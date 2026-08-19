@@ -13,6 +13,9 @@ import { formatBookTitle } from '../lib/bookTitle'
 import { storyboardTaskNotice } from '../lib/productionNotices'
 
 const PAGE_SIZE = 15
+export const FIRST_THREE_VIDEO_GLOBAL_BUDGET_CAP_CNY = 450
+export const FIRST_THREE_VIDEO_PER_EPISODE_CAP_CNY = 150
+export const FIRST_THREE_VIDEO_WALL_CLOCK_CAP_S = 4 * 60 * 60
 type BatchAction = 'replan' | 'screenplay' | 'storyboard'
 type StoryboardMetrics = {
   active_storyboard_runs: number
@@ -22,6 +25,49 @@ type StoryboardMetrics = {
   repairing: number
   waiting_authorization?: number
   phase_counts: Record<string, number>
+}
+
+type FirstThreeVideoApi = {
+  get: (path: string) => Promise<unknown>
+  projectVideoCompletion: (
+    projectId: string,
+    body?: Record<string, unknown>,
+  ) => Promise<unknown>
+}
+
+type EpisodeSelectionResponse = {
+  episodes?: Array<{
+    id?: string | null
+    episode_no: number
+  }>
+}
+
+export async function generateFirstThreeEpisodeVideos(
+  projectId: string,
+  idempotencyKey: string,
+  client: FirstThreeVideoApi = api,
+): Promise<number> {
+  const project = await client.get(
+    `/projects/${projectId}?view=episodes&page=1&page_size=3&status_filter=all`,
+  ) as EpisodeSelectionResponse
+  const episodeIds = [...(project.episodes ?? [])]
+    .sort((left, right) => left.episode_no - right.episode_no)
+    .map(episode => episode.id?.trim() ?? '')
+    .filter(Boolean)
+    .slice(0, 3)
+
+  if (episodeIds.length === 0) return 0
+
+  await client.projectVideoCompletion(projectId, {
+    episode_ids: episodeIds,
+    global_budget_cap_cny: FIRST_THREE_VIDEO_GLOBAL_BUDGET_CAP_CNY,
+    per_episode_cap_cny: FIRST_THREE_VIDEO_PER_EPISODE_CAP_CNY,
+    wall_clock_cap_s: FIRST_THREE_VIDEO_WALL_CLOCK_CAP_S,
+    allow_fallback_adopt: true,
+    allow_storyboard_edit: false,
+    idempotency_key: idempotencyKey,
+  })
+  return episodeIds.length
 }
 
 export function canScanPortraitGaps(
@@ -209,6 +255,18 @@ export default function EpisodesPage() {
       ? `当前已是第 ${curPage + 1} 页`
       : ''
 
+  const generateFirstThreeVideos = () => act(async () => {
+    const count = await generateFirstThreeEpisodeVideos(
+      p.id,
+      `episodes:first-three-video:${p.id}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`,
+    )
+    if (count === 0) {
+      toast('当前项目没有可提交的视频分集', true)
+      return
+    }
+    toast(`已启动前 ${count} 集视频生成，将按集顺序执行`)
+  })
+
   const executeBatch = async () => {
     if (!batchConfirm) return
     if (batchConfirm === 'replan') {
@@ -316,6 +374,16 @@ export default function EpisodesPage() {
                 : `生成待办分镜，共 ${pendingCount} 集`} disabled={busy || p.plan_status === 'running' || pendingCount === 0}
                 title={p.plan_status === 'running' ? '需等待分集规划完成' : pendingCount === 0 ? '当前没有剧本已就绪的待生成分镜' : busy ? '正在处理上一项操作' : ''}
                 onClick={() => setBatchConfirm('storyboard')}>生成待办分镜（{pendingCount} 集）</button>
+              <button
+                type="button"
+                className="btn"
+                disabled={busy}
+                aria-label={busy ? '生成前三集视频，暂不可用：正在处理上一项操作' : '生成前三集视频'}
+                title={busy ? '正在处理上一项操作' : '从全部分集第一页按集数选择最多三集，批准后生成视频'}
+                onClick={() => { void generateFirstThreeVideos() }}
+              >
+                生成前三集视频
+              </button>
               {screenplayActiveCount > 0 && (
                 <button className="btn ghost danger" disabled={busy}
                   aria-label={busy ? '停止批量剧本，暂不可用：正在处理上一项操作' : `停止批量剧本，共 ${screenplayActiveCount} 集在运行或排队`}

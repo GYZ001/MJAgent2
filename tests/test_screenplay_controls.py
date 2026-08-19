@@ -27,6 +27,9 @@ from app.narrative_blueprint import (
 )
 from app.observability.tracing import bind_trace
 from app.production.patch import screenplay_artifact_payload
+from app.production.screenplay_authority import (
+    SCREENPLAY_QA_PROFILE_VERSION,
+)
 from app.production.revision import (
     ProductionRevisionOwnershipLost,
     ensure_production_revision,
@@ -626,7 +629,7 @@ def test_stale_v14_document_is_not_new_baseline_step_authority(
         kind="screenplay",
         input_fingerprint=f"authority:{error_id}",
         contract_version=get_contract("screenplay").version,
-        qa_profile_version="screenplay-qa-gate-3",
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         resume=False,
     )
     save_checkpoint(revision.id, {
@@ -669,7 +672,7 @@ def test_finalize_working_document_remains_step_authority() -> None:
         kind="screenplay",
         input_fingerprint="current-authority",
         contract_version=get_contract("screenplay").version,
-        qa_profile_version="screenplay-qa-gate-3",
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         resume=False,
     )
     mark_baseline_generated(

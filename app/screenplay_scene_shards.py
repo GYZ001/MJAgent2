@@ -54,8 +54,13 @@ from app.screenplay_ir import (
     IR_VERSION,
     screenplay_ir_source_audit_contract_errors,
 )
-from app.source_excerpt import index_source_segments, structural_front_matter_ids
-from app.source_facts import source_segment_facts
+from app.source_excerpt import (
+    index_source_segments,
+    quotation_closing,
+    quotation_opening,
+    structural_front_matter_ids,
+)
+from app.source_facts import SourceFact, source_segment_facts
 
 
 SCREENPLAY_ENVELOPE_VERSION = "screenplay-envelope.v1"
@@ -65,7 +70,7 @@ SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v10"
 SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v7"
 SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v9"
 SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION = (
-    "screenplay-scene-semantic-review.v6"
+    "screenplay-scene-semantic-review.v12"
 )
 SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT = (
     "只返回一个符合用户消息内 JSON Schema 的 JSON 对象。"
@@ -75,6 +80,9 @@ SCREENPLAY_SCENE_SEMANTIC_REVIEW_MIN_OUTPUT_TOKENS = 2048
 SCREENPLAY_SCENE_SEMANTIC_REVIEW_CONTEXT_RESERVE_TOKENS = 1024
 SCREENPLAY_SCENE_SEMANTIC_REPAIR_MIN_OUTPUT_TOKENS = 4096
 SCREENPLAY_SCENE_SEMANTIC_REPAIR_ROOT_RESERVE_PERCENT = 20
+SCREENPLAY_SCENE_SEMANTIC_MAX_REPAIR_ROUNDS = 3
+SCREENPLAY_SCENE_SEMANTIC_INITIAL_FORMAT_RETRY_LIMIT = 2
+SCREENPLAY_SCENE_SEMANTIC_POST_REPAIR_FORMAT_RETRY_LIMIT = 2
 SCREENPLAY_SCENE_SEMANTIC_FINDING_MESSAGE_MAX_CHARS = 160
 SCREENPLAY_SCENE_SEMANTIC_FINDING_CODES = (
     "state_subject_semantic_drift",
@@ -399,6 +407,7 @@ class ScreenplaySceneShardSemanticFinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     unit_key: str
+    related_unit_keys: list[str]
     code: Literal[
         "state_subject_semantic_drift",
         "source_semantic_drift",
@@ -417,8 +426,24 @@ class ScreenplaySceneShardSemanticFinding(BaseModel):
         max_length=SCREENPLAY_SCENE_SEMANTIC_FINDING_MESSAGE_MAX_CHARS,
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_missing_non_cross_related_unit_keys(
+        cls,
+        value: Any,
+    ) -> Any:
+        if (
+            isinstance(value, dict)
+            and "related_unit_keys" not in value
+            and isinstance(value.get("violation_kinds"), list)
+            and "cross_slot_duplication"
+            not in value["violation_kinds"]
+        ):
+            return {**value, "related_unit_keys": []}
+        return value
+
     @model_validator(mode="after")
-    def _canonicalize_violation_kinds(
+    def _validate_typed_finding(
         self,
     ) -> "ScreenplaySceneShardSemanticFinding":
         if len(self.violation_kinds) != len(set(self.violation_kinds)):
@@ -428,6 +453,27 @@ class ScreenplaySceneShardSemanticFinding(BaseModel):
             for kind in SCREENPLAY_SCENE_SEMANTIC_VIOLATION_KINDS
             if kind in self.violation_kinds
         ]
+        if len(self.related_unit_keys) != len(
+            set(self.related_unit_keys)
+        ):
+            raise ValueError("related_unit_keys 不得重复")
+        if self.unit_key in self.related_unit_keys:
+            raise ValueError("related_unit_keys 不得包含 finding 自身 unit_key")
+        has_cross_slot_duplication = (
+            "cross_slot_duplication" in self.violation_kinds
+        )
+        if (
+            has_cross_slot_duplication
+            and len(self.related_unit_keys) != 1
+        ):
+            raise ValueError(
+                "cross_slot_duplication 必须恰好声明一个 related_unit_key"
+            )
+        if not has_cross_slot_duplication and self.related_unit_keys:
+            raise ValueError(
+                "非 cross_slot_duplication finding 的 "
+                "related_unit_keys 必须为空"
+            )
         return self
 
 
@@ -447,6 +493,98 @@ class ScreenplaySceneShardSemanticReview(BaseModel):
         if len(finding_keys) != len(set(finding_keys)):
             raise ValueError("findings 中 (unit_key, code) 必须唯一")
         return self
+
+
+_SCENE_SHARD_UNIT_ORDINAL_RE = re.compile(r":(?P<ordinal>\d+):unit$")
+
+
+def _scene_shard_canonicalize_review_unit_references(
+    review: ScreenplaySceneShardSemanticReview,
+    known_unit_keys: set[str],
+) -> int:
+    """Repair only uniquely identifiable structured unit-key references."""
+    canonical_by_ordinal: dict[str, list[str]] = {}
+    for unit_key in known_unit_keys:
+        match = _SCENE_SHARD_UNIT_ORDINAL_RE.search(unit_key)
+        if match is None:
+            continue
+        canonical_by_ordinal.setdefault(
+            match.group("ordinal"),
+            [],
+        ).append(unit_key)
+
+    def canonicalize(unit_key: str) -> str:
+        if unit_key in known_unit_keys:
+            return unit_key
+        match = _SCENE_SHARD_UNIT_ORDINAL_RE.search(unit_key)
+        if match is None:
+            return unit_key
+        candidates = canonical_by_ordinal.get(
+            match.group("ordinal"),
+            [],
+        )
+        return candidates[0] if len(candidates) == 1 else unit_key
+
+    changes = 0
+    for finding in review.findings:
+        canonical_unit_key = canonicalize(finding.unit_key)
+        canonical_related_keys = [
+            canonicalize(unit_key)
+            for unit_key in finding.related_unit_keys
+        ]
+        if canonical_unit_key != finding.unit_key:
+            finding.unit_key = canonical_unit_key
+            changes += 1
+        if canonical_related_keys != finding.related_unit_keys:
+            finding.related_unit_keys = canonical_related_keys
+            changes += 1
+    return changes
+
+
+_SCENE_SHARD_UNIT_ORDINAL_RE = re.compile(r":(?P<ordinal>\d+):unit$")
+
+
+def _scene_shard_canonicalize_review_unit_references(
+    review: ScreenplaySceneShardSemanticReview,
+    known_unit_keys: set[str],
+) -> int:
+    """Repair only uniquely identifiable structured unit-key references."""
+    canonical_by_ordinal: dict[str, list[str]] = {}
+    for unit_key in known_unit_keys:
+        match = _SCENE_SHARD_UNIT_ORDINAL_RE.search(unit_key)
+        if match is None:
+            continue
+        canonical_by_ordinal.setdefault(
+            match.group("ordinal"),
+            [],
+        ).append(unit_key)
+
+    def canonicalize(unit_key: str) -> str:
+        if unit_key in known_unit_keys:
+            return unit_key
+        match = _SCENE_SHARD_UNIT_ORDINAL_RE.search(unit_key)
+        if match is None:
+            return unit_key
+        candidates = canonical_by_ordinal.get(
+            match.group("ordinal"),
+            [],
+        )
+        return candidates[0] if len(candidates) == 1 else unit_key
+
+    changes = 0
+    for finding in review.findings:
+        canonical_unit_key = canonicalize(finding.unit_key)
+        canonical_related_keys = [
+            canonicalize(unit_key)
+            for unit_key in finding.related_unit_keys
+        ]
+        if canonical_unit_key != finding.unit_key:
+            finding.unit_key = canonical_unit_key
+            changes += 1
+        if canonical_related_keys != finding.related_unit_keys:
+            finding.related_unit_keys = canonical_related_keys
+            changes += 1
+    return changes
 
 
 def _screenplay_scene_semantic_consensus_message(
@@ -473,10 +611,18 @@ def screenplay_scene_semantic_consensus(
     ]
     consensus: list[ScreenplaySceneShardSemanticFinding] = []
     for key in sorted(set(finding_maps[0]).intersection(finding_maps[1])):
+        first_finding = finding_maps[0][key]
+        second_finding = finding_maps[1][key]
         shared_kinds = (
-            set(finding_maps[0][key].violation_kinds)
-            & set(finding_maps[1][key].violation_kinds)
+            set(first_finding.violation_kinds)
+            & set(second_finding.violation_kinds)
         )
+        if (
+            "cross_slot_duplication" in shared_kinds
+            and first_finding.related_unit_keys
+            != second_finding.related_unit_keys
+        ):
+            shared_kinds.remove("cross_slot_duplication")
         canonical_kinds = [
             kind
             for kind in SCREENPLAY_SCENE_SEMANTIC_VIOLATION_KINDS
@@ -486,6 +632,11 @@ def screenplay_scene_semantic_consensus(
             consensus.append(
                 ScreenplaySceneShardSemanticFinding(
                     unit_key=key[0],
+                    related_unit_keys=(
+                        list(first_finding.related_unit_keys)
+                        if "cross_slot_duplication" in canonical_kinds
+                        else []
+                    ),
                     code=key[1],
                     violation_kinds=canonical_kinds,
                     message=_screenplay_scene_semantic_consensus_message(
@@ -504,16 +655,23 @@ def screenplay_scene_semantic_review_worst_case_payload(
     findings = [
         {
             "unit_key": unit_key,
-            "code": code,
-            "violation_kinds": list(
-                SCREENPLAY_SCENE_SEMANTIC_VIOLATION_KINDS
+            "related_unit_keys": (
+                [unit_keys[(unit_index + 1) % len(unit_keys)]]
+                if len(unit_keys) > 1
+                else []
             ),
+            "code": code,
+            "violation_kinds": [
+                kind
+                for kind in SCREENPLAY_SCENE_SEMANTIC_VIOLATION_KINDS
+                if len(unit_keys) > 1 or kind != "cross_slot_duplication"
+            ],
             "message": (
                 "冲"
                 * SCREENPLAY_SCENE_SEMANTIC_FINDING_MESSAGE_MAX_CHARS
             ),
         }
-        for unit_key in unit_keys
+        for unit_index, unit_key in enumerate(unit_keys)
         for code in SCREENPLAY_SCENE_SEMANTIC_FINDING_CODES
     ]
     return json.dumps(
@@ -691,7 +849,11 @@ def _scene_shard_semantic_review_compatibility(
     if any(not isinstance(phase, dict) for phase in phases):
         return False, "semantic_review_artifacts_missing"
     phase_names = [phase.get("phase") for phase in phases]
-    if phase_names not in (["initial"], ["initial", "post_repair"]):
+    if (
+        len(phase_names) > SCREENPLAY_SCENE_SEMANTIC_MAX_REPAIR_ROUNDS + 1
+        or phase_names[0] != "initial"
+        or any(phase != "post_repair" for phase in phase_names[1:])
+    ):
         return False, "semantic_review_phase"
     if str(phases[0].get("creative_hash") or "") != initial_hash:
         return False, "semantic_review_initial_candidate"
@@ -710,7 +872,7 @@ def _scene_shard_semantic_review_compatibility(
         for unit in scene.units
     }
     recomputed_consensus: list[list[dict[str, Any]]] = []
-    for phase in phases:
+    for phase_index, phase in enumerate(phases):
         reviews = phase.get("reviews")
         if not isinstance(reviews, list) or len(reviews) != 2:
             return False, "semantic_review_artifacts_missing"
@@ -750,6 +912,10 @@ def _scene_shard_semantic_review_compatibility(
                 return False, "semantic_review_schema"
         if any(
             finding.unit_key not in valid_unit_keys
+            or any(
+                related_unit_key not in valid_unit_keys
+                for related_unit_key in finding.related_unit_keys
+            )
             for review in validated_reviews
             for finding in review.findings
         ):
@@ -767,17 +933,35 @@ def _scene_shard_semantic_review_compatibility(
                 validated_reviews[1],
             )
         ]
+        if phase_index:
+            allowed_unit_keys = {
+                finding["unit_key"]
+                for finding in recomputed_consensus[-1]
+            }
+            current_findings = [
+                finding
+                for review in validated_reviews
+                for finding in review.findings
+            ]
+            if any(
+                finding.unit_key not in allowed_unit_keys
+                and set(finding.related_unit_keys).isdisjoint(
+                    allowed_unit_keys
+                )
+                for finding in current_findings
+            ):
+                return False, "semantic_review_phase_contract"
         if phase.get("consensus") != expected_consensus:
             return False, "semantic_review_consensus"
         recomputed_consensus.append(expected_consensus)
     if (
-        phase_names == ["initial"]
+        len(phase_names) == 1
         and recomputed_consensus[0]
     ) or (
-        phase_names == ["initial", "post_repair"]
+        len(phase_names) > 1
         and (
-            not recomputed_consensus[0]
-            or recomputed_consensus[1]
+            not all(recomputed_consensus[:-1])
+            or recomputed_consensus[-1]
         )
     ):
         return False, "semantic_review_phase_contract"
@@ -1079,6 +1263,7 @@ def _compile_unit_identity_scaffold(
     source_set = set(source_ids)
     participant_usages: dict[str, set[str]] = {}
     participant_channels: dict[str, list[str]] = {}
+    scene_visible_keys: set[str] = set()
     voice_claims: list[str] = []
     decision_actor_keys: list[str] = []
     state_subject_claims: list[str] = []
@@ -1105,6 +1290,8 @@ def _compile_unit_identity_scaffold(
                 participant.source_segment_ids
             ):
                 continue
+            if participant.usage == "visible":
+                scene_visible_keys.add(participant.identity_key)
             if (
                 participant.usage == "voice"
                 and not participant.source_unit_keys
@@ -1217,6 +1404,39 @@ def _compile_unit_identity_scaffold(
                 )
 
     typed_actor_claims = _ordered_unique(exact_decision_actor_keys)
+    unspoken_owner_key = (
+        slot.content_owner_key
+        if (
+            slot.delivery_mode == "unspoken_reference"
+            and slot.content_owner_key
+        )
+        else ""
+    )
+    if (
+        unspoken_owner_key
+        and unspoken_owner_key in scene_visible_keys
+        and unspoken_owner_key not in visible_keys
+    ):
+        visible_keys.append(unspoken_owner_key)
+    if unspoken_owner_key:
+        if joint_state_subject_claims:
+            if (
+                len(joint_state_subject_claims) != 1
+                or joint_state_subject_claims[0]
+                != [unspoken_owner_key]
+            ):
+                errors.append(
+                    f"{slot.unit_key} unspoken content owner 与 joint "
+                    "state_subject 冲突"
+                )
+        elif state_subject_claims:
+            if set(state_subject_claims) != {unspoken_owner_key}:
+                errors.append(
+                    f"{slot.unit_key} unspoken content owner 与 single "
+                    "state_subject 冲突"
+                )
+        else:
+            state_subject_claims.append(unspoken_owner_key)
     state_subject_keys: list[str] = []
     state_subject_key = ""
     if len(joint_state_subject_claims) > 1:
@@ -3562,7 +3782,7 @@ def _scene_shard_semantic_authority_payload(
     identity_registry: list[dict[str, Any]],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     source_facts_by_key = {
-        fact.source_unit_key: fact.model_dump(mode="json")
+        fact.source_unit_key: fact
         for contract in scene_input_contracts
         for segment in contract.source_segments
         for fact in source_segment_facts(
@@ -3575,7 +3795,13 @@ def _scene_shard_semantic_authority_payload(
             "kind": slot.kind,
             "source_unit_key": slot.source_unit_key,
             "source_text": slot.source_text,
-            "source_fact": source_facts_by_key.get(slot.source_unit_key),
+            "source_fact": (
+                source_facts_by_key[slot.source_unit_key].model_dump(
+                    mode="json"
+                )
+                if slot.source_unit_key in source_facts_by_key
+                else None
+            ),
             "state_subject_key": slot.state_subject_key,
             "state_subject_keys": slot.state_subject_keys,
             "environment_only": slot.environment_only,
@@ -3619,11 +3845,209 @@ def _scene_shard_semantic_authority_payload(
     return authority_slots, identity_labels
 
 
+def _scene_shard_exact_source_text(value: str) -> str:
+    normalized = "".join(str(value or "").split())
+    while (
+        len(normalized) >= 2
+        and quotation_opening(normalized[0])
+        and quotation_closing(normalized[0], normalized[-1])
+    ):
+        normalized = normalized[1:-1]
+    return normalized
+
+
+def _scene_shard_creative_has_exact_source_support(
+    creative: ScreenplaySceneShardCreativeUnit,
+    source_fact: SourceFact,
+) -> bool:
+    source_text = _scene_shard_exact_source_text(source_fact.text)
+    content_values = (
+        creative.text,
+        creative.performance,
+        creative.resulting_state,
+        creative.required_text,
+        creative.prop_text,
+        creative.on_screen_text,
+    )
+    non_empty_values = [
+        value
+        for value in content_values
+        if str(value or "").strip()
+    ]
+    return bool(source_text and non_empty_values) and all(
+        _scene_shard_exact_source_text(value) == source_text
+        for value in non_empty_values
+    )
+
+
+def _scene_shard_source_facts_by_slot(
+    scene_input_contracts: list[ScreenplaySceneInputContract],
+) -> dict[str, SourceFact | None]:
+    source_facts_by_key = {
+        fact.source_unit_key: fact
+        for contract in scene_input_contracts
+        for segment in contract.source_segments
+        for fact in source_segment_facts(
+            segment.source_segment_id,
+            segment.text,
+        )
+    }
+    return {
+        slot.unit_key: source_facts_by_key.get(slot.source_unit_key)
+        for contract in scene_input_contracts
+        for slot in contract.unit_slots
+    }
+
+
+def _scene_shard_canonicalize_cross_slot_findings(
+    review: ScreenplaySceneShardSemanticReview,
+    *,
+    draft: ScreenplaySceneShardCreativeIR,
+    scene_input_contracts: list[ScreenplaySceneInputContract],
+) -> ScreenplaySceneShardSemanticReview:
+    source_facts_by_slot = _scene_shard_source_facts_by_slot(
+        scene_input_contracts
+    )
+    canonical_findings: list[ScreenplaySceneShardSemanticFinding] = []
+    for finding in review.findings:
+        if "cross_slot_duplication" not in finding.violation_kinds:
+            canonical_findings.append(finding)
+            continue
+        related_unit_key = finding.related_unit_keys[0]
+        target_creative = draft.slots.get(finding.unit_key)
+        related_creative = draft.slots.get(related_unit_key)
+        target_source_fact = source_facts_by_slot.get(finding.unit_key)
+        related_source_fact = source_facts_by_slot.get(related_unit_key)
+        if (
+            target_creative is None
+            or related_creative is None
+            or target_source_fact is None
+            or related_source_fact is None
+        ):
+            canonical_findings.append(finding)
+            continue
+        target_source_text = _scene_shard_exact_source_text(
+            target_source_fact.text
+        )
+        related_source_text = _scene_shard_exact_source_text(
+            related_source_fact.text
+        )
+        if (
+            target_source_text
+            and related_source_text
+            and target_source_text != related_source_text
+            and _scene_shard_exact_source_text(target_creative.text)
+            == target_source_text
+            and _scene_shard_exact_source_text(related_creative.text)
+            != related_source_text
+        ):
+            canonical_findings.append(
+                ScreenplaySceneShardSemanticFinding.model_validate({
+                    **finding.model_dump(mode="json"),
+                    "unit_key": related_unit_key,
+                    "related_unit_keys": [finding.unit_key],
+                })
+            )
+        else:
+            canonical_findings.append(finding)
+    merged_findings: dict[
+        tuple[str, str],
+        ScreenplaySceneShardSemanticFinding,
+    ] = {}
+    for finding in canonical_findings:
+        key = (finding.unit_key, finding.code)
+        existing = merged_findings.get(key)
+        if existing is None:
+            merged_findings[key] = finding
+            continue
+        merged_kinds = [
+            kind
+            for kind in SCREENPLAY_SCENE_SEMANTIC_VIOLATION_KINDS
+            if (
+                kind in existing.violation_kinds
+                or kind in finding.violation_kinds
+            )
+        ]
+        merged_related_keys = list(dict.fromkeys([
+            *existing.related_unit_keys,
+            *finding.related_unit_keys,
+        ]))
+        if (
+            "cross_slot_duplication" in merged_kinds
+            and len(merged_related_keys) != 1
+        ):
+            raise ValueError(
+                "canonicalized cross-slot finding 必须具有唯一 counterpart"
+            )
+        if "cross_slot_duplication" not in merged_kinds:
+            merged_related_keys = []
+        merged_message = "；".join(dict.fromkeys([
+            existing.message,
+            finding.message,
+        ]))
+        merged_findings[key] = (
+            ScreenplaySceneShardSemanticFinding.model_validate({
+                **existing.model_dump(mode="json"),
+                "related_unit_keys": merged_related_keys,
+                "violation_kinds": merged_kinds,
+                "message": merged_message[
+                    :SCREENPLAY_SCENE_SEMANTIC_FINDING_MESSAGE_MAX_CHARS
+                ],
+            })
+        )
+    return ScreenplaySceneShardSemanticReview(
+        findings=list(merged_findings.values())
+    )
+
+
+def _scene_shard_filter_exact_source_duplication(
+    review: ScreenplaySceneShardSemanticReview,
+    *,
+    draft: ScreenplaySceneShardCreativeIR,
+    scene_input_contracts: list[ScreenplaySceneInputContract],
+) -> ScreenplaySceneShardSemanticReview:
+    source_facts_by_slot = _scene_shard_source_facts_by_slot(
+        scene_input_contracts
+    )
+    filtered: list[ScreenplaySceneShardSemanticFinding] = []
+    for finding in review.findings:
+        creative = draft.slots.get(finding.unit_key)
+        source_fact = source_facts_by_slot.get(finding.unit_key)
+        if (
+            "cross_slot_duplication" not in finding.violation_kinds
+            or creative is None
+            or source_fact is None
+            or not _scene_shard_creative_has_exact_source_support(
+                creative,
+                source_fact,
+            )
+        ):
+            filtered.append(finding)
+            continue
+        remaining_kinds = [
+            kind
+            for kind in finding.violation_kinds
+            if kind != "cross_slot_duplication"
+        ]
+        if remaining_kinds:
+            filtered.append(
+                ScreenplaySceneShardSemanticFinding(
+                    unit_key=finding.unit_key,
+                    related_unit_keys=[],
+                    code=finding.code,
+                    violation_kinds=remaining_kinds,
+                    message=finding.message,
+                )
+            )
+    return ScreenplaySceneShardSemanticReview(findings=filtered)
+
+
 def _scene_shard_semantic_review_prompt(
     *,
     draft: ScreenplaySceneShardCreativeIR,
     scene_input_contracts: list[ScreenplaySceneInputContract],
     identity_registry: list[dict[str, Any]],
+    unit_keys: list[str] | None = None,
 ) -> str:
     authority_slots, identity_labels = (
         _scene_shard_semantic_authority_payload(
@@ -3631,6 +4055,20 @@ def _scene_shard_semantic_review_prompt(
             identity_registry=identity_registry,
         )
     )
+    projected_unit_keys = (
+        list(draft.slots) if unit_keys is None else list(unit_keys)
+    )
+    projected_authority_slots = {
+        unit_key: authority_slots[unit_key]
+        for unit_key in projected_unit_keys
+        if unit_key in authority_slots
+    }
+    projected_draft = draft.model_copy(update={
+        "slots": {
+            unit_key: draft.slots[unit_key]
+            for unit_key in projected_unit_keys
+        },
+    })
     review_schema = ScreenplaySceneShardSemanticReview.model_json_schema()
     return (
         "你是剧本场次分片的独立语义审查员。必须逐 slot 穷举审查，不得抽样、"
@@ -3643,6 +4081,11 @@ def _scene_shard_semantic_review_prompt(
         "wrong_subject、unsupported_action、source_contradiction、"
         "cross_slot_duplication、environment_personification 中选择，不得重复 "
         "kind 或为同一 pair 输出重复 finding；message 必须覆盖数组中的全部 kinds。"
+        "每个 finding 都必须显式输出 related_unit_keys。若包含 "
+        "cross_slot_duplication，related_unit_keys 必须恰好包含当前审查 payload "
+        "内另一个且非自身的 unit_key；它是跨 slot 证据的唯一 typed 引用。"
+        "不包含 cross_slot_duplication 时 related_unit_keys 必须为 []。不得引用"
+        "当前 payload 外的 slot，跨 chunk 内容不能作为本 finding 的证据。"
         "finding 只能归因到 creative fields 与该 slot 自身 source_fact/冻结权威"
         "发生明确冲突的 slot，不能借用其他 slot 的 source_fact 给当前 slot 定罪。"
         "跨 slot 重复时，标记最早越界或没有自身来源承载该内容的 slot；不得标记后来"
@@ -3652,11 +4095,15 @@ def _scene_shard_semantic_review_prompt(
         "或 audit。"
         '无问题时只输出合法 JSON 对象 {"findings":[]}。不得输出 Markdown、解释或'
         "任何对象外文本。\n冻结 slot 权威：\n"
-        + json.dumps(authority_slots, ensure_ascii=False, separators=(",", ":"))
+        + json.dumps(
+            projected_authority_slots,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         + "\n冻结身份最小映射：\n"
         + json.dumps(identity_labels, ensure_ascii=False, separators=(",", ":"))
         + "\n待审 creative fields：\n"
-        + draft.model_dump_json()
+        + projected_draft.model_dump_json()
         + "\n完整输出 JSON Schema：\n"
         + json.dumps(
             review_schema,
@@ -3714,38 +4161,168 @@ def _scene_shard_semantic_review_budget(
     }
 
 
+def _scene_shard_semantic_review_chunks(
+    *,
+    draft: ScreenplaySceneShardCreativeIR,
+    scene_input_contracts: list[ScreenplaySceneInputContract],
+    identity_registry: list[dict[str, Any]],
+    shard_id: str,
+) -> list[dict[str, Any]]:
+    unit_keys = list(draft.slots)
+
+    def candidate(chunk_unit_keys: list[str]) -> dict[str, Any]:
+        review_prompt = _scene_shard_semantic_review_prompt(
+            draft=draft,
+            scene_input_contracts=scene_input_contracts,
+            identity_registry=identity_registry,
+            unit_keys=chunk_unit_keys,
+        )
+        budget = _scene_shard_semantic_review_budget(
+            unit_keys=chunk_unit_keys,
+            review_prompt=review_prompt,
+        )
+        return {
+            "unit_keys": chunk_unit_keys,
+            "review_prompt": review_prompt,
+            "budget": budget,
+            "chunk_hash": _hash({
+                "unit_keys": chunk_unit_keys,
+                "review_prompt": review_prompt,
+            }),
+        }
+
+    def fits(value: dict[str, Any]) -> bool:
+        budget = value["budget"]
+        return int(budget["required"]) <= int(budget["ceiling"])
+
+    def raise_single_unit_budget_error(value: dict[str, Any]) -> None:
+        budget = value["budget"]
+        raise ScreenplaySceneShardError(
+            shard_id,
+            [
+                "语义审查输出预算不足，provider 调用已阻断："
+                f"unit_key={value['unit_keys'][0]}，"
+                f"unit_count={budget['unit_count']}，"
+                f"required={budget['required']}，"
+                f"ceiling={budget['ceiling']}，"
+                f"provider={budget['provider']}，"
+                f"model={budget['model']}"
+            ],
+        )
+
+    chunks: list[dict[str, Any]] = []
+    start = 0
+    while start < len(unit_keys):
+        remaining = candidate(unit_keys[start:])
+        if fits(remaining):
+            chunks.append(remaining)
+            break
+
+        single = candidate(unit_keys[start:start + 1])
+        if not fits(single):
+            raise_single_unit_budget_error(single)
+
+        best = single
+        low = 2
+        high = len(unit_keys) - start - 1
+        while low <= high:
+            size = (low + high) // 2
+            projected = candidate(unit_keys[start:start + size])
+            if fits(projected):
+                best = projected
+                low = size + 1
+            else:
+                high = size - 1
+        chunks.append(best)
+        start += len(best["unit_keys"])
+    return chunks
+
+
+def _scene_shard_reviewer_findings_payload(
+    consensus_findings: list[ScreenplaySceneShardSemanticFinding],
+    reviews: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    consensus_kinds = {
+        (finding.unit_key, finding.code): set(finding.violation_kinds)
+        for finding in consensus_findings
+    }
+    reviewer_findings: list[dict[str, Any]] = []
+    for review_payload in reviews:
+        review = ScreenplaySceneShardSemanticReview.model_validate(
+            review_payload
+        )
+        for finding in review.findings:
+            shared_kinds = consensus_kinds.get(
+                (finding.unit_key, finding.code),
+                set(),
+            )
+            if shared_kinds.intersection(finding.violation_kinds):
+                reviewer_findings.append(
+                    finding.model_dump(mode="json")
+                )
+    return reviewer_findings
+
+
 def _scene_shard_semantic_repair_prompt(
     *,
     findings_payload: list[dict[str, Any]],
+    reviewer_findings_payload: list[dict[str, Any]],
     frozen_slots: dict[str, dict[str, Any]],
-    identity_labels: dict[str, dict[str, Any]],
     draft_json: str,
     creative_schema: dict[str, Any],
+    identity_labels: dict[str, dict[str, Any]] | None = None,
 ) -> str:
+    del identity_labels
     return (
         "只修复下列 consensus finding 对应 slot 的 creative fields：text、"
         "performance、resulting_state、function、required_text、prop_text、"
         "on_screen_text。必须忠于 source_text 与 exact state_subject/actor/speaker；"
-        "不得增加删除 slot，不得输出或改变任何结构、身份、timeline、source ownership"
-        "或 audit 字段。返回完整 creative root。\nfindings：\n"
+        "不得输出未标记 slot，不得输出或改变任何结构、身份、timeline、"
+        "source ownership 或 audit 字段。只返回当前标记 slot 的 subset creative "
+        "root。\nfindings：\n"
         + json.dumps(
             findings_payload,
             ensure_ascii=False,
             separators=(",", ":"),
         )
+        + "\nreviewer_findings：\n"
+        + json.dumps(
+            reviewer_findings_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         + "\n冻结 slots：\n"
         + json.dumps(frozen_slots, ensure_ascii=False, separators=(",", ":"))
-        + "\n冻结身份最小映射：\n"
-        + json.dumps(identity_labels, ensure_ascii=False, separators=(",", ":"))
-        + "\n当前 creative：\n"
+        + "\n当前 flagged creative slots：\n"
         + draft_json
-        + "\n完整 creative 输出 JSON Schema：\n"
+        + "\nsubset creative 输出 JSON Schema：\n"
         + json.dumps(
             creative_schema,
             ensure_ascii=False,
             separators=(",", ":"),
         )
     )
+
+
+def _scene_shard_semantic_repair_subset_schema(
+    flagged_unit_keys: list[str],
+) -> dict[str, Any]:
+    schema = deepcopy(ScreenplaySceneShardCreativeIR.model_json_schema())
+    slot_schemas = {
+        unit_key: {
+            "$ref": "#/$defs/ScreenplaySceneShardCreativeUnit",
+        }
+        for unit_key in flagged_unit_keys
+    }
+    schema["properties"]["slots"] = {
+        "type": "object",
+        "properties": slot_schemas,
+        "required": flagged_unit_keys,
+        "additionalProperties": False,
+        "minProperties": len(flagged_unit_keys),
+        "maxProperties": len(flagged_unit_keys),
+    }
+    return schema
 
 
 def _scene_shard_semantic_repair_budget(
@@ -3811,33 +4388,61 @@ async def _semantic_review_scene_shard_draft(
 ) -> tuple[ScreenplaySceneShardCreativeIR, list[dict[str, Any]]]:
     """Consensus-review creative prose without allowing structural rewrites."""
     review_schema = ScreenplaySceneShardSemanticReview.model_json_schema()
-    creative_schema = ScreenplaySceneShardCreativeIR.model_json_schema()
 
     async def review(
         candidate: ScreenplaySceneShardCreativeIR,
         reviewer_no: int,
         phase: str,
+        unit_keys: list[str],
         review_prompt: str,
         budget: dict[str, int | str],
+        chunk_index: int,
+        chunk_count: int,
+        chunk_hash: str,
     ) -> ScreenplaySceneShardSemanticReview:
-        known_unit_keys = set(candidate.slots)
+        known_unit_keys = set(unit_keys)
 
         def validate_review(
             value: ScreenplaySceneShardSemanticReview,
         ) -> list[str]:
+            _scene_shard_canonicalize_review_unit_references(
+                value,
+                known_unit_keys,
+            )
+            try:
+                ScreenplaySceneShardSemanticReview.model_validate(
+                    value.model_dump(mode="json"),
+                )
+            except ValidationError as exc:
+                return [
+                    "语义审查规范化后的 finding 合同无效："
+                    + str(exc),
+                ]
             unknown_finding_keys = {
                 finding.unit_key
                 for finding in value.findings
                 if finding.unit_key not in known_unit_keys
             }
-            if not unknown_finding_keys:
-                return []
-            return [
-                "语义审查引用未知 unit_key："
-                + ",".join(sorted(unknown_finding_keys))
-            ]
+            unknown_related_keys = {
+                related_unit_key
+                for finding in value.findings
+                for related_unit_key in finding.related_unit_keys
+                if related_unit_key not in known_unit_keys
+            }
+            errors: list[str] = []
+            if unknown_finding_keys:
+                errors.append(
+                    "语义审查引用未知 unit_key："
+                    + ",".join(sorted(unknown_finding_keys))
+                )
+            if unknown_related_keys:
+                errors.append(
+                    "语义审查引用未知 related_unit_key："
+                    + ",".join(sorted(unknown_related_keys))
+                )
+            return errors
 
-        return await model_gateway.chat_structured(
+        result = await model_gateway.chat_structured(
             [
                 {
                     "role": "system",
@@ -3854,11 +4459,15 @@ async def _semantic_review_scene_shard_draft(
                 f"{operation_id}:semantic:"
                 f"{SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION}:{phase}:"
                 f"reviewer-{reviewer_no}:"
-                f"{_hash(candidate.model_dump(mode='json'))}"
+                f"chunk-{chunk_index}-of-{chunk_count}:{chunk_hash}"
             ),
             max_tokens=int(budget["required"]),
             temperature=0.0,
-            format_retry_limit=1,
+            format_retry_limit=(
+                SCREENPLAY_SCENE_SEMANTIC_POST_REPAIR_FORMAT_RETRY_LIMIT
+                if phase == "post_repair"
+                else SCREENPLAY_SCENE_SEMANTIC_INITIAL_FORMAT_RETRY_LIMIT
+            ),
             semantic_retry_limit=0,
             call_meta={
                 "stage": "剧本场次语义审查",
@@ -3866,9 +4475,12 @@ async def _semantic_review_scene_shard_draft(
                 "substage": phase,
                 "shard_id": shard_id,
                 "reviewer_no": reviewer_no,
+                "chunk_index": chunk_index,
+                "chunk_count": chunk_count,
                 "contract_version": (
                     SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
                 ),
+                "reuse_successful_operation": True,
                 "provider": budget["provider"],
                 "model": budget["model"],
                 "unit_count": budget["unit_count"],
@@ -3878,36 +4490,48 @@ async def _semantic_review_scene_shard_draft(
             },
             output_schema=review_schema,
         )
+        validation_errors = validate_review(result)
+        if validation_errors:
+            raise ScreenplaySceneShardError(
+                shard_id,
+                validation_errors,
+            )
+        return result
 
     async def consensus(
         candidate: ScreenplaySceneShardCreativeIR,
         phase: str,
+        allowed_finding_unit_keys: set[str] | None = None,
     ) -> tuple[list[ScreenplaySceneShardSemanticFinding], list[dict[str, Any]]]:
-        review_prompt = _scene_shard_semantic_review_prompt(
+        chunks = _scene_shard_semantic_review_chunks(
             draft=candidate,
             scene_input_contracts=scene_input_contracts,
             identity_registry=identity_registry,
+            shard_id=shard_id,
         )
-        unit_keys = list(candidate.slots)
-        budget = _scene_shard_semantic_review_budget(
-            unit_keys=unit_keys,
-            review_prompt=review_prompt,
-        )
-        if int(budget["required"]) > int(budget["ceiling"]):
-            raise ScreenplaySceneShardError(
-                shard_id,
-                [
-                    "语义审查输出预算不足，provider 调用已阻断："
-                    f"unit_count={budget['unit_count']}，"
-                    f"required={budget['required']}，"
-                    f"ceiling={budget['ceiling']}，"
-                    f"provider={budget['provider']}，"
-                    f"model={budget['model']}"
-                ],
-            )
+
+        async def reviewer_stream(
+            reviewer_no: int,
+        ) -> ScreenplaySceneShardSemanticReview:
+            findings: list[ScreenplaySceneShardSemanticFinding] = []
+            for chunk_index, chunk in enumerate(chunks, start=1):
+                chunk_review = await review(
+                    candidate,
+                    reviewer_no,
+                    phase,
+                    chunk["unit_keys"],
+                    chunk["review_prompt"],
+                    chunk["budget"],
+                    chunk_index,
+                    len(chunks),
+                    chunk["chunk_hash"],
+                )
+                findings.extend(chunk_review.findings)
+            return ScreenplaySceneShardSemanticReview(findings=findings)
+
         reviews = await asyncio.gather(
-            review(candidate, 1, phase, review_prompt, budget),
-            review(candidate, 2, phase, review_prompt, budget),
+            reviewer_stream(1),
+            reviewer_stream(2),
         )
         known_unit_keys = set(candidate.slots)
         unknown_finding_keys = {
@@ -3916,14 +4540,55 @@ async def _semantic_review_scene_shard_draft(
             for finding in item.findings
             if finding.unit_key not in known_unit_keys
         }
-        if unknown_finding_keys:
-            raise ScreenplaySceneShardError(
-                shard_id,
-                [
+        unknown_related_keys = {
+            related_unit_key
+            for item in reviews
+            for finding in item.findings
+            for related_unit_key in finding.related_unit_keys
+            if related_unit_key not in known_unit_keys
+        }
+        if unknown_finding_keys or unknown_related_keys:
+            errors: list[str] = []
+            if unknown_finding_keys:
+                errors.append(
                     "语义审查引用未知 unit_key："
                     + ",".join(sorted(unknown_finding_keys))
-                ],
+                )
+            if unknown_related_keys:
+                errors.append(
+                    "语义审查引用未知 related_unit_key："
+                    + ",".join(sorted(unknown_related_keys))
+                )
+            raise ScreenplaySceneShardError(
+                shard_id,
+                errors,
             )
+        reviews = [
+            _scene_shard_filter_exact_source_duplication(
+                _scene_shard_canonicalize_cross_slot_findings(
+                    item,
+                    draft=candidate,
+                    scene_input_contracts=scene_input_contracts,
+                ),
+                draft=candidate,
+                scene_input_contracts=scene_input_contracts,
+            )
+            for item in reviews
+        ]
+        if allowed_finding_unit_keys is not None:
+            reviews = [
+                ScreenplaySceneShardSemanticReview(findings=[
+                    finding
+                    for finding in item.findings
+                    if (
+                        finding.unit_key in allowed_finding_unit_keys
+                        or not set(finding.related_unit_keys).isdisjoint(
+                            allowed_finding_unit_keys
+                        )
+                    )
+                ])
+                for item in reviews
+            ]
         return (
             screenplay_scene_semantic_consensus(reviews[0], reviews[1]),
             [item.model_dump(mode="json") for item in reviews],
@@ -3940,151 +4605,178 @@ async def _semantic_review_scene_shard_draft(
     if not findings:
         return draft, audit
 
-    flagged_unit_keys = {item.unit_key for item in findings}
-
-    def validate_repair(
-        candidate: ScreenplaySceneShardCreativeIR,
-    ) -> list[str]:
-        errors = list(validate_draft(candidate))
-        if set(candidate.slots) != set(draft.slots):
-            errors.append("语义 repair 改变了 generation slot 集合")
-        rewritten_unflagged = [
-            unit_key
-            for unit_key in draft.slots
-            if (
-                unit_key in candidate.slots
-                and unit_key not in flagged_unit_keys
-                and candidate.slots[unit_key].model_dump(mode="json")
-                != draft.slots[unit_key].model_dump(mode="json")
-            )
-        ]
-        if rewritten_unflagged:
-            errors.append(
-                "语义 repair 越权改写未被 consensus 标记的 slot："
-                + ",".join(rewritten_unflagged)
-            )
-        return errors
-
-    frozen_slots, identity_labels = _scene_shard_semantic_authority_payload(
+    frozen_slots, _identity_labels = _scene_shard_semantic_authority_payload(
         scene_input_contracts=scene_input_contracts,
         identity_registry=identity_registry,
     )
-    findings_payload = [
-        item.model_dump(mode="json")
-        for item in findings
-    ]
-    draft_json = draft.model_dump_json()
-    original_draft_payload = draft.model_dump(mode="json")
-    repair_context = json.dumps(
-        {
-            "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
-            "consensus_findings": findings_payload,
-            "frozen_slots": frozen_slots,
-            "identity_authority": identity_labels,
-            "original_draft": original_draft_payload,
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    repair_prompt = _scene_shard_semantic_repair_prompt(
-        findings_payload=findings_payload,
-        frozen_slots=frozen_slots,
-        identity_labels=identity_labels,
-        draft_json=draft_json,
-        creative_schema=creative_schema,
-    )
-    repair_messages = [
-        {
-            "role": "system",
-            "content": SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT,
-        },
-        {"role": "user", "content": repair_prompt},
-    ]
-    repair_budget = _scene_shard_semantic_repair_budget(
-        draft_json=draft_json,
-        repair_prompt=repair_prompt,
-        unit_count=len(draft.slots),
-    )
-    if int(repair_budget["required"]) > int(repair_budget["ceiling"]):
-        raise ScreenplaySceneShardError(
-            shard_id,
-            [
-                "语义 repair 输出预算不足，provider 调用已阻断："
-                f"unit_count={repair_budget['unit_count']}，"
-                f"input={repair_budget['input']}，"
-                f"required={repair_budget['required']}，"
-                f"ceiling={repair_budget['ceiling']}，"
-                f"provider={repair_budget['provider']}，"
-                f"model={repair_budget['model']}"
-            ],
+    current_draft = draft
+    current_reviews = initial_reviews
+    for repair_round in range(
+        1,
+        SCREENPLAY_SCENE_SEMANTIC_MAX_REPAIR_ROUNDS + 1,
+    ):
+        flagged_unit_keys = {item.unit_key for item in findings}
+        ordered_flagged_unit_keys = [
+            unit_key
+            for unit_key in current_draft.slots
+            if unit_key in flagged_unit_keys
+        ]
+        subset_schema = _scene_shard_semantic_repair_subset_schema(
+            ordered_flagged_unit_keys,
         )
-    repaired = await model_gateway.chat_structured(
-        repair_messages,
-        model_type=ScreenplaySceneShardCreativeIR,
-        validate=validate_repair,
-        operation_id=(
-            f"{operation_id}:semantic:"
-            f"{SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION}:repair:"
-            f"{_hash(draft.model_dump(mode='json'))}"
-        ),
-        max_tokens=int(repair_budget["required"]),
-        temperature=0.2,
-        format_retry_limit=1,
-        semantic_retry_limit=1,
-        call_meta={
-            "stage": "剧本场次语义修复",
-            "stage_key": "screenplay_scene_shard_semantic_repair",
-            "substage": "consensus_repair",
-            "shard_id": shard_id,
-            "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
-            "provider": repair_budget["provider"],
-            "model": repair_budget["model"],
-            "required": repair_budget["required"],
-            "ceiling": repair_budget["ceiling"],
-            "input": repair_budget["input"],
-            "unit_count": repair_budget["unit_count"],
-        },
-        repair_context=repair_context,
-        output_schema=creative_schema,
-    )
-    if set(repaired.slots) != set(draft.slots):
-        raise ScreenplaySceneShardError(
-            shard_id,
-            ["语义 repair 改变了 generation slot 集合"],
+        subset_schema_hash = _hash(subset_schema)
+
+        def validate_repair(
+            candidate: ScreenplaySceneShardCreativeIR,
+        ) -> list[str]:
+            candidate_unit_keys = set(candidate.slots)
+            if candidate_unit_keys != flagged_unit_keys:
+                return [
+                    "语义 repair subset slots 必须完全等于 consensus 标记集合"
+                ]
+            merged = current_draft.model_copy(deep=True)
+            for unit_key in ordered_flagged_unit_keys:
+                merged.slots[unit_key] = candidate.slots[
+                    unit_key
+                ].model_copy(deep=True)
+            return list(validate_draft(merged))
+
+        findings_payload = [
+            item.model_dump(mode="json")
+            for item in findings
+        ]
+        reviewer_findings_payload = (
+            _scene_shard_reviewer_findings_payload(
+                findings,
+                current_reviews,
+            )
         )
-    rewritten_unflagged = [
-        unit_key
-        for unit_key in draft.slots
-        if (
-            unit_key not in flagged_unit_keys
-            and repaired.slots[unit_key].model_dump(mode="json")
-            != draft.slots[unit_key].model_dump(mode="json")
+        current_draft_payload = current_draft.model_dump(mode="json")
+        current_draft_hash = _hash(current_draft_payload)
+        subset_draft = ScreenplaySceneShardCreativeIR(
+            slots={
+                unit_key: current_draft.slots[unit_key].model_copy(deep=True)
+                for unit_key in ordered_flagged_unit_keys
+            },
         )
-    ]
-    if rewritten_unflagged:
-        raise ScreenplaySceneShardError(
-            shard_id,
-            [
-                "语义 repair 越权改写未被 consensus 标记的 slot："
-                + ",".join(rewritten_unflagged)
-            ],
+        subset_draft_payload = subset_draft.model_dump(mode="json")
+        subset_draft_json = subset_draft.model_dump_json()
+        flagged_frozen_slots = {
+            unit_key: frozen_slots[unit_key]
+            for unit_key in ordered_flagged_unit_keys
+        }
+        repair_context = json.dumps(
+            {
+                "consensus_findings": findings_payload,
+                "reviewer_findings": reviewer_findings_payload,
+                "frozen_slots": flagged_frozen_slots,
+                "current_flagged_creative": subset_draft_payload,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
-    remaining, final_reviews = await consensus(repaired, "post_repair")
-    audit.append({
-        "phase": "post_repair",
-        "creative_hash": _hash(repaired.model_dump(mode="json")),
-        "reviews": final_reviews,
-        "consensus": [item.model_dump(mode="json") for item in remaining],
-    })
-    if remaining:
-        raise ScreenplaySceneShardError(
-            shard_id,
-            [
-                f"{item.unit_key} creative semantic gate 未收口：{item.message}"
+        repair_prompt = _scene_shard_semantic_repair_prompt(
+            findings_payload=findings_payload,
+            reviewer_findings_payload=reviewer_findings_payload,
+            frozen_slots=flagged_frozen_slots,
+            draft_json=subset_draft_json,
+            creative_schema=subset_schema,
+        )
+        repair_messages = [
+            {
+                "role": "system",
+                "content": SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT,
+            },
+            {"role": "user", "content": repair_prompt},
+        ]
+        repair_budget = _scene_shard_semantic_repair_budget(
+            draft_json=subset_draft_json,
+            repair_prompt=repair_prompt,
+            unit_count=len(ordered_flagged_unit_keys),
+        )
+        if int(repair_budget["required"]) > int(repair_budget["ceiling"]):
+            raise ScreenplaySceneShardError(
+                shard_id,
+                [
+                    "语义 repair 输出预算不足，provider 调用已阻断："
+                    f"unit_count={repair_budget['unit_count']}，"
+                    f"input={repair_budget['input']}，"
+                    f"required={repair_budget['required']}，"
+                    f"ceiling={repair_budget['ceiling']}，"
+                    f"provider={repair_budget['provider']}，"
+                    f"model={repair_budget['model']}"
+                ],
+            )
+        repaired = await model_gateway.chat_structured(
+            repair_messages,
+            model_type=ScreenplaySceneShardCreativeIR,
+            validate=validate_repair,
+            operation_id=(
+                f"{operation_id}:semantic:"
+                f"{SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION}:repair:"
+                f"round-{repair_round}:{current_draft_hash}:"
+                f"{subset_schema_hash}"
+            ),
+            max_tokens=int(repair_budget["required"]),
+            temperature=0.2,
+            format_retry_limit=1,
+            semantic_retry_limit=1,
+            call_meta={
+                "stage": "剧本场次语义修复",
+                "stage_key": "screenplay_scene_shard_semantic_repair",
+                "substage": "consensus_repair",
+                "repair_round": repair_round,
+                "shard_id": shard_id,
+                "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
+                "schema_hash": subset_schema_hash,
+                "provider": repair_budget["provider"],
+                "model": repair_budget["model"],
+                "required": repair_budget["required"],
+                "ceiling": repair_budget["ceiling"],
+                "input": repair_budget["input"],
+                "unit_count": repair_budget["unit_count"],
+            },
+            repair_context=repair_context,
+            output_schema=subset_schema,
+        )
+        repair_errors = validate_repair(repaired)
+        if repair_errors:
+            raise ScreenplaySceneShardError(
+                shard_id,
+                repair_errors,
+            )
+        merged_repair = current_draft.model_copy(deep=True)
+        for unit_key in ordered_flagged_unit_keys:
+            merged_repair.slots[unit_key] = repaired.slots[
+                unit_key
+            ].model_copy(deep=True)
+        remaining, final_reviews = await consensus(
+            merged_repair,
+            "post_repair",
+            allowed_finding_unit_keys=flagged_unit_keys,
+        )
+        audit.append({
+            "phase": "post_repair",
+            "creative_hash": _hash(merged_repair.model_dump(mode="json")),
+            "reviews": final_reviews,
+            "consensus": [
+                item.model_dump(mode="json")
                 for item in remaining
             ],
-        )
-    return repaired, audit
+        })
+        if not remaining:
+            return merged_repair, audit
+        current_draft = merged_repair
+        findings = remaining
+        current_reviews = final_reviews
+
+    raise ScreenplaySceneShardError(
+        shard_id,
+        [
+            f"{item.unit_key} creative semantic gate 未收口：{item.message}"
+            for item in findings
+        ],
+    )
 
 
 async def generate_screenplay_scene_shards(

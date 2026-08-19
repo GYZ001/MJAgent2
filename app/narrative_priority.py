@@ -513,6 +513,45 @@ def _drop_paratext(
     }
 
 
+def _project_strict_unit_delivery_merge_policies(
+    screenplay: EpisodeScreenplay,
+    scene_groups: list[list[str]],
+) -> int:
+    plan = screenplay.narrative_plan
+    if plan is None or not scene_groups:
+        return 0
+    from app.screenplay_ir import screenplay_ir_version_key
+
+    if screenplay_ir_version_key(screenplay.source_text_range) < (1, 3):
+        return 0
+    events = {
+        event.event_id: event
+        for event in plan.events
+    }
+    changed = 0
+    for group in scene_groups:
+        story_events = [
+            events[event_id]
+            for event_id in group
+            if (
+                event_id in events
+                and events[event_id].narrative_layer == "story"
+                and events[event_id].render_policy
+                != "exclude_from_spine"
+            )
+        ]
+        for index, event in enumerate(story_events):
+            projected_policy = (
+                "merge_adjacent"
+                if index + 1 < len(story_events)
+                else "standalone"
+            )
+            if event.render_policy != projected_policy:
+                event.render_policy = projected_policy
+                changed += 1
+    return changed
+
+
 def picture_screenplay_projection(
     screenplay: EpisodeScreenplay,
 ) -> tuple[EpisodeScreenplay, dict[str, Any]]:
@@ -555,6 +594,12 @@ def picture_screenplay_projection(
     plan = projected.narrative_plan
     assert plan is not None
     scene_groups = _scene_event_groups(projected)
+    merge_policy_change_count = (
+        _project_strict_unit_delivery_merge_policies(
+            projected,
+            scene_groups,
+        )
+    )
     excluded = {
         event.event_id
         for event in plan.events
@@ -572,6 +617,9 @@ def picture_screenplay_projection(
     report["story_event_count"] = len(
         projected.narrative_plan.events
         if projected.narrative_plan is not None else []
+    )
+    report["delivery_merge_policy_change_count"] = (
+        merge_policy_change_count
     )
     return projected, report
 
@@ -619,15 +667,23 @@ def _events_allow_merge(
     right: StoryboardOutlineShot,
     events: dict[str, Any],
 ) -> bool:
-    left_ids = set(left.event_ids)
-    right_ids = set(right.event_ids)
-    if left_ids.intersection(right_ids):
+    left_ids = list(dict.fromkeys(left.event_ids))
+    right_ids = list(dict.fromkeys(right.event_ids))
+    if set(left_ids).intersection(right_ids):
         return True
-    return any(
-        events.get(event_id) is not None
-        and events[event_id].render_policy == "merge_adjacent"
-        for event_id in left_ids | right_ids
+    if not left_ids or not right_ids:
+        return False
+    left_event = events.get(left_ids[-1])
+    right_event_id = right_ids[0]
+    if (
+        left_event is None
+        or left_event.render_policy != "merge_adjacent"
+    ):
+        return False
+    downstream = set(
+        left_event.downstream_dependency_event_ids or []
     )
+    return not downstream or right_event_id in downstream
 
 
 def _can_merge(

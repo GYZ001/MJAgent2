@@ -3,7 +3,9 @@
 """
 from __future__ import annotations
 
+from collections import defaultdict
 import difflib
+import math
 import re
 import sys
 from typing import Any
@@ -1943,6 +1945,52 @@ def normalize_screenplay_ledgers(script: EpisodeScreenplay) -> EpisodeScreenplay
     WARNING 候选。主线权威是 plot_spine；台账只是下游拆镜索引，允许从 spine 合成最小完备集。
     """
     spine = script.plot_spine
+    plan = script.narrative_plan
+    if plan is not None:
+        action_by_id = {
+            action.action_id: action
+            for action in plan.atomic_actions
+        }
+        evidence_by_event: defaultdict[str, list[str]] = defaultdict(list)
+        for evidence in plan.evidence:
+            if evidence.anchor.type == "event":
+                evidence_by_event[evidence.anchor.id].append(
+                    (evidence.observable_claim or "").strip()
+                )
+        authority_by_event: dict[str, str] = {}
+        for narrative_event in plan.events:
+            candidates = [
+                *evidence_by_event.get(narrative_event.event_id, []),
+                *[
+                    (action_by_id[action_id].semantic_intent or "").strip()
+                    for action_id in narrative_event.action_ids
+                    if action_id in action_by_id
+                ],
+                *[
+                    (
+                        action_by_id[action_id].completion_condition
+                        or ""
+                    ).strip()
+                    for action_id in narrative_event.action_ids
+                    if action_id in action_by_id
+                ],
+            ]
+            authority = next(
+                (candidate for candidate in candidates if len(candidate) >= 4),
+                "",
+            )
+            if authority:
+                authority_by_event[narrative_event.event_id] = authority
+        for event in script.events or []:
+            if len((event.visible_change or "").strip()) >= 4:
+                continue
+            authority = authority_by_event.get(
+                (event.event_id or "").strip(),
+                "",
+            )
+            if authority:
+                event.visible_change = authority
+
     # 1) 清洗 events：丢掉缺 id / 缺状态链的空壳
     cleaned_events: list[StoryEvent] = []
     seen_eids: set[str] = set()
@@ -1959,7 +2007,12 @@ def normalize_screenplay_ledgers(script: EpisodeScreenplay) -> EpisodeScreenplay
     must_beats = [b for b in (spine.spine_beats if spine else []) if b.must_keep] or list(
         (spine.spine_beats if spine else []) or []
     )
-    if spine and must_beats and len(cleaned_events) < min(3, len(must_beats)):
+    if (
+        plan is None
+        and spine
+        and must_beats
+        and len(cleaned_events) < min(3, len(must_beats))
+    ):
         cleaned_events = []
         for i, beat in enumerate(must_beats, start=1):
             cleaned_events.append(StoryEvent(
@@ -2687,8 +2740,109 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             errors.append(f"{tag}.characters 含{contract_name}外角色：{unknown}")
     full_text = (script.full_script_text or "").strip()
     spine_n = len((script.plot_spine.spine_beats if script.plot_spine else None) or [])
-    min_script_chars = max(160, spine_n * 36 if spine_n else max(160, expected_beats * 30))
+    if narrative_authority:
+        from app.screenplay_ir import IR_MIN_ADAPTED_SOURCE_RATIO
+
+        script_length_source_chars = len(
+            textmatch.condense(source_text or "")
+        )
+        min_script_chars = max(
+            160,
+            math.ceil(
+                script_length_source_chars
+                * IR_MIN_ADAPTED_SOURCE_RATIO
+            ),
+        )
+        script_length_authority = "authorized_source_ratio"
+    else:
+        script_length_source_chars = 0
+        min_script_chars = max(
+            160,
+            spine_n * 36
+            if spine_n
+            else max(160, expected_beats * 30),
+        )
+        script_length_authority = "legacy_spine_or_expected_beats"
     hard_min_script_chars = max(160, (min_script_chars * 99 + 99) // 100)
+    # #region debug-point C42-B:screenplay-length-gate
+    try:
+        import json as _debug_json
+        import os as _debug_os
+        import time as _debug_time
+        import urllib.request as _debug_request
+
+        if _debug_os.environ.get("PYTEST_CURRENT_TEST"):
+            raise RuntimeError("debug instrumentation disabled under pytest")
+        _debug_url = "http://127.0.0.1:7777/event"
+        _debug_session = "three-episode-video"
+        with open(
+            ".dbg/three-episode-video.env",
+            encoding="utf-8",
+        ) as _debug_env:
+            for _debug_line in _debug_env:
+                if _debug_line.startswith("DEBUG_SERVER_URL="):
+                    _debug_url = _debug_line.split("=", 1)[1].strip()
+                elif _debug_line.startswith("DEBUG_SESSION_ID="):
+                    _debug_session = _debug_line.split("=", 1)[1].strip()
+        _debug_beats = list(
+            (
+                script.plot_spine.spine_beats
+                if script.plot_spine
+                else None
+            )
+            or []
+        )
+        _debug_request.urlopen(
+            _debug_request.Request(
+                _debug_url,
+                data=_debug_json.dumps({
+                    "sessionId": _debug_session,
+                    "runId": "duration-gate-post-fix",
+                    "hypothesisId": "C42-B",
+                    "location": "app/validators.py:validate_screenplay",
+                    "msg": "[DEBUG] screenplay text length gate inputs",
+                    "data": {
+                        "full_script_chars": len(full_text),
+                        "source_text_chars": len(source_text or ""),
+                        "source_text_content_chars": (
+                            script_length_source_chars
+                        ),
+                        "length_authority": script_length_authority,
+                        "spine_beat_count": spine_n,
+                        "must_keep_spine_beat_count": sum(
+                            1 for _debug_beat in _debug_beats
+                            if _debug_beat.must_keep
+                        ),
+                        "expected_beats": expected_beats,
+                        "min_script_chars": min_script_chars,
+                        "hard_min_script_chars": hard_min_script_chars,
+                        "screenplay_event_count": len(script.events or []),
+                        "narrative_event_count": len(
+                            (
+                                script.narrative_plan.events
+                                if script.narrative_plan
+                                else None
+                            )
+                            or []
+                        ),
+                        "scene_outline_count": len(scenes),
+                        "scene_heading_count": len(
+                            SCRIPT_SCENE_HEADING_RE.findall(full_text)
+                        ),
+                        "scene_summary_chars": sum(
+                            len((scene.summary or "").strip())
+                            for scene in scenes
+                        ),
+                    },
+                    "ts": int(_debug_time.time() * 1000),
+                }).encode(),
+                headers={"Content-Type": "application/json"},
+            ),
+            timeout=1,
+        ).read()
+    except Exception:
+        pass
+    # #endregion
     if len(full_text) < hard_min_script_chars:
         errors.append(
             f"full_script_text 过短；当前仅 {len(full_text)} 字，至少需要 {min_script_chars} 字"
@@ -2902,6 +3056,89 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     event_ids: set[str] = set()
     if not script.events:
         errors.append("events 不能为空；必须把完整剧本拆成可追溯的状态变化事件")
+    # #region debug-point C42-C:event-visible-change
+    try:
+        import json as _debug_json
+        import os as _debug_os
+        import time as _debug_time
+        import urllib.request as _debug_request
+
+        if _debug_os.environ.get("PYTEST_CURRENT_TEST"):
+            raise RuntimeError("debug instrumentation disabled under pytest")
+        _debug_url = "http://127.0.0.1:7777/event"
+        _debug_session = "three-episode-video"
+        with open(
+            ".dbg/three-episode-video.env",
+            encoding="utf-8",
+        ) as _debug_env:
+            for _debug_line in _debug_env:
+                if _debug_line.startswith("DEBUG_SERVER_URL="):
+                    _debug_url = _debug_line.split("=", 1)[1].strip()
+                elif _debug_line.startswith("DEBUG_SESSION_ID="):
+                    _debug_session = _debug_line.split("=", 1)[1].strip()
+        _debug_invalid_events = []
+        for _debug_index, _debug_event in enumerate(script.events or []):
+            _debug_short_fields = {
+                _debug_field: (
+                    getattr(_debug_event, _debug_field, "") or ""
+                ).strip()
+                for _debug_field in (
+                    "state_in",
+                    "visible_change",
+                    "state_out",
+                )
+                if len(
+                    (
+                        getattr(_debug_event, _debug_field, "") or ""
+                    ).strip()
+                ) < 4
+            }
+            if _debug_short_fields:
+                _debug_invalid_events.append({
+                    "index": _debug_index,
+                    "event_id": (_debug_event.event_id or "").strip(),
+                    "short_fields": _debug_short_fields,
+                    "source_fact": (
+                        _debug_event.source_fact or ""
+                    ).strip()[:160],
+                    "trigger": (
+                        _debug_event.trigger or ""
+                    ).strip()[:160],
+                    "state_in": (
+                        _debug_event.state_in or ""
+                    ).strip()[:160],
+                    "visible_change": (
+                        _debug_event.visible_change or ""
+                    ).strip()[:160],
+                    "state_out": (
+                        _debug_event.state_out or ""
+                    ).strip()[:160],
+                })
+        _debug_request.urlopen(
+            _debug_request.Request(
+                _debug_url,
+                data=_debug_json.dumps({
+                    "sessionId": _debug_session,
+                    "runId": "duration-gate-post-fix",
+                    "hypothesisId": "C42-C",
+                    "location": "app/validators.py:validate_screenplay",
+                    "msg": "[DEBUG] screenplay event state-chain gaps",
+                    "data": {
+                        "event_count": len(script.events or []),
+                        "invalid_event_count": len(
+                            _debug_invalid_events
+                        ),
+                        "invalid_events": _debug_invalid_events[:20],
+                    },
+                    "ts": int(_debug_time.time() * 1000),
+                }).encode(),
+                headers={"Content-Type": "application/json"},
+            ),
+            timeout=1,
+        ).read()
+    except Exception:
+        pass
+    # #endregion
     for i, event in enumerate(script.events or []):
         tag = f"events[{i}]"
         event_id = (event.event_id or "").strip()

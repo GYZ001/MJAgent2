@@ -2403,6 +2403,107 @@ def test_environment_misclassification_review_contract_has_semantic_authority() 
         )
 
 
+def test_environment_misclassification_text_units_must_match_exact_fields() -> None:
+    source = "，".join(
+        f"甲执行动作{index}" for index in range(1, 25)
+    ) + "。"
+    _, blueprint, _ = _environment_misclassification_fixture()
+    owner = blueprint.nodes[0]
+    unit_12 = "SRC0001:unit:012"
+    unit_24 = "SRC0001:unit:024"
+    owner.environment_source_unit_keys = [unit_12, unit_24]
+    for evidence in owner.participant_evidence:
+        if evidence.usage in {"visible", "voice"}:
+            evidence.source_unit_keys = [unit_12]
+
+    misaligned_issue = BlueprintSemanticIssue(
+        code="state_subject_environment_misclassified",
+        node_keys=[owner.key],
+        source_segment_ids=["SRC0001"],
+        source_unit_keys=[unit_12],
+        message=f"{unit_24} 的 environment ownership 错误",
+        required_resolution=f"仅修改 {unit_24} 的 state subject",
+    )
+    misaligned_review = BlueprintSemanticReview(issues=[misaligned_issue])
+    assert any(
+        "[BLUEPRINT_REVIEW_STATE_SUBJECT_ENVIRONMENT_CONTRACT]" in error
+        and unit_24 in error
+        for error in validate_blueprint_semantic_review(
+            misaligned_review,
+            blueprint,
+            source,
+        )
+    )
+    assert filter_blueprint_semantic_review_voice_issues(
+        misaligned_review,
+        blueprint,
+        source,
+    ) == 1
+    assert misaligned_review.issues == []
+
+    complete_issue = misaligned_issue.model_copy(update={
+        "source_unit_keys": [unit_12, unit_24],
+    })
+    unsupported_review = BlueprintSemanticReview(issues=[complete_issue])
+    assert filter_blueprint_semantic_review_voice_issues(
+        unsupported_review,
+        blueprint,
+        source,
+    ) == 1
+
+    owner.participant_evidence[0].source_unit_keys = [unit_12, unit_24]
+    supported_review = BlueprintSemanticReview(issues=[complete_issue])
+    assert filter_blueprint_semantic_review_voice_issues(
+        supported_review,
+        blueprint,
+        source,
+    ) == 0
+    assert supported_review.issues == [complete_issue]
+
+
+def test_environment_misclassification_filter_requires_exact_repair_authority() -> None:
+    source, blueprint, action_keys = _environment_misclassification_fixture()
+    issue = BlueprintSemanticIssue(
+        code="state_subject_environment_misclassified",
+        node_keys=["misclassified-owner"],
+        source_segment_ids=["SRC0001"],
+        source_unit_keys=[action_keys[0]],
+        message="该 environment action unit 应改为人物主体",
+        required_resolution="仅使用该 exact unit 的 existing participant authority",
+    )
+
+    without_exact_evidence = blueprint.model_copy(deep=True)
+    for evidence in without_exact_evidence.nodes[0].participant_evidence:
+        if evidence.usage in {"visible", "voice"}:
+            evidence.source_unit_keys = [action_keys[1]]
+    unsupported = BlueprintSemanticReview(issues=[issue])
+
+    assert filter_blueprint_semantic_review_voice_issues(
+        unsupported,
+        without_exact_evidence,
+        source,
+    ) == 1
+    assert unsupported.issues == []
+    assert validate_blueprint_semantic_review(
+        unsupported,
+        without_exact_evidence,
+        source,
+    ) == []
+
+    supported = BlueprintSemanticReview(issues=[issue])
+    assert filter_blueprint_semantic_review_voice_issues(
+        supported,
+        blueprint,
+        source,
+    ) == 0
+    assert supported.issues == [issue]
+    assert validate_blueprint_semantic_review(
+        supported,
+        blueprint,
+        source,
+    ) == []
+
+
 def test_full_blueprint_misclassification_schema_exposes_only_authorized_owners() -> None:
     source, blueprint, action_keys = _environment_misclassification_fixture()
     target = action_keys[0]
@@ -2565,7 +2666,7 @@ def test_true_environment_and_patch_drift_fail_closed() -> None:
         required_resolution="只能使用已有感知 authority",
     )
 
-    assert blueprint_environment_subject_issue_has_exact_authority(
+    assert not blueprint_environment_subject_issue_has_exact_authority(
         issue,
         blueprint,
         source,
@@ -3466,6 +3567,366 @@ def test_targeted_reviewer_conflict_triggers_full_review(monkeypatch) -> None:
     assert modes == ["risk_nodes", "risk_nodes", "full", "full"]
 
 
+def test_bounded_full_review_recheck_round_two_then_clean_without_patch(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint()
+    derive_blueprint_scene_plans(blueprint)
+    calls: list[tuple[int, int, str]] = []
+    patch_calls: list[str] = []
+    created: list = []
+    empty_rows = SimpleNamespace(fetchall=lambda: [])
+    empty_connection = SimpleNamespace(
+        execute=lambda *_args, **_kwargs: empty_rows,
+    )
+
+    def issue(code: str, message: str) -> BlueprintSemanticReview:
+        return BlueprintSemanticReview(issues=[BlueprintSemanticIssue(
+            code=code,
+            node_keys=["n2"],
+            source_segment_ids=["SRC0002"],
+            message=message,
+            required_resolution="仅在双审形成共识后修复",
+        )])
+
+    async def fake_structured(*_args, **kwargs):
+        meta = kwargs["call_meta"]
+        review_round = meta["review_round"]
+        sample_no = meta["review_sample"]
+        calls.append((review_round, sample_no, meta["substage"]))
+        if review_round == 1:
+            code = (
+                "timeline_conflict"
+                if sample_no == 1
+                else "spatial_action_gap"
+            )
+            return issue(code, "定向审稿结论不一致")
+        if review_round == 2 and sample_no == 1:
+            return issue("timeline_conflict", "完整审稿仍有单侧残留")
+        return BlueprintSemanticReview(issues=[])
+
+    async def forbidden_patch(*_args, **_kwargs):
+        patch_calls.append("called")
+        raise AssertionError("one-sided review issue must not enter patch")
+
+    def create_artifact(artifact, **_kwargs):
+        created.append(artifact)
+        return {"id": f"artifact-{len(created)}"}
+
+    monkeypatch.setattr(stages, "get_conn", lambda: empty_connection)
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: "true"
+        if key == "screenplay_targeted_blueprint_review_enabled"
+        else "1",
+    )
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        fake_structured,
+    )
+    monkeypatch.setattr(
+        stages,
+        "_repair_narrative_blueprint",
+        forbidden_patch,
+    )
+    monkeypatch.setattr(
+        stages,
+        "_repair_reviewed_blueprint_state_subject_ownership",
+        forbidden_patch,
+    )
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        create_artifact,
+    )
+
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        blueprint,
+        episode={"id": "episode-full-one-sided-then-clean", "episode_no": 8},
+        source_text=SOURCE,
+    ))
+
+    assert result is blueprint
+    assert patch_calls == []
+    assert calls == [
+        (1, 1, "risk_nodes"),
+        (1, 2, "risk_nodes"),
+        (2, 1, "full"),
+        (2, 2, "full"),
+        (3, 1, "full"),
+        (3, 2, "full"),
+    ]
+    consensus = [
+        artifact
+        for artifact in created
+        if artifact.type == "screenplay_narrative_blueprint_review_consensus"
+    ]
+    assert [
+        artifact.content["review_outcome"] for artifact in consensus
+    ] == [
+        "full_fallback_required",
+        "one_sided_residual",
+        "clean",
+    ]
+    assert [artifact.status for artifact in consensus] == [
+        "needs_revision",
+        "needs_revision",
+        "validated",
+    ]
+
+
+def test_bounded_full_review_recheck_round_four_fails_without_patch(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint()
+    derive_blueprint_scene_plans(blueprint)
+    calls: list[tuple[int, int, str]] = []
+    patch_calls: list[str] = []
+    created: list = []
+    empty_rows = SimpleNamespace(fetchall=lambda: [])
+    empty_connection = SimpleNamespace(
+        execute=lambda *_args, **_kwargs: empty_rows,
+    )
+
+    def issue(code: str, message: str) -> BlueprintSemanticReview:
+        return BlueprintSemanticReview(issues=[BlueprintSemanticIssue(
+            code=code,
+            node_keys=["n2"],
+            source_segment_ids=["SRC0002"],
+            message=message,
+            required_resolution="仅在双审形成共识后修复",
+        )])
+
+    async def fake_structured(*_args, **kwargs):
+        meta = kwargs["call_meta"]
+        review_round = meta["review_round"]
+        sample_no = meta["review_sample"]
+        calls.append((review_round, sample_no, meta["substage"]))
+        if review_round == 1:
+            code = (
+                "timeline_conflict"
+                if sample_no == 1
+                else "spatial_action_gap"
+            )
+            return issue(code, "定向审稿结论不一致")
+        if sample_no == 1:
+            return issue("timeline_conflict", "完整审稿持续单侧残留")
+        return BlueprintSemanticReview(issues=[])
+
+    async def forbidden_patch(*_args, **_kwargs):
+        patch_calls.append("called")
+        raise AssertionError("one-sided review issue must not enter patch")
+
+    def create_artifact(artifact, **_kwargs):
+        created.append(artifact)
+        return {"id": f"artifact-{len(created)}"}
+
+    monkeypatch.setattr(stages, "get_conn", lambda: empty_connection)
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: "true"
+        if key == "screenplay_targeted_blueprint_review_enabled"
+        else "1",
+    )
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        fake_structured,
+    )
+    monkeypatch.setattr(
+        stages,
+        "_repair_narrative_blueprint",
+        forbidden_patch,
+    )
+    monkeypatch.setattr(
+        stages,
+        "_repair_reviewed_blueprint_state_subject_ownership",
+        forbidden_patch,
+    )
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        create_artifact,
+    )
+
+    with pytest.raises(
+        ContentGenerationError,
+        match="蓝图完整双审仍有单侧必须修复问题",
+    ):
+        asyncio.run(stages._semantic_review_narrative_blueprint(
+            blueprint,
+            episode={
+                "id": "episode-full-one-sided-through-round-four",
+                "episode_no": 8,
+            },
+            source_text=SOURCE,
+        ))
+
+    assert patch_calls == []
+    assert calls == [
+        (1, 1, "risk_nodes"),
+        (1, 2, "risk_nodes"),
+        (2, 1, "full"),
+        (2, 2, "full"),
+        (3, 1, "full"),
+        (3, 2, "full"),
+        (4, 1, "full"),
+        (4, 2, "full"),
+    ]
+    consensus = [
+        artifact
+        for artifact in created
+        if artifact.type == "screenplay_narrative_blueprint_review_consensus"
+    ]
+    assert [
+        artifact.content["review_outcome"] for artifact in consensus
+    ] == [
+        "full_fallback_required",
+        "one_sided_residual",
+        "one_sided_residual",
+        "one_sided_residual",
+    ]
+    assert all(
+        artifact.status == "needs_revision"
+        for artifact in consensus
+    )
+
+
+def test_reviewer_quorum_filters_unsupported_guesses_before_validation(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint()
+    derive_blueprint_scene_plans(blueprint)
+    reviews = {
+        1: BlueprintSemanticReview.model_validate({"issues": [{
+            "code": "state_subject_missing",
+            "node_keys": ["n1"],
+            "source_segment_ids": ["SRC0001"],
+            "message": "无权威的状态主体猜测",
+            "required_resolution": "不应进入共识",
+        }, {
+            "code": "state_subject_environment_misclassified",
+            "node_keys": ["n1"],
+            "source_segment_ids": ["SRC0001"],
+            "source_unit_keys": ["SRC0001:unit:001"],
+            "message": "无 environment ownership 的猜测",
+            "required_resolution": "不应进入共识",
+        }]}),
+        2: BlueprintSemanticReview.model_validate({"issues": [{
+            "code": "state_subject_missing",
+            "node_keys": ["n1"],
+            "source_segment_ids": ["SRC0001"],
+            "message": "无权威的状态主体猜测",
+            "required_resolution": "不应进入共识",
+        }, {
+            "code": "state_subject_ambiguous",
+            "node_keys": ["n2"],
+            "source_segment_ids": ["SRC0002"],
+            "message": "无权威的状态主体歧义猜测",
+            "required_resolution": "不应进入共识",
+        }, {
+            "code": "state_subject_environment_misclassified",
+            "node_keys": ["n3"],
+            "source_segment_ids": ["SRC0003"],
+            "source_unit_keys": ["SRC0003:unit:001"],
+            "message": "无 environment ownership 的猜测",
+            "required_resolution": "不应进入共识",
+        }, {
+            "code": "state_subject_environment_misclassified",
+            "node_keys": ["n4"],
+            "source_segment_ids": ["SRC0004"],
+            "source_unit_keys": ["SRC0004:unit:001"],
+            "message": "无 environment ownership 的猜测",
+            "required_resolution": "不应进入共识",
+        }]}),
+    }
+    validation_errors: dict[int, list[str]] = {}
+    invalid_reference_errors: list[str] = []
+    created: list = []
+
+    empty_rows = SimpleNamespace(fetchall=lambda: [])
+    empty_connection = SimpleNamespace(
+        execute=lambda *_args, **_kwargs: empty_rows,
+    )
+
+    async def fake_structured(*_args, **kwargs):
+        sample_no = kwargs["call_meta"]["review_sample"]
+        if sample_no == 1:
+            invalid_review = BlueprintSemanticReview.model_validate({
+                "issues": [{
+                    "code": "timeline_conflict",
+                    "node_keys": ["missing-node"],
+                    "source_segment_ids": ["SRC9999"],
+                    "message": "非法引用不得被 authority filter 移除",
+                    "required_resolution": "拒绝整份非法 review",
+                }],
+            })
+            invalid_reference_errors.extend(
+                kwargs["validate"](invalid_review)
+            )
+            assert len(invalid_review.issues) == 1
+        review = reviews[sample_no].model_copy(deep=True)
+        validation_errors[sample_no] = kwargs["validate"](review)
+        return review
+
+    def create_artifact(artifact, **_kwargs):
+        created.append(artifact)
+        return {"id": f"artifact-{len(created)}"}
+
+    monkeypatch.setattr(stages, "get_conn", lambda: empty_connection)
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: "true"
+        if key == "screenplay_targeted_blueprint_review_enabled"
+        else "1",
+    )
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        fake_structured,
+    )
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        create_artifact,
+    )
+
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        blueprint,
+        episode={"id": "episode-reviewer-filter-quorum", "episode_no": 8},
+        source_text=SOURCE,
+    ))
+
+    assert result is blueprint
+    assert validation_errors == {1: [], 2: []}
+    assert any("NODE_UNKNOWN" in error for error in invalid_reference_errors)
+    assert any("SOURCE_UNKNOWN" in error for error in invalid_reference_errors)
+    review_artifacts = sorted(
+        (
+            artifact for artifact in created
+            if artifact.type == "screenplay_narrative_blueprint_review"
+        ),
+        key=lambda artifact: artifact.model_snapshot["review_sample"],
+    )
+    assert len(review_artifacts) == 2
+    assert [artifact.content["issues"] for artifact in review_artifacts] == [
+        [],
+        [],
+    ]
+    assert [
+        artifact.model_snapshot["dropped_unsupported_voice_issue_count"]
+        for artifact in review_artifacts
+    ] == [2, 4]
+    consensus = next(
+        artifact for artifact in created
+        if artifact.type == "screenplay_narrative_blueprint_review_consensus"
+    )
+    assert consensus.content["review_outcome"] == "clean"
+    assert consensus.content["consensus_issue_keys"] == []
+    assert consensus.content["dropped_unsupported_voice_issue_count"] == 6
+
+
 def test_clean_semantic_review_cache_is_bound_to_source_corpus(
     monkeypatch,
 ) -> None:
@@ -3592,6 +4053,14 @@ def test_reviewer_input_and_retry_share_canonical_contract(
 
     assert result is blueprint
     assert len(calls) == 2
+    assert {
+        call_kwargs["format_retry_limit"]
+        for _, call_kwargs in calls
+    } == {1}
+    assert {
+        call_kwargs["semantic_retry_limit"]
+        for _, call_kwargs in calls
+    } == {0}
     messages, kwargs = calls[0]
     prompt = messages[1]["content"]
     expected_keys = [node.key for node in blueprint.nodes]

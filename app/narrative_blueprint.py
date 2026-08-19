@@ -46,6 +46,9 @@ BLUEPRINT_SPLIT_MANIFEST_VERSION = "blueprint-split-manifest.v1"
 STATE_SUBJECT_ADJUDICATION_VERSION = (
     "blueprint-state-subject-adjudication.v1"
 )
+_CANONICAL_SOURCE_UNIT_REFERENCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])SRC\d{4}:unit:\d{3}(?![A-Za-z0-9_])"
+)
 
 
 def blueprint_authority_validator_fingerprint() -> str:
@@ -1756,6 +1759,25 @@ def _blueprint_environment_subject_issue_contract_errors(
         return []
 
     errors: list[str] = []
+    declared_unit_keys = set(issue.source_unit_keys)
+    text_unit_keys = list(dict.fromkeys(
+        _CANONICAL_SOURCE_UNIT_REFERENCE_RE.findall(issue.message)
+        + _CANONICAL_SOURCE_UNIT_REFERENCE_RE.findall(
+            issue.required_resolution
+        )
+    ))
+    undeclared_text_unit_keys = [
+        unit_key
+        for unit_key in text_unit_keys
+        if unit_key not in declared_unit_keys
+    ]
+    if undeclared_text_unit_keys:
+        errors.append(
+            "state_subject_environment_misclassified 的 "
+            "message/required_resolution 引用了 source_unit_keys 未声明的 "
+            "canonical exact unit："
+            + "、".join(undeclared_text_unit_keys)
+        )
     if len(issue.node_keys) != 1:
         errors.append(
             "state_subject_environment_misclassified 必须恰好引用一个节点"
@@ -1807,6 +1829,13 @@ def _blueprint_environment_subject_issue_contract_errors(
             )
         if unit_key in node.state_subject_adjudicated_unit_keys:
             errors.append(f"{unit_key} 已完成 state subject adjudication")
+        if not _node_state_subject_repairable_identities(
+            node,
+            source_unit_key=unit_key,
+        ):
+            errors.append(
+                f"{unit_key} 没有 existing participant visible/voice authority"
+            )
 
     if len(target_facts) == len(unit_keys):
         expected_source_ids = list(dict.fromkeys(
@@ -2282,6 +2311,41 @@ def blueprint_voice_identity_issues(
     return issues
 
 
+def normalize_blueprint_state_subject_evidence_projection(
+    candidate: NarrativeBlueprint | NarrativeBlueprintShard,
+    source_text: str,
+) -> int:
+    """Remove non-action keys from provider-authored state-subject rows."""
+    action_unit_keys = {
+        fact.source_unit_key
+        for fact in source_facts(source_text)
+        if fact.projection == "action"
+    }
+    removed = 0
+    for node in candidate.nodes:
+        retained_evidence: list[NarrativeParticipantEvidence] = []
+        for evidence in node.participant_evidence:
+            if evidence.usage != "state_subject":
+                retained_evidence.append(evidence)
+                continue
+            retained_keys = [
+                unit_key
+                for unit_key in evidence.source_unit_keys
+                if unit_key in action_unit_keys
+            ]
+            removed += len(evidence.source_unit_keys) - len(retained_keys)
+            if not retained_keys:
+                continue
+            if retained_keys == evidence.source_unit_keys:
+                retained_evidence.append(evidence)
+                continue
+            retained = evidence.model_copy(deep=True)
+            retained.source_unit_keys = retained_keys
+            retained_evidence.append(retained)
+        node.participant_evidence = retained_evidence
+    return removed
+
+
 def blueprint_state_subject_issues(
     blueprint: NarrativeBlueprint,
     source_text: str,
@@ -2543,6 +2607,27 @@ def _node_identity_has_perception_evidence(
         )
         for evidence in node.participant_evidence
     )
+
+
+def _node_state_subject_repairable_identities(
+    node: NarrativeNode,
+    *,
+    source_unit_key: str,
+) -> list[str]:
+    """Return existing participants with perception authority for one unit."""
+    return [
+        identity_key
+        for identity_key in dict.fromkeys(
+            value.strip()
+            for value in node.participants
+            if value.strip()
+        )
+        if _node_identity_has_perception_evidence(
+            node,
+            identity_key=identity_key,
+            source_unit_key=source_unit_key,
+        )
+    ]
 
 
 def normalize_blueprint_state_subject_perception(
@@ -3089,19 +3174,10 @@ def _blueprint_state_subject_misclassification_contract(
             raise ValueError(
                 f"misclassified environment target 已完成 adjudication：{unit_key}"
             )
-        identities = [
-            identity_key
-            for identity_key in dict.fromkeys(
-                value.strip()
-                for value in owner.participants
-                if value.strip()
-            )
-            if _node_identity_has_perception_evidence(
-                owner,
-                identity_key=identity_key,
-                source_unit_key=unit_key,
-            )
-        ]
+        identities = _node_state_subject_repairable_identities(
+            owner,
+            source_unit_key=unit_key,
+        )
         if not identities:
             raise ValueError(
                 "misclassified environment target 没有 existing participant "

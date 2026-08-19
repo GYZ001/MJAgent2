@@ -1296,6 +1296,42 @@ def test_v13_compiler_accepts_unique_source_scene_owners() -> None:
     assert screenplay.source_text_range == "screenplay-generation-ir.v1.3"
 
 
+def test_v13_compiler_projects_same_scene_units_for_delivery_merge() -> None:
+    payload = _v13_payload()
+    payload["scenes"][0]["units"][1]["event_key"] = "e1-dialogue"
+
+    screenplay = compile_screenplay_ir(
+        ScreenplayGenerationIR.model_validate(payload),
+        episode={"id": "ep-ir-v13-delivery", "episode_no": 1},
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+
+    narrative_events = screenplay.narrative_plan.events
+    assert [event.event_id for event in narrative_events] == [
+        "E1",
+        "E2",
+        "E3",
+        "E4",
+    ]
+    assert [event.render_policy for event in narrative_events] == [
+        "merge_adjacent",
+        "standalone",
+        "standalone",
+        "standalone",
+    ]
+    assert [
+        event.render_policy for event in screenplay.events
+    ] == [
+        "merge_adjacent",
+        "standalone",
+        "standalone",
+        "standalone",
+    ]
+    assert len(screenplay.narrative_plan.atomic_actions) == 4
+    assert len(screenplay.narrative_plan.evidence) >= 4
+
+
 def test_compiled_identity_ids_are_stable_when_ir_order_changes() -> None:
     first_payload = _v13_payload()
     second_payload = _v13_payload()

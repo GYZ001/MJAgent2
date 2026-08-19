@@ -21,6 +21,7 @@ def test_async_write_retries_until_lock_release_without_blocking_event_loop(
     writer.commit()
     writer.execute("BEGIN IMMEDIATE")
     monkeypatch.setattr(db, "DB_PATH", database_path)
+    monkeypatch.setattr(db, "_is_transient_sqlite_lock", lambda _exc: False)
 
     async def contend() -> tuple[int, int]:
         heartbeat_ticks = 0

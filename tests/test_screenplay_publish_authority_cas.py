@@ -154,6 +154,99 @@ def test_baseline_duration_expansion_persists_planning_authority_with_cas() -> N
     ).fetchone()) == (1801, 1801)
 
 
+def test_baseline_duration_expansion_accepts_null_planning_with_cas() -> None:
+    case = _source_projection_case()
+    conn = db.get_conn()
+    conn.execute(
+        """UPDATE episodes
+              SET target_duration_s=1800,planning_target_duration_s=NULL,
+                  target_duration_authority='planning_estimate',
+                  active_screenplay_run_id='run-owner'
+            WHERE id=?""",
+        (case["episode_id"],),
+    )
+    conn.commit()
+
+    _persist_screenplay_duration_expansion(
+        conn,
+        episode_id=case["episode_id"],
+        expected_target_s=1800,
+        expected_planning_s=None,
+        expected_duration_authority="planning_estimate",
+        expected_active_run_id="run-owner",
+        required_target_s=1801,
+    )
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT target_duration_s,planning_target_duration_s FROM episodes WHERE id=?",
+        (case["episode_id"],),
+    ).fetchone()
+    assert tuple(row) == (1801, 1801)
+
+
+def test_baseline_duration_expansion_rejects_null_expected_after_planning_set() -> None:
+    case = _source_projection_case()
+    conn = db.get_conn()
+    conn.execute(
+        """UPDATE episodes
+              SET target_duration_s=1800,planning_target_duration_s=1800,
+                  target_duration_authority='planning_estimate',
+                  active_screenplay_run_id='run-owner'
+            WHERE id=?""",
+        (case["episode_id"],),
+    )
+    conn.commit()
+
+    with pytest.raises(StateConflict):
+        _persist_screenplay_duration_expansion(
+            conn,
+            episode_id=case["episode_id"],
+            expected_target_s=1800,
+            expected_planning_s=None,
+            expected_duration_authority="planning_estimate",
+            expected_active_run_id="run-owner",
+            required_target_s=1801,
+        )
+
+    row = conn.execute(
+        "SELECT target_duration_s,planning_target_duration_s FROM episodes WHERE id=?",
+        (case["episode_id"],),
+    ).fetchone()
+    assert tuple(row) == (1800, 1800)
+
+
+def test_baseline_duration_expansion_rejects_non_null_expected_for_null_planning() -> None:
+    case = _source_projection_case()
+    conn = db.get_conn()
+    conn.execute(
+        """UPDATE episodes
+              SET target_duration_s=1800,planning_target_duration_s=NULL,
+                  target_duration_authority='planning_estimate',
+                  active_screenplay_run_id='run-owner'
+            WHERE id=?""",
+        (case["episode_id"],),
+    )
+    conn.commit()
+
+    with pytest.raises(StateConflict):
+        _persist_screenplay_duration_expansion(
+            conn,
+            episode_id=case["episode_id"],
+            expected_target_s=1800,
+            expected_planning_s=1800,
+            expected_duration_authority="planning_estimate",
+            expected_active_run_id="run-owner",
+            required_target_s=1801,
+        )
+
+    row = conn.execute(
+        "SELECT target_duration_s,planning_target_duration_s FROM episodes WHERE id=?",
+        (case["episode_id"],),
+    ).fetchone()
+    assert tuple(row) == (1800, None)
+
+
 @pytest.mark.parametrize(
     ("planning_s", "authority", "active_run_id"),
     [

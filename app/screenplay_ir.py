@@ -62,7 +62,7 @@ from app.spoken_contract import content_char_count
 
 
 IR_VERSION = "screenplay-generation-ir.v4"
-IR_COMPILER_VERSION = "screenplay-ir-compiler.v7"
+IR_COMPILER_VERSION = "screenplay-ir-compiler.v8"
 IR_MAX_SOURCE_SEGMENTS_PER_UNIT = 16
 IR_MIN_ADAPTED_SOURCE_RATIO = 0.35
 IR_MIN_LOCAL_ADAPTED_SOURCE_RATIO = 0.18
@@ -4793,6 +4793,48 @@ def compile_screenplay_ir(
     event_evidence_ids: dict[str, str] = {}
     event_action_ids: dict[str, str] = {}
     event_character_state_ids: defaultdict[str, list[str]] = defaultdict(list)
+    effective_render_policy = {
+        event.key: event.render_policy
+        for event in value.events
+    }
+    if strict_unit_ownership:
+        changed_render_policy_keys: list[str] = []
+        for event_index, event in enumerate(value.events):
+            if (
+                event.narrative_layer != "story"
+                or event.render_policy == "exclude_from_spine"
+            ):
+                continue
+            next_event = (
+                value.events[event_index + 1]
+                if event_index + 1 < len(value.events)
+                else None
+            )
+            projected_policy = (
+                "merge_adjacent"
+                if (
+                    next_event is not None
+                    and next_event.scene_key == event.scene_key
+                    and next_event.narrative_layer == "story"
+                    and next_event.render_policy
+                    != "exclude_from_spine"
+                )
+                else "standalone"
+            )
+            effective_render_policy[event.key] = projected_policy
+            if projected_policy != event.render_policy:
+                changed_render_policy_keys.append(event.key)
+        if changed_render_policy_keys:
+            compiler_audit.append({
+                "path": "events[*].render_policy",
+                "operation": "project_contiguous_delivery_merge_policy",
+                "count": len(changed_render_policy_keys),
+                "sample_event_keys": changed_render_policy_keys[:20],
+                "reason": (
+                    "strict_unit_events_retain_identity_and_traceability_"
+                    "while_same_scene_delivery_tasks_may_share_one_shot"
+                ),
+            })
 
     def state_fact_ids(position: int, count: int) -> list[str]:
         base = f"F-{position}"
@@ -5005,7 +5047,7 @@ def compile_screenplay_ir(
             "must_keep": event.must_keep,
             "narrative_layer": event.narrative_layer,
             "event_priority": event.event_priority,
-            "render_policy": event.render_policy,
+            "render_policy": effective_render_policy[event.key],
             "delivery_scope_id": str(episode.get("id") or f"episode-{episode_no}"),
             "delivery_policy": "deliver",
             "primary_delivery_window_id": f"RW-{position}",
@@ -5022,7 +5064,7 @@ def compile_screenplay_ir(
             must_keep=event.must_keep,
             narrative_layer=event.narrative_layer,
             event_priority=event.event_priority,
-            render_policy=event.render_policy,
+            render_policy=effective_render_policy[event.key],
             adaptation_addition=event.adaptation_relation == "invent",
             adaptation_reason=event.adaptation_reason,
             approved=event.adaptation_relation != "invent",
@@ -5335,10 +5377,16 @@ def compile_screenplay_ir(
             if any(event.event_priority == "supporting" for event in related_events)
             else "connective"
         )
+        related_render_policies = [
+            effective_render_policy[event.key]
+            for event in related_events
+        ]
         render_policy = (
             "standalone"
-            if any(event.render_policy == "standalone" for event in related_events)
+            if "standalone" in related_render_policies
             else "merge_adjacent"
+            if "merge_adjacent" in related_render_policies
+            else "exclude_from_spine"
         )
         plot_beats.append(PlotSpineBeat(
             beat_id=beat_ids[beat.key],

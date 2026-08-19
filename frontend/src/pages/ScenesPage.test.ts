@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
+import type { Scene } from '../api'
 import { sceneAvailability, sceneUsability } from '../lib/sceneUsability'
-import { handoffGapSelectionToPayment, scenePrepStatus } from './ScenesPage'
+import {
+  handoffGapSelectionToPayment,
+  readScenePreviewDraft,
+  scenePrepStatus,
+  scenePreviewStorageKey,
+  writeScenePreviewDraft,
+} from './ScenesPage'
 
 describe('场景库步骤状态', () => {
   it('生成期间优先显示进行中，不把待生成缺口误报为有问题', () => {
@@ -81,5 +88,45 @@ describe('场景主图与附加视角状态', () => {
 
     expect(sceneAvailability(scene, false)).toBe('missing')
     expect(sceneUsability(scene, false)).toBe('unavailable')
+  })
+})
+
+function memoryStorage() {
+  const values = new Map<string, string>()
+  return {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value) },
+    removeItem: (key: string) => { values.delete(key) },
+    has: (key: string) => values.has(key),
+  }
+}
+
+const previewScenes: Scene[] = [{
+  name: '萧家测验广场',
+  scene_canonical: '室外开阔青石广场，中央立有测验魔石碑，四周为家族看台，日光明亮且空间规整。',
+}]
+
+describe('场景清单预览恢复', () => {
+  it('恢复同一人物谱版本的场景预览', () => {
+    const storage = memoryStorage()
+    writeScenePreviewDraft(storage, 'project-1', 3, previewScenes)
+
+    expect(readScenePreviewDraft(storage, 'project-1', 3)).toEqual(previewScenes)
+  })
+
+  it('丢弃旧人物谱版本的场景预览', () => {
+    const storage = memoryStorage()
+    writeScenePreviewDraft(storage, 'project-1', 2, previewScenes)
+
+    expect(readScenePreviewDraft(storage, 'project-1', 3)).toBeNull()
+    expect(storage.has(scenePreviewStorageKey('project-1'))).toBe(false)
+  })
+
+  it('丢弃结构损坏的场景预览', () => {
+    const storage = memoryStorage()
+    storage.setItem(scenePreviewStorageKey('project-1'), '{"bibleVersion":3,"scenes":[{}]}')
+
+    expect(readScenePreviewDraft(storage, 'project-1', 3)).toBeNull()
+    expect(storage.has(scenePreviewStorageKey('project-1'))).toBe(false)
   })
 })

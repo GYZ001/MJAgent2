@@ -3023,6 +3023,66 @@ async def test_semantic_patch_retries_rejected_and_duplicate_candidates(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_semantic_patch_budget_preserves_local_prompt_and_truncation_error(
+    monkeypatch,
+):
+    from app import hiagent
+    from app.harness import model_gateway
+    from app.production import screenplay_repair
+
+    issue = structured_issue(
+        code="EVENT_EFFECT_MISSING",
+        message="E-LOCAL 缺少结果状态",
+        subject="screenplay",
+        path="/events/E-LOCAL",
+        related_node_ids=["E-LOCAL"],
+        stage="screenplay",
+    )
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan(
+            scope_id="ep_test",
+            events=[
+                NarrativeEvent(event_id="E-LOCAL"),
+                NarrativeEvent(event_id="E-UNRELATED"),
+            ],
+        ),
+    )
+    captured: dict = {}
+    truncation = hiagent.ProviderError(
+        "模型输出因响应 token 预算耗尽而截断",
+        failure_kind=hiagent.ProviderFailureKind.OUTPUT_TRUNCATED,
+        delivery_state="responded",
+        replay_safe=False,
+    )
+
+    async def fake_chat(messages, **kwargs):
+        captured["messages"] = messages
+        captured["kwargs"] = kwargs
+        raise truncation
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    with pytest.raises(hiagent.ProviderError) as raised:
+        await screenplay_repair._llm_field_patch_once(
+            issue,
+            script,
+            source_text="局部事件原文",
+        )
+
+    assert raised.value is truncation
+    kwargs = captured["kwargs"]
+    assert kwargs["max_tokens"] == 8192
+    assert kwargs["call_meta"]["requested_max_tokens"] == 8192
+    prompt = json.loads(captured["messages"][1]["content"])
+    scoped_events = prompt["screenplay_document"]["narrative_plan"]["events"]
+    assert [event["event_id"] for event in scoped_events] == ["E-LOCAL"]
+    assert prompt["screenplay_document"]["narrative_graph_id_index"]["events"] == [
+        "E-LOCAL",
+        "E-UNRELATED",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_semantic_patch_repairs_unescaped_inner_quotes(monkeypatch):
     from app import schemas
     from app.harness import model_gateway

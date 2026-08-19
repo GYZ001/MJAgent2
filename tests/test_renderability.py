@@ -3,8 +3,10 @@ from app.renderability import (
     shot_count_budget_errors,
 )
 from app.schemas import (
-    Bible, Character, EpisodeScreenplay, KeyDialogueChain, KeyDialogueTurn,
-    PlotSpine, PlotSpineBeat, World,
+    AtomicAction, Bible, Character, EpisodeScreenplay, KeyDialogueChain,
+    KeyDialogueTurn, NarrativeAnchor, NarrativeContinuityPlan,
+    NarrativeEvent, NarrativeEvidence, PlotSpine, PlotSpineBeat,
+    StoryEvent, World,
 )
 from app.validators import validate_plot_spine, validate_screenplay, storyboard_shot_count_range
 
@@ -207,6 +209,119 @@ def test_empty_shell_ledger_normalized_from_spine() -> None:
     errors = validate_screenplay(script, _bible_guyan(), expected_beats=5, episode_no=1)
     ledger_errs = [e for e in errors if "information_ledger" in e or "events[" in e or "events 不能为空" in e]
     assert ledger_errs == [], ledger_errs
+
+
+def _minimal_narrative_plan() -> NarrativeContinuityPlan:
+    return NarrativeContinuityPlan(
+        scope_id="episode-1",
+        events=[
+            NarrativeEvent(
+                event_id="E1",
+                action_ids=["A1"],
+            ),
+        ],
+        atomic_actions=[
+            AtomicAction(
+                action_id="A1",
+                actor_ids=["谷言"],
+                participant_deliveries=[],
+                semantic_intent="谷言抬头看向门口并起身戒备",
+                completion_condition="戒备",
+            ),
+        ],
+        evidence=[
+            NarrativeEvidence(
+                evidence_id="EV1",
+                anchor=NarrativeAnchor(type="event", id="E1"),
+                observable_claim="戒备",
+            ),
+        ],
+    )
+
+
+def test_narrative_ledger_normalizes_short_visible_change_from_action() -> None:
+    from app.validators import normalize_screenplay_candidate
+
+    script = _minimal_valid_body(
+        events=[
+            StoryEvent(
+                event_id="E1",
+                state_in="谷言仍坐在桌边等待",
+                trigger="门口突然传来风铃声",
+                visible_change="戒备",
+                state_out="谷言已经起身看向门口",
+            ),
+        ],
+        information_ledger=[
+            {
+                "info_id": "I1",
+                "event_id": "E1",
+                "content": "谷言听见动静后转入戒备",
+            },
+        ],
+        narrative_plan=_minimal_narrative_plan(),
+    )
+
+    normalized = normalize_screenplay_candidate(script)
+
+    assert script.events[0].visible_change == "戒备"
+    assert (
+        normalized.events[0].visible_change
+        == "谷言抬头看向门口并起身戒备"
+    )
+
+
+def test_narrative_script_length_uses_source_ratio_not_micro_event_count() -> None:
+    source_text = "原文" * 500
+    body = "正文" * 200
+    micro_beats = [
+        PlotSpineBeat(
+            beat_id=f"S{index:03d}",
+            who="谷言",
+            does="完成当前来源单元的可见动作",
+            turn="局势推进到下一来源单元",
+            must_keep=True,
+        )
+        for index in range(1, 226)
+    ]
+    narrative = _minimal_valid_body(
+        full_script_text=body,
+        plot_spine=PlotSpine(
+            episode_premise="谷言要完成当前章节的核心行动",
+            spine_beats=micro_beats,
+            must_keep_ending="本章核心行动当场完成",
+        ),
+        narrative_plan=_minimal_narrative_plan(),
+    )
+    legacy = narrative.model_copy(
+        deep=True,
+        update={"narrative_plan": None},
+    )
+
+    narrative_errors = validate_screenplay(
+        narrative,
+        _bible_guyan(),
+        expected_beats=225,
+        episode_no=1,
+        source_text=source_text,
+        validate_narrative=False,
+    )
+    legacy_errors = validate_screenplay(
+        legacy,
+        _bible_guyan(),
+        expected_beats=225,
+        episode_no=1,
+        source_text=source_text,
+    )
+
+    assert not any(
+        "full_script_text 过短" in error
+        for error in narrative_errors
+    )
+    assert any(
+        "至少需要 8100 字" in error
+        for error in legacy_errors
+    )
 
 
 def test_screenplay_allows_dialogue_rich_key_lines_without_fixed_cap() -> None:

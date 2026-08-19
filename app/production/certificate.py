@@ -15,7 +15,7 @@ _SCREENPLAY_GATE_EVALUATOR = "screenplay_production_qa"
 _STORYBOARD_GATE_EVALUATOR = "storyboard_full_gate"
 _NARRATIVE_REVIEW_EVALUATOR = "narrative_blind_comparator"
 _CURRENT_QA_PROFILE = {
-    "screenplay": "screenplay-qa-gate-3",
+    "screenplay": "screenplay-qa-gate-4",
     "storyboard": "storyboard-full-gate-2",
 }
 

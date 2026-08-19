@@ -154,6 +154,59 @@ def test_legacy_terminal_non_story_scene_requires_rebuild() -> None:
         picture_screenplay_projection(screenplay)
 
 
+def test_strict_unit_picture_projection_recovers_delivery_merge_policy() -> None:
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        source_text_range="screenplay-generation-ir.v4",
+        scene_outline=[
+            ScriptScene(
+                scene_no=1,
+                scene_heading="【场1】日 / 测验广场",
+                story_function="完成连续测验动作",
+                summary="两个相邻来源单元在同一连续场景内发生。",
+            ),
+        ],
+        narrative_plan=NarrativeContinuityPlan(
+            contract_version="narrative-continuity.v2",
+            scope_id="episode-1",
+            events=[
+                NarrativeEvent(
+                    event_id="E1",
+                    narrative_layer="story",
+                    event_priority="causal",
+                    render_policy="standalone",
+                    downstream_dependency_event_ids=["E2"],
+                ),
+                NarrativeEvent(
+                    event_id="E2",
+                    narrative_layer="story",
+                    event_priority="causal",
+                    render_policy="standalone",
+                    causal_parent_ids=["E1"],
+                ),
+            ],
+            scene_contracts=[
+                SceneDramaticContract(
+                    scene_id="SC01",
+                    turn_event_ids=["E2"],
+                ),
+            ],
+        ),
+    )
+
+    projected, report = picture_screenplay_projection(screenplay)
+
+    assert [
+        event.render_policy
+        for event in screenplay.narrative_plan.events
+    ] == ["standalone", "standalone"]
+    assert [
+        event.render_policy
+        for event in projected.narrative_plan.events
+    ] == ["merge_adjacent", "standalone"]
+    assert report["delivery_merge_policy_change_count"] == 1
+
+
 def test_adjacent_structured_tasks_merge_without_losing_delivery_ids() -> None:
     screenplay = EpisodeScreenplay(
         episode_no=1,
@@ -201,3 +254,47 @@ def test_adjacent_structured_tasks_merge_without_losing_delivery_ids() -> None:
     assert outline.shots[0].event_ids == ["E1", "E2"]
     assert outline.shots[0].information_ids == ["I1", "I2"]
     assert outline.shots[0].duration_s == 5
+
+
+def test_right_event_cannot_retroactively_authorize_delivery_merge() -> None:
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        narrative_plan=NarrativeContinuityPlan(
+            scope_id="episode-1",
+            events=[
+                NarrativeEvent(
+                    event_id="E1",
+                    render_policy="standalone",
+                    downstream_dependency_event_ids=["E2"],
+                ),
+                NarrativeEvent(
+                    event_id="E2",
+                    render_policy="merge_adjacent",
+                ),
+            ],
+        ),
+    )
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                shot_id="SH001",
+                scene_id="SC01",
+                event_ids=["E1"],
+                capacity_budget=ShotCapacityBudget(action_phase_s=2),
+                duration_s=5,
+            ),
+            StoryboardOutlineShot(
+                shot_no=2,
+                shot_id="SH002",
+                scene_id="SC01",
+                event_ids=["E2"],
+                capacity_budget=ShotCapacityBudget(action_phase_s=2),
+                duration_s=5,
+            ),
+        ],
+    )
+
+    assert merge_outline_delivery_beats(outline, screenplay) == []
+    assert [shot.event_ids for shot in outline.shots] == [["E1"], ["E2"]]

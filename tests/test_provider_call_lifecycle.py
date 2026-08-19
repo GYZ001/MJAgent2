@@ -202,11 +202,12 @@ def test_stream_total_timeout_covers_keepalive_and_blank_lines(
     fault = {"timeout_scope_active": False}
     events: list[tuple] = []
 
-    class InjectedTotalTimeout:
-        async def __aenter__(self):
-            fault["timeout_scope_active"] = True
-
-        async def __aexit__(self, *_args):
+    async def injected_wait_for(awaitable, *, timeout):
+        assert timeout == 60
+        fault["timeout_scope_active"] = True
+        try:
+            return await awaitable
+        finally:
             fault["timeout_scope_active"] = False
 
     class HeartbeatThenTimeout(httpx.AsyncByteStream):
@@ -226,7 +227,7 @@ def test_stream_total_timeout_covers_keepalive_and_blank_lines(
             headers={"content-type": "text/event-stream"},
         )
 
-    monkeypatch.setattr(hiagent.asyncio, "timeout", lambda _seconds: InjectedTotalTimeout())
+    monkeypatch.setattr(hiagent.asyncio, "wait_for", injected_wait_for)
     monkeypatch.setattr(hiagent, "get_setting", lambda _key: "60")
     monkeypatch.setattr(hiagent, "start_provider_call", lambda *_args, **_kwargs: 17)
     monkeypatch.setattr(

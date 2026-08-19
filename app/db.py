@@ -22,6 +22,13 @@ _T = TypeVar("_T")
 
 ASYNC_WRITE_RETRY_DELAYS_S = (0.05, 0.1, 0.2, 0.4)
 
+
+class _WriteTransactionStartError(Exception):
+    def __init__(self, original: sqlite3.OperationalError):
+        self.original = original
+        super().__init__(str(original))
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
@@ -1140,6 +1147,36 @@ def _open_connection(*, timeout: float = 30.0) -> sqlite3.Connection:
 
 def _is_transient_sqlite_lock(exc: sqlite3.OperationalError) -> bool:
     error_code = getattr(exc, "sqlite_errorcode", None)
+    # #region debug-point E:sqlite-lock-classification
+    try:
+        import os as _debug_os
+        import urllib.request as _debug_request
+        if _debug_os.environ.get("PYTEST_CURRENT_TEST"):
+            raise RuntimeError("debug instrumentation disabled under pytest")
+        _debug_request.urlopen(
+            _debug_request.Request(
+                "http://127.0.0.1:7778/event",
+                data=json.dumps({
+                    "sessionId": "three-episode-video",
+                    "runId": "pre-fix",
+                    "hypothesisId": "E",
+                    "location": "app/db.py:_is_transient_sqlite_lock",
+                    "msg": "[DEBUG] classify sqlite operational error",
+                    "data": {
+                        "python_has_sqlite_errorcode": hasattr(exc, "sqlite_errorcode"),
+                        "sqlite_errorcode": error_code,
+                        "sqlite_errorname": getattr(exc, "sqlite_errorname", None),
+                        "message": str(exc)[:200],
+                    },
+                    "ts": int(time.time() * 1000),
+                }).encode(),
+                headers={"Content-Type": "application/json"},
+            ),
+            timeout=1,
+        ).read()
+    except Exception:
+        pass
+    # #endregion
     if error_code is None:
         return False
     return (int(error_code) & 0xFF) in {
@@ -1151,9 +1188,15 @@ def _is_transient_sqlite_lock(exc: sqlite3.OperationalError) -> bool:
 def _run_write_transaction_once(
     operation: Callable[[sqlite3.Connection], _T],
 ) -> _T:
-    conn = _open_connection(timeout=0)
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        conn = _open_connection(timeout=0)
+    except sqlite3.OperationalError as exc:
+        raise _WriteTransactionStartError(exc) from exc
+    try:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            raise _WriteTransactionStartError(exc) from exc
         result = operation(conn)
         conn.commit()
         return result
@@ -1206,6 +1249,41 @@ async def run_write_transaction(
             return await run_in_thread_cancellation_safe(
                 lambda: _run_write_transaction_once(operation)
             )
+        except _WriteTransactionStartError as exc:
+            # #region debug-point E:sqlite-begin-retry
+            try:
+                import os as _debug_os
+                import urllib.request as _debug_request
+                if _debug_os.environ.get("PYTEST_CURRENT_TEST"):
+                    raise RuntimeError(
+                        "debug instrumentation disabled under pytest"
+                    )
+                _debug_request.urlopen(
+                    _debug_request.Request(
+                        "http://127.0.0.1:7778/event",
+                        data=json.dumps({
+                            "sessionId": "three-episode-video",
+                            "runId": "post-fix",
+                            "hypothesisId": "E",
+                            "location": "app/db.py:run_write_transaction",
+                            "msg": "[DEBUG] retry sqlite transaction start",
+                            "data": {
+                                "attempt": attempt,
+                                "retry_count": len(retry_delays),
+                                "message": str(exc.original)[:200],
+                            },
+                            "ts": int(time.time() * 1000),
+                        }).encode(),
+                        headers={"Content-Type": "application/json"},
+                    ),
+                    timeout=1,
+                ).read()
+            except Exception:
+                pass
+            # #endregion
+            if attempt >= len(retry_delays):
+                raise exc.original from exc
+            await asyncio.sleep(max(0.0, float(retry_delays[attempt])))
         except sqlite3.OperationalError as exc:
             if (
                 not _is_transient_sqlite_lock(exc)

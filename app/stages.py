@@ -68,6 +68,7 @@ from app.narrative_blueprint import (
     normalize_blueprint_provider_payload,
     normalize_blueprint_raw_json,
     normalize_blueprint_semantic_review_payload,
+    normalize_blueprint_state_subject_evidence_projection,
     normalize_blueprint_state_subject_perception,
     recover_complete_blueprint_prefix,
     render_blueprint_shard_semantic_issue,
@@ -177,7 +178,8 @@ SCREENPLAY_IR_MAX_TOKENS = 36864
 BLUEPRINT_SHARD_MIN_TOKENS = 6144
 BLUEPRINT_SHARD_MAX_TOKENS = 16384
 BLUEPRINT_SHARD_MAX_ATTEMPTS = 2
-BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS = 12
+BLUEPRINT_REVIEW_FORMAT_RETRY_LIMIT = 1
+BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS = 32
 BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS = 131072
 BLUEPRINT_GENERATION_MAX_WALL_SECONDS = 1800.0
 BLUEPRINT_GENERATION_MAX_SPLIT_DEPTH = 4
@@ -5052,6 +5054,13 @@ async def _semantic_review_narrative_blueprint(
         dropped_voice_issue_counts: dict[int, int] = {}
         async def run_reviewer(sample_no: int) -> BlueprintSemanticReview:
             def validate_review(candidate_review: BlueprintSemanticReview) -> list[str]:
+                dropped_voice_issue_counts[sample_no] = (
+                    filter_blueprint_semantic_review_voice_issues(
+                        candidate_review,
+                        blueprint,
+                        source_text,
+                    )
+                )
                 errors = validate_blueprint_semantic_review(
                     candidate_review,
                     blueprint,
@@ -5065,6 +5074,62 @@ async def _semantic_review_narrative_blueprint(
                         for node_key in issue.node_keys
                         if node_key not in allowed
                     )
+                # #region debug-point C:reviewer-contract
+                try:
+                    import urllib.request as _debug_request
+                    _debug_url = "http://127.0.0.1:7777/event"
+                    _debug_session = "three-episode-video"
+                    with open(
+                        ".dbg/three-episode-video.env",
+                        encoding="utf-8",
+                    ) as _debug_env:
+                        for _debug_line in _debug_env:
+                            if _debug_line.startswith("DEBUG_SERVER_URL="):
+                                _debug_url = _debug_line.split(
+                                    "=", 1
+                                )[1].strip()
+                            elif _debug_line.startswith("DEBUG_SESSION_ID="):
+                                _debug_session = _debug_line.split(
+                                    "=", 1
+                                )[1].strip()
+                    _debug_request.urlopen(
+                        _debug_request.Request(
+                            _debug_url,
+                            data=json.dumps({
+                                "sessionId": _debug_session,
+                                "runId": "reviewer-post-fix",
+                                "hypothesisId": "C",
+                                "location": (
+                                    "app/stages.py:"
+                                    "_semantic_review_narrative_blueprint"
+                                ),
+                                "msg": (
+                                    "[DEBUG] validate independent "
+                                    "Blueprint reviewer"
+                                ),
+                                "data": {
+                                    "review_round": review_round,
+                                    "review_sample": sample_no,
+                                    "issue_count": len(
+                                        candidate_review.issues
+                                    ),
+                                    "dropped_unsupported_issue_count": (
+                                        dropped_voice_issue_counts.get(
+                                            sample_no,
+                                            0,
+                                        )
+                                    ),
+                                    "validation_errors": errors[:10],
+                                },
+                                "ts": int(time.time() * 1000),
+                            }).encode(),
+                            headers={"Content-Type": "application/json"},
+                        ),
+                        timeout=1,
+                    ).read()
+                except Exception:
+                    pass
+                # #endregion
                 return errors
 
             review_messages = [
@@ -5089,6 +5154,19 @@ async def _semantic_review_narrative_blueprint(
                     temperature=0.1,
                 )
             )
+            format_retry_limit = BLUEPRINT_REVIEW_FORMAT_RETRY_LIMIT
+            durable_base_replay = bool(
+                generation_budget is not None
+                and operation_id
+                in generation_budget._durable_successful_operations
+            )
+            reservation_operation_id = operation_id
+            if durable_base_replay and format_retry_limit > 0:
+                reservation_operation_id = (
+                    _blueprint_format_repair_reservation_operation_id(
+                        operation_id
+                    )
+                )
             reservation_id: int | None = None
             remaining_seconds: float | None = None
             legacy_retry_call_id: int | None = None
@@ -5101,7 +5179,7 @@ async def _semantic_review_narrative_blueprint(
                 reservation_id = generation_budget.claim(
                     max_tokens=effective_max_tokens,
                     requested_max_tokens=8192,
-                    operation_id=operation_id,
+                    operation_id=reservation_operation_id,
                 )
                 remaining_seconds = (
                     BLUEPRINT_GENERATION_MAX_WALL_SECONDS
@@ -5114,7 +5192,7 @@ async def _semantic_review_narrative_blueprint(
                 operation_id=operation_id,
                 temperature=0.1,
                 max_tokens=8192,
-                format_retry_limit=0,
+                format_retry_limit=format_retry_limit,
                 semantic_retry_limit=0,
                 call_meta={
                     "stage": "剧本蓝图语义审稿",
@@ -5133,10 +5211,8 @@ async def _semantic_review_narrative_blueprint(
                     "substage": "risk_nodes" if targeted_review else "full",
                     "source_count": len(projected_source.splitlines()),
                     "reuse_successful_operation": True,
-                    "require_cached_successful_operation": bool(
-                        generation_budget is not None
-                        and operation_id
-                        in generation_budget._durable_successful_operations
+                    "require_cached_successful_operation": (
+                        durable_base_replay and format_retry_limit <= 0
                     ),
                     "disable_reasoning_fallback": True,
                     "disable_provider_retries": True,
@@ -5196,13 +5272,6 @@ async def _semantic_review_narrative_blueprint(
             else:
                 if reservation_id is not None:
                     generation_budget.settle(reservation_id)
-            dropped_voice_issue_counts[sample_no] = (
-                filter_blueprint_semantic_review_voice_issues(
-                    review,
-                    blueprint,
-                    source_text,
-                )
-            )
             review.issues = [
                 issue
                 for issue in review.issues
@@ -5402,9 +5471,12 @@ async def _semantic_review_narrative_blueprint(
             )
             return blueprint
         if full_review_has_one_sided_residual:
-            raise ContentGenerationError(
-                "蓝图完整双审仍有单侧必须修复问题，已按非 clean 停止"
-            )
+            if review_round >= 4:
+                raise ContentGenerationError(
+                    "蓝图完整双审仍有单侧必须修复问题，已按非 clean 停止"
+                )
+            targeted_review = False
+            continue
         if not consensus_issues:
             raise ContentGenerationError(
                 "蓝图双审存在未解决问题，但没有可安全修复的共识"
@@ -6554,6 +6626,15 @@ def _blueprint_structured_operation_id(
     return f"screenplay.blueprint.{operation_kind}:{digest}", effective_max_tokens
 
 
+def _blueprint_format_repair_reservation_operation_id(
+    base_operation_id: str,
+) -> str:
+    return (
+        f"{base_operation_id}:reservation:"
+        f"{BLUEPRINT_VERSION}:structured-format-repair"
+    )
+
+
 class _BlueprintGenerationBudget:
     """Reserve call exposure, then settle against provider-reported usage.
 
@@ -7510,6 +7591,66 @@ async def _generate_sharded_narrative_blueprint(
                             previous_candidate=previous_candidate,
                             validation_errors=errors,
                         )
+                removed_state_subject_keys = (
+                    normalize_blueprint_state_subject_evidence_projection(
+                        candidate,
+                        source_text,
+                    )
+                )
+                # #region debug-point C:state-subject-projection
+                try:
+                    import urllib.request as _debug_request
+                    _debug_url = "http://127.0.0.1:7777/event"
+                    _debug_session = "three-episode-video"
+                    with open(
+                        ".dbg/three-episode-video.env",
+                        encoding="utf-8",
+                    ) as _debug_env:
+                        for _debug_line in _debug_env:
+                            if _debug_line.startswith("DEBUG_SERVER_URL="):
+                                _debug_url = _debug_line.split(
+                                    "=", 1
+                                )[1].strip()
+                            elif _debug_line.startswith("DEBUG_SESSION_ID="):
+                                _debug_session = _debug_line.split(
+                                    "=", 1
+                                )[1].strip()
+                    _debug_request.urlopen(
+                        _debug_request.Request(
+                            _debug_url,
+                            data=json.dumps({
+                                "sessionId": _debug_session,
+                                "runId": "post-fix",
+                                "hypothesisId": "C",
+                                "location": (
+                                    "app/stages.py:"
+                                    "_generate_sharded_narrative_blueprint"
+                                ),
+                                "msg": (
+                                    "[DEBUG] normalize state-subject "
+                                    "evidence projection"
+                                ),
+                                "data": {
+                                    "shard_index": shard_index,
+                                    "attempt": attempt,
+                                    "response_mode": (
+                                        "ownership_repair"
+                                        if repair_only
+                                        else "full_shard"
+                                    ),
+                                    "removed_non_action_keys": (
+                                        removed_state_subject_keys
+                                    ),
+                                },
+                                "ts": int(time.time() * 1000),
+                            }).encode(),
+                            headers={"Content-Type": "application/json"},
+                        ),
+                        timeout=1,
+                    ).read()
+                except Exception:
+                    pass
+                # #endregion
                 previous_candidate = candidate.model_dump(mode="json")
                 errors = validate_narrative_blueprint_shard(
                     candidate,
@@ -7579,6 +7720,69 @@ async def _generate_sharded_narrative_blueprint(
                             source_text=source_text,
                         )
                     )
+                    # #region debug-point C:ownership-repair-route
+                    try:
+                        import urllib.request as _debug_request
+                        _debug_url = "http://127.0.0.1:7777/event"
+                        _debug_session = "three-episode-video"
+                        with open(
+                            ".dbg/three-episode-video.env",
+                            encoding="utf-8",
+                        ) as _debug_env:
+                            for _debug_line in _debug_env:
+                                if _debug_line.startswith(
+                                    "DEBUG_SERVER_URL="
+                                ):
+                                    _debug_url = _debug_line.split(
+                                        "=", 1
+                                    )[1].strip()
+                                elif _debug_line.startswith(
+                                    "DEBUG_SESSION_ID="
+                                ):
+                                    _debug_session = _debug_line.split(
+                                        "=", 1
+                                    )[1].strip()
+                        _debug_request.urlopen(
+                            _debug_request.Request(
+                                _debug_url,
+                                data=json.dumps({
+                                    "sessionId": _debug_session,
+                                    "runId": "post-fix",
+                                    "hypothesisId": "C",
+                                    "location": (
+                                        "app/stages.py:"
+                                        "_generate_sharded_narrative_blueprint"
+                                    ),
+                                    "msg": (
+                                        "[DEBUG] select exact ownership "
+                                        "repair route"
+                                    ),
+                                    "data": {
+                                        "shard_index": shard_index,
+                                        "selected": (
+                                            ownership_repair_issues
+                                            is not None
+                                        ),
+                                        "target_unit_keys": (
+                                            _blueprint_state_subject_repair_target_keys(
+                                                ownership_repair_issues
+                                            )
+                                            if ownership_repair_issues
+                                            else []
+                                        ),
+                                        "validation_error_count": len(errors),
+                                    },
+                                    "ts": int(time.time() * 1000),
+                                }).encode(),
+                                headers={
+                                    "Content-Type": "application/json"
+                                },
+                            ),
+                            timeout=1,
+                        ).read()
+                    except Exception:
+                        pass
+                    # #endregion
             if split_for_truncation:
                 split = _split_blueprint_segments(shard_segments)
                 segment_shards[shard_index - 1:shard_index] = split

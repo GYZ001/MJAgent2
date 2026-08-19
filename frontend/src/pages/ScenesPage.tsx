@@ -31,6 +31,45 @@ export function scenePrepStatus(
   return sceneCount > 0 ? 'done' : 'idle'
 }
 
+type ScenePreviewDraft = {
+  bibleVersion: number
+  scenes: Scene[]
+}
+
+export function scenePreviewStorageKey(projectId: string): string {
+  return `manju:scene-preview:${projectId}`
+}
+
+export function readScenePreviewDraft(
+  storage: Pick<Storage, 'getItem' | 'removeItem'>,
+  projectId: string,
+  bibleVersion: number,
+): Scene[] | null {
+  const key = scenePreviewStorageKey(projectId)
+  try {
+    const parsed = JSON.parse(storage.getItem(key) || 'null') as ScenePreviewDraft | null
+    const valid = parsed?.bibleVersion === bibleVersion
+      && Array.isArray(parsed.scenes)
+      && parsed.scenes.length > 0
+      && parsed.scenes.every(scene =>
+        typeof scene?.name === 'string' && typeof scene?.scene_canonical === 'string')
+    if (valid) return parsed!.scenes
+  } catch {
+    // Invalid drafts are removed below.
+  }
+  storage.removeItem(key)
+  return null
+}
+
+export function writeScenePreviewDraft(
+  storage: Pick<Storage, 'setItem'>,
+  projectId: string,
+  bibleVersion: number,
+  scenes: Scene[],
+): void {
+  storage.setItem(scenePreviewStorageKey(projectId), JSON.stringify({ bibleVersion, scenes }))
+}
+
 export default function ScenesPage() {
   const { projectId, toast, registerNavigationGuard } = useNav()
   const { data: p, refresh, error, loading } = useProject(projectId!, undefined, 'scenes')
@@ -130,6 +169,16 @@ export default function ScenesPage() {
     if (generating) void refreshProgress()
   }, [generating, refreshProgress])
 
+  useEffect(() => {
+    if (!p || payOpen || scenePreview || scenes.length > 0) return
+    const restored = readScenePreviewDraft(
+      window.localStorage,
+      p.id,
+      p.bible_version ?? 0,
+    )
+    if (restored) setScenePreview(restored)
+  }, [p, payOpen, scenePreview, scenes.length])
+
   if (error && !p) return <QueryState loading={false} error={error} hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
   if (loading && !p) return <QueryState loading hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
   if (!p) return <QueryState loading hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
@@ -154,6 +203,12 @@ export default function ScenesPage() {
     setBusy(true)
     try {
       const preview = await api.sceneBiblePreview(p.id)
+      writeScenePreviewDraft(
+        window.localStorage,
+        p.id,
+        p.bible_version ?? 0,
+        preview.scenes,
+      )
       setScenePreview(preview.scenes)
     } catch (e: unknown) { toast(e instanceof Error ? e.message : String(e), true) }
     finally { setBusy(false) }
@@ -491,8 +546,12 @@ export default function ScenesPage() {
       {scenePreview && (
         <ScenePreviewDialog
           scenes={scenePreview}
-          onClose={() => setScenePreview(null)}
+          onClose={() => {
+            window.localStorage.removeItem(scenePreviewStorageKey(p.id))
+            setScenePreview(null)
+          }}
           onConfirm={async confirmed => {
+            window.localStorage.removeItem(scenePreviewStorageKey(p.id))
             setScenePreview(null)
             setPayLoading(true); setPayError(null); setPayTitle('确认场景清单与首次出图费用'); setPayOpen(true)
             try {
@@ -504,6 +563,7 @@ export default function ScenesPage() {
                   throw new Error('付费范围已改变，请返回场景清单重新预检')
                 }
                 await api.genSceneBible(p.id, { scenes: finalScenes, confirm: true, quote_id: quote.quote_id })
+                window.localStorage.removeItem(scenePreviewStorageKey(p.id))
               })
             } catch (e: unknown) { setPayError(e instanceof Error ? e.message : String(e)) }
             finally { setPayLoading(false) }

@@ -645,6 +645,191 @@ def test_run_77675349_applies_atomic_52_target_ownership_patch() -> None:
     ) == []
 
 
+def test_shard4_projects_state_subject_keys_before_repair_only() -> None:
+    source = "\n\n".join([
+        "前置来源一。",
+        "前置来源二。",
+        "前置来源三。",
+        "“快走！”甲推开门，乙抬桌，丙关窗。",
+    ])
+    shard_facts = [
+        fact
+        for fact in stages.source_facts(source)
+        if fact.source_segment_id == "SRC0004"
+    ]
+    quoted_key = "SRC0004:unit:001"
+    action_keys = [
+        fact.source_unit_key
+        for fact in shard_facts
+        if fact.projection == "action"
+    ]
+    assert [
+        (fact.source_unit_key, fact.projection)
+        for fact in shard_facts
+    ] == [
+        (quoted_key, "quoted"),
+        ("SRC0004:unit:002", "action"),
+        ("SRC0004:unit:003", "action"),
+        ("SRC0004:unit:004", "action"),
+    ]
+
+    payload = json.loads(_shard_response(
+        source_ids=["SRC0004"],
+        shard_index=4,
+    ))
+    node = payload["nodes"][0]
+    node["participants"] = ["甲", "乙", "丙"]
+    node["participant_evidence"] = [{
+        "identity_key": "甲",
+        "source_segment_ids": ["SRC0004"],
+        "source_unit_keys": [quoted_key],
+        "usage": "voice",
+    }, {
+        "identity_key": "甲",
+        "source_segment_ids": ["SRC0004"],
+        "source_unit_keys": [quoted_key, action_keys[0]],
+        "usage": "state_subject",
+    }, {
+        "identity_key": "甲",
+        "source_segment_ids": ["SRC0004"],
+        "source_unit_keys": [action_keys[0]],
+        "usage": "visible",
+    }, {
+        "identity_key": "乙",
+        "source_segment_ids": ["SRC0004"],
+        "source_unit_keys": [quoted_key],
+        "usage": "mentioned",
+    }, {
+        "identity_key": "丙",
+        "source_segment_ids": ["SRC0004"],
+        "source_unit_keys": [quoted_key],
+        "usage": "mentioned",
+    }, {
+        "identity_key": "丙",
+        "source_segment_ids": ["SRC0004"],
+        "source_unit_keys": [quoted_key],
+        "usage": "state_subject",
+    }]
+    node["source_unit_deliveries"] = [{
+        "source_unit_key": quoted_key,
+        "mode": "spoken_dialogue",
+        "performer_key": "甲",
+    }]
+    candidate = stages.NarrativeBlueprintShard.model_validate(payload)
+    unprojected_errors = stages.validate_narrative_blueprint_shard(
+        candidate,
+        expected_episode_no=1,
+        expected_shard_index=4,
+        expected_source_segment_ids=["SRC0004"],
+        source_text=source,
+    )
+    assert quoted_key in "\n".join(unprojected_errors)
+    assert stages._blueprint_state_subject_repair_issues(
+        candidate,
+        validation_errors=unprojected_errors,
+        source_text=source,
+    ) is None
+    non_subject_before = [
+        evidence.model_dump(mode="json")
+        for evidence in candidate.nodes[0].participant_evidence
+        if evidence.usage != "state_subject"
+    ]
+
+    removed = (
+        stages.normalize_blueprint_state_subject_evidence_projection(
+            candidate,
+            source,
+        )
+    )
+
+    assert removed == 2
+    assert [
+        evidence.model_dump(mode="json")
+        for evidence in candidate.nodes[0].participant_evidence
+        if evidence.usage != "state_subject"
+    ] == non_subject_before
+    assert [
+        (
+            evidence.identity_key,
+            evidence.source_unit_keys,
+        )
+        for evidence in candidate.nodes[0].participant_evidence
+        if evidence.usage == "state_subject"
+    ] == [("甲", [action_keys[0]])]
+    assert any(
+        evidence.usage == "voice"
+        and evidence.source_unit_keys == [quoted_key]
+        for evidence in candidate.nodes[0].participant_evidence
+    )
+
+    errors = stages.validate_narrative_blueprint_shard(
+        candidate,
+        expected_episode_no=1,
+        expected_shard_index=4,
+        expected_source_segment_ids=["SRC0004"],
+        source_text=source,
+    )
+    typed_issues = stages._blueprint_state_subject_repair_issues(
+        candidate,
+        validation_errors=errors,
+        source_text=source,
+    )
+
+    assert typed_issues is not None
+    assert [
+        (issue.code, issue.source_unit_keys)
+        for issue in typed_issues
+    ] == [
+        ("state_subject_missing", [action_keys[1]]),
+        ("state_subject_missing", [action_keys[2]]),
+    ]
+    repaired = stages.apply_blueprint_state_subject_ownership_patch(
+        candidate,
+        {
+            "base_candidate_hash": (
+                stages.blueprint_shard_candidate_hash(candidate)
+            ),
+            "repairs": {
+                action_keys[1]: {
+                    "mode": "single",
+                    "identity_keys": ["乙"],
+                },
+                action_keys[2]: {
+                    "mode": "joint",
+                    "identity_keys": ["乙", "丙"],
+                },
+            },
+        },
+        target_unit_keys=action_keys[1:],
+        source_text=source,
+    )
+
+    assert any(
+        evidence.usage == "voice"
+        and evidence.source_unit_keys == [quoted_key]
+        for evidence in repaired.nodes[0].participant_evidence
+    )
+    assert {
+        (
+            evidence.identity_key,
+            tuple(evidence.source_unit_keys),
+        )
+        for evidence in repaired.nodes[0].participant_evidence
+        if evidence.usage == "visible"
+    } >= {
+        ("乙", (action_keys[1],)),
+        ("乙", (action_keys[2],)),
+        ("丙", (action_keys[2],)),
+    }
+    assert stages.validate_narrative_blueprint_shard(
+        repaired,
+        expected_episode_no=1,
+        expected_shard_index=4,
+        expected_source_segment_ids=["SRC0004"],
+        source_text=source,
+    ) == []
+
+
 def test_initial_candidate_keeps_ungrounded_node_for_typed_gate() -> None:
     payload = json.loads(_shard_response(
         source_ids=["SRC0001"],
@@ -1947,6 +2132,21 @@ def test_blueprint_generation_budget_caps_calls_tokens_and_time(
         budget.claim(max_tokens=1)
 
 
+def test_blueprint_budget_keeps_mandatory_dual_review_admissible() -> None:
+    budget = stages._BlueprintGenerationBudget()
+    budget.provider_calls = 11
+
+    first = budget.claim(max_tokens=1)
+    second = budget.claim(max_tokens=1)
+
+    assert first != second
+    assert budget.provider_calls == 13
+    assert (
+        budget.provider_calls
+        < stages.BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS
+    )
+
+
 def test_run_bd33_dynamic_split_releases_requested_reservations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2963,6 +3163,112 @@ def _install_semantic_review_harness(
     )
 
 
+@pytest.mark.parametrize(
+    ("durable_base", "format_retry_limit"),
+    [
+        (True, 1),
+        (True, 0),
+        (False, 1),
+    ],
+)
+def test_reviewer_replay_reserves_only_enabled_format_repair(
+    monkeypatch: pytest.MonkeyPatch,
+    durable_base: bool,
+    format_retry_limit: int,
+) -> None:
+    source, blueprint, _unit_keys = _semantic_review_environment_fixture()
+    created: list = []
+    calls: list[dict] = []
+    claimed_operation_ids: list[str] = []
+    base_operation_ids = [
+        f"review-operation:1:{sample_no}:targeted"
+        for sample_no in (1, 2)
+    ]
+    budget = stages._BlueprintGenerationBudget()
+    if durable_base:
+        budget._durable_successful_operations.update(base_operation_ids)
+    original_claim = budget.claim
+
+    def record_claim(**kwargs):
+        claimed_operation_ids.append(kwargs["operation_id"])
+        return original_claim(**kwargs)
+
+    async def clean_review(*_args, **kwargs):
+        calls.append(kwargs)
+        kwargs["usage_callback"]({
+            "completion_tokens": 0,
+            "reused": durable_base,
+        })
+        return BlueprintSemanticReview(issues=[])
+
+    _install_semantic_review_harness(monkeypatch, created)
+    monkeypatch.setattr(
+        stages,
+        "BLUEPRINT_REVIEW_FORMAT_RETRY_LIMIT",
+        format_retry_limit,
+    )
+    monkeypatch.setattr(
+        stages,
+        "_blueprint_structured_operation_id",
+        lambda **kwargs: (
+            f"review-operation:{kwargs['ordinal']}",
+            4096,
+        ),
+    )
+    monkeypatch.setattr(budget, "claim", record_claim)
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        clean_review,
+    )
+
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        blueprint,
+        episode={"id": "ep-reviewer-replay-budget", "episode_no": 1},
+        source_text=source,
+        generation_budget=budget,
+    ))
+
+    expect_format_repair_reservation = (
+        durable_base and format_retry_limit > 0
+    )
+    expected_claims = [
+        (
+            stages._blueprint_format_repair_reservation_operation_id(
+                operation_id
+            )
+            if expect_format_repair_reservation
+            else operation_id
+        )
+        for operation_id in base_operation_ids
+    ]
+    assert result is blueprint
+    assert claimed_operation_ids == expected_claims
+    if expect_format_repair_reservation:
+        assert all(
+            operation_id not in budget._durable_successful_operations
+            for operation_id in expected_claims
+        )
+    assert {
+        call["format_retry_limit"] for call in calls
+    } == {format_retry_limit}
+    assert {
+        call["semantic_retry_limit"] for call in calls
+    } == {0}
+    assert all(
+        call["call_meta"]["reuse_successful_operation"] is True
+        for call in calls
+    )
+    assert all(
+        call["call_meta"]["require_cached_successful_operation"]
+        is (durable_base and format_retry_limit <= 0)
+        for call in calls
+    )
+    assert budget.provider_calls == (
+        0 if durable_base and format_retry_limit <= 0 else 2
+    )
+
+
 def test_targeted_review_includes_environment_nodes_and_exact_units(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2994,7 +3300,7 @@ def test_targeted_review_includes_environment_nodes_and_exact_units(
     assert schema["x-canonical-timeline-node-keys"] == ["n2", "n3", "n4"]
     assert schema["x-canonical-source-unit-keys"] == unit_keys[1:4]
     assert all(
-        call["format_retry_limit"] == 0
+        call["format_retry_limit"] == 1
         and call["semantic_retry_limit"] == 0
         for _messages, call in calls
     )
@@ -3126,6 +3432,10 @@ def test_post_ownership_repair_one_sided_full_residual_fails_closed(
         "risk_nodes",
         "risk_nodes",
         "ownership_patch",
+        "full",
+        "full",
+        "full",
+        "full",
         "full",
         "full",
     ]

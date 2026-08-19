@@ -56,6 +56,7 @@ from app.renderability import DIALOGUE_CHAIN_TURNS_HARD_MAX
 MAX_REPAIR_ACTIVATION_PATCHES = 12
 MAX_REPAIR_ACTIVATION_PASSES = 32
 MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 5
+NARRATIVE_PATCH_PLANNER_MAX_OUTPUT_TOKENS = 8192
 SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-17"
 
 
@@ -64,7 +65,7 @@ def _persist_screenplay_duration_expansion(
     *,
     episode_id: str,
     expected_target_s: int,
-    expected_planning_s: int,
+    expected_planning_s: int | None,
     expected_duration_authority: str,
     expected_active_run_id: str | None,
     required_target_s: int,
@@ -84,7 +85,7 @@ def _persist_screenplay_duration_expansion(
                   screenplay_snapshot_version=screenplay_snapshot_version+1
             WHERE id=?
               AND target_duration_s=?
-              AND planning_target_duration_s=?
+              AND planning_target_duration_s IS ?
               AND target_duration_authority=?
               AND active_screenplay_run_id IS ?""",
         (
@@ -3730,11 +3731,7 @@ async def run_screenplay_production(
                     conn,
                     episode_id=episode_id,
                     expected_target_s=current_target,
-                    expected_planning_s=int(
-                        episode.get("planning_target_duration_s")
-                        if episode.get("planning_target_duration_s") is not None
-                        else current_target
-                    ),
+                    expected_planning_s=episode.get("planning_target_duration_s"),
                     expected_duration_authority=str(
                         episode.get("target_duration_authority")
                         or "planning_estimate"
@@ -5913,7 +5910,7 @@ async def _llm_field_patch_once(
             {"role": "user", "content": prompt_json},
         ],
         temperature=0.1,
-        max_tokens=4096,
+        max_tokens=NARRATIVE_PATCH_PLANNER_MAX_OUTPUT_TOKENS,
         call_meta={
             "stage": "screenplay_narrative_patch",
             "stage_key": "narrative_graph_patch",
@@ -5922,6 +5919,9 @@ async def _llm_field_patch_once(
             "reuse_successful_operation": True,
             "planner_attempt": planner_attempt,
             "prompt_context_chars": len(prompt_json),
+            "requested_max_tokens": (
+                NARRATIVE_PATCH_PLANNER_MAX_OUTPUT_TOKENS
+            ),
         },
     )
     try:
