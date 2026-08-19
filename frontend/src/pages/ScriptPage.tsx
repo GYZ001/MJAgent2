@@ -111,6 +111,68 @@ export function screenplayGeneratePayload(
   return payload
 }
 
+export type ScreenplayWriteError = Error & { status?: number; detail?: any }
+
+export type ScreenplayWriteErrorDecision =
+  | { kind: 'conflict'; detail: Record<string, any> }
+  | { kind: 'qa'; failure: { score?: number; errors: string[] } }
+  | { kind: 'identity'; failure: { errors: string[] }; toast: string }
+  | { kind: 'already_passed'; message: string }
+  | { kind: 'cancelled'; message: string }
+  | { kind: 'toast'; message: string }
+
+// 发布 / 发布预览 / 送修共享同一套后端写错误语义。前端只按 status + detail.code
+// 归类，不复制后端状态机，也不做白/黑名单式特判；副作用交由调用方按判定对象执行。
+export function classifyScreenplayWriteError(
+  error: ScreenplayWriteError,
+): ScreenplayWriteErrorDecision {
+  const detail = error.detail
+  const code: string | undefined = detail?.code
+  if (
+    error.status === 409
+    && (code === 'screenplay_version_conflict' || code === 'version_conflict')
+  ) {
+    return { kind: 'conflict', detail }
+  }
+  if (error.status === 409 && code === 'screenplay_qa_already_passed') {
+    return { kind: 'already_passed', message: detail?.message ?? error.message }
+  }
+  if (error.status === 422 && code === 'screenplay_qa_failed') {
+    return {
+      kind: 'qa',
+      failure: {
+        score: detail.score,
+        errors: detail.errors
+          ?? detail.issues?.map((item: any) => item.message)
+          ?? [error.message],
+      },
+    }
+  }
+  if (error.status === 422 && !!code && SCREENPLAY_IDENTITY_ERROR_CODES.has(code)) {
+    return {
+      kind: 'identity',
+      failure: { errors: detail.errors ?? [detail.message ?? error.message] },
+      toast: '人物身份预检未通过，草稿与现有分镜均已保留',
+    }
+  }
+  if (error.status === 403 && error.message.includes('已取消操作')) {
+    return { kind: 'cancelled', message: error.message }
+  }
+  return { kind: 'toast', message: error.message }
+}
+
+export function screenplayRepairDraftPayload(
+  idempotencyKey: string,
+  draft: EpisodeScreenplay,
+  baselineVersion: string | null,
+): { screenplay: EpisodeScreenplay; expected_version: string | null; idempotency_key: string } {
+  return {
+    screenplay: draft,
+    expected_version: baselineVersion,
+    idempotency_key: idempotencyKey,
+  }
+}
+
 export function ScreenplayResumeButton({
   production,
   busy,
@@ -207,8 +269,9 @@ export default function ScriptPage() {
   const screenplayTaskActive = ep?.screenplay_production?.task_active
     ?? ['queued', 'running'].includes(ep?.screenplay_status ?? '')
   const canResumeBaseline = ep?.screenplay_production?.can_resume_baseline ?? false
-  const canResumeRepair = ep?.screenplay_production?.can_resume_repair
-    ?? ep?.screenplay_status === 'repairing'
+  // 信任后端状态机：repairing 但无兼容 checkpoint 时后端会给 generate_screenplay，
+  // 前端不再用 `status==='repairing'` 猜测续跑，否则会误挡首次生成主操作。
+  const canResumeRepair = ep?.screenplay_production?.can_resume_repair ?? false
   const canResumeFlow = canResumeBaseline || canResumeRepair
   const script = draft ?? ep?.screenplay ?? null
   const editing = draft !== null
@@ -374,6 +437,33 @@ export default function ScriptPage() {
     }
   }
 
+  const handleScreenplayWriteError = (
+    error: ScreenplayWriteError,
+    options: { cancelledMessage?: string; alreadyPassedMessage?: string } = {},
+  ) => {
+    const decision = classifyScreenplayWriteError(error)
+    switch (decision.kind) {
+      case 'conflict':
+        setConflict(decision.detail)
+        return
+      case 'qa':
+        setQaFailure(decision.failure)
+        return
+      case 'identity':
+        setQaFailure(decision.failure)
+        toast(decision.toast, true)
+        return
+      case 'already_passed':
+        toast(options.alreadyPassedMessage ?? decision.message, !options.alreadyPassedMessage)
+        return
+      case 'cancelled':
+        toast(options.cancelledMessage ?? decision.message, !options.cancelledMessage)
+        return
+      default:
+        toast(decision.message, true)
+    }
+  }
+
   const publishDraft = async () => {
     if (!ep || !draft) return
     setBusy(true)
@@ -386,24 +476,9 @@ export default function ScriptPage() {
       await clearWorkingDraft()
       await refresh({ force: true })
     } catch (saveError: unknown) {
-      const typed = saveError as Error & { status?: number; detail?: any }
-      if (typed.status === 409 && ['screenplay_version_conflict', 'version_conflict'].includes(typed.detail?.code)) {
-        setConflict(typed.detail)
-      } else if (typed.status === 422 && typed.detail?.code === 'screenplay_qa_failed') {
-        setQaFailure({
-          score: typed.detail.score,
-          errors: typed.detail.errors ?? typed.detail.issues?.map((item: any) => item.message) ?? [typed.message],
-        })
-      } else if (typed.status === 422 && SCREENPLAY_IDENTITY_ERROR_CODES.has(typed.detail?.code)) {
-        setQaFailure({
-          errors: typed.detail.errors ?? [typed.detail.message ?? typed.message],
-        })
-        toast('人物身份预检未通过，草稿与现有分镜均已保留', true)
-      } else if (typed.status === 403 && typed.message.includes('已取消操作')) {
-        toast('未执行发布，工作草稿已保留')
-      } else {
-        toast(typed.message, true)
-      }
+      handleScreenplayWriteError(saveError as ScreenplayWriteError, {
+        cancelledMessage: '未执行发布，工作草稿已保留',
+      })
     } finally { setBusy(false) }
   }
 
@@ -487,22 +562,30 @@ export default function ScriptPage() {
         idempotencyKey: stableKey(`screenplay-save:${ep.id}`),
       })
     } catch (previewError: unknown) {
-      const typed = previewError as Error & { status?: number; detail?: any }
-      if (typed.status === 409 && ['screenplay_version_conflict', 'version_conflict'].includes(typed.detail?.code)) {
-        setConflict(typed.detail)
-      } else if (typed.status === 422 && typed.detail?.code === 'screenplay_qa_failed') {
-        setQaFailure({
-          score: typed.detail.score,
-          errors: typed.detail.errors ?? typed.detail.issues?.map((item: any) => item.message) ?? [typed.message],
-        })
-      } else if (typed.status === 422 && SCREENPLAY_IDENTITY_ERROR_CODES.has(typed.detail?.code)) {
-        setQaFailure({
-          errors: typed.detail.errors ?? [typed.detail.message ?? typed.message],
-        })
-        toast('人物身份预检未通过，草稿与现有分镜均已保留', true)
-      } else {
-        toast(typed.message, true)
-      }
+      handleScreenplayWriteError(previewError as ScreenplayWriteError)
+    } finally { setBusy(false) }
+  }
+
+  const sendDraftToRepair = async () => {
+    if (!ep || !draft) return
+    setBusy(true)
+    try {
+      await api.post(
+        `/episodes/${ep.id}/screenplay/repair-draft`,
+        screenplayRepairDraftPayload(
+          stableKey(`screenplay-repair:${ep.id}`),
+          draft,
+          baselineVersion,
+        ),
+      )
+      screenplayTimer.start()
+      toast('工作草稿已进入独立修复环节，完成后会重新校验')
+      await clearWorkingDraft()
+      await refresh({ force: true })
+    } catch (repairError: unknown) {
+      handleScreenplayWriteError(repairError as ScreenplayWriteError, {
+        alreadyPassedMessage: '当前草稿已通过校验，可直接发布',
+      })
     } finally { setBusy(false) }
   }
 
@@ -605,7 +688,8 @@ export default function ScriptPage() {
     message: '状态同步中',
     recommended_action: 'refresh',
   }
-  const screenplayStateMessage = ep.screenplay_status === 'ready' ? '剧本已交付' : state.message
+  // 直接透传后端已压好的一句话状态；后端已区分“剧本已交付｜分镜生成中/停在第 N 镜/待人工确认”等细节。
+  const screenplayStateMessage = state.message
   const screenplayGenerateDisabledReason = busy
     ? '正在处理上一项操作'
     : ''
@@ -788,6 +872,13 @@ export default function ScriptPage() {
           <div className="editor-validation screenplay-qa-failure" role="alert">
             <b>结构或人物上下文校验未通过</b>
             {qaFailure.errors.slice(0, 6).map(item => <span key={item}>{item}</span>)}
+            {draft && (
+              <button type="button" className="btn small"
+                disabled={busy}
+                aria-label={busy ? '送修草稿，暂不可用：正在处理上一项操作' : '送修草稿'}
+                title={busy ? '正在处理上一项操作' : '把当前工作草稿交给独立修复环节，完成后自动重新校验'}
+                onClick={sendDraftToRepair}>送修草稿</button>
+            )}
           </div>
         )}
         {screenplayNotice && (

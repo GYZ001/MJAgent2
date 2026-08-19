@@ -3,10 +3,19 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   ScreenplayResumeButton,
+  ScreenplayWriteError,
+  classifyScreenplayWriteError,
   screenplayGeneratePayload,
+  screenplayRepairDraftPayload,
   screenplayResumeActionLabel,
   screenplayResumeOutcomeSummary,
 } from './ScriptPage'
+
+const writeError = (
+  status: number,
+  message: string,
+  detail?: any,
+): ScreenplayWriteError => Object.assign(new Error(message), { status, detail })
 
 const rebuildProduction = {
   operation: 'baseline_rebuild' as const,
@@ -100,5 +109,115 @@ describe('screenplayGeneratePayload', () => {
       authorize_blueprint_retry: true,
       expected_blueprint_unknown_receipts: [],
     })
+  })
+})
+
+describe('screenplayRepairDraftPayload', () => {
+  const draft = { title: '第一集', full_script_text: '正文' } as any
+
+  it('assembles the repair-draft body aligned with the backend contract', () => {
+    expect(screenplayRepairDraftPayload('repair-key', draft, 'artifact-7')).toEqual({
+      screenplay: draft,
+      expected_version: 'artifact-7',
+      idempotency_key: 'repair-key',
+    })
+  })
+
+  it('carries a null baseline verbatim so the backend treats it as no expected version', () => {
+    expect(screenplayRepairDraftPayload('repair-key', draft, null)).toEqual({
+      screenplay: draft,
+      expected_version: null,
+      idempotency_key: 'repair-key',
+    })
+  })
+})
+
+describe('classifyScreenplayWriteError', () => {
+  it('classifies both version conflict codes as a conflict carrying the detail', () => {
+    const detail = { code: 'screenplay_version_conflict', current_version: 'v2', diff: [] }
+    expect(classifyScreenplayWriteError(writeError(409, '冲突', detail))).toEqual({
+      kind: 'conflict',
+      detail,
+    })
+    const legacy = { code: 'version_conflict' }
+    expect(classifyScreenplayWriteError(writeError(409, '冲突', legacy))).toEqual({
+      kind: 'conflict',
+      detail: legacy,
+    })
+  })
+
+  it('maps qa_already_passed (409) to a distinct already_passed decision', () => {
+    expect(
+      classifyScreenplayWriteError(
+        writeError(409, '已过 QA', { code: 'screenplay_qa_already_passed', message: '已通过' }),
+      ),
+    ).toEqual({ kind: 'already_passed', message: '已通过' })
+  })
+
+  it('extracts qa failure score and errors, falling back to issues then message', () => {
+    expect(
+      classifyScreenplayWriteError(
+        writeError(422, '结构失败', {
+          code: 'screenplay_qa_failed',
+          score: 42,
+          errors: ['缺少结尾钩子'],
+        }),
+      ),
+    ).toEqual({ kind: 'qa', failure: { score: 42, errors: ['缺少结尾钩子'] } })
+
+    expect(
+      classifyScreenplayWriteError(
+        writeError(422, '结构失败', {
+          code: 'screenplay_qa_failed',
+          issues: [{ message: '第 2 场未闭环' }],
+        }),
+      ),
+    ).toEqual({ kind: 'qa', failure: { score: undefined, errors: ['第 2 场未闭环'] } })
+
+    expect(
+      classifyScreenplayWriteError(
+        writeError(422, '兜底文案', { code: 'screenplay_qa_failed' }),
+      ),
+    ).toEqual({ kind: 'qa', failure: { score: undefined, errors: ['兜底文案'] } })
+  })
+
+  it('routes both identity error codes to an identity decision with a toast', () => {
+    const decision = classifyScreenplayWriteError(
+      writeError(422, '身份未决', {
+        code: 'screenplay_character_identity_unresolved',
+        errors: ['人物 A 未匹配'],
+      }),
+    )
+    expect(decision).toEqual({
+      kind: 'identity',
+      failure: { errors: ['人物 A 未匹配'] },
+      toast: '人物身份预检未通过，草稿与现有分镜均已保留',
+    })
+
+    expect(
+      classifyScreenplayWriteError(
+        writeError(422, '发现失败', { code: 'screenplay_character_discovery_failed' }),
+      ).kind,
+    ).toBe('identity')
+  })
+
+  it('recognizes the cancelled operation from the 403 message', () => {
+    expect(classifyScreenplayWriteError(writeError(403, '已取消操作'))).toEqual({
+      kind: 'cancelled',
+      message: '已取消操作',
+    })
+  })
+
+  it('falls back to a plain toast for unclassified errors', () => {
+    expect(classifyScreenplayWriteError(writeError(500, '服务异常'))).toEqual({
+      kind: 'toast',
+      message: '服务异常',
+    })
+    // 403 without the cancellation phrase must not be mistaken for a cancellation.
+    expect(classifyScreenplayWriteError(writeError(403, '无权限')).kind).toBe('toast')
+    // A conflict on the wrong status must not be swallowed as a version conflict.
+    expect(
+      classifyScreenplayWriteError(writeError(500, 'x', { code: 'screenplay_version_conflict' })).kind,
+    ).toBe('toast')
   })
 })
