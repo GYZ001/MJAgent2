@@ -441,7 +441,7 @@ def test_compact_ir_compiles_to_existing_screenplay_contract() -> None:
 #   路径2（document 投影）平铺后再用 key_lines_in_story_order 按正文出现顺序重排。
 # 当某一场里两条对白链在正文中交错出现时，chain 结构顺序 != 正文出现顺序，
 # 两条路径会产出不同顺序的 key_lines——这是隐性数据漂移。现已收敛为单一算法
-# app.production.screenplay_document.derive_key_lines（两处共用），下面的测试
+# app.validators.derive_key_lines（IR 编译与 document 投影两处共用），下面的测试
 # 用一个「结构顺序与正文顺序故意不同」的输入把这一契约钉死。
 _KEY_LINE_DRIFT_SOURCE = "\n\n".join([
     "谷言独自在咖啡厅等待旧友。他看向门口说：“再等十分钟。”"

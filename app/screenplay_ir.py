@@ -59,7 +59,6 @@ from app.source_excerpt import (
     structural_front_matter_ids,
 )
 from app.spoken_contract import content_char_count
-from app.production.screenplay_document import derive_key_lines
 
 
 IR_VERSION = "screenplay-generation-ir.v4"
@@ -5456,6 +5455,9 @@ def compile_screenplay_ir(
     # key_lines 与 document 投影共用同一派生算法：以 dialogue_chains 为权威源，
     # 依据已定稿的 full_script_text 正文出现顺序排列。必须在 full_script_text 完成
     # must_keep 插入后再派生，两条路径才能对同一输入逐字段相等（消除结构顺序漂移）。
+    # 延迟 import：validators 在函数级反向引用本模块，顶层直连会成环。
+    from app.validators import derive_key_lines
+
     key_lines = derive_key_lines(dialogue_chains, full_script_text)
 
     scope_id = str(episode.get("id") or f"episode-{episode_no}")

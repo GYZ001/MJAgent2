@@ -1295,6 +1295,36 @@ def key_lines_in_story_order(key_lines: list[str], full_script_text: str) -> lis
     return [line for _position, _original_index, line in sorted(ranked)]
 
 
+def _key_lines_from_chains(chains: list[KeyDialogueChain]) -> list[str]:
+    lines: list[str] = []
+    for chain in chains:
+        for turn in chain.turns:
+            speaker = (turn.speaker or "").strip()
+            line = (turn.line or "").strip()
+            if not line:
+                continue
+            lines.append(f"{speaker}：{line}" if speaker else line)
+    return lines
+
+
+def derive_key_lines(
+    chains: list[KeyDialogueChain],
+    full_script_text: str,
+) -> list[str]:
+    """Single source of truth for ``EpisodeScreenplay.key_lines``.
+
+    权威源是 ``dialogue_chains``（触发→回应的主线对白链）。此函数先按链结构
+    平铺，再用 ``key_lines_in_story_order`` 依据 ``full_script_text`` 的正文出现
+    顺序重排。IR 编译、document 投影、校验期归一化都必须走这一条算法，才能对同
+    一份输入产出逐字段相等的 key_lines，杜绝双派生路径漂移。放在 validators 与
+    ``key_lines_in_story_order`` 同层，避免 screenplay_ir 反向依赖 production 层。
+    """
+    return key_lines_in_story_order(
+        _key_lines_from_chains(chains),
+        full_script_text or "",
+    )
+
+
 def key_line_order_errors(
     key_lines: list[str], ordered_texts: list[str], *, subject: str,
 ) -> list[str]:
@@ -2753,7 +2783,6 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
                 * IR_MIN_ADAPTED_SOURCE_RATIO
             ),
         )
-        script_length_authority = "authorized_source_ratio"
     else:
         script_length_source_chars = 0
         min_script_chars = max(
@@ -2762,7 +2791,6 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             if spine_n
             else max(160, expected_beats * 30),
         )
-        script_length_authority = "legacy_spine_or_expected_beats"
     hard_min_script_chars = max(160, (min_script_chars * 99 + 99) // 100)
     if len(full_text) < hard_min_script_chars:
         errors.append(
