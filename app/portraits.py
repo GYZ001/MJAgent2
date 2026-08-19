@@ -1217,17 +1217,44 @@ functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
         },
         repair_context=future_context,
     )
+    def relocate_owned_evidence(canonical_name: str) -> str:
+        """当真名逐字存在于窗口、但模型给的 future_evidence 未能锚定时，
+        由程序确定性地从窗口切出包含该真名的最小片段作为证据。
+
+        这不放松防捏造约束：真名必须逐字出现在 future_context 才可能被切出；
+        窗口中不存在的名字（模型臆测）依旧无法取得任何证据。目的是把“证据措辞
+        不精确导致合法解析被静默丢弃”恢复为“确定性可锚定的解析”，减少下游因
+        身份未冻结而报错。"""
+        if not canonical_name or canonical_name not in future_context:
+            return ""
+        anchor_length = max(4, len(canonical_name) + 2)
+        name_at = future_context.find(canonical_name)
+        # 以真名为中心向两侧扩展，凑够足以稳定命中的最小锚点长度。
+        half = max(0, (anchor_length - len(canonical_name) + 1) // 2)
+        start = max(0, name_at - half)
+        end = min(len(future_context), name_at + len(canonical_name) + half)
+        snippet = future_context[start:end]
+        return snippet if has_owned_canonical_anchor(snippet, canonical_name) else ""
+
+    def owned_future_evidence(item: dict) -> str:
+        """返回可锚定的 future_evidence：优先用模型原始逐字证据，其次由程序确定性重定位。"""
+        canonical_name = str(item.get("canonical_name") or "").strip()
+        model_evidence = str(item.get("future_evidence") or "").strip()
+        if has_owned_canonical_anchor(model_evidence, canonical_name):
+            return model_evidence
+        return relocate_owned_evidence(canonical_name)
+
     resolved_by_label = {
-        str(item.get("source_label") or "").strip(): item
+        str(item.get("source_label") or "").strip(): {
+            **item,
+            "future_evidence": owned_future_evidence(item),
+        }
         for item in response.characters
         if (
             str(item.get("source_label") or "").strip()
             and str(item.get("canonical_name") or "").strip()
             and str(item.get("identity_kind") or "").strip().lower() == "named"
-            and has_owned_canonical_anchor(
-                str(item.get("future_evidence") or "").strip(),
-                str(item.get("canonical_name") or "").strip(),
-            )
+            and owned_future_evidence(item)
         )
     }
     group_resolution: dict[str, dict] = {}
