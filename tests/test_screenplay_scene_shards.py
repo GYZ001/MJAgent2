@@ -7795,6 +7795,35 @@ def test_scene_shard_error_has_generation_contract_classification() -> None:
     )
 
 
+def test_blueprint_retry_grant_deadlock_has_distinct_classification() -> None:
+    from app.stages import StageError
+
+    error = StageError(
+        "剧本时空因果蓝图分片",
+        [
+            "[BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED] "
+            "上次供应商结果未知；必须由新的 Production Grant 显式授权同一语义 operation 的下一 attempt"
+        ],
+    )
+    assert app_errors.classify(error) == (
+        "generation_retry_grant",
+        "GEN-RETRY-GRANT",
+    )
+    record = app_errors.log_error(error)
+    assert record.code == "GEN-RETRY-GRANT"
+    # The hint must make clear that retrying / 修复重试上限 will not help here.
+    assert "无效" in record.public
+    assert "GEN-RETRY-GRANT" in record.public
+
+
+def test_generic_stage_error_still_classifies_as_generation() -> None:
+    from app.stages import StageError
+
+    assert app_errors.classify(
+        StageError("剧本时空因果蓝图分片", ["某个通用校验失败"])
+    ) == ("generation", "GEN")
+
+
 def test_scene_shard_unit_rejects_unknown_identity_authority_field() -> None:
     blueprint = _blueprint(split_domain=True)
     plan = build_screenplay_scene_shard_plans(
