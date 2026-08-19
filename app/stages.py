@@ -6870,7 +6870,18 @@ class _BlueprintGenerationBudget:
         if prior is None:
             return None
         call_id, prior_grant_id = prior
-        if not self.retry_grant_id or self.retry_grant_id == prior_grant_id:
+        # Gate on the SAME authorization state that ``claim`` checks
+        # (``_explicit_retry_authorized``), not merely on ``retry_grant_id``
+        # being present and distinct. ``retry_grant_id`` is populated from the
+        # config snapshot in ``from_durable_calls`` even when Site B
+        # authorization failed, so the weaker guard could hand back a prior
+        # interrupted call id that ``claim`` would then refuse — the two gates
+        # must not disagree.
+        if not (
+            self._explicit_retry_authorized
+            and self.retry_grant_id
+            and self.retry_grant_id != prior_grant_id
+        ):
             raise StageError(
                 "剧本时空因果蓝图分片",
                 [

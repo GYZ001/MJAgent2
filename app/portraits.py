@@ -3125,6 +3125,39 @@ def persist_screenplay_character_resolutions(
             )
         ]
     merged = merge_screenplay_character_resolutions(current, resolutions)
+    # Fingerprint stability guard. A fresh discovery pass that reproduces the
+    # SAME semantic identity decisions (same authority_id / resolution /
+    # identity group / provenance) must not rewrite the stored rows just because
+    # the model re-authored volatile free-text (reason/evidence) or row order.
+    # That churn changed screenplay_authority_fingerprint between a retry-grant
+    # activation and its baseline task, superseding the revision the
+    # user_retry_approval grant was bound to and deadlocking every retry
+    # (BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED). Comparing against the ORIGINAL
+    # stored payload (not the post-retire ``current``) keeps genuine retire /
+    # scope-replacement writes intact while suppressing no-op semantic rewrites.
+    stored_current = (
+        normalize_character_resolutions(old_payload)
+        if isinstance(old_payload, list)
+        else []
+    )
+
+    def _semantic_identity_key(items: list[dict]) -> list[tuple[str, ...]]:
+        return sorted(
+            (
+                str(item.get("authority_id") or ""),
+                str(item.get("source_label") or ""),
+                str(item.get("canonical_name") or ""),
+                str(item.get("resolution") or ""),
+                str(item.get("identity_group") or ""),
+                str(item.get("identity_scope_fingerprint") or ""),
+                str(item.get("decision_provenance") or ""),
+                str(item.get("decision_contract_version") or ""),
+            )
+            for item in items
+        )
+
+    if _semantic_identity_key(merged) == _semantic_identity_key(stored_current):
+        return stored_current
     if _has_column(conn, "episodes", "screenplay_character_resolutions"):
         clauses = ["id=?", "screenplay_character_resolutions=?"]
         params: list[object] = [
