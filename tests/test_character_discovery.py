@@ -218,6 +218,58 @@ def test_required_identity_card_prompt_does_not_reapply_importance_gate(
     assert call_options[0]["call_meta"]["expected_json"] is True
 
 
+def test_required_identity_card_retries_once_when_first_card_too_thin(
+    monkeypatch,
+) -> None:
+    """已确认真名但首轮人物卡过薄时，应有界重试补全，而不是首轮不完整就报错。"""
+    prompts: list[str] = []
+    responses = [
+        # 首轮：外观过薄，缺可视维度 → 触发补全重试。
+        json.dumps({
+            "important": True,
+            "reason": "已确认真名",
+            "role": "重要配角",
+            "appearance_canonical": "一个男子",
+            "personality": "",
+            "speech_style": "",
+            "relationships": [],
+        }, ensure_ascii=False),
+        # 第二轮：补全为完整外观锚点。
+        json.dumps({
+            "important": True,
+            "reason": "已确认真名",
+            "role": "重要配角",
+            "appearance_canonical": (
+                "成年黑发男子，身穿深灰色皮甲短衫，腰间佩刀，"
+                "体格壮实，左眉留有一道浅疤"
+            ),
+            "personality": "服从命令",
+            "speech_style": "简短应答",
+            "relationships": [],
+        }, ensure_ascii=False),
+    ]
+
+    async def fake_chat(messages, **_kwargs):
+        prompts.append(messages[0]["content"])
+        return responses[len(prompts) - 1]
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+
+    result = asyncio.run(portraits.assess_new_character(
+        "丁力",
+        "丁力听令后带人巡查山门。",
+        style="国风",
+        known_names=["萧炎"],
+        ep_label="第 21 集",
+        require_identity_card=True,
+    ))
+
+    assert len(prompts) == 2  # 恰好重试一次
+    assert "上一轮 appearance_canonical 不完整" in prompts[1]
+    assert result["card_complete"] is True
+    assert result["important"] is True
+
+
 def test_mentioned_only_unknown_character_does_not_require_identity_card() -> None:
     known = {"白洁", "小晶"}
 

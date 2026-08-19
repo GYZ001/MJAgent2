@@ -336,7 +336,7 @@ DEFAULT_SETTINGS = {
     "screenplay_scene_shard_max_units": "24",
     "screenplay_scene_shard_max_output_chars": "12000",
     "screenplay_format_retry_limit": "1",
-    "screenplay_semantic_retry_limit": "1",
+    "screenplay_semantic_retry_limit": "2",
     "screenplay_fidelity_max_rounds": "8",
     "text_stream_total_timeout_s": "1200", # 流式文本调用总墙钟熔断；空闲超时仍由 httpx 负责
     "storyboard_concurrency": "2",      # 旧设置兼容读取，不再作为新资源池名称

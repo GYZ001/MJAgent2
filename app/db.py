@@ -2404,6 +2404,22 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
             "INSERT INTO settings(key, value) VALUES(?, 'applied')",
             (supporting_candidates_migration_key,),
         )
+    # 剧本结构化调用的业务语义修复预算从 1 提升到 2：给模型一次带确定性错误反馈的
+    # 二次修复机会，降低单次输出不满足业务校验即整条 run 硬失败的概率。仅迁移仍停留
+    # 在旧默认值 1 的工作区；一次性标记确保用户之后主动改回 1 时不会被启动流程覆盖。
+    semantic_retry_migration_key = "_migration_screenplay_semantic_retry_limit_2_v1"
+    semantic_retry_migrated = conn.execute(
+        "SELECT 1 FROM settings WHERE key=?", (semantic_retry_migration_key,),
+    ).fetchone()
+    if not semantic_retry_migrated:
+        conn.execute(
+            "UPDATE settings SET value='2' "
+            "WHERE key='screenplay_semantic_retry_limit' AND value='1'"
+        )
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES(?, 'applied')",
+            (semantic_retry_migration_key,),
+        )
     # These settings are persisted immediately but only become runtime-effective
     # after a process restart.  Capture the authoritative startup value separately
     # so the monitor UI never reports a pending value as already active.

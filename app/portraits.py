@@ -3668,53 +3668,75 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
 
 只输出一个 JSON 对象：
 {{"important": true/false, "reason": "一句话依据", "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}]}}"""
-    raw = await model_gateway.chat(
-        [{"role": "user", "content": prompt}],
-        temperature=0.3,
-        max_tokens=CHARACTER_CARD_MAX_TOKENS,
-        call_meta={
-            "stage": "assess_new_character",
-            "character_name": name,
-            "expected_json": True,
-        },
-    )
-    try:
-        obj = extract_json(raw)
-    except ValueError as exc:
-        raise ContentGenerationError(
-            f"新角色「{name}」人物卡结构化输出不完整"
-        ) from exc
-    important = bool(obj.get("important"))
-    appearance = production_appearance_anchor(
-        (obj.get("appearance_canonical") or "").strip()
-    )
-    if len(appearance) > APPEARANCE_MAX:
-        appearance = appearance[:APPEARANCE_MAX]
-    role = (obj.get("role") or "重要配角").strip() or "重要配角"
-    card_complete = (
-        APPEARANCE_MIN <= len(appearance) <= APPEARANCE_MAX
-        and not missing_production_appearance_dimensions(appearance)
-        and bool(role)
-    )
-    if important and not card_complete:
-        important = False  # 外观太稀薄不足以稳定定妆 → 不建卡
-    known_set = set(known_names)
-    # 只保留指向【已知角色】且 relation 非空的关系；Relationship.to/relation 必填，漏 relation 会让校验崩。
-    rels = [
-        {"to": r["to"], "relation": str(r.get("relation") or "").strip()}
-        for r in (obj.get("relationships") or [])
-        if isinstance(r, dict) and r.get("to") in known_set and str(r.get("relation") or "").strip()
-    ]
-    return {
-        "important": important,
-        "card_complete": card_complete,
-        "reason": (obj.get("reason") or "").strip(),
-        "role": role,
-        "appearance_canonical": appearance,
-        "personality": (obj.get("personality") or "").strip(),
-        "speech_style": (obj.get("speech_style") or "").strip(),
-        "relationships": rels,
-    }
+
+    async def _assess_once(extra_instruction: str) -> dict:
+        messages = [{"role": "user", "content": prompt + extra_instruction}]
+        raw = await model_gateway.chat(
+            messages,
+            temperature=0.3,
+            max_tokens=CHARACTER_CARD_MAX_TOKENS,
+            call_meta={
+                "stage": "assess_new_character",
+                "character_name": name,
+                "expected_json": True,
+            },
+        )
+        try:
+            return extract_json(raw)
+        except ValueError as exc:
+            raise ContentGenerationError(
+                f"新角色「{name}」人物卡结构化输出不完整"
+            ) from exc
+
+    def _build_verdict(obj: dict) -> dict:
+        important = bool(obj.get("important"))
+        appearance = production_appearance_anchor(
+            (obj.get("appearance_canonical") or "").strip()
+        )
+        if len(appearance) > APPEARANCE_MAX:
+            appearance = appearance[:APPEARANCE_MAX]
+        role = (obj.get("role") or "重要配角").strip() or "重要配角"
+        card_complete = (
+            APPEARANCE_MIN <= len(appearance) <= APPEARANCE_MAX
+            and not missing_production_appearance_dimensions(appearance)
+            and bool(role)
+        )
+        if important and not card_complete:
+            important = False  # 外观太稀薄不足以稳定定妆 → 不建卡
+        known_set = set(known_names)
+        # 只保留指向【已知角色】且 relation 非空的关系；Relationship.to/relation 必填，漏 relation 会让校验崩。
+        rels = [
+            {"to": r["to"], "relation": str(r.get("relation") or "").strip()}
+            for r in (obj.get("relationships") or [])
+            if isinstance(r, dict) and r.get("to") in known_set and str(r.get("relation") or "").strip()
+        ]
+        return {
+            "important": important,
+            "card_complete": card_complete,
+            "reason": (obj.get("reason") or "").strip(),
+            "role": role,
+            "appearance_canonical": appearance,
+            "personality": (obj.get("personality") or "").strip(),
+            "speech_style": (obj.get("speech_style") or "").strip(),
+            "relationships": rels,
+        }
+
+    verdict = _build_verdict(await _assess_once(""))
+    # 已确认真名却拿到过薄的人物卡时，做一次有界重试并明确要求补全可视维度，
+    # 而不是首轮不完整就让整条剧本硬失败（这是与结构化输出同源的单点脆弱性）。
+    if require_identity_card and not verdict["card_complete"]:
+        missing = missing_production_appearance_dimensions(
+            verdict["appearance_canonical"]
+        )
+        retry_instruction = (
+            "\n\n上一轮 appearance_canonical 不完整，缺少可视维度："
+            + ("、".join(missing) if missing else "长度或标志性特征不足")
+            + f"。请重写为 {APPEARANCE_MIN}~{APPEARANCE_MAX} 字、"
+            "含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征 的完整外观锚点，"
+            "并固定 important=true。原著未写处按画风保守补全，只写视觉可见信息。"
+        )
+        verdict = _build_verdict(await _assess_once(retry_instruction))
+    return verdict
 
 
 async def ensure_character_card(
