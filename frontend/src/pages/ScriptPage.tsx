@@ -359,7 +359,7 @@ export default function ScriptPage() {
     try {
       const result = await fn()
       if (done) toast(done)
-      await refresh()
+      await refresh({ force: true })
       return result
     } catch (unknownError: unknown) {
       const apiError = unknownError as Error & { status?: number; detail?: any }
@@ -384,7 +384,7 @@ export default function ScriptPage() {
       })
       toast(result.unchanged ? '内容无变化，未创建新版本' : '剧本已原子发布')
       await clearWorkingDraft()
-      await refresh()
+      await refresh({ force: true })
     } catch (saveError: unknown) {
       const typed = saveError as Error & { status?: number; detail?: any }
       if (typed.status === 409 && ['screenplay_version_conflict', 'version_conflict'].includes(typed.detail?.code)) {
@@ -883,7 +883,7 @@ export default function ScriptPage() {
             <div className="dialog-actions">
               <button className="btn" onClick={() => setConflict(null)}>继续保留我的草稿</button>
               <button className="btn primary" onClick={async () => {
-                const latest = await refresh()
+                const latest = await refresh({ force: true })
                 if (latest?.screenplay) beginEditing(latest.screenplay, latest.screenplay_artifact_id ?? null)
                 setConflict(null)
               }}>重新加载发布版</button>

@@ -920,7 +920,7 @@ export default function BoardPage() {
     try {
       const result = await fn()
       if (message) toast(message)
-      await refresh()
+      await refresh({ force: true })
       return result
     } catch (caught) {
       toast((caught as Error).message, true)
@@ -1245,7 +1245,7 @@ export default function BoardPage() {
               <ShotWorkspace key={`${selectedShot.id}:${selectedShot.storyboard_artifact_id ?? ''}`}
                 shot={selectedShot} episode={ep} status={status}
                 previous={shots[absoluteIndex - 1]} next={shots[absoluteIndex + 1]}
-                onChanged={() => { void refresh() }} onSelect={requestShotSelect}
+                onChanged={() => { void refresh({ force: true }) }} onSelect={requestShotSelect}
                 onDirtyChange={setShotEditDirty}
                 onStructure={previewStructure} disabled={busy} />
             )}
@@ -1379,7 +1379,7 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
   const changes = edit && baseline ? buildStoryboardChanges(baseline, edit, sourceBinding) : {}
   const dirty = Object.keys(changes).length > 0
   const currentChars = storyboardSpokenChars(current)
-  const spokenLimit = current.spoken_limit ?? Math.max(1, current.duration_s * 5)
+  const spokenLimit = shotSpokenLimit(current)
   const overCapacity = currentChars > spokenLimit
   const prevConflict = Boolean(edit && previous?.state_out?.trim() && edit.state_in?.trim() && previous.state_out.trim() !== edit.state_in.trim())
   const nextConflict = Boolean(edit && next?.state_in?.trim() && edit.state_out?.trim() && next.state_in.trim() !== edit.state_out.trim())

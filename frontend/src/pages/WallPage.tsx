@@ -593,7 +593,7 @@ export default function WallPage() {
   }, [generationDecision])
 
   const loadContext = useCallback(async () => {
-    const result = await refreshContext()
+    const result = await refreshContext({ force: true })
     return result?.ok ? result.context : null
   }, [refreshContext])
 
@@ -775,7 +775,7 @@ export default function WallPage() {
 
   const refreshAll = useCallback(async () => {
     const preservedShotId = selectedShotId
-    const next = await refresh()
+    const next = await refresh({ force: true })
     await Promise.all([loadContext(), loadVideoPlan()])
     if (!preservedShotId) return
     if (!next?.shots?.some(shot => shot.id === preservedShotId)) {

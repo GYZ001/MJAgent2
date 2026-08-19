@@ -75,10 +75,19 @@ export class AdaptivePoller<T> {
     this.clearTimer()
   }
 
-  refresh(): Promise<T | null> {
+  refresh(options?: { force?: boolean }): Promise<T | null> {
     if (!this.started) return Promise.resolve(this.data)
     this.active = true
-    if (this.inFlight) return this.inFlight
+    if (this.inFlight) {
+      // 默认复用在途请求即可；但写操作后的 force 刷新必须拿到“提交后”的新鲜数据，
+      // 因此等当前在途请求结束（其 finally 会清空 inFlight）后再发起一次真正的新拉取。
+      if (options?.force) {
+        return this.inFlight.then(() =>
+          this.started ? this.refresh() : this.data,
+        )
+      }
+      return this.inFlight
+    }
 
     const generation = this.generation
     const request = Promise.resolve()

@@ -1154,7 +1154,8 @@ export function usePoll<T>(
   });
 
   const refresh = useCallback(
-    (): Promise<T | null> => pollerRef.current!.refresh(),
+    (options?: { force?: boolean }): Promise<T | null> =>
+      pollerRef.current!.refresh(options),
     [],
   );
 
@@ -1329,8 +1330,11 @@ export function useScriptEpisode(episodeId: string) {
     data,
     error: detail.error || (!full ? status.error : null),
     loading: detail.loading,
-    refresh: async () => {
-      const [next] = await Promise.all([detail.refresh(), status.refresh()]);
+    refresh: async (options?: { force?: boolean }) => {
+      const [next] = await Promise.all([
+        detail.refresh(options),
+        status.refresh(options),
+      ]);
       return next;
     },
   };
