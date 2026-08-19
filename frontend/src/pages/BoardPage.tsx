@@ -797,9 +797,14 @@ export default function BoardPage() {
     if (riskFilter && !shot.preflight_errors?.length && !shot.continuity_degraded && !(shot.risk_tags?.length)) return false
     return true
   }), [shots, onlyProblems, sceneFilter, characterFilter, capacityFilter, riskFilter])
-  const selectedShot = visibleShots.find(shot => shot.id === selectedShotId) ?? visibleShots[0]
+  // 先在全量 shots 里按当前选中 id 解析，避免轮询刷新使选中镜因“问题态”变化离开
+  // visibleShots 时被静默跳到第一条；仅当尚无选中或该镜确实被删除时，才回退到 visibleShots[0]。
+  const selectedShot = shots.find(shot => shot.id === selectedShotId) ?? visibleShots[0]
   const selectedIndex = visibleShots.findIndex(shot => shot.id === selectedShot?.id)
   const absoluteIndex = shots.findIndex(shot => shot.id === selectedShot?.id)
+  const selectionOutsideFilters = Boolean(
+    selectedShot && visibleShots.length > 0 && !visibleShots.some(shot => shot.id === selectedShot.id),
+  )
   const status = ep?.storyboard_status ?? recoveredStatus ?? (ep ? statusFallback(ep) : null)
   const taskNotice = ep ? storyboardTaskNotice(ep, status?.state) : null
   const filterDisabledReason = shotEditDirty ? '请先保存或放弃当前镜头修改' : ''
@@ -1241,6 +1246,9 @@ export default function BoardPage() {
           </section>
 
           <section className="shot-editor-pane">
+            {selectionOutsideFilters && (
+              <div className="filter-selection-note" role="status">当前镜头已不在筛选结果内，已保留当前对象；只有你主动切换时才会离开。</div>
+            )}
             {selectedShot && (
               <ShotWorkspace key={`${selectedShot.id}:${selectedShot.storyboard_artifact_id ?? ''}`}
                 shot={selectedShot} episode={ep} status={status}

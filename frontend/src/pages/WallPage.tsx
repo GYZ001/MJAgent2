@@ -340,23 +340,6 @@ function refScore(ref: ReferenceImage): number | null {
   return typeof score === 'number' ? score : null
 }
 
-export function currentVersionRefs(shot: Shot): {
-  versionId: string; versionNo: number; refs: ReferenceImage[]; isFallback: boolean
-} | null {
-  const adopted = shot.versions.find(version => version.id === shot.adopted_version_id)
-  const hasRefs = (version: ShotVersion) => (version.image_inputs?.reference_images?.length ?? 0) > 0
-  const live = shot.versions.find(version => ['queued', 'running', 'waiting_provider'].includes(version.status) && hasRefs(version))
-  const preferred = live || adopted || shot.versions[0]
-  const version = preferred && hasRefs(preferred) ? preferred : shot.versions.find(hasRefs) || preferred
-  if (!version) return null
-  return {
-    versionId: version.id,
-    versionNo: version.version_no,
-    refs: version.image_inputs?.reference_images ?? [],
-    isFallback: !!preferred && version.id !== preferred.id,
-  }
-}
-
 export type MaterialLibraryKind = 'keyframes' | 'references' | 'video'
 
 export function shotMaterialLibraryKind(shot: Shot): MaterialLibraryKind {

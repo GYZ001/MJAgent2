@@ -127,10 +127,6 @@ export function shotVideoState(shot: Shot): ShotVideoState {
   }
 }
 
-export function countAdoptedVideos(shots: Shot[]): number {
-  return shots.filter(shot => shotVideoState(shot).phase === 'adopted').length
-}
-
 /** 生成台镜头按钮上的简明执行阶段。 */
 export function compactShotStage(shot: Shot): string {
   const pipeline = shot.pipeline
@@ -183,27 +179,4 @@ export function compactShotStage(shot: Shot): string {
     waiting_human: '等待人工',
   }
   return labels[stage] || pipeline?.stage_label || '状态同步中'
-}
-
-export function formatPipelineSummary(
-  summary: import('./api').EpisodePipelineSummary | null | undefined,
-  shotsTotal: number,
-): string {
-  const counts = summary?.video_status_counts
-  const adopted = counts?.adopted ?? summary?.adopted ?? 0
-  const generating = counts?.generating ?? summary?.upstream_generating ?? 0
-  const pendingAdoption = counts?.pending_adoption
-    ?? Math.max(0, (summary?.with_candidate ?? adopted) - adopted)
-  const failed = counts?.generation_failed ?? summary?.failed ?? 0
-  const pendingGeneration = counts?.pending_generation
-    ?? Math.max(0, shotsTotal - adopted - generating - pendingAdoption - failed)
-
-  return [
-    `${summary?.shots_total ?? shotsTotal} 镜`,
-    `待生成 ${pendingGeneration}`,
-    `生成中 ${generating}`,
-    `待采纳 ${pendingAdoption}`,
-    `已采纳 ${adopted}`,
-    `生成失败 ${failed}`,
-  ].join(' · ')
 }

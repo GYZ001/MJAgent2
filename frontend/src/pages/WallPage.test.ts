@@ -11,7 +11,6 @@ import {
   REVIEW_TABS,
   boundarySourceLabel,
   currentMaterialVersion,
-  currentVersionRefs,
   classifyReferenceBuckets,
   countReferenceImages,
   describeShotUpdate,
@@ -65,36 +64,6 @@ describe('供应商重新提交文案', () => {
     expect(PROVIDER_RESUBMISSION_WARNING).toContain('新的 operation ID')
     expect(PROVIDER_RESUBMISSION_WARNING).toContain('独立预算 claim')
     expect(PROVIDER_RESUBMISSION_WARNING).not.toContain('复用原幂等标识')
-  })
-})
-
-describe('currentVersionRefs', () => {
-  it('优先展示运行中新版本已流出的参考图，而不是旧采用版', () => {
-    const liveRef = {
-      id: 'live-ref',
-      type: 'plot_key_frame',
-      source: 'seedream_generated',
-      selectedForSeedance: true,
-    }
-    const adoptedRef = {
-      id: 'old-ref',
-      type: 'plot_key_frame',
-      source: 'seedream_generated',
-      selectedForSeedance: true,
-    }
-    const shot = {
-      adopted_version_id: 'v1',
-      versions: [
-        version('v2', 'running', [liveRef], 2),
-        version('v1', 'succeeded', [adoptedRef], 1),
-      ],
-    } as Shot
-
-    const result = currentVersionRefs(shot)
-
-    expect(result?.versionId).toBe('v2')
-    expect(result?.refs.map(ref => ref.id)).toEqual(['live-ref'])
-    expect(result?.isFallback).toBe(false)
   })
 })
 

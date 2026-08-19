@@ -117,6 +117,48 @@ describe('AdaptivePoller', () => {
     expect(timers).toHaveLength(1)
   })
 
+  it('forces a fresh fetch after the in-flight request instead of reusing it', async () => {
+    let calls = 0
+    const resolvers: Array<(value: { seq: number }) => void> = []
+    const received: Array<{ seq: number }> = []
+    const timers: Array<() => void> = []
+    const poller = new AdaptivePoller(
+      () => {
+        calls += 1
+        const seq = calls
+        return new Promise<{ seq: number }>(resolve => {
+          resolvers.push(() => resolve({ seq }))
+        })
+      },
+      0,
+      {
+        onData: state => received.push(state),
+        onError: error => { throw error },
+      },
+      {
+        setTimeout: callback => { timers.push(callback); return callback },
+        clearTimeout: () => undefined,
+      },
+    )
+
+    const initial = poller.start()
+    await flush()
+    expect(calls).toBe(1)
+
+    // 写操作后的 force 刷新：即使有在途请求，也必须在其结束后再拉一次“提交后”的新鲜数据。
+    const forced = poller.refresh({ force: true })
+    expect(calls).toBe(1)
+
+    resolvers.shift()!()
+    await flush()
+    expect(calls).toBe(2)
+
+    resolvers.shift()!()
+    await forced
+    await flush()
+    expect(received.at(-1)).toEqual({ seq: 2 })
+  })
+
   it('refetches after an invalidated in-flight request across stop and start', async () => {
     let calls = 0
     const resolvers: Array<(value: number) => void> = []

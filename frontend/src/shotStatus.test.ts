@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Shot, ShotVersion } from './api'
-import { compactShotStage, countAdoptedVideos, formatPipelineSummary, shotVideoState } from './shotStatus'
+import { compactShotStage, shotVideoState } from './shotStatus'
 
 function version(partial: Partial<ShotVersion> & Pick<ShotVersion, 'id' | 'status'>): ShotVersion {
   return {
@@ -205,47 +205,5 @@ describe('shotVideoState', () => {
     expect(state.railClass).toBe('fallback')
     expect(state.fallbackReason).toContain('兜底')
     expect(state.continuityDegraded).toBe(true)
-  })
-})
-
-describe('review wall summary', () => {
-  it('采纳统计包含 stale 的可播放采纳版', () => {
-    const shots = [
-      shot({
-        id: 'a',
-        adopted_version_id: 'v1',
-        versions: [version({ id: 'v1', status: 'succeeded', video_url: '/a.mp4' })],
-      }),
-      shot({
-        id: 'b',
-        adopted_version_id: 'v2',
-        video_stale: true,
-        versions: [version({ id: 'v2', status: 'succeeded', video_url: '/b.mp4' })],
-      }),
-    ]
-
-    expect(countAdoptedVideos(shots)).toBe(2)
-  })
-
-  it('顶部汇总只展示五态', () => {
-    const summary = formatPipelineSummary({
-      shots_total: 5,
-      adopted: 1,
-      with_candidate: 2,
-      upstream_generating: 1,
-      preparing_references: 0,
-      queued: 0,
-      waiting_human: 1,
-      failed: 1,
-      video_status_counts: {
-        pending_generation: 1,
-        generating: 1,
-        pending_adoption: 1,
-        adopted: 1,
-        generation_failed: 1,
-      },
-    }, 5)
-
-    expect(summary).toBe('5 镜 · 待生成 1 · 生成中 1 · 待采纳 1 · 已采纳 1 · 生成失败 1')
   })
 })
