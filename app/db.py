@@ -1147,36 +1147,6 @@ def _open_connection(*, timeout: float = 30.0) -> sqlite3.Connection:
 
 def _is_transient_sqlite_lock(exc: sqlite3.OperationalError) -> bool:
     error_code = getattr(exc, "sqlite_errorcode", None)
-    # #region debug-point E:sqlite-lock-classification
-    try:
-        import os as _debug_os
-        import urllib.request as _debug_request
-        if _debug_os.environ.get("PYTEST_CURRENT_TEST"):
-            raise RuntimeError("debug instrumentation disabled under pytest")
-        _debug_request.urlopen(
-            _debug_request.Request(
-                "http://127.0.0.1:7778/event",
-                data=json.dumps({
-                    "sessionId": "three-episode-video",
-                    "runId": "pre-fix",
-                    "hypothesisId": "E",
-                    "location": "app/db.py:_is_transient_sqlite_lock",
-                    "msg": "[DEBUG] classify sqlite operational error",
-                    "data": {
-                        "python_has_sqlite_errorcode": hasattr(exc, "sqlite_errorcode"),
-                        "sqlite_errorcode": error_code,
-                        "sqlite_errorname": getattr(exc, "sqlite_errorname", None),
-                        "message": str(exc)[:200],
-                    },
-                    "ts": int(time.time() * 1000),
-                }).encode(),
-                headers={"Content-Type": "application/json"},
-            ),
-            timeout=1,
-        ).read()
-    except Exception:
-        pass
-    # #endregion
     if error_code is None:
         return False
     return (int(error_code) & 0xFF) in {

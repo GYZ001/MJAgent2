@@ -1770,43 +1770,6 @@ async def _stream_chat_completion(
         )
     except (TypeError, ValueError):
         total_timeout_s = 1200.0
-    # #region debug-point A:runtime-timeout-support
-    try:
-        import sys as _debug_sys
-        import urllib.request as _debug_request
-        _debug_url = "http://127.0.0.1:7777/event"
-        _debug_session = "generation-workflow-errors"
-        with open(".dbg/generation-workflow-errors.env", encoding="utf-8") as _debug_env:
-            for _debug_line in _debug_env:
-                if _debug_line.startswith("DEBUG_SERVER_URL="):
-                    _debug_url = _debug_line.split("=", 1)[1].strip()
-                elif _debug_line.startswith("DEBUG_SESSION_ID="):
-                    _debug_session = _debug_line.split("=", 1)[1].strip()
-        _debug_request.urlopen(
-            _debug_request.Request(
-                _debug_url,
-                data=json.dumps({
-                    "sessionId": _debug_session,
-                    "runId": "post-fix",
-                    "hypothesisId": "A",
-                    "location": "app/hiagent.py:_stream_chat_completion",
-                    "msg": "[DEBUG] stream timeout runtime support",
-                    "data": {
-                        "python": _debug_sys.version.split()[0],
-                        "has_asyncio_timeout": hasattr(asyncio, "timeout"),
-                        "total_timeout_s": total_timeout_s,
-                        "kind": kind,
-                        "model": model,
-                    },
-                    "ts": int(time.time() * 1000),
-                }).encode(),
-                headers={"Content-Type": "application/json"},
-            ),
-            timeout=1,
-        ).read()
-    except Exception:
-        pass
-    # #endregion
     try:
         async def consume_stream() -> None:
             nonlocal received_chars, last_progress_chars, last_progress_at, saw_done
