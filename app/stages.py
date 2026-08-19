@@ -179,6 +179,11 @@ BLUEPRINT_SHARD_MIN_TOKENS = 6144
 BLUEPRINT_SHARD_MAX_TOKENS = 16384
 BLUEPRINT_SHARD_MAX_ATTEMPTS = 3
 BLUEPRINT_REVIEW_FORMAT_RETRY_LIMIT = 1
+# Extra attempts for a single independent semantic reviewer when the provider
+# never received the request (delivery_state == not_sent, replay_safe). A
+# transient not-sent failure of one reviewer must not discard the whole
+# multi-round blueprint generation; genuinely-unknown outcomes still fail closed.
+BLUEPRINT_REVIEW_PROVIDER_RETRY_LIMIT = 1
 BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS = 32
 BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS = 131072
 BLUEPRINT_GENERATION_MAX_WALL_SECONDS = 1800.0
@@ -5226,9 +5231,44 @@ async def _semantic_review_narrative_blueprint(
             ]
             return review
 
+        async def run_reviewer_resilient(
+            sample_no: int,
+        ) -> BlueprintSemanticReview:
+            # Retry a single reviewer ONLY when the provider never received the
+            # request (not_sent + replay_safe): that cannot double-charge or
+            # leave unknown liability, and re-uses the same deterministic
+            # operation_id. Timeouts / mid-stream cuts (unknown outcome) are not
+            # ProviderError-not_sent, so they still propagate and fail closed.
+            attempts = BLUEPRINT_REVIEW_PROVIDER_RETRY_LIMIT + 1
+            for attempt in range(1, attempts + 1):
+                try:
+                    return await run_reviewer(sample_no)
+                except hiagent.ProviderError as exc:
+                    replay_safe = bool(
+                        getattr(exc, "delivery_state", None) == "not_sent"
+                        and getattr(exc, "replay_safe", False)
+                    )
+                    if not replay_safe or attempt >= attempts:
+                        raise
+                    if trace.run_id:
+                        evidence_repository.append_event(
+                            trace.run_id,
+                            "BLUEPRINT_REVIEWER_RETRY",
+                            "info",
+                            "独立审稿样本未送达，按 replay-safe 重试同一确定性 operation",
+                            step_run_id=trace.step_run_id,
+                            trace_id=trace.trace_id,
+                            payload={
+                                "review_round": review_round,
+                                "review_sample": sample_no,
+                                "attempt": attempt,
+                            },
+                        )
+            raise AssertionError("unreachable reviewer retry exhaustion")
+
         results = await asyncio.gather(
-            run_reviewer(1),
-            run_reviewer(2),
+            run_reviewer_resilient(1),
+            run_reviewer_resilient(2),
             return_exceptions=True,
         )
         for sample_no, result in enumerate(results, start=1):
