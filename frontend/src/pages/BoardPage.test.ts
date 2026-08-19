@@ -13,6 +13,7 @@ import {
   storyboardSaveDisabledReason,
   storyboardShotCheckpointLabel,
   storyboardSpokenChars,
+  shotSpokenLimit,
   storyboardStartPreviewCopy,
   storyboardToolbarActions,
 } from './BoardPage'
@@ -83,6 +84,17 @@ describe('分镜台结构化 diff 与问题筛选', () => {
     const value = shot({ spoken_limit: 5 })
     expect(storyboardSpokenChars(value)).toBe(7)
     expect(isStoryboardProblemShot(value)).toBe(true)
+  })
+
+  it('口播上限优先采信后端 spoken_limit，缺失时按后端公式 clamp(dur,5,10)*18//5 兜底', () => {
+    // 后端下发时直接采用，列表与编辑器同一口径。
+    expect(shotSpokenLimit(shot({ spoken_limit: 12 }))).toBe(12)
+    // 缺失时按 config.max_spoken_chars_for_duration 兜底：5s→18、8s→28、10s→36，并对时长做 5–10 clamp。
+    expect(shotSpokenLimit(shot({ spoken_limit: undefined, duration_s: 5 }))).toBe(18)
+    expect(shotSpokenLimit(shot({ spoken_limit: undefined, duration_s: 8 }))).toBe(28)
+    expect(shotSpokenLimit(shot({ spoken_limit: undefined, duration_s: 10 }))).toBe(36)
+    expect(shotSpokenLimit(shot({ spoken_limit: undefined, duration_s: 3 }))).toBe(18)
+    expect(shotSpokenLimit(shot({ spoken_limit: undefined, duration_s: 99 }))).toBe(36)
   })
 
   it('质量优化建议不混入必须处理的问题镜', () => {
