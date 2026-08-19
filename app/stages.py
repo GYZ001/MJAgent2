@@ -179,6 +179,11 @@ BLUEPRINT_SHARD_MIN_TOKENS = 6144
 BLUEPRINT_SHARD_MAX_TOKENS = 16384
 BLUEPRINT_SHARD_MAX_ATTEMPTS = 3
 BLUEPRINT_REVIEW_FORMAT_RETRY_LIMIT = 1
+# A full (non-targeted) review of a converged blueprint can carry a dozen+
+# must-fix issues; 8192 output tokens is exactly the truncation cliff observed
+# in production (finish_reason=length -> OUTPUT_TRUNCATED, replayed forever).
+# The text model supports up to 32768 output tokens.
+BLUEPRINT_REVIEW_MAX_TOKENS = 16384
 # Extra attempts for a single independent semantic reviewer when the provider
 # never received the request (delivery_state == not_sent, replay_safe). A
 # transient not-sent failure of one reviewer must not discard the whole
@@ -5099,7 +5104,7 @@ async def _semantic_review_narrative_blueprint(
                     ),
                     messages=review_messages,
                     output_schema=review_schema,
-                    requested_max_tokens=8192,
+                    requested_max_tokens=BLUEPRINT_REVIEW_MAX_TOKENS,
                     temperature=0.1,
                 )
             )
@@ -5127,7 +5132,7 @@ async def _semantic_review_narrative_blueprint(
                 )
                 reservation_id = generation_budget.claim(
                     max_tokens=effective_max_tokens,
-                    requested_max_tokens=8192,
+                    requested_max_tokens=BLUEPRINT_REVIEW_MAX_TOKENS,
                     operation_id=reservation_operation_id,
                 )
                 remaining_seconds = (
@@ -5140,7 +5145,7 @@ async def _semantic_review_narrative_blueprint(
                 validate=validate_review,
                 operation_id=operation_id,
                 temperature=0.1,
-                max_tokens=8192,
+                max_tokens=BLUEPRINT_REVIEW_MAX_TOKENS,
                 format_retry_limit=format_retry_limit,
                 semantic_retry_limit=0,
                 call_meta={
@@ -7604,7 +7609,9 @@ async def _generate_sharded_narrative_blueprint(
                             previous_candidate=previous_candidate,
                             validation_errors=errors,
                         )
-                removed_state_subject_keys = (
+                # Returns a count of removed keys; the in-place normalization
+                # on ``candidate`` is the intended effect.
+                _removed_state_subject_keys = (
                     normalize_blueprint_state_subject_evidence_projection(
                         candidate,
                         source_text,

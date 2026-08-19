@@ -169,6 +169,12 @@ TIMEOUT_CHAT_VIDEO_PLAN_READ = float(
 TIMEOUT_CHAT_STORYBOARD_OUTLINE_READ = float(
     os.environ.get("TIMEOUT_CHAT_STORYBOARD_OUTLINE_READ", "600")
 )
+# 蓝图语义审稿是长结构化生成：完整复审要把整份蓝图 + 来源投影一起送审，
+# 实测单次可达 300s+（生产已出现 312s ReadTimeout）。单独放宽到 600s，
+# 与 baseline 阶段一致，避免慢审稿在接近完成时被断开并整次重放。
+TIMEOUT_CHAT_BLUEPRINT_REVIEW_READ = float(
+    os.environ.get("TIMEOUT_CHAT_BLUEPRINT_REVIEW_READ", "600")
+)
 TIMEOUT_VIDEO_CREATE = 30.0
 TIMEOUT_VIDEO_POLL = 30.0
 TIMEOUT_DOWNLOAD = 180.0

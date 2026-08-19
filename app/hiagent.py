@@ -120,6 +120,17 @@ def _cached_successful_provider_response(
             value = json.loads(row["response_json"])
             if not isinstance(value, dict):
                 continue
+            # A finish_reason=length response is truncated output: every
+            # consumer rejects it via ``_reject_truncated_chat_response``, so
+            # it is NOT a valid durable success. Replaying it only reproduces
+            # the same failure on every run (and forces a pointless format
+            # repair). Skip such rows so a later, valid attempt wins.
+            try:
+                finish_reason = value["choices"][0].get("finish_reason")
+            except (KeyError, IndexError, TypeError, AttributeError):
+                finish_reason = None
+            if finish_reason == "length":
+                continue
             from app.db import provider_request_hash
 
             stored_hash = str(row["request_hash"] or "")
@@ -1088,6 +1099,11 @@ def _chat_read_timeout_s(call_meta: dict | None) -> float:
         )
     if stage_key == "storyboard" or stage_key.startswith("storyboard_shot_"):
         return max(config.TIMEOUT_CHAT_READ, config.TIMEOUT_CHAT_BASELINE_READ)
+    if stage_key == "screenplay_blueprint_review":
+        return max(
+            config.TIMEOUT_CHAT_READ,
+            config.TIMEOUT_CHAT_BLUEPRINT_REVIEW_READ,
+        )
     if stage == "episode_video_mode_plan":
         return max(
             config.TIMEOUT_CHAT_READ,

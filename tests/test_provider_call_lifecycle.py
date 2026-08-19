@@ -92,6 +92,12 @@ def test_screenplay_baseline_uses_dedicated_long_read_timeout(monkeypatch) -> No
     assert hiagent._chat_read_timeout_s({"stage_key": "storyboard_outline"}) == 720.0
     assert hiagent._chat_read_timeout_s({"stage_key": "storyboard"}) == 600.0
     assert hiagent._chat_read_timeout_s({"stage_key": "storyboard_shot_6"}) == 600.0
+    monkeypatch.setattr(
+        hiagent.config, "TIMEOUT_CHAT_BLUEPRINT_REVIEW_READ", 600.0,
+    )
+    assert hiagent._chat_read_timeout_s(
+        {"stage_key": "screenplay_blueprint_review"}
+    ) == 600.0
 
 
 def test_post_json_writes_running_before_updating_same_ledger_row(monkeypatch) -> None:
@@ -1831,3 +1837,100 @@ def test_provider_stream_progress_persists_heartbeat(
     assert row["first_chunk_at"] == 1234.5
     assert row["last_chunk_at"] == 1234.5
     assert row["received_chars"] == 8192
+
+
+def test_cached_replay_skips_truncated_length_responses(monkeypatch) -> None:
+    """A stored finish_reason=length response is truncated output and must not
+    be replayed as a durable success (it is always rejected downstream). A
+    later valid attempt with the same operation must win the replay."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """CREATE TABLE provider_calls(
+               id INTEGER PRIMARY KEY, response_json TEXT, meta TEXT,
+               request_json TEXT, request_hash TEXT, contract_version TEXT,
+               kind TEXT, model TEXT, operation_id TEXT, status TEXT)"""
+    )
+    payload = {
+        "model": "text-model",
+        "messages": [{"role": "user", "content": "review"}],
+        "max_tokens": 100,
+    }
+    from app.db import provider_request_hash
+
+    def insert(call_id, finish_reason, content):
+        conn.execute(
+            """INSERT INTO provider_calls(
+                   id,response_json,meta,request_json,request_hash,
+                   contract_version,kind,model,operation_id,status
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                call_id,
+                json.dumps({
+                    "choices": [{
+                        "finish_reason": finish_reason,
+                        "message": {"content": content},
+                    }],
+                }),
+                "{}",
+                json.dumps(payload),
+                provider_request_hash(payload),
+                "",
+                "chat", "text-model", "op-review", "OK",
+            ),
+        )
+
+    # Newer row is truncated -> must be skipped in favor of the older valid row.
+    insert(2, "length", '{"issues": [')
+    insert(1, "stop", '{"issues": []}')
+    conn.commit()
+    monkeypatch.setattr(hiagent, "get_conn", lambda: conn)
+    monkeypatch.setattr(hiagent, "log_provider_call", lambda *_a, **_k: None)
+
+    meta = {"reuse_successful_operation": True, "operation_id": "op-review"}
+    result = hiagent._cached_successful_provider_response(
+        "chat", "text-model", payload, meta,
+    )
+
+    assert result is not None
+    assert result["choices"][0]["finish_reason"] == "stop"
+
+
+def test_cached_replay_returns_none_when_only_truncated_rows_exist(monkeypatch) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """CREATE TABLE provider_calls(
+               id INTEGER PRIMARY KEY, response_json TEXT, meta TEXT,
+               request_json TEXT, request_hash TEXT, contract_version TEXT,
+               kind TEXT, model TEXT, operation_id TEXT, status TEXT)"""
+    )
+    payload = {
+        "model": "text-model",
+        "messages": [{"role": "user", "content": "review"}],
+        "max_tokens": 100,
+    }
+    from app.db import provider_request_hash
+
+    conn.execute(
+        """INSERT INTO provider_calls(
+               id,response_json,meta,request_json,request_hash,
+               contract_version,kind,model,operation_id,status
+           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            1,
+            json.dumps({"choices": [{"finish_reason": "length",
+                                     "message": {"content": " "}}]}),
+            "{}", json.dumps(payload), provider_request_hash(payload),
+            "", "chat", "text-model", "op-review", "OK",
+        ),
+    )
+    conn.commit()
+    monkeypatch.setattr(hiagent, "get_conn", lambda: conn)
+    monkeypatch.setattr(hiagent, "log_provider_call", lambda *_a, **_k: None)
+
+    meta = {"reuse_successful_operation": True, "operation_id": "op-review"}
+    result = hiagent._cached_successful_provider_response(
+        "chat", "text-model", payload, meta,
+    )
+    assert result is None
