@@ -3458,10 +3458,22 @@ async def _ensure_ai_video_prompt(
         AI_VIDEO_PROMPT_CONTRACT_VERSION,
         generate_ai_video_prompt,
     )
+    from app.video_prompt_profiles import resolve_video_prompt_profile
+
+    target_provider = hiagent.active_provider("video")
+    target_model = hiagent.active_model("video", target_provider)
+    target_profile = resolve_video_prompt_profile(
+        provider=target_provider,
+        model=target_model,
+    )
 
     if (
         meta.get("ai_video_prompt_contract_version")
         == AI_VIDEO_PROMPT_CONTRACT_VERSION
+        and meta.get("ai_video_prompt_profile_id") == target_profile.profile_id
+        and meta.get("ai_video_prompt_profile_version") == target_profile.version
+        and meta.get("ai_video_prompt_target_provider") == target_provider
+        and meta.get("ai_video_prompt_target_model") == target_model
         and isinstance(meta.get("ai_video_prompt_draft"), dict)
         and str(meta.get("ai_video_prompt_base") or "").strip()
     ):
@@ -3503,6 +3515,8 @@ async def _ensure_ai_video_prompt(
             or video_modes.REFERENCE_IMAGE_MODE
         ),
         operation_scope=str(version["id"]),
+        target_provider=target_provider,
+        target_model=target_model,
         user_instruction=str(meta.get("prompt_user_instruction") or ""),
         critique=[
             str(item).strip()
@@ -3514,6 +3528,10 @@ async def _ensure_ai_video_prompt(
     meta["ai_video_prompt_contract_version"] = (
         AI_VIDEO_PROMPT_CONTRACT_VERSION
     )
+    meta["ai_video_prompt_profile_id"] = target_profile.profile_id
+    meta["ai_video_prompt_profile_version"] = target_profile.version
+    meta["ai_video_prompt_target_provider"] = target_provider
+    meta["ai_video_prompt_target_model"] = target_model
     meta["ai_video_prompt_draft"] = draft.model_dump(mode="json")
     meta["ai_video_prompt_base"] = prompt
     meta["ai_video_prompt_generated_at"] = now()

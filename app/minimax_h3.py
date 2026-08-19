@@ -380,6 +380,28 @@ def _tagged_prompt(
             )
             for index in range(1, video_count + 1)
         )
+    if mappings and prompt_text.startswith("subject_definitions:\n"):
+        mappings = [
+            line
+            for line in mappings
+            if not (
+                (label_match := re.match(r"(<(?:Picture|Video|Audio) \d+>)", line))
+                and re.search(
+                    re.escape(label_match.group(1)) + r"\s*:",
+                    prompt_text,
+                )
+            )
+        ]
+        if not mappings:
+            return prompt_text
+        heading, body = prompt_text.split("\n", 1)
+        return (
+            heading
+            + "\n"
+            + "\n".join(mappings)
+            + "\n"
+            + body
+        )
     return (
         "[MiniMax H3 input mapping]\n"
         + " ".join(mappings)

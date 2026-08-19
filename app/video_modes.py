@@ -4556,6 +4556,18 @@ def append_reference_prompt_notes_from_dicts(
         + " ".join(lines)
         + REFERENCE_SINGLE_INSTANCE_NOTE
     )
+    if prompt_body.startswith("subject_definitions:\n"):
+        heading, body = prompt_body.split("\n", 1)
+        return (
+            heading
+            + "\n"
+            + " ".join(lines)
+            + " "
+            + REFERENCE_SINGLE_INSTANCE_NOTE.strip()
+            + "\n"
+            + body
+            + prompt_args
+        )
     return prompt_body + note + prompt_args
 
 

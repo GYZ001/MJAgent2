@@ -12,9 +12,14 @@ from app.compiler import sanitize_seedance_prompt
 from app.continuity import effective_characters_visible, prompt_source_provenance_errors
 from app.harness import model_gateway
 from app.schemas import Bible, Shot
+from app.video_prompt_profiles import (
+    SEEDANCE_2_PROFILE,
+    VideoPromptProfile,
+    resolve_video_prompt_profile,
+)
 
 
-AI_VIDEO_PROMPT_CONTRACT_VERSION = "ai_physical_performance_v1"
+AI_VIDEO_PROMPT_CONTRACT_VERSION = "ai_model_adaptive_prompt_v2"
 _TIME_EPSILON = 0.02
 
 
@@ -59,6 +64,7 @@ class CameraDirection(BaseModel):
 
 class AIVideoPromptDraft(BaseModel):
     visible_characters: list[str] = Field(default_factory=list)
+    visual_medium: str = ""
     character_direction: str
     scene_direction: str
     reference_strategy: str
@@ -80,6 +86,8 @@ class AIVideoPromptDraft(BaseModel):
     performance_direction: str
     dialogue: list[DialogueDirection] = Field(default_factory=list)
     on_screen_text: str
+    overall_soundscape: str = ""
+    non_diegetic_music: str = "N/A"
     negative_constraints: list[str] = Field(min_length=1, max_length=6)
 
 
@@ -220,7 +228,7 @@ def _render_pose(items: list[CharacterPoseDirection], environment: str) -> str:
     return "\n".join(lines)
 
 
-def render_ai_video_prompt(
+def _render_seedance_prompt(
     draft: AIVideoPromptDraft,
     *,
     shot: Shot,
@@ -255,6 +263,7 @@ def render_ai_video_prompt(
         f"构图：{draft.camera.framing}；动作可见性：{draft.camera.action_visibility}。"
     )
     sections = [
+        ("VISUAL MEDIUM", draft.visual_medium),
         ("CHARACTERS", draft.character_direction),
         ("SCENE", draft.scene_direction),
         ("REFERENCE STRATEGY", draft.reference_strategy),
@@ -268,6 +277,8 @@ def render_ai_video_prompt(
         ("CAMERA", camera),
         ("PERFORMANCE", draft.performance_direction),
         ("DIALOGUE", dialogue),
+        ("SOUNDSCAPE", draft.overall_soundscape),
+        ("MUSIC", draft.non_diegetic_music),
         ("ON-SCREEN TEXT", draft.on_screen_text),
         ("NEGATIVE", "；".join(draft.negative_constraints)),
     ]
@@ -278,6 +289,164 @@ def render_ai_video_prompt(
     )
     return sanitize_seedance_prompt(
         f"{body} --ratio {aspect_ratio} --dur {shot.duration_s}"
+    )
+
+
+def _dialogue_language(text: str) -> str:
+    return "Chinese" if any("\u4e00" <= char <= "\u9fff" for char in text) else "English"
+
+
+def _render_h3_timeline(
+    draft: AIVideoPromptDraft,
+    *,
+    shot: Shot,
+) -> str:
+    opening = " ".join(filter(None, (
+        draft.visual_medium.strip(),
+        draft.character_direction.strip(),
+        draft.scene_direction.strip(),
+        "Opening state: " + _render_pose(
+            draft.start_pose,
+            draft.start_environment,
+        ).replace("\n", " "),
+    )))
+    beats = " ".join(
+        (
+            f"From {beat.start_s:.2f} to {beat.end_s:.2f} seconds, "
+            f"{beat.physical_action}; body mechanics: {beat.body_mechanics}; "
+            f"camera behavior: {beat.camera_behavior}"
+            + (
+                f"; dialogue synchronization: {beat.dialogue_sync}"
+                if beat.dialogue_sync.strip()
+                else ""
+            )
+            + "."
+        )
+        for beat in draft.motion_beats
+    )
+    speaker_ids: dict[str, str] = {}
+    dialogue_parts: list[str] = []
+    for item in draft.dialogue:
+        speaker_id = speaker_ids.setdefault(
+            item.speaker,
+            f"S{len(speaker_ids) + 1}",
+        )
+        voice_mode = (
+            "says in an off-screen voiceover"
+            if item.delivery in {"offscreen_voice", "narration"}
+            else "says"
+        )
+        closed_lips = (
+            " while the corresponding on-screen character's lips remain completely closed"
+            if item.delivery in {"offscreen_voice", "narration"}
+            else ""
+        )
+        dialogue_parts.append(
+            f"From {item.start_s:.2f} to {item.end_s:.2f} seconds, "
+            f"{item.speaker} ({speaker_id}) {voice_mode}: "
+            f"<d>[{_dialogue_language(item.text)}] {item.text}</d>"
+            f"{closed_lips}; physical delivery: {item.physical_delivery}."
+        )
+    dialogue = " ".join(dialogue_parts)
+    interaction = ""
+    if draft.interaction_kind != "none":
+        interaction = (
+            f" Physical interaction: {', '.join(draft.interaction_participants)}; "
+            f"contact point: {draft.contact_point or 'no physical contact'}; "
+            f"the contact point remains visible: "
+            f"{'yes' if draft.contact_point_visible else 'no'}."
+        )
+    camera = (
+        f" Camera plan: {draft.camera.shot_size}; {draft.camera.angle}; "
+        f"{draft.camera.movement}; framing: {draft.camera.framing}; "
+        f"action visibility: {draft.camera.action_visibility}."
+    )
+    ending = (
+        f" End state at {float(shot.duration_s):.2f} seconds: "
+        + _render_pose(draft.end_pose, draft.end_environment).replace("\n", " ")
+    )
+    text_instruction = f" Visible text: {draft.on_screen_text}."
+    constraints = " Constraints: " + "; ".join(draft.negative_constraints) + "."
+    return (
+        f"[Shot 1] {opening} {beats}{dialogue}{interaction}{camera} "
+        f"Performance: {draft.performance_direction}.{ending}"
+        f"{text_instruction}{constraints}"
+    ).strip()
+
+
+def _render_minimax_h3_prompt(
+    draft: AIVideoPromptDraft,
+    *,
+    shot: Shot,
+    video_generation_mode: str,
+    aspect_ratio: str,
+) -> str:
+    timeline = _render_h3_timeline(draft, shot=shot)
+    soundscape = (
+        draft.overall_soundscape.strip()
+        or "Natural ambience and synchronized physical action sounds follow the described timeline."
+    )
+    music = draft.non_diegetic_music.strip() or "N/A"
+    duration = float(shot.duration_s)
+    if video_generation_mode == "FIRST_FRAME_MODE":
+        body = (
+            "For the target video, at 0.00 seconds into the target video, "
+            "<Picture 1> (from [Shot 1]) is fully referenced.\n\n"
+            f"integrated_multimodal_description: {timeline}\n\n"
+            f"overall_soundscape: {soundscape}\n\n"
+            f"non_diegetic_music: {music}"
+        )
+    elif video_generation_mode == "FIRST_LAST_FRAME_MODE":
+        body = (
+            "How the reference pictures align with the target video — "
+            "Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target "
+            f"video; Picture 2 (from Shot 1) aligns with the {duration:.2f}-second "
+            "mark of the target video.\n\n"
+            f"integrated_multimodal_description: {timeline}\n\n"
+            f"overall_soundscape: {soundscape}\n\n"
+            f"non_diegetic_music: {music}"
+        )
+    else:
+        body = (
+            "subject_definitions:\n"
+            "Reference subjects and bindings are declared by the provider input-role "
+            "contract. Each reference keeps only its declared identity, environment, "
+            "motion, camera, timing, or audio role.\n\n"
+            "summary:\n"
+            "[reference generation] Generate the target shot from the declared "
+            "subjects and reference roles while preserving the directed action and "
+            "continuity endpoint.\n\n"
+            "retention_analysis:\n"
+            "Each declared reference: fully_preserved for its assigned dimensions; "
+            "attributes outside that assignment must not transfer.\n\n"
+            f"detailed_description:\n{timeline}\n\n"
+            f"overall_soundscape:\n{soundscape}\n\n"
+            f"non_diegetic_music:\n{music}"
+        )
+    return sanitize_seedance_prompt(
+        f"{body} --ratio {aspect_ratio} --dur {shot.duration_s}"
+    )
+
+
+def render_ai_video_prompt(
+    draft: AIVideoPromptDraft,
+    *,
+    shot: Shot,
+    aspect_ratio: str = "9:16",
+    prompt_profile: VideoPromptProfile = SEEDANCE_2_PROFILE,
+    video_generation_mode: str = "REFERENCE_IMAGE_MODE",
+) -> str:
+    if prompt_profile.render_format == "minimax_h3_native_fields":
+        return _render_minimax_h3_prompt(
+            draft,
+            shot=shot,
+            video_generation_mode=video_generation_mode,
+            aspect_ratio=aspect_ratio,
+        )
+    return _render_seedance_prompt(
+        draft,
+        shot=shot,
+        aspect_ratio=aspect_ratio,
     )
 
 
@@ -300,15 +469,22 @@ async def generate_ai_video_prompt(
     continuity_contract: str,
     video_generation_mode: str,
     operation_scope: str,
+    target_provider: str = "hiagent",
+    target_model: str = "",
     user_instruction: str = "",
     critique: list[str] | None = None,
 ) -> tuple[str, AIVideoPromptDraft]:
+    prompt_profile = resolve_video_prompt_profile(
+        provider=target_provider,
+        model=target_model,
+    )
     payload = {
         "task": (
-            "将内部 Cinematic Continuity Contract 编译成一条可直接提交 MiniMax H3 的"
-            " Physical Performance Generation Prompt。所有创作字段必须由你重新导演和生成，"
-            "不要复制长合同的重复约束。重点写清可见骨架姿态、重心、手部、视线、呼吸、"
-            "连续动作力学、摄影可见范围，以及动作与权威声轨的同一节奏。"
+            "将内部 Cinematic Continuity Contract 编译成一条可直接提交"
+            f" {prompt_profile.model_family} 的漫剧视频提示词。先形成共享导演结构化草稿，"
+            "所有创作字段必须重新导演和生成，不要复制长合同的重复约束。重点写清"
+            "可见骨架姿态、重心、手部、视线、呼吸、连续动作力学、动作因果、"
+            "摄影可见范围，以及动作与权威声轨的同一节奏。"
         ),
         "hard_rules": [
             "start_pose/end_pose 只能写可直接看到的身体与环境状态，不能写剧情态度或台词",
@@ -318,7 +494,17 @@ async def generate_ai_video_prompt(
             "camera 必须覆盖主动作真正发生的身体区域；不能同时要求大动作和单人大头特写",
             "negative_constraints 只写本镜最关键的 1–6 条风险，禁止复述整份长合同",
             "禁止添加合同外人物、台词、动作结果、道具、文字或下一镜内容",
+            *prompt_profile.generation_rules,
         ],
+        "target_prompt_profile": {
+            "provider": target_provider,
+            "model": target_model,
+            "profile_id": prompt_profile.profile_id,
+            "profile_version": prompt_profile.version,
+            "model_family": prompt_profile.model_family,
+            "output_language": prompt_profile.output_language,
+            "render_format": prompt_profile.render_format,
+        },
         "video_generation_mode": video_generation_mode,
         "duration_s": shot.duration_s,
         "visible_characters": effective_characters_visible(shot),
@@ -367,6 +553,8 @@ async def generate_ai_video_prompt(
                 "role": "system",
                 "content": (
                     "你是电影动作导演和 AI 视频提示词编译器。"
+                    f"当前目标模型是 {prompt_profile.model_family}；"
+                    f"创作字段语言要求为 {prompt_profile.output_language}。"
                     "只输出符合 Schema 的一个 JSON 对象，不输出 Markdown 或解释。"
                 ),
             },
@@ -388,6 +576,10 @@ async def generate_ai_video_prompt(
             "initiator_label": "AI 视频提示词编译",
             "shot_no": shot.shot_no,
             "contract_version": AI_VIDEO_PROMPT_CONTRACT_VERSION,
+            "prompt_profile_id": prompt_profile.profile_id,
+            "prompt_profile_version": prompt_profile.version,
+            "target_video_provider": target_provider,
+            "target_video_model": target_model,
         },
         repair_context=(
             f"镜头时长={shot.duration_s}s；"
@@ -395,7 +587,12 @@ async def generate_ai_video_prompt(
             f"权威声轨={json.dumps(_expected_dialogue(shot), ensure_ascii=False)}"
         ),
     )
-    prompt = render_ai_video_prompt(draft, shot=shot)
+    prompt = render_ai_video_prompt(
+        draft,
+        shot=shot,
+        prompt_profile=prompt_profile,
+        video_generation_mode=video_generation_mode,
+    )
     if len(prompt) > config.PROMPT_CHAR_LIMIT:
         raise model_gateway.StructuredSemanticError(
             f"AI 视频提示词长度 {len(prompt)} 超过上限 {config.PROMPT_CHAR_LIMIT}"

@@ -5,6 +5,11 @@ import asyncio
 import pytest
 
 from app import video_modes, video_prompt_ai
+from app.video_prompt_profiles import (
+    MINIMAX_H3_PROFILE,
+    SEEDANCE_2_PROFILE,
+    resolve_video_prompt_profile,
+)
 from app.hiagent import ProviderError
 from app.schemas import (
     AudioTimelineItem,
@@ -229,6 +234,58 @@ def test_ai_video_prompt_is_physical_and_audio_aligned() -> None:
     assert prompt.endswith("--ratio 9:16 --dur 5")
 
 
+def test_video_prompt_profile_follows_video_provider() -> None:
+    assert resolve_video_prompt_profile(
+        provider="hiagent",
+        model="seedance-2.0",
+    ) == SEEDANCE_2_PROFILE
+    assert resolve_video_prompt_profile(
+        provider="minimax_h3",
+        model="MiniMax-H3",
+    ) == MINIMAX_H3_PROFILE
+
+
+def test_h3_keyframe_prompt_uses_native_three_field_contract() -> None:
+    prompt = video_prompt_ai.render_ai_video_prompt(
+        _draft(),
+        shot=_shot(),
+        prompt_profile=MINIMAX_H3_PROFILE,
+        video_generation_mode=video_modes.FIRST_LAST_FRAME_MODE,
+    )
+
+    assert prompt.startswith(
+        "How the reference pictures align with the target video"
+    )
+    assert "0.00-second mark" in prompt
+    assert "5.00-second mark" in prompt
+    assert "integrated_multimodal_description:" in prompt
+    assert "overall_soundscape:" in prompt
+    assert "non_diegetic_music:" in prompt
+    assert "<d>[Chinese] 别走。</d>" in prompt
+    assert prompt.endswith("--ratio 9:16 --dur 5")
+
+
+def test_h3_reference_prompt_uses_native_six_section_contract() -> None:
+    prompt = video_prompt_ai.render_ai_video_prompt(
+        _draft(),
+        shot=_shot(),
+        prompt_profile=MINIMAX_H3_PROFILE,
+        video_generation_mode=video_modes.REFERENCE_IMAGE_MODE,
+    )
+
+    headings = [
+        "subject_definitions:",
+        "summary:",
+        "retention_analysis:",
+        "detailed_description:",
+        "overall_soundscape:",
+        "non_diegetic_music:",
+    ]
+    positions = [prompt.index(heading) for heading in headings]
+    assert positions == sorted(positions)
+    assert "[reference generation]" in prompt
+
+
 def test_ai_video_prompt_rejects_timeline_and_dialogue_drift() -> None:
     shot = _shot()
     draft = _draft()
@@ -267,6 +324,9 @@ def test_ai_prompt_generation_uses_structured_model_output(monkeypatch) -> None:
     assert generated == draft
     assert calls[0]["call_meta"]["call_role"] == "video_prompt_compiler"
     assert "AI 视频提示词编译" == calls[0]["call_meta"]["initiator_label"]
+    assert calls[0]["call_meta"]["prompt_profile_id"] == (
+        SEEDANCE_2_PROFILE.profile_id
+    )
     assert "别走。" in prompt
 
 

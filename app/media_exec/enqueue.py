@@ -1372,6 +1372,10 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         compile_prompt,
     )
     from app.video_prompt_ai import AI_VIDEO_PROMPT_CONTRACT_VERSION
+    from app.video_prompt_profiles import (
+        resolve_video_prompt_profile,
+        video_prompt_target_fingerprint,
+    )
     from app.continuity import (
         derive_continuity_mode,
         effective_state_out,
@@ -1381,6 +1385,19 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         resolve_do_not_repeat_texts,
         shot_contract_dict,
         uses_previous_tail_frame,
+    )
+    target_video_provider = hiagent.active_provider("video")
+    target_video_model = hiagent.active_model(
+        "video",
+        target_video_provider,
+    )
+    target_prompt_profile = resolve_video_prompt_profile(
+        provider=target_video_provider,
+        model=target_video_model,
+    )
+    target_prompt_fingerprint = video_prompt_target_fingerprint(
+        provider=target_video_provider,
+        model=target_video_model,
     )
     authority_context = _assert_enqueue_storyboard_authority(shot_id)
     if (
@@ -1712,6 +1729,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         + f"|keyframe_prompt_contract:{video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION}"
         + f"|video_prompt_contract:{VIDEO_PROMPT_CONTRACT_VERSION}"
         + f"|ai_video_prompt_contract:{AI_VIDEO_PROMPT_CONTRACT_VERSION}"
+        + f"|ai_video_prompt_target:{target_prompt_fingerprint}"
         + f"|prompt_user_instruction:{(prompt_override or '').strip()}"
         + f"|previous_prompt:{previous_prompt_fingerprint}"
         + f"|reference_input_policy:{video_modes.REFERENCE_INPUT_POLICY_VERSION}"
@@ -1827,6 +1845,10 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         "video_prompt_contract_version": VIDEO_PROMPT_CONTRACT_VERSION,
         "ai_video_prompt_required": True,
         "ai_video_prompt_contract_target": AI_VIDEO_PROMPT_CONTRACT_VERSION,
+        "ai_video_prompt_profile_target": target_prompt_profile.profile_id,
+        "ai_video_prompt_profile_version_target": target_prompt_profile.version,
+        "ai_video_prompt_target_provider": target_video_provider,
+        "ai_video_prompt_target_model": target_video_model,
         "continuity_contract_prompt": prompt_text,
         "prompt_user_instruction": (prompt_override or "").strip(),
         "prompt_critique": [

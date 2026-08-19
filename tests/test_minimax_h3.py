@@ -198,6 +198,49 @@ def test_minimax_h3_video_reference_mapping_respects_declared_intent(
     assert "当前镜正文" in prompt
 
 
+def test_minimax_h3_injects_input_mapping_into_native_subject_definitions() -> None:
+    prompt = minimax_h3._tagged_prompt(
+        "subject_definitions:\n"
+        "Reference bindings follow the input-role contract.\n\n"
+        "summary:\n[reference generation] One shot.",
+        image_count=1,
+        video_count=1,
+        video_input_intent="CAMERA_REFERENCE",
+    )
+
+    assert prompt.startswith("subject_definitions:\n<Picture 1>")
+    assert "<Video 1> supplies camera movement" in prompt
+    assert "[MiniMax H3 input mapping]" not in prompt
+    assert prompt.index("<Picture 1>") < prompt.index("summary:")
+
+
+def test_h3_reference_binding_stays_inside_subject_definitions() -> None:
+    native_prompt = (
+        "subject_definitions:\n"
+        "Reference subjects follow the input-role contract.\n\n"
+        "summary:\n[reference generation] One shot.\n\n"
+        "retention_analysis:\nPreserve assigned dimensions.\n\n"
+        "detailed_description:\n[Shot 1] One action.\n\n"
+        "overall_soundscape:\nRoom tone.\n\n"
+        "non_diegetic_music:\nN/A --ratio 9:16 --dur 5"
+    )
+    bound = video_modes.append_reference_prompt_notes_from_dicts(
+        native_prompt,
+        [{
+            "type": "character",
+            "entity_name": "A",
+            "relatedCharacterIds": ["A"],
+        }],
+    )
+    provider_prompt = minimax_h3._tagged_prompt(bound, image_count=1)
+
+    subject_block = provider_prompt.split("\n\nsummary:", 1)[0]
+    music_block = provider_prompt.split("non_diegetic_music:", 1)[1]
+    assert "<Picture 1>: use as character「A」" in subject_block
+    assert provider_prompt.count("<Picture 1>:") == 1
+    assert "<Picture 1>" not in music_block
+
+
 def test_minimax_h3_only_consumes_trailing_technical_args() -> None:
     prompt = minimax_h3._tagged_prompt(
         "角色对白中逐字说出“--dur 5”作为口令。\n"
