@@ -2376,3 +2376,78 @@ def test_late_episode_screenplay_auto_adds_character_and_defers_portrait_generat
     ).fetchone()["bible_auto_changes_json"])
     assert queue[0]["character"] == "魂天帝"
     assert queue[0]["status"] == "auto_applied_asset_pending"
+
+
+def test_future_identity_recovers_in_window_name_with_imprecise_evidence(
+    monkeypatch,
+) -> None:
+    """真名逐字在后续窗口、但模型证据措辞不精确时，程序应确定性重定位证据并保留解析。"""
+    future = (
+        "绿袍男子恭敬地说道，许师姐好手段。"
+        "许师姐已经到了凝气第七层，被掌教赐了风幡。"
+        "另一个绿袍修士感慨，孟浩看着许师姐消失在山峦间。"
+    ) * 2
+
+    async def fake_structured(messages, **_kwargs):
+        return SimpleNamespace(characters=[{
+            # 模型证据故意不含真名“许师姐”，模拟今天线上“证据措辞不精确”的情况。
+            "source_label": "会飞的女人",
+            "canonical_name": "许师姐",
+            "identity_kind": "named",
+            "future_evidence": "那女子已经到了凝气第七层",
+        }])
+
+    monkeypatch.setattr(portraits.model_gateway, "chat_structured", fake_structured)
+
+    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
+        [{
+            "source_label": "会飞的女人",
+            "identity_kind": "functional",
+            "kind": "onscreen",
+            "identity_group": "grp-fly",
+        }],
+        source_text="一个会飞的女人出现在众人面前。",
+        future_text=future,
+        bible=Bible(characters=[], world=World(visual_style_canonical="测试")),
+        episode_no=2,
+    ))
+
+    fly = next(item for item in resolved if item["source_label"] == "会飞的女人")
+    assert fly["name"] == "许师姐"
+    assert fly["identity_kind"] == "named"
+    # 证据由程序确定性重定位，必须逐字来自窗口且包含真名。
+    assert "许师姐" in fly["future_evidence"]
+    assert fly["future_evidence"] in future
+
+
+def test_future_identity_rejects_name_absent_from_window(monkeypatch) -> None:
+    """真名不在后续窗口时（模型臆测），即便声称 named 也不得取得解析，防捏造约束不放松。"""
+    future = "绿袍男子恭敬地说道，许师姐好手段。许师姐已经到了凝气第七层。" * 2
+
+    async def fake_structured(messages, **_kwargs):
+        return SimpleNamespace(characters=[{
+            "source_label": "会飞的女人",
+            "canonical_name": "许清",  # 窗口里根本没有“许清”
+            "identity_kind": "named",
+            "future_evidence": "绿袍男子称该会飞的女子为许清",
+        }])
+
+    monkeypatch.setattr(portraits.model_gateway, "chat_structured", fake_structured)
+
+    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
+        [{
+            "source_label": "会飞的女人",
+            "identity_kind": "functional",
+            "kind": "onscreen",
+            "identity_group": "grp-fly",
+        }],
+        source_text="一个会飞的女人出现在众人面前。",
+        future_text=future,
+        bible=Bible(characters=[], world=World(visual_style_canonical="测试")),
+        episode_no=2,
+    ))
+
+    fly = next(item for item in resolved if item["source_label"] == "会飞的女人")
+    # 未取得真名解析：保持原 functional，不得被误绑定为 named。
+    assert fly.get("name") != "许清"
+    assert fly.get("identity_kind") == "functional"
