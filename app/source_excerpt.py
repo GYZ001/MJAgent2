@@ -125,6 +125,26 @@ def index_source_segments(
         left = raw.find(text, start, end)
         spans.append((left, left + len(text)))
 
+    # A quotation may span paragraph breaks (common in web-novel monologue and
+    # multi-line speech). Merge adjacent paragraph spans while a quote stays open
+    # so one quotation is never cut into unbalanced fragments that fail source
+    # fact extraction downstream. If a quote is never closed through the end of
+    # the source it is left as-is; source_segment_facts closes it deterministically.
+    if spans:
+        merged_spans: list[tuple[int, int]] = []
+        index = 0
+        while index < len(spans):
+            start, end = spans[index]
+            while (
+                unclosed_quotation(raw, start=start, end=end) is not None
+                and index + 1 < len(spans)
+            ):
+                index += 1
+                end = spans[index][1]
+            merged_spans.append((start, end))
+            index += 1
+        spans = merged_spans
+
     chunks: list[tuple[int, int]] = []
     for start, end in spans:
         cursor = start

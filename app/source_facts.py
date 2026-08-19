@@ -151,11 +151,18 @@ def source_segment_facts(
                     parts.append(("quoted", "quoted_span", value))
 
         if quoted:
-            raise SourceFactQuotationError(
-                source_segment_id,
-                opening=quote_open,
-                offset=quote_open_offset,
-            )
+            # An opening quote with no structural close within this unit is an
+            # authoring artifact of the source (unclosed monologue/speech), not a
+            # system fault. index_source_segments already merges quotes that span
+            # paragraph breaks, so reaching here means the source itself never
+            # closes it. Close it deterministically as one quoted span instead of
+            # failing the whole episode; no source characters are dropped.
+            value = "".join(quoted).strip()
+            quoted.clear()
+            quote_open = ""
+            quote_open_offset = -1
+            if value and has_content(value):
+                parts.append(("quoted", "quoted_span", value))
         flush_outside()
         if not parts:
             parts = [("action", "prose", text)]

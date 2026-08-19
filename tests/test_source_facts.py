@@ -8,7 +8,6 @@ import pytest
 from app.source_excerpt import index_source_segments
 from app.source_facts import (
     SOURCE_FACT_VERSION,
-    SourceFactQuotationError,
     source_facts,
     source_segment_facts,
 )
@@ -63,14 +62,46 @@ def test_source_split_extends_only_to_structural_quote_close() -> None:
     assert projections == [*(["action"] * 10), "quoted"]
 
 
-def test_unclosed_quote_is_reported_instead_of_coerced_to_action() -> None:
+def test_unclosed_quote_in_source_is_closed_deterministically_not_fatal() -> None:
+    # 原文作者未闭合的引号（内心独白/口语常见）是来源写法，不是系统故障：
+    # 必须确定性收尾为一个 quoted span，绝不因此让整集剧本硬失败，也不丢字。
     source = "前置动作。“确有开引号但来源已经结束"
 
-    with pytest.raises(
-        SourceFactQuotationError,
-        match=r"\[SOURCE_FACT_QUOTE_UNCLOSED\].*SRC0001.*offset=",
-    ):
-        source_facts(source)
+    facts = source_facts(source)
+
+    assert facts, "未闭合引号不得导致 0 facts 或异常"
+    quoted = [fact for fact in facts if fact.projection == "quoted"]
+    assert quoted, "未闭合的引号内容应作为 quoted span 保留"
+    assert "确有开引号但来源已经结束" in quoted[-1].text
+    # 前置动作仍应作为独立 action 单元保留，不被吞并。
+    assert any(
+        fact.projection == "action" and "前置动作" in fact.text
+        for fact in facts
+    )
+
+
+def test_quote_spanning_paragraph_break_is_merged_into_one_balanced_segment() -> None:
+    # 一段跨自然段（\n\n）的引文：开引号在前段、闭引号在后段。分段必须把它们并成
+    # 一个引号平衡的 segment，避免下游 source fact 抽取把半截引文判为未闭合而崩溃。
+    source = (
+        "他心中默念。\n\n"
+        "“凝气一层可以成为外宗弟子，那抓我来的女人，她是凝气七层。\n\n"
+        "这等工钱虽说不是银两，但若能拿出去，必可卖到百金！”孟浩怦然心动。\n\n"
+        "马脸青年闭上了眼。"
+    )
+
+    segments = index_source_segments(source)
+
+    monologue = next(
+        segment for segment in segments
+        if "凝气一层可以成为外宗弟子" in segment.text
+    )
+    assert monologue.text.count("“") == monologue.text.count("”") == 1
+    # 合并后的 segment 能正常抽取 source facts，不抛异常。
+    facts = source_segment_facts(monologue.segment_id, monologue.text)
+    assert any(fact.projection == "quoted" for fact in facts)
+    # 全量抽取也不抛异常，且覆盖所有自然段。
+    assert source_facts(source)
 
 
 def test_closing_quote_does_not_open_a_new_quoted_span() -> None:
