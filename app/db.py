@@ -2045,6 +2045,55 @@ def _repair_integrity(conn: sqlite3.Connection) -> dict[str, Any]:
     return report
 
 
+def _reconcile_settled_orphan_blueprint_shards(conn: sqlite3.Connection) -> None:
+    """Terminalize orphan INTERRUPTED blueprint shards that later completed.
+
+    An interrupted blueprint-shard provider call left with
+    ``superseded_by_call_id IS NULL`` counts as unresolved "unknown" liability
+    forever (``_BlueprintGenerationBudget.from_durable_calls``). The normal
+    resolution path only supersedes the exact receipt set pinned by the run
+    that rebuilt the blueprint, so an orphan from a crashed run or an older
+    lineage can linger until retention prunes it.
+
+    This resolves ONLY the provably-settled ones: an orphan whose episode has a
+    later ``VALIDATED_BLUEPRINT_AUTHORITY`` resolution is superseded by that
+    resolution. A validated authority proves the blueprint operation completed
+    and was settled, so linking the orphan to it cannot drop real unknown
+    liability or risk a double-charge. Orphans without such a successor are left
+    untouched — the retry path (with a valid grant) resolves them on the next
+    successful rebuild.
+    """
+    try:
+        conn.execute(
+            """
+            UPDATE provider_calls
+               SET superseded_by_call_id=(
+                       SELECT r.id FROM provider_calls r
+                        WHERE r.recovery_disposition='VALIDATED_BLUEPRINT_AUTHORITY'
+                          AND json_extract(r.meta,'$.episode_id')
+                              =json_extract(provider_calls.meta,'$.episode_id')
+                          AND r.ts>=provider_calls.ts
+                        ORDER BY r.ts LIMIT 1
+                   ),
+                   recovery_disposition='RECONCILED_SUPERSEDED_BY_LATER_AUTHORITY'
+             WHERE status IN ('INTERRUPTED','RUNNING')
+               AND superseded_by_call_id IS NULL
+               AND json_extract(meta,'$.stage_key') LIKE 'screenplay_blueprint%'
+               AND json_extract(meta,'$.episode_id') IS NOT NULL
+               AND EXISTS(
+                       SELECT 1 FROM provider_calls r
+                        WHERE r.recovery_disposition='VALIDATED_BLUEPRINT_AUTHORITY'
+                          AND json_extract(r.meta,'$.episode_id')
+                              =json_extract(provider_calls.meta,'$.episode_id')
+                          AND r.ts>=provider_calls.ts
+                   )
+            """
+        )
+    except sqlite3.OperationalError:
+        # Legacy/partial schemas (e.g. no json1) must not block startup.
+        return
+
+
 def _repair_invalid_provider_metadata(conn: sqlite3.Connection) -> None:
     """Replace legacy character-truncated metadata with valid audit summaries."""
     try:
@@ -2379,6 +2428,7 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
             "recovery_disposition=COALESCE(recovery_disposition, 'AWAITING_RETRY') "
             "WHERE status='RUNNING'"
         )
+        _reconcile_settled_orphan_blueprint_shards(conn)
         conn.execute(
             "UPDATE step_runs SET status='FAILED', finished_at=?, exit_reason='service_restart', "
             "error_code='SERVICE_RESTART', error_message=COALESCE(error_message, '服务重启，步骤已中断') "

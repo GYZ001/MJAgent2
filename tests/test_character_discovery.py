@@ -1499,6 +1499,52 @@ def test_character_resolutions_persist_and_future_identity_upgrades_route_fallba
     assert portraits.load_screenplay_character_resolutions(conn, "e1") == upgraded
 
 
+def test_persist_is_stable_when_semantic_identity_set_is_unchanged() -> None:
+    """A re-discovery that reproduces the same semantic decisions must not
+    rewrite the stored rows (which would churn screenplay_authority_fingerprint
+    and strand the retry grant on a superseded revision)."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE episodes(id TEXT PRIMARY KEY, "
+        "screenplay_character_resolutions TEXT NOT NULL DEFAULT '[]')"
+    )
+    conn.execute("INSERT INTO episodes(id) VALUES('e1')")
+    portraits.persist_screenplay_character_resolutions(conn, "e1", [{
+        "source_label": "门卫",
+        "canonical_name": "门卫",
+        "resolution": "functional_identity",
+        "reason": "首版理由文本",
+        "evidence": "首版证据文本",
+    }])
+    stored_before = str(conn.execute(
+        "SELECT screenplay_character_resolutions FROM episodes WHERE id='e1'"
+    ).fetchone()[0])
+
+    # Same semantic decision, but the model re-authored the free-text fields.
+    portraits.persist_screenplay_character_resolutions(conn, "e1", [{
+        "source_label": "门卫",
+        "canonical_name": "门卫",
+        "resolution": "functional_identity",
+        "reason": "重跑理由文本完全不同",
+        "evidence": "重跑证据文本完全不同",
+    }])
+    stored_after = str(conn.execute(
+        "SELECT screenplay_character_resolutions FROM episodes WHERE id='e1'"
+    ).fetchone()[0])
+
+    # Stored bytes are unchanged -> authority fingerprint stays stable.
+    assert stored_after == stored_before
+
+    # A genuine semantic change (new resolution) still persists.
+    changed = portraits.persist_screenplay_character_resolutions(conn, "e1", [{
+        "source_label": "青衣人",
+        "canonical_name": "丁力",
+        "resolution": "future_identity",
+    }])
+    assert any(item["source_label"] == "青衣人" for item in changed)
+
+
 def test_discovery_persistence_retires_only_legacy_future_identity_rows() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

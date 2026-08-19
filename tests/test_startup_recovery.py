@@ -718,3 +718,68 @@ def test_passive_instance_initialization_does_not_fence_active_run(tmp_path, mon
     assert conn.execute("SELECT status FROM workflow_runs WHERE id=?", (run_id,)).fetchone()["status"] == "RUNNING"
     assert conn.execute("SELECT status FROM step_runs WHERE id=?", (step_id,)).fetchone()["status"] == "RUNNING"
     assert conn.execute("SELECT status FROM provider_calls WHERE id=?", (call_id,)).fetchone()["status"] == "RUNNING"
+
+
+def _blueprint_shard_call(conn, *, episode_id, ts, status="INTERRUPTED"):
+    cursor = conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,meta,run_id,operation_id,
+               attempt_no,recovery_disposition
+           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            ts, "chat", "model", status, 1000,
+            json.dumps({
+                "stage_key": "screenplay_blueprint_shard",
+                "episode_id": episode_id,
+            }),
+            "run-x", "op", 1, "REQUIRES_EXPLICIT_RETRY",
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def _validated_authority_call(conn, *, episode_id, ts):
+    cursor = conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,meta,run_id,operation_id,
+               attempt_no,recovery_disposition
+           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            ts, "blueprint_authority_resolution", "deterministic", "OK", 0,
+            json.dumps({
+                "stage_key": "screenplay_blueprint_resolution",
+                "episode_id": episode_id,
+            }),
+            "run-x", "op-res", 1, "VALIDATED_BLUEPRINT_AUTHORITY",
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def test_startup_reconciles_only_orphan_shards_with_later_validated_authority(
+    tmp_path, monkeypatch,
+):
+    conn = _fresh_database(tmp_path, monkeypatch)
+    # Episode A: orphan shard followed by a validated authority -> settled.
+    settled = _blueprint_shard_call(conn, episode_id="epA", ts=100)
+    resolution_id = _validated_authority_call(conn, episode_id="epA", ts=200)
+    # Episode B: orphan shard with no validated successor -> must be left alone.
+    unsettled = _blueprint_shard_call(conn, episode_id="epB", ts=100)
+    conn.commit()
+
+    db._reconcile_settled_orphan_blueprint_shards(conn)
+    conn.commit()
+
+    settled_row = conn.execute(
+        "SELECT superseded_by_call_id,recovery_disposition FROM provider_calls WHERE id=?",
+        (settled,),
+    ).fetchone()
+    assert settled_row["superseded_by_call_id"] == resolution_id
+    assert settled_row["recovery_disposition"] == "RECONCILED_SUPERSEDED_BY_LATER_AUTHORITY"
+
+    unsettled_row = conn.execute(
+        "SELECT superseded_by_call_id,recovery_disposition FROM provider_calls WHERE id=?",
+        (unsettled,),
+    ).fetchone()
+    assert unsettled_row["superseded_by_call_id"] is None
+    assert unsettled_row["recovery_disposition"] == "REQUIRES_EXPLICIT_RETRY"
