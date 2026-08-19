@@ -1546,6 +1546,122 @@ def test_blueprint_review_exhaustion_is_quality_gate(
     assert repair_calls == 3
 
 
+def test_blueprint_review_retries_replay_safe_not_sent_reviewer(
+    monkeypatch,
+) -> None:
+    """A reviewer whose request was never sent (replay-safe ProviderError) is
+    retried instead of failing the whole dual-review gate. The deterministic
+    operation_id is unchanged, so the retry is the same semantic review."""
+    clean_review = BlueprintSemanticReview.model_validate({"issues": []})
+    reviewer_calls = 0
+
+    class EmptyRows:
+        @staticmethod
+        def fetchall():
+            return []
+
+    class EmptyConnection:
+        @staticmethod
+        def execute(*_args, **_kwargs):
+            return EmptyRows()
+
+    async def fake_chat_structured(*_args, **_kwargs):
+        nonlocal reviewer_calls
+        reviewer_calls += 1
+        if reviewer_calls == 1:
+            raise hiagent.ProviderError(
+                "connection_failed: not sent",
+                delivery_state="not_sent",
+                replay_safe=True,
+            )
+        return clean_review.model_copy(deep=True)
+
+    monkeypatch.setattr(stages, "get_conn", lambda: EmptyConnection())
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: "true"
+        if key == "screenplay_targeted_blueprint_review_enabled"
+        else 1,
+    )
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        fake_chat_structured,
+    )
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda *_args, **_kwargs: {"id": str(uuid.uuid4())},
+    )
+
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        _blueprint(),
+        episode={"id": "episode-review-retry"},
+        source_text=SOURCE,
+    ))
+
+    assert result is not None
+    # reviewer1: not_sent (1) + retry success (2); reviewer2: success (3).
+    assert reviewer_calls == 3
+
+
+def test_blueprint_review_does_not_retry_unknown_outcome_reviewer(
+    monkeypatch,
+) -> None:
+    """A reviewer failure whose outcome is genuinely unknown (not replay-safe)
+    is NOT retried — the dual-review gate still fails closed."""
+    reviewer_calls = 0
+
+    class EmptyRows:
+        @staticmethod
+        def fetchall():
+            return []
+
+    class EmptyConnection:
+        @staticmethod
+        def execute(*_args, **_kwargs):
+            return EmptyRows()
+
+    async def fake_chat_structured(*_args, **_kwargs):
+        nonlocal reviewer_calls
+        reviewer_calls += 1
+        raise hiagent.ProviderError(
+            "mid-stream interruption, outcome unknown",
+            delivery_state="unknown",
+            replay_safe=False,
+        )
+
+    monkeypatch.setattr(stages, "get_conn", lambda: EmptyConnection())
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: "true"
+        if key == "screenplay_targeted_blueprint_review_enabled"
+        else 1,
+    )
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        fake_chat_structured,
+    )
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda *_args, **_kwargs: {"id": str(uuid.uuid4())},
+    )
+
+    with pytest.raises(
+        ContentGenerationError,
+        match="蓝图语义审稿人不足两份",
+    ):
+        asyncio.run(stages._semantic_review_narrative_blueprint(
+            _blueprint(),
+            episode={"id": "episode-review-no-retry"},
+            source_text=SOURCE,
+        ))
+
+    assert reviewer_calls == 2
+
+
 def test_blueprint_patch_rejects_node_split() -> None:
     blueprint = _blueprint()
     original = blueprint.nodes[0]
