@@ -85,10 +85,20 @@ def main() -> None:
 
     print("=== EQUAL? ===", screenplay.key_lines == restored.key_lines)
 
-    # Show KL id references in plot_spine to check for cross-ref impact
-    print("=== plot_spine beat key_line_ids (IR) ===")
-    for b in screenplay.plot_spine.spine_beats:
-        print("  ", b.beat_id, b.key_line_ids)
+    from app.validators import key_line_catalog
+
+    def dump_alignment(label: str, script) -> None:
+        cat = key_line_catalog(script)
+        print(f"--- {label}: key_line_catalog ---")
+        for kid, line in cat.items():
+            print("   ", kid, "->", line)
+        print(f"--- {label}: plot_spine beats -> resolved lines ---")
+        for b in script.plot_spine.spine_beats:
+            resolved = [cat.get(k, f"<{k}?>") for k in b.key_line_ids]
+            print("   ", b.beat_id, b.key_line_ids, "->", resolved)
+
+    dump_alignment("PATH1 (IR direct)", screenplay)
+    dump_alignment("PATH2 (after projection)", restored)
 
 
 if __name__ == "__main__":
