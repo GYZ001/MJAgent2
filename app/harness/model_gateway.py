@@ -344,11 +344,15 @@ async def chat(
     max_tokens: int = 8192,
     call_meta: dict[str, Any] | None = None,
     usage_callback: Callable[[dict[str, Any]], None] | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> str:
     """The only text-model entry point for business stages.
 
     It enforces trace metadata at the harness boundary while retaining the
     provider adapter's retry, redaction and lifecycle recording.
+
+    ``response_format`` 用于让网关在生成阶段就约束输出为合法 JSON（json_object /
+    json_schema）；仅结构化调用会传入，供应商不支持时适配层自动去掉并重试。
     """
     trace = current_trace()
     meta = {
@@ -375,6 +379,8 @@ async def chat(
             }
             if usage_callback is not None:
                 provider_kwargs["usage_callback"] = usage_callback
+            if response_format is not None:
+                provider_kwargs["response_format"] = response_format
             result = await run_with_provider_call_slot(
                 lambda: hiagent.chat(messages, **provider_kwargs)
             )

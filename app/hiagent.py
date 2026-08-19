@@ -1176,10 +1176,15 @@ async def _plain_chat_request(
 
 async def chat(messages: list[dict], *, model: str | None = None, temperature: float = 0.7,
                max_tokens: int = 65535, call_meta: dict | None = None,
-               usage_callback: Callable[[dict[str, Any]], None] | None = None) -> str:
+               usage_callback: Callable[[dict[str, Any]], None] | None = None,
+               response_format: dict[str, Any] | None = None) -> str:
     """文本 LLM 对话，返回 message.content（推理模型的 reasoning 一律丢弃）。
     按设置在火山 HiAgent、OpenRouter、阿里云百炼、DeepSeek、智谱官方 API 之间路由（后两者仅文本，
-    图像/视频始终走火山）。"""
+    图像/视频始终走火山）。
+
+    response_format 用于让网关在生成时就约束输出为合法 JSON（json_object / json_schema）。
+    这些供应商都实现 OpenAI 兼容协议，普遍支持该字段；若某 provider/model 以客户端错误
+    明确拒绝该字段，会被记为不支持并去掉该字段重试一次，退回纯文本 + 本地修复的旧行为。"""
     timeout = httpx.Timeout(connect=10, read=_chat_read_timeout_s(call_meta), write=30, pool=10)
     provider, selected_model, effective_max_tokens = text_request_token_limits(
         requested_max_tokens=max_tokens,
@@ -1198,98 +1203,130 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
         "requested_max_tokens": requested_max_tokens,
         "effective_max_tokens": max_tokens,
     }
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        if provider == "openrouter":
-            or_model = selected_model
-            base_url, model_headers = _model_connection("openrouter", or_model, config.OPENROUTER_BASE_URL, config.OPENROUTER_API_KEY)
-            payload: dict[str, Any] = {"model": or_model, "messages": messages, "max_tokens": max_tokens}
-            effort = (config.OPENROUTER_TEXT_REASONING_EFFORT or "").strip().lower()
-            if effort and effort != "none":
-                payload["reasoning"] = {"effort": effort}
+
+    async def _dispatch(attempt_response_format: dict[str, Any] | None) -> tuple[str, dict]:
+        """执行一次真实的 provider 调用。attempt_response_format 非空时注入到 payload，
+        让网关在生成阶段就约束合法 JSON；返回 (content, data) 供空内容兜底。"""
+        def _with_rf(payload: dict[str, Any]) -> dict[str, Any]:
+            if attempt_response_format is not None:
+                payload["response_format"] = attempt_response_format
+            return payload
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            if provider == "openrouter":
+                or_model = selected_model
+                base_url, model_headers = _model_connection("openrouter", or_model, config.OPENROUTER_BASE_URL, config.OPENROUTER_API_KEY)
+                payload: dict[str, Any] = {"model": or_model, "messages": messages, "max_tokens": max_tokens}
+                effort = (config.OPENROUTER_TEXT_REASONING_EFFORT or "").strip().lower()
+                if effort and effort != "none":
+                    payload["reasoning"] = {"effort": effort}
+                else:
+                    payload["temperature"] = temperature
+                _with_rf(payload)
+                content = await _chat_with_reasoning_fallback(
+                    client, f"{base_url}/chat/completions", payload,
+                    kind="chat", model=or_model, headers=model_headers,
+                    key_name="OPENROUTER_API_KEY", temperature=temperature, call_meta=call_meta,
+                    usage_callback=usage_callback)
+                data = {}
+            elif provider == "bailian":
+                bailian_model = selected_model
+                payload = _with_rf({"messages": messages, "temperature": temperature, "max_tokens": max_tokens})
+                data, _, reused = await _post_bailian_chat_with_fallback(
+                    client, payload, fallback_kind="text", log_kind="chat",
+                    preferred_model=bailian_model, meta=call_meta)
+                _notify_completion_usage(data, usage_callback, reused=reused)
+                _reject_truncated_chat_response(data)
+                content = _chat_content(data, label="chat")
+            elif provider == "deepseek":
+                deepseek_model = selected_model
+                try:
+                    base_url, model_headers = _model_connection("deepseek", deepseek_model, config.DEEPSEEK_BASE_URL, config.DEEPSEEK_API_KEY)
+                except ProviderError:
+                    base_url, model_headers = config.DEEPSEEK_BASE_URL, _deepseek_headers()
+                payload = _with_rf({"model": deepseek_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens})
+                content = await _chat_with_reasoning_fallback(
+                    client, f"{base_url}/chat/completions", payload,
+                    kind="chat", model=deepseek_model, headers=model_headers,
+                    key_name="DEEPSEEK_API_KEY", temperature=temperature, call_meta=call_meta,
+                    usage_callback=usage_callback)
+                data = {}
+            elif provider == "zhipu":
+                zhipu_model = selected_model
+                try:
+                    base_url, model_headers = _model_connection("zhipu", zhipu_model, config.ZHIPU_BASE_URL, config.ZHIPU_API_KEY)
+                except ProviderError:
+                    base_url, model_headers = config.ZHIPU_BASE_URL, _zhipu_headers()
+                payload = _with_rf({"model": zhipu_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens})
+                content = await _chat_with_reasoning_fallback(
+                    client, f"{base_url}/chat/completions", payload,
+                    kind="chat", model=zhipu_model, headers=model_headers,
+                    key_name="ZHIPU_API_KEY", temperature=temperature, call_meta=call_meta,
+                    usage_callback=usage_callback)
+                data = {}
+            elif provider.startswith("custom:"):
+                custom_model = selected_model
+                base_url, headers = _model_connection(provider, custom_model)
+                payload = _with_rf({"model": custom_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens})
+                data = _cached_successful_provider_response(
+                    "chat", custom_model, payload, call_meta,
+                )
+                _require_cached_replay_or_raise(data, call_meta)
+                reused = data is not None
+                if data is None:
+                    data = await _plain_chat_request(
+                        client,
+                        f"{base_url}/chat/completions",
+                        payload,
+                        kind="chat",
+                        model=custom_model,
+                        headers=headers,
+                        key_name=f"model:{custom_model}",
+                        meta=call_meta,
+                    )
+                _notify_completion_usage(data, usage_callback, reused=reused)
+                _reject_truncated_chat_response(data)
+                content = _chat_content(data, label="custom chat")
             else:
-                payload["temperature"] = temperature
-            content = await _chat_with_reasoning_fallback(
-                client, f"{base_url}/chat/completions", payload,
-                kind="chat", model=or_model, headers=model_headers,
-                key_name="OPENROUTER_API_KEY", temperature=temperature, call_meta=call_meta,
-                usage_callback=usage_callback)
-        elif provider == "bailian":
-            bailian_model = selected_model
-            payload = {"messages": messages, "temperature": temperature, "max_tokens": max_tokens}
-            data, _, reused = await _post_bailian_chat_with_fallback(
-                client, payload, fallback_kind="text", log_kind="chat",
-                preferred_model=bailian_model, meta=call_meta)
-            _notify_completion_usage(data, usage_callback, reused=reused)
-            _reject_truncated_chat_response(data)
-            content = _chat_content(data, label="chat")
-        elif provider == "deepseek":
-            deepseek_model = selected_model
-            try:
-                base_url, model_headers = _model_connection("deepseek", deepseek_model, config.DEEPSEEK_BASE_URL, config.DEEPSEEK_API_KEY)
-            except ProviderError:
-                base_url, model_headers = config.DEEPSEEK_BASE_URL, _deepseek_headers()
-            payload = {"model": deepseek_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
-            content = await _chat_with_reasoning_fallback(
-                client, f"{base_url}/chat/completions", payload,
-                kind="chat", model=deepseek_model, headers=model_headers,
-                key_name="DEEPSEEK_API_KEY", temperature=temperature, call_meta=call_meta,
-                usage_callback=usage_callback)
-        elif provider == "zhipu":
-            zhipu_model = selected_model
-            try:
-                base_url, model_headers = _model_connection("zhipu", zhipu_model, config.ZHIPU_BASE_URL, config.ZHIPU_API_KEY)
-            except ProviderError:
-                base_url, model_headers = config.ZHIPU_BASE_URL, _zhipu_headers()
-            payload = {"model": zhipu_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
-            content = await _chat_with_reasoning_fallback(
-                client, f"{base_url}/chat/completions", payload,
-                kind="chat", model=zhipu_model, headers=model_headers,
-                key_name="ZHIPU_API_KEY", temperature=temperature, call_meta=call_meta,
-                usage_callback=usage_callback)
-        elif provider.startswith("custom:"):
-            custom_model = selected_model
-            base_url, headers = _model_connection(provider, custom_model)
-            payload = {"model": custom_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
-            data = _cached_successful_provider_response(
-                "chat", custom_model, payload, call_meta,
-            )
-            _require_cached_replay_or_raise(data, call_meta)
-            reused = data is not None
-            if data is None:
-                data = await _plain_chat_request(
-                    client,
-                    f"{base_url}/chat/completions",
-                    payload,
-                    kind="chat",
-                    model=custom_model,
-                    headers=headers,
-                    key_name=f"model:{custom_model}",
-                    meta=call_meta,
-                )
-            _notify_completion_usage(data, usage_callback, reused=reused)
-            _reject_truncated_chat_response(data)
-            content = _chat_content(data, label="custom chat")
-        else:
-            model = selected_model
-            base_url, model_headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
-            payload = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
-            data = _cached_successful_provider_response("chat", model, payload, call_meta)
-            _require_cached_replay_or_raise(data, call_meta)
-            reused = data is not None
-            if data is None:
-                data = await _plain_chat_request(
-                    client,
-                    f"{base_url}/chat/completions",
-                    payload,
-                    kind="chat",
-                    model=model,
-                    headers=model_headers,
-                    key_name=f"model:{model}",
-                    meta=call_meta,
-                )
-            _notify_completion_usage(data, usage_callback, reused=reused)
-            _reject_truncated_chat_response(data)
-            content = _chat_content(data, label="chat")
+                hiagent_model = selected_model
+                base_url, model_headers = _model_connection("hiagent", hiagent_model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
+                payload = _with_rf({"model": hiagent_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens})
+                data = _cached_successful_provider_response("chat", hiagent_model, payload, call_meta)
+                _require_cached_replay_or_raise(data, call_meta)
+                reused = data is not None
+                if data is None:
+                    data = await _plain_chat_request(
+                        client,
+                        f"{base_url}/chat/completions",
+                        payload,
+                        kind="chat",
+                        model=hiagent_model,
+                        headers=model_headers,
+                        key_name=f"model:{hiagent_model}",
+                        meta=call_meta,
+                    )
+                _notify_completion_usage(data, usage_callback, reused=reused)
+                _reject_truncated_chat_response(data)
+                content = _chat_content(data, label="chat")
+        return content, data
+
+    attempt_response_format = (
+        response_format
+        if response_format and not _response_format_known_unsupported(provider, selected_model)
+        else None
+    )
+    while True:
+        try:
+            content, data = await _dispatch(attempt_response_format)
+            break
+        except ProviderError as exc:
+            if attempt_response_format is not None and _looks_like_response_format_unsupported(exc):
+                # 该 provider/model 明确拒绝 response_format：记录能力缺失并去掉该字段重试一次，
+                # 退回“纯文本 + 本地 extract_json 修复”的旧行为，绝不因此中断业务。
+                _remember_response_format_unsupported(provider, selected_model)
+                attempt_response_format = None
+                continue
+            raise
 
     if not content or not content.strip():
         raise ProviderError(f"模型返回空内容（content 为空；{_empty_content_detail(data)}）")
@@ -1355,6 +1392,41 @@ def _looks_like_tools_unsupported(exc: ProviderError) -> bool:
     blob = f"{exc} {exc.raw}".lower()
     return ("tool" in blob or "function" in blob) and (
         "support" in blob or "unknown" in blob or "unrecognized" in blob or "invalid" in blob
+    )
+
+
+# 运行期记录“已证实拒绝 response_format 的 provider:model”，避免每次都先试一遍再回退。
+# 这是能力协商（按运行期真实反馈学习），不是内容白/黑名单；重启即清空、按需重学。
+_RESPONSE_FORMAT_UNSUPPORTED: set[str] = set()
+
+
+def _response_format_capability_key(provider: str, model: str) -> str:
+    return f"{provider}:{model}"
+
+
+def _response_format_known_unsupported(provider: str, model: str) -> bool:
+    return _response_format_capability_key(provider, model) in _RESPONSE_FORMAT_UNSUPPORTED
+
+
+def _remember_response_format_unsupported(provider: str, model: str) -> None:
+    _RESPONSE_FORMAT_UNSUPPORTED.add(_response_format_capability_key(provider, model))
+
+
+def _looks_like_response_format_unsupported(exc: ProviderError) -> bool:
+    """仅当网关以客户端错误明确拒绝 response_format 字段时才判定不支持。
+
+    限流/超时/5xx 等都不算，以免把可恢复故障误判为能力缺失而永久放弃结构化约束。
+    """
+    if exc.retryable:
+        return False
+    blob = f"{exc} {exc.raw}".lower()
+    return ("response_format" in blob or "json_schema" in blob or "json schema" in blob) and (
+        "support" in blob
+        or "unknown" in blob
+        or "unrecognized" in blob
+        or "invalid" in blob
+        or "not allowed" in blob
+        or "unexpected" in blob
     )
 
 
