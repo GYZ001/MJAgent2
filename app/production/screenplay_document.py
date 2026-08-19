@@ -210,12 +210,7 @@ def document_to_screenplay(doc: ScreenplayDocument) -> EpisodeScreenplay:
         for block in rederived.scene_blocks
     ]
     full_text = render_full_script_text(rederived)
-    from app.validators import key_lines_in_story_order
-
-    key_lines = key_lines_in_story_order(
-        _key_lines_from_chains(rederived.dialogue_chains),
-        full_text,
-    )
+    key_lines = derive_key_lines(rederived.dialogue_chains, full_text)
     return EpisodeScreenplay(
         episode_no=meta.episode_no,
         id=meta.id,
@@ -1442,6 +1437,25 @@ def _key_lines_from_chains(chains: list[KeyDialogueChain]) -> list[str]:
                 continue
             lines.append(f"{speaker}：{line}" if speaker else line)
     return lines
+
+
+def derive_key_lines(
+    chains: list[KeyDialogueChain],
+    full_script_text: str,
+) -> list[str]:
+    """Single source of truth for ``EpisodeScreenplay.key_lines``.
+
+    权威源是 ``dialogue_chains``（触发→回应的主线对白链）。此函数先按链结构
+    平铺，再用 ``key_lines_in_story_order`` 依据 ``full_script_text`` 的正文出现
+    顺序重排。IR 编译、document 投影、校验期归一化都必须走这一条算法，才能对同
+    一份输入产出逐字段相等的 key_lines，杜绝双派生路径漂移。
+    """
+    from app.validators import key_lines_in_story_order
+
+    return key_lines_in_story_order(
+        _key_lines_from_chains(chains),
+        full_script_text or "",
+    )
 
 
 def _chains_from_scene_turns(blocks: list[SceneBlockNode]) -> list[KeyDialogueChain]:

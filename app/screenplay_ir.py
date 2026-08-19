@@ -5340,11 +5340,6 @@ def compile_screenplay_ir(
                 ),
                 turns=chunk,
             ))
-    key_lines = [
-        f"{turn.speaker}：{turn.line}"
-        for chain in dialogue_chains
-        for turn in chain.turns
-    ]
 
     info_ids_by_event: defaultdict[str, list[str]] = defaultdict(list)
     for item in information_ledger:
@@ -5456,6 +5451,11 @@ def compile_screenplay_ir(
                 + insertion
                 + full_script_text[marker:]
             )
+
+    # key_lines 与 document 投影共用同一派生算法：以 dialogue_chains 为权威源，
+    # 依据已定稿的 full_script_text 正文出现顺序排列。必须在 full_script_text 完成
+    # must_keep 插入后再派生，两条路径才能对同一输入逐字段相等（消除结构顺序漂移）。
+    key_lines = derive_key_lines(dialogue_chains, full_script_text)
 
     scope_id = str(episode.get("id") or f"episode-{episode_no}")
     dramatic_questions = [{
