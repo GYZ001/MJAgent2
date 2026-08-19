@@ -59,6 +59,7 @@ from app.source_excerpt import (
     structural_front_matter_ids,
 )
 from app.spoken_contract import content_char_count
+from app.production.screenplay_document import derive_key_lines
 
 
 IR_VERSION = "screenplay-generation-ir.v4"

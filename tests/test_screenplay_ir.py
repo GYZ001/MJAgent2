@@ -436,6 +436,131 @@ def test_compact_ir_compiles_to_existing_screenplay_contract() -> None:
     ]
 
 
+# key_lines 曾经有两条独立派生路径且算法不一致：
+#   路径1（IR 编译）按 dialogue_chains 的结构顺序平铺；
+#   路径2（document 投影）平铺后再用 key_lines_in_story_order 按正文出现顺序重排。
+# 当某一场里两条对白链在正文中交错出现时，chain 结构顺序 != 正文出现顺序，
+# 两条路径会产出不同顺序的 key_lines——这是隐性数据漂移。现已收敛为单一算法
+# app.production.screenplay_document.derive_key_lines（两处共用），下面的测试
+# 用一个「结构顺序与正文顺序故意不同」的输入把这一契约钉死。
+_KEY_LINE_DRIFT_SOURCE = "\n\n".join([
+    "谷言独自在咖啡厅等待旧友。他看向门口说：“再等十分钟。”"
+    "他又低声说：“他到底来不来。”中途还招手说：“服务员，再来一杯水。”",
+    "旧友推门出现，把钥匙递给谷言说：“拿好这把钥匙。”",
+    "门外响起更重的敲门声，旧友立刻说：“别开门。”危险已经逼近。",
+])
+
+
+def _interleaved_chain_ir_payload() -> dict:
+    """第一场里 wait/aside 两条链在正文中交错：结构顺序 != 正文出现顺序。
+
+    正文（发出）顺序:   再等十分钟(wait) -> 服务员再来一杯水(aside) -> 他到底来不来(wait)
+    按链结构分组后顺序: wait=[再等十分钟, 他到底来不来], aside=[服务员再来一杯水]
+                        -> [再等十分钟, 他到底来不来, 服务员再来一杯水]
+    两种顺序不同，可暴露双派生路径漂移。
+    """
+    payload = deepcopy(_ir_payload())
+    payload["scenes"][0]["units"] = [
+        {
+            "kind": "dialogue",
+            "text": "再等十分钟。",
+            "event_key": "e1",
+            "speaker_key": "g",
+            "function": "decision",
+            "source_text": "再等十分钟。",
+            "chain_key": "wait",
+        },
+        {
+            "kind": "dialogue",
+            "text": "服务员，再来一杯水。",
+            "event_key": "e1",
+            "speaker_key": "g",
+            "function": "statement",
+            "source_text": "服务员，再来一杯水。",
+            "chain_key": "aside",
+        },
+        {
+            "kind": "dialogue",
+            "text": "他到底来不来。",
+            "event_key": "e1",
+            "speaker_key": "g",
+            "function": "statement",
+            "source_text": "他到底来不来。",
+            "chain_key": "wait",
+        },
+    ]
+    return payload
+
+
+def _compile_interleaved() -> EpisodeScreenplay:
+    payload = _interleaved_chain_ir_payload()
+    return compile_screenplay_ir(
+        ScreenplayGenerationIR.model_validate(payload),
+        episode={
+            "id": "ep-ir-key-line-drift",
+            "episode_no": 1,
+            "title": "雨夜敲门",
+            "authorized_source_chapters": {"chapter-1": _KEY_LINE_DRIFT_SOURCE},
+        },
+        source_text=_KEY_LINE_DRIFT_SOURCE,
+        bible=_bible(),
+    )
+
+
+def test_ir_key_lines_use_story_order_not_chain_structure_order() -> None:
+    """IR 编译的 key_lines 必须按正文出现顺序，而非 dialogue_chains 结构顺序。"""
+    screenplay = _compile_interleaved()
+
+    # 结构顺序会得到 [再等十分钟, 他到底来不来, 服务员再来一杯水, ...]；
+    # 正文顺序（唯一正确算法）应得到 [再等十分钟, 服务员再来一杯水, 他到底来不来, ...]。
+    assert screenplay.key_lines == [
+        "谷言：再等十分钟。",
+        "谷言：服务员，再来一杯水。",
+        "谷言：他到底来不来。",
+        "旧友：拿好这把钥匙。",
+        "旧友：别开门。",
+    ]
+
+
+def test_ir_and_document_key_lines_are_field_equal_under_chain_interleaving() -> None:
+    """收敛契约：IR 编译产物与经 document 投影往返后的 key_lines 逐项相等。
+
+    document_to_screenplay(screenplay_to_document(...)) 会重新按同一算法投影
+    key_lines；若 IR 编译走的是另一套算法，交错链输入会让两者顺序分叉。
+    """
+    screenplay = _compile_interleaved()
+    projected = document_to_screenplay(screenplay_to_document(screenplay))
+
+    assert screenplay.key_lines == projected.key_lines
+    # 不只是集合相等，顺序也必须逐项一致。
+    for compiled_line, projected_line in zip(
+        screenplay.key_lines, projected.key_lines, strict=True
+    ):
+        assert compiled_line == projected_line
+
+
+def test_ir_plot_spine_key_line_ids_resolve_through_catalog_after_convergence() -> None:
+    """KL* 引用经 key_line_catalog 解析后，必须命中它所代表的那句台词。
+
+    plot_spine.key_line_ids 是按发出顺序铸造的 KL 序号，key_line_catalog 又按
+    key_lines 顺序重新编号。只有当 key_lines 与铸造 KL 时的顺序一致（都为正文
+    顺序）时，二者才对齐——这条测试防止未来任一侧回退到结构顺序造成错位。
+    """
+    from app.validators import key_line_catalog
+
+    screenplay = _compile_interleaved()
+    catalog = key_line_catalog(screenplay)
+    spine_first = screenplay.plot_spine.spine_beats[0]
+    resolved = [catalog[kid] for kid in spine_first.key_line_ids]
+
+    # 第一个 beat 覆盖第一场的全部三句台词，按正文顺序解析。
+    assert resolved == [
+        "谷言：再等十分钟。",
+        "谷言：服务员，再来一杯水。",
+        "谷言：他到底来不来。",
+    ]
+
+
 def test_event_onscreen_only_identity_is_included_in_compiler_registry() -> None:
     payload = _ir_payload()
     payload["identities"].append({
