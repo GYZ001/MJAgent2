@@ -412,8 +412,19 @@ export default function ScriptPage() {
     }
     if (current.kind === 'screenplay') {
       screenplayTimer.start()
+      // 上次供应商结果未知时，后端会围栏同一语义 operation 的重付；此处经用户在
+      // 预检弹窗二次确认后，显式携带授权与期望的未知收据，解开成本保护闸门。
+      const retryBudget = current.data?.blueprint_budget
+      const authorizeRetry = Boolean(retryBudget?.requires_fresh_retry_grant)
       const result = await run(() => api.post(`/episodes/${ep.id}/screenplay`, {
         idempotency_key: current.idempotencyKey,
+        ...(authorizeRetry
+          ? {
+              authorize_blueprint_retry: true,
+              expected_blueprint_unknown_receipts:
+                retryBudget?.unknown_receipts ?? [],
+            }
+          : {}),
       }), '首版剧本任务已受理').catch(() => screenplayTimer.clear())
       if (result) {
         setDirty(false)
@@ -892,6 +903,12 @@ export default function ScriptPage() {
                     定妆资产预计最多 {preview.data.cast_impact?.portrait_asset_stage?.estimated_images ?? 0} 张，
                     将在独立资产环节确认后补齐
                   </li>
+                  {preview.data.blueprint_budget?.requires_fresh_retry_grant && (
+                    <li className="danger">
+                      上次蓝图生成的模型调用被中断、结果未知（常见于服务重启或网络波动）。
+                      为避免重复扣费，系统已暂停自动重试；确认继续将授权对同一环节重新发起一次付费调用。
+                    </li>
+                  )}
                 </>
               ) : preview.kind === 'screenplay-save' ? (
                 <>
@@ -910,7 +927,9 @@ export default function ScriptPage() {
               <button className="btn" onClick={() => setPreview(null)}>取消（不执行）</button>
               <button className="btn primary" onClick={executePreview}>
                 {preview.kind === 'screenplay'
-                  ? '启动首版剧本生成'
+                  ? (preview.data.blueprint_budget?.requires_fresh_retry_grant
+                      ? '授权并重试（可能重新计费）'
+                      : '启动首版剧本生成')
                   : (preview.data.unchanged ? '确认无变更' : '确认发布')}
               </button>
             </div>
