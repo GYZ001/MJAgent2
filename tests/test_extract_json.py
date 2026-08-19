@@ -218,6 +218,40 @@ def test_extract_json_does_not_repair_non_eof_closer_mismatch() -> None:
         extract_json(text)
 
 
+def test_extract_json_repairs_array_missing_object_brace() -> None:
+    # Production ERR-20260819-ebf9b6: the model emitted a doubled comma and
+    # omitted the opening brace of the next object inside a characters array.
+    text = '''{"characters": [
+    {"source_label": "甲", "canonical_name": "", "identity_kind": "functional", "future_evidence": ""},
+    {"source_label": "乙", "canonical_name": "乙真", "identity_kind": "named", "future_evidence": "乙真"},
+    ,"canonical_name": "", "identity_kind": "functional", "future_evidence": ""}'''
+
+    obj = extract_json(text, repair_unescaped_inner_quotes=True)
+
+    assert len(obj["characters"]) == 3
+    assert obj["characters"][2]["canonical_name"] == ""
+    assert obj["characters"][2]["identity_kind"] == "functional"
+
+
+def test_extract_json_repairs_fullwidth_closing_quote() -> None:
+    # The model used a full-width closing quote instead of the required ASCII
+    # quote, leaving the JSON string open across a newline until the next
+    # object.  This is the malformed shape seen in character-discovery runs.
+    text = '''{
+  "characters": [
+    {"source_label": "甲", "canonical_name": "", "identity_kind": "functional", "future_evidence": ""},
+    {"source_label": "乙", "canonical_name": "乙真", "identity_kind": "named", "future_evidence": "他说：“乙真。”
+    },
+    {"source_label": "丙", "canonical_name": "", "identity_kind": "functional", "future_evidence": ""}
+  ]
+}'''
+
+    obj = extract_json(text, repair_unescaped_inner_quotes=True)
+
+    assert [item["source_label"] for item in obj["characters"]] == ["甲", "乙", "丙"]
+    assert obj["characters"][1]["future_evidence"] == "他说：“乙真。"
+
+
 def test_screenplay_shape_hoists_fields_misnested_under_plot_spine() -> None:
     # One brace closes plot_spine; the missing final brace closes the root.
     # This is the shape observed in ERR-20260803-df0cee.

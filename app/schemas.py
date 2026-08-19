@@ -2048,6 +2048,165 @@ def _has_unclosed_json_string_prefix(text: str) -> bool:
     return in_string
 
 
+def _repair_array_missing_object_brace(text: str) -> str:
+    """Repair an array element whose opening ``{`` was omitted.
+
+    Providers sometimes emit ``},\n    ,"field": ...`` after an object in an
+    array: the first comma closes the previous element, the second comma is a
+    doubled separator, and the following object keys are missing the opening
+    brace.  This turns that pattern into a proper next object and, when the
+    inserted object consumes the only trailing root closer, appends the
+    deterministic ``]}`` closers.
+    """
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            index += 1
+            continue
+        if char == "{":
+            stack.append("{")
+            index += 1
+            continue
+        if char == "[":
+            stack.append("[")
+            index += 1
+            continue
+        if char == "}":
+            if stack and stack[-1] == "{":
+                stack.pop()
+            index += 1
+            continue
+        if char == "]":
+            if stack and stack[-1] == "[":
+                stack.pop()
+            index += 1
+            continue
+        if char == "," and stack and stack[-1] == "[":
+            second = index + 1
+            while second < length and text[second].isspace():
+                second += 1
+            if second < length and text[second] == ",":
+                key_start = second + 1
+                while key_start < length and text[key_start].isspace():
+                    key_start += 1
+                if key_start < length and text[key_start] == '"':
+                    cursor = key_start + 1
+                    local_escaped = False
+                    while cursor < length:
+                        current = text[cursor]
+                        if local_escaped:
+                            local_escaped = False
+                        elif current == "\\":
+                            local_escaped = True
+                        elif current == '"':
+                            cursor += 1
+                            break
+                        cursor += 1
+                    while cursor < length and text[cursor].isspace():
+                        cursor += 1
+                    if cursor < length and text[cursor] == ":":
+                        repaired = text[: index + 1] + "{" + text[second + 1 :]
+                        try:
+                            json.loads(repaired)
+                        except (TypeError, ValueError):
+                            if (
+                                repaired.rstrip().endswith("}")
+                                and not repaired.rstrip().endswith("]}")
+                            ):
+                                candidate = repaired + "]}"
+                                try:
+                                    json.loads(candidate)
+                                except (TypeError, ValueError):
+                                    return text
+                                return candidate
+                            return text
+                        return repaired
+        index += 1
+    return text
+
+
+def _repair_fullwidth_closing_quote(text: str) -> str:
+    """Close a JSON string when the model used ``”`` as the closing quote.
+
+    The model frequently writes Chinese text containing full-width quotes and
+    occasionally replaces the required ASCII closing quote with ``”``.  When
+    that happens the JSON string is left open until the next structural token.
+    This narrow repair only converts ``”`` to ``"`` if it is immediately
+    followed (ignoring whitespace) by ``}`` or ``]`` and no ASCII quote appears
+    before that closer.
+    """
+    repaired: list[str] = []
+    in_string = False
+    escaped = False
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if in_string:
+            if escaped:
+                repaired.append(char)
+                escaped = False
+                index += 1
+                continue
+            if char == "\\":
+                repaired.append(char)
+                escaped = True
+                index += 1
+                continue
+            if char == '"':
+                repaired.append(char)
+                in_string = False
+                index += 1
+                continue
+            if char == "”":
+                look = index + 1
+                while look < length and text[look].isspace():
+                    look += 1
+                if look < length and text[look] in "}]":
+                    after = look + 1
+                    while after < length and text[after].isspace():
+                        after += 1
+                    if after >= length or text[after] in ",}]":
+                        probe = index + 1
+                        has_ascii_quote = False
+                        while probe < look:
+                            if text[probe] == "\\":
+                                probe += 2
+                                continue
+                            if text[probe] == '"':
+                                has_ascii_quote = True
+                                break
+                            probe += 1
+                        if not has_ascii_quote:
+                            repaired.append('"')
+                            in_string = False
+                            index += 1
+                            continue
+            repaired.append(char)
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+        repaired.append(char)
+        index += 1
+    return "".join(repaired)
+
+
 def extract_json(
     text: str,
     *,
@@ -2083,7 +2242,10 @@ def extract_json(
             cleaned[start:],
             repair_singleton_string_object_fields,
         )
+        if repair_unescaped_inner_quotes:
+            candidate = _repair_fullwidth_closing_quote(candidate)
         candidate = _escape_json_control_chars_in_strings(candidate)
+        candidate = _repair_array_missing_object_brace(candidate)
         try:
             obj, _ = json.JSONDecoder().raw_decode(candidate)
         except json.JSONDecodeError as exc:
