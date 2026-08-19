@@ -184,12 +184,24 @@ export function storyboardSpokenChars(shot: Shot): number {
   return (shot.dialogues ?? []).reduce((total, line) => total + (line.line || '').replace(punctuation, '').length, 0)
 }
 
+// 口播容量上限的唯一口径，对齐后端 config.max_spoken_chars_for_duration：
+// clamp(duration_s, 5, 10) * 18 // 5（3.6 字/秒，纯文字不计标点）。后端在所有含镜头的视图里
+// 都会注入 spoken_limit（storyboard_ops.py:210），优先采信；仅当缺失时按同一公式兜底，
+// 避免列表徽标与编辑器保存判定使用两套标准而互相矛盾。
+export function shotSpokenLimit(shot: Pick<Shot, 'spoken_limit' | 'duration_s'>): number {
+  if (typeof shot.spoken_limit === 'number' && Number.isFinite(shot.spoken_limit)) {
+    return shot.spoken_limit
+  }
+  const duration = Math.min(Math.max(Math.trunc(shot.duration_s || 5), 5), 10)
+  return Math.floor((duration * 18) / 5)
+}
+
 export function isStoryboardProblemShot(shot: Shot): boolean {
   const status = shot.storyboard_evidence?.status || ''
   return shot.spoken_contract_status === 'conflict'
     || Boolean(shot.legacy_unvalidated)
     || ['candidate', 'needs_revision', 'rejected', 'stale', 'superseded'].includes(status)
-    || storyboardSpokenChars(shot) > (shot.spoken_limit ?? Number.POSITIVE_INFINITY)
+    || storyboardSpokenChars(shot) > shotSpokenLimit(shot)
     || Boolean(shot.preflight_errors?.length)
 }
 
@@ -781,7 +793,7 @@ export default function BoardPage() {
     if (onlyProblems && !isStoryboardProblemShot(shot)) return false
     if (sceneFilter && (shot.scene_name || shot.scene_setting) !== sceneFilter) return false
     if (characterFilter && ![...(shot.characters ?? []), ...(shot.audio_cast ?? [])].includes(characterFilter)) return false
-    if (capacityFilter && storyboardSpokenChars(shot) <= (shot.spoken_limit ?? Number.POSITIVE_INFINITY)) return false
+    if (capacityFilter && storyboardSpokenChars(shot) <= shotSpokenLimit(shot)) return false
     if (riskFilter && !shot.preflight_errors?.length && !shot.continuity_degraded && !(shot.risk_tags?.length)) return false
     return true
   }), [shots, onlyProblems, sceneFilter, characterFilter, capacityFilter, riskFilter])
@@ -1216,7 +1228,7 @@ export default function BoardPage() {
                     {checkpoint && <i className={checkpoint.className} title={checkpoint.title}>{checkpoint.label}</i>}
                     {isStoryboardProblemShot(shot) && <i className="problem">需处理</i>}
                     {shot.is_final && <i>{checkpoint?.className === 'checkpoint-pending' ? '草稿收尾' : '收尾镜'}</i>}
-                    {storyboardSpokenChars(shot) > (shot.spoken_limit ?? Infinity) && <i className="problem">口播超限</i>}
+                    {storyboardSpokenChars(shot) > shotSpokenLimit(shot) && <i className="problem">口播超限</i>}
                   </span>
                 </button>
               })}

@@ -530,9 +530,8 @@ export default function ScriptPage() {
     ;(value.scene_outline ?? []).forEach((scene, index) => {
       if (!scene.scene_heading.trim() || !scene.story_function.trim() || !scene.summary.trim()) sections.scenes.push(`场次 ${index + 1} 未写完`)
     })
-    ;(value.key_lines ?? []).forEach((line, index) => {
-      if (line && !value.full_script_text?.includes(line.replace(/^.{1,12}[：:]/, ''))) sections.evidence.push(`主线台词 ${index + 1} 在正文中不可追溯`)
-    })
+    // 主线台词 key_lines 是后端在发布时从 dialogue_chains 派生（validators.py key_lines_in_story_order），
+    // 编辑器不提供其输入、后端也会丢弃提交值；只校验权威来源“主线对白链”，避免拦住一个用户无法修改的派生字段。
     if (!(value.dialogue_chains ?? []).length) sections.evidence.push('主线对白链不能为空')
     return sections
   }
