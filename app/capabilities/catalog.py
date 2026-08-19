@@ -165,8 +165,8 @@ def _register_resources(registry) -> None:
         ResourceSpec(
             "screenplay_working",
             "manju://episodes/{episode_id}/screenplay/working",
-            "剧本工作副本",
-            "Agent 正在修复的不可变工作 Artifact（不可作为页面交付）",
+            "剧本工作文档",
+            "Repair 环节的服务端工作文档（working Artifact，由 working_screenplay_artifact_id 指向）；供局部修补，不可作为页面交付，既非页面会话草稿（screenplay_drafts）也非已发布剧本（screenplay_json）",
         ),
         ResourceSpec(
             "storyboard",
@@ -660,8 +660,8 @@ def _register_commands(registry) -> None:
         ),
         _cmd(
             "screenplay.repair_draft",
-            title="修复剧本草稿结构",
-            description="仅修复人工草稿的 JSON/Schema/上下文绑定问题；质量问题不触发修复",
+            title="送修人工剧本（生成工作文档）",
+            description="把页面提交的人工剧本送入独立 Repair 环节，仅修复 JSON/Schema/上下文绑定等结构问题并产出服务端工作文档（working Artifact）；质量问题不触发修复。与页面自动保存的会话草稿（screenplay_drafts）无关，也不直接改写已发布剧本",
             input_model=I.ScreenplayRepairDraftInput,
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.WHEN_IMPACT,
@@ -676,7 +676,7 @@ def _register_commands(registry) -> None:
         _cmd(
             "screenplay.delete",
             title="删除当前剧本",
-            description="删除本集当前剧本并清空分镜、媒体和交付指针；保留历史证据",
+            description="删除本集已发布剧本并清空其工作文档指针与分镜、媒体、交付等下游指针；保留历史证据，不影响页面会话草稿记录（screenplay_drafts）",
             input_model=I.ScreenplayDeleteInput,
             risk=RiskLevel.R3_DESTRUCTIVE,
             confirmation=ConfirmationPolicy.ALWAYS,
@@ -1425,8 +1425,8 @@ def _register_exemptions(registry) -> None:
         "人物定妆候选人工回滚；页面评审入口，复用采纳切换逻辑",
     )
     for route, reason in {
-        "PUT /api/episodes/{episode_id}/screenplay/draft": "剧本台草稿会话写入；不发布、不触发生成，仅由页面自动保存管理",
-        "DELETE /api/episodes/{episode_id}/screenplay/draft": "剧本台草稿清理；只删除未发布工作副本",
+        "PUT /api/episodes/{episode_id}/screenplay/draft": "剧本台会话草稿写入（screenplay_drafts）；仅页面自动保存的未发布编辑内容，不发布、不触发生成、不进入下游；与 Repair 工作文档、已发布剧本无关",
+        "DELETE /api/episodes/{episode_id}/screenplay/draft": "剧本台会话草稿清理；只删除 screenplay_drafts 中该分集的会话草稿记录，不影响 Repair 工作文档（working_screenplay_artifact_id）与已发布剧本（screenplay_json）",
         "DELETE /api/shots/{shot_id}/drafts/{draft_id}": "分镜编辑会话草稿清理；不改变已发布产物",
         "POST /api/episodes/{episode_id}/confirm-preview": "分集确认前只读影响预览；正式确认仍走已登记命令",
         "POST /api/episodes/{episode_id}/screenplay/preflight": "剧本生成前只读输入范围与人物资产影响预检",
