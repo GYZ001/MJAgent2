@@ -287,7 +287,7 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     )
 
     assert stages.SCREENPLAY_BLUEPRINT_PROMPT_VERSION == (
-        "screenplay-blueprint-1.9.0"
+        "screenplay-blueprint-1.10.0"
     )
     assert stages.BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION == (
         "blueprint-semantic-review.v4"
@@ -296,6 +296,9 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     assert "每个SRC必须整体且只归一个节点" in prompt
     assert "节点只能在SRC边界拆分" in prompt
     assert "连续动作压缩为一个核心因果进程" in prompt
+    # required_fact_key 引用完整性约束必须在提示词中明确，避免模型编造未建立事实。
+    assert "required_fact_key必须指向一个已建立事实" in prompt
+    assert "assumed_prior=true" in prompt
     assert (
         "identity_key集合及exact-unit joint assignment "
         "identity_keys的并集完全相等"
