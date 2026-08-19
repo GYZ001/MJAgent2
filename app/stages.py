@@ -5074,62 +5074,6 @@ async def _semantic_review_narrative_blueprint(
                         for node_key in issue.node_keys
                         if node_key not in allowed
                     )
-                # #region debug-point C:reviewer-contract
-                try:
-                    import urllib.request as _debug_request
-                    _debug_url = "http://127.0.0.1:7777/event"
-                    _debug_session = "three-episode-video"
-                    with open(
-                        ".dbg/three-episode-video.env",
-                        encoding="utf-8",
-                    ) as _debug_env:
-                        for _debug_line in _debug_env:
-                            if _debug_line.startswith("DEBUG_SERVER_URL="):
-                                _debug_url = _debug_line.split(
-                                    "=", 1
-                                )[1].strip()
-                            elif _debug_line.startswith("DEBUG_SESSION_ID="):
-                                _debug_session = _debug_line.split(
-                                    "=", 1
-                                )[1].strip()
-                    _debug_request.urlopen(
-                        _debug_request.Request(
-                            _debug_url,
-                            data=json.dumps({
-                                "sessionId": _debug_session,
-                                "runId": "reviewer-post-fix",
-                                "hypothesisId": "C",
-                                "location": (
-                                    "app/stages.py:"
-                                    "_semantic_review_narrative_blueprint"
-                                ),
-                                "msg": (
-                                    "[DEBUG] validate independent "
-                                    "Blueprint reviewer"
-                                ),
-                                "data": {
-                                    "review_round": review_round,
-                                    "review_sample": sample_no,
-                                    "issue_count": len(
-                                        candidate_review.issues
-                                    ),
-                                    "dropped_unsupported_issue_count": (
-                                        dropped_voice_issue_counts.get(
-                                            sample_no,
-                                            0,
-                                        )
-                                    ),
-                                    "validation_errors": errors[:10],
-                                },
-                                "ts": int(time.time() * 1000),
-                            }).encode(),
-                            headers={"Content-Type": "application/json"},
-                        ),
-                        timeout=1,
-                    ).read()
-                except Exception:
-                    pass
-                # #endregion
                 return errors
 
             review_messages = [
@@ -7597,60 +7541,6 @@ async def _generate_sharded_narrative_blueprint(
                         source_text,
                     )
                 )
-                # #region debug-point C:state-subject-projection
-                try:
-                    import urllib.request as _debug_request
-                    _debug_url = "http://127.0.0.1:7777/event"
-                    _debug_session = "three-episode-video"
-                    with open(
-                        ".dbg/three-episode-video.env",
-                        encoding="utf-8",
-                    ) as _debug_env:
-                        for _debug_line in _debug_env:
-                            if _debug_line.startswith("DEBUG_SERVER_URL="):
-                                _debug_url = _debug_line.split(
-                                    "=", 1
-                                )[1].strip()
-                            elif _debug_line.startswith("DEBUG_SESSION_ID="):
-                                _debug_session = _debug_line.split(
-                                    "=", 1
-                                )[1].strip()
-                    _debug_request.urlopen(
-                        _debug_request.Request(
-                            _debug_url,
-                            data=json.dumps({
-                                "sessionId": _debug_session,
-                                "runId": "post-fix",
-                                "hypothesisId": "C",
-                                "location": (
-                                    "app/stages.py:"
-                                    "_generate_sharded_narrative_blueprint"
-                                ),
-                                "msg": (
-                                    "[DEBUG] normalize state-subject "
-                                    "evidence projection"
-                                ),
-                                "data": {
-                                    "shard_index": shard_index,
-                                    "attempt": attempt,
-                                    "response_mode": (
-                                        "ownership_repair"
-                                        if repair_only
-                                        else "full_shard"
-                                    ),
-                                    "removed_non_action_keys": (
-                                        removed_state_subject_keys
-                                    ),
-                                },
-                                "ts": int(time.time() * 1000),
-                            }).encode(),
-                            headers={"Content-Type": "application/json"},
-                        ),
-                        timeout=1,
-                    ).read()
-                except Exception:
-                    pass
-                # #endregion
                 previous_candidate = candidate.model_dump(mode="json")
                 errors = validate_narrative_blueprint_shard(
                     candidate,
@@ -7720,69 +7610,6 @@ async def _generate_sharded_narrative_blueprint(
                             source_text=source_text,
                         )
                     )
-                    # #region debug-point C:ownership-repair-route
-                    try:
-                        import urllib.request as _debug_request
-                        _debug_url = "http://127.0.0.1:7777/event"
-                        _debug_session = "three-episode-video"
-                        with open(
-                            ".dbg/three-episode-video.env",
-                            encoding="utf-8",
-                        ) as _debug_env:
-                            for _debug_line in _debug_env:
-                                if _debug_line.startswith(
-                                    "DEBUG_SERVER_URL="
-                                ):
-                                    _debug_url = _debug_line.split(
-                                        "=", 1
-                                    )[1].strip()
-                                elif _debug_line.startswith(
-                                    "DEBUG_SESSION_ID="
-                                ):
-                                    _debug_session = _debug_line.split(
-                                        "=", 1
-                                    )[1].strip()
-                        _debug_request.urlopen(
-                            _debug_request.Request(
-                                _debug_url,
-                                data=json.dumps({
-                                    "sessionId": _debug_session,
-                                    "runId": "post-fix",
-                                    "hypothesisId": "C",
-                                    "location": (
-                                        "app/stages.py:"
-                                        "_generate_sharded_narrative_blueprint"
-                                    ),
-                                    "msg": (
-                                        "[DEBUG] select exact ownership "
-                                        "repair route"
-                                    ),
-                                    "data": {
-                                        "shard_index": shard_index,
-                                        "selected": (
-                                            ownership_repair_issues
-                                            is not None
-                                        ),
-                                        "target_unit_keys": (
-                                            _blueprint_state_subject_repair_target_keys(
-                                                ownership_repair_issues
-                                            )
-                                            if ownership_repair_issues
-                                            else []
-                                        ),
-                                        "validation_error_count": len(errors),
-                                    },
-                                    "ts": int(time.time() * 1000),
-                                }).encode(),
-                                headers={
-                                    "Content-Type": "application/json"
-                                },
-                            ),
-                            timeout=1,
-                        ).read()
-                    except Exception:
-                        pass
-                    # #endregion
             if split_for_truncation:
                 split = _split_blueprint_segments(shard_segments)
                 segment_shards[shard_index - 1:shard_index] = split

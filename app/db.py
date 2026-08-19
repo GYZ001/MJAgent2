@@ -1220,37 +1220,6 @@ async def run_write_transaction(
                 lambda: _run_write_transaction_once(operation)
             )
         except _WriteTransactionStartError as exc:
-            # #region debug-point E:sqlite-begin-retry
-            try:
-                import os as _debug_os
-                import urllib.request as _debug_request
-                if _debug_os.environ.get("PYTEST_CURRENT_TEST"):
-                    raise RuntimeError(
-                        "debug instrumentation disabled under pytest"
-                    )
-                _debug_request.urlopen(
-                    _debug_request.Request(
-                        "http://127.0.0.1:7778/event",
-                        data=json.dumps({
-                            "sessionId": "three-episode-video",
-                            "runId": "post-fix",
-                            "hypothesisId": "E",
-                            "location": "app/db.py:run_write_transaction",
-                            "msg": "[DEBUG] retry sqlite transaction start",
-                            "data": {
-                                "attempt": attempt,
-                                "retry_count": len(retry_delays),
-                                "message": str(exc.original)[:200],
-                            },
-                            "ts": int(time.time() * 1000),
-                        }).encode(),
-                        headers={"Content-Type": "application/json"},
-                    ),
-                    timeout=1,
-                ).read()
-            except Exception:
-                pass
-            # #endregion
             if attempt >= len(retry_delays):
                 raise exc.original from exc
             await asyncio.sleep(max(0.0, float(retry_delays[attempt])))
