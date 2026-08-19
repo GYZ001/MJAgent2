@@ -362,6 +362,12 @@ async def chat(
         "trace_id": trace.trace_id,
         **(call_meta or {}),
     }
+    # 任何声明期望 JSON 的业务调用（chat_structured 及直接带 expected_json 的分片/蓝图等）
+    # 都在生成阶段就约束合法 JSON。显式传入的 response_format 优先；否则按 expected_json 兜底。
+    # 这样无需逐个改调用点，统一在 harness 边界收口，供应商不支持时适配层会自动去掉重试。
+    effective_response_format = response_format
+    if effective_response_format is None and meta.get("expected_json"):
+        effective_response_format = {"type": "json_object"}
     max_retries = (
         0
         if meta.get("disable_provider_retries")
@@ -379,8 +385,8 @@ async def chat(
             }
             if usage_callback is not None:
                 provider_kwargs["usage_callback"] = usage_callback
-            if response_format is not None:
-                provider_kwargs["response_format"] = response_format
+            if effective_response_format is not None:
+                provider_kwargs["response_format"] = effective_response_format
             result = await run_with_provider_call_slot(
                 lambda: hiagent.chat(messages, **provider_kwargs)
             )
