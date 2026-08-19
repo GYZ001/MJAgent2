@@ -177,7 +177,7 @@ SCREENPLAY_IR_MAX_TOKENS = 36864
 
 BLUEPRINT_SHARD_MIN_TOKENS = 6144
 BLUEPRINT_SHARD_MAX_TOKENS = 16384
-BLUEPRINT_SHARD_MAX_ATTEMPTS = 2
+BLUEPRINT_SHARD_MAX_ATTEMPTS = 3
 BLUEPRINT_REVIEW_FORMAT_RETRY_LIMIT = 1
 BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS = 32
 BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS = 131072
@@ -6455,6 +6455,14 @@ def _blueprint_shard_prompt(
         "多个主要地点，仍必须整段只归一个节点，location_key/location_label只填写"
         "该SRC核心因果进程实际发生的一个主要地点，移动过程写入transition_cue和"
         "action_logic，禁止复合地点、禁止拆SRC。"
+        "state_requirements每条的required_fact_key必须指向一个已建立事实："
+        "要么是本分片更早节点state_changes里出现过的fact_key，要么是"
+        "boundary_context.active_state_facts里已带入的fact_key；"
+        "严禁引用任何没有在这两处建立过的fact_key（会触发"
+        "BLUEPRINT_SHARD_FACT_UNKNOWN）。若某状态确实在本集之前就已成立、"
+        "本分片无对应state_changes来源，则该requirement必须写assumed_prior=true"
+        "并留空required_fact_key，绝不可凭空编造fact_key。supersedes_fact_keys"
+        "同理只能指向已建立事实。"
         "所有描述字段简洁，不复述原文或Schema。"
     )
     compact = lambda value: json.dumps(  # noqa: E731 - local canonical renderer

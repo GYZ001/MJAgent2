@@ -29,7 +29,7 @@ from app.source_facts import SOURCE_FACT_VERSION, SourceFact, source_facts
 
 
 BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v7"
-BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.9.0"
+BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.10.0"
 BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 # Provider-facing Blueprint shards are deliberately smaller than the final
 # scene/node ownership limit.  A production 28-SRC shard exhausted 10K output
