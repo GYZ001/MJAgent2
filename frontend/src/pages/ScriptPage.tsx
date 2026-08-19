@@ -90,6 +90,27 @@ export function screenplayResumeOutcomeSummary(
   return '完整剧本工作副本已继续执行结构校验、评分与发布'
 }
 
+export function screenplayGeneratePayload(
+  idempotencyKey: string,
+  blueprintBudget?: {
+    requires_fresh_retry_grant?: boolean
+    unknown_receipts?: unknown
+  } | null,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = { idempotency_key: idempotencyKey }
+  // 上次供应商结果未知时，后端围栏同一语义 operation 的重付；经用户在预检弹窗二次
+  // 确认后，显式携带授权与期望的未知收据，解开成本保护闸门。非该场景绝不带授权字段。
+  if (blueprintBudget?.requires_fresh_retry_grant) {
+    payload.authorize_blueprint_retry = true
+    payload.expected_blueprint_unknown_receipts = Array.isArray(
+      blueprintBudget.unknown_receipts,
+    )
+      ? blueprintBudget.unknown_receipts
+      : []
+  }
+  return payload
+}
+
 export function ScreenplayResumeButton({
   production,
   busy,
@@ -412,20 +433,13 @@ export default function ScriptPage() {
     }
     if (current.kind === 'screenplay') {
       screenplayTimer.start()
-      // 上次供应商结果未知时，后端会围栏同一语义 operation 的重付；此处经用户在
-      // 预检弹窗二次确认后，显式携带授权与期望的未知收据，解开成本保护闸门。
-      const retryBudget = current.data?.blueprint_budget
-      const authorizeRetry = Boolean(retryBudget?.requires_fresh_retry_grant)
-      const result = await run(() => api.post(`/episodes/${ep.id}/screenplay`, {
-        idempotency_key: current.idempotencyKey,
-        ...(authorizeRetry
-          ? {
-              authorize_blueprint_retry: true,
-              expected_blueprint_unknown_receipts:
-                retryBudget?.unknown_receipts ?? [],
-            }
-          : {}),
-      }), '首版剧本任务已受理').catch(() => screenplayTimer.clear())
+      const result = await run(() => api.post(
+        `/episodes/${ep.id}/screenplay`,
+        screenplayGeneratePayload(
+          current.idempotencyKey,
+          current.data?.blueprint_budget,
+        ),
+      ), '首版剧本任务已受理').catch(() => screenplayTimer.clear())
       if (result) {
         setDirty(false)
         localStorage.removeItem(localDraftKey)
