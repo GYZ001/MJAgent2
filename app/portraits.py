@@ -1502,7 +1502,13 @@ async def resolve_future_identity_candidates(
     episode_no: int,
     future_label: str = "",
 ) -> list[dict]:
-    """Resolve only current unresolved identities from bounded future windows."""
+    """Resolve current unresolved identity groups from bounded future evidence.
+
+    The provider never copies a label, authority, group or evidence quote on
+    this wire.  It selects one backend-owned decision token per exact group
+    key.  Only a genuinely new name remains open text, and that name must be
+    anchored verbatim in one backend-owned raw-future evidence span.
+    """
     unresolved_onscreen_groups = {
         str(item.get("identity_group") or "").strip()
         for item in candidates
@@ -1522,15 +1528,11 @@ async def resolve_future_identity_candidates(
     ]
     if not unresolved or not str(future_text or "").strip():
         return candidates
-    known_names = [character.name for character in bible.characters if character.name]
-    future_context = _future_identity_context(
-        future_text,
-        [str(item.get("source_label") or "") for item in unresolved],
-        known_names=known_names,
-        current_text=source_text,
-    )
-    if not future_context:
-        return candidates
+    known_names = [
+        str(character.name or "").strip()
+        for character in bible.characters
+        if str(character.name or "").strip()
+    ]
     authority_by_id: dict[str, dict] = {}
     for name in known_names:
         authority_by_id[f"bible:{name}"] = {
@@ -1565,157 +1567,335 @@ async def resolve_future_identity_candidates(
         if source_label and source_label not in authority["aliases"]:
             authority["aliases"].append(source_label)
     authority_projection = list(authority_by_id.values())
-    allowed_source_labels = list(dict.fromkeys(
-        str(item.get("source_label") or "").strip()
-        for item in unresolved
-        if str(item.get("source_label") or "").strip()
-    ))
+
+    raw_groups: dict[str, dict] = {}
+    label_to_group: dict[str, str] = {}
+    for candidate in unresolved:
+        source_label = str(candidate.get("source_label") or "").strip()
+        if not source_label:
+            raise ContentGenerationError(
+                "future identity candidate 缺少 source_label"
+            )
+        raw_group = str(candidate.get("identity_group") or "").strip()
+        if not raw_group:
+            raw_group = f"label:{source_label}"
+        previous_group = label_to_group.setdefault(source_label, raw_group)
+        if previous_group != raw_group:
+            raise ContentGenerationError(
+                "future identity 同一称谓对应多个身份组："
+                f"{source_label}"
+            )
+        group = raw_groups.setdefault(raw_group, {
+            "identity_group": raw_group,
+            "labels": [],
+            "candidates": [],
+        })
+        if source_label not in group["labels"]:
+            group["labels"].append(source_label)
+        group["candidates"].append(candidate)
+
+    group_specs: list[dict] = []
+    for index, group in enumerate(raw_groups.values(), start=1):
+        group_specs.append({
+            **group,
+            "group_key": f"G{index:03d}",
+        })
+    group_keys = [str(group["group_key"]) for group in group_specs]
+
+    # Evidence IDs always resolve to an exact raw-future span.  Current-tail
+    # context is shown separately for semantic handoff, but can never be cited
+    # as the owned evidence which authorizes a decision.
+    future_segments = index_source_segments(future_text, max_chars=120)
+    evidence_by_id: dict[str, dict] = {}
+    evidence_ids_by_group: dict[str, list[str]] = {}
+    per_group_budget = max(
+        480,
+        min(
+            1800,
+            CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET // max(1, len(group_specs)),
+        ),
+    )
+    for group in group_specs:
+        group_key = str(group["group_key"])
+        group_labels = [str(value) for value in group["labels"]]
+        matching_indexes = [
+            index for index, segment in enumerate(future_segments)
+            if any(label in segment.text for label in group_labels)
+        ]
+        context_indexes = set(matching_indexes)
+        for index in matching_indexes:
+            if index > 0:
+                context_indexes.add(index - 1)
+            if index + 1 < len(future_segments):
+                context_indexes.add(index + 1)
+        matching = [
+            future_segments[index] for index in sorted(context_indexes)
+        ]
+        if not matching:
+            matching = [
+                segment for segment in future_segments
+                if segment.start_offset < 900
+            ]
+        ranked = sorted(
+            enumerate(matching),
+            key=lambda item: (
+                -sum(name in item[1].text for name in known_names),
+                0 if item[0] == 0 else 1,
+                0 if item[0] == len(matching) - 1 else 1,
+                item[1].start_offset,
+            ),
+        )
+        selected: list = []
+        used = 0
+        for _rank, segment in ranked:
+            if used >= per_group_budget:
+                break
+            if segment.text in {item.text for item in selected}:
+                continue
+            selected.append(segment)
+            used += len(segment.text)
+        selected.sort(key=lambda item: item.start_offset)
+        group_evidence_ids: list[str] = []
+        for segment in selected:
+            evidence_id = "E:" + evidence_repository.content_hash({
+                "contract_version": FUTURE_IDENTITY_DECISION_VERSION,
+                "origin": "future",
+                "source_hash": evidence_repository.content_hash(future_text),
+                "start_offset": segment.start_offset,
+                "end_offset": segment.end_offset,
+                "text": segment.text,
+            })[:20]
+            evidence_by_id.setdefault(evidence_id, {
+                "evidence_id": evidence_id,
+                "origin": "future",
+                "start_offset": segment.start_offset,
+                "end_offset": segment.end_offset,
+                "text": segment.text,
+            })
+            group_evidence_ids.append(evidence_id)
+        evidence_ids_by_group[group_key] = list(dict.fromkeys(
+            group_evidence_ids
+        ))
+
+    decision_by_id: dict[str, dict] = {}
+    decision_ids_by_group: dict[str, list[str]] = {}
+    for group in group_specs:
+        group_key = str(group["group_key"])
+        functional_id = f"F:{group_key}"
+        decision_by_id[functional_id] = {
+            "decision_id": functional_id,
+            "group_key": group_key,
+            "resolution_kind": "functional",
+        }
+        decision_ids = [functional_id]
+        for authority_id, authority in authority_by_id.items():
+            for evidence_id in evidence_ids_by_group[group_key]:
+                known_hash = evidence_repository.content_hash({
+                    "contract_version": FUTURE_IDENTITY_DECISION_VERSION,
+                    "group_key": group_key,
+                    "authority_id": authority_id,
+                    "evidence_id": evidence_id,
+                })[:12]
+                known_id = (
+                    f"K:{group_key}:{authority_id}:{evidence_id}:{known_hash}"
+                )
+                decision_by_id[known_id] = {
+                    "decision_id": known_id,
+                    "group_key": group_key,
+                    "resolution_kind": "known_named",
+                    "authority_id": authority_id,
+                    "canonical_name": str(
+                        authority.get("canonical_name") or ""
+                    ),
+                    "evidence_id": evidence_id,
+                }
+                decision_ids.append(known_id)
+        if evidence_ids_by_group[group_key]:
+            new_id = f"N:{group_key}"
+            decision_by_id[new_id] = {
+                "decision_id": new_id,
+                "group_key": group_key,
+                "resolution_kind": "new_named",
+            }
+            decision_ids.append(new_id)
+        decision_ids_by_group[group_key] = decision_ids
+
     identity_schema = _future_identity_schema(
-        allowed_source_labels,
-        list(authority_by_id),
+        group_keys,
+        decision_ids_by_group=decision_ids_by_group,
+        evidence_ids_by_group=evidence_ids_by_group,
     )
     identity_response_format = _identity_strict_response_format(
         identity_schema,
-        name="screenplay_future_identity_resolution_v8",
+        name="screenplay_future_identity_resolution_v9",
     )
-    prompt = f"""任务：只为当前集尚未确认的身份做后续姓名消歧。
-当前未决身份（不可新增列表外人物）：
-{json.dumps(unresolved, ensure_ascii=False, separators=(',', ':'))}
-候选人物权威（用于精确绑定已有角色，不发送其未来剧情窗口）：
+    group_projection = [
+        {
+            "group_key": group["group_key"],
+            "identity_group": group["identity_group"],
+            "source_labels": group["labels"],
+        }
+        for group in group_specs
+    ]
+    decision_projection = [
+        decision for decision in decision_by_id.values()
+    ]
+    evidence_projection = [
+        evidence for evidence in evidence_by_id.values()
+    ]
+    current_boundary = str(source_text or "").strip()[-700:]
+    prompt = f"""任务：只为当前集尚未确认的身份组做后续姓名消歧。
+未决身份组（group_key 是唯一可输出的键）：
+{json.dumps(group_projection, ensure_ascii=False, separators=(',', ':'))}
+已有人物权威目录（只读）：
 {json.dumps(authority_projection, ensure_ascii=False, separators=(',', ':'))}
-后续局部窗口（{future_label or '后续章节'}）：
-{future_context}
-规则：source_label 必须逐字引用当前未决列表；请结合称谓、别名、关系和上下文语义判断
-是否为候选人物权威中的同一人，或窗口是否逐字揭示了新的稳定真名。只有窗口中存在
-可追溯的同一性依据时才输出 named。若绑定“候选人物权威”中的既有身份，放入
-known_named 并只选 authority_id；若后续窗口首次逐字揭示了新稳定真名，放入
-new_named 并输出 canonical_name。future_evidence 必须是后续窗口中的最小逐字依据；
-new_named 依据必须包含 canonical_name，known_named 依据必须包含当前称谓或
-权威真名。证据不足时放入 functional，这是合法终态，不得猜名或补名；
-不得输出只在后续出场的人。必须对每个未决 source_label 恰好分类一次，三个数组都
-必须显式输出，空集合用 []。只输出符合下列 Schema 的 JSON：
+后续证据目录（{future_label or '后续章节'}；evidence_id 对应未改写的原文连续片段）：
+{json.dumps(evidence_projection, ensure_ascii=False, separators=(',', ':'))}
+可选决议目录（已将 group/authority/evidence 组合绑定为不透明 decision_id）：
+{json.dumps(decision_projection, ensure_ascii=False, separators=(',', ':'))}
+当前章末交接上下文（仅供推理，绝不是可选 evidence_id）：
+{current_boundary or '（无）'}
+规则：
+1. decisions/revealed_names/reveal_evidence_ids 三个对象都必须精确输出全部 group_key，不得增删键。
+2. 证据不足时选 F: 决议，这是合法终态；此时两个侧载字段都必须是空字符串。
+3. 绑定已有人物时只能选 K: 决议；该 token 已绑定 authority 与原文证据，两个侧载字段都必须为空。
+4. 只有证据目录首次逐字揭示了不在已有权威目录中的稳定真名，才能选 N: 决议；
+   revealed_names 写真名，reveal_evidence_ids 选包含该真名的 evidence_id。
+5. 不得回抄或改写证据文本，不得为已有权威重新签发新名，不得输出只在后续出场的人。
+只输出符合下列 Schema 的 JSON：
 {json.dumps(identity_schema, ensure_ascii=False, separators=(',', ':'))}"""
 
     def response_decisions(
         value: FutureIdentityCandidateResponse,
     ) -> list[dict]:
         decisions: list[dict] = []
-        for item in value.known_named:
-            raw = item.model_dump(mode="json")
-            authority = authority_by_id.get(item.authority_id)
-            decisions.append({
-                **raw,
-                "resolution_kind": "known_named",
-                "identity_kind": "named",
-                "canonical_name": str(
-                    (authority or {}).get("canonical_name") or ""
-                ),
-            })
-        for item in value.new_named:
-            decisions.append({
-                **item.model_dump(mode="json"),
-                "resolution_kind": "new_named",
-                "identity_kind": "named",
-                "authority_id": _canonical_named_authority_id(
-                    item.canonical_name
-                ),
-            })
-        for item in value.functional:
-            decisions.append({
-                **item.model_dump(mode="json"),
-                "resolution_kind": "functional",
-                "identity_kind": "functional",
-                "canonical_name": "",
-                "future_evidence": "",
-            })
+        for group in group_specs:
+            group_key = str(group["group_key"])
+            selected_id = str(value.decisions.get(group_key) or "")
+            selected = decision_by_id.get(selected_id, {})
+            resolution_kind = str(selected.get("resolution_kind") or "")
+            if resolution_kind == "known_named":
+                evidence = evidence_by_id.get(
+                    str(selected.get("evidence_id") or ""),
+                    {},
+                )
+                common = {
+                    "resolution_kind": resolution_kind,
+                    "identity_kind": "named",
+                    "canonical_name": str(
+                        selected.get("canonical_name") or ""
+                    ),
+                    "authority_id": str(
+                        selected.get("authority_id") or ""
+                    ),
+                    "future_evidence": str(evidence.get("text") or ""),
+                }
+            elif resolution_kind == "new_named":
+                canonical_name = str(
+                    value.revealed_names.get(group_key) or ""
+                )
+                evidence = evidence_by_id.get(
+                    str(value.reveal_evidence_ids.get(group_key) or ""),
+                    {},
+                )
+                common = {
+                    "resolution_kind": resolution_kind,
+                    "identity_kind": "named",
+                    "canonical_name": canonical_name,
+                    "authority_id": (
+                        _canonical_named_authority_id(canonical_name)
+                        if canonical_name.strip() else ""
+                    ),
+                    "future_evidence": str(evidence.get("text") or ""),
+                }
+            else:
+                common = {
+                    "resolution_kind": "functional",
+                    "identity_kind": "functional",
+                    "canonical_name": "",
+                    "authority_id": "",
+                    "future_evidence": "",
+                }
+            for source_label in group["labels"]:
+                decisions.append({
+                    **common,
+                    "source_label": str(source_label),
+                })
         return decisions
 
     def validate_response(
         value: FutureIdentityCandidateResponse,
     ) -> list[str]:
-        allowed = set(allowed_source_labels)
         errors: list[str] = []
-        seen_labels: set[str] = set()
-        decisions = response_decisions(value)
-        decision_by_label: dict[str, dict] = {}
-        for item in decisions:
-            source_label = str(item.get("source_label") or "")
-            if source_label != source_label.strip():
+        expected_keys = set(group_keys)
+        maps = {
+            "decisions": value.decisions,
+            "revealed_names": value.revealed_names,
+            "reveal_evidence_ids": value.reveal_evidence_ids,
+        }
+        for field_name, values in maps.items():
+            actual_keys = set(values)
+            if actual_keys != expected_keys:
                 errors.append(
-                    f"source_label 含首尾空白：{source_label!r}"
+                    f"future identity {field_name} keys 不闭合"
                 )
-            if source_label not in allowed:
-                errors.append(f"source_label 越界：{source_label}")
-            if source_label in seen_labels:
-                errors.append(f"source_label 重复：{source_label}")
-            seen_labels.add(source_label)
-            decision_by_label[source_label] = item
-            resolution_kind = str(item.get("resolution_kind") or "")
-            if resolution_kind == "known_named":
-                authority_id = str(item.get("authority_id") or "")
-                authority = authority_by_id.get(authority_id)
-                if authority is None:
-                    errors.append(f"authority_id 越界：{authority_id}")
-                    continue
-                evidence_text = str(item.get("future_evidence") or "")
-                canonical_name = str(authority.get("canonical_name") or "")
-                if (
-                    evidence_text != evidence_text.strip()
-                    or evidence_text not in future_text
-                    or (
-                        source_label not in evidence_text
-                        and canonical_name not in evidence_text
-                    )
-                ):
-                    errors.append(
-                        f"known identity 缺少 owned future evidence：{source_label}"
-                    )
-            elif resolution_kind == "new_named":
-                canonical_name = str(item.get("canonical_name") or "")
-                evidence_text = str(item.get("future_evidence") or "")
-                if canonical_name != canonical_name.strip():
-                    errors.append(
-                        f"canonical_name 含首尾空白：{source_label}"
-                    )
-                if canonical_name in {
-                    str(authority.get("canonical_name") or "")
-                    for authority in authority_by_id.values()
-                }:
-                    errors.append(
-                        "new_named 不得重新签发已有 authority："
-                        f"{source_label}"
-                    )
-                if (
-                    evidence_text != evidence_text.strip()
-                    or evidence_text not in future_text
-                    or canonical_name not in evidence_text
-                ):
-                    errors.append(
-                        f"new identity 缺少逐字真名锚点：{source_label}"
-                    )
-        missing_labels = allowed - seen_labels
-        if missing_labels:
-            errors.append(
-                "future identity 缺少未决称谓："
-                + ",".join(sorted(missing_labels))
+        existing_canonical_names = {
+            str(authority.get("canonical_name") or "")
+            for authority in authority_by_id.values()
+        }
+        for group_key in group_keys:
+            selected_id = str(value.decisions.get(group_key) or "")
+            selected = decision_by_id.get(selected_id)
+            if (
+                selected is None
+                or str(selected.get("group_key") or "") != group_key
+            ):
+                errors.append(
+                    f"future identity decision_id 越界：{group_key}"
+                )
+                continue
+            canonical_name = str(
+                value.revealed_names.get(group_key) or ""
             )
-        groups: dict[str, list[dict]] = {}
-        for candidate in unresolved:
-            label = str(candidate.get("source_label") or "").strip()
-            group = str(candidate.get("identity_group") or "").strip()
-            decision = decision_by_label.get(label)
-            if group and decision is not None:
-                groups.setdefault(group, []).append(decision)
-        for group, group_decisions in groups.items():
-            identities = {
-                (
-                    str(item.get("identity_kind") or ""),
-                    str(item.get("authority_id") or ""),
+            evidence_id = str(
+                value.reveal_evidence_ids.get(group_key) or ""
+            )
+            resolution_kind = str(selected.get("resolution_kind") or "")
+            if resolution_kind != "new_named":
+                if canonical_name or evidence_id:
+                    errors.append(
+                        "future identity 非 NEW 决议侧载必须为空："
+                        f"{group_key}"
+                    )
+                continue
+            if canonical_name != canonical_name.strip() or not canonical_name:
+                errors.append(
+                    f"future identity NEW 真名无效：{group_key}"
                 )
-                for item in group_decisions
-            }
-            if len(identities) > 1:
-                errors.append(f"future identity 同组决议冲突：{group}")
+            if len(canonical_name) > 16:
+                errors.append(
+                    f"future identity NEW 真名过长：{group_key}"
+                )
+            if canonical_name in existing_canonical_names:
+                errors.append(
+                    "future identity NEW 不得重新签发已有 authority："
+                    f"{group_key}"
+                )
+            if evidence_id not in evidence_ids_by_group.get(group_key, []):
+                errors.append(
+                    f"future identity NEW evidence_id 越界：{group_key}"
+                )
+                continue
+            evidence = evidence_by_id.get(evidence_id, {})
+            evidence_text = str(evidence.get("text") or "")
+            if (
+                evidence.get("origin") != "future"
+                or evidence_text not in future_text
+                or canonical_name not in evidence_text
+            ):
+                errors.append(
+                    f"future identity NEW 缺少逐字真名锚点：{group_key}"
+                )
         return errors
     identity_provider, identity_model, identity_effective_max = (
         hiagent.text_request_token_limits(requested_max_tokens=4096)
@@ -1724,7 +1904,7 @@ new_named 依据必须包含 canonical_name，known_named 依据必须包含当�
         identity_provider
     )
     operation_id = (
-        "screenplay.identity.future.v9:"
+        "screenplay.identity.future.v10:"
         + evidence_repository.content_hash({
             "episode_no": episode_no,
             "provider": identity_provider,
@@ -1767,8 +1947,22 @@ new_named 依据必须包含 canonical_name，known_named 依据必须包含当�
             "disable_provider_candidate_fallback": True,
             "disable_reasoning_fallback": True,
             "schema_hash": evidence_repository.content_hash(identity_schema),
+            "decision_catalog_hash": evidence_repository.content_hash(
+                decision_projection
+            ),
+            "evidence_catalog_hash": evidence_repository.content_hash(
+                evidence_projection
+            ),
         },
-        repair_context=future_context,
+        repair_context=json.dumps(
+            {
+                "groups": group_projection,
+                "decisions": decision_projection,
+                "evidence": evidence_projection,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
         output_schema=identity_schema,
         response_format=identity_response_format,
         require_response_format=True,
