@@ -1038,7 +1038,23 @@ def test_generic_discovery_keeps_current_contract_cache_compatible(
         "existing_resolutions": [],
         "structural_evidence": [],
     })
-    expected = [{"source_label": "ordinary-current"}]
+    receipt = portraits._current_identity_evidence_records(source_text)[0]
+    expected = [{
+        "name": "萌浩",
+        "source_label": "萌浩",
+        "identity_kind": "functional",
+        "identity_group": "current-1:F1",
+        "authority_id": "",
+        "kind": "onscreen",
+        "source_label_provenance": (
+            portraits.CURRENT_IDENTITY_LITERAL_PROVENANCE
+        ),
+        "source_evidence_receipt": receipt,
+        "source_evidence_receipts": [receipt],
+        "source_segment_id": receipt["source_segment_id"],
+        "source_segment_ids": [receipt["source_segment_id"]],
+        "source_quote": receipt["text"],
+    }]
     conn.execute(
         "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
         (
@@ -2972,12 +2988,12 @@ def test_attempt14_call_63221_current_rf9_preserves_all_distinct_identities(
         )
         assert meta["source_batches"] == 1
         assert kwargs["response_format"]["json_schema"]["name"] == (
-            "screenplay_current_identity_discovery_v10"
+            "screenplay_current_identity_discovery_v11"
         )
         provider_schema = kwargs["response_format"]["json_schema"]["schema"]
-        evidence_refs = provider_schema["properties"]["decisions"][
-            "properties"
-        ]
+        evidence_refs = provider_schema["$defs"][
+            "CurrentNewNamedIdentityDecision"
+        ]["properties"]["evidence_ref"]["enum"]
         assert len(evidence_refs) == 5
         characters = [
             {
@@ -3225,15 +3241,15 @@ def test_attempt15_call_63222_rf10_mirror_succeeds_once(
         calls += 1
         meta = kwargs["call_meta"]
         assert meta["contract_version"] == (
-            "screenplay-identity-discovery.v13"
+            "screenplay-identity-discovery.v14"
         )
         assert meta["current_identity_version"] == (
-            "screenplay-current-identity.v10"
+            "screenplay-current-identity.v11"
         )
         assert meta["format_attempt"] == 0
         assert meta["semantic_attempt"] == 0
         assert kwargs["response_format"]["json_schema"]["name"] == (
-            "screenplay_current_identity_discovery_v10"
+            "screenplay_current_identity_discovery_v11"
         )
         return json.dumps(
             _identity_wire_for_call(
@@ -3304,19 +3320,17 @@ def test_current_identity_rf10_schema_stays_under_strict_property_limit() -> Non
         return property_count
 
     assert inspect(provider_schema) < 100
-    decisions_schema = provider_schema["properties"]["decisions"]
-    assert decisions_schema["required"] == evidence_refs
-    assert all(
-        value == {"$ref": "#/$defs/CurrentEvidenceIdentityDecisions"}
-        for value in decisions_schema["properties"].values()
-    )
-    empty_payload = {
-        "decisions": {
-            evidence_ref: {"k": [], "n": [], "f": []}
-            for evidence_ref in evidence_refs
-        },
-    }
-    assert len(json.dumps(empty_payload, separators=(",", ":"))) < 2000
+    assert provider_schema["required"] == ["k", "n", "f"]
+    assert set(provider_schema["properties"]) == {"k", "n", "f"}
+    assert provider_schema["additionalProperties"] is False
+    assert provider_schema["$defs"]["CurrentNewNamedIdentityDecision"][
+        "properties"
+    ]["evidence_ref"]["enum"] == evidence_refs
+    assert provider_schema["$defs"]["CurrentFunctionalIdentityDecision"][
+        "properties"
+    ]["evidence_ref"]["enum"] == evidence_refs
+    empty_payload = {"k": [], "n": [], "f": []}
+    assert len(json.dumps(empty_payload, separators=(",", ":"))) < 64
     assert provider_schema["$defs"]["CurrentKnownIdentityDecision"][
         "properties"
     ]["decision_id"]["enum"] == ["K:NONE"]
@@ -3346,13 +3360,8 @@ def test_current_identity_rf10_manual_alias_k_is_backend_projected() -> None:
         authorities=authorities,
     )
     selected = next(iter(known.values()))
-    payload = {
-        "decisions": {
-            evidence_ref: {"k": [], "n": [], "f": []}
-            for evidence_ref in evidence_by_ref
-        },
-    }
-    payload["decisions"][selected["evidence_ref"]]["k"].append({
+    payload = {"k": [], "n": [], "f": []}
+    payload["k"].append({
         "decision_id": selected["decision_id"],
         "kind": "mentioned",
     })
@@ -3775,9 +3784,7 @@ def test_future_known_decision_overwrites_stale_materialization_compatibility(
 @pytest.mark.parametrize(
     ("mutation", "error_fragment"),
     [
-        ("missing_ref", "缺少 evidence refs"),
-        ("extra_ref", "未知 evidence refs"),
-        ("cross_k", "K decision 越界"),
+        ("forged_k", "K decision 越界"),
         ("sentinel", "K decision 越界"),
         ("reserved_n", "必须选择 K decision"),
         ("cross_f", "evidence_id 与已知逐字 source_label 不匹配"),
@@ -3810,30 +3817,21 @@ def test_current_identity_rf10_custom_exact_gates(
         authorities=authorities,
     )
     selected = next(iter(known.values()))
-    payload = {
-        "decisions": {
-            evidence_ref: {"k": [], "n": [], "f": []}
-            for evidence_ref in evidence_by_ref
-        },
-    }
+    payload = {"k": [], "n": [], "f": []}
     refs = list(evidence_by_ref)
-    if mutation == "missing_ref":
-        payload["decisions"].pop(refs[-1])
-    elif mutation == "extra_ref":
-        payload["decisions"]["E999"] = {"k": [], "n": [], "f": []}
-    elif mutation == "cross_k":
-        other_ref = next(ref for ref in refs if ref != selected["evidence_ref"])
-        payload["decisions"][other_ref]["k"] = [{
-            "decision_id": selected["decision_id"],
+    if mutation == "forged_k":
+        payload["k"] = [{
+            "decision_id": "K:forged",
             "kind": "mentioned",
         }]
     elif mutation == "sentinel":
-        payload["decisions"][refs[0]]["k"] = [{
+        payload["k"] = [{
             "decision_id": "K:NONE",
             "kind": "mentioned",
         }]
     elif mutation == "reserved_n":
-        payload["decisions"][selected["evidence_ref"]]["n"] = [{
+        payload["n"] = [{
+            "evidence_ref": selected["evidence_ref"],
             "identity_label": "耳根",
             "kind": "onscreen",
         }]
@@ -3843,7 +3841,8 @@ def test_current_identity_rf10_custom_exact_gates(
             if "门卫" in str(record["text"])
         )
         other_ref = next(ref for ref in refs if ref != guard_ref)
-        payload["decisions"][other_ref]["f"] = [{
+        payload["f"] = [{
+            "evidence_ref": other_ref,
             "source_label": "门卫",
             "functional_identity_key": "F1",
             "kind": "onscreen",
@@ -3906,12 +3905,8 @@ def test_current_identity_rf10_rejects_unbound_provider_output_once(
             }],
             messages=messages,
         )
-        source_ref = next(
-            evidence_ref
-            for evidence_ref, decisions in payload["decisions"].items()
-            if decisions["f"]
-        )
-        payload["decisions"]["E999"] = payload["decisions"].pop(source_ref)
+        assert len(payload["f"]) == 1
+        payload["f"][0]["evidence_ref"] = "E999"
         return json.dumps(payload, ensure_ascii=False)
 
     async def forbidden_future(*_args, **_kwargs):
@@ -4229,15 +4224,14 @@ def test_current_identity_cross_batch_literal_uses_global_catalog() -> None:
         item for item in records if "银袍女子" in str(item["text"])
     )
     response = portraits.CurrentIdentityCandidateResponse.model_validate({
-        "decisions": {"E001": {
-            "k": [],
-            "n": [],
-            "f": [{
-                "source_label": "门卫",
-                "functional_identity_key": "F1",
-                "kind": "onscreen",
-            }],
-        }},
+        "k": [],
+        "n": [],
+        "f": [{
+            "evidence_ref": "E001",
+            "source_label": "门卫",
+            "functional_identity_key": "F1",
+            "kind": "onscreen",
+        }],
     })
 
     _projected, errors = portraits._project_current_identity_response(
@@ -4310,8 +4304,15 @@ def test_current_identity_cross_batch_prior_reuse_keeps_onscreen_receipt(
     ]
     assert len(result) == 1
     assert result[0]["kind"] == "onscreen"
-    expected_text = records[1 if second_kind == "onscreen" else 0]["text"]
-    assert result[0]["source_evidence_receipt"]["text"] == expected_text
+    assert result[0]["source_evidence_receipt"]["text"] == records[0]["text"]
+    assert [
+        receipt["evidence_id"]
+        for receipt in result[0]["source_evidence_receipts"]
+    ] == [record["evidence_id"] for record in records]
+    assert result[0]["source_segment_ids"] == [
+        record["source_segment_id"] for record in records
+    ]
+    assert result[0]["evidence"] in result[0]["source_quote"]
 
 
 def test_current_identity_cross_batch_alias_explicitly_reuses_prior_group(
