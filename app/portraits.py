@@ -1277,6 +1277,8 @@ async def _discover_character_candidates_legacy(
         for item in candidates
         if (
             item.get("identity_kind") == "functional"
+            and item.get("source_label_provenance")
+            != CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
             and item.get("kind") == "onscreen"
             and str(item.get("identity_group") or "").strip()
         )
@@ -1286,6 +1288,8 @@ async def _discover_character_candidates_legacy(
         for item in candidates
         if (
             item.get("identity_kind") == "functional"
+            and item.get("source_label_provenance")
+            != CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
             and (
                 item.get("kind") == "onscreen"
                 or str(item.get("identity_group") or "").strip()
@@ -1434,7 +1438,12 @@ async def _discover_character_candidates_legacy(
     for item in resolved:
         group = str(item.get("identity_group") or "").strip()
         names = named_by_group.get(group, set())
-        if item.get("identity_kind") == "functional" and len(names) == 1:
+        if (
+            item.get("identity_kind") == "functional"
+            and item.get("source_label_provenance")
+            != CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+            and len(names) == 1
+        ):
             canonical_name = next(iter(names))
             evidence = named_evidence[(group, canonical_name)]
             upgraded.append({
@@ -1863,12 +1872,16 @@ async def resolve_future_identity_candidates(
         str(item.get("identity_group") or "").strip()
         for item in candidates
         if item.get("identity_kind") == "functional"
+        and item.get("source_label_provenance")
+        != CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
         and item.get("kind") == "onscreen"
         and str(item.get("identity_group") or "").strip()
     }
     unresolved = [
         dict(item) for item in candidates
         if item.get("identity_kind") == "functional"
+        and item.get("source_label_provenance")
+        != CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
         and (
             item.get("kind") == "onscreen"
             or str(item.get("identity_group") or "").strip()
@@ -3290,6 +3303,13 @@ async def discover_character_candidates(
     )
     discovery_input = {
         "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "current_identity_version": CURRENT_IDENTITY_DECISION_VERSION,
+        "current_evidence_catalog_hash": (
+            _current_identity_evidence_catalog_hash(
+                source_text,
+                draft_text=draft_text,
+            )
+        ),
         "mode": "targeted" if targeted else "legacy",
         "episode_no": episode_no,
         "source_text": source_text,
@@ -3399,6 +3419,10 @@ async def discover_character_candidates(
             trust_level="T0",
             content={
                 "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
+                "current_identity_version": CURRENT_IDENTITY_DECISION_VERSION,
+                "current_evidence_catalog_hash": discovery_input[
+                    "current_evidence_catalog_hash"
+                ],
                 "structural_coverage_policy_version": (
                     STRUCTURAL_IDENTITY_COVERAGE_VERSION
                 ),
@@ -3420,6 +3444,10 @@ async def discover_character_candidates(
             trust_level="T1",
             content={
                 "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
+                "current_identity_version": CURRENT_IDENTITY_DECISION_VERSION,
+                "current_evidence_catalog_hash": discovery_input[
+                    "current_evidence_catalog_hash"
+                ],
                 "structural_coverage_policy_version": (
                     STRUCTURAL_IDENTITY_COVERAGE_VERSION
                 ),
@@ -3465,6 +3493,14 @@ def _identity_resolution(
             STRUCTURAL_IDENTITY_COVERAGE_VERSION
         ),
         "authority_id": str(item.get("authority_id") or "").strip(),
+        "source_label_provenance": str(
+            item.get("source_label_provenance") or ""
+        ).strip(),
+        "source_evidence_receipt": (
+            dict(item["source_evidence_receipt"])
+            if isinstance(item.get("source_evidence_receipt"), dict)
+            else None
+        ),
     })
 
 
@@ -3534,6 +3570,7 @@ def _structural_identity_candidate_semantic_rows(
         "authority_id",
         "source_segment_id",
         "source_quote",
+        "source_label_provenance",
     )
     rows = [
         {
@@ -3546,6 +3583,13 @@ def _structural_identity_candidate_semantic_rows(
                 for value in item.get("source_segment_ids") or []
                 if str(value).strip()
             ],
+            "source_evidence_receipt_hash": (
+                evidence_repository.content_hash(
+                    item.get("source_evidence_receipt")
+                )
+                if isinstance(item.get("source_evidence_receipt"), dict)
+                else ""
+            ),
         }
         for item in (candidates or [])
         if isinstance(item, dict)

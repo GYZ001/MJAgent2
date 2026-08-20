@@ -1929,12 +1929,21 @@ async def _recorded_screenplay_task(
             # QA gate 暴露，禁止回到全章人物发现。
             from app.portraits import (
                 load_screenplay_character_resolutions,
+                screenplay_identity_resolution_is_current_for_source,
             )
 
             conn = get_conn()
-            persisted_resolutions = load_screenplay_character_resolutions(
-                conn, episode_id,
-            )
+            persisted_resolutions = [
+                item
+                for item in load_screenplay_character_resolutions(
+                    conn, episode_id,
+                )
+                if screenplay_identity_resolution_is_current_for_source(
+                    item,
+                    episode_no=int(production_state.get("episode_no") or 0),
+                    source_text=discovery_source,
+                )
+            ]
             preflight = {
                 "added": [],
                 "resolutions": persisted_resolutions,

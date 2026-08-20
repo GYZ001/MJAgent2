@@ -16,7 +16,51 @@ from app.schemas import (Bible, Character, EpisodeScreenplay,
                          VoiceCanonical, World)
 
 
-def _current_identity_wire(characters: list[dict]) -> dict:
+def _current_identity_wire(
+    characters: list[dict],
+    *,
+    provider_schema: dict,
+    messages: list[dict] | None = None,
+) -> dict:
+    definitions = provider_schema["$defs"]
+    allowed_ids = list(
+        definitions["CurrentNamedIdentityCandidate"]["properties"][
+            "evidence_id"
+        ]["enum"]
+    )
+    evidence_by_id: dict[str, str] = {}
+    if messages:
+        prompt = str(messages[0].get("content") or "")
+        marker = "backend-owned 当前身份证据目录（只能逐字引用 evidence_id）："
+        end_marker = "\n\n本集已有功能身份决议"
+        if marker in prompt and end_marker in prompt:
+            raw_catalog = prompt.split(marker, 1)[1]
+            raw_catalog = raw_catalog.split("\n", 1)[1]
+            raw_catalog = raw_catalog.split(end_marker, 1)[0]
+            evidence_by_id = {
+                str(item["evidence_id"]): str(item["text"])
+                for item in json.loads(raw_catalog)
+            }
+
+    def evidence_id_for(item: dict, source_label: str) -> str:
+        explicit = str(item.get("evidence_id") or "")
+        if explicit in allowed_ids:
+            return explicit
+        evidence_hint = str(item.get("evidence") or "")
+        return next(
+            (
+                evidence_id for evidence_id in allowed_ids
+                if (
+                    source_label in evidence_by_id.get(evidence_id, "")
+                    or (
+                        evidence_hint
+                        and evidence_hint in evidence_by_id.get(evidence_id, "")
+                    )
+                )
+            ),
+            allowed_ids[0],
+        )
+
     named: list[dict] = []
     functional: list[dict] = []
     for index, raw in enumerate(characters, start=1):
@@ -25,7 +69,7 @@ def _current_identity_wire(characters: list[dict]) -> dict:
         common = {
             "source_label": source_label,
             "kind": "mentioned" if item.get("kind") == "mentioned" else "onscreen",
-            "evidence": str(item.get("evidence") or "身份依据"),
+            "evidence_id": evidence_id_for(item, source_label),
         }
         if str(item.get("identity_kind") or "named") == "functional":
             functional.append({
@@ -215,7 +259,11 @@ def _identity_wire_for_call(
 ) -> dict:
     phase = str(kwargs.get("call_meta", {}).get("discovery_phase") or "")
     if phase == "current":
-        return _current_identity_wire(characters)
+        return _current_identity_wire(
+            characters,
+            provider_schema=kwargs["response_format"]["json_schema"]["schema"],
+            messages=messages,
+        )
     if phase == "future_identity":
         provider_schema = kwargs["response_format"]["json_schema"]["schema"]
         evidence_text_by_id: dict[str, str] = {}
@@ -863,6 +911,10 @@ def test_generic_discovery_keeps_current_contract_cache_compatible(
     )
     current_contract_hash = portraits.evidence_repository.content_hash({
         "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "current_identity_version": portraits.CURRENT_IDENTITY_DECISION_VERSION,
+        "current_evidence_catalog_hash": (
+            portraits._current_identity_evidence_catalog_hash(source_text)
+        ),
         "mode": "targeted",
         "episode_no": 1,
         "source_text": source_text,
@@ -1765,7 +1817,7 @@ def test_discover_character_candidates_rejects_malformed_json_without_retry(monk
         )],
     )
 
-    async def fake_chat(*_args, **_kwargs):
+    async def fake_chat(messages, **_kwargs):
         return (
             '```json\n{"characters":[{"source_label":"孟浩",'
             '"canonical_name":"孟浩","identity_kind":"named","kind":"onscreen",'
@@ -1791,16 +1843,13 @@ def test_current_identity_rejects_same_scene_person_misbinding(
         nonlocal calls
         calls += 1
         assert kwargs["call_meta"]["reuse_successful_operation"] is False
-        return json.dumps({
-            "named": [{
+        return json.dumps(_identity_wire_for_call(kwargs, [{
                 "source_label": "银袍女子",
                 "canonical_name": "孟浩",
                 "identity_kind": "named",
                 "kind": "onscreen",
                 "evidence": "孟浩走在前面，银袍女子跟在后面",
-            }],
-            "functional": [],
-        }, ensure_ascii=False)
+            }], messages=_args[0]), ensure_ascii=False)
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
     with pytest.raises(
@@ -1945,7 +1994,7 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
             "kind": "onscreen",
             "evidence": "青衣人拦路",
             "future_evidence": "",
-        }]), ensure_ascii=False)
+        }], messages=messages), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     candidates = asyncio.run(portraits.discover_character_candidates(
@@ -2526,7 +2575,9 @@ def test_future_identity_operation_binds_exact_outbound_semantics(
     assert [item[1] for item in operations] == ["model-a", "model-a", "model-b"]
 
 
-def test_identity_discovery_aligns_provider_expanded_source_label(monkeypatch) -> None:
+def test_identity_discovery_preserves_nonliteral_functional_label_as_synthetic(
+    monkeypatch,
+) -> None:
     bible = Bible(
         world=World(visual_style_canonical="国风"),
         characters=[Character(
@@ -2536,7 +2587,7 @@ def test_identity_discovery_aligns_provider_expanded_source_label(monkeypatch) -
         )],
     )
 
-    async def fake_chat(*_args, **_kwargs):
+    async def fake_chat(messages, **_kwargs):
         return json.dumps(_identity_wire_for_call(_kwargs, [{
             "source_label": "白白净净身较胖的少年",
             "canonical_name": "",
@@ -2544,7 +2595,7 @@ def test_identity_discovery_aligns_provider_expanded_source_label(monkeypatch) -
             "functional_identity_key": "F1",
             "kind": "onscreen",
             "evidence": "原文中的白净胖少年",
-        }]), ensure_ascii=False)
+        }], messages=messages), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     candidates = asyncio.run(portraits.discover_character_candidates(
@@ -2553,8 +2604,17 @@ def test_identity_discovery_aligns_provider_expanded_source_label(monkeypatch) -
         1,
     ))
 
-    assert candidates[0]["source_label"] == "白白净净身较胖"
-    assert candidates[0]["model_source_label"] == "白白净净身较胖的少年"
+    assert candidates[0]["source_label"] == "白白净净身较胖的少年"
+    assert candidates[0]["source_label_provenance"] == (
+        portraits.CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+    )
+    assert candidates[0]["identity_kind"] == "functional"
+    assert candidates[0]["source_evidence_receipt"]["origin"] == (
+        "current_source"
+    )
+    assert candidates[0]["source_quote"] in (
+        "王有材身边另一个则是白白净净身较胖，正缩在裂缝里。"
+    )
 
 
 def test_future_context_prioritizes_late_known_name_cooccurrence() -> None:
@@ -3258,6 +3318,16 @@ def test_baseline_audit_uses_model_to_classify_arbitrary_descriptive_identity(mo
     assert [(item["source_label"], item["identity_kind"]) for item in candidates] == [
         ("紫甲女子", "functional"),
     ]
+    assert candidates[0]["source_label_provenance"] == (
+        portraits.CURRENT_IDENTITY_LITERAL_PROVENANCE
+    )
+    assert candidates[0]["source_evidence_receipt"]["origin"] == (
+        "draft_identity_projection"
+    )
+    assert candidates[0]["source_evidence_receipt"]["source_segment_id"] == (
+        "DRF0002"
+    )
+    assert "紫甲女子" in candidates[0]["source_quote"]
 
 
 def test_baseline_audit_sends_typed_identity_projection_only(monkeypatch) -> None:
@@ -3284,7 +3354,7 @@ def test_baseline_audit_sends_typed_identity_projection_only(monkeypatch) -> Non
             "kind": "onscreen",
             "evidence": "类型合同中的场次人物",
             "future_evidence": "",
-        }]), ensure_ascii=False)
+        }], messages=messages), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     draft = EpisodeScreenplay(
