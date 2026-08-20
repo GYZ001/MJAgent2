@@ -298,7 +298,8 @@ def test_gate_decision_is_versioned_and_idempotent(monkeypatch) -> None:
     conn.execute(
         """INSERT INTO artifacts(id,type,scope_type,scope_id,version,status,trust_level,content_json,
                                   content_hash,parent_artifact_ids_json,model_snapshot_json,created_at)
-           VALUES('art-1','character_bible','project','p1',1,'validated','T3','{}','hash','[]','{}',1)"""
+           VALUES('art-1','character_bible','project','p1',1,'validated','T3','{}',?,'[]','{}',1)""",
+        (repository.content_hash({}),),
     )
     conn.commit()
 
@@ -309,7 +310,6 @@ def test_gate_decision_is_versioned_and_idempotent(monkeypatch) -> None:
     assert result["ok"] is True
     assert conn.execute("SELECT status FROM artifacts WHERE id='art-1'").fetchone()[0] == "approved"
     assert conn.execute("SELECT COUNT(*) FROM gate_decisions WHERE artifact_id='art-1'").fetchone()[0] == 1
-
     repeated = orchestration_api.decide_gate("art-1", {
         "decision": "approve", "reason": "重复提交", "expected_version": 1,
         "idempotency_key": "gate-art-1-v1",
@@ -317,6 +317,67 @@ def test_gate_decision_is_versioned_and_idempotent(monkeypatch) -> None:
     assert repeated["idempotent"] is True
     assert conn.execute("SELECT COUNT(*) FROM gate_decisions WHERE artifact_id='art-1'").fetchone()[0] == 1
 
+
+def test_character_bible_gate_rejects_tampered_artifact_atomically(
+    monkeypatch,
+) -> None:
+    conn = _conn()
+    _patch_conn(monkeypatch, conn)
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) "
+        "VALUES('p1','项目一','created',1)"
+    )
+    original = {"characters": [{"name": "原始角色"}]}
+    prior = {"characters": [{"name": "已批准角色"}]}
+    conn.execute(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,
+               content_json,content_hash,parent_artifact_ids_json,
+               model_snapshot_json,created_at
+           ) VALUES(
+               'art-prior','character_bible','project','p1',1,'approved','T4',
+               ?,?,'[]','{}',1
+           )""",
+        (json.dumps(prior, ensure_ascii=False), repository.content_hash(prior)),
+    )
+    conn.execute(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,
+               content_json,content_hash,parent_artifact_ids_json,
+               model_snapshot_json,created_at
+           ) VALUES(
+               'art-tampered','character_bible','project','p1',2,'validated','T3',
+               ?,?,'[]','{}',2
+           )""",
+        (json.dumps(original, ensure_ascii=False), repository.content_hash(original)),
+    )
+    conn.execute(
+        "UPDATE artifacts SET content_json=? WHERE id='art-tampered'",
+        (json.dumps({"characters": [{"name": "篡改角色"}]}, ensure_ascii=False),),
+    )
+    conn.commit()
+
+    with pytest.raises(ValueError, match="存储指纹漂移"):
+        orchestration_api.decide_gate("art-tampered", {
+            "decision": "approve",
+            "reason": "不应通过",
+            "expected_version": 2,
+            "idempotency_key": "tampered-bible",
+        })
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM evaluations WHERE artifact_id='art-tampered'"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT status FROM artifacts WHERE id='art-tampered'"
+    ).fetchone()[0] == "validated"
+    assert conn.execute(
+        "SELECT status FROM artifacts WHERE id='art-prior'"
+    ).fetchone()[0] == "approved"
+    project = conn.execute(
+        "SELECT bible_json,bible_artifact_id FROM projects WHERE id='p1'"
+    ).fetchone()
+    assert tuple(project) == (None, None)
 
 @pytest.mark.parametrize("artifact_type", ["episode_screenplay", "storyboard"])
 def test_generic_gate_cannot_bypass_domain_publish_authority(

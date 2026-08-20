@@ -984,7 +984,7 @@ def decide_gate(artifact_id: str, body: dict = Body(...)):
         audit("gate_decision", "artifact", artifact_id, decision, {"idempotency_key": idem})
         return {"ok": True, "idempotent": False, "decision": decision, "result": result}
     if decision in {"approve", "approve_with_risk"}:
-        repository.commit_artifact(None, artifact_id, [Evaluation(
+        artifact = repository.commit_artifact(None, artifact_id, [Evaluation(
             evaluator_type="human", evaluator_name=decided_by, evaluator_version="monitor-1.0",
             status="warning" if decision == "approve_with_risk" else "passed",
             hard_gate_passed=True, score=100,

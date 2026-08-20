@@ -577,11 +577,6 @@ def commit_artifact(
     evaluations: list[Evaluation],
 ) -> dict[str, Any]:
     """Adopt an artifact only when explicit evidence satisfies the hard gates."""
-    artifact = get_artifact(artifact_id)
-    if not artifact:
-        raise KeyError(f"artifact not found: {artifact_id}")
-    if artifact["status"] == "stale":
-        raise ValueError("stale artifact cannot be committed")
     if not evaluations:
         raise ValueError("artifact commit requires at least one evaluation")
     gate_evaluations = [
@@ -595,59 +590,95 @@ def commit_artifact(
         raise ValueError("unresolved blocker prevents artifact commit")
     if any(evaluation.recovered for evaluation in gate_evaluations):
         raise ValueError("recovered evaluation cannot independently commit an artifact")
-
-    created_evaluations = [
-        create_evaluation(artifact_id, evaluation, step_run_id=step_run_id)
-        for evaluation in evaluations
-    ]
-    evaluator_types = {
-        evaluation.evaluator_type for evaluation in gate_evaluations
-    } | {
-        row["evaluator_type"] for row in get_evaluations(artifact_id)
-        if row["hard_gate_passed"] and row["status"] not in {"failed", "error"}
-        and not _is_score_only_evaluation_row(row)
-    }
-    if artifact["type"] == "delivery_package" and {"human", "file"}.issubset(evaluator_types):
-        trust_level = "T5"
-    elif "human" in evaluator_types:
-        trust_level = "T4"
-    elif evaluator_types.intersection({"model", "file"}):
-        trust_level = "T3"
-    else:
-        trust_level = "T2"
-
     conn = get_conn()
-    release_fences = _active_published_release_ids(conn)
-    previous = rows_to_dicts(conn.execute(
-        """SELECT id FROM artifacts
-           WHERE type=? AND scope_type=? AND scope_id=?
-             AND status='approved' AND id!=?""",
-        (artifact["type"], artifact["scope_type"], artifact["scope_id"], artifact_id),
-    ).fetchall())
-    previous = [
-        row for row in previous
-        if str(row["id"]) not in release_fences
-    ]
-    conn.execute(
-        "UPDATE artifacts SET status='approved', trust_level=?, approved_at=? WHERE id=?",
-        (trust_level, now(), artifact_id),
-    )
-    conn.executemany(
-        "UPDATE artifacts SET status='superseded', superseded_by_artifact_id=? WHERE id=?",
-        [(artifact_id, row["id"]) for row in previous],
-    )
-    if step_run_id:
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        artifact = get_artifact(artifact_id, conn=conn)
+        if not artifact:
+            raise KeyError(f"artifact not found: {artifact_id}")
+        verified_artifact_content_hash(artifact)
+        if artifact["status"] == "stale":
+            raise ValueError("stale artifact cannot be committed")
+
+        created_evaluations = [
+            create_evaluation(
+                artifact_id,
+                evaluation,
+                step_run_id=step_run_id,
+                conn=conn,
+                commit=False,
+            )
+            for evaluation in evaluations
+        ]
+        existing_evaluations = _decode_rows(rows_to_dicts(conn.execute(
+            "SELECT * FROM evaluations WHERE artifact_id=? "
+            "ORDER BY created_at,id",
+            (artifact_id,),
+        ).fetchall()))
+        evaluator_types = {
+            evaluation.evaluator_type for evaluation in gate_evaluations
+        } | {
+            row["evaluator_type"] for row in existing_evaluations
+            if row["hard_gate_passed"]
+            and row["status"] not in {"failed", "error"}
+            and not _is_score_only_evaluation_row(row)
+        }
+        if (
+            artifact["type"] == "delivery_package"
+            and {"human", "file"}.issubset(evaluator_types)
+        ):
+            trust_level = "T5"
+        elif "human" in evaluator_types:
+            trust_level = "T4"
+        elif evaluator_types.intersection({"model", "file"}):
+            trust_level = "T3"
+        else:
+            trust_level = "T2"
+
+        release_fences = _active_published_release_ids(conn)
+        previous = rows_to_dicts(conn.execute(
+            """SELECT id FROM artifacts
+               WHERE type=? AND scope_type=? AND scope_id=?
+                 AND status='approved' AND id!=?""",
+            (
+                artifact["type"],
+                artifact["scope_type"],
+                artifact["scope_id"],
+                artifact_id,
+            ),
+        ).fetchall())
+        previous = [
+            row for row in previous
+            if str(row["id"]) not in release_fences
+        ]
         conn.execute(
-            "UPDATE step_runs SET output_artifact_id=?, decision='accept' WHERE id=?",
-            (artifact_id, step_run_id),
+            "UPDATE artifacts SET status='approved', trust_level=?, "
+            "approved_at=? WHERE id=?",
+            (trust_level, now(), artifact_id),
         )
-    conn.commit()
-    for row in previous:
-        invalidate_descendants(
-            row["id"],
-            f"上游产物已由 {artifact_id} 替代",
-            exclude_ids={artifact_id},
+        conn.executemany(
+            "UPDATE artifacts SET status='superseded', "
+            "superseded_by_artifact_id=? WHERE id=?",
+            [(artifact_id, row["id"]) for row in previous],
         )
+        for row in previous:
+            invalidate_descendants(
+                row["id"],
+                f"上游产物已由 {artifact_id} 替代",
+                exclude_ids={artifact_id},
+                conn=conn,
+                commit=False,
+            )
+        if step_run_id:
+            conn.execute(
+                "UPDATE step_runs SET output_artifact_id=?,decision='accept' "
+                "WHERE id=?",
+                (artifact_id, step_run_id),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     step = (
         conn.execute("SELECT run_id FROM step_runs WHERE id=?", (step_run_id,)).fetchone()
         if step_run_id
@@ -663,7 +694,7 @@ def commit_artifact(
                 "evaluation_ids": [item["id"] for item in created_evaluations],
             },
         )
-    return get_artifact(artifact_id) or {}
+    return get_artifact(artifact_id, conn=conn) or {}
 
 
 def get_run(run_id: str) -> dict[str, Any] | None:

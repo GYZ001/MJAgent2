@@ -4312,24 +4312,26 @@ def test_v5_validated_no_authority_review_outcomes_are_cacheable(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+    cached_content = {
+        "blueprint_hash": blueprint_hash,
+        "consensus_issue_keys": [],
+        "deterministic_authority_issue_keys": [],
+        "authoritative_issue_count": 0,
+        "non_consensus_issue_count": residual_issue_count,
+        "non_authoritative_residual_issue_count": residual_issue_count,
+        "review_mode": review_mode,
+        "review_outcome": review_outcome,
+    }
 
     class CachedRows:
         @staticmethod
         def fetchall():
-            return [{
-                "id": f"cached-{review_outcome}",
-                "content_json": json.dumps({
-                    "blueprint_hash": blueprint_hash,
-                    "consensus_issue_keys": [],
-                    "deterministic_authority_issue_keys": [],
-                    "authoritative_issue_count": 0,
-                    "non_consensus_issue_count": residual_issue_count,
-                    "non_authoritative_residual_issue_count": (
-                        residual_issue_count
+                return [{
+                    "id": f"cached-{review_outcome}",
+                    "content_json": json.dumps(cached_content),
+                    "content_hash": evidence_repository.content_hash(
+                        cached_content
                     ),
-                    "review_mode": review_mode,
-                    "review_outcome": review_outcome,
-                }),
                 "model_snapshot_json": json.dumps({
                     "review_policy_version": (
                         "blueprint-semantic-review.v5"
