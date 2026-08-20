@@ -1486,29 +1486,19 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
     assert ensured == ["丁力"]
     assert len(prompts) == 2
     assert result["future_context_label"] == "第 31-40 章（仅姓名消歧）"
-    assert result["resolutions"] == [{
-        "source_label": "绿袍男子",
-        "canonical_name": "丁力",
-        "resolution": "future_identity",
-        "reason": "后续章节已确认该称谓的稳定真名",
-        "evidence": "绿袍男子拦路呵斥",
-        "future_evidence": "绿袍男子摘下斗笠，众人这才认出他正是丁力。",
-            "identity_group": "current-1:绿袍男子",
-                "identity_scope_fingerprint": portraits.evidence_repository.content_hash({
-                "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
-                "episode_no": 21,
-                "source_text": "绿袍男子拦在萧炎面前，厉声呵斥。",
-                }),
-                "decision_provenance": (
-                    portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
-                ),
-                "decision_contract_version": "screenplay-future-identity.v7",
-                "structural_identity_policy_version": (
-                    portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
-                ),
-            "authority_id": "bible:丁力",
-        "authority_version": "screenplay-identity-authority.v1",
-    }]
+    assert len(result["resolutions"]) == 1
+    resolution = result["resolutions"][0]
+    assert resolution["source_label"] == "绿袍男子"
+    assert resolution["canonical_name"] == "丁力"
+    assert resolution["resolution"] == "future_identity"
+    assert resolution["identity_group"] == "current-1:F1"
+    assert resolution["decision_contract_version"] == (
+        portraits.FUTURE_IDENTITY_DECISION_VERSION
+    )
+    assert resolution["structural_identity_policy_version"] == (
+        portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+    )
+    assert resolution["authority_id"].startswith("future-name:")
 
 
 def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeypatch) -> None:
@@ -1586,7 +1576,7 @@ def test_future_identity_accepts_semantic_alias_with_verbatim_name_anchor(
             "source_label": "那间学校的校长",
             "canonical_name": "赵振",
             "identity_kind": "named",
-            "future_evidence": "聪慧的白洁马上反应过来是那个‘大象’赵振的主意。",
+            "future_evidence": "聪慧的白洁马上反应过来是那个“大象”赵振的主意。",
         }]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
@@ -1791,14 +1781,20 @@ def test_future_named_identity_upgrades_every_alias_in_same_group(monkeypatch) -
                     "evidence": "同一女子被称为许师姐",
                 },
             ]), ensure_ascii=False)
-        return json.dumps(_identity_wire_for_call(kwargs, [{
-            "source_label": "许师姐",
-            "canonical_name": "许清",
-            "identity_kind": "named",
-            "kind": "mentioned",
-            "evidence": "许师姐是同一女子",
-            "future_evidence": "许师姐转身，众人称她许清。",
-        }]), ensure_ascii=False)
+        return json.dumps(_identity_wire_for_call(kwargs, [
+            {
+                "source_label": "会飞的女人",
+                "canonical_name": "许清",
+                "identity_kind": "named",
+                "future_evidence": "许师姐转身，众人称她许清。",
+            },
+            {
+                "source_label": "许师姐",
+                "canonical_name": "许清",
+                "identity_kind": "named",
+                "future_evidence": "许师姐转身，众人称她许清。",
+            },
+        ]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     candidates = asyncio.run(portraits.discover_character_candidates(
@@ -3142,7 +3138,7 @@ def test_late_episode_screenplay_auto_adds_character_and_defers_portrait_generat
     assert queue[0]["status"] == "auto_applied_asset_pending"
 
 
-def test_future_identity_recovers_in_window_name_with_imprecise_evidence(
+def test_future_identity_accepts_new_name_with_owned_verbatim_evidence(
     monkeypatch,
 ) -> None:
     """真名逐字在后续窗口、但模型证据措辞不精确时，程序应确定性重定位证据并保留解析。"""
@@ -3153,13 +3149,15 @@ def test_future_identity_recovers_in_window_name_with_imprecise_evidence(
     ) * 2
 
     async def fake_structured(messages, **_kwargs):
-        return SimpleNamespace(characters=[{
-            # 模型证据故意不含真名“许师姐”，模拟今天线上“证据措辞不精确”的情况。
-            "source_label": "会飞的女人",
-            "canonical_name": "许师姐",
-            "identity_kind": "named",
-            "future_evidence": "那女子已经到了凝气第七层",
-        }])
+        return portraits.FutureIdentityCandidateResponse(
+            known_named=[],
+            new_named=[{
+                "source_label": "会飞的女人",
+                "canonical_name": "许师姐",
+                "future_evidence": "许师姐已经到了凝气第七层",
+            }],
+            functional=[],
+        )
 
     monkeypatch.setattr(portraits.model_gateway, "chat_structured", fake_structured)
 
@@ -3179,7 +3177,7 @@ def test_future_identity_recovers_in_window_name_with_imprecise_evidence(
     fly = next(item for item in resolved if item["source_label"] == "会飞的女人")
     assert fly["name"] == "许师姐"
     assert fly["identity_kind"] == "named"
-    # 证据由程序确定性重定位，必须逐字来自窗口且包含真名。
+    # 新真名证据必须由provider逐字拥有，程序不再静默重写。
     assert "许师姐" in fly["future_evidence"]
     assert fly["future_evidence"] in future
 
@@ -3189,29 +3187,25 @@ def test_future_identity_rejects_name_absent_from_window(monkeypatch) -> None:
     future = "绿袍男子恭敬地说道，许师姐好手段。许师姐已经到了凝气第七层。" * 2
 
     async def fake_structured(messages, **_kwargs):
-        return SimpleNamespace(characters=[{
+        return json.dumps(_future_identity_wire([{
             "source_label": "会飞的女人",
             "canonical_name": "许清",  # 窗口里根本没有“许清”
             "identity_kind": "named",
             "future_evidence": "绿袍男子称该会飞的女子为许清",
-        }])
+        }]), ensure_ascii=False)
 
-    monkeypatch.setattr(portraits.model_gateway, "chat_structured", fake_structured)
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_structured)
 
-    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
-        [{
-            "source_label": "会飞的女人",
-            "identity_kind": "functional",
-            "kind": "onscreen",
-            "identity_group": "grp-fly",
-        }],
-        source_text="一个会飞的女人出现在众人面前。",
-        future_text=future,
-        bible=Bible(characters=[], world=World(visual_style_canonical="测试")),
-        episode_no=2,
-    ))
-
-    fly = next(item for item in resolved if item["source_label"] == "会飞的女人")
-    # 未取得真名解析：保持原 functional，不得被误绑定为 named。
-    assert fly.get("name") != "许清"
-    assert fly.get("identity_kind") == "functional"
+    with pytest.raises(model_gateway.StructuredSemanticError):
+        asyncio.run(portraits.resolve_future_identity_candidates(
+            [{
+                "source_label": "会飞的女人",
+                "identity_kind": "functional",
+                "kind": "onscreen",
+                "identity_group": "grp-fly",
+            }],
+            source_text="一个会飞的女人出现在众人面前。",
+            future_text=future,
+            bible=Bible(characters=[], world=World(visual_style_canonical="测试")),
+            episode_no=2,
+        ))

@@ -203,7 +203,7 @@ def test_structural_identity_coverage_rejects_non_strict_response_format(
     assert called is False
 
 
-def test_non_target_character_discovery_keeps_default_structured_behavior(
+def test_non_contract_character_discovery_keeps_default_structured_behavior(
     monkeypatch,
 ) -> None:
     calls = 0
@@ -224,7 +224,7 @@ def test_non_target_character_discovery_keeps_default_structured_behavior(
         max_tokens=256,
         call_meta={
             "stage_key": "screenplay_character_discovery",
-            "substage": "current_identity",
+            "substage": "legacy_identity",
         },
     ))
 
