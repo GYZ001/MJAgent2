@@ -369,6 +369,117 @@ def test_structural_identity_coverage_unsupported_schema_is_one_call(
     assert calls == 1
 
 
+def test_generic_discovery_rejects_legacy_coverage_cache(
+    monkeypatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE artifacts("
+        "id TEXT PRIMARY KEY, scope_type TEXT, scope_id TEXT, type TEXT, "
+        "status TEXT, content_json TEXT, created_at REAL)"
+    )
+    source_text = "裂缝中有未知求救者探出半个身子。"
+    bible = Bible(
+        characters=[],
+        world=World(visual_style_canonical="测试"),
+    )
+    structural_evidence = _coverage_audit_kwargs()[
+        "structural_evidence"
+    ]
+    legacy_input_hash = portraits.evidence_repository.content_hash({
+        "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "mode": "targeted",
+        "episode_no": 1,
+        "source_text": source_text,
+        "draft_text": "",
+        "future_text": "",
+        "future_label": "",
+        "bible": bible.model_dump(mode="json"),
+        "existing_resolutions": [],
+        "structural_evidence": structural_evidence,
+    })
+    conn.execute(
+        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
+        (
+            "legacy-v3-generic",
+            "episode",
+            "ep-attempt10-cache",
+            "screenplay_identity_discovery",
+            "validated",
+            json.dumps({
+                "contract_version": (
+                    portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION
+                ),
+                "input_hash": legacy_input_hash,
+                "mode": "targeted",
+                "candidates": [{"source_label": "stale-v3"}],
+            }),
+            1.0,
+        ),
+    )
+    conn.commit()
+    phases: list[str] = []
+    artifacts: list[dict] = []
+
+    async def fake_current(*_args, **_kwargs):
+        phases.append("current")
+        return []
+
+    async def fake_future(candidates, **_kwargs):
+        phases.append("future")
+        return candidates
+
+    async def fake_coverage(candidates, **_kwargs):
+        phases.append("coverage")
+        return [*candidates, {"source_label": "fresh-v4"}]
+
+    def record_artifact(artifact, **_kwargs):
+        artifacts.append(dict(artifact.content))
+        return {"id": f"artifact-{len(artifacts)}"}
+
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    monkeypatch.setattr(portraits, "get_setting", lambda *_args: "true")
+    monkeypatch.setattr(
+        portraits,
+        "extract_current_identity_candidates",
+        fake_current,
+    )
+    monkeypatch.setattr(
+        portraits,
+        "resolve_future_identity_candidates",
+        fake_future,
+    )
+    monkeypatch.setattr(
+        portraits,
+        "audit_identity_coverage_from_structural_evidence",
+        fake_coverage,
+    )
+    monkeypatch.setattr(
+        portraits.evidence_repository,
+        "create_artifact",
+        record_artifact,
+    )
+
+    result = asyncio.run(portraits.discover_character_candidates(
+        source_text,
+        bible,
+        1,
+        structural_evidence=structural_evidence,
+        scope_id="ep-attempt10-cache",
+    ))
+
+    assert phases == ["current", "future", "coverage"]
+    assert result == [{"source_label": "fresh-v4"}]
+    assert len(artifacts) == 2
+    assert all(
+        artifact["structural_coverage_policy_version"]
+        == portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+        and artifact["structural_coverage_applied"] is True
+        for artifact in artifacts
+    )
+
+
 def test_structural_coverage_parse_failure_stops_before_scene_writing(
     monkeypatch,
 ) -> None:
@@ -449,7 +560,19 @@ def test_structural_coverage_parse_failure_stops_before_scene_writing(
                 "id": "ep-attempt10-fail-fast",
                 "project_id": "project-attempt10-fail-fast",
                 "episode_no": 1,
-                "character_resolutions": [],
+                "character_resolutions": [{
+                    "source_label": "未知求救者",
+                    "canonical_name": "未知求救者",
+                    "resolution": "functional_identity",
+                    "identity_group": "legacy-v3:F1",
+                    "decision_provenance": (
+                        portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
+                    ),
+                    "decision_contract_version": (
+                        portraits.FUTURE_IDENTITY_DECISION_VERSION
+                    ),
+                    # Attempt10/v3 persisted rows had no structural policy tag.
+                }],
             },
             source_text,
             Bible(

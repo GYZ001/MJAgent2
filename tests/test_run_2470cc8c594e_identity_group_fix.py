@@ -409,6 +409,51 @@ def test_resolution_persist_old_value_cas_rolls_back_and_releases_connection() -
     conn.commit()
 
 
+def test_structural_policy_retirement_drops_legacy_automatic_resolutions(
+) -> None:
+    current_policy = portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+    stale = {
+        "source_label": "旧功能角色",
+        "canonical_name": "旧功能角色",
+        "resolution": "functional_identity",
+        "identity_group": "legacy:F1",
+        "decision_provenance": portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE,
+        "decision_contract_version": portraits.FUTURE_IDENTITY_DECISION_VERSION,
+    }
+    current = {
+        "source_label": "当前功能角色",
+        "canonical_name": "当前功能角色",
+        "resolution": "functional_identity",
+        "identity_group": "current:F1",
+        "decision_provenance": portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE,
+        "decision_contract_version": portraits.FUTURE_IDENTITY_DECISION_VERSION,
+        "structural_identity_policy_version": current_policy,
+    }
+    manual = {
+        "source_label": "人工角色",
+        "canonical_name": "人工角色",
+        "resolution": "functional_identity",
+        "identity_group": "manual:F1",
+        "decision_provenance": "manual",
+    }
+    conn = _resolution_conn([stale, current, manual])
+
+    persisted = portraits.persist_screenplay_character_resolutions(
+        conn,
+        "ep_711b29204aa9",
+        [],
+        retire_stale_structural_identity_policy=current_policy,
+    )
+
+    assert {item["source_label"] for item in persisted} == {
+        "当前功能角色",
+        "人工角色",
+    }
+    assert portraits.structural_identity_resolution_is_current(current)
+    assert portraits.structural_identity_resolution_is_current(manual)
+    assert not portraits.structural_identity_resolution_is_current(stale)
+
+
 def _coverage_cache_conn() -> sqlite3.Connection:
     conn = _resolution_conn([])
     conn.execute(
@@ -483,6 +528,12 @@ def test_structural_coverage_reuses_only_current_contract_cache(
             "identity_group": "current-1:F1",
             "identity_scope_fingerprint": (
                 portraits.screenplay_identity_scope_fingerprint(1, source_text)
+            ),
+            "decision_provenance": (
+                portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
+            ),
+            "structural_identity_policy_version": (
+                portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
             ),
         }], ensure_ascii=False),),
     )
@@ -594,9 +645,28 @@ def test_stale_structural_cache_is_neither_reused_nor_used_as_base(
         "source_label": "虎头虎脑的少年",
         "identity_group": "current-1:F1",
     }]
+    stale_generic_alias = [{
+        "source_label": "大青山被困少年1",
+        "identity_group": "legacy-generic:F1",
+    }]
     conn.executemany(
         "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
         [
+            (
+                "art-stale-generic", "episode", "ep_711b29204aa9",
+                "screenplay_identity_discovery", "validated",
+                json.dumps({
+                    "mode": "targeted",
+                    "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+                    "structural_coverage_policy_version": (
+                        "screenplay-identity-structural-coverage.v3"
+                    ),
+                    "structural_coverage_applied": True,
+                    "source_hash": portraits.evidence_repository.content_hash(source_text),
+                    "candidates": stale_generic_alias,
+                }, ensure_ascii=False),
+                3.0,
+            ),
             (
                 "art-stale", "episode", "ep_711b29204aa9",
                 "screenplay_identity_discovery", "validated",
@@ -608,6 +678,10 @@ def test_stale_structural_cache_is_neither_reused_nor_used_as_base(
                 json.dumps({
                     "mode": "targeted",
                     "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+                    "structural_coverage_policy_version": (
+                        portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+                    ),
+                    "structural_coverage_applied": False,
                     "source_hash": portraits.evidence_repository.content_hash(source_text),
                     "candidates": valid_base,
                 }, ensure_ascii=False),
@@ -641,3 +715,4 @@ def test_stale_structural_cache_is_neither_reused_nor_used_as_base(
     assert "reused" not in result
     assert observed_base == valid_base
     assert stale_alias[0] not in observed_base
+    assert stale_generic_alias[0] not in observed_base

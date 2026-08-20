@@ -8616,12 +8616,22 @@ async def _generate_screenplay_scene_sharded_baseline(
     # Blueprint exists.  Only participant references not already covered by the
     # frozen authority projection are sent, together with their owned SRC.
     from app.identity_authority import identity_authority_registry
-    from app.portraits import ensure_structural_identity_coverage
+    from app.portraits import (
+        ensure_structural_identity_coverage,
+        structural_identity_resolution_is_current,
+    )
     from app.orchestration.state_machine import StateConflict
 
     authorities = identity_authority_registry(
         bible,
-        list(episode.get("character_resolutions") or []),
+        [
+            item
+            for item in (episode.get("character_resolutions") or [])
+            if (
+                isinstance(item, dict)
+                and structural_identity_resolution_is_current(item)
+            )
+        ],
     )
     known_identity_labels = {
         str(value).strip()
@@ -8697,8 +8707,10 @@ async def _generate_screenplay_scene_sharded_baseline(
                 "蓝图人物权威收口失败："
                 + "；".join(str(value) for value in coverage["errors"][:10])
             )
-        if coverage.get("resolutions"):
-            episode["character_resolutions"] = list(coverage["resolutions"])
+        if "resolutions" in coverage:
+            episode["character_resolutions"] = list(
+                coverage.get("resolutions") or []
+            )
         if coverage.get("added"):
             project_row = get_conn().execute(
                 "SELECT bible_json FROM projects WHERE id=?",

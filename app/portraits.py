@@ -1606,8 +1606,15 @@ async def discover_character_candidates(
     targeted = str(
         get_setting("screenplay_targeted_identity_enabled") or "true"
     ).strip().lower() not in {"0", "false", "off", "no"}
+    structural_coverage_applied = bool(
+        targeted and structural_evidence
+    )
     input_hash = evidence_repository.content_hash({
         "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "structural_coverage_policy_version": (
+            STRUCTURAL_IDENTITY_COVERAGE_VERSION
+        ),
+        "structural_coverage_applied": structural_coverage_applied,
         "mode": "targeted" if targeted else "legacy",
         "episode_no": episode_no,
         "source_text": source_text,
@@ -1642,6 +1649,10 @@ async def discover_character_candidates(
             continue
         if (
             cached.get("contract_version") == IDENTITY_DISCOVERY_CONTRACT_VERSION
+            and cached.get("structural_coverage_policy_version")
+            == STRUCTURAL_IDENTITY_COVERAGE_VERSION
+            and cached.get("structural_coverage_applied")
+            is structural_coverage_applied
             and cached.get("input_hash") == input_hash
             and isinstance(cached.get("candidates"), list)
         ):
@@ -1700,6 +1711,10 @@ async def discover_character_candidates(
             trust_level="T0",
             content={
                 "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
+                "structural_coverage_policy_version": (
+                    STRUCTURAL_IDENTITY_COVERAGE_VERSION
+                ),
+                "structural_coverage_applied": structural_coverage_applied,
                 "input_hash": input_hash,
                 "mode": "targeted" if targeted else "legacy",
                 "model_candidates": audited,
@@ -1717,6 +1732,10 @@ async def discover_character_candidates(
             trust_level="T1",
             content={
                 "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
+                "structural_coverage_policy_version": (
+                    STRUCTURAL_IDENTITY_COVERAGE_VERSION
+                ),
+                "structural_coverage_applied": structural_coverage_applied,
                 "episode_no": episode_no,
                 "candidates": audited,
                 "source_hash": evidence_repository.content_hash(source_text),
@@ -1754,7 +1773,21 @@ def _identity_resolution(
             or AUTOMATIC_IDENTITY_DECISION_PROVENANCE
         ).strip(),
         "decision_contract_version": FUTURE_IDENTITY_DECISION_VERSION,
+        "structural_identity_policy_version": (
+            STRUCTURAL_IDENTITY_COVERAGE_VERSION
+        ),
     })
+
+
+def structural_identity_resolution_is_current(value: dict) -> bool:
+    """Whether a durable resolution may suppress the current coverage gate."""
+    provenance = str(value.get("decision_provenance") or "").strip()
+    return bool(
+        provenance in DURABLE_IDENTITY_DECISION_PROVENANCE
+        or str(
+            value.get("structural_identity_policy_version") or ""
+        ).strip() == STRUCTURAL_IDENTITY_COVERAGE_VERSION
+    )
 
 
 def _replace_resolved_label(text: str, source_label: str, canonical_name: str) -> str:
@@ -3251,6 +3284,7 @@ def persist_screenplay_character_resolutions(
     expected_active_run_id: str | None = None,
     expected_revision_id: str | None = None,
     replace_identity_scope: str | None = None,
+    retire_stale_structural_identity_policy: str | None = None,
 ) -> list[dict]:
     columns = "screenplay_character_resolutions"
     if expected_active_run_id is not None:
@@ -3315,6 +3349,17 @@ def persist_screenplay_character_resolutions(
                 == FUTURE_IDENTITY_DECISION_VERSION
             )
         ]
+    if retire_stale_structural_identity_policy is not None:
+        current = [
+            item for item in current
+            if (
+                str(item.get("decision_provenance") or "").strip()
+                in DURABLE_IDENTITY_DECISION_PROVENANCE
+                or str(
+                    item.get("structural_identity_policy_version") or ""
+                ).strip() == retire_stale_structural_identity_policy
+            )
+        ]
     merged = merge_screenplay_character_resolutions(current, resolutions)
     # Fingerprint stability guard. A fresh discovery pass that reproduces the
     # SAME semantic identity decisions (same authority_id / resolution /
@@ -3343,6 +3388,9 @@ def persist_screenplay_character_resolutions(
                 str(item.get("identity_scope_fingerprint") or ""),
                 str(item.get("decision_provenance") or ""),
                 str(item.get("decision_contract_version") or ""),
+                str(
+                    item.get("structural_identity_policy_version") or ""
+                ),
             )
             for item in items
         )
@@ -3647,6 +3695,10 @@ async def ensure_structural_identity_coverage(
             cached_resolutions = load_screenplay_character_resolutions(
                 conn, episode_id
             )
+            cached_resolutions = [
+                item for item in cached_resolutions
+                if structural_identity_resolution_is_current(item)
+            ]
             materialized_keys = {
                 (
                     str(item.get("source_label") or "").strip(),
@@ -3685,6 +3737,9 @@ async def ensure_structural_identity_coverage(
             payload.get("mode") != "structural_coverage"
             and payload.get("contract_version")
             == IDENTITY_DISCOVERY_CONTRACT_VERSION
+            and payload.get("structural_coverage_policy_version")
+            == STRUCTURAL_IDENTITY_COVERAGE_VERSION
+            and payload.get("structural_coverage_applied") is False
             and payload.get("source_hash") == source_hash
             and isinstance(payload.get("candidates"), list)
         ):
@@ -3718,6 +3773,20 @@ async def ensure_structural_identity_coverage(
         ) not in base_keys
     ]
     if not additions:
+        if write_guard:
+            write_guard()
+        persisted = persist_screenplay_character_resolutions(
+            conn,
+            episode_id,
+            [],
+            expected_active_run_id=expected_active_run_id,
+            expected_revision_id=expected_revision_id,
+            retire_stale_structural_identity_policy=(
+                STRUCTURAL_IDENTITY_COVERAGE_VERSION
+            ),
+        )
+        if write_guard:
+            write_guard()
         trace = None
         try:
             from app.observability.tracing import current_trace
@@ -3768,7 +3837,7 @@ async def ensure_structural_identity_coverage(
             "checked": 0,
             "candidates": audited,
             "added": [],
-            "resolutions": [],
+            "resolutions": persisted,
             "errors": [],
             "warnings": [],
         }
@@ -3789,6 +3858,9 @@ async def ensure_structural_identity_coverage(
         result.get("resolutions") or [],
         expected_active_run_id=expected_active_run_id,
         expected_revision_id=expected_revision_id,
+        retire_stale_structural_identity_policy=(
+            STRUCTURAL_IDENTITY_COVERAGE_VERSION
+        ),
     )
     if write_guard:
         write_guard()
