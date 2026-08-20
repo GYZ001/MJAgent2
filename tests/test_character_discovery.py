@@ -3258,7 +3258,7 @@ def test_current_identity_rf10_manual_alias_k_is_backend_projected() -> None:
     }
     payload["decisions"][selected["evidence_ref"]]["k"].append({
         "decision_id": selected["decision_id"],
-        "kind": "onscreen",
+        "kind": "mentioned",
     })
     response = portraits.CurrentIdentityCandidateResponse.model_validate(
         payload
@@ -3280,6 +3280,161 @@ def test_current_identity_rf10_manual_alias_k_is_backend_projected() -> None:
     assert projected[0]["source_label"] == "师尊"
     assert projected[0]["name"] == "苍玄"
     assert projected[0]["authority_id"] == "manual:cangxuan"
+
+
+def test_current_identity_rf10_manual_alias_cannot_reach_card_materialization(
+    monkeypatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE episodes(id TEXT PRIMARY KEY, project_id TEXT, "
+        "episode_no INTEGER, screenplay_character_resolutions TEXT NOT NULL)"
+    )
+    manual = {
+        "source_label": "师尊",
+        "canonical_name": "苍玄",
+        "resolution": "reference_identity",
+        "identity_group": "manual:master",
+        "authority_id": "manual:cangxuan",
+        "decision_provenance": "manual",
+    }
+    conn.execute(
+        "INSERT INTO episodes VALUES('e1','p1',1,?)",
+        (json.dumps([manual], ensure_ascii=False),),
+    )
+    conn.commit()
+    calls = 0
+    card_calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        payload = _identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "师尊",
+                "canonical_name": "苍玄",
+                "identity_kind": "named",
+                "kind": "onscreen",
+                "evidence": "师尊走入殿中",
+            }],
+            messages=messages,
+        )
+        return json.dumps(payload, ensure_ascii=False)
+
+    async def forbidden_card(*_args, **_kwargs):
+        nonlocal card_calls
+        card_calls += 1
+        raise AssertionError("non-Bible K alias reached card materialization")
+
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    monkeypatch.setattr(portraits, "get_setting", lambda *_args: "true")
+    monkeypatch.setattr(
+        portraits,
+        "_future_chapter_context",
+        lambda *_args, **_kwargs: ("", ""),
+    )
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(portraits, "ensure_character_card", forbidden_card)
+
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="K authority 不可直接物化人物卡",
+    ):
+        asyncio.run(portraits.ensure_cards_for_text(
+            "p1",
+            1,
+            "师尊走入殿中。",
+            Bible(world=World(visual_style_canonical="国风"), characters=[]),
+            generate_portraits=False,
+        ))
+
+    assert calls == 1
+    assert card_calls == 0
+    stored = json.loads(conn.execute(
+        "SELECT screenplay_character_resolutions FROM episodes WHERE id='e1'"
+    ).fetchone()[0])
+    assert stored == [manual]
+
+
+def test_current_identity_rf10_manual_alias_mentioned_persists_one_authority(
+    monkeypatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE episodes(id TEXT PRIMARY KEY, project_id TEXT, "
+        "episode_no INTEGER, screenplay_character_resolutions TEXT NOT NULL)"
+    )
+    manual = {
+        "source_label": "师尊",
+        "canonical_name": "苍玄",
+        "resolution": "reference_identity",
+        "identity_group": "manual:master",
+        "authority_id": "manual:cangxuan",
+        "decision_provenance": "manual",
+    }
+    conn.execute(
+        "INSERT INTO episodes VALUES('e1','p1',1,?)",
+        (json.dumps([manual], ensure_ascii=False),),
+    )
+    conn.commit()
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "师尊",
+                "canonical_name": "苍玄",
+                "identity_kind": "named",
+                "kind": "mentioned",
+                "evidence": "提到师尊",
+            }],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    async def forbidden_card(*_args, **_kwargs):
+        raise AssertionError("mentioned K alias must not materialize a card")
+
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    monkeypatch.setattr(portraits, "get_setting", lambda *_args: "true")
+    monkeypatch.setattr(
+        portraits,
+        "_future_chapter_context",
+        lambda *_args, **_kwargs: ("", ""),
+    )
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(portraits, "ensure_character_card", forbidden_card)
+
+    result = asyncio.run(portraits.ensure_cards_for_text(
+        "p1",
+        1,
+        "正文提到师尊留下的戒律。",
+        Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        generate_portraits=False,
+    ))
+    persisted = portraits.persist_screenplay_character_resolutions(
+        conn,
+        "e1",
+        result["resolutions"],
+    )
+    registry = portraits.identity_authority_registry(
+        Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        persisted,
+    )
+
+    assert calls == 1
+    assert result["checked"] == 0
+    assert {item["authority_id"] for item in persisted} == {
+        "manual:cangxuan"
+    }
+    assert [item["authority_id"] for item in registry] == [
+        "manual:cangxuan"
+    ]
 
 
 @pytest.mark.parametrize(

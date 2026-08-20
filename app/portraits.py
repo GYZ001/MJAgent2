@@ -814,6 +814,13 @@ def _current_identity_known_decision_catalog(
                     "authority_id": authority_id,
                     "canonical_name": canonical_name,
                     "source_label": source_label,
+                    "materialization_compatible": bool(
+                        authority_id
+                        == _canonical_named_authority_id(canonical_name)
+                        and str(
+                            authority.get("identity_group") or ""
+                        ).strip() == authority_id
+                    ),
                 }
                 decision_id = (
                     f"K:{evidence_ref}:"
@@ -940,6 +947,7 @@ def _project_current_identity_response(
         authority_id: str = "",
         authority_group: str = "",
         known_authority: bool = False,
+        materialization_compatible: bool = False,
     ) -> None:
         source_label = str(source_label or "")
         canonical_name = str(canonical_name or "")
@@ -976,6 +984,15 @@ def _project_current_identity_response(
             if not literal:
                 errors.append(
                     f"current named 缺少逐字 owned evidence：{source_label}"
+                )
+            if (
+                known_authority
+                and kind == "onscreen"
+                and not materialization_compatible
+            ):
+                errors.append(
+                    "current K authority 不可直接物化人物卡："
+                    f"{source_label}->{canonical_name}"
                 )
         if functional_key != functional_key.strip():
             errors.append(
@@ -1093,6 +1110,9 @@ def _project_current_identity_response(
                 authority_id=str(selected.get("authority_id") or ""),
                 authority_group=str(selected.get("identity_group") or ""),
                 known_authority=True,
+                materialization_compatible=bool(
+                    selected.get("materialization_compatible")
+                ),
             )
         for item in decisions.n:
             append_candidate(
@@ -1377,6 +1397,11 @@ async def _discover_character_candidates_legacy(
                 "evidence_ref": str(item.get("evidence_ref") or ""),
                 "source_label": str(item.get("source_label") or ""),
                 "canonical_name": str(item.get("canonical_name") or ""),
+                "allowed_kinds": (
+                    ["onscreen", "mentioned"]
+                    if item.get("materialization_compatible")
+                    else ["mentioned"]
+                ),
             }
             for decision_id, item in sorted(known_decisions.items())
         ]
@@ -1411,8 +1436,9 @@ async def _discover_character_candidates_legacy(
 规则：
 1. decisions 必须精确包含目录中全部 E ref；每个 E 都显式输出 k/n/f 三个数组，
    无结果用 []。人物只能写在其逐字证据所在 E 下；同一 E 可有多人。
-2. 已登记身份只可选 k：decision_id 精确复制 K 目录，kind 选择 onscreen/mentioned；
-   不得把 K 目录中的 source_label 写进 n/f。
+2. 已登记身份只可选 k：decision_id 精确复制 K 目录，kind 必须属于该 K 的 allowed_kinds；
+   不得把 K 目录中的 source_label 写进 n/f。只允许 mentioned 的 K 没有可安全物化的最终人物卡
+   authority；若人物实际出镜则必须停止而不能谎报 mentioned 或另造身份。
 3. 当前阶段的新 named 只用于逐字自称谓：n 每项只写 identity_label 与 kind，
    identity_label 必须是当前 E text 的连续逐字子串；后端会令 canonical_name=source_label。
    任何“称谓 A 其实是名字 B”的别名判断，即使 A、B 同时出现在当前输入，也必须先判为
