@@ -102,14 +102,36 @@ SCREENPLAY_SCENE_SHARD_UNIT_RESERVE_TOKENS = 128
 SCREENPLAY_SCENE_SHARD_REASONING_RESERVE_PERCENT = 20
 
 
-async def _gather_fail_fast(*awaitables: Awaitable[Any]) -> list[Any]:
+async def _gather_fail_fast(
+    *factories: Callable[[], Awaitable[Any]],
+) -> list[Any]:
     """Run a batch in input order, cancelling and joining it on first failure.
 
     ``asyncio.gather`` propagates a child exception without cancelling its
     siblings.  That is unsafe for paid generation: those detached siblings can
     continue into later provider calls after the batch has already failed.
     """
-    tasks = [asyncio.ensure_future(awaitable) for awaitable in awaitables]
+    tasks: list[asyncio.Task[Any]] = []
+    failure_owner: asyncio.Task[Any] | None = None
+
+    async def run_child(factory: Callable[[], Awaitable[Any]]) -> Any:
+        nonlocal failure_owner
+        try:
+            return await factory()
+        except BaseException:
+            current = asyncio.current_task()
+            if failure_owner is None and current is not None:
+                failure_owner = current
+                # Cancel peers before this child finishes unwinding.  Waiting
+                # for the coordinator would let a semaphore waiter or an
+                # in-flight structured runner start its next provider attempt.
+                for peer in tasks:
+                    if peer is not current and not peer.done():
+                        peer.cancel()
+            raise
+
+    for factory in factories:
+        tasks.append(asyncio.create_task(run_child(factory)))
     pending = set(tasks)
     try:
         while pending:
@@ -117,16 +139,8 @@ async def _gather_fail_fast(*awaitables: Awaitable[Any]) -> list[Any]:
                 pending,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            failed = next(
-                (
-                    task
-                    for task in done
-                    if not task.cancelled() and task.exception() is not None
-                ),
-                None,
-            )
-            if failed is not None:
-                failed.result()
+            if failure_owner is not None:
+                failure_owner.result()
             for task in done:
                 # result() preserves the original exception (including
                 # CancelledError) instead of wrapping it in an ExceptionGroup.
@@ -4682,21 +4696,24 @@ async def _semantic_review_scene_shard_draft(
             [],
         ]
         for chunk_index, chunk in enumerate(chunks, start=1):
+            async def review_one(
+                reviewer_no: int,
+            ) -> ScreenplaySceneShardSemanticReview:
+                return await review(
+                    candidate,
+                    reviewer_no,
+                    phase,
+                    chunk["unit_keys"],
+                    chunk["review_prompt"],
+                    chunk["budget"],
+                    chunk_index,
+                    len(chunks),
+                    chunk["chunk_hash"],
+                )
+
             chunk_reviews = await _gather_fail_fast(
-                *(
-                    review(
-                        candidate,
-                        reviewer_no,
-                        phase,
-                        chunk["unit_keys"],
-                        chunk["review_prompt"],
-                        chunk["budget"],
-                        chunk_index,
-                        len(chunks),
-                        chunk["chunk_hash"],
-                    )
-                    for reviewer_no in (1, 2)
-                ),
+                lambda: review_one(1),
+                lambda: review_one(2),
             )
             for reviewer_index, chunk_review in enumerate(chunk_reviews):
                 reviewer_findings[reviewer_index].extend(
@@ -5229,11 +5246,17 @@ async def generate_screenplay_scene_shards(
             async with semaphore:
                 if batch_abort.is_set():
                     raise asyncio.CancelledError
-                checkpoint_rows[plan.shard_id].update({
-                    "status": "running", "attempt": 1,
-                })
-                emit_progress()
-                budget_meta = _screenplay_scene_shard_budget_meta(plan)
+                try:
+                    checkpoint_rows[plan.shard_id].update({
+                        "status": "running", "attempt": 1,
+                    })
+                    emit_progress()
+                    budget_meta = _screenplay_scene_shard_budget_meta(plan)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    batch_abort.set()
+                    raise
                 try:
                     draft = await model_gateway.chat_structured(
                         [{"role": "user", "content": prompt}],
@@ -5421,7 +5444,10 @@ async def generate_screenplay_scene_shards(
             raise
 
     results = await _gather_fail_fast(
-        *(generate_one_with_checkpoint(plan) for plan in plans),
+        *(
+            lambda plan=plan: generate_one_with_checkpoint(plan)
+            for plan in plans
+        ),
     )
     shards = [shard for shard, _artifact_id in results]
     artifact_ids = [artifact_id for _shard, artifact_id in results]

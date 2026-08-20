@@ -3696,6 +3696,77 @@ def test_scene_shard_failure_fences_semaphore_waiter_before_provider(
     assert "error_type" not in latest_rows[plans[1].shard_id]
 
 
+def test_scene_shard_failure_cancels_peer_before_structured_retry(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=True)
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )
+    contracts = _contracts(plans, blueprint)
+    sibling_started = asyncio.Event()
+    release_sibling = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+    sibling_attempts: list[int] = []
+    original_error = scene_shards_module.hiagent.ProviderError(
+        "injected peer structured failure",
+        retryable=True,
+        failure_kind="request_outcome_unknown",
+        delivery_state="unknown",
+        requires_explicit_retry=True,
+    )
+
+    def fixed_settings(
+        key: str,
+        default: int,
+        *,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        value = 2 if key == "screenplay_scene_shard_parallelism" else default
+        return max(minimum, min(maximum, value))
+
+    async def fake_chat(*_args, **kwargs):
+        meta = kwargs["call_meta"]
+        shard_id = str(meta["shard_id"])
+        if shard_id == plans[0].shard_id:
+            await sibling_started.wait()
+            release_sibling.set()
+            raise original_error
+        sibling_attempts.append(int(meta["format_attempt"]))
+        if len(sibling_attempts) > 1:
+            raise AssertionError(
+                "peer entered structured retry after batch failure"
+            )
+        sibling_started.set()
+        try:
+            await release_sibling.wait()
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+        return "not valid JSON"
+
+    monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    with pytest.raises(scene_shards_module.hiagent.ProviderError) as caught:
+        asyncio.run(generate_screenplay_scene_shards(
+            episode={"id": "ep-shard-structured-retry-fence", "episode_no": 1},
+            source_text=SOURCE,
+            blueprint=blueprint,
+            identity_registry=[],
+            identities=_identities(),
+            plans=plans,
+            scene_input_contracts=contracts,
+        ))
+
+    assert caught.value is original_error
+    assert sibling_attempts == [0]
+    assert sibling_cancelled.is_set()
+
+
 def test_scene_shard_batch_user_cancellation_does_not_mark_failed(
     monkeypatch,
 ) -> None:
