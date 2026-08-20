@@ -219,12 +219,12 @@ def identity_authority_registry(
         semantic_group = None
         if (
             str(item.get("resolution") or "") == "future_identity"
-            and authority_id.startswith("bible:")
         ):
             # A confirmed name is no longer an episode-local functional group.
-            # Its canonical group is the same Bible authority already registered
-            # above, so the former F1 token cannot make one named identity appear
-            # to span two semantic groups.
+            # This applies equally to Bible and backend-signed future-name /
+            # candidate authorities: multiple former F1 tokens may be verified
+            # aliases of one authority, while the forward raw-group check below
+            # still forbids one F1 from resolving to two authorities.
             semantic_group = authority_id
         register_group(
             authority_id,

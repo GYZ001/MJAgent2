@@ -4578,13 +4578,15 @@ async def ensure_structural_identity_coverage(
     base_candidates: list[dict] = []
     parent_artifact_id = ""
     invalid_cached_resolution_keys: set[tuple[str, str, str]] = set()
+    matching_coverage_artifact_seen = False
     for row in rows:
         try:
             payload = json.loads(row["content_json"] or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
         if (
-            payload.get("mode") == "structural_coverage"
+            not matching_coverage_artifact_seen
+            and payload.get("mode") == "structural_coverage"
             and payload.get("contract_version")
             == IDENTITY_DISCOVERY_CONTRACT_VERSION
             and payload.get("policy_version")
@@ -4593,6 +4595,7 @@ async def ensure_structural_identity_coverage(
             and payload.get("structural_evidence_hash") == structural_hash
             and isinstance(payload.get("candidates"), list)
         ):
+            matching_coverage_artifact_seen = True
             required_keys = {
                 (
                     str(item.get("source_label") or "").strip(),
@@ -4733,7 +4736,23 @@ async def ensure_structural_identity_coverage(
             str(item.get("identity_group") or "").strip(),
         ) not in base_keys
     ]
-    if not additions:
+    recovery_candidates = [
+        item
+        for item in audited
+        if (
+            str(item.get("source_label") or "").strip(),
+            str(item.get("identity_group") or "").strip(),
+            identity_scope_fingerprint,
+        ) in invalid_cached_resolution_keys
+    ]
+    materialization_candidates = list({
+        (
+            str(item.get("source_label") or "").strip(),
+            str(item.get("identity_group") or "").strip(),
+        ): item
+        for item in [*additions, *recovery_candidates]
+    }.values())
+    if not materialization_candidates:
         if write_guard:
             write_guard()
         persisted = persist_screenplay_character_resolutions(
@@ -4832,7 +4851,7 @@ async def ensure_structural_identity_coverage(
         source_text,
         bible,
         generate_portraits=False,
-        _precomputed_candidates=additions,
+        _precomputed_candidates=materialization_candidates,
         write_guard=write_guard,
     )
     if write_guard:
@@ -4878,7 +4897,7 @@ async def ensure_structural_identity_coverage(
                 "mode": "structural_coverage",
                 "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
                 "structural_evidence_hash": structural_hash,
-                "model_candidates": additions,
+                "model_candidates": materialization_candidates,
             },
             parent_artifact_ids=[parent_artifact_id] if parent_artifact_id else [],
             contract_version=IDENTITY_DISCOVERY_CONTRACT_VERSION,

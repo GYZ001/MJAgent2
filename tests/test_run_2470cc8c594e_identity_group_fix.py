@@ -176,6 +176,37 @@ def test_structural_alias_reuses_scoped_authority_and_remains_projectable() -> N
     }]
 
 
+def test_backend_signed_future_authority_can_unify_multiple_raw_alias_groups(
+) -> None:
+    authority_id = "future-name:stable-cangxuan"
+    scope = "owned-source-episode-1"
+    registry = identity_authority_registry(_empty_bible(), [
+        {
+            "source_label": "师尊",
+            "canonical_name": "苍玄",
+            "resolution": "future_identity",
+            "identity_group": "current-1:F1",
+            "identity_scope_fingerprint": scope,
+            "authority_id": authority_id,
+        },
+        {
+            "source_label": "白袍老人",
+            "canonical_name": "苍玄",
+            "resolution": "future_identity",
+            "identity_group": "current-2:F3",
+            "identity_scope_fingerprint": scope,
+            "authority_id": authority_id,
+        },
+    ])
+
+    authority = next(
+        item for item in registry if item["authority_id"] == authority_id
+    )
+    assert authority["canonical_name"] == "苍玄"
+    assert authority["identity_group"] == authority_id
+    assert set(authority["source_labels"]) == {"师尊", "白袍老人"}
+
+
 def test_same_group_token_from_distinct_discovery_epochs_does_not_merge() -> None:
     scope_a = _fresh_source_anchors("source-a")[:1]
     scope_b = [{
@@ -578,6 +609,221 @@ def test_structural_coverage_reuses_only_current_contract_cache(
 
     assert result["reused"] is True
     assert result["candidates"] == cached_candidates
+
+
+def test_structural_coverage_receipt_rejects_same_key_wrong_authority(
+    monkeypatch,
+) -> None:
+    conn = _coverage_cache_conn()
+    source_text = "银袍女子站在山门前。"
+    evidence = [{
+        "identity_key": "银袍女子",
+        "source_segment_ids": ["SRC0001"],
+        "usage": "visible",
+        "node_key": "S001-N001",
+    }]
+    scope = portraits.screenplay_identity_scope_fingerprint(1, source_text)
+    candidates = [{
+        "name": "许清",
+        "source_label": "银袍女子",
+        "identity_kind": "named",
+        "identity_group": "current-1:F3",
+        "authority_id": "bible:许清",
+        "kind": "onscreen",
+        "source_segment_id": "SRC0001",
+        "source_segment_ids": ["SRC0001"],
+        "source_quote": source_text,
+    }]
+    expected_resolution = {
+        "source_label": "银袍女子",
+        "canonical_name": "许清",
+        "resolution": "future_identity",
+        "identity_group": "current-1:F3",
+        "identity_scope_fingerprint": scope,
+        "decision_provenance": (
+            portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
+        ),
+        "decision_contract_version": portraits.FUTURE_IDENTITY_DECISION_VERSION,
+        "structural_identity_policy_version": (
+            portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+        ),
+        "authority_id": "bible:许清",
+    }
+    payload = _structural_cache_payload(
+        source_text,
+        evidence,
+        contract_version=portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        policy_version=portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+        candidates=candidates,
+        materialized_resolutions=[expected_resolution],
+    )
+    conn.execute(
+        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
+        (
+            "art-current", "episode", "ep_711b29204aa9",
+            "screenplay_identity_discovery", "validated",
+            json.dumps(payload, ensure_ascii=False), 2.0,
+        ),
+    )
+    wrong_resolution = {
+        **expected_resolution,
+        "canonical_name": "孟浩",
+        "authority_id": "bible:孟浩",
+    }
+    conn.execute(
+        "UPDATE episodes SET screenplay_character_resolutions=? "
+        "WHERE id='ep_711b29204aa9'",
+        (json.dumps([wrong_resolution], ensure_ascii=False),),
+    )
+    conn.commit()
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    audit_calls = 0
+
+    async def fake_audit(*_args, **_kwargs):
+        nonlocal audit_calls
+        audit_calls += 1
+        return candidates
+
+    async def fake_ensure(*_args, **_kwargs):
+        return {
+            "checked": 0,
+            "candidates": candidates,
+            "added": [],
+            "resolutions": [expected_resolution],
+            "errors": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(
+        portraits,
+        "audit_identity_coverage_from_structural_evidence",
+        fake_audit,
+    )
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_ensure)
+    monkeypatch.setattr(
+        portraits.evidence_repository,
+        "create_artifact",
+        lambda *_args, **_kwargs: {"id": "art-new"},
+    )
+
+    result = asyncio.run(portraits.ensure_structural_identity_coverage(
+        "proj", "ep_711b29204aa9", 1, source_text,
+        _empty_bible(), evidence,
+    ))
+
+    assert audit_calls == 1
+    assert "reused" not in result
+    assert {
+        (item["canonical_name"], item["authority_id"])
+        for item in result["resolutions"]
+    } == {("许清", "bible:许清")}
+
+
+def test_structural_coverage_cache_hit_retires_all_stale_auto_rows(
+    monkeypatch,
+) -> None:
+    conn = _coverage_cache_conn()
+    source_text = "虎头虎脑的少年站在山门前。"
+    evidence = [{
+        "identity_key": "虎头虎脑的少年",
+        "source_segment_ids": ["SRC0001"],
+        "usage": "visible",
+        "node_key": "S001-N001",
+    }]
+    scope = portraits.screenplay_identity_scope_fingerprint(1, source_text)
+    candidate = {
+        "name": "虎头虎脑的少年",
+        "source_label": "虎头虎脑的少年",
+        "identity_kind": "functional",
+        "identity_group": "current-1:F1",
+        "kind": "onscreen",
+    }
+    current = {
+        "source_label": "虎头虎脑的少年",
+        "canonical_name": "虎头虎脑的少年",
+        "resolution": "functional_identity",
+        "identity_group": "current-1:F1",
+        "identity_scope_fingerprint": scope,
+        "decision_provenance": (
+            portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
+        ),
+        "decision_contract_version": portraits.FUTURE_IDENTITY_DECISION_VERSION,
+        "structural_identity_policy_version": (
+            portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+        ),
+    }
+    stale_contract = {
+        **current,
+        "source_label": "旧合同角色",
+        "canonical_name": "旧合同角色",
+        "identity_group": "current-1:F2",
+        "decision_contract_version": "screenplay-future-identity.v6",
+    }
+    stale_scope = {
+        **current,
+        "source_label": "旧来源角色",
+        "canonical_name": "旧来源角色",
+        "identity_group": "current-1:F3",
+        "identity_scope_fingerprint": "old-source-scope",
+    }
+    manual = {
+        "source_label": "人工角色",
+        "canonical_name": "人工角色",
+        "resolution": "functional_identity",
+        "identity_group": "manual:F1",
+        "decision_provenance": "manual",
+    }
+    payload = _structural_cache_payload(
+        source_text,
+        evidence,
+        contract_version=portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        policy_version=portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+        candidates=[candidate],
+        materialized_resolutions=[current],
+    )
+    conn.execute(
+        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
+        (
+            "art-current", "episode", "ep_711b29204aa9",
+            "screenplay_identity_discovery", "validated",
+            json.dumps(payload, ensure_ascii=False), 2.0,
+        ),
+    )
+    conn.execute(
+        "UPDATE episodes SET screenplay_character_resolutions=? "
+        "WHERE id='ep_711b29204aa9'",
+        (json.dumps(
+            [current, stale_contract, stale_scope, manual],
+            ensure_ascii=False,
+        ),),
+    )
+    conn.commit()
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+
+    async def forbidden_audit(*_args, **_kwargs):
+        raise AssertionError("exact receipt must reuse without provider audit")
+
+    monkeypatch.setattr(
+        portraits,
+        "audit_identity_coverage_from_structural_evidence",
+        forbidden_audit,
+    )
+
+    result = asyncio.run(portraits.ensure_structural_identity_coverage(
+        "proj", "ep_711b29204aa9", 1, source_text,
+        _empty_bible(), evidence,
+    ))
+
+    assert result["reused"] is True
+    assert {item["source_label"] for item in result["resolutions"]} == {
+        "虎头虎脑的少年", "人工角色",
+    }
+    stored = portraits.load_screenplay_character_resolutions(
+        conn, "ep_711b29204aa9"
+    )
+    assert {item["source_label"] for item in stored} == {
+        "虎头虎脑的少年", "人工角色",
+    }
 
 
 def test_structural_cache_surviving_resolution_reset_is_rematerialized(
