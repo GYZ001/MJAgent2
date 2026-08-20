@@ -42,6 +42,7 @@ from app.narrative_blueprint import (
     filter_blueprint_semantic_review_voice_issues,
     normalize_blueprint_agency_continuity,
     normalize_blueprint_provider_payload,
+    normalize_blueprint_requirement_state_keys,
     normalize_blueprint_semantic_review_payload,
     normalize_blueprint_state_subject_perception,
     recover_complete_blueprint_prefix,
@@ -364,6 +365,61 @@ def test_valid_blueprint_derives_scenes_without_model_scene_grouping() -> None:
         and relation.reference_key == "F001"
         for relation in blueprint.scene_derivations
     )
+
+
+def test_err_20260820_e7b06d_requirement_state_key_converges_to_fact() -> None:
+    blueprint = _blueprint()
+    requirement = blueprint.nodes[3].state_requirements[0]
+    assert requirement.required_fact_key == "F001"
+    # LLM authored a free-text label that disagrees with the authoritative
+    # fact's state_key, so the deterministic gate cannot close on its own.
+    requirement.state_key = "司机的自由文本标签"
+
+    assert any(
+        error.startswith("[BLUEPRINT_STATE_KEY_MISMATCH]")
+        for error in validate_narrative_blueprint(blueprint, SOURCE)
+    )
+
+    changes = normalize_blueprint_requirement_state_keys(blueprint)
+
+    assert changes >= 1
+    assert requirement.state_key == "vehicle:wang:driver"
+    assert not any(
+        error.startswith("[BLUEPRINT_STATE_KEY_MISMATCH]")
+        for error in validate_narrative_blueprint(blueprint, SOURCE)
+    )
+    assert validate_narrative_blueprint(blueprint, SOURCE) == []
+
+
+def test_err_20260820_e7b06d_missing_fact_still_unestablished() -> None:
+    blueprint = _blueprint()
+    requirement = blueprint.nodes[3].state_requirements[0]
+    requirement.required_fact_key = "F999-does-not-exist"
+    requirement.state_key = "司机的自由文本标签"
+
+    changes = normalize_blueprint_requirement_state_keys(blueprint)
+
+    # A missing fact is a genuine "dependency not established" error and must
+    # not be masked: the label is left untouched and the gate still fires.
+    assert changes == 0
+    assert requirement.state_key == "司机的自由文本标签"
+    assert any(
+        error.startswith("[BLUEPRINT_STATE_UNESTABLISHED]")
+        for error in validate_narrative_blueprint(blueprint, SOURCE)
+    )
+
+
+def test_err_20260820_e7b06d_assumed_prior_untouched() -> None:
+    blueprint = _blueprint()
+    requirement = blueprint.nodes[3].state_requirements[0]
+    requirement.assumed_prior = True
+    requirement.required_fact_key = "F001"
+    requirement.state_key = "assumed:自由文本标签"
+
+    changes = normalize_blueprint_requirement_state_keys(blueprint)
+
+    assert changes == 0
+    assert requirement.state_key == "assumed:自由文本标签"
 
 
 def test_picture_partition_preserves_mixed_node_order_and_audit_coverage() -> None:
