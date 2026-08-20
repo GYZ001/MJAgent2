@@ -22,7 +22,7 @@ import re
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NoReturn
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -1038,6 +1038,11 @@ def _current_identity_semantic_signature(item: dict) -> tuple[str, ...]:
     )
 
 
+def _current_identity_durable_signature(item: dict) -> tuple[str, ...]:
+    """Stable identity signature after request-local F/P tokens are resolved."""
+    return _current_identity_semantic_signature(item)[:-1]
+
+
 def _current_identity_receipt_sort_key(value: dict) -> tuple[object, ...]:
     return (
         str(value.get("origin") or ""),
@@ -1094,12 +1099,20 @@ def _merge_current_identity_occurrences(options: list[dict]) -> dict:
         "source_segment_ids": source_segment_ids,
     }
     if primary_receipt is not None:
+        primary_text = str(primary_receipt.get("text") or "")
+        source_label = str(merged.get("source_label") or "").strip()
+        primary_evidence = _bounded_owned_identity_evidence(
+            primary_text,
+            anchors=[source_label] if source_label in primary_text else [],
+            max_chars=80,
+        ) or primary_text.strip()[:80]
         merged.update({
             "source_evidence_receipt": dict(primary_receipt),
             "source_segment_id": str(
                 primary_receipt.get("source_segment_id") or ""
             ),
-            "source_quote": str(primary_receipt.get("text") or ""),
+            "source_quote": primary_text,
+            "evidence": primary_evidence,
         })
     return merged
 
@@ -1387,7 +1400,7 @@ def _project_current_identity_response(
         )
     for source_label, options in by_label.items():
         signatures = {
-            _current_identity_semantic_signature(item) for item in options
+            _current_identity_durable_signature(item) for item in options
         }
         synthetic_repeat = len(options) > 1 and any(
             item.get("source_label_provenance")
@@ -2401,6 +2414,118 @@ def _structural_identity_coverage_response_format(
     )
 
 
+def _validate_current_identity_receipt_bundle(
+    candidate: dict,
+    *,
+    source_text: str | None,
+    draft_text: str | None = "",
+) -> tuple[dict, list[dict], list[str]] | None:
+    """Validate the complete RF11 receipt bundle, never only its primary."""
+    current_receipt = candidate.get("source_evidence_receipt")
+    current_receipts = candidate.get("source_evidence_receipts")
+    if current_receipt is None and current_receipts is None:
+        return None
+
+    def invalid(reason: str) -> NoReturn:
+        raise ContentGenerationError(
+            f"current identity evidence receipt v2 无效：{reason}"
+        )
+
+    if (
+        not isinstance(current_receipt, dict)
+        or not isinstance(current_receipts, list)
+        or not current_receipts
+        or any(not isinstance(value, dict) for value in current_receipts)
+    ):
+        invalid("缺少完整 receipt list")
+    receipts = [dict(value) for value in current_receipts]
+
+    def seal_is_valid(value: dict) -> bool:
+        if source_text is not None:
+            return _current_identity_evidence_receipt_is_valid(
+                value,
+                source_text=source_text,
+                draft_text=str(draft_text or ""),
+            )
+        if (
+            value.get("receipt_version")
+            != CURRENT_IDENTITY_EVIDENCE_RECEIPT_VERSION
+            or value.get("contract_version")
+            != CURRENT_IDENTITY_DECISION_VERSION
+        ):
+            return False
+        try:
+            payload = _current_identity_evidence_payload(value)
+        except (TypeError, ValueError):
+            return False
+        return bool(
+            payload["origin"] in {
+                "current_source", "draft_identity_projection",
+            }
+            and payload["source_hash"]
+            and payload["source_segment_id"]
+            and payload["text"].strip()
+            and payload["end_offset"] > payload["start_offset"]
+            and str(value.get("evidence_id") or "")
+            == "CE:" + evidence_repository.content_hash(payload)[:24]
+        )
+
+    if any(not seal_is_valid(value) for value in receipts):
+        invalid("seal 或 owned source epoch 不匹配")
+    evidence_ids = [
+        str(value.get("evidence_id") or "").strip() for value in receipts
+    ]
+    if not all(evidence_ids) or len(evidence_ids) != len(set(evidence_ids)):
+        invalid("evidence_id 空值或重复")
+    canonical_receipts = sorted(receipts, key=_current_identity_receipt_sort_key)
+    if receipts != canonical_receipts:
+        invalid("receipt list 顺序不是 canonical")
+
+    label = str(candidate.get("source_label") or "").strip()
+    provenance = str(candidate.get("source_label_provenance") or "").strip()
+    if provenance == CURRENT_IDENTITY_LITERAL_PROVENANCE:
+        if not label or any(
+            label not in str(value.get("text") or "") for value in receipts
+        ):
+            invalid("逐字 source_label 与 receipt 不匹配")
+    elif provenance == CURRENT_IDENTITY_SYNTHETIC_PROVENANCE:
+        if len(receipts) != 1 or (
+            label and label in str(receipts[0].get("text") or "")
+        ):
+            invalid("synthetic receipt 语义不闭合")
+        if source_text is not None:
+            owned_catalog = _current_identity_evidence_records(
+                source_text,
+                draft_text=str(draft_text or ""),
+            )
+            if label and any(
+                label in str(value.get("text") or "")
+                for value in owned_catalog
+            ):
+                invalid("synthetic source_label 已在 owned catalog 逐字出现")
+    else:
+        invalid("source_label provenance 不允许持有 v2 receipt")
+
+    if current_receipt != receipts[0]:
+        invalid("singular primary 不是 canonical 首项")
+    expected_source_ids = list(dict.fromkeys(
+        str(value.get("source_segment_id") or "").strip()
+        for value in receipts
+        if str(value.get("source_segment_id") or "").strip()
+    ))
+    actual_source_ids = [
+        str(value or "").strip()
+        for value in candidate.get("source_segment_ids") or []
+        if str(value or "").strip()
+    ]
+    if actual_source_ids != expected_source_ids:
+        invalid("source_segment_ids 投影不一致")
+    primary_source_id = str(current_receipt.get("source_segment_id") or "")
+    if str(candidate.get("source_segment_id") or "") != primary_source_id:
+        invalid("singular source_segment_id 不一致")
+    return dict(current_receipt), receipts, expected_source_ids
+
+
 def _attach_candidate_source_evidence(
     candidates: list[dict],
     source_text: str,
@@ -2420,65 +2545,22 @@ def _attach_candidate_source_evidence(
         cited_id = str(candidate.get("source_segment_id") or "").strip()
         cited = by_id.get(cited_id)
         if current_receipt is not None or current_receipts is not None:
-            def reject_current_receipts(reason: str) -> None:
+            try:
+                bundle = _validate_current_identity_receipt_bundle(
+                    candidate,
+                    source_text=source_text,
+                    draft_text=draft_text,
+                )
+            except ContentGenerationError:
                 candidate["source_evidence_receipt"] = None
                 candidate["source_evidence_receipts"] = []
                 candidate["source_segment_id"] = ""
                 candidate["source_segment_ids"] = []
                 candidate["source_quote"] = ""
-                raise ContentGenerationError(
-                    f"current identity evidence receipt v2 无效：{reason}"
-                )
-
-            if (
-                not isinstance(current_receipt, dict)
-                or not isinstance(current_receipts, list)
-                or not current_receipts
-                or any(not isinstance(value, dict) for value in current_receipts)
-            ):
-                reject_current_receipts("缺少完整 receipt list")
-            receipts = [dict(value) for value in current_receipts]
-            if any(
-                not _current_identity_evidence_receipt_is_valid(
-                    value,
-                    source_text=source_text,
-                    draft_text=draft_text,
-                )
-                for value in receipts
-            ):
-                reject_current_receipts("seal 或 owned source epoch 不匹配")
-            evidence_ids = [
-                str(value.get("evidence_id") or "").strip() for value in receipts
-            ]
-            if not all(evidence_ids) or len(evidence_ids) != len(set(evidence_ids)):
-                reject_current_receipts("evidence_id 空值或重复")
-            canonical_receipts = sorted(
-                receipts, key=_current_identity_receipt_sort_key
-            )
-            if receipts != canonical_receipts:
-                reject_current_receipts("receipt list 顺序不是 canonical")
-            if current_receipt != receipts[0]:
-                reject_current_receipts("singular primary 不是 canonical 首项")
-            expected_source_ids = list(dict.fromkeys(
-                str(value.get("source_segment_id") or "").strip()
-                for value in receipts
-                if str(value.get("source_segment_id") or "").strip()
-            ))
-            actual_source_ids = [
-                str(value or "").strip()
-                for value in candidate.get("source_segment_ids") or []
-                if str(value or "").strip()
-            ]
-            if actual_source_ids != expected_source_ids:
-                reject_current_receipts("source_segment_ids 投影不一致")
-            primary_source_id = str(
-                current_receipt.get("source_segment_id") or ""
-            )
-            if (
-                str(candidate.get("source_segment_id") or "")
-                != primary_source_id
-            ):
-                reject_current_receipts("singular source_segment_id 不一致")
+                raise
+            assert bundle is not None
+            current_receipt, receipts, expected_source_ids = bundle
+            primary_source_id = str(current_receipt.get("source_segment_id") or "")
             candidate["source_evidence_receipt"] = dict(current_receipt)
             candidate["source_evidence_receipts"] = receipts
             candidate["source_segment_id"] = primary_source_id
@@ -4167,7 +4249,40 @@ async def discover_character_candidates(
             and cached.get("input_hash") == input_hash
             and isinstance(cached.get("candidates"), list)
         ):
-            return [dict(item) for item in cached["candidates"] if isinstance(item, dict)]
+            cached_candidates = [
+                dict(item) for item in cached["candidates"]
+                if isinstance(item, dict)
+            ]
+            typed_current_candidates = [
+                item for item in cached_candidates
+                if str(item.get("source_label_provenance") or "").strip()
+                in {
+                    CURRENT_IDENTITY_LITERAL_PROVENANCE,
+                    CURRENT_IDENTITY_SYNTHETIC_PROVENANCE,
+                }
+            ]
+            if (
+                not structural_coverage_applied
+                and len(typed_current_candidates) != len(cached_candidates)
+            ):
+                continue
+            if any(
+                item.get("source_evidence_receipt") is None
+                or item.get("source_evidence_receipts") is None
+                for item in typed_current_candidates
+            ):
+                continue
+            try:
+                _attach_candidate_source_evidence(
+                    typed_current_candidates,
+                    source_text,
+                    draft_text=draft_text,
+                )
+                return cached_candidates
+            except ContentGenerationError:
+                # A validated marker cannot override a broken RF11 receipt.
+                # Ignore the cache and rerun the strict discovery gate.
+                continue
 
     if targeted:
         current = await extract_current_identity_candidates(
@@ -4305,6 +4420,16 @@ def _identity_resolution(
             if isinstance(item.get("source_evidence_receipt"), dict)
             else None
         ),
+        "source_evidence_receipts": [
+            dict(value)
+            for value in item.get("source_evidence_receipts") or []
+            if isinstance(value, dict)
+        ],
+        "source_segment_ids": [
+            str(value).strip()
+            for value in item.get("source_segment_ids") or []
+            if str(value).strip()
+        ],
     })
 
 
@@ -4394,6 +4519,11 @@ def _structural_identity_candidate_semantic_rows(
                 if isinstance(item.get("source_evidence_receipt"), dict)
                 else ""
             ),
+            "source_evidence_receipts_hash": evidence_repository.content_hash([
+                dict(value)
+                for value in item.get("source_evidence_receipts") or []
+                if isinstance(value, dict)
+            ]),
         }
         for item in (candidates or [])
         if isinstance(item, dict)

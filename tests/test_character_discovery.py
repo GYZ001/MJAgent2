@@ -23,7 +23,8 @@ def _current_identity_wire(
     messages: list[dict] | None = None,
 ) -> dict:
     evidence_refs = list(
-        provider_schema["properties"]["decisions"]["properties"]
+        provider_schema["$defs"]["CurrentNewNamedIdentityDecision"]
+        ["properties"]["evidence_ref"]["enum"]
     )
     evidence_by_ref: dict[str, dict] = {}
     known_by_label: dict[tuple[str, str], list[dict]] = {}
@@ -88,10 +89,7 @@ def _current_identity_wire(
             evidence_refs[0],
         )
 
-    decisions = {
-        evidence_ref: {"k": [], "n": [], "f": []}
-        for evidence_ref in evidence_refs
-    }
+    decisions = {"k": [], "n": [], "f": []}
     for index, raw in enumerate(characters, start=1):
         item = dict(raw)
         source_label = str(item.get("source_label") or item.get("name") or "")
@@ -106,7 +104,8 @@ def _current_identity_wire(
                 candidate for candidate in prior_functional
                 if prior_label in (candidate.get("source_labels") or [])
             ), None)
-            decisions[evidence_ref]["f"].append({
+            decisions["f"].append({
+                "evidence_ref": evidence_ref,
                 "source_label": source_label,
                 "functional_identity_key": str(
                     prior["decision_id"]
@@ -127,16 +126,17 @@ def _current_identity_wire(
                 if candidate.get("evidence_ref") == evidence_ref
             ), None)
             if known is not None:
-                decisions[evidence_ref]["k"].append({
+                decisions["k"].append({
                     "decision_id": known["decision_id"],
                     "kind": kind,
                 })
             else:
-                decisions[evidence_ref]["n"].append({
+                decisions["n"].append({
+                    "evidence_ref": evidence_ref,
                     "identity_label": source_label,
                     "kind": kind,
                 })
-    return {"decisions": decisions}
+    return decisions
 
 
 def _future_identity_wire(
