@@ -471,6 +471,7 @@ def _structural_cache_payload(
     contract_version: str,
     policy_version: str,
     candidates: list[dict],
+    materialized_resolutions: list[dict] | None = None,
 ) -> dict:
     source_hash = portraits.evidence_repository.content_hash(source_text)
     structural_hash = portraits.evidence_repository.content_hash({
@@ -478,7 +479,7 @@ def _structural_cache_payload(
         "source_hash": source_hash,
         "structural_evidence": structural_evidence,
     })
-    return {
+    payload = {
         "mode": "structural_coverage",
         "contract_version": contract_version,
         "policy_version": policy_version,
@@ -486,6 +487,25 @@ def _structural_cache_payload(
         "structural_evidence_hash": structural_hash,
         "candidates": candidates,
     }
+    if materialized_resolutions is not None:
+        identity_scope = portraits.screenplay_identity_scope_fingerprint(
+            1, source_text
+        )
+        payload.update({
+            "candidate_semantic_hash": (
+                portraits._structural_identity_candidate_semantic_hash(
+                    candidates
+                )
+            ),
+            "materialized_resolution_receipt": (
+                portraits._structural_identity_resolution_receipt(
+                    materialized_resolutions,
+                    candidates=candidates,
+                    identity_scope_fingerprint=identity_scope,
+                )
+            ),
+        })
+    return payload
 
 
 def test_structural_coverage_reuses_only_current_contract_cache(
@@ -503,12 +523,29 @@ def test_structural_coverage_reuses_only_current_contract_cache(
         "source_label": "虎头虎脑的少年",
         "identity_group": "current-1:F1",
     }]
+    materialized = [{
+        "source_label": "虎头虎脑的少年",
+        "canonical_name": "虎头虎脑的少年",
+        "resolution": "functional_identity",
+        "identity_group": "current-1:F1",
+        "identity_scope_fingerprint": (
+            portraits.screenplay_identity_scope_fingerprint(1, source_text)
+        ),
+        "decision_provenance": (
+            portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
+        ),
+        "decision_contract_version": portraits.FUTURE_IDENTITY_DECISION_VERSION,
+        "structural_identity_policy_version": (
+            portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+        ),
+    }]
     payload = _structural_cache_payload(
         source_text,
         evidence,
         contract_version=portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
         policy_version=portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION,
         candidates=cached_candidates,
+        materialized_resolutions=materialized,
     )
     conn.execute(
         "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
@@ -521,21 +558,7 @@ def test_structural_coverage_reuses_only_current_contract_cache(
     conn.execute(
         "UPDATE episodes SET screenplay_character_resolutions=? "
         "WHERE id='ep_711b29204aa9'",
-        (json.dumps([{
-            "source_label": "虎头虎脑的少年",
-            "canonical_name": "虎头虎脑的少年",
-            "resolution": "functional_identity",
-            "identity_group": "current-1:F1",
-            "identity_scope_fingerprint": (
-                portraits.screenplay_identity_scope_fingerprint(1, source_text)
-            ),
-            "decision_provenance": (
-                portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
-            ),
-            "structural_identity_policy_version": (
-                portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
-            ),
-        }], ensure_ascii=False),),
+        (json.dumps(materialized, ensure_ascii=False),),
     )
     conn.commit()
     monkeypatch.setattr(portraits, "get_conn", lambda: conn)

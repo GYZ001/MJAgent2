@@ -391,6 +391,30 @@ def test_structural_identity_coverage_http_200_contract_failure_is_one_call(
     assert calls == 1
 
 
+def test_strict_identity_invalid_raw_is_not_reused_across_authorized_runs(
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    async def fake_chat(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["call_meta"]["reuse_successful_operation"] is False
+        return '{"named":[],"functional":[]}'
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    for _retry_epoch in ("run-one", "run-two"):
+        with pytest.raises(model_gateway.StructuredSemanticError):
+            asyncio.run(
+                portraits.audit_identity_coverage_from_structural_evidence(
+                    [],
+                    **_coverage_audit_kwargs(),
+                )
+            )
+
+    assert calls == 2
+
+
 def test_structural_identity_coverage_subset_is_one_call_hard_failure(
     monkeypatch,
 ) -> None:
@@ -1359,7 +1383,10 @@ def test_discover_character_candidates_keeps_typed_functionals(monkeypatch) -> N
     )
 
     async def fake_chat(*_args, **kwargs):
-        assert kwargs["call_meta"]["reuse_successful_operation"] is True
+        # Raw HTTP-200 responses are not durable structured successes.  The
+        # validated discovery Artifact owns recovery; provider raw reuse stays
+        # disabled so a malformed/semantic-invalid response cannot stick.
+        assert kwargs["call_meta"]["reuse_successful_operation"] is False
         return json.dumps(_identity_wire_for_call(kwargs, [
                 {
                     "source_label": "魂天帝", "canonical_name": "魂天帝",
@@ -1413,6 +1440,48 @@ def test_discover_character_candidates_rejects_malformed_json_without_retry(monk
             bible,
             1,
         ))
+
+
+def test_current_identity_rejects_same_scene_person_misbinding(
+    monkeypatch,
+) -> None:
+    """Literal co-occurrence cannot prove that one label is another person."""
+    calls = 0
+
+    async def fake_chat(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["call_meta"]["reuse_successful_operation"] is False
+        return json.dumps({
+            "named": [{
+                "source_label": "银袍女子",
+                "canonical_name": "孟浩",
+                "identity_kind": "named",
+                "kind": "onscreen",
+                "evidence": "孟浩走在前面，银袍女子跟在后面",
+            }],
+            "functional": [],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="别名必须留待 typed authority",
+    ):
+        asyncio.run(portraits.discover_character_candidates(
+            "孟浩走在前面，银袍女子跟在后面。",
+            Bible(
+                world=World(visual_style_canonical="国风"),
+                characters=[Character(
+                    name="孟浩",
+                    role="主角",
+                    appearance_canonical="黑发书生，青色长衫，目光坚定",
+                )],
+            ),
+            1,
+        ))
+
+    assert calls == 1
 
 
 def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(monkeypatch) -> None:

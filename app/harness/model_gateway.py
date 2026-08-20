@@ -554,6 +554,10 @@ async def chat_structured(
                 raise ValueError(
                     f"{stage_key}/{substage} forbids reasoning fallback"
                 )
+            if (call_meta or {}).get("reuse_successful_operation") is not False:
+                raise ValueError(
+                    f"{stage_key}/{substage} forbids raw provider success reuse"
+                )
     structured_schema = output_schema or _model_schema(model_type)
     base_messages = [dict(message) for message in messages]
     current_messages = base_messages

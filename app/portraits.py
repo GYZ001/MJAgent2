@@ -81,6 +81,16 @@ def screenplay_identity_scope_fingerprint(
     })
 
 
+def _identity_operation_retry_epoch() -> str:
+    """Fence raw provider idempotency to one authorized workflow attempt."""
+    try:
+        from app.observability.tracing import current_trace
+
+        return str(current_trace().run_id or "").strip()
+    except Exception:  # noqa: BLE001 - tracing is optional in isolated helpers
+        return ""
+
+
 # ---------- 原文片段抽取（纯本地，不调模型） ----------
 
 def extract_character_fragments(text: str, name: str, *, window: int = FRAGMENT_WINDOW,
@@ -868,6 +878,7 @@ async def _discover_character_candidates_legacy(
                     "effective_max_tokens": current_effective_max,
                     "temperature": 0.1,
                     "provider_semantic_settings": current_semantic_settings,
+                    "retry_epoch": _identity_operation_retry_epoch(),
                     "prompt": prompt,
                     "schema": current_schema,
                     "response_format": current_response_format,
@@ -885,7 +896,7 @@ async def _discover_character_candidates_legacy(
                 "discovery_phase": "current",
                 "source_batch": current_batch,
                 "source_batches": len(source_contexts),
-                "reuse_successful_operation": True,
+                "reuse_successful_operation": False,
                 "disable_provider_retries": True,
                 "disable_provider_candidate_fallback": True,
                 "disable_reasoning_fallback": True,
@@ -895,6 +906,7 @@ async def _discover_character_candidates_legacy(
                 "model": current_model,
                 "effective_max_tokens": current_effective_max,
                 "provider_semantic_settings": current_semantic_settings,
+                "retry_epoch": _identity_operation_retry_epoch(),
             },
             output_schema=current_schema,
             response_format=current_response_format,
@@ -1718,6 +1730,7 @@ new_named 依据必须包含 canonical_name，known_named 依据必须包含当�
             "effective_max_tokens": identity_effective_max,
             "temperature": 0.1,
             "provider_semantic_settings": identity_semantic_settings,
+            "retry_epoch": _identity_operation_retry_epoch(),
             "messages": [{"role": "user", "content": prompt}],
             "output_schema": identity_schema,
             "response_format": identity_response_format,
@@ -1740,12 +1753,13 @@ new_named 依据必须包含 canonical_name，known_named 依据必须包含当�
             "model": identity_model,
             "effective_max_tokens": identity_effective_max,
             "provider_semantic_settings": identity_semantic_settings,
+            "retry_epoch": _identity_operation_retry_epoch(),
             "stage": "discover_character_candidates",
             "stage_key": "screenplay_character_discovery",
             "substage": "future_identity",
             "discovery_phase": "future_identity",
             "episode_no": episode_no,
-            "reuse_successful_operation": True,
+            "reuse_successful_operation": False,
             "disable_provider_retries": True,
             "disable_provider_candidate_fallback": True,
             "disable_reasoning_fallback": True,
@@ -2167,8 +2181,9 @@ async def audit_identity_coverage_from_structural_evidence(
                 "model": coverage_model,
                 "requested_max_tokens": 4096,
                 "effective_max_tokens": coverage_effective_max,
-                "temperature": 0.05,
-                "provider_semantic_settings": coverage_semantic_settings,
+            "temperature": 0.05,
+            "provider_semantic_settings": coverage_semantic_settings,
+            "retry_epoch": _identity_operation_retry_epoch(),
                 "prompt": prompt,
                 "schema": coverage_schema,
                 "response_format": coverage_response_format,
@@ -2191,11 +2206,12 @@ async def audit_identity_coverage_from_structural_evidence(
             "disable_provider_retries": True,
             "disable_provider_candidate_fallback": True,
             "disable_reasoning_fallback": True,
-            "reuse_successful_operation": True,
+            "reuse_successful_operation": False,
             "provider": coverage_provider,
             "model": coverage_model,
             "effective_max_tokens": coverage_effective_max,
             "provider_semantic_settings": coverage_semantic_settings,
+            "retry_epoch": _identity_operation_retry_epoch(),
         },
         output_schema=coverage_schema,
         response_format=coverage_response_format,
@@ -4729,7 +4745,19 @@ async def ensure_structural_identity_coverage(
             retire_stale_structural_identity_policy=(
                 STRUCTURAL_IDENTITY_COVERAGE_VERSION
             ),
+            retire_stale_identity_scope_fingerprint=(
+                identity_scope_fingerprint
+            ),
+            retire_automatic_identity_keys=invalid_cached_resolution_keys,
         )
+        persisted = [
+            item
+            for item in persisted
+            if screenplay_identity_resolution_is_current_for_scope(
+                item,
+                identity_scope_fingerprint=identity_scope_fingerprint,
+            )
+        ]
         if write_guard:
             write_guard()
         trace = None
@@ -4770,6 +4798,18 @@ async def ensure_structural_identity_coverage(
                     "mode": "structural_coverage",
                     "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
                     "candidates": audited,
+                    "candidate_semantic_hash": (
+                        _structural_identity_candidate_semantic_hash(audited)
+                    ),
+                    "materialized_resolution_receipt": (
+                        _structural_identity_resolution_receipt(
+                            persisted,
+                            candidates=audited,
+                            identity_scope_fingerprint=(
+                                identity_scope_fingerprint
+                            ),
+                        )
+                    ),
                     "source_hash": source_hash,
                     "structural_evidence_hash": structural_hash,
                 },
@@ -4806,7 +4846,17 @@ async def ensure_structural_identity_coverage(
         retire_stale_structural_identity_policy=(
             STRUCTURAL_IDENTITY_COVERAGE_VERSION
         ),
+        retire_stale_identity_scope_fingerprint=identity_scope_fingerprint,
+        retire_automatic_identity_keys=invalid_cached_resolution_keys,
     )
+    persisted = [
+        item
+        for item in persisted
+        if screenplay_identity_resolution_is_current_for_scope(
+            item,
+            identity_scope_fingerprint=identity_scope_fingerprint,
+        )
+    ]
     if write_guard:
         write_guard()
     result["resolutions"] = persisted
@@ -4848,6 +4898,16 @@ async def ensure_structural_identity_coverage(
                 "mode": "structural_coverage",
                 "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
                 "candidates": audited,
+                "candidate_semantic_hash": (
+                    _structural_identity_candidate_semantic_hash(audited)
+                ),
+                "materialized_resolution_receipt": (
+                    _structural_identity_resolution_receipt(
+                        persisted,
+                        candidates=audited,
+                        identity_scope_fingerprint=identity_scope_fingerprint,
+                    )
+                ),
                 "source_hash": source_hash,
                 "structural_evidence_hash": structural_hash,
             },
