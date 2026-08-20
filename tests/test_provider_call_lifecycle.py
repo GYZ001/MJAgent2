@@ -79,6 +79,7 @@ def test_video_create_replay_safety_is_explicit_only(
 
 def test_screenplay_baseline_uses_dedicated_long_read_timeout(monkeypatch) -> None:
     monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_READ", 300.0)
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_SCENE_SHARD_READ", 480.0)
     monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_BASELINE_READ", 600.0)
     monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_VIDEO_PLAN_READ", 660.0)
     monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_STORYBOARD_OUTLINE_READ", 720.0)
@@ -100,25 +101,65 @@ def test_screenplay_baseline_uses_dedicated_long_read_timeout(monkeypatch) -> No
     ) == 735.0
 
 
-@pytest.mark.parametrize(
-    "stage_key",
-    [
-        "screenplay_scene_shards",
-        "screenplay_scene_shard_semantic_review",
-        "screenplay_scene_shard_semantic_repair",
-    ],
-)
-def test_scene_shard_long_calls_use_configured_baseline_read_timeout(
-    monkeypatch,
-    stage_key: str,
-) -> None:
+def test_scene_shard_read_timeout_selector_is_stage_specific(monkeypatch) -> None:
     monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_READ", 300.0)
-    # TIMEOUT_CHAT_BASELINE_READ is loaded from the environment by app.config;
-    # a non-default value proves this selector honors that deployment override.
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_SCENE_SHARD_READ", 480.0)
     monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_BASELINE_READ", 675.0)
 
-    assert hiagent._chat_read_timeout_s({"stage_key": stage_key}) == 675.0
+    assert hiagent._chat_read_timeout_s({"stage_key": "screenplay_scene_shards"}) == 480.0
+    assert hiagent._chat_read_timeout_s(
+        {"stage_key": "screenplay_scene_shard_semantic_review"}
+    ) == 675.0
+    assert hiagent._chat_read_timeout_s(
+        {"stage_key": "screenplay_scene_shard_semantic_repair"}
+    ) == 675.0
     assert hiagent._chat_read_timeout_s({"stage_key": "ordinary_chat"}) == 300.0
+
+    # Every dedicated timeout is a floor; an operator's larger generic read
+    # timeout must still win for writing, review, and repair.
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_READ", 700.0)
+    assert hiagent._chat_read_timeout_s({"stage_key": "screenplay_scene_shards"}) == 700.0
+    assert hiagent._chat_read_timeout_s(
+        {"stage_key": "screenplay_scene_shard_semantic_review"}
+    ) == 700.0
+    assert hiagent._chat_read_timeout_s(
+        {"stage_key": "screenplay_scene_shard_semantic_repair"}
+    ) == 700.0
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(httpx.ConnectTimeout("connect timeout"), id="connect-timeout"),
+        pytest.param(httpx.PoolTimeout("pool timeout"), id="pool-timeout"),
+        pytest.param(httpx.ConnectError("connect error"), id="connect-error"),
+    ],
+)
+def test_stream_connection_failures_are_replay_safe(exc: httpx.HTTPError) -> None:
+    assert hiagent._stream_timeout_replay_state(exc, received_chars=0) == (
+        "not_sent",
+        True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("exc", "received_chars"),
+    [
+        pytest.param(httpx.ReadTimeout("read timeout"), 0, id="zero-char-read"),
+        pytest.param(httpx.ReadTimeout("read timeout"), 123, id="token-read"),
+        pytest.param(httpx.TimeoutException("unknown timeout"), 0, id="unknown-http"),
+        pytest.param(None, 0, id="zero-char-total"),
+        pytest.param(None, 123, id="token-total"),
+    ],
+)
+def test_stream_non_connection_timeouts_require_explicit_retry(
+    exc: httpx.HTTPError | None,
+    received_chars: int,
+) -> None:
+    assert hiagent._stream_timeout_replay_state(exc, received_chars) == (
+        "unknown",
+        False,
+    )
 
 
 def test_post_json_writes_running_before_updating_same_ledger_row(monkeypatch) -> None:
@@ -280,15 +321,15 @@ def test_stream_total_timeout_covers_keepalive_and_blank_lines(
 
     assert caught.value.timeout_phase == "总时长"
     assert caught.value.retryable is True
-    # Only heartbeat/blank frames arrived → received_chars == 0, so the total
-    # timeout is decided by delivered-byte evidence: a resend equals the first
-    # send, hence replay-safe / not_sent and finished as TIMEOUT (not INTERRUPTED).
-    assert caught.value.replay_safe is True
-    assert caught.value.delivery_state == "not_sent"
-    assert caught.value.requires_explicit_retry is False
+    # A zero-character total timeout does not prove that the provider did not
+    # accept the request or is no longer generating it.
+    assert caught.value.replay_safe is False
+    assert caught.value.delivery_state == "unknown"
+    assert caught.value.requires_explicit_retry is True
+    assert caught.value.failure_kind == "request_outcome_unknown"
     assert caught.value.received_chars == 0
     assert len(events) == 1
-    assert events[0][0:3] == (17, "TIMEOUT", None)
+    assert events[0][0:3] == (17, "INTERRUPTED", None)
     assert events[0][4] is None
 
 
@@ -483,15 +524,10 @@ def test_harness_zero_token_stream_interruption_does_not_fallback_to_second_requ
     }
 
 
-def test_stream_zero_byte_read_timeout_is_replay_safe_not_sent(
+def test_stream_zero_byte_read_timeout_requires_explicit_retry(
     tmp_path, monkeypatch,
 ) -> None:
-    """A provider SSE stall that delivers zero bytes is replay-safe.
-
-    received_chars == 0 means nothing was produced or consumed, so a resend is
-    equivalent to the first send. The read timeout must be classified as
-    not_sent / replay_safe and finished as TIMEOUT (recoverable), not INTERRUPTED.
-    """
+    """A zero-byte SSE stall can still be running upstream and cannot replay."""
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-stream-zero-read-timeout.db")
     monkeypatch.setattr(db._local, "conn", None, raising=False)
     db.init_db()
@@ -531,20 +567,20 @@ def test_stream_zero_byte_read_timeout_is_replay_safe_not_sent(
 
     assert caught.value.timeout_phase == "read"
     assert caught.value.retryable is True
-    assert caught.value.replay_safe is True
-    assert caught.value.requires_explicit_retry is False
-    assert caught.value.delivery_state == "not_sent"
-    assert caught.value.failure_kind == "connection_failed"
+    assert caught.value.replay_safe is False
+    assert caught.value.requires_explicit_retry is True
+    assert caught.value.delivery_state == "unknown"
+    assert caught.value.failure_kind == "request_outcome_unknown"
     assert caught.value.received_chars == 0
     assert emitted == []
     row = db.get_conn().execute(
         "SELECT status,http_status,received_chars,recovery_disposition "
         "FROM provider_calls ORDER BY id DESC LIMIT 1"
     ).fetchone()
-    assert row["status"] == "TIMEOUT"
+    assert row["status"] == "INTERRUPTED"
     assert row["http_status"] is None
     assert row["received_chars"] == 0
-    assert row["recovery_disposition"] != "REQUIRES_EXPLICIT_RETRY"
+    assert row["recovery_disposition"] == "REQUIRES_EXPLICIT_RETRY"
 
 
 def test_stream_partial_byte_read_timeout_stays_not_replay_safe(
@@ -607,10 +643,10 @@ def test_stream_partial_byte_read_timeout_stays_not_replay_safe(
     assert row["recovery_disposition"] == "REQUIRES_EXPLICIT_RETRY"
 
 
-def test_stream_zero_byte_read_timeout_falls_back_to_non_stream(
+def test_stream_zero_byte_read_timeout_does_not_fall_back_to_non_stream(
     tmp_path, monkeypatch,
 ) -> None:
-    """Zero-byte streaming read timeout is replay-safe → non-stream fallback runs."""
+    """Zero-byte read timeout is outcome-unknown, so fallback must not replay it."""
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-stream-zero-read-fallback.db")
     monkeypatch.setattr(db._local, "conn", None, raising=False)
     db.init_db()
@@ -639,9 +675,9 @@ def test_stream_zero_byte_read_timeout_falls_back_to_non_stream(
     monkeypatch.setattr(hiagent, "get_setting", lambda _key: "60")
     monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
 
-    async def run() -> dict:
+    async def run() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            return await hiagent._stream_or_fallback(
+            await hiagent._stream_or_fallback(
                 client,
                 "https://provider.test/chat/completions",
                 {"model": "m", "messages": []},
@@ -653,10 +689,13 @@ def test_stream_zero_byte_read_timeout_falls_back_to_non_stream(
                 on_token=lambda _kind, _text: None,
             )
 
-    result = asyncio.run(run())
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(run())
 
-    assert result == {"choices": [{"message": {"content": "recovered"}}]}
-    assert fallback_calls == 1
+    assert caught.value.delivery_state == "unknown"
+    assert caught.value.replay_safe is False
+    assert caught.value.requires_explicit_retry is True
+    assert fallback_calls == 0
 
 
 def test_harness_chat_network_error_has_single_adapter_attempt(monkeypatch) -> None:

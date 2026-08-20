@@ -407,26 +407,18 @@ def _transport_replay_state(exc: httpx.HTTPError) -> tuple[str, bool]:
 def _stream_timeout_replay_state(
     exc: httpx.HTTPError | None, received_chars: int
 ) -> tuple[str, bool]:
-    """Judge streaming-timeout replay safety by delivered-byte evidence.
+    """Only explicit pre-delivery connection failures are replay-safe.
 
-    For a *streaming* completion the authoritative fact is whether any byte was
-    ever consumed downstream. When nothing was received (received_chars == 0)
-    the provider never started producing and nothing was consumed, so a resend
-    is equivalent to the first send → replay-safe / not_sent. Once any token was
-    consumed the outcome is uncertain (possible partial side effect) and we stay
-    conservative → unknown / not replay-safe.
-
-    Connect/Pool/ConnectError keep their existing not_sent/replay_safe=True
-    semantics regardless of received_chars (nothing could have been sent). Only
-    read/unknown transport timeouts and the total-duration asyncio timeout
-    (exc is None) are decided by received_chars.
+    Receiving zero characters does not prove that the upstream request was not
+    accepted or is no longer running. Read/unknown HTTP timeouts and the outer
+    total-duration timeout therefore remain outcome-unknown and require an
+    explicit retry, regardless of how many characters reached the caller.
     """
+    del received_chars  # Delivery volume cannot establish that the request was not sent.
     if exc is not None:
         delivery_state, replay_safe = _transport_replay_state(exc)
         if replay_safe:
             return delivery_state, True
-    if received_chars == 0:
-        return "not_sent", True
     return "unknown", False
 
 
@@ -1120,8 +1112,12 @@ def _chat_read_timeout_s(call_meta: dict | None) -> float:
     """为长结构化生成使用独立读超时，其他文本请求保持通用上限。"""
     stage_key = str((call_meta or {}).get("stage_key") or "").strip().lower()
     stage = str((call_meta or {}).get("stage") or "").strip().lower()
+    if stage_key == "screenplay_scene_shards":
+        return max(
+            config.TIMEOUT_CHAT_READ,
+            config.TIMEOUT_CHAT_SCENE_SHARD_READ,
+        )
     if stage_key in {
-        "screenplay_scene_shards",
         "screenplay_scene_shard_semantic_review",
         "screenplay_scene_shard_semantic_repair",
     }:

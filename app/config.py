@@ -155,6 +155,11 @@ ZHIPU_MODEL_TEXT = os.environ.get("ZHIPU_MODEL_TEXT", "glm-5.2")
 
 # 超时（秒）——依据 1.0 实测延迟：LLM ~22s、VLM ~57-66s（见 docs/HIAGENT_INTEGRATION.md §2）
 TIMEOUT_CHAT_READ = float(os.environ.get("TIMEOUT_CHAT_READ", "300"))
+# 场次分片写作的线上 P99 约 160s；按 P99×3 单独放宽到 480s，
+# 避免与更长的语义审稿共用 baseline 上限。
+TIMEOUT_CHAT_SCENE_SHARD_READ = float(
+    os.environ.get("TIMEOUT_CHAT_SCENE_SHARD_READ", "480")
+)
 # 整版剧本需要同时生成骨架、场次、对白链与正文，实测长章可超过 300s。
 # 单独放宽该阶段，不让短请求共享一个过大超时，也避免已接近完成时整次重发。
 TIMEOUT_CHAT_BASELINE_READ = float(os.environ.get("TIMEOUT_CHAT_BASELINE_READ", "600"))
