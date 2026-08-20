@@ -65,10 +65,10 @@ STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集�
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
-IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v10"
-FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v9"
+IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v11"
+FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v10"
 STRUCTURAL_IDENTITY_COVERAGE_VERSION = (
-    "screenplay-identity-structural-coverage.v5"
+    "screenplay-identity-structural-coverage.v6"
 )
 AUTOMATIC_IDENTITY_DECISION_PROVENANCE = "automatic_identity_discovery.v1"
 DURABLE_IDENTITY_DECISION_PROVENANCE = frozenset({"manual", "bible"})
@@ -1221,46 +1221,16 @@ class FutureIdentityCandidateResponse(BaseModel):
     reveal_evidence_ids: dict[str, str]
 
 
-class StructuralNamedIdentityCoverageCandidate(BaseModel):
-    """A named coverage decision bound to backend-owned authorities."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    source_label: str = Field(min_length=1, max_length=160)
-    authority_id: str = Field(min_length=1, max_length=200)
-    identity_group_ref: str = Field(min_length=1, max_length=96)
-    evidence: str = Field(min_length=1, max_length=80)
-
-
-class StructuralFunctionalIdentityCoverageCandidate(BaseModel):
-    """A functional coverage decision with no canonical-name field."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    source_label: str = Field(min_length=1, max_length=160)
-    identity_group_ref: str = Field(min_length=1, max_length=96)
-    evidence: str = Field(min_length=1, max_length=80)
-
-
 class StructuralIdentityCoverageResponse(BaseModel):
-    """Strict split wire for the post-Blueprint identity coverage audit."""
+    """Exact keyed wire for the post-Blueprint identity coverage audit.
+
+    Every value is an opaque backend-owned decision token.  Labels, groups,
+    authorities and evidence never travel as independently mixable fields.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    named: list[StructuralNamedIdentityCoverageCandidate]
-    functional: list[StructuralFunctionalIdentityCoverageCandidate]
-
-    @property
-    def characters(self) -> list[dict]:
-        named = [
-            {**item.model_dump(mode="json"), "identity_kind": "named"}
-            for item in self.named
-        ]
-        functional = [
-            {**item.model_dump(mode="json"), "identity_kind": "functional"}
-            for item in self.functional
-        ]
-        return [*named, *functional]
+    decisions: dict[str, str]
 
 
 _IDENTITY_COVERAGE_STRICT_PROVIDER_SCHEMA_KEYWORDS = frozenset({
@@ -1358,37 +1328,37 @@ def _future_identity_schema(
 
 
 def _structural_identity_coverage_schema(
-    source_labels: list[str],
+    group_keys: list[str],
     *,
-    authority_ids: list[str],
-    identity_group_refs: list[str],
+    decision_ids_by_group: dict[str, list[str]],
 ) -> dict:
-    """Bind coverage labels, authorities and groups to backend-owned enums."""
-    if not authority_ids:
-        raise ValueError("structural identity coverage requires authorities")
-    if not identity_group_refs:
-        raise ValueError("structural identity coverage requires identity groups")
-    schema = _identity_source_label_schema(
-        StructuralIdentityCoverageResponse,
-        source_labels,
-        candidate_defs=(
-            "StructuralNamedIdentityCoverageCandidate",
-            "StructuralFunctionalIdentityCoverageCandidate",
-        ),
-    )
-    named = schema["$defs"]["StructuralNamedIdentityCoverageCandidate"]
-    named["properties"]["authority_id"]["enum"] = list(dict.fromkeys(
-        str(value) for value in authority_ids if str(value)
+    """Bind each coverage leader to its own opaque decision-token enum."""
+    keys = list(dict.fromkeys(
+        str(value or "").strip() for value in group_keys
+        if str(value or "").strip()
     ))
-    group_values = list(dict.fromkeys(
-        str(value) for value in identity_group_refs if str(value)
-    ))
-    named["properties"]["identity_group_ref"]["enum"] = group_values
-    functional = schema["$defs"][
-        "StructuralFunctionalIdentityCoverageCandidate"
-    ]
-    functional["properties"]["identity_group_ref"]["enum"] = group_values
-    return schema
+    if not keys:
+        raise ValueError("structural identity coverage requires group keys")
+    if any(not decision_ids_by_group.get(key) for key in keys):
+        raise ValueError("structural identity coverage requires decisions")
+    decisions = {
+        "type": "object",
+        "properties": {
+            key: {
+                "type": "string",
+                "enum": list(decision_ids_by_group[key]),
+            }
+            for key in keys
+        },
+        "required": keys,
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {"decisions": decisions},
+        "required": ["decisions"],
+        "additionalProperties": False,
+    }
 
 
 def _identity_strict_provider_schema(
@@ -1460,7 +1430,7 @@ def _structural_identity_coverage_response_format(
 ) -> dict:
     return _identity_strict_response_format(
         local_schema,
-        name="screenplay_structural_identity_coverage_v5",
+        name="screenplay_structural_identity_coverage_v6",
     )
 
 
@@ -1746,6 +1716,18 @@ async def resolve_future_identity_candidates(
             group_evidence_ids
         ))
 
+    named_authorities_by_identity_group: dict[str, set[str]] = {}
+    for candidate in candidates:
+        if str(candidate.get("identity_kind") or "") != "named":
+            continue
+        identity_group = str(candidate.get("identity_group") or "").strip()
+        canonical_name = str(candidate.get("name") or "").strip()
+        if not identity_group or not canonical_name:
+            continue
+        named_authorities_by_identity_group.setdefault(
+            identity_group, set()
+        ).add(_canonical_named_authority_id(canonical_name))
+
     decision_by_id: dict[str, dict] = {}
     decision_ids_by_group: dict[str, list[str]] = {}
     for group in group_specs:
@@ -1758,13 +1740,33 @@ async def resolve_future_identity_candidates(
         }
         decision_ids = [functional_id]
         for authority_id, authority in authority_by_id.items():
-            authority_anchors = [
-                str(authority.get("canonical_name") or ""),
-                *[
-                    str(value)
-                    for value in authority.get("aliases") or []
-                ],
+            canonical_name = str(
+                authority.get("canonical_name") or ""
+            ).strip()
+            # A raw future window which merely contains a known person's
+            # canonical name does not prove that the unresolved label denotes
+            # that person ("A talked about B" is the production counterexample).
+            # K decisions therefore need either a backend-registered non-
+            # canonical alias, or an authority already bound to this exact
+            # current identity group.
+            registered_aliases = [
+                str(value).strip()
+                for value in authority.get("aliases") or []
+                if str(value).strip()
+                and str(value).strip() != canonical_name
             ]
+            same_group_authority = authority_id in (
+                named_authorities_by_identity_group.get(
+                    str(group.get("identity_group") or ""), set()
+                )
+            )
+            proof_anchors = (
+                [str(value) for value in group.get("labels") or []]
+                if same_group_authority
+                else registered_aliases
+            )
+            if not proof_anchors:
+                continue
             anchored_evidence_ids = [
                 evidence_id
                 for evidence_id in evidence_ids_by_group[group_key]
@@ -1773,7 +1775,7 @@ async def resolve_future_identity_candidates(
                     and anchor in str(
                         evidence_by_id.get(evidence_id, {}).get("text") or ""
                     )
-                    for anchor in authority_anchors
+                    for anchor in proof_anchors
                 )
             ]
             if not anchored_evidence_ids:
@@ -1790,10 +1792,14 @@ async def resolve_future_identity_candidates(
                 "group_key": group_key,
                 "resolution_kind": "known_named",
                 "authority_id": authority_id,
-                "canonical_name": str(
-                    authority.get("canonical_name") or ""
-                ),
+                "canonical_name": canonical_name,
                 "evidence_ids": anchored_evidence_ids,
+                "proof_kind": (
+                    "same_group_authority"
+                    if same_group_authority
+                    else "registered_alias"
+                ),
+                "proof_anchors": proof_anchors,
             }
             decision_ids.append(known_id)
         if evidence_ids_by_group[group_key]:
@@ -1813,7 +1819,7 @@ async def resolve_future_identity_candidates(
     )
     identity_response_format = _identity_strict_response_format(
         identity_schema,
-        name="screenplay_future_identity_resolution_v9",
+        name="screenplay_future_identity_resolution_v10",
     )
     group_projection = [
         {
@@ -1866,11 +1872,9 @@ async def resolve_future_identity_candidates(
                     {},
                 )
                 anchors = [
-                    str(authority.get("canonical_name") or ""),
-                    *[
-                        str(value)
-                        for value in authority.get("aliases") or []
-                    ],
+                    str(value)
+                    for value in selected.get("proof_anchors") or []
+                    if str(value)
                 ]
                 evidence_options = [
                     evidence_by_id.get(str(evidence_id), {})
@@ -1998,15 +2002,38 @@ async def resolve_future_identity_candidates(
                         str(value)
                         for value in selected.get("evidence_ids") or []
                     ]
-                    authority_anchors = [
-                        str((authority or {}).get("canonical_name") or ""),
-                        *[
-                            str(value)
-                            for value in (authority or {}).get("aliases") or []
-                        ],
+                    proof_kind = str(selected.get("proof_kind") or "")
+                    proof_anchors = [
+                        str(value)
+                        for value in selected.get("proof_anchors") or []
+                        if str(value)
                     ]
+                    same_group_authority = str(
+                        selected.get("authority_id") or ""
+                    ) in named_authorities_by_identity_group.get(
+                        str(
+                            next(
+                                (
+                                    group.get("identity_group")
+                                    for group in group_specs
+                                    if group.get("group_key") == group_key
+                                ),
+                                "",
+                            )
+                        ),
+                        set(),
+                    )
                     if (
                         authority is None
+                        or proof_kind not in {
+                            "registered_alias",
+                            "same_group_authority",
+                        }
+                        or (
+                            proof_kind == "same_group_authority"
+                            and not same_group_authority
+                        )
+                        or not proof_anchors
                         or not selected_evidence_ids
                         or any(
                             value not in evidence_ids_by_group.get(
@@ -2021,7 +2048,7 @@ async def resolve_future_identity_candidates(
                                 or ""
                             )
                             for value in selected_evidence_ids
-                            for anchor in authority_anchors
+                            for anchor in proof_anchors
                         )
                     ):
                         errors.append(
@@ -2065,7 +2092,7 @@ async def resolve_future_identity_candidates(
         identity_provider
     )
     operation_id = (
-        "screenplay.identity.future.v10:"
+        "screenplay.identity.future.v11:"
         + evidence_repository.content_hash({
             "episode_no": episode_no,
             "provider": identity_provider,
@@ -2260,9 +2287,21 @@ async def audit_identity_coverage_from_structural_evidence(
                 "identity_group_ref": identity_group,
                 "source_labels": [],
                 "authority_ids": [],
+                "source_segment_ids": [],
             })
             if source_label and source_label not in group["source_labels"]:
                 group["source_labels"].append(source_label)
+            candidate_source_ids = [
+                str(value).strip()
+                for value in (
+                    candidate.get("source_segment_ids")
+                    or [candidate.get("source_segment_id")]
+                )
+                if str(value or "").strip() in source_by_id
+            ]
+            for source_id in candidate_source_ids:
+                if source_id not in group["source_segment_ids"]:
+                    group["source_segment_ids"].append(source_id)
         if identity_kind == "named" and canonical_name:
             authority_id = str(candidate.get("authority_id") or "").strip()
             if not authority_id:
@@ -2283,14 +2322,8 @@ async def audit_identity_coverage_from_structural_evidence(
                 group = groups_by_ref[identity_group]
                 if authority_id not in group["authority_ids"]:
                     group["authority_ids"].append(authority_id)
+    seed_group_by_label: dict[str, str] = {}
     for label in allowed_source_labels:
-        self_authority_id = f"self:{label}"
-        authority_by_id.setdefault(self_authority_id, {
-            "authority_id": self_authority_id,
-            "canonical_name": label,
-            "identity_group": "",
-            "aliases": [label],
-        })
         seed_ref = "new:" + evidence_repository.content_hash({
             "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
             "source_label": label,
@@ -2302,10 +2335,12 @@ async def audit_identity_coverage_from_structural_evidence(
                 key=evidence_repository.content_hash,
             ),
         })[:24]
+        seed_group_by_label[label] = seed_ref
         groups_by_ref.setdefault(seed_ref, {
             "identity_group_ref": seed_ref,
             "source_labels": [label],
             "authority_ids": [],
+            "source_segment_ids": [],
         })
     conflicting_groups = {
         group_ref: sorted(set(group.get("authority_ids") or []))

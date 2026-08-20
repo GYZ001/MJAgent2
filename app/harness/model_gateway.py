@@ -494,8 +494,8 @@ async def chat_structured(
     substage = str((call_meta or {}).get("substage") or "")
     identity_response_format_names = {
         "current_identity": "screenplay_current_identity_discovery_v8",
-        "future_identity": "screenplay_future_identity_resolution_v9",
-        "structural_coverage": "screenplay_structural_identity_coverage_v5",
+        "future_identity": "screenplay_future_identity_resolution_v10",
+        "structural_coverage": "screenplay_structural_identity_coverage_v6",
     }
     strict_identity_substage = (
         stage_key == "screenplay_character_discovery"
