@@ -1689,14 +1689,31 @@ async def resolve_future_identity_candidates(
         }
         decision_ids = [functional_id]
         for authority_id, authority in authority_by_id.items():
-            group_evidence_ids = evidence_ids_by_group[group_key]
-            if not group_evidence_ids:
+            authority_anchors = [
+                str(authority.get("canonical_name") or ""),
+                *[
+                    str(value)
+                    for value in authority.get("aliases") or []
+                ],
+            ]
+            anchored_evidence_ids = [
+                evidence_id
+                for evidence_id in evidence_ids_by_group[group_key]
+                if any(
+                    anchor
+                    and anchor in str(
+                        evidence_by_id.get(evidence_id, {}).get("text") or ""
+                    )
+                    for anchor in authority_anchors
+                )
+            ]
+            if not anchored_evidence_ids:
                 continue
             known_hash = evidence_repository.content_hash({
                 "contract_version": FUTURE_IDENTITY_DECISION_VERSION,
                 "group_key": group_key,
                 "authority_id": authority_id,
-                "evidence_ids": group_evidence_ids,
+                "evidence_ids": anchored_evidence_ids,
             })[:12]
             known_id = f"K:{group_key}:{authority_id}:{known_hash}"
             decision_by_id[known_id] = {
@@ -1707,7 +1724,7 @@ async def resolve_future_identity_candidates(
                 "canonical_name": str(
                     authority.get("canonical_name") or ""
                 ),
-                "evidence_ids": group_evidence_ids,
+                "evidence_ids": anchored_evidence_ids,
             }
             decision_ids.append(known_id)
         if evidence_ids_by_group[group_key]:
@@ -1775,13 +1792,11 @@ async def resolve_future_identity_candidates(
             selected = decision_by_id.get(selected_id, {})
             resolution_kind = str(selected.get("resolution_kind") or "")
             if resolution_kind == "known_named":
-                group_labels = [str(value) for value in group["labels"]]
                 authority = authority_by_id.get(
                     str(selected.get("authority_id") or ""),
                     {},
                 )
                 anchors = [
-                    *group_labels,
                     str(authority.get("canonical_name") or ""),
                     *[
                         str(value)
@@ -1800,7 +1815,7 @@ async def resolve_future_identity_candidates(
                             for anchor in anchors
                         )
                     ),
-                    evidence_options[0] if evidence_options else {},
+                    {},
                 )
                 common = {
                     "resolution_kind": resolution_kind,
@@ -1890,6 +1905,44 @@ async def resolve_future_identity_candidates(
                         "future identity 非 NEW 决议侧载必须为空："
                         f"{group_key}"
                     )
+                if resolution_kind == "known_named":
+                    authority = authority_by_id.get(
+                        str(selected.get("authority_id") or "")
+                    )
+                    selected_evidence_ids = [
+                        str(value)
+                        for value in selected.get("evidence_ids") or []
+                    ]
+                    authority_anchors = [
+                        str((authority or {}).get("canonical_name") or ""),
+                        *[
+                            str(value)
+                            for value in (authority or {}).get("aliases") or []
+                        ],
+                    ]
+                    if (
+                        authority is None
+                        or not selected_evidence_ids
+                        or any(
+                            value not in evidence_ids_by_group.get(
+                                group_key, []
+                            )
+                            for value in selected_evidence_ids
+                        )
+                        or not any(
+                            anchor
+                            and anchor in str(
+                                evidence_by_id.get(value, {}).get("text")
+                                or ""
+                            )
+                            for value in selected_evidence_ids
+                            for anchor in authority_anchors
+                        )
+                    ):
+                        errors.append(
+                            "future identity known 缺少后端登记的权威锚点："
+                            f"{group_key}"
+                        )
                 continue
             if canonical_name != canonical_name.strip() or not canonical_name:
                 errors.append(

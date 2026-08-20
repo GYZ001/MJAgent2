@@ -786,7 +786,7 @@ def test_generic_discovery_keeps_current_contract_cache_compatible(
     assert result == expected
 
 
-def test_generic_discovery_rejects_pre_authority_contract_cache(
+def test_generic_discovery_rejects_attempt12_previous_contract_cache(
     monkeypatch,
 ) -> None:
     conn = sqlite3.connect(":memory:")
@@ -801,7 +801,7 @@ def test_generic_discovery_rejects_pre_authority_contract_cache(
         characters=[],
         world=World(visual_style_canonical="测试"),
     )
-    previous_contract = "screenplay-identity-discovery.v8"
+    previous_contract = "screenplay-identity-discovery.v9"
     previous_hash = portraits.evidence_repository.content_hash({
         "contract_version": previous_contract,
         "mode": "targeted",
@@ -1940,6 +1940,324 @@ def test_future_identity_untraceable_name_is_one_call_hard_failure(
             episode_no=7,
             future_label="后续章节",
         ))
+    assert calls == 1
+
+
+def test_future_identity_cannot_bind_unanchored_bible_authority(
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    async def fake_chat(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        group_key = next(iter(
+            schema["properties"]["decisions"]["properties"]
+        ))
+        allowed = schema["properties"]["decisions"]["properties"][
+            group_key
+        ]["enum"]
+        assert not any(":bible:孟浩:" in value for value in allowed)
+        # Simulate an HTTP-200 provider which ignored the strict enum.
+        return json.dumps({
+            "decisions": {
+                group_key: f"K:{group_key}:bible:孟浩:forged",
+            },
+            "revealed_names": {group_key: ""},
+            "reveal_evidence_ids": {group_key: ""},
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="decision_id 越界",
+    ):
+        asyncio.run(portraits.resolve_future_identity_candidates(
+            [{
+                "name": "陌生门卫",
+                "source_label": "陌生门卫",
+                "identity_kind": "functional",
+                "identity_group": "grp:gate",
+                "kind": "onscreen",
+            }],
+            source_text="陌生门卫守在山门。",
+            future_text="后来陌生门卫仍守在山门，从未说明姓名。",
+            bible=Bible(
+                world=World(visual_style_canonical="国风"),
+                characters=[Character(
+                    name="孟浩",
+                    role="主角",
+                    appearance_canonical="黑发书生，青色长衫，目光坚定",
+                )],
+            ),
+            episode_no=1,
+        ))
+
+    assert calls == 1
+
+
+def test_attempt12_future_identity_group_decision_is_exact_and_one_call(
+    monkeypatch,
+) -> None:
+    """One backend group decision must fan out to all aliases without quote copying."""
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[
+            Character(
+                name="许清",
+                role="重要配角",
+                appearance_canonical="银袍女子，黑发冷眸，身形高挑",
+            ),
+            Character(
+                name="李富贵",
+                role="重要配角",
+                appearance_canonical="圆脸胖少年，粗麻长衫，门牙醒目",
+            ),
+        ],
+    )
+    candidates = [
+        {
+            "name": "会飞的女人",
+            "source_label": "会飞的女人",
+            "identity_kind": "functional",
+            "identity_group": "current-1:F3",
+            "kind": "onscreen",
+        },
+        {
+            "name": "许师姐",
+            "source_label": "许师姐",
+            "identity_kind": "functional",
+            "identity_group": "current-1:F3",
+            "kind": "mentioned",
+        },
+        {
+            "name": "白白净净身子较胖",
+            "source_label": "白白净净身子较胖",
+            "identity_kind": "functional",
+            "identity_group": "current-1:F4",
+            "kind": "onscreen",
+        },
+    ]
+    future_text = (
+        "许师姐收起风幡，绿袍修士向她行礼。\n\n"
+        "白白净净身子较胖的少年仍被众人叫作小胖子。"
+    )
+    calls: list[dict] = []
+
+    async def fake_chat(messages, **kwargs):
+        calls.append(kwargs)
+        assert kwargs["response_format"]["type"] == "json_schema"
+        assert kwargs["response_format"]["json_schema"]["strict"] is True
+        assert kwargs["response_format"]["json_schema"]["name"] == (
+            "screenplay_future_identity_resolution_v9"
+        )
+        assert kwargs["call_meta"]["response_format_required"] is True
+        assert kwargs["call_meta"]["format_attempt"] == 0
+        assert kwargs["call_meta"]["semantic_attempt"] == 0
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        assert list(schema["properties"]["decisions"]["properties"]) == [
+            "G001", "G002",
+        ]
+        return json.dumps(
+            _identity_wire_for_call(
+                kwargs,
+                [
+                    {
+                        "source_label": "许师姐",
+                        "identity_kind": "functional",
+                    },
+                    {
+                        "source_label": "白白净净身子较胖",
+                        "identity_kind": "functional",
+                    },
+                ],
+                messages=messages,
+            ),
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
+        candidates,
+        source_text="会飞的女人携着白净胖少年离开。",
+        future_text=future_text,
+        bible=bible,
+        episode_no=1,
+        future_label="后续章节",
+    ))
+
+    assert len(calls) == 1
+    assert {
+        (item["source_label"], item["name"], item["identity_kind"])
+        for item in resolved
+    } == {
+        ("会飞的女人", "会飞的女人", "functional"),
+        ("许师姐", "许师姐", "functional"),
+        ("白白净净身子较胖", "白白净净身子较胖", "functional"),
+    }
+    assert all(item["identity_kind"] == "functional" for item in resolved)
+
+
+def test_attempt12_invalid_future_decision_is_one_call_and_zero_downstream(
+    monkeypatch,
+) -> None:
+    """A strict HTTP-200 cannot duplicate a group or re-sign an existing name."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    candidates = [
+        {
+            "name": "会飞的女人",
+            "source_label": "会飞的女人",
+            "identity_kind": "functional",
+            "identity_group": "current-1:F3",
+            "kind": "onscreen",
+        },
+        {
+            "name": "许师姐",
+            "source_label": "许师姐",
+            "identity_kind": "functional",
+            "identity_group": "current-1:F3",
+            "kind": "mentioned",
+        },
+        {
+            "name": "白白净净身子较胖",
+            "source_label": "白白净净身子较胖",
+            "identity_kind": "functional",
+            "identity_group": "current-1:F4",
+            "kind": "onscreen",
+        },
+    ]
+    future_text = (
+        "许师姐收起风幡。\n\n"
+        "白白净净身子较胖的少年被称作小胖子。"
+    )
+    provider_calls = 0
+    downstream: list[str] = []
+
+    async def fake_current(*_args, **_kwargs):
+        return candidates
+
+    async def invalid_future_provider(_messages, **kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        decision_properties = schema["properties"]["decisions"][
+            "properties"
+        ]
+        evidence_properties = schema["properties"][
+            "reveal_evidence_ids"
+        ]["properties"]
+        return json.dumps({
+            "decisions": {
+                "G001": next(
+                    value for value in decision_properties["G001"]["enum"]
+                    if value.startswith("F:")
+                ),
+                "G002": next(
+                    value for value in decision_properties["G002"]["enum"]
+                    if value.startswith("N:")
+                ),
+            },
+            "revealed_names": {"G001": "", "G002": "李富贵"},
+            "reveal_evidence_ids": {
+                "G001": "",
+                "G002": next(
+                    value for value in evidence_properties["G002"]["enum"]
+                    if value
+                ),
+            },
+        }, ensure_ascii=False)
+
+    async def forbidden_coverage(*_args, **_kwargs):
+        downstream.append("coverage")
+        raise AssertionError("invalid future identity reached coverage")
+
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    monkeypatch.setattr(
+        portraits, "extract_current_identity_candidates", fake_current,
+    )
+    monkeypatch.setattr(
+        portraits,
+        "audit_identity_coverage_from_structural_evidence",
+        forbidden_coverage,
+    )
+    monkeypatch.setattr(model_gateway, "chat", invalid_future_provider)
+
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="NEW 不得重新签发已有 authority",
+    ):
+        asyncio.run(portraits.discover_character_candidates(
+            "会飞的女人携着白净胖少年离开。",
+            Bible(
+                world=World(visual_style_canonical="国风"),
+                characters=[
+                    Character(
+                        name="许清",
+                        role="重要配角",
+                        appearance_canonical="银袍女子，黑发冷眸，身形高挑",
+                    ),
+                    Character(
+                        name="李富贵",
+                        role="重要配角",
+                        appearance_canonical="圆脸胖少年，粗麻长衫，门牙醒目",
+                    ),
+                ],
+            ),
+            1,
+            future_text=future_text,
+            future_label="后续章节",
+        ))
+
+    assert provider_calls == 1
+    assert downstream == []
+
+
+def test_attempt12_old_split_wire_is_one_call_hard_failure(
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    async def old_attempt12_wire(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["call_meta"]["format_attempt"] == 0
+        return json.dumps({
+            "known_named": [{
+                "source_label": "许师姐",
+                "authority_id": "bible:许清",
+                "future_evidence": "许师姐收起风幡",
+            }],
+            "new_named": [{
+                "source_label": "白白净净身子较胖",
+                "canonical_name": "李富贵",
+                "future_evidence": "小胖子跟上来",
+            }],
+            "functional": [
+                {"source_label": "白白净净身子较胖"},
+            ],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", old_attempt12_wire)
+    with pytest.raises(model_gateway.StructuredFormatError):
+        asyncio.run(portraits.resolve_future_identity_candidates(
+            [{
+                "name": "白白净净身子较胖",
+                "source_label": "白白净净身子较胖",
+                "identity_kind": "functional",
+                "identity_group": "current-1:F4",
+                "kind": "onscreen",
+            }],
+            source_text="白净胖少年跟随众人。",
+            future_text="小胖子跟上来，但没有交代真名。",
+            bible=Bible(
+                world=World(visual_style_canonical="国风"),
+                characters=[],
+            ),
+            episode_no=1,
+        ))
+
     assert calls == 1
 
 
