@@ -68,10 +68,14 @@ for idx in $(seq "$START_IDX" 5); do
         log "=== ABORT: EP$idx failed, stopping serial run ==="
         exit 2 ;;
       repairing)
-        # 一次性生成目标下，暂停待修=整体失败：立即中止，避免空轮询到超时
-        log "EP$idx REPAIRING (paused) ❌ err=$err"
-        log "=== ABORT: EP$idx entered repairing (one-shot failure), stopping serial run ==="
-        exit 2 ;;
+        # active=True 表示自动局部修复循环正在进行（正常瞬态，会收敛到 ready），继续等待；
+        # active=False 表示流程已暂停待人工介入（一次性生成目标下=整体失败），立即中止。
+        if [ "$active" = "False" ] || [ "$active" = "false" ]; then
+          log "EP$idx REPAIRING & PAUSED (active=$active) ❌ err=$err"
+          log "=== ABORT: EP$idx paused for manual repair (one-shot failure), stopping serial run ==="
+          exit 2
+        fi
+        log "EP$idx repairing in-loop (active=$active), waiting to converge..." ;;
       pending)
         # 不应发生（已启动）；等待一轮
         : ;;
