@@ -113,6 +113,7 @@ async def test_expected_json_meta_auto_attaches_json_object(monkeypatch) -> None
     captured: dict[str, object] = {}
 
     async def fake_hiagent_chat(messages, **kwargs):
+        captured["messages"] = messages
         captured.update(kwargs)
         return '{"ok": true}'
 
@@ -125,12 +126,19 @@ async def test_expected_json_meta_auto_attaches_json_object(monkeypatch) -> None
         passthrough_slot,
     )
 
+    original = [{"role": "user", "content": "只返回一个对象"}]
     result = await model_gateway.chat(
-        [{"role": "user", "content": "x"}],
+        original,
         call_meta={"expected_json": True, "stage_key": "screenplay_blueprint_shard"},
     )
     assert result == '{"ok": true}'
     assert captured.get("response_format") == {"type": "json_object"}
+    sent_messages = captured["messages"]
+    assert sent_messages is not original
+    assert sent_messages[0]["role"] == "system"
+    assert "json" in sent_messages[0]["content"].lower()
+    assert sent_messages[1:] == original
+    assert original == [{"role": "user", "content": "只返回一个对象"}]
 
 
 @pytest.mark.asyncio
@@ -138,6 +146,7 @@ async def test_non_json_call_does_not_attach_response_format(monkeypatch) -> Non
     captured: dict[str, object] = {}
 
     async def fake_hiagent_chat(messages, **kwargs):
+        captured["messages"] = messages
         captured.update(kwargs)
         return "plain text answer"
 
@@ -150,11 +159,13 @@ async def test_non_json_call_does_not_attach_response_format(monkeypatch) -> Non
         passthrough_slot,
     )
 
+    original = [{"role": "user", "content": "写一段自由文本"}]
     await model_gateway.chat(
-        [{"role": "user", "content": "写一段自由文本"}],
+        original,
         call_meta={"stage_key": "free_text"},
     )
     assert "response_format" not in captured
+    assert captured["messages"] is original
 
 
 @pytest.mark.asyncio

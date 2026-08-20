@@ -368,6 +368,14 @@ async def chat(
     effective_response_format = response_format
     if effective_response_format is None and meta.get("expected_json"):
         effective_response_format = {"type": "json_object"}
+    # Strict OpenAI-compatible gateways require the prompt itself to name JSON
+    # when ``json_object`` is requested.  Normalize once at the harness boundary
+    # so the first provider attempt, durable request hash and any retry all use
+    # the same caller-independent message snapshot.
+    provider_messages = hiagent._messages_for_response_format(
+        messages,
+        effective_response_format,
+    )
     max_retries = (
         0
         if meta.get("disable_provider_retries")
@@ -388,7 +396,7 @@ async def chat(
             if effective_response_format is not None:
                 provider_kwargs["response_format"] = effective_response_format
             result = await run_with_provider_call_slot(
-                lambda: hiagent.chat(messages, **provider_kwargs)
+                lambda: hiagent.chat(provider_messages, **provider_kwargs)
             )
             if meta.get("expected_json") and _is_non_candidate_json_response(result):
                 raise hiagent.ProviderError(
