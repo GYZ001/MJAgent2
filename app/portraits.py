@@ -1675,10 +1675,10 @@ async def resolve_future_identity_candidates(
             ))
     evidence_by_id: dict[str, dict] = {}
     evidence_ids_by_group: dict[str, list[str]] = {}
-    per_group_budget = max(
-        480,
-        min(
-            1800,
+    per_group_budget = min(
+        1800,
+        max(
+            120,
             CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET // max(1, len(group_specs)),
         ),
     )
@@ -1705,9 +1705,22 @@ async def resolve_future_identity_candidates(
                 segment for _base_index, segment in future_segments
                 if segment.start_offset < 900
             ]
+        label_window_indexes = {
+            index for index, segment in enumerate(matching)
+            if any(label in segment.text for label in group_labels)
+        }
+        adjacent_label_window_indexes = {
+            neighbor
+            for index in label_window_indexes
+            for neighbor in (index - 1, index + 1)
+            if 0 <= neighbor < len(matching)
+        }
         ranked = sorted(
             enumerate(matching),
             key=lambda item: (
+                0 if item[0] in label_window_indexes else (
+                    1 if item[0] in adjacent_label_window_indexes else 2
+                ),
                 -sum(name in item[1].text for name in known_names),
                 0 if item[0] == 0 else 1,
                 0 if item[0] == len(matching) - 1 else 1,
@@ -1717,9 +1730,11 @@ async def resolve_future_identity_candidates(
         selected: list = []
         used = 0
         for _rank, segment in ranked:
-            if used >= per_group_budget or len(selected) >= 6:
+            if used >= per_group_budget:
                 break
             if segment.text in {item.text for item in selected}:
+                continue
+            if selected and used + len(segment.text) > per_group_budget:
                 continue
             selected.append(segment)
             used += len(segment.text)

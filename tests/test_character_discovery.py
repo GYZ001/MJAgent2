@@ -3869,6 +3869,57 @@ def test_future_identity_persists_bounded_evidence_with_authority_anchor(
     assert resolved[0]["authority_id"] == "bible:丁力"
 
 
+def test_future_identity_catalog_reserves_middle_label_reveal_window(
+    monkeypatch,
+) -> None:
+    reveal = "黑衣人摘下面具说我叫丁力"
+    future = "“" + "甲" * 1000 + reveal + "乙" * 1000 + "”"
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        prompt = messages[0]["content"]
+        raw_catalog = prompt.split("后续证据目录", 1)[1]
+        raw_catalog = raw_catalog.split("\n", 1)[1]
+        raw_catalog = raw_catalog.split("\n可选决议目录", 1)[0]
+        evidence_catalog = json.loads(raw_catalog)
+        assert all(len(item["text"]) <= 120 for item in evidence_catalog)
+        assert any(reveal in item["text"] for item in evidence_catalog)
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "黑衣人",
+                "canonical_name": "丁力",
+                "identity_kind": "named",
+            }],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
+        [{
+            "name": "黑衣人",
+            "source_label": "黑衣人",
+            "identity_kind": "functional",
+            "identity_group": "current-1:F1",
+            "kind": "onscreen",
+        }],
+        source_text="黑衣人站在门口。",
+        future_text=future,
+        bible=Bible(
+            world=World(visual_style_canonical="国风"),
+            characters=[],
+        ),
+        episode_no=1,
+    ))
+
+    assert calls == 1
+    assert resolved[0]["name"] == "丁力"
+    assert "丁力" in resolved[0]["future_evidence"]
+    assert resolved[0]["future_evidence"] in future
+
+
 def test_future_identity_rejects_name_absent_from_window(monkeypatch) -> None:
     """真名不在后续窗口时（模型臆测），即便声称 named 也不得取得解析，防捏造约束不放松。"""
     future = "绿袍男子恭敬地说道，许师姐好手段。许师姐已经到了凝气第七层。" * 2
