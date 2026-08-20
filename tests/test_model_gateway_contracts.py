@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 from pathlib import Path
 import subprocess
 
+from pydantic import BaseModel
+
+from app.evidence import repository
 from app.harness import model_gateway
+
+
+class _StrictResponse(BaseModel):
+    ok: bool
 
 
 def test_format_repair_context_is_optional_keyword_only() -> None:
@@ -72,3 +80,60 @@ def test_direct_chat_structured_calls_pass_required_keyword_only_arguments() -> 
                 )
 
     assert not violations, "\n".join(violations)
+
+
+def test_chat_structured_keeps_required_response_format_across_format_retry(
+    monkeypatch,
+) -> None:
+    schema = _StrictResponse.model_json_schema()
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "strict_response",
+            "strict": True,
+            "schema": schema,
+        },
+    }
+    calls: list[tuple[list[dict[str, str]], dict]] = []
+
+    async def fake_chat(messages, **kwargs):
+        calls.append((messages, kwargs))
+        return "not json" if len(calls) == 1 else '{"ok":true}'
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "Return JSON."}],
+        model_type=_StrictResponse,
+        validate=None,
+        operation_id="strict-response-format",
+        max_tokens=256,
+        format_retry_limit=1,
+        semantic_retry_limit=0,
+        output_schema=schema,
+        response_format=response_format,
+        require_response_format=True,
+    ))
+
+    assert result == _StrictResponse(ok=True)
+    assert len(calls) == 2
+    assert all(
+        kwargs["response_format"] is response_format
+        and kwargs["call_meta"]["response_format_required"] is True
+        for _messages, kwargs in calls
+    )
+    second_messages, second_kwargs = calls[1]
+    expected_identity = repository.content_hash({
+        "base_operation_id": "strict-response-format",
+        "format_attempt": 1,
+        "semantic_attempt": 0,
+        "messages": second_messages,
+        "max_tokens": 256,
+        "temperature": 0.1,
+        "structured_schema": schema,
+        "response_format": response_format,
+        "require_response_format": True,
+    })
+    assert second_kwargs["call_meta"]["operation_id"] == (
+        "strict-response-format:structured-attempt:"
+        + expected_identity
+    )

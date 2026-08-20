@@ -500,7 +500,7 @@ async def chat_structured(
     while True:
         attempt_operation_id = operation_id
         if format_attempt or semantic_attempt:
-            attempt_identity = repository.content_hash({
+            attempt_identity_payload = {
                 "base_operation_id": operation_id,
                 "format_attempt": format_attempt,
                 "semantic_attempt": semantic_attempt,
@@ -508,13 +508,19 @@ async def chat_structured(
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "structured_schema": structured_schema,
-                "response_format": response_format,
-                "require_response_format": require_response_format,
-            })
+            }
+            if response_format is not None:
+                attempt_identity_payload.update({
+                    "response_format": response_format,
+                    "require_response_format": require_response_format,
+                })
+            attempt_identity = repository.content_hash(
+                attempt_identity_payload
+            )
             attempt_operation_id = (
                 f"{operation_id}:structured-attempt:{attempt_identity}"
             )
-        meta = {
+        meta: dict[str, Any] = {
             **(call_meta or {}),
             "operation_id": attempt_operation_id,
             "base_operation_id": operation_id,
@@ -522,8 +528,9 @@ async def chat_structured(
             "format_attempt": format_attempt,
             "semantic_attempt": semantic_attempt,
             "local_recovery": local_recovery,
-            "response_format_required": bool(require_response_format),
         }
+        if require_response_format:
+            meta["response_format_required"] = True
         last_raw = await chat(
             current_messages,
             temperature=temperature,

@@ -129,6 +129,11 @@ ATTEMPT6_CALL_63118_SEMANTIC_BUDGET = (
     / "fixtures"
     / "attempt6_call_63118_semantic_budget.json"
 )
+ATTEMPT7_CALL_63139_SEMANTIC_RESPONSE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "attempt7_call_63139_semantic_response.json"
+)
 RUN_B0659B64B548_REPLAY = (
     Path(__file__).parent
     / "fixtures"
@@ -321,6 +326,63 @@ def test_scene_shard_semantic_review_json_contract_is_strict() -> None:
             "findings": [],
             "explanation": "none",
         })
+
+
+def test_scene_shard_semantic_review_schema_binds_exact_chunk_keys() -> None:
+    unit_keys = [
+        "bp-sc006:SRC0012:001:unit",
+        "bp-sc006:SRC0012:002:unit",
+        "bp-sc007:SRC0015:001:unit",
+    ]
+
+    schema = scene_shards_module._scene_shard_semantic_review_schema(
+        unit_keys
+    )
+    finding_properties = schema["$defs"][
+        "ScreenplaySceneShardSemanticFinding"
+    ]["properties"]
+    response_format = (
+        scene_shards_module._scene_shard_semantic_review_response_format(
+            schema
+        )
+    )
+
+    assert finding_properties["unit_key"]["enum"] == unit_keys
+    related_schema = finding_properties["related_unit_keys"]
+    assert related_schema["items"]["enum"] == unit_keys
+    assert related_schema["maxItems"] == 1
+    assert related_schema["uniqueItems"] is True
+    assert finding_properties["violation_kinds"]["uniqueItems"] is True
+    assert schema["properties"]["findings"]["maxItems"] == 6
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    assert response_format["json_schema"]["schema"] is schema
+
+
+def test_attempt7_call_63139_has_no_complete_json_root_to_accept() -> None:
+    case = json.loads(
+        ATTEMPT7_CALL_63139_SEMANTIC_RESPONSE.read_text(encoding="utf-8")
+    )
+    content = (
+        case["content_non_whitespace_prefix"]
+        + "\n" * case["trailing_newlines"]
+        + " " * case["trailing_spaces"]
+    )
+
+    assert len(content) == case["content_chars"] == 63869
+    assert len(content.rstrip()) == case["content_non_whitespace_chars"] == 26
+    assert case["finish_reason"] == "length"
+    assert case["completion_tokens"] == case["effective_max_tokens"] == 31928
+    assert case["reasoning_tokens"] == 0
+    assert case["complete_top_level_roots"] == 0
+    authority_root = model_gateway._latest_json_authority_root(content)
+    assert authority_root == (
+        "object",
+        case["content_non_whitespace_prefix"],
+    )
+    assert model_gateway._json_candidates(content) == []
+    with pytest.raises(json.JSONDecodeError, match="Invalid control character"):
+        json.loads(content)
 
 
 def test_scene_shard_semantic_finding_kind_and_message_are_bounded() -> None:
@@ -3445,6 +3507,7 @@ def test_err_20260816_e8ac9d_post_repair_allows_second_format_repair(
             "meta": deepcopy(meta),
             "max_tokens": kwargs["max_tokens"],
             "temperature": kwargs["temperature"],
+            "response_format": deepcopy(kwargs["response_format"]),
         })
         return {
             0: invalid_code_response,
@@ -3491,9 +3554,11 @@ def test_err_20260816_e8ac9d_post_repair_allows_second_format_repair(
                 "messages": call["messages"],
                 "max_tokens": call["max_tokens"],
                 "temperature": call["temperature"],
-                "structured_schema": (
-                    ScreenplaySceneShardSemanticReview.model_json_schema()
-                ),
+                "structured_schema": call["response_format"][
+                    "json_schema"
+                ]["schema"],
+                "response_format": call["response_format"],
+                "require_response_format": True,
             })
             expected_operation_id = (
                 f"{base_operation_id}:structured-attempt:"
@@ -3612,8 +3677,10 @@ def test_scene_shard_semantic_unknown_unit_fails_in_real_structured_validator(
             message="unknown",
         ),
     ])
+    calls: list[dict] = []
 
-    async def fake_chat(*_args, **_kwargs):
+    async def fake_chat(*_args, **kwargs):
+        calls.append(kwargs)
         return unknown_review.model_dump_json()
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
@@ -3629,6 +3696,18 @@ def test_scene_shard_semantic_unknown_unit_fails_in_real_structured_validator(
             shard_id=plan.shard_id,
             validate_draft=lambda _candidate: [],
         ))
+    assert calls
+    known_unit_keys = list(draft.slots)
+    for call in calls:
+        assert call["call_meta"]["response_format_required"] is True
+        response_format = call["response_format"]
+        assert response_format["type"] == "json_schema"
+        assert response_format["json_schema"]["strict"] is True
+        finding_properties = response_format["json_schema"]["schema"][
+            "$defs"
+        ]["ScreenplaySceneShardSemanticFinding"]["properties"]
+        assert finding_properties["unit_key"]["enum"] == known_unit_keys
+        assert "UNKNOWN-SLOT" not in finding_properties["unit_key"]["enum"]
 
 
 def test_scene_shard_semantic_repair_overreach_fails_in_real_validator(

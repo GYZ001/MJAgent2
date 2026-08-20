@@ -222,3 +222,86 @@ async def test_json_object_first_provider_payload_contains_json_instruction(
     assert result == '{"ok":true}'
     assert original == [{"role": "user", "content": "只返回对象"}]
     assert len(payloads) == 1
+
+
+@pytest.mark.asyncio
+async def test_required_json_schema_rejection_never_downgrades_or_replays(
+    monkeypatch,
+) -> None:
+    payloads: list[dict] = []
+    provider, model = "hiagent", "required-schema-model"
+    capability_key = hiagent._response_format_capability_key(provider, model)
+    hiagent._RESPONSE_FORMAT_UNSUPPORTED.discard(capability_key)
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+        "additionalProperties": False,
+    }
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "required_schema",
+            "strict": True,
+            "schema": schema,
+        },
+    }
+    monkeypatch.setattr(
+        hiagent,
+        "text_request_token_limits",
+        lambda **_kwargs: (provider, model, 256),
+    )
+    monkeypatch.setattr(
+        hiagent,
+        "active_model_token_limits",
+        lambda *_args, **_kwargs: {
+            "context_window_tokens": 8192,
+            "max_output_tokens": 256,
+            "token_limits_source": "test",
+        },
+    )
+    monkeypatch.setattr(
+        hiagent,
+        "_model_connection",
+        lambda *_args, **_kwargs: (
+            "https://example.invalid",
+            {"x-test": "1"},
+        ),
+    )
+    monkeypatch.setattr(
+        hiagent,
+        "_cached_successful_provider_response",
+        lambda *_args, **_kwargs: None,
+    )
+
+    async def rejected_request(_client, _url, payload, **_kwargs):
+        payloads.append(payload)
+        raise hiagent.ProviderError(
+            "请求被拒绝（HTTP 400）：unsupported parameter json_schema",
+            retryable=False,
+            raw=(
+                '{"error":{"message":"response_format json_schema '
+                'is not supported"}}'
+            ),
+        )
+
+    monkeypatch.setattr(hiagent, "_plain_chat_request", rejected_request)
+    try:
+        with pytest.raises(hiagent.ProviderError, match="unsupported parameter"):
+            await hiagent.chat(
+                [{"role": "user", "content": "Return JSON."}],
+                response_format=response_format,
+                max_tokens=256,
+                call_meta={
+                    "operation_id": "op-required-json-schema",
+                    "response_format_required": True,
+                },
+            )
+        assert len(payloads) == 1
+        assert payloads[0]["response_format"] == response_format
+        assert (
+            hiagent._response_format_known_unsupported(provider, model)
+            is False
+        )
+    finally:
+        hiagent._RESPONSE_FORMAT_UNSUPPORTED.discard(capability_key)
