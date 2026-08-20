@@ -455,6 +455,146 @@ def test_semantic_review_does_not_guess_ambiguous_unit_ordinal() -> None:
     assert review.findings[0].unit_key == "malformed:026:unit"
 
 
+@pytest.mark.parametrize("blank_unit_key", ["", " \t "])
+def test_semantic_review_aligns_single_peer_proven_local_blank_scope(
+    blank_unit_key: str,
+) -> None:
+    target_key = "bp-sc001:SRC0002:006:unit"
+    shared_keys = [
+        "bp-sc001:SRC0002:007:unit",
+        "bp-sc001:SRC0002:010:unit",
+    ]
+
+    def finding(unit_key: str, reviewer_no: int):
+        return ScreenplaySceneShardSemanticFinding(
+            unit_key=unit_key,
+            related_unit_keys=[],
+            code="source_semantic_drift",
+            violation_kinds=[
+                "environment_personification",
+                "unsupported_action",
+            ],
+            message=f"reviewer {reviewer_no} local source observation",
+        )
+
+    reviews = [
+        ScreenplaySceneShardSemanticReview(findings=[
+            finding(blank_unit_key, 1),
+            *(finding(unit_key, 1) for unit_key in shared_keys),
+        ]),
+        ScreenplaySceneShardSemanticReview(findings=[
+            finding(target_key, 2),
+            *(finding(unit_key, 2) for unit_key in shared_keys),
+        ]),
+    ]
+
+    errors = (
+        scene_shards_module
+        ._scene_shard_normalize_peer_review_unit_scopes(
+            reviews,
+            {target_key, *shared_keys},
+        )
+    )
+
+    assert errors == []
+    assert reviews[0].findings[0].unit_key == target_key
+    assert {
+        finding.unit_key
+        for finding in scene_shards_module
+        .screenplay_scene_semantic_consensus(*reviews)
+    } == {target_key, *shared_keys}
+
+
+def test_semantic_review_unresolved_local_blank_has_no_unilateral_authority(
+) -> None:
+    candidate_keys = {
+        "bp-sc001:SRC0002:006:unit",
+        "bp-sc001:SRC0002:007:unit",
+    }
+
+    def finding(unit_key: str):
+        return ScreenplaySceneShardSemanticFinding(
+            unit_key=unit_key,
+            related_unit_keys=[],
+            code="source_semantic_drift",
+            violation_kinds=["unsupported_action"],
+            message="local source observation",
+        )
+
+    reviews = [
+        ScreenplaySceneShardSemanticReview(findings=[finding("")]),
+        ScreenplaySceneShardSemanticReview(findings=[
+            finding(unit_key) for unit_key in sorted(candidate_keys)
+        ]),
+    ]
+
+    errors = (
+        scene_shards_module
+        ._scene_shard_normalize_peer_review_unit_scopes(
+            reviews,
+            candidate_keys,
+        )
+    )
+
+    assert errors == []
+    assert reviews[0].findings == []
+    assert {
+        finding.unit_key for finding in reviews[1].findings
+    } == candidate_keys
+    assert scene_shards_module.screenplay_scene_semantic_consensus(
+        *reviews
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("code", "violation_kinds"),
+    [
+        ("state_subject_semantic_drift", ["wrong_subject"]),
+        ("source_semantic_drift", ["wrong_subject"]),
+        ("source_semantic_drift", ["source_contradiction"]),
+        (
+            "source_semantic_drift",
+            ["unsupported_action", "wrong_subject"],
+        ),
+    ],
+)
+def test_semantic_review_deterministic_issue_requires_unit_scope(
+    code: str,
+    violation_kinds: list[str],
+) -> None:
+    target_key = "bp-sc001:SRC0002:006:unit"
+    reviews = [
+        ScreenplaySceneShardSemanticReview(findings=[
+            ScreenplaySceneShardSemanticFinding(
+                unit_key=" \t ",
+                related_unit_keys=[],
+                code=code,
+                violation_kinds=violation_kinds,
+                message="deterministic issue missing target scope",
+            ),
+        ]),
+        ScreenplaySceneShardSemanticReview(findings=[
+            ScreenplaySceneShardSemanticFinding(
+                unit_key=target_key,
+                related_unit_keys=[],
+                code=code,
+                violation_kinds=violation_kinds,
+                message="peer has a scoped observation",
+            ),
+        ]),
+    ]
+
+    errors = (
+        scene_shards_module
+        ._scene_shard_normalize_peer_review_unit_scopes(
+            reviews,
+            {target_key},
+        )
+    )
+
+    assert any("缺少必需 unit_key scope" in error for error in errors)
+
+
 def test_run_884443dc4404_semantic_budget_covers_worst_payload() -> None:
     case = json.loads(
         RUN_884443DC4404_REPLAY.read_text(encoding="utf-8")
@@ -1980,6 +2120,75 @@ def test_scene_shard_semantic_single_reviewer_finding_does_not_repair(
     assert audit[0]["consensus"] == []
 
 
+def test_scene_shard_semantic_peer_proven_blank_scope_continues_runtime(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    draft = _creative_shard(plan, blueprint, contracts)
+    target_key = next(iter(draft.slots))
+    review_calls: list[tuple[str, int]] = []
+    repair_calls = 0
+
+    async def fake_structured(*_args, **kwargs):
+        nonlocal repair_calls
+        if kwargs["model_type"] is ScreenplaySceneShardSemanticReview:
+            meta = kwargs["call_meta"]
+            review_calls.append((meta["substage"], meta["reviewer_no"]))
+            if meta["substage"] == "post_repair":
+                return ScreenplaySceneShardSemanticReview(findings=[])
+            return ScreenplaySceneShardSemanticReview(findings=[
+                ScreenplaySceneShardSemanticFinding(
+                    unit_key=(
+                        " \t " if meta["reviewer_no"] == 1 else target_key
+                    ),
+                    related_unit_keys=[],
+                    code="source_semantic_drift",
+                    violation_kinds=[
+                        "environment_personification",
+                        "unsupported_action",
+                    ],
+                    message=f"reviewer {meta['reviewer_no']} local finding",
+                ),
+            ])
+        repair_calls += 1
+        return ScreenplaySceneShardCreativeIR(slots={
+            target_key: draft.slots[target_key].model_copy(deep=True),
+        })
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.model_gateway.chat_structured",
+        fake_structured,
+    )
+    result, audit = asyncio.run(_REAL_SEMANTIC_REVIEW(
+        draft=draft,
+        scene_input_contracts=contracts,
+        identity_registry=[],
+        operation_id="scene-semantic-peer-proven-blank",
+        shard_id=plan.shard_id,
+        validate_draft=lambda _candidate: [],
+    ))
+
+    assert result == draft
+    assert repair_calls == 1
+    assert sorted(review_calls) == [
+        ("initial", 1),
+        ("initial", 2),
+        ("post_repair", 1),
+        ("post_repair", 2),
+    ]
+    assert audit[0]["reviews"][0]["findings"][0]["unit_key"] == (
+        target_key
+    )
+    assert audit[0]["consensus"][0]["unit_key"] == target_key
+    assert audit[-1]["consensus"] == []
+
+
 def test_scene_shard_semantic_same_key_code_different_kind_is_not_consensus(
     monkeypatch,
 ) -> None:
@@ -2252,7 +2461,7 @@ def test_scene_shard_semantic_unknown_finding_is_hard_failure(
     async def fake_structured(*_args, **_kwargs):
         return ScreenplaySceneShardSemanticReview(findings=[
             ScreenplaySceneShardSemanticFinding(
-                unit_key="UNKNOWN-SRC0031",
+                unit_key=" UNKNOWN-SRC0031 ",
                 code="source_semantic_drift",
                 violation_kinds=["source_contradiction"],
                 message="unknown",
@@ -2263,7 +2472,10 @@ def test_scene_shard_semantic_unknown_finding_is_hard_failure(
         "app.screenplay_scene_shards.model_gateway.chat_structured",
         fake_structured,
     )
-    with pytest.raises(ScreenplaySceneShardError, match="未知 unit_key"):
+    with pytest.raises(
+        ScreenplaySceneShardError,
+        match="未知 unit_key：UNKNOWN-SRC0031",
+    ):
         asyncio.run(_REAL_SEMANTIC_REVIEW(
             draft=draft,
             scene_input_contracts=contracts,

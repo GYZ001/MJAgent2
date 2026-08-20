@@ -95,6 +95,10 @@ SCREENPLAY_SCENE_SEMANTIC_VIOLATION_KINDS = (
     "cross_slot_duplication",
     "environment_personification",
 )
+_SCREENPLAY_SCENE_SEMANTIC_OPTIONAL_UNIT_KINDS = frozenset({
+    "unsupported_action",
+    "environment_personification",
+})
 SCREENPLAY_SCENE_SHARD_MIN_OUTPUT_TOKENS = 4096
 SCREENPLAY_SCENE_SHARD_MAX_OUTPUT_TOKENS = 16384
 SCREENPLAY_SCENE_SHARD_SCENE_RESERVE_TOKENS = 512
@@ -525,6 +529,10 @@ class ScreenplaySceneShardSemanticFinding(BaseModel):
     def _validate_typed_finding(
         self,
     ) -> "ScreenplaySceneShardSemanticFinding":
+        self.unit_key = self.unit_key.strip()
+        self.related_unit_keys = [
+            unit_key.strip() for unit_key in self.related_unit_keys
+        ]
         if len(self.violation_kinds) != len(set(self.violation_kinds)):
             raise ValueError("violation_kinds 不得重复")
         self.violation_kinds = [
@@ -572,6 +580,194 @@ class ScreenplaySceneShardSemanticReview(BaseModel):
         if len(finding_keys) != len(set(finding_keys)):
             raise ValueError("findings 中 (unit_key, code) 必须唯一")
         return self
+
+
+def _scene_shard_finding_allows_omitted_unit_key(
+    finding: ScreenplaySceneShardSemanticFinding,
+) -> bool:
+    """Whether a blank local observation may be denied repair authority.
+
+    These finding kinds can be observed without safely identifying a repair
+    target. A blank reference is never treated as global scope: it must either
+    be uniquely aligned with the peer review or be removed before audit and
+    consensus. Subject, contradiction, and cross-slot findings always require
+    explicit deterministic scope.
+    """
+    kinds = set(finding.violation_kinds)
+    return bool(kinds) and (
+        finding.code == "source_semantic_drift"
+        and not finding.related_unit_keys
+        and kinds.issubset(
+            _SCREENPLAY_SCENE_SEMANTIC_OPTIONAL_UNIT_KINDS
+        )
+    )
+
+
+def _scene_shard_review_reference_errors(
+    review: ScreenplaySceneShardSemanticReview,
+    known_unit_keys: set[str],
+    *,
+    allow_local_omitted_unit_key: bool,
+) -> list[str]:
+    unknown_finding_keys = {
+        finding.unit_key
+        for finding in review.findings
+        if finding.unit_key and finding.unit_key not in known_unit_keys
+    }
+    unknown_related_keys = {
+        related_unit_key
+        for finding in review.findings
+        for related_unit_key in finding.related_unit_keys
+        if related_unit_key and related_unit_key not in known_unit_keys
+    }
+    missing_finding_scopes = [
+        finding
+        for finding in review.findings
+        if (
+            not finding.unit_key
+            and not (
+                allow_local_omitted_unit_key
+                and _scene_shard_finding_allows_omitted_unit_key(finding)
+            )
+        )
+    ]
+    missing_related_scopes = [
+        finding
+        for finding in review.findings
+        if any(not unit_key for unit_key in finding.related_unit_keys)
+    ]
+    errors: list[str] = []
+    if missing_finding_scopes:
+        errors.append(
+            "语义审查 finding 缺少必需 unit_key scope："
+            + ",".join(sorted({
+                finding.code for finding in missing_finding_scopes
+            }))
+        )
+    if missing_related_scopes:
+        errors.append(
+            "语义审查 finding 缺少必需 related_unit_key scope："
+            + ",".join(sorted({
+                finding.code for finding in missing_related_scopes
+            }))
+        )
+    if unknown_finding_keys:
+        errors.append(
+            "语义审查引用未知 unit_key："
+            + ",".join(sorted(unknown_finding_keys))
+        )
+    if unknown_related_keys:
+        errors.append(
+            "语义审查引用未知 related_unit_key："
+            + ",".join(sorted(unknown_related_keys))
+        )
+    return errors
+
+
+def _scene_shard_review_finding_signature(
+    finding: ScreenplaySceneShardSemanticFinding,
+) -> tuple[str, str, tuple[str, ...], tuple[str, ...]]:
+    return (
+        finding.unit_key,
+        finding.code,
+        tuple(finding.violation_kinds),
+        tuple(finding.related_unit_keys),
+    )
+
+
+def _scene_shard_review_issue_signature(
+    finding: ScreenplaySceneShardSemanticFinding,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    return (
+        finding.code,
+        tuple(finding.violation_kinds),
+        tuple(finding.related_unit_keys),
+    )
+
+
+def _scene_shard_normalize_peer_review_unit_scopes(
+    reviews: list[ScreenplaySceneShardSemanticReview],
+    known_unit_keys: set[str],
+) -> list[str]:
+    """Resolve one peer-proven blank scope, then deny unresolved blanks authority."""
+    blank_findings = [
+        (review_index, finding)
+        for review_index, review in enumerate(reviews)
+        for finding in review.findings
+        if not finding.unit_key
+    ]
+    invalid_blank_findings = [
+        finding
+        for _, finding in blank_findings
+        if not _scene_shard_finding_allows_omitted_unit_key(finding)
+    ]
+    if invalid_blank_findings:
+        return _scene_shard_review_reference_errors(
+            ScreenplaySceneShardSemanticReview(
+                findings=invalid_blank_findings,
+            ),
+            known_unit_keys,
+            allow_local_omitted_unit_key=False,
+        )
+
+    aligned = False
+    if len(reviews) == 2 and len(blank_findings) == 1:
+        blank_review_index, blank_finding = blank_findings[0]
+        peer_review = reviews[1 - blank_review_index]
+        blank_scoped_signatures = {
+            _scene_shard_review_finding_signature(finding)
+            for finding in reviews[blank_review_index].findings
+            if finding.unit_key
+        }
+        peer_by_signature = {
+            _scene_shard_review_finding_signature(finding): finding
+            for finding in peer_review.findings
+        }
+        peer_only_signatures = (
+            set(peer_by_signature) - blank_scoped_signatures
+        )
+        blank_only_signatures = (
+            blank_scoped_signatures - set(peer_by_signature)
+        )
+        if not blank_only_signatures and len(peer_only_signatures) == 1:
+            peer_candidate = peer_by_signature[
+                next(iter(peer_only_signatures))
+            ]
+            if (
+                peer_candidate.unit_key in known_unit_keys
+                and _scene_shard_review_issue_signature(peer_candidate)
+                == _scene_shard_review_issue_signature(blank_finding)
+            ):
+                blank_finding.unit_key = peer_candidate.unit_key
+                aligned = True
+
+    if blank_findings and not aligned:
+        for review in reviews:
+            review.findings = [
+                finding
+                for finding in review.findings
+                if finding.unit_key
+            ]
+
+    errors: list[str] = []
+    for review in reviews:
+        try:
+            normalized = ScreenplaySceneShardSemanticReview.model_validate(
+                review.model_dump(mode="json"),
+            )
+        except ValidationError as exc:
+            errors.append(
+                "语义审查 unit scope 规范化后的 finding 合同无效："
+                + str(exc)
+            )
+            continue
+        review.findings = normalized.findings
+        errors.extend(_scene_shard_review_reference_errors(
+            review,
+            known_unit_keys,
+            allow_local_omitted_unit_key=False,
+        ))
+    return errors
 
 
 _SCENE_SHARD_UNIT_ORDINAL_RE = re.compile(r":(?P<ordinal>\d+):unit$")
@@ -4614,29 +4810,11 @@ async def _semantic_review_scene_shard_draft(
                     "语义审查规范化后的 finding 合同无效："
                     + str(exc),
                 ]
-            unknown_finding_keys = {
-                finding.unit_key
-                for finding in value.findings
-                if finding.unit_key not in known_unit_keys
-            }
-            unknown_related_keys = {
-                related_unit_key
-                for finding in value.findings
-                for related_unit_key in finding.related_unit_keys
-                if related_unit_key not in known_unit_keys
-            }
-            errors: list[str] = []
-            if unknown_finding_keys:
-                errors.append(
-                    "语义审查引用未知 unit_key："
-                    + ",".join(sorted(unknown_finding_keys))
-                )
-            if unknown_related_keys:
-                errors.append(
-                    "语义审查引用未知 related_unit_key："
-                    + ",".join(sorted(unknown_related_keys))
-                )
-            return errors
+            return _scene_shard_review_reference_errors(
+                value,
+                known_unit_keys,
+                allow_local_omitted_unit_key=True,
+            )
 
         if batch_abort is not None and batch_abort.is_set():
             raise asyncio.CancelledError
@@ -4742,6 +4920,15 @@ async def _semantic_review_scene_shard_draft(
                 lambda: review_one(2),
                 on_failure=abort_batch,
             )
+            scope_errors = _scene_shard_normalize_peer_review_unit_scopes(
+                chunk_reviews,
+                set(chunk["unit_keys"]),
+            )
+            if scope_errors:
+                raise ScreenplaySceneShardError(
+                    shard_id,
+                    scope_errors,
+                )
             for reviewer_index, chunk_review in enumerate(chunk_reviews):
                 reviewer_findings[reviewer_index].extend(
                     chunk_review.findings
