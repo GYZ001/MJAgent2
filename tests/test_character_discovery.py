@@ -600,7 +600,7 @@ def test_generic_discovery_rejects_legacy_coverage_cache(
     )
 
 
-def test_generic_discovery_keeps_ordinary_v7_cache_compatible(
+def test_generic_discovery_keeps_current_contract_cache_compatible(
     monkeypatch,
 ) -> None:
     conn = sqlite3.connect(":memory:")
@@ -615,7 +615,7 @@ def test_generic_discovery_keeps_ordinary_v7_cache_compatible(
         characters=[],
         world=World(visual_style_canonical="测试"),
     )
-    ordinary_v7_hash = portraits.evidence_repository.content_hash({
+    current_contract_hash = portraits.evidence_repository.content_hash({
         "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
         "mode": "targeted",
         "episode_no": 1,
@@ -627,11 +627,11 @@ def test_generic_discovery_keeps_ordinary_v7_cache_compatible(
         "existing_resolutions": [],
         "structural_evidence": [],
     })
-    expected = [{"source_label": "ordinary-v7"}]
+    expected = [{"source_label": "ordinary-current"}]
     conn.execute(
         "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
         (
-            "ordinary-v7",
+            "ordinary-current",
             "episode",
             "ep-attempt10-ordinary-cache",
             "screenplay_identity_discovery",
@@ -640,7 +640,7 @@ def test_generic_discovery_keeps_ordinary_v7_cache_compatible(
                 "contract_version": (
                     portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION
                 ),
-                "input_hash": ordinary_v7_hash,
+                "input_hash": current_contract_hash,
                 "mode": "targeted",
                 "candidates": expected,
             }),
@@ -650,7 +650,7 @@ def test_generic_discovery_keeps_ordinary_v7_cache_compatible(
     conn.commit()
 
     async def forbidden_provider(*_args, **_kwargs):
-        raise AssertionError("ordinary v7 cache should remain compatible")
+        raise AssertionError("current contract cache should remain compatible")
 
     monkeypatch.setattr(portraits, "get_conn", lambda: conn)
     monkeypatch.setattr(portraits, "get_setting", lambda *_args: "true")
@@ -668,6 +668,99 @@ def test_generic_discovery_keeps_ordinary_v7_cache_compatible(
     ))
 
     assert result == expected
+
+
+def test_generic_discovery_rejects_pre_authority_contract_cache(
+    monkeypatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE artifacts("
+        "id TEXT PRIMARY KEY, scope_type TEXT, scope_id TEXT, type TEXT, "
+        "status TEXT, content_json TEXT, created_at REAL)"
+    )
+    source_text = "白袍老人摘下面具，自称苍玄。"
+    bible = Bible(
+        characters=[],
+        world=World(visual_style_canonical="测试"),
+    )
+    previous_contract = "screenplay-identity-discovery.v8"
+    previous_hash = portraits.evidence_repository.content_hash({
+        "contract_version": previous_contract,
+        "mode": "targeted",
+        "episode_no": 1,
+        "source_text": source_text,
+        "draft_text": "",
+        "future_text": "",
+        "future_label": "",
+        "bible": bible.model_dump(mode="json"),
+        "existing_resolutions": [],
+        "structural_evidence": [],
+    })
+    conn.execute(
+        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
+        (
+            "pre-authority-contract",
+            "episode",
+            "ep-pre-authority-contract",
+            "screenplay_identity_discovery",
+            "validated",
+            json.dumps({
+                "contract_version": previous_contract,
+                "input_hash": previous_hash,
+                "mode": "targeted",
+                "candidates": [{
+                    "source_label": "白袍老人",
+                    "authority_id": "future-name:legacy-cangxuan",
+                }],
+            }),
+            1.0,
+        ),
+    )
+    conn.commit()
+    phases: list[str] = []
+
+    async def fresh_current(*_args, **_kwargs):
+        phases.append("current")
+        return [{"source_label": "fresh-current"}]
+
+    async def fresh_future(candidates, **_kwargs):
+        phases.append("future")
+        return candidates
+
+    async def fresh_coverage(candidates, **_kwargs):
+        phases.append("coverage")
+        return candidates
+
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    monkeypatch.setattr(portraits, "get_setting", lambda *_args: "true")
+    monkeypatch.setattr(
+        portraits, "extract_current_identity_candidates", fresh_current,
+    )
+    monkeypatch.setattr(
+        portraits, "resolve_future_identity_candidates", fresh_future,
+    )
+    monkeypatch.setattr(
+        portraits,
+        "audit_identity_coverage_from_structural_evidence",
+        fresh_coverage,
+    )
+    monkeypatch.setattr(
+        portraits.evidence_repository,
+        "create_artifact",
+        lambda artifact, **_kwargs: {"id": artifact.type},
+    )
+
+    result = asyncio.run(portraits.discover_character_candidates(
+        source_text,
+        bible,
+        1,
+        scope_id="ep-pre-authority-contract",
+    ))
+
+    assert phases == ["current", "future", "coverage"]
+    assert result == [{"source_label": "fresh-current"}]
 
 
 def test_structural_coverage_parse_failure_stops_before_scene_writing(
@@ -1724,6 +1817,17 @@ def test_future_identity_operation_binds_exact_outbound_semantics(
     operations: list[tuple[str, str]] = []
 
     async def fake_structured(*_args, **kwargs):
+        assert kwargs["operation_id"].startswith(
+            "screenplay.identity.future.v9:"
+        )
+        assert (
+            kwargs["response_format"]["json_schema"]["name"]
+            == "screenplay_future_identity_resolution_v8"
+        )
+        assert (
+            kwargs["call_meta"]["contract_version"]
+            == "screenplay-future-identity.v8"
+        )
         operations.append((kwargs["operation_id"], kwargs["call_meta"]["model"]))
         return portraits.FutureIdentityCandidateResponse(
             known_named=[],
@@ -3246,6 +3350,7 @@ def test_future_identity_accepts_new_name_with_owned_verbatim_evidence(
     fly = next(item for item in resolved if item["source_label"] == "会飞的女人")
     assert fly["name"] == "许师姐"
     assert fly["identity_kind"] == "named"
+    assert fly["authority_id"] == "bible:许师姐"
     # 新真名证据必须由provider逐字拥有，程序不再静默重写。
     assert "许师姐" in fly["future_evidence"]
     assert fly["future_evidence"] in future

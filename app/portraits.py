@@ -61,8 +61,8 @@ STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集�
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
-IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v8"
-FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v7"
+IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v9"
+FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v8"
 STRUCTURAL_IDENTITY_COVERAGE_VERSION = (
     "screenplay-identity-structural-coverage.v5"
 )
@@ -1567,7 +1567,7 @@ async def resolve_future_identity_candidates(
     )
     identity_response_format = _identity_strict_response_format(
         identity_schema,
-        name="screenplay_future_identity_resolution_v7",
+        name="screenplay_future_identity_resolution_v8",
     )
     prompt = f"""任务：只为当前集尚未确认的身份做后续姓名消歧。
 当前未决身份（不可新增列表外人物）：
@@ -1715,7 +1715,7 @@ new_named 依据必须包含 canonical_name，known_named 依据必须包含当�
         identity_provider
     )
     operation_id = (
-        "screenplay.identity.future.v8:"
+        "screenplay.identity.future.v9:"
         + evidence_repository.content_hash({
             "episode_no": episode_no,
             "provider": identity_provider,

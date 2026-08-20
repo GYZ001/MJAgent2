@@ -15,7 +15,7 @@ from app.identity_authority import (
     identity_authority_registry,
 )
 from app.orchestration.state_machine import StateConflict
-from app.schemas import Bible, World
+from app.schemas import Bible, Character, World
 
 
 FIXTURE_PATH = (
@@ -556,6 +556,11 @@ def _structural_cache_payload(
                     identity_scope_fingerprint=identity_scope,
                 )
             ),
+            "materialized_bible_names": (
+                portraits._structural_identity_required_bible_names(
+                    candidates
+                )
+            ),
         })
     return payload
 
@@ -727,9 +732,17 @@ def test_structural_coverage_receipt_rejects_same_key_wrong_authority(
         lambda *_args, **_kwargs: {"id": "art-new"},
     )
 
+    bible = Bible(
+        characters=[Character(
+            name="许清",
+            role="外宗师姐",
+            appearance_canonical="银袍女子，气质冷清",
+        )],
+        world=World(visual_style_canonical="国风"),
+    )
     result = asyncio.run(portraits.ensure_structural_identity_coverage(
         "proj", "ep_711b29204aa9", 1, source_text,
-        _empty_bible(), evidence,
+        bible, evidence,
     ))
 
     assert audit_calls == 1
@@ -737,7 +750,81 @@ def test_structural_coverage_receipt_rejects_same_key_wrong_authority(
     assert {
         (item["canonical_name"], item["authority_id"])
         for item in result["resolutions"]
-    } == {("许清", "bible:许清")}
+    } == {("\u8bb8\u6e05", "bible:\u8bb8\u6e05")}
+
+
+def test_structural_coverage_card_failure_never_mints_validated_cache(
+    monkeypatch,
+) -> None:
+    conn = _coverage_cache_conn()
+    source_text = "银袍女子站在山门前。"
+    evidence = [{
+        "identity_key": "银袍女子",
+        "source_segment_ids": ["SRC0001"],
+        "usage": "visible",
+        "node_key": "S001-N001",
+    }]
+    candidate = {
+        "name": "许清",
+        "source_label": "银袍女子",
+        "identity_kind": "named",
+        "identity_group": "current-1:F3",
+        "authority_id": "bible:许清",
+        "kind": "onscreen",
+        "source_segment_id": "SRC0001",
+        "source_segment_ids": ["SRC0001"],
+        "source_quote": source_text,
+    }
+    audit_calls = 0
+    card_calls = 0
+    artifacts: list[object] = []
+
+    async def fake_audit(*_args, **_kwargs):
+        nonlocal audit_calls
+        audit_calls += 1
+        return [candidate]
+
+    async def failed_cards(*_args, **_kwargs):
+        nonlocal card_calls
+        card_calls += 1
+        return {
+            "checked": 1,
+            "candidates": [candidate],
+            "added": [],
+            "resolutions": [],
+            "errors": ["card failed"],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    monkeypatch.setattr(
+        portraits,
+        "audit_identity_coverage_from_structural_evidence",
+        fake_audit,
+    )
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", failed_cards)
+    monkeypatch.setattr(
+        portraits.evidence_repository,
+        "create_artifact",
+        lambda artifact, **_kwargs: artifacts.append(artifact),
+    )
+
+    first = asyncio.run(portraits.ensure_structural_identity_coverage(
+        "proj", "ep_711b29204aa9", 1, source_text,
+        _empty_bible(), evidence,
+    ))
+    second = asyncio.run(portraits.ensure_structural_identity_coverage(
+        "proj", "ep_711b29204aa9", 1, source_text,
+        _empty_bible(), evidence,
+    ))
+
+    assert first["errors"] == ["card failed"]
+    assert second["errors"] == ["card failed"]
+    assert audit_calls == card_calls == 2
+    assert artifacts == []
+    assert portraits.load_screenplay_character_resolutions(
+        conn, "ep_711b29204aa9"
+    ) == []
 
 
 def test_structural_coverage_cache_hit_retires_all_stale_auto_rows(
@@ -778,7 +865,7 @@ def test_structural_coverage_cache_hit_retires_all_stale_auto_rows(
         "source_label": "旧合同角色",
         "canonical_name": "旧合同角色",
         "identity_group": "current-1:F2",
-        "decision_contract_version": "screenplay-future-identity.v6",
+        "decision_contract_version": "screenplay-future-identity.v7",
     }
     stale_scope = {
         **current,
