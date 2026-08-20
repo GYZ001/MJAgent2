@@ -67,10 +67,10 @@ STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集�
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
-IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v13"
-CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v10"
+IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v14"
+CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v11"
 CURRENT_IDENTITY_EVIDENCE_RECEIPT_VERSION = (
-    "screenplay-current-identity-evidence-receipt.v1"
+    "screenplay-current-identity-evidence-receipt.v2"
 )
 CURRENT_IDENTITY_LITERAL_PROVENANCE = "owned_current_literal.v1"
 CURRENT_IDENTITY_SYNTHETIC_PROVENANCE = "provider_synthetic_functional.v1"
@@ -1023,6 +1023,72 @@ def _current_identity_evidence_receipt_is_valid(
     return False
 
 
+def _current_identity_semantic_signature(item: dict) -> tuple[str, ...]:
+    """Return the identity fields which must agree across owned occurrences."""
+    return (
+        str(item.get("source_label") or "").strip(),
+        str(item.get("identity_kind") or "").strip(),
+        str(item.get("name") or "").strip(),
+        str(item.get("identity_group") or "").strip(),
+        str(item.get("authority_id") or "").strip(),
+        str(item.get("existing_route_name") or "").strip(),
+        str(item.get("source_label_provenance") or "").strip(),
+        "1" if item.get("materialization_compatible") else "0",
+        str(item.get("_current_response_group_key") or "").strip(),
+    )
+
+
+def _current_identity_receipt_sort_key(value: dict) -> tuple[object, ...]:
+    return (
+        str(value.get("origin") or ""),
+        str(value.get("source_hash") or ""),
+        int(value.get("start_offset") or 0),
+        int(value.get("end_offset") or 0),
+        str(value.get("evidence_id") or ""),
+    )
+
+
+def _merge_current_identity_occurrences(options: list[dict]) -> dict:
+    """Merge one exact semantic identity while retaining every typed receipt."""
+    if not options:
+        raise ValueError("current identity occurrence merge requires candidates")
+    ordered = sorted(
+        options,
+        key=lambda item: _current_identity_receipt_sort_key(
+            item.get("source_evidence_receipt") or {}
+        ),
+    )
+    strongest = next(
+        (item for item in ordered if item.get("kind") == "onscreen"),
+        ordered[0],
+    )
+    receipt_by_id: dict[str, dict] = {}
+    for item in ordered:
+        raw_receipts = item.get("source_evidence_receipts")
+        receipts = (
+            raw_receipts
+            if isinstance(raw_receipts, list)
+            else [item.get("source_evidence_receipt")]
+        )
+        for raw in receipts:
+            if not isinstance(raw, dict):
+                continue
+            evidence_id = str(raw.get("evidence_id") or "").strip()
+            if evidence_id:
+                receipt_by_id.setdefault(evidence_id, dict(raw))
+    receipts = sorted(receipt_by_id.values(), key=_current_identity_receipt_sort_key)
+    source_segment_ids = list(dict.fromkeys(
+        str(receipt.get("source_segment_id") or "").strip()
+        for receipt in receipts
+        if str(receipt.get("source_segment_id") or "").strip()
+    ))
+    return {
+        **strongest,
+        "source_evidence_receipts": receipts,
+        "source_segment_ids": source_segment_ids,
+    }
+
+
 def _project_current_identity_response(
     value: CurrentIdentityCandidateResponse,
     *,
@@ -1037,17 +1103,11 @@ def _project_current_identity_response(
     """Resolve the RF10 K/N/F wire through backend-owned evidence receipts."""
     errors: list[str] = []
     projected: list[dict] = []
-    seen_labels: dict[str, str] = {}
-    seen_label_groups: dict[str, set[str]] = {}
-
     expected_refs = set(evidence_by_ref)
-    actual_refs = set(value.decisions)
-    missing_refs = sorted(expected_refs - actual_refs)
-    extra_refs = sorted(actual_refs - expected_refs)
-    if missing_refs:
-        errors.append(f"current decisions 缺少 evidence refs：{missing_refs}")
-    if extra_refs:
-        errors.append(f"current decisions 含未知 evidence refs：{extra_refs}")
+    if set(value.model_fields_set) != {"k", "n", "f"}:
+        errors.append("current identity root keys 非闭合")
+    if len(value.k) + len(value.n) + len(value.f) > 192:
+        errors.append("current identity decisions 过多")
 
     all_records = list((all_evidence_by_id or {}).values()) or list(
         evidence_by_ref.values()
@@ -1132,11 +1192,6 @@ def _project_current_identity_response(
                 f"{source_label}"
             )
 
-        if source_label in seen_labels:
-            errors.append(f"source_label 重复：{source_label}")
-        else:
-            seen_labels[source_label] = identity_kind
-
         prior_functional_group = (
             (prior_functional_groups or {}).get(functional_key)
             if identity_kind == "functional"
@@ -1212,8 +1267,6 @@ def _project_current_identity_response(
                 )
             )
             provenance = CURRENT_IDENTITY_LITERAL_PROVENANCE
-        seen_label_groups.setdefault(source_label, set()).add(identity_group)
-
         evidence = _bounded_owned_identity_evidence(
             evidence_text,
             anchors=[source_label] if literal else [],
@@ -1237,6 +1290,8 @@ def _project_current_identity_response(
             "source_quote": evidence_text,
             "source_label_provenance": provenance,
             "source_evidence_receipt": dict(record),
+            "source_evidence_receipts": [dict(record)],
+            "source_segment_ids": [str(record.get("source_segment_id") or "")],
             "_current_materialization_compatible": bool(
                 materialization_compatible or not authority_id
             ),
@@ -1249,74 +1304,94 @@ def _project_current_identity_response(
             "_typed_source_evidence_owned": True,
         })
 
-    for evidence_ref, record in evidence_by_ref.items():
-        decisions = value.decisions.get(evidence_ref)
-        if decisions is None:
+    for item in value.k:
+        decision_id = str(item.decision_id or "")
+        selected = known_decisions.get(decision_id)
+        evidence_ref = str((selected or {}).get("evidence_ref") or "")
+        record = evidence_by_ref.get(evidence_ref)
+        if selected is None or record is None:
+            errors.append(f"current K decision 越界：{decision_id}")
             continue
-        if set(decisions.model_fields_set) != {"k", "n", "f"}:
-            errors.append(
-                f"current evidence decision keys 非闭合：{evidence_ref}"
-            )
-        if len(decisions.k) + len(decisions.n) + len(decisions.f) > 64:
-            errors.append(f"current evidence decisions 过多：{evidence_ref}")
-        for item in decisions.k:
-            decision_id = str(item.decision_id or "")
-            selected = known_decisions.get(decision_id)
-            if (
-                selected is None
-                or selected.get("evidence_ref") != evidence_ref
-            ):
-                errors.append(
-                    f"current K decision 越界：{evidence_ref}:{decision_id}"
-                )
-                continue
-            append_candidate(
-                source_label=str(selected.get("source_label") or ""),
-                canonical_name=str(selected.get("canonical_name") or ""),
-                identity_kind="named",
-                functional_key="",
-                kind=item.kind,
-                record=record,
-                authority_id=str(selected.get("authority_id") or ""),
-                authority_group=str(selected.get("identity_group") or ""),
-                known_authority=bool(
-                    selected.get("decision_type") == "registered_authority"
-                    or selected.get("known_authority")
-                ),
-                materialization_compatible=bool(
-                    selected.get("materialization_compatible")
-                ),
-                fixed_identity_group=(
-                    str(selected.get("identity_group") or "")
-                    if selected.get("decision_type") == "prior_named"
-                    else ""
-                ),
-            )
-        for item in decisions.n:
-            append_candidate(
-                source_label=item.identity_label,
-                canonical_name=item.identity_label,
-                identity_kind="named",
-                functional_key="",
-                kind=item.kind,
-                record=record,
-            )
-        for item in decisions.f:
-            append_candidate(
-                source_label=item.source_label,
-                canonical_name="",
-                identity_kind="functional",
-                functional_key=item.functional_identity_key,
-                kind=item.kind,
-                record=record,
-            )
+        append_candidate(
+            source_label=str(selected.get("source_label") or ""),
+            canonical_name=str(selected.get("canonical_name") or ""),
+            identity_kind="named",
+            functional_key="",
+            kind=item.kind,
+            record=record,
+            authority_id=str(selected.get("authority_id") or ""),
+            authority_group=str(selected.get("identity_group") or ""),
+            known_authority=bool(
+                selected.get("decision_type") == "registered_authority"
+                or selected.get("known_authority")
+            ),
+            materialization_compatible=bool(
+                selected.get("materialization_compatible")
+            ),
+            fixed_identity_group=(
+                str(selected.get("identity_group") or "")
+                if selected.get("decision_type") == "prior_named"
+                else ""
+            ),
+        )
+    for item in value.n:
+        evidence_ref = str(item.evidence_ref or "")
+        record = evidence_by_ref.get(evidence_ref)
+        if evidence_ref not in expected_refs or record is None:
+            errors.append(f"current N evidence_ref 越界：{evidence_ref}")
+            continue
+        append_candidate(
+            source_label=item.identity_label,
+            canonical_name=item.identity_label,
+            identity_kind="named",
+            functional_key="",
+            kind=item.kind,
+            record=record,
+        )
+    for item in value.f:
+        evidence_ref = str(item.evidence_ref or "")
+        record = evidence_by_ref.get(evidence_ref)
+        if evidence_ref not in expected_refs or record is None:
+            errors.append(f"current F evidence_ref 越界：{evidence_ref}")
+            continue
+        append_candidate(
+            source_label=item.source_label,
+            canonical_name="",
+            identity_kind="functional",
+            functional_key=item.functional_identity_key,
+            kind=item.kind,
+            record=record,
+        )
 
-    for source_label, groups in seen_label_groups.items():
-        if len(groups) > 1:
-            errors.append(
-                f"current 同一 source_label 对应多个 identity_group：{source_label}"
-            )
-    return projected, errors
+    merged: list[dict] = []
+    by_label: dict[str, list[dict]] = {}
+    for item in projected:
+        by_label.setdefault(str(item.get("source_label") or "").strip(), []).append(
+            item
+        )
+    for source_label, options in by_label.items():
+        signatures = {
+            _current_identity_semantic_signature(item) for item in options
+        }
+        synthetic_repeat = len(options) > 1 and any(
+            item.get("source_label_provenance")
+            == CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+            for item in options
+        )
+        if len(signatures) != 1 or synthetic_repeat:
+            errors.append(f"source_label 重复：{source_label}")
+            groups = {
+                str(item.get("identity_group") or "").strip() for item in options
+            }
+            if len(groups) > 1:
+                errors.append(
+                    "current 同一 source_label 对应多个 identity_group："
+                    f"{source_label}"
+                )
+            merged.extend(options)
+            continue
+        merged.append(_merge_current_identity_occurrences(options))
+    return merged, errors
 
 
 def _current_identity_projection_errors(candidates: list[dict]) -> list[str]:
@@ -1984,6 +2059,7 @@ class CurrentNewNamedIdentityDecision(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    evidence_ref: str
     identity_label: str = Field(min_length=1, max_length=16)
     kind: Literal["onscreen", "mentioned"]
 
@@ -1993,27 +2069,20 @@ class CurrentFunctionalIdentityDecision(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    evidence_ref: str
     source_label: str = Field(min_length=1, max_length=16)
     functional_identity_key: str = Field(min_length=1, max_length=64)
     kind: Literal["onscreen", "mentioned"]
 
 
-class CurrentEvidenceIdentityDecisions(BaseModel):
-    """All identities selected from one request-local evidence ref."""
+class CurrentIdentityCandidateResponse(BaseModel):
+    """Global closed RF11 K/N/F wire for current-source discovery."""
 
     model_config = ConfigDict(extra="forbid")
 
     k: list[CurrentKnownIdentityDecision]
     n: list[CurrentNewNamedIdentityDecision]
     f: list[CurrentFunctionalIdentityDecision]
-
-
-class CurrentIdentityCandidateResponse(BaseModel):
-    """Exact evidence-keyed RF10 wire for current-source discovery."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    decisions: dict[str, CurrentEvidenceIdentityDecisions]
 
 
 class FutureIdentityCandidateResponse(BaseModel):
@@ -2086,12 +2155,14 @@ def _current_identity_schema(
     *,
     known_decision_ids: list[str],
 ) -> dict:
-    """Build one shared K/N/F definition under an exact evidence-ref map.
+    """Build the global closed RF11 K/N/F schema.
 
-    Keeping all evidence properties pointed at one shared definition keeps the
-    strict provider contract below the common 100-property implementation
-    limit.  K tokens carry their evidence ref and are checked again locally;
-    ``K:NONE`` is only a schema-safe sentinel when this batch has no K option.
+    RF10 required one K/N/F object for every evidence span.  That shape made a
+    model classify occurrences instead of identities and structurally invited
+    the same person dozens of times.  RF11 emits only selected identities in
+    three global arrays.  K remains an opaque evidence-bound backend token;
+    N/F carry one explicit request-local evidence ref and are revalidated
+    locally.  The shape stays inside the provider-proven strict subset.
     """
     refs = list(dict.fromkeys(
         str(value or "").strip()
@@ -2108,59 +2179,36 @@ def _current_identity_schema(
 
     known_item = CurrentKnownIdentityDecision.model_json_schema()
     known_item["properties"]["decision_id"]["enum"] = decision_ids
+    new_item = CurrentNewNamedIdentityDecision.model_json_schema()
+    new_item["properties"]["evidence_ref"]["enum"] = refs
+    functional_item = CurrentFunctionalIdentityDecision.model_json_schema()
+    functional_item["properties"]["evidence_ref"]["enum"] = refs
     definitions = {
         "CurrentKnownIdentityDecision": known_item,
-        "CurrentNewNamedIdentityDecision": (
-            CurrentNewNamedIdentityDecision.model_json_schema()
-        ),
-        "CurrentFunctionalIdentityDecision": (
-            CurrentFunctionalIdentityDecision.model_json_schema()
-        ),
-        "CurrentEvidenceIdentityDecisions": {
-            "type": "object",
-            "properties": {
-                "k": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/$defs/CurrentKnownIdentityDecision",
-                    },
-                    "maxItems": 64,
-                },
-                "n": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/$defs/CurrentNewNamedIdentityDecision",
-                    },
-                    "maxItems": 64,
-                },
-                "f": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/$defs/CurrentFunctionalIdentityDecision",
-                    },
-                    "maxItems": 64,
-                },
-            },
-            "required": ["k", "n", "f"],
-            "additionalProperties": False,
-        },
-    }
-    decisions = {
-        "type": "object",
-        "properties": {
-            evidence_ref: {
-                "$ref": "#/$defs/CurrentEvidenceIdentityDecisions",
-            }
-            for evidence_ref in refs
-        },
-        "required": refs,
-        "additionalProperties": False,
+        "CurrentNewNamedIdentityDecision": new_item,
+        "CurrentFunctionalIdentityDecision": functional_item,
     }
     return {
         "$defs": definitions,
         "type": "object",
-        "properties": {"decisions": decisions},
-        "required": ["decisions"],
+        "properties": {
+            "k": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/CurrentKnownIdentityDecision"},
+                "maxItems": 64,
+            },
+            "n": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/CurrentNewNamedIdentityDecision"},
+                "maxItems": 64,
+            },
+            "f": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/CurrentFunctionalIdentityDecision"},
+                "maxItems": 64,
+            },
+        },
+        "required": ["k", "n", "f"],
         "additionalProperties": False,
     }
 
