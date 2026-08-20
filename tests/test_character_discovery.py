@@ -6514,6 +6514,7 @@ def test_attempt16_old_rf10_wire_fails_once_before_downstream(monkeypatch) -> No
     [
         "tamper", "non_dict", "duplicate", "out_of_order",
         "ids_mismatch", "primary_mismatch", "wrong_label",
+        "ids_integer", "ids_mapping", "ids_whitespace", "ids_duplicate",
     ],
 )
 def test_current_identity_receipt_v2_bundle_is_fail_closed(
@@ -6549,6 +6550,18 @@ def test_current_identity_receipt_v2_bundle_is_fail_closed(
         ]["source_segment_id"]
     elif mutation == "wrong_label":
         candidate["source_label"] = "银袍女子"
+    elif mutation == "ids_integer":
+        candidate["source_segment_ids"] = 1
+    elif mutation == "ids_mapping":
+        candidate["source_segment_ids"] = {"SRC0001": 1}
+    elif mutation == "ids_whitespace":
+        candidate["source_segment_ids"][0] = (
+            " " + candidate["source_segment_ids"][0]
+        )
+    elif mutation == "ids_duplicate":
+        candidate["source_segment_ids"].append(
+            candidate["source_segment_ids"][0]
+        )
 
     with pytest.raises(
         portraits.ContentGenerationError,
@@ -6709,11 +6722,12 @@ def test_persist_repairs_invalid_adjudication_receipt_and_keeps_valid_bytes(
     source_hash = portraits.evidence_repository.content_hash(source_text)
     scope = portraits.screenplay_identity_scope_fingerprint(1, source_text)
 
-    def adjudicated(source_id: str) -> dict:
+    def adjudicated(source_id: str | list[str]) -> dict:
+        source_ids = [source_id] if isinstance(source_id, str) else source_id
         receipt_payload = {
             "version": "screenplay-ir-identity-adjudicator.v2",
             "source_hash": source_hash,
-            "source_segment_ids": [source_id],
+            "source_segment_ids": source_ids,
         }
         return {
             "source_label": "守卫",
@@ -6736,8 +6750,8 @@ def test_persist_repairs_invalid_adjudication_receipt_and_keeps_valid_bytes(
                 portraits.IDENTITY_ADJUDICATION_SOURCE_PROVENANCE
             ),
             "decision_source": "screenplay-ir-identity-adjudicator.v2",
-            "evidence_source_ids": [source_id],
-            "source_segment_ids": [source_id],
+            "evidence_source_ids": source_ids,
+            "source_segment_ids": source_ids,
             "identity_adjudication_receipt": {
                 **receipt_payload,
                 "hash": portraits.evidence_repository.content_hash(
@@ -6747,6 +6761,17 @@ def test_persist_repairs_invalid_adjudication_receipt_and_keeps_valid_bytes(
         }
 
     first = adjudicated("SRC0001")
+    for invalid_source_ids in (["SRC9999"], ["SRC0002", "SRC0001"]):
+        invalid = adjudicated(invalid_source_ids)
+        assert portraits._identity_adjudication_receipt_is_valid(
+            invalid,
+            source_text=None,
+        )
+        assert not portraits.screenplay_identity_resolution_is_current_for_source(
+            invalid,
+            episode_no=1,
+            source_text=source_text,
+        )
     bad = json.loads(json.dumps(first, ensure_ascii=False))
     bad["identity_adjudication_receipt"]["hash"] = "bad"
     conn.execute(

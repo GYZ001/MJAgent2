@@ -553,13 +553,22 @@ async def adjudicate_screenplay_ir_identities(
                     )
                 except Exception:  # noqa: BLE001 - manual callers have no run owner
                     pass
+                persisted_resolutions = persist_screenplay_character_resolutions(
+                    conn,
+                    episode_id,
+                    new_resolutions,
+                    expected_active_run_id=expected_run_id,
+                    expected_revision_id=expected_revision_id,
+                )
                 episode["character_resolutions"] = (
-                    persist_screenplay_character_resolutions(
-                        conn,
-                        episode_id,
-                        new_resolutions,
-                        expected_active_run_id=expected_run_id,
-                        expected_revision_id=expected_revision_id,
+                    screenplay_character_resolutions_for_source(
+                        persisted_resolutions,
+                        episode_no=int(
+                            episode.get("episode_no")
+                            or candidate.episode_no
+                            or 0
+                        ),
+                        source_text=source_text,
                     )
                 )
     adjudication_audit = [{

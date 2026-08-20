@@ -2544,6 +2544,7 @@ def test_identity_adjudication_calls_ai_once_for_conflicting_exact_authorities(
         "canonical_name": "来人",
         "resolution": "functional_identity",
         "identity_group": "episode:visitor",
+        "decision_provenance": "manual",
     })
     episode = {
         "id": "ep-ir-conflict",

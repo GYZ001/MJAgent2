@@ -4616,9 +4616,25 @@ def _identity_adjudication_receipt_is_valid(
         or source_ids != evidence_source_ids
     ):
         return False
+    if source_text is None:
+        # Persistence compares validity classes without necessarily owning the
+        # episode source.  The source-aware read fence below performs the
+        # stronger membership/order proof whenever the source is available.
+        return True
+    if payload["source_hash"] != evidence_repository.content_hash(source_text):
+        return False
+    indexed_source_ids = [
+        segment.segment_id for segment in index_source_segments(source_text)
+    ]
+    selected_source_ids = set(source_ids)
     return bool(
-        source_text is None
-        or payload["source_hash"] == evidence_repository.content_hash(source_text)
+        selected_source_ids.issubset(indexed_source_ids)
+        and source_ids
+        == [
+            source_id
+            for source_id in indexed_source_ids
+            if source_id in selected_source_ids
+        ]
     )
 
 

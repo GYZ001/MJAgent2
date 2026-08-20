@@ -1753,9 +1753,10 @@ async def test_resume_replays_persisted_identity_before_first_qa(monkeypatch):
                 "target_duration_s": 50,
                 "character_resolutions": [{
                     "source_label": "青衣人",
-                    "canonical_name": "路人甲",
-                    "resolution": "functional_extra",
-                }],
+                        "canonical_name": "路人甲",
+                        "resolution": "functional_extra",
+                        "decision_provenance": "manual",
+                    }],
             },
             source_text="青衣人拦路。",
             bible=Bible(characters=[], world=World(visual_style_canonical="测试画风")),
