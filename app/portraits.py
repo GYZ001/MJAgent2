@@ -2213,7 +2213,9 @@ async def resolve_future_identity_candidates(
         # on the same final card authority.  The resolution is persisted only
         # after ``ensure_character_card`` succeeds, so this does not claim a
         # durable Bible identity before materialization.
-        authority_id = _canonical_named_authority_id(canonical_name)
+        authority_id = str(candidate.get("authority_id") or "").strip()
+        if not authority_id:
+            authority_id = _canonical_named_authority_id(canonical_name)
         authority = authority_by_id.setdefault(authority_id, {
             "authority_id": authority_id,
             "canonical_name": canonical_name,

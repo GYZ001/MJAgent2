@@ -3449,6 +3449,39 @@ def test_current_identity_rf10_rejects_unbound_provider_output_once(
     assert downstream == []
 
 
+def test_current_identity_rf10_unsupported_schema_is_one_call(
+    monkeypatch,
+) -> None:
+    calls = 0
+    original = hiagent.ProviderError(
+        "strict response_format unsupported",
+        retryable=False,
+        failure_kind="response_format_unsupported",
+    )
+
+    async def fake_chat(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["call_meta"]["response_format_required"] is True
+        assert kwargs["call_meta"]["disable_provider_retries"] is True
+        assert kwargs["call_meta"][
+            "disable_provider_candidate_fallback"
+        ] is True
+        assert kwargs["call_meta"]["disable_reasoning_fallback"] is True
+        raise original
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(portraits.discover_character_candidates(
+            "门卫守在山门。",
+            Bible(world=World(visual_style_canonical="国风"), characters=[]),
+            1,
+        ))
+
+    assert caught.value is original
+    assert calls == 1
+
+
 def test_current_identity_empty_owned_catalog_skips_provider(monkeypatch) -> None:
     async def forbidden(*_args, **_kwargs):
         raise AssertionError("empty current evidence catalog must skip provider")
