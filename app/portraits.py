@@ -99,6 +99,35 @@ def _canonical_named_authority_id(canonical_name: str) -> str:
     return f"bible:{value}"
 
 
+def _bounded_owned_identity_evidence(
+    evidence_text: str,
+    *,
+    anchors: list[str],
+    max_chars: int = 120,
+) -> str:
+    """Return one exact bounded window which retains an authority anchor."""
+    text = str(evidence_text or "")
+    limit = max(1, int(max_chars))
+    matches = [
+        (text.find(anchor), -len(anchor), anchor)
+        for anchor in dict.fromkeys(
+            str(value or "").strip() for value in anchors
+        )
+        if anchor and anchor in text
+    ]
+    if not matches:
+        return ""
+    offset, _negative_length, anchor = min(matches)
+    if len(text) <= limit:
+        return text.strip()
+    left_room = max(0, (limit - len(anchor)) // 2)
+    start = max(0, offset - left_room)
+    end = min(len(text), start + limit)
+    start = max(0, end - limit)
+    excerpt = text[start:end].strip()
+    return excerpt if anchor in excerpt else ""
+
+
 # ---------- 原文片段抽取（纯本地，不调模型） ----------
 
 def extract_character_fragments(text: str, name: str, *, window: int = FRAGMENT_WINDOW,
@@ -1817,6 +1846,10 @@ async def resolve_future_identity_candidates(
                     ),
                     {},
                 )
+                bounded_evidence = _bounded_owned_identity_evidence(
+                    str(evidence.get("text") or ""),
+                    anchors=anchors,
+                )
                 common = {
                     "resolution_kind": resolution_kind,
                     "identity_kind": "named",
@@ -1826,7 +1859,7 @@ async def resolve_future_identity_candidates(
                     "authority_id": str(
                         selected.get("authority_id") or ""
                     ),
-                    "future_evidence": str(evidence.get("text") or ""),
+                    "future_evidence": bounded_evidence,
                 }
             elif resolution_kind == "new_named":
                 canonical_name = str(
@@ -1836,6 +1869,10 @@ async def resolve_future_identity_candidates(
                     str(value.reveal_evidence_ids.get(group_key) or ""),
                     {},
                 )
+                bounded_evidence = _bounded_owned_identity_evidence(
+                    str(evidence.get("text") or ""),
+                    anchors=[canonical_name],
+                )
                 common = {
                     "resolution_kind": resolution_kind,
                     "identity_kind": "named",
@@ -1844,7 +1881,7 @@ async def resolve_future_identity_candidates(
                         _canonical_named_authority_id(canonical_name)
                         if canonical_name.strip() else ""
                     ),
-                    "future_evidence": str(evidence.get("text") or ""),
+                    "future_evidence": bounded_evidence,
                 }
             else:
                 common = {
@@ -1877,9 +1914,17 @@ async def resolve_future_identity_candidates(
                 errors.append(
                     f"future identity {field_name} keys 不闭合"
                 )
-        existing_canonical_names = {
-            str(authority.get("canonical_name") or "")
+        existing_identity_names = {
+            name
             for authority in authority_by_id.values()
+            for name in (
+                str(authority.get("canonical_name") or ""),
+                *[
+                    str(value)
+                    for value in authority.get("aliases") or []
+                ],
+            )
+            if name
         }
         for group_key in group_keys:
             selected_id = str(value.decisions.get(group_key) or "")
@@ -1952,7 +1997,7 @@ async def resolve_future_identity_candidates(
                 errors.append(
                     f"future identity NEW 真名过长：{group_key}"
                 )
-            if canonical_name in existing_canonical_names:
+            if canonical_name in existing_identity_names:
                 errors.append(
                     "future identity NEW 不得重新签发已有 authority："
                     f"{group_key}"
@@ -2082,7 +2127,7 @@ async def resolve_future_identity_candidates(
             ),
             "future_evidence": str(
                 resolution.get("future_evidence") or ""
-            )[:120],
+            ),
             "decision_contract_version": FUTURE_IDENTITY_DECISION_VERSION,
         })
     return merged
@@ -4662,7 +4707,7 @@ async def ensure_cards_for_text(
     # Automatic decisions are inputs to the next discovery pass only when all
     # three authority fences match the current owned source.  Older coverage,
     # future-wire or source epochs must be re-adjudicated before influencing a
-    # strict v8 prompt; explicitly durable manual/Bible decisions survive.
+    # the current strict prompt; explicitly durable manual/Bible decisions survive.
     existing_resolutions = [
         item for item in existing_resolutions
         if screenplay_identity_resolution_is_current_for_source(

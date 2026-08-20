@@ -3811,6 +3811,64 @@ def test_future_identity_accepts_new_name_with_owned_verbatim_evidence(
     assert fly["future_evidence"] in future
 
 
+@pytest.mark.parametrize("known_authority", [False, True])
+def test_future_identity_persists_bounded_evidence_with_authority_anchor(
+    monkeypatch,
+    known_authority: bool,
+) -> None:
+    future = (
+        "“黑衣人"
+        + "缓慢向前走。" * 35
+        + "最后摘下面具说道我叫丁力。”"
+    )
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "黑衣人",
+                "canonical_name": "丁力",
+                "identity_kind": "named",
+            }],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    bible_characters = [
+        Character(
+            name="丁力",
+            role="重要配角",
+            appearance_canonical="黑衣男子，短发利落，身形健硕",
+        )
+    ] if known_authority else []
+    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
+        [{
+            "name": "黑衣人",
+            "source_label": "黑衣人",
+            "identity_kind": "functional",
+            "identity_group": "current-1:F1",
+            "kind": "onscreen",
+        }],
+        source_text="黑衣人站在门口。",
+        future_text=future,
+        bible=Bible(
+            world=World(visual_style_canonical="国风"),
+            characters=bible_characters,
+        ),
+        episode_no=1,
+    ))
+
+    assert calls == 1
+    evidence = resolved[0]["future_evidence"]
+    assert 0 < len(evidence) <= 120
+    assert "丁力" in evidence
+    assert evidence in future
+    assert resolved[0]["authority_id"] == "bible:丁力"
+
+
 def test_future_identity_rejects_name_absent_from_window(monkeypatch) -> None:
     """真名不在后续窗口时（模型臆测），即便声称 named 也不得取得解析，防捏造约束不放松。"""
     future = "绿袍男子恭敬地说道，许师姐好手段。许师姐已经到了凝气第七层。" * 2
