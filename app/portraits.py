@@ -1077,16 +1077,31 @@ def _merge_current_identity_occurrences(options: list[dict]) -> dict:
             if evidence_id:
                 receipt_by_id.setdefault(evidence_id, dict(raw))
     receipts = sorted(receipt_by_id.values(), key=_current_identity_receipt_sort_key)
+    # The singular receipt is compatibility-only in RF11.  Keep it derivable
+    # from the durable v2 list: the canonical first receipt is the primary,
+    # while the candidate kind is still the strongest occurrence across all
+    # receipts.  We intentionally do not encode an unverifiable per-receipt
+    # kind inside the backend evidence seal.
+    primary_receipt = receipts[0] if receipts else None
     source_segment_ids = list(dict.fromkeys(
         str(receipt.get("source_segment_id") or "").strip()
         for receipt in receipts
         if str(receipt.get("source_segment_id") or "").strip()
     ))
-    return {
+    merged = {
         **strongest,
         "source_evidence_receipts": receipts,
         "source_segment_ids": source_segment_ids,
     }
+    if primary_receipt is not None:
+        merged.update({
+            "source_evidence_receipt": dict(primary_receipt),
+            "source_segment_id": str(
+                primary_receipt.get("source_segment_id") or ""
+            ),
+            "source_quote": str(primary_receipt.get("text") or ""),
+        })
+    return merged
 
 
 def _project_current_identity_response(
@@ -1106,8 +1121,9 @@ def _project_current_identity_response(
     expected_refs = set(evidence_by_ref)
     if set(value.model_fields_set) != {"k", "n", "f"}:
         errors.append("current identity root keys 非闭合")
-    if len(value.k) + len(value.n) + len(value.f) > 192:
-        errors.append("current identity decisions 过多")
+    for branch, items in (("k", value.k), ("n", value.n), ("f", value.f)):
+        if len(items) > 64:
+            errors.append(f"current identity {branch} decisions 过多")
 
     all_records = list((all_evidence_by_id or {}).values()) or list(
         evidence_by_ref.values()
@@ -1698,7 +1714,7 @@ async def _discover_character_candidates_legacy(
         )
         current_response_format = _identity_strict_response_format(
             current_schema,
-            name="screenplay_current_identity_discovery_v10",
+            name="screenplay_current_identity_discovery_v11",
         )
         prompt = f"""任务：为第 {episode_no} 集做人物身份增量预检。请用语义和上下文判断，
 不要依赖服饰、性别、年龄或称谓后缀的固定词表。
@@ -1719,18 +1735,19 @@ async def _discover_character_candidates_legacy(
 {json.dumps(existing_resolution_projection, ensure_ascii=False, separators=(',', ':'))}
 
 规则：
-1. decisions 必须精确包含目录中全部 E ref；每个 E 都显式输出 k/n/f 三个数组，
-   无结果用 []。人物只能写在其逐字证据所在 E 下；同一 E 可有多人。
-2. 已登记身份只可选 k：decision_id 精确复制 K 目录，kind 必须属于该 K 的 allowed_kinds；
+1. root 只输出一次 k/n/f 三个全局数组，不得输出 decisions，也无需覆盖没有人物的 E。
+   每个身份/称谓只输出一次，从它的 owned 证据中选最清晰的 E；同一 E 可支持多人。
+2. 已登记身份只可选 k：decision_id 精确复制 K 目录，该 token 已绑定 E；
+   kind 必须属于该 K 的 allowed_kinds；
    不得把 K 目录中的 source_label 写进 n/f。只允许 mentioned 的 K 没有可安全物化的最终人物卡
    authority；若人物实际出镜则必须停止而不能谎报 mentioned 或另造身份。
-3. 当前阶段的新 named 只用于逐字自称谓：n 每项只写 identity_label 与 kind，
-   identity_label 必须是当前 E text 的连续逐字子串；后端会令 canonical_name=source_label。
+3. 当前阶段的新 named 只用于逐字自称谓：n 每项写 evidence_ref、identity_label 与 kind，
+   identity_label 必须是所选 E text 的连续逐字子串；后端会令 canonical_name=source_label。
    任何“称谓 A 其实是名字 B”的别名判断，即使 A、B 同时出现在当前输入，也必须先判为
    functional，交由后续带 authority_id 的权威绑定；不得用同场共现代替同一性证据。
 4. 若是一次性角色，别名待后续确认，或无法确认稳定真名，放入 f；每项填写
-   source_label、functional_identity_key、kind，不得携带 canonical/authority/evidence。
-   source_label 尽量逐字复用当前 E text；若为区分同段多个无名实体而
+   evidence_ref、source_label、functional_identity_key、kind，不得携带 canonical/authority/evidence。
+   source_label 尽量逐字复用所选 E text；若为区分同段多个无名实体而
    必须使用非逐字的稳定描述，只能保留为 functional，后端会隔离为 synthetic identity，
    不得将它当作别名或真名。
 5. 若身份投影中的 source_label 混入动作或表演提示，必须结合对应 line_context 判断真正说话人；
@@ -1742,7 +1759,9 @@ async def _discover_character_candidates_legacy(
    - 若它与“本集已有功能身份决议”中的某人是同一人，精确填写该人的 canonical_name。
    - 否则填写本次响应内的不透明分组 ID（如 F1、F2）；不同 source_label 若明确是同一人必须共用同一 ID。
    - 无法确认是否同一人时必须使用不同 ID，禁止根据称谓字面相似猜测。
-7. 每个人只输出一次；不得因共用证据合并人物，也不得把同一 source_label 放入多个分支。
+7. 每个人只输出一次；不得因多次出现重复输出，不得因共用证据合并人物，
+   也不得把同一 source_label 放入多个分支。后端只会聚合语义签名完全相同的合法重复，
+   任何跨分支、跨分组或非逐字 synthetic 重复都会硬失败。
 只输出 response_format 约束的 JSON，不要复述证据、Schema 或规则。"""
 
         def validate_current_response(
@@ -1765,7 +1784,7 @@ async def _discover_character_candidates_legacy(
             model_type=CurrentIdentityCandidateResponse,
             validate=validate_current_response,
             operation_id=(
-                f"screenplay.identity.current.v5:{episode_no}:{current_batch}:"
+                f"screenplay.identity.current.v6:{episode_no}:{current_batch}:"
                 + evidence_repository.content_hash({
                     "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
                     "current_identity_version": CURRENT_IDENTITY_DECISION_VERSION,
@@ -1964,6 +1983,15 @@ async def _discover_character_candidates_legacy(
     # 具名证据唯一时优先；出现两个不同真名时不猜，降级为一次性角色。
     def strongest_occurrence(options: list[dict]) -> dict:
         """Preserve an onscreen owned receipt independent of batch order."""
+        signatures = {
+            _current_identity_semantic_signature(item) for item in options
+        }
+        if len(signatures) == 1 and not any(
+            item.get("source_label_provenance")
+            == CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+            for item in options
+        ):
+            return _merge_current_identity_occurrences(options)
         return next(
             (item for item in options if item.get("kind") == "onscreen"),
             options[0],
@@ -2387,21 +2415,74 @@ def _attach_candidate_source_evidence(
         candidate.pop("_current_materialization_compatible", None)
         candidate.pop("_current_response_group_key", None)
         current_receipt = candidate.get("source_evidence_receipt")
+        current_receipts = candidate.get("source_evidence_receipts")
         label = str(candidate.get("source_label") or "").strip()
         cited_id = str(candidate.get("source_segment_id") or "").strip()
         cited = by_id.get(cited_id)
-        if current_receipt is not None:
-            if not _current_identity_evidence_receipt_is_valid(
-                current_receipt,
-                source_text=source_text,
-                draft_text=draft_text,
-            ):
+        if current_receipt is not None or current_receipts is not None:
+            def reject_current_receipts(reason: str) -> None:
+                candidate["source_evidence_receipt"] = None
+                candidate["source_evidence_receipts"] = []
                 candidate["source_segment_id"] = ""
+                candidate["source_segment_ids"] = []
                 candidate["source_quote"] = ""
-                continue
-            candidate["source_segment_id"] = str(
+                raise ContentGenerationError(
+                    f"current identity evidence receipt v2 无效：{reason}"
+                )
+
+            if (
+                not isinstance(current_receipt, dict)
+                or not isinstance(current_receipts, list)
+                or not current_receipts
+                or any(not isinstance(value, dict) for value in current_receipts)
+            ):
+                reject_current_receipts("缺少完整 receipt list")
+            receipts = [dict(value) for value in current_receipts]
+            if any(
+                not _current_identity_evidence_receipt_is_valid(
+                    value,
+                    source_text=source_text,
+                    draft_text=draft_text,
+                )
+                for value in receipts
+            ):
+                reject_current_receipts("seal 或 owned source epoch 不匹配")
+            evidence_ids = [
+                str(value.get("evidence_id") or "").strip() for value in receipts
+            ]
+            if not all(evidence_ids) or len(evidence_ids) != len(set(evidence_ids)):
+                reject_current_receipts("evidence_id 空值或重复")
+            canonical_receipts = sorted(
+                receipts, key=_current_identity_receipt_sort_key
+            )
+            if receipts != canonical_receipts:
+                reject_current_receipts("receipt list 顺序不是 canonical")
+            if current_receipt != receipts[0]:
+                reject_current_receipts("singular primary 不是 canonical 首项")
+            expected_source_ids = list(dict.fromkeys(
+                str(value.get("source_segment_id") or "").strip()
+                for value in receipts
+                if str(value.get("source_segment_id") or "").strip()
+            ))
+            actual_source_ids = [
+                str(value or "").strip()
+                for value in candidate.get("source_segment_ids") or []
+                if str(value or "").strip()
+            ]
+            if actual_source_ids != expected_source_ids:
+                reject_current_receipts("source_segment_ids 投影不一致")
+            primary_source_id = str(
                 current_receipt.get("source_segment_id") or ""
             )
+            if (
+                str(candidate.get("source_segment_id") or "")
+                != primary_source_id
+            ):
+                reject_current_receipts("singular source_segment_id 不一致")
+            candidate["source_evidence_receipt"] = dict(current_receipt)
+            candidate["source_evidence_receipts"] = receipts
+            candidate["source_segment_id"] = primary_source_id
+            candidate["source_segment_ids"] = expected_source_ids
             candidate["source_quote"] = str(current_receipt.get("text") or "")
             continue
         if typed_owned and cited is not None:
