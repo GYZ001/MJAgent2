@@ -22,8 +22,9 @@ import re
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app import config, hiagent, textmatch
 from app.atomic_io import atomic_write_bytes
@@ -63,7 +64,7 @@ CHARACTER_CARD_MAX_TOKENS = 4096
 IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v7"
 FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v6"
 STRUCTURAL_IDENTITY_COVERAGE_VERSION = (
-    "screenplay-identity-structural-coverage.v3"
+    "screenplay-identity-structural-coverage.v4"
 )
 AUTOMATIC_IDENTITY_DECISION_PROVENANCE = "automatic_identity_discovery.v1"
 DURABLE_IDENTITY_DECISION_PROVENANCE = frozenset({"manual", "bible"})
@@ -1009,6 +1010,119 @@ class _IdentityCandidateResponse(BaseModel):
     characters: list[dict] = Field(default_factory=list)
 
 
+class StructuralIdentityCoverageCandidate(BaseModel):
+    """One closed identity decision for a typed structural reference."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_label: str = Field(min_length=1, max_length=160)
+    canonical_name: str = Field(max_length=80)
+    identity_kind: Literal["named", "functional"]
+    identity_group: str = Field(min_length=1, max_length=160)
+    kind: Literal["onscreen", "mentioned"]
+    evidence: str = Field(min_length=1, max_length=320)
+
+
+class StructuralIdentityCoverageResponse(BaseModel):
+    """Strict wire root for the post-Blueprint identity coverage audit."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    characters: list[StructuralIdentityCoverageCandidate]
+
+
+_IDENTITY_COVERAGE_STRICT_PROVIDER_SCHEMA_KEYWORDS = frozenset({
+    "$defs",
+    "$ref",
+    "additionalProperties",
+    "enum",
+    "items",
+    "properties",
+    "required",
+    "type",
+})
+
+
+def _structural_identity_coverage_schema(
+    source_labels: list[str],
+) -> dict:
+    """Bind one local coverage contract to the exact unresolved identities."""
+    known_labels = list(dict.fromkeys(
+        str(value or "").strip() for value in source_labels
+        if str(value or "").strip()
+    ))
+    if not known_labels:
+        raise ValueError(
+            "structural identity coverage schema requires source labels"
+        )
+    schema = StructuralIdentityCoverageResponse.model_json_schema()
+    candidate_schema = schema["$defs"][
+        "StructuralIdentityCoverageCandidate"
+    ]
+    candidate_schema["properties"]["source_label"]["enum"] = known_labels
+    schema["properties"]["characters"]["maxItems"] = len(known_labels)
+    return schema
+
+
+def _identity_coverage_strict_provider_schema(
+    local_schema: dict,
+) -> dict:
+    """Project the local identity contract to the provider-safe subset."""
+
+    def sanitize(schema_node: dict) -> dict:
+        sanitized: dict = {}
+        for keyword, value in schema_node.items():
+            if keyword == "const":
+                sanitized["enum"] = [value]
+                continue
+            if keyword not in (
+                _IDENTITY_COVERAGE_STRICT_PROVIDER_SCHEMA_KEYWORDS
+            ):
+                continue
+            if keyword in {"$defs", "properties"}:
+                if not isinstance(value, dict):
+                    raise ValueError(
+                        f"identity strict schema {keyword} must be an object"
+                    )
+                sanitized[keyword] = {
+                    name: sanitize(child_schema)
+                    for name, child_schema in value.items()
+                }
+            elif keyword == "items":
+                if not isinstance(value, dict):
+                    raise ValueError(
+                        "identity strict schema items must be an object"
+                    )
+                sanitized[keyword] = sanitize(value)
+            else:
+                sanitized[keyword] = value
+        properties = sanitized.get("properties")
+        if isinstance(properties, dict):
+            if sanitized.get("additionalProperties") is not False:
+                raise ValueError(
+                    "identity strict object schemas must forbid extra fields"
+                )
+            sanitized["required"] = list(properties)
+        return sanitized
+
+    return sanitize(local_schema)
+
+
+def _structural_identity_coverage_response_format(
+    local_schema: dict,
+) -> dict:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "screenplay_structural_identity_coverage",
+            "strict": True,
+            "schema": _identity_coverage_strict_provider_schema(
+                local_schema
+            ),
+        },
+    }
+
+
 def _attach_candidate_source_evidence(
     candidates: list[dict],
     source_text: str,
@@ -1341,23 +1455,79 @@ async def audit_identity_coverage_from_structural_evidence(
         '"identity_kind":"named|functional","identity_group":"稳定分组",'
         '"kind":"onscreen","evidence":"依据"}]}'
     )
+    allowed_source_labels = [
+        str(item.get("identity_key") or "").strip()
+        for item in minimal
+        if str(item.get("identity_key") or "").strip()
+    ]
+    coverage_schema = _structural_identity_coverage_schema(
+        allowed_source_labels
+    )
+
+    def validate_response(
+        value: StructuralIdentityCoverageResponse,
+    ) -> list[str]:
+        allowed = set(allowed_source_labels)
+        errors: list[str] = []
+        if len(value.characters) > len(allowed):
+            errors.append(
+                "结构人物 coverage 返回数量超过未决引用上限："
+                f"actual={len(value.characters)}，limit={len(allowed)}"
+            )
+        seen_labels: set[str] = set()
+        for item in value.characters:
+            source_label = item.source_label.strip()
+            canonical_name = item.canonical_name.strip()
+            identity_group = item.identity_group.strip()
+            evidence_text = item.evidence.strip()
+            if source_label not in allowed:
+                errors.append(f"source_label 越界：{source_label}")
+            if source_label in seen_labels:
+                errors.append(f"source_label 重复：{source_label}")
+            seen_labels.add(source_label)
+            if not identity_group:
+                errors.append(f"identity_group 为空：{source_label}")
+            if not evidence_text:
+                errors.append(f"evidence 为空：{source_label}")
+            if item.identity_kind == "named" and not canonical_name:
+                errors.append(f"named identity 缺少 canonical_name：{source_label}")
+            if item.identity_kind == "functional" and canonical_name:
+                errors.append(
+                    "functional identity 不得声明 canonical_name："
+                    f"{source_label}"
+                )
+        return errors
+
     response = await model_gateway.chat_structured(
         [{"role": "user", "content": prompt}],
-        model_type=_IdentityCandidateResponse,
-        validate=None,
+        model_type=StructuralIdentityCoverageResponse,
+        validate=validate_response,
         operation_id=(
-            f"screenplay.identity.coverage.v3:{episode_no}:"
+            f"screenplay.identity.coverage.v4:{episode_no}:"
             + evidence_repository.content_hash(minimal)
         ),
         max_tokens=4096,
         temperature=0.05,
+        format_retry_limit=0,
+        semantic_retry_limit=0,
         call_meta={
             "stage": "discover_character_candidates",
             "stage_key": "screenplay_character_discovery",
             "substage": "structural_coverage",
             "discovery_phase": "coverage",
             "episode_no": episode_no,
+            "contract_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+            "schema_hash": evidence_repository.content_hash(
+                coverage_schema
+            ),
         },
+        output_schema=coverage_schema,
+        response_format=(
+            _structural_identity_coverage_response_format(
+                coverage_schema
+            )
+        ),
+        require_response_format=True,
     )
     existing = {
         (str(item.get("source_label") or ""), str(item.get("identity_group") or ""))
@@ -1375,7 +1545,12 @@ async def audit_identity_coverage_from_structural_evidence(
             and item.get("source_segment_ids")
         )
     }
-    for raw in response.characters:
+    for item in response.characters:
+        raw = (
+            item
+            if isinstance(item, dict)
+            else item.model_dump(mode="json")
+        )
         label = str(raw.get("source_label") or "").strip()
         typed_evidence = structural_by_key.get(label)
         if not label or (typed_evidence is None and label not in owned_text):

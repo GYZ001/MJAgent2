@@ -169,3 +169,64 @@ def test_semantic_repair_stage_rejects_non_strict_response_format(
         ))
 
     assert called is False
+
+
+def test_structural_identity_coverage_rejects_non_strict_response_format(
+    monkeypatch,
+) -> None:
+    called = False
+
+    async def forbidden_chat(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("invalid coverage contract reached provider")
+
+    monkeypatch.setattr(model_gateway, "chat", forbidden_chat)
+    with pytest.raises(
+        ValueError,
+        match="structural_coverage requires strict json_schema",
+    ):
+        asyncio.run(model_gateway.chat_structured(
+            [{"role": "user", "content": "coverage"}],
+            model_type=_StrictResponse,
+            validate=None,
+            operation_id="coverage-json-object-forbidden",
+            max_tokens=256,
+            call_meta={
+                "stage_key": "screenplay_character_discovery",
+                "substage": "structural_coverage",
+            },
+            response_format={"type": "json_object"},
+            require_response_format=True,
+        ))
+
+    assert called is False
+
+
+def test_non_target_character_discovery_keeps_default_structured_behavior(
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    async def fake_chat(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["response_format"] is None
+        assert kwargs["call_meta"]["expected_json"] is True
+        return '{"ok":true}'
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "current identity"}],
+        model_type=_StrictResponse,
+        validate=None,
+        operation_id="non-target-character-discovery",
+        max_tokens=256,
+        call_meta={
+            "stage_key": "screenplay_character_discovery",
+            "substage": "current_identity",
+        },
+    ))
+
+    assert result == _StrictResponse(ok=True)
+    assert calls == 1

@@ -490,10 +490,16 @@ async def chat_structured(
         raise ValueError(
             "require_response_format needs an explicit response_format"
         )
-    if (
-        str((call_meta or {}).get("stage_key") or "")
-        == "screenplay_scene_shard_semantic_repair"
-    ):
+    stage_key = str((call_meta or {}).get("stage_key") or "")
+    substage = str((call_meta or {}).get("substage") or "")
+    strict_json_schema_contract = (
+        stage_key == "screenplay_scene_shard_semantic_repair"
+        or (
+            stage_key == "screenplay_character_discovery"
+            and substage == "structural_coverage"
+        )
+    )
+    if strict_json_schema_contract:
         json_schema = (
             response_format.get("json_schema")
             if isinstance(response_format, dict)
@@ -507,9 +513,12 @@ async def chat_structured(
             or json_schema.get("strict") is not True
             or not isinstance(json_schema.get("schema"), dict)
         ):
+            contract_name = "/".join(
+                value for value in (stage_key, substage) if value
+            )
             raise ValueError(
-                "screenplay_scene_shard_semantic_repair requires strict "
-                "json_schema response_format"
+                f"{contract_name} requires strict json_schema "
+                "response_format"
             )
     structured_schema = output_schema or _model_schema(model_type)
     base_messages = [dict(message) for message in messages]

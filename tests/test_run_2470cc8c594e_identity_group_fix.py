@@ -586,8 +586,8 @@ def test_stale_structural_cache_is_neither_reused_nor_used_as_base(
     stale = _structural_cache_payload(
         source_text,
         evidence,
-        contract_version="screenplay-identity-discovery.v6",
-        policy_version="screenplay-identity-structural-coverage.v2",
+        contract_version=portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        policy_version="screenplay-identity-structural-coverage.v3",
         candidates=stale_alias,
     )
     valid_base = [{

@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import api, db, portraits
+from app import api, db, hiagent, portraits
+from app.harness import model_gateway
 from app.schemas import (Bible, Character, EpisodeScreenplay,
                          IdentityContractEvidence, InformationItem,
                          KeyDialogueChain, KeyDialogueTurn,
@@ -35,6 +36,7 @@ def test_structural_identity_audit_accepts_typed_blueprint_key(
     async def fake_structured(messages, **kwargs):
         seen["prompt"] = messages[0]["content"]
         seen["operation_id"] = kwargs["operation_id"]
+        seen["kwargs"] = kwargs
         return type("Response", (), {
             "characters": [{
                 "source_label": "北区杂役处未知闯入者",
@@ -73,8 +75,224 @@ def test_structural_identity_audit_accepts_typed_blueprint_key(
 
     assert audited[0]["source_label"] == "北区杂役处未知闯入者"
     assert audited[0]["identity_kind"] == "functional"
-    assert seen["operation_id"].startswith("screenplay.identity.coverage.v3:")
+    assert seen["operation_id"].startswith("screenplay.identity.coverage.v4:")
     assert "逐字复用未决结构证据中的 identity_key" in str(seen["prompt"])
+    kwargs = seen["kwargs"]
+    assert kwargs["model_type"] is portraits.StructuralIdentityCoverageResponse
+    assert kwargs["format_retry_limit"] == 0
+    assert kwargs["semantic_retry_limit"] == 0
+    assert kwargs["require_response_format"] is True
+    assert kwargs["response_format"]["type"] == "json_schema"
+    assert kwargs["response_format"]["json_schema"]["strict"] is True
+    assert kwargs["call_meta"]["contract_version"] == (
+        portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+    )
+
+
+def test_structural_identity_coverage_schema_is_closed_and_provider_safe(
+) -> None:
+    labels = ["未知求救者", "被困同伴"]
+    local_schema = portraits._structural_identity_coverage_schema(labels)
+    local_before = json.loads(json.dumps(local_schema, ensure_ascii=False))
+    response_format = (
+        portraits._structural_identity_coverage_response_format(
+            local_schema
+        )
+    )
+
+    assert local_schema == local_before
+    assert local_schema["required"] == ["characters"]
+    assert local_schema["properties"]["characters"]["maxItems"] == 2
+    local_candidate = local_schema["$defs"][
+        "StructuralIdentityCoverageCandidate"
+    ]
+    assert local_candidate["additionalProperties"] is False
+    assert set(local_candidate["required"]) == {
+        "source_label",
+        "canonical_name",
+        "identity_kind",
+        "identity_group",
+        "kind",
+        "evidence",
+    }
+    assert local_candidate["properties"]["source_label"]["enum"] == labels
+    assert local_candidate["properties"]["identity_kind"]["enum"] == [
+        "named",
+        "functional",
+    ]
+
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    provider_schema = response_format["json_schema"]["schema"]
+    assert provider_schema["required"] == ["characters"]
+    provider_candidate = provider_schema["$defs"][
+        "StructuralIdentityCoverageCandidate"
+    ]
+    assert provider_candidate["additionalProperties"] is False
+    assert set(provider_candidate["required"]) == set(
+        provider_candidate["properties"]
+    )
+    assert provider_candidate["properties"]["source_label"]["enum"] == labels
+    provider_keywords: set[str] = set()
+
+    def collect(schema_node: dict) -> None:
+        provider_keywords.update(schema_node)
+        for mapping_keyword in ("$defs", "properties"):
+            for child in schema_node.get(mapping_keyword, {}).values():
+                collect(child)
+        items = schema_node.get("items")
+        if isinstance(items, dict):
+            collect(items)
+
+    collect(provider_schema)
+    assert provider_keywords <= (
+        portraits._IDENTITY_COVERAGE_STRICT_PROVIDER_SCHEMA_KEYWORDS
+    )
+    assert provider_keywords.isdisjoint({
+        "title",
+        "default",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+    })
+
+
+def _coverage_audit_kwargs() -> dict:
+    return {
+        "structural_evidence": [{
+            "identity_key": "未知求救者",
+            "source_label": "未知求救者",
+            "source_segment_ids": ["SRC0001"],
+            "usage": "visible",
+            "node_key": "node-1",
+        }],
+        "source_text": "裂缝中有未知求救者探出半个身子。",
+        "bible": Bible(
+            characters=[],
+            world=World(visual_style_canonical="测试"),
+        ),
+        "episode_no": 1,
+    }
+
+
+def test_structural_identity_coverage_strict_success_is_one_call(
+    monkeypatch,
+) -> None:
+    calls: list[dict] = []
+
+    async def fake_chat(_messages, **kwargs):
+        calls.append(kwargs)
+        return json.dumps({
+            "characters": [{
+                "source_label": "未知求救者",
+                "canonical_name": "王有材",
+                "identity_kind": "named",
+                "identity_group": "current-1:王有材",
+                "kind": "onscreen",
+                "evidence": "来源明确承载未知求救者身份",
+            }],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    result = asyncio.run(
+        portraits.audit_identity_coverage_from_structural_evidence(
+            [],
+            **_coverage_audit_kwargs(),
+        )
+    )
+
+    assert len(calls) == 1
+    assert result[0]["source_label"] == "未知求救者"
+    assert result[0]["name"] == "王有材"
+    call = calls[0]
+    assert call["response_format"]["type"] == "json_schema"
+    assert call["response_format"]["json_schema"]["strict"] is True
+    assert call["call_meta"]["response_format_required"] is True
+    assert call["call_meta"]["format_attempt"] == 0
+    assert call["call_meta"]["semantic_attempt"] == 0
+
+
+@pytest.mark.parametrize(
+    ("provider_result", "error_type"),
+    [
+        (
+            '{"characters":[{"source_label" "未知求救者"}]}',
+            model_gateway.StructuredFormatError,
+        ),
+        (
+            '{"characters":[{"source_label":"未知求救者"}]}',
+            model_gateway.StructuredFormatError,
+        ),
+        (
+            json.dumps({
+                "characters": [{
+                    "source_label": "越界人物",
+                    "canonical_name": "",
+                    "identity_kind": "functional",
+                    "identity_group": "F1",
+                    "kind": "onscreen",
+                    "evidence": "越界",
+                }],
+            }, ensure_ascii=False),
+            model_gateway.StructuredSemanticError,
+        ),
+    ],
+)
+def test_structural_identity_coverage_http_200_contract_failure_is_one_call(
+    monkeypatch,
+    provider_result: str,
+    error_type: type[Exception],
+) -> None:
+    calls = 0
+
+    async def fake_chat(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["response_format"]["type"] == "json_schema"
+        assert kwargs["call_meta"]["response_format_required"] is True
+        return provider_result
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    with pytest.raises(error_type):
+        asyncio.run(
+            portraits.audit_identity_coverage_from_structural_evidence(
+                [],
+                **_coverage_audit_kwargs(),
+            )
+        )
+
+    assert calls == 1
+
+
+def test_structural_identity_coverage_unsupported_schema_is_one_call(
+    monkeypatch,
+) -> None:
+    calls = 0
+    original = hiagent.ProviderError(
+        "strict response_format unsupported",
+        retryable=False,
+        failure_kind="response_format_unsupported",
+    )
+
+    async def fake_chat(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["call_meta"]["response_format_required"] is True
+        raise original
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(
+            portraits.audit_identity_coverage_from_structural_evidence(
+                [],
+                **_coverage_audit_kwargs(),
+            )
+        )
+
+    assert caught.value is original
+    assert calls == 1
 
 
 def _seed_project(conn: sqlite3.Connection, chapter_content: str) -> None:
