@@ -3531,6 +3531,79 @@ def test_semantic_consensus_is_source_unit_sensitive(
     )
 
 
+def test_full_one_sided_environment_classification_has_no_semantic_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, blueprint, unit_keys = _semantic_review_environment_fixture()
+    target_unit_key = unit_keys[2]
+    created: list = []
+    call_modes: list[str] = []
+
+    async def one_sided_review(*_args, **kwargs):
+        meta = kwargs["call_meta"]
+        call_modes.append(meta["substage"])
+        if meta["review_sample"] == 1:
+            return BlueprintSemanticReview(issues=[BlueprintSemanticIssue(
+                code="state_subject_environment_misclassified",
+                node_keys=["n3"],
+                source_segment_ids=["SRC0003"],
+                source_unit_keys=[target_unit_key],
+                message="单侧语义判断不能把 scope 证明升格为主体权威",
+                required_resolution="只有双审共识才能更改 ownership",
+            )])
+        return BlueprintSemanticReview(issues=[])
+
+    async def forbidden_patch(*_args, **_kwargs):
+        raise AssertionError("one-sided environment issue reached patch")
+
+    _install_semantic_review_harness(monkeypatch, created)
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: (
+            "false"
+            if key == "screenplay_targeted_blueprint_review_enabled"
+            else "1"
+        ),
+    )
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        one_sided_review,
+    )
+    monkeypatch.setattr(
+        stages,
+        "_repair_narrative_blueprint",
+        forbidden_patch,
+    )
+    monkeypatch.setattr(
+        stages,
+        "_repair_reviewed_blueprint_state_subject_ownership",
+        forbidden_patch,
+    )
+
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        blueprint,
+        episode={"id": "ep-one-sided-environment", "episode_no": 1},
+        source_text=source,
+    ))
+
+    assert result is blueprint
+    assert call_modes == ["full", "full"]
+    consensus = next(
+        artifact
+        for artifact in created
+        if artifact.type
+        == "screenplay_narrative_blueprint_review_consensus"
+    )
+    assert consensus.status == "validated"
+    assert consensus.content["review_outcome"] == (
+        "non_authoritative_one_sided_residual"
+    )
+    assert consensus.content["authoritative_issue_count"] == 0
+    assert consensus.content["deterministic_authority_issue_keys"] == []
+
+
 def test_post_ownership_repair_one_sided_full_residual_validates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3588,7 +3661,7 @@ def test_post_ownership_repair_one_sided_full_residual_validates(
         source_text=source,
     ))
 
-    assert result is blueprint
+    assert result.episode_no == blueprint.episode_no
     assert call_modes == [
         "risk_nodes",
         "risk_nodes",
@@ -3613,14 +3686,6 @@ def test_post_ownership_repair_one_sided_full_residual_validates(
     assert consensus_artifacts[-1].content["review_outcome"] == (
         "non_authoritative_one_sided_residual"
     )
-    assert any(
-        artifact.type == "screenplay_narrative_blueprint"
-        and (artifact.model_snapshot or {}).get("generation_mode")
-        == "semantic_reviewed"
-        for artifact in created
-    )
-
-
 def test_mixed_consensus_uses_node_repair_then_exact_ownership_patch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

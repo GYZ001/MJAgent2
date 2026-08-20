@@ -57,9 +57,9 @@ from app.narrative_blueprint import (
     blueprint_source_occurrence_issues,
     blueprint_shard_provider_schema,
     blueprint_semantic_issue_is_resolved,
+    blueprint_semantic_voice_issue_has_dialogue_authority,
     blueprint_state_subject_issues,
     blueprint_state_subject_ownership_patch_schema,
-    blueprint_voice_identity_issues,
     filter_blueprint_semantic_review_voice_issues,
     blueprint_prompt_contract,
     blueprint_semantic_review_schema,
@@ -286,6 +286,10 @@ def _current_blueprint_authority_snapshot(
             blueprint_authority_validator_fingerprint()
         ),
     }
+    if generation_mode == "semantic_reviewed":
+        snapshot["review_policy_version"] = (
+            BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION
+        )
     if shard_count is not None:
         snapshot["shard_count"] = int(shard_count)
     if generation_budget is not None:
@@ -312,18 +316,21 @@ def _blueprint_authority_snapshot_is_current(
         source_text,
         generation_mode=str(snapshot.get("generation_mode") or "authority"),
     )
+    authority_keys = [
+        "contract_version",
+        "prompt_version",
+        "source_fact_version",
+        "shard_policy_version",
+        "local_authority_validator_version",
+        "split_manifest_version",
+        "source_corpus_hash",
+        "validator_fingerprint",
+    ]
+    if str(snapshot.get("generation_mode") or "") == "semantic_reviewed":
+        authority_keys.append("review_policy_version")
     return all(
         snapshot.get(key) == expected.get(key)
-        for key in (
-            "contract_version",
-            "prompt_version",
-            "source_fact_version",
-            "shard_policy_version",
-            "local_authority_validator_version",
-            "split_manifest_version",
-            "source_corpus_hash",
-            "validator_fingerprint",
-        )
+        for key in authority_keys
     )
 
 
@@ -4732,24 +4739,34 @@ def _blueprint_semantic_issue_exact_scope(
     )
 
 
-def _deterministic_blueprint_semantic_issue_scopes(
+def _blueprint_semantic_issue_has_deterministic_authority(
+    issue: Any,
     blueprint: NarrativeBlueprint,
     source_text: str,
-) -> set[tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]]:
-    """Project server-derived issues that can independently block review.
+) -> bool:
+    """Whether a typed one-sided finding has deterministic local authority.
 
-    Environment misclassification is intentionally excluded: its local check
+    The shared validator accepts a reviewer sub-scope when every referenced
+    node/source is covered by a server-derived delivery or state-subject issue.
+    Its default ``True`` for ordinary craft findings is deliberately fenced
+    out here. Environment misclassification is also excluded: that check only
     proves exact-unit scope, not the semantic identity of the state subject.
-    That classification therefore still requires dual-review consensus.
     """
-    return {
-        _blueprint_semantic_issue_exact_scope(issue)
-        for issue in (
-            blueprint_voice_identity_issues(blueprint, source_text)
-            + blueprint_state_subject_issues(blueprint, source_text)
-        )
-        if issue.code != "state_subject_environment_misclassified"
-    }
+    code = str(issue.code)
+    if (
+        code == "state_subject_environment_misclassified"
+        or not code.startswith((
+            "voice_identity_",
+            "source_delivery_",
+            "state_subject_",
+        ))
+    ):
+        return False
+    return blueprint_semantic_voice_issue_has_dialogue_authority(
+        issue,
+        blueprint,
+        source_text,
+    )
 
 
 async def _semantic_review_narrative_blueprint(
@@ -4794,6 +4811,9 @@ async def _semantic_review_narrative_blueprint(
                    AND json_extract(
                        model_snapshot_json,'$.source_corpus_hash'
                    )=?
+                   AND json_extract(
+                       model_snapshot_json,'$.review_policy_version'
+                   )=?
                  ORDER BY created_at DESC LIMIT 1""",
             (
                 episode_id,
@@ -4801,6 +4821,7 @@ async def _semantic_review_narrative_blueprint(
                 BLUEPRINT_VERSION,
                 SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
                 source_digest,
+                BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION,
             ),
         ).fetchone()
         if existing is None:
@@ -5456,12 +5477,6 @@ async def _semantic_review_narrative_blueprint(
             sum(len(issue_map) for issue_map in issue_maps)
             - 2 * len(consensus_keys)
         )
-        deterministic_issue_scopes = (
-            _deterministic_blueprint_semantic_issue_scopes(
-                blueprint,
-                source_text,
-            )
-        )
         deterministic_authority_issues = sorted(
             (
                 issue
@@ -5469,8 +5484,11 @@ async def _semantic_review_narrative_blueprint(
                 for issue_key, issue in issue_map.items()
                 if (
                     issue_key not in consensus_keys
-                    and _blueprint_semantic_issue_exact_scope(issue)
-                    in deterministic_issue_scopes
+                    and _blueprint_semantic_issue_has_deterministic_authority(
+                        issue,
+                        blueprint,
+                        source_text,
+                    )
                 )
             ),
             key=_blueprint_semantic_issue_exact_scope,

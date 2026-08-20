@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 from types import SimpleNamespace
 import uuid
 
@@ -3743,11 +3744,6 @@ def test_targeted_one_sided_falls_back_once_and_full_residual_validates(
     monkeypatch,
 ) -> None:
     blueprint = _blueprint()
-    blueprint.nodes[-1].participant_evidence = [
-        evidence
-        for evidence in blueprint.nodes[-1].participant_evidence
-        if evidence.usage != "state_subject"
-    ]
     derive_blueprint_scene_plans(blueprint)
     calls: list[tuple[int, int, str]] = []
     patch_calls: list[str] = []
@@ -3952,11 +3948,20 @@ def test_deterministic_supported_one_sided_issue_remains_repair_authority(
     monkeypatch,
 ) -> None:
     blueprint = _blueprint()
+    blueprint.nodes[-1].participant_evidence = [
+        evidence
+        for evidence in blueprint.nodes[-1].participant_evidence
+        if evidence.usage != "state_subject"
+    ]
     derive_blueprint_scene_plans(blueprint)
     deterministic_issue = blueprint_state_subject_issues(
         blueprint,
         SOURCE,
     )[0]
+    reviewer_subscope_issue = deterministic_issue.model_copy(
+        update={"source_unit_keys": []},
+        deep=True,
+    )
     calls: list[tuple[int, int]] = []
     repair_errors: list[str] = []
     created: list = []
@@ -3970,7 +3975,7 @@ def test_deterministic_supported_one_sided_issue_remains_repair_authority(
         calls.append((meta["review_round"], meta["review_sample"]))
         if meta["review_round"] == 1 and meta["review_sample"] == 1:
             return BlueprintSemanticReview(issues=[
-                deterministic_issue.model_copy(deep=True),
+                reviewer_subscope_issue.model_copy(deep=True),
             ])
         return BlueprintSemanticReview(issues=[])
 
@@ -4228,6 +4233,212 @@ def test_clean_semantic_review_cache_is_bound_to_source_corpus(
 
     assert result is blueprint
     assert calls == 2
+
+
+@pytest.mark.parametrize(
+    ("review_outcome", "review_mode", "residual_issue_count"),
+    [
+        ("clean", "targeted", 0),
+        ("non_authoritative_one_sided_residual", "full", 1),
+    ],
+)
+def test_v5_validated_no_authority_review_outcomes_are_cacheable(
+    monkeypatch,
+    review_outcome: str,
+    review_mode: str,
+    residual_issue_count: int,
+) -> None:
+    blueprint = _blueprint()
+    derive_blueprint_scene_plans(blueprint)
+    episode_id = f"episode-v5-cache-{review_outcome}"
+    blueprint_hash = hashlib.sha256(
+        json.dumps(
+            blueprint.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    source_hash = hashlib.sha256(SOURCE.encode("utf-8")).hexdigest()
+    authority_fingerprint = blueprint_authority_validator_fingerprint()
+    review_input_fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "episode_id": episode_id,
+                "blueprint_hash": blueprint_hash,
+                "source_corpus_hash": source_hash,
+                "review_policy_version": (
+                    stages.BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION
+                ),
+                "authority_fingerprint": authority_fingerprint,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    class CachedRows:
+        @staticmethod
+        def fetchall():
+            return [{
+                "id": f"cached-{review_outcome}",
+                "content_json": json.dumps({
+                    "blueprint_hash": blueprint_hash,
+                    "consensus_issue_keys": [],
+                    "deterministic_authority_issue_keys": [],
+                    "authoritative_issue_count": 0,
+                    "non_consensus_issue_count": residual_issue_count,
+                    "non_authoritative_residual_issue_count": (
+                        residual_issue_count
+                    ),
+                    "review_mode": review_mode,
+                    "review_outcome": review_outcome,
+                }),
+                "model_snapshot_json": json.dumps({
+                    "review_policy_version": (
+                        "blueprint-semantic-review.v5"
+                    ),
+                    "authority_fingerprint": authority_fingerprint,
+                    "source_corpus_hash": source_hash,
+                    "review_input_fingerprint": review_input_fingerprint,
+                }),
+            }]
+
+    class CachedConnection:
+        @staticmethod
+        def execute(*_args, **_kwargs):
+            return CachedRows()
+
+    async def forbidden_reviewer(*_args, **_kwargs):
+        raise AssertionError("validated v5 review outcome was not reused")
+
+    monkeypatch.setattr(stages, "get_conn", lambda: CachedConnection())
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        forbidden_reviewer,
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(run_id="", step_run_id="", trace_id=""),
+    )
+
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        blueprint,
+        episode={"id": episode_id, "episode_no": 8},
+        source_text=SOURCE,
+    ))
+
+    assert stages.BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION == (
+        "blueprint-semantic-review.v5"
+    )
+    assert result is blueprint
+
+
+def test_semantic_reviewed_wrapper_does_not_reuse_v4_policy(
+    monkeypatch,
+) -> None:
+    from app.evidence import repository as evidence_repository
+
+    blueprint = _blueprint()
+    derive_blueprint_scene_plans(blueprint)
+    episode_id = "episode-semantic-wrapper-v5"
+    source_hash = hashlib.sha256(SOURCE.encode("utf-8")).hexdigest()
+    content = blueprint.model_dump(mode="json")
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        """CREATE TABLE artifacts (
+               id TEXT,
+               type TEXT,
+               scope_type TEXT,
+               scope_id TEXT,
+               status TEXT,
+               content_hash TEXT,
+               contract_version TEXT,
+               prompt_version TEXT,
+               model_snapshot_json TEXT,
+               content_json TEXT,
+               created_at TEXT
+           )"""
+    )
+    connection.execute(
+        """INSERT INTO artifacts VALUES (
+               ?, 'screenplay_narrative_blueprint', 'episode', ?,
+               'validated', ?, ?, ?, ?, ?, '2026-08-20T00:00:00Z'
+           )""",
+        (
+            "old-v4-wrapper",
+            episode_id,
+            evidence_repository.content_hash(content),
+            stages.BLUEPRINT_VERSION,
+            stages.SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+            json.dumps({
+                "generation_mode": "semantic_reviewed",
+                "source_corpus_hash": source_hash,
+                "review_policy_version": "blueprint-semantic-review.v4",
+            }),
+            json.dumps(content, ensure_ascii=False),
+        ),
+    )
+    created: list = []
+
+    async def clean_review(*_args, **_kwargs):
+        return BlueprintSemanticReview(issues=[])
+
+    def create_artifact(artifact, **_kwargs):
+        created.append(artifact)
+        return {"id": f"artifact-{len(created)}"}
+
+    monkeypatch.setattr(stages, "get_conn", lambda: connection)
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: "false"
+        if key == "screenplay_targeted_blueprint_review_enabled"
+        else "1",
+    )
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        clean_review,
+    )
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        create_artifact,
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(
+            run_id="run-semantic-wrapper-v5",
+            step_run_id="step-semantic-wrapper-v5",
+            trace_id="trace-semantic-wrapper-v5",
+        ),
+    )
+
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        blueprint,
+        episode={"id": episode_id, "episode_no": 8},
+        source_text=SOURCE,
+    ))
+
+    wrappers = [
+        artifact
+        for artifact in created
+        if artifact.type == "screenplay_narrative_blueprint"
+    ]
+    assert result is blueprint
+    assert len(wrappers) == 1
+    assert wrappers[0].model_snapshot["review_policy_version"] == (
+        "blueprint-semantic-review.v5"
+    )
+    assert not stages._blueprint_authority_snapshot_is_current(
+        {
+            **wrappers[0].model_snapshot,
+            "review_policy_version": "blueprint-semantic-review.v4",
+        },
+        SOURCE,
+    )
 
 
 def test_reviewer_input_and_retry_share_canonical_contract(
