@@ -3633,7 +3633,7 @@ def test_bible_authority_alias_can_materialize_and_freeze_one_authority(
     assert {item["authority_id"] for item in registry} == {"bible:苍玄"}
 
 
-def test_materialized_bible_alias_k_normalizes_manual_authority(
+def test_materialized_bible_alias_k_never_upgrades_manual_authority(
     monkeypatch,
 ) -> None:
     conn = sqlite3.connect(":memory:")
@@ -3694,18 +3694,26 @@ def test_materialized_bible_alias_k_normalizes_manual_authority(
         bible,
         generate_portraits=False,
     ))
-    persisted = portraits.persist_screenplay_character_resolutions(
-        conn,
-        "e1",
-        result["resolutions"],
-    )
-    registry = portraits.identity_authority_registry(bible, persisted)
-
     assert calls == 1
-    assert result["errors"] == []
-    assert result["candidates"][0]["authority_id"] == "bible:苍玄"
-    assert {item["authority_id"] for item in persisted} == {"bible:苍玄"}
-    assert {item["authority_id"] for item in registry} == {"bible:苍玄"}
+    assert result["errors"] == [
+        "named authority 不可直接物化人物卡：师尊->苍玄"
+    ]
+    assert result["candidates"][0]["authority_id"] == "manual:cangxuan"
+    assert result["resolutions"] == []
+    stored = json.loads(conn.execute(
+        "SELECT screenplay_character_resolutions FROM episodes WHERE id='e1'"
+    ).fetchone()[0])
+    assert stored == [manual]
+
+
+def test_materialization_compatibility_flag_cannot_override_non_bible_authority(
+) -> None:
+    assert portraits._named_candidate_materialization_compatible({
+        "name": "苍玄",
+        "authority_id": "manual:cangxuan",
+        "identity_group": "manual:master",
+        "materialization_compatible": True,
+    }) is False
 
 
 @pytest.mark.parametrize(

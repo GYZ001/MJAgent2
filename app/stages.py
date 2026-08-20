@@ -8683,16 +8683,6 @@ async def _generate_screenplay_scene_sharded_baseline(
                         ),
                     }
                 ]
-                materialized = any(
-                    (
-                        str(authority.get("canonical_name") or "").strip()
-                        in bible_identity_names
-                        and str(authority.get("authority_id") or "").strip()
-                        == "bible:"
-                        + str(authority.get("canonical_name") or "").strip()
-                    )
-                    for authority in matching_authorities
-                )
                 nonmaterializable_named = any(
                     str(authority.get("identity_kind") or "").strip()
                     != "functional"
@@ -8708,7 +8698,6 @@ async def _generate_screenplay_scene_sharded_baseline(
                 if (
                     usage in {"visible", "voice", "state_subject"}
                     and nonmaterializable_named
-                    and not materialized
                 ):
                     raise ContentGenerationError(
                         "Blueprint 可见人物只有不可物化的引用身份："

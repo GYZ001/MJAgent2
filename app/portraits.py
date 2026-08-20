@@ -113,14 +113,15 @@ def _canonical_named_authority_id(canonical_name: str) -> str:
 
 def _named_candidate_materialization_compatible(item: dict) -> bool:
     """Whether adding the candidate's named card preserves one authority/group."""
-    if "materialization_compatible" in item:
-        return bool(item.get("materialization_compatible"))
     canonical_name = str(item.get("name") or item.get("canonical_name") or "").strip()
     authority_id = str(item.get("authority_id") or "").strip()
     if not canonical_name or not authority_id:
-        return True
+        return bool(item.get("materialization_compatible", True))
     canonical_authority = _canonical_named_authority_id(canonical_name)
-    return authority_id == canonical_authority
+    return bool(
+        authority_id == canonical_authority
+        and item.get("materialization_compatible", True)
+    )
 
 
 def _bounded_owned_identity_evidence(
@@ -3105,15 +3106,18 @@ async def resolve_future_identity_candidates(
             merged.append(item)
             continue
         canonical_name = str(resolution.get("canonical_name") or "").strip()
+        resolved_authority_id = (
+            str(resolution.get("authority_id") or "")
+            or _canonical_named_authority_id(canonical_name)
+        )
         merged.append({
             **item,
             "name": canonical_name,
             "identity_kind": "named",
-            "authority_id": (
-                str(resolution.get("authority_id") or "")
-                or (
-                    _canonical_named_authority_id(canonical_name)
-                )
+            "authority_id": resolved_authority_id,
+            "materialization_compatible": (
+                resolved_authority_id
+                == _canonical_named_authority_id(canonical_name)
             ),
             "future_evidence": str(
                 resolution.get("future_evidence") or ""
@@ -6219,16 +6223,19 @@ async def ensure_cards_for_text(
             functional_candidates.append(item)
             continue
         name = str(item.get("name") or "").strip()
-        if name in known:
-            known_named_candidates.append(item)
-        elif _candidate_requires_identity_card(item, known):
-            if not _named_candidate_materialization_compatible(item):
+        if not _named_candidate_materialization_compatible(item):
+            if item.get("kind") == "mentioned" and name and name not in known:
+                mentioned_only_candidates.append(item)
+            else:
                 errors.append(
                     "named authority 不可直接物化人物卡："
                     f"{str(item.get('source_label') or name).strip()}->{name}"
                 )
-            else:
-                unknown_by_name.setdefault(name, []).append(item)
+            continue
+        if name in known:
+            known_named_candidates.append(item)
+        elif _candidate_requires_identity_card(item, known):
+            unknown_by_name.setdefault(name, []).append(item)
         elif name:
             mentioned_only_candidates.append(item)
     added: list[dict] = []
