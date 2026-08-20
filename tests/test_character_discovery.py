@@ -16,6 +16,95 @@ from app.schemas import (Bible, Character, EpisodeScreenplay,
                          VoiceCanonical, World)
 
 
+def _current_identity_wire(characters: list[dict]) -> dict:
+    named: list[dict] = []
+    functional: list[dict] = []
+    for index, raw in enumerate(characters, start=1):
+        item = dict(raw)
+        source_label = str(item.get("source_label") or item.get("name") or "")
+        common = {
+            "source_label": source_label,
+            "kind": "mentioned" if item.get("kind") == "mentioned" else "onscreen",
+            "evidence": str(item.get("evidence") or "身份依据"),
+        }
+        if str(item.get("identity_kind") or "named") == "functional":
+            functional.append({
+                **common,
+                "identity_kind": "functional",
+                "functional_identity_key": str(
+                    item.get("functional_identity_key") or f"F{index}"
+                ),
+            })
+        else:
+            named.append({
+                **common,
+                "canonical_name": str(
+                    item.get("canonical_name") or item.get("name") or ""
+                ),
+                "identity_kind": "named",
+            })
+    return {"named": named, "functional": functional}
+
+
+def _future_identity_wire(
+    characters: list[dict],
+    *,
+    known_authorities: dict[str, str] | None = None,
+) -> dict:
+    known_by_name = {
+        canonical_name: authority_id
+        for authority_id, canonical_name in (known_authorities or {}).items()
+    }
+    known_named: list[dict] = []
+    new_named: list[dict] = []
+    functional: list[dict] = []
+    for raw in characters:
+        item = dict(raw)
+        source_label = str(item.get("source_label") or "")
+        canonical_name = str(item.get("canonical_name") or "")
+        evidence = str(item.get("future_evidence") or "")
+        if str(item.get("identity_kind") or "functional") == "functional":
+            functional.append({"source_label": source_label})
+        elif canonical_name in known_by_name:
+            known_named.append({
+                "source_label": source_label,
+                "authority_id": known_by_name[canonical_name],
+                "future_evidence": evidence,
+            })
+        else:
+            new_named.append({
+                "source_label": source_label,
+                "canonical_name": canonical_name,
+                "future_evidence": evidence,
+            })
+    return {
+        "known_named": known_named,
+        "new_named": new_named,
+        "functional": functional,
+    }
+
+
+def _identity_wire_for_call(kwargs: dict, characters: list[dict]) -> dict:
+    phase = str(kwargs.get("call_meta", {}).get("discovery_phase") or "")
+    if phase == "current":
+        return _current_identity_wire(characters)
+    if phase == "future_identity":
+        provider_schema = kwargs["response_format"]["json_schema"]["schema"]
+        authority_ids = provider_schema["$defs"][
+            "FutureKnownNamedIdentityCandidate"
+        ]["properties"]["authority_id"]["enum"]
+        known_authorities = {
+            authority_id: authority_id.removeprefix("bible:")
+            for authority_id in authority_ids
+            if authority_id.startswith("bible:")
+        }
+        return _future_identity_wire(
+            characters,
+            known_authorities=known_authorities,
+        )
+    raise AssertionError(f"unexpected identity phase: {phase}")
+
+
 def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -192,14 +281,17 @@ def test_structural_identity_coverage_strict_success_is_one_call(
 
     async def fake_chat(_messages, **kwargs):
         calls.append(kwargs)
+        group_ref = kwargs["response_format"]["json_schema"]["schema"][
+            "$defs"
+        ]["StructuralFunctionalIdentityCoverageCandidate"]["properties"][
+            "identity_group_ref"
+        ]["enum"][0]
         return json.dumps({
-            "characters": [{
+            "named": [],
+            "functional": [{
                 "source_label": "未知求救者",
-                "canonical_name": "王有材",
-                "identity_kind": "named",
-                "identity_group": "current-1:王有材",
-                "kind": "onscreen",
-                "evidence": "来源明确承载未知求救者身份",
+                "identity_group_ref": group_ref,
+                "evidence": "未知求救者",
             }],
         }, ensure_ascii=False)
 
@@ -213,7 +305,7 @@ def test_structural_identity_coverage_strict_success_is_one_call(
 
     assert len(calls) == 1
     assert result[0]["source_label"] == "未知求救者"
-    assert result[0]["name"] == "王有材"
+    assert result[0]["name"] == "未知求救者"
     call = calls[0]
     assert call["response_format"]["type"] == "json_schema"
     assert call["response_format"]["json_schema"]["strict"] is True
@@ -235,46 +327,41 @@ def test_structural_identity_coverage_strict_success_is_one_call(
         ),
         (
             json.dumps({
-                "characters": [{
+                "named": [],
+                "functional": [{
                     "source_label": "越界人物",
-                    "canonical_name": "",
-                    "identity_kind": "functional",
-                    "identity_group": "F1",
-                    "kind": "onscreen",
+                    "identity_group_ref": "new:bogus",
                     "evidence": "越界",
                 }],
             }, ensure_ascii=False),
             model_gateway.StructuredSemanticError,
         ),
         (
-            '{"characters":[]}',
+            '{"named":[],"functional":[]}',
             model_gateway.StructuredSemanticError,
         ),
         (
             json.dumps({
-                "characters": [{
+                "named": [],
+                "functional": [{
                     "source_label": " 未知求救者 ",
-                    "canonical_name": "",
-                    "identity_kind": "functional",
-                    "identity_group": "F1",
-                    "kind": "onscreen",
-                    "evidence": "引用精确但键含空白",
+                    "identity_group_ref": "new:bogus",
+                    "evidence": "未知求救者",
                 }],
             }, ensure_ascii=False),
             model_gateway.StructuredSemanticError,
         ),
         (
             json.dumps({
-                "characters": [{
+                "named": [],
+                "functional": [{
                     "source_label": "未知求救者",
                     "canonical_name": "   ",
-                    "identity_kind": "functional",
-                    "identity_group": "F1",
-                    "kind": "onscreen",
-                    "evidence": "功能身份不得以空白冒充空串",
+                    "identity_group_ref": "new:bogus",
+                    "evidence": "未知求救者",
                 }],
             }, ensure_ascii=False),
-            model_gateway.StructuredSemanticError,
+            model_gateway.StructuredFormatError,
         ),
     ],
 )
@@ -313,14 +400,17 @@ def test_structural_identity_coverage_subset_is_one_call_hard_failure(
         nonlocal calls
         calls += 1
         assert kwargs["response_format"]["type"] == "json_schema"
+        group_ref = kwargs["response_format"]["json_schema"]["schema"][
+            "$defs"
+        ]["StructuralFunctionalIdentityCoverageCandidate"]["properties"][
+            "identity_group_ref"
+        ]["enum"][0]
         return json.dumps({
-            "characters": [{
+            "named": [],
+            "functional": [{
                 "source_label": "未知求救者",
-                "canonical_name": "",
-                "identity_kind": "functional",
-                "identity_group": "F1",
-                "kind": "onscreen",
-                "evidence": "只返回了一个引用",
+                "identity_group_ref": group_ref,
+                "evidence": "未知求救者",
             }],
         }, ensure_ascii=False)
 
@@ -1258,7 +1348,7 @@ def test_bible_for_episode_picks_segment_anchor(monkeypatch) -> None:
     assert bible.characters[0].appearance_canonical == original
 
 
-def test_discover_character_candidates_keeps_typed_functionals_and_filters_unseen_names(monkeypatch) -> None:
+def test_discover_character_candidates_keeps_typed_functionals(monkeypatch) -> None:
     bible = Bible(
         world=World(visual_style_canonical="国风"),
         characters=[Character(
@@ -1270,8 +1360,7 @@ def test_discover_character_candidates_keeps_typed_functionals_and_filters_unsee
 
     async def fake_chat(*_args, **kwargs):
         assert kwargs["call_meta"]["reuse_successful_operation"] is True
-        return json.dumps({
-            "characters": [
+        return json.dumps(_identity_wire_for_call(kwargs, [
                 {
                     "source_label": "魂天帝", "canonical_name": "魂天帝",
                     "identity_kind": "named", "kind": "onscreen",
@@ -1287,13 +1376,7 @@ def test_discover_character_candidates_keeps_typed_functionals_and_filters_unsee
                     "identity_kind": "functional", "kind": "onscreen",
                     "evidence": "守卫后退",
                 },
-                {
-                    "source_label": "不存在的人", "canonical_name": "不存在的人",
-                    "identity_kind": "named", "kind": "onscreen",
-                    "evidence": "模型臆造",
-                },
-            ],
-        }, ensure_ascii=False)
+            ]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     result = asyncio.run(portraits.discover_character_candidates(
@@ -1306,7 +1389,7 @@ def test_discover_character_candidates_keeps_typed_functionals_and_filters_unsee
     assert result[-1]["identity_kind"] == "functional"
 
 
-def test_discover_character_candidates_repairs_unescaped_evidence_quotes(monkeypatch) -> None:
+def test_discover_character_candidates_rejects_malformed_json_without_retry(monkeypatch) -> None:
     bible = Bible(
         world=World(visual_style_canonical="国风"),
         characters=[Character(
@@ -1324,14 +1407,12 @@ def test_discover_character_candidates_repairs_unescaped_evidence_quotes(monkeyp
         )
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
-    result = asyncio.run(portraits.discover_character_candidates(
-        "孟浩说道，他要去靠山宗。",
-        bible,
-        1,
-    ))
-
-    assert result[0]["name"] == "孟浩"
-    assert result[0]["evidence"] == '原文写道"孟浩说道"。'
+    with pytest.raises(model_gateway.StructuredFormatError):
+        asyncio.run(portraits.discover_character_candidates(
+            "孟浩说道，他要去靠山宗。",
+            bible,
+            1,
+        ))
 
 
 def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(monkeypatch) -> None:
@@ -1360,29 +1441,25 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
         phase = _kwargs["call_meta"]["discovery_phase"]
         if phase == "current":
             assert "绿袍男子摘下斗笠" not in prompt
-            return json.dumps({
-                "characters": [{
+            return json.dumps(_identity_wire_for_call(_kwargs, [{
                     "source_label": "绿袍男子",
                     "canonical_name": "",
                     "identity_kind": "functional",
                     "kind": "onscreen",
                     "evidence": "绿袍男子拦路呵斥",
                     "future_evidence": "",
-                }],
-            }, ensure_ascii=False)
+                }]), ensure_ascii=False)
         assert "绿袍男子摘下斗笠" in prompt
         assert "丁力再次现身" in prompt
         assert "超出十章" not in prompt
-        return json.dumps({
-            "characters": [{
+        return json.dumps(_identity_wire_for_call(_kwargs, [{
                 "source_label": "绿袍男子",
                 "canonical_name": "丁力",
                 "identity_kind": "named",
                 "kind": "onscreen",
                 "evidence": "绿袍男子拦路呵斥",
                 "future_evidence": "绿袍男子摘下斗笠，众人这才认出他正是丁力。",
-            }],
-        }, ensure_ascii=False)
+            }]), ensure_ascii=False)
 
     ensured: list[str] = []
 
@@ -1425,7 +1502,7 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
                 "decision_provenance": (
                     portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
                 ),
-                "decision_contract_version": "screenplay-future-identity.v6",
+                "decision_contract_version": "screenplay-future-identity.v7",
                 "structural_identity_policy_version": (
                     portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
                 ),
@@ -1455,22 +1532,22 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
         prompts.append(prompt)
         if _kwargs["call_meta"]["discovery_phase"] == "future_identity":
             assert "前批章节暂无身份线索" not in prompt
-            return json.dumps({"characters": [{
+            return json.dumps(_identity_wire_for_call(_kwargs, [{
                 "source_label": "青衣人",
                 "canonical_name": "丁力",
                 "identity_kind": "named",
                 "kind": "onscreen",
                 "evidence": "青衣人拦路",
                 "future_evidence": "青衣人摘下面具，萧炎这才认出他就是丁力。",
-            }]}, ensure_ascii=False)
-        return json.dumps({"characters": [{
+            }]), ensure_ascii=False)
+        return json.dumps(_identity_wire_for_call(_kwargs, [{
             "source_label": "青衣人",
             "canonical_name": "",
             "identity_kind": "functional",
             "kind": "onscreen",
             "evidence": "青衣人拦路",
             "future_evidence": "",
-        }]}, ensure_ascii=False)
+        }]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     candidates = asyncio.run(portraits.discover_character_candidates(
@@ -1505,12 +1582,12 @@ def test_future_identity_accepts_semantic_alias_with_verbatim_name_anchor(
         nonlocal calls
         calls += 1
         assert kwargs["call_meta"]["discovery_phase"] == "future_identity"
-        return json.dumps({"characters": [{
+        return json.dumps(_identity_wire_for_call(kwargs, [{
             "source_label": "那间学校的校长",
             "canonical_name": "赵振",
             "identity_kind": "named",
             "future_evidence": "聪慧的白洁马上反应过来是那个‘大象’赵振的主意。",
-        }]}, ensure_ascii=False)
+        }]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     candidates = asyncio.run(portraits.resolve_future_identity_candidates(
@@ -1538,7 +1615,7 @@ def test_future_identity_accepts_semantic_alias_with_verbatim_name_anchor(
     ] == [("那间学校的校长", "赵振", "named")]
 
 
-def test_future_identity_untraceable_name_falls_back_without_retry(
+def test_future_identity_untraceable_name_is_one_call_hard_failure(
     monkeypatch,
 ) -> None:
     bible = Bible(
@@ -1555,34 +1632,30 @@ def test_future_identity_untraceable_name_falls_back_without_retry(
         nonlocal calls
         calls += 1
         assert kwargs["call_meta"]["discovery_phase"] == "future_identity"
-        return json.dumps({"characters": [{
+        return json.dumps(_identity_wire_for_call(kwargs, [{
             "source_label": "三哥",
             "canonical_name": "陈三",
             "identity_kind": "named",
             "future_evidence": "模型自行补写陈三是真名",
-        }]}, ensure_ascii=False)
+        }]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
-    candidates = asyncio.run(portraits.resolve_future_identity_candidates(
-        [{
-            "name": "三哥",
-            "source_label": "三哥",
-            "identity_kind": "functional",
-            "identity_group": "current:third-brother",
-            "kind": "onscreen",
-        }],
-        source_text="三哥推门进来。",
-        future_text="后来众人仍只叫他三哥，没有交代真名。",
-        bible=bible,
-        episode_no=7,
-        future_label="后续章节",
-    ))
-
+    with pytest.raises(model_gateway.StructuredSemanticError):
+        asyncio.run(portraits.resolve_future_identity_candidates(
+            [{
+                "name": "三哥",
+                "source_label": "三哥",
+                "identity_kind": "functional",
+                "identity_group": "current:third-brother",
+                "kind": "onscreen",
+            }],
+            source_text="三哥推门进来。",
+            future_text="后来众人仍只叫他三哥，没有交代真名。",
+            bible=bible,
+            episode_no=7,
+            future_label="后续章节",
+        ))
     assert calls == 1
-    assert [
-        (item["source_label"], item["name"], item["identity_kind"])
-        for item in candidates
-    ] == [("三哥", "三哥", "functional")]
 
 
 def test_future_identity_operation_binds_exact_outbound_semantics(
@@ -1593,12 +1666,11 @@ def test_future_identity_operation_binds_exact_outbound_semantics(
 
     async def fake_structured(*_args, **kwargs):
         operations.append((kwargs["operation_id"], kwargs["call_meta"]["model"]))
-        return SimpleNamespace(characters=[{
-            "source_label": "三哥",
-            "canonical_name": "",
-            "identity_kind": "functional",
-            "future_evidence": "",
-        }])
+        return portraits.FutureIdentityCandidateResponse(
+            known_named=[],
+            new_named=[],
+            functional=[{"source_label": "三哥"}],
+        )
 
     monkeypatch.setattr(
         portraits.model_gateway, "chat_structured", fake_structured,
@@ -1649,14 +1721,14 @@ def test_identity_discovery_aligns_provider_expanded_source_label(monkeypatch) -
     )
 
     async def fake_chat(*_args, **_kwargs):
-        return json.dumps({"characters": [{
+        return json.dumps(_identity_wire_for_call(_kwargs, [{
             "source_label": "白白净净身较胖的少年",
             "canonical_name": "",
             "identity_kind": "functional",
             "functional_identity_key": "F1",
             "kind": "onscreen",
             "evidence": "原文中的白净胖少年",
-        }]}, ensure_ascii=False)
+        }]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     candidates = asyncio.run(portraits.discover_character_candidates(
@@ -1701,7 +1773,7 @@ def test_future_named_identity_upgrades_every_alias_in_same_group(monkeypatch) -
         nonlocal calls
         calls += 1
         if kwargs["call_meta"]["discovery_phase"] == "current":
-            return json.dumps({"characters": [
+            return json.dumps(_identity_wire_for_call(kwargs, [
                 {
                     "source_label": "会飞的女人",
                     "canonical_name": "",
@@ -1718,15 +1790,15 @@ def test_future_named_identity_upgrades_every_alias_in_same_group(monkeypatch) -
                     "kind": "mentioned",
                     "evidence": "同一女子被称为许师姐",
                 },
-            ]}, ensure_ascii=False)
-        return json.dumps({"characters": [{
+            ]), ensure_ascii=False)
+        return json.dumps(_identity_wire_for_call(kwargs, [{
             "source_label": "许师姐",
             "canonical_name": "许清",
             "identity_kind": "named",
             "kind": "mentioned",
             "evidence": "许师姐是同一女子",
             "future_evidence": "许师姐转身，众人称她许清。",
-        }]}, ensure_ascii=False)
+        }]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     candidates = asyncio.run(portraits.discover_character_candidates(
@@ -1868,28 +1940,36 @@ def test_structural_audit_recovers_entity_omitted_by_current_pass(monkeypatch) -
     async def fake_chat(messages, **kwargs):
         phases.append(kwargs["call_meta"]["discovery_phase"])
         if kwargs["call_meta"]["discovery_phase"] == "current":
-            return json.dumps({"characters": [{
+            return json.dumps(_identity_wire_for_call(kwargs, [{
                 "source_label": "孟浩",
                 "canonical_name": "孟浩",
                 "identity_kind": "named",
                 "kind": "onscreen",
                 "evidence": "当前主角",
-            }]}, ensure_ascii=False)
+            }]), ensure_ascii=False)
         assert "白白净净身较胖" in messages[0]["content"]
         assert "SRC0001" in messages[0]["content"]
         assert "我李富贵" not in messages[0]["content"]
-        return json.dumps({"characters": [{
-            "source_label": "白白净净身较胖",
-            "canonical_name": "李富贵",
-            "identity_kind": "named",
-            "identity_group": "current-1:李富贵",
-            "kind": "onscreen",
-            "evidence": "当前集独立出场的白净胖少年",
-        }]}, ensure_ascii=False)
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        group_refs = schema["$defs"][
+            "StructuralNamedIdentityCoverageCandidate"
+        ]["properties"]["identity_group_ref"]["enum"]
+        group_ref = next(
+            value for value in group_refs if value.startswith("new:")
+        )
+        return json.dumps({
+            "named": [{
+                "source_label": "白白净净身较胖",
+                "authority_id": "bible:李富贵",
+                "identity_group_ref": group_ref,
+                "evidence": "李富贵",
+            }],
+            "functional": [],
+        }, ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     candidates = asyncio.run(portraits.discover_character_candidates(
-        "孟浩身边另一个则是白白净净身较胖。",
+        "孟浩身边的李富贵长得白白净净身较胖。",
         bible,
         1,
         future_text="小胖子跟随孟浩。后来小胖子说：我李富贵认你这个朋友。",
@@ -1921,7 +2001,7 @@ def test_identity_discovery_does_not_run_fixed_coverage_without_structural_evide
 
     async def fake_chat(_messages, **kwargs):
         phases.append(kwargs["call_meta"]["discovery_phase"])
-        return json.dumps({"characters": []}, ensure_ascii=False)
+        return json.dumps(_identity_wire_for_call(kwargs, []), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     assert asyncio.run(portraits.discover_character_candidates(
@@ -1940,22 +2020,22 @@ def test_stable_unique_title_is_accepted_as_named_identity(monkeypatch) -> None:
 
     async def fake_chat(*_args, **kwargs):
         if kwargs["call_meta"]["discovery_phase"] == "current":
-            return json.dumps({"characters": [{
+            return json.dumps(_identity_wire_for_call(kwargs, [{
                 "source_label": "靠山老祖",
                 "canonical_name": "",
                 "identity_kind": "functional",
                 "functional_identity_key": "F1",
                 "kind": "mentioned",
                 "evidence": "本集提到建立宗门的老祖",
-            }]}, ensure_ascii=False)
-        return json.dumps({"characters": [{
+            }]), ensure_ascii=False)
+        return json.dumps(_identity_wire_for_call(kwargs, [{
             "source_label": "靠山老祖",
             "canonical_name": "靠山老祖",
             "identity_kind": "named",
             "kind": "mentioned",
             "evidence": "跨章节唯一指向建立宗门的同一位老祖",
             "future_evidence": "靠山老祖定下门规",
-        }]}, ensure_ascii=False)
+        }]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     candidates = asyncio.run(portraits.discover_character_candidates(
@@ -1983,15 +2063,15 @@ def test_future_functional_relation_label_is_not_promoted_by_text_presence(
     async def fake_chat(*_args, **kwargs):
         phases.append(kwargs["call_meta"]["discovery_phase"])
         if kwargs["call_meta"]["discovery_phase"] == "current":
-            return json.dumps({"characters": [{
+            return json.dumps(_identity_wire_for_call(kwargs, [{
                 "source_label": "她男朋友",
                 "canonical_name": "",
                 "identity_kind": "functional",
                 "functional_identity_key": "F1",
                 "kind": "onscreen",
                 "evidence": "她男朋友帮忙拎行李",
-            }]}, ensure_ascii=False)
-        return json.dumps({"characters": [{
+            }]), ensure_ascii=False)
+        return json.dumps(_identity_wire_for_call(kwargs, [{
             "source_label": "她男朋友",
             "canonical_name": "",
             "identity_kind": "functional",
@@ -1999,7 +2079,7 @@ def test_future_functional_relation_label_is_not_promoted_by_text_presence(
             "kind": "onscreen",
             "evidence": "她男朋友帮忙拎行李",
             "future_evidence": "",
-        }]}, ensure_ascii=False)
+        }]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     candidates = asyncio.run(portraits.discover_character_candidates(
@@ -2031,15 +2111,15 @@ def test_future_functional_enum_drift_can_use_existing_bible_identity(
 
     async def fake_chat(*_args, **kwargs):
         if kwargs["call_meta"]["discovery_phase"] == "current":
-            return json.dumps({"characters": [{
+            return json.dumps(_identity_wire_for_call(kwargs, [{
                 "source_label": "小胖子",
                 "canonical_name": "",
                 "identity_kind": "functional",
                 "functional_identity_key": "F1",
                 "kind": "onscreen",
                 "evidence": "小胖子跟随孟浩",
-            }]}, ensure_ascii=False)
-        return json.dumps({"characters": [{
+            }]), ensure_ascii=False)
+        return json.dumps(_identity_wire_for_call(kwargs, [{
             "source_label": "小胖子",
             "canonical_name": "李富贵",
             "identity_kind": "named",
@@ -2047,7 +2127,7 @@ def test_future_functional_enum_drift_can_use_existing_bible_identity(
             "kind": "onscreen",
             "evidence": "小胖子跟随孟浩",
             "future_evidence": "小胖子拍着胸口说，我李富贵认你这个朋友。",
-        }]}, ensure_ascii=False)
+        }]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     candidates = asyncio.run(portraits.discover_character_candidates(
@@ -2217,8 +2297,7 @@ def test_unresolved_descriptive_people_keep_source_labels(monkeypatch) -> None:
     _patch_settings(monkeypatch, conn)
 
     async def fake_chat(*_args, **_kwargs):
-        return json.dumps({
-            "characters": [
+        return json.dumps(_identity_wire_for_call(_kwargs, [
                 {
                     "source_label": "绿袍男子", "canonical_name": "",
                     "identity_kind": "functional", "kind": "onscreen", "evidence": "绿袍男子守门",
@@ -2227,8 +2306,7 @@ def test_unresolved_descriptive_people_keep_source_labels(monkeypatch) -> None:
                     "source_label": "大汉", "canonical_name": "",
                     "identity_kind": "functional", "kind": "onscreen", "evidence": "大汉守门",
                 },
-            ],
-        }, ensure_ascii=False)
+            ]), ensure_ascii=False)
 
     async def forbidden_ensure(*_args, **_kwargs):
         raise AssertionError("过渡称谓不得建人物卡")
@@ -2339,14 +2417,14 @@ def test_baseline_audit_uses_model_to_classify_arbitrary_descriptive_identity(mo
     )
 
     async def fake_chat(*_args, **_kwargs):
-        return json.dumps({"characters": [{
+        return json.dumps(_identity_wire_for_call(_kwargs, [{
             "source_label": "紫甲女子",
             "canonical_name": "",
             "identity_kind": "functional",
             "kind": "onscreen",
             "evidence": "紫甲女子拦路",
             "future_evidence": "",
-        }]}, ensure_ascii=False)
+        }]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     draft = EpisodeScreenplay(
@@ -2386,14 +2464,14 @@ def test_baseline_audit_sends_typed_identity_projection_only(monkeypatch) -> Non
         assert "SOURCE_BODY_MARKER" not in prompt
         assert "SCRIPT_ACTION_MARKER" not in prompt
         assert "紫甲女子" in prompt
-        return json.dumps({"characters": [{
+        return json.dumps(_identity_wire_for_call(_kwargs, [{
             "source_label": "紫甲女子",
             "canonical_name": "",
             "identity_kind": "functional",
             "kind": "onscreen",
             "evidence": "类型合同中的场次人物",
             "future_evidence": "",
-        }]}, ensure_ascii=False)
+        }]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     draft = EpisodeScreenplay(
@@ -2534,10 +2612,10 @@ def test_existing_bible_name_that_looks_generic_keeps_its_canonical_identity(mon
     )
 
     async def fake_chat(*_args, **_kwargs):
-        return json.dumps({"characters": [{
+        return json.dumps(_identity_wire_for_call(_kwargs, [{
             "source_label": "少年", "canonical_name": "少年",
             "identity_kind": "named", "kind": "onscreen", "evidence": "少年转身迎战",
-        }]}, ensure_ascii=False)
+        }]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     candidates = asyncio.run(portraits.discover_character_candidates(

@@ -2022,6 +2022,12 @@ async def audit_identity_coverage_from_structural_evidence(
             "structural identity coverage 缺少 owned SRC："
             + ",".join(sorted(missing_owned_source))
         )
+    coverage_provider, coverage_model, coverage_effective_max = (
+        hiagent.text_request_token_limits(requested_max_tokens=4096)
+    )
+    coverage_semantic_settings = hiagent.text_request_semantic_settings(
+        coverage_provider
+    )
 
     def validate_response(
         value: StructuralIdentityCoverageResponse,
@@ -2154,6 +2160,12 @@ async def audit_identity_coverage_from_structural_evidence(
             f"screenplay.identity.coverage.v5:{episode_no}:"
             + evidence_repository.content_hash({
                 "contract_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+                "provider": coverage_provider,
+                "model": coverage_model,
+                "requested_max_tokens": 4096,
+                "effective_max_tokens": coverage_effective_max,
+                "temperature": 0.05,
+                "provider_semantic_settings": coverage_semantic_settings,
                 "prompt": prompt,
                 "schema": coverage_schema,
                 "response_format": coverage_response_format,
@@ -2176,6 +2188,11 @@ async def audit_identity_coverage_from_structural_evidence(
             "disable_provider_retries": True,
             "disable_provider_candidate_fallback": True,
             "disable_reasoning_fallback": True,
+            "reuse_successful_operation": True,
+            "provider": coverage_provider,
+            "model": coverage_model,
+            "effective_max_tokens": coverage_effective_max,
+            "provider_semantic_settings": coverage_semantic_settings,
         },
         output_schema=coverage_schema,
         response_format=coverage_response_format,
