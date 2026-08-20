@@ -3716,6 +3716,62 @@ def test_materialization_compatibility_flag_cannot_override_non_bible_authority(
     }) is False
 
 
+def test_future_known_decision_overwrites_stale_materialization_compatibility(
+    monkeypatch,
+) -> None:
+    """Future K must retain the signed origin-group verdict, not an old F flag."""
+
+    async def fake_chat(messages, **kwargs):
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "老者",
+                "canonical_name": "苍玄",
+                "identity_kind": "named",
+                "kind": "onscreen",
+            }],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
+        [
+            {
+                "name": "苍玄",
+                "source_label": "师尊",
+                "identity_kind": "named",
+                "identity_group": "manual:master",
+                "authority_id": "bible:苍玄",
+                "decision_provenance": "manual",
+                "kind": "mentioned",
+            },
+            {
+                "name": "老者",
+                "source_label": "老者",
+                "identity_kind": "functional",
+                "identity_group": "current-1:F1",
+                "kind": "onscreen",
+                # This optimistic current-stage value must not survive a K
+                # decision signed from an incompatible manual origin group.
+                "materialization_compatible": True,
+            },
+        ],
+        source_text="老者出现在山门前。",
+        future_text="老者摘下面具，弟子认出他就是师尊。",
+        bible=Bible(
+            world=World(visual_style_canonical="国风"),
+            characters=[],
+        ),
+        episode_no=1,
+    ))
+
+    elder = next(item for item in resolved if item["source_label"] == "老者")
+    assert elder["name"] == "苍玄"
+    assert elder["authority_id"] == "bible:苍玄"
+    assert elder["materialization_compatible"] is False
+    assert portraits._named_candidate_materialization_compatible(elder) is False
+
+
 @pytest.mark.parametrize(
     ("mutation", "error_fragment"),
     [

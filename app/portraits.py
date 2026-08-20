@@ -2461,6 +2461,7 @@ async def resolve_future_identity_candidates(
             "canonical_name": name,
             "identity_group": "",
             "aliases": [],
+            "materialization_compatible": True,
         }
     for candidate in candidates:
         if str(candidate.get("identity_kind") or "") != "named":
@@ -2476,11 +2477,17 @@ async def resolve_future_identity_candidates(
         authority_id = str(candidate.get("authority_id") or "").strip()
         if not authority_id:
             authority_id = _canonical_named_authority_id(canonical_name)
+        candidate_materialization_compatible = bool(
+            authority_id == _canonical_named_authority_id(canonical_name)
+            and identity_group in {"", authority_id}
+            and candidate.get("materialization_compatible", True)
+        )
         authority = authority_by_id.setdefault(authority_id, {
             "authority_id": authority_id,
             "canonical_name": canonical_name,
             "identity_group": identity_group,
             "aliases": [],
+            "materialization_compatible": candidate_materialization_compatible,
         })
         if authority["canonical_name"] != canonical_name:
             raise ContentGenerationError(
@@ -2489,6 +2496,14 @@ async def resolve_future_identity_candidates(
         source_label = str(candidate.get("source_label") or "").strip()
         if source_label and source_label not in authority["aliases"]:
             authority["aliases"].append(source_label)
+        # An authority assembled from several backend routes is safe to
+        # materialize only when every origin converges on the final Bible
+        # authority/group.  A Bible entry must not mask a durable alias whose
+        # origin group is incompatible with that card authority.
+        authority["materialization_compatible"] = bool(
+            authority.get("materialization_compatible", True)
+            and candidate_materialization_compatible
+        )
     authority_projection = list(authority_by_id.values())
 
     raw_groups: dict[str, dict] = {}
@@ -2722,6 +2737,9 @@ async def resolve_future_identity_candidates(
                 "authority_id": authority_id,
                 "canonical_name": canonical_name,
                 "evidence_ids": anchored_evidence_ids,
+                "materialization_compatible": bool(
+                    authority.get("materialization_compatible")
+                ),
                 "proof_kind": (
                     "same_group_authority"
                     if same_group_authority
@@ -2827,6 +2845,9 @@ async def resolve_future_identity_candidates(
                     "authority_id": str(
                         selected.get("authority_id") or ""
                     ),
+                    "materialization_compatible": bool(
+                        selected.get("materialization_compatible")
+                    ),
                     "future_evidence": bounded_evidence,
                 }
             elif resolution_kind == "new_named":
@@ -2849,6 +2870,7 @@ async def resolve_future_identity_candidates(
                         _canonical_named_authority_id(canonical_name)
                         if canonical_name.strip() else ""
                     ),
+                    "materialization_compatible": True,
                     "future_evidence": bounded_evidence,
                 }
             else:
@@ -2857,6 +2879,7 @@ async def resolve_future_identity_candidates(
                     "identity_kind": "functional",
                     "canonical_name": "",
                     "authority_id": "",
+                    "materialization_compatible": False,
                     "future_evidence": "",
                 }
             for source_label in group["labels"]:
@@ -3115,9 +3138,12 @@ async def resolve_future_identity_candidates(
             "name": canonical_name,
             "identity_kind": "named",
             "authority_id": resolved_authority_id,
-            "materialization_compatible": (
-                resolved_authority_id
-                == _canonical_named_authority_id(canonical_name)
+            # The selected backend decision owns this verdict.  Never inherit
+            # a previous functional candidate's optimistic flag, and never
+            # recompute from the final authority ID alone: its origin group may
+            # still be a durable incompatible manual/reference group.
+            "materialization_compatible": bool(
+                resolution.get("materialization_compatible")
             ),
             "future_evidence": str(
                 resolution.get("future_evidence") or ""
