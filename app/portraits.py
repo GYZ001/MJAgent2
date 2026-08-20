@@ -1042,7 +1042,7 @@ async def _discover_character_candidates_legacy(
             bible,
             existing_resolutions or [],
         )
-        if str(authority.get("identity_kind") or "").strip() == "named"
+        if str(authority.get("identity_kind") or "").strip() != "functional"
         for label in (
             authority.get("canonical_name"),
             *(authority.get("source_labels") or []),

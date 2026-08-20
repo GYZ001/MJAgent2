@@ -2827,6 +2827,43 @@ def test_document_identity_adjudication_uses_only_source_backed_typed_reference(
     assert guard_resolution["authority_id"].startswith("functional:")
 
 
+def test_document_identity_adjudication_does_not_treat_synthetic_as_known(
+    monkeypatch,
+) -> None:
+    screenplay = _compile()
+    screenplay.scene_outline[0].characters.append("门卫")
+    calls: list[list[str]] = []
+
+    async def fake_adjudicate(candidate, **_kwargs):
+        calls.append([identity.display_name for identity in candidate.identities])
+        return candidate
+
+    monkeypatch.setattr(
+        identity_adjudication,
+        "adjudicate_screenplay_ir_identities",
+        fake_adjudicate,
+    )
+    synthetic = normalize_character_resolution({
+        "source_label": "门卫",
+        "canonical_name": "门卫",
+        "resolution": "functional_identity",
+        "identity_group": "current-1:synthetic:guard",
+        "source_label_provenance": "provider_synthetic_functional.v1",
+    })
+
+    asyncio.run(identity_adjudication.adjudicate_screenplay_document_identities(
+        screenplay,
+        episode={
+            "episode_no": 1,
+            "character_resolutions": [synthetic],
+        },
+        source_text=SOURCE + "\n\n门卫推开外门。",
+        bible=_bible(),
+    ))
+
+    assert calls == [["门卫"]]
+
+
 def test_shared_functional_source_label_requires_ai_before_merging_identities() -> None:
     payload = _v13_payload()
     payload["identities"] = [
@@ -2888,6 +2925,23 @@ def test_bible_context_includes_character_named_by_resolution() -> None:
     )
 
     assert [item["name"] for item in payload["characters"]] == ["未出场人物"]
+
+
+def test_bible_context_ignores_synthetic_resolution_token() -> None:
+    payload = screenplay_ir_bible_context(
+        _bible(),
+        source_text="谷言站在门口。",
+        episode_no=1,
+        character_resolutions=[{
+            "source_label": "伪造称谓",
+            "canonical_name": "未出场人物",
+            "resolution": "functional_identity",
+            "identity_group": "current-1:synthetic:forged",
+            "source_label_provenance": "provider_synthetic_functional.v1",
+        }],
+    )
+
+    assert [item["name"] for item in payload["characters"]] == ["谷言"]
 
 
 def test_bible_context_uses_source_evidence_not_full_project_dump() -> None:

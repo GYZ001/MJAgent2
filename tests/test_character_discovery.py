@@ -3121,6 +3121,104 @@ def test_current_identity_literal_label_rejects_cross_evidence_once(
     assert downstream == []
 
 
+@pytest.mark.parametrize(
+    ("source_text", "source_label", "evidence_hint", "bible", "resolutions"),
+    [
+        (
+            "孟浩守在山门。",
+            "孟浩",
+            "孟浩守在山门",
+            Bible(
+                world=World(visual_style_canonical="国风"),
+                characters=[Character(
+                    name="孟浩",
+                    role="主角",
+                    appearance_canonical="黑发青年，青色长衫，目光坚定",
+                )],
+            ),
+            [],
+        ),
+        (
+            "银袍女子守在山门。",
+            "孟浩",
+            "银袍女子守在山门",
+            Bible(
+                world=World(visual_style_canonical="国风"),
+                characters=[Character(
+                    name="孟浩",
+                    role="主角",
+                    appearance_canonical="黑发青年，青色长衫，目光坚定",
+                )],
+            ),
+            [],
+        ),
+        (
+            "孟兄守在山门。",
+            "孟兄",
+            "孟兄守在山门",
+            Bible(world=World(visual_style_canonical="国风"), characters=[]),
+            [{
+                "source_label": "孟兄",
+                "canonical_name": "孟浩",
+                "resolution": "reference_identity",
+                "identity_group": "reference:menghao",
+                "authority_id": "bible:孟浩",
+                "decision_provenance": "manual",
+            }],
+        ),
+    ],
+)
+def test_current_functional_cannot_claim_reserved_authority_label_once(
+    monkeypatch,
+    source_text: str,
+    source_label: str,
+    evidence_hint: str,
+    bible: Bible,
+    resolutions: list[dict],
+) -> None:
+    calls = 0
+    downstream: list[str] = []
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": source_label,
+                "identity_kind": "functional",
+                "functional_identity_key": "F1",
+                "kind": "onscreen",
+                "evidence": evidence_hint,
+            }],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    async def forbidden_future(*_args, **_kwargs):
+        downstream.append("future")
+        raise AssertionError("reserved functional result reached future")
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(
+        portraits,
+        "resolve_future_identity_candidates",
+        forbidden_future,
+    )
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="functional 不得冒用已登记身份称谓",
+    ):
+        asyncio.run(portraits.discover_character_candidates(
+            source_text,
+            bible,
+            1,
+            existing_resolutions=resolutions,
+        ))
+
+    assert calls == 1
+    assert downstream == []
+
+
 def test_current_identity_cross_batch_literal_uses_global_catalog() -> None:
     records = portraits._current_identity_evidence_records(
         "门卫守在山门。\n\n银袍女子站在殿前。"

@@ -60,6 +60,21 @@ def test_character_resolution_prompt_delegates_narrator_authority_to_backend() -
     assert all("每个 identities[*].authority_id" not in block for block in blocks)
 
 
+def test_character_resolution_prompt_omits_synthetic_observation() -> None:
+    block = stages._character_resolution_prompt_block({
+        "character_resolutions": [{
+            "source_label": "孟浩",
+            "canonical_name": "孟浩",
+            "resolution": "functional_identity",
+            "identity_group": "current-1:synthetic:forged",
+            "source_label_provenance": "provider_synthetic_functional.v1",
+        }],
+    })
+
+    assert "本集没有额外称谓决议" in block
+    assert "current-1:synthetic:forged" not in block
+
+
 def _scene(no: int, heading: str, summary: str) -> ScriptScene:
     return ScriptScene(
         scene_no=no,
