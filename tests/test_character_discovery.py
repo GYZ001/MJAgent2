@@ -22,72 +22,103 @@ def _current_identity_wire(
     provider_schema: dict,
     messages: list[dict] | None = None,
 ) -> dict:
-    definitions = provider_schema["$defs"]
-    allowed_ids = list(
-        definitions["CurrentNamedIdentityCandidate"]["properties"][
-            "evidence_id"
-        ]["enum"]
+    evidence_refs = list(
+        provider_schema["properties"]["decisions"]["properties"]
     )
-    evidence_by_id: dict[str, str] = {}
+    evidence_by_ref: dict[str, dict] = {}
+    known_by_label: dict[tuple[str, str], list[dict]] = {}
     if messages:
         prompt = str(messages[0].get("content") or "")
-        marker = "backend-owned 当前身份证据目录（只能逐字引用 evidence_id）："
-        end_marker = "\n\n本集已有功能身份决议"
+        marker = (
+            "backend-owned 当前身份证据目录。E ref 已绑定完整证据 receipt，"
+            "禁止跨 E 搬运人物："
+        )
+        end_marker = "\n\n本批已登记身份 K 决议目录"
         if marker in prompt and end_marker in prompt:
             raw_catalog = prompt.split(marker, 1)[1]
             raw_catalog = raw_catalog.split("\n", 1)[1]
             raw_catalog = raw_catalog.split(end_marker, 1)[0]
-            evidence_by_id = {
-                str(item["evidence_id"]): str(item["text"])
+            evidence_by_ref = {
+                str(item["evidence_ref"]): dict(item)
                 for item in json.loads(raw_catalog)
             }
+        known_marker = "目录为空则所有 k=[]）："
+        known_end = "\n\n本集已有功能身份决议"
+        if known_marker in prompt and known_end in prompt:
+            raw_known = prompt.split(known_marker, 1)[1]
+            raw_known = raw_known.split("\n", 1)[1]
+            raw_known = raw_known.split(known_end, 1)[0]
+            for item in json.loads(raw_known):
+                known_by_label.setdefault((
+                    str(item.get("source_label") or ""),
+                    str(item.get("canonical_name") or ""),
+                ), []).append(dict(item))
 
-    def evidence_id_for(item: dict, source_label: str) -> str:
-        explicit = str(item.get("evidence_id") or "")
-        if explicit in allowed_ids:
+    def evidence_ref_for(item: dict, source_label: str) -> str:
+        explicit = str(
+            item.get("evidence_ref") or item.get("evidence_id") or ""
+        )
+        if explicit in evidence_refs:
             return explicit
         evidence_hint = str(item.get("evidence") or "")
         return next(
             (
-                evidence_id for evidence_id in allowed_ids
+                evidence_ref for evidence_ref in evidence_refs
                 if (
-                    source_label in evidence_by_id.get(evidence_id, "")
+                    source_label in str(
+                        evidence_by_ref.get(evidence_ref, {}).get("text") or ""
+                    )
                     or (
                         evidence_hint
-                        and evidence_hint in evidence_by_id.get(evidence_id, "")
+                        and evidence_hint in str(
+                            evidence_by_ref.get(evidence_ref, {}).get("text")
+                            or ""
+                        )
                     )
                 )
             ),
-            allowed_ids[0],
+            evidence_refs[0],
         )
 
-    named: list[dict] = []
-    functional: list[dict] = []
+    decisions = {
+        evidence_ref: {"k": [], "n": [], "f": []}
+        for evidence_ref in evidence_refs
+    }
     for index, raw in enumerate(characters, start=1):
         item = dict(raw)
         source_label = str(item.get("source_label") or item.get("name") or "")
-        common = {
-            "source_label": source_label,
-            "kind": "mentioned" if item.get("kind") == "mentioned" else "onscreen",
-            "evidence_id": evidence_id_for(item, source_label),
-        }
+        kind = "mentioned" if item.get("kind") == "mentioned" else "onscreen"
+        evidence_ref = evidence_ref_for(item, source_label)
         if str(item.get("identity_kind") or "named") == "functional":
-            functional.append({
-                **common,
-                "identity_kind": "functional",
+            decisions[evidence_ref]["f"].append({
+                "source_label": source_label,
                 "functional_identity_key": str(
                     item.get("functional_identity_key") or f"F{index}"
                 ),
+                "kind": kind,
             })
         else:
-            named.append({
-                **common,
-                "canonical_name": str(
-                    item.get("canonical_name") or item.get("name") or ""
-                ),
-                "identity_kind": "named",
-            })
-    return {"named": named, "functional": functional}
+            canonical_name = str(
+                item.get("canonical_name") or item.get("name") or ""
+            )
+            known = next((
+                candidate
+                for candidate in known_by_label.get(
+                    (source_label, canonical_name), []
+                )
+                if candidate.get("evidence_ref") == evidence_ref
+            ), None)
+            if known is not None:
+                decisions[evidence_ref]["k"].append({
+                    "decision_id": known["decision_id"],
+                    "kind": kind,
+                })
+            else:
+                decisions[evidence_ref]["n"].append({
+                    "identity_label": source_label,
+                    "kind": kind,
+                })
+    return {"decisions": decisions}
 
 
 def _future_identity_wire(
@@ -1980,7 +2011,7 @@ def test_discover_character_candidates_keeps_typed_functionals(monkeypatch) -> N
                     "identity_kind": "functional", "kind": "onscreen",
                     "evidence": "守卫后退",
                 },
-            ]), ensure_ascii=False)
+            ], messages=_args[0]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     result = asyncio.run(portraits.discover_character_candidates(
@@ -2842,17 +2873,13 @@ def test_attempt14_call_63221_current_rf9_preserves_all_distinct_identities(
         )
         assert meta["source_batches"] == 1
         assert kwargs["response_format"]["json_schema"]["name"] == (
-            "screenplay_current_identity_discovery_v9"
+            "screenplay_current_identity_discovery_v10"
         )
         provider_schema = kwargs["response_format"]["json_schema"]["schema"]
-        named_ids = provider_schema["$defs"][
-            "CurrentNamedIdentityCandidate"
-        ]["properties"]["evidence_id"]["enum"]
-        functional_ids = provider_schema["$defs"][
-            "CurrentFunctionalIdentityCandidate"
-        ]["properties"]["evidence_id"]["enum"]
-        assert named_ids == functional_ids
-        assert len(named_ids) == 5
+        evidence_refs = provider_schema["properties"]["decisions"][
+            "properties"
+        ]
+        assert len(evidence_refs) == 5
         characters = [
             {
                 "source_label": label,
@@ -3401,7 +3428,7 @@ def test_future_canonical_cooccurrence_does_not_upgrade_alias_group(
                     "kind": "mentioned",
                     "evidence": "同一女子被称为许师姐",
                 },
-            ]), ensure_ascii=False)
+            ], messages=_args[0]), ensure_ascii=False)
         return json.dumps(_identity_wire_for_call(kwargs, [
             {
                 "source_label": "会飞的女人",
@@ -3642,7 +3669,7 @@ def test_stable_unique_title_is_accepted_as_named_identity(monkeypatch) -> None:
             "kind": "mentioned",
             "evidence": "跨章节唯一指向建立宗门的同一位老祖",
             "future_evidence": "靠山老祖定下门规",
-        }]), ensure_ascii=False)
+        }], messages=_args[0]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     candidates = asyncio.run(portraits.discover_character_candidates(

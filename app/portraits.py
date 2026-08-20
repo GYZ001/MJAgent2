@@ -903,56 +903,80 @@ def _current_identity_evidence_receipt_is_valid(
 def _project_current_identity_response(
     value: CurrentIdentityCandidateResponse,
     *,
-    evidence_by_id: dict[str, dict],
+    evidence_by_ref: dict[str, dict],
+    known_decisions: dict[str, dict],
     all_evidence_by_id: dict[str, dict] | None = None,
     reserved_authority_labels: set[str] | None = None,
     group_scope: str,
     existing_functional_routes: set[str],
 ) -> tuple[list[dict], list[str]]:
-    """Resolve the RF9 wire exclusively through the sealed evidence catalog."""
+    """Resolve the RF10 K/N/F wire through backend-owned evidence receipts."""
     errors: list[str] = []
     projected: list[dict] = []
     seen_labels: dict[str, str] = {}
     seen_label_groups: dict[str, set[str]] = {}
-    for item in value.characters:
-        source_label = str(item.get("source_label") or "")
-        identity_kind = str(item.get("identity_kind") or "")
-        evidence_id = str(item.get("evidence_id") or "")
-        record = evidence_by_id.get(evidence_id)
+
+    expected_refs = set(evidence_by_ref)
+    actual_refs = set(value.decisions)
+    missing_refs = sorted(expected_refs - actual_refs)
+    extra_refs = sorted(actual_refs - expected_refs)
+    if missing_refs:
+        errors.append(f"current decisions 缺少 evidence refs：{missing_refs}")
+    if extra_refs:
+        errors.append(f"current decisions 含未知 evidence refs：{extra_refs}")
+
+    all_records = list((all_evidence_by_id or {}).values()) or list(
+        evidence_by_ref.values()
+    )
+
+    def append_candidate(
+        *,
+        source_label: str,
+        canonical_name: str,
+        identity_kind: str,
+        functional_key: str,
+        kind: str,
+        record: dict,
+        authority_id: str = "",
+        authority_group: str = "",
+        known_authority: bool = False,
+    ) -> None:
+        source_label = str(source_label or "")
+        canonical_name = str(canonical_name or "")
+        functional_key = str(functional_key or "")
         if source_label != source_label.strip():
             errors.append(f"source_label 含首尾空白：{source_label!r}")
         if not source_label or len(source_label) > 16:
             errors.append(f"source_label 非法：{source_label!r}")
-        if evidence_id != evidence_id.strip() or record is None:
-            errors.append(
-                f"current evidence_id 越界：{source_label or '<empty>'}"
-            )
-            continue
         evidence_text = str(record.get("text") or "")
         literal = bool(source_label and source_label in evidence_text)
         literal_anywhere = bool(
             source_label
             and any(
                 source_label in str(owned_record.get("text") or "")
-                for owned_record in (
-                    all_evidence_by_id or evidence_by_id
-                ).values()
+                for owned_record in all_records
             )
         )
-        canonical_name = str(item.get("canonical_name") or "")
         if canonical_name != canonical_name.strip():
             errors.append(f"canonical_name 含首尾空白：{source_label}")
         if identity_kind == "named":
-            if canonical_name != source_label:
+            if not known_authority and canonical_name != source_label:
                 errors.append(
                     "current named 只允许逐字自称谓，别名必须留待 typed authority："
                     f"{source_label}->{canonical_name}"
+                )
+            if (
+                not known_authority
+                and source_label in (reserved_authority_labels or set())
+            ):
+                errors.append(
+                    "current 已登记身份必须选择 K decision："
+                    f"{source_label}"
                 )
             if not literal:
                 errors.append(
                     f"current named 缺少逐字 owned evidence：{source_label}"
                 )
-        functional_key = str(item.get("functional_identity_key") or "")
         if functional_key != functional_key.strip():
             errors.append(
                 f"functional_identity_key 含首尾空白：{source_label}"
@@ -985,7 +1009,10 @@ def _project_current_identity_response(
             and functional_key in existing_functional_routes
             else ""
         )
-        if identity_kind == "named":
+        if identity_kind == "named" and authority_id:
+            identity_group = authority_group or authority_id
+            provenance = CURRENT_IDENTITY_LITERAL_PROVENANCE
+        elif identity_kind == "named":
             identity_group = (
                 f"{group_scope}:named:"
                 + evidence_repository.content_hash(source_label)[:16]
@@ -996,7 +1023,7 @@ def _project_current_identity_response(
                 f"{group_scope}:synthetic:"
                 + evidence_repository.content_hash({
                     "source_label": source_label,
-                    "evidence_id": evidence_id,
+                    "evidence_id": str(record.get("evidence_id") or ""),
                 })[:16]
             )
             provenance = CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
@@ -1021,9 +1048,10 @@ def _project_current_identity_response(
             "source_label": source_label,
             "identity_kind": identity_kind,
             "identity_group": identity_group,
+            "authority_id": authority_id,
             "existing_route_name": existing_route_name,
             "kind": (
-                "mentioned" if item.get("kind") == "mentioned" else "onscreen"
+                "mentioned" if kind == "mentioned" else "onscreen"
             ),
             "evidence": evidence,
             "future_evidence": "",
@@ -1033,6 +1061,57 @@ def _project_current_identity_response(
             "source_evidence_receipt": dict(record),
             "_typed_source_evidence_owned": True,
         })
+
+    for evidence_ref, record in evidence_by_ref.items():
+        decisions = value.decisions.get(evidence_ref)
+        if decisions is None:
+            continue
+        if set(decisions.model_fields_set) != {"k", "n", "f"}:
+            errors.append(
+                f"current evidence decision keys 非闭合：{evidence_ref}"
+            )
+        if len(decisions.k) + len(decisions.n) + len(decisions.f) > 64:
+            errors.append(f"current evidence decisions 过多：{evidence_ref}")
+        for item in decisions.k:
+            decision_id = str(item.decision_id or "")
+            selected = known_decisions.get(decision_id)
+            if (
+                selected is None
+                or selected.get("evidence_ref") != evidence_ref
+            ):
+                errors.append(
+                    f"current K decision 越界：{evidence_ref}:{decision_id}"
+                )
+                continue
+            append_candidate(
+                source_label=str(selected.get("source_label") or ""),
+                canonical_name=str(selected.get("canonical_name") or ""),
+                identity_kind="named",
+                functional_key="",
+                kind=item.kind,
+                record=record,
+                authority_id=str(selected.get("authority_id") or ""),
+                authority_group=str(selected.get("identity_group") or ""),
+                known_authority=True,
+            )
+        for item in decisions.n:
+            append_candidate(
+                source_label=item.identity_label,
+                canonical_name=item.identity_label,
+                identity_kind="named",
+                functional_key="",
+                kind=item.kind,
+                record=record,
+            )
+        for item in decisions.f:
+            append_candidate(
+                source_label=item.source_label,
+                canonical_name="",
+                identity_kind="functional",
+                functional_key=item.functional_identity_key,
+                kind=item.kind,
+                record=record,
+            )
 
     for source_label, groups in seen_label_groups.items():
         if len(groups) > 1:
@@ -1101,12 +1180,13 @@ async def _discover_character_candidates_legacy(
             and str(item.get("canonical_name") or "").strip()
         )
     ]
+    current_authorities = identity_authority_registry(
+        bible,
+        existing_resolutions or [],
+    )
     reserved_authority_labels = {
         str(label).strip()
-        for authority in identity_authority_registry(
-            bible,
-            existing_resolutions or [],
-        )
+        for authority in current_authorities
         if str(authority.get("identity_kind") or "").strip() != "functional"
         for label in (
             authority.get("canonical_name"),
@@ -1271,31 +1351,47 @@ async def _discover_character_candidates_legacy(
     for current_batch, evidence_records in enumerate(
         current_evidence_batches, start=1
     ):
-        evidence_by_id = {
-            str(record["evidence_id"]): record for record in evidence_records
+        evidence_by_ref = {
+            f"E{index:03d}": record
+            for index, record in enumerate(evidence_records, start=1)
         }
         evidence_catalog = [
             {
-                key: record[key]
-                for key in (
-                    "evidence_id",
-                    "origin",
-                    "source_segment_id",
-                    "start_offset",
-                    "end_offset",
-                    "path",
-                    "text",
-                )
+                "evidence_ref": evidence_ref,
+                "origin": str(record.get("origin") or ""),
+                "source_segment_id": str(
+                    record.get("source_segment_id") or ""
+                ),
+                "path": str(record.get("path") or ""),
+                "text": str(record.get("text") or ""),
             }
-            for record in evidence_records
+            for evidence_ref, record in evidence_by_ref.items()
         ]
-        evidence_catalog_hash = evidence_repository.content_hash(
-            evidence_records
+        known_decisions = _current_identity_known_decision_catalog(
+            evidence_by_ref,
+            authorities=current_authorities,
         )
-        current_schema = _current_identity_schema(list(evidence_by_id))
+        known_decision_projection = [
+            {
+                "decision_id": decision_id,
+                "evidence_ref": str(item.get("evidence_ref") or ""),
+                "source_label": str(item.get("source_label") or ""),
+                "canonical_name": str(item.get("canonical_name") or ""),
+            }
+            for decision_id, item in sorted(known_decisions.items())
+        ]
+        evidence_catalog_hash = evidence_repository.content_hash({
+            "contract_version": CURRENT_IDENTITY_DECISION_VERSION,
+            "evidence": evidence_records,
+            "known_decisions": known_decision_projection,
+        })
+        current_schema = _current_identity_schema(
+            list(evidence_by_ref),
+            known_decision_ids=list(known_decisions),
+        )
         current_response_format = _identity_strict_response_format(
             current_schema,
-            name="screenplay_current_identity_discovery_v9",
+            name="screenplay_current_identity_discovery_v10",
         )
         prompt = f"""任务：为第 {episode_no} 集做人物身份增量预检。请用语义和上下文判断，
 不要依赖服饰、性别、年龄或称谓后缀的固定词表。
@@ -1303,45 +1399,46 @@ async def _discover_character_candidates_legacy(
 当前人物谱已有角色：
 {known}
 
-本批 backend-owned 当前身份证据目录（只能逐字引用 evidence_id）：
+本批 backend-owned 当前身份证据目录。E ref 已绑定完整证据 receipt，禁止跨 E 搬运人物：
 {json.dumps(evidence_catalog, ensure_ascii=False, separators=(',', ':'))}
+
+本批已登记身份 K 决议目录（只有这些 decision_id 可进入 k；目录为空则所有 k=[]）：
+{json.dumps(known_decision_projection, ensure_ascii=False, separators=(',', ':'))}
 
 本集已有功能身份决议（可为空；canonical_name 是已分配的本集稳定 ID）：
 {json.dumps(existing_resolution_projection, ensure_ascii=False, separators=(',', ':'))}
 
 规则：
-1. 找出本批证据中实际出场或开口的人；每项必须选择所在证据的
-   evidence_id，不得编写、改写或复制 evidence 文本。
-2. 当前阶段的 named 只用于逐字自称谓：canonical_name 必须与 source_label 完全相同。
-   source_label 与 canonical_name 还必须是所选 evidence text 中连续逐字子串。
+1. decisions 必须精确包含目录中全部 E ref；每个 E 都显式输出 k/n/f 三个数组，
+   无结果用 []。人物只能写在其逐字证据所在 E 下；同一 E 可有多人。
+2. 已登记身份只可选 k：decision_id 精确复制 K 目录，kind 选择 onscreen/mentioned；
+   不得把 K 目录中的 source_label 写进 n/f。
+3. 当前阶段的新 named 只用于逐字自称谓：n 每项只写 identity_label 与 kind，
+   identity_label 必须是当前 E text 的连续逐字子串；后端会令 canonical_name=source_label。
    任何“称谓 A 其实是名字 B”的别名判断，即使 A、B 同时出现在当前输入，也必须先判为
    functional，交由后续带 authority_id 的权威绑定；不得用同场共现代替同一性证据。
-3. canonical_name 可以是人名、法号、尊号或专属称号，但必须逐字复用 source_label。
-   只在人物谱中出现、或当前文本另处共现的名字不能在本阶段直接绑定。
-4. 姓名单独出现不算同一人证据；必须能确认该真名与 source_label 是同一人，有歧义一律不猜。
-5. 若是一次性角色，或在可见线索中无法确认稳定真名，放入 functional 数组；
-   functional 项在结构上不得携带 canonical_name。
-   functional 尽量逐字复用所选 evidence text 的称谓；若为区分同段多个无名实体而
+4. 若是一次性角色，别名待后续确认，或无法确认稳定真名，放入 f；每项填写
+   source_label、functional_identity_key、kind，不得携带 canonical/authority/evidence。
+   source_label 尽量逐字复用当前 E text；若为区分同段多个无名实体而
    必须使用非逐字的稳定描述，只能保留为 functional，后端会隔离为 synthetic identity，
    不得将它当作别名或真名。
-6. 若身份投影中的 source_label 混入动作或表演提示，必须结合对应 line_context 判断真正说话人；
+5. 若身份投影中的 source_label 混入动作或表演提示，必须结合对应 line_context 判断真正说话人；
    source_label 保留原始完整字符串，canonical_name/functional_identity_key 绑定到真正说话人。
    禁止按“说、喊、点头”等固定词表或后缀规则猜测。
-7. 每个 functional 项必须填写 functional_identity_key：
+6. 每个 f 项必须填写 functional_identity_key：
    - 若它与“本集已有功能身份决议”中的某人是同一人，精确填写该人的 canonical_name。
    - 否则填写本次响应内的不透明分组 ID（如 F1、F2）；不同 source_label 若明确是同一人必须共用同一 ID。
    - 无法确认是否同一人时必须使用不同 ID，禁止根据称谓字面相似猜测。
-8. 同一 evidence_id 可用于多个确实不同的人；每个人只输出一次，不得因共用证据合并人物。
-只输出符合下列 Schema 的 JSON。named 项必须携带 canonical_name，functional 项在结构上
-不得携带 canonical_name；两个数组都必须显式输出，空集合用 []：
-{json.dumps(current_schema, ensure_ascii=False, separators=(',', ':'))}"""
+7. 每个人只输出一次；不得因共用证据合并人物，也不得把同一 source_label 放入多个分支。
+只输出 response_format 约束的 JSON，不要复述证据、Schema 或规则。"""
 
         def validate_current_response(
             value: CurrentIdentityCandidateResponse,
         ) -> list[str]:
             _projected, errors = _project_current_identity_response(
                 value,
-                evidence_by_id=evidence_by_id,
+                evidence_by_ref=evidence_by_ref,
+                known_decisions=known_decisions,
                 all_evidence_by_id=all_current_evidence_by_id,
                 reserved_authority_labels=reserved_authority_labels,
                 group_scope=f"current-{current_batch}",
@@ -1354,7 +1451,7 @@ async def _discover_character_candidates_legacy(
             model_type=CurrentIdentityCandidateResponse,
             validate=validate_current_response,
             operation_id=(
-                f"screenplay.identity.current.v4:{episode_no}:{current_batch}:"
+                f"screenplay.identity.current.v5:{episode_no}:{current_batch}:"
                 + evidence_repository.content_hash({
                     "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
                     "current_identity_version": CURRENT_IDENTITY_DECISION_VERSION,
@@ -1390,6 +1487,9 @@ async def _discover_character_candidates_legacy(
                 "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
                 "current_identity_version": CURRENT_IDENTITY_DECISION_VERSION,
                 "current_evidence_catalog_hash": evidence_catalog_hash,
+                "current_decision_catalog_hash": evidence_repository.content_hash(
+                    known_decision_projection
+                ),
                 "schema_hash": evidence_repository.content_hash(current_schema),
                 "provider": current_provider,
                 "model": current_model,
@@ -1404,7 +1504,8 @@ async def _discover_character_candidates_legacy(
         batch_candidates, projection_errors = (
             _project_current_identity_response(
                 response,
-                evidence_by_id=evidence_by_id,
+                evidence_by_ref=evidence_by_ref,
+                known_decisions=known_decisions,
                 all_evidence_by_id=all_current_evidence_by_id,
                 reserved_authority_labels=reserved_authority_labels,
                 group_scope=f"current-{current_batch}",
