@@ -1461,56 +1461,83 @@ def mark_first_evaluation(revision_id: str, evaluation_id: str) -> ProductionRev
 
 def update_working_artifact(revision_id: str, artifact_id: str, *, expected_hash: str | None = None) -> None:
     """CAS 更新 working_artifact_id。"""
+    from app.evidence import repository as evidence_repository
+
     ensure_production_revisions_table()
     conn = get_conn()
-    row = conn.execute(
-        "SELECT * FROM production_revisions WHERE id=?", (revision_id,)
-    ).fetchone()
-    if not row:
-        raise ValueError(f"production revision not found: {revision_id}")
-    _assert_screenplay_write_owner(
-        conn,
-        episode_id=row["episode_id"],
-        kind=row["kind"],
-        revision_id=revision_id,
-    )
-    if row["status"] != "active":
-        raise RuntimeError("production revision 不再 active")
-    if expected_hash:
-        current_id = row["working_artifact_id"]
-        if current_id:
-            art = conn.execute(
-                "SELECT content_hash FROM artifacts WHERE id=?", (current_id,)
-            ).fetchone()
-            if art and art["content_hash"] and art["content_hash"] != expected_hash:
-                raise RuntimeError("working artifact hash conflict")
-    stamp = now()
-    cursor = conn.execute(
-        "UPDATE production_revisions SET working_artifact_id=?, updated_at=? "
-        "WHERE id=? AND status='active' "
-        "AND COALESCE(working_artifact_id, '')=COALESCE(?, '')",
-        (
-            artifact_id,
-            stamp,
-            revision_id,
-            row["working_artifact_id"],
-        ),
-    )
-    if cursor.rowcount != 1:
-        conn.rollback()
-        raise RuntimeError("production revision working artifact 发生 CAS 冲突")
-    kind = row["kind"]
-    episode_id = row["episode_id"]
-    col = (
-        "working_screenplay_artifact_id"
-        if kind == "screenplay"
-        else "working_storyboard_artifact_id"
-    )
     try:
-        conn.execute(f"UPDATE episodes SET {col}=? WHERE id=?", (artifact_id, episode_id))
-    except Exception:  # noqa: BLE001
-        pass
-    conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM production_revisions WHERE id=?", (revision_id,)
+        ).fetchone()
+        if not row:
+            raise ValueError(f"production revision not found: {revision_id}")
+        _assert_screenplay_write_owner(
+            conn,
+            episode_id=row["episode_id"],
+            kind=row["kind"],
+            revision_id=revision_id,
+        )
+        if row["status"] != "active":
+            raise RuntimeError("production revision 不再 active")
+        if expected_hash:
+            current_id = str(row["working_artifact_id"] or "")
+            if current_id:
+                artifact_row = conn.execute(
+                    "SELECT id,type,content_json,file_path,content_hash "
+                    "FROM artifacts WHERE id=?",
+                    (current_id,),
+                ).fetchone()
+                if artifact_row is None:
+                    raise RuntimeError("working artifact hash conflict")
+                artifact_value = dict(artifact_row)
+                artifact_value["content"] = _artifact_json(artifact_value)
+                try:
+                    actual_hash = (
+                        evidence_repository.verified_artifact_content_hash(
+                            artifact_value
+                        )
+                    )
+                except ValueError as exc:
+                    raise RuntimeError(
+                        "working artifact content hash drift"
+                    ) from exc
+                if actual_hash != expected_hash:
+                    raise RuntimeError("working artifact hash conflict")
+        stamp = now()
+        cursor = conn.execute(
+            "UPDATE production_revisions SET working_artifact_id=?, updated_at=? "
+            "WHERE id=? AND status='active' "
+            "AND COALESCE(working_artifact_id, '')=COALESCE(?, '')",
+            (
+                artifact_id,
+                stamp,
+                revision_id,
+                row["working_artifact_id"],
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError(
+                "production revision working artifact 发生 CAS 冲突"
+            )
+        kind = row["kind"]
+        episode_id = row["episode_id"]
+        col = (
+            "working_screenplay_artifact_id"
+            if kind == "screenplay"
+            else "working_storyboard_artifact_id"
+        )
+        try:
+            conn.execute(
+                f"UPDATE episodes SET {col}=? WHERE id=?",
+                (artifact_id, episode_id),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def recover_screenplay_working_authority(
@@ -1581,14 +1608,29 @@ def recover_screenplay_working_authority(
         ):
             raise RuntimeError("screenplay recovery eligibility/working CAS 冲突")
         current_artifact = conn.execute(
-            "SELECT content_hash FROM artifacts WHERE id=?",
+            "SELECT id,type,content_json,file_path,content_hash "
+            "FROM artifacts WHERE id=?",
             (expected_working_artifact_id,),
         ).fetchone()
-        if (
-            current_artifact is None
-            or str(current_artifact["content_hash"] or "")
-            != expected_working_hash
-        ):
+        if current_artifact is None:
+            raise RuntimeError("screenplay recovery working hash CAS 冲突")
+        current_artifact_value = dict(current_artifact)
+        current_artifact_value["content"] = _artifact_json(
+            current_artifact_value
+        )
+        from app.evidence import repository as evidence_repository
+
+        try:
+            current_artifact_hash = (
+                evidence_repository.verified_artifact_content_hash(
+                    current_artifact_value
+                )
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                "screenplay recovery working content hash drift"
+            ) from exc
+        if current_artifact_hash != expected_working_hash:
             raise RuntimeError("screenplay recovery working hash CAS 冲突")
         replacement = conn.execute(
             "SELECT id,type,scope_type,scope_id,status,contract_version,"

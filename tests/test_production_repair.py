@@ -1950,6 +1950,18 @@ def test_certificate_binds_hash_and_rejects_mismatch(monkeypatch):
     with pytest.raises(ValueError):
         verify_completion_certificate(cert, expected_artifact_hash="deadbeef")
     db.get_conn().execute(
+        "UPDATE artifacts SET content_json=? WHERE id=?",
+        (json.dumps({"ok": True, "stakes": "已篡改"}, ensure_ascii=False), art["id"]),
+    )
+    db.get_conn().commit()
+    with pytest.raises(ValueError, match="内容指纹漂移"):
+        verify_completion_certificate(cert)
+    db.get_conn().execute(
+        "UPDATE artifacts SET content_json=? WHERE id=?",
+        (json.dumps(art["content"], ensure_ascii=False), art["id"]),
+    )
+    db.get_conn().commit()
+    db.get_conn().execute(
         "UPDATE artifacts SET status='stale' WHERE id=?",
         (art["id"],),
     )
@@ -1960,6 +1972,80 @@ def test_certificate_binds_hash_and_rejects_mismatch(monkeypatch):
         cert,
         allow_stale_artifact_for_revision=True,
     )
+
+
+def test_certificate_issue_rejects_tampered_artifact_outer_hash() -> None:
+    from app.evidence import repository as evidence_repository
+
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="validated",
+        trust_level="T2",
+        content={"ok": True, "stakes": "代价"},
+    ))
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE artifacts SET content_json=? WHERE id=?",
+        (json.dumps({"ok": True, "stakes": "已篡改"}, ensure_ascii=False), artifact["id"]),
+    )
+    conn.commit()
+
+    with pytest.raises(ValueError, match="不得绑定内容指纹漂移"):
+        issue_completion_certificate(
+            kind="screenplay",
+            scope_id="ep_p",
+            artifact_id=artifact["id"],
+            artifact_hash=artifact["content_hash"],
+        )
+
+
+def test_update_working_artifact_cas_rejects_tampered_current_payload() -> None:
+    from app.evidence import repository as evidence_repository
+    from app.production.revision import update_working_artifact
+
+    revision = ensure_production_revision(
+        episode_id="ep_p", kind="screenplay", resume=False
+    )
+    current = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="validated",
+        trust_level="T2",
+        content={"screenplay_metadata": {"episode_no": 1}},
+    ))
+    replacement = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="validated",
+        trust_level="T2",
+        content={"screenplay_metadata": {"episode_no": 1}, "next": True},
+    ))
+    mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=current["id"],
+        working_artifact_id=current["id"],
+    )
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE artifacts SET content_json=? WHERE id=?",
+        (json.dumps({"tampered": True}), current["id"]),
+    )
+    conn.commit()
+
+    with pytest.raises(RuntimeError, match="content hash drift"):
+        update_working_artifact(
+            revision.id,
+            replacement["id"],
+            expected_hash=current["content_hash"],
+        )
+    assert conn.execute(
+        "SELECT working_artifact_id FROM production_revisions WHERE id=?",
+        (revision.id,),
+    ).fetchone()[0] == current["id"]
 
 
 def test_certificate_derives_blockers_from_evaluation() -> None:

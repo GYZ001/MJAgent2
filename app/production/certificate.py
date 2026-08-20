@@ -361,7 +361,10 @@ def issue_completion_certificate(
         or art.get("status") not in {"validated", "approved"}
     ):
         raise ValueError("完成凭证只能绑定当前集的可用 validated/approved Artifact")
-    stored_hash = art.get("content_hash") or evidence_repository.content_hash(art.get("content"))
+    try:
+        stored_hash = evidence_repository.verified_artifact_content_hash(art)
+    except ValueError as exc:
+        raise ValueError("完成凭证不得绑定内容指纹漂移的 Artifact") from exc
     if stored_hash != artifact_hash:
         raise ValueError("artifact_hash 与存储内容不一致，拒绝签发凭证")
     evaluation_ids = list(evaluation_ids or [])
@@ -603,7 +606,10 @@ def verify_completion_certificate(
         or art.get("status") not in allowed_artifact_statuses
     ):
         raise ValueError("凭证绑定的 artifact 范围或当前状态已失效")
-    current_hash = art.get("content_hash") or evidence_repository.content_hash(art.get("content"))
+    try:
+        current_hash = evidence_repository.verified_artifact_content_hash(art)
+    except ValueError as exc:
+        raise ValueError("凭证绑定的 artifact 内容指纹漂移") from exc
     if current_hash != cert.artifact_hash:
         raise ValueError("凭证绑定的 artifact 内容已变化")
     if cert.blockers or cert.must_fix_issues:

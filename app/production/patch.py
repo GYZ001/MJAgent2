@@ -68,25 +68,14 @@ class PatchResult(BaseModel):
 
 
 def _artifact_content_hash(artifact: dict[str, Any]) -> str:
-    stored_hash = str(artifact.get("content_hash") or "")
     try:
-        current_hash = evidence_repository.content_hash(
-            artifact.get("content"),
-            artifact.get("file_path"),
-        )
-    except (OSError, TypeError, ValueError) as exc:
-        raise ArtifactNeedsRebuildError(
-            artifact_id=str(artifact.get("id") or ""),
-            artifact_type=str(artifact.get("type") or "screenplay_document"),
-            reason="Patch 基线当前内容无法重新计算指纹",
-        ) from exc
-    if not stored_hash or stored_hash != current_hash:
+        return evidence_repository.verified_artifact_content_hash(artifact)
+    except ValueError as exc:
         raise ArtifactNeedsRebuildError(
             artifact_id=str(artifact.get("id") or ""),
             artifact_type=str(artifact.get("type") or "screenplay_document"),
             reason="Patch 基线内容与存储指纹漂移",
-        )
-    return current_hash
+        ) from exc
 
 
 def apply_patch_operation_to_document(
@@ -432,6 +421,10 @@ def _current_ir_semantic_gaps(art: dict[str, Any]) -> list[str]:
         if parent.get("type") != "screenplay_generation_ir_merged":
             continue
         merged_artifacts.append(parent)
+        try:
+            evidence_repository.verified_artifact_content_hash(parent)
+        except ValueError:
+            gaps.append(f"{artifact_id}:content_hash")
         content = parent.get("content")
         if parent.get("status") != "validated":
             gaps.append(f"{artifact_id}:status")
@@ -491,8 +484,17 @@ def _current_ir_semantic_gaps(art: dict[str, Any]) -> list[str]:
                 and candidate.get("status") not in {"validated", "approved"}
             ):
                 gaps.append(f"{parent_id}:status")
+            elif candidate.get("type") in required_parent_types:
+                try:
+                    evidence_repository.verified_artifact_content_hash(candidate)
+                except ValueError:
+                    gaps.append(f"{parent_id}:content_hash")
         for shard in shard_parents:
             shard_id = str(shard.get("id") or "")
+            try:
+                evidence_repository.verified_artifact_content_hash(shard)
+            except ValueError:
+                gaps.append(f"{shard_id}:content_hash")
             if (
                 str(shard.get("contract_version") or "")
                 != SCREENPLAY_SCENE_SHARD_VERSION
@@ -640,6 +642,14 @@ def screenplay_from_artifact_record(art: dict[str, Any]) -> EpisodeScreenplay:
     """
     artifact_id = str(art.get("id") or "")
     content = art.get("content") or {}
+    try:
+        evidence_repository.verified_artifact_content_hash(art)
+    except ValueError as exc:
+        raise ArtifactNeedsRebuildError(
+            artifact_id=artifact_id,
+            artifact_type=str(art.get("type") or "screenplay_document"),
+            reason="Artifact 内容与存储指纹漂移",
+        ) from exc
     _assert_screenplay_artifact_contract(art, content)
     content_fingerprint = evidence_repository.content_hash(content)
     cache_key = (artifact_id, content_fingerprint)

@@ -2795,9 +2795,7 @@ def _complete_screenplay_from_working_artifact(
     artifact = evidence_repository.get_artifact(working_id)
     if artifact is None:
         raise RuntimeError("剧本 working Artifact 不存在")
-    artifact_hash = artifact.get("content_hash") or evidence_repository.content_hash(
-        artifact.get("content")
-    )
+    artifact_hash = evidence_repository.verified_artifact_content_hash(artifact)
     script = load_screenplay_from_artifact(working_id)
 
     save_checkpoint(revision_id, {
@@ -3187,7 +3185,9 @@ def _revalidate_or_rebuild_resume_working(
     old_working_artifact = evidence_repository.get_artifact(old_working_id)
     if old_working_artifact is None:
         raise RuntimeError("screenplay recovery working Artifact 不存在")
-    old_working_hash = str(old_working_artifact.get("content_hash") or "")
+    old_working_hash = evidence_repository.verified_artifact_content_hash(
+        old_working_artifact
+    )
     working_script = load_screenplay_from_artifact(old_working_id)
     qa_episode = {
         **episode,
@@ -3895,9 +3895,8 @@ async def run_screenplay_production(
     working_id = rev.working_artifact_id
     working_artifact = evidence_repository.get_artifact(working_id)
     assert working_artifact
-    working_hash = (
-        working_artifact.get("content_hash")
-        or evidence_repository.content_hash(working_artifact.get("content"))
+    working_hash = evidence_repository.verified_artifact_content_hash(
+        working_artifact
     )
     working_script = load_screenplay_from_artifact(working_id)
     from app.portraits import (
@@ -4044,7 +4043,7 @@ async def run_screenplay_production(
         assert working_id
         art = evidence_repository.get_artifact(working_id)
         assert art
-        artifact_hash = art.get("content_hash") or evidence_repository.content_hash(art.get("content"))
+        artifact_hash = evidence_repository.verified_artifact_content_hash(art)
         script = load_screenplay_from_artifact(working_id)
 
         # 身份决议可能来自 Baseline 后审计、服务恢复或人工入口。无论从哪条路
@@ -4373,7 +4372,7 @@ async def run_screenplay_production(
     working_id = rev.working_artifact_id
     art = evidence_repository.get_artifact(working_id)
     assert art
-    artifact_hash = art.get("content_hash") or evidence_repository.content_hash(art.get("content"))
+    artifact_hash = evidence_repository.verified_artifact_content_hash(art)
     script = load_screenplay_from_artifact(working_id)
     issues, evaluation = run_screenplay_qa(
         script, bible=bible, source_text=source_text, episode=episode,

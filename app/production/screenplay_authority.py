@@ -1175,6 +1175,28 @@ def _validated_v7_source_artifacts(
                 artifact_type=str(artifact.get("type") or ""),
                 reason="merged IR lineage 缺少已声明的直接父 Artifact",
             )
+        authority_parent_types = {
+            "screenplay_narrative_blueprint",
+            "screenplay_identity_registry",
+            "screenplay_envelope",
+            "screenplay_scene_shard",
+        }
+        try:
+            for direct_parent in direct_parents:
+                if (
+                    direct_parent is not None
+                    and direct_parent.get("type") in authority_parent_types
+                ):
+                    _verified_artifact_hash(
+                        direct_parent,
+                        label="validated screenplay lineage Artifact",
+                    )
+        except ValueError as exc:
+            raise ArtifactNeedsRebuildError(
+                artifact_id=str(artifact.get("id") or ""),
+                artifact_type=str(artifact.get("type") or ""),
+                reason=str(exc),
+            ) from exc
         shard_parents = [
             parent
             for parent in direct_parents

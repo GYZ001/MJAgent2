@@ -750,6 +750,7 @@ def test_current_screenplay_artifact_broken_lineage_needs_rebuild() -> None:
         ("old_merged_current_shards", True),
         ("tampered_merged_hash", True),
         ("tampered_shard_hash", True),
+        ("tampered_direct_authority_parent", True),
         ("complete_current", False),
     ],
 )
@@ -812,6 +813,23 @@ def test_validated_v7_source_authority_requires_complete_current_lineage(
         conn.execute(
             "UPDATE artifacts SET content_json=? WHERE id=?",
             (json.dumps(tampered, ensure_ascii=False), shard_ids[0]),
+        )
+    elif lineage_case == "tampered_direct_authority_parent":
+        authority_parent = next(
+            evidence_repository.get_artifact(parent_id)
+            for parent_id in merged["parent_artifact_ids"]
+            if (evidence_repository.get_artifact(parent_id) or {}).get("type")
+            in {
+                "screenplay_narrative_blueprint",
+                "screenplay_identity_registry",
+                "screenplay_envelope",
+            }
+        )
+        tampered = deepcopy(authority_parent["content"])
+        tampered["_tampered"] = True
+        conn.execute(
+            "UPDATE artifacts SET content_json=? WHERE id=?",
+            (json.dumps(tampered, ensure_ascii=False), authority_parent["id"]),
         )
     conn.commit()
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
