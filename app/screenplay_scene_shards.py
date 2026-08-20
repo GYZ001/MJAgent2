@@ -11,7 +11,7 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from typing import Any, Literal
 
@@ -100,6 +100,36 @@ SCREENPLAY_SCENE_SHARD_MAX_OUTPUT_TOKENS = 16384
 SCREENPLAY_SCENE_SHARD_SCENE_RESERVE_TOKENS = 512
 SCREENPLAY_SCENE_SHARD_UNIT_RESERVE_TOKENS = 128
 SCREENPLAY_SCENE_SHARD_REASONING_RESERVE_PERCENT = 20
+
+
+async def _gather_fail_fast(*awaitables: Awaitable[Any]) -> list[Any]:
+    """Run a batch in input order, cancelling and joining it on first failure.
+
+    ``asyncio.gather`` propagates a child exception without cancelling its
+    siblings.  That is unsafe for paid generation: those detached siblings can
+    continue into later provider calls after the batch has already failed.
+    """
+    tasks = [asyncio.ensure_future(awaitable) for awaitable in awaitables]
+    pending = set(tasks)
+    try:
+        while pending:
+            done, pending = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                # result() preserves the original exception (including
+                # CancelledError) instead of wrapping it in an ExceptionGroup.
+                task.result()
+        return [task.result() for task in tasks]
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        # Retrieve every terminal outcome before propagating the original one;
+        # this prevents detached work and "exception was never retrieved".
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 def _hash(value: Any) -> str:
@@ -4644,7 +4674,7 @@ async def _semantic_review_scene_shard_draft(
                 findings.extend(chunk_review.findings)
             return ScreenplaySceneShardSemanticReview(findings=findings)
 
-        reviews = await asyncio.gather(
+        reviews = await _gather_fail_fast(
             reviewer_stream(1),
             reviewer_stream(2),
         )
@@ -5309,32 +5339,27 @@ async def generate_screenplay_scene_shards(
         emit_progress()
         return shard, str(artifact["id"])
 
-    results = await asyncio.gather(
-        *(generate_one(plan) for plan in plans),
-        return_exceptions=True,
-    )
-    shards: list[ScreenplaySceneShardIR] = []
-    artifact_ids: list[str] = []
-    failures: list[BaseException] = []
-    for plan, result in zip(plans, results, strict=True):
-        if isinstance(result, BaseException):
+    async def generate_one_with_checkpoint(
+        plan: ScreenplaySceneShardPlan,
+    ) -> tuple[ScreenplaySceneShardIR, str]:
+        try:
+            return await generate_one(plan)
+        except asyncio.CancelledError:
+            # Cancellation (whether user-requested or fail-fast sibling
+            # cleanup) is not a shard validation failure.
+            raise
+        except Exception as exc:
             checkpoint_rows[plan.shard_id]["status"] = "failed"
-            checkpoint_rows[plan.shard_id]["error_type"] = type(result).__name__
-            failures.append(result)
-            continue
-        shard, artifact_id = result
-        shards.append(shard)
-        artifact_ids.append(artifact_id)
+            checkpoint_rows[plan.shard_id]["error_type"] = type(exc).__name__
+            emit_progress()
+            raise
+
+    results = await _gather_fail_fast(
+        *(generate_one_with_checkpoint(plan) for plan in plans),
+    )
+    shards = [shard for shard, _artifact_id in results]
+    artifact_ids = [artifact_id for _shard, artifact_id in results]
     emit_progress()
-    if failures:
-        first = failures[0]
-        raise ScreenplaySceneShardError(
-            next(
-                plan.shard_id for plan in plans
-                if checkpoint_rows[plan.shard_id]["status"] == "failed"
-            ),
-            [str(first)],
-        ) from first
     return shards, artifact_ids, [checkpoint_rows[plan.shard_id] for plan in plans]
 
 

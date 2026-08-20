@@ -3534,6 +3534,252 @@ def _contracts(
     )
 
 
+def test_scene_shard_batch_failure_cancels_inflight_sibling(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=True)
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )
+    contracts = _contracts(plans, blueprint)
+    assert len(plans) == 2
+    sibling_started = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+    provider_calls: list[str] = []
+    review_calls: list[str] = []
+    progress_rows: list[list[dict]] = []
+    original_error = RuntimeError("injected shard provider failure")
+
+    def fixed_settings(
+        key: str,
+        default: int,
+        *,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        value = 2 if key == "screenplay_scene_shard_parallelism" else default
+        return max(minimum, min(maximum, value))
+
+    async def fake_structured(*_args, **kwargs):
+        shard_id = str(kwargs["call_meta"]["shard_id"])
+        provider_calls.append(shard_id)
+        if shard_id == plans[0].shard_id:
+            await sibling_started.wait()
+            raise original_error
+        sibling_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+
+    async def forbidden_review(*, shard_id: str, **_kwargs):
+        review_calls.append(shard_id)
+        raise AssertionError("failed batch must not enter semantic review")
+
+    monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
+    monkeypatch.setattr(
+        scene_shards_module.model_gateway,
+        "chat_structured",
+        fake_structured,
+    )
+    monkeypatch.setattr(
+        scene_shards_module,
+        "_semantic_review_scene_shard_draft",
+        forbidden_review,
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        asyncio.run(generate_screenplay_scene_shards(
+            episode={"id": "ep-shard-fail-fast", "episode_no": 1},
+            source_text=SOURCE,
+            blueprint=blueprint,
+            identity_registry=[],
+            identities=_identities(),
+            plans=plans,
+            scene_input_contracts=contracts,
+            progress=lambda rows: progress_rows.append(deepcopy(rows)),
+        ))
+
+    assert caught.value is original_error
+    assert sibling_cancelled.is_set()
+    assert provider_calls == [plan.shard_id for plan in plans]
+    assert review_calls == []
+    latest_rows = {
+        row["shard_id"]: row for row in progress_rows[-1]
+    }
+    assert latest_rows[plans[0].shard_id]["status"] == "failed"
+    assert latest_rows[plans[0].shard_id]["error_type"] == "RuntimeError"
+    assert latest_rows[plans[1].shard_id]["status"] == "running"
+    assert "error_type" not in latest_rows[plans[1].shard_id]
+
+
+def test_scene_shard_batch_user_cancellation_does_not_mark_failed(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=True)
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )
+    contracts = _contracts(plans, blueprint)
+    all_started = asyncio.Event()
+    started: set[str] = set()
+    cancelled: set[str] = set()
+    progress_rows: list[list[dict]] = []
+
+    def fixed_settings(
+        key: str,
+        default: int,
+        *,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        value = 2 if key == "screenplay_scene_shard_parallelism" else default
+        return max(minimum, min(maximum, value))
+
+    async def blocking_structured(*_args, **kwargs):
+        shard_id = str(kwargs["call_meta"]["shard_id"])
+        started.add(shard_id)
+        if len(started) == len(plans):
+            all_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.add(shard_id)
+            raise
+
+    monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
+    monkeypatch.setattr(
+        scene_shards_module.model_gateway,
+        "chat_structured",
+        blocking_structured,
+    )
+
+    async def run_and_cancel() -> None:
+        task = asyncio.create_task(generate_screenplay_scene_shards(
+            episode={"id": "ep-shard-user-cancel", "episode_no": 1},
+            source_text=SOURCE,
+            blueprint=blueprint,
+            identity_registry=[],
+            identities=_identities(),
+            plans=plans,
+            scene_input_contracts=contracts,
+            progress=lambda rows: progress_rows.append(deepcopy(rows)),
+        ))
+        await asyncio.wait_for(all_started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run_and_cancel())
+
+    assert started == {plan.shard_id for plan in plans}
+    assert cancelled == started
+    assert progress_rows
+    assert all(
+        row["status"] != "failed"
+        and "error_type" not in row
+        for row in progress_rows[-1]
+    )
+
+
+def test_scene_shard_batch_success_preserves_plan_order(monkeypatch) -> None:
+    blueprint = _blueprint(split_domain=True)
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )
+    contracts = _contracts(plans, blueprint)
+
+    async def successful_structured(*_args, **kwargs):
+        shard_id = str(kwargs["call_meta"]["shard_id"])
+        plan = next(item for item in plans if item.shard_id == shard_id)
+        if plan is plans[0]:
+            await asyncio.sleep(0.01)
+        return _creative_shard(plan, blueprint)
+
+    monkeypatch.setattr(
+        scene_shards_module.model_gateway,
+        "chat_structured",
+        successful_structured,
+    )
+
+    shards, artifact_ids, rows = asyncio.run(
+        generate_screenplay_scene_shards(
+            episode={"id": "ep-shard-success-order", "episode_no": 1},
+            source_text=SOURCE,
+            blueprint=blueprint,
+            identity_registry=[],
+            identities=_identities(),
+            plans=plans,
+            scene_input_contracts=contracts,
+        )
+    )
+
+    assert [shard.shard_id for shard in shards] == [
+        plan.shard_id for plan in plans
+    ]
+    assert len(artifact_ids) == len(plans)
+    assert [row["shard_id"] for row in rows] == [
+        plan.shard_id for plan in plans
+    ]
+    assert all(row["status"] == "validated" for row in rows)
+
+
+def test_semantic_reviewer_failure_cancels_other_reviewer(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    reviewer_two_started = asyncio.Event()
+    reviewer_two_cancelled = asyncio.Event()
+    reviewer_calls: list[int] = []
+    original_error = RuntimeError("injected reviewer failure")
+
+    async def fake_review(*_args, **kwargs):
+        reviewer_no = int(kwargs["call_meta"]["reviewer_no"])
+        reviewer_calls.append(reviewer_no)
+        if reviewer_no == 1:
+            await reviewer_two_started.wait()
+            raise original_error
+        reviewer_two_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            reviewer_two_cancelled.set()
+            raise
+
+    monkeypatch.setattr(
+        scene_shards_module.model_gateway,
+        "chat_structured",
+        fake_review,
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        asyncio.run(_REAL_SEMANTIC_REVIEW(
+            draft=_creative_shard(plan, blueprint, contracts),
+            scene_input_contracts=contracts,
+            identity_registry=[],
+            operation_id="semantic-review-fail-fast",
+            shard_id=plan.shard_id,
+            validate_draft=lambda _candidate: [],
+        ))
+
+    assert caught.value is original_error
+    assert reviewer_two_cancelled.is_set()
+    assert sorted(reviewer_calls) == [1, 2]
+
+
 def _a78_replay_models(
     *,
     creative_update: dict | None = None,
