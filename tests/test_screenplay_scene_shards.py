@@ -3622,6 +3622,80 @@ def test_scene_shard_batch_failure_cancels_inflight_sibling(
     assert "error_type" not in latest_rows[plans[1].shard_id]
 
 
+def test_scene_shard_failure_fences_semaphore_waiter_before_provider(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=True)
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )
+    contracts = _contracts(plans, blueprint)
+    provider_calls: list[str] = []
+    review_calls: list[str] = []
+    progress_rows: list[list[dict]] = []
+    original_error = scene_shards_module.hiagent.ProviderError(
+        "injected queued-shard fence failure",
+        retryable=True,
+        failure_kind="request_outcome_unknown",
+        delivery_state="unknown",
+        requires_explicit_retry=True,
+    )
+
+    def fixed_settings(
+        key: str,
+        default: int,
+        *,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        value = 1 if key == "screenplay_scene_shard_parallelism" else default
+        return max(minimum, min(maximum, value))
+
+    async def failing_structured(*_args, **kwargs):
+        provider_calls.append(str(kwargs["call_meta"]["shard_id"]))
+        raise original_error
+
+    async def forbidden_review(*, shard_id: str, **_kwargs):
+        review_calls.append(shard_id)
+        raise AssertionError("failed batch must not enter semantic review")
+
+    monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
+    monkeypatch.setattr(
+        scene_shards_module.model_gateway,
+        "chat_structured",
+        failing_structured,
+    )
+    monkeypatch.setattr(
+        scene_shards_module,
+        "_semantic_review_scene_shard_draft",
+        forbidden_review,
+    )
+
+    with pytest.raises(scene_shards_module.hiagent.ProviderError) as caught:
+        asyncio.run(generate_screenplay_scene_shards(
+            episode={"id": "ep-shard-queued-fence", "episode_no": 1},
+            source_text=SOURCE,
+            blueprint=blueprint,
+            identity_registry=[],
+            identities=_identities(),
+            plans=plans,
+            scene_input_contracts=contracts,
+            progress=lambda rows: progress_rows.append(deepcopy(rows)),
+        ))
+
+    assert caught.value is original_error
+    assert provider_calls == [plans[0].shard_id]
+    assert review_calls == []
+    latest_rows = {
+        row["shard_id"]: row for row in progress_rows[-1]
+    }
+    assert latest_rows[plans[0].shard_id]["status"] == "failed"
+    assert latest_rows[plans[1].shard_id]["status"] == "pending"
+    assert "error_type" not in latest_rows[plans[1].shard_id]
+
+
 def test_scene_shard_batch_user_cancellation_does_not_mark_failed(
     monkeypatch,
 ) -> None:
@@ -3784,6 +3858,70 @@ def test_semantic_reviewer_failure_cancels_other_reviewer(
     assert caught.value is original_error
     assert reviewer_two_cancelled.is_set()
     assert sorted(reviewer_calls) == [1, 2]
+
+
+def test_semantic_reviewer_failure_fences_next_chunk(monkeypatch) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    draft = _creative_shard(plan, blueprint, contracts)
+    chunks = scene_shards_module._scene_shard_semantic_review_chunks(
+        draft=draft,
+        scene_input_contracts=contracts,
+        identity_registry=[],
+        shard_id=plan.shard_id,
+    )
+    assert chunks
+    two_chunks = [
+        deepcopy(chunks[0]),
+        {
+            **deepcopy(chunks[0]),
+            "chunk_hash": "injected-second-review-chunk",
+        },
+    ]
+    reviewer_two_finished = asyncio.Event()
+    reviewer_calls: list[tuple[int, int]] = []
+    original_error = RuntimeError("injected first-chunk reviewer failure")
+
+    async def fake_review(*_args, **kwargs):
+        meta = kwargs["call_meta"]
+        call = (int(meta["reviewer_no"]), int(meta["chunk_index"]))
+        reviewer_calls.append(call)
+        if call == (1, 1):
+            await reviewer_two_finished.wait()
+            raise original_error
+        if call == (2, 1):
+            reviewer_two_finished.set()
+            return ScreenplaySceneShardSemanticReview(findings=[])
+        raise AssertionError("reviewer advanced after peer failure")
+
+    monkeypatch.setattr(
+        scene_shards_module,
+        "_scene_shard_semantic_review_chunks",
+        lambda **_kwargs: two_chunks,
+    )
+    monkeypatch.setattr(
+        scene_shards_module.model_gateway,
+        "chat_structured",
+        fake_review,
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        asyncio.run(_REAL_SEMANTIC_REVIEW(
+            draft=draft,
+            scene_input_contracts=contracts,
+            identity_registry=[],
+            operation_id="semantic-review-next-chunk-fence",
+            shard_id=plan.shard_id,
+            validate_draft=lambda _candidate: [],
+        ))
+
+    assert caught.value is original_error
+    assert reviewer_calls == [(1, 1), (2, 1)]
 
 
 def _a78_replay_models(
