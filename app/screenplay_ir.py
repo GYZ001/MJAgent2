@@ -1879,7 +1879,10 @@ def prepare_ir_identity_authorities(
         not str(value.format_version or "").startswith(
             "screenplay-generation-ir.v1.4"
         )
-        and not (episode.get("character_resolutions") or [])
+        and not any(
+            identity_resolution_is_authoritative(item)
+            for item in (episode.get("character_resolutions") or [])
+        )
     )
     changes: list[dict[str, Any]] = []
     issues: list[dict[str, Any]] = []
@@ -2224,7 +2227,10 @@ def screenplay_ir_bible_context(
     resolution_tokens = {
         str(item.get(field) or "").strip()
         for item in (character_resolutions or [])
-        if isinstance(item, dict)
+        if (
+            isinstance(item, dict)
+            and identity_resolution_is_authoritative(item)
+        )
         for field in ("source_label", "canonical_name")
         if str(item.get(field) or "").strip()
     }
@@ -3206,7 +3212,10 @@ def compile_screenplay_ir(
             for identity in value.identities
         }
         for resolution in episode.get("character_resolutions") or []:
-            if not isinstance(resolution, dict):
+            if (
+                not isinstance(resolution, dict)
+                or not identity_resolution_is_authoritative(resolution)
+            ):
                 continue
             aliases = {
                 str(resolution.get(field) or "").strip()

@@ -3358,9 +3358,13 @@ def _character_resolution_prompt_block(episode: dict) -> str:
     """把剧本预检的姓名消歧结果转成生产硬合同。"""
     from app.identity_authority import normalize_character_resolutions
 
-    rows = normalize_character_resolutions(
-        episode.get("character_resolutions") or [],
-    )
+    rows = [
+        item
+        for item in normalize_character_resolutions(
+            episode.get("character_resolutions") or [],
+        )
+        if identity_resolution_is_authoritative(item)
+    ]
     if not rows:
         return (
             "【角色身份预解析】本集没有额外称谓决议；人物谱角色的 "

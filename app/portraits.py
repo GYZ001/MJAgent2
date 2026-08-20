@@ -37,6 +37,7 @@ from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
 from app.identity_authority import (
     IdentityAuthorityConflictError,
+    identity_authority_registry,
     identity_resolution_is_authoritative,
     normalize_character_resolution,
     normalize_character_resolutions,
@@ -839,6 +840,7 @@ def _project_current_identity_response(
     *,
     evidence_by_id: dict[str, dict],
     all_evidence_by_id: dict[str, dict] | None = None,
+    reserved_authority_labels: set[str] | None = None,
     group_scope: str,
     existing_functional_routes: set[str],
 ) -> tuple[list[dict], list[str]]:
@@ -892,6 +894,14 @@ def _project_current_identity_response(
             )
         if identity_kind == "functional" and not functional_key:
             errors.append(f"functional_identity_key 为空：{source_label}")
+        if (
+            identity_kind == "functional"
+            and source_label in (reserved_authority_labels or set())
+        ):
+            errors.append(
+                "current functional 不得冒用已登记身份称谓："
+                f"{source_label}"
+            )
         if identity_kind == "functional" and literal_anywhere and not literal:
             errors.append(
                 "current evidence_id 与已知逐字 source_label 不匹配："
@@ -1026,6 +1036,19 @@ async def _discover_character_candidates_legacy(
             and str(item.get("canonical_name") or "").strip()
         )
     ]
+    reserved_authority_labels = {
+        str(label).strip()
+        for authority in identity_authority_registry(
+            bible,
+            existing_resolutions or [],
+        )
+        if str(authority.get("identity_kind") or "").strip() == "named"
+        for label in (
+            authority.get("canonical_name"),
+            *(authority.get("source_labels") or []),
+        )
+        if str(label or "").strip()
+    }
     current_haystack = f"{source_text or ''}\n{draft_text or ''}"
     current_evidence_batches = _current_identity_evidence_batches(
         source_text,
@@ -1255,6 +1278,7 @@ async def _discover_character_candidates_legacy(
                 value,
                 evidence_by_id=evidence_by_id,
                 all_evidence_by_id=all_current_evidence_by_id,
+                reserved_authority_labels=reserved_authority_labels,
                 group_scope=f"current-{current_batch}",
                 existing_functional_routes=existing_functional_routes,
             )
@@ -1317,6 +1341,7 @@ async def _discover_character_candidates_legacy(
                 response,
                 evidence_by_id=evidence_by_id,
                 all_evidence_by_id=all_current_evidence_by_id,
+                reserved_authority_labels=reserved_authority_labels,
                 group_scope=f"current-{current_batch}",
                 existing_functional_routes=existing_functional_routes,
             )

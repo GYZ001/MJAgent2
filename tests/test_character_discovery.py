@@ -547,6 +547,70 @@ def test_structural_identity_coverage_strict_success_is_one_call(
     assert call["call_meta"]["semantic_attempt"] == 0
 
 
+def test_structural_coverage_does_not_treat_current_synthetic_as_authority(
+    monkeypatch,
+) -> None:
+    synthetic_group = "current-1:synthetic:owned-receipt"
+    synthetic = {
+        "name": "未知求救者",
+        "source_label": "未知求救者",
+        "identity_kind": "functional",
+        "identity_group": synthetic_group,
+        "kind": "onscreen",
+        "source_label_provenance": (
+            portraits.CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+        ),
+    }
+    calls = 0
+
+    async def fake_structured(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        prompt = str(messages[0]["content"])
+        decision_marker = "可选决议目录"
+        raw_catalog = prompt.split(decision_marker, 1)[1].split("\n", 1)[1]
+        raw_catalog = raw_catalog.split("\n规则：", 1)[0]
+        decision_catalog = json.loads(raw_catalog)
+        assert all(
+            item["identity_group_ref"] != synthetic_group
+            for item in decision_catalog
+        )
+        return portraits.StructuralIdentityCoverageResponse.model_validate(
+            _coverage_identity_wire(
+                [{
+                    "source_label": "未知求救者",
+                    "identity_kind": "functional",
+                }],
+                provider_schema=kwargs["response_format"]["json_schema"][
+                    "schema"
+                ],
+                messages=messages,
+            )
+        )
+
+    monkeypatch.setattr(
+        portraits.model_gateway,
+        "chat_structured",
+        fake_structured,
+    )
+    result = asyncio.run(
+        portraits.audit_identity_coverage_from_structural_evidence(
+            [synthetic],
+            **_coverage_audit_kwargs(),
+        )
+    )
+
+    assert calls == 1
+    authoritative = [
+        item for item in result
+        if item.get("source_label_provenance")
+        != portraits.CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+    ]
+    assert len(authoritative) == 1
+    assert authoritative[0]["source_label"] == "未知求救者"
+    assert authoritative[0]["identity_group"].startswith("structural:")
+
+
 def test_structural_coverage_bound_group_uses_selected_owned_src(
     monkeypatch,
 ) -> None:
@@ -1173,6 +1237,120 @@ def test_structural_coverage_parse_failure_stops_before_scene_writing(
 
     assert provider_calls == ["screenplay_character_discovery"]
     assert downstream_calls == []
+
+
+def test_current_synthetic_resolution_cannot_suppress_blueprint_coverage(
+    monkeypatch,
+) -> None:
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": [{
+            "key": "n1",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "面色苍白的女子从裂缝探身",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "日",
+            "time_relation": "episode_start",
+            "location_key": "mountain",
+            "location_label": "半山腰",
+            "participants": ["面色苍白的女子"],
+            "participant_evidence": [{
+                "identity_key": "面色苍白的女子",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": ["SRC0001:unit:001"],
+                "usage": "visible",
+            }],
+            "action_logic": "面色苍白的女子从裂缝探身",
+            "scene_boundary_before": True,
+        }],
+    })
+    source_text = "一个面色苍白，看不出年纪的女子从裂缝探身。"
+    scope = portraits.screenplay_identity_scope_fingerprint(1, source_text)
+    coverage_inputs: list[list[dict]] = []
+    downstream: list[str] = []
+
+    class CoverageReached(RuntimeError):
+        pass
+
+    async def assert_coverage(
+        _project_id,
+        _episode_id,
+        _episode_no,
+        _source_text,
+        _bible,
+        structural_evidence,
+        **_kwargs,
+    ):
+        coverage_inputs.append(list(structural_evidence))
+        raise CoverageReached("synthetic participant reached coverage")
+
+    async def forbidden_scene(*_args, **_kwargs):
+        downstream.append("scene-writing")
+        raise AssertionError("synthetic participant skipped coverage")
+
+    monkeypatch.setattr(
+        portraits,
+        "ensure_structural_identity_coverage",
+        assert_coverage,
+    )
+    monkeypatch.setattr(
+        screenplay_scene_shards,
+        "generate_screenplay_scene_shards",
+        forbidden_scene,
+    )
+    monkeypatch.setattr(
+        "app.production.revision.get_active_production_revision",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(
+            run_id="run-attempt14-synthetic",
+            step_run_id="step-attempt14-synthetic",
+        ),
+    )
+
+    with pytest.raises(CoverageReached):
+        asyncio.run(stages._generate_screenplay_scene_sharded_baseline(
+            {
+                "id": "ep-attempt14-synthetic",
+                "project_id": "project-attempt14-synthetic",
+                "episode_no": 1,
+                "character_resolutions": [{
+                    "source_label": "面色苍白的女子",
+                    "canonical_name": "面色苍白的女子",
+                    "resolution": "functional_identity",
+                    "identity_group": "current-1:synthetic:owned-receipt",
+                    "identity_scope_fingerprint": scope,
+                    "decision_provenance": (
+                        portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
+                    ),
+                    "decision_contract_version": (
+                        portraits.FUTURE_IDENTITY_DECISION_VERSION
+                    ),
+                    "structural_identity_policy_version": (
+                        portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+                    ),
+                    "source_label_provenance": (
+                        portraits.CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+                    ),
+                }],
+            },
+            source_text,
+            Bible(
+                characters=[],
+                world=World(visual_style_canonical="测试"),
+            ),
+            narrative_blueprint=blueprint,
+        ))
+
+    assert [
+        item["identity_key"] for item in coverage_inputs[0]
+    ] == ["面色苍白的女子"]
+    assert downstream == []
 
 
 def _seed_project(conn: sqlite3.Connection, chapter_content: str) -> None:

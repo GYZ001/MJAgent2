@@ -12,6 +12,7 @@ from app.errors import ContentGenerationError
 from app.harness import model_gateway
 from app.identity_authority import (
     identity_authority_registry,
+    identity_resolution_is_authoritative,
     normalize_character_resolution,
 )
 from app.schemas import Bible, EpisodeScreenplay
@@ -580,7 +581,10 @@ async def adjudicate_screenplay_document_identities(
             if token
         )
     for resolution in episode.get("character_resolutions") or []:
-        if not isinstance(resolution, dict):
+        if (
+            not isinstance(resolution, dict)
+            or not identity_resolution_is_authoritative(resolution)
+        ):
             continue
         known.update({
             str(resolution.get("source_label") or "").strip(),
