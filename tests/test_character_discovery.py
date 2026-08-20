@@ -5,8 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import api, db, hiagent, portraits
+from app import api, db, hiagent, portraits, screenplay_scene_shards, stages
 from app.harness import model_gateway
+from app.narrative_blueprint import NarrativeBlueprint
 from app.schemas import (Bible, Character, EpisodeScreenplay,
                          IdentityContractEvidence, InformationItem,
                          KeyDialogueChain, KeyDialogueTurn,
@@ -102,6 +103,7 @@ def test_structural_identity_coverage_schema_is_closed_and_provider_safe(
 
     assert local_schema == local_before
     assert local_schema["required"] == ["characters"]
+    assert local_schema["properties"]["characters"]["minItems"] == 2
     assert local_schema["properties"]["characters"]["maxItems"] == 2
     local_candidate = local_schema["$defs"][
         "StructuralIdentityCoverageCandidate"
@@ -238,6 +240,36 @@ def test_structural_identity_coverage_strict_success_is_one_call(
             }, ensure_ascii=False),
             model_gateway.StructuredSemanticError,
         ),
+        (
+            '{"characters":[]}',
+            model_gateway.StructuredSemanticError,
+        ),
+        (
+            json.dumps({
+                "characters": [{
+                    "source_label": " 未知求救者 ",
+                    "canonical_name": "",
+                    "identity_kind": "functional",
+                    "identity_group": "F1",
+                    "kind": "onscreen",
+                    "evidence": "引用精确但键含空白",
+                }],
+            }, ensure_ascii=False),
+            model_gateway.StructuredSemanticError,
+        ),
+        (
+            json.dumps({
+                "characters": [{
+                    "source_label": "未知求救者",
+                    "canonical_name": "   ",
+                    "identity_kind": "functional",
+                    "identity_group": "F1",
+                    "kind": "onscreen",
+                    "evidence": "功能身份不得以空白冒充空串",
+                }],
+            }, ensure_ascii=False),
+            model_gateway.StructuredSemanticError,
+        ),
     ],
 )
 def test_structural_identity_coverage_http_200_contract_failure_is_one_call(
@@ -260,6 +292,48 @@ def test_structural_identity_coverage_http_200_contract_failure_is_one_call(
             portraits.audit_identity_coverage_from_structural_evidence(
                 [],
                 **_coverage_audit_kwargs(),
+            )
+        )
+
+    assert calls == 1
+
+
+def test_structural_identity_coverage_subset_is_one_call_hard_failure(
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    async def fake_chat(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["response_format"]["type"] == "json_schema"
+        return json.dumps({
+            "characters": [{
+                "source_label": "未知求救者",
+                "canonical_name": "",
+                "identity_kind": "functional",
+                "identity_group": "F1",
+                "kind": "onscreen",
+                "evidence": "只返回了一个引用",
+            }],
+        }, ensure_ascii=False)
+
+    kwargs = _coverage_audit_kwargs()
+    kwargs["structural_evidence"].append({
+        "identity_key": "被困同伴",
+        "source_label": "被困同伴",
+        "source_segment_ids": ["SRC0001"],
+        "usage": "visible",
+        "node_key": "node-1",
+    })
+    kwargs["source_text"] = "裂缝中有未知求救者与被困同伴探出半个身子。"
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    with pytest.raises(model_gateway.StructuredSemanticError):
+        asyncio.run(
+            portraits.audit_identity_coverage_from_structural_evidence(
+                [],
+                **kwargs,
             )
         )
 
@@ -293,6 +367,100 @@ def test_structural_identity_coverage_unsupported_schema_is_one_call(
 
     assert caught.value is original
     assert calls == 1
+
+
+def test_structural_coverage_parse_failure_stops_before_scene_writing(
+    monkeypatch,
+) -> None:
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": [{
+            "key": "n1",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "未知求救者从裂缝探身",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "日",
+            "time_relation": "episode_start",
+            "location_key": "mountain",
+            "location_label": "半山腰",
+            "participants": ["未知求救者"],
+            "participant_evidence": [{
+                "identity_key": "未知求救者",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": ["SRC0001:unit:001"],
+                "usage": "visible",
+            }],
+            "action_logic": "未知求救者从裂缝探身",
+            "scene_boundary_before": True,
+        }],
+    })
+    source_text = "未知求救者从裂缝探出半个身子。"
+    provider_calls: list[str] = []
+    downstream_calls: list[str] = []
+
+    async def malformed_provider(_messages, **kwargs):
+        provider_calls.append(str(kwargs["call_meta"]["stage_key"]))
+        assert kwargs["response_format"]["type"] == "json_schema"
+        assert kwargs["call_meta"]["response_format_required"] is True
+        return '{"characters":[{"source_label" "未知求救者"}]}'
+
+    async def coverage_without_persistence(*args, **_kwargs):
+        return await portraits.audit_identity_coverage_from_structural_evidence(
+            [],
+            structural_evidence=args[5],
+            source_text=args[3],
+            bible=args[4],
+            episode_no=args[2],
+        )
+
+    async def forbidden_scene_writing(*_args, **_kwargs):
+        downstream_calls.append("scene-writing-ledger")
+        raise AssertionError("coverage failure reached scene writing")
+
+    monkeypatch.setattr(model_gateway, "chat", malformed_provider)
+    monkeypatch.setattr(
+        portraits,
+        "ensure_structural_identity_coverage",
+        coverage_without_persistence,
+    )
+    monkeypatch.setattr(
+        screenplay_scene_shards,
+        "generate_screenplay_scene_shards",
+        forbidden_scene_writing,
+    )
+    monkeypatch.setattr(
+        "app.production.revision.get_active_production_revision",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(
+            run_id="run-attempt10-fail-fast",
+            step_run_id="step-attempt10-fail-fast",
+        ),
+    )
+
+    with pytest.raises(model_gateway.StructuredFormatError):
+        asyncio.run(stages._generate_screenplay_scene_sharded_baseline(
+            {
+                "id": "ep-attempt10-fail-fast",
+                "project_id": "project-attempt10-fail-fast",
+                "episode_no": 1,
+                "character_resolutions": [],
+            },
+            source_text,
+            Bible(
+                characters=[],
+                world=World(visual_style_canonical="测试"),
+            ),
+            narrative_blueprint=blueprint,
+        ))
+
+    assert provider_calls == ["screenplay_character_discovery"]
+    assert downstream_calls == []
 
 
 def _seed_project(conn: sqlite3.Connection, chapter_content: str) -> None:
@@ -1512,9 +1680,9 @@ def test_structural_audit_recovers_entity_omitted_by_current_pass(monkeypatch) -
             "source_label": "白白净净身较胖",
             "canonical_name": "李富贵",
             "identity_kind": "named",
+            "identity_group": "current-1:李富贵",
             "kind": "onscreen",
             "evidence": "当前集独立出场的白净胖少年",
-            "future_evidence": "后续以小胖子承接并自报李富贵",
         }]}, ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
@@ -1525,7 +1693,7 @@ def test_structural_audit_recovers_entity_omitted_by_current_pass(monkeypatch) -
         future_text="小胖子跟随孟浩。后来小胖子说：我李富贵认你这个朋友。",
         future_label="后续章节",
         structural_evidence=[{
-            "identity_key": "unbound_person",
+            "identity_key": "白白净净身较胖",
             "source_segment_ids": ["SRC0001"],
             "usage": "visible",
         }],

@@ -1060,6 +1060,7 @@ def _structural_identity_coverage_schema(
         "StructuralIdentityCoverageCandidate"
     ]
     candidate_schema["properties"]["source_label"]["enum"] = known_labels
+    schema["properties"]["characters"]["minItems"] = len(known_labels)
     schema["properties"]["characters"]["maxItems"] = len(known_labels)
     return schema
 
@@ -1455,11 +1456,11 @@ async def audit_identity_coverage_from_structural_evidence(
         '"identity_kind":"named|functional","identity_group":"稳定分组",'
         '"kind":"onscreen","evidence":"依据"}]}'
     )
-    allowed_source_labels = [
+    allowed_source_labels = list(dict.fromkeys(
         str(item.get("identity_key") or "").strip()
         for item in minimal
         if str(item.get("identity_key") or "").strip()
-    ]
+    ))
     coverage_schema = _structural_identity_coverage_schema(
         allowed_source_labels
     )
@@ -1476,15 +1477,24 @@ async def audit_identity_coverage_from_structural_evidence(
             )
         seen_labels: set[str] = set()
         for item in value.characters:
-            source_label = item.source_label.strip()
+            source_label = item.source_label
             canonical_name = item.canonical_name.strip()
             identity_group = item.identity_group.strip()
             evidence_text = item.evidence.strip()
+            if source_label != source_label.strip():
+                errors.append(
+                    f"source_label 含首尾空白：{source_label!r}"
+                )
             if source_label not in allowed:
                 errors.append(f"source_label 越界：{source_label}")
             if source_label in seen_labels:
                 errors.append(f"source_label 重复：{source_label}")
             seen_labels.add(source_label)
+            if item.canonical_name != canonical_name:
+                errors.append(
+                    "canonical_name 含首尾空白："
+                    f"{source_label}"
+                )
             if not identity_group:
                 errors.append(f"identity_group 为空：{source_label}")
             if not evidence_text:
@@ -1496,6 +1506,12 @@ async def audit_identity_coverage_from_structural_evidence(
                     "functional identity 不得声明 canonical_name："
                     f"{source_label}"
                 )
+        missing_labels = allowed - seen_labels
+        if missing_labels:
+            errors.append(
+                "结构人物 coverage 缺少未决引用："
+                + ",".join(sorted(missing_labels))
+            )
         return errors
 
     response = await model_gateway.chat_structured(
