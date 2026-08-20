@@ -1567,7 +1567,7 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
     assert resolution["structural_identity_policy_version"] == (
         portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
     )
-    assert resolution["authority_id"].startswith("future-name:")
+    assert resolution["authority_id"] == "bible:丁力"
 
 
 def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeypatch) -> None:

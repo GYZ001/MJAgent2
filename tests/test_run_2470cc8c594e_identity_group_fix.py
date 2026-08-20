@@ -207,6 +207,27 @@ def test_backend_signed_future_authority_can_unify_multiple_raw_alias_groups(
     assert set(authority["source_labels"]) == {"师尊", "白袍老人"}
 
 
+def test_bible_and_legacy_future_authority_for_same_name_fail_closed() -> None:
+    bible = Bible(
+        characters=[],
+        world=World(visual_style_canonical="国风"),
+    )
+    bible.characters.append(SimpleNamespace(name="苍玄"))
+
+    with pytest.raises(
+        IdentityAuthorityConflictError,
+        match="canonical_name=苍玄 对应多个 named authority",
+    ):
+        identity_authority_registry(bible, [{
+            "source_label": "白袍老人",
+            "canonical_name": "苍玄",
+            "resolution": "future_identity",
+            "identity_group": "current-1:F2",
+            "identity_scope_fingerprint": "owned-source-episode-1",
+            "authority_id": "future-name:legacy-cangxuan",
+        }])
+
+
 def test_same_group_token_from_distinct_discovery_epochs_does_not_merge() -> None:
     scope_a = _fresh_source_anchors("source-a")[:1]
     scope_b = [{

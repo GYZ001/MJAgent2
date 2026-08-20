@@ -160,6 +160,7 @@ def identity_authority_registry(
     entries: dict[str, dict[str, Any]] = {}
     groups_by_authority: dict[str, set[str]] = {}
     authorities_by_group: dict[str, set[str]] = {}
+    authorities_by_named_canonical: dict[str, set[str]] = {}
 
     def scoped_group_key(
         identity_group: str,
@@ -198,6 +199,9 @@ def identity_authority_registry(
         if not name:
             continue
         register_group(f"bible:{name}", f"bible:{name}")
+        authorities_by_named_canonical.setdefault(name, set()).add(
+            f"bible:{name}"
+        )
         entries[f"bible:{name}"] = {
             "authority_id": f"bible:{name}",
             "canonical_name": name,
@@ -226,6 +230,9 @@ def identity_authority_registry(
             # aliases of one authority, while the forward raw-group check below
             # still forbids one F1 from resolving to two authorities.
             semantic_group = authority_id
+            authorities_by_named_canonical.setdefault(
+                item["canonical_name"], set()
+            ).add(authority_id)
         register_group(
             authority_id,
             raw_identity_group,
@@ -299,6 +306,21 @@ def identity_authority_registry(
         }
         for authority_id, identity_groups in groups_by_authority.items()
         if len(identity_groups) > 1
+    )
+    issues.extend(
+        {
+            "reason": "canonical_name_multiple_named_authorities",
+            "canonical_name": canonical_name,
+            "authority_ids": sorted(authority_ids),
+            "message": (
+                f"canonical_name={canonical_name} 对应多个 named authority："
+                f"{sorted(authority_ids)}"
+            ),
+        }
+        for canonical_name, authority_ids in (
+            authorities_by_named_canonical.items()
+        )
+        if len(authority_ids) > 1
     )
     if issues:
         raise IdentityAuthorityConflictError(issues)

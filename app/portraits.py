@@ -91,6 +91,14 @@ def _identity_operation_retry_epoch() -> str:
         return ""
 
 
+def _canonical_named_authority_id(canonical_name: str) -> str:
+    """Return the final backend authority used once a named card is committed."""
+    value = str(canonical_name or "").strip()
+    if not value:
+        raise ValueError("named identity authority requires canonical_name")
+    return f"bible:{value}"
+
+
 # ---------- 原文片段抽取（纯本地，不调模型） ----------
 
 def extract_character_fragments(text: str, name: str, *, window: int = FRAGMENT_WINDOW,
@@ -1529,16 +1537,11 @@ async def resolve_future_identity_candidates(
         if not canonical_name:
             continue
         identity_group = str(candidate.get("identity_group") or "").strip()
-        authority_id = (
-            f"bible:{canonical_name}"
-            if canonical_name in known_names
-            else str(candidate.get("authority_id") or "").strip()
-        )
-        if not authority_id:
-            authority_id = "candidate:" + evidence_repository.content_hash({
-                "canonical_name": canonical_name,
-                "identity_group": identity_group,
-            })[:24]
+        # Every named candidate which can authorize a future alias must converge
+        # on the same final card authority.  The resolution is persisted only
+        # after ``ensure_character_card`` succeeds, so this does not claim a
+        # durable Bible identity before materialization.
+        authority_id = _canonical_named_authority_id(canonical_name)
         authority = authority_by_id.setdefault(authority_id, {
             "authority_id": authority_id,
             "canonical_name": canonical_name,
@@ -1604,17 +1607,8 @@ new_named 依据必须包含 canonical_name，known_named 依据必须包含当�
                 **item.model_dump(mode="json"),
                 "resolution_kind": "new_named",
                 "identity_kind": "named",
-                "authority_id": (
-                    "future-name:"
-                    + evidence_repository.content_hash({
-                        "contract_version": FUTURE_IDENTITY_DECISION_VERSION,
-                        "canonical_name": item.canonical_name,
-                        "identity_scope_fingerprint": (
-                            screenplay_identity_scope_fingerprint(
-                                episode_no, source_text
-                            )
-                        ),
-                    })[:24]
+                "authority_id": _canonical_named_authority_id(
+                    item.canonical_name
                 ),
             })
         for item in value.functional:
@@ -1804,16 +1798,7 @@ new_named 依据必须包含 canonical_name，known_named 依据必须包含当�
             "authority_id": (
                 str(resolution.get("authority_id") or "")
                 or (
-                    "future-name:"
-                    + evidence_repository.content_hash({
-                        "contract_version": FUTURE_IDENTITY_DECISION_VERSION,
-                        "canonical_name": canonical_name,
-                        "identity_scope_fingerprint": (
-                            screenplay_identity_scope_fingerprint(
-                                episode_no, source_text
-                            )
-                        ),
-                    })[:24]
+                    _canonical_named_authority_id(canonical_name)
                 )
             ),
             "future_evidence": str(
@@ -1917,17 +1902,7 @@ async def audit_identity_coverage_from_structural_evidence(
         if identity_kind == "named" and canonical_name:
             authority_id = str(candidate.get("authority_id") or "").strip()
             if not authority_id:
-                authority_id = (
-                    f"bible:{canonical_name}"
-                    if canonical_name in {
-                        str(character.name or "").strip()
-                        for character in bible.characters
-                    }
-                    else "candidate:" + evidence_repository.content_hash({
-                        "canonical_name": canonical_name,
-                        "identity_group": identity_group,
-                    })[:24]
-                )
+                authority_id = _canonical_named_authority_id(canonical_name)
             authority = authority_by_id.setdefault(authority_id, {
                 "authority_id": authority_id,
                 "canonical_name": canonical_name,
@@ -2590,6 +2565,49 @@ def _structural_identity_candidate_semantic_hash(
     return evidence_repository.content_hash(
         _structural_identity_candidate_semantic_rows(candidates)
     )
+
+
+def _structural_identity_required_bible_names(
+    candidates: list[dict] | None,
+) -> list[str]:
+    """Named visible identities require a committed card before cache success."""
+    return sorted({
+        str(item.get("name") or "").strip()
+        for item in (candidates or [])
+        if isinstance(item, dict)
+        and str(item.get("identity_kind") or "").strip() == "named"
+        and str(item.get("kind") or "onscreen").strip() != "mentioned"
+        and str(item.get("name") or "").strip()
+    })
+
+
+def _project_bible_character_names(
+    conn,
+    project_id: str,
+    fallback_bible: Bible,
+) -> set[str]:
+    """Read the post-materialization Bible, with isolated-test compatibility."""
+    if _has_column(conn, "projects", "bible_json"):
+        row = conn.execute(
+            "SELECT bible_json FROM projects WHERE id=?", (project_id,)
+        ).fetchone()
+        if row and row["bible_json"]:
+            try:
+                current_bible = Bible.model_validate(
+                    json.loads(row["bible_json"])
+                )
+            except (TypeError, ValueError, ValidationError, json.JSONDecodeError):
+                return set()
+            return {
+                str(character.name or "").strip()
+                for character in current_bible.characters
+                if str(character.name or "").strip()
+            }
+    return {
+        str(character.name or "").strip()
+        for character in fallback_bible.characters
+        if str(character.name or "").strip()
+    }
 
 
 def _structural_identity_resolution_receipt(
@@ -4579,6 +4597,17 @@ async def ensure_structural_identity_coverage(
     parent_artifact_id = ""
     invalid_cached_resolution_keys: set[tuple[str, str, str]] = set()
     matching_coverage_artifact_seen = False
+
+    def verified_materialized_bible_names(candidates: list[dict]) -> list[str]:
+        required = _structural_identity_required_bible_names(candidates)
+        available = _project_bible_character_names(conn, project_id, bible)
+        missing = set(required) - available
+        if missing:
+            raise ContentGenerationError(
+                "结构人物 coverage 的 named card 尚未物化："
+                + ",".join(sorted(missing))
+            )
+        return required
     for row in rows:
         try:
             payload = json.loads(row["content_json"] or "{}")
@@ -4624,6 +4653,15 @@ async def ensure_structural_identity_coverage(
                 payload.get("candidate_semantic_hash") or ""
             )
             expected_receipt = payload.get("materialized_resolution_receipt")
+            expected_bible_names = payload.get("materialized_bible_names")
+            required_bible_names = (
+                _structural_identity_required_bible_names(
+                    payload["candidates"]
+                )
+            )
+            current_bible_names = _project_bible_character_names(
+                conn, project_id, bible
+            )
             actual_receipt = _structural_identity_resolution_receipt(
                 current_cached_resolutions,
                 candidates=payload["candidates"],
@@ -4639,6 +4677,8 @@ async def ensure_structural_identity_coverage(
                     expected_receipt
                 )
                 and expected_receipt == actual_receipt
+                and expected_bible_names == required_bible_names
+                and set(required_bible_names) <= current_bible_names
             )
             if cache_is_exact:
                 # A validated receipt can coexist with unrelated legacy rows.
@@ -4777,6 +4817,7 @@ async def ensure_structural_identity_coverage(
                 identity_scope_fingerprint=identity_scope_fingerprint,
             )
         ]
+        materialized_bible_names = verified_materialized_bible_names(audited)
         if write_guard:
             write_guard()
         trace = None
@@ -4829,6 +4870,7 @@ async def ensure_structural_identity_coverage(
                             ),
                         )
                     ),
+                    "materialized_bible_names": materialized_bible_names,
                     "source_hash": source_hash,
                     "structural_evidence_hash": structural_hash,
                 },
@@ -4856,6 +4898,20 @@ async def ensure_structural_identity_coverage(
     )
     if write_guard:
         write_guard()
+    if result.get("errors"):
+        # Provider/schema validation is not the materialization boundary.  A
+        # card failure (or any downstream identity error) must never mint a
+        # validated coverage Artifact with an empty receipt: that would turn
+        # the next run into a false cache success and bypass the identity gate.
+        result["resolutions"] = [
+            item
+            for item in result.get("resolutions") or []
+            if screenplay_identity_resolution_is_current_for_scope(
+                item,
+                identity_scope_fingerprint=identity_scope_fingerprint,
+            )
+        ]
+        return result
     persisted = persist_screenplay_character_resolutions(
         conn,
         episode_id,
@@ -4876,6 +4932,7 @@ async def ensure_structural_identity_coverage(
             identity_scope_fingerprint=identity_scope_fingerprint,
         )
     ]
+    materialized_bible_names = verified_materialized_bible_names(audited)
     if write_guard:
         write_guard()
     result["resolutions"] = persisted
@@ -4927,6 +4984,7 @@ async def ensure_structural_identity_coverage(
                         identity_scope_fingerprint=identity_scope_fingerprint,
                     )
                 ),
+                "materialized_bible_names": materialized_bible_names,
                 "source_hash": source_hash,
                 "structural_evidence_hash": structural_hash,
             },
