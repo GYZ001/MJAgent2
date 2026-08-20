@@ -2806,7 +2806,7 @@ def test_identity_discovery_preserves_nonliteral_functional_label_as_synthetic(
 def test_attempt14_call_63221_current_rf9_preserves_all_distinct_identities(
     monkeypatch,
 ) -> None:
-    """Mirror the production RF8 response through the RF9 owned-evidence wire."""
+    """Mirror 63221 with its Bible identity corrected to the RF9 named branch."""
     source_text = "\n\n".join([
         "王伯与王老伯的木匠铺子赚钱，孟浩还欠周员外三两银子。",
         "孟浩看到裂缝里的王有材，旁边有一个虎头虎脑的少年。",
@@ -2827,7 +2827,6 @@ def test_attempt14_call_63221_current_rf9_preserves_all_distinct_identities(
         ("绿袍修士一", "F6", "onscreen", "两个男子中的一人"),
         ("绿袍修士二", "F7", "onscreen", "另一个绿袍修士"),
         ("掌教", "F8", "mentioned", "掌教"),
-        ("耳根", "F9", "mentioned", "耳根"),
     ]
     calls = 0
 
@@ -2879,6 +2878,13 @@ def test_attempt14_call_63221_current_rf9_preserves_all_distinct_identities(
                 "kind": "onscreen",
                 "evidence": "王有材",
             },
+            {
+                "source_label": "耳根",
+                "canonical_name": "耳根",
+                "identity_kind": "named",
+                "kind": "mentioned",
+                "evidence": "耳根",
+            },
         ])
         return json.dumps(
             _identity_wire_for_call(
@@ -2894,7 +2900,11 @@ def test_attempt14_call_63221_current_rf9_preserves_all_distinct_identities(
         source_text,
         Bible(
             world=World(visual_style_canonical="国风"),
-            characters=[],
+            characters=[Character(
+                name="耳根",
+                role="已登记稳定身份",
+                appearance_canonical="中年男子，素色长衫，面容沉静",
+            )],
         ),
         1,
     ))
@@ -2905,6 +2915,7 @@ def test_attempt14_call_63221_current_rf9_preserves_all_distinct_identities(
         *(label for label, _group, _kind, _anchor in captured),
         "孟浩",
         "王有材",
+        "耳根",
     }
     synthetic = {
         item["source_label"]: item for item in candidates
@@ -2926,6 +2937,58 @@ def test_attempt14_call_63221_current_rf9_preserves_all_distinct_identities(
     assert "另一个绿袍修士" in (
         synthetic["绿袍修士二"]["source_quote"]
     )
+
+
+def test_attempt14_call_63221_old_functional_bible_name_fails_once(
+    monkeypatch,
+) -> None:
+    calls = 0
+    downstream: list[str] = []
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "耳根",
+                "identity_kind": "functional",
+                "functional_identity_key": "F9",
+                "kind": "mentioned",
+                "evidence": "耳根",
+            }],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    async def forbidden_future(*_args, **_kwargs):
+        downstream.append("future")
+        raise AssertionError("old 63221 classification reached future")
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(
+        portraits,
+        "resolve_future_identity_candidates",
+        forbidden_future,
+    )
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="functional 不得冒用已登记身份称谓：耳根",
+    ):
+        asyncio.run(portraits.discover_character_candidates(
+            "作者耳根请读者收藏。",
+            Bible(
+                world=World(visual_style_canonical="国风"),
+                characters=[Character(
+                    name="耳根",
+                    role="已登记稳定身份",
+                    appearance_canonical="中年男子，素色长衫，面容沉静",
+                )],
+            ),
+            1,
+        ))
+
+    assert calls == 1
+    assert downstream == []
 
 
 @pytest.mark.parametrize("failure", ["old_wire", "unknown_evidence"])
