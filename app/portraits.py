@@ -67,8 +67,8 @@ STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集�
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
-IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v12"
-CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v9"
+IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v13"
+CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v10"
 CURRENT_IDENTITY_EVIDENCE_RECEIPT_VERSION = (
     "screenplay-current-identity-evidence-receipt.v1"
 )
@@ -766,6 +766,71 @@ def _current_identity_evidence_catalog_hash(
             draft_text=draft_text,
         ),
     })
+
+
+def _current_identity_known_decision_catalog(
+    evidence_by_ref: dict[str, dict],
+    *,
+    authorities: list[dict],
+) -> dict[str, dict]:
+    """Sign exact current-evidence/registered-authority label decisions."""
+    decisions: dict[str, dict] = {}
+    authority_by_ref_label: dict[tuple[str, str], str] = {}
+    for evidence_ref, record in evidence_by_ref.items():
+        evidence_text = str(record.get("text") or "")
+        for authority in authorities:
+            if str(authority.get("identity_kind") or "") == "functional":
+                continue
+            authority_id = str(authority.get("authority_id") or "").strip()
+            canonical_name = str(
+                authority.get("canonical_name") or ""
+            ).strip()
+            if not authority_id or not canonical_name:
+                continue
+            registered_labels = list(dict.fromkeys(
+                str(label or "").strip()
+                for label in (
+                    canonical_name,
+                    *(authority.get("source_labels") or []),
+                )
+                if str(label or "").strip()
+            ))
+            for source_label in registered_labels:
+                if len(source_label) > 16 or source_label not in evidence_text:
+                    continue
+                pair = (evidence_ref, source_label)
+                previous_authority = authority_by_ref_label.setdefault(
+                    pair, authority_id
+                )
+                if previous_authority != authority_id:
+                    raise ContentGenerationError(
+                        "current registered label 对应多个 authority："
+                        f"{source_label}"
+                    )
+                payload = {
+                    "contract_version": CURRENT_IDENTITY_DECISION_VERSION,
+                    "evidence_ref": evidence_ref,
+                    "evidence_id": str(record.get("evidence_id") or ""),
+                    "authority_id": authority_id,
+                    "canonical_name": canonical_name,
+                    "source_label": source_label,
+                }
+                decision_id = (
+                    f"K:{evidence_ref}:"
+                    + evidence_repository.content_hash(payload)[:24]
+                )
+                decisions[decision_id] = {
+                    **payload,
+                    "decision_id": decision_id,
+                    "identity_group": str(
+                        authority.get("identity_group")
+                        or authority_id
+                    ).strip(),
+                    "source_instance_key": str(
+                        authority.get("source_instance_key") or authority_id
+                    ).strip(),
+                }
+    return decisions
 
 
 def _current_identity_evidence_receipt_is_valid(
@@ -1546,63 +1611,50 @@ async def _discover_character_candidates_legacy(
     )
 
 
-class CurrentNamedIdentityCandidate(BaseModel):
-    """Closed current-source wire item with an explicit stable name."""
+class CurrentKnownIdentityDecision(BaseModel):
+    """Select one backend-owned registered authority for one evidence ref."""
 
     model_config = ConfigDict(extra="forbid")
 
-    source_label: str = Field(min_length=1, max_length=16)
-    canonical_name: str = Field(min_length=1, max_length=16)
-    identity_kind: Literal["named"]
+    decision_id: str = Field(min_length=1, max_length=96)
     kind: Literal["onscreen", "mentioned"]
-    evidence_id: str = Field(min_length=1, max_length=80)
 
 
-class CurrentFunctionalIdentityCandidate(BaseModel):
-    """Closed current-source wire item which cannot carry a canonical name."""
+class CurrentNewNamedIdentityDecision(BaseModel):
+    """Declare one literal current-source name without a free canonical field."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    identity_label: str = Field(min_length=1, max_length=16)
+    kind: Literal["onscreen", "mentioned"]
+
+
+class CurrentFunctionalIdentityDecision(BaseModel):
+    """Declare one unresolved current-source identity within owned evidence."""
 
     model_config = ConfigDict(extra="forbid")
 
     source_label: str = Field(min_length=1, max_length=16)
-    identity_kind: Literal["functional"]
     functional_identity_key: str = Field(min_length=1, max_length=64)
     kind: Literal["onscreen", "mentioned"]
-    evidence_id: str = Field(min_length=1, max_length=80)
+
+
+class CurrentEvidenceIdentityDecisions(BaseModel):
+    """All identities selected from one request-local evidence ref."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    k: list[CurrentKnownIdentityDecision]
+    n: list[CurrentNewNamedIdentityDecision]
+    f: list[CurrentFunctionalIdentityDecision]
 
 
 class CurrentIdentityCandidateResponse(BaseModel):
-    """Provider-safe split wire for the current-source discovery pass."""
+    """Exact evidence-keyed RF10 wire for current-source discovery."""
 
     model_config = ConfigDict(extra="forbid")
 
-    named: list[CurrentNamedIdentityCandidate]
-    functional: list[CurrentFunctionalIdentityCandidate]
-
-    @property
-    def characters(self) -> list[dict]:
-        named = [
-            {
-                **item.model_dump(mode="json"),
-                "functional_identity_key": "",
-                "evidence": "",
-                "source_segment_id": "",
-                "source_quote": "",
-                "future_evidence": "",
-            }
-            for item in self.named
-        ]
-        functional = [
-            {
-                **item.model_dump(mode="json"),
-                "canonical_name": "",
-                "evidence": "",
-                "source_segment_id": "",
-                "source_quote": "",
-                "future_evidence": "",
-            }
-            for item in self.functional
-        ]
-        return [*named, *functional]
+    decisions: dict[str, CurrentEvidenceIdentityDecisions]
 
 
 class FutureIdentityCandidateResponse(BaseModel):
@@ -1670,24 +1722,88 @@ def _identity_source_label_schema(
     return schema
 
 
-def _current_identity_schema(evidence_ids: list[str]) -> dict:
-    """Close both current-wire branches over one backend evidence catalog."""
-    allowed_ids = list(dict.fromkeys(
+def _current_identity_schema(
+    evidence_refs: list[str],
+    *,
+    known_decision_ids: list[str],
+) -> dict:
+    """Build one shared K/N/F definition under an exact evidence-ref map.
+
+    Keeping all evidence properties pointed at one shared definition keeps the
+    strict provider contract below the common 100-property implementation
+    limit.  K tokens carry their evidence ref and are checked again locally;
+    ``K:NONE`` is only a schema-safe sentinel when this batch has no K option.
+    """
+    refs = list(dict.fromkeys(
         str(value or "").strip()
-        for value in evidence_ids
+        for value in evidence_refs
         if str(value or "").strip()
     ))
-    if not allowed_ids:
-        raise ValueError("current identity schema requires evidence IDs")
-    schema = CurrentIdentityCandidateResponse.model_json_schema()
-    for definition_name in (
-        "CurrentNamedIdentityCandidate",
-        "CurrentFunctionalIdentityCandidate",
-    ):
-        schema["$defs"][definition_name]["properties"]["evidence_id"][
-            "enum"
-        ] = allowed_ids
-    return schema
+    if not refs:
+        raise ValueError("current identity schema requires evidence refs")
+    decision_ids = list(dict.fromkeys(
+        str(value or "").strip()
+        for value in known_decision_ids
+        if str(value or "").strip()
+    )) or ["K:NONE"]
+
+    known_item = CurrentKnownIdentityDecision.model_json_schema()
+    known_item["properties"]["decision_id"]["enum"] = decision_ids
+    definitions = {
+        "CurrentKnownIdentityDecision": known_item,
+        "CurrentNewNamedIdentityDecision": (
+            CurrentNewNamedIdentityDecision.model_json_schema()
+        ),
+        "CurrentFunctionalIdentityDecision": (
+            CurrentFunctionalIdentityDecision.model_json_schema()
+        ),
+        "CurrentEvidenceIdentityDecisions": {
+            "type": "object",
+            "properties": {
+                "k": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CurrentKnownIdentityDecision",
+                    },
+                    "maxItems": 64,
+                },
+                "n": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CurrentNewNamedIdentityDecision",
+                    },
+                    "maxItems": 64,
+                },
+                "f": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CurrentFunctionalIdentityDecision",
+                    },
+                    "maxItems": 64,
+                },
+            },
+            "required": ["k", "n", "f"],
+            "additionalProperties": False,
+        },
+    }
+    decisions = {
+        "type": "object",
+        "properties": {
+            evidence_ref: {
+                "$ref": "#/$defs/CurrentEvidenceIdentityDecisions",
+            }
+            for evidence_ref in refs
+        },
+        "required": refs,
+        "additionalProperties": False,
+    }
+    return {
+        "$defs": definitions,
+        "type": "object",
+        "properties": {"decisions": decisions},
+        "required": ["decisions"],
+        "additionalProperties": False,
+    }
 
 
 def _future_identity_schema(
