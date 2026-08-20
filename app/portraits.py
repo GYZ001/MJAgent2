@@ -61,8 +61,8 @@ STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集�
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
-IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v9"
-FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v8"
+IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v10"
+FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v9"
 STRUCTURAL_IDENTITY_COVERAGE_VERSION = (
     "screenplay-identity-structural-coverage.v5"
 )
@@ -1172,42 +1172,20 @@ class CurrentIdentityCandidateResponse(BaseModel):
         return [*named, *functional]
 
 
-class FutureKnownNamedIdentityCandidate(BaseModel):
-    """A future-window decision bound to one backend-owned authority."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    source_label: str = Field(min_length=1, max_length=16)
-    authority_id: str = Field(min_length=1, max_length=200)
-    future_evidence: str = Field(min_length=1, max_length=120)
-
-
-class FutureNewNamedIdentityCandidate(BaseModel):
-    """A newly revealed name which must own a verbatim future anchor."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    source_label: str = Field(min_length=1, max_length=16)
-    canonical_name: str = Field(min_length=1, max_length=16)
-    future_evidence: str = Field(min_length=1, max_length=120)
-
-
-class FutureFunctionalIdentityCandidate(BaseModel):
-    """A future-window decision which structurally cannot invent a name."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    source_label: str = Field(min_length=1, max_length=16)
-
-
 class FutureIdentityCandidateResponse(BaseModel):
-    """Provider-safe split wire for bounded future identity resolution."""
+    """Exact group-keyed wire for bounded future identity resolution.
+
+    The three maps are dynamically closed over backend-owned group keys.  A
+    decision token either names one catalog entry, or selects the NEW sentinel;
+    the sidecars are empty for every non-NEW decision.  This keeps the provider
+    schema inside the proven strict subset without relying on anyOf/oneOf.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    known_named: list[FutureKnownNamedIdentityCandidate]
-    new_named: list[FutureNewNamedIdentityCandidate]
-    functional: list[FutureFunctionalIdentityCandidate]
+    decisions: dict[str, str]
+    revealed_names: dict[str, str]
+    reveal_evidence_ids: dict[str, str]
 
 
 class StructuralNamedIdentityCoverageCandidate(BaseModel):
@@ -1294,25 +1272,56 @@ def _current_identity_schema() -> dict:
 
 
 def _future_identity_schema(
-    source_labels: list[str],
-    authority_ids: list[str],
+    group_keys: list[str],
+    *,
+    decision_ids_by_group: dict[str, list[str]],
+    evidence_ids_by_group: dict[str, list[str]],
 ) -> dict:
-    schema = _identity_source_label_schema(
-        FutureIdentityCandidateResponse,
-        source_labels,
-        candidate_defs=(
-            "FutureKnownNamedIdentityCandidate",
-            "FutureNewNamedIdentityCandidate",
-            "FutureFunctionalIdentityCandidate",
-        ),
-        branches=("known_named", "new_named", "functional"),
-    )
-    known_named = schema["$defs"]["FutureKnownNamedIdentityCandidate"]
-    known_named["properties"]["authority_id"]["enum"] = (
-        list(dict.fromkeys(str(value) for value in authority_ids if str(value)))
-        or ["__no_known_identity_authority__"]
-    )
-    return schema
+    """Build three exact maps using only the provider-proven schema subset."""
+    keys = list(dict.fromkeys(
+        str(value or "").strip() for value in group_keys
+        if str(value or "").strip()
+    ))
+    if not keys:
+        raise ValueError("future identity schema requires group keys")
+
+    def exact_map(properties: dict[str, dict]) -> dict:
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": list(properties),
+            "additionalProperties": False,
+        }
+
+    return {
+        "type": "object",
+        "properties": {
+            "decisions": exact_map({
+                key: {
+                    "type": "string",
+                    "enum": list(decision_ids_by_group[key]),
+                }
+                for key in keys
+            }),
+            "revealed_names": exact_map({
+                key: {"type": "string", "maxLength": 16}
+                for key in keys
+            }),
+            "reveal_evidence_ids": exact_map({
+                key: {
+                    "type": "string",
+                    "enum": ["", *evidence_ids_by_group.get(key, [])],
+                }
+                for key in keys
+            }),
+        },
+        "required": [
+            "decisions",
+            "revealed_names",
+            "reveal_evidence_ids",
+        ],
+        "additionalProperties": False,
+    }
 
 
 def _structural_identity_coverage_schema(
