@@ -788,9 +788,11 @@ async def _discover_character_candidates_legacy(
 
 规则：
 1. 找出本集原文/草稿中实际出场或开口的人，source_label 填本集对他/她的原始称谓。
-2. 若当前输入有明确同一人证据，identity_kind="named"，canonical_name 填稳定真名。
-3. canonical_name 必须逐字出现在当前输入，可以是人名、法号、尊号或专属称号。
-   只在人物谱中出现、但本集无逐字同一性锚点的别名必须先判为 functional，交由后续权威绑定。
+2. 当前阶段的 named 只用于逐字自称谓：canonical_name 必须与 source_label 完全相同。
+   任何“称谓 A 其实是名字 B”的别名判断，即使 A、B 同时出现在当前输入，也必须先判为
+   functional，交由后续带 authority_id 的权威绑定；不得用同场共现代替同一性证据。
+3. canonical_name 可以是人名、法号、尊号或专属称号，但必须逐字复用 source_label。
+   只在人物谱中出现、或当前文本另处共现的名字不能在本阶段直接绑定。
 4. 姓名单独出现不算同一人证据；必须能确认该真名与 source_label 是同一人，有歧义一律不猜。
 5. 若是一次性角色，或在可见线索中无法确认稳定真名，放入 functional 数组；
    functional 项在结构上不得携带 canonical_name。
@@ -836,10 +838,11 @@ async def _discover_character_candidates_legacy(
                     )
                 if (
                     item.get("identity_kind") == "named"
-                    and canonical_name not in current_haystack
+                    and canonical_name != source_label
                 ):
                     errors.append(
-                        f"canonical_name 缺少当前权威锚点：{source_label}"
+                        "current named 只允许逐字自称谓，别名必须留待 typed authority："
+                        f"{source_label}->{canonical_name}"
                     )
                 functional_key = str(
                     item.get("functional_identity_key") or ""
@@ -2496,6 +2499,20 @@ def screenplay_identity_resolution_is_current_for_source(
     source_text: str,
 ) -> bool:
     """Fence automatic identity authority by wire versions and source epoch."""
+    return screenplay_identity_resolution_is_current_for_scope(
+        value,
+        identity_scope_fingerprint=screenplay_identity_scope_fingerprint(
+            episode_no, source_text
+        ),
+    )
+
+
+def screenplay_identity_resolution_is_current_for_scope(
+    value: dict,
+    *,
+    identity_scope_fingerprint: str,
+) -> bool:
+    """Fence automatic authority by wire versions and an owned-source epoch."""
     provenance = str(value.get("decision_provenance") or "").strip()
     if provenance in DURABLE_IDENTITY_DECISION_PROVENANCE:
         return True
@@ -2505,9 +2522,125 @@ def screenplay_identity_resolution_is_current_for_source(
         and structural_identity_resolution_is_current(value)
         and str(
             value.get("identity_scope_fingerprint") or ""
-        ).strip() == screenplay_identity_scope_fingerprint(
-            episode_no, source_text
+        ).strip() == str(identity_scope_fingerprint or "").strip()
+    )
+
+
+_STRUCTURAL_IDENTITY_RECEIPT_VERSION = (
+    "screenplay-identity-structural-resolution-receipt.v1"
+)
+
+
+def _structural_identity_candidate_semantic_rows(
+    candidates: list[dict] | None,
+) -> list[dict]:
+    """Canonical semantic projection bound into a validated coverage Artifact."""
+    fields = (
+        "source_label",
+        "name",
+        "identity_kind",
+        "kind",
+        "identity_group",
+        "authority_id",
+        "source_segment_id",
+        "source_quote",
+    )
+    rows = [
+        {
+            **{
+                field: str(item.get(field) or "").strip()
+                for field in fields
+            },
+            "source_segment_ids": [
+                str(value).strip()
+                for value in item.get("source_segment_ids") or []
+                if str(value).strip()
+            ],
+        }
+        for item in (candidates or [])
+        if isinstance(item, dict)
+    ]
+    return sorted(
+        rows,
+        key=lambda item: json.dumps(
+            item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ),
+    )
+
+
+def _structural_identity_candidate_semantic_hash(
+    candidates: list[dict] | None,
+) -> str:
+    return evidence_repository.content_hash(
+        _structural_identity_candidate_semantic_rows(candidates)
+    )
+
+
+def _structural_identity_resolution_receipt(
+    resolutions: list[dict] | None,
+    *,
+    candidates: list[dict] | None,
+    identity_scope_fingerprint: str,
+) -> dict:
+    """Bind a coverage Artifact to the exact durable rows it materialized.
+
+    Candidate keys select only rows owned by this coverage result; every
+    authority-bearing field is retained so a same-label/group row with a
+    different canonical identity can never satisfy replay recovery.
+    """
+    candidate_keys = {
+        (
+            str(item.get("source_label") or "").strip(),
+            str(item.get("identity_group") or "").strip(),
         )
+        for item in (candidates or [])
+        if isinstance(item, dict)
+        and str(item.get("source_label") or "").strip()
+        and str(item.get("identity_group") or "").strip()
+    }
+    fields = (
+        "source_label",
+        "canonical_name",
+        "authority_id",
+        "authority_version",
+        "resolution",
+        "identity_group",
+        "identity_scope_fingerprint",
+        "source_instance_key",
+        "decision_provenance",
+        "decision_contract_version",
+        "structural_identity_policy_version",
+    )
+    rows = [
+        {
+            field: str(item.get(field) or "").strip()
+            for field in fields
+        }
+        for item in normalize_character_resolutions(resolutions)
+        if (
+            str(item.get("source_label") or "").strip(),
+            str(item.get("identity_group") or "").strip(),
+        ) in candidate_keys
+        and screenplay_identity_resolution_is_current_for_scope(
+            item,
+            identity_scope_fingerprint=identity_scope_fingerprint,
+        )
+    ]
+    rows.sort(key=lambda item: tuple(item[field] for field in fields))
+    return {
+        "version": _STRUCTURAL_IDENTITY_RECEIPT_VERSION,
+        "rows": rows,
+        "hash": evidence_repository.content_hash(rows),
+    }
+
+
+def _structural_identity_resolution_receipt_is_valid(value: object) -> bool:
+    return bool(
+        isinstance(value, dict)
+        and value.get("version") == _STRUCTURAL_IDENTITY_RECEIPT_VERSION
+        and isinstance(value.get("rows"), list)
+        and str(value.get("hash") or "")
+        == evidence_repository.content_hash(value["rows"])
     )
 
 
@@ -4006,6 +4139,8 @@ def persist_screenplay_character_resolutions(
     expected_revision_id: str | None = None,
     replace_identity_scope: str | None = None,
     retire_stale_structural_identity_policy: str | None = None,
+    retire_stale_identity_scope_fingerprint: str | None = None,
+    retire_automatic_identity_keys: set[tuple[str, str, str]] | None = None,
 ) -> list[dict]:
     columns = "screenplay_character_resolutions"
     if expected_active_run_id is not None:
@@ -4079,6 +4214,33 @@ def persist_screenplay_character_resolutions(
                 or str(
                     item.get("structural_identity_policy_version") or ""
                 ).strip() == retire_stale_structural_identity_policy
+            )
+        ]
+    if retire_stale_identity_scope_fingerprint is not None:
+        current = [
+            item
+            for item in current
+            if screenplay_identity_resolution_is_current_for_scope(
+                item,
+                identity_scope_fingerprint=(
+                    retire_stale_identity_scope_fingerprint
+                ),
+            )
+        ]
+    if retire_automatic_identity_keys:
+        current = [
+            item
+            for item in current
+            if (
+                str(item.get("decision_provenance") or "").strip()
+                in DURABLE_IDENTITY_DECISION_PROVENANCE
+                or (
+                    str(item.get("source_label") or "").strip(),
+                    str(item.get("identity_group") or "").strip(),
+                    str(
+                        item.get("identity_scope_fingerprint") or ""
+                    ).strip(),
+                ) not in retire_automatic_identity_keys
             )
         ]
     merged = merge_screenplay_character_resolutions(current, resolutions)
@@ -4399,6 +4561,7 @@ async def ensure_structural_identity_coverage(
     ).fetchall()
     base_candidates: list[dict] = []
     parent_artifact_id = ""
+    invalid_cached_resolution_keys: set[tuple[str, str, str]] = set()
     for row in rows:
         try:
             payload = json.loads(row["content_json"] or "{}")
@@ -4414,24 +4577,6 @@ async def ensure_structural_identity_coverage(
             and payload.get("structural_evidence_hash") == structural_hash
             and isinstance(payload.get("candidates"), list)
         ):
-            cached_resolutions = load_screenplay_character_resolutions(
-                conn, episode_id
-            )
-            cached_resolutions = [
-                item for item in cached_resolutions
-                if structural_identity_resolution_is_current(item)
-            ]
-            materialized_keys = {
-                (
-                    str(item.get("source_label") or "").strip(),
-                    str(item.get("identity_group") or "").strip(),
-                    str(
-                        item.get("identity_scope_fingerprint") or ""
-                    ).strip(),
-                )
-                for item in cached_resolutions
-                if isinstance(item, dict)
-            }
             required_keys = {
                 (
                     str(item.get("source_label") or "").strip(),
@@ -4445,16 +4590,80 @@ async def ensure_structural_identity_coverage(
                     and str(item.get("identity_group") or "").strip()
                 )
             }
-            if required_keys <= materialized_keys:
+            cached_resolutions = load_screenplay_character_resolutions(
+                conn, episode_id
+            )
+            current_cached_resolutions = [
+                item
+                for item in cached_resolutions
+                if screenplay_identity_resolution_is_current_for_scope(
+                    item,
+                    identity_scope_fingerprint=identity_scope_fingerprint,
+                )
+            ]
+            expected_candidate_hash = str(
+                payload.get("candidate_semantic_hash") or ""
+            )
+            expected_receipt = payload.get("materialized_resolution_receipt")
+            actual_receipt = _structural_identity_resolution_receipt(
+                current_cached_resolutions,
+                candidates=payload["candidates"],
+                identity_scope_fingerprint=identity_scope_fingerprint,
+            )
+            cache_is_exact = bool(
+                expected_candidate_hash
+                and expected_candidate_hash
+                == _structural_identity_candidate_semantic_hash(
+                    payload["candidates"]
+                )
+                and _structural_identity_resolution_receipt_is_valid(
+                    expected_receipt
+                )
+                and expected_receipt == actual_receipt
+            )
+            if cache_is_exact:
+                # A validated receipt can coexist with unrelated legacy rows.
+                # Retire those rows at the successful recovery boundary before
+                # exposing any authority to the screenplay compiler.
+                persisted = persist_screenplay_character_resolutions(
+                    conn,
+                    episode_id,
+                    [],
+                    expected_active_run_id=expected_active_run_id,
+                    expected_revision_id=expected_revision_id,
+                    retire_stale_identity_scope_fingerprint=(
+                        identity_scope_fingerprint
+                    ),
+                )
+                persisted = [
+                    item
+                    for item in persisted
+                    if screenplay_identity_resolution_is_current_for_scope(
+                        item,
+                        identity_scope_fingerprint=identity_scope_fingerprint,
+                    )
+                ]
+                if expected_receipt != _structural_identity_resolution_receipt(
+                    persisted,
+                    candidates=payload["candidates"],
+                    identity_scope_fingerprint=identity_scope_fingerprint,
+                ):
+                    raise StateConflict(
+                        "screenplay_identity_resolution_receipt",
+                        episode_id,
+                        {str(expected_receipt.get("hash") or "")},
+                        "changed-during-cache-recovery",
+                    )
                 return {
                     "checked": 0,
                     "candidates": payload["candidates"],
                     "added": [],
-                    "resolutions": cached_resolutions,
+                    "resolutions": persisted,
                     "errors": [],
                     "warnings": [],
                     "reused": True,
                 }
+            invalid_cached_resolution_keys.update(required_keys)
         if (
             payload.get("mode") != "structural_coverage"
             and payload.get("contract_version")
@@ -4474,7 +4683,15 @@ async def ensure_structural_identity_coverage(
     existing_coverage_resolutions = [
         item
         for item in load_screenplay_character_resolutions(conn, episode_id)
-        if structural_identity_resolution_is_current(item)
+        if screenplay_identity_resolution_is_current_for_scope(
+            item,
+            identity_scope_fingerprint=identity_scope_fingerprint,
+        )
+        and (
+            str(item.get("source_label") or "").strip(),
+            str(item.get("identity_group") or "").strip(),
+            str(item.get("identity_scope_fingerprint") or "").strip(),
+        ) not in invalid_cached_resolution_keys
     ]
     audited = await audit_identity_coverage_from_structural_evidence(
         base_candidates,
