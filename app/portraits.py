@@ -1638,41 +1638,20 @@ async def resolve_future_identity_candidates(
     # Evidence IDs always resolve to an exact raw-future span.  Current-tail
     # context is shown separately for semantic handoff, but can never be cited
     # as the owned evidence which authorizes a decision.
-    indexed_future_segments = index_source_segments(
-        future_text,
-        max_chars=120,
-    )
-    future_segments: list[tuple[int, SourceSegment]] = []
-    for base_index, segment in enumerate(indexed_future_segments):
-        raw_segment = str(segment.text or "")
-        if len(raw_segment) <= 120:
-            future_segments.append((base_index, segment))
-            continue
-        # Source segmentation intentionally keeps a long quotation balanced.
-        # The identity wire does not need balanced quotes: split it into
-        # overlapping exact raw windows so one pathological quotation cannot
-        # defeat the prompt budget, while a <=16-char reveal cannot straddle
-        # every window boundary.
-        raw_start = future_text.find(
-            raw_segment,
-            max(0, segment.start_offset),
-            min(len(future_text), segment.end_offset + len(raw_segment)),
+    # Use one overlap policy across the complete raw future source.  Applying
+    # overlap only inside a long balanced quotation leaves ordinary 120-char
+    # segment boundaries able to split a <=16-char name.  A 32-char overlap
+    # guarantees every allowed label/name is complete in at least one window.
+    future_segments = [
+        SourceSegment(
+            segment_id=f"FUTURE:E{index + 1}",
+            text=future_text[offset:offset + 120],
+            start_offset=offset,
+            end_offset=min(len(future_text), offset + 120),
         )
-        if raw_start < 0:
-            raw_start = max(0, segment.start_offset)
-        for window_index, offset in enumerate(range(0, len(raw_segment), 88)):
-            text = raw_segment[offset:offset + 120]
-            if not text:
-                continue
-            future_segments.append((
-                base_index,
-                SourceSegment(
-                    segment_id=f"{segment.segment_id}:E{window_index + 1}",
-                    text=text,
-                    start_offset=raw_start + offset,
-                    end_offset=raw_start + offset + len(text),
-                ),
-            ))
+        for index, offset in enumerate(range(0, len(future_text), 88))
+        if future_text[offset:offset + 120]
+    ]
     evidence_by_id: dict[str, dict] = {}
     evidence_ids_by_group: dict[str, list[str]] = {}
     per_group_budget = min(
@@ -1685,24 +1664,29 @@ async def resolve_future_identity_candidates(
     for group in group_specs:
         group_key = str(group["group_key"])
         group_labels = [str(value) for value in group["labels"]]
-        matching_base_indexes = {
-            base_index
-            for base_index, segment in future_segments
+        label_source_indexes = {
+            index for index, segment in enumerate(future_segments)
             if any(label in segment.text for label in group_labels)
         }
-        context_base_indexes = set(matching_base_indexes)
-        for base_index in matching_base_indexes:
-            if base_index > 0:
-                context_base_indexes.add(base_index - 1)
-            if base_index + 1 < len(indexed_future_segments):
-                context_base_indexes.add(base_index + 1)
-        matching = [
-            segment for base_index, segment in future_segments
-            if base_index in context_base_indexes
-        ]
-        if not matching:
+        if label_source_indexes:
+            context_source_indexes = {
+                neighbor
+                for index in label_source_indexes
+                for neighbor in (index - 1, index, index + 1)
+                if 0 <= neighbor < len(future_segments)
+            }
+            context_source_indexes.add(len(future_segments) - 1)
+            context_source_indexes.update(
+                index for index, segment in enumerate(future_segments)
+                if any(name in segment.text for name in known_names)
+            )
             matching = [
-                segment for _base_index, segment in future_segments
+                segment for index, segment in enumerate(future_segments)
+                if index in context_source_indexes
+            ]
+        else:
+            matching = [
+                segment for segment in future_segments
                 if segment.start_offset < 900
             ]
         label_window_indexes = {
@@ -1729,8 +1713,9 @@ async def resolve_future_identity_candidates(
         )
         selected: list = []
         used = 0
+        max_windows = max(1, min(6, per_group_budget // 120))
         for _rank, segment in ranked:
-            if used >= per_group_budget:
+            if used >= per_group_budget or len(selected) >= max_windows:
                 break
             if segment.text in {item.text for item in selected}:
                 continue
