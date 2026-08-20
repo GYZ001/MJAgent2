@@ -775,6 +775,13 @@ def _current_identity_evidence_receipt_is_valid(
     """Verify the backend seal and, when available, its owned input epoch."""
     if not isinstance(value, dict):
         return False
+    if (
+        value.get("receipt_version")
+        != CURRENT_IDENTITY_EVIDENCE_RECEIPT_VERSION
+        or value.get("contract_version")
+        != CURRENT_IDENTITY_DECISION_VERSION
+    ):
+        return False
     try:
         payload = _current_identity_evidence_payload(value)
     except (TypeError, ValueError):
@@ -789,16 +796,40 @@ def _current_identity_evidence_receipt_is_valid(
             return False
         start = payload["start_offset"]
         end = payload["end_offset"]
+        segments_by_id = {
+            segment.segment_id: segment
+            for segment in index_source_segments(source_text)
+        }
+        owned_segment = segments_by_id.get(payload["source_segment_id"])
         return bool(
             0 <= start < end <= len(source_text)
             and source_text[start:end].strip() == payload["text"]
+            and owned_segment is not None
+            and owned_segment.start_offset == start
+            and owned_segment.end_offset == end
+            and owned_segment.text == payload["text"]
         )
     if origin == "draft_identity_projection":
         if draft_text and payload["source_hash"] != evidence_repository.content_hash(
             draft_text
         ):
             return False
-        return bool(payload["path"] and payload["text"].strip())
+        if not payload["path"] or not payload["text"].strip():
+            return False
+        if not draft_text:
+            # The seal was already checked against the owned draft at the
+            # current-discovery boundary.  Later stages only need to preserve
+            # that immutable backend receipt.
+            return True
+        return any(
+            str(record.get("evidence_id") or "")
+            == str(value.get("evidence_id") or "")
+            and record == value
+            for record in _current_identity_evidence_records(
+                source_text,
+                draft_text=draft_text,
+            )
+        )
     return False
 
 

@@ -938,6 +938,14 @@ def test_generic_discovery_keeps_current_contract_cache_compatible(
                 "contract_version": (
                     portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION
                 ),
+                "current_identity_version": (
+                    portraits.CURRENT_IDENTITY_DECISION_VERSION
+                ),
+                "current_evidence_catalog_hash": (
+                    portraits._current_identity_evidence_catalog_hash(
+                        source_text
+                    )
+                ),
                 "input_hash": current_contract_hash,
                 "mode": "targeted",
                 "candidates": expected,
@@ -2878,6 +2886,37 @@ def test_current_identity_named_requires_literal_selected_evidence(
             1,
         ))
     assert calls == 1
+
+
+def test_current_synthetic_functional_never_enters_future_authority(
+    monkeypatch,
+) -> None:
+    candidate = {
+        "name": "绿袍修士一",
+        "source_label": "绿袍修士一",
+        "identity_kind": "functional",
+        "identity_group": "current-1:synthetic:one",
+        "kind": "onscreen",
+        "source_label_provenance": (
+            portraits.CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+        ),
+    }
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("synthetic current label reached future provider")
+
+    monkeypatch.setattr(model_gateway, "chat", forbidden)
+    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
+        [candidate],
+        source_text="有两个穿绿袍的男子。",
+        future_text="绿袍修士一后来自称赵某。",
+        bible=Bible(
+            world=World(visual_style_canonical="国风"),
+            characters=[],
+        ),
+        episode_no=1,
+    ))
+    assert resolved == [candidate]
 
 
 def test_future_context_prioritizes_late_known_name_cooccurrence() -> None:

@@ -16,6 +16,9 @@ IDENTITY_AUTHORITY_VERSION = "screenplay-identity-authority.v1"
 BACKEND_OWNED_IDENTITY_AUTHORITY_VERSION = (
     "screenplay-backend-owned-identity-authority.v1"
 )
+NON_AUTHORITATIVE_SOURCE_LABEL_PROVENANCES = frozenset({
+    "provider_synthetic_functional.v1",
+})
 
 
 class IdentityAuthorityConflictError(ValueError):
@@ -152,6 +155,15 @@ def normalize_character_resolutions(
     ]
 
 
+def identity_resolution_is_authoritative(value: object) -> bool:
+    """Synthetic provider labels are observations, never identity authority."""
+    return bool(
+        isinstance(value, dict)
+        and str(value.get("source_label_provenance") or "").strip()
+        not in NON_AUTHORITATIVE_SOURCE_LABEL_PROVENANCES
+    )
+
+
 def identity_authority_registry(
     bible: object,
     resolutions: Iterable[dict[str, Any]] | None,
@@ -214,6 +226,8 @@ def identity_authority_registry(
         }
 
     for item in normalize_character_resolutions(resolutions):
+        if not identity_resolution_is_authoritative(item):
+            continue
         authority_id = item["authority_id"]
         identity_group = str(item.get("identity_group") or "").strip()
         identity_scope_fingerprint = str(
