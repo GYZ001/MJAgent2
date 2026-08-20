@@ -395,7 +395,7 @@ def test_future_identity_exact_map_schema_is_closed_and_provider_safe(
     local_before = json.loads(json.dumps(local_schema, ensure_ascii=False))
     response_format = portraits._identity_strict_response_format(
         local_schema,
-        name="screenplay_future_identity_resolution_v9",
+        name="screenplay_future_identity_resolution_v10",
     )
 
     assert local_schema == local_before
@@ -469,19 +469,16 @@ def test_structural_identity_coverage_strict_success_is_one_call(
 
     async def fake_chat(_messages, **kwargs):
         calls.append(kwargs)
-        group_ref = kwargs["response_format"]["json_schema"]["schema"][
-            "$defs"
-        ]["StructuralFunctionalIdentityCoverageCandidate"]["properties"][
-            "identity_group_ref"
-        ]["enum"][0]
-        return json.dumps({
-            "named": [],
-            "functional": [{
+        return json.dumps(_coverage_identity_wire(
+            [{
                 "source_label": "未知求救者",
-                "identity_group_ref": group_ref,
-                "evidence": "未知求救者",
+                "identity_kind": "functional",
             }],
-        }, ensure_ascii=False)
+            provider_schema=kwargs["response_format"]["json_schema"][
+                "schema"
+            ],
+            messages=_messages,
+        ), ensure_ascii=False)
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
     result = asyncio.run(
@@ -514,29 +511,15 @@ def test_structural_identity_coverage_strict_success_is_one_call(
             model_gateway.StructuredFormatError,
         ),
         (
-            json.dumps({
-                "named": [],
-                "functional": [{
-                    "source_label": "越界人物",
-                    "identity_group_ref": "new:bogus",
-                    "evidence": "越界",
-                }],
-            }, ensure_ascii=False),
+            '{"decisions":{"I001":"F:I001:forged"}}',
             model_gateway.StructuredSemanticError,
         ),
         (
-            '{"named":[],"functional":[]}',
+            '{"decisions":{}}',
             model_gateway.StructuredSemanticError,
         ),
         (
-            json.dumps({
-                "named": [],
-                "functional": [{
-                    "source_label": " 未知求救者 ",
-                    "identity_group_ref": "new:bogus",
-                    "evidence": "未知求救者",
-                }],
-            }, ensure_ascii=False),
+            '{"decisions":{"I001":"F:I001:forged","I002":"extra"}}',
             model_gateway.StructuredSemanticError,
         ),
         (
@@ -588,7 +571,7 @@ def test_strict_identity_invalid_raw_is_not_reused_across_authorized_runs(
         nonlocal calls
         calls += 1
         assert kwargs["call_meta"]["reuse_successful_operation"] is False
-        return '{"named":[],"functional":[]}'
+        return '{"decisions":{}}'
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
     for _retry_epoch in ("run-one", "run-two"):
@@ -612,18 +595,13 @@ def test_structural_identity_coverage_subset_is_one_call_hard_failure(
         nonlocal calls
         calls += 1
         assert kwargs["response_format"]["type"] == "json_schema"
-        group_ref = kwargs["response_format"]["json_schema"]["schema"][
-            "$defs"
-        ]["StructuralFunctionalIdentityCoverageCandidate"]["properties"][
-            "identity_group_ref"
-        ]["enum"][0]
+        decision_properties = kwargs["response_format"]["json_schema"][
+            "schema"
+        ]["properties"]["decisions"]["properties"]
+        first_key = next(iter(decision_properties))
+        first_option = decision_properties[first_key]["enum"][0]
         return json.dumps({
-            "named": [],
-            "functional": [{
-                "source_label": "未知求救者",
-                "identity_group_ref": group_ref,
-                "evidence": "未知求救者",
-            }],
+            "decisions": {first_key: first_option},
         }, ensure_ascii=False)
 
     kwargs = _coverage_audit_kwargs()
@@ -1905,7 +1883,7 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
     ]
 
 
-def test_future_identity_accepts_semantic_alias_with_verbatim_name_anchor(
+def test_future_identity_does_not_bind_bible_name_from_raw_cooccurrence(
     monkeypatch,
 ) -> None:
     bible = Bible(
@@ -1924,9 +1902,7 @@ def test_future_identity_accepts_semantic_alias_with_verbatim_name_anchor(
         assert kwargs["call_meta"]["discovery_phase"] == "future_identity"
         return json.dumps(_identity_wire_for_call(kwargs, [{
             "source_label": "那间学校的校长",
-            "canonical_name": "赵振",
-            "identity_kind": "named",
-            "future_evidence": "聪慧的白洁马上反应过来是那个“大象”赵振的主意。",
+            "identity_kind": "functional",
         }]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
@@ -1952,7 +1928,7 @@ def test_future_identity_accepts_semantic_alias_with_verbatim_name_anchor(
     assert [
         (item["source_label"], item["name"], item["identity_kind"])
         for item in candidates
-    ] == [("那间学校的校长", "赵振", "named")]
+    ] == [("那间学校的校长", "那间学校的校长", "functional")]
 
 
 def test_future_identity_untraceable_name_is_one_call_hard_failure(
@@ -2122,7 +2098,7 @@ def test_attempt12_future_identity_group_decision_is_exact_and_one_call(
         assert kwargs["response_format"]["type"] == "json_schema"
         assert kwargs["response_format"]["json_schema"]["strict"] is True
         assert kwargs["response_format"]["json_schema"]["name"] == (
-            "screenplay_future_identity_resolution_v9"
+            "screenplay_future_identity_resolution_v10"
         )
         assert kwargs["call_meta"]["response_format_required"] is True
         assert kwargs["call_meta"]["format_attempt"] == 0
@@ -2341,15 +2317,15 @@ def test_future_identity_operation_binds_exact_outbound_semantics(
 
     async def fake_structured(*_args, **kwargs):
         assert kwargs["operation_id"].startswith(
-            "screenplay.identity.future.v10:"
+            "screenplay.identity.future.v11:"
         )
         assert (
             kwargs["response_format"]["json_schema"]["name"]
-            == "screenplay_future_identity_resolution_v9"
+            == "screenplay_future_identity_resolution_v10"
         )
         assert (
             kwargs["call_meta"]["contract_version"]
-            == "screenplay-future-identity.v9"
+            == "screenplay-future-identity.v10"
         )
         operations.append((kwargs["operation_id"], kwargs["call_meta"]["model"]))
         return portraits.FutureIdentityCandidateResponse.model_validate(
@@ -2447,7 +2423,9 @@ def test_future_context_prioritizes_late_known_name_cooccurrence() -> None:
     assert "人物谱真名：李富贵" in context
 
 
-def test_future_named_identity_upgrades_every_alias_in_same_group(monkeypatch) -> None:
+def test_future_canonical_cooccurrence_does_not_upgrade_alias_group(
+    monkeypatch,
+) -> None:
     bible = Bible(
         world=World(visual_style_canonical="国风"),
         characters=[Character(
@@ -2483,15 +2461,11 @@ def test_future_named_identity_upgrades_every_alias_in_same_group(monkeypatch) -
         return json.dumps(_identity_wire_for_call(kwargs, [
             {
                 "source_label": "会飞的女人",
-                "canonical_name": "许清",
-                "identity_kind": "named",
-                "future_evidence": "许师姐转身，众人称她许清。",
+                "identity_kind": "functional",
             },
             {
                 "source_label": "许师姐",
-                "canonical_name": "许清",
-                "identity_kind": "named",
-                "future_evidence": "许师姐转身，众人称她许清。",
+                "identity_kind": "functional",
             },
         ]), ensure_ascii=False)
 
@@ -2509,8 +2483,8 @@ def test_future_named_identity_upgrades_every_alias_in_same_group(monkeypatch) -
         (item["source_label"], item["name"], item["identity_kind"])
         for item in candidates
     } == {
-        ("会飞的女人", "许清", "named"),
-        ("许师姐", "许清", "named"),
+        ("会飞的女人", "会飞的女人", "functional"),
+        ("许师姐", "许师姐", "functional"),
     }
 
 
@@ -2613,7 +2587,9 @@ def test_future_identity_repairs_legacy_expansion_and_blocks_it_before_publish()
     ) == []
 
 
-def test_structural_audit_recovers_entity_omitted_by_current_pass(monkeypatch) -> None:
+def test_structural_audit_keeps_unregistered_descriptor_functional(
+    monkeypatch,
+) -> None:
     bible = Bible(
         world=World(visual_style_canonical="国风"),
         characters=[
@@ -2645,22 +2621,14 @@ def test_structural_audit_recovers_entity_omitted_by_current_pass(monkeypatch) -
         assert "白白净净身较胖" in messages[0]["content"]
         assert "SRC0001" in messages[0]["content"]
         assert "我李富贵" not in messages[0]["content"]
-        schema = kwargs["response_format"]["json_schema"]["schema"]
-        group_refs = schema["$defs"][
-            "StructuralNamedIdentityCoverageCandidate"
-        ]["properties"]["identity_group_ref"]["enum"]
-        group_ref = next(
-            value for value in group_refs if value.startswith("new:")
-        )
-        return json.dumps({
-            "named": [{
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
                 "source_label": "白白净净身较胖",
-                "authority_id": "bible:李富贵",
-                "identity_group_ref": group_ref,
-                "evidence": "李富贵",
+                "identity_kind": "functional",
             }],
-            "functional": [],
-        }, ensure_ascii=False)
+            messages=messages,
+        ), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     candidates = asyncio.run(portraits.discover_character_candidates(
@@ -2678,8 +2646,8 @@ def test_structural_audit_recovers_entity_omitted_by_current_pass(monkeypatch) -
 
     assert any(
         item["source_label"] == "白白净净身较胖"
-        and item["name"] == "李富贵"
-        and item["identity_kind"] == "named"
+        and item["name"] == "白白净净身较胖"
+        and item["identity_kind"] == "functional"
         for item in candidates
     )
     assert phases == ["current", "coverage"]
@@ -2792,7 +2760,7 @@ def test_future_functional_relation_label_is_not_promoted_by_text_presence(
     assert phases == ["current", "future_identity"]
 
 
-def test_future_functional_enum_drift_can_use_existing_bible_identity(
+def test_future_functional_does_not_bind_existing_bible_by_cooccurrence(
     monkeypatch,
 ) -> None:
     bible = Bible(
@@ -2816,8 +2784,7 @@ def test_future_functional_enum_drift_can_use_existing_bible_identity(
             }]), ensure_ascii=False)
         return json.dumps(_identity_wire_for_call(kwargs, [{
             "source_label": "小胖子",
-            "canonical_name": "李富贵",
-            "identity_kind": "named",
+            "identity_kind": "functional",
             "functional_identity_key": "F1",
             "kind": "onscreen",
             "evidence": "小胖子跟随孟浩",
@@ -2836,7 +2803,7 @@ def test_future_functional_enum_drift_can_use_existing_bible_identity(
     assert [
         (item["source_label"], item["name"], item["identity_kind"])
         for item in candidates
-    ] == [("小胖子", "李富贵", "named")]
+    ] == [("小胖子", "小胖子", "functional")]
 
 
 def test_character_resolutions_persist_and_future_identity_upgrades_route_fallback() -> None:
@@ -3903,7 +3870,9 @@ def test_future_identity_persists_bounded_evidence_with_authority_anchor(
             [{
                 "source_label": "黑衣人",
                 "canonical_name": "丁力",
-                "identity_kind": "named",
+                "identity_kind": (
+                    "functional" if known_authority else "named"
+                ),
             }],
             messages=messages,
         ), ensure_ascii=False)
@@ -3934,11 +3903,16 @@ def test_future_identity_persists_bounded_evidence_with_authority_anchor(
     ))
 
     assert calls == 1
-    evidence = resolved[0]["future_evidence"]
-    assert 0 < len(evidence) <= 120
-    assert "丁力" in evidence
-    assert evidence in future
-    assert resolved[0]["authority_id"] == "bible:丁力"
+    if known_authority:
+        assert resolved[0]["identity_kind"] == "functional"
+        assert resolved[0].get("future_evidence", "") == ""
+        assert not resolved[0].get("authority_id")
+    else:
+        evidence = resolved[0]["future_evidence"]
+        assert 0 < len(evidence) <= 120
+        assert "丁力" in evidence
+        assert evidence in future
+        assert resolved[0]["authority_id"] == "bible:丁力"
 
 
 def test_future_identity_catalog_reserves_middle_label_reveal_window(

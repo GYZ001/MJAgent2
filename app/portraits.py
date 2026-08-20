@@ -1720,6 +1720,14 @@ async def resolve_future_identity_candidates(
     for candidate in candidates:
         if str(candidate.get("identity_kind") or "") != "named":
             continue
+        # Same-group K is a recovery authority, not a way for two values from
+        # the same provider response to certify each other.  A free functional
+        # key may collide with a named group string; only an explicitly durable
+        # backend decision may authorize this shortcut.
+        if str(candidate.get("decision_provenance") or "").strip() not in (
+            DURABLE_IDENTITY_DECISION_PROVENANCE
+        ):
+            continue
         identity_group = str(candidate.get("identity_group") or "").strip()
         canonical_name = str(candidate.get("name") or "").strip()
         if not identity_group or not canonical_name:
@@ -2419,27 +2427,28 @@ async def audit_identity_coverage_from_structural_evidence(
         group_key: str,
         identity_group_ref: str,
     ) -> list[str]:
-        """Return owned spans which can justify linking one existing group."""
+        """Return owned spans for an exact backend-registered label binding.
+
+        Mere SRC overlap or co-occurrence is not identity evidence: one source
+        sentence routinely contains several people.  An existing group is
+        eligible only when this exact synthetic identity key is already one of
+        its registered labels and appears verbatim in the owned span.
+        """
         group = groups_by_ref.get(identity_group_ref, {})
-        group_source_ids = {
-            str(value) for value in group.get("source_segment_ids") or []
-        }
-        group_labels = [
+        registered_labels = {
             str(value).strip()
             for value in group.get("source_labels") or []
             if str(value).strip()
-        ]
+        }
+        source_label = str(
+            coverage_group_by_key[group_key]["source_label"]
+        )
+        if source_label not in registered_labels:
+            return []
         return [
             evidence_id
             for evidence_id in evidence_ids_by_group.get(group_key, [])
-            if (
-                str(evidence_by_id[evidence_id]["source_segment_id"])
-                in group_source_ids
-                or any(
-                    label in str(evidence_by_id[evidence_id]["text"])
-                    for label in group_labels
-                )
-            )
+            if source_label in str(evidence_by_id[evidence_id]["text"])
         ]
 
     decision_by_id: dict[str, dict] = {}
@@ -2840,10 +2849,16 @@ owned SRC 证据目录（后端逐字锁定，不得回抄或改写）：
             for source_id in value.get("source_segment_ids") or []
             if str(source_id) in source_by_id
         }, key=lambda source_id: source_order[source_id])
-        source_segment_id = source_ids[0] if source_ids else ""
         evidence_record = evidence_by_id.get(
             str(raw.get("evidence_id") or ""), {}
         )
+        source_segment_id = str(
+            evidence_record.get("source_segment_id") or ""
+        )
+        if source_segment_id not in source_ids:
+            raise ContentGenerationError(
+                f"结构人物 coverage evidence receipt 越界：{label}"
+            )
         evidence_text = str(evidence_record.get("text") or "")
         proof_anchors = [
             str(value)

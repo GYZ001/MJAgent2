@@ -217,7 +217,7 @@ def test_future_identity_rejects_attempt12_response_format_name(
     monkeypatch.setattr(model_gateway, "chat", forbidden_chat)
     with pytest.raises(
         ValueError,
-        match="name=screenplay_future_identity_resolution_v9",
+        match="name=screenplay_future_identity_resolution_v10",
     ):
         asyncio.run(model_gateway.chat_structured(
             [{"role": "user", "content": "future identity"}],
