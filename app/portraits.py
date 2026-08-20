@@ -763,7 +763,7 @@ async def _discover_character_candidates_legacy(
         current_schema = _current_identity_schema()
         current_response_format = _identity_strict_response_format(
             current_schema,
-            name="screenplay_current_identity_discovery",
+            name="screenplay_current_identity_discovery_v8",
         )
         prompt = f"""任务：为第 {episode_no} 集做人物身份增量预检。请用语义和上下文判断，
 不要依赖服饰、性别、年龄或称谓后缀的固定词表。
@@ -786,7 +786,8 @@ async def _discover_character_candidates_legacy(
 3. canonical_name 可以是文本明确给出的人名，也可以是跨章节稳定、唯一指向同一实体的法号、
    尊号或专属称号。泛化职位、外貌标签和无法唯一指人的称谓才判为 functional。
 4. 姓名单独出现不算同一人证据；必须能确认该真名与 source_label 是同一人，有歧义一律不猜。
-5. 若是一次性角色，或在可见线索中无法确认稳定真名，identity_kind="functional"、canonical_name=""。
+5. 若是一次性角色，或在可见线索中无法确认稳定真名，放入 functional 数组；
+   functional 项在结构上不得携带 canonical_name。
 6. 若身份投影中的 source_label 混入动作或表演提示，必须结合对应 line_context 判断真正说话人；
    source_label 保留原始完整字符串，canonical_name/functional_identity_key 绑定到真正说话人。
    禁止按“说、喊、点头”等固定词表或后缀规则猜测。
@@ -795,9 +796,6 @@ async def _discover_character_candidates_legacy(
    - 否则填写本次响应内的不透明分组 ID（如 F1、F2）；不同 source_label 若明确是同一人必须共用同一 ID。
    - 无法确认是否同一人时必须使用不同 ID，禁止根据称谓字面相似猜测。
 8. evidence 只描述身份依据，不复述与人物身份无关的剧情。
-9. source_segment_id/source_quote 必须引用当前输入中实际承载该称谓的最小来源段；
-   source_quote 必须逐字来自该段。短称谓只有在该段内唯一时才可输出。
-
 只输出符合下列 Schema 的 JSON。named 项必须携带 canonical_name，functional 项在结构上
 不得携带 canonical_name；两个数组都必须显式输出，空集合用 []：
 {json.dumps(current_schema, ensure_ascii=False, separators=(',', ':'))}"""
@@ -816,6 +814,12 @@ async def _discover_character_candidates_legacy(
                 if source_label in seen_labels:
                     errors.append(f"source_label 重复：{source_label}")
                 seen_labels.add(source_label)
+                if not _aligned_identity_source_label(
+                    source_label, current_haystack
+                ):
+                    errors.append(
+                        f"source_label 缺少 owned current source：{source_label}"
+                    )
                 evidence_text = str(item.get("evidence") or "")
                 if evidence_text != evidence_text.strip():
                     errors.append(f"evidence 含首尾空白：{source_label}")
@@ -823,6 +827,14 @@ async def _discover_character_candidates_legacy(
                 if canonical_name != canonical_name.strip():
                     errors.append(
                         f"canonical_name 含首尾空白：{source_label}"
+                    )
+                if (
+                    item.get("identity_kind") == "named"
+                    and canonical_name not in current_haystack
+                    and canonical_name not in known_names
+                ):
+                    errors.append(
+                        f"canonical_name 缺少当前权威锚点：{source_label}"
                     )
                 functional_key = str(
                     item.get("functional_identity_key") or ""
@@ -1068,14 +1080,11 @@ class CurrentNamedIdentityCandidate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    source_segment_id: str = Field(max_length=64)
-    source_quote: str = Field(max_length=240)
     source_label: str = Field(min_length=1, max_length=16)
     canonical_name: str = Field(min_length=1, max_length=16)
     identity_kind: Literal["named"]
     kind: Literal["onscreen", "mentioned"]
     evidence: str = Field(min_length=1, max_length=80)
-    future_evidence: str = Field(max_length=120)
 
 
 class CurrentFunctionalIdentityCandidate(BaseModel):
@@ -1083,14 +1092,11 @@ class CurrentFunctionalIdentityCandidate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    source_segment_id: str = Field(max_length=64)
-    source_quote: str = Field(max_length=240)
     source_label: str = Field(min_length=1, max_length=16)
     identity_kind: Literal["functional"]
     functional_identity_key: str = Field(min_length=1, max_length=64)
     kind: Literal["onscreen", "mentioned"]
     evidence: str = Field(min_length=1, max_length=80)
-    future_evidence: Literal[""]
 
 
 class CurrentIdentityCandidateResponse(BaseModel):
@@ -1107,6 +1113,9 @@ class CurrentIdentityCandidateResponse(BaseModel):
             {
                 **item.model_dump(mode="json"),
                 "functional_identity_key": "",
+                "source_segment_id": "",
+                "source_quote": "",
+                "future_evidence": "",
             }
             for item in self.named
         ]
@@ -1114,6 +1123,9 @@ class CurrentIdentityCandidateResponse(BaseModel):
             {
                 **item.model_dump(mode="json"),
                 "canonical_name": "",
+                "source_segment_id": "",
+                "source_quote": "",
+                "future_evidence": "",
             }
             for item in self.functional
         ]
@@ -1366,7 +1378,7 @@ def _structural_identity_coverage_response_format(
 ) -> dict:
     return _identity_strict_response_format(
         local_schema,
-        name="screenplay_structural_identity_coverage",
+        name="screenplay_structural_identity_coverage_v5",
     )
 
 
@@ -1508,7 +1520,7 @@ async def resolve_future_identity_candidates(
     )
     identity_response_format = _identity_strict_response_format(
         identity_schema,
-        name="screenplay_future_identity_resolution",
+        name="screenplay_future_identity_resolution_v7",
     )
     prompt = f"""任务：只为当前集尚未确认的身份做后续姓名消歧。
 当前未决身份（不可新增列表外人物）：
@@ -1553,8 +1565,10 @@ new_named 依据必须包含 canonical_name，known_named 依据必须包含当�
                     + evidence_repository.content_hash({
                         "contract_version": FUTURE_IDENTITY_DECISION_VERSION,
                         "canonical_name": item.canonical_name,
-                        "future_context_hash": (
-                            evidence_repository.content_hash(future_context)
+                        "identity_scope_fingerprint": (
+                            screenplay_identity_scope_fingerprint(
+                                episode_no, source_text
+                            )
                         ),
                     })[:24]
                 ),
@@ -1600,7 +1614,7 @@ new_named 依据必须包含 canonical_name，known_named 依据必须包含当�
                 canonical_name = str(authority.get("canonical_name") or "")
                 if (
                     evidence_text != evidence_text.strip()
-                    or evidence_text not in future_context
+                    or evidence_text not in future_text
                     or (
                         source_label not in evidence_text
                         and canonical_name not in evidence_text
@@ -1616,9 +1630,17 @@ new_named 依据必须包含 canonical_name，known_named 依据必须包含当�
                     errors.append(
                         f"canonical_name 含首尾空白：{source_label}"
                     )
+                if canonical_name in {
+                    str(authority.get("canonical_name") or "")
+                    for authority in authority_by_id.values()
+                }:
+                    errors.append(
+                        "new_named 不得重新签发已有 authority："
+                        f"{source_label}"
+                    )
                 if (
                     evidence_text != evidence_text.strip()
-                    or evidence_text not in future_context
+                    or evidence_text not in future_text
                     or canonical_name not in evidence_text
                 ):
                     errors.append(
@@ -1738,6 +1760,11 @@ new_named 依据必须包含 canonical_name，known_named 依据必须包含当�
                     + evidence_repository.content_hash({
                         "contract_version": FUTURE_IDENTITY_DECISION_VERSION,
                         "canonical_name": canonical_name,
+                        "identity_scope_fingerprint": (
+                            screenplay_identity_scope_fingerprint(
+                                episode_no, source_text
+                            )
+                        ),
                     })[:24]
                 )
             ),
@@ -1796,8 +1823,22 @@ async def audit_identity_coverage_from_structural_evidence(
             }
     groups_by_ref: dict[str, dict] = {}
     catalog_candidates = [*candidates]
+    current_identity_scope = screenplay_identity_scope_fingerprint(
+        episode_no, source_text
+    )
     for resolution in existing_resolutions or []:
-        if not structural_identity_resolution_is_current(resolution):
+        provenance = str(
+            resolution.get("decision_provenance") or ""
+        ).strip()
+        if not (
+            provenance in DURABLE_IDENTITY_DECISION_PROVENANCE
+            or (
+                structural_identity_resolution_is_current(resolution)
+                and str(
+                    resolution.get("identity_scope_fingerprint") or ""
+                ).strip() == current_identity_scope
+            )
+        ):
             continue
         canonical_name = str(
             resolution.get("canonical_name") or ""
@@ -1873,16 +1914,33 @@ async def audit_identity_coverage_from_structural_evidence(
         seed_ref = "new:" + evidence_repository.content_hash({
             "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
             "source_label": label,
-            "structural_evidence": [
-                item for item in minimal
-                if str(item.get("identity_key") or "").strip() == label
-            ],
+            "structural_evidence": sorted(
+                [
+                    item for item in minimal
+                    if str(item.get("identity_key") or "").strip() == label
+                ],
+                key=evidence_repository.content_hash,
+            ),
         })[:24]
         groups_by_ref.setdefault(seed_ref, {
             "identity_group_ref": seed_ref,
             "source_labels": [label],
             "authority_ids": [],
         })
+    conflicting_groups = {
+        group_ref: sorted(set(group.get("authority_ids") or []))
+        for group_ref, group in groups_by_ref.items()
+        if len(set(group.get("authority_ids") or [])) > 1
+    }
+    if conflicting_groups:
+        raise ContentGenerationError(
+            "structural identity group 缺少唯一权威："
+            + json.dumps(
+                conflicting_groups,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
     coverage_schema = _structural_identity_coverage_schema(
         allowed_source_labels,
         authority_ids=list(authority_by_id),
@@ -1931,6 +1989,15 @@ async def audit_identity_coverage_from_structural_evidence(
         )
         for label, items in structural_by_key.items()
     }
+    missing_owned_source = [
+        label for label in allowed_source_labels
+        if not owned_source_by_key.get(label, "").strip()
+    ]
+    if missing_owned_source:
+        raise ContentGenerationError(
+            "structural identity coverage 缺少 owned SRC："
+            + ",".join(sorted(missing_owned_source))
+        )
 
     def validate_response(
         value: StructuralIdentityCoverageResponse,
@@ -1971,6 +2038,18 @@ async def audit_identity_coverage_from_structural_evidence(
                 errors.append(f"evidence 含首尾空白：{source_label}")
             if not evidence_text.strip():
                 errors.append(f"evidence 为空：{source_label}")
+            owned_segments = [
+                str(text)
+                for typed_item in structural_by_key.get(source_label, [])
+                for text in (typed_item.get("source_segments") or {}).values()
+                if str(text)
+            ]
+            if evidence_text and not any(
+                evidence_text in segment for segment in owned_segments
+            ):
+                errors.append(
+                    f"evidence 不属于 owned SRC：{source_label}"
+                )
             if item.get("identity_kind") == "named":
                 authority_id = str(item.get("authority_id") or "")
                 authority = authority_by_id.get(authority_id)
@@ -1990,25 +2069,27 @@ async def audit_identity_coverage_from_structural_evidence(
                             "named authority 与已有 group 权威冲突："
                             f"{source_label}"
                         )
-                    if not existing_group_authorities:
-                        owned_source = owned_source_by_key.get(
-                            source_label, ""
+                    authority_anchors = {
+                        str(authority.get("canonical_name") or "").strip(),
+                        *(
+                            str(alias or "").strip()
+                            for alias in authority.get("aliases") or []
+                        ),
+                        *(
+                            str(label or "").strip()
+                            for label in groups_by_ref.get(
+                                identity_group, {}
+                            ).get("source_labels") or []
+                        ),
+                    }
+                    if not any(
+                        anchor and anchor in evidence_text
+                        for anchor in authority_anchors
+                    ):
+                        errors.append(
+                            "named group 缺少 owned authority 锚点："
+                            f"{source_label}"
                         )
-                        authority_anchors = {
-                            str(authority.get("canonical_name") or "").strip(),
-                            *(
-                                str(alias or "").strip()
-                                for alias in authority.get("aliases") or []
-                            ),
-                        }
-                        if not any(
-                            anchor and anchor in owned_source
-                            for anchor in authority_anchors
-                        ):
-                            errors.append(
-                                "unbound group 缺少 owned authority 锚点："
-                                f"{source_label}"
-                            )
                 named_groups.add(identity_group)
                 named_authorities_by_group.setdefault(
                     identity_group, set()
@@ -2078,6 +2159,29 @@ async def audit_identity_coverage_from_structural_evidence(
         for item in candidates
     }
     additions: list[dict] = []
+    new_group_members: dict[str, set[str]] = {}
+    for decision in response.characters:
+        raw_group = str(decision.get("identity_group_ref") or "").strip()
+        label = str(decision.get("source_label") or "").strip()
+        if raw_group.startswith("new:") and label:
+            new_group_members.setdefault(raw_group, set()).add(label)
+    normalized_new_groups = {
+        raw_group: (
+            "structural:"
+            + evidence_repository.content_hash({
+                "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+                "source_labels": sorted(labels),
+                "source_segment_ids": sorted({
+                    str(source_id)
+                    for label in labels
+                    for typed_item in structural_by_key.get(label, [])
+                    for source_id in typed_item.get("source_segment_ids") or []
+                    if str(source_id)
+                }),
+            })[:24]
+        )
+        for raw_group, labels in new_group_members.items()
+    }
     for item in response.characters:
         raw = (
             item
@@ -2095,7 +2199,8 @@ async def audit_identity_coverage_from_structural_evidence(
         canonical_name = str(
             authority_by_id.get(authority_id, {}).get("canonical_name") or ""
         )
-        group = str(raw.get("identity_group_ref") or "").strip()
+        raw_group = str(raw.get("identity_group_ref") or "").strip()
+        group = normalized_new_groups.get(raw_group, raw_group)
         if (label, group) in existing:
             continue
         usages = {
@@ -4296,12 +4401,18 @@ async def ensure_structural_identity_coverage(
             ]
             parent_artifact_id = str(row["id"])
             break
+    existing_coverage_resolutions = [
+        item
+        for item in load_screenplay_character_resolutions(conn, episode_id)
+        if structural_identity_resolution_is_current(item)
+    ]
     audited = await audit_identity_coverage_from_structural_evidence(
         base_candidates,
         structural_evidence=structural_evidence,
         source_text=source_text,
         bible=bible,
         episode_no=episode_no,
+        existing_resolutions=existing_coverage_resolutions,
     )
     if write_guard:
         write_guard()

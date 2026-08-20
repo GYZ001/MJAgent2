@@ -492,12 +492,18 @@ async def chat_structured(
         )
     stage_key = str((call_meta or {}).get("stage_key") or "")
     substage = str((call_meta or {}).get("substage") or "")
+    identity_response_format_names = {
+        "current_identity": "screenplay_current_identity_discovery_v8",
+        "future_identity": "screenplay_future_identity_resolution_v7",
+        "structural_coverage": "screenplay_structural_identity_coverage_v5",
+    }
+    strict_identity_substage = (
+        stage_key == "screenplay_character_discovery"
+        and substage in identity_response_format_names
+    )
     strict_json_schema_contract = (
         stage_key == "screenplay_scene_shard_semantic_repair"
-        or (
-            stage_key == "screenplay_character_discovery"
-            and substage == "structural_coverage"
-        )
+        or strict_identity_substage
     )
     if strict_json_schema_contract:
         json_schema = (
@@ -520,6 +526,24 @@ async def chat_structured(
                 f"{contract_name} requires strict json_schema "
                 "response_format"
             )
+        if strict_identity_substage:
+            expected_name = identity_response_format_names[substage]
+            if json_schema.get("name") != expected_name:
+                raise ValueError(
+                    f"{stage_key}/{substage} requires response_format "
+                    f"name={expected_name}"
+                )
+            if (
+                int(format_retry_limit) != 0
+                or int(semantic_retry_limit) != 0
+            ):
+                raise ValueError(
+                    f"{stage_key}/{substage} forbids structured retries"
+                )
+            if not bool((call_meta or {}).get("disable_provider_retries")):
+                raise ValueError(
+                    f"{stage_key}/{substage} forbids provider retries"
+                )
     structured_schema = output_schema or _model_schema(model_type)
     base_messages = [dict(message) for message in messages]
     current_messages = base_messages
