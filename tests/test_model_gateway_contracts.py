@@ -250,7 +250,7 @@ def test_future_identity_rejects_attempt12_response_format_name(
     assert called is False
 
 
-def test_current_identity_rejects_attempt14_response_format_name(
+def test_current_identity_rejects_attempt15_response_format_name(
     monkeypatch,
 ) -> None:
     called = False
@@ -264,7 +264,7 @@ def test_current_identity_rejects_attempt14_response_format_name(
     monkeypatch.setattr(model_gateway, "chat", forbidden_chat)
     with pytest.raises(
         ValueError,
-        match="name=screenplay_current_identity_discovery_v9",
+        match="name=screenplay_current_identity_discovery_v10",
     ):
         asyncio.run(model_gateway.chat_structured(
             [{"role": "user", "content": "current identity"}],
@@ -286,7 +286,7 @@ def test_current_identity_rejects_attempt14_response_format_name(
             response_format={
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "screenplay_current_identity_discovery_v8",
+                    "name": "screenplay_current_identity_discovery_v9",
                     "strict": True,
                     "schema": schema,
                 },

@@ -3389,7 +3389,7 @@ async def test_active_recovery_run_reuses_prebaseline_identity_checkpoint(
         "source_text": recovery_source,
     })
     assert IDENTITY_DISCOVERY_CONTRACT_VERSION == (
-        "screenplay-identity-discovery.v12"
+        "screenplay-identity-discovery.v13"
     )
     conn.execute(
         "UPDATE episodes SET screenplay_character_resolutions=? WHERE id='ep_p'",

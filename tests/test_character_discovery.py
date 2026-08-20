@@ -1071,7 +1071,7 @@ def test_generic_discovery_keeps_current_contract_cache_compatible(
     assert result == expected
 
 
-def test_generic_discovery_rejects_attempt14_previous_contract_cache(
+def test_generic_discovery_rejects_attempt15_previous_contract_cache(
     monkeypatch,
 ) -> None:
     conn = sqlite3.connect(":memory:")
@@ -1086,7 +1086,7 @@ def test_generic_discovery_rejects_attempt14_previous_contract_cache(
         characters=[],
         world=World(visual_style_canonical="测试"),
     )
-    previous_contract = "screenplay-identity-discovery.v11"
+    previous_contract = "screenplay-identity-discovery.v12"
     previous_hash = portraits.evidence_repository.content_hash({
         "contract_version": previous_contract,
         "mode": "targeted",
@@ -1109,6 +1109,7 @@ def test_generic_discovery_rejects_attempt14_previous_contract_cache(
             "validated",
             json.dumps({
                 "contract_version": previous_contract,
+                "current_identity_version": "screenplay-current-identity.v9",
                 "input_hash": previous_hash,
                 "mode": "targeted",
                 "candidates": [{
@@ -2060,18 +2061,20 @@ def test_current_identity_rejects_same_scene_person_misbinding(
         nonlocal calls
         calls += 1
         assert kwargs["call_meta"]["reuse_successful_operation"] is False
-        return json.dumps(_identity_wire_for_call(kwargs, [{
+        return json.dumps({
+            "named": [{
                 "source_label": "银袍女子",
                 "canonical_name": "孟浩",
                 "identity_kind": "named",
                 "kind": "onscreen",
-                "evidence": "孟浩走在前面，银袍女子跟在后面",
-            }], messages=_args[0]), ensure_ascii=False)
+                "evidence_id": "CE:legacy-free-combination",
+            }],
+            "functional": [],
+        }, ensure_ascii=False)
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
     with pytest.raises(
-        model_gateway.StructuredSemanticError,
-        match="别名必须留待 typed authority",
+        model_gateway.StructuredFormatError,
     ):
         asyncio.run(portraits.discover_character_candidates(
             "孟浩走在前面，银袍女子跟在后面。",
@@ -3018,25 +3021,388 @@ def test_attempt14_call_63221_old_functional_bible_name_fails_once(
     assert downstream == []
 
 
-@pytest.mark.parametrize("failure", ["old_wire", "unknown_evidence"])
-def test_current_identity_rf9_rejects_unbound_provider_output_once(
+def test_attempt15_call_63222_rf10_mirror_succeeds_once(
     monkeypatch,
-    failure: str,
 ) -> None:
+    """The captured three bad choices all have one explicit RF10 alternative."""
+    source_text = "\n\n".join([
+        "【第一章书生孟浩】第一章书生孟浩。",
+        "王伯的木匠铺子赚钱，早知如此便和王老伯去学木匠手艺。",
+        "孟浩还欠了周员外三两银子。",
+        "王有材旁边探出一个仈jiu岁少年，这少年虎头虎脑。",
+        "王有材身边另一个则是白白净净身子较胖。",
+        "一个面色苍白的女子穿着一身银色长袍，站在那里。",
+        "许师姐好手段，两个男子中的一人恭维那女子。",
+        "许师姐已经到了凝气第七层，另一个绿袍修士提到掌教。",
+        "作者耳根请读者收藏。",
+    ])
+    characters = [
+        {
+            "source_label": "王伯",
+            "identity_kind": "functional",
+            "functional_identity_key": "F1",
+            "kind": "mentioned",
+            "evidence": "王伯的木匠铺子",
+        },
+        {
+            "source_label": "王老伯",
+            "identity_kind": "functional",
+            "functional_identity_key": "F1",
+            "kind": "mentioned",
+            "evidence": "王老伯去学木匠",
+        },
+        {
+            "source_label": "周员外",
+            "identity_kind": "functional",
+            "functional_identity_key": "F2",
+            "kind": "mentioned",
+            "evidence": "周员外三两银子",
+        },
+        {
+            "source_label": "八岁虎头虎脑少年",
+            "identity_kind": "functional",
+            "functional_identity_key": "F3",
+            "kind": "onscreen",
+            "evidence": "这少年虎头虎脑",
+        },
+        {
+            "source_label": "白净较胖少年",
+            "identity_kind": "functional",
+            "functional_identity_key": "F4",
+            "kind": "onscreen",
+            "evidence": "白白净净身子较胖",
+        },
+        {
+            "source_label": "银袍女子",
+            "identity_kind": "functional",
+            "functional_identity_key": "F5",
+            "kind": "onscreen",
+            "evidence": "穿着一身银色长袍",
+        },
+        {
+            "source_label": "许师姐",
+            "identity_kind": "functional",
+            "functional_identity_key": "F5",
+            "kind": "onscreen",
+            "evidence": "许师姐好手段",
+        },
+        {
+            "source_label": "绿袍男子甲",
+            "identity_kind": "functional",
+            "functional_identity_key": "F6",
+            "kind": "onscreen",
+            "evidence": "两个男子中的一人",
+        },
+        {
+            "source_label": "绿袍男子乙",
+            "identity_kind": "functional",
+            "functional_identity_key": "F7",
+            "kind": "onscreen",
+            "evidence": "另一个绿袍修士",
+        },
+        {
+            "source_label": "孟浩",
+            "canonical_name": "孟浩",
+            "identity_kind": "named",
+            "kind": "onscreen",
+            "evidence": "书生孟浩",
+        },
+        {
+            "source_label": "王有材",
+            "canonical_name": "王有材",
+            "identity_kind": "named",
+            "kind": "onscreen",
+            "evidence": "王有材旁边",
+        },
+        {
+            "source_label": "耳根",
+            "canonical_name": "耳根",
+            "identity_kind": "named",
+            "kind": "mentioned",
+            "evidence": "作者耳根",
+        },
+    ]
     calls = 0
 
     async def fake_chat(messages, **kwargs):
         nonlocal calls
         calls += 1
-        if failure == "old_wire":
+        meta = kwargs["call_meta"]
+        assert meta["contract_version"] == (
+            "screenplay-identity-discovery.v13"
+        )
+        assert meta["current_identity_version"] == (
+            "screenplay-current-identity.v10"
+        )
+        assert meta["format_attempt"] == 0
+        assert meta["semantic_attempt"] == 0
+        assert kwargs["response_format"]["json_schema"]["name"] == (
+            "screenplay_current_identity_discovery_v10"
+        )
+        return json.dumps(
+            _identity_wire_for_call(
+                kwargs,
+                characters,
+                messages=messages,
+            ),
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    candidates = asyncio.run(portraits.discover_character_candidates(
+        source_text,
+        Bible(
+            world=World(visual_style_canonical="国风"),
+            characters=[
+                Character(
+                    name=name,
+                    role="已登记身份",
+                    appearance_canonical="黑发长衫，五官清晰，体态稳定，服饰完整",
+                )
+                for name in ("孟浩", "王有材", "许清", "耳根")
+            ],
+        ),
+        1,
+    ))
+
+    assert calls == 1
+    assert len(candidates) == 12
+    by_label = {item["source_label"]: item for item in candidates}
+    assert by_label["王伯"]["identity_group"] == (
+        by_label["王老伯"]["identity_group"]
+    )
+    assert by_label["许师姐"]["identity_kind"] == "functional"
+    assert by_label["耳根"]["authority_id"] == "bible:耳根"
+    assert by_label["孟浩"]["authority_id"] == "bible:孟浩"
+    assert by_label["王有材"]["authority_id"] == "bible:王有材"
+
+
+def test_current_identity_rf10_schema_stays_under_strict_property_limit() -> None:
+    evidence_refs = [f"E{index:03d}" for index in range(1, 63)]
+    local_schema = portraits._current_identity_schema(
+        evidence_refs,
+        known_decision_ids=[],
+    )
+    provider_schema = portraits._identity_strict_provider_schema(local_schema)
+    allowed = {
+        "$defs", "$ref", "additionalProperties", "enum", "items",
+        "properties", "required", "type",
+    }
+
+    def inspect(node: object, *, schema_position: bool = True) -> int:
+        if not isinstance(node, dict):
+            return 0
+        if schema_position:
+            assert set(node) <= allowed
+        property_count = 0
+        for key, child in node.items():
+            if key in {"properties", "$defs"}:
+                assert isinstance(child, dict)
+                if key == "properties":
+                    property_count += len(child)
+                property_count += sum(
+                    inspect(value) for value in child.values()
+                )
+            elif key == "items":
+                property_count += inspect(child)
+        return property_count
+
+    assert inspect(provider_schema) < 100
+    decisions_schema = provider_schema["properties"]["decisions"]
+    assert decisions_schema["required"] == evidence_refs
+    assert all(
+        value == {"$ref": "#/$defs/CurrentEvidenceIdentityDecisions"}
+        for value in decisions_schema["properties"].values()
+    )
+    empty_payload = {
+        "decisions": {
+            evidence_ref: {"k": [], "n": [], "f": []}
+            for evidence_ref in evidence_refs
+        },
+    }
+    assert len(json.dumps(empty_payload, separators=(",", ":"))) < 2000
+    assert provider_schema["$defs"]["CurrentKnownIdentityDecision"][
+        "properties"
+    ]["decision_id"]["enum"] == ["K:NONE"]
+
+
+def test_current_identity_rf10_manual_alias_k_is_backend_projected() -> None:
+    records = portraits._current_identity_evidence_records(
+        "师尊走入殿中。陌生门卫守在门外。"
+    )
+    evidence_by_ref = {
+        f"E{index:03d}": record
+        for index, record in enumerate(records, start=1)
+    }
+    authorities = portraits.identity_authority_registry(
+        Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        [{
+            "source_label": "师尊",
+            "canonical_name": "苍玄",
+            "resolution": "reference_identity",
+            "identity_group": "manual:master",
+            "authority_id": "manual:cangxuan",
+            "decision_provenance": "manual",
+        }],
+    )
+    known = portraits._current_identity_known_decision_catalog(
+        evidence_by_ref,
+        authorities=authorities,
+    )
+    selected = next(iter(known.values()))
+    payload = {
+        "decisions": {
+            evidence_ref: {"k": [], "n": [], "f": []}
+            for evidence_ref in evidence_by_ref
+        },
+    }
+    payload["decisions"][selected["evidence_ref"]]["k"].append({
+        "decision_id": selected["decision_id"],
+        "kind": "onscreen",
+    })
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(
+        payload
+    )
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions=known,
+        all_evidence_by_id={
+            str(record["evidence_id"]): record
+            for record in records
+        },
+        reserved_authority_labels={"师尊", "苍玄"},
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+
+    assert errors == []
+    assert projected[0]["source_label"] == "师尊"
+    assert projected[0]["name"] == "苍玄"
+    assert projected[0]["authority_id"] == "manual:cangxuan"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error_fragment"),
+    [
+        ("missing_ref", "缺少 evidence refs"),
+        ("extra_ref", "未知 evidence refs"),
+        ("cross_k", "K decision 越界"),
+        ("sentinel", "K decision 越界"),
+        ("reserved_n", "必须选择 K decision"),
+        ("cross_f", "evidence_id 与已知逐字 source_label 不匹配"),
+    ],
+)
+def test_current_identity_rf10_custom_exact_gates(
+    mutation: str,
+    error_fragment: str,
+) -> None:
+    records = portraits._current_identity_evidence_records(
+        "耳根站在山门。\n\n门卫守在殿前。"
+    )
+    evidence_by_ref = {
+        f"E{index:03d}": record
+        for index, record in enumerate(records, start=1)
+    }
+    authorities = portraits.identity_authority_registry(
+        Bible(
+            world=World(visual_style_canonical="国风"),
+            characters=[Character(
+                name="耳根",
+                role="已登记身份",
+                appearance_canonical="中年男子，素色长衫，五官清晰",
+            )],
+        ),
+        [],
+    )
+    known = portraits._current_identity_known_decision_catalog(
+        evidence_by_ref,
+        authorities=authorities,
+    )
+    selected = next(iter(known.values()))
+    payload = {
+        "decisions": {
+            evidence_ref: {"k": [], "n": [], "f": []}
+            for evidence_ref in evidence_by_ref
+        },
+    }
+    refs = list(evidence_by_ref)
+    if mutation == "missing_ref":
+        payload["decisions"].pop(refs[-1])
+    elif mutation == "extra_ref":
+        payload["decisions"]["E999"] = {"k": [], "n": [], "f": []}
+    elif mutation == "cross_k":
+        other_ref = next(ref for ref in refs if ref != selected["evidence_ref"])
+        payload["decisions"][other_ref]["k"] = [{
+            "decision_id": selected["decision_id"],
+            "kind": "mentioned",
+        }]
+    elif mutation == "sentinel":
+        payload["decisions"][refs[0]]["k"] = [{
+            "decision_id": "K:NONE",
+            "kind": "mentioned",
+        }]
+    elif mutation == "reserved_n":
+        payload["decisions"][selected["evidence_ref"]]["n"] = [{
+            "identity_label": "耳根",
+            "kind": "onscreen",
+        }]
+    elif mutation == "cross_f":
+        guard_ref = next(
+            ref for ref, record in evidence_by_ref.items()
+            if "门卫" in str(record["text"])
+        )
+        other_ref = next(ref for ref in refs if ref != guard_ref)
+        payload["decisions"][other_ref]["f"] = [{
+            "source_label": "门卫",
+            "functional_identity_key": "F1",
+            "kind": "onscreen",
+        }]
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(
+        payload
+    )
+    _projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions=known,
+        all_evidence_by_id={
+            str(record["evidence_id"]): record
+            for record in records
+        },
+        reserved_authority_labels={"耳根"},
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+
+    assert any(error_fragment in error for error in errors)
+
+
+@pytest.mark.parametrize("failure", ["attempt15_rf9", "unknown_evidence"])
+def test_current_identity_rf10_rejects_unbound_provider_output_once(
+    monkeypatch,
+    failure: str,
+) -> None:
+    calls = 0
+    downstream: list[str] = []
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        if failure == "attempt15_rf9":
             return json.dumps({
-                "named": [],
+                "named": [{
+                    "source_label": "许师姐",
+                    "canonical_name": "许清",
+                    "identity_kind": "named",
+                    "kind": "onscreen",
+                    "evidence_id": "CE:attempt15-wrong-alias",
+                }],
                 "functional": [{
-                    "source_label": "门卫",
+                    "source_label": "耳根",
                     "identity_kind": "functional",
                     "functional_identity_key": "F1",
-                    "kind": "onscreen",
-                    "evidence": "门卫守在山门",
+                    "kind": "mentioned",
+                    "evidence_id": "CE:attempt15-reserved",
                 }],
             }, ensure_ascii=False)
         payload = _identity_wire_for_call(
@@ -3050,13 +3416,27 @@ def test_current_identity_rf9_rejects_unbound_provider_output_once(
             }],
             messages=messages,
         )
-        payload["functional"][0]["evidence_id"] = "CE:forged"
+        source_ref = next(
+            evidence_ref
+            for evidence_ref, decisions in payload["decisions"].items()
+            if decisions["f"]
+        )
+        payload["decisions"]["E999"] = payload["decisions"].pop(source_ref)
         return json.dumps(payload, ensure_ascii=False)
 
+    async def forbidden_future(*_args, **_kwargs):
+        downstream.append("future")
+        raise AssertionError("invalid current wire reached future")
+
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(
+        portraits,
+        "resolve_future_identity_candidates",
+        forbidden_future,
+    )
     expected_error = (
         model_gateway.StructuredFormatError
-        if failure == "old_wire"
+        if failure == "attempt15_rf9"
         else model_gateway.StructuredSemanticError
     )
     with pytest.raises(expected_error):
@@ -3066,6 +3446,7 @@ def test_current_identity_rf9_rejects_unbound_provider_output_once(
             1,
         ))
     assert calls == 1
+    assert downstream == []
 
 
 def test_current_identity_empty_owned_catalog_skips_provider(monkeypatch) -> None:
@@ -3166,12 +3547,17 @@ def test_current_identity_literal_label_rejects_cross_evidence_once(
         nonlocal calls
         calls += 1
         prompt = str(messages[0].get("content") or "")
-        marker = "backend-owned 当前身份证据目录（只能逐字引用 evidence_id）："
+        marker = (
+            "backend-owned 当前身份证据目录。E ref 已绑定完整证据 receipt，"
+            "禁止跨 E 搬运人物："
+        )
         raw_catalog = prompt.split(marker, 1)[1].split("\n", 1)[1]
-        raw_catalog = raw_catalog.split("\n\n本集已有功能身份决议", 1)[0]
+        raw_catalog = raw_catalog.split(
+            "\n\n本批已登记身份 K 决议目录", 1
+        )[0]
         catalog = json.loads(raw_catalog)
-        unrelated_id = next(
-            str(item["evidence_id"])
+        unrelated_ref = next(
+            str(item["evidence_ref"])
             for item in catalog
             if "银袍女子" in str(item["text"])
         )
@@ -3182,7 +3568,7 @@ def test_current_identity_literal_label_rejects_cross_evidence_once(
                 "identity_kind": "functional",
                 "functional_identity_key": "F1",
                 "kind": "onscreen",
-                "evidence_id": unrelated_id,
+                "evidence_ref": unrelated_ref,
             }],
             messages=messages,
         ), ensure_ascii=False)
@@ -3320,19 +3706,21 @@ def test_current_identity_cross_batch_literal_uses_global_catalog() -> None:
         item for item in records if "银袍女子" in str(item["text"])
     )
     response = portraits.CurrentIdentityCandidateResponse.model_validate({
-        "named": [],
-        "functional": [{
-            "source_label": "门卫",
-            "identity_kind": "functional",
-            "functional_identity_key": "F1",
-            "kind": "onscreen",
-            "evidence_id": unrelated_record["evidence_id"],
-        }],
+        "decisions": {"E001": {
+            "k": [],
+            "n": [],
+            "f": [{
+                "source_label": "门卫",
+                "functional_identity_key": "F1",
+                "kind": "onscreen",
+            }],
+        }},
     })
 
     _projected, errors = portraits._project_current_identity_response(
         response,
-        evidence_by_id={unrelated_record["evidence_id"]: unrelated_record},
+        evidence_by_ref={"E001": unrelated_record},
+        known_decisions={},
         all_evidence_by_id={
             guard_record["evidence_id"]: guard_record,
             unrelated_record["evidence_id"]: unrelated_record,
@@ -3588,7 +3976,7 @@ def test_structural_audit_keeps_unregistered_descriptor_functional(
                 "identity_kind": "named",
                 "kind": "onscreen",
                 "evidence": "当前主角",
-            }]), ensure_ascii=False)
+            }], messages=messages), ensure_ascii=False)
         assert "白白净净身较胖" in messages[0]["content"]
         assert "SRC0001" in messages[0]["content"]
         assert "我李富贵" not in messages[0]["content"]
@@ -4258,7 +4646,7 @@ def test_existing_bible_name_that_looks_generic_keeps_its_canonical_identity(mon
         return json.dumps(_identity_wire_for_call(_kwargs, [{
             "source_label": "少年", "canonical_name": "少年",
             "identity_kind": "named", "kind": "onscreen", "evidence": "少年转身迎战",
-        }]), ensure_ascii=False)
+        }], messages=_args[0]), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     candidates = asyncio.run(portraits.discover_character_candidates(
