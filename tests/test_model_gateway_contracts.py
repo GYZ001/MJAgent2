@@ -6,6 +6,7 @@ import inspect
 from pathlib import Path
 import subprocess
 
+import pytest
 from pydantic import BaseModel
 
 from app.evidence import repository
@@ -137,3 +138,34 @@ def test_chat_structured_keeps_required_response_format_across_format_retry(
         "strict-response-format:structured-attempt:"
         + expected_identity
     )
+
+
+def test_semantic_repair_stage_rejects_non_strict_response_format(
+    monkeypatch,
+) -> None:
+    called = False
+
+    async def forbidden_chat(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("invalid repair contract reached provider")
+
+    monkeypatch.setattr(model_gateway, "chat", forbidden_chat)
+    with pytest.raises(
+        ValueError,
+        match="semantic_repair requires strict json_schema",
+    ):
+        asyncio.run(model_gateway.chat_structured(
+            [{"role": "user", "content": "repair"}],
+            model_type=_StrictResponse,
+            validate=None,
+            operation_id="semantic-repair-json-object-forbidden",
+            max_tokens=256,
+            call_meta={
+                "stage_key": "screenplay_scene_shard_semantic_repair",
+            },
+            response_format={"type": "json_object"},
+            require_response_format=True,
+        ))
+
+    assert called is False

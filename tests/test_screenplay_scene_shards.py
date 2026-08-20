@@ -3489,6 +3489,225 @@ def test_scene_shard_semantic_repair_rejects_unflagged_slot_rewrite(
         ))
 
 
+def test_scene_shard_semantic_repair_uses_plan_bound_strict_schema(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    dialogue_slot = plan.unit_slots[0]
+    dialogue_slot.kind = "dialogue"
+    dialogue_slot.source_text = "“不得改写的语义修复对白”"
+    draft = _creative_shard(plan, blueprint, contracts)
+    flagged_key = dialogue_slot.unit_key
+    finding = ScreenplaySceneShardSemanticFinding(
+        unit_key=flagged_key,
+        code="source_semantic_drift",
+        violation_kinds=["source_contradiction"],
+        message="对白必须保持来源原文",
+    )
+    full_schema = build_screenplay_scene_shard_repair_schema(
+        plan=plan,
+        scene_input_contracts=contracts,
+    )
+    full_schema_before = deepcopy(full_schema)
+    repair_calls: list[dict] = []
+
+    async def fake_structured(messages, **kwargs):
+        meta = kwargs["call_meta"]
+        if meta["stage_key"] == "screenplay_scene_shard_semantic_review":
+            return ScreenplaySceneShardSemanticReview(
+                findings=(
+                    [finding]
+                    if meta["substage"] == "initial"
+                    else []
+                ),
+            )
+        repair_calls.append({
+            "messages": messages,
+            **kwargs,
+        })
+        return ScreenplaySceneShardCreativeIR.model_validate({
+            "contract_version": SCREENPLAY_SCENE_CREATIVE_VERSION,
+            "slots": {
+                flagged_key: draft.slots[flagged_key].model_dump(
+                    mode="json"
+                ),
+            },
+        })
+
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_structured)
+    repaired, audit = asyncio.run(_REAL_SEMANTIC_REVIEW(
+        draft=draft,
+        scene_input_contracts=contracts,
+        identity_registry=[],
+        operation_id="attempt9-semantic-repair-strict",
+        shard_id=plan.shard_id,
+        validate_draft=lambda _candidate: [],
+        full_creative_schema=full_schema,
+    ))
+
+    assert repaired == draft
+    assert audit[-1]["consensus"] == []
+    assert full_schema == full_schema_before
+    assert len(repair_calls) == 1
+    repair_call = repair_calls[0]
+    subset_schema = repair_call["output_schema"]
+    assert set(subset_schema["properties"]["slots"]["properties"]) == {
+        flagged_key,
+    }
+    assert subset_schema["properties"]["slots"]["required"] == [
+        flagged_key,
+    ]
+    local_dialogue_schema = subset_schema["properties"]["slots"][
+        "properties"
+    ][flagged_key]
+    assert local_dialogue_schema["allOf"][1]["properties"]["text"][
+        "const"
+    ] == dialogue_slot.source_text
+    assert json.dumps(
+        subset_schema,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ) in repair_call["messages"][1]["content"]
+    assert repair_call["require_response_format"] is True
+    response_format = repair_call["response_format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    provider_schema = response_format["json_schema"]["schema"]
+    provider_slot_ref = provider_schema["properties"]["slots"][
+        "properties"
+    ][flagged_key]["$ref"]
+    provider_dialogue_schema = provider_schema["$defs"][
+        provider_slot_ref.removeprefix("#/$defs/")
+    ]
+    assert provider_dialogue_schema["properties"]["text"]["enum"] == [
+        dialogue_slot.source_text,
+    ]
+    assert repair_call["repair_schema"](repaired) is subset_schema
+    assert SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION in repair_call[
+        "operation_id"
+    ]
+    assert repair_call["call_meta"]["contract_version"] == (
+        SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+    )
+
+
+def test_scene_shard_semantic_repair_ignoring_schema_fails_closed(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    draft = _creative_shard(plan, blueprint, contracts)
+    flagged_key = next(iter(draft.slots))
+    finding = ScreenplaySceneShardSemanticFinding(
+        unit_key=flagged_key,
+        code="source_semantic_drift",
+        violation_kinds=["source_contradiction"],
+        message="来源内容矛盾",
+    )
+    full_schema = build_screenplay_scene_shard_repair_schema(
+        plan=plan,
+        scene_input_contracts=contracts,
+    )
+    repair_calls: list[dict] = []
+
+    async def fake_chat(messages, **kwargs):
+        meta = kwargs["call_meta"]
+        if meta["stage_key"] == "screenplay_scene_shard_semantic_review":
+            return ScreenplaySceneShardSemanticReview(
+                findings=(
+                    [finding]
+                    if meta["substage"] == "initial"
+                    else []
+                ),
+            ).model_dump_json()
+        repair_calls.append({
+            "messages": deepcopy(messages),
+            "kwargs": deepcopy(kwargs),
+        })
+        # Simulate HTTP 200 from a provider that ignored strict `required`:
+        # Pydantic can fill these defaults, but the local wire-contract gate
+        # must not authorize that omission.
+        return json.dumps({
+            "contract_version": SCREENPLAY_SCENE_CREATIVE_VERSION,
+            "slots": {
+                flagged_key: {
+                    "text": draft.slots[flagged_key].text,
+                },
+            },
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="显式提供全部 creative fields",
+    ):
+        asyncio.run(_REAL_SEMANTIC_REVIEW(
+            draft=draft,
+            scene_input_contracts=contracts,
+            identity_registry=[],
+            operation_id="attempt9-semantic-repair-ignore-schema",
+            shard_id=plan.shard_id,
+            validate_draft=lambda _candidate: [],
+            full_creative_schema=full_schema,
+        ))
+
+    assert len(repair_calls) == 2
+    first_call, retry_call = repair_calls
+    assert all(
+        call["kwargs"]["response_format"]["type"] == "json_schema"
+        and call["kwargs"]["response_format"]["json_schema"]["strict"]
+        is True
+        and call["kwargs"]["call_meta"]["response_format_required"] is True
+        for call in repair_calls
+    )
+    assert first_call["kwargs"]["max_tokens"] == retry_call["kwargs"][
+        "max_tokens"
+    ]
+    assert first_call["kwargs"]["response_format"] == retry_call[
+        "kwargs"
+    ]["response_format"]
+    assert first_call["kwargs"]["call_meta"]["semantic_attempt"] == 0
+    assert retry_call["kwargs"]["call_meta"]["semantic_attempt"] == 1
+    assert ":structured-attempt:" not in first_call["kwargs"][
+        "call_meta"
+    ]["operation_id"]
+    base_operation_id = first_call["kwargs"]["call_meta"][
+        "base_operation_id"
+    ]
+    subset_schema = (
+        scene_shards_module._scene_shard_semantic_repair_subset_schema(
+        [flagged_key],
+        full_creative_schema=full_schema,
+        )
+    )
+    expected_retry_identity = evidence_repository.content_hash({
+        "base_operation_id": base_operation_id,
+        "format_attempt": 0,
+        "semantic_attempt": 1,
+        "messages": retry_call["messages"],
+        "max_tokens": retry_call["kwargs"]["max_tokens"],
+        "temperature": retry_call["kwargs"]["temperature"],
+        "structured_schema": subset_schema,
+        "response_format": retry_call["kwargs"]["response_format"],
+        "require_response_format": True,
+    })
+    assert retry_call["kwargs"]["call_meta"]["operation_id"] == (
+        f"{base_operation_id}:structured-attempt:"
+        f"{expected_retry_identity}"
+    )
+
+
 def test_scene_shard_semantic_clean_dual_review_uses_real_structured_signature(
     monkeypatch,
 ) -> None:
@@ -4363,6 +4582,88 @@ def test_scene_shard_structured_lease_fences_real_provider_waiter(
     if failure_kind == "provider":
         assert caught.value is original_error
     assert provider_calls == [plans[0].shard_id]
+
+
+@pytest.mark.parametrize("failure_kind", ["provider", "local_validation"])
+def test_semantic_repair_gate_fences_queued_next_scene_ledger(
+    monkeypatch,
+    failure_kind: str,
+) -> None:
+    monkeypatch.setattr(
+        generation_concurrency,
+        "get_setting",
+        lambda key: (
+            "1" if key == "text_generation_concurrency" else None
+        ),
+    )
+
+    async def scenario() -> tuple[
+        BaseException,
+        BaseException,
+        BaseException,
+        list[str],
+        bool,
+    ]:
+        batch_abort = asyncio.Event()
+        gate = scene_shards_module._SceneStructuredOperationGate(
+            batch_abort
+        )
+        repair_started = asyncio.Event()
+        release_repair = asyncio.Event()
+        ledger: list[str] = []
+        if failure_kind == "provider":
+            original: BaseException = scene_shards_module.hiagent.ProviderError(
+                "semantic repair provider failed",
+                failure_kind="request_outcome_unknown",
+                delivery_state="unknown",
+                requires_explicit_retry=True,
+            )
+        else:
+            original = model_gateway.StructuredSemanticError(
+                "semantic repair local validation failed"
+            )
+
+        async def repair_operation() -> None:
+            ledger.append("repair-provider")
+            repair_started.set()
+            await release_repair.wait()
+            raise original
+
+        async def next_scene_operation() -> None:
+            ledger.append("next-scene-provider")
+
+        repair_task = asyncio.create_task(gate.run(repair_operation))
+        await asyncio.wait_for(repair_started.wait(), timeout=1)
+        next_scene_task = asyncio.create_task(
+            gate.run(next_scene_operation)
+        )
+        provider_gate = generation_concurrency.gate_for(
+            "text_provider_calls"
+        )
+        while not provider_gate.waiters:
+            await asyncio.sleep(0)
+
+        release_repair.set()
+        repair_result, next_scene_result = await asyncio.gather(
+            repair_task,
+            next_scene_task,
+            return_exceptions=True,
+        )
+        return (
+            original,
+            repair_result,
+            next_scene_result,
+            ledger,
+            batch_abort.is_set(),
+        )
+
+    original, repair_result, next_scene_result, ledger, aborted = (
+        asyncio.run(scenario())
+    )
+    assert repair_result is original
+    assert isinstance(next_scene_result, asyncio.CancelledError)
+    assert ledger == ["repair-provider"]
+    assert aborted is True
 
 
 def test_scene_shard_failure_cancels_peer_before_structured_retry(
