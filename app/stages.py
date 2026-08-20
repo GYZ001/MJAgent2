@@ -66,6 +66,7 @@ from app.narrative_blueprint import (
     normalize_blueprint_agency_continuity,
     normalize_blueprint_fact_versions,
     normalize_blueprint_provider_payload,
+    normalize_blueprint_requirement_state_keys,
     normalize_blueprint_raw_json,
     normalize_blueprint_semantic_review_payload,
     normalize_blueprint_state_subject_evidence_projection,
@@ -3940,6 +3941,7 @@ async def _repair_narrative_blueprint(
 
     def normalize_and_validate() -> list[str]:
         normalize_blueprint_state_subject_perception(blueprint)
+        normalize_blueprint_requirement_state_keys(blueprint)
         return validate_narrative_blueprint(blueprint, source_text)
 
     for round_no in range(1, 7):
@@ -7740,6 +7742,7 @@ async def _generate_sharded_narrative_blueprint(
         nodes=merged_nodes,
     )
     normalize_blueprint_fact_versions(blueprint)
+    normalize_blueprint_requirement_state_keys(blueprint)
     errors = validate_narrative_blueprint(blueprint, source_text)
     if errors:
         blueprint = await _repair_narrative_blueprint(
@@ -7830,6 +7833,7 @@ async def _generate_screenplay_narrative_blueprint(
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
             normalize_blueprint_fact_versions(recovered)
+            normalize_blueprint_requirement_state_keys(recovered)
             log_provider_call(
                 "screenplay_blueprint_local_recompile",
                 config.MODEL_TEXT,

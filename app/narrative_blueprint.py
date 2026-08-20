@@ -1665,6 +1665,44 @@ def normalize_blueprint_fact_versions(
     return changes
 
 
+def normalize_blueprint_requirement_state_keys(
+    blueprint: NarrativeBlueprint,
+) -> int:
+    """Converge requirement.state_key onto the referenced fact's authoritative state_key.
+
+    ``requirement.state_key`` is a free-text label authored independently of the
+    ``BlueprintStateChange`` it references, whereas the authoritative state_key is
+    the one carried by that referenced fact.  When the two texts disagree the
+    UNESTABLISHED / KEY_MISMATCH / SUPERSEDED gates can never all close because
+    there is no deterministic way to reconcile two free-text labels.  This pass
+    removes the second authority: for every requirement that resolves to a known
+    fact it rewrites ``requirement.state_key`` to the fact's ``state_key`` so all
+    three gates key off the single authoritative source.
+
+    Must run after ``normalize_blueprint_fact_versions`` so that
+    ``required_fact_key`` already points at the final deterministic SSA key.
+    """
+    facts: dict[str, BlueprintStateChange] = {}
+    for node in blueprint.nodes:
+        for change in node.state_changes:
+            facts[change.fact_key] = change
+    changes = 0
+    for node in blueprint.nodes:
+        for requirement in node.state_requirements:
+            if requirement.assumed_prior:
+                continue
+            fact = facts.get(requirement.required_fact_key)
+            if fact is None:
+                # A missing fact is a genuine "dependency not established"
+                # error.  Leave the label untouched so
+                # BLUEPRINT_STATE_UNESTABLISHED still surfaces it.
+                continue
+            if fact.state_key != requirement.state_key:
+                requirement.state_key = fact.state_key
+                changes += 1
+    return changes
+
+
 def normalize_blueprint_agency_continuity(
     blueprint: NarrativeBlueprint,
 ) -> int:
