@@ -968,7 +968,7 @@ def test_generic_discovery_keeps_current_contract_cache_compatible(
     assert result == expected
 
 
-def test_generic_discovery_rejects_attempt12_previous_contract_cache(
+def test_generic_discovery_rejects_attempt14_previous_contract_cache(
     monkeypatch,
 ) -> None:
     conn = sqlite3.connect(":memory:")
@@ -983,7 +983,7 @@ def test_generic_discovery_rejects_attempt12_previous_contract_cache(
         characters=[],
         world=World(visual_style_canonical="测试"),
     )
-    previous_contract = "screenplay-identity-discovery.v9"
+    previous_contract = "screenplay-identity-discovery.v11"
     previous_hash = portraits.evidence_repository.content_hash({
         "contract_version": previous_contract,
         "mode": "targeted",
@@ -2612,9 +2612,272 @@ def test_identity_discovery_preserves_nonliteral_functional_label_as_synthetic(
     assert candidates[0]["source_evidence_receipt"]["origin"] == (
         "current_source"
     )
-    assert candidates[0]["source_quote"] in (
+    assert candidates[0]["source_quote"] == (
         "王有材身边另一个则是白白净净身较胖，正缩在裂缝里。"
     )
+
+
+def test_attempt14_call_63221_current_rf9_preserves_all_distinct_identities(
+    monkeypatch,
+) -> None:
+    """Mirror the production RF8 response through the RF9 owned-evidence wire."""
+    source_text = "\n\n".join([
+        "王伯与王老伯的木匠铺子赚钱，孟浩还欠周员外三两银子。",
+        "孟浩看到裂缝里的王有材，旁边有一个虎头虎脑的少年。",
+        "王有材说他们被一个会飞的女人抓来。",
+        "一个面色苍白，看不出年纪的女子穿着银色长袍，后来被称为许师姐。",
+        "王有材身边另一个则是白白净净身子较胖。前方有两个穿着绿色长袍的男子，"
+        "两个男子中的一人恭维许师姐，另一个绿袍修士提到掌教。作者耳根请读者收藏。",
+    ])
+    captured = [
+        ("王伯", "F1", "mentioned", "王伯"),
+        ("王老伯", "F1", "mentioned", "王老伯"),
+        ("周员外", "F2", "mentioned", "周员外"),
+        ("虎头虎脑的少年", "F3", "onscreen", "虎头虎脑的少年"),
+        ("会飞的女人", "F4", "onscreen", "会飞的女人"),
+        ("面色苍白的女子", "F4", "onscreen", "一个面色苍白"),
+        ("许师姐", "F4", "onscreen", "许师姐"),
+        ("白白净净身子较胖的少年", "F5", "onscreen", "白白净净身子较胖"),
+        ("绿袍修士一", "F6", "onscreen", "两个男子中的一人"),
+        ("绿袍修士二", "F7", "onscreen", "另一个绿袍修士"),
+        ("掌教", "F8", "mentioned", "掌教"),
+        ("耳根", "F9", "mentioned", "耳根"),
+    ]
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        meta = kwargs["call_meta"]
+        assert meta["contract_version"] == (
+            portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION
+        )
+        assert meta["current_identity_version"] == (
+            portraits.CURRENT_IDENTITY_DECISION_VERSION
+        )
+        assert meta["source_batches"] == 1
+        assert kwargs["response_format"]["json_schema"]["name"] == (
+            "screenplay_current_identity_discovery_v9"
+        )
+        provider_schema = kwargs["response_format"]["json_schema"]["schema"]
+        named_ids = provider_schema["$defs"][
+            "CurrentNamedIdentityCandidate"
+        ]["properties"]["evidence_id"]["enum"]
+        functional_ids = provider_schema["$defs"][
+            "CurrentFunctionalIdentityCandidate"
+        ]["properties"]["evidence_id"]["enum"]
+        assert named_ids == functional_ids
+        assert len(named_ids) == 5
+        characters = [
+            {
+                "source_label": label,
+                "identity_kind": "functional",
+                "functional_identity_key": group,
+                "kind": kind,
+                "evidence": anchor,
+            }
+            for label, group, kind, anchor in captured
+        ]
+        characters.extend([
+            {
+                "source_label": "孟浩",
+                "canonical_name": "孟浩",
+                "identity_kind": "named",
+                "kind": "onscreen",
+                "evidence": "孟浩",
+            },
+            {
+                "source_label": "王有材",
+                "canonical_name": "王有材",
+                "identity_kind": "named",
+                "kind": "onscreen",
+                "evidence": "王有材",
+            },
+        ])
+        return json.dumps(
+            _identity_wire_for_call(
+                kwargs,
+                characters,
+                messages=messages,
+            ),
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    candidates = asyncio.run(portraits.discover_character_candidates(
+        source_text,
+        Bible(
+            world=World(visual_style_canonical="国风"),
+            characters=[],
+        ),
+        1,
+    ))
+
+    assert calls == 1
+    assert len(candidates) == 14
+    assert {item["source_label"] for item in candidates} == {
+        *(label for label, _group, _kind, _anchor in captured),
+        "孟浩",
+        "王有材",
+    }
+    synthetic = {
+        item["source_label"]: item for item in candidates
+        if item.get("source_label_provenance")
+        == portraits.CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+    }
+    assert set(synthetic) == {
+        "面色苍白的女子",
+        "白白净净身子较胖的少年",
+        "绿袍修士一",
+        "绿袍修士二",
+    }
+    assert synthetic["绿袍修士一"]["identity_group"] != (
+        synthetic["绿袍修士二"]["identity_group"]
+    )
+    assert "两个男子中的一人" in (
+        synthetic["绿袍修士一"]["source_quote"]
+    )
+    assert "另一个绿袍修士" in (
+        synthetic["绿袍修士二"]["source_quote"]
+    )
+
+
+@pytest.mark.parametrize("failure", ["old_wire", "unknown_evidence"])
+def test_current_identity_rf9_rejects_unbound_provider_output_once(
+    monkeypatch,
+    failure: str,
+) -> None:
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        if failure == "old_wire":
+            return json.dumps({
+                "named": [],
+                "functional": [{
+                    "source_label": "门卫",
+                    "identity_kind": "functional",
+                    "functional_identity_key": "F1",
+                    "kind": "onscreen",
+                    "evidence": "门卫守在山门",
+                }],
+            }, ensure_ascii=False)
+        payload = _identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "门卫",
+                "identity_kind": "functional",
+                "functional_identity_key": "F1",
+                "kind": "onscreen",
+                "evidence": "门卫",
+            }],
+            messages=messages,
+        )
+        payload["functional"][0]["evidence_id"] = "CE:forged"
+        return json.dumps(payload, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    expected_error = (
+        model_gateway.StructuredFormatError
+        if failure == "old_wire"
+        else model_gateway.StructuredSemanticError
+    )
+    with pytest.raises(expected_error):
+        asyncio.run(portraits.discover_character_candidates(
+            "门卫守在山门。",
+            Bible(world=World(visual_style_canonical="国风"), characters=[]),
+            1,
+        ))
+    assert calls == 1
+
+
+def test_current_identity_empty_owned_catalog_skips_provider(monkeypatch) -> None:
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("empty current evidence catalog must skip provider")
+
+    monkeypatch.setattr(model_gateway, "chat", forbidden)
+    assert asyncio.run(portraits.discover_character_candidates(
+        "",
+        Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        1,
+    )) == []
+
+
+def test_current_identity_same_label_multiple_groups_fails_closed_once(
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        payload = _identity_wire_for_call(
+            kwargs,
+            [
+                {
+                    "source_label": "绿袍修士",
+                    "identity_kind": "functional",
+                    "functional_identity_key": "F1",
+                    "kind": "onscreen",
+                    "evidence": "绿袍修士",
+                },
+                {
+                    "source_label": "绿袍修士",
+                    "identity_kind": "functional",
+                    "functional_identity_key": "F2",
+                    "kind": "onscreen",
+                    "evidence": "绿袍修士",
+                },
+            ],
+            messages=messages,
+        )
+        return json.dumps(payload, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="source_label 重复",
+    ):
+        asyncio.run(portraits.discover_character_candidates(
+            "两名绿袍修士同时开口。",
+            Bible(world=World(visual_style_canonical="国风"), characters=[]),
+            1,
+        ))
+    assert calls == 1
+
+
+def test_current_identity_named_requires_literal_selected_evidence(
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "面色苍白的女子",
+                "canonical_name": "面色苍白的女子",
+                "identity_kind": "named",
+                "kind": "onscreen",
+                "evidence": "一个面色苍白",
+            }],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="缺少逐字 owned evidence",
+    ):
+        asyncio.run(portraits.discover_character_candidates(
+            "一个面色苍白，看不出年纪的女子走来。",
+            Bible(world=World(visual_style_canonical="国风"), characters=[]),
+            1,
+        ))
+    assert calls == 1
 
 
 def test_future_context_prioritizes_late_known_name_cooccurrence() -> None:
@@ -3289,7 +3552,7 @@ def test_baseline_audit_uses_model_to_classify_arbitrary_descriptive_identity(mo
         )],
     )
 
-    async def fake_chat(*_args, **_kwargs):
+    async def fake_chat(messages, **_kwargs):
         return json.dumps(_identity_wire_for_call(_kwargs, [{
             "source_label": "紫甲女子",
             "canonical_name": "",
@@ -3297,7 +3560,7 @@ def test_baseline_audit_uses_model_to_classify_arbitrary_descriptive_identity(mo
             "kind": "onscreen",
             "evidence": "紫甲女子拦路",
             "future_evidence": "",
-        }]), ensure_ascii=False)
+        }], messages=messages), ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     draft = EpisodeScreenplay(

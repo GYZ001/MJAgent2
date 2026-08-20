@@ -1916,9 +1916,13 @@ async def _recorded_screenplay_task(
 
     try:
         recorder.start()
+        discovery_conn = get_conn()
+        discovery_episode = discovery_conn.execute(
+            "SELECT * FROM episodes WHERE id=?", (episode_id,)
+        ).fetchone()
         discovery_source = _episode_source_text(
-            get_conn(),
-            get_conn().execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone(),
+            discovery_conn,
+            discovery_episode,
         )
         production_state = _screenplay_production_state(episode_id)
         if (
@@ -1940,7 +1944,7 @@ async def _recorded_screenplay_task(
                 )
                 if screenplay_identity_resolution_is_current_for_source(
                     item,
-                    episode_no=int(production_state.get("episode_no") or 0),
+                    episode_no=int(discovery_episode["episode_no"]),
                     source_text=discovery_source,
                 )
             ]

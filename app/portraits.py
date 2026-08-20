@@ -3352,6 +3352,10 @@ async def discover_character_candidates(
             continue
         if (
             cached.get("contract_version") == IDENTITY_DISCOVERY_CONTRACT_VERSION
+            and cached.get("current_identity_version")
+            == CURRENT_IDENTITY_DECISION_VERSION
+            and cached.get("current_evidence_catalog_hash")
+            == discovery_input["current_evidence_catalog_hash"]
             and (
                 not structural_coverage_applied
                 or (

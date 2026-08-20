@@ -3370,6 +3370,68 @@ async def test_active_recovery_run_reuses_prebaseline_identity_checkpoint(
         trigger_type="resume",
     )
     conn = db.get_conn()
+    from app.portraits import (
+        AUTOMATIC_IDENTITY_DECISION_PROVENANCE,
+        FUTURE_IDENTITY_DECISION_VERSION,
+        IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+        screenplay_identity_scope_fingerprint,
+    )
+
+    episode_row = conn.execute(
+        "SELECT * FROM episodes WHERE id='ep_p'"
+    ).fetchone()
+    recovery_source = screenplay_ops._episode_source_text(conn, episode_row)
+    current_scope = screenplay_identity_scope_fingerprint(1, recovery_source)
+    stale_v11_scope = evidence_repository.content_hash({
+        "contract_version": "screenplay-identity-discovery.v11",
+        "episode_no": 1,
+        "source_text": recovery_source,
+    })
+    assert IDENTITY_DISCOVERY_CONTRACT_VERSION == (
+        "screenplay-identity-discovery.v12"
+    )
+    conn.execute(
+        "UPDATE episodes SET screenplay_character_resolutions=? WHERE id='ep_p'",
+        (json.dumps([
+            {
+                "source_label": "current-auto",
+                "canonical_name": "current-auto",
+                "resolution": "functional_identity",
+                "identity_group": "current-1:F1",
+                "identity_scope_fingerprint": current_scope,
+                "decision_provenance": AUTOMATIC_IDENTITY_DECISION_PROVENANCE,
+                "decision_contract_version": FUTURE_IDENTITY_DECISION_VERSION,
+                "structural_identity_policy_version": (
+                    STRUCTURAL_IDENTITY_COVERAGE_VERSION
+                ),
+            },
+            {
+                "source_label": "stale-v11-auto",
+                "canonical_name": "stale-v11-auto",
+                "resolution": "functional_identity",
+                "identity_group": "current-1:F2",
+                "identity_scope_fingerprint": stale_v11_scope,
+                "decision_provenance": AUTOMATIC_IDENTITY_DECISION_PROVENANCE,
+                "decision_contract_version": FUTURE_IDENTITY_DECISION_VERSION,
+                "structural_identity_policy_version": (
+                    STRUCTURAL_IDENTITY_COVERAGE_VERSION
+                ),
+            },
+            {
+                "source_label": "manual-kept",
+                "canonical_name": "manual-kept",
+                "resolution": "functional_identity",
+                "decision_provenance": "manual",
+            },
+            {
+                "source_label": "bible-kept",
+                "canonical_name": "bible-kept",
+                "resolution": "future_identity",
+                "decision_provenance": "bible",
+            },
+        ], ensure_ascii=False),),
+    )
     conn.execute(
         "UPDATE episodes SET screenplay_status='queued',active_screenplay_run_id=? "
         "WHERE id='ep_p'",
@@ -3382,6 +3444,10 @@ async def test_active_recovery_run_reuses_prebaseline_identity_checkpoint(
 
     async def fake_task(_episode_id, *, preflight_result=None):
         assert preflight_result["skipped"] == "prebaseline_identity_checkpoint_reused"
+        assert {
+            item["source_label"]
+            for item in preflight_result["resolutions"]
+        } == {"current-auto", "manual-kept", "bible-kept"}
         script = _minimal_script()
         conn.execute(
             "UPDATE episodes SET screenplay_status='ready',screenplay_json=? "
