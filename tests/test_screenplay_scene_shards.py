@@ -3550,7 +3550,13 @@ def test_scene_shard_batch_failure_cancels_inflight_sibling(
     provider_calls: list[str] = []
     review_calls: list[str] = []
     progress_rows: list[list[dict]] = []
-    original_error = RuntimeError("injected shard provider failure")
+    original_error = scene_shards_module.hiagent.ProviderError(
+        "injected shard provider failure",
+        retryable=True,
+        failure_kind="request_outcome_unknown",
+        delivery_state="unknown",
+        requires_explicit_retry=True,
+    )
 
     def fixed_settings(
         key: str,
@@ -3591,7 +3597,7 @@ def test_scene_shard_batch_failure_cancels_inflight_sibling(
         forbidden_review,
     )
 
-    with pytest.raises(RuntimeError) as caught:
+    with pytest.raises(scene_shards_module.hiagent.ProviderError) as caught:
         asyncio.run(generate_screenplay_scene_shards(
             episode={"id": "ep-shard-fail-fast", "episode_no": 1},
             source_text=SOURCE,
@@ -3611,7 +3617,7 @@ def test_scene_shard_batch_failure_cancels_inflight_sibling(
         row["shard_id"]: row for row in progress_rows[-1]
     }
     assert latest_rows[plans[0].shard_id]["status"] == "failed"
-    assert latest_rows[plans[0].shard_id]["error_type"] == "RuntimeError"
+    assert latest_rows[plans[0].shard_id]["error_type"] == "ProviderError"
     assert latest_rows[plans[1].shard_id]["status"] == "running"
     assert "error_type" not in latest_rows[plans[1].shard_id]
 
@@ -7186,7 +7192,7 @@ def test_owner_change_after_provider_response_prevents_artifact_persist(monkeypa
         fake_structured,
     )
     scene_input_contracts = _contracts([plan], blueprint)
-    with pytest.raises(ScreenplaySceneShardError, match="owner changed"):
+    with pytest.raises(ScreenplaySceneShardOwnershipLost, match="owner changed"):
         asyncio.run(generate_screenplay_scene_shards(
             episode={"id": episode_id, "episode_no": 1},
             source_text=SOURCE,
@@ -7413,7 +7419,10 @@ def test_generation_rejects_identity_fields_as_explicit_format_error(
     monkeypatch.setattr(model_gateway, "chat", local_model_response)
     scene_input_contracts = _contracts(plans, blueprint, registry)
 
-    with pytest.raises(ScreenplaySceneShardError, match="extra_forbidden"):
+    with pytest.raises(
+        model_gateway.StructuredFormatError,
+        match="extra_forbidden",
+    ):
         asyncio.run(generate_screenplay_scene_shards(
             episode={"id": "ep-cross-scene-participant", "episode_no": 1},
             source_text=SOURCE,
