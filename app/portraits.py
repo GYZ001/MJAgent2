@@ -51,7 +51,11 @@ from app.refs import (
     production_appearance_anchor,
 )
 from app.schemas import Bible, Character, EpisodeScreenplay, extract_json
-from app.source_excerpt import align_source_excerpt, index_source_segments
+from app.source_excerpt import (
+    SourceSegment,
+    align_source_excerpt,
+    index_source_segments,
+)
 
 FRAGMENT_WINDOW = 220   # 命中角色名前后各取多少字
 FRAGMENT_BUDGET = 4000  # 单角色单段送审片段总字数预算
@@ -1634,7 +1638,41 @@ async def resolve_future_identity_candidates(
     # Evidence IDs always resolve to an exact raw-future span.  Current-tail
     # context is shown separately for semantic handoff, but can never be cited
     # as the owned evidence which authorizes a decision.
-    future_segments = index_source_segments(future_text, max_chars=120)
+    indexed_future_segments = index_source_segments(
+        future_text,
+        max_chars=120,
+    )
+    future_segments: list[tuple[int, SourceSegment]] = []
+    for base_index, segment in enumerate(indexed_future_segments):
+        raw_segment = str(segment.text or "")
+        if len(raw_segment) <= 120:
+            future_segments.append((base_index, segment))
+            continue
+        # Source segmentation intentionally keeps a long quotation balanced.
+        # The identity wire does not need balanced quotes: split it into
+        # overlapping exact raw windows so one pathological quotation cannot
+        # defeat the prompt budget, while a <=16-char reveal cannot straddle
+        # every window boundary.
+        raw_start = future_text.find(
+            raw_segment,
+            max(0, segment.start_offset),
+            min(len(future_text), segment.end_offset + len(raw_segment)),
+        )
+        if raw_start < 0:
+            raw_start = max(0, segment.start_offset)
+        for window_index, offset in enumerate(range(0, len(raw_segment), 88)):
+            text = raw_segment[offset:offset + 120]
+            if not text:
+                continue
+            future_segments.append((
+                base_index,
+                SourceSegment(
+                    segment_id=f"{segment.segment_id}:E{window_index + 1}",
+                    text=text,
+                    start_offset=raw_start + offset,
+                    end_offset=raw_start + offset + len(text),
+                ),
+            ))
     evidence_by_id: dict[str, dict] = {}
     evidence_ids_by_group: dict[str, list[str]] = {}
     per_group_budget = max(
@@ -1647,22 +1685,24 @@ async def resolve_future_identity_candidates(
     for group in group_specs:
         group_key = str(group["group_key"])
         group_labels = [str(value) for value in group["labels"]]
-        matching_indexes = [
-            index for index, segment in enumerate(future_segments)
+        matching_base_indexes = {
+            base_index
+            for base_index, segment in future_segments
             if any(label in segment.text for label in group_labels)
-        ]
-        context_indexes = set(matching_indexes)
-        for index in matching_indexes:
-            if index > 0:
-                context_indexes.add(index - 1)
-            if index + 1 < len(future_segments):
-                context_indexes.add(index + 1)
+        }
+        context_base_indexes = set(matching_base_indexes)
+        for base_index in matching_base_indexes:
+            if base_index > 0:
+                context_base_indexes.add(base_index - 1)
+            if base_index + 1 < len(indexed_future_segments):
+                context_base_indexes.add(base_index + 1)
         matching = [
-            future_segments[index] for index in sorted(context_indexes)
+            segment for base_index, segment in future_segments
+            if base_index in context_base_indexes
         ]
         if not matching:
             matching = [
-                segment for segment in future_segments
+                segment for _base_index, segment in future_segments
                 if segment.start_offset < 900
             ]
         ranked = sorted(

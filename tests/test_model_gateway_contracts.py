@@ -203,6 +203,53 @@ def test_structural_identity_coverage_rejects_non_strict_response_format(
     assert called is False
 
 
+def test_future_identity_rejects_attempt12_response_format_name(
+    monkeypatch,
+) -> None:
+    called = False
+    schema = _StrictResponse.model_json_schema()
+
+    async def forbidden_chat(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("stale future contract reached provider")
+
+    monkeypatch.setattr(model_gateway, "chat", forbidden_chat)
+    with pytest.raises(
+        ValueError,
+        match="name=screenplay_future_identity_resolution_v9",
+    ):
+        asyncio.run(model_gateway.chat_structured(
+            [{"role": "user", "content": "future identity"}],
+            model_type=_StrictResponse,
+            validate=None,
+            operation_id="attempt12-future-contract-forbidden",
+            max_tokens=256,
+            format_retry_limit=0,
+            semantic_retry_limit=0,
+            call_meta={
+                "stage_key": "screenplay_character_discovery",
+                "substage": "future_identity",
+                "reuse_successful_operation": False,
+                "disable_provider_retries": True,
+                "disable_provider_candidate_fallback": True,
+                "disable_reasoning_fallback": True,
+            },
+            output_schema=schema,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "screenplay_future_identity_resolution_v8",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+            require_response_format=True,
+        ))
+
+    assert called is False
+
+
 def test_non_contract_character_discovery_keeps_default_structured_behavior(
     monkeypatch,
 ) -> None:
