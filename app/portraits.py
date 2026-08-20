@@ -3275,10 +3275,19 @@ def _structural_identity_catalog_input_hash(
     resolution_rows.sort(
         key=lambda item: tuple(item[field] for field in resolution_fields)
     )
+    output_named_authorities = {
+        str(item.get("name") or "").strip()
+        for item in (output_candidates or [])
+        if isinstance(item, dict)
+        and str(item.get("identity_kind") or "").strip() == "named"
+        and str(item.get("name") or "").strip()
+    }
     bible_authorities = sorted({
         str(character.name or "").strip()
         for character in bible.characters
         if str(character.name or "").strip()
+        and str(character.name or "").strip()
+        not in output_named_authorities
     })
     return evidence_repository.content_hash({
         "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,

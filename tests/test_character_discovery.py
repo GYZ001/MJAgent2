@@ -499,6 +499,86 @@ def test_structural_identity_coverage_strict_success_is_one_call(
     assert call["call_meta"]["semantic_attempt"] == 0
 
 
+def test_structural_coverage_bound_group_uses_selected_owned_src(
+    monkeypatch,
+) -> None:
+    source_text = "第一段只有风声。\n\n守卫在第二段高声喝止。"
+    scope = portraits.screenplay_identity_scope_fingerprint(1, source_text)
+    existing_resolution = {
+        "source_label": "守卫",
+        "canonical_name": "丁力",
+        "resolution": "future_identity",
+        "identity_group": "current-1:guard",
+        "authority_id": "bible:丁力",
+        "identity_scope_fingerprint": scope,
+        "decision_provenance": (
+            portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
+        ),
+        "decision_contract_version": portraits.FUTURE_IDENTITY_DECISION_VERSION,
+        "structural_identity_policy_version": (
+            portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+        ),
+    }
+    calls = 0
+
+    async def fake_structured(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        wire = _coverage_identity_wire(
+            [{
+                "source_label": "守卫",
+                "canonical_name": "丁力",
+                "identity_kind": "named",
+                "identity_group_ref": "current-1:guard",
+            }],
+            provider_schema=kwargs["response_format"]["json_schema"][
+                "schema"
+            ],
+            messages=messages,
+        )
+        return portraits.StructuralIdentityCoverageResponse.model_validate(
+            wire
+        )
+
+    monkeypatch.setattr(
+        portraits.model_gateway,
+        "chat_structured",
+        fake_structured,
+    )
+    result = asyncio.run(
+        portraits.audit_identity_coverage_from_structural_evidence(
+            [],
+            structural_evidence=[{
+                "identity_key": "守卫",
+                "source_label": "守卫",
+                "source_segment_ids": ["SRC0001", "SRC0002"],
+                "usage": "visible",
+                "node_key": "node-1",
+            }],
+            source_text=source_text,
+            bible=Bible(
+                characters=[Character(
+                    name="丁力",
+                    role="山门守卫",
+                    appearance_canonical="黑发男子，深灰皮甲，腰佩长刀",
+                )],
+                world=World(visual_style_canonical="国风"),
+            ),
+            episode_no=1,
+            existing_resolutions=[existing_resolution],
+        )
+    )
+
+    assert calls == 1
+    assert len(result) == 1
+    candidate = result[0]
+    assert candidate["name"] == "丁力"
+    assert candidate["source_segment_ids"] == ["SRC0001", "SRC0002"]
+    assert candidate["source_segment_id"] == "SRC0002"
+    assert candidate["source_quote"] == "守卫在第二段高声喝止。"
+    assert candidate["evidence"] == candidate["source_quote"]
+
+
 @pytest.mark.parametrize(
     ("provider_result", "error_type"),
     [
@@ -2145,6 +2225,77 @@ def test_attempt12_future_identity_group_decision_is_exact_and_one_call(
         ("白白净净身子较胖", "白白净净身子较胖", "functional"),
     }
     assert all(item["identity_kind"] == "functional" for item in resolved)
+
+
+def test_future_identity_cooccurrence_does_not_mint_known_authority(
+    monkeypatch,
+) -> None:
+    """A named person mentioning an alias is not proof they are one person."""
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        decision_properties = kwargs["response_format"]["json_schema"][
+            "schema"
+        ]["properties"]["decisions"]["properties"]
+        options = next(iter(decision_properties.values()))["enum"]
+        assert not any(
+            option.startswith("K:") and "bible:赵武刚" in option
+            for option in options
+        )
+        return json.dumps(
+            _identity_wire_for_call(
+                kwargs,
+                [{
+                    "source_label": "许师姐",
+                    "identity_kind": "functional",
+                }],
+                messages=messages,
+            ),
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    candidates = [{
+        "name": "赵武刚",
+        "source_label": "赵武刚",
+        "identity_kind": "named",
+        "identity_group": "current-1:named:zhao",
+        "authority_id": "bible:赵武刚",
+        "decision_provenance": (
+            portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
+        ),
+        "kind": "onscreen",
+    }, {
+        "name": "许师姐",
+        "source_label": "许师姐",
+        "identity_kind": "functional",
+        "identity_group": "current-1:F5",
+        "kind": "mentioned",
+    }]
+    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
+        candidates,
+        source_text="许师姐收起风幡。",
+        future_text="赵武刚谈到许师姐，嘱咐众人留意她的动向。",
+        bible=Bible(
+            characters=[Character(
+                name="赵武刚",
+                role="外宗弟子",
+                appearance_canonical="黑发男子，灰色长袍，背负长剑",
+            )],
+            world=World(visual_style_canonical="国风"),
+        ),
+        episode_no=1,
+    ))
+
+    assert calls == 1
+    alias = next(
+        item for item in resolved if item["source_label"] == "许师姐"
+    )
+    assert alias["identity_kind"] == "functional"
+    assert alias["name"] == "许师姐"
+    assert not alias.get("authority_id")
 
 
 def test_attempt12_invalid_future_decision_is_one_call_and_zero_downstream(

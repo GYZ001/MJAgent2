@@ -524,6 +524,9 @@ def _structural_cache_payload(
     policy_version: str,
     candidates: list[dict],
     materialized_resolutions: list[dict] | None = None,
+    bible: Bible | None = None,
+    base_candidates: list[dict] | None = None,
+    catalog_input_resolutions: list[dict] | None = None,
 ) -> dict:
     source_hash = portraits.evidence_repository.content_hash(source_text)
     structural_hash = portraits.evidence_repository.content_hash({
@@ -561,6 +564,41 @@ def _structural_cache_payload(
                     candidates
                 )
             ),
+        })
+        catalog_hashes = {
+            field: portraits.evidence_repository.content_hash(
+                {"fixture": field}
+            )
+            for field in (
+                "authority_catalog_hash",
+                "group_catalog_hash",
+                "decision_catalog_hash",
+                "evidence_catalog_hash",
+            )
+        }
+        payload.update({
+            "coverage_catalog_input_hash": (
+                portraits._structural_identity_catalog_input_hash(
+                    bible=bible or _empty_bible(),
+                    base_candidates=base_candidates or [],
+                    structural_evidence_hash=structural_hash,
+                    existing_resolutions=(
+                        catalog_input_resolutions
+                        if catalog_input_resolutions is not None
+                        else materialized_resolutions
+                    ),
+                    output_candidates=candidates,
+                )
+            ),
+            "coverage_catalog_receipt": {
+                "version": (
+                    portraits._STRUCTURAL_IDENTITY_CATALOG_RECEIPT_VERSION
+                ),
+                **catalog_hashes,
+                "hash": portraits.evidence_repository.content_hash(
+                    catalog_hashes
+                ),
+            },
         })
     return payload
 
@@ -635,6 +673,194 @@ def test_structural_coverage_reuses_only_current_contract_cache(
 
     assert result["reused"] is True
     assert result["candidates"] == cached_candidates
+
+
+def test_structural_coverage_cache_reaudits_when_authority_catalog_changes(
+    monkeypatch,
+) -> None:
+    conn = _coverage_cache_conn()
+    source_text = "守卫站在山门前。"
+    evidence = [{
+        "identity_key": "守卫",
+        "source_segment_ids": ["SRC0001"],
+        "usage": "visible",
+        "node_key": "S001-N001",
+    }]
+    scope = portraits.screenplay_identity_scope_fingerprint(1, source_text)
+    cached_candidate = {
+        "name": "守卫",
+        "source_label": "守卫",
+        "identity_kind": "functional",
+        "identity_group": "structural:guard",
+        "kind": "onscreen",
+    }
+    cached_resolution = {
+        "source_label": "守卫",
+        "canonical_name": "守卫",
+        "resolution": "functional_identity",
+        "identity_group": "structural:guard",
+        "identity_scope_fingerprint": scope,
+        "decision_provenance": (
+            portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
+        ),
+        "decision_contract_version": portraits.FUTURE_IDENTITY_DECISION_VERSION,
+        "structural_identity_policy_version": (
+            portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+        ),
+    }
+    payload = _structural_cache_payload(
+        source_text,
+        evidence,
+        contract_version=portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        policy_version=portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+        candidates=[cached_candidate],
+        materialized_resolutions=[cached_resolution],
+        bible=_empty_bible(),
+    )
+    conn.execute(
+        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
+        (
+            "art-before-authority", "episode", "ep_711b29204aa9",
+            "screenplay_identity_discovery", "validated",
+            json.dumps(payload, ensure_ascii=False), 2.0,
+        ),
+    )
+    conn.execute(
+        "UPDATE episodes SET screenplay_character_resolutions=? "
+        "WHERE id='ep_711b29204aa9'",
+        (json.dumps([cached_resolution], ensure_ascii=False),),
+    )
+    conn.commit()
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    audit_calls = 0
+
+    async def fresh_audit(candidates, **kwargs):
+        nonlocal audit_calls
+        audit_calls += 1
+        assert candidates == []
+        receipt = kwargs["catalog_receipt"]
+        hashes = {
+            field: portraits.evidence_repository.content_hash(
+                {"fresh": field}
+            )
+            for field in (
+                "authority_catalog_hash",
+                "group_catalog_hash",
+                "decision_catalog_hash",
+                "evidence_catalog_hash",
+            )
+        }
+        receipt.update({
+            "version": (
+                portraits._STRUCTURAL_IDENTITY_CATALOG_RECEIPT_VERSION
+            ),
+            **hashes,
+            "hash": portraits.evidence_repository.content_hash(hashes),
+        })
+        return [cached_candidate]
+
+    async def no_materialization(*_args, **_kwargs):
+        return {
+            "checked": 0,
+            "candidates": [cached_candidate],
+            "added": [],
+            "resolutions": [cached_resolution],
+            "errors": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(
+        portraits,
+        "audit_identity_coverage_from_structural_evidence",
+        fresh_audit,
+    )
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", no_materialization)
+    monkeypatch.setattr(
+        portraits.evidence_repository,
+        "create_artifact",
+        lambda *_args, **_kwargs: {"id": "art-fresh"},
+    )
+    result = asyncio.run(portraits.ensure_structural_identity_coverage(
+        "proj",
+        "ep_711b29204aa9",
+        1,
+        source_text,
+        Bible(
+            characters=[Character(
+                name="守卫",
+                role="山门守卫",
+                appearance_canonical="青衣男子，腰佩长剑",
+            )],
+            world=World(visual_style_canonical="国风"),
+        ),
+        evidence,
+    ))
+
+    assert audit_calls == 1
+    assert "reused" not in result
+
+
+def test_structural_coverage_catalog_hash_ignores_its_own_materialized_card(
+) -> None:
+    candidate = {
+        "name": "丁力",
+        "source_label": "黑衣人",
+        "identity_kind": "named",
+        "identity_group": "structural:masked-man",
+        "authority_id": "bible:丁力",
+    }
+    kwargs = {
+        "base_candidates": [],
+        "structural_evidence_hash": "structural-hash",
+        "existing_resolutions": [],
+        "output_candidates": [candidate],
+    }
+    before_materialization = (
+        portraits._structural_identity_catalog_input_hash(
+            bible=_empty_bible(),
+            **kwargs,
+        )
+    )
+    after_materialization = (
+        portraits._structural_identity_catalog_input_hash(
+            bible=Bible(
+                characters=[Character(
+                    name="丁力",
+                    role="山门守卫",
+                    appearance_canonical="黑发男子，深灰皮甲，腰佩长刀",
+                )],
+                world=World(visual_style_canonical="国风"),
+            ),
+            **kwargs,
+        )
+    )
+    unrelated_authority_added = (
+        portraits._structural_identity_catalog_input_hash(
+            bible=Bible(
+                characters=[
+                    Character(
+                        name="丁力",
+                        role="山门守卫",
+                        appearance_canonical=(
+                            "黑发男子，深灰皮甲，腰佩长刀"
+                        ),
+                    ),
+                    Character(
+                        name="许清",
+                        role="外宗师姐",
+                        appearance_canonical=(
+                            "银袍女子，黑发冷眸，身形高挑"
+                        ),
+                    ),
+                ],
+                world=World(visual_style_canonical="国风"),
+            ),
+            **kwargs,
+        )
+    )
+
+    assert before_materialization == after_materialization
+    assert unrelated_authority_added != after_materialization
 
 
 def test_structural_coverage_receipt_rejects_same_key_wrong_authority(
@@ -888,6 +1114,7 @@ def test_structural_coverage_cache_hit_retires_all_stale_auto_rows(
         policy_version=portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION,
         candidates=[candidate],
         materialized_resolutions=[current],
+        catalog_input_resolutions=[current, manual],
     )
     conn.execute(
         "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
