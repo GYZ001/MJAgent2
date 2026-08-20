@@ -49,58 +49,109 @@ def _current_identity_wire(characters: list[dict]) -> dict:
 def _future_identity_wire(
     characters: list[dict],
     *,
-    known_authorities: dict[str, str] | None = None,
+    provider_schema: dict,
+    evidence_text_by_id: dict[str, str] | None = None,
 ) -> dict:
-    known_by_name = {
-        canonical_name: authority_id
-        for authority_id, canonical_name in (known_authorities or {}).items()
-    }
-    known_named: list[dict] = []
-    new_named: list[dict] = []
-    functional: list[dict] = []
-    for raw in characters:
+    decision_properties = provider_schema["properties"]["decisions"][
+        "properties"
+    ]
+    evidence_properties = provider_schema["properties"][
+        "reveal_evidence_ids"
+    ]["properties"]
+    group_keys = list(decision_properties)
+    grouped: dict[str, list[dict]] = {}
+    for index, raw in enumerate(characters, start=1):
         item = dict(raw)
-        source_label = str(item.get("source_label") or "")
-        canonical_name = str(item.get("canonical_name") or "")
-        evidence = str(item.get("future_evidence") or "")
-        if str(item.get("identity_kind") or "functional") == "functional":
-            functional.append({"source_label": source_label})
-        elif canonical_name in known_by_name:
-            known_named.append({
-                "source_label": source_label,
-                "authority_id": known_by_name[canonical_name],
-                "future_evidence": evidence,
-            })
+        group_marker = str(
+            item.get("functional_identity_key")
+            or item.get("identity_group")
+            or item.get("canonical_name")
+            or item.get("source_label")
+            or f"fixture-{index}"
+        )
+        grouped.setdefault(group_marker, []).append(item)
+
+    decisions: dict[str, str] = {}
+    revealed_names: dict[str, str] = {}
+    reveal_evidence_ids: dict[str, str] = {}
+    desired_groups = list(grouped.values())
+    for index, group_key in enumerate(group_keys):
+        options = decision_properties[group_key]["enum"]
+        desired = desired_groups[index][0] if index < len(desired_groups) else {}
+        canonical_name = str(desired.get("canonical_name") or "")
+        identity_kind = str(desired.get("identity_kind") or "functional")
+        known_option = next(
+            (
+                option for option in options
+                if canonical_name
+                and f":bible:{canonical_name}:" in str(option)
+            ),
+            "",
+        )
+        if identity_kind == "named" and known_option:
+            decisions[group_key] = known_option
+            revealed_names[group_key] = ""
+            reveal_evidence_ids[group_key] = ""
+        elif identity_kind == "named":
+            decisions[group_key] = next(
+                option for option in options if str(option).startswith("N:")
+            )
+            revealed_names[group_key] = canonical_name
+            evidence_options = [
+                value for value in evidence_properties[group_key]["enum"]
+                if value
+            ]
+            reveal_evidence_ids[group_key] = next(
+                (
+                    value for value in evidence_options
+                    if canonical_name in str(
+                        (evidence_text_by_id or {}).get(value) or ""
+                    )
+                ),
+                evidence_options[0],
+            )
         else:
-            new_named.append({
-                "source_label": source_label,
-                "canonical_name": canonical_name,
-                "future_evidence": evidence,
-            })
+            decisions[group_key] = next(
+                option for option in options if str(option).startswith("F:")
+            )
+            revealed_names[group_key] = ""
+            reveal_evidence_ids[group_key] = ""
     return {
-        "known_named": known_named,
-        "new_named": new_named,
-        "functional": functional,
+        "decisions": decisions,
+        "revealed_names": revealed_names,
+        "reveal_evidence_ids": reveal_evidence_ids,
     }
 
 
-def _identity_wire_for_call(kwargs: dict, characters: list[dict]) -> dict:
+def _identity_wire_for_call(
+    kwargs: dict,
+    characters: list[dict],
+    *,
+    messages: list[dict] | None = None,
+) -> dict:
     phase = str(kwargs.get("call_meta", {}).get("discovery_phase") or "")
     if phase == "current":
         return _current_identity_wire(characters)
     if phase == "future_identity":
         provider_schema = kwargs["response_format"]["json_schema"]["schema"]
-        authority_ids = provider_schema["$defs"][
-            "FutureKnownNamedIdentityCandidate"
-        ]["properties"]["authority_id"]["enum"]
-        known_authorities = {
-            authority_id: authority_id.removeprefix("bible:")
-            for authority_id in authority_ids
-            if authority_id.startswith("bible:")
-        }
+        evidence_text_by_id: dict[str, str] = {}
+        if messages:
+            prompt = str(messages[0].get("content") or "")
+            marker = "后续证据目录"
+            decision_marker = "\n可选决议目录"
+            if marker in prompt and decision_marker in prompt:
+                raw_catalog = prompt.split(marker, 1)[1]
+                raw_catalog = raw_catalog.split("\n", 1)[1]
+                raw_catalog = raw_catalog.split(decision_marker, 1)[0]
+                catalog = json.loads(raw_catalog)
+                evidence_text_by_id = {
+                    str(item["evidence_id"]): str(item["text"])
+                    for item in catalog
+                }
         return _future_identity_wire(
             characters,
-            known_authorities=known_authorities,
+            provider_schema=provider_schema,
+            evidence_text_by_id=evidence_text_by_id,
         )
     raise AssertionError(f"unexpected identity phase: {phase}")
 
@@ -253,6 +304,71 @@ def test_structural_identity_coverage_schema_is_closed_and_provider_safe(
         "minItems",
         "maxItems",
         "uniqueItems",
+    })
+
+
+def test_future_identity_exact_map_schema_is_closed_and_provider_safe(
+) -> None:
+    local_schema = portraits._future_identity_schema(
+        ["G001", "G002"],
+        decision_ids_by_group={
+            "G001": ["F:G001", "K:G001:bible:许清:receipt", "N:G001"],
+            "G002": ["F:G002", "N:G002"],
+        },
+        evidence_ids_by_group={
+            "G001": ["E:first"],
+            "G002": ["E:second"],
+        },
+    )
+    local_before = json.loads(json.dumps(local_schema, ensure_ascii=False))
+    response_format = portraits._identity_strict_response_format(
+        local_schema,
+        name="screenplay_future_identity_resolution_v9",
+    )
+
+    assert local_schema == local_before
+    assert set(local_schema["required"]) == {
+        "decisions", "revealed_names", "reveal_evidence_ids",
+    }
+    for field_name in local_schema["required"]:
+        field_schema = local_schema["properties"][field_name]
+        assert field_schema["additionalProperties"] is False
+        assert field_schema["required"] == ["G001", "G002"]
+        assert list(field_schema["properties"]) == ["G001", "G002"]
+    assert local_schema["properties"]["decisions"]["properties"][
+        "G001"
+    ]["enum"] == ["F:G001", "K:G001:bible:许清:receipt", "N:G001"]
+    assert local_schema["properties"]["reveal_evidence_ids"][
+        "properties"
+    ]["G002"]["enum"] == ["", "E:second"]
+    assert local_schema["properties"]["revealed_names"]["properties"][
+        "G001"
+    ]["maxLength"] == 16
+
+    provider_schema = response_format["json_schema"]["schema"]
+    assert response_format["json_schema"]["strict"] is True
+    assert "maxLength" not in provider_schema["properties"][
+        "revealed_names"
+    ]["properties"]["G001"]
+    provider_keywords: set[str] = set()
+
+    def collect(schema_node: dict) -> None:
+        provider_keywords.update(schema_node)
+        for mapping_keyword in ("$defs", "properties"):
+            for child in schema_node.get(mapping_keyword, {}).values():
+                collect(child)
+        items = schema_node.get("items")
+        if isinstance(items, dict):
+            collect(items)
+
+    collect(provider_schema)
+    assert provider_keywords <= (
+        portraits._IDENTITY_COVERAGE_STRICT_PROVIDER_SCHEMA_KEYWORDS
+    )
+    assert provider_keywords.isdisjoint({
+        "anyOf", "oneOf", "if", "then", "else", "allOf", "const",
+        "title", "default", "minLength", "maxLength", "minItems",
+        "maxItems", "uniqueItems",
     })
 
 
@@ -1691,7 +1807,7 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
                 "kind": "onscreen",
                 "evidence": "青衣人拦路",
                 "future_evidence": "青衣人摘下面具，萧炎这才认出他就是丁力。",
-            }]), ensure_ascii=False)
+            }], messages=messages), ensure_ascii=False)
         return json.dumps(_identity_wire_for_call(_kwargs, [{
             "source_label": "青衣人",
             "canonical_name": "",
@@ -1784,12 +1900,29 @@ def test_future_identity_untraceable_name_is_one_call_hard_failure(
         nonlocal calls
         calls += 1
         assert kwargs["call_meta"]["discovery_phase"] == "future_identity"
-        return json.dumps(_identity_wire_for_call(kwargs, [{
-            "source_label": "三哥",
-            "canonical_name": "陈三",
-            "identity_kind": "named",
-            "future_evidence": "模型自行补写陈三是真名",
-        }]), ensure_ascii=False)
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        group_key = next(iter(
+            schema["properties"]["decisions"]["properties"]
+        ))
+        decisions = schema["properties"]["decisions"]["properties"]
+        evidence = schema["properties"]["reveal_evidence_ids"][
+            "properties"
+        ]
+        return json.dumps({
+            "decisions": {
+                group_key: next(
+                    value for value in decisions[group_key]["enum"]
+                    if value.startswith("N:")
+                ),
+            },
+            "revealed_names": {group_key: "陈三"},
+            "reveal_evidence_ids": {
+                group_key: next(
+                    value for value in evidence[group_key]["enum"]
+                    if value
+                ),
+            },
+        }, ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     with pytest.raises(model_gateway.StructuredSemanticError):
@@ -1818,21 +1951,24 @@ def test_future_identity_operation_binds_exact_outbound_semantics(
 
     async def fake_structured(*_args, **kwargs):
         assert kwargs["operation_id"].startswith(
-            "screenplay.identity.future.v9:"
+            "screenplay.identity.future.v10:"
         )
         assert (
             kwargs["response_format"]["json_schema"]["name"]
-            == "screenplay_future_identity_resolution_v8"
+            == "screenplay_future_identity_resolution_v9"
         )
         assert (
             kwargs["call_meta"]["contract_version"]
-            == "screenplay-future-identity.v8"
+            == "screenplay-future-identity.v9"
         )
         operations.append((kwargs["operation_id"], kwargs["call_meta"]["model"]))
-        return portraits.FutureIdentityCandidateResponse(
-            known_named=[],
-            new_named=[],
-            functional=[{"source_label": "三哥"}],
+        return portraits.FutureIdentityCandidateResponse.model_validate(
+            _future_identity_wire(
+                [],
+                provider_schema=kwargs["response_format"]["json_schema"][
+                    "schema"
+                ],
+            )
         )
 
     monkeypatch.setattr(
@@ -3321,15 +3457,16 @@ def test_future_identity_accepts_new_name_with_owned_verbatim_evidence(
         "另一个绿袍修士感慨，孟浩看着许师姐消失在山峦间。"
     ) * 2
 
-    async def fake_structured(messages, **_kwargs):
-        return portraits.FutureIdentityCandidateResponse(
-            known_named=[],
-            new_named=[{
+    async def fake_structured(messages, **kwargs):
+        return portraits.FutureIdentityCandidateResponse.model_validate(
+            _future_identity_wire([{
                 "source_label": "会飞的女人",
                 "canonical_name": "许师姐",
+                "identity_kind": "named",
                 "future_evidence": "许师姐已经到了凝气第七层",
-            }],
-            functional=[],
+            }], provider_schema=kwargs["response_format"]["json_schema"][
+                "schema"
+            ])
         )
 
     monkeypatch.setattr(portraits.model_gateway, "chat_structured", fake_structured)
@@ -3360,8 +3497,8 @@ def test_future_identity_rejects_name_absent_from_window(monkeypatch) -> None:
     """真名不在后续窗口时（模型臆测），即便声称 named 也不得取得解析，防捏造约束不放松。"""
     future = "绿袍男子恭敬地说道，许师姐好手段。许师姐已经到了凝气第七层。" * 2
 
-    async def fake_structured(messages, **_kwargs):
-        return json.dumps(_future_identity_wire([{
+    async def fake_structured(messages, **kwargs):
+        return json.dumps(_identity_wire_for_call(kwargs, [{
             "source_label": "会飞的女人",
             "canonical_name": "许清",  # 窗口里根本没有“许清”
             "identity_kind": "named",
