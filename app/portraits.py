@@ -2212,6 +2212,7 @@ async def audit_identity_coverage_from_structural_evidence(
     bible: Bible,
     episode_no: int,
     existing_resolutions: list[dict] | None = None,
+    catalog_receipt: dict[str, object] | None = None,
 ) -> list[dict]:
     """Audit only typed Blueprint/IR references that lack identity ownership."""
     evidence = [item for item in (structural_evidence or []) if isinstance(item, dict)]
@@ -2590,6 +2591,35 @@ async def audit_identity_coverage_from_structural_evidence(
     ]
     coverage_evidence_projection = list(evidence_by_id.values())
     coverage_decision_projection = list(decision_by_id.values())
+    receipt_hashes = {
+        "authority_catalog_hash": evidence_repository.content_hash(
+            sorted(
+                authority_by_id.values(),
+                key=lambda item: str(item.get("authority_id") or ""),
+            )
+        ),
+        "group_catalog_hash": evidence_repository.content_hash(
+            sorted(
+                groups_by_ref.values(),
+                key=lambda item: str(
+                    item.get("identity_group_ref") or ""
+                ),
+            )
+        ),
+        "decision_catalog_hash": evidence_repository.content_hash(
+            coverage_decision_projection
+        ),
+        "evidence_catalog_hash": evidence_repository.content_hash(
+            coverage_evidence_projection
+        ),
+    }
+    if catalog_receipt is not None:
+        catalog_receipt.clear()
+        catalog_receipt.update({
+            "version": _STRUCTURAL_IDENTITY_CATALOG_RECEIPT_VERSION,
+            **receipt_hashes,
+            "hash": evidence_repository.content_hash(receipt_hashes),
+        })
     prompt = f"""任务：审计结构化蓝图/IR 中未绑定的人物引用。
 未决引用目录（group_key 是唯一可输出的键；同键所有 owned SRC 行共用一个决议）：
 {json.dumps(coverage_group_projection, ensure_ascii=False, separators=(',', ':'))}
@@ -3139,6 +3169,9 @@ def screenplay_identity_resolution_is_current_for_scope(
 _STRUCTURAL_IDENTITY_RECEIPT_VERSION = (
     "screenplay-identity-structural-resolution-receipt.v2"
 )
+_STRUCTURAL_IDENTITY_CATALOG_RECEIPT_VERSION = (
+    "screenplay-identity-structural-catalog-receipt.v1"
+)
 
 
 def _structural_identity_candidate_semantic_rows(
@@ -3183,6 +3216,98 @@ def _structural_identity_candidate_semantic_hash(
 ) -> str:
     return evidence_repository.content_hash(
         _structural_identity_candidate_semantic_rows(candidates)
+    )
+
+
+def _structural_identity_catalog_input_hash(
+    *,
+    bible: Bible,
+    base_candidates: list[dict] | None,
+    structural_evidence_hash: str,
+    existing_resolutions: list[dict] | None,
+    output_candidates: list[dict] | None,
+) -> str:
+    """Fingerprint every backend-owned input that can change coverage options.
+
+    Automatic rows materialized by ``output_candidates`` are excluded so the
+    pre-audit fingerprint remains stable after a successful coverage result is
+    persisted.  Their complete semantics are already bound separately by the
+    materialization receipt.  Durable/manual rows remain inputs even when they
+    share a key with an output candidate.
+    """
+    output_keys = {
+        (
+            str(item.get("source_label") or "").strip(),
+            str(item.get("identity_group") or "").strip(),
+        )
+        for item in (output_candidates or [])
+        if isinstance(item, dict)
+        and str(item.get("source_label") or "").strip()
+        and str(item.get("identity_group") or "").strip()
+    }
+    resolution_fields = (
+        "source_label",
+        "canonical_name",
+        "authority_id",
+        "resolution",
+        "identity_group",
+        "identity_scope_fingerprint",
+        "decision_provenance",
+        "decision_contract_version",
+        "structural_identity_policy_version",
+    )
+    resolution_rows = []
+    for item in normalize_character_resolutions(existing_resolutions):
+        key = (
+            str(item.get("source_label") or "").strip(),
+            str(item.get("identity_group") or "").strip(),
+        )
+        provenance = str(item.get("decision_provenance") or "").strip()
+        if (
+            provenance not in DURABLE_IDENTITY_DECISION_PROVENANCE
+            and key in output_keys
+        ):
+            continue
+        resolution_rows.append({
+            field: str(item.get(field) or "").strip()
+            for field in resolution_fields
+        })
+    resolution_rows.sort(
+        key=lambda item: tuple(item[field] for field in resolution_fields)
+    )
+    bible_authorities = sorted({
+        str(character.name or "").strip()
+        for character in bible.characters
+        if str(character.name or "").strip()
+    })
+    return evidence_repository.content_hash({
+        "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+        "structural_evidence_hash": structural_evidence_hash,
+        "bible_authorities": bible_authorities,
+        "base_candidate_semantics": (
+            _structural_identity_candidate_semantic_rows(base_candidates)
+        ),
+        "external_resolution_semantics": resolution_rows,
+    })
+
+
+def _structural_identity_catalog_receipt_is_valid(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    fields = (
+        "authority_catalog_hash",
+        "group_catalog_hash",
+        "decision_catalog_hash",
+        "evidence_catalog_hash",
+    )
+    payload = {field: str(value.get(field) or "") for field in fields}
+    return bool(
+        value.get("version")
+        == _STRUCTURAL_IDENTITY_CATALOG_RECEIPT_VERSION
+        and all(payload.values())
+        and str(value.get("hash") or "")
+        == evidence_repository.content_hash(payload)
     )
 
 
@@ -5212,8 +5337,34 @@ async def ensure_structural_identity_coverage(
              ORDER BY created_at DESC LIMIT 20""",
         (episode_id,),
     ).fetchall()
+    parsed_rows: list[tuple[sqlite3.Row, dict]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["content_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            parsed_rows.append((row, payload))
     base_candidates: list[dict] = []
     parent_artifact_id = ""
+    for row, payload in parsed_rows:
+        if (
+            payload.get("mode") != "structural_coverage"
+            and payload.get("contract_version")
+            == IDENTITY_DISCOVERY_CONTRACT_VERSION
+            and payload.get("structural_coverage_policy_version")
+            == STRUCTURAL_IDENTITY_COVERAGE_VERSION
+            and payload.get("structural_coverage_applied") is False
+            and payload.get("source_hash") == source_hash
+            and isinstance(payload.get("candidates"), list)
+        ):
+            base_candidates = [
+                dict(item)
+                for item in payload["candidates"]
+                if isinstance(item, dict)
+            ]
+            parent_artifact_id = str(row["id"])
+            break
     invalid_cached_resolution_keys: set[tuple[str, str, str]] = set()
     matching_coverage_artifact_seen = False
 
@@ -5227,11 +5378,7 @@ async def ensure_structural_identity_coverage(
                 + ",".join(sorted(missing))
             )
         return required
-    for row in rows:
-        try:
-            payload = json.loads(row["content_json"] or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
+    for _row, payload in parsed_rows:
         if (
             not matching_coverage_artifact_seen
             and payload.get("mode") == "structural_coverage"
@@ -5286,6 +5433,15 @@ async def ensure_structural_identity_coverage(
                 candidates=payload["candidates"],
                 identity_scope_fingerprint=identity_scope_fingerprint,
             )
+            actual_catalog_input_hash = (
+                _structural_identity_catalog_input_hash(
+                    bible=bible,
+                    base_candidates=base_candidates,
+                    structural_evidence_hash=structural_hash,
+                    existing_resolutions=current_cached_resolutions,
+                    output_candidates=payload["candidates"],
+                )
+            )
             cache_is_exact = bool(
                 expected_candidate_hash
                 and expected_candidate_hash
@@ -5298,6 +5454,11 @@ async def ensure_structural_identity_coverage(
                 and expected_receipt == actual_receipt
                 and expected_bible_names == required_bible_names
                 and set(required_bible_names) <= current_bible_names
+                and str(payload.get("coverage_catalog_input_hash") or "")
+                == actual_catalog_input_hash
+                and _structural_identity_catalog_receipt_is_valid(
+                    payload.get("coverage_catalog_receipt")
+                )
             )
             if cache_is_exact:
                 # A validated receipt can coexist with unrelated legacy rows.
@@ -5342,22 +5503,6 @@ async def ensure_structural_identity_coverage(
                     "reused": True,
                 }
             invalid_cached_resolution_keys.update(required_keys)
-        if (
-            payload.get("mode") != "structural_coverage"
-            and payload.get("contract_version")
-            == IDENTITY_DISCOVERY_CONTRACT_VERSION
-            and payload.get("structural_coverage_policy_version")
-            == STRUCTURAL_IDENTITY_COVERAGE_VERSION
-            and payload.get("structural_coverage_applied") is False
-            and payload.get("source_hash") == source_hash
-            and isinstance(payload.get("candidates"), list)
-        ):
-            base_candidates = [
-                dict(item) for item in payload["candidates"]
-                if isinstance(item, dict)
-            ]
-            parent_artifact_id = str(row["id"])
-            break
     existing_coverage_resolutions = [
         item
         for item in load_screenplay_character_resolutions(conn, episode_id)
@@ -5371,6 +5516,7 @@ async def ensure_structural_identity_coverage(
             str(item.get("identity_scope_fingerprint") or "").strip(),
         ) not in invalid_cached_resolution_keys
     ]
+    coverage_catalog_receipt: dict[str, object] = {}
     audited = await audit_identity_coverage_from_structural_evidence(
         base_candidates,
         structural_evidence=structural_evidence,
@@ -5378,6 +5524,14 @@ async def ensure_structural_identity_coverage(
         bible=bible,
         episode_no=episode_no,
         existing_resolutions=existing_coverage_resolutions,
+        catalog_receipt=coverage_catalog_receipt,
+    )
+    coverage_catalog_input_hash = _structural_identity_catalog_input_hash(
+        bible=bible,
+        base_candidates=base_candidates,
+        structural_evidence_hash=structural_hash,
+        existing_resolutions=existing_coverage_resolutions,
+        output_candidates=audited,
     )
     if write_guard:
         write_guard()
@@ -5457,6 +5611,10 @@ async def ensure_structural_identity_coverage(
                     "mode": "structural_coverage",
                     "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
                     "structural_evidence_hash": structural_hash,
+                    "coverage_catalog_input_hash": (
+                        coverage_catalog_input_hash
+                    ),
+                    "coverage_catalog_receipt": coverage_catalog_receipt,
                     "model_candidates": [],
                 },
                 parent_artifact_ids=[parent_artifact_id] if parent_artifact_id else [],
@@ -5492,6 +5650,10 @@ async def ensure_structural_identity_coverage(
                     "materialized_bible_names": materialized_bible_names,
                     "source_hash": source_hash,
                     "structural_evidence_hash": structural_hash,
+                    "coverage_catalog_input_hash": (
+                        coverage_catalog_input_hash
+                    ),
+                    "coverage_catalog_receipt": coverage_catalog_receipt,
                 },
                 parent_artifact_ids=[raw_artifact["id"]],
                 contract_version=IDENTITY_DISCOVERY_CONTRACT_VERSION,
@@ -5573,6 +5735,8 @@ async def ensure_structural_identity_coverage(
                 "mode": "structural_coverage",
                 "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
                 "structural_evidence_hash": structural_hash,
+                "coverage_catalog_input_hash": coverage_catalog_input_hash,
+                "coverage_catalog_receipt": coverage_catalog_receipt,
                 "model_candidates": materialization_candidates,
             },
             parent_artifact_ids=[parent_artifact_id] if parent_artifact_id else [],
@@ -5606,6 +5770,8 @@ async def ensure_structural_identity_coverage(
                 "materialized_bible_names": materialized_bible_names,
                 "source_hash": source_hash,
                 "structural_evidence_hash": structural_hash,
+                "coverage_catalog_input_hash": coverage_catalog_input_hash,
+                "coverage_catalog_receipt": coverage_catalog_receipt,
             },
             parent_artifact_ids=[raw_artifact["id"]],
             contract_version=IDENTITY_DISCOVERY_CONTRACT_VERSION,
