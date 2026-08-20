@@ -111,6 +111,16 @@ def _canonical_named_authority_id(canonical_name: str) -> str:
     return f"bible:{value}"
 
 
+def _named_candidate_materialization_compatible(item: dict) -> bool:
+    """Whether adding the candidate's named card preserves one authority/group."""
+    canonical_name = str(item.get("name") or item.get("canonical_name") or "").strip()
+    authority_id = str(item.get("authority_id") or "").strip()
+    if not canonical_name or not authority_id:
+        return True
+    canonical_authority = _canonical_named_authority_id(canonical_name)
+    return authority_id == canonical_authority
+
+
 def _bounded_owned_identity_evidence(
     evidence_text: str,
     *,
@@ -1129,20 +1139,19 @@ def _project_current_identity_response(
             errors.append(
                 f"current prior functional decision 越界：{functional_key}"
             )
-        prior_response_group_keys = {
-            value
+        prior_groups_for_label = [
+            group
             for group in (prior_functional_groups or {}).values()
-            for value in group.get("response_group_keys") or []
-            if str(value or "").strip()
-        }
+            if source_label in set(group.get("source_labels") or [])
+        ]
         if (
             identity_kind == "functional"
             and prior_functional_group is None
-            and functional_key in prior_response_group_keys
+            and prior_groups_for_label
         ):
             errors.append(
-                "current 后续batch必须用P token显式复用 prior group："
-                f"{functional_key}"
+                "current 后续batch的同称谓必须用P token显式复用 prior group："
+                f"{source_label}"
             )
         if prior_functional_group is not None and not literal:
             errors.append(
@@ -1542,13 +1551,24 @@ async def _discover_character_candidates_legacy(
             }
             for evidence_ref, record in evidence_by_ref.items()
         ]
-        known_decisions = _current_identity_known_decision_catalog(
+        registered_decisions = _current_identity_known_decision_catalog(
             evidence_by_ref,
             authorities=current_authorities,
         )
+        prior_named_decisions, prior_functional_groups = (
+            _current_identity_prior_decision_catalog(
+                evidence_by_ref,
+                prior_candidates=candidates,
+            )
+        )
+        known_decisions = {
+            **registered_decisions,
+            **prior_named_decisions,
+        }
         known_decision_projection = [
             {
                 "decision_id": decision_id,
+                "decision_type": str(item.get("decision_type") or ""),
                 "evidence_ref": str(item.get("evidence_ref") or ""),
                 "source_label": str(item.get("source_label") or ""),
                 "canonical_name": str(item.get("canonical_name") or ""),
@@ -1560,10 +1580,28 @@ async def _discover_character_candidates_legacy(
             }
             for decision_id, item in sorted(known_decisions.items())
         ]
+        prior_functional_projection = [
+            {
+                "decision_id": decision_id,
+                "source_labels": list(item.get("source_labels") or []),
+                "existing_route_name": str(
+                    item.get("existing_route_name") or ""
+                ),
+            }
+            for decision_id, item in sorted(prior_functional_groups.items())
+        ]
+        prior_decision_catalog_hash = evidence_repository.content_hash({
+            "named": [
+                item for item in known_decision_projection
+                if str(item.get("decision_type") or "").startswith("prior_")
+            ],
+            "functional": prior_functional_projection,
+        })
         evidence_catalog_hash = evidence_repository.content_hash({
             "contract_version": CURRENT_IDENTITY_DECISION_VERSION,
             "evidence": evidence_records,
             "known_decisions": known_decision_projection,
+            "prior_functional_groups": prior_functional_projection,
         })
         current_schema = _current_identity_schema(
             list(evidence_by_ref),
@@ -1578,6 +1616,9 @@ async def _discover_character_candidates_legacy(
 
 当前人物谱已有角色：
 {known}
+
+前批已确定的 functional 分组 P 决议（后批判断为同一人时，functional_identity_key 必须精确复用 decision_id）：
+{json.dumps(prior_functional_projection, ensure_ascii=False, separators=(',', ':'))}
 
 本批 backend-owned 当前身份证据目录。E ref 已绑定完整证据 receipt，禁止跨 E 搬运人物：
 {json.dumps(evidence_catalog, ensure_ascii=False, separators=(',', ':'))}
@@ -1607,6 +1648,8 @@ async def _discover_character_candidates_legacy(
    source_label 保留原始完整字符串，canonical_name/functional_identity_key 绑定到真正说话人。
    禁止按“说、喊、点头”等固定词表或后缀规则猜测。
 6. 每个 f 项必须填写 functional_identity_key：
+   - 若它与“前批已确定的 functional 分组”是同一人，必须精确复制该 P decision_id；
+     不得重新使用前批原始分组字符串。
    - 若它与“本集已有功能身份决议”中的某人是同一人，精确填写该人的 canonical_name。
    - 否则填写本次响应内的不透明分组 ID（如 F1、F2）；不同 source_label 若明确是同一人必须共用同一 ID。
    - 无法确认是否同一人时必须使用不同 ID，禁止根据称谓字面相似猜测。
@@ -1620,6 +1663,7 @@ async def _discover_character_candidates_legacy(
                 value,
                 evidence_by_ref=evidence_by_ref,
                 known_decisions=known_decisions,
+                prior_functional_groups=prior_functional_groups,
                 all_evidence_by_id=all_current_evidence_by_id,
                 reserved_authority_labels=reserved_authority_labels,
                 group_scope=f"current-{current_batch}",
@@ -1637,6 +1681,7 @@ async def _discover_character_candidates_legacy(
                     "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
                     "current_identity_version": CURRENT_IDENTITY_DECISION_VERSION,
                     "current_evidence_catalog_hash": evidence_catalog_hash,
+                    "prior_decision_catalog_hash": prior_decision_catalog_hash,
                     "provider": current_provider,
                     "model": current_model,
                     "requested_max_tokens": 8192,
@@ -1671,6 +1716,7 @@ async def _discover_character_candidates_legacy(
                 "current_decision_catalog_hash": evidence_repository.content_hash(
                     known_decision_projection
                 ),
+                "prior_decision_catalog_hash": prior_decision_catalog_hash,
                 "schema_hash": evidence_repository.content_hash(current_schema),
                 "provider": current_provider,
                 "model": current_model,
@@ -1687,6 +1733,7 @@ async def _discover_character_candidates_legacy(
                 response,
                 evidence_by_ref=evidence_by_ref,
                 known_decisions=known_decisions,
+                prior_functional_groups=prior_functional_groups,
                 all_evidence_by_id=all_current_evidence_by_id,
                 reserved_authority_labels=reserved_authority_labels,
                 group_scope=f"current-{current_batch}",
@@ -1826,18 +1873,34 @@ async def _discover_character_candidates_legacy(
 
     # 同一称谓在不同后文批次中可能先被保守判为 functional，后被真名证据命中。
     # 具名证据唯一时优先；出现两个不同真名时不猜，降级为一次性角色。
+    def strongest_occurrence(options: list[dict]) -> dict:
+        """Preserve an onscreen owned receipt independent of batch order."""
+        return next(
+            (item for item in options if item.get("kind") == "onscreen"),
+            options[0],
+        )
+
     resolved: list[dict] = []
     for source_label in dict.fromkeys(item["source_label"] for item in candidates):
         options = [item for item in candidates if item["source_label"] == source_label]
+        named_options_by_name: dict[str, list[dict]] = {}
+        for item in options:
+            if item["identity_kind"] == "named":
+                named_options_by_name.setdefault(item["name"], []).append(item)
         named_by_name = {
-            item["name"]: item for item in options if item["identity_kind"] == "named"
+            name: strongest_occurrence(named_options)
+            for name, named_options in named_options_by_name.items()
         }
         if len(named_by_name) == 1:
             resolved.append(next(iter(named_by_name.values())))
         elif len(named_by_name) > 1:
-            functional = next(
-                (item for item in options if item["identity_kind"] == "functional"),
-                None,
+            functional_options = [
+                item for item in options
+                if item["identity_kind"] == "functional"
+            ]
+            functional = (
+                strongest_occurrence(functional_options)
+                if functional_options else None
             )
             resolved.append(functional or {
                 "name": source_label,
@@ -1850,7 +1913,7 @@ async def _discover_character_candidates_legacy(
                 "future_evidence": "",
             })
         else:
-            resolved.append(options[0])
+            resolved.append(strongest_occurrence(options))
 
     named_by_group: dict[str, set[str]] = {}
     named_evidence: dict[tuple[str, str], dict] = {}
@@ -3095,6 +3158,7 @@ async def audit_identity_coverage_from_structural_evidence(
                 "canonical_name": canonical_name,
                 "identity_group": "",
                 "aliases": [],
+                "materialization_compatible": True,
             }
     groups_by_ref: dict[str, dict] = {}
     # Current RF9 may preserve a non-literal provider label as an explicitly
@@ -3167,6 +3231,10 @@ async def audit_identity_coverage_from_structural_evidence(
                 "canonical_name": canonical_name,
                 "identity_group": identity_group,
                 "aliases": [],
+                "materialization_compatible": (
+                    authority_id == _canonical_named_authority_id(canonical_name)
+                    and identity_group in {"", authority_id}
+                ),
             })
             if authority["canonical_name"] != canonical_name:
                 raise ContentGenerationError(
@@ -3325,6 +3393,14 @@ async def audit_identity_coverage_from_structural_evidence(
         decision_ids_by_group.setdefault(group_key, []).append(decision_id)
         return decision_id
 
+    def coverage_group_kind(group_key: str) -> str:
+        label = str(coverage_group_by_key[group_key]["source_label"])
+        usages = {
+            str(item.get("usage") or "").strip()
+            for item in structural_by_key.get(label, [])
+        }
+        return "mentioned" if usages == {"mentioned"} else "onscreen"
+
     for group in coverage_groups:
         group_key = str(group["group_key"])
         label = str(group["source_label"])
@@ -3371,6 +3447,17 @@ async def audit_identity_coverage_from_structural_evidence(
             canonical_name = str(
                 authority.get("canonical_name") or ""
             ).strip()
+            materialization_compatible = bool(
+                authority.get("materialization_compatible")
+            )
+            if (
+                coverage_group_kind(group_key) == "onscreen"
+                and not materialization_compatible
+            ):
+                # A non-Bible/manual authority may be cited while mentioned,
+                # but cannot be upgraded through coverage into a card-backed
+                # onscreen identity without atomically migrating its authority.
+                continue
             authority_anchors = list(dict.fromkeys(
                 value
                 for value in [
@@ -3399,6 +3486,7 @@ async def audit_identity_coverage_from_structural_evidence(
                     "owned_source_segment_ids": source_ids,
                     "proof_kind": "identity_key_registered_authority",
                     "proof_anchors": [label],
+                    "materialization_compatible": materialization_compatible,
                 })
             for identity_group_ref, catalog_group in groups_by_ref.items():
                 if set(catalog_group.get("authority_ids") or []) != {
@@ -3420,6 +3508,7 @@ async def audit_identity_coverage_from_structural_evidence(
                     "owned_source_segment_ids": source_ids,
                     "proof_kind": "existing_bound_group",
                     "proof_anchors": [],
+                    "materialization_compatible": materialization_compatible,
                 })
 
     coverage_group_keys = [
@@ -3588,6 +3677,14 @@ owned SRC 证据目录（后端逐字锁定，不得回抄或改写）：
                             "named group 缺少 owned authority 锚点："
                             f"{group_key}"
                         )
+                    if (
+                        coverage_group_kind(group_key) == "onscreen"
+                        and not item.get("materialization_compatible")
+                    ):
+                        errors.append(
+                            "structural coverage K authority 不可直接物化人物卡："
+                            f"{group_key}"
+                        )
                 named_groups.add(identity_group)
                 named_authorities_by_group.setdefault(
                     identity_group, set()
@@ -3724,6 +3821,16 @@ owned SRC 证据目录（后端逐字锁定，不得回抄或改写）：
             str(value.get("usage") or "").strip()
             for value in typed_evidence
         }
+        projected_kind = "mentioned" if usages == {"mentioned"} else "onscreen"
+        if (
+            identity_kind == "named"
+            and projected_kind == "onscreen"
+            and not raw.get("materialization_compatible")
+        ):
+            raise ContentGenerationError(
+                "structural coverage K authority 不可直接物化人物卡："
+                f"{label}"
+            )
         source_ids = sorted({
             str(source_id)
             for value in typed_evidence
@@ -3761,7 +3868,7 @@ owned SRC 证据目录（后端逐字锁定，不得回抄或改写）：
             "identity_kind": identity_kind,
             "identity_group": group,
             "authority_id": authority_id if identity_kind == "named" else "",
-            "kind": "mentioned" if usages == {"mentioned"} else "onscreen",
+            "kind": projected_kind,
             "evidence": bounded_evidence,
             "future_evidence": "",
             "source_segment_ids": source_ids,
@@ -6063,6 +6170,7 @@ async def ensure_cards_for_text(
     functional_candidates: list[dict] = []
     known_named_candidates: list[dict] = []
     mentioned_only_candidates: list[dict] = []
+    errors: list[str] = []
     for item in candidates:
         if item.get("identity_kind") == "functional":
             functional_candidates.append(item)
@@ -6071,7 +6179,13 @@ async def ensure_cards_for_text(
         if name in known:
             known_named_candidates.append(item)
         elif _candidate_requires_identity_card(item, known):
-            unknown_by_name.setdefault(name, []).append(item)
+            if not _named_candidate_materialization_compatible(item):
+                errors.append(
+                    "named authority 不可直接物化人物卡："
+                    f"{str(item.get('source_label') or name).strip()}->{name}"
+                )
+            else:
+                unknown_by_name.setdefault(name, []).append(item)
         elif name:
             mentioned_only_candidates.append(item)
     added: list[dict] = []
@@ -6084,7 +6198,6 @@ async def ensure_cards_for_text(
         }
         for item in mentioned_only_candidates
     ]
-    errors: list[str] = []
     warnings: list[str] = []
     resolutions: list[dict] = []
     assigned_extra_names: dict[str, str] = {}
