@@ -346,6 +346,9 @@ DEFAULT_SETTINGS = {
     "screenplay_scene_shard_parallelism": "2",
     "screenplay_scene_shard_max_units": "24",
     "screenplay_scene_shard_max_output_chars": "12000",
+    # 语义审查的 compact 最坏合法 JSON 之外，预留有界的格式布局/修复空间。
+    # 仅在 compact 需求已超过 2048-token 短请求 floor 时生效。
+    "screenplay_scene_semantic_review_output_reserve_percent": "100",
     "screenplay_format_retry_limit": "1",
     "screenplay_semantic_retry_limit": "2",
     "screenplay_fidelity_max_rounds": "8",

@@ -87,6 +87,17 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "screenplay_scene_shard_parallelism": _number("单集场次分片并发", "2", 1, 2, unit="请求"),
     "screenplay_scene_shard_max_units": _number("场次分片单位上限", "24", 8, 64, unit="units"),
     "screenplay_scene_shard_max_output_chars": _number("场次分片输出字符上限", "12000", 3000, 30000, unit="字符"),
+    "screenplay_scene_semantic_review_output_reserve_percent": _number(
+        "场次语义审查输出预留",
+        "100",
+        0,
+        200,
+        unit="%",
+        description=(
+            "compact 最坏合法 JSON 之外的有界输出预留；短审查仍使用 2048-token floor，"
+            "最终上限仍受模型与上下文能力约束。"
+        ),
+    ),
     "screenplay_format_retry_limit": _number("剧本格式修复上限", "1", 0, 3, unit="次"),
     "screenplay_semantic_retry_limit": _number("剧本语义修复上限", "1", 0, 3, unit="次"),
     "screenplay_fidelity_max_rounds": _number("剧本保真补写上限", "8", 1, 8, unit="轮"),

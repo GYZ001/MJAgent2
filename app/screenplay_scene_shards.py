@@ -77,6 +77,7 @@ SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT = (
     "不得返回 Markdown、解释或对象外文本。"
 )
 SCREENPLAY_SCENE_SEMANTIC_REVIEW_MIN_OUTPUT_TOKENS = 2048
+SCREENPLAY_SCENE_SEMANTIC_REVIEW_OUTPUT_RESERVE_PERCENT = 100
 SCREENPLAY_SCENE_SEMANTIC_REVIEW_CONTEXT_RESERVE_TOKENS = 1024
 SCREENPLAY_SCENE_SEMANTIC_REPAIR_MIN_OUTPUT_TOKENS = 4096
 SCREENPLAY_SCENE_SEMANTIC_REPAIR_ROOT_RESERVE_PERCENT = 20
@@ -962,13 +963,34 @@ def _screenplay_scene_semantic_token_estimate(chars: int) -> int:
 
 def screenplay_scene_semantic_review_required_tokens(
     unit_keys: list[str],
+    *,
+    output_reserve_percent: int = (
+        SCREENPLAY_SCENE_SEMANTIC_REVIEW_OUTPUT_RESERVE_PERCENT
+    ),
 ) -> int:
     payload = screenplay_scene_semantic_review_worst_case_payload(
         unit_keys
     )
+    compact_required = _screenplay_scene_semantic_token_estimate(
+        len(payload)
+    )
+    if compact_required <= SCREENPLAY_SCENE_SEMANTIC_REVIEW_MIN_OUTPUT_TOKENS:
+        # Do not make ordinary 1-2 unit reviews pay the large-review reserve.
+        return SCREENPLAY_SCENE_SEMANTIC_REVIEW_MIN_OUTPUT_TOKENS
+    pretty_required = _screenplay_scene_semantic_token_estimate(
+        len(json.dumps(json.loads(payload), ensure_ascii=False, indent=2))
+    )
+    bounded_reserve_percent = max(
+        0,
+        min(200, int(output_reserve_percent)),
+    )
+    reserved_required = math.ceil(
+        compact_required * (100 + bounded_reserve_percent) / 100
+    )
     return max(
         SCREENPLAY_SCENE_SEMANTIC_REVIEW_MIN_OUTPUT_TOKENS,
-        _screenplay_scene_semantic_token_estimate(len(payload)),
+        pretty_required,
+        reserved_required,
     )
 
 
@@ -4528,7 +4550,16 @@ def _scene_shard_semantic_review_budget(
         separators=(",", ":"),
     ))
     input_estimate = _screenplay_scene_semantic_token_estimate(input_chars)
-    required = screenplay_scene_semantic_review_required_tokens(unit_keys)
+    output_reserve_percent = _setting_int(
+        "screenplay_scene_semantic_review_output_reserve_percent",
+        SCREENPLAY_SCENE_SEMANTIC_REVIEW_OUTPUT_RESERVE_PERCENT,
+        minimum=0,
+        maximum=200,
+    )
+    required = screenplay_scene_semantic_review_required_tokens(
+        unit_keys,
+        output_reserve_percent=output_reserve_percent,
+    )
     context_ceiling = max(
         0,
         int(limits["context_window_tokens"])
@@ -4543,6 +4574,7 @@ def _scene_shard_semantic_review_budget(
         "provider": provider,
         "model": model,
         "unit_count": len(unit_keys),
+        "output_reserve_percent": output_reserve_percent,
         "input_estimate": input_estimate,
         "required": required,
         "ceiling": ceiling,
@@ -4861,6 +4893,9 @@ async def _semantic_review_scene_shard_draft(
                     "provider": budget["provider"],
                     "model": budget["model"],
                     "unit_count": budget["unit_count"],
+                    "output_reserve_percent": budget[
+                        "output_reserve_percent"
+                    ],
                     "input_estimate": budget["input_estimate"],
                     "required": budget["required"],
                     "ceiling": budget["ceiling"],

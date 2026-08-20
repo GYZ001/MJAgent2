@@ -1,0 +1,27 @@
+{
+  "run_id": "run_ce6de5406a72",
+  "provider_call_id": 63118,
+  "shard_id": "SS007",
+  "chunk_index": 1,
+  "chunk_count": 1,
+  "scene_keys": ["bp-sc029", "bp-sc030"],
+  "source_segment_ids": ["SRC0047", "SRC0048"],
+  "unit_keys": [
+    "bp-sc029:SRC0047:001:unit",
+    "bp-sc029:SRC0047:002:unit",
+    "bp-sc029:SRC0047:003:unit",
+    "bp-sc029:SRC0047:004:unit",
+    "bp-sc029:SRC0047:005:unit",
+    "bp-sc029:SRC0047:006:unit",
+    "bp-sc029:SRC0047:007:unit",
+    "bp-sc030:SRC0048:001:unit",
+    "bp-sc030:SRC0048:002:unit",
+    "bp-sc030:SRC0048:003:unit",
+    "bp-sc030:SRC0048:004:unit"
+  ],
+  "prompt_chars": 10935,
+  "requested_max_tokens": 7641,
+  "effective_max_tokens": 7641,
+  "completion_tokens": 7641,
+  "finish_reason": "length"
+}

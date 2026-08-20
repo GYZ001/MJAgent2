@@ -124,6 +124,11 @@ RUN_884443DC4404_REPLAY = (
     / "fixtures"
     / "run_884443dc4404_semantic_review.json"
 )
+ATTEMPT6_CALL_63118_SEMANTIC_BUDGET = (
+    Path(__file__).parent
+    / "fixtures"
+    / "attempt6_call_63118_semantic_budget.json"
+)
 RUN_B0659B64B548_REPLAY = (
     Path(__file__).parent
     / "fixtures"
@@ -641,9 +646,16 @@ def test_run_884443dc4404_semantic_budget_covers_worst_payload() -> None:
             for finding in review.findings
         )
         assert all(len(finding.message) == 160 for finding in review.findings)
+        compact_required = math.ceil(len(payload) / 1.5 * 1.2)
+        pretty_payload = json.dumps(
+            json.loads(payload),
+            ensure_ascii=False,
+            indent=2,
+        )
         assert required == max(
             2048,
-            math.ceil(len(payload) / 1.5 * 1.2),
+            math.ceil(len(pretty_payload) / 1.5 * 1.2),
+            compact_required * 2,
         )
         budgets.append(required)
         payloads[unit_count] = payload
@@ -666,6 +678,113 @@ def test_run_884443dc4404_semantic_budget_covers_worst_payload() -> None:
     assert partial["unit_count"] == case["budget_unit_counts"][-1]
     assert budgets[-1] > partial_need
     assert len(payloads[partial["unit_count"]]) > len(partial_payload)
+
+
+def test_attempt6_call_63118_semantic_budget_has_bounded_runaway_reserve(
+) -> None:
+    case = json.loads(
+        ATTEMPT6_CALL_63118_SEMANTIC_BUDGET.read_text(encoding="utf-8")
+    )
+    unit_keys = case["unit_keys"]
+    payload = (
+        scene_shards_module
+        .screenplay_scene_semantic_review_worst_case_payload(unit_keys)
+    )
+    compact_required = (
+        scene_shards_module._screenplay_scene_semantic_token_estimate(
+            len(payload)
+        )
+    )
+    required = (
+        scene_shards_module
+        .screenplay_scene_semantic_review_required_tokens(unit_keys)
+    )
+
+    assert len(unit_keys) == 11
+    assert len(case["scene_keys"]) == len(case["source_segment_ids"]) == 2
+    assert compact_required == case["requested_max_tokens"] == 7641
+    assert case["effective_max_tokens"] == case["completion_tokens"] == 7641
+    assert case["finish_reason"] == "length"
+    assert required == compact_required * 2 == 15282
+    assert required < 32768
+
+
+def test_semantic_review_reserve_does_not_inflate_one_or_two_unit_reviews(
+) -> None:
+    for unit_count in (1, 2):
+        unit_keys = [
+            f"bp-sc001:SRC0001:{index:03d}:unit"
+            for index in range(1, unit_count + 1)
+        ]
+        assert all(
+            scene_shards_module
+            .screenplay_scene_semantic_review_required_tokens(
+                unit_keys,
+                output_reserve_percent=reserve_percent,
+            )
+            == scene_shards_module
+            .SCREENPLAY_SCENE_SEMANTIC_REVIEW_MIN_OUTPUT_TOKENS
+            for reserve_percent in (0, 100, 200)
+        )
+
+
+def test_semantic_review_reserve_setting_remains_provider_capped(
+    monkeypatch,
+) -> None:
+    case = json.loads(
+        ATTEMPT6_CALL_63118_SEMANTIC_BUDGET.read_text(encoding="utf-8")
+    )
+    monkeypatch.setattr(
+        scene_shards_module.hiagent,
+        "active_provider",
+        lambda _kind: "budget-test-provider",
+    )
+    monkeypatch.setattr(
+        scene_shards_module.hiagent,
+        "active_model",
+        lambda _kind, _provider=None: "budget-test-model",
+    )
+    monkeypatch.setattr(
+        scene_shards_module.hiagent,
+        "active_model_token_limits",
+        lambda *_args: {
+            "context_window_tokens": 128 * 1024,
+            "max_output_tokens": 12000,
+            "token_limits_source": "configured",
+        },
+    )
+
+    configured_reserve = "0"
+    monkeypatch.setattr(
+        scene_shards_module,
+        "get_setting",
+        lambda key: (
+            configured_reserve
+            if key
+            == "screenplay_scene_semantic_review_output_reserve_percent"
+            else ""
+        ),
+    )
+    no_reserve = scene_shards_module._scene_shard_semantic_review_budget(
+        unit_keys=case["unit_keys"],
+        review_prompt="production-sized semantic review",
+    )
+
+    configured_reserve = "100"
+    default_reserve = (
+        scene_shards_module._scene_shard_semantic_review_budget(
+            unit_keys=case["unit_keys"],
+            review_prompt="production-sized semantic review",
+        )
+    )
+
+    assert no_reserve["output_reserve_percent"] == 0
+    assert no_reserve["required"] < default_reserve["required"]
+    assert default_reserve["output_reserve_percent"] == 100
+    assert default_reserve["required"] == 15282
+    assert no_reserve["ceiling"] == default_reserve["ceiling"] == 12000
+    assert no_reserve["required"] <= no_reserve["ceiling"]
+    assert default_reserve["required"] > default_reserve["ceiling"]
 
 
 def test_scene_shard_semantic_review_rejects_duplicate_finding_keys() -> None:
@@ -3394,6 +3513,7 @@ def test_scene_shard_semantic_post_repair_invalid_format_uses_three_calls_per_re
         message="持续错误的来源状态主体",
     )
     review_calls: list[dict] = []
+    review_token_budgets: list[tuple[int, int]] = []
 
     async def fake_chat(*_args, **kwargs):
         meta = kwargs["call_meta"]
@@ -3402,6 +3522,10 @@ def test_scene_shard_semantic_post_repair_invalid_format_uses_three_calls_per_re
                 flagged_key: draft.slots[flagged_key].model_copy(deep=True),
             }).model_dump_json()
         review_calls.append(deepcopy(meta))
+        review_token_budgets.append((
+            int(kwargs["max_tokens"]),
+            int(meta["required"]),
+        ))
         await asyncio.sleep(0)
         if meta["substage"] == "initial":
             return ScreenplaySceneShardSemanticReview(
@@ -3448,6 +3572,11 @@ def test_scene_shard_semantic_post_repair_invalid_format_uses_three_calls_per_re
     assert all(
         call["semantic_attempt"] == 0
         for call in post_repair_calls
+    )
+    assert review_token_budgets
+    assert all(
+        max_tokens == required
+        for max_tokens, required in review_token_budgets
     )
 
 
