@@ -64,10 +64,10 @@ from app.source_facts import SourceFact, source_segment_facts
 
 
 SCREENPLAY_ENVELOPE_VERSION = "screenplay-envelope.v1"
-SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v10"
+SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v11"
 SCREENPLAY_SHARD_PLAN_VERSION = "screenplay-scene-shard-plan.v6"
 SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v10"
-SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v7"
+SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v8"
 SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v9"
 SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION = (
     "screenplay-scene-semantic-review.v13"
@@ -127,6 +127,43 @@ class _FailFastScope:
             if peer is not owner and not peer.done():
                 peer.cancel()
         return True
+
+
+class _SceneStructuredOperationGate:
+    """Fence complete structured operations before a queued peer can start."""
+
+    def __init__(self, limit: int, batch_abort: asyncio.Event) -> None:
+        self._semaphore = asyncio.Semaphore(max(1, int(limit)))
+        self._batch_abort = batch_abort
+
+    async def run(
+        self,
+        operation: Callable[[], Awaitable[Any]],
+        *,
+        on_failure: Callable[[], None] | None = None,
+    ) -> Any:
+        await self._semaphore.acquire()
+        try:
+            if self._batch_abort.is_set():
+                raise asyncio.CancelledError
+            try:
+                return await operation()
+            except BaseException as exc:
+                # The abort fence must be visible before release wakes the next
+                # structured operation. Preserve the original exception,
+                # including user/fail-fast CancelledError.
+                self._batch_abort.set()
+                if on_failure is not None:
+                    try:
+                        on_failure()
+                    except Exception as callback_exc:  # noqa: BLE001
+                        exc.add_note(
+                            "structured-operation abort callback failed: "
+                            f"{callback_exc!r}"
+                        )
+                raise
+        finally:
+            self._semaphore.release()
 
 
 async def _gather_fail_fast(
@@ -481,7 +518,7 @@ class ScreenplaySceneShardCreativeUnit(BaseModel):
 class ScreenplaySceneShardCreativeIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-creative.v7"] = (
+    contract_version: Literal["screenplay-scene-creative.v8"] = (
         SCREENPLAY_SCENE_CREATIVE_VERSION
     )
     slots: dict[str, ScreenplaySceneShardCreativeUnit]
@@ -1035,7 +1072,9 @@ class ScreenplaySceneShardScene(IRScene):
 class ScreenplaySceneShardIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-shard.v10"] = SCREENPLAY_SCENE_SHARD_VERSION
+    contract_version: Literal["screenplay-scene-shard.v11"] = (
+        SCREENPLAY_SCENE_SHARD_VERSION
+    )
     episode_no: int
     shard_id: str
     scene_plan_keys: list[str]
@@ -4564,11 +4603,22 @@ def _scene_shard_semantic_review_schema(
 def _scene_shard_semantic_review_response_format(
     review_schema: dict[str, Any],
 ) -> dict[str, Any]:
-    provider_schema = _scene_shard_strict_provider_schema(review_schema)
+    return _scene_shard_strict_response_format(
+        name="screenplay_scene_semantic_review",
+        local_schema=review_schema,
+    )
+
+
+def _scene_shard_strict_response_format(
+    *,
+    name: str,
+    local_schema: dict[str, Any],
+) -> dict[str, Any]:
+    provider_schema = _scene_shard_strict_provider_schema(local_schema)
     return {
         "type": "json_schema",
         "json_schema": {
-            "name": "screenplay_scene_semantic_review",
+            "name": name,
             "strict": True,
             "schema": provider_schema,
         },
@@ -4600,7 +4650,29 @@ def _scene_shard_strict_provider_schema(
 
     def sanitize(schema_node: dict[str, Any]) -> dict[str, Any]:
         sanitized: dict[str, Any] = {}
+        all_of = schema_node.get("allOf")
+        if all_of is not None:
+            references = [
+                branch["$ref"]
+                for branch in all_of
+                if (
+                    isinstance(branch, dict)
+                    and isinstance(branch.get("$ref"), str)
+                )
+            ]
+            if len(references) != 1:
+                raise ValueError(
+                    "strict provider schema cannot project allOf without "
+                    "one authoritative $ref"
+                )
+            # Scene slots combine a reusable creative-unit $ref with local-only
+            # dialogue const constraints. Preserve the structural contract;
+            # the full schema and Pydantic validator enforce the omitted const.
+            sanitized["$ref"] = references[0]
         for keyword, value in schema_node.items():
+            if keyword == "const":
+                sanitized["enum"] = [deepcopy(value)]
+                continue
             if (
                 keyword
                 not in _SCREENPLAY_SCENE_STRICT_PROVIDER_SCHEMA_KEYWORDS
@@ -4615,6 +4687,16 @@ def _scene_shard_strict_provider_schema(
                 sanitized[keyword] = sanitize(value)
             else:
                 sanitized[keyword] = deepcopy(value)
+        properties = sanitized.get("properties")
+        if isinstance(properties, dict):
+            if sanitized.get("additionalProperties") is not False:
+                raise ValueError(
+                    "strict provider object schemas must forbid extra fields"
+                )
+            # Strict schemas require every declared property to be required.
+            # Local defaults still own the business meaning of empty creative
+            # fields such as performance and resulting_state.
+            sanitized["required"] = list(properties)
         return sanitized
 
     return sanitize(local_schema)
@@ -4909,6 +4991,7 @@ async def _semantic_review_scene_shard_draft(
     validate_draft: Callable[[ScreenplaySceneShardCreativeIR], list[str]],
     batch_abort: asyncio.Event | None = None,
     abort_batch: Callable[[], None] | None = None,
+    structured_operation_gate: _SceneStructuredOperationGate | None = None,
 ) -> tuple[ScreenplaySceneShardCreativeIR, list[dict[str, Any]]]:
     """Consensus-review creative prose without allowing structural rewrites."""
 
@@ -4948,9 +5031,7 @@ async def _semantic_review_scene_shard_draft(
                 allow_local_omitted_unit_key=True,
             )
 
-        if batch_abort is not None and batch_abort.is_set():
-            raise asyncio.CancelledError
-        try:
+        async def execute_review() -> ScreenplaySceneShardSemanticReview:
             result = await model_gateway.chat_structured(
                 [
                     {
@@ -5008,21 +5089,31 @@ async def _semantic_review_scene_shard_draft(
                 ),
                 require_response_format=True,
             )
+            if batch_abort is not None and batch_abort.is_set():
+                raise asyncio.CancelledError
+            validation_errors = validate_review(result)
+            if validation_errors:
+                raise ScreenplaySceneShardError(
+                    shard_id,
+                    validation_errors,
+                )
+            return result
+
+        if batch_abort is not None and batch_abort.is_set():
+            raise asyncio.CancelledError
+        try:
+            if structured_operation_gate is None:
+                return await execute_review()
+            return await structured_operation_gate.run(
+                execute_review,
+                on_failure=abort_batch,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
             if batch_abort is not None:
                 batch_abort.set()
             raise
-        if batch_abort is not None and batch_abort.is_set():
-            raise asyncio.CancelledError
-        validation_errors = validate_review(result)
-        if validation_errors:
-            raise ScreenplaySceneShardError(
-                shard_id,
-                validation_errors,
-            )
-        return result
 
     async def consensus(
         candidate: ScreenplaySceneShardCreativeIR,
@@ -5259,8 +5350,9 @@ async def _semantic_review_scene_shard_draft(
             )
         if batch_abort is not None and batch_abort.is_set():
             raise asyncio.CancelledError
-        try:
-            repaired = await model_gateway.chat_structured(
+
+        async def execute_repair() -> ScreenplaySceneShardCreativeIR:
+            repaired_candidate = await model_gateway.chat_structured(
                 repair_messages,
                 model_type=ScreenplaySceneShardCreativeIR,
                 validate=validate_repair,
@@ -5294,6 +5386,24 @@ async def _semantic_review_scene_shard_draft(
                 repair_context=repair_context,
                 output_schema=subset_schema,
             )
+            if batch_abort is not None and batch_abort.is_set():
+                raise asyncio.CancelledError
+            repair_errors = validate_repair(repaired_candidate)
+            if repair_errors:
+                raise ScreenplaySceneShardError(
+                    shard_id,
+                    repair_errors,
+                )
+            return repaired_candidate
+
+        try:
+            if structured_operation_gate is None:
+                repaired = await execute_repair()
+            else:
+                repaired = await structured_operation_gate.run(
+                    execute_repair,
+                    on_failure=abort_batch,
+                )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -5302,14 +5412,6 @@ async def _semantic_review_scene_shard_draft(
             if abort_batch is not None:
                 abort_batch()
             raise
-        if batch_abort is not None and batch_abort.is_set():
-            raise asyncio.CancelledError
-        repair_errors = validate_repair(repaired)
-        if repair_errors:
-            raise ScreenplaySceneShardError(
-                shard_id,
-                repair_errors,
-            )
         merged_repair = current_draft.model_copy(deep=True)
         for unit_key in ordered_flagged_unit_keys:
             merged_repair.slots[unit_key] = repaired.slots[
@@ -5371,6 +5473,15 @@ async def generate_screenplay_scene_shards(
     semaphore = asyncio.Semaphore(parallelism)
     batch_abort = asyncio.Event()
     shard_scope = _FailFastScope()
+    structured_operation_gate = _SceneStructuredOperationGate(
+        _setting_int(
+            "text_generation_concurrency",
+            2,
+            minimum=1,
+            maximum=16,
+        ),
+        batch_abort,
+    )
     checkpoint_rows: dict[str, dict[str, Any]] = {
         plan.shard_id: {
             "shard_id": plan.shard_id,
@@ -5398,6 +5509,13 @@ async def generate_screenplay_scene_shards(
     ) -> tuple[ScreenplaySceneShardIR, str]:
         if batch_abort.is_set():
             raise asyncio.CancelledError
+        shard_owner = asyncio.current_task()
+
+        def abort_outer_batch() -> None:
+            batch_abort.set()
+            if shard_owner is not None:
+                shard_scope.fail(shard_owner)
+
         _assert_episode_owner(episode_id)
         plan_scene_input_contracts = scene_input_contracts.get(
             plan.shard_id, []
@@ -5617,46 +5735,65 @@ async def generate_screenplay_scene_shards(
                     batch_abort.set()
                     raise
                 try:
-                    draft = await model_gateway.chat_structured(
-                        [{"role": "user", "content": prompt}],
-                        model_type=ScreenplaySceneShardCreativeIR,
-                        validate=validate_draft,
-                        operation_id=operation_id,
-                        max_tokens=screenplay_scene_shard_token_budget(plan),
-                        temperature=0.4,
-                        format_retry_limit=_setting_int(
-                            "screenplay_format_retry_limit",
-                            1,
-                            minimum=0,
-                            maximum=3,
-                        ),
-                        semantic_retry_limit=_setting_int(
-                            "screenplay_semantic_retry_limit",
-                            1,
-                            minimum=0,
-                            maximum=3,
-                        ),
-                        call_meta={
-                            "stage": "剧本场次分片",
-                            "stage_key": "screenplay_scene_shards",
-                            "substage": "scene_writing",
-                            "shard_id": plan.shard_id,
-                            "shard_count": len(plans),
-                            "episode_id": episode_id,
-                            "source_count": len(plan.source_segment_ids),
-                            "scene_count": len(plan.scene_plan_keys),
-                            "identity_scaffold_hash": identity_scaffold_hash,
-                            "generation_scaffold_hash": (
-                                generation_scaffold_hash
+                    async def write_draft() -> (
+                        ScreenplaySceneShardCreativeIR
+                    ):
+                        return await model_gateway.chat_structured(
+                            [{"role": "user", "content": prompt}],
+                            model_type=ScreenplaySceneShardCreativeIR,
+                            validate=validate_draft,
+                            operation_id=operation_id,
+                            max_tokens=(
+                                screenplay_scene_shard_token_budget(plan)
                             ),
-                            "input_chars": len(prompt),
-                            **budget_meta,
-                        },
-                        repair_context=creative_repair_context,
-                        format_repair_context=creative_repair_context,
-                        output_schema=output_schema,
-                        repair_schema=repair_schema,
-                        on_attempt=attempts.append,
+                            temperature=0.4,
+                            format_retry_limit=_setting_int(
+                                "screenplay_format_retry_limit",
+                                1,
+                                minimum=0,
+                                maximum=3,
+                            ),
+                            semantic_retry_limit=_setting_int(
+                                "screenplay_semantic_retry_limit",
+                                1,
+                                minimum=0,
+                                maximum=3,
+                            ),
+                            call_meta={
+                                "stage": "剧本场次分片",
+                                "stage_key": "screenplay_scene_shards",
+                                "substage": "scene_writing",
+                                "shard_id": plan.shard_id,
+                                "shard_count": len(plans),
+                                "episode_id": episode_id,
+                                "source_count": len(plan.source_segment_ids),
+                                "scene_count": len(plan.scene_plan_keys),
+                                "identity_scaffold_hash": (
+                                    identity_scaffold_hash
+                                ),
+                                "generation_scaffold_hash": (
+                                    generation_scaffold_hash
+                                ),
+                                "input_chars": len(prompt),
+                                **budget_meta,
+                            },
+                            repair_context=creative_repair_context,
+                            format_repair_context=creative_repair_context,
+                            output_schema=output_schema,
+                            response_format=(
+                                _scene_shard_strict_response_format(
+                                    name="screenplay_scene_shard_creative",
+                                    local_schema=output_schema,
+                                )
+                            ),
+                            require_response_format=True,
+                            repair_schema=repair_schema,
+                            on_attempt=attempts.append,
+                        )
+
+                    draft = await structured_operation_gate.run(
+                        write_draft,
+                        on_failure=abort_outer_batch,
                     )
                 except asyncio.CancelledError:
                     raise
@@ -5668,13 +5805,6 @@ async def generate_screenplay_scene_shards(
         if batch_abort.is_set():
             raise asyncio.CancelledError
         initial_creative_hash = _hash(draft.model_dump(mode="json"))
-        shard_owner = asyncio.current_task()
-
-        def abort_outer_batch() -> None:
-            batch_abort.set()
-            if shard_owner is not None:
-                shard_scope.fail(shard_owner)
-
         draft, semantic_reviews = await _semantic_review_scene_shard_draft(
             draft=draft,
             scene_input_contracts=plan_scene_input_contracts,
@@ -5684,6 +5814,7 @@ async def generate_screenplay_scene_shards(
             validate_draft=validate_draft,
             batch_abort=batch_abort,
             abort_batch=abort_outer_batch,
+            structured_operation_gate=structured_operation_gate,
         )
         if batch_abort.is_set():
             raise asyncio.CancelledError

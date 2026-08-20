@@ -5527,7 +5527,7 @@ def test_scene_shard_contract_version_is_not_silently_upgraded() -> None:
     payload["contract_version"] = "screenplay-scene-shard.v0"
     with pytest.raises(ValidationError):
         ScreenplaySceneShardIR.model_validate(payload)
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v10"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v11"
 
 
 def test_blueprint_and_slot_semantics_are_required_without_defaults() -> None:
@@ -8091,7 +8091,7 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
         "authority_id"
     ] == "bible:甲"
     assert first_repair_context["root_contract"]["contract_version"] == (
-        "screenplay-scene-creative.v7"
+        "screenplay-scene-creative.v8"
     )
     assert (
         "empty action source_text does not authorize free rewriting; "
@@ -8671,12 +8671,12 @@ def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -
 def test_scene_shard_contract_fingerprint_is_upgraded(
     monkeypatch,
 ) -> None:
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v10"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v11"
     assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v10"
     assert SCREENPLAY_SCENE_CREATIVE_VERSION == (
-        "screenplay-scene-creative.v7"
+        "screenplay-scene-creative.v8"
     )
-    with pytest.raises(ValidationError, match="screenplay-scene-creative.v7"):
+    with pytest.raises(ValidationError, match="screenplay-scene-creative.v8"):
         ScreenplaySceneShardCreativeIR.model_validate({
             "contract_version": "screenplay-scene-creative.v6",
             "slots": {},
@@ -9518,7 +9518,7 @@ def test_generation_scaffold_fingerprint_binds_slot_structure() -> None:
         )
         != fingerprint
     )
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v10"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v11"
     assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v10"
 
 
