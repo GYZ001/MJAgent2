@@ -43,6 +43,57 @@ def test_response_format_unsupported_detection_only_on_explicit_client_rejection
     )
     assert hiagent._looks_like_response_format_unsupported(unrelated) is False
 
+    # 网关要求 messages 显式提到 JSON 是请求契约错误，不是能力缺失；
+    # 不得记入 unsupported 后悄然去掉结构化约束。
+    missing_instruction = hiagent.ProviderError(
+        "请求被拒绝（HTTP 400）：'messages' must contain the word 'json' "
+        "in some form, to use 'response_format' of type 'json_object'",
+        retryable=False,
+        raw='{"error":{"code":"InvalidParameter"}}',
+    )
+    assert hiagent._looks_like_response_format_unsupported(missing_instruction) is False
+
+
+def test_json_object_adds_json_instruction_without_mutating_messages() -> None:
+    messages = [{"role": "user", "content": "只返回一个对象"}]
+
+    normalized = hiagent._messages_for_response_format(
+        messages, {"type": "json_object"},
+    )
+
+    assert messages == [{"role": "user", "content": "只返回一个对象"}]
+    assert normalized is not messages
+    assert normalized[0]["role"] == "system"
+    assert "json" in normalized[0]["content"].lower()
+    assert normalized[1:] == messages
+
+
+def test_json_object_does_not_duplicate_existing_json_instruction() -> None:
+    messages = [
+        {"role": "system", "content": "Return valid JSON only."},
+        {"role": "user", "content": "生成结果"},
+    ]
+
+    normalized = hiagent._messages_for_response_format(
+        messages, {"type": "json_object"},
+    )
+
+    assert normalized == messages
+    assert normalized is not messages
+    assert sum(
+        "json" in str(message.get("content") or "").lower()
+        for message in normalized
+    ) == 1
+
+
+def test_non_json_response_format_does_not_change_messages() -> None:
+    messages = [{"role": "user", "content": "写一段自由文本"}]
+
+    assert hiagent._messages_for_response_format(messages, None) is messages
+    assert hiagent._messages_for_response_format(
+        messages, {"type": "text"},
+    ) is messages
+
 
 def test_response_format_capability_memory_roundtrip() -> None:
     provider, model = "test-provider", "test-model-cap"
@@ -104,3 +155,59 @@ async def test_non_json_call_does_not_attach_response_format(monkeypatch) -> Non
         call_meta={"stage_key": "free_text"},
     )
     assert "response_format" not in captured
+
+
+@pytest.mark.asyncio
+async def test_json_object_first_provider_payload_contains_json_instruction(
+    monkeypatch,
+) -> None:
+    """The first provider request is valid; no 400-driven fallback is needed."""
+    payloads: list[dict] = []
+
+    monkeypatch.setattr(
+        hiagent,
+        "text_request_token_limits",
+        lambda **_kwargs: ("hiagent", "test-model", 256),
+    )
+    monkeypatch.setattr(
+        hiagent,
+        "active_model_token_limits",
+        lambda *_args, **_kwargs: {
+            "context_window_tokens": 8192,
+            "max_output_tokens": 256,
+            "token_limits_source": "test",
+        },
+    )
+    monkeypatch.setattr(
+        hiagent,
+        "_model_connection",
+        lambda *_args, **_kwargs: ("https://example.invalid", {"x-test": "1"}),
+    )
+    monkeypatch.setattr(
+        hiagent,
+        "_cached_successful_provider_response",
+        lambda *_args, **_kwargs: None,
+    )
+
+    async def fake_request(_client, _url, payload, **_kwargs):
+        payloads.append(payload)
+        assert payload["response_format"] == {"type": "json_object"}
+        assert any(
+            "json" in str(message.get("content") or "").lower()
+            for message in payload["messages"]
+        )
+        return {"choices": [{"message": {"content": '{"ok":true}'}}]}
+
+    monkeypatch.setattr(hiagent, "_plain_chat_request", fake_request)
+
+    original = [{"role": "user", "content": "只返回对象"}]
+    result = await hiagent.chat(
+        original,
+        response_format={"type": "json_object"},
+        max_tokens=256,
+        call_meta={"operation_id": "op-json-contract"},
+    )
+
+    assert result == '{"ok":true}'
+    assert original == [{"role": "user", "content": "只返回对象"}]
+    assert len(payloads) == 1

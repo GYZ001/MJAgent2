@@ -1253,6 +1253,9 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
         让网关在生成阶段就约束合法 JSON；返回 (content, data) 供空内容兜底。"""
         def _with_rf(payload: dict[str, Any]) -> dict[str, Any]:
             if attempt_response_format is not None:
+                payload["messages"] = _messages_for_response_format(
+                    payload["messages"], attempt_response_format,
+                )
                 payload["response_format"] = attempt_response_format
             return payload
 
@@ -1443,6 +1446,46 @@ def _looks_like_tools_unsupported(exc: ProviderError) -> bool:
 # 这是能力协商（按运行期真实反馈学习），不是内容白/黑名单；重启即清空、按需重学。
 _RESPONSE_FORMAT_UNSUPPORTED: set[str] = set()
 
+_JSON_OBJECT_SYSTEM_INSTRUCTION = (
+    "Return exactly one valid JSON object. Do not use Markdown or prose outside JSON."
+)
+
+
+def _message_content_mentions_json(value: Any) -> bool:
+    """Return whether textual message content already names the JSON contract."""
+    if isinstance(value, str):
+        return "json" in value.casefold()
+    if isinstance(value, dict):
+        return any(_message_content_mentions_json(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_message_content_mentions_json(item) for item in value)
+    return False
+
+
+def _messages_for_response_format(
+    messages: list[dict], response_format: dict[str, Any] | None,
+) -> list[dict]:
+    """Make ``json_object`` requests valid for strict OpenAI-compatible gateways.
+
+    Some gateways reject ``response_format={"type": "json_object"}`` unless a
+    message explicitly contains the word ``JSON``.  Add that protocol hint at
+    the provider boundary, without mutating caller-owned messages.  Other
+    response formats and ordinary text calls retain their byte-for-byte message
+    payload semantics.
+    """
+    if not response_format or response_format.get("type") != "json_object":
+        return messages
+    copied = [dict(message) for message in messages]
+    if any(
+        _message_content_mentions_json(message.get("content"))
+        for message in copied
+    ):
+        return copied
+    return [
+        {"role": "system", "content": _JSON_OBJECT_SYSTEM_INSTRUCTION},
+        *copied,
+    ]
+
 
 def _response_format_capability_key(provider: str, model: str) -> str:
     return f"{provider}:{model}"
@@ -1464,13 +1507,45 @@ def _looks_like_response_format_unsupported(exc: ProviderError) -> bool:
     if exc.retryable:
         return False
     blob = f"{exc} {exc.raw}".lower()
-    return ("response_format" in blob or "json_schema" in blob or "json schema" in blob) and (
-        "support" in blob
-        or "unknown" in blob
-        or "unrecognized" in blob
-        or "invalid" in blob
-        or "not allowed" in blob
-        or "unexpected" in blob
+    names_format = (
+        "response_format" in blob
+        or "json_schema" in blob
+        or "json schema" in blob
+    )
+    if not names_format:
+        return False
+    # This is a malformed request contract, not evidence that the model lacks
+    # response_format support.  Silently removing response_format would hide a
+    # first-attempt 400 and weaken the caller's structured-output guarantee.
+    if "json" in blob and ("message" in blob or "messages" in blob) and any(
+        marker in blob
+        for marker in (
+            "must contain",
+            "must include",
+            "should contain",
+            "should include",
+            "contain the word",
+            "mention the word",
+        )
+    ):
+        return False
+    # Remember only an explicit capability/field rejection.  A generic
+    # InvalidParameter may describe the prompt, schema, or another caller bug.
+    return any(
+        marker in blob
+        for marker in (
+            "unsupported parameter",
+            "unsupported field",
+            "not supported",
+            "does not support",
+            "unknown parameter",
+            "unknown field",
+            "unrecognized parameter",
+            "unrecognized field",
+            "unexpected parameter",
+            "unexpected field",
+            "not allowed",
+        )
     )
 
 
