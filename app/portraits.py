@@ -61,10 +61,10 @@ STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集�
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
-IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v7"
-FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v6"
+IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v8"
+FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v7"
 STRUCTURAL_IDENTITY_COVERAGE_VERSION = (
-    "screenplay-identity-structural-coverage.v4"
+    "screenplay-identity-structural-coverage.v5"
 )
 AUTOMATIC_IDENTITY_DECISION_PROVENANCE = "automatic_identity_discovery.v1"
 DURABLE_IDENTITY_DECISION_PROVENANCE = frozenset({"manual", "bible"})
@@ -760,6 +760,11 @@ async def _discover_character_candidates_legacy(
             })
 
     for current_batch, source_context in enumerate(source_contexts, start=1):
+        current_schema = _current_identity_schema()
+        current_response_format = _identity_strict_response_format(
+            current_schema,
+            name="screenplay_current_identity_discovery",
+        )
         prompt = f"""任务：为第 {episode_no} 集做人物身份增量预检。请用语义和上下文判断，
 不要依赖服饰、性别、年龄或称谓后缀的固定词表。
 
@@ -793,29 +798,81 @@ async def _discover_character_candidates_legacy(
 9. source_segment_id/source_quote 必须引用当前输入中实际承载该称谓的最小来源段；
    source_quote 必须逐字来自该段。短称谓只有在该段内唯一时才可输出。
 
-只输出 JSON：
-{{"characters": [{{"source_segment_id":"SRC0001","source_quote":"原文逐字短句","source_label": "本集称谓", "canonical_name": "真名或空串", "identity_kind": "named|functional", "functional_identity_key": "已有稳定ID或本次响应内分组ID", "kind": "onscreen|mentioned", "evidence": "本集依据", "future_evidence": "同一性依据或空串"}}]}}"""
+只输出符合下列 Schema 的 JSON。named 项必须携带 canonical_name，functional 项在结构上
+不得携带 canonical_name；两个数组都必须显式输出，空集合用 []：
+{json.dumps(current_schema, ensure_ascii=False, separators=(',', ':'))}"""
+
+        def validate_current_response(
+            value: CurrentIdentityCandidateResponse,
+        ) -> list[str]:
+            errors: list[str] = []
+            seen_labels: set[str] = set()
+            for item in value.characters:
+                source_label = str(item.get("source_label") or "")
+                if source_label != source_label.strip():
+                    errors.append(
+                        f"source_label 含首尾空白：{source_label!r}"
+                    )
+                if source_label in seen_labels:
+                    errors.append(f"source_label 重复：{source_label}")
+                seen_labels.add(source_label)
+                evidence_text = str(item.get("evidence") or "")
+                if evidence_text != evidence_text.strip():
+                    errors.append(f"evidence 含首尾空白：{source_label}")
+                canonical_name = str(item.get("canonical_name") or "")
+                if canonical_name != canonical_name.strip():
+                    errors.append(
+                        f"canonical_name 含首尾空白：{source_label}"
+                    )
+                functional_key = str(
+                    item.get("functional_identity_key") or ""
+                )
+                if functional_key != functional_key.strip():
+                    errors.append(
+                        "functional_identity_key 含首尾空白："
+                        f"{source_label}"
+                    )
+            return errors
 
         response = await model_gateway.chat_structured(
             [{"role": "user", "content": prompt}],
-            model_type=_IdentityCandidateResponse,
-            validate=None,
+            model_type=CurrentIdentityCandidateResponse,
+            validate=validate_current_response,
             operation_id=(
-                f"screenplay.identity.current.v2:{episode_no}:{current_batch}:"
-                + evidence_repository.content_hash(source_context)
+                f"screenplay.identity.current.v3:{episode_no}:{current_batch}:"
+                + evidence_repository.content_hash({
+                    "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
+                    "prompt": prompt,
+                    "schema": current_schema,
+                    "response_format": current_response_format,
+                })
             ),
             temperature=0.1,
             max_tokens=8192,
+            format_retry_limit=0,
+            semantic_retry_limit=0,
             call_meta={
                 "stage": "discover_character_candidates",
+                "stage_key": "screenplay_character_discovery",
+                "substage": "current_identity",
                 "episode_no": episode_no,
                 "discovery_phase": "current",
                 "source_batch": current_batch,
                 "source_batches": len(source_contexts),
                 "reuse_successful_operation": True,
+                "disable_provider_retries": True,
+                "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
+                "schema_hash": evidence_repository.content_hash(current_schema),
             },
+            output_schema=current_schema,
+            response_format=current_response_format,
+            require_response_format=True,
         )
-        raw = response.model_dump_json()
+        raw = json.dumps(
+            {"characters": response.characters},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         collect(
             raw,
             identity_haystack=current_haystack,
@@ -1006,29 +1063,141 @@ async def _discover_character_candidates_legacy(
     )
 
 
-class _IdentityCandidateResponse(BaseModel):
-    characters: list[dict] = Field(default_factory=list)
+class CurrentNamedIdentityCandidate(BaseModel):
+    """Closed current-source wire item with an explicit stable name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_segment_id: str = Field(max_length=64)
+    source_quote: str = Field(max_length=240)
+    source_label: str = Field(min_length=1, max_length=16)
+    canonical_name: str = Field(min_length=1, max_length=16)
+    identity_kind: Literal["named"]
+    kind: Literal["onscreen", "mentioned"]
+    evidence: str = Field(min_length=1, max_length=80)
+    future_evidence: str = Field(max_length=120)
 
 
-class StructuralIdentityCoverageCandidate(BaseModel):
-    """One closed identity decision for a typed structural reference."""
+class CurrentFunctionalIdentityCandidate(BaseModel):
+    """Closed current-source wire item which cannot carry a canonical name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_segment_id: str = Field(max_length=64)
+    source_quote: str = Field(max_length=240)
+    source_label: str = Field(min_length=1, max_length=16)
+    identity_kind: Literal["functional"]
+    functional_identity_key: str = Field(min_length=1, max_length=64)
+    kind: Literal["onscreen", "mentioned"]
+    evidence: str = Field(min_length=1, max_length=80)
+    future_evidence: Literal[""]
+
+
+class CurrentIdentityCandidateResponse(BaseModel):
+    """Provider-safe split wire for the current-source discovery pass."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    named: list[CurrentNamedIdentityCandidate]
+    functional: list[CurrentFunctionalIdentityCandidate]
+
+    @property
+    def characters(self) -> list[dict]:
+        named = [
+            {
+                **item.model_dump(mode="json"),
+                "functional_identity_key": "",
+            }
+            for item in self.named
+        ]
+        functional = [
+            {
+                **item.model_dump(mode="json"),
+                "canonical_name": "",
+            }
+            for item in self.functional
+        ]
+        return [*named, *functional]
+
+
+class FutureKnownNamedIdentityCandidate(BaseModel):
+    """A future-window decision bound to one backend-owned authority."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_label: str = Field(min_length=1, max_length=16)
+    authority_id: str = Field(min_length=1, max_length=200)
+    future_evidence: str = Field(min_length=1, max_length=120)
+
+
+class FutureNewNamedIdentityCandidate(BaseModel):
+    """A newly revealed name which must own a verbatim future anchor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_label: str = Field(min_length=1, max_length=16)
+    canonical_name: str = Field(min_length=1, max_length=16)
+    future_evidence: str = Field(min_length=1, max_length=120)
+
+
+class FutureFunctionalIdentityCandidate(BaseModel):
+    """A future-window decision which structurally cannot invent a name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_label: str = Field(min_length=1, max_length=16)
+
+
+class FutureIdentityCandidateResponse(BaseModel):
+    """Provider-safe split wire for bounded future identity resolution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    known_named: list[FutureKnownNamedIdentityCandidate]
+    new_named: list[FutureNewNamedIdentityCandidate]
+    functional: list[FutureFunctionalIdentityCandidate]
+
+
+class StructuralNamedIdentityCoverageCandidate(BaseModel):
+    """A named coverage decision bound to backend-owned authorities."""
 
     model_config = ConfigDict(extra="forbid")
 
     source_label: str = Field(min_length=1, max_length=160)
-    canonical_name: str = Field(max_length=80)
-    identity_kind: Literal["named", "functional"]
-    identity_group: str = Field(min_length=1, max_length=160)
-    kind: Literal["onscreen", "mentioned"]
-    evidence: str = Field(min_length=1, max_length=320)
+    authority_id: str = Field(min_length=1, max_length=200)
+    identity_group_ref: str = Field(min_length=1, max_length=96)
+    evidence: str = Field(min_length=1, max_length=80)
 
 
-class StructuralIdentityCoverageResponse(BaseModel):
-    """Strict wire root for the post-Blueprint identity coverage audit."""
+class StructuralFunctionalIdentityCoverageCandidate(BaseModel):
+    """A functional coverage decision with no canonical-name field."""
 
     model_config = ConfigDict(extra="forbid")
 
-    characters: list[StructuralIdentityCoverageCandidate]
+    source_label: str = Field(min_length=1, max_length=160)
+    identity_group_ref: str = Field(min_length=1, max_length=96)
+    evidence: str = Field(min_length=1, max_length=80)
+
+
+class StructuralIdentityCoverageResponse(BaseModel):
+    """Strict split wire for the post-Blueprint identity coverage audit."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    named: list[StructuralNamedIdentityCoverageCandidate]
+    functional: list[StructuralFunctionalIdentityCoverageCandidate]
+
+    @property
+    def characters(self) -> list[dict]:
+        named = [
+            {**item.model_dump(mode="json"), "identity_kind": "named"}
+            for item in self.named
+        ]
+        functional = [
+            {**item.model_dump(mode="json"), "identity_kind": "functional"}
+            for item in self.functional
+        ]
+        return [*named, *functional]
 
 
 _IDENTITY_COVERAGE_STRICT_PROVIDER_SCHEMA_KEYWORDS = frozenset({
@@ -1043,29 +1212,91 @@ _IDENTITY_COVERAGE_STRICT_PROVIDER_SCHEMA_KEYWORDS = frozenset({
 })
 
 
-def _structural_identity_coverage_schema(
+def _identity_source_label_schema(
+    model_type: type[BaseModel],
     source_labels: list[str],
+    *,
+    candidate_defs: tuple[str, ...],
+    branches: tuple[str, ...] = ("named", "functional"),
 ) -> dict:
-    """Bind one local coverage contract to the exact unresolved identities."""
+    """Bind both branches of a split identity wire to one allowed label set."""
     known_labels = list(dict.fromkeys(
         str(value or "").strip() for value in source_labels
         if str(value or "").strip()
     ))
     if not known_labels:
         raise ValueError(
-            "structural identity coverage schema requires source labels"
+            "identity schema requires source labels"
         )
-    schema = StructuralIdentityCoverageResponse.model_json_schema()
-    candidate_schema = schema["$defs"][
-        "StructuralIdentityCoverageCandidate"
-    ]
-    candidate_schema["properties"]["source_label"]["enum"] = known_labels
-    schema["properties"]["characters"]["minItems"] = len(known_labels)
-    schema["properties"]["characters"]["maxItems"] = len(known_labels)
+    schema = model_type.model_json_schema()
+    for definition_name in candidate_defs:
+        candidate_schema = schema["$defs"][definition_name]
+        candidate_schema["properties"]["source_label"]["enum"] = known_labels
+    for branch in branches:
+        schema["properties"][branch]["maxItems"] = len(known_labels)
     return schema
 
 
-def _identity_coverage_strict_provider_schema(
+def _current_identity_schema() -> dict:
+    return CurrentIdentityCandidateResponse.model_json_schema()
+
+
+def _future_identity_schema(
+    source_labels: list[str],
+    authority_ids: list[str],
+) -> dict:
+    schema = _identity_source_label_schema(
+        FutureIdentityCandidateResponse,
+        source_labels,
+        candidate_defs=(
+            "FutureKnownNamedIdentityCandidate",
+            "FutureNewNamedIdentityCandidate",
+            "FutureFunctionalIdentityCandidate",
+        ),
+        branches=("known_named", "new_named", "functional"),
+    )
+    known_named = schema["$defs"]["FutureKnownNamedIdentityCandidate"]
+    known_named["properties"]["authority_id"]["enum"] = list(dict.fromkeys(
+        str(value) for value in authority_ids if str(value)
+    ))
+    return schema
+
+
+def _structural_identity_coverage_schema(
+    source_labels: list[str],
+    *,
+    authority_ids: list[str],
+    identity_group_refs: list[str],
+) -> dict:
+    """Bind coverage labels, authorities and groups to backend-owned enums."""
+    if not authority_ids:
+        raise ValueError("structural identity coverage requires authorities")
+    if not identity_group_refs:
+        raise ValueError("structural identity coverage requires identity groups")
+    schema = _identity_source_label_schema(
+        StructuralIdentityCoverageResponse,
+        source_labels,
+        candidate_defs=(
+            "StructuralNamedIdentityCoverageCandidate",
+            "StructuralFunctionalIdentityCoverageCandidate",
+        ),
+    )
+    named = schema["$defs"]["StructuralNamedIdentityCoverageCandidate"]
+    named["properties"]["authority_id"]["enum"] = list(dict.fromkeys(
+        str(value) for value in authority_ids if str(value)
+    ))
+    group_values = list(dict.fromkeys(
+        str(value) for value in identity_group_refs if str(value)
+    ))
+    named["properties"]["identity_group_ref"]["enum"] = group_values
+    functional = schema["$defs"][
+        "StructuralFunctionalIdentityCoverageCandidate"
+    ]
+    functional["properties"]["identity_group_ref"]["enum"] = group_values
+    return schema
+
+
+def _identity_strict_provider_schema(
     local_schema: dict,
 ) -> dict:
     """Project the local identity contract to the provider-safe subset."""
@@ -1109,19 +1340,33 @@ def _identity_coverage_strict_provider_schema(
     return sanitize(local_schema)
 
 
-def _structural_identity_coverage_response_format(
+# Kept as a source-compatible alias for callers/tests which inspect the
+# sanitizer directly; it now serves every strict identity-discovery substage.
+_identity_coverage_strict_provider_schema = _identity_strict_provider_schema
+
+
+def _identity_strict_response_format(
     local_schema: dict,
+    *,
+    name: str,
 ) -> dict:
     return {
         "type": "json_schema",
         "json_schema": {
-            "name": "screenplay_structural_identity_coverage",
+            "name": name,
             "strict": True,
-            "schema": _identity_coverage_strict_provider_schema(
-                local_schema
-            ),
+            "schema": _identity_strict_provider_schema(local_schema),
         },
     }
+
+
+def _structural_identity_coverage_response_format(
+    local_schema: dict,
+) -> dict:
+    return _identity_strict_response_format(
+        local_schema,
+        name="screenplay_structural_identity_coverage",
+    )
 
 
 def _attach_candidate_source_evidence(
@@ -1221,6 +1466,16 @@ async def resolve_future_identity_candidates(
         {"authority_id": f"bible:{name}", "canonical_name": name}
         for name in known_names
     ]
+    allowed_source_labels = list(dict.fromkeys(
+        str(item.get("source_label") or "").strip()
+        for item in unresolved
+        if str(item.get("source_label") or "").strip()
+    ))
+    identity_schema = _future_identity_schema(allowed_source_labels)
+    identity_response_format = _identity_strict_response_format(
+        identity_schema,
+        name="screenplay_future_identity_resolution",
+    )
     prompt = f"""任务：只为当前集尚未确认的身份做后续姓名消歧。
 当前未决身份（不可新增列表外人物）：
 {json.dumps(unresolved, ensure_ascii=False, separators=(',', ':'))}
@@ -1234,8 +1489,10 @@ async def resolve_future_identity_candidates(
 future_evidence 必须逐字引用包含 canonical_name 的最小决定性依据，但该依据中的称谓可能
 是 source_label 的别名或语义承接，不要求两个字符串机械共现。证据不足时必须输出
 functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
-不得输出只在后续出场的人。只输出 JSON：
-{{"characters":[{{"source_label":"","canonical_name":"","identity_kind":"named|functional","future_evidence":"逐字依据或空串"}}]}}"""
+不得输出只在后续出场的人。必须对每个未决 source_label 恰好分类一次；named 项才能
+携带 canonical_name，functional 项在结构上不得携带 canonical_name。两个数组都必须显式
+输出，空集合用 []。只输出符合下列 Schema 的 JSON：
+{json.dumps(identity_schema, ensure_ascii=False, separators=(',', ':'))}"""
 
     def has_owned_canonical_anchor(
         future_evidence: str,
@@ -1266,36 +1523,68 @@ functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
                     return True
             search_from = name_at + len(canonical_name)
 
-    def validate_response(value: _IdentityCandidateResponse) -> list[str]:
-        allowed = {str(item.get("source_label") or "") for item in unresolved}
+    def relocate_owned_evidence(canonical_name: str) -> str:
+        """Deterministically relocate a verbatim canonical-name anchor."""
+        if not canonical_name or canonical_name not in future_context:
+            return ""
+        anchor_length = max(4, len(canonical_name) + 2)
+        name_at = future_context.find(canonical_name)
+        half = max(0, (anchor_length - len(canonical_name) + 1) // 2)
+        start = max(0, name_at - half)
+        end = min(len(future_context), name_at + len(canonical_name) + half)
+        snippet = future_context[start:end]
+        return snippet if has_owned_canonical_anchor(snippet, canonical_name) else ""
+
+    def owned_future_evidence(item: dict) -> str:
+        """Return provider evidence or one deterministic in-window anchor."""
+        canonical_name = str(item.get("canonical_name") or "").strip()
+        model_evidence = str(item.get("future_evidence") or "").strip()
+        if has_owned_canonical_anchor(model_evidence, canonical_name):
+            return model_evidence
+        return relocate_owned_evidence(canonical_name)
+
+    def validate_response(
+        value: FutureIdentityCandidateResponse,
+    ) -> list[str]:
+        allowed = set(allowed_source_labels)
         errors: list[str] = []
+        seen_labels: set[str] = set()
         for item in value.characters:
-            source_label = str(item.get("source_label") or "").strip()
-            identity_kind = str(
-                item.get("identity_kind") or ""
-            ).strip().lower()
+            source_label = str(item.get("source_label") or "")
+            if source_label != source_label.strip():
+                errors.append(
+                    f"source_label 含首尾空白：{source_label!r}"
+                )
             if source_label not in allowed:
                 errors.append(f"source_label 越界：{source_label}")
-            if identity_kind not in {"named", "functional"}:
-                errors.append(f"identity_kind 非法：{identity_kind}")
+            if source_label in seen_labels:
+                errors.append(f"source_label 重复：{source_label}")
+            seen_labels.add(source_label)
+            if item.get("identity_kind") == "named":
+                canonical_name = str(item.get("canonical_name") or "")
+                if canonical_name != canonical_name.strip():
+                    errors.append(
+                        f"canonical_name 含首尾空白：{source_label}"
+                    )
+                if not owned_future_evidence(item):
+                    errors.append(
+                        f"named identity 缺少可追溯真名锚点：{source_label}"
+                    )
+        missing_labels = allowed - seen_labels
+        if missing_labels:
+            errors.append(
+                "future identity 缺少未决称谓："
+                + ",".join(sorted(missing_labels))
+            )
         return errors
-
-    legacy_operation_id = (
-        f"screenplay.identity.future.v6:{episode_no}:"
-        + evidence_repository.content_hash({
-            "unresolved": unresolved,
-            "future_context": future_context,
-        })
-    )
     identity_provider, identity_model, identity_effective_max = (
         hiagent.text_request_token_limits(requested_max_tokens=4096)
     )
     identity_semantic_settings = hiagent.text_request_semantic_settings(
         identity_provider
     )
-    identity_schema = _IdentityCandidateResponse.model_json_schema()
     operation_id = (
-        "screenplay.identity.future.v7:"
+        "screenplay.identity.future.v8:"
         + evidence_repository.content_hash({
             "episode_no": episode_no,
             "provider": identity_provider,
@@ -1306,20 +1595,22 @@ functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
             "provider_semantic_settings": identity_semantic_settings,
             "messages": [{"role": "user", "content": prompt}],
             "output_schema": identity_schema,
+            "response_format": identity_response_format,
             "contract_version": FUTURE_IDENTITY_DECISION_VERSION,
         })
     )
 
     response = await model_gateway.chat_structured(
         [{"role": "user", "content": prompt}],
-        model_type=_IdentityCandidateResponse,
+        model_type=FutureIdentityCandidateResponse,
         validate=validate_response,
         operation_id=operation_id,
         max_tokens=4096,
         temperature=0.1,
+        format_retry_limit=0,
+        semantic_retry_limit=0,
         call_meta={
             "contract_version": FUTURE_IDENTITY_DECISION_VERSION,
-            "legacy_success_operation_id": legacy_operation_id,
             "provider": identity_provider,
             "model": identity_model,
             "effective_max_tokens": identity_effective_max,
@@ -1329,35 +1620,15 @@ functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
             "substage": "future_identity",
             "discovery_phase": "future_identity",
             "episode_no": episode_no,
+            "reuse_successful_operation": True,
+            "disable_provider_retries": True,
+            "schema_hash": evidence_repository.content_hash(identity_schema),
         },
         repair_context=future_context,
+        output_schema=identity_schema,
+        response_format=identity_response_format,
+        require_response_format=True,
     )
-    def relocate_owned_evidence(canonical_name: str) -> str:
-        """当真名逐字存在于窗口、但模型给的 future_evidence 未能锚定时，
-        由程序确定性地从窗口切出包含该真名的最小片段作为证据。
-
-        这不放松防捏造约束：真名必须逐字出现在 future_context 才可能被切出；
-        窗口中不存在的名字（模型臆测）依旧无法取得任何证据。目的是把“证据措辞
-        不精确导致合法解析被静默丢弃”恢复为“确定性可锚定的解析”，减少下游因
-        身份未冻结而报错。"""
-        if not canonical_name or canonical_name not in future_context:
-            return ""
-        anchor_length = max(4, len(canonical_name) + 2)
-        name_at = future_context.find(canonical_name)
-        # 以真名为中心向两侧扩展，凑够足以稳定命中的最小锚点长度。
-        half = max(0, (anchor_length - len(canonical_name) + 1) // 2)
-        start = max(0, name_at - half)
-        end = min(len(future_context), name_at + len(canonical_name) + half)
-        snippet = future_context[start:end]
-        return snippet if has_owned_canonical_anchor(snippet, canonical_name) else ""
-
-    def owned_future_evidence(item: dict) -> str:
-        """返回可锚定的 future_evidence：优先用模型原始逐字证据，其次由程序确定性重定位。"""
-        canonical_name = str(item.get("canonical_name") or "").strip()
-        model_evidence = str(item.get("future_evidence") or "").strip()
-        if has_owned_canonical_anchor(model_evidence, canonical_name):
-            return model_evidence
-        return relocate_owned_evidence(canonical_name)
 
     resolved_by_label = {
         str(item.get("source_label") or "").strip(): {
