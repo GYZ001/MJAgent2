@@ -300,7 +300,7 @@ def test_scene_shard_semantic_review_json_contract_is_strict() -> None:
     schema = ScreenplaySceneShardSemanticReview.model_json_schema()
 
     assert SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION == (
-        "screenplay-scene-semantic-review.v12"
+        "screenplay-scene-semantic-review.v13"
     )
     assert schema["required"] == ["findings"]
     assert "default" not in schema["properties"]["findings"]
@@ -2039,17 +2039,25 @@ def test_scene_shard_semantic_consensus_repairs_only_flagged_creative_slot(
         assert messages[0]["content"] == (
             scene_shards_module.SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT
         )
-        assert "response_format" not in kwargs
         if kwargs["model_type"] is ScreenplaySceneShardSemanticReview:
             prompt = messages[1]["content"]
+            dynamic_schema = kwargs["output_schema"]
             assert "findings=[]" not in prompt
             assert '{"findings":[]}' in prompt
             assert "不得输出 Markdown、解释或任何对象外文本" in prompt
-            assert kwargs["output_schema"] == (
-                ScreenplaySceneShardSemanticReview.model_json_schema()
+            assert kwargs["require_response_format"] is True
+            assert kwargs["response_format"] == (
+                scene_shards_module
+                ._scene_shard_semantic_review_response_format(
+                    dynamic_schema
+                )
+            )
+            assert (
+                kwargs["response_format"]["json_schema"]["schema"]
+                is dynamic_schema
             )
             assert json.dumps(
-                kwargs["output_schema"],
+                dynamic_schema,
                 ensure_ascii=False,
                 separators=(",", ":"),
             ) in prompt
@@ -2989,7 +2997,11 @@ def test_scene_shard_semantic_prompt_reads_action_source_facts_for_production_dr
         scene_input_contracts=[contract],
         identity_registry=[],
     )
-    review_schema = ScreenplaySceneShardSemanticReview.model_json_schema()
+    review_schema = (
+        scene_shards_module._scene_shard_semantic_review_schema(
+            list(draft.slots)
+        )
+    )
     assert "findings=[]" not in prompt
     assert '{"findings":[]}' in prompt
     assert "不得输出 Markdown、解释或任何对象外文本" in prompt

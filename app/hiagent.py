@@ -1230,7 +1230,8 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
 
     response_format 用于让网关在生成时就约束输出为合法 JSON（json_object / json_schema）。
     这些供应商都实现 OpenAI 兼容协议，普遍支持该字段；若某 provider/model 以客户端错误
-    明确拒绝该字段，会被记为不支持并去掉该字段重试一次，退回纯文本 + 本地修复的旧行为。"""
+    明确拒绝该字段，普通调用会记为不支持并去掉该字段重试一次。声明
+    ``response_format_required`` 的权威调用则原样失败，绝不降级结构化约束。"""
     timeout = httpx.Timeout(connect=10, read=_chat_read_timeout_s(call_meta), write=30, pool=10)
     provider, selected_model, effective_max_tokens = text_request_token_limits(
         requested_max_tokens=max_tokens,
@@ -1359,9 +1360,25 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                 content = _chat_content(data, label="chat")
         return content, data
 
+    response_format_required = bool(
+        (call_meta or {}).get("response_format_required")
+    )
+    if response_format_required and response_format is None:
+        raise ValueError(
+            "response_format_required needs an explicit response_format"
+        )
     attempt_response_format = (
         response_format
-        if response_format and not _response_format_known_unsupported(provider, selected_model)
+        if (
+            response_format
+            and (
+                response_format_required
+                or not _response_format_known_unsupported(
+                    provider,
+                    selected_model,
+                )
+            )
+        )
         else None
     )
     while True:
@@ -1370,6 +1387,12 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
             break
         except ProviderError as exc:
             if attempt_response_format is not None and _looks_like_response_format_unsupported(exc):
+                if response_format_required:
+                    # This operation declared provider-side schema enforcement
+                    # authoritative. A plain-text/json_object fallback would
+                    # silently weaken the contract and may create a second paid
+                    # generation, so propagate the first explicit rejection.
+                    raise
                 # 该 provider/model 明确拒绝 response_format：记录能力缺失并去掉该字段重试一次，
                 # 退回“纯文本 + 本地 extract_json 修复”的旧行为，绝不因此中断业务。
                 _remember_response_format_unsupported(provider, selected_model)

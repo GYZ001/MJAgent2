@@ -470,6 +470,8 @@ async def chat_structured(
     repair_context: str = "",
     format_repair_context: str = "",
     output_schema: dict[str, Any] | None = None,
+    response_format: dict[str, Any] | None = None,
+    require_response_format: bool = False,
     repair_schema: Callable[[T], dict[str, Any]] | None = None,
     normalize_payload: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     on_attempt: Callable[[dict[str, Any]], Any] | None = None,
@@ -484,6 +486,10 @@ async def chat_structured(
     """
     if not operation_id.strip():
         raise ValueError("structured operation_id is required")
+    if require_response_format and response_format is None:
+        raise ValueError(
+            "require_response_format needs an explicit response_format"
+        )
     structured_schema = output_schema or _model_schema(model_type)
     base_messages = [dict(message) for message in messages]
     current_messages = base_messages
@@ -502,6 +508,8 @@ async def chat_structured(
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "structured_schema": structured_schema,
+                "response_format": response_format,
+                "require_response_format": require_response_format,
             })
             attempt_operation_id = (
                 f"{operation_id}:structured-attempt:{attempt_identity}"
@@ -514,6 +522,7 @@ async def chat_structured(
             "format_attempt": format_attempt,
             "semantic_attempt": semantic_attempt,
             "local_recovery": local_recovery,
+            "response_format_required": bool(require_response_format),
         }
         last_raw = await chat(
             current_messages,
@@ -521,6 +530,7 @@ async def chat_structured(
             max_tokens=max_tokens,
             call_meta=meta,
             usage_callback=usage_callback,
+            response_format=response_format,
         )
         try:
             direct_error = json.loads(last_raw.strip())

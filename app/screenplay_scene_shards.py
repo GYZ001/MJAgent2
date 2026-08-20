@@ -70,7 +70,7 @@ SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v10"
 SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v7"
 SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v9"
 SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION = (
-    "screenplay-scene-semantic-review.v12"
+    "screenplay-scene-semantic-review.v13"
 )
 SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT = (
     "只返回一个符合用户消息内 JSON Schema 的 JSON 对象。"
@@ -4460,6 +4460,7 @@ def _scene_shard_semantic_review_prompt(
     scene_input_contracts: list[ScreenplaySceneInputContract],
     identity_registry: list[dict[str, Any]],
     unit_keys: list[str] | None = None,
+    review_schema: dict[str, Any] | None = None,
 ) -> str:
     authority_slots, identity_labels = (
         _scene_shard_semantic_authority_payload(
@@ -4481,7 +4482,11 @@ def _scene_shard_semantic_review_prompt(
             for unit_key in projected_unit_keys
         },
     })
-    review_schema = ScreenplaySceneShardSemanticReview.model_json_schema()
+    effective_review_schema = (
+        review_schema
+        if review_schema is not None
+        else _scene_shard_semantic_review_schema(projected_unit_keys)
+    )
     return (
         "你是剧本场次分片的独立语义审查员。必须逐 slot 穷举审查，不得抽样、"
         "提前停止或只报告部分冲突。逐 slot 对照原始 source_text 与"
@@ -4518,11 +4523,49 @@ def _scene_shard_semantic_review_prompt(
         + projected_draft.model_dump_json()
         + "\n完整输出 JSON Schema：\n"
         + json.dumps(
-            review_schema,
+            effective_review_schema,
             ensure_ascii=False,
             separators=(",", ":"),
         )
     )
+
+
+def _scene_shard_semantic_review_schema(
+    unit_keys: list[str],
+) -> dict[str, Any]:
+    """Bind semantic-review references and cardinality to one exact chunk."""
+    known_unit_keys = list(dict.fromkeys(unit_keys))
+    if not known_unit_keys:
+        raise ValueError("semantic review schema requires at least one unit_key")
+    schema = ScreenplaySceneShardSemanticReview.model_json_schema()
+    finding_schema = schema["$defs"][
+        "ScreenplaySceneShardSemanticFinding"
+    ]
+    finding_properties = finding_schema["properties"]
+    finding_properties["unit_key"]["enum"] = known_unit_keys
+    related_schema = finding_properties["related_unit_keys"]
+    related_schema["items"]["enum"] = known_unit_keys
+    related_schema["maxItems"] = 1
+    related_schema["uniqueItems"] = True
+    finding_properties["violation_kinds"]["uniqueItems"] = True
+    findings_schema = schema["properties"]["findings"]
+    findings_schema["maxItems"] = (
+        len(known_unit_keys) * len(SCREENPLAY_SCENE_SEMANTIC_FINDING_CODES)
+    )
+    return schema
+
+
+def _scene_shard_semantic_review_response_format(
+    review_schema: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "screenplay_scene_semantic_review",
+            "strict": True,
+            "schema": review_schema,
+        },
+    }
 
 
 def _scene_shard_semantic_review_budget(
@@ -4593,11 +4636,15 @@ def _scene_shard_semantic_review_chunks(
     unit_keys = list(draft.slots)
 
     def candidate(chunk_unit_keys: list[str]) -> dict[str, Any]:
+        review_schema = _scene_shard_semantic_review_schema(
+            chunk_unit_keys
+        )
         review_prompt = _scene_shard_semantic_review_prompt(
             draft=draft,
             scene_input_contracts=scene_input_contracts,
             identity_registry=identity_registry,
             unit_keys=chunk_unit_keys,
+            review_schema=review_schema,
         )
         budget = _scene_shard_semantic_review_budget(
             unit_keys=chunk_unit_keys,
@@ -4606,6 +4653,7 @@ def _scene_shard_semantic_review_chunks(
         return {
             "unit_keys": chunk_unit_keys,
             "review_prompt": review_prompt,
+            "review_schema": review_schema,
             "budget": budget,
             "chunk_hash": _hash({
                 "unit_keys": chunk_unit_keys,
@@ -4811,7 +4859,6 @@ async def _semantic_review_scene_shard_draft(
     abort_batch: Callable[[], None] | None = None,
 ) -> tuple[ScreenplaySceneShardCreativeIR, list[dict[str, Any]]]:
     """Consensus-review creative prose without allowing structural rewrites."""
-    review_schema = ScreenplaySceneShardSemanticReview.model_json_schema()
 
     async def review(
         candidate: ScreenplaySceneShardCreativeIR,
@@ -4819,6 +4866,7 @@ async def _semantic_review_scene_shard_draft(
         phase: str,
         unit_keys: list[str],
         review_prompt: str,
+        review_schema: dict[str, Any],
         budget: dict[str, int | str],
         chunk_index: int,
         chunk_count: int,
@@ -4901,6 +4949,12 @@ async def _semantic_review_scene_shard_draft(
                     "ceiling": budget["ceiling"],
                 },
                 output_schema=review_schema,
+                response_format=(
+                    _scene_shard_semantic_review_response_format(
+                        review_schema
+                    )
+                ),
+                require_response_format=True,
             )
         except asyncio.CancelledError:
             raise
@@ -4944,6 +4998,7 @@ async def _semantic_review_scene_shard_draft(
                     phase,
                     chunk["unit_keys"],
                     chunk["review_prompt"],
+                    chunk["review_schema"],
                     chunk["budget"],
                     chunk_index,
                     len(chunks),
