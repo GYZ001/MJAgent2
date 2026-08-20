@@ -67,6 +67,11 @@ for idx in $(seq "$START_IDX" 5); do
         log "EP$idx FAILED ❌ err=$err"
         log "=== ABORT: EP$idx failed, stopping serial run ==="
         exit 2 ;;
+      repairing)
+        # 一次性生成目标下，暂停待修=整体失败：立即中止，避免空轮询到超时
+        log "EP$idx REPAIRING (paused) ❌ err=$err"
+        log "=== ABORT: EP$idx entered repairing (one-shot failure), stopping serial run ==="
+        exit 2 ;;
       pending)
         # 不应发生（已启动）；等待一轮
         : ;;
