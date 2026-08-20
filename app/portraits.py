@@ -4443,6 +4443,10 @@ def _identity_resolution(
         payload.update({
             "source_evidence_receipt": dict(primary_receipt),
             "source_evidence_receipts": receipt_list,
+            "source_segment_id": str(
+                primary_receipt.get("source_segment_id") or ""
+            ),
+            "source_quote": str(primary_receipt.get("text") or ""),
         })
     return normalize_character_resolution(payload)
 
@@ -6457,6 +6461,40 @@ def persist_screenplay_character_resolutions(
         else []
     )
 
+    def _receipt_semantic_key(item: dict) -> tuple[str, str]:
+        try:
+            bundle = _validate_current_identity_receipt_bundle(
+                item,
+                source_text=None,
+            )
+        except ContentGenerationError:
+            return (
+                "invalid",
+                evidence_repository.content_hash({
+                    "primary": item.get("source_evidence_receipt"),
+                    "receipts": item.get("source_evidence_receipts"),
+                    "source_segment_id": item.get("source_segment_id"),
+                    "source_segment_ids": item.get("source_segment_ids"),
+                }),
+            )
+        if bundle is not None:
+            return (
+                "current_v2",
+                evidence_repository.content_hash({
+                    "primary": bundle[0],
+                    "receipts": bundle[1],
+                    "source_segment_ids": bundle[2],
+                }),
+            )
+        return (
+            "typed_or_none",
+            evidence_repository.content_hash([
+                str(value).strip()
+                for value in item.get("source_segment_ids") or []
+                if str(value).strip()
+            ]),
+        )
+
     def _semantic_identity_key(items: list[dict]) -> list[tuple[str, ...]]:
         return sorted(
             (
@@ -6471,6 +6509,7 @@ def persist_screenplay_character_resolutions(
                 str(
                     item.get("structural_identity_policy_version") or ""
                 ),
+                *_receipt_semantic_key(item),
             )
             for item in items
         )

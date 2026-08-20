@@ -6177,3 +6177,276 @@ def test_future_identity_rejects_name_absent_from_window(monkeypatch) -> None:
             bible=Bible(characters=[], world=World(visual_style_canonical="测试")),
             episode_no=2,
         ))
+
+
+def _rf11_literal_candidate(source_text: str, source_label: str) -> dict:
+    receipts = [
+        record
+        for record in portraits._current_identity_evidence_records(source_text)
+        if source_label in str(record.get("text") or "")
+    ]
+    assert receipts
+    receipts = sorted(
+        receipts,
+        key=portraits._current_identity_receipt_sort_key,
+    )
+    primary = receipts[0]
+    return {
+        "name": source_label,
+        "source_label": source_label,
+        "identity_kind": "functional",
+        "identity_group": "current-1:F1",
+        "authority_id": "",
+        "kind": "onscreen",
+        "evidence": source_label,
+        "future_evidence": "",
+        "source_label_provenance": (
+            portraits.CURRENT_IDENTITY_LITERAL_PROVENANCE
+        ),
+        "source_evidence_receipt": dict(primary),
+        "source_evidence_receipts": [dict(value) for value in receipts],
+        "source_segment_id": primary["source_segment_id"],
+        "source_segment_ids": [
+            value["source_segment_id"] for value in receipts
+        ],
+        "source_quote": primary["text"],
+    }
+
+
+def test_attempt16_rf11_global_wire_aggregates_occurrence_receipts_once(
+    monkeypatch,
+) -> None:
+    paragraphs = [
+        f"孟浩在第{index:02d}处查看山路。" for index in range(1, 51)
+    ] + [
+        f"守卫{index:02d}在第{index:02d}道门前值守。"
+        for index in range(1, 13)
+    ]
+    source_text = "\n\n".join(paragraphs)
+    assert len(portraits._current_identity_evidence_records(source_text)) == 62
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        prompt = str(messages[0]["content"])
+        assert "decisions 必须精确包含目录中全部 E" not in prompt
+        assert "root 只输出一次 k/n/f" in prompt
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        refs = schema["$defs"]["CurrentFunctionalIdentityDecision"][
+            "properties"
+        ]["evidence_ref"]["enum"]
+        assert len(refs) == 62
+        characters = [
+            {
+                "source_label": "孟浩",
+                "canonical_name": "孟浩",
+                "identity_kind": "named",
+                "kind": "onscreen" if index == 49 else "mentioned",
+                "evidence_ref": refs[index],
+            }
+            for index in range(50)
+        ]
+        characters.extend([
+            {
+                "source_label": f"守卫{index:02d}",
+                "identity_kind": "functional",
+                "functional_identity_key": f"F{index}",
+                "kind": "onscreen",
+                "evidence_ref": refs[49 + index],
+            }
+            for index in range(1, 13)
+        ])
+        return json.dumps(
+            _identity_wire_for_call(kwargs, characters, messages=messages),
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    result = asyncio.run(portraits.discover_character_candidates(
+        source_text,
+        Bible(
+            world=World(visual_style_canonical="国风"),
+            characters=[Character(
+                name="孟浩",
+                role="主角",
+                appearance_canonical="黑发长衫，五官清晰，体态稳定",
+            )],
+        ),
+        1,
+    ))
+
+    assert calls == 1
+    assert len(result) == 13
+    meng = next(item for item in result if item["source_label"] == "孟浩")
+    assert meng["kind"] == "onscreen"
+    assert len(meng["source_evidence_receipts"]) == 50
+    assert len(meng["source_segment_ids"]) == 50
+    assert meng["source_evidence_receipt"] == meng[
+        "source_evidence_receipts"
+    ][0]
+    assert meng["evidence"] in meng["source_quote"]
+
+
+def test_attempt16_old_rf10_wire_fails_once_before_downstream(monkeypatch) -> None:
+    calls = 0
+    downstream: list[str] = []
+
+    async def fake_chat(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps({
+            "decisions": {"E001": {"k": [], "n": [], "f": []}},
+        })
+
+    async def forbidden_future(*_args, **_kwargs):
+        downstream.append("future")
+        raise AssertionError("old RF10 wire reached downstream")
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(
+        portraits,
+        "resolve_future_identity_candidates",
+        forbidden_future,
+    )
+    with pytest.raises(model_gateway.StructuredFormatError):
+        asyncio.run(portraits.discover_character_candidates(
+            "守卫站在山门。",
+            Bible(world=World(visual_style_canonical="国风"), characters=[]),
+            1,
+        ))
+
+    assert calls == 1
+    assert downstream == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "tamper", "non_dict", "duplicate", "out_of_order",
+        "ids_mismatch", "primary_mismatch", "wrong_label",
+    ],
+)
+def test_current_identity_receipt_v2_bundle_is_fail_closed(
+    mutation: str,
+) -> None:
+    source_text = "守卫守在山门。\n\n守卫走到殿前。"
+    candidate = _rf11_literal_candidate(source_text, "守卫")
+    if mutation == "tamper":
+        candidate["source_evidence_receipts"][1]["text"] += "伪造"
+    elif mutation == "non_dict":
+        candidate["source_evidence_receipts"].append("bad")
+    elif mutation == "duplicate":
+        first = dict(candidate["source_evidence_receipts"][0])
+        candidate["source_evidence_receipts"] = [first, dict(first)]
+        candidate["source_segment_ids"] = [first["source_segment_id"]]
+    elif mutation == "out_of_order":
+        candidate["source_evidence_receipts"].reverse()
+        candidate["source_evidence_receipt"] = dict(
+            candidate["source_evidence_receipts"][0]
+        )
+        candidate["source_segment_id"] = candidate[
+            "source_evidence_receipt"
+        ]["source_segment_id"]
+        candidate["source_segment_ids"].reverse()
+    elif mutation == "ids_mismatch":
+        candidate["source_segment_ids"] = ["SRC9999"]
+    elif mutation == "primary_mismatch":
+        candidate["source_evidence_receipt"] = dict(
+            candidate["source_evidence_receipts"][1]
+        )
+        candidate["source_segment_id"] = candidate[
+            "source_evidence_receipt"
+        ]["source_segment_id"]
+    elif mutation == "wrong_label":
+        candidate["source_label"] = "银袍女子"
+
+    with pytest.raises(ContentGenerationError, match="receipt v2 无效"):
+        portraits._attach_candidate_source_evidence(
+            [candidate],
+            source_text,
+        )
+    assert candidate["source_evidence_receipts"] == []
+    assert candidate["source_segment_ids"] == []
+
+
+def test_current_identity_receipt_v2_resolution_and_hash_keep_all_evidence() -> None:
+    source_text = "守卫守在山门。\n\n守卫走到殿前。\n\n守卫敲了敲门。"
+    candidate = _rf11_literal_candidate(source_text, "守卫")
+    candidate["identity_scope_fingerprint"] = (
+        portraits.screenplay_identity_scope_fingerprint(1, source_text)
+    )
+    resolution = portraits._identity_resolution(
+        candidate,
+        "守卫",
+        "functional_identity",
+    )
+
+    assert resolution["source_evidence_receipts"] == candidate[
+        "source_evidence_receipts"
+    ]
+    assert resolution["source_segment_ids"] == candidate["source_segment_ids"]
+    assert resolution["source_segment_id"] == candidate["source_segment_id"]
+    assert portraits.screenplay_identity_resolution_is_current_for_source(
+        resolution,
+        episode_no=1,
+        source_text=source_text,
+    )
+
+    changed = dict(candidate)
+    changed["source_evidence_receipts"] = [
+        dict(candidate["source_evidence_receipts"][0]),
+        dict(candidate["source_evidence_receipts"][2]),
+    ]
+    changed["source_segment_ids"] = [
+        value["source_segment_id"]
+        for value in changed["source_evidence_receipts"]
+    ]
+    assert portraits._structural_identity_candidate_semantic_hash(
+        [candidate]
+    ) != portraits._structural_identity_candidate_semantic_hash([changed])
+
+
+def test_persist_replaces_invalid_current_bundle_with_valid_v2() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE episodes(id TEXT PRIMARY KEY, "
+        "screenplay_character_resolutions TEXT NOT NULL)"
+    )
+    source_text = "守卫守在山门。\n\n守卫走到殿前。"
+    candidate = _rf11_literal_candidate(source_text, "守卫")
+    candidate["identity_scope_fingerprint"] = (
+        portraits.screenplay_identity_scope_fingerprint(1, source_text)
+    )
+    good = portraits._identity_resolution(
+        candidate,
+        "守卫",
+        "functional_identity",
+    )
+    bad = dict(good)
+    bad.pop("source_evidence_receipt")
+    bad.pop("source_evidence_receipts")
+    bad["source_segment_id"] = ""
+    bad["source_segment_ids"] = []
+    conn.execute(
+        "INSERT INTO episodes VALUES(?,?)",
+        ("ep1", json.dumps([bad], ensure_ascii=False)),
+    )
+    conn.commit()
+
+    persisted = portraits.persist_screenplay_character_resolutions(
+        conn,
+        "ep1",
+        [good],
+    )
+
+    assert persisted[0]["source_evidence_receipts"] == good[
+        "source_evidence_receipts"
+    ]
+    stored = json.loads(conn.execute(
+        "SELECT screenplay_character_resolutions FROM episodes WHERE id='ep1'"
+    ).fetchone()[0])
+    assert stored[0]["source_evidence_receipts"] == good[
+        "source_evidence_receipts"
+    ]
