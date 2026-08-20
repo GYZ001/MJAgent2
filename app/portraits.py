@@ -809,6 +809,7 @@ def _current_identity_known_decision_catalog(
                     )
                 payload = {
                     "contract_version": CURRENT_IDENTITY_DECISION_VERSION,
+                    "decision_type": "registered_authority",
                     "evidence_ref": evidence_ref,
                     "evidence_id": str(record.get("evidence_id") or ""),
                     "authority_id": authority_id,
@@ -838,6 +839,100 @@ def _current_identity_known_decision_catalog(
                     ).strip(),
                 }
     return decisions
+
+
+def _current_identity_prior_decision_catalog(
+    evidence_by_ref: dict[str, dict],
+    *,
+    prior_candidates: list[dict],
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Sign explicit cross-batch reuse choices without label auto-merging."""
+    prior_named: dict[str, dict] = {}
+    functional_groups: dict[str, dict] = {}
+    for candidate in prior_candidates:
+        if (
+            candidate.get("source_label_provenance")
+            == CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+        ):
+            continue
+        source_label = str(candidate.get("source_label") or "").strip()
+        identity_group = str(candidate.get("identity_group") or "").strip()
+        identity_kind = str(candidate.get("identity_kind") or "").strip()
+        if not source_label or not identity_group:
+            continue
+        if identity_kind == "named":
+            canonical_name = str(candidate.get("name") or "").strip()
+            if not canonical_name:
+                continue
+            for evidence_ref, record in evidence_by_ref.items():
+                if source_label not in str(record.get("text") or ""):
+                    continue
+                payload = {
+                    "contract_version": CURRENT_IDENTITY_DECISION_VERSION,
+                    "decision_type": "prior_named",
+                    "evidence_ref": evidence_ref,
+                    "evidence_id": str(record.get("evidence_id") or ""),
+                    "source_label": source_label,
+                    "canonical_name": canonical_name,
+                    "identity_group": identity_group,
+                    "authority_id": str(
+                        candidate.get("authority_id") or ""
+                    ).strip(),
+                    "known_authority": bool(
+                        str(candidate.get("authority_id") or "").strip()
+                    ),
+                    "materialization_compatible": bool(
+                        candidate.get("_current_materialization_compatible")
+                    ),
+                }
+                decision_id = (
+                    f"P:N:{evidence_ref}:"
+                    + evidence_repository.content_hash(payload)[:20]
+                )
+                prior_named[decision_id] = {
+                    **payload,
+                    "decision_id": decision_id,
+                }
+        elif identity_kind == "functional":
+            existing = next((
+                item for item in functional_groups.values()
+                if item["identity_group"] == identity_group
+            ), None)
+            if existing is not None:
+                if source_label not in existing["source_labels"]:
+                    existing["source_labels"].append(source_label)
+                response_group_key = str(
+                    candidate.get("_current_response_group_key") or ""
+                ).strip()
+                if (
+                    response_group_key
+                    and response_group_key
+                    not in existing["response_group_keys"]
+                ):
+                    existing["response_group_keys"].append(response_group_key)
+                continue
+            payload = {
+                "contract_version": CURRENT_IDENTITY_DECISION_VERSION,
+                "decision_type": "prior_functional_group",
+                "identity_group": identity_group,
+                "existing_route_name": str(
+                    candidate.get("existing_route_name") or ""
+                ).strip(),
+            }
+            decision_id = (
+                "P:F:" + evidence_repository.content_hash(payload)[:24]
+            )
+            functional_groups[decision_id] = {
+                **payload,
+                "decision_id": decision_id,
+                "source_labels": [source_label],
+                "response_group_keys": [
+                    value for value in [str(
+                        candidate.get("_current_response_group_key") or ""
+                    ).strip()] if value
+                ],
+            }
+    return prior_named, functional_groups
 
 
 def _current_identity_evidence_receipt_is_valid(
@@ -912,6 +1007,7 @@ def _project_current_identity_response(
     *,
     evidence_by_ref: dict[str, dict],
     known_decisions: dict[str, dict],
+    prior_functional_groups: dict[str, dict] | None = None,
     all_evidence_by_id: dict[str, dict] | None = None,
     reserved_authority_labels: set[str] | None = None,
     group_scope: str,
@@ -948,6 +1044,7 @@ def _project_current_identity_response(
         authority_group: str = "",
         known_authority: bool = False,
         materialization_compatible: bool = False,
+        fixed_identity_group: str = "",
     ) -> None:
         source_label = str(source_label or "")
         canonical_name = str(canonical_name or "")
@@ -1019,14 +1116,54 @@ def _project_current_identity_response(
         else:
             seen_labels[source_label] = identity_kind
 
-        existing_route_name = (
-            functional_key
+        prior_functional_group = (
+            (prior_functional_groups or {}).get(functional_key)
             if identity_kind == "functional"
-            and literal
-            and functional_key in existing_functional_routes
-            else ""
+            else None
         )
-        if identity_kind == "named" and authority_id:
+        if (
+            identity_kind == "functional"
+            and functional_key.startswith("P:")
+            and prior_functional_group is None
+        ):
+            errors.append(
+                f"current prior functional decision 越界：{functional_key}"
+            )
+        prior_response_group_keys = {
+            value
+            for group in (prior_functional_groups or {}).values()
+            for value in group.get("response_group_keys") or []
+            if str(value or "").strip()
+        }
+        if (
+            identity_kind == "functional"
+            and prior_functional_group is None
+            and functional_key in prior_response_group_keys
+        ):
+            errors.append(
+                "current 后续batch必须用P token显式复用 prior group："
+                f"{functional_key}"
+            )
+        if prior_functional_group is not None and not literal:
+            errors.append(
+                "current synthetic functional 不得复用 prior group："
+                f"{source_label}"
+            )
+        existing_route_name = (
+            str(prior_functional_group.get("existing_route_name") or "")
+            if prior_functional_group is not None
+            else (
+                functional_key
+                if identity_kind == "functional"
+                and literal
+                and functional_key in existing_functional_routes
+                else ""
+            )
+        )
+        if identity_kind == "named" and fixed_identity_group:
+            identity_group = fixed_identity_group
+            provenance = CURRENT_IDENTITY_LITERAL_PROVENANCE
+        elif identity_kind == "named" and authority_id:
             identity_group = authority_group or authority_id
             provenance = CURRENT_IDENTITY_LITERAL_PROVENANCE
         elif identity_kind == "named":
@@ -1046,9 +1183,13 @@ def _project_current_identity_response(
             provenance = CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
         else:
             identity_group = (
-                f"existing:{existing_route_name}"
-                if existing_route_name
-                else f"{group_scope}:{functional_key}"
+                str(prior_functional_group.get("identity_group") or "")
+                if prior_functional_group is not None
+                else (
+                    f"existing:{existing_route_name}"
+                    if existing_route_name
+                    else f"{group_scope}:{functional_key}"
+                )
             )
             provenance = CURRENT_IDENTITY_LITERAL_PROVENANCE
         seen_label_groups.setdefault(source_label, set()).add(identity_group)
@@ -1076,6 +1217,12 @@ def _project_current_identity_response(
             "source_quote": evidence_text,
             "source_label_provenance": provenance,
             "source_evidence_receipt": dict(record),
+            "_current_materialization_compatible": bool(
+                materialization_compatible or not authority_id
+            ),
+            "_current_response_group_key": (
+                functional_key if identity_kind == "functional" else ""
+            ),
             "_typed_source_evidence_owned": True,
         })
 
@@ -1109,9 +1256,17 @@ def _project_current_identity_response(
                 record=record,
                 authority_id=str(selected.get("authority_id") or ""),
                 authority_group=str(selected.get("identity_group") or ""),
-                known_authority=True,
+                known_authority=bool(
+                    selected.get("decision_type") == "registered_authority"
+                    or selected.get("known_authority")
+                ),
                 materialization_compatible=bool(
                     selected.get("materialization_compatible")
+                ),
+                fixed_identity_group=(
+                    str(selected.get("identity_group") or "")
+                    if selected.get("decision_type") == "prior_named"
+                    else ""
                 ),
             )
         for item in decisions.n:
@@ -2104,6 +2259,8 @@ def _attach_candidate_source_evidence(
     by_id = {segment.segment_id: segment for segment in segments}
     for candidate in candidates:
         typed_owned = bool(candidate.pop("_typed_source_evidence_owned", False))
+        candidate.pop("_current_materialization_compatible", None)
+        candidate.pop("_current_response_group_key", None)
         current_receipt = candidate.get("source_evidence_receipt")
         label = str(candidate.get("source_label") or "").strip()
         cited_id = str(candidate.get("source_segment_id") or "").strip()
