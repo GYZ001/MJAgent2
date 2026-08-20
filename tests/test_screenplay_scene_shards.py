@@ -305,7 +305,7 @@ def test_scene_shard_semantic_review_json_contract_is_strict() -> None:
     schema = ScreenplaySceneShardSemanticReview.model_json_schema()
 
     assert SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION == (
-        "screenplay-scene-semantic-review.v13"
+        "screenplay-scene-semantic-review.v14"
     )
     assert schema["required"] == ["findings"]
     assert "default" not in schema["properties"]["findings"]

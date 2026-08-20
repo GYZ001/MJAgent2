@@ -70,7 +70,7 @@ SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v10"
 SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v8"
 SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v9"
 SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION = (
-    "screenplay-scene-semantic-review.v13"
+    "screenplay-scene-semantic-review.v14"
 )
 SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT = (
     "只返回一个符合用户消息内 JSON Schema 的 JSON 对象。"
@@ -4966,14 +4966,45 @@ def _scene_shard_semantic_repair_prompt(
 
 def _scene_shard_semantic_repair_subset_schema(
     flagged_unit_keys: list[str],
+    *,
+    full_creative_schema: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    schema = deepcopy(ScreenplaySceneShardCreativeIR.model_json_schema())
-    slot_schemas = {
-        unit_key: {
-            "$ref": "#/$defs/ScreenplaySceneShardCreativeUnit",
+    """Project one exact repair subset from the plan-bound creative schema."""
+    schema = deepcopy(
+        full_creative_schema
+        if full_creative_schema is not None
+        else ScreenplaySceneShardCreativeIR.model_json_schema()
+    )
+    source_slots = schema.get("properties", {}).get("slots", {})
+    source_slot_schemas = source_slots.get("properties")
+    if full_creative_schema is not None:
+        if not isinstance(source_slot_schemas, dict):
+            raise ValueError(
+                "semantic repair full creative schema has no bound slots"
+            )
+        missing_unit_keys = [
+            unit_key
+            for unit_key in flagged_unit_keys
+            if unit_key not in source_slot_schemas
+        ]
+        if missing_unit_keys:
+            raise ValueError(
+                "semantic repair subset references unknown schema slots: "
+                + ",".join(missing_unit_keys)
+            )
+        slot_schemas = {
+            unit_key: deepcopy(source_slot_schemas[unit_key])
+            for unit_key in flagged_unit_keys
         }
-        for unit_key in flagged_unit_keys
-    }
+    else:
+        # Compatibility for direct unit-level callers that do not own a plan.
+        # Production generation always supplies the full plan-bound schema.
+        slot_schemas = {
+            unit_key: {
+                "$ref": "#/$defs/ScreenplaySceneShardCreativeUnit",
+            }
+            for unit_key in flagged_unit_keys
+        }
     schema["properties"]["slots"] = {
         "type": "object",
         "properties": slot_schemas,
@@ -5048,6 +5079,7 @@ async def _semantic_review_scene_shard_draft(
     batch_abort: asyncio.Event | None = None,
     abort_batch: Callable[[], None] | None = None,
     structured_operation_gate: _SceneStructuredOperationGate | None = None,
+    full_creative_schema: dict[str, Any] | None = None,
 ) -> tuple[ScreenplaySceneShardCreativeIR, list[dict[str, Any]]]:
     """Consensus-review creative prose without allowing structural rewrites."""
 
@@ -5320,12 +5352,33 @@ async def _semantic_review_scene_shard_draft(
         ]
         subset_schema = _scene_shard_semantic_repair_subset_schema(
             ordered_flagged_unit_keys,
+            full_creative_schema=full_creative_schema,
         )
         subset_schema_hash = _hash(subset_schema)
 
         def validate_repair(
             candidate: ScreenplaySceneShardCreativeIR,
         ) -> list[str]:
+            if full_creative_schema is not None:
+                required_root_fields = {"contract_version", "slots"}
+                if candidate.model_fields_set != required_root_fields:
+                    return [
+                        "语义 repair root 必须显式提供且仅提供 "
+                        "contract_version、slots"
+                    ]
+                required_unit_fields = set(
+                    ScreenplaySceneShardCreativeUnit.model_fields
+                )
+                incomplete_unit_keys = [
+                    unit_key
+                    for unit_key, unit in candidate.slots.items()
+                    if unit.model_fields_set != required_unit_fields
+                ]
+                if incomplete_unit_keys:
+                    return [
+                        "语义 repair slot 必须显式提供全部 creative fields："
+                        + ",".join(incomplete_unit_keys)
+                    ]
             candidate_unit_keys = set(candidate.slots)
             if candidate_unit_keys != flagged_unit_keys:
                 return [
@@ -5408,6 +5461,16 @@ async def _semantic_review_scene_shard_draft(
             raise asyncio.CancelledError
 
         async def execute_repair() -> ScreenplaySceneShardCreativeIR:
+            repair_response_format = _scene_shard_strict_response_format(
+                name="screenplay_scene_semantic_repair",
+                local_schema=subset_schema,
+            )
+
+            def repair_schema(
+                _candidate: ScreenplaySceneShardCreativeIR,
+            ) -> dict[str, Any]:
+                return subset_schema
+
             repaired_candidate = await model_gateway.chat_structured(
                 repair_messages,
                 model_type=ScreenplaySceneShardCreativeIR,
@@ -5441,6 +5504,9 @@ async def _semantic_review_scene_shard_draft(
                 },
                 repair_context=repair_context,
                 output_schema=subset_schema,
+                response_format=repair_response_format,
+                require_response_format=True,
+                repair_schema=repair_schema,
             )
             if batch_abort is not None and batch_abort.is_set():
                 raise asyncio.CancelledError
@@ -5863,6 +5929,7 @@ async def generate_screenplay_scene_shards(
             batch_abort=batch_abort,
             abort_batch=abort_outer_batch,
             structured_operation_gate=structured_operation_gate,
+            full_creative_schema=output_schema,
         )
         if batch_abort.is_set():
             raise asyncio.CancelledError
