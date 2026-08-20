@@ -23,6 +23,12 @@ _generation_priority: contextvars.ContextVar[int] = contextvars.ContextVar(
     "generation_priority",
     default=PRIORITY_INTERACTIVE,
 )
+_provider_call_slot_owner: contextvars.ContextVar[
+    asyncio.Task[object] | None
+] = contextvars.ContextVar(
+    "provider_call_slot_owner",
+    default=None,
+)
 
 
 @dataclass
@@ -183,18 +189,50 @@ async def run_with_provider_call_slot(
     operation: Callable[[], Awaitable[T]],
     *,
     priority: int | None = None,
+    abort_predicate: Callable[[], bool] | None = None,
+    on_failure: Callable[[], None] | None = None,
 ) -> T:
     """Limit actual text-provider requests independently from active workflows.
 
     A workflow releases this slot between provider retries and while performing
     local validation.  Scene shards can therefore run concurrently without
     multiplying the global provider concurrency configured by operators.
+
+    A caller may deliberately lease the slot around one complete structured
+    operation.  Nested provider calls made by that same task are re-entrant;
+    the outer lease can therefore publish a batch-abort fence before releasing
+    the real process-wide slot.  Runtime guards are intentionally callbacks,
+    not durable provider metadata.
     """
+    current_task = asyncio.current_task()
+    if (
+        current_task is not None
+        and _provider_call_slot_owner.get() is current_task
+    ):
+        if abort_predicate is not None and abort_predicate():
+            raise asyncio.CancelledError
+        return await operation()
+
     gate = gate_for("text_provider_calls")
     await gate.acquire(
         current_generation_priority() if priority is None else int(priority)
     )
+    owner_token = _provider_call_slot_owner.set(current_task)
     try:
-        return await operation()
+        if abort_predicate is not None and abort_predicate():
+            raise asyncio.CancelledError
+        try:
+            return await operation()
+        except BaseException as exc:
+            if on_failure is not None:
+                try:
+                    on_failure()
+                except Exception as callback_exc:  # noqa: BLE001
+                    exc.add_note(
+                        "provider-slot failure callback failed: "
+                        f"{callback_exc!r}"
+                    )
+            raise
     finally:
+        _provider_call_slot_owner.reset(owner_token)
         gate.release()

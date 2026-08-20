@@ -23,7 +23,7 @@ from pydantic import (
     model_validator,
 )
 
-from app import hiagent
+from app import generation_concurrency, hiagent
 from app.character_policy import functional_extra_anchor
 from app.db import get_conn, get_setting
 from app.evidence import repository as evidence_repository
@@ -130,10 +130,9 @@ class _FailFastScope:
 
 
 class _SceneStructuredOperationGate:
-    """Fence complete structured operations before a queued peer can start."""
+    """Lease the real provider slot for one complete structured operation."""
 
-    def __init__(self, limit: int, batch_abort: asyncio.Event) -> None:
-        self._semaphore = asyncio.Semaphore(max(1, int(limit)))
+    def __init__(self, batch_abort: asyncio.Event) -> None:
         self._batch_abort = batch_abort
 
     async def run(
@@ -142,28 +141,16 @@ class _SceneStructuredOperationGate:
         *,
         on_failure: Callable[[], None] | None = None,
     ) -> Any:
-        await self._semaphore.acquire()
-        try:
-            if self._batch_abort.is_set():
-                raise asyncio.CancelledError
-            try:
-                return await operation()
-            except BaseException as exc:
-                # The abort fence must be visible before release wakes the next
-                # structured operation. Preserve the original exception,
-                # including user/fail-fast CancelledError.
-                self._batch_abort.set()
-                if on_failure is not None:
-                    try:
-                        on_failure()
-                    except Exception as callback_exc:  # noqa: BLE001
-                        exc.add_note(
-                            "structured-operation abort callback failed: "
-                            f"{callback_exc!r}"
-                        )
-                raise
-        finally:
-            self._semaphore.release()
+        def abort() -> None:
+            self._batch_abort.set()
+            if on_failure is not None:
+                on_failure()
+
+        return await generation_concurrency.run_with_provider_call_slot(
+            operation,
+            abort_predicate=self._batch_abort.is_set,
+            on_failure=abort,
+        )
 
 
 async def _gather_fail_fast(
@@ -5473,15 +5460,7 @@ async def generate_screenplay_scene_shards(
     semaphore = asyncio.Semaphore(parallelism)
     batch_abort = asyncio.Event()
     shard_scope = _FailFastScope()
-    structured_operation_gate = _SceneStructuredOperationGate(
-        _setting_int(
-            "text_generation_concurrency",
-            2,
-            minimum=1,
-            maximum=16,
-        ),
-        batch_abort,
-    )
+    structured_operation_gate = _SceneStructuredOperationGate(batch_abort)
     checkpoint_rows: dict[str, dict[str, Any]] = {
         plan.shard_id: {
             "shard_id": plan.shard_id,
