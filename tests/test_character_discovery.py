@@ -27,8 +27,16 @@ def _current_identity_wire(
     )
     evidence_by_ref: dict[str, dict] = {}
     known_by_label: dict[tuple[str, str], list[dict]] = {}
+    prior_functional: list[dict] = []
     if messages:
         prompt = str(messages[0].get("content") or "")
+        prior_marker = "前批已确定的 functional 分组 P 决议"
+        prior_end = "\n\n本批 backend-owned 当前身份证据目录"
+        if prior_marker in prompt and prior_end in prompt:
+            raw_prior = prompt.split(prior_marker, 1)[1]
+            raw_prior = raw_prior.split("\n", 1)[1]
+            raw_prior = raw_prior.split(prior_end, 1)[0]
+            prior_functional = json.loads(raw_prior)
         marker = (
             "backend-owned 当前身份证据目录。E ref 已绑定完整证据 receipt，"
             "禁止跨 E 搬运人物："
@@ -90,10 +98,20 @@ def _current_identity_wire(
         kind = "mentioned" if item.get("kind") == "mentioned" else "onscreen"
         evidence_ref = evidence_ref_for(item, source_label)
         if str(item.get("identity_kind") or "named") == "functional":
+            reuse_prior = bool(item.get("reuse_prior"))
+            prior_label = str(
+                item.get("prior_source_label") or source_label
+            )
+            prior = next((
+                candidate for candidate in prior_functional
+                if prior_label in (candidate.get("source_labels") or [])
+            ), None)
             decisions[evidence_ref]["f"].append({
                 "source_label": source_label,
                 "functional_identity_key": str(
-                    item.get("functional_identity_key") or f"F{index}"
+                    prior["decision_id"]
+                    if reuse_prior and prior is not None
+                    else item.get("functional_identity_key") or f"F{index}"
                 ),
                 "kind": kind,
             })
@@ -1382,6 +1400,84 @@ def test_current_synthetic_resolution_cannot_suppress_blueprint_coverage(
     assert [
         item["identity_key"] for item in coverage_inputs[0]
     ] == ["面色苍白的女子"]
+    assert downstream == []
+
+
+def test_reference_identity_cannot_hide_visible_blueprint_participant(
+    monkeypatch,
+) -> None:
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": [{
+            "key": "n1",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "师尊走入大殿",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "日",
+            "time_relation": "episode_start",
+            "location_key": "hall",
+            "location_label": "大殿",
+            "participants": ["师尊"],
+            "participant_evidence": [{
+                "identity_key": "师尊",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": ["SRC0001:unit:001"],
+                "usage": "visible",
+            }],
+            "action_logic": "师尊走入大殿",
+            "scene_boundary_before": True,
+        }],
+    })
+    downstream: list[str] = []
+
+    async def forbidden_coverage(*_args, **_kwargs):
+        downstream.append("coverage")
+        raise AssertionError("non-materializable reference reached coverage")
+
+    async def forbidden_scene(*_args, **_kwargs):
+        downstream.append("scene")
+        raise AssertionError("non-materializable reference reached scene")
+
+    monkeypatch.setattr(
+        portraits,
+        "ensure_structural_identity_coverage",
+        forbidden_coverage,
+    )
+    monkeypatch.setattr(
+        screenplay_scene_shards,
+        "generate_screenplay_scene_shards",
+        forbidden_scene,
+    )
+
+    with pytest.raises(
+        portraits.ContentGenerationError,
+        match="只有不可物化的引用身份",
+    ):
+        asyncio.run(stages._generate_screenplay_scene_sharded_baseline(
+            {
+                "id": "ep-reference-visible",
+                "project_id": "project-reference-visible",
+                "episode_no": 1,
+                "character_resolutions": [{
+                    "source_label": "师尊",
+                    "canonical_name": "苍玄",
+                    "resolution": "reference_identity",
+                    "identity_group": "manual:master",
+                    "authority_id": "manual:cangxuan",
+                    "decision_provenance": "manual",
+                }],
+            },
+            "师尊走入大殿。",
+            Bible(
+                characters=[],
+                world=World(visual_style_canonical="测试"),
+            ),
+            narrative_blueprint=blueprint,
+        ))
+
     assert downstream == []
 
 
@@ -3437,6 +3533,106 @@ def test_current_identity_rf10_manual_alias_mentioned_persists_one_authority(
     ]
 
 
+def test_structural_coverage_rejects_visible_non_bible_reference_before_call(
+    monkeypatch,
+) -> None:
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("non-materializable reference reached provider")
+
+    monkeypatch.setattr(model_gateway, "chat", forbidden)
+    with pytest.raises(
+        portraits.ContentGenerationError,
+        match="structural coverage 可见人物只有不可物化",
+    ):
+        asyncio.run(portraits.audit_identity_coverage_from_structural_evidence(
+            [{
+                "source_label": "师尊",
+                "name": "苍玄",
+                "identity_kind": "named",
+                "identity_group": "manual:master",
+                "authority_id": "manual:cangxuan",
+                "kind": "mentioned",
+            }],
+            structural_evidence=[{
+                "identity_key": "师尊",
+                "source_segment_ids": ["SRC0001"],
+                "usage": "visible",
+            }],
+            source_text="师尊走入大殿。",
+            bible=Bible(
+                world=World(visual_style_canonical="国风"),
+                characters=[],
+            ),
+            episode_no=1,
+        ))
+
+
+def test_bible_authority_alias_can_materialize_and_freeze_one_authority(
+    monkeypatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE episodes(id TEXT PRIMARY KEY, project_id TEXT, "
+        "episode_no INTEGER, screenplay_character_resolutions TEXT NOT NULL)"
+    )
+    conn.execute("INSERT INTO episodes VALUES('e1','p1',1,'[]')")
+    conn.commit()
+    card_calls: list[str] = []
+
+    async def fake_card(_project_id, name, _episode_no, **_kwargs):
+        card_calls.append(name)
+        return {
+            "status": "added",
+            "name": name,
+            "has_portrait": False,
+            "portrait_deferred": True,
+        }
+
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    monkeypatch.setattr(
+        portraits,
+        "_future_chapter_context",
+        lambda *_args, **_kwargs: ("", ""),
+    )
+    monkeypatch.setattr(portraits, "ensure_character_card", fake_card)
+    result = asyncio.run(portraits.ensure_cards_for_text(
+        "p1",
+        1,
+        "师尊走入大殿。",
+        Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        generate_portraits=False,
+        _precomputed_candidates=[{
+            "source_label": "师尊",
+            "name": "苍玄",
+            "identity_kind": "named",
+            "identity_group": "structural:master",
+            "authority_id": "bible:苍玄",
+            "kind": "onscreen",
+        }],
+    ))
+    persisted = portraits.persist_screenplay_character_resolutions(
+        conn,
+        "e1",
+        result["resolutions"],
+    )
+    registry = portraits.identity_authority_registry(
+        Bible(
+            world=World(visual_style_canonical="国风"),
+            characters=[Character(
+                name="苍玄",
+                role="重要配角",
+                appearance_canonical="白发老者，道袍简洁，神情威严",
+            )],
+        ),
+        persisted,
+    )
+
+    assert result["errors"] == []
+    assert card_calls == ["苍玄"]
+    assert {item["authority_id"] for item in registry} == {"bible:苍玄"}
+
+
 @pytest.mark.parametrize(
     ("mutation", "error_fragment"),
     [
@@ -3920,6 +4116,148 @@ def test_current_identity_cross_batch_literal_uses_global_catalog() -> None:
     assert errors == [
         "current evidence_id 与已知逐字 source_label 不匹配：门卫"
     ]
+
+
+@pytest.mark.parametrize("identity_kind", ["functional", "named"])
+@pytest.mark.parametrize(
+    ("first_kind", "second_kind"),
+    [("mentioned", "onscreen"), ("onscreen", "mentioned")],
+)
+def test_current_identity_cross_batch_prior_reuse_keeps_onscreen_receipt(
+    monkeypatch,
+    identity_kind: str,
+    first_kind: str,
+    second_kind: str,
+) -> None:
+    source_text = "守卫在山门外被提及。\n\n守卫冲上前拦路。"
+    records = portraits._current_identity_evidence_records(source_text)
+    assert len(records) == 2
+    monkeypatch.setattr(
+        portraits,
+        "_current_identity_evidence_batches",
+        lambda *_args, **_kwargs: [[records[0]], [records[1]]],
+    )
+    calls: list[dict] = []
+
+    async def fake_chat(messages, **kwargs):
+        index = len(calls)
+        calls.append(dict(kwargs["call_meta"]))
+        item = {
+            "source_label": "守卫",
+            "identity_kind": identity_kind,
+            "kind": first_kind if index == 0 else second_kind,
+            "evidence": "守卫",
+        }
+        if identity_kind == "functional":
+            item["functional_identity_key"] = "F1"
+            item["reuse_prior"] = index == 1
+        else:
+            item["canonical_name"] = "守卫"
+        return json.dumps(
+            _identity_wire_for_call(kwargs, [item], messages=messages),
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    result = asyncio.run(portraits.extract_current_identity_candidates(
+        source_text,
+        Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        1,
+    ))
+
+    assert len(calls) == 2
+    assert calls[1]["prior_decision_catalog_hash"] != calls[0][
+        "prior_decision_catalog_hash"
+    ]
+    assert len(result) == 1
+    assert result[0]["kind"] == "onscreen"
+    expected_text = records[1 if second_kind == "onscreen" else 0]["text"]
+    assert result[0]["source_evidence_receipt"]["text"] == expected_text
+
+
+def test_current_identity_cross_batch_alias_explicitly_reuses_prior_group(
+    monkeypatch,
+) -> None:
+    source_text = "王伯在铺子里忙碌。\n\n王老伯后来关上了铺门。"
+    records = portraits._current_identity_evidence_records(source_text)
+    assert len(records) == 2
+    monkeypatch.setattr(
+        portraits,
+        "_current_identity_evidence_batches",
+        lambda *_args, **_kwargs: [[records[0]], [records[1]]],
+    )
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        item = {
+            "source_label": "王伯" if calls == 1 else "王老伯",
+            "identity_kind": "functional",
+            "functional_identity_key": "F1",
+            "kind": "onscreen",
+            "evidence": "王伯" if calls == 1 else "王老伯",
+            "reuse_prior": calls == 2,
+            "prior_source_label": "王伯",
+        }
+        return json.dumps(
+            _identity_wire_for_call(kwargs, [item], messages=messages),
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    result = asyncio.run(portraits.extract_current_identity_candidates(
+        source_text,
+        Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        1,
+    ))
+
+    assert calls == 2
+    assert {item["source_label"] for item in result} == {"王伯", "王老伯"}
+    assert len({item["identity_group"] for item in result}) == 1
+    assert len({
+        item["source_evidence_receipt"]["evidence_id"] for item in result
+    }) == 2
+
+
+def test_current_identity_cross_batch_same_label_new_group_fails_once(
+    monkeypatch,
+) -> None:
+    source_text = "守卫在山门外。\n\n守卫又走到殿前。"
+    records = portraits._current_identity_evidence_records(source_text)
+    monkeypatch.setattr(
+        portraits,
+        "_current_identity_evidence_batches",
+        lambda *_args, **_kwargs: [[records[0]], [records[1]]],
+    )
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "守卫",
+                "identity_kind": "functional",
+                "functional_identity_key": "F1",
+                "kind": "onscreen",
+                "evidence": "守卫",
+            }],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="必须用P token显式复用",
+    ):
+        asyncio.run(portraits.extract_current_identity_candidates(
+            source_text,
+            Bible(world=World(visual_style_canonical="国风"), characters=[]),
+            1,
+        ))
+    assert calls == 2
 
 
 def test_current_synthetic_functional_never_enters_future_authority(

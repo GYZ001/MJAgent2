@@ -8654,6 +8654,11 @@ async def _generate_screenplay_scene_sharded_baseline(
         )
         if str(value or "").strip()
     }
+    bible_identity_names = {
+        str(character.name or "").strip()
+        for character in bible.characters
+        if str(character.name or "").strip()
+    }
     structural_identity_evidence: list[dict[str, Any]] = []
     for node in narrative_blueprint.nodes:
         if node.narrative_layer == "paratext":
@@ -8663,9 +8668,43 @@ async def _generate_screenplay_scene_sharded_baseline(
             for item in node.participant_evidence
         }
         for participant in node.participants:
-            if participant in known_identity_labels:
-                continue
             evidence = evidence_by_key.get(participant)
+            usage = evidence.usage if evidence else "visible"
+            if participant in known_identity_labels:
+                matching_authorities = [
+                    authority
+                    for authority in authorities
+                    if participant in {
+                        str(authority.get("canonical_name") or "").strip(),
+                        str(authority.get("authority_id") or "").strip(),
+                        *(
+                            str(value or "").strip()
+                            for value in authority.get("source_labels") or []
+                        ),
+                    }
+                ]
+                materialized = any(
+                    str(authority.get("canonical_name") or "").strip()
+                    in bible_identity_names
+                    for authority in matching_authorities
+                )
+                nonmaterializable_named = any(
+                    str(authority.get("identity_kind") or "").strip()
+                    != "functional"
+                    and str(authority.get("canonical_name") or "").strip()
+                    not in bible_identity_names
+                    for authority in matching_authorities
+                )
+                if (
+                    usage in {"visible", "voice", "state_subject"}
+                    and nonmaterializable_named
+                    and not materialized
+                ):
+                    raise ContentGenerationError(
+                        "Blueprint 可见人物只有不可物化的引用身份："
+                        f"{participant} ({usage})"
+                    )
+                continue
             structural_identity_evidence.append({
                 "identity_key": participant,
                 "source_label": participant,
@@ -8673,7 +8712,7 @@ async def _generate_screenplay_scene_sharded_baseline(
                     list(evidence.source_segment_ids)
                     if evidence else list(node.source_segment_ids)
                 ),
-                "usage": evidence.usage if evidence else "visible",
+                "usage": usage,
                 "node_key": node.key,
             })
     if structural_identity_evidence and episode.get("project_id") and episode.get("id"):

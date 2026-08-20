@@ -872,7 +872,15 @@ def _current_identity_prior_decision_catalog(
             continue
         if identity_kind == "named":
             canonical_name = str(candidate.get("name") or "").strip()
-            if not canonical_name:
+            # Registered authorities are re-signed against each batch by the
+            # normal K catalog.  P:N is only for a request-local new literal
+            # name that has no authority yet; exposing both would make two
+            # different tokens claim the same registered decision.
+            if (
+                not canonical_name
+                or str(candidate.get("authority_id") or "").strip()
+                or canonical_name != source_label
+            ):
                 continue
             for evidence_ref, record in evidence_by_ref.items():
                 if source_label not in str(record.get("text") or ""):
@@ -3233,7 +3241,6 @@ async def audit_identity_coverage_from_structural_evidence(
                 "aliases": [],
                 "materialization_compatible": (
                     authority_id == _canonical_named_authority_id(canonical_name)
-                    and identity_group in {"", authority_id}
                 ),
             })
             if authority["canonical_name"] != canonical_name:
@@ -3303,6 +3310,33 @@ async def audit_identity_coverage_from_structural_evidence(
             "structural identity coverage 缺少 owned SRC："
             + ",".join(sorted(missing_owned_source))
         )
+    for label, typed_items in structural_by_key.items():
+        if {
+            str(item.get("usage") or "").strip() for item in typed_items
+        } == {"mentioned"}:
+            continue
+        matching_authorities = [
+            authority
+            for authority in authority_by_id.values()
+            if label in {
+                str(authority.get("canonical_name") or "").strip(),
+                *(
+                    str(alias or "").strip()
+                    for alias in authority.get("aliases") or []
+                ),
+            }
+        ]
+        if (
+            matching_authorities
+            and not any(
+                authority.get("materialization_compatible")
+                for authority in matching_authorities
+            )
+        ):
+            raise ContentGenerationError(
+                "structural coverage 可见人物只有不可物化的引用身份："
+                f"{label}"
+            )
 
     coverage_groups = [
         {
