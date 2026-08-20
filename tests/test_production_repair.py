@@ -2151,6 +2151,58 @@ def test_apply_screenplay_patch_cas_and_noop(monkeypatch):
     assert "no-op" in (noop.error or "")
 
 
+def test_apply_screenplay_patch_rejects_tampered_baseline_before_write() -> None:
+    from app.evidence import repository as evidence_repository
+    from app.production.patch import PatchOperation, PatchRequest, apply_screenplay_patch
+    from app.production.patch import screenplay_artifact_payload
+
+    rev = ensure_production_revision(episode_id="ep_p", kind="screenplay", resume=False)
+    payload = screenplay_artifact_payload(_minimal_script(stakes=""))
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="validated",
+        trust_level="T2",
+        content=payload,
+    ))
+    mark_baseline_generated(
+        rev.id,
+        baseline_artifact_id=artifact["id"],
+        working_artifact_id=artifact["id"],
+    )
+    tampered = dict(payload)
+    tampered["_tampered"] = True
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE artifacts SET content_json=? WHERE id=?",
+        (json.dumps(tampered, ensure_ascii=False), artifact["id"]),
+    )
+    conn.commit()
+    before_count = conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
+
+    result = apply_screenplay_patch(
+        PatchRequest(
+            production_revision_id=rev.id,
+            expected_artifact_id=artifact["id"],
+            expected_hash=artifact["content_hash"],
+            operations=[
+                PatchOperation(
+                    op="replace_field",
+                    path="stakes",
+                    value="不得被应用",
+                )
+            ],
+        ),
+        episode_id="ep_p",
+    )
+
+    assert not result.ok
+    assert result.failure_kind == "invalid_artifact"
+    assert "存储指纹漂移" in (result.error or "")
+    assert conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == before_count
+
+
 def test_source_span_normalizer_maps_hard_wrapped_import_text():
     from app.narrative import (
         normalize_source_evidence_text,

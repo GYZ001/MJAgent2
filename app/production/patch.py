@@ -68,7 +68,25 @@ class PatchResult(BaseModel):
 
 
 def _artifact_content_hash(artifact: dict[str, Any]) -> str:
-    return artifact.get("content_hash") or evidence_repository.content_hash(artifact.get("content"))
+    stored_hash = str(artifact.get("content_hash") or "")
+    try:
+        current_hash = evidence_repository.content_hash(
+            artifact.get("content"),
+            artifact.get("file_path"),
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise ArtifactNeedsRebuildError(
+            artifact_id=str(artifact.get("id") or ""),
+            artifact_type=str(artifact.get("type") or "screenplay_document"),
+            reason="Patch 基线当前内容无法重新计算指纹",
+        ) from exc
+    if not stored_hash or stored_hash != current_hash:
+        raise ArtifactNeedsRebuildError(
+            artifact_id=str(artifact.get("id") or ""),
+            artifact_type=str(artifact.get("type") or "screenplay_document"),
+            reason="Patch 基线内容与存储指纹漂移",
+        )
+    return current_hash
 
 
 def apply_patch_operation_to_document(
@@ -147,7 +165,15 @@ def apply_screenplay_patch(
             error="expected artifact 不存在",
             failure_kind="not_found",
         )
-    before_hash = _artifact_content_hash(before)
+    try:
+        before_hash = _artifact_content_hash(before)
+    except ArtifactNeedsRebuildError as exc:
+        return PatchResult(
+            ok=False,
+            before_artifact_id=request.expected_artifact_id,
+            error=str(exc),
+            failure_kind="invalid_artifact",
+        )
     if request.expected_hash and before_hash != request.expected_hash:
         return PatchResult(
             ok=False,

@@ -748,6 +748,8 @@ def test_current_screenplay_artifact_broken_lineage_needs_rebuild() -> None:
         ("all_old_shards", True),
         ("mixed_shards", True),
         ("old_merged_current_shards", True),
+        ("tampered_merged_hash", True),
+        ("tampered_shard_hash", True),
         ("complete_current", False),
     ],
 )
@@ -794,6 +796,22 @@ def test_validated_v7_source_authority_requires_complete_current_lineage(
         conn.execute(
             "UPDATE artifacts SET contract_version=? WHERE id=?",
             ("screenplay-generation-ir-merged.v8", merged["id"]),
+        )
+    elif lineage_case == "tampered_merged_hash":
+        tampered = deepcopy(merged["content"])
+        tampered["_tampered"] = True
+        conn.execute(
+            "UPDATE artifacts SET content_json=? WHERE id=?",
+            (json.dumps(tampered, ensure_ascii=False), merged["id"]),
+        )
+    elif lineage_case == "tampered_shard_hash":
+        tampered = deepcopy(
+            evidence_repository.get_artifact(shard_ids[0])["content"]
+        )
+        tampered["_tampered"] = True
+        conn.execute(
+            "UPDATE artifacts SET content_json=? WHERE id=?",
+            (json.dumps(tampered, ensure_ascii=False), shard_ids[0]),
         )
     conn.commit()
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
@@ -2265,6 +2283,7 @@ def test_recovery_compile_receives_normalized_resolution_projection(
         "canonical_name": "旧称谓",
         "resolution": "functional_identity",
         "identity_group": "current-1:F1",
+        "decision_provenance": "manual",
     }]
     conn.execute(
         "UPDATE episodes SET screenplay_character_resolutions=? WHERE id=?",

@@ -1155,6 +1155,14 @@ def _validated_v7_source_artifacts(
     for _depth, candidate in ancestors:
         if candidate.get("type") != "screenplay_generation_ir_merged":
             continue
+        try:
+            _verified_artifact_hash(candidate, label="validated merged IR Artifact")
+        except ValueError as exc:
+            raise ArtifactNeedsRebuildError(
+                artifact_id=str(artifact.get("id") or ""),
+                artifact_type=str(artifact.get("type") or ""),
+                reason=str(exc),
+            ) from exc
         direct_parent_ids = [
             str(parent_id)
             for parent_id in candidate.get("parent_artifact_ids") or []
@@ -1182,6 +1190,18 @@ def _validated_v7_source_artifacts(
                 artifact_type=str(artifact.get("type") or ""),
                 reason="merged IR lineage 缺少 validated scene shard 父链",
             )
+        try:
+            for shard_parent in shard_parents:
+                _verified_artifact_hash(
+                    shard_parent,
+                    label="validated scene shard Artifact",
+                )
+        except ValueError as exc:
+            raise ArtifactNeedsRebuildError(
+                artifact_id=str(artifact.get("id") or ""),
+                artifact_type=str(artifact.get("type") or ""),
+                reason=str(exc),
+            ) from exc
         has_current_source = any(
             str(parent.get("contract_version") or "")
             == SCREENPLAY_SCENE_SHARD_VERSION

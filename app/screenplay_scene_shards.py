@@ -3822,6 +3822,12 @@ def _latest_validated_artifact(
             content = json.loads(row["content_json"] or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
+        if (
+            not str(row["content_hash"] or "")
+            or str(row["content_hash"])
+            != evidence_repository.content_hash(content)
+        ):
+            continue
         if predicate(content):
             return {**dict(row), "content": content}
     return None
@@ -6077,11 +6083,18 @@ def persist_identity_registry(
     parent_artifact_ids: list[str] | None = None,
 ) -> str:
     _assert_episode_owner(episode_id)
+    registry_contract = "screenplay-identity-registry.v1"
+    calculated_registry_hash = _hash(identity_registry)
+    if calculated_registry_hash != identity_registry_hash:
+        raise ValueError("identity registry 内容与声明指纹不匹配")
     cached = _latest_validated_artifact(
         episode_id=episode_id,
         artifact_type="screenplay_identity_registry",
         predicate=lambda content: (
-            content.get("identity_registry_hash") == identity_registry_hash
+            content.get("contract_version") == registry_contract
+            and content.get("identity_registry_hash") == identity_registry_hash
+            and content.get("identities") == identity_registry
+            and _hash(content.get("identities")) == identity_registry_hash
         ),
     )
     expected_parents = {
@@ -6089,7 +6102,11 @@ def persist_identity_registry(
         for parent_id in parent_artifact_ids or []
         if str(parent_id)
     }
-    if cached and _artifact_parent_ids(cached) == expected_parents:
+    if (
+        cached
+        and str(cached.get("contract_version") or "") == registry_contract
+        and _artifact_parent_ids(cached) == expected_parents
+    ):
         return str(cached["id"])
     trace = current_trace()
     artifact = evidence_repository.create_artifact(
@@ -6100,12 +6117,12 @@ def persist_identity_registry(
             status="validated",
             trust_level="T1",
             content={
-                "contract_version": "screenplay-identity-registry.v1",
+                "contract_version": registry_contract,
                 "identity_registry_hash": identity_registry_hash,
                 "identities": identity_registry,
             },
             parent_artifact_ids=list(parent_artifact_ids or []),
-            contract_version="screenplay-identity-registry.v1",
+            contract_version=registry_contract,
         ),
         step_run_id=trace.step_run_id,
     )

@@ -720,6 +720,56 @@ def test_reused_identity_is_rebound_to_the_new_blueprint_artifact() -> None:
     ]
 
 
+@pytest.mark.parametrize("reseal_outer", [False, True])
+def test_identity_registry_cache_rejects_tampered_payload(
+    reseal_outer: bool,
+) -> None:
+    authority = _current_checkpoint_artifacts()
+    identity = authority["identity"]
+    poisoned = dict(identity["content"])
+    poisoned["identities"] = [{"identity_key": "poison"}]
+    params: list[object] = [json.dumps(poisoned, ensure_ascii=False)]
+    sql = "UPDATE artifacts SET content_json=?"
+    if reseal_outer:
+        sql += ",content_hash=?"
+        params.append(repository.content_hash(poisoned))
+    sql += " WHERE id=?"
+    params.append(identity["id"])
+    db.get_conn().execute(sql, params)
+    db.get_conn().commit()
+
+    replacement_id = persist_identity_registry(
+        episode_id="e1",
+        identity_registry=[],
+        identity_registry_hash=str(authority["identity_hash"]),
+        parent_artifact_ids=[authority["blueprint"]["id"]],
+    )
+
+    assert replacement_id != identity["id"]
+    replacement = repository.get_artifact(replacement_id)
+    assert replacement is not None
+    assert replacement["content"]["identities"] == []
+
+
+def test_identity_registry_rejects_wrong_input_hash_before_persist() -> None:
+    before = db.get_conn().execute(
+        "SELECT COUNT(*) FROM artifacts WHERE type='screenplay_identity_registry'"
+    ).fetchone()[0]
+
+    with pytest.raises(ValueError, match="内容与声明指纹不匹配"):
+        persist_identity_registry(
+            episode_id="e1",
+            identity_registry=[],
+            identity_registry_hash="wrong",
+            parent_artifact_ids=[],
+        )
+
+    after = db.get_conn().execute(
+        "SELECT COUNT(*) FROM artifacts WHERE type='screenplay_identity_registry'"
+    ).fetchone()[0]
+    assert after == before
+
+
 def test_production_state_distinguishes_technical_failure_from_pause() -> None:
     revision = ensure_production_revision(
         episode_id="e1",
