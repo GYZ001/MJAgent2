@@ -167,6 +167,44 @@ def _storyboard_target_for_source(target_duration_s: int | None, source_chars: i
     return _compact_episode_target(target_duration_s)
 
 
+def _compact_target_columns(compact_target: int) -> dict[str, object]:
+    """Every episode column rewritten when re-baselining to a compact target.
+
+    Single source of truth for the compact-target write: callers use this same
+    dict both for the ``UPDATE episodes`` statement and to refresh the in-memory
+    episode snapshot, so the snapshot can never drift from the row on disk.
+    """
+    return {
+        "target_duration_s": compact_target,
+        "planning_target_duration_s": compact_target,
+        "planning_duration_source": "screenplay_source_capacity_estimate",
+        "target_duration_authority": "planning_estimate",
+    }
+
+
+def _apply_compact_target(conn, episode_id: str, ep_data: dict, compact_target: int) -> None:
+    """Persist the compact target and mirror every written column into ``ep_data``.
+
+    ``ep_data`` is the in-memory snapshot handed to ``run_screenplay_production``
+    and read downstream as ``episode.get("planning_target_duration_s")`` for the
+    duration-expansion CAS.  Writing the DB and the snapshot from one
+    ``_compact_target_columns`` dict guarantees "whatever was written is synced",
+    so the CAS can never see a stale non-rounded planning value.
+    """
+    compact_columns = _compact_target_columns(compact_target)
+    conn.execute(
+        """UPDATE episodes
+              SET target_duration_s=:target_duration_s,
+                  planning_target_duration_s=:planning_target_duration_s,
+                  planning_duration_source=:planning_duration_source,
+                  target_duration_authority=:target_duration_authority
+            WHERE id=:episode_id""",
+        {**compact_columns, "episode_id": episode_id},
+    )
+    conn.commit()
+    ep_data.update(compact_columns)
+
+
 def _episode_source_text(conn, ep) -> str:
     raw_source_chapters = ep["source_chapters"] or []
     source_chapters = (

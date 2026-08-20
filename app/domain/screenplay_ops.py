@@ -1150,17 +1150,11 @@ async def _screenplay_task(
         )
         compact_target = _storyboard_target_for_source(ep_data.get("target_duration_s"), len(source_text))
         if compact_target != ep_data.get("target_duration_s"):
-            conn.execute(
-                """UPDATE episodes
-                      SET target_duration_s=?,
-                          planning_target_duration_s=?,
-                          planning_duration_source='screenplay_source_capacity_estimate',
-                          target_duration_authority='planning_estimate'
-                    WHERE id=?""",
-                (compact_target, compact_target, episode_id),
-            )
-            conn.commit()
-            ep_data["target_duration_s"] = compact_target
+            # 单一真源：UPDATE 与内存快照 ep_data 都由 _apply_compact_target
+            # 从同一份 _compact_target_columns 取值，保证“写了什么就同步什么”，
+            # 杜绝内存快照与 DB 漂移（历史上 planning 停留在非整十旧值会导致
+            # 下游 duration-expansion CAS 冲突）。
+            _apply_compact_target(conn, episode_id, ep_data, compact_target)
         prev = conn.execute(
             "SELECT cliffhanger FROM episodes WHERE project_id=? AND episode_no=?",
             (ep["project_id"], ep["episode_no"] - 1)).fetchone()
