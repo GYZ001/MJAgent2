@@ -93,11 +93,32 @@ def test_screenplay_baseline_uses_dedicated_long_read_timeout(monkeypatch) -> No
     assert hiagent._chat_read_timeout_s({"stage_key": "storyboard"}) == 600.0
     assert hiagent._chat_read_timeout_s({"stage_key": "storyboard_shot_6"}) == 600.0
     monkeypatch.setattr(
-        hiagent.config, "TIMEOUT_CHAT_BLUEPRINT_REVIEW_READ", 600.0,
+        hiagent.config, "TIMEOUT_CHAT_BLUEPRINT_REVIEW_READ", 735.0,
     )
     assert hiagent._chat_read_timeout_s(
         {"stage_key": "screenplay_blueprint_review"}
-    ) == 600.0
+    ) == 735.0
+
+
+@pytest.mark.parametrize(
+    "stage_key",
+    [
+        "screenplay_scene_shards",
+        "screenplay_scene_shard_semantic_review",
+        "screenplay_scene_shard_semantic_repair",
+    ],
+)
+def test_scene_shard_long_calls_use_configured_baseline_read_timeout(
+    monkeypatch,
+    stage_key: str,
+) -> None:
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_READ", 300.0)
+    # TIMEOUT_CHAT_BASELINE_READ is loaded from the environment by app.config;
+    # a non-default value proves this selector honors that deployment override.
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_BASELINE_READ", 675.0)
+
+    assert hiagent._chat_read_timeout_s({"stage_key": stage_key}) == 675.0
+    assert hiagent._chat_read_timeout_s({"stage_key": "ordinary_chat"}) == 300.0
 
 
 def test_post_json_writes_running_before_updating_same_ledger_row(monkeypatch) -> None:

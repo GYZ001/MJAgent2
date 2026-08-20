@@ -1120,6 +1120,12 @@ def _chat_read_timeout_s(call_meta: dict | None) -> float:
     """为长结构化生成使用独立读超时，其他文本请求保持通用上限。"""
     stage_key = str((call_meta or {}).get("stage_key") or "").strip().lower()
     stage = str((call_meta or {}).get("stage") or "").strip().lower()
+    if stage_key in {
+        "screenplay_scene_shards",
+        "screenplay_scene_shard_semantic_review",
+        "screenplay_scene_shard_semantic_repair",
+    }:
+        return max(config.TIMEOUT_CHAT_READ, config.TIMEOUT_CHAT_BASELINE_READ)
     if stage_key == "storyboard_outline":
         return max(
             config.TIMEOUT_CHAT_READ,
