@@ -1260,9 +1260,23 @@ def test_stale_structural_cache_is_neither_reused_nor_used_as_base(
         policy_version="screenplay-identity-structural-coverage.v3",
         candidates=stale_alias,
     )
+    current_receipt = portraits._current_identity_evidence_records(
+        source_text
+    )[0]
     valid_base = [{
+        "name": "虎头虎脑的少年",
         "source_label": "虎头虎脑的少年",
+        "identity_kind": "functional",
         "identity_group": "current-1:F1",
+        "kind": "onscreen",
+        "source_label_provenance": (
+            portraits.CURRENT_IDENTITY_LITERAL_PROVENANCE
+        ),
+        "source_evidence_receipt": current_receipt,
+        "source_evidence_receipts": [current_receipt],
+        "source_segment_id": current_receipt["source_segment_id"],
+        "source_segment_ids": [current_receipt["source_segment_id"]],
+        "source_quote": current_receipt["text"],
     }]
     stale_generic_alias = [{
         "source_label": "大青山被困少年1",

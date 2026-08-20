@@ -6361,7 +6361,10 @@ def test_current_identity_receipt_v2_bundle_is_fail_closed(
     elif mutation == "wrong_label":
         candidate["source_label"] = "银袍女子"
 
-    with pytest.raises(ContentGenerationError, match="receipt v2 无效"):
+    with pytest.raises(
+        portraits.ContentGenerationError,
+        match="receipt v2 无效",
+    ):
         portraits._attach_candidate_source_evidence(
             [candidate],
             source_text,
@@ -6450,3 +6453,145 @@ def test_persist_replaces_invalid_current_bundle_with_valid_v2() -> None:
     assert stored[0]["source_evidence_receipts"] == good[
         "source_evidence_receipts"
     ]
+
+
+def test_persist_keeps_stored_bytes_for_two_valid_receipt_subsets() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE episodes(id TEXT PRIMARY KEY, "
+        "screenplay_character_resolutions TEXT NOT NULL)"
+    )
+    source_text = "守卫守在山门。\n\n守卫走到殿前。\n\n守卫敲了敲门。"
+    base = _rf11_literal_candidate(source_text, "守卫")
+    scope = portraits.screenplay_identity_scope_fingerprint(1, source_text)
+
+    def resolution_for(indexes: tuple[int, int]) -> dict:
+        candidate = dict(base)
+        receipts = [
+            dict(base["source_evidence_receipts"][index]) for index in indexes
+        ]
+        candidate.update({
+            "source_evidence_receipt": dict(receipts[0]),
+            "source_evidence_receipts": receipts,
+            "source_segment_id": receipts[0]["source_segment_id"],
+            "source_segment_ids": [
+                value["source_segment_id"] for value in receipts
+            ],
+            "source_quote": receipts[0]["text"],
+            "identity_scope_fingerprint": scope,
+        })
+        return portraits._identity_resolution(
+            candidate,
+            "守卫",
+            "functional_identity",
+        )
+
+    first = resolution_for((0, 1))
+    second = resolution_for((0, 2))
+    original_json = json.dumps([first], ensure_ascii=False)
+    conn.execute("INSERT INTO episodes VALUES(?,?)", ("ep1", original_json))
+    conn.commit()
+
+    persisted = portraits.persist_screenplay_character_resolutions(
+        conn,
+        "ep1",
+        [second],
+    )
+    stored_json = conn.execute(
+        "SELECT screenplay_character_resolutions FROM episodes WHERE id='ep1'"
+    ).fetchone()[0]
+
+    assert stored_json == original_json
+    assert persisted[0]["source_evidence_receipts"] == first[
+        "source_evidence_receipts"
+    ]
+
+
+def test_legacy_generic_cache_rejects_tampered_typed_v2_bundle(
+    monkeypatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE artifacts(id TEXT PRIMARY KEY, scope_type TEXT, "
+        "scope_id TEXT, type TEXT, status TEXT, content_json TEXT, "
+        "created_at REAL)"
+    )
+    source_text = "守卫守在山门。\n\n守卫走到殿前。"
+    bible = Bible(world=World(visual_style_canonical="国风"), characters=[])
+    bad = _rf11_literal_candidate(source_text, "守卫")
+    bad["source_evidence_receipts"][1]["text"] += "伪造"
+    discovery_input = {
+        "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "current_identity_version": portraits.CURRENT_IDENTITY_DECISION_VERSION,
+        "current_evidence_catalog_hash": (
+            portraits._current_identity_evidence_catalog_hash(source_text)
+        ),
+        "mode": "legacy",
+        "episode_no": 1,
+        "source_text": source_text,
+        "draft_text": "",
+        "future_text": "",
+        "future_label": "",
+        "bible": bible.model_dump(mode="json"),
+        "existing_resolutions": [],
+        "structural_evidence": [],
+    }
+    conn.execute(
+        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
+        (
+            "bad-cache", "episode", "ep1",
+            "screenplay_identity_discovery", "validated",
+            json.dumps({
+                "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+                "current_identity_version": portraits.CURRENT_IDENTITY_DECISION_VERSION,
+                "current_evidence_catalog_hash": discovery_input[
+                    "current_evidence_catalog_hash"
+                ],
+                "input_hash": portraits.evidence_repository.content_hash(
+                    discovery_input
+                ),
+                "mode": "legacy",
+                "candidates": [bad],
+            }, ensure_ascii=False),
+            1.0,
+        ),
+    )
+    conn.commit()
+    calls = 0
+
+    async def fresh_legacy(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return [{
+            "name": "守卫",
+            "source_label": "守卫",
+            "identity_kind": "functional",
+            "identity_group": "legacy:F1",
+            "kind": "onscreen",
+        }]
+
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    monkeypatch.setattr(portraits, "get_setting", lambda *_args: "false")
+    monkeypatch.setattr(
+        portraits,
+        "_discover_character_candidates_legacy",
+        fresh_legacy,
+    )
+    monkeypatch.setattr(
+        portraits.evidence_repository,
+        "create_artifact",
+        lambda *_args, **_kwargs: {"id": "fresh"},
+    )
+
+    result = asyncio.run(portraits.discover_character_candidates(
+        source_text,
+        bible,
+        1,
+        scope_id="ep1",
+    ))
+
+    assert calls == 1
+    assert result[0]["identity_group"] == "legacy:F1"
+    assert result[0].get("source_evidence_receipts") is None

@@ -3374,29 +3374,41 @@ async def test_active_recovery_run_reuses_prebaseline_identity_checkpoint(
         AUTOMATIC_IDENTITY_DECISION_PROVENANCE,
         FUTURE_IDENTITY_DECISION_VERSION,
         IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        CURRENT_IDENTITY_LITERAL_PROVENANCE,
         STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+        _current_identity_evidence_records,
         screenplay_identity_scope_fingerprint,
     )
 
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content) VALUES(?,?,?,?)",
+        ("proj_p", 1, "第一章", "守卫守在山门。"),
+    )
+    conn.execute(
+        "UPDATE episodes SET source_chapters='[1]' WHERE id='ep_p'"
+    )
+    conn.commit()
     episode_row = conn.execute(
         "SELECT * FROM episodes WHERE id='ep_p'"
     ).fetchone()
     recovery_source = screenplay_ops._episode_source_text(conn, episode_row)
     current_scope = screenplay_identity_scope_fingerprint(1, recovery_source)
-    stale_v11_scope = evidence_repository.content_hash({
-        "contract_version": "screenplay-identity-discovery.v11",
+    stale_v13_scope = evidence_repository.content_hash({
+        "contract_version": "screenplay-identity-discovery.v13",
         "episode_no": 1,
         "source_text": recovery_source,
     })
     assert IDENTITY_DISCOVERY_CONTRACT_VERSION == (
-        "screenplay-identity-discovery.v13"
+        "screenplay-identity-discovery.v14"
     )
+    current_receipt = _current_identity_evidence_records(recovery_source)[0]
+    current_label = str(current_receipt["text"])[:2]
     conn.execute(
         "UPDATE episodes SET screenplay_character_resolutions=? WHERE id='ep_p'",
         (json.dumps([
             {
-                "source_label": "current-auto",
-                "canonical_name": "current-auto",
+                "source_label": current_label,
+                "canonical_name": current_label,
                 "resolution": "functional_identity",
                 "identity_group": "current-1:F1",
                 "identity_scope_fingerprint": current_scope,
@@ -3405,13 +3417,21 @@ async def test_active_recovery_run_reuses_prebaseline_identity_checkpoint(
                 "structural_identity_policy_version": (
                     STRUCTURAL_IDENTITY_COVERAGE_VERSION
                 ),
+                "source_label_provenance": (
+                    CURRENT_IDENTITY_LITERAL_PROVENANCE
+                ),
+                "source_evidence_receipt": current_receipt,
+                "source_evidence_receipts": [current_receipt],
+                "source_segment_id": current_receipt["source_segment_id"],
+                "source_segment_ids": [current_receipt["source_segment_id"]],
+                "source_quote": current_receipt["text"],
             },
             {
                 "source_label": "stale-v11-auto",
                 "canonical_name": "stale-v11-auto",
                 "resolution": "functional_identity",
                 "identity_group": "current-1:F2",
-                "identity_scope_fingerprint": stale_v11_scope,
+                "identity_scope_fingerprint": stale_v13_scope,
                 "decision_provenance": AUTOMATIC_IDENTITY_DECISION_PROVENANCE,
                 "decision_contract_version": FUTURE_IDENTITY_DECISION_VERSION,
                 "structural_identity_policy_version": (
@@ -3447,7 +3467,7 @@ async def test_active_recovery_run_reuses_prebaseline_identity_checkpoint(
         assert {
             item["source_label"]
             for item in preflight_result["resolutions"]
-        } == {"current-auto", "manual-kept", "bible-kept"}
+        } == {current_label, "manual-kept", "bible-kept"}
         script = _minimal_script()
         conn.execute(
             "UPDATE episodes SET screenplay_status='ready',screenplay_json=? "

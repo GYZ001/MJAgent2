@@ -4266,10 +4266,9 @@ async def discover_character_candidates(
                     CURRENT_IDENTITY_SYNTHETIC_PROVENANCE,
                 }
             ]
-            if not targeted:
-                return cached_candidates
             if (
-                not structural_coverage_applied
+                targeted
+                and not structural_coverage_applied
                 and len(typed_current_candidates) != len(cached_candidates)
             ):
                 continue
@@ -6468,32 +6467,10 @@ def persist_screenplay_character_resolutions(
                 source_text=None,
             )
         except ContentGenerationError:
-            return (
-                "invalid",
-                evidence_repository.content_hash({
-                    "primary": item.get("source_evidence_receipt"),
-                    "receipts": item.get("source_evidence_receipts"),
-                    "source_segment_id": item.get("source_segment_id"),
-                    "source_segment_ids": item.get("source_segment_ids"),
-                }),
-            )
+            return ("invalid", "")
         if bundle is not None:
-            return (
-                "current_v2",
-                evidence_repository.content_hash({
-                    "primary": bundle[0],
-                    "receipts": bundle[1],
-                    "source_segment_ids": bundle[2],
-                }),
-            )
-        return (
-            "typed_or_none",
-            evidence_repository.content_hash([
-                str(value).strip()
-                for value in item.get("source_segment_ids") or []
-                if str(value).strip()
-            ]),
-        )
+            return ("current_v2", "")
+        return ("typed_or_none", "")
 
     def _semantic_identity_key(items: list[dict]) -> list[tuple[str, ...]]:
         return sorted(
