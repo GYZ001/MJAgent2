@@ -1918,26 +1918,28 @@ async def _stream_chat_completion(
             else _timeout_phase(exc)
         )
         detail = f"{type(exc).__name__}(phase={phase}, latency_ms={latency}): {exc!r}"
-        if isinstance(exc, httpx.HTTPError):
-            err = _transport_provider_error(
-                exc,
-                f"流式调用{phase}阶段超时（{latency}ms）",
-                raw=detail,
-                timeout_phase=phase,
-            )
-            err.received_chars = received_chars
+        http_exc = exc if isinstance(exc, httpx.HTTPError) else None
+        delivery_state, replay_safe = _stream_timeout_replay_state(http_exc, received_chars)
+        if replay_safe:
+            message = f"流式调用{phase}阶段超时（{latency}ms）"
+            failure_kind = "connection_failed" if delivery_state == "not_sent" else "request_outcome_unknown"
         else:
-            err = ProviderError(
+            message = (
                 f"流式调用{phase}阶段超时（{latency}ms）；"
-                "请求结果不确定，已禁止自动重试，请在页面确认后重试",
-                retryable=True,
-                raw=detail,
-                timeout_phase=phase,
-                failure_kind="request_outcome_unknown",
-                delivery_state="unknown",
-                requires_explicit_retry=True,
-                received_chars=received_chars,
+                "请求结果不确定，已禁止自动重试，请在页面确认后重试"
             )
+            failure_kind = "request_outcome_unknown"
+        err = ProviderError(
+            message,
+            retryable=True,
+            raw=detail,
+            timeout_phase=phase,
+            failure_kind=failure_kind,
+            delivery_state=delivery_state,
+            replay_safe=replay_safe,
+            requires_explicit_retry=not replay_safe,
+            received_chars=received_chars,
+        )
         finish_provider_call(
             call_id,
             "TIMEOUT" if err.replay_safe else "INTERRUPTED",

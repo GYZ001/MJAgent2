@@ -259,10 +259,15 @@ def test_stream_total_timeout_covers_keepalive_and_blank_lines(
 
     assert caught.value.timeout_phase == "总时长"
     assert caught.value.retryable is True
-    assert caught.value.replay_safe is False
-    assert caught.value.requires_explicit_retry is True
+    # Only heartbeat/blank frames arrived → received_chars == 0, so the total
+    # timeout is decided by delivered-byte evidence: a resend equals the first
+    # send, hence replay-safe / not_sent and finished as TIMEOUT (not INTERRUPTED).
+    assert caught.value.replay_safe is True
+    assert caught.value.delivery_state == "not_sent"
+    assert caught.value.requires_explicit_retry is False
+    assert caught.value.received_chars == 0
     assert len(events) == 1
-    assert events[0][0:3] == (17, "INTERRUPTED", None)
+    assert events[0][0:3] == (17, "TIMEOUT", None)
     assert events[0][4] is None
 
 
@@ -455,6 +460,182 @@ def test_harness_zero_token_stream_interruption_does_not_fallback_to_second_requ
         "status": "INTERRUPTED",
         "recovery_disposition": "REQUIRES_EXPLICIT_RETRY",
     }
+
+
+def test_stream_zero_byte_read_timeout_is_replay_safe_not_sent(
+    tmp_path, monkeypatch,
+) -> None:
+    """A provider SSE stall that delivers zero bytes is replay-safe.
+
+    received_chars == 0 means nothing was produced or consumed, so a resend is
+    equivalent to the first send. The read timeout must be classified as
+    not_sent / replay_safe and finished as TIMEOUT (recoverable), not INTERRUPTED.
+    """
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-stream-zero-read-timeout.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+
+    class ZeroByteReadTimeout(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            raise httpx.ReadTimeout("provider stalled before first byte")
+            yield b""  # pragma: no cover - makes this an async generator
+
+        async def aclose(self):
+            return None
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=ZeroByteReadTimeout(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    emitted: list[tuple[str, str]] = []
+    monkeypatch.setattr(hiagent, "get_setting", lambda _key: "60")
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await hiagent._stream_chat_completion(
+                client,
+                "https://provider.test/chat/completions",
+                {"model": "m", "messages": []},
+                kind="chat",
+                model="m",
+                headers={},
+                on_token=lambda kind, text: emitted.append((kind, text)),
+            )
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(run())
+
+    assert caught.value.timeout_phase == "read"
+    assert caught.value.retryable is True
+    assert caught.value.replay_safe is True
+    assert caught.value.requires_explicit_retry is False
+    assert caught.value.delivery_state == "not_sent"
+    assert caught.value.failure_kind == "connection_failed"
+    assert caught.value.received_chars == 0
+    assert emitted == []
+    row = db.get_conn().execute(
+        "SELECT status,http_status,received_chars,recovery_disposition "
+        "FROM provider_calls ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["status"] == "TIMEOUT"
+    assert row["http_status"] is None
+    assert row["received_chars"] == 0
+    assert row["recovery_disposition"] != "REQUIRES_EXPLICIT_RETRY"
+
+
+def test_stream_partial_byte_read_timeout_stays_not_replay_safe(
+    tmp_path, monkeypatch,
+) -> None:
+    """A read timeout after tokens were consumed stays conservative (unknown)."""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-stream-partial-read-timeout.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    partial_text = "已经吐了一部分"
+    frame = {"choices": [{"delta": {"content": partial_text}}]}
+
+    class PartialThenReadTimeout(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield f"data: {json.dumps(frame, ensure_ascii=False)}\n\n".encode("utf-8")
+            raise httpx.ReadTimeout("provider stalled after partial delivery")
+
+        async def aclose(self):
+            return None
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=PartialThenReadTimeout(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    emitted: list[tuple[str, str]] = []
+    monkeypatch.setattr(hiagent, "get_setting", lambda _key: "60")
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await hiagent._stream_chat_completion(
+                client,
+                "https://provider.test/chat/completions",
+                {"model": "m", "messages": []},
+                kind="chat",
+                model="m",
+                headers={},
+                on_token=lambda kind, text: emitted.append((kind, text)),
+            )
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(run())
+
+    assert caught.value.timeout_phase == "read"
+    assert caught.value.retryable is True
+    assert caught.value.replay_safe is False
+    assert caught.value.requires_explicit_retry is True
+    assert caught.value.delivery_state == "unknown"
+    assert caught.value.failure_kind == "request_outcome_unknown"
+    assert caught.value.received_chars == len(partial_text)
+    assert emitted == [("content", partial_text)]
+    row = db.get_conn().execute(
+        "SELECT status,received_chars,recovery_disposition "
+        "FROM provider_calls ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["status"] == "INTERRUPTED"
+    assert row["received_chars"] == len(partial_text)
+    assert row["recovery_disposition"] == "REQUIRES_EXPLICIT_RETRY"
+
+
+def test_stream_zero_byte_read_timeout_falls_back_to_non_stream(
+    tmp_path, monkeypatch,
+) -> None:
+    """Zero-byte streaming read timeout is replay-safe → non-stream fallback runs."""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-stream-zero-read-fallback.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    fallback_calls = 0
+
+    class ZeroByteReadTimeout(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            raise httpx.ReadTimeout("provider stalled before first byte")
+            yield b""  # pragma: no cover
+
+        async def aclose(self):
+            return None
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=ZeroByteReadTimeout(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def fake_post_json(*_args, **_kwargs):
+        nonlocal fallback_calls
+        fallback_calls += 1
+        return {"choices": [{"message": {"content": "recovered"}}]}
+
+    monkeypatch.setattr(hiagent, "get_setting", lambda _key: "60")
+    monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
+
+    async def run() -> dict:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await hiagent._stream_or_fallback(
+                client,
+                "https://provider.test/chat/completions",
+                {"model": "m", "messages": []},
+                kind="chat",
+                model="m",
+                headers={},
+                key_name="TEST_API_KEY",
+                meta={},
+                on_token=lambda _kind, _text: None,
+            )
+
+    result = asyncio.run(run())
+
+    assert result == {"choices": [{"message": {"content": "recovered"}}]}
+    assert fallback_calls == 1
 
 
 def test_harness_chat_network_error_has_single_adapter_attempt(monkeypatch) -> None:

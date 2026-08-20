@@ -245,3 +245,110 @@ def test_shared_auto_run_records_retry_without_pausing_siblings(tmp_path, monkey
         event["event_type"] == "PROVIDER_RETRY_SCHEDULED"
         for event in repository.get_events(recorder.run_id, limit=100)
     )
+
+
+def test_zero_byte_stream_read_timeout_schedules_bounded_retry(tmp_path, monkeypatch) -> None:
+    """End-to-end: a zero-byte streaming read timeout is replay-safe, so
+    model_gateway.chat schedules a bounded automatic retry (PROVIDER_RETRY_SCHEDULED)."""
+    _fresh_database(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "TEXT_PROVIDER_MAX_RETRIES", 3)
+    monkeypatch.setattr(config, "TEXT_PROVIDER_RETRY_BASE_DELAY", 0.0)
+    attempts = 0
+
+    recorder = WorkflowRecorder.create(
+        workflow_type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="zero-byte-read-timeout",
+    )
+    recorder.start()
+
+    async def zero_byte_then_ok(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            # Mirrors what _stream_chat_completion now produces for a zero-byte
+            # read timeout: evidence says nothing was delivered → replay-safe.
+            raise hiagent.ProviderError(
+                "流式调用read阶段超时（303274ms）",
+                retryable=True,
+                failure_kind="connection_failed",
+                delivery_state="not_sent",
+                replay_safe=True,
+                received_chars=0,
+            )
+        return '{"ok":true}'
+
+    async def no_wait(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(model_gateway.hiagent, "chat", zero_byte_then_ok)
+    monkeypatch.setattr(model_gateway.asyncio, "sleep", no_wait)
+
+    async def operation() -> str:
+        return await model_gateway.chat(
+            [{"role": "user", "content": "same one-shot generation"}],
+            call_meta={"stage_key": "storyboard", "call_role": "stage_generate"},
+        )
+
+    _, result = asyncio.run(recorder.step("storyboard", operation))
+    recorder.succeed()
+
+    assert result == '{"ok":true}'
+    assert attempts == 2
+    events = repository.get_events(recorder.run_id, limit=100)
+    assert [event["event_type"] for event in events].count("PROVIDER_RETRY_SCHEDULED") == 1
+
+
+def test_partial_byte_stream_read_timeout_does_not_schedule_retry(tmp_path, monkeypatch) -> None:
+    """End-to-end: a partial-byte streaming read timeout stays not-replay-safe,
+    so model_gateway.chat must NOT schedule an automatic retry."""
+    _fresh_database(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "TEXT_PROVIDER_MAX_RETRIES", 3)
+    monkeypatch.setattr(config, "TEXT_PROVIDER_RETRY_BASE_DELAY", 0.0)
+    attempts = 0
+    sleeps = 0
+
+    recorder = WorkflowRecorder.create(
+        workflow_type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="partial-byte-read-timeout",
+    )
+    recorder.start()
+
+    async def partial_byte_read_timeout(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise hiagent.ProviderError(
+            "流式调用read阶段超时（303274ms）；请求结果不确定，已禁止自动重试，请在页面确认后重试",
+            retryable=True,
+            failure_kind="request_outcome_unknown",
+            delivery_state="unknown",
+            requires_explicit_retry=True,
+            received_chars=123,
+        )
+
+    async def forbidden_sleep(_delay: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+
+    monkeypatch.setattr(model_gateway.hiagent, "chat", partial_byte_read_timeout)
+    monkeypatch.setattr(model_gateway.asyncio, "sleep", forbidden_sleep)
+
+    async def operation() -> str:
+        return await model_gateway.chat(
+            [{"role": "user", "content": "same paid generation"}],
+            call_meta={"stage_key": "storyboard", "call_role": "stage_generate"},
+        )
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(recorder.step("storyboard", operation))
+    recorder.fail(caught.value)
+
+    assert attempts == 1
+    assert sleeps == 0
+    events = repository.get_events(recorder.run_id, limit=100)
+    assert not any(
+        event["event_type"] == "PROVIDER_RETRY_SCHEDULED" for event in events
+    )
