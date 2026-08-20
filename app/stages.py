@@ -59,6 +59,7 @@ from app.narrative_blueprint import (
     blueprint_semantic_issue_is_resolved,
     blueprint_state_subject_issues,
     blueprint_state_subject_ownership_patch_schema,
+    blueprint_voice_identity_issues,
     filter_blueprint_semantic_review_voice_issues,
     blueprint_prompt_contract,
     blueprint_semantic_review_schema,
@@ -168,7 +169,7 @@ SYSTEM_PREFIX = (
 
 SCREENPLAY_BASELINE_PROMPT_VERSION = "screenplay-compact-ir-5.5.1"
 SCREENPLAY_BLUEPRINT_PROMPT_VERSION = BLUEPRINT_PROMPT_VERSION
-BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION = "blueprint-semantic-review.v4"
+BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION = "blueprint-semantic-review.v5"
 # IR shape drift is normalized locally. A second AgentLoop iteration would
 # resend the entire chapter and candidate for a few field-level corrections,
 # erasing the latency/token savings of the compact contract.
@@ -4719,6 +4720,38 @@ async def _repair_reviewed_blueprint_state_subject_ownership(
     return repaired, str(artifact["id"])
 
 
+def _blueprint_semantic_issue_exact_scope(
+    issue: Any,
+) -> tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Return the exact scope used to bind a review to local authority."""
+    return (
+        str(issue.code),
+        tuple(sorted(str(key) for key in issue.node_keys)),
+        tuple(sorted(str(key) for key in issue.source_segment_ids)),
+        tuple(sorted(str(key) for key in issue.source_unit_keys)),
+    )
+
+
+def _deterministic_blueprint_semantic_issue_scopes(
+    blueprint: NarrativeBlueprint,
+    source_text: str,
+) -> set[tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]]:
+    """Project server-derived issues that can independently block review.
+
+    Environment misclassification is intentionally excluded: its local check
+    proves exact-unit scope, not the semantic identity of the state subject.
+    That classification therefore still requires dual-review consensus.
+    """
+    return {
+        _blueprint_semantic_issue_exact_scope(issue)
+        for issue in (
+            blueprint_voice_identity_issues(blueprint, source_text)
+            + blueprint_state_subject_issues(blueprint, source_text)
+        )
+        if issue.code != "state_subject_environment_misclassified"
+    }
+
+
 async def _semantic_review_narrative_blueprint(
     blueprint: NarrativeBlueprint,
     *,
@@ -4734,7 +4767,7 @@ async def _semantic_review_narrative_blueprint(
         *,
         parent_artifact_ids: list[str] | None = None,
     ) -> None:
-        """Persist the clean authority, then terminalize old unknown retries.
+        """Persist reviewed authority, then terminalize old unknown retries.
 
         The artifact commit deliberately happens first.  A crash between the
         two writes leaves the historical provider outcome unresolved (safe);
@@ -4839,12 +4872,33 @@ async def _semantic_review_narrative_blueprint(
             cached_snapshot = json.loads(
                 row["model_snapshot_json"] or "{}"
             )
+            cached_authoritative_issue_count = int(
+                cached.get("authoritative_issue_count")
+            )
+            cached_residual_issue_count = int(
+                cached.get("non_authoritative_residual_issue_count")
+            )
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
+        cached_outcome = str(cached.get("review_outcome") or "")
+        reusable_no_authority_outcome = bool(
+            (
+                cached_outcome == "clean"
+                and cached_residual_issue_count == 0
+            )
+            or (
+                cached_outcome
+                == "non_authoritative_one_sided_residual"
+                and cached.get("review_mode") == "full"
+                and cached_residual_issue_count > 0
+            )
+        )
         if (
             cached.get("blueprint_hash") == initial_blueprint_hash
             and not cached.get("consensus_issue_keys")
-            and cached.get("review_outcome") == "clean"
+            and not cached.get("deterministic_authority_issue_keys")
+            and cached_authoritative_issue_count == 0
+            and reusable_no_authority_outcome
             and cached_snapshot.get("review_policy_version")
             == BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION
             and cached_snapshot.get("authority_fingerprint")
@@ -5065,14 +5119,21 @@ async def _semantic_review_narrative_blueprint(
         review_artifact_ids: list[str] = []
         dropped_voice_issue_counts: dict[int, int] = {}
         async def run_reviewer(sample_no: int) -> BlueprintSemanticReview:
+            last_validated_review: BlueprintSemanticReview | None = None
+            validated_drop_count = 0
+
             def validate_review(candidate_review: BlueprintSemanticReview) -> list[str]:
-                dropped_voice_issue_counts[sample_no] = (
-                    filter_blueprint_semantic_review_voice_issues(
-                        candidate_review,
-                        blueprint,
-                        source_text,
-                    )
+                nonlocal last_validated_review, validated_drop_count
+                dropped = filter_blueprint_semantic_review_voice_issues(
+                    candidate_review,
+                    blueprint,
+                    source_text,
                 )
+                if candidate_review is last_validated_review:
+                    validated_drop_count += dropped
+                else:
+                    last_validated_review = candidate_review
+                    validated_drop_count = dropped
                 errors = validate_blueprint_semantic_review(
                     candidate_review,
                     blueprint,
@@ -5228,6 +5289,22 @@ async def _semantic_review_narrative_blueprint(
             else:
                 if reservation_id is not None:
                     generation_budget.settle(reservation_id)
+            # The real gateway invokes validate_review, but test/replay
+            # adapters are allowed to return a typed cached value directly.
+            # Reapply the deterministic authority filter at the boundary so an
+            # unsupported delivery/state guess can never reach consensus.  If
+            # the same object was already filtered by the callback, retain its
+            # prior count instead of counting the boundary no-op twice.
+            boundary_dropped = filter_blueprint_semantic_review_voice_issues(
+                review,
+                blueprint,
+                source_text,
+            )
+            dropped_voice_issue_counts[sample_no] = (
+                validated_drop_count + boundary_dropped
+                if review is last_validated_review
+                else boundary_dropped
+            )
             review.issues = [
                 issue
                 for issue in review.issues
@@ -5379,16 +5456,42 @@ async def _semantic_review_narrative_blueprint(
             sum(len(issue_map) for issue_map in issue_maps)
             - 2 * len(consensus_keys)
         )
+        deterministic_issue_scopes = (
+            _deterministic_blueprint_semantic_issue_scopes(
+                blueprint,
+                source_text,
+            )
+        )
+        deterministic_authority_issues = sorted(
+            (
+                issue
+                for issue_map in issue_maps
+                for issue_key, issue in issue_map.items()
+                if (
+                    issue_key not in consensus_keys
+                    and _blueprint_semantic_issue_exact_scope(issue)
+                    in deterministic_issue_scopes
+                )
+            ),
+            key=_blueprint_semantic_issue_exact_scope,
+        )
+        authoritative_issues = (
+            consensus_issues + deterministic_authority_issues
+        )
+        non_authoritative_residual_issue_count = (
+            non_consensus_issue_count
+            - len(deterministic_authority_issues)
+        )
         reviews_are_clean = not issue_maps[0] and not issue_maps[1]
         needs_full_fallback = bool(
             targeted_review
-            and not consensus_keys
-            and non_consensus_issue_count
+            and not authoritative_issues
+            and non_authoritative_residual_issue_count
         )
-        full_review_has_one_sided_residual = bool(
+        full_review_has_non_authoritative_residual = bool(
             not targeted_review
-            and not consensus_keys
-            and non_consensus_issue_count
+            and not authoritative_issues
+            and non_authoritative_residual_issue_count
         )
         consensus_artifact = evidence_repository.create_artifact(
             EvidenceArtifact(
@@ -5397,10 +5500,7 @@ async def _semantic_review_narrative_blueprint(
                 scope_id=str(episode.get("id") or ""),
                 status=(
                     "needs_revision"
-                    if (
-                        needs_full_fallback
-                        or full_review_has_one_sided_residual
-                    )
+                    if needs_full_fallback or authoritative_issues
                     else "validated"
                 ),
                 trust_level="T1",
@@ -5416,7 +5516,26 @@ async def _semantic_review_narrative_blueprint(
                         for code, node_keys, source_unit_keys
                         in sorted(consensus_keys)
                     ],
+                    "deterministic_authority_issue_keys": [
+                        {
+                            "code": issue.code,
+                            "node_keys": sorted(issue.node_keys),
+                            "source_segment_ids": sorted(
+                                issue.source_segment_ids
+                            ),
+                            "source_unit_keys": sorted(
+                                issue.source_unit_keys
+                            ),
+                        }
+                        for issue in deterministic_authority_issues
+                    ],
+                    "authoritative_issue_count": len(
+                        authoritative_issues
+                    ),
                     "non_consensus_issue_count": non_consensus_issue_count,
+                    "non_authoritative_residual_issue_count": (
+                        non_authoritative_residual_issue_count
+                    ),
                     "dropped_unsupported_voice_issue_count": sum(
                         dropped_voice_issue_counts.values()
                     ),
@@ -5424,10 +5543,13 @@ async def _semantic_review_narrative_blueprint(
                     "review_outcome": (
                         "full_fallback_required"
                         if needs_full_fallback else
-                        "one_sided_residual"
-                        if full_review_has_one_sided_residual else
                         "consensus_issues"
-                        if consensus_keys else "clean"
+                        if consensus_keys else
+                        "deterministic_authority_issues"
+                        if deterministic_authority_issues else
+                        "non_authoritative_one_sided_residual"
+                        if full_review_has_non_authoritative_residual else
+                        "clean"
                     ),
                 },
                 parent_artifact_ids=review_artifact_ids,
@@ -5461,22 +5583,25 @@ async def _semantic_review_narrative_blueprint(
                 parent_artifact_ids=[str(consensus_artifact["id"])],
             )
             return blueprint
-        if full_review_has_one_sided_residual:
-            if review_round >= 4:
-                raise ContentGenerationError(
-                    "蓝图完整双审仍有单侧必须修复问题，已按非 clean 停止"
-                )
-            targeted_review = False
-            continue
-        if not consensus_issues:
+        if full_review_has_non_authoritative_residual:
+            persist_reviewed_authority(
+                parent_artifact_ids=[str(consensus_artifact["id"])],
+            )
+            return blueprint
+        if not authoritative_issues:
             raise ContentGenerationError(
-                "蓝图双审存在未解决问题，但没有可安全修复的共识"
+                "蓝图双审存在未解决问题，但没有可安全修复的权威问题"
             )
         if review_round >= 4:
+            gate_label = (
+                "语义共识"
+                if consensus_issues
+                else "确定性权威"
+            )
             raise ContentGenerationError(
-                "蓝图语义共识复审仍有必须修复问题："
+                f"蓝图{gate_label}复审仍有必须修复问题："
                 + "；".join(
-                    issue.message for issue in consensus_issues[:10]
+                    issue.message for issue in authoritative_issues[:10]
                 )
             )
         semantic_errors = [
@@ -5487,16 +5612,16 @@ async def _semantic_review_narrative_blueprint(
                 f"{'、'.join(issue.source_unit_keys)}："
                 f"{issue.message}；必须：{issue.required_resolution}"
             )
-            for issue in consensus_issues
+            for issue in authoritative_issues
         ]
         ownership_issues = [
             issue
-            for issue in consensus_issues
+            for issue in authoritative_issues
             if issue.code == "state_subject_environment_misclassified"
         ]
         mixed_issues = [
             issue
-            for issue in consensus_issues
+            for issue in authoritative_issues
             if issue.code != "state_subject_environment_misclassified"
         ]
         ownership_artifact_ids: list[str] = []
@@ -5516,7 +5641,10 @@ async def _semantic_review_narrative_blueprint(
                 source_text=source_text,
                 additional_errors=[
                     error
-                    for error, issue in zip(semantic_errors, consensus_issues)
+                    for error, issue in zip(
+                        semantic_errors,
+                        authoritative_issues,
+                    )
                     if issue.code
                     != "state_subject_environment_misclassified"
                 ],
@@ -5552,7 +5680,13 @@ async def _semantic_review_narrative_blueprint(
                 trust_level="T1",
                 content={
                     "review_artifact_ids": review_artifact_ids,
-                    "repaired_issue_count": len(consensus_issues),
+                    "repaired_issue_count": len(authoritative_issues),
+                    "consensus_repaired_issue_count": len(
+                        consensus_issues
+                    ),
+                    "deterministic_authority_repaired_issue_count": len(
+                        deterministic_authority_issues
+                    ),
                     "ownership_repaired_issue_count": len(ownership_issues),
                     "mixed_repaired_issue_count": len(mixed_issues),
                     "ownership_source_unit_keys": list(dict.fromkeys(

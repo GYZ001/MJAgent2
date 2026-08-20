@@ -3739,10 +3739,15 @@ def test_targeted_reviewer_conflict_triggers_full_review(monkeypatch) -> None:
     assert modes == ["risk_nodes", "risk_nodes", "full", "full"]
 
 
-def test_bounded_full_review_recheck_round_two_then_clean_without_patch(
+def test_targeted_one_sided_falls_back_once_and_full_residual_validates(
     monkeypatch,
 ) -> None:
     blueprint = _blueprint()
+    blueprint.nodes[-1].participant_evidence = [
+        evidence
+        for evidence in blueprint.nodes[-1].participant_evidence
+        if evidence.usage != "state_subject"
+    ]
     derive_blueprint_scene_plans(blueprint)
     calls: list[tuple[int, int, str]] = []
     patch_calls: list[str] = []
@@ -3826,8 +3831,6 @@ def test_bounded_full_review_recheck_round_two_then_clean_without_patch(
         (1, 2, "risk_nodes"),
         (2, 1, "full"),
         (2, 2, "full"),
-        (3, 1, "full"),
-        (3, 2, "full"),
     ]
     consensus = [
         artifact
@@ -3838,17 +3841,19 @@ def test_bounded_full_review_recheck_round_two_then_clean_without_patch(
         artifact.content["review_outcome"] for artifact in consensus
     ] == [
         "full_fallback_required",
-        "one_sided_residual",
-        "clean",
+        "non_authoritative_one_sided_residual",
     ]
     assert [artifact.status for artifact in consensus] == [
         "needs_revision",
-        "needs_revision",
         "validated",
     ]
+    assert consensus[-1].content["authoritative_issue_count"] == 0
+    assert consensus[-1].content[
+        "non_authoritative_residual_issue_count"
+    ] == 1
 
 
-def test_bounded_full_review_recheck_round_four_fails_without_patch(
+def test_full_persistent_one_sided_residual_validates_without_recheck(
     monkeypatch,
 ) -> None:
     blueprint = _blueprint()
@@ -3875,13 +3880,6 @@ def test_bounded_full_review_recheck_round_four_fails_without_patch(
         review_round = meta["review_round"]
         sample_no = meta["review_sample"]
         calls.append((review_round, sample_no, meta["substage"]))
-        if review_round == 1:
-            code = (
-                "timeline_conflict"
-                if sample_no == 1
-                else "spatial_action_gap"
-            )
-            return issue(code, "定向审稿结论不一致")
         if sample_no == 1:
             return issue("timeline_conflict", "完整审稿持续单侧残留")
         return BlueprintSemanticReview(issues=[])
@@ -3898,7 +3896,7 @@ def test_bounded_full_review_recheck_round_four_fails_without_patch(
     monkeypatch.setattr(
         stages,
         "get_setting",
-        lambda key: "true"
+        lambda key: "false"
         if key == "screenplay_targeted_blueprint_review_enabled"
         else "1",
     )
@@ -3922,29 +3920,20 @@ def test_bounded_full_review_recheck_round_four_fails_without_patch(
         create_artifact,
     )
 
-    with pytest.raises(
-        ContentGenerationError,
-        match="蓝图完整双审仍有单侧必须修复问题",
-    ):
-        asyncio.run(stages._semantic_review_narrative_blueprint(
-            blueprint,
-            episode={
-                "id": "episode-full-one-sided-through-round-four",
-                "episode_no": 8,
-            },
-            source_text=SOURCE,
-        ))
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        blueprint,
+        episode={
+            "id": "episode-full-one-sided-no-recheck",
+            "episode_no": 8,
+        },
+        source_text=SOURCE,
+    ))
 
+    assert result is blueprint
     assert patch_calls == []
     assert calls == [
-        (1, 1, "risk_nodes"),
-        (1, 2, "risk_nodes"),
-        (2, 1, "full"),
-        (2, 2, "full"),
-        (3, 1, "full"),
-        (3, 2, "full"),
-        (4, 1, "full"),
-        (4, 2, "full"),
+        (1, 1, "full"),
+        (1, 2, "full"),
     ]
     consensus = [
         artifact
@@ -3954,15 +3943,87 @@ def test_bounded_full_review_recheck_round_four_fails_without_patch(
     assert [
         artifact.content["review_outcome"] for artifact in consensus
     ] == [
-        "full_fallback_required",
-        "one_sided_residual",
-        "one_sided_residual",
-        "one_sided_residual",
+        "non_authoritative_one_sided_residual",
     ]
-    assert all(
-        artifact.status == "needs_revision"
-        for artifact in consensus
+    assert consensus[0].status == "validated"
+
+
+def test_deterministic_supported_one_sided_issue_remains_repair_authority(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint()
+    derive_blueprint_scene_plans(blueprint)
+    deterministic_issue = blueprint_state_subject_issues(
+        blueprint,
+        SOURCE,
+    )[0]
+    calls: list[tuple[int, int]] = []
+    repair_errors: list[str] = []
+    created: list = []
+    empty_rows = SimpleNamespace(fetchall=lambda: [])
+    empty_connection = SimpleNamespace(
+        execute=lambda *_args, **_kwargs: empty_rows,
     )
+
+    async def fake_structured(*_args, **kwargs):
+        meta = kwargs["call_meta"]
+        calls.append((meta["review_round"], meta["review_sample"]))
+        if meta["review_round"] == 1 and meta["review_sample"] == 1:
+            return BlueprintSemanticReview(issues=[
+                deterministic_issue.model_copy(deep=True),
+            ])
+        return BlueprintSemanticReview(issues=[])
+
+    async def record_repair(value, **kwargs):
+        repair_errors.extend(kwargs["additional_errors"])
+        return value
+
+    def create_artifact(artifact, **_kwargs):
+        created.append(artifact)
+        return {"id": f"artifact-{len(created)}"}
+
+    monkeypatch.setattr(stages, "get_conn", lambda: empty_connection)
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: "false"
+        if key == "screenplay_targeted_blueprint_review_enabled"
+        else "1",
+    )
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        fake_structured,
+    )
+    monkeypatch.setattr(stages, "_repair_narrative_blueprint", record_repair)
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        create_artifact,
+    )
+
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        blueprint,
+        episode={"id": "episode-deterministic-one-sided", "episode_no": 8},
+        source_text=SOURCE,
+    ))
+
+    assert result is blueprint
+    assert calls == [(1, 1), (1, 2), (2, 1), (2, 2)]
+    assert len(repair_errors) == 1
+    assert deterministic_issue.code.upper() in repair_errors[0]
+    consensus = [
+        artifact
+        for artifact in created
+        if artifact.type == "screenplay_narrative_blueprint_review_consensus"
+    ]
+    assert consensus[0].status == "needs_revision"
+    assert consensus[0].content["review_outcome"] == (
+        "deterministic_authority_issues"
+    )
+    assert consensus[0].content["authoritative_issue_count"] == 1
+    assert consensus[0].content[
+        "non_authoritative_residual_issue_count"
+    ] == 0
 
 
 def test_reviewer_quorum_filters_unsupported_guesses_before_validation(

@@ -290,7 +290,7 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
         "screenplay-blueprint-1.10.0"
     )
     assert stages.BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION == (
-        "blueprint-semantic-review.v4"
+        "blueprint-semantic-review.v5"
     )
     assert stages.BLUEPRINT_SHARD_POLICY_VERSION == "blueprint-shard-policy.v8"
     assert "每个SRC必须整体且只归一个节点" in prompt
@@ -3531,7 +3531,7 @@ def test_semantic_consensus_is_source_unit_sensitive(
     )
 
 
-def test_post_ownership_repair_one_sided_full_residual_fails_closed(
+def test_post_ownership_repair_one_sided_full_residual_validates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source, blueprint, unit_keys = _semantic_review_environment_fixture()
@@ -3582,24 +3582,17 @@ def test_post_ownership_repair_one_sided_full_residual_fails_closed(
         review_or_patch,
     )
 
-    with pytest.raises(
-        stages.ContentGenerationError,
-        match="完整双审仍有单侧必须修复问题",
-    ):
-        asyncio.run(stages._semantic_review_narrative_blueprint(
-            blueprint,
-            episode={"id": "ep-post-ownership-residual", "episode_no": 1},
-            source_text=source,
-        ))
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        blueprint,
+        episode={"id": "ep-post-ownership-residual", "episode_no": 1},
+        source_text=source,
+    ))
 
+    assert result is blueprint
     assert call_modes == [
         "risk_nodes",
         "risk_nodes",
         "ownership_patch",
-        "full",
-        "full",
-        "full",
-        "full",
         "full",
         "full",
     ]
@@ -3615,12 +3608,12 @@ def test_post_ownership_repair_one_sided_full_residual_fails_closed(
         "node_keys": ["n3"],
         "source_unit_keys": [target_unit_key],
     }]
-    assert consensus_artifacts[-1].status == "needs_revision"
+    assert consensus_artifacts[-1].status == "validated"
     assert consensus_artifacts[-1].content["review_mode"] == "full"
     assert consensus_artifacts[-1].content["review_outcome"] == (
-        "one_sided_residual"
+        "non_authoritative_one_sided_residual"
     )
-    assert not any(
+    assert any(
         artifact.type == "screenplay_narrative_blueprint"
         and (artifact.model_snapshot or {}).get("generation_mode")
         == "semantic_reviewed"
