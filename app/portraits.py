@@ -4222,20 +4222,33 @@ async def discover_character_candidates(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='artifacts'"
         ).fetchone()
     )
+    artifact_seals_available = bool(
+        artifacts_available
+        and _has_column(evidence_conn, "artifacts", "content_hash")
+    )
     cached_rows = (
         evidence_conn.execute(
-            """SELECT content_json FROM artifacts
+            """SELECT content_json,content_hash FROM artifacts
                  WHERE scope_type='episode' AND scope_id=?
                    AND type='screenplay_identity_discovery' AND status='validated'
                  ORDER BY created_at DESC LIMIT 20""",
             (artifact_scope_id,),
         ).fetchall()
-        if artifacts_available else []
+        if artifact_seals_available else []
     )
     for row in cached_rows:
         try:
             cached = json.loads(row["content_json"] or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if (
+            not isinstance(cached, dict)
+            or not str(row["content_hash"] or "").strip()
+            or str(row["content_hash"] or "").strip()
+            != evidence_repository.content_hash(cached)
+        ):
+            # `validated` is not an integrity seal by itself.  Never reuse a
+            # payload whose bytes no longer match the repository-owned hash.
             continue
         if (
             cached.get("contract_version") == IDENTITY_DISCOVERY_CONTRACT_VERSION
@@ -4254,10 +4267,9 @@ async def discover_character_candidates(
             and cached.get("input_hash") == input_hash
             and isinstance(cached.get("candidates"), list)
         ):
-            cached_candidates = [
-                dict(item) for item in cached["candidates"]
-                if isinstance(item, dict)
-            ]
+            if any(not isinstance(item, dict) for item in cached["candidates"]):
+                continue
+            cached_candidates = [dict(item) for item in cached["candidates"]]
             typed_current_candidates = [
                 item for item in cached_candidates
                 if str(item.get("source_label_provenance") or "").strip()
@@ -4556,7 +4568,15 @@ def _structural_identity_candidate_semantic_rows(
     rows: list[dict] = []
     for item in (candidates or []):
         if not isinstance(item, dict):
-            continue
+            raise ContentGenerationError(
+                "结构人物 candidate semantic receipt 含非对象项"
+            )
+        if not str(item.get("source_label") or "").strip() or not str(
+            item.get("identity_group") or ""
+        ).strip():
+            raise ContentGenerationError(
+                "结构人物 candidate semantic receipt 缺少身份键"
+            )
         bundle = _validate_current_identity_receipt_bundle(
             item,
             source_text=None,
@@ -6796,19 +6816,24 @@ async def ensure_structural_identity_coverage(
         "structural_evidence": structural_evidence,
     })
     rows = conn.execute(
-        """SELECT id,content_json FROM artifacts
+        """SELECT id,content_json,content_hash FROM artifacts
              WHERE scope_type='episode' AND scope_id=?
                AND type='screenplay_identity_discovery' AND status='validated'
              ORDER BY created_at DESC LIMIT 20""",
         (episode_id,),
-    ).fetchall()
+    ).fetchall() if _has_column(conn, "artifacts", "content_hash") else []
     parsed_rows: list[tuple[sqlite3.Row, dict]] = []
     for row in rows:
         try:
             payload = json.loads(row["content_json"] or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
-        if isinstance(payload, dict):
+        if (
+            isinstance(payload, dict)
+            and str(row["content_hash"] or "").strip()
+            and str(row["content_hash"] or "").strip()
+            == evidence_repository.content_hash(payload)
+        ):
             parsed_rows.append((row, payload))
     base_candidates: list[dict] = []
     parent_artifact_id = ""
@@ -6823,11 +6848,9 @@ async def ensure_structural_identity_coverage(
             and payload.get("source_hash") == source_hash
             and isinstance(payload.get("candidates"), list)
         ):
-            candidate_rows = [
-                dict(item)
-                for item in payload["candidates"]
-                if isinstance(item, dict)
-            ]
+            if any(not isinstance(item, dict) for item in payload["candidates"]):
+                continue
+            candidate_rows = [dict(item) for item in payload["candidates"]]
             typed_current_rows = [
                 item for item in candidate_rows
                 if str(item.get("source_label_provenance") or "").strip()
@@ -6905,51 +6928,57 @@ async def ensure_structural_identity_coverage(
                     identity_scope_fingerprint=identity_scope_fingerprint,
                 )
             ]
-            expected_candidate_hash = str(
-                payload.get("candidate_semantic_hash") or ""
-            )
             expected_receipt = payload.get("materialized_resolution_receipt")
-            expected_bible_names = payload.get("materialized_bible_names")
-            required_bible_names = (
-                _structural_identity_required_bible_names(
-                    payload["candidates"]
+            try:
+                expected_candidate_hash = str(
+                    payload.get("candidate_semantic_hash") or ""
                 )
-            )
-            current_bible_names = _project_bible_character_names(
-                conn, project_id, bible
-            )
-            actual_receipt = _structural_identity_resolution_receipt(
-                current_cached_resolutions,
-                candidates=payload["candidates"],
-                identity_scope_fingerprint=identity_scope_fingerprint,
-            )
-            actual_catalog_input_hash = (
-                _structural_identity_catalog_input_hash(
-                    bible=bible,
-                    base_candidates=base_candidates,
-                    structural_evidence_hash=structural_hash,
-                    existing_resolutions=current_cached_resolutions,
-                    output_candidates=payload["candidates"],
+                required_bible_names = (
+                    _structural_identity_required_bible_names(
+                        payload["candidates"]
+                    )
                 )
-            )
-            cache_is_exact = bool(
-                expected_candidate_hash
-                and expected_candidate_hash
-                == _structural_identity_candidate_semantic_hash(
-                    payload["candidates"]
+                current_bible_names = _project_bible_character_names(
+                    conn, project_id, bible
                 )
-                and _structural_identity_resolution_receipt_is_valid(
-                    expected_receipt
+                actual_receipt = _structural_identity_resolution_receipt(
+                    current_cached_resolutions,
+                    candidates=payload["candidates"],
+                    identity_scope_fingerprint=identity_scope_fingerprint,
                 )
-                and expected_receipt == actual_receipt
-                and expected_bible_names == required_bible_names
-                and set(required_bible_names) <= current_bible_names
-                and str(payload.get("coverage_catalog_input_hash") or "")
-                == actual_catalog_input_hash
-                and _structural_identity_catalog_receipt_is_valid(
-                    payload.get("coverage_catalog_receipt")
+                actual_catalog_input_hash = (
+                    _structural_identity_catalog_input_hash(
+                        bible=bible,
+                        base_candidates=base_candidates,
+                        structural_evidence_hash=structural_hash,
+                        existing_resolutions=current_cached_resolutions,
+                        output_candidates=payload["candidates"],
+                    )
                 )
-            )
+                cache_is_exact = bool(
+                    expected_candidate_hash
+                    and expected_candidate_hash
+                    == _structural_identity_candidate_semantic_hash(
+                        payload["candidates"]
+                    )
+                    and _structural_identity_resolution_receipt_is_valid(
+                        expected_receipt
+                    )
+                    and expected_receipt == actual_receipt
+                    and payload.get("materialized_bible_names")
+                    == required_bible_names
+                    and set(required_bible_names) <= current_bible_names
+                    and str(payload.get("coverage_catalog_input_hash") or "")
+                    == actual_catalog_input_hash
+                    and _structural_identity_catalog_receipt_is_valid(
+                        payload.get("coverage_catalog_receipt")
+                    )
+                )
+            except (ContentGenerationError, TypeError, ValueError, KeyError):
+                # A validated cache may be stale or corrupt.  Recovery must
+                # re-audit once instead of making that bad marker permanently
+                # sticky across retries.
+                cache_is_exact = False
             if cache_is_exact:
                 # A validated receipt can coexist with unrelated legacy rows.
                 # Retire those rows at the successful recovery boundary before

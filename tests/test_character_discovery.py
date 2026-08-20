@@ -3289,7 +3289,7 @@ def test_attempt15_call_63222_rf10_mirror_succeeds_once(
     assert by_label["王有材"]["authority_id"] == "bible:王有材"
 
 
-def test_current_identity_rf10_schema_stays_under_strict_property_limit() -> None:
+def test_current_identity_rf11_schema_stays_under_strict_property_limit() -> None:
     evidence_refs = [f"E{index:03d}" for index in range(1, 63)]
     local_schema = portraits._current_identity_schema(
         evidence_refs,
@@ -3336,7 +3336,7 @@ def test_current_identity_rf10_schema_stays_under_strict_property_limit() -> Non
     ]["decision_id"]["enum"] == ["K:NONE"]
 
 
-def test_current_identity_rf10_manual_alias_k_is_backend_projected() -> None:
+def test_current_identity_rf11_manual_alias_k_is_backend_projected() -> None:
     records = portraits._current_identity_evidence_records(
         "师尊走入殿中。陌生门卫守在门外。"
     )
@@ -3387,7 +3387,7 @@ def test_current_identity_rf10_manual_alias_k_is_backend_projected() -> None:
     assert projected[0]["authority_id"] == "manual:cangxuan"
 
 
-def test_current_identity_rf10_manual_alias_cannot_reach_card_materialization(
+def test_current_identity_rf11_manual_alias_cannot_reach_card_materialization(
     monkeypatch,
 ) -> None:
     conn = sqlite3.connect(":memory:")
@@ -3463,7 +3463,7 @@ def test_current_identity_rf10_manual_alias_cannot_reach_card_materialization(
     assert stored == [manual]
 
 
-def test_current_identity_rf10_manual_alias_mentioned_persists_one_authority(
+def test_current_identity_rf11_manual_alias_mentioned_persists_one_authority(
     monkeypatch,
 ) -> None:
     conn = sqlite3.connect(":memory:")
@@ -3790,7 +3790,7 @@ def test_future_known_decision_overwrites_stale_materialization_compatibility(
         ("cross_f", "evidence_id 与已知逐字 source_label 不匹配"),
     ],
 )
-def test_current_identity_rf10_custom_exact_gates(
+def test_current_identity_rf11_custom_exact_gates(
     mutation: str,
     error_fragment: str,
 ) -> None:
@@ -3867,7 +3867,7 @@ def test_current_identity_rf10_custom_exact_gates(
 
 
 @pytest.mark.parametrize("failure", ["attempt15_rf9", "unknown_evidence"])
-def test_current_identity_rf10_rejects_unbound_provider_output_once(
+def test_current_identity_rf11_rejects_unbound_provider_output_once(
     monkeypatch,
     failure: str,
 ) -> None:
@@ -3934,7 +3934,7 @@ def test_current_identity_rf10_rejects_unbound_provider_output_once(
     assert downstream == []
 
 
-def test_current_identity_rf10_unsupported_schema_is_one_call(
+def test_current_identity_rf11_unsupported_schema_is_one_call(
     monkeypatch,
 ) -> None:
     calls = 0
@@ -6229,6 +6229,23 @@ def test_attempt16_rf11_global_wire_aggregates_occurrence_receipts_once(
     async def fake_chat(messages, **kwargs):
         nonlocal calls
         calls += 1
+        assert kwargs["operation_id"].startswith(
+            "screenplay.identity.current.v6:1:1:"
+        )
+        meta = kwargs["call_meta"]
+        assert meta["contract_version"] == (
+            portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION
+        )
+        assert meta["current_identity_version"] == (
+            portraits.CURRENT_IDENTITY_DECISION_VERSION
+        )
+        assert meta["reuse_successful_operation"] is False
+        assert meta["disable_provider_retries"] is True
+        assert meta["disable_provider_candidate_fallback"] is True
+        assert meta["disable_reasoning_fallback"] is True
+        assert kwargs["response_format"]["json_schema"]["name"] == (
+            "screenplay_current_identity_discovery_v11"
+        )
         prompt = str(messages[0]["content"])
         assert "decisions 必须精确包含目录中全部 E" not in prompt
         assert "root 只输出一次 k/n/f" in prompt
