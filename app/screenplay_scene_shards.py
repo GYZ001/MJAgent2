@@ -4042,6 +4042,121 @@ def _scene_shard_filter_exact_source_duplication(
     return ScreenplaySceneShardSemanticReview(findings=filtered)
 
 
+def _scene_shard_creative_reproduces_source_text(
+    creative: ScreenplaySceneShardCreativeUnit,
+    source_text: str,
+) -> bool:
+    """Whether any creative content field verbatim carries the given source."""
+    normalized_source = _scene_shard_exact_source_text(source_text)
+    if not normalized_source:
+        return False
+    content_values = (
+        creative.text,
+        creative.performance,
+        creative.resulting_state,
+        creative.required_text,
+        creative.prop_text,
+        creative.on_screen_text,
+    )
+    return any(
+        _scene_shard_exact_source_text(value) == normalized_source
+        for value in content_values
+        if str(value or "").strip()
+    )
+
+
+def _scene_shard_filter_distinct_source_ownership_duplication(
+    review: ScreenplaySceneShardSemanticReview,
+    *,
+    draft: ScreenplaySceneShardCreativeIR,
+    scene_input_contracts: list[ScreenplaySceneInputContract],
+) -> ScreenplaySceneShardSemanticReview:
+    """Falsify cross_slot_duplication when both slots own distinct frozen source.
+
+    Frozen source ownership is the single authority: every slot carries exactly
+    one ``source_unit_key`` whose ``SourceFact`` text is the only thing it may
+    reproduce. When a ``cross_slot_duplication`` finding pairs slot A with slot B
+    but each owns a *different* ``source_unit_key`` whose normalized source text
+    also differs, the two units are structurally distinct source units, so the
+    kind cannot hold on ownership grounds. This complements
+    ``_scene_shard_creative_has_exact_source_support`` (which requires the
+    creative to equal its *own* source); here the decision rests on whether the
+    two slots draw from different frozen source, not on whether either creative
+    was expanded.
+
+    A genuine cross-slot borrow (one slot verbatim reproducing the *other*
+    slot's frozen source instead of its own) still owns a distinct source unit
+    on paper, so ownership alone cannot separate it from a false positive. The
+    finding is therefore only cleared when neither slot's creative verbatim
+    carries the other slot's frozen source; any such borrow keeps the finding
+    intact. If either slot cannot be resolved to a ``SourceFact`` the finding is
+    conservatively preserved.
+    """
+    source_facts_by_slot = _scene_shard_source_facts_by_slot(
+        scene_input_contracts
+    )
+    filtered: list[ScreenplaySceneShardSemanticFinding] = []
+    for finding in review.findings:
+        if "cross_slot_duplication" not in finding.violation_kinds:
+            filtered.append(finding)
+            continue
+        related_unit_key = finding.related_unit_keys[0]
+        target_creative = draft.slots.get(finding.unit_key)
+        related_creative = draft.slots.get(related_unit_key)
+        target_source_fact = source_facts_by_slot.get(finding.unit_key)
+        related_source_fact = source_facts_by_slot.get(related_unit_key)
+        if (
+            target_creative is None
+            or related_creative is None
+            or target_source_fact is None
+            or related_source_fact is None
+        ):
+            filtered.append(finding)
+            continue
+        target_source_text = _scene_shard_exact_source_text(
+            target_source_fact.text
+        )
+        related_source_text = _scene_shard_exact_source_text(
+            related_source_fact.text
+        )
+        distinct_source_ownership = (
+            target_source_fact.source_unit_key
+            != related_source_fact.source_unit_key
+            and bool(target_source_text)
+            and bool(related_source_text)
+            and target_source_text != related_source_text
+        )
+        cross_slot_borrowing = (
+            _scene_shard_creative_reproduces_source_text(
+                target_creative,
+                related_source_text,
+            )
+            or _scene_shard_creative_reproduces_source_text(
+                related_creative,
+                target_source_text,
+            )
+        )
+        if not distinct_source_ownership or cross_slot_borrowing:
+            filtered.append(finding)
+            continue
+        remaining_kinds = [
+            kind
+            for kind in finding.violation_kinds
+            if kind != "cross_slot_duplication"
+        ]
+        if remaining_kinds:
+            filtered.append(
+                ScreenplaySceneShardSemanticFinding(
+                    unit_key=finding.unit_key,
+                    related_unit_keys=[],
+                    code=finding.code,
+                    violation_kinds=remaining_kinds,
+                    message=finding.message,
+                )
+            )
+    return ScreenplaySceneShardSemanticReview(findings=filtered)
+
+
 def _scene_shard_semantic_review_prompt(
     *,
     draft: ScreenplaySceneShardCreativeIR,
@@ -4564,9 +4679,13 @@ async def _semantic_review_scene_shard_draft(
                 errors,
             )
         reviews = [
-            _scene_shard_filter_exact_source_duplication(
-                _scene_shard_canonicalize_cross_slot_findings(
-                    item,
+            _scene_shard_filter_distinct_source_ownership_duplication(
+                _scene_shard_filter_exact_source_duplication(
+                    _scene_shard_canonicalize_cross_slot_findings(
+                        item,
+                        draft=candidate,
+                        scene_input_contracts=scene_input_contracts,
+                    ),
                     draft=candidate,
                     scene_input_contracts=scene_input_contracts,
                 ),

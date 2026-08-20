@@ -861,6 +861,172 @@ def test_err_20260816_68234d_dual_filtered_review_has_clean_consensus(
     assert audit[0]["consensus"] == []
 
 
+def _err_20260820_d05c0a_case() -> tuple[
+    ScreenplaySceneShardCreativeIR,
+    list[ScreenplaySceneInputContract],
+    list[ScreenplaySceneShardSemanticFinding],
+]:
+    """SS008 SRC0051:004/005 own distinct comma-split source units.
+
+    Two reviewers keep cross-marking the two eye-description clauses as a
+    cross_slot_duplication because they read semantically similar, even though
+    ``source_segment_facts`` splits them into independent source units with
+    different keys and different frozen text. Each creative expands only its
+    own source, so no slot borrows the other's frozen source.
+    """
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    base_contract = _contracts([plan], blueprint)[plan.shard_id][0]
+    base_slot = base_contract.unit_slots[0]
+    source_text = (
+        "在这女子的前方，有两个穿着绿色长袍的男子，年纪看起来都是二十许岁，"
+        "但都是双眼凹陷，瞳孔绿油油的，让人望之生畏。"
+    )
+    source_facts = source_segment_facts("SRC0051", source_text)
+    facts_by_unit = {fact.unit_order: fact for fact in source_facts}
+    assert facts_by_unit[4].text == "但都是双眼凹陷，"
+    assert facts_by_unit[5].text == "瞳孔绿油油的，"
+    unit_keys = ["bp-sc033:SRC0051:004:unit", "bp-sc033:SRC0051:005:unit"]
+    slots = [
+        base_slot.model_copy(update={
+            "unit_key": unit_key,
+            "source_unit_key": facts_by_unit[unit_order].source_unit_key,
+            "source_segment_ids": ["SRC0051"],
+            "source_text": "",
+        })
+        for unit_key, unit_order in zip(unit_keys, (4, 5), strict=True)
+    ]
+    contract = base_contract.model_copy(update={
+        "source_segments": [
+            ScreenplaySceneSourceSegment(
+                source_segment_id="SRC0051",
+                text=source_text,
+            )
+        ],
+        "unit_slots": slots,
+    })
+    draft = ScreenplaySceneShardCreativeIR(slots={
+        unit_keys[0]: ScreenplaySceneShardCreativeUnit(
+            text="两名绿袍男子的双眼深深凹陷进眼窝之中。",
+        ),
+        unit_keys[1]: ScreenplaySceneShardCreativeUnit(
+            text="他们的瞳孔泛着诡异的绿油油光泽。",
+        ),
+    })
+    findings = [
+        ScreenplaySceneShardSemanticFinding(
+            unit_key=unit_keys[1],
+            related_unit_keys=[unit_keys[0]],
+            code="source_semantic_drift",
+            violation_kinds=["cross_slot_duplication"],
+            message=message,
+        )
+        for message in (
+            "reviewer1 认为 005 与 004 描述同一双眼睛属于重复",
+            "reviewer2 认为 005 与 004 描述同一双眼睛属于重复",
+        )
+    ]
+    return draft, [contract], findings
+
+
+def test_err_20260820_d05c0a_distinct_source_ownership_not_duplication(
+) -> None:
+    draft, contracts, findings = _err_20260820_d05c0a_case()
+    review = ScreenplaySceneShardSemanticReview(findings=[findings[0]])
+
+    filtered = (
+        scene_shards_module
+        ._scene_shard_filter_distinct_source_ownership_duplication(
+            review,
+            draft=draft,
+            scene_input_contracts=contracts,
+        )
+    )
+
+    assert filtered.findings == []
+
+
+def test_err_20260820_d05c0a_distinct_ownership_keeps_other_kinds(
+) -> None:
+    draft, contracts, findings = _err_20260820_d05c0a_case()
+    finding = findings[0].model_copy(update={
+        "violation_kinds": [
+            "unsupported_action",
+            "cross_slot_duplication",
+        ],
+    })
+    review = ScreenplaySceneShardSemanticReview(findings=[finding])
+
+    filtered = (
+        scene_shards_module
+        ._scene_shard_filter_distinct_source_ownership_duplication(
+            review,
+            draft=draft,
+            scene_input_contracts=contracts,
+        )
+    )
+
+    assert len(filtered.findings) == 1
+    assert filtered.findings[0].violation_kinds == ["unsupported_action"]
+    assert filtered.findings[0].related_unit_keys == []
+
+
+def test_err_20260820_d05c0a_borrowed_source_stays_flagged() -> None:
+    draft, contracts, findings = _err_20260820_d05c0a_case()
+    borrowing_slot = draft.slots[findings[0].related_unit_keys[0]]
+    borrowing_slot.text = "瞳孔绿油油的，"
+    review = ScreenplaySceneShardSemanticReview(findings=[findings[0]])
+
+    filtered = (
+        scene_shards_module
+        ._scene_shard_filter_distinct_source_ownership_duplication(
+            review,
+            draft=draft,
+            scene_input_contracts=contracts,
+        )
+    )
+
+    assert filtered == review
+
+
+def test_err_20260820_d05c0a_dual_review_gate_closes(
+    monkeypatch,
+) -> None:
+    draft, contracts, findings = _err_20260820_d05c0a_case()
+    reviewer_calls = 0
+
+    async def fake_structured(*_args, **kwargs):
+        nonlocal reviewer_calls
+        assert kwargs["model_type"] is ScreenplaySceneShardSemanticReview
+        return ScreenplaySceneShardSemanticReview(findings=[
+            findings[kwargs["call_meta"]["reviewer_no"] - 1],
+        ])
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.model_gateway.chat_structured",
+        fake_structured,
+    )
+    result, audit = asyncio.run(_REAL_SEMANTIC_REVIEW(
+        draft=draft,
+        scene_input_contracts=contracts,
+        identity_registry=[],
+        operation_id="err-20260820-d05c0a",
+        shard_id="SS008",
+        validate_draft=lambda _candidate: [],
+    ))
+
+    assert result == draft
+    assert audit[0]["reviews"] == [
+        {"findings": []},
+        {"findings": []},
+    ]
+    assert audit[0]["consensus"] == []
+
+
 def _err_20260816_77848a_case() -> tuple[
     ScreenplaySceneShardCreativeIR,
     list[ScreenplaySceneInputContract],
