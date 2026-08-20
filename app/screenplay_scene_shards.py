@@ -5041,6 +5041,7 @@ async def generate_screenplay_scene_shards(
     )
     semaphore = asyncio.Semaphore(parallelism)
     batch_abort = asyncio.Event()
+    shard_scope = _FailFastScope()
     checkpoint_rows: dict[str, dict[str, Any]] = {
         plan.shard_id: {
             "shard_id": plan.shard_id,
@@ -5338,6 +5339,13 @@ async def generate_screenplay_scene_shards(
         if batch_abort.is_set():
             raise asyncio.CancelledError
         initial_creative_hash = _hash(draft.model_dump(mode="json"))
+        shard_owner = asyncio.current_task()
+
+        def abort_outer_batch() -> None:
+            batch_abort.set()
+            if shard_owner is not None:
+                shard_scope.fail(shard_owner)
+
         draft, semantic_reviews = await _semantic_review_scene_shard_draft(
             draft=draft,
             scene_input_contracts=plan_scene_input_contracts,
@@ -5346,6 +5354,7 @@ async def generate_screenplay_scene_shards(
             shard_id=plan.shard_id,
             validate_draft=validate_draft,
             batch_abort=batch_abort,
+            abort_batch=abort_outer_batch,
         )
         if batch_abort.is_set():
             raise asyncio.CancelledError
@@ -5477,6 +5486,7 @@ async def generate_screenplay_scene_shards(
             lambda plan=plan: generate_one_with_checkpoint(plan)
             for plan in plans
         ),
+        scope=shard_scope,
     )
     shards = [shard for shard, _artifact_id in results]
     artifact_ids = [artifact_id for _shard, artifact_id in results]

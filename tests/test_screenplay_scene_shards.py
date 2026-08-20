@@ -3760,6 +3760,87 @@ def test_scene_shard_failure_cancels_peer_before_structured_retry(
     assert sibling_cancelled.is_set()
 
 
+def test_nested_reviewer_failure_cancels_other_shard_structured_retry(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=True)
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )
+    contracts = _contracts(plans, blueprint)
+    sibling_started = asyncio.Event()
+    release_sibling = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+    sibling_attempts: list[int] = []
+    original_error = scene_shards_module.hiagent.ProviderError(
+        "injected nested reviewer failure",
+        retryable=True,
+        failure_kind="request_outcome_unknown",
+        delivery_state="unknown",
+        requires_explicit_retry=True,
+    )
+
+    def fixed_settings(
+        key: str,
+        default: int,
+        *,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        value = 2 if key == "screenplay_scene_shard_parallelism" else default
+        return max(minimum, min(maximum, value))
+
+    async def fake_chat(*_args, **kwargs):
+        meta = kwargs["call_meta"]
+        shard_id = str(meta["shard_id"])
+        stage_key = str(meta["stage_key"])
+        if stage_key == "screenplay_scene_shard_semantic_review":
+            if int(meta["reviewer_no"]) == 1:
+                await sibling_started.wait()
+                release_sibling.set()
+                raise original_error
+            await asyncio.Future()
+        if shard_id == plans[0].shard_id:
+            return _creative_shard(plans[0], blueprint).model_dump_json()
+        sibling_attempts.append(int(meta["format_attempt"]))
+        if len(sibling_attempts) > 1:
+            raise AssertionError(
+                "other shard retried after nested reviewer failure"
+            )
+        sibling_started.set()
+        try:
+            await release_sibling.wait()
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+        return "not valid JSON"
+
+    monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
+    monkeypatch.setattr(
+        scene_shards_module,
+        "_semantic_review_scene_shard_draft",
+        _REAL_SEMANTIC_REVIEW,
+    )
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    with pytest.raises(scene_shards_module.hiagent.ProviderError) as caught:
+        asyncio.run(generate_screenplay_scene_shards(
+            episode={"id": "ep-nested-reviewer-retry-fence", "episode_no": 1},
+            source_text=SOURCE,
+            blueprint=blueprint,
+            identity_registry=[],
+            identities=_identities(),
+            plans=plans,
+            scene_input_contracts=contracts,
+        ))
+
+    assert caught.value is original_error
+    assert sibling_attempts == [0]
+    assert sibling_cancelled.is_set()
+
+
 def test_scene_shard_batch_user_cancellation_does_not_mark_failed(
     monkeypatch,
 ) -> None:
