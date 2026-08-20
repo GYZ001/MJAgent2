@@ -10,7 +10,7 @@ import uuid
 import pytest
 from pydantic import ValidationError
 
-from app import db, errors as app_errors
+from app import db, errors as app_errors, generation_concurrency
 from app import screenplay_scene_shards as scene_shards_module
 from app.harness import model_gateway
 from app.narrative_blueprint import (
@@ -432,6 +432,7 @@ def test_scene_shard_creative_response_format_binds_dynamic_slot_contract(
         plan=plan,
         scene_input_contracts=contracts,
     )
+    local_schema_before = deepcopy(local_schema)
     response_format = scene_shards_module._scene_shard_strict_response_format(
         name="screenplay_scene_shard_creative",
         local_schema=local_schema,
@@ -440,6 +441,13 @@ def test_scene_shard_creative_response_format_binds_dynamic_slot_contract(
 
     assert response_format["type"] == "json_schema"
     assert response_format["json_schema"]["strict"] is True
+    assert local_schema == local_schema_before
+    assert response_format == (
+        scene_shards_module._scene_shard_strict_response_format(
+            name="screenplay_scene_shard_creative",
+            local_schema=local_schema,
+        )
+    )
     assert local_schema["properties"]["contract_version"]["const"] == (
         SCREENPLAY_SCENE_CREATIVE_VERSION
     )
@@ -461,6 +469,21 @@ def test_scene_shard_creative_response_format_binds_dynamic_slot_contract(
     assert provider_definition["properties"]["text"]["enum"] == [
         dialogue_slot.source_text
     ]
+    action_slot = plan.unit_slots[1]
+    provider_action_schema = provider_schema["properties"]["slots"][
+        "properties"
+    ][action_slot.unit_key]
+    assert provider_action_schema["$ref"] != provider_slot_schema["$ref"]
+    provider_action_definition = provider_schema["$defs"][
+        provider_action_schema["$ref"].rsplit("/", 1)[-1]
+    ]
+    assert "enum" not in provider_action_definition["properties"]["text"]
+    assert all(
+        value["$ref"].rsplit("/", 1)[-1] in provider_schema["$defs"]
+        for value in provider_schema["properties"]["slots"][
+            "properties"
+        ].values()
+    )
 
     provider_keywords: set[str] = set()
 
@@ -4261,6 +4284,85 @@ def test_scene_shard_failure_fences_semaphore_waiter_before_provider(
     assert latest_rows[plans[0].shard_id]["status"] == "failed"
     assert latest_rows[plans[1].shard_id]["status"] == "pending"
     assert "error_type" not in latest_rows[plans[1].shard_id]
+
+
+@pytest.mark.parametrize("failure_kind", ["provider", "local_validation"])
+def test_scene_shard_structured_lease_fences_real_provider_waiter(
+    monkeypatch,
+    failure_kind: str,
+) -> None:
+    blueprint = _blueprint(split_domain=True)
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )
+    contracts = _contracts(plans, blueprint)
+    provider_calls: list[str] = []
+    original_error = scene_shards_module.hiagent.ProviderError(
+        "63178 output truncated",
+        failure_kind="output_truncated",
+    )
+
+    def fixed_settings(
+        key: str,
+        default: int,
+        *,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        values = {
+            "screenplay_scene_shard_parallelism": 2,
+            "screenplay_format_retry_limit": 0,
+            "screenplay_semantic_retry_limit": 0,
+        }
+        return max(minimum, min(maximum, values.get(key, default)))
+
+    monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
+    monkeypatch.setattr(
+        generation_concurrency,
+        "get_setting",
+        lambda key: "1" if key == "text_generation_concurrency" else None,
+    )
+
+    async def wait_for_queued_peer() -> None:
+        gate = generation_concurrency.gate_for("text_provider_calls")
+        while not gate.waiters:
+            await asyncio.sleep(0)
+
+    async def fake_chat(*_args, **kwargs):
+        meta = kwargs["call_meta"]
+        provider_calls.append(str(meta["shard_id"]))
+        assert meta["response_format_required"] is True
+        assert kwargs["response_format"]["type"] == "json_schema"
+        await asyncio.wait_for(wait_for_queued_peer(), timeout=1)
+        if failure_kind == "provider":
+            raise original_error
+        return ScreenplaySceneShardCreativeIR(slots={}).model_dump_json()
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    expected_error = (
+        scene_shards_module.hiagent.ProviderError
+        if failure_kind == "provider"
+        else model_gateway.StructuredSemanticError
+    )
+    with pytest.raises(expected_error) as caught:
+        asyncio.run(generate_screenplay_scene_shards(
+            episode={
+                "id": f"ep-attempt8-gate-{failure_kind}-{uuid.uuid4()}",
+                "episode_no": 1,
+            },
+            source_text=SOURCE,
+            blueprint=blueprint,
+            identity_registry=[],
+            identities=_identities(),
+            plans=plans,
+            scene_input_contracts=contracts,
+        ))
+
+    if failure_kind == "provider":
+        assert caught.value is original_error
+    assert provider_calls == [plans[0].shard_id]
 
 
 def test_scene_shard_failure_cancels_peer_before_structured_retry(
@@ -8778,7 +8880,7 @@ def test_scene_shard_contract_fingerprint_is_upgraded(
     )
     with pytest.raises(ValidationError, match="screenplay-scene-creative.v8"):
         ScreenplaySceneShardCreativeIR.model_validate({
-            "contract_version": "screenplay-scene-creative.v6",
+            "contract_version": "screenplay-scene-creative.v7",
             "slots": {},
         })
 
@@ -8796,7 +8898,7 @@ def test_scene_shard_contract_fingerprint_is_upgraded(
     monkeypatch.setattr(
         scene_shards_module,
         "SCREENPLAY_SCENE_CREATIVE_VERSION",
-        "screenplay-scene-creative.v6",
+        "screenplay-scene-creative.v7",
     )
     legacy_hash = screenplay_scene_generation_scaffold_hash(
         plan,
@@ -9563,8 +9665,20 @@ def test_run_961abd54eb1c_structural_repair_receives_dialogue_mismatch(
 
     prompts: list[str] = []
     attempts: list[dict] = []
+    strict_schema = build_screenplay_scene_shard_repair_schema(
+        plan=plan,
+        scene_input_contracts=contracts,
+    )
+    strict_response_format = (
+        scene_shards_module._scene_shard_strict_response_format(
+            name="screenplay_scene_shard_creative",
+            local_schema=strict_schema,
+        )
+    )
 
-    async def fake_chat(messages, **_kwargs):
+    async def fake_chat(messages, **kwargs):
+        assert kwargs["response_format"] == strict_response_format
+        assert kwargs["call_meta"]["response_format_required"] is True
         prompts.append(messages[0]["content"])
         draft = invalid_draft if len(prompts) == 1 else valid_draft
         return json.dumps(draft.model_dump(mode="json"), ensure_ascii=False)
@@ -9578,6 +9692,9 @@ def test_run_961abd54eb1c_structural_repair_receives_dialogue_mismatch(
         max_tokens=1024,
         format_retry_limit=0,
         semantic_retry_limit=1,
+        output_schema=strict_schema,
+        response_format=strict_response_format,
+        require_response_format=True,
         on_attempt=attempts.append,
     ))
 
