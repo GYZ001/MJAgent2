@@ -102,8 +102,32 @@ SCREENPLAY_SCENE_SHARD_UNIT_RESERVE_TOKENS = 128
 SCREENPLAY_SCENE_SHARD_REASONING_RESERVE_PERCENT = 20
 
 
+class _FailFastScope:
+    """Own one task batch and synchronously cancel peers on its first failure."""
+
+    def __init__(self) -> None:
+        self.tasks: list[asyncio.Task[Any]] = []
+        self.failure_owner: asyncio.Task[Any] | None = None
+
+    def bind(self, tasks: list[asyncio.Task[Any]]) -> None:
+        if self.tasks:
+            raise RuntimeError("fail-fast scope is already bound")
+        self.tasks = tasks
+
+    def fail(self, owner: asyncio.Task[Any]) -> bool:
+        if self.failure_owner is not None:
+            return False
+        self.failure_owner = owner
+        for peer in self.tasks:
+            if peer is not owner and not peer.done():
+                peer.cancel()
+        return True
+
+
 async def _gather_fail_fast(
     *factories: Callable[[], Awaitable[Any]],
+    scope: _FailFastScope | None = None,
+    on_failure: Callable[[], None] | None = None,
 ) -> list[Any]:
     """Run a batch in input order, cancelling and joining it on first failure.
 
@@ -111,27 +135,28 @@ async def _gather_fail_fast(
     siblings.  That is unsafe for paid generation: those detached siblings can
     continue into later provider calls after the batch has already failed.
     """
+    active_scope = scope or _FailFastScope()
     tasks: list[asyncio.Task[Any]] = []
-    failure_owner: asyncio.Task[Any] | None = None
 
     async def run_child(factory: Callable[[], Awaitable[Any]]) -> Any:
-        nonlocal failure_owner
         try:
             return await factory()
-        except BaseException:
+        except BaseException as exc:
             current = asyncio.current_task()
-            if failure_owner is None and current is not None:
-                failure_owner = current
-                # Cancel peers before this child finishes unwinding.  Waiting
-                # for the coordinator would let a semaphore waiter or an
-                # in-flight structured runner start its next provider attempt.
-                for peer in tasks:
-                    if peer is not current and not peer.done():
-                        peer.cancel()
+            if current is not None and active_scope.fail(current):
+                if on_failure is not None:
+                    try:
+                        on_failure()
+                    except Exception as callback_exc:  # noqa: BLE001
+                        exc.add_note(
+                            "fail-fast propagation callback failed: "
+                            f"{callback_exc!r}"
+                        )
             raise
 
     for factory in factories:
         tasks.append(asyncio.create_task(run_child(factory)))
+    active_scope.bind(tasks)
     pending = set(tasks)
     try:
         while pending:
@@ -139,8 +164,8 @@ async def _gather_fail_fast(
                 pending,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if failure_owner is not None:
-                failure_owner.result()
+            if active_scope.failure_owner is not None:
+                active_scope.failure_owner.result()
             for task in done:
                 # result() preserves the original exception (including
                 # CancelledError) instead of wrapping it in an ExceptionGroup.
@@ -4555,6 +4580,7 @@ async def _semantic_review_scene_shard_draft(
     shard_id: str,
     validate_draft: Callable[[ScreenplaySceneShardCreativeIR], list[str]],
     batch_abort: asyncio.Event | None = None,
+    abort_batch: Callable[[], None] | None = None,
 ) -> tuple[ScreenplaySceneShardCreativeIR, list[dict[str, Any]]]:
     """Consensus-review creative prose without allowing structural rewrites."""
     review_schema = ScreenplaySceneShardSemanticReview.model_json_schema()
@@ -4714,6 +4740,7 @@ async def _semantic_review_scene_shard_draft(
             chunk_reviews = await _gather_fail_fast(
                 lambda: review_one(1),
                 lambda: review_one(2),
+                on_failure=abort_batch,
             )
             for reviewer_index, chunk_review in enumerate(chunk_reviews):
                 reviewer_findings[reviewer_index].extend(
@@ -4943,6 +4970,8 @@ async def _semantic_review_scene_shard_draft(
         except Exception:
             if batch_abort is not None:
                 batch_abort.set()
+            if abort_batch is not None:
+                abort_batch()
             raise
         if batch_abort is not None and batch_abort.is_set():
             raise asyncio.CancelledError

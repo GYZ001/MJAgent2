@@ -2333,7 +2333,6 @@ def test_scene_shard_semantic_post_repair_unknown_finding_is_hard_failure(
         "initial",
         "initial",
         "post_repair",
-        "post_repair",
     ]
 
 
@@ -3022,17 +3021,11 @@ def test_scene_shard_semantic_real_reviewer_rejects_duplicate_finding_keys(
             validate_draft=lambda _candidate: [],
         ))
 
-    assert len(call_meta) == 6
-    assert {item["reviewer_no"] for item in call_meta} == {1, 2}
-    assert sorted(item["format_attempt"] for item in call_meta) == [
-        0, 0, 1, 1, 2, 2,
-    ]
-    for reviewer_no in (1, 2):
-        assert [
-            item["format_attempt"]
-            for item in call_meta
-            if item["reviewer_no"] == reviewer_no
-        ] == [0, 1, 2]
+    # Reviewer 1 exhausts its bounded format repair synchronously; strict
+    # fail-fast cancels reviewer 2 before it creates a duplicate paid attempt.
+    assert len(call_meta) == 3
+    assert {item["reviewer_no"] for item in call_meta} == {1}
+    assert [item["format_attempt"] for item in call_meta] == [0, 1, 2]
     assert all(
         item["reuse_successful_operation"] is True
         for item in call_meta
