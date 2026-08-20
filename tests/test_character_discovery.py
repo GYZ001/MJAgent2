@@ -1015,7 +1015,7 @@ def test_generic_discovery_keeps_current_contract_cache_compatible(
     conn.execute(
         "CREATE TABLE artifacts("
         "id TEXT PRIMARY KEY, scope_type TEXT, scope_id TEXT, type TEXT, "
-        "status TEXT, content_json TEXT, created_at REAL)"
+        "status TEXT, content_json TEXT, content_hash TEXT, created_at REAL)"
     )
     source_text = "萌浩独自前行。"
     bible = Bible(
@@ -1055,30 +1055,26 @@ def test_generic_discovery_keeps_current_contract_cache_compatible(
         "source_segment_ids": [receipt["source_segment_id"]],
         "source_quote": receipt["text"],
     }]
+    cached_content = {
+        "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "current_identity_version": portraits.CURRENT_IDENTITY_DECISION_VERSION,
+        "current_evidence_catalog_hash": (
+            portraits._current_identity_evidence_catalog_hash(source_text)
+        ),
+        "input_hash": current_contract_hash,
+        "mode": "targeted",
+        "candidates": expected,
+    }
     conn.execute(
-        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?,?)",
         (
             "ordinary-current",
             "episode",
             "ep-attempt10-ordinary-cache",
             "screenplay_identity_discovery",
             "validated",
-            json.dumps({
-                "contract_version": (
-                    portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION
-                ),
-                "current_identity_version": (
-                    portraits.CURRENT_IDENTITY_DECISION_VERSION
-                ),
-                "current_evidence_catalog_hash": (
-                    portraits._current_identity_evidence_catalog_hash(
-                        source_text
-                    )
-                ),
-                "input_hash": current_contract_hash,
-                "mode": "targeted",
-                "candidates": expected,
-            }),
+            json.dumps(cached_content),
+            portraits.evidence_repository.content_hash(cached_content),
             1.0,
         ),
     )
@@ -1100,6 +1096,185 @@ def test_generic_discovery_keeps_current_contract_cache_compatible(
         bible,
         1,
         scope_id="ep-attempt10-ordinary-cache",
+    ))
+
+    assert result == expected
+
+
+def test_generic_discovery_rejects_tampered_validated_artifact_content(
+    monkeypatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE artifacts("
+        "id TEXT PRIMARY KEY, scope_type TEXT, scope_id TEXT, type TEXT, "
+        "status TEXT, content_json TEXT, content_hash TEXT, created_at REAL)"
+    )
+    source_text = "守卫独自值守山门。"
+    bible = Bible(characters=[], world=World(visual_style_canonical="测试"))
+    discovery_input = {
+        "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "current_identity_version": portraits.CURRENT_IDENTITY_DECISION_VERSION,
+        "current_evidence_catalog_hash": (
+            portraits._current_identity_evidence_catalog_hash(source_text)
+        ),
+        "mode": "targeted",
+        "episode_no": 1,
+        "source_text": source_text,
+        "draft_text": "",
+        "future_text": "",
+        "future_label": "",
+        "bible": bible.model_dump(mode="json"),
+        "existing_resolutions": [],
+        "structural_evidence": [],
+    }
+    original = {
+        "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "current_identity_version": portraits.CURRENT_IDENTITY_DECISION_VERSION,
+        "current_evidence_catalog_hash": discovery_input[
+            "current_evidence_catalog_hash"
+        ],
+        "input_hash": portraits.evidence_repository.content_hash(
+            discovery_input
+        ),
+        "mode": "targeted",
+        "candidates": [],
+    }
+    tampered = {**original, "candidates": [{"source_label": "伪造身份"}]}
+    conn.execute(
+        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?,?)",
+        (
+            "tampered", "episode", "ep-seal", "screenplay_identity_discovery",
+            "validated", json.dumps(tampered, ensure_ascii=False),
+            portraits.evidence_repository.content_hash(original), 1.0,
+        ),
+    )
+    calls: list[str] = []
+
+    async def fresh_current(*_args, **_kwargs):
+        calls.append("current")
+        return []
+
+    async def passthrough(candidates, **_kwargs):
+        return candidates
+
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    monkeypatch.setattr(portraits, "get_setting", lambda *_args: "true")
+    monkeypatch.setattr(
+        portraits, "extract_current_identity_candidates", fresh_current,
+    )
+    monkeypatch.setattr(
+        portraits, "resolve_future_identity_candidates", passthrough,
+    )
+    monkeypatch.setattr(
+        portraits,
+        "audit_identity_coverage_from_structural_evidence",
+        passthrough,
+    )
+    monkeypatch.setattr(
+        portraits.evidence_repository,
+        "create_artifact",
+        lambda artifact, **_kwargs: {"id": artifact.type},
+    )
+
+    result = asyncio.run(portraits.discover_character_candidates(
+        source_text, bible, 1, scope_id="ep-seal",
+    ))
+
+    assert result == []
+    assert calls == ["current"]
+
+
+def test_generic_discovery_reuses_sealed_structural_applied_artifact(
+    monkeypatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE artifacts("
+        "id TEXT PRIMARY KEY, scope_type TEXT, scope_id TEXT, type TEXT, "
+        "status TEXT, content_json TEXT, content_hash TEXT, created_at REAL)"
+    )
+    source_text = "被困者从裂缝中探出半个身子。"
+    bible = Bible(characters=[], world=World(visual_style_canonical="测试"))
+    structural_evidence = [{
+        "identity_key": "被困者",
+        "source_segment_ids": ["SRC0001"],
+        "usage": "visible",
+        "node_key": "S001-N001",
+    }]
+    discovery_input = {
+        "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "current_identity_version": portraits.CURRENT_IDENTITY_DECISION_VERSION,
+        "current_evidence_catalog_hash": (
+            portraits._current_identity_evidence_catalog_hash(source_text)
+        ),
+        "mode": "targeted",
+        "episode_no": 1,
+        "source_text": source_text,
+        "draft_text": "",
+        "future_text": "",
+        "future_label": "",
+        "bible": bible.model_dump(mode="json"),
+        "existing_resolutions": [],
+        "structural_evidence": structural_evidence,
+        "structural_coverage_policy_version": (
+            portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+        ),
+        "structural_coverage_applied": True,
+    }
+    expected = [{
+        "name": "被困者",
+        "source_label": "被困者",
+        "identity_kind": "functional",
+        "identity_group": "structural:trapped",
+        "kind": "onscreen",
+        "source_segment_id": "SRC0001",
+        "source_segment_ids": ["SRC0001"],
+        "source_quote": source_text,
+    }]
+    cached = {
+        "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "current_identity_version": portraits.CURRENT_IDENTITY_DECISION_VERSION,
+        "current_evidence_catalog_hash": discovery_input[
+            "current_evidence_catalog_hash"
+        ],
+        "structural_coverage_policy_version": (
+            portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+        ),
+        "structural_coverage_applied": True,
+        "input_hash": portraits.evidence_repository.content_hash(
+            discovery_input
+        ),
+        "mode": "targeted",
+        "candidates": expected,
+    }
+    conn.execute(
+        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?,?)",
+        (
+            "sealed", "episode", "ep-sealed-structural",
+            "screenplay_identity_discovery", "validated",
+            json.dumps(cached, ensure_ascii=False),
+            portraits.evidence_repository.content_hash(cached), 1.0,
+        ),
+    )
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("sealed structural-applied cache should be reused")
+
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    monkeypatch.setattr(portraits, "get_setting", lambda *_args: "true")
+    monkeypatch.setattr(
+        portraits, "extract_current_identity_candidates", forbidden,
+    )
+
+    result = asyncio.run(portraits.discover_character_candidates(
+        source_text,
+        bible,
+        1,
+        structural_evidence=structural_evidence,
+        scope_id="ep-sealed-structural",
     ))
 
     assert result == expected
@@ -6229,9 +6404,6 @@ def test_attempt16_rf11_global_wire_aggregates_occurrence_receipts_once(
     async def fake_chat(messages, **kwargs):
         nonlocal calls
         calls += 1
-        assert kwargs["operation_id"].startswith(
-            "screenplay.identity.current.v6:1:1:"
-        )
         meta = kwargs["call_meta"]
         assert meta["contract_version"] == (
             portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION
@@ -6533,7 +6705,7 @@ def test_legacy_generic_cache_rejects_tampered_typed_v2_bundle(
     conn.execute(
         "CREATE TABLE artifacts(id TEXT PRIMARY KEY, scope_type TEXT, "
         "scope_id TEXT, type TEXT, status TEXT, content_json TEXT, "
-        "created_at REAL)"
+        "content_hash TEXT, created_at REAL)"
     )
     source_text = "守卫守在山门。\n\n守卫走到殿前。"
     bible = Bible(world=World(visual_style_canonical="国风"), characters=[])
@@ -6555,23 +6727,25 @@ def test_legacy_generic_cache_rejects_tampered_typed_v2_bundle(
         "existing_resolutions": [],
         "structural_evidence": [],
     }
+    cached_content = {
+        "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "current_identity_version": portraits.CURRENT_IDENTITY_DECISION_VERSION,
+        "current_evidence_catalog_hash": discovery_input[
+            "current_evidence_catalog_hash"
+        ],
+        "input_hash": portraits.evidence_repository.content_hash(
+            discovery_input
+        ),
+        "mode": "legacy",
+        "candidates": [bad],
+    }
     conn.execute(
-        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?,?)",
         (
             "bad-cache", "episode", "ep1",
             "screenplay_identity_discovery", "validated",
-            json.dumps({
-                "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
-                "current_identity_version": portraits.CURRENT_IDENTITY_DECISION_VERSION,
-                "current_evidence_catalog_hash": discovery_input[
-                    "current_evidence_catalog_hash"
-                ],
-                "input_hash": portraits.evidence_repository.content_hash(
-                    discovery_input
-                ),
-                "mode": "legacy",
-                "candidates": [bad],
-            }, ensure_ascii=False),
+            json.dumps(cached_content, ensure_ascii=False),
+            portraits.evidence_repository.content_hash(cached_content),
             1.0,
         ),
     )

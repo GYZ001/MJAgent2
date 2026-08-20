@@ -526,9 +526,30 @@ def _coverage_cache_conn() -> sqlite3.Connection:
     conn.execute(
         "CREATE TABLE artifacts("
         "id TEXT PRIMARY KEY, scope_type TEXT, scope_id TEXT, type TEXT, "
-        "status TEXT, content_json TEXT, created_at REAL)"
+        "status TEXT, content_json TEXT, content_hash TEXT, created_at REAL)"
     )
     return conn
+
+
+def _insert_coverage_cache_artifact(
+    conn: sqlite3.Connection,
+    artifact_id: str,
+    payload: dict,
+    created_at: float,
+) -> None:
+    conn.execute(
+        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?,?)",
+        (
+            artifact_id,
+            "episode",
+            "ep_711b29204aa9",
+            "screenplay_identity_discovery",
+            "validated",
+            json.dumps(payload, ensure_ascii=False),
+            portraits.evidence_repository.content_hash(payload),
+            created_at,
+        ),
+    )
 
 
 def _structural_cache_payload(
@@ -657,14 +678,7 @@ def test_structural_coverage_reuses_only_current_contract_cache(
         candidates=cached_candidates,
         materialized_resolutions=materialized,
     )
-    conn.execute(
-        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
-        (
-            "art-current", "episode", "ep_711b29204aa9",
-            "screenplay_identity_discovery", "validated",
-            json.dumps(payload, ensure_ascii=False), 2.0,
-        ),
-    )
+    _insert_coverage_cache_artifact(conn, "art-current", payload, 2.0)
     conn.execute(
         "UPDATE episodes SET screenplay_character_resolutions=? "
         "WHERE id='ep_711b29204aa9'",
@@ -688,6 +702,118 @@ def test_structural_coverage_reuses_only_current_contract_cache(
 
     assert result["reused"] is True
     assert result["candidates"] == cached_candidates
+
+
+@pytest.mark.parametrize("mutation", ["bad_item", "tampered_secondary_receipt"])
+def test_structural_coverage_corrupt_validated_cache_reaudits_once(
+    monkeypatch,
+    mutation: str,
+) -> None:
+    conn = _coverage_cache_conn()
+    source_text = "守卫守在山门。\n\n守卫走到殿前。"
+    evidence = [{
+        "identity_key": "守卫",
+        "source_segment_ids": ["SRC0001", "SRC0002"],
+        "usage": "visible",
+        "node_key": "S001-N001",
+    }]
+    receipts = portraits._current_identity_evidence_records(source_text)
+    assert len(receipts) == 2
+    scope = portraits.screenplay_identity_scope_fingerprint(1, source_text)
+    candidate = {
+        "name": "守卫",
+        "source_label": "守卫",
+        "identity_kind": "functional",
+        "identity_group": "current-1:F1",
+        "kind": "onscreen",
+        "identity_scope_fingerprint": scope,
+        "source_label_provenance": (
+            portraits.CURRENT_IDENTITY_LITERAL_PROVENANCE
+        ),
+        "source_evidence_receipt": receipts[0],
+        "source_evidence_receipts": receipts,
+        "source_segment_id": receipts[0]["source_segment_id"],
+        "source_segment_ids": [
+            item["source_segment_id"] for item in receipts
+        ],
+        "source_quote": receipts[0]["text"],
+    }
+    resolution = portraits._identity_resolution(
+        candidate, "守卫", "functional_identity"
+    )
+    payload = _structural_cache_payload(
+        source_text,
+        evidence,
+        contract_version=portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        policy_version=portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+        candidates=[candidate],
+        materialized_resolutions=[resolution],
+    )
+    if mutation == "bad_item":
+        payload["candidates"].append("BAD")
+    else:
+        payload["candidates"][0]["source_evidence_receipts"][1][
+            "text"
+        ] += "伪造"
+    _insert_coverage_cache_artifact(conn, "corrupt", payload, 2.0)
+    conn.execute(
+        "UPDATE episodes SET screenplay_character_resolutions=? "
+        "WHERE id='ep_711b29204aa9'",
+        (json.dumps([resolution], ensure_ascii=False),),
+    )
+    conn.commit()
+    audit_calls = 0
+
+    async def fresh_audit(candidates, **kwargs):
+        nonlocal audit_calls
+        audit_calls += 1
+        assert candidates == []
+        receipt = kwargs["catalog_receipt"]
+        hashes = {
+            field: portraits.evidence_repository.content_hash(
+                {"fresh": mutation, "field": field}
+            )
+            for field in (
+                "authority_catalog_hash",
+                "group_catalog_hash",
+                "decision_catalog_hash",
+                "evidence_catalog_hash",
+            )
+        }
+        receipt.update({
+            "version": portraits._STRUCTURAL_IDENTITY_CATALOG_RECEIPT_VERSION,
+            **hashes,
+            "hash": portraits.evidence_repository.content_hash(hashes),
+        })
+        return []
+
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    monkeypatch.setattr(
+        portraits,
+        "audit_identity_coverage_from_structural_evidence",
+        fresh_audit,
+    )
+    monkeypatch.setattr(
+        portraits.evidence_repository,
+        "create_artifact",
+        lambda *_args, **_kwargs: {"id": "fresh"},
+    )
+
+    result = asyncio.run(portraits.ensure_structural_identity_coverage(
+        "proj",
+        "ep_711b29204aa9",
+        1,
+        source_text,
+        _empty_bible(),
+        evidence,
+    ))
+
+    assert audit_calls == 1
+    assert result["candidates"] == []
+    assert result.get("reused") is not True
+    assert portraits.load_screenplay_character_resolutions(
+        conn, "ep_711b29204aa9"
+    ) == []
 
 
 def test_structural_coverage_cache_reaudits_when_authority_catalog_changes(
@@ -732,13 +858,8 @@ def test_structural_coverage_cache_reaudits_when_authority_catalog_changes(
         materialized_resolutions=[cached_resolution],
         bible=_empty_bible(),
     )
-    conn.execute(
-        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
-        (
-            "art-before-authority", "episode", "ep_711b29204aa9",
-            "screenplay_identity_discovery", "validated",
-            json.dumps(payload, ensure_ascii=False), 2.0,
-        ),
+    _insert_coverage_cache_artifact(
+        conn, "art-before-authority", payload, 2.0
     )
     conn.execute(
         "UPDATE episodes SET screenplay_character_resolutions=? "
@@ -924,14 +1045,7 @@ def test_structural_coverage_receipt_rejects_same_key_wrong_authority(
         candidates=candidates,
         materialized_resolutions=[expected_resolution],
     )
-    conn.execute(
-        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
-        (
-            "art-current", "episode", "ep_711b29204aa9",
-            "screenplay_identity_discovery", "validated",
-            json.dumps(payload, ensure_ascii=False), 2.0,
-        ),
-    )
+    _insert_coverage_cache_artifact(conn, "art-current", payload, 2.0)
     wrong_resolution = {
         **expected_resolution,
         "canonical_name": "孟浩",
@@ -1131,14 +1245,7 @@ def test_structural_coverage_cache_hit_retires_all_stale_auto_rows(
         materialized_resolutions=[current],
         catalog_input_resolutions=[current, manual],
     )
-    conn.execute(
-        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
-        (
-            "art-current", "episode", "ep_711b29204aa9",
-            "screenplay_identity_discovery", "validated",
-            json.dumps(payload, ensure_ascii=False), 2.0,
-        ),
-    )
+    _insert_coverage_cache_artifact(conn, "art-current", payload, 2.0)
     conn.execute(
         "UPDATE episodes SET screenplay_character_resolutions=? "
         "WHERE id='ep_711b29204aa9'",
@@ -1200,14 +1307,7 @@ def test_structural_cache_surviving_resolution_reset_is_rematerialized(
         policy_version=portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION,
         candidates=cached_alias,
     )
-    conn.execute(
-        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
-        (
-            "art-current", "episode", "ep_711b29204aa9",
-            "screenplay_identity_discovery", "validated",
-            json.dumps(payload, ensure_ascii=False), 2.0,
-        ),
-    )
+    _insert_coverage_cache_artifact(conn, "art-current", payload, 2.0)
     conn.commit()
     monkeypatch.setattr(portraits, "get_conn", lambda: conn)
     calls = 0
@@ -1282,45 +1382,32 @@ def test_stale_structural_cache_is_neither_reused_nor_used_as_base(
         "source_label": "大青山被困少年1",
         "identity_group": "legacy-generic:F1",
     }]
-    conn.executemany(
-        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
-        [
-            (
-                "art-stale-generic", "episode", "ep_711b29204aa9",
-                "screenplay_identity_discovery", "validated",
-                json.dumps({
-                    "mode": "targeted",
-                    "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
-                    "structural_coverage_policy_version": (
-                        "screenplay-identity-structural-coverage.v3"
-                    ),
-                    "structural_coverage_applied": True,
-                    "source_hash": portraits.evidence_repository.content_hash(source_text),
-                    "candidates": stale_generic_alias,
-                }, ensure_ascii=False),
-                3.0,
-            ),
-            (
-                "art-stale", "episode", "ep_711b29204aa9",
-                "screenplay_identity_discovery", "validated",
-                json.dumps(stale, ensure_ascii=False), 2.0,
-            ),
-            (
-                "art-base", "episode", "ep_711b29204aa9",
-                "screenplay_identity_discovery", "validated",
-                json.dumps({
-                    "mode": "targeted",
-                    "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
-                    "structural_coverage_policy_version": (
-                        portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
-                    ),
-                    "structural_coverage_applied": False,
-                    "source_hash": portraits.evidence_repository.content_hash(source_text),
-                    "candidates": valid_base,
-                }, ensure_ascii=False),
-                1.0,
-            ),
-        ],
+    stale_generic = {
+        "mode": "targeted",
+        "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "structural_coverage_policy_version": (
+            "screenplay-identity-structural-coverage.v3"
+        ),
+        "structural_coverage_applied": True,
+        "source_hash": portraits.evidence_repository.content_hash(source_text),
+        "candidates": stale_generic_alias,
+    }
+    base_payload = {
+        "mode": "targeted",
+        "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "structural_coverage_policy_version": (
+            portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+        ),
+        "structural_coverage_applied": False,
+        "source_hash": portraits.evidence_repository.content_hash(source_text),
+        "candidates": valid_base,
+    }
+    _insert_coverage_cache_artifact(
+        conn, "art-stale-generic", stale_generic, 3.0
+    )
+    _insert_coverage_cache_artifact(conn, "art-stale", stale, 2.0)
+    _insert_coverage_cache_artifact(
+        conn, "art-base", base_payload, 1.0
     )
     conn.commit()
     monkeypatch.setattr(portraits, "get_conn", lambda: conn)
