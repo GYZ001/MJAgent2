@@ -1256,9 +1256,10 @@ def _future_identity_schema(
         branches=("known_named", "new_named", "functional"),
     )
     known_named = schema["$defs"]["FutureKnownNamedIdentityCandidate"]
-    known_named["properties"]["authority_id"]["enum"] = list(dict.fromkeys(
-        str(value) for value in authority_ids if str(value)
-    ))
+    known_named["properties"]["authority_id"]["enum"] = (
+        list(dict.fromkeys(str(value) for value in authority_ids if str(value)))
+        or ["__no_known_identity_authority__"]
+    )
     return schema
 
 
@@ -1377,9 +1378,16 @@ def _attach_candidate_source_evidence(
     segments = index_source_segments(source_text)
     by_id = {segment.segment_id: segment for segment in segments}
     for candidate in candidates:
+        typed_owned = bool(candidate.pop("_typed_source_evidence_owned", False))
         label = str(candidate.get("source_label") or "").strip()
         cited_id = str(candidate.get("source_segment_id") or "").strip()
         cited = by_id.get(cited_id)
+        if typed_owned and cited is not None:
+            candidate["source_segment_id"] = cited.segment_id
+            candidate["source_quote"] = str(
+                candidate.get("source_quote") or cited.text
+            )
+            continue
         owned = (
             [cited]
             if cited is not None and label and label in cited.text
@@ -1462,16 +1470,42 @@ async def resolve_future_identity_candidates(
     )
     if not future_context:
         return candidates
-    authority_projection = [
-        {"authority_id": f"bible:{name}", "canonical_name": name}
-        for name in known_names
-    ]
+    authority_by_id: dict[str, dict] = {}
+    for name in known_names:
+        authority_by_id[f"bible:{name}"] = {
+            "authority_id": f"bible:{name}",
+            "canonical_name": name,
+            "identity_group": "",
+        }
+    for candidate in candidates:
+        if str(candidate.get("identity_kind") or "") != "named":
+            continue
+        canonical_name = str(candidate.get("name") or "").strip()
+        if not canonical_name:
+            continue
+        authority_id = "candidate:" + evidence_repository.content_hash({
+            "canonical_name": canonical_name,
+            "identity_group": str(
+                candidate.get("identity_group") or ""
+            ).strip(),
+        })[:24]
+        authority_by_id[authority_id] = {
+            "authority_id": authority_id,
+            "canonical_name": canonical_name,
+            "identity_group": str(
+                candidate.get("identity_group") or ""
+            ).strip(),
+        }
+    authority_projection = list(authority_by_id.values())
     allowed_source_labels = list(dict.fromkeys(
         str(item.get("source_label") or "").strip()
         for item in unresolved
         if str(item.get("source_label") or "").strip()
     ))
-    identity_schema = _future_identity_schema(allowed_source_labels)
+    identity_schema = _future_identity_schema(
+        allowed_source_labels,
+        list(authority_by_id),
+    )
     identity_response_format = _identity_strict_response_format(
         identity_schema,
         name="screenplay_future_identity_resolution",
@@ -1485,63 +1519,55 @@ async def resolve_future_identity_candidates(
 {future_context}
 规则：source_label 必须逐字引用当前未决列表；请结合称谓、别名、关系和上下文语义判断
 是否为候选人物权威中的同一人，或窗口是否逐字揭示了新的稳定真名。只有窗口中存在
-可追溯的同一性依据时才输出 named；
-future_evidence 必须逐字引用包含 canonical_name 的最小决定性依据，但该依据中的称谓可能
-是 source_label 的别名或语义承接，不要求两个字符串机械共现。证据不足时必须输出
-functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
-不得输出只在后续出场的人。必须对每个未决 source_label 恰好分类一次；named 项才能
-携带 canonical_name，functional 项在结构上不得携带 canonical_name。两个数组都必须显式
-输出，空集合用 []。只输出符合下列 Schema 的 JSON：
+可追溯的同一性依据时才输出 named。若绑定“候选人物权威”中的既有身份，放入
+known_named 并只选 authority_id；若后续窗口首次逐字揭示了新稳定真名，放入
+new_named 并输出 canonical_name。future_evidence 必须是后续窗口中的最小逐字依据；
+new_named 依据必须包含 canonical_name，known_named 依据必须包含当前称谓或
+权威真名。证据不足时放入 functional，这是合法终态，不得猜名或补名；
+不得输出只在后续出场的人。必须对每个未决 source_label 恰好分类一次，三个数组都
+必须显式输出，空集合用 []。只输出符合下列 Schema 的 JSON：
 {json.dumps(identity_schema, ensure_ascii=False, separators=(',', ':'))}"""
 
-    def has_owned_canonical_anchor(
-        future_evidence: str,
-        canonical_name: str,
-    ) -> bool:
-        """Verify a short verbatim name anchor without redoing AI coreference."""
-        if (
-            not future_evidence
-            or not canonical_name
-            or canonical_name not in future_evidence
-            or canonical_name not in future_context
-        ):
-            return False
-        anchor_length = min(
-            len(future_evidence),
-            max(4, len(canonical_name) + 2),
-        )
-        search_from = 0
-        while True:
-            name_at = future_evidence.find(canonical_name, search_from)
-            if name_at < 0:
-                return False
-            min_start = max(0, name_at + len(canonical_name) - anchor_length)
-            max_start = min(name_at, len(future_evidence) - anchor_length)
-            for start in range(min_start, max_start + 1):
-                anchor = future_evidence[start:start + anchor_length]
-                if canonical_name in anchor and anchor in future_context:
-                    return True
-            search_from = name_at + len(canonical_name)
-
-    def relocate_owned_evidence(canonical_name: str) -> str:
-        """Deterministically relocate a verbatim canonical-name anchor."""
-        if not canonical_name or canonical_name not in future_context:
-            return ""
-        anchor_length = max(4, len(canonical_name) + 2)
-        name_at = future_context.find(canonical_name)
-        half = max(0, (anchor_length - len(canonical_name) + 1) // 2)
-        start = max(0, name_at - half)
-        end = min(len(future_context), name_at + len(canonical_name) + half)
-        snippet = future_context[start:end]
-        return snippet if has_owned_canonical_anchor(snippet, canonical_name) else ""
-
-    def owned_future_evidence(item: dict) -> str:
-        """Return provider evidence or one deterministic in-window anchor."""
-        canonical_name = str(item.get("canonical_name") or "").strip()
-        model_evidence = str(item.get("future_evidence") or "").strip()
-        if has_owned_canonical_anchor(model_evidence, canonical_name):
-            return model_evidence
-        return relocate_owned_evidence(canonical_name)
+    def response_decisions(
+        value: FutureIdentityCandidateResponse,
+    ) -> list[dict]:
+        decisions: list[dict] = []
+        for item in value.known_named:
+            raw = item.model_dump(mode="json")
+            authority = authority_by_id.get(item.authority_id)
+            decisions.append({
+                **raw,
+                "resolution_kind": "known_named",
+                "identity_kind": "named",
+                "canonical_name": str(
+                    (authority or {}).get("canonical_name") or ""
+                ),
+            })
+        for item in value.new_named:
+            decisions.append({
+                **item.model_dump(mode="json"),
+                "resolution_kind": "new_named",
+                "identity_kind": "named",
+                "authority_id": (
+                    "future-name:"
+                    + evidence_repository.content_hash({
+                        "contract_version": FUTURE_IDENTITY_DECISION_VERSION,
+                        "canonical_name": item.canonical_name,
+                        "future_context_hash": (
+                            evidence_repository.content_hash(future_context)
+                        ),
+                    })[:24]
+                ),
+            })
+        for item in value.functional:
+            decisions.append({
+                **item.model_dump(mode="json"),
+                "resolution_kind": "functional",
+                "identity_kind": "functional",
+                "canonical_name": "",
+                "future_evidence": "",
+            })
+        return decisions
 
     def validate_response(
         value: FutureIdentityCandidateResponse,
@@ -1549,7 +1575,9 @@ functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
         allowed = set(allowed_source_labels)
         errors: list[str] = []
         seen_labels: set[str] = set()
-        for item in value.characters:
+        decisions = response_decisions(value)
+        decision_by_label: dict[str, dict] = {}
+        for item in decisions:
             source_label = str(item.get("source_label") or "")
             if source_label != source_label.strip():
                 errors.append(
@@ -1560,15 +1588,41 @@ functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
             if source_label in seen_labels:
                 errors.append(f"source_label 重复：{source_label}")
             seen_labels.add(source_label)
-            if item.get("identity_kind") == "named":
+            decision_by_label[source_label] = item
+            resolution_kind = str(item.get("resolution_kind") or "")
+            if resolution_kind == "known_named":
+                authority_id = str(item.get("authority_id") or "")
+                authority = authority_by_id.get(authority_id)
+                if authority is None:
+                    errors.append(f"authority_id 越界：{authority_id}")
+                    continue
+                evidence_text = str(item.get("future_evidence") or "")
+                canonical_name = str(authority.get("canonical_name") or "")
+                if (
+                    evidence_text != evidence_text.strip()
+                    or evidence_text not in future_context
+                    or (
+                        source_label not in evidence_text
+                        and canonical_name not in evidence_text
+                    )
+                ):
+                    errors.append(
+                        f"known identity 缺少 owned future evidence：{source_label}"
+                    )
+            elif resolution_kind == "new_named":
                 canonical_name = str(item.get("canonical_name") or "")
+                evidence_text = str(item.get("future_evidence") or "")
                 if canonical_name != canonical_name.strip():
                     errors.append(
                         f"canonical_name 含首尾空白：{source_label}"
                     )
-                if not owned_future_evidence(item):
+                if (
+                    evidence_text != evidence_text.strip()
+                    or evidence_text not in future_context
+                    or canonical_name not in evidence_text
+                ):
                     errors.append(
-                        f"named identity 缺少可追溯真名锚点：{source_label}"
+                        f"new identity 缺少逐字真名锚点：{source_label}"
                     )
         missing_labels = allowed - seen_labels
         if missing_labels:
@@ -1576,6 +1630,23 @@ functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
                 "future identity 缺少未决称谓："
                 + ",".join(sorted(missing_labels))
             )
+        groups: dict[str, list[dict]] = {}
+        for candidate in unresolved:
+            label = str(candidate.get("source_label") or "").strip()
+            group = str(candidate.get("identity_group") or "").strip()
+            decision = decision_by_label.get(label)
+            if group and decision is not None:
+                groups.setdefault(group, []).append(decision)
+        for group, group_decisions in groups.items():
+            identities = {
+                (
+                    str(item.get("identity_kind") or ""),
+                    str(item.get("canonical_name") or ""),
+                )
+                for item in group_decisions
+            }
+            if len(identities) > 1:
+                errors.append(f"future identity 同组决议冲突：{group}")
         return errors
     identity_provider, identity_model, identity_effective_max = (
         hiagent.text_request_token_limits(requested_max_tokens=4096)
@@ -1630,18 +1701,11 @@ functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
         require_response_format=True,
     )
 
+    decisions = response_decisions(response)
     resolved_by_label = {
-        str(item.get("source_label") or "").strip(): {
-            **item,
-            "future_evidence": owned_future_evidence(item),
-        }
-        for item in response.characters
-        if (
-            str(item.get("source_label") or "").strip()
-            and str(item.get("canonical_name") or "").strip()
-            and str(item.get("identity_kind") or "").strip().lower() == "named"
-            and owned_future_evidence(item)
-        )
+        str(item.get("source_label") or "").strip(): item
+        for item in decisions
+        if item.get("identity_kind") == "named"
     }
     group_resolution: dict[str, dict] = {}
     candidate_by_label = {
@@ -1667,6 +1731,16 @@ functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
             **item,
             "name": canonical_name,
             "identity_kind": "named",
+            "authority_id": (
+                str(resolution.get("authority_id") or "")
+                or (
+                    "future-name:"
+                    + evidence_repository.content_hash({
+                        "contract_version": FUTURE_IDENTITY_DECISION_VERSION,
+                        "canonical_name": canonical_name,
+                    })[:24]
+                )
+            ),
             "future_evidence": str(
                 resolution.get("future_evidence") or ""
             )[:120],
@@ -1682,6 +1756,7 @@ async def audit_identity_coverage_from_structural_evidence(
     source_text: str,
     bible: Bible,
     episode_no: int,
+    existing_resolutions: list[dict] | None = None,
 ) -> list[dict]:
     """Audit only typed Blueprint/IR references that lack identity ownership."""
     evidence = [item for item in (structural_evidence or []) if isinstance(item, dict)]
@@ -1704,54 +1779,178 @@ async def audit_identity_coverage_from_structural_evidence(
                 source_id: source_by_id[source_id] for source_id in source_ids
             },
         })
-    prompt = (
-        "任务：审计结构化蓝图/IR 中未绑定的人物引用。只处理给定引用及其 owned SRC，"
-        "不得重扫全章或新增无关人物。source_label 必须逐字复用未决结构证据中的 "
-        "identity_key，不得润色、扩写或另造称谓；该 identity_key 是后续回填蓝图引用的"
-        "稳定句柄，即使它是程序合成标签而未逐字出现在原文中也必须原样返回。"
-        "已有同一实体时复用其 identity_group 和 canonical_name。\n已有人物候选：\n"
-        + json.dumps(candidates, ensure_ascii=False, separators=(",", ":"))
-        + "\n已有角色权威投影：\n"
-        + json.dumps(
-            [
-                {"authority_id": f"bible:{character.name}", "canonical_name": character.name}
-                for character in bible.characters if character.name
-            ],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        + "\n未决结构证据：\n"
-        + json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
-        + "\n只输出 JSON："
-        '{"characters":[{"source_label":"逐字复用 identity_key","canonical_name":"真名或空串",'
-        '"identity_kind":"named|functional","identity_group":"稳定分组",'
-        '"kind":"onscreen","evidence":"依据"}]}'
-    )
     allowed_source_labels = list(dict.fromkeys(
         str(item.get("identity_key") or "").strip()
         for item in minimal
         if str(item.get("identity_key") or "").strip()
     ))
+    authority_by_id: dict[str, dict] = {}
+    for character in bible.characters:
+        canonical_name = str(character.name or "").strip()
+        if canonical_name:
+            authority_by_id[f"bible:{canonical_name}"] = {
+                "authority_id": f"bible:{canonical_name}",
+                "canonical_name": canonical_name,
+                "identity_group": "",
+                "aliases": [],
+            }
+    groups_by_ref: dict[str, dict] = {}
+    catalog_candidates = [*candidates]
+    for resolution in existing_resolutions or []:
+        if not structural_identity_resolution_is_current(resolution):
+            continue
+        canonical_name = str(
+            resolution.get("canonical_name") or ""
+        ).strip()
+        catalog_candidates.append({
+            "source_label": str(
+                resolution.get("source_label") or ""
+            ).strip(),
+            "name": canonical_name,
+            "identity_kind": (
+                "functional"
+                if resolution_declares_functional_identity(resolution)
+                else "named"
+            ),
+            "identity_group": str(
+                resolution.get("identity_group") or ""
+            ).strip(),
+            "authority_id": str(
+                resolution.get("authority_id") or ""
+            ).strip(),
+        })
+    for candidate in catalog_candidates:
+        source_label = str(candidate.get("source_label") or "").strip()
+        canonical_name = str(candidate.get("name") or "").strip()
+        identity_group = str(candidate.get("identity_group") or "").strip()
+        identity_kind = str(candidate.get("identity_kind") or "").strip()
+        if identity_group:
+            group = groups_by_ref.setdefault(identity_group, {
+                "identity_group_ref": identity_group,
+                "source_labels": [],
+                "authority_ids": [],
+            })
+            if source_label and source_label not in group["source_labels"]:
+                group["source_labels"].append(source_label)
+        if identity_kind == "named" and canonical_name:
+            authority_id = str(candidate.get("authority_id") or "").strip()
+            if not authority_id:
+                authority_id = (
+                    f"bible:{canonical_name}"
+                    if canonical_name in {
+                        str(character.name or "").strip()
+                        for character in bible.characters
+                    }
+                    else "candidate:" + evidence_repository.content_hash({
+                        "canonical_name": canonical_name,
+                        "identity_group": identity_group,
+                    })[:24]
+                )
+            authority = authority_by_id.setdefault(authority_id, {
+                "authority_id": authority_id,
+                "canonical_name": canonical_name,
+                "identity_group": identity_group,
+                "aliases": [],
+            })
+            if authority["canonical_name"] != canonical_name:
+                raise ContentGenerationError(
+                    f"identity authority={authority_id} 对应多个真名"
+                )
+            if source_label and source_label not in authority["aliases"]:
+                authority["aliases"].append(source_label)
+            if identity_group:
+                group = groups_by_ref[identity_group]
+                if authority_id not in group["authority_ids"]:
+                    group["authority_ids"].append(authority_id)
+    for label in allowed_source_labels:
+        self_authority_id = f"self:{label}"
+        authority_by_id.setdefault(self_authority_id, {
+            "authority_id": self_authority_id,
+            "canonical_name": label,
+            "identity_group": "",
+            "aliases": [label],
+        })
+        seed_ref = "new:" + evidence_repository.content_hash({
+            "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+            "source_label": label,
+            "structural_evidence": [
+                item for item in minimal
+                if str(item.get("identity_key") or "").strip() == label
+            ],
+        })[:24]
+        groups_by_ref.setdefault(seed_ref, {
+            "identity_group_ref": seed_ref,
+            "source_labels": [label],
+            "authority_ids": [],
+        })
     coverage_schema = _structural_identity_coverage_schema(
-        allowed_source_labels
+        allowed_source_labels,
+        authority_ids=list(authority_by_id),
+        identity_group_refs=list(groups_by_ref),
     )
+    coverage_response_format = _structural_identity_coverage_response_format(
+        coverage_schema
+    )
+    prompt = (
+        "任务：审计结构化蓝图/IR 中未绑定的人物引用。只处理给定引用及其 owned SRC，"
+        "不得重扫全章或新增无关人物。source_label 必须逐字复用未决结构证据中的 "
+        "identity_key，不得润色、扩写或另造称谓；该 identity_key 是后续回填蓝图引用的"
+        "稳定句柄，即使它是程序合成标签而未逐字出现在原文中也必须原样返回。"
+        "已有同一实体时只能选择给定 authority_id 和 identity_group_ref；不得回写或"
+        "发明 canonical_name。named 放入 named 数组；证据不足时放入 functional 数组。"
+        "两个数组必须显式输出且并集恰好覆盖全部未决 identity_key。\n已有人物候选：\n"
+        + json.dumps(candidates, ensure_ascii=False, separators=(",", ":"))
+        + "\n角色权威目录：\n"
+        + json.dumps(
+            list(authority_by_id.values()),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n身份分组目录：\n"
+        + json.dumps(
+            list(groups_by_ref.values()),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n未决结构证据：\n"
+        + json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
+        + "\n只输出符合下列 Schema 的 JSON：\n"
+        + json.dumps(coverage_schema, ensure_ascii=False, separators=(",", ":"))
+    )
+    structural_by_key: dict[str, list[dict]] = {}
+    for item in minimal:
+        label = str(item.get("identity_key") or "").strip()
+        if label:
+            structural_by_key.setdefault(label, []).append(item)
+    owned_source_by_key = {
+        label: "\n".join(
+            str(text)
+            for item in items
+            for text in (item.get("source_segments") or {}).values()
+            if str(text)
+        )
+        for label, items in structural_by_key.items()
+    }
 
     def validate_response(
         value: StructuralIdentityCoverageResponse,
     ) -> list[str]:
         allowed = set(allowed_source_labels)
         errors: list[str] = []
-        if len(value.characters) > len(allowed):
+        decisions = value.characters
+        if len(decisions) > len(allowed):
             errors.append(
                 "结构人物 coverage 返回数量超过未决引用上限："
-                f"actual={len(value.characters)}，limit={len(allowed)}"
+                f"actual={len(decisions)}，limit={len(allowed)}"
             )
         seen_labels: set[str] = set()
-        for item in value.characters:
-            source_label = item.source_label
-            canonical_name = item.canonical_name.strip()
-            identity_group = item.identity_group.strip()
-            evidence_text = item.evidence.strip()
+        named_authorities_by_group: dict[str, set[str]] = {}
+        named_groups: set[str] = set()
+        functional_groups: set[str] = set()
+        for item in decisions:
+            source_label = str(item.get("source_label") or "")
+            identity_group = str(item.get("identity_group_ref") or "")
+            evidence_text = str(item.get("evidence") or "")
             if source_label != source_label.strip():
                 errors.append(
                     f"source_label 含首尾空白：{source_label!r}"
@@ -1761,28 +1960,84 @@ async def audit_identity_coverage_from_structural_evidence(
             if source_label in seen_labels:
                 errors.append(f"source_label 重复：{source_label}")
             seen_labels.add(source_label)
-            if item.canonical_name != canonical_name:
+            if identity_group != identity_group.strip():
                 errors.append(
-                    "canonical_name 含首尾空白："
+                    "identity_group_ref 含首尾空白："
                     f"{source_label}"
                 )
-            if not identity_group:
-                errors.append(f"identity_group 为空：{source_label}")
-            if not evidence_text:
+            if identity_group not in groups_by_ref:
+                errors.append(f"identity_group_ref 越界：{identity_group}")
+            if evidence_text != evidence_text.strip():
+                errors.append(f"evidence 含首尾空白：{source_label}")
+            if not evidence_text.strip():
                 errors.append(f"evidence 为空：{source_label}")
-            if item.identity_kind == "named" and not canonical_name:
-                errors.append(f"named identity 缺少 canonical_name：{source_label}")
-            if item.identity_kind == "functional" and canonical_name:
-                errors.append(
-                    "functional identity 不得声明 canonical_name："
-                    f"{source_label}"
-                )
+            if item.get("identity_kind") == "named":
+                authority_id = str(item.get("authority_id") or "")
+                authority = authority_by_id.get(authority_id)
+                if authority is None:
+                    errors.append(f"authority_id 越界：{authority_id}")
+                else:
+                    existing_group_authorities = set(
+                        groups_by_ref.get(identity_group, {}).get(
+                            "authority_ids", []
+                        )
+                    )
+                    if (
+                        existing_group_authorities
+                        and authority_id not in existing_group_authorities
+                    ):
+                        errors.append(
+                            "named authority 与已有 group 权威冲突："
+                            f"{source_label}"
+                        )
+                    if not existing_group_authorities:
+                        owned_source = owned_source_by_key.get(
+                            source_label, ""
+                        )
+                        authority_anchors = {
+                            str(authority.get("canonical_name") or "").strip(),
+                            *(
+                                str(alias or "").strip()
+                                for alias in authority.get("aliases") or []
+                            ),
+                        }
+                        if not any(
+                            anchor and anchor in owned_source
+                            for anchor in authority_anchors
+                        ):
+                            errors.append(
+                                "unbound group 缺少 owned authority 锚点："
+                                f"{source_label}"
+                            )
+                named_groups.add(identity_group)
+                named_authorities_by_group.setdefault(
+                    identity_group, set()
+                ).add(authority_id)
+            else:
+                functional_groups.add(identity_group)
         missing_labels = allowed - seen_labels
         if missing_labels:
             errors.append(
                 "结构人物 coverage 缺少未决引用："
                 + ",".join(sorted(missing_labels))
             )
+        for identity_group, authority_ids in named_authorities_by_group.items():
+            if len(authority_ids) > 1:
+                errors.append(
+                    "identity_group 对应多个 named authority："
+                    f"{identity_group}"
+                )
+        for identity_group in named_groups & functional_groups:
+            errors.append(
+                "functional 不得引用本响应已升级 group："
+                f"{identity_group}"
+            )
+        for identity_group in functional_groups:
+            if groups_by_ref.get(identity_group, {}).get("authority_ids"):
+                errors.append(
+                    "functional 不得引用已命名 group："
+                    f"{identity_group}"
+                )
         return errors
 
     response = await model_gateway.chat_structured(
@@ -1790,8 +2045,13 @@ async def audit_identity_coverage_from_structural_evidence(
         model_type=StructuralIdentityCoverageResponse,
         validate=validate_response,
         operation_id=(
-            f"screenplay.identity.coverage.v4:{episode_no}:"
-            + evidence_repository.content_hash(minimal)
+            f"screenplay.identity.coverage.v5:{episode_no}:"
+            + evidence_repository.content_hash({
+                "contract_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+                "prompt": prompt,
+                "schema": coverage_schema,
+                "response_format": coverage_response_format,
+            })
         ),
         max_tokens=4096,
         temperature=0.05,
@@ -1807,13 +2067,10 @@ async def audit_identity_coverage_from_structural_evidence(
             "schema_hash": evidence_repository.content_hash(
                 coverage_schema
             ),
+            "disable_provider_retries": True,
         },
         output_schema=coverage_schema,
-        response_format=(
-            _structural_identity_coverage_response_format(
-                coverage_schema
-            )
-        ),
+        response_format=coverage_response_format,
         require_response_format=True,
     )
     existing = {
@@ -1821,17 +2078,6 @@ async def audit_identity_coverage_from_structural_evidence(
         for item in candidates
     }
     additions: list[dict] = []
-    owned_text = "\n".join(
-        text for item in minimal for text in item.get("source_segments", {}).values()
-    )
-    structural_by_key = {
-        str(item.get("identity_key") or "").strip(): item
-        for item in minimal
-        if (
-            str(item.get("identity_key") or "").strip()
-            and item.get("source_segment_ids")
-        )
-    }
     for item in response.characters:
         raw = (
             item
@@ -1839,23 +2085,43 @@ async def audit_identity_coverage_from_structural_evidence(
             else item.model_dump(mode="json")
         )
         label = str(raw.get("source_label") or "").strip()
-        typed_evidence = structural_by_key.get(label)
-        if not label or (typed_evidence is None and label not in owned_text):
-            continue
+        typed_evidence = structural_by_key.get(label) or []
+        if not label or not typed_evidence:
+            raise ContentGenerationError(
+                f"结构人物 coverage 缺少 owned evidence：{label}"
+            )
         identity_kind = str(raw.get("identity_kind") or "functional")
-        canonical_name = str(raw.get("canonical_name") or "").strip()
-        group = str(raw.get("identity_group") or f"structural:{label}")
+        authority_id = str(raw.get("authority_id") or "").strip()
+        canonical_name = str(
+            authority_by_id.get(authority_id, {}).get("canonical_name") or ""
+        )
+        group = str(raw.get("identity_group_ref") or "").strip()
         if (label, group) in existing:
             continue
-        usage = str((typed_evidence or {}).get("usage") or "").strip()
+        usages = {
+            str(value.get("usage") or "").strip()
+            for value in typed_evidence
+        }
+        source_ids = list(dict.fromkeys(
+            str(source_id)
+            for value in typed_evidence
+            for source_id in value.get("source_segment_ids") or []
+            if str(source_id) in source_by_id
+        ))
+        source_segment_id = source_ids[0] if source_ids else ""
         additions.append({
             "name": canonical_name or label,
             "source_label": label,
-            "identity_kind": identity_kind if identity_kind in {"named", "functional"} else "functional",
+            "identity_kind": identity_kind,
             "identity_group": group,
-            "kind": "mentioned" if usage == "mentioned" else "onscreen",
-            "evidence": str(raw.get("evidence") or "")[:80],
+            "authority_id": authority_id if identity_kind == "named" else "",
+            "kind": "mentioned" if usages == {"mentioned"} else "onscreen",
+            "evidence": str(raw.get("evidence") or ""),
             "future_evidence": "",
+            "source_segment_ids": source_ids,
+            "source_segment_id": source_segment_id,
+            "source_quote": source_by_id.get(source_segment_id, ""),
+            "_typed_source_evidence_owned": bool(source_segment_id),
         })
     return _attach_candidate_source_evidence([*candidates, *additions], source_text)
 
@@ -1959,6 +2225,7 @@ async def discover_character_candidates(
             source_text=source_text,
             bible=bible,
             episode_no=episode_no,
+            existing_resolutions=existing_resolutions,
         )
     else:
         audited = _attach_candidate_source_evidence(
@@ -2055,6 +2322,7 @@ def _identity_resolution(
         "structural_identity_policy_version": (
             STRUCTURAL_IDENTITY_COVERAGE_VERSION
         ),
+        "authority_id": str(item.get("authority_id") or "").strip(),
     })
 
 
