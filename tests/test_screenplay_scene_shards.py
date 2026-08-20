@@ -351,12 +351,69 @@ def test_scene_shard_semantic_review_schema_binds_exact_chunk_keys() -> None:
     related_schema = finding_properties["related_unit_keys"]
     assert related_schema["items"]["enum"] == unit_keys
     assert related_schema["maxItems"] == 1
-    assert "uniqueItems" not in related_schema
-    assert "uniqueItems" not in finding_properties["violation_kinds"]
+    assert finding_properties["violation_kinds"]["minItems"] == 1
+    assert finding_properties["violation_kinds"]["maxItems"] == 5
+    assert finding_properties["message"]["minLength"] == 1
+    assert finding_properties["message"]["maxLength"] == 160
     assert schema["properties"]["findings"]["maxItems"] == 6
     assert response_format["type"] == "json_schema"
     assert response_format["json_schema"]["strict"] is True
-    assert response_format["json_schema"]["schema"] is schema
+    provider_schema = response_format["json_schema"]["schema"]
+    assert provider_schema is not schema
+    provider_finding_properties = provider_schema["$defs"][
+        "ScreenplaySceneShardSemanticFinding"
+    ]["properties"]
+    assert provider_finding_properties["unit_key"]["enum"] == unit_keys
+    assert provider_finding_properties["related_unit_keys"]["items"][
+        "enum"
+    ] == unit_keys
+
+    provider_keywords: set[str] = set()
+
+    def collect_provider_keywords(schema_node: dict) -> None:
+        provider_keywords.update(schema_node)
+        for mapping_keyword in ("$defs", "properties"):
+            for child_schema in schema_node.get(
+                mapping_keyword,
+                {},
+            ).values():
+                collect_provider_keywords(child_schema)
+        items = schema_node.get("items")
+        if isinstance(items, dict):
+            collect_provider_keywords(items)
+
+    collect_provider_keywords(provider_schema)
+    assert provider_keywords <= (
+        scene_shards_module
+        ._SCREENPLAY_SCENE_STRICT_PROVIDER_SCHEMA_KEYWORDS
+    )
+    assert provider_keywords.isdisjoint({
+        "title",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+    })
+
+    excessive_review = ScreenplaySceneShardSemanticReview(findings=[
+        ScreenplaySceneShardSemanticFinding(
+            unit_key=f"unknown-{index}",
+            related_unit_keys=[],
+            code="source_semantic_drift",
+            violation_kinds=["unsupported_action"],
+            message="out of chunk",
+        )
+        for index in range(7)
+    ])
+    assert any(
+        "actual=7，limit=6" in error
+        for error in scene_shards_module._scene_shard_review_reference_errors(
+            excessive_review,
+            set(unit_keys),
+            allow_local_omitted_unit_key=True,
+        )
+    )
 
 
 def test_attempt7_call_63139_has_no_complete_json_root_to_accept() -> None:
@@ -2116,7 +2173,7 @@ def test_scene_shard_semantic_consensus_repairs_only_flagged_creative_slot(
             )
             assert (
                 kwargs["response_format"]["json_schema"]["schema"]
-                is dynamic_schema
+                is not dynamic_schema
             )
             assert json.dumps(
                 dynamic_schema,
@@ -3486,6 +3543,9 @@ def test_err_20260816_e8ac9d_post_repair_allows_second_format_repair(
     )[:625]
     assert len(truncated_response) == 625
     post_repair_calls: list[dict] = []
+    review_schema = scene_shards_module._scene_shard_semantic_review_schema(
+        list(draft.slots)
+    )
 
     async def fake_chat(messages, **kwargs):
         meta = kwargs["call_meta"]
@@ -3507,6 +3567,7 @@ def test_err_20260816_e8ac9d_post_repair_allows_second_format_repair(
             "meta": deepcopy(meta),
             "max_tokens": kwargs["max_tokens"],
             "temperature": kwargs["temperature"],
+            "output_schema": deepcopy(review_schema),
             "response_format": deepcopy(kwargs["response_format"]),
         })
         return {
@@ -3554,9 +3615,7 @@ def test_err_20260816_e8ac9d_post_repair_allows_second_format_repair(
                 "messages": call["messages"],
                 "max_tokens": call["max_tokens"],
                 "temperature": call["temperature"],
-                "structured_schema": call["response_format"][
-                    "json_schema"
-                ]["schema"],
+                "structured_schema": call["output_schema"],
                 "response_format": call["response_format"],
                 "require_response_format": True,
             })

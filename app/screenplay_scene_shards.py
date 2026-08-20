@@ -610,6 +610,9 @@ def _scene_shard_review_reference_errors(
     *,
     allow_local_omitted_unit_key: bool,
 ) -> list[str]:
+    finding_limit = (
+        len(known_unit_keys) * len(SCREENPLAY_SCENE_SEMANTIC_FINDING_CODES)
+    )
     unknown_finding_keys = {
         finding.unit_key
         for finding in review.findings
@@ -638,6 +641,11 @@ def _scene_shard_review_reference_errors(
         if any(not unit_key for unit_key in finding.related_unit_keys)
     ]
     errors: list[str] = []
+    if len(review.findings) > finding_limit:
+        errors.append(
+            "语义审查 findings 超过当前 chunk 的确定性上限："
+            f"actual={len(review.findings)}，limit={finding_limit}"
+        )
     if missing_finding_scopes:
         errors.append(
             "语义审查 finding 缺少必需 unit_key scope："
@@ -4556,14 +4564,60 @@ def _scene_shard_semantic_review_schema(
 def _scene_shard_semantic_review_response_format(
     review_schema: dict[str, Any],
 ) -> dict[str, Any]:
+    provider_schema = _scene_shard_strict_provider_schema(review_schema)
     return {
         "type": "json_schema",
         "json_schema": {
             "name": "screenplay_scene_semantic_review",
             "strict": True,
-            "schema": review_schema,
+            "schema": provider_schema,
         },
     }
+
+
+_SCREENPLAY_SCENE_STRICT_PROVIDER_SCHEMA_KEYWORDS = frozenset({
+    "$defs",
+    "$ref",
+    "additionalProperties",
+    "enum",
+    "items",
+    "properties",
+    "required",
+    "type",
+})
+
+
+def _scene_shard_strict_provider_schema(
+    local_schema: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep only the strict-provider JSON Schema compatibility subset.
+
+    The complete dynamic schema remains authoritative in the prompt and local
+    validation.  Provider-side structured output is an additional generation
+    constraint, so unsupported annotation/cardinality keywords must not turn a
+    locally enforceable contract into an HTTP 400.
+    """
+
+    def sanitize(schema_node: dict[str, Any]) -> dict[str, Any]:
+        sanitized: dict[str, Any] = {}
+        for keyword, value in schema_node.items():
+            if (
+                keyword
+                not in _SCREENPLAY_SCENE_STRICT_PROVIDER_SCHEMA_KEYWORDS
+            ):
+                continue
+            if keyword in {"$defs", "properties"}:
+                sanitized[keyword] = {
+                    name: sanitize(child_schema)
+                    for name, child_schema in value.items()
+                }
+            elif keyword == "items" and isinstance(value, dict):
+                sanitized[keyword] = sanitize(value)
+            else:
+                sanitized[keyword] = deepcopy(value)
+        return sanitized
+
+    return sanitize(local_schema)
 
 
 def _scene_shard_semantic_review_budget(
