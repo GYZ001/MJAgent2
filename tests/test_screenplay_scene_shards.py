@@ -702,6 +702,7 @@ def test_attempt6_call_63118_semantic_budget_has_bounded_runaway_reserve(
 
     assert len(unit_keys) == 11
     assert len(case["scene_keys"]) == len(case["source_segment_ids"]) == 2
+    assert case["prompt_chars"] == 10934
     assert compact_required == case["requested_max_tokens"] == 7641
     assert case["effective_max_tokens"] == case["completion_tokens"] == 7641
     assert case["finish_reason"] == "length"

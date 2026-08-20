@@ -19,7 +19,7 @@
     "bp-sc030:SRC0048:003:unit",
     "bp-sc030:SRC0048:004:unit"
   ],
-  "prompt_chars": 10935,
+  "prompt_chars": 10934,
   "requested_max_tokens": 7641,
   "effective_max_tokens": 7641,
   "completion_tokens": 7641,
