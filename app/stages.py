@@ -8684,15 +8684,25 @@ async def _generate_screenplay_scene_sharded_baseline(
                     }
                 ]
                 materialized = any(
-                    str(authority.get("canonical_name") or "").strip()
-                    in bible_identity_names
+                    (
+                        str(authority.get("canonical_name") or "").strip()
+                        in bible_identity_names
+                        and str(authority.get("authority_id") or "").strip()
+                        == "bible:"
+                        + str(authority.get("canonical_name") or "").strip()
+                    )
                     for authority in matching_authorities
                 )
                 nonmaterializable_named = any(
                     str(authority.get("identity_kind") or "").strip()
                     != "functional"
-                    and str(authority.get("canonical_name") or "").strip()
-                    not in bible_identity_names
+                    and not (
+                        str(authority.get("canonical_name") or "").strip()
+                        in bible_identity_names
+                        and str(authority.get("authority_id") or "").strip()
+                        == "bible:"
+                        + str(authority.get("canonical_name") or "").strip()
+                    )
                     for authority in matching_authorities
                 )
                 if (

@@ -113,6 +113,8 @@ def _canonical_named_authority_id(canonical_name: str) -> str:
 
 def _named_candidate_materialization_compatible(item: dict) -> bool:
     """Whether adding the candidate's named card preserves one authority/group."""
+    if "materialization_compatible" in item:
+        return bool(item.get("materialization_compatible"))
     canonical_name = str(item.get("name") or item.get("canonical_name") or "").strip()
     authority_id = str(item.get("authority_id") or "").strip()
     if not canonical_name or not authority_id:
@@ -797,6 +799,9 @@ def _current_identity_known_decision_catalog(
             ).strip()
             if not authority_id or not canonical_name:
                 continue
+            signed_identity_group = str(
+                authority.get("identity_group") or authority_id
+            ).strip()
             registered_labels = list(dict.fromkeys(
                 str(label or "").strip()
                 for label in (
@@ -828,9 +833,7 @@ def _current_identity_known_decision_catalog(
                     "materialization_compatible": bool(
                         authority_id
                         == _canonical_named_authority_id(canonical_name)
-                        and str(
-                            authority.get("identity_group") or ""
-                        ).strip() == authority_id
+                        and signed_identity_group == authority_id
                     ),
                 }
                 decision_id = (
@@ -841,9 +844,8 @@ def _current_identity_known_decision_catalog(
                     **payload,
                     "decision_id": decision_id,
                     "identity_group": str(
-                        authority.get("identity_group")
-                        or authority_id
-                    ).strip(),
+                        signed_identity_group
+                    ),
                     "source_instance_key": str(
                         authority.get("source_instance_key") or authority_id
                     ).strip(),
@@ -1235,6 +1237,9 @@ def _project_current_identity_response(
             "source_label_provenance": provenance,
             "source_evidence_receipt": dict(record),
             "_current_materialization_compatible": bool(
+                materialization_compatible or not authority_id
+            ),
+            "materialization_compatible": bool(
                 materialization_compatible or not authority_id
             ),
             "_current_response_group_key": (
@@ -3241,6 +3246,7 @@ async def audit_identity_coverage_from_structural_evidence(
                 "aliases": [],
                 "materialization_compatible": (
                     authority_id == _canonical_named_authority_id(canonical_name)
+                    and identity_group in {"", authority_id}
                 ),
             })
             if authority["canonical_name"] != canonical_name:
@@ -3909,6 +3915,9 @@ owned SRC 证据目录（后端逐字锁定，不得回抄或改写）：
             "source_segment_id": source_segment_id,
             "source_quote": source_by_id.get(source_segment_id, ""),
             "_typed_source_evidence_owned": bool(source_segment_id),
+            "materialization_compatible": bool(
+                raw.get("materialization_compatible")
+            ),
         })
     return _attach_candidate_source_evidence([*candidates, *additions], source_text)
 

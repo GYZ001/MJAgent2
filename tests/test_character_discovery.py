@@ -3633,6 +3633,81 @@ def test_bible_authority_alias_can_materialize_and_freeze_one_authority(
     assert {item["authority_id"] for item in registry} == {"bible:苍玄"}
 
 
+def test_materialized_bible_alias_k_normalizes_manual_authority(
+    monkeypatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE episodes(id TEXT PRIMARY KEY, project_id TEXT, "
+        "episode_no INTEGER, screenplay_character_resolutions TEXT NOT NULL)"
+    )
+    manual = {
+        "source_label": "师尊",
+        "canonical_name": "苍玄",
+        "resolution": "reference_identity",
+        "identity_group": "manual:master",
+        "authority_id": "manual:cangxuan",
+        "decision_provenance": "manual",
+    }
+    conn.execute(
+        "INSERT INTO episodes VALUES('e1','p1',1,?)",
+        (json.dumps([manual], ensure_ascii=False),),
+    )
+    conn.commit()
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "师尊",
+                "canonical_name": "苍玄",
+                "identity_kind": "named",
+                "kind": "mentioned",
+                "evidence": "师尊",
+            }],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="苍玄",
+            role="重要配角",
+            appearance_canonical="白发老者，道袍简洁，神情威严",
+        )],
+    )
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    monkeypatch.setattr(
+        portraits,
+        "_future_chapter_context",
+        lambda *_args, **_kwargs: ("", ""),
+    )
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    result = asyncio.run(portraits.ensure_cards_for_text(
+        "p1",
+        1,
+        "本章再次提到师尊的戒律。",
+        bible,
+        generate_portraits=False,
+    ))
+    persisted = portraits.persist_screenplay_character_resolutions(
+        conn,
+        "e1",
+        result["resolutions"],
+    )
+    registry = portraits.identity_authority_registry(bible, persisted)
+
+    assert calls == 1
+    assert result["errors"] == []
+    assert result["candidates"][0]["authority_id"] == "bible:苍玄"
+    assert {item["authority_id"] for item in persisted} == {"bible:苍玄"}
+    assert {item["authority_id"] for item in registry} == {"bible:苍玄"}
+
+
 @pytest.mark.parametrize(
     ("mutation", "error_fragment"),
     [
@@ -4258,6 +4333,55 @@ def test_current_identity_cross_batch_same_label_new_group_fails_once(
             1,
         ))
     assert calls == 2
+
+
+def test_current_identity_cross_batch_registered_alias_uses_only_k(
+    monkeypatch,
+) -> None:
+    source_text = "本章提到师尊的戒律。\n\n弟子再次谈到师尊。"
+    records = portraits._current_identity_evidence_records(source_text)
+    monkeypatch.setattr(
+        portraits,
+        "_current_identity_evidence_batches",
+        lambda *_args, **_kwargs: [[records[0]], [records[1]]],
+    )
+    prompts: list[str] = []
+
+    async def fake_chat(messages, **kwargs):
+        prompts.append(messages[0]["content"])
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "师尊",
+                "canonical_name": "苍玄",
+                "identity_kind": "named",
+                "kind": "mentioned",
+                "evidence": "师尊",
+            }],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    result = asyncio.run(portraits.extract_current_identity_candidates(
+        source_text,
+        Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        1,
+        existing_resolutions=[{
+            "source_label": "师尊",
+            "canonical_name": "苍玄",
+            "resolution": "reference_identity",
+            "identity_group": "manual:master",
+            "authority_id": "manual:cangxuan",
+            "decision_provenance": "manual",
+        }],
+    ))
+
+    assert len(prompts) == 2
+    assert '"decision_type":"prior_named"' not in prompts[1]
+    assert '"decision_type":"registered_authority"' in prompts[1]
+    assert len(result) == 1
+    assert result[0]["authority_id"] == "manual:cangxuan"
+    assert result[0]["kind"] == "mentioned"
 
 
 def test_current_synthetic_functional_never_enters_future_authority(
