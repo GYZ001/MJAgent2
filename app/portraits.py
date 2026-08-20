@@ -1609,12 +1609,8 @@ async def discover_character_candidates(
     structural_coverage_applied = bool(
         targeted and structural_evidence
     )
-    input_hash = evidence_repository.content_hash({
+    discovery_input = {
         "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
-        "structural_coverage_policy_version": (
-            STRUCTURAL_IDENTITY_COVERAGE_VERSION
-        ),
-        "structural_coverage_applied": structural_coverage_applied,
         "mode": "targeted" if targeted else "legacy",
         "episode_no": episode_no,
         "source_text": source_text,
@@ -1624,7 +1620,15 @@ async def discover_character_candidates(
         "bible": bible.model_dump(mode="json"),
         "existing_resolutions": existing_resolutions or [],
         "structural_evidence": structural_evidence or [],
-    })
+    }
+    if structural_coverage_applied:
+        discovery_input.update({
+            "structural_coverage_policy_version": (
+                STRUCTURAL_IDENTITY_COVERAGE_VERSION
+            ),
+            "structural_coverage_applied": True,
+        })
+    input_hash = evidence_repository.content_hash(discovery_input)
     evidence_conn = get_conn()
     artifacts_available = bool(
         scope_id
@@ -1649,10 +1653,14 @@ async def discover_character_candidates(
             continue
         if (
             cached.get("contract_version") == IDENTITY_DISCOVERY_CONTRACT_VERSION
-            and cached.get("structural_coverage_policy_version")
-            == STRUCTURAL_IDENTITY_COVERAGE_VERSION
-            and cached.get("structural_coverage_applied")
-            is structural_coverage_applied
+            and (
+                not structural_coverage_applied
+                or (
+                    cached.get("structural_coverage_policy_version")
+                    == STRUCTURAL_IDENTITY_COVERAGE_VERSION
+                    and cached.get("structural_coverage_applied") is True
+                )
+            )
             and cached.get("input_hash") == input_hash
             and isinstance(cached.get("candidates"), list)
         ):

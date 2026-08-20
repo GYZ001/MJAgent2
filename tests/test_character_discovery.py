@@ -480,6 +480,76 @@ def test_generic_discovery_rejects_legacy_coverage_cache(
     )
 
 
+def test_generic_discovery_keeps_ordinary_v7_cache_compatible(
+    monkeypatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE artifacts("
+        "id TEXT PRIMARY KEY, scope_type TEXT, scope_id TEXT, type TEXT, "
+        "status TEXT, content_json TEXT, created_at REAL)"
+    )
+    source_text = "萌浩独自前行。"
+    bible = Bible(
+        characters=[],
+        world=World(visual_style_canonical="测试"),
+    )
+    ordinary_v7_hash = portraits.evidence_repository.content_hash({
+        "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "mode": "targeted",
+        "episode_no": 1,
+        "source_text": source_text,
+        "draft_text": "",
+        "future_text": "",
+        "future_label": "",
+        "bible": bible.model_dump(mode="json"),
+        "existing_resolutions": [],
+        "structural_evidence": [],
+    })
+    expected = [{"source_label": "ordinary-v7"}]
+    conn.execute(
+        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
+        (
+            "ordinary-v7",
+            "episode",
+            "ep-attempt10-ordinary-cache",
+            "screenplay_identity_discovery",
+            "validated",
+            json.dumps({
+                "contract_version": (
+                    portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION
+                ),
+                "input_hash": ordinary_v7_hash,
+                "mode": "targeted",
+                "candidates": expected,
+            }),
+            1.0,
+        ),
+    )
+    conn.commit()
+
+    async def forbidden_provider(*_args, **_kwargs):
+        raise AssertionError("ordinary v7 cache should remain compatible")
+
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    monkeypatch.setattr(portraits, "get_setting", lambda *_args: "true")
+    monkeypatch.setattr(
+        portraits,
+        "extract_current_identity_candidates",
+        forbidden_provider,
+    )
+
+    result = asyncio.run(portraits.discover_character_candidates(
+        source_text,
+        bible,
+        1,
+        scope_id="ep-attempt10-ordinary-cache",
+    ))
+
+    assert result == expected
+
+
 def test_structural_coverage_parse_failure_stops_before_scene_writing(
     monkeypatch,
 ) -> None:
@@ -1350,7 +1420,10 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
                     portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
                 ),
                 "decision_contract_version": "screenplay-future-identity.v6",
-        "authority_id": "bible:丁力",
+                "structural_identity_policy_version": (
+                    portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+                ),
+            "authority_id": "bible:丁力",
         "authority_version": "screenplay-identity-authority.v1",
     }]
 
