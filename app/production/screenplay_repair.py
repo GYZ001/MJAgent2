@@ -11,6 +11,7 @@ from typing import Any
 
 from app import config, textmatch
 from app.character_policy import resolution_declares_functional_identity
+from app.identity_authority import identity_resolution_is_authoritative
 from app.db import get_conn, get_setting, now
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue
@@ -482,6 +483,7 @@ def run_screenplay_qa(
         for item in character_resolutions
         if (
             isinstance(item, dict)
+            and identity_resolution_is_authoritative(item)
             and resolution_declares_functional_identity(item)
             and str(item.get("canonical_name") or "").strip()
         )

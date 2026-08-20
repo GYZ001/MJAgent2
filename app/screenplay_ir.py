@@ -23,6 +23,7 @@ from app.character_policy import (
 from app.identity_authority import (
     backend_owned_identity_authority,
     identity_authority_registry,
+    identity_resolution_is_authoritative,
     model_identity_authority_prompt_rule,
 )
 from app.narrative_blueprint import (
@@ -1509,6 +1510,7 @@ def _normalize_duplicate_ir_identity_displays(
         for item in (episode.get("character_resolutions") or [])
         if (
             isinstance(item, dict)
+            and identity_resolution_is_authoritative(item)
             and resolution_declares_functional_identity(item)
             and str(item.get("source_label") or "").strip()
             and str(item.get("canonical_name") or "").strip()

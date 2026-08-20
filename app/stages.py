@@ -158,7 +158,10 @@ from app.screenplay_ir import (
     screenplay_ir_prompt_contract,
     screenplay_ir_source_audit_contract_errors,
 )
-from app.identity_authority import model_identity_authority_prompt_rule
+from app.identity_authority import (
+    identity_resolution_is_authoritative,
+    model_identity_authority_prompt_rule,
+)
 
 SYSTEM_PREFIX = (
     "你是专业的竖屏漫剧（动态漫画短剧）编剧与分镜师。\n"
@@ -9260,6 +9263,7 @@ async def generate_screenplay_baseline(
             for item in resolutions
             if (
                 isinstance(item, dict)
+                and identity_resolution_is_authoritative(item)
                 and resolution_declares_functional_identity(item)
                 and str(item.get("canonical_name") or "").strip()
             )

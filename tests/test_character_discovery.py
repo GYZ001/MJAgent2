@@ -2888,6 +2888,98 @@ def test_current_identity_named_requires_literal_selected_evidence(
     assert calls == 1
 
 
+def test_current_identity_literal_label_rejects_cross_evidence_once(
+    monkeypatch,
+) -> None:
+    calls = 0
+    downstream: list[str] = []
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        prompt = str(messages[0].get("content") or "")
+        marker = "backend-owned 当前身份证据目录（只能逐字引用 evidence_id）："
+        raw_catalog = prompt.split(marker, 1)[1].split("\n", 1)[1]
+        raw_catalog = raw_catalog.split("\n\n本集已有功能身份决议", 1)[0]
+        catalog = json.loads(raw_catalog)
+        unrelated_id = next(
+            str(item["evidence_id"])
+            for item in catalog
+            if "银袍女子" in str(item["text"])
+        )
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "门卫",
+                "identity_kind": "functional",
+                "functional_identity_key": "F1",
+                "kind": "onscreen",
+                "evidence_id": unrelated_id,
+            }],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    async def forbidden_future(*_args, **_kwargs):
+        downstream.append("future")
+        raise AssertionError("cross-evidence current result reached future")
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(
+        portraits,
+        "resolve_future_identity_candidates",
+        forbidden_future,
+    )
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="evidence_id 与已知逐字 source_label 不匹配",
+    ):
+        asyncio.run(portraits.discover_character_candidates(
+            "门卫守在山门。\n\n银袍女子站在殿前。",
+            Bible(world=World(visual_style_canonical="国风"), characters=[]),
+            1,
+        ))
+
+    assert calls == 1
+    assert downstream == []
+
+
+def test_current_identity_cross_batch_literal_uses_global_catalog() -> None:
+    records = portraits._current_identity_evidence_records(
+        "门卫守在山门。\n\n银袍女子站在殿前。"
+    )
+    guard_record = next(
+        item for item in records if "门卫" in str(item["text"])
+    )
+    unrelated_record = next(
+        item for item in records if "银袍女子" in str(item["text"])
+    )
+    response = portraits.CurrentIdentityCandidateResponse.model_validate({
+        "named": [],
+        "functional": [{
+            "source_label": "门卫",
+            "identity_kind": "functional",
+            "functional_identity_key": "F1",
+            "kind": "onscreen",
+            "evidence_id": unrelated_record["evidence_id"],
+        }],
+    })
+
+    _projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_id={unrelated_record["evidence_id"]: unrelated_record},
+        all_evidence_by_id={
+            guard_record["evidence_id"]: guard_record,
+            unrelated_record["evidence_id"]: unrelated_record,
+        },
+        group_scope="current-2",
+        existing_functional_routes=set(),
+    )
+
+    assert errors == [
+        "current evidence_id 与已知逐字 source_label 不匹配：门卫"
+    ]
+
+
 def test_current_synthetic_functional_never_enters_future_authority(
     monkeypatch,
 ) -> None:

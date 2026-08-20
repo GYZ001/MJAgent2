@@ -246,6 +246,21 @@ def test_same_group_token_from_distinct_discovery_epochs_does_not_merge() -> Non
     ) == portraits.merge_screenplay_character_resolutions([], scope_b)
 
 
+def test_current_synthetic_observation_never_becomes_identity_authority() -> None:
+    synthetic = {
+        "source_label": "面色苍白的女子",
+        "canonical_name": "面色苍白的女子",
+        "resolution": "functional_identity",
+        "identity_group": "current-1:synthetic:owned-receipt",
+        "identity_scope_fingerprint": "owned-source-episode-1",
+        "source_label_provenance": (
+            portraits.CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+        ),
+    }
+
+    assert identity_authority_registry(_empty_bible(), [synthetic]) == []
+
+
 @pytest.mark.parametrize(
     ("old_resolution", "new_resolution", "new_name"),
     [

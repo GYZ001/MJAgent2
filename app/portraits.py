@@ -37,6 +37,7 @@ from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
 from app.identity_authority import (
     IdentityAuthorityConflictError,
+    identity_resolution_is_authoritative,
     normalize_character_resolution,
     normalize_character_resolutions,
 )
@@ -837,6 +838,7 @@ def _project_current_identity_response(
     value: CurrentIdentityCandidateResponse,
     *,
     evidence_by_id: dict[str, dict],
+    all_evidence_by_id: dict[str, dict] | None = None,
     group_scope: str,
     existing_functional_routes: set[str],
 ) -> tuple[list[dict], list[str]]:
@@ -861,6 +863,15 @@ def _project_current_identity_response(
             continue
         evidence_text = str(record.get("text") or "")
         literal = bool(source_label and source_label in evidence_text)
+        literal_anywhere = bool(
+            source_label
+            and any(
+                source_label in str(owned_record.get("text") or "")
+                for owned_record in (
+                    all_evidence_by_id or evidence_by_id
+                ).values()
+            )
+        )
         canonical_name = str(item.get("canonical_name") or "")
         if canonical_name != canonical_name.strip():
             errors.append(f"canonical_name 含首尾空白：{source_label}")
@@ -881,6 +892,11 @@ def _project_current_identity_response(
             )
         if identity_kind == "functional" and not functional_key:
             errors.append(f"functional_identity_key 为空：{source_label}")
+        if identity_kind == "functional" and literal_anywhere and not literal:
+            errors.append(
+                "current evidence_id 与已知逐字 source_label 不匹配："
+                f"{source_label}"
+            )
 
         if source_label in seen_labels:
             errors.append(f"source_label 重复：{source_label}")
@@ -991,6 +1007,7 @@ async def _discover_character_candidates_legacy(
         for item in (existing_resolutions or [])
         if (
             isinstance(item, dict)
+            and identity_resolution_is_authoritative(item)
             and resolution_declares_functional_identity(item)
             and str(item.get("canonical_name") or "").strip()
         )
@@ -1003,6 +1020,7 @@ async def _discover_character_candidates_legacy(
         for item in (existing_resolutions or [])
         if (
             isinstance(item, dict)
+            and identity_resolution_is_authoritative(item)
             and resolution_declares_functional_identity(item)
             and str(item.get("source_label") or "").strip()
             and str(item.get("canonical_name") or "").strip()
@@ -1013,6 +1031,11 @@ async def _discover_character_candidates_legacy(
         source_text,
         draft_text=draft_text,
     )
+    all_current_evidence_by_id = {
+        str(record["evidence_id"]): record
+        for evidence_records in current_evidence_batches
+        for record in evidence_records
+    }
     seen: set[tuple[str, str, str]] = set()
     candidates: list[dict] = []
     current_provider, current_model, current_effective_max = (
@@ -1231,6 +1254,7 @@ async def _discover_character_candidates_legacy(
             _projected, errors = _project_current_identity_response(
                 value,
                 evidence_by_id=evidence_by_id,
+                all_evidence_by_id=all_current_evidence_by_id,
                 group_scope=f"current-{current_batch}",
                 existing_functional_routes=existing_functional_routes,
             )
@@ -1292,6 +1316,7 @@ async def _discover_character_candidates_legacy(
             _project_current_identity_response(
                 response,
                 evidence_by_id=evidence_by_id,
+                all_evidence_by_id=all_current_evidence_by_id,
                 group_scope=f"current-{current_batch}",
                 existing_functional_routes=existing_functional_routes,
             )
@@ -2645,13 +2670,21 @@ async def audit_identity_coverage_from_structural_evidence(
                 "aliases": [],
             }
     groups_by_ref: dict[str, dict] = {}
-    catalog_candidates = [*candidates]
+    # Current RF9 may preserve a non-literal provider label as an explicitly
+    # synthetic observation.  It is useful as a low-confidence audit input,
+    # but it is not an alias or identity authority and must never suppress the
+    # Blueprint-owned coverage gate.
+    catalog_candidates = [
+        candidate
+        for candidate in candidates
+        if identity_resolution_is_authoritative(candidate)
+    ]
     for resolution in existing_resolutions or []:
         if not screenplay_identity_resolution_is_current_for_source(
             resolution,
             episode_no=episode_no,
             source_text=source_text,
-        ):
+        ) or not identity_resolution_is_authoritative(resolution):
             continue
         canonical_name = str(
             resolution.get("canonical_name") or ""
@@ -5078,6 +5111,7 @@ def screenplay_unknown_identity_errors(
         for item in (resolutions or [])
         if (
             isinstance(item, dict)
+            and identity_resolution_is_authoritative(item)
             and resolution_declares_functional_identity(item)
             and str(item.get("canonical_name") or "").strip()
         )
