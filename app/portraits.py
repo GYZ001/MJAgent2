@@ -623,6 +623,12 @@ async def _discover_character_candidates_legacy(
     )
     seen: set[tuple[str, str, str]] = set()
     candidates: list[dict] = []
+    current_provider, current_model, current_effective_max = (
+        hiagent.text_request_token_limits(requested_max_tokens=8192)
+    )
+    current_semantic_settings = hiagent.text_request_semantic_settings(
+        current_provider
+    )
 
     def collect(
         raw: str,
@@ -783,8 +789,8 @@ async def _discover_character_candidates_legacy(
 规则：
 1. 找出本集原文/草稿中实际出场或开口的人，source_label 填本集对他/她的原始称谓。
 2. 若当前输入有明确同一人证据，identity_kind="named"，canonical_name 填稳定真名。
-3. canonical_name 可以是文本明确给出的人名，也可以是跨章节稳定、唯一指向同一实体的法号、
-   尊号或专属称号。泛化职位、外貌标签和无法唯一指人的称谓才判为 functional。
+3. canonical_name 必须逐字出现在当前输入，可以是人名、法号、尊号或专属称号。
+   只在人物谱中出现、但本集无逐字同一性锚点的别名必须先判为 functional，交由后续权威绑定。
 4. 姓名单独出现不算同一人证据；必须能确认该真名与 source_label 是同一人，有歧义一律不猜。
 5. 若是一次性角色，或在可见线索中无法确认稳定真名，放入 functional 数组；
    functional 项在结构上不得携带 canonical_name。
@@ -831,7 +837,6 @@ async def _discover_character_candidates_legacy(
                 if (
                     item.get("identity_kind") == "named"
                     and canonical_name not in current_haystack
-                    and canonical_name not in known_names
                 ):
                     errors.append(
                         f"canonical_name 缺少当前权威锚点：{source_label}"
@@ -854,6 +859,12 @@ async def _discover_character_candidates_legacy(
                 f"screenplay.identity.current.v3:{episode_no}:{current_batch}:"
                 + evidence_repository.content_hash({
                     "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
+                    "provider": current_provider,
+                    "model": current_model,
+                    "requested_max_tokens": 8192,
+                    "effective_max_tokens": current_effective_max,
+                    "temperature": 0.1,
+                    "provider_semantic_settings": current_semantic_settings,
                     "prompt": prompt,
                     "schema": current_schema,
                     "response_format": current_response_format,
@@ -873,8 +884,14 @@ async def _discover_character_candidates_legacy(
                 "source_batches": len(source_contexts),
                 "reuse_successful_operation": True,
                 "disable_provider_retries": True,
+                "disable_provider_candidate_fallback": True,
+                "disable_reasoning_fallback": True,
                 "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
                 "schema_hash": evidence_repository.content_hash(current_schema),
+                "provider": current_provider,
+                "model": current_model,
+                "effective_max_tokens": current_effective_max,
+                "provider_semantic_settings": current_semantic_settings,
             },
             output_schema=current_schema,
             response_format=current_response_format,
@@ -1488,6 +1505,7 @@ async def resolve_future_identity_candidates(
             "authority_id": f"bible:{name}",
             "canonical_name": name,
             "identity_group": "",
+            "aliases": [],
         }
     for candidate in candidates:
         if str(candidate.get("identity_kind") or "") != "named":
@@ -1495,19 +1513,30 @@ async def resolve_future_identity_candidates(
         canonical_name = str(candidate.get("name") or "").strip()
         if not canonical_name:
             continue
-        authority_id = "candidate:" + evidence_repository.content_hash({
-            "canonical_name": canonical_name,
-            "identity_group": str(
-                candidate.get("identity_group") or ""
-            ).strip(),
-        })[:24]
-        authority_by_id[authority_id] = {
+        identity_group = str(candidate.get("identity_group") or "").strip()
+        authority_id = (
+            f"bible:{canonical_name}"
+            if canonical_name in known_names
+            else str(candidate.get("authority_id") or "").strip()
+        )
+        if not authority_id:
+            authority_id = "candidate:" + evidence_repository.content_hash({
+                "canonical_name": canonical_name,
+                "identity_group": identity_group,
+            })[:24]
+        authority = authority_by_id.setdefault(authority_id, {
             "authority_id": authority_id,
             "canonical_name": canonical_name,
-            "identity_group": str(
-                candidate.get("identity_group") or ""
-            ).strip(),
-        }
+            "identity_group": identity_group,
+            "aliases": [],
+        })
+        if authority["canonical_name"] != canonical_name:
+            raise ContentGenerationError(
+                f"identity authority={authority_id} 对应多个真名"
+            )
+        source_label = str(candidate.get("source_label") or "").strip()
+        if source_label and source_label not in authority["aliases"]:
+            authority["aliases"].append(source_label)
     authority_projection = list(authority_by_id.values())
     allowed_source_labels = list(dict.fromkeys(
         str(item.get("source_label") or "").strip()
@@ -1663,7 +1692,7 @@ new_named 依据必须包含 canonical_name，known_named 依据必须包含当�
             identities = {
                 (
                     str(item.get("identity_kind") or ""),
-                    str(item.get("canonical_name") or ""),
+                    str(item.get("authority_id") or ""),
                 )
                 for item in group_decisions
             }
@@ -1715,6 +1744,8 @@ new_named 依据必须包含 canonical_name，known_named 依据必须包含当�
             "episode_no": episode_no,
             "reuse_successful_operation": True,
             "disable_provider_retries": True,
+            "disable_provider_candidate_fallback": True,
+            "disable_reasoning_fallback": True,
             "schema_hash": evidence_repository.content_hash(identity_schema),
         },
         repair_context=future_context,
@@ -1793,6 +1824,9 @@ async def audit_identity_coverage_from_structural_evidence(
         segment.segment_id: segment.text
         for segment in index_source_segments(source_text)
     }
+    source_order = {
+        source_id: index for index, source_id in enumerate(source_by_id)
+    }
     minimal = []
     for item in evidence:
         source_ids = [
@@ -1823,21 +1857,11 @@ async def audit_identity_coverage_from_structural_evidence(
             }
     groups_by_ref: dict[str, dict] = {}
     catalog_candidates = [*candidates]
-    current_identity_scope = screenplay_identity_scope_fingerprint(
-        episode_no, source_text
-    )
     for resolution in existing_resolutions or []:
-        provenance = str(
-            resolution.get("decision_provenance") or ""
-        ).strip()
-        if not (
-            provenance in DURABLE_IDENTITY_DECISION_PROVENANCE
-            or (
-                structural_identity_resolution_is_current(resolution)
-                and str(
-                    resolution.get("identity_scope_fingerprint") or ""
-                ).strip() == current_identity_scope
-            )
+        if not screenplay_identity_resolution_is_current_for_source(
+            resolution,
+            episode_no=episode_no,
+            source_text=source_text,
         ):
             continue
         canonical_name = str(
@@ -2075,13 +2099,14 @@ async def audit_identity_coverage_from_structural_evidence(
                             str(alias or "").strip()
                             for alias in authority.get("aliases") or []
                         ),
-                        *(
+                    }
+                    if existing_group_authorities == {authority_id}:
+                        authority_anchors.update(
                             str(label or "").strip()
                             for label in groups_by_ref.get(
                                 identity_group, {}
                             ).get("source_labels") or []
-                        ),
-                    }
+                        )
                     if not any(
                         anchor and anchor in evidence_text
                         for anchor in authority_anchors
@@ -2149,6 +2174,8 @@ async def audit_identity_coverage_from_structural_evidence(
                 coverage_schema
             ),
             "disable_provider_retries": True,
+            "disable_provider_candidate_fallback": True,
+            "disable_reasoning_fallback": True,
         },
         output_schema=coverage_schema,
         response_format=coverage_response_format,
@@ -2171,13 +2198,16 @@ async def audit_identity_coverage_from_structural_evidence(
             + evidence_repository.content_hash({
                 "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
                 "source_labels": sorted(labels),
-                "source_segment_ids": sorted({
-                    str(source_id)
-                    for label in labels
-                    for typed_item in structural_by_key.get(label, [])
-                    for source_id in typed_item.get("source_segment_ids") or []
-                    if str(source_id)
-                }),
+                "source_segment_ids": sorted(
+                    {
+                        str(source_id)
+                        for label in labels
+                        for typed_item in structural_by_key.get(label, [])
+                        for source_id in typed_item.get("source_segment_ids") or []
+                        if str(source_id) in source_order
+                    },
+                    key=lambda source_id: source_order[source_id],
+                ),
             })[:24]
         )
         for raw_group, labels in new_group_members.items()
@@ -2207,12 +2237,12 @@ async def audit_identity_coverage_from_structural_evidence(
             str(value.get("usage") or "").strip()
             for value in typed_evidence
         }
-        source_ids = list(dict.fromkeys(
+        source_ids = sorted({
             str(source_id)
             for value in typed_evidence
             for source_id in value.get("source_segment_ids") or []
             if str(source_id) in source_by_id
-        ))
+        }, key=lambda source_id: source_order[source_id])
         source_segment_id = source_ids[0] if source_ids else ""
         additions.append({
             "name": canonical_name or label,
@@ -2439,6 +2469,28 @@ def structural_identity_resolution_is_current(value: dict) -> bool:
         or str(
             value.get("structural_identity_policy_version") or ""
         ).strip() == STRUCTURAL_IDENTITY_COVERAGE_VERSION
+    )
+
+
+def screenplay_identity_resolution_is_current_for_source(
+    value: dict,
+    *,
+    episode_no: int,
+    source_text: str,
+) -> bool:
+    """Fence automatic identity authority by wire versions and source epoch."""
+    provenance = str(value.get("decision_provenance") or "").strip()
+    if provenance in DURABLE_IDENTITY_DECISION_PROVENANCE:
+        return True
+    return bool(
+        str(value.get("decision_contract_version") or "").strip()
+        == FUTURE_IDENTITY_DECISION_VERSION
+        and structural_identity_resolution_is_current(value)
+        and str(
+            value.get("identity_scope_fingerprint") or ""
+        ).strip() == screenplay_identity_scope_fingerprint(
+            episode_no, source_text
+        )
     )
 
 
@@ -4112,15 +4164,19 @@ async def ensure_cards_for_text(
         if episode_row
         else []
     )
-    # Legacy future-identity rows were accepted when a name appeared anywhere
-    # in a broad future window.  A new discovery run must re-adjudicate them
-    # under the owned-evidence contract before reusing them as authority.
+    identity_scope_fingerprint = screenplay_identity_scope_fingerprint(
+        episode_no, source_text
+    )
+    # Automatic decisions are inputs to the next discovery pass only when all
+    # three authority fences match the current owned source.  Older coverage,
+    # future-wire or source epochs must be re-adjudicated before influencing a
+    # strict v8 prompt; explicitly durable manual/Bible decisions survive.
     existing_resolutions = [
         item for item in existing_resolutions
-        if (
-            str(item.get("resolution") or "") != "future_identity"
-            or str(item.get("decision_contract_version") or "")
-            == FUTURE_IDENTITY_DECISION_VERSION
+        if screenplay_identity_resolution_is_current_for_source(
+            item,
+            episode_no=episode_no,
+            source_text=source_text,
         )
     ]
     future_text, future_label = _future_chapter_context(
@@ -4135,9 +4191,6 @@ async def ensure_cards_for_text(
             existing_resolutions=existing_resolutions,
             scope_id=str(episode_row["id"]) if episode_row else None,
         )
-    )
-    identity_scope_fingerprint = screenplay_identity_scope_fingerprint(
-        episode_no, source_text
     )
     candidates = [
         {

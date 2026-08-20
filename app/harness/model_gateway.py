@@ -544,6 +544,16 @@ async def chat_structured(
                 raise ValueError(
                     f"{stage_key}/{substage} forbids provider retries"
                 )
+            if not bool(
+                (call_meta or {}).get("disable_provider_candidate_fallback")
+            ):
+                raise ValueError(
+                    f"{stage_key}/{substage} forbids provider candidate fallback"
+                )
+            if not bool((call_meta or {}).get("disable_reasoning_fallback")):
+                raise ValueError(
+                    f"{stage_key}/{substage} forbids reasoning fallback"
+                )
     structured_schema = output_schema or _model_schema(model_type)
     base_messages = [dict(message) for message in messages]
     current_messages = base_messages

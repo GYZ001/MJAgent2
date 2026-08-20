@@ -8618,7 +8618,7 @@ async def _generate_screenplay_scene_sharded_baseline(
     from app.identity_authority import identity_authority_registry
     from app.portraits import (
         ensure_structural_identity_coverage,
-        structural_identity_resolution_is_current,
+        screenplay_identity_resolution_is_current_for_source,
     )
     from app.orchestration.state_machine import StateConflict
 
@@ -8629,7 +8629,11 @@ async def _generate_screenplay_scene_sharded_baseline(
             for item in (episode.get("character_resolutions") or [])
             if (
                 isinstance(item, dict)
-                and structural_identity_resolution_is_current(item)
+                and screenplay_identity_resolution_is_current_for_source(
+                    item,
+                    episode_no=int(episode.get("episode_no") or 0),
+                    source_text=source_text,
+                )
             )
         ],
     )

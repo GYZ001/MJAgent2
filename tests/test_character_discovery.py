@@ -41,10 +41,8 @@ def test_structural_identity_audit_accepts_typed_blueprint_key(
         return type("Response", (), {
             "characters": [{
                 "source_label": "北区杂役处未知闯入者",
-                "canonical_name": "",
                 "identity_kind": "functional",
-                "identity_group": "structural:intruder",
-                "kind": "onscreen",
+                "identity_group_ref": "new:test",
                 "evidence": "该声音与踹门动作由同一 owned SRC 支持",
             }],
         })()
@@ -76,7 +74,7 @@ def test_structural_identity_audit_accepts_typed_blueprint_key(
 
     assert audited[0]["source_label"] == "北区杂役处未知闯入者"
     assert audited[0]["identity_kind"] == "functional"
-    assert seen["operation_id"].startswith("screenplay.identity.coverage.v4:")
+    assert seen["operation_id"].startswith("screenplay.identity.coverage.v5:")
     assert "逐字复用未决结构证据中的 identity_key" in str(seen["prompt"])
     kwargs = seen["kwargs"]
     assert kwargs["model_type"] is portraits.StructuralIdentityCoverageResponse
@@ -93,7 +91,11 @@ def test_structural_identity_audit_accepts_typed_blueprint_key(
 def test_structural_identity_coverage_schema_is_closed_and_provider_safe(
 ) -> None:
     labels = ["未知求救者", "被困同伴"]
-    local_schema = portraits._structural_identity_coverage_schema(labels)
+    local_schema = portraits._structural_identity_coverage_schema(
+        labels,
+        authority_ids=["bible:王有材"],
+        identity_group_refs=["current-1:F1", "new:test"],
+    )
     local_before = json.loads(json.dumps(local_schema, ensure_ascii=False))
     response_format = (
         portraits._structural_identity_coverage_response_format(
@@ -102,33 +104,37 @@ def test_structural_identity_coverage_schema_is_closed_and_provider_safe(
     )
 
     assert local_schema == local_before
-    assert local_schema["required"] == ["characters"]
-    assert local_schema["properties"]["characters"]["minItems"] == 2
-    assert local_schema["properties"]["characters"]["maxItems"] == 2
-    local_candidate = local_schema["$defs"][
-        "StructuralIdentityCoverageCandidate"
+    assert local_schema["required"] == ["named", "functional"]
+    assert local_schema["properties"]["named"]["maxItems"] == 2
+    assert local_schema["properties"]["functional"]["maxItems"] == 2
+    local_named = local_schema["$defs"][
+        "StructuralNamedIdentityCoverageCandidate"
     ]
-    assert local_candidate["additionalProperties"] is False
-    assert set(local_candidate["required"]) == {
+    local_functional = local_schema["$defs"][
+        "StructuralFunctionalIdentityCoverageCandidate"
+    ]
+    assert local_named["additionalProperties"] is False
+    assert local_functional["additionalProperties"] is False
+    assert set(local_named["required"]) == {
         "source_label",
-        "canonical_name",
-        "identity_kind",
-        "identity_group",
-        "kind",
+        "authority_id",
+        "identity_group_ref",
         "evidence",
     }
-    assert local_candidate["properties"]["source_label"]["enum"] == labels
-    assert local_candidate["properties"]["identity_kind"]["enum"] == [
-        "named",
-        "functional",
+    assert set(local_functional["required"]) == {
+        "source_label", "identity_group_ref", "evidence",
+    }
+    assert local_named["properties"]["source_label"]["enum"] == labels
+    assert local_named["properties"]["authority_id"]["enum"] == [
+        "bible:王有材"
     ]
 
     assert response_format["type"] == "json_schema"
     assert response_format["json_schema"]["strict"] is True
     provider_schema = response_format["json_schema"]["schema"]
-    assert provider_schema["required"] == ["characters"]
+    assert provider_schema["required"] == ["named", "functional"]
     provider_candidate = provider_schema["$defs"][
-        "StructuralIdentityCoverageCandidate"
+        "StructuralNamedIdentityCoverageCandidate"
     ]
     assert provider_candidate["additionalProperties"] is False
     assert set(provider_candidate["required"]) == set(
