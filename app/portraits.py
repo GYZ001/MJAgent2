@@ -1867,10 +1867,6 @@ async def resolve_future_identity_candidates(
             selected = decision_by_id.get(selected_id, {})
             resolution_kind = str(selected.get("resolution_kind") or "")
             if resolution_kind == "known_named":
-                authority = authority_by_id.get(
-                    str(selected.get("authority_id") or ""),
-                    {},
-                )
                 anchors = [
                     str(value)
                     for value in selected.get("proof_anchors") or []
@@ -2356,40 +2352,6 @@ async def audit_identity_coverage_from_structural_evidence(
                 separators=(",", ":"),
             )
         )
-    coverage_schema = _structural_identity_coverage_schema(
-        allowed_source_labels,
-        authority_ids=list(authority_by_id),
-        identity_group_refs=list(groups_by_ref),
-    )
-    coverage_response_format = _structural_identity_coverage_response_format(
-        coverage_schema
-    )
-    prompt = (
-        "任务：审计结构化蓝图/IR 中未绑定的人物引用。只处理给定引用及其 owned SRC，"
-        "不得重扫全章或新增无关人物。source_label 必须逐字复用未决结构证据中的 "
-        "identity_key，不得润色、扩写或另造称谓；该 identity_key 是后续回填蓝图引用的"
-        "稳定句柄，即使它是程序合成标签而未逐字出现在原文中也必须原样返回。"
-        "已有同一实体时只能选择给定 authority_id 和 identity_group_ref；不得回写或"
-        "发明 canonical_name。named 放入 named 数组；证据不足时放入 functional 数组。"
-        "两个数组必须显式输出且并集恰好覆盖全部未决 identity_key。\n已有人物候选：\n"
-        + json.dumps(candidates, ensure_ascii=False, separators=(",", ":"))
-        + "\n角色权威目录：\n"
-        + json.dumps(
-            list(authority_by_id.values()),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        + "\n身份分组目录：\n"
-        + json.dumps(
-            list(groups_by_ref.values()),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        + "\n未决结构证据：\n"
-        + json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
-        + "\n只输出符合下列 Schema 的 JSON：\n"
-        + json.dumps(coverage_schema, ensure_ascii=False, separators=(",", ":"))
-    )
     structural_by_key: dict[str, list[dict]] = {}
     for item in minimal:
         label = str(item.get("identity_key") or "").strip()
@@ -2413,6 +2375,225 @@ async def audit_identity_coverage_from_structural_evidence(
             "structural identity coverage 缺少 owned SRC："
             + ",".join(sorted(missing_owned_source))
         )
+
+    coverage_groups = [
+        {
+            "group_key": f"I{index:03d}",
+            "source_label": label,
+            "source_segment_ids": sorted({
+                str(source_id)
+                for item in structural_by_key[label]
+                for source_id in item.get("source_segment_ids") or []
+                if str(source_id) in source_order
+            }, key=lambda source_id: source_order[source_id]),
+            "seed_group_ref": seed_group_by_label[label],
+        }
+        for index, label in enumerate(allowed_source_labels, start=1)
+    ]
+    coverage_group_by_key = {
+        str(group["group_key"]): group for group in coverage_groups
+    }
+    evidence_by_id: dict[str, dict] = {}
+    evidence_ids_by_group: dict[str, list[str]] = {}
+    for group in coverage_groups:
+        group_key = str(group["group_key"])
+        evidence_ids: list[str] = []
+        for source_id in group["source_segment_ids"]:
+            text = str(source_by_id[source_id])
+            evidence_id = "E:" + evidence_repository.content_hash({
+                "contract_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+                "group_key": group_key,
+                "source_segment_id": source_id,
+                "text": text,
+            })[:20]
+            evidence_by_id[evidence_id] = {
+                "evidence_id": evidence_id,
+                "group_key": group_key,
+                "source_segment_id": source_id,
+                "text": text,
+            }
+            evidence_ids.append(evidence_id)
+        evidence_ids_by_group[group_key] = evidence_ids
+
+    def matching_group_evidence_ids(
+        group_key: str,
+        identity_group_ref: str,
+    ) -> list[str]:
+        """Return owned spans which can justify linking one existing group."""
+        group = groups_by_ref.get(identity_group_ref, {})
+        group_source_ids = {
+            str(value) for value in group.get("source_segment_ids") or []
+        }
+        group_labels = [
+            str(value).strip()
+            for value in group.get("source_labels") or []
+            if str(value).strip()
+        ]
+        return [
+            evidence_id
+            for evidence_id in evidence_ids_by_group.get(group_key, [])
+            if (
+                str(evidence_by_id[evidence_id]["source_segment_id"])
+                in group_source_ids
+                or any(
+                    label in str(evidence_by_id[evidence_id]["text"])
+                    for label in group_labels
+                )
+            )
+        ]
+
+    decision_by_id: dict[str, dict] = {}
+    decision_ids_by_group: dict[str, list[str]] = {}
+
+    def register_decision(group_key: str, payload: dict) -> str:
+        decision_kind = (
+            "K" if payload.get("identity_kind") == "named" else "F"
+        )
+        decision_id = (
+            f"{decision_kind}:{group_key}:"
+            + evidence_repository.content_hash({
+                "contract_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+                **payload,
+            })[:16]
+        )
+        decision_by_id[decision_id] = {
+            "decision_id": decision_id,
+            "group_key": group_key,
+            **payload,
+        }
+        decision_ids_by_group.setdefault(group_key, []).append(decision_id)
+        return decision_id
+
+    for group in coverage_groups:
+        group_key = str(group["group_key"])
+        label = str(group["source_label"])
+        evidence_ids = evidence_ids_by_group[group_key]
+        primary_evidence_id = evidence_ids[0]
+        source_ids = list(group["source_segment_ids"])
+        seed_group_ref = str(group["seed_group_ref"])
+        register_decision(group_key, {
+            "source_label": label,
+            "identity_kind": "functional",
+            "identity_group_ref": seed_group_ref,
+            "authority_id": "",
+            "canonical_name": "",
+            "evidence_id": primary_evidence_id,
+            "owned_source_segment_ids": source_ids,
+            "proof_kind": "owned_functional_new",
+        })
+        for identity_group_ref, catalog_group in groups_by_ref.items():
+            if identity_group_ref == seed_group_ref:
+                continue
+            matching_ids = matching_group_evidence_ids(
+                group_key, identity_group_ref
+            )
+            if not matching_ids:
+                continue
+            group_authorities = sorted(set(
+                str(value)
+                for value in catalog_group.get("authority_ids") or []
+                if str(value)
+            ))
+            if not group_authorities:
+                register_decision(group_key, {
+                    "source_label": label,
+                    "identity_kind": "functional",
+                    "identity_group_ref": identity_group_ref,
+                    "authority_id": "",
+                    "canonical_name": "",
+                    "evidence_id": matching_ids[0],
+                    "owned_source_segment_ids": source_ids,
+                    "proof_kind": "owned_functional_existing_group",
+                })
+
+        for authority_id, authority in authority_by_id.items():
+            canonical_name = str(
+                authority.get("canonical_name") or ""
+            ).strip()
+            authority_anchors = list(dict.fromkeys(
+                value
+                for value in [
+                    canonical_name,
+                    *[
+                        str(alias).strip()
+                        for alias in authority.get("aliases") or []
+                    ],
+                ]
+                if value
+            ))
+            identity_label_anchor_ids = [
+                evidence_id
+                for evidence_id in evidence_ids
+                if label in authority_anchors
+                and label in str(evidence_by_id[evidence_id]["text"])
+            ]
+            if identity_label_anchor_ids:
+                register_decision(group_key, {
+                    "source_label": label,
+                    "identity_kind": "named",
+                    "identity_group_ref": seed_group_ref,
+                    "authority_id": authority_id,
+                    "canonical_name": canonical_name,
+                    "evidence_id": identity_label_anchor_ids[0],
+                    "owned_source_segment_ids": source_ids,
+                    "proof_kind": "identity_key_registered_authority",
+                    "proof_anchors": [label],
+                })
+            for identity_group_ref, catalog_group in groups_by_ref.items():
+                if set(catalog_group.get("authority_ids") or []) != {
+                    authority_id
+                }:
+                    continue
+                matching_ids = matching_group_evidence_ids(
+                    group_key, identity_group_ref
+                )
+                if not matching_ids:
+                    continue
+                register_decision(group_key, {
+                    "source_label": label,
+                    "identity_kind": "named",
+                    "identity_group_ref": identity_group_ref,
+                    "authority_id": authority_id,
+                    "canonical_name": canonical_name,
+                    "evidence_id": matching_ids[0],
+                    "owned_source_segment_ids": source_ids,
+                    "proof_kind": "existing_bound_group",
+                    "proof_anchors": [],
+                })
+
+    coverage_group_keys = [
+        str(group["group_key"]) for group in coverage_groups
+    ]
+    coverage_schema = _structural_identity_coverage_schema(
+        coverage_group_keys,
+        decision_ids_by_group=decision_ids_by_group,
+    )
+    coverage_response_format = _structural_identity_coverage_response_format(
+        coverage_schema
+    )
+    coverage_group_projection = [
+        {
+            "group_key": group["group_key"],
+            "source_label": group["source_label"],
+            "owned_source_segment_ids": group["source_segment_ids"],
+        }
+        for group in coverage_groups
+    ]
+    coverage_evidence_projection = list(evidence_by_id.values())
+    coverage_decision_projection = list(decision_by_id.values())
+    prompt = f"""任务：审计结构化蓝图/IR 中未绑定的人物引用。
+未决引用目录（group_key 是唯一可输出的键；同键所有 owned SRC 行共用一个决议）：
+{json.dumps(coverage_group_projection, ensure_ascii=False, separators=(',', ':'))}
+owned SRC 证据目录（后端逐字锁定，不得回抄或改写）：
+{json.dumps(coverage_evidence_projection, ensure_ascii=False, separators=(',', ':'))}
+可选决议目录（每个不透明 decision_id 已绑定 label/kind/group/authority/evidence/source_ids）：
+{json.dumps(coverage_decision_projection, ensure_ascii=False, separators=(',', ':'))}
+规则：
+1. decisions 必须精确输出全部 group_key，不得增删键。
+2. 证据不足时选 F 决议，这是合法终态；不得猜测人物权威。
+3. 只有目录已提供 K 决议时才能绑定已有人物；不得自行组合姓名、组或证据。
+4. 只输出符合下列 Schema 的 JSON：
+{json.dumps(coverage_schema, ensure_ascii=False, separators=(',', ':'))}"""
     coverage_provider, coverage_model, coverage_effective_max = (
         hiagent.text_request_token_limits(requested_max_tokens=4096)
     )
@@ -2423,59 +2604,54 @@ async def audit_identity_coverage_from_structural_evidence(
     def validate_response(
         value: StructuralIdentityCoverageResponse,
     ) -> list[str]:
-        allowed = set(allowed_source_labels)
         errors: list[str] = []
-        decisions = value.characters
-        if len(decisions) > len(allowed):
-            errors.append(
-                "结构人物 coverage 返回数量超过未决引用上限："
-                f"actual={len(decisions)}，limit={len(allowed)}"
-            )
-        seen_labels: set[str] = set()
+        expected_keys = set(coverage_group_keys)
+        if set(value.decisions) != expected_keys:
+            errors.append("structural coverage decisions keys 不闭合")
         named_authorities_by_group: dict[str, set[str]] = {}
         named_groups: set[str] = set()
         functional_groups: set[str] = set()
-        for item in decisions:
+        for group_key in coverage_group_keys:
+            selected_id = str(value.decisions.get(group_key) or "")
+            item = decision_by_id.get(selected_id)
+            if item is None or item.get("group_key") != group_key:
+                errors.append(f"structural coverage decision_id 越界：{group_key}")
+                continue
             source_label = str(item.get("source_label") or "")
+            expected_label = str(
+                coverage_group_by_key[group_key]["source_label"]
+            )
+            if source_label != expected_label:
+                errors.append(f"structural coverage label 不匹配：{group_key}")
             identity_group = str(item.get("identity_group_ref") or "")
-            evidence_text = str(item.get("evidence") or "")
-            if source_label != source_label.strip():
-                errors.append(
-                    f"source_label 含首尾空白：{source_label!r}"
-                )
-            if source_label not in allowed:
-                errors.append(f"source_label 越界：{source_label}")
-            if source_label in seen_labels:
-                errors.append(f"source_label 重复：{source_label}")
-            seen_labels.add(source_label)
-            if identity_group != identity_group.strip():
-                errors.append(
-                    "identity_group_ref 含首尾空白："
-                    f"{source_label}"
-                )
             if identity_group not in groups_by_ref:
-                errors.append(f"identity_group_ref 越界：{identity_group}")
-            if evidence_text != evidence_text.strip():
-                errors.append(f"evidence 含首尾空白：{source_label}")
-            if not evidence_text.strip():
-                errors.append(f"evidence 为空：{source_label}")
-            owned_segments = [
-                str(text)
-                for typed_item in structural_by_key.get(source_label, [])
-                for text in (typed_item.get("source_segments") or {}).values()
-                if str(text)
-            ]
-            if evidence_text and not any(
-                evidence_text in segment for segment in owned_segments
+                errors.append(f"identity_group_ref 越界：{group_key}")
+            expected_source_ids = list(
+                coverage_group_by_key[group_key]["source_segment_ids"]
+            )
+            if list(item.get("owned_source_segment_ids") or []) != (
+                expected_source_ids
             ):
-                errors.append(
-                    f"evidence 不属于 owned SRC：{source_label}"
+                errors.append(f"owned source ids 不闭合：{group_key}")
+            evidence_id = str(item.get("evidence_id") or "")
+            evidence = evidence_by_id.get(evidence_id)
+            if (
+                evidence_id not in evidence_ids_by_group.get(group_key, [])
+                or evidence is None
+                or str(evidence.get("source_segment_id") or "")
+                not in expected_source_ids
+                or str(evidence.get("text") or "")
+                != source_by_id.get(
+                    str(evidence.get("source_segment_id") or ""), ""
                 )
+            ):
+                errors.append(f"owned evidence receipt 无效：{group_key}")
+                continue
             if item.get("identity_kind") == "named":
                 authority_id = str(item.get("authority_id") or "")
                 authority = authority_by_id.get(authority_id)
                 if authority is None:
-                    errors.append(f"authority_id 越界：{authority_id}")
+                    errors.append(f"authority_id 越界：{group_key}")
                 else:
                     existing_group_authorities = set(
                         groups_by_ref.get(identity_group, {}).get(
@@ -2488,42 +2664,48 @@ async def audit_identity_coverage_from_structural_evidence(
                     ):
                         errors.append(
                             "named authority 与已有 group 权威冲突："
-                            f"{source_label}"
+                            f"{group_key}"
                         )
-                    authority_anchors = {
-                        str(authority.get("canonical_name") or "").strip(),
-                        *(
-                            str(alias or "").strip()
-                            for alias in authority.get("aliases") or []
-                        ),
-                    }
-                    if existing_group_authorities == {authority_id}:
-                        authority_anchors.update(
-                            str(label or "").strip()
-                            for label in groups_by_ref.get(
-                                identity_group, {}
-                            ).get("source_labels") or []
+                    authority_anchors = set(
+                        str(value).strip()
+                        for value in item.get("proof_anchors") or []
+                        if str(value).strip()
+                    )
+                    proof_kind = str(item.get("proof_kind") or "")
+                    bound_group_proof = bool(
+                        proof_kind == "existing_bound_group"
+                        and existing_group_authorities == {authority_id}
+                        and evidence_id in matching_group_evidence_ids(
+                            group_key, identity_group
                         )
-                    if not any(
-                        anchor and anchor in evidence_text
-                        for anchor in authority_anchors
-                    ):
+                    )
+                    label_authority_proof = bool(
+                        proof_kind == "identity_key_registered_authority"
+                        and source_label in authority_anchors
+                        and source_label
+                        in str(evidence.get("text") or "")
+                        and source_label
+                        in {
+                            str(authority.get("canonical_name") or "").strip(),
+                            *(
+                                str(alias or "").strip()
+                                for alias in authority.get("aliases") or []
+                            ),
+                        }
+                    )
+                    if not (bound_group_proof or label_authority_proof):
                         errors.append(
                             "named group 缺少 owned authority 锚点："
-                            f"{source_label}"
+                            f"{group_key}"
                         )
                 named_groups.add(identity_group)
                 named_authorities_by_group.setdefault(
                     identity_group, set()
                 ).add(authority_id)
             else:
+                if item.get("authority_id") or item.get("canonical_name"):
+                    errors.append(f"functional 携带权威：{group_key}")
                 functional_groups.add(identity_group)
-        missing_labels = allowed - seen_labels
-        if missing_labels:
-            errors.append(
-                "结构人物 coverage 缺少未决引用："
-                + ",".join(sorted(missing_labels))
-            )
         for identity_group, authority_ids in named_authorities_by_group.items():
             if len(authority_ids) > 1:
                 errors.append(
@@ -2548,7 +2730,7 @@ async def audit_identity_coverage_from_structural_evidence(
         model_type=StructuralIdentityCoverageResponse,
         validate=validate_response,
         operation_id=(
-            f"screenplay.identity.coverage.v5:{episode_no}:"
+            f"screenplay.identity.coverage.v6:{episode_no}:"
             + evidence_repository.content_hash({
                 "contract_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
                 "provider": coverage_provider,
@@ -2577,6 +2759,12 @@ async def audit_identity_coverage_from_structural_evidence(
             "schema_hash": evidence_repository.content_hash(
                 coverage_schema
             ),
+            "decision_catalog_hash": evidence_repository.content_hash(
+                coverage_decision_projection
+            ),
+            "evidence_catalog_hash": evidence_repository.content_hash(
+                coverage_evidence_projection
+            ),
             "disable_provider_retries": True,
             "disable_provider_candidate_fallback": True,
             "disable_reasoning_fallback": True,
@@ -2591,13 +2779,17 @@ async def audit_identity_coverage_from_structural_evidence(
         response_format=coverage_response_format,
         require_response_format=True,
     )
+    selected_decisions = [
+        decision_by_id[str(response.decisions[group_key])]
+        for group_key in coverage_group_keys
+    ]
     existing = {
         (str(item.get("source_label") or ""), str(item.get("identity_group") or ""))
         for item in candidates
     }
     additions: list[dict] = []
     new_group_members: dict[str, set[str]] = {}
-    for decision in response.characters:
+    for decision in selected_decisions:
         raw_group = str(decision.get("identity_group_ref") or "").strip()
         label = str(decision.get("source_label") or "").strip()
         if raw_group.startswith("new:") and label:
@@ -2622,12 +2814,7 @@ async def audit_identity_coverage_from_structural_evidence(
         )
         for raw_group, labels in new_group_members.items()
     }
-    for item in response.characters:
-        raw = (
-            item
-            if isinstance(item, dict)
-            else item.model_dump(mode="json")
-        )
+    for raw in selected_decisions:
         label = str(raw.get("source_label") or "").strip()
         typed_evidence = structural_by_key.get(label) or []
         if not label or not typed_evidence:
@@ -2654,6 +2841,24 @@ async def audit_identity_coverage_from_structural_evidence(
             if str(source_id) in source_by_id
         }, key=lambda source_id: source_order[source_id])
         source_segment_id = source_ids[0] if source_ids else ""
+        evidence_record = evidence_by_id.get(
+            str(raw.get("evidence_id") or ""), {}
+        )
+        evidence_text = str(evidence_record.get("text") or "")
+        proof_anchors = [
+            str(value)
+            for value in raw.get("proof_anchors") or []
+            if str(value)
+        ]
+        bounded_evidence = (
+            _bounded_owned_identity_evidence(
+                evidence_text,
+                anchors=proof_anchors,
+                max_chars=80,
+            )
+            if identity_kind == "named" and proof_anchors
+            else evidence_text.strip()[:80]
+        )
         additions.append({
             "name": canonical_name or label,
             "source_label": label,
@@ -2661,7 +2866,7 @@ async def audit_identity_coverage_from_structural_evidence(
             "identity_group": group,
             "authority_id": authority_id if identity_kind == "named" else "",
             "kind": "mentioned" if usages == {"mentioned"} else "onscreen",
-            "evidence": str(raw.get("evidence") or ""),
+            "evidence": bounded_evidence,
             "future_evidence": "",
             "source_segment_ids": source_ids,
             "source_segment_id": source_segment_id,
@@ -2917,7 +3122,7 @@ def screenplay_identity_resolution_is_current_for_scope(
 
 
 _STRUCTURAL_IDENTITY_RECEIPT_VERSION = (
-    "screenplay-identity-structural-resolution-receipt.v1"
+    "screenplay-identity-structural-resolution-receipt.v2"
 )
 
 

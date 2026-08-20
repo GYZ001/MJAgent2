@@ -123,6 +123,90 @@ def _future_identity_wire(
     }
 
 
+def _coverage_identity_wire(
+    characters: list[dict],
+    *,
+    provider_schema: dict,
+    messages: list[dict] | None = None,
+) -> dict:
+    decision_properties = provider_schema["properties"]["decisions"][
+        "properties"
+    ]
+    decision_catalog: dict[str, dict] = {}
+    group_labels: dict[str, str] = {}
+    if messages:
+        prompt = str(messages[0].get("content") or "")
+        group_marker = "未决引用目录"
+        evidence_marker = "\nowned SRC 证据目录"
+        decision_marker = "可选决议目录"
+        rules_marker = "\n规则："
+        if group_marker in prompt and evidence_marker in prompt:
+            raw_groups = prompt.split(group_marker, 1)[1]
+            raw_groups = raw_groups.split("\n", 1)[1]
+            raw_groups = raw_groups.split(evidence_marker, 1)[0]
+            group_labels = {
+                str(item["group_key"]): str(item["source_label"])
+                for item in json.loads(raw_groups)
+            }
+        if decision_marker in prompt and rules_marker in prompt:
+            raw_catalog = prompt.split(decision_marker, 1)[1]
+            raw_catalog = raw_catalog.split("\n", 1)[1]
+            raw_catalog = raw_catalog.split(rules_marker, 1)[0]
+            decision_catalog = {
+                str(item["decision_id"]): item
+                for item in json.loads(raw_catalog)
+            }
+    desired_by_label = {
+        str(item.get("source_label") or item.get("name") or ""): item
+        for item in characters
+    }
+    decisions: dict[str, str] = {}
+    for group_key, decision_schema in decision_properties.items():
+        options = list(decision_schema["enum"])
+        desired = desired_by_label.get(group_labels.get(group_key, ""), {})
+        desired_kind = str(desired.get("identity_kind") or "functional")
+        desired_name = str(
+            desired.get("canonical_name") or desired.get("name") or ""
+        )
+        desired_group = str(desired.get("identity_group_ref") or "")
+        selected = next(
+            (
+                option for option in options
+                if (
+                    desired_kind == "named"
+                    and decision_catalog.get(option, {}).get("identity_kind")
+                    == "named"
+                    and (
+                        not desired_name
+                        or decision_catalog.get(option, {}).get(
+                            "canonical_name"
+                        ) == desired_name
+                    )
+                    and (
+                        not desired_group
+                        or decision_catalog.get(option, {}).get(
+                            "identity_group_ref"
+                        ) == desired_group
+                    )
+                )
+            ),
+            "",
+        )
+        if not selected:
+            selected = next(
+                option for option in options
+                if str(option).startswith("F:")
+                and (
+                    not desired_group
+                    or decision_catalog.get(option, {}).get(
+                        "identity_group_ref"
+                    ) == desired_group
+                )
+            )
+        decisions[group_key] = selected
+    return {"decisions": decisions}
+
+
 def _identity_wire_for_call(
     kwargs: dict,
     characters: list[dict],
@@ -153,6 +237,14 @@ def _identity_wire_for_call(
             provider_schema=provider_schema,
             evidence_text_by_id=evidence_text_by_id,
         )
+    if phase == "coverage":
+        return _coverage_identity_wire(
+            characters,
+            provider_schema=kwargs["response_format"]["json_schema"][
+                "schema"
+            ],
+            messages=messages,
+        )
     raise AssertionError(f"unexpected identity phase: {phase}")
 
 
@@ -178,14 +270,14 @@ def test_structural_identity_audit_accepts_typed_blueprint_key(
         seen["prompt"] = messages[0]["content"]
         seen["operation_id"] = kwargs["operation_id"]
         seen["kwargs"] = kwargs
-        return type("Response", (), {
-            "characters": [{
+        return portraits.StructuralIdentityCoverageResponse.model_validate(
+            _coverage_identity_wire([{
                 "source_label": "北区杂役处未知闯入者",
                 "identity_kind": "functional",
-                "identity_group_ref": "new:test",
-                "evidence": "该声音与踹门动作由同一 owned SRC 支持",
-            }],
-        })()
+            }], provider_schema=kwargs["response_format"]["json_schema"][
+                "schema"
+            ], messages=messages)
+        )
 
     monkeypatch.setattr(
         portraits.model_gateway,
@@ -214,8 +306,8 @@ def test_structural_identity_audit_accepts_typed_blueprint_key(
 
     assert audited[0]["source_label"] == "北区杂役处未知闯入者"
     assert audited[0]["identity_kind"] == "functional"
-    assert seen["operation_id"].startswith("screenplay.identity.coverage.v5:")
-    assert "逐字复用未决结构证据中的 identity_key" in str(seen["prompt"])
+    assert seen["operation_id"].startswith("screenplay.identity.coverage.v6:")
+    assert "每个不透明 decision_id 已绑定" in str(seen["prompt"])
     kwargs = seen["kwargs"]
     assert kwargs["model_type"] is portraits.StructuralIdentityCoverageResponse
     assert kwargs["format_retry_limit"] == 0
@@ -230,11 +322,13 @@ def test_structural_identity_audit_accepts_typed_blueprint_key(
 
 def test_structural_identity_coverage_schema_is_closed_and_provider_safe(
 ) -> None:
-    labels = ["未知求救者", "被困同伴"]
+    group_keys = ["I001", "I002"]
     local_schema = portraits._structural_identity_coverage_schema(
-        labels,
-        authority_ids=["bible:王有材"],
-        identity_group_refs=["current-1:F1", "new:test"],
+        group_keys,
+        decision_ids_by_group={
+            "I001": ["F:I001:one", "K:I001:known"],
+            "I002": ["F:I002:two"],
+        },
     )
     local_before = json.loads(json.dumps(local_schema, ensure_ascii=False))
     response_format = (
@@ -244,43 +338,21 @@ def test_structural_identity_coverage_schema_is_closed_and_provider_safe(
     )
 
     assert local_schema == local_before
-    assert local_schema["required"] == ["named", "functional"]
-    assert local_schema["properties"]["named"]["maxItems"] == 2
-    assert local_schema["properties"]["functional"]["maxItems"] == 2
-    local_named = local_schema["$defs"][
-        "StructuralNamedIdentityCoverageCandidate"
-    ]
-    local_functional = local_schema["$defs"][
-        "StructuralFunctionalIdentityCoverageCandidate"
-    ]
-    assert local_named["additionalProperties"] is False
-    assert local_functional["additionalProperties"] is False
-    assert set(local_named["required"]) == {
-        "source_label",
-        "authority_id",
-        "identity_group_ref",
-        "evidence",
-    }
-    assert set(local_functional["required"]) == {
-        "source_label", "identity_group_ref", "evidence",
-    }
-    assert local_named["properties"]["source_label"]["enum"] == labels
-    assert local_named["properties"]["authority_id"]["enum"] == [
-        "bible:王有材"
+    assert local_schema["required"] == ["decisions"]
+    decisions = local_schema["properties"]["decisions"]
+    assert decisions["additionalProperties"] is False
+    assert decisions["required"] == group_keys
+    assert decisions["properties"]["I001"]["enum"] == [
+        "F:I001:one", "K:I001:known",
     ]
 
     assert response_format["type"] == "json_schema"
     assert response_format["json_schema"]["strict"] is True
     provider_schema = response_format["json_schema"]["schema"]
-    assert provider_schema["required"] == ["named", "functional"]
-    provider_candidate = provider_schema["$defs"][
-        "StructuralNamedIdentityCoverageCandidate"
-    ]
-    assert provider_candidate["additionalProperties"] is False
-    assert set(provider_candidate["required"]) == set(
-        provider_candidate["properties"]
+    assert provider_schema == local_schema
+    assert response_format["json_schema"]["name"] == (
+        "screenplay_structural_identity_coverage_v6"
     )
-    assert provider_candidate["properties"]["source_label"]["enum"] == labels
     provider_keywords: set[str] = set()
 
     def collect(schema_node: dict) -> None:
