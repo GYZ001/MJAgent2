@@ -351,8 +351,8 @@ def test_scene_shard_semantic_review_schema_binds_exact_chunk_keys() -> None:
     related_schema = finding_properties["related_unit_keys"]
     assert related_schema["items"]["enum"] == unit_keys
     assert related_schema["maxItems"] == 1
-    assert related_schema["uniqueItems"] is True
-    assert finding_properties["violation_kinds"]["uniqueItems"] is True
+    assert "uniqueItems" not in related_schema
+    assert "uniqueItems" not in finding_properties["violation_kinds"]
     assert schema["properties"]["findings"]["maxItems"] == 6
     assert response_format["type"] == "json_schema"
     assert response_format["json_schema"]["strict"] is True

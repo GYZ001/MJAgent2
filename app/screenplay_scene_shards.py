@@ -4546,8 +4546,6 @@ def _scene_shard_semantic_review_schema(
     related_schema = finding_properties["related_unit_keys"]
     related_schema["items"]["enum"] = known_unit_keys
     related_schema["maxItems"] = 1
-    related_schema["uniqueItems"] = True
-    finding_properties["violation_kinds"]["uniqueItems"] = True
     findings_schema = schema["properties"]["findings"]
     findings_schema["maxItems"] = (
         len(known_unit_keys) * len(SCREENPLAY_SCENE_SEMANTIC_FINDING_CODES)
