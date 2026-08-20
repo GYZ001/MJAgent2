@@ -298,6 +298,15 @@ async def adjudicate_screenplay_ir_identities(
     persist_new_resolutions: bool = True,
 ) -> ScreenplayGenerationIR:
     """Resolve only semantic cases that exact structural binding cannot decide."""
+    from app.portraits import screenplay_character_resolutions_for_source
+
+    episode["character_resolutions"] = (
+        screenplay_character_resolutions_for_source(
+            list(episode.get("character_resolutions") or []),
+            episode_no=int(episode.get("episode_no") or candidate.episode_no or 0),
+            source_text=source_text,
+        )
+    )
     deterministic_audit: list[dict[str, Any]] = []
     _changes, issues = prepare_ir_identity_authorities(
         candidate,
@@ -594,6 +603,15 @@ async def adjudicate_screenplay_document_identities(
     This adapter intentionally never sends the full screenplay or full chapter.
     It projects identity-bearing fields, then reuses the owned-SRC adjudicator.
     """
+    from app.portraits import screenplay_character_resolutions_for_source
+
+    episode["character_resolutions"] = (
+        screenplay_character_resolutions_for_source(
+            list(episode.get("character_resolutions") or []),
+            episode_no=int(episode.get("episode_no") or screenplay.episode_no or 0),
+            source_text=source_text,
+        )
+    )
     labels: list[str] = []
 
     def add(value: Any) -> None:

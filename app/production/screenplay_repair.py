@@ -3501,9 +3501,17 @@ async def run_screenplay_production(
 ) -> EpisodeScreenplay:
     """一次 Baseline + 局部修复直到证书发布（或 WAITING_INPUT）。"""
     from app.harness.contracts import get_contract
+    from app.portraits import screenplay_character_resolutions_for_source
     from app.stages import generate_screenplay_baseline
 
     conn = get_conn()
+    episode["character_resolutions"] = (
+        screenplay_character_resolutions_for_source(
+            list(episode.get("character_resolutions") or []),
+            episode_no=int(episode.get("episode_no") or 0),
+            source_text=source_text,
+        )
+    )
     if not isinstance(episode.get("authorized_source_chapters"), dict):
         from app.production.screenplay_authority import (
             screenplay_authorized_source_chapters,

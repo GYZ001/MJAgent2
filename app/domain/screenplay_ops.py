@@ -1136,7 +1136,7 @@ async def _screenplay_task(
                     load_screenplay_character_resolutions(conn, episode_id),
                     preflight_result.get("resolutions") or [],
                 ),
-                episode_no=int(ep.get("episode_no") or 0),
+                episode_no=int(ep_data.get("episode_no") or 0),
                 source_text=source_text,
             )
         )

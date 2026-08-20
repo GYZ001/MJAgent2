@@ -6697,6 +6697,92 @@ def test_persist_keeps_stored_bytes_for_two_valid_receipt_subsets() -> None:
     ]
 
 
+def test_persist_repairs_invalid_adjudication_receipt_and_keeps_valid_bytes(
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE episodes(id TEXT PRIMARY KEY, "
+        "screenplay_character_resolutions TEXT NOT NULL)"
+    )
+    source_text = "守卫守在山门。\n\n守卫走到殿前。"
+    source_hash = portraits.evidence_repository.content_hash(source_text)
+    scope = portraits.screenplay_identity_scope_fingerprint(1, source_text)
+
+    def adjudicated(source_id: str) -> dict:
+        receipt_payload = {
+            "version": "screenplay-ir-identity-adjudicator.v2",
+            "source_hash": source_hash,
+            "source_segment_ids": [source_id],
+        }
+        return {
+            "source_label": "守卫",
+            "canonical_name": "守卫",
+            "resolution": "functional_identity",
+            "identity_group": "functional:guard",
+            "authority_id": "functional:guard",
+            "source_instance_key": "functional:guard",
+            "identity_scope_fingerprint": scope,
+            "decision_provenance": (
+                portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
+            ),
+            "decision_contract_version": (
+                portraits.FUTURE_IDENTITY_DECISION_VERSION
+            ),
+            "structural_identity_policy_version": (
+                portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+            ),
+            "source_label_provenance": (
+                portraits.IDENTITY_ADJUDICATION_SOURCE_PROVENANCE
+            ),
+            "decision_source": "screenplay-ir-identity-adjudicator.v2",
+            "evidence_source_ids": [source_id],
+            "source_segment_ids": [source_id],
+            "identity_adjudication_receipt": {
+                **receipt_payload,
+                "hash": portraits.evidence_repository.content_hash(
+                    receipt_payload
+                ),
+            },
+        }
+
+    first = adjudicated("SRC0001")
+    bad = json.loads(json.dumps(first, ensure_ascii=False))
+    bad["identity_adjudication_receipt"]["hash"] = "bad"
+    conn.execute(
+        "INSERT INTO episodes VALUES(?,?)",
+        ("ep1", json.dumps([bad], ensure_ascii=False)),
+    )
+    conn.commit()
+
+    repaired = portraits.persist_screenplay_character_resolutions(
+        conn, "ep1", [first]
+    )
+    assert repaired[0]["identity_adjudication_receipt"] == first[
+        "identity_adjudication_receipt"
+    ]
+    assert portraits.load_screenplay_character_resolutions_for_source(
+        conn,
+        "ep1",
+        episode_no=1,
+        source_text=source_text,
+    ) == repaired
+
+    stored_json = conn.execute(
+        "SELECT screenplay_character_resolutions FROM episodes WHERE id='ep1'"
+    ).fetchone()[0]
+    second = adjudicated("SRC0002")
+    persisted = portraits.persist_screenplay_character_resolutions(
+        conn, "ep1", [second]
+    )
+    assert conn.execute(
+        "SELECT screenplay_character_resolutions FROM episodes WHERE id='ep1'"
+    ).fetchone()[0] == stored_json
+    assert persisted[0]["identity_adjudication_receipt"] == first[
+        "identity_adjudication_receipt"
+    ]
+
+
 def test_legacy_generic_cache_rejects_tampered_typed_v2_bundle(
     monkeypatch,
 ) -> None:

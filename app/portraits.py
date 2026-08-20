@@ -2519,11 +2519,20 @@ def _validate_current_identity_receipt_bundle(
         for value in receipts
         if str(value.get("source_segment_id") or "").strip()
     ))
-    actual_source_ids = [
-        str(value or "").strip()
-        for value in candidate.get("source_segment_ids") or []
-        if str(value or "").strip()
-    ]
+    raw_source_ids = candidate.get("source_segment_ids")
+    if (
+        not isinstance(raw_source_ids, list)
+        or not raw_source_ids
+        or any(
+            not isinstance(value, str)
+            or not value.strip()
+            or value != value.strip()
+            for value in raw_source_ids
+        )
+        or len(raw_source_ids) != len(set(raw_source_ids))
+    ):
+        invalid("source_segment_ids 必须为 exact nonempty unique string list")
+    actual_source_ids = list(raw_source_ids)
     if actual_source_ids != expected_source_ids:
         invalid("source_segment_ids 投影不一致")
     primary_source_id = str(current_receipt.get("source_segment_id") or "")
@@ -4568,37 +4577,43 @@ def _identity_adjudication_receipt_is_valid(
     receipt = value.get("identity_adjudication_receipt")
     if not isinstance(receipt, dict):
         return False
-    source_ids = receipt.get("source_segment_ids")
+
+    def exact_source_ids(raw: object) -> list[str] | None:
+        if (
+            not isinstance(raw, list)
+            or not raw
+            or any(
+                not isinstance(item, str)
+                or not item.strip()
+                or item != item.strip()
+                for item in raw
+            )
+        ):
+            return None
+        normalized = list(raw)
+        return normalized if len(normalized) == len(set(normalized)) else None
+
+    source_ids = exact_source_ids(receipt.get("source_segment_ids"))
+    item_source_ids = exact_source_ids(value.get("source_segment_ids"))
+    evidence_source_ids = exact_source_ids(value.get("evidence_source_ids"))
     if (
         receipt.get("version") != "screenplay-ir-identity-adjudicator.v2"
-        or not isinstance(source_ids, list)
-        or not source_ids
-        or any(not isinstance(item, str) or not item.strip() for item in source_ids)
-        or len(source_ids) != len(set(source_ids))
+        or source_ids is None
+        or item_source_ids is None
+        or evidence_source_ids is None
     ):
         return False
-    canonical_ids = [item.strip() for item in source_ids]
     payload = {
         "version": receipt["version"],
         "source_hash": str(receipt.get("source_hash") or "").strip(),
-        "source_segment_ids": canonical_ids,
+        "source_segment_ids": source_ids,
     }
     if (
         not payload["source_hash"]
         or str(receipt.get("hash") or "").strip()
         != evidence_repository.content_hash(payload)
-        or canonical_ids
-        != [
-            str(item).strip()
-            for item in value.get("source_segment_ids") or []
-            if str(item).strip()
-        ]
-        or canonical_ids
-        != [
-            str(item).strip()
-            for item in value.get("evidence_source_ids") or []
-            if str(item).strip()
-        ]
+        or source_ids != item_source_ids
+        or source_ids != evidence_source_ids
     ):
         return False
     return bool(
@@ -6583,6 +6598,18 @@ def persist_screenplay_character_resolutions(
     )
 
     def _receipt_semantic_key(item: dict) -> tuple[str, str]:
+        if str(item.get("source_label_provenance") or "").strip() == (
+            IDENTITY_ADJUDICATION_SOURCE_PROVENANCE
+        ):
+            return (
+                "adjudication_v2"
+                if _identity_adjudication_receipt_is_valid(
+                    item,
+                    source_text=None,
+                )
+                else "invalid_adjudication",
+                "",
+            )
         try:
             bundle = _validate_current_identity_receipt_bundle(
                 item,

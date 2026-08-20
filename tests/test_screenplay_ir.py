@@ -1640,6 +1640,7 @@ def test_v14_compiler_context_actor_gets_structural_authority() -> None:
         "canonical_name": "旧友",
         "resolution": "functional_identity",
         "identity_group": "episode:old-friend",
+        "decision_provenance": "manual",
     })
     payload["identities"][0]["authority_id"] = "bible:谷言"
     payload["identities"][1]["authority_id"] = friend_resolution["authority_id"]
@@ -2335,6 +2336,7 @@ def test_identity_adjudication_skips_ai_when_exact_authorities_are_complete(
         "canonical_name": "旧友",
         "resolution": "functional_identity",
         "identity_group": "episode:old-friend",
+        "decision_provenance": "manual",
     })
     payload["identities"][0]["authority_id"] = "bible:谷言"
     payload["identities"][1]["authority_id"] = friend_resolution["authority_id"]
@@ -2377,6 +2379,7 @@ def test_identity_adjudication_normalizes_backend_owned_narrator_without_ai(
         "canonical_name": "旧友",
         "resolution": "functional_identity",
         "identity_group": "episode:old-friend",
+        "decision_provenance": "manual",
     })
     payload["identities"][0]["authority_id"] = "bible:谷言"
     payload["identities"][1]["authority_id"] = friend_resolution["authority_id"]
@@ -2484,6 +2487,7 @@ def test_identity_adjudication_prunes_unreferenced_identity_without_ai(
         "canonical_name": "旧友",
         "resolution": "functional_identity",
         "identity_group": "episode:old-friend",
+        "decision_provenance": "manual",
     })
     payload["identities"][1]["authority_id"] = friend_resolution["authority_id"]
     payload["identities"].append({
@@ -2533,6 +2537,7 @@ def test_identity_adjudication_calls_ai_once_for_conflicting_exact_authorities(
         "canonical_name": "旧友",
         "resolution": "functional_identity",
         "identity_group": "episode:old-friend",
+        "decision_provenance": "manual",
     })
     visitor = normalize_character_resolution({
         "source_label": "来人",
@@ -2821,6 +2826,7 @@ def test_document_identity_adjudication_uses_only_source_backed_typed_reference(
         "canonical_name": "旧友",
         "resolution": "functional_identity",
         "identity_group": "episode:old-friend",
+        "decision_provenance": "manual",
     })
     episode = {
         "episode_no": 1,

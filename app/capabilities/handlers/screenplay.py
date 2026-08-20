@@ -128,10 +128,18 @@ async def delete(args: I.ScreenplayDeleteInput) -> CommandResult:
 
 async def patch(args: I.ScreenplayPatchInput) -> CommandResult:
     from app.db import get_conn
-    from app.portraits import load_screenplay_character_resolutions
+    from app.domain.screenplay_ops import _episode_source_text
+    from app.portraits import load_screenplay_character_resolutions_for_source
     from app.production.patch import PatchOperation, PatchRequest, apply_screenplay_patch
     from app.capabilities.handlers.common import failed
 
+    conn = get_conn()
+    episode = conn.execute(
+        "SELECT * FROM episodes WHERE id=?", (args.episode_id,)
+    ).fetchone()
+    if episode is None:
+        return failed("episode not found", error_code="episode_not_found")
+    source_text = _episode_source_text(conn, episode)
     result = apply_screenplay_patch(
         PatchRequest(
             production_revision_id=args.production_revision_id,
@@ -143,8 +151,11 @@ async def patch(args: I.ScreenplayPatchInput) -> CommandResult:
             reason=args.reason,
         ),
         episode_id=args.episode_id,
-        character_resolutions=load_screenplay_character_resolutions(
-            get_conn(), args.episode_id,
+        character_resolutions=load_screenplay_character_resolutions_for_source(
+            conn,
+            args.episode_id,
+            episode_no=int(episode["episode_no"] or 0),
+            source_text=source_text,
         ),
     )
     if not result.ok:
