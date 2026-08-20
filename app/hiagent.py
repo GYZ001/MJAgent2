@@ -404,6 +404,32 @@ def _transport_replay_state(exc: httpx.HTTPError) -> tuple[str, bool]:
     return "unknown", False
 
 
+def _stream_timeout_replay_state(
+    exc: httpx.HTTPError | None, received_chars: int
+) -> tuple[str, bool]:
+    """Judge streaming-timeout replay safety by delivered-byte evidence.
+
+    For a *streaming* completion the authoritative fact is whether any byte was
+    ever consumed downstream. When nothing was received (received_chars == 0)
+    the provider never started producing and nothing was consumed, so a resend
+    is equivalent to the first send → replay-safe / not_sent. Once any token was
+    consumed the outcome is uncertain (possible partial side effect) and we stay
+    conservative → unknown / not replay-safe.
+
+    Connect/Pool/ConnectError keep their existing not_sent/replay_safe=True
+    semantics regardless of received_chars (nothing could have been sent). Only
+    read/unknown transport timeouts and the total-duration asyncio timeout
+    (exc is None) are decided by received_chars.
+    """
+    if exc is not None:
+        delivery_state, replay_safe = _transport_replay_state(exc)
+        if replay_safe:
+            return delivery_state, True
+    if received_chars == 0:
+        return "not_sent", True
+    return "unknown", False
+
+
 def _transport_provider_error(
     exc: httpx.HTTPError,
     message: str,
