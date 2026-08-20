@@ -1128,10 +1128,17 @@ async def _screenplay_task(
         from app.portraits import (
             load_screenplay_character_resolutions,
             merge_screenplay_character_resolutions,
+            screenplay_character_resolutions_for_source,
         )
-        ep_data["character_resolutions"] = merge_screenplay_character_resolutions(
-            load_screenplay_character_resolutions(conn, episode_id),
-            preflight_result.get("resolutions") or [],
+        ep_data["character_resolutions"] = (
+            screenplay_character_resolutions_for_source(
+                merge_screenplay_character_resolutions(
+                    load_screenplay_character_resolutions(conn, episode_id),
+                    preflight_result.get("resolutions") or [],
+                ),
+                episode_no=int(ep.get("episode_no") or 0),
+                source_text=source_text,
+            )
         )
         # Other episodes can add a character while this run is in discovery.
         # Always bind generation to the latest persisted Bible authority.
@@ -2537,7 +2544,7 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
     )
     from app.portraits import (
         apply_screenplay_character_resolutions,
-        load_screenplay_character_resolutions,
+        load_screenplay_character_resolutions_for_source,
         screenplay_unknown_identity_errors,
     )
     from app.validators import normalize_screenplay_candidate
@@ -2583,7 +2590,12 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
     conn = get_conn()
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     source_text = _episode_source_text(conn, ep)
-    resolutions = load_screenplay_character_resolutions(conn, episode_id)
+    resolutions = load_screenplay_character_resolutions_for_source(
+        conn,
+        episode_id,
+        episode_no=int(ep.get("episode_no") or 0),
+        source_text=source_text,
+    )
     apply_screenplay_character_resolutions(instance, resolutions)
     instance = normalize_screenplay_candidate(instance)
     bible = _project_bible_or_placeholder(project)
@@ -2604,7 +2616,12 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
                 "message": "剧本未决人物身份仲裁未通过",
                 "errors": [str(exc)],
             }) from exc
-        resolutions = load_screenplay_character_resolutions(conn, episode_id)
+        resolutions = load_screenplay_character_resolutions_for_source(
+            conn,
+            episode_id,
+            episode_no=int(ep.get("episode_no") or 0),
+            source_text=source_text,
+        )
         apply_screenplay_character_resolutions(instance, resolutions)
         instance = normalize_screenplay_candidate(instance)
         project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
@@ -3302,14 +3319,20 @@ def preview_screenplay_edit_impact(episode_id: str, body: dict):
     )
     from app.portraits import (
         apply_screenplay_character_resolutions,
-        load_screenplay_character_resolutions,
+        load_screenplay_character_resolutions_for_source,
         screenplay_unknown_identity_errors,
     )
     from app.validators import normalize_screenplay_candidate
 
     instance = normalize_screenplay_candidate(instance)
     conn = get_conn()
-    resolutions = load_screenplay_character_resolutions(conn, episode_id)
+    source_text = _episode_source_text(conn, ep)
+    resolutions = load_screenplay_character_resolutions_for_source(
+        conn,
+        episode_id,
+        episode_no=int(ep.get("episode_no") or 0),
+        source_text=source_text,
+    )
     apply_screenplay_character_resolutions(instance, resolutions)
     instance = normalize_screenplay_candidate(instance)
     current_script = _load_screenplay(ep)
@@ -3328,7 +3351,7 @@ def preview_screenplay_edit_impact(episode_id: str, body: dict):
         qa_issues, qa_evaluation = run_screenplay_qa(
             instance,
             bible=bible,
-            source_text=_episode_source_text(conn, ep),
+            source_text=source_text,
             episode={
                 **ep,
                 "character_resolutions": resolutions,
@@ -3440,7 +3463,7 @@ async def edit_screenplay(episode_id: str, body: dict):
     )
     from app.portraits import (
         apply_screenplay_character_resolutions,
-        load_screenplay_character_resolutions,
+        load_screenplay_character_resolutions_for_source,
         screenplay_unknown_identity_errors,
     )
     from app.validators import normalize_screenplay_candidate
@@ -3451,7 +3474,12 @@ async def edit_screenplay(episode_id: str, body: dict):
     normalized_old = normalize_screenplay_candidate(old_script) if old_script else None
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     source_text = _episode_source_text(conn, ep)
-    resolutions = load_screenplay_character_resolutions(conn, episode_id)
+    resolutions = load_screenplay_character_resolutions_for_source(
+        conn,
+        episode_id,
+        episode_no=int(ep.get("episode_no") or 0),
+        source_text=source_text,
+    )
     apply_screenplay_character_resolutions(instance, resolutions)
     instance = normalize_screenplay_candidate(instance)
     bible = _project_bible_or_placeholder(project)
@@ -3473,7 +3501,12 @@ async def edit_screenplay(episode_id: str, body: dict):
                 "message": "剧本未决人物身份仲裁未通过",
                 "errors": [str(exc)],
             }) from exc
-        resolutions = load_screenplay_character_resolutions(conn, episode_id)
+        resolutions = load_screenplay_character_resolutions_for_source(
+            conn,
+            episode_id,
+            episode_no=int(ep.get("episode_no") or 0),
+            source_text=source_text,
+        )
         apply_screenplay_character_resolutions(instance, resolutions)
         instance = normalize_screenplay_candidate(instance)
         # 人物预检可能新增真名角色卡，QA 必须使用最新 Bible。

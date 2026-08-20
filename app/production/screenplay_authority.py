@@ -1327,10 +1327,15 @@ def _compile_validated_v7_source_projection(
     bible = Bible.model_validate(bible_projection or {})
     _records, source_text = _source_records(conn, episode)
     episode_input = dict(episode)
-    from app.portraits import load_screenplay_character_resolutions
+    from app.portraits import load_screenplay_character_resolutions_for_source
 
     episode_input["character_resolutions"] = (
-        load_screenplay_character_resolutions(conn, episode_id)
+        load_screenplay_character_resolutions_for_source(
+            conn,
+            episode_id,
+            episode_no=int(_episode_value(episode, "episode_no", 0) or 0),
+            source_text=source_text,
+        )
     )
     episode_input["authorized_source_chapters"] = (
         screenplay_authorized_source_chapters(episode_id, conn=conn)

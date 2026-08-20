@@ -8625,24 +8625,20 @@ async def _generate_screenplay_scene_sharded_baseline(
     from app.identity_authority import identity_authority_registry
     from app.portraits import (
         ensure_structural_identity_coverage,
-        screenplay_identity_resolution_is_current_for_source,
+        screenplay_character_resolutions_for_source,
     )
     from app.orchestration.state_machine import StateConflict
 
+    episode["character_resolutions"] = (
+        screenplay_character_resolutions_for_source(
+            list(episode.get("character_resolutions") or []),
+            episode_no=int(episode.get("episode_no") or 0),
+            source_text=source_text,
+        )
+    )
     authorities = identity_authority_registry(
         bible,
-        [
-            item
-            for item in (episode.get("character_resolutions") or [])
-            if (
-                isinstance(item, dict)
-                and screenplay_identity_resolution_is_current_for_source(
-                    item,
-                    episode_no=int(episode.get("episode_no") or 0),
-                    source_text=source_text,
-                )
-            )
-        ],
+        list(episode.get("character_resolutions") or []),
     )
     known_identity_labels = {
         str(value).strip()
@@ -8821,10 +8817,16 @@ async def _generate_screenplay_scene_sharded_baseline(
     )
 
     async def freeze_identity() -> tuple[list[Any], list[dict[str, Any]], str, str]:
+        current_resolutions = screenplay_character_resolutions_for_source(
+            list(episode.get("character_resolutions") or []),
+            episode_no=int(episode.get("episode_no") or 0),
+            source_text=source_text,
+        )
+        episode["character_resolutions"] = current_resolutions
         identities_value, registry_value, registry_hash_value = (
             build_frozen_identity_registry(
                 bible,
-                list(episode.get("character_resolutions") or []),
+                current_resolutions,
             )
         )
         from app.production.revision import get_active_production_revision
@@ -9061,6 +9063,15 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
     拆镜与执行字段延后到分镜阶段。先显式锁定"本集必保留关键台词/关键剧情点"，
     再写正文，从机制上阻止重要台词与剧情在压缩中被丢弃。
     """
+    from app.portraits import screenplay_character_resolutions_for_source
+
+    episode["character_resolutions"] = (
+        screenplay_character_resolutions_for_source(
+            list(episode.get("character_resolutions") or []),
+            episode_no=int(episode.get("episode_no") or 0),
+            source_text=source_text,
+        )
+    )
     narrative_blueprint = await _run_screenplay_workflow_step(
         "screenplay_blueprint",
         lambda: _generate_screenplay_narrative_blueprint(

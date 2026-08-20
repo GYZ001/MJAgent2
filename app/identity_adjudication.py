@@ -371,6 +371,32 @@ async def adjudicate_screenplay_ir_identities(
         )
 
     identities_by_key = {identity.key: identity for identity in candidate.identities}
+    from app.evidence import repository as evidence_repository
+    from app.portraits import (
+        AUTOMATIC_IDENTITY_DECISION_PROVENANCE,
+        FUTURE_IDENTITY_DECISION_VERSION,
+        IDENTITY_ADJUDICATION_SOURCE_PROVENANCE,
+        STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+        screenplay_identity_scope_fingerprint,
+    )
+
+    identity_scope_fingerprint = screenplay_identity_scope_fingerprint(
+        int(episode.get("episode_no") or candidate.episode_no or 0),
+        source_text,
+    )
+    source_hash = evidence_repository.content_hash(source_text)
+
+    def source_receipt(source_ids: list[str]) -> dict[str, Any]:
+        receipt_payload = {
+            "version": IDENTITY_ADJUDICATOR_VERSION,
+            "source_hash": source_hash,
+            "source_segment_ids": list(source_ids),
+        }
+        return {
+            **receipt_payload,
+            "hash": evidence_repository.content_hash(receipt_payload),
+        }
+
     new_resolutions: list[dict[str, Any]] = []
     for key, decision in decisions.items():
         identity = identities_by_key[key]
@@ -410,6 +436,21 @@ async def adjudicate_screenplay_ir_identities(
                 "evidence": decision.rationale[:160],
                 "evidence_source_ids": decision.evidence_source_ids,
                 "decision_source": IDENTITY_ADJUDICATOR_VERSION,
+                "decision_provenance": (
+                    AUTOMATIC_IDENTITY_DECISION_PROVENANCE
+                ),
+                "decision_contract_version": FUTURE_IDENTITY_DECISION_VERSION,
+                "structural_identity_policy_version": (
+                    STRUCTURAL_IDENTITY_COVERAGE_VERSION
+                ),
+                "identity_scope_fingerprint": identity_scope_fingerprint,
+                "source_label_provenance": (
+                    IDENTITY_ADJUDICATION_SOURCE_PROVENANCE
+                ),
+                "source_segment_ids": decision.evidence_source_ids,
+                "identity_adjudication_receipt": source_receipt(
+                    decision.evidence_source_ids
+                ),
             }))
             continue
         seed = {
@@ -451,6 +492,19 @@ async def adjudicate_screenplay_ir_identities(
             "evidence": decision.rationale[:160],
             "evidence_source_ids": decision.evidence_source_ids,
             "decision_source": IDENTITY_ADJUDICATOR_VERSION,
+            "decision_provenance": AUTOMATIC_IDENTITY_DECISION_PROVENANCE,
+            "decision_contract_version": FUTURE_IDENTITY_DECISION_VERSION,
+            "structural_identity_policy_version": (
+                STRUCTURAL_IDENTITY_COVERAGE_VERSION
+            ),
+            "identity_scope_fingerprint": identity_scope_fingerprint,
+            "source_label_provenance": (
+                IDENTITY_ADJUDICATION_SOURCE_PROVENANCE
+            ),
+            "source_segment_ids": decision.evidence_source_ids,
+            "identity_adjudication_receipt": source_receipt(
+                decision.evidence_source_ids
+            ),
         }))
 
     if new_resolutions:

@@ -74,6 +74,7 @@ CURRENT_IDENTITY_EVIDENCE_RECEIPT_VERSION = (
 )
 CURRENT_IDENTITY_LITERAL_PROVENANCE = "owned_current_literal.v1"
 CURRENT_IDENTITY_SYNTHETIC_PROVENANCE = "provider_synthetic_functional.v1"
+IDENTITY_ADJUDICATION_SOURCE_PROVENANCE = "owned_ir_identity_adjudication.v2"
 FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v10"
 STRUCTURAL_IDENTITY_COVERAGE_VERSION = (
     "screenplay-identity-structural-coverage.v6"
@@ -4505,6 +4506,15 @@ def screenplay_identity_resolution_is_current_for_source(
             ) is not None
         except ContentGenerationError:
             return False
+    if (
+        current
+        and provenance not in DURABLE_IDENTITY_DECISION_PROVENANCE
+        and label_provenance == IDENTITY_ADJUDICATION_SOURCE_PROVENANCE
+    ):
+        return _identity_adjudication_receipt_is_valid(
+            value,
+            source_text=source_text,
+        )
     return current
 
 
@@ -4539,7 +4549,62 @@ def screenplay_identity_resolution_is_current_for_scope(
             ) is not None
         except ContentGenerationError:
             return False
+    if (
+        current
+        and label_provenance == IDENTITY_ADJUDICATION_SOURCE_PROVENANCE
+    ):
+        return _identity_adjudication_receipt_is_valid(
+            value,
+            source_text=None,
+        )
     return current
+
+
+def _identity_adjudication_receipt_is_valid(
+    value: dict,
+    *,
+    source_text: str | None,
+) -> bool:
+    receipt = value.get("identity_adjudication_receipt")
+    if not isinstance(receipt, dict):
+        return False
+    source_ids = receipt.get("source_segment_ids")
+    if (
+        receipt.get("version") != "screenplay-ir-identity-adjudicator.v2"
+        or not isinstance(source_ids, list)
+        or not source_ids
+        or any(not isinstance(item, str) or not item.strip() for item in source_ids)
+        or len(source_ids) != len(set(source_ids))
+    ):
+        return False
+    canonical_ids = [item.strip() for item in source_ids]
+    payload = {
+        "version": receipt["version"],
+        "source_hash": str(receipt.get("source_hash") or "").strip(),
+        "source_segment_ids": canonical_ids,
+    }
+    if (
+        not payload["source_hash"]
+        or str(receipt.get("hash") or "").strip()
+        != evidence_repository.content_hash(payload)
+        or canonical_ids
+        != [
+            str(item).strip()
+            for item in value.get("source_segment_ids") or []
+            if str(item).strip()
+        ]
+        or canonical_ids
+        != [
+            str(item).strip()
+            for item in value.get("evidence_source_ids") or []
+            if str(item).strip()
+        ]
+    ):
+        return False
+    return bool(
+        source_text is None
+        or payload["source_hash"] == evidence_repository.content_hash(source_text)
+    )
 
 
 _STRUCTURAL_IDENTITY_RECEIPT_VERSION = (
@@ -6349,6 +6414,43 @@ def load_screenplay_character_resolutions(conn, episode_id: str) -> list[dict]:
     )
 
 
+def screenplay_character_resolutions_for_source(
+    resolutions: list[dict] | None,
+    *,
+    episode_no: int,
+    source_text: str,
+) -> list[dict]:
+    """Return the only resolution set downstream screenplay code may trust.
+
+    Durable manual/Bible decisions remain portable.  Automatic decisions are
+    admitted only when their aggregate/source epoch and, for RF11 current
+    identities, complete owned-evidence receipt bundle are current.
+    """
+    return [
+        item
+        for item in normalize_character_resolutions(resolutions)
+        if screenplay_identity_resolution_is_current_for_source(
+            item,
+            episode_no=episode_no,
+            source_text=source_text,
+        )
+    ]
+
+
+def load_screenplay_character_resolutions_for_source(
+    conn,
+    episode_id: str,
+    *,
+    episode_no: int,
+    source_text: str,
+) -> list[dict]:
+    return screenplay_character_resolutions_for_source(
+        load_screenplay_character_resolutions(conn, episode_id),
+        episode_no=episode_no,
+        source_text=source_text,
+    )
+
+
 def persist_screenplay_character_resolutions(
     conn,
     episode_id: str,
@@ -6920,14 +7022,13 @@ async def ensure_structural_identity_coverage(
             cached_resolutions = load_screenplay_character_resolutions(
                 conn, episode_id
             )
-            current_cached_resolutions = [
-                item
-                for item in cached_resolutions
-                if screenplay_identity_resolution_is_current_for_scope(
-                    item,
-                    identity_scope_fingerprint=identity_scope_fingerprint,
+            current_cached_resolutions = (
+                screenplay_character_resolutions_for_source(
+                    cached_resolutions,
+                    episode_no=episode_no,
+                    source_text=source_text,
                 )
-            ]
+            )
             expected_receipt = payload.get("materialized_resolution_receipt")
             try:
                 expected_candidate_hash = str(
@@ -6993,14 +7094,11 @@ async def ensure_structural_identity_coverage(
                         identity_scope_fingerprint
                     ),
                 )
-                persisted = [
-                    item
-                    for item in persisted
-                    if screenplay_identity_resolution_is_current_for_scope(
-                        item,
-                        identity_scope_fingerprint=identity_scope_fingerprint,
-                    )
-                ]
+                persisted = screenplay_character_resolutions_for_source(
+                    persisted,
+                    episode_no=episode_no,
+                    source_text=source_text,
+                )
                 if expected_receipt != _structural_identity_resolution_receipt(
                     persisted,
                     candidates=payload["candidates"],
@@ -7024,12 +7122,13 @@ async def ensure_structural_identity_coverage(
             invalid_cached_resolution_keys.update(required_keys)
     existing_coverage_resolutions = [
         item
-        for item in load_screenplay_character_resolutions(conn, episode_id)
-        if screenplay_identity_resolution_is_current_for_scope(
-            item,
-            identity_scope_fingerprint=identity_scope_fingerprint,
+        for item in load_screenplay_character_resolutions_for_source(
+            conn,
+            episode_id,
+            episode_no=episode_no,
+            source_text=source_text,
         )
-        and (
+        if (
             str(item.get("source_label") or "").strip(),
             str(item.get("identity_group") or "").strip(),
             str(item.get("identity_scope_fingerprint") or "").strip(),
@@ -7101,14 +7200,11 @@ async def ensure_structural_identity_coverage(
             ),
             retire_automatic_identity_keys=invalid_cached_resolution_keys,
         )
-        persisted = [
-            item
-            for item in persisted
-            if screenplay_identity_resolution_is_current_for_scope(
-                item,
-                identity_scope_fingerprint=identity_scope_fingerprint,
-            )
-        ]
+        persisted = screenplay_character_resolutions_for_source(
+            persisted,
+            episode_no=episode_no,
+            source_text=source_text,
+        )
         materialized_bible_names = verified_materialized_bible_names(audited)
         if write_guard:
             write_guard()
@@ -7203,14 +7299,11 @@ async def ensure_structural_identity_coverage(
         # card failure (or any downstream identity error) must never mint a
         # validated coverage Artifact with an empty receipt: that would turn
         # the next run into a false cache success and bypass the identity gate.
-        result["resolutions"] = [
-            item
-            for item in result.get("resolutions") or []
-            if screenplay_identity_resolution_is_current_for_scope(
-                item,
-                identity_scope_fingerprint=identity_scope_fingerprint,
-            )
-        ]
+        result["resolutions"] = screenplay_character_resolutions_for_source(
+            result.get("resolutions") or [],
+            episode_no=episode_no,
+            source_text=source_text,
+        )
         return result
     persisted = persist_screenplay_character_resolutions(
         conn,
@@ -7224,14 +7317,11 @@ async def ensure_structural_identity_coverage(
         retire_stale_identity_scope_fingerprint=identity_scope_fingerprint,
         retire_automatic_identity_keys=invalid_cached_resolution_keys,
     )
-    persisted = [
-        item
-        for item in persisted
-        if screenplay_identity_resolution_is_current_for_scope(
-            item,
-            identity_scope_fingerprint=identity_scope_fingerprint,
-        )
-    ]
+    persisted = screenplay_character_resolutions_for_source(
+        persisted,
+        episode_no=episode_no,
+        source_text=source_text,
+    )
     materialized_bible_names = verified_materialized_bible_names(audited)
     if write_guard:
         write_guard()

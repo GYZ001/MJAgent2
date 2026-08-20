@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from app import db, stages
+from app import db, portraits, stages
 from app import errors as app_errors
 from app import identity_adjudication
 from app.evidence import repository as evidence_repository
@@ -2625,6 +2625,22 @@ def test_identity_adjudication_creates_source_backed_functional_authority(
     assert episode["character_resolutions"][0]["evidence_source_ids"] == [
         "SRC0002"
     ]
+    adjudicated = episode["character_resolutions"][0]
+    assert portraits.screenplay_identity_resolution_is_current_for_source(
+        adjudicated,
+        episode_no=1,
+        source_text=SOURCE,
+    )
+    assert not portraits.screenplay_identity_resolution_is_current_for_source(
+        adjudicated,
+        episode_no=1,
+        source_text=SOURCE + "\n来源变更。",
+    )
+    assert portraits.screenplay_character_resolutions_for_source(
+        [adjudicated],
+        episode_no=1,
+        source_text=SOURCE,
+    ) == [adjudicated]
 
 
 def test_identity_adjudication_preserves_two_entities_with_one_source_label(

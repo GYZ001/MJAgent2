@@ -2469,6 +2469,16 @@ def compile_screenplay_ir(
 
     metadata = value.metadata or _default_metadata(episode)
     episode_no = int(episode.get("episode_no") or value.episode_no or 0)
+    from app.portraits import screenplay_character_resolutions_for_source
+
+    episode = dict(episode)
+    episode["character_resolutions"] = (
+        screenplay_character_resolutions_for_source(
+            list(episode.get("character_resolutions") or []),
+            episode_no=episode_no,
+            source_text=source_text,
+        )
+    )
     if value.episode_no and value.episode_no != episode_no:
         compiler_audit.append({
             "path": "episode_no",
