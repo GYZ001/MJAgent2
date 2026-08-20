@@ -2,7 +2,17 @@ from __future__ import annotations
 
 import asyncio
 
-from app import generation_concurrency, task_registry
+import pytest
+
+from app import generation_concurrency, hiagent, task_registry
+
+
+def _single_provider_slot(monkeypatch) -> None:
+    monkeypatch.setattr(
+        generation_concurrency,
+        "get_setting",
+        lambda key: "1" if key == "text_generation_concurrency" else None,
+    )
 
 
 def test_screenplay_and_storyboard_share_one_process_wide_limit(
@@ -207,3 +217,185 @@ def test_two_phase_batch_cancel_does_not_start_waiters(monkeypatch) -> None:
         return started
 
     assert asyncio.run(scenario()) == ["one"]
+
+
+def test_provider_slot_is_reentrant_for_same_structured_operation(
+    monkeypatch,
+) -> None:
+    _single_provider_slot(monkeypatch)
+
+    async def scenario() -> list[str]:
+        calls: list[str] = []
+
+        async def nested_provider_call() -> str:
+            calls.append("provider")
+            return "ok"
+
+        async def structured_operation() -> str:
+            calls.append("structured")
+            return await generation_concurrency.run_with_provider_call_slot(
+                nested_provider_call
+            )
+
+        result = await asyncio.wait_for(
+            generation_concurrency.run_with_provider_call_slot(
+                structured_operation
+            ),
+            timeout=1,
+        )
+        assert result == "ok"
+        return calls
+
+    assert asyncio.run(scenario()) == ["structured", "provider"]
+
+
+def test_reentrant_provider_attempt_inherits_outer_abort_predicate(
+    monkeypatch,
+) -> None:
+    _single_provider_slot(monkeypatch)
+
+    async def scenario() -> tuple[BaseException, list[int]]:
+        abort = asyncio.Event()
+        attempts: list[int] = []
+
+        async def provider_attempt(attempt: int) -> str:
+            attempts.append(attempt)
+            if attempt == 0:
+                abort.set()
+                return "malformed"
+            raise AssertionError("retry crossed the inherited abort fence")
+
+        async def structured_operation() -> None:
+            await generation_concurrency.run_with_provider_call_slot(
+                lambda: provider_attempt(0)
+            )
+            await generation_concurrency.run_with_provider_call_slot(
+                lambda: provider_attempt(1)
+            )
+
+        result = await asyncio.gather(
+            generation_concurrency.run_with_provider_call_slot(
+                structured_operation,
+                abort_predicate=abort.is_set,
+            ),
+            return_exceptions=True,
+        )
+        return result[0], attempts
+
+    result, attempts = asyncio.run(scenario())
+    assert isinstance(result, asyncio.CancelledError)
+    assert attempts == [0]
+
+
+@pytest.mark.parametrize("failure_kind", ["provider", "local_validation"])
+def test_provider_slot_publishes_abort_before_waking_queued_peer(
+    monkeypatch,
+    failure_kind: str,
+) -> None:
+    _single_provider_slot(monkeypatch)
+
+    async def scenario() -> tuple[
+        BaseException,
+        BaseException,
+        BaseException,
+        list[str],
+    ]:
+        abort = asyncio.Event()
+        release_owner = asyncio.Event()
+        owner_started = asyncio.Event()
+        calls: list[str] = []
+        if failure_kind == "provider":
+            original: BaseException = hiagent.ProviderError(
+                "63178 length",
+                failure_kind="output_truncated",
+            )
+        else:
+            original = RuntimeError("local structured validation failed")
+
+        async def owner_operation() -> None:
+            calls.append("owner-ledger")
+            owner_started.set()
+            await release_owner.wait()
+            raise original
+
+        async def peer_operation() -> None:
+            calls.append("peer-ledger")
+
+        owner = asyncio.create_task(
+            generation_concurrency.run_with_provider_call_slot(
+                owner_operation,
+                on_failure=abort.set,
+            )
+        )
+        await asyncio.wait_for(owner_started.wait(), timeout=1)
+        peer = asyncio.create_task(
+            generation_concurrency.run_with_provider_call_slot(
+                peer_operation,
+                abort_predicate=abort.is_set,
+            )
+        )
+        gate = generation_concurrency.gate_for("text_provider_calls")
+        while not gate.waiters:
+            await asyncio.sleep(0)
+
+        release_owner.set()
+        owner_result, peer_result = await asyncio.gather(
+            owner,
+            peer,
+            return_exceptions=True,
+        )
+        return original, owner_result, peer_result, calls
+
+    original, owner_result, peer_result, calls = asyncio.run(scenario())
+    assert owner_result is original
+    assert isinstance(peer_result, asyncio.CancelledError)
+    assert calls == ["owner-ledger"]
+
+
+def test_provider_slot_preserves_user_cancellation_and_fences_peer(
+    monkeypatch,
+) -> None:
+    _single_provider_slot(monkeypatch)
+
+    async def scenario() -> tuple[BaseException, BaseException, list[str]]:
+        abort = asyncio.Event()
+        owner_started = asyncio.Event()
+        calls: list[str] = []
+
+        async def owner_operation() -> None:
+            calls.append("owner-ledger")
+            owner_started.set()
+            await asyncio.Future()
+
+        async def peer_operation() -> None:
+            calls.append("peer-ledger")
+
+        owner = asyncio.create_task(
+            generation_concurrency.run_with_provider_call_slot(
+                owner_operation,
+                on_failure=abort.set,
+            )
+        )
+        await asyncio.wait_for(owner_started.wait(), timeout=1)
+        peer = asyncio.create_task(
+            generation_concurrency.run_with_provider_call_slot(
+                peer_operation,
+                abort_predicate=abort.is_set,
+            )
+        )
+        gate = generation_concurrency.gate_for("text_provider_calls")
+        while not gate.waiters:
+            await asyncio.sleep(0)
+
+        owner.cancel()
+        owner_result, peer_result = await asyncio.gather(
+            owner,
+            peer,
+            return_exceptions=True,
+        )
+        return owner_result, peer_result, calls
+
+    owner_result, peer_result, calls = asyncio.run(scenario())
+    assert isinstance(owner_result, asyncio.CancelledError)
+    assert isinstance(peer_result, asyncio.CancelledError)
+    assert calls == ["owner-ledger"]

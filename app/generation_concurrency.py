@@ -23,10 +23,10 @@ _generation_priority: contextvars.ContextVar[int] = contextvars.ContextVar(
     "generation_priority",
     default=PRIORITY_INTERACTIVE,
 )
-_provider_call_slot_owner: contextvars.ContextVar[
-    asyncio.Task[object] | None
+_provider_call_slot_lease: contextvars.ContextVar[
+    tuple[asyncio.Task[object] | None, Callable[[], bool] | None] | None
 ] = contextvars.ContextVar(
-    "provider_call_slot_owner",
+    "provider_call_slot_lease",
     default=None,
 )
 
@@ -205,11 +205,17 @@ async def run_with_provider_call_slot(
     not durable provider metadata.
     """
     current_task = asyncio.current_task()
+    inherited_lease = _provider_call_slot_lease.get()
     if (
-        current_task is not None
-        and _provider_call_slot_owner.get() is current_task
+        inherited_lease is not None
+        and current_task is not None
+        and inherited_lease[0] is current_task
     ):
-        if abort_predicate is not None and abort_predicate():
+        predicates = (inherited_lease[1], abort_predicate)
+        if any(
+            predicate is not None and predicate()
+            for predicate in predicates
+        ):
             raise asyncio.CancelledError
         return await operation()
 
@@ -217,7 +223,9 @@ async def run_with_provider_call_slot(
     await gate.acquire(
         current_generation_priority() if priority is None else int(priority)
     )
-    owner_token = _provider_call_slot_owner.set(current_task)
+    owner_token = _provider_call_slot_lease.set(
+        (current_task, abort_predicate)
+    )
     try:
         if abort_predicate is not None and abort_predicate():
             raise asyncio.CancelledError
@@ -234,5 +242,5 @@ async def run_with_provider_call_slot(
                     )
             raise
     finally:
-        _provider_call_slot_owner.reset(owner_token)
+        _provider_call_slot_lease.reset(owner_token)
         gate.release()

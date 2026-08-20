@@ -416,6 +416,88 @@ def test_scene_shard_semantic_review_schema_binds_exact_chunk_keys() -> None:
     )
 
 
+def test_scene_shard_creative_response_format_binds_dynamic_slot_contract(
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    dialogue_slot = plan.unit_slots[0]
+    dialogue_slot.kind = "dialogue"
+    dialogue_slot.source_text = "“不得改写的来源对白”"
+    local_schema = build_screenplay_scene_shard_repair_schema(
+        plan=plan,
+        scene_input_contracts=contracts,
+    )
+    response_format = scene_shards_module._scene_shard_strict_response_format(
+        name="screenplay_scene_shard_creative",
+        local_schema=local_schema,
+    )
+    provider_schema = response_format["json_schema"]["schema"]
+
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    assert local_schema["properties"]["contract_version"]["const"] == (
+        SCREENPLAY_SCENE_CREATIVE_VERSION
+    )
+    assert provider_schema["properties"]["contract_version"]["enum"] == [
+        SCREENPLAY_SCENE_CREATIVE_VERSION
+    ]
+    local_dialogue_schema = local_schema["properties"]["slots"][
+        "properties"
+    ][dialogue_slot.unit_key]
+    assert local_dialogue_schema["allOf"][1]["properties"]["text"][
+        "const"
+    ] == dialogue_slot.source_text
+    provider_slot_schema = provider_schema["properties"]["slots"][
+        "properties"
+    ][dialogue_slot.unit_key]
+    provider_definition = provider_schema["$defs"][
+        provider_slot_schema["$ref"].rsplit("/", 1)[-1]
+    ]
+    assert provider_definition["properties"]["text"]["enum"] == [
+        dialogue_slot.source_text
+    ]
+
+    provider_keywords: set[str] = set()
+
+    def audit(node: dict) -> None:
+        provider_keywords.update(node)
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            assert node["additionalProperties"] is False
+            assert node["required"] == list(properties)
+            for child in properties.values():
+                audit(child)
+        definitions = node.get("$defs")
+        if isinstance(definitions, dict):
+            for child in definitions.values():
+                audit(child)
+        items = node.get("items")
+        if isinstance(items, dict):
+            audit(items)
+
+    audit(provider_schema)
+    assert provider_keywords <= (
+        scene_shards_module
+        ._SCREENPLAY_SCENE_STRICT_PROVIDER_SCHEMA_KEYWORDS
+    )
+    assert provider_keywords.isdisjoint({
+        "allOf",
+        "const",
+        "default",
+        "title",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+    })
+
+
 def test_attempt7_call_63139_has_no_complete_json_root_to_accept() -> None:
     case = json.loads(
         ATTEMPT7_CALL_63139_SEMANTIC_RESPONSE.read_text(encoding="utf-8")
@@ -7996,6 +8078,8 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
     format_repair_contexts: dict[str, dict] = {}
     operation_ids: dict[str, str] = {}
     output_schemas: dict[str, dict] = {}
+    response_formats: dict[str, dict] = {}
+    response_format_required: dict[str, bool] = {}
     repair_schema_builders: dict[str, object] = {}
     identity_registry = [
         {
@@ -8019,6 +8103,11 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
         operation_ids[prompt_key] = kwargs["operation_id"]
         if kwargs.get("output_schema"):
             output_schemas[prompt_key] = kwargs["output_schema"]
+        if kwargs.get("response_format"):
+            response_formats[prompt_key] = kwargs["response_format"]
+        response_format_required[prompt_key] = bool(
+            kwargs.get("require_response_format")
+        )
         if kwargs.get("repair_schema"):
             repair_schema_builders[prompt_key] = kwargs["repair_schema"]
         if kwargs.get("repair_context"):
@@ -8118,6 +8207,17 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
     ]["$defs"]["ScreenplaySceneShardCreativeUnit"]
     assert "participant_deliveries" not in unit_schema["properties"]
     assert "actor_keys" not in unit_schema["properties"]
+    assert response_format_required[
+        "screenplay_scene_shards:SS001"
+    ] is True
+    assert response_formats["screenplay_scene_shards:SS001"] == (
+        scene_shards_module._scene_shard_strict_response_format(
+            name="screenplay_scene_shard_creative",
+            local_schema=output_schemas[
+                "screenplay_scene_shards:SS001"
+            ],
+        )
+    )
     repair_schema_builder = repair_schema_builders[
         "screenplay_scene_shards:SS001"
     ]
