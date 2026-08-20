@@ -3485,6 +3485,36 @@ def test_recovery_accepts_legal_current_ir_artifact() -> None:
     assert tuple(row) == ("candidate", None)
 
 
+def test_recovery_rejects_legal_ir_payload_with_drifted_outer_hash() -> None:
+    episode_id = "ep-ir-contract-v4-tampered"
+    payload = _participant_delivery_complete_ir_payload(stages.IR_VERSION)
+    run_id, step_id, artifact = _persist_recoverable_ir(
+        episode_id=episode_id,
+        input_fingerprint="ir-contract-v4-tampered",
+        contract_version=stages.IR_VERSION,
+        payload=payload,
+    )
+    tampered = deepcopy(payload)
+    tampered["metadata"]["title"] = "另一份仍合法的 IR"
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE artifacts SET content_json=? WHERE id=?",
+        (json.dumps(tampered, ensure_ascii=False), artifact["id"]),
+    )
+    conn.commit()
+
+    with bind_trace(run_id, step_id):
+        recovered = stages._recover_screenplay_ir_candidate(episode_id)
+
+    assert recovered is None
+    row = conn.execute(
+        "SELECT status,stale_reason FROM artifacts WHERE id=?",
+        (artifact["id"],),
+    ).fetchone()
+    assert row["status"] == "stale"
+    assert "存储指纹漂移" in row["stale_reason"]
+
+
 def test_recovery_rebuilds_ir_with_swapped_audit_node_source_groups() -> None:
     episode_id = "ep-ir-contract-v3-audit-authority"
     payload = _audit_only_ir_payload("SRC0002", "SRC0003")

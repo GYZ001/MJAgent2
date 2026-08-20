@@ -233,17 +233,10 @@ def _verified_artifact_hash(artifact: dict[str, Any], *, label: str) -> str:
     production boundary, so trusting that column would let a direct payload
     mutation keep an old certificate alive.
     """
-    stored_hash = str(artifact.get("content_hash") or "")
     try:
-        current_hash = evidence_repository.content_hash(
-            artifact.get("content"),
-            artifact.get("file_path"),
-        )
-    except (OSError, TypeError, ValueError) as exc:
+        return evidence_repository.verified_artifact_content_hash(artifact)
+    except ValueError as exc:
         raise ValueError(f"{label} 当前内容无法重新计算指纹") from exc
-    if not stored_hash or stored_hash != current_hash:
-        raise ValueError(f"{label} 内容与存储指纹漂移")
-    return current_hash
 
 
 def _source_records(conn: Any, episode: Any) -> tuple[list[dict[str, Any]], str]:
@@ -587,6 +580,10 @@ def _recorded_portrait_explains_appearance(
                 artifact.get("parent_artifact_ids") or []
             )
         ):
+            continue
+        try:
+            _verified_artifact_hash(artifact, label="approved portrait Artifact")
+        except ValueError:
             continue
         content = artifact.get("content") or {}
         if (

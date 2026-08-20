@@ -10,6 +10,7 @@ import uuid
 import pytest
 
 from app import hiagent, stages
+from app.evidence import repository as evidence_repository
 from app.errors import ContentGenerationError
 from app.harness import model_gateway
 from app.narrative_blueprint import (
@@ -3642,12 +3643,18 @@ def test_current_blueprint_selector_prefers_current_same_hash_wrapper() -> None:
     rows = [{
         "id": "art-old-same-hash",
         "content_json": blueprint.model_dump_json(),
+        "content_hash": evidence_repository.content_hash(
+            blueprint.model_dump(mode="json")
+        ),
         "contract_version": stages.BLUEPRINT_VERSION,
         "prompt_version": stages.SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
         "model_snapshot_json": "{}",
     }, {
         "id": "art-current-wrapper",
         "content_json": blueprint.model_dump_json(),
+        "content_hash": evidence_repository.content_hash(
+            blueprint.model_dump(mode="json")
+        ),
         "contract_version": stages.BLUEPRINT_VERSION,
         "prompt_version": stages.SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
         "model_snapshot_json": json.dumps(current_snapshot),
@@ -3669,6 +3676,9 @@ def test_only_old_same_hash_blueprint_requires_current_wrapper() -> None:
         [{
             "id": "art-old-same-hash",
             "content_json": blueprint.model_dump_json(),
+            "content_hash": evidence_repository.content_hash(
+                blueprint.model_dump(mode="json")
+            ),
             "contract_version": stages.BLUEPRINT_VERSION,
             "prompt_version": stages.SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
             "model_snapshot_json": json.dumps({
@@ -3681,6 +3691,30 @@ def test_only_old_same_hash_blueprint_requires_current_wrapper() -> None:
 
     assert selected is None
     assert legacy == "art-old-same-hash"
+
+
+def test_current_blueprint_selector_rejects_drifted_outer_hash() -> None:
+    blueprint = _blueprint()
+    current_snapshot = stages._current_blueprint_authority_snapshot(
+        SOURCE,
+        generation_mode="test",
+    )
+
+    selected, legacy = stages._select_current_blueprint_artifact(
+        [{
+            "id": "art-tampered",
+            "content_json": blueprint.model_dump_json(),
+            "content_hash": "stale-hash",
+            "contract_version": stages.BLUEPRINT_VERSION,
+            "prompt_version": stages.SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+            "model_snapshot_json": json.dumps(current_snapshot),
+        }],
+        blueprint,
+        SOURCE,
+    )
+
+    assert selected is None
+    assert legacy is None
 
 
 def test_semantic_repair_validated_artifact_writes_current_authority_snapshot(
@@ -4185,17 +4219,19 @@ def test_clean_semantic_review_cache_is_bound_to_source_corpus(
         "source_corpus_hash": hashlib.sha256(SOURCE.encode("utf-8")).hexdigest(),
         "review_input_fingerprint": "stale-review-input",
     }
+    stale_content = {
+        "blueprint_hash": blueprint_hash,
+        "consensus_issue_keys": [],
+        "review_outcome": "clean",
+    }
 
     class CachedRows:
         @staticmethod
         def fetchall():
             return [{
                 "id": "stale-clean-consensus",
-                "content_json": json.dumps({
-                    "blueprint_hash": blueprint_hash,
-                    "consensus_issue_keys": [],
-                    "review_outcome": "clean",
-                }),
+                "content_json": json.dumps(stale_content),
+                "content_hash": evidence_repository.content_hash(stale_content),
                 "model_snapshot_json": json.dumps(stale_snapshot),
             }]
 
@@ -4560,6 +4596,9 @@ def test_blueprint_generation_reuses_validated_cached_artifact(
                 assert "a.status='validated'" in sql
                 return QueryResult(many=[{
                     "content_json": blueprint.model_dump_json(),
+                    "content_hash": evidence_repository.content_hash(
+                        blueprint.model_dump(mode="json")
+                    ),
                 }])
             raise AssertionError(sql)
 

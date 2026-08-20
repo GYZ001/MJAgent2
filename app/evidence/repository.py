@@ -104,6 +104,26 @@ def content_hash(content: Any | None = None, file_path: str | None = None) -> st
     return digest.hexdigest()
 
 
+def verified_artifact_content_hash(artifact: dict[str, Any]) -> str:
+    """Re-hash an artifact's current payload and require its stored seal.
+
+    A persisted ``content_hash`` is an integrity claim, not the payload's
+    current value.  Every authority/cache boundary must compare both before it
+    uses the artifact or accepts a caller-supplied CAS hash.
+    """
+    stored_hash = str(artifact.get("content_hash") or "")
+    try:
+        current_hash = content_hash(
+            artifact.get("content"),
+            artifact.get("file_path"),
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise ValueError("Artifact 当前内容无法重新计算指纹") from exc
+    if not stored_hash or stored_hash != current_hash:
+        raise ValueError("Artifact 内容与存储指纹漂移")
+    return current_hash
+
+
 def create_run(
     *,
     workflow_type: str,

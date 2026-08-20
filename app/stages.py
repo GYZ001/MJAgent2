@@ -347,9 +347,10 @@ def _select_current_blueprint_artifact(
     legacy_same_hash_id: str | None = None
     for row in rows:
         try:
-            row_blueprint = NarrativeBlueprint.model_validate(
-                json.loads(row["content_json"] or "{}")
-            )
+            raw_content = json.loads(row["content_json"] or "{}")
+            if not _artifact_json_content_is_sealed(row, raw_content):
+                continue
+            row_blueprint = NarrativeBlueprint.model_validate(raw_content)
             if _narrative_blueprint_content_hash(row_blueprint) != expected_hash:
                 continue
             artifact_id = str(row["id"])
@@ -371,6 +372,20 @@ def _select_current_blueprint_artifact(
     return None, legacy_same_hash_id
 
 
+def _artifact_json_content_is_sealed(row: Any, content: object) -> bool:
+    """Verify a DB artifact wrapper before any cache/recovery projection."""
+    from app.evidence import repository as evidence_repository
+
+    try:
+        stored_hash = str(row["content_hash"] or "")
+    except (KeyError, IndexError, TypeError):
+        return False
+    return bool(
+        stored_hash
+        and stored_hash == evidence_repository.content_hash(content)
+    )
+
+
 def _screenplay_ir_blueprint_snapshot_matches(
     model_snapshot: dict[str, Any],
     expected_blueprint_hash: str,
@@ -390,6 +405,7 @@ def _recover_screenplay_ir_candidate(
     expected_source_audit_annotations: list[object] | None = None,
 ) -> tuple[ScreenplayGenerationIR, str] | None:
     """Load the latest IR produced for the same authority input."""
+    from app.evidence import repository as evidence_repository
     from app.observability.tracing import current_trace
 
     trace = current_trace()
@@ -421,7 +437,7 @@ def _recover_screenplay_ir_candidate(
         return None
     lineage_marks = ",".join("?" for _ in lineage_run_ids)
     rows = conn.execute(
-        f"""SELECT a.id,a.type,a.content_json,a.contract_version,
+        f"""SELECT a.id,a.type,a.content_json,a.content_hash,a.contract_version,
                   a.prompt_version,
                   a.model_snapshot_json,
                   wr.input_fingerprint AS artifact_input_fingerprint
@@ -466,6 +482,16 @@ def _recover_screenplay_ir_candidate(
             ):
                 continue
             content = json.loads(row["content_json"] or "{}")
+            if (
+                not str(row["content_hash"] or "")
+                or str(row["content_hash"])
+                != evidence_repository.content_hash(content)
+            ):
+                raise ArtifactNeedsRebuildError(
+                    artifact_id=str(row["id"]),
+                    artifact_type=str(row["type"]),
+                    reason="IR Artifact 内容与存储指纹漂移",
+                )
             raw = content.get("raw_output") if isinstance(content, dict) else None
             if isinstance(raw, str):
                 try:
@@ -4881,7 +4907,7 @@ async def _semantic_review_narrative_blueprint(
         ).encode("utf-8")
     ).hexdigest()
     cached_rows = get_conn().execute(
-        """SELECT id,content_json,model_snapshot_json
+        """SELECT id,content_json,content_hash,model_snapshot_json
              FROM artifacts
             WHERE scope_type='episode' AND scope_id=?
               AND type='screenplay_narrative_blueprint_review_consensus'
@@ -4897,6 +4923,8 @@ async def _semantic_review_narrative_blueprint(
     for row in cached_rows:
         try:
             cached = json.loads(row["content_json"] or "{}")
+            if not _artifact_json_content_is_sealed(row, cached):
+                continue
             cached_snapshot = json.loads(
                 row["model_snapshot_json"] or "{}"
             )
@@ -7952,7 +7980,7 @@ async def _generate_screenplay_narrative_blueprint(
     ).fetchone()
     if current_run is not None:
         rows = get_conn().execute(
-            """SELECT a.content_json
+            """SELECT a.content_json,a.content_hash
                  FROM artifacts a
                  JOIN step_runs sr ON sr.id=a.created_by_step_run_id
                  JOIN workflow_runs wr ON wr.id=sr.run_id
@@ -7973,6 +8001,8 @@ async def _generate_screenplay_narrative_blueprint(
         for row in rows:
             try:
                 content = json.loads(row["content_json"] or "{}")
+                if not _artifact_json_content_is_sealed(row, content):
+                    continue
                 raw = (
                     content.get("raw_output")
                     if isinstance(content, dict)
@@ -8167,7 +8197,7 @@ async def _generate_screenplay_narrative_blueprint(
 
         trace = current_trace()
         row = get_conn().execute(
-            """SELECT a.content_json
+            """SELECT a.content_json,a.content_hash
                  FROM artifacts a
                  JOIN step_runs sr ON sr.id=a.created_by_step_run_id
                 WHERE a.scope_type='episode' AND a.scope_id=?
@@ -8183,9 +8213,10 @@ async def _generate_screenplay_narrative_blueprint(
         ).fetchone()
         if row is None:
             raise
-        candidate = NarrativeBlueprint.model_validate(
-            json.loads(row["content_json"] or "{}"),
-        )
+        fallback_content = json.loads(row["content_json"] or "{}")
+        if not _artifact_json_content_is_sealed(row, fallback_content):
+            raise
+        candidate = NarrativeBlueprint.model_validate(fallback_content)
         candidate = await _repair_narrative_blueprint(
             candidate,
             episode=episode,
@@ -8284,9 +8315,13 @@ def _commit_blueprint_authority_checkpoint(
                 ["[BLUEPRINT_AUTHORITY_ARTIFACT_INVALID] current Blueprint artifact失效"],
             )
         snapshot = json.loads(artifact["model_snapshot_json"] or "{}")
-        artifact_blueprint = NarrativeBlueprint.model_validate(
-            json.loads(artifact["content_json"] or "{}")
-        )
+        artifact_content = json.loads(artifact["content_json"] or "{}")
+        if not _artifact_json_content_is_sealed(artifact, artifact_content):
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_AUTHORITY_ARTIFACT_HASH] current Blueprint 内容指纹漂移"],
+            )
+        artifact_blueprint = NarrativeBlueprint.model_validate(artifact_content)
         artifact_blueprint_hash = _narrative_blueprint_content_hash(
             artifact_blueprint
         )
@@ -8770,7 +8805,7 @@ async def _generate_screenplay_scene_sharded_baseline(
     blueprint_hash = blueprint_content_hash(narrative_blueprint)
     trace = current_trace()
     blueprint_row = get_conn().execute(
-        """SELECT id,content_json,model_snapshot_json,contract_version,
+        """SELECT id,content_json,content_hash,model_snapshot_json,contract_version,
                   prompt_version
              FROM artifacts
              WHERE scope_type='episode' AND scope_id=?
