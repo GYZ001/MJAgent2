@@ -112,6 +112,9 @@ def test_real_dialogue_still_requires_exact_unique_speaker() -> None:
         ["S001-N002"],
         ["SRC0005"],
     )]
+    assert deterministic_issues[0].source_unit_keys == [
+        "SRC0005:unit:001"
+    ]
     review = BlueprintSemanticReview.model_validate({
         "issues": [payload["supported_dialogue_issue"]],
     })
@@ -120,6 +123,40 @@ def test_real_dialogue_still_requires_exact_unique_speaker() -> None:
         blueprint,
         source_text,
     )
+    correct_unit_issue = review.issues[0].model_copy(
+        update={"source_unit_keys": ["SRC0005:unit:001"]},
+        deep=True,
+    )
+    wrong_unit_issue = review.issues[0].model_copy(
+        update={"source_unit_keys": ["SRC0001:unit:001"]},
+        deep=True,
+    )
+    assert blueprint_semantic_voice_issue_has_dialogue_authority(
+        correct_unit_issue,
+        blueprint,
+        source_text,
+    )
+    correct_unit_review = BlueprintSemanticReview(issues=[
+        correct_unit_issue,
+    ])
+    assert filter_blueprint_semantic_review_voice_issues(
+        correct_unit_review,
+        blueprint,
+        source_text,
+    ) == 0
+    assert correct_unit_review.issues == [correct_unit_issue]
+    assert not blueprint_semantic_voice_issue_has_dialogue_authority(
+        wrong_unit_issue,
+        blueprint,
+        source_text,
+    )
+    wrong_unit_review = BlueprintSemanticReview(issues=[wrong_unit_issue])
+    assert filter_blueprint_semantic_review_voice_issues(
+        wrong_unit_review,
+        blueprint,
+        source_text,
+    ) == 1
+    assert wrong_unit_review.issues == []
     unscoped_issue = review.issues[0].model_copy(
         update={"source_segment_ids": []},
     )

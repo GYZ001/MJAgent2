@@ -2010,16 +2010,33 @@ def blueprint_semantic_voice_issue_has_dialogue_authority(
     relevant_deterministic_issues = [
         deterministic_issue
         for deterministic_issue in deterministic_issues
-        if issue_node_keys.intersection(deterministic_issue.node_keys)
+        if (
+            issue_node_keys.intersection(deterministic_issue.node_keys)
+            and set(issue.source_segment_ids).intersection(
+                deterministic_issue.source_segment_ids
+            )
+        )
     ]
     supported_source_ids = {
         source_id
         for deterministic_issue in relevant_deterministic_issues
         for source_id in deterministic_issue.source_segment_ids
     }
-    return bool(issue.source_segment_ids) and set(
+    if not (
         issue.source_segment_ids
-    ).issubset(supported_source_ids)
+        and set(issue.source_segment_ids).issubset(supported_source_ids)
+    ):
+        return False
+    if not issue.source_unit_keys:
+        return True
+    supported_source_unit_keys = {
+        source_unit_key
+        for deterministic_issue in relevant_deterministic_issues
+        for source_unit_key in deterministic_issue.source_unit_keys
+    }
+    return bool(supported_source_unit_keys) and set(
+        issue.source_unit_keys
+    ).issubset(supported_source_unit_keys)
 
 
 def blueprint_environment_subject_issue_has_exact_authority(
@@ -2149,6 +2166,7 @@ def blueprint_voice_identity_issues(
                     code="source_delivery_conflict",
                     node_keys=[node.key],
                     source_segment_ids=list(node.source_segment_ids),
+                    source_unit_keys=[delivery.source_unit_key],
                     message=(
                         f"{delivery.source_unit_key} 不是本节点拥有的 "
                         "quoted source unit"
@@ -2191,6 +2209,7 @@ def blueprint_voice_identity_issues(
                     source_segment_ids=list(
                         evidence.source_segment_ids
                     ),
+                    source_unit_keys=list(invalid_keys),
                     message=(
                         f"{evidence.identity_key} 的 voice evidence 引用了"
                         "非本节点 quoted source unit："
@@ -2245,6 +2264,7 @@ def blueprint_voice_identity_issues(
                     code="source_delivery_missing",
                     node_keys=[node.key],
                     source_segment_ids=[fact.source_segment_id],
+                    source_unit_keys=[fact.source_unit_key],
                     message=(
                         f"{fact.source_unit_key} 缺少 quoted source unit "
                         "交付决策"
@@ -2260,6 +2280,7 @@ def blueprint_voice_identity_issues(
                     code="source_delivery_conflict",
                     node_keys=[node.key],
                     source_segment_ids=[fact.source_segment_id],
+                    source_unit_keys=[fact.source_unit_key],
                     message=(
                         f"{fact.source_unit_key} 同时声明多个交付决策"
                     ),
@@ -2280,6 +2301,7 @@ def blueprint_voice_identity_issues(
                     code="source_delivery_identity_conflict",
                     node_keys=[node.key],
                     source_segment_ids=[fact.source_segment_id],
+                    source_unit_keys=[fact.source_unit_key],
                     message=(
                         f"{fact.source_unit_key} 的表演身份未列入 "
                         f"participants：{sorted(unknown_delivery_identities)}"
@@ -2302,6 +2324,7 @@ def blueprint_voice_identity_issues(
                         code="voice_identity_conflict",
                         node_keys=[node.key],
                         source_segment_ids=[fact.source_segment_id],
+                        source_unit_keys=[fact.source_unit_key],
                         message=(
                             f"{fact.source_unit_key} 的 delivery mode="
                             f"{delivery.mode}，不得声明 voice performer"
@@ -2339,6 +2362,7 @@ def blueprint_voice_identity_issues(
                 code=code,
                 node_keys=[node.key],
                 source_segment_ids=[fact.source_segment_id],
+                source_unit_keys=[fact.source_unit_key],
                 message=message,
                 required_resolution=(
                     "保持完整 node、source ownership、来源顺序和语义三元不变；"
