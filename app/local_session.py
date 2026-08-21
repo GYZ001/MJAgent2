@@ -151,7 +151,17 @@ def _is_loopback_host(host: str | None) -> bool:
 
 
 def assert_session_bootstrap_allowed(request: Request) -> None:
-    """``GET /api/session`` 无鉴权：本机 Origin、同源公网 Origin，或 loopback Host。"""
+    """``GET /api/session`` 无鉴权：带 Origin 时必须同源；不带 Origin 时要求有 Host。
+
+    「不带 Origin」不是绕过口子：浏览器只在**同源 GET/HEAD** 时省略 Origin，
+    跨源 fetch 一定带 Origin（走下面的同源校验被拒），且本响应没有任何 CORS 头，
+    异源页面即便发出请求也读不到 body。真正的边界是端口可达性，由
+    MJ_BACKEND_HOST 与反代决定，不由这里决定。
+
+    这里原先靠「客户端是回环地址」放行，隐式依赖请求必须经 vite 反代到达；
+    后端直接对外服务构建产物后，同源 GET 因缺 Origin 被误拒，页面拿不到凭证，
+    表现为「项目加载失败」。
+    """
     origin = (request.headers.get("origin") or "").strip()
     if origin:
         if not origin_allowed(origin, request):
@@ -164,7 +174,9 @@ def assert_session_bootstrap_allowed(request: Request) -> None:
     if client_host in {"127.0.0.1", "::1", "localhost", "testclient"}:
         # testclient：Starlette TestClient 本机回环；生产反向代理不应伪造为 testclient。
         return
-    raise HTTPException(403, "会话领取仅允许本机 Host 或同源 Origin")
+    if host:
+        return
+    raise HTTPException(403, "会话领取需要 Host 或同源 Origin")
 
 
 def public_session_payload() -> dict[str, str]:

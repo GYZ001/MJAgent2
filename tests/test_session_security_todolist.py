@@ -276,3 +276,56 @@ def test_keys_preview_does_not_expose_prefix(authed: SessionTestClient, monkeypa
     preview = resp.json()["hiagent"]["preview"]
     assert preview == "已配置"
     assert "sk-abc" not in preview
+
+
+@pytest.fixture
+def remote_anon() -> TestClient:
+    """非回环客户端：模拟浏览器直连后端（不经 vite 反代）。"""
+    with TestClient(app, client=("203.0.113.9", 51515)) as client:
+        yield client
+
+
+def test_same_origin_get_without_origin_header_can_bootstrap(
+    remote_anon: TestClient,
+) -> None:
+    """浏览器同源 GET 不发 Origin；后端直服构建产物时不能因此拒发凭证。
+
+    回归 2026-08-21：后端从 127.0.0.1 改绑 0.0.0.0 直接服务 frontend/dist 后，
+    /api/session 对同源 GET 返回 403，前端拿不到凭证，页面报「项目加载失败」。
+    """
+    resp = remote_anon.get("/api/session", headers={"Host": "manju.example.com"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["session_token"]
+
+
+def test_cross_origin_bootstrap_still_rejected_from_remote_client(
+    remote_anon: TestClient,
+) -> None:
+    """放行「无 Origin」不得放松跨源：带异源 Origin 仍必须拒绝。"""
+    resp = remote_anon.get(
+        "/api/session",
+        headers={"Origin": "https://evil.example", "Host": "manju.example.com"},
+    )
+    assert resp.status_code == 403, resp.text
+
+
+def test_remote_client_still_needs_token_for_protected_api(
+    remote_anon: TestClient,
+) -> None:
+    """凭证闸门本身不变：非回环客户端不带凭证访问受保护 API 仍是 401。"""
+    resp = remote_anon.get("/api/projects", headers={"Host": "manju.example.com"})
+    assert resp.status_code == 401, resp.text
+
+
+def test_no_origin_bootstrap_is_not_covered_by_loopback_exemptions() -> None:
+    """守住上一条测试不空转：放行必须来自新增的 Host 分支，而非回环豁免。"""
+    from app.local_session import _is_loopback_host
+
+    assert not _is_loopback_host("manju.example.com")
+    assert "203.0.113.9" not in {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+def test_bootstrap_requires_host_when_origin_absent(remote_anon: TestClient) -> None:
+    """既无 Origin 也无 Host 的请求仍然拒绝。"""
+    resp = remote_anon.get("/api/session", headers={"Host": ""})
+    assert resp.status_code == 403, resp.text
