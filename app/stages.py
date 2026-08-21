@@ -183,6 +183,12 @@ SCREENPLAY_IR_MAX_TOKENS = 36864
 BLUEPRINT_SHARD_MIN_TOKENS = 6144
 BLUEPRINT_SHARD_MAX_TOKENS = 16384
 BLUEPRINT_SHARD_MAX_ATTEMPTS = 3
+# A transport stall authors nothing, so it is not a semantic attempt and gets
+# its own bounded budget.  Production: shard 13 of ep_a0e90058f83c spent
+# attempts 1 and 2 on invalid candidates, then attempt 3 stalled at 0 received
+# characters after 182.8s -- the episode died on a call that never delivered a
+# single byte, with no candidate to show for it.
+BLUEPRINT_SHARD_MAX_STALL_RETRIES = 2
 BLUEPRINT_REVIEW_FORMAT_RETRY_LIMIT = 1
 # A full (non-targeted) review of a converged blueprint can carry a dozen+
 # must-fix issues; 8192 output tokens is exactly the truncation cliff observed
@@ -7077,6 +7083,7 @@ def _blueprint_provider_operation_id(
     effective_max_tokens: int,
     temperature: float,
     provider_semantic_settings: dict[str, Any],
+    stall_epoch: int = 0,
 ) -> str:
     material = {
         "contract_version": BLUEPRINT_VERSION,
@@ -7099,6 +7106,10 @@ def _blueprint_provider_operation_id(
         ).hexdigest(),
         "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
     }
+    if stall_epoch:
+        # Only a retry after a stall carries this key, so the operation ids of
+        # every ordinary attempt stay exactly what they were.
+        material["stall_epoch"] = int(stall_epoch)
     return "blueprint_" + hashlib.sha256(
         json.dumps(
             material,
@@ -7961,7 +7972,10 @@ async def _generate_sharded_narrative_blueprint(
             ownership_repair_issues: list[Any] | None = None
             split_for_truncation = False
             token_budget = _blueprint_shard_token_budget(shard_segments)
-            for attempt in range(1, BLUEPRINT_SHARD_MAX_ATTEMPTS + 1):
+            stall_epoch = 0
+            attempt = 0
+            while attempt < BLUEPRINT_SHARD_MAX_ATTEMPTS:
+                attempt += 1
                 repair_only = bool(
                     attempt == 2
                     and previous_candidate is not None
@@ -7996,6 +8010,7 @@ async def _generate_sharded_narrative_blueprint(
                     episode_id=str(episode.get("id") or ""),
                     shard_index=shard_index,
                     attempt=attempt,
+                    stall_epoch=stall_epoch,
                     split_depth=split_depth,
                     source_hash=source_hash,
                     boundary_hash=boundary_hash,
@@ -8093,17 +8108,23 @@ async def _generate_sharded_narrative_blueprint(
                         split_for_truncation = True
                         break
                     if (
-                        attempt < BLUEPRINT_SHARD_MAX_ATTEMPTS
+                        stall_epoch < BLUEPRINT_SHARD_MAX_STALL_RETRIES
                         and getattr(exc, "received_chars", 0) == 0
                         and exc.failure_kind
                         in {"request_outcome_unknown", "stream_interrupted"}
                     ):
                         # A read/total timeout before any streamed character is
-                        # most likely a transport stall rather than a completed
-                        # generation.  Give the shard one more fresh attempt;
-                        # the new attempt has a different operation id, so the
-                        # budget does not treat it as replaying the same unknown
-                        # outcome.
+                        # a transport stall, not a completed generation: nothing
+                        # was authored, so there is no candidate to preserve and
+                        # nothing to re-roll.  It therefore replays the same
+                        # semantic attempt out of its own bounded budget instead
+                        # of consuming one -- a stall landing on the last attempt
+                        # used to kill the episode having delivered zero
+                        # characters.  The fresh stall epoch gives the retry a
+                        # distinct operation id, so the budget does not treat it
+                        # as replaying the same unknown outcome.
+                        stall_epoch += 1
+                        attempt -= 1
                         continue
                     raise
                 except asyncio.TimeoutError as exc:

@@ -4013,3 +4013,114 @@ def test_err_dbbf95_budget_breaker_is_not_reported_as_validation_failure() -> No
         "generation_retry_grant",
         "GEN-RETRY-GRANT",
     )
+
+
+def test_stall_on_last_attempt_does_not_consume_the_semantic_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 0-character stall replays the attempt instead of ending the episode.
+
+    Production: shard 13 of ep_a0e90058f83c spent attempts 1 and 2 on invalid
+    candidates, then attempt 3 stalled at 0 received characters after 182.8s.
+    The shard had three semantic chances and the transport consumed the last
+    one without delivering a single byte.
+    """
+    calls = 0
+    operation_ids: list[str] = []
+    validations = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        operation_ids.append(str(kwargs["call_meta"]["operation_id"]))
+        if calls == 3:
+            raise hiagent.ProviderError(
+                "read timeout before any char",
+                retryable=True,
+                failure_kind="request_outcome_unknown",
+                delivery_state="unknown",
+                requires_explicit_retry=True,
+                received_chars=0,
+            )
+        source_ids = _prompt_source_ids(messages[1]["content"])
+        return _shard_response(
+            source_ids=source_ids,
+            shard_index=int(kwargs["call_meta"]["shard_index"]),
+        )
+
+    def fake_shard_validation(*_args, **_kwargs):
+        nonlocal validations
+        validations += 1
+        return ["[BLUEPRINT_TEST] 前两次候选无效"] if validations <= 2 else []
+
+    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(
+        stages, "validate_narrative_blueprint_shard", fake_shard_validation
+    )
+    monkeypatch.setattr(
+        stages, "validate_narrative_blueprint", lambda *_a, **_k: []
+    )
+    monkeypatch.setattr(
+        stages, "derive_blueprint_scene_plans", lambda *_a, **_k: []
+    )
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(step_run_id="step-stall-budget"),
+    )
+
+    result = asyncio.run(stages._generate_sharded_narrative_blueprint(
+        {"id": "ep-stall-budget", "episode_no": 1},
+        _source(1),
+        {},
+    ))
+
+    # 1 invalid, 2 invalid, 3 stalled, 4 accepted.
+    assert calls == 4
+    assert len(result.nodes) == 1
+    # The stall retry must not replay the stalled call's operation id.
+    assert operation_ids[3] != operation_ids[2]
+    assert len(set(operation_ids)) == 4
+
+
+def test_repeated_stalls_remain_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stall budget is bounded; a permanently stalling provider fails."""
+    calls = 0
+
+    async def always_stalls(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise hiagent.ProviderError(
+            "read timeout before any char",
+            retryable=True,
+            failure_kind="request_outcome_unknown",
+            delivery_state="unknown",
+            requires_explicit_retry=True,
+            received_chars=0,
+        )
+
+    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    monkeypatch.setattr(stages.model_gateway, "chat", always_stalls)
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(step_run_id="step-stall-bounded"),
+    )
+
+    with pytest.raises(hiagent.ProviderError):
+        asyncio.run(stages._generate_sharded_narrative_blueprint(
+            {"id": "ep-stall-bounded", "episode_no": 1},
+            _source(1),
+            {},
+        ))
+
+    assert calls == stages.BLUEPRINT_SHARD_MAX_STALL_RETRIES + 1

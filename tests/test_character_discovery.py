@@ -7497,3 +7497,81 @@ def test_registered_canonical_name_in_new_named_still_fails_closed(
         ))
 
     assert calls == 1
+
+
+def test_identity_transport_stall_is_resampled_under_a_fresh_operation(
+    monkeypatch,
+) -> None:
+    """A 0-character stall delivered no judgement, so it is not a re-roll.
+
+    Production: one identity call stalled for 303s with received_chars=0 and
+    ended the episode.  Nothing was authored, so there was no answer to
+    preserve -- the same reasoning the blueprint shard path already applies.
+    """
+    operations: list[str] = []
+
+    async def stalling_then_valid(_messages, **kwargs):
+        operations.append(str(kwargs["call_meta"]["operation_id"]))
+        if len(operations) == 1:
+            raise hiagent.ProviderError(
+                "流式调用read阶段超时（303131ms）",
+                failure_kind="request_outcome_unknown",
+                received_chars=0,
+            )
+        return json.dumps({"value": "ok"}, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", stalling_then_valid)
+
+    class _Shape(BaseModel):
+        value: str
+
+    result = asyncio.run(portraits._identity_structured_with_resample(
+        [{"role": "user", "content": "p"}],
+        model_type=_Shape,
+        validate=lambda _value: [],
+        max_tokens=4096,
+        operation_id_for_attempt=lambda attempt: (
+            "op-identity" if not attempt else f"op-identity:resample:{attempt}"
+        ),
+        call_meta={"stage_key": "screenplay_character_discovery"},
+        format_retry_limit=0,
+        semantic_retry_limit=0,
+    ))
+
+    assert result.value == "ok"
+    assert operations == ["op-identity", "op-identity:resample:1"]
+
+
+def test_identity_partial_delivery_provider_error_still_fails_closed(
+    monkeypatch,
+) -> None:
+    """Bytes on the wire mean an answer existed; it is never re-rolled."""
+    calls = 0
+
+    async def partially_delivered(_messages, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise hiagent.ProviderError(
+            "流式调用read阶段超时",
+            failure_kind="request_outcome_unknown",
+            received_chars=1200,
+        )
+
+    monkeypatch.setattr(model_gateway, "chat", partially_delivered)
+
+    class _Shape(BaseModel):
+        value: str
+
+    with pytest.raises(hiagent.ProviderError):
+        asyncio.run(portraits._identity_structured_with_resample(
+            [{"role": "user", "content": "p"}],
+            model_type=_Shape,
+            validate=lambda _value: [],
+            max_tokens=4096,
+            operation_id_for_attempt=lambda attempt: f"op-partial-{attempt}",
+            call_meta={"stage_key": "screenplay_character_discovery"},
+            format_retry_limit=0,
+            semantic_retry_limit=0,
+        ))
+
+    assert calls == 1

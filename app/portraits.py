@@ -118,6 +118,10 @@ def _identity_operation_retry_epoch() -> str:
 # response_format and demonstrably does not always honour it, so without this
 # one clean resample a single corrupt sample costs a whole episode.
 #
+# A transport stall which delivered zero characters is the same animal, only
+# more clearly so: the provider never authored anything at all.  The blueprint
+# shard path already gives that case a fresh attempt for exactly this reason.
+#
 # Schema-invalid and semantically-invalid answers keep the strict one-call rule.
 IDENTITY_UNUSABLE_RESPONSE_RESAMPLES = 1
 
@@ -132,16 +136,18 @@ async def _identity_structured_with_resample(
     call_meta: dict[str, Any],
     **kwargs: Any,
 ) -> Any:
-    """Run one identity contract, resampling only an unusable response.
+    """Run one identity contract, resampling only an undelivered response.
 
     Each attempt still goes through the gateway's strict identity fence with
     ``format_retry_limit=0`` and ``semantic_retry_limit=0``; the resample is an
     authored second attempt at the caller, with its own operation id so cost
-    and idempotency accounting stay exact.  Only a response that never decoded
-    into a JSON object at all is resampled -- schema-invalid answers and
-    business-validation failures are re-raised on the first attempt.
+    and idempotency accounting stay exact.  Only an answer the provider never
+    delivered is resampled -- a response that decoded into no JSON object at
+    all, or a transport stall that produced zero characters.  Schema-invalid
+    answers and business-validation failures are re-raised on the first
+    attempt.
     """
-    last_error: model_gateway.StructuredFormatError | None = None
+    last_error: Exception | None = None
     for attempt in range(IDENTITY_UNUSABLE_RESPONSE_RESAMPLES + 1):
         try:
             # model_type/validate/max_tokens stay explicit here so the
@@ -157,6 +163,19 @@ async def _identity_structured_with_resample(
             )
         except model_gateway.StructuredFormatError as exc:
             if not getattr(exc, "unparseable", False):
+                raise
+            last_error = exc
+        except hiagent.ProviderError as exc:
+            # Zero received characters means the request stalled before the
+            # provider emitted anything: no identity judgement exists to
+            # preserve, so this is the undelivered case above rather than an
+            # answer being re-rolled until it passes.  Anything that did
+            # deliver bytes, and every other provider failure class, still
+            # fails closed on the first call.
+            if getattr(exc, "received_chars", 0) or exc.failure_kind not in {
+                "request_outcome_unknown",
+                "stream_interrupted",
+            }:
                 raise
             last_error = exc
     assert last_error is not None
