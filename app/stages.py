@@ -7974,12 +7974,22 @@ async def _generate_sharded_narrative_blueprint(
             token_budget = _blueprint_shard_token_budget(shard_segments)
             stall_epoch = 0
             attempt = 0
+            previous_attempt_repaired_ownership = False
             while attempt < BLUEPRINT_SHARD_MAX_ATTEMPTS:
                 attempt += 1
+                # The bounded ownership-map mode belongs to the attempt after
+                # a repairable candidate actually appeared -- not to attempt 2
+                # whatever happened before it.  In production shard 21 of
+                # ep_3b07c59c0856 lost attempt 1 to malformed JSON, so the one
+                # repair slot was spent before any candidate existed; attempt 2
+                # then produced exactly the 15 ownership issues this mode
+                # repairs and had to be re-rolled blind instead.  A repair that
+                # did not resolve its own issues falls back to a full shard so
+                # the remaining budget is never spent re-sending the same map.
                 repair_only = bool(
-                    attempt == 2
-                    and previous_candidate is not None
+                    previous_candidate is not None
                     and ownership_repair_issues is not None
+                    and not previous_attempt_repaired_ownership
                 )
                 if repair_only:
                     assert previous_candidate is not None
@@ -8319,14 +8329,14 @@ async def _generate_sharded_narrative_blueprint(
                         step_run_id=trace.step_run_id,
                     )
                     break
-                if attempt == 1:
-                    ownership_repair_issues = (
-                        _blueprint_state_subject_repair_issues(
-                            candidate,
-                            validation_errors=errors,
-                            source_text=source_text,
-                        )
+                previous_attempt_repaired_ownership = repair_only
+                ownership_repair_issues = (
+                    _blueprint_state_subject_repair_issues(
+                        candidate,
+                        validation_errors=errors,
+                        source_text=source_text,
                     )
+                )
             if split_for_truncation:
                 split = _split_blueprint_segments(shard_segments)
                 segment_shards[shard_index - 1:shard_index] = split

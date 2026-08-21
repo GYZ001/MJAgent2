@@ -4124,3 +4124,108 @@ def test_repeated_stalls_remain_bounded(
         ))
 
     assert calls == stages.BLUEPRINT_SHARD_MAX_STALL_RETRIES + 1
+
+
+def test_ownership_repair_survives_a_lost_first_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The repair slot follows the first repairable candidate, not attempt 2.
+
+    Production: shard 21 of ep_3b07c59c0856 lost attempt 1 to malformed JSON.
+    Attempt 2 then produced exactly the state-subject ownership issues the
+    bounded ownership-map mode exists to repair, but the mode was pinned to
+    attempt 2 and had already been consumed by a response that never parsed.
+    """
+    calls = 0
+    modes: list[str] = []
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            modes.append("malformed")
+            return '{"format_version": "screenplay-narrative-blueprint.v7",'
+        if "ownership-map contract" in messages[1]["content"]:
+            modes.append("ownership_repair")
+            return "{}"
+        source_ids = _prompt_source_ids(messages[1]["content"])
+        modes.append("shard")
+        return _shard_response(
+            source_ids=source_ids,
+            shard_index=int(kwargs["call_meta"]["shard_index"]),
+        )
+
+    issue_rounds = 0
+
+    def repairable_once(*_args, **_kwargs):
+        nonlocal issue_rounds
+        issue_rounds += 1
+        return ["[BLUEPRINT_TEST] ownership"] if issue_rounds == 1 else []
+
+    repair_calls: list[list[str]] = []
+
+    def fake_repair_issues(candidate, *, validation_errors, source_text):
+        del candidate, source_text
+        repair_calls.append(list(validation_errors))
+        return ["issue"] if validation_errors else None
+
+    def fake_repair_prompt(**_kwargs) -> str:
+        return "ownership-map contract"
+
+    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(
+        stages, "validate_narrative_blueprint_shard", repairable_once
+    )
+    monkeypatch.setattr(
+        stages, "_blueprint_state_subject_repair_issues", fake_repair_issues
+    )
+    monkeypatch.setattr(
+        stages, "_blueprint_state_subject_repair_prompt", fake_repair_prompt
+    )
+    monkeypatch.setattr(
+        stages, "_blueprint_state_subject_repair_target_keys",
+        lambda _issues: ["SRC0001:unit:001"],
+    )
+    monkeypatch.setattr(
+        stages, "apply_blueprint_state_subject_ownership_patch",
+        lambda previous_candidate, _patch, **_kwargs: (
+            stages.NarrativeBlueprintShard.model_validate(previous_candidate)
+        ),
+    )
+    monkeypatch.setattr(
+        stages, "BlueprintStateSubjectOwnershipPatch",
+        SimpleNamespace(model_validate=lambda payload: payload),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        stages, "validate_narrative_blueprint", lambda *_a, **_k: []
+    )
+    monkeypatch.setattr(
+        stages, "derive_blueprint_scene_plans", lambda *_a, **_k: []
+    )
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(step_run_id="step-repair-slot"),
+    )
+
+    asyncio.run(stages._generate_sharded_narrative_blueprint(
+        {"id": "ep-repair-slot", "episode_no": 1},
+        _source(1),
+        {},
+    ))
+
+    # Attempt 1 never parsed, so the repair issues are first computed from the
+    # attempt-2 candidate -- which is exactly when the mode must become
+    # available, rather than having already been spent.
+    assert calls == 3
+    # Attempt 1 malformed, attempt 2 repairable, attempt 3 the bounded
+    # ownership-map mode that used to be unreachable here.
+    assert modes == ["malformed", "shard", "ownership_repair"]
+    # The issues were computed from the attempt-2 candidate, the first one
+    # that existed at all; attempt 3 validated clean and never recomputed.
+    assert repair_calls == [["[BLUEPRINT_TEST] ownership"]]
