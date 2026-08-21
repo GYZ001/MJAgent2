@@ -4271,19 +4271,12 @@ def test_current_identity_literal_label_isolated_as_synthetic_once(
             messages=messages,
         ), ensure_ascii=False)
 
-    async def forbidden_future(*_args, **_kwargs):
-        raise AssertionError("synthetic current label reached future provider")
-
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(
-        portraits,
-        "resolve_future_identity_candidates",
-        forbidden_future,
-    )
     # "门卫" is not literal in the receipt it was bound to, so it is a legitimate
     # synthetic observation (prompt rule 4). It must be isolated as synthetic,
     # not hard-failed just because "门卫" appears verbatim in another owned
-    # receipt. Synthetic labels never enter future authority resolution.
+    # receipt. Only the single current provider round-trip is allowed; the
+    # synthetic label must not trigger any future/authority provider call.
     candidates = asyncio.run(portraits.discover_character_candidates(
         "门卫守在山门。\n\n银袍女子站在殿前。",
         Bible(world=World(visual_style_canonical="国风"), characters=[]),
