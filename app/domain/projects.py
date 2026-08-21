@@ -481,6 +481,140 @@ def _attach_scene_refs(conn, project_id: str, bible: dict) -> None:
                 s["ref_image_url"] = latest["image_url"]
 
 
+_PICKER_COLUMNS = "id, episode_no, title, status, screenplay_status"
+
+_PICKER_GENERATION_COLUMNS = """e.id, e.episode_no, e.title, e.status, e.screenplay_status,
+    (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id) AS shot_count,
+    (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id AND s.adopted_version_id IS NOT NULL) AS video_count,
+    (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id AND s.adopted_version_id IS NULL
+       AND EXISTS(SELECT 1 FROM shot_versions v WHERE v.shot_id=s.id AND v.status='succeeded')) AS pending_adoption_count,
+    (SELECT COUNT(*) FROM shot_versions v JOIN shots s ON s.id=v.shot_id
+       WHERE s.episode_id=e.id AND v.status='failed') AS failed_count"""
+
+# 与前端 episodePicker.filterEpisodeOptions 的制作状态筛选一一对应。
+_PRODUCTION_FILTER_SQL = {
+    "with_video": "video_count > 0",
+    "pending_adoption": "pending_adoption_count > 0",
+    "failed": "failed_count > 0",
+    "unproduced": "(shot_count = 0 OR video_count = 0)",
+}
+
+_PICKER_MAX_LIMIT = 200
+
+
+def _attach_picker_episodes(
+    conn,
+    payload: dict,
+    project_id: str,
+    *,
+    with_production_counts: bool,
+    limit: int = 0,
+    keyword: str = "",
+    cursor: str = "",
+    production_filter: str = "all",
+) -> None:
+    """分集切换器的数据源。
+
+    ``limit<=0`` 返回整份分集，保持旧契约。``limit>0`` 只返回一个窗口：
+    1616 集的项目整份 payload 未压缩 250KB，其中中文标题占 72KB 且 gzip 压不动，
+    而下拉最多只展示 60 条——搜索、制作状态筛选、取窗因此全部下沉到服务端。
+
+    窗口之外仍要保证三件事可用，故一并返回：总集数、光标所在序号，以及
+    上一集/下一集（按全量顺序算，不受搜索与筛选影响）。光标分集本身始终包含
+    在 ``episodes`` 里，这样前端既有的 resolveEpisodeId 语义不用改。
+    """
+    base = (
+        f"SELECT {_PICKER_GENERATION_COLUMNS} FROM episodes e WHERE e.project_id=?"
+        if with_production_counts
+        else f"SELECT {_PICKER_COLUMNS} FROM episodes WHERE project_id=?"
+    )
+    if limit <= 0:
+        payload["episodes"] = rows_to_dicts(
+            conn.execute(f"{base} ORDER BY episode_no", (project_id,)).fetchall()
+        )
+        return
+
+    limit = max(1, min(int(limit), _PICKER_MAX_LIMIT))
+    kw = (keyword or "").strip().lower()
+    predicate = (
+        _PRODUCTION_FILTER_SQL.get(production_filter or "all")
+        if with_production_counts
+        else None
+    )
+
+    clauses: list[str] = []
+    params: list[object] = [project_id]
+    if kw:
+        clauses.append("(LOWER(title) LIKE ? OR CAST(episode_no AS TEXT) LIKE ?)")
+        params.extend([f"%{kw}%", f"%{kw}%"])
+    if predicate:
+        clauses.append(predicate)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    windowed = f"SELECT * FROM ({base}){where}"
+
+    total = int(conn.execute(
+        "SELECT COUNT(*) AS c FROM episodes WHERE project_id=?", (project_id,)
+    ).fetchone()["c"])
+    if predicate:
+        # 制作状态筛选依赖派生列，只能包一层统计；无筛选时走轻量的直接统计。
+        match_total = int(conn.execute(
+            f"SELECT COUNT(*) AS c FROM ({windowed})", params
+        ).fetchone()["c"])
+    elif kw:
+        match_total = int(conn.execute(
+            "SELECT COUNT(*) AS c FROM episodes WHERE project_id=? "
+            "AND (LOWER(title) LIKE ? OR CAST(episode_no AS TEXT) LIKE ?)",
+            (project_id, f"%{kw}%", f"%{kw}%"),
+        ).fetchone()["c"])
+    else:
+        match_total = total
+
+    cursor_row = None
+    index = prev_row = next_row = None
+    if cursor:
+        cursor_row = conn.execute(
+            f"SELECT * FROM ({base}) WHERE id=?", (project_id, cursor)
+        ).fetchone()
+    if cursor_row is not None:
+        episode_no = cursor_row["episode_no"]
+        index = int(conn.execute(
+            "SELECT COUNT(*) AS c FROM episodes WHERE project_id=? AND episode_no < ?",
+            (project_id, episode_no),
+        ).fetchone()["c"])
+        prev_row = conn.execute(
+            "SELECT id, episode_no, title FROM episodes WHERE project_id=? AND episode_no < ? "
+            "ORDER BY episode_no DESC LIMIT 1",
+            (project_id, episode_no),
+        ).fetchone()
+        next_row = conn.execute(
+            "SELECT id, episode_no, title FROM episodes WHERE project_id=? AND episode_no > ? "
+            "ORDER BY episode_no LIMIT 1",
+            (project_id, episode_no),
+        ).fetchone()
+
+    # 有搜索或筛选时从头给结果；否则把窗口落在光标附近，保留「打开即定位当前集」。
+    if kw or predicate or index is None:
+        offset = 0
+    else:
+        offset = max(0, min(index - limit // 3, max(0, match_total - limit)))
+
+    rows = rows_to_dicts(conn.execute(
+        f"{windowed} ORDER BY episode_no LIMIT ? OFFSET ?", (*params, limit, offset)
+    ).fetchall())
+    if cursor_row is not None and all(row["id"] != cursor for row in rows):
+        rows.append(dict(cursor_row))
+        rows.sort(key=lambda row: row["episode_no"])
+
+    payload["episodes"] = rows
+    payload["episode_total"] = total
+    payload["episode_match_total"] = match_total
+    payload["episode_offset"] = offset
+    payload["episode_index"] = index
+    payload["episode_current"] = dict(cursor_row) if cursor_row is not None else None
+    payload["episode_prev"] = dict(prev_row) if prev_row is not None else None
+    payload["episode_next"] = dict(next_row) if next_row is not None else None
+
+
 @router.get("/projects/{project_id}")
 def project_detail(
     project_id: str,
@@ -571,6 +705,8 @@ def project_detail(
         _attach_scene_refs(conn, project_id, p["bible"])
 
     if view in ("picker", "picker_generation"):
+        # 切换器用不到自动改动流水（13KB），前端也没有任何消费点，别跟着每次切集来回传。
+        p.pop("bible_auto_changes_json", None)
         _attach_picker_episodes(
             conn,
             p,

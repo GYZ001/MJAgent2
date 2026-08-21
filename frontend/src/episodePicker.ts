@@ -29,6 +29,40 @@ export function resolveEpisodeId(
   return episodes[0]?.id ?? null
 }
 
+/** 构造窗口化 picker 的查询串；空值一律不写入，URL 才稳定、可缓存。 */
+export function pickerWindowParams(
+  limit: number,
+  cursor: string | null = null,
+  options: { query?: string; production?: EpisodeProductionFilter } = {},
+): string {
+  const params = new URLSearchParams({ episode_limit: String(limit) })
+  if (cursor) params.set('episode_cursor', cursor)
+  const query = options.query?.trim()
+  if (query) params.set('episode_query', query)
+  if (options.production && options.production !== 'all') {
+    params.set('episode_filter', options.production)
+  }
+  return params.toString()
+}
+
+/** 窗口化 picker 的分集解析。
+ *
+ * 窗口模式下 `episodes` 只是全量里的一小段，不能再用「当前 id 是否在数组里」判断有效性；
+ * `episode_current` 才是服务端对「光标是否仍属于本项目」的判定。
+ * 光标失效时退回窗口首条——服务端在无光标时把窗口落在第一集，故等价于取首集。
+ */
+export function resolveWindowedEpisodeId(
+  picker: { episode_current?: { id: string } | null; episodes?: EpisodeOption[] },
+  currentEpisodeId: string | null,
+  requestedEpisodeId: string | null = null,
+): string | null {
+  if (requestedEpisodeId) return requestedEpisodeId
+  if (currentEpisodeId && picker.episode_current?.id === currentEpisodeId) {
+    return currentEpisodeId
+  }
+  return picker.episode_current?.id ?? picker.episodes?.[0]?.id ?? null
+}
+
 /** 地址栏显式指定的分集保持权威；无显式目标时才从项目分集中恢复选择。 */
 export function resolveRoutedEpisodeId(
   episodes: EpisodeOption[],

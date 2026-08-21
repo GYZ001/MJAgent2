@@ -21,7 +21,7 @@ import SearchField from "./components/SearchField";
 import { useFocusTrap } from "./hooks/useFocusTrap";
 import { useScrollContainment } from "./useScrollContainment";
 import { AdaptivePoller, type PollInterval } from "./adaptivePoller";
-import { resolveEpisodeId, resolveRoutedEpisodeId } from "./episodePicker";
+import { pickerWindowParams, resolveWindowedEpisodeId } from "./episodePicker";
 
 // 加载器单独具名：lazy() 与 hover 预取共用同一个引用，import() 天然去重。
 const loadBiblePage = () => import("./pages/BiblePage");
@@ -663,13 +663,14 @@ export default function App() {
     const requestedEpisodeId =
       location.projectId === projectId ? location.episodeId : null;
     let cancelled = false;
+    // 这里只要解析出一个有效分集 id，不需要整份清单：用窗口模式取 1 条即可，
+    // 千集项目下 payload 从 250KB 降到不足 1KB。
     api
-      .get(`/projects/${projectId}?view=picker`)
+      .get(`/projects/${projectId}?view=picker&${pickerWindowParams(1, requestedEpisodeId ?? episodeId)}`)
       .then((project: Project) => {
         if (cancelled) return;
-        const episodes = project.episodes ?? [];
         setEpisodeId((current) =>
-          resolveRoutedEpisodeId(episodes, current, requestedEpisodeId),
+          resolveWindowedEpisodeId(project, current, requestedEpisodeId),
         );
       })
       .catch(() => {
@@ -704,21 +705,16 @@ export default function App() {
       return;
     }
 
-    // 立刻切页，不等分集清单。?view=picker 返回整份 episodes（本项目 1600+ 条，
-    // gzip 后仍有 ~54KB），await 它会把「切标签 → 拉清单 → 加载页面 chunk」串成一条
-    // 长链；先用已知分集进场，清单回来后再纠正选中项。
+    // 立刻切页，不等分集校验：先用已知分集进场，校验结果回来后再纠正选中项。
     const openedWith = episodeId;
     const openedTarget = locationFor(s.key, projectId, openedWith, chapterIdx);
     go(s.key, projectId, openedWith);
 
-    // 分集可能在项目打开后才生成，仍要重新读取，只是不再阻塞导航。
+    // 分集可能在项目打开后才生成，仍要重新校验，只是既不阻塞导航、也不拉整份清单。
     api
-      .get(`/projects/${projectId}?view=picker`)
+      .get(`/projects/${projectId}?view=picker&${pickerWindowParams(1, openedWith)}`)
       .then((project: Project) => {
-        const nextEpisodeId = resolveEpisodeId(
-          project.episodes ?? [],
-          openedWith,
-        );
+        const nextEpisodeId = resolveWindowedEpisodeId(project, openedWith);
         if (!nextEpisodeId || nextEpisodeId === openedWith) return;
         // 用户可能已经切走或被离开守卫拦下；只在仍停在刚打开的地址时纠正。
         const current = `${window.location.pathname}${window.location.search}`;

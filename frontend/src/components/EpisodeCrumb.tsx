@@ -1,12 +1,18 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { numToCn } from '../api'
-import { useNav, useProject } from '../App'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { api, numToCn } from '../api'
+import type { Project } from '../api'
+import { useNav, usePoll } from '../App'
 import type { View } from '../App'
 import {
   episodeProductionStatus,
-  filterEpisodeOptions,
+  pickerWindowParams,
   type EpisodeProductionFilter,
 } from '../episodePicker'
+
+/** 下拉一次最多展示多少条；与服务端窗口大小一致。 */
+const PICKER_WINDOW = 60
+/** 搜索防抖：每次击键都打服务端会把窄带链路打满。 */
+const SEARCH_DEBOUNCE_MS = 250
 
 interface EpisodeCrumbProps {
   label: string
@@ -20,19 +26,39 @@ const episodeLabel = (episodeNo: number, title: string) => `第${numToCn(episode
 
 export default function EpisodeCrumb({ label, view, episodeNo, showProductionFilters = false, onBeforeEpisodeChange }: EpisodeCrumbProps) {
   const { projectId, episodeId, go } = useNav()
-  const { data: project, error, loading, refresh } = useProject(projectId!, 0, showProductionFilters ? 'picker_generation' : 'picker')
-  const episodes = project?.episodes ?? []
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
+  const [debouncedQuery, setDebouncedQuery] = useState('')
   const [productionFilter, setProductionFilter] = useState<EpisodeProductionFilter>('all')
   const [activeIndex, setActiveIndex] = useState(0)
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const listboxId = useId()
-  const currentIndex = episodes.findIndex(ep => ep.id === episodeId)
-  const current = currentIndex >= 0 ? episodes[currentIndex] : null
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedQuery(query), SEARCH_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [query])
+
+  // 搜索与筛选都在服务端完成：千集项目整份分集未压缩 250KB，而这里最多展示 60 条。
+  const pickerView = showProductionFilters ? 'picker_generation' : 'picker'
+  const pickerParams = pickerWindowParams(PICKER_WINDOW, episodeId, {
+    query: debouncedQuery,
+    production: productionFilter,
+  })
+  const { data: project, error, loading, refresh } = usePoll<Project>(
+    () => api.get(`/projects/${projectId}?view=${pickerView}&${pickerParams}`),
+    0,
+    [projectId, pickerView, pickerParams],
+  )
+  const matches = project?.episodes ?? []
+  const total = project?.episode_total ?? 0
+  const matchTotal = project?.episode_match_total ?? matches.length
+  const current = project?.episode_current ?? null
+  const previous = project?.episode_prev ?? null
+  const next = project?.episode_next ?? null
   const hasPickerFilter = Boolean(query.trim()) || productionFilter !== 'all'
-  const projectHasNoEpisodes = !error && !loading && episodes.length === 0
+  const projectHasNoEpisodes = !error && !loading && total === 0
   const pickerText = current
     ? episodeLabel(current.episode_no, current.title)
     : error
@@ -41,7 +67,7 @@ export default function EpisodeCrumb({ label, view, episodeNo, showProductionFil
         ? '正在加载分集…'
         : episodeNo
           ? `第${numToCn(episodeNo)}集`
-          : episodes.length
+          : total
             ? '选择分集'
             : '项目暂无分集'
   const pickerLabel = current
@@ -50,7 +76,7 @@ export default function EpisodeCrumb({ label, view, episodeNo, showProductionFil
       ? '分集加载失败，点击重试'
       : loading
         ? '正在加载分集'
-        : episodes.length
+        : total
           ? '选择分集'
           : '选择分集，暂不可用：项目暂无分集，请先到分集规划创建'
 
@@ -64,6 +90,7 @@ export default function EpisodeCrumb({ label, view, episodeNo, showProductionFil
   useEffect(() => {
     setOpen(false)
     setQuery('')
+    setDebouncedQuery('')
   }, [episodeId])
 
   useEffect(() => {
@@ -83,12 +110,6 @@ export default function EpisodeCrumb({ label, view, episodeNo, showProductionFil
       document.removeEventListener('keydown', closeOnEscape)
     }
   }, [closePicker, open])
-
-  const matches = useMemo(() => {
-    return filterEpisodeOptions(episodes, query, 60, {
-      production: productionFilter,
-    })
-  }, [episodes, productionFilter, query])
 
   useEffect(() => {
     if (!open) return
@@ -118,13 +139,13 @@ export default function EpisodeCrumb({ label, view, episodeNo, showProductionFil
   }
 
   const toggle = async () => {
-    if (episodes.length) {
+    if (total) {
       setOpen(value => !value)
       return
     }
     if (!error) return
-    const next = await refresh()
-    if (next?.episodes?.length) setOpen(true)
+    const reloaded = await refresh()
+    if (reloaded?.episode_total) setOpen(true)
   }
 
   return (
@@ -134,16 +155,18 @@ export default function EpisodeCrumb({ label, view, episodeNo, showProductionFil
       <button
         className="episode-step"
         type="button"
-        aria-label={currentIndex < 0
+        aria-label={!current
           ? episodeId
             ? '上一集，当前分集不在项目列表中'
             : '上一集，尚未选择分集'
-          : currentIndex > 0
-            ? `上一集：${episodeLabel(episodes[currentIndex - 1].episode_no, episodes[currentIndex - 1].title)}`
+          : previous
+            ? `上一集：${episodeLabel(previous.episode_no, previous.title)}`
             : '上一集，当前已是第一集'}
-        title={currentIndex < 0 ? episodeId ? '当前分集不在项目列表中' : '尚未选择分集' : currentIndex === 0 ? '当前已是第一集' : '切换到上一集'}
-        disabled={currentIndex <= 0}
-        onClick={() => currentIndex > 0 && choose(episodes[currentIndex - 1].id)}
+        title={!current
+          ? episodeId ? '当前分集不在项目列表中' : '尚未选择分集'
+          : previous ? '切换到上一集' : '当前已是第一集'}
+        disabled={!previous}
+        onClick={() => previous && choose(previous.id)}
       >←</button>
       <div className="episode-picker" ref={rootRef}>
         <button
@@ -237,27 +260,29 @@ export default function EpisodeCrumb({ label, view, episodeNo, showProductionFil
                 )}
               </div>
             )}
-            <div className="episode-picker-foot">共 {episodes.length} 集 · 最多展示 60 条搜索结果</div>
+            <div className="episode-picker-foot">
+              共 {total} 集
+              {hasPickerFilter ? ` · 匹配 ${matchTotal} 条` : ''}
+              {matchTotal > PICKER_WINDOW ? ` · 仅展示前 ${PICKER_WINDOW} 条，可继续输入缩小范围` : ''}
+            </div>
           </div>
         )}
       </div>
       <button
         className="episode-step"
         type="button"
-        aria-label={currentIndex >= 0 && currentIndex < episodes.length - 1
-          ? `下一集：${episodeLabel(episodes[currentIndex + 1].episode_no, episodes[currentIndex + 1].title)}`
-          : currentIndex < 0
+        aria-label={next
+          ? `下一集：${episodeLabel(next.episode_no, next.title)}`
+          : !current
             ? episodeId
               ? '下一集，当前分集不在项目列表中'
               : '下一集，尚未选择分集'
             : '下一集，当前已是最后一集'}
-        title={currentIndex < 0
+        title={!current
           ? episodeId ? '当前分集不在项目列表中' : '尚未选择分集'
-          : currentIndex >= episodes.length - 1
-            ? '当前已是最后一集'
-            : '切换到下一集'}
-        disabled={currentIndex < 0 || currentIndex >= episodes.length - 1}
-        onClick={() => currentIndex >= 0 && currentIndex < episodes.length - 1 && choose(episodes[currentIndex + 1].id)}
+          : next ? '切换到下一集' : '当前已是最后一集'}
+        disabled={!next}
+        onClick={() => next && choose(next.id)}
       >→</button>
     </div>
   )

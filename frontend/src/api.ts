@@ -2266,6 +2266,16 @@ export interface Project {
   bible_artifact_id?: string | null;
   bible_evidence?: ArtifactEvidence | null;
   harness_engine_enabled?: number | boolean;
+  /** 以下仅在 ?view=picker&episode_limit>0 的窗口模式下返回。
+   *  整份分集在千集项目里未压缩 250KB，而切换器最多只展示 60 条，
+   *  故服务端只回一个窗口，另外把窗口外仍需要的信息单独带上。 */
+  episode_total?: number;
+  episode_match_total?: number;
+  episode_offset?: number;
+  episode_index?: number | null;
+  episode_current?: Episode | null;
+  episode_prev?: Pick<Episode, "id" | "episode_no" | "title"> | null;
+  episode_next?: Pick<Episode, "id" | "episode_no" | "title"> | null;
 }
 
 export const numToCn = (n: number): string => {
