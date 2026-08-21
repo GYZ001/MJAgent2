@@ -1414,6 +1414,46 @@ def _new_screenplay_recorder(
     )
 
 
+def _abandon_orphaned_blueprint_receipts(episode_id: str, *, conn) -> int:
+    """Close unknown blueprint outcomes whose production no longer exists.
+
+    The scope is exactly what the budget still counts as an unresolved receipt
+    -- an unsuperseded ``INTERRUPTED``/``RUNNING`` call -- and not merely calls
+    with no disposition yet: an unknown outcome is normally already stamped
+    ``REQUIRES_EXPLICIT_RETRY``, which is precisely the state that needs
+    closing.  Anything genuinely resolved carries a superseding call id and is
+    excluded by that guard.  The rows, their cost and their responses stay
+    untouched as audit evidence; only the open liability is settled.
+    """
+    from app.stages import BLUEPRINT_CALL_ABANDONED_BY_DELETE
+
+    cursor = conn.execute(
+        """UPDATE provider_calls SET recovery_disposition=?
+            WHERE status IN ('INTERRUPTED','RUNNING')
+              AND superseded_by_call_id IS NULL
+              AND COALESCE(recovery_disposition,'') <> ?
+              AND json_extract(meta,'$.stage_key') IN (
+                  'screenplay_blueprint_shard',
+                  'screenplay_blueprint_patch',
+                  'screenplay_blueprint_review'
+              )
+              AND (
+                  json_extract(meta,'$.episode_id')=?
+                  OR run_id IN (
+                      SELECT id FROM workflow_runs
+                       WHERE scope_type='episode' AND scope_id=?
+                  )
+              )""",
+        (
+            BLUEPRINT_CALL_ABANDONED_BY_DELETE,
+            BLUEPRINT_CALL_ABANDONED_BY_DELETE,
+            episode_id,
+            episode_id,
+        ),
+    )
+    return int(cursor.rowcount or 0)
+
+
 def _screenplay_blueprint_budget_projection(
     episode_id: str,
     *,
@@ -1642,6 +1682,28 @@ def _spawn_screenplay_activation(
             started_at=activation_stamp,
         )
         budget = budget_projection["budget"]
+        if (
+            clear_unpublished_ir
+            and budget_projection["requires_fresh_retry_grant"]
+            and budget_projection["revision"] is None
+        ):
+            # A fresh Baseline with no active revision has no production for
+            # these receipts to belong to: the run that made them was
+            # discarded and the revision a retry grant must bind to went with
+            # it.  Every gate below would then be unsatisfiable -- there is no
+            # grant that can be issued and no approval that can stand in for
+            # one -- so the episode would be unstartable for good.  Settle the
+            # orphaned liability exactly as a delete does and let this
+            # activation proceed on its own new revision and budget.  A resume
+            # never takes this path: it really does re-enter the production
+            # those receipts were spent on, and still fails closed.
+            if _abandon_orphaned_blueprint_receipts(episode_id, conn=conn):
+                budget_projection = _screenplay_blueprint_budget_projection(
+                    episode_id,
+                    run_id=recorder.run_id,
+                    started_at=activation_stamp,
+                )
+                budget = budget_projection["budget"]
         if budget_projection["requires_fresh_retry_grant"]:
             trusted_retry_approval = bool(
                 authorize_blueprint_retry
@@ -1684,48 +1746,50 @@ def _spawn_screenplay_activation(
                 raise RuntimeError(
                     "BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED: 缺少可绑定的 active revision"
                 )
-            from app.production.grant import issue_production_grant
-            grant, _token = issue_production_grant(
-                episode_id=episode_id,
-                project_id=project_id,
-                production_revision_id=str(revision["id"]),
-                kind="screenplay",
-                input_artifact_hash=blueprint_retry_receipts_hash(
-                    budget_projection["unknown_receipts"]
-                ),
-                issued_by="user_retry_approval",
-                conn=conn,
-                commit=False,
-            )
-            budget.authorize_unknown_retry(grant.grant_id)
-            activation_retry_grant_id = grant.grant_id
-            activation_retry_receipts_hash = current_receipts_hash
-            activation_retry_revision_id = str(revision["id"])
-            run_row = conn.execute(
-                "SELECT config_snapshot_json FROM workflow_runs WHERE id=?",
-                (recorder.run_id,),
-            ).fetchone()
-            config_snapshot = json.loads(
-                run_row["config_snapshot_json"] or "{}"
-            ) if run_row is not None else {}
-            config_snapshot.update({
-                "blueprint_retry_grant_id": grant.grant_id,
-                "blueprint_retry_receipts_hash": blueprint_retry_receipts_hash(
-                    budget_projection["unknown_receipts"]
-                ),
-                "blueprint_retry_receipts": list(
-                    budget_projection["unknown_receipts"]
-                ),
-            })
-            conn.execute(
-                "UPDATE workflow_runs SET config_snapshot_json=?,updated_at=? "
-                "WHERE id=?",
-                (
-                    json.dumps(config_snapshot, ensure_ascii=False),
-                    activation_stamp,
-                    recorder.run_id,
-                ),
-            )
+                from app.production.grant import issue_production_grant
+                grant, _token = issue_production_grant(
+                    episode_id=episode_id,
+                    project_id=project_id,
+                    production_revision_id=str(revision["id"]),
+                    kind="screenplay",
+                    input_artifact_hash=blueprint_retry_receipts_hash(
+                        budget_projection["unknown_receipts"]
+                    ),
+                    issued_by="user_retry_approval",
+                    conn=conn,
+                    commit=False,
+                )
+                budget.authorize_unknown_retry(grant.grant_id)
+                activation_retry_grant_id = grant.grant_id
+                activation_retry_receipts_hash = current_receipts_hash
+                activation_retry_revision_id = str(revision["id"])
+                run_row = conn.execute(
+                    "SELECT config_snapshot_json FROM workflow_runs WHERE id=?",
+                    (recorder.run_id,),
+                ).fetchone()
+                config_snapshot = json.loads(
+                    run_row["config_snapshot_json"] or "{}"
+                ) if run_row is not None else {}
+                config_snapshot.update({
+                    "blueprint_retry_grant_id": grant.grant_id,
+                    "blueprint_retry_receipts_hash": (
+                        blueprint_retry_receipts_hash(
+                            budget_projection["unknown_receipts"]
+                        )
+                    ),
+                    "blueprint_retry_receipts": list(
+                        budget_projection["unknown_receipts"]
+                    ),
+                })
+                conn.execute(
+                    "UPDATE workflow_runs SET config_snapshot_json=?,updated_at=? "
+                    "WHERE id=?",
+                    (
+                        json.dumps(config_snapshot, ensure_ascii=False),
+                        activation_stamp,
+                        recorder.run_id,
+                    ),
+                )
         elif budget.unknown_receipts and budget.retry_grant_id:
             # A legacy unconsumed exact grant may authorize one activation.
             # It is consumed below only after the task registry accepts the
@@ -2889,33 +2953,11 @@ async def delete_screenplay(episode_id: str):
                 "changed_during_delete",
             )
         # The revision a blueprint retry grant must bind to is superseded
-        # above.  An unknown provider outcome left over from the deleted
-        # production would therefore demand a grant that can no longer be
-        # issued, and every later Baseline would fail activation with
-        # BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED.  Give those calls the
-        # terminal disposition the delete actually is; the rows, their cost
-        # and their responses stay untouched as audit evidence.
-        from app.stages import BLUEPRINT_CALL_ABANDONED_BY_DELETE
-
-        conn.execute(
-            """UPDATE provider_calls SET recovery_disposition=?
-                WHERE status IN ('INTERRUPTED','RUNNING')
-                  AND superseded_by_call_id IS NULL
-                  AND recovery_disposition IS NULL
-                  AND json_extract(meta,'$.stage_key') IN (
-                      'screenplay_blueprint_shard',
-                      'screenplay_blueprint_patch',
-                      'screenplay_blueprint_review'
-                  )
-                  AND (
-                      json_extract(meta,'$.episode_id')=?
-                      OR run_id IN (
-                          SELECT id FROM workflow_runs
-                           WHERE scope_type='episode' AND scope_id=?
-                      )
-                  )""",
-            (BLUEPRINT_CALL_ABANDONED_BY_DELETE, episode_id, episode_id),
-        )
+        # above, so an unknown provider outcome left over from the deleted
+        # production would demand a grant that can no longer be issued and
+        # every later Baseline would fail activation with
+        # BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED.
+        _abandon_orphaned_blueprint_receipts(episode_id, conn=conn)
         from app.storyboard_authority import (
             clear_storyboard_outline_authority,
         )

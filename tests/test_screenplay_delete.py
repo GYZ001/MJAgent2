@@ -286,8 +286,9 @@ def _insert_interrupted_blueprint_call(run_id: str, input_fingerprint: str) -> i
     cursor = conn.execute(
         """INSERT INTO provider_calls(
                ts, kind, model, status, request_json, response_json, meta,
-               project_id, run_id, operation_id
-           ) VALUES(?, 'chat', 'm', 'INTERRUPTED', '{}', '{}', ?, 'p1', ?, ?)""",
+               project_id, run_id, operation_id, recovery_disposition
+           ) VALUES(?, 'chat', 'm', 'INTERRUPTED', '{}', '{}', ?, 'p1', ?, ?,
+                    'REQUIRES_EXPLICIT_RETRY')""",
         (
             db.now(),
             json.dumps({
@@ -372,9 +373,9 @@ def test_delete_leaves_other_episodes_unknown_liability_untouched() -> None:
     conn.execute(
         """INSERT INTO provider_calls(
                ts, kind, model, status, request_json, response_json, meta,
-               project_id, run_id, operation_id
+               project_id, run_id, operation_id, recovery_disposition
            ) VALUES(?, 'chat', 'm', 'INTERRUPTED', '{}', '{}', ?, 'p1',
-                    'run-other', 'op-other-shard')""",
+                    'run-other', 'op-other-shard', 'REQUIRES_EXPLICIT_RETRY')""",
         (
             db.now(),
             json.dumps({
