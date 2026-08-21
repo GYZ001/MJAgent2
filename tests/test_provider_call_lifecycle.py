@@ -462,8 +462,12 @@ def test_stream_eof_without_done_fails_lifecycle_and_discards_partial_tool_call(
     assert row["status"] == "INTERRUPTED"
     assert row["http_status"] == 200
     assert row["error"].startswith("stream interrupted before [DONE] (latency_ms=")
-    assert row["error"].endswith(f", received_chars={len(partial_text)})")
-    assert row["response_json"] is None
+    assert f", received_chars={len(partial_text)})" in row["error"]
+    # The answer is still discarded; only bounded evidence is kept, so a
+    # repeated interruption can be diagnosed instead of guessed at.
+    evidence = json.loads(row["response_json"])["interrupted_stream"]
+    assert "choices" not in json.loads(row["response_json"])
+    assert evidence["content_prefix"] == partial_text
     assert row["received_chars"] == len(partial_text)
     assert row["recovery_disposition"] == "REQUIRES_EXPLICIT_RETRY"
 
@@ -2198,3 +2202,57 @@ def test_identity_discovery_read_timeout_is_stage_specific(monkeypatch) -> None:
     ) == 120.0
     # Every other stage keeps its own selector.
     assert hiagent._chat_read_timeout_s({"stage_key": "other_stage"}) == 900.0
+
+
+def test_interrupted_stream_keeps_bounded_evidence() -> None:
+    """The discarded reconstruction must not take the diagnosis with it."""
+    frames: list[str] = []
+    hiagent._remember_unconsumed_stream_frame(frames, 'event: error')
+    hiagent._remember_unconsumed_stream_frame(frames, '{"code":400,"msg":"x"}')
+    hiagent._remember_unconsumed_stream_frame(frames, '   ')
+    assert frames == ['event: error', '{"code":400,"msg":"x"}']
+
+    for _ in range(10):
+        hiagent._remember_unconsumed_stream_frame(frames, "extra")
+    assert len(frames) == hiagent._INTERRUPTED_STREAM_MAX_FRAMES
+
+    evidence = hiagent._interrupted_stream_evidence(
+        content_parts=["抱歉，我无法"],
+        reasoning_parts=[],
+        unconsumed_frames=frames,
+    )
+    assert evidence["content_prefix"] == "抱歉，我无法"
+    assert evidence["summary"] == "抱歉，我无法"
+    assert evidence["unconsumed_frames"] == frames
+
+
+def test_interrupted_stream_evidence_falls_back_to_dropped_frame() -> None:
+    """With no content at all, the dropped SSE frame is the only evidence."""
+    evidence = hiagent._interrupted_stream_evidence(
+        content_parts=[],
+        reasoning_parts=[],
+        unconsumed_frames=['{"code":400,"message":"too long"}'],
+    )
+    assert evidence["summary"] == '{"code":400,"message":"too long"}'
+
+
+def test_reproduced_interruption_is_relabelled_as_deterministic() -> None:
+    """Telling an operator to retry a reproducible rejection wastes their time."""
+    original = hiagent.ProviderError(
+        "流式响应在 [DONE] 前中断，结果不确定",
+        retryable=True,
+        raw="stream interrupted before [DONE]: 抱歉，我无法",
+        failure_kind="stream_interrupted",
+        delivery_state="unknown",
+        requires_explicit_retry=True,
+        received_chars=22,
+    )
+
+    relabelled = hiagent.deterministic_undelivered_error(original, attempts=2)
+
+    assert relabelled.failure_kind == "deterministic_rejection"
+    assert relabelled.retryable is False
+    assert relabelled.requires_explicit_retry is False
+    # The evidence travels with it, so the cause is visible at the call site.
+    assert "抱歉，我无法" in str(relabelled)
+    assert "重试不会成功" in str(relabelled)

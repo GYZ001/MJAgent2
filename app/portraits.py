@@ -204,6 +204,11 @@ async def _identity_structured_with_resample(
                 raise
             last_error = exc
     assert last_error is not None
+    if isinstance(last_error, hiagent.ProviderError):
+        raise hiagent.deterministic_undelivered_error(
+            last_error,
+            attempts=IDENTITY_UNUSABLE_RESPONSE_RESAMPLES + 1,
+        )
     raise last_error
 
 

@@ -1135,6 +1135,34 @@ def provider_answer_undelivered(exc: object) -> bool:
         return False
 
 
+def deterministic_undelivered_error(
+    last_error: "ProviderError", *, attempts: int,
+) -> "ProviderError":
+    """Re-label an undelivered outcome that reproduced under a fresh attempt.
+
+    A transport stall is transient by nature, so "结果不确定，稍后重试" is the
+    right thing to tell an operator once.  When the identical request is
+    re-issued under its own operation id and the provider cuts it exactly the
+    same way, it is not uncertain any more -- it is a reproducible rejection of
+    that request, and telling anyone to retry it later is telling them to wait
+    forever.  Whatever bounded evidence the transport captured travels with the
+    message so the actual cause is visible.
+    """
+    evidence = str(getattr(last_error, "raw", "") or "").strip()
+    return ProviderError(
+        "供应商对同一请求连续 "
+        f"{attempts} 次以相同方式中断，属于可复现的拒绝而非临时故障；"
+        "重试不会成功，请检查该请求的内容或规模"
+        + (f"（{evidence[:200]}）" if evidence else ""),
+        retryable=False,
+        raw=evidence,
+        failure_kind="deterministic_rejection",
+        delivery_state="responded",
+        requires_explicit_retry=False,
+        received_chars=int(getattr(last_error, "received_chars", 0) or 0),
+    )
+
+
 def _chat_read_timeout_s(call_meta: dict | None) -> float:
     """为长结构化生成使用独立读超时，其他文本请求保持通用上限。"""
     stage_key = str((call_meta or {}).get("stage_key") or "").strip().lower()
@@ -1914,6 +1942,48 @@ def _reconstruct_stream_data(
     return data
 
 
+_INTERRUPTED_STREAM_FRAME_CHARS = 300
+_INTERRUPTED_STREAM_MAX_FRAMES = 4
+_INTERRUPTED_STREAM_TEXT_CHARS = 300
+
+
+def _remember_unconsumed_stream_frame(
+    frames: list[str], line: str,
+) -> None:
+    """Keep a bounded record of SSE frames the reader could not consume."""
+    text = str(line or "").strip()
+    if not text or len(frames) >= _INTERRUPTED_STREAM_MAX_FRAMES:
+        return
+    frames.append(text[:_INTERRUPTED_STREAM_FRAME_CHARS])
+
+
+def _interrupted_stream_evidence(
+    *,
+    content_parts: list[str],
+    reasoning_parts: list[str],
+    unconsumed_frames: list[str],
+) -> dict[str, Any]:
+    """Bounded evidence for a stream that ended without ``[DONE]``.
+
+    The reconstructed answer is still discarded -- an incomplete stream is not
+    an answer.  But discarding the evidence too left a repeated interruption
+    undiagnosable: in production the same prompt was cut four times after
+    exactly 22 characters, and nobody could see whether those characters were
+    a refusal, an error envelope or ordinary prose.
+    """
+    content = "".join(content_parts)[:_INTERRUPTED_STREAM_TEXT_CHARS]
+    reasoning = "".join(reasoning_parts)[:_INTERRUPTED_STREAM_TEXT_CHARS]
+    summary = content or reasoning or (
+        unconsumed_frames[0] if unconsumed_frames else ""
+    )
+    return {
+        "content_prefix": content,
+        "reasoning_prefix": reasoning,
+        "unconsumed_frames": list(unconsumed_frames),
+        "summary": summary[:_INTERRUPTED_STREAM_TEXT_CHARS],
+    }
+
+
 async def _stream_chat_completion(
     client: httpx.AsyncClient, url: str, payload: dict, *,
     kind: str, model: str, headers: dict | None = None, key_name: str = "HIAGENT_API_KEY",
@@ -1936,6 +2006,7 @@ async def _stream_chat_completion(
         "streaming": True, **(merged_meta or {}),
     }
     call_id = start_provider_call(kind, model, meta=attempt_meta, request_json=stream_payload)
+    unconsumed_frames: list[str] = []
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_slots: dict[int, dict[str, Any]] = {}
@@ -1965,6 +2036,12 @@ async def _stream_chat_completion(
                     raise err
                 async for line in resp.aiter_lines():
                     if not line or not line.startswith("data:"):
+                        # An SSE ``event: error`` frame, or any non-data line,
+                        # used to vanish here and the stream simply ended
+                        # without [DONE] -- leaving no evidence of why.
+                        _remember_unconsumed_stream_frame(
+                            unconsumed_frames, line,
+                        )
                         continue
                     chunk_str = line[len("data:"):].strip()
                     if not chunk_str or chunk_str == "[DONE]":
@@ -1975,6 +2052,9 @@ async def _stream_chat_completion(
                     try:
                         chunk = json.loads(chunk_str)
                     except (json.JSONDecodeError, ValueError):
+                        _remember_unconsumed_stream_frame(
+                            unconsumed_frames, chunk_str,
+                        )
                         continue
                     content_count = len(content_parts)
                     reasoning_count = len(reasoning_parts)
@@ -2013,11 +2093,24 @@ async def _stream_chat_completion(
                 chunk_at=time.time(),
             )
         if not saw_done:
+            evidence = _interrupted_stream_evidence(
+                content_parts=content_parts,
+                reasoning_parts=reasoning_parts,
+                unconsumed_frames=unconsumed_frames,
+            )
             detail = (
                 "stream interrupted before [DONE] "
                 f"(latency_ms={latency}, received_chars={received_chars})"
             )
-            finish_provider_call(call_id, "INTERRUPTED", 200, latency, error=detail)
+            if evidence.get("summary"):
+                detail = f"{detail}: {evidence['summary']}"
+            # The reconstruction is still discarded as an answer; only this
+            # bounded evidence survives, so a repeated interruption can be
+            # diagnosed instead of guessed at.
+            finish_provider_call(
+                call_id, "INTERRUPTED", 200, latency,
+                error=detail, response_json={"interrupted_stream": evidence},
+            )
             raise ProviderError(
                 "流式响应在 [DONE] 前中断，结果不确定；"
                 "已丢弃不完整结果并禁止自动重试，请在页面确认后重试",
