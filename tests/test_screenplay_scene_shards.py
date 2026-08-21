@@ -305,7 +305,7 @@ def test_scene_shard_semantic_review_json_contract_is_strict() -> None:
     schema = ScreenplaySceneShardSemanticReview.model_json_schema()
 
     assert SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION == (
-        "screenplay-scene-semantic-review.v14"
+        "screenplay-scene-semantic-review.v15"
     )
     assert schema["required"] == ["findings"]
     assert "default" not in schema["properties"]["findings"]
@@ -3303,9 +3303,9 @@ def test_run_884443dc4404_prompt_attributes_051_duplication_to_045() -> None:
         }
     )
 
-    assert "必须逐 slot 穷举审查" in prompt
+    assert "必须逐 slot 穷举核对" in prompt
     assert "finding 只能归因到 creative fields 与该 slot 自身 source_fact" in prompt
-    assert "标记最早越界或没有自身来源承载该内容的 slot" in prompt
+    assert "标记最早超出自身来源、或没有自身来源承载该内容的 slot" in prompt
     assert "不得标记后来正确承载其自身 source_fact 的 slot" in prompt
     assert all(slot["unit_key"] in prompt for slot in fixture_slots)
     assert all(slot["source_fact"] in prompt for slot in fixture_slots)
