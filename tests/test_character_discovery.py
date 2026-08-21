@@ -4236,11 +4236,10 @@ def test_current_identity_named_requires_literal_selected_evidence(
     assert calls == 1
 
 
-def test_current_identity_literal_label_rejects_cross_evidence_once(
+def test_current_identity_literal_label_isolated_as_synthetic_once(
     monkeypatch,
 ) -> None:
     calls = 0
-    downstream: list[str] = []
 
     async def fake_chat(messages, **kwargs):
         nonlocal calls
@@ -4273,8 +4272,7 @@ def test_current_identity_literal_label_rejects_cross_evidence_once(
         ), ensure_ascii=False)
 
     async def forbidden_future(*_args, **_kwargs):
-        downstream.append("future")
-        raise AssertionError("cross-evidence current result reached future")
+        raise AssertionError("synthetic current label reached future provider")
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
     monkeypatch.setattr(
@@ -4282,18 +4280,25 @@ def test_current_identity_literal_label_rejects_cross_evidence_once(
         "resolve_future_identity_candidates",
         forbidden_future,
     )
-    with pytest.raises(
-        model_gateway.StructuredSemanticError,
-        match="evidence_id 与已知逐字 source_label 不匹配",
-    ):
-        asyncio.run(portraits.discover_character_candidates(
-            "门卫守在山门。\n\n银袍女子站在殿前。",
-            Bible(world=World(visual_style_canonical="国风"), characters=[]),
-            1,
-        ))
+    # "门卫" is not literal in the receipt it was bound to, so it is a legitimate
+    # synthetic observation (prompt rule 4). It must be isolated as synthetic,
+    # not hard-failed just because "门卫" appears verbatim in another owned
+    # receipt. Synthetic labels never enter future authority resolution.
+    candidates = asyncio.run(portraits.discover_character_candidates(
+        "门卫守在山门。\n\n银袍女子站在殿前。",
+        Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        1,
+    ))
 
     assert calls == 1
-    assert downstream == []
+    assert len(candidates) == 1
+    assert candidates[0]["source_label"] == "门卫"
+    assert candidates[0]["identity_kind"] == "functional"
+    assert candidates[0]["source_label_provenance"] == (
+        portraits.CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+    )
+    assert candidates[0]["identity_group"].startswith("current-1:synthetic:")
+    assert "银袍女子" in candidates[0]["source_quote"]
 
 
 @pytest.mark.parametrize(

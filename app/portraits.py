@@ -2475,16 +2475,6 @@ def _validate_current_identity_receipt_bundle(
             label and label in str(receipts[0].get("text") or "")
         ):
             invalid("synthetic receipt 语义不闭合")
-        if source_text is not None:
-            owned_catalog = _current_identity_evidence_records(
-                source_text,
-                draft_text=str(draft_text or ""),
-            )
-            if label and any(
-                label in str(value.get("text") or "")
-                for value in owned_catalog
-            ):
-                invalid("synthetic source_label 已在 owned catalog 逐字出现")
     else:
         invalid("source_label provenance 不允许持有 v2 receipt")
 
