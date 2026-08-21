@@ -3958,12 +3958,12 @@ def test_future_known_decision_overwrites_stale_materialization_compatibility(
         ("forged_k", "K decision 越界"),
         ("sentinel", "K decision 越界"),
         ("reserved_n", "必须选择 K decision"),
-        ("cross_f", "evidence_id 与已知逐字 source_label 不匹配"),
+        ("cross_f", None),
     ],
 )
 def test_current_identity_rf11_custom_exact_gates(
     mutation: str,
-    error_fragment: str,
+    error_fragment: str | None,
 ) -> None:
     records = portraits._current_identity_evidence_records(
         "耳根站在山门。\n\n门卫守在殿前。"
@@ -4021,20 +4021,30 @@ def test_current_identity_rf11_custom_exact_gates(
     response = portraits.CurrentIdentityCandidateResponse.model_validate(
         payload
     )
-    _projected, errors = portraits._project_current_identity_response(
+    projected, errors = portraits._project_current_identity_response(
         response,
         evidence_by_ref=evidence_by_ref,
         known_decisions=known,
-        all_evidence_by_id={
-            str(record["evidence_id"]): record
-            for record in records
-        },
         reserved_authority_labels={"耳根"},
         group_scope="current-1",
         existing_functional_routes=set(),
     )
 
-    assert any(error_fragment in error for error in errors)
+    if error_fragment is None:
+        # A functional label that is not literal in its own owned evidence is a
+        # legitimate synthetic observation (prompt rule 4), never a hard failure
+        # just because the phrase happens to appear verbatim elsewhere.
+        assert errors == []
+        assert len(projected) == 1
+        assert projected[0]["identity_kind"] == "functional"
+        assert projected[0]["source_label"] == "门卫"
+        assert (
+            projected[0]["source_label_provenance"]
+            == portraits.CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+        )
+        assert projected[0]["identity_group"].startswith("current-1:synthetic:")
+    else:
+        assert any(error_fragment in error for error in errors)
 
 
 @pytest.mark.parametrize("failure", ["attempt15_rf9", "unknown_evidence"])
@@ -4388,9 +4398,6 @@ def test_current_identity_cross_batch_literal_uses_global_catalog() -> None:
     records = portraits._current_identity_evidence_records(
         "门卫守在山门。\n\n银袍女子站在殿前。"
     )
-    guard_record = next(
-        item for item in records if "门卫" in str(item["text"])
-    )
     unrelated_record = next(
         item for item in records if "银袍女子" in str(item["text"])
     )
@@ -4405,21 +4412,28 @@ def test_current_identity_cross_batch_literal_uses_global_catalog() -> None:
         }],
     })
 
-    _projected, errors = portraits._project_current_identity_response(
+    projected, errors = portraits._project_current_identity_response(
         response,
         evidence_by_ref={"E001": unrelated_record},
         known_decisions={},
-        all_evidence_by_id={
-            guard_record["evidence_id"]: guard_record,
-            unrelated_record["evidence_id"]: unrelated_record,
-        },
         group_scope="current-2",
         existing_functional_routes=set(),
     )
 
-    assert errors == [
-        "current evidence_id 与已知逐字 source_label 不匹配：门卫"
-    ]
+    # The provider bound "门卫" to evidence that does not contain it verbatim.
+    # That makes it a synthetic observation for this batch; the fact that "门卫"
+    # appears literally in a different batch's receipt must not turn a legitimate
+    # synthetic label into a hard failure. Synthetic identities are structurally
+    # excluded from becoming authorities downstream, so no cross-batch conflict.
+    assert errors == []
+    assert len(projected) == 1
+    assert projected[0]["source_label"] == "门卫"
+    assert projected[0]["identity_kind"] == "functional"
+    assert (
+        projected[0]["source_label_provenance"]
+        == portraits.CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+    )
+    assert projected[0]["identity_group"].startswith("current-2:synthetic:")
 
 
 @pytest.mark.parametrize("identity_kind", ["functional", "named"])
