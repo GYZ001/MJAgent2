@@ -1538,13 +1538,6 @@ def _project_current_identity_response(
             kind=item.kind,
             record=record,
         )
-    # Two F entries with the same verbatim label bound to the same owned
-    # evidence carry nothing the backend could tell apart, and the contract
-    # requires genuinely distinct anonymous entities to use distinct labels.
-    # Collapsing them onto the first key keeps one identity per label instead
-    # of guaranteeing a downstream registry conflict; different labels or
-    # different evidence still fail closed.
-    functional_key_by_occurrence: dict[tuple[str, str], str] = {}
     for item in value.f:
         evidence_ref = _resolved_evidence_ref(
             item.evidence_ref, expected_refs
@@ -1553,15 +1546,11 @@ def _project_current_identity_response(
         if evidence_ref not in expected_refs or record is None:
             errors.append(f"current F evidence_ref 越界：{evidence_ref}")
             continue
-        occurrence = (str(item.source_label or "").strip(), evidence_ref)
-        functional_key = functional_key_by_occurrence.setdefault(
-            occurrence, str(item.functional_identity_key or ""),
-        )
         append_candidate(
             source_label=item.source_label,
             canonical_name="",
             identity_kind="functional",
-            functional_key=functional_key,
+            functional_key=item.functional_identity_key,
             kind=item.kind,
             record=record,
         )
