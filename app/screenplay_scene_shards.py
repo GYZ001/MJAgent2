@@ -5606,7 +5606,7 @@ async def generate_screenplay_scene_shards(
     front_matter_ids = structural_front_matter_ids(source_segments)
     identity_keys = {identity.key for identity in identities}
     parallelism = _setting_int(
-        "screenplay_scene_shard_parallelism", 2, minimum=1, maximum=2
+        "screenplay_scene_shard_parallelism", 4, minimum=1, maximum=8
     )
     semaphore = asyncio.Semaphore(parallelism)
     batch_abort = asyncio.Event()

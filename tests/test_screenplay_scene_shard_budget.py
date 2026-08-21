@@ -282,22 +282,28 @@ def test_ss004_budget_replay_preserves_all_sources_and_events(
     assert captured["call_meta"]["required_output_tokens"] == 9118
     assert captured["call_meta"]["output_budget_tokens"] == 9118
     assert captured["call_meta"]["output_budget_limited"] is False
-    authority_budget = case["exact_authority_budget"]
-    assert len(captured["prompt"]) == authority_budget["prompt_chars"]
-    assert (
-        len(captured["prompt"]) - recorded["input_chars"]
-        == authority_budget["prompt_increment_chars"]
+    # SS004 的安全属性是「提示词与修复上下文不会吃满上下文窗口」，不是「字符数
+    # 一个字节都不许变」。措辞改动属于正常演进，膨胀（重复拼接、整块复制）才是
+    # 事故。所以这里对事故当时的真实请求体设上限，并保留两条真正的窗口断言。
+    bounds = case["authority_budget_bounds"]
+    assert bounds["baseline_prompt_chars"] == recorded["input_chars"]
+    assert bounds["baseline_repair_context_chars"] == (
+        case["recorded_attempts"][2]["request_chars"]
+    )
+    assert len(captured["prompt"]) <= bounds["prompt_chars_max"], (
+        f"提示词已增长到 {len(captured['prompt'])} 字，超过事故基线 "
+        f"{bounds['baseline_prompt_chars']} 的 "
+        f"{bounds['max_growth_ratio']:.0%} 上限；请确认是有意扩写而非重复拼接。"
     )
     assert math.ceil(len(captured["prompt"]) / 1.5 * 1.2) < (
         recorded["model_context_window_tokens"]
     )
-    assert len(captured["repair_context"]) == authority_budget[
-        "repair_context_chars"
-    ]
-    assert (
-        len(captured["repair_context"])
-        - case["recorded_attempts"][2]["request_chars"]
-        == authority_budget["repair_context_increment_chars"]
+    assert len(captured["repair_context"]) <= bounds[
+        "repair_context_chars_max"
+    ], (
+        f"修复上下文已增长到 {len(captured['repair_context'])} 字，超过事故基线 "
+        f"{bounds['baseline_repair_context_chars']} 的 "
+        f"{bounds['max_growth_ratio']:.0%} 上限。"
     )
     assert math.ceil(len(captured["repair_context"]) / 1.5 * 1.2) < (
         recorded["model_context_window_tokens"]

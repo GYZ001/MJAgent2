@@ -84,7 +84,9 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "screenplay_scene_shards_enabled": _boolean("启用剧本场次分片", "true"),
     "screenplay_targeted_identity_enabled": _boolean("启用定向人物解析", "true"),
     "screenplay_targeted_blueprint_review_enabled": _boolean("启用蓝图风险审稿", "true"),
-    "screenplay_scene_shard_parallelism": _number("单集场次分片并发", "2", 1, 2, unit="请求"),
+    # 场次分片彼此独立（各自有缓存与 fail-fast 作用域），真实 provider 负载已由
+    # text_generation_concurrency 这一进程级闸门兜底，所以单集这一层不需要再压到 2。
+    "screenplay_scene_shard_parallelism": _number("单集场次分片并发", "4", 1, 8, unit="请求"),
     "screenplay_scene_shard_max_units": _number("场次分片单位上限", "24", 8, 64, unit="units"),
     "screenplay_scene_shard_max_output_chars": _number("场次分片输出字符上限", "12000", 3000, 30000, unit="字符"),
     "screenplay_scene_semantic_review_output_reserve_percent": _number(

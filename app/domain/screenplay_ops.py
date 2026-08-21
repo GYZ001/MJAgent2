@@ -1421,11 +1421,11 @@ def _screenplay_blueprint_budget_projection(
     started_at: float | None = None,
 ) -> dict[str, Any]:
     """Read-only budget/grant projection shared by preflight and activation."""
+    from app.source_excerpt import index_source_segments
     from app.stages import (
-        BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS,
-        BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS,
         BLUEPRINT_SHARD_MIN_TOKENS,
         _BlueprintGenerationBudget,
+        _partition_blueprint_segments,
         blueprint_retry_receipts_hash,
     )
 
@@ -1487,13 +1487,19 @@ def _screenplay_blueprint_budget_projection(
             == blueprint_retry_receipts_hash(budget.unknown_receipts)
         ):
             budget.authorize_unknown_retry(current_grant_id)
+    # Size the runaway breakers from the same deterministic partition the
+    # stage will plan from.  Cached leaves and dynamic splits can only add
+    # leaves, so this uncached count is a lower bound: the fence here is never
+    # more permissive than the runtime budget, and never rejects an episode
+    # purely for being long.
+    budget.adopt_shard_plan(
+        len(_partition_blueprint_segments(index_source_segments(source_text)))
+    )
     token_admissible = (
         budget.charged_output_tokens + BLUEPRINT_SHARD_MIN_TOKENS
-        <= BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS
+        <= budget.max_output_tokens
     )
-    call_admissible = (
-        budget.provider_calls < BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS
-    )
+    call_admissible = budget.provider_calls < budget.max_provider_calls
     return {
         "budget": budget,
         "input_fingerprint": input_fp,

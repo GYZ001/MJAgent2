@@ -1,0 +1,14 @@
+[Unit]
+Description=MJAgent2 local/remote git sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/MJAgent2
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/root/MJAgent2/scripts/sync_remote.sh
+Nice=10
+TimeoutStartSec=180

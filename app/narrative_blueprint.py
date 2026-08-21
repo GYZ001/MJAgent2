@@ -29,7 +29,11 @@ from app.source_facts import SOURCE_FACT_VERSION, SourceFact, source_facts
 
 
 BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v7"
-BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.10.0"
+# 1.11.0: evidence rows stop restating source_segment_ids (backend derives them
+# from source_unit_keys) and stop emitting the visible rows a resolved
+# state_subject already implies.  Both are deterministic locally, so buying them
+# from the provider was pure output cost and an extra failure surface.
+BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.11.0"
 BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 # Provider-facing Blueprint shards are deliberately smaller than the final
 # scene/node ownership limit.  A production 28-SRC shard exhausted 10K output
@@ -109,6 +113,20 @@ _PARATEXT_EMPTY_LIST_FIELDS = (
 )
 
 
+def _evidence_segment_ids_from_units(value: Any) -> list[str]:
+    """Project the owning SRC ids out of exact source unit keys, in order."""
+    segment_ids: list[str] = []
+    for unit_key in value if isinstance(value, list) else []:
+        source_segment_id, marker, unit_id = str(unit_key or "").partition(
+            ":unit:"
+        )
+        if not marker or not source_segment_id or not unit_id:
+            return []
+        if source_segment_id not in segment_ids:
+            segment_ids.append(source_segment_id)
+    return segment_ids
+
+
 def normalize_blueprint_provider_payload(payload: Any) -> Any:
     """Normalize provider-only cross-field drift without inventing authority.
 
@@ -163,6 +181,16 @@ def normalize_blueprint_provider_payload(payload: Any) -> Any:
                 if source_unit_keys and not retained_keys:
                     continue
                 evidence["source_unit_keys"] = retained_keys
+            # ``source_unit_keys`` is the authoritative binding; the owning SRC
+            # is literally its prefix.  Restating it is redundant output the
+            # provider can also get wrong, so the projection derives it here
+            # and the shard contract no longer asks for it.  Rows that cite no
+            # unit (segment-level ``visible``/``mentioned``) keep their own.
+            derived_segment_ids = _evidence_segment_ids_from_units(
+                evidence.get("source_unit_keys")
+            )
+            if derived_segment_ids:
+                evidence["source_segment_ids"] = derived_segment_ids
             evidence_values.append(evidence)
             identity_key = str(evidence.get("identity_key") or "").strip()
             if identity_key and identity_key not in evidence_identities:
@@ -264,11 +292,14 @@ def blueprint_shard_provider_schema(
     if isinstance(evidence_schema, dict):
         evidence_properties = evidence_schema.get("properties", {})
         evidence_properties.get("identity_key", {})["minLength"] = 1
-        evidence_properties.get("source_segment_ids", {})["minItems"] = 1
         if source_ids:
             evidence_properties["source_segment_ids"]["items"] = {
                 "enum": source_ids,
             }
+        evidence_properties["source_segment_ids"]["description"] = (
+            "Backend-derived from source_unit_keys; only fill it for a row "
+            "that cites no source unit at all."
+        )
         if source_unit_keys:
             evidence_properties["source_unit_keys"]["items"] = {
                 "enum": source_unit_keys,
@@ -291,14 +322,23 @@ def blueprint_shard_provider_schema(
             "then": {
                 "properties": {
                     "identity_key": {"minLength": 1},
-                    "source_segment_ids": {"minItems": 1},
                     "source_unit_keys": {"minItems": 1},
                 },
                 "required": [
                     "identity_key",
-                    "source_segment_ids",
                     "source_unit_keys",
                 ],
+            },
+        })
+        # Once a row cites an exact unit, its owning SRC is derivable, so the
+        # provider must not spend output restating it.
+        evidence_schema.setdefault("allOf", []).append({
+            "if": {
+                "properties": {"source_unit_keys": {"minItems": 1}},
+                "required": ["source_unit_keys"],
+            },
+            "then": {
+                "properties": {"source_segment_ids": {"maxItems": 0}},
             },
         })
     assignment_schema = definitions.get("NarrativeStateSubjectAssignment")
@@ -2693,9 +2733,15 @@ def _node_state_subject_repairable_identities(
 
 
 def normalize_blueprint_state_subject_perception(
-    blueprint: NarrativeBlueprint,
+    blueprint: NarrativeBlueprint | NarrativeBlueprintShard,
 ) -> int:
-    """Add grouped visible evidence for valid exact-unit state subjects."""
+    """Add grouped visible evidence for valid exact-unit state subjects.
+
+    Only nodes/units that already resolve to exactly one state subject are
+    touched, so ambiguous, conflicting, missing and environment units are left
+    for the model to adjudicate.  Shard generation and the merged-blueprint
+    repair loop both run this before validation.
+    """
     added = 0
     for node in blueprint.nodes:
         if node.narrative_layer != "story":

@@ -174,11 +174,24 @@ TIMEOUT_CHAT_VIDEO_PLAN_READ = float(
 TIMEOUT_CHAT_STORYBOARD_OUTLINE_READ = float(
     os.environ.get("TIMEOUT_CHAT_STORYBOARD_OUTLINE_READ", "600")
 )
-# 蓝图语义审稿是长结构化生成：完整复审要把整份蓝图 + 来源投影一起送审，
-# 实测单次可达 300s+（生产已出现 312s ReadTimeout）。单独放宽到 600s，
-# 与 baseline 阶段一致，避免慢审稿在接近完成时被断开并整次重放。
+# 蓝图语义审稿是长结构化生成：完整复审要把整份蓝图 + 来源投影一起送审。
+# 曾因一次 312s ReadTimeout 放宽到 600s，但那次同样是 0 字节卡死而不是慢审稿：
+# ep_3d523ff4d0a4 的三次成功审稿是 35.3s/37.1s/45.9s（1202/1875/2138 tokens），
+# 而失败那次在 618.9s 时仍然 received_chars=0。按 54 次同网关调用拟合出的
+# latency ≈ 3.7s + chars/170，即使跑满 16384 tokens（≈36K 字）也只要 ~216s，
+# 所以 600s 只是把卡死的空等拉长到 10 分钟，并不能救活任何一次真实审稿。
+# 收紧到 360s：对理论满额输出仍有 1.7× 余量，卡死则少空等 4 分钟。
+# 注意这只是止血——真正的问题是「两名审稿人少一个就废掉整份蓝图」，见 stages.py。
 TIMEOUT_CHAT_BLUEPRINT_REVIEW_READ = float(
-    os.environ.get("TIMEOUT_CHAT_BLUEPRINT_REVIEW_READ", "600")
+    os.environ.get("TIMEOUT_CHAT_BLUEPRINT_REVIEW_READ", "360")
+)
+# 蓝图分片是本流水线里最短的一类结构化生成：ep_3d523ff4d0a4 的 54 次成功调用
+# 中最慢一次 67.8s（13K 字输出）。上游网关实际是「攒够再吐」，读超时因此等价于
+# 整次生成超时，用通用 300s 意味着一次卡死要空等 5 分钟才暴露，而且会把
+# 「什么都没发生」升级成 outcome-unknown、必须人工签发 Production Grant。
+# 按实测最慢值 ×2.6 单独收紧到 180s：健康调用留足余量，卡死更早暴露。
+TIMEOUT_CHAT_BLUEPRINT_SHARD_READ = float(
+    os.environ.get("TIMEOUT_CHAT_BLUEPRINT_SHARD_READ", "180")
 )
 TIMEOUT_VIDEO_CREATE = 30.0
 TIMEOUT_VIDEO_POLL = 30.0

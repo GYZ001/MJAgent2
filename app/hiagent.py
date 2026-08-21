@@ -1129,6 +1129,11 @@ def _chat_read_timeout_s(call_meta: dict | None) -> float:
         )
     if stage_key == "storyboard" or stage_key.startswith("storyboard_shot_"):
         return max(config.TIMEOUT_CHAT_READ, config.TIMEOUT_CHAT_BASELINE_READ)
+    if stage_key == "screenplay_blueprint_shard":
+        # Deliberately not max()-ed against the generic ceiling: this stage is
+        # short enough that the generic 300s only delays a stall, and a stalled
+        # shard costs an explicit Production Grant on top of the dead wait.
+        return config.TIMEOUT_CHAT_BLUEPRINT_SHARD_READ
     if stage_key == "screenplay_blueprint_review":
         return max(
             config.TIMEOUT_CHAT_READ,

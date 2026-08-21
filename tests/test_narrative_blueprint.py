@@ -4677,3 +4677,217 @@ def test_blueprint_review_fails_closed_when_one_reviewer_is_unavailable(
             episode={"id": f"ep-blueprint-review-unavailable-{uuid.uuid4()}", "episode_no": 8},
             source_text=SOURCE,
         ))
+
+
+# --- ERR-20260821-2def08 -----------------------------------------------------
+# run_23f773b2ec1c finished all 25 blueprint leaves, then one of the two
+# independent reviewers stalled for 618.9s with received_chars=0.  Consensus was
+# one clean sample short, and the gate discarded ~30 minutes of validated
+# blueprint.  A reviewer that never delivered an opinion is re-drawn once as a
+# NEW deterministic sample; a reviewer that *authored* an unacceptable opinion
+# is never re-drawn.
+
+
+class _ReviewEmptyRows:
+    @staticmethod
+    def fetchall():
+        return []
+
+
+class _ReviewEmptyConnection:
+    @staticmethod
+    def execute(*_args, **_kwargs):
+        return _ReviewEmptyRows()
+
+
+def _install_review_harness(monkeypatch, fake_chat_structured) -> None:
+    monkeypatch.setattr(stages, "get_conn", lambda: _ReviewEmptyConnection())
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: "true"
+        if key == "screenplay_targeted_blueprint_review_enabled"
+        else 1,
+    )
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        fake_chat_structured,
+    )
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda *_args, **_kwargs: {"id": str(uuid.uuid4())},
+    )
+
+
+def test_undelivered_reviewer_is_supplemented_instead_of_discarding_blueprint(
+    monkeypatch,
+) -> None:
+    clean_review = BlueprintSemanticReview.model_validate({"issues": []})
+    samples: list[int] = []
+
+    async def fake_chat_structured(*_args, **kwargs):
+        sample_no = int(kwargs["call_meta"]["review_sample"])
+        samples.append(sample_no)
+        if sample_no == 2:
+            raise hiagent.ProviderError(
+                "ReadTimeout(phase=read): outcome unknown",
+                delivery_state="unknown",
+                replay_safe=False,
+            )
+        return clean_review.model_copy(deep=True)
+
+    _install_review_harness(monkeypatch, fake_chat_structured)
+
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        _blueprint(),
+        episode={"id": "episode-review-supplement"},
+        source_text=SOURCE,
+    ))
+
+    assert result is not None
+    # Sample 3 is a distinct operation, never a replay of the unresolved call.
+    assert samples == [1, 2, stages.BLUEPRINT_REVIEW_SUPPLEMENTARY_SAMPLE]
+
+
+def test_authored_but_invalid_review_is_never_redrawn(monkeypatch) -> None:
+    """Re-drawing an authored opinion until one passes is coached compliance."""
+    clean_review = BlueprintSemanticReview.model_validate({"issues": []})
+    samples: list[int] = []
+
+    async def fake_chat_structured(*_args, **kwargs):
+        sample_no = int(kwargs["call_meta"]["review_sample"])
+        samples.append(sample_no)
+        if sample_no == 2:
+            raise stages.model_gateway.StructuredSemanticError(
+                "风险审稿引用了范围外节点",
+            )
+        return clean_review.model_copy(deep=True)
+
+    _install_review_harness(monkeypatch, fake_chat_structured)
+
+    with pytest.raises(
+        ContentGenerationError,
+        match="蓝图语义审稿人不足两份",
+    ):
+        asyncio.run(stages._semantic_review_narrative_blueprint(
+            _blueprint(),
+            episode={"id": "episode-review-authored-invalid"},
+            source_text=SOURCE,
+        ))
+
+    assert samples == [1, 2]
+
+
+def test_off_schema_review_is_not_redrawn_but_corrupt_bytes_are(
+    monkeypatch,
+) -> None:
+    clean_review = BlueprintSemanticReview.model_validate({"issues": []})
+
+    def run(unparseable: bool) -> list[int]:
+        samples: list[int] = []
+
+        async def fake_chat_structured(*_args, **kwargs):
+            sample_no = int(kwargs["call_meta"]["review_sample"])
+            samples.append(sample_no)
+            if sample_no == 2 and len(samples) <= 2:
+                error = stages.model_gateway.StructuredFormatError("bad body")
+                error.unparseable = unparseable
+                raise error
+            return clean_review.model_copy(deep=True)
+
+        _install_review_harness(monkeypatch, fake_chat_structured)
+        try:
+            asyncio.run(stages._semantic_review_narrative_blueprint(
+                _blueprint(),
+                episode={"id": f"episode-review-shape-{unparseable}"},
+                source_text=SOURCE,
+            ))
+        except ContentGenerationError:
+            pass
+        return samples
+
+    # Decoded-but-off-schema is an authored answer: one call each, no re-draw.
+    assert run(False) == [1, 2]
+    # Corrupt bytes carry no opinion, so the missing sample is drawn again.
+    assert run(True) == [1, 2, stages.BLUEPRINT_REVIEW_SUPPLEMENTARY_SAMPLE]
+
+
+def test_both_reviewers_undelivered_still_fails_closed(monkeypatch) -> None:
+    """A systemic provider outage must not be chased with extra samples."""
+    samples: list[int] = []
+
+    async def fake_chat_structured(*_args, **kwargs):
+        samples.append(int(kwargs["call_meta"]["review_sample"]))
+        raise hiagent.ProviderError(
+            "ReadTimeout(phase=read): outcome unknown",
+            delivery_state="unknown",
+            replay_safe=False,
+        )
+
+    _install_review_harness(monkeypatch, fake_chat_structured)
+
+    with pytest.raises(
+        ContentGenerationError,
+        match="蓝图语义审稿人不足两份",
+    ):
+        asyncio.run(stages._semantic_review_narrative_blueprint(
+            _blueprint(),
+            episode={"id": "episode-review-both-down"},
+            source_text=SOURCE,
+        ))
+
+    assert samples == [1, 2]
+
+
+def test_supplementary_reviewer_failure_is_bounded_to_one_extra_sample(
+    monkeypatch,
+) -> None:
+    clean_review = BlueprintSemanticReview.model_validate({"issues": []})
+    samples: list[int] = []
+
+    async def fake_chat_structured(*_args, **kwargs):
+        sample_no = int(kwargs["call_meta"]["review_sample"])
+        samples.append(sample_no)
+        if sample_no == 1:
+            return clean_review.model_copy(deep=True)
+        raise hiagent.ProviderError(
+            "ReadTimeout(phase=read): outcome unknown",
+            delivery_state="unknown",
+            replay_safe=False,
+        )
+
+    _install_review_harness(monkeypatch, fake_chat_structured)
+
+    with pytest.raises(
+        ContentGenerationError,
+        match="蓝图语义审稿人不足两份",
+    ):
+        asyncio.run(stages._semantic_review_narrative_blueprint(
+            _blueprint(),
+            episode={"id": "episode-review-supplement-fails"},
+            source_text=SOURCE,
+        ))
+
+    # Exactly one supplementary sample: never a loop.
+    assert samples == [1, 2, stages.BLUEPRINT_REVIEW_SUPPLEMENTARY_SAMPLE]
+
+
+def test_generation_breaker_in_reviewer_is_not_masked_as_missing_reviewer(
+    monkeypatch,
+) -> None:
+    """A call/token/wall breaker must surface, not read as 审稿人不足两份."""
+    async def fake_chat_structured(*_args, **_kwargs):
+        raise stages.StageError(
+            "剧本时空因果蓝图分片",
+            ["[BLUEPRINT_GENERATION_CALL_BUDGET] 超过全局调用上限"],
+        )
+
+    _install_review_harness(monkeypatch, fake_chat_structured)
+
+    with pytest.raises(stages.StageError, match="CALL_BUDGET"):
+        asyncio.run(stages._semantic_review_narrative_blueprint(
+            _blueprint(),
+            episode={"id": "episode-review-breaker"},
+            source_text=SOURCE,
+        ))

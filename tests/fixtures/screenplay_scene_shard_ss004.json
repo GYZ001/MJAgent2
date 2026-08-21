@@ -14,12 +14,6 @@
     "scene_count": 3,
     "source_count": 11
   },
-  "exact_authority_budget": {
-    "prompt_chars": 36185,
-    "prompt_increment_chars": 1452,
-    "repair_context_chars": 23114,
-    "repair_context_increment_chars": 2205
-  },
   "recorded_attempts": [
     {
       "format_attempt": 0,
@@ -120,8 +114,16 @@
   "scene_plans": [
     {
       "key": "bp-sc013",
-      "node_keys": ["S002-S001-N014"],
-      "source_segment_ids": ["SRC0049", "SRC0050", "SRC0051", "SRC0052", "SRC0053"],
+      "node_keys": [
+        "S002-S001-N014"
+      ],
+      "source_segment_ids": [
+        "SRC0049",
+        "SRC0050",
+        "SRC0051",
+        "SRC0052",
+        "SRC0053"
+      ],
       "temporal_domain_key": "T002",
       "time_label": "入夜",
       "location_key": "L004",
@@ -132,13 +134,29 @@
       "exit_state": "孟浩苏醒在云雾缭绕的宗门青石空地，许师姐将四人交给两名绿袍男子后离去",
       "dramatic_load": 2,
       "agency_contracts": [],
-      "participant_keys": ["孟浩", "王有材", "许师姐", "大青山被困少年甲", "大青山被困少年乙", "绿袍执事甲", "绿袍执事乙"],
+      "participant_keys": [
+        "孟浩",
+        "王有材",
+        "许师姐",
+        "大青山被困少年甲",
+        "大青山被困少年乙",
+        "绿袍执事甲",
+        "绿袍执事乙"
+      ],
       "scene_heading": "【场13】入夜 / 修仙宗门外门半山腰青石空地"
     },
     {
       "key": "bp-sc014",
-      "node_keys": ["S002-S001-N015", "S003-S002-S001-N016"],
-      "source_segment_ids": ["SRC0054", "SRC0055", "SRC0056", "SRC0057"],
+      "node_keys": [
+        "S002-S001-N015",
+        "S003-S002-S001-N016"
+      ],
+      "source_segment_ids": [
+        "SRC0054",
+        "SRC0055",
+        "SRC0056",
+        "SRC0057"
+      ],
       "temporal_domain_key": "T002",
       "time_label": "入夜",
       "location_key": "L004",
@@ -149,13 +167,24 @@
       "exit_state": "王有材二人被指定去向，心生慌乱",
       "dramatic_load": 3,
       "agency_contracts": [],
-      "participant_keys": ["孟浩", "绿袍执事甲", "绿袍执事乙", "王有材", "大青山被困少年乙"],
+      "participant_keys": [
+        "孟浩",
+        "绿袍执事甲",
+        "绿袍执事乙",
+        "王有材",
+        "大青山被困少年乙"
+      ],
       "scene_heading": "【场14】入夜 / 修仙宗门外门半山腰青石空地"
     },
     {
       "key": "bp-sc015",
-      "node_keys": ["S003-S002-S001-N017"],
-      "source_segment_ids": ["SRC0058", "SRC0059"],
+      "node_keys": [
+        "S003-S002-S001-N017"
+      ],
+      "source_segment_ids": [
+        "SRC0058",
+        "SRC0059"
+      ],
       "temporal_domain_key": "T002",
       "time_label": "入夜",
       "location_key": "L004",
@@ -166,79 +195,243 @@
       "exit_state": "众人得知所在宗门名称，孟浩对靠山宗生出更深好奇",
       "dramatic_load": 1,
       "agency_contracts": [],
-      "participant_keys": ["王有材", "绿袍执事甲", "孟浩"],
+      "participant_keys": [
+        "王有材",
+        "绿袍执事甲",
+        "孟浩"
+      ],
       "scene_heading": "【场15】入夜 / 修仙宗门外门半山腰青石空地"
     }
   ],
   "scene_inputs": [
     {
       "scene_plan_key": "bp-sc013",
-      "node_keys": ["S002-S001-N014"],
+      "node_keys": [
+        "S002-S001-N014"
+      ],
       "source_segments": [
-        {"source_segment_id": "SRC0049", "text": "当他睁开眼睛时，已经在了一处半山腰的青石空地上，四周山峦起伏，云雾缭绕绝非凡尘，能看到一些精美的阁楼环绕山峦八方，满眼陌生。"},
-        {"source_segment_id": "SRC0050", "text": "他身边王有材以及另外两个少年，此刻都已苏醒过来，正身子颤抖惊恐的望着前方背对着四人的女子。"},
-        {"source_segment_id": "SRC0051", "text": "在这女子的前方，有两个穿着绿色长袍的男子，年纪看起来都是二十许岁，但都是双眼凹陷，瞳孔绿油油的，让人望之生畏。"},
-        {"source_segment_id": "SRC0052", "text": "“许师姐好手段，出门一次竟带回了四个拥有资质的小娃。”两个男子中的一人，带着恭维向着那女子说道。"},
-        {"source_segment_id": "SRC0053", "text": "“将他们带去杂役处。”那女子神情冷漠，看都不看孟浩四人一眼，迈步间整个人化作了一道长虹，没入山峦之间消失不见。"}
+        {
+          "source_segment_id": "SRC0049",
+          "text": "当他睁开眼睛时，已经在了一处半山腰的青石空地上，四周山峦起伏，云雾缭绕绝非凡尘，能看到一些精美的阁楼环绕山峦八方，满眼陌生。"
+        },
+        {
+          "source_segment_id": "SRC0050",
+          "text": "他身边王有材以及另外两个少年，此刻都已苏醒过来，正身子颤抖惊恐的望着前方背对着四人的女子。"
+        },
+        {
+          "source_segment_id": "SRC0051",
+          "text": "在这女子的前方，有两个穿着绿色长袍的男子，年纪看起来都是二十许岁，但都是双眼凹陷，瞳孔绿油油的，让人望之生畏。"
+        },
+        {
+          "source_segment_id": "SRC0052",
+          "text": "“许师姐好手段，出门一次竟带回了四个拥有资质的小娃。”两个男子中的一人，带着恭维向着那女子说道。"
+        },
+        {
+          "source_segment_id": "SRC0053",
+          "text": "“将他们带去杂役处。”那女子神情冷漠，看都不看孟浩四人一眼，迈步间整个人化作了一道长虹，没入山峦之间消失不见。"
+        }
       ],
       "participant_bindings": [
-        ["孟浩", "person_b67de643afe6"],
-        ["王有材", "person_e79ecc6793f5"],
-        ["许师姐", "person_224fd998b1e7"],
-        ["大青山被困少年甲", "person_b9cd0397a07f"],
-        ["大青山被困少年乙", "person_32ce878a56e2"],
-        ["绿袍执事甲", "person_46e7e8b742ed"],
-        ["绿袍执事乙", "person_8ff1cb1a5861"]
+        [
+          "孟浩",
+          "person_b67de643afe6"
+        ],
+        [
+          "王有材",
+          "person_e79ecc6793f5"
+        ],
+        [
+          "许师姐",
+          "person_224fd998b1e7"
+        ],
+        [
+          "大青山被困少年甲",
+          "person_b9cd0397a07f"
+        ],
+        [
+          "大青山被困少年乙",
+          "person_32ce878a56e2"
+        ],
+        [
+          "绿袍执事甲",
+          "person_46e7e8b742ed"
+        ],
+        [
+          "绿袍执事乙",
+          "person_8ff1cb1a5861"
+        ]
       ]
     },
     {
       "scene_plan_key": "bp-sc014",
-      "node_keys": ["S002-S001-N015", "S003-S002-S001-N016"],
+      "node_keys": [
+        "S002-S001-N015",
+        "S003-S002-S001-N016"
+      ],
       "source_segments": [
-        {"source_segment_id": "SRC0054", "text": "此刻的孟浩已恢复了心神，他怔怔的看着那女子消失的地方，目中渐渐竟露出了一抹在他身上十六年来前所未有的神采，这神采让孟浩的内心，一下子沸腾了。"},
-        {"source_segment_id": "SRC0055", "text": "“杂役？这是要给仙人打工，应该不少赚吧。”孟浩期待起来，因为他看出来了，这里的人不是要害命。"},
-        {"source_segment_id": "SRC0056", "text": "“许师姐已经到了凝气第七层，被掌教赐了风幡，没到筑基便可飞行，让人羡慕。”另一个绿袍修士，感慨的说道，随后神色带着高高在上之意，看向孟浩四人。"},
-        {"source_segment_id": "SRC0057", "text": "“你，还有你，跟我走，去南区杂役处。”话语间，此人指了指王有材和其旁虎头虎脑的少年。"}
+        {
+          "source_segment_id": "SRC0054",
+          "text": "此刻的孟浩已恢复了心神，他怔怔的看着那女子消失的地方，目中渐渐竟露出了一抹在他身上十六年来前所未有的神采，这神采让孟浩的内心，一下子沸腾了。"
+        },
+        {
+          "source_segment_id": "SRC0055",
+          "text": "“杂役？这是要给仙人打工，应该不少赚吧。”孟浩期待起来，因为他看出来了，这里的人不是要害命。"
+        },
+        {
+          "source_segment_id": "SRC0056",
+          "text": "“许师姐已经到了凝气第七层，被掌教赐了风幡，没到筑基便可飞行，让人羡慕。”另一个绿袍修士，感慨的说道，随后神色带着高高在上之意，看向孟浩四人。"
+        },
+        {
+          "source_segment_id": "SRC0057",
+          "text": "“你，还有你，跟我走，去南区杂役处。”话语间，此人指了指王有材和其旁虎头虎脑的少年。"
+        }
       ],
       "participant_bindings": [
-        ["孟浩", "person_b67de643afe6"],
-        ["绿袍执事甲", "person_46e7e8b742ed"],
-        ["绿袍执事乙", "person_8ff1cb1a5861"],
-        ["王有材", "person_e79ecc6793f5"],
-        ["大青山被困少年乙", "person_32ce878a56e2"]
+        [
+          "孟浩",
+          "person_b67de643afe6"
+        ],
+        [
+          "绿袍执事甲",
+          "person_46e7e8b742ed"
+        ],
+        [
+          "绿袍执事乙",
+          "person_8ff1cb1a5861"
+        ],
+        [
+          "王有材",
+          "person_e79ecc6793f5"
+        ],
+        [
+          "大青山被困少年乙",
+          "person_32ce878a56e2"
+        ]
       ]
     },
     {
       "scene_plan_key": "bp-sc015",
-      "node_keys": ["S003-S002-S001-N017"],
+      "node_keys": [
+        "S003-S002-S001-N017"
+      ],
       "source_segments": [
-        {"source_segment_id": "SRC0058", "text": "“这……这里是什么地方？”被那人一指，王有材身子哆嗦，打着颤音开口。"},
-        {"source_segment_id": "SRC0059", "text": "“靠山宗。”"}
+        {
+          "source_segment_id": "SRC0058",
+          "text": "“这……这里是什么地方？”被那人一指，王有材身子哆嗦，打着颤音开口。"
+        },
+        {
+          "source_segment_id": "SRC0059",
+          "text": "“靠山宗。”"
+        }
       ],
       "participant_bindings": [
-        ["王有材", "person_e79ecc6793f5"],
-        ["绿袍执事甲", "person_46e7e8b742ed"],
-        ["孟浩", "person_b67de643afe6"]
+        [
+          "王有材",
+          "person_e79ecc6793f5"
+        ],
+        [
+          "绿袍执事甲",
+          "person_46e7e8b742ed"
+        ],
+        [
+          "孟浩",
+          "person_b67de643afe6"
+        ]
       ]
     }
   ],
   "identity_registry": [
-    {"identity_key": "person_b67de643afe6", "canonical_name": "孟浩", "source_labels": ["孟浩"]},
-    {"identity_key": "person_e79ecc6793f5", "canonical_name": "王有材", "source_labels": ["王有材"]},
-    {"identity_key": "person_224fd998b1e7", "canonical_name": "会飞的女人", "source_labels": ["会飞的女人", "许师姐"]},
-    {"identity_key": "person_b9cd0397a07f", "canonical_name": "大青山被困少年甲", "source_labels": ["大青山被困少年甲"]},
-    {"identity_key": "person_32ce878a56e2", "canonical_name": "大青山被困少年乙", "source_labels": ["大青山被困少年乙"]},
-    {"identity_key": "person_46e7e8b742ed", "canonical_name": "绿袍执事甲", "source_labels": ["绿袍执事甲"]},
-    {"identity_key": "person_8ff1cb1a5861", "canonical_name": "绿袍执事乙", "source_labels": ["绿袍执事乙"]},
-    {"identity_key": "person_59b6805875cd", "canonical_name": "曹阳", "source_labels": ["曹阳"]}
+    {
+      "identity_key": "person_b67de643afe6",
+      "canonical_name": "孟浩",
+      "source_labels": [
+        "孟浩"
+      ]
+    },
+    {
+      "identity_key": "person_e79ecc6793f5",
+      "canonical_name": "王有材",
+      "source_labels": [
+        "王有材"
+      ]
+    },
+    {
+      "identity_key": "person_224fd998b1e7",
+      "canonical_name": "会飞的女人",
+      "source_labels": [
+        "会飞的女人",
+        "许师姐"
+      ]
+    },
+    {
+      "identity_key": "person_b9cd0397a07f",
+      "canonical_name": "大青山被困少年甲",
+      "source_labels": [
+        "大青山被困少年甲"
+      ]
+    },
+    {
+      "identity_key": "person_32ce878a56e2",
+      "canonical_name": "大青山被困少年乙",
+      "source_labels": [
+        "大青山被困少年乙"
+      ]
+    },
+    {
+      "identity_key": "person_46e7e8b742ed",
+      "canonical_name": "绿袍执事甲",
+      "source_labels": [
+        "绿袍执事甲"
+      ]
+    },
+    {
+      "identity_key": "person_8ff1cb1a5861",
+      "canonical_name": "绿袍执事乙",
+      "source_labels": [
+        "绿袍执事乙"
+      ]
+    },
+    {
+      "identity_key": "person_59b6805875cd",
+      "canonical_name": "曹阳",
+      "source_labels": [
+        "曹阳"
+      ]
+    }
   ],
   "event_sources": {
-    "E001": ["SRC0049"],
-    "E002": ["SRC0050"],
-    "E003": ["SRC0051"],
-    "E004": ["SRC0052", "SRC0053"],
-    "E005": ["SRC0054", "SRC0055"],
-    "E006": ["SRC0056", "SRC0057"],
-    "E007": ["SRC0058", "SRC0059"]
+    "E001": [
+      "SRC0049"
+    ],
+    "E002": [
+      "SRC0050"
+    ],
+    "E003": [
+      "SRC0051"
+    ],
+    "E004": [
+      "SRC0052",
+      "SRC0053"
+    ],
+    "E005": [
+      "SRC0054",
+      "SRC0055"
+    ],
+    "E006": [
+      "SRC0056",
+      "SRC0057"
+    ],
+    "E007": [
+      "SRC0058",
+      "SRC0059"
+    ]
+  },
+  "authority_budget_bounds": {
+    "_why": "SS004 事故要防的是提示词/修复上下文把模型上下文窗口吃满。原先钉死精确字符数（prompt_chars 等），任何一次正常的提示词措辞改动都会让这条预算测试变红，而红的那一刻并不说明预算真的出了问题——2026-08-21 的 865733c 只是加了 218 字的 environment_personification 规则就把它打红了，红着放了一天。为什么不干脆只留 context-window 断言：那条要到约 163840 字才触发，等它报警时已经晚了。为什么不设更紧的上限：当前提示词只占窗口 22%，收到 15% 就又变成一条措辞改动的绊线。取事故基线的 1.5 倍：重复拼接、整块复制这类真正的膨胀（通常 ≥2 倍）会被挡住，正常改写不会误报，且上限仍只占窗口 32%，离硬限还有 3 倍余量。",
+    "baseline_prompt_chars": 34733,
+    "baseline_repair_context_chars": 20909,
+    "max_growth_ratio": 0.5,
+    "prompt_chars_max": 52099,
+    "repair_context_chars_max": 31363
   }
 }

@@ -4,6 +4,7 @@ import sqlite3
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 
 from app import api, db, hiagent, portraits, screenplay_scene_shards, stages
 from app.harness import model_gateway
@@ -831,10 +832,9 @@ def test_structural_coverage_bound_group_uses_selected_owned_src(
 @pytest.mark.parametrize(
     ("provider_result", "error_type"),
     [
-        (
-            '{"characters":[{"source_label" "未知求救者"}]}',
-            model_gateway.StructuredFormatError,
-        ),
+        # Corrupt bytes (no JSON object ever decodes) are deliberately absent:
+        # nothing was authored to preserve, so that case is resampled once and
+        # is covered by test_undelivered_identity_answer_is_resampled_once.
         (
             '{"characters":[{"source_label":"未知求救者"}]}',
             model_gateway.StructuredFormatError,
@@ -1564,7 +1564,10 @@ def test_structural_coverage_parse_failure_stops_before_scene_writing(
             narrative_blueprint=blueprint,
         ))
 
-    assert provider_calls == ["screenplay_character_discovery"]
+    # Corrupt bytes carry no authored identity judgement, so the contract
+    # allows exactly one clean resample; the point of this test is that a
+    # coverage failure still never reaches scene writing.
+    assert provider_calls == ["screenplay_character_discovery"] * 2
     assert downstream_calls == []
 
 
@@ -6999,3 +7002,238 @@ def test_legacy_generic_cache_rejects_tampered_typed_v2_bundle(
     assert calls == 1
     assert result[0]["identity_group"] == "legacy:F1"
     assert result[0].get("source_evidence_receipts") is None
+
+
+def test_current_identity_named_rebinds_wrong_evidence_ref(monkeypatch) -> None:
+    """模型挑错 E 下标不该炸掉整集：称谓逐字出现在本批另一条 owned 证据里就改绑。"""
+    calls = 0
+    source_text = (
+        "孟浩抬头望向山巅，久久没有说话。\n\n"
+        "“许师姐好手段。”绿袍男子带着恭维说道。"
+    )
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "许师姐",
+                "canonical_name": "许师姐",
+                "identity_kind": "named",
+                "kind": "mentioned",
+                # 第一段里没有“许师姐”，模型却选了 E001。
+                "evidence_ref": "E001",
+            }],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    result = asyncio.run(portraits.extract_current_identity_candidates(
+        source_text,
+        Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        1,
+    ))
+
+    assert calls == 1
+    named = [item for item in result if item["source_label"] == "许师姐"]
+    assert len(named) == 1
+    assert named[0]["identity_kind"] == "named"
+    assert "许师姐" in named[0]["source_quote"]
+    assert named[0]["source_segment_id"] == "SRC0002"
+
+
+def test_current_identity_named_without_any_owned_evidence_still_fails(
+    monkeypatch,
+) -> None:
+    """改绑只认原文逐字存在的称谓；正文里根本没有的名字仍必须硬失败。"""
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "许师姐",
+                "canonical_name": "许师姐",
+                "identity_kind": "named",
+                "kind": "onscreen",
+                "evidence_ref": "E001",
+            }],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="缺少逐字 owned evidence",
+    ):
+        asyncio.run(portraits.extract_current_identity_candidates(
+            "孟浩抬头望向山巅，久久没有说话。\n\n绿袍男子带着恭维说道。",
+            Bible(world=World(visual_style_canonical="国风"), characters=[]),
+            1,
+        ))
+    assert calls == 1
+
+
+# --- ERR-20260821-f3e065 -----------------------------------------------------
+# run_d05fc5539edf asked for a strict json_schema response_format and the
+# provider returned a body that derailed mid-object into `{"decision_id": "f" :
+# [`, so no JSON object ever decoded.  Under the strict identity contract that
+# single corrupt sample failed the whole episode.  A response that was never
+# delivered carries no identity judgement to preserve, so it -- and only it --
+# is resampled once under a fresh operation id.
+
+
+class _IdentityResampleShape(BaseModel):
+    name: str
+
+
+def test_undelivered_identity_answer_is_resampled_once(monkeypatch) -> None:
+    operation_ids: list[str] = []
+    attempts: list[int] = []
+
+    async def fake_structured(_messages, **kwargs):
+        operation_ids.append(kwargs["operation_id"])
+        attempts.append(kwargs["call_meta"]["resample_attempt"])
+        if len(operation_ids) == 1:
+            error = model_gateway.StructuredFormatError("derailed mid-object")
+            error.unparseable = True
+            raise error
+        return "recovered"
+
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_structured)
+
+    result = asyncio.run(portraits._identity_structured_with_resample(
+        [{"role": "user", "content": "prompt"}],
+        model_type=_IdentityResampleShape,
+        validate=lambda _value: [],
+        max_tokens=256,
+        operation_id_for_attempt=lambda attempt: f"op:{attempt}",
+        call_meta={"stage_key": "screenplay_character_discovery"},
+    ))
+
+    assert result == "recovered"
+    assert attempts == [0, 1]
+    # A distinct operation id keeps cost/idempotency accounting exact.
+    assert operation_ids == ["op:0", "op:1"]
+    assert len(operation_ids) == (
+        portraits.IDENTITY_UNUSABLE_RESPONSE_RESAMPLES + 1
+    )
+
+
+def test_authored_but_schema_invalid_identity_answer_is_never_resampled(
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    async def fake_structured(_messages, **_kwargs):
+        nonlocal calls
+        calls += 1
+        error = model_gateway.StructuredFormatError("wrong shape")
+        error.unparseable = False
+        raise error
+
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_structured)
+
+    with pytest.raises(model_gateway.StructuredFormatError):
+        asyncio.run(portraits._identity_structured_with_resample(
+            [{"role": "user", "content": "prompt"}],
+            model_type=_IdentityResampleShape,
+            validate=lambda _value: [],
+            max_tokens=256,
+            operation_id_for_attempt=lambda attempt: f"op:{attempt}",
+            call_meta={"stage_key": "screenplay_character_discovery"},
+        ))
+
+    assert calls == 1
+
+
+def test_semantically_invalid_identity_answer_is_never_resampled(
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    async def fake_structured(_messages, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise model_gateway.StructuredSemanticError("current named 缺少逐字 owned evidence")
+
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_structured)
+
+    with pytest.raises(model_gateway.StructuredSemanticError):
+        asyncio.run(portraits._identity_structured_with_resample(
+            [{"role": "user", "content": "prompt"}],
+            model_type=_IdentityResampleShape,
+            validate=lambda _value: [],
+            max_tokens=256,
+            operation_id_for_attempt=lambda attempt: f"op:{attempt}",
+            call_meta={"stage_key": "screenplay_character_discovery"},
+        ))
+
+    assert calls == 1
+
+
+def test_two_undelivered_identity_answers_still_fail(monkeypatch) -> None:
+    calls = 0
+
+    async def fake_structured(_messages, **_kwargs):
+        nonlocal calls
+        calls += 1
+        error = model_gateway.StructuredFormatError("derailed again")
+        error.unparseable = True
+        raise error
+
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_structured)
+
+    with pytest.raises(model_gateway.StructuredFormatError):
+        asyncio.run(portraits._identity_structured_with_resample(
+            [{"role": "user", "content": "prompt"}],
+            model_type=_IdentityResampleShape,
+            validate=lambda _value: [],
+            max_tokens=256,
+            operation_id_for_attempt=lambda attempt: f"op:{attempt}",
+            call_meta={"stage_key": "screenplay_character_discovery"},
+        ))
+
+    assert calls == portraits.IDENTITY_UNUSABLE_RESPONSE_RESAMPLES + 1
+
+
+def test_gateway_tags_corrupt_and_schema_invalid_responses_differently(
+    monkeypatch,
+) -> None:
+    class _Shape(BaseModel):
+        name: str
+
+    async def corrupt(*_args, **_kwargs):
+        return '{"name" "missing colon"}'
+
+    async def wrong_shape(*_args, **_kwargs):
+        return '{"unrelated": 1}'
+
+    monkeypatch.setattr(model_gateway, "chat", corrupt)
+    with pytest.raises(model_gateway.StructuredFormatError) as corrupt_error:
+        asyncio.run(model_gateway.chat_structured(
+            [{"role": "user", "content": "p"}],
+            model_type=_Shape,
+            validate=lambda _value: [],
+            operation_id="op-corrupt",
+            max_tokens=256,
+            format_retry_limit=0,
+            semantic_retry_limit=0,
+        ))
+    assert corrupt_error.value.unparseable is True
+
+    monkeypatch.setattr(model_gateway, "chat", wrong_shape)
+    with pytest.raises(model_gateway.StructuredFormatError) as shape_error:
+        asyncio.run(model_gateway.chat_structured(
+            [{"role": "user", "content": "p"}],
+            model_type=_Shape,
+            validate=lambda _value: [],
+            operation_id="op-shape",
+            max_tokens=256,
+            format_retry_limit=0,
+            semantic_retry_limit=0,
+        ))
+    assert shape_error.value.unparseable is False

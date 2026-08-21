@@ -21,7 +21,18 @@ class StructuredOutputError(ValueError):
 
 
 class StructuredFormatError(StructuredOutputError):
-    pass
+    """The response could not be turned into the contracted object.
+
+    ``unparseable`` separates the two very different causes this covers: True
+    means no JSON object was ever decoded (the provider emitted corrupt or
+    truncated bytes and never delivered an authored answer), False means a JSON
+    object was decoded but disagrees with the schema (the provider *did* author
+    an answer, it is just the wrong one).  Callers under a no-retry contract use
+    that distinction: an undelivered answer may be resampled, a wrong answer
+    must not be.
+    """
+
+    unparseable: bool = False
 
 
 class StructuredSemanticError(StructuredOutputError):
@@ -708,9 +719,13 @@ async def chat_structured(
                 })
             if format_attempt >= max(0, int(format_retry_limit)):
                 detail = str(parse_error or "找不到完整 JSON 对象")
-                raise StructuredFormatError(
+                error = StructuredFormatError(
                     f"{operation_id} 结构化输出失败：{detail}"
-                ) from parse_error
+                )
+                # ``payload`` is set only once a JSON object actually decoded,
+                # so its absence is exactly "no authored answer was delivered".
+                error.unparseable = payload is None
+                raise error from parse_error
             format_attempt += 1
             candidate_text = (
                 json.dumps(

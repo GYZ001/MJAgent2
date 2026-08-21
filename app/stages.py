@@ -81,7 +81,7 @@ from app.narrative_blueprint import (
     validate_narrative_blueprint_patch_projection,
     validate_narrative_blueprint_shard,
 )
-from app.schemas import (Bible, CAMERA_MOVES, Dialogue, EMOTIONS, EpisodeScreenplay,
+from app.schemas import (Bible, CAMERA_MOVES, Character, Dialogue, EMOTIONS, EpisodeScreenplay,
                          NARRATIVE_CONTRACT_VERSION, RequiredOnScreenText,
                          SHOT_SIZES, Scene, Shot, Storyboard,
                          StoryboardContextRequirement, StoryboardOutline,
@@ -194,9 +194,27 @@ BLUEPRINT_REVIEW_MAX_TOKENS = 16384
 # transient not-sent failure of one reviewer must not discard the whole
 # multi-round blueprint generation; genuinely-unknown outcomes still fail closed.
 BLUEPRINT_REVIEW_PROVIDER_RETRY_LIMIT = 1
+# Consensus needs two independent samples.  When exactly one reviewer never
+# delivered an opinion at all, draw ONE more sample under this number instead of
+# discarding a validated blueprint that cost ~30 minutes to build.  It is a new
+# deterministic operation, never a replay of the unresolved call, and it is
+# bounded to one per review round.
+BLUEPRINT_REVIEW_SUPPLEMENTARY_SAMPLE = 3
+# Runaway-generation breakers.  These three values are *floors*: a blueprint is
+# produced leaf-by-leaf, so the honest cost of one activation scales with the
+# planned leaf count, not with a constant.  ``_BlueprintGenerationBudget``
+# raises all three from the deterministic leaf plan (see ``adopt_shard_plan``)
+# so the breakers only ever fire on genuine runaway, never on the nominal path
+# of a long episode.
 BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS = 32
 BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS = 131072
 BLUEPRINT_GENERATION_MAX_WALL_SECONDS = 1800.0
+# Per planned leaf: one full-shard call plus at most one typed ownership
+# repair call (``BLUEPRINT_SHARD_MAX_ATTEMPTS`` allows a third attempt, which
+# the shared headroom below absorbs together with dynamic splits and the
+# patch/review stages).
+BLUEPRINT_LEAF_PROVIDER_CALLS = 2
+BLUEPRINT_LEAF_CALL_HEADROOM = 8
 BLUEPRINT_GENERATION_MAX_SPLIT_DEPTH = 4
 
 
@@ -3130,8 +3148,14 @@ BIBLE_SOURCE_BUDGET_CHARS = 60000
 _BIBLE_TAIL_SAMPLE_MAX = 12      # 后段最多抽样多少章（取其开头，角色多在章首登场）
 _BIBLE_TAIL_SLICE_CHARS = 1500   # 每个抽样章节注入的开头字数
 
+BIBLE_HEAD_CHAPTERS = 10         # 首版人物谱必须完整通读的章节数
+BIBLE_LOOKAHEAD_CHAPTERS = 10    # 判定「这个角色重不重要」时再往后看的章节数
+BIBLE_RECURRING_MIN_HITS = 3     # 在通读窗口内逐字出现多少次才算重要角色
+BIBLE_MUST_COVER_MAX = 12        # 必收名单上限，避免把生成预算耗在龙套身上
 
-def _render_bible_source(chapters: list[dict], budget: int = BIBLE_SOURCE_BUDGET_CHARS) -> str:
+
+def _render_bible_source(chapters: list[dict], budget: int = BIBLE_SOURCE_BUDGET_CHARS,
+                         *, head_chapters: int | None = None) -> str:
     """为角色圣经渲染源文本：先顺序铺头部（主角通常在前期出场），再在剩余预算里
     跨越全书【抽样后段章节的开头】，让后期才登场的重要角色（如中后段反派）也能进圣经——
     否则分镜阶段引用这些角色会因"不在圣经"而反复返工或被迫漏掉。
@@ -3145,6 +3169,12 @@ def _render_bible_source(chapters: list[dict], budget: int = BIBLE_SOURCE_BUDGET
 
     # 头部顺序铺设：用至多 70% 预算（其余留给后段抽样）。
     head_budget = int(budget * 0.7)
+    if head_chapters:
+        # 首版人物谱要求「完整读完前 N 章」。按比例切的头部会随章节长度漂移：
+        # 长章小说可能读到第三、四章就把头部预算用光，主要配角整体缺席。
+        head_budget = min(budget, max(head_budget, sum(
+            len(ch["content"].strip()) for ch in valid[:head_chapters]
+        )))
     blocks: list[str] = []
     used = 0
     head_count = 0
@@ -3181,10 +3211,197 @@ def _render_bible_source(chapters: list[dict], budget: int = BIBLE_SOURCE_BUDGET
     return "\n\n".join(blocks)
 
 
+class _CharacterRollCall(BaseModel):
+    """人物点名合同：只要名字，不要描写（描写留给正式的人物谱调用）。"""
+
+    names: list[str] = Field(default_factory=list)
+
+
+class _BibleSupplement(BaseModel):
+    """补录合同：只为「必收名单里还缺的人」补出完整角色条目。"""
+
+    characters: list[Character] = Field(default_factory=list)
+
+
+async def _recurring_character_names(chapters: list[dict]) -> list[tuple[str, int]]:
+    """产出「必收角色名单」：先点名，再按原文逐字出现次数判定谁重要。
+
+    只靠一次生成调用时，模型往往只写开头几段里的人：它既没有全局出现次数，
+    也没有动力把后面才反复登场的角色补上。这里把判断拆成两步——
+    模型只负责在前 BIBLE_HEAD_CHAPTERS 章里点出候选名字（它擅长这件事），
+    后端再在「前 N 章 + 往后 BIBLE_LOOKAHEAD_CHAPTERS 章」里逐字统计出现次数
+    （这件事必须精确，不能交给模型），出现多次的才进必收名单。
+    统计窗口失败时返回空名单，绝不阻断人物谱本身。
+    """
+    valid = [ch for ch in chapters if (ch.get("content") or "").strip()]
+    if not valid:
+        return []
+    head = valid[:BIBLE_HEAD_CHAPTERS]
+    head_text = _render_bible_source(head, head_chapters=BIBLE_HEAD_CHAPTERS)
+    if not head_text.strip():
+        return []
+    prompt = f"""任务：从下面的小说正文里点出【出场人物的名字】，只点名，不要写任何描写。
+
+要求：
+1. 只输出原文中稳定出现的人名或固定称谓（如"孟浩""王有材""许师姐"）。
+2. 不要输出"少年""女子""老者""两人"这类泛称，也不要输出宗门名、地名、法宝名。
+3. 同一个人只输出一次，用原文里最常见的那个写法，不要把同一人的多个称呼都列出来。
+4. 名字必须逐字出现在正文中，不得改写、简称或补全。
+5. 宁多勿漏：戏份很少的人也可以点出来，后端会按出现次数再筛一遍。
+
+小说正文：
+{head_text}
+
+输出 JSON Schema：
+{{"names": [str]}}"""
+    try:
+        raw = await model_gateway.chat(
+            [{"role": "system", "content": SYSTEM_PREFIX},
+             {"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=2048,
+            call_meta={
+                "stage": "人物点名",
+                "stage_key": "character_roll_call",
+                "call_role": "stage_generate",
+                "call_role_label": "人物点名",
+                "expected_json": True,
+            },
+        )
+        names = _CharacterRollCall.model_validate(extract_json(raw)).names
+    except Exception as exc:  # noqa: BLE001 - 点名只是覆盖度提示，失败不阻断人物谱
+        log_provider_call(
+            "character_roll_call", config.MODEL_TEXT, "FAILED", None, 0,
+            meta={"error": str(exc)[:300]},
+        )
+        return []
+    head_raw = "\n".join(ch["content"] for ch in head)
+    window_raw = "\n".join(
+        ch["content"]
+        for ch in valid[:BIBLE_HEAD_CHAPTERS + BIBLE_LOOKAHEAD_CHAPTERS]
+    )
+    ranked: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for value in names:
+        name = str(value or "").strip()
+        # 必须逐字出现在通读章节里：模型改写或补全出来的名字不进必收名单。
+        if not 2 <= len(name) <= 8 or name in seen or name not in head_raw:
+            continue
+        seen.add(name)
+        hits = window_raw.count(name)
+        if hits >= BIBLE_RECURRING_MIN_HITS:
+            ranked.append((name, hits))
+    ranked.sort(key=lambda item: (-item[1], item[0]))
+    return ranked[:BIBLE_MUST_COVER_MAX]
+
+
+def _bible_covers_name(bible: Bible, name: str) -> bool:
+    """必收名字是否已经在人物谱里（允许模型用更完整的正式姓名收录同一人）。"""
+    return any(
+        character.name == name
+        or (name and character.name and (name in character.name or character.name in name))
+        for character in bible.characters
+    )
+
+
+async def _supplement_bible_characters(bible: Bible, missing: list[tuple[str, int]],
+                                       chapters_text: str, *,
+                                       visual_style_prompt: str | None = None) -> list[str]:
+    """为必收名单里仍然缺席的角色补一次条目；失败或不合格就放弃该角色。
+
+    这一步刻意放在 AgentLoop 之外：人物谱缺角色是质量问题，不该把整个项目
+    卡在 bible_status=warning 上（那会连带停掉定妆照与场景库）。
+    """
+    from app.refs import (
+        PRODUCTION_APPEARANCE_MAX_CHARS,
+        PRODUCTION_APPEARANCE_MIN_CHARS,
+    )
+
+    wanted = "、".join(f"{name}（原文出现 {hits} 次）" for name, hits in missing)
+    style = visual_style_prompt or bible.world.visual_style_canonical
+    prompt = f"""任务：为下列【已确认重要但人物谱漏收】的角色补出角色条目，用于 AI 视频生成的一致性控制。
+
+必须补录的角色（name 必须逐字照抄，不得改写或合并）：
+{wanted}
+
+已收录角色（不要重复输出）：{'、'.join(c.name for c in bible.characters) or '无'}
+全片统一画风（角色外观必须服从）：{style}
+
+要求：
+1. 只输出上面「必须补录」的角色，也不要多输出别人。唯一例外：其中某个名字如果其实不是人物（是宗门、地名或法宝名），跳过它，不要硬编成角色。
+2. appearance_canonical 是固定外观锚点串：{PRODUCTION_APPEARANCE_MIN_CHARS}~{PRODUCTION_APPEARANCE_MAX_CHARS} 字，必须包含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征。只写常规完整着装、中性站姿下可直接看见并能跨镜稳定复现的静态形态；不写性格、情绪、眼神行为，不得写裸体或私密身体部位。原著未描写处按题材合理补全并保持内部一致。
+3. role 取"主角|重要配角|反派"之一。
+4. speech_style 15~30 字，描述句长习惯/口头禅/敬语习惯。
+5. relationships.to 只能指向【已收录角色或本次补录角色】的 name；无法确定就留空数组。
+
+小说文本：
+{chapters_text}
+
+输出 JSON Schema：
+{{"characters": [{{"name": str, "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}]}}]}}"""
+    try:
+        raw = await model_gateway.chat(
+            [{"role": "system", "content": SYSTEM_PREFIX},
+             {"role": "user", "content": prompt}],
+            temperature=0.4,
+            max_tokens=8192,
+            call_meta={
+                "stage": "人物谱补录",
+                "stage_key": "character_bible_supplement",
+                "call_role": "stage_generate",
+                "call_role_label": "人物谱补录",
+                "expected_json": True,
+            },
+        )
+        drafted = _BibleSupplement.model_validate(extract_json(raw)).characters
+    except Exception as exc:  # noqa: BLE001 - 补录失败保留已有人物谱，不阻断下游
+        log_provider_call(
+            "character_bible_supplement", config.MODEL_TEXT, "FAILED", None, 0,
+            meta={"error": str(exc)[:300]},
+        )
+        return []
+    wanted_names = {name for name, _ in missing}
+    added: list[str] = []
+    for character in drafted:
+        name = (character.name or "").strip()
+        if (
+            name not in wanted_names
+            or _bible_covers_name(bible, name)
+            or not PRODUCTION_APPEARANCE_MIN_CHARS
+            <= len(character.appearance_canonical)
+            <= PRODUCTION_APPEARANCE_MAX_CHARS
+        ):
+            continue
+        character.name = name
+        character.ref_image_path = None
+        character.portrait_prompt_override = None
+        bible.characters.append(character)
+        added.append(name)
+    # 关系只能指向最终名单里的人，否则 validate_bible 会因「关系指向未知角色」退回。
+    names = {c.name for c in bible.characters}
+    for character in bible.characters:
+        character.relationships = [
+            relation for relation in character.relationships if relation.to in names
+        ]
+    return added
+
+
 async def generate_bible(chapters: list[dict], feedback: str = "", previous_bible: dict | None = None,
                          project_id: str | None = None,
                          visual_style_prompt: str | None = None) -> Bible:
-    chapters_text = _render_bible_source(chapters)
+    chapters_text = _render_bible_source(chapters, head_chapters=BIBLE_HEAD_CHAPTERS)
+    must_cover = await _recurring_character_names(chapters)
+    must_cover_part = ""
+    if must_cover:
+        must_cover_part = f"""
+【必收角色名单】（后端已在前 {BIBLE_HEAD_CHAPTERS} 章及其后 {BIBLE_LOOKAHEAD_CHAPTERS} 章原文里逐字统计出现次数；次数多＝戏份重，必须全部收录）：
+{'、'.join(f'{name}（{hits} 次）' for name, hits in must_cover)}
+
+执行方式：
+- 名单里的每个名字都要单独输出一个角色条目，name 逐字照抄名单写法，不得改写、合并或省略。
+- 名单之外的重要角色仍然可以补充；总数以覆盖名单为准，不要为了写得短就删掉名单里的人。
+- 唯一例外：名单里某个名字如果其实不是人物（是宗门、地名或法宝名），跳过它，不要硬编成角色。
+"""
     previous_part = ""
     if previous_bible:
         names = "、".join(
@@ -3199,7 +3416,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
 {feedback.strip()}
 
 执行方式：
-- 如果用户点名遗漏人物，必须回到原文中查找并收录；受 8 人上限影响时，删除更边缘的角色也要保留用户点名人物。
+- 如果用户点名遗漏人物，必须回到原文中查找并收录；受角色总数上限影响时，删除更边缘的角色也要保留用户点名人物。
 - 如果用户指出身份、关系、外观或称谓错误，必须按要求修正，并保持后续 relationships 一致。
 - 不要把同一人物的外号、尊称、简称拆成多个角色；统一为原文最稳定的正式姓名。
 """
@@ -3216,7 +3433,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
     prompt = f"""任务：从小说文本中提取角色圣经与世界观，用于后续 AI 视频生成的一致性控制。
 
 要求：
-1. 只收录出场 2 次以上或明显重要的角色，最多 8 个。
+1. 收录所有出场 2 次以上或明显重要的角色；【必收角色名单】里的人一个都不能少，其余按重要性补足，总数不超过 20 个。
 2. appearance_canonical 是该角色的"固定外观锚点串"：40~60 字，必须包含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征。只写常规完整着装、中性站姿下可直接看见并能跨镜稳定复现的静态形态：五官、发型、体型、外层服装、可见配饰或面部标记。不写性格、欲望、气质、眼神行为、对他人的注视方式，不得写裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。原著未描写的部分，按题材合理补全并保持内部一致。
 3. visual_style_canonical：25~40 字的全局画风串，包含 美术风格/光线/色调，适配竖屏漫剧，必须依据本书题材定制。【硬性约束】必须是 CG/动画/漫画/插画类的非真人风格（如 3D 渲染、3D 写实 CG、2D 动画、动态漫画、厚涂插画、国漫风等，写实质感/照片级/胶片颗粒等氛围词可以保留），但严禁"真人实拍/真人出镜/实拍摄影"这类真人风格描述（否则后续 Seedance 视频接口会因疑似真人而报错 InputImageSensitiveContentDetected）。核心是画面为 CG/动画渲染而非真人拍摄。
 4. speech_style 用于后续台词写作：句长习惯/口头禅/敬语习惯等，15~30 字。
@@ -3224,7 +3441,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
 6. relationships 只描述【已收录角色之间】的关系：relationships.to 必须逐字等于本次 characters 里某个角色的 name，不要指向未收录的人物（否则代码校验会因「关系指向未知角色」退回重写）。与圈外人物的关系请省略，或并入 personality 文字描述。
 
 小说文本：
-{chapters_text}{previous_part}{feedback_part}{visual_style_part}
+{chapters_text}{previous_part}{feedback_part}{visual_style_part}{must_cover_part}
 
 输出 JSON Schema：
 {{"characters": [{{"name": str, "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}]}}], "world": {{"era": str, "genre": str, "visual_style_canonical": str}}}}"""
@@ -3255,9 +3472,27 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
     bible = await _run_with_agent_loop(
         "角色圣经", "character_bible", prompt, Bible, validate_authoritative_bible,
         loop=loop, temperature=0.5, max_tokens=16384,
+        # 默认的 3000 字任务摘要会把小说正文整段截掉：一旦首轮候选未过校验，
+        # 后续每一轮"定向修复"都只看得到规则和上一版候选，模型只能照抄开头
+        # 那几段里的人，人物谱越修越少。人物谱的任务本体就是原文，不能截。
+        repair_user_prompt_limit=None,
     )
     if visual_style_prompt:
         bible.world.visual_style_canonical = visual_style_prompt
+    missing = [item for item in must_cover if not _bible_covers_name(bible, item[0])]
+    if missing:
+        added = await _supplement_bible_characters(
+            bible, missing, chapters_text, visual_style_prompt=visual_style_prompt,
+        )
+        log_provider_call(
+            "character_bible_coverage", config.MODEL_TEXT,
+            "OK" if len(added) == len(missing) else "PARTIAL", None, 0,
+            meta={
+                "must_cover": [name for name, _ in must_cover],
+                "missing": [name for name, _ in missing],
+                "supplemented": added,
+            },
+        )
     return bible
 
 
@@ -3315,6 +3550,8 @@ async def generate_scene_bible(chapters: list[dict], bible: Bible,
     draft = await _run_with_agent_loop(
         "场景圣经", "scene_bible", prompt, _SceneBibleDraft,
         lambda d: validate_scene_bible(d.scenes), loop=loop, temperature=0.5,
+        # 与人物谱同因：修复轮不能把小说正文截掉，否则只会反复重排开头几个场景。
+        repair_user_prompt_limit=None,
     )
     return list(draft.scenes)
 
@@ -4282,10 +4519,7 @@ async def _repair_narrative_blueprint(
                 requested_max_tokens=requested_max_tokens,
                 operation_id=operation_id,
             )
-            remaining_seconds = (
-                BLUEPRINT_GENERATION_MAX_WALL_SECONDS
-                - (time.monotonic() - generation_budget.started_at)
-            )
+            remaining_seconds = generation_budget.remaining_seconds()
         structured_call = model_gateway.chat_structured(
             patch_messages,
             model_type=NarrativeBlueprintPatch,
@@ -4642,10 +4876,7 @@ async def _repair_reviewed_blueprint_state_subject_ownership(
             requested_max_tokens=requested_max_tokens,
             operation_id=operation_id,
         )
-        remaining_seconds = (
-            BLUEPRINT_GENERATION_MAX_WALL_SECONDS
-            - (time.monotonic() - generation_budget.started_at)
-        )
+        remaining_seconds = generation_budget.remaining_seconds()
 
     patch_call = model_gateway.chat_structured(
         messages,
@@ -5254,10 +5485,7 @@ async def _semantic_review_narrative_blueprint(
                     requested_max_tokens=BLUEPRINT_REVIEW_MAX_TOKENS,
                     operation_id=reservation_operation_id,
                 )
-                remaining_seconds = (
-                    BLUEPRINT_GENERATION_MAX_WALL_SECONDS
-                    - (time.monotonic() - generation_budget.started_at)
-                )
+                remaining_seconds = generation_budget.remaining_seconds()
             review_call = model_gateway.chat_structured(
                 review_messages,
                 model_type=BlueprintSemanticReview,
@@ -5406,12 +5634,7 @@ async def _semantic_review_narrative_blueprint(
                         )
             raise AssertionError("unreachable reviewer retry exhaustion")
 
-        results = await asyncio.gather(
-            run_reviewer_resilient(1),
-            run_reviewer_resilient(2),
-            return_exceptions=True,
-        )
-        for sample_no, result in enumerate(results, start=1):
+        def record_review(sample_no: int, result: Any) -> bool:
             if isinstance(result, BaseException):
                 evidence_repository.append_event(
                     trace.run_id,
@@ -5426,7 +5649,7 @@ async def _semantic_review_narrative_blueprint(
                         "error_type": type(result).__name__,
                     },
                 ) if trace.run_id else None
-                continue
+                return False
             review = result
             reviews.append(review)
             artifact = evidence_repository.create_artifact(
@@ -5450,6 +5673,68 @@ async def _semantic_review_narrative_blueprint(
                 step_run_id=trace.step_run_id,
             )
             review_artifact_ids.append(artifact["id"])
+            return True
+
+        results = await asyncio.gather(
+            run_reviewer_resilient(1),
+            run_reviewer_resilient(2),
+            return_exceptions=True,
+        )
+        for failure in results:
+            # A generation breaker (call/token/wall budget) is not a reviewer
+            # being unavailable.  Letting gather() swallow it would resurface it
+            # as "审稿人不足两份" and send the operator after the wrong thing.
+            if isinstance(failure, StageError):
+                raise failure
+        outcomes = list(enumerate(results, start=1))
+        for sample_no, result in outcomes:
+            record_review(sample_no, result)
+
+        undelivered = [
+            result
+            for _sample_no, result in outcomes
+            if isinstance(result, BaseException)
+            and _blueprint_review_sample_is_undelivered(result)
+        ]
+        if len(reviews) == 1 and len(undelivered) == 1:
+            # Exactly one reviewer never delivered an opinion, so consensus is
+            # one clean sample short rather than compromised.  Draw that one
+            # sample again as a NEW deterministic operation (sample no 3), which
+            # is not a replay of the unresolved call and cannot double-charge
+            # it.  Bounded to a single supplementary sample per round, and the
+            # call still goes through generation_budget.claim() plus the
+            # activation's remaining wall clock, so it cannot outrun any
+            # breaker.  Discarding a whole validated blueprint costs ~30
+            # minutes; one more review sample costs ~45s.
+            if trace.run_id:
+                evidence_repository.append_event(
+                    trace.run_id,
+                    "BLUEPRINT_REVIEWER_SUPPLEMENTED",
+                    "info",
+                    "一名独立审稿样本未送达，补采一个新样本而非作废整份蓝图",
+                    step_run_id=trace.step_run_id,
+                    trace_id=trace.trace_id,
+                    payload={
+                        "review_round": review_round,
+                        "review_sample": BLUEPRINT_REVIEW_SUPPLEMENTARY_SAMPLE,
+                        "undelivered_error_type": type(
+                            undelivered[0]
+                        ).__name__,
+                    },
+                )
+            try:
+                supplementary = await run_reviewer_resilient(
+                    BLUEPRINT_REVIEW_SUPPLEMENTARY_SAMPLE,
+                )
+            except StageError:
+                raise
+            except BaseException as exc:  # noqa: BLE001 - fail closed below
+                record_review(BLUEPRINT_REVIEW_SUPPLEMENTARY_SAMPLE, exc)
+            else:
+                record_review(
+                    BLUEPRINT_REVIEW_SUPPLEMENTARY_SAMPLE,
+                    supplementary,
+                )
 
         if len(reviews) < 2:
             evidence_repository.create_artifact(
@@ -5757,6 +6042,37 @@ async def _semantic_review_narrative_blueprint(
             step_run_id=trace.step_run_id,
         )
     return blueprint
+
+
+def _blueprint_review_sample_is_undelivered(exc: BaseException) -> bool:
+    """Whether a reviewer failed without ever authoring a review opinion.
+
+    Only these are worth drawing again.  A transport failure (timeout, cut
+    stream) and a body that never decoded into JSON both mean the reviewer
+    never said anything, so a fresh sample restores the missing opinion without
+    overruling one.
+
+    Deliberately excluded:
+
+    * ``StructuredSemanticError`` -- the reviewer *did* author an opinion and it
+      failed the review contract.  Re-drawing until some sample passes is
+      exactly the coached-compliance failure the strict contracts forbid.
+    * ``StructuredFormatError`` with ``unparseable=False`` -- a decoded but
+      off-schema answer is likewise authored, and the gateway already spent its
+      one bounded format repair on it.
+    * ``StructuredProviderRejection`` -- an explicit refusal envelope is
+      normally persistent; another sample just burns wall clock.
+    * ``StageError`` -- generation breakers must surface, not be re-drawn.
+    """
+    if isinstance(exc, StageError):
+        return False
+    if isinstance(exc, hiagent.ProviderError):
+        return True
+    if isinstance(exc, model_gateway.StructuredProviderRejection):
+        return False
+    if isinstance(exc, model_gateway.StructuredFormatError):
+        return bool(getattr(exc, "unparseable", False))
+    return False
 
 
 def _blueprint_shard_boundary_context(
@@ -6647,8 +6963,14 @@ def _blueprint_shard_prompt(
         "复用有效fact_key、人物位置、时间域和稳定character_key；本分片新key保持唯一。"
         "participants去重后的identity集合必须与participant_evidence中非空"
         "identity_key集合及exact-unit joint assignment identity_keys的并集完全相等；"
-        "每个identity至少有一条来源证据，"
-        "source_segment_ids必须非空且只引用本节点owned SRC。修复缺证据时必须保留"
+        "每个identity至少有一条来源证据，每条证据的source_unit_keys必须非空且"
+        "只引用本节点owned SRC的unit。"
+        "participant_evidence一律不要输出source_segment_ids：后端会从"
+        "source_unit_keys确定性派生，多写只会浪费输出并引入不一致。"
+        "usage=visible只写「在本节点画面中出现、但不是任何action unit的"
+        "state_subject、也没有voice」的人物；已经写了state_subject或voice的人物"
+        "不要再为同一unit补visible，后端会确定性派生其可感知证据。"
+        "修复缺证据时必须保留"
         "原文已有角色并补同identity_key的participant_evidence，禁止删除角色、"
         "合并多个身份或改用默认身份。"
         "每节点显式narrative_layer/event_priority/render_policy。故事画面用"
@@ -6662,8 +6984,8 @@ def _blueprint_shard_prompt(
         "source_unit_deliveries；quoted_span不等于开口。每条spoken_dialogue/"
         "offscreen_voice delivery除performer_key外，还必须在participant_evidence"
         "追加一条独立对象：identity_key与performer_key相同、usage=\"voice\"、"
-        "source_unit_keys只含该delivery的source_unit_key、source_segment_ids只含"
-        "该unit所属SRC。performer_key不能替代这条typed voice evidence；每个声音"
+        "source_unit_keys只含该delivery的source_unit_key。"
+        "performer_key不能替代这条typed voice evidence；每个声音"
         "unit必须恰有一条；written_text、sound_effect、unspoken_reference等非声音"
         "delivery在同一source_unit_key上不得有usage=voice。content_owner可以是"
         "文字、物件或概念的归属，不要求列入participants，也绝不等于performer。"
@@ -6845,6 +7167,55 @@ class _BlueprintGenerationBudget:
         self._durable_unknown_receipts: list[dict[str, Any]] = []
         self._explicit_retry_authorized = False
         self.retry_grant_id = ""
+        self.planned_leaf_count = 0
+
+    def adopt_shard_plan(self, planned_leaf_count: int) -> None:
+        """Raise the runaway breakers to the size of the deterministic plan.
+
+        The leaf plan is derived locally from the frozen source cover (and from
+        already-validated cached leaves), never from model output, so it cannot
+        be inflated by a provider response.  It only ever grows -- a dynamic
+        split adds leaves mid-run -- and the caps grow with it, so a cap can
+        never shrink below exposure that was already admitted.
+        """
+        count = max(0, int(planned_leaf_count))
+        if count > self.planned_leaf_count:
+            self.planned_leaf_count = count
+
+    @property
+    def max_provider_calls(self) -> int:
+        if not self.planned_leaf_count:
+            return BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS
+        return max(
+            BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS,
+            self.planned_leaf_count * BLUEPRINT_LEAF_PROVIDER_CALLS
+            + BLUEPRINT_LEAF_CALL_HEADROOM,
+        )
+
+    @property
+    def plan_scale(self) -> int:
+        """How many floor-sized activations the leaf plan justifies.
+
+        Token and wall-clock exposure track the admissible call count, so all
+        three breakers keep the calibration they were chosen with instead of
+        one of them firing first purely because the episode is long.
+        """
+        floor = max(1, BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS)
+        return max(1, -(-self.max_provider_calls // floor))
+
+    @property
+    def max_output_tokens(self) -> int:
+        return BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS * self.plan_scale
+
+    @property
+    def max_wall_seconds(self) -> float:
+        return BLUEPRINT_GENERATION_MAX_WALL_SECONDS * self.plan_scale
+
+    def remaining_seconds(self) -> float:
+        """Wall clock left for one provider call in this activation."""
+        return self.max_wall_seconds - (
+            time.monotonic() - self.started_at
+        )
 
     @classmethod
     def from_durable_calls(
@@ -7080,19 +7451,19 @@ class _BlueprintGenerationBudget:
                 ],
             )
         elapsed = time.monotonic() - self.started_at
-        if elapsed >= BLUEPRINT_GENERATION_MAX_WALL_SECONDS:
+        if elapsed >= self.max_wall_seconds:
             raise StageError(
                 "剧本时空因果蓝图分片",
                 ["[BLUEPRINT_GENERATION_TIME_BUDGET] 超过当前激活时间上限"],
             )
-        if self.provider_calls >= BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS:
+        if self.provider_calls >= self.max_provider_calls:
             raise StageError(
                 "剧本时空因果蓝图分片",
                 ["[BLUEPRINT_GENERATION_CALL_BUDGET] 超过全局调用上限"],
             )
         if (
             self.charged_output_tokens + int(minimum_output_tokens)
-            > BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS
+            > self.max_output_tokens
         ):
             raise StageError(
                 "剧本时空因果蓝图分片",
@@ -7161,7 +7532,7 @@ class _BlueprintGenerationBudget:
         elapsed = time.monotonic() - self.started_at
         if (
             not durable_replay
-            and elapsed >= BLUEPRINT_GENERATION_MAX_WALL_SECONDS
+            and elapsed >= self.max_wall_seconds
         ):
             raise StageError(
                 "剧本时空因果蓝图分片",
@@ -7169,7 +7540,7 @@ class _BlueprintGenerationBudget:
             )
         if (
             not durable_replay
-            and self.provider_calls >= BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS
+            and self.provider_calls >= self.max_provider_calls
         ):
             raise StageError(
                 "剧本时空因果蓝图分片",
@@ -7181,7 +7552,7 @@ class _BlueprintGenerationBudget:
                 self.charged_output_tokens
                 + self.reserved_output_tokens
                 + max_tokens
-                > BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS
+                > self.max_output_tokens
             )
         ):
             raise StageError(
@@ -7450,10 +7821,12 @@ async def _generate_sharded_narrative_blueprint(
         generation_budget = _blueprint_generation_budget_for_trace(
             current_trace(),
         )
+    generation_budget.adopt_shard_plan(len(segment_shards))
     optional_ids = structural_front_matter_ids(segments)
     merged_nodes: list[Any] = []
     shard_index = 1
     while shard_index <= len(segment_shards):
+        generation_budget.adopt_shard_plan(len(segment_shards))
         shard_segments = segment_shards[shard_index - 1]
         split_depth = shard_split_depths[shard_index - 1]
         source_ids = [segment.segment_id for segment in shard_segments]
@@ -7607,10 +7980,9 @@ async def _generate_sharded_narrative_blueprint(
                     in generation_budget._durable_successful_operations
                 )
                 remaining_seconds = (
-                    BLUEPRINT_GENERATION_MAX_WALL_SECONDS
+                    generation_budget.max_wall_seconds
                     if durable_replay
-                    else BLUEPRINT_GENERATION_MAX_WALL_SECONDS
-                    - (time.monotonic() - generation_budget.started_at)
+                    else generation_budget.remaining_seconds()
                 )
                 settlement: dict[str, Any] | None = None
                 try:
@@ -7819,6 +8191,13 @@ async def _generate_sharded_narrative_blueprint(
                         source_text,
                     )
                 )
+                # A unit that already resolves to exactly one state subject
+                # implies its own perception evidence; the merged-blueprint
+                # repair loop has always settled that locally.  Running the
+                # same normalization per shard keeps the contract identical and
+                # stops every shard from spending a whole ownership-repair
+                # round trip restating an owner it had already chosen.
+                normalize_blueprint_state_subject_perception(candidate)
                 previous_candidate = candidate.model_dump(mode="json")
                 errors = validate_narrative_blueprint_shard(
                     candidate,

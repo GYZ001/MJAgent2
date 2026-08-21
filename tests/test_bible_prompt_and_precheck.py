@@ -105,9 +105,9 @@ def test_generate_precheck_estimates_without_bible(monkeypatch) -> None:
     ).fetchone()))
 
     result = asyncio.run(bible_ops.bible_generate_precheck("p1"))
-    assert result["character_count"] == 8
-    assert result["image_count"] == 24
-    assert result["estimated_cost_cny"] == 4.8
+    assert result["character_count"] == 12
+    assert result["image_count"] == 36
+    assert result["estimated_cost_cny"] == 7.2
     assert result["style_name"] == "国漫电影风"
 
 
@@ -148,8 +148,8 @@ def test_bible_generate_precheck_binds_style_name(monkeypatch) -> None:
     assert quote["quote_id"] == fingerprint({
         "project_id": "p1",
         "action": "generate_bible_and_refs",
-        "character_count": 8,
-        "image_count": 24,
+        "character_count": 12,
+        "image_count": 36,
         "unit": 0.2,
         "bible_version": 0,
         "style_name": "现实电影风",
@@ -193,3 +193,122 @@ def test_generate_bible_forces_backend_visual_style_prompt(monkeypatch) -> None:
     assert seen["style_during_validation"] == result.world.visual_style_canonical
     assert seen["allow_warning_candidate"] is False
     assert seen["repair_all_blockers"] is True
+
+
+def test_bible_source_keeps_first_ten_chapters_complete() -> None:
+    """长章小说不能只读到第三四章：前 10 章必须整章进入首版人物谱输入。"""
+    from app import stages
+
+    chapters = [
+        {"idx": i, "title": f"第{i}章", "content": f"第{i}章开头。" + "文" * 5000 + f"第{i}章结尾。"}
+        for i in range(1, 40)
+    ]
+
+    proportional = stages._render_bible_source(chapters)
+    guaranteed = stages._render_bible_source(chapters, head_chapters=10)
+
+    assert "第9章结尾。" not in proportional
+    for i in range(1, 11):
+        assert f"第{i}章开头。" in guaranteed
+        assert f"第{i}章结尾。" in guaranteed
+
+
+def test_recurring_character_names_ranks_by_lookahead_occurrences(monkeypatch) -> None:
+    """点名之后由后端逐字统计：出现多次才算重要，改写出来的名字不算数。"""
+    import asyncio
+    import json
+
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters = [
+        {"idx": 1, "title": "第一章", "content": "孟浩与王有材同行，孟浩开口。"},
+        {"idx": 2, "title": "第二章", "content": "孟浩再遇王有材，路人甲一闪而过。"},
+    ] + [
+        {"idx": i, "title": f"第{i}章", "content": f"第{i}章：孟浩独行，王有材追来。"}
+        for i in range(3, 21)
+    ]
+
+    async def fake_chat(_messages, **_kwargs):
+        return json.dumps({
+            "names": ["孟浩", "王有材", "路人甲", "孟浩然"],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    ranked = asyncio.run(stages._recurring_character_names(chapters))
+
+    assert [name for name, _ in ranked] == ["孟浩", "王有材"]
+    assert dict(ranked)["孟浩"] >= dict(ranked)["王有材"]
+
+
+def test_generate_bible_keeps_source_in_repair_rounds_and_supplements(monkeypatch) -> None:
+    """修复轮不得截掉原文；必收名单缺人时用一次补录补齐，而不是把项目卡成 warning。"""
+    import asyncio
+    import json
+
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters = [
+        {"idx": i, "title": f"第{i}章", "content": f"第{i}章：孟浩与王有材同行，许师姐在旁。"}
+        for i in range(1, 21)
+    ]
+    seen: dict[str, object] = {}
+
+    async def fake_chat(messages, **kwargs):
+        stage_key = str((kwargs.get("call_meta") or {}).get("stage_key") or "")
+        if stage_key == "character_roll_call":
+            return json.dumps({"names": ["孟浩", "王有材", "许师姐"]}, ensure_ascii=False)
+        seen["supplement_prompt"] = messages[-1]["content"]
+        return json.dumps({"characters": [
+            {
+                "name": "许师姐",
+                "role": "重要配角",
+                "appearance_canonical": "二十岁女子，墨发高马尾，银色素面长袍，身形清瘦，背后一柄银色长剑",
+                "personality": "外冷内热",
+                "speech_style": "话少句短，语气平淡，极少多余修饰",
+                "relationships": [{"to": "无名氏", "relation": "同门"}],
+            },
+            {
+                "name": "王有材",
+                "role": "重要配角",
+                "appearance_canonical": "十六七岁少年，黑色短发梳整齐，深棕短打木匠服，身形敦实，腰间挂木尺",
+                "personality": "略带莽撞",
+                "speech_style": "说话直白无修饰，情急下语速快，常用口语",
+                "relationships": [{"to": "孟浩", "relation": "同乡"}],
+            },
+            {
+                "name": "无名氏",
+                "role": "反派",
+                "appearance_canonical": "三十岁男子，黑色长发束冠，玄色长袍绣暗纹，身形高瘦，左颊一道旧疤",
+                "personality": "阴沉",
+                "speech_style": "语调平缓，句子极短，从不多说一个字",
+                "relationships": [],
+            },
+        ]}, ensure_ascii=False)
+
+    async def fake_loop(*args, **kwargs):
+        seen["prompt"] = args[2]
+        seen["repair_user_prompt_limit"] = kwargs["repair_user_prompt_limit"]
+        return Bible(
+            world=World(visual_style_canonical="国漫3D动画电影质感，精致光影，统一电影画面"),
+            characters=[Character(
+                name="孟浩",
+                role="主角",
+                appearance_canonical="十六七岁少年，黑色短发额前碎发，蓝色文士长衫，身形瘦弱，腰间挂布袋",
+            )],
+        )
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
+
+    bible = asyncio.run(stages.generate_bible(chapters))
+
+    assert seen["repair_user_prompt_limit"] is None
+    assert "【必收角色名单】" in seen["prompt"]
+    assert "许师姐" in seen["prompt"]
+    # 必收名单里缺的人补齐；名单之外的人不得借补录混进人物谱。
+    assert [c.name for c in bible.characters] == ["孟浩", "许师姐", "王有材"]
+    assert "许师姐" in str(seen["supplement_prompt"])
+    # 补录进来的关系不得指向名单外的人，否则 validate_bible 会退回重写。
+    assert validate_bible(bible) == []

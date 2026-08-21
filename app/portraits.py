@@ -22,7 +22,7 @@ import re
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal, NoReturn
+from typing import Any, Literal, NoReturn
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -102,6 +102,65 @@ def _identity_operation_retry_epoch() -> str:
         return str(current_trace().run_id or "").strip()
     except Exception:  # noqa: BLE001 - tracing is optional in isolated helpers
         return ""
+
+
+# The identity contracts forbid structured retries because a second sample that
+# is *shown* the first one's failure can be coached into fabricating compliance,
+# and because a wrong-but-coherent answer must never be re-rolled until it
+# happens to pass.  Both of those are about answers the provider actually
+# authored.  An *undelivered* answer is a different animal: in production the
+# response derailed mid-object into `{"decision_id": "f" : [` and no JSON object
+# ever decoded, so there was no identity judgement to preserve, the outcome is
+# known-bad rather than outcome-unknown, and nothing from the failed attempt
+# reaches the next one.  Re-issuing the identical prompt under a fresh operation
+# id is then the same act as an operator pressing retry, minus re-running the
+# whole upstream pipeline.  The provider is asked for a strict json_schema
+# response_format and demonstrably does not always honour it, so without this
+# one clean resample a single corrupt sample costs a whole episode.
+#
+# Schema-invalid and semantically-invalid answers keep the strict one-call rule.
+IDENTITY_UNUSABLE_RESPONSE_RESAMPLES = 1
+
+
+async def _identity_structured_with_resample(
+    messages: list[dict[str, str]],
+    *,
+    model_type: Any,
+    validate: Callable[[Any], list[str]],
+    max_tokens: int,
+    operation_id_for_attempt: Callable[[int], str],
+    call_meta: dict[str, Any],
+    **kwargs: Any,
+) -> Any:
+    """Run one identity contract, resampling only an unusable response.
+
+    Each attempt still goes through the gateway's strict identity fence with
+    ``format_retry_limit=0`` and ``semantic_retry_limit=0``; the resample is an
+    authored second attempt at the caller, with its own operation id so cost
+    and idempotency accounting stay exact.  Only a response that never decoded
+    into a JSON object at all is resampled -- schema-invalid answers and
+    business-validation failures are re-raised on the first attempt.
+    """
+    last_error: model_gateway.StructuredFormatError | None = None
+    for attempt in range(IDENTITY_UNUSABLE_RESPONSE_RESAMPLES + 1):
+        try:
+            # model_type/validate/max_tokens stay explicit here so the
+            # gateway call-site contract test still sees them named.
+            return await model_gateway.chat_structured(
+                messages,
+                model_type=model_type,
+                validate=validate,
+                max_tokens=max_tokens,
+                operation_id=operation_id_for_attempt(attempt),
+                call_meta={**call_meta, "resample_attempt": attempt},
+                **kwargs,
+            )
+        except model_gateway.StructuredFormatError as exc:
+            if not getattr(exc, "unparseable", False):
+                raise
+            last_error = exc
+    assert last_error is not None
+    raise last_error
 
 
 def _canonical_named_authority_id(canonical_name: str) -> str:
@@ -1161,6 +1220,23 @@ def _project_current_identity_response(
             errors.append(f"source_label 非法：{source_label!r}")
         evidence_text = str(record.get("text") or "")
         literal = bool(source_label and source_label in evidence_text)
+        if not literal and identity_kind == "named" and source_label:
+            # 模型只是在一批 backend-owned 证据里挑下标，证据本身始终由后端拥有。
+            # 一个逐字自称谓如果确实逐字出现在本批另一条证据里，那是选错了 E，
+            # 不是凭空捏造：直接改绑到真正承载它的那条证据，而不是让整集预检硬失败
+            # （否则模型每挑错一次下标，整集剧本就必须人工重试一次）。
+            rebound = next(
+                (
+                    owned
+                    for owned in evidence_by_ref.values()
+                    if source_label in str(owned.get("text") or "")
+                ),
+                None,
+            )
+            if rebound is not None:
+                record = rebound
+                evidence_text = str(record.get("text") or "")
+                literal = True
         if canonical_name != canonical_name.strip():
             errors.append(f"canonical_name 含首尾空白：{source_label}")
         if identity_kind == "named":
@@ -1770,11 +1846,11 @@ async def _discover_character_candidates_legacy(
             )
             return errors
 
-        response = await model_gateway.chat_structured(
+        response = await _identity_structured_with_resample(
             [{"role": "user", "content": prompt}],
             model_type=CurrentIdentityCandidateResponse,
             validate=validate_current_response,
-            operation_id=(
+            operation_id_for_attempt=lambda resample_attempt: (
                 f"screenplay.identity.current.v6:{episode_no}:{current_batch}:"
                 + evidence_repository.content_hash({
                     "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
@@ -1788,6 +1864,7 @@ async def _discover_character_candidates_legacy(
                     "temperature": 0.1,
                     "provider_semantic_settings": current_semantic_settings,
                     "retry_epoch": _identity_operation_retry_epoch(),
+                    "resample_attempt": resample_attempt,
                     "prompt": prompt,
                     "schema": current_schema,
                     "response_format": current_response_format,
@@ -3248,11 +3325,15 @@ async def resolve_future_identity_candidates(
         })
     )
 
-    response = await model_gateway.chat_structured(
+    response = await _identity_structured_with_resample(
         [{"role": "user", "content": prompt}],
         model_type=FutureIdentityCandidateResponse,
         validate=validate_response,
-        operation_id=operation_id,
+        operation_id_for_attempt=lambda resample_attempt: (
+            operation_id
+            if not resample_attempt
+            else f"{operation_id}:resample:{resample_attempt}"
+        ),
         max_tokens=4096,
         temperature=0.1,
         format_retry_limit=0,
@@ -3974,13 +4055,14 @@ owned SRC 证据目录（后端逐字锁定，不得回抄或改写）：
                 )
         return errors
 
-    response = await model_gateway.chat_structured(
+    response = await _identity_structured_with_resample(
         [{"role": "user", "content": prompt}],
         model_type=StructuralIdentityCoverageResponse,
         validate=validate_response,
-        operation_id=(
+        operation_id_for_attempt=lambda resample_attempt: (
             f"screenplay.identity.coverage.v6:{episode_no}:"
             + evidence_repository.content_hash({
+                "resample_attempt": resample_attempt,
                 "contract_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
                 "provider": coverage_provider,
                 "model": coverage_model,

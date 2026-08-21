@@ -287,7 +287,7 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     )
 
     assert stages.SCREENPLAY_BLUEPRINT_PROMPT_VERSION == (
-        "screenplay-blueprint-1.10.0"
+        "screenplay-blueprint-1.11.0"
     )
     assert stages.BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION == (
         "blueprint-semantic-review.v5"
@@ -311,6 +311,9 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     assert "动作目标、被观察者、同场者" in prompt
     assert "非人物力量或环境状态作用于人物时归environment" in prompt
     assert "source_segment_ids=[]的无来源node" in prompt
+    # 1.11.0：证据行不再向模型索取可派生内容。
+    assert "participant_evidence一律不要输出source_segment_ids" in prompt
+    assert "已经写了state_subject或voice的人物" in prompt
     assert _prompt_source_ids(prompt) == ["SRC0003"]
     schema = json.loads(prompt.split("\nschema=", 1)[1])
     node_schema = schema["$defs"]["NarrativeNode"]
@@ -357,10 +360,21 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
         "NarrativeParticipantEvidence"
     ]["properties"]
     assert evidence_properties["identity_key"]["minLength"] == 1
-    assert evidence_properties["source_segment_ids"]["minItems"] == 1
+    # 1.11.0：引用了 exact unit 的证据行不得再重复写 source_segment_ids，
+    # 后端从 source_unit_keys 前缀确定性派生。
+    assert "minItems" not in evidence_properties["source_segment_ids"]
     assert evidence_properties["source_segment_ids"]["items"] == {
         "enum": ["SRC0003"],
     }
+    derived_contract = next(
+        contract
+        for contract in schema["$defs"]["NarrativeParticipantEvidence"]["allOf"]
+        if contract["if"]["required"] == ["source_unit_keys"]
+    )
+    assert derived_contract["then"]["properties"]["source_segment_ids"] == {
+        "maxItems": 0
+    }
+    assert "source_segment_ids" not in evidence_contract["required"]
     assert evidence_properties["source_unit_keys"]["items"] == {
         "enum": [key for pair in zip(action_keys, quoted_keys) for key in pair],
     }
@@ -2178,11 +2192,17 @@ def test_blueprint_generation_budget_caps_calls_tokens_and_time(
     with pytest.raises(stages.StageError, match="TOKEN_BUDGET"):
         budget.claim(max_tokens=1)
 
+    # started_at 必须从一个确定值出发再推进整段预算：直接用真实 monotonic()
+    # 加 1800 会踩浮点边界——本机 uptime 下 (x+1800.0)-x 有约 25% 概率算出
+    # 1799.9999999999982，令 `elapsed >= 上限` 为假，测试随机变红（历史上已多次）。
+    # 从 0.0 起算既保持「边界是闭区间」这一原意，又不再依赖机器 uptime。
+    monkeypatch.setattr(stages.time, "monotonic", lambda: 0.0)
     budget = stages._BlueprintGenerationBudget()
+    assert budget.started_at == 0.0
     monkeypatch.setattr(
         stages.time,
         "monotonic",
-        lambda: budget.started_at + stages.BLUEPRINT_GENERATION_MAX_WALL_SECONDS,
+        lambda: stages.BLUEPRINT_GENERATION_MAX_WALL_SECONDS,
     )
     with pytest.raises(stages.StageError, match="TIME_BUDGET"):
         budget.claim(max_tokens=1)
@@ -3775,4 +3795,221 @@ def test_mixed_consensus_uses_node_repair_then_exact_ownership_patch(
         and evidence.usage == "state_subject"
         and evidence.source_unit_keys == [target_unit_key]
         for evidence in result.nodes[2].participant_evidence
+    )
+
+
+# --- ERR-20260821-dbbf95 -----------------------------------------------------
+# run_8f416074711b / ep_3d523ff4d0a4 planned 22 leaves (24 after two dynamic
+# splits) and spent one full-shard call plus one ownership-repair call on almost
+# every leaf.  The flat 32-call breaker therefore fired at leaf 16/24 on a
+# perfectly healthy run and surfaced as "内容生成未通过格式或业务校验".
+
+_ERR_DBBF95_SOURCE = "孟浩摇了摇头，从怀里取出一张纸条，认真的看了看。"
+
+
+def _err_dbbf95_shard_payload(
+    *,
+    source_ids: list[str],
+    shard_index: int,
+) -> str:
+    """One leaf whose only gap is the perception evidence its owner implies."""
+    return json.dumps({
+        "format_version": stages.BLUEPRINT_VERSION,
+        "episode_no": 1,
+        "shard_index": shard_index,
+        "source_segment_ids": source_ids,
+        "nodes": [{
+            "key": f"N{shard_index:03d}",
+            "source_segment_ids": source_ids,
+            "summary": "孟浩取出纸条",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "日",
+            "time_relation": "episode_start" if shard_index == 1 else "after",
+            "location_key": "road",
+            "location_label": "路上",
+            "participants": ["孟浩"],
+            "participant_evidence": [{
+                "identity_key": "孟浩",
+                "source_segment_ids": source_ids,
+                "source_unit_keys": [
+                    f"{source_id}:unit:{index:03d}"
+                    for source_id in source_ids
+                    for index in (1, 2, 3)
+                ],
+                "usage": "state_subject",
+            }],
+            "environment_source_unit_keys": [],
+            "action_logic": "孟浩取出纸条查看",
+        }],
+    }, ensure_ascii=False)
+
+
+def test_err_dbbf95_call_budget_scales_with_the_planned_leaf_plan() -> None:
+    budget = stages._BlueprintGenerationBudget()
+
+    assert budget.planned_leaf_count == 0
+    assert budget.max_provider_calls == (
+        stages.BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS
+    )
+    assert budget.max_output_tokens == (
+        stages.BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS
+    )
+    assert budget.max_wall_seconds == (
+        stages.BLUEPRINT_GENERATION_MAX_WALL_SECONDS
+    )
+
+    budget.adopt_shard_plan(24)
+
+    # Two calls per leaf is the designed nominal path, so a 24-leaf episode
+    # must never trip the breaker on its own honest cost.
+    assert budget.max_provider_calls >= 24 * stages.BLUEPRINT_LEAF_PROVIDER_CALLS
+    assert budget.max_output_tokens > (
+        stages.BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS
+    )
+    assert budget.max_wall_seconds > (
+        stages.BLUEPRINT_GENERATION_MAX_WALL_SECONDS
+    )
+
+    scaled_calls = budget.max_provider_calls
+    budget.adopt_shard_plan(22)
+
+    # A replan never lowers a cap below exposure that was already admitted.
+    assert budget.planned_leaf_count == 24
+    assert budget.max_provider_calls == scaled_calls
+
+
+def test_err_dbbf95_twenty_two_leaves_with_repair_rounds_stay_admissible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    segments = index_source_segments(_source(22))
+    calls: list[tuple[list[str], int]] = []
+    seen_shards: set[int] = set()
+
+    async def fake_chat(messages, **kwargs):
+        source_ids = _prompt_source_ids(messages[1]["content"])
+        calls.append((source_ids, int(kwargs["call_meta"]["attempt"])))
+        kwargs["usage_callback"]({"completion_tokens": 2, "reused": False})
+        return _shard_response(
+            source_ids=source_ids,
+            shard_index=int(kwargs["call_meta"]["shard_index"]),
+        )
+
+    def fake_validate(candidate, **_kwargs):
+        # Reproduce the observed shape: every leaf needs one repair round.
+        if candidate.shard_index in seen_shards:
+            return []
+        seen_shards.add(candidate.shard_index)
+        return ["[BLUEPRINT_TEST_RETRY] attempt1 invalid"]
+
+    monkeypatch.setattr(
+        stages,
+        "_partition_blueprint_segments",
+        lambda _segments: [[segment] for segment in segments],
+    )
+    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(
+        stages,
+        "validate_narrative_blueprint_shard",
+        fake_validate,
+    )
+    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    monkeypatch.setattr(stages, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(step_run_id="step-err-dbbf95"),
+    )
+
+    budget = stages._BlueprintGenerationBudget()
+    result = asyncio.run(stages._generate_sharded_narrative_blueprint(
+        {"id": "ep-err-dbbf95", "episode_no": 1},
+        _source(22),
+        {},
+        generation_budget=budget,
+    ))
+
+    assert len(result.nodes) == 22
+    assert len(calls) == 44
+    assert budget.planned_leaf_count == 22
+    assert budget.provider_calls == 44
+    # The flat floor is exactly what ERR-20260821-dbbf95 hit at call 33.
+    assert len(calls) > stages.BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS
+
+
+def test_err_dbbf95_single_owner_perception_needs_no_repair_round(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+
+    async def fake_chat(messages, **kwargs):
+        calls.append(int(kwargs["call_meta"]["attempt"]))
+        kwargs["usage_callback"]({"completion_tokens": 2, "reused": False})
+        return _err_dbbf95_shard_payload(
+            source_ids=_prompt_source_ids(messages[1]["content"]),
+            shard_index=int(kwargs["call_meta"]["shard_index"]),
+        )
+
+    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    monkeypatch.setattr(stages, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(step_run_id="step-err-dbbf95-perception"),
+    )
+
+    result = asyncio.run(stages._generate_sharded_narrative_blueprint(
+        {"id": "ep-err-dbbf95-perception", "episode_no": 1},
+        _ERR_DBBF95_SOURCE,
+        {},
+    ))
+
+    # The provider only ever named one state subject per unit; the implied
+    # visible evidence is settled locally instead of buying a second call.
+    assert calls == [1]
+    assert any(
+        evidence.usage == "visible"
+        and evidence.identity_key == "孟浩"
+        and set(evidence.source_unit_keys) == {
+            "SRC0001:unit:001",
+            "SRC0001:unit:002",
+            "SRC0001:unit:003",
+        }
+        for evidence in result.nodes[0].participant_evidence
+    )
+
+
+def test_err_dbbf95_budget_breaker_is_not_reported_as_validation_failure() -> None:
+    from app import errors as app_errors
+
+    for marker in (
+        "BLUEPRINT_GENERATION_CALL_BUDGET",
+        "BLUEPRINT_GENERATION_TOKEN_BUDGET",
+        "BLUEPRINT_GENERATION_TIME_BUDGET",
+    ):
+        exc = stages.StageError("剧本时空因果蓝图分片", [f"[{marker}] 超过上限"])
+        assert app_errors.classify(exc) == ("generation_budget", "GEN-BUDGET")
+
+    hint = app_errors.CATEGORIES["generation_budget"]["hint"]
+    assert "修复重试上限" in hint and "无效" in hint
+    assert "未通过格式或业务校验" not in hint
+
+    grant_exc = stages.StageError(
+        "剧本时空因果蓝图分片",
+        ["[BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED] 上次供应商结果未知"],
+    )
+    assert app_errors.classify(grant_exc) == (
+        "generation_retry_grant",
+        "GEN-RETRY-GRANT",
     )

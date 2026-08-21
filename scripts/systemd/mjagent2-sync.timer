@@ -1,0 +1,12 @@
+[Unit]
+Description=Run MJAgent2 git sync every 5 minutes
+
+[Timer]
+OnActiveSec=30s
+OnUnitActiveSec=5min
+AccuracySec=15s
+Persistent=true
+Unit=mjagent2-sync.service
+
+[Install]
+WantedBy=timers.target

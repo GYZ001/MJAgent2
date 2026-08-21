@@ -40,6 +40,14 @@ CATEGORIES: dict[str, dict[str, Any]] = {
         "technical": True,
         "hint": "模型输出未通过确定性生成合同，请按错误码检查合同证据后重试。",
     },
+    "generation_budget": {
+        "label": "内容生成",
+        "technical": True,
+        "hint": "本次生成触发了单次运行的调用/输出/时长安全上限而中止，"
+                "并非格式或业务校验失败，调整「修复重试上限」无效。"
+                "已完成的分片会被复用，直接重新生成即可从中断处继续；"
+                "若同一集反复触顶，请把错误码反馈给技术人员。",
+    },
     "media":      {"label": "媒体处理", "technical": True,
                    "hint": "媒体处理失败（转码/文件读写等），请把错误码反馈给技术人员。"},
     "system":     {"label": "系统内部", "technical": True,
@@ -127,6 +135,18 @@ def classify(exc: BaseException | None, http_status: int | None = None) -> tuple
         return "provider", "LLM"
     if name == "ScreenplaySceneShardError":
         return "generation_contract", "GEN-CONTRACT"
+    if name == "StageError" and any(
+        marker in _extract_message(exc)
+        for marker in (
+            "[BLUEPRINT_GENERATION_CALL_BUDGET]",
+            "[BLUEPRINT_GENERATION_TOKEN_BUDGET]",
+            "[BLUEPRINT_GENERATION_TIME_BUDGET]",
+        )
+    ):
+        # Runaway breakers (call/token/wall clock). The run was stopped on
+        # capacity, not on a format or business check, so it must not carry the
+        # generic "内容生成未通过格式或业务校验" hint.
+        return "generation_budget", "GEN-BUDGET"
     if name == "StageError" and "JSON 解析失败" in _extract_message(exc):
         return "generation", "JSON"
     if (

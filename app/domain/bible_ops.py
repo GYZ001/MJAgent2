@@ -1421,12 +1421,13 @@ def _compute_bible_generate_precheck(project_id: str, *, style_name: str | None 
     """计算首次人物谱+定妆范围；不签发可执行凭证。"""
     from app.config import IMAGE_PRICE_PER_UNIT
     from app.multiview import CHARACTER_REQUIRED_VIEWS
+    from app.stages import BIBLE_MUST_COVER_MAX
 
     style_name = _normalize_visual_style_name(style_name)
     p = _project_or_404(project_id)
     unit = float(IMAGE_PRICE_PER_UNIT)
     views_per = len(CHARACTER_REQUIRED_VIEWS)
-    # 初始谱写合同上限 8 角色；若已有 bible 则用真实角色数
+    # 首版谱写按必收名单上限估算；若已有 bible 则用真实角色数
     if p.get("bible_json"):
         bible = json.loads(p["bible_json"])
         chars = bible.get("characters") or []
@@ -1434,9 +1435,12 @@ def _compute_bible_generate_precheck(project_id: str, *, style_name: str | None 
         names = [c.get("name") for c in chars if c.get("name")]
         estimate_note = "基于当前人物谱角色数"
     else:
-        char_count = 8
+        char_count = BIBLE_MUST_COVER_MAX
         names = []
-        estimate_note = "尚无人物谱，按初始上限 8 角色估算；谱写完成后按真实角色数出图"
+        estimate_note = (
+            f"尚无人物谱，按首版必收名单上限 {BIBLE_MUST_COVER_MAX} 角色估算；"
+            "谱写完成后按真实角色数出图"
+        )
     image_count = char_count * views_per
     estimated = round(image_count * unit, 2)
     max_retry = round(estimated * 1.5, 2)
