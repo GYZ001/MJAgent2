@@ -660,6 +660,95 @@ def test_structural_coverage_does_not_treat_current_synthetic_as_authority(
     assert authoritative[0]["identity_group"].startswith("structural:")
 
 
+def test_structural_coverage_named_reference_keeps_single_group_authority(
+    monkeypatch,
+) -> None:
+    """A mentioned named reference must not add a second authority class.
+
+    Regression for the EP1 blueprint-stage failure ``structural identity group
+    缺少唯一权威``: a ``reference_identity`` for a named label ("许师姐") lands in a
+    ``named:`` identity_group.  When its authority_id was minted as
+    ``functional:...`` the very same group also derived ``bible:许师姐`` from the
+    named branch, so the coverage gate saw two authority classes in one group
+    and hard-failed.  The authority for a named-family reference must resolve to
+    the ``bible:`` namespace so the group carries exactly one authority.
+    """
+    source_text = "许师姐出门带回了四个拥有资质的小娃。"
+    scope = portraits.screenplay_identity_scope_fingerprint(1, source_text)
+    named_group = "current-1:named:" + evidence_repository.content_hash(
+        "许师姐"
+    )[:16]
+    reference = {
+        "source_label": "许师姐",
+        "canonical_name": "许师姐",
+        "resolution": "reference_identity",
+        "identity_group": named_group,
+        "identity_scope_fingerprint": scope,
+        "decision_provenance": (
+            portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
+        ),
+        "decision_contract_version": portraits.FUTURE_IDENTITY_DECISION_VERSION,
+        "structural_identity_policy_version": (
+            portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION
+        ),
+    }
+    # The named-family reference must own the ``bible:`` authority that agrees
+    # with its ``named:`` group; a ``functional:`` authority here is the
+    # self-contradictory row the coverage gate rejects.
+    assert evidence_repository is not None
+    normalized = portraits.normalize_character_resolution(reference)
+    assert normalized["authority_id"] == "bible:许师姐"
+
+    calls = 0
+
+    async def fake_structured(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        return portraits.StructuralIdentityCoverageResponse.model_validate(
+            _coverage_identity_wire(
+                [{
+                    "source_label": "许师姐",
+                    "canonical_name": "许师姐",
+                    "identity_kind": "named",
+                    "identity_group_ref": named_group,
+                }],
+                provider_schema=kwargs["response_format"]["json_schema"][
+                    "schema"
+                ],
+                messages=messages,
+            )
+        )
+
+    monkeypatch.setattr(
+        portraits.model_gateway,
+        "chat_structured",
+        fake_structured,
+    )
+    # Must not raise "structural identity group 缺少唯一权威".
+    result = asyncio.run(
+        portraits.audit_identity_coverage_from_structural_evidence(
+            [],
+            structural_evidence=[{
+                "identity_key": "许师姐",
+                "source_label": "许师姐",
+                "source_segment_ids": ["SRC0001"],
+                "usage": "mentioned",
+                "node_key": "node-1",
+            }],
+            source_text=source_text,
+            bible=Bible(
+                characters=[],
+                world=World(visual_style_canonical="国风"),
+            ),
+            episode_no=1,
+            existing_resolutions=[normalized],
+        )
+    )
+    assert calls == 1
+    named = next(item for item in result if item["source_label"] == "许师姐")
+    assert named["authority_id"] == "bible:许师姐"
+
+
 def test_structural_coverage_bound_group_uses_selected_owned_src(
     monkeypatch,
 ) -> None:
@@ -5290,7 +5379,13 @@ def test_mentioned_named_identity_gets_authority_without_character_card(
     assert result["checked"] == 0
     assert result["added"] == []
     assert result["resolutions"][0]["resolution"] == "reference_identity"
-    assert result["resolutions"][0]["authority_id"].startswith("functional:")
+    # A mentioned named reference is a named-family decision: it must resolve to
+    # the canonical named-authority namespace so the persisted authority_id
+    # agrees with the ``named:`` identity_group the discovery projector assigns
+    # to the same label.  Minting a ``functional:`` authority for a named group
+    # is the self-contradictory row the structural-coverage gate rejects as
+    # "identity group 缺少唯一权威".
+    assert result["resolutions"][0]["authority_id"] == "bible:靠山老祖"
 
 
 def test_confirmed_real_name_is_not_downgraded_to_route_extra(monkeypatch) -> None:
