@@ -1,7 +1,12 @@
 """本地会话秘密：保护 /api/* 免受恶意网页跨站调用（PRD §12.2 / 2026-07-27 Todolist T1）。
 
 启动时生成（或复用落盘）随机会话秘密；前端通过 ``/api/session`` 领取后，
-以 ``X-Manju-Session`` 头携带。仅绑定本机 Origin allowlist。
+以 ``X-Manju-Session`` 头携带。
+
+Origin 策略：
+- 本机开发 allowlist（localhost / 127.0.0.1 的前后端端口）；
+- 公网同域反代：Origin 主机名与请求 Host（或 X-Forwarded-Host）一致即放行，
+  换域名无需改代码；异源恶意站点仍会被拒绝。
 """
 from __future__ import annotations
 
@@ -9,6 +14,7 @@ import contextvars
 import hmac
 import secrets
 import threading
+from urllib.parse import urlparse
 
 from fastapi import Header, HTTPException, Request
 
@@ -77,6 +83,49 @@ def verify_session_token(token: str | None) -> bool:
     return hmac.compare_digest(token, expected)
 
 
+def _hostname_of(value: str | None) -> str | None:
+    """从 Origin URL 或 Host 头取出小写主机名（忽略端口与默认 80/443）。"""
+    if not value:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if "://" in raw:
+        host = urlparse(raw).hostname
+    else:
+        # Host / X-Forwarded-Host 可能是 ``a, b`` 或 ``example.com:443``
+        host = raw.split(",", 1)[0].strip()
+        if host.startswith("["):
+            # IPv6 literal ``[::1]:8230``
+            end = host.find("]")
+            host = host[1:end] if end != -1 else host.strip("[]")
+        else:
+            host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    if not host:
+        return None
+    return host.strip(".").lower() or None
+
+
+def _request_public_hostname(request: Request) -> str | None:
+    """优先 X-Forwarded-Host（反代保留的公网域名），否则 Host。"""
+    forwarded = (request.headers.get("x-forwarded-host") or "").strip()
+    if forwarded:
+        return _hostname_of(forwarded)
+    return _hostname_of(request.headers.get("host"))
+
+
+def origin_allowed(origin: str | None, request: Request) -> bool:
+    """浏览器 Origin 是否允许：本机白名单，或与请求公网 Host 同源。"""
+    if not origin:
+        return True
+    normalized = origin.strip().rstrip("/")
+    if normalized in _DEFAULT_ORIGINS:
+        return True
+    origin_host = _hostname_of(normalized)
+    request_host = _request_public_hostname(request)
+    return bool(origin_host and request_host and origin_host == request_host)
+
+
 def require_local_session(
     request: Request,
     x_manju_session: str | None = Header(default=None, alias="X-Manju-Session"),
@@ -86,7 +135,7 @@ def require_local_session(
     EventSource 无法自定义 Header，因此也接受 ``?session=`` 查询参数。
     """
     origin = request.headers.get("origin")
-    if origin and origin not in _DEFAULT_ORIGINS:
+    if origin and not origin_allowed(origin, request):
         raise HTTPException(403, "不允许的 Origin")
     token = x_manju_session or request.query_params.get("session")
     if not verify_session_token(token):
@@ -97,15 +146,15 @@ def require_local_session(
 def _is_loopback_host(host: str | None) -> bool:
     if not host:
         return False
-    hostname = host.split(":", 1)[0].strip().lower()
+    hostname = _hostname_of(host) or host.split(":", 1)[0].strip().lower()
     return hostname in {"localhost", "127.0.0.1", "::1"}
 
 
 def assert_session_bootstrap_allowed(request: Request) -> None:
-    """``GET /api/session`` 无鉴权，必须限制在本机开发 Origin / loopback。"""
+    """``GET /api/session`` 无鉴权：本机 Origin、同源公网 Origin，或 loopback Host。"""
     origin = (request.headers.get("origin") or "").strip()
     if origin:
-        if origin not in _DEFAULT_ORIGINS:
+        if not origin_allowed(origin, request):
             raise HTTPException(403, "不允许的 Origin")
         return
     host = (request.headers.get("host") or "").strip()
@@ -115,7 +164,7 @@ def assert_session_bootstrap_allowed(request: Request) -> None:
     if client_host in {"127.0.0.1", "::1", "localhost", "testclient"}:
         # testclient：Starlette TestClient 本机回环；生产反向代理不应伪造为 testclient。
         return
-    raise HTTPException(403, "会话领取仅允许本机 Host")
+    raise HTTPException(403, "会话领取仅允许本机 Host 或同源 Origin")
 
 
 def public_session_payload() -> dict[str, str]:

@@ -60,8 +60,61 @@ def test_public_health_and_session_need_no_auth(anon: TestClient) -> None:
     body = anon.get("/api/session", headers={"Origin": "http://127.0.0.1:5230"}).json()
     assert body["session_token"]
     assert body["header"] == "X-Manju-Session"
-    blocked = anon.get("/api/session", headers={"Origin": "https://evil.example", "Host": "evil.example"})
+    # 异源攻击：恶意页 Origin 与后端 Host 不一致 → 拒绝（同源公网域名则允许）
+    blocked = anon.get(
+        "/api/session",
+        headers={"Origin": "https://evil.example", "Host": "127.0.0.1:8230"},
+    )
     assert blocked.status_code == 403
+
+
+def test_same_host_public_origin_can_bootstrap_session(anon: TestClient) -> None:
+    """同域反代：公网 Origin 与 Host 一致时可领取会话；异源仍拒绝。"""
+    ok = anon.get(
+        "/api/session",
+        headers={
+            "Origin": "https://manju.example.com",
+            "Host": "manju.example.com",
+        },
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["session_token"]
+
+    via_forwarded = anon.get(
+        "/api/session",
+        headers={
+            "Origin": "https://manju.example.com",
+            "Host": "127.0.0.1:8230",
+            "X-Forwarded-Host": "manju.example.com",
+        },
+    )
+    assert via_forwarded.status_code == 200, via_forwarded.text
+
+    cross = anon.get(
+        "/api/session",
+        headers={
+            "Origin": "https://evil.example",
+            "Host": "manju.example.com",
+        },
+    )
+    assert cross.status_code == 403
+
+
+def test_same_host_public_origin_can_call_api(anon: TestClient) -> None:
+    """领取到的会话可带着公网同源 Origin 访问受保护 API。"""
+    token = anon.get(
+        "/api/session",
+        headers={"Origin": "https://app.example.com", "Host": "app.example.com"},
+    ).json()["session_token"]
+    resp = anon.get(
+        "/api/settings",
+        headers={
+            "Origin": "https://app.example.com",
+            "Host": "app.example.com",
+            "X-Manju-Session": token,
+        },
+    )
+    assert resp.status_code == 200, resp.text
 
 
 def test_keys_and_credentials_require_confirm(

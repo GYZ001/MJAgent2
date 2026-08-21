@@ -5,7 +5,8 @@
 # 不会随终端关闭或父进程被杀而退出——只有手动 `scripts/dev.sh stop` 或 kill 端口进程才会停。
 #
 #   后端  uvicorn  http://127.0.0.1:8230  （默认稳定常驻；MJ_BACKEND_RELOAD=1 开启热重载）
-#   前端  vite     http://127.0.0.1:5230  （/api、/media 反代到后端）
+#   前端  vite     http://0.0.0.0:5230   （/api、/media 反代到后端；公网经 Host 访问）
+#   可用 MJ_FRONTEND_HOST=127.0.0.1 收回为仅本机
 #
 # 用法：scripts/dev.sh [start|stop|status|restart]   （缺省 start）
 set -euo pipefail
@@ -106,16 +107,18 @@ else:
         "--timeout-graceful-shutdown", "30",
     ]
     backend_mode = "stable"
+frontend_host = be_env.get("MJ_FRONTEND_HOST", "0.0.0.0").strip() or "0.0.0.0"
 b = subprocess.Popen(
     backend_args,
     cwd=root, stdin=dn, stdout=be, stderr=be, env=be_env, start_new_session=True)
 f = subprocess.Popen(
-    ["npm", "run", "dev", "--", "--host", "127.0.0.1"],
+    ["npm", "run", "dev", "--", "--host", frontend_host],
     cwd=os.path.join(root, "frontend"), stdin=dn, stdout=fe, stderr=fe, start_new_session=True)
 print(f"backend pid={b.pid}  frontend pid={f.pid}")
 print("backend mode=" + backend_mode)
+print("frontend host=" + frontend_host)
 PY
-  echo "已启动：后端 http://127.0.0.1:8230   前端 http://127.0.0.1:5230"
+  echo "已启动：后端 http://127.0.0.1:8230   前端 http://0.0.0.0:5230（公网可用 IP/域名:5230）"
   echo "日志：${BACKEND_LOG} / ${FRONTEND_LOG}"
   echo "停止：scripts/dev.sh stop"
 }
