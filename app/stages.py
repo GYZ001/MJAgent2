@@ -7167,6 +7167,14 @@ def _blueprint_format_repair_reservation_operation_id(
     )
 
 
+# Deleting the screenplay is the terminal disposition of everything that
+# production spent: the same command supersedes the active revision, so a
+# retry grant -- which may only bind to an active revision -- can never be
+# issued for a receipt that outlives it.  Marking the abandoned calls keeps
+# their cost auditable while closing the liability the deleted product owned.
+BLUEPRINT_CALL_ABANDONED_BY_DELETE = "ABANDONED_BY_SCREENPLAY_DELETE"
+
+
 class _BlueprintGenerationBudget:
     """Reserve call exposure, then settle against provider-reported usage.
 
@@ -7326,6 +7334,13 @@ class _BlueprintGenerationBudget:
                 and int(superseded_by_call_id or 0)
                 == int(include_resolved_by_call_id)
             )
+            try:
+                durable_disposition = str(row["recovery_disposition"] or "")
+            except (KeyError, IndexError):
+                durable_disposition = ""
+            unresolved_liability = (
+                not superseded_by_call_id or resolved_by_expected
+            ) and durable_disposition != BLUEPRINT_CALL_ABANDONED_BY_DELETE
             if (
                 not durable_grant_id
                 and episode_id
@@ -7366,7 +7381,7 @@ class _BlueprintGenerationBudget:
             if (
                 stage_key
                 and status in {"INTERRUPTED", "RUNNING"}
-                and (not superseded_by_call_id or resolved_by_expected)
+                and unresolved_liability
             ):
                 try:
                     durable_call_id = int(row["id"])
@@ -7400,7 +7415,7 @@ class _BlueprintGenerationBudget:
                 if (
                     disposition not in {"not_sent", "definitely_not_sent"}
                     and delivery_state not in {"not_sent", "definitely_not_sent"}
-                    and (not superseded_by_call_id or resolved_by_expected)
+                    and unresolved_liability
                 ):
                     # A fresh retry activation inherits unresolved paid/unknown
                     # liability, but not the elapsed wall clock of a dead

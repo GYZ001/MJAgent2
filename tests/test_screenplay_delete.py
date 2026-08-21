@@ -271,3 +271,128 @@ async def test_deleted_screenplay_cannot_be_revived_from_historical_run(
         "screenplay_status": "pending",
         "active_screenplay_run_id": None,
     }
+
+
+def _insert_interrupted_blueprint_call(run_id: str, input_fingerprint: str) -> int:
+    """Persist one unknown-outcome blueprint call exactly as a cancel leaves it."""
+    conn = db.get_conn()
+    conn.execute(
+        """INSERT INTO workflow_runs(
+               id, workflow_type, scope_type, scope_id, status,
+               input_fingerprint, started_at, updated_at
+           ) VALUES(?, 'screenplay', 'episode', 'e1', 'CANCELLED', ?, ?, ?)""",
+        (run_id, input_fingerprint, db.now(), db.now()),
+    )
+    cursor = conn.execute(
+        """INSERT INTO provider_calls(
+               ts, kind, model, status, request_json, response_json, meta,
+               project_id, run_id, operation_id
+           ) VALUES(?, 'chat', 'm', 'INTERRUPTED', '{}', '{}', ?, 'p1', ?, ?)""",
+        (
+            db.now(),
+            json.dumps({
+                "stage_key": "screenplay_blueprint_shard",
+                "episode_id": "e1",
+                "requested_max_tokens": 8192,
+                "effective_max_tokens": 8192,
+            }, ensure_ascii=False),
+            run_id,
+            "op-interrupted-shard",
+        ),
+    )
+    conn.commit()
+    return int(cursor.lastrowid)
+
+
+def test_delete_closes_unknown_blueprint_liability_so_baseline_can_restart() -> None:
+    """A cancelled in-flight call must not outlive the revision it binds to.
+
+    The delete supersedes every active revision, and a blueprint retry grant
+    may only bind to an active one.  Without a terminal disposition here the
+    receipt survives the product it belonged to and every later Baseline dies
+    on BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED with no way to authorize it.
+    """
+    from app.stages import (
+        BLUEPRINT_CALL_ABANDONED_BY_DELETE,
+        _BlueprintGenerationBudget,
+    )
+
+    input_fingerprint = "fp-delete-liability"
+    call_id = _insert_interrupted_blueprint_call("run-cancelled", input_fingerprint)
+
+    before = _BlueprintGenerationBudget.from_durable_calls(
+        run_id=None,
+        episode_id="e1",
+        input_fingerprint=input_fingerprint,
+    )
+    assert before.requires_fresh_retry_grant is True
+    assert [item["call_id"] for item in before.unknown_receipts] == [call_id]
+
+    with enter_handler():
+        asyncio.run(api.delete_screenplay("e1"))
+
+    conn = db.get_conn()
+    row = conn.execute(
+        "SELECT status, response_json, recovery_disposition FROM provider_calls WHERE id=?",
+        (call_id,),
+    ).fetchone()
+    # Closed as a liability, preserved as evidence.
+    assert row["recovery_disposition"] == BLUEPRINT_CALL_ABANDONED_BY_DELETE
+    assert row["status"] == "INTERRUPTED"
+    assert row["response_json"] == "{}"
+
+    after = _BlueprintGenerationBudget.from_durable_calls(
+        run_id=None,
+        episode_id="e1",
+        input_fingerprint=input_fingerprint,
+    )
+    assert after.requires_fresh_retry_grant is False
+    assert after.unknown_receipts == []
+    assert after.provider_calls == 0
+
+
+def test_delete_leaves_other_episodes_unknown_liability_untouched() -> None:
+    """The disposition is scoped to the deleted episode's own production."""
+    from app.stages import _BlueprintGenerationBudget
+
+    conn = db.get_conn()
+    conn.execute(
+        """INSERT INTO episodes(id, project_id, episode_no, title,
+               source_chapters, screenplay_status, status, created_at)
+           VALUES('e2','p1',2,'第二集','[1]','running','planned',?)""",
+        (db.now(),),
+    )
+    conn.execute(
+        """INSERT INTO workflow_runs(
+               id, workflow_type, scope_type, scope_id, status,
+               input_fingerprint, started_at, updated_at
+           ) VALUES('run-other','screenplay','episode','e2','RUNNING','fp-other',?,?)""",
+        (db.now(), db.now()),
+    )
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts, kind, model, status, request_json, response_json, meta,
+               project_id, run_id, operation_id
+           ) VALUES(?, 'chat', 'm', 'INTERRUPTED', '{}', '{}', ?, 'p1',
+                    'run-other', 'op-other-shard')""",
+        (
+            db.now(),
+            json.dumps({
+                "stage_key": "screenplay_blueprint_shard",
+                "episode_id": "e2",
+                "requested_max_tokens": 8192,
+                "effective_max_tokens": 8192,
+            }, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+    with enter_handler():
+        asyncio.run(api.delete_screenplay("e1"))
+
+    other = _BlueprintGenerationBudget.from_durable_calls(
+        run_id=None,
+        episode_id="e2",
+        input_fingerprint="fp-other",
+    )
+    assert other.requires_fresh_retry_grant is True

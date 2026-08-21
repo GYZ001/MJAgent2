@@ -2888,6 +2888,34 @@ async def delete_screenplay(episode_id: str):
                 {expected_owner},
                 "changed_during_delete",
             )
+        # The revision a blueprint retry grant must bind to is superseded
+        # above.  An unknown provider outcome left over from the deleted
+        # production would therefore demand a grant that can no longer be
+        # issued, and every later Baseline would fail activation with
+        # BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED.  Give those calls the
+        # terminal disposition the delete actually is; the rows, their cost
+        # and their responses stay untouched as audit evidence.
+        from app.stages import BLUEPRINT_CALL_ABANDONED_BY_DELETE
+
+        conn.execute(
+            """UPDATE provider_calls SET recovery_disposition=?
+                WHERE status IN ('INTERRUPTED','RUNNING')
+                  AND superseded_by_call_id IS NULL
+                  AND recovery_disposition IS NULL
+                  AND json_extract(meta,'$.stage_key') IN (
+                      'screenplay_blueprint_shard',
+                      'screenplay_blueprint_patch',
+                      'screenplay_blueprint_review'
+                  )
+                  AND (
+                      json_extract(meta,'$.episode_id')=?
+                      OR run_id IN (
+                          SELECT id FROM workflow_runs
+                           WHERE scope_type='episode' AND scope_id=?
+                      )
+                  )""",
+            (BLUEPRINT_CALL_ABANDONED_BY_DELETE, episode_id, episode_id),
+        )
         from app.storyboard_authority import (
             clear_storyboard_outline_authority,
         )
