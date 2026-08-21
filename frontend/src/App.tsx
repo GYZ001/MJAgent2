@@ -23,15 +23,26 @@ import { useScrollContainment } from "./useScrollContainment";
 import { AdaptivePoller, type PollInterval } from "./adaptivePoller";
 import { resolveEpisodeId, resolveRoutedEpisodeId } from "./episodePicker";
 
-const BiblePage = lazy(() => import("./pages/BiblePage"));
-const ScenesPage = lazy(() => import("./pages/ScenesPage"));
-const EpisodesPage = lazy(() => import("./pages/EpisodesPage"));
-const ScriptPage = lazy(() => import("./pages/ScriptPage"));
-const BoardPage = lazy(() => import("./pages/BoardPage"));
-const WallPage = lazy(() => import("./pages/WallPage"));
-const CinemaPage = lazy(() => import("./pages/CinemaPage"));
-const MonitorPage = lazy(() => import("./pages/MonitorPage"));
-const ReaderPage = lazy(() => import("./pages/ReaderPage"));
+// 加载器单独具名：lazy() 与 hover 预取共用同一个引用，import() 天然去重。
+const loadBiblePage = () => import("./pages/BiblePage");
+const loadScenesPage = () => import("./pages/ScenesPage");
+const loadEpisodesPage = () => import("./pages/EpisodesPage");
+const loadScriptPage = () => import("./pages/ScriptPage");
+const loadBoardPage = () => import("./pages/BoardPage");
+const loadWallPage = () => import("./pages/WallPage");
+const loadCinemaPage = () => import("./pages/CinemaPage");
+const loadMonitorPage = () => import("./pages/MonitorPage");
+const loadReaderPage = () => import("./pages/ReaderPage");
+
+const BiblePage = lazy(loadBiblePage);
+const ScenesPage = lazy(loadScenesPage);
+const EpisodesPage = lazy(loadEpisodesPage);
+const ScriptPage = lazy(loadScriptPage);
+const BoardPage = lazy(loadBoardPage);
+const WallPage = lazy(loadWallPage);
+const CinemaPage = lazy(loadCinemaPage);
+const MonitorPage = lazy(loadMonitorPage);
+const ReaderPage = lazy(loadReaderPage);
 
 export type View =
   | "studio"
@@ -46,6 +57,36 @@ export type View =
   | "system"
   | "monitor"
   | "reader";
+
+const PAGE_LOADERS: Partial<Record<View, () => Promise<unknown>>> = {
+  bible: loadBiblePage,
+  scenes: loadScenesPage,
+  episodes: loadEpisodesPage,
+  script: loadScriptPage,
+  board: loadBoardPage,
+  wall: loadWallPage,
+  cinema: loadCinemaPage,
+  observability: loadMonitorPage,
+  system: loadMonitorPage,
+  monitor: loadMonitorPage,
+  reader: loadReaderPage,
+};
+
+const prefetchedViews = new Set<View>();
+
+/** 鼠标悬停/聚焦即开始拉该页 chunk，把等待挪到点击之前。
+ *
+ * dev 服务器还要为首次请求现场编译（大页 0.3~1.6s），预取同样能把这笔开销提前。
+ * 失败时撤销标记，留给点击后的 lazy() 正常重试。
+ */
+export function prefetchView(view: View): void {
+  const load = PAGE_LOADERS[view];
+  if (!load || prefetchedViews.has(view)) return;
+  prefetchedViews.add(view);
+  void load().catch(() => {
+    prefetchedViews.delete(view);
+  });
+}
 
 export interface NavigationGuardPrompt {
   title: string;
@@ -69,6 +110,7 @@ interface Nav {
     projectId?: string | null,
     episodeId?: string | null,
     chapterIdx?: number | null,
+    historyAction?: "push" | "replace",
   ) => void;
   requestNavigation: (target: string, commit: () => void) => void;
   toast: (msg: string, isErr?: boolean) => void;
@@ -450,6 +492,7 @@ export default function App() {
       pid?: string | null,
       eid?: string | null,
       cidx?: number | null,
+      historyAction: "push" | "replace" = "push",
     ) => {
       const globalView = v === "studio" || v === "monitor" || v === "system";
       const nextProjectId = globalView
@@ -481,14 +524,16 @@ export default function App() {
           episodeId: nextEpisodeId,
           chapterIdx: nextChapterIdx,
           target,
-          historyAction: "push",
+          historyAction,
           prompt: navigationGuardRef.current,
         });
         setMobileNavOpen(false);
         return;
       }
       if (currentLocation !== target) {
-        window.history.pushState({}, "", target);
+        window.history[
+          historyAction === "replace" ? "replaceState" : "pushState"
+        ]({}, "", target);
         lastLocationRef.current = target;
         if (target.startsWith("/projects/")) {
           window.localStorage.setItem("manju:last-project-route", target);
@@ -653,23 +698,40 @@ export default function App() {
     unsaved_draft: unsavedDraft,
   };
 
-  const openSection = async (s: (typeof SECTIONS)[number]) => {
+  const openSection = (s: (typeof SECTIONS)[number]) => {
     if (!s.needEpisode || !projectId) {
       go(s.key);
       return;
     }
 
-    try {
-      // 分集可能在项目打开后才生成，进入制作工作台前必须重新读取，不能依赖首次加载的快照。
-      const project = (await api.get(
-        `/projects/${projectId}?view=picker`,
-      )) as Project;
-      const nextEpisodeId = resolveEpisodeId(project.episodes ?? [], episodeId);
-      go(s.key, projectId, nextEpisodeId);
-    } catch {
-      toast("分集列表加载失败，已打开工作台入口；可点击顶部的分集切换器重试", true);
-      go(s.key);
-    }
+    // 立刻切页，不等分集清单。?view=picker 返回整份 episodes（本项目 1600+ 条，
+    // gzip 后仍有 ~54KB），await 它会把「切标签 → 拉清单 → 加载页面 chunk」串成一条
+    // 长链；先用已知分集进场，清单回来后再纠正选中项。
+    const openedWith = episodeId;
+    const openedTarget = locationFor(s.key, projectId, openedWith, chapterIdx);
+    go(s.key, projectId, openedWith);
+
+    // 分集可能在项目打开后才生成，仍要重新读取，只是不再阻塞导航。
+    api
+      .get(`/projects/${projectId}?view=picker`)
+      .then((project: Project) => {
+        const nextEpisodeId = resolveEpisodeId(
+          project.episodes ?? [],
+          openedWith,
+        );
+        if (!nextEpisodeId || nextEpisodeId === openedWith) return;
+        // 用户可能已经切走或被离开守卫拦下；只在仍停在刚打开的地址时纠正。
+        const current = `${window.location.pathname}${window.location.search}`;
+        if (current !== openedTarget) return;
+        // replace：纠正是补齐信息而非一次新导航，不该在回退栈里多压一格。
+        go(s.key, projectId, nextEpisodeId, undefined, "replace");
+      })
+      .catch(() => {
+        toast(
+          "分集列表加载失败，已打开工作台入口；可点击顶部的分集切换器重试",
+          true,
+        );
+      });
   };
 
   const groupedSections = visibleSections.reduce<
@@ -860,8 +922,11 @@ export default function App() {
                     className={`spine-item ${active ? "active" : ""}`}
                     aria-label={s.label}
                     aria-current={active ? "page" : undefined}
+                    onMouseEnter={() => prefetchView(s.key)}
+                    onFocus={() => prefetchView(s.key)}
+                    onTouchStart={() => prefetchView(s.key)}
                     onClick={() => {
-                      void openSection(s);
+                      openSection(s);
                     }}
                     title={s.label}
                   >
@@ -878,7 +943,10 @@ export default function App() {
         )}
         <div className="spine-foot">
           {view === "system" ? (
-            <button className="spine-foot-action" type="button" aria-label="返回项目空间" onClick={() => {
+            <button className="spine-foot-action" type="button" aria-label="返回项目空间"
+              onMouseEnter={() => prefetchView("bible")}
+              onFocus={() => prefetchView("bible")}
+              onClick={() => {
               const last = window.localStorage.getItem("manju:last-project-id");
               const saved = window.localStorage.getItem("manju:last-project-route") || "";
               if (last && projects.some((item) => item.id === last)) {
@@ -897,7 +965,15 @@ export default function App() {
               <i className="spine-foot-arrow" aria-hidden="true">←</i>
             </button>
           ) : (
-            <button className="spine-foot-action" type="button" aria-label="系统设置" onClick={() => go("system", null, null)}>
+            <button
+              className="spine-foot-action"
+              type="button"
+              aria-label="系统设置"
+              onMouseEnter={() => prefetchView("system")}
+              onFocus={() => prefetchView("system")}
+              onTouchStart={() => prefetchView("system")}
+              onClick={() => go("system", null, null)}
+            >
               <span className="spine-foot-icon" aria-hidden="true">设</span>
               <span className="spine-foot-copy"><b>系统设置</b><span>模型与全局策略</span></span>
               <i className="spine-foot-arrow" aria-hidden="true">→</i>

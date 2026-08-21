@@ -10461,3 +10461,61 @@ def test_paratext_forbids_environment_subject_contract() -> None:
     })
     with pytest.raises(ValidationError, match="paratext 节点不得承载"):
         NarrativeNode.model_validate(payload)
+
+
+def test_fail_fast_reports_the_real_cause_when_owner_is_still_unwinding() -> None:
+    """A failure owner registered from an abort callback has no result yet.
+
+    Production EP1: ``abort_outer_batch`` registers the running shard task as
+    the batch's failure owner while that task is still executing.  The waiter
+    then called ``result()`` on an unfinished task and the whole episode died
+    with asyncio's ``InvalidStateError: Result is not set``, which says nothing
+    about what actually went wrong.
+    """
+    scope = scene_shards_module._FailFastScope()
+
+    async def owner():
+        # Let _gather_fail_fast bind the batch before the abort callback runs.
+        await asyncio.sleep(0)
+        current = asyncio.current_task()
+        assert current is not None
+        scope.fail(current)          # the out-of-band registration
+        # The peer's cancellation lands first, so the waiter wakes while this
+        # registered owner still has no result at all.
+        await asyncio.sleep(0.05)
+        raise ValueError("真实失败原因")
+
+    async def peer():
+        await asyncio.sleep(10)
+        return "peer"
+
+    async def run():
+        return await scene_shards_module._gather_fail_fast(
+            owner, peer, scope=scope,
+        )
+
+    with pytest.raises(ValueError, match="真实失败原因"):
+        asyncio.run(run())
+
+
+def test_fail_fast_still_propagates_a_normally_raised_child() -> None:
+    """The ordinary path is unchanged: first raiser wins, peers are cancelled."""
+    peer_finished = False
+
+    async def failing():
+        raise RuntimeError("first")
+
+    async def slow_peer():
+        nonlocal peer_finished
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            raise
+        peer_finished = True
+
+    async def run():
+        return await scene_shards_module._gather_fail_fast(failing, slow_peer)
+
+    with pytest.raises(RuntimeError, match="first"):
+        asyncio.run(run())
+    assert peer_finished is False
