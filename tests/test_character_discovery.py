@@ -7400,3 +7400,100 @@ def test_future_identity_new_name_without_backend_decision_stays_closed(
             bible=_reveal_bible(),
             episode_no=2,
         ))
+
+
+def test_registered_authority_without_literal_anchor_routes_to_functional(
+    monkeypatch,
+) -> None:
+    """A Bible name the episode never writes must route to f, not to n.
+
+    Production regression: the episode only ever says the appellation, so no K
+    decision can be minted for that authority, while rule 2 said a registered
+    identity may only enter through k.  The provider resolved the deadlock by
+    writing the canonical name into n, which fails closed twice over and ends
+    the episode.  The routing for that case is now stated explicitly.
+    """
+    prompts: list[str] = []
+
+    async def fake_chat(messages, **kwargs):
+        prompt = str(messages[0].get("content") or "")
+        prompts.append(prompt)
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "许师姐",
+                "identity_kind": "functional",
+                "functional_identity_key": "F1",
+                "kind": "mentioned",
+            }],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="许清",
+            role="重要配角",
+            appearance_canonical="银袍女子，黑发高髻，肤色惨白",
+        )],
+    )
+    candidates = asyncio.run(portraits.discover_character_candidates(
+        "许师姐与陈师兄是内门弟子，以往很少看到。",
+        bible,
+        5,
+    ))
+
+    prompt = prompts[0]
+    # The authority is offered for recognition …
+    assert "许清" in prompt.split("本批 backend-owned", 1)[0]
+    # … but no K decision can be minted, because nothing anchors it verbatim.
+    catalog = _future_identity_catalog(prompt, "本批已登记身份 K 决议目录")
+    assert catalog == []
+    # So the prompt must say where such an authority goes instead.
+    assert "本批 K 目录没有为「当前人物谱已有角色」中的某人签发 decision_id" in prompt
+    assert "只能把你实际读到的" in prompt
+
+    assert [
+        (item["source_label"], item["identity_kind"]) for item in candidates
+    ] == [("许师姐", "functional")]
+
+
+def test_registered_canonical_name_in_new_named_still_fails_closed(
+    monkeypatch,
+) -> None:
+    """The routing rule is guidance; writing the reserved name still fails."""
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "许清",
+                "identity_kind": "named",
+                "kind": "onscreen",
+            }],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="已登记身份必须选择 K decision",
+    ):
+        asyncio.run(portraits.discover_character_candidates(
+            "许师姐与陈师兄是内门弟子，以往很少看到。",
+            Bible(
+                world=World(visual_style_canonical="国风"),
+                characters=[Character(
+                    name="许清",
+                    role="重要配角",
+                    appearance_canonical="银袍女子，黑发高髻，肤色惨白",
+                )],
+            ),
+            5,
+        ))
+
+    assert calls == 1

@@ -2175,3 +2175,26 @@ def test_cached_replay_returns_none_when_only_truncated_rows_exist(monkeypatch) 
         "chat", "text-model", payload, meta,
     )
     assert result is None
+
+
+def test_identity_discovery_read_timeout_is_stage_specific(monkeypatch) -> None:
+    """Identity calls must not inherit the generic ceiling.
+
+    The identity contracts forbid an automatic retry, so a 0-byte stall on the
+    generic 300s ceiling does not merely waste five minutes -- it ends the
+    episode after them.  The stage-specific ceiling still leaves >2x headroom
+    over a full 4096-token response.
+    """
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_READ", 300.0)
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_IDENTITY_READ", 120.0)
+
+    assert hiagent._chat_read_timeout_s(
+        {"stage_key": "screenplay_character_discovery"}
+    ) == 120.0
+    # Deliberately not max()-ed against the generic ceiling.
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_READ", 900.0)
+    assert hiagent._chat_read_timeout_s(
+        {"stage_key": "screenplay_character_discovery"}
+    ) == 120.0
+    # Every other stage keeps its own selector.
+    assert hiagent._chat_read_timeout_s({"stage_key": "other_stage"}) == 900.0

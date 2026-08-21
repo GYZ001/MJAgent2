@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import time
 import urllib.error
@@ -135,6 +136,73 @@ def cmd_start() -> int:
     return 1 if failed else 0
 
 
+PROVIDER_STALL_MARKERS = (
+    "read阶段超时",
+    "ReadTimeout",
+    "连接超时",
+    "ConnectTimeout",
+    "请求结果不确定",
+)
+
+
+def latest_error(eid: str) -> str:
+    """Read the episode's newest durable error text (local ops script)."""
+    conn = sqlite3.connect(f"file:{ROOT / 'data' / 'manju.db'}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT message, traceback FROM error_logs "
+            "WHERE json_extract(context_json,'$.episode_id')=? "
+            "ORDER BY ts DESC LIMIT 4",
+            (eid,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return "\n".join(str(value or "") for row in rows for value in row)
+
+
+def is_provider_stall(eid: str) -> bool:
+    text = latest_error(eid)
+    return any(marker in text for marker in PROVIDER_STALL_MARKERS)
+
+
+def retry_after_stall(name: str, eid: str) -> bool:
+    """Trigger the system's own explicit retry for an unknown provider outcome."""
+    code, preflight = call("POST", f"/api/episodes/{eid}/screenplay/preflight", {}, timeout=60)
+    budget = (preflight or {}).get("blueprint_budget") or {}
+    receipts = budget.get("unknown_receipts") or []
+    log(f"{name} retry preflight -> HTTP{code} "
+        f"requires_grant={budget.get('requires_fresh_retry_grant')} "
+        f"receipts={len(receipts)} admissible={budget.get('admissible_after_approval')}")
+    body = {
+        "idempotency_key": f"yyft-retry-{eid}-{int(time.time())}",
+        "authorize_blueprint_retry": True,
+        "expected_blueprint_unknown_receipts": receipts,
+    }
+    code, resp = call("POST", f"/api/episodes/{eid}/screenplay", body, timeout=60)
+    if resp.get("status") == "waiting_approval" and resp.get("approval_token"):
+        code, resp = call(
+            "POST", f"/api/episodes/{eid}/screenplay", body,
+            headers={"x-manju-approval-token": resp["approval_token"]}, timeout=60,
+        )
+    log(f"{name} retry start -> HTTP{code} {json.dumps(resp, ensure_ascii=False)[:240]}")
+    return resp.get("status") in {"queued", "running", "repairing"}
+
+
+def cmd_retry() -> int:
+    """Retry every episode whose latest failure is an unknown provider outcome."""
+    ok = True
+    for name, eid in EPISODES:
+        payload = status_of(eid)
+        if payload.get("screenplay_status") != "failed":
+            continue
+        if not is_provider_stall(eid):
+            log(f"{name} failed but NOT a provider stall -- needs a real fix")
+            ok = False
+            continue
+        ok = retry_after_stall(name, eid) and ok
+    return 0 if ok else 1
+
+
 def cmd_monitor(interval: int = 30, limit: int = 20000) -> int:
     log("=== MONITOR FIRST 5 ===")
     waited = 0
@@ -145,10 +213,13 @@ def cmd_monitor(interval: int = 30, limit: int = 20000) -> int:
             states[name] = payload
             log(f"{name} :: {brief(payload)}")
         values = [p.get("screenplay_status") for p in states.values()]
-        if any(v == "failed" for v in values):
-            log("RESULT=FAILED " + ",".join(
-                f"{k}={v.get('screenplay_status')}" for k, v in states.items()))
-            return 2
+        failed = [k for k, v in states.items()
+                  if v.get("screenplay_status") == "failed"]
+        if failed:
+            eids = dict(EPISODES)
+            stalled = [k for k in failed if is_provider_stall(eids[k])]
+            log(f"RESULT=FAILED {failed} provider_stall={stalled}")
+            return 5 if stalled and set(stalled) == set(failed) else 2
         paused = [k for k, v in states.items()
                   if v.get("screenplay_status") in {"repairing", "pending"}
                   and not v.get("active")]
@@ -171,5 +242,6 @@ if __name__ == "__main__":
         "clear": cmd_clear,
         "start": cmd_start,
         "monitor": cmd_monitor,
+        "retry": cmd_retry,
     }
     sys.exit(handlers[command]())

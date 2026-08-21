@@ -112,7 +112,6 @@ def source_segment_facts(
         outside: list[str] = []
         quoted: list[str] = []
         quote_open = ""
-        quote_open_offset = -1
 
         def has_content(value: str) -> bool:
             return any(
@@ -134,7 +133,6 @@ def source_segment_facts(
                 if quotation_opening(char):
                     flush_outside()
                     quote_open = char
-                    quote_open_offset = offset
                     quoted.append(char)
                 else:
                     outside.append(char)
@@ -146,7 +144,6 @@ def source_segment_facts(
                 value = "".join(quoted).strip()
                 quoted.clear()
                 quote_open = ""
-                quote_open_offset = -1
                 if value:
                     parts.append(("quoted", "quoted_span", value))
 
@@ -160,7 +157,6 @@ def source_segment_facts(
             value = "".join(quoted).strip()
             quoted.clear()
             quote_open = ""
-            quote_open_offset = -1
             if value and has_content(value):
                 parts.append(("quoted", "quoted_span", value))
         flush_outside()
