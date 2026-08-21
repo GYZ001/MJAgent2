@@ -10648,3 +10648,59 @@ def test_scene_shard_delivered_failure_is_never_retried() -> None:
         )
 
     assert calls == ["op-scene"]
+
+
+def test_single_reviewer_fallback_is_strictly_stricter_than_consensus() -> None:
+    """Dropping to one reviewer can only add findings, never suppress them.
+
+    The consensus rule intersects the two reviewers, so an abstaining reviewer
+    contributing an empty review would suppress every finding for that chunk --
+    fail-open.  Counting the surviving reviewer for both sides makes the gate
+    strictly stricter instead, which is what a provider refusing to audit
+    justifies.
+    """
+    finding = ScreenplaySceneShardSemanticFinding(
+        unit_key="SRC0001:unit:001",
+        related_unit_keys=[],
+        code="source_semantic_drift",
+        violation_kinds=["unsupported_action"],
+        message="来源与正文冲突",
+    )
+    survivor = ScreenplaySceneShardSemanticReview(findings=[finding])
+    empty = ScreenplaySceneShardSemanticReview(findings=[])
+
+    # An empty peer would silently erase the surviving reviewer's finding.
+    assert scene_shards_module.screenplay_scene_semantic_consensus(
+        survivor, empty,
+    ) == []
+    # Counting the survivor on both sides keeps it.
+    kept = scene_shards_module.screenplay_scene_semantic_consensus(
+        survivor, survivor,
+    )
+    assert [item.unit_key for item in kept] == ["SRC0001:unit:001"]
+
+
+def test_deterministic_rejection_is_the_only_tolerated_review_failure() -> None:
+    """Only a reproduced provider refusal counts as an abstention."""
+    tolerated = scene_shards_module.hiagent.deterministic_undelivered_error(
+        scene_shards_module.hiagent.ProviderError(
+            "流式响应在 [DONE] 前中断",
+            retryable=True,
+            raw="抱歉，该问题不符合安全合规要求，暂时无法回答",
+            failure_kind="stream_interrupted",
+            delivery_state="unknown",
+            requires_explicit_retry=True,
+            received_chars=22,
+        ),
+        attempts=2,
+    )
+    assert tolerated.failure_kind == "deterministic_rejection"
+
+    ordinary = scene_shards_module.hiagent.ProviderError(
+        "provider rejected the request",
+        retryable=False,
+        failure_kind="provider_rejected",
+        delivery_state="responded",
+        received_chars=900,
+    )
+    assert ordinary.failure_kind != "deterministic_rejection"

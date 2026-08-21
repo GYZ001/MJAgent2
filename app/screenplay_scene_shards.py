@@ -5362,28 +5362,60 @@ async def _semantic_review_scene_shard_draft(
             [],
             [],
         ]
+        semantic_abstentions: list[dict[str, Any]] = []
         for chunk_index, chunk in enumerate(chunks, start=1):
             async def review_one(
                 reviewer_no: int,
-            ) -> ScreenplaySceneShardSemanticReview:
-                return await review(
-                    candidate,
-                    reviewer_no,
-                    phase,
-                    chunk["unit_keys"],
-                    chunk["review_prompt"],
-                    chunk["review_schema"],
-                    chunk["budget"],
-                    chunk_index,
-                    len(chunks),
-                    chunk["chunk_hash"],
-                )
+            ) -> ScreenplaySceneShardSemanticReview | None:
+                try:
+                    return await review(
+                        candidate,
+                        reviewer_no,
+                        phase,
+                        chunk["unit_keys"],
+                        chunk["review_prompt"],
+                        chunk["review_schema"],
+                        chunk["budget"],
+                        chunk_index,
+                        len(chunks),
+                        chunk["chunk_hash"],
+                    )
+                except hiagent.ProviderError as exc:
+                    if str(
+                        getattr(exc, "failure_kind", "") or ""
+                    ) != "deterministic_rejection":
+                        raise
+                    # 供应商反复以同一方式拒绝审阅这一块内容。那是它不肯看，
+                    # 不是稿件的质量证据，所以按弃权处理而不是让整集失败。
+                    semantic_abstentions.append({
+                        "phase": phase,
+                        "chunk_index": chunk_index,
+                        "chunk_count": len(chunks),
+                        "chunk_hash": str(chunk["chunk_hash"]),
+                        "reviewer_no": reviewer_no,
+                        "reason": str(exc)[:300],
+                    })
+                    return None
 
             chunk_reviews = await _gather_fail_fast(
                 lambda: review_one(1),
                 lambda: review_one(2),
                 on_failure=abort_batch,
             )
+            delivered = [item for item in chunk_reviews if item is not None]
+            if not delivered:
+                raise ScreenplaySceneShardError(
+                    shard_id,
+                    [
+                        f"语义审查第 {chunk_index}/{len(chunks)} 块的两名审稿人"
+                        "都被供应商拒绝，本块没有经过任何审查"
+                    ],
+                )
+            if len(delivered) < len(chunk_reviews):
+                # 共识规则是两名审稿人取交集，所以退回单审稿人只会让门禁更严：
+                # 幸存者报出的每一条都会通过交集，绝不会放过共识本可拦下的问题。
+                # 把幸存者的判断同时计入双方，弃权本身留在审计里可查。
+                chunk_reviews = [delivered[0] for _ in chunk_reviews]
             scope_errors = _scene_shard_normalize_peer_review_unit_scopes(
                 chunk_reviews,
                 set(chunk["unit_keys"]),
@@ -5463,7 +5495,13 @@ async def _semantic_review_scene_shard_draft(
             ]
         return (
             screenplay_scene_semantic_consensus(reviews[0], reviews[1]),
-            [item.model_dump(mode="json") for item in reviews],
+            [
+                *(item.model_dump(mode="json") for item in reviews),
+                *(
+                    [{"provider_abstentions": semantic_abstentions}]
+                    if semantic_abstentions else []
+                ),
+            ],
         )
 
     initial_hash = _hash(draft.model_dump(mode="json"))
