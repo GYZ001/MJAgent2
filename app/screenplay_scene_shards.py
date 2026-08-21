@@ -144,7 +144,7 @@ async def _scene_structured_with_undelivered_retry(
     assert last_error is not None
     raise hiagent.deterministic_undelivered_error(
         last_error, attempts=SCENE_SHARD_UNDELIVERED_RETRIES + 1,
-    )
+    ) from last_error
 
 
 class _FailFastScope:

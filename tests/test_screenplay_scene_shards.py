@@ -4686,12 +4686,15 @@ def test_scene_shard_failure_cancels_peer_before_structured_retry(
     release_sibling = asyncio.Event()
     sibling_cancelled = asyncio.Event()
     sibling_attempts: list[int] = []
+    # A delivered failure, so the cancellation semantics under test are
+    # not entangled with the bounded retry for undelivered answers.
     original_error = scene_shards_module.hiagent.ProviderError(
         "injected peer structured failure",
         retryable=True,
         failure_kind="request_outcome_unknown",
         delivery_state="unknown",
         requires_explicit_retry=True,
+        received_chars=1200,
     )
 
     def fixed_settings(
@@ -4757,12 +4760,15 @@ def test_nested_reviewer_failure_cancels_other_shard_structured_retry(
     release_sibling = asyncio.Event()
     sibling_cancelled = asyncio.Event()
     sibling_attempts: list[int] = []
+    # A delivered failure, so the cancellation semantics under test are
+    # not entangled with the bounded retry for undelivered answers.
     original_error = scene_shards_module.hiagent.ProviderError(
         "injected nested reviewer failure",
         retryable=True,
         failure_kind="request_outcome_unknown",
         delivery_state="unknown",
         requires_explicit_retry=True,
+        received_chars=1200,
     )
 
     def fixed_settings(

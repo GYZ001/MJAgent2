@@ -208,7 +208,7 @@ async def _identity_structured_with_resample(
         raise hiagent.deterministic_undelivered_error(
             last_error,
             attempts=IDENTITY_UNUSABLE_RESPONSE_RESAMPLES + 1,
-        )
+        ) from last_error
     raise last_error
 
 
