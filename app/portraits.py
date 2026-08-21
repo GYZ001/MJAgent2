@@ -1124,7 +1124,6 @@ def _project_current_identity_response(
     evidence_by_ref: dict[str, dict],
     known_decisions: dict[str, dict],
     prior_functional_groups: dict[str, dict] | None = None,
-    all_evidence_by_id: dict[str, dict] | None = None,
     reserved_authority_labels: set[str] | None = None,
     group_scope: str,
     existing_functional_routes: set[str],
@@ -1138,10 +1137,6 @@ def _project_current_identity_response(
     for branch, items in (("k", value.k), ("n", value.n), ("f", value.f)):
         if len(items) > 64:
             errors.append(f"current identity {branch} decisions 过多")
-
-    all_records = list((all_evidence_by_id or {}).values()) or list(
-        evidence_by_ref.values()
-    )
 
     def append_candidate(
         *,
@@ -1166,13 +1161,6 @@ def _project_current_identity_response(
             errors.append(f"source_label 非法：{source_label!r}")
         evidence_text = str(record.get("text") or "")
         literal = bool(source_label and source_label in evidence_text)
-        literal_anywhere = bool(
-            source_label
-            and any(
-                source_label in str(owned_record.get("text") or "")
-                for owned_record in all_records
-            )
-        )
         if canonical_name != canonical_name.strip():
             errors.append(f"canonical_name 含首尾空白：{source_label}")
         if identity_kind == "named":
@@ -1214,11 +1202,6 @@ def _project_current_identity_response(
         ):
             errors.append(
                 "current functional 不得冒用已登记身份称谓："
-                f"{source_label}"
-            )
-        if identity_kind == "functional" and literal_anywhere and not literal:
-            errors.append(
-                "current evidence_id 与已知逐字 source_label 不匹配："
                 f"{source_label}"
             )
 
@@ -1502,11 +1485,6 @@ async def _discover_character_candidates_legacy(
         source_text,
         draft_text=draft_text,
     )
-    all_current_evidence_by_id = {
-        str(record["evidence_id"]): record
-        for evidence_records in current_evidence_batches
-        for record in evidence_records
-    }
     seen: set[tuple[str, str, str]] = set()
     candidates: list[dict] = []
     current_provider, current_model, current_effective_max = (
@@ -1786,7 +1764,6 @@ async def _discover_character_candidates_legacy(
                 evidence_by_ref=evidence_by_ref,
                 known_decisions=known_decisions,
                 prior_functional_groups=prior_functional_groups,
-                all_evidence_by_id=all_current_evidence_by_id,
                 reserved_authority_labels=reserved_authority_labels,
                 group_scope=f"current-{current_batch}",
                 existing_functional_routes=existing_functional_routes,
@@ -1856,7 +1833,6 @@ async def _discover_character_candidates_legacy(
                 evidence_by_ref=evidence_by_ref,
                 known_decisions=known_decisions,
                 prior_functional_groups=prior_functional_groups,
-                all_evidence_by_id=all_current_evidence_by_id,
                 reserved_authority_labels=reserved_authority_labels,
                 group_scope=f"current-{current_batch}",
                 existing_functional_routes=existing_functional_routes,

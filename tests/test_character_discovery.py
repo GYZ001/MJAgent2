@@ -3547,10 +3547,6 @@ def test_current_identity_rf11_manual_alias_k_is_backend_projected() -> None:
         response,
         evidence_by_ref=evidence_by_ref,
         known_decisions=known,
-        all_evidence_by_id={
-            str(record["evidence_id"]): record
-            for record in records
-        },
         reserved_authority_labels={"师尊", "苍玄"},
         group_scope="current-1",
         existing_functional_routes=set(),
