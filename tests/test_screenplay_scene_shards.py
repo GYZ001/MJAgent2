@@ -4447,12 +4447,15 @@ def test_scene_shard_failure_fences_semaphore_waiter_before_provider(
     provider_calls: list[str] = []
     review_calls: list[str] = []
     progress_rows: list[list[dict]] = []
+    # A delivered failure, so the queue-fencing semantics under test are not
+    # entangled with the bounded retry for answers never delivered.
     original_error = scene_shards_module.hiagent.ProviderError(
         "injected queued-shard fence failure",
         retryable=True,
         failure_kind="request_outcome_unknown",
         delivery_state="unknown",
         requires_explicit_retry=True,
+        received_chars=1200,
     )
 
     def fixed_settings(
@@ -10578,3 +10581,64 @@ def test_a_performer_is_never_auto_registered_as_a_reference() -> None:
         "performer_key": "未登记的人",
     }])
     assert scene_shards_module.blueprint_referenced_content_owners(blueprint) == []
+
+
+def test_scene_shard_undelivered_answer_is_retried_inside_the_batch() -> None:
+    """A stream cut before [DONE] is re-issued, not an episode-ending failure.
+
+    Production round 5: one scene-shard review stream delivered 22 characters
+    and stopped without the provider's own completion marker.  The transport
+    discards that partial text, so nothing was authored -- yet the batch was
+    torn down and the episode paused.
+    """
+    calls: list[str] = []
+    interrupted = scene_shards_module.hiagent.ProviderError(
+        "流式响应在 [DONE] 前中断",
+        retryable=True,
+        failure_kind="stream_interrupted",
+        delivery_state="unknown",
+        requires_explicit_retry=True,
+        received_chars=22,
+    )
+
+    async def issue(attempt_operation_id: str) -> str:
+        calls.append(attempt_operation_id)
+        if len(calls) == 1:
+            raise interrupted
+        return "ok"
+
+    result = asyncio.run(
+        scene_shards_module._scene_structured_with_undelivered_retry(
+            issue, operation_id="op-scene",
+        )
+    )
+
+    assert result == "ok"
+    # The retry carries its own operation id, so it is not replaying the
+    # unknown outcome of the interrupted call.
+    assert calls == ["op-scene", "op-scene:undelivered:1"]
+
+
+def test_scene_shard_delivered_failure_is_never_retried() -> None:
+    """An answer the provider did deliver still fails on the first call."""
+    calls: list[str] = []
+    delivered = scene_shards_module.hiagent.ProviderError(
+        "provider rejected the request",
+        retryable=False,
+        failure_kind="provider_rejected",
+        delivery_state="responded",
+        received_chars=900,
+    )
+
+    async def issue(attempt_operation_id: str) -> str:
+        calls.append(attempt_operation_id)
+        raise delivered
+
+    with pytest.raises(scene_shards_module.hiagent.ProviderError):
+        asyncio.run(
+            scene_shards_module._scene_structured_with_undelivered_retry(
+                issue, operation_id="op-scene",
+            )
+        )
+
+    assert calls == ["op-scene"]

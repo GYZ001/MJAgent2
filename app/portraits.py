@@ -1221,6 +1221,31 @@ def _merge_current_identity_occurrences(options: list[dict]) -> dict:
     return merged
 
 
+def _resolved_evidence_ref(raw: str, expected_refs: set[str]) -> str:
+    """Repair a zero-padding slip in an otherwise in-catalog evidence ref.
+
+    The schema pins ``evidence_ref`` to a closed enum, but the provider does
+    not always honour strict mode: production delivered ``E01`` for a catalog
+    holding ``E001``.  Re-padding is pure formatting -- it selects an existing
+    backend-owned receipt and only when exactly one matches, so it can never
+    move a decision onto a different span.  Anything ambiguous is returned
+    unchanged and still fails closed.
+    """
+    ref = str(raw or "").strip()
+    if ref in expected_refs:
+        return ref
+    match = re.fullmatch(r"([A-Za-z]+)([0-9]+)", ref)
+    if match is None:
+        return ref
+    prefix, digits = match.group(1), match.group(2).lstrip("0") or "0"
+    candidates = [
+        candidate for candidate in expected_refs
+        if candidate.startswith(prefix)
+        and (candidate[len(prefix):].lstrip("0") or "0") == digits
+    ]
+    return candidates[0] if len(candidates) == 1 else ref
+
+
 def _identity_form_functional_key(identity_label: str) -> str:
     """Stable per-label group key for an appellation demoted out of N."""
     return "NF" + evidence_repository.content_hash(
@@ -1475,7 +1500,9 @@ def _project_current_identity_response(
             ),
         )
     for item in value.n:
-        evidence_ref = str(item.evidence_ref or "")
+        evidence_ref = _resolved_evidence_ref(
+            item.evidence_ref, expected_refs
+        )
         record = evidence_by_ref.get(evidence_ref)
         if evidence_ref not in expected_refs or record is None:
             errors.append(f"current N evidence_ref 越界：{evidence_ref}")
@@ -1511,17 +1538,30 @@ def _project_current_identity_response(
             kind=item.kind,
             record=record,
         )
+    # Two F entries with the same verbatim label bound to the same owned
+    # evidence carry nothing the backend could tell apart, and the contract
+    # requires genuinely distinct anonymous entities to use distinct labels.
+    # Collapsing them onto the first key keeps one identity per label instead
+    # of guaranteeing a downstream registry conflict; different labels or
+    # different evidence still fail closed.
+    functional_key_by_occurrence: dict[tuple[str, str], str] = {}
     for item in value.f:
-        evidence_ref = str(item.evidence_ref or "")
+        evidence_ref = _resolved_evidence_ref(
+            item.evidence_ref, expected_refs
+        )
         record = evidence_by_ref.get(evidence_ref)
         if evidence_ref not in expected_refs or record is None:
             errors.append(f"current F evidence_ref 越界：{evidence_ref}")
             continue
+        occurrence = (str(item.source_label or "").strip(), evidence_ref)
+        functional_key = functional_key_by_occurrence.setdefault(
+            occurrence, str(item.functional_identity_key or ""),
+        )
         append_candidate(
             source_label=item.source_label,
             canonical_name="",
             identity_kind="functional",
-            functional_key=item.functional_identity_key,
+            functional_key=functional_key,
             kind=item.kind,
             record=record,
         )

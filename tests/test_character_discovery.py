@@ -7737,3 +7737,118 @@ def test_future_personal_name_reveal_still_mints_the_authority(
     assert resolved[0]["identity_kind"] == "named"
     assert resolved[0]["name"] == "陈三"
     assert resolved[0]["authority_id"] == "bible:陈三"
+
+
+def test_current_identity_repairs_zero_padding_slip_in_evidence_ref() -> None:
+    """`E01` for a catalog holding `E001` is formatting, not a new decision.
+
+    Production EP1: the provider ignored the closed enum and sent `E01`, and
+    the whole episode failed on `current F evidence_ref 越界`.  Re-padding
+    selects an existing backend-owned receipt, and only when exactly one
+    matches.
+    """
+    records = portraits._current_identity_evidence_records(
+        "绿袍修士站在山门。\n\n许师姐收起风幡。"
+    )
+    evidence_by_ref = {
+        f"E{index:03d}": record
+        for index, record in enumerate(records, start=1)
+    }
+    response = portraits.CurrentIdentityCandidateResponse.model_validate({
+        "k": [],
+        "n": [],
+        "f": [{
+            "evidence_ref": "E01",
+            "source_label": "绿袍修士",
+            "functional_identity_key": "F1",
+            "kind": "onscreen",
+        }],
+    })
+
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+
+    assert errors == []
+    assert [item["source_label"] for item in projected] == ["绿袍修士"]
+
+
+def test_current_identity_ambiguous_ref_still_fails_closed() -> None:
+    """Only an unambiguous re-padding is accepted."""
+    evidence_by_ref = {
+        "E001": {"text": "绿袍修士站在山门。", "evidence_id": "e1"},
+        "EE01": {"text": "许师姐收起风幡。", "evidence_id": "e2"},
+    }
+    response = portraits.CurrentIdentityCandidateResponse.model_validate({
+        "k": [],
+        "n": [],
+        "f": [{
+            "evidence_ref": "E9",
+            "source_label": "绿袍修士",
+            "functional_identity_key": "F1",
+            "kind": "onscreen",
+        }],
+    })
+
+    _projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+
+    assert any("evidence_ref 越界" in error for error in errors)
+
+
+def test_same_label_on_same_evidence_collapses_to_one_identity() -> None:
+    """One verbatim label bound to one span is one identity, not two.
+
+    Production EP1: the provider emitted 「绿袍修士」 twice on the same evidence
+    with keys F2 and F3.  Keeping both guarantees a downstream registry
+    conflict, and nothing in the owned evidence can tell them apart.
+    """
+    records = portraits._current_identity_evidence_records(
+        "绿袍修士站在山门。\n\n许师姐收起风幡。"
+    )
+    evidence_by_ref = {
+        f"E{index:03d}": record
+        for index, record in enumerate(records, start=1)
+    }
+    ref = next(
+        key for key, record in evidence_by_ref.items()
+        if "绿袍修士" in str(record.get("text") or "")
+    )
+    response = portraits.CurrentIdentityCandidateResponse.model_validate({
+        "k": [],
+        "n": [],
+        "f": [
+            {
+                "evidence_ref": ref,
+                "source_label": "绿袍修士",
+                "functional_identity_key": "F2",
+                "kind": "onscreen",
+            },
+            {
+                "evidence_ref": ref,
+                "source_label": "绿袍修士",
+                "functional_identity_key": "F3",
+                "kind": "onscreen",
+            },
+        ],
+    })
+
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+
+    assert errors == []
+    assert len({item["identity_group"] for item in projected}) == 1
