@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
 from app import errors, task_registry, worker
@@ -205,6 +206,33 @@ app.include_router(agent_conversation_router, prefix="/api")  # 路由自身已�
 app.include_router(mcp_router)
 app.mount("/media", StaticFiles(directory=PROJECTS_DIR), name="media")
 
+
+class SpaStaticFiles(StaticFiles):
+    """构建产物的静态服务：SPA 深链回落 + 指纹资源长缓存。
+
+    前端是 path-based 路由（``/projects/p1/board``），裸 StaticFiles 对这类路径
+    只会 404，刷新深链就白屏；此处未命中文件时回落 index.html。
+    ``/api`` ``/media`` ``/mcp`` 不回落，避免不存在的接口返回 HTML 骗过前端错误处理。
+    """
+
+    # 与路由前缀一致；StaticFiles 传进来的 path 不带前导斜杠。
+    _NO_FALLBACK = ("api/", "api", "media/", "media", "mcp/", "mcp")
+
+    async def get_response(self, path: str, scope):
+        try:
+            response = await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code != 404 or path.startswith(self._NO_FALLBACK):
+                raise
+            response = await super().get_response("index.html", scope)
+            path = "index.html"
+        # vite 产物带内容指纹（index-3R6yEkIO.js），改一次内容换一次文件名，
+        # 可以放心长缓存；index.html 必须每次回源，否则拿不到新指纹。
+        if path.startswith("assets/") and response.status_code == 200:
+            response.headers["cache-control"] = "public, max-age=31536000, immutable"
+        return response
+
+
 frontend_dist = ROOT / "frontend" / "dist"
 if frontend_dist.exists():
-    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+    app.mount("/", SpaStaticFiles(directory=frontend_dist, html=True), name="frontend")

@@ -4,11 +4,17 @@
 # 服务以独立会话（start_new_session）后台常驻：父进程/终端退出后由 init 接管，
 # 不会随终端关闭或父进程被杀而退出——只有手动 `scripts/dev.sh stop` 或 kill 端口进程才会停。
 #
-#   后端  uvicorn  http://127.0.0.1:8230  （默认稳定常驻；MJ_BACKEND_RELOAD=1 开启热重载）
-#   前端  vite     http://0.0.0.0:5230   （/api、/media 反代到后端；公网经 Host 访问）
-#   可用 MJ_FRONTEND_HOST=127.0.0.1 收回为仅本机
+#   后端  uvicorn  http://0.0.0.0:8230   （同时服务 frontend/dist 构建产物 + /api + /media，全程 gzip）
+#   前端  vite     http://0.0.0.0:5230   （改代码用的热重载入口；/api、/media 反代到后端）
 #
-# 用法：scripts/dev.sh [start|stop|status|restart]   （缺省 start）
+# 日常使用请走 :8230（构建产物，首屏与切标签比 dev 快一个数量级）；
+# :5230 只在改前端代码需要热重载时用——dev 模式不压缩、按需现编译，公网访问必然慢。
+#
+#   MJ_BACKEND_HOST=127.0.0.1  收回后端为仅本机
+#   MJ_FRONTEND_HOST=127.0.0.1 收回 vite 为仅本机
+#   MJ_SKIP_BUILD=1            跳过构建产物的陈旧检查（不重新 npm run build）
+#
+# 用法：scripts/dev.sh [start|stop|status|restart|build]   （缺省 start）
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_LOG="/tmp/manju2_backend.log"
@@ -47,6 +53,37 @@ stop_one() {
   fi
 }
 
+DIST="$ROOT/frontend/dist"
+
+dist_stale() {
+  [ -f "$DIST/index.html" ] || return 0
+  # 任一前端源文件比产物新即视为陈旧（tsc -b 增量，无改动时本函数直接短路）
+  [ -n "$(find "$ROOT/frontend/src" "$ROOT/frontend/index.html" "$ROOT/frontend/vite.config.ts" \
+            -newer "$DIST/index.html" -print -quit 2>/dev/null)" ]
+}
+
+do_build() {
+  echo "构建前端产物（tsc -b && vite build，约 30s）..."
+  if (cd "$ROOT/frontend" && npm run build); then
+    echo "构建完成：$DIST"
+  else
+    echo "[警告] 前端构建失败，:8230 将继续服务上一次的产物；请修掉 TS 错误后重跑 scripts/dev.sh build" >&2
+    return 1
+  fi
+}
+
+ensure_dist() {
+  if [ -n "${MJ_SKIP_BUILD:-}" ]; then
+    echo "已跳过构建检查（MJ_SKIP_BUILD）"
+    return 0
+  fi
+  if dist_stale; then
+    do_build || true
+  else
+    echo "构建产物已是最新，跳过构建"
+  fi
+}
+
 do_stop() {
   stop_one 8230 后端
   stop_one 5230 前端
@@ -60,6 +97,8 @@ do_status() {
 }
 
 do_start() {
+  # 构建产物必须在后端起来之前就位：main.py 在导入期判断 dist 是否存在并挂载。
+  ensure_dist
   # 仅释放本项目端口，绝不影响其它项目（如 :5173 的另一套前端）
   [ -n "$(listeners 8230)" ] && stop_one 8230 后端
   [ -n "$(listeners 5230)" ] && stop_one 5230 前端
@@ -93,17 +132,20 @@ if not inherit_proxy:
 backend_reload = be_env.get("MJ_BACKEND_RELOAD", "").strip().lower() in {
     "1", "true", "yes", "on",
 }
+# 后端自带会话闸门（X-Manju-Session + Origin 同源），与 vite 反代暴露的面一致；
+# 绑 0.0.0.0 才能让外部直接访问构建产物，绕开 dev 服务器的未压缩按需编译。
+backend_host = be_env.get("MJ_BACKEND_HOST", "0.0.0.0").strip() or "0.0.0.0"
 if backend_reload:
     backend_args = [
         "./.venv/bin/uvicorn", "app.main:app",
-        "--host", "127.0.0.1", "--port", "8230",
+        "--host", backend_host, "--port", "8230",
         "--reload", "--reload-dir", "app",
     ]
     backend_mode = "reload"
 else:
     backend_args = [
         "./.venv/bin/uvicorn", "app.main:app",
-        "--host", "127.0.0.1", "--port", "8230",
+        "--host", backend_host, "--port", "8230",
         "--timeout-graceful-shutdown", "30",
     ]
     backend_mode = "stable"
@@ -116,9 +158,12 @@ f = subprocess.Popen(
     cwd=os.path.join(root, "frontend"), stdin=dn, stdout=fe, stderr=fe, start_new_session=True)
 print(f"backend pid={b.pid}  frontend pid={f.pid}")
 print("backend mode=" + backend_mode)
+print("backend host=" + backend_host)
 print("frontend host=" + frontend_host)
 PY
-  echo "已启动：后端 http://127.0.0.1:8230   前端 http://0.0.0.0:5230（公网可用 IP/域名:5230）"
+  echo "已启动："
+  echo "  日常使用（构建产物，快） http://<本机IP或域名>:8230"
+  echo "  改前端代码（热重载，慢） http://<本机IP或域名>:5230"
   echo "日志：${BACKEND_LOG} / ${FRONTEND_LOG}"
   echo "停止：scripts/dev.sh stop"
 }
@@ -128,5 +173,6 @@ case "${1:-start}" in
   stop)    do_stop ;;
   status)  do_status ;;
   restart) do_stop; sleep 1; do_start ;;
-  *) echo "用法：scripts/dev.sh [start|stop|status|restart]"; exit 1 ;;
+  build)   do_build ;;
+  *) echo "用法：scripts/dev.sh [start|stop|status|restart|build]"; exit 1 ;;
 esac

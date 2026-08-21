@@ -25,6 +25,7 @@ BE_ERR = LOG_DIR / "backend-dev.err.log"
 UVICORN = ROOT / ".venv" / "Scripts" / "uvicorn.exe"
 NODE = Path(os.environ.get("NODE_EXE", "")) if os.environ.get("NODE_EXE") else None
 VITE_JS = ROOT / "frontend" / "node_modules" / "vite" / "bin" / "vite.js"
+DIST = ROOT / "frontend" / "dist"
 
 # 无控制台窗口 + 独立进程组（不随启动器退出）
 CREATE_NO_WINDOW = 0x08000000
@@ -106,6 +107,47 @@ def _kill_port(port: int, name: str) -> bool:
     return True
 
 
+def _dist_stale() -> bool:
+    """产物缺失，或任一前端源文件比产物新。"""
+    index = DIST / "index.html"
+    if not index.exists():
+        return True
+    stamp = index.stat().st_mtime
+    watched = [ROOT / "frontend" / "index.html", ROOT / "frontend" / "vite.config.ts"]
+    watched.extend((ROOT / "frontend" / "src").rglob("*"))
+    return any(f.is_file() and f.stat().st_mtime > stamp for f in watched)
+
+
+def _ensure_dist(node: str) -> None:
+    """:8230 服务的是构建产物；main.py 在导入期判断 dist 是否存在，必须先于后端就位。
+
+    dev 服务器（:5230）不压缩、按需现编译，公网访问首次点开每个标签都要几百 KB
+    未压缩 JS + 冷编译；构建产物走 gzip 且体积小一个数量级。
+    """
+    if os.environ.get("MJ_SKIP_BUILD", "").strip():
+        print("已跳过构建检查（MJ_SKIP_BUILD）")
+        return
+    if not _dist_stale():
+        print("构建产物已是最新，跳过构建")
+        return
+    print("构建前端产物（tsc -b && vite build，约 30s）...")
+    npm_cli = ROOT / "frontend" / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    cmd = ([node, str(npm_cli), "run", "build"] if npm_cli.exists()
+           else ["npm.cmd", "run", "build"])
+    try:
+        rc = subprocess.call(
+            cmd, cwd=str(ROOT / "frontend"),
+            creationflags=CREATE_NO_WINDOW, startupinfo=_startupinfo_hidden(),
+        )
+    except OSError as exc:
+        print(f"[警告] 无法执行构建（{exc}）；:8230 继续服务上一次的产物")
+        return
+    if rc == 0:
+        print(f"构建完成：{DIST}")
+    else:
+        print("[警告] 前端构建失败；:8230 将继续服务上一次的产物，请修掉 TS 错误后重跑")
+
+
 def _start() -> tuple[subprocess.Popen[bytes], subprocess.Popen[bytes]]:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     if not UVICORN.exists():
@@ -114,6 +156,7 @@ def _start() -> tuple[subprocess.Popen[bytes], subprocess.Popen[bytes]]:
         raise SystemExit(f"缺少 vite: {VITE_JS}（先在 frontend 执行 npm install）")
 
     node = _find_node()
+    _ensure_dist(node)
     dn = open(os.devnull, "rb")
     be_out = open(BE_LOG, "ab")
     be_err = open(BE_ERR, "ab")
@@ -158,7 +201,8 @@ def _start() -> tuple[subprocess.Popen[bytes], subprocess.Popen[bytes]]:
     print(f"backend pid={b.pid}  frontend pid={f.pid}")
     backend_mode = "--reload 热重载（可能中断长任务）" if backend_reload else "稳定模式（不热重载）"
     print(f"后端 http://127.0.0.1:8230  （{backend_mode}）")
-    print("前端 http://127.0.0.1:5230  （Vite HMR）")
+    print("前端 http://127.0.0.1:5230  （Vite HMR，改前端代码时用）")
+    print("日常使用请走 :8230—— 它服务构建产物，切标签比 :5230 快一个数量级。")
     print(f"日志 {BE_LOG}")
     print(f"     {FE_LOG}")
     print("无控制台窗口；前端改动自动热刷新，后端改动后请执行 restart。")

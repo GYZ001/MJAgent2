@@ -193,8 +193,20 @@ async def _gather_fail_fast(
                 pending,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if active_scope.failure_owner is not None:
-                active_scope.failure_owner.result()
+            owner = active_scope.failure_owner
+            if owner is not None:
+                if not owner.done():
+                    # A batch can also be told about its failure from an abort
+                    # callback that fires while the owning task is still
+                    # unwinding -- there the owner is registered before it has
+                    # any result at all.  Calling ``result()`` then raises
+                    # asyncio's "Result is not set" and destroys the real
+                    # cause; reporting a cancelled peer instead would hide it
+                    # just as thoroughly.  The owner is still pending and its
+                    # peers are already cancelled, so waiting one more round
+                    # yields the actual exception.
+                    continue
+                owner.result()
             for task in done:
                 # result() preserves the original exception (including
                 # CancelledError) instead of wrapping it in an ExceptionGroup.
