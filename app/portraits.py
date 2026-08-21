@@ -67,18 +67,46 @@ STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集�
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
-IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v14"
-CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v11"
+IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v15"
+CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v12"
 CURRENT_IDENTITY_EVIDENCE_RECEIPT_VERSION = (
     "screenplay-current-identity-evidence-receipt.v2"
 )
 CURRENT_IDENTITY_LITERAL_PROVENANCE = "owned_current_literal.v1"
 CURRENT_IDENTITY_SYNTHETIC_PROVENANCE = "provider_synthetic_functional.v1"
 IDENTITY_ADJUDICATION_SOURCE_PROVENANCE = "owned_ir_identity_adjudication.v2"
-FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v11"
+FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v12"
 STRUCTURAL_IDENTITY_COVERAGE_VERSION = (
     "screenplay-identity-structural-coverage.v6"
 )
+# 称谓形态的优先级阶梯：真名 > 尊称 > 代称。
+#
+# 生产事故：第 1 集的后续窗口只写出「许师姐」，模型据此签发了一张全新人物卡
+# ``bible:许师姐``，与人物谱里本来就有的「许清」构成同一个人的身份分裂，随后
+# 第 5 集的场次身份注册表因为同一个称谓指向两个 canonical identity 而 fail-closed。
+#
+# 判据不能靠后缀词表（本项目明令禁止），只能由读得懂原文的模型给出形态判断；
+# 后端拿到形态后确定性执行阶梯：只有真名可以签发新的人物权威，尊称与代称一律
+# 先落为功能身份。这样「有真名就不能单独成角色」，而真名尚未出现时该人物仍然
+# 是一个独立身份，等真名真正出现在证据里再由 K 决议认领同一个人。
+IDENTITY_NAME_FORM_PERSONAL = "personal_name"
+IDENTITY_NAME_FORM_HONORIFIC = "honorific"
+IDENTITY_NAME_FORM_REFERENTIAL = "referential"
+IDENTITY_NAME_FORMS = (
+    IDENTITY_NAME_FORM_PERSONAL,
+    IDENTITY_NAME_FORM_HONORIFIC,
+    IDENTITY_NAME_FORM_REFERENTIAL,
+)
+IDENTITY_NAME_FORM_RULE = (
+    "称谓形态优先级：真名 > 尊称 > 代称。"
+    "personal_name=人物的真实姓名（姓+名或单名）；"
+    "honorific=姓氏或关系加称呼（如「某师姐」「某爷」），不是真名；"
+    "referential=只描述外形、衣着、身份或方位的代称。"
+    "只有 personal_name 才能签发新的人物身份；"
+    "尊称与代称必须留作功能身份，等真名在证据中出现后再由 K 决议认领同一个人。"
+)
+
+
 AUTOMATIC_IDENTITY_DECISION_PROVENANCE = "automatic_identity_discovery.v1"
 DURABLE_IDENTITY_DECISION_PROVENANCE = frozenset({"manual", "bible"})
 
@@ -1196,6 +1224,13 @@ def _merge_current_identity_occurrences(options: list[dict]) -> dict:
     return merged
 
 
+def _identity_form_functional_key(identity_label: str) -> str:
+    """Stable per-label group key for an appellation demoted out of N."""
+    return "NF" + evidence_repository.content_hash(
+        str(identity_label or "").strip()
+    )[:12]
+
+
 def _project_current_identity_response(
     value: CurrentIdentityCandidateResponse,
     *,
@@ -1448,9 +1483,32 @@ def _project_current_identity_response(
         if evidence_ref not in expected_refs or record is None:
             errors.append(f"current N evidence_ref 越界：{evidence_ref}")
             continue
+        identity_label = str(item.identity_label or "").strip()
+        if str(item.name_kind or "") != IDENTITY_NAME_FORM_PERSONAL:
+            # 尊称与代称永远不能签发新的人物权威。它们先落为功能身份，保留原文
+            # 里的逐字称谓，等真名真正出现在证据中时再由 K 决议认领同一个人。
+            append_candidate(
+                source_label=identity_label,
+                canonical_name="",
+                identity_kind="functional",
+                functional_key=_identity_form_functional_key(identity_label),
+                kind=item.kind,
+                record=record,
+            )
+            continue
+        if identity_label in (reserved_authority_labels or set()) and not any(
+            identity_label in str(owned.get("text") or "")
+            for owned in evidence_by_ref.values()
+        ):
+            # 模型是从上下文认出了一位已登记人物，而不是读到了逐字姓名。合同要求
+            # 这类「称谓 A 其实是名字 B」的判断先落为 functional，可这里没有任何
+            # 逐字称谓可以留下来当 source_label。后面的结构化身份覆盖审计会用原文
+            # 中真正出现的称谓把这个人补回来，所以丢弃这一条声明，而不是让整集
+            # 预检硬失败。
+            continue
         append_candidate(
-            source_label=item.identity_label,
-            canonical_name=item.identity_label,
+            source_label=identity_label,
+            canonical_name=identity_label,
             identity_kind="named",
             functional_key="",
             kind=item.kind,
@@ -1832,8 +1890,11 @@ async def _discover_character_candidates_legacy(
    逐字锚定他：此时既不得把他的真名写进 n，也不得据上下文推断，只能把你实际读到的
    逐字称谓按第 4 条放入 f，交给后续带 authority_id 的权威绑定去认领。人物谱名单只用于
    识别，不是可以直接书写的名字。
-3. 当前阶段的新 named 只用于逐字自称谓：n 每项写 evidence_ref、identity_label 与 kind，
+3. 当前阶段的新 named 只用于逐字自称谓：n 每项写 evidence_ref、identity_label、name_kind 与 kind，
    identity_label 必须是所选 E text 的连续逐字子串；后端会令 canonical_name=source_label。
+   {IDENTITY_NAME_FORM_RULE}
+   name_kind 只描述 identity_label 这个字符串本身的形态，与你是否认得这个人无关；
+   尊称或代称请照实写 honorific/referential，后端会自动把它落为功能身份。
    任何“称谓 A 其实是名字 B”的别名判断，即使 A、B 同时出现在当前输入，也必须先判为
    functional，交由后续带 authority_id 的权威绑定；不得用同场共现代替同一性证据。
 4. 若是一次性角色，别名待后续确认，或无法确认稳定真名，放入 f；每项填写
@@ -2178,12 +2239,18 @@ class CurrentKnownIdentityDecision(BaseModel):
 
 
 class CurrentNewNamedIdentityDecision(BaseModel):
-    """Declare one literal current-source name without a free canonical field."""
+    """Declare one literal current-source name without a free canonical field.
+
+    ``name_kind`` is the identity-form rank (真名 > 尊称 > 代称).  Only a
+    personal name may become a new authority; the backend deterministically
+    demotes the other two forms to a functional identity.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     evidence_ref: str
     identity_label: str = Field(min_length=1, max_length=16)
+    name_kind: Literal["personal_name", "honorific", "referential"]
     kind: Literal["onscreen", "mentioned"]
 
 
@@ -2222,6 +2289,7 @@ class FutureIdentityCandidateResponse(BaseModel):
     decisions: dict[str, str]
     revealed_names: dict[str, str]
     reveal_evidence_ids: dict[str, str]
+    revealed_name_kinds: dict[str, str]
 
 
 class StructuralIdentityCoverageResponse(BaseModel):
@@ -2379,11 +2447,19 @@ def _future_identity_schema(
                 }
                 for key in keys
             }),
+            "revealed_name_kinds": exact_map({
+                key: {
+                    "type": "string",
+                    "enum": ["", *IDENTITY_NAME_FORMS],
+                }
+                for key in keys
+            }),
         },
         "required": [
             "decisions",
             "revealed_names",
             "reveal_evidence_ids",
+            "revealed_name_kinds",
         ],
         "additionalProperties": False,
     }
@@ -3114,19 +3190,34 @@ async def resolve_future_identity_candidates(
 当前章末交接上下文（仅供推理，绝不是可选 evidence_id）：
 {current_boundary or '（无）'}
 规则：
-1. decisions/revealed_names/reveal_evidence_ids 三个对象都必须精确输出全部 group_key，不得增删键。
+1. decisions/revealed_names/reveal_evidence_ids/revealed_name_kinds 四个对象都必须精确输出全部
+   group_key，不得增删键。
 2. 证据不足时选 F: 决议，这是合法终态；此时两个侧载字段都必须是空字符串。
 3. 证据显示该组就是「已有人物权威目录」中的人时，只能选对应那名 authority 的 K: 决议；
    该 token 已绑定 authority 与原文证据，两个侧载字段都必须为空；
    若目录里没有为该组与该 authority 列出 K: 决议，则只能选 F: 决议。
 4. 只有证据目录首次逐字揭示了不在已有权威目录中的稳定真名，才能选 N: 决议；
-   revealed_names 写真名，reveal_evidence_ids 选包含该真名的 evidence_id。
+   revealed_names 写真名，reveal_evidence_ids 选包含该真名的 evidence_id，
+   revealed_name_kinds 写 personal_name。
+   {IDENTITY_NAME_FORM_RULE}
+   「某师姐」「某爷」「某掌柜」这类姓氏或关系加称呼是 honorific，不是真名：
+   这种情况选 F: 决议，四个对象里除 decisions 外都写空字符串。
+   非 N: 决议的组，revealed_names/reveal_evidence_ids/revealed_name_kinds 三项都必须是空字符串。
 5. 不得回抄或改写证据文本，不得为已有权威重新签发新名，不得输出只在后续出场的人。
 只输出符合下列 Schema 的 JSON：
 {json.dumps(identity_schema, ensure_ascii=False, separators=(',', ':'))}"""
 
     def normalize_identity_payload(payload: dict) -> dict:
-        """Rewrite a NEW answer that actually names an existing authority.
+        """Route a NEW answer to the decision its own evidence supports.
+
+        Two deterministic rewrites, both before validation:
+
+        * a NEW whose declared form is not a personal name is demoted to this
+          group's functional decision -- 真名 > 尊称 > 代称, and only a real
+          name may mint a new authority; and
+
+        * a NEW that actually names an already-registered person is rewritten
+          onto that person's own backend decision.
 
         The provider sometimes expresses "this group is that already-registered
         person" with the N token plus that person's existing canonical name.
@@ -3149,6 +3240,9 @@ async def resolve_future_identity_candidates(
             and isinstance(reveal_evidence_ids, dict)
         ):
             return payload
+        name_kinds = payload.get("revealed_name_kinds")
+        if not isinstance(name_kinds, dict):
+            name_kinds = {}
         rewritten: dict[str, str] = {}
         for group_key in group_keys:
             selected = decision_by_id.get(str(decisions.get(group_key) or ""))
@@ -3156,6 +3250,16 @@ async def resolve_future_identity_candidates(
                 selected is None
                 or str(selected.get("resolution_kind") or "") != "new_named"
             ):
+                continue
+            if str(
+                name_kinds.get(group_key) or ""
+            ) != IDENTITY_NAME_FORM_PERSONAL:
+                # 真名 > 尊称 > 代称：只有真名可以签发新的人物权威。尊称与代称
+                # （以及没有明确声明形态的情况）确定性降级为功能身份，本组仍然是
+                # 一个独立身份，等真名出现在证据里再由 K 决议认领同一个人。
+                functional_id = f"F:{group_key}"
+                if functional_id in decision_by_id:
+                    rewritten[group_key] = functional_id
                 continue
             canonical_name = str(
                 revealed_names.get(group_key) or ""
@@ -3203,6 +3307,10 @@ async def resolve_future_identity_candidates(
             },
             "reveal_evidence_ids": {
                 **reveal_evidence_ids,
+                **{group_key: "" for group_key in rewritten},
+            },
+            "revealed_name_kinds": {
+                **name_kinds,
                 **{group_key: "" for group_key in rewritten},
             },
         }
@@ -3302,6 +3410,7 @@ async def resolve_future_identity_candidates(
             "decisions": value.decisions,
             "revealed_names": value.revealed_names,
             "reveal_evidence_ids": value.reveal_evidence_ids,
+            "revealed_name_kinds": value.revealed_name_kinds,
         }
         for field_name, values in maps.items():
             actual_keys = set(values)
@@ -3339,8 +3448,11 @@ async def resolve_future_identity_candidates(
                 value.reveal_evidence_ids.get(group_key) or ""
             )
             resolution_kind = str(selected.get("resolution_kind") or "")
+            declared_form = str(
+                value.revealed_name_kinds.get(group_key) or ""
+            )
             if resolution_kind != "new_named":
-                if canonical_name or evidence_id:
+                if canonical_name or evidence_id or declared_form:
                     errors.append(
                         "future identity 非 NEW 决议侧载必须为空："
                         f"{group_key}"
@@ -3415,6 +3527,11 @@ async def resolve_future_identity_candidates(
             if len(canonical_name) > 16:
                 errors.append(
                     f"future identity NEW 真名过长：{group_key}"
+                )
+            if declared_form != IDENTITY_NAME_FORM_PERSONAL:
+                errors.append(
+                    "future identity NEW 只能签发真名（真名 > 尊称 > 代称）："
+                    f"{group_key}"
                 )
             if canonical_name in existing_identity_names:
                 errors.append(
