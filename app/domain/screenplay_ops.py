@@ -1746,50 +1746,50 @@ def _spawn_screenplay_activation(
                 raise RuntimeError(
                     "BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED: 缺少可绑定的 active revision"
                 )
-                from app.production.grant import issue_production_grant
-                grant, _token = issue_production_grant(
-                    episode_id=episode_id,
-                    project_id=project_id,
-                    production_revision_id=str(revision["id"]),
-                    kind="screenplay",
-                    input_artifact_hash=blueprint_retry_receipts_hash(
+            from app.production.grant import issue_production_grant
+            grant, _token = issue_production_grant(
+                episode_id=episode_id,
+                project_id=project_id,
+                production_revision_id=str(revision["id"]),
+                kind="screenplay",
+                input_artifact_hash=blueprint_retry_receipts_hash(
+                    budget_projection["unknown_receipts"]
+                ),
+                issued_by="user_retry_approval",
+                conn=conn,
+                commit=False,
+            )
+            budget.authorize_unknown_retry(grant.grant_id)
+            activation_retry_grant_id = grant.grant_id
+            activation_retry_receipts_hash = current_receipts_hash
+            activation_retry_revision_id = str(revision["id"])
+            run_row = conn.execute(
+                "SELECT config_snapshot_json FROM workflow_runs WHERE id=?",
+                (recorder.run_id,),
+            ).fetchone()
+            config_snapshot = json.loads(
+                run_row["config_snapshot_json"] or "{}"
+            ) if run_row is not None else {}
+            config_snapshot.update({
+                "blueprint_retry_grant_id": grant.grant_id,
+                "blueprint_retry_receipts_hash": (
+                    blueprint_retry_receipts_hash(
                         budget_projection["unknown_receipts"]
-                    ),
-                    issued_by="user_retry_approval",
-                    conn=conn,
-                    commit=False,
-                )
-                budget.authorize_unknown_retry(grant.grant_id)
-                activation_retry_grant_id = grant.grant_id
-                activation_retry_receipts_hash = current_receipts_hash
-                activation_retry_revision_id = str(revision["id"])
-                run_row = conn.execute(
-                    "SELECT config_snapshot_json FROM workflow_runs WHERE id=?",
-                    (recorder.run_id,),
-                ).fetchone()
-                config_snapshot = json.loads(
-                    run_row["config_snapshot_json"] or "{}"
-                ) if run_row is not None else {}
-                config_snapshot.update({
-                    "blueprint_retry_grant_id": grant.grant_id,
-                    "blueprint_retry_receipts_hash": (
-                        blueprint_retry_receipts_hash(
-                            budget_projection["unknown_receipts"]
-                        )
-                    ),
-                    "blueprint_retry_receipts": list(
-                        budget_projection["unknown_receipts"]
-                    ),
-                })
-                conn.execute(
-                    "UPDATE workflow_runs SET config_snapshot_json=?,updated_at=? "
-                    "WHERE id=?",
-                    (
-                        json.dumps(config_snapshot, ensure_ascii=False),
-                        activation_stamp,
-                        recorder.run_id,
-                    ),
-                )
+                    )
+                ),
+                "blueprint_retry_receipts": list(
+                    budget_projection["unknown_receipts"]
+                ),
+            })
+            conn.execute(
+                "UPDATE workflow_runs SET config_snapshot_json=?,updated_at=? "
+                "WHERE id=?",
+                (
+                    json.dumps(config_snapshot, ensure_ascii=False),
+                    activation_stamp,
+                    recorder.run_id,
+                ),
+            )
         elif budget.unknown_receipts and budget.retry_grant_id:
             # A legacy unconsumed exact grant may authorize one activation.
             # It is consumed below only after the task registry accepts the

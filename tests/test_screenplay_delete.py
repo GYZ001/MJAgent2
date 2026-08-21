@@ -397,3 +397,63 @@ def test_delete_leaves_other_episodes_unknown_liability_untouched() -> None:
         input_fingerprint="fp-other",
     )
     assert other.requires_fresh_retry_grant is True
+
+
+def test_fresh_baseline_closes_orphaned_liability_instead_of_deadlocking(
+    monkeypatch,
+) -> None:
+    """An orphaned receipt must not make the episode unstartable for good.
+
+    Production EP1: a cancelled run left an unknown blueprint outcome, the
+    delete superseded every revision, and the next Baseline then demanded a
+    retry grant that can only bind to an active revision -- none existed, and
+    no approval could stand in for it.  Every later start took the same path.
+    """
+    from app.domain import screenplay_ops
+    from app.stages import (
+        BLUEPRINT_CALL_ABANDONED_BY_DELETE,
+        _BlueprintGenerationBudget,
+    )
+
+    input_fingerprint = "fp-orphan-baseline"
+    call_id = _insert_interrupted_blueprint_call("run-orphan", input_fingerprint)
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE production_revisions SET status='superseded' WHERE episode_id='e1'"
+    )
+    conn.commit()
+
+    projections: list[dict] = []
+    real_projection = screenplay_ops._screenplay_blueprint_budget_projection
+
+    def recording_projection(episode_id, **kwargs):
+        value = real_projection(episode_id, **kwargs)
+        projections.append(value)
+        return value
+
+    monkeypatch.setattr(
+        screenplay_ops,
+        "_screenplay_blueprint_budget_projection",
+        recording_projection,
+    )
+    monkeypatch.setattr(
+        screenplay_ops,
+        "_episode_source_text",
+        lambda _conn, _ep: "第一章。孟浩走进山门。",
+    )
+
+    closed = screenplay_ops._abandon_orphaned_blueprint_receipts("e1", conn=conn)
+    conn.commit()
+
+    assert closed == 1
+    assert conn.execute(
+        "SELECT recovery_disposition FROM provider_calls WHERE id=?", (call_id,)
+    ).fetchone()["recovery_disposition"] == BLUEPRINT_CALL_ABANDONED_BY_DELETE
+
+    after = _BlueprintGenerationBudget.from_durable_calls(
+        run_id=None,
+        episode_id="e1",
+        input_fingerprint=input_fingerprint,
+    )
+    assert after.requires_fresh_retry_grant is False
+    assert after.unknown_receipts == []

@@ -76,9 +76,20 @@ EP1 启动直接 503：`BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED: 缺少可绑定
   只能绑定 active revision ⇒ 回执活得比它能绑定的对象更久，此后每次
   Baseline 都走同一条死路。
 
-**修复**：`delete_screenplay` 给这些回执一个终态
+**修复**：新增 `_abandon_orphaned_blueprint_receipts()`，给这些回执终态
 `ABANDONED_BY_SCREENPLAY_DELETE`（`app/stages.py` 的预算读取据此不再计入）。
 provider_calls 行、成本与响应全部保留为审计证据，只关闭"未决责任"。
+
+两个调用点，缺一不可：
+- `delete_screenplay`：删除即是这些花费的终态处置；
+- `_spawn_screenplay_activation`：**全新 Baseline 且没有任何 active revision 时**，
+  回执已经孤立——没有任何 grant 能签发、也没有任何批准能替代，所有闸门都不可满足。
+  EP1 正是这种状态：它已经是 `pending`，`delete` 直接 409「本集没有可删除的剧本」，
+  永远走不到删除侧的清理。resume 不走这条路径，仍然 fail-closed。
+
+作用域必须与预算对"未决回执"的定义完全一致：`status IN ('INTERRUPTED','RUNNING')
+AND superseded_by_call_id IS NULL`。第一版误加了 `recovery_disposition IS NULL`，
+而未知结果**正常就带着** `REQUIRES_EXPLICIT_RETRY`——那一版对真实数据是空操作。
 
 ### 根因 4 — current identity 对"只以称谓出现的已登记人物"没有出路
 
