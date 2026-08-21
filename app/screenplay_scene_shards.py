@@ -2237,12 +2237,77 @@ def _source_ownership_hash(blueprint: NarrativeBlueprint) -> str:
     })
 
 
+def blueprint_referenced_content_owners(
+    blueprint: NarrativeBlueprint,
+) -> list[str]:
+    """Return content-owner tokens that no one performs.
+
+    A quoted unit's ``content_owner_key`` is documented as possibly being a
+    text or object attribution -- the sect that engraved a token, the author of
+    a notice -- and the Blueprint contract deliberately allows it.  Everything
+    downstream, however, resolves content owners as identity references, so an
+    attribution that is nobody's identity used to abort scene planning with a
+    bare ValueError at a stage that owns no repair loop.
+
+    Only owners that are never a ``performer_key`` are returned: whoever
+    performs a line must remain a frozen person, and that check stays strict.
+    """
+    owners: list[str] = []
+    performers: set[str] = set()
+    for node in blueprint.nodes:
+        if node.source_semantics().projection_policy != "picture":
+            continue
+        for delivery in effective_source_unit_deliveries(node):
+            performer = delivery.performer_key.strip()
+            if performer:
+                performers.add(performer)
+            owner = delivery.content_owner_key.strip()
+            if owner:
+                owners.append(owner)
+    return [
+        owner for owner in dict.fromkeys(owners)
+        if owner not in performers
+    ]
+
+
 def build_frozen_identity_registry(
     bible: Bible,
     resolutions: list[dict[str, Any]] | None,
+    referenced_content_owners: list[str] | None = None,
 ) -> tuple[list[IRIdentity], list[dict[str, Any]], str]:
     """Project durable authorities into stable IR identity keys."""
     authorities = identity_authority_registry(bible, resolutions)
+    if referenced_content_owners:
+        known_tokens = {
+            str(value or "").strip()
+            for authority in authorities
+            for value in (
+                authority.get("authority_id"),
+                authority.get("identity_group"),
+                authority.get("source_instance_key"),
+                authority.get("canonical_name"),
+                *(authority.get("source_labels") or []),
+            )
+            if str(value or "").strip()
+        }
+        for owner in referenced_content_owners:
+            token = str(owner or "").strip()
+            if not token or token in known_tokens:
+                continue
+            # An attribution nobody performs is exactly what the registry's
+            # ``reference`` kind is for: offscreen only, assets forbidden.  It
+            # can never become a performer or a rendered character, so a
+            # mis-attributed token stays inert instead of ending the episode.
+            known_tokens.add(token)
+            authorities.append({
+                "authority_id": f"reference:{token}",
+                "canonical_name": token,
+                "identity_kind": "reference",
+                "source_labels": [token],
+                "identity_group": f"reference:{token}",
+                "source_instance_key": f"reference:{token}",
+                "materialization_compatible": False,
+            })
     identities: list[IRIdentity] = []
     projected: list[dict[str, Any]] = []
     for authority in sorted(

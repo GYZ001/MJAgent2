@@ -4469,23 +4469,59 @@ table.calls-ledger th:nth-child(6) {
     grid-template-columns: minmax(240px, 42%) minmax(0, 1fr);
   }
 }
+.trace-pane-switch {
+  display: none;
+}
 @media (max-width: 640px) {
+  /* 堆叠会让「看详情」和「换节点」相隔一屏多的滚动距离，改成互斥切换，
+     每一栏都拿到完整高度，滚动上下文也只剩一个。 */
+  .trace-pane-switch {
+    display: grid;
+    flex: 0 0 auto;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    padding: 8px 12px;
+    border-bottom: 1px solid #e6e9ee;
+    background: #fff;
+  }
+  .trace-pane-switch button {
+    padding: 9px 10px;
+    border: 1px solid var(--hairline);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--ink-soft);
+    font-family: var(--serif);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .trace-pane-switch button.active {
+    border-color: var(--cinnabar-deep);
+    background: rgba(181, 68, 52, 0.08);
+    color: var(--cinnabar-deep);
+    font-weight: 600;
+  }
   .trace-workspace {
     display: flex;
+    min-height: 0;
     flex-direction: column;
-    overflow: auto;
   }
-  .trace-tree-panel {
-    max-height: 42vh;
-    border-right: 0;
-    border-bottom: 1px solid #e6e9ee;
+  .trace-workspace[data-mobile-pane="tree"] .trace-detail-panel,
+  .trace-workspace[data-mobile-pane="detail"] .trace-tree-panel {
+    display: none;
   }
+  .trace-tree-panel,
   .trace-detail-panel {
-    min-height: 52vh;
+    max-height: none;
+    min-height: 0;
+    flex: 1 1 auto;
+    border-right: 0;
   }
   .trace-detail-head {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .trace-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 .call-summary-grid {
@@ -4748,6 +4784,35 @@ table.calls-ledger th:nth-child(6) {
   border-left: 1px dashed rgba(163, 151, 138, 0.35);
   margin-left: 6px;
   padding-left: 6px;
+}
+
+/* 移动端观测台：把 JSON 读起来。
+   桌面上 JsonViewer 自带一个 45vh 的内滚区，触屏上它会和抽屉滚动互相抢手势；
+   再叠上每层 16px 缩进与 key/value 同行的 flex 布局，深层长字符串基本读不到。 */
+@media (max-width: 640px) {
+  .json-viewer {
+    --json-indent: 8px;
+    font-size: 12.5px;
+  }
+  /* maxHeight 由组件以内联样式传入，只有 !important 能解除嵌套滚动 */
+  .trace-json .json-viewer-body,
+  .call-io-json .json-viewer-body {
+    max-height: none !important;
+    padding: 8px 10px;
+  }
+  /* 键与值改为顺排：长提示词能占满整行宽度，而不是被挤在右半边 */
+  .json-row {
+    display: block;
+  }
+  .json-children {
+    margin-left: 3px;
+    padding-left: 5px;
+  }
+  .json-viewer-toolbar {
+    position: sticky;
+    z-index: 1;
+    top: 0;
+  }
 }
 .job-technical-details {
   margin-top: 14px;

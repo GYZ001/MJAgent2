@@ -9096,6 +9096,7 @@ async def _generate_screenplay_scene_sharded_baseline(
     from app.screenplay_scene_shards import (
         SCREENPLAY_SHARD_PLAN_VERSION,
         blueprint_content_hash,
+        blueprint_referenced_content_owners,
         build_frozen_identity_registry,
         build_screenplay_scene_input_contract_set,
         build_screenplay_scene_shard_plans,
@@ -9319,6 +9320,9 @@ async def _generate_screenplay_scene_sharded_baseline(
             build_frozen_identity_registry(
                 bible,
                 current_resolutions,
+                referenced_content_owners=(
+                    blueprint_referenced_content_owners(narrative_blueprint)
+                ),
             )
         )
         from app.production.revision import get_active_production_revision

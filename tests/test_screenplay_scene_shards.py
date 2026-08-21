@@ -10519,3 +10519,76 @@ def test_fail_fast_still_propagates_a_normally_raised_child() -> None:
     with pytest.raises(RuntimeError, match="first"):
         asyncio.run(run())
     assert peer_finished is False
+
+
+def _picture_node_with_written_text(owner: str, performer: str = "") -> object:
+    """One picture node whose quoted unit is engraved text owned by `owner`."""
+    from app.narrative_blueprint import (
+        NarrativeNode as _Node,
+        NarrativeSourceUnitDelivery as _Delivery,
+    )
+
+    node = _Node.model_construct(
+        key="n1",
+        source_segment_ids=["SRC0001"],
+        summary="木牌上刻着字",
+        source_unit_deliveries=[
+            _Delivery(
+                source_unit_key="SRC0001:unit:002",
+                mode="written_text",
+                content_owner_key=owner,
+                performer_key=performer,
+            ),
+        ],
+        participant_evidence=[],
+    )
+    return node
+
+
+def test_blueprint_attribution_that_nobody_performs_is_registered_reference() -> None:
+    """A sect owning engraved text must not abort scene planning.
+
+    The Blueprint contract allows a quoted unit's content owner to be a text or
+    object attribution.  Everything downstream resolves content owners as
+    identity references, so the attribution has to exist in the frozen
+    registry -- as the ``reference`` kind, which is offscreen-only and cannot
+    own assets.
+    """
+    from app.narrative_blueprint import NarrativeBlueprint as _Blueprint
+
+    blueprint = _Blueprint.model_construct(
+        episode_no=2,
+        nodes=[_picture_node_with_written_text("靠山宗")],
+    )
+    owners = scene_shards_module.blueprint_referenced_content_owners(blueprint)
+    assert owners == ["靠山宗"]
+
+    identities, registry, _hash = scene_shards_module.build_frozen_identity_registry(
+        Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        [],
+        referenced_content_owners=owners,
+    )
+    entry = next(
+        item for item in registry
+        if item["canonical_name"] == "靠山宗"
+    )
+    assert entry["authority_id"] == "reference:靠山宗"
+    identity = next(
+        item for item in identities if item.display_name == "靠山宗"
+    )
+    assert identity.kind == "referenced_identity"
+    assert identity.visual_policy == "offscreen_only"
+    assert identity.asset_requirement == "forbidden"
+    # The freeze now resolves it, so scene planning no longer aborts.
+    assert scene_shards_module._identity_aliases(registry)["靠山宗"] == identity.key
+
+
+def test_a_performer_is_never_auto_registered_as_a_reference() -> None:
+    """Whoever performs a line must stay a frozen person; that stays strict."""
+    from app.narrative_blueprint import NarrativeBlueprint as _Blueprint
+
+    blueprint = _Blueprint.model_construct(
+        episode_no=2,
+        nodes=[_picture_node_with_written_text("孟浩", performer="孟浩")],
+    )
+    assert scene_shards_module.blueprint_referenced_content_owners(blueprint) == []

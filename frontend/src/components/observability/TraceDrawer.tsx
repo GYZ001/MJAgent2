@@ -380,6 +380,9 @@ export default function TraceDrawer({
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [detail, setDetail] = useState<TraceNodeDetail | null>(null);
   const [tab, setTab] = useState<DetailTab>("input");
+  // 窄屏放不下「树 + 详情」两栏，堆叠后又要长距离滚动才能换节点，改为互斥切换。
+  // 宽屏仍是并排两栏，这个状态由 CSS 忽略。
+  const [mobilePane, setMobilePane] = useState<"tree" | "detail">("tree");
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
