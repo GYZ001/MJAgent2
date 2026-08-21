@@ -4891,3 +4891,112 @@ def test_generation_breaker_in_reviewer_is_not_masked_as_missing_reviewer(
             episode={"id": "episode-review-breaker"},
             source_text=SOURCE,
         ))
+
+
+# Production shape: the provider stopped emitting key names and produced runs
+# of tabs and spaces instead, so nothing ever decoded into a JSON object.
+_DEGENERATE_PATCH_RESPONSE = (
+    '{\n    "    ' + "\t" * 60 + " " * 80 + "\t" * 40 + ':": [{" '
+    + "\t" * 120 + "," + "\t" * 120 + '"},{" ' + "\t" * 120
+    + ': "n4",\n            "node": {\n                "key": "n4",\n'
+)
+
+
+def test_undelivered_blueprint_patch_spends_a_round_not_the_episode(
+    monkeypatch,
+) -> None:
+    """An answer that never decoded is a failed round, not a dead episode.
+
+    The repair loop owns a bounded budget of six separately reserved rounds.
+    A response whose keys degenerated into whitespace carries no authored
+    repair to preserve, so it costs one of those rounds; aborting on round one
+    threw the remaining budgeted rounds away.
+    """
+    blueprint = _blueprint()
+    replacement = blueprint.nodes[3].model_copy(deep=True)
+    replacement.transition_cue = "次日字幕后切到学校门口"
+    valid_patch = json.dumps(
+        {
+            "replacements": [{
+                "node_key": "n4",
+                "node": replacement.model_dump(mode="json"),
+            }],
+        },
+        ensure_ascii=False,
+    )
+    responses = iter([_DEGENERATE_PATCH_RESPONSE, valid_patch])
+    operation_ids: list[str] = []
+
+    async def fake_chat(_messages, **_kwargs):
+        return next(responses)
+
+    async def fake_structured(messages, **kwargs):
+        operation_ids.append(str(kwargs["operation_id"]))
+        # The gateway must see the strict one-call fence this path sets.
+        assert kwargs["format_retry_limit"] == 0
+        assert kwargs["semantic_retry_limit"] == 0
+        return await original_structured(messages, **kwargs)
+
+    original_structured = stages.model_gateway.chat_structured
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda artifact, **_kwargs: {"id": "art-undelivered"},
+    )
+    monkeypatch.setattr(
+        stages.hiagent,
+        "text_request_token_limits",
+        lambda **_kwargs: ("hiagent", "model", 16384),
+    )
+
+    budget = stages._BlueprintGenerationBudget()
+    budget.retry_grant_id = "grant-undelivered"
+    repaired = asyncio.run(stages._repair_narrative_blueprint(
+        blueprint,
+        episode={"id": "ep-undelivered-patch"},
+        source_text=SOURCE,
+        additional_errors=["[BLUEPRINT_TEST] n4 需要局部修复"],
+        generation_budget=budget,
+    ))
+
+    assert len(operation_ids) == 2
+    assert operation_ids[0] != operation_ids[1]
+    assert budget.provider_calls == 2
+    assert repaired.nodes[3].transition_cue == "次日字幕后切到学校门口"
+
+
+def test_schema_invalid_blueprint_patch_still_fails_the_first_call(
+    monkeypatch,
+) -> None:
+    """A decoded-but-invalid patch is authored output and is never re-rolled."""
+    calls = 0
+
+    async def fake_chat(_messages, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return '{"replacements": "not-a-list"}'
+
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda artifact, **_kwargs: {"id": "art-schema-invalid"},
+    )
+    monkeypatch.setattr(
+        stages.hiagent,
+        "text_request_token_limits",
+        lambda **_kwargs: ("hiagent", "model", 16384),
+    )
+
+    budget = stages._BlueprintGenerationBudget()
+    budget.retry_grant_id = "grant-schema-invalid"
+    with pytest.raises(model_gateway.StructuredFormatError):
+        asyncio.run(stages._repair_narrative_blueprint(
+            _blueprint(),
+            episode={"id": "ep-schema-invalid-patch"},
+            source_text=SOURCE,
+            additional_errors=["[BLUEPRINT_TEST] n4 需要局部修复"],
+            generation_budget=budget,
+        ))
+
+    assert calls == 1

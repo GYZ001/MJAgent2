@@ -4216,6 +4216,7 @@ async def _repair_narrative_blueprint(
 
     parent_artifact_ids: list[str] = []
     pending_external_errors = list(additional_errors or [])
+    undelivered_patch_errors: list[str] = []
 
     def normalize_and_validate() -> list[str]:
         normalize_blueprint_state_subject_perception(blueprint)
@@ -4605,6 +4606,23 @@ async def _repair_narrative_blueprint(
                     ),
                 )
             raise
+        except model_gateway.StructuredFormatError as exc:
+            if reservation_id is not None:
+                generation_budget.settle(reservation_id)
+            # A patch that decoded but failed the schema is an answer the
+            # provider actually authored: it keeps the strict one-call rule and
+            # must never be re-rolled until it happens to pass.  A response that
+            # never decoded into a JSON object at all -- in production the keys
+            # degenerated into runs of tabs and spaces -- carries no repair to
+            # preserve and is simply a round that was never delivered.  This
+            # loop already owns a bounded budget of rounds, each with its own
+            # reservation and operation id, so spending the next one is the
+            # in-contract answer; aborting the episode on round 1 threw the
+            # remaining budgeted rounds away.
+            if not getattr(exc, "unparseable", False):
+                raise
+            undelivered_patch_errors.append(str(exc))
+            continue
         except BaseException:
             if reservation_id is not None:
                 generation_budget.settle(reservation_id)
@@ -4662,6 +4680,12 @@ async def _repair_narrative_blueprint(
         raise ContentGenerationError(
             "蓝图局部语义修复六轮后仍未通过："
             + "；".join(errors[:10])
+            + (
+                f"；其中 {len(undelivered_patch_errors)} 轮未收到可解析的修复响应，"
+                f"最近一次：{undelivered_patch_errors[-1]}"
+                if undelivered_patch_errors
+                else ""
+            )
         )
     trace = current_trace()
     evidence_repository.create_artifact(
