@@ -208,10 +208,34 @@ def _prompt(payload: dict[str, Any]) -> str:
 {{"decisions":[{{"identity_key":"IR identity.key","status":"bind|new_named|new_functional|insufficient_evidence","authority_id":"bind 时填写已有 ID，否则空串","canonical_name":"new_named/new_functional 时填写 owned SRC 逐字称谓，否则可空","evidence_source_ids":["SRC0001"],"rationale":"基于哪些原文动作、对白或同一性证据"}}]}}"""
 
 
+def _source_segment_document_order(source_text: str) -> dict[str, int]:
+    """Return the document-order rank of every source segment id.
+
+    This is the single ordering authority shared with the read fence in
+    ``portraits._identity_adjudication_receipt_is_valid`` (which requires the
+    receipt/source ids to equal the ``index_source_segments`` document subset
+    order).  Every producer field derived from ``evidence_source_ids`` sorts by
+    this rank so the persisted order matches the consumer's strong fence.
+    """
+    return {
+        segment.segment_id: index
+        for index, segment in enumerate(index_source_segments(source_text))
+    }
+
+
+def _order_source_ids_by_document(
+    source_ids: list[str],
+    document_order: dict[str, int],
+) -> list[str]:
+    """Sort validated source ids into consumer document order (no set change)."""
+    return sorted(source_ids, key=lambda source_id: document_order[source_id])
+
+
 def _validate_decisions(
     result: IdentityAdjudicationResult,
     *,
     payload: dict[str, Any],
+    source_text: str,
 ) -> dict[str, IdentityAdjudicationDecision]:
     issue_keys = {
         str(key or "").strip()
@@ -235,6 +259,7 @@ def _validate_decisions(
         str(item.get("key") or "").strip(): item
         for item in payload["identities"]
     }
+    document_order = _source_segment_document_order(source_text)
     for decision in result.decisions:
         key = decision.identity_key.strip()
         if key not in issue_keys or key in decisions:
@@ -261,7 +286,17 @@ def _validate_decisions(
             raise ContentGenerationError(
                 f"人物身份仲裁 {key} 引用了不属于该身份的原文来源段"
             )
-        decision.evidence_source_ids = evidence_ids
+        # Normalize to consumer document order once, before any downstream
+        # writer derives from it.  ``resolution.evidence_source_ids``,
+        # ``resolution.source_segment_ids`` and ``receipt.source_segment_ids``
+        # all read ``decision.evidence_source_ids`` after this point, so the
+        # producer and the read fence share one ordering authority
+        # (``index_source_segments``).  This only reorders; the deduped
+        # owned/known-source set stays identical.
+        decision.evidence_source_ids = _order_source_ids_by_document(
+            evidence_ids,
+            document_order,
+        )
         if decision.status == "bind":
             if decision.authority_id not in valid_authorities:
                 raise ContentGenerationError(
@@ -336,7 +371,11 @@ async def adjudicate_screenplay_ir_identities(
             model_type=IdentityAdjudicationResult,
             validate=lambda value: (
                 []
-                if _validate_decisions(value, payload=payload)
+                if _validate_decisions(
+                    value,
+                    payload=payload,
+                    source_text=source_text,
+                )
                 else []
             ),
             operation_id=(
@@ -365,7 +404,11 @@ async def adjudicate_screenplay_ir_identities(
         # Preserve the domain-level error contract after the bounded structured
         # retry runner has exhausted its content budget.
         raise ContentGenerationError(str(exc)) from exc
-    decisions = _validate_decisions(result, payload=payload)
+    decisions = _validate_decisions(
+        result,
+        payload=payload,
+        source_text=source_text,
+    )
 
     unresolved = [
         decision
