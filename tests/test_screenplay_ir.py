@@ -2649,6 +2649,83 @@ def test_identity_adjudication_creates_source_backed_functional_authority(
     ) == [adjudicated]
 
 
+def test_identity_adjudication_normalizes_multi_segment_evidence_to_doc_order(
+    monkeypatch,
+) -> None:
+    """Multi-segment adjudication evidence must persist in consumer doc order.
+
+    Regression: the producer used to keep the model's evidence order verbatim.
+    When one identity's evidence spans several source segments and the model
+    returns them out of document order, the persisted receipt/source ids failed
+    the source-aware read fence ``_identity_adjudication_receipt_is_valid`` and
+    the automatic identity was silently dropped.  The producer now shares the
+    ``index_source_segments`` document order with that fence.
+    """
+    payload = _v13_payload()
+    payload["format_version"] = "screenplay-generation-ir.v1.4"
+    payload["identities"][0]["authority_id"] = "bible:谷言"
+    payload["identities"][1]["authority_id"] = ""
+    episode = {
+        "id": "ep-ir-multi-segment-order",
+        "episode_no": 1,
+        "authorized_source_chapters": {"chapter-1": SOURCE},
+        "character_resolutions": [],
+    }
+
+    document_order = [
+        segment.segment_id for segment in index_source_segments(SOURCE)
+    ]
+    assert document_order == ["SRC0001", "SRC0002", "SRC0003"]
+    # The model returns owned evidence spanning three segments in reverse
+    # document order; the producer must normalize it to the document order.
+    reverse_document_order = list(reversed(document_order))
+
+    async def fake_chat(*_args, **_kwargs):
+        return json.dumps({"decisions": [{
+            "identity_key": "friend",
+            "status": "new_functional",
+            "authority_id": "",
+            "canonical_name": "旧友",
+            "evidence_source_ids": reverse_document_order,
+            "rationale": "旧友的动作与对白跨越三段原文",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(identity_adjudication.model_gateway, "chat", fake_chat)
+    candidate = ScreenplayGenerationIR.model_validate(payload)
+    resolved = asyncio.run(adjudicate_screenplay_ir_identities(
+        candidate,
+        episode=episode,
+        source_text=SOURCE,
+        bible=_bible(),
+        persist_new_resolutions=False,
+    ))
+
+    assert resolved.identities[1].authority_id.startswith("functional:")
+    adjudicated = episode["character_resolutions"][0]
+    # All three derived fields must equal the document order, not the model's
+    # reverse order, so the producer aligns with the consumer read fence.
+    assert adjudicated["evidence_source_ids"] == document_order
+    assert adjudicated["source_segment_ids"] == document_order
+    assert adjudicated["identity_adjudication_receipt"][
+        "source_segment_ids"
+    ] == document_order
+    # The source-aware strong fence accepts the normalized producer output.
+    assert portraits._identity_adjudication_receipt_is_valid(
+        adjudicated,
+        source_text=SOURCE,
+    )
+    assert portraits.screenplay_identity_resolution_is_current_for_source(
+        adjudicated,
+        episode_no=1,
+        source_text=SOURCE,
+    )
+    assert portraits.screenplay_character_resolutions_for_source(
+        [adjudicated],
+        episode_no=1,
+        source_text=SOURCE,
+    ) == [adjudicated]
+
+
 def test_identity_adjudication_preserves_two_entities_with_one_source_label(
     monkeypatch,
 ) -> None:
