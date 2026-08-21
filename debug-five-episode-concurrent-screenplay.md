@@ -241,3 +241,41 @@ SRC0020:unit:008  quoted  quoted_span  '“杂”'
 谁在说话必须仍然是冻结的人物身份。被自动登记的只可能是「没有任何人表演的归属」，
 而 reference 身份 offscreen_only、禁止资产、不能成为表演者，所以即使模型写错一个
 归属 token，它也只会成为一个惰性引用，而不会污染人物卡、定妆照或表演分配。
+
+
+## Round 5（2026-08-22 12:59）
+
+归属修复生效：EP2 越过了冻结，`靠山宗` 不再拦路。新暴露的失败：
+
+### 根因 11 — 「未送达」的判据太窄
+
+大量 INTERRUPTED 其实是 fail-fast 取消的同伴调用（`流式请求被取消`，几百毫秒）。
+真正的源头是 `stream interrupted before [DONE] (received_chars=22)`。
+
+`[DONE]` 是供应商自己的完成标记，`_stream_chat_completion` 在缺它时**直接丢弃**
+重建出来的部分内容。所以只要流没走到 `[DONE]`，无论收到多少字节都不存在"已授权
+的答案"，字节数根本不是判据。
+
+**修复**：抽出共享判据 `hiagent.provider_answer_undelivered(exc)`
+（`stream_interrupted`，或 `request_outcome_unknown` 且 0 字节），
+身份重采样与蓝图分片卡死重试都改用它；并给场次写作/语义审查/语义修复三处
+加上同样有界的一次重发（`_scene_structured_with_undelivered_retry`，每次重发
+带自己的 operation id）。重发**必须写在供应商槽位租约内部**——租约看到异常就会
+触发批次中止回调，写在外面第二次尝试根本没机会跑。
+
+### 根因 12 — 严格 enum 的 evidence_ref 仍会收到 `E01`
+
+EP1：目录里是 `E001`，供应商送来 `E01`，整集死在 `current F evidence_ref 越界`。
+schema 已经把它钉成闭合枚举，但供应商并不总是遵守 strict 模式。
+
+**修复**：`_resolved_evidence_ref` 只做补零这一种纯格式还原，且**必须唯一命中**
+一条已有的后端证据 receipt；有歧义原样返回，继续 fail-closed。
+
+### 一次撤回的改动（记录以免重犯）
+
+同一次响应里「绿袍修士」出现两次（F2/F3、同一条证据）。我一度把它规范化为
+同一个身份，但既有用例
+`test_current_identity_same_label_multiple_groups_fails_closed_once` 的源文正是
+「两名绿袍修士同时开口」——**两个不同的人共用一个称谓**，合并会把两个角色并成
+一个。合同要求模型给同段多个无名实体使用可区分的稳定描述，所以这里 fail-closed
+是刻意设计。改动已撤回，只保留补零修复。
