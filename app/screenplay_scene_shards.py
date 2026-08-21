@@ -4068,7 +4068,12 @@ def _scene_shard_prompt(
         "唯一创作权限：action slot 即使 source_text 为空也不授权自由改写，"
         "必须只展开自身 source_fact.text；每个 slot 只能改写自身 source_fact，"
         "不得借用相邻 unit 的事实。cross-slot 内容必须归因到最早越界 slot，"
-        "不得提前或重复承载其他 slot 的来源事实。\nShard plan：\n"
+        "不得提前或重复承载其他 slot 的来源事实。"
+        "逐 slot exact authority 中 environment_only=true 的 slot 只描写环境、"
+        "空间、氛围与无主体的客观现象，text/performance/resulting_state 不得写入"
+        "任何人物的思考、发问、反应、动作或情绪，也不得把环境拟人化或让环境替人物"
+        "行动；此类 slot 没有 state_subject，任何人物内容都会作为 "
+        "environment_personification 失败。\nShard plan：\n"
         + json.dumps(
             plan_payload,
             ensure_ascii=False,
@@ -4944,7 +4949,12 @@ def _scene_shard_semantic_repair_prompt(
         "performance、resulting_state、function、required_text、prop_text、"
         "on_screen_text。必须忠于 source_text 与 exact state_subject/actor/speaker；"
         "不得输出未标记 slot，不得输出或改变任何结构、身份、timeline、"
-        "source ownership 或 audit 字段。只返回当前标记 slot 的 subset creative "
+        "source ownership 或 audit 字段。"
+        "修复 environment_personification 时：该 slot 在冻结 slots 中 "
+        "environment_only=true，必须删除 text/performance/resulting_state 里所有"
+        "人物思考、发问、反应、动作、情绪以及环境拟人化表达，改写为只描写环境、"
+        "空间、氛围与无主体客观现象的中性描述，不得保留任何人物主体或让环境替人物"
+        "行动。只返回当前标记 slot 的 subset creative "
         "root。\nfindings：\n"
         + json.dumps(
             findings_payload,
