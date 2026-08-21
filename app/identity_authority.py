@@ -83,7 +83,17 @@ def authority_id_for_resolution(value: dict[str, Any]) -> str:
 
     canonical_name = str(value.get("canonical_name") or "").strip()
     resolution = str(value.get("resolution") or "").strip()
-    if resolution == "future_identity" and canonical_name:
+    # ``future_identity`` and ``reference_identity`` are both named-family
+    # decisions: a stable named entity that either materializes a card now
+    # (future) or is only referenced offscreen this episode (reference).  Both
+    # must resolve to the canonical named-authority namespace so the persisted
+    # ``authority_id`` agrees with the ``named:`` identity_group that the
+    # discovery projector assigns to the very same label.  Minting a
+    # ``functional:`` authority for a named group is the self-contradictory row
+    # that makes the structural-coverage gate see two authority classes in one
+    # group.  Only functional extras (no stable canonical name) fall through to
+    # the synthetic functional namespace below.
+    if canonical_name and resolution in {"future_identity", "reference_identity"}:
         return f"bible:{canonical_name}"
 
     source_label = str(value.get("source_label") or "").strip()
