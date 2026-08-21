@@ -591,8 +591,10 @@ def commit_artifact(
     if any(evaluation.recovered for evaluation in gate_evaluations):
         raise ValueError("recovered evaluation cannot independently commit an artifact")
     conn = get_conn()
+    owns_transaction = not conn.in_transaction
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        if owns_transaction:
+            conn.execute("BEGIN IMMEDIATE")
         artifact = get_artifact(artifact_id, conn=conn)
         if not artifact:
             raise KeyError(f"artifact not found: {artifact_id}")
@@ -675,9 +677,11 @@ def commit_artifact(
                 "WHERE id=?",
                 (artifact_id, step_run_id),
             )
-        conn.commit()
+        if owns_transaction:
+            conn.commit()
     except Exception:
-        conn.rollback()
+        if owns_transaction:
+            conn.rollback()
         raise
     step = (
         conn.execute("SELECT run_id FROM step_runs WHERE id=?", (step_run_id,)).fetchone()
