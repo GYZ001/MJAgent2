@@ -193,6 +193,14 @@ TIMEOUT_CHAT_BLUEPRINT_REVIEW_READ = float(
 TIMEOUT_CHAT_BLUEPRINT_SHARD_READ = float(
     os.environ.get("TIMEOUT_CHAT_BLUEPRINT_SHARD_READ", "180")
 )
+# 人物身份预检是本流水线里最短的结构化生成：max_tokens 固定 4096，本项目实测
+# 成功调用 3.2s/94 字 … 38.0s/4593 字。按同网关拟合的 latency ≈ 3.7s + chars/170，
+# 即使跑满 4096 tokens（≈9K 字）也只要 ~57s。通用 300s 因此只会把 0 字节卡死的空等
+# 拉长到 5 分钟——身份合同禁止自动重试，那 5 分钟之后整集必然失败。收紧到 120s：
+# 对理论满额输出仍有 2.1× 余量，卡死则少空等 3 分钟。
+TIMEOUT_CHAT_IDENTITY_READ = float(
+    os.environ.get("TIMEOUT_CHAT_IDENTITY_READ", "120")
+)
 TIMEOUT_VIDEO_CREATE = 30.0
 TIMEOUT_VIDEO_POLL = 30.0
 TIMEOUT_DOWNLOAD = 180.0

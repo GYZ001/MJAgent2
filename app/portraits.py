@@ -1809,6 +1809,10 @@ async def _discover_character_candidates_legacy(
    kind 必须属于该 K 的 allowed_kinds；
    不得把 K 目录中的 source_label 写进 n/f。只允许 mentioned 的 K 没有可安全物化的最终人物卡
    authority；若人物实际出镜则必须停止而不能谎报 mentioned 或另造身份。
+   本批 K 目录没有为「当前人物谱已有角色」中的某人签发 decision_id，说明本批证据没有
+   逐字锚定他：此时既不得把他的真名写进 n，也不得据上下文推断，只能把你实际读到的
+   逐字称谓按第 4 条放入 f，交给后续带 authority_id 的权威绑定去认领。人物谱名单只用于
+   识别，不是可以直接书写的名字。
 3. 当前阶段的新 named 只用于逐字自称谓：n 每项写 evidence_ref、identity_label 与 kind，
    identity_label 必须是所选 E text 的连续逐字子串；后端会令 canonical_name=source_label。
    任何“称谓 A 其实是名字 B”的别名判断，即使 A、B 同时出现在当前输入，也必须先判为

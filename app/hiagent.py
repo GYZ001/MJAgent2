@@ -1129,6 +1129,11 @@ def _chat_read_timeout_s(call_meta: dict | None) -> float:
         )
     if stage_key == "storyboard" or stage_key.startswith("storyboard_shot_"):
         return max(config.TIMEOUT_CHAT_READ, config.TIMEOUT_CHAT_BASELINE_READ)
+    if stage_key == "screenplay_character_discovery":
+        # Same reasoning as the blueprint shard below, and sharper: the identity
+        # contracts forbid an automatic retry, so a stalled call does not just
+        # waste the wait -- it ends the episode. Expose the stall early instead.
+        return config.TIMEOUT_CHAT_IDENTITY_READ
     if stage_key == "screenplay_blueprint_shard":
         # Deliberately not max()-ed against the generic ceiling: this stage is
         # short enough that the generic 300s only delays a stall, and a stalled
