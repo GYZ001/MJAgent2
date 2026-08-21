@@ -7349,9 +7349,12 @@ class _BlueprintGenerationBudget:
                 durable_disposition = str(row["recovery_disposition"] or "")
             except (KeyError, IndexError):
                 durable_disposition = ""
+            abandoned_by_delete = (
+                durable_disposition == BLUEPRINT_CALL_ABANDONED_BY_DELETE
+            )
             unresolved_liability = (
                 not superseded_by_call_id or resolved_by_expected
-            ) and durable_disposition != BLUEPRINT_CALL_ABANDONED_BY_DELETE
+            ) and not abandoned_by_delete
             if (
                 not durable_grant_id
                 and episode_id
@@ -7415,7 +7418,12 @@ class _BlueprintGenerationBudget:
                     "effective_max_tokens": effective,
                     "prior_grant_id": durable_grant_id,
                 })
-            if operation_id:
+            if operation_id and not abandoned_by_delete:
+                # A settled-abandoned call is not "the previous attempt of this
+                # semantic operation" either: leaving it here made ``claim``
+                # demand a Production Grant for an operation whose liability
+                # had already been closed, so a cached shard replay after a
+                # delete was blocked by a call nobody can authorize any more.
                 latest_operation_status[operation_id] = (
                     status,
                     durable_grant_id,

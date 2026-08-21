@@ -457,3 +457,36 @@ def test_fresh_baseline_closes_orphaned_liability_instead_of_deadlocking(
     )
     assert after.requires_fresh_retry_grant is False
     assert after.unknown_receipts == []
+
+
+def test_abandoned_call_no_longer_blocks_its_own_operation_replay() -> None:
+    """Closing the liability must also clear the prior-unknown-attempt marker.
+
+    Production EP3: the delete settled the stalled shard call, but the budget
+    still recorded that operation id as "last outcome unknown", so replaying
+    the cached shard raised BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED from
+    ``claim`` -- demanding a grant for a liability that was already closed.
+    """
+    from app.stages import _BlueprintGenerationBudget
+
+    input_fingerprint = "fp-operation-marker"
+    call_id = _insert_interrupted_blueprint_call("run-marker", input_fingerprint)
+    conn = db.get_conn()
+    operation_id = conn.execute(
+        "SELECT operation_id FROM provider_calls WHERE id=?", (call_id,)
+    ).fetchone()["operation_id"]
+
+    before = _BlueprintGenerationBudget.from_durable_calls(
+        run_id=None, episode_id="e1", input_fingerprint=input_fingerprint,
+    )
+    with pytest.raises(Exception, match="BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED"):
+        before.claim(max_tokens=8192, operation_id=operation_id)
+
+    with enter_handler():
+        asyncio.run(api.delete_screenplay("e1"))
+
+    after = _BlueprintGenerationBudget.from_durable_calls(
+        run_id=None, episode_id="e1", input_fingerprint=input_fingerprint,
+    )
+    after.adopt_shard_plan(4)
+    assert after.claim(max_tokens=8192, operation_id=operation_id) > 0
