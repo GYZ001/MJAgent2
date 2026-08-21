@@ -195,7 +195,7 @@ EP1 的后续窗口只写出「许师姐」，模型据此签发了 `bible:许�
 **数据修复**：已通过人物谱自身的 CAS 写入删除重复角色卡「许师姐」（v3→v4，
 影响仅 text_only，无付费资产失效）。
 
-## 待确认的根因 10 — content_owner_key 的两套语义互相矛盾
+## 根因 10 — content_owner_key 的两套语义互相矛盾
 
 EP2：`SRC0020:unit:008 content owner 未冻结：靠山宗`。
 
@@ -210,3 +210,34 @@ EP2：`SRC0020:unit:008 content owner 未冻结：靠山宗`。
 正是宗门/机构这种被引用实体应该落的位置——但人物发现只找人，不会登记它们。
 需要一个产品判断：非人物归属应当登记为 reference 身份，还是蓝图合同收紧为
 「content_owner_key 必须是已登记身份」。
+
+
+### 根因 10 的定性与取舍
+
+先用真实加载器 `_episode_source_text` 复算了一次源文单元（第一次用手写的章节拼接方式
+复算是错的，得到的是一条 prose 单元，据此差点做出反向结论）：
+
+```
+SRC0020:unit:008  quoted  quoted_span  '“杂”'
+```
+
+这是木牌上刻的那个「杂」字。把它的 content owner 写成「靠山宗」，正是蓝图合同里
+白纸黑字允许的那条用法（文字/物件归属），蓝图本身没有错。
+
+因此**不能**收紧蓝图合同——那会禁掉刻字、告示、信物这类完全正当的建模。
+错的是场次侧：它要求每个 content_owner_key 都能映射到冻结的**人物**身份。
+
+**采用的方案**：让非人物归属在冻结注册表里有正当位置。注册表本来就有
+`identity_kind="reference"` 这一类（`referenced_identity`、`offscreen_only`、
+`asset_requirement="forbidden"`），机构/物件归属正该落在这里。
+
+- 新增 `blueprint_referenced_content_owners(blueprint)`：取 picture 节点上
+  所有 delivery 的 content_owner_key，**排除任何同时作为 performer_key 出现的 token**；
+- `build_frozen_identity_registry(..., referenced_content_owners=...)`：注册表里
+  没有的归属 token 登记为 `reference:<token>` 权威；
+- 冻结发生在 IDENTITY_FREEZE 步骤内、注册表哈希之前，所以冻结仍然是权威的、哈希仍然正确。
+
+**为什么这样是 fail-safe 而不是 fail-open**：performer 的严格性完全没有放松——
+谁在说话必须仍然是冻结的人物身份。被自动登记的只可能是「没有任何人表演的归属」，
+而 reference 身份 offscreen_only、禁止资产、不能成为表演者，所以即使模型写错一个
+归属 token，它也只会成为一个惰性引用，而不会污染人物卡、定妆照或表演分配。

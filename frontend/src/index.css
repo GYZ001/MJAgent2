@@ -12388,6 +12388,14 @@ label.f {
   margin: 7px 0;
   padding-left: 18px;
 }
+/* 两个按钮是紧邻兄弟，JSX 会吃掉它们之间的换行空白；容器又不是 flex，
+   不显式给间距就会直接贴在一起。 */
+.shot-validation-summary > button {
+  margin-top: 8px;
+}
+.shot-validation-summary > button + button {
+  margin-left: 8px;
+}
 .shot-drafts {
   margin: 10px 14px 0;
 }
@@ -12921,6 +12929,13 @@ label.f {
   display: block;
   margin-bottom: 8px;
   font-size: 17px;
+}
+.reader-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 12px;
 }
 .reader-state p {
   margin: 0;

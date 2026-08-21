@@ -164,7 +164,7 @@ export default function ReaderPage() {
                 <summary>查看错误详情</summary>
                 <pre>{error}</pre>
               </details>
-              <div>
+              <div className="reader-state-actions">
                 <button type="button" className="btn primary" onClick={() => setReloadToken(token => token + 1)}>
                   重新加载第 {idx} 章
                 </button>
