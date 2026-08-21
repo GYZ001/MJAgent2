@@ -675,7 +675,7 @@ def test_structural_coverage_named_reference_keeps_single_group_authority(
     """
     source_text = "许师姐出门带回了四个拥有资质的小娃。"
     scope = portraits.screenplay_identity_scope_fingerprint(1, source_text)
-    named_group = "current-1:named:" + evidence_repository.content_hash(
+    named_group = "current-1:named:" + portraits.evidence_repository.content_hash(
         "许师姐"
     )[:16]
     reference = {
@@ -695,7 +695,6 @@ def test_structural_coverage_named_reference_keeps_single_group_authority(
     # The named-family reference must own the ``bible:`` authority that agrees
     # with its ``named:`` group; a ``functional:`` authority here is the
     # self-contradictory row the coverage gate rejects.
-    assert evidence_repository is not None
     normalized = portraits.normalize_character_resolution(reference)
     assert normalized["authority_id"] == "bible:许师姐"
 
