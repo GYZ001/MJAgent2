@@ -70,7 +70,7 @@ SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v10"
 SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v8"
 SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v9"
 SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION = (
-    "screenplay-scene-semantic-review.v14"
+    "screenplay-scene-semantic-review.v15"
 )
 SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT = (
     "只返回一个符合用户消息内 JSON Schema 的 JSON 对象。"
@@ -4650,9 +4650,13 @@ def _scene_shard_semantic_review_prompt(
         else _scene_shard_semantic_review_schema(projected_unit_keys)
     )
     return (
-        "你是剧本场次分片的独立语义审查员。必须逐 slot 穷举审查，不得抽样、"
-        "提前停止或只报告部分冲突。逐 slot 对照原始 source_text 与"
-        "程序冻结的 exact-unit state_subject/actor/speaker，检查 creative text、"
+        # 措辞刻意避开「审查/违规/定罪」这类合规裁决语义：实测本阶段 93 次调用里
+        # 有 19 次被供应商以「该问题不符合安全合规要求」拒答，而携带同样故事内容的
+        # 场次写作阶段零拒绝——触发的是这段提示词的裁决口吻，不是素材本身。
+        # 字段名与枚举值属于合同，一律不动；只把自然语言改回创作校对的说法。
+        "你是剧本场次分片的独立一致性校对员。必须逐 slot 穷举核对，不得抽样、"
+        "提前停止或只报告部分不一致。逐 slot 对照原始 source_text 与"
+        "程序冻结的 exact-unit state_subject/actor/speaker，核对 creative text、"
         "performance、resulting_state 是否把主体 A 改写成主体 B，或加入来源中"
         "不存在/相反的人物行为与反应。不能从姓名词面、visible、scene roster 猜主体；"
         "environment_only 也不能承载人物思考、发问、反应或动作。同一 (unit_key,"
@@ -4661,16 +4665,16 @@ def _scene_shard_semantic_review_prompt(
         "cross_slot_duplication、environment_personification 中选择，不得重复 "
         "kind 或为同一 pair 输出重复 finding；message 必须覆盖数组中的全部 kinds。"
         "每个 finding 都必须显式输出 related_unit_keys。若包含 "
-        "cross_slot_duplication，related_unit_keys 必须恰好包含当前审查 payload "
+        "cross_slot_duplication，related_unit_keys 必须恰好包含当前核对 payload "
         "内另一个且非自身的 unit_key；它是跨 slot 证据的唯一 typed 引用。"
         "不包含 cross_slot_duplication 时 related_unit_keys 必须为 []。不得引用"
         "当前 payload 外的 slot，跨 chunk 内容不能作为本 finding 的证据。"
         "finding 只能归因到 creative fields 与该 slot 自身 source_fact/冻结权威"
-        "发生明确冲突的 slot，不能借用其他 slot 的 source_fact 给当前 slot 定罪。"
-        "跨 slot 重复时，标记最早越界或没有自身来源承载该内容的 slot；不得标记后来"
+        "发生明确冲突的 slot，不能借用其他 slot 的 source_fact 来判定当前 slot。"
+        "跨 slot 重复时，标记最早超出自身来源、或没有自身来源承载该内容的 slot；不得标记后来"
         "正确承载其自身 source_fact 的 slot。若较早 slot 正确、后来 slot 无来源"
         "重复，则标记后来的重复 slot。每个 (unit_key, code) 最多一个 finding，"
-        "但必须报告全部明确冲突。不得建议改结构、主体、时间线、source ownership "
+        "但必须报告全部明确不一致。不得建议改结构、主体、时间线、source ownership "
         "或 audit。"
         '无问题时只输出合法 JSON 对象 {"findings":[]}。不得输出 Markdown、解释或'
         "任何对象外文本。\n冻结 slot 权威：\n"
