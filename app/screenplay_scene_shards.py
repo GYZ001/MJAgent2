@@ -5612,42 +5612,50 @@ async def _semantic_review_scene_shard_draft(
             ) -> dict[str, Any]:
                 return subset_schema
 
-            repaired_candidate = await model_gateway.chat_structured(
-                repair_messages,
-                model_type=ScreenplaySceneShardCreativeIR,
-                validate=validate_repair,
+            async def issue_repair(
+                attempt_operation_id: str,
+            ) -> ScreenplaySceneShardCreativeIR:
+                return await model_gateway.chat_structured(
+                    repair_messages,
+                    model_type=ScreenplaySceneShardCreativeIR,
+                    validate=validate_repair,
+                    operation_id=attempt_operation_id,
+                    max_tokens=int(repair_budget["required"]),
+                    temperature=0.2,
+                    format_retry_limit=1,
+                    semantic_retry_limit=1,
+                    call_meta={
+                        "stage": "剧本场次语义修复",
+                        "stage_key": "screenplay_scene_shard_semantic_repair",
+                        "substage": "consensus_repair",
+                        "repair_round": repair_round,
+                        "shard_id": shard_id,
+                        "contract_version": (
+                            SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+                        ),
+                        "schema_hash": subset_schema_hash,
+                        "provider": repair_budget["provider"],
+                        "model": repair_budget["model"],
+                        "required": repair_budget["required"],
+                        "ceiling": repair_budget["ceiling"],
+                        "input": repair_budget["input"],
+                        "unit_count": repair_budget["unit_count"],
+                    },
+                    repair_context=repair_context,
+                    output_schema=subset_schema,
+                    response_format=repair_response_format,
+                    require_response_format=True,
+                    repair_schema=repair_schema,
+                )
+
+            repaired_candidate = await _scene_structured_with_undelivered_retry(
+                issue_repair,
                 operation_id=(
                     f"{operation_id}:semantic:"
                     f"{SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION}:repair:"
                     f"round-{repair_round}:{current_draft_hash}:"
                     f"{subset_schema_hash}"
                 ),
-                max_tokens=int(repair_budget["required"]),
-                temperature=0.2,
-                format_retry_limit=1,
-                semantic_retry_limit=1,
-                call_meta={
-                    "stage": "剧本场次语义修复",
-                    "stage_key": "screenplay_scene_shard_semantic_repair",
-                    "substage": "consensus_repair",
-                    "repair_round": repair_round,
-                    "shard_id": shard_id,
-                    "contract_version": (
-                        SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
-                    ),
-                    "schema_hash": subset_schema_hash,
-                    "provider": repair_budget["provider"],
-                    "model": repair_budget["model"],
-                    "required": repair_budget["required"],
-                    "ceiling": repair_budget["ceiling"],
-                    "input": repair_budget["input"],
-                    "unit_count": repair_budget["unit_count"],
-                },
-                repair_context=repair_context,
-                output_schema=subset_schema,
-                response_format=repair_response_format,
-                require_response_format=True,
-                repair_schema=repair_schema,
             )
             if batch_abort is not None and batch_abort.is_set():
                 raise asyncio.CancelledError
@@ -5993,57 +6001,65 @@ async def generate_screenplay_scene_shards(
                     async def write_draft() -> (
                         ScreenplaySceneShardCreativeIR
                     ):
-                        return await model_gateway.chat_structured(
-                            [{"role": "user", "content": prompt}],
-                            model_type=ScreenplaySceneShardCreativeIR,
-                            validate=validate_draft,
+                        async def issue_draft(
+                            attempt_operation_id: str,
+                        ) -> ScreenplaySceneShardCreativeIR:
+                            return await model_gateway.chat_structured(
+                                [{"role": "user", "content": prompt}],
+                                model_type=ScreenplaySceneShardCreativeIR,
+                                validate=validate_draft,
+                                operation_id=attempt_operation_id,
+                                max_tokens=(
+                                    screenplay_scene_shard_token_budget(plan)
+                                ),
+                                temperature=0.4,
+                                format_retry_limit=_setting_int(
+                                    "screenplay_format_retry_limit",
+                                    1,
+                                    minimum=0,
+                                    maximum=3,
+                                ),
+                                semantic_retry_limit=_setting_int(
+                                    "screenplay_semantic_retry_limit",
+                                    1,
+                                    minimum=0,
+                                    maximum=3,
+                                ),
+                                call_meta={
+                                    "stage": "剧本场次分片",
+                                    "stage_key": "screenplay_scene_shards",
+                                    "substage": "scene_writing",
+                                    "shard_id": plan.shard_id,
+                                    "shard_count": len(plans),
+                                    "episode_id": episode_id,
+                                    "source_count": len(plan.source_segment_ids),
+                                    "scene_count": len(plan.scene_plan_keys),
+                                    "identity_scaffold_hash": (
+                                        identity_scaffold_hash
+                                    ),
+                                    "generation_scaffold_hash": (
+                                        generation_scaffold_hash
+                                    ),
+                                    "input_chars": len(prompt),
+                                    **budget_meta,
+                                },
+                                repair_context=creative_repair_context,
+                                format_repair_context=creative_repair_context,
+                                output_schema=output_schema,
+                                response_format=(
+                                    _scene_shard_strict_response_format(
+                                        name="screenplay_scene_shard_creative",
+                                        local_schema=output_schema,
+                                    )
+                                ),
+                                require_response_format=True,
+                                repair_schema=repair_schema,
+                                on_attempt=attempts.append,
+                            )
+
+                        return await _scene_structured_with_undelivered_retry(
+                            issue_draft,
                             operation_id=operation_id,
-                            max_tokens=(
-                                screenplay_scene_shard_token_budget(plan)
-                            ),
-                            temperature=0.4,
-                            format_retry_limit=_setting_int(
-                                "screenplay_format_retry_limit",
-                                1,
-                                minimum=0,
-                                maximum=3,
-                            ),
-                            semantic_retry_limit=_setting_int(
-                                "screenplay_semantic_retry_limit",
-                                1,
-                                minimum=0,
-                                maximum=3,
-                            ),
-                            call_meta={
-                                "stage": "剧本场次分片",
-                                "stage_key": "screenplay_scene_shards",
-                                "substage": "scene_writing",
-                                "shard_id": plan.shard_id,
-                                "shard_count": len(plans),
-                                "episode_id": episode_id,
-                                "source_count": len(plan.source_segment_ids),
-                                "scene_count": len(plan.scene_plan_keys),
-                                "identity_scaffold_hash": (
-                                    identity_scaffold_hash
-                                ),
-                                "generation_scaffold_hash": (
-                                    generation_scaffold_hash
-                                ),
-                                "input_chars": len(prompt),
-                                **budget_meta,
-                            },
-                            repair_context=creative_repair_context,
-                            format_repair_context=creative_repair_context,
-                            output_schema=output_schema,
-                            response_format=(
-                                _scene_shard_strict_response_format(
-                                    name="screenplay_scene_shard_creative",
-                                    local_schema=output_schema,
-                                )
-                            ),
-                            require_response_format=True,
-                            repair_schema=repair_schema,
-                            on_attempt=attempts.append,
                         )
 
                     draft = await structured_operation_gate.run(

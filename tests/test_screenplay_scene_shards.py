@@ -4359,12 +4359,15 @@ def test_scene_shard_batch_failure_cancels_inflight_sibling(
     provider_calls: list[str] = []
     review_calls: list[str] = []
     progress_rows: list[list[dict]] = []
+    # A delivered failure, so the batch-cancellation semantics under test are
+    # not entangled with the bounded retry for answers never delivered.
     original_error = scene_shards_module.hiagent.ProviderError(
         "injected shard provider failure",
         retryable=True,
         failure_kind="request_outcome_unknown",
         delivery_state="unknown",
         requires_explicit_retry=True,
+        received_chars=1200,
     )
 
     def fixed_settings(
