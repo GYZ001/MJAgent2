@@ -194,16 +194,13 @@ async def _identity_structured_with_resample(
                 raise
             last_error = exc
         except hiagent.ProviderError as exc:
-            # Zero received characters means the request stalled before the
-            # provider emitted anything: no identity judgement exists to
-            # preserve, so this is the undelivered case above rather than an
-            # answer being re-rolled until it passes.  Anything that did
-            # deliver bytes, and every other provider failure class, still
-            # fails closed on the first call.
-            if getattr(exc, "received_chars", 0) or exc.failure_kind not in {
-                "request_outcome_unknown",
-                "stream_interrupted",
-            }:
+            # An answer the provider never delivered -- a stall before the
+            # first character, or a stream cut before its own ``[DONE]`` --
+            # holds no identity judgement to preserve, so this is the
+            # undelivered case above rather than an answer being re-rolled
+            # until it passes.  Every other failure class still fails closed
+            # on the first call.
+            if not hiagent.provider_answer_undelivered(exc):
                 raise
             last_error = exc
     assert last_error is not None

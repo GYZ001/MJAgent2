@@ -107,6 +107,44 @@ SCREENPLAY_SCENE_SHARD_UNIT_RESERVE_TOKENS = 128
 SCREENPLAY_SCENE_SHARD_REASONING_RESERVE_PERCENT = 20
 
 
+SCENE_SHARD_UNDELIVERED_RETRIES = 1
+
+
+async def _scene_structured_with_undelivered_retry(
+    call: Callable[[str], Awaitable[Any]],
+    *,
+    operation_id: str,
+) -> Any:
+    """Re-issue one scene-shard call whose answer was never delivered.
+
+    A stall before the first streamed character, or a stream cut before the
+    provider's own ``[DONE]`` (whose partial text the transport discards),
+    leaves nothing authored to preserve -- so one fresh attempt under its own
+    operation id is not an answer being re-rolled until it passes.  Anything
+    the provider did deliver, including a candidate that failed validation,
+    still fails on the first call.
+
+    The retry deliberately sits *inside* the provider-slot lease: the lease is
+    re-entrant for the same task, and the batch-abort callback fires when the
+    lease sees a failure.  Retrying outside it would tear the whole batch down
+    before the second attempt could run.
+    """
+    last_error: hiagent.ProviderError | None = None
+    for attempt in range(SCENE_SHARD_UNDELIVERED_RETRIES + 1):
+        try:
+            return await call(
+                operation_id
+                if not attempt
+                else f"{operation_id}:undelivered:{attempt}"
+            )
+        except hiagent.ProviderError as exc:
+            if not hiagent.provider_answer_undelivered(exc):
+                raise
+            last_error = exc
+    assert last_error is not None
+    raise last_error
+
+
 class _FailFastScope:
     """Own one task batch and synchronously cancel peers on its first failure."""
 
@@ -5213,62 +5251,72 @@ async def _semantic_review_scene_shard_draft(
             )
 
         async def execute_review() -> ScreenplaySceneShardSemanticReview:
-            result = await model_gateway.chat_structured(
-                [
-                    {
-                        "role": "system",
-                        "content": SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT,
+            async def issue_review(
+                attempt_operation_id: str,
+            ) -> ScreenplaySceneShardSemanticReview:
+                return await model_gateway.chat_structured(
+                    [
+                        {
+                            "role": "system",
+                            "content": (
+                                SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": review_prompt,
+                        },
+                    ],
+                    model_type=ScreenplaySceneShardSemanticReview,
+                    validate=validate_review,
+                    operation_id=attempt_operation_id,
+                    max_tokens=int(budget["required"]),
+                    temperature=0.0,
+                    format_retry_limit=(
+                        SCREENPLAY_SCENE_SEMANTIC_POST_REPAIR_FORMAT_RETRY_LIMIT
+                        if phase == "post_repair"
+                        else SCREENPLAY_SCENE_SEMANTIC_INITIAL_FORMAT_RETRY_LIMIT
+                    ),
+                    semantic_retry_limit=0,
+                    call_meta={
+                        "stage": "剧本场次语义审查",
+                        "stage_key": "screenplay_scene_shard_semantic_review",
+                        "substage": phase,
+                        "shard_id": shard_id,
+                        "reviewer_no": reviewer_no,
+                        "chunk_index": chunk_index,
+                        "chunk_count": chunk_count,
+                        "contract_version": (
+                            SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+                        ),
+                        "reuse_successful_operation": True,
+                        "provider": budget["provider"],
+                        "model": budget["model"],
+                        "unit_count": budget["unit_count"],
+                        "output_reserve_percent": budget[
+                            "output_reserve_percent"
+                        ],
+                        "input_estimate": budget["input_estimate"],
+                        "required": budget["required"],
+                        "ceiling": budget["ceiling"],
                     },
-                    {
-                        "role": "user",
-                        "content": review_prompt,
-                    },
-                ],
-                model_type=ScreenplaySceneShardSemanticReview,
-                validate=validate_review,
+                    output_schema=review_schema,
+                    response_format=(
+                        _scene_shard_semantic_review_response_format(
+                            review_schema
+                        )
+                    ),
+                    require_response_format=True,
+                )
+
+            result = await _scene_structured_with_undelivered_retry(
+                issue_review,
                 operation_id=(
                     f"{operation_id}:semantic:"
                     f"{SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION}:{phase}:"
                     f"reviewer-{reviewer_no}:"
                     f"chunk-{chunk_index}-of-{chunk_count}:{chunk_hash}"
                 ),
-                max_tokens=int(budget["required"]),
-                temperature=0.0,
-                format_retry_limit=(
-                    SCREENPLAY_SCENE_SEMANTIC_POST_REPAIR_FORMAT_RETRY_LIMIT
-                    if phase == "post_repair"
-                    else SCREENPLAY_SCENE_SEMANTIC_INITIAL_FORMAT_RETRY_LIMIT
-                ),
-                semantic_retry_limit=0,
-                call_meta={
-                    "stage": "剧本场次语义审查",
-                    "stage_key": "screenplay_scene_shard_semantic_review",
-                    "substage": phase,
-                    "shard_id": shard_id,
-                    "reviewer_no": reviewer_no,
-                    "chunk_index": chunk_index,
-                    "chunk_count": chunk_count,
-                    "contract_version": (
-                        SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
-                    ),
-                    "reuse_successful_operation": True,
-                    "provider": budget["provider"],
-                    "model": budget["model"],
-                    "unit_count": budget["unit_count"],
-                    "output_reserve_percent": budget[
-                        "output_reserve_percent"
-                    ],
-                    "input_estimate": budget["input_estimate"],
-                    "required": budget["required"],
-                    "ceiling": budget["ceiling"],
-                },
-                output_schema=review_schema,
-                response_format=(
-                    _scene_shard_semantic_review_response_format(
-                        review_schema
-                    )
-                ),
-                require_response_format=True,
             )
             if batch_abort is not None and batch_abort.is_set():
                 raise asyncio.CancelledError

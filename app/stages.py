@@ -8127,14 +8127,13 @@ async def _generate_sharded_narrative_blueprint(
                         break
                     if (
                         stall_epoch < BLUEPRINT_SHARD_MAX_STALL_RETRIES
-                        and getattr(exc, "received_chars", 0) == 0
-                        and exc.failure_kind
-                        in {"request_outcome_unknown", "stream_interrupted"}
+                        and hiagent.provider_answer_undelivered(exc)
                     ):
-                        # A read/total timeout before any streamed character is
-                        # a transport stall, not a completed generation: nothing
-                        # was authored, so there is no candidate to preserve and
-                        # nothing to re-roll.  It therefore replays the same
+                        # An answer the provider never delivered -- a stall
+                        # before the first character, or a stream cut before its
+                        # own ``[DONE]`` -- is not a completed generation:
+                        # nothing was authored, so there is no candidate to
+                        # preserve and nothing to re-roll.  It replays the same
                         # semantic attempt out of its own bounded budget instead
                         # of consuming one -- a stall landing on the last attempt
                         # used to kill the episode having delivered zero

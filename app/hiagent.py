@@ -1108,6 +1108,33 @@ async def _chat_with_reasoning_fallback(client: httpx.AsyncClient, url: str, pay
     return content
 
 
+def provider_answer_undelivered(exc: object) -> bool:
+    """Whether a failed provider call left no authored answer to preserve.
+
+    Two shapes qualify, and neither is an answer being re-rolled:
+
+    * a read/total timeout before a single streamed character -- the provider
+      never began answering; and
+    * a stream that ended without ``[DONE]``.  That marker is the provider's
+      own completion signal, and :func:`_stream_chat_completion` discards the
+      partial reconstruction outright, so nothing survives no matter how many
+      characters arrived.  In production one such cut delivered 22 characters
+      and still ended the whole episode.
+
+    Every other failure class -- including a delivered answer that failed
+    validation -- is excluded, so the strict one-call rules stay intact.
+    """
+    kind = str(getattr(exc, "failure_kind", "") or "")
+    if kind == "stream_interrupted":
+        return True
+    if kind != "request_outcome_unknown":
+        return False
+    try:
+        return int(getattr(exc, "received_chars", 0) or 0) == 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _chat_read_timeout_s(call_meta: dict | None) -> float:
     """为长结构化生成使用独立读超时，其他文本请求保持通用上限。"""
     stage_key = str((call_meta or {}).get("stage_key") or "").strip().lower()
