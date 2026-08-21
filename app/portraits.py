@@ -75,7 +75,7 @@ CURRENT_IDENTITY_EVIDENCE_RECEIPT_VERSION = (
 CURRENT_IDENTITY_LITERAL_PROVENANCE = "owned_current_literal.v1"
 CURRENT_IDENTITY_SYNTHETIC_PROVENANCE = "provider_synthetic_functional.v1"
 IDENTITY_ADJUDICATION_SOURCE_PROVENANCE = "owned_ir_identity_adjudication.v2"
-FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v10"
+FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v11"
 STRUCTURAL_IDENTITY_COVERAGE_VERSION = (
     "screenplay-identity-structural-coverage.v6"
 )
@@ -2940,6 +2940,20 @@ async def resolve_future_identity_candidates(
             identity_group, set()
         ).add(_canonical_named_authority_id(canonical_name))
 
+    # An authority which already stands on this episode's stage under its own
+    # name cannot be revealed by a later window that merely mentions that name:
+    # that is co-occurrence ("A talked about B"), and the unresolved label is
+    # then someone else.  An authority with no independent named presence here
+    # has no such alternative reading, and a future window naming it is the
+    # only way this episode can learn who the label is.
+    episode_named_authorities = {
+        str(candidate.get("authority_id") or "").strip()
+        or _canonical_named_authority_id(str(candidate.get("name") or ""))
+        for candidate in candidates
+        if str(candidate.get("identity_kind") or "") == "named"
+        and str(candidate.get("name") or "").strip()
+    }
+
     decision_by_id: dict[str, dict] = {}
     decision_ids_by_group: dict[str, list[str]] = {}
     for group in group_specs:
@@ -2955,12 +2969,15 @@ async def resolve_future_identity_candidates(
             canonical_name = str(
                 authority.get("canonical_name") or ""
             ).strip()
-            # A raw future window which merely contains a known person's
-            # canonical name does not prove that the unresolved label denotes
-            # that person ("A talked about B" is the production counterexample).
-            # K decisions therefore need either a backend-registered non-
-            # canonical alias, or an authority already bound to this exact
-            # current identity group.
+            # K decisions need an anchor the backend can bind to this group's
+            # own evidence: a registered non-canonical alias, an authority
+            # already bound to this exact current identity group, or -- for an
+            # authority not otherwise present in this episode -- its canonical
+            # name.  Excluding the canonical name outright was the production
+            # defect: every Bible-seeded authority starts with an empty alias
+            # list, so no K decision was ever minted, "this group is an
+            # already-registered person" became unrepresentable, and the run
+            # died on rule 5 instead.
             registered_aliases = [
                 str(value).strip()
                 for value in authority.get("aliases") or []
@@ -2972,11 +2989,26 @@ async def resolve_future_identity_candidates(
                     str(group.get("identity_group") or ""), set()
                 )
             )
-            proof_anchors = (
-                [str(value) for value in group.get("labels") or []]
-                if same_group_authority
-                else registered_aliases
-            )
+            if same_group_authority:
+                proof_anchors = [
+                    str(value) for value in group.get("labels") or []
+                ]
+                proof_kind = "same_group_authority"
+            else:
+                canonical_anchor = (
+                    [canonical_name]
+                    if canonical_name
+                    and authority_id not in episode_named_authorities
+                    else []
+                )
+                proof_anchors = list(dict.fromkeys([
+                    *registered_aliases,
+                    *canonical_anchor,
+                ]))
+                proof_kind = (
+                    "registered_alias" if registered_aliases
+                    else "canonical_name"
+                )
             if not proof_anchors:
                 continue
             anchored_evidence_ids = [
@@ -3009,11 +3041,7 @@ async def resolve_future_identity_candidates(
                 "materialization_compatible": bool(
                     authority.get("materialization_compatible")
                 ),
-                "proof_kind": (
-                    "same_group_authority"
-                    if same_group_authority
-                    else "registered_alias"
-                ),
+                "proof_kind": proof_kind,
                 "proof_anchors": proof_anchors,
             }
             decision_ids.append(known_id)
@@ -3065,12 +3093,96 @@ async def resolve_future_identity_candidates(
 规则：
 1. decisions/revealed_names/reveal_evidence_ids 三个对象都必须精确输出全部 group_key，不得增删键。
 2. 证据不足时选 F: 决议，这是合法终态；此时两个侧载字段都必须是空字符串。
-3. 绑定已有人物时只能选 K: 决议；该 token 已绑定 authority 与原文证据，两个侧载字段都必须为空。
+3. 证据显示该组就是「已有人物权威目录」中的人时，只能选对应那名 authority 的 K: 决议；
+   该 token 已绑定 authority 与原文证据，两个侧载字段都必须为空；
+   若目录里没有为该组与该 authority 列出 K: 决议，则只能选 F: 决议。
 4. 只有证据目录首次逐字揭示了不在已有权威目录中的稳定真名，才能选 N: 决议；
    revealed_names 写真名，reveal_evidence_ids 选包含该真名的 evidence_id。
 5. 不得回抄或改写证据文本，不得为已有权威重新签发新名，不得输出只在后续出场的人。
 只输出符合下列 Schema 的 JSON：
 {json.dumps(identity_schema, ensure_ascii=False, separators=(',', ':'))}"""
+
+    def normalize_identity_payload(payload: dict) -> dict:
+        """Rewrite a NEW answer that actually names an existing authority.
+
+        The provider sometimes expresses "this group is that already-registered
+        person" with the N token plus that person's existing canonical name.
+        When the backend has itself already minted a K decision for the exact
+        same (group, authority, evidence) tuple, the answer carries every fact
+        the K decision requires and differs only in which token was written --
+        so it is canonicalised onto the backend's own token instead of failing
+        the episode.  Without a matching backend decision nothing is rewritten
+        and the NEW rule stays fail-closed: this can never bind an authority
+        the backend has not already anchored in this group's own evidence.
+        """
+        if not isinstance(payload, dict):
+            return payload
+        decisions = payload.get("decisions")
+        revealed_names = payload.get("revealed_names")
+        reveal_evidence_ids = payload.get("reveal_evidence_ids")
+        if not (
+            isinstance(decisions, dict)
+            and isinstance(revealed_names, dict)
+            and isinstance(reveal_evidence_ids, dict)
+        ):
+            return payload
+        rewritten: dict[str, str] = {}
+        for group_key in group_keys:
+            selected = decision_by_id.get(str(decisions.get(group_key) or ""))
+            if (
+                selected is None
+                or str(selected.get("resolution_kind") or "") != "new_named"
+            ):
+                continue
+            canonical_name = str(
+                revealed_names.get(group_key) or ""
+            ).strip()
+            evidence_id = str(
+                reveal_evidence_ids.get(group_key) or ""
+            ).strip()
+            if not canonical_name or not evidence_id:
+                continue
+            # An ambiguous name matches no single authority: fail closed.
+            authority_ids = [
+                authority_id
+                for authority_id, authority in authority_by_id.items()
+                if str(
+                    authority.get("canonical_name") or ""
+                ).strip() == canonical_name
+            ]
+            if len(authority_ids) != 1:
+                continue
+            known = next(
+                (
+                    decision for decision in decision_by_id.values()
+                    if str(decision.get("group_key") or "") == group_key
+                    and str(
+                        decision.get("resolution_kind") or ""
+                    ) == "known_named"
+                    and str(
+                        decision.get("authority_id") or ""
+                    ) == authority_ids[0]
+                    and evidence_id in (decision.get("evidence_ids") or [])
+                ),
+                None,
+            )
+            if known is None:
+                continue
+            rewritten[group_key] = str(known["decision_id"])
+        if not rewritten:
+            return payload
+        return {
+            **payload,
+            "decisions": {**decisions, **rewritten},
+            "revealed_names": {
+                **revealed_names,
+                **{group_key: "" for group_key in rewritten},
+            },
+            "reveal_evidence_ids": {
+                **reveal_evidence_ids,
+                **{group_key: "" for group_key in rewritten},
+            },
+        }
 
     def response_decisions(
         value: FutureIdentityCandidateResponse,
@@ -3243,6 +3355,7 @@ async def resolve_future_identity_candidates(
                         authority is None
                         or proof_kind not in {
                             "registered_alias",
+                            "canonical_name",
                             "same_group_authority",
                         }
                         or (
@@ -3374,6 +3487,7 @@ async def resolve_future_identity_candidates(
         output_schema=identity_schema,
         response_format=identity_response_format,
         require_response_format=True,
+        normalize_payload=normalize_identity_payload,
     )
 
     decisions = response_decisions(response)

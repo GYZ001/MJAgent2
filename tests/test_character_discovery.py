@@ -3123,7 +3123,7 @@ def test_future_identity_operation_binds_exact_outbound_semantics(
         )
         assert (
             kwargs["call_meta"]["contract_version"]
-            == "screenplay-future-identity.v10"
+            == "screenplay-future-identity.v11"
         )
         operations.append((kwargs["operation_id"], kwargs["call_meta"]["model"]))
         return portraits.FutureIdentityCandidateResponse.model_validate(
@@ -7237,3 +7237,166 @@ def test_gateway_tags_corrupt_and_schema_invalid_responses_differently(
             semantic_retry_limit=0,
         ))
     assert shape_error.value.unparseable is False
+
+
+def _future_identity_catalog(prompt: str, marker: str) -> list[dict]:
+    """Return one backend-owned catalog exactly as the provider receives it."""
+    body = prompt.split(marker, 1)[1]
+    body = body[body.index("["):]
+    depth = 0
+    for index, char in enumerate(body):
+        depth += (char == "[") - (char == "]")
+        if depth == 0:
+            return json.loads(body[: index + 1])
+    raise AssertionError(f"未找到闭合的目录：{marker}")
+
+
+_REVEAL_FUTURE_TEXT = (
+    "“好人啊，孟浩，你走了这么久，依旧每天回来偷偷帮我砍柴，"
+    "孟浩，你是我李富贵这一辈子的好朋友。”小胖子感慨连连。\n\n"
+    "孟浩在不远处的丛林内听到这些话，愣在那里。"
+)
+_REVEAL_CANDIDATES = [{
+    "name": "小胖子",
+    "source_label": "小胖子",
+    "identity_kind": "functional",
+    "identity_group": "current-1:F3",
+    "kind": "onscreen",
+}]
+
+
+def _reveal_bible() -> Bible:
+    return Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="李富贵",
+            role="重要配角",
+            appearance_canonical="圆脸胖少年，粗麻长衫，门牙醒目",
+        )],
+    )
+
+
+def _resolve_reveal() -> list[dict]:
+    return asyncio.run(portraits.resolve_future_identity_candidates(
+        [dict(item) for item in _REVEAL_CANDIDATES],
+        source_text="小胖子在通铺上打呼噜。",
+        future_text=_REVEAL_FUTURE_TEXT,
+        bible=_reveal_bible(),
+        episode_no=2,
+        future_label="第 3-12 章",
+    ))
+
+
+def test_future_identity_offers_k_for_canonical_name_in_group_evidence(
+    monkeypatch,
+) -> None:
+    """A Bible authority without aliases must still be selectable as known.
+
+    Production regression: every Bible-seeded authority starts with an empty
+    alias list, so requiring a *non-canonical* registered alias meant no K
+    decision was ever minted.  The one correct answer was unrepresentable and
+    the episode died on the NEW rule instead.
+    """
+    seen: dict[str, list] = {}
+
+    async def known_wire(messages, **kwargs):
+        prompt = str(messages[0]["content"])
+        seen["decisions"] = _future_identity_catalog(prompt, "可选决议目录")
+        enum = kwargs["response_format"]["json_schema"]["schema"][
+            "properties"]["decisions"]["properties"]["G001"]["enum"]
+        seen["enum"] = list(enum)
+        return json.dumps({
+            "decisions": {
+                "G001": next(v for v in enum if v.startswith("K:")),
+            },
+            "revealed_names": {"G001": ""},
+            "reveal_evidence_ids": {"G001": ""},
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", known_wire)
+    resolved = _resolve_reveal()
+
+    known = [
+        decision for decision in seen["decisions"]
+        if decision["resolution_kind"] == "known_named"
+    ]
+    assert [decision["authority_id"] for decision in known] == ["bible:李富贵"]
+    assert known[0]["proof_kind"] == "canonical_name"
+    assert known[0]["proof_anchors"] == ["李富贵"]
+    assert resolved[0]["name"] == "李富贵"
+    assert resolved[0]["authority_id"] == "bible:李富贵"
+    assert resolved[0]["identity_kind"] == "named"
+
+
+def test_future_identity_new_naming_existing_authority_becomes_that_k(
+    monkeypatch,
+) -> None:
+    """NEW carrying an existing canonical name is that authority's K decision.
+
+    Every fact the K decision requires -- this group, this authority, this
+    backend-owned evidence span, the anchor verbatim inside it -- is already
+    present, so the answer is canonicalised onto the backend token instead of
+    failing the episode.
+    """
+    calls = 0
+
+    async def new_wire(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        prompt = str(messages[0]["content"])
+        evidence = _future_identity_catalog(prompt, "后续证据目录")
+        anchored = next(
+            item for item in evidence if "李富贵" in item["text"]
+        )
+        enum = kwargs["response_format"]["json_schema"]["schema"][
+            "properties"]["decisions"]["properties"]["G001"]["enum"]
+        return json.dumps({
+            "decisions": {
+                "G001": next(v for v in enum if v.startswith("N:")),
+            },
+            "revealed_names": {"G001": "李富贵"},
+            "reveal_evidence_ids": {"G001": anchored["evidence_id"]},
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", new_wire)
+    resolved = _resolve_reveal()
+
+    assert calls == 1
+    assert resolved[0]["name"] == "李富贵"
+    assert resolved[0]["authority_id"] == "bible:李富贵"
+    assert resolved[0]["identity_kind"] == "named"
+    assert "李富贵" in str(resolved[0]["future_evidence"])
+
+
+def test_future_identity_new_name_without_backend_decision_stays_closed(
+    monkeypatch,
+) -> None:
+    """No backend K decision, no rewrite: the NEW rule still fails closed."""
+
+    async def unanchored_wire(_messages, **kwargs):
+        enum = kwargs["response_format"]["json_schema"]["schema"][
+            "properties"]["decisions"]["properties"]["G001"]["enum"]
+        evidence_enum = kwargs["response_format"]["json_schema"]["schema"][
+            "properties"]["reveal_evidence_ids"]["properties"]["G001"]["enum"]
+        return json.dumps({
+            "decisions": {
+                "G001": next(v for v in enum if v.startswith("N:")),
+            },
+            "revealed_names": {"G001": "李富贵"},
+            "reveal_evidence_ids": {
+                "G001": next(v for v in evidence_enum if v),
+            },
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", unanchored_wire)
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="NEW 不得重新签发已有 authority",
+    ):
+        asyncio.run(portraits.resolve_future_identity_candidates(
+            [dict(item) for item in _REVEAL_CANDIDATES],
+            source_text="小胖子在通铺上打呼噜。",
+            future_text="小胖子第二天照常去砍柴，没有人叫破他的名字。",
+            bible=_reveal_bible(),
+            episode_no=2,
+        ))
