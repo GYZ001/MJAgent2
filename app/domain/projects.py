@@ -489,6 +489,10 @@ def project_detail(
     page_size: int = 15,
     query: str = "",
     status_filter: str = "all",
+    episode_limit: int = 0,
+    episode_query: str = "",
+    episode_cursor: str = "",
+    episode_filter: str = "all",
 ):
     if view not in (None, "bible", "scenes", "episodes", "picker", "picker_generation"):
         raise HTTPException(400, f"未知项目视图：{view}")
@@ -566,25 +570,17 @@ def project_detail(
     if p["bible"] and (full or view in ("bible", "scenes")):
         _attach_scene_refs(conn, project_id, p["bible"])
 
-    if view == "picker":
-        p["episodes"] = rows_to_dicts(conn.execute(
-            "SELECT id, episode_no, title, status, screenplay_status "
-            "FROM episodes WHERE project_id=? ORDER BY episode_no",
-            (project_id,),
-        ).fetchall())
-        return p
-    if view == "picker_generation":
-        p["episodes"] = rows_to_dicts(conn.execute(
-            """SELECT e.id, e.episode_no, e.title, e.status, e.screenplay_status,
-                      (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id) AS shot_count,
-                      (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id AND s.adopted_version_id IS NOT NULL) AS video_count,
-                      (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id AND s.adopted_version_id IS NULL
-                         AND EXISTS(SELECT 1 FROM shot_versions v WHERE v.shot_id=s.id AND v.status='succeeded')) AS pending_adoption_count,
-                      (SELECT COUNT(*) FROM shot_versions v JOIN shots s ON s.id=v.shot_id
-                         WHERE s.episode_id=e.id AND v.status='failed') AS failed_count
-                 FROM episodes e WHERE e.project_id=? ORDER BY e.episode_no""",
-            (project_id,),
-        ).fetchall())
+    if view in ("picker", "picker_generation"):
+        _attach_picker_episodes(
+            conn,
+            p,
+            project_id,
+            with_production_counts=view == "picker_generation",
+            limit=episode_limit,
+            keyword=episode_query,
+            cursor=episode_cursor,
+            production_filter=episode_filter,
+        )
         return p
     if view not in (None, "episodes"):
         p["episodes"] = []

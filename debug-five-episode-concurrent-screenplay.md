@@ -149,3 +149,64 @@ state-subject ownership 问题、attempt 3 再次盲重试同样失败。
 ## Unrelated Fix
 `app/source_facts.py` 的 `quote_open_offset` 是四处只写不读的死赋值，
 ruff F821/F841 使 `verify.py --full` 无法通过；已删除，无行为变化。
+
+
+## Round 3（2026-08-21 07:01）与 Round 4（07:36）
+
+进度显著推进：多集首次越过 CHARACTER_DISCOVERY / BLUEPRINT_GENERATION，
+到达 IDENTITY_FREEZE (2/10) 与 SCENE_SHARD_GENERATION (4/10)。新暴露的根因：
+
+### 根因 7 — 关闭回执时没有同步清掉「该 operation 上次结果未知」标记
+
+EP3 缓存分片重放时 `claim()` 仍抛 `BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED`。
+`from_durable_calls` 里 `latest_operation_status[operation_id]` 的赋值在
+`unresolved_liability` 判断之外，被删除结算过的调用照样把自己登记成
+「这个语义 operation 的上一次尝试结果未知」。已一并按 `abandoned_by_delete` 排除。
+
+### 根因 8 — `_FailFastScope` 的失败归属者可能在尚未结束时被登记
+
+`abort_outer_batch()` 从供应商槽位的中止回调里调用 `shard_scope.fail(shard_owner)`，
+而此时该任务还在运行。`_gather_fail_fast` 的等待者随后对一个尚无结果的 task 调用
+`result()`，抛出 `InvalidStateError: Result is not set`，把真实失败原因彻底掩盖，
+整集以一个 asyncio 内部错误结束。
+
+**修复**：登记了失败归属者但它尚未结束时，继续等待它的真实异常，而不是立刻
+`result()`，也不是转而报告一个被取消的同伴。回归测试对旧代码确实失败、对新代码通过。
+
+### 根因 9 — 纯称谓被签发成永久人物卡，与真名角色形成身份分裂
+
+EP1 的后续窗口只写出「许师姐」，模型据此签发了 `bible:许师姐`，与人物谱里本来
+就有的「许清」构成同一人的两张卡；EP5 的场次身份注册表随后因为「许师姐」同时
+指向 `person_0e9f485d40cc` 与 `person_31931b789904` 而 fail-closed。
+
+**用户给定的规则**：真名 > 尊称 > 代称；有真名就不能单独成角色，没有真名才可以。
+
+**方案（零新增模型调用）**：在已有的那一次身份调用里多要一个称谓形态字段，
+后端确定性执行阶梯。
+- current 合同：`CurrentNewNamedIdentityDecision.name_kind`
+  ∈ {personal_name, honorific, referential}；
+- future 合同：新增闭合映射 `revealed_name_kinds`；
+- 后端规则：只有 `personal_name` 能签发新权威；尊称/代称一律确定性降级为功能身份
+  （保留原文逐字称谓，仍是独立身份），等真名真正出现在证据里再由 K 决议认领同一个人；
+- 模型从上下文认出已登记人物却写不出逐字姓名时（EP5 的「许清」），该声明被丢弃
+  而不是让整集硬失败——结构化身份覆盖审计会用原文真正出现的称谓把这个人补回来。
+- 合同版本：identity-discovery v15 / current-identity v12 / future-identity v12。
+
+**数据修复**：已通过人物谱自身的 CAS 写入删除重复角色卡「许师姐」（v3→v4，
+影响仅 text_only，无付费资产失效）。
+
+## 待确认的根因 10 — content_owner_key 的两套语义互相矛盾
+
+EP2：`SRC0020:unit:008 content owner 未冻结：靠山宗`。
+
+- 蓝图合同明确写着「content_owner_key 可以是文字或物件归属」，所以把一段文字的
+  归属写成宗门名是合法的，能通过全部六轮蓝图修复；
+- `build_screenplay_scene_shard_plans` 却要求每个 content_owner_key 都能映射到
+  冻结的**人物**身份，映射不到就抛裸 `ValueError`，而这一层没有任何修复循环；
+- 下游 IR 又把 content_owner_keys 并入 `referenced_identity_keys`，所以「原样保留
+  非人物归属」只会把失败推迟到更后面。
+
+身份注册表本身有 `identity_kind="reference"`（offscreen_only、禁止资产）这一类，
+正是宗门/机构这种被引用实体应该落的位置——但人物发现只找人，不会登记它们。
+需要一个产品判断：非人物归属应当登记为 reference 身份，还是蓝图合同收紧为
+「content_owner_key 必须是已登记身份」。
