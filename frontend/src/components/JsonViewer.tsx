@@ -134,7 +134,11 @@ function JsonCollapsible({
   children: React.ReactNode
 }) {
   const [isOpen, setIsOpen] = useState(open)
-  const indent = { paddingLeft: `${depth * 16}px` }
+  // 缩进用自定义属性表达而非写死像素：内联样式无法按屏宽覆盖，
+  // 窄屏上每层 16px 会把深层内容整个挤出视口。层级另做封顶。
+  const indent = {
+    '--json-depth': Math.min(depth, 8),
+  } as React.CSSProperties
   return (
     <div className="json-collapsible">
       <button

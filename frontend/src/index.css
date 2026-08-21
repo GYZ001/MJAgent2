@@ -4691,6 +4691,7 @@ table.calls-ledger th:nth-child(6) {
   display: flex;
   align-items: baseline;
   min-height: 1.4em;
+  overflow-wrap: anywhere;
 }
 .json-row:hover {
   background: rgba(181, 68, 52, 0.05);
@@ -4727,6 +4728,7 @@ table.calls-ledger th:nth-child(6) {
   background: none;
   cursor: pointer;
   padding: 1px 0;
+  padding-left: calc(var(--json-depth, 0) * var(--json-indent, 16px));
   font: inherit;
   color: var(--ink-soft);
   text-align: left;

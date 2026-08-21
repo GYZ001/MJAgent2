@@ -570,7 +570,25 @@ export default function TraceDrawer({
                 开始时间
               </span>
             </div>
-            <div className="trace-workspace">
+            <nav className="trace-pane-switch" aria-label="链路视图切换">
+              <button
+                type="button"
+                className={mobilePane === "tree" ? "active" : ""}
+                aria-current={mobilePane === "tree" ? "page" : undefined}
+                onClick={() => setMobilePane("tree")}
+              >
+                调用树
+              </button>
+              <button
+                type="button"
+                className={mobilePane === "detail" ? "active" : ""}
+                aria-current={mobilePane === "detail" ? "page" : undefined}
+                onClick={() => setMobilePane("detail")}
+              >
+                节点详情
+              </button>
+            </nav>
+            <div className="trace-workspace" data-mobile-pane={mobilePane}>
               <section className="trace-tree-panel" aria-label="调用树">
                 <div className="trace-panel-title">
                   <b>调用树</b>
@@ -586,7 +604,10 @@ export default function TraceDrawer({
                       summaries={summaries}
                       expandedIds={expandedIds}
                       selectedId={selectedId}
-                      onSelect={(next) => void loadNode(next.id)}
+                      onSelect={(next) => {
+                        setMobilePane("detail");
+                        void loadNode(next.id);
+                      }}
                       onToggle={toggleNode}
                     />
                   ))}

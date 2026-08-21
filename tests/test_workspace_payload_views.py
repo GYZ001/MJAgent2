@@ -499,3 +499,111 @@ def test_project_episode_view_is_server_paginated(monkeypatch) -> None:
     episode_queries = [sql for sql in statements if "FROM episodes" in sql and "ORDER BY episode_no" in sql]
     assert len(episode_queries) == 1
     assert "LIMIT 15 OFFSET 15" in episode_queries[0]
+
+
+def _seed_picker_project(conn: sqlite3.Connection, count: int = 40) -> None:
+    conn.execute(
+        "INSERT INTO projects(id, name, status, created_at) VALUES('p1','demo','created',1)"
+    )
+    for idx in range(1, count + 1):
+        conn.execute(
+            """INSERT INTO episodes(
+                   id, project_id, episode_no, title, source_chapters,
+                   screenplay_status, status, created_at
+               ) VALUES(?,?,?,?,?,'pending','planned',1)""",
+            (f"e{idx}", "p1", idx, f"episode {idx}", json.dumps([idx])),
+        )
+    conn.commit()
+
+
+def test_picker_without_limit_keeps_returning_every_episode(monkeypatch) -> None:
+    """旧契约：不带 episode_limit 时仍是整份分集，窗口字段不出现。"""
+    conn = _conn()
+    _seed_picker_project(conn)
+    monkeypatch.setattr(common, "get_conn", lambda: conn)
+    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+
+    result = projects.project_detail("p1", view="picker")
+
+    assert len(result["episodes"]) == 40
+    assert "episode_total" not in result
+
+
+def test_picker_window_centers_on_cursor_and_reports_neighbors(monkeypatch) -> None:
+    """窗口模式只回一段，但总数、序号与上/下一集必须仍然可用。
+
+    回归 2026-08-21：1616 集项目里整份分集未压缩 250KB，中文标题 gzip 压不动，
+    每次切集都重拉一遍，移动端明显卡顿。
+    """
+    conn = _conn()
+    _seed_picker_project(conn)
+    monkeypatch.setattr(common, "get_conn", lambda: conn)
+    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+
+    result = projects.project_detail(
+        "p1", view="picker", episode_limit=9, episode_cursor="e20"
+    )
+
+    numbers = [episode["episode_no"] for episode in result["episodes"]]
+    assert len(numbers) == 9
+    assert 20 in numbers, "光标分集必须落在窗口内，否则前端解析不出当前集"
+    assert numbers == sorted(numbers)
+    assert result["episode_total"] == 40
+    assert result["episode_index"] == 19
+    assert result["episode_current"]["id"] == "e20"
+    assert result["episode_prev"]["episode_no"] == 19
+    assert result["episode_next"]["episode_no"] == 21
+    # 切换器用不到自动改动流水，不应随每次切集回传
+    assert "bible_auto_changes_json" not in result
+
+
+def test_picker_window_search_runs_on_the_server(monkeypatch) -> None:
+    conn = _conn()
+    _seed_picker_project(conn)
+    monkeypatch.setattr(common, "get_conn", lambda: conn)
+    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+
+    result = projects.project_detail(
+        "p1", view="picker", episode_limit=60, episode_query="episode 3"
+    )
+
+    numbers = {episode["episode_no"] for episode in result["episodes"]}
+    assert numbers == {3, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39}
+    assert result["episode_match_total"] == 11
+    assert result["episode_total"] == 40
+
+
+def test_picker_window_keeps_cursor_even_when_filtered_out(monkeypatch) -> None:
+    """搜索命中里没有当前集时也要带上它，否则切换器标题会退化成「第 N 集」。"""
+    conn = _conn()
+    _seed_picker_project(conn)
+    monkeypatch.setattr(common, "get_conn", lambda: conn)
+    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+
+    result = projects.project_detail(
+        "p1", view="picker", episode_limit=60,
+        episode_query="episode 7", episode_cursor="e20",
+    )
+
+    ids = [episode["id"] for episode in result["episodes"]]
+    assert "e20" in ids
+    assert result["episode_current"]["id"] == "e20"
+
+
+def test_picker_window_limits_the_sql_itself(monkeypatch) -> None:
+    """窗口必须由 SQL 完成——否则仍然把整份分集读进内存，等于没优化。"""
+    conn = _conn()
+    _seed_picker_project(conn)
+    monkeypatch.setattr(common, "get_conn", lambda: conn)
+    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+
+    projects.project_detail("p1", view="picker", episode_limit=9, episode_cursor="e20")
+
+    windowed = [sql for sql in statements if "LIMIT" in sql and "OFFSET" in sql]
+    assert windowed, "没有生成带 LIMIT/OFFSET 的取窗语句"
+    assert not [
+        sql for sql in statements
+        if "FROM episodes" in sql and "ORDER BY episode_no" in sql and "LIMIT" not in sql
+    ], "仍然存在一条无上限的整表分集查询"
