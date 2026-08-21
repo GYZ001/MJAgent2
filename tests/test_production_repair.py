@@ -3538,7 +3538,7 @@ async def test_active_recovery_run_reuses_prebaseline_identity_checkpoint(
         "source_text": recovery_source,
     })
     assert IDENTITY_DISCOVERY_CONTRACT_VERSION == (
-        "screenplay-identity-discovery.v14"
+        "screenplay-identity-discovery.v15"
     )
     current_receipt = _current_identity_evidence_records(recovery_source)[0]
     current_label = str(current_receipt["text"])[:2]

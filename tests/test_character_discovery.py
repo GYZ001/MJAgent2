@@ -135,6 +135,11 @@ def _current_identity_wire(
                 decisions["n"].append({
                     "evidence_ref": evidence_ref,
                     "identity_label": source_label,
+                    # Fixtures declare a real name unless they say otherwise;
+                    # 真名 > 尊称 > 代称 is exercised by its own tests.
+                    "name_kind": str(
+                        item.get("name_kind") or "personal_name"
+                    ),
                     "kind": kind,
                 })
     return decisions
@@ -168,6 +173,7 @@ def _future_identity_wire(
     decisions: dict[str, str] = {}
     revealed_names: dict[str, str] = {}
     reveal_evidence_ids: dict[str, str] = {}
+    revealed_name_kinds: dict[str, str] = {}
     desired_groups = list(grouped.values())
     for index, group_key in enumerate(group_keys):
         options = decision_properties[group_key]["enum"]
@@ -186,6 +192,7 @@ def _future_identity_wire(
             decisions[group_key] = known_option
             revealed_names[group_key] = ""
             reveal_evidence_ids[group_key] = ""
+            revealed_name_kinds[group_key] = ""
         elif identity_kind == "named":
             decisions[group_key] = next(
                 option for option in options if str(option).startswith("N:")
@@ -204,16 +211,23 @@ def _future_identity_wire(
                 ),
                 evidence_options[0],
             )
+            # Fixtures propose a real name unless a test says otherwise;
+            # 真名 > 尊称 > 代称 is exercised by its own tests.
+            revealed_name_kinds[group_key] = str(
+                desired.get("name_kind") or "personal_name"
+            )
         else:
             decisions[group_key] = next(
                 option for option in options if str(option).startswith("F:")
             )
             revealed_names[group_key] = ""
             reveal_evidence_ids[group_key] = ""
+            revealed_name_kinds[group_key] = ""
     return {
         "decisions": decisions,
         "revealed_names": revealed_names,
         "reveal_evidence_ids": reveal_evidence_ids,
+        "revealed_name_kinds": revealed_name_kinds,
     }
 
 
@@ -499,6 +513,7 @@ def test_future_identity_exact_map_schema_is_closed_and_provider_safe(
     assert local_schema == local_before
     assert set(local_schema["required"]) == {
         "decisions", "revealed_names", "reveal_evidence_ids",
+        "revealed_name_kinds",
     }
     for field_name in local_schema["required"]:
         field_schema = local_schema["properties"][field_name]
@@ -2691,6 +2706,7 @@ def test_future_identity_untraceable_name_is_one_call_hard_failure(
                 ),
             },
             "revealed_names": {group_key: "陈三"},
+            "revealed_name_kinds": {group_key: "personal_name"},
             "reveal_evidence_ids": {
                 group_key: next(
                     value for value in evidence[group_key]["enum"]
@@ -2740,6 +2756,7 @@ def test_future_identity_cannot_bind_unanchored_bible_authority(
                 group_key: f"K:{group_key}:bible:孟浩:forged",
             },
             "revealed_names": {group_key: ""},
+            "revealed_name_kinds": {group_key: ""},
             "reveal_evidence_ids": {group_key: ""},
         }, ensure_ascii=False)
 
@@ -3006,6 +3023,7 @@ def test_attempt12_invalid_future_decision_is_one_call_and_zero_downstream(
                 ),
             },
             "revealed_names": {"G001": "", "G002": "李富贵"},
+            "revealed_name_kinds": {"G001": "", "G002": "personal_name"},
             "reveal_evidence_ids": {
                 "G001": "",
                 "G002": next(
@@ -3123,7 +3141,7 @@ def test_future_identity_operation_binds_exact_outbound_semantics(
         )
         assert (
             kwargs["call_meta"]["contract_version"]
-            == "screenplay-future-identity.v11"
+            == "screenplay-future-identity.v12"
         )
         operations.append((kwargs["operation_id"], kwargs["call_meta"]["model"]))
         return portraits.FutureIdentityCandidateResponse.model_validate(
@@ -3507,10 +3525,10 @@ def test_attempt15_call_63222_rf10_mirror_succeeds_once(
         calls += 1
         meta = kwargs["call_meta"]
         assert meta["contract_version"] == (
-            "screenplay-identity-discovery.v14"
+            "screenplay-identity-discovery.v15"
         )
         assert meta["current_identity_version"] == (
-            "screenplay-current-identity.v11"
+            "screenplay-current-identity.v12"
         )
         assert meta["format_attempt"] == 0
         assert meta["semantic_attempt"] == 0
@@ -4095,6 +4113,7 @@ def test_current_identity_rf11_custom_exact_gates(
         payload["n"] = [{
             "evidence_ref": selected["evidence_ref"],
             "identity_label": "耳根",
+            "name_kind": "personal_name",
             "kind": "onscreen",
         }]
     elif mutation == "cross_f":
@@ -7310,6 +7329,7 @@ def test_future_identity_offers_k_for_canonical_name_in_group_evidence(
                 "G001": next(v for v in enum if v.startswith("K:")),
             },
             "revealed_names": {"G001": ""},
+            "revealed_name_kinds": {"G001": ""},
             "reveal_evidence_ids": {"G001": ""},
         }, ensure_ascii=False)
 
@@ -7355,6 +7375,7 @@ def test_future_identity_new_naming_existing_authority_becomes_that_k(
                 "G001": next(v for v in enum if v.startswith("N:")),
             },
             "revealed_names": {"G001": "李富贵"},
+            "revealed_name_kinds": {"G001": "personal_name"},
             "reveal_evidence_ids": {"G001": anchored["evidence_id"]},
         }, ensure_ascii=False)
 
@@ -7383,6 +7404,7 @@ def test_future_identity_new_name_without_backend_decision_stays_closed(
                 "G001": next(v for v in enum if v.startswith("N:")),
             },
             "revealed_names": {"G001": "李富贵"},
+            "revealed_name_kinds": {"G001": "personal_name"},
             "reveal_evidence_ids": {
                 "G001": next(v for v in evidence_enum if v),
             },
@@ -7459,10 +7481,18 @@ def test_registered_authority_without_literal_anchor_routes_to_functional(
     ] == [("许师姐", "functional")]
 
 
-def test_registered_canonical_name_in_new_named_still_fails_closed(
+def test_registered_name_recognised_from_context_is_dropped_not_fatal(
     monkeypatch,
 ) -> None:
-    """The routing rule is guidance; writing the reserved name still fails."""
+    """Recognising a registered person is not the same as reading their name.
+
+    The episode only ever writes 「许师姐」, so no K decision can exist for
+    「许清」 and the name is nowhere verbatim in the owned evidence.  The claim
+    cannot become a new authority and carries no appellation to keep, so it is
+    dropped -- the structural coverage audit still recovers the person from the
+    wording the source actually uses.  Ending the whole episode over one such
+    claim was the production failure.
+    """
     calls = 0
 
     async def fake_chat(messages, **kwargs):
@@ -7479,24 +7509,64 @@ def test_registered_canonical_name_in_new_named_still_fails_closed(
         ), ensure_ascii=False)
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    with pytest.raises(
-        model_gateway.StructuredSemanticError,
-        match="已登记身份必须选择 K decision",
-    ):
-        asyncio.run(portraits.discover_character_candidates(
-            "许师姐与陈师兄是内门弟子，以往很少看到。",
-            Bible(
-                world=World(visual_style_canonical="国风"),
-                characters=[Character(
-                    name="许清",
-                    role="重要配角",
-                    appearance_canonical="银袍女子，黑发高髻，肤色惨白",
-                )],
-            ),
-            5,
-        ))
+    candidates = asyncio.run(portraits.discover_character_candidates(
+        "许师姐与陈师兄是内门弟子，以往很少看到。",
+        Bible(
+            world=World(visual_style_canonical="国风"),
+            characters=[Character(
+                name="许清",
+                role="重要配角",
+                appearance_canonical="银袍女子，黑发高髻，肤色惨白",
+            )],
+        ),
+        5,
+    ))
 
     assert calls == 1
+    # No duplicate authority is minted for the recognised person.
+    assert not [
+        item for item in candidates
+        if str(item.get("name") or "") == "许清"
+        and item.get("identity_kind") == "named"
+    ]
+
+
+def test_honorific_new_name_becomes_functional_not_a_new_authority(
+    monkeypatch,
+) -> None:
+    """真名 > 尊称 > 代称: an honorific never mints a character card.
+
+    Production: 「许师姐」 was issued as a brand-new authority ``bible:许师姐``
+    beside the already-registered 「许清」, and the scene identity registry then
+    failed closed because one appellation pointed at two canonical identities.
+    """
+
+    async def fake_chat(messages, **kwargs):
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [{
+                "source_label": "许师姐",
+                "identity_kind": "named",
+                "name_kind": "honorific",
+                "kind": "onscreen",
+            }],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    candidates = asyncio.run(portraits.discover_character_candidates(
+        "许师姐与陈师兄是内门弟子，以往很少看到。",
+        Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        5,
+    ))
+
+    honorific = [
+        item for item in candidates
+        if str(item.get("source_label") or "") == "许师姐"
+    ]
+    assert honorific, candidates
+    assert honorific[0]["identity_kind"] == "functional"
+    assert not honorific[0].get("authority_id")
 
 
 def test_identity_transport_stall_is_resampled_under_a_fresh_operation(
@@ -7575,3 +7645,95 @@ def test_identity_partial_delivery_provider_error_still_fails_closed(
         ))
 
     assert calls == 1
+
+
+def test_future_honorific_reveal_is_demoted_to_functional(monkeypatch) -> None:
+    """真名 > 尊称 > 代称 on the future wire, deterministically.
+
+    Production EP1: the lookahead window only ever wrote 「许师姐」, the model
+    issued it as a NEW authority, and 「许师姐」/「许清」 became two character
+    cards for one person.  An honorific must resolve the group as a functional
+    identity instead -- still a standalone identity, still claimable by the
+    real name through a K decision once the source finally writes it.
+    """
+    seen: dict[str, object] = {}
+
+    async def honorific_wire(messages, **kwargs):
+        prompt = str(messages[0]["content"])
+        evidence = _future_identity_catalog(prompt, "后续证据目录")
+        anchored = next(item for item in evidence if "许师姐" in item["text"])
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        enum = schema["properties"]["decisions"]["properties"]["G001"]["enum"]
+        seen["kinds_enum"] = list(
+            schema["properties"]["revealed_name_kinds"]["properties"]["G001"]["enum"]
+        )
+        return json.dumps({
+            "decisions": {
+                "G001": next(v for v in enum if v.startswith("N:")),
+            },
+            "revealed_names": {"G001": "许师姐"},
+            "reveal_evidence_ids": {"G001": anchored["evidence_id"]},
+            "revealed_name_kinds": {"G001": "honorific"},
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", honorific_wire)
+    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
+        [{
+            "name": "银袍女子",
+            "source_label": "银袍女子",
+            "identity_kind": "functional",
+            "identity_group": "current-1:F1",
+            "kind": "onscreen",
+        }],
+        source_text="一个身穿银袍的女子站在广场上。",
+        future_text="“许师姐好手段。”众人低声议论，那银袍女子并未回头。",
+        bible=Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        episode_no=1,
+        future_label="第 2-11 章",
+    ))
+
+    assert "honorific" in seen["kinds_enum"]
+    assert resolved[0]["identity_kind"] == "functional"
+    assert not resolved[0].get("authority_id")
+    assert resolved[0]["name"] == "银袍女子"
+
+
+def test_future_personal_name_reveal_still_mints_the_authority(
+    monkeypatch,
+) -> None:
+    """A real name keeps working exactly as before."""
+
+    async def personal_wire(messages, **kwargs):
+        prompt = str(messages[0]["content"])
+        evidence = _future_identity_catalog(prompt, "后续证据目录")
+        anchored = next(item for item in evidence if "陈三" in item["text"])
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        enum = schema["properties"]["decisions"]["properties"]["G001"]["enum"]
+        return json.dumps({
+            "decisions": {
+                "G001": next(v for v in enum if v.startswith("N:")),
+            },
+            "revealed_names": {"G001": "陈三"},
+            "reveal_evidence_ids": {"G001": anchored["evidence_id"]},
+            "revealed_name_kinds": {"G001": "personal_name"},
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", personal_wire)
+    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
+        [{
+            "name": "青衫少年",
+            "source_label": "青衫少年",
+            "identity_kind": "functional",
+            "identity_group": "current-1:F1",
+            "kind": "onscreen",
+        }],
+        source_text="一个青衫少年走进院子。",
+        future_text="那青衫少年抬起头：“我叫陈三。”",
+        bible=Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        episode_no=1,
+        future_label="第 2-11 章",
+    ))
+
+    assert resolved[0]["identity_kind"] == "named"
+    assert resolved[0]["name"] == "陈三"
+    assert resolved[0]["authority_id"] == "bible:陈三"
