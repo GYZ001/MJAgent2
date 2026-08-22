@@ -7903,3 +7903,46 @@ def test_card_role_must_come_from_the_declared_enum() -> None:
     assert portraits.CHARACTER_CARD_ROLES == ("主角", "重要配角", "反派")
     assert "重要场景载体" not in portraits.CHARACTER_CARD_ROLES
     assert portraits.CHARACTER_SUBJECT_PERSON in portraits.CHARACTER_SUBJECT_KINDS
+
+
+def test_author_pen_name_is_recorded_as_not_a_character(monkeypatch) -> None:
+    """卡层拒绝建卡后，该判定必须持久化，否则 coverage 仍会索要人物卡。
+
+    Production EP3: 「耳根」 is the author's pen name in the chapter's closing
+    note.  The card layer correctly declined it, and structural coverage then
+    failed the whole episode with 「结构人物 coverage 的 named card 尚未物化：耳根」.
+    ``ensure_cards_for_text`` copies its candidate dicts and coverage reads
+    persisted artifacts, so an in-memory demotion alone would not reach it.
+    """
+    conn = _make_conn()
+    _seed_project(conn, "耳根在这里恭喜柚子，求推荐票。" * 6)
+    _patch_settings(monkeypatch, conn)
+
+    async def fake_assess(*_args, **_kwargs):
+        return {
+            "subject_kind": "other",
+            "important": False,
+            "reason": "作者笔名，出现在章末互动旁白，并非故事角色",
+            "role": "重要配角",
+            "appearance_canonical": "",
+            "personality": "",
+            "speech_style": "",
+            "relationships": [],
+        }
+
+    monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
+
+    result = asyncio.run(portraits.ensure_character_card(
+        "p1", "耳根", 21, require_identity_card=True,
+    ))
+
+    assert result["status"] == "skipped_not_person"
+    assert portraits.get_setting(
+        portraits._non_character_skip_key("p1", "耳根")
+    ) == "1"
+    bible = json.loads(
+        conn.execute(
+            "SELECT bible_json FROM projects WHERE id='p1'"
+        ).fetchone()["bible_json"]
+    )
+    assert "耳根" not in {item["name"] for item in bible["characters"]}

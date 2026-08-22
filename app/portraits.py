@@ -393,6 +393,17 @@ async def _bible_lock(project_id: str) -> asyncio.Lock:
         return lock
 
 
+def _non_character_skip_key(project_id: str, name: str) -> str:
+    """Durable record that the card layer judged this name not a character.
+
+    The in-place demotion below only reaches in-process consumers, and
+    ``ensure_cards_for_text`` copies its candidate dicts.  Structural coverage
+    reads persisted artifacts, so the decision has to survive as its own
+    durable fact or coverage will keep demanding a card that must never exist.
+    """
+    return f"char_not_character:{project_id}:{name}"
+
+
 def _discovery_skip_key(project_id: str, name: str) -> str:
     return f"char_discovery_skip:{project_id}:{name}"
 
@@ -7234,6 +7245,16 @@ async def ensure_cards_for_text(
             "skipped_minor", "exists", "skipped_not_person",
         }:
             skipped.append(result)
+            if result.get("status") == "skipped_not_person":
+                # 非人（宗门、器物）以及非故事角色（作者笔名出现在章末旁白）
+                # 本来就不该进人物谱，这是正常终态而不是错误。但它们不能继续
+                # 保持 named：结构人物 coverage 会要求每个具名身份都有已物化的
+                # 人物卡，于是"正确地拒绝建卡"反而让整集硬失败（生产上 EP3 卡在
+                # 「耳根」——作者笔名）。降级为功能身份，让两边重新一致。
+                for item in items:
+                    item["identity_kind"] = "functional"
+                    item["authority_id"] = ""
+                    item["materialization_compatible"] = False
             # 非人（宗门/器物/地点）本来就不该进人物谱，这是正常终态而不是错误。
             if result.get("status") == "skipped_minor":
                 # identity_kind=named 已由身份模型给出可靠同一性证据。
@@ -7363,7 +7384,17 @@ async def ensure_structural_identity_coverage(
     matching_coverage_artifact_seen = False
 
     def verified_materialized_bible_names(candidates: list[dict]) -> list[str]:
-        required = _structural_identity_required_bible_names(candidates)
+        required = [
+            name for name in _structural_identity_required_bible_names(
+                candidates
+            )
+            # 卡层已判定"不是角色"（宗门、器物，或出现在章末旁白里的作者笔名）。
+            # 那是正确的拒绝，不能反过来要求它必须有人物卡——生产上 EP3 就是被
+            # 「耳根」这个作者笔名整集卡死的。
+            if not str(
+                get_setting(_non_character_skip_key(project_id, name)) or ""
+            ).strip()
+        ]
         available = _project_bible_character_names(conn, project_id, bible)
         missing = set(required) - available
         if missing:
@@ -8056,6 +8087,7 @@ async def ensure_character_card(
                 set_setting(
                     _discovery_skip_key(project_id, name), str(from_episode_no)
                 )
+                set_setting(_non_character_skip_key(project_id, name), "1")
                 return {
                     "status": "skipped_not_person",
                     "name": name,
