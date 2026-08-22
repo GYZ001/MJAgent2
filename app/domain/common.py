@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import time
+from collections import OrderedDict
 from pathlib import Path
+from threading import RLock
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 from pydantic import ValidationError
@@ -345,6 +348,85 @@ def purge_legacy_screenplays() -> int:
     return purged
 
 
+# ``_screenplay_ready`` 是一个对不可变已发布权威链的完整重验证：重解析 2 MB
+# Artifact、重编译 IR、重验完成凭证、逐字段比对投影。实测一次 ~1.9 s，而剧本台
+# 每 15 s 轮询一次、每次打开页面还要再跑两遍（详情 + 轻量状态）。
+#
+# 它同时是一个**纯函数**：结论只由本集的 episodes/projects 行、原文章节、
+# 本集与本项目名下的全部 Artifact（含 status 与 content_hash）、完成凭证、
+# production revision、以及绑定在这些 Artifact 上的 evaluation 决定。
+# 因此这里按「这些输入的完整内容指纹」缓存结论：任何一个输入变化都会改变键，
+# 缓存命中与重算在语义上完全等价，fail-closed 语义不受影响。
+# 键的完整性由 tests/test_screenplay_ready_identity.py 逐类输入锁死。
+_SCREENPLAY_READY_CACHE: "OrderedDict[str, bool]" = OrderedDict()
+_SCREENPLAY_READY_CACHE_SIZE = 64
+_SCREENPLAY_READY_CACHE_LOCK = RLock()
+
+
+def _digest(*parts: object) -> str:
+    return hashlib.blake2b(
+        json.dumps(parts, ensure_ascii=False, sort_keys=True, default=str).encode(
+            "utf-8"
+        ),
+        digest_size=20,
+    ).hexdigest()
+
+
+def screenplay_ready_identity(data: dict) -> str:
+    """Content identity of everything ``_screenplay_ready`` can read."""
+    from app.production.screenplay_authority import SCREENPLAY_QA_PROFILE_VERSION
+    from app.schemas import NARRATIVE_CONTRACT_VERSION
+
+    episode_id = str(data.get("id") or "")
+    project_id = str(data.get("project_id") or "")
+    conn = get_conn()
+    project_row = conn.execute(
+        "SELECT * FROM projects WHERE id=?", (project_id,)
+    ).fetchone()
+    chapters = conn.execute(
+        "SELECT idx, title, char_count, content FROM chapters WHERE project_id=? "
+        "ORDER BY idx",
+        (project_id,),
+    ).fetchall()
+    artifacts = conn.execute(
+        "SELECT id, type, status, version, content_hash, contract_version, "
+        "       parent_artifact_ids_json, file_path "
+        "  FROM artifacts "
+        " WHERE (scope_type='episode' AND scope_id=?) "
+        "    OR (scope_type='project' AND scope_id=?) "
+        " ORDER BY id",
+        (episode_id, project_id),
+    ).fetchall()
+    certificates = conn.execute(
+        "SELECT * FROM completion_certificates WHERE scope_id=? ORDER BY id",
+        (episode_id,),
+    ).fetchall()
+    revisions = conn.execute(
+        "SELECT * FROM production_revisions WHERE episode_id=? ORDER BY id",
+        (episode_id,),
+    ).fetchall()
+    evaluations = conn.execute(
+        "SELECT evaluation.* FROM evaluations AS evaluation "
+        "  JOIN artifacts AS artifact ON artifact.id=evaluation.artifact_id "
+        " WHERE (artifact.scope_type='episode' AND artifact.scope_id=?) "
+        "    OR (artifact.scope_type='project' AND artifact.scope_id=?) "
+        " ORDER BY evaluation.id",
+        (episode_id, project_id),
+    ).fetchall()
+    return _digest(
+        "screenplay-ready.v1",
+        NARRATIVE_CONTRACT_VERSION,
+        SCREENPLAY_QA_PROFILE_VERSION,
+        data,
+        [dict(row) for row in ([project_row] if project_row else [])],
+        [dict(row) for row in chapters],
+        [dict(row) for row in artifacts],
+        [dict(row) for row in certificates],
+        [dict(row) for row in revisions],
+        [dict(row) for row in evaluations],
+    )
+
+
 def _screenplay_ready(ep) -> bool:
     """仅带正式投影的 ready 剧本可进分镜。"""
     data = dict(ep)
@@ -354,6 +436,23 @@ def _screenplay_ready(ep) -> bool:
     screenplay_json = data.get("screenplay_json")
     if not (screenplay_json and status == "ready"):
         return False
+    identity = screenplay_ready_identity(data)
+    with _SCREENPLAY_READY_CACHE_LOCK:
+        cached = _SCREENPLAY_READY_CACHE.get(identity)
+        if cached is not None:
+            _SCREENPLAY_READY_CACHE.move_to_end(identity)
+            return cached
+    verdict = _screenplay_ready_uncached(data)
+    with _SCREENPLAY_READY_CACHE_LOCK:
+        _SCREENPLAY_READY_CACHE[identity] = verdict
+        _SCREENPLAY_READY_CACHE.move_to_end(identity)
+        while len(_SCREENPLAY_READY_CACHE) > _SCREENPLAY_READY_CACHE_SIZE:
+            _SCREENPLAY_READY_CACHE.popitem(last=False)
+    return verdict
+
+
+def _screenplay_ready_uncached(data: dict) -> bool:
+    screenplay_json = data.get("screenplay_json")
     try:
         script = EpisodeScreenplay.model_validate(json.loads(screenplay_json))
     except (json.JSONDecodeError, TypeError, ValueError):

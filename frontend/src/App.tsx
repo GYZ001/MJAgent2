@@ -1368,10 +1368,13 @@ export function screenplayStatusPollInterval(
  */
 export function useScriptEpisode(episodeId: string) {
   const detail = useEpisode(episodeId, "script", 0);
+  // 详情响应已经带着同一份 screenplay_production / screenplay_state / shot_count，
+  // 首屏再并发拉一次轻量状态就是一次纯重复请求（两个端点跑的是同一套权威校验）。
+  // 轻量状态只负责“之后的变化”，所以等详情落地再开始轮询。
   const status = usePoll<ScreenplayLightStatus>(
     () => api.get(`/episodes/${episodeId}/screenplay/status`),
     screenplayStatusPollInterval,
-    [episodeId],
+    [detail.data ? episodeId : null],
   );
   const lastTerminalRef = useRef("");
 

@@ -316,7 +316,14 @@ export default function ScriptPage() {
       baseline: baselineVersion ?? draftEpisodeArtifactId,
       saved_at: Date.now(),
     }
-    localStorage.setItem(localDraftKey, JSON.stringify(payload))
+    // localStorage 是同步 API 且只有几 MB 配额：超额时 setItem 会**抛异常**。
+    // 在这个 effect 里抛出会中断整条编辑链路，而本地副本本来就只是云端草稿的
+    // 冗余兜底，丢了不影响正确性，所以失败只降级、不阻断。
+    try {
+      localStorage.setItem(localDraftKey, JSON.stringify(payload))
+    } catch {
+      try { localStorage.removeItem(localDraftKey) } catch { /* 配额已满且无法清理 */ }
+    }
     setDraftSaveState('saving')
     const timer = window.setTimeout(() => {
       api.put(`/episodes/${draftEpisodeId}/screenplay/draft`, {
