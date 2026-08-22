@@ -8045,7 +8045,11 @@ async def ensure_character_card(
                     str(verdict.get("appearance_canonical") or "").strip()
                 )
             )
-            if not verdict.get("is_person"):
+            # 以 subject_kind 为准（_build_verdict 一定会给出它），缺失同样拦截：
+            # 无法断言"这是一个人"时，保守的方向就是不进人物谱。
+            if str(
+                verdict.get("subject_kind") or ""
+            ).strip() != CHARACTER_SUBJECT_PERSON:
                 # 人格是独立的硬闸门，不能被 require_identity_card 绕过：身份消歧
                 # 确认的是"这是一个稳定的专名"，不是"这是一个人"。宗门、器物、
                 # 地点即使专名稳定、戏份很重，也只能留在场景库/reference 身份里。

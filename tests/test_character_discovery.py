@@ -7809,3 +7809,97 @@ def test_current_identity_ambiguous_ref_still_fails_closed() -> None:
     )
 
     assert any("evidence_ref 越界" in error for error in errors)
+
+
+def _non_person_verdict(subject_kind: str, name: str) -> dict:
+    """A card the model considers worth anchoring, for a thing that is not a person."""
+    return {
+        "subject_kind": subject_kind,
+        "important": True,
+        "reason": f"{name}是独立出场单元，需单独建卡保证一致性",
+        "role": "重要配角",
+        "appearance_canonical": (
+            "青灰色石砌山门，飞檐上悬着铜铃，门楣刻着朱红宗名，常年云雾缭绕"
+        ),
+        "personality": "",
+        "speech_style": "",
+        "relationships": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("subject_kind", "name"),
+    [
+        ("organization", "靠山宗"),
+        ("object", "凝气卷"),
+        ("place", "大青山"),
+        ("other", "凝气三层"),
+    ],
+)
+def test_non_person_never_enters_the_character_bible(
+    monkeypatch, subject_kind: str, name: str,
+) -> None:
+    """人物谱只登记人。
+
+    Production: 「靠山宗」 was carded with the model's own reason saying it is
+    「独立的组织类出场单元」, and 「凝气卷」 with 「靠山宗发放的修行典籍」.  Both
+    stated plainly that they are not people.  Nothing asked.
+    """
+    conn = _make_conn()
+    _seed_project(conn, f"{name}矗立在山谷之中。" * 6)
+    _patch_settings(monkeypatch, conn)
+
+    async def fake_assess(*_args, **_kwargs):
+        return _non_person_verdict(subject_kind, name)
+
+    monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
+
+    result = asyncio.run(portraits.ensure_character_card("p1", name, 21))
+
+    assert result["status"] == "skipped_not_person"
+    assert result["subject_kind"] == subject_kind
+    bible = json.loads(
+        conn.execute(
+            "SELECT bible_json FROM projects WHERE id='p1'"
+        ).fetchone()["bible_json"]
+    )
+    assert name not in {item["name"] for item in bible["characters"]}
+
+
+def test_confirmed_real_name_cannot_bypass_the_person_gate(monkeypatch) -> None:
+    """身份消歧确认的是"稳定专名"，不是"这是一个人"。
+
+    ``require_identity_card`` forces a complete card and skips the importance
+    vote, which is exactly the branch a non-person used to slip through.
+    """
+    conn = _make_conn()
+    _seed_project(conn, "靠山宗矗立在山谷之中。" * 6)
+    _patch_settings(monkeypatch, conn)
+
+    async def fake_assess(*_args, **_kwargs):
+        return _non_person_verdict("organization", "靠山宗")
+
+    monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
+
+    result = asyncio.run(portraits.ensure_character_card(
+        "p1", "靠山宗", 21, require_identity_card=True,
+    ))
+
+    assert result["status"] == "skipped_not_person"
+    bible = json.loads(
+        conn.execute(
+            "SELECT bible_json FROM projects WHERE id='p1'"
+        ).fetchone()["bible_json"]
+    )
+    assert "靠山宗" not in {item["name"] for item in bible["characters"]}
+
+
+def test_card_role_must_come_from_the_declared_enum() -> None:
+    """role 是闭合枚举，不是自由文本。
+
+    「靠山宗」's persisted card carried role="重要场景载体", a value the contract
+    never allowed; only a non-empty check stood between it and the bible.
+    """
+    assert portraits.CHARACTER_CARD_ROLES == ("主角", "重要配角", "反派")
+    assert "重要场景载体" not in portraits.CHARACTER_CARD_ROLES
+    assert portraits.CHARACTER_SUBJECT_PERSON in portraits.CHARACTER_SUBJECT_KINDS
