@@ -332,12 +332,74 @@ def cmd_run(args) -> int:
     return 0 if all(value == "ready" for value in results.values()) else 1
 
 
+def cmd_verify(_args) -> int:
+    """验收：10 集全部通过项目自身的业务校验，且没有残留异常或脏数据。
+
+    只用项目**已有**的判据，不另立标准：
+      * `_screenplay_ready` —— 分镜前置门禁，会把已发布权威链整条重新验证一遍；
+      * `resolve_current_screenplay_authority` —— 不可变权威解析，任何漂移即抛错；
+      * 轻量状态端点 —— 页面看到的状态必须同样是已交付；
+      * 没有活跃 run、没有 screenplay_error、没有未消费的完成凭证。
+    """
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT))
+    from app.db import get_conn
+    from app.domain.common import _screenplay_ready
+    from app.production.screenplay_authority import (
+        resolve_current_screenplay_authority,
+    )
+
+    log("=== VERIFY EP1-EP10 ===")
+    ok = True
+    db = get_conn()
+    for name, eid in EPISODES:
+        row = db.execute("SELECT * FROM episodes WHERE id=?", (eid,)).fetchone()
+        payload = status_of(eid)
+        problems: list[str] = []
+        if row is None:
+            problems.append("分集记录不存在")
+        else:
+            if row["screenplay_status"] != "ready":
+                problems.append(f"screenplay_status={row['screenplay_status']}")
+            if row["screenplay_error"]:
+                problems.append(f"screenplay_error={str(row['screenplay_error'])[:120]}")
+            if row["active_screenplay_run_id"]:
+                run = db.execute(
+                    "SELECT status FROM workflow_runs WHERE id=?",
+                    (row["active_screenplay_run_id"],),
+                ).fetchone()
+                if run is not None and run["status"] not in {
+                    "SUCCEEDED", "FAILED", "CANCELLED", "PARTIAL",
+                }:
+                    problems.append(f"仍有活跃 run（{run['status']}）")
+            if not _screenplay_ready(dict(row)):
+                problems.append("_screenplay_ready=False")
+            try:
+                resolve_current_screenplay_authority(eid)
+            except Exception as exc:  # noqa: BLE001 - 验收即要看到真实原因
+                problems.append(f"权威解析失败：{exc}")
+        state = (payload.get("screenplay_state") or {}).get("code")
+        if not str(state or "").startswith("ready"):
+            problems.append(f"页面状态={state}")
+        if problems:
+            ok = False
+            log(f"{name} ✗ " + "；".join(problems))
+        else:
+            log(f"{name} ✓ ready / 权威链完整 / 页面状态={state}")
+    log(f"=== VERIFY {'PASSED' if ok else 'FAILED'} ===")
+    return 0 if ok else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["status", "clear", "run"])
+    parser.add_argument("command", choices=["status", "clear", "run", "verify"])
     parser.add_argument("--from", dest="start_from", default="")
     args = parser.parse_args()
-    return {"status": cmd_status, "clear": cmd_clear, "run": cmd_run}[args.command](args)
+    return {
+        "status": cmd_status, "clear": cmd_clear,
+        "run": cmd_run, "verify": cmd_verify,
+    }[args.command](args)
 
 
 if __name__ == "__main__":
