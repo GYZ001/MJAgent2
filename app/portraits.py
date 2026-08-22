@@ -1721,7 +1721,9 @@ async def _discover_character_candidates_legacy(
     seen: set[tuple[str, str, str]] = set()
     candidates: list[dict] = []
     current_provider, current_model, current_effective_max = (
-        hiagent.text_request_token_limits(requested_max_tokens=8192)
+        hiagent.text_request_token_limits(
+            requested_max_tokens=IDENTITY_REQUEST_MAX_TOKENS,
+        )
     )
     current_semantic_settings = hiagent.text_request_semantic_settings(
         current_provider
@@ -2036,7 +2038,7 @@ async def _discover_character_candidates_legacy(
                 })
             ),
             temperature=0.1,
-            max_tokens=8192,
+            max_tokens=IDENTITY_REQUEST_MAX_TOKENS,
             format_retry_limit=0,
             semantic_retry_limit=0,
             call_meta={

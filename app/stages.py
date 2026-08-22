@@ -215,6 +215,9 @@ BLUEPRINT_REVIEW_SUPPLEMENTARY_SAMPLE = 3
 BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS = 32
 BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS = 131072
 BLUEPRINT_GENERATION_MAX_WALL_SECONDS = 1800.0
+# 与身份合同同源的标定：会先思考再作答的模型，其 reasoning token 与正文共用
+# completion 预算，所以"够写下补丁"并不等于"够跑完这次调用"。
+IR_FIDELITY_PATCH_MAX_TOKENS = 16384
 # Per planned leaf: one full-shard call plus at most one typed ownership
 # repair call (``BLUEPRINT_SHARD_MAX_ATTEMPTS`` allows a third attempt, which
 # the shared headroom below absorbs together with dynamic splits and the
@@ -1394,7 +1397,10 @@ async def _complete_screenplay_ir_fidelity(
                 ).hexdigest()
             ),
             temperature=0.3,
-            max_tokens=8192,
+            # 推理模型的 reasoning token 计入 completion_tokens，固定 8192 会在
+            # 写出补丁之前就被思考耗尽（生产上 EP3 拿到 finish_reason=length /
+            # completion_tokens=8193）。预算只是上限，真实成本按实际用量结算。
+            max_tokens=IR_FIDELITY_PATCH_MAX_TOKENS,
             format_retry_limit=int(
                 get_setting("screenplay_format_retry_limit") or 1
             ),

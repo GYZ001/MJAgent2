@@ -2348,3 +2348,9 @@ def test_identity_budgets_leave_room_for_a_reasoning_model() -> None:
     # It still stays below the generic long-generation ceilings, so a stalled
     # identity call surfaces sooner than a full baseline would.
     assert config.TIMEOUT_CHAT_IDENTITY_READ <= config.TIMEOUT_CHAT_BASELINE_READ
+
+    # The IR fidelity patch shares the exposure: production EP3 was cut at
+    # finish_reason=length / completion_tokens=8193 against an 8192 budget.
+    from app import stages
+
+    assert stages.IR_FIDELITY_PATCH_MAX_TOKENS >= 16384
