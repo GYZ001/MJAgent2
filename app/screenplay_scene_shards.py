@@ -2267,9 +2267,19 @@ def compile_screenplay_scene_shard_draft(
 
 
 class ScreenplaySceneShardError(ValueError):
-    def __init__(self, shard_id: str, errors: list[str]):
+    def __init__(
+        self,
+        shard_id: str,
+        errors: list[str],
+        *,
+        unresolved_semantic_units: dict[str, list[str]] | None = None,
+    ):
         self.shard_id = shard_id
         self.errors = list(errors)
+        # 语义门禁耗尽全部修复轮次后仍未收口的 unit → 双审共识原文。
+        # 它标识的是**上游冻结分类无解**，而不是文案没写好：本层唯一能做的
+        # 补救（重写文案）修不好一个分类错误，所以要把证据原样交给能改分类的那一层。
+        self.unresolved_semantic_units = dict(unresolved_semantic_units or {})
         super().__init__(f"{shard_id}: " + "；".join(errors[:10]))
 
 
@@ -5810,6 +5820,10 @@ async def _semantic_review_scene_shard_draft(
             f"{item.unit_key} creative semantic gate 未收口：{item.message}"
             for item in findings
         ],
+        unresolved_semantic_units={
+            item.unit_key: [item.message]
+            for item in findings
+        },
     )
 
 
