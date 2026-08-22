@@ -10750,17 +10750,16 @@ def test_attributed_text_unit_needs_no_person_state_subject() -> None:
     assert "unspoken_reference" not in modes
 
 
-def test_chunk_review_backoff_outlasts_a_burst_without_holding_a_slot() -> None:
-    """The chunk-level wait is the one that may be long.
+def test_no_chunk_level_backoff_exists() -> None:
+    """Added latency anywhere is paid everywhere in this pipeline.
 
-    The in-lease retry occupies a provider slot while it waits, so it has to
-    stay small; this one runs between chunk attempts, outside every lease, so
-    it can actually outlast a provider burst.
+    An 8s/25s/60s chunk-level wait was tried to outlast provider bursts.  The
+    sleeping shard tasks kept holding the bounded pools, other episodes' stages
+    ran out their own wall-clock budgets, and the whole batch was cancelled --
+    including episodes that had never reached the review at all.
     """
-    chunk_delays = scene_shards_module.SCENE_SHARD_CHUNK_REVIEW_BACKOFF_S
-    lease_delays = scene_shards_module.SCENE_SHARD_UNDELIVERED_BACKOFF_S
-
-    assert list(chunk_delays) == sorted(chunk_delays)
-    assert sum(lease_delays) <= 6.0
-    assert sum(chunk_delays) >= 60.0
-    assert sum(chunk_delays) <= 180.0
+    assert not hasattr(
+        scene_shards_module, "SCENE_SHARD_CHUNK_REVIEW_BACKOFF_S"
+    )
+    # Only the short in-lease pause survives.
+    assert sum(scene_shards_module.SCENE_SHARD_UNDELIVERED_BACKOFF_S) <= 6.0
