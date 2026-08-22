@@ -2314,3 +2314,18 @@ def test_provider_400_naming_json_schema_is_a_capability_gap() -> None:
     )
 
     assert hiagent._looks_like_response_format_unsupported(exc) is True
+
+
+def test_response_format_ladder_has_exactly_three_rungs() -> None:
+    """json_schema → json_object → 纯文本，每级只在被明确拒绝时下探一次。"""
+    schema_format = {
+        "type": "json_schema",
+        "json_schema": {"name": "x", "strict": True, "schema": {}},
+    }
+
+    # 第一级降到第二级。
+    assert hiagent._json_object_response_format(schema_format) == {
+        "type": "json_object"
+    }
+    # 第二级没有更弱的 response_format 了，下一步只能是纯文本（None）。
+    assert hiagent._json_object_response_format({"type": "json_object"}) is None

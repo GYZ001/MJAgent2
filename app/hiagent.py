@@ -1460,24 +1460,17 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
             break
         except ProviderError as exc:
             if attempt_response_format is not None and _looks_like_response_format_unsupported(exc):
+                # 能力阶梯：json_schema → json_object → 纯文本。
+                # 每一级只在网关明确拒绝上一级时下探一次，并把该能力缺失按
+                # provider:model 记住，之后的调用直接从可用的那一级开始。
+                # 无论降到哪一级，本地 schema 校验与业务校验始终是权威判据，
+                # 纯文本还会经过 extract_json 修复，所以降级不会放过错误答案，
+                # 只是把"合法 JSON 由谁保证"从网关移回本地。
                 degraded = _json_object_response_format(attempt_response_format)
                 if degraded is not None:
-                    # The gateway named json_schema specifically.  Try the
-                    # weaker JSON guarantee it may still honour before giving
-                    # up the guarantee altogether -- this keeps
-                    # response_format_required callers working on models that
-                    # only implement json_object.
                     _remember_json_schema_unsupported(provider, selected_model)
                     attempt_response_format = degraded
                     continue
-                if response_format_required:
-                    # This operation declared provider-side schema enforcement
-                    # authoritative. A plain-text/json_object fallback would
-                    # silently weaken the contract and may create a second paid
-                    # generation, so propagate the first explicit rejection.
-                    raise
-                # 该 provider/model 明确拒绝 response_format：记录能力缺失并去掉该字段重试一次，
-                # 退回“纯文本 + 本地 extract_json 修复”的旧行为，绝不因此中断业务。
                 _remember_response_format_unsupported(provider, selected_model)
                 attempt_response_format = None
                 continue

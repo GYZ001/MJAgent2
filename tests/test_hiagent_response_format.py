@@ -225,7 +225,7 @@ async def test_json_object_first_provider_payload_contains_json_instruction(
 
 
 @pytest.mark.asyncio
-async def test_required_json_schema_rejection_never_downgrades_or_replays(
+async def test_response_format_capability_ladder_degrades_step_by_step(
     monkeypatch,
 ) -> None:
     payloads: list[dict] = []
@@ -286,6 +286,7 @@ async def test_required_json_schema_rejection_never_downgrades_or_replays(
         )
 
     monkeypatch.setattr(hiagent, "_plain_chat_request", rejected_request)
+    hiagent._JSON_SCHEMA_UNSUPPORTED.discard(capability_key)
     try:
         with pytest.raises(hiagent.ProviderError, match="unsupported parameter"):
             await hiagent.chat(
@@ -297,11 +298,19 @@ async def test_required_json_schema_rejection_never_downgrades_or_replays(
                     "response_format_required": True,
                 },
             )
-        assert len(payloads) == 1
-        assert payloads[0]["response_format"] == response_format
+        # 能力阶梯：json_schema → json_object → 纯文本。每一级只在网关明确拒绝
+        # 上一级时下探一次，能力缺失按 provider:model 记住，后续调用直接从可用的
+        # 那一级开始，不会每次都重新试探。
+        assert [item.get("response_format") for item in payloads] == [
+            response_format,
+            {"type": "json_object"},
+            None,
+        ]
+        assert hiagent._json_schema_known_unsupported(provider, model) is True
         assert (
             hiagent._response_format_known_unsupported(provider, model)
-            is False
+            is True
         )
     finally:
         hiagent._RESPONSE_FORMAT_UNSUPPORTED.discard(capability_key)
+        hiagent._JSON_SCHEMA_UNSUPPORTED.discard(capability_key)
