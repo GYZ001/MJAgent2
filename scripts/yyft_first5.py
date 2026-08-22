@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import sys
 import time
@@ -204,6 +205,13 @@ def cmd_retry() -> int:
 
 
 SERIAL_ATTEMPTS_PER_EPISODE = 4
+_ERROR_CODE = re.compile(r"ERR-\d{8}-[0-9a-f]{6}")
+
+
+def _failure_signature(message: str) -> str:
+    """Identify a failure by its shape, ignoring the per-run error code."""
+    text = _ERROR_CODE.sub("", str(message or "")).strip()
+    return text[:160]
 TERMINAL_STATES = {"ready", "failed"}
 
 
@@ -268,6 +276,7 @@ def cmd_serial() -> int:
             log(f"{name} already ready, skipping")
             results[name] = "ready"
             continue
+        last_signature = ""
         for attempt in range(1, SERIAL_ATTEMPTS_PER_EPISODE + 1):
             payload = status_of(eid)
             state = str(payload.get("screenplay_status") or "")
@@ -293,8 +302,18 @@ def cmd_serial() -> int:
             state = str(payload.get("screenplay_status") or "")
             if state == "ready":
                 break
-            log(f"{name} attempt {attempt} ended in {state}: "
-                f"{(payload.get('screenplay_error') or '')[:200]}")
+            failure = (payload.get("screenplay_error") or "")[:200]
+            log(f"{name} attempt {attempt} ended in {state}: {failure}")
+            # Retrying is only worth a paid attempt when something changed.
+            # An identical failure means the next attempt reproduces it, so the
+            # remaining budget would just repeat the same paid generation --
+            # in production EP2 burned all four attempts on one deterministic
+            # identity-adjudication failure.
+            signature = _failure_signature(failure)
+            if signature and signature == last_signature:
+                log(f"{name} 与上一次失败完全相同，停止重试（{signature}）")
+                break
+            last_signature = signature
         final = str(status_of(eid).get("screenplay_status") or "")
         results[name] = final
         log(f"{name} FINAL={final}")

@@ -1920,6 +1920,24 @@ def prepare_ir_identity_authorities(
                     "identity_kind": "functional",
                     "source_labels": list(identity.source_names),
                 }
+        if (
+            explicit
+            and authority is None
+            and identity.kind == "referenced_identity"
+            and explicit == f"reference:{identity.display_name}"
+        ):
+            # 后端自己签发的非人物引用权威（宗门、器物这类"文字/物件归属"）。
+            # identity_authority_registry 只从人物谱与本集人物决议派生，看不到它，
+            # 于是它会被当成"未知权威"送进人物身份仲裁——而那个仲裁只有
+            # 绑定已有人物 / 新真名 / 新功能身份三种结论，宗门一个都满足不了，
+            # 只能判"证据不足"，整集必死（生产上 EP2 每次都停在 reference:靠山宗）。
+            # 权威 ID 是由 display_name 逐字派生的，可被后端自证，不会被模型伪造。
+            authority = {
+                "authority_id": explicit,
+                "canonical_name": identity.display_name,
+                "identity_kind": "reference",
+                "source_labels": list(identity.source_names),
+            }
         if explicit and authority is None and legacy_self_authority:
             legacy_seed = json.dumps(
                 {
