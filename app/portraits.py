@@ -1244,6 +1244,37 @@ def _merge_current_identity_occurrences(options: list[dict]) -> dict:
     return merged
 
 
+def _normalize_current_identity_payload(payload: dict) -> dict:
+    """Drop fields the K/N/F wire declares redundant before strict validation.
+
+    A K decision's token already binds its evidence, so an ``evidence_ref``
+    echoed alongside it carries nothing the backend does not own -- yet the
+    strict ``extra="forbid"`` shape turns that echo into a whole-episode
+    format failure (production EP4: ``k.0.evidence_ref Extra inputs are not
+    permitted``).  Only keys the model has no authority over are removed;
+    anything unknown on N/F stays and still fails closed, because those
+    branches carry model-authored content the backend cannot second-guess.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    known = payload.get("k")
+    if not isinstance(known, list):
+        return payload
+    allowed = set(CurrentKnownIdentityDecision.model_fields)
+    cleaned: list[dict] = []
+    changed = False
+    for item in known:
+        if not isinstance(item, dict):
+            cleaned.append(item)
+            continue
+        trimmed = {key: value for key, value in item.items() if key in allowed}
+        changed = changed or trimmed != item
+        cleaned.append(trimmed)
+    if not changed:
+        return payload
+    return {**payload, "k": cleaned}
+
+
 def _resolved_evidence_ref(raw: str, expected_refs: set[str]) -> str:
     """Repair a zero-padding slip in an otherwise in-catalog evidence ref.
 
@@ -1983,6 +2014,7 @@ async def _discover_character_candidates_legacy(
             [{"role": "user", "content": prompt}],
             model_type=CurrentIdentityCandidateResponse,
             validate=validate_current_response,
+            normalize_payload=_normalize_current_identity_payload,
             operation_id_for_attempt=lambda resample_attempt: (
                 f"screenplay.identity.current.v6:{episode_no}:{current_batch}:"
                 + evidence_repository.content_hash({

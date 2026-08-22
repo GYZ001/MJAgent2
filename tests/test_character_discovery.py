@@ -4,7 +4,7 @@ import sqlite3
 from types import SimpleNamespace
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app import api, db, hiagent, portraits, screenplay_scene_shards, stages
 from app.harness import model_gateway
@@ -7946,3 +7946,47 @@ def test_author_pen_name_is_recorded_as_not_a_character(monkeypatch) -> None:
         ).fetchone()["bible_json"]
     )
     assert "耳根" not in {item["name"] for item in bible["characters"]}
+
+
+def test_redundant_evidence_ref_on_a_k_decision_is_dropped() -> None:
+    """K 决议的 token 已经绑定证据，回声字段不该让整集格式失败。
+
+    Production EP4: ``k.0.evidence_ref Extra inputs are not permitted`` —
+    the model echoed a field the backend already owns, and the strict
+    ``extra="forbid"`` shape turned that into a whole-episode failure.
+    """
+    payload = {
+        "k": [{
+            "decision_id": "K:E002:abc",
+            "kind": "onscreen",
+            "evidence_ref": "E002",
+        }],
+        "n": [],
+        "f": [],
+    }
+
+    normalized = portraits._normalize_current_identity_payload(payload)
+
+    assert normalized["k"] == [{"decision_id": "K:E002:abc", "kind": "onscreen"}]
+    portraits.CurrentIdentityCandidateResponse.model_validate(normalized)
+
+
+def test_unknown_fields_on_n_and_f_still_fail_closed() -> None:
+    """只清理后端本就拥有的字段；N/F 携带模型创作内容，不得替它猜。"""
+    payload = {
+        "k": [],
+        "n": [{
+            "evidence_ref": "E001",
+            "identity_label": "陈三",
+            "name_kind": "personal_name",
+            "kind": "onscreen",
+            "unexpected": "x",
+        }],
+        "f": [],
+    }
+
+    normalized = portraits._normalize_current_identity_payload(payload)
+
+    assert normalized["n"][0]["unexpected"] == "x"
+    with pytest.raises(ValidationError):
+        portraits.CurrentIdentityCandidateResponse.model_validate(normalized)
