@@ -174,3 +174,82 @@ async def test_truncation_at_the_output_limit_still_fails(monkeypatch) -> None:
         == hiagent.ProviderFailureKind.OUTPUT_TRUNCATED.value
     )
     assert len(payloads) == 2
+
+
+@pytest.mark.asyncio
+async def test_native_tool_calls_go_through_the_same_conversion_point(
+    monkeypatch,
+) -> None:
+    """工具调用路径过去完全绕开换算入口，默认 65535 已超过模型上限 32768。"""
+    _patch_model(monkeypatch)
+    payloads: list[dict] = []
+
+    monkeypatch.setattr(hiagent, "_provider_supports_tools", lambda _p: True)
+    monkeypatch.setattr(hiagent, "_streaming_enabled", lambda: False)
+    monkeypatch.setattr(
+        hiagent,
+        "_resolve_text_connection",
+        lambda *_a, **_k: ("https://example.invalid/chat", "thinking-model", {}, "k"),
+    )
+
+    async def fake_post(_client, _url, payload, **_kwargs):
+        payloads.append(payload)
+        return {
+            "choices": [
+                {"finish_reason": "stop", "message": {"role": "assistant", "content": "好"}}
+            ]
+        }
+
+    monkeypatch.setattr(hiagent, "_post_json", fake_post)
+
+    turn = await hiagent.chat_with_tools([{"role": "user", "content": "hi"}], [])
+
+    assert turn.content == "好"
+    assert payloads[0]["max_tokens"] == 32768
+
+
+@pytest.mark.asyncio
+async def test_truncated_tool_call_is_not_executed_as_a_complete_answer(
+    monkeypatch,
+) -> None:
+    """截断的 tool_call 参数是残缺 JSON，必须报 OUTPUT_TRUNCATED 而不是照常返回。"""
+    _patch_model(monkeypatch)
+    monkeypatch.setattr(hiagent, "_provider_supports_tools", lambda _p: True)
+    monkeypatch.setattr(hiagent, "_streaming_enabled", lambda: False)
+    monkeypatch.setattr(
+        hiagent,
+        "_resolve_text_connection",
+        lambda *_a, **_k: ("https://example.invalid/chat", "thinking-model", {}, "k"),
+    )
+
+    async def fake_post(_client, _url, _payload, **_kwargs):
+        return {
+            "choices": [
+                {
+                    "finish_reason": "length",
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "function": {
+                                    "name": "screenplay.generate",
+                                    "arguments": '{"episode_id": "ep_',
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+            "usage": {"completion_tokens": 32769},
+        }
+
+    monkeypatch.setattr(hiagent, "_post_json", fake_post)
+
+    with pytest.raises(hiagent.ProviderError) as excinfo:
+        await hiagent.chat_with_tools([{"role": "user", "content": "hi"}], [])
+
+    assert (
+        excinfo.value.failure_kind
+        == hiagent.ProviderFailureKind.OUTPUT_TRUNCATED.value
+    )

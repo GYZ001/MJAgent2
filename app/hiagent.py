@@ -2369,6 +2369,14 @@ async def chat_with_tools(
       路径与 JSON 回退协议暂不流式，最终结果一致。
     """
     provider = active_provider("text")
+    # 与 chat() 走同一个换算入口：调用方传的是「答案预算」，这里叠加模型的思考
+    # 预留并夹紧到它真实的 max_output_tokens。此前这条路径完全绕开该入口，
+    # 默认值 65535 甚至已经超过模型默认上限 32768。
+    _provider, _model, max_tokens = text_request_token_limits(
+        requested_max_tokens=max_tokens,
+        provider=provider,
+        model=model,
+    )
     if not _provider_supports_tools(provider):
         return await _chat_tools_via_json_protocol(
             messages, tools, temperature=temperature, max_tokens=max_tokens,
@@ -2410,6 +2418,9 @@ async def chat_with_tools(
                     messages, tools, temperature=temperature, max_tokens=max_tokens,
                     call_meta=call_meta, on_token=on_token)
             raise
+    # 被截断的工具调用参数是**残缺的 JSON**，编排器却会照常执行它。
+    # 和普通文本调用同等对待：截断即失败，带上可诊断的 OUTPUT_TRUNCATED。
+    _reject_truncated_chat_response(data)
     return _parse_assistant_turn(data, label="chat_tools")
 
 
