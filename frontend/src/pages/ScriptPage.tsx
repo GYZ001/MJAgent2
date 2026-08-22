@@ -316,16 +316,17 @@ export default function ScriptPage() {
       baseline: baselineVersion ?? draftEpisodeArtifactId,
       saved_at: Date.now(),
     }
-    // localStorage 是同步 API 且只有几 MB 配额：超额时 setItem 会**抛异常**。
-    // 在这个 effect 里抛出会中断整条编辑链路，而本地副本本来就只是云端草稿的
-    // 冗余兜底，丢了不影响正确性，所以失败只降级、不阻断。
-    try {
-      localStorage.setItem(localDraftKey, JSON.stringify(payload))
-    } catch {
-      try { localStorage.removeItem(localDraftKey) } catch { /* 配额已满且无法清理 */ }
-    }
     setDraftSaveState('saving')
     const timer = window.setTimeout(() => {
+      // 本地快照和云端保存共用同一个防抖：JSON.stringify 整份剧本 + 同步写
+      // localStorage 原本每次按键都发生，是编辑器里最贵的同步操作之一。
+      // localStorage 配额溢出时 setItem 会**抛异常**，而本地副本只是云端草稿的
+      // 冗余兜底，丢了不影响正确性，所以失败只降级、不阻断编辑。
+      try {
+        localStorage.setItem(localDraftKey, JSON.stringify(payload))
+      } catch {
+        try { localStorage.removeItem(localDraftKey) } catch { /* 配额已满且无法清理 */ }
+      }
       api.put(`/episodes/${draftEpisodeId}/screenplay/draft`, {
         content: draft ?? undefined,
         baseline_artifact_id: baselineVersion ?? draftEpisodeArtifactId,
@@ -368,7 +369,10 @@ export default function ScriptPage() {
   const mutateDraft = (updater: (current: EpisodeScreenplay) => EpisodeScreenplay) => {
     setDraft(current => {
       if (!current) return current
-      historyRef.current.push(cloneScript(current)!)
+      // 一次按键只做一次整份深拷贝：把 `current` 原样留给历史栈（它此后不再被写），
+      // 只给 updater 一份新副本。原来两次拷贝里，历史栈那份和交给 updater 那份
+      // 内容完全相同，等于每次按键白拷一遍整份剧本。
+      historyRef.current.push(current)
       if (historyRef.current.length > 80) historyRef.current.shift()
       redoRef.current = []
       return updater(cloneScript(current)!)
@@ -1402,7 +1406,12 @@ function ScreenplayReader({
   const currentBeats = currentSpineItems.flatMap(item => item.kind === 'beat' ? [item] : [])
   const currentDrops = currentSpineItems.flatMap(item => item.kind === 'drop' ? [item] : [])
   const query = search.trim().toLowerCase()
-  const matches = query ? (script.full_script_text ?? '').toLowerCase().split(query).length - 1 : 0
+  // 整份正文的 toLowerCase + split 原本写在 render 体里，阅读器的每一次重渲染
+  // （翻页、轮询回包、父组件更新）都会重算一遍全文。
+  const matches = useMemo(
+    () => (query ? (script.full_script_text ?? '').toLowerCase().split(query).length - 1 : 0),
+    [query, script.full_script_text],
+  )
 
   useEffect(() => {
     setSpinePage(0)

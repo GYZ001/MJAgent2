@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -45,17 +44,23 @@ LOG = ROOT / "logs" / "serial10.log"
 
 # 只有这些才算供应商限流。普通 timeout / 连接错误 / JSON / schema / 模型输出异常
 # 一律不算，必须停下来做根因分析。
+#
+# 刻意不放裸 "429"/"tpm"/"rpm"：错误码形如 ERR-20260822-4295ab，裸数字与两字母
+# 缩写会在无关文本里假阳性，把一个真实缺陷误判成限流并自动等 30 分钟——那正是
+# 任务书禁止的。HTTP 429 由 provider_calls.http_status 这一**结构化**字段单独判定。
 RATE_LIMIT_MARKERS = (
-    "429",
     "rate_limit",
     "rate limit",
     "ratelimit",
     "too many requests",
-    "quota",
+    "quota exceeded",
+    "quota temporarily",
+    "insufficient_quota",
     "限流",
-    "tpm",
-    "rpm",
+    "请求过于频繁",
     "concurrency limit",
+    "tokens per minute",
+    "requests per minute",
 )
 
 
