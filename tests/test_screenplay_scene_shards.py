@@ -10731,3 +10731,20 @@ def test_deterministic_rejection_is_the_only_tolerated_review_failure() -> None:
         received_chars=900,
     )
     assert ordinary.failure_kind != "deterministic_rejection"
+
+
+def test_attributed_text_unit_needs_no_person_state_subject() -> None:
+    """Engraved text belongs to its owner, not to anyone's present state.
+
+    Production EP2: `SRC0020:008:unit` is the 「杂」 carved on a wooden token,
+    a quoted unit delivered as written_text and attributed to the sect.  It is
+    neither a character's state nor ownerless environment, so both branches of
+    the usual rule rejected it and the episode paused every single round.
+    """
+    modes = scene_shards_module._ATTRIBUTED_TEXT_DELIVERY_MODES
+    assert modes == frozenset({"written_text", "sound_effect"})
+    # Embodied speech is deliberately absent: someone performs it, and that
+    # performer must still be a frozen person with a state subject.
+    assert "spoken_dialogue" not in modes
+    assert "offscreen_voice" not in modes
+    assert "unspoken_reference" not in modes

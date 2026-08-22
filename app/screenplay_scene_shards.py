@@ -117,6 +117,14 @@ SCREENPLAY_SCENE_SHARD_REASONING_RESERVE_PERCENT = 20
 # second spent waiting is a second one of the few provider slots sits idle.  A
 # 4s+16s schedule starved the pool badly enough to cancel three episodes'
 # blueprint stage outright -- worse than the failure it was meant to absorb.
+# Engraved characters, notices and sound effects are attributed by
+# ``content_owner_key`` -- the sect that made the token owns the 「杂」 carved on
+# it -- and belong to nobody's present state.  Demanding a person's
+# state_subject for them asks the wrong question, and they are not ownerless
+# environment either, so neither branch of the usual rule fits.  They already
+# carry a typed owner, which is why this is a narrower rule and not a hole.
+_ATTRIBUTED_TEXT_DELIVERY_MODES = frozenset({"written_text", "sound_effect"})
+
 SCENE_SHARD_UNDELIVERED_BACKOFF_S = (1.5, 4.0)
 SCENE_SHARD_UNDELIVERED_RETRIES = len(SCENE_SHARD_UNDELIVERED_BACKOFF_S)
 
@@ -1881,7 +1889,14 @@ def _compile_unit_identity_scaffold(
         errors.append(
             f"{slot.unit_key} 同时声明人物主体与 environment_only"
         )
-    elif not environment_only and not state_subject_keys:
+    elif (
+        not environment_only
+        and not state_subject_keys
+        and not (
+            slot.delivery_mode in _ATTRIBUTED_TEXT_DELIVERY_MODES
+            and slot.content_owner_key
+        )
+    ):
         errors.append(
             f"{slot.unit_key} 缺少 single/joint state_subject 结构证据，"
             "且未显式声明 environment_only"
