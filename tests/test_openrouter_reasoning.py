@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from app import hiagent
+from app import hiagent, model_capabilities
 
 
 def test_openrouter_retries_without_reasoning_when_budget_is_exhausted(monkeypatch) -> None:
@@ -98,12 +98,20 @@ def test_reasoning_fallback_reports_both_paid_response_usages(monkeypatch) -> No
 
 
 def test_nonempty_length_response_is_rejected_as_truncated(monkeypatch) -> None:
-    calls = 0
+    """截断仍然是失败，且绝不做**盲重放**——只允许一次抬高上限的确定性重发。
+
+    历史上这里断言 ``calls == 1``：一次被截断的回答不得被原样重发，否则就是
+    为同一个语义 operation 重复付费而没有任何新信息。这条保证依旧成立，
+    但「同一请求原样再发一次」和「把 max_tokens 抬到模型输出上限再发一次」
+    不是一回事：后者是一个**参数不同**的确定性请求，正是截断这一已知失败的
+    对症处置（生产上 reasoning token 与正文共用 completion 预算，占比中位 97%）。
+    所以这里锁死的是：至多两次、第二次必须抬到模型上限、且顶到上限仍失败。
+    """
+    calls: list[int] = []
 
     async def fake_post_json(client, url, payload, *, kind, model, retries=2,
                              headers=None, key_name="", meta=None):
-        nonlocal calls
-        calls += 1
+        calls.append(int(payload["max_tokens"]))
         return {
             "choices": [{
                 "finish_reason": "length",
@@ -151,7 +159,10 @@ def test_nonempty_length_response_is_rejected_as_truncated(monkeypatch) -> None:
     assert exc.value.failure_kind == "output_truncated"
     assert exc.value.retryable is False
     assert exc.value.replay_safe is False
-    assert calls == 1
+    # 至多一次抬升；两次请求的 max_tokens 必须不同（不是盲重放）。
+    assert len(calls) == 2
+    assert len(set(calls)) == 2
+    assert calls[-1] == model_capabilities.DEFAULT_MAX_OUTPUT_TOKENS
 
 
 def test_custom_provider_nonempty_length_response_is_rejected(
