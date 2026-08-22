@@ -225,6 +225,17 @@ IR_FIDELITY_PATCH_MAX_TOKENS = 16384
 BLUEPRINT_LEAF_PROVIDER_CALLS = 2
 BLUEPRINT_LEAF_CALL_HEADROOM = 8
 BLUEPRINT_GENERATION_MAX_SPLIT_DEPTH = 4
+# 场次语义门禁耗尽修复轮次后仍未收口，往往不是文案问题，而是**蓝图把这个 source unit
+# 分错了类**（例如把一句人物内在特质标成纯环境）：环境 slot 不许写人物内容，源文却整句
+# 都是人物，两条路都通不过 —— 合同可证明无解，而场次层唯一的补救手段（重写文案）
+# 修不好一个分类错误。生产 EP2 的 SS002 因此累计打了 254 次 provider 调用、
+# 整片重写 8 次，每一轮双审共识都给出完全相同的判定。
+#
+# 这一层的正确动作是把证据交回**拥有该决定的那一层**：带着「哪些 unit 下游无解、
+# 审查员原话是什么」重建一次蓝图。它不是盲目重摇——反馈会进入分片的 source payload，
+# 既改变 source_hash（使已缓存分片不被复用），也作为显式约束进入提示词。
+# 严格限一次：真正无解的输入不会因为多试几次而变得有解。
+SCREENPLAY_BLUEPRINT_SEMANTIC_REBUILD_LIMIT = 1
 
 
 def screenplay_ir_token_budget(source_text: str) -> int:
@@ -7073,6 +7084,20 @@ def _blueprint_shard_prompt(
         "同理只能指向已建立事实。"
         "所有描述字段简洁，不复述原文或Schema。"
     )
+    if any(
+        item.get("downstream_semantic_conflicts")
+        for item in source_payload
+    ):
+        rules += (
+            "本分片的 target_sources 中带 downstream_semantic_conflicts 的 unit，"
+            "上一版蓝图给它的归类在下游场次写作里被两位独立校对员一致判定为无法成立："
+            "环境 slot 不得写人物内容，而这些 unit 的源文本身就在讲人物，"
+            "或者归属主体与源文语义不符。必须为这些 unit 重新给出成立的归属："
+            "若源文讲的是某个人物的状态、反应、动作或内在特质，就把它写进该人物的 "
+            "state_subject 证据，不要放进 environment_source_unit_keys；"
+            "若它确实只是环境、空间或物件的客观现象，才保留为环境。"
+            "不得为了绕过冲突而删除、合并或改写这些 unit 的来源归属之外的结构。"
+        )
     compact = lambda value: json.dumps(  # noqa: E731 - local canonical renderer
         value,
         ensure_ascii=False,
@@ -7859,12 +7884,84 @@ def _blueprint_generation_budget_for_trace(
     return budget
 
 
+def _append_blueprint_semantic_rebuild_event(
+    *,
+    episode_id: str,
+    shard_id: str,
+    unresolved: dict[str, list[str]],
+    rebuild_no: int,
+) -> None:
+    """Leave durable evidence that a blueprint was rebuilt for a dead end."""
+    from app.evidence import repository as evidence_repository
+    from app.observability.tracing import current_trace
+
+    try:
+        run_id = current_trace().run_id
+    except Exception:  # noqa: BLE001 - evidence must never break generation
+        run_id = None
+    if not run_id:
+        return
+    try:
+        evidence_repository.append_event(
+            run_id,
+            "BLUEPRINT_SEMANTIC_REBUILD",
+            "warn",
+            (
+                f"场次语义门禁在 {shard_id} 未收口，按下游证据重建叙事蓝图"
+                f"（第 {rebuild_no} 次，上限 "
+                f"{SCREENPLAY_BLUEPRINT_SEMANTIC_REBUILD_LIMIT} 次）"
+            ),
+            payload={
+                "episode_id": episode_id,
+                "shard_id": shard_id,
+                "unresolved_semantic_units": unresolved,
+                "rebuild_no": rebuild_no,
+            },
+        )
+    except Exception:  # noqa: BLE001 - evidence must never break generation
+        return
+
+
+def _blueprint_shard_source_entry(
+    segment: Any,
+    semantic_feedback: dict[str, list[str]] | None,
+) -> dict[str, Any]:
+    """One shard source entry, carrying any downstream semantic dead-end.
+
+    The feedback rides inside the source payload on purpose: that payload is
+    hashed into ``source_hash``, so a rebuild neither reuses the cached leaf nor
+    replays the same provider operation, and it is serialised into the prompt,
+    so the model sees exactly which unit could not be rendered and why.
+    """
+    entry: dict[str, Any] = {
+        "source_segment_id": segment.segment_id,
+        "text": segment.text,
+        "source_facts": [
+            fact.model_dump(mode="json")
+            for fact in source_segment_facts(
+                segment.segment_id,
+                segment.text,
+            )
+        ],
+    }
+    prefix = f"{segment.segment_id}:"
+    conflicts = {
+        unit_key: list(messages)
+        for unit_key, messages in (semantic_feedback or {}).items()
+        if unit_key.startswith(prefix)
+    }
+    if conflicts:
+        entry["downstream_semantic_conflicts"] = conflicts
+    return entry
+
+
 async def _generate_sharded_narrative_blueprint(
     episode: dict[str, Any],
     source_text: str,
     bible_context: dict[str, Any],
     *,
     generation_budget: _BlueprintGenerationBudget | None = None,
+    semantic_feedback: dict[str, list[str]] | None = None,
 ) -> NarrativeBlueprint:
     from app.evidence import repository as evidence_repository
     from app.harness.types import EvidenceArtifact
@@ -7911,17 +8008,7 @@ async def _generate_sharded_narrative_blueprint(
         split_depth = shard_split_depths[shard_index - 1]
         source_ids = [segment.segment_id for segment in shard_segments]
         source_payload = [
-            {
-                "source_segment_id": segment.segment_id,
-                "text": segment.text,
-                "source_facts": [
-                    fact.model_dump(mode="json")
-                    for fact in source_segment_facts(
-                        segment.segment_id,
-                        segment.text,
-                    )
-                ],
-            }
+            _blueprint_shard_source_entry(segment, semantic_feedback)
             for segment in shard_segments
         ]
         boundary = _blueprint_shard_boundary_context(merged_nodes)
@@ -8444,6 +8531,8 @@ async def _generate_screenplay_narrative_blueprint(
     episode: dict[str, Any],
     source_text: str,
     bible: Bible,
+    *,
+    semantic_feedback: dict[str, list[str]] | None = None,
 ) -> NarrativeBlueprint:
     from app.observability.tracing import current_trace
 
@@ -8456,6 +8545,9 @@ async def _generate_screenplay_narrative_blueprint(
         "SELECT input_fingerprint FROM workflow_runs WHERE id=?",
         (trace.run_id,),
     ).fetchone()
+    # 带着下游死结重建时绝不能复用上一版蓝图：那份蓝图正是死结的来源。
+    if semantic_feedback:
+        current_run = None
     if current_run is not None:
         rows = get_conn().execute(
             """SELECT a.content_json,a.content_hash
@@ -8542,6 +8634,7 @@ async def _generate_screenplay_narrative_blueprint(
         source_text,
         bible_context,
         generation_budget=generation_budget,
+        semantic_feedback=semantic_feedback,
     )
     return await _semantic_review_narrative_blueprint(
         candidate,
@@ -9589,28 +9682,54 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
             source_text=source_text,
         )
     )
-    narrative_blueprint = await _run_screenplay_workflow_step(
-        "screenplay_blueprint",
-        lambda: _generate_screenplay_narrative_blueprint(
-            episode,
-            source_text,
-            bible,
-        ),
-        agent_name="screenplay_blueprint",
-        context_manifest={
-            "episode_id": str(episode.get("id") or ""),
-            "source_chars": len(source_text),
-        },
-    )
-    if str(
+    scene_shards_enabled = str(
         get_setting("screenplay_scene_shards_enabled") or "true"
-    ).strip().lower() not in {"0", "false", "off", "no"}:
-        return await _generate_screenplay_scene_sharded_baseline(
-            episode,
-            source_text,
-            bible,
-            narrative_blueprint=narrative_blueprint,
+    ).strip().lower() not in {"0", "false", "off", "no"}
+    semantic_feedback: dict[str, list[str]] = {}
+    for rebuild_no in range(SCREENPLAY_BLUEPRINT_SEMANTIC_REBUILD_LIMIT + 1):
+        narrative_blueprint = await _run_screenplay_workflow_step(
+            "screenplay_blueprint",
+            lambda: _generate_screenplay_narrative_blueprint(
+                episode,
+                source_text,
+                bible,
+                semantic_feedback=dict(semantic_feedback),
+            ),
+            agent_name="screenplay_blueprint",
+            context_manifest={
+                "episode_id": str(episode.get("id") or ""),
+                "source_chars": len(source_text),
+                "semantic_rebuild_no": rebuild_no,
+            },
         )
+        if not scene_shards_enabled:
+            break
+        from app.screenplay_scene_shards import ScreenplaySceneShardError
+
+        try:
+            return await _generate_screenplay_scene_sharded_baseline(
+                episode,
+                source_text,
+                bible,
+                narrative_blueprint=narrative_blueprint,
+            )
+        except ScreenplaySceneShardError as exc:
+            unresolved = dict(
+                getattr(exc, "unresolved_semantic_units", {}) or {}
+            )
+            # 只有「语义门禁耗尽修复轮次仍未收口」才带 unresolved：其余分片失败
+            # （schema、归属、预算）不属于蓝图分类问题，照常向上抛。
+            if not unresolved or rebuild_no >= (
+                SCREENPLAY_BLUEPRINT_SEMANTIC_REBUILD_LIMIT
+            ):
+                raise
+            semantic_feedback = unresolved
+            _append_blueprint_semantic_rebuild_event(
+                episode_id=str(episode.get("id") or ""),
+                shard_id=str(getattr(exc, "shard_id", "") or ""),
+                unresolved=unresolved,
+                rebuild_no=rebuild_no + 1,
+            )
     blueprint_json = json.dumps(
         narrative_blueprint.model_dump(mode="json"),
         ensure_ascii=False,
