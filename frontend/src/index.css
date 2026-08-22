@@ -7046,7 +7046,23 @@ table.calls-ledger th:nth-child(6) {
   margin: 8px 0 7px;
   padding: 0;
   overflow: auto;
+  /* 同为深色面：scrollbar-color 只有 Firefox 认，Chrome / Safari 还要 webkit 伪元素，
+     否则仍是白轨灰条。取值与 .spine 保持一致。 */
+  scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+.workspace-switcher-list::-webkit-scrollbar {
+  width: 6px;
+}
+.workspace-switcher-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.workspace-switcher-list::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+}
+.workspace-switcher-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.32);
 }
 .workspace-switcher-list > button {
   min-height: 52px;
@@ -7944,6 +7960,23 @@ select {
     linear-gradient(180deg, #20252d, #171b22);
   box-shadow: 5px 0 30px rgba(22, 27, 34, 0.08);
   z-index: 70;
+  /* 侧栏是深色面，默认滚动条是白轨灰条，贴在这个背景上非常刺眼。
+     取值与 .character-portrait-track / .workspace-switcher-list 的深色滚动条一致。 */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+.spine::-webkit-scrollbar {
+  width: 6px;
+}
+.spine::-webkit-scrollbar-track {
+  background: transparent;
+}
+.spine::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+}
+.spine::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.32);
 }
 .spine.collapsed {
   width: 76px;
