@@ -4357,6 +4357,12 @@ def episode_detail(episode_id: str, view: str | None = None):
     if view in (None, "board"):
         from app.storyboard_workspace import reconcile_cancelled_storyboard_run
         reconcile_cancelled_storyboard_run(episode_id)
+    with evidence_repository.artifact_read_scope():
+        return _episode_detail_projection(episode_id, view)
+
+
+def _episode_detail_projection(episode_id: str, view: str | None) -> dict:
+    """Read-only projection body; the caller owns reconciliation and scoping."""
     full = view is None
     ep = dict(_episode_or_404(episode_id))
     conn = get_conn()
@@ -4369,7 +4375,14 @@ def episode_detail(episode_id: str, view: str | None = None):
             raise
         screenplay_rebuild_error = exc
         script = None
-    ep["screenplay"] = script.model_dump() if script and (full or view in ("script", "board")) else None
+    screenplay_payload = (
+        script.model_dump() if script and (full or view in ("script", "board")) else None
+    )
+    if view == "script":
+        # 剧本台不读也不改叙事蓝图；不下发它，写回时由服务端从权威补齐。
+        screenplay_payload = screenplay_workspace_projection(screenplay_payload)
+        ep["screenplay_withheld_fields"] = list(SCREENPLAY_WORKSPACE_WITHHELD_FIELDS)
+    ep["screenplay"] = screenplay_payload
     narrative_workspace = view in ("script", "board")
     ep["narrative_contract_summary"] = (
         _narrative_contract_summary(script) if narrative_workspace else None
@@ -4432,7 +4445,12 @@ def episode_detail(episode_id: str, view: str | None = None):
             storyboard_artifact_id
         )
     ep["storyboard_evidence"] = storyboard_artifact
-    ep.pop("screenplay_json", None)
+    # 页面投影不回传整份 screenplay_json，但 screenplay_state 的权威判定必须看得见它：
+    # 先 pop 再判定会让 _screenplay_ready 因「没有页面投影」直接 fail-closed，于是
+    # 同一时刻 GET /episodes/{id}?view=script 报 qa_certificate_invalid，
+    # 而 GET /episodes/{id}/screenplay/status 报 ready —— 两个端点对同一集给出
+    # 互相矛盾的权威状态（剧本台恰好把两者合并展示）。
+    screenplay_projection_json = ep.pop("screenplay_json", None)
     # 分镜大纲（先规划后逐镜填充）：透出给前端做 已通过 k / 计划 N 镜 的进度展示
     outline = None
     outline_json_for_gate = (
@@ -4501,7 +4519,7 @@ def episode_detail(episode_id: str, view: str | None = None):
     ep["shot_count"] = shot_count
     if full or view == "script":
         ep["screenplay_state"] = _screenplay_authority_state(
-            ep,
+            {**ep, "screenplay_json": screenplay_projection_json},
             shot_count=shot_count,
             production=ep.get("screenplay_production"),
             rebuild_error=screenplay_rebuild_error,

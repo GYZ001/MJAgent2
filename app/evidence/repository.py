@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import hashlib
 import json
 import logging
@@ -112,6 +114,13 @@ def verified_artifact_content_hash(artifact: dict[str, Any]) -> str:
     uses the artifact or accepts a caller-supplied CAS hash.
     """
     stored_hash = str(artifact.get("content_hash") or "")
+    artifact_id = str(artifact.get("id") or "")
+    scope = _ARTIFACT_READ_SCOPE.get()
+    scope_key = (artifact_id, stored_hash, str(artifact.get("file_path") or ""))
+    if scope is not None and artifact_id and scope_key in scope["verified_hashes"]:
+        # Same row, same seal, same read-only scope: re-hashing multiple
+        # megabytes again cannot reach a different verdict.
+        return scope["verified_hashes"][scope_key]
     try:
         current_hash = content_hash(
             artifact.get("content"),
@@ -121,6 +130,8 @@ def verified_artifact_content_hash(artifact: dict[str, Any]) -> str:
         raise ValueError("Artifact 当前内容无法重新计算指纹") from exc
     if not stored_hash or stored_hash != current_hash:
         raise ValueError("Artifact 内容与存储指纹漂移")
+    if scope is not None and artifact_id:
+        scope["verified_hashes"][scope_key] = current_hash
     return current_hash
 
 
@@ -769,10 +780,45 @@ def get_events(run_id: str, *, after: float | None = None, limit: int = 500) -> 
     return _decode_rows(rows)
 
 
+_ARTIFACT_READ_SCOPE: contextvars.ContextVar[dict[str, Any] | None] = (
+    contextvars.ContextVar("artifact_read_scope", default=None)
+)
+
+
+@contextlib.contextmanager
+def artifact_read_scope():
+    """Read-only scope where one Artifact row is fetched and decoded once.
+
+    Authority verification walks the same lineage repeatedly: resolving one
+    published screenplay reads its Artifact row 36 times and JSON-decodes the
+    same multi-megabyte payload every time.  Inside a request that only reads,
+    those repeats can never observe different data than the first one would, so
+    memoising them changes nothing an API caller can distinguish -- a read
+    endpoint never promised a stronger snapshot than "some recent state".
+
+    Callers receive their own shallow copy of the row (``episode_detail`` pops
+    fields off it), while the decoded ``content`` object is shared and must be
+    treated as read-only, exactly as every current reader already does.
+    Writers must never open this scope.
+    """
+    token = _ARTIFACT_READ_SCOPE.set({"artifacts": {}, "verified_hashes": {}})
+    try:
+        yield
+    finally:
+        _ARTIFACT_READ_SCOPE.reset(token)
+
+
 def get_artifact(artifact_id: str, *, conn=None) -> dict[str, Any] | None:
+    scope = _ARTIFACT_READ_SCOPE.get()
+    if scope is not None and artifact_id in scope["artifacts"]:
+        cached = scope["artifacts"][artifact_id]
+        return dict(cached) if cached is not None else None
     db = conn or get_conn()
     row = db.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
-    return _decode_rows([dict(row)])[0] if row else None
+    decoded = _decode_rows([dict(row)])[0] if row else None
+    if scope is not None:
+        scope["artifacts"][artifact_id] = decoded
+    return dict(decoded) if decoded is not None else None
 
 
 def latest_artifact(

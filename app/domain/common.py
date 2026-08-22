@@ -249,6 +249,52 @@ def _load_screenplay(ep) -> EpisodeScreenplay | None:
     return EpisodeScreenplay.model_validate(json.loads(ep["screenplay_json"]))
 
 
+# 剧本台工作区既不展示也不编辑这些字段：它们由生成管线撰写，是叙事权威的一部分。
+# 让页面下载 1.6 MB 的叙事蓝图再原样传回来，一是纯浪费（实测占 view=script 响应体
+# 的 85%，并让草稿自动保存每次都要 JSON.stringify 一份接近 localStorage 配额的对象），
+# 二是把「客户端回声」变成权威内容的一条写路径 —— 前端任何一次裁剪或序列化差异
+# 都会静默改写权威。工作区读不到它们，写回时由服务端从当前权威补齐。
+SCREENPLAY_WORKSPACE_WITHHELD_FIELDS = ("narrative_plan",)
+
+
+def screenplay_workspace_projection(payload):
+    """Strip the pipeline-authored fields the screenplay workspace never uses."""
+    if not isinstance(payload, dict):
+        return payload
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in SCREENPLAY_WORKSPACE_WITHHELD_FIELDS
+    }
+
+
+def merge_withheld_screenplay_fields(payload, *, authority):
+    """Restore withheld authority fields the workspace was never given.
+
+    A field the client never received cannot be an intentional deletion, so an
+    absent key inherits the current authority value.  A key the client did send
+    (an older local draft, an API consumer) is honoured unchanged.
+    """
+    if not isinstance(payload, dict) or authority is None:
+        return payload
+    missing = [
+        field
+        for field in SCREENPLAY_WORKSPACE_WITHHELD_FIELDS
+        if field not in payload
+    ]
+    if not missing:
+        return payload
+    authority_dump = (
+        authority.model_dump(mode="json")
+        if hasattr(authority, "model_dump")
+        else dict(authority)
+    )
+    merged = dict(payload)
+    for field in missing:
+        merged[field] = authority_dump.get(field)
+    return merged
+
+
 LEGACY_SCREENPLAY_PURGED_ERROR = "旧版拍卡剧本已下线，请重新生成完整剧本。"
 
 

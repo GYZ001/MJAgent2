@@ -506,12 +506,15 @@ def screenplay_lightweight_status(episode_id: str):
     shot_count = int(conn.execute(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
     ).fetchone()["c"])
-    production = _screenplay_production_state(episode_id)
-    snapshot = _screenplay_authority_state(
-        ep,
-        shot_count=shot_count,
-        production=production,
-    )
+    # 只读端点：同一次请求内权威链会反复读到同一批不可变 Artifact，
+    # 复读一次也得不到不同的答案（见 artifact_read_scope）。
+    with evidence_repository.artifact_read_scope():
+        production = _screenplay_production_state(episode_id)
+        snapshot = _screenplay_authority_state(
+            ep,
+            shot_count=shot_count,
+            production=production,
+        )
     return {
         "id": episode_id,
         "screenplay_status": ep["screenplay_status"],
@@ -2301,6 +2304,7 @@ def save_screenplay_draft(episode_id: str, body: dict):
     content = body.get("content")
     if content is None:
         raise HTTPException(422, "草稿内容不能为空")
+    content = _screenplay_payload_with_authority_fields(episode_id, content)
     baseline = body.get("baseline_artifact_id")
     current = ep.get("screenplay_artifact_id")
     validation: dict = {"baseline_current": str(baseline or "") == str(current or "")}
@@ -2620,7 +2624,9 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
     from app.validators import normalize_screenplay_candidate
 
     body = _as_body_dict(body)
-    payload = body.get("screenplay", body)
+    payload = _screenplay_payload_with_authority_fields(
+        episode_id, body.get("screenplay", body)
+    )
     expected_version = body.get("expected_version")
     routed = await ui_route("screenplay.repair_draft", {
         "episode_id": episode_id,
@@ -3367,11 +3373,43 @@ async def cancel_screenplay(episode_id: str):
     }
 
 
+def _screenplay_payload_with_authority_fields(episode_id: str, payload):
+    """Restore the fields the screenplay workspace was never given.
+
+    ``view=script`` withholds pipeline-authored authority fields
+    (``SCREENPLAY_WORKSPACE_WITHHELD_FIELDS``).  Every endpoint that accepts a
+    screenplay body from that workspace must merge them back from the current
+    authority *before* validation, routing or diffing, otherwise a page save
+    would silently publish a screenplay with its narrative authority erased.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    missing = [
+        field
+        for field in SCREENPLAY_WORKSPACE_WITHHELD_FIELDS
+        if field not in payload
+    ]
+    if not missing:
+        return payload
+    row = get_conn().execute(
+        "SELECT * FROM episodes WHERE id=?", (episode_id,)
+    ).fetchone()
+    if row is None:
+        return payload
+    try:
+        authority = _load_screenplay(row)
+    except Exception:  # noqa: BLE001 - a stale authority cannot supply fields
+        return payload
+    return merge_withheld_screenplay_fields(payload, authority=authority)
+
+
 @router.post("/episodes/{episode_id}/screenplay/impact-preview")
 def preview_screenplay_edit_impact(episode_id: str, body: dict):
     """发布前的纯读影响预览：不建任务、不设栅栏、不写证据。"""
     ep = dict(_episode_or_404(episode_id))
-    payload = body.get("screenplay", body)
+    payload = _screenplay_payload_with_authority_fields(
+        episode_id, body.get("screenplay", body)
+    )
     expected_version = body.get("expected_version")
     current_version = ep.get("screenplay_artifact_id") or ""
     if expected_version is not None and str(expected_version) != str(current_version):
@@ -3488,7 +3526,9 @@ def preview_screenplay_edit_impact(episode_id: str, body: dict):
 @router.put("/episodes/{episode_id}/screenplay")
 async def edit_screenplay(episode_id: str, body: dict):
     from app.capabilities.dispatch import ui_route
-    payload = body.get("screenplay", body)
+    payload = _screenplay_payload_with_authority_fields(
+        episode_id, body.get("screenplay", body)
+    )
     expected_version = body.get("expected_version")
     routed = await ui_route(
         "screenplay.update",
@@ -3525,7 +3565,6 @@ async def edit_screenplay(episode_id: str, body: dict):
             "current_version": current_version,
             "diff": _screenplay_field_diff(current_script, payload),
         })
-    payload = body.get("screenplay", body)
     instance, validation_errors = schema_errors(EpisodeScreenplay, payload)
     if validation_errors:
         raise HTTPException(422, {
