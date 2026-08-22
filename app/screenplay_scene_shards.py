@@ -108,12 +108,16 @@ SCREENPLAY_SCENE_SHARD_REASONING_RESERVE_PERCENT = 20
 
 
 # Measured on this pipeline: the semantic review stage fired 50 calls in one
-# round, the first 14 all succeeded, then 16 were cut inside a ~19s window, and
-# afterwards they succeeded again.  The provider sheds load under the batch's
-# peak concurrency and answers the shed requests with a canned refusal before
-# closing the stream.  So the retry has to *wait out* the window -- an immediate
-# re-issue lands inside the same burst and looks deterministic when it is not.
-SCENE_SHARD_UNDELIVERED_BACKOFF_S = (4.0, 16.0)
+# round, the first 14 all succeeded, then 16 were cut inside a short window, and
+# afterwards they succeeded again.  A brief pause before re-issuing therefore
+# beats an immediate one, which lands inside the same burst.
+#
+# The pause must stay short.  This retry runs *inside* the provider-slot lease
+# (it has to: the lease's failure callback tears the batch down), so every
+# second spent waiting is a second one of the few provider slots sits idle.  A
+# 4s+16s schedule starved the pool badly enough to cancel three episodes'
+# blueprint stage outright -- worse than the failure it was meant to absorb.
+SCENE_SHARD_UNDELIVERED_BACKOFF_S = (1.5, 4.0)
 SCENE_SHARD_UNDELIVERED_RETRIES = len(SCENE_SHARD_UNDELIVERED_BACKOFF_S)
 
 

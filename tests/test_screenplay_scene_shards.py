@@ -10665,13 +10665,16 @@ def test_scene_shard_delivered_failure_is_never_retried() -> None:
     assert calls == ["op-scene"]
 
 
-def test_scene_shard_backoff_is_bounded_and_increasing() -> None:
-    """The retry waits out a shedding window without stalling the batch."""
+def test_scene_shard_backoff_is_short_enough_not_to_starve_the_pool() -> None:
+    """The pause happens while holding a provider slot, so it must stay small.
+
+    A long schedule left the few provider slots idle and starved other stages
+    badly enough to cancel whole episodes -- worse than the failure it absorbs.
+    """
     delays = scene_shards_module.SCENE_SHARD_UNDELIVERED_BACKOFF_S
     assert len(delays) == scene_shards_module.SCENE_SHARD_UNDELIVERED_RETRIES
     assert list(delays) == sorted(delays)
-    assert sum(delays) >= 19.0   # covers the measured ~19s shed window
-    assert sum(delays) <= 60.0
+    assert sum(delays) <= 6.0
 
 
 def test_single_reviewer_fallback_is_strictly_stricter_than_consensus() -> None:
