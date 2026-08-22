@@ -10748,3 +10748,19 @@ def test_attributed_text_unit_needs_no_person_state_subject() -> None:
     assert "spoken_dialogue" not in modes
     assert "offscreen_voice" not in modes
     assert "unspoken_reference" not in modes
+
+
+def test_chunk_review_backoff_outlasts_a_burst_without_holding_a_slot() -> None:
+    """The chunk-level wait is the one that may be long.
+
+    The in-lease retry occupies a provider slot while it waits, so it has to
+    stay small; this one runs between chunk attempts, outside every lease, so
+    it can actually outlast a provider burst.
+    """
+    chunk_delays = scene_shards_module.SCENE_SHARD_CHUNK_REVIEW_BACKOFF_S
+    lease_delays = scene_shards_module.SCENE_SHARD_UNDELIVERED_BACKOFF_S
+
+    assert list(chunk_delays) == sorted(chunk_delays)
+    assert sum(lease_delays) <= 6.0
+    assert sum(chunk_delays) >= 60.0
+    assert sum(chunk_delays) <= 180.0

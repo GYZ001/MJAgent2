@@ -123,6 +123,12 @@ SCREENPLAY_SCENE_SHARD_REASONING_RESERVE_PERCENT = 20
 # state_subject for them asks the wrong question, and they are not ownerless
 # environment either, so neither branch of the usual rule fits.  They already
 # carry a typed owner, which is why this is a narrower rule and not a hole.
+# When both reviewers of one chunk are shed together, the batch is inside a
+# provider burst.  This wait is at chunk level -- outside every provider-slot
+# lease -- so it can be long enough to actually outlast the burst without
+# starving the slot pool the way an in-lease pause does.
+SCENE_SHARD_CHUNK_REVIEW_BACKOFF_S = (8.0, 25.0, 60.0)
+
 _ATTRIBUTED_TEXT_DELIVERY_MODES = frozenset({"written_text", "sound_effect"})
 
 SCENE_SHARD_UNDELIVERED_BACKOFF_S = (1.5, 4.0)
@@ -5437,12 +5443,30 @@ async def _semantic_review_scene_shard_draft(
                 on_failure=abort_batch,
             )
             delivered = [item for item in chunk_reviews if item is not None]
+            for wait_s in SCENE_SHARD_CHUNK_REVIEW_BACKOFF_S:
+                if delivered:
+                    break
+                # Both reviewers were shed at once, which is what a provider
+                # burst looks like from here.  Waiting happens at chunk level,
+                # outside any provider-slot lease, so the pause costs nothing
+                # but time -- unlike the in-lease retry, which must stay short.
+                # The whole two-reviewer consensus is then re-run: nothing is
+                # weakened, the chunk is simply reviewed later.
+                await asyncio.sleep(wait_s)
+                chunk_reviews = await _gather_fail_fast(
+                    lambda: review_one(1),
+                    lambda: review_one(2),
+                    on_failure=abort_batch,
+                )
+                delivered = [
+                    item for item in chunk_reviews if item is not None
+                ]
             if not delivered:
                 raise ScreenplaySceneShardError(
                     shard_id,
                     [
                         f"语义审查第 {chunk_index}/{len(chunks)} 块的两名审稿人"
-                        "都被供应商拒绝，本块没有经过任何审查"
+                        "在多次退避后仍被供应商丢弃，本块没有经过任何审查"
                     ],
                 )
             if len(delivered) < len(chunk_reviews):
