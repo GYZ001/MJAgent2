@@ -7230,8 +7230,11 @@ async def ensure_cards_for_text(
         elif result.get("status") == "pending_review":
             # 兼容旧实现返回值；新流程不应再产生用户待审项。
             errors.append(f"{name}：自动建卡流程未完成")
-        elif result.get("status") in {"skipped_minor", "exists"}:
+        elif result.get("status") in {
+            "skipped_minor", "exists", "skipped_not_person",
+        }:
             skipped.append(result)
+            # 非人（宗门/器物/地点）本来就不该进人物谱，这是正常终态而不是错误。
             if result.get("status") == "skipped_minor":
                 # identity_kind=named 已由身份模型给出可靠同一性证据。
                 # 不能再用“戏份不足”把真名降回路人；卡片不完整就留在剧本闸门修复。
@@ -7766,6 +7769,27 @@ async def ensure_structural_identity_coverage(
     return result
 
 
+# 人物谱是"可以被选角、被定妆、能出镜表演的人"的登记表。宗门、地点、器物、
+# 功法都不是人，它们属于场景库或 reference 身份，绝不能占据人物卡。
+#
+# 生产事故：模型给「靠山宗」的建卡理由是「属于独立的组织类出场单元…需单独建卡
+# 保证漫剧场景一致性」，给「凝气卷」的理由是「靠山宗发放的修行典籍」——两次都
+# 如实说明了这不是人，却照样入了人物谱。原因是建卡判定问的一直是"值不值得做
+# 一致性锚点"，从来没有人问过"这是不是一个人"。
+CHARACTER_SUBJECT_KINDS = (
+    "person",
+    "organization",
+    "place",
+    "object",
+    "other",
+)
+CHARACTER_SUBJECT_PERSON = "person"
+
+# role 是合同枚举，不是自由文本。「靠山宗」当初写进来的 role 是"重要场景载体"，
+# 根本不在允许值里，却因为只检查了非空而落库。
+CHARACTER_CARD_ROLES = ("主角", "重要配角", "反派")
+
+
 def _candidate_requires_identity_card(item: dict, known_names: set[str]) -> bool:
     """Only a new named identity that appears or speaks needs a visual card."""
     name = str(item.get("name") or "").strip()
@@ -7814,8 +7838,17 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
 - appearance_canonical 是"固定外观锚点串"：40~60 字，须含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征；只写视觉可见信息，不写性格。原著未写处按画风（{style}）合理补全并保持内部一致。
 - appearance_canonical 只允许常规完整着装、中性站姿下可直接看见、可跨镜稳定复现的静态形态；不得写性格、欲望、气质、眼神行为、对他人的注视方式、裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。
 
+先判断「{name}」指的是什么：
+- subject_kind=person：一个具体的人（可以被选角、被定妆、能出镜表演）。
+- subject_kind=organization：宗门、门派、家族、势力、商号等组织。
+- subject_kind=place：地点、建筑、区域。
+- subject_kind=object：器物、法宝、典籍、功法、丹药等物品。
+- subject_kind=other：以上都不是。
+人物谱只登记 person。组织、地点、器物即使在剧情里极其重要、也确实需要视觉一致性，
+也一律 important=false——它们属于场景库，不属于人物谱。
+
 只输出一个 JSON 对象：
-{{"important": true/false, "reason": "一句话依据", "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}]}}"""
+{{"subject_kind": "person|organization|place|object|other", "important": true/false, "reason": "一句话依据", "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}]}}"""
 
     async def _assess_once(extra_instruction: str) -> dict:
         messages = [{"role": "user", "content": prompt + extra_instruction}]
@@ -7838,6 +7871,7 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
 
     def _build_verdict(obj: dict) -> dict:
         important = bool(obj.get("important"))
+        subject_kind = str(obj.get("subject_kind") or "").strip()
         appearance = production_appearance_anchor(
             (obj.get("appearance_canonical") or "").strip()
         )
@@ -7847,10 +7881,16 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
         card_complete = (
             APPEARANCE_MIN <= len(appearance) <= APPEARANCE_MAX
             and not missing_production_appearance_dimensions(appearance)
-            and bool(role)
+            # role 是闭合枚举，不是自由文本。
+            and role in CHARACTER_CARD_ROLES
         )
         if important and not card_complete:
             important = False  # 外观太稀薄不足以稳定定妆 → 不建卡
+        if subject_kind != CHARACTER_SUBJECT_PERSON:
+            # 不是人就不进人物谱，且这一条不受 require_identity_card 影响：
+            # 身份消歧确认了"这是一个稳定的专名"，并不等于确认了"这是一个人"。
+            # 未声明 subject_kind 的旧响应同样落在这里，方向是保守的。
+            important = False
         known_set = set(known_names)
         # 只保留指向【已知角色】且 relation 非空的关系；Relationship.to/relation 必填，漏 relation 会让校验崩。
         rels = [
@@ -7861,6 +7901,8 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
         return {
             "important": important,
             "card_complete": card_complete,
+            "subject_kind": subject_kind,
+            "is_person": subject_kind == CHARACTER_SUBJECT_PERSON,
             "reason": (obj.get("reason") or "").strip(),
             "role": role,
             "appearance_canonical": appearance,
@@ -8003,6 +8045,19 @@ async def ensure_character_card(
                     str(verdict.get("appearance_canonical") or "").strip()
                 )
             )
+            if not verdict.get("is_person"):
+                # 人格是独立的硬闸门，不能被 require_identity_card 绕过：身份消歧
+                # 确认的是"这是一个稳定的专名"，不是"这是一个人"。宗门、器物、
+                # 地点即使专名稳定、戏份很重，也只能留在场景库/reference 身份里。
+                set_setting(
+                    _discovery_skip_key(project_id, name), str(from_episode_no)
+                )
+                return {
+                    "status": "skipped_not_person",
+                    "name": name,
+                    "subject_kind": verdict.get("subject_kind") or "",
+                    "reason": verdict["reason"],
+                }
             if not verdict["important"] and not (
                 require_identity_card and card_complete
             ):

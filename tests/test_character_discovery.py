@@ -1804,7 +1804,7 @@ def test_ensure_character_card_auto_adds_prominent_character_and_portrait(monkey
 
     async def fake_assess(name, fragments, *, style, known_names, ep_label):
         assert name == "美杜莎" and "美杜莎" in fragments  # 检索到的是该角色片段
-        return {"important": True, "reason": "反复出场", "role": "重要配角",
+        return {"subject_kind": "person", "important": True, "reason": "反复出场", "role": "重要配角",
                 "appearance_canonical": "紫发妖娆女子，紫色长发，金瞳蛇眸，蛇纹长裙，气场冷艳标志性蛇瞳",
                 "personality": "高傲", "speech_style": "冷冽",
                 "relationships": [{"to": "萧炎", "relation": "宿敌"}]}
@@ -1847,6 +1847,7 @@ def test_required_identity_card_accepts_complete_card_despite_importance_vote(
     async def fake_assess(*_args, **kwargs):
         assert kwargs["require_identity_card"] is True
         return {
+            "subject_kind": "person",
             "important": False,
             "reason": "只出现一次",
             "role": "重要配角",
@@ -1888,6 +1889,7 @@ def test_required_identity_card_prompt_does_not_reapply_importance_gate(
         captured.append(messages[0]["content"])
         call_options.append(_kwargs)
         return json.dumps({
+            "subject_kind": "person",
             "important": False,
             "reason": "只出现一次",
             "role": "重要配角",
@@ -1927,6 +1929,7 @@ def test_required_identity_card_retries_once_when_first_card_too_thin(
     responses = [
         # 首轮：外观过薄，缺可视维度 → 触发补全重试。
         json.dumps({
+            "subject_kind": "person",
             "important": True,
             "reason": "已确认真名",
             "role": "重要配角",
@@ -1937,6 +1940,7 @@ def test_required_identity_card_retries_once_when_first_card_too_thin(
         }, ensure_ascii=False),
         # 第二轮：补全为完整外观锚点。
         json.dumps({
+            "subject_kind": "person",
             "important": True,
             "reason": "已确认真名",
             "role": "重要配角",
@@ -2011,7 +2015,7 @@ def test_character_card_truncation_is_reported_as_generation_error(
     monkeypatch,
 ) -> None:
     async def truncated_chat(*_args, **_kwargs):
-        return '{"important":true,"reason":"响应被截断'
+        return '{"subject_kind":"person","important":true,"reason":"响应被截断'
 
     monkeypatch.setattr(portraits.model_gateway, "chat", truncated_chat)
 
@@ -2035,7 +2039,7 @@ def test_ensure_character_card_keeps_auto_added_card_when_portrait_fails(monkeyp
     _patch_settings(monkeypatch, conn)
 
     async def fake_assess(*a, **k):
-        return {"important": True, "reason": "反复出场", "role": "反派",
+        return {"subject_kind": "person", "important": True, "reason": "反复出场", "role": "反派",
                 "appearance_canonical": "紫发妖娆女子，紫色长发，金瞳蛇眸，蛇纹长裙，气场冷艳标志性蛇瞳",
                 "personality": "", "speech_style": "", "relationships": []}
 
@@ -2141,6 +2145,7 @@ def test_auto_discovered_character_pack_starts_at_first_appearance(tmp_path, mon
 
     async def fake_assess(*_args, **_kwargs):
         return {
+            "subject_kind": "person",
             "important": True, "reason": "具名对手且持续参与主线", "role": "重要配角",
             "appearance_canonical": "老年男性，灰白长发束起，身着云岚宗青灰长袍，面容沉稳，腰佩宗门令牌",
             "personality": "沉稳", "speech_style": "克制", "relationships": [],
@@ -2188,7 +2193,7 @@ def test_minor_character_is_skipped_and_negatively_cached(monkeypatch) -> None:
 
     async def fake_assess(*a, **k):
         calls["assess"] += 1
-        return {"important": False, "reason": "路人", "role": "重要配角",
+        return {"subject_kind": "person", "important": False, "reason": "路人", "role": "重要配角",
                 "appearance_canonical": "", "personality": "", "speech_style": "", "relationships": []}
 
     monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
@@ -6104,6 +6109,7 @@ def test_late_episode_screenplay_auto_adds_character_and_defers_portrait_generat
 
     async def fake_assess(*_args, **_kwargs):
         return {
+            "subject_kind": "person",
             "important": True,
             "reason": "本章核心反派并反复出场",
             "role": "反派",

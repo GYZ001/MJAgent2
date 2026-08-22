@@ -470,6 +470,7 @@ def test_new_screenplay_scene_is_ai_adopted_and_hidden_from_human_queue(tmp_path
 
     async def fake_assess(*_args, **_kwargs):
         return {
+            "subject_kind": "person",
             "important": True,
             "existing_scene_name": "",
             "reason": "本集真实开拍的新地点",
@@ -511,6 +512,7 @@ def test_scene_discovery_receives_spatial_context_without_plot_summary(
     async def fake_assess(_label, spatial_context, **_kwargs):
         received.append(spatial_context)
         return {
+            "subject_kind": "person",
             "important": True,
             "existing_scene_name": "",
             "reason": "本集真实开拍的新地点",
@@ -553,6 +555,7 @@ def test_new_interior_scene_is_not_collapsed_to_generic_exterior_alias(
 
     async def fake_assess(*_args, **_kwargs):
         return {
+            "subject_kind": "person",
             "important": True,
             "existing_scene_name": "",
             "reason": "宝阁内部与门前外景是不同物理空间",
