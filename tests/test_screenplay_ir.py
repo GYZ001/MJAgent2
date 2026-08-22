@@ -1688,20 +1688,29 @@ def test_v13_rejects_event_key_reused_across_scenes() -> None:
         )
 
 
-def test_compiler_rejects_repeated_spine_action_and_turn() -> None:
+def test_compiler_flags_repeated_spine_action_and_turn_for_the_gate() -> None:
+    """内容质量判断归质量闸门，编译器只留审计痕迹。
+
+    编译器这份致命拷贝是在保真循环内触发的，那里没有修复路径，整集会死在
+    IR_MERGE（生产 EP3）；而闸门那条同源规则
+    [SPINE_ACTION_TURN_DUPLICATE] 带着可操作的改写要求且身处修复循环之中。
+    规则本身没有放松——见下面的闸门用例。
+    """
     payload = _ir_payload()
     payload["beats"][0]["turn"] = payload["beats"][0]["does"]
 
-    with pytest.raises(
-        ValueError,
-        match="主线节拍 does 与 turn 语义重复",
-    ):
-        compile_screenplay_ir(
-            ScreenplayGenerationIR.model_validate(payload),
-            episode={"id": "ep-ir-repeat-gate", "episode_no": 1},
-            source_text=SOURCE,
-            bible=_bible(),
-        )
+    compiled = compile_screenplay_ir(
+        ScreenplayGenerationIR.model_validate(payload),
+        episode={"id": "ep-ir-repeat-gate", "episode_no": 1},
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+
+    audit = getattr(compiled, "_ir_compiler_audit", [])
+    assert any(
+        item.get("operation") == "flag_action_outcome_duplicate"
+        for item in audit
+    ), audit
 
 
 def test_screenplay_gate_rejects_repeated_spine_action_and_turn() -> None:

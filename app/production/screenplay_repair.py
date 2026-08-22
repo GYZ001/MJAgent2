@@ -3134,6 +3134,25 @@ def _reusable_recovery_evaluation(
     return None
 
 
+def _activation_retry_grant_id(run_id: str | None) -> str | None:
+    """Return the retry grant this activation was authorised with, if any."""
+    if not run_id:
+        return None
+    from app.db import get_conn
+
+    row = get_conn().execute(
+        "SELECT config_snapshot_json FROM workflow_runs WHERE id=?",
+        (run_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        snapshot = json.loads(row["config_snapshot_json"] or "{}")
+    except (TypeError, ValueError):
+        return None
+    return str(snapshot.get("blueprint_retry_grant_id") or "") or None
+
+
 def _revalidate_or_rebuild_resume_working(
     *,
     episode_id: str,
@@ -3555,6 +3574,12 @@ async def run_screenplay_production(
         resume
         and entry_eligibility.reason_code == "WORKING_REVALIDATION_REQUIRED"
     )
+    # 激活时如果为"上次结果未知"签发了重试授权，它是绑在当时那条 active
+    # revision 上的。这里一旦因为字段不匹配而另起一条 revision，旧的那条立刻
+    # 变成 superseded，授权就悬空了，随后的解析检查必然报
+    # BLUEPRINT_RESOLUTION_GRANT_DRIFT（生产上 EP4 每轮都死在这里，两条
+    # revision 的时间戳只差 0.06 秒——正是同一次激活里前后脚发生的）。
+    # 授权属于这一次运行，运行合法地新建 revision 时它必须跟着走。
     rev = ensure_production_revision(
         episode_id=episode_id,
         kind="screenplay",
@@ -3564,6 +3589,7 @@ async def run_screenplay_production(
             "" if needs_working_revalidation
             else SCREENPLAY_QA_PROFILE_VERSION
         ),
+        grant_id=_activation_retry_grant_id(run_id),
         resume=resume,
     )
     if needs_working_revalidation:

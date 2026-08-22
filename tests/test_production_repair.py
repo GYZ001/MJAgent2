@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import pathlib
 
 import pytest
 
@@ -3630,3 +3631,30 @@ async def test_active_recovery_run_reuses_prebaseline_identity_checkpoint(
         "SELECT status FROM workflow_runs WHERE id=?",
         (recorder.run_id,),
     ).fetchone()["status"] == "SUCCEEDED"
+
+
+def test_activation_retry_grant_travels_to_a_newly_created_revision() -> None:
+    """授权属于这一次运行，运行新建 revision 时它必须跟着走。
+
+    Production EP4: activation issued a retry grant bound to the then-active
+    revision, the worker immediately superseded that revision and created a
+    new one (0.06s apart), and the resolution check reported
+    BLUEPRINT_RESOLUTION_GRANT_DRIFT every single round.
+    """
+    from app.production import screenplay_repair
+
+    source = pathlib.Path(screenplay_repair.__file__).read_text(
+        encoding="utf-8"
+    )
+    call = source[source.index("rev = ensure_production_revision("):]
+    call = call[: call.index(")\n")]
+
+    assert "grant_id=_activation_retry_grant_id(run_id)" in call
+
+
+def test_activation_retry_grant_lookup_is_defensive() -> None:
+    """没有 run、没有快照、快照损坏，都只是"没有授权"，不该炸。"""
+    from app.production import screenplay_repair
+
+    assert screenplay_repair._activation_retry_grant_id(None) is None
+    assert screenplay_repair._activation_retry_grant_id("run-does-not-exist") is None
