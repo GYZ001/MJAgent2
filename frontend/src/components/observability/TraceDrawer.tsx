@@ -520,6 +520,9 @@ export default function TraceDrawer({
           <div>
             <span className="eyebrow">链路详情</span>
             <h3 id="trace-drawer-title">{trace?.title || target.title}</h3>
+            {trace && (
+              <span className="trace-head-count">{trace.nodes.length} 个节点</span>
+            )}
           </div>
           <div className="trace-drawer-head-actions">
             <button

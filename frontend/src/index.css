@@ -4493,12 +4493,24 @@ table.calls-ledger th:nth-child(6) {
     width: 100vw;
     min-width: 0;
   }
+  /* 5 项概要在窄屏排成 2 列要占 3 行近 300px。改成单行横滑：信息一项不少，
+     纵向从 ~300px 压到 ~56px，省下的全部给下面的调用树 / JSON。 */
   .trace-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    display: flex;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+  .trace-summary > span {
+    min-width: 96px;
+    flex: 0 0 auto;
+    padding: 9px 13px;
   }
   .trace-workspace {
     grid-template-columns: minmax(240px, 42%) minmax(0, 1fr);
   }
+}
+.trace-head-count {
+  display: none;
 }
 .trace-pane-switch {
   display: none;
@@ -4506,6 +4518,13 @@ table.calls-ledger th:nth-child(6) {
 @media (max-width: 640px) {
   /* 堆叠会让「看详情」和「换节点」相隔一屏多的滚动距离，改成互斥切换，
      每一栏都拿到完整高度，滚动上下文也只剩一个。 */
+  /* 概要在详情页被收起，节点数是其中唯一还需要常驻的信息，提到标题旁。 */
+  .trace-head-count {
+    display: inline-block;
+    margin-top: 4px;
+    color: #8a939e;
+    font-size: 11px;
+  }
   .trace-pane-switch {
     display: grid;
     flex: 0 0 auto;
@@ -4545,14 +4564,40 @@ table.calls-ledger th:nth-child(6) {
   .trace-drawer[data-mobile-pane="detail"] .trace-summary {
     display: none;
   }
+  /* 合规提示压到一行高度，别再占掉一个段落。 */
   .trace-raw-notice {
-    padding: 6px 12px;
-    font-size: 10px;
-    line-height: 1.45;
+    padding: 5px 12px;
+    font-size: 9.5px;
+    line-height: 1.4;
   }
+  /* 节点头原本是「类型 / 名称」两行加右侧状态耗时定义列表，竖着占 90pt。
+     窄屏并成一行：类型 · 名称 · 状态 · 耗时，把纵向空间让给 JSON。 */
   .trace-detail-head {
+    display: flex;
+    align-items: baseline;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    padding: 8px 12px;
+  }
+  .trace-detail-head > div:first-child {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 4px 6px;
+    min-width: 0;
+  }
+  .trace-detail-head h4 {
+    margin: 0;
+    font-size: 13.5px;
+  }
+  .trace-detail-head dl {
+    gap: 8px;
+  }
+  .trace-detail-head dl > div {
+    display: flex;
+    align-items: baseline;
     gap: 4px;
-    padding: 10px 12px;
   }
   .trace-json {
     padding: 10px 12px calc(18px + env(safe-area-inset-bottom));
@@ -4563,13 +4608,6 @@ table.calls-ledger th:nth-child(6) {
     min-height: 0;
     flex: 1 1 auto;
     border-right: 0;
-  }
-  .trace-detail-head {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-  .trace-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 .call-summary-grid {
@@ -4855,11 +4893,6 @@ table.calls-ledger th:nth-child(6) {
   .json-children {
     margin-left: 3px;
     padding-left: 5px;
-  }
-  .json-viewer-toolbar {
-    position: sticky;
-    z-index: 1;
-    top: 0;
   }
 }
 .job-technical-details {
