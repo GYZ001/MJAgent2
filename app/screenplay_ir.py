@@ -3995,11 +3995,27 @@ def compile_screenplay_ir(
             event.action_intent,
             event.resulting_state,
         ):
-            raise ValueError(
-                "IR 事件动作与结果状态语义重复："
-                f"{event.key} does={event.action_intent!r} "
-                f"turn={event.resulting_state!r}"
-            )
+            if textmatch.condense(
+                str(event.action_intent or "")
+            ) == textmatch.condense(str(event.resulting_state or "")):
+                # 模型把动作原样抄进了结果状态，那本来就不是一个"结果"，
+                # 携带的信息为零。空 resulting_state 是这条检查自己明确接受的
+                # 状态（见 screenplay_beat_fields_repeat 的空值分支），所以清空
+                # 比让整集硬失败更贴合合同，也不会抹掉任何模型真正写出的内容。
+                # 只处理逐字相同这一种；近似重复说明模型确实写了不同的东西，
+                # 属于内容质量问题，继续 fail-closed。
+                event.resulting_state = ""
+                compiler_audit.append({
+                    "path": f"events.{event.key}",
+                    "operation": "clear_duplicated_resulting_state",
+                    "reason": "resulting_state_repeated_action_intent_verbatim",
+                })
+            else:
+                raise ValueError(
+                    "IR 事件动作与结果状态语义重复："
+                    f"{event.key} does={event.action_intent!r} "
+                    f"turn={event.resulting_state!r}"
+                )
     beats_were_derived = not value.beats
     if beats_were_derived:
         value.beats = [

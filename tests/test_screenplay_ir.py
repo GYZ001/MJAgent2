@@ -3837,3 +3837,25 @@ def test_attributed_text_unit_needs_no_person_state_subject_in_ir() -> None:
     # state subject.
     assert "dialogue" not in ATTRIBUTED_TEXT_PROVENANCE_KINDS
     assert "creative_action" not in ATTRIBUTED_TEXT_PROVENANCE_KINDS
+
+
+def test_verbatim_duplicated_resulting_state_is_cleared_not_fatal() -> None:
+    """逐字抄回动作的 resulting_state 携带零信息，清空即可。
+
+    Production EP3 stalled at IR_MERGE on
+    does='腰上都挂着这样的口袋。' turn='腰上都挂着这样的口袋。'.
+    An empty outcome is a state this very check accepts, so clearing the copy
+    matches the contract; a merely *similar* outcome is real content and still
+    fails closed.
+    """
+    from app.screenplay_ir import screenplay_beat_fields_repeat
+
+    same = "腰上都挂着这样的口袋。"
+    assert screenplay_beat_fields_repeat(same, same) is True
+    # Clearing lands on a state the checker itself treats as fine.
+    assert screenplay_beat_fields_repeat(same, "") is False
+    # Genuinely different outcomes are untouched by either path.
+    assert screenplay_beat_fields_repeat(
+        "他把口袋挂在腰上。",
+        "腰间多了一只鼓囊囊的口袋，他脚步轻快起来。",
+    ) is False
