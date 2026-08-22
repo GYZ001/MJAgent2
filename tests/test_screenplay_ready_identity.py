@@ -104,6 +104,37 @@ def test_source_chapter_change_changes_identity() -> None:
     ))
 
 
+def test_stub_fallback_chapter_change_changes_identity() -> None:
+    """存根回退会读到下一条存在的章节，它同样是输入。"""
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO chapters(project_id, idx, title, content, char_count) "
+        "VALUES('p1',7,'第七章','后续正文。',5)",
+    )
+    conn.commit()
+    _assert_changes(lambda db_conn: db_conn.execute(
+        "UPDATE chapters SET content='后续正文改了。' WHERE project_id='p1' AND idx=7"
+    ))
+
+
+def test_unrelated_chapter_does_not_change_identity() -> None:
+    """整本小说上千章：只有本集真正读到的章节能影响结论。"""
+    conn = db.get_conn()
+    conn.executemany(
+        "INSERT INTO chapters(project_id, idx, title, content, char_count) "
+        "VALUES('p1',?,?,?,4)",
+        [(20, "第二十章", "无关正文。"), (21, "第二十一章", "无关正文。")],
+    )
+    conn.commit()
+    before = screenplay_ready_identity(_episode_row())
+    conn.execute(
+        "UPDATE chapters SET content='彻底改写。' WHERE project_id='p1' AND idx=21"
+    )
+    conn.commit()
+
+    assert screenplay_ready_identity(_episode_row()) == before
+
+
 def test_episode_artifact_status_change_changes_identity() -> None:
     artifact_id = _episode_artifact_id()
     _assert_changes(lambda conn: conn.execute(

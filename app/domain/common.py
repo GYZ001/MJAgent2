@@ -395,12 +395,32 @@ def screenplay_ready_identity(data: dict) -> str:
     project_row = conn.execute(
         "SELECT * FROM projects WHERE id=?", (project_id,)
     ).fetchone()
-    chapters = _rows_or_empty(
-        conn,
-        "SELECT idx, title, char_count, content FROM chapters WHERE project_id=? "
-        "ORDER BY idx",
-        (project_id,),
-    )
+    # 只有本集实际读到的章节才影响结论：`_source_records` 取 `source_chapters`，
+    # 并在首章是占位存根时回退到紧邻的下一章。整本小说有上千章，全量哈希一次要
+    # 130 ms，比它保护的判定本身还贵。
+    try:
+        source_indexes = [
+            int(value) for value in json.loads(data.get("source_chapters") or "[]")
+        ]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        source_indexes = []
+    chapters: list = []
+    if source_indexes:
+        chapters = _rows_or_empty(
+            conn,
+            "SELECT idx, title, char_count, content FROM chapters "
+            "WHERE project_id=? AND idx IN "
+            f"({','.join('?' for _ in source_indexes)}) ORDER BY idx",
+            (project_id, *source_indexes),
+        )
+        # 存根回退读的是「下一条**存在**的章节」，章节号可能不连续，所以照同样的
+        # 方式取，而不是假定 max+1。
+        chapters += _rows_or_empty(
+            conn,
+            "SELECT idx, title, char_count, content FROM chapters "
+            "WHERE project_id=? AND idx>? ORDER BY idx LIMIT 1",
+            (project_id, max(source_indexes)),
+        )
     artifacts = _rows_or_empty(
         conn,
         "SELECT id, type, status, version, content_hash, contract_version, "
