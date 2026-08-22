@@ -203,6 +203,106 @@ def cmd_retry() -> int:
     return 0 if ok else 1
 
 
+SERIAL_ATTEMPTS_PER_EPISODE = 4
+TERMINAL_STATES = {"ready", "failed"}
+
+
+def resume_episode(name: str, eid: str) -> bool:
+    """Continue a paused run from its validated checkpoint."""
+    body = {"idempotency_key": f"yyft-resume-{eid}-{int(time.time())}"}
+    code, resp = call("POST", f"/api/episodes/{eid}/screenplay/resume", body, timeout=60)
+    if resp.get("status") == "waiting_approval" and resp.get("approval_token"):
+        code, resp = call(
+            "POST", f"/api/episodes/{eid}/screenplay/resume", body,
+            headers={"x-manju-approval-token": resp["approval_token"]}, timeout=60,
+        )
+    log(f"{name} resume -> HTTP{code} {json.dumps(resp, ensure_ascii=False)[:200]}")
+    return resp.get("status") in {"queued", "running", "repairing"}
+
+
+def start_episode(name: str, eid: str, tag: str) -> bool:
+    body = {"idempotency_key": f"yyft-{tag}-{eid}-{int(time.time())}"}
+    code, resp = call("POST", f"/api/episodes/{eid}/screenplay", body, timeout=60)
+    if resp.get("status") == "waiting_approval" and resp.get("approval_token"):
+        code, resp = call(
+            "POST", f"/api/episodes/{eid}/screenplay", body,
+            headers={"x-manju-approval-token": resp["approval_token"]}, timeout=60,
+        )
+    log(f"{name} start -> HTTP{code} {json.dumps(resp, ensure_ascii=False)[:200]}")
+    return resp.get("status") in {"queued", "running", "repairing"}
+
+
+def await_terminal(name: str, eid: str, interval: int = 30, limit: int = 5400) -> dict:
+    """Block until the episode stops making progress, then return its status."""
+    waited = 0
+    last = ""
+    while waited <= limit:
+        payload = status_of(eid)
+        state = str(payload.get("screenplay_status") or "")
+        active = bool(payload.get("active"))
+        line = brief(payload)
+        if line != last:
+            log(f"{name} :: {line}")
+            last = line
+        if state in TERMINAL_STATES or (state == "repairing" and not active):
+            return payload
+        time.sleep(interval)
+        waited += interval
+    log(f"{name} TIMEOUT after {waited}s")
+    return status_of(eid)
+
+
+def cmd_serial() -> int:
+    """Generate EP1..EP5 one at a time.
+
+    Serial is the point: the provider sheds requests at the concurrent batch's
+    peak, and a single episode presents a fraction of that load.  Each episode
+    gets bounded attempts, preferring resume so validated shards are reused
+    rather than regenerated.
+    """
+    log("=== SERIAL EP1-EP5 START ===")
+    results: dict[str, str] = {}
+    for name, eid in EPISODES:
+        payload = status_of(eid)
+        if payload.get("screenplay_status") == "ready":
+            log(f"{name} already ready, skipping")
+            results[name] = "ready"
+            continue
+        for attempt in range(1, SERIAL_ATTEMPTS_PER_EPISODE + 1):
+            payload = status_of(eid)
+            state = str(payload.get("screenplay_status") or "")
+            eligibility = (payload.get("screenplay_production") or {}).get(
+                "eligibility"
+            ) or {}
+            resumable = bool(eligibility.get("resumable"))
+            log(f"{name} attempt {attempt}/{SERIAL_ATTEMPTS_PER_EPISODE} "
+                f"from state={state} resumable={resumable}")
+            if state == "ready":
+                break
+            started = (
+                resume_episode(name, eid)
+                if resumable and state in {"repairing", "failed"}
+                else start_episode(name, eid, f"serial{attempt}")
+            )
+            if not started:
+                # A refused start with a resumable checkpoint still resumes.
+                if not resume_episode(name, eid):
+                    log(f"{name} could not be started or resumed")
+                    break
+            payload = await_terminal(name, eid)
+            state = str(payload.get("screenplay_status") or "")
+            if state == "ready":
+                break
+            log(f"{name} attempt {attempt} ended in {state}: "
+                f"{(payload.get('screenplay_error') or '')[:200]}")
+        final = str(status_of(eid).get("screenplay_status") or "")
+        results[name] = final
+        log(f"{name} FINAL={final}")
+    log("=== SERIAL DONE === " + ", ".join(
+        f"{k}={v}" for k, v in results.items()))
+    return 0 if all(v == "ready" for v in results.values()) else 1
+
+
 def cmd_monitor(interval: int = 30, limit: int = 20000) -> int:
     log("=== MONITOR FIRST 5 ===")
     waited = 0
@@ -243,5 +343,6 @@ if __name__ == "__main__":
         "start": cmd_start,
         "monitor": cmd_monitor,
         "retry": cmd_retry,
+        "serial": cmd_serial,
     }
     sys.exit(handlers[command]())
