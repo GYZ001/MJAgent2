@@ -256,6 +256,23 @@ TEXT_PROVIDER_RETRY_BASE_DELAY = max(
     0.0, float(os.environ.get("TEXT_PROVIDER_RETRY_BASE_DELAY", "30"))
 )
 
+# 会先思考再作答的模型把 reasoning token 与 message.content 计入**同一份**
+# completion 预算（`_reject_truncated_chat_response` 的注释早已点明这一点）。
+# 业务各阶段算出来的 max_tokens 一律是「答案要多大」，从不包含思考开销，于是
+# 一个正确规模的答案预算仍会以 finish_reason=length 截断，整集失败。
+#
+# 实测（2767 次成功 chat 调用的 usage.completion_tokens_details）：
+#   reasoning p90=4436 / p95=6849 / p99=10859 / max=21959；
+#   场次语义审查阶段 reasoning 占 completion 的中位数 97%（答案只有约 100 token）。
+# 因此把「思考预留」建模成 provider/model 属性并统一叠加在网关入口，
+# 而不是让每个阶段各自把自己的常量往上调（历史上 BLUEPRINT_REVIEW_MAX_TOKENS
+# 8192→16384、IR_FIDELITY_PATCH_MAX_TOKENS=16384 都是同一根因的局部补丁）。
+# 该预留只抬高上限、不改变实际计费（按真实 token 计费），并始终被模型自身的
+# max_output_tokens 夹紧。
+TEXT_REASONING_TOKEN_RESERVE = max(
+    0, int(os.environ.get("TEXT_REASONING_TOKEN_RESERVE", "16384"))
+)
+
 # 逐镜生成一次只输出一个 Shot JSON。沿用整集剧本的 65535 输出预算会把短请求
 # 计入过高的 TPM 配额并触发 429；8192 足够容纳单镜候选及定向修复，同时保留余量。
 STORYBOARD_SHOT_MAX_TOKENS = max(

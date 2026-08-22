@@ -1370,6 +1370,19 @@ def ensure_production_revision(
                 contract_version, qa_profile_version, grant_id, stamp, stamp,
             ),
         )
+        if grant_id:
+            # 「这次授权属于哪条 revision」只能有一个真源。授权跟着运行走到新
+            # revision 上（上一轮为修 GRANT_DRIFT 引入），但 production_grants 行
+            # 过去仍指向被 superseded 的旧 revision，于是下游同时校验两处的
+            # _commit_blueprint_authority_checkpoint 必然报 GRANT_INVALID
+            # （生产 EP4：grant pgrant_47209e7a9ac3 停留在 rev_7bb707e0a75d）。
+            # 在同一事务里把 grant 行改绑过来，两处永远一致。
+            # 作用域收紧到「同一集、同一 kind、未撤销」的授权，绝不越集借用。
+            conn.execute(
+                "UPDATE production_grants SET production_revision_id=? "
+                "WHERE id=? AND episode_id=? AND kind=? AND revoked_at IS NULL",
+                (revision_id, grant_id, episode_id, kind),
+            )
         conn.commit()
     except BaseException:
         if conn.in_transaction:

@@ -1218,6 +1218,28 @@ def _plain_chat_streaming_enabled(call_meta: dict | None) -> bool:
     return bool((call_meta or {}).get("gateway") == "execution_harness")
 
 
+def reasoning_token_reserve() -> int:
+    """How much of one completion budget a thinking model spends before answering.
+
+    Every business stage sizes ``max_tokens`` from the answer it expects.  The
+    provider, however, charges reasoning tokens against the *same* completion
+    budget (see ``_reject_truncated_chat_response``), and for this model class
+    reasoning is the overwhelming majority of it.  The reserve therefore belongs
+    to the provider/model, not to any single call site, and is applied once at
+    the only place that turns a business budget into a provider ``max_tokens``.
+
+    Operators can retune it without a code change; the model's own
+    ``max_output_tokens`` still clamps the result.
+    """
+    override = (get_setting("text_reasoning_token_reserve") or "").strip()
+    if override:
+        try:
+            return max(0, int(override))
+        except ValueError:
+            pass
+    return max(0, int(config.TEXT_REASONING_TOKEN_RESERVE))
+
+
 def text_request_token_limits(
     *,
     requested_max_tokens: int,
@@ -1231,8 +1253,11 @@ def text_request_token_limits(
         selected_model,
         get_setting,
     )
+    # ``requested_max_tokens`` is an *answer* budget.  Add the model's thinking
+    # reserve so a correctly-sized answer budget cannot be truncated by the
+    # reasoning that precedes it, then clamp to what the model can emit at all.
     effective = min(
-        max(1, int(requested_max_tokens)),
+        max(1, int(requested_max_tokens)) + reasoning_token_reserve(),
         int(limits["max_output_tokens"]),
     )
     return selected_provider, selected_model, effective
@@ -1454,11 +1479,31 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
             _json_object_response_format(attempt_response_format)
             or attempt_response_format
         )
+    truncation_escalated = False
     while True:
         try:
             content, data = await _dispatch(attempt_response_format)
             break
         except ProviderError as exc:
+            if (
+                exc.failure_kind == ProviderFailureKind.OUTPUT_TRUNCATED.value
+                and not truncation_escalated
+                and max_tokens < runtime_output_limit
+            ):
+                # 截断意味着供应商**没有交付任何可用答案**（content 为空或半句），
+                # 和"流中断"同类：没有判断可保留，也没有答案可挑选，所以这不是
+                # 在重摇一个语义答案，而是把同一个确定性请求放到它本来就应该有的
+                # 输出上限上再发一次。只做一次，且只在还没顶到模型上限时做；
+                # 顶到上限仍截断则照常失败。思考预留（text_request_token_limits）
+                # 覆盖常态，这一跳负责分布尾部。
+                truncation_escalated = True
+                max_tokens = runtime_output_limit
+                call_meta = {
+                    **call_meta,
+                    "effective_max_tokens": max_tokens,
+                    "output_truncation_escalated": True,
+                }
+                continue
             if attempt_response_format is not None and _looks_like_response_format_unsupported(exc):
                 # 能力阶梯：json_schema → json_object → 纯文本。
                 # 每一级只在网关明确拒绝上一级时下探一次，并把该能力缺失按
