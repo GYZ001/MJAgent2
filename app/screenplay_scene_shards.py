@@ -4473,11 +4473,25 @@ def _scene_shard_canonicalize_cross_slot_findings(
             "cross_slot_duplication" in merged_kinds
             and len(merged_related_keys) != 1
         ):
-            raise ValueError(
-                "canonicalized cross-slot finding 必须具有唯一 counterpart"
-            )
+            # 两条同 (unit_key, code) 的 finding 指向了不同的对手 slot。这不是
+            # 不可能发生的矛盾：上面的 canonicalize 步骤会把 finding 改挂到它的
+            # related slot 上，后端自己就会制造这种碰撞。而每条 finding 只允许
+            # 恰好一个对手，所以合并结果无法同时表达两个。
+            #
+            # 共识层对「两名审稿人给出不同对手」早有既定处置：撤掉 cross-slot
+            # 这一类，保留其余类型。这里沿用同一条规则——抛内部错误的旧行为让
+            # 整集停摆，反而连其余类型的门禁一起丢掉。
+            merged_kinds = [
+                kind for kind in merged_kinds
+                if kind != "cross_slot_duplication"
+            ]
+            merged_related_keys = []
         if "cross_slot_duplication" not in merged_kinds:
             merged_related_keys = []
+        if not merged_kinds:
+            # 撤掉 cross-slot 后无类型可报：该 finding 不再成立。
+            merged_findings.pop(key, None)
+            continue
         merged_message = "；".join(dict.fromkeys([
             existing.message,
             finding.message,
