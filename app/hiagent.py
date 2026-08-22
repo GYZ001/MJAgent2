@@ -1138,21 +1138,21 @@ def provider_answer_undelivered(exc: object) -> bool:
 def deterministic_undelivered_error(
     last_error: "ProviderError", *, attempts: int,
 ) -> "ProviderError":
-    """Re-label an undelivered outcome that reproduced under a fresh attempt.
+    """Re-label an undelivered outcome that survived a backed-off retry.
 
-    A transport stall is transient by nature, so "结果不确定，稍后重试" is the
-    right thing to tell an operator once.  When the identical request is
-    re-issued under its own operation id and the provider cuts it exactly the
-    same way, it is not uncertain any more -- it is a reproducible rejection of
-    that request, and telling anyone to retry it later is telling them to wait
-    forever.  Whatever bounded evidence the transport captured travels with the
-    message so the actual cause is visible.
+    A single transport stall is transient, so "结果不确定，稍后重试" is the right
+    thing to say once.  Surviving several attempts spread across a backoff
+    window means something else: measured on this pipeline the provider sheds
+    load at the batch's peak concurrency and answers the shed requests with a
+    canned refusal, so the useful lever is less concurrency rather than another
+    immediate retry.  Whatever bounded evidence the transport captured travels
+    with the message so the actual cause stays visible.
     """
     evidence = str(getattr(last_error, "raw", "") or "").strip()
     return ProviderError(
-        "供应商对同一请求连续 "
-        f"{attempts} 次以相同方式中断，属于可复现的拒绝而非临时故障；"
-        "重试不会成功，请检查该请求的内容或规模"
+        f"供应商连续 {attempts} 次在退避重试后仍未送达答案；"
+        "通常是并发高峰下的限流丢弃，请降低并发或稍后整体重跑，"
+        "对同一请求立即重试无效"
         + (f"（{evidence[:200]}）" if evidence else ""),
         retryable=False,
         raw=evidence,

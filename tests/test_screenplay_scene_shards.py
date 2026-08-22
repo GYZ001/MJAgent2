@@ -10613,16 +10613,31 @@ def test_scene_shard_undelivered_answer_is_retried_inside_the_batch() -> None:
             raise interrupted
         return "ok"
 
-    result = asyncio.run(
-        scene_shards_module._scene_structured_with_undelivered_retry(
-            issue, operation_id="op-scene",
+    slept: list[float] = []
+
+    async def no_wait(delay: float) -> None:
+        slept.append(delay)
+
+    monkeypatch_sleep = getattr(asyncio, "sleep")
+    asyncio.sleep = no_wait  # type: ignore[assignment]
+    try:
+        result = asyncio.run(
+            scene_shards_module._scene_structured_with_undelivered_retry(
+                issue, operation_id="op-scene",
+            )
         )
-    )
+    finally:
+        asyncio.sleep = monkeypatch_sleep  # type: ignore[assignment]
 
     assert result == "ok"
     # The retry carries its own operation id, so it is not replaying the
     # unknown outcome of the interrupted call.
     assert calls == ["op-scene", "op-scene:undelivered:1"]
+    # It also waits first: an immediate re-issue lands inside the same
+    # load-shedding window and fails for the same reason.
+    assert slept == [
+        scene_shards_module.SCENE_SHARD_UNDELIVERED_BACKOFF_S[0]
+    ]
 
 
 def test_scene_shard_delivered_failure_is_never_retried() -> None:
@@ -10648,6 +10663,15 @@ def test_scene_shard_delivered_failure_is_never_retried() -> None:
         )
 
     assert calls == ["op-scene"]
+
+
+def test_scene_shard_backoff_is_bounded_and_increasing() -> None:
+    """The retry waits out a shedding window without stalling the batch."""
+    delays = scene_shards_module.SCENE_SHARD_UNDELIVERED_BACKOFF_S
+    assert len(delays) == scene_shards_module.SCENE_SHARD_UNDELIVERED_RETRIES
+    assert list(delays) == sorted(delays)
+    assert sum(delays) >= 19.0   # covers the measured ~19s shed window
+    assert sum(delays) <= 60.0
 
 
 def test_single_reviewer_fallback_is_strictly_stricter_than_consensus() -> None:

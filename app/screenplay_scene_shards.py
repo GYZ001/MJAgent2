@@ -107,7 +107,14 @@ SCREENPLAY_SCENE_SHARD_UNIT_RESERVE_TOKENS = 128
 SCREENPLAY_SCENE_SHARD_REASONING_RESERVE_PERCENT = 20
 
 
-SCENE_SHARD_UNDELIVERED_RETRIES = 1
+# Measured on this pipeline: the semantic review stage fired 50 calls in one
+# round, the first 14 all succeeded, then 16 were cut inside a ~19s window, and
+# afterwards they succeeded again.  The provider sheds load under the batch's
+# peak concurrency and answers the shed requests with a canned refusal before
+# closing the stream.  So the retry has to *wait out* the window -- an immediate
+# re-issue lands inside the same burst and looks deterministic when it is not.
+SCENE_SHARD_UNDELIVERED_BACKOFF_S = (4.0, 16.0)
+SCENE_SHARD_UNDELIVERED_RETRIES = len(SCENE_SHARD_UNDELIVERED_BACKOFF_S)
 
 
 async def _scene_structured_with_undelivered_retry(
@@ -119,7 +126,7 @@ async def _scene_structured_with_undelivered_retry(
 
     A stall before the first streamed character, or a stream cut before the
     provider's own ``[DONE]`` (whose partial text the transport discards),
-    leaves nothing authored to preserve -- so one fresh attempt under its own
+    leaves nothing authored to preserve -- so a fresh attempt under its own
     operation id is not an answer being re-rolled until it passes.  Anything
     the provider did deliver, including a candidate that failed validation,
     still fails on the first call.
@@ -131,6 +138,10 @@ async def _scene_structured_with_undelivered_retry(
     """
     last_error: hiagent.ProviderError | None = None
     for attempt in range(SCENE_SHARD_UNDELIVERED_RETRIES + 1):
+        if attempt:
+            await asyncio.sleep(
+                SCENE_SHARD_UNDELIVERED_BACKOFF_S[attempt - 1]
+            )
         try:
             return await call(
                 operation_id
