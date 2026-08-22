@@ -2237,7 +2237,12 @@ def test_interrupted_stream_evidence_falls_back_to_dropped_frame() -> None:
 
 
 def test_reproduced_interruption_is_relabelled_as_deterministic() -> None:
-    """Telling an operator to retry a reproducible rejection wastes their time."""
+    """An outcome that survives backoff is load shedding, not a stall.
+
+    Telling an operator to "retry later" after several backed-off attempts
+    points them at the wrong lever: the measured cause is the provider shedding
+    the batch's peak concurrency, so the message must name concurrency.
+    """
     original = hiagent.ProviderError(
         "流式响应在 [DONE] 前中断，结果不确定",
         retryable=True,
@@ -2255,4 +2260,5 @@ def test_reproduced_interruption_is_relabelled_as_deterministic() -> None:
     assert relabelled.requires_explicit_retry is False
     # The evidence travels with it, so the cause is visible at the call site.
     assert "抱歉，我无法" in str(relabelled)
-    assert "重试不会成功" in str(relabelled)
+    assert "限流丢弃" in str(relabelled)
+    assert "降低并发" in str(relabelled)
