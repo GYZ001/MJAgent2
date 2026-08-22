@@ -4,6 +4,7 @@ import asyncio
 from copy import deepcopy
 import hashlib
 import json
+import pathlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -3798,3 +3799,22 @@ def test_screenplay_document_roundtrip_preserves_body_interleave() -> None:
         "actor_id": "谷言",
         "agency_mode": "voluntary",
     }]
+
+
+def test_gap_search_walks_every_remaining_batch(monkeypatch) -> None:
+    """A batch without a gap is not a failure; the gap is in a later batch.
+
+    Production EP2 died at IR_MERGE with 「IR 保真补写没有可处理的缺口窗口」
+    because only the first six remaining plans were inspected, and its missing
+    source sat further along the plan list.
+    """
+    import app.stages as stages_module
+
+    source = pathlib.Path(stages_module.__file__).read_text(encoding="utf-8")
+    body = source[source.index("selected_windows = project_windows("):]
+    body = body[: body.index("context[\"required_remaining_scene_plans\"]")]
+
+    # The search must iterate the remaining plans, not slice a fixed prefix.
+    assert "for start in range(0, len(_remaining_plans), 6):" in body
+    assert "_remaining_plans[start:start + 6]" in body
+    assert "_remaining_plans[:6]" not in body

@@ -1135,6 +1135,7 @@ async def _complete_screenplay_ir_fidelity(
 
     patched = False
     consecutive_empty_patches = 0
+    fidelity_error: ValueError | None = None
     initial_gap_context = _ir_fidelity_patch_context(candidate, source_text)
     missing_scene_plan_count = (
         max(
@@ -1200,6 +1201,7 @@ async def _complete_screenplay_ir_fidelity(
         except ValueError as exc:
             if not isinstance(exc, ScreenplayIRFidelityError):
                 raise
+            fidelity_error = exc
 
         context = _ir_fidelity_patch_context(candidate, source_text)
         if narrative_blueprint is not None:
@@ -1290,20 +1292,28 @@ async def _complete_screenplay_ir_fidelity(
                 for source_id in plan.source_segment_ids
             }
             selected_windows = project_windows(allowed_source_ids)
-            if (
-                not selected_windows
-                and internal_plans
-                and _remaining_plans
-            ):
-                selected_plans = _remaining_plans[:6]
-                allowed_source_ids = {
-                    source_id
-                    for plan in selected_plans
-                    for source_id in plan.source_segment_ids
-                }
-                selected_windows = project_windows(
-                    allowed_source_ids
-                )
+            if not selected_windows and internal_plans and _remaining_plans:
+                # A batch that happens to contain no gap is not a failure --
+                # the gap simply lives in a later batch.  Only inspecting the
+                # first six remaining plans made that an episode-ending
+                # ValueError whenever the missing source sat further along
+                # (production EP2 died at IR_MERGE this way).  Walk the
+                # remaining plans batch by batch until one actually has work.
+                for start in range(0, len(_remaining_plans), 6):
+                    batch = _remaining_plans[start:start + 6]
+                    if not batch:
+                        break
+                    batch_source_ids = {
+                        source_id
+                        for plan in batch
+                        for source_id in plan.source_segment_ids
+                    }
+                    batch_windows = project_windows(batch_source_ids)
+                    if batch_windows:
+                        selected_plans = batch
+                        allowed_source_ids = batch_source_ids
+                        selected_windows = batch_windows
+                        break
             context["required_remaining_scene_plans"] = [
                 plan.model_dump(mode="json")
                 for plan in selected_plans
@@ -1320,7 +1330,13 @@ async def _complete_screenplay_ir_fidelity(
             ][:2]
         windows = context["windows_requiring_expansion"]
         if not windows:
-            raise ValueError("IR 保真补写没有可处理的缺口窗口")
+            # 编译器报了保真缺口，窗口投影器却找不到任何可补窗口——两者对
+            # "还缺什么"的判断不一致。裸抛 "没有可处理的缺口窗口" 会把编译器
+            # 的诊断整个吞掉，让这一类失败无从下手；把它原样带出来。
+            raise ValueError(
+                "IR 保真补写没有可处理的缺口窗口；编译器报告的缺口："
+                + str(fidelity_error)[:400]
+            )
         if candidate.source_scene_owners:
             context["source_scene_owners"] = dict(
                 candidate.source_scene_owners
