@@ -2262,3 +2262,55 @@ def test_reproduced_interruption_is_relabelled_as_deterministic() -> None:
     assert "抱歉，我无法" in str(relabelled)
     assert "限流丢弃" in str(relabelled)
     assert "降低并发" in str(relabelled)
+
+
+def test_json_schema_rejection_degrades_to_json_object_not_free_text() -> None:
+    """A model may reject the schema flavour yet honour plain json_object.
+
+    Production: the gateway answered HTTP 400 with `json_schema is not
+    supported by this model`.  The only rungs available were "json_schema" and
+    "no response_format at all", so every ``response_format_required`` caller
+    -- the identity contracts, the scene shards -- failed outright on a model
+    that would have accepted json_object.
+    """
+    schema_format = {
+        "type": "json_schema",
+        "json_schema": {"name": "x", "strict": True, "schema": {}},
+    }
+
+    degraded = hiagent._json_object_response_format(schema_format)
+    assert degraded == {"type": "json_object"}
+
+    # Already-weak or absent formats have no rung below them.
+    assert hiagent._json_object_response_format({"type": "json_object"}) is None
+    assert hiagent._json_object_response_format(None) is None
+
+
+def test_json_schema_capability_gap_is_remembered_per_model() -> None:
+    """Once a model names json_schema as unsupported, stop re-sending it."""
+    provider, model = "custom:probe", "model-without-json-schema"
+    assert not hiagent._json_schema_known_unsupported(provider, model)
+
+    hiagent._remember_json_schema_unsupported(provider, model)
+
+    assert hiagent._json_schema_known_unsupported(provider, model)
+    # It is a narrower gap than "response_format unsupported": json_object
+    # still works, so the broader memory must stay untouched.
+    assert not hiagent._response_format_known_unsupported(provider, model)
+
+
+def test_provider_400_naming_json_schema_is_a_capability_gap() -> None:
+    """The exact production rejection must classify as a capability gap."""
+    exc = hiagent.ProviderError(
+        "请求被拒绝（HTTP 400）",
+        retryable=False,
+        raw=(
+            '{"error":{"message":"The parameter `response_format.type` '
+            "specified in the request are not valid: `json_schema` is not "
+            'supported by this model.","type":"bad_request"}}'
+        ),
+        failure_kind="provider_rejected",
+        delivery_state="responded",
+    )
+
+    assert hiagent._looks_like_response_format_unsupported(exc) is True

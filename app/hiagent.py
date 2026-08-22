@@ -1446,12 +1446,30 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
         )
         else None
     )
+    if (
+        attempt_response_format is not None
+        and _json_schema_known_unsupported(provider, selected_model)
+    ):
+        attempt_response_format = (
+            _json_object_response_format(attempt_response_format)
+            or attempt_response_format
+        )
     while True:
         try:
             content, data = await _dispatch(attempt_response_format)
             break
         except ProviderError as exc:
             if attempt_response_format is not None and _looks_like_response_format_unsupported(exc):
+                degraded = _json_object_response_format(attempt_response_format)
+                if degraded is not None:
+                    # The gateway named json_schema specifically.  Try the
+                    # weaker JSON guarantee it may still honour before giving
+                    # up the guarantee altogether -- this keeps
+                    # response_format_required callers working on models that
+                    # only implement json_object.
+                    _remember_json_schema_unsupported(provider, selected_model)
+                    attempt_response_format = degraded
+                    continue
                 if response_format_required:
                     # This operation declared provider-side schema enforcement
                     # authoritative. A plain-text/json_object fallback would
@@ -1587,6 +1605,43 @@ def _response_format_known_unsupported(provider: str, model: str) -> bool:
 
 def _remember_response_format_unsupported(provider: str, model: str) -> None:
     _RESPONSE_FORMAT_UNSUPPORTED.add(_response_format_capability_key(provider, model))
+
+
+# A model can reject the *schema* flavour while still honouring plain
+# ``json_object``.  Production: `json_schema is not supported by this model`
+# (HTTP 400) from a gateway that accepts json_object fine.
+_JSON_SCHEMA_UNSUPPORTED: set[str] = set()
+
+
+def _json_schema_known_unsupported(provider: str, model: str) -> bool:
+    return _response_format_capability_key(
+        provider, model
+    ) in _JSON_SCHEMA_UNSUPPORTED
+
+
+def _remember_json_schema_unsupported(provider: str, model: str) -> None:
+    _JSON_SCHEMA_UNSUPPORTED.add(
+        _response_format_capability_key(provider, model)
+    )
+
+
+def _json_object_response_format(
+    response_format: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Degrade a json_schema request to json_object, keeping a JSON guarantee.
+
+    ``json_object`` still makes the gateway return syntactically valid JSON, so
+    the entire "no JSON object ever decoded" failure class stays closed.  What
+    it drops is provider-side *shape* enforcement -- and the caller validates
+    the full schema plus its business rules locally regardless, which is what
+    actually decides acceptance.  Falling all the way back to free text would
+    be the real weakening; this is the rung between them that was missing.
+    """
+    if not isinstance(response_format, dict):
+        return None
+    if response_format.get("type") != "json_schema":
+        return None
+    return {"type": "json_object"}
 
 
 def _looks_like_response_format_unsupported(exc: ProviderError) -> bool:
