@@ -508,6 +508,7 @@ export default function TraceDrawer({
     >
       <aside
         className="monitor-drawer trace-drawer"
+        data-mobile-pane={mobilePane}
         role="dialog"
         aria-modal="true"
         aria-labelledby="trace-drawer-title"

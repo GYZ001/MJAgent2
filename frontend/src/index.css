@@ -3846,6 +3846,11 @@ table.calls-ledger th:nth-child(6) {
   gap: 6px;
   margin: -16px 0 10px;
 }
+/* .monitor-subnav 的 margin-top:-12px 与本条的 margin-bottom:10px 折叠后是 -2px，
+   子菜单会压在状态时间戳上；窄屏 chip 换行后尤其明显。这里显式给回间距。 */
+.monitor-block-strip + .monitor-subnav {
+  margin-top: 8px;
+}
 .monitor-block-chip {
   padding: 4px 8px;
   border: 1px solid var(--hairline);
@@ -3991,6 +3996,10 @@ table.calls-ledger th:nth-child(6) {
   justify-content: flex-end;
   background: rgba(30, 27, 20, 0.34);
   backdrop-filter: blur(3px);
+  /* iOS Safari 下 fixed+inset:0 按「大视口」算高度，底部一截被地址栏/工具栏盖住，
+     抽屉里滚到底也够不到最后的内容。dvh 只算当前可见高度；100vh 留作旧浏览器回退。 */
+  height: 100vh;
+  height: 100dvh;
 }
 .monitor-drawer {
   width: min(600px, 96vw);
@@ -4509,6 +4518,23 @@ table.calls-ledger th:nth-child(6) {
   .trace-workspace[data-mobile-pane="detail"] .trace-tree-panel {
     display: none;
   }
+  /* 看节点 JSON 时，链路级概要（状态/耗时/节点数/费用/开始时间）要占掉近 300px，
+     手机上正是这几百像素让 JSON 只剩一条缝。切回「调用树」即可查看。 */
+  .trace-drawer[data-mobile-pane="detail"] .trace-summary {
+    display: none;
+  }
+  .trace-raw-notice {
+    padding: 6px 12px;
+    font-size: 10px;
+    line-height: 1.45;
+  }
+  .trace-detail-head {
+    gap: 4px;
+    padding: 10px 12px;
+  }
+  .trace-json {
+    padding: 10px 12px calc(18px + env(safe-area-inset-bottom));
+  }
   .trace-tree-panel,
   .trace-detail-panel {
     max-height: none;
@@ -4969,7 +4995,8 @@ table.calls-ledger th:nth-child(6) {
     align-items: stretch;
   }
   .monitor-toolbar label,
-  .monitor-toolbar .monitor-search {
+  .monitor-toolbar .monitor-search,
+  .monitor-toolbar .monitor-scope-lock {
     min-width: 100%;
   }
   .monitor-toolbar select {
