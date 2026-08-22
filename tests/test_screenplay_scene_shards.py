@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from copy import deepcopy
 import json
 import math
@@ -10763,3 +10764,78 @@ def test_no_chunk_level_backoff_exists() -> None:
     )
     # Only the short in-lease pause survives.
     assert sum(scene_shards_module.SCENE_SHARD_UNDELIVERED_BACKOFF_S) <= 6.0
+
+
+def _cross_slot_finding(
+    unit_key: str, counterpart: str, message: str, kinds: list[str],
+):
+    return ScreenplaySceneShardSemanticFinding(
+        unit_key=unit_key,
+        related_unit_keys=[counterpart],
+        code="source_semantic_drift",
+        violation_kinds=kinds,
+        message=message,
+    )
+
+
+def _canonicalise_colliding_review(monkeypatch, kinds: list[str]):
+    """Reproduce the collision the way production makes it.
+
+    The response model forbids a duplicate (unit_key, code), so the model can
+    never send one.  Canonicalisation re-hangs a finding from a faithful slot
+    onto the drifting slot it names -- and that rewritten key can collide with
+    a finding already sitting on that slot.
+    """
+    draft = SimpleNamespace(slots={
+        "u1": SimpleNamespace(text="忠实照抄来源"),
+        "u2": SimpleNamespace(text="偏离来源的改写"),
+        "u3": SimpleNamespace(text="另一段偏离"),
+    })
+    monkeypatch.setattr(
+        scene_shards_module,
+        "_scene_shard_source_facts_by_slot",
+        lambda _contracts: {
+            "u1": SimpleNamespace(text="忠实照抄来源"),
+            "u2": SimpleNamespace(text="u2 自己的来源"),
+            "u3": SimpleNamespace(text="u3 自己的来源"),
+        },
+    )
+    review = ScreenplaySceneShardSemanticReview(findings=[
+        # u1 is faithful and names u2, so this one is re-hung onto u2 …
+        _cross_slot_finding("u1", "u2", "与 u2 重复", kinds),
+        # … where a finding with the same code already names u3.
+        _cross_slot_finding("u2", "u3", "与 u3 重复", kinds),
+    ])
+    return scene_shards_module._scene_shard_canonicalize_cross_slot_findings(
+        review, draft=draft, scene_input_contracts=[],
+    )
+
+
+def test_conflicting_cross_slot_counterparts_drop_the_kind_not_the_episode(
+    monkeypatch,
+) -> None:
+    """Two counterparts for one (unit_key, code) is not an impossible state.
+
+    Raising an internal ValueError paused the whole episode and threw away the
+    other violation kinds with it; the consensus layer's existing answer for
+    disagreeing counterparts is to drop the cross-slot kind and keep the rest.
+    """
+    merged = _canonicalise_colliding_review(
+        monkeypatch, ["cross_slot_duplication", "unsupported_action"],
+    )
+
+    collided = [item for item in merged.findings if item.unit_key == "u2"]
+    assert len(collided) == 1
+    assert "cross_slot_duplication" not in collided[0].violation_kinds
+    # The unrelated kind survives: the gate is not silently emptied.
+    assert collided[0].violation_kinds == ["unsupported_action"]
+    assert collided[0].related_unit_keys == []
+
+
+def test_conflicting_cross_slot_only_finding_is_dropped(monkeypatch) -> None:
+    """With nothing left to report the finding itself goes away."""
+    merged = _canonicalise_colliding_review(
+        monkeypatch, ["cross_slot_duplication"],
+    )
+
+    assert [item.unit_key for item in merged.findings] == []
