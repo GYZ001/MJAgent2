@@ -1,8 +1,10 @@
 """Immutable screenplay/source authority resolution for downstream narrative work."""
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
+from threading import RLock
 import hashlib
 import json
 from typing import Any
@@ -1269,6 +1271,85 @@ def _validated_v7_source_artifacts(
     return None
 
 
+# 重编译已发布剧本的「场次源投影」是纯函数：输入全部是不可变 Artifact
+# （已发布剧本 / merged IR / 各 scene shard，都按 content_hash 封印）加上本集的
+# episodes / projects 行与原文章节。实测一次重编译 437 ms（其中
+# compile_screenplay_ir 339 ms），而剧本台每次打开或轮询都要跑一次。
+# 这里按「全部输入的内容指纹」缓存结果：任何一个输入变化都会改变键，
+# 因此缓存命中与重算在语义上完全等价，不存在读到过期权威的可能。
+# 与 patch.py 同理，缓存里存的是序列化 JSON，保证每个调用方拿到独立可变模型。
+_V7_SOURCE_PROJECTION_CACHE: OrderedDict[
+    str, tuple[str, str, tuple[str, ...]]
+] = OrderedDict()
+_V7_SOURCE_PROJECTION_CACHE_SIZE = 8
+_V7_SOURCE_PROJECTION_CACHE_LOCK = RLock()
+
+
+def _row_fingerprint(row: Any) -> str:
+    """Content fingerprint of one sqlite row, independent of column order."""
+    if row is None:
+        return "none"
+    data = dict(row)
+    return hashlib.blake2b(
+        json.dumps(data, ensure_ascii=False, sort_keys=True, default=str).encode(
+            "utf-8"
+        ),
+        digest_size=16,
+    ).hexdigest()
+
+
+def _v7_source_projection_cache_key(
+    *,
+    episode_id: str,
+    artifact: dict[str, Any],
+    merged_artifact: dict[str, Any],
+    shard_artifacts: list[dict[str, Any]],
+    episode_row: Any,
+    project_row: Any,
+    source_text: str,
+) -> str:
+    from app.screenplay_scene_shards import (
+        SCREENPLAY_MERGED_IR_VERSION,
+        SCREENPLAY_SCENE_SHARD_VERSION,
+    )
+    from app.schemas import NARRATIVE_CONTRACT_VERSION
+
+    material = {
+        "episode_id": episode_id,
+        "published": [
+            str(artifact.get("id") or ""),
+            str(artifact.get("content_hash") or ""),
+            str(artifact.get("contract_version") or ""),
+        ],
+        "merged": [
+            str(merged_artifact.get("id") or ""),
+            str(merged_artifact.get("content_hash") or ""),
+        ],
+        "shards": sorted(
+            [
+                str(shard.get("id") or ""),
+                str(shard.get("content_hash") or ""),
+            ]
+            for shard in shard_artifacts
+        ),
+        "episode_row": _row_fingerprint(episode_row),
+        "project_row": _row_fingerprint(project_row),
+        "source_text": hashlib.blake2b(
+            source_text.encode("utf-8"), digest_size=16
+        ).hexdigest(),
+        "contracts": [
+            SCREENPLAY_MERGED_IR_VERSION,
+            SCREENPLAY_SCENE_SHARD_VERSION,
+            NARRATIVE_CONTRACT_VERSION,
+            SCREENPLAY_QA_PROFILE_VERSION,
+        ],
+    }
+    return hashlib.blake2b(
+        json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+        digest_size=20,
+    ).hexdigest()
+
+
 def _compile_validated_v7_source_projection(
     *,
     episode_id: str,
@@ -1288,6 +1369,38 @@ def _compile_validated_v7_source_projection(
         SCREENPLAY_SCENE_SHARD_VERSION,
         ScreenplaySceneShardIR,
     )
+
+    episode = conn.execute(
+        "SELECT * FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    if episode is None:
+        raise ValueError(f"episode not found: {episode_id}")
+    project = conn.execute(
+        "SELECT * FROM projects WHERE id=?",
+        (_episode_value(episode, "project_id"),),
+    ).fetchone()
+    _records, source_text = _source_records(conn, episode)
+    cache_key = _v7_source_projection_cache_key(
+        episode_id=episode_id,
+        artifact=artifact,
+        merged_artifact=merged_artifact,
+        shard_artifacts=shard_artifacts,
+        episode_row=episode,
+        project_row=project,
+        source_text=source_text,
+    )
+    with _V7_SOURCE_PROJECTION_CACHE_LOCK:
+        cached = _V7_SOURCE_PROJECTION_CACHE.get(cache_key)
+        if cached is not None:
+            _V7_SOURCE_PROJECTION_CACHE.move_to_end(cache_key)
+    if cached is not None:
+        cached_json, cached_merged_id, cached_shard_ids = cached
+        return (
+            EpisodeScreenplay.model_validate_json(cached_json),
+            cached_merged_id,
+            cached_shard_ids,
+        )
 
     try:
         merged_ir = ScreenplayGenerationIR.model_validate(
@@ -1352,19 +1465,8 @@ def _compile_validated_v7_source_projection(
         )
     merged_ir.scenes = ordered_source_scenes
 
-    episode = conn.execute(
-        "SELECT * FROM episodes WHERE id=?",
-        (episode_id,),
-    ).fetchone()
-    if episode is None:
-        raise ValueError(f"episode not found: {episode_id}")
-    project = conn.execute(
-        "SELECT * FROM projects WHERE id=?",
-        (_episode_value(episode, "project_id"),),
-    ).fetchone()
     bible_projection = _project_bible_projection(project)
     bible = Bible.model_validate(bible_projection or {})
-    _records, source_text = _source_records(conn, episode)
     episode_input = dict(episode)
     from app.portraits import load_screenplay_character_resolutions_for_source
 
@@ -1392,14 +1494,24 @@ def _compile_validated_v7_source_projection(
             artifact_type=str(artifact.get("type") or ""),
             reason=f"validated scene source projection 无法重新编译：{exc}",
         ) from exc
-    return (
-        source_screenplay,
-        str(merged_artifact.get("id") or ""),
-        tuple(
-            str(shard_artifact.get("id") or "")
-            for shard_artifact in shard_artifacts
-        ),
+    merged_artifact_id = str(merged_artifact.get("id") or "")
+    shard_artifact_ids = tuple(
+        str(shard_artifact.get("id") or "")
+        for shard_artifact in shard_artifacts
     )
+    with _V7_SOURCE_PROJECTION_CACHE_LOCK:
+        _V7_SOURCE_PROJECTION_CACHE[cache_key] = (
+            source_screenplay.model_dump_json(),
+            merged_artifact_id,
+            shard_artifact_ids,
+        )
+        _V7_SOURCE_PROJECTION_CACHE.move_to_end(cache_key)
+        while (
+            len(_V7_SOURCE_PROJECTION_CACHE)
+            > _V7_SOURCE_PROJECTION_CACHE_SIZE
+        ):
+            _V7_SOURCE_PROJECTION_CACHE.popitem(last=False)
+    return (source_screenplay, merged_artifact_id, shard_artifact_ids)
 
 
 def assert_screenplay_matches_validated_v7_source(
