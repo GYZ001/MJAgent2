@@ -17,6 +17,28 @@ const PAGE_LABELS: Record<AgentView, string> = {
   reader: '原著阅读',
 }
 
+/**
+ * Agent 上下文标签只需要三个名字：项目名、分集名、镜头号。
+ *
+ * 这里曾经直接拉整份项目投影：千集项目 4.8 MB / 1616 集（每集还带镜头），
+ * 而 picker 投影用同一套服务端逻辑给出项目名与当前分集，只有 1.4 KB。
+ * 镜头号只在真的选中了镜头时才需要，那时才按分集取一次分镜投影。
+ */
+export function agentContextRequestPaths(context: {
+  project_id?: string | null
+  episode_id?: string | null
+  selected_shot_id?: string | null
+}): { project: string; shot: string | null } {
+  const project =
+    `/projects/${encodeURIComponent(String(context.project_id ?? ''))}?view=picker`
+    + `&episode_limit=1`
+    + (context.episode_id ? `&episode_cursor=${encodeURIComponent(context.episode_id)}` : '')
+  const shot = context.selected_shot_id && context.episode_id
+    ? `/episodes/${encodeURIComponent(context.episode_id)}?view=board`
+    : null
+  return { project, shot }
+}
+
 interface ContextNames {
   loading: boolean
   project: string | null
@@ -42,21 +64,26 @@ export default function ContextChips({
     }
     let cancelled = false
     setNames({ loading: true, project: null, episode: null, shot: null })
-    api.get(`/projects/${encodeURIComponent(context.project_id)}`)
-      .then((project: Project) => {
+    const paths = agentContextRequestPaths(context)
+    const shotPromise: Promise<string | null> = paths.shot
+      ? api.get(paths.shot)
+          .then((episode: { shots?: { id: string; shot_no: number }[] }) => {
+            const shot = (episode.shots ?? [])
+              .find(item => item.id === context.selected_shot_id)
+            return shot ? `第${shot.shot_no}镜` : null
+          })
+          .catch(() => null)
+      : Promise.resolve(null)
+    Promise.all([api.get(paths.project) as Promise<Project>, shotPromise])
+      .then(([project, shot]) => {
         if (cancelled) return
-        const episode = context.episode_id
-          ? (project.episodes ?? []).find(item => item.id === context.episode_id)
-          : null
-        const shot = context.selected_shot_id
-          ? episode?.shots?.find(item => item.id === context.selected_shot_id)
-          : null
-        const episodeTitle = episode?.title?.replace(/\s+/g, ' ').trim() || ''
+        const current = project.episode_current
+        const episodeTitle = current?.title?.replace(/\s+/g, ' ').trim() || ''
         setNames({
           loading: false,
           project: project.name?.replace(/\s+/g, ' ').trim() || '当前项目',
-          episode: episode ? episodeTitle || '当前章节' : null,
-          shot: shot ? `第${shot.shot_no}镜` : null,
+          episode: context.episode_id && current ? episodeTitle || '当前章节' : null,
+          shot,
         })
       })
       .catch(() => {

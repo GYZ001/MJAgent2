@@ -51,11 +51,25 @@ def timed_get(path: str, timeout: int = 120) -> dict:
                 "wire_bytes": 0, "raw_bytes": 0, "encoding": "error"}
 
 
-def studio_requests(episode_id: str, project_id: str) -> list[str]:
-    """剧本台首屏真实请求集合（顺序与前端依赖一致）。"""
+def studio_requests(episode_id: str, project_id: str, *, legacy: bool = False) -> list[str]:
+    """剧本台首屏真实请求集合（与后端访问日志里观察到的一致）。
+
+    ``legacy=True`` 复现整改前的取数方式，用于同口径对比：
+    Agent 上下文标签当时直接拉整份项目投影（千集项目 4.8 MB）。
+    """
+    agent_context = (
+        f"/api/projects/{project_id}"
+        if legacy
+        else f"/api/projects/{project_id}?view=picker&episode_limit=1"
+             f"&episode_cursor={episode_id}"
+    )
     return [
+        "/api/session",
+        "/api/settings",
         "/api/projects",
-        f"/api/projects/{project_id}?view=picker&window=60&anchor={episode_id}",
+        agent_context,
+        f"/api/projects/{project_id}?view=picker&episode_limit=60"
+        f"&episode_cursor={episode_id}",
         f"/api/episodes/{episode_id}?view=script",
         f"/api/episodes/{episode_id}/screenplay/status",
         f"/api/episodes/{episode_id}/screenplay/draft",
@@ -121,6 +135,7 @@ def main() -> int:
     parser.add_argument("--repeat", type=int, default=5)
     parser.add_argument("--label", default="baseline")
     parser.add_argument("--skip-sql", action="store_true")
+    parser.add_argument("--legacy-agent-context", action="store_true")
     args = parser.parse_args()
 
     import sqlite3
@@ -133,7 +148,9 @@ def main() -> int:
         return 1
     project_id = row["project_id"]
 
-    paths = studio_requests(args.episode_id, project_id)
+    paths = studio_requests(
+        args.episode_id, project_id, legacy=args.legacy_agent_context,
+    )
     samples: dict[str, list[dict]] = {path: [] for path in paths}
     for _ in range(args.repeat):
         for path in paths:
