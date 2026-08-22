@@ -1366,15 +1366,27 @@ export function screenplayStatusPollInterval(
  * 剧本台初始/终态拉详情，运行中高频、终态低频轮询轻量快照。
  * 1646 集项目不再每 2s 重复传输正文和全部台词。
  */
+/**
+ * 轻量状态轮询的启动条件。
+ *
+ * 详情响应已经带着同一份 screenplay_production / screenplay_state / shot_count，
+ * 两个端点跑的是**同一套**已发布权威校验。首屏并发拉两次就是一次纯重复请求，
+ * 而轻量状态的职责本来只是“详情之后发生的变化”。所以详情未落地前返回 null，
+ * usePoll 见到 null 依赖就不启动。
+ */
+export function screenplayStatusPollDeps(
+  episodeId: string,
+  detailLoaded: boolean,
+): (string | null)[] {
+  return [detailLoaded ? episodeId : null];
+}
+
 export function useScriptEpisode(episodeId: string) {
   const detail = useEpisode(episodeId, "script", 0);
-  // 详情响应已经带着同一份 screenplay_production / screenplay_state / shot_count，
-  // 首屏再并发拉一次轻量状态就是一次纯重复请求（两个端点跑的是同一套权威校验）。
-  // 轻量状态只负责“之后的变化”，所以等详情落地再开始轮询。
   const status = usePoll<ScreenplayLightStatus>(
     () => api.get(`/episodes/${episodeId}/screenplay/status`),
     screenplayStatusPollInterval,
-    [detail.data ? episodeId : null],
+    screenplayStatusPollDeps(episodeId, Boolean(detail.data)),
   );
   const lastTerminalRef = useRef("");
 

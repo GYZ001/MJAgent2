@@ -363,6 +363,18 @@ _SCREENPLAY_READY_CACHE_SIZE = 64
 _SCREENPLAY_READY_CACHE_LOCK = RLock()
 
 
+def _rows_or_empty(conn, sql: str, params: tuple) -> list:
+    """Query a lazily-created table; a missing table means "no rows yet"."""
+    import sqlite3 as _sqlite3
+
+    try:
+        return conn.execute(sql, params).fetchall()
+    except _sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return []
+        raise
+
+
 def _digest(*parts: object) -> str:
     return hashlib.blake2b(
         json.dumps(parts, ensure_ascii=False, sort_keys=True, default=str).encode(
@@ -383,12 +395,14 @@ def screenplay_ready_identity(data: dict) -> str:
     project_row = conn.execute(
         "SELECT * FROM projects WHERE id=?", (project_id,)
     ).fetchone()
-    chapters = conn.execute(
+    chapters = _rows_or_empty(
+        conn,
         "SELECT idx, title, char_count, content FROM chapters WHERE project_id=? "
         "ORDER BY idx",
         (project_id,),
-    ).fetchall()
-    artifacts = conn.execute(
+    )
+    artifacts = _rows_or_empty(
+        conn,
         "SELECT id, type, status, version, content_hash, contract_version, "
         "       parent_artifact_ids_json, file_path "
         "  FROM artifacts "
@@ -396,23 +410,28 @@ def screenplay_ready_identity(data: dict) -> str:
         "    OR (scope_type='project' AND scope_id=?) "
         " ORDER BY id",
         (episode_id, project_id),
-    ).fetchall()
-    certificates = conn.execute(
+    )
+    # 完成凭证与 production revision 表是按需建表的；表不存在等价于「一条也没有」，
+    # 建表并写入后行会自然出现在指纹里。
+    certificates = _rows_or_empty(
+        conn,
         "SELECT * FROM completion_certificates WHERE scope_id=? ORDER BY id",
         (episode_id,),
-    ).fetchall()
-    revisions = conn.execute(
+    )
+    revisions = _rows_or_empty(
+        conn,
         "SELECT * FROM production_revisions WHERE episode_id=? ORDER BY id",
         (episode_id,),
-    ).fetchall()
-    evaluations = conn.execute(
+    )
+    evaluations = _rows_or_empty(
+        conn,
         "SELECT evaluation.* FROM evaluations AS evaluation "
         "  JOIN artifacts AS artifact ON artifact.id=evaluation.artifact_id "
         " WHERE (artifact.scope_type='episode' AND artifact.scope_id=?) "
         "    OR (artifact.scope_type='project' AND artifact.scope_id=?) "
         " ORDER BY evaluation.id",
         (episode_id, project_id),
-    ).fetchall()
+    )
     return _digest(
         "screenplay-ready.v1",
         NARRATIVE_CONTRACT_VERSION,

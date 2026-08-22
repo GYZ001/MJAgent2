@@ -1023,14 +1023,23 @@ def test_stale_screenplay_state_preserves_real_resumable_action(
 
 
 def test_script_detail_keeps_valid_screenplay_projection() -> None:
+    """兼容历史发布行：ready 且投影有效 ⇒ 两个端点都判 ready。
+
+    这里曾断言 ``published_screenplay_missing``，那是 ``episode_detail`` 先把
+    ``screenplay_json`` 从返回字典里 pop 掉、再用同一个字典去算 ``screenplay_state``
+    造成的假象：``_screenplay_ready`` 因「没有页面投影」恒为 False，于是走进
+    “已发布 Artifact 复验”分支，而同一时刻 ``/screenplay/status`` 判的是 ready。
+    修复后两个端点必须给出同一个答案。
+    """
     _seed_episode(with_artifact=False)
 
     detail = api.episode_detail("e1", view="script")
+    status = api.screenplay_lightweight_status("e1")
 
     assert detail["screenplay"]["title"] == _valid_script().title
-    assert detail["screenplay_state"]["code"] == "published_screenplay_missing"
+    assert detail["screenplay_state"] == status["screenplay_state"]
+    assert detail["screenplay_state"]["code"] == "ready_storyboard_empty"
     assert detail["screenplay_state"]["can_resume"] is False
-    assert detail["screenplay_state"]["recommended_action"] == "refresh"
 
 
 @pytest.mark.parametrize(
