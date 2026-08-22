@@ -17,6 +17,36 @@
   --serif:
     "Songti SC", "STSongti-SC-Regular", "Noto Serif SC", "Source Han Serif SC",
     "SimSun", serif;
+
+  /* 滚动条：全站一套取值。深色面只覆盖下面两个变量即可，不要再各写各的。 */
+  --scrollbar-size: 6px;
+  --scrollbar-thumb: rgba(116, 125, 136, 0.36);
+  --scrollbar-thumb-hover: rgba(116, 125, 136, 0.6);
+}
+
+/* scrollbar-width / scrollbar-color 是可继承属性，挂在 :root 即覆盖 Firefox 全站；
+   ::-webkit-scrollbar 不继承，必须用通配选择器，Chrome / Safari / Edge 才生效。
+   thumb 取 var()，所以任何祖先改写 --scrollbar-thumb 都会自动向下生效。 */
+:root {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+*::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 * {
@@ -2840,14 +2870,6 @@ button.btn.ghost.danger:hover {
   scrollbar-gutter: stable;
   animation: review-tab-in 0.16s ease-out;
 }
-.review-tab-content::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-.review-tab-content::-webkit-scrollbar-thumb {
-  background: var(--hairline);
-  border-radius: 4px;
-}
 .review-tab-content > .candidate-compare,
 .review-tab-content .version-history {
   margin-top: 0;
@@ -4957,7 +4979,6 @@ table.calls-ledger th:nth-child(6) {
   .monitor-subnav {
     display: flex;
     overflow-x: auto;
-    scrollbar-width: thin;
   }
   .monitor-subnav button {
     flex: 0 0 142px;
@@ -6102,16 +6123,6 @@ table.calls-ledger th:nth-child(6) {
   overflow-x: auto;
   scroll-snap-type: x proximity;
 }
-.material-strip::-webkit-scrollbar {
-  height: 8px;
-}
-.material-strip::-webkit-scrollbar-thumb {
-  background: var(--hairline);
-  border-radius: 4px;
-}
-.material-strip::-webkit-scrollbar-track {
-  background: transparent;
-}
 .material-fallback-note {
   margin: 10px 18px 0;
   padding: 7px 10px;
@@ -6244,7 +6255,6 @@ table.calls-ledger th:nth-child(6) {
   gap: 8px;
   overflow-x: auto;
   padding: 6px 0;
-  scrollbar-width: thin;
 }
 .portrait-view-chip {
   flex: 0 0 auto;
@@ -7046,23 +7056,9 @@ table.calls-ledger th:nth-child(6) {
   margin: 8px 0 7px;
   padding: 0;
   overflow: auto;
-  /* 同为深色面：scrollbar-color 只有 Firefox 认，Chrome / Safari 还要 webkit 伪元素，
-     否则仍是白轨灰条。取值与 .spine 保持一致。 */
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
-}
-.workspace-switcher-list::-webkit-scrollbar {
-  width: 6px;
-}
-.workspace-switcher-list::-webkit-scrollbar-track {
-  background: transparent;
-}
-.workspace-switcher-list::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.18);
-}
-.workspace-switcher-list::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.32);
+  /* 深色弹层：同样只改变量。 */
+  --scrollbar-thumb: rgba(255, 255, 255, 0.18);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.34);
 }
 .workspace-switcher-list > button {
   min-height: 52px;
@@ -7960,23 +7956,9 @@ select {
     linear-gradient(180deg, #20252d, #171b22);
   box-shadow: 5px 0 30px rgba(22, 27, 34, 0.08);
   z-index: 70;
-  /* 侧栏是深色面，默认滚动条是白轨灰条，贴在这个背景上非常刺眼。
-     取值与 .character-portrait-track / .workspace-switcher-list 的深色滚动条一致。 */
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
-}
-.spine::-webkit-scrollbar {
-  width: 6px;
-}
-.spine::-webkit-scrollbar-track {
-  background: transparent;
-}
-.spine::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.18);
-}
-.spine::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.32);
+  /* 深色面：只改变量，样式本体在 :root 的全站规则里。 */
+  --scrollbar-thumb: rgba(255, 255, 255, 0.18);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.34);
 }
 .spine.collapsed {
   width: 76px;
@@ -9234,18 +9216,9 @@ label.f {
   overflow-y: hidden;
   scroll-snap-type: x mandatory;
   scroll-behavior: smooth;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.64) transparent;
-}
-.character-portrait-track::-webkit-scrollbar {
-  height: 5px;
-}
-.character-portrait-track::-webkit-scrollbar-track {
-  background: transparent;
-}
-.character-portrait-track::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.64);
+  /* 特例：轨道压在定妆照上，底色不可控，需要比深色面更实的白才看得见。 */
+  --scrollbar-thumb: rgba(255, 255, 255, 0.62);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.82);
 }
 .character-portrait-slide {
   position: relative;
@@ -11149,8 +11122,6 @@ label.f {
   overflow-x: auto;
   scroll-snap-type: x proximity;
   scroll-behavior: smooth;
-  scrollbar-width: thin;
-  scrollbar-color: #cac7c0 transparent;
   outline: none;
 }
 .shot-navigator-list:focus-visible {
@@ -14715,7 +14686,6 @@ summary:focus-visible,
 ) {
   color: var(--ink);
   overscroll-behavior: contain;
-  scrollbar-color: rgba(116, 125, 136, 0.36) transparent;
 }
 :is(
   .impact-dialog,
