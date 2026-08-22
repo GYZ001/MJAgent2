@@ -3995,27 +3995,17 @@ def compile_screenplay_ir(
             event.action_intent,
             event.resulting_state,
         ):
-            if textmatch.condense(
-                str(event.action_intent or "")
-            ) == textmatch.condense(str(event.resulting_state or "")):
-                # 模型把动作原样抄进了结果状态，那本来就不是一个"结果"，
-                # 携带的信息为零。空 resulting_state 是这条检查自己明确接受的
-                # 状态（见 screenplay_beat_fields_repeat 的空值分支），所以清空
-                # 比让整集硬失败更贴合合同，也不会抹掉任何模型真正写出的内容。
-                # 只处理逐字相同这一种；近似重复说明模型确实写了不同的东西，
-                # 属于内容质量问题，继续 fail-closed。
-                event.resulting_state = ""
-                compiler_audit.append({
-                    "path": f"events.{event.key}",
-                    "operation": "clear_duplicated_resulting_state",
-                    "reason": "resulting_state_repeated_action_intent_verbatim",
-                })
-            else:
-                raise ValueError(
-                    "IR 事件动作与结果状态语义重复："
-                    f"{event.key} does={event.action_intent!r} "
-                    f"turn={event.resulting_state!r}"
-                )
+            # 内容质量判断归质量闸门：validators 有一条同源规则
+            # [SPINE_ACTION_TURN_DUPLICATE]，它带着"turn 必须写该动作完成后新
+            # 成立的状态"这样可操作的诉求，而且身处修复循环之内。编译器再复制
+            # 一份致命拷贝，只会把可修复的问题变成崩溃（生产上 EP3 卡死在
+            # IR_MERGE），既不增加安全性，也让修复模型看不到该改什么。
+            # 只留审计痕迹，判定权交给闸门。
+            compiler_audit.append({
+                "path": f"events.{event.key}",
+                "operation": "flag_action_outcome_duplicate",
+                "reason": "quality_gate_owns_spine_action_turn_duplicate",
+            })
     beats_were_derived = not value.beats
     if beats_were_derived:
         value.beats = [
@@ -4055,10 +4045,14 @@ def compile_screenplay_ir(
         if screenplay_beat_fields_repeat(beat.does, beat.turn)
     ]
     if repeated_beats:
-        raise ValueError(
-            "IR 主线节拍 does 与 turn 语义重复，无法表达状态变化："
-            + "、".join(repeated_beats[:20])
-        )
+        # 同上：这条规则的权威在质量闸门，它给的是可操作的改写要求。
+        # 节拍本身就是从事件派生的，所以这里和上面报的是同一个内容缺陷。
+        compiler_audit.append({
+            "path": "beats",
+            "operation": "flag_action_outcome_duplicate",
+            "beats": repeated_beats[:20],
+            "reason": "quality_gate_owns_spine_action_turn_duplicate",
+        })
     beat_by_key = _unique_by_key(value.beats, "beats")
     prior_values = list(value.audience_priors)
     if len(prior_values) < 2:
