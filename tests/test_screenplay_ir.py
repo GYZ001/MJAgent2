@@ -3818,3 +3818,22 @@ def test_gap_search_walks_every_remaining_batch(monkeypatch) -> None:
     assert "for start in range(0, len(_remaining_plans), 6):" in body
     assert "_remaining_plans[start:start + 6]" in body
     assert "_remaining_plans[:6]" not in body
+
+
+def test_attributed_text_unit_needs_no_person_state_subject_in_ir() -> None:
+    """刻字/告示由 content_owner_keys 归属，不是谁"当下的状态"。
+
+    Production EP2 stalled at IR_MERGE on bp-sc005:SRC0020:008 — the 「杂」
+    carved on a wooden token.  The compiler deliberately empties
+    ``identity_keys`` for these provenance kinds, then demanded a person state
+    subject for the same unit.
+    """
+    from app.screenplay_ir import ATTRIBUTED_TEXT_PROVENANCE_KINDS
+
+    assert ATTRIBUTED_TEXT_PROVENANCE_KINDS == frozenset({
+        "required_text", "prop_text", "on_screen_text",
+    })
+    # Speech is deliberately absent: someone performs it and still owns the
+    # state subject.
+    assert "dialogue" not in ATTRIBUTED_TEXT_PROVENANCE_KINDS
+    assert "creative_action" not in ATTRIBUTED_TEXT_PROVENANCE_KINDS

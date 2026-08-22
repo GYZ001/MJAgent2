@@ -1699,6 +1699,17 @@ def _bind_ir_identity_authority(
     return change
 
 
+# 文字归属型单元：文字本身刻在道具上、写在屏幕上或作为必现文本出现，
+# 由 text_provenance.content_owner_keys 归属，而不是某个在场人物的状态。
+# 与 screenplay_scene_shards._ATTRIBUTED_TEXT_DELIVERY_MODES 同源，只是那边
+# 用的是蓝图侧的 delivery mode，这边用的是编译后的 provenance kind。
+ATTRIBUTED_TEXT_PROVENANCE_KINDS = frozenset({
+    "required_text",
+    "prop_text",
+    "on_screen_text",
+})
+
+
 def _rewrite_ir_identity_key(
     value: ScreenplayGenerationIR,
     old_key: str,
@@ -3340,6 +3351,20 @@ def compile_screenplay_ir(
                             f"IR {format_version} {scene.key}.{event_key} 纯环境单元"
                             "不得同时声明人物 state subject/actor"
                         )
+                elif (
+                    unit.text_provenance.kind
+                    in ATTRIBUTED_TEXT_PROVENANCE_KINDS
+                    and unit.text_provenance.content_owner_keys
+                    and not subject_keys
+                ):
+                    # 刻字、告示、道具上的字由 content_owner_keys 归属，不是任何
+                    # 在场人物"当下的状态"：木牌上的「杂」属于宗门。编译器在生成
+                    # text_provenance 时本来就刻意把这三类的 identity_keys 清空，
+                    # 说明设计上它们不承载人物关系；同一个编译器再要求它们必须有
+                    # 人物 state subject 就是自相矛盾，生产上 EP2 每轮都卡在
+                    # bp-sc005:SRC0020:008（那个「杂」字）。
+                    # 归属仍然是强制的：没有 content_owner_keys 就不走这条豁免。
+                    pass
                 elif (
                     not subject_keys
                     or any(key not in unit.actor_keys for key in subject_keys)
