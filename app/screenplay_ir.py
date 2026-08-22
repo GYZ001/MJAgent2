@@ -4702,15 +4702,28 @@ def compile_screenplay_ir(
                 subject_keys = list(dict.fromkeys(event.state_subject_keys))
                 if (
                     not subject_keys
+                    and event.text_provenance.kind
+                    in ATTRIBUTED_TEXT_PROVENANCE_KINDS
+                    and content_owner_ids
+                ):
+                    # 归属型文字的状态主体就是它的归属方：木牌上的「杂」属于宗门，
+                    # 不属于任何在场人物。下面的非 typed 分支本来就用
+                    # content_owner_ids 兜底，typed 分支不该反而无路可走
+                    # （生产上 EP2 每轮都卡在 bp-sc005:SRC0020:008）。
+                    state_subject_ids = list(content_owner_ids)
+                elif (
+                    not subject_keys
                     or any(key not in event.actor_keys for key in subject_keys)
                 ):
                     raise ScreenplayIRFidelityError(
                         f"IR {format_version} event {event.key} 缺少"
                         " exact-unit typed actor state_subject_keys"
                     )
-                state_subject_ids = [
-                    identity_id(subject_key) for subject_key in subject_keys
-                ]
+                else:
+                    state_subject_ids = [
+                        identity_id(subject_key)
+                        for subject_key in subject_keys
+                    ]
         else:
             non_actor_subject_ids = list(dict.fromkeys([
                 *speaker_ids,
