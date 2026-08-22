@@ -2329,3 +2329,22 @@ def test_response_format_ladder_has_exactly_three_rungs() -> None:
     }
     # 第二级没有更弱的 response_format 了，下一步只能是纯文本（None）。
     assert hiagent._json_object_response_format({"type": "json_object"}) is None
+
+
+def test_identity_budgets_leave_room_for_a_reasoning_model() -> None:
+    """推理 token 计入同一次请求，预算必须按会先思考的模型标定。
+
+    Production: after the text model became a reasoning model, the identity
+    call returned finish_reason=length at completion_tokens=4097 against a
+    4096 budget, and another one was cut at 123.4s against a 120s read timeout.
+    Both constants had been calibrated on a non-reasoning model.
+    """
+    from app import config, portraits
+
+    # Reasoning eats the completion budget before the answer is written.
+    assert portraits.IDENTITY_REQUEST_MAX_TOKENS >= 8192
+    # The read timeout must outlast a call that thinks before answering.
+    assert config.TIMEOUT_CHAT_IDENTITY_READ >= 300.0
+    # It still stays below the generic long-generation ceilings, so a stalled
+    # identity call surfaces sooner than a full baseline would.
+    assert config.TIMEOUT_CHAT_IDENTITY_READ <= config.TIMEOUT_CHAT_BASELINE_READ

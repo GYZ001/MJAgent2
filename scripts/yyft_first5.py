@@ -288,6 +288,20 @@ def cmd_serial() -> int:
                 f"from state={state} resumable={resumable}")
             if state == "ready":
                 break
+            if state in {"queued", "running"} or (
+                state == "repairing" and payload.get("active")
+            ):
+                # Already working: the only correct action is to wait for it.
+                # Trying to start it earns a 409 and abandoning it here breaks
+                # the one guarantee serial mode exists to give -- it let the
+                # next episodes start alongside a still-running one, which is
+                # exactly the concurrency this mode avoids.
+                log(f"{name} 已在运行，等待其自行结束")
+                payload = await_terminal(name, eid)
+                state = str(payload.get("screenplay_status") or "")
+                if state == "ready":
+                    break
+                continue
             started = (
                 resume_episode(name, eid)
                 if resumable and state in {"repairing", "failed"}
@@ -296,6 +310,19 @@ def cmd_serial() -> int:
             if not started:
                 # A refused start with a resumable checkpoint still resumes.
                 if not resume_episode(name, eid):
+                    # It may have been refused because it just started; wait
+                    # rather than walking away from an episode still in flight.
+                    latest = status_of(eid)
+                    if str(
+                        latest.get("screenplay_status") or ""
+                    ) in {"queued", "running"}:
+                        payload = await_terminal(name, eid)
+                        state = str(
+                            payload.get("screenplay_status") or ""
+                        )
+                        if state == "ready":
+                            break
+                        continue
                     log(f"{name} could not be started or resumed")
                     break
             payload = await_terminal(name, eid)
@@ -314,7 +341,13 @@ def cmd_serial() -> int:
                 log(f"{name} 与上一次失败完全相同，停止重试（{signature}）")
                 break
             last_signature = signature
-        final = str(status_of(eid).get("screenplay_status") or "")
+        final_payload = status_of(eid)
+        if str(final_payload.get("screenplay_status") or "") in {
+            "queued", "running",
+        }:
+            log(f"{name} 仍在运行，等待其结束后再进入下一集")
+            final_payload = await_terminal(name, eid)
+        final = str(final_payload.get("screenplay_status") or "")
         results[name] = final
         log(f"{name} FINAL={final}")
     log("=== SERIAL DONE === " + ", ".join(

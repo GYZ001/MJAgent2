@@ -89,6 +89,13 @@ STRUCTURAL_IDENTITY_COVERAGE_VERSION = (
 # 后端拿到形态后确定性执行阶梯：只有真名可以签发新的人物权威，尊称与代称一律
 # 先落为功能身份。这样「有真名就不能单独成角色」，而真名尚未出现时该人物仍然
 # 是一个独立身份，等真名真正出现在证据里再由 K 决议认领同一个人。
+# 身份合同的输出预算。推理模型的 reasoning token 计入 completion_tokens，
+# 所以"够写下答案"并不等于"够跑完这次调用"：生产上换成推理模型后，
+# 4096 的预算被推理吃光，returned finish_reason=length / completion_tokens=4097，
+# 每一集都在人物预检确定性截断（EP4）。这里按输出上限的量级给足余量，
+# 真正的成本仍由实际用量结算，预算只是不让推理把答案挤掉。
+IDENTITY_REQUEST_MAX_TOKENS = 16384
+
 IDENTITY_NAME_FORM_PERSONAL = "personal_name"
 IDENTITY_NAME_FORM_HONORIFIC = "honorific"
 IDENTITY_NAME_FORM_REFERENTIAL = "referential"
@@ -2119,7 +2126,7 @@ async def _discover_character_candidates_legacy(
         future_raw = await model_gateway.chat(
             [{"role": "user", "content": future_prompt}],
             temperature=0.1,
-            max_tokens=4096,
+            max_tokens=IDENTITY_REQUEST_MAX_TOKENS,
             call_meta={
                 "stage": "discover_character_candidates",
                 "episode_no": episode_no,
@@ -2158,7 +2165,7 @@ async def _discover_character_candidates_legacy(
             coverage_raw = await model_gateway.chat(
                 [{"role": "user", "content": coverage_prompt}],
                 temperature=0.05,
-                max_tokens=4096,
+                max_tokens=IDENTITY_REQUEST_MAX_TOKENS,
                 call_meta={
                     "stage": "discover_character_candidates",
                     "episode_no": episode_no,
@@ -3597,7 +3604,9 @@ async def resolve_future_identity_candidates(
                 )
         return errors
     identity_provider, identity_model, identity_effective_max = (
-        hiagent.text_request_token_limits(requested_max_tokens=4096)
+        hiagent.text_request_token_limits(
+            requested_max_tokens=IDENTITY_REQUEST_MAX_TOKENS,
+        )
     )
     identity_semantic_settings = hiagent.text_request_semantic_settings(
         identity_provider
@@ -3629,7 +3638,7 @@ async def resolve_future_identity_candidates(
             if not resample_attempt
             else f"{operation_id}:resample:{resample_attempt}"
         ),
-        max_tokens=4096,
+        max_tokens=IDENTITY_REQUEST_MAX_TOKENS,
         temperature=0.1,
         format_retry_limit=0,
         semantic_retry_limit=0,
@@ -4213,7 +4222,9 @@ owned SRC 证据目录（后端逐字锁定，不得回抄或改写）：
 4. 只输出符合下列 Schema 的 JSON：
 {json.dumps(coverage_schema, ensure_ascii=False, separators=(',', ':'))}"""
     coverage_provider, coverage_model, coverage_effective_max = (
-        hiagent.text_request_token_limits(requested_max_tokens=4096)
+        hiagent.text_request_token_limits(
+            requested_max_tokens=IDENTITY_REQUEST_MAX_TOKENS,
+        )
     )
     coverage_semantic_settings = hiagent.text_request_semantic_settings(
         coverage_provider
@@ -4372,7 +4383,7 @@ owned SRC 证据目录（后端逐字锁定，不得回抄或改写）：
                 "response_format": coverage_response_format,
             })
         ),
-        max_tokens=4096,
+        max_tokens=IDENTITY_REQUEST_MAX_TOKENS,
         temperature=0.05,
         format_retry_limit=0,
         semantic_retry_limit=0,
