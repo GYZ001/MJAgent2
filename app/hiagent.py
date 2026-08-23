@@ -1310,6 +1310,13 @@ async def _plain_chat_request(
     )
 
 
+# response_format_required=True 调用命中"看起来是 response_format 不支持"的 400 时，
+# 在原地重放同一份请求（不降级）的次数上限。见 chat() 内 response_format_required 分支
+# 的注释：真实实验显示这类 400 是约 3.8% 的独立背景噪声，与请求内容无关，重放大概率
+# 会成功；这不是一个"猜的"数字，是"建议 2 次"的既定结论，超出后老实抛错。
+_RESPONSE_FORMAT_REQUIRED_JSON_SCHEMA_RETRIES = 2
+
+
 async def chat(messages: list[dict], *, model: str | None = None, temperature: float = 0.7,
                max_tokens: int = 65535, call_meta: dict | None = None,
                usage_callback: Callable[[dict[str, Any]], None] | None = None,
@@ -1473,16 +1480,28 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
     )
     if (
         attempt_response_format is not None
+        and not response_format_required
         and _json_schema_known_unsupported(provider, selected_model)
     ):
+        # 该缓存只是"跳过一次大概率会 400 的往返"的性能优化，永远不能替调用方
+        # 决定放弃它显式要求的强约束——required 调用必须每次都真枪实弹地发出
+        # 原始 response_format，即便这个 (provider, model) 之前被记过不支持。
         attempt_response_format = (
             _json_object_response_format(attempt_response_format)
             or attempt_response_format
         )
     truncation_escalated = False
+    required_format_attempt = 0
     while True:
         try:
             content, data = await _dispatch(attempt_response_format)
+            if (
+                attempt_response_format is not None
+                and attempt_response_format.get("type") == "json_schema"
+            ):
+                # 拿到一次真实成功，证明该 (provider, model) 当下能承接 json_schema，
+                # 清空"连续拒绝"计数，避免几次分散的背景噪声被累积计入拉黑阈值。
+                _forget_json_schema_reject_streak(provider, selected_model)
             break
         except ProviderError as exc:
             if (
@@ -1505,6 +1524,26 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                 }
                 continue
             if attempt_response_format is not None and _looks_like_response_format_unsupported(exc):
+                if response_format_required:
+                    # required 调用绝不静默降级：json_schema → json_object → 纯文本这条
+                    # 能力阶梯只对"允许弱化"的调用开放。真实 API 实验显示该类 400 约
+                    # 3.8% 概率发生、与 schema 大小/结构无关，是间歇性背景噪声而非真的
+                    # 不支持；原地重放同一份请求约 96% 概率成功，所以这里选择"原样重试"
+                    # 而不是"下探到弱约束"。仍然把这次拒绝计入(provider, model)的连续
+                    # 拒绝计数，供其它非 required 调用参考（见 _remember_json_schema_unsupported
+                    # / _json_schema_known_unsupported 前面的 not response_format_required 判断，
+                    # required 调用自己永远不读这份缓存）。重试预算用尽后原样抛出，不吞异常、
+                    # 不悄悄换成弱约束继续跑。
+                    if attempt_response_format.get("type") == "json_schema":
+                        _remember_json_schema_unsupported(provider, selected_model)
+                    else:
+                        _remember_response_format_unsupported(provider, selected_model)
+                    if required_format_attempt < _RESPONSE_FORMAT_REQUIRED_JSON_SCHEMA_RETRIES:
+                        # 退避沿用本文件 _post_json 已有的 1.5 * 2**attempt 节奏，不发明新策略。
+                        await asyncio.sleep(1.5 * (2 ** required_format_attempt))
+                        required_format_attempt += 1
+                        continue
+                    raise
                 # 能力阶梯：json_schema → json_object → 纯文本。
                 # 每一级只在网关明确拒绝上一级时下探一次，并把该能力缺失按
                 # provider:model 记住，之后的调用直接从可用的那一级开始。
@@ -1648,6 +1687,25 @@ def _remember_response_format_unsupported(provider: str, model: str) -> None:
 # A model can reject the *schema* flavour while still honouring plain
 # ``json_object``.  Production: `json_schema is not supported by this model`
 # (HTTP 400) from a gateway that accepts json_object fine.
+#
+# Measured against the real gateway, a single such 400 is not reliable evidence
+# of incapability: the rejection rate is ~3.8% and behaves like independent
+# background noise -- uncorrelated with schema size, $ref/$defs, nesting depth,
+# enum size, or anyOf/oneOf. Replaying the *identical* request usually succeeds.
+# Blacklisting a (provider, model) after one hit therefore poisons this
+# process for the rest of its life over what is most likely noise. Require a
+# short streak of *consecutive* (uninterrupted by an intervening success)
+# rejections before caching "unsupported". Threshold=3: assuming independent
+# ~3.8% events, three in a row has probability ~5e-5, which is low enough to
+# treat as a real signal while one or two isolated hits are absorbed as noise.
+# This is a process-lifetime, best-effort optimisation only -- it exists to
+# skip a round trip that will *probably* 400 again for opportunistic callers.
+# It must never be consulted for response_format_required=True calls (see
+# chat()): those always send the caller's real response_format and, on a 400,
+# retry the same request in place rather than downgrading or reading this
+# cache.
+_JSON_SCHEMA_UNSUPPORTED_STREAK_THRESHOLD = 3
+_JSON_SCHEMA_REJECT_STREAK: dict[str, int] = {}
 _JSON_SCHEMA_UNSUPPORTED: set[str] = set()
 
 
@@ -1658,8 +1716,30 @@ def _json_schema_known_unsupported(provider: str, model: str) -> bool:
 
 
 def _remember_json_schema_unsupported(provider: str, model: str) -> None:
-    _JSON_SCHEMA_UNSUPPORTED.add(
-        _response_format_capability_key(provider, model)
+    """Record one json_schema rejection; blacklist only after a consecutive streak.
+
+    Called for every observed rejection, including those from
+    ``response_format_required=True`` retries -- the event is real regardless
+    of who saw it. What differs is *consumption*: required calls never check
+    ``_json_schema_known_unsupported`` (see chat()), so this bookkeeping only
+    ever helps future non-required callers skip a likely-doomed round trip.
+    """
+    key = _response_format_capability_key(provider, model)
+    streak = _JSON_SCHEMA_REJECT_STREAK.get(key, 0) + 1
+    _JSON_SCHEMA_REJECT_STREAK[key] = streak
+    if streak >= _JSON_SCHEMA_UNSUPPORTED_STREAK_THRESHOLD:
+        _JSON_SCHEMA_UNSUPPORTED.add(key)
+
+
+def _forget_json_schema_reject_streak(provider: str, model: str) -> None:
+    """Reset the consecutive-rejection streak after an observed success.
+
+    Keeps "consecutive" meaningful: a success in between rejections proves the
+    (provider, model) pair can deliver json_schema, so unrelated noise hits
+    before/after it must not accumulate toward the blacklist threshold.
+    """
+    _JSON_SCHEMA_REJECT_STREAK.pop(
+        _response_format_capability_key(provider, model), None
     )
 
 

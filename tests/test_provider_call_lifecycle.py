@@ -2287,16 +2287,39 @@ def test_json_schema_rejection_degrades_to_json_object_not_free_text() -> None:
 
 
 def test_json_schema_capability_gap_is_remembered_per_model() -> None:
-    """Once a model names json_schema as unsupported, stop re-sending it."""
+    """A model must reject json_schema several times *in a row* before we stop
+    sending it -- not once.
+
+    Measured against the real gateway, a single such 400 behaves like ~3.8%
+    independent background noise, uncorrelated with schema shape/size, and
+    replaying the identical request usually succeeds.  Blacklisting on the
+    first hit would poison the whole process over what is most likely noise,
+    so caching "unsupported" requires a short consecutive streak (see
+    ``_JSON_SCHEMA_UNSUPPORTED_STREAK_THRESHOLD`` in app/hiagent.py).
+    """
     provider, model = "custom:probe", "model-without-json-schema"
-    assert not hiagent._json_schema_known_unsupported(provider, model)
+    key = hiagent._response_format_capability_key(provider, model)
+    hiagent._JSON_SCHEMA_UNSUPPORTED.discard(key)
+    hiagent._JSON_SCHEMA_REJECT_STREAK.pop(key, None)
+    try:
+        assert not hiagent._json_schema_known_unsupported(provider, model)
 
-    hiagent._remember_json_schema_unsupported(provider, model)
+        # Two isolated rejections are not yet a verdict.
+        hiagent._remember_json_schema_unsupported(provider, model)
+        assert not hiagent._json_schema_known_unsupported(provider, model)
+        hiagent._remember_json_schema_unsupported(provider, model)
+        assert not hiagent._json_schema_known_unsupported(provider, model)
 
-    assert hiagent._json_schema_known_unsupported(provider, model)
-    # It is a narrower gap than "response_format unsupported": json_object
-    # still works, so the broader memory must stay untouched.
-    assert not hiagent._response_format_known_unsupported(provider, model)
+        # A success in between would have reset the streak; without one, the
+        # third consecutive rejection crosses the threshold.
+        hiagent._remember_json_schema_unsupported(provider, model)
+        assert hiagent._json_schema_known_unsupported(provider, model)
+        # It is a narrower gap than "response_format unsupported": json_object
+        # still works, so the broader memory must stay untouched.
+        assert not hiagent._response_format_known_unsupported(provider, model)
+    finally:
+        hiagent._JSON_SCHEMA_UNSUPPORTED.discard(key)
+        hiagent._JSON_SCHEMA_REJECT_STREAK.pop(key, None)
 
 
 def test_provider_400_naming_json_schema_is_a_capability_gap() -> None:
