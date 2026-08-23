@@ -63,6 +63,9 @@ export function ServerTaskTimer({ label, startedAt, finishedAt, running }: {
     return () => window.clearInterval(timer)
   }, [running, startedAt])
   if (!startedAt) return null
+  // 已停止却没有服务端结束时间时，耗时无从得知：用挂载时刻当终点会让数字每次刷新都变大，
+  // 宁可不显示，也不给一个会漂移的数。
+  if (!running && !finishedAt) return null
   const endMs = finishedAt ? finishedAt * 1000 : clock
   const elapsedMs = Math.max(0, endMs - startedAt * 1000)
   return running

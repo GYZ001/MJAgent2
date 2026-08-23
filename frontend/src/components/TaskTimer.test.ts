@@ -42,6 +42,17 @@ describe("ServerTaskTimer", () => {
     expect(html).toBe("");
   });
 
+  it("已停止且无服务端结束时间时不渲染，避免数字随刷新漂移", () => {
+    const html = renderToStaticMarkup(createElement(ServerTaskTimer, {
+      label: "剧本",
+      startedAt: Math.floor(Date.now() / 1000) - 3_600,
+      finishedAt: null,
+      running: false,
+    }));
+
+    expect(html).toBe("");
+  });
+
   it("运行中以服务端起点为准，20 小时前的本地残留不参与计算", () => {
     const startedAt = Math.floor(Date.now() / 1000) - 90;
     const html = renderToStaticMarkup(createElement(ServerTaskTimer, {
