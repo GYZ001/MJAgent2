@@ -527,7 +527,8 @@ def test_regex_planner_creates_exactly_one_episode_per_chapter(monkeypatch) -> N
         """
         CREATE TABLE projects(
           id TEXT PRIMARY KEY, plan_status TEXT, plan_error TEXT,
-          key_timeline TEXT, status TEXT
+          key_timeline TEXT, status TEXT,
+          plan_started_at REAL, plan_finished_at REAL
         );
         CREATE TABLE chapters(
           project_id TEXT, idx INTEGER, title TEXT, content TEXT
@@ -537,7 +538,7 @@ def test_regex_planner_creates_exactly_one_episode_per_chapter(monkeypatch) -> N
           cliffhanger TEXT, synopsis TEXT, source_chapters TEXT,
           target_duration_s INTEGER, status TEXT, created_at REAL
         );
-        INSERT INTO projects VALUES('p1','running',NULL,NULL,'ingested');
+        INSERT INTO projects(id,plan_status,plan_error,key_timeline,status) VALUES('p1','running',NULL,NULL,'ingested');
         INSERT INTO chapters VALUES('p1',1,'第一章 起点','第一章 起点\n  A   wakes.');
         INSERT INTO chapters VALUES('p1',2,'第二章 转折','第二章 转折\nB arrives.');
         """
@@ -567,7 +568,8 @@ def test_regex_replan_skips_existing_title_only_duplicate_and_cleans_media(
         """
         CREATE TABLE projects(
           id TEXT PRIMARY KEY, plan_status TEXT, plan_error TEXT,
-          key_timeline TEXT, status TEXT
+          key_timeline TEXT, status TEXT,
+          plan_started_at REAL, plan_finished_at REAL
         );
         CREATE TABLE chapters(
           project_id TEXT, idx INTEGER, title TEXT, content TEXT
@@ -577,7 +579,7 @@ def test_regex_replan_skips_existing_title_only_duplicate_and_cleans_media(
           cliffhanger TEXT, synopsis TEXT, source_chapters TEXT,
           target_duration_s INTEGER, status TEXT, created_at REAL
         );
-        INSERT INTO projects VALUES('p1','running',NULL,NULL,'ingested');
+        INSERT INTO projects(id,plan_status,plan_error,key_timeline,status) VALUES('p1','running',NULL,NULL,'ingested');
         INSERT INTO chapters VALUES(
           'p1',1926,'第一千六百二十二章 双帝之战！（上）',
           '第一千六百二十二章 双帝之战！（上） 正文 第一千六百二十二章 双帝之战！（上）'
@@ -627,7 +629,8 @@ def test_regex_planner_rolls_back_to_old_plan_and_keeps_media(
         """
         CREATE TABLE projects(
           id TEXT PRIMARY KEY, plan_status TEXT, plan_error TEXT,
-          key_timeline TEXT, status TEXT
+          key_timeline TEXT, status TEXT,
+          plan_started_at REAL, plan_finished_at REAL
         );
         CREATE TABLE chapters(
           project_id TEXT, idx INTEGER, title TEXT, content TEXT
@@ -641,7 +644,7 @@ def test_regex_planner_rolls_back_to_old_plan_and_keeps_media(
           id TEXT PRIMARY KEY, ts REAL, action TEXT, category TEXT, code TEXT,
           message TEXT, traceback TEXT, context TEXT
         );
-        INSERT INTO projects VALUES('p1','running',NULL,NULL,'ingested');
+        INSERT INTO projects(id,plan_status,plan_error,key_timeline,status) VALUES('p1','running',NULL,NULL,'ingested');
         INSERT INTO chapters VALUES('p1',1,'第一章','第一章 正文一');
         INSERT INTO chapters VALUES('p1',2,'第二章','第二章 正文二');
         INSERT INTO episodes VALUES(

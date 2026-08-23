@@ -147,6 +147,8 @@ def test_bounding_preserves_key_lines_verbatim() -> None:
     normalize_screenplay_dialogue_chains(script)
     after = derive_key_lines(script.dialogue_chains, script.full_script_text)
 
+    # 先证明真的拆了——否则 before == after 在 no-op 上恒真，等于没测。
+    assert len(script.dialogue_chains) > 1
     assert before == after
 
 
@@ -161,6 +163,7 @@ def test_bounding_preserves_every_turn() -> None:
         (t.speaker, t.line)
         for c in script.dialogue_chains for t in c.turns
     ]
+    assert len(script.dialogue_chains) > 1, "没有发生拆分，本断言恒真"
     assert before == after
 
 
@@ -168,6 +171,7 @@ def test_bounding_keeps_chain_ids_unique() -> None:
     script = _script_with_oversized_chain()
     normalize_screenplay_dialogue_chains(script)
     ids = [c.chain_id for c in script.dialogue_chains]
+    assert len(ids) > 1, "没有发生拆分，唯一性断言恒真"
     assert len(ids) == len(set(ids))
 
 

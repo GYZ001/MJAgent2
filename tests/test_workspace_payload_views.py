@@ -607,3 +607,108 @@ def test_picker_window_limits_the_sql_itself(monkeypatch) -> None:
         sql for sql in statements
         if "FROM episodes" in sql and "ORDER BY episode_no" in sql and "LIMIT" not in sql
     ], "仍然存在一条无上限的整表分集查询"
+
+
+def _seed_run(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    workflow_type: str,
+    scope_type: str,
+    scope_id: str,
+    status: str,
+    started_at: float,
+    finished_at: float | None = None,
+) -> None:
+    conn.execute(
+        """INSERT INTO workflow_runs(
+               id, workflow_type, scope_type, scope_id, status,
+               input_fingerprint, started_at, finished_at, updated_at
+           ) VALUES(?,?,?,?,?,'fp',?,?,?)""",
+        (run_id, workflow_type, scope_type, scope_id, status,
+         started_at, finished_at, finished_at or started_at),
+    )
+    conn.commit()
+
+
+def test_project_task_timings_come_from_server_runs(monkeypatch) -> None:
+    """任务计时必须由服务端 run 提供起止时间。
+
+    前端曾把起点存在 localStorage：任务运行中刷新页面会让起点永久搁浅，下一个
+    任务复用旧起点后显示出「已等待 1244 分」这类虚高时长。
+    """
+    conn = _conn()
+    _seed_episode(conn)
+    monkeypatch.setattr(common, "get_conn", lambda: conn)
+    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+
+    _seed_run(conn, run_id="r_bible", workflow_type="character_bible",
+              scope_type="project", scope_id="p1", status="SUCCEEDED",
+              started_at=100.0, finished_at=160.0)
+    _seed_run(conn, run_id="r_refs", workflow_type="character_references",
+              scope_type="project", scope_id="p1", status="RUNNING",
+              started_at=200.0)
+
+    timings = projects.project_detail("p1", view="bible")["task_timings"]
+    assert timings["bible"] == {"started_at": 100.0, "finished_at": 160.0}
+    # 活跃 run 不给结束时间，否则计时会提前停住。
+    assert timings["refs"] == {"started_at": 200.0, "finished_at": None}
+    # 从未跑过的任务不编造时间。
+    assert timings["scene_refs"] == {"started_at": None, "finished_at": None}
+
+
+def test_project_task_timings_pick_the_latest_attempt(monkeypatch) -> None:
+    """挂起态（PAUSED_EXTERNAL）也算活跃，不能让它盖过更近的一次尝试。"""
+    conn = _conn()
+    _seed_episode(conn)
+    monkeypatch.setattr(common, "get_conn", lambda: conn)
+    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+
+    _seed_run(conn, run_id="r_old", workflow_type="scene_references",
+              scope_type="project", scope_id="p1", status="PAUSED_EXTERNAL",
+              started_at=100.0)
+    _seed_run(conn, run_id="r_new", workflow_type="scene_references",
+              scope_type="project", scope_id="p1", status="SUCCEEDED",
+              started_at=500.0, finished_at=560.0)
+
+    timings = projects.project_detail("p1", view="scenes")["task_timings"]
+    assert timings["scene_refs"] == {"started_at": 500.0, "finished_at": 560.0}
+
+
+def test_plan_timing_reads_project_columns(monkeypatch) -> None:
+    """分集规划不产生 workflow_run，起止时间落在 projects 列上。"""
+    conn = _conn()
+    _seed_episode(conn)
+    monkeypatch.setattr(common, "get_conn", lambda: conn)
+    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+
+    conn.execute(
+        "UPDATE projects SET plan_started_at=?, plan_finished_at=? WHERE id='p1'",
+        (300.0, 372.0),
+    )
+    conn.commit()
+
+    timings = projects.project_detail("p1", view="episodes")["task_timings"]
+    assert timings["plan"] == {"started_at": 300.0, "finished_at": 372.0}
+
+
+def test_storyboard_batch_timing_aggregates_active_runs(monkeypatch) -> None:
+    """批量分镜没有父 run，只能按活跃子 run 的最早起点聚合。"""
+    conn = _conn()
+    _seed_episode(conn)
+    monkeypatch.setattr(common, "get_conn", lambda: conn)
+    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+
+    _seed_run(conn, run_id="r_sb_done", workflow_type="storyboard",
+              scope_type="episode", scope_id="e1", status="SUCCEEDED",
+              started_at=100.0, finished_at=150.0)
+    assert projects.project_detail("p1", view="episodes")["task_timings"][
+        "storyboard_batch"
+    ] == {"started_at": None, "finished_at": None}
+
+    _seed_run(conn, run_id="r_sb_live", workflow_type="storyboard",
+              scope_type="episode", scope_id="e1", status="RUNNING",
+              started_at=400.0)
+    assert projects.project_detail("p1", view="episodes")["task_timings"][
+        "storyboard_batch"
+    ] == {"started_at": 400.0, "finished_at": None}
