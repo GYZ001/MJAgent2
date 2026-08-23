@@ -6297,7 +6297,15 @@ async def _llm_field_patch_once(
                 candidate_document,
                 operation,
             )
-    except Exception:  # noqa: BLE001 - reject an invalid model-authored candidate
+    except Exception as exc:  # noqa: BLE001 - reject an invalid model-authored candidate
+        # Distinguish "target didn't resolve to a real node" from a semantic
+        # rejection further below, so the next planner attempt retargets
+        # instead of re-proposing the same unsatisfied semantics.
+        if rejection_feedback is not None:
+            rejection_feedback.append(
+                "候选操作的 target 未能定位到真实文档节点（结构性失败，"
+                f"不是语义未满足）：{type(exc).__name__}: {exc}",
+            )
         return []
     try:
         from app.narrative import validate_screenplay_narrative

@@ -745,6 +745,28 @@ def resolve_field_patch_target(
     if field in ScreenplayMetadata.model_fields and metadata_id in {"", field}:
         candidates.append({**resolved, "kind": "metadata", "id": field})
 
+    spine = doc.plot_spine
+    if spine is not None and spine.spine_beats and field in PlotSpineBeat.model_fields:
+        beat_ids = [beat.beat_id for beat in spine.spine_beats]
+        # target.id may be an alias of the real beat_id (see
+        # _resolve_spine_beat_id); fall back to the same alias search over
+        # `path` so a fully-qualified dotted path (e.g.
+        # "plot_spine.spine_beats[221].does") resolves without a target dict.
+        matched_beat_id = (
+            _resolve_spine_beat_id(beat_ids, node_id)
+            or _resolve_spine_beat_id(beat_ids, path)
+        )
+        for beat in spine.spine_beats:
+            if matched_beat_id is not None:
+                if beat.beat_id != matched_beat_id:
+                    continue
+            elif node_id and beat.beat_id != node_id:
+                continue
+            candidates.append({**resolved, "kind": "spine_beat", "id": beat.beat_id})
+
+    for coverage in doc.source_coverage:
+        add("source_coverage", coverage.source_segment_id, coverage)
+
     for block in doc.scene_blocks:
         add("scene", block.scene_id, block)
         for action in block.action_blocks:
@@ -817,8 +839,17 @@ def apply_field_patch(
         touched.append(f"meta:{key}")
         return ScreenplayDocument.model_validate(data), touched
 
-    # plot_spine fields
-    if path.startswith("plot_spine"):
+    # plot_spine scalar fields (episode_premise / must_keep_ending / drop_list).
+    # Indexed beat paths ("plot_spine.spine_beats[N].*") and target.kind ==
+    # "spine_beat" must NOT take this shortcut: _set_by_dotted has no notion
+    # of a beat's identity, so it used to silently stash the value under a
+    # bogus extra key that ScreenplayDocument.model_validate then dropped.
+    # Route those to the dedicated spine_beat branch below instead.
+    targets_spine_beat = (
+        str(target.get("kind") or "").strip() == "spine_beat"
+        or bool(re.search(r"spine_beats(?:\[\d+\]|\.\d+)", path))
+    )
+    if path.startswith("plot_spine") and not targets_spine_beat:
         _set_by_dotted(data, path, value)
         touched.append("plot_spine")
         return ScreenplayDocument.model_validate(data), touched
@@ -1001,7 +1032,64 @@ def apply_field_patch(
         touched.append(item.get("info_id") or node_id)
         return ScreenplayDocument.model_validate(data), touched
 
-    # generic dotted set on document root
+    if (
+        kind == "spine_beat"
+        or re.search(r"spine_beats(?:\[\d+\]|\.\d+)", path)
+    ):
+        plot_spine = data.get("plot_spine")
+        if not isinstance(plot_spine, dict):
+            raise KeyError("plot_spine not found")
+        beats = plot_spine.get("spine_beats")
+        if not isinstance(beats, list) or not beats:
+            raise KeyError("plot_spine.spine_beats not found")
+        beat_ids = [str(b.get("beat_id") or "") for b in beats if isinstance(b, dict)]
+        resolved_beat_id = (
+            _resolve_spine_beat_id(beat_ids, node_id)
+            or _resolve_spine_beat_id(beat_ids, path)
+        )
+        beat = (
+            _find_by_id(beats, "beat_id", resolved_beat_id)
+            if resolved_beat_id
+            else None
+        )
+        if beat is None:
+            raise KeyError(f"spine beat not found: {node_id or path}")
+        field = re.split(r"[./]+", path.strip("/"))[-1]
+        if field not in beat:
+            raise KeyError(f"unsupported spine beat field: {field}")
+        beat[field] = value
+        touched.append(beat.get("beat_id") or resolved_beat_id)
+        return ScreenplayDocument.model_validate(data), touched
+
+    if kind == "source_coverage" or path.startswith("source_coverage"):
+        items = data.setdefault("source_coverage", [])
+        item = _find_by_id(items, "source_segment_id", node_id)
+        if item is None:
+            raise KeyError(f"source coverage decision not found: {node_id or path}")
+        field = path.split(".")[-1]
+        if field in item:
+            item[field] = value
+        elif isinstance(value, dict):
+            item.update(value)
+        else:
+            raise KeyError(f"unsupported source coverage field: {field}")
+        touched.append(item.get("source_segment_id") or node_id)
+        return ScreenplayDocument.model_validate(data), touched
+
+    # generic dotted set on document root — only for fields that genuinely
+    # live at the document root.  Anything else means kind resolution failed
+    # to find an owning node; silently writing an unknown key here used to
+    # report success (touched=[...]) while leaving the document unchanged,
+    # because ScreenplayDocument.model_validate drops unrecognized extra
+    # fields without error. Fail loudly instead so callers (see
+    # _try_document_patch_operation / _llm_field_patch_once in
+    # screenplay_repair.py) can fall back or surface the real reason.
+    root_key = re.split(r"[.\[]", path)[0] if path else ""
+    if root_key not in ScreenplayDocument.model_fields:
+        raise KeyError(
+            f"unresolved patch target: kind={kind or '<empty>'} "
+            f"id={node_id or '<empty>'} path={path or '<empty>'}"
+        )
     _set_by_dotted(data, path, value)
     touched.append(path.split(".")[0] or path)
     return ScreenplayDocument.model_validate(data), touched
@@ -1503,8 +1591,28 @@ def _chains_from_scene_turns(blocks: list[SceneBlockNode]) -> list[KeyDialogueCh
     return chains
 
 
+_DOTTED_BRACKET_INDEX_RE = re.compile(r"^([^\[\]]+)\[(\d+)\]$")
+
+
 def _set_by_dotted(data: dict[str, Any], path: str, value: Any) -> None:
-    parts = [p for p in path.replace("/", ".").split(".") if p]
+    """Set a value at a dotted/slash path; also parses `key[idx]` segments.
+
+    "plot_spine.spine_beats[2].does" used to silently create a literal
+    "spine_beats[2]" dict key (since dict-vs-list dispatch below only ever
+    checked `part.isdigit()`) instead of indexing into the spine_beats list,
+    and pydantic's model_validate then dropped that unknown key without
+    error. Expanding `key[idx]` into two path segments ("key", "idx") lets
+    the existing digit-index branch drill into the real list element.
+    """
+    raw_parts = [p for p in path.replace("/", ".").split(".") if p]
+    parts: list[str] = []
+    for raw_part in raw_parts:
+        bracket_match = _DOTTED_BRACKET_INDEX_RE.match(raw_part)
+        if bracket_match:
+            parts.append(bracket_match.group(1))
+            parts.append(bracket_match.group(2))
+        else:
+            parts.append(raw_part)
     cur: Any = data
     for part in parts[:-1]:
         if part.isdigit():
