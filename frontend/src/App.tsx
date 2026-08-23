@@ -12,8 +12,6 @@ import {
 } from "react";
 import { api, Episode, Project } from "./api";
 import Studio from "./pages/Studio";
-import AgentDrawer from "./agent/AgentDrawer";
-import type { ContextEnvelope } from "./agent/types";
 import CapabilityApprovalHost from "./components/CapabilityApprovalHost";
 import DecisionDialog from "./components/DecisionDialog";
 import EpisodeCrumb from "./components/EpisodeCrumb";
@@ -334,10 +332,6 @@ export default function App() {
   const lastLocationRef = useRef(
     `${window.location.pathname}${window.location.search}`,
   );
-  const [agentOpen, setAgentOpen] = useState(false);
-  const [agentEnabled, setAgentEnabled] = useState(true);
-  const agentToggleRef = useRef<HTMLButtonElement | null>(null);
-  const restoreAgentFocusRef = useRef(false);
   const toastTimerRef = useRef<number>();
   const projectsRetryTimerRef = useRef<number>();
   const spineRef = useRef<HTMLElement | null>(null);
@@ -446,18 +440,6 @@ export default function App() {
     return () => window.removeEventListener("manju:locationchange", syncLocation);
   }, []);
 
-  useEffect(() => {
-    api
-      .get("/settings")
-      .then((settings: Record<string, string>) => {
-        const raw = String(settings.agent_enabled ?? "true")
-          .trim()
-          .toLowerCase();
-        setAgentEnabled(["1", "true", "yes", "on"].includes(raw));
-      })
-      .catch(() => setAgentEnabled(true));
-  }, []);
-
   const toast = useCallback((text: string, isErr = false) => {
     setToastMsg({ text, err: isErr });
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
@@ -474,17 +456,6 @@ export default function App() {
     },
     [],
   );
-
-  const closeAgent = useCallback(() => {
-    restoreAgentFocusRef.current = true;
-    setAgentOpen(false);
-  }, []);
-
-  useEffect(() => {
-    if (agentOpen || !restoreAgentFocusRef.current) return;
-    restoreAgentFocusRef.current = false;
-    agentToggleRef.current?.focus();
-  }, [agentOpen]);
 
   const go = useCallback(
     (
@@ -647,14 +618,6 @@ export default function App() {
   }, [view, projectId, episodeId, chapterIdx]);
 
   useEffect(() => {
-    const root = document.getElementById("root");
-    root?.classList.toggle("agent-open", agentOpen);
-    return () => {
-      root?.classList.remove("agent-open");
-    };
-  }, [agentOpen]);
-
-  useEffect(() => {
     if (!projectId) {
       setEpisodeId(null);
       return;
@@ -692,12 +655,6 @@ export default function App() {
     registerNavigationGuard,
   };
   const visibleSections = projectId ? SECTIONS : [];
-  const agentContext: ContextEnvelope = {
-    route: view,
-    project_id: projectId,
-    episode_id: episodeId,
-    unsaved_draft: unsavedDraft,
-  };
 
   const openSection = (s: (typeof SECTIONS)[number]) => {
     if (!s.needEpisode || !projectId) {
@@ -1022,50 +979,6 @@ export default function App() {
         {view === "monitor" && <LegacyMonitorRedirect loaded={projectsLoaded} toast={toast} />}
         </Suspense>
       </main>
-      {agentEnabled && !agentOpen && (
-        <button
-          ref={agentToggleRef}
-          type="button"
-          className="agent-toggle"
-          aria-label="打开案头助手"
-          aria-expanded={false}
-          aria-controls="agent-drawer"
-          title="打开案头助手"
-          onClick={() => setAgentOpen(true)}
-        >
-          <svg
-            className="agent-toggle-icon"
-            viewBox="0 0 22 18"
-            aria-hidden="true"
-            focusable="false"
-          >
-            <rect
-              x="1.25"
-              y="1.25"
-              width="19.5"
-              height="15.5"
-              rx="2.2"
-              ry="2.2"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-            />
-            <path
-              d="M15.25 1.25v15.5"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-            />
-          </svg>
-        </button>
-      )}
-      {agentEnabled && (
-        <AgentDrawer
-          open={agentOpen}
-          onClose={closeAgent}
-          context={agentContext}
-        />
-      )}
       {pendingNavigation && (
         <DecisionDialog
           title={pendingNavigation.prompt.title}
