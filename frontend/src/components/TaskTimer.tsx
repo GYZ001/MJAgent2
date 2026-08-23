@@ -4,15 +4,38 @@ interface TimerRecord {
   startAt?: number
   lastMs?: number
   finishedAt?: number
+  /** 心跳：运行态下定期写入。用于识别「页面被关掉后搁浅」的起点。 */
+  seenAt?: number
+}
+
+/** 心跳落盘间隔；显示仍是每秒刷新，这里只是降低 localStorage 写入频率。 */
+const HEARTBEAT_MS = 10_000
+/** 心跳早于此阈值即视为搁浅记录。需大于 HEARTBEAT_MS 且足够容忍一次刷新。 */
+const STALE_MS = 90_000
+
+/** 运行中刷新页面应当续算，而任务跑完后页面才被重开则必须丢弃旧起点。
+ *  二者只能靠「上次心跳距今多久」区分：心跳随页面关闭而停止。 */
+export function isStaleRecord(record: TimerRecord, now: number): boolean {
+  if (!record.startAt) return false
+  return now - (record.seenAt ?? record.startAt) > STALE_MS
 }
 
 function loadRecord(key: string): TimerRecord {
   try {
-    return JSON.parse(window.localStorage.getItem(key) || '{}') as TimerRecord
+    const record = JSON.parse(window.localStorage.getItem(key) || '{}') as TimerRecord
+    // 搁浅的起点会让下一个任务从旧时间累加（曾出现「已等待 1244 分」）。
+    if (isStaleRecord(record, Date.now())) {
+      const { startAt: _startAt, seenAt: _seenAt, ...rest } = record
+      return rest
+    }
+    return record
   } catch {
     return {}
   }
 }
+
+/** 仅供测试：验证搁浅起点的清理契约。 */
+export const loadRecordForTest = loadRecord
 
 function saveRecord(key: string, record: TimerRecord) {
   window.localStorage.setItem(key, JSON.stringify(record))
@@ -62,20 +85,32 @@ export function useTaskTimer(key: string, active: boolean) {
   // 进入运行态：若还没开始计时则自动开始（人工 start() 只是提前给反馈，可有可无）
   useEffect(() => {
     if (active && !record.startAt) {
-      const next = { startAt: Date.now() }
+      const startAt = Date.now()
+      const next = { startAt, seenAt: startAt }
       saveRecord(storageKey, next)
       setRecord(next)
     }
   }, [active, record.startAt, storageKey])
 
-  // 运行态进行中：标记「已观察到运行」，并每秒刷新计时
+  // 运行态进行中：标记「已观察到运行」，每秒刷新计时，并定期落盘心跳
   useEffect(() => {
     if (!active || !record.startAt) return
     sawActive.current = true
     setNow(Date.now())
-    const t = window.setInterval(() => setNow(Date.now()), 1000)
+    let lastBeat = Date.now()
+    saveRecord(storageKey, { ...record, seenAt: lastBeat })
+    const t = window.setInterval(() => {
+      const tick = Date.now()
+      setNow(tick)
+      if (tick - lastBeat >= HEARTBEAT_MS) {
+        lastBeat = tick
+        saveRecord(storageKey, { ...record, seenAt: tick })
+      }
+    }, 1000)
     return () => window.clearInterval(t)
-  }, [active, record.startAt])
+    // record 只在 startAt 变化时需要重建心跳；其余字段变动不应重启计时器。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, record.startAt, storageKey])
 
   // 结束：只有真正运行过（sawActive）才记录本次耗时
   useEffect(() => {
@@ -89,10 +124,11 @@ export function useTaskTimer(key: string, active: boolean) {
 
   const start = () => {
     sawActive.current = false
-    const next = { startAt: Date.now() }
+    const startAt = Date.now()
+    const next = { startAt, seenAt: startAt }
     saveRecord(storageKey, next)
     setRecord(next)
-    setNow(Date.now())
+    setNow(startAt)
   }
 
   const clear = () => {
@@ -115,7 +151,7 @@ export function useTaskTimer(key: string, active: boolean) {
     return () => window.clearTimeout(t)
   }, [active, record.startAt, storageKey])
 
-  const elapsedMs = record.startAt ? now - record.startAt : 0
+  const elapsedMs = record.startAt ? Math.max(0, now - record.startAt) : 0
   return {
     start,
     clear,

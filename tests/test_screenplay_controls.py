@@ -335,6 +335,45 @@ def _incompatible_working_revision():
     return revision, artifact
 
 
+def test_production_state_exposes_server_run_timestamps() -> None:
+    """任务计时必须由服务端 run 提供起止时间。
+
+    前端曾用 localStorage 记录起点，任务运行中刷新页面会让该起点永久搁浅，
+    下一个任务复用旧起点后显示出「已等待 1244 分」这类虚高时长。
+    """
+    conn = db.get_conn()
+    started_at = db.now() - 90.0
+    conn.execute(
+        "INSERT INTO workflow_runs(id, workflow_type, scope_type, scope_id, status, "
+        "input_fingerprint, started_at, updated_at) "
+        "VALUES('run_t1','screenplay','episode','e1','RUNNING','fp',?,?)",
+        (started_at, db.now()),
+    )
+    conn.execute("UPDATE episodes SET active_screenplay_run_id='run_t1' WHERE id='e1'")
+    conn.commit()
+
+    state = screenplay_production_state("e1")
+    assert state["task_started_at"] == pytest.approx(started_at)
+    assert state["task_finished_at"] is None
+
+    finished_at = db.now()
+    conn.execute(
+        "UPDATE workflow_runs SET status='SUCCEEDED', finished_at=? WHERE id='run_t1'",
+        (finished_at,),
+    )
+    conn.commit()
+
+    done = screenplay_production_state("e1")
+    assert done["task_started_at"] == pytest.approx(started_at)
+    assert done["task_finished_at"] == pytest.approx(finished_at)
+
+
+def test_production_state_reports_no_timestamps_without_active_run() -> None:
+    state = screenplay_production_state("e1")
+    assert state["task_started_at"] is None
+    assert state["task_finished_at"] is None
+
+
 def test_production_state_resumes_post_baseline_stages() -> None:
     initial = screenplay_production_state("e1")
     assert initial["operation"] == "baseline"
