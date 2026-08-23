@@ -94,7 +94,10 @@ def _remember(text: str, spans: tuple[ParatextAnchor, ...]) -> None:
 
 
 MIN_ANCHOR_CHARS = 8
-MAX_REMOVED_FRACTION = 0.4
+# 单个区间超过这个比例，多半是锚点定歪了、把正文一起圈了进去——只丢这一段。
+MAX_REGION_FRACTION = 0.4
+# 全部区间加起来还超过这个比例，说明整次判定不可信——整体放弃。
+MAX_REMOVED_FRACTION = 0.5
 
 
 def _anchor_region(text: str, start: str, end: str) -> tuple[int, int] | None:
@@ -128,6 +131,11 @@ def remove_spans(text: str, spans: list[ParatextAnchor]) -> str:
             regions.append(region)
     if not regions:
         return text
+    # 先按段丢弃明显定歪的区间：一个坏锚点不该让其它有效删除一起作废。
+    region_cap = len(text) * MAX_REGION_FRACTION
+    regions = [r for r in regions if (r[1] - r[0]) <= region_cap]
+    if not regions:
+        return text
     regions.sort()
     merged: list[list[int]] = []
     for begin, finish in regions:
@@ -137,7 +145,7 @@ def remove_spans(text: str, spans: list[ParatextAnchor]) -> str:
             merged.append([begin, finish])
     removed = sum(finish - begin for begin, finish in merged)
     if removed > len(text) * MAX_REMOVED_FRACTION:
-        # 删得太多说明这次判定不可信，整体放弃。
+        # 逐段都不算离谱，合起来仍占掉一半以上：整次判定不可信，放弃。
         return text
     out = text
     for begin, finish in reversed(merged):

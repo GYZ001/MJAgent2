@@ -24,6 +24,7 @@ from __future__ import annotations
 import pytest
 
 from app.source_paratext import (
+    MAX_REGION_FRACTION,
     MAX_REMOVED_FRACTION,
     MIN_ANCHOR_CHARS,
     ParatextAnchor,
@@ -106,13 +107,32 @@ def test_overlapping_regions_are_merged_not_double_cut() -> None:
 
 
 def test_multiple_notes_are_all_cut() -> None:
+    """真实比例：章节 3600 字、每段作者的话百余字，占比远低于上限。"""
     second = "今天两更，月票榜掉得厉害，恳请诸位道友支援一张月票！"
-    raw = STORY[:20] + NOTE + STORY[20:] + second
+    body = STORY * 6  # 放大正文，让两段旁文本的占比接近真实章节
+    raw = body[:120] + NOTE + body[120:] + second
     out = remove_spans(raw, [_anchor(NOTE), _anchor(second)])
 
     assert NOTE not in out
     assert second not in out
     assert "孟浩推开院门走进屋舍" in out
+
+
+def test_one_bad_anchor_does_not_discard_the_good_removals() -> None:
+    """一个定歪的锚点只丢它自己，其余有效删除必须照常生效。"""
+    body = STORY * 6
+    raw = body + NOTE
+    good = _anchor(NOTE)
+    runaway = ParatextAnchor(start=raw[:12], end=raw[-12:])  # 圈住整篇
+
+    out = remove_spans(raw, [runaway, good])
+
+    assert NOTE not in out
+    assert "孟浩推开院门走进屋舍" in out
+
+
+def test_caps_are_fractions_and_region_cap_is_tighter() -> None:
+    assert 0 < MAX_REGION_FRACTION <= MAX_REMOVED_FRACTION < 1
 
 
 def test_no_spans_returns_the_text_unchanged() -> None:
