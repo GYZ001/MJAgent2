@@ -3,7 +3,7 @@ import {
   api, ApiError, Bible, BibleImpactPreview, Character, Portrait, PortraitView, RefsCostPrecheck,
 } from '../api'
 import { useNav, usePoll, useProject } from '../App'
-import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
+import { ServerTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
@@ -436,8 +436,6 @@ export default function BiblePage() {
   const [impactMode, setImpactMode] = useState<'bible' | 'character'>('bible')
   const [pendingCharacterSave, setPendingCharacterSave] = useState<{ name: string; character: Character } | null>(null)
   const editingRef = useRef<Bible | null>(null)
-  const bibleTimer = useTaskTimer(`project.${projectId}.bible`, p?.bible_status === 'running')
-  const refsTimer = useTaskTimer(`project.${projectId}.refs`, p?.refs_status === 'running')
 
   const biblePreview = editing ?? p?.bible
   const charQuery = charSearch.trim()
@@ -723,8 +721,6 @@ export default function BiblePage() {
       p.bible ? '重新生成人物谱和定妆照' : '开始生成人物谱和定妆照',
       {},
       async (quote) => {
-        bibleTimer.start()
-        refsTimer.start()
         await api.post(`/projects/${p.id}/bible`, {
           confirm: true,
           quote_id: quote.quote_id,
@@ -790,7 +786,6 @@ export default function BiblePage() {
       '补齐缺失的定妆照',
       { resume: true },
       async (quote, selection) => {
-        refsTimer.start()
         const selectedCharacters = selection.characters.filter(Boolean)
         const effectiveQuote = selectedCharacters.length
           ? await api.refsPrecheck(p.id, { resume: true, characters: selectedCharacters })
@@ -822,7 +817,6 @@ export default function BiblePage() {
       '按最新人物设定与画风批量重新生成',
       { resume: false },
       async (quote, selection) => {
-        refsTimer.start()
         const selectedCharacters = selection.characters.filter(Boolean)
         const effectiveQuote = selectedCharacters.length
           ? await api.refsPrecheck(p.id, { resume: false, characters: selectedCharacters })
@@ -1150,8 +1144,18 @@ export default function BiblePage() {
           {editing && draftState === 'saved' && <span className="stamp green">草稿已自动保存</span>}
           {editing && draftState === 'error' && <span className="stamp red">草稿保存失败，已保留本地备份</span>}
           {p.bible_evidence && <EvidenceDrawer evidence={p.bible_evidence} label="查看人物谱质检依据" />}
-          <TaskTimer label="人物谱" timer={bibleTimer} />
-          <TaskTimer label="定妆照" timer={refsTimer} />
+          <ServerTaskTimer
+            label="人物谱"
+            startedAt={p.task_timings?.bible?.started_at}
+            finishedAt={p.task_timings?.bible?.finished_at}
+            running={p.bible_status === 'running'}
+          />
+          <ServerTaskTimer
+            label="定妆照"
+            startedAt={p.task_timings?.refs?.started_at}
+            finishedAt={p.task_timings?.refs?.finished_at}
+            running={p.refs_status === 'running'}
+          />
         </div>
         {refsProgress && (
           <div className="refs-progress-strip" role="status" aria-label="定妆进度">

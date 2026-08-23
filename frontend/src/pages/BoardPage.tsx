@@ -2,7 +2,7 @@ import { ReactNode, useEffect, useId, useLayoutEffect, useMemo, useRef, useState
 import { api, ApiError, Episode, Shot, StoryboardStatus } from '../api'
 import { useEpisode, useNav } from '../App'
 import EpisodeCrumb from '../components/EpisodeCrumb'
-import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
+import { ServerTaskTimer } from '../components/TaskTimer'
 import DecisionDialog from '../components/DecisionDialog'
 import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
 import QueryState from '../components/QueryState'
@@ -786,7 +786,6 @@ export default function BoardPage() {
   const [clearPreview, setClearPreview] = useState<StoryboardClearPreview | null>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const startPreviewTriggerRef = useRef<HTMLElement | null>(null)
-  const storyboardTimer = useTaskTimer(`episode.${episodeId}.storyboard`, ep?.storyboard_status?.state === 'running')
 
   const shots = ep?.shots ?? []
   const visibleShots = useMemo(() => shots.filter(shot => {
@@ -966,7 +965,6 @@ export default function BoardPage() {
     if (!startPreview || startPreview.can_start === false) return
     const preview = startPreview
     setStartPreview(null)
-    storyboardTimer.start()
     const result = await run(
       () => api.post(`/episodes/${ep.id}/storyboard`, {
         preflight_token: preview.preview_token,
@@ -975,7 +973,6 @@ export default function BoardPage() {
         ? '已开始重新校验并修复现有分镜'
         : preview.action === 'resume' ? '已从安全检查点继续生成' : '分镜生成已开始',
     )
-    if (!result) storyboardTimer.clear()
   }
 
   const runPrimary = async () => {
@@ -1076,7 +1073,6 @@ export default function BoardPage() {
     const previewToken = clearPreview.preview_token
     const deletedShots = clearPreview.shot_count
     setClearPreview(null)
-    storyboardTimer.clear()
     const result = await run(
       () => api.post(`/episodes/${ep.id}/storyboard/clear`, { preview_token: previewToken }),
       `已清空 ${deletedShots} 个镜头及其下游资源，剧本已保留`,
@@ -1092,7 +1088,6 @@ export default function BoardPage() {
       () => api.post(`/episodes/${ep.id}/storyboard/cancel`, {}),
       '分镜任务已暂停，工作镜头和安全检查点已保留',
     )
-    if (result) storyboardTimer.clear()
   }
 
   const showLaunchPanel = !shots.length && (status.state === 'empty' || status.state === 'no_screenplay')
@@ -1150,7 +1145,14 @@ export default function BoardPage() {
               </button>}
             </>}
           </div>
-          {status.state === 'running' && <TaskTimer label="分镜" timer={storyboardTimer} />}
+          {status.state === 'running' && (
+            <ServerTaskTimer
+              label="分镜"
+              startedAt={status.task_started_at}
+              finishedAt={status.task_finished_at}
+              running
+            />
+          )}
         </div>
         {progressCopy.detail && <div className="board-progress-explanation" role="status">
           <b>数字口径</b><span>{progressCopy.detail}</span>

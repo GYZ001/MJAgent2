@@ -11,6 +11,51 @@ except NameError:  # pragma: no cover - used when importing this module directly
 _SQLITE_IN_CHUNK_SIZE = 400
 
 
+def _project_task_timings(conn, project: dict) -> dict[str, dict[str, float | None]]:
+    """项目级任务计时的服务端起止时间。
+
+    前端曾把起点存在 localStorage：任务运行中刷新页面会让起点永久搁浅，下一个
+    任务复用旧起点后显示出「已等待 1244 分」这类虚高时长，故一律以服务端为准。
+    """
+    project_id = project["id"]
+
+    def run_timing(workflow_type: str) -> dict[str, float | None]:
+        return evidence_repository.latest_run_timing(
+            workflow_type=workflow_type,
+            scope_type="project",
+            scope_id=project_id,
+            conn=conn,
+        )
+
+    # 批量分镜没有父 run，只能按活跃子 run 聚合；全部结束后不再有「本次耗时」可言。
+    marks = ",".join("?" for _ in evidence_repository.ACTIVE_RUN_STATUSES)
+    storyboard_batch = conn.execute(
+        f"""SELECT MIN(run.started_at) AS started_at
+              FROM workflow_runs AS run
+              JOIN episodes AS episode ON episode.id=run.scope_id
+             WHERE run.workflow_type='storyboard' AND run.scope_type='episode'
+               AND episode.project_id=? AND run.started_at IS NOT NULL
+               AND run.status IN ({marks})""",
+        (project_id, *sorted(evidence_repository.ACTIVE_RUN_STATUSES)),
+    ).fetchone()
+
+    return {
+        "bible": run_timing("character_bible"),
+        "refs": run_timing("character_references"),
+        "scene_refs": run_timing("scene_references"),
+        "screenplay_batch": run_timing("screenplay_batch"),
+        "storyboard_batch": {
+            "started_at": storyboard_batch["started_at"] if storyboard_batch else None,
+            "finished_at": None,
+        },
+        # 分集规划不产生 workflow_run，起止时间直接落在 projects 列上。
+        "plan": {
+            "started_at": project.get("plan_started_at"),
+            "finished_at": project.get("plan_finished_at"),
+        },
+    }
+
+
 def _in_chunks(values: Iterable[object], size: int | None = None):
     size = size or _SQLITE_IN_CHUNK_SIZE
     items = list(values)
@@ -634,6 +679,8 @@ def project_detail(
     p = dict(_project_or_404(project_id))
     conn = get_conn()
     p["refs_error"] = _present_refs_error(conn, p.get("refs_error"))
+    if full or view in ("bible", "scenes", "episodes"):
+        p["task_timings"] = _project_task_timings(conn, p)
     include_bible = full or view in ("bible", "scenes")
     p["bible"] = json.loads(p["bible_json"]) if include_bible and p["bible_json"] else None
     bible_artifact = (

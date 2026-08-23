@@ -4684,6 +4684,21 @@ def _episode_detail_projection(episode_id: str, view: str | None) -> dict:
         )
         if ep["storyboard_status"].pop("_obsolete_policy_repair", False):
             ep["script_error"] = None
+        # 任务计时以服务端 run 为准：localStorage 起点在运行中刷新后会永久搁浅，
+        # 下一个任务复用旧起点会显示出「已等待 1244 分」这类虚高时长。
+        # 不走 active_storyboard_run_id：该指针在任务结束时被清空，取最近一次 run
+        # 才能在完成后继续显示「本次耗时」。
+        ep["storyboard_status"].update(
+            {
+                f"task_{key}": value
+                for key, value in evidence_repository.latest_run_timing(
+                    workflow_type="storyboard",
+                    scope_type="episode",
+                    scope_id=episode_id,
+                    conn=conn,
+                ).items()
+            }
+        )
     ep["pipeline_summary"] = pipeline_summary
     # 视频补齐 Supervisor 面板（生成台）
     if full or view == "wall":

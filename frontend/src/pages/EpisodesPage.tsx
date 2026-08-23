@@ -1,7 +1,7 @@
 import { useDeferredValue, useEffect, useId, useRef, useState } from 'react'
 import { api, numToCn, type Project } from '../api'
 import { useNav, usePoll } from '../App'
-import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
+import { ServerTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import PrepSubnav from '../components/PrepSubnav'
 import QueryState from '../components/QueryState'
@@ -130,9 +130,6 @@ export default function EpisodesPage() {
   const screenplayActiveCount = screenplayQueuedCount + screenplayRunningCount
   const storyboardReadyCount = counts?.storyboard_ready ?? eps.filter(e => e.screenplay_status === 'ready' && ['planned', 'script_failed'].includes(e.status)).length
   const scriptingCount = counts?.scripting ?? eps.filter(e => e.status === 'scripting').length
-  const planTimer = useTaskTimer(`project.${projectId}.plan`, p?.plan_status === 'running')
-  const screenplayAllTimer = useTaskTimer(`project.${projectId}.screenplay-all`, screenplayActiveCount > 0)
-  const storyboardAllTimer = useTaskTimer(`project.${projectId}.storyboard-all`, scriptingCount > 0)
   const { data: sbMetrics } = usePoll<StoryboardMetrics>(
     () => api.get(`/projects/${projectId}/storyboard-metrics`),
     scriptingCount > 0 ? 4000 : 15000,
@@ -270,16 +267,13 @@ export default function EpisodesPage() {
   const executeBatch = async () => {
     if (!batchConfirm) return
     if (batchConfirm === 'replan') {
-      planTimer.start()
       await act(() => api.post(`/projects/${p.id}/plan`))
     } else if (batchConfirm === 'screenplay') {
-      screenplayAllTimer.start()
       await act(async () => {
         const result = await api.post(`/projects/${p.id}/screenplay-all`) as { started: number }
         toast(`已为 ${result.started} 集发起剧本生成`)
       })
     } else {
-      storyboardAllTimer.start()
       await act(async () => {
         const result = await api.post(`/projects/${p.id}/storyboard-all`) as { started: number }
         toast(`已为 ${result.started} 集发起分镜生成`)
@@ -408,9 +402,24 @@ export default function EpisodesPage() {
               {(sbMetrics.waiting_authorization || 0) > 0 ? ` · 待授权 ${sbMetrics.waiting_authorization}` : ''}
             </span>
           )}
-          <TaskTimer label="分集" timer={planTimer} />
-          <TaskTimer label="批量剧本" timer={screenplayAllTimer} />
-          <TaskTimer label="批量分镜" timer={storyboardAllTimer} />
+          <ServerTaskTimer
+            label="分集"
+            startedAt={p.task_timings?.plan?.started_at}
+            finishedAt={p.task_timings?.plan?.finished_at}
+            running={p.plan_status === 'running'}
+          />
+          <ServerTaskTimer
+            label="批量剧本"
+            startedAt={p.task_timings?.screenplay_batch?.started_at}
+            finishedAt={p.task_timings?.screenplay_batch?.finished_at}
+            running={screenplayActiveCount > 0}
+          />
+          <ServerTaskTimer
+            label="批量分镜"
+            startedAt={p.task_timings?.storyboard_batch?.started_at}
+            finishedAt={p.task_timings?.storyboard_batch?.finished_at}
+            running={scriptingCount > 0}
+          />
         </div>
         {p.plan_status === 'failed' && (
           <OperationError

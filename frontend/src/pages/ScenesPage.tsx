@@ -4,7 +4,7 @@ import {
   SceneRefsProgress,
 } from '../api'
 import { useNav, usePoll, useProject } from '../App'
-import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
+import { ServerTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import GenerationParamsDialog from '../components/GenerationParamsDialog'
@@ -103,7 +103,6 @@ export default function ScenesPage() {
   const [gapScan, setGapScan] = useState<SceneGapScan | null>(null)
   const [scenePreview, setScenePreview] = useState<Scene[] | null>(null)
   const [compareDetail, setCompareDetail] = useState<{ title: string; images: { src: string; label: string }[] } | null>(null)
-  const sceneTimer = useTaskTimer(`project.${projectId}.scene_refs`, p?.scene_refs_status === 'running')
 
   const scenes = p?.bible?.scenes ?? []
   const generating = p?.scene_refs_status === 'running'
@@ -306,7 +305,12 @@ export default function ScenesPage() {
             )}
             {generating && <span className="stamp gold">生成中</span>}
             {scenes.length > 0 && <span className="stamp green">{scenes.length} 个场景</span>}
-            <TaskTimer label="场景图" timer={sceneTimer} />
+            <ServerTaskTimer
+              label="场景图"
+              startedAt={p.task_timings?.scene_refs?.started_at}
+              finishedAt={p.task_timings?.scene_refs?.finished_at}
+              running={p.scene_refs_status === 'running'}
+            />
           </div>
         )}
         {generating && !scenes.length && (

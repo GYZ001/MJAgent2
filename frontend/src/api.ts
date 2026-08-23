@@ -1914,6 +1914,9 @@ export interface StoryboardStatus {
   contract_version: string;
   snapshot_version: number;
   state_fingerprint: string;
+  /** 服务端 run 的起止时间（秒）。任务计时以此为准，不用前端本地起点。 */
+  task_started_at?: number | null;
+  task_finished_at?: number | null;
   state:
     | "no_screenplay"
     | "empty"
@@ -2222,11 +2225,26 @@ export interface Bible {
   scenes?: Scene[];
 }
 
+/** 服务端 run 的起止时间（秒）；缺失表示该任务从未跑过。 */
+export interface TaskTiming {
+  started_at?: number | null;
+  finished_at?: number | null;
+}
+
 export interface Project {
   id: string;
   name: string;
   status: string;
   novel_chars: number;
+  /** 各项目级任务的服务端计时。前端本地起点会在刷新后搁浅，一律以此为准。 */
+  task_timings?: {
+    bible?: TaskTiming;
+    refs?: TaskTiming;
+    scene_refs?: TaskTiming;
+    plan?: TaskTiming;
+    screenplay_batch?: TaskTiming;
+    storyboard_batch?: TaskTiming;
+  };
   bible_status: string;
   bible_error?: string;
   bible_style_name?: string | null;

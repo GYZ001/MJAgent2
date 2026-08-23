@@ -71,6 +71,12 @@ describe("useTaskTimer 的搁浅记录清理", () => {
     expect(isStaleRecord({ lastMs: 1_000 }, now)).toBe(false);
   });
 
+  it("搁浅阈值为 20 秒：刷新期内保留，超出即丢弃", () => {
+    const now = Date.now();
+    expect(isStaleRecord({ startAt: now - 60_000, seenAt: now - 19_000 }, now)).toBe(false);
+    expect(isStaleRecord({ startAt: now - 60_000, seenAt: now - 21_000 }, now)).toBe(true);
+  });
+
   it("心跳过期的起点会被丢弃，新任务不会从旧时间累加", () => {
     const stranded = Date.now() - 20 * 60 * 60 * 1000;
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify({
