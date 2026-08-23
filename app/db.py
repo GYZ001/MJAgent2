@@ -2853,15 +2853,39 @@ def _start_provider_call_inner(
             # edge.  A newly authorized operation may consume this unknown
             # liability once, after its own result is durable.
             legacy_unknown_resolution_id = int(legacy_previous["id"])
+    # Default recovery-chain linking only trusts a prior INTERRUPTED row: the
+    # request's fate there was unknown, so an identical follow-up is provably
+    # the same in-flight operation resuming. A prior FAILED row is normally a
+    # *known*, definitive outcome and is deliberately left unlinked (e.g. the
+    # unrelated 5xx retries already performed inside hiagent._post_json's own
+    # loop). One narrow, explicit exception: callers that know they are
+    # replaying an unmodified request after a transport-level rejection (see
+    # hiagent.chat's response_format_required 400 retry) may opt in via
+    # meta["provider_call_retry_of_failed"] so that specific, self-declared
+    # retry chain still shows up as attempt_no/supersedes_call_id linkage in
+    # /api/system/calls instead of looking like unrelated duplicate calls.
+    # This never changes op_id (still pure kind/model/payload hash) and never
+    # affects any other FAILED→FAILED transition that does not set the flag.
+    link_failed_retry = bool((meta or {}).get("provider_call_retry_of_failed"))
     retry_previous = (
         previous
-        if previous is not None and previous["status"] == "INTERRUPTED"
+        if previous is not None and (
+            previous["status"] == "INTERRUPTED"
+            or (link_failed_retry and previous["status"] == "FAILED")
+        )
         else None
     )
     attempt_no = (
         int(retry_previous["attempt_no"] or 0) + 1
         if retry_previous else 1
     )
+    retry_disposition = None
+    if retry_previous:
+        retry_disposition = (
+            "RETRYING_INTERRUPTED"
+            if retry_previous["status"] == "INTERRUPTED"
+            else "RETRYING_REJECTED_REQUEST"
+        )
     cur = conn.execute(
         """INSERT INTO provider_calls(
             ts, kind, model, status, http_status, latency_ms, error, request_json, request_hash, response_json, meta,
@@ -2876,7 +2900,7 @@ def _start_provider_call_inner(
              ),
          }), project_id, trace.run_id, trace.step_run_id, trace.trace_id,
          op_id, attempt_no, retry_previous["id"] if retry_previous else None,
-         "RETRYING_INTERRUPTED" if retry_previous else None,
+         retry_disposition,
          str((meta or {}).get("contract_version") or "") or None,
          str((meta or {}).get("production_grant_id") or "") or None),
     )
@@ -3024,10 +3048,18 @@ def _finish_provider_call_inner(
             "SELECT supersedes_call_id,meta FROM provider_calls WHERE id=?", (call_id,)
         ).fetchone()
         if row and row["supersedes_call_id"]:
+            # supersedes_call_id is only ever populated by the gated logic in
+            # _start_provider_call_inner (previous row was INTERRUPTED, or the
+            # narrow opted-in provider_call_retry_of_failed case where it was
+            # FAILED) — by the time we reach here the predecessor's identity
+            # is already proven, so accepting either terminal status here just
+            # lets the FAILED-retry chain close out symmetrically instead of
+            # only linking forward (supersedes_call_id) without ever setting
+            # the backward pointer (superseded_by_call_id) on success.
             conn.execute(
                 "UPDATE provider_calls SET superseded_by_call_id=?, "
                 "recovery_disposition='RETRIED_SUCCESSFULLY' "
-                "WHERE id=? AND status='INTERRUPTED'",
+                "WHERE id=? AND status IN ('INTERRUPTED','FAILED')",
                 (call_id, row["supersedes_call_id"]),
             )
         if row:

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import inspect
 
+import httpx
 import pytest
 
-from app import hiagent
+from app import db, hiagent
 from app.harness import model_gateway
 
 
@@ -451,6 +452,117 @@ async def test_required_call_retries_same_request_on_400_then_succeeds(
         # 必须清零，不能被后续互不相关的噪声接着累加。
         assert hiagent._JSON_SCHEMA_REJECT_STREAK.get(capability_key) is None
         assert hiagent._json_schema_known_unsupported(provider, model) is False
+    finally:
+        hiagent._JSON_SCHEMA_UNSUPPORTED.discard(capability_key)
+        hiagent._JSON_SCHEMA_REJECT_STREAK.pop(capability_key, None)
+
+
+@pytest.mark.asyncio
+async def test_required_call_retry_links_provider_call_audit_chain(
+    tmp_path, monkeypatch,
+) -> None:
+    """The required-format 400 retry must leave a traceable chain in provider_calls.
+
+    Unlike the tests above (which stub ``hiagent._plain_chat_request`` and
+    therefore never reach ``_post_json``'s ``start_provider_call`` /
+    ``finish_provider_call`` calls), this test only stubs the HTTP transport
+    (``httpx.AsyncClient.post``) so the *real* observability write path runs
+    against a real (temp) sqlite db. It asserts the two rows share one
+    operation_id -- derived purely from kind/model/payload, unaffected by the
+    call_meta bookkeeping the fix adds -- and that attempt_no/supersedes_call_id
+    correctly link the retry instead of looking like two unrelated calls.
+    """
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-required-retry.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+
+    provider, model = "hiagent", "required-retry-audit-model"
+    capability_key = hiagent._response_format_capability_key(provider, model)
+    hiagent._JSON_SCHEMA_UNSUPPORTED.discard(capability_key)
+    hiagent._JSON_SCHEMA_REJECT_STREAK.pop(capability_key, None)
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+        "additionalProperties": False,
+    }
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "required_schema",
+            "strict": True,
+            "schema": schema,
+        },
+    }
+    _patch_chat_dispatch_dependencies(monkeypatch, provider, model)
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(hiagent.asyncio, "sleep", no_sleep)
+
+    calls = {"n": 0}
+
+    class _FakeResponse:
+        def __init__(self, status_code: int, *, text: str = "", json_body=None):
+            self.status_code = status_code
+            self.text = text
+            self._json_body = json_body
+
+        def json(self):
+            return self._json_body
+
+    async def fake_post(_self, _url, *, json, headers):  # noqa: ARG001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FakeResponse(
+                400,
+                text=(
+                    '{"error":{"message":"response_format json_schema '
+                    'is not supported"}}'
+                ),
+            )
+        return _FakeResponse(
+            200,
+            json_body={"choices": [{"message": {"content": '{"ok":true}'}}]},
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    try:
+        # Deliberately no explicit call_meta["operation_id"] -- this exercises
+        # the payload-hash path (app.db.provider_operation_id) directly, which
+        # is the one the fix must not perturb.
+        result = await hiagent.chat(
+            [{"role": "user", "content": "Return JSON."}],
+            response_format=response_format,
+            max_tokens=256,
+            call_meta={"response_format_required": True},
+        )
+        assert result == '{"ok":true}'
+        assert calls["n"] == 2
+
+        rows = db.get_conn().execute(
+            "SELECT id, operation_id, attempt_no, status, supersedes_call_id, "
+            "superseded_by_call_id, recovery_disposition "
+            "FROM provider_calls ORDER BY id"
+        ).fetchall()
+        assert len(rows) == 2
+        failed_row, ok_row = rows
+
+        assert failed_row["status"] == "FAILED"
+        assert ok_row["status"] == "OK"
+        # Same business operation -- the hard constraint from the review: the
+        # required-format retry must not make operation_id fork per attempt.
+        assert failed_row["operation_id"] == ok_row["operation_id"]
+        assert failed_row["operation_id"]
+        # This is the actual defect: before the fix both rows land at
+        # attempt_no=1 with no supersedes/superseded link, indistinguishable
+        # from two unrelated duplicate calls in /api/system/calls.
+        assert failed_row["attempt_no"] == 1
+        assert ok_row["attempt_no"] == 2
+        assert ok_row["supersedes_call_id"] == failed_row["id"]
+        assert failed_row["superseded_by_call_id"] == ok_row["id"]
+        assert failed_row["recovery_disposition"] == "RETRIED_SUCCESSFULLY"
     finally:
         hiagent._JSON_SCHEMA_UNSUPPORTED.discard(capability_key)
         hiagent._JSON_SCHEMA_REJECT_STREAK.pop(capability_key, None)

@@ -1525,6 +1525,18 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                 continue
             if attempt_response_format is not None and _looks_like_response_format_unsupported(exc):
                 if response_format_required:
+                    # 契约说明（对应 app/portraits.py 三处身份判定调用的
+                    # call_meta["disable_provider_retries"]=True，由
+                    # app/harness/model_gateway.py 的
+                    # "forbids provider retries" 断言强制）：那个标志只网关一层
+                    # 针对 exc.retryable 的 5xx/超时重试循环，本函数从不读它，
+                    # 下面这段 400 原样重放对它是刻意豁免、不是疏漏。二者不是同一
+                    # 件事——disable_provider_retries 禁的是"换一次语义答案再摇一次
+                    # 骰子"的业务重试；这里的重放是同一份 payload 原样再发一次的
+                    # 传输层背景噪声修复（约 3.8% 与内容无关的独立 400、原样重放约
+                    # 96% 成功、命中即代表 provider 在生成前就拒绝、不产生 token
+                    # 成本），既不重新摇答案也不放宽任何校验，所以不违反这些身份判定
+                    # "一律 fail-closed" 的既定原则。
                     # required 调用绝不静默降级：json_schema → json_object → 纯文本这条
                     # 能力阶梯只对"允许弱化"的调用开放。真实 API 实验显示该类 400 约
                     # 3.8% 概率发生、与 schema 大小/结构无关，是间歇性背景噪声而非真的
@@ -1542,6 +1554,21 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                         # 退避沿用本文件 _post_json 已有的 1.5 * 2**attempt 节奏，不发明新策略。
                         await asyncio.sleep(1.5 * (2 ** required_format_attempt))
                         required_format_attempt += 1
+                        # payload 逐字节不变（同一份 response_format 原样重放），所以
+                        # provider_operation_id（app/db.py 里纯 kind/model/payload 的哈希，
+                        # 不读 meta）算出的 operation_id 和上一次尝试完全相同——这是必须
+                        # 保留的既有语义，不能因为重试就让它跳变。但落库时 400 记的是
+                        # FAILED，而 app/db.py 的 attempt_no/supersedes_call_id 拼接默认
+                        # 只认上一条状态是 INTERRUPTED；不显式声明的话这几次原样重放会在
+                        # /api/system/calls 里显示成互不相关的重复调用而不是一条重试链。
+                        # required_format_retry_attempt 只是给人看的调试字段；真正让
+                        # app/db.py 把这次 FAILED 也接进链路的是下面这个显式 opt-in 开关，
+                        # 范围严格限定在这一条重放路径，不影响其它 FAILED 状态的默认不链接行为。
+                        call_meta = {
+                            **call_meta,
+                            "required_format_retry_attempt": required_format_attempt,
+                            "provider_call_retry_of_failed": True,
+                        }
                         continue
                     raise
                 # 能力阶梯：json_schema → json_object → 纯文本。

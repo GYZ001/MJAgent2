@@ -51,7 +51,9 @@ CATEGORIES: dict[str, dict[str, Any]] = {
     "generation_identity_fixed_budget": {
         "label": "内容生成",
         "technical": True,
-        "hint": "人物身份判定按团队既定原则一律 fail-closed，不做格式/语义修复重试，"
+        "hint": "人物身份判定按团队既定原则一律 fail-closed，不做格式/语义修复重试"
+                "（即不会放宽约束或换一次答案重新摇骰子；网关对完全相同请求的原样"
+                "重放不算在内，命中即代表这轮判定本身失败），"
                 "「修复重试上限」对本步骤无效，调整它不会改变结果。"
                 "请先按错误码检查具体原因，再直接重新生成。",
     },

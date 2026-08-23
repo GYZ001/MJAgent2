@@ -50,6 +50,7 @@ from app.schemas import (
     PlotSpine,
     PlotSpineBeat,
     ScriptScene,
+    SourceCoverageDecision,
     VoiceCanonical,
     World,
 )
@@ -982,6 +983,190 @@ def test_screenplay_document_patch_stakes_only():
     assert "meta:stakes" in touched
     # 无关场次标题保持
     assert out.scene_outline[0].scene_heading == script.scene_outline[0].scene_heading
+
+
+# --- spine_beat 补丁落地回归测试（975fa3a）-----------------------------------
+# 原缺陷：resolve_field_patch_target/apply_field_patch 都没有 spine_beat 分支，
+# 补丁落到 _set_by_dotted 兜底后被写到文档根级或被 model_validate 静默丢弃，
+# apply_field_patch 全程不抛异常且 touched 返回"成功"，但文档实际原封不动。
+# 下面的测试专门断言字段值真的改变了，而不是只看 touched/是否抛异常。
+
+def _spine_beats_script() -> EpisodeScreenplay:
+    return _minimal_script(
+        plot_spine=PlotSpine(
+            episode_premise="主角要在三次交锋中逆转局势",
+            spine_beats=[
+                PlotSpineBeat(beat_id="S01", who="甲", does="应战开局", turn="局势紧张"),
+                PlotSpineBeat(beat_id="S02", who="乙", does="出手反击", turn="局势胶着"),
+                PlotSpineBeat(beat_id="S03", who="甲", does="扭转局势", turn="局势逆转"),
+            ],
+            must_keep_ending="甲反败为胜",
+            drop_list=["闲聊", "风景"],
+        ),
+    )
+
+
+def test_spine_beat_patch_actually_lands_on_target_beat_only():
+    """核心回归：target={kind:spine_beat,id:<真实id>} 必须真的改到该 beat 的字段，
+    且不能波及其它 beat（原缺陷是 touched 报告成功但文档只字未改）。"""
+    doc = screenplay_to_document(_spine_beats_script())
+    original_beats = {beat.beat_id: beat.does for beat in doc.plot_spine.spine_beats}
+
+    patched, touched = apply_field_patch(
+        doc,
+        path="does",
+        value="乙改变策略，绝地反击",
+        target={"kind": "spine_beat", "id": "S02"},
+    )
+
+    beats_by_id = {beat.beat_id: beat for beat in patched.plot_spine.spine_beats}
+    assert beats_by_id["S02"].does == "乙改变策略，绝地反击"
+    assert beats_by_id["S02"].does != original_beats["S02"]
+    # 其它 beat 未被波及
+    assert beats_by_id["S01"].does == original_beats["S01"]
+    assert beats_by_id["S03"].does == original_beats["S03"]
+    assert "S02" in touched
+    # 传入的原始 doc 不应被就地修改（apply_field_patch 应在副本上操作）
+    assert doc.plot_spine.spine_beats[1].does == original_beats["S02"]
+
+
+@pytest.mark.parametrize("alias", ["spine_beats[2]", "spine_beat_2", "2"])
+def test_spine_beat_patch_resolves_all_three_id_aliases(alias):
+    """"spine_beats[2]"/"spine_beat_2"/裸"2" 都是同一个 0-based 索引约定，
+    三者必须命中同一条 beat（第三条，beat_id="S03"）。"""
+    doc = screenplay_to_document(_spine_beats_script())
+
+    patched, touched = apply_field_patch(
+        doc,
+        path="does",
+        value=f"改写-{alias}",
+        target={"kind": "spine_beat", "id": alias},
+    )
+
+    assert patched.plot_spine.spine_beats[2].beat_id == "S03"
+    assert patched.plot_spine.spine_beats[2].does == f"改写-{alias}"
+    # 前两条 beat 不受影响
+    assert patched.plot_spine.spine_beats[0].does == "应战开局"
+    assert patched.plot_spine.spine_beats[1].does == "出手反击"
+    assert "S03" in touched
+
+
+def test_spine_beat_patch_via_dotted_path_drills_into_list_element():
+    """不给 target，只给 path="plot_spine.spine_beats[2].does" 时也必须下钻到
+    真实的第三条 beat，而不是在 plot_spine 下新建一个字面量
+    "spine_beats[2]" 键（这是原 _set_by_dotted 的确切缺陷形态）。"""
+    doc = screenplay_to_document(_spine_beats_script())
+
+    patched, touched = apply_field_patch(
+        doc,
+        path="plot_spine.spine_beats[2].does",
+        value="通过点路径改写",
+    )
+
+    assert patched.plot_spine.spine_beats[2].beat_id == "S03"
+    assert patched.plot_spine.spine_beats[2].does == "通过点路径改写"
+    # 列表长度不变，没有多出一个伪造元素/键
+    assert len(patched.plot_spine.spine_beats) == 3
+    assert [b.beat_id for b in patched.plot_spine.spine_beats] == ["S01", "S02", "S03"]
+    assert patched.plot_spine.spine_beats[0].does == "应战开局"
+    assert patched.plot_spine.spine_beats[1].does == "出手反击"
+    assert touched
+
+
+def test_spine_beat_patch_raises_when_target_beat_does_not_exist():
+    """解析不到目标 beat 时必须显式抛错，不能静默返回"成功"。"""
+    doc = screenplay_to_document(_spine_beats_script())
+
+    with pytest.raises(KeyError):
+        apply_field_patch(
+            doc,
+            path="does",
+            value="不存在的目标",
+            target={"kind": "spine_beat", "id": "S999"},
+        )
+
+    with pytest.raises(KeyError):
+        apply_field_patch(
+            doc,
+            path="does",
+            value="越界索引",
+            target={"kind": "spine_beat", "id": "9999"},
+        )
+
+
+def test_field_patch_raises_on_unknown_root_path():
+    """路径首段不是 ScreenplayDocument 字段时，根级兜底必须显式抛错，
+    不能像原缺陷那样把值写进文档根级并报告成功。"""
+    doc = screenplay_to_document(_spine_beats_script())
+
+    with pytest.raises(KeyError):
+        apply_field_patch(
+            doc,
+            path="totally_unknown_root_field",
+            value="不该落地的值",
+            target={},
+        )
+
+
+def test_plot_spine_scalar_field_patch_still_uses_legacy_dotted_path():
+    """回归保护：plot_spine.episode_premise 这类非索引标量字段不应被新增的
+    targets_spine_beat 判断误伤，仍要走原有的 _set_by_dotted 路径正常写入。"""
+    doc = screenplay_to_document(_spine_beats_script())
+    original_does = [beat.does for beat in doc.plot_spine.spine_beats]
+
+    patched, touched = apply_field_patch(
+        doc,
+        path="plot_spine.episode_premise",
+        value="新的一集前提：三次交锋后逆转",
+    )
+
+    assert patched.plot_spine.episode_premise == "新的一集前提：三次交锋后逆转"
+    assert touched == ["plot_spine"]
+    # spine_beats 完全未受影响
+    assert [beat.does for beat in patched.plot_spine.spine_beats] == original_does
+
+
+def test_source_coverage_field_patch_lands_and_rejects_unknown_id():
+    """source_coverage 写侧同类缺口：补丁要真的落地到对应 segment，
+    不存在的 id 必须显式抛错。"""
+    script = _minimal_script(
+        source_coverage=[
+            SourceCoverageDecision(
+                source_segment_id="SRC0001",
+                disposition="deliver",
+                projection_policy="picture",
+                beat_ids=["S01"],
+            ),
+            SourceCoverageDecision(
+                source_segment_id="SRC0002",
+                disposition="deliver",
+                projection_policy="picture",
+                beat_ids=["S01"],
+            ),
+        ],
+    )
+    doc = screenplay_to_document(script)
+
+    patched, touched = apply_field_patch(
+        doc,
+        path="reason",
+        value="补充说明依据",
+        target={"kind": "source_coverage", "id": "SRC0002"},
+    )
+
+    items_by_id = {item.source_segment_id: item for item in patched.source_coverage}
+    assert items_by_id["SRC0002"].reason == "补充说明依据"
+    # 未涉及的 segment 不受影响
+    assert items_by_id["SRC0001"].reason == ""
+    assert "SRC0002" in touched
+
+    with pytest.raises(KeyError):
+        apply_field_patch(
+            doc,
+            path="reason",
+            value="不存在的 segment",
+            target={"kind": "source_coverage", "id": "SRC-404"},
+        )
 
 
 def test_screenplay_projection_separates_action_labels_and_deduplicates_dialogue():
