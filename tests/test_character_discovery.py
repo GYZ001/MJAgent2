@@ -7990,3 +7990,37 @@ def test_unknown_fields_on_n_and_f_still_fail_closed() -> None:
     assert normalized["n"][0]["unexpected"] == "x"
     with pytest.raises(ValidationError):
         portraits.CurrentIdentityCandidateResponse.model_validate(normalized)
+
+
+def test_identity_discovery_failure_gets_dedicated_no_retry_budget_hint() -> None:
+    """身份判定 format_retry_limit=semantic_retry_limit=0（fail-closed，见
+    app/portraits.py 身份判定调用点与 _current_identity_projection_errors 附近
+    注释），所以它触发的 StageError 必须走专用报错分类，而不是共享的
+    "generation" 分类——共享分类的提示会建议用户"调整「修复重试上限」"，
+    但那个设置对这条 fail-closed 路径完全无效，会误导用户。
+
+    app/domain/screenplay_ops.py 的 ``_screenplay_character_discovery`` 用
+    ``[IDENTITY_DISCOVERY_FIXED_RETRY_BUDGET]`` 标记这类失败；这里只验证
+    分类结果与专用提示文案，不驱动完整的身份判定流程。
+    """
+    from app import errors as app_errors
+
+    exc = stages.StageError(
+        "新人物发现",
+        [
+            "人物身份模型暂未完成本集预检，请在剧本阶段重试（ERR-x）"
+            "[IDENTITY_DISCOVERY_FIXED_RETRY_BUDGET]"
+        ],
+    )
+
+    assert app_errors.classify(exc) == (
+        "generation_identity_fixed_budget",
+        "GEN-IDENTITY-BUDGET",
+    )
+    hint = app_errors.CATEGORIES["generation_identity_fixed_budget"]["hint"]
+    assert "修复重试上限" in hint and "无效" in hint
+
+    # 未命中标记的普通 StageError 必须继续走既有的共享 "generation" 分类，
+    # 不能被这条新分支误伤。
+    generic_exc = stages.StageError("新人物发现", ["普通失败，无特殊标记"])
+    assert app_errors.classify(generic_exc) == ("generation", "GEN")

@@ -224,28 +224,13 @@ async def test_json_object_first_provider_payload_contains_json_instruction(
     assert len(payloads) == 1
 
 
-@pytest.mark.asyncio
-async def test_response_format_capability_ladder_degrades_step_by_step(
-    monkeypatch,
-) -> None:
-    payloads: list[dict] = []
-    provider, model = "hiagent", "required-schema-model"
-    capability_key = hiagent._response_format_capability_key(provider, model)
-    hiagent._RESPONSE_FORMAT_UNSUPPORTED.discard(capability_key)
-    schema = {
-        "type": "object",
-        "properties": {"ok": {"type": "boolean"}},
-        "required": ["ok"],
-        "additionalProperties": False,
-    }
-    response_format = {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "required_schema",
-            "strict": True,
-            "schema": schema,
-        },
-    }
+def _patch_chat_dispatch_dependencies(monkeypatch, provider: str, model: str) -> None:
+    """Stub the plumbing chat() needs before it ever reaches the network.
+
+    Shared by every test below that drives ``hiagent.chat`` end-to-end through
+    a fake ``_plain_chat_request`` -- only the transport call itself differs
+    per test.
+    """
     monkeypatch.setattr(
         hiagent,
         "text_request_token_limits",
@@ -274,39 +259,70 @@ async def test_response_format_capability_ladder_degrades_step_by_step(
         lambda *_args, **_kwargs: None,
     )
 
+
+def _unsupported_json_schema_error() -> "hiagent.ProviderError":
+    return hiagent.ProviderError(
+        "请求被拒绝（HTTP 400）：unsupported parameter json_schema",
+        retryable=False,
+        raw=(
+            '{"error":{"message":"response_format json_schema '
+            'is not supported"}}'
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_response_format_capability_ladder_degrades_step_by_step(
+    monkeypatch,
+) -> None:
+    """Non-required calls may still ride the ladder all the way to free text."""
+    payloads: list[dict] = []
+    provider, model = "hiagent", "optional-schema-model"
+    capability_key = hiagent._response_format_capability_key(provider, model)
+    hiagent._RESPONSE_FORMAT_UNSUPPORTED.discard(capability_key)
+    hiagent._JSON_SCHEMA_UNSUPPORTED.discard(capability_key)
+    hiagent._JSON_SCHEMA_REJECT_STREAK.pop(capability_key, None)
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+        "additionalProperties": False,
+    }
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "optional_schema",
+            "strict": True,
+            "schema": schema,
+        },
+    }
+    _patch_chat_dispatch_dependencies(monkeypatch, provider, model)
+
     async def rejected_request(_client, _url, payload, **_kwargs):
         payloads.append(payload)
-        raise hiagent.ProviderError(
-            "请求被拒绝（HTTP 400）：unsupported parameter json_schema",
-            retryable=False,
-            raw=(
-                '{"error":{"message":"response_format json_schema '
-                'is not supported"}}'
-            ),
-        )
+        raise _unsupported_json_schema_error()
 
     monkeypatch.setattr(hiagent, "_plain_chat_request", rejected_request)
-    hiagent._JSON_SCHEMA_UNSUPPORTED.discard(capability_key)
     try:
         with pytest.raises(hiagent.ProviderError, match="unsupported parameter"):
             await hiagent.chat(
                 [{"role": "user", "content": "Return JSON."}],
                 response_format=response_format,
                 max_tokens=256,
-                call_meta={
-                    "operation_id": "op-required-json-schema",
-                    "response_format_required": True,
-                },
+                call_meta={"operation_id": "op-optional-json-schema"},
             )
         # 能力阶梯：json_schema → json_object → 纯文本。每一级只在网关明确拒绝
-        # 上一级时下探一次，能力缺失按 provider:model 记住，后续调用直接从可用的
-        # 那一级开始，不会每次都重新试探。
+        # 上一级时下探一次，之后的调用直接从可用的那一级开始，不会每次都重新试探。
         assert [item.get("response_format") for item in payloads] == [
             response_format,
             {"type": "json_object"},
             None,
         ]
-        assert hiagent._json_schema_known_unsupported(provider, model) is True
+        # 单次拒绝只是一次噪声候选，还没连续到拉黑阈值（默认 3），所以
+        # json_schema 这一级本身还没被记为不支持——只是这次调用自己往下探了。
+        assert hiagent._json_schema_known_unsupported(provider, model) is False
+        assert hiagent._JSON_SCHEMA_REJECT_STREAK.get(capability_key) == 1
+        # "整个 response_format 都不支持" 是不同的、单次即记的缓存，未受影响。
         assert (
             hiagent._response_format_known_unsupported(provider, model)
             is True
@@ -314,3 +330,190 @@ async def test_response_format_capability_ladder_degrades_step_by_step(
     finally:
         hiagent._RESPONSE_FORMAT_UNSUPPORTED.discard(capability_key)
         hiagent._JSON_SCHEMA_UNSUPPORTED.discard(capability_key)
+        hiagent._JSON_SCHEMA_REJECT_STREAK.pop(capability_key, None)
+
+
+@pytest.mark.asyncio
+async def test_required_call_ignores_json_schema_cache_and_never_downgrades(
+    monkeypatch,
+) -> None:
+    """response_format_required=True must not consult the opportunistic cache.
+
+    Even a (provider, model) already blacklisted for json_schema must still
+    receive the caller's exact response_format on a required call -- the cache
+    is a performance shortcut for opportunistic callers only.
+    """
+    payloads: list[dict] = []
+    provider, model = "hiagent", "required-schema-model"
+    capability_key = hiagent._response_format_capability_key(provider, model)
+    hiagent._JSON_SCHEMA_UNSUPPORTED.add(capability_key)  # pre-seed as "known unsupported"
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+        "additionalProperties": False,
+    }
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "required_schema",
+            "strict": True,
+            "schema": schema,
+        },
+    }
+    _patch_chat_dispatch_dependencies(monkeypatch, provider, model)
+
+    async def succeeding_request(_client, _url, payload, **_kwargs):
+        payloads.append(payload)
+        return {"choices": [{"message": {"content": '{"ok":true}'}}]}
+
+    monkeypatch.setattr(hiagent, "_plain_chat_request", succeeding_request)
+    try:
+        result = await hiagent.chat(
+            [{"role": "user", "content": "Return JSON."}],
+            response_format=response_format,
+            max_tokens=256,
+            call_meta={
+                "operation_id": "op-required-cache-bypass",
+                "response_format_required": True,
+            },
+        )
+        assert result == '{"ok":true}'
+        assert len(payloads) == 1
+        assert payloads[0]["response_format"] == response_format
+    finally:
+        hiagent._JSON_SCHEMA_UNSUPPORTED.discard(capability_key)
+        hiagent._JSON_SCHEMA_REJECT_STREAK.pop(capability_key, None)
+
+
+@pytest.mark.asyncio
+async def test_required_call_retries_same_request_on_400_then_succeeds(
+    monkeypatch,
+) -> None:
+    """A required call must retry the identical json_schema request in place.
+
+    Real-world measurement: this class of 400 is ~3.8% independent background
+    noise; replaying the exact same request usually succeeds. So a required
+    call must never weaken the contract to recover -- it retries.
+    """
+    payloads: list[dict] = []
+    provider, model = "hiagent", "required-retry-model"
+    capability_key = hiagent._response_format_capability_key(provider, model)
+    hiagent._JSON_SCHEMA_UNSUPPORTED.discard(capability_key)
+    hiagent._JSON_SCHEMA_REJECT_STREAK.pop(capability_key, None)
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+        "additionalProperties": False,
+    }
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "required_schema",
+            "strict": True,
+            "schema": schema,
+        },
+    }
+    _patch_chat_dispatch_dependencies(monkeypatch, provider, model)
+    sleeps: list[float] = []
+
+    async def no_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(hiagent.asyncio, "sleep", no_sleep)
+
+    async def flaky_then_ok(_client, _url, payload, **_kwargs):
+        payloads.append(payload)
+        if len(payloads) == 1:
+            raise _unsupported_json_schema_error()
+        return {"choices": [{"message": {"content": '{"ok":true}'}}]}
+
+    monkeypatch.setattr(hiagent, "_plain_chat_request", flaky_then_ok)
+    try:
+        result = await hiagent.chat(
+            [{"role": "user", "content": "Return JSON."}],
+            response_format=response_format,
+            max_tokens=256,
+            call_meta={
+                "operation_id": "op-required-retry-success",
+                "response_format_required": True,
+            },
+        )
+        assert result == '{"ok":true}'
+        # 两次请求都必须是原样的 json_schema，重试不允许降级。
+        assert [item.get("response_format") for item in payloads] == [
+            response_format,
+            response_format,
+        ]
+        assert len(sleeps) == 1  # 退避了一次就成功了，不需要第二次重试
+        # 中途的一次成功证明该 (provider, model) 支持 json_schema，连续拒绝计数
+        # 必须清零，不能被后续互不相关的噪声接着累加。
+        assert hiagent._JSON_SCHEMA_REJECT_STREAK.get(capability_key) is None
+        assert hiagent._json_schema_known_unsupported(provider, model) is False
+    finally:
+        hiagent._JSON_SCHEMA_UNSUPPORTED.discard(capability_key)
+        hiagent._JSON_SCHEMA_REJECT_STREAK.pop(capability_key, None)
+
+
+@pytest.mark.asyncio
+async def test_required_call_raises_after_exhausting_retries_without_downgrading(
+    monkeypatch,
+) -> None:
+    """When every retry also 400s, a required call fails loudly -- never mute."""
+    payloads: list[dict] = []
+    provider, model = "hiagent", "required-exhausted-model"
+    capability_key = hiagent._response_format_capability_key(provider, model)
+    hiagent._JSON_SCHEMA_UNSUPPORTED.discard(capability_key)
+    hiagent._JSON_SCHEMA_REJECT_STREAK.pop(capability_key, None)
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+        "additionalProperties": False,
+    }
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "required_schema",
+            "strict": True,
+            "schema": schema,
+        },
+    }
+    _patch_chat_dispatch_dependencies(monkeypatch, provider, model)
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(hiagent.asyncio, "sleep", no_sleep)
+
+    async def always_rejected(_client, _url, payload, **_kwargs):
+        payloads.append(payload)
+        raise _unsupported_json_schema_error()
+
+    monkeypatch.setattr(hiagent, "_plain_chat_request", always_rejected)
+    try:
+        with pytest.raises(hiagent.ProviderError, match="unsupported parameter"):
+            await hiagent.chat(
+                [{"role": "user", "content": "Return JSON."}],
+                response_format=response_format,
+                max_tokens=256,
+                call_meta={
+                    "operation_id": "op-required-exhausted",
+                    "response_format_required": True,
+                },
+            )
+        expected_attempts = 1 + hiagent._RESPONSE_FORMAT_REQUIRED_JSON_SCHEMA_RETRIES
+        assert len(payloads) == expected_attempts
+        # 每一次都必须是原样的 json_schema，一次都不能降级。
+        assert [item.get("response_format") for item in payloads] == (
+            [response_format] * expected_attempts
+        )
+        # 三次都是拒绝，达到了拉黑阈值——这条信息对*其它非 required 调用*仍然
+        # 有意义（省下一次大概率会 400 的往返），即便这条 required 调用自己
+        # 从未读过这份缓存。
+        assert expected_attempts >= hiagent._JSON_SCHEMA_UNSUPPORTED_STREAK_THRESHOLD
+        assert hiagent._json_schema_known_unsupported(provider, model) is True
+    finally:
+        hiagent._JSON_SCHEMA_UNSUPPORTED.discard(capability_key)
+        hiagent._JSON_SCHEMA_REJECT_STREAK.pop(capability_key, None)

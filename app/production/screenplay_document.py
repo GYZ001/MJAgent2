@@ -20,6 +20,7 @@ from app.schemas import (
     KeyDialogueTurn,
     NarrativeContinuityPlan,
     PlotSpine,
+    PlotSpineBeat,
     ScriptScene,
     SourceCoverageDecision,
     StoryEvent,
@@ -662,6 +663,48 @@ def render_full_script_text(doc: ScreenplayDocument) -> str:
         parts.append("")  # blank between scenes
     text = "\n".join(parts).strip()
     return text
+
+
+_SPINE_BEAT_ALIAS_RE = re.compile(r"spine_beats?[\[._-](\d+)\]?", re.I)
+
+
+def _spine_beat_alias_index(raw: str) -> int | None:
+    """Recover a 0-based spine_beats list index from a malformed id alias.
+
+    The repair loop only ever sees the beat's real ``beat_id`` (e.g. "S02")
+    inside a document excerpt, or the 0-based list index inside a validator
+    message such as ``plot_spine.spine_beats[221].does 过短`` (see
+    ``validate_plot_spine``'s ``tag = f"plot_spine.spine_beats[{i}]"`` and the
+    matching read-side excerpt in ``screenplay_repair._ISSUE_TARGET_CONTAINERS``
+    / ``_ISSUE_TARGET_INDEX_RE``, which already treat that ``[i]`` as a
+    0-based ``enumerate(beats)`` index).  When a model echoes that index back
+    as the patch target id instead of the real beat_id, it shows up as
+    "spine_beats[221]", "spine_beat_221" or a bare "221" — all three encode
+    the same 0-based index, so this reuses that one established convention
+    instead of inventing new fuzzy matching.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    match = _SPINE_BEAT_ALIAS_RE.search(raw)
+    if match:
+        return int(match.group(1))
+    if raw.isdigit():
+        return int(raw)
+    return None
+
+
+def _resolve_spine_beat_id(beat_ids: list[str], raw: str) -> str | None:
+    """Map an id/path fragment to a real beat_id, exact match first."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    if raw in beat_ids:
+        return raw
+    index = _spine_beat_alias_index(raw)
+    if index is not None and 0 <= index < len(beat_ids):
+        return beat_ids[index]
+    return None
 
 
 def resolve_field_patch_target(

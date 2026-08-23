@@ -48,6 +48,13 @@ CATEGORIES: dict[str, dict[str, Any]] = {
                 "已完成的分片会被复用，直接重新生成即可从中断处继续；"
                 "若同一集反复触顶，请把错误码反馈给技术人员。",
     },
+    "generation_identity_fixed_budget": {
+        "label": "内容生成",
+        "technical": True,
+        "hint": "人物身份判定按团队既定原则一律 fail-closed，不做格式/语义修复重试，"
+                "「修复重试上限」对本步骤无效，调整它不会改变结果。"
+                "请先按错误码检查具体原因，再直接重新生成。",
+    },
     "media":      {"label": "媒体处理", "technical": True,
                    "hint": "媒体处理失败（转码/文件读写等），请把错误码反馈给技术人员。"},
     "system":     {"label": "系统内部", "technical": True,
@@ -154,6 +161,14 @@ def classify(exc: BaseException | None, http_status: int | None = None) -> tuple
         and "BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED" in _extract_message(exc)
     ):
         return "generation_retry_grant", "GEN-RETRY-GRANT"
+    if (
+        name == "StageError"
+        and "IDENTITY_DISCOVERY_FIXED_RETRY_BUDGET" in _extract_message(exc)
+    ):
+        # 人物身份判定 fail-closed，format_retry_limit/semantic_retry_limit
+        # 硬编码为 0（见 app/portraits.py 身份判定调用点），通用的
+        # "调整「修复重试上限」" 提示对这条路径不成立，必须走专用提示。
+        return "generation_identity_fixed_budget", "GEN-IDENTITY-BUDGET"
     if name in {
         "StageError",
         "CompileError",

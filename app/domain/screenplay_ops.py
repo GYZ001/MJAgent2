@@ -1078,7 +1078,10 @@ async def _screenplay_character_discovery(
         )
         raise StageError(
             "新人物发现",
-            [f"人物身份模型暂未完成本集预检，请在剧本阶段重试（{public}）"],
+            [
+                f"人物身份模型暂未完成本集预检，请在剧本阶段重试（{public}）"
+                "[IDENTITY_DISCOVERY_FIXED_RETRY_BUDGET]"
+            ],
         ) from exc
     if result.get("errors"):
         raise StageError("新人物发现", list(result["errors"]))

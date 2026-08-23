@@ -516,6 +516,19 @@ async def chat_structured(
         stage_key == "screenplay_scene_shard_semantic_repair"
         or strict_identity_substage
     )
+    # Scope of the block below: it only validates the *caller's* arguments to
+    # this function (the Python-level contract at this call boundary) -- it
+    # never inspects the bytes actually sent over HTTP, so on its own it
+    # cannot prove the provider received this exact json_schema. What closes
+    # that gap is `require_response_format=True` (forced True here) flowing
+    # into `call_meta["response_format_required"]` and from there into
+    # `app.hiagent.chat()`: that function structurally guarantees a
+    # response_format_required call either sends the caller's response_format
+    # unmodified (retrying the identical request in place on a transient-
+    # looking 400) or raises -- it never silently downgrades json_schema to
+    # json_object/None the way opportunistic calls may. So the two layers
+    # together do guarantee the wire payload, but neither one alone does;
+    # do not read this block as a payload-level assertion by itself.
     if strict_json_schema_contract:
         json_schema = (
             response_format.get("json_schema")
