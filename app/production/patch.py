@@ -648,11 +648,15 @@ def screenplay_from_artifact_record(art: dict[str, Any]) -> EpisodeScreenplay:
     ``EpisodeScreenplay`` is a mutable Pydantic model, so no caller may ever
     receive a shared instance: downstream normalization would contaminate a
     process-wide template and a later resolver would report drift although
-    neither the Artifact nor the persisted page projection changed.  Parsing
-    the immutable payload afresh (~31 ms) is both cheaper than deep-copying a
-    cached model (~129 ms) and structurally immune to that contamination, so
-    only the *verification verdict* is memoised -- keyed by the content seal,
-    which any content change necessarily invalidates.
+    neither the Artifact nor the persisted page projection changed.
+
+    What is memoised is exactly the **deterministic parse** of an immutable
+    sealed payload -- keyed by the content seal, which any content change
+    necessarily invalidates -- and nothing else.  The contract gate is *not*
+    memoised: it reads mutable rows (see the comment at the call below) and
+    memoising its verdict would silently disable a data-integrity gate.
+    Every caller is handed a freshly parsed model, so no two callers can ever
+    share mutable state through this function.
     """
     artifact_id = str(art.get("id") or "")
     content = art.get("content") or {}
@@ -666,29 +670,44 @@ def screenplay_from_artifact_record(art: dict[str, Any]) -> EpisodeScreenplay:
             artifact_type=str(art.get("type") or "screenplay_document"),
             reason="Artifact 内容与存储指纹漂移",
         ) from exc
+    # 门禁**必须**每次都跑，绝不能放到缓存命中之后：它不是
+    # (artifact_id, content_hash, contract_version) 的纯函数。
+    #   * plan 为空的历史产物走 `_historical_screenplay_artifact_is_bound`，
+    #     查 production_revisions / completion_certificates / episodes /
+    #     evaluations / lineage——同一份不可变内容，绑定状态会随时间改变；
+    #   * 需要谱系追踪的合同走 `_current_ir_semantic_gaps`，沿 parent 链读
+    #     `status != 'validated'`，而 artifact.status 本身就是可变列
+    #     （`UPDATE artifacts SET status='stale'`）。
+    # 缓存只允许记住**确定性解析**（content → 模型），不许记住校验结论。
+    # 实测：门禁 29–53ms，解析 276–284ms，仍是缓存值得做的那一半。
+    _assert_screenplay_artifact_contract(art, content)
     cache_key = (artifact_id, verified_hash, NARRATIVE_CONTRACT_VERSION)
     with _SCREENPLAY_ARTIFACT_MODEL_CACHE_LOCK:
         cached_json = _SCREENPLAY_ARTIFACT_MODEL_CACHE.get(cache_key)
         if cached_json is not None:
             _SCREENPLAY_ARTIFACT_MODEL_CACHE.move_to_end(cache_key)
-    if cached_json is not None:
-        return EpisodeScreenplay.model_validate_json(cached_json)
-    _assert_screenplay_artifact_contract(art, content)
-    if "_projection" in content:
-        screenplay = EpisodeScreenplay.model_validate(content["_projection"])
-    elif "screenplay_metadata" in content:
-        screenplay = document_to_screenplay(ScreenplayDocument.model_validate(content))
-    else:
-        screenplay = EpisodeScreenplay.model_validate(content)
-    with _SCREENPLAY_ARTIFACT_MODEL_CACHE_LOCK:
-        _SCREENPLAY_ARTIFACT_MODEL_CACHE[cache_key] = screenplay.model_dump_json()
-        _SCREENPLAY_ARTIFACT_MODEL_CACHE.move_to_end(cache_key)
-        while (
-            len(_SCREENPLAY_ARTIFACT_MODEL_CACHE)
-            > _SCREENPLAY_ARTIFACT_MODEL_CACHE_SIZE
-        ):
-            _SCREENPLAY_ARTIFACT_MODEL_CACHE.popitem(last=False)
-    return screenplay
+    if cached_json is None:
+        if "_projection" in content:
+            screenplay = EpisodeScreenplay.model_validate(content["_projection"])
+        elif "screenplay_metadata" in content:
+            screenplay = document_to_screenplay(
+                ScreenplayDocument.model_validate(content)
+            )
+        else:
+            screenplay = EpisodeScreenplay.model_validate(content)
+        cached_json = screenplay.model_dump_json()
+        with _SCREENPLAY_ARTIFACT_MODEL_CACHE_LOCK:
+            _SCREENPLAY_ARTIFACT_MODEL_CACHE[cache_key] = cached_json
+            _SCREENPLAY_ARTIFACT_MODEL_CACHE.move_to_end(cache_key)
+            while (
+                len(_SCREENPLAY_ARTIFACT_MODEL_CACHE)
+                > _SCREENPLAY_ARTIFACT_MODEL_CACHE_SIZE
+            ):
+                _SCREENPLAY_ARTIFACT_MODEL_CACHE.popitem(last=False)
+    # 命中与未命中走同一条返回路径：`model_validate` 对 bare dict/list 字段
+    # **不做**深拷贝，直接返回它会让调用方的原地规范化写穿 artifact content，
+    # 污染同一个读作用域里所有其它读者。JSON 往返保证每个调用方拿到独立模型。
+    return EpisodeScreenplay.model_validate_json(cached_json)
 
 
 def load_screenplay_from_artifact(artifact_id: str) -> EpisodeScreenplay:

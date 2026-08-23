@@ -578,6 +578,8 @@ def create_and_commit_artifact_in_transaction(
             "UPDATE step_runs SET output_artifact_id=?,decision='accept' WHERE id=?",
             (artifact_id, step_run_id),
         )
+    # supersede/stale 级联覆盖整条谱系，调用方无法枚举被改的行，整体失效。
+    invalidate_artifact_read_scope()
     row = conn.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
     return _decode_rows([dict(row)])[0] if row else {}
 
@@ -799,13 +801,40 @@ def artifact_read_scope():
     Callers receive their own shallow copy of the row (``episode_detail`` pops
     fields off it), while the decoded ``content`` object is shared and must be
     treated as read-only, exactly as every current reader already does.
-    Writers must never open this scope.
+
+    "Read-only" is not something a comment can guarantee: a read endpoint may
+    legitimately reach a fail-closed verifier that marks an Artifact stale
+    (``assert_screenplay_matches_validated_v7_source``), and a memoised row
+    would then keep serving the pre-write ``status`` to the rest of the same
+    request.  So every writer of an Artifact row calls
+    ``invalidate_artifact_read_scope`` and the scope drops what it memoised --
+    the cache can never outlive a write it was concurrent with.
     """
     token = _ARTIFACT_READ_SCOPE.set({"artifacts": {}, "verified_hashes": {}})
     try:
         yield
     finally:
         _ARTIFACT_READ_SCOPE.reset(token)
+
+
+def invalidate_artifact_read_scope(artifact_id: str | None = None) -> None:
+    """Drop what the active read scope memoised for a just-written Artifact.
+
+    A no-op outside a scope, which is the common case: writers on the
+    generation path never open one.  Passing ``None`` drops everything, which
+    is the safe answer whenever a write touches rows the caller cannot
+    enumerate (supersede/stale cascades over a whole lineage).
+    """
+    scope = _ARTIFACT_READ_SCOPE.get()
+    if scope is None:
+        return
+    if artifact_id is None:
+        scope["artifacts"].clear()
+        scope["verified_hashes"].clear()
+        return
+    scope["artifacts"].pop(artifact_id, None)
+    for key in [k for k in scope["verified_hashes"] if k[0] == artifact_id]:
+        scope["verified_hashes"].pop(key, None)
 
 
 def get_artifact(artifact_id: str, *, conn=None) -> dict[str, Any] | None:

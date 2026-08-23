@@ -1581,12 +1581,18 @@ def assert_screenplay_matches_validated_v7_source(
         if not isinstance(exc, ArtifactNeedsRebuildError):
             raise
         if mark_stale:
+            stale_id = str(artifact.get("id") or "")
             db.execute(
                 "UPDATE artifacts SET status='stale',stale_reason=? "
                 "WHERE id=? AND status!='rejected'",
-                (str(exc), str(artifact.get("id") or "")),
+                (str(exc), stale_id),
             )
             db.commit()
+            # 这条写入可以发生在只读端点开着读作用域的时候（剧本台首屏 →
+            # resolve_current_screenplay_authority → 这里）。不失效的话，
+            # 同一次请求里后续对这份 artifact 的读取仍会拿到写前的
+            # status='approved'，把刚判定出来的 stale 掩盖掉。
+            evidence_repository.invalidate_artifact_read_scope(stale_id)
         raise
 
 
