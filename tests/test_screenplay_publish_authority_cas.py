@@ -377,7 +377,17 @@ def test_successful_publish_replay_does_not_issue_duplicate_certificate() -> Non
     first = _publish(case)
     conn = db.get_conn()
 
-    with pytest.raises(ValueError, match="production revision 已失效"):
+    # The fixture's compiled screenplay carries a non-empty ending_hook, so the
+    # first publish above already mirrored it into episodes.cliffhanger (see
+    # app/production/publish.py). A byte-for-byte replay therefore now trips
+    # the earlier "authority fingerprint no longer matches" gate before ever
+    # reaching the revision-status check — a stale, pre-mutation fingerprint
+    # is exactly what that gate exists to reject. Either error is a correct,
+    # hard "do not republish" outcome; only the earliest-tripped one changed.
+    with pytest.raises(
+        ValueError,
+        match="production revision 已失效|剧本 revision 未绑定当前原文/Bible/人物决议/改编约束指纹",
+    ):
         _publish(case)
 
     certificates = conn.execute(

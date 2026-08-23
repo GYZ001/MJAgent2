@@ -229,14 +229,27 @@ async def _gather_fail_fast(
     *factories: Callable[[], Awaitable[Any]],
     scope: _FailFastScope | None = None,
     on_failure: Callable[[], None] | None = None,
+    cascades: Callable[[BaseException], bool] | None = None,
 ) -> list[Any]:
     """Run a batch in input order, cancelling and joining it on first failure.
 
     ``asyncio.gather`` propagates a child exception without cancelling its
     siblings.  That is unsafe for paid generation: those detached siblings can
     continue into later provider calls after the batch has already failed.
+
+    ``cascades`` decides, per raised exception, whether that failure should
+    cancel the rest of the batch.  Its default (``None``) treats every
+    failure as cancel-worthy -- the historical behaviour, unchanged for every
+    caller that does not pass it.  A caller that needs to isolate unrelated
+    siblings (one shard's content failure must not cancel another shard's
+    still-running work) passes a narrower predicate: exceptions it rejects
+    fail only their own factory -- siblings keep running to their own
+    outcome -- while the batch still waits for everything to finish and then
+    raises the first such deferred failure, so a quiet return never hides
+    one.
     """
     active_scope = scope or _FailFastScope()
+    should_cascade = cascades if cascades is not None else (lambda _exc: True)
     tasks: list[asyncio.Task[Any]] = []
 
     async def run_child(factory: Callable[[], Awaitable[Any]]) -> Any:
@@ -244,7 +257,11 @@ async def _gather_fail_fast(
             return await factory()
         except BaseException as exc:
             current = asyncio.current_task()
-            if current is not None and active_scope.fail(current):
+            if (
+                current is not None
+                and should_cascade(exc)
+                and active_scope.fail(current)
+            ):
                 if on_failure is not None:
                     try:
                         on_failure()
@@ -259,6 +276,7 @@ async def _gather_fail_fast(
         tasks.append(asyncio.create_task(run_child(factory)))
     active_scope.bind(tasks)
     pending = set(tasks)
+    deferred_failure: asyncio.Task[Any] | None = None
     try:
         while pending:
             done, pending = await asyncio.wait(
@@ -280,9 +298,24 @@ async def _gather_fail_fast(
                     continue
                 owner.result()
             for task in done:
-                # result() preserves the original exception (including
-                # CancelledError) instead of wrapping it in an ExceptionGroup.
-                task.result()
+                # A non-cascading failure (per ``should_cascade``) never
+                # became the scope's owner and never cancelled its peers, so
+                # it will not surface via the ``owner`` branch above.  Record
+                # the first one and keep waiting -- this task's siblings are
+                # still entitled to reach their own outcome.
+                if task.cancelled():
+                    if deferred_failure is None:
+                        deferred_failure = task
+                    continue
+                exc = task.exception()
+                if exc is None:
+                    continue
+                if deferred_failure is None:
+                    deferred_failure = task
+        if deferred_failure is not None:
+            # result() preserves the original exception (including
+            # CancelledError) instead of wrapping it in an ExceptionGroup.
+            deferred_failure.result()
         return [task.result() for task in tasks]
     except BaseException:
         for task in tasks:
@@ -4044,6 +4077,7 @@ async def generate_screenplay_envelope(
     identity_registry_hash: str,
     blueprint_artifact_id: str | None = None,
     identity_artifact_id: str | None = None,
+    source_text: str = "",
 ) -> tuple[ScreenplayEnvelopeIR, str]:
     episode_id = str(episode.get("id") or f"episode-{episode['episode_no']}")
     _assert_episode_owner(episode_id)
@@ -4116,9 +4150,15 @@ async def generate_screenplay_envelope(
             errors.append("blueprint_hash 不匹配")
         if value.identity_registry_hash != identity_registry_hash:
             errors.append("identity_registry_hash 不匹配")
-        expected_ending = str(episode.get("cliffhanger") or "").strip()
-        if not expected_ending and value.metadata.ending_hook.strip():
-            errors.append("本集无 cliffhanger，ending_hook 必须为空")
+        ending_hook = value.metadata.ending_hook.strip()
+        if ending_hook:
+            from app.validators import ending_hook_is_grounded
+
+            if not ending_hook_is_grounded(ending_hook, source_text):
+                errors.append(
+                    "ending_hook 与本集原文几乎不重合，判定为编造下一集钩子："
+                    "ending_hook 必须来自本集原文真实存在的悬念/转折/未完成动作，或留空"
+                )
         return errors
 
     attempts: list[dict[str, Any]] = []
@@ -5874,12 +5914,18 @@ async def generate_screenplay_scene_shards(
     front_matter_ids = structural_front_matter_ids(source_segments)
     identity_keys = {identity.key for identity in identities}
     parallelism = _setting_int(
-        "screenplay_scene_shard_parallelism", 4, minimum=1, maximum=8
+        "screenplay_scene_shard_parallelism", 2, minimum=1, maximum=8
     )
     semaphore = asyncio.Semaphore(parallelism)
-    batch_abort = asyncio.Event()
-    shard_scope = _FailFastScope()
-    structured_operation_gate = _SceneStructuredOperationGate(batch_abort)
+    # batch_abort/structured_operation_gate are per-shard, not per-episode:
+    # each generate_one() call below makes its own, so one shard's failure
+    # can only short-circuit that shard's own later sub-operations (its
+    # reviewers, its repair rounds).  The one failure that must still cancel
+    # every other shard -- upstream authority invalidated, i.e. the episode's
+    # active_screenplay_run_id changed underneath this run -- is raised by
+    # _assert_episode_owner() as ScreenplaySceneShardOwnershipLost and is
+    # cascaded explicitly by the top-level _gather_fail_fast(cascades=...)
+    # call at the bottom of this function, independent of batch_abort.
     checkpoint_rows: dict[str, dict[str, Any]] = {
         plan.shard_id: {
             "shard_id": plan.shard_id,
@@ -5905,14 +5951,13 @@ async def generate_screenplay_scene_shards(
     async def generate_one(
         plan: ScreenplaySceneShardPlan,
     ) -> tuple[ScreenplaySceneShardIR, str]:
-        if batch_abort.is_set():
-            raise asyncio.CancelledError
-        shard_owner = asyncio.current_task()
+        # Shard-local abort signal/gate: setting it only ever short-circuits
+        # this one shard's remaining sub-operations, never a sibling shard's.
+        batch_abort = asyncio.Event()
+        structured_operation_gate = _SceneStructuredOperationGate(batch_abort)
 
         def abort_outer_batch() -> None:
             batch_abort.set()
-            if shard_owner is not None:
-                shard_scope.fail(shard_owner)
 
         _assert_episode_owner(episode_id)
         plan_scene_input_contracts = scene_input_contracts.get(
@@ -6204,8 +6249,11 @@ async def generate_screenplay_scene_shards(
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    # Fence queued shards before releasing the semaphore.  The
-                    # gather coordinator may not run until after a waiter wakes.
+                    # Belt-and-suspenders: the gate's on_failure callback
+                    # (abort_outer_batch) already set this shard's own
+                    # batch_abort before this exception reached us.  This
+                    # only ever affects this shard's later checkpoints below
+                    # -- it cannot reach sibling shards, which is the point.
                     batch_abort.set()
                     raise
         if batch_abort.is_set():
@@ -6338,11 +6386,11 @@ async def generate_screenplay_scene_shards(
         try:
             return await generate_one(plan)
         except asyncio.CancelledError:
-            # Cancellation (whether user-requested or fail-fast sibling
-            # cleanup) is not a shard validation failure.
+            # Cancellation (whether user-requested or an ownership-loss
+            # cascade -- see the cascades= predicate below) is not a shard
+            # validation failure.
             raise
         except Exception as exc:
-            batch_abort.set()
             checkpoint_rows[plan.shard_id]["status"] = "failed"
             checkpoint_rows[plan.shard_id]["error_type"] = type(exc).__name__
             emit_progress()
@@ -6353,7 +6401,18 @@ async def generate_screenplay_scene_shards(
             lambda plan=plan: generate_one_with_checkpoint(plan)
             for plan in plans
         ),
-        scope=shard_scope,
+        # Narrow cascade: a shard's own content/provider failure (deterministic
+        # rejection, validation gate, exhausted retries, ...) must not cancel
+        # its still-running siblings -- that cross-shard cascade is what
+        # turned one canned upstream refusal into an episode-wide pileup
+        # (measured: 97.2% of cancellations landed on scene shards, 99.4% of
+        # those with zero received chars).  The one failure that genuinely
+        # invalidates every shard's in-flight work is the episode's owner
+        # changing underneath this run -- a newer run superseded it, so
+        # continuing would burn provider calls whose results could never be
+        # persisted (_assert_episode_owner enforces that at every checkpoint
+        # regardless).  That is the only exception type allowed to cascade.
+        cascades=lambda exc: isinstance(exc, ScreenplaySceneShardOwnershipLost),
     )
     shards = [shard for shard, _artifact_id in results]
     artifact_ids = [artifact_id for _shard, artifact_id in results]

@@ -12,6 +12,7 @@ from app import api, db, errors as app_errors, storyboard_workspace, task_regist
 from app.capabilities.direct import enter_handler
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact
+from app.narrative import NARRATIVE_CONTRACT_VERSION
 from app.narrative_review import NarrativeReviewError, run_blind_audience_review
 from app.production.publish import publish_screenplay
 from app.production.patch import (
@@ -2350,8 +2351,15 @@ def test_duration_recovery_rejects_non_storyboard_or_combined_drift(
     _published_case()
     conn = db.get_conn()
     if extra_drift:
+        # `hook`/`cliffhanger` are normalized to a fixed "" in authority
+        # material (they are editable display metadata, never production
+        # input -- see the fingerprint-exclusion rationale on
+        # screenplay_authority_material's `constraints` dict), so drifting
+        # them no longer counts as "other" drift for this test. Use `title`,
+        # a field that *is* still tracked, so this still proves the duration
+        # recovery path stays narrow and does not paper over unrelated drift.
         conn.execute(
-            "UPDATE episodes SET target_duration_s=60,hook='changed' "
+            "UPDATE episodes SET target_duration_s=60,title='changed' "
             "WHERE id='episode-generic'"
         )
     else:
@@ -2362,6 +2370,48 @@ def test_duration_recovery_rejects_non_storyboard_or_combined_drift(
 
     with pytest.raises(ValueError):
         resolve_current_screenplay_authority("episode-generic")
+
+
+def test_authority_fingerprint_ignores_cliffhanger_tampering() -> None:
+    """独立 review 复现用例：篡改 episodes.cliffhanger 不再影响权威指纹。
+
+    problem 2 的修复不是"识别并拒绝篡改"，而是把 hook/cliffhanger 彻底移出
+    指纹材料——它们是 docs/PROMPT_SPEC.md 定义的可编辑展示元数据，从来就不
+    该是权威指纹的一部分（真正的剧本/事件证据仍由 artifact_hash 与
+    full_script_text/events 等字段保护，未被这项改动触碰）。因此这里的预期
+    结果是 resolve_current_screenplay_authority 在篡改后依然成功解析——
+    而不是像旧版"值盲容忍"逻辑那样，只因为字符串*恰好*能让候选指纹重新算出
+    同一个值才放行。
+    """
+    _published_case()
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE episodes SET cliffhanger=? WHERE id='episode-generic'",
+        ("ATTACKER INJECTED TEXT UNRELATED TO SCRIPT",),
+    )
+    conn.execute(
+        "UPDATE episodes SET hook=? WHERE id='episode-generic'",
+        ("ANOTHER INJECTED VALUE",),
+    )
+    conn.commit()
+
+    resolved = resolve_current_screenplay_authority("episode-generic")
+    assert resolved.screenplay is not None
+
+
+def test_authority_fingerprint_recovers_legacy_empty_hook_certificate() -> None:
+    """历史证书（签发时 hook/cliffhanger 恒为 "" ——唯一建集写入路径
+    app/planning.py 的行为）在这次改动后必须继续正常解析，不因剔除这两个
+    字段而失效。这里额外确认 DB 值也保持在 "" 上，模拟从未被 D9 的跨集镜像
+    写回触碰过的历史行——最常见、也是唯一在这次改动之前真实出现过的状态。
+    """
+    _published_case()
+    episode = _published_episode()
+    assert episode["hook"] in (None, "")
+    assert episode["cliffhanger"] in (None, "")
+
+    resolved = resolve_current_screenplay_authority("episode-generic")
+    assert resolved.screenplay is not None
 
 
 @pytest.mark.asyncio
@@ -2535,3 +2585,218 @@ def test_narrative_shot_id_migration_is_dry_run_only() -> None:
     assert conn.execute(
         "SELECT shot_contract_json FROM shots WHERE id='shot-row-1'"
     ).fetchone()[0] == before
+
+
+# ---------------------------------------------------------------------------
+# episodes.hook / episodes.cliffhanger 写入端（跨集叙事承接）
+# ---------------------------------------------------------------------------
+
+
+def _publish_episode_with_hook(
+    *,
+    project_id: str,
+    episode_id: str,
+    episode_no: int,
+    ending_hook: str = "",
+) -> tuple[dict, dict]:
+    """Publish a minimal narrative-authority screenplay for one episode.
+
+    Mirrors the proven-working setup in
+    tests.test_narrative_review._persist_review_projection (same one-chapter
+    project scaffolding and runtime_gate evaluation shape), but parameterized
+    so several sequential episodes can share one project and be published
+    (or republished) independently. Returns (artifact, publish_result).
+    """
+    conn = db.get_conn()
+    if conn.execute(
+        "SELECT 1 FROM projects WHERE id=?", (project_id,),
+    ).fetchone() is None:
+        conn.execute(
+            "INSERT INTO projects(id,name,status,created_at) VALUES(?,?,?,?)",
+            (project_id, project_id, "created", db.now()),
+        )
+        conn.execute(
+            """INSERT INTO chapters(project_id,idx,title,content)
+               VALUES(?,1,'Chapter 1','An observable change occurs.')""",
+            (project_id,),
+        )
+    if conn.execute(
+        "SELECT 1 FROM episodes WHERE id=?", (episode_id,),
+    ).fetchone() is None:
+        conn.execute(
+            """INSERT INTO episodes(
+                   id,project_id,episode_no,source_chapters,status,created_at
+               ) VALUES(?,?,?,?,?,?)""",
+            (episode_id, project_id, episode_no, "[1]", "scripted", db.now()),
+        )
+    conn.commit()
+
+    screenplay = _screenplay()
+    screenplay.episode_no = episode_no
+    screenplay.ending_hook = ending_hook
+    if ending_hook:
+        # publish_screenplay() re-validates ending_hook against
+        # full_script_text before writing it into episodes.cliffhanger /
+        # the next episode's episodes.hook (problem 1's structural
+        # grounding gate). These tests exercise the write-back mechanics,
+        # not grounding itself, so the fixture's source text must actually
+        # contain the hook -- an empty full_script_text would otherwise get
+        # every hook cleared to "" here, same as any other ungroundable
+        # content.
+        screenplay.full_script_text = f"（正文）{ending_hook}"
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id=episode_id,
+        status="approved",
+        trust_level="T2",
+        content=screenplay.model_dump(mode="json"),
+        contract_version=NARRATIVE_CONTRACT_VERSION,
+    ))
+    fingerprint = screenplay_authority_fingerprint(
+        episode_id,
+        contract_version=NARRATIVE_CONTRACT_VERSION,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+    )
+    revision = ensure_production_revision(
+        episode_id=episode_id,
+        kind="screenplay",
+        input_fingerprint=fingerprint,
+        contract_version=NARRATIVE_CONTRACT_VERSION,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        resume=False,
+    )
+    mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=artifact["id"],
+        working_artifact_id=artifact["id"],
+    )
+    qa = evidence_repository.create_evaluation(
+        artifact["id"],
+        Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="screenplay_production_qa",
+            evaluator_version=SCREENPLAY_QA_PROFILE_VERSION,
+            status="passed",
+            hard_gate_passed=True,
+            evaluation_role="runtime_gate",
+            runtime_blocking=True,
+            score=100,
+            evidence={"authority_input_fingerprint": fingerprint},
+        ),
+    )
+    result = publish_screenplay(
+        episode_id=episode_id,
+        revision_id=revision.id,
+        artifact_id=artifact["id"],
+        artifact_hash=artifact["content_hash"],
+        evaluation_ids=[qa["id"]],
+        input_fingerprint=fingerprint,
+        contract_version=NARRATIVE_CONTRACT_VERSION,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        clear_downstream=False,
+    )
+    return artifact, result
+
+
+def _episode_row(episode_id: str) -> dict:
+    return dict(db.get_conn().execute(
+        "SELECT * FROM episodes WHERE id=?", (episode_id,),
+    ).fetchone())
+
+
+def test_publish_writes_cliffhanger_and_mirrors_next_episode_hook() -> None:
+    project_id = "project-hook-mirror"
+    _publish_episode_with_hook(
+        project_id=project_id, episode_id="ep-hook-mirror-2", episode_no=2,
+    )
+    _publish_episode_with_hook(
+        project_id=project_id,
+        episode_id="ep-hook-mirror-1",
+        episode_no=1,
+        ending_hook="神秘来电在深夜再次响起，屏幕上显示的是三年前失联的号码。",
+    )
+
+    ep1 = _episode_row("ep-hook-mirror-1")
+    ep2 = _episode_row("ep-hook-mirror-2")
+    assert ep1["cliffhanger"] == "神秘来电在深夜再次响起，屏幕上显示的是三年前失联的号码。"
+    assert ep2["hook"] == "神秘来电在深夜再次响起，屏幕上显示的是三年前失联的号码。"
+
+
+def test_publish_without_next_episode_row_does_not_raise() -> None:
+    # No episode_no=2 row exists for this project; the mirror UPDATE must be a
+    # harmless no-op (rowcount=0), not an error.
+    _publish_episode_with_hook(
+        project_id="project-hook-no-next",
+        episode_id="ep-hook-no-next-1",
+        episode_no=1,
+        ending_hook="仓库大门在身后缓缓关闭。",
+    )
+    ep1 = _episode_row("ep-hook-no-next-1")
+    assert ep1["cliffhanger"] == "仓库大门在身后缓缓关闭。"
+
+
+def test_publish_empty_ending_hook_writes_and_clears_empty_string() -> None:
+    project_id = "project-hook-empty"
+    _publish_episode_with_hook(
+        project_id=project_id, episode_id="ep-hook-empty-2", episode_no=2,
+    )
+    # First publish carries a real hook forward...
+    _publish_episode_with_hook(
+        project_id=project_id,
+        episode_id="ep-hook-empty-1",
+        episode_no=1,
+        ending_hook="他转身看向仍未熄灭的灯。",
+    )
+    assert _episode_row("ep-hook-empty-2")["hook"] == "他转身看向仍未熄灭的灯。"
+
+    # ...republishing with an empty ending_hook (model judged the story
+    # complete) must overwrite both fields back to "", not leave stale text.
+    _publish_episode_with_hook(
+        project_id=project_id,
+        episode_id="ep-hook-empty-1",
+        episode_no=1,
+        ending_hook="",
+    )
+    assert _episode_row("ep-hook-empty-1")["cliffhanger"] == ""
+    assert _episode_row("ep-hook-empty-2")["hook"] == ""
+
+
+def test_republishing_earlier_episode_does_not_cascade_into_next_episode_artifact() -> None:
+    project_id = "project-no-cascade"
+    # EP6's row must exist before EP5 publishes, so EP5's mirror-write has a
+    # real target row (mirroring the production order: EP5 publishes, EP6's
+    # own screenplay/storyboard get produced afterward using EP6.hook).
+    artifact6, _ = _publish_episode_with_hook(
+        project_id=project_id,
+        episode_id="ep-no-cascade-6",
+        episode_no=6,
+        ending_hook="",
+    )
+    artifact5_a, _ = _publish_episode_with_hook(
+        project_id=project_id,
+        episode_id="ep-no-cascade-5",
+        episode_no=5,
+        # Real prose, not a bare "A": a single character is too short for the
+        # bigram grounding check (app.validators.ending_hook_is_grounded) to
+        # ever match a longer haystack, which would trivially clear it back
+        # to "" here regardless of full_script_text containing it verbatim.
+        ending_hook="灯还亮着，走廊尽头传来脚步声。",
+    )
+    ep6_before = _episode_row("ep-no-cascade-6")
+    assert ep6_before["hook"] == "灯还亮着，走廊尽头传来脚步声。"
+    assert ep6_before["screenplay_artifact_id"] == artifact6["id"]
+
+    artifact5_b, _ = _publish_episode_with_hook(
+        project_id=project_id,
+        episode_id="ep-no-cascade-5",
+        episode_no=5,
+        ending_hook="门锁忽然从外面转动，屋里的人瞬间屏住呼吸。",
+    )
+    assert artifact5_b["id"] != artifact5_a["id"]
+
+    ep6_after = _episode_row("ep-no-cascade-6")
+    assert ep6_after["hook"] == "门锁忽然从外面转动，屋里的人瞬间屏住呼吸。"
+    assert ep6_after["screenplay_json"] == ep6_before["screenplay_json"]
+    assert ep6_after["screenplay_artifact_id"] == ep6_before["screenplay_artifact_id"]
+    assert ep6_after["screenplay_artifact_id"] == artifact6["id"]

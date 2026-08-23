@@ -71,7 +71,7 @@ def _boolean(label: str, default: str, *, experimental: bool = False) -> dict[st
 SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "text_generation_concurrency": _number(
         "文本模型真实请求并发",
-        "10",
+        "6",
         1,
         16,
         unit="请求",
@@ -84,9 +84,13 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "screenplay_scene_shards_enabled": _boolean("启用剧本场次分片", "true"),
     "screenplay_targeted_identity_enabled": _boolean("启用定向人物解析", "true"),
     "screenplay_targeted_blueprint_review_enabled": _boolean("启用蓝图风险审稿", "true"),
-    # 场次分片彼此独立（各自有缓存与 fail-fast 作用域），真实 provider 负载已由
-    # text_generation_concurrency 这一进程级闸门兜底，所以单集这一层不需要再压到 2。
-    "screenplay_scene_shard_parallelism": _number("单集场次分片并发", "4", 1, 8, unit="请求"),
+    # RCA (2026-08-23)：4×2(reviewer)=8 路并发几乎顶满 text_generation_concurrency
+    # 闸门，单集场次分片阶段自己把并发推进上游"高峰丢弃"区间——317 条
+    # stream_cut_before_done 里 299 条是同一句 22 字罐头拒答；级联取消（分片
+    # 失败旧代码会连累全集其余分片）又把浪费的时间放大到全部损失的 79.5%。
+    # 级联本身已在代码里收窄为分片粒度隔离，这里把默认并发压回历史保守值，
+    # 为其他阶段留出闸门余量，不再依赖"分片彼此独立"这条已被证伪的假设。
+    "screenplay_scene_shard_parallelism": _number("单集场次分片并发", "2", 1, 8, unit="请求"),
     "screenplay_scene_shard_max_units": _number("场次分片单位上限", "24", 8, 64, unit="units"),
     "screenplay_scene_shard_max_output_chars": _number("场次分片输出字符上限", "12000", 3000, 30000, unit="字符"),
     "screenplay_scene_semantic_review_output_reserve_percent": _number(

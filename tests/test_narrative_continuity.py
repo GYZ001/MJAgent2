@@ -34,6 +34,7 @@ from app.schemas import (
     Shot,
     ShotContribution,
     Storyboard,
+    StoryEvent,
     WithheldProposition,
 )
 
@@ -1489,3 +1490,211 @@ def test_ai_human_calibration_requires_enough_nonconstant_paired_samples() -> No
         },
     )
     assert metrics["blind_ai_human_comprehension_correlation"] == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# episodes.hook / episodes.cliffhanger 承接文案（app.stages._first_shot_rule
+# 是逐镜层规则 6/7 的第二套实现，见 app.stages 顶部同名规则）与溯源校验
+# ---------------------------------------------------------------------------
+
+
+def test_first_episode_shot_rule_uses_special_branch_and_stays_blank() -> None:
+    from app.stages import _first_shot_rule
+
+    rule = _first_shot_rule(
+        {"episode_no": 1, "hook": "", "cliffhanger": ""},
+        narrative_authority=False,
+    )
+    assert "【第一集第一镜=全片开场建场镜" in rule
+    assert "本集开场无需承接钩子" in rule
+    # Empty hook must never be string-interpolated into a "承接上一集结尾：" style
+    # instruction; EP1 has no previous episode so this must read as a plain
+    # statement, not a broken reference to a blank value.
+    assert "承接上一集真实结尾：" not in rule
+
+
+def test_second_episode_shot_rule_carries_prev_ending_hook_not_old_ban() -> None:
+    from app.stages import _first_shot_rule
+
+    hook = "神秘来电在深夜再次响起，屏幕上显示的是三年前失联的号码。"
+    rule = _first_shot_rule(
+        {"episode_no": 2, "hook": hook, "cliffhanger": ""},
+        narrative_authority=False,
+    )
+    assert f"第 1 个镜头必须承接上一集真实结尾：{hook}" in rule
+    assert f"不得凭空续写 {hook} 之外的新剧情" in rule
+    # The old field-empty-implies-forbidden phrasing must be gone from this
+    # branch now that hook is non-empty.
+    assert "禁止发明额外开场钩子" not in rule
+    assert "禁止因 hook 为空发明额外钩子" not in rule
+
+
+def test_empty_hook_and_cliffhanger_never_interpolate_blank_value() -> None:
+    from app.stages import _first_shot_rule
+
+    rule = _first_shot_rule(
+        {"episode_no": 3, "hook": "", "cliffhanger": ""},
+        narrative_authority=False,
+    )
+    assert "承接上一集真实结尾：" not in rule
+    assert "本集真实尾钩：" not in rule
+    assert "（空）" not in rule
+    assert "第 1 个镜头按剧本真实开场自然进入" in rule
+    assert "最后 1 个镜头只收束到剧本/原文已有状态" in rule
+    assert "不得发明下一集钩子" in rule
+
+
+def test_ending_hook_is_grounded_rejects_fabricated_content() -> None:
+    from app.validators import ending_hook_is_grounded
+
+    source = (
+        "李明推开吱呀作响的木门，看见桌上摆着一封没有署名的信，"
+        "信封已经拆开，里面的信纸却是空的。"
+    )
+    grounded = "桌上那封没有署名的信，信封已经拆开，信纸却是空的。"
+    fabricated = "外星飞船在城市上空缓缓降落，全城陷入一片死寂。"
+
+    assert ending_hook_is_grounded("", source) is True
+    assert ending_hook_is_grounded("   ", source) is True
+    assert ending_hook_is_grounded(grounded, source) is True
+    assert ending_hook_is_grounded(fabricated, source) is False
+
+
+_ENDING_HOOK_TEST_SCRIPT = (
+    "第一场 内景 李明家客厅 夜\n"
+    "李明推开木门，看见王芳正端着一杯热茶站在窗边。她转过身，眼神里带着几分犹豫。\n"
+    "\"你回来了。\"王芳把热茶放在桌上，声音有些发抖。\n"
+    "李明没有说话，只是静静地看着她，心里升起一种说不出的沉重。\n"
+    "窗外下起了小雨，屋子里的气氛也跟着凝固起来。\n"
+    "王芳低下头，说起了当年离开家乡的往事，那段日子里她一个人扛下了所有债务，"
+    "还要照顾年迈的母亲。\n"
+    "李明听着，手指无意识地摩挲着木门的边缘，仿佛想抓住什么。\n"
+    "\"对不起，\"王芳终于说出这句话，眼泪落了下来。\n"
+    "李明伸手，轻轻握住她的手，两人在沉默中达成了某种和解。\n\n"
+    "第二场 内景 医院走廊 日\n"
+    "李明的母亲躺在病床上，脸色苍白。医生说情况不容乐观，需要尽快手术。\n"
+    "王芳赶到医院，看到李明疲惫的样子，心疼地递给他一杯热茶。\n"
+    "\"你先歇一会儿，\"她说，\"剩下的交给我。\"\n"
+    "李明摇摇头，说这是他自己的责任，不能全推给王芳。\n"
+    "两人在走廊里争执了几句，最后还是决定一起面对。\n\n"
+    "第三场 内景 老宅厨房 黄昏\n"
+    "王芳在厨房里忙碌，锅里炖着汤。她的手机响了，是一个陌生号码。\n"
+    "她接起电话，对方沉默了几秒才开口，说了一个让她脸色骤变的消息。\n"
+    "王芳挂了电话，靠在灶台边，久久没有说话。\n"
+    "李明推开厨房的木门，看到她的表情不对，连忙问怎么了。\n"
+    "王芳摇摇头，说没事，转身继续炖汤，但眼神里藏着不安。\n"
+)
+
+# 独立 code review 实测的四条绕过样本：全部复用正文真实词汇（李明/王芳/木门/热茶/
+# 窗边等），拼出正文里从未发生的事件；对纯 2-gram 覆盖率门禁（旧版
+# ending_hook_is_grounded，无 events 参数）逐一实测覆盖率 0.40~0.54，全部高于门槛
+# 0.2，即绕过成功。这里复用同一批语料验证新的结构化校验能否拦住它们。
+_REVIEWER_BYPASS_FABRICATIONS = [
+    "李明看着王芳，忽然想起多年前的一段往事，心里涌起一阵说不清的烦躁。",
+    "窗外的天色渐渐暗了下来，李明却在这时收到了一条神秘的短信。",
+    "王芳端着热茶走进厨房，却发现李明早已不知去向。",
+    "他转身走向窗边，望着楼下车水马龙的街道，忽然做出一个惊人的决定。",
+]
+
+_REAL_PARAPHRASED_HOOKS = [
+    "王芳接到一个神秘电话，脸色骤变，久久说不出话来。",
+    "医生说李明母亲手术情况不容乐观，李明与王芳争执后决定一起面对。",
+    "王芳终于说出当年离乡扛债的往事，李明握住她的手，两人和解。",
+]
+
+
+def _ending_hook_test_events() -> list[StoryEvent]:
+    return [
+        StoryEvent(event_id="E1", trigger="李明推开木门",
+                   visible_change="王芳端着热茶站在窗边", state_out="两人相对无言",
+                   source_fact="李明回家看见王芳"),
+        StoryEvent(event_id="E2", trigger="王芳提起往事",
+                   visible_change="王芳说出当年独自扛债的经历", state_out="李明沉默摩挲木门",
+                   source_fact="王芳讲述离乡扛债往事"),
+        StoryEvent(event_id="E3", trigger="王芳道歉", visible_change="王芳落泪并道歉",
+                   state_out="李明握住王芳的手达成和解", source_fact="王芳道歉两人和解"),
+        StoryEvent(event_id="E4", trigger="医生诊断",
+                   visible_change="李明母亲手术情况不容乐观",
+                   state_out="李明王芳在走廊争执后决定共同面对",
+                   source_fact="母亲病情严重需要手术"),
+        StoryEvent(event_id="E5", trigger="陌生来电",
+                   visible_change="王芳接到陌生号码来电脸色骤变",
+                   state_out="王芳挂断电话久久不语", source_fact="王芳接到神秘电话"),
+    ]
+
+
+def test_ending_hook_is_grounded_bigram_floor_alone_lets_vocabulary_reuse_through() -> None:
+    """不传 events（旧签名/早期生成阶段）时保持原有行为——记录已证实的绕过面，
+    证明这一层单独不足以防编造，新增的结构化层（见下一条测试）才是真正的门禁。"""
+    from app.validators import ending_hook_is_grounded
+
+    bypassed = [
+        s for s in _REVIEWER_BYPASS_FABRICATIONS
+        if ending_hook_is_grounded(s, _ENDING_HOOK_TEST_SCRIPT) is True
+    ]
+    assert bypassed, "预期纯 2-gram 覆盖率门槛对复用词汇的编造样本至少部分失效"
+
+
+def test_ending_hook_is_grounded_with_events_rejects_reviewer_bypass_fabrications() -> None:
+    """结构化校验：传入 events 后，四条已证实的绕过样本必须全部被拦下。"""
+    from app.validators import ending_hook_is_grounded
+
+    events = _ending_hook_test_events()
+    for fabricated in _REVIEWER_BYPASS_FABRICATIONS:
+        assert ending_hook_is_grounded(
+            fabricated, _ENDING_HOOK_TEST_SCRIPT, events=events,
+        ) is False, f"编造钩子未被拦下：{fabricated}"
+
+
+def test_ending_hook_is_grounded_with_events_accepts_real_paraphrased_hooks() -> None:
+    """反向测试：真实、来自正文事件的钩子（哪怕高度改写）不能被结构化层误杀。"""
+    from app.validators import ending_hook_is_grounded
+
+    events = _ending_hook_test_events()
+    for grounded in _REAL_PARAPHRASED_HOOKS:
+        assert ending_hook_is_grounded(
+            grounded, _ENDING_HOOK_TEST_SCRIPT, events=events,
+        ) is True, f"真实钩子被误判为编造：{grounded}"
+
+
+def test_ending_hook_is_grounded_rejects_hook_only_matching_unapproved_addition() -> None:
+    """钩子词汇只对得上一条模型自报的未授权改编新增事件时，不能算已溯源。"""
+    from app.validators import ending_hook_is_grounded
+
+    unauthorized_events = [
+        StoryEvent(
+            event_id="E9", trigger="李明失踪", visible_change="李明忽然不知去向",
+            state_out="王芳独自在厨房", source_fact="剧本原文暗示",
+            adaptation_addition=True, approved=False,
+        ),
+    ]
+    assert ending_hook_is_grounded(
+        "王芳端着热茶走进厨房，却发现李明早已不知去向。",
+        _ENDING_HOOK_TEST_SCRIPT,
+        events=unauthorized_events,
+    ) is False
+
+
+def test_adaptation_hook_errors_alone_misses_unmarked_ending_hook_fabrication() -> None:
+    """独立 review 的调研问题：adaptation_hook_errors 现状能否单独拦住编造钩子？
+
+    结论（本测试锁定）：不能。它只在模型*自报*某条事件为
+    adaptation_addition 且未 approved 时才报错；对本任务要防的失败模式——
+    模型直接写一句编造的 ending_hook 散文，压根不创建任何 events 记录——
+    events 为空，unauthorized 列表天然为空，函数返回 []。这正是为什么防编造
+    改用 ending_hook_is_grounded(events=...) 结构化比对，而不是单独依赖这个函数。
+    """
+    from app.continuity import adaptation_hook_errors
+
+    fabricated_script = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text=_ENDING_HOOK_TEST_SCRIPT,
+        ending_hook=_REVIEWER_BYPASS_FABRICATIONS[0],
+        events=[],
+    )
+    assert adaptation_hook_errors(
+        fabricated_script, {"cliffhanger": "", "hook": ""},
+    ) == []
+    assert adaptation_hook_errors(
+        fabricated_script, {"cliffhanger": "旧钩子", "hook": "旧钩子"},
+    ) == []

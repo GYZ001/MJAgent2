@@ -428,10 +428,27 @@ def screenplay_authority_material(
     # The two dialogue fields are no longer production inputs. Keep their
     # historical values in v1 authority material so already-issued completion
     # certificates remain verifiable after the feature removal.
+    #
+    # hook/cliffhanger are normalized to a fixed "" here rather than read from
+    # the episode row. docs/PROMPT_SPEC.md marks both as editable display
+    # metadata that must never substitute for source chapters as screenplay
+    # or storyboard evidence, so they were never meant to be authority
+    # material. Since app/production/publish.py now mirrors this episode's
+    # resolved ending_hook into episodes.cliffhanger (and the previous
+    # episode's ending_hook into episodes.hook) inside the same transaction
+    # that publishes the screenplay, the DB value can legitimately change
+    # after this certificate is issued -- and did so unconditionally through
+    # every already-issued certificate's history, since the only write path
+    # before that mirroring existed (app/planning.py's episode INSERT) always
+    # set both columns to "". Fixing them here reproduces the exact byte-for-
+    # byte material every historical certificate was already computed from,
+    # so this is 100% backward compatible, and it removes the field from the
+    # fingerprint entirely -- no future write path can smuggle unverified
+    # content into a resolved authority fingerprint through it.
     constraints = {
         "title": _episode_value(episode, "title", "") or "",
-        "hook": _episode_value(episode, "hook", "") or "",
-        "cliffhanger": _episode_value(episode, "cliffhanger", "") or "",
+        "hook": "",
+        "cliffhanger": "",
         "synopsis": _episode_value(episode, "synopsis", "") or "",
         "target_duration_s": target_duration_s,
         "required_dialogues": _decode_list(

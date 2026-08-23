@@ -15,6 +15,7 @@ from app.production.metrics import record_certificate_issued
 from app.production.patch import load_screenplay_from_artifact
 from app.production.revision import get_production_revision, set_published_artifact
 from app.production.structured_issues import blocker_count, must_fix_count
+from app.validators import ending_hook_is_grounded
 
 
 def _screenplay_qa_authority_evidence(
@@ -252,7 +253,8 @@ def publish_screenplay(
         )
 
         previous = conn.execute(
-            "SELECT screenplay_artifact_id FROM episodes WHERE id=?", (episode_id,)
+            "SELECT screenplay_artifact_id,project_id,episode_no FROM episodes WHERE id=?",
+            (episode_id,),
         ).fetchone()
         if previous is None:
             raise ValueError("待发布剧集不存在")
@@ -344,6 +346,25 @@ def publish_screenplay(
         )
         if episode_cursor.rowcount != 1:
             raise ValueError("剧本发布 episode 更新发生冲突")
+        # 跨集叙事承接：把本集真实结尾钩子写回 episodes.cliffhanger，并
+        # 镜像写入下一集 episodes.hook，供 prev_ending 查询与 prompt 承接文案使用。
+        # ending_hook 已在生成/校验链路里经过溯源判定（编造内容会被清空为
+        # ""）；此处仍在写入权威锚点前用同一判据复核一次——不同调用路径可能
+        # 携带未经这条门禁清洗过的 legacy Artifact，复核不通过就按空钩子处理，
+        # 绝不把可疑内容写进 episodes.cliffhanger / 下一集 episodes.hook。
+        ending_hook_value = (script.ending_hook or "").strip()
+        if ending_hook_value and not ending_hook_is_grounded(
+            ending_hook_value, script.full_script_text, events=script.events,
+        ):
+            ending_hook_value = ""
+        conn.execute(
+            "UPDATE episodes SET cliffhanger=? WHERE id=?",
+            (ending_hook_value, episode_id),
+        )
+        conn.execute(
+            "UPDATE episodes SET hook=? WHERE project_id=? AND episode_no=?",
+            (ending_hook_value, previous["project_id"], previous["episode_no"] + 1),
+        )
         set_published_artifact(
             revision_id,
             artifact_id,

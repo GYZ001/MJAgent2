@@ -1999,6 +1999,76 @@ def _claim_clearly_absent(atom: str, haystack: str) -> bool:
     return True
 
 
+# ending_hook 是叙事摘要式的一句话陈述（"下一步会发生什么"），不是逐字引用，天然比
+# 逐字台词/事实陈述的 2-gram 命中率低。参照 COVERS_ATOM_ABSENT_COVERAGE=0.25 同量级，
+# 但取更宽松的下限：目标只是拦住"正文完全没有对应内容、纯属编造"的钩子，不能把
+# 真实但高度改写/概括的钩子误判为编造进而清空。
+#
+# 这条 2-gram 覆盖率本身**不足以**独立当作防编造门禁：字符 2-gram 是无序集合，
+# "复用真实词汇编造情节"（沿用剧本里出现过的人名/常用词，拼出一句正文里从未
+# 发生的事）在几百到几千字的整篇正文里几乎总能凑出 >0.4 的覆盖率——已用真实
+# 案例验证。因此单独达标只作为最低门槛（挡住完全无关词汇的硬编，如"外星飞船
+# 降落"），不再是唯一判据；见下方 events 结构化校验。
+ENDING_HOOK_GROUNDING_COVERAGE = 0.2
+
+# 结构化交叉校验的覆盖率门槛：与 full_script_text 的整篇正文不同，这里的比对
+# 对象是单条 StoryEvent 的精炼字段（trigger/visible_change/state_out/
+# source_fact），文本量小两个数量级，"复用词汇但内容无关"很难再靠随机碰撞
+# 凑出覆盖率——真正编造的钩子对不上任何一条真实事件。取值复用本文件里
+# KEY_POINT_COVERAGE（0.34）：同属"概括性描述 vs 结构化条目"的比对量级。
+ENDING_HOOK_EVENT_COVERAGE = KEY_POINT_COVERAGE
+
+
+def _ending_hook_event_text(event: StoryEvent) -> str:
+    """StoryEvent 里跟"发生了什么"直接相关的精炼字段拼接，供钩子溯源比对。"""
+    return "".join([
+        event.trigger or "",
+        event.visible_change or "",
+        event.state_out or "",
+        event.source_fact or "",
+    ])
+
+
+def ending_hook_is_grounded(
+    ending_hook: str,
+    full_script_text: str,
+    events: list[StoryEvent] | None = None,
+) -> bool:
+    """ending_hook 是否确有本集正文内容支持；空值本身合法，直接放行。
+
+    两层判据：
+    1）字符 2-gram 覆盖率门槛（宽松，只挡完全无关词汇的硬编）；
+    2）若提供了 events（剧情事件台账），额外要求 ending_hook 至少能对应上
+       其中一条「有来源证据、且未被标记为未授权改编新增」的事件——结构化
+       溯源，而不是跟整篇正文比词汇重叠。拿不出这样一条事件时，即便整篇
+       正文的词汇覆盖率达标，也判定为编造。
+
+    events 为空（未传入，例如尚未编译出事件台账的早期生成阶段）时只应用
+    第 1 层，保持既有行为不变。
+    """
+    text = (ending_hook or "").strip()
+    if not text:
+        return True
+    if _bigram_coverage(text, full_script_text or "") < ENDING_HOOK_GROUNDING_COVERAGE:
+        return False
+    if not events:
+        return True
+    for event in events:
+        haystack = _ending_hook_event_text(event)
+        if not haystack:
+            continue
+        if not ((event.source_fact or "").strip() or (event.source_span or "").strip()):
+            continue
+        if _bigram_coverage(text, haystack) < ENDING_HOOK_EVENT_COVERAGE:
+            continue
+        if event.adaptation_addition and not event.approved:
+            # 最匹配的事件是模型自报的未授权改编新增：这恰恰证明 ending_hook
+            # 复述的是一条尚未被批准的发明内容，不能当作已溯源。
+            continue
+        return True
+    return False
+
+
 def normalize_screenplay_ledgers(script: EpisodeScreenplay) -> EpisodeScreenplay:
     """Renderability：清洗空壳 events/ledger，必要时从 plot_spine 确定性回填。
 
@@ -2542,7 +2612,8 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
                         require_dialogue_chains: bool = False,
                         validate_narrative: bool = True,
                         require_source_coverage: bool = False,
-                        functional_identity_names: set[str] | None = None) -> list[str]:
+                        functional_identity_names: set[str] | None = None,
+                        episode: dict | None = None) -> list[str]:
     """纯 QA：只读取候选并返回问题，不补字段、不覆盖投影、不修改输入。"""
     errors: list[str] = []
     narrative_authority = script.narrative_plan is not None
@@ -3088,7 +3159,7 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
                 f"full_script_text 又写回了 drop_list 中的内容：{shown}；"
                 "已声明不拍的支线/气氛戏不得出现在正文"
             )
-    errors.extend(adaptation_hook_errors(script))
+    errors.extend(adaptation_hook_errors(script, episode))
     return list(dict.fromkeys(errors))
 
 def _screenplay_sound_stats(script: EpisodeScreenplay) -> dict[str, int]:

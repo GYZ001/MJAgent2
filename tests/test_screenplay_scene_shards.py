@@ -4344,9 +4344,20 @@ def _contracts(
     )
 
 
-def test_scene_shard_batch_failure_cancels_inflight_sibling(
+def test_scene_shard_ordinary_failure_does_not_cancel_inflight_sibling(
     monkeypatch,
 ) -> None:
+    """A shard's own content/provider failure must stay shard-local.
+
+    RCA: batch_abort used to be one asyncio.Event shared by the whole
+    episode, so any one shard's ordinary failure (including the canned
+    "该问题不符合安全合规要求" rejection the upstream returns under
+    concurrent load) cancelled every other shard's in-flight work --
+    measured at 97.2% of cancellations landing on scene shards, 99.4% of
+    those with zero received chars (a sibling caught mid-flight,
+    contributing nothing).  batch_abort is per-shard now; only an
+    episode-owner change is allowed to cascade (see the next test).
+    """
     blueprint = _blueprint(split_domain=True)
     plans = build_screenplay_scene_shard_plans(
         blueprint,
@@ -4356,12 +4367,10 @@ def test_scene_shard_batch_failure_cancels_inflight_sibling(
     contracts = _contracts(plans, blueprint)
     assert len(plans) == 2
     sibling_started = asyncio.Event()
-    sibling_cancelled = asyncio.Event()
     provider_calls: list[str] = []
-    review_calls: list[str] = []
     progress_rows: list[list[dict]] = []
-    # A delivered failure, so the batch-cancellation semantics under test are
-    # not entangled with the bounded retry for answers never delivered.
+    # A delivered failure, so the isolation semantics under test are not
+    # entangled with the bounded retry for answers never delivered.
     original_error = scene_shards_module.hiagent.ProviderError(
         "injected shard provider failure",
         retryable=True,
@@ -4388,15 +4397,7 @@ def test_scene_shard_batch_failure_cancels_inflight_sibling(
             await sibling_started.wait()
             raise original_error
         sibling_started.set()
-        try:
-            await asyncio.Future()
-        except asyncio.CancelledError:
-            sibling_cancelled.set()
-            raise
-
-    async def forbidden_review(*, shard_id: str, **_kwargs):
-        review_calls.append(shard_id)
-        raise AssertionError("failed batch must not enter semantic review")
+        return _creative_shard(plans[1], blueprint)
 
     monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
     monkeypatch.setattr(
@@ -4404,15 +4405,10 @@ def test_scene_shard_batch_failure_cancels_inflight_sibling(
         "chat_structured",
         fake_structured,
     )
-    monkeypatch.setattr(
-        scene_shards_module,
-        "_semantic_review_scene_shard_draft",
-        forbidden_review,
-    )
 
     with pytest.raises(scene_shards_module.hiagent.ProviderError) as caught:
         asyncio.run(generate_screenplay_scene_shards(
-            episode={"id": "ep-shard-fail-fast", "episode_no": 1},
+            episode={"id": "ep-shard-isolated-failure", "episode_no": 1},
             source_text=SOURCE,
             blueprint=blueprint,
             identity_registry=[],
@@ -4423,21 +4419,100 @@ def test_scene_shard_batch_failure_cancels_inflight_sibling(
         ))
 
     assert caught.value is original_error
-    assert sibling_cancelled.is_set()
     assert provider_calls == [plan.shard_id for plan in plans]
-    assert review_calls == []
     latest_rows = {
         row["shard_id"]: row for row in progress_rows[-1]
     }
     assert latest_rows[plans[0].shard_id]["status"] == "failed"
     assert latest_rows[plans[0].shard_id]["error_type"] == "ProviderError"
-    assert latest_rows[plans[1].shard_id]["status"] == "running"
-    assert "error_type" not in latest_rows[plans[1].shard_id]
+    # The sibling was NOT cancelled: it ran to completion and validated even
+    # though the batch as a whole still raises for shard 0's failure.
+    assert latest_rows[plans[1].shard_id]["status"] == "validated"
 
 
-def test_scene_shard_failure_fences_semaphore_waiter_before_provider(
+def test_scene_shard_ownership_loss_still_cancels_other_shards(
     monkeypatch,
 ) -> None:
+    """The one failure that must still cascade across shards: the episode's
+    active_screenplay_run_id changed underneath this run (a newer run
+    superseded it -- see ``_assert_episode_owner``).  Continuing the other
+    shard would only burn a provider call whose result could never be
+    persisted, so ``ScreenplaySceneShardOwnershipLost`` is the one exception
+    type the top-level ``_gather_fail_fast(cascades=...)`` still cancels the
+    whole batch for.  Contrast with the previous test, where an ordinary
+    failure left the sibling running to its own completion.
+    """
+    blueprint = _blueprint(split_domain=True)
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )
+    contracts = _contracts(plans, blueprint)
+    assert len(plans) == 2
+    sibling_started = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+    provider_calls: list[str] = []
+
+    def fixed_settings(
+        key: str,
+        default: int,
+        *,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        value = 2 if key == "screenplay_scene_shard_parallelism" else default
+        return max(minimum, min(maximum, value))
+
+    async def fake_structured(*_args, **kwargs):
+        shard_id = str(kwargs["call_meta"]["shard_id"])
+        provider_calls.append(shard_id)
+        if shard_id == plans[0].shard_id:
+            await sibling_started.wait()
+            raise scene_shards_module.ScreenplaySceneShardOwnershipLost(
+                "场次分片返回时剧集 owner 已变化，旧 worker 不得持久化结果"
+            )
+        sibling_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+
+    monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
+    monkeypatch.setattr(
+        scene_shards_module.model_gateway,
+        "chat_structured",
+        fake_structured,
+    )
+
+    with pytest.raises(scene_shards_module.ScreenplaySceneShardOwnershipLost):
+        asyncio.run(generate_screenplay_scene_shards(
+            episode={"id": "ep-shard-owner-lost", "episode_no": 1},
+            source_text=SOURCE,
+            blueprint=blueprint,
+            identity_registry=[],
+            identities=_identities(),
+            plans=plans,
+            scene_input_contracts=contracts,
+        ))
+
+    assert sibling_cancelled.is_set()
+    assert provider_calls == [plan.shard_id for plan in plans]
+
+
+def test_scene_shard_ordinary_failure_lets_queued_semaphore_waiter_proceed(
+    monkeypatch,
+) -> None:
+    """A shard queued behind the local per-episode semaphore must still get
+    its own turn.
+
+    It used to be permanently fenced: the (formerly episode-wide)
+    batch_abort was checked right after acquiring the semaphore, so a shard
+    that had not even started yet was blocked from ever attempting its own
+    generation once any sibling failed.  batch_abort is per-shard now, so
+    the queued shard proceeds normally once the semaphore frees up.
+    """
     blueprint = _blueprint(split_domain=True)
     plans = build_screenplay_scene_shard_plans(
         blueprint,
@@ -4446,12 +4521,11 @@ def test_scene_shard_failure_fences_semaphore_waiter_before_provider(
     )
     contracts = _contracts(plans, blueprint)
     provider_calls: list[str] = []
-    review_calls: list[str] = []
     progress_rows: list[list[dict]] = []
-    # A delivered failure, so the queue-fencing semantics under test are not
-    # entangled with the bounded retry for answers never delivered.
+    # A delivered failure, so the isolation semantics under test are not
+    # entangled with the bounded retry for undelivered answers.
     original_error = scene_shards_module.hiagent.ProviderError(
-        "injected queued-shard fence failure",
+        "injected queued-shard failure",
         retryable=True,
         failure_kind="request_outcome_unknown",
         delivery_state="unknown",
@@ -4469,29 +4543,23 @@ def test_scene_shard_failure_fences_semaphore_waiter_before_provider(
         value = 1 if key == "screenplay_scene_shard_parallelism" else default
         return max(minimum, min(maximum, value))
 
-    async def failing_structured(*_args, **kwargs):
-        provider_calls.append(str(kwargs["call_meta"]["shard_id"]))
-        raise original_error
-
-    async def forbidden_review(*, shard_id: str, **_kwargs):
-        review_calls.append(shard_id)
-        raise AssertionError("failed batch must not enter semantic review")
+    async def structured(*_args, **kwargs):
+        shard_id = str(kwargs["call_meta"]["shard_id"])
+        provider_calls.append(shard_id)
+        if shard_id == plans[0].shard_id:
+            raise original_error
+        return _creative_shard(plans[1], blueprint)
 
     monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
     monkeypatch.setattr(
         scene_shards_module.model_gateway,
         "chat_structured",
-        failing_structured,
-    )
-    monkeypatch.setattr(
-        scene_shards_module,
-        "_semantic_review_scene_shard_draft",
-        forbidden_review,
+        structured,
     )
 
     with pytest.raises(scene_shards_module.hiagent.ProviderError) as caught:
         asyncio.run(generate_screenplay_scene_shards(
-            episode={"id": "ep-shard-queued-fence", "episode_no": 1},
+            episode={"id": "ep-shard-queued-proceeds", "episode_no": 1},
             source_text=SOURCE,
             blueprint=blueprint,
             identity_registry=[],
@@ -4502,21 +4570,26 @@ def test_scene_shard_failure_fences_semaphore_waiter_before_provider(
         ))
 
     assert caught.value is original_error
-    assert provider_calls == [plans[0].shard_id]
-    assert review_calls == []
+    assert provider_calls == [plan.shard_id for plan in plans]
     latest_rows = {
         row["shard_id"]: row for row in progress_rows[-1]
     }
     assert latest_rows[plans[0].shard_id]["status"] == "failed"
-    assert latest_rows[plans[1].shard_id]["status"] == "pending"
-    assert "error_type" not in latest_rows[plans[1].shard_id]
+    assert latest_rows[plans[1].shard_id]["status"] == "validated"
 
 
 @pytest.mark.parametrize("failure_kind", ["provider", "local_validation"])
-def test_scene_shard_structured_lease_fences_real_provider_waiter(
+def test_scene_shard_ordinary_failure_lets_queued_real_provider_waiter_proceed(
     monkeypatch,
     failure_kind: str,
 ) -> None:
+    """A peer queued on the *global* real-provider gate (not just the local
+    per-episode semaphore) must also get its turn once the failing shard
+    releases the slot.  Fencing that queued peer was the same batch_abort
+    bug one layer deeper: the provider-slot lease is re-entrant and re-checks
+    its abort_predicate on every acquire, and that predicate used to be
+    ``(episode-wide batch_abort).is_set`` for every shard.
+    """
     blueprint = _blueprint(split_domain=True)
     plans = build_screenplay_scene_shard_plans(
         blueprint,
@@ -4525,6 +4598,7 @@ def test_scene_shard_structured_lease_fences_real_provider_waiter(
     )
     contracts = _contracts(plans, blueprint)
     provider_calls: list[str] = []
+    progress_rows: list[list[dict]] = []
     original_error = scene_shards_module.hiagent.ProviderError(
         "63178 output truncated",
         failure_kind="output_truncated",
@@ -4558,13 +4632,16 @@ def test_scene_shard_structured_lease_fences_real_provider_waiter(
 
     async def fake_chat(*_args, **kwargs):
         meta = kwargs["call_meta"]
-        provider_calls.append(str(meta["shard_id"]))
+        shard_id = str(meta["shard_id"])
+        provider_calls.append(shard_id)
         assert meta["response_format_required"] is True
         assert kwargs["response_format"]["type"] == "json_schema"
-        await asyncio.wait_for(wait_for_queued_peer(), timeout=1)
-        if failure_kind == "provider":
-            raise original_error
-        return ScreenplaySceneShardCreativeIR(slots={}).model_dump_json()
+        if shard_id == plans[0].shard_id:
+            await asyncio.wait_for(wait_for_queued_peer(), timeout=1)
+            if failure_kind == "provider":
+                raise original_error
+            return ScreenplaySceneShardCreativeIR(slots={}).model_dump_json()
+        return _creative_shard(plans[1], blueprint).model_dump_json()
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
     expected_error = (
@@ -4584,11 +4661,17 @@ def test_scene_shard_structured_lease_fences_real_provider_waiter(
             identities=_identities(),
             plans=plans,
             scene_input_contracts=contracts,
+            progress=lambda rows: progress_rows.append(deepcopy(rows)),
         ))
 
     if failure_kind == "provider":
         assert caught.value is original_error
-    assert provider_calls == [plans[0].shard_id]
+    assert provider_calls == [plan.shard_id for plan in plans]
+    latest_rows = {
+        row["shard_id"]: row for row in progress_rows[-1]
+    }
+    assert latest_rows[plans[0].shard_id]["status"] == "failed"
+    assert latest_rows[plans[1].shard_id]["status"] == "validated"
 
 
 @pytest.mark.parametrize("failure_kind", ["provider", "local_validation"])
@@ -4673,9 +4756,17 @@ def test_semantic_repair_gate_fences_queued_next_scene_ledger(
     assert aborted is True
 
 
-def test_scene_shard_failure_cancels_peer_before_structured_retry(
+def test_scene_shard_ordinary_failure_does_not_fence_peer_structured_retry(
     monkeypatch,
 ) -> None:
+    """A sibling's own format-retry -- a *nested*, re-entrant provider-slot
+    lease -- must keep running after another shard's ordinary failure.
+
+    It used to be fenced: the re-entrant lease re-checks the (formerly
+    shared) batch_abort on every nested re-entry, so a sibling mid-retry got
+    cancelled the instant an unrelated shard failed.  batch_abort is
+    per-shard now, so the sibling's own retry is unaffected.
+    """
     blueprint = _blueprint(split_domain=True)
     plans = build_screenplay_scene_shard_plans(
         blueprint,
@@ -4683,12 +4774,10 @@ def test_scene_shard_failure_cancels_peer_before_structured_retry(
         identity_registry_hash="identity-hash",
     )
     contracts = _contracts(plans, blueprint)
-    sibling_started = asyncio.Event()
-    release_sibling = asyncio.Event()
-    sibling_cancelled = asyncio.Event()
     sibling_attempts: list[int] = []
-    # A delivered failure, so the cancellation semantics under test are
-    # not entangled with the bounded retry for undelivered answers.
+    progress_rows: list[list[dict]] = []
+    # A delivered failure, so the isolation semantics under test are not
+    # entangled with the bounded retry for undelivered answers.
     original_error = scene_shards_module.hiagent.ProviderError(
         "injected peer structured failure",
         retryable=True,
@@ -4712,44 +4801,46 @@ def test_scene_shard_failure_cancels_peer_before_structured_retry(
         meta = kwargs["call_meta"]
         shard_id = str(meta["shard_id"])
         if shard_id == plans[0].shard_id:
-            await sibling_started.wait()
-            release_sibling.set()
             raise original_error
         sibling_attempts.append(int(meta["format_attempt"]))
-        if len(sibling_attempts) > 1:
-            raise AssertionError(
-                "peer entered structured retry after batch failure"
-            )
-        sibling_started.set()
-        try:
-            await release_sibling.wait()
-        except asyncio.CancelledError:
-            sibling_cancelled.set()
-            raise
-        return "not valid JSON"
+        if len(sibling_attempts) == 1:
+            return "not valid JSON"
+        return _creative_shard(plans[1], blueprint).model_dump_json()
 
     monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
 
     with pytest.raises(scene_shards_module.hiagent.ProviderError) as caught:
         asyncio.run(generate_screenplay_scene_shards(
-            episode={"id": "ep-shard-structured-retry-fence", "episode_no": 1},
+            episode={
+                "id": "ep-shard-structured-retry-isolated",
+                "episode_no": 1,
+            },
             source_text=SOURCE,
             blueprint=blueprint,
             identity_registry=[],
             identities=_identities(),
             plans=plans,
             scene_input_contracts=contracts,
+            progress=lambda rows: progress_rows.append(deepcopy(rows)),
         ))
 
     assert caught.value is original_error
-    assert sibling_attempts == [0]
-    assert sibling_cancelled.is_set()
+    assert sibling_attempts == [0, 1]
+    latest_rows = {
+        row["shard_id"]: row for row in progress_rows[-1]
+    }
+    assert latest_rows[plans[1].shard_id]["status"] == "validated"
 
 
-def test_nested_reviewer_failure_cancels_other_shard_structured_retry(
+def test_scene_shard_reviewer_failure_does_not_fence_other_shard_structured_retry(
     monkeypatch,
 ) -> None:
+    """A different shard's nested reviewer failure (deep inside its own
+    semantic-review sub-batch, itself still fail-fast -- see reviewer_no==2
+    below) must not fence another shard's independent structured retry
+    either: same per-shard batch_abort isolation, one layer deeper still.
+    """
     blueprint = _blueprint(split_domain=True)
     plans = build_screenplay_scene_shard_plans(
         blueprint,
@@ -4757,12 +4848,10 @@ def test_nested_reviewer_failure_cancels_other_shard_structured_retry(
         identity_registry_hash="identity-hash",
     )
     contracts = _contracts(plans, blueprint)
-    sibling_started = asyncio.Event()
-    release_sibling = asyncio.Event()
-    sibling_cancelled = asyncio.Event()
     sibling_attempts: list[int] = []
-    # A delivered failure, so the cancellation semantics under test are
-    # not entangled with the bounded retry for undelivered answers.
+    progress_rows: list[list[dict]] = []
+    # A delivered failure, so the isolation semantics under test are not
+    # entangled with the bounded retry for undelivered answers.
     original_error = scene_shards_module.hiagent.ProviderError(
         "injected nested reviewer failure",
         retryable=True,
@@ -4787,25 +4876,25 @@ def test_nested_reviewer_failure_cancels_other_shard_structured_retry(
         shard_id = str(meta["shard_id"])
         stage_key = str(meta["stage_key"])
         if stage_key == "screenplay_scene_shard_semantic_review":
-            if int(meta["reviewer_no"]) == 1:
-                await sibling_started.wait()
-                release_sibling.set()
-                raise original_error
-            await asyncio.Future()
+            if shard_id == plans[0].shard_id:
+                if int(meta["reviewer_no"]) == 1:
+                    raise original_error
+                # reviewer_no == 2 for the same chunk: the in-shard
+                # reviewer-pair fail-fast (untouched by this change) still
+                # cancels it.
+                await asyncio.Future()
+            # The sibling's own review must be free to pass on its own --
+            # this test isolates the *other* shard's nested reviewer call,
+            # not semantic review in general.
+            return ScreenplaySceneShardSemanticReview(
+                findings=[]
+            ).model_dump_json()
         if shard_id == plans[0].shard_id:
             return _creative_shard(plans[0], blueprint).model_dump_json()
         sibling_attempts.append(int(meta["format_attempt"]))
-        if len(sibling_attempts) > 1:
-            raise AssertionError(
-                "other shard retried after nested reviewer failure"
-            )
-        sibling_started.set()
-        try:
-            await release_sibling.wait()
-        except asyncio.CancelledError:
-            sibling_cancelled.set()
-            raise
-        return "not valid JSON"
+        if len(sibling_attempts) == 1:
+            return "not valid JSON"
+        return _creative_shard(plans[1], blueprint).model_dump_json()
 
     monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
     monkeypatch.setattr(
@@ -4817,18 +4906,22 @@ def test_nested_reviewer_failure_cancels_other_shard_structured_retry(
 
     with pytest.raises(scene_shards_module.hiagent.ProviderError) as caught:
         asyncio.run(generate_screenplay_scene_shards(
-            episode={"id": "ep-nested-reviewer-retry-fence", "episode_no": 1},
+            episode={"id": "ep-nested-reviewer-isolated", "episode_no": 1},
             source_text=SOURCE,
             blueprint=blueprint,
             identity_registry=[],
             identities=_identities(),
             plans=plans,
             scene_input_contracts=contracts,
+            progress=lambda rows: progress_rows.append(deepcopy(rows)),
         ))
 
     assert caught.value is original_error
-    assert sibling_attempts == [0]
-    assert sibling_cancelled.is_set()
+    assert sibling_attempts == [0, 1]
+    latest_rows = {
+        row["shard_id"]: row for row in progress_rows[-1]
+    }
+    assert latest_rows[plans[1].shard_id]["status"] == "validated"
 
 
 def test_scene_shard_batch_user_cancellation_does_not_mark_failed(
@@ -10530,6 +10623,60 @@ def test_fail_fast_still_propagates_a_normally_raised_child() -> None:
         return await scene_shards_module._gather_fail_fast(failing, slow_peer)
 
     with pytest.raises(RuntimeError, match="first"):
+        asyncio.run(run())
+    assert peer_finished is False
+
+
+def test_fail_fast_cascades_predicate_isolates_non_cascading_failures() -> None:
+    """A failure the ``cascades`` predicate rejects fails on its own.
+
+    This is the primitive the per-shard isolation in
+    ``generate_screenplay_scene_shards`` is built on: a factory whose
+    exception is not cancel-worthy must not cancel its siblings, and the
+    batch still surfaces that failure once everything else has finished.
+    """
+    peer_finished = False
+
+    async def failing():
+        raise RuntimeError("ordinary failure")
+
+    async def slow_peer():
+        nonlocal peer_finished
+        await asyncio.sleep(0.01)
+        peer_finished = True
+
+    async def run():
+        return await scene_shards_module._gather_fail_fast(
+            failing, slow_peer, cascades=lambda _exc: False,
+        )
+
+    with pytest.raises(RuntimeError, match="ordinary failure"):
+        asyncio.run(run())
+    assert peer_finished is True
+
+
+def test_fail_fast_cascades_predicate_still_cancels_matching_failures() -> None:
+    """A failure the predicate accepts still cancels the rest of the batch,
+    exactly like the no-predicate default."""
+    peer_finished = False
+
+    async def failing():
+        raise RuntimeError("must abort everything")
+
+    async def slow_peer():
+        nonlocal peer_finished
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            raise
+        peer_finished = True
+
+    async def run():
+        return await scene_shards_module._gather_fail_fast(
+            failing, slow_peer, cascades=lambda exc: isinstance(exc, RuntimeError),
+        )
+
+    with pytest.raises(RuntimeError, match="must abort everything"):
         asyncio.run(run())
     assert peer_finished is False
 

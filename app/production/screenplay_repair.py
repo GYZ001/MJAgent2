@@ -495,6 +495,7 @@ def run_screenplay_qa(
         require_dialogue_chains=True,
         validate_narrative=False,
         functional_identity_names=functional_identity_names,
+        episode=episode,
     )
     source_chapter_contract_present = "source_chapters" in episode
     raw_source_chapters = episode.get("source_chapters") or []
@@ -661,6 +662,7 @@ async def _plan_screenplay_repair_operations(
     *,
     source_text: str,
     strategy_history: dict[str, list[str]],
+    episode: dict[str, Any] | None = None,
 ) -> list[PatchOperation]:
     """Prefer bounded document operations; use semantic planning for graph gaps."""
     operations = plan_screenplay_patch(
@@ -676,6 +678,7 @@ async def _plan_screenplay_repair_operations(
         script,
         source_text=source_text,
         strategy_history=strategy_history.get(issue.fingerprint, []),
+        episode=episode,
     )
 
 
@@ -4252,6 +4255,7 @@ async def run_screenplay_production(
             script,
             source_text=source_text,
             strategy_history=strategy_history,
+            episode=episode,
         )
         if ops:
             proposed_key = _patch_strategy_key(ops)
@@ -5488,6 +5492,7 @@ def _preflight_document_candidate(
     document: Any,
     source_text: str,
     issue: Issue,
+    episode: dict[str, Any] | None = None,
 ) -> list[PatchOperation]:
     """Find the smallest executable operation subset that passes full local QA."""
     from itertools import combinations
@@ -5530,6 +5535,7 @@ def _preflight_document_candidate(
             source_text=source_text,
             require_dialogue_chains=True,
             validate_narrative=False,
+            episode=episode,
         ))
         return errors
 
@@ -5655,6 +5661,7 @@ async def _llm_field_patch(
     *,
     source_text: str,
     strategy_history: list[str] | None = None,
+    episode: dict[str, Any] | None = None,
 ) -> list[PatchOperation]:
     """Retry rejected or duplicate semantic candidates with explicit feedback."""
     feedback: list[str] = []
@@ -5666,6 +5673,7 @@ async def _llm_field_patch(
             source_text=source_text,
             planner_attempt=planner_attempt,
             rejection_feedback=feedback,
+            episode=episode,
         )
         if not operations:
             feedback.append(
@@ -5917,6 +5925,7 @@ async def _llm_field_patch_once(
     source_text: str,
     planner_attempt: int = 1,
     rejection_feedback: list[str] | None = None,
+    episode: dict[str, Any] | None = None,
 ) -> list[PatchOperation]:
     """Compare semantic candidates, then return one bounded candidate patch.
 
@@ -6065,6 +6074,7 @@ async def _llm_field_patch_once(
                     document=document,
                     source_text=source_text,
                     issue=issue,
+                    episode=episode,
                 )
                 if preflight:
                     return preflight
@@ -6325,6 +6335,7 @@ async def _llm_field_patch_once(
                 source_text=source_text,
                 require_dialogue_chains=True,
                 validate_narrative=False,
+                episode=episode,
             ))
             return errors
 

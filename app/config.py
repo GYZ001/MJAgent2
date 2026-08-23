@@ -376,7 +376,7 @@ DEFAULT_SETTINGS = {
     "hiagent_model_image": MODEL_IMAGE,
     "minimax_h3_model_video": DEFAULT_MINIMAX_H3_MODEL_VIDEO,
     "minimax_h3_base_url": MINIMAX_H3_BASE_URL,
-    "text_generation_concurrency": "10", # 剧本与分镜共享文本模型资源池
+    "text_generation_concurrency": "6", # 剧本与分镜共享文本模型资源池；见 monitoring.py 同名项注释的 RCA
     "text_generation_workflow_concurrency": "10", # 活跃文本工作流；真实请求另受 provider call gate 约束
     "screenplay_scene_shards_enabled": "true",
     "screenplay_targeted_identity_enabled": "true",

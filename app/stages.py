@@ -92,6 +92,7 @@ from app.schemas import (Bible, CAMERA_MOVES, Character, Dialogue, EMOTIONS, Epi
 from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             canonicalize_storyboard_scene,
                             defer_establishing_covers,
+                            ending_hook_is_grounded,
                             _condense,
                             _scene_time_changed,
                             normalize_action_desc, normalize_continuity,
@@ -9623,6 +9624,7 @@ async def _generate_screenplay_scene_sharded_baseline(
                 identity_registry_hash=identity_registry_hash,
                 blueprint_artifact_id=blueprint_artifact_id,
                 identity_artifact_id=identity_artifact_id,
+                source_text=source_text,
             ),
             agent_name="screenplay_envelope",
             context_manifest={"episode_id": episode_id},
@@ -9724,7 +9726,11 @@ async def _generate_screenplay_scene_sharded_baseline(
         "_source_ir_artifact_id",
         getattr(completed_ir, "evidence_artifact_id", merged_artifact_id),
     )
-    if not str(episode.get("cliffhanger") or "").strip():
+    # 溯源校验：ending_hook 必须能在本集正文中找到对应内容支持，否则视为编造并清空。
+    # 不再依据 episode.cliffhanger 是否预设来决定是否允许写 ending_hook——
+    # 判据从"字段是否预设"换成"内容是否真的来自本集正文"。此处 script.events
+    # 已由 compile_screenplay_ir 编译完成，传入后额外要求结构化事件溯源。
+    if not ending_hook_is_grounded(script.ending_hook, script.full_script_text, events=script.events):
         script.ending_hook = ""
     return script
 
@@ -9832,20 +9838,15 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
         else "【首条改编对白来源锚点】本集原文未检测到显式对白，禁止凭空发明对白。"
     )
     screenplay_hook_rule = (
-        "剧本开头按原文真实开场推进；本集 episode hook 为空，禁止为了格式发明额外开场钩子。"
-        if not episode_hook
-        else f"剧本开头必须尽快进入本集 hook：{episode_hook}"
+        f"剧本开头必须承接上一集真实结尾：{episode_hook}，用本集原文真实内容尽快呼应/推进，"
+        f"不得无视，也不得凭空续写 {episode_hook} 之外的新剧情。"
+        if episode_hook
+        else "剧本开头按原文真实开场推进。"
     )
     screenplay_ending_rule = (
-        "本集 episode hook 与 cliffhanger 均为空/空白：ending_hook 必须为空字符串；"
-        "禁止发明任何未受原文命题、事件与改编决策支持的下一集钩子。"
-        if no_episode_hook
-        else (
-            "本集 cliffhanger 为空：剧本结尾只收束到原文真实状态，ending_hook 保持为空字符串，"
-            "禁止为了尾钩发明原文没有的下一集事件。"
-            if not episode_cliffhanger
-            else f"剧本结尾必须落到本集尾钩：{episode_cliffhanger}"
-        )
+        "本集结尾按原文真实收束；若本集原文结尾处存在真实悬念/转折/未完成动作，"
+        "据实呈现为 ending_hook；若原文本集确已完结、无遗留悬念，ending_hook 留空——"
+        "不得为了留钩在原文没有悬念处编造下一集事件。"
     )
     authorized_source_chapters = episode.get("authorized_source_chapters")
     source_chapter_ids = (
@@ -9978,7 +9979,6 @@ async def generate_screenplay_baseline(
         # 或走 generate_screenplay 包装。此处保留独立入口供 Production Repair 使用。
         return await generate_screenplay(episode, source_text, bible, prev_ending=prev_ending)
 
-    no_episode_hook = bool(_no_episode_hook)
     # Compact IR only permits one full model response. Shape drift is repaired
     # before Pydantic validation; semantic fields are expanded by the local
     # compiler. Never resend the complete source and candidate as a repair.
@@ -10037,6 +10037,7 @@ async def generate_screenplay_baseline(
             validate_narrative=False,
             require_source_coverage=True,
             functional_identity_names=functional_identity_names,
+            episode=episode,
         )
         if s.narrative_plan is None:
             errors.append(Issue(
@@ -10091,11 +10092,12 @@ async def generate_screenplay_baseline(
             resolutions,
         ))
         errors.extend(adaptation_hook_errors(s, episode))
-        if no_episode_hook:
-            ending = (s.ending_hook or "").strip()
-            if ending:
-                errors.append(
-                    "ending_hook 必须为空字符串：本集 hook/cliffhanger 均为空，禁止发明下一集钩子")
+        # 判据是内容是否有本集正文支持，不是 episode.hook/cliffhanger 字段是否预设为空。
+        ending = (s.ending_hook or "").strip()
+        if ending and not ending_hook_is_grounded(ending, s.full_script_text, events=s.events):
+            errors.append(
+                "ending_hook 与本集正文几乎不重合，判定为编造下一集钩子：ending_hook 必须"
+                "来自本集原文真实存在的悬念/转折/未完成动作，原文确已完结则留空")
         deduped_errors: list[str | Issue] = []
         seen_errors: set[str] = set()
         for error in errors:
@@ -10303,7 +10305,9 @@ async def generate_screenplay_baseline(
         "_source_ir_artifact_id",
         getattr(candidate, "evidence_artifact_id", None),
     )
-    if no_episode_hook:
+    # 溯源校验：与 Scene-Shard 路径一致，只有 ending_hook 在本集正文找不到对应内容
+    # 支持时才判定为编造并清空；不再仅凭 episode.hook/cliffhanger 是否预设决定。
+    if not ending_hook_is_grounded(script.ending_hook, script.full_script_text, events=script.events):
         script.ending_hook = ""
     return script
 
@@ -11831,9 +11835,10 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
     else:
         first_rule = ("【本集是第一集】第 1 镜是全片开场建场镜：先交代世界观/主角处境/核心设定，再带出本集 hook。"
                       if is_first else (
-                          f"第 1 镜要尽快进入本集 hook：{episode_hook}。"
+                          f"第 1 镜必须承接上一集真实结尾：{episode_hook}，用本集原文真实内容尽快呼应/推进，"
+                          f"不得无视，也不得凭空续写 {episode_hook} 之外的新剧情。"
                           if episode_hook else
-                          "第 1 镜按剧本真实开场自然进入，不得因 episode hook 为空而发明额外钩子。"
+                          "第 1 镜按剧本真实开场自然进入。"
                       ))
         rhythm_rule = "N 条镜头必须覆盖开端→发展→冲突→高潮→收束，篇幅按主线状态变化分配。"
         director_staging_rule = (
@@ -11845,9 +11850,10 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
             "7~10s 最多 3 个；primary_action、beat、covers 任一字段超限都要拆镜。"
         )
     ending_rule = (
-        f"最后一镜落到本集尾钩：{episode_cliffhanger}。"
+        f"最后一镜落到本集真实尾钩：{episode_cliffhanger}，用本集已有内容据实呈现，"
+        "不得凭空发明该尾钩之外的下一集事件。"
         if episode_cliffhanger else
-        "本集 cliffhanger 为空：最后一镜只收束到剧本/原文已有的真实结束状态，不得发明下一集钩子。"
+        "最后一镜按剧本/原文真实结束状态收束；本集确已完结、无遗留悬念时不得发明下一集钩子。"
     )
     scene_block = (chr(10).join(
         f"场{sc.scene_no}｜{sc.scene_heading}｜功能：{sc.story_function}｜摘要：{sc.summary}｜"
@@ -13875,14 +13881,16 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
     episode_hook = (episode.get("hook") or "").strip()
     episode_cliffhanger = (episode.get("cliffhanger") or "").strip()
     final_shot_rule = (
-        f"如果 is_final=true，本镜必须落到本集尾钩：{episode_cliffhanger}，并且整集必保留关键台词/剧情点都已经在已通过镜头或本镜中体现。"
+        f"如果 is_final=true，本镜必须落到本集真实尾钩：{episode_cliffhanger}，用本集已有内容据实呈现，"
+        "并且整集必保留关键台词/剧情点都已经在已通过镜头或本镜中体现。"
         if episode_cliffhanger else
-        "如果 is_final=true，本镜只收束到剧本/原文已有的真实结束状态；本集 cliffhanger 为空，禁止发明原文没有的下一集钩子。"
+        "如果 is_final=true，本镜只收束到剧本/原文已有的真实结束状态，不得发明原文没有的下一集钩子。"
     )
     first_shot_entry_rule = (
-        f"第 1 镜要尽快进入本集 hook：{episode_hook}。"
+        f"第 1 镜必须承接上一集真实结尾：{episode_hook}，用本集原文真实内容尽快呼应/推进，"
+        f"不得无视，也不得凭空续写 {episode_hook} 之外的新剧情。"
         if episode_hook else
-        "第 1 镜按剧本真实开场自然进入；本集 hook 为空，禁止发明额外开场钩子。"
+        "第 1 镜按剧本真实开场自然进入。"
     )
     if narrative_authority:
         first_shot_entry_rule = (
@@ -14280,9 +14288,9 @@ def _first_shot_rule(
     hook = (episode.get("hook") or "").strip()
     cliffhanger = (episode.get("cliffhanger") or "").strip()
     ending = (
-        f"最后 1 个镜头必须呈现悬念钩：{cliffhanger}"
+        f"最后 1 个镜头必须落到本集真实尾钩：{cliffhanger}，用本集已有内容据实呈现"
         if cliffhanger else
-        "最后 1 个镜头只收束到剧本/原文已有状态；本集 cliffhanger 为空，禁止发明下一集钩子"
+        "最后 1 个镜头只收束到剧本/原文已有状态，不得发明下一集钩子"
     )
     if narrative_authority:
         return (
@@ -14304,16 +14312,17 @@ def _first_shot_rule(
             f"所以 action_desc/首尾帧请按\"远景缓慢推近、镜头从环境推向主角\"来写：首帧是交代环境的大远景，"
             f"尾帧镜头推近到主角、但仍是同一机位的连续推进，人物动作保持克制连贯。\n"
             + (
-                f"    - 仍要包含本集 hook：{hook}，但以\"先立背景、再带出钩子\"的方式呈现，"
-                "不要为了 hook 牺牲掉背景交代。\n"
+                f"    - 仍要承接上一集真实结尾：{hook}，以\"先立背景、再据实呼应\"的方式呈现，"
+                f"不要为了呼应牺牲掉背景交代，也不得凭空续写 {hook} 之外的新剧情。\n"
                 if hook else
-                "    - 本集 hook 为空：开场只按原文和剧本真实情境建立世界与主角处境，禁止额外发明开场钩子。\n"
+                "    - 本集开场无需承接钩子：开场只按原文和剧本真实情境建立世界与主角处境。\n"
             )
             + f"    {ending}")
     opening = (
-        f"第 1 个镜头必须呈现本集 hook：{hook}"
+        f"第 1 个镜头必须承接上一集真实结尾：{hook}，用本集原文真实内容尽快呼应/推进，"
+        f"不得无视，也不得凭空续写 {hook} 之外的新剧情"
         if hook else
-        "第 1 个镜头按剧本真实开场自然进入，禁止因 hook 为空发明额外钩子"
+        "第 1 个镜头按剧本真实开场自然进入"
     )
     return f"23. {opening}\n    {ending}"
 
