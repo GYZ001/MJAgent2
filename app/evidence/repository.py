@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+import re
 import sqlite3
 import time
 from typing import Any
@@ -773,6 +774,53 @@ def latest_run_timing(
         # 活跃 run 的 finished_at 一律视为未结束，避免残留值让计时提前停住。
         "finished_at": None if active else row["finished_at"],
     }
+
+
+_SHOT_STEP_KEY_RE = re.compile(r"^storyboard_shot_(\d+)\b")
+
+
+def storyboard_shot_timings(
+    *,
+    episode_id: str,
+    conn=None,
+) -> dict[str, dict[str, Any]]:
+    """每个镜头的生成耗时，按 shot_no 归集。
+
+    逐镜生成走 AgentLoop，每轮重试写一条 ``storyboard_shot_{n}.iteration``
+    step_run。口径为累计全部迭代：已完成的取 latency_ms 之和，仍在跑的那轮
+    额外回报 ``running_since``，由前端叠加实时增量，这样「生成中实时、完成后
+    留耗时」两种显示共用同一份数据。
+    """
+    db = conn or get_conn()
+    run = db.execute(
+        "SELECT id FROM workflow_runs "
+        "WHERE workflow_type='storyboard' AND scope_type='episode' AND scope_id=? "
+        "AND started_at IS NOT NULL ORDER BY started_at DESC LIMIT 1",
+        (episode_id,),
+    ).fetchone()
+    if run is None:
+        return {}
+    timings: dict[str, dict[str, Any]] = {}
+    for row in db.execute(
+        "SELECT step_key, started_at, finished_at, latency_ms FROM step_runs "
+        "WHERE run_id=? AND step_key LIKE 'storyboard_shot_%'",
+        (run["id"],),
+    ).fetchall():
+        matched = _SHOT_STEP_KEY_RE.match(row["step_key"] or "")
+        if not matched:
+            continue
+        shot_no = matched.group(1)
+        entry = timings.setdefault(
+            shot_no, {"elapsed_ms": 0, "running_since": None, "iterations": 0}
+        )
+        entry["iterations"] += 1
+        if row["finished_at"] is None:
+            # 仍在跑：起点交给前端做实时增量，避免服务端每秒推一次数。
+            if row["started_at"] is not None:
+                entry["running_since"] = row["started_at"]
+        else:
+            entry["elapsed_ms"] += int(row["latency_ms"] or 0)
+    return timings
 
 
 def list_runs(*, active: bool | None = None, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:

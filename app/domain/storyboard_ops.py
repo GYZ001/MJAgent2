@@ -4229,6 +4229,11 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
                       video_path, qa_json, cost_cny, latency_s, artifact_id,
                       adoption_reason, playback_rate, technical_validation_json, created_at,
                       provider_task_id,
+                      (SELECT job.attempt_started_at FROM jobs AS job
+                        WHERE job.version_id=shot_versions.id
+                          AND job.attempt_started_at IS NOT NULL
+                          AND job.status NOT IN ('succeeded','failed','cancelled')
+                        ORDER BY job.attempt_started_at DESC LIMIT 1) AS running_since,
                       CASE WHEN status='rejected_static_fallback'
                            THEN 1 ELSE 0 END AS delivery_fallback,
                       CASE WHEN length(image_inputs) <= ? THEN image_inputs END AS image_inputs,
@@ -4244,6 +4249,11 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
                       video_path, qa_json, cost_cny, latency_s, artifact_id,
                       adoption_reason, playback_rate, technical_validation_json, created_at,
                       provider_task_id,
+                      (SELECT job.attempt_started_at FROM jobs AS job
+                        WHERE job.version_id=shot_versions.id
+                          AND job.attempt_started_at IS NOT NULL
+                          AND job.status NOT IN ('succeeded','failed','cancelled')
+                        ORDER BY job.attempt_started_at DESC LIMIT 1) AS running_since,
                       CASE WHEN status='rejected_static_fallback'
                            THEN 1 ELSE 0 END AS delivery_fallback,
                       NULL AS image_inputs
@@ -4699,9 +4709,21 @@ def _episode_detail_projection(episode_id: str, view: str | None) -> dict:
                 ).items()
             }
         )
+        # 逐镜耗时（累计全部重试迭代），按 shot_no 归集。
+        ep["shot_timings"] = evidence_repository.storyboard_shot_timings(
+            episode_id=episode_id,
+            conn=conn,
+        )
     ep["pipeline_summary"] = pipeline_summary
     # 视频补齐 Supervisor 面板（生成台）
     if full or view == "wall":
+        # 整集视频生成的总计时；单条视频的耗时随 version 一起下发。
+        ep["video_task_timing"] = evidence_repository.latest_run_timing(
+            workflow_type="episode_video_completion",
+            scope_type="episode",
+            scope_id=episode_id,
+            conn=conn,
+        )
         try:
             from app.completion_grant import (
                 episode_video_completion_budget_requirement,

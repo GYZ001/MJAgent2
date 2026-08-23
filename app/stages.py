@@ -3425,9 +3425,43 @@ async def _supplement_bible_characters(bible: Bible, missing: list[tuple[str, in
     return added
 
 
+async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
+    """把作者的话等旁文本从章节正文里剔掉，再交给人物谱这条链路。
+
+    生产缺陷 R9：网文章节正文里直接粘着作者的话（求票、感谢读者、活动公告）。
+    `_recurring_character_names` 按**原文逐字出现次数**产出「必收名单」，
+    而提示词明令「名单里的每个名字…不得改写、合并或省略」——于是作者笔名
+    在统计窗口里出现 27 次排第 4（高于真配角王有材 17 次），进入必收名单，
+    **模型是被程序命令**建出那张人物卡的。它照办的同时把关系写成
+    「创作者，在故事外注视并推动主角命运」，等于自己标注了疑虑。
+
+    所以这不是模型幻觉，是程序把旁文本当成了正文来统计。判据与叙事蓝图
+    共用一份（`app/source_paratext.PARATEXT_RULE`）。
+
+    净化失败一律退回原文：人物谱不能因为这一步判不出来就产不出来。
+    """
+    from app.source_paratext import strip_paratext
+
+    cleaned: list[dict] = []
+    for index, chapter in enumerate(chapters):
+        content = (chapter.get("content") or "")
+        if not content.strip():
+            cleaned.append(chapter)
+            continue
+        stripped = await strip_paratext(
+            content, operation_id=f"bible.paratext:{chapter.get('id') or index}"
+        )
+        cleaned.append(
+            chapter if stripped == content else {**chapter, "content": stripped}
+        )
+    return cleaned
+
+
 async def generate_bible(chapters: list[dict], feedback: str = "", previous_bible: dict | None = None,
                          project_id: str | None = None,
                          visual_style_prompt: str | None = None) -> Bible:
+    # 必须在渲染源文本**和**统计必收名单之前净化，两者都以正文为准。
+    chapters = await _chapters_without_paratext(chapters)
     chapters_text = _render_bible_source(chapters, head_chapters=BIBLE_HEAD_CHAPTERS)
     must_cover = await _recurring_character_names(chapters)
     must_cover_part = ""

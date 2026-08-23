@@ -1046,11 +1046,21 @@ async def _screenplay_character_discovery(
         screenplay_identity_scope_fingerprint,
     )
 
+    # 人物发现是剧本 stage 0，跑在叙事蓝图**之前**，拿不到蓝图那份 paratext
+    # 判定，于是会把作者的话里的人名（作者笔名本身）当成出场人物立卡。
+    # 这里用同一份判据先净化一次；判不出来就退回原文，绝不挡住人物发现。
+    # 只净化**发现用**的文本，剧本链路的 source_text 一个字都不动——
+    # 那里需要完整原文做 audit_only 来源审计，删字会让 SRC 段编号错位。
+    from app.source_paratext import strip_paratext
+
+    discovery_text = await strip_paratext(
+        source_text, operation_id=f"screenplay.discovery.paratext:{episode_id}"
+    )
     try:
         result = await ensure_cards_for_text(
             ep["project_id"],
             ep["episode_no"],
-            source_text,
+            discovery_text,
             bible,
             draft_text=draft_text,
             generate_portraits=False,

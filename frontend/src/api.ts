@@ -1450,6 +1450,8 @@ export interface ShotVersion {
   } | null;
   cost_cny: number;
   latency_s: number;
+  /** 在跑任务的服务端起点（秒）；有值表示这条正在生成，用于实时计时。 */
+  running_since?: number | null;
   artifact_id?: string | null;
   adoption_reason?: string | null;
   playback_rate?: number | null;
@@ -1843,6 +1845,10 @@ export interface Episode {
   storyboard_artifact_id?: string | null;
   storyboard_evidence?: ArtifactEvidence | null;
   storyboard_status?: StoryboardStatus | null;
+  /** 逐镜生成耗时，键为 shot_no；累计全部重试迭代。 */
+  shot_timings?: Record<string, ShotTiming>;
+  /** 整集视频生成的总计时。 */
+  video_task_timing?: TaskTiming;
   active_storyboard_run_id?: string | null;
   active_video_run_id?: string | null;
   video_completion_mode?: string | null;
