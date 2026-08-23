@@ -1,6 +1,7 @@
 """Fail CI when frozen product contracts drift across active surfaces."""
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 
@@ -57,6 +58,106 @@ FORBIDDEN = {
     ],
 }
 
+# --- Version-bump discipline (WARN-only, never SystemExit) -----------------
+#
+# RCA (2026-08-23): three consecutive fix commits (77481f8, e40978a, 975fa3a)
+# changed the screenplay narrative-blueprint/envelope/scene-shard generation
+# prompts and validation logic (including a brand-new ending_hook_is_grounded
+# gate) without bumping any of the version constants that decide whether a
+# historical artifact may be silently reused instead of regenerated. Old,
+# unaudited artifacts kept being served after the fix shipped.
+#
+# This check is a coarse, text-diff-based approximation: it cannot tell
+# "changed behavior" apart from "changed a comment/docstring/log message", so
+# it only flags a *candidate* miss and never fails the build by itself. Treat
+# a hit as "go re-check whether the matching version constant needs to move",
+# not as proof that it does.
+#
+# Known false positives: any non-comment line change in a guard file trips
+# this, including pure refactors, log-message rewording inside an f-string,
+# renamed local variables, or added type hints -- none of which change what
+# gets accepted/produced. Expect noise on unrelated refactors of these files.
+#
+# Known false negatives: (1) this only looks at the *working tree vs HEAD*
+# diff (mirroring scripts/verify.py's own change-detection), so it cannot
+# catch drift that was already committed -- exactly how the original bug
+# shipped across three commits with nobody re-running this check in between;
+# it only helps if run before each commit. (2) a guard file is cleared as
+# soon as *any* of its paired anchors moves, even if the actual change only
+# affects a narrower slice of that file's logic than the anchor implies (no
+# attempt is made to correlate which lines changed to which anchor). (3) a
+# brand-new (untracked-but-uncommitted) guard file is not diffed against
+# anything, so its first-ever content is not checked.
+REUSE_GUARD_ANCHORS: dict[str, list[tuple[str, list[str]]]] = {
+    "app/stages.py": [
+        ("app/narrative_blueprint.py", ["BLUEPRINT_VERSION =", "BLUEPRINT_PROMPT_VERSION ="]),
+        ("app/stages.py", ["SCREENPLAY_BASELINE_PROMPT_VERSION ="]),
+    ],
+    "app/screenplay_scene_shards.py": [
+        (
+            "app/screenplay_scene_shards.py",
+            ["SCREENPLAY_ENVELOPE_VERSION =", "SCREENPLAY_SCENE_SHARD_VERSION ="],
+        ),
+    ],
+    "app/validators.py": [
+        ("app/harness/contracts.py", ['version="']),
+        (
+            "app/screenplay_scene_shards.py",
+            ["SCREENPLAY_ENVELOPE_VERSION =", "SCREENPLAY_SCENE_SHARD_VERSION ="],
+        ),
+    ],
+    "app/production/publish.py": [("app/harness/contracts.py", ['version="'])],
+    "app/production/screenplay_document.py": [("app/harness/contracts.py", ['version="'])],
+    "app/production/screenplay_repair.py": [("app/harness/contracts.py", ['version="'])],
+    "app/production/screenplay_authority.py": [("app/harness/contracts.py", ['version="'])],
+}
+
+
+def _diff_changed_lines(relative: str) -> list[str]:
+    """Added/removed source lines for one file, working tree vs HEAD."""
+    result = subprocess.run(
+        ["git", "diff", "-U0", "--diff-filter=ACMR", "HEAD", "--", relative],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    changed: list[str] = []
+    for line in result.stdout.splitlines():
+        if line.startswith(("+++", "---")):
+            continue
+        if line.startswith(("+", "-")):
+            changed.append(line[1:])
+    return changed
+
+
+def _is_substantive(line: str) -> bool:
+    stripped = line.strip()
+    return bool(stripped) and not stripped.startswith("#")
+
+
+def check_version_bump_discipline() -> list[str]:
+    """Warn (never fail) when a reuse-guard file changed without its anchor."""
+    misses: list[str] = []
+    for guard_file, anchors in REUSE_GUARD_ANCHORS.items():
+        if not (ROOT / guard_file).exists():
+            continue
+        substantive = [line for line in _diff_changed_lines(guard_file) if _is_substantive(line)]
+        if not substantive:
+            continue
+        anchor_moved = any(
+            pattern in line
+            for anchor_file, patterns in anchors
+            for line in _diff_changed_lines(anchor_file)
+            for pattern in patterns
+        )
+        if not anchor_moved:
+            anchor_desc = "; ".join(
+                f"{anchor_file}:{'/'.join(patterns)}" for anchor_file, patterns in anchors
+            )
+            misses.append(
+                f"{guard_file} changed ({len(substantive)} line(s)) but none of its "
+                f"reuse-guard version anchors moved ({anchor_desc})"
+            )
+    return misses
+
 
 def main() -> None:
     errors: list[str] = []
@@ -86,6 +187,20 @@ def main() -> None:
         "Contract surface OK: one chapter/episode, complete source coverage, "
         "unbounded scene-packed 5-10s shots, motivated camera triples."
     )
+    bump_misses = check_version_bump_discipline()
+    if bump_misses:
+        print("\n" + "!" * 78)
+        print("! POSSIBLE MISSING VERSION BUMP (warning only, not blocking the build)")
+        print("! A file that gates whether old artifacts get silently reused changed,")
+        print("! but its paired version constant did not move in this diff. If this")
+        print("! changed generated prompt text or validation/acceptance logic, bump")
+        print("! the matching constant so resume/repair on existing episodes cannot")
+        print("! silently reuse artifacts produced by the old logic. If this is a")
+        print("! comment/refactor-only change, this warning is a false positive --")
+        print("! ignore it.")
+        for miss in bump_misses:
+            print(f"!   - {miss}")
+        print("!" * 78)
 
 
 if __name__ == "__main__":

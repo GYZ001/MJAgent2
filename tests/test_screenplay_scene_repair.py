@@ -412,7 +412,7 @@ def _create_working_artifact(
         trust_level="T1",
         content=screenplay_repair.screenplay_artifact_payload(script),
         parent_artifact_ids=[merged["id"]],
-        contract_version="4.0.0",
+        contract_version=get_contract("screenplay").version,
         model_snapshot={
             "compiler_version": IR_COMPILER_VERSION,
             "source_merged_content_hash": merged["content_hash"],

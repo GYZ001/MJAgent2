@@ -4,7 +4,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.db import get_conn, now
+from app import config
+from app.db import get_conn, log_provider_call, now
 from app.production.certificate import (
     assert_publish_has_certificate,
     consume_completion_certificate,
@@ -15,7 +16,7 @@ from app.production.metrics import record_certificate_issued
 from app.production.patch import load_screenplay_from_artifact
 from app.production.revision import get_production_revision, set_published_artifact
 from app.production.structured_issues import blocker_count, must_fix_count
-from app.validators import ending_hook_is_grounded
+from app.validators import ending_hook_grounding_report
 
 
 def _screenplay_qa_authority_evidence(
@@ -352,11 +353,29 @@ def publish_screenplay(
         # ""）；此处仍在写入权威锚点前用同一判据复核一次——不同调用路径可能
         # 携带未经这条门禁清洗过的 legacy Artifact，复核不通过就按空钩子处理，
         # 绝不把可疑内容写进 episodes.cliffhanger / 下一集 episodes.hook。
+        #
+        # 这次复核如果判定不通过，必须留下可查证据——以前是直接清空、不留
+        # 痕迹，数据上无法区分"原文真的没钩子"和"被误杀"（app/stages.py 里
+        # 两处生成期清空同理，已一并修复）。
+        #
+        # 注意：log_provider_call() 内部会 conn.commit()——这个函数正处在
+        # `BEGIN IMMEDIATE` 开启的原子发布事务里（本函数末尾统一
+        # conn.commit()，任何异常都要整体 conn.rollback()）。这里如果直接调用
+        # log_provider_call()，它的内部 commit 会把事务提前收口，后续
+        # consume_completion_certificate 等步骤一旦失败，rollback 就晚了——
+        # 已提交的部分（包括这条 UPDATE episodes 尚未来得及执行的当前状态）
+        # 回不去，发布的原子性被破坏。因此这里只记录判定结果，真正的
+        # log_provider_call() 调用推迟到事务成功提交之后（见本函数下方
+        # "事务已提交，此时才能安全记录观测证据" 处）。
         ending_hook_value = (script.ending_hook or "").strip()
-        if ending_hook_value and not ending_hook_is_grounded(
-            ending_hook_value, script.full_script_text, events=script.events,
-        ):
-            ending_hook_value = ""
+        ending_hook_rejection: dict[str, Any] | None = None
+        if ending_hook_value:
+            recheck_report = ending_hook_grounding_report(
+                ending_hook_value, script.full_script_text, events=script.events,
+            )
+            if not recheck_report["grounded"]:
+                ending_hook_value = ""
+                ending_hook_rejection = recheck_report
         conn.execute(
             "UPDATE episodes SET cliffhanger=? WHERE id=?",
             (ending_hook_value, episode_id),
@@ -394,6 +413,29 @@ def publish_screenplay(
         if conn.in_transaction:
             conn.rollback()
         raise
+    # 事务已提交，此时才能安全记录观测证据：log_provider_call() 自带
+    # conn.commit()，必须放在原子发布事务收口之后调用，否则会把事务提前
+    # 收口、破坏发布失败时的整体回滚（见上方判定处的注释）。事务已经成功
+    # 提交意味着 episodes.cliffhanger/hook 写入的就是这个被清空的值，此时
+    # 记录的证据与实际落库结果一致。
+    if ending_hook_rejection is not None:
+        log_provider_call(
+            "ending_hook_grounding_rejected",
+            config.MODEL_TEXT,
+            "REJECTED",
+            None,
+            0,
+            meta={
+                "episode_id": episode_id,
+                "source": "screenplay_publish_recheck",
+                "hook_text": ending_hook_rejection["hook_text"],
+                "tier": ending_hook_rejection["tier"],
+                "layer1_coverage": ending_hook_rejection["layer1_coverage"],
+                "best_event_id": ending_hook_rejection["best_event_id"],
+                "best_event_coverage": ending_hook_rejection["best_event_coverage"],
+                "window": ending_hook_rejection["window"],
+            },
+        )
     try:
         record_certificate_issued(
             kind="screenplay",

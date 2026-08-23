@@ -225,8 +225,25 @@ def _quick_commands(paths: list[str]) -> list[tuple[list[str], Path]]:
         if selected_tests:
             commands.append(([sys.executable, "-m", "pytest", "-q", *selected_tests], ROOT))
 
-    if any(path.startswith("app/capabilities/") or path == "app/api.py" for path in paths):
+    # Keep this set in sync with REUSE_GUARD_ANCHORS in check_contract_surface.py:
+    # these files gate whether a historical artifact gets silently reused instead
+    # of regenerated, so touching them should also run the (warn-only) version-bump
+    # discipline check even outside --full.
+    reuse_guard_files = {
+        "app/stages.py",
+        "app/screenplay_scene_shards.py",
+        "app/validators.py",
+        "app/production/publish.py",
+        "app/production/screenplay_document.py",
+        "app/production/screenplay_repair.py",
+        "app/production/screenplay_authority.py",
+    }
+    if (
+        any(path.startswith("app/capabilities/") or path == "app/api.py" for path in paths)
+        or any(path in reuse_guard_files for path in paths)
+    ):
         commands.append(([sys.executable, "scripts/check_contract_surface.py"], ROOT))
+    if any(path.startswith("app/capabilities/") or path == "app/api.py" for path in paths):
         commands.append(([sys.executable, "scripts/check_capability_coverage.py"], ROOT))
 
     frontend_changes = [path for path in paths if path.startswith("frontend/")]

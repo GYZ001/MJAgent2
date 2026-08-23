@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+from pathlib import Path
 
 import pytest
 
@@ -1698,3 +1699,209 @@ def test_adaptation_hook_errors_alone_misses_unmarked_ending_hook_fabrication() 
     assert adaptation_hook_errors(
         fabricated_script, {"cliffhanger": "旧钩子", "hook": "旧钩子"},
     ) == []
+
+
+_EP4_ENDING_HOOK_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "ep4_ending_hook_grounding_ep_3b07c59c0856.json"
+)
+
+
+def _load_ep4_ending_hook_fixture() -> dict:
+    """EP4（episode ep_3b07c59c0856）真实全量生成的只读快照：269 条 events +
+    5998 字 full_script_text，取自 episodes.screenplay_json；ending_hook 取自
+    art_872dff9a8234.metadata.ending_hook（旧判据清空前的原始钩子）。这是本次
+    修复动机的第一手证据：旧的单事件 Tier A（覆盖率需 ≥0.34）在这批 269 条
+    原子事件上，单事件最佳匹配只有 0.2162，把这条模型正确、忠实原文的收尾钩子
+    误判为编造并清空。"""
+    with _EP4_ENDING_HOOK_FIXTURE.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+    events = [StoryEvent.model_validate(item) for item in payload["events"]]
+    return {
+        "ending_hook": payload["ending_hook"],
+        "full_script_text": payload["full_script_text"],
+        "events": events,
+    }
+
+
+def test_ending_hook_is_grounded_accepts_ep4_real_multi_event_summary_hook() -> None:
+    """正向：EP4 真实钩子 + 真实 269 条 events 必须通过（回归此次要修的假阳性）。"""
+    from app.validators import (
+        ENDING_HOOK_EVENT_COVERAGE,
+        ending_hook_grounding_report,
+        ending_hook_is_grounded,
+    )
+
+    fixture = _load_ep4_ending_hook_fixture()
+
+    assert ending_hook_is_grounded(
+        fixture["ending_hook"], fixture["full_script_text"], events=fixture["events"],
+    ) is True
+
+    report = ending_hook_grounding_report(
+        fixture["ending_hook"], fixture["full_script_text"], events=fixture["events"],
+    )
+    assert report["grounded"] is True
+    # 锁定根因：单事件 Tier A 在这批事件表上确实摸不到 0.34（旧判据据此误清空），
+    # 新判据必须靠 Tier B（末尾事件滑动窗口）才能放行，而不是碰巧靠 Tier A。
+    assert report["best_event_coverage"] < ENDING_HOOK_EVENT_COVERAGE
+    assert report["tier"] == "tierB"
+    assert report["window"] is not None
+    assert report["window"]["passed"] is True
+    assert report["window"]["contributors"] >= 2
+    # ending_hook 描述的是"本集结尾"，命中窗口必须落在事件表尾部（最后一条
+    # 事件 E269），而不是全篇任意位置碰运气拼出来的覆盖率。
+    assert report["window"]["event_ids"][-1] == fixture["events"][-1].event_id
+
+
+def test_ending_hook_is_grounded_window_rejects_reviewer_bypass_fabrications() -> None:
+    """反向补充：四条已证实的绕过样本在新的窗口判据（report 粒度）下，
+    仍必须落在 Tier A、Tier B 都不通过的 'ungrounded'，而不是侥幸靠窗口放宽混过去。"""
+    from app.validators import ending_hook_grounding_report
+
+    events = _ending_hook_test_events()
+    for fabricated in _REVIEWER_BYPASS_FABRICATIONS:
+        report = ending_hook_grounding_report(
+            fabricated, _ENDING_HOOK_TEST_SCRIPT, events=events,
+        )
+        assert report["grounded"] is False, f"编造钩子未被拦下：{fabricated}"
+        assert report["tier"] in ("layer1_fail", "ungrounded"), (
+            f"编造钩子应止步于 layer1_fail 或 ungrounded，"
+            f"实际 tier={report['tier']}：{fabricated}"
+        )
+
+
+def test_ending_hook_is_grounded_window_requires_multiple_contributing_events() -> None:
+    """Tier B 的核心防线：窗口覆盖率达标但只有 1 条事件独立贡献命中时，仍必须
+    拒绝——这正是编造钩子"运气好挂上一条事件，其余事件净贡献为零"的典型信号，
+    区别于真实多事件摘要"证据分布在多条事件里"的信号。"""
+    from app.validators import ending_hook_grounding_report
+
+    # 构造一个人为窗口：只有最后一条事件真正贡献了命中 2-gram，其余相邻事件的
+    # 命中都是该事件已覆盖内容的子集（不新增任何独立命中）——模拟 fab3 绕过
+    # 样本"王芳端着热茶走进厨房，却发现李明早已不知去向"对 all-events 窗口的
+    # 真实行为：pooled 覆盖率达到 0.3（高于 Tier B 门槛 0.28），但只有 1 条
+    # 事件独立贡献。
+    events = [
+        StoryEvent(event_id="F1", trigger="李明推开木门", visible_change="王芳端着热茶站在窗边",
+                   state_out="两人相对无言", source_fact="李明回家看见王芳"),
+        StoryEvent(event_id="F2", trigger="无关内容一", visible_change="无关内容一",
+                   state_out="无关内容一", source_fact="无关内容一"),
+        StoryEvent(event_id="F3", trigger="无关内容二", visible_change="无关内容二",
+                   state_out="无关内容二", source_fact="无关内容二"),
+    ]
+    report = ending_hook_grounding_report(
+        "王芳端着热茶走进厨房，却发现李明早已不知去向。",
+        "李明推开木门，王芳端着热茶站在窗边。两人相对无言。",
+        events=events,
+    )
+    assert report["grounded"] is False
+    assert report["tier"] == "ungrounded"
+    # 窗口本身的覆盖率其实达标了（否则这条测试测不出"贡献者数量门禁"本身在
+    # 起作用），只是贡献事件数不够——断言这一点，避免这条测试未来因为覆盖率
+    # 恰好不达标而"意外通过"，掩盖了真正要锁定的门禁。
+    if report["window"]["coverage"] >= 0.28:
+        assert report["window"]["contributors"] < 2
+
+
+def test_ending_hook_grounding_report_empty_hook_is_legitimate() -> None:
+    """边界：原文本集确已完结、无遗留悬念时，ending_hook 留空必须合法放行，
+    不能被误判为"编造后被清空"。"""
+    from app.validators import ending_hook_grounding_report
+
+    report = ending_hook_grounding_report("", _ENDING_HOOK_TEST_SCRIPT, events=_ending_hook_test_events())
+    assert report["grounded"] is True
+    assert report["tier"] == "empty"
+
+    report_blank = ending_hook_grounding_report("   ", _ENDING_HOOK_TEST_SCRIPT, events=_ending_hook_test_events())
+    assert report_blank["grounded"] is True
+    assert report_blank["tier"] == "empty"
+
+
+def test_ending_hook_is_grounded_window_rejects_unapproved_addition_only_window() -> None:
+    """边界：钩子只能对上一串未批准 adaptation_addition 事件（哪怕文本上刻意
+    让它们相邻、覆盖率很高），Tier B 也必须拒绝——未批准新增在窗口比对之前
+    就已被 _ending_hook_eligible_events 整条过滤掉，候选池里根本凑不出
+    2 条可用的相邻事件，天然回退到 Tier A 已确认失败的结果。"""
+    from app.validators import ending_hook_grounding_report
+
+    unauthorized_events = [
+        StoryEvent(
+            event_id="U1", trigger="李明失踪", visible_change="李明忽然不知去向",
+            state_out="王芳独自在厨房", source_fact="剧本原文暗示",
+            adaptation_addition=True, approved=False,
+        ),
+        StoryEvent(
+            event_id="U2", trigger="王芳端着热茶走进厨房", visible_change="王芳端着热茶走进厨房",
+            state_out="却发现李明早已不知去向", source_fact="剧本原文暗示",
+            adaptation_addition=True, approved=False,
+        ),
+    ]
+    report = ending_hook_grounding_report(
+        "王芳端着热茶走进厨房，却发现李明早已不知去向。",
+        _ENDING_HOOK_TEST_SCRIPT,
+        events=unauthorized_events,
+    )
+    assert report["grounded"] is False
+    assert report["tier"] == "ungrounded"
+
+
+def test_clear_ungrounded_ending_hook_leaves_observable_evidence() -> None:
+    """清空静默性回归测试：app/stages.py 两处生成期清空点（场次分片路径与
+    legacy baseline 路径共用的 _clear_ungrounded_ending_hook）以前直接
+    `script.ending_hook = ""`，不留任何观测记录——数据上完全无法区分"原文
+    真的没钩子（合法留空）"和"被误杀"。EP4 269 条原子事件那次假阳性就是这样
+    被人工偶然发现的（追问"为什么这一集生成得比别的慢"才挖出来）。这次修复
+    要求清空动作必须留下可在 provider_calls 里查到的证据。"""
+    from app import db, stages
+
+    fabricated_hook = "外星飞船在城市上空缓缓降落，全城陷入一片死寂。"
+    script = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text=_ENDING_HOOK_TEST_SCRIPT,
+        ending_hook=fabricated_hook,
+        events=_ending_hook_test_events(),
+    )
+    stages._clear_ungrounded_ending_hook(
+        script, episode_id="ep-stages-observability-1", source="unit_test",
+    )
+    assert script.ending_hook == ""
+
+    rows = db.get_conn().execute(
+        """SELECT meta FROM provider_calls
+            WHERE kind='ending_hook_grounding_rejected' AND status='REJECTED'
+            ORDER BY id DESC""",
+    ).fetchall()
+    assert rows, "ending_hook 被判定编造并清空时必须留下可查的观测记录"
+    meta = json.loads(rows[0]["meta"])
+    assert meta["episode_id"] == "ep-stages-observability-1"
+    assert meta["source"] == "unit_test"
+    assert meta["hook_text"] == fabricated_hook
+    assert meta["tier"] in ("layer1_fail", "ungrounded")
+    assert isinstance(meta["layer1_coverage"], (int, float))
+
+
+def test_clear_ungrounded_ending_hook_is_noop_when_grounded() -> None:
+    """反向：真实、有依据的钩子不能被这条观测化改动误伤——既不清空，也不该
+    产生一条"编造被拒绝"的假记录。"""
+    from app import db, stages
+
+    real_hook = _REAL_PARAPHRASED_HOOKS[0]
+    script = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text=_ENDING_HOOK_TEST_SCRIPT,
+        ending_hook=real_hook,
+        events=_ending_hook_test_events(),
+    )
+    before = db.get_conn().execute(
+        "SELECT COUNT(*) AS n FROM provider_calls WHERE kind='ending_hook_grounding_rejected'",
+    ).fetchone()["n"]
+    stages._clear_ungrounded_ending_hook(
+        script, episode_id="ep-stages-observability-2", source="unit_test",
+    )
+    assert script.ending_hook == real_hook
+    after = db.get_conn().execute(
+        "SELECT COUNT(*) AS n FROM provider_calls WHERE kind='ending_hook_grounding_rejected'",
+    ).fetchone()["n"]
+    assert after == before

@@ -93,6 +93,7 @@ from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             canonicalize_storyboard_scene,
                             defer_establishing_covers,
                             ending_hook_is_grounded,
+                            ending_hook_grounding_report,
                             _condense,
                             _scene_time_changed,
                             normalize_action_desc, normalize_continuity,
@@ -9261,6 +9262,54 @@ async def _run_screenplay_workflow_step(
     return result
 
 
+def _clear_ungrounded_ending_hook(
+    script: EpisodeScreenplay,
+    *,
+    episode_id: str,
+    source: str,
+) -> None:
+    """ending_hook 溯源判定失败时清空，并把判定证据写成可查的观测事件。
+
+    背景：这条清空动作以前是完全静默的（app/stages.py 两处、
+    app/production/publish.py 一处直接 `script.ending_hook = ""`，不留任何
+    痕迹）——数据上无法区分"原文真的没钩子（合法留空）"和"被误杀"。EP4 的
+    269 条原子事件把结尾拆得极细，导致旧的单事件判据误杀了一条模型正确、
+    忠实原文的钩子；这次要不是人工追问 EP4 为什么慢，根本发现不了。QA
+    校验（validate_screenplay_narrative 里的 ending_hook 分支）只在
+    "非空但过短"时报错，对"被清空为空"完全无感，指望不上它兜底。
+
+    这里复用 ending_hook_grounding_report 而不是 ending_hook_is_grounded：
+    两层判据的实测覆盖率数值、最佳匹配 event id/窗口，都要落进 provider_calls
+    观测记录，供事后查证具体清空原因，而不只是一个 bool。
+    """
+    hook_text = (script.ending_hook or "").strip()
+    if not hook_text:
+        return
+    report = ending_hook_grounding_report(
+        script.ending_hook, script.full_script_text, events=script.events,
+    )
+    if report["grounded"]:
+        return
+    script.ending_hook = ""
+    log_provider_call(
+        "ending_hook_grounding_rejected",
+        config.MODEL_TEXT,
+        "REJECTED",
+        None,
+        0,
+        meta={
+            "episode_id": episode_id,
+            "source": source,
+            "hook_text": report["hook_text"],
+            "tier": report["tier"],
+            "layer1_coverage": report["layer1_coverage"],
+            "best_event_id": report["best_event_id"],
+            "best_event_coverage": report["best_event_coverage"],
+            "window": report["window"],
+        },
+    )
+
+
 async def _generate_screenplay_scene_sharded_baseline(
     episode: dict[str, Any],
     source_text: str,
@@ -9729,9 +9778,13 @@ async def _generate_screenplay_scene_sharded_baseline(
     # 溯源校验：ending_hook 必须能在本集正文中找到对应内容支持，否则视为编造并清空。
     # 不再依据 episode.cliffhanger 是否预设来决定是否允许写 ending_hook——
     # 判据从"字段是否预设"换成"内容是否真的来自本集正文"。此处 script.events
-    # 已由 compile_screenplay_ir 编译完成，传入后额外要求结构化事件溯源。
-    if not ending_hook_is_grounded(script.ending_hook, script.full_script_text, events=script.events):
-        script.ending_hook = ""
+    # 已由 compile_screenplay_ir 编译完成，传入后额外要求结构化事件溯源。清空
+    # 动作本身必须可观测（见 _clear_ungrounded_ending_hook docstring）。
+    _clear_ungrounded_ending_hook(
+        script,
+        episode_id=str(episode.get("id") or ""),
+        source="screenplay_scene_sharded_baseline",
+    )
     return script
 
 
@@ -10307,8 +10360,12 @@ async def generate_screenplay_baseline(
     )
     # 溯源校验：与 Scene-Shard 路径一致，只有 ending_hook 在本集正文找不到对应内容
     # 支持时才判定为编造并清空；不再仅凭 episode.hook/cliffhanger 是否预设决定。
-    if not ending_hook_is_grounded(script.ending_hook, script.full_script_text, events=script.events):
-        script.ending_hook = ""
+    # 清空动作本身必须可观测（见 _clear_ungrounded_ending_hook docstring）。
+    _clear_ungrounded_ending_hook(
+        script,
+        episode_id=str(episode.get("id") or ""),
+        source="screenplay_baseline_legacy",
+    )
     return script
 
 

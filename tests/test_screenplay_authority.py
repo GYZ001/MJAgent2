@@ -2598,6 +2598,7 @@ def _publish_episode_with_hook(
     episode_id: str,
     episode_no: int,
     ending_hook: str = "",
+    embed_hook_in_source: bool = True,
 ) -> tuple[dict, dict]:
     """Publish a minimal narrative-authority screenplay for one episode.
 
@@ -2634,7 +2635,7 @@ def _publish_episode_with_hook(
     screenplay = _screenplay()
     screenplay.episode_no = episode_no
     screenplay.ending_hook = ending_hook
-    if ending_hook:
+    if ending_hook and embed_hook_in_source:
         # publish_screenplay() re-validates ending_hook against
         # full_script_text before writing it into episodes.cliffhanger /
         # the next episode's episodes.hook (problem 1's structural
@@ -2642,7 +2643,9 @@ def _publish_episode_with_hook(
         # not grounding itself, so the fixture's source text must actually
         # contain the hook -- an empty full_script_text would otherwise get
         # every hook cleared to "" here, same as any other ungroundable
-        # content.
+        # content. embed_hook_in_source=False deliberately keeps that
+        # mismatch, for tests that exercise the rejection/observability path
+        # instead.
         screenplay.full_script_text = f"（正文）{ending_hook}"
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
@@ -2800,3 +2803,41 @@ def test_republishing_earlier_episode_does_not_cascade_into_next_episode_artifac
     assert ep6_after["screenplay_json"] == ep6_before["screenplay_json"]
     assert ep6_after["screenplay_artifact_id"] == ep6_before["screenplay_artifact_id"]
     assert ep6_after["screenplay_artifact_id"] == artifact6["id"]
+
+
+def test_publish_recheck_rejection_leaves_observable_evidence() -> None:
+    """清空静默性回归测试：publish_screenplay() 复核判定 ending_hook 编造并
+    清空时，以前完全不留痕迹（app/production/publish.py:356-359 直接
+    `ending_hook_value = ""`）——数据上无法区分"原文真的没钩子"和"被误杀"，
+    EP4 269 条原子事件那次就是这样被人工偶然发现的。现在必须能在
+    provider_calls 里查到这次清空的证据：被清空的钩子原文、两层覆盖率实测值、
+    最佳匹配 event id/窗口。
+
+    embed_hook_in_source=False 让 full_script_text 里完全不含这条钩子的任何
+    文字，确保 publish_screenplay() 的复核判据必定判定为编造（不依赖具体
+    Tier A/Tier B 数值细节，只需要"确实被拒绝了"这一事实成立）。
+    """
+    fabricated_hook = "外星飞船在城市上空缓缓降落，全城陷入一片死寂。"
+    _publish_episode_with_hook(
+        project_id="project-hook-observability",
+        episode_id="ep-hook-observability-1",
+        episode_no=1,
+        ending_hook=fabricated_hook,
+        embed_hook_in_source=False,
+    )
+
+    # 清空动作本身必须生效：episodes.cliffhanger 不能残留编造内容。
+    assert _episode_row("ep-hook-observability-1")["cliffhanger"] == ""
+
+    rows = db.get_conn().execute(
+        """SELECT meta FROM provider_calls
+            WHERE kind='ending_hook_grounding_rejected' AND status='REJECTED'
+            ORDER BY id DESC""",
+    ).fetchall()
+    assert rows, "ending_hook 被判定编造并清空时必须留下可查的观测记录"
+    meta = json.loads(rows[0]["meta"])
+    assert meta["episode_id"] == "ep-hook-observability-1"
+    assert meta["source"] == "screenplay_publish_recheck"
+    assert meta["hook_text"] == fabricated_hook
+    assert meta["tier"] in ("layer1_fail", "ungrounded")
+    assert isinstance(meta["layer1_coverage"], (int, float))

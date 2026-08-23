@@ -2011,12 +2011,47 @@ def _claim_clearly_absent(atom: str, haystack: str) -> bool:
 # 降落"），不再是唯一判据；见下方 events 结构化校验。
 ENDING_HOOK_GROUNDING_COVERAGE = 0.2
 
-# 结构化交叉校验的覆盖率门槛：与 full_script_text 的整篇正文不同，这里的比对
-# 对象是单条 StoryEvent 的精炼字段（trigger/visible_change/state_out/
-# source_fact），文本量小两个数量级，"复用词汇但内容无关"很难再靠随机碰撞
-# 凑出覆盖率——真正编造的钩子对不上任何一条真实事件。取值复用本文件里
-# KEY_POINT_COVERAGE（0.34）：同属"概括性描述 vs 结构化条目"的比对量级。
+# 结构化交叉校验 Tier A：与 full_script_text 的整篇正文不同，这里的比对对象是
+# 单条 StoryEvent 的精炼字段（trigger/visible_change/state_out/source_fact），
+# 文本量小两个数量级，"复用词汇但内容无关"很难再靠随机碰撞凑出覆盖率——真正
+# 编造的钩子对不上任何一条真实事件。取值复用本文件里 KEY_POINT_COVERAGE
+# （0.34）：同属"概括性描述 vs 结构化条目"的比对量级。
 ENDING_HOOK_EVENT_COVERAGE = KEY_POINT_COVERAGE
+
+# 结构化交叉校验 Tier B：场次分片路径实测会把一集拆成几百条原子事件（EP4 真实
+# 数据：269 条事件覆盖 5998 字正文，单事件精炼字段中位数仅 76 字符）。这种粒度
+# 下 ending_hook——"对结尾 5~8 条事件的一句话综合概括"——天然不可能在单条事件
+# 上摸到 0.34：概括用词被摊薄到每条事件里只剩几个字。Tier A 单事件比对本身不动
+# （历史已验证：真实钩子在粗粒度事件表上普遍能摸到 0.4~0.7，编造钩子摸不到
+# 0.34），Tier A 落空时才启用 Tier B。
+#
+# Tier B 把比对对象换成事件表**末尾**最多 ENDING_HOOK_WINDOW_MAX_EVENTS 条相邻
+# 事件拼接的文本——ending_hook 描述的是"本集结尾"，证据理应集中在事件表尾部，
+# 而不是散落在全篇任意位置。限定末尾窗口是关键：EP4 269 条真实事件实测过，若
+# 允许窗口滑动到任意位置且不设上限，窗口一旦扩大到 20 条事件，覆盖率会跳到
+# 0.43，与编造钩子对整篇正文的覆盖率同量级——退化回第一层已被证明拦不住编造
+# 的弱判据。限定末尾 + 有限窗口大小后这一退化未再出现（末尾窗口从 5 条扩到 15
+# 条，覆盖率稳定停在 0.297，说明这就是真实上限，不是窗口不够大）。
+#
+# 只降覆盖率门槛（0.34→0.28）不足以独立成立：单降门槛，编造钩子只要把窗口开大
+# 到吞下几乎全部事件，一样能在小样本里凑出同量级覆盖率——这仍是"退化成整篇
+# 比对"的老问题。因此额外要求窗口内至少 ENDING_HOOK_WINDOW_MIN_CONTRIBUTORS 条
+# 事件分别贡献"其它事件都给不出"的独立命中 2-gram：真钩子的证据分布在多条事件
+# 里（EP4 实测最优窗口有 2 条事件独立贡献了旁的事件给不出的命中），编造钩子即使
+# 窗口再大，命中的 2-gram 几乎全部只来自最先"运气好"命中的那一条事件，其余事件
+# 净贡献为零——已用四条独立 code review 实测过的绕过样本逐一验证：在任意窗口
+# 大小下都凑不出 2 条独立贡献事件，Tier B 对它们全部关闭（回退到已确认失败的
+# Tier A）。
+#
+# 已知局限：这仍是字符 2-gram 无序集合比对，不理解语义关系。刻意拼接跨多条
+# 真实事件的**逐字/近逐字**片段、伪造它们之间从未发生过的因果关联，理论上仍可
+# 能同时喂出足够覆盖率与足够的独立贡献事件数——这是任何词袋类溯源判据的通病
+# （第一层的整篇比对同样存在，且更严重），不是本次修复引入的新缺口；本次修复
+# 只针对已确认的失败模式（粒度化事件表拖累的假阳性），不追求对抗任意精心构造
+# 的拼接攻击。
+ENDING_HOOK_WINDOW_COVERAGE = 0.28
+ENDING_HOOK_WINDOW_MAX_EVENTS = 8
+ENDING_HOOK_WINDOW_MIN_CONTRIBUTORS = 2
 
 
 def _ending_hook_event_text(event: StoryEvent) -> str:
@@ -2029,6 +2064,150 @@ def _ending_hook_event_text(event: StoryEvent) -> str:
     ])
 
 
+def _ending_hook_eligible_events(
+    events: list[StoryEvent] | None,
+) -> list[tuple[str, str]]:
+    """Tier A/Tier B 共用的事件过滤：有素材文本、有来源证据（source_fact 或
+    source_span 任一非空）、且不是未批准的改编新增。保留原始顺序（events 列表
+    本身即按叙事顺序排列），返回 (event_id, haystack) 列表。"""
+    eligible: list[tuple[str, str]] = []
+    for event in events or []:
+        haystack = _ending_hook_event_text(event)
+        if not haystack:
+            continue
+        if not ((event.source_fact or "").strip() or (event.source_span or "").strip()):
+            continue
+        if event.adaptation_addition and not event.approved:
+            # 未批准的改编新增：即便文本命中，也恰恰证明 ending_hook 复述的是
+            # 一条尚未被批准的发明内容，不能当作已溯源，整条排除出候选池。
+            continue
+        eligible.append((event.event_id, haystack))
+    return eligible
+
+
+def _ending_hook_window_match(
+    text: str,
+    eligible: list[tuple[str, str]],
+) -> dict[str, Any]:
+    """Tier B：事件表末尾滑动窗口（相邻事件拼接）比对。
+
+    始终返回实际尝试过的最佳窗口信息（覆盖率最高的一次），无论最终是否达标——
+    调用方在判定编造时要能记录"差多少、差在哪个窗口"，而不只是一个 bool。
+    """
+    hook_bigrams = _bigram_set(text)
+    n = len(eligible)
+    best: dict[str, Any] = {
+        "passed": False,
+        "window_size": 0,
+        "coverage": 0.0,
+        "contributors": 0,
+        "event_ids": [],
+    }
+    if n < 2 or not hook_bigrams:
+        return best
+    for window_size in range(2, min(ENDING_HOOK_WINDOW_MAX_EVENTS, n) + 1):
+        window = eligible[n - window_size:]
+        matches = [_bigram_set(haystack) & hook_bigrams for _, haystack in window]
+        union: set[str] = set()
+        for match in matches:
+            union |= match
+        coverage = len(union) / len(hook_bigrams)
+        contributors = 0
+        for index, match in enumerate(matches):
+            others: set[str] = set()
+            for other_index, other_match in enumerate(matches):
+                if other_index != index:
+                    others |= other_match
+            if match - others:
+                contributors += 1
+        passed = (
+            coverage >= ENDING_HOOK_WINDOW_COVERAGE
+            and contributors >= ENDING_HOOK_WINDOW_MIN_CONTRIBUTORS
+        )
+        if passed:
+            best = {
+                "passed": True,
+                "window_size": window_size,
+                "coverage": coverage,
+                "contributors": contributors,
+                "event_ids": [event_id for event_id, _ in window],
+            }
+            break
+        if coverage >= best["coverage"]:
+            best = {
+                "passed": False,
+                "window_size": window_size,
+                "coverage": coverage,
+                "contributors": contributors,
+                "event_ids": [event_id for event_id, _ in window],
+            }
+    return best
+
+
+def ending_hook_grounding_report(
+    ending_hook: str,
+    full_script_text: str,
+    events: list[StoryEvent] | None = None,
+) -> dict[str, Any]:
+    """ending_hook 溯源判定的完整诊断信息，供调用方在判定为编造并清空时记录
+    可观测证据：被清空的钩子原文、两层覆盖率实测值、最佳匹配 event id/窗口。
+
+    report["tier"] 取值：
+      "empty"       —— 钩子本身为空，合法放行；
+      "layer1_fail" —— 连宽松的整篇正文 2-gram 门槛都过不了，判定编造；
+      "no_events"   —— 未传入 events（早期生成阶段），只应用第一层，放行；
+      "tierA"       —— 命中某一条单独事件，覆盖率 ≥ ENDING_HOOK_EVENT_COVERAGE；
+      "tierB"       —— 命中末尾相邻事件滑动窗口，覆盖率 ≥
+                        ENDING_HOOK_WINDOW_COVERAGE 且独立贡献事件数达标；
+      "ungrounded"  —— 前两层结构化校验都没有找到支持，判定编造。
+    """
+    text = (ending_hook or "").strip()
+    report: dict[str, Any] = {
+        "grounded": True,
+        "hook_text": text,
+        "layer1_coverage": None,
+        "tier": None,
+        "best_event_id": None,
+        "best_event_coverage": 0.0,
+        "window": None,
+    }
+    if not text:
+        report["tier"] = "empty"
+        return report
+    layer1_coverage = _bigram_coverage(text, full_script_text or "")
+    report["layer1_coverage"] = layer1_coverage
+    if layer1_coverage < ENDING_HOOK_GROUNDING_COVERAGE:
+        report["grounded"] = False
+        report["tier"] = "layer1_fail"
+        return report
+    if not events:
+        report["tier"] = "no_events"
+        return report
+    eligible = _ending_hook_eligible_events(events)
+    best_event_id: str | None = None
+    best_event_coverage = 0.0
+    for event_id, haystack in eligible:
+        coverage = _bigram_coverage(text, haystack)
+        if coverage > best_event_coverage:
+            best_event_coverage = coverage
+            best_event_id = event_id
+        if coverage >= ENDING_HOOK_EVENT_COVERAGE:
+            report["tier"] = "tierA"
+            report["best_event_id"] = event_id
+            report["best_event_coverage"] = coverage
+            return report
+    report["best_event_id"] = best_event_id
+    report["best_event_coverage"] = best_event_coverage
+    window = _ending_hook_window_match(text, eligible)
+    report["window"] = window
+    if window["passed"]:
+        report["tier"] = "tierB"
+        return report
+    report["grounded"] = False
+    report["tier"] = "ungrounded"
+    return report
+
+
 def ending_hook_is_grounded(
     ending_hook: str,
     full_script_text: str,
@@ -2036,37 +2215,19 @@ def ending_hook_is_grounded(
 ) -> bool:
     """ending_hook 是否确有本集正文内容支持；空值本身合法，直接放行。
 
-    两层判据：
+    结构化判据分三层，逐级放宽比对粒度（详见 ending_hook_grounding_report 与
+    ENDING_HOOK_WINDOW_* 常量上方注释）：
     1）字符 2-gram 覆盖率门槛（宽松，只挡完全无关词汇的硬编）；
-    2）若提供了 events（剧情事件台账），额外要求 ending_hook 至少能对应上
-       其中一条「有来源证据、且未被标记为未授权改编新增」的事件——结构化
-       溯源，而不是跟整篇正文比词汇重叠。拿不出这样一条事件时，即便整篇
-       正文的词汇覆盖率达标，也判定为编造。
+    2）Tier A：与单条 StoryEvent 精炼字段比对，覆盖率 ≥ 0.34；
+    3）Tier B：Tier A 落空时，与事件表末尾相邻若干条事件的滑动窗口拼接比对，
+       覆盖率 ≥ 0.28 且至少 2 条事件独立贡献命中——处理"结尾被拆成一串细碎
+       原子事件、钩子是对它们的一句话综合概括"这种真实但天然摸不到单事件
+       0.34 的场景，同时仍能拦住复用词汇但内容无关的编造（结构化事件溯源）。
 
     events 为空（未传入，例如尚未编译出事件台账的早期生成阶段）时只应用
     第 1 层，保持既有行为不变。
     """
-    text = (ending_hook or "").strip()
-    if not text:
-        return True
-    if _bigram_coverage(text, full_script_text or "") < ENDING_HOOK_GROUNDING_COVERAGE:
-        return False
-    if not events:
-        return True
-    for event in events:
-        haystack = _ending_hook_event_text(event)
-        if not haystack:
-            continue
-        if not ((event.source_fact or "").strip() or (event.source_span or "").strip()):
-            continue
-        if _bigram_coverage(text, haystack) < ENDING_HOOK_EVENT_COVERAGE:
-            continue
-        if event.adaptation_addition and not event.approved:
-            # 最匹配的事件是模型自报的未授权改编新增：这恰恰证明 ending_hook
-            # 复述的是一条尚未被批准的发明内容，不能当作已溯源。
-            continue
-        return True
-    return False
+    return ending_hook_grounding_report(ending_hook, full_script_text, events)["grounded"]
 
 
 def normalize_screenplay_ledgers(script: EpisodeScreenplay) -> EpisodeScreenplay:

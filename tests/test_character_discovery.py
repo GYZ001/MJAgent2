@@ -7102,6 +7102,257 @@ def test_current_identity_named_without_any_owned_evidence_still_fails(
     assert calls == 1
 
 
+# --- ERR-20260823-66c63c / ERR-20260823-71551e --------------------------------
+# EP5 (proj_3ac0b627fa46, source chapter idx=5) production run: the model
+# repeated the exact same generic label "男子" twice with the exact same
+# functional_identity_key "F3" -- its own declared "this is one person"
+# signal per prompt rule 6 ("不同 source_label 若明确是同一人必须共用同一
+# ID"; the same source_label repeating the same ID is a stronger version of
+# that same declaration).  But it cited two different evidence refs (E021
+# "...男女修士...", E038 "...许姓女子...") -- neither literally contains
+# "男子".  The chapter's only literal "男子" is one paragraph later, at E039
+# ("...银袍，神色淡然的男子...").  Because both citations missed, both
+# entries fell into the non-literal synthetic branch, which isolates
+# identity_group per (source_label, evidence_id) -- so the one declared
+# person split into two different identity_group values and hard-failed the
+# whole episode with the exact production error text:
+#   source_label 重复：男子；current 同一 source_label 对应多个
+#   identity_group：男子
+# chapter_text below is chapters.content for (proj_3ac0b627fa46, idx=5)
+# verbatim; the f payload below is response_json.choices[0].message.content
+# from provider_calls id=7252 (operation_id
+# screenplay.identity.current.v6:5:1:000a67cec...), unmodified.
+
+_EP5_CHAPTER5_TEXT = """第五章此子不错
+
+“竟然是上官师叔亲自来发丹，而且许师姐与陈师兄是内门弟子，以往很少看到，这次居然也都来了，莫非这次有单独丹药发放不成？”
+
+“应该是这样，你们看外宗的韩宗师兄出现了，他是外宗第二人，修为凝气五层，若能到了凝气七层，就可自动成为内门弟子，可惜没有看到王腾飞师兄。”
+
+“以王腾飞师兄的资质，根本就不会在意这些丹药，他当年加入靠山宗，可是引起了掌门长老等人不小的轰动，若非是王师兄不愿坏了宗门规矩，要凭自己本事进入内宗，如今早就是第三位内宗弟子了。”
+
+“嘿嘿，这次有好戏看了，每次单独发放的丹药都有十二个时辰的封印期，每个时辰都会散发丹光给人指引来抢夺，在这期间更是无法服用，就算带着丹药逃走，估计也没有本事藏十二个时辰。”
+
+孟浩听着身边同门的议论，尽管是第一次参与这种事，但也知晓，每一次外宗的发丹，将是引起争夺的关键，这半个月来他看到了不少抢夺之事，死亡也有发生。
+
+尤其是这次似乎有单独丹药发放，想来争夺必定是更为激烈。
+
+孟浩沉默，暗道自己只有凝气一层，这种所谓的单独丹药，应该不会落在自己身上，只是看着四周一片带着贪婪之意的面孔，孟浩对弱肉强食这四个字，有了更深的了解。
+
+“安静！”平台上金袍老者淡淡开口，他声音不大，可传出时却如滚滚雷霆轰隆隆的降临天地，震的下方所有修士一个个心神震动，双耳嗡鸣，孟浩这里更是如此，好半晌才恢复过来。
+
+“老夫上官修，今日放丹，余者每人一粒凝灵丹，半块灵石。”上官修右手一挥，立刻一百多粒丹药与灵石瞬间四散，竟没有丝毫差错的落入每一个人的面前，孟浩望着漂浮在身前的丹药与灵石，阵阵药香让人陶醉，这是孟浩第一次看到丹药，也是他第一次看到灵石。
+
+这灵石只有指甲盖大小，晶莹剔透，让人看一眼就会忍不住沉迷进去。
+
+他心跳立刻加速，这丹药与灵石必定还是价值千金，孟浩毫不迟疑一把拿入手中，正要将丹药吞下时却发现四周之人没有一个如此，内心一动，再看手中丹药，那上面有一层光芒，隐隐有一道古怪的印记。
+
+“还有这粒……旱灵丹。”孟浩正观察手中丹药时，高台上的上官修声音继续传出，在他的手中，赫然出现了一枚紫色的丹药。
+
+这丹药一出，瞬间整个广场都掀起了一片药香，孟浩闻一口，顿时觉得体内的灵气竟多了一丝，心知这丹药绝非寻常。
+
+“居然是……旱灵丹！”
+
+“这……这是对凝气五层以上修士极为珍贵的丹药，估计宗门内也没多少，居然拿出了一颗！”
+
+“此丹一出，这次外宗争夺会死伤多少人啊。”众人嗡鸣，看向上官修手中丹药的目光，顿时凝聚了无数的贪婪与渴望，尤其是那些修为即将突破的弟子，更是呼吸都急促起来。
+
+“今日本无此丹，可听闻本月有弟子晋升外宗，老夫很是欣喜，若能日月如此，靠山宗辉煌指日可待，这丹药便送此人以作勉励。”上官修微微一笑，目光扫过人群，落在了孟浩身上。
+
+孟浩内心咯噔一声，他听到老者前半句话就觉得不妙，可还没等他反应过来，上官修右手一挥，顿时其手中的紫色丹药刹那出现在了孟浩的面前，由不得他拒绝般，直接落在了他的手中。
+
+在这一刹，孟浩进入靠山宗前所未有的，瞬间成为了万众瞩目，他四周所有的目光齐齐凝聚而来。
+
+那些目光里的贪婪与凶残，仿佛要将孟浩生生撕裂，就连上官修身边的男女修士，也都在此时看向了孟浩，那女子看到孟浩后一怔，但很快就恢复了冰冷。
+
+“哈哈，居然是一个凝气一层的弟子获得丹药，这一次应该好争夺了不少，此人如今已是公敌。”
+
+“此人完了，上次单独丹药发放，我记得那人是凝气二层，就因为迟疑了一下，被没抢到丹药的赵武刚师兄泄愤生生拽入公开区内砍了脑袋。”
+
+阵阵议论之声回荡，许多凝气二三层的弟子，尽管知晓危险，但也忍不住贪婪起来，毕竟这一次丹药首获之人，修为实在是弱到了极致，使得他们仿佛也有了抢夺的资格。
+
+孟浩全身冷汗已经泌出，他想立刻扔了丹药，可却发现这丹药如粘在了手上，无法扔下，四周虎视眈眈的目光，让孟浩刹那间仿佛感受到了死亡的阴影，甚至他看到有不少人带着凶狠之意，正快步向自己这里走来。
+
+“师弟，这丹药一会你扔给我，否则的话，我要你好看。”
+
+“你敢不给我，明年的今天，是你的忌日。”阵阵声音如冷冽之风回荡孟浩四周。
+
+与此同时，在这靠山宗四周的山峰上，有两个老者盘膝坐在山顶，正笑眯眯的看着山下外宗广场的一幕幕。
+
+“上官师侄太不讲究了，把这丹药给了这刚入门的小娃，完了，估计我们靠山宗又要少了一个弟子。”
+
+“这一次的争夺没意思，我赌这小娃一会广场禁制消散后会将立刻扔丹。”
+
+随着二老的彼此谈论，下方广场的九根柱子颜色瞬间黯淡下来，看其样子，也就是十多息后，就会完全失去光芒，到了那时，此地广场的禁制也会立刻消失。
+
+孟浩心脏快跳，不用别人去说，他也能明白当这九根柱子光芒消失后，等待自己将是一场疯狂，甚至直接扔了丹药都极有可能引起一些人不喜，迁怒自己。
+
+“这……这怎么给我了。”孟浩全身冷汗，心神瞬间千转，不扔必死，扔了日后恐怕也一样会被迁怒，孟浩几乎用出了三年读书的全部脑筋，要看光柱光芒将暗，彩霞石台上的上官修挥袖要离去，在这危急关头孟浩脑海刹那灵机一闪，猛地迈出一步，大声喊出。
+
+“弟子有话要说。”
+
+“弟子能来到靠山宗，能感受到伟大的靠山宗磅礴的仙家气息，全因一场造化，弟子非常感谢给我造化的那个人。”
+
+“弟子日夜期盼可以再次看到她，要当面感谢她，直至今日弟子终于看到了。”孟浩越说越快，话语传出时让平台上的上官修一愣，不再离去而是向孟浩看来。
+
+“此人就是许师姐，许师姐，师弟对你感激万分，无以为报，特将此丹送给你，只有这样才可以报答师姐再造之恩。”孟浩说着，立刻抬起右手，将那粘在手上的丹药高高举起。
+
+上官修怔了一下，显然没想到孟浩居然要说的是这些话语，神色有些古怪，嘴角渐渐露出微笑，其旁穿着银袍的许姓女子自然也是一愣，她就算是再冷漠，如今也是神色有了变化，她虽说修为已是凝气七层，这旱灵丹对她用处不大，但就算身为内门弟子，因旱灵丹极为稀少，她要获得也并非容易，自忖此丹若是与其他几种丹药重新熔炼，可炼出一炉对自己帮助甚大的五灵丹，故而此刻也不由得怦然心动。
+
+就算是那一样银袍，神色淡然的男子，此刻也不由得多看了孟浩几眼。
+
+在这一刹那，四周之人瞬间安静下来，那些快步走向孟浩的修士也下意识的脚步一顿，一个个神色古怪，看向孟浩的目光带着错愣。
+
+“还能这样……”
+
+“居然当着这么多人的面，如此赤露露的送出丹药，而且竟是给内门弟子，这……这谁还敢继续抢，这是和内门弟子抢丹药。”
+
+“这个方法简单，可怎么当年我就没想到，该死的，该死的！”
+
+“他奶奶的，老子当年也没想到这个方法，害的我重伤躺了三个多月。”
+
+短暂的安静之后，立刻哗然四起，所有看向孟浩的目光，瞬间蕴含了无数情绪，不说古往今来，但此地修士多年这还是第一次遇到这种处理丹药的方式，不由得使众人看向孟浩时，在这一刹那深深的记住了孟浩。
+
+与此同时，九根柱子的光芒彻底散去，可在孟浩手中的丹药，却是于这一瞬，竟无人去抢，这一幕在靠山宗的发丹之日，极其罕见。
+
+许姓女子神色很快恢复如常，毫不迟疑的右手抬起向下一抓，顿时孟浩高举的丹药立刻飞出直奔这女子，被她一把拿在手中。眼看丹药被取走，孟浩暗叹，可也知道此物对目前的自己而言是祸根，此时四周的人群，一个个纷纷暗自叹气，有心对孟浩迁怒，可想到那许师姐，一个个顿时犹豫中打消了念头。
+
+许姓女子迟疑了一下，觉得以自己内门弟子的身份，白拿一个刚入门的外宗弟子的好处，有些过意不去。
+
+“我早年于外宗被赐了一座南峰洞府，借你居住。”许姓女子沉默片刻，从储物袋内取出一枚白色的玉简，抛出落在孟浩的面前，被孟浩接住。
+
+“许师姐的洞府……这家伙也太走运了，那洞府据说灵气极为充足，整个宗门也没多少。”
+
+“许师姐说是借，实际上这明显是给，只不过借之一字便可打消太多人的念头，看来这小子的送丹，起到了绝效。”
+
+“该死的，我当年怎么没想到。”
+
+与此同时，在这外宗旁的山峰上，那之前打赌的两个老者中穿着灰色长袍的高大老者，双眼猛地明亮，带着强烈的赞赏，哈哈大笑起来。
+
+“这小家伙有意思，刚入宗门就知道找靠山，莫非这是本能不成，好好好，这才是领悟了我靠山宗的真意，此子不错，非常不错。”
+
+孟浩很聪明吧，周一到了，诸位道友看在孟浩的聪明份上，推荐票，会员点击，还请给我！！第一周能不能封榜，就看这一天了！
+
+加上这第三更，今天一共更新1万1千字，相当于四更，不求月票，只求免费的推荐票！！！很多道友已经注册会员，可却没有到500经验值，这个很简单，书评区有专门的帖子告诉大伙如何10分钟获得500经验值，随后就可以获得一张推荐票，全程10分钟左右，就可以来支持耳根，还请大家去看看这个帖子，耳根谢谢你们，谢谢，谢谢！至于龙套，书评区有专门的龙套楼，我保证会在结束前，争取让所有里面的角色出场，需要龙套的道友记得要去登记一下。"""
+
+
+def test_ep5_declared_repeat_label_rebinds_to_unique_literal_evidence() -> None:
+    """Real EP5 chapter text + the real 「男子」-bearing f entries must merge, not hard-fail."""
+    records = portraits._current_identity_evidence_records(_EP5_CHAPTER5_TEXT)
+    evidence_by_ref = {
+        f"E{index:03d}": record for index, record in enumerate(records, start=1)
+    }
+    assert "男子" in evidence_by_ref["E039"]["text"]
+    assert "男子" not in evidence_by_ref["E021"]["text"]
+    assert "男子" not in evidence_by_ref["E038"]["text"]
+
+    # Verbatim f array from provider_calls id=7252 (real production response).
+    payload = {"k": [], "n": [], "f": [
+        {"evidence_ref": "E002", "functional_identity_key": "F1", "kind": "mentioned", "source_label": "上官师叔"},
+        {"evidence_ref": "E002", "functional_identity_key": "F2", "kind": "mentioned", "source_label": "许师姐"},
+        {"evidence_ref": "E002", "functional_identity_key": "F3", "kind": "mentioned", "source_label": "陈师兄"},
+        {"evidence_ref": "E003", "functional_identity_key": "F4", "kind": "mentioned", "source_label": "韩宗师兄"},
+        {"evidence_ref": "E003", "functional_identity_key": "F5", "kind": "mentioned", "source_label": "王腾飞师兄"},
+        {"evidence_ref": "E009", "functional_identity_key": "F6", "kind": "mentioned", "source_label": "金袍老者"},
+        {"evidence_ref": "E021", "functional_identity_key": "F2", "kind": "mentioned", "source_label": "女子"},
+        {"evidence_ref": "E021", "functional_identity_key": "F3", "kind": "mentioned", "source_label": "男子"},
+        {"evidence_ref": "E038", "functional_identity_key": "F2", "kind": "mentioned", "source_label": "许姓女子"},
+        {"evidence_ref": "E038", "functional_identity_key": "F3", "kind": "mentioned", "source_label": "男子"},
+    ]}
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        reserved_authority_labels=set(),
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+
+    assert errors == []
+    by_label = {item["source_label"]: item for item in projected}
+    assert set(by_label) == {
+        "上官师叔", "许师姐", "陈师兄", "韩宗师兄", "王腾飞师兄",
+        "金袍老者", "女子", "男子", "许姓女子",
+    }
+    merged = by_label["男子"]
+    assert merged["identity_kind"] == "functional"
+    assert merged["identity_group"] == "current-1:F3"
+    assert merged["source_label_provenance"] == (
+        portraits.CURRENT_IDENTITY_LITERAL_PROVENANCE
+    )
+    assert merged["source_segment_id"] == "SRC0039"
+    assert "银袍" in merged["source_quote"] and "男子" in merged["source_quote"]
+    # Both mis-citations (E021 and E038) rebind to the one real literal home
+    # (E039), so they collapse onto that single receipt rather than staying
+    # split across the two evidence ids the model actually cited.
+    assert len(merged["source_evidence_receipts"]) == 1
+    assert merged["source_evidence_receipts"][0]["source_segment_id"] == (
+        "SRC0039"
+    )
+
+
+def test_two_distinct_people_same_label_different_key_still_hard_fails() -> None:
+    """Reverse guard: genuinely different entities sharing a bare label must still fail.
+
+    Unlike the EP5 repair above, here the model uses two DIFFERENT
+    functional_identity_key values (F1 vs F2) and correctly cites each
+    person's own literal evidence -- the same-generic-label-but-different-
+    people shape prompt rule 4 requires distinguishing descriptions for. The
+    EP5 fix must not let this kind of pair through.
+    """
+    text = "一个男子站在桥头，神色警惕。\n\n远处又有一个男子骑马而来，衣着截然不同。"
+    records = portraits._current_identity_evidence_records(text)
+    evidence_by_ref = {
+        f"E{index:03d}": record for index, record in enumerate(records, start=1)
+    }
+    payload = {"k": [], "n": [], "f": [
+        {"evidence_ref": "E001", "source_label": "男子", "functional_identity_key": "F1", "kind": "onscreen"},
+        {"evidence_ref": "E002", "source_label": "男子", "functional_identity_key": "F2", "kind": "onscreen"},
+    ]}
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    _projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        reserved_authority_labels=set(),
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert any("source_label 重复" in error for error in errors)
+    assert any("多个 identity_group" in error for error in errors)
+
+
+def test_declared_repeat_label_with_ambiguous_literal_home_still_hard_fails() -> None:
+    """Reverse guard: the repair only fires for an UNAMBIGUOUS literal anchor.
+
+    Both entries declare the same functional_identity_key (claiming one
+    person), but the label is genuinely ambiguous in this batch -- it occurs
+    literally in two different places, and neither cited E contains it. The
+    fix must not silently guess which one is meant; this stays a hard
+    failure exactly like before the EP5 fix.
+    """
+    text = "一个男子站在桥头。\n\n远处又有一个男子骑马而来。\n\n孟浩打了个哈欠。"
+    records = portraits._current_identity_evidence_records(text)
+    evidence_by_ref = {
+        f"E{index:03d}": record for index, record in enumerate(records, start=1)
+    }
+    payload = {"k": [], "n": [], "f": [
+        {"evidence_ref": "E003", "source_label": "男子", "functional_identity_key": "F3", "kind": "mentioned"},
+        {"evidence_ref": "E003", "source_label": "男子", "functional_identity_key": "F3", "kind": "mentioned"},
+    ]}
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    _projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        reserved_authority_labels=set(),
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert any("source_label 重复" in error for error in errors)
+
+
 # --- ERR-20260821-f3e065 -----------------------------------------------------
 # run_d05fc5539edf asked for a strict json_schema response_format and the
 # provider returned a body that derailed mid-object into `{"decision_id": "f" :

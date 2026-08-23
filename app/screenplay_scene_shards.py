@@ -64,8 +64,8 @@ from app.source_excerpt import (
 from app.source_facts import SourceFact, source_segment_facts
 
 
-SCREENPLAY_ENVELOPE_VERSION = "screenplay-envelope.v1"
-SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v11"
+SCREENPLAY_ENVELOPE_VERSION = "screenplay-envelope.v2"
+SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v12"
 SCREENPLAY_SHARD_PLAN_VERSION = "screenplay-scene-shard-plan.v6"
 SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v10"
 SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v8"
@@ -382,7 +382,7 @@ class ScreenplayEnvelopeExperience(BaseModel):
 
 
 class ScreenplayEnvelopeIR(BaseModel):
-    contract_version: Literal["screenplay-envelope.v1"] = SCREENPLAY_ENVELOPE_VERSION
+    contract_version: Literal["screenplay-envelope.v2"] = SCREENPLAY_ENVELOPE_VERSION
     episode_no: int
     metadata: ScreenplayEnvelopeMetadata
     experience: ScreenplayEnvelopeExperience
@@ -1176,7 +1176,7 @@ class ScreenplaySceneShardScene(IRScene):
 class ScreenplaySceneShardIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-shard.v11"] = (
+    contract_version: Literal["screenplay-scene-shard.v12"] = (
         SCREENPLAY_SCENE_SHARD_VERSION
     )
     episode_no: int

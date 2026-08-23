@@ -6118,7 +6118,7 @@ def test_scene_shard_contract_version_is_not_silently_upgraded() -> None:
     payload["contract_version"] = "screenplay-scene-shard.v0"
     with pytest.raises(ValidationError):
         ScreenplaySceneShardIR.model_validate(payload)
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v11"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v12"
 
 
 def test_blueprint_and_slot_semantics_are_required_without_defaults() -> None:
@@ -9280,7 +9280,7 @@ def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -
 def test_scene_shard_contract_fingerprint_is_upgraded(
     monkeypatch,
 ) -> None:
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v11"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v12"
     assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v10"
     assert SCREENPLAY_SCENE_CREATIVE_VERSION == (
         "screenplay-scene-creative.v8"
@@ -10142,7 +10142,7 @@ def test_generation_scaffold_fingerprint_binds_slot_structure() -> None:
         )
         != fingerprint
     )
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v11"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v12"
     assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v10"
 
 

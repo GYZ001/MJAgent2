@@ -1327,6 +1327,26 @@ def _project_current_identity_response(
         if len(items) > 64:
             errors.append(f"current identity {branch} decisions 过多")
 
+    # rule 6 makes functional_identity_key the model's own explicit "this is
+    # the same person" signal: two F entries that repeat both the identical
+    # source_label *and* the identical functional_identity_key are the model
+    # asserting one entity, not two.  That declared-repeat shape is narrower
+    # than "any non-literal functional citation" -- a single, unrepeated F
+    # entry whose cited E happens not to contain its label stays exactly the
+    # legitimate synthetic observation prompt rule 4 describes (never
+    # auto-rebound; see test_current_identity_literal_label_isolated_as_synthetic_once).
+    functional_repeat_pairs: dict[tuple[str, str], int] = {}
+    for item in value.f:
+        pair = (
+            str(item.source_label or "").strip(),
+            str(item.functional_identity_key or "").strip(),
+        )
+        functional_repeat_pairs[pair] = functional_repeat_pairs.get(pair, 0) + 1
+    declared_repeat_labels = {
+        label for (label, key), count in functional_repeat_pairs.items()
+        if count > 1 and label and key
+    }
+
     def append_candidate(
         *,
         source_label: str,
@@ -1350,21 +1370,35 @@ def _project_current_identity_response(
             errors.append(f"source_label 非法：{source_label!r}")
         evidence_text = str(record.get("text") or "")
         literal = bool(source_label and source_label in evidence_text)
-        if not literal and identity_kind == "named" and source_label:
+        eligible_for_rebind = identity_kind == "named" or (
+            identity_kind == "functional" and source_label in declared_repeat_labels
+        )
+        if not literal and eligible_for_rebind and source_label:
             # 模型只是在一批 backend-owned 证据里挑下标，证据本身始终由后端拥有。
-            # 一个逐字自称谓如果确实逐字出现在本批另一条证据里，那是选错了 E，
-            # 不是凭空捏造：直接改绑到真正承载它的那条证据，而不是让整集预检硬失败
+            # 一个逐字称谓如果确实逐字出现在本批另一条证据里，那是选错了 E，不是
+            # 凭空捏造：直接改绑到真正承载它的那条证据，而不是让整集预检硬失败
             # （否则模型每挑错一次下标，整集剧本就必须人工重试一次）。
-            rebound = next(
-                (
-                    owned
-                    for owned in evidence_by_ref.values()
-                    if source_label in str(owned.get("text") or "")
-                ),
-                None,
-            )
-            if rebound is not None:
-                record = rebound
+            # named 一直如此。functional 只在模型自己用同一 source_label +
+            # 同一 functional_identity_key 重复声明「这是同一个人」时才享有同样
+            # 的改绑（rule 6：不同 source_label 若明确是同一人必须共用同一 ID —
+            # 同一 source_label 重复同一 ID 是更强的同一性声明）。单次、未重复的
+            # 非逐字 functional 引用（如「门卫」被错误但仅一次地绑到无关证据）
+            # 仍然是 prompt rule 4 允许的合法 synthetic 观察，不做改绑
+            # （见 test_current_identity_literal_label_isolated_as_synthetic_once /
+            # cross_f gate）。
+            # 生产 EP5：两条同 key「男子」都被错误绑到了不含该词的段落，唯一真正
+            # 逐字出现「男子」的段落反而没有被引用，导致本应合并的一个人被按证据
+            # 分别隔离出不同 identity_group，触发 source_label 重复硬失败。
+            # 只在全批唯一匹配时才自动改绑；命中多条视为歧义，不得静默挑一个可能
+            # 错的目标——这种情况维持原判（named 硬失败，functional 隔离为
+            # synthetic）。
+            literal_matches = [
+                owned
+                for owned in evidence_by_ref.values()
+                if source_label in str(owned.get("text") or "")
+            ]
+            if len(literal_matches) == 1:
+                record = literal_matches[0]
                 evidence_text = str(record.get("text") or "")
                 literal = True
         if canonical_name != canonical_name.strip():

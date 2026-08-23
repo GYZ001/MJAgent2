@@ -34,7 +34,7 @@ _CONTRACTS: dict[str, StageContract] = {
     ),
     "screenplay": StageContract(
         key="screenplay",
-        version="4.0.0",
+        version="5.0.0",
         input_types=["novel_source", "character_bible", "episode_mapping"],
         output_type="episode_screenplay",
         invariants=[
@@ -47,6 +47,8 @@ _CONTRACTS: dict[str, StageContract] = {
             "scene count and story beat count are determined by complete content rather than a duration ceiling",
             "every scene declares entry state, exit state, and context requirements",
             "only one bounded structural repair may follow the initial screenplay generation",
+            "a non-empty ending hook resolves to a source-grounded story event rather than passing on lexical overlap alone",
+            "adaptation hook errors evaluate the actual episode instead of running as a silent no-op",
         ],
         max_iterations=2,
         requires_human_gate=True,
