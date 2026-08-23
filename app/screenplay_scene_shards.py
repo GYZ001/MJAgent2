@@ -52,6 +52,7 @@ from app.screenplay_ir import (
     IRSceneUnit,
     ScreenplayGenerationIR,
     IR_VERSION,
+    screenplay_beat_fields_repeat,
     screenplay_ir_source_audit_contract_errors,
 )
 from app.source_excerpt import (
@@ -3679,6 +3680,22 @@ def validate_screenplay_scene_shard(
             errors.append(
                 f"{planned_slot.unit_key} dialogue.text 必须等于 "
                 "scaffold source_text"
+            )
+        # 同一条「动作与结果不得雷同」的判据，下游 plot_spine 硬门禁
+        # （SPINE_ACTION_TURN_DUPLICATE）已经在用，但那里**没有任何修复策略**：
+        # 编译器把 text→does、resulting_state→turn 逐字带下去，门禁一命中，
+        # 规划器立刻记 exhausted，整集停在 WAITING_HUMAN，补丁数为 0
+        # （生产 EP1：145 个单元里 4 个把 resulting_state 原样写成了 text）。
+        # 判据本身是确定性的（condense 后完全相同，或双向 0.9 的最长公共段
+        # 与 bigram 覆盖），所以把它提到**这一层**——这里有 3 轮定向语义修复，
+        # 模型能拿到具体 unit 和明确诉求，是同一条规则唯一能被便宜修好的位置。
+        if unit.kind != "dialogue" and screenplay_beat_fields_repeat(
+            unit.text, unit.resulting_state
+        ):
+            errors.append(
+                f"{planned_slot.unit_key} resulting_state 与 text 语义重复；"
+                "text 写可见/可听动作，resulting_state 必须写该动作完成后"
+                "新成立的人物、信息、关系或局势状态"
             )
         for source_id in unit.source_segment_ids:
             planned_owner = plan.source_scene_owners.get(source_id)
