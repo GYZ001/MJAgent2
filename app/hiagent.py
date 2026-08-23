@@ -1860,8 +1860,13 @@ async def _chat_tools_via_json_protocol(
     if want_stream:
         assert on_token is not None
         reply_streamer = _JsonReplyStreamer(on_token)
+        # 流式分支自己拼 payload，不经过 chat()，所以在这里把答案预算换算成
+        # 供应商 max_tokens；非流式分支交给 chat() 换算，两条路各换算一次。
+        _provider, _model, stream_max_tokens = text_request_token_limits(
+            requested_max_tokens=max_tokens,
+        )
         raw = await _stream_plain_chat(
-            flat, temperature=temperature, max_tokens=max_tokens,
+            flat, temperature=temperature, max_tokens=stream_max_tokens,
             call_meta=fallback_meta, on_token=reply_streamer.feed,
         )
         streamed_reply = reply_streamer.emitted
@@ -2369,17 +2374,22 @@ async def chat_with_tools(
       路径与 JSON 回退协议暂不流式，最终结果一致。
     """
     provider = active_provider("text")
-    # 与 chat() 走同一个换算入口：调用方传的是「答案预算」，这里叠加模型的思考
-    # 预留并夹紧到它真实的 max_output_tokens。此前这条路径完全绕开该入口，
-    # 默认值 65535 甚至已经超过模型默认上限 32768。
+    # 调用方传的是「答案预算」。原生 tools 路径自己拼 payload，所以这里换算成
+    # 供应商 max_tokens（叠加思考预留并夹紧到模型真实上限）；此前这条路径完全
+    # 绕开该入口，默认值 65535 甚至已经超过模型默认上限 32768。
+    #
+    # JSON 协议回退路径**必须继续拿原始答案预算**：它内部要么走 chat()（自己换算），
+    # 要么走 _stream_plain_chat（在那里换算）。传换算后的值会让思考预留被叠加两次。
+    answer_max_tokens = max(1, int(max_tokens))
     _provider, _model, max_tokens = text_request_token_limits(
-        requested_max_tokens=max_tokens,
+        requested_max_tokens=answer_max_tokens,
         provider=provider,
         model=model,
     )
     if not _provider_supports_tools(provider):
         return await _chat_tools_via_json_protocol(
-            messages, tools, temperature=temperature, max_tokens=max_tokens,
+            messages, tools, temperature=temperature,
+            max_tokens=answer_max_tokens,
             call_meta=call_meta, on_token=on_token)
     timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_CHAT_READ, write=30, pool=10)
     stream = on_token is not None and _streaming_enabled()
@@ -2415,7 +2425,8 @@ async def chat_with_tools(
         except ProviderError as exc:
             if _looks_like_tools_unsupported(exc):
                 return await _chat_tools_via_json_protocol(
-                    messages, tools, temperature=temperature, max_tokens=max_tokens,
+                    messages, tools, temperature=temperature,
+                    max_tokens=answer_max_tokens,
                     call_meta=call_meta, on_token=on_token)
             raise
     # 被截断的工具调用参数是**残缺的 JSON**，编排器却会照常执行它。

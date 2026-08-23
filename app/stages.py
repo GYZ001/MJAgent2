@@ -7922,6 +7922,30 @@ def _append_blueprint_semantic_rebuild_event(
         return
 
 
+def _cached_leaf_superseded_by_feedback(
+    *,
+    cached_source_hash: str,
+    source_hash: str,
+    source_payload: list[dict[str, Any]],
+) -> bool:
+    """Whether a cached leaf was built before this activation changed its input.
+
+    A semantic rebuild deliberately injects ``downstream_semantic_conflicts``
+    into the affected shard's source payload, which changes ``source_hash`` on
+    purpose.  The previous leaf is then simply *not applicable* -- it is not
+    authority drift.  Treating it as drift makes the rebuild die in
+    ``BLUEPRINT_SPLIT_MANIFEST_AUTHORITY``, i.e. exactly inside the scenario the
+    rebuild exists to rescue.  Shards without injected evidence keep the
+    original strict drift check unchanged.
+    """
+    if cached_source_hash == source_hash:
+        return False
+    return any(
+        item.get("downstream_semantic_conflicts")
+        for item in source_payload
+    )
+
+
 def _blueprint_shard_source_entry(
     segment: Any,
     semantic_feedback: dict[str, list[str]] | None,
@@ -8030,6 +8054,12 @@ async def _generate_sharded_narrative_blueprint(
         ).hexdigest()
         shard: NarrativeBlueprintShard | None = None
         planned_cached = cached_by_plan_index.get(shard_index)
+        if planned_cached is not None and _cached_leaf_superseded_by_feedback(
+            cached_source_hash=planned_cached[1].source_hash,
+            source_hash=source_hash,
+            source_payload=source_payload,
+        ):
+            planned_cached = None
         if planned_cached is not None:
             cached_row, cached = planned_cached
             try:

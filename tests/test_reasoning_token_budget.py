@@ -253,3 +253,50 @@ async def test_truncated_tool_call_is_not_executed_as_a_complete_answer(
         excinfo.value.failure_kind
         == hiagent.ProviderFailureKind.OUTPUT_TRUNCATED.value
     )
+
+
+@pytest.mark.asyncio
+async def test_json_protocol_fallback_applies_the_reserve_exactly_once(
+    monkeypatch,
+) -> None:
+    """工具调用回退到 JSON 协议时，思考预留只能叠加一次。
+
+    `chat_with_tools` 自己换算过一次；回退路径内部又走 `chat()`（也会换算）。
+    把换算后的值传下去会让预留被加两次：实测 2000 → 34768 而不是 18384，
+    在小上限模型上直接顶满 max_output_tokens，与请求预算脱钩。
+    """
+    _patch_model(monkeypatch)
+    payloads = _install_fake_provider(monkeypatch, [_ok_response()])
+    monkeypatch.setattr(hiagent, "_provider_supports_tools", lambda _p: False)
+    monkeypatch.setattr(hiagent, "_streaming_enabled", lambda: False)
+
+    await hiagent.chat_with_tools(
+        [{"role": "user", "content": "hi"}], [], max_tokens=2000,
+    )
+
+    assert len(payloads) == 1
+    assert payloads[0]["max_tokens"] == 2000 + config.TEXT_REASONING_TOKEN_RESERVE
+
+
+@pytest.mark.asyncio
+async def test_streaming_json_protocol_fallback_also_reserves_once(
+    monkeypatch,
+) -> None:
+    """流式回退不经过 chat()，必须在自己那一层换算，且同样只换算一次。"""
+    _patch_model(monkeypatch)
+    seen: list[int] = []
+
+    async def fake_stream(_messages, *, temperature, max_tokens, call_meta, on_token):
+        seen.append(int(max_tokens))
+        return '{"reply":"ok","tool_calls":[],"done":true}'
+
+    monkeypatch.setattr(hiagent, "_provider_supports_tools", lambda _p: False)
+    monkeypatch.setattr(hiagent, "_streaming_enabled", lambda: True)
+    monkeypatch.setattr(hiagent, "_stream_plain_chat", fake_stream)
+
+    await hiagent.chat_with_tools(
+        [{"role": "user", "content": "hi"}], [],
+        max_tokens=2000, on_token=lambda _kind, _text: None,
+    )
+
+    assert seen == [2000 + config.TEXT_REASONING_TOKEN_RESERVE]

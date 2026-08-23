@@ -236,3 +236,38 @@ async def test_non_dead_end_shard_failure_never_rebuilds(monkeypatch) -> None:
         await stages.generate_screenplay({"id": "e1", "episode_no": 2}, "源文", None)
 
     assert attempts["n"] == 1
+
+
+def test_cached_leaf_is_a_miss_only_when_this_activation_changed_its_input() -> None:
+    """重建刻意改了分片输入 ⇒ 旧 leaf 不适用；这不是权威漂移。
+
+    不区分这两者的话，重建必然停在 BLUEPRINT_SPLIT_MANIFEST_AUTHORITY——
+    恰好死在这个机制要救的那个场景里（第一轮蓝图成功过，它的 leaf 一定已被缓存）。
+    """
+    payload_with_feedback = [
+        stages._blueprint_shard_source_entry(
+            _Segment("SRC0012", "但他性格坚毅，此刻深吸口气。"),
+            {"SRC0012:unit:003": ["与源文矛盾"]},
+        )
+    ]
+    payload_plain = [
+        stages._blueprint_shard_source_entry(
+            _Segment("SRC0012", "但他性格坚毅，此刻深吸口气。"), None,
+        )
+    ]
+
+    # 本次注入了证据、且哈希确实变了 ⇒ 视为缓存未命中，重新生成该分片。
+    assert stages._cached_leaf_superseded_by_feedback(
+        cached_source_hash="old", source_hash="new",
+        source_payload=payload_with_feedback,
+    )
+    # 没有注入证据的分片，哈希不一致仍然是权威漂移，严格性一个字都没放松。
+    assert not stages._cached_leaf_superseded_by_feedback(
+        cached_source_hash="old", source_hash="new",
+        source_payload=payload_plain,
+    )
+    # 哈希一致就是正常命中，无论是否带证据。
+    assert not stages._cached_leaf_superseded_by_feedback(
+        cached_source_hash="same", source_hash="same",
+        source_payload=payload_with_feedback,
+    )
