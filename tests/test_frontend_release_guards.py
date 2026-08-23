@@ -75,5 +75,12 @@ def test_fingerprinted_assets_are_immutably_cached() -> None:
         assert hashed.status_code == 200
         assert "immutable" in hashed.headers.get("cache-control", "")
 
-        index = client.get("/index.html")
-        assert "immutable" not in (index.headers.get("cache-control") or "")
+        # 只断言「不是 immutable」不够：完全不设 cache-control 也能通过，而那正是
+        # 浏览器启发式缓存的触发条件——外壳被缓存后，它引用的旧 chunk 因 immutable
+        # 永不更新，发版就再也到不了用户。必须正向要求回源校验。
+        for shell in ("/index.html", "/", "/projects/p1/board"):
+            response = client.get(shell)
+            assert response.status_code == 200, shell
+            cache_control = response.headers.get("cache-control") or ""
+            assert "no-cache" in cache_control, f"{shell} 缺少回源校验：{cache_control!r}"
+            assert "immutable" not in cache_control, shell

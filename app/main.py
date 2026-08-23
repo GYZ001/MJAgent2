@@ -230,6 +230,12 @@ class SpaStaticFiles(StaticFiles):
         # 可以放心长缓存；index.html 必须每次回源，否则拿不到新指纹。
         if path.startswith("assets/") and response.status_code == 200:
             response.headers["cache-control"] = "public, max-age=31536000, immutable"
+        elif "text/html" in response.headers.get("content-type", ""):
+            # 不设 cache-control 时浏览器会启发式缓存（常按 last-modified 距今的 10%
+            # 估算），移动端 Safari 尤其激进：外壳一旦被缓存，它引用的旧 chunk 又是
+            # immutable，整个旧版应用会被永久钉死，发版永远到不了用户。
+            # no-cache 允许缓存但强制用 ETag 回源校验，未变更时走 304，几乎无额外开销。
+            response.headers["cache-control"] = "no-cache"
         return response
 
 
