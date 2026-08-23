@@ -11,7 +11,7 @@ import {
 import { useNav, useScriptEpisode } from '../App'
 import EpisodeCrumb from '../components/EpisodeCrumb'
 import DecisionDialog from '../components/DecisionDialog'
-import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
+import { ServerTaskTimer } from '../components/TaskTimer'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import { ScreenplayStatusStamp } from '../components/ProductionStatusStamp'
 import QueryState from '../components/QueryState'
@@ -259,12 +259,6 @@ export default function ScriptPage() {
     dirty: Boolean(dropWizard?.reason || dropWizard?.rewrite),
     onDirtyClose: () => toast('恢复向导尚未写入草稿，请先完成或点击取消'),
   })
-
-  const screenplayTimer = useTaskTimer(
-    `episode.${episodeId}.screenplay`,
-    ep?.screenplay_production?.task_active
-      ?? ['queued', 'running'].includes(ep?.screenplay_status ?? ''),
-  )
 
   const screenplayTaskActive = ep?.screenplay_production?.task_active
     ?? ['queued', 'running'].includes(ep?.screenplay_status ?? '')
@@ -518,14 +512,13 @@ export default function ScriptPage() {
       return
     }
     if (current.kind === 'screenplay') {
-      screenplayTimer.start()
       const result = await run(() => api.post(
         `/episodes/${ep.id}/screenplay`,
         screenplayGeneratePayload(
           current.idempotencyKey,
           current.data?.blueprint_budget,
         ),
-      ), '首版剧本任务已受理').catch(() => screenplayTimer.clear())
+      ), '首版剧本任务已受理').catch(() => undefined)
       if (result) {
         setDirty(false)
         localStorage.removeItem(localDraftKey)
@@ -541,7 +534,6 @@ export default function ScriptPage() {
       idempotency_key: stableKey(`screenplay-resume:${ep.id}`),
     })).catch(() => null)
     if (!result) return
-    screenplayTimer.start()
     toast(screenplayResumeOutcomeSummary(result))
   }
 
@@ -589,7 +581,6 @@ export default function ScriptPage() {
           baselineVersion,
         ),
       )
-      screenplayTimer.start()
       toast('工作草稿已进入独立修复环节，完成后会重新校验')
       await clearWorkingDraft()
       await refresh({ force: true })
@@ -606,7 +597,6 @@ export default function ScriptPage() {
       const result = await run(() => api.del(`/episodes/${ep.id}/screenplay`))
       if (result) {
         await clearWorkingDraft()
-        screenplayTimer.clear()
         toast('当前剧本及下游已删除')
       }
     } catch { /* run 已呈现结果 */ }
@@ -845,7 +835,12 @@ export default function ScriptPage() {
           )}
           <span className="screenplay-row-spacer" />
           {ep.screenplay_evidence && <EvidenceDrawer evidence={ep.screenplay_evidence} label="剧本证据" />}
-          <TaskTimer label="剧本" timer={screenplayTimer} />
+          <ServerTaskTimer
+            label="剧本"
+            startedAt={ep.screenplay_production?.task_started_at}
+            finishedAt={ep.screenplay_production?.task_finished_at}
+            running={screenplayTaskActive}
+          />
         </div>
 
         {recoverable && !editing && (

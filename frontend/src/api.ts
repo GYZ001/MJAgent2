@@ -1818,6 +1818,9 @@ export interface Episode {
     baseline_done: boolean;
     first_evaluation_done: boolean;
     task_active: boolean;
+    /** 服务端 run 的起止时间（秒）。计时以此为准，不用前端本地起点。 */
+    task_started_at?: number | null;
+    task_finished_at?: number | null;
     can_resume_baseline?: boolean;
     can_resume_repair: boolean;
     shard_progress?: {

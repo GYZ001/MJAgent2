@@ -1146,13 +1146,17 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
 
     current_run = (
         conn.execute(
-            "SELECT status,failure_code,failure_message FROM workflow_runs "
-            "WHERE id=?",
+            "SELECT status,failure_code,failure_message,started_at,finished_at "
+            "FROM workflow_runs WHERE id=?",
             (episode["active_screenplay_run_id"],),
         ).fetchone()
         if episode and episode["active_screenplay_run_id"]
         else None
     )
+    # 任务计时必须以服务端 run 的时间戳为准：前端 localStorage 起点在
+    # 「任务运行中刷新页面」后会永久搁浅，下一个任务会复用旧起点导致时长虚高。
+    task_started_at = current_run["started_at"] if current_run else None
+    task_finished_at = current_run["finished_at"] if current_run else None
     active = bool(
         task_registry.active("screenplay", episode_id)
         or (
@@ -1180,6 +1184,8 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
             "baseline_done": False,
             "first_evaluation_done": False,
             "task_active": active,
+            "task_started_at": task_started_at,
+            "task_finished_at": task_finished_at,
             "can_resume_repair": False,
             "can_resume_baseline": False,
             "has_working_baseline": False,
@@ -1288,6 +1294,8 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         "baseline_done": rev.baseline_done,
         "first_evaluation_done": rev.first_evaluation_done,
         "task_active": active,
+        "task_started_at": task_started_at,
+        "task_finished_at": task_finished_at,
         "can_resume_repair": bool(
             eligibility.mode == "finalize" and not active
         ),
