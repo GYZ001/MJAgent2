@@ -152,17 +152,18 @@ async def run_regex_plan(project_id: str) -> None:
             )
         conn.execute(
             "UPDATE projects SET plan_status='ready', plan_error=NULL, key_timeline='[]', "
-            "status='planned' WHERE id=?", (project_id,)
+            "status='planned', plan_finished_at=? WHERE id=?", (now(), project_id)
         )
         conn.commit()
         committed = True
     except ReplanActiveWorkError:
         conn.rollback()
         conn.execute(
-            "UPDATE projects SET plan_status='failed', plan_error=? WHERE id=?",
+            "UPDATE projects SET plan_status='failed', plan_error=?, plan_finished_at=? WHERE id=?",
             (
                 "重新分集未执行：检测到仍可继续或正在运行的下游任务。"
                 "请先在对应工作台或任务中心结束、取消任务后重试；原分集和媒体均已保留。",
+                now(),
                 project_id,
             ),
         )
@@ -175,8 +176,8 @@ async def run_regex_plan(project_id: str) -> None:
             exc, action="plan_generate", context={"project_id": project_id}
         )
         conn.execute(
-            "UPDATE projects SET plan_status='failed', plan_error=? WHERE id=?",
-            (public, project_id),
+            "UPDATE projects SET plan_status='failed', plan_error=?, plan_finished_at=? WHERE id=?",
+            (public, now(), project_id),
         )
         conn.commit()
     if not committed:
@@ -221,8 +222,8 @@ def recover_plan_tasks() -> int:
                 exc, action="plan_recovery_spawn", context={"project_id": project_id}
             )
             conn.execute(
-                "UPDATE projects SET plan_status='failed', plan_error=? WHERE id=?",
-                (f"分集恢复任务未能启动，原文已保留，可在分集页重试：{public}", project_id),
+                "UPDATE projects SET plan_status='failed', plan_error=?, plan_finished_at=? WHERE id=?",
+                (f"分集恢复任务未能启动，原文已保留，可在分集页重试：{public}", now(), project_id),
             )
             conn.commit()
     return resumed
@@ -243,8 +244,10 @@ async def start_plan(project_id: str, *, replace_existing: bool = False) -> dict
     if task_registry.active("plan", project_id):
         if project["plan_status"] != "running":
             conn.execute(
-                "UPDATE projects SET plan_status='running', plan_error=NULL WHERE id=?",
-                (project_id,),
+                # 任务已在跑，状态只是没对上；起点缺失时补一个，不覆盖已有值。
+                "UPDATE projects SET plan_status='running', plan_error=NULL, "
+                "plan_started_at=COALESCE(plan_started_at, ?) WHERE id=?",
+                (now(), project_id),
             )
             conn.commit()
         return {
@@ -264,7 +267,10 @@ async def start_plan(project_id: str, *, replace_existing: bool = False) -> dict
     _raise_replan_active_work(replan_blockers(conn, project_id))
     resumed = project["plan_status"] == "running"
     conn.execute(
-        "UPDATE projects SET plan_status='running', plan_error=NULL WHERE id=?", (project_id,)
+        # plan_started_at 是任务计时的服务端起点：续跑保留原起点，新任务才重新计时。
+        "UPDATE projects SET plan_status='running', plan_error=NULL, "
+        "plan_started_at=CASE WHEN ? THEN COALESCE(plan_started_at, ?) ELSE ? END WHERE id=?",
+        (1 if resumed else 0, now(), now(), project_id),
     )
     conn.commit()
     try:
@@ -274,8 +280,8 @@ async def start_plan(project_id: str, *, replace_existing: bool = False) -> dict
             exc, action="plan_spawn", context={"project_id": project_id}
         )
         conn.execute(
-            "UPDATE projects SET plan_status='failed', plan_error=? WHERE id=?",
-            (f"分集任务未能启动，项目和原文已保留，可直接重试：{public}", project_id),
+            "UPDATE projects SET plan_status='failed', plan_error=?, plan_finished_at=? WHERE id=?",
+            (f"分集任务未能启动，项目和原文已保留，可直接重试：{public}", now(), project_id),
         )
         conn.commit()
         raise HTTPException(

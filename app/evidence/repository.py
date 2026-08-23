@@ -741,6 +741,40 @@ def get_active_scoped_run(
     return _decode_rows([dict(row)])[0]
 
 
+def latest_run_timing(
+    *,
+    workflow_type: str,
+    scope_type: str,
+    scope_id: str,
+    conn=None,
+) -> dict[str, float | None]:
+    """返回该 scope 最近一次 run 的起止时间，供前端任务计时使用。
+
+    前端曾把计时起点存在 localStorage：任务运行中刷新页面会让起点永久搁浅，
+    下一个任务复用旧起点，显示出「已等待 1244 分」这类虚高时长。计时必须以
+    服务端 run 的时间戳为准。
+
+    取 started_at 最新的一条即「当前这次尝试」。不按状态优先：PAUSED_EXTERNAL
+    等挂起态也计入活跃，若让其优先会选中几十小时前的旧 run 而非最近一次。
+    是否运行中由调用方的领域状态决定，这里只描述最近一次尝试的起止。
+    """
+    db = conn or get_conn()
+    row = db.execute(
+        "SELECT started_at, finished_at, status FROM workflow_runs "
+        "WHERE workflow_type=? AND scope_type=? AND scope_id=? AND started_at IS NOT NULL "
+        "ORDER BY started_at DESC LIMIT 1",
+        (workflow_type, scope_type, scope_id),
+    ).fetchone()
+    if row is None:
+        return {"started_at": None, "finished_at": None}
+    active = row["status"] in ACTIVE_RUN_STATUSES
+    return {
+        "started_at": row["started_at"],
+        # 活跃 run 的 finished_at 一律视为未结束，避免残留值让计时提前停住。
+        "finished_at": None if active else row["finished_at"],
+    }
+
+
 def list_runs(*, active: bool | None = None, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
     clauses: list[str] = []
     params: list[Any] = []
