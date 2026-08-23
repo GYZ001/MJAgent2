@@ -14,6 +14,7 @@ import {
 import { compactShotStage, shotVideoState } from '../shotStatus'
 import DecisionDialog from '../components/DecisionDialog'
 import QueryState from '../components/QueryState'
+import { ItemTaskTimer, ServerTaskTimer } from '../components/TaskTimer'
 import {
   artifactTypeLabel,
   statusLabel,
@@ -945,6 +946,12 @@ export default function WallPage() {
           <details className="status-detail"><summary><span className={`stamp ${context?.upstream.eligible_for_production ? 'green' : 'gold'}`}>{episodeState.label}</span></summary><div>{episodeState.next}<br /><code>{ep.status}</code></div></details>
         </div>
         <div className="wall-topbar-right">
+          <ServerTaskTimer
+            label="视频"
+            startedAt={ep.video_task_timing?.started_at}
+            finishedAt={ep.video_task_timing?.finished_at}
+            running={generationAction === 'stop'}
+          />
           {shots.length > 0 && (
             <button
               ref={generationActionRef}
@@ -1591,7 +1598,7 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
           return <article className={`video-candidate-card${selectedCandidate ? ' selected' : ''}${adopted ? ' adopted' : ''}${archived ? ' archived' : ''}`} key={version.id}>
             <button type="button" className="video-candidate-select" aria-pressed={selectedCandidate} title={version.video_url ? `选择 v${version.version_no} 预览` : `选择 v${version.version_no} 查看生成状态`} onClick={() => setPreviewId(version.id)}>
               <span className="video-candidate-title"><b>v{version.version_no}</b><span className={`stamp ${version.status === 'failed' ? 'red' : version.status === 'succeeded' ? 'green' : 'gold'}`}>{videoVersionStatusLabel(version, adopted)}</span>{archived && <span className="stamp grey">已归档</span>}</span>
-              <span className="video-candidate-metrics"><span>质检 {version.qa?.overall?.toFixed(2) ?? '—'}</span><span>￥{version.cost_cny.toFixed(2)}</span><span>{version.latency_s.toFixed(1)} 秒</span><span>{playbackRates[version.id] ?? videoPlaybackRate(version)}×</span></span>
+              <span className="video-candidate-metrics"><span>质检 {version.qa?.overall?.toFixed(2) ?? '—'}</span><span>￥{version.cost_cny.toFixed(2)}</span><ItemTaskTimer elapsedMs={Math.round(version.latency_s * 1000)} runningSince={version.running_since} compact /><span>{playbackRates[version.id] ?? videoPlaybackRate(version)}×</span></span>
               <span className="video-candidate-note">{videoCandidateNote(version)}</span>
             </button>
             <div className="video-candidate-actions">{version.video_url && !adopted && !archived && <button type="button" className="btn primary small" disabled={Boolean(adoptDisabledReason || candidateAction)} title={adoptDisabledReason || '采纳前需填写理由'} onClick={() => openAdopt(version)}>采纳</button>}{!adopted && !archived && <button type="button" className="btn ghost small" disabled={Boolean(candidateAction)} title="暂时从候选列表隐藏，可随时恢复" onClick={() => { void archive(version) }}>{candidateAction?.kind === 'archive' && candidateAction.versionId === version.id ? '归档中…' : '归档'}</button>}{!adopted && !archived && !['queued', 'running', 'waiting_provider'].includes(version.status) && <button type="button" className="btn ghost small danger" disabled={Boolean(candidateAction)} title="永久删除此候选，操作前会再次确认" onClick={() => setDeleteTarget(version)}>删除候选</button>}{archived && <button type="button" className="btn ghost small" disabled={Boolean(candidateAction)} title="恢复到可操作的候选列表" onClick={() => { void unarchive(version) }}>{candidateAction?.kind === 'restore' && candidateAction.versionId === version.id ? '恢复中…' : '恢复候选'}</button>}</div>

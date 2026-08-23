@@ -2237,6 +2237,13 @@ export interface TaskTiming {
   finished_at?: number | null;
 }
 
+/** 单个镜头的生成耗时。已完成迭代累计在 elapsed_ms，仍在跑的那轮给起点。 */
+export interface ShotTiming {
+  elapsed_ms: number;
+  running_since?: number | null;
+  iterations: number;
+}
+
 export interface Project {
   id: string;
   name: string;

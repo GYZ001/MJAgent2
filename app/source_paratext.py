@@ -46,24 +46,36 @@ PARATEXT_RULE = (
     "不得按段落位置、长度或是否出现某个词来判断。"
 )
 
-_CACHE: OrderedDict[str, tuple[str, ...]] = OrderedDict()
+_CACHE: OrderedDict[str, tuple["ParatextAnchor", ...]] = OrderedDict()
 _CACHE_SIZE = 256
 _CACHE_LOCK = RLock()
 
 
-class ParatextSpans(BaseModel):
-    """模型只需要指出旁文本片段的原文起始句，程序自己定位与删除。"""
+class ParatextAnchor(BaseModel):
+    """一段旁文本的首尾锚点。
+
+    刻意**不**让模型逐字复述整段：实测它能准确判出哪段是作者的话，
+    却复述不出逐字相同的长文本（194 字那段就抄漏了），
+    于是精确匹配整段删除会静默失效。判断交给模型，定位与切割交给程序。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    spans: list[str] = Field(default_factory=list)
+    start: str = Field(description="该段旁文本开头的原文，逐字抄至少 10 个字")
+    end: str = Field(description="该段旁文本结尾的原文，逐字抄至少 10 个字")
+
+
+class ParatextSpans(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    spans: list[ParatextAnchor] = Field(default_factory=list)
 
 
 def _cache_key(text: str) -> str:
     return hashlib.blake2b(text.encode("utf-8"), digest_size=16).hexdigest()
 
 
-def _cached(text: str) -> tuple[str, ...] | None:
+def _cached(text: str) -> tuple[ParatextAnchor, ...] | None:
     key = _cache_key(text)
     with _CACHE_LOCK:
         hit = _CACHE.get(key)
@@ -72,7 +84,7 @@ def _cached(text: str) -> tuple[str, ...] | None:
         return hit
 
 
-def _remember(text: str, spans: tuple[str, ...]) -> None:
+def _remember(text: str, spans: tuple[ParatextAnchor, ...]) -> None:
     key = _cache_key(text)
     with _CACHE_LOCK:
         _CACHE[key] = spans
@@ -81,24 +93,59 @@ def _remember(text: str, spans: tuple[str, ...]) -> None:
             _CACHE.popitem(last=False)
 
 
-def remove_spans(text: str, spans: list[str] | tuple[str, ...]) -> str:
-    """删除模型指认的旁文本片段。
+MIN_ANCHOR_CHARS = 8
+MAX_REMOVED_FRACTION = 0.4
 
-    只删**逐字命中**的片段：模型若把片段抄错一个字就当它没指认，
-    宁可漏删也不能凭模糊匹配删掉正文。
+
+def _anchor_region(text: str, start: str, end: str) -> tuple[int, int] | None:
+    """用首尾锚点在原文里定位一段区间。任何一项不成立就返回 None（不删）。"""
+    head, tail = (start or "").strip(), (end or "").strip()
+    if len(head) < MIN_ANCHOR_CHARS or len(tail) < MIN_ANCHOR_CHARS:
+        return None
+    begin = text.find(head)
+    if begin < 0:
+        return None
+    tail_at = text.find(tail, begin + len(head))
+    if tail_at < 0:
+        # 允许首尾锚点重叠在同一句（整段就是一句话）。
+        if text.startswith(tail, begin):
+            tail_at = begin
+        else:
+            return None
+    return begin, tail_at + len(tail)
+
+
+def remove_spans(text: str, spans: list[ParatextAnchor]) -> str:
+    """按锚点区间删除旁文本。
+
+    程序负责定位与切割，并对总删除比例设上限——模型指错一次也不会
+    把正文删掉大半。区间重叠时合并，从后往前删以免下标漂移。
     """
-    out = text
+    regions: list[tuple[int, int]] = []
     for span in spans:
-        candidate = (span or "").strip()
-        if len(candidate) < 8:
-            # 太短的片段无法证明是旁文本，删了容易伤到正文。
-            continue
-        if candidate in out:
-            out = out.replace(candidate, "")
+        region = _anchor_region(text, span.start, span.end)
+        if region is not None:
+            regions.append(region)
+    if not regions:
+        return text
+    regions.sort()
+    merged: list[list[int]] = []
+    for begin, finish in regions:
+        if merged and begin <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], finish)
+        else:
+            merged.append([begin, finish])
+    removed = sum(finish - begin for begin, finish in merged)
+    if removed > len(text) * MAX_REMOVED_FRACTION:
+        # 删得太多说明这次判定不可信，整体放弃。
+        return text
+    out = text
+    for begin, finish in reversed(merged):
+        out = out[:begin] + out[finish:]
     return re.sub(r"\n{3,}", "\n\n", out).strip()
 
 
-async def paratext_spans(text: str, *, operation_id: str) -> tuple[str, ...]:
+async def paratext_spans(text: str, *, operation_id: str) -> tuple[ParatextAnchor, ...]:
     """让模型逐字指认原文里的旁文本片段。失败时返回空元组（保守：不删）。"""
     body = (text or "").strip()
     if len(body) < 200:
@@ -112,8 +159,10 @@ async def paratext_spans(text: str, *, operation_id: str) -> tuple[str, ...]:
     prompt = (
         f"{PARATEXT_RULE}\n\n"
         "任务：从下面这段小说原文里找出所有旁文本片段。\n"
-        "把每个片段的原文**逐字**抄进 spans（含首尾标点，不要改写、不要省略号）。"
-        "没有旁文本就返回空列表。\n\n"
+        "每个片段只需给出首尾锚点：start 逐字抄该段**开头**的至少 10 个字，"
+        "end 逐字抄该段**结尾**的至少 10 个字（含标点）。"
+        "两个锚点都必须能在原文里逐字找到，中间的内容由后端自己截取，"
+        "所以不要复述整段。没有旁文本就返回空列表。\n\n"
         f"原文：\n{body}"
     )
     try:
@@ -129,7 +178,10 @@ async def paratext_spans(text: str, *, operation_id: str) -> tuple[str, ...]:
         # 旁文本剔除是**净化**步骤，不是门禁：判不出来就退回原文，
         # 让下游照旧工作，绝不因为它挡住建人物谱/人物发现。
         return ()
-    spans = tuple(s for s in (result.spans or []) if (s or "").strip())
+    spans = tuple(
+        s for s in (result.spans or [])
+        if (s.start or "").strip() and (s.end or "").strip()
+    )
     _remember(body, spans)
     return spans
 
@@ -140,11 +192,7 @@ async def strip_paratext(text: str, *, operation_id: str) -> str:
     spans = await paratext_spans(body, operation_id=operation_id)
     if not spans:
         return body
-    cleaned = remove_spans(body, spans)
-    # 只要清洗后内容明显不足，就判定这次判定不可信，退回原文。
-    if len(cleaned) < len(body.strip()) * 0.5:
-        return body
-    return cleaned
+    return remove_spans(body, list(spans))
 
 
 def paratext_cache_clear() -> None:

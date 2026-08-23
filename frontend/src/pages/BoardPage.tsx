@@ -2,7 +2,7 @@ import { ReactNode, useEffect, useId, useLayoutEffect, useMemo, useRef, useState
 import { api, ApiError, Episode, Shot, StoryboardStatus } from '../api'
 import { useEpisode, useNav } from '../App'
 import EpisodeCrumb from '../components/EpisodeCrumb'
-import { ServerTaskTimer } from '../components/TaskTimer'
+import { ItemTaskTimer, ServerTaskTimer } from '../components/TaskTimer'
 import DecisionDialog from '../components/DecisionDialog'
 import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
 import QueryState from '../components/QueryState'
@@ -1099,6 +1099,8 @@ export default function BoardPage() {
     ?? Math.max(0, status.produced_shots - status.validated_shots)
   const terminalFinalShot = status.final_shot_valid && ['ready_to_confirm', 'confirmed'].includes(status.state)
   const toolbarActions = storyboardToolbarActions(status.state)
+  // 逐镜耗时按 shot_no 归集；从未生成过的镜头没有条目，计时器自然不显示。
+  const shotTiming = (shotNo: number) => ep.shot_timings?.[String(shotNo)]
 
   return (
     <>
@@ -1232,6 +1234,14 @@ export default function BoardPage() {
                   <span className="shot-nav-top"><span className="shot-nav-no">镜 {String(shot.shot_no).padStart(2, '0')}</span><span>{shot.duration_s}s</span></span>
                   <span className="shot-nav-main"><b>{shot.shot_size} · {shot.camera_angle || '平视'} · {shot.camera_move}</b><small>{shot.scene_time ? `${shot.scene_time} · ` : ''}{shot.scene_name || shot.scene_setting}</small></span>
                   <span className="shot-nav-badges">
+                    {shotTiming(shot.shot_no) && (
+                      <ItemTaskTimer
+                        elapsedMs={shotTiming(shot.shot_no)!.elapsed_ms}
+                        runningSince={shotTiming(shot.shot_no)!.running_since}
+                        iterations={shotTiming(shot.shot_no)!.iterations}
+                        compact
+                      />
+                    )}
                     {checkpoint && <i className={checkpoint.className} title={checkpoint.title}>{checkpoint.label}</i>}
                     {isStoryboardProblemShot(shot) && <i className="problem">需处理</i>}
                     {shot.is_final && <i>{checkpoint?.className === 'checkpoint-pending' ? '草稿收尾' : '收尾镜'}</i>}

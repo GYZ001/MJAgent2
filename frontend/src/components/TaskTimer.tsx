@@ -73,6 +73,37 @@ export function ServerTaskTimer({ label, startedAt, finishedAt, running }: {
     : <span className="task-timer done"><b>{label}</b> 本次耗时 {formatDuration(elapsedMs)}</span>
 }
 
+/** 单项计时：累计已完成耗时，若仍在跑则叠加实时增量。
+ *
+ *  用于逐镜分镜与逐条视频——它们的耗时由多次重试累加而成，语义与整模块的
+ *  起止时间不同，不能复用 ServerTaskTimer。
+ */
+export function ItemTaskTimer({ elapsedMs, runningSince, iterations, compact = false }: {
+  elapsedMs: number
+  runningSince?: number | null
+  iterations?: number
+  compact?: boolean
+}) {
+  const [clock, setClock] = useState(Date.now())
+  useEffect(() => {
+    if (!runningSince) return
+    setClock(Date.now())
+    const timer = window.setInterval(() => setClock(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [runningSince])
+  const running = Boolean(runningSince)
+  const liveMs = running ? Math.max(0, clock - (runningSince as number) * 1000) : 0
+  const totalMs = Math.max(0, elapsedMs) + liveMs
+  if (!running && totalMs <= 0) return null
+  const retries = Math.max(0, (iterations ?? 0) - 1)
+  return (
+    <span className={`task-timer item-timer${running ? '' : ' done'}`}>
+      {running ? '已执行 ' : ''}{formatDuration(totalMs)}
+      {!compact && retries > 0 && <small> · 重试 {retries} 次</small>}
+    </span>
+  )
+}
+
 export function useTaskTimer(key: string, active: boolean) {
   const storageKey = useMemo(() => `mjagent.timer.${key}`, [key])
   const [record, setRecord] = useState<TimerRecord>(() => loadRecord(storageKey))

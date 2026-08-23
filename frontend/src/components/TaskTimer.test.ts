@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { isStaleRecord, loadRecordForTest, ServerTaskTimer } from "./TaskTimer";
+import { isStaleRecord, ItemTaskTimer, loadRecordForTest, ServerTaskTimer } from "./TaskTimer";
 
 const STORAGE_KEY = "mjagent.timer.episode.ep_1.screenplay";
 
@@ -123,5 +123,66 @@ describe("useTaskTimer 的搁浅记录清理", () => {
     }));
 
     expect(loadRecordForTest(STORAGE_KEY).lastMs).toBe(5_000);
+  });
+});
+
+describe("ItemTaskTimer 逐项计时", () => {
+  it("已完成时显示累计耗时，并标注重试次数", () => {
+    // 实测某镜头 4 次迭代：67243+163830+194568+93061 = 518702ms
+    const html = renderToStaticMarkup(createElement(ItemTaskTimer, {
+      elapsedMs: 518_702,
+      runningSince: null,
+      iterations: 4,
+    }));
+
+    expect(html).toContain("8分38秒");
+    expect(html).toContain("重试 3 次");
+    expect(html).toContain("done");
+  });
+
+  it("生成中把实时增量叠加到已完成迭代之上", () => {
+    const html = renderToStaticMarkup(createElement(ItemTaskTimer, {
+      elapsedMs: 60_000,
+      runningSince: Math.floor(Date.now() / 1000) - 30,
+      iterations: 2,
+    }));
+
+    // 60 秒已完成 + 约 30 秒实时 = 约 1 分 30 秒，且处于运行态。
+    expect(html).toContain("已执行");
+    expect(html).toContain("1分3");
+    expect(html).not.toContain("done");
+  });
+
+  it("单次成功不显示重试标注", () => {
+    const html = renderToStaticMarkup(createElement(ItemTaskTimer, {
+      elapsedMs: 45_000,
+      runningSince: null,
+      iterations: 1,
+    }));
+
+    expect(html).toContain("45秒");
+    expect(html).not.toContain("重试");
+  });
+
+  it("compact 模式省略重试标注，避免撑破小字号容器", () => {
+    const html = renderToStaticMarkup(createElement(ItemTaskTimer, {
+      elapsedMs: 518_702,
+      runningSince: null,
+      iterations: 4,
+      compact: true,
+    }));
+
+    expect(html).toContain("8分38秒");
+    expect(html).not.toContain("重试");
+  });
+
+  it("从未生成过（无耗时且未在跑）时不渲染", () => {
+    const html = renderToStaticMarkup(createElement(ItemTaskTimer, {
+      elapsedMs: 0,
+      runningSince: null,
+      iterations: 0,
+    }));
+
+    expect(html).toBe("");
   });
 });

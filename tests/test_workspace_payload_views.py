@@ -695,3 +695,68 @@ def test_storyboard_batch_timing_aggregates_active_runs(monkeypatch) -> None:
     assert projects.project_detail("p1", view="episodes")["task_timings"][
         "storyboard_batch"
     ] == {"started_at": 400.0, "finished_at": None}
+
+
+def test_storyboard_shot_timings_sum_all_retry_iterations(monkeypatch) -> None:
+    """逐镜耗时累计全部重试迭代，仍在跑的那轮回报起点供前端实时叠加。"""
+    conn = _conn()
+    _seed_episode(conn)
+    _patch_storyboard_db(monkeypatch, conn)
+
+    _seed_run(conn, run_id="r_sb", workflow_type="storyboard",
+              scope_type="episode", scope_id="e1", status="RUNNING",
+              started_at=1_000.0)
+    rows = [
+        # 镜 1：四轮重试全部结束，累计 518702ms。
+        ("sr1", "storyboard_shot_1.iteration", 1_000.0, 1_067.2, 67_243),
+        ("sr2", "storyboard_shot_1.iteration", 1_070.0, 1_233.8, 163_830),
+        ("sr3", "storyboard_shot_1.iteration", 1_240.0, 1_434.5, 194_568),
+        ("sr4", "storyboard_shot_1.iteration", 1_440.0, 1_533.0, 93_061),
+        # 镜 2：一轮已结束，第二轮仍在跑（finished_at 为空，latency_ms 尚未回填）。
+        ("sr5", "storyboard_shot_2.iteration", 1_540.0, 1_600.0, 60_000),
+        ("sr6", "storyboard_shot_2.iteration", 1_610.0, None, 0),
+    ]
+    conn.executemany(
+        """INSERT INTO step_runs(id, run_id, step_key, iteration_no, status,
+                                 started_at, finished_at, latency_ms)
+           VALUES(?,'r_sb',?,1,'SUCCEEDED',?,?,?)""",
+        rows,
+    )
+    conn.commit()
+
+    timings = storyboard_ops.episode_detail("e1", view="board")["shot_timings"]
+    assert timings["1"] == {
+        "elapsed_ms": 518_702, "running_since": None, "iterations": 4,
+    }
+    # 在跑的那轮不计入 elapsed_ms，只交出起点。
+    assert timings["2"] == {
+        "elapsed_ms": 60_000, "running_since": 1_610.0, "iterations": 2,
+    }
+
+
+def test_storyboard_shot_timings_are_scoped_to_the_latest_run(monkeypatch) -> None:
+    """重新生成后只算最近一次 run，不把上一次的耗时累加进来。"""
+    conn = _conn()
+    _seed_episode(conn)
+    _patch_storyboard_db(monkeypatch, conn)
+
+    _seed_run(conn, run_id="r_old", workflow_type="storyboard",
+              scope_type="episode", scope_id="e1", status="CANCELLED",
+              started_at=100.0, finished_at=200.0)
+    _seed_run(conn, run_id="r_new", workflow_type="storyboard",
+              scope_type="episode", scope_id="e1", status="RUNNING",
+              started_at=900.0)
+    conn.executemany(
+        """INSERT INTO step_runs(id, run_id, step_key, iteration_no, status,
+                                 started_at, finished_at, latency_ms)
+           VALUES(?,?,'storyboard_shot_1.iteration',1,'SUCCEEDED',?,?,?)""",
+        [
+            ("old1", "r_old", 100.0, 190.0, 90_000),
+            ("new1", "r_new", 900.0, 930.0, 30_000),
+        ],
+    )
+    conn.commit()
+
+    timings = storyboard_ops.episode_detail("e1", view="board")["shot_timings"]
+    assert timings["1"]["elapsed_ms"] == 30_000, "不应把上一次 run 的耗时算进来"
+    assert timings["1"]["iterations"] == 1
