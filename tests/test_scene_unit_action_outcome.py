@@ -115,33 +115,23 @@ def test_scene_shard_validator_accepts_a_real_resulting_state() -> None:
 
 
 def test_dialogue_units_are_exempt_on_the_real_validator() -> None:
-    """对白 text 被合同钉死为源文原句，不能因此判它重复。"""
-    blueprint = _blueprint(split_domain=True)
-    plans = build_screenplay_scene_shard_plans(
-        blueprint,
-        source_text=SOURCE,
-        identity_registry_hash="identity-hash",
-    )
-    for plan in plans:
-        shard = _shard(plan, blueprint)
-        dialogue = next(
-            (u for scene in shard.scenes for u in scene.units if u.kind == "dialogue"),
-            None,
-        )
-        if dialogue is not None:
-            break
-    else:  # pragma: no cover - 夹具退化时立刻暴露，而不是静默跳过
-        raise AssertionError("蓝图夹具里没有任何对白单元，豁免断言失去意义")
-    dialogue.resulting_state = dialogue.text
+    """对白 text 被合同钉死为源文原句，不能因此判它重复。
 
-    errors = validate_screenplay_scene_shard(
-        shard,
-        plan=plan,
-        scene_plans={item.key: item for item in blueprint.scene_plans},
-        scene_input_contracts=_contracts([plan], blueprint)[plan.shard_id],
-        identity_keys={"narrator"},
+    对同一份 text/resulting_state 只翻转 `kind` 这一个维度做差分：
+    action 必须报重复，dialogue 必须不报。（翻转 kind 会另外触发结构漂移
+    错误，那是别的规则，这里只断言重复这一条的有无。）
+    """
+    def restate(unit) -> None:
+        unit.resulting_state = unit.text
+
+    def restate_as_dialogue(unit) -> None:
+        unit.resulting_state = unit.text
+        unit.kind = "dialogue"
+
+    assert any(_DUPLICATE_ERROR in e for e in _validate_with_unit(restate))
+    assert not any(
+        _DUPLICATE_ERROR in e for e in _validate_with_unit(restate_as_dialogue)
     )
-    assert not any(_DUPLICATE_ERROR in error for error in errors), errors
 
 
 @pytest.mark.parametrize(
