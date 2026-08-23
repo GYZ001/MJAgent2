@@ -50,8 +50,8 @@ from app.schemas import (
     VoiceCanonical,
 )
 from app.renderability import (
-    DIALOGUE_CHAIN_TURNS_HARD_MAX,
     SCENE_STORY_FUNCTION_MIN_CHARS,
+    chunk_dialogue_turns,
 )
 from app.source_excerpt import (
     align_source_excerpt,
@@ -5405,13 +5405,12 @@ def compile_screenplay_ir(
     dialogue_chains: list[KeyDialogueChain] = []
     for key in dialogue_chain_order:
         turns = dialogue_chain_rows[key]
-        for offset in range(0, len(turns), DIALOGUE_CHAIN_TURNS_HARD_MAX):
-            chunk = [
-                turn.model_copy(deep=True)
-                for turn in turns[
-                offset:offset + DIALOGUE_CHAIN_TURNS_HARD_MAX
-                ]
-            ]
+        # 按**发言**而不是按片段数切分：上面 `_split_spoken_line` 刚把一句
+        # 台词按单镜口播容量切成了多段，若在这里按片段数硬切，边界会落进
+        # 一次发言内部，把半句话分给下一条 chain（EP4 实测 DC3/DC4、
+        # DC5/DC6 两处都是这样切断的）。
+        for offset, chunk_turns in enumerate(chunk_dialogue_turns(turns)):
+            chunk = [turn.model_copy(deep=True) for turn in chunk_turns]
             if (
                 offset
                 and chunk

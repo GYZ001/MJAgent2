@@ -18,6 +18,67 @@ DROP_LIST_MIN = 0
 KEY_LINES_MIN = 3
 # 对白数量不设固定上限；整集预算由口播时长和单链技术熔断共同约束。
 DIALOGUE_CHAIN_TURNS_HARD_MAX = 8
+
+
+def dialogue_turn_speech_acts(turns: list) -> list[list]:
+    """把话轮列表按「一次发言」分组。
+
+    一句台词会被 `_split_spoken_line` 按单镜口播容量
+    （`MAX_SPOKEN_CHARS_PER_SHOT`）**有意**切成多段，每段都登记成独立
+    `KeyDialogueTurn`——这是 `DIALOGUE_TURN_CAPACITY_EXCEEDED` 这条硬门禁
+    要求的（单轮超过 36 字必拒）。但「话轮」在
+    `DIALOGUE_CHAIN_LENGTH_INVALID` 那里是语义概念：谁开口说了一次。
+    同一说话人、同一 `source_text` 的连续片段属于同一次发言。
+
+    两条门禁数的是同一个字段的两种不同单位，所以任何按数量切分的地方
+    都必须用这个函数，不能直接数 `len(turns)`。
+    """
+    acts: list[list] = []
+    previous_key: tuple[str, str] | None = None
+    for turn in turns:
+        key = (
+            str(getattr(turn, "speaker", "") or "").strip(),
+            str(getattr(turn, "source_text", "") or "").strip(),
+        )
+        # source_text 为空时无法证明同源，一律各自成一次发言（保守）。
+        if previous_key is not None and key == previous_key and key[1]:
+            acts[-1].append(turn)
+        else:
+            acts.append([turn])
+        previous_key = key
+    return acts
+
+
+def chunk_dialogue_turns(
+    turns: list,
+    *,
+    limit: int = DIALOGUE_CHAIN_TURNS_HARD_MAX,
+) -> list[list]:
+    """按 `limit` 切分话轮，且**不在一次发言中间切开**。
+
+    先分组成发言，再贪心装箱。只有当**单独一次发言**本身就超过 `limit`
+    时才退化为硬切——那种输入下任何切法都会切进一次发言内部，
+    此时保证长度上限比保证发言完整更重要（长度是硬门禁，会拒稿）。
+    """
+    if limit < 1:
+        raise ValueError("limit 必须为正整数")
+    chunks: list[list] = []
+    current: list = []
+    for act in dialogue_turn_speech_acts(turns):
+        if len(act) > limit:
+            if current:
+                chunks.append(current)
+                current = []
+            for offset in range(0, len(act), limit):
+                chunks.append(act[offset:offset + limit])
+            continue
+        if len(current) + len(act) > limit:
+            chunks.append(current)
+            current = []
+        current.extend(act)
+    if current:
+        chunks.append(current)
+    return chunks
 KEY_PLOT_POINTS_MIN = 1
 KEY_PLOT_POINTS_MAX: int | None = None
 

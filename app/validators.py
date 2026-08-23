@@ -69,6 +69,7 @@ from app.renderability import (
     HUMAN_DURATION_REVIEW_TAG,
     KEY_LINES_MIN,
     KEY_PLOT_POINTS_MIN,
+    chunk_dialogue_turns,
     PREFERRED_SHOT_DURATION_S,
     SCENE_OUTLINE_MIN,
     SCENE_STORY_FUNCTION_MIN_CHARS,
@@ -1707,6 +1708,36 @@ def normalize_screenplay_dialogue_chains(
                 chain.turns[0].function = "statement"
         merged_chains.append(chain)
     script.dialogue_chains = merged_chains
+
+    # 长度上限必须由**这个共享归一化器**兜底，不能只指望某一个生产者。
+    # `DIALOGUE_CHAIN_TURNS_HARD_MAX` 原先只有 `compile_screenplay_ir` 的分块
+    # 循环真正执行；validators / repair / document 投影里另外 7 处写
+    # `chain.turns` 的地方都不检查它，于是一条 11 轮的 chain 能一路走到硬门禁
+    # 才被拒——而修复层**没有任何策略能让 chain 变短**（只有往里补话轮的
+    # `dialogue_chain_continuity`），必然记 exhausted（EP4 实测 0 个补丁）。
+    #
+    # 按发言边界切分：话轮总数与顺序不变，因此 `derive_key_lines` 展平后的
+    # key_lines 与 KL## 编号逐字不变，对已生成的分镜零影响。
+    bounded_chains: list[KeyDialogueChain] = []
+    for chain in script.dialogue_chains:
+        turns = list(chain.turns or [])
+        if len(turns) <= DIALOGUE_CHAIN_TURNS_HARD_MAX:
+            bounded_chains.append(chain)
+            continue
+        base_topic = re.sub(
+            r"[（(]\s*续\s*[）)]\s*$", "", str(chain.topic or "").strip()
+        )
+        for part_index, chunk in enumerate(chunk_dialogue_turns(turns)):
+            part = chain.model_copy(deep=True)
+            part.turns = chunk
+            if part_index:
+                part.chain_id = next_chain_id()
+                part.topic = f"{base_topic}（续）"
+                if part.turns and part.turns[0].function == "response":
+                    part.turns[0].function = "statement"
+            bounded_chains.append(part)
+    script.dialogue_chains = bounded_chains
+
     flattened: list[str] = []
     for chain in script.dialogue_chains:
         for turn in chain.turns or []:
