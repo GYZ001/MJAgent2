@@ -5684,6 +5684,65 @@ async def _llm_field_patch(
     return []
 
 
+# 修复提示词过去只带 7 个 key（metadata / scene_blocks / dialogue_chains /
+# voice_bible / narrative_plan 两跳闭包 / graph 索引 / scope_note），
+# 而 ScreenplayDocument 还有 plot_spine、source_coverage、story_events、
+# information_ledger 四个顶层字段**完全不在其中**。
+# 于是任何落在这四个字段上的 issue，修复模型都是在**盲写**：它看不到自己要改的
+# 内容，只能凭消息文本猜。生产 EP1 的 SPINE_ACTION_TURN_DUPLICATE 正是如此，
+# 规划器一次补丁都没产出就记了 exhausted。
+#
+# 这里不把整份字段塞进提示词（plot_spine 有 300+ 条节拍），
+# 而是按 issue 自己指明的下标取一个很小的窗口——确定性、有界、且只在
+# 该字段真的是本次 issue 的目标时才带上。
+_ISSUE_TARGET_INDEX_RE = re.compile(r"([a-z_][a-z0-9_]*)\[(\d+)\]")
+_ISSUE_TARGET_CONTAINERS: dict[str, tuple[str, ...]] = {
+    "spine_beats": ("plot_spine", "spine_beats"),
+    "drop_list": ("plot_spine", "drop_list"),
+    "source_coverage": ("source_coverage",),
+    "story_events": ("story_events",),
+    "information_ledger": ("information_ledger",),
+}
+_ISSUE_TARGET_WINDOW = 1
+
+
+def _issue_target_excerpt(
+    payload: dict[str, Any],
+    issue: Issue,
+) -> dict[str, Any]:
+    """Show the repairer the exact document slice its issue points at."""
+    evidence = issue.evidence if isinstance(issue.evidence, dict) else {}
+    haystack = " ".join(
+        str(value or "")
+        for value in (
+            evidence.get("path"),
+            issue.message,
+            issue.subject,
+            issue.repair_hint,
+        )
+    )
+    excerpt: dict[str, Any] = {}
+    for match in _ISSUE_TARGET_INDEX_RE.finditer(haystack):
+        name, raw_index = match.group(1), match.group(2)
+        route = _ISSUE_TARGET_CONTAINERS.get(name)
+        if route is None or name in excerpt:
+            continue
+        container: Any = payload
+        for key in route:
+            container = (container or {}).get(key) if isinstance(container, dict) else None
+        if not isinstance(container, list) or not container:
+            continue
+        index = int(raw_index)
+        low = max(0, index - _ISSUE_TARGET_WINDOW)
+        high = min(len(container), index + _ISSUE_TARGET_WINDOW + 1)
+        excerpt[name] = {
+            "path": ".".join(route),
+            "window_start_index": low,
+            "items": container[low:high],
+        }
+    return excerpt
+
+
 def _narrative_patch_prompt_context(
     document,
     issue: Issue,
@@ -5835,6 +5894,14 @@ def _narrative_patch_prompt_context(
             "narrative_graph_id_index 是全图稳定 ID 索引。"
         ),
     }
+    target_excerpt = _issue_target_excerpt(payload, issue)
+    if target_excerpt:
+        context["issue_target_excerpt"] = target_excerpt
+        context["scope_note"] += (
+            "issue_target_excerpt 是本次问题直接指向的文档切片"
+            "（含前后各一条相邻项，window_start_index 为窗口首项的真实下标），"
+            "修改这些字段时以它为准。"
+        )
     return context, source_excerpt
 
 
