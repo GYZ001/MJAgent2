@@ -2,9 +2,10 @@
 """Validate and record an attested 30-episode screenplay dual-track run.
 
 Input JSON must contain ``baseline_samples`` and ``candidate_samples``.  Every
-sample carries an ``episode_id`` and the metrics documented in
-``docs/剧本全链路性能与健壮性整改方案.md``.  This command records measurements;
-it deliberately does not invent or simulate provider executions.
+sample carries an ``episode_id`` and the metrics defined by the screenplay
+full-chain performance plan (removed from ``docs/``; see git history).  This
+command records measurements; it deliberately does not invent or simulate
+provider executions.
 """
 from __future__ import annotations
 
