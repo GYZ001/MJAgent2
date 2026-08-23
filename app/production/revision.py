@@ -1139,7 +1139,8 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         ).fetchone())
     conn = get_conn()
     episode = conn.execute(
-        "SELECT active_screenplay_run_id FROM episodes WHERE id=?",
+        "SELECT active_screenplay_run_id, screenplay_started_at, screenplay_updated_at "
+        "FROM episodes WHERE id=?",
         (episode_id,),
     ).fetchone()
     from app.evidence import repository as evidence_repository
@@ -1153,10 +1154,6 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         if episode and episode["active_screenplay_run_id"]
         else None
     )
-    # 任务计时必须以服务端 run 的时间戳为准：前端 localStorage 起点在
-    # 「任务运行中刷新页面」后会永久搁浅，下一个任务会复用旧起点导致时长虚高。
-    task_started_at = current_run["started_at"] if current_run else None
-    task_finished_at = current_run["finished_at"] if current_run else None
     active = bool(
         task_registry.active("screenplay", episode_id)
         or (
@@ -1169,6 +1166,15 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
                 conn=conn,
             )
         )
+    )
+    # 任务计时以 episodes.screenplay_started_at 为准，不能用 active_screenplay_run_id
+    # 指向的 run：剧本任务每次续跑/重试都会新建一个 run，指针随之前移，用子 run 的
+    # 起点会让计时在每个阶段归零（曾表现为跑了 43 分钟却显示 3 分钟）。
+    # 该字段在续跑时由 preserve_started_at 保留，只有删除剧本才清空，正是任务级语义。
+    task_started_at = episode["screenplay_started_at"] if episode else None
+    # 结束时间没有独立字段：任务终止时的最后一次状态写入即 screenplay_updated_at。
+    task_finished_at = (
+        None if active or not episode else episode["screenplay_updated_at"]
     )
     if rev is None:
         return {

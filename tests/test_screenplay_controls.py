@@ -335,37 +335,56 @@ def _incompatible_working_revision():
     return revision, artifact
 
 
-def test_production_state_exposes_server_run_timestamps() -> None:
-    """任务计时必须由服务端 run 提供起止时间。
+def test_production_state_times_the_whole_task_not_the_latest_run() -> None:
+    """任务计时取 episodes.screenplay_started_at，不能取当前子 run 的起点。
 
-    前端曾用 localStorage 记录起点，任务运行中刷新页面会让该起点永久搁浅，
-    下一个任务复用旧起点后显示出「已等待 1244 分」这类虚高时长。
+    剧本任务每次续跑/重试都会新建 workflow_run，active_screenplay_run_id 随之
+    前移。若按子 run 计时，跑了 43 分钟的任务在换阶段后会显示成 3 分钟。
     """
     conn = db.get_conn()
-    started_at = db.now() - 90.0
+    task_started = db.now() - 2_580.0          # 任务级起点：43 分钟前
+    latest_run_started = db.now() - 234.0      # 最新子 run：3.9 分钟前
     conn.execute(
         "INSERT INTO workflow_runs(id, workflow_type, scope_type, scope_id, status, "
         "input_fingerprint, started_at, updated_at) "
-        "VALUES('run_t1','screenplay','episode','e1','RUNNING','fp',?,?)",
-        (started_at, db.now()),
+        "VALUES('run_first','screenplay','episode','e1','PAUSED_EXTERNAL','fp',?,?)",
+        (task_started, db.now()),
     )
-    conn.execute("UPDATE episodes SET active_screenplay_run_id='run_t1' WHERE id='e1'")
+    conn.execute(
+        "INSERT INTO workflow_runs(id, workflow_type, scope_type, scope_id, status, "
+        "input_fingerprint, started_at, updated_at) "
+        "VALUES('run_latest','screenplay','episode','e1','RUNNING','fp',?,?)",
+        (latest_run_started, db.now()),
+    )
+    conn.execute(
+        "UPDATE episodes SET active_screenplay_run_id='run_latest', "
+        "screenplay_started_at=?, screenplay_updated_at=? WHERE id='e1'",
+        (task_started, db.now()),
+    )
     conn.commit()
 
     state = screenplay_production_state("e1")
-    assert state["task_started_at"] == pytest.approx(started_at)
-    assert state["task_finished_at"] is None
+    assert state["task_started_at"] == pytest.approx(task_started)
+    assert state["task_started_at"] != pytest.approx(latest_run_started)
+    assert state["task_finished_at"] is None, "运行中不给结束时间，否则计时会提前停住"
 
+
+def test_production_state_reports_task_duration_after_it_stops() -> None:
+    """任务停止后以最后一次状态写入作为结束时间，供前端显示本次耗时。"""
+    conn = db.get_conn()
+    task_started = db.now() - 600.0
     finished_at = db.now()
     conn.execute(
-        "UPDATE workflow_runs SET status='SUCCEEDED', finished_at=? WHERE id='run_t1'",
-        (finished_at,),
+        "UPDATE episodes SET screenplay_started_at=?, screenplay_updated_at=?, "
+        "active_screenplay_run_id=NULL WHERE id='e1'",
+        (task_started, finished_at),
     )
     conn.commit()
 
-    done = screenplay_production_state("e1")
-    assert done["task_started_at"] == pytest.approx(started_at)
-    assert done["task_finished_at"] == pytest.approx(finished_at)
+    state = screenplay_production_state("e1")
+    assert state["task_active"] is False
+    assert state["task_started_at"] == pytest.approx(task_started)
+    assert state["task_finished_at"] == pytest.approx(finished_at)
 
 
 def test_production_state_reports_no_timestamps_without_active_run() -> None:
