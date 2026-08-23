@@ -806,11 +806,21 @@ def artifact_read_scope():
     legitimately reach a fail-closed verifier that marks an Artifact stale
     (``assert_screenplay_matches_validated_v7_source``), and a memoised row
     would then keep serving the pre-write ``status`` to the rest of the same
-    request.  So every writer of an Artifact row calls
-    ``invalidate_artifact_read_scope`` and the scope drops what it memoised --
-    the cache can never outlive a write it was concurrent with.
+    request.  Fifteen modules write Artifact rows, so "every writer remembers
+    to invalidate" is a rule that will be broken by the next one added.
+
+    Instead the scope watches SQLite's own ``Connection.total_changes`` -- a
+    monotonic count of rows this connection has modified.  Every memoised row
+    is stamped with the count at fetch time and a read whose count no longer
+    matches re-reads from the database.  A request that only reads never moves
+    the counter, so the cache still works fully; a request that writes anything
+    at all drops what it memoised, whether or not the writer knew about this
+    scope.  Writers may additionally call ``invalidate_artifact_read_scope``,
+    but correctness does not depend on their doing so.
     """
-    token = _ARTIFACT_READ_SCOPE.set({"artifacts": {}, "verified_hashes": {}})
+    token = _ARTIFACT_READ_SCOPE.set(
+        {"artifacts": {}, "verified_hashes": {}, "changes": None}
+    )
     try:
         yield
     finally:
@@ -829,20 +839,49 @@ def invalidate_artifact_read_scope(artifact_id: str | None = None) -> None:
     if scope is None:
         return
     if artifact_id is None:
-        scope["artifacts"].clear()
-        scope["verified_hashes"].clear()
+        _drop_scope_memo(scope)
         return
     scope["artifacts"].pop(artifact_id, None)
     for key in [k for k in scope["verified_hashes"] if k[0] == artifact_id]:
         scope["verified_hashes"].pop(key, None)
 
 
+def _drop_scope_memo(scope: dict[str, Any]) -> None:
+    scope["artifacts"].clear()
+    scope["verified_hashes"].clear()
+
+
+def _scope_after_writes(scope: dict[str, Any] | None, conn) -> dict[str, Any] | None:
+    """Drop the scope's memo if this connection wrote anything since it filled.
+
+    ``total_changes`` counts rows modified on this connection, so a read-only
+    request never moves it and keeps the full benefit of the scope, while any
+    write -- by a caller that knows about this scope or one that does not --
+    invalidates what was memoised before it.
+    """
+    if scope is None:
+        return None
+    try:
+        changes = conn.total_changes
+    except AttributeError:
+        # A caller-supplied connection wrapper without the counter cannot be
+        # proven unchanged, so it never gets to serve memoised rows.
+        _drop_scope_memo(scope)
+        return scope
+    if scope["changes"] is None:
+        scope["changes"] = changes
+    elif scope["changes"] != changes:
+        _drop_scope_memo(scope)
+        scope["changes"] = changes
+    return scope
+
+
 def get_artifact(artifact_id: str, *, conn=None) -> dict[str, Any] | None:
-    scope = _ARTIFACT_READ_SCOPE.get()
+    db = conn or get_conn()
+    scope = _scope_after_writes(_ARTIFACT_READ_SCOPE.get(), db)
     if scope is not None and artifact_id in scope["artifacts"]:
         cached = scope["artifacts"][artifact_id]
         return dict(cached) if cached is not None else None
-    db = conn or get_conn()
     row = db.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
     decoded = _decode_rows([dict(row)])[0] if row else None
     if scope is not None:

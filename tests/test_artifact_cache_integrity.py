@@ -113,51 +113,101 @@ def test_cache_hit_still_pays_the_gate(monkeypatch) -> None:
 
 # ------------------------------------------------------------------ 缺陷 2
 
-def test_every_caller_gets_an_isolated_model_on_a_cache_miss() -> None:
-    """未命中也必须隔离：改返回值不得写穿 artifact content。"""
+def _planned_screenplay_artifact() -> dict:
+    """带 narrative_plan 的产物：`relationship_state` 是 bare `dict`。
+
+    pydantic 只复制最外层容器，**`Any` 位置上的嵌套值仍然是同一个对象**
+    （本仓 pydantic 2.13.4 实测）。剧本模型上所有这样的位置都在
+    `narrative_plan` 里，所以隔离性必须在这里验，legacy 夹具验不出来。
+    """
+    created = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="episode-cache",
+        status="validated",
+        trust_level="T1",
+        content={
+            "episode_no": 1,
+            "title": "别名夹具",
+            "full_script_text": "甲推门进入。",
+            "narrative_plan": {
+                "contract_version": "narrative-continuity.v2",
+                "scope_id": "episode-cache",
+                "character_states": [{
+                    "character_state_id": "CS1",
+                    "character_id": "C1",
+                    "anchor": {"type": "beat", "id": "B1"},
+                    "relationship_state": {"乙": {"trust": ["low"]}},
+                }],
+            },
+        },
+        contract_version="screenplay.v1",
+    ))
+    return evidence_repository.get_artifact(created["id"])
+
+
+def test_cache_miss_does_not_alias_nested_artifact_content() -> None:
+    """未命中路径原地改嵌套字段，绝不能写穿 artifact content。
+
+    去掉隔离后实测：`trust` 会变成 `['low', 'POLLUTED']`——调用方的一次
+    规范化污染了同一读作用域里所有其它读者看到的产物内容。
+    """
+    art = _planned_screenplay_artifact()
+    source = art["content"]["narrative_plan"]["character_states"][0][
+        "relationship_state"
+    ]
+
+    model = screenplay_from_artifact_record(art)
+    state = model.narrative_plan.character_states[0].relationship_state
+    assert state["乙"] is not source["乙"], "嵌套值仍与 artifact content 同一对象"
+
+    state["乙"]["trust"].append("POLLUTED")
+    assert source["乙"]["trust"] == ["low"]
+
+
+def test_two_callers_never_share_one_model() -> None:
+    """命中与未命中都必须给出彼此独立的模型。"""
+    art = _planned_screenplay_artifact()
+
+    first = screenplay_from_artifact_record(art)   # miss
+    second = screenplay_from_artifact_record(art)  # hit
+
+    assert first is not second
+    first_state = first.narrative_plan.character_states[0].relationship_state
+    second_state = second.narrative_plan.character_states[0].relationship_state
+    assert first_state["乙"] is not second_state["乙"]
+
+    first_state["乙"]["trust"].append("POLLUTED")
+    assert second_state["乙"]["trust"] == ["low"]
+
+    third = screenplay_from_artifact_record(art)
+    assert third.narrative_plan.character_states[0].relationship_state == {
+        "乙": {"trust": ["low"]}
+    }
+
+
+def test_scalar_edits_never_reach_the_artifact_record() -> None:
     art = _legacy_screenplay_artifact()
     original_title = art["content"]["title"]
 
     first = screenplay_from_artifact_record(art)
     first.title = "被调用方改过"
-    first.key_plot_points.append("调用方追加的条目")
 
     assert art["content"]["title"] == original_title
-    assert not art["content"].get("key_plot_points")
-
-    second = screenplay_from_artifact_record(art)
-    assert second.title == original_title
-    assert second.key_plot_points == []
-    assert second is not first
-
-
-def test_nested_mutable_fields_are_not_aliased_to_artifact_content() -> None:
-    """pydantic 对 bare dict/list 字段不深拷贝——这条盯的正是那个特性。"""
-    art = _legacy_screenplay_artifact()
-    art["content"]["key_plot_points"] = ["原始条目"]
-    # content 变了，封印也得跟着变，否则会被指纹漂移挡在门口。
-    conn = db.get_conn()
-    conn.execute(
-        "UPDATE artifacts SET content_json=?, content_hash=? WHERE id=?",
-        (
-            __import__("json").dumps(art["content"], ensure_ascii=False),
-            evidence_repository.content_hash(art["content"], None),
-            art["id"],
-        ),
-    )
-    conn.commit()
-    art = evidence_repository.get_artifact(art["id"])
-
-    model = screenplay_from_artifact_record(art)
-    model.key_plot_points.append("污染")
-
-    assert art["content"]["key_plot_points"] == ["原始条目"]
+    assert screenplay_from_artifact_record(art).title == original_title
 
 
 # ------------------------------------------------------------------ 缺陷 3
 
-def test_read_scope_never_serves_a_row_older_than_a_write_inside_it() -> None:
-    """作用域内发生写之后，同一作用域的后续读必须看到新状态。"""
+@pytest.mark.parametrize("announce_the_write", [True, False])
+def test_read_scope_never_serves_a_row_older_than_a_write_inside_it(
+    announce_the_write: bool,
+) -> None:
+    """作用域内发生写之后，同一作用域的后续读必须看到新状态。
+
+    `announce_the_write=False` 是关键那一半：写方**完全不知道**有这个作用域，
+    一行失效代码都没调。正确性不能依赖 15 个写入点都记得配合。
+    """
     art = _legacy_screenplay_artifact()
 
     with evidence_repository.artifact_read_scope():
@@ -170,11 +220,36 @@ def test_read_scope_never_serves_a_row_older_than_a_write_inside_it() -> None:
             (art["id"],),
         )
         conn.commit()
-        evidence_repository.invalidate_artifact_read_scope(art["id"])
+        if announce_the_write:
+            evidence_repository.invalidate_artifact_read_scope(art["id"])
 
         after = evidence_repository.get_artifact(art["id"])
 
     assert after["status"] == "stale", "读作用域把作用域内的写掩盖掉了"
+
+
+def test_a_write_to_an_unrelated_row_also_drops_the_memo() -> None:
+    """`total_changes` 是连接级计数，判定必然保守——保守正是这里要的。
+
+    宁可多读一次库，也不能让任何一次写被缓存掩盖。
+    """
+    art = _legacy_screenplay_artifact()
+    other = _legacy_screenplay_artifact()
+
+    with evidence_repository.artifact_read_scope():
+        evidence_repository.get_artifact(art["id"])
+        conn = db.get_conn()
+        conn.execute(
+            "UPDATE artifacts SET stale_reason='无关写入' WHERE id=?",
+            (other["id"],),
+        )
+        conn.commit()
+        conn.execute(
+            "UPDATE artifacts SET status='stale' WHERE id=?", (art["id"],)
+        )
+        conn.commit()
+
+        assert evidence_repository.get_artifact(art["id"])["status"] == "stale"
 
 
 def test_read_scope_still_memoises_when_nothing_is_written() -> None:
