@@ -760,3 +760,52 @@ def test_storyboard_shot_timings_are_scoped_to_the_latest_run(monkeypatch) -> No
     timings = storyboard_ops.episode_detail("e1", view="board")["shot_timings"]
     assert timings["1"]["elapsed_ms"] == 30_000, "不应把上一次 run 的耗时算进来"
     assert timings["1"]["iterations"] == 1
+
+
+def test_batch_timings_prefer_the_task_level_start_over_the_latest_run(monkeypatch) -> None:
+    """定妆照/场景图续跑会新建 run，起点必须取批次列而非最近一次 run。
+
+    与剧本台同一类缺陷：只看最近一次 run，跑了很久的批次在续跑后会显示成几分钟。
+    """
+    conn = _conn()
+    _seed_episode(conn)
+    monkeypatch.setattr(common, "get_conn", lambda: conn)
+    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+
+    batch_started = 1_000.0        # 批次真实起点
+    resumed_run_started = 3_400.0  # 续跑后新建的 run
+    _seed_run(conn, run_id="r_refs", workflow_type="character_references",
+              scope_type="project", scope_id="p1", status="RUNNING",
+              started_at=resumed_run_started)
+    _seed_run(conn, run_id="r_scene", workflow_type="scene_references",
+              scope_type="project", scope_id="p1", status="RUNNING",
+              started_at=resumed_run_started)
+    conn.execute(
+        "UPDATE projects SET refs_batch_started_at=?, scene_refs_batch_started_at=? "
+        "WHERE id='p1'",
+        (batch_started, batch_started),
+    )
+    conn.commit()
+
+    timings = projects.project_detail("p1", view="bible")["task_timings"]
+    assert timings["refs"]["started_at"] == batch_started
+    assert timings["refs"]["started_at"] != resumed_run_started
+
+    scenes = projects.project_detail("p1", view="scenes")["task_timings"]
+    assert scenes["scene_refs"]["started_at"] == batch_started
+
+
+def test_batch_timings_fall_back_to_run_when_batch_column_is_empty(monkeypatch) -> None:
+    """批次列为空（字段启用前跑过的旧批次）时回退到 run，不能整个计时消失。"""
+    conn = _conn()
+    _seed_episode(conn)
+    monkeypatch.setattr(common, "get_conn", lambda: conn)
+    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+
+    _seed_run(conn, run_id="r_refs", workflow_type="character_references",
+              scope_type="project", scope_id="p1", status="SUCCEEDED",
+              started_at=500.0, finished_at=560.0)
+    conn.commit()
+
+    timings = projects.project_detail("p1", view="bible")["task_timings"]
+    assert timings["refs"] == {"started_at": 500.0, "finished_at": 560.0}

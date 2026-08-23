@@ -27,6 +27,19 @@ def _project_task_timings(conn, project: dict) -> dict[str, dict[str, float | No
             conn=conn,
         )
 
+    def batch_timing(workflow_type: str, batch_column: str) -> dict[str, float | None]:
+        """批次任务的计时：起点取批次列，结束沿用最近一次 run。
+
+        这类任务续跑时会新建 workflow_run，只看最近一次 run 会让计时在每次
+        续跑后归零（剧本台曾表现为跑了 43 分钟却显示 3 分钟）。批次列在续跑时
+        由 resume 分支保留，才是任务级起点。
+        """
+        timing = run_timing(workflow_type)
+        batch_started_at = project.get(batch_column)
+        if batch_started_at is not None:
+            timing["started_at"] = batch_started_at
+        return timing
+
     # 批量分镜没有父 run，只能按活跃子 run 聚合；全部结束后不再有「本次耗时」可言。
     marks = ",".join("?" for _ in evidence_repository.ACTIVE_RUN_STATUSES)
     storyboard_batch = conn.execute(
@@ -40,9 +53,10 @@ def _project_task_timings(conn, project: dict) -> dict[str, dict[str, float | No
     ).fetchone()
 
     return {
+        # 人物谱没有批次级起点列，只能取最近一次 run；续跑会让它归零，是已知限制。
         "bible": run_timing("character_bible"),
-        "refs": run_timing("character_references"),
-        "scene_refs": run_timing("scene_references"),
+        "refs": batch_timing("character_references", "refs_batch_started_at"),
+        "scene_refs": batch_timing("scene_references", "scene_refs_batch_started_at"),
         "screenplay_batch": run_timing("screenplay_batch"),
         "storyboard_batch": {
             "started_at": storyboard_batch["started_at"] if storyboard_batch else None,
