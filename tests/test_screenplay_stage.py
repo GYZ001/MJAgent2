@@ -1146,7 +1146,7 @@ def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(mon
         prompts.append(prompt)
         return script
 
-    async def fake_blueprint(_episode, source_text, _bible):
+    async def fake_blueprint(_episode, source_text, _bible, **_kwargs):
         source_ids = [
             segment.segment_id
             for segment in stages.index_source_segments(source_text)
