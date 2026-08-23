@@ -5696,11 +5696,16 @@ async def _llm_field_patch(
 # 而是按 issue 自己指明的下标取一个很小的窗口——确定性、有界、且只在
 # 该字段真的是本次 issue 的目标时才带上。
 _ISSUE_TARGET_INDEX_RE = re.compile(r"([a-z_][a-z0-9_]*)\[(\d+)\]")
+# 键是**校验器真实写进 message 的下标标签名**，值是该标签在 payload 里的路径。
+# 两者并不总是同名：`EpisodeScreenplay.events` 在 `ScreenplayDocument` 里叫
+# `story_events`，而门禁写的是 `events[i]`（app/validators.py 的 `tag`）。
+# 按 payload 字段名建键会让整段切片对该字段静默失效——第一版就是这么错的。
+# `tests/test_repair_context_blind_spots.py` 用真实校验器输出反查这张表，
+# 出现新的下标标签而这里没登记就会红。
 _ISSUE_TARGET_CONTAINERS: dict[str, tuple[str, ...]] = {
     "spine_beats": ("plot_spine", "spine_beats"),
-    "drop_list": ("plot_spine", "drop_list"),
     "source_coverage": ("source_coverage",),
-    "story_events": ("story_events",),
+    "events": ("story_events",),
     "information_ledger": ("information_ledger",),
 }
 _ISSUE_TARGET_WINDOW = 1

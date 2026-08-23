@@ -3689,8 +3689,16 @@ def validate_screenplay_scene_shard(
         # 判据本身是确定性的（condense 后完全相同，或双向 0.9 的最长公共段
         # 与 bigram 覆盖），所以把它提到**这一层**——这里有 3 轮定向语义修复，
         # 模型能拿到具体 unit 和明确诉求，是同一条规则唯一能被便宜修好的位置。
-        if unit.kind != "dialogue" and screenplay_beat_fields_repeat(
-            unit.text, unit.resulting_state
+        # 域必须与下游门禁**完全一致**，不能更宽：paratext / exclude_from_spine
+        # 事件在 `finalize_screenplay_ir` 里被整体剔出 events / beats / units
+        # （app/screenplay_ir.py 的「非剧情旁文本隔离」），根本走不到
+        # validate_plot_spine。若在这一层顺手把它们也判掉，就等于凭空发明了一条
+        # 下游从不存在的约束，去卡下游刻意排除的内容。
+        if (
+            unit.kind != "dialogue"
+            and unit.narrative_layer != "paratext"
+            and unit.render_policy != "exclude_from_spine"
+            and screenplay_beat_fields_repeat(unit.text, unit.resulting_state)
         ):
             errors.append(
                 f"{planned_slot.unit_key} resulting_state 与 text 语义重复；"

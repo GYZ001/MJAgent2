@@ -12,7 +12,43 @@ resulting_state→turn 逐字带下去，下游 `plot_spine` 硬门禁
 """
 from __future__ import annotations
 
+import pytest
+
 from app.screenplay_ir import screenplay_beat_fields_repeat
+from app.screenplay_scene_shards import (
+    build_screenplay_scene_shard_plans,
+    validate_screenplay_scene_shard,
+)
+from tests.test_screenplay_scene_shards import (
+    SOURCE,
+    _blueprint,
+    _contracts,
+    _shard,
+)
+
+_DUPLICATE_ERROR = "resulting_state 与 text 语义重复"
+
+
+def _validate_with_unit(mutate) -> list[str]:
+    """跑**真实**的分片校验器，只改动第一个非对白单元。"""
+    blueprint = _blueprint(split_domain=True)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    shard = _shard(plan, blueprint)
+    unit = next(
+        u for scene in shard.scenes for u in scene.units if u.kind != "dialogue"
+    )
+    mutate(unit)
+    return validate_screenplay_scene_shard(
+        shard,
+        plan=plan,
+        scene_plans={item.key: item for item in blueprint.scene_plans},
+        scene_input_contracts=_contracts([plan], blueprint)[plan.shard_id],
+        identity_keys={"narrator"},
+    )
 
 
 def test_verbatim_repetition_is_a_duplicate() -> None:
@@ -53,29 +89,78 @@ def test_empty_side_is_never_a_duplicate() -> None:
     assert not screenplay_beat_fields_repeat("任何内容", "")
 
 
-def test_scene_shard_validator_uses_the_same_predicate() -> None:
-    """两层必须共用同一个谓词，否则早拦与晚拦会给出不一致的判定。"""
-    import inspect
+# --------------------------------------------------- 真实分片校验器上的行为
 
-    from app import screenplay_scene_shards, validators
+def test_scene_shard_validator_really_rejects_a_restated_unit() -> None:
+    """真实调用：非对白单元把 resulting_state 写回 text，必须当场拦下。
 
-    shard_source = inspect.getsource(
-        screenplay_scene_shards.validate_screenplay_scene_shard
-    )
-    gate_source = inspect.getsource(
-        validators.validate_plot_spine
-    )
-    assert "screenplay_beat_fields_repeat" in shard_source
-    assert "screenplay_beat_fields_repeat" in gate_source
+    这是 R6 的核心断言——规则必须在**这一层**生效，而不是等到下游那个
+    修不好它的门禁。
+    """
+    def restate(unit) -> None:
+        unit.resulting_state = unit.text
+
+    errors = _validate_with_unit(restate)
+    assert any(_DUPLICATE_ERROR in error for error in errors), errors
 
 
-def test_dialogue_units_are_exempt() -> None:
+def test_scene_shard_validator_accepts_a_real_resulting_state() -> None:
+    """正常写法不得误伤：这条保证新规则不是「一律报错」。"""
+    def proper(unit) -> None:
+        unit.text = "孟浩的目光落在王有材身上。"
+        unit.resulting_state = "王有材成为孟浩此刻的注意焦点，两人之间形成对峙。"
+
+    errors = _validate_with_unit(proper)
+    assert not any(_DUPLICATE_ERROR in error for error in errors), errors
+
+
+def test_dialogue_units_are_exempt_on_the_real_validator() -> None:
     """对白 text 被合同钉死为源文原句，不能因此判它重复。"""
-    import inspect
-
-    from app import screenplay_scene_shards
-
-    source = inspect.getsource(
-        screenplay_scene_shards.validate_screenplay_scene_shard
+    blueprint = _blueprint(split_domain=True)
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
     )
-    assert 'unit.kind != "dialogue" and screenplay_beat_fields_repeat' in source
+    for plan in plans:
+        shard = _shard(plan, blueprint)
+        dialogue = next(
+            (u for scene in shard.scenes for u in scene.units if u.kind == "dialogue"),
+            None,
+        )
+        if dialogue is not None:
+            break
+    else:  # pragma: no cover - 夹具退化时立刻暴露，而不是静默跳过
+        raise AssertionError("蓝图夹具里没有任何对白单元，豁免断言失去意义")
+    dialogue.resulting_state = dialogue.text
+
+    errors = validate_screenplay_scene_shard(
+        shard,
+        plan=plan,
+        scene_plans={item.key: item for item in blueprint.scene_plans},
+        scene_input_contracts=_contracts([plan], blueprint)[plan.shard_id],
+        identity_keys={"narrator"},
+    )
+    assert not any(_DUPLICATE_ERROR in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("narrative_layer", "paratext"), ("render_policy", "exclude_from_spine")],
+)
+def test_paratext_units_are_exempt_because_the_downstream_gate_never_sees_them(
+    field: str, value: str,
+) -> None:
+    """域必须与下游门禁一致，不能更宽。
+
+    `finalize_screenplay_ir` 的「非剧情旁文本隔离」把 paratext /
+    exclude_from_spine 事件整体剔出 events / beats / units，它们根本走不到
+    `validate_plot_spine`。若在分片层顺手把它们也判掉，就是凭空发明了一条
+    下游从不存在的约束，去卡下游刻意排除的内容——那不是提前拦截，是加严。
+    """
+    def restate_as_paratext(unit) -> None:
+        unit.resulting_state = unit.text
+        setattr(unit, field, value)
+
+    errors = _validate_with_unit(restate_as_paratext)
+    assert not any(_DUPLICATE_ERROR in error for error in errors), errors
