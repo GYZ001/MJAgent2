@@ -48,11 +48,7 @@ def _project_task_timings(conn, project: dict) -> dict[str, dict[str, float | No
             "started_at": storyboard_batch["started_at"] if storyboard_batch else None,
             "finished_at": None,
         },
-        # 分集规划不产生 workflow_run，起止时间直接落在 projects 列上。
-        "plan": {
-            "started_at": project.get("plan_started_at"),
-            "finished_at": project.get("plan_finished_at"),
-        },
+        # 分集规划不在此列：run_regex_plan 是确定性正则切分，毫秒级完成，无需计时。
     }
 
 

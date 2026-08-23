@@ -1526,9 +1526,6 @@ MIGRATIONS = (
     "ALTER TABLE evaluations ADD COLUMN score_status TEXT",
     "ALTER TABLE evaluations ADD COLUMN runtime_blocking INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE evaluations ADD COLUMN retry_eligible INTEGER NOT NULL DEFAULT 0",
-    # 分集规划不产生 workflow_run，任务计时缺少服务端起止时间；沿用 refs_batch_started_at 的做法补两列。
-    "ALTER TABLE projects ADD COLUMN plan_started_at REAL",
-    "ALTER TABLE projects ADD COLUMN plan_finished_at REAL",
 )
 
 

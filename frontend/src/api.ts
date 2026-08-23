@@ -2241,7 +2241,6 @@ export interface Project {
     bible?: TaskTiming;
     refs?: TaskTiming;
     scene_refs?: TaskTiming;
-    plan?: TaskTiming;
     screenplay_batch?: TaskTiming;
     storyboard_batch?: TaskTiming;
   };

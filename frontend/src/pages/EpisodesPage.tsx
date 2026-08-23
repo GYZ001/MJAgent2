@@ -402,12 +402,7 @@ export default function EpisodesPage() {
               {(sbMetrics.waiting_authorization || 0) > 0 ? ` · 待授权 ${sbMetrics.waiting_authorization}` : ''}
             </span>
           )}
-          <ServerTaskTimer
-            label="分集"
-            startedAt={p.task_timings?.plan?.started_at}
-            finishedAt={p.task_timings?.plan?.finished_at}
-            running={p.plan_status === 'running'}
-          />
+          {/* 分集规划是确定性正则切分（run_regex_plan，不走模型），毫秒级完成，不需要计时。 */}
           <ServerTaskTimer
             label="批量剧本"
             startedAt={p.task_timings?.screenplay_batch?.started_at}

@@ -675,23 +675,6 @@ def test_project_task_timings_pick_the_latest_attempt(monkeypatch) -> None:
     assert timings["scene_refs"] == {"started_at": 500.0, "finished_at": 560.0}
 
 
-def test_plan_timing_reads_project_columns(monkeypatch) -> None:
-    """分集规划不产生 workflow_run，起止时间落在 projects 列上。"""
-    conn = _conn()
-    _seed_episode(conn)
-    monkeypatch.setattr(common, "get_conn", lambda: conn)
-    monkeypatch.setattr(projects, "get_conn", lambda: conn)
-
-    conn.execute(
-        "UPDATE projects SET plan_started_at=?, plan_finished_at=? WHERE id='p1'",
-        (300.0, 372.0),
-    )
-    conn.commit()
-
-    timings = projects.project_detail("p1", view="episodes")["task_timings"]
-    assert timings["plan"] == {"started_at": 300.0, "finished_at": 372.0}
-
-
 def test_storyboard_batch_timing_aggregates_active_runs(monkeypatch) -> None:
     """批量分镜没有父 run，只能按活跃子 run 的最早起点聚合。"""
     conn = _conn()
