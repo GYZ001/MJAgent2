@@ -12546,7 +12546,9 @@ label.f {
 
 @media (max-width: 520px) {
   .board-desk {
-    padding: 14px 10px 104px;
+    /* padding-top 需保持 >=68px（与 800px 断点一致），
+       避免分集切换箭头被固定在 top:10/left:10 的 ☰ 菜单按钮压住。 */
+    padding: 68px 10px 104px;
   }
   .board-desk .desk-head {
     margin-bottom: 8px;
