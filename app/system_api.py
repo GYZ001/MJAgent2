@@ -260,6 +260,9 @@ def make_dir(body: dict):
 # ---------- 系统 ----------
 
 MODEL_KINDS = {"text", "vlm", "video", "image"}
+# 自建服务商可以声明的能力。视频/图像要额外声明 protocol：它们没有统一协议，
+# 只能复用已实现的那几套。
+CUSTOM_PROVIDER_KINDS = {"text", "vlm", "video", "image"}
 MODEL_PROVIDER_KINDS = {
     "hiagent": MODEL_KINDS,
     "minimax_h3": {"video"},
@@ -268,26 +271,43 @@ MODEL_PROVIDER_KINDS = {
     "deepseek": {"text"},
     "zhipu": {"text"},
 }
-BUILTIN_MODELS = (
-    ("hiagent", config.DEFAULT_HIAGENT_MODEL_TEXT, "文本推理模型", ("text",)),
-    ("hiagent", "d71l5c8nfdb167kligqg", "Text 模型", ("text",)),
-    ("hiagent", config.DEFAULT_HIAGENT_MODEL_VLM, "视觉质检模型", ("vlm",)),
-    ("hiagent", config.DEFAULT_HIAGENT_MODEL_VIDEO, "Seedance 视频生成", ("video",)),
-    ("hiagent", config.DEFAULT_HIAGENT_MODEL_IMAGE, "Seedream 图像生成", ("image",)),
-    ("minimax_h3", config.DEFAULT_MINIMAX_H3_MODEL_VIDEO, "MiniMaxH3", ("video",)),
-    ("openrouter", "z-ai/glm-5.2", "GLM 5.2", ("text",)),
-    ("openrouter", "anthropic/claude-opus-4.8", "Claude Opus 4.8", ("text",)),
-    ("openrouter", "google/gemini-3.5-flash", "Gemini 3.5 Flash", ("vlm",)),
-    ("bailian", "qwen3.7-max-2026-06-08", "Qwen3.7-Max 2026-06-08", ("text",)),
-    ("bailian", "qwen3.7-max-2026-05-20", "Qwen3.7-Max 2026-05-20", ("text",)),
-    ("bailian", "qwen3.7-max-2026-05-17", "Qwen3.7-Max 2026-05-17", ("text",)),
-    ("bailian", "qwen3.7-max-preview", "Qwen3.7-Max Preview", ("text",)),
-    ("bailian", "qwen3.7-plus-2026-05-26", "Qwen3.7-Plus 2026-05-26", ("text", "vlm")),
-    ("bailian", "qwen3.7-max", "Qwen3.7-Max", ("text",)),
-    ("bailian", "qwen3.7-plus", "Qwen3.7-Plus", ("text", "vlm")),
-    ("deepseek", "deepseek-v4-pro", "DeepSeek V4 Pro", ("text",)),
-    ("zhipu", "glm-5.2", "GLM 5.2", ("text",)),
-)
+# 代码里不再内嵌任何模型：模型库（custom_models）是唯一来源，页面上的每一条都是
+# 通过「添加模型」进来的。历史内嵌模型由 app/model_migration.py 一次性搬入。
+
+
+def probe_kind(kinds: list[str] | set[str] | None) -> str:
+    """把「模型能力」翻译成连接测试要走的探测方式。
+
+    媒体模型只查目录（不出片、不产生费用），文本/视觉理解才真发一次补全。
+    两条测试路径（草稿态 /models/test 与已保存的 /models/{id}/test）共用这里，
+    避免再次出现"页面上勾了图像、后端却按文本去探测"的错配。
+    """
+    selected = list(kinds or ["text"])
+    if "video" in selected:
+        return "video"
+    if "image" in selected:
+        return "image"
+    if "vlm" in selected and "text" not in selected:
+        return "vlm"
+    return "text"
+
+
+def media_protocol_options(kinds: list[str] | set[str]) -> set[str]:
+    """某组能力可选的接入协议。
+
+    协议清单来自各自的注册表，而不是这里再抄一份：新实现一套协议只要在注册表
+    里登记，页面上就能选到。
+    """
+    from app import image_providers, text_providers, video_providers
+
+    options: set[str] = set()
+    if "video" in kinds:
+        options |= set(video_providers.VIDEO_PROTOCOLS)
+    if "image" in kinds:
+        options |= set(image_providers.IMAGE_PROTOCOLS)
+    if "text" in kinds or "vlm" in kinds:
+        options |= set(text_providers.TEXT_PROTOCOLS)
+    return options
 
 
 def _custom_models() -> list[dict]:
@@ -308,26 +328,10 @@ def _token_capability_overrides() -> dict[str, dict]:
 
 def _model_catalog() -> list[dict]:
     overrides = _token_capability_overrides()
-    builtins = [
-        apply_token_limit_defaults({
-            "id": f"builtin:{provider}:{model}", "provider": provider, "model": model,
-            "label": label, "kinds": list(kinds), "builtin": True,
-            **({
-                "base_url": (
-                    get_setting("minimax_h3_base_url")
-                    or config.MINIMAX_H3_BASE_URL
-                ),
-                "requires_api_key": False,
-            } if provider == "minimax_h3" else {}),
-            **overrides.get(f"builtin:{provider}:{model}", {}),
-        })
-        for provider, model, label, kinds in BUILTIN_MODELS
-    ]
-    custom = [
+    return [
         apply_token_limit_defaults({**item, **overrides.get(str(item.get("id") or ""), {})})
         for item in _custom_models() if isinstance(item, dict)
     ]
-    return [*builtins, *custom]
 
 
 def _public_model(item: dict) -> dict:
@@ -339,7 +343,7 @@ def _public_model(item: dict) -> dict:
     provider_key = {
         "hiagent": config.HIAGENT_API_KEY, "openrouter": config.OPENROUTER_API_KEY,
         "bailian": config.BAILIAN_API_KEY, "deepseek": config.DEEPSEEK_API_KEY,
-        "zhipu": config.ZHIPU_API_KEY,
+        "zhipu": config.ZHIPU_API_KEY, "minimax_h3": config.MINIMAX_H3_API_KEY,
     }.get(str(item.get("provider") or ""), "")
     public["key_configured"] = (
         bool(item.get("base_url"))
@@ -355,7 +359,18 @@ def _public_model(item: dict) -> dict:
 
 @router.get("/models")
 def get_models():
-    return {"items": [_public_model(item) for item in _model_catalog()]}
+    from app import image_providers, text_providers, video_providers
+
+    return {
+        "items": [_public_model(item) for item in _model_catalog()],
+        # 页面据此渲染"接入协议"下拉；清单只有一份，避免前后端各抄一遍后漂移。
+        "media_protocols": {
+            "video": sorted(video_providers.VIDEO_PROTOCOLS),
+            "image": sorted(image_providers.IMAGE_PROTOCOLS),
+            "text": sorted(text_providers.TEXT_PROTOCOLS),
+            "vlm": sorted(text_providers.TEXT_PROTOCOLS),
+        },
+    }
 
 
 @router.post("/models")
@@ -380,9 +395,18 @@ def add_model(body: dict):
         raise HTTPException(422, "模型 ID 必填，且不能包含空格")
     if not label or len(label) > 80:
         raise HTTPException(422, "模型名称必填，且不能超过 80 个字符")
-    allowed_kinds = {"text", "vlm"} if custom_provider else MODEL_PROVIDER_KINDS[provider]
+    allowed_kinds = CUSTOM_PROVIDER_KINDS if custom_provider else MODEL_PROVIDER_KINDS[provider]
     if not kinds or any(k not in allowed_kinds for k in kinds):
         raise HTTPException(422, "所选服务商不支持该模型能力")
+    # 每条模型都要声明走哪套接入协议。代码里只有协议实现，没有模型；
+    # 声明清楚了，同一协议下换服务就只是改地址和密钥，不必再改代码。
+    protocol = str(body.get("protocol") or "").strip().lower()
+    available = media_protocol_options(kinds)
+    if protocol not in available:
+        raise HTTPException(422, detail={
+            "field": "protocol",
+            "message": f"必须声明接入协议，可选：{', '.join(sorted(available))}",
+        })
     base_url = str(body.get("base_url") or "").strip().rstrip("/")
     api_key = str(body.get("api_key") or "").strip()
     provider_label = str(body.get("provider_label") or "").strip()
@@ -402,6 +426,10 @@ def add_model(body: dict):
         "id": item_id, "provider": provider, "model": model,
         "label": label, "kinds": kinds, "builtin": False,
     }
+    item["protocol"] = protocol
+    params = body.get("params")
+    if isinstance(params, dict) and params:
+        item["params"] = params
     item.update(normalize_token_limits(body))
     if custom_provider:
         item.update({"provider_label": provider_label, "base_url": base_url, "api_key": api_key})
@@ -583,9 +611,30 @@ async def test_model_connection(body: dict):
     routed = await ui_route("system.model_test", {"draft": body})
     if routed is not None:
         return routed
+    protocol = str(body.get("protocol") or "").strip().lower()
+    if protocol == "minimax_h3":
+        # H3 不是 OpenAI 兼容接口，用它自己的能力探测：这样"测试连接"验的是
+        # 真实出片前提（模式/加速档/VAE 是否就绪），而不只是端口通不通。
+        from app import hiagent, minimax_h3
+
+        try:
+            return {
+                **await minimax_h3.probe_connection(
+                    str(body.get("base_url") or ""),
+                    minimax_h3.connection_from_catalog_item(
+                        body,
+                        base_url_override=str(body.get("base_url") or ""),
+                        api_key_override=str(body.get("api_key") or ""),
+                    ),
+                ),
+                **normalize_token_limits({}),
+            }
+        except hiagent.ProviderError as exc:
+            raise HTTPException(422, f"模型测试失败：{exc}") from exc
     return await _probe_openai_model(
         str(body.get("base_url") or ""), str(body.get("api_key") or ""),
-        str(body.get("model") or ""), str(body.get("kind") or "text"))
+        str(body.get("model") or ""),
+        str(body.get("kind") or "") or probe_kind(body.get("kinds")))
 
 
 @router.put("/models/{model_id}")
@@ -646,21 +695,36 @@ async def test_saved_model(model_id: str, body: dict | None = None):
     if not item:
         raise HTTPException(404, "模型不存在")
     override = body or {}
-    if item.get("provider") == "minimax_h3":
+    provider = str(item.get("provider") or "")
+    uses_h3 = provider == "minimax_h3" or (
+        provider.startswith("custom:")
+        and str(item.get("protocol") or "") == "minimax_h3"
+    )
+    if uses_h3:
         from app import hiagent, minimax_h3
         from app.video_plan import record_minimax_h3_probe_snapshot
 
+        connection = (
+            minimax_h3.connection_from_catalog_item(
+                item,
+                base_url_override=str(override.get("base_url") or ""),
+                api_key_override=str(override.get("api_key") or ""),
+            )
+            if provider != "minimax_h3"
+            else minimax_h3.default_connection()
+        )
         try:
             result = await minimax_h3.probe_connection(
-                str(override.get("base_url") or item.get("base_url") or "")
+                str(override.get("base_url") or item.get("base_url") or ""),
+                connection,
             )
         except hiagent.ProviderError as exc:
             raise HTTPException(422, f"模型测试失败：{exc}") from exc
         response = {**result, **normalize_token_limits({})}
-        if str(result.get("base_url") or "").rstrip("/") == minimax_h3.base_url():
+        if str(result.get("base_url") or "").rstrip("/") == connection.base_url:
             snapshot = record_minimax_h3_probe_snapshot(
                 result,
-                provider="minimax_h3",
+                provider=provider,
                 model=str(
                     item.get("model")
                     or config.DEFAULT_MINIMAX_H3_MODEL_VIDEO
@@ -676,8 +740,7 @@ async def test_saved_model(model_id: str, body: dict | None = None):
     base_url = str(override.get("base_url") or saved.get("base_url") or item.get("base_url") or "")
     api_key = str(override.get("api_key") or saved.get("api_key") or item.get("api_key") or "")
     model = str(override.get("model") or item.get("model") or "")
-    kinds = item.get("kinds") or ["text"]
-    kind = "video" if "video" in kinds else "image" if "image" in kinds else "vlm" if "vlm" in kinds and "text" not in kinds else "text"
+    kind = probe_kind(item.get("kinds"))
     result = await _probe_openai_model(base_url, api_key, model, kind)
     if kind in {"text", "vlm"}:
         overrides = _token_capability_overrides()
@@ -743,7 +806,12 @@ def health():
 
     def selected(kind: str, label: str, options: list[dict]) -> dict:
         provider = hiagent.active_provider(kind)
-        active = next((o for o in options if o["provider"] == provider), options[0])
+        # 模型库可能一条都没有（全新部署）：这时如实报"未配置"，
+        # 不能拿 options[0] 去索引一个空列表。
+        active = next(
+            (o for o in options if o["provider"] == provider),
+            options[0] if options else {"provider": "", "model": ""},
+        )
         return {
             "key": kind,
             "label": label,
@@ -752,39 +820,26 @@ def health():
             "options": options,
         }
 
-    def custom_options(kind: str) -> list[dict]:
-        return [option(item["provider"], item["model"], bool(_public_model(item).get("key_configured")))
-                for item in _custom_models()
-                if kind in item.get("kinds", []) and str(item.get("provider", "")).startswith("custom:")]
+    def catalog_options(kind: str) -> list[dict]:
+        return [
+            option(
+                item["provider"], item["model"],
+                bool(_public_model(item).get("key_configured")),
+            )
+            for item in _model_catalog()
+            if kind in (item.get("kinds") or [])
+        ]
 
-    def model_available(provider: str, model: str, legacy_available: bool) -> bool:
-        item = next((m for m in _model_catalog() if m.get("provider") == provider and m.get("model") == model), None)
-        return bool(legacy_available or (item and _public_model(item).get("key_configured")))
-
+    # 选项全部来自模型库：代码里不再有内嵌 provider，下拉里也就不会再出现
+    # "同一家服务出现两次（一条来自代码、一条来自页面）"这种没法解释的情况。
     models = {
-        "text": selected("text", "Text 模型", [
-            option("hiagent", hiagent.active_model("text", "hiagent"), model_available("hiagent", hiagent.active_model("text", "hiagent"), bool(config.HIAGENT_API_KEY))),
-            option("openrouter", hiagent.active_model("text", "openrouter"), model_available("openrouter", hiagent.active_model("text", "openrouter"), bool(config.OPENROUTER_API_KEY))),
-            option("bailian", hiagent.active_model("text", "bailian"), model_available("bailian", hiagent.active_model("text", "bailian"), bool(config.BAILIAN_API_KEY))),
-            option("deepseek", hiagent.active_model("text", "deepseek"), model_available("deepseek", hiagent.active_model("text", "deepseek"), bool(config.DEEPSEEK_API_KEY))),
-            option("zhipu", hiagent.active_model("text", "zhipu"), model_available("zhipu", hiagent.active_model("text", "zhipu"), bool(config.ZHIPU_API_KEY))),
-            *custom_options("text"),
-        ]),
-        "vlm": selected("vlm", "VLM 模型", [
-            option("hiagent", hiagent.active_model("vlm", "hiagent"), model_available("hiagent", hiagent.active_model("vlm", "hiagent"), bool(config.HIAGENT_API_KEY))),
-            option("openrouter", hiagent.active_model("vlm", "openrouter"), model_available("openrouter", hiagent.active_model("vlm", "openrouter"), bool(config.OPENROUTER_API_KEY))),
-            option("bailian", hiagent.active_model("vlm", "bailian"), model_available("bailian", hiagent.active_model("vlm", "bailian"), bool(config.BAILIAN_API_KEY))),
-            *custom_options("vlm"),
-        ]),
-        "video": selected("video", "视频模型", [
-            option("hiagent", hiagent.active_model("video", "hiagent"), model_available("hiagent", hiagent.active_model("video", "hiagent"), bool(config.HIAGENT_API_KEY))),
-            option("minimax_h3", hiagent.active_model("video", "minimax_h3"), bool(config.MINIMAX_H3_BASE_URL)),
-            option("openrouter", "", False),
-        ]),
-        "image": selected("image", "图像模型", [
-            option("hiagent", hiagent.active_model("image", "hiagent"), model_available("hiagent", hiagent.active_model("image", "hiagent"), bool(config.HIAGENT_API_KEY))),
-            option("openrouter", "", False),
-        ]),
+        kind: selected(kind, label, catalog_options(kind))
+        for kind, label in (
+            ("text", "Text 模型"),
+            ("vlm", "VLM 模型"),
+            ("video", "视频模型"),
+            ("image", "图像模型"),
+        )
     }
     return {
         "ok": True,
@@ -1209,15 +1264,62 @@ def jobs_overview(include_all: bool = False):
     def add_count(status: str, amount: int = 1) -> None:
         counts[status] = counts.get(status, 0) + amount
 
-    def effective_run_status(row: dict) -> str:
+    def _resolve_recovery_tail(start_id: str, chain_lookup: dict) -> dict:
+        """Follow recovered_by_run_id hops to the chain's terminal run.
+
+        A run interrupted mid-flight may be superseded by a *chain* of
+        continuation runs — each service restart appends one more hop
+        (docs/HARNESS_RUNBOOK.md: history is immutable, recovery only
+        appends new attempts). An ancestor's displayed status must track the
+        chain's *final* outcome, not just its immediate successor, otherwise
+        an ancestor whose direct child was itself later superseded again
+        gets stuck forever showing an intermediate "still recovering" state.
+        `recovered_by_run_id` must never cycle by construction, but this
+        still guards against a cycle or a dangling id so malformed data can
+        never hang the request — traversal simply stops at the last
+        resolvable hop instead.
+        """
+        visited = {start_id}
+        current = chain_lookup.get(start_id)
+        tail = current
+        while current and current.get("recovered_by_run_id"):
+            next_id = current["recovered_by_run_id"]
+            if next_id in visited:
+                break
+            nxt = chain_lookup.get(next_id)
+            if nxt is None:
+                break
+            visited.add(next_id)
+            current = nxt
+            tail = current
+        return tail or {}
+
+    def _superseded_message(successor_id: str, tail: dict) -> str:
+        tail_id = tail.get("id") or successor_id
+        tail_status = str(tail.get("status") or "").upper()
+        status_word = {
+            "RUNNING": "仍在运行",
+            "CREATED": "已排队等待执行",
+            "PAUSED_EXTERNAL": "自身也被中断（接管链尚未解析到终态）",
+            "": "状态未知（接管链未能解析，请核对数据）",
+        }.get(tail_status, tail_status.lower())
+        if tail_id == successor_id:
+            return f"历史记录：本次尝试已被 run {successor_id} 接管（{status_word}），本记录不会再被 worker 领取"
+        return (
+            f"历史记录：本次尝试已被 run {successor_id} 接管，经多次续跑后当前由 "
+            f"run {tail_id} 继续（{status_word}），本记录不会再被 worker 领取"
+        )
+
+    def effective_run_status(row: dict, tail: dict | None = None) -> str:
         if row.get("recovered_by_run_id"):
-            recovered_status = str(
-                row.get("recovered_run_status") or ""
-            ).upper()
+            recovered_status = str((tail or {}).get("status") or "").upper()
             if recovered_status == "SUCCEEDED":
                 return "recovered"
             if recovered_status in {"CREATED", "RUNNING", "PAUSED_EXTERNAL", ""}:
-                return "recovering"
+                # Superseded: this row itself is inert history. It is not
+                # "recovering" — nothing will ever pick it up again, its
+                # successor chain is simply not finished yet.
+                return "superseded"
             return run_statuses.get(
                 recovered_status,
                 recovered_status.lower(),
@@ -1238,10 +1340,6 @@ def jobs_overview(include_all: bool = False):
     # row in the low-level media jobs table.
     run_recent = rows_to_dicts(conn.execute(
         """SELECT wr.*,
-                  (SELECT child.status FROM workflow_runs child
-                    WHERE child.id=wr.recovered_by_run_id) AS recovered_run_status,
-                  (SELECT child.failure_message FROM workflow_runs child
-                    WHERE child.id=wr.recovered_by_run_id) AS recovered_run_failure_message,
                   CASE
                     WHEN wr.status IN ('PAUSED_EXTERNAL', 'WAITING_RETRY') THEN (
                       SELECT j.status FROM jobs j WHERE j.run_id=wr.id
@@ -1270,26 +1368,45 @@ def jobs_overview(include_all: bool = False):
            LEFT JOIN episodes shot_episode ON shot_episode.id=scope_shot.episode_id
            LEFT JOIN projects shot_project ON shot_project.id=shot_episode.project_id
            ORDER BY wr.updated_at DESC""").fetchall())
+    # Snapshot of every run's *raw* status/link before the loop below starts
+    # overwriting row["status"] with its projected value. Chain resolution
+    # must always walk original database values — never an already-projected
+    # one — otherwise resolving row A's chain could read row B's status after
+    # B has already been rewritten earlier in the same loop.
+    chain_lookup = {
+        row["id"]: {
+            "id": row["id"],
+            "status": row["status"],
+            "recovered_by_run_id": row.get("recovered_by_run_id"),
+            "failure_message": row.get("failure_message"),
+        }
+        for row in run_recent
+    }
     for row in run_recent:
         row["source"] = "run"
         row["run_id"] = row["id"]
         row["kind"] = row["workflow_type"]
         row["raw_status"] = row["status"]
-        row["status"] = effective_run_status(row)
-        row["error"] = (
-            "服务重启后已自动重新排队，等待 worker 领取"
-            if row["status"] == "recovering"
-            else (
-                row.get("recovered_run_failure_message")
-                if row.get("recovered_by_run_id")
-                and row.get("status") in {"failed", "cancelled", "partial"}
-                else row.get("failure_message")
-            )
+        tail = (
+            _resolve_recovery_tail(row["id"], chain_lookup)
+            if row.get("recovered_by_run_id") else None
         )
+        row["status"] = effective_run_status(row, tail)
+        if tail and tail.get("id") and tail.get("id") != row.get("recovered_by_run_id"):
+            row["recovered_tail_run_id"] = tail.get("id")
+        if row["status"] == "recovering":
+            row["error"] = "服务重启后已自动重新排队，等待 worker 领取"
+        elif row["status"] == "superseded":
+            row["error"] = _superseded_message(row.get("recovered_by_run_id") or "", tail or {})
+        elif (
+            row.get("recovered_by_run_id")
+            and row["status"] in {"failed", "cancelled", "partial"}
+        ):
+            row["error"] = (tail or {}).get("failure_message")
+        else:
+            row["error"] = row.get("failure_message")
     count_rows = rows_to_dicts(conn.execute(
         """SELECT wr.*,
-                  (SELECT child.status FROM workflow_runs child
-                    WHERE child.id=wr.recovered_by_run_id) AS recovered_run_status,
                   CASE
                     WHEN wr.status IN ('PAUSED_EXTERNAL', 'WAITING_RETRY') THEN (
                       SELECT j.status FROM jobs j WHERE j.run_id=wr.id
@@ -1299,7 +1416,11 @@ def jobs_overview(include_all: bool = False):
            FROM workflow_runs wr"""
     ).fetchall())
     for row in count_rows:
-        add_count(effective_run_status(row))
+        tail = (
+            _resolve_recovery_tail(row["id"], chain_lookup)
+            if row.get("recovered_by_run_id") else None
+        )
+        add_count(effective_run_status(row, tail))
 
     # Keep legacy/untraced media jobs visible, but omit jobs already represented
     # by a valid Run so one business task is never counted twice.
@@ -2093,7 +2214,7 @@ def put_settings(body: dict):
             "hiagent": bool(config.HIAGENT_API_KEY), "openrouter": bool(config.OPENROUTER_API_KEY),
             "bailian": bool(config.BAILIAN_API_KEY), "deepseek": bool(config.DEEPSEEK_API_KEY),
             "zhipu": bool(config.ZHIPU_API_KEY),
-            "minimax_h3": bool(config.MINIMAX_H3_BASE_URL),
+            "minimax_h3": bool(config.MINIMAX_H3_BASE_URL and config.MINIMAX_H3_API_KEY),
         }
         for kind in ("text", "vlm", "video", "image"):
             provider_field = f"model_{kind}_provider"
@@ -2230,6 +2351,7 @@ def put_keys(body: dict, _admin: None = Depends(require_system_admin)):
         "bailian": "BAILIAN_API_KEY",
         "deepseek": "DEEPSEEK_API_KEY",
         "zhipu": "ZHIPU_API_KEY",
+        "minimax_h3": "MINIMAX_H3_API_KEY",
     }
     env_keys: dict[str, str] = {}
     for provider, value in body.items():

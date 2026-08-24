@@ -45,6 +45,8 @@ export interface Job {
   raw_status?: string;
   error?: string;
   reason_code?: string;
+  recovered_by_run_id?: string;
+  recovered_tail_run_id?: string;
   state_revision?: number;
   shot_no?: number;
   episode_no?: number;
@@ -216,9 +218,17 @@ export interface CatalogModel {
   context_window_tokens?: number;
   max_output_tokens?: number;
   token_limits_source?: string;
+  protocol?: string;
 }
 interface ModelCatalog {
   items: CatalogModel[];
+  // 视频/图像没有统一协议，自建实例必须声明走哪一套；清单由后端注册表给出。
+  media_protocols?: {
+    video?: string[];
+    image?: string[];
+    text?: string[];
+    vlm?: string[];
+  };
 }
 interface SystemOverview {
   projects: Array<{
@@ -288,6 +298,7 @@ const JOB_STATUS_LABELS: Record<string, string> = {
   cancelled: "已取消",
   recovering: "恢复排队中",
   recovered: "已自动续跑",
+  superseded: "已被接管",
 };
 const WORKFLOW_LABELS: Record<string, string> = {
   character_bible: "人物谱",
@@ -501,8 +512,12 @@ export function jobNextStep(job: Job) {
     return "任务已完成，无需处理";
   if (job.status === "running")
     return "正在执行，可查看进度或取消任务";
-  if (job.status === "queued" || job.status === "recovering")
+  if (job.status === "queued")
     return "正在等待执行，可查看排队详情或取消任务";
+  if (job.status === "recovering")
+    return "服务重启后已自动重新排队，等待 worker 领取继续执行，可查看详情或取消任务";
+  if (job.status === "superseded")
+    return "历史记录：已被后续尝试接管，真正在执行/已完成的是接管记录，本记录无需处理";
   if (job.status === "waiting_retry")
     return "正在等待自动重试，可查看失败原因";
   if (job.status === "waiting_human")
@@ -836,11 +851,13 @@ function JobDrawer({
   projectId,
   onClose,
   onChanged,
+  onJumpToRun,
 }: {
   job: Job;
   projectId?: string;
   onClose: () => void;
   onChanged: () => void;
+  onJumpToRun?: (runId: string) => void;
 }) {
   const [detail, setDetail] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState("");
@@ -939,6 +956,13 @@ function JobDrawer({
     "waiting_human",
   ].includes(job.status);
   const providerCreateUnresolved = isProviderCreateUnresolved(job);
+  // "superseded" rows are deliberately excluded here even though the backend
+  // now scopes cancel to the record's own ownership (833236f) and can no
+  // longer kill the live successor by mistake: the real attempt is the
+  // successor, not this row, so a "取消任务" button here would let a user
+  // "cancel" a task and then watch it keep running anyway — confusing even
+  // though harmless. The record's real state is already visible via its
+  // status/label and error text; only the misleading action is withheld.
   const canCancel =
     job.source !== "screenplay" &&
     ["running", "queued", "recovering"].includes(job.status);
@@ -983,6 +1007,17 @@ function JobDrawer({
           <div className="monitor-impact">
             <b>当前影响：</b>
             <span>{jobNextStep(job)}</span>
+            {job.recovered_by_run_id && onJumpToRun && (
+              <button
+                type="button"
+                className="monitor-name-button"
+                onClick={() =>
+                  onJumpToRun(job.recovered_tail_run_id || job.recovered_by_run_id!)
+                }
+              >
+                查看接管记录 {job.recovered_tail_run_id || job.recovered_by_run_id} →
+              </button>
+            )}
             <details className="monitor-error-details">
               <summary>查看错误详情</summary>
               <pre>{job.error}</pre>
@@ -1845,6 +1880,7 @@ function ModelCenter({
     api_key: "",
     model: "",
     kinds: ["text"] as ModelKind[],
+    protocol: "",
   });
   const [newTested, setNewTested] = useState("");
   const [newTokenLimits, setNewTokenLimits] = useState<{
@@ -2033,6 +2069,16 @@ function ModelCenter({
     : testedSignature !== credentialSignature
       ? "请先使用当前地址和密钥通过连接测试"
       : "";
+  // 每条模型都要声明接入协议：代码里只有协议实现，没有模型。
+  const protocolOptions = Array.from(
+    new Set(
+      (["video", "image", "text", "vlm"] as ModelKind[]).flatMap((kind) =>
+        modelDraft.kinds.includes(kind)
+          ? catalog?.media_protocols?.[kind] ?? []
+          : [],
+      ),
+    ),
+  );
   const modelDraftMissing = [
     !modelDraft.label.trim() ? "显示名称" : "",
     !modelDraft.provider_label.trim() ? "服务名称" : "",
@@ -2040,6 +2086,7 @@ function ModelCenter({
     !modelDraft.model.trim() ? "模型标识" : "",
     !editingModel && !modelDraft.api_key.trim() ? "访问密钥" : "",
     !modelDraft.kinds.length ? "至少一种模型能力" : "",
+    !modelDraft.protocol ? "接入协议" : "",
   ].filter(Boolean);
   const modelTestDisabledReason = newTesting
     ? "正在测试连接"
@@ -2079,6 +2126,7 @@ function ModelCenter({
                 api_key: "",
                 model: "",
                 kinds: ["text"],
+                protocol: "",
               });
               setNewTested("");
               setNewTokenLimits({});
@@ -2105,10 +2153,22 @@ function ModelCenter({
             catalog?.items || [],
             row.key,
           );
+          // 模型库里一条模型就是一个 provider，所以「服务」按服务名称分组，
+          // 否则同一家服务下有两个模型时会在下拉里出现两个同名项。
+          const serviceOf = (provider: string) =>
+            catalog?.items.find((item) => item.provider === provider)
+              ?.provider_label || provider;
+          const currentService = serviceOf(providerKey);
+          const services = Array.from(
+            new Map(
+              options.map((option) => [serviceOf(option.provider), option]),
+            ).entries(),
+          );
           const models =
             catalog?.items.filter(
               (item) =>
-                item.provider === providerKey && item.kinds.includes(row.key),
+                item.kinds.includes(row.key) &&
+                serviceOf(item.provider) === currentService,
             ) || [];
           const modelDraftKey = modelAssignmentSettingKey(
             providerKey,
@@ -2122,7 +2182,7 @@ function ModelCenter({
             modelDraftKey ? draft[modelDraftKey] : undefined,
           );
           const selectedModel = models.find(
-            (item) => item.model === currentModel,
+            (item) => item.provider === providerKey,
           );
           const runningModel = catalog?.items.find(
             (item) =>
@@ -2157,10 +2217,16 @@ function ModelCenter({
                         ? `${row.label}服务商，当前只有一个受支持的服务`
                         : `${row.label}服务商`
                     }
-                    value={providerKey}
-                    disabled={options.length <= 1}
+                    value={currentService}
+                    disabled={services.length <= 1}
                     onChange={(e) => {
-                      const nextProvider = e.target.value;
+                      const nextService = e.target.value;
+                      const nextProvider =
+                        (catalog?.items.find(
+                          (item) =>
+                            item.kinds.includes(row.key) &&
+                            serviceOf(item.provider) === nextService,
+                        )?.provider) || providerKey;
                       const nextModel = modelAssignmentValue(
                         selection,
                         catalog?.items || [],
@@ -2181,13 +2247,9 @@ function ModelCenter({
                       });
                     }}
                   >
-                    {options.map((option) => (
-                      <option key={option.provider} value={option.provider}>
-                        {PROVIDER_LABELS[option.provider] ||
-                          catalog?.items.find(
-                            (item) => item.provider === option.provider,
-                          )?.provider_label ||
-                          option.provider}
+                    {services.map(([service, option]) => (
+                      <option key={service} value={service}>
+                        {service}
                         {option.available ? "" : "（待配置）"}
                       </option>
                     ))}
@@ -2197,25 +2259,24 @@ function ModelCenter({
                   <span>模型</span>
                   <select
                     aria-label={`${row.label}目标模型`}
-                    value={currentModel}
-                    disabled={!modelDraftKey || models.length <= 1}
+                    value={providerKey}
+                    disabled={models.length <= 1}
                     onChange={(e) => {
-                      if (!modelDraftKey) return;
                       setDraft((value) => ({
                         ...value,
-                        [modelDraftKey]: e.target.value,
+                        [`model_${row.key}_provider`]: e.target.value,
                       }));
                     }}
                   >
                     {models.length ? (
                       models.map((item) => (
-                        <option key={item.id} value={item.model}>
+                        <option key={item.id} value={item.provider}>
                           {modelBusinessLabel(item.label)}
                           {item.key_configured ? "" : "（待配置）"}
                         </option>
                       ))
                     ) : (
-                      <option value={currentModel}>
+                      <option value={providerKey}>
                         {catalogLabel(providerKey, currentModel)}
                       </option>
                     )}
@@ -2471,6 +2532,7 @@ function ModelCenter({
                                   api_key: "",
                                   model: item.model,
                                   kinds: item.kinds,
+                                  protocol: item.protocol || "",
                                 });
                                 setNewTested("");
                                 setNewTokenLimits({
@@ -2632,11 +2694,12 @@ function ModelCenter({
               <div>
                 <span className="eyebrow">自定义模型</span>
                 <h2 id="new-model-title">
-                  {editingModel
-                    ? "编辑 OpenAI 兼容模型"
-                    : "添加 OpenAI 兼容模型"}
+                  {editingModel ? "编辑自定义模型" : "添加自定义模型"}
                 </h2>
-                <p>保存前必须通过当前配置的连接测试。</p>
+                <p>
+                  所有模型都在模型库里，按所选接入协议对接；保存前必须通过当前
+                  配置的连接测试。
+                </p>
               </div>
               <button
                 className="model-modal-close"
@@ -2680,6 +2743,7 @@ function ModelCenter({
                 <span>服务地址（必填）</span>
                 <input
                   value={modelDraft.base_url}
+                  placeholder="https://…/v1"
                   onChange={(e) => {
                     setModelDraft((value) => ({
                       ...value,
@@ -2688,6 +2752,10 @@ function ModelCenter({
                     setNewTested("");
                   }}
                 />
+                <small>
+                  只填到版本号（如 https://…/v1），不要带
+                  /chat/completions、/images/generations 等具体接口路径。
+                </small>
               </label>
               <label className="model-form-field">
                 <span>模型技术标识（必填）</span>
@@ -2722,24 +2790,63 @@ function ModelCenter({
               </label>
               <fieldset className="model-form-field model-form-wide">
                 <legend>模型能力</legend>
-                {(["text", "vlm"] as ModelKind[]).map((kind) => (
+                {(["text", "vlm", "video", "image"] as ModelKind[]).map((kind) => (
                   <label key={kind}>
                     <input
                       type="checkbox"
                       checked={modelDraft.kinds.includes(kind)}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const kinds = e.target.checked
+                          ? [...modelDraft.kinds, kind]
+                          : modelDraft.kinds.filter((item) => item !== kind);
+                        const allowed = new Set(
+                          (["video", "image", "text", "vlm"] as ModelKind[])
+                            .flatMap((item) =>
+                              kinds.includes(item)
+                                ? catalog?.media_protocols?.[item] ?? []
+                                : [],
+                            ),
+                        );
                         setModelDraft((value) => ({
                           ...value,
-                          kinds: e.target.checked
-                            ? [...value.kinds, kind]
-                            : value.kinds.filter((item) => item !== kind),
-                        }))
-                      }
+                          kinds,
+                          // 改能力可能让已选协议不再适用（比如从文本改成视频），
+                          // 这时必须清掉重选，不能带着一个对新能力无效的协议提交。
+                          protocol: allowed.has(value.protocol)
+                            ? value.protocol
+                            : "",
+                        }));
+                        setNewTested("");
+                      }}
                     />
-                    {kind === "text" ? "文本生成" : "视觉理解"}
+                    {MODEL_KIND_LABELS[kind]}
                   </label>
                 ))}
               </fieldset>
+              {protocolOptions.length > 0 && (
+                <label className="model-form-field model-form-wide">
+                  <span>接入协议</span>
+                  <select
+                    value={modelDraft.protocol}
+                    onChange={(e) => {
+                      const protocol = e.target.value;
+                      setModelDraft((value) => ({ ...value, protocol }));
+                      setNewTested("");
+                    }}
+                  >
+                    <option value="">请选择</option>
+                    {protocolOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                  <small>
+                    代码里只实现协议，不内置模型；同一协议下换服务只要改地址和
+                    密钥。文本与视觉理解通常选 openai（OpenAI 兼容）。
+                  </small>
+                </label>
+              )}
             </div>
             <div className="model-modal-actions">
               <button
@@ -4436,6 +4543,10 @@ export default function MonitorPage({
                 .then((item) => setSelectedJob(item as Job)),
             ])
           }
+          onJumpToRun={(runId) => {
+            setSelectedJobId(runId);
+            writeQuery({ job_id: runId });
+          }}
         />
       )}
       {traceTarget && projectId && (
