@@ -12,7 +12,7 @@ machinery (app/production/certificate.py) are reused as-is.
 Frozen artifact payload shape (single source of truth -- field names must not
 change; see the task brief / docs/TRANSFORM_FREEZE_PLAN.md §3):
 {
-  "prep_pack_version": "1.3.0",
+  "prep_pack_version": "1.4.0",
   "episode_no": int,
   "episode_scope": {"chapter_indexes": [int], "source_segment_count": int},
   "event_chain": [{
@@ -31,7 +31,7 @@ change; see the task brief / docs/TRANSFORM_FREEZE_PLAN.md §3):
   "coverage_ledger": {"total_segments": int, "delivered": [int], "merged": [int],
       "retained_as_context": [int],
       "proven_duplicates": [{"segment_index": int, "duplicate_of_segment_index": int}],
-      "uncovered": [int]},
+      "paratext": [int], "uncovered": [int]},
   "hook": str, "cliffhanger": str,
 }
 
@@ -63,14 +63,34 @@ still blocks (_discovery_errored_names). ``characters`` keeps its
 existing portrait_id-bearing-only meaning; P1 storyboard prompts need
 functional_extras to know who else is in frame. See _resolve_assets below.
 
+1.4.0 (coordinator decision: users do not want chapter-heading/author's-note
+text turning into event-chain "events"): coverage_ledger gained a fifth
+account, ``paratext`` -- segment_index values the source text's own shape
+deterministically classifies as chapter heading (first segment) or trailing
+author's note (an unbroken keyword-matching run counted backward from the
+last segment), see app.validators.prep_pack_paratext_segment_indexes for the
+full position-constraint argument. This is a bookkeeping change, not a
+coverage-gate weakening: 洞即删戏 still applies to every segment that is
+*not* paratext, and a paratext segment that somehow also ends up inside some
+event's validated span is itself now a fatal ledger contradiction (see
+build_prep_pack_span_ledger's paratext_conflict check) rather than being
+silently tolerated either way. The event-chain extraction prompt (see
+_extract_chunk) still receives the full chunk text including paratext
+segments (for narrative context / to let the model see what precedes/follows
+it) but is told those specific segment numbers do not need to fall inside
+any event's span.
+
 Coverage accounting design (three real EP1 iterations, see
 docs/TRANSFORM_FREEZE_PLAN.md and app.validators.build_prep_pack_span_ledger):
 the model declares each event's ``source_span`` (a closed [from_segment,
 to_segment] interval) instead of enumerating a disposition for every
-individual segment. The four-account coverage_ledger is then a deterministic
-PROJECTION of the validated spans -- delivered/retained_as_context/uncovered
-are derived, not model-declared; merged/proven_duplicates are always empty
-under this accounting. This replaced an earlier per-segment
+individual segment. The coverage_ledger is then a deterministic PROJECTION
+of the validated spans -- delivered/retained_as_context/uncovered are
+derived, not model-declared; merged/proven_duplicates are always empty under
+this accounting; paratext (1.4.0) is the one account that is *not* derived
+from spans -- it is classified independently, directly from the source text
+(see the 1.4.0 note above), before any event span is even considered. This
+replaced an earlier per-segment
 disposition-declaration design (2026-08-24) that made the model's bookkeeping
 burden scale with segment count and left it randomly dropping ~1 short
 segment (2-6 chars, e.g. a single interjection) per real run despite three
@@ -108,11 +128,13 @@ from app.validators import (
     assert_prep_pack_coverage_complete,
     assert_prep_pack_span_union_matches_ledger,
     build_prep_pack_span_ledger,
+    prep_pack_paratext_segment_indexes,
 )
 
-PREP_PACK_VERSION = "1.3.0"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "1.4.0"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
-# gained functional_extras (see module docstring).
+# gained functional_extras; 1.4.0: coverage_ledger gained paratext (see module
+# docstring's 1.4.0 note and app.validators.prep_pack_paratext_segment_indexes).
 QA_PROFILE_VERSION = "prep-pack-qa-gate-1"
 _QA_EVALUATOR_NAME = "screenplay_production_qa"
 _CHUNK_MAX_CHARS = 6000
@@ -737,10 +759,18 @@ async def _extract_chunk(
     chunk: list[tuple[int, SourceSegment]],
     known_characters: list[str],
     known_scenes: list[str],
+    paratext_indexes: set[int],
     attempt_hint: str,
     run_id: str | None,
 ) -> _ChunkResponse:
     rendered = _render_chunk(chunk)
+    chunk_paratext = sorted(index for index, _ in chunk if index in paratext_indexes)
+    paratext_note = (
+        f"- 本段编号 {chunk_paratext} 属于章节名/作者留言等框外文字（不是故事叙述本身），"
+        "不需要被任何事件的 span 覆盖，划分事件时可以跳过这些编号；除这些编号外，"
+        "本段其余编号仍必须被完整覆盖；\n"
+        if chunk_paratext else ""
+    )
     hint = f"\n上一次尝试未通过校验，请修正：{attempt_hint}\n" if attempt_hint else ""
     prompt = f"""你在为一部网络小说改编的短剧准备第 {episode_no} 集的事件链（不改编台词、不生成分镜）。
 
@@ -765,7 +795,7 @@ async def _extract_chunk(
 硬性要求（关于 source_span）：
 - 所有事件的 span 首尾相接，必须完整覆盖本段全部编号 {chunk[0][0]}~{chunk[-1][0]}，
   不允许任何编号夹在所有 span 之外——那等于把那段原文删掉了；
-- 相邻事件允许共享一个边界编号（例如事件 A 的 to_segment=20，事件 B 的 from_segment=20），
+{paratext_note}- 相邻事件允许共享一个边界编号（例如事件 A 的 to_segment=20，事件 B 的 from_segment=20），
   但不允许区间交叉或倒退（后一个事件的 from_segment 不能小于前一个事件的 to_segment）；
 - 不要为了省事把一大段编号塞进一个事件——跨度明显大于平均值的事件，请至少给两条分别落在
   该跨度前半和后半的 source_evidence，证明你确实看过整段内容而不是笼统打包。
@@ -871,6 +901,11 @@ async def _generate_prep_pack_once(
     chunks = _chunk_segments(segments)
     known_characters = _known_character_names(conn, project_id, episode_no)
     known_scenes = _known_scene_names(conn, project_id, episode_no)
+    # 1.4.0: classified once up front from the full source text (chapter
+    # heading / trailing author's note are document-level, not chunk-local
+    # concepts), then narrowed to each chunk's own range when building that
+    # chunk's prompt below.
+    paratext_indexes = prep_pack_paratext_segment_indexes(source_text)
 
     raw_events: list[dict[str, Any]] = []  # fed to build_prep_pack_span_ledger
     events: list[dict[str, Any]] = []  # payload-shaped, built after the gate passes
@@ -885,6 +920,7 @@ async def _generate_prep_pack_once(
             chunk=chunk,
             known_characters=known_characters,
             known_scenes=known_scenes,
+            paratext_indexes=paratext_indexes,
             attempt_hint=attempt_hint,
             run_id=run_id,
         )
@@ -912,11 +948,20 @@ async def _generate_prep_pack_once(
     if not raw_events:
         raise PrepPackGateError("本集未抽取到任何事件")
 
-    ledger, ledger_errors = build_prep_pack_span_ledger(source_text, events=raw_events)
+    ledger, ledger_errors, span_extensions = build_prep_pack_span_ledger(
+        source_text, events=raw_events,
+    )
     if ledger_errors:
         raise PrepPackGateError(
             "事件跨度账本存在无效声明：" + "；".join(ledger_errors[:10])
         )
+    # Deterministic span extension (ERR-20260824-9babad): a verified quote
+    # just outside the raw declared span widens that event's own span --
+    # publish the widened boundary, not the raw declaration, so downstream
+    # (P1 storyboard) sees the span the ledger actually validated against.
+    extended_span_by_event_id = {
+        item["event_id"]: (item["from"], item["to"]) for item in span_extensions
+    }
     try:
         assert_prep_pack_coverage_complete(ledger)
     except ValueError as exc:
@@ -964,13 +1009,18 @@ async def _generate_prep_pack_once(
                 "line": aligned.excerpt if aligned is not None else key_line.line,
                 "segment_index": key_line.segment_index,
             })
+        extended = extended_span_by_event_id.get(event["event_id"])
+        final_from, final_to = (
+            extended if extended is not None
+            else (model_event.source_span.from_segment, model_event.source_span.to_segment)
+        )
         payload_events.append({
             "event_id": event["event_id"],
             "order": event["order"],
             "summary": event["summary"],
             "source_span": {
-                "from_segment": model_event.source_span.from_segment,
-                "to_segment": model_event.source_span.to_segment,
+                "from_segment": final_from,
+                "to_segment": final_to,
             },
             "source_evidence": aligned_evidence,
             "key_lines": aligned_key_lines,

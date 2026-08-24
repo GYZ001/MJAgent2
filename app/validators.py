@@ -59,7 +59,12 @@ from app.scene_contract import (
     scene_time_of,
     split_legacy_scene_setting,
 )
-from app.source_excerpt import align_source_excerpt, index_source_segments
+from app.source_excerpt import (
+    SourceSegment,
+    align_source_excerpt,
+    index_source_segments,
+    structural_front_matter_ids,
+)
 from app.renderability import (
     ACTION_DESC_HARD_MIN,
     ACTION_DESC_TARGET_MAX,
@@ -2731,11 +2736,89 @@ PREP_PACK_SPAN_LAZINESS_MULTIPLIER = 3
 _PREP_PACK_QUOTE_MIN_MATCH_CHARS = 2
 
 
+# --- Paratext ledger account (coordinator decision, 2026-08-24) ------------
+# Users do not want "chapter heading" or "author's note" text to show up as
+# events in the event chain, but 洞即删戏 (rule a below) still applies -- a
+# segment cannot just vanish from the ledger to make that happen. Paratext
+# segments get their own fifth account instead: exempted from "must be
+# inside some event's span", not exempted from being accounted for.
+#
+# Classification is 100% deterministic (no model call) and, unlike a bare
+# keyword scan, deliberately POSITION-constrained. app/source_paratext.py's
+# own module docstring documents why a keyword/position-only classifier was
+# explicitly *rejected* for the narrative-blueprint layer: it misfires on a
+# character name that happens to contain "他" or a mid-chapter line that
+# mentions "收藏" in real dialogue. The two rules below are narrower than
+# that rejected design specifically so they cannot repeat the mistake:
+#   ① chapter heading: ONLY segment #1 (plus a short segment #2 subtitle)
+#      can ever match, via the same first-segment-only regex the narrative
+#      blueprint layer already uses (structural_front_matter_ids) -- a
+#      chapter-heading-shaped line anywhere else in the document is never
+#      even examined by this rule, let alone classified by it.
+#   ② author's note: ONLY a segment inside the unbroken run counting
+#      backward from the very last segment can ever match, and only via one
+#      of the fixed keywords below -- the backward scan stops at the first
+#      segment (from the end) that does NOT match, so a real story segment
+#      earlier in the document is never reached no matter what words it
+#      contains. This is exactly what keeps a mid-body line mentioning
+#      "推荐票" in dialogue/narration from being misclassified: something
+#      after it in document order fails to match, halting the scan before
+#      it ever reaches that segment.
+# Anything neither rule reaches stays "real content" -- fail-closed per
+# instruction: 拿不准就是戏, never paratext.
+_PARATEXT_AUTHOR_NOTE_KEYWORDS = (
+    # Same vocabulary as PARATEXT_RULE (app/source_paratext.py) plus the
+    # coordinator's own example words -- one shared definition, just also
+    # frozen here as a deterministic keyword table for this position-scoped
+    # use.
+    "求收藏", "求推荐", "推荐票", "求月票", "月票", "求订阅", "订阅",
+    "感谢读者", "感谢大家", "感谢支持", "新书", "求追读", "求点击",
+    "更新", "上架", "加更", "求打赏", "打赏", "求评论", "求书评",
+    "读者群", "书友群", "作者的话", "作者有话说", "书架",
+)
+
+
+def _prep_pack_paratext_indexes_from_segments(segments: list[SourceSegment]) -> set[int]:
+    """Core classification, operating on already-indexed segments (shared by
+    ``prep_pack_paratext_segment_indexes`` and ``build_prep_pack_span_ledger``
+    so the latter does not re-run ``index_source_segments`` a second time).
+    See the module comment above for the position-constraint safety
+    argument. Returns 1-based segment_index values."""
+    if not segments:
+        return set()
+    index_by_segment_id = {
+        segment.segment_id: index for index, segment in enumerate(segments, start=1)
+    }
+    paratext: set[int] = set()
+    for segment_id in structural_front_matter_ids(segments):
+        index = index_by_segment_id.get(segment_id)
+        if index is not None:
+            paratext.add(index)
+    for segment in reversed(segments):
+        if any(keyword in segment.text for keyword in _PARATEXT_AUTHOR_NOTE_KEYWORDS):
+            paratext.add(index_by_segment_id[segment.segment_id])
+        else:
+            break
+    return paratext
+
+
+def prep_pack_paratext_segment_indexes(source_text: str) -> set[int]:
+    """Deterministically classify which indexed segments of ``source_text``
+    are paratext (chapter heading / trailing author's note) for the
+    prep_pack coverage ledger's fifth account and for the event-chain
+    extraction prompt (app.production.prep_pack._extract_chunk tells the
+    model these segment numbers do not need to fall inside any event's
+    span). See the module comment above ``_prep_pack_paratext_indexes_from_
+    segments`` for the position-constraint safety argument.
+    """
+    return _prep_pack_paratext_indexes_from_segments(index_source_segments(source_text or ""))
+
+
 def build_prep_pack_span_ledger(
     source_text: str,
     *,
     events: list[dict[str, Any]],
-) -> tuple[dict[str, Any], list[str]]:
+) -> tuple[dict[str, Any], list[str], list[dict[str, Any]]]:
     """Deterministically validate event spans and project the coverage ledger.
 
     Coverage accounting design (screenplay contract 6.0.0, invariant ①; see
@@ -2751,50 +2834,82 @@ def build_prep_pack_span_ledger(
     [{"segment_index": int, "quote": str}, ...]}`` (raw model output, not yet
     alignment-verified -- this function does that itself).
 
+    **确定性跨度扩展**（EP2 首次正式回归暴露，ERR-20260824-9babad：模型对
+    ev_003 声明 span=[13,16] 却引用了 segment 17，方差性的"跨度写窄一格"，
+    不是新回归缺陷）："申报 ∪ 确定性证明"哲学的直接延伸——逐字核实的引文是
+    强证据，跨度声明本身只是弱元数据；一个事件的最终 span 在有序/无洞检查
+    **之前**先归一为 ``[原始 span] ∪ [该事件全部逐字核实引文的 segment_index]``。
+    这不是放宽门禁：扩展只能被这个事件**自己**的、已核实（align_source_excerpt
+    命中）的引文推动，不核实的东西、别的事件的引文都不能移动它的边界一步。
+    扩展导致的真冲突（吃进相邻事件的独占区间，使有序检查无法单调化）照旧
+    按规则 (c) 致命——扩展不解除跨度有序的义务，只是先把"证据确凿但笔误写窄
+    了一格"这种噪音在阻断判断前过滤掉。扩展记录进返回值第三项
+    ``normalized_span_extensions``，供观测，不改变三条致命规则本身。
+
     Exactly three things are fatal (**洞即删戏、引文锚地、跨度有序** -- all
     three, and only these three, block publish; everything else is
-    unrestricted):
-      a) **洞即删戏**: the union of all validated spans must equal
+    unrestricted). All three are evaluated against each event's EXTENDED
+    span (see above), not the raw declared one:
+      a) **洞即删戏**: the union of all validated (extended) spans must equal
          ``[1, total_segments]`` with no gaps -- any segment outside every
          event's span is content that got silently cut, full stop, no size
          exemption (an earlier "small holes get interpolated" mechanism was
          explicitly retired: real output showed the "hole" was actually a
-         structural artifact -- a genuinely unquotable micro-fragment or a
-         span boundary against non-story paratext -- not a size problem, so
-         a size-based exemption was the wrong lever).
+         structural artifact, not a size problem, so a size-based exemption
+         was the wrong lever).
       b) **引文锚地**: each event must have >=1 verbatim-aligned quote
-         (source_evidence) *inside its own declared span* -- proves the
-         event isn't fabricated. A quote whose segment_index falls outside
-         the event's own span is a contradiction (the ledger's own claims
-         disagree with each other), not weak evidence -- fatal, not just
-         "uncovered".
+         (source_evidence) -- proves the event isn't fabricated. A quote
+         that fails alignment (does not actually match its claimed
+         segment's text) simply does not count, anywhere; it neither
+         anchors nor extends anything.
       c) **跨度有序**: spans must advance in ``order`` -- the next event's
-         from_segment may not be less than the previous event's to_segment.
-         Sharing exactly the boundary segment (next.from_segment ==
-         prev.to_segment) is normal and expected, not an error. Real overlap
-         or regression means the ledger contradicts itself about who owns a
-         segment -- fatal.
+         (extended) from_segment may not be less than the previous event's
+         (extended) to_segment. Sharing exactly the boundary segment is
+         normal and expected, not an error. Real overlap or regression
+         means the ledger contradicts itself about who owns a segment --
+         fatal, extension included.
     The anti-laziness guardrail (PREP_PACK_SPAN_LAZINESS_MULTIPLIER) is part
-    of (b): a span far larger than average is not "well anchored" merely by
-    having one quote somewhere in it, so oversized spans need two quotes
-    spread across their own front/back halves.
+    of (b), evaluated against the extended span length: a span far larger
+    than average is not "well anchored" merely by having one quote
+    somewhere in it, so oversized spans need two quotes spread across their
+    own front/back halves.
 
-    Returns ``(ledger, errors)``. The four-account ledger is a pure
-    PROJECTION of the validated spans, not a model declaration:
+    Returns ``(ledger, errors, normalized_span_extensions)``. The ledger has
+    five accounts; four are a pure PROJECTION of the validated (extended)
+    spans, not a model declaration, and the fifth (paratext) is an
+    independent deterministic classification (prep_pack_version 1.4.0, see
+    ``prep_pack_paratext_segment_indexes`` above) that exempts chapter-
+    heading / trailing-author's-note segments from needing event coverage
+    without letting them silently disappear:
       delivered = segments with a verbatim-aligned quote in their owning
         event's source_evidence
       retained_as_context = other segments inside some validated span
-      uncovered = segments outside every span (rule a's fatal case)
+      paratext = chapter heading / trailing author's note segments,
+        classified independently of any event span (see above); a segment
+        here is, by construction, never also in delivered/retained_as_context
+        -- if the model's own span somehow covers one anyway, that is a
+        contradiction (see paratext_conflict below), not a silent merge
+      uncovered = segments outside every span AND not paratext (rule a's
+        fatal case)
       merged / proven_duplicates = always [] -- the model no longer declares
         per-segment disposition, so these accounts have nothing to populate
-    ``errors`` describes rule (b)/(c) violations (a event's own claims are
-    internally inconsistent); a non-empty ``uncovered`` is rule (a) and is
-    reported by ``assert_prep_pack_coverage_complete`` instead, not here.
+    ``errors`` describes rule (b)/(c) violations (an event's own claims are
+    internally inconsistent, even after extension) *and* a paratext/covered
+    overlap (ledger self-contradiction, coordinator red test (c)); a
+    non-empty ``uncovered`` is rule (a) and is reported by
+    ``assert_prep_pack_coverage_complete`` instead, not here.
+    ``normalized_span_extensions`` is
+    ``[{"event_id", "from", "to", "extended_by"}]`` for every event whose
+    final span differs from its raw declared one -- observability only, the
+    caller (app.production.prep_pack) also uses it to publish the extended
+    span in the artifact payload's event_chain[].source_span.
     """
     segments = index_source_segments(source_text or "")
     by_index = {index: segment for index, segment in enumerate(segments, start=1)}
     total = len(segments)
+    paratext = _prep_pack_paratext_indexes_from_segments(segments)
     errors: list[str] = []
+    extensions: list[dict[str, Any]] = []
     ordered = sorted(events, key=lambda e: int(e.get("order") or 0))
     event_count = len(ordered)
     avg_span = (total / event_count) if event_count else 0.0
@@ -2805,27 +2920,21 @@ def build_prep_pack_span_ledger(
     prev_to = 0
     for event in ordered:
         event_id = str(event.get("event_id") or "")
-        from_segment = int(event.get("from_segment") or 0)
-        to_segment = int(event.get("to_segment") or 0)
-        if from_segment < 1 or to_segment > total or from_segment > to_segment:
+        declared_from = int(event.get("from_segment") or 0)
+        declared_to = int(event.get("to_segment") or 0)
+        if declared_from < 1 or declared_to > total or declared_from > declared_to:
             errors.append(
-                f"事件 {event_id} 的 source_span [{from_segment},{to_segment}] "
+                f"事件 {event_id} 的 source_span [{declared_from},{declared_to}] "
                 "超出原文范围或首尾颠倒"
             )
             continue
-        if from_segment < prev_to:
-            errors.append(
-                f"事件 {event_id} 的 span 起点 {from_segment} 早于前一事件终点 "
-                f"{prev_to}，跨度交叉或倒退"
-            )
-            continue
+        # Verify every claimed quote against its OWN claimed segment's real
+        # text, regardless of whether that segment lies inside the raw
+        # declared span -- alignment success is what "verified" means here,
+        # not span membership.
         anchored: set[int] = set()
-        outside: list[int] = []
         for item in event.get("source_evidence") or []:
             idx = int(item.get("segment_index") or 0)
-            if idx < from_segment or idx > to_segment:
-                outside.append(idx)
-                continue
             source_segment = by_index.get(idx)
             if source_segment is None:
                 continue
@@ -2835,16 +2944,32 @@ def build_prep_pack_span_ledger(
             )
             if aligned is not None:
                 anchored.add(idx)
-        if outside:
-            errors.append(
-                f"事件 {event_id} 的引文 segment_index {sorted(set(outside))} "
-                f"落在其自己声明的 span [{from_segment},{to_segment}] 之外"
-            )
         if not anchored:
             errors.append(
-                f"事件 {event_id} 在其 span [{from_segment},{to_segment}] 内"
+                f"事件 {event_id} 在其 span [{declared_from},{declared_to}] 附近"
                 "没有任何逐字引文命中原文，缺少可核验证据"
             )
+            continue
+        # Deterministic span extension: only this event's own verified quotes
+        # may move its boundary, and only outward.
+        from_segment = min(declared_from, min(anchored))
+        to_segment = max(declared_to, max(anchored))
+        if (from_segment, to_segment) != (declared_from, declared_to):
+            extended_by = sorted(
+                idx for idx in anchored if idx < declared_from or idx > declared_to
+            )
+            extensions.append({
+                "event_id": event_id,
+                "from": from_segment,
+                "to": to_segment,
+                "extended_by": extended_by,
+            })
+        if from_segment < prev_to:
+            errors.append(
+                f"事件 {event_id} 的 span（含确定性扩展）起点 {from_segment} 早于"
+                f"前一事件终点 {prev_to}，跨度交叉或倒退"
+            )
+            continue
         span_len = to_segment - from_segment + 1
         if span_len > laziness_threshold:
             midpoint = (from_segment + to_segment) / 2
@@ -2860,7 +2985,21 @@ def build_prep_pack_span_ledger(
         covered |= set(range(from_segment, to_segment + 1))
         prev_to = max(prev_to, to_segment)
 
-    uncovered = sorted(set(by_index) - covered)
+    # 副文本/其它账重叠 = 账本自相矛盾（协调方红灯 c）：paratext 是分类阶段独立
+    # 算出来的，不该出现在任何事件的已验证 span 里；一旦出现，说明分类判错了
+    # 或模型没照提示词跳过它，两种情况都不该被静默接受，走 errors 而不是四舍
+    # 五入吞掉——与 (b)/(c) 走同一条阻断路径（调用方看到 ledger_errors 非空
+    # 即 PrepPackGateError，不会走到下面的 uncovered 判断）。merged/proven_
+    # duplicates 在本设计下恒为空集，不需要单独再检查。
+    paratext_conflict = sorted(paratext & covered)
+    if paratext_conflict:
+        shown = "、".join(str(i) for i in paratext_conflict[:20])
+        errors.append(
+            f"以下编号已被判定为副文本（章节名/作者留言），却又被某个事件的 "
+            f"source_span 覆盖，账本自相矛盾：{shown}"
+        )
+
+    uncovered = sorted(set(by_index) - covered - paratext)
     retained_as_context = sorted(covered - delivered)
     ledger = {
         "total_segments": total,
@@ -2868,9 +3007,10 @@ def build_prep_pack_span_ledger(
         "merged": [],
         "retained_as_context": retained_as_context,
         "proven_duplicates": [],
+        "paratext": sorted(paratext),
         "uncovered": uncovered,
     }
-    return ledger, errors
+    return ledger, errors, extensions
 
 
 def assert_prep_pack_coverage_complete(ledger: dict[str, Any]) -> None:
@@ -2894,6 +3034,9 @@ def assert_prep_pack_coverage_complete(ledger: dict[str, Any]) -> None:
       - 其余不设限：模型不再申报任何逐段 disposition，没有"冗余申报"这类
         问题需要归一化——四账是从已验证的 span 确定性投影出来的，不是
         模型的自由声明。
+    跨度声明本身只是弱元数据：可以被这个事件自己已核实（逐字对齐命中）的
+    引文确定性扩展（见 build_prep_pack_span_ledger），但不可以被任何未核实
+    的东西扩展——扩展权限只属于证据，不属于声明或猜测。
     """
     uncovered = list(ledger.get("uncovered") or [])
     if not uncovered:

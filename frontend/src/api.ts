@@ -1275,7 +1275,8 @@ export interface EpisodeScreenplay {
  * prep_pack_version 判别，见 ScriptPage.tsx 的 isPrepPack。基础形状冻结见
  * docs/TRANSFORM_FREEZE_PLAN.md §3；字段随版本持续演进，均按可选处理，不假设
  * 某个具体版本号是终点：1.1.0 起 event_chain[].source_span，1.2.0 起
- * asset_manifest.characters[].aliases，1.3.0 起 asset_manifest.functional_extras。
+ * asset_manifest.characters[].aliases，1.3.0 起 asset_manifest.functional_extras，
+ * 1.4.0 起 coverage_ledger.paratext。
  */
 export interface PrepPackSourceEvidence {
   segment_index: number;
@@ -1354,6 +1355,12 @@ export interface PrepPackCoverageLedger {
   retained_as_context: PrepPackCoverageEntry[];
   proven_duplicates: PrepPackCoverageEntry[];
   uncovered: PrepPackCoverageEntry[];
+  /**
+   * 第五账（1.4.0+ 字段，1.3.0 及更早的产物没有它）：副文本——章节名/作者留言段等
+   * 不属于正文事件链、但已被合法计入覆盖的原文段。不算未覆盖，参与"已覆盖"总数
+   * 的并集计算，见 ScriptPage.tsx 的 coverageGateSummary。
+   */
+  paratext?: PrepPackCoverageEntry[];
 }
 
 export interface EpisodePrepPack {

@@ -100,6 +100,10 @@ export function coverageGateSummary(ledger: PrepPackCoverageLedger | null | unde
   const merged = ledger?.merged ?? []
   const retained = ledger?.retained_as_context ?? []
   const duplicates = ledger?.proven_duplicates ?? []
+  // 第五账（1.4.0+，1.3.0 及更早产物没有它）：副文本是合法覆盖，并入"已覆盖"总数，
+  // 不算未覆盖——uncovered 数组本身已经是权威来源，这里不需要、也不应该从 uncovered
+  // 里减去 paratext，只是把它计进展示用的覆盖计数。
+  const paratext = ledger?.paratext ?? []
   return {
     ok: uncovered.length === 0,
     uncoveredCount: uncovered.length,
@@ -108,6 +112,8 @@ export function coverageGateSummary(ledger: PrepPackCoverageLedger | null | unde
     mergedCount: merged.length,
     retainedCount: retained.length,
     duplicateCount: duplicates.length,
+    paratextCount: paratext.length,
+    paratextLabels: paratext.map(coverageEntryLabel),
     totalSegments: ledger?.total_segments ?? 0,
   }
 }
@@ -596,7 +602,7 @@ export function PrepPackView({
     ? sourceRangeText(pack.episode_scope.chapter_indexes)
     : sourceFallback
   const coveredSegments = gate.totalSegments
-    || gate.deliveredCount + gate.mergedCount + gate.retainedCount + gate.duplicateCount
+    || gate.deliveredCount + gate.mergedCount + gate.retainedCount + gate.duplicateCount + gate.paratextCount
 
   return (
     <>
@@ -611,6 +617,12 @@ export function PrepPackView({
           <span className="prep-gate-chip">已合并 {gate.mergedCount}</span>
           <span className="prep-gate-chip">保留上下文 {gate.retainedCount}</span>
           <span className="prep-gate-chip">判定重复 {gate.duplicateCount}</span>
+          {/* 第五账（1.4.0+）：副文本，仅非空时显示；没有展开交互，用 title 承载段号列表。 */}
+          {gate.paratextCount > 0 && (
+            <span className="prep-gate-chip" title={`原文段：${gate.paratextLabels.join('、')}`}>
+              副文本 {gate.paratextCount} 段
+            </span>
+          )}
         </span>
       </div>
       {!gate.ok && (

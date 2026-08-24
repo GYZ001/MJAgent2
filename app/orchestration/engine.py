@@ -73,6 +73,12 @@ _STEP_PRESENTATIONS: dict[str, WorkflowStepPresentation] = {
     "episode_prep_pack_asset_mapping": WorkflowStepPresentation(
         "资产映射", "确定性核对事件链中出场角色/场景，解析到已有定妆照/场景参考图",
     ),
+    "episode_prep_pack_character_discovery": WorkflowStepPresentation(
+        "识别新出场角色", "对资产映射解析不到的角色名调用人物发现，判定改名/群演/新建人物卡",
+    ),
+    "episode_prep_pack_scene_discovery": WorkflowStepPresentation(
+        "识别新出场场景", "对资产映射解析不到的场景名调用场景发现，判定改名或登记新场景",
+    ),
     "episode_prep_pack_hook_cliffhanger": WorkflowStepPresentation(
         "抽取开场钩子与结尾悬念", "从事件链推导本集 hook/cliffhanger 并核验接地到真实事件",
     ),
@@ -120,6 +126,12 @@ _STEP_PRESENTATIONS: dict[str, WorkflowStepPresentation] = {
     ),
     "apply_delivery_gate": WorkflowStepPresentation(
         "确认交付条件", "根据质量门禁决定是否允许正式交付",
+    ),
+    "portrait_view_redo": WorkflowStepPresentation(
+        "重做人物单视角", "重新生成人物定妆照的单个视角图并验收",
+    ),
+    "generate_and_single_view_qa_and_pack_qa": WorkflowStepPresentation(
+        "重做场景单视角", "重新生成场景参考图的单个视角图，验收单视角与整包质量",
     ),
 }
 

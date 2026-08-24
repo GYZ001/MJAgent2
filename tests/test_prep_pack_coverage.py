@@ -26,6 +26,7 @@ from app.validators import (
     assert_prep_pack_coverage_complete,
     assert_prep_pack_span_union_matches_ledger,
     build_prep_pack_span_ledger,
+    prep_pack_paratext_segment_indexes,
 )
 
 
@@ -62,7 +63,7 @@ def test_hole_in_middle_of_span_union_blocks_publish():
             "source_evidence": [{"segment_index": 4, "quote": _seg_text(SOURCE, 4)}],
         },
     ]
-    ledger, errors = build_prep_pack_span_ledger(SOURCE, events=events)
+    ledger, errors, extensions = build_prep_pack_span_ledger(SOURCE, events=events)
     assert errors == []
     assert ledger["uncovered"] == [3]
     with pytest.raises(ValueError) as exc_info:
@@ -86,7 +87,7 @@ def test_full_span_coverage_passes():
             "source_evidence": [{"segment_index": 4, "quote": _seg_text(SOURCE, 4)}],
         },
     ]
-    ledger, errors = build_prep_pack_span_ledger(SOURCE, events=events)
+    ledger, errors, extensions = build_prep_pack_span_ledger(SOURCE, events=events)
     assert errors == []
     assert ledger["uncovered"] == []
     assert ledger["delivered"] == [1, 4]
@@ -97,31 +98,70 @@ def test_full_span_coverage_passes():
 
 
 # ---------------------------------------------------------------------------
-# c) 引文不在申报 span 内 → 阻断
+# c) 确定性跨度扩展（ERR-20260824-9babad，EP2 正式回归）：一个事件自己已核实
+# 的引文落在申报 span 之外时，先扩展该事件自己的 span，再做有序/无洞检查——
+# 而不是立刻把"落在 span 外"当错误。扩展只能被这个事件自己的核实引文推动；
+# 扩展导致跟别的事件的真冲突（有序检查在扩展后的边界上失败）照旧致命。
 # ---------------------------------------------------------------------------
 
-def test_quote_outside_declared_span_blocks():
+def test_adjacent_out_of_span_quote_extends_and_records_one_extension():
+    """引文 = span.to + 1（紧邻），归一通过，extensions 记录恰好 1 条。"""
     events = [
         {
-            "event_id": "ev_001", "order": 1, "from_segment": 1, "to_segment": 2,
-            # segment_index 4 is outside this event's own [1,2] span.
-            "source_evidence": [{"segment_index": 4, "quote": _seg_text(SOURCE, 4)}],
+            "event_id": "ev_001", "order": 1, "from_segment": 1, "to_segment": 1,
+            "source_evidence": [
+                {"segment_index": 1, "quote": _seg_text(SOURCE, 1)},
+                # segment_index 2 == declared to_segment(1) + 1: adjacent overreach.
+                {"segment_index": 2, "quote": _seg_text(SOURCE, 2)},
+            ],
         },
         {
             "event_id": "ev_002", "order": 2, "from_segment": 3, "to_segment": 4,
             "source_evidence": [{"segment_index": 4, "quote": _seg_text(SOURCE, 4)}],
         },
     ]
-    ledger, errors = build_prep_pack_span_ledger(SOURCE, events=events)
-    # This is a rule-(b) contradiction (an event's own evidence disagrees
-    # with its own declared span), reported via `errors` -- a different gate
-    # from assert_prep_pack_coverage_complete's uncovered check. The caller
-    # (app.production.prep_pack._generate_prep_pack_once) blocks on either
-    # being non-empty; here both spans still union to full coverage, so
-    # uncovered is legitimately empty and errors is where this must surface.
-    assert any("落在其自己声明的 span" in message for message in errors)
-    assert any("没有任何逐字引文命中原文" in message for message in errors)
+    ledger, errors, extensions = build_prep_pack_span_ledger(SOURCE, events=events)
+    assert errors == []
     assert ledger["uncovered"] == []
+    assert len(extensions) == 1
+    assert extensions[0]["event_id"] == "ev_001"
+    assert extensions[0]["from"] == 1
+    assert extensions[0]["to"] == 2
+    assert extensions[0]["extended_by"] == [2]
+    assert_prep_pack_coverage_complete(ledger)  # must not raise
+
+
+def test_extension_reaching_into_next_events_territory_is_still_fatal():
+    """引文深入另一事件独占区间：扩展本身发生，但扩展后的跨度使有序检查在
+    处理下一个事件时失败——真冲突照旧阻断，扩展机制不豁免它。"""
+    segments = index_source_segments(LONGER_SOURCE)
+    events = [
+        {
+            "event_id": "ev_001", "order": 1, "from_segment": 1, "to_segment": 3,
+            "source_evidence": [
+                {"segment_index": 1, "quote": segments[0].text},
+                # segment_index 10 sits deep inside ev_003's own exclusive
+                # range below -- not a harmless adjacent overreach.
+                {"segment_index": 10, "quote": segments[9].text},
+            ],
+        },
+        {
+            "event_id": "ev_002", "order": 2, "from_segment": 4, "to_segment": 8,
+            "source_evidence": [{"segment_index": 4, "quote": segments[3].text}],
+        },
+        {
+            "event_id": "ev_003", "order": 3, "from_segment": 9, "to_segment": 16,
+            "source_evidence": [{"segment_index": 9, "quote": segments[8].text}],
+        },
+    ]
+    ledger, errors, extensions = build_prep_pack_span_ledger(LONGER_SOURCE, events=events)
+    # ev_001 does extend (its own verified evidence reaches segment 10)...
+    assert any(item["event_id"] == "ev_001" and item["to"] == 10 for item in extensions)
+    # ...but the extension swallows ev_002's declared start, which must
+    # still surface as a fatal crossing/regression when ev_002 is processed.
+    assert any("交叉或倒退" in message for message in errors)
+    with pytest.raises(ValueError):
+        assert_prep_pack_coverage_complete(ledger)
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +199,7 @@ def test_oversized_span_with_insufficient_spread_blocks():
             "source_evidence": [{"segment_index": 16, "quote": segments[15].text}],
         },
     ]
-    ledger, errors = build_prep_pack_span_ledger(LONGER_SOURCE, events=events)
+    ledger, errors, extensions = build_prep_pack_span_ledger(LONGER_SOURCE, events=events)
     assert any("疑似整段打包偷懒" in message for message in errors)
     # A laziness-guardrail violation is a rule-(b) ledger error, independent
     # of whether the segments happen to be span-covered (uncovered may well
@@ -190,7 +230,7 @@ def test_oversized_span_with_proper_spread_passes_laziness_guardrail():
             "source_evidence": [{"segment_index": 16, "quote": segments[15].text}],
         },
     ]
-    ledger, errors = build_prep_pack_span_ledger(LONGER_SOURCE, events=events)
+    ledger, errors, extensions = build_prep_pack_span_ledger(LONGER_SOURCE, events=events)
     assert not any("疑似整段打包偷懒" in message for message in errors)
     assert ledger["uncovered"] == []
 
@@ -211,7 +251,7 @@ def test_adjacent_events_sharing_boundary_segment_passes():
             "source_evidence": [{"segment_index": 4, "quote": _seg_text(SOURCE, 4)}],
         },
     ]
-    ledger, errors = build_prep_pack_span_ledger(SOURCE, events=events)
+    ledger, errors, extensions = build_prep_pack_span_ledger(SOURCE, events=events)
     assert errors == []
     assert ledger["uncovered"] == []
     assert 2 in ledger["delivered"]  # anchored by ev_001's own evidence
@@ -231,7 +271,7 @@ def test_span_crossing_is_fatal():
             "source_evidence": [{"segment_index": 4, "quote": _seg_text(SOURCE, 4)}],
         },
     ]
-    ledger, errors = build_prep_pack_span_ledger(SOURCE, events=events)
+    ledger, errors, extensions = build_prep_pack_span_ledger(SOURCE, events=events)
     assert any("交叉或倒退" in message for message in errors)
     with pytest.raises(ValueError):
         assert_prep_pack_coverage_complete(ledger)
@@ -288,4 +328,100 @@ def test_published_span_union_with_extra_segment_blocks():
     with pytest.raises(ValueError) as exc_info:
         assert_prep_pack_span_union_matches_ledger(event_spans=event_spans, ledger=ledger)
     assert "PREP_PACK_SPAN_LEDGER_MISMATCH" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# prep_pack_version 1.4.0 (coordinator decision): paratext ledger account.
+# Users do not want chapter-heading/author's-note text to become event-chain
+# "events"; classification is 100% deterministic (no model call) and
+# POSITION-constrained on purpose -- see app.validators' module comment above
+# prep_pack_paratext_segment_indexes for the full false-positive argument
+# (directly informed by app/source_paratext.py's own documented prior
+# rejection of bare keyword/position classification).
+# ---------------------------------------------------------------------------
+
+PARATEXT_SOURCE = "\n\n".join([
+    "第一章 山间清晨",                                            # 1: chapter heading -> paratext (①)
+    "孟浩推开柴门，看见院子里落满黄叶。",                              # 2: real story
+    "他叹了口气，转身回屋取来扫帚，开始清扫满地的落叶。",                  # 3: real story
+    "邻居王婶端着一碗热汤走了过来，说道：“浩儿，快趁热喝了。”",  # 4: real story
+    "感谢大家一直以来的支持，本书求收藏求推荐！",                        # 5: trailing author's note -> paratext (②)
+    "新书已经上架，欢迎大家多多支持，谢谢！",                            # 6: trailing author's note -> paratext (②)
+])
+
+
+def _paratext_seg_text(index: int) -> str:
+    return index_source_segments(PARATEXT_SOURCE)[index - 1].text
+
+
+def test_paratext_fixture_classification_is_heading_plus_trailing_run_only():
+    # Guard the fixture itself: exactly {1, 5, 6}, not more (segment 2's
+    # story text must not bleed into "subtitle" absorption, and the
+    # backward scan must stop the instant it hits segment 4's real content).
+    assert prep_pack_paratext_segment_indexes(PARATEXT_SOURCE) == {1, 5, 6}
+
+
+def test_paratext_segments_are_exempt_from_event_coverage_and_ledger_passes():
+    """红灯 a）：首段章节名 + 尾部连续留言段 → 正确归入 paratext，五账全量
+    覆盖通过，且不要求这些段落被任何事件的 span 覆盖。"""
+    events = [
+        {
+            "event_id": "ev_001", "order": 1, "from_segment": 2, "to_segment": 3,
+            "source_evidence": [{"segment_index": 2, "quote": _paratext_seg_text(2)}],
+        },
+        {
+            "event_id": "ev_002", "order": 2, "from_segment": 4, "to_segment": 4,
+            "source_evidence": [{"segment_index": 4, "quote": _paratext_seg_text(4)}],
+        },
+    ]
+    ledger, errors, extensions = build_prep_pack_span_ledger(PARATEXT_SOURCE, events=events)
+    assert errors == []
+    assert ledger["paratext"] == [1, 5, 6]
+    assert ledger["uncovered"] == []  # 1/5/6 never claimed by any event span
+    assert ledger["delivered"] == [2, 4]
+    assert ledger["retained_as_context"] == [3]
+    assert_prep_pack_coverage_complete(ledger)  # must not raise
+
+
+def test_mid_body_recommendation_ticket_mention_is_not_classified_as_paratext():
+    """红灯 b）（关键假阳性护栏，直接对应 app/source_paratext.py 文档记载的
+    历史教训："正文里出现「收藏」等" 不得误伤）：正文中间一句提到"推荐票"的
+    真实叙事/心理描写，绝不能被归入 paratext——从末段向前扫的规则只认一段
+    "不中断的尾巴"，这句后面紧跟着不含关键词的正常故事段落，扫描早在到达
+    它之前就已经停止。"""
+    source = "\n\n".join([
+        "第一章 山间清晨",
+        "孟浩推开柴门，心里想着若能得几张推荐票就好了，随即又摇了摇头。",
+        "他叹了口气，转身回屋取来扫帚，开始清扫满地的落叶。",
+        "邻居王婶端着一碗热汤走了过来，说道：“浩儿，快趁热喝了。”",
+    ])
+    paratext = prep_pack_paratext_segment_indexes(source)
+    assert paratext == {1}
+    assert 2 not in paratext
+
+
+def test_paratext_segment_reachable_by_an_event_span_is_a_fatal_contradiction():
+    """红灯 c）：某段落同时出现在 paratext 与事件覆盖（delivered/
+    retained_as_context）账里——两套判定互相矛盾，必须致命阻断，不能静默
+    接受任何一边。"""
+    events = [
+        # ev_001's span erroneously reaches into segment 1 (the chapter
+        # heading) and even quotes it as evidence -- the model ignored the
+        # "these segment numbers don't need coverage" instruction.
+        {
+            "event_id": "ev_001", "order": 1, "from_segment": 1, "to_segment": 3,
+            "source_evidence": [{"segment_index": 1, "quote": _paratext_seg_text(1)}],
+        },
+        {
+            "event_id": "ev_002", "order": 2, "from_segment": 4, "to_segment": 4,
+            "source_evidence": [{"segment_index": 4, "quote": _paratext_seg_text(4)}],
+        },
+    ]
+    ledger, errors, extensions = build_prep_pack_span_ledger(PARATEXT_SOURCE, events=events)
+    assert 1 in ledger["paratext"]
+    assert any("账本自相矛盾" in message for message in errors)
+    # Same enforcement path as every other rule-(b)/(c) violation in this
+    # file (e.g. test_oversized_span_with_insufficient_spread_blocks): the
+    # caller (app.production.prep_pack) blocks on any non-empty `errors`
+    # regardless of what `uncovered` says.
 

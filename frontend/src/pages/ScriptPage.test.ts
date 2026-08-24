@@ -167,6 +167,8 @@ describe('coverageGateSummary', () => {
       mergedCount: 1,
       retainedCount: 1,
       duplicateCount: 0,
+      paratextCount: 0,
+      paratextLabels: [],
       totalSegments: 4,
     })
   })
@@ -206,8 +208,41 @@ describe('coverageGateSummary', () => {
       mergedCount: 0,
       retainedCount: 0,
       duplicateCount: 0,
+      paratextCount: 0,
+      paratextLabels: [],
       totalSegments: 0,
     })
+  })
+
+  // 第五账（1.4.0+）：副文本——章节名/作者留言段等，是合法覆盖，不算未覆盖。
+  it('counts paratext as a legitimate covered account, separate from uncovered', () => {
+    const summary = coverageGateSummary({
+      total_segments: 5,
+      delivered: [1, 2],
+      merged: [],
+      retained_as_context: [3],
+      proven_duplicates: [],
+      uncovered: [],
+      paratext: [4, 5],
+    })
+    expect(summary.ok).toBe(true)
+    expect(summary.paratextCount).toBe(2)
+    expect(summary.paratextLabels).toEqual(['4', '5'])
+    expect(summary.uncoveredCount).toBe(0)
+  })
+
+  it('defaults paratext to zero/empty for 1.3.0-and-earlier packs that lack the field entirely', () => {
+    const summary = coverageGateSummary({
+      total_segments: 3,
+      delivered: [1, 2, 3],
+      merged: [],
+      retained_as_context: [],
+      proven_duplicates: [],
+      uncovered: [],
+      // paratext 字段整个不存在（1.3.0 及更早产物）
+    })
+    expect(summary.paratextCount).toBe(0)
+    expect(summary.paratextLabels).toEqual([])
   })
 })
 
@@ -641,5 +676,46 @@ describe('PrepPackView renders aliases and functional_extras (real EP13 data)', 
   it('hides the section when functional_extras is an empty array too', () => {
     const html = renderToStaticMarkup(createElement(PrepPackView, { pack: buildPack({ ...ep13AssetManifest, functional_extras: [] }), bible: null, sourceFallback: '第 13 章' }))
     expect(html).not.toContain('群演 / 一次性人物')
+  })
+})
+
+// 覆盖门禁第五账（1.4.0+）：副文本 chip 只在非空时出现，且不影响绿灯判定。
+describe('PrepPackView renders the paratext gate chip (5th account)', () => {
+  const basePack = (coverageLedger: Record<string, unknown>) => ({
+    prep_pack_version: '1.4.0',
+    episode_no: 1,
+    episode_scope: { chapter_indexes: [1], source_segment_count: 5 },
+    event_chain: [],
+    asset_manifest: { characters: [], scenes: [] },
+    coverage_ledger: coverageLedger,
+    hook: 'h', cliffhanger: 'c',
+  }) as any
+
+  it('shows the "副文本 N 段" chip with the segment list in its title when paratext is non-empty', () => {
+    const pack = basePack({
+      total_segments: 5, delivered: [1, 2, 3], merged: [], retained_as_context: [],
+      proven_duplicates: [], uncovered: [], paratext: [4, 5],
+    })
+    const html = renderToStaticMarkup(createElement(PrepPackView, { pack, bible: null, sourceFallback: '第 1 章' }))
+    expect(html).toContain('副文本 2 段')
+    expect(html).toContain('原文段：4、5')
+    // 绿灯判定不受第五账影响；覆盖总数展示把它并入
+    expect(html).toContain('全部原文段已覆盖（5/5 段）')
+  })
+
+  it('omits the chip entirely when paratext is absent (pre-1.4.0 packs) or an empty array', () => {
+    const withoutField = basePack({
+      total_segments: 3, delivered: [1, 2, 3], merged: [], retained_as_context: [],
+      proven_duplicates: [], uncovered: [],
+    })
+    const htmlWithout = renderToStaticMarkup(createElement(PrepPackView, { pack: withoutField, bible: null, sourceFallback: '第 1 章' }))
+    expect(htmlWithout).not.toContain('副文本')
+
+    const withEmpty = basePack({
+      total_segments: 3, delivered: [1, 2, 3], merged: [], retained_as_context: [],
+      proven_duplicates: [], uncovered: [], paratext: [],
+    })
+    const htmlEmpty = renderToStaticMarkup(createElement(PrepPackView, { pack: withEmpty, bible: null, sourceFallback: '第 1 章' }))
+    expect(htmlEmpty).not.toContain('副文本')
   })
 })
