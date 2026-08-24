@@ -528,7 +528,7 @@ def test_future_identity_exact_map_schema_is_closed_and_provider_safe(
     ]["G002"]["enum"] == ["", "E:second"]
     assert local_schema["properties"]["revealed_names"]["properties"][
         "G001"
-    ]["maxLength"] == 16
+    ]["maxLength"] == portraits.IDENTITY_SOURCE_LABEL_DEFENSIVE_MAX_LENGTH
 
     provider_schema = response_format["json_schema"]["schema"]
     assert response_format["json_schema"]["strict"] is True
@@ -555,6 +555,252 @@ def test_future_identity_exact_map_schema_is_closed_and_provider_safe(
         "title", "default", "minLength", "maxLength", "minItems",
         "maxItems", "uniqueItems",
     })
+
+
+# --- source_label 约束维度回归：从长度换成分隔符标点 ------------------------
+#
+# 生产事故 provider_calls.id=8233（第 7 集）：模型对 f 项如实回答
+# source_label='一只约莫一人大小，样子如猴般的凶兽'（17 字），被旧的
+# max_length=16 硬拒绝，触发 StructuredFormatError 并杀掉整集。真正应该拒绝
+# 的原因是其中的全角逗号——下游按 `_IDENTITY_LIST_SEPARATOR_PATTERN` 切分身份
+# 列表，混入分隔符会让一个人被错误切成两段。长度只是不精确的代理：更短但带
+# 逗号的标签一样危险，更长但不带分隔符的标签反而无害。见
+# `IDENTITY_SOURCE_LABEL_DEFENSIVE_MAX_LENGTH` 旁的完整说明。
+
+
+def test_current_functional_source_label_ep7_regression_rejects_separator_not_length() -> None:
+    """EP7 真实夹具：provider_calls.id=8233 response_json 里的原样 source_label。"""
+    ep7_label = "一只约莫一人大小，样子如猴般的凶兽"
+    assert len(ep7_label) == 17
+    # 17 字远小于新的防御性上限 64；如果修复后仍被拒绝，必须是因为分隔符。
+    assert len(ep7_label) <= portraits.IDENTITY_SOURCE_LABEL_DEFENSIVE_MAX_LENGTH
+
+    with pytest.raises(ValidationError, match="分隔符"):
+        portraits.CurrentFunctionalIdentityDecision(
+            evidence_ref="E013",
+            source_label=ep7_label,
+            functional_identity_key="F1",
+            kind="onscreen",
+        )
+
+    # 证明约束维度真的换了：去掉那个全角逗号后，字符串仍然比旧的 16 字上限长，
+    # 但不再含分隔符，必须放行。
+    without_separator = ep7_label.replace("，", "")
+    assert len(without_separator) == 16
+    accepted = portraits.CurrentFunctionalIdentityDecision(
+        evidence_ref="E013",
+        source_label=without_separator,
+        functional_identity_key="F1",
+        kind="onscreen",
+    )
+    assert accepted.source_label == without_separator
+
+
+def test_current_functional_source_label_accepts_shortest_literal_span() -> None:
+    """第七章原文里「凶兽」本身就是一个更短、合法的逐字称谓。"""
+    accepted = portraits.CurrentFunctionalIdentityDecision(
+        evidence_ref="E013",
+        source_label="凶兽",
+        functional_identity_key="F1",
+        kind="onscreen",
+    )
+    assert accepted.source_label == "凶兽"
+
+
+def test_current_functional_source_label_accepts_long_label_without_separators() -> None:
+    """约束维度是分隔符标点，不是长度：远超旧 16 字上限但不含分隔符必须放行。"""
+    long_label = "一只约莫一人大小样子如猴般的凶兽并无任何逗号顿号或空白字符插入其中三十字整"
+    assert len(long_label) > 16
+    assert len(long_label) <= portraits.IDENTITY_SOURCE_LABEL_DEFENSIVE_MAX_LENGTH
+    accepted = portraits.CurrentFunctionalIdentityDecision(
+        evidence_ref="E013",
+        source_label=long_label,
+        functional_identity_key="F1",
+        kind="onscreen",
+    )
+    assert accepted.source_label == long_label
+
+
+@pytest.mark.parametrize("separator", [
+    "、", "，", ",", "／", "/", "；", ";", "｜", "|", "＆", "&", "＋", "+", " ", "\t",
+])
+def test_current_functional_source_label_rejects_every_list_separator(
+    separator: str,
+) -> None:
+    with pytest.raises(ValidationError, match="分隔符"):
+        portraits.CurrentFunctionalIdentityDecision(
+            evidence_ref="E013",
+            source_label=f"甲{separator}乙",
+            functional_identity_key="F1",
+            kind="onscreen",
+        )
+
+
+def test_current_functional_source_label_defensive_cap_still_applies() -> None:
+    """长度上限没有消失，只是从业务约束降级为防御性上限（64，对齐
+    functional_identity_key 的 max_length=64）。"""
+    with pytest.raises(ValidationError):
+        portraits.CurrentFunctionalIdentityDecision(
+            evidence_ref="E013",
+            source_label="甲" * 65,
+            functional_identity_key="F1",
+            kind="onscreen",
+        )
+    accepted = portraits.CurrentFunctionalIdentityDecision(
+        evidence_ref="E013",
+        source_label="甲" * 64,
+        functional_identity_key="F1",
+        kind="onscreen",
+    )
+    assert len(accepted.source_label) == 64
+
+
+def test_current_identity_projection_accepts_long_separator_free_functional_label() -> None:
+    """append_candidate 的手写业务校验必须和 Pydantic Field 一起放宽。
+
+    此前 `_project_current_identity_response` 内部的 `append_candidate` 单独
+    用 `len(source_label) > 16` 复查了一遍同一条规则；只放宽 Pydantic Field
+    而漏改这里，会让一个已经通过 schema 校验的合法长标签在业务校验阶段再次
+    被拒。
+    """
+    long_label = "一只约莫一人大小样子如猴般的凶兽并无任何逗号顿号或空白字符插入其中三十字整"
+    source_text = f"{long_label}忽然从林中窜出，众人大惊。"
+    records = portraits._current_identity_evidence_records(source_text)
+    evidence_by_ref = {
+        f"E{index:03d}": record for index, record in enumerate(records, start=1)
+    }
+    evidence_ref = next(
+        ref for ref, record in evidence_by_ref.items()
+        if long_label in str(record.get("text") or "")
+    )
+    payload = {
+        "k": [],
+        "n": [],
+        "f": [{
+            "evidence_ref": evidence_ref,
+            "source_label": long_label,
+            "functional_identity_key": "F1",
+            "kind": "onscreen",
+        }],
+    }
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        reserved_authority_labels=set(),
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert errors == []
+    assert len(projected) == 1
+    assert projected[0]["source_label"] == long_label
+
+
+def test_current_identity_known_decision_catalog_exposes_long_separator_free_alias() -> None:
+    """K 目录过滤器（历史注册别名）必须使用同一条业务规则，而不是独立的旧
+    len()>16 检查，否则修复后新签发的长标签永远无法在后续集数被重新认领。
+    """
+    long_alias = "一只约莫一人大小样子如猴般的凶兽并无任何逗号顿号或空白字符插入其中三十字整"
+    source_text = f"{long_alias}忽然现身。"
+    records = portraits._current_identity_evidence_records(source_text)
+    evidence_by_ref = {
+        f"E{index:03d}": record for index, record in enumerate(records, start=1)
+    }
+    authorities = [{
+        "authority_id": "bible:凶兽头领",
+        "canonical_name": "凶兽头领",
+        "identity_kind": "named",
+        "identity_group": "bible:凶兽头领",
+        "source_labels": [long_alias],
+        "source_instance_key": "bible:凶兽头领",
+    }]
+    known = portraits._current_identity_known_decision_catalog(
+        evidence_by_ref, authorities=authorities,
+    )
+    assert any(item["source_label"] == long_alias for item in known.values())
+
+
+def test_current_identity_known_decision_catalog_still_rejects_separator_alias() -> None:
+    """同一过滤器仍必须拒绝带分隔符的历史别名（哪怕它很短）。"""
+    bad_alias = "凶兽，头领"
+    source_text = f"{bad_alias}忽然现身。"
+    records = portraits._current_identity_evidence_records(source_text)
+    evidence_by_ref = {
+        f"E{index:03d}": record for index, record in enumerate(records, start=1)
+    }
+    authorities = [{
+        "authority_id": "bible:凶兽头领",
+        "canonical_name": "凶兽头领",
+        "identity_kind": "named",
+        "identity_group": "bible:凶兽头领",
+        "source_labels": [bad_alias],
+        "source_instance_key": "bible:凶兽头领",
+    }]
+    known = portraits._current_identity_known_decision_catalog(
+        evidence_by_ref, authorities=authorities,
+    )
+    assert not any(item["source_label"] == bad_alias for item in known.values())
+
+
+def test_future_identity_new_name_rejects_list_separator_not_length(
+    monkeypatch,
+) -> None:
+    """revealed_names（未来揭示真名）与 source_label 同源同险：canonical_name
+    一旦混入分隔符，会被下游按同一 pattern 错误切成两段身份。这里验证真正的
+    业务约束（validate_response 里的检查）已经从长度换成分隔符。
+    """
+    bible = Bible(world=World(visual_style_canonical="都市漫画"), characters=[])
+    calls = 0
+    # 8 字，远小于旧的 16 字上限：证明拒绝理由是分隔符，不是长度。
+    bad_name = "陈某、王某"
+
+    async def fake_chat(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        group_key = next(iter(
+            schema["properties"]["decisions"]["properties"]
+        ))
+        decisions = schema["properties"]["decisions"]["properties"]
+        evidence = schema["properties"]["reveal_evidence_ids"]["properties"]
+        return json.dumps({
+            "decisions": {
+                group_key: next(
+                    value for value in decisions[group_key]["enum"]
+                    if value.startswith("N:")
+                ),
+            },
+            "revealed_names": {group_key: bad_name},
+            "revealed_name_kinds": {group_key: "personal_name"},
+            "reveal_evidence_ids": {
+                group_key: next(
+                    value for value in evidence[group_key]["enum"]
+                    if value
+                ),
+            },
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="真名不得包含身份列表分隔符",
+    ):
+        asyncio.run(portraits.resolve_future_identity_candidates(
+            [{
+                "name": "三哥",
+                "source_label": "三哥",
+                "identity_kind": "functional",
+                "identity_group": "current:third-brother",
+                "kind": "onscreen",
+            }],
+            source_text="三哥推门进来。",
+            future_text=f"后来才知道，三哥其实是{bad_name}两人假扮的。",
+            bible=bible,
+            episode_no=7,
+            future_label="后续章节",
+        ))
+    assert calls == 1
 
 
 def _coverage_audit_kwargs() -> dict:
@@ -3146,7 +3392,7 @@ def test_future_identity_operation_binds_exact_outbound_semantics(
         )
         assert (
             kwargs["call_meta"]["contract_version"]
-            == "screenplay-future-identity.v12"
+            == portraits.FUTURE_IDENTITY_DECISION_VERSION
         )
         operations.append((kwargs["operation_id"], kwargs["call_meta"]["model"]))
         return portraits.FutureIdentityCandidateResponse.model_validate(
@@ -3530,10 +3776,10 @@ def test_attempt15_call_63222_rf10_mirror_succeeds_once(
         calls += 1
         meta = kwargs["call_meta"]
         assert meta["contract_version"] == (
-            "screenplay-identity-discovery.v15"
+            portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION
         )
         assert meta["current_identity_version"] == (
-            "screenplay-current-identity.v12"
+            portraits.CURRENT_IDENTITY_DECISION_VERSION
         )
         assert meta["format_attempt"] == 0
         assert meta["semantic_attempt"] == 0

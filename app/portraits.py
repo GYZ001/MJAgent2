@@ -24,7 +24,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, NoReturn
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app import config, hiagent, textmatch
 from app.atomic_io import atomic_write_bytes
@@ -67,18 +67,29 @@ STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集�
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
-IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v15"
-CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v12"
+IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v16"
+CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v13"
 CURRENT_IDENTITY_EVIDENCE_RECEIPT_VERSION = (
     "screenplay-current-identity-evidence-receipt.v2"
 )
 CURRENT_IDENTITY_LITERAL_PROVENANCE = "owned_current_literal.v1"
 CURRENT_IDENTITY_SYNTHETIC_PROVENANCE = "provider_synthetic_functional.v1"
 IDENTITY_ADJUDICATION_SOURCE_PROVENANCE = "owned_ir_identity_adjudication.v2"
-FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v12"
+FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v13"
 STRUCTURAL_IDENTITY_COVERAGE_VERSION = (
     "screenplay-identity-structural-coverage.v6"
 )
+# 身份标签（source_label / 未来揭示的真名）的防御性长度上限。这不是业务约束
+# 本身，只用来拦截模型输出中明显失控的超长值（如整段抄录原文）；真正的业务
+# 约束是禁止携带 _IDENTITY_LIST_SEPARATOR_PATTERN 命中的分隔符标点或空白——
+# 下游（plot_spine.who / dialogue speaker / information_ledger.speaker_id /
+# voice_bible.speaker_id / scene.characters）按该 pattern 切分身份列表，源头
+# 混入分隔符会让一个人被错误切成多段身份。生产事故：EP7 的
+# source_label='一只约莫一人大小，样子如猴般的凶兽'（17 字）曾因超过旧
+# max_length=16 被 pydantic 直接拒绝，而真正应该拒绝的原因是其中的全角逗号，
+# 不是长度——10 字带逗号一样危险，30 字不带分隔符反而无害。与同文件
+# functional_identity_key 的 max_length=64 对齐。
+IDENTITY_SOURCE_LABEL_DEFENSIVE_MAX_LENGTH = 64
 # 称谓形态的优先级阶梯：真名 > 尊称 > 代称。
 #
 # 生产事故：第 1 集的后续窗口只写出「许师姐」，模型据此签发了一张全新人物卡
@@ -939,7 +950,11 @@ def _current_identity_known_decision_catalog(
                 if str(label or "").strip()
             ))
             for source_label in registered_labels:
-                if len(source_label) > 16 or source_label not in evidence_text:
+                if (
+                    len(source_label) > IDENTITY_SOURCE_LABEL_DEFENSIVE_MAX_LENGTH
+                    or _identity_source_label_has_list_separator(source_label)
+                    or source_label not in evidence_text
+                ):
                     continue
                 pair = (evidence_ref, source_label)
                 previous_authority = authority_by_ref_label.setdefault(
@@ -1366,7 +1381,11 @@ def _project_current_identity_response(
         functional_key = str(functional_key or "")
         if source_label != source_label.strip():
             errors.append(f"source_label 含首尾空白：{source_label!r}")
-        if not source_label or len(source_label) > 16:
+        if (
+            not source_label
+            or len(source_label) > IDENTITY_SOURCE_LABEL_DEFENSIVE_MAX_LENGTH
+            or _identity_source_label_has_list_separator(source_label)
+        ):
             errors.append(f"source_label 非法：{source_label!r}")
         evidence_text = str(record.get("text") or "")
         literal = bool(source_label and source_label in evidence_text)
@@ -2018,6 +2037,12 @@ async def _discover_character_candidates_legacy(
    source_label 尽量逐字复用所选 E text；若为区分同段多个无名实体而
    必须使用非逐字的稳定描述，只能保留为 functional，后端会隔离为 synthetic identity，
    不得将它当作别名或真名。
+   若同一实体在证据里有多个逐字可用的称呼（如「凶兽」与「一只约莫一人大小，
+   样子如猴般的凶兽」），必须选其中最短的那个稳定称谓：source_label 只是一个
+   可复用的身份标签，不是用来证明你读到了完整描述。
+   source_label 不得包含 、，,／/；;｜|＆&＋+ 等分隔符标点或空白：后端会按这些
+   字符切分身份列表（如台词发言人、场次角色表），混入分隔符会让一个人被错误
+   切成多段身份。
 5. 若身份投影中的 source_label 混入动作或表演提示，必须结合对应 line_context 判断真正说话人；
    source_label 保留原始完整字符串，canonical_name/functional_identity_key 绑定到真正说话人。
    禁止按“说、喊、点头”等固定词表或后缀规则猜测。
@@ -2377,9 +2402,24 @@ class CurrentFunctionalIdentityDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     evidence_ref: str
-    source_label: str = Field(min_length=1, max_length=16)
+    source_label: str = Field(
+        min_length=1, max_length=IDENTITY_SOURCE_LABEL_DEFENSIVE_MAX_LENGTH
+    )
     functional_identity_key: str = Field(min_length=1, max_length=64)
     kind: Literal["onscreen", "mentioned"]
+
+    @field_validator("source_label")
+    @classmethod
+    def _source_label_forbids_identity_list_separators(cls, value: str) -> str:
+        # 约束维度是分隔符标点，不是长度：max_length 只是防御性上限（见常量旁
+        # 说明）。生产事故 EP7 的 source_label 是因为混入全角逗号才必须被拒，
+        # 一个更短但带逗号的标签同样危险，一个更长但不带分隔符的标签反而无害。
+        if _identity_source_label_has_list_separator(value):
+            raise ValueError(
+                "source_label 不得包含身份列表分隔符或空白"
+                "（、，,／/；;｜|＆&＋+ 及空白）：下游会按这些字符切分身份列表"
+            )
+        return value
 
 
 class CurrentIdentityCandidateResponse(BaseModel):
@@ -2554,7 +2594,13 @@ def _future_identity_schema(
                 for key in keys
             }),
             "revealed_names": exact_map({
-                key: {"type": "string", "maxLength": 16}
+                # maxLength 是防御性上限，不是业务约束（业务约束是禁止分隔符
+                # 标点，见 validate_response 里对 canonical_name 的检查）；provider
+                # strict schema 会剥离 maxLength，这里保留只为向模型展示信息。
+                key: {
+                    "type": "string",
+                    "maxLength": IDENTITY_SOURCE_LABEL_DEFENSIVE_MAX_LENGTH,
+                }
                 for key in keys
             }),
             "reveal_evidence_ids": exact_map({
@@ -3641,9 +3687,13 @@ async def resolve_future_identity_candidates(
                 errors.append(
                     f"future identity NEW 真名无效：{group_key}"
                 )
-            if len(canonical_name) > 16:
+            if len(canonical_name) > IDENTITY_SOURCE_LABEL_DEFENSIVE_MAX_LENGTH:
                 errors.append(
                     f"future identity NEW 真名过长：{group_key}"
+                )
+            if _identity_source_label_has_list_separator(canonical_name):
+                errors.append(
+                    f"future identity NEW 真名不得包含身份列表分隔符：{group_key}"
                 )
             if declared_form != IDENTITY_NAME_FORM_PERSONAL:
                 errors.append(
@@ -5426,6 +5476,17 @@ def _replace_resolved_label(text: str, source_label: str, canonical_name: str) -
 _IDENTITY_LIST_SEPARATOR_PATTERN = re.compile(
     r"([、，,／/；;｜|＆&＋+\s]+)"
 )
+
+
+def _identity_source_label_has_list_separator(value: str) -> bool:
+    """True if ``value`` contains a char the identity-list grammar splits on.
+
+    这是 source_label / 未来揭示真名的真正业务约束（见
+    ``IDENTITY_SOURCE_LABEL_DEFENSIVE_MAX_LENGTH`` 旁的说明）：长度只是不精确
+    的代理，混入 ``_IDENTITY_LIST_SEPARATOR_PATTERN`` 命中的分隔符或空白才会
+    让下游身份列表被错误切分。
+    """
+    return _IDENTITY_LIST_SEPARATOR_PATTERN.search(str(value or "")) is not None
 
 
 def _project_identity_token(
