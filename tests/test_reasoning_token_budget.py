@@ -176,6 +176,111 @@ async def test_truncation_at_the_output_limit_still_fails(monkeypatch) -> None:
     assert len(payloads) == 2
 
 
+def _undelivered_response() -> dict:
+    """EP6 蓝图局部修复的真实故障指纹（provider_calls id=7887, 2026-08-23）：
+    content 为空、finish_reason 缺失（不是 "length"）、reasoning 停在半句、
+    usage 全 0——供应商对这次请求什么都没交付，而不是交付了一个空答案。"""
+    return {
+        "choices": [
+            {
+                "finish_reason": None,
+                "message": {
+                    "content": "",
+                    "reasoning": "我们被要求只修复硬门禁问题……",
+                },
+            }
+        ],
+        "usage": {
+            "total_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+        },
+    }
+
+
+def _delivered_empty_response() -> dict:
+    """content 为空，但 finish_reason=stop 且 completion_tokens>0：供应商确实
+    跑完了这次请求，只是决定不说话。这是交付了的坏答案，必须继续 fail-closed，
+    不能被"没有交付"那条重放豁免。"""
+    return {
+        "choices": [
+            {"finish_reason": "stop", "message": {"content": ""}}
+        ],
+        "usage": {"completion_tokens": 3},
+    }
+
+
+@pytest.mark.asyncio
+async def test_undelivered_empty_response_retries_once_and_succeeds(
+    monkeypatch,
+) -> None:
+    """没有 finish_reason 也没有入账 completion_tokens 的空响应，和流中断同类：
+    没有答案可挑选，原样重放同一份请求一次是安全的。"""
+    _patch_model(monkeypatch)
+    payloads = _install_fake_provider(
+        monkeypatch, [_undelivered_response(), _ok_response()]
+    )
+
+    result = await hiagent.chat(
+        [{"role": "user", "content": "写一段"}],
+        max_tokens=2048,
+        call_meta={"operation_id": "op-undelivered-retry"},
+    )
+
+    assert result == '{"ok":true}'
+    assert len(payloads) == 2
+    # 原样重放：不像 OUTPUT_TRUNCATED 那样抬高 max_tokens，两次请求逐字节相同。
+    assert payloads[0] == payloads[1]
+    assert payloads[0]["max_tokens"] == 2048 + config.TEXT_REASONING_TOKEN_RESERVE
+
+
+@pytest.mark.asyncio
+async def test_undelivered_empty_response_exhausts_retry_and_fails_closed(
+    monkeypatch,
+) -> None:
+    """重放后仍未交付就照常失败，不无限重试、不放宽校验。"""
+    _patch_model(monkeypatch)
+    payloads = _install_fake_provider(
+        monkeypatch, [_undelivered_response(), _undelivered_response()]
+    )
+
+    with pytest.raises(hiagent.ProviderError) as excinfo:
+        await hiagent.chat(
+            [{"role": "user", "content": "写一段"}],
+            max_tokens=2048,
+            call_meta={"operation_id": "op-undelivered-exhausted"},
+        )
+
+    assert (
+        excinfo.value.failure_kind
+        == hiagent.ProviderFailureKind.OUTPUT_MISSING.value
+    )
+    assert excinfo.value.replay_safe is True
+    assert len(payloads) == 2
+
+
+@pytest.mark.asyncio
+async def test_delivered_empty_answer_is_not_retried(monkeypatch) -> None:
+    """finish_reason=stop 且 completion_tokens>0 的空 content 是交付了的坏答案，
+    不属于"没有交付"，必须原样 fail-closed、只发一次请求，不能被静默重放。"""
+    _patch_model(monkeypatch)
+    payloads = _install_fake_provider(monkeypatch, [_delivered_empty_response()])
+
+    with pytest.raises(hiagent.ProviderError) as excinfo:
+        await hiagent.chat(
+            [{"role": "user", "content": "写一段"}],
+            max_tokens=2048,
+            call_meta={"operation_id": "op-delivered-empty"},
+        )
+
+    assert (
+        excinfo.value.failure_kind
+        != hiagent.ProviderFailureKind.OUTPUT_MISSING.value
+    )
+    assert excinfo.value.replay_safe is False
+    assert len(payloads) == 1
+
+
 @pytest.mark.asyncio
 async def test_native_tool_calls_go_through_the_same_conversion_point(
     monkeypatch,

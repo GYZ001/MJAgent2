@@ -1847,6 +1847,110 @@ def test_ending_hook_is_grounded_window_rejects_unapproved_addition_only_window(
     assert report["tier"] == "ungrounded"
 
 
+_ROUND10_REAL_HOOK_FIXTURES = {
+    # (fixture 文件名, 期望 grounded)。全部取自生产库 episodes.screenplay_json /
+    # episodes.cliffhanger 的真实数据（只读快照，见各文件内 _provenance 字段）。
+    # EP1/EP2/EP4 三条是第 10 轮真实回归里被旧版 Tier B 误杀、清空的真钩子
+    # （provider_calls.kind=ending_hook_grounding_rejected 的三条真实记录，
+    # hook_text 逐字对应）；EP3/EP5 是同一轮里正常通过、必须继续保持通过的
+    # 真钩子，防止重新标定"矫枉过正"。
+    "ep1": "ep1_ending_hook_grounding_ep_3d523ff4d0a4.json",
+    "ep2": "ep2_ending_hook_grounding_ep_94fc1dd627f5.json",
+    "ep3": "ep3_ending_hook_grounding_ep_a0e90058f83c.json",
+    "ep4": "ep4_ending_hook_grounding_round10_ep_3b07c59c0856.json",
+    "ep5": "ep5_ending_hook_grounding_ep_0a7130b7b402.json",
+}
+
+# 压力测试编造样本：全部对比 EP4 round10 真实事件表（269 条真实事件 + 6863 字
+# 真实正文）。前 4 条是已验证会被拦下的复用词汇编造；最后 1 条（idx 4）在
+# state_out 复述 bug 修复前，对旧版（更早一轮生成）EP4 事件表能侥幸通过，是
+# 本次标定要继续堵住的已知缺口——用当前 round10 真实事件表验证时同样必须拦下。
+_ROUND10_FABRICATED_HOOKS = [
+    "孟浩在靠山宗的资源发放广场上被银袍女子当众点名，随即被带往内宗禁地。",
+    "银袍女子在广场上取出一枚玉简交给孟浩，瞳孔骤然收缩，悬念骤起。",
+    "孟浩在资源发放广场上认出银袍女子，当场拔剑相向，与其激战三百回合。",
+    "李明看着王芳，忽然想起多年前的一段往事，心里涌起一阵说不清的烦躁。",
+    "孟浩认出银袍女子后转身逃离广场，靠山宗弟子四散追捕，山门大乱。",
+]
+
+
+def _load_round10_fixture(name: str) -> dict:
+    path = Path(__file__).parent / "fixtures" / name
+    with path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+    events = [StoryEvent.model_validate(item) for item in payload["events"]]
+    return {
+        "ending_hook": payload["ending_hook"],
+        "full_script_text": payload["full_script_text"],
+        "events": events,
+    }
+
+
+@pytest.mark.parametrize("tag", sorted(_ROUND10_REAL_HOOK_FIXTURES))
+def test_ending_hook_grounding_round10_accepts_all_real_rejected_and_passed_hooks(
+    tag: str,
+) -> None:
+    """第 10 轮真实回归标定集——正例：5 集真实钩子（3 条曾被误杀 + 2 条本就
+    通过）在重新标定后的判据下必须全部 grounded=True。这是本次 Tier B 重新
+    标定（覆盖率 0.28→0.10、contributors 改用不含 state_out 的核心字段、新增
+    strongest_contribution≥2 门槛）的正向验收标准，取代了此前逐集单独验证。"""
+    from app.validators import ending_hook_grounding_report, ending_hook_is_grounded
+
+    fixture = _load_round10_fixture(_ROUND10_REAL_HOOK_FIXTURES[tag])
+    assert ending_hook_is_grounded(
+        fixture["ending_hook"], fixture["full_script_text"], events=fixture["events"],
+    ) is True, f"{tag} 真实钩子被重新标定后的判据误杀：{fixture['ending_hook']}"
+
+    report = ending_hook_grounding_report(
+        fixture["ending_hook"], fixture["full_script_text"], events=fixture["events"],
+    )
+    assert report["grounded"] is True
+    assert report["tier"] == "tierB", (
+        f"{tag} 预期靠 Tier B（末尾事件窗口）通过而非侥幸命中 Tier A，实际 tier={report['tier']}"
+    )
+    assert report["window"]["contributors"] >= 2
+    assert report["window"]["strongest_contribution"] >= 2
+
+
+@pytest.mark.parametrize("index", range(len(_ROUND10_FABRICATED_HOOKS)))
+def test_ending_hook_grounding_round10_rejects_all_fabricated_hooks(index: int) -> None:
+    """第 10 轮真实回归标定集——反例：5 条编造钩子（复用 EP4 真实词汇拼出正文
+    从未发生的情节）对比 EP4 round10 真实事件表，重新标定后必须全部继续被拒绝。
+    其中 index 3（"李明看着王芳……"）额外验证了 strongest_contribution 门槛——
+    单独降覆盖率门槛不足以拦住它，见 ENDING_HOOK_WINDOW_MIN_STRONG_CONTRIBUTION
+    上方注释。"""
+    from app.validators import ending_hook_grounding_report, ending_hook_is_grounded
+
+    fixture = _load_round10_fixture(_ROUND10_REAL_HOOK_FIXTURES["ep4"])
+    fabricated = _ROUND10_FABRICATED_HOOKS[index]
+
+    assert ending_hook_is_grounded(
+        fabricated, fixture["full_script_text"], events=fixture["events"],
+    ) is False, f"编造钩子未被拦下：{fabricated}"
+
+    report = ending_hook_grounding_report(
+        fabricated, fixture["full_script_text"], events=fixture["events"],
+    )
+    assert report["grounded"] is False
+    assert report["tier"] == "ungrounded"
+
+
+def test_ending_hook_window_contributors_bug_fixed_on_real_ep2_regression() -> None:
+    """contributors=0 口径 bug 的直接回归锁定：EP2 真实数据（provider_calls.id=7402）
+    里，末尾窗口覆盖率 0.2857（远高于门槛）但旧代码算出 contributors=0——自相
+    矛盾，逐事件核对是 StoryEvent.state_out 复述下一事件 trigger 导致的人为
+    重叠（E226.state_out 与 E227.trigger 逐字重复），不是证据不足。核心字段
+    （不含 state_out）口径修复后，这同一份真实数据必须能摸到 contributors≥2。"""
+    from app.validators import _ending_hook_eligible_events, _ending_hook_window_match
+
+    fixture = _load_round10_fixture(_ROUND10_REAL_HOOK_FIXTURES["ep2"])
+    eligible = _ending_hook_eligible_events(fixture["events"])
+    window = _ending_hook_window_match(fixture["ending_hook"], eligible)
+    assert window["passed"] is True
+    assert window["contributors"] >= 2
+    assert window["coverage"] >= 0.2857 - 1e-9
+
+
 def test_clear_ungrounded_ending_hook_leaves_observable_evidence() -> None:
     """清空静默性回归测试：app/stages.py 两处生成期清空点（场次分片路径与
     legacy baseline 路径共用的 _clear_ungrounded_ending_hook）以前直接

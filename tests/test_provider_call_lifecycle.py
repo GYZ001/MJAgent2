@@ -2181,6 +2181,112 @@ def test_cached_replay_returns_none_when_only_truncated_rows_exist(monkeypatch) 
     assert result is None
 
 
+def test_cached_replay_skips_undelivered_empty_responses(monkeypatch) -> None:
+    """A stored response with no finish_reason and no accounted completion
+    tokens is the same "provider delivered nothing" shape as a
+    finish_reason=length row (see EP6 blueprint-patch incident,
+    2026-08-23): replaying it as a durable success would hand a
+    crash-recovery restart -- or the one-shot ``chat()`` retry -- the exact
+    broken row it is trying to get past, instead of ever reaching the
+    network again. A later valid attempt with the same operation must win."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """CREATE TABLE provider_calls(
+               id INTEGER PRIMARY KEY, response_json TEXT, meta TEXT,
+               request_json TEXT, request_hash TEXT, contract_version TEXT,
+               kind TEXT, model TEXT, operation_id TEXT, status TEXT)"""
+    )
+    payload = {
+        "model": "text-model",
+        "messages": [{"role": "user", "content": "patch"}],
+        "max_tokens": 100,
+    }
+    from app.db import provider_request_hash
+
+    def insert(call_id, *, finish_reason, content, completion_tokens):
+        conn.execute(
+            """INSERT INTO provider_calls(
+                   id,response_json,meta,request_json,request_hash,
+                   contract_version,kind,model,operation_id,status
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                call_id,
+                json.dumps({
+                    "choices": [{
+                        "finish_reason": finish_reason,
+                        "message": {"content": content, "reasoning": "半句思考"},
+                    }],
+                    "usage": {"completion_tokens": completion_tokens},
+                }),
+                "{}",
+                json.dumps(payload),
+                provider_request_hash(payload),
+                "",
+                "chat", "text-model", "op-patch", "OK",
+            ),
+        )
+
+    # Newer row is the undelivered fingerprint (no finish_reason, 0 tokens
+    # accounted) -> must be skipped in favor of the older valid row.
+    insert(2, finish_reason=None, content="", completion_tokens=0)
+    insert(1, finish_reason="stop", content='{"replacements": []}', completion_tokens=42)
+    conn.commit()
+    monkeypatch.setattr(hiagent, "get_conn", lambda: conn)
+    monkeypatch.setattr(hiagent, "log_provider_call", lambda *_a, **_k: None)
+
+    meta = {"reuse_successful_operation": True, "operation_id": "op-patch"}
+    result = hiagent._cached_successful_provider_response(
+        "chat", "text-model", payload, meta,
+    )
+
+    assert result is not None
+    assert result["choices"][0]["finish_reason"] == "stop"
+
+
+def test_cached_replay_returns_none_when_only_undelivered_rows_exist(monkeypatch) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """CREATE TABLE provider_calls(
+               id INTEGER PRIMARY KEY, response_json TEXT, meta TEXT,
+               request_json TEXT, request_hash TEXT, contract_version TEXT,
+               kind TEXT, model TEXT, operation_id TEXT, status TEXT)"""
+    )
+    payload = {
+        "model": "text-model",
+        "messages": [{"role": "user", "content": "patch"}],
+        "max_tokens": 100,
+    }
+    from app.db import provider_request_hash
+
+    conn.execute(
+        """INSERT INTO provider_calls(
+               id,response_json,meta,request_json,request_hash,
+               contract_version,kind,model,operation_id,status
+           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            1,
+            json.dumps({
+                "choices": [{"finish_reason": None,
+                             "message": {"content": "", "reasoning": "半句"}}],
+                "usage": {"completion_tokens": 0},
+            }),
+            "{}", json.dumps(payload), provider_request_hash(payload),
+            "", "chat", "text-model", "op-patch", "OK",
+        ),
+    )
+    conn.commit()
+    monkeypatch.setattr(hiagent, "get_conn", lambda: conn)
+    monkeypatch.setattr(hiagent, "log_provider_call", lambda *_a, **_k: None)
+
+    meta = {"reuse_successful_operation": True, "operation_id": "op-patch"}
+    result = hiagent._cached_successful_provider_response(
+        "chat", "text-model", payload, meta,
+    )
+    assert result is None
+
+
 def test_identity_discovery_read_timeout_is_stage_specific(monkeypatch) -> None:
     """Identity calls must not inherit the generic ceiling.
 

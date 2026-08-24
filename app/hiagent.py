@@ -131,6 +131,20 @@ def _cached_successful_provider_response(
                 finish_reason = None
             if finish_reason == "length":
                 continue
+            # A response with no finish_reason and no accounted completion
+            # tokens is the same "provider delivered nothing" shape as the
+            # length-truncated case above (see ``_content_delivery_absent``
+            # / ``OUTPUT_MISSING`` in ``chat()``): the crash-recovery replay
+            # this cache exists for must not hand a fresh attempt the exact
+            # broken row it is retrying past, or the one-shot retry in
+            # ``chat()`` would just refetch this same empty answer from the
+            # database instead of ever reaching the network again.
+            try:
+                stored_content = value["choices"][0].get("message", {}).get("content")
+            except (KeyError, IndexError, TypeError, AttributeError):
+                stored_content = None
+            if not (stored_content or "").strip() and _content_delivery_absent(value):
+                continue
             from app.db import provider_request_hash
 
             stored_hash = str(row["request_hash"] or "")
@@ -594,7 +608,12 @@ def active_provider(kind: str) -> str:
     configured = (get_setting(f"model_{kind}_provider") or "").strip()
     if configured.startswith("custom:"):
         return configured
-    if kind == "video" and configured in {"hiagent", "minimax_h3"}:
+    if kind == "video":
+        from app import video_providers
+
+        if configured in video_providers.registered_providers():
+            return configured
+    if kind == "image" and configured == "hiagent":
         return configured
     if kind == "text" and configured in {"hiagent", "openrouter", "bailian", "deepseek", "zhipu"}:
         return configured
@@ -779,6 +798,55 @@ def _reject_truncated_chat_response(data: dict) -> None:
         delivery_state="responded",
         replay_safe=False,
     )
+
+
+def _content_delivery_absent(data: dict) -> bool:
+    """Whether an OpenAI 兼容响应完全没有交付证据（既非答案也非可诊断的拒答）。
+
+    一次真正跑完的补全，无论模型说了什么，最终 chunk 都会盖上一个终态
+    ``finish_reason``（stop/length/content_filter/tool_calls/...），并且
+    ``usage.completion_tokens`` 会如实反映它花掉的预算——即便答案是"什么都
+    不说"。当这两个证据同时缺席（没有 finish_reason，且已入账的
+    completion_tokens 为 0 或未上报）、content 又为空时，供应商没有对这次请求
+    做出任何决定：这与 ``_stream_chat_completion`` 里"流在 [DONE] 前中断"
+    （见 ``provider_answer_undelivered``）是同一种情况，只是这次流最终还是吐出
+    了 ``[DONE]``，因此被记成了正常的 200。既然没有答案可挑选、也没有判断可
+    保留，原样重放这份确定性请求一次是安全的——与 ``_reject_truncated_chat_response``
+    对 ``OUTPUT_TRUNCATED`` 的论证同构，只是这里对应的是生成中途夭折，而不是
+    预算耗尽。
+
+    反之，只要 finish_reason 或 completion_tokens 任一项证明供应商确实跑完了
+    这次请求（哪怕答案就是空字符串），就不属于这里——那是一次交付了的坏答案，
+    必须继续 fail-closed，不能被这条重放豁免。
+    """
+    try:
+        choice = data["choices"][0]
+    except (KeyError, IndexError, TypeError):
+        return False
+    if choice.get("finish_reason"):
+        return False
+    usage = data.get("usage") or {}
+    completion_tokens = usage.get("completion_tokens")
+    return not (isinstance(completion_tokens, int) and completion_tokens > 0)
+
+
+def _empty_chat_content_error(data: dict) -> ProviderError:
+    """构造"content 为空"的分类化 ProviderError（供 ``chat()`` 两条 provider 分支复用）。
+
+    判定逻辑统一走 ``_content_delivery_absent``，两处不再各写一套、避免以后
+    分叉出不一致的重试资格。
+    """
+    detail = _empty_content_detail(data)
+    message = f"模型返回空内容（content 为空；{detail}）"
+    if _content_delivery_absent(data):
+        return ProviderError(
+            message,
+            raw=detail,
+            failure_kind=ProviderFailureKind.OUTPUT_MISSING,
+            delivery_state="responded",
+            replay_safe=True,
+        )
+    return ProviderError(message)
 
 
 def _notify_completion_usage(
@@ -1104,7 +1172,7 @@ async def _chat_with_reasoning_fallback(client: httpx.AsyncClient, url: str, pay
         content = _chat_content(data, label=f"{kind} reasoning fallback")
     _reject_truncated_chat_response(data)
     if not content.strip():
-        raise ProviderError(f"模型返回空内容（content 为空；{_empty_content_detail(data)}）")
+        raise _empty_chat_content_error(data)
     return content
 
 
@@ -1491,10 +1559,18 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
             or attempt_response_format
         )
     truncation_escalated = False
+    undelivered_retry_used = False
     required_format_attempt = 0
     while True:
         try:
             content, data = await _dispatch(attempt_response_format)
+            if not content or not content.strip():
+                # 判定与重放资格统一在 _empty_chat_content_error /
+                # _content_delivery_absent 里做出；这里只负责把"content 为空"
+                # 从一次表面成功的 _dispatch 里揪出来，交给下面的 except 分支
+                # 决定是重放还是照常 fail-closed，绝不能在这一步就把它当成
+                # json_schema 的真实成功去清空拒绝计数。
+                raise _empty_chat_content_error(data)
             if (
                 attempt_response_format is not None
                 and attempt_response_format.get("type") == "json_schema"
@@ -1522,6 +1598,20 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                     "effective_max_tokens": max_tokens,
                     "output_truncation_escalated": True,
                 }
+                continue
+            if (
+                exc.failure_kind == ProviderFailureKind.OUTPUT_MISSING.value
+                and not undelivered_retry_used
+            ):
+                # content 为空、且响应既没有终态 finish_reason 也没有已入账的
+                # completion_tokens（判定见 _content_delivery_absent）：供应商
+                # 对这次请求什么都没交付，和 OUTPUT_TRUNCATED 同理——不是在重摇
+                # 一个语义答案，原样重放同一份请求一次是安全的。实测库存证据：
+                # 全库 4712 次成功 kind=chat 调用里，这个指纹只出现过 1 次
+                # （EP6 蓝图局部修复，2026-08-23），概率≈0.02%，不是系统性模式，
+                # 不需要抬高 max_tokens（该次 completion_tokens=0，远未顶到预算）。
+                # 只做一次；重放后仍未交付就照常 fail-closed，不无限重试。
+                undelivered_retry_used = True
                 continue
             if attempt_response_format is not None and _looks_like_response_format_unsupported(exc):
                 if response_format_required:
@@ -1587,8 +1677,9 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                 continue
             raise
 
-    if not content or not content.strip():
-        raise ProviderError(f"模型返回空内容（content 为空；{_empty_content_detail(data)}）")
+    # content 的非空校验已经在循环内的 _dispatch() 之后立刻做过（见上方
+    # "if not content or not content.strip()"），break 只会在校验通过后发生，
+    # 这里不需要也不应该重复判断。
     return content
 
 
@@ -2579,155 +2670,42 @@ async def create_video_task(
         if str(url).startswith("data:") or not str(url).startswith(("http://", "https://")):
             raise reject_before_create("reference_video 必须是供应商可访问的 http(s) Web URL")
 
-    if active_provider("video") == "minimax_h3":
-        from app import minimax_h3
+    from app import video_providers
 
-        return await minimax_h3.create_video_task(
-            prompt_text,
-            image_urls=image_urls,
-            video_urls=video_urls,
-            call_meta=call_meta,
-        )
-
-    content: list[dict[str, Any]] = [{"type": "text", "text": prompt_text}]
-    for url, role in image_urls or []:
-        content.append({"type": "image_url", "image_url": {"url": url}, "role": role})
-    for url, role in video_urls or []:
-        content.append({"type": "video_url", "video_url": {"url": url}, "role": role})
-    model = active_model("video", "hiagent")
-    base_url, model_headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
-    payload = {"model": model, "content": content}
-    if return_last_frame:
-        payload["return_last_frame"] = True
-    if call_meta and call_meta.get("operation_id"):
-        operation_id = str(call_meta["operation_id"])
-    elif call_meta and call_meta.get("version_id"):
-        operation_id = f"video-create-{call_meta['version_id']}"
-    else:
-        operation_id = provider_operation_id("video_create", model, payload)
-    saved_request = _latest_provider_operation_request(
-        "video_create", operation_id,
+    return await video_providers.resolve(
+        active_provider("video")
+    ).create_video_task(
+        prompt_text,
+        image_urls=image_urls,
+        video_urls=video_urls,
+        return_last_frame=return_last_frame,
+        call_meta=call_meta,
     )
-    if saved_request is not None and saved_request != payload:
-        raise ProviderError(
-            "Seedance 同一业务操作的请求内容发生变化，已阻止复用幂等键；"
-            "请保留原任务等待供应商结果确认，或通过页面明确创建新的生成尝试",
-            failure_kind="idempotency_request_mismatch",
-            delivery_state="unknown",
-            requires_explicit_retry=True,
-        )
-    call_meta = {**(call_meta or {}), "operation_id": operation_id}
-    timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_VIDEO_CREATE, write=30, pool=10)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        data = await _post_json(client, f"{base_url}/contents/generations/tasks", payload,
-                                kind="video_create", model=model, headers=model_headers,
-                                key_name=f"model:{model}", meta=call_meta,
-                                idempotency_key=operation_id,
-                                preserve_exact_request=True)
-    task_id = data.get("id")
-    if not task_id:
-        raise ProviderError(f"视频任务创建响应缺少 id：{json.dumps(data, ensure_ascii=False)[:300]}")
-    return task_id
 
 
 async def poll_video_task(task_id: str, *, call_meta: dict | None = None) -> dict:
-    """轮询单次；失败时返回结构化 failure，不从错误正文推断类别。"""
-    from app import minimax_h3
+    """轮询单次；按 task_id 归属路由到对应供应商适配器。"""
+    from app import video_providers
 
-    if minimax_h3.is_task_id(task_id):
-        return await minimax_h3.poll_video_task(task_id, call_meta=call_meta)
-
-    timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_VIDEO_POLL, write=10, pool=10)
-    start = time.time()
-    model = active_model("video", "hiagent")
-    base_url, model_headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.get(
-                f"{base_url}/contents/generations/tasks/{task_id}", headers=model_headers)
-    except httpx.RequestError as exc:
-        latency = int((time.time() - start) * 1000)
-        err = ProviderError(
-            f"视频任务状态查询网络异常：{type(exc).__name__}: {exc}",
-            retryable=True,
-            raw=repr(exc),
-            timeout_phase=_timeout_phase(exc) if isinstance(exc, httpx.TimeoutException) else None,
-            failure_kind="connection_failed",
-        )
-        merged_meta = _merge_call_meta(call_meta)
-        log_provider_call(
-            "video_poll", model, "FAILED", None, latency, error=str(err),
-            meta=merged_meta,
-            request_json={
-                "method": "GET",
-                "url": f"{base_url}/contents/generations/tasks/{task_id}",
-            },
-        )
-        raise err from exc
-    latency = int((time.time() - start) * 1000)
-    if resp.status_code != 200:
-        model = active_model("video", "hiagent")
-        err = _classify_http_error(resp.status_code, resp.text)
-        merged_meta = _merge_call_meta(call_meta)
-        log_provider_call("video_poll", model, "FAILED", resp.status_code, latency, error=str(err),
-                          meta=merged_meta,
-                          request_json={"method": "GET", "url": f"{base_url}/contents/generations/tasks/{task_id}"},
-                          response_json={"status_code": resp.status_code, "body": resp.text})
-        raise err
-    try:
-        data = resp.json()
-        if not isinstance(data, dict):
-            raise TypeError("expected a JSON object")
-    except (TypeError, ValueError) as exc:
-        err = ProviderError(
-            f"视频任务状态响应不是合法 JSON 对象：{exc}",
-            retryable=True,
-            raw=resp.text,
-            failure_kind=ProviderFailureKind.MALFORMED_RESPONSE,
-            delivery_state="responded",
-        )
-        merged_meta = _merge_call_meta(call_meta)
-        log_provider_call(
-            "video_poll", model, "FAILED", 200, latency, error=str(err),
-            meta=merged_meta,
-            request_json={
-                "method": "GET",
-                "url": f"{base_url}/contents/generations/tasks/{task_id}",
-            },
-            response_json={"status_code": 200, "body": resp.text},
-        )
-        raise err from exc
-    status = data.get("status", "")
-    error_obj = data.get("error") if isinstance(data.get("error"), dict) else {}
-    failure = (
-        ProviderFailure.from_provider_payload(error_obj.get("failure"))
-        if status == "failed"
-        else None
-    )
-    if status == "failed":
-        merged_meta = _merge_call_meta(call_meta)
-        log_provider_call("video_poll", active_model("video", "hiagent"), "TASK_FAILED", 200, latency,
-                          meta=merged_meta,
-                          error=error_obj.get("message", ""),
-                          request_json={"method": "GET", "url": f"{base_url}/contents/generations/tasks/{task_id}"},
-                          response_json=data)
-    return {
-        "status": status,
-        "video_url": _absolute_provider_url((data.get("content") or {}).get("video_url", ""), base_url),
-        "last_frame_url": _absolute_provider_url((data.get("content") or {}).get("last_frame_url", ""), base_url),
-        "error": error_obj.get("message", ""),
-        "failure": failure.to_payload() if failure else None,
-    }
+    adapter = video_providers.adapter_for_task_id(task_id)
+    if adapter is None:
+        adapter = video_providers.resolve(active_provider("video"))
+    return await adapter.poll_video_task(task_id, call_meta=call_meta)
 
 
 async def _download_once(url: str, dest_path: str) -> None:
-    """单次下载；禁止 SSRF：仅允许公网 http(s)，跟随重定向后再次校验。"""
-    from app import minimax_h3
+    """单次下载；按产物 URL 归属路由，未被认领的一律走通用公网下载。"""
+    from app import video_providers
 
-    if minimax_h3.is_output_url(url):
-        await minimax_h3.download_output(url, dest_path)
+    adapter = video_providers.adapter_for_output_url(url)
+    if adapter is not None:
+        await adapter.download_output(url, dest_path)
         return
+    await _download_public_url(url, dest_path)
 
+
+async def _download_public_url(url: str, dest_path: str) -> None:
+    """通用媒体下载；禁止 SSRF：仅允许公网 http(s)，跟随重定向后再次校验。"""
     import ipaddress
     import socket
     from urllib.parse import urlparse
@@ -2822,13 +2800,22 @@ async def generate_image(prompt: str, *, size: str = "1024x1024",
     """Seedream 图像生成。返回 {url 或 b64_json}。
     image_inputs：可选的参考图（data URL 列表），用于让生成图保持角色/场景一致性。
     网关是否支持参考图未知，调用方应 try-with-fallback（带参考图失败则不带重试）。"""
-    model = active_model("image", "hiagent")
-    base_url, model_headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
+    from app import image_providers
+
+    provider = active_provider("image")
+    model = active_model("image", provider)
+    base_url, model_headers = _model_connection(
+        provider, model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY,
+    )
     payload: dict[str, Any] = {"model": model, "prompt": prompt, "n": 1, "size": size}
     media_meta: dict[str, Any] = {}
     if image_inputs:
         prepared_inputs, media_meta = await _prepare_image_data_urls(image_inputs)
-        payload["image"] = prepared_inputs if len(prepared_inputs) > 1 else prepared_inputs[0]
+        image_providers.apply_reference_images(
+            payload,
+            prepared_inputs,
+            protocol=image_providers.protocol_for_provider(provider),
+        )
     kind = log_kind or ("image_edit" if image_inputs else "image_generate")
     operation_id = (
         str((call_meta or {}).get("operation_id") or "").strip()
