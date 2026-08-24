@@ -1429,6 +1429,276 @@ def test_semantic_attempt_id_separates_new_repair_from_crash_recovery(
     assert fresh_attempt is None
 
 
+# Real evidence captured from the EP6 blueprint-patch regression
+# (run_id=run_c6db4403166c, provider_calls.id=7887, kind=chat,
+# operation_id="screenplay.blueprint.patch:f13e5c8a2e2f733c3a4f57f4a9a2988e...").
+# HTTP 200 parsed fine (so the row is durably recorded status=OK), but the
+# provider delivered nothing: no terminal finish_reason, empty content, and
+# every usage counter is 0. ``reasoning`` is truncated for test readability;
+# the fields that drive ``_content_delivery_absent`` are verbatim.
+_EP6_UNDELIVERED_RESPONSE = {
+    "choices": [
+        {
+            "index": 0,
+            "finish_reason": None,
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "reasoning": (
+                    "我们被要求只修复硬门禁问题：S001-node_6_1_1 和 "
+                    "S001-node_6_1_2 缺少单一地点。这两个节点都是 paratext，"
+                    "audit_only 节点。根据规则，paratext/audit_only replaceme"
+                ),
+            },
+        },
+    ],
+    "usage": {
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "prompt_tokens_details": {"cached_tokens": 0},
+        "completion_tokens_details": {"reasoning_tokens": 0},
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "generated_images": 0,
+    },
+}
+
+# Real finish_reason/usage from the same EP6 run's shard call
+# (provider_calls.id=7868): a genuinely delivered answer -- real content,
+# terminal finish_reason, non-zero billed completion_tokens.
+_EP6_DELIVERED_USAGE = {
+    "total_tokens": 11433,
+    "prompt_tokens": 6080,
+    "completion_tokens": 5353,
+    "prompt_tokens_details": {"cached_tokens": 0},
+    "completion_tokens_details": {"reasoning_tokens": 4038},
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "generated_images": 0,
+}
+
+# Real finish_reason/usage for a *truncated* (not undelivered) response
+# (provider_calls.id=149, unrelated run): the provider ran to its full
+# output budget and was billed 10752 completion tokens for it -- the
+# opposite evidence shape from "delivered nothing", even though both make
+# ``_cached_successful_provider_response`` return ``None``.
+_TRUNCATED_USAGE = {
+    "total_tokens": 17771,
+    "prompt_tokens": 7019,
+    "completion_tokens": 10752,
+    "prompt_tokens_details": {"cached_tokens": 0},
+    "completion_tokens_details": {"reasoning_tokens": 0},
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "generated_images": 0,
+}
+
+
+def _durable_ok_row(payload: dict, response_json: dict, *, operation_id: str) -> int:
+    call_id = db.start_provider_call(
+        "chat", "text-model",
+        meta={"operation_id": operation_id},
+        request_json=payload,
+    )
+    db.finish_provider_call(
+        call_id, "OK", 200, 20, response_json=response_json,
+    )
+    return call_id
+
+
+def test_durable_replay_guard_blocks_when_no_receipt_exists() -> None:
+    """No provider_calls row at all for this operation: the original attempt
+    may still have been sent and billed outside this process's view, so the
+    guard must keep failing closed even though kind/model/payload are now
+    supplied."""
+    payload = {
+        "model": "text-model",
+        "messages": [{"role": "user", "content": "ep6 patch retry"}],
+        "temperature": 0.1,
+        "max_tokens": 16384,
+    }
+    meta = {
+        "operation_id": "op_ep6_patch_no_receipt",
+        "reuse_successful_operation": True,
+        "require_cached_successful_operation": True,
+    }
+
+    with pytest.raises(hiagent.ProviderError, match="durable provider") as caught:
+        hiagent._require_cached_replay_or_raise(
+            None, meta, kind="chat", model="text-model", payload=payload,
+        )
+
+    assert caught.value.delivery_state == "not_sent"
+    assert caught.value.replay_safe is True
+
+
+def test_durable_replay_guard_blocks_when_cached_row_is_truncated() -> None:
+    """A truncated row (finish_reason='length') is proof of *real*, maximum
+    spend -- not zero spend. It must not be mistaken for the undelivered
+    shape, or a resend here would double-charge the truncated attempt."""
+    payload = {
+        "model": "text-model",
+        "messages": [{"role": "user", "content": "ep6 patch retry"}],
+        "temperature": 0.1,
+        "max_tokens": 16384,
+    }
+    operation_id = "op_ep6_patch_truncated"
+    meta = {
+        "operation_id": operation_id,
+        "reuse_successful_operation": True,
+        "require_cached_successful_operation": True,
+    }
+    response = {
+        "choices": [{
+            "finish_reason": "length",
+            "message": {"content": "half an answer that ran out of budget"},
+        }],
+        "usage": _TRUNCATED_USAGE,
+    }
+    _durable_ok_row(payload, response, operation_id=operation_id)
+
+    assert hiagent._cached_successful_provider_response(
+        "chat", "text-model", payload, meta,
+    ) is None
+    with pytest.raises(hiagent.ProviderError, match="durable provider") as caught:
+        hiagent._require_cached_replay_or_raise(
+            None, meta, kind="chat", model="text-model", payload=payload,
+        )
+    assert caught.value.delivery_state == "not_sent"
+
+
+def test_durable_replay_guard_allows_resend_when_cached_row_proves_undelivered() -> None:
+    """The exact EP6 regression shape: the only durable row for this
+    operation is objective proof (no finish_reason, zero completion_tokens)
+    that the provider delivered and billed nothing. The guard must not treat
+    a missing *replay* as a missing *receipt* here -- it should step aside
+    so the caller can fall through to a fresh, unreserved-but-zero-risk
+    network attempt instead of hard-failing the whole stage."""
+    payload = {
+        "model": "text-model",
+        "messages": [{"role": "user", "content": "ep6 patch retry"}],
+        "temperature": 0.1,
+        "max_tokens": 16384,
+    }
+    operation_id = "op_ep6_patch_undelivered"
+    meta = {
+        "operation_id": operation_id,
+        "reuse_successful_operation": True,
+        "require_cached_successful_operation": True,
+    }
+    _durable_ok_row(payload, _EP6_UNDELIVERED_RESPONSE, operation_id=operation_id)
+
+    # The cache itself must still refuse to hand back the broken row as a
+    # "replay" -- that is the 2534023 fix this regression must not undo.
+    assert hiagent._cached_successful_provider_response(
+        "chat", "text-model", payload, meta,
+    ) is None
+    # But the guard must recognize the row as proof of zero cost and let the
+    # caller proceed to a real network attempt instead of raising.
+    hiagent._require_cached_replay_or_raise(
+        None, meta, kind="chat", model="text-model", payload=payload,
+    )
+
+
+def test_durable_replay_reuses_directly_when_cached_row_is_truly_delivered() -> None:
+    """The ordinary case must stay untouched: a row with real delivered
+    content is returned as a valid replay and the guard never needs its new
+    evidence check (data is already not None)."""
+    payload = {
+        "model": "text-model",
+        "messages": [{"role": "user", "content": "ep6 shard retry"}],
+        "temperature": 0.15,
+        "max_tokens": 32768,
+    }
+    operation_id = "op_ep6_shard_delivered"
+    meta = {
+        "operation_id": operation_id,
+        "reuse_successful_operation": True,
+        "require_cached_successful_operation": True,
+    }
+    response = {
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {"content": '{"format_version": "screenplay-narrative-blueprint.v7"}'},
+        }],
+        "usage": _EP6_DELIVERED_USAGE,
+    }
+    _durable_ok_row(payload, response, operation_id=operation_id)
+
+    cached = hiagent._cached_successful_provider_response(
+        "chat", "text-model", payload, meta,
+    )
+    assert cached is not None
+    assert cached["choices"][0]["message"]["content"].startswith("{")
+    # data is not None, so the guard must return without even looking at the
+    # database again.
+    hiagent._require_cached_replay_or_raise(
+        cached, meta, kind="chat", model="text-model", payload=payload,
+    )
+
+
+def test_custom_provider_resends_when_durable_row_proves_undelivered_and_succeeds(
+    monkeypatch,
+) -> None:
+    """End-to-end wiring check through ``hiagent.chat()``'s custom-provider
+    branch: with ``require_cached_successful_operation=True`` and a durable
+    row that is objective proof of zero delivery/zero cost (the exact EP6
+    shape), the call must fall through to one real network attempt and
+    return its content -- not raise ``durable_replay_missing``, and not
+    silently replay the broken cached row."""
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    sends = 0
+
+    async def fake_plain_chat_request(*_args, **_kwargs):
+        nonlocal sends
+        sends += 1
+        return {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": "resent answer after undelivered receipt"},
+            }],
+            "usage": {"completion_tokens": 42, "prompt_tokens": 10, "total_tokens": 52},
+        }
+
+    monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "custom:model-x")
+    monkeypatch.setattr(hiagent, "active_model", lambda *_args: "text-model")
+    monkeypatch.setattr(hiagent, "_model_connection", lambda *_args: ("https://provider", {}))
+    monkeypatch.setattr(hiagent.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(
+        hiagent, "text_request_token_limits",
+        lambda **_kwargs: ("custom:model-x", "text-model", 999),
+    )
+    monkeypatch.setattr(hiagent, "_plain_chat_request", fake_plain_chat_request)
+
+    payload = {
+        "model": "text-model",
+        "messages": [{"role": "user", "content": "same"}],
+        "temperature": 0.7,
+        "max_tokens": 999,
+    }
+    operation_id = "op_ep6_patch_e2e_undelivered"
+    _durable_ok_row(payload, _EP6_UNDELIVERED_RESPONSE, operation_id=operation_id)
+
+    result = asyncio.run(hiagent.chat(
+        [{"role": "user", "content": "same"}],
+        call_meta={
+            "operation_id": operation_id,
+            "reuse_successful_operation": True,
+            "require_cached_successful_operation": True,
+        },
+    ))
+
+    assert result == "resent answer after undelivered receipt"
+    assert sends == 1
+
+
 def test_custom_text_provider_uses_opt_in_success_cache(monkeypatch) -> None:
     class Client:
         async def __aenter__(self):

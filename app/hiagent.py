@@ -65,22 +65,34 @@ def _provider_request_matches(
     return normalized == current_payload
 
 
-def _cached_successful_provider_response(
+def _reusable_operation_candidate_rows(
     kind: str,
     model: str,
     payload: dict[str, Any],
     meta: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    """恢复时复用同一幂等 operation 的成功响应，避免成功结果因状态竞态丢失。"""
+):
+    """Yield ``(row, parsed_response)`` for durable rows of this idempotent
+    operation, most-recent first, after the identity gates (reuse opt-in,
+    operation id, contract version, request hash/body) that decide whether a
+    stored row is even a candidate for *this* operation at all.
+
+    Delivery-shape judgement (truncated vs. content-delivered vs. nothing
+    delivered) is deliberately left to callers.
+    ``_cached_successful_provider_response`` and
+    ``_durable_operation_proven_undelivered`` both need "which rows belong to
+    this operation" to be the exact same set, or the guard and the cache
+    could reach contradictory conclusions about the same history from two
+    independently-drifting queries.
+    """
     if not bool((meta or {}).get("reuse_successful_operation")):
-        return None
+        return
     if not (
         str((meta or {}).get("operation_id") or "").strip()
         or str((meta or {}).get("semantic_attempt_id") or "").strip()
     ):
         # A byte-identical prompt is not proof of semantic success. Reuse is
         # allowed only when the caller names a durable business operation.
-        return None
+        return
     # A caller may provide a durable semantic operation id.  This is required
     # for repair workflows: the same semantic attempt must be recoverable after
     # a process crash, while a *new* repair attempt must never reuse an older
@@ -103,7 +115,10 @@ def _cached_successful_provider_response(
             "AND response_json IS NOT NULL ORDER BY id DESC LIMIT 20",
             (*operation_ids, kind, model),
         ).fetchall()
-        expected_contract = str((meta or {}).get("contract_version") or "").strip()
+    except sqlite3.Error:
+        return
+    expected_contract = str((meta or {}).get("contract_version") or "").strip()
+    try:
         for row in rows:
             if expected_contract:
                 stored_meta = json.loads(row["meta"] or "{}")
@@ -120,31 +135,6 @@ def _cached_successful_provider_response(
             value = json.loads(row["response_json"])
             if not isinstance(value, dict):
                 continue
-            # A finish_reason=length response is truncated output: every
-            # consumer rejects it via ``_reject_truncated_chat_response``, so
-            # it is NOT a valid durable success. Replaying it only reproduces
-            # the same failure on every run (and forces a pointless format
-            # repair). Skip such rows so a later, valid attempt wins.
-            try:
-                finish_reason = value["choices"][0].get("finish_reason")
-            except (KeyError, IndexError, TypeError, AttributeError):
-                finish_reason = None
-            if finish_reason == "length":
-                continue
-            # A response with no finish_reason and no accounted completion
-            # tokens is the same "provider delivered nothing" shape as the
-            # length-truncated case above (see ``_content_delivery_absent``
-            # / ``OUTPUT_MISSING`` in ``chat()``): the crash-recovery replay
-            # this cache exists for must not hand a fresh attempt the exact
-            # broken row it is retrying past, or the one-shot retry in
-            # ``chat()`` would just refetch this same empty answer from the
-            # database instead of ever reaching the network again.
-            try:
-                stored_content = value["choices"][0].get("message", {}).get("content")
-            except (KeyError, IndexError, TypeError, AttributeError):
-                stored_content = None
-            if not (stored_content or "").strip() and _content_delivery_absent(value):
-                continue
             from app.db import provider_request_hash
 
             stored_hash = str(row["request_hash"] or "")
@@ -158,31 +148,150 @@ def _cached_successful_provider_response(
                     continue
                 if not _provider_request_matches(stored_request, payload):
                     continue
-            log_provider_call(
-                "provider_cache_hit",
-                model,
-                "REUSED",
-                None,
-                0,
-                meta={
-                    **(meta or {}),
-                    "operation_id": operation_id,
-                    "source_provider_call_id": int(row["id"]),
-                },
-            )
-            return value
-        return None
-    except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError):
-        return None
+            yield row, value
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return
+
+
+def _cached_successful_provider_response(
+    kind: str,
+    model: str,
+    payload: dict[str, Any],
+    meta: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """恢复时复用同一幂等 operation 的成功响应，避免成功结果因状态竞态丢失。"""
+    for row, value in _reusable_operation_candidate_rows(kind, model, payload, meta):
+        # A finish_reason=length response is truncated output: every
+        # consumer rejects it via ``_reject_truncated_chat_response``, so
+        # it is NOT a valid durable success. Replaying it only reproduces
+        # the same failure on every run (and forces a pointless format
+        # repair). Skip such rows so a later, valid attempt wins.
+        try:
+            finish_reason = value["choices"][0].get("finish_reason")
+        except (KeyError, IndexError, TypeError, AttributeError):
+            finish_reason = None
+        if finish_reason == "length":
+            continue
+        # A response with no finish_reason and no accounted completion
+        # tokens is the same "provider delivered nothing" shape as the
+        # length-truncated case above (see ``_content_delivery_absent``
+        # / ``OUTPUT_MISSING`` in ``chat()``): the crash-recovery replay
+        # this cache exists for must not hand a fresh attempt the exact
+        # broken row it is retrying past, or the one-shot retry in
+        # ``chat()`` would just refetch this same empty answer from the
+        # database instead of ever reaching the network again.
+        try:
+            stored_content = value["choices"][0].get("message", {}).get("content")
+        except (KeyError, IndexError, TypeError, AttributeError):
+            stored_content = None
+        if not (stored_content or "").strip() and _content_delivery_absent(value):
+            continue
+        operation_id = str((meta or {}).get("operation_id") or "").strip() \
+            or provider_operation_id(kind, model, payload)
+        log_provider_call(
+            "provider_cache_hit",
+            model,
+            "REUSED",
+            None,
+            0,
+            meta={
+                **(meta or {}),
+                "operation_id": operation_id,
+                "source_provider_call_id": int(row["id"]),
+            },
+        )
+        return value
+    return None
+
+
+def _durable_operation_proven_undelivered(
+    kind: str,
+    model: str,
+    payload: dict[str, Any],
+    meta: dict[str, Any] | None,
+) -> bool:
+    """Whether every durable row on record for this operation is objective
+    proof the provider delivered nothing and billed nothing for it.
+
+    This reuses ``_reusable_operation_candidate_rows`` -- the exact identity
+    gates ``_cached_successful_provider_response`` applies -- so the two
+    functions can never disagree about *which rows belong to this
+    operation*, only about what a delivered-nothing row implies for each of
+    them (one treats it as "not a valid replay", the other as "safe to
+    resend").
+
+    A row only counts if it is content-delivery-absent per
+    ``_content_delivery_absent`` (no terminal ``finish_reason`` and no
+    accounted ``completion_tokens``) -- the same bar ``chat()``'s own
+    in-process OUTPUT_MISSING one-shot retry already uses to decide a resend
+    is free of double-billing risk. A ``finish_reason == "length"`` row is
+    proof of the *opposite*: the provider ran to its full output budget and
+    was billed for it, so it must never satisfy this check even though
+    ``_cached_successful_provider_response`` also treats it as "not a valid
+    replay" -- conflating the two would let a truncated (real-cost) attempt
+    silently authorize an unreserved resend.
+
+    If no row at all is on record, this returns ``False``: an operation with
+    zero history might still have a request in flight that this process
+    cannot see, so "no receipt" must keep failing closed.
+    """
+    found_undelivered = False
+    for _row, value in _reusable_operation_candidate_rows(kind, model, payload, meta):
+        try:
+            finish_reason = value["choices"][0].get("finish_reason")
+        except (KeyError, IndexError, TypeError, AttributeError):
+            finish_reason = None
+        if finish_reason == "length":
+            return False
+        try:
+            stored_content = value["choices"][0].get("message", {}).get("content")
+        except (KeyError, IndexError, TypeError, AttributeError):
+            stored_content = None
+        if (stored_content or "").strip() or not _content_delivery_absent(value):
+            # A row with real content, or with finish_reason/token evidence
+            # of a completed run, is a *delivered* answer -- reaching this
+            # branch means ``_cached_successful_provider_response`` would
+            # already have returned it as a valid replay, so ``data`` would
+            # not have been ``None`` and this function would never have been
+            # called for that row. Treat the mismatch as "not proven safe"
+            # rather than assume it away.
+            return False
+        found_undelivered = True
+    return found_undelivered
 
 
 def _require_cached_replay_or_raise(
     data: dict[str, Any] | None,
     meta: dict[str, Any] | None,
+    *,
+    kind: str | None = None,
+    model: str | None = None,
+    payload: dict[str, Any] | None = None,
 ) -> None:
     if data is not None or not bool(
         (meta or {}).get("require_cached_successful_operation")
     ):
+        return
+    if (
+        kind is not None
+        and model is not None
+        and payload is not None
+        and _durable_operation_proven_undelivered(kind, model, payload, meta)
+    ):
+        # ``claim()`` (app/stages.py) skipped a fresh budget reservation for
+        # this attempt because raw DB status told it this operation already
+        # succeeded. That premise just turned out false, but the specific
+        # way it is false matters: the row it relied on is objective proof
+        # of zero delivered content and zero billed tokens (see
+        # ``_durable_operation_proven_undelivered``). There is nothing to
+        # replay and nothing to double-charge, so falling through to a live
+        # request here carries exactly the same (zero) revenue risk as the
+        # one-shot "undelivered retry" ``chat()`` already performs
+        # in-process for the identical evidence shape (OUTPUT_MISSING,
+        # replay_safe=True) -- this only extends that same policy across a
+        # process restart / fresh top-level attempt, instead of silently
+        # denying it merely because the evidence now lives in the database
+        # instead of the current call stack.
         return
     raise ProviderError(
         "durable provider 成功回执缺失，禁止未重新预留预算即重发",
@@ -1133,7 +1242,7 @@ async def _chat_with_reasoning_fallback(client: httpx.AsyncClient, url: str, pay
                                      usage_callback: Callable[[dict[str, Any]], None] | None = None) -> str:
     """封装推理模型的降级重试逻辑：若首轮因推理过长导致 content 为空，则关闭推理重试一次。"""
     data = _cached_successful_provider_response(kind, model, payload, call_meta)
-    _require_cached_replay_or_raise(data, call_meta)
+    _require_cached_replay_or_raise(data, call_meta, kind=kind, model=model, payload=payload)
     reused = data is not None
     if data is None:
         data = await _plain_chat_request(
@@ -1486,7 +1595,9 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                 data = _cached_successful_provider_response(
                     "chat", custom_model, payload, call_meta,
                 )
-                _require_cached_replay_or_raise(data, call_meta)
+                _require_cached_replay_or_raise(
+                    data, call_meta, kind="chat", model=custom_model, payload=payload,
+                )
                 reused = data is not None
                 if data is None:
                     data = await _plain_chat_request(
@@ -1507,7 +1618,9 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                 base_url, model_headers = _model_connection("hiagent", hiagent_model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
                 payload = _with_rf({"model": hiagent_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens})
                 data = _cached_successful_provider_response("chat", hiagent_model, payload, call_meta)
-                _require_cached_replay_or_raise(data, call_meta)
+                _require_cached_replay_or_raise(
+                    data, call_meta, kind="chat", model=hiagent_model, payload=payload,
+                )
                 reused = data is not None
                 if data is None:
                     data = await _plain_chat_request(
