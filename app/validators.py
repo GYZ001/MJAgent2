@@ -2864,20 +2864,30 @@ def build_prep_pack_span_ledger(
     **确定性跨度扩展**（EP2 首次正式回归暴露，ERR-20260824-9babad：模型对
     ev_003 声明 span=[13,16] 却引用了 segment 17，方差性的"跨度写窄一格"，
     不是新回归缺陷）："申报 ∪ 确定性证明"哲学的直接延伸——逐字核实的引文是
-    强证据，跨度声明本身只是弱元数据；一个事件的最终 span 在有序/无洞检查
-    **之前**先归一为 ``[原始 span] ∪ [该事件全部逐字核实引文的 segment_index]``。
-    这不是放宽门禁：扩展只能被这个事件**自己**的、已核实（align_source_excerpt
+    强证据，跨度声明本身只是弱元数据；一个事件的最终（用于覆盖记账的）span
+    归一为 ``[原始 span] ∪ [该事件全部逐字核实引文的 segment_index]``。这不是
+    放宽门禁：扩展只能被这个事件**自己**的、已核实（align_source_excerpt
     命中）的引文推动，不核实的东西、别的事件的引文都不能移动它的边界一步。
-    扩展导致的真冲突（吃进相邻事件的独占区间，使有序检查无法单调化）照旧
-    按规则 (c) 致命——扩展不解除跨度有序的义务，只是先把"证据确凿但笔误写窄
-    了一格"这种噪音在阻断判断前过滤掉。扩展记录进返回值第三项
-    ``normalized_span_extensions``，供观测，不改变三条致命规则本身。
+    扩展记录进返回值第三项 ``normalized_span_extensions``，供观测。
+
+    **语义分离**（1.5.0，ERR-20260824-22cb1c：真实第17轮 EP3 回归，
+    ev_010 扩展后起点 38 撞前一事件申报终点 39——相邻事件合法共享过渡段落
+    时，后一个事件对该过渡段的逐字引文把自己的 span 往回扩展了一格，被
+    误判成"跨度交叉"，即使两个事件申报的原始 span 从未真正交叉）："叙事
+    结构主张"（这个事件在故事里排第几、跟邻居的边界在哪）与"交付证明"
+    （这个事件到底有没有证据撑住自己声称覆盖的范围）是两种不同语义，不能
+    用同一把尺子量：
+      - 跨度有序检查（规则 c）**只看模型申报的原始 span**，独立于证据核验
+        与扩展计算，从不受扩展结果影响；
+      - 覆盖/无洞（规则 a）与反懒惰护栏（规则 b 的一部分）**继续用扩展后
+        的 span 并集**——扩展是为了证明"这段确实交付了"，跟"事件之间谁先
+        谁后"无关。扩展导致相邻（甚至更远）事件的 span 出现重叠，不再是
+        错误，是良性双重覆盖（证据外溢，不是叙事边界主张）。
 
     Exactly three things are fatal (**洞即删戏、引文锚地、跨度有序** -- all
     three, and only these three, block publish; everything else is
-    unrestricted). All three are evaluated against each event's EXTENDED
-    span (see above), not the raw declared one:
-      a) **洞即删戏**: the union of all validated (extended) spans must equal
+    unrestricted):
+      a) **洞即删戏**: the union of all validated (EXTENDED) spans must equal
          ``[1, total_segments]`` with no gaps -- any segment outside every
          event's span is content that got silently cut, full stop, no size
          exemption (an earlier "small holes get interpolated" mechanism was
@@ -2889,14 +2899,17 @@ def build_prep_pack_span_ledger(
          that fails alignment (does not actually match its claimed
          segment's text) simply does not count, anywhere; it neither
          anchors nor extends anything.
-      c) **跨度有序**: spans must advance in ``order`` -- the next event's
-         (extended) from_segment may not be less than the previous event's
-         (extended) to_segment. Sharing exactly the boundary segment is
-         normal and expected, not an error. Real overlap or regression
-         means the ledger contradicts itself about who owns a segment --
-         fatal, extension included.
+      c) **跨度有序**: spans must advance in ``order`` -- evaluated against
+         each event's DECLARED (raw, unextended) span only (1.5.0, see
+         above) -- the next event's declared from_segment may not be less
+         than the previous event's declared to_segment. Sharing exactly the
+         boundary segment is normal and expected, not an error. A real
+         declared-span crossing or regression means the model's own
+         narrative-structure claim contradicts itself about who owns a
+         segment -- fatal; an EXTENDED-span overlap that arises purely from
+         evidence spillover is not (see 语义分离 above).
     The anti-laziness guardrail (PREP_PACK_SPAN_LAZINESS_MULTIPLIER) is part
-    of (b), evaluated against the extended span length: a span far larger
+    of (b), evaluated against the EXTENDED span length: a span far larger
     than average is not "well anchored" merely by having one quote
     somewhere in it, so oversized spans need two quotes spread across their
     own front/back halves.
@@ -2955,7 +2968,13 @@ def build_prep_pack_span_ledger(
     # citing a segment as real evidence is what matters here, not span
     # validity.
     referenced: set[int] = set()
-    prev_to = 0
+    # 1.5.0 语义分离（ERR-20260824-22cb1c，真实第17轮 EP3 回归）：有序性/
+    # 交叉/倒退检查只用模型申报的原始 span（叙事结构主张），不用确定性扩展
+    # 后的 span（交付证明）——旧代码把这两种语义混用同一把尺子，导致相邻
+    # 事件合法共享过渡段落时，后一个事件对该过渡段的证据引用（把自己的
+    # span 往回扩展一格）被误判成"跨度交叉"，即使两个事件申报的原始 span
+    # 从未真正交叉。prev_declared_to 只跟踪申报值，从不被扩展后的值污染。
+    prev_declared_to = 0
     for event in ordered:
         event_id = str(event.get("event_id") or "")
         declared_from = int(event.get("from_segment") or 0)
@@ -2972,6 +2991,15 @@ def build_prep_pack_span_ledger(
             errors.append(
                 f"事件 {event_id} 的 source_span [{declared_from},{declared_to}] "
                 "超出原文范围或首尾颠倒"
+            )
+            continue
+        # 跨度有序（规则c）：只比较申报值，独立于证据核验/扩展计算——这是
+        # 一条纯粹的叙事结构主张检查，不依赖也不污染下面的交付证明逻辑。
+        # 共享边界（declared_from == prev_declared_to）依旧合法，不算交叉。
+        if declared_from < prev_declared_to:
+            errors.append(
+                f"事件 {event_id} 的 source_span [{declared_from},{declared_to}] "
+                f"（申报值）起点早于前一事件申报终点 {prev_declared_to}，跨度交叉或倒退"
             )
             continue
         # Verify every claimed quote against its OWN claimed segment's real
@@ -2996,8 +3024,12 @@ def build_prep_pack_span_ledger(
                 "没有任何逐字引文命中原文，缺少可核验证据"
             )
             continue
-        # Deterministic span extension: only this event's own verified quotes
-        # may move its boundary, and only outward.
+        # Deterministic span extension (交付证明 only -- 1.5.0 起不再反馈进
+        # 跨度有序检查): only this event's own verified quotes may move its
+        # boundary, and only outward. An extended span overlapping a
+        # neighbor's (declared or extended) span is no longer, by itself,
+        # an error -- it is benign double coverage (delivery-evidence
+        # spillover), see ERR-20260824-22cb1c above.
         from_segment = min(declared_from, min(anchored))
         to_segment = max(declared_to, max(anchored))
         if (from_segment, to_segment) != (declared_from, declared_to):
@@ -3010,12 +3042,6 @@ def build_prep_pack_span_ledger(
                 "to": to_segment,
                 "extended_by": extended_by,
             })
-        if from_segment < prev_to:
-            errors.append(
-                f"事件 {event_id} 的 span（含确定性扩展）起点 {from_segment} 早于"
-                f"前一事件终点 {prev_to}，跨度交叉或倒退"
-            )
-            continue
         span_len = to_segment - from_segment + 1
         if span_len > laziness_threshold:
             midpoint = (from_segment + to_segment) / 2
@@ -3029,7 +3055,7 @@ def build_prep_pack_span_ledger(
                 )
         delivered |= anchored
         covered |= set(range(from_segment, to_segment + 1))
-        prev_to = max(prev_to, to_segment)
+        prev_declared_to = max(prev_declared_to, declared_to)
 
     # --- Paratext v3 gates: model DECLARES, this function DISPOSES -----
     # (see the module comment above PARATEXT_TAIL_WINDOW_SEGMENTS for the

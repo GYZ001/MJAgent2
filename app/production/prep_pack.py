@@ -12,14 +12,26 @@ machinery (app/production/certificate.py) are reused as-is.
 Frozen artifact payload shape (single source of truth -- field names must not
 change; see the task brief / docs/TRANSFORM_FREEZE_PLAN.md §3):
 {
-  "prep_pack_version": "1.4.1",
+  "prep_pack_version": "1.5.0",
   "episode_no": int,
   "episode_scope": {"chapter_indexes": [int], "source_segment_count": int},
   "event_chain": [{
       "event_id": str, "order": int, "summary": str,
+      # source_span carries the EXTENDED value (see app.validators.
+      # build_prep_pack_span_ledger's 语义分离 note, 1.5.0/ERR-20260824-22cb1c):
+      # adjacent events' source_span may legitimately OVERLAP by a segment or
+      # two -- that overlap is delivery-evidence spillover (a later event's
+      # own verified quote reached one segment into a shared transition),
+      # NOT a narrative-boundary claim. P1 storyboard consumers must not
+      # treat source_span overlap as "these two events cover the same beat
+      # twice"; the model's own declared span (not published here, only the
+      # extended result is) is the actual narrative-order claim, and that
+      # never overlaps by construction (see coverage_ledger's fatal rules).
       "source_span": {"from_segment": int, "to_segment": int},
       "source_evidence": [{"segment_index": int, "quote": str}],
-      "key_lines": [{"speaker": str, "line": str, "segment_index": int}],
+      "key_lines": [
+          {"speaker": str, "line": str, "segment_index": int, "speaker_ref": str},
+      ],
   }],
   "asset_manifest": {
       "characters": [{"identity_id": str, "display_name": str,
@@ -120,6 +132,41 @@ into the existing discovery path (app.scenes.ensure_scenes_for_labels),
 which is exactly the mechanism already designed to register a genuinely new
 scene when nothing existing actually matches. asset_manifest's own shape is
 unchanged.
+
+1.5.0 (three coordinator amendments, same batch, real round-16/17
+regressions -- schema changed, hence the minor bump):
+  a) Prior-knowledge declare-then-verify (user correction: outright banning
+     the model's own book knowledge in the extraction prompt was wrong --
+     a correct guess like "丹鬼" should be a bonus, not discarded).
+     _ModelCharacterMention/_ModelSceneMention gain ``suspected_true_name``
+     (required, nullable); display_name still must be the verbatim
+     in-episode term, never replaced. See
+     _prep_pack_verify_true_name_hypothesis: a hypothesis is only trusted
+     once it resolves to an existing bible identity AND the guessed name
+     itself is textually corroborated (this episode's text or the same
+     forward-looking window app.portraits already uses for real-name
+     disambiguation) -- never taken on the model's word alone.
+  b) Speaker roster referencing (real EP2 finding: a key line's speaker was
+     written as "韩宗", a character absent until chapter 5, with zero
+     validation on that field ever). event_chain[].key_lines[] gains
+     ``speaker_ref``, resolved deterministically against the ALREADY-gated
+     episode roster (asset_manifest.characters/functional_extras) by
+     _prep_pack_resolve_key_line_speakers -- a speaker that resolves to
+     nothing in this episode's own roster is a named, hard gate failure.
+     Also added: prose-field lint (_prep_pack_prose_lint_warnings,
+     summary/hook/cliffhanger) -- observability only, not fatal.
+  c) Span-overlap semantic separation (ERR-20260824-22cb1c, real round-17
+     EP3 regression) -- see app.validators.build_prep_pack_span_ledger's
+     "语义分离" docstring note for the full argument. event_chain[].
+     source_span keeps publishing the EXTENDED value (unchanged), but
+     adjacent events' source_span may now legitimately overlap by a
+     segment or two when a later event's own verified quote reaches one
+     segment into a shared transition -- that is delivery-evidence
+     spillover, not a narrative-boundary claim (the ordering/crossing gate
+     itself only ever looks at the model's DECLARED span, never the
+     extended one, as of this version). P1 storyboard consumers of this
+     payload must not treat source_span overlap between consecutive events
+     as "double-booked" story time.
 
 Coverage accounting design (three real EP1 iterations, see
 docs/TRANSFORM_FREEZE_PLAN.md and app.validators.build_prep_pack_span_ledger):

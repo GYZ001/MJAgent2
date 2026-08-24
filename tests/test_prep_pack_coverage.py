@@ -98,9 +98,15 @@ def test_full_span_coverage_passes():
 
 # ---------------------------------------------------------------------------
 # c) 确定性跨度扩展（ERR-20260824-9babad，EP2 正式回归）：一个事件自己已核实
-# 的引文落在申报 span 之外时，先扩展该事件自己的 span，再做有序/无洞检查——
-# 而不是立刻把"落在 span 外"当错误。扩展只能被这个事件自己的核实引文推动；
-# 扩展导致跟别的事件的真冲突（有序检查在扩展后的边界上失败）照旧致命。
+# 的引文落在申报 span 之外时，先扩展该事件自己的 span，再做无洞/懒惰检查——
+# 而不是立刻把"落在 span 外"当错误。扩展只能被这个事件自己的核实引文推动。
+#
+# 语义分离（1.5.0，ERR-20260824-22cb1c，真实第17轮 EP3 回归，supersedes 上面
+# 这条 EP2 设计里"扩展导致真冲突照旧致命"的部分）：跨度有序/交叉/倒退检查
+# 改为只看模型申报的原始 span，不再看扩展后的 span——这两种语义（叙事结构
+# 主张 vs 交付证明）不该用同一把尺子量。扩展导致的 span 重叠（不管是紧邻
+# 的还是更远的事件）现在是良性双重覆盖，不再是错误；只有申报 span 自己
+# 交叉/倒退才致命。
 # ---------------------------------------------------------------------------
 
 def test_adjacent_out_of_span_quote_extends_and_records_one_extension():
@@ -130,17 +136,20 @@ def test_adjacent_out_of_span_quote_extends_and_records_one_extension():
     assert_prep_pack_coverage_complete(ledger)  # must not raise
 
 
-def test_extension_reaching_into_next_events_territory_is_still_fatal():
-    """引文深入另一事件独占区间：扩展本身发生，但扩展后的跨度使有序检查在
-    处理下一个事件时失败——真冲突照旧阻断，扩展机制不豁免它。"""
+def test_extension_reaching_into_next_events_territory_is_benign_since_1_5_0():
+    """1.5.0 起，此场景不再致命（superseded, 见上方"语义分离"说明；旧名
+    test_extension_reaching_into_next_events_territory_is_still_fatal 的
+    行为断言已倒转，函数改名以免继续误导后人）：三个事件申报的原始 span
+    （[1,3]/[4,8]/[9,16]）互相之间从未交叉，跨度有序检查只看这些申报值，
+    干净通过；ev_001 自己的引文深入 segment 10（原本"属于" ev_003 的范围）
+    只影响覆盖记账——扩展后 ev_001 变成 [1,10]，跟 ev_002([4,8])、
+    ev_003([9,16]) 都有重叠，这是良性双重覆盖，不是错误。"""
     segments = index_source_segments(LONGER_SOURCE)
     events = [
         {
             "event_id": "ev_001", "order": 1, "from_segment": 1, "to_segment": 3,
             "source_evidence": [
                 {"segment_index": 1, "quote": segments[0].text},
-                # segment_index 10 sits deep inside ev_003's own exclusive
-                # range below -- not a harmless adjacent overreach.
                 {"segment_index": 10, "quote": segments[9].text},
             ],
         },
@@ -154,13 +163,50 @@ def test_extension_reaching_into_next_events_territory_is_still_fatal():
         },
     ]
     ledger, errors, extensions, rejected = build_prep_pack_span_ledger(LONGER_SOURCE, events=events)
-    # ev_001 does extend (its own verified evidence reaches segment 10)...
     assert any(item["event_id"] == "ev_001" and item["to"] == 10 for item in extensions)
-    # ...but the extension swallows ev_002's declared start, which must
-    # still surface as a fatal crossing/regression when ev_002 is processed.
-    assert any("交叉或倒退" in message for message in errors)
-    with pytest.raises(ValueError):
-        assert_prep_pack_coverage_complete(ledger)
+    assert errors == []
+    assert ledger["uncovered"] == []
+    assert_prep_pack_coverage_complete(ledger)  # must not raise
+
+
+def test_declared_order_valid_but_extension_creates_overlap_is_benign_double_coverage():
+    """红灯 b）（协调方点名，真实第17轮 EP3 回归 ERR-20260824-22cb1c 的最小
+    复现：ev_010 扩展后起点 38 撞前一事件申报终点 39，相邻事件合法共享过渡
+    段落时被误判交叉）：ev_001 申报 [1,2]，ev_002 申报 [2,4]（与 ev_001 共享
+    边界 2，合法）；ev_002 自己的证据额外引用了 segment 1（过渡段，完全落在
+    ev_001 的申报范围内，深入其独占区间一格），把 ev_002 的 span 往回扩展
+    成 [1,4]。申报层面从未交叉（ev_002 申报 from=2 不小于 ev_001 申报
+    to=2），必须通过；覆盖并集用扩展后的值，segment 1/2 被两个事件重复
+    覆盖，是良性双重覆盖，不再报错。"""
+    events = [
+        {
+            "event_id": "ev_001", "order": 1, "from_segment": 1, "to_segment": 2,
+            "source_evidence": [{"segment_index": 1, "quote": _seg_text(SOURCE, 1)}],
+        },
+        {
+            "event_id": "ev_002", "order": 2, "from_segment": 2, "to_segment": 4,
+            "source_evidence": [
+                # segment_index 1 is the shared transition segment -- fully
+                # inside ev_001's own exclusive declared range [1,2], one
+                # segment before ev_002's own declared_from (2), extending
+                # ev_002's span backward past its own declaration.
+                {"segment_index": 1, "quote": _seg_text(SOURCE, 1)},
+                {"segment_index": 3, "quote": _seg_text(SOURCE, 3)},
+            ],
+        },
+    ]
+    ledger, errors, extensions, rejected = build_prep_pack_span_ledger(SOURCE, events=events)
+    assert errors == []
+    assert any(
+        item["event_id"] == "ev_002" and item["from"] == 1 and item["extended_by"] == [1]
+        for item in extensions
+    )
+    assert ledger["uncovered"] == []
+    assert ledger["delivered"] == [1, 3]
+    # segment 1 and 2 are covered by BOTH events' (extended) spans -- benign
+    # double coverage, not flagged anywhere.
+    assert set(ledger["delivered"]) | set(ledger["retained_as_context"]) == {1, 2, 3, 4}
+    assert_prep_pack_coverage_complete(ledger)  # must not raise
 
 
 # ---------------------------------------------------------------------------
