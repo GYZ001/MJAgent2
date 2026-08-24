@@ -156,3 +156,26 @@ def test_no_module_builds_media_urls_outside_the_signer():
             if '"/media/' in line or 'f"/media/' in line or "/media/{" in line:
                 offenders.append(f"{rel}:{lineno}: {line.strip()}")
     assert not offenders, "这些地方绕过了 build_media_url：\n" + "\n".join(offenders)
+
+
+def test_disabled_workspace_disappears_from_the_login_payload_too(client: TestClient):
+    """展示口径必须和授权口径一致：停用的团队不能还留在 /api/auth/me 的列表里。
+
+    ``resolve_session`` 与 ``_workspaces_payload`` 是两处独立计算「我属于哪些团队」
+    的地方。只有前者带 status 过滤时，用户会在界面上看到一个自己其实已经没有任何
+    权限的团队——点进去每个请求都 404，而「团队还在列表里」会让人以为是系统坏了。
+    这条守的就是这两处口径不能分叉。
+    """
+    _add_workspace("ws_shown", "active")
+    _add_workspace("ws_hidden", "disabled")
+    user_id = _add_user("split")
+    _join("ws_shown", user_id)
+    _join("ws_hidden", user_id)
+
+    resp = client.get(
+        "/api/auth/me",
+        headers={**_HEADERS, "X-Manju-Session": create_session(user_id)},
+    )
+    assert resp.status_code == 200
+    listed = {w["id"] for w in resp.json()["workspaces"]}
+    assert listed == {"ws_shown"}, f"停用团队仍出现在登录载荷里：{listed}"

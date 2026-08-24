@@ -75,10 +75,14 @@ def _workspaces_payload(principal: Principal) -> list[dict[str, str]]:
             }
             for r in rows
         ]
+    # 必须和 resolve_session 用同一个口径（只认 status='active'）。这里少一个条件，
+    # 用户就会在界面上看到一个自己其实已经没有任何权限的团队——点进去每个请求都
+    # 404，而"团队还在列表里"会让人以为是系统坏了。两处算"我属于哪些团队"的地方
+    # 只要有一处不带 status，就会出现这种展示与授权不一致。
     rows = conn.execute(
         """SELECT w.id AS id, w.name AS name
              FROM workspace_members m JOIN workspaces w ON w.id=m.workspace_id
-            WHERE m.user_id=?""",
+            WHERE m.user_id=? AND w.status='active'""",
         (principal.user_id,),
     ).fetchall()
     return [
