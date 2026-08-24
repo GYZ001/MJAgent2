@@ -38,7 +38,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BASE = "http://127.0.0.1:8230"
-SESSION = (ROOT / "data" / "local_session_secret.txt").read_text(encoding="utf-8").strip()
+# 2026-08-24 起改用回归专用会话凭证，见 scripts/yyft_serial10.py 同名常量的注释。
+SESSION = (ROOT / "data" / "regression_session_token.txt").read_text(encoding="utf-8").strip()
 PROJECT_ID = "proj_3ac0b627fa46"
 EPISODES = [
     ("EP1", "ep_3d523ff4d0a4"),

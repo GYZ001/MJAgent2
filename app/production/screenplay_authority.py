@@ -53,8 +53,15 @@ def _contract_major(contract_version: str | None) -> int:
 
 
 def screenplay_contract_requires_narrative(contract_version: str | None) -> bool:
-    """Return whether this contract generation requires typed narrative authority."""
-    return _contract_major(contract_version) >= 3
+    """Return whether this contract generation requires typed narrative authority.
+
+    Only the retired heavy blueprint/scene-shard pipeline (major 3-5) produces
+    a ``narrative_plan``. Contract 6.0.0+ is the lightweight episode_prep_pack
+    pipeline (docs/TRANSFORM_FREEZE_PLAN.md), which has no narrative_plan
+    concept at all -- it must not be routed into the narrative-authority gate.
+    """
+    major = _contract_major(contract_version)
+    return 3 <= major < 6
 
 
 def screenplay_contract_tracks_bible_projection(
@@ -62,6 +69,24 @@ def screenplay_contract_tracks_bible_projection(
 ) -> bool:
     """Return whether the screenplay binds the composed project Bible view."""
     return _contract_major(contract_version) >= 4
+
+
+def screenplay_contract_is_prep_pack(contract_version: str | None) -> bool:
+    """Return whether this contract's artifact self-declares as
+    episode_prep_pack (screenplay contract 6.0.0+).
+
+    This is an EXPLICIT declaration and must win over proxy inference (see
+    app.production.patch._historical_screenplay_artifact_is_bound, which
+    treats "referenced by production_revisions/completion_certificates/
+    episode pointers" as evidence of being an old heavy-pipeline artifact --
+    a prep_pack artifact gets bound to those same tables/pointers by its own,
+    different publish path, so that proxy false-positives on every prep_pack
+    publish. Caught via a real EP1 run: the startup recovery sweep
+    (recover_screenplay_tasks) flipped a freshly-published, fully valid
+    'ready' episode to 'failed' with ARTIFACT_NEEDS_REBUILD on the very next
+    process restart).
+    """
+    return _contract_major(contract_version) >= 6
 
 
 def _json(value: Any) -> str:

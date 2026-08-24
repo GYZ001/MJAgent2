@@ -1262,19 +1262,6 @@ label.f {
   display: block;
   background: var(--paper-deep);
 }
-/* 准备包资产映射：定妆照/场景参考图还未解析到具体图片时的占位（剧本台只读视图） */
-.asset-thumb-placeholder {
-  width: 100%;
-  aspect-ratio: 9/16;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  padding: 8px;
-  color: var(--ink-faint);
-  font-size: 11.5px;
-  background: var(--paper-deep);
-}
 .scene-thumb .st-body {
   padding: 6px 8px;
   font-size: 11.5px;
@@ -10587,79 +10574,7 @@ label.f {
 .screenplay-primary-actions {
   flex-shrink: 0;
 }
-.screenplay-stage-rail {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 6px;
-  margin: 12px 0 0;
-  padding: 0;
-  list-style: none;
-}
-.screenplay-stage-rail li {
-  display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
-  gap: 1px 7px;
-  align-items: center;
-  min-width: 0;
-  padding: 8px;
-  border: 1px solid var(--hairline);
-  border-radius: 9px;
-  background: #f6f4ef;
-  color: var(--ink-faint);
-}
-.screenplay-stage-rail i {
-  grid-row: 1 / 3;
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: #e7e3db;
-  font: normal 700 11px var(--ui);
-}
-.screenplay-stage-rail span {
-  overflow: hidden;
-  color: inherit;
-  font: 600 11px/1.2 var(--ui);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.screenplay-stage-rail small {
-  color: inherit;
-  font: 10px/1.2 var(--ui);
-}
-.screenplay-stage-rail li[data-status="completed"] {
-  color: #40724f;
-  background: #f0f7f1;
-}
-.screenplay-stage-rail li[data-status="completed"] i {
-  color: #fff;
-  background: #4f7f5e;
-}
-.screenplay-stage-rail li[data-status="in_progress"] {
-  border-color: rgba(168, 132, 44, 0.5);
-  color: #7f651f;
-  background: #fff9e8;
-}
-.screenplay-stage-rail li[data-status="in_progress"] i {
-  color: #fff;
-  background: #a8842c;
-}
-.screenplay-stage-rail li[data-status="paused"] {
-  border-color: rgba(168, 132, 44, 0.4);
-  color: #7f651f;
-  background: #fff9e8;
-}
-.screenplay-stage-rail li[data-status="blocked"] {
-  border-color: rgba(181, 72, 56, 0.45);
-  color: var(--cinnabar-deep);
-  background: #fff4f1;
-}
-.screenplay-stage-rail li[data-status="failed"] {
-  border-color: rgba(153, 43, 32, 0.6);
-  color: #8f2f24;
-  background: #fff0ed;
-}
+/* 旧 .screenplay-stage-rail（十步大灰框）已被 .prep-stepper 紧凑步进器取代，规则整块删除。 */
 .screenplay-quality-summary {
   display: flex;
   align-items: center;
@@ -10958,9 +10873,6 @@ label.f {
   .screenplay-secondary-row {
     max-height: 112px;
     overflow-y: auto;
-  }
-  .screenplay-stage-rail {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .screenplay-row-spacer {
     display: none;
@@ -14682,4 +14594,444 @@ summary:focus-visible,
   flex-direction: column;
   gap: 4px;
   min-width: 110px;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   剧本台·准备包视图（转型三轮版式重构）
+   紧凑步进器 / 全宽门禁细条带 / 两栏（事件时间线 + 粘性侧栏）/ 引言卡。
+   层级靠字号字重与留白，不靠灰底方框；延续全站暖纸色调，只新增这一屏专属样式。
+   ═══════════════════════════════════════════════════════════════ */
+
+/* 紧凑步进器：小号数字圆点 + 短标签，单行排布可换行，细连接线 */
+.prep-stepper-block {
+  margin: 10px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.prep-stepper-status {
+  margin: 0;
+}
+.prep-stepper {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0;
+}
+.prep-stepper-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+}
+.prep-stepper-item:not(:last-child)::after {
+  content: '';
+  width: 20px;
+  height: 1px;
+  margin: 0 8px;
+  background: var(--hairline);
+  flex: none;
+}
+.prep-stepper-dot {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 10px/1 var(--ui, sans-serif);
+  background: var(--paper-deep);
+  color: var(--ink-faint);
+}
+.prep-stepper-label {
+  font: 600 12px/1.3 var(--ui, sans-serif);
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.prep-stepper-item[data-tone="done"] .prep-stepper-dot {
+  background: var(--moss);
+  color: #fff;
+}
+.prep-stepper-item[data-tone="done"] .prep-stepper-label {
+  color: var(--ink-soft);
+}
+.prep-stepper-item[data-tone="active"] .prep-stepper-dot {
+  background: var(--cinnabar);
+  color: #fff;
+}
+.prep-stepper-item[data-tone="active"] .prep-stepper-label {
+  color: var(--cinnabar-deep);
+  font-weight: 700;
+}
+.prep-stepper-item[data-tone="blocked"] .prep-stepper-dot {
+  background: rgba(181, 72, 56, 0.16);
+  color: var(--cinnabar-deep);
+}
+.prep-stepper-item[data-tone="blocked"] .prep-stepper-label {
+  color: var(--cinnabar-deep);
+}
+
+/* 生成中且尚无准备包内容：不摆大面积空框，只给一句居中提示 */
+.prep-generating-hint {
+  text-align: center;
+  padding: 28px 20px;
+  color: var(--ink-soft);
+}
+.prep-generating-hint p {
+  margin: 0;
+  font: 15px/1.8 var(--serif);
+}
+
+/* 门禁状态灯：全宽细条带 */
+.prep-gate-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 10px 16px;
+  border-radius: 9px;
+  border: 1px solid var(--hairline);
+  font: 13px/1.5 var(--ui, sans-serif);
+}
+.prep-gate-strip.ok {
+  background: rgba(71, 112, 90, 0.07);
+  border-color: rgba(71, 112, 90, 0.24);
+}
+.prep-gate-strip.blocked {
+  background: rgba(181, 72, 56, 0.07);
+  border-color: rgba(181, 72, 56, 0.26);
+}
+.prep-gate-strip-icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 12px/1 var(--ui, sans-serif);
+}
+.prep-gate-strip.ok .prep-gate-strip-icon {
+  color: #fff;
+  background: var(--moss);
+}
+.prep-gate-strip.blocked .prep-gate-strip-icon {
+  color: #fff;
+  background: var(--cinnabar);
+}
+.prep-gate-strip strong {
+  font: 700 13px/1.4 var(--ui, sans-serif);
+  color: var(--ink);
+}
+.prep-gate-strip-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+.prep-gate-chip {
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(34, 38, 44, 0.05);
+  color: var(--ink-soft);
+  font: 600 11px/1.6 var(--ui, sans-serif);
+  white-space: nowrap;
+}
+.prep-gate-missing {
+  margin: 6px 2px 0;
+  color: var(--cinnabar-deep);
+  font: 12.5px/1.7 var(--ui, sans-serif);
+  word-break: break-word;
+}
+
+/* 主体两栏：左 2/3 事件链主内容，右 1/3 粘性侧栏 */
+.prep-pack-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(230px, 1fr);
+  gap: 18px;
+  align-items: start;
+  margin-top: 14px;
+}
+.prep-pack-main {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.prep-pack-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  position: sticky;
+  top: 14px;
+}
+.prep-sidebar-heading {
+  margin: 0 0 8px;
+  font: 600 13px/1.4 var(--ui, sans-serif);
+  color: var(--ink-soft);
+  letter-spacing: 0.02em;
+}
+.prep-scope-card p {
+  margin: 0;
+  font: 13px/1.6 var(--ui, sans-serif);
+  color: var(--ink);
+}
+.prep-scope-card .prep-sidebar-meta {
+  margin-top: 3px;
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+
+/* 空态提示：小号弱化文字，不用大面积留白框 */
+.prep-empty-hint {
+  margin: 4px 0 0;
+  color: var(--ink-faint);
+  font: 12.5px/1.6 var(--ui, sans-serif);
+}
+
+/* 事件链：不靠灰底方框分隔，靠留白 + 细分隔线 + 字号字重 */
+.prep-timeline {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+.prep-timeline-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 2px 12px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.prep-timeline-item:first-child {
+  padding-top: 2px;
+}
+.prep-timeline-item:last-child {
+  border-bottom: none;
+  padding-bottom: 2px;
+}
+.prep-timeline-marker {
+  grid-row: 1 / 2;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--cinnabar);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 11px/1 var(--ui, sans-serif);
+  margin-top: 2px;
+}
+.prep-timeline-details {
+  grid-column: 2 / 3;
+  min-width: 0;
+}
+.prep-timeline-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  cursor: pointer;
+  list-style: none;
+}
+.prep-timeline-summary::-webkit-details-marker {
+  display: none;
+}
+.prep-timeline-summary::marker {
+  content: '';
+}
+.prep-timeline-headline {
+  font: 16px/1.6 var(--serif);
+  color: var(--ink);
+}
+.prep-timeline-summary::after {
+  content: '展开';
+  margin-left: auto;
+  flex: none;
+  font: 600 11px/1.4 var(--ui, sans-serif);
+  color: var(--ink-faint);
+}
+.prep-timeline-item details[open] .prep-timeline-summary::after {
+  content: '收起';
+}
+/* span 角标弱化为浅金小签，不与正文抢视觉重量 */
+.prep-timeline-span {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(152, 115, 36, 0.09);
+  color: var(--gold);
+  font: 600 10px/1.6 var(--ui, sans-serif);
+  white-space: nowrap;
+}
+.prep-timeline-body {
+  margin: 10px 0 4px;
+  display: grid;
+  gap: 10px;
+  font: 13px/1.75 var(--ui, sans-serif);
+  color: var(--ink-soft);
+}
+.prep-timeline-body b {
+  display: block;
+  margin-bottom: 4px;
+  font: 600 11px/1.4 var(--ui, sans-serif);
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+}
+.prep-timeline-quotes,
+.prep-timeline-lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 7px;
+}
+.prep-timeline-quotes li {
+  border-left: 2px solid var(--gold);
+  padding: 1px 0 1px 10px;
+}
+.prep-timeline-lines li {
+  border-left: 2px solid var(--cinnabar);
+  padding: 1px 0 1px 10px;
+}
+.prep-timeline-idx {
+  color: var(--ink-faint);
+  font-size: 11px;
+  margin-left: 6px;
+}
+
+/* hook / cliffhanger：引言卡 */
+.prep-quote-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+  margin-top: 4px;
+}
+.prep-quote-card {
+  padding: 14px 18px 14px 20px;
+  border-radius: 10px;
+  background: var(--paper-deep);
+  border-left: 3px solid var(--cinnabar);
+}
+.prep-quote-card b {
+  display: block;
+  margin-bottom: 5px;
+  font: 700 10px/1.4 var(--ui, sans-serif);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--cinnabar-deep);
+}
+.prep-quote-card p {
+  margin: 0;
+  font: 15px/1.75 var(--serif);
+  color: var(--ink);
+}
+.prep-quote-card.empty p {
+  font: 13px/1.6 var(--ui, sans-serif);
+  color: var(--ink-faint);
+}
+
+/* 资产映射：侧栏纵向堆叠的紧凑名册（非缩略图网格），事件覆盖数常驻显示 */
+.prep-roster {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.prep-roster-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.prep-roster-thumb {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: var(--paper-deep);
+}
+.prep-roster-thumb-empty {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background: var(--paper-deep);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-faint);
+  font-size: 9.5px;
+}
+/* 群演 / 一次性人物的占位图标：没有定妆照是设计使然，不是数据缺失，
+   用中性的人形符号而不是 .prep-roster-thumb-empty 的"无图"措辞——那个措辞
+   专门表达"本该有定妆照但没找到"，语义上不适合套在群演身上。 */
+.prep-roster-icon {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background: var(--paper-deep);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  color: var(--ink-faint);
+}
+.prep-roster-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.prep-roster-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.prep-roster-name-text {
+  min-width: 0;
+  font: 600 12.5px/1.3 var(--ui, sans-serif);
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 本集称谓小签：与事件卡上的 source_span 角标同一套"浅金小签"语言，保持视觉一致。 */
+.prep-roster-alias {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(152, 115, 36, 0.09);
+  color: var(--gold);
+  font: 600 10px/1.5 var(--ui, sans-serif);
+  white-space: nowrap;
+}
+.prep-roster-meta {
+  font: 11px/1.3 var(--ui, sans-serif);
+  color: var(--ink-faint);
+}
+
+@media (max-width: 900px) {
+  .prep-pack-layout {
+    grid-template-columns: 1fr;
+  }
+  .prep-pack-sidebar {
+    position: static;
+  }
+}
+@media (max-width: 640px) {
+  .prep-timeline-summary::after {
+    display: none;
+  }
+  .prep-gate-strip-chips {
+    margin-left: 0;
+    width: 100%;
+  }
 }

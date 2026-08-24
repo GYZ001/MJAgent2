@@ -354,7 +354,11 @@ def issue_completion_certificate(
         art.get("type") not in (
             {"storyboard", "storyboard_document"}
             if kind == "storyboard"
-            else {"screenplay_document"}
+            # "screenplay_document" is the retired heavy-pipeline shape
+            # (contract major < 6); "episode_prep_pack" is the lightweight
+            # replacement (contract 6.0.0+, docs/TRANSFORM_FREEZE_PLAN.md).
+            # Both are the "screenplay" production stage's completion kind.
+            else {"screenplay_document", "episode_prep_pack"}
         )
         or art.get("scope_type") != "episode"
         or art.get("scope_id") != scope_id
@@ -599,7 +603,7 @@ def verify_completion_certificate(
         art.get("type") not in (
             {"storyboard", "storyboard_document"}
             if cert.kind == "storyboard"
-            else {"screenplay_document"}
+            else {"screenplay_document", "episode_prep_pack"}
         )
         or art.get("scope_type") != "episode"
         or art.get("scope_id") != cert.scope_id

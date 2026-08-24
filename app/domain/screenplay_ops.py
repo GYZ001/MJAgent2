@@ -498,6 +498,65 @@ def _screenplay_authority_state(
     return _screenplay_rebuild_state(snapshot, rebuild_error)
 
 
+# Backend-declared stage table for the lightweight episode_prep_pack pipeline
+# (screenplay contract 6.0.0+). The frontend renders whatever this endpoint
+# returns and must not hardcode a stage list of its own -- when the pipeline's
+# real steps change, only this mapping needs to change (#24 收尾追加项:
+# 阶段表由后端声明). Order matters; it is the display order. display_name is
+# derived from app.orchestration.engine._STEP_PRESENTATIONS at read time (the
+# same registry the observability trace renders from) -- single source of
+# truth for step business names, not a second copy kept in sync by hand.
+_PREP_PACK_STAGE_STEP_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("event_chain_extraction", ("episode_prep_pack_event_chain_chunk",)),
+    ("asset_mapping", ("episode_prep_pack_asset_mapping",)),
+    ("hook_cliffhanger", ("episode_prep_pack_hook_cliffhanger",)),
+    ("coverage_and_publish", ("episode_prep_pack_publish",)),
+)
+
+
+def _prep_pack_stage_snapshot(episode_id: str) -> list[dict[str, Any]]:
+    """Derive each stage's state from the latest screenplay-workflow run's
+    persisted step_runs (durable audit trail, not an in-memory guess).
+
+    Shape: {"key", "display_name", "state"}; state in
+    {"pending", "active", "done", "blocked"}.
+    """
+    from app.orchestration.engine import step_presentation
+
+    conn = get_conn()
+    run_row = conn.execute(
+        """SELECT id FROM workflow_runs
+             WHERE scope_type='episode' AND scope_id=? AND workflow_type='screenplay'
+             ORDER BY COALESCE(started_at, updated_at) DESC, id DESC LIMIT 1""",
+        (episode_id,),
+    ).fetchone()
+    statuses_by_step_key: dict[str, list[str]] = {}
+    if run_row is not None:
+        rows = conn.execute(
+            "SELECT step_key, status FROM step_runs WHERE run_id=?",
+            (run_row["id"],),
+        ).fetchall()
+        for row in rows:
+            statuses_by_step_key.setdefault(row["step_key"], []).append(row["status"])
+    stages: list[dict[str, Any]] = []
+    for stage_key, step_keys in _PREP_PACK_STAGE_STEP_KEYS:
+        statuses = [s for key in step_keys for s in statuses_by_step_key.get(key, [])]
+        if not statuses:
+            state = "pending"
+        elif any(s == "FAILED" for s in statuses):
+            state = "blocked"
+        elif any(s not in {"SUCCEEDED", "FAILED"} for s in statuses):
+            state = "active"
+        else:
+            state = "done"
+        stages.append({
+            "key": stage_key,
+            "display_name": step_presentation(step_keys[0]).name,
+            "state": state,
+        })
+    return stages
+
+
 @router.get("/episodes/{episode_id}/screenplay/status")
 def screenplay_lightweight_status(episode_id: str):
     """运行期轻量状态：不返回正文、台词库、镜头或证据。"""
@@ -515,6 +574,23 @@ def screenplay_lightweight_status(episode_id: str):
             shot_count=shot_count,
             production=production,
         )
+    # ``production["stages"]`` is the heavy-pipeline's 10-step ProductionRevision
+    # ledger (app.production.revision.screenplay_production_state) -- for the
+    # lightweight prep_pack flow (screenplay contract 6.0.0+) no
+    # ProductionRevision is ever created, so ``rev`` there is always None and
+    # this field is permanently the hardcoded all-"pending" 10-step list, never
+    # reflecting real progress. ``prep_pack_stages`` below is the real,
+    # always-4-item, actual-progress-driven source for the current flow; a
+    # real mobile observation during this task's live verification run showed
+    # the old 10-step list still rendering mid-generation because the frontend
+    # fallback picked up this always-non-empty legacy field. Every other
+    # backend caller of screenplay_production_state()/_screenplay_production_state()
+    # reads the function's return value directly in Python (grepped: none read
+    # this "stages" key from this HTTP response), so dropping it only from
+    # this response shape is safe -- the underlying function/table and its own
+    # tests (test_screenplay_controls.py, test_screenplay_delete.py) are
+    # untouched.
+    production_for_response = {k: v for k, v in production.items() if k != "stages"}
     return {
         "id": episode_id,
         "screenplay_status": ep["screenplay_status"],
@@ -524,8 +600,9 @@ def screenplay_lightweight_status(episode_id: str):
         "script_error": ep["script_error"],
         "shot_count": shot_count,
         "active_storyboard_run_id": ep.get("active_storyboard_run_id"),
-        "screenplay_production": production,
+        "screenplay_production": production_for_response,
         "screenplay_state": snapshot,
+        "prep_pack_stages": _prep_pack_stage_snapshot(episode_id),
         "active": bool(
             production.get("task_active")
             or snapshot["storyboard_running"]
@@ -801,6 +878,32 @@ def recover_screenplay_tasks() -> int:
                   )"""
     ).fetchall()
     for published in published_rows:
+        # episode_prep_pack (screenplay contract 6.0.0+, see
+        # app.production.prep_pack) has no narrative_plan and is not the
+        # legacy EpisodeScreenplay shape load_screenplay_from_artifact
+        # validates. Without this guard, every restart's startup sweep would
+        # call into that legacy validator for a freshly-published prep_pack
+        # artifact, which is "historically bound" (it has a completion
+        # certificate and episode pointers) but has no narrative_plan --
+        # _assert_screenplay_artifact_contract raises ArtifactNeedsRebuildError
+        # for exactly that combination, flipping a fully valid 'ready'
+        # episode to 'failed' on every process restart. Caught via a real
+        # EP1 run going from 'ready' to 'failed' immediately after an
+        # unrelated backend restart. prep_pack's own completion certificate +
+        # coverage ledger already guarantee correctness at publish time and
+        # its content is immutable afterward, so this legacy re-validation
+        # has nothing meaningful to do for it -- treat as already valid.
+        raw_screenplay_json = published["screenplay_json"] if "screenplay_json" in published.keys() else None
+        if raw_screenplay_json:
+            try:
+                parsed_screenplay_json = json.loads(raw_screenplay_json)
+            except (TypeError, ValueError):
+                parsed_screenplay_json = None
+            if (
+                isinstance(parsed_screenplay_json, dict)
+                and "prep_pack_version" in parsed_screenplay_json
+            ):
+                continue
         published_artifact_id = str(
             published["screenplay_artifact_id"] or ""
         )
@@ -1117,92 +1220,27 @@ async def _screenplay_task(
     episode_id: str,
     *,
     preflight_result: dict | None = None,
-) -> EpisodeScreenplay | None:
-    """一次 Baseline + Production Repair Agent 局部自愈；仅证书通过后写入 published。"""
+) -> dict | None:
+    """轻量分集准备包生成（screenplay 契约 6.0.0，episode_prep_pack）。
+
+    替代原先的蓝图→场次分片→编译→修复回路（休眠保留于
+    app/production/screenplay_repair.py 等，未从本调用路径引用）：事件链抽取
+    （模型）→ 覆盖/资产确定性核对 → 原子发布，全部逻辑见
+    app/production/prep_pack.py。``preflight_result`` 形参保留仅为兼容旧调用签名
+    （recover_screenplay_tasks 等），本流程不消费它。
+    """
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     try:
         _assert_screenplay_run_owner(episode_id)
         ep_data = dict(ep)
-        p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-        bible = _project_bible_or_placeholder(p)
         source_text = _episode_source_text(conn, ep)
-        from app.production.screenplay_authority import (
-            screenplay_authorized_source_chapters,
-        )
-
-        ep_data["authorized_source_chapters"] = (
-            screenplay_authorized_source_chapters(
-                episode_id,
-                conn=conn,
-            )
-        )
-        if preflight_result is None:
-            preflight_result = await _screenplay_character_discovery(episode_id, source_text)
-        # 身份映射必须随 Baseline、恢复 Patch 和手工发布重放。
-        # 持久化的只是姓名决议与证据，不传递后续章节剧情。
-        from app.portraits import (
-            load_screenplay_character_resolutions,
-            merge_screenplay_character_resolutions,
-            screenplay_character_resolutions_for_source,
-        )
-        ep_data["character_resolutions"] = (
-            screenplay_character_resolutions_for_source(
-                merge_screenplay_character_resolutions(
-                    load_screenplay_character_resolutions(conn, episode_id),
-                    preflight_result.get("resolutions") or [],
-                ),
-                episode_no=int(ep_data.get("episode_no") or 0),
-                source_text=source_text,
-            )
-        )
-        # Other episodes can add a character while this run is in discovery.
-        # Always bind generation to the latest persisted Bible authority.
-        p = conn.execute(
-            "SELECT * FROM projects WHERE id=?",
-            (ep["project_id"],),
-        ).fetchone()
-        bible = _project_bible_or_placeholder(p)
-        from app.portraits import (
-            bible_with_pending_characters_for_text,
-            bible_with_provisional_characters,
-        )
-        bible = bible_with_provisional_characters(bible, preflight_result)
-        bible = bible_with_pending_characters_for_text(
-            ep["project_id"], bible, source_text,
-        )
-        compact_target = _storyboard_target_for_source(ep_data.get("target_duration_s"), len(source_text))
-        if compact_target != ep_data.get("target_duration_s"):
-            # 单一真源：UPDATE 与内存快照 ep_data 都由 _apply_compact_target
-            # 从同一份 _compact_target_columns 取值，保证“写了什么就同步什么”，
-            # 杜绝内存快照与 DB 漂移（历史上 planning 停留在非整十旧值会导致
-            # 下游 duration-expansion CAS 冲突）。
-            _apply_compact_target(conn, episode_id, ep_data, compact_target)
-        prev = conn.execute(
-            "SELECT cliffhanger FROM episodes WHERE project_id=? AND episode_no=?",
-            (ep["project_id"], ep["episode_no"] - 1)).fetchone()
-
-        # Delivery 状态必须与真实 production phase 一致：Baseline 尚未落库时
-        # 仍是 running；已有 working baseline 时从确定性阶段继续。
-        production_state = _screenplay_production_state(episode_id)
         conn.execute(
             "UPDATE episodes SET screenplay_status=?, screenplay_error=?, screenplay_updated_at=? WHERE id=?",
-            (
-                "running",
-                (
-                    "从完整工作副本继续结构校验、评分与发布"
-                    if production_state["operation"] == "finalize"
-                    else "从已验证场次恢复首版生成"
-                    if production_state.get("can_resume_baseline")
-                    else "正在生成人物上下文与首版剧本"
-                ),
-                now(),
-                episode_id,
-            ),
+            ("running", "正在抽取事件链与资产映射", now(), episode_id),
         )
         conn.commit()
 
-        from app.production.screenplay_repair import run_screenplay_production
         from app.observability.tracing import current_trace
 
         run_id = None
@@ -1211,32 +1249,15 @@ async def _screenplay_task(
         except Exception:  # noqa: BLE001
             run_id = None
 
-        # 有 active revision 时继续工作副本；全量 Baseline 只允许一次。
-        resume = True
-        script = await run_screenplay_production(
+        from app.production.prep_pack import run_episode_prep_pack
+
+        payload = await run_episode_prep_pack(
             episode_id=episode_id,
             episode=ep_data,
             source_text=source_text,
-            bible=bible,
-            prev_ending=prev["cliffhanger"] if prev else "",
             run_id=run_id,
-            resume=resume,
         )
-
-        # run_screenplay_production 在成功时已 publish；若仍 repairing 则不要写成 ready
-        row = conn.execute(
-            "SELECT screenplay_status, screenplay_json FROM episodes WHERE id=?", (episode_id,)
-        ).fetchone()
-        if row and row["screenplay_status"] == "ready" and row["screenplay_json"]:
-            return _load_screenplay(row) or script
-
-        # 未发布：保持 repairing，不写 warning 候选到页面交付位
-        if row and row["screenplay_status"] == "repairing":
-            # 工作副本仅存 working artifact；兼容字段不覆盖 published screenplay_json
-            return script
-
-        # 兜底：若 publish 已写入
-        return script
+        return payload
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
             # 进程热更/停机不是用户取消；保留 running 让新 worker 续跑。
@@ -1256,54 +1277,13 @@ async def _screenplay_task(
                 and owner["active_screenplay_run_id"] == current_run_id
             )
         ):
-            from app.production.revision import get_active_production_revision
-
-            active_revision = get_active_production_revision(
-                episode_id, "screenplay"
-            )
-            checkpoint = dict(
-                active_revision.checkpoint_json or {}
-            ) if active_revision else {}
-            has_validated_shards = any(
-                isinstance(item, dict)
-                and item.get("status") == "validated"
-                for item in checkpoint.get("shards") or []
-            )
-            has_document = bool(
-                active_revision
-                and active_revision.baseline_done
-                and active_revision.working_artifact_id
-            )
-            if not has_document and not has_validated_shards:
-                _clear_unpublished_screenplay_ir(
-                    episode_id,
-                    run_id=current_run_id,
-                )
-            if active_revision:
-                from app.production.revision import save_checkpoint
-
-                save_checkpoint(active_revision.id, {
-                    **checkpoint,
-                    "yield_reason": "user_cancelled",
-                    "phase": (
-                        "STRUCTURE_VALIDATION" if has_document
-                        else checkpoint.get("phase") or "BLUEPRINT_GENERATION"
-                    ),
-                })
+            # 轻量流程一次性生成到原子发布，中途取消没有可续跑的工作副本
+            # （不同于旧修复回路的分片 checkpoint），直接投影为 failed。
             conn.execute(
-                "UPDATE episodes SET screenplay_status=?, screenplay_error=?, screenplay_updated_at=? WHERE id=?",
-                (
-                    "repairing" if has_document else "failed",
-                    (
-                        "完整剧本校验已取消，工作副本已保留，可继续校验。"
-                        if has_document else
-                        "首版生成已取消，已验证场次分片已保留，可继续首版生成。"
-                        if has_validated_shards else
-                        "剧本生成已取消，可重新发起。"
-                    ),
-                    now(),
-                    episode_id,
-                ))
+                "UPDATE episodes SET screenplay_status='failed', screenplay_error=?, "
+                "active_screenplay_run_id=NULL, screenplay_updated_at=? WHERE id=?",
+                ("剧本生成已取消，可重新发起。", now(), episode_id),
+            )
             conn.commit()
         raise
     except Exception as exc:  # noqa: BLE001
@@ -1325,32 +1305,6 @@ async def _screenplay_task(
             # 已被恢复任务替代的旧协程可能在 socket 返回后才观察到围栏；
             # 它不得覆盖新运行的剧集状态。
             raise
-        from app.production.screenplay_repair import ScreenplayNarrativeGateError
-
-        if isinstance(exc, ScreenplayNarrativeGateError):
-            # The repair engine has already projected WAITING_HUMAN and saved
-            # the working artifact/checkpoint.  Keep that durable recovery
-            # point; the Run may fail, but the episode remains resumable.
-            raise
-        msg = str(exc)
-        if msg.startswith("WAITING_INPUT"):
-            conn.execute(
-                "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, screenplay_updated_at=? WHERE id=?",
-                (msg[:800], now(), episode_id))
-            conn.commit()
-            return None
-        if type(exc).__name__ == "ScreenplayIdentityGateError":
-            _clear_unpublished_screenplay_ir(
-                episode_id,
-                run_id=current_run_id,
-            )
-            conn.execute(
-                "UPDATE episodes SET screenplay_status='failed', screenplay_error=?, "
-                "screenplay_updated_at=? WHERE id=?",
-                (msg[:800], now(), episode_id),
-            )
-            conn.commit()
-            return None
         public = errors.record_and_format(exc, action="screenplay_generate", context={"episode_id": episode_id})
         _project_screenplay_runtime_failure(
             episode_id,
@@ -1997,8 +1951,8 @@ def _screenplay_context_pack(episode_id: str) -> tuple[list[str], dict]:
 async def _recorded_screenplay_task(
     episode_id: str,
     recorder: WorkflowRecorder,
-) -> EpisodeScreenplay | None:
-    async def operation(preflight: dict) -> EpisodeScreenplay:
+) -> dict | None:
+    async def operation(preflight: dict) -> dict:
         generated = await _screenplay_task(episode_id, preflight_result=preflight)
         if generated is None:
             row = get_conn().execute(
@@ -2017,61 +1971,18 @@ async def _recorded_screenplay_task(
             discovery_conn,
             discovery_episode,
         )
-        production_state = _screenplay_production_state(episode_id)
-        if (
-            production_state["operation"] == "finalize"
-            or production_state.get("has_resumable_baseline")
-        ):
-            # 完整 Document 续跑复用已冻结决议；未知身份由 typed structural
-            # QA gate 暴露，禁止回到全章人物发现。
-            from app.portraits import (
-                load_screenplay_character_resolutions,
-                screenplay_identity_resolution_is_current_for_source,
-            )
-
-            conn = get_conn()
-            persisted_resolutions = [
-                item
-                for item in load_screenplay_character_resolutions(
-                    conn, episode_id,
-                )
-                if screenplay_identity_resolution_is_current_for_source(
-                    item,
-                    episode_no=int(discovery_episode["episode_no"]),
-                    source_text=discovery_source,
-                )
-            ]
-            preflight = {
-                "added": [],
-                "resolutions": persisted_resolutions,
-                "skipped": (
-                    "baseline_identity_already_resolved"
-                    if production_state["operation"] == "finalize"
-                    else "prebaseline_identity_checkpoint_reused"
-                ),
-            }
-            evidence_repository.append_event(
-                recorder.run_id,
-                "CHARACTER_DISCOVERY_SKIPPED",
-                "info",
-                (
-                    "已有完整 Document，继续时复用持久化人物决议"
-                    if production_state["operation"] == "finalize"
-                    else "已有首版安全检查点，继续时复用持久化人物决议"
-                ),
-                payload={"episode_id": episode_id},
-            )
-        else:
-            _, preflight = await recorder.step(
-                "character_discovery",
-                lambda: _screenplay_character_discovery(episode_id, discovery_source),
-                agent_name="screenplay_character_discovery",
-                context_manifest={
-                    "episode_id": episode_id,
-                    "source_chars": len(discovery_source),
-                    "phase": "before_screenplay",
-                },
-            )
+        # 轻量 episode_prep_pack 流程（screenplay 契约 6.0.0）不做全章人物预检：
+        # 出场角色/场景在 app/production/prep_pack.py 内对 character_portraits /
+        # scene_references 做确定性解析，不需要旧重型改编管线的姓名决议预检。
+        # preflight 保留为空 dict 只为兼容 operation() 的签名。
+        preflight: dict = {}
+        evidence_repository.append_event(
+            recorder.run_id,
+            "CHARACTER_DISCOVERY_SKIPPED",
+            "info",
+            "轻量分集准备流程使用确定性资产映射，跳过全章人物预检模型调用",
+            payload={"episode_id": episode_id},
+        )
         _assert_screenplay_run_owner(episode_id, run_id=recorder.run_id)
         # Discovery may advance bible_version. Refresh the persisted fingerprint and
         # context pack before the screenplay step so evidence describes the inputs

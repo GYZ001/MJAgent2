@@ -769,7 +769,7 @@ function statusFallback(ep: Episode): StoryboardStatus {
 
 export default function BoardPage() {
   const { episodeId, go, projectId, toast, registerNavigationGuard } = useNav()
-  const { data: ep, refresh, error, loading } = useEpisode(episodeId!, 'board')
+  const { data: ep, refresh, error, status: queryErrorStatus, loading } = useEpisode(episodeId!, 'board')
   const [busy, setBusy] = useState(false)
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null)
   const [shotEditDirty, setShotEditDirty] = useState(false)
@@ -902,6 +902,7 @@ export default function BoardPage() {
       <QueryState
         loading={loading}
         error={error}
+        status={queryErrorStatus}
         hasData={false}
         objectName="分镜台"
         loadingText="正在加载分镜、镜头列表与确认状态…"
@@ -987,9 +988,14 @@ export default function BoardPage() {
       case 'resume_storyboard': await loadStartPreview(); break
       case 'view_progress': go('observability', projectId, null); break
       case 'confirm_storyboard': {
+        // 决策③：分镜确认不再是需要人工点头的内容质量门——必检项一旦全部通过就自动放行，
+        // 不再停下来等一次"批准并确认分镜"的点击。必检项没通过是真实阻断（不是审美/内容取舍），
+        // 这类问题继续展示详情，因为用户需要知道具体要修什么，而不是被要求"确认"一个坏结果。
         setBusy(true)
-        try { setConfirmPreview(await api.post(`/episodes/${ep.id}/confirm-preview`) as ConfirmPreview) }
-        catch (caught) {
+        try {
+          const preview = await api.post(`/episodes/${ep.id}/confirm-preview`) as ConfirmPreview
+          await autoConfirmStoryboard(preview)
+        } catch (caught) {
           const apiError = caught as ApiError
           const detail = apiError.detail as Partial<ConfirmPreview> | undefined
           if (detail?.hard_gates && detail.estimated_video_cost_cny && detail.unlocks) {
@@ -1006,14 +1012,14 @@ export default function BoardPage() {
     }
   }
 
-  const confirmStoryboard = async () => {
-    if (!confirmPreview?.preview_token) return
-    if (!confirmPreview.hard_gates.passed) return
-    const token = confirmPreview.preview_token
-    setConfirmPreview(null)
+  const autoConfirmStoryboard = async (preview: ConfirmPreview) => {
+    if (!preview.hard_gates.passed || !preview.preview_token) {
+      setConfirmPreview(preview)
+      return
+    }
     await run(
       () => api.post(`/episodes/${ep.id}/confirm`, {
-        preview_token: token,
+        preview_token: preview.preview_token,
       }),
       '分镜已确认，可以进入生成台',
     )
@@ -1329,17 +1335,18 @@ export default function BoardPage() {
         </div>}
       </Modal>
 
-      <Modal open={!!confirmPreview} title={confirmPreview?.hard_gates.passed ? '确认分镜前完整预览' : '暂不能确认分镜'} onClose={() => setConfirmPreview(null)}
-        actions={<><button className="btn" onClick={() => setConfirmPreview(null)}>返回审阅</button>{confirmPreview?.hard_gates.passed && confirmPreview.preview_token && <button className="btn primary" onClick={() => void confirmStoryboard()}>批准并确认分镜</button>}</>}>
+      {/* 决策③：确认分镜不再是需要人工点头的内容质量门——必检项全部通过时已在 autoConfirmStoryboard
+          里自动放行，走不到这个弹窗。这里只在必检项未通过（真实阻断，不是审美取舍）时出现，
+          纯粹展示要修什么，不提供"确认"按钮。 */}
+      <Modal open={!!confirmPreview} title="暂不能确认分镜" onClose={() => setConfirmPreview(null)}
+        actions={<button className="btn" onClick={() => setConfirmPreview(null)}>返回审阅</button>}>
         {confirmPreview && <div className="storyboard-preview-card">
           <dl><div><dt>当前分镜</dt><dd>{confirmPreview.storyboard_artifact_id ? '已生成，等待确认' : '待定稿'}</dd></div><div><dt>镜头完整性</dt><dd>{confirmPreview.shot_count}/{confirmPreview.planned_shots}</dd></div>
             <div><dt>总时长</dt><dd>{confirmPreview.total_duration_s}s</dd></div><div><dt>收尾镜</dt><dd>{confirmPreview.final_shot_valid ? '有效' : '缺失'}</dd></div>
-            <div><dt>必检项</dt><dd>{confirmPreview.hard_gates.passed ? '全部通过' : '未通过'}</dd></div><div><dt>预计视频成本</dt><dd>¥{confirmPreview.estimated_video_cost_cny.min}–¥{confirmPreview.estimated_video_cost_cny.max}</dd></div></dl>
+            <div><dt>必检项</dt><dd>未通过</dd></div><div><dt>预计视频成本</dt><dd>¥{confirmPreview.estimated_video_cost_cny.min}–¥{confirmPreview.estimated_video_cost_cny.max}</dd></div></dl>
           {!!confirmPreview.warnings.length && <div className="warning-banner">{confirmPreview.warnings.map(storyboardGateIssueLabel).join('；')}</div>}
           {!!confirmPreview.hard_gates.errors.length && <div className="error-banner" role="alert"><b>请先处理以下问题：</b><ul>{confirmPreview.hard_gates.errors.map((item, index) => <li key={`${index}-${item}`}>{storyboardGateIssueLabel(item)}</li>)}</ul></div>}
-          {confirmPreview.hard_gates.passed
-            ? <p>确认后解锁：{confirmPreview.unlocks.join('、')}</p>
-            : <p>处理方式：{confirmPreview.recovery_action || '返回分镜台继续修复，全部必检项通过后再确认'}</p>}
+          <p>处理方式：{confirmPreview.recovery_action || '返回分镜台继续修复，全部必检项通过后会自动确认'}</p>
           <small>{confirmPreview.estimated_video_cost_cny.note}</small>
         </div>}
       </Modal>

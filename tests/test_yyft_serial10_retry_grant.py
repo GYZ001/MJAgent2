@@ -1,4 +1,4 @@
-"""scripts/yyft_serial10.py 的 GEN-RETRY-GRANT 自动恢复覆盖。
+"""scripts/yyft_serial10.py 的 GEN-RETRY-GRANT 分类覆盖。
 
 背景：EP1→EP10 严格串行回归里，EP7（ep_621d93ac1231 / run_7143e7e04ab9）在后端
 被另一会话重启时打断了一次流式蓝图分片调用（provider_calls id=8207，
@@ -9,12 +9,27 @@ error_logs.category=='generation_retry_grant' 的记录（ERR-20260823-62f248）
 带 token 二次确认 -> 签发新 Production Grant）已经由
 tests/test_screenplay_controls.py::
 test_confirmed_unknown_retry_crosses_handler_api_facade_and_mints_grant 等
-覆盖，本文件不重复验证门禁语义，只验证新增的驱动脚本分类器与重试循环：
-  1. is_retry_grant_recoverable 只在「客观证据吻合」时放行（该放行的放行）；
-  2. 面对同一时间窗内的其它失败类别、其它剧集、过期证据时仍然拦下
-     （该拦的仍然拦）；
-  3. cmd_run 的循环把该分类接到既有的两步确认重试上，且有上限，
-     不会把真实故障（一直复现）也悄悄吃掉。
+覆盖，本文件不重复验证门禁语义。
+
+【2026-08-24 更新】上面这次真实事故打断的是 `screenplay_blueprint_shard`
+（旧的重型「蓝图→场次分片→编译→修复回路」管线的 stage_key）。剧本台已改造为
+轻量 episode_prep_pack 流程后，领域层的 `requires_fresh_retry_grant` 门禁
+（app/stages.py:_BlueprintGenerationBudget，query 见 app/stages.py:7372-7374）
+只认 `screenplay_blueprint_shard`/`_patch`/`_review` 三个旧 stage_key，
+app/production/prep_pack.py 从不写这三个 key、也从不抛
+`BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED`——在当前后端下这条门禁对新管线的
+生成活动已结构性不可达（实测：对本项目 10 集调用
+`_screenplay_blueprint_budget_projection` 全部 `requires_fresh_retry_grant=
+False`、`revision=None`）。scripts/yyft_serial10.py 因此不再自动恢复这一类
+失败——继续假装"自动重新发起首版剧本就能自愈"是在保护一条走不到的分支。
+本文件相应更新：
+  1. `is_retry_grant_category`（原 `is_retry_grant_recoverable`）只在「客观
+     证据吻合」时命中（该识别的识别）；
+  2. 面对同一时间窗内的其它失败类别、其它剧集、过期证据时仍然不命中
+     （该拦的仍然拦——这部分证据判定逻辑本身未变，仍然值得测）；
+  3. `cmd_run` 命中这一类别时不再进自动重试循环，直接按非限流失败停下
+     （原来的「循环内自愈、超上限才停」两条用例被下面单条
+     `test_cmd_run_stops_immediately_without_a_retry_loop` 取代）。
 """
 from __future__ import annotations
 
@@ -133,7 +148,7 @@ def ep7_fixture_db(tmp_path, monkeypatch):
 def test_recognizes_real_ep7_gen_retry_grant_evidence(ep7_fixture_db) -> None:
     """正面：真实 call 8207 + 真实 error_logs 记录必须被判定为可自动恢复。"""
     since = CALL_8207["ts"]
-    assert yyft_serial10.is_retry_grant_recoverable(
+    assert yyft_serial10.is_retry_grant_category(
         EP7, since, db_path=ep7_fixture_db,
     ) is True
 
@@ -144,7 +159,7 @@ def test_call_8208_noise_does_not_leak_into_a_different_episode(
     """反面：8208 是无关会话的调用（无 episode_id/stage_key），不构成任何剧集
     的 GEN-RETRY-GRANT 证据 —— 对 EP7 之外的任意剧集查询都必须是 False。"""
     since = CALL_8207["ts"]
-    assert yyft_serial10.is_retry_grant_recoverable(
+    assert yyft_serial10.is_retry_grant_category(
         "ep_some_other_episode", since, db_path=ep7_fixture_db,
     ) is False
 
@@ -155,7 +170,7 @@ def test_stale_evidence_before_the_attempt_window_is_not_reused(
     """反面：把 since 设到那条错误记录之后，代表「这是更早一次已处理过的失败」，
     不能被新一轮 start_or_resume 误当成刚发生的可恢复证据。"""
     since = ERROR_LOG_62F248["ts"] + 1.0
-    assert yyft_serial10.is_retry_grant_recoverable(
+    assert yyft_serial10.is_retry_grant_category(
         EP7, since, db_path=ep7_fixture_db,
     ) is False
 
@@ -189,13 +204,13 @@ def test_other_failure_category_for_the_same_episode_still_blocks(
     # 只留预算错误，才是真正的"该拦"场景。
     conn.execute("DELETE FROM error_logs WHERE id=?", (ERROR_LOG_62F248["id"],))
     conn.commit()
-    assert yyft_serial10.is_retry_grant_recoverable(
+    assert yyft_serial10.is_retry_grant_category(
         EP7, monkeypatch_since, db_path=db.DB_PATH,
     ) is False
 
 
 # ---------------------------------------------------------------------------
-# 2) cmd_run 循环：接入既有两步确认重试、且有上限
+# 2) cmd_run：命中该分类不再自动重试，直接按非限流失败停下
 # ---------------------------------------------------------------------------
 
 def _prep_single_episode_run(monkeypatch, tmp_path) -> None:
@@ -211,45 +226,13 @@ def _prep_single_episode_run(monkeypatch, tmp_path) -> None:
     )
 
 
-def test_cmd_run_self_heals_within_the_recovery_cap(monkeypatch, tmp_path) -> None:
-    """正面：GEN-RETRY-GRANT 复现次数在上限之内时，串行回归不停整轮，
-    而是像既有限流分支一样自动继续（这里是重新发起首版剧本，走既有两步确认）。"""
-    _prep_single_episode_run(monkeypatch, tmp_path)
-    starts = {"n": 0}
-
-    def fake_start_or_resume(_name, _eid):
-        starts["n"] += 1
-        return True
-
-    monkeypatch.setattr(yyft_serial10, "start_or_resume", fake_start_or_resume)
-    monkeypatch.setattr(
-        yyft_serial10, "is_retry_grant_recoverable", lambda eid, since: True,
-    )
-    terminal_calls = {"n": 0}
-
-    def fake_await_terminal(_name, _eid, **_kwargs):
-        terminal_calls["n"] += 1
-        if terminal_calls["n"] <= yyft_serial10.RETRY_GRANT_MAX_AUTO_RECOVERIES:
-            return {
-                "screenplay_status": "failed",
-                "screenplay_error": "GEN-RETRY-GRANT",
-            }
-        return {"screenplay_status": "ready"}
-
-    monkeypatch.setattr(yyft_serial10, "await_terminal", fake_await_terminal)
-
-    rc = yyft_serial10.cmd_run(SimpleNamespace(start_from=""))
-
-    assert rc == 0
-    assert starts["n"] == yyft_serial10.RETRY_GRANT_MAX_AUTO_RECOVERIES + 1
-    assert terminal_calls["n"] == yyft_serial10.RETRY_GRANT_MAX_AUTO_RECOVERIES + 1
-
-
-def test_cmd_run_stops_for_rca_once_the_cap_is_exhausted(
+def test_cmd_run_stops_immediately_without_a_retry_loop(
     monkeypatch, tmp_path,
 ) -> None:
-    """反面：如果 GEN-RETRY-GRANT 一直复现（真实故障，不是一次性重启），
-    自动恢复必须有底线，超过上限仍然按非限流失败停下整轮、留证据给人。"""
+    """GEN-RETRY-GRANT 命中时不再自动重试（2026-08-24 起该分支在
+    episode_prep_pack-only 后端下结构性不可达，见模块 docstring）：cmd_run
+    只标注一条诊断日志，然后照常按非限流失败停下整轮——只调用一次
+    start_or_resume，不循环、不设自动恢复上限。"""
     _prep_single_episode_run(monkeypatch, tmp_path)
     starts = {"n": 0}
 
@@ -259,7 +242,7 @@ def test_cmd_run_stops_for_rca_once_the_cap_is_exhausted(
 
     monkeypatch.setattr(yyft_serial10, "start_or_resume", fake_start_or_resume)
     monkeypatch.setattr(
-        yyft_serial10, "is_retry_grant_recoverable", lambda eid, since: True,
+        yyft_serial10, "is_retry_grant_category", lambda eid, since: True,
     )
     monkeypatch.setattr(
         yyft_serial10, "await_terminal",
@@ -272,8 +255,7 @@ def test_cmd_run_stops_for_rca_once_the_cap_is_exhausted(
     rc = yyft_serial10.cmd_run(SimpleNamespace(start_from=""))
 
     assert rc == 4
-    # 上限次自动恢复 + 最初一次尝试 = 总共 cap+1 次 start_or_resume。
-    assert starts["n"] == yyft_serial10.RETRY_GRANT_MAX_AUTO_RECOVERIES + 1
+    assert starts["n"] == 1
 
 
 def test_cmd_run_does_not_auto_recover_a_non_retry_grant_failure(
@@ -290,7 +272,7 @@ def test_cmd_run_does_not_auto_recover_a_non_retry_grant_failure(
 
     monkeypatch.setattr(yyft_serial10, "start_or_resume", fake_start_or_resume)
     monkeypatch.setattr(
-        yyft_serial10, "is_retry_grant_recoverable", lambda eid, since: False,
+        yyft_serial10, "is_retry_grant_category", lambda eid, since: False,
     )
     monkeypatch.setattr(
         yyft_serial10, "await_terminal",

@@ -1268,10 +1268,14 @@ export interface EpisodeScreenplay {
 }
 
 /**
- * 剧本台转型后的轻量分集准备包（episode_prep_pack v1.0.0）。取代 EpisodeScreenplay
- * 成为剧本台的发布产物；旧产物（无 prep_pack_version 字段）仍可能出现在
- * `Episode.screenplay` 中，调用方必须先按 prep_pack_version 判别，见 ScriptPage.tsx
- * 的 isPrepPack。冻结形状见 docs/TRANSFORM_FREEZE_PLAN.md §3，字段名不再变。
+ * 剧本台转型后的轻量分集准备包（episode_prep_pack）。取代 EpisodeScreenplay 成为
+ * 剧本台的发布产物，投影在 `Episode.prep_pack` 字段（不是 `Episode.screenplay`——
+ * 后端把两种产物形状分到不同字段，见 Episode.prep_pack 上的注释）。旧产物（无
+ * prep_pack_version 字段）仍可能出现在 `Episode.screenplay` 中，调用方必须先按
+ * prep_pack_version 判别，见 ScriptPage.tsx 的 isPrepPack。基础形状冻结见
+ * docs/TRANSFORM_FREEZE_PLAN.md §3；字段随版本持续演进，均按可选处理，不假设
+ * 某个具体版本号是终点：1.1.0 起 event_chain[].source_span，1.2.0 起
+ * asset_manifest.characters[].aliases，1.3.0 起 asset_manifest.functional_extras。
  */
 export interface PrepPackSourceEvidence {
   segment_index: number;
@@ -1284,12 +1288,20 @@ export interface PrepPackKeyLine {
   segment_index: number;
 }
 
+/** 1.1.0 新增：事件覆盖的原文段区间，闭区间、以 segment_index 计。 */
+export interface PrepPackSourceSpan {
+  from_segment: number;
+  to_segment: number;
+}
+
 export interface PrepPackEvent {
   event_id: string;
   order: number;
   summary: string;
   source_evidence: PrepPackSourceEvidence[];
   key_lines: PrepPackKeyLine[];
+  /** 1.1.0+ 字段；1.0.0 产物没有它，读取时必须容忍缺失。 */
+  source_span?: PrepPackSourceSpan;
 }
 
 export interface PrepPackCharacterAsset {
@@ -1297,6 +1309,8 @@ export interface PrepPackCharacterAsset {
   display_name: string;
   portrait_id: string;
   event_ids: string[];
+  /** 1.2.0+ 字段；本集内对该角色的称谓（如「小胖子」）。之前的产物没有它。 */
+  aliases?: string[];
 }
 
 export interface PrepPackSceneAsset {
@@ -1306,9 +1320,20 @@ export interface PrepPackSceneAsset {
   event_ids: string[];
 }
 
+/**
+ * 1.3.0+ 字段：群演 / 一次性人物——没有定妆照是设计使然（不进人物谱身份体系），
+ * 不是数据缺失，前端展示时用统一占位图标，不当成"图片没找到"处理。
+ */
+export interface PrepPackFunctionalExtra {
+  label: string;
+  event_ids: string[];
+}
+
 export interface PrepPackAssetManifest {
   characters: PrepPackCharacterAsset[];
   scenes: PrepPackSceneAsset[];
+  /** 1.3.0+ 字段；1.2.0 及更早的产物没有它，读取时按可选处理。 */
+  functional_extras?: PrepPackFunctionalExtra[];
 }
 
 export interface PrepPackEpisodeScope {
@@ -1992,10 +2017,31 @@ export interface Episode {
     phase_label?: string;
     stage_index?: number;
     stage_count?: number;
+    /**
+     * 旧十步重型流水线遗留的阶段列表（{key, label, status}）。后端已定稿改发
+     * prep_pack_stages（见下），两个字段目前并存；stages 只作旧产物/过渡期回退。
+     */
     stages?: Array<{
       key: string;
-      label: string;
-      status: "pending" | "in_progress" | "paused" | "blocked" | "failed" | "completed";
+      display_name?: string;
+      label?: string;
+      state?: string;
+      status?: string;
+    }>;
+    /**
+     * 转型后的真实轻量流程阶段列表（已定稿，2026-08-24 后端上线）：
+     * [{key, display_name, state}]，state: pending/active/done/blocked。
+     * ScriptPage.tsx 的选源逻辑：prep_pack_stages 存在且非空 → 用它；否则回退到
+     * 上面的旧 `stages`。两个字段的具体项都仍过 normalizeStage 的三级回退
+     * （display_name ?? label ?? key，state ?? status ?? 'pending'）防御，不假设
+     * 后端此后再也不会漏字段。
+     */
+    prep_pack_stages?: Array<{
+      key: string;
+      display_name?: string;
+      label?: string;
+      state?: string;
+      status?: string;
     }>;
     baseline_done: boolean;
     first_evaluation_done: boolean;

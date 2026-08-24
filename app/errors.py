@@ -138,7 +138,12 @@ def classify(exc: BaseException | None, http_status: int | None = None) -> tuple
     name = type(exc).__name__ if exc is not None else ""
     if name == "ArtifactNeedsRebuildError":
         return "conflict", "ARTIFACT-REBUILD"
-    if name in {"ContentGenerationError", "ScreenplayNarrativeGateError"}:
+    if name in {
+        "ContentGenerationError", "ScreenplayNarrativeGateError", "PrepPackGateError",
+    }:
+        # PrepPackGateError: episode_prep_pack (screenplay 契约 6.0.0) 硬门禁
+        # 未通过（覆盖账本/资产解析/hook 接地），供应商调用本身是成功的，属于
+        # 业务质量校验失败，不应展示为系统内部错误（docs/TRANSFORM_FREEZE_PLAN.md）。
         return "quality_gate", "QA"
     if name == "ProviderError":
         return "provider", "LLM"

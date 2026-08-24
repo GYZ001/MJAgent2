@@ -359,8 +359,24 @@ def purge_legacy_screenplays() -> int:
     purged = 0
     for ep in episodes:
         try:
-            script = EpisodeScreenplay.model_validate(json.loads(ep["screenplay_json"]))
+            parsed = json.loads(ep["screenplay_json"])
         except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if isinstance(parsed, dict) and "prep_pack_version" in parsed:
+            # episode_prep_pack (screenplay contract 6.0.0+, see
+            # app.production.prep_pack) is not the legacy EpisodeScreenplay
+            # shape this startup sweep targets. EpisodeScreenplay.model_validate
+            # does not raise on it (unknown keys are ignored and
+            # full_script_text defaults to empty), so without this guard the
+            # sweep would silently wipe a freshly-published, fully valid
+            # prep_pack artifact on every process restart -- caught via a real
+            # EP1 run going from screenplay_status='ready' back to 'pending'
+            # with this function's own LEGACY_SCREENPLAY_PURGED_ERROR message
+            # after an unrelated backend restart.
+            continue
+        try:
+            script = EpisodeScreenplay.model_validate(parsed)
+        except (TypeError, ValueError):
             continue
         if (script.full_script_text or "").strip():
             continue

@@ -64,7 +64,20 @@ _STEP_PRESENTATIONS: dict[str, WorkflowStepPresentation] = {
         "合并并校验完整剧本", "合并全部场次并检查原文、人物和剧情一致性",
     ),
     "screenplay_document": WorkflowStepPresentation(
-        "生成并验收完整剧本", "统筹剧本生成、质量修复和最终发布验收",
+        "生成并验收分集准备包",
+        "抽取本集事件链、确定性核对覆盖与角色/场景资产、签发完成凭证并原子发布",
+    ),
+    "episode_prep_pack_event_chain_chunk": WorkflowStepPresentation(
+        "事件链抽取", "模型按原文分块抽取事件链，声明每个事件的原文跨度与逐字引文证据",
+    ),
+    "episode_prep_pack_asset_mapping": WorkflowStepPresentation(
+        "资产映射", "确定性核对事件链中出场角色/场景，解析到已有定妆照/场景参考图",
+    ),
+    "episode_prep_pack_hook_cliffhanger": WorkflowStepPresentation(
+        "抽取开场钩子与结尾悬念", "从事件链推导本集 hook/cliffhanger 并核验接地到真实事件",
+    ),
+    "episode_prep_pack_publish": WorkflowStepPresentation(
+        "覆盖对账与原子发布", "确定性核对四账覆盖、签发完成凭证并原子发布分集准备包",
     ),
     "storyboard": WorkflowStepPresentation(
         "生成可执行分镜", "把剧本拆解为可以生成画面和视频的镜头",

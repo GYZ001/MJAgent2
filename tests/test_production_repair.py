@@ -2027,6 +2027,11 @@ async def test_identity_replay_with_unchanged_payload_reaches_qa(monkeypatch):
     assert derived["version"] == artifact["version"] + 1
 
 
+@pytest.mark.skip(
+    reason="休眠待 P1 清理：断言重型剧本流水线的 checkpoint 续跑复用人物决议路径；"
+    "screenplay 契约 6.0.0 起该分支已从 _recorded_screenplay_task 调用路径摘除"
+    "（见 app/domain/screenplay_ops.py，改为轻量 app/production/prep_pack.py）。"
+)
 @pytest.mark.asyncio
 async def test_recorded_repair_resume_skips_character_discovery_model_call(monkeypatch):
     from app.domain import screenplay_ops
@@ -3544,6 +3549,11 @@ def test_screenplay_narrative_gate_is_quality_error():
     )
 
 
+@pytest.mark.skip(
+    reason="休眠待 P1 清理：断言 ScreenplayNarrativeGateError（重型叙事修复回路的"
+    "WAITING_HUMAN 门禁）在 _screenplay_task 里的处理；screenplay 契约 6.0.0 起"
+    "该异常类型不再从新流程抛出（见 app/production/prep_pack.py）。"
+)
 @pytest.mark.asyncio
 async def test_recorded_narrative_gate_preserves_repair_state_and_fails_run(
     monkeypatch,
@@ -3649,6 +3659,12 @@ async def test_recorded_narrative_gate_preserves_repair_state_and_fails_run(
     assert error_log["category"] == "quality_gate"
 
 
+@pytest.mark.skip(
+    reason="休眠待 P1 清理：断言 _recorded_screenplay_task 的全章人物发现 skip/复用"
+    "身份 checkpoint 逻辑（monkeypatch _screenplay_character_discovery）；"
+    "screenplay 契约 6.0.0 起该函数已从调用路径摘除（见 app/domain/screenplay_ops.py "
+    "的 _recorded_screenplay_task，改为轻量 app/production/prep_pack.py 的确定性资产解析）。"
+)
 @pytest.mark.asyncio
 async def test_active_recovery_run_reuses_prebaseline_identity_checkpoint(
     monkeypatch,

@@ -2189,6 +2189,172 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
     }
 
 
+async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: list[str]) -> dict:
+    """反应式场景发现，供没有编译剧本对象的调用方使用（如 episode_prep_pack 的资产
+    映射，app/production/prep_pack.py）：对给定的原始场景提及标签逐个做 新场景/
+    已有场景别名 判定，新场景则建库并出场景参考图。
+
+    是 ``ensure_scenes_for_storyboard`` 的①部分（发现→建库→出图）在“只有一串标签、
+    没有 screenplay 场景结构”时的等价复用：调用同一批 assess_new_scene /
+    _append_scene_to_bible / _append_scene_alias / _ensure_reactive_scene_image，
+    不重复其判定逻辑。不含该函数的②已入库场景状态演进探测（损毁/重建等）——那仍是
+    分镜前维护职责，本函数的调用方（剧本台）不需要，也拿不到②所需的 screenplay/
+    summary_by_heading 输入。
+    """
+    conn = get_conn()
+    project = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+    if not project or not (project["bible_json"] or "").strip():
+        return {
+            "added": [],
+            "errors": [f"{label}：人物谱尚未初始化，无法建场景库" for label in labels],
+            "ready_scenes": [],
+            "resolved_names": {},
+        }
+    bible = Bible.model_validate(json.loads(project["bible_json"]))
+    scenes = list(bible.scenes)
+    style = bible.world.visual_style_canonical
+
+    unmatched = [
+        label for label in labels
+        if not match_scene_name(label, scenes, allow_fuzzy=False)
+    ]
+    added: list[dict] = []
+    errors: list[str] = []
+    for label in unmatched:
+        _scene_time, location = split_legacy_scene_setting(label)
+        spatial_context = location or label
+        try:
+            verdict = await assess_new_scene(
+                label, spatial_context, style=style,
+                known_names=[s.name for s in scenes],
+                ep_label=f"第 {episode_no} 集")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{label}：场景识别失败" + code_ref(
+                exc, action="assess_new_scene",
+                context={"project_id": project_id, "scene": label, "episode_no": episode_no},
+            ))
+            continue
+        if not verdict["important"]:
+            existing_name = verdict.get("existing_scene_name") or ""
+            if existing_name not in {scene.name for scene in scenes}:
+                errors.append(f"{label}：AI 未能解析为新场景或已有场景别名")
+                continue
+            bible_lock = await _reactive_bible_lock(project_id)
+            async with bible_lock:
+                _append_scene_alias(conn, project_id, existing_name, label)
+            project_row = conn.execute(
+                "SELECT bible_json FROM projects WHERE id=?", (project_id,),
+            ).fetchone()
+            scenes = Bible.model_validate(json.loads(project_row["bible_json"])).scenes
+            continue
+        name = verdict["name"]
+        if _exact_known_scene_name(name, scenes):
+            continue
+        scene_payload = {
+            "name": name,
+            "scene_canonical": verdict["scene_canonical"],
+            "location_kind": verdict["location_kind"],
+            "first_episode": episode_no,
+            "discovery_sources": [spatial_context[:500]],
+            "aliases": [label] if label != name else [],
+        }
+        queued = _queue_scene_auto_change(
+            conn, project_id, kind="scene_discovery", scene_name=name, episode_no=episode_no,
+            reason=verdict["reason"], payload={
+                "scene": scene_payload,
+                "source_episode": episode_no, "source_episode_label": f"第 {episode_no} 集",
+                "evidence_fragments": [spatial_context[:500]],
+                "duplicate_candidates": [s.name for s in scenes if name in s.name or s.name in name],
+            },
+        )
+        try:
+            bible_lock = await _reactive_bible_lock(project_id)
+            async with bible_lock:
+                appended = _append_scene_to_bible(conn, project_id, scene_payload)
+            project_row = conn.execute(
+                "SELECT bible_json FROM projects WHERE id=?", (project_id,),
+            ).fetchone()
+            scenes = Bible.model_validate(json.loads(project_row["bible_json"])).scenes
+            if not appended and not match_scene_name(label, scenes, allow_fuzzy=False):
+                raise ValueError("scene bible commit failed")
+            added.append({
+                "name": name, "reason": verdict["reason"], "change_id": queued["id"],
+                "has_image": False,
+            })
+        except Exception as exc:  # noqa: BLE001
+            message = f"{name}：自动加入场景库失败" + code_ref(
+                exc, action="auto_apply_scene_discovery",
+                context={"project_id": project_id, "scene": name, "episode_no": episode_no},
+            )
+            _mark_scene_auto_change(
+                conn, project_id, queued["id"], status="auto_apply_failed", reason=message,
+            )
+            errors.append(message)
+
+    # 所有传入标签都必须等到自己的主图落盘；不存在“借最接近旧场景继续用”。
+    project_row = conn.execute(
+        "SELECT bible_json,bible_version FROM projects WHERE id=?", (project_id,),
+    ).fetchone()
+    current_bible = Bible.model_validate(json.loads(project_row["bible_json"]))
+    scenes = list(current_bible.scenes)
+    resolved_names: dict[str, str] = {}
+    relevant_names: list[str] = []
+    for label in labels:
+        matched = match_scene_name(label, scenes, allow_fuzzy=False)
+        if not matched:
+            continue  # 未解析成功已在上面记过 errors
+        resolved_names[label] = matched
+        if matched not in relevant_names:
+            relevant_names.append(matched)
+    by_name = {scene.name: scene for scene in scenes}
+    ready_scenes: list[str] = []
+    for name in relevant_names:
+        scene = by_name[name]
+        try:
+            ready = await _ensure_reactive_scene_image(
+                project_id,
+                scene,
+                episode_no=episode_no,
+                style=current_bible.world.visual_style_canonical,
+                bible_version=int(project_row["bible_version"] or 0),
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{name}：自动场景图生成尚未就绪" + code_ref(
+                exc, action="auto_generate_prep_pack_scene",
+                context={"project_id": project_id, "scene": name, "episode_no": episode_no},
+            ))
+            continue
+        ready_scenes.append(name)
+        for item in added:
+            if item.get("name") == name:
+                item["has_image"] = True
+                item.update(ready)
+        change_rows = conn.execute(
+            "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
+        ).fetchone()
+        try:
+            all_changes = json.loads(change_rows["bible_auto_changes_json"] or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            all_changes = []
+        for change in all_changes:
+            if change.get("kind") == "scene_discovery" and change.get("scene") == name:
+                _mark_scene_auto_change(
+                    conn,
+                    project_id,
+                    str(change.get("id") or ""),
+                    status="auto_applied",
+                    reason="AI 已自动采纳场景并等待场景图落盘后放行",
+                    image_path=ready["image_path"],
+                )
+
+    return {
+        "added": added,
+        "errors": errors,
+        "ready_scenes": ready_scenes,
+        "resolved_names": resolved_names,
+    }
+
+
 def _open_scene_ref(conn, project_id: str, name: str):
     return conn.execute(
         "SELECT * FROM scene_references WHERE project_id=? AND scene_name=? AND ep_end IS NULL "

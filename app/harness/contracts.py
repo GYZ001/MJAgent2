@@ -11,7 +11,7 @@ _CONTRACTS: dict[str, StageContract] = {
         output_type="character_bible",
         invariants=["character names are source traceable", "visual anchors are non-empty"],
         max_iterations=4,
-        requires_human_gate=True,
+        requires_human_gate=False,
     ),
     "scene_bible": StageContract(
         key="scene_bible",
@@ -20,6 +20,7 @@ _CONTRACTS: dict[str, StageContract] = {
         output_type="scene_bible",
         invariants=["scene names are unique", "visual anchors contain no characters"],
         max_iterations=4,
+        requires_human_gate=False,
     ),
     "episode_mapping": StageContract(
         key="episode_mapping",
@@ -31,27 +32,26 @@ _CONTRACTS: dict[str, StageContract] = {
             "episode numbers are contiguous",
             "no model call is allowed",
         ],
+        requires_human_gate=False,
     ),
     "screenplay": StageContract(
         key="screenplay",
-        version="5.1.0",
-        input_types=["novel_source", "character_bible", "episode_mapping"],
-        output_type="episode_screenplay",
+        version="6.0.0",
+        input_types=["novel_source", "episode_mapping", "character_portraits", "scene_references"],
+        output_type="episode_prep_pack",
         invariants=[
-            "blockers prevent ready status",
-            "source claims have evidence",
-            "every key line is delivered by an explicit screenplay dialogue line",
-            "key dialogue is preserved as an ordered context chain rather than isolated quotes",
-            "the first adapted dialogue turn cites a semantically matching source utterance before key lines are derived",
-            "every indexed source segment is delivered, merged, retained as context, or linked to a proven duplicate",
-            "scene count and story beat count are determined by complete content rather than a duration ceiling",
-            "every scene declares entry state, exit state, and context requirements",
-            "only one bounded structural repair may follow the initial screenplay generation",
-            "a non-empty ending hook resolves to a window of adjacent story events with independent lexical contributors, not to a single event or to whole-script overlap",
-            "adaptation hook errors evaluate the actual episode instead of running as a silent no-op",
+            "every indexed source segment is covered by the event chain as delivered, merged, "
+            "retained as context, or linked to a proven duplicate; any uncovered segment blocks publish",
+            "every event carries source evidence as an explicit segment_index paired with a quote "
+            "that deterministically aligns to that segment's text",
+            "every character or scene appearing in the event chain resolves to an existing "
+            "portrait_id or scene_reference_id, or to a deterministic generic-extra class",
+            "the episode hook is non-empty and grounds to one or more events in the event chain",
+            "episode scope is taken from the deterministic episode_mapping chapter assignment; "
+            "no model call determines episode scope",
         ],
         max_iterations=2,
-        requires_human_gate=True,
+        requires_human_gate=False,
     ),
     "storyboard": StageContract(
         key="storyboard",
@@ -76,6 +76,7 @@ _CONTRACTS: dict[str, StageContract] = {
             "intentional repetition declares the additional reaction, verification, viewpoint, or payoff",
         ],
         max_iterations=4,
+        requires_human_gate=False,
     ),
     "video": StageContract(
         key="video",
@@ -87,6 +88,7 @@ _CONTRACTS: dict[str, StageContract] = {
             "duration approximately matches the storyboard-selected value between 5 and 10 seconds",
         ],
         max_iterations=2,
+        requires_human_gate=False,
     ),
 }
 

@@ -6317,6 +6317,12 @@ def test_future_identity_keeps_current_display_label() -> None:
     assert "丁力" not in script.scene_outline[0].summary
 
 
+@pytest.mark.skip(
+    reason="休眠待 P1 清理：断言重型剧本流水线内的全章人物发现自动建人物谱行为；"
+    "screenplay 契约 6.0.0 起 _screenplay_task 改为轻量 episode_prep_pack 流程"
+    "（app/production/prep_pack.py），角色/场景改为对 character_portraits/"
+    "scene_references 的确定性解析，不再跑全章人物发现模型调用。"
+)
 def test_late_episode_screenplay_auto_adds_character_and_defers_portrait_generation(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "late-episode-character.db")
     monkeypatch.setattr(db._local, "conn", None, raising=False)

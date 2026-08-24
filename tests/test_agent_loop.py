@@ -691,6 +691,11 @@ def test_context_pack_records_hash_and_truncation_without_hiding_it() -> None:
     assert len(manifest["items"][0]["content_hash"]) == 64
 
 
+@pytest.mark.skip(
+    reason="休眠待 P1 清理：断言重型剧本流水线（run_screenplay_production/QA "
+    "blocker/repairing 工作副本）的行为；screenplay 契约 6.0.0 起 _screenplay_task "
+    "改为轻量 episode_prep_pack 流程（app/production/prep_pack.py），不再有该状态机。"
+)
 def test_screenplay_task_keeps_repairing_without_publishing_warning(
     tmp_path, monkeypatch
 ) -> None:

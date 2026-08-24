@@ -1,14 +1,14 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   api,
-  EpisodeScreenplay,
-  KeyDialogueChain,
-  PlotSpine,
-  ScreenplayState,
-  ScriptScene,
+  Bible,
+  EpisodePrepPack,
+  PrepPackCoverageEntry,
+  PrepPackCoverageLedger,
+  PrepPackEvent,
   numToCn,
 } from '../api'
-import { useNav, useScriptEpisode } from '../App'
+import { useNav, useProject, useScriptEpisode } from '../App'
 import EpisodeCrumb from '../components/EpisodeCrumb'
 import DecisionDialog from '../components/DecisionDialog'
 import { ServerTaskTimer } from '../components/TaskTimer'
@@ -18,59 +18,22 @@ import QueryState from '../components/QueryState'
 import OperationError from '../components/OperationError'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { screenplayTaskNotice } from '../lib/productionNotices'
-import { paginateItems, paginateManuscript, paginateSpine } from './scriptReaderPagination'
 
-type EditorSection = 'spine' | 'body' | 'scenes' | 'evidence'
-type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 type ScreenplayProduction = NonNullable<
   NonNullable<ReturnType<typeof useScriptEpisode>['data']>['screenplay_production']
 >
 
 type ActionPreview = {
-  kind: 'screenplay' | 'screenplay-save'
   title: string
   data: Record<string, any>
   idempotencyKey: string
 }
 
-type DropWizard = {
-  item: string
-  reason: string
-  rewrite: string
-  targetType: 'beat' | 'scene'
-  targetIndex: number
-  step: 1 | 2
-}
-
-const cloneScript = (script: EpisodeScreenplay | null | undefined): EpisodeScreenplay | null =>
-  script ? JSON.parse(JSON.stringify(script)) : null
-
-const emptySpine = (): PlotSpine => ({
-  episode_premise: '',
-  spine_beats: [],
-  must_keep_ending: '',
-  drop_list: [],
-})
-
 const sourceRangeText = (chapters: number[]) => chapters.length <= 1
   ? `第 ${chapters[0] ?? '-'} 章`
   : `第 ${chapters[0]}-${chapters[chapters.length - 1]} 章`
 
-const splitLines = (text: string) => text.split('\n').map(value => value.trim()).filter(Boolean)
-
-const moveItem = <T,>(items: T[], index: number, direction: -1 | 1): T[] => {
-  const target = index + direction
-  if (target < 0 || target >= items.length) return items
-  const next = [...items]
-  ;[next[index], next[target]] = [next[target], next[index]]
-  return next
-}
-
 const stableKey = (prefix: string) => `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2)}`
-const SCREENPLAY_IDENTITY_ERROR_CODES = new Set([
-  'screenplay_character_discovery_failed',
-  'screenplay_character_identity_unresolved',
-])
 
 export function screenplayResumeActionLabel(
   production: ScreenplayProduction | null | undefined,
@@ -111,66 +74,164 @@ export function screenplayGeneratePayload(
   return payload
 }
 
-export type ScreenplayWriteError = Error & { status?: number; detail?: any }
-
-export type ScreenplayWriteErrorDecision =
-  | { kind: 'conflict'; detail: Record<string, any> }
-  | { kind: 'qa'; failure: { score?: number; errors: string[] } }
-  | { kind: 'identity'; failure: { errors: string[] }; toast: string }
-  | { kind: 'already_passed'; message: string }
-  | { kind: 'cancelled'; message: string }
-  | { kind: 'toast'; message: string }
-
-// 发布 / 发布预览 / 送修共享同一套后端写错误语义。前端只按 status + detail.code
-// 归类，不复制后端状态机，也不做白/黑名单式特判；副作用交由调用方按判定对象执行。
-export function classifyScreenplayWriteError(
-  error: ScreenplayWriteError,
-): ScreenplayWriteErrorDecision {
-  const detail = error.detail
-  const code: string | undefined = detail?.code
-  if (
-    error.status === 409
-    && (code === 'screenplay_version_conflict' || code === 'version_conflict')
-  ) {
-    return { kind: 'conflict', detail }
-  }
-  if (error.status === 409 && code === 'screenplay_qa_already_passed') {
-    return { kind: 'already_passed', message: detail?.message ?? error.message }
-  }
-  if (error.status === 422 && code === 'screenplay_qa_failed') {
-    return {
-      kind: 'qa',
-      failure: {
-        score: detail.score,
-        errors: detail.errors
-          ?? detail.issues?.map((item: any) => item.message)
-          ?? [error.message],
-      },
-    }
-  }
-  if (error.status === 422 && !!code && SCREENPLAY_IDENTITY_ERROR_CODES.has(code)) {
-    return {
-      kind: 'identity',
-      failure: { errors: detail.errors ?? [detail.message ?? error.message] },
-      toast: '人物身份预检未通过，草稿与现有分镜均已保留',
-    }
-  }
-  if (error.status === 403 && error.message.includes('已取消操作')) {
-    return { kind: 'cancelled', message: error.message }
-  }
-  return { kind: 'toast', message: error.message }
+/** 旧产物（转型前的重型剧本）没有这个字段；出现即说明后端还没换成准备包，前端绝不按旧形状渲染。 */
+export function isPrepPack(value: unknown): value is EpisodePrepPack {
+  if (!value || typeof value !== 'object') return false
+  const version = (value as { prep_pack_version?: unknown }).prep_pack_version
+  return typeof version === 'string' && version.length > 0
 }
 
-export function screenplayRepairDraftPayload(
-  idempotencyKey: string,
-  draft: EpisodeScreenplay,
-  baselineVersion: string | null,
-): { screenplay: EpisodeScreenplay; expected_version: string | null; idempotency_key: string } {
-  return {
-    screenplay: draft,
-    expected_version: baselineVersion,
-    idempotency_key: idempotencyKey,
+export function sortedEventChain(events: PrepPackEvent[] | null | undefined): PrepPackEvent[] {
+  return [...(events ?? [])].sort((a, b) => (Number(a?.order) || 0) - (Number(b?.order) || 0))
+}
+
+/** 覆盖账本条目的确切子形状后端未冻结（示例只给了空数组）；数字或 {segment_index} 都按原文段号解析。 */
+function coverageEntryLabel(entry: PrepPackCoverageEntry): string {
+  if (typeof entry === 'number') return String(entry)
+  if (entry && typeof entry === 'object' && 'segment_index' in entry && entry.segment_index != null) {
+    return String((entry as { segment_index: number | string }).segment_index)
   }
+  return JSON.stringify(entry)
+}
+
+export function coverageGateSummary(ledger: PrepPackCoverageLedger | null | undefined) {
+  const uncovered = ledger?.uncovered ?? []
+  const delivered = ledger?.delivered ?? []
+  const merged = ledger?.merged ?? []
+  const retained = ledger?.retained_as_context ?? []
+  const duplicates = ledger?.proven_duplicates ?? []
+  return {
+    ok: uncovered.length === 0,
+    uncoveredCount: uncovered.length,
+    uncoveredLabels: uncovered.map(coverageEntryLabel),
+    deliveredCount: delivered.length,
+    mergedCount: merged.length,
+    retainedCount: retained.length,
+    duplicateCount: duplicates.length,
+    totalSegments: ledger?.total_segments ?? 0,
+  }
+}
+
+/** 复用 BiblePage 展示 character_portraits 的口径：在项目人物谱的 portraits[] 里按 id 查图。 */
+export function findPortraitImage(bible: Bible | null | undefined, portraitId: string | null | undefined): string | null {
+  if (!portraitId) return null
+  for (const character of bible?.characters ?? []) {
+    const match = (character.portraits ?? []).find(portrait => portrait.id === portraitId)
+    if (match?.image_url) return match.image_url
+  }
+  return null
+}
+
+/** 复用 ScenesPage 展示 scene_references 的口径：在项目场景库的 scene_refs[] 里按 id 查图。 */
+export function findSceneReferenceImage(bible: Bible | null | undefined, sceneReferenceId: string | null | undefined): string | null {
+  if (!sceneReferenceId) return null
+  for (const scene of bible?.scenes ?? []) {
+    const match = (scene.scene_refs ?? []).find(ref => ref.id === sceneReferenceId)
+    if (match?.image_url) return match.image_url
+  }
+  return null
+}
+
+// 轻量流程的真实阶段列表由后端下发（目标形状 {key, display_name, state}，
+// state: pending/active/done/blocked）。实测后端落地是渐进的：当前仍在发旧形状
+// {key, label, status}（十步重型流水线遗留），若只读 display_name/state 会读到
+// undefined、渲出空文本——这正是"十个框还在但字没了"的成因。normalizeStage 做
+// 三级文本回退 + state/status 双读，新旧两种形状、以及字段整个缺失，都不会空。
+const STAGE_STATE_LABELS: Record<string, string> = {
+  pending: '待开始',
+  queued: '待开始',
+  active: '进行中',
+  in_progress: '进行中',
+  running: '进行中',
+  blocked: '门禁未通过',
+  failed: '异常中断',
+  paused: '已暂停',
+  done: '已完成',
+  completed: '已完成',
+}
+
+/** 未识别的 state 原样显示，不假装认识、不吞掉信息——state 枚举确定前的安全带。 */
+export function stageStateLabel(state: string): string {
+  return STAGE_STATE_LABELS[state] ?? state
+}
+
+export type StageTone = 'done' | 'active' | 'blocked' | 'pending'
+
+export function stageStateTone(state: string): StageTone {
+  if (state === 'done' || state === 'completed') return 'done'
+  if (state === 'active' || state === 'in_progress' || state === 'running') return 'active'
+  if (state === 'blocked' || state === 'failed') return 'blocked'
+  return 'pending'
+}
+
+export type RawStage = {
+  key: string
+  display_name?: string
+  label?: string
+  state?: string
+  status?: string
+}
+
+export type NormalizedStage = {
+  key: string
+  text: string
+  tone: StageTone
+  stateLabel: string
+}
+
+/** display_name ?? label ?? key 三级回退（空字符串也视为缺失，继续往下退）；
+ *  state ?? status 同理，缺失时按 pending 处理。任何输入形状都保证 text 非空。 */
+export function normalizeStage(stage: RawStage, index: number): NormalizedStage {
+  const text = (stage.display_name || '').trim()
+    || (stage.label || '').trim()
+    || (stage.key || '').trim()
+    || `阶段 ${index + 1}`
+  const rawState = (stage.state || '').trim() || (stage.status || '').trim() || 'pending'
+  return {
+    key: (stage.key || '').trim() || String(index),
+    text,
+    tone: stageStateTone(rawState),
+    stateLabel: stageStateLabel(rawState),
+  }
+}
+
+/**
+ * 阶段列表选源：prep_pack_stages（已定稿的轻量流程真实阶段，2026-08-24 后端上线，
+ * 4-5 步）存在且非空 → 用它；否则回退到旧 stages（十步重型流水线遗留，过渡期/旧产物
+ * 兜底）。两个字段目前在 API 里并存，选源只发生一次，不是逐项合并。
+ */
+export function resolveStages(production: {
+  stages?: RawStage[]
+  prep_pack_stages?: RawStage[]
+} | null | undefined): RawStage[] {
+  const prepPackStages = production?.prep_pack_stages
+  if (prepPackStages && prepPackStages.length > 0) return prepPackStages
+  return production?.stages ?? []
+}
+
+/** 紧凑步进器：小号数字圆点 + 短标签，单行排布可换行；不管后端发来几步都不占大面积。 */
+export function PrepStepper({ stages }: { stages: RawStage[] }) {
+  return (
+    <ol className="prep-stepper" aria-label="剧本制作阶段">
+      {stages.map((stage, index) => {
+        const normalized = normalizeStage(stage, index)
+        return (
+          <li key={normalized.key} className="prep-stepper-item" data-tone={normalized.tone}>
+            <span className="prep-stepper-dot" aria-hidden="true">{normalized.tone === 'done' ? '✓' : index + 1}</span>
+            <span className="prep-stepper-label" title={normalized.stateLabel}>{normalized.text}</span>
+          </li>
+        )
+      })}
+    </ol>
+  )
+}
+
+/** 事件原文段区间（1.1.0 起下发，更早的产物没有该字段）；单段与多段分别措辞，缺失时返回 null。 */
+export function formatSourceSpan(span: { from_segment: number; to_segment: number } | null | undefined): string | null {
+  if (!span || span.from_segment == null || span.to_segment == null) return null
+  return span.from_segment === span.to_segment
+    ? `覆盖原文段 ${span.from_segment}`
+    : `覆盖原文段 ${span.from_segment}-${span.to_segment}`
 }
 
 export function ScreenplayResumeButton({
@@ -192,73 +253,15 @@ export function ScreenplayResumeButton({
   )
 }
 
-function StructuredListActions({
-  index,
-  length,
-  onMove,
-  onDelete,
-}: {
-  index: number
-  length: number
-  onMove: (direction: -1 | 1) => void
-  onDelete: () => void
-}) {
-  return (
-    <div className="structured-row-actions">
-      <button type="button" className="btn small ghost" disabled={index === 0} onClick={() => onMove(-1)}
-        aria-label={index === 0 ? '上移，暂不可用：已是第一项' : '上移'}
-        title={index === 0 ? '已是第一项' : '上移一项'}>↑</button>
-      <button type="button" className="btn small ghost" disabled={index === length - 1} onClick={() => onMove(1)}
-        aria-label={index === length - 1 ? '下移，暂不可用：已是最后一项' : '下移'}
-        title={index === length - 1 ? '已是最后一项' : '下移一项'}>↓</button>
-      <button type="button" className="btn small ghost danger" onClick={onDelete}>删除</button>
-    </div>
-  )
-}
-
-function HighlightedText({ text, query }: { text: string; query: string }) {
-  const needle = query.trim()
-  if (!needle) return <>{text}</>
-  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const parts = text.split(new RegExp(`(${escaped})`, 'gi'))
-  return <>{parts.map((part, index) => part.toLowerCase() === needle.toLowerCase()
-    ? <mark key={index}>{part}</mark>
-    : part)}</>
-}
-
 export default function ScriptPage() {
-  const { episodeId, projectId, go, toast, registerNavigationGuard } = useNav()
-  const { data: ep, refresh, error, loading } = useScriptEpisode(episodeId!)
+  const { episodeId, projectId, go, toast } = useNav()
+  const { data: ep, refresh, error, status, loading } = useScriptEpisode(episodeId!)
+  const { data: project } = useProject(projectId!, 0, 'bible')
   const [busy, setBusy] = useState(false)
-  const [draft, setDraft] = useState<EpisodeScreenplay | null>(null)
-  const [baselineVersion, setBaselineVersion] = useState<string | null>(null)
-  const [dirty, setDirty] = useState(false)
-  const [draftSaveState, setDraftSaveState] = useState<SaveState>('idle')
-  const [recoverable, setRecoverable] = useState<{
-    content?: EpisodeScreenplay
-    baseline?: string | null
-    saved_at?: number
-  } | null>(null)
-  const [manuscriptExpanded, setManuscriptExpanded] = useState(false)
   const [detailsExpanded, setDetailsExpanded] = useState(false)
-  const [editorSection, setEditorSection] = useState<EditorSection>('spine')
-  const [manuscriptSearch, setManuscriptSearch] = useState('')
   const [preview, setPreview] = useState<ActionPreview | null>(null)
-  const [dropWizard, setDropWizard] = useState<DropWizard | null>(null)
-  const [conflict, setConflict] = useState<Record<string, any> | null>(null)
-  const [discardDraftOpen, setDiscardDraftOpen] = useState(false)
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false)
-  const [qaFailure, setQaFailure] = useState<{ score?: number; errors: string[] } | null>(null)
-  const historyRef = useRef<EpisodeScreenplay[]>([])
-  const redoRef = useRef<EpisodeScreenplay[]>([])
-  const restoredRef = useRef(false)
-  const manuscriptRef = useRef<HTMLDivElement>(null)
-  const conflictTrapRef = useFocusTrap(Boolean(conflict), () => setConflict(null))
   const previewTrapRef = useFocusTrap(Boolean(preview), () => setPreview(null))
-  const dropTrapRef = useFocusTrap(Boolean(dropWizard), () => setDropWizard(null), {
-    dirty: Boolean(dropWizard?.reason || dropWizard?.rewrite),
-    onDirtyClose: () => toast('恢复向导尚未写入草稿，请先完成或点击取消'),
-  })
 
   const screenplayTaskActive = ep?.screenplay_production?.task_active
     ?? ['queued', 'running'].includes(ep?.screenplay_status ?? '')
@@ -267,160 +270,19 @@ export default function ScriptPage() {
   // 前端不再用 `status==='repairing'` 猜测续跑，否则会误挡首次生成主操作。
   const canResumeRepair = ep?.screenplay_production?.can_resume_repair ?? false
   const canResumeFlow = canResumeBaseline || canResumeRepair
-  const script = draft ?? ep?.screenplay ?? null
-  const editing = draft !== null
   const screenplayNotice = ep ? screenplayTaskNotice(ep) : null
 
-  const localDraftKey = ep ? `manju:screenplay-draft:${projectId}:${ep.id}` : ''
-  const draftEpisodeId = ep?.id
-  const draftEpisodeArtifactId = ep?.screenplay_artifact_id ?? null
-
-  useEffect(() => {
-    if (!ep || restoredRef.current) return
-    restoredRef.current = true
-    let cancelled = false
-    const fromLocal = localStorage.getItem(localDraftKey)
-    if (fromLocal) {
-      try {
-        const parsed = JSON.parse(fromLocal)
-        if (parsed?.content) setRecoverable(parsed)
-      } catch { localStorage.removeItem(localDraftKey) }
-    }
-    api.get(`/episodes/${ep.id}/screenplay/draft`).then((result: any) => {
-      if (cancelled || !result?.draft) return
-      const server = result.draft
-      const candidate = {
-        content: server.content,
-        baseline: server.baseline_artifact_id,
-        saved_at: Number(server.updated_at ?? 0) * 1000,
-      }
-      setRecoverable(current => (
-        !current || Number(candidate.saved_at ?? 0) > Number(current.saved_at ?? 0)
-          ? candidate
-          : current
-      ))
-    }).catch(() => { /* 本地草稿仍可恢复 */ })
-    return () => { cancelled = true }
-  }, [ep, localDraftKey])
-
-  useEffect(() => {
-    if (!draftEpisodeId || !dirty) return
-    const payload = {
-      content: draft ?? undefined,
-      baseline: baselineVersion ?? draftEpisodeArtifactId,
-      saved_at: Date.now(),
-    }
-    setDraftSaveState('saving')
-    const timer = window.setTimeout(() => {
-      // 本地快照和云端保存共用同一个防抖：JSON.stringify 整份剧本 + 同步写
-      // localStorage 原本每次按键都发生，是编辑器里最贵的同步操作之一。
-      // localStorage 配额溢出时 setItem 会**抛异常**，而本地副本只是云端草稿的
-      // 冗余兜底，丢了不影响正确性，所以失败只降级、不阻断编辑。
-      try {
-        localStorage.setItem(localDraftKey, JSON.stringify(payload))
-      } catch {
-        try { localStorage.removeItem(localDraftKey) } catch { /* 配额已满且无法清理 */ }
-      }
-      api.put(`/episodes/${draftEpisodeId}/screenplay/draft`, {
-        content: draft ?? undefined,
-        baseline_artifact_id: baselineVersion ?? draftEpisodeArtifactId,
-      }).then(() => setDraftSaveState('saved')).catch(() => setDraftSaveState('error'))
-    }, 650)
-    return () => window.clearTimeout(timer)
-  }, [baselineVersion, dirty, draft, draftEpisodeArtifactId, draftEpisodeId, localDraftKey])
-
-  useLayoutEffect(() => {
-    if (!dirty) {
-      registerNavigationGuard(null, false)
-      return
-    }
-    registerNavigationGuard(
-      {
-        title: '保留工作草稿并离开？',
-        summary: '当前剧本修改尚未发布',
-        message: '系统会保留本地工作草稿；云端草稿保存成功后，也可在其他页面返回继续编辑。',
-        details: [
-          draftSaveState === 'error'
-            ? '云端草稿保存失败，本机草稿仍保留'
-            : '离开不会改动当前已发布剧本',
-          '未发布修改不会进入分镜或视频流程',
-        ],
-        confirmLabel: '保留草稿并离开',
-        cancelLabel: '继续编辑',
-      },
-      true,
-    )
-    const beforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault()
-    }
-    window.addEventListener('beforeunload', beforeUnload)
-    return () => {
-      window.removeEventListener('beforeunload', beforeUnload)
-      registerNavigationGuard(null, false)
-    }
-  }, [dirty, draftSaveState, registerNavigationGuard])
-
-  const mutateDraft = (updater: (current: EpisodeScreenplay) => EpisodeScreenplay) => {
-    setDraft(current => {
-      if (!current) return current
-      // 一次按键只做一次整份深拷贝：把 `current` 原样留给历史栈（它此后不再被写），
-      // 只给 updater 一份新副本。原来两次拷贝里，历史栈那份和交给 updater 那份
-      // 内容完全相同，等于每次按键白拷一遍整份剧本。
-      historyRef.current.push(current)
-      if (historyRef.current.length > 80) historyRef.current.shift()
-      redoRef.current = []
-      return updater(cloneScript(current)!)
-    })
-    setDirty(true)
-    setQaFailure(null)
-  }
-
-  const undo = () => {
-    const previous = historyRef.current.pop()
-    if (!previous || !draft) return
-    redoRef.current.push(cloneScript(draft)!)
-    setDraft(previous)
-    setDirty(true)
-  }
-
-  const redo = () => {
-    const next = redoRef.current.pop()
-    if (!next || !draft) return
-    historyRef.current.push(cloneScript(draft)!)
-    setDraft(next)
-    setDirty(true)
-  }
-
-  const updateScript = (patch: Partial<EpisodeScreenplay>) => mutateDraft(current => ({ ...current, ...patch }))
-  const updateSpine = (patch: Partial<PlotSpine>) => mutateDraft(current => ({
-    ...current,
-    plot_spine: { ...(current.plot_spine ?? emptySpine()), ...patch },
-  }))
-
-  const beginEditing = (value = ep?.screenplay ?? null, baseline = ep?.screenplay_artifact_id ?? null) => {
-    if (!value) return
-    setDraft(cloneScript(value))
-    setBaselineVersion(baseline)
-    setEditorSection('spine')
-    historyRef.current = []
-    redoRef.current = []
-    setDirty(false)
-    setConflict(null)
-    setQaFailure(null)
-  }
-
-  const clearWorkingDraft = async () => {
-    setDraft(null)
-    setBaselineVersion(null)
-    setDirty(false)
-    setRecoverable(null)
-    setConflict(null)
-    setQaFailure(null)
-    historyRef.current = []
-    redoRef.current = []
-    if (localDraftKey) localStorage.removeItem(localDraftKey)
-    if (ep) await api.del(`/episodes/${ep.id}/screenplay/draft`).catch(() => undefined)
-  }
+  // React #310 事故教训：这个 useMemo 曾经写在下面 `if (!ep) return` 之后——首次渲染
+  // ep 为空时提前返回、这个 hook 从未被调用；数据到达后的下一次渲染会走到这里，
+  // hook 调用数比上一次渲染多了一个，直接违反 Rules of Hooks 炸出 #310。
+  // 所有 hooks（含 useMemo/useState/自定义 hook）必须无条件出现在组件顶部、
+  // 出现在任何 return 之前；条件渲染只允许发生在 JSX/返回值层面，这里用 `ep?.` 可选链
+  // 而不是等 `ep` 确定非空后再读，就是为了让这个 useMemo 能安全地留在提前 return 之前。
+  // 选源逻辑见 resolveStages：prep_pack_stages 存在且非空优先，否则回退旧 stages。
+  const stages = resolveStages(ep?.screenplay_production)
+  const normalizedStages = useMemo(() => stages.map(normalizeStage), [stages])
+  const activeStage = normalizedStages.find(item => item.tone === 'active')
+  const generatingHint = activeStage ? `正在${activeStage.text}…` : '正在生成准备包…'
 
   const run = async (fn: () => Promise<any>, done?: string) => {
     setBusy(true)
@@ -442,59 +304,13 @@ export default function ScriptPage() {
     }
   }
 
-  const handleScreenplayWriteError = (
-    error: ScreenplayWriteError,
-    options: { cancelledMessage?: string; alreadyPassedMessage?: string } = {},
-  ) => {
-    const decision = classifyScreenplayWriteError(error)
-    switch (decision.kind) {
-      case 'conflict':
-        setConflict(decision.detail)
-        return
-      case 'qa':
-        setQaFailure(decision.failure)
-        return
-      case 'identity':
-        setQaFailure(decision.failure)
-        toast(decision.toast, true)
-        return
-      case 'already_passed':
-        toast(options.alreadyPassedMessage ?? decision.message, !options.alreadyPassedMessage)
-        return
-      case 'cancelled':
-        toast(options.cancelledMessage ?? decision.message, !options.cancelledMessage)
-        return
-      default:
-        toast(decision.message, true)
-    }
-  }
-
-  const publishDraft = async () => {
-    if (!ep || !draft) return
-    setBusy(true)
-    try {
-      const result = await api.put(`/episodes/${ep.id}/screenplay`, {
-        screenplay: draft,
-        expected_version: baselineVersion,
-      })
-      toast(result.unchanged ? '内容无变化，未创建新版本' : '剧本已原子发布')
-      await clearWorkingDraft()
-      await refresh({ force: true })
-    } catch (saveError: unknown) {
-      handleScreenplayWriteError(saveError as ScreenplayWriteError, {
-        cancelledMessage: '未执行发布，工作草稿已保留',
-      })
-    } finally { setBusy(false) }
-  }
-
   const openScreenplayPreview = async () => {
     if (!ep || canResumeFlow) return
     setBusy(true)
     try {
       const data = await api.post(`/episodes/${ep.id}/screenplay/preflight`, {})
       setPreview({
-        kind: 'screenplay',
-        title: '首次生成剧本预检',
+        title: '首次生成准备包预检',
         data,
         idempotencyKey: stableKey(`screenplay:${ep.id}`),
       })
@@ -507,25 +323,10 @@ export default function ScriptPage() {
     if (!preview || !ep) return
     const current = preview
     setPreview(null)
-    if (current.kind === 'screenplay-save') {
-      await publishDraft()
-      return
-    }
-    if (current.kind === 'screenplay') {
-      const result = await run(() => api.post(
-        `/episodes/${ep.id}/screenplay`,
-        screenplayGeneratePayload(
-          current.idempotencyKey,
-          current.data?.blueprint_budget,
-        ),
-      ), '首版剧本任务已受理').catch(() => undefined)
-      if (result) {
-        setDirty(false)
-        localStorage.removeItem(localDraftKey)
-        void api.del(`/episodes/${ep.id}/screenplay/draft`).catch(() => undefined)
-      }
-      return
-    }
+    await run(() => api.post(
+      `/episodes/${ep.id}/screenplay`,
+      screenplayGeneratePayload(current.idempotencyKey, current.data?.blueprint_budget),
+    ), '准备包生成任务已受理').catch(() => undefined)
   }
 
   const resumeRepair = async () => {
@@ -545,128 +346,12 @@ export default function ScriptPage() {
     else if (result) toast(`任务已终止；${result.resume_available ? '可从工作副本恢复' : '可重新发起'}`)
   }
 
-  const savePublished = async () => {
-    if (!ep || !draft) return
-    setBusy(true)
-    try {
-      const result = await api.post(`/episodes/${ep.id}/screenplay/impact-preview`, {
-        screenplay: draft,
-        expected_version: baselineVersion,
-      })
-      if (result.requires_server_approval) {
-        // 有下游时不再叠加本地弹窗；PUT 会进入统一 Capability 影响卡。
-        await publishDraft()
-        return
-      }
-      setPreview({
-        kind: 'screenplay-save',
-        title: result.unchanged ? '发布前检查' : '剧本发布差异预览',
-        data: result,
-        idempotencyKey: stableKey(`screenplay-save:${ep.id}`),
-      })
-    } catch (previewError: unknown) {
-      handleScreenplayWriteError(previewError as ScreenplayWriteError)
-    } finally { setBusy(false) }
-  }
-
-  const sendDraftToRepair = async () => {
-    if (!ep || !draft) return
-    setBusy(true)
-    try {
-      await api.post(
-        `/episodes/${ep.id}/screenplay/repair-draft`,
-        screenplayRepairDraftPayload(
-          stableKey(`screenplay-repair:${ep.id}`),
-          draft,
-          baselineVersion,
-        ),
-      )
-      toast('工作草稿已进入独立修复环节，完成后会重新校验')
-      await clearWorkingDraft()
-      await refresh({ force: true })
-    } catch (repairError: unknown) {
-      handleScreenplayWriteError(repairError as ScreenplayWriteError, {
-        alreadyPassedMessage: '当前草稿已通过校验，可直接发布',
-      })
-    } finally { setBusy(false) }
-  }
-
   const deleteCurrentScreenplay = async () => {
     if (!ep) return
     try {
       const result = await run(() => api.del(`/episodes/${ep.id}/screenplay`))
-      if (result) {
-        await clearWorkingDraft()
-        toast('当前剧本及下游已删除')
-      }
+      if (result) toast('当前准备包及下游已删除')
     } catch { /* run 已呈现结果 */ }
-  }
-
-  const validateDraft = (value: EpisodeScreenplay | null) => {
-    const sections: Record<EditorSection, string[]> = { spine: [], body: [], scenes: [], evidence: [] }
-    if (!value) return sections
-    if (!value.title?.trim()) sections.body.push('标题不能为空')
-    if (!value.full_script_text?.trim()) sections.body.push('完整剧本正文不能为空')
-    if ((value.full_script_text?.length ?? 0) < 100) sections.body.push('剧本正文过短')
-    ;(value.plot_spine?.spine_beats ?? []).forEach((beat, index) => {
-      if (!beat.who?.trim() || !beat.does?.trim() || !beat.turn?.trim()) sections.spine.push(`节拍 ${index + 1} 未写完`)
-    })
-    ;(value.scene_outline ?? []).forEach((scene, index) => {
-      if (!scene.scene_heading.trim() || !scene.story_function.trim() || !scene.summary.trim()) sections.scenes.push(`场次 ${index + 1} 未写完`)
-    })
-    // 主线台词 key_lines 是后端在发布时从 dialogue_chains 派生（validators.py key_lines_in_story_order），
-    // 编辑器不提供其输入、后端也会丢弃提交值；只校验权威来源“主线对白链”，避免拦住一个用户无法修改的派生字段。
-    if (!(value.dialogue_chains ?? []).length) sections.evidence.push('主线对白链不能为空')
-    return sections
-  }
-
-  const validation = useMemo(() => validateDraft(draft), [draft])
-  const totalErrors = Object.values(validation).reduce((sum, items) => sum + items.length, 0)
-
-  const exportScript = () => {
-    if (!script || !ep) return
-    const blob = new Blob([script.full_script_text ?? ''], { type: 'text/plain;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = `第${ep.episode_no}集-${script.title || ep.title}-剧本.txt`
-    anchor.click()
-    URL.revokeObjectURL(url)
-  }
-
-  const applyDropWizard = () => {
-    if (!dropWizard || !draft || !dropWizard.rewrite.trim() || !dropWizard.reason.trim()) return
-    const wizard = dropWizard
-    mutateDraft(current => {
-      const next = cloneScript(current)!
-      const nextSpine = { ...(next.plot_spine ?? emptySpine()) }
-      nextSpine.drop_list = (nextSpine.drop_list ?? []).filter(item => item !== wizard.item)
-      if (wizard.targetType === 'beat') {
-        const beats = [...(nextSpine.spine_beats ?? [])]
-        const target = beats[wizard.targetIndex]
-        if (target) beats[wizard.targetIndex] = {
-          ...target,
-          does: `${target.does || ''}；${wizard.rewrite}`.replace(/^；/, ''),
-        }
-        nextSpine.spine_beats = beats
-      } else {
-        const scenes = [...(next.scene_outline ?? [])]
-        const target = scenes[wizard.targetIndex]
-        if (target) scenes[wizard.targetIndex] = {
-          ...target,
-          summary: `${target.summary || ''}；${wizard.rewrite}`.replace(/^；/, ''),
-        }
-        next.scene_outline = scenes
-      }
-      next.plot_spine = nextSpine
-      next.approved_adaptations = [
-        ...(next.approved_adaptations ?? []),
-        `恢复原因：${wizard.reason}；可拍化：${wizard.rewrite}`,
-      ]
-      return next
-    })
-    setDropWizard(null)
-    toast('恢复项已进入工作草稿，尚未影响下游')
   }
 
   if (!ep) {
@@ -674,6 +359,7 @@ export default function ScriptPage() {
       <QueryState
         loading={loading}
         error={error}
+        status={status}
         hasData={false}
         objectName="剧本台"
         loadingText="正在加载剧本与本集状态…"
@@ -685,34 +371,24 @@ export default function ScriptPage() {
     )
   }
 
-  const state: Pick<ScreenplayState, 'message' | 'recommended_action'> = ep.screenplay_state ?? {
+  const state = ep.screenplay_state ?? {
     message: '状态同步中',
-    recommended_action: 'refresh',
+    recommended_action: 'refresh' as const,
   }
-  // 直接透传后端已压好的一句话状态；后端已区分“剧本已交付｜分镜生成中/停在第 N 镜/待人工确认”等细节。
+  // 直接透传后端已压好的一句话状态；后端已区分"准备包已交付｜分镜生成中/停在第 N 镜/待人工确认"等细节。
   const screenplayStateMessage = state.message
-  const screenplayGenerateDisabledReason = busy
-    ? '正在处理上一项操作'
-    : ''
-  const publishDisabledReason = busy
-    ? '正在处理上一项操作'
-    : totalErrors > 0
-      ? `工作草稿还有 ${totalErrors} 项需要修正`
-      : ''
+  const screenplayGenerateDisabledReason = busy ? '正在处理上一项操作' : ''
 
   const primaryAction = () => {
-    if (dirty && editing) return <button className="btn primary" disabled={Boolean(publishDisabledReason)}
-      aria-label={publishDisabledReason ? `预览影响并发布，暂不可用：${publishDisabledReason}` : '预览影响并发布'}
-      title={publishDisabledReason || '提交前先预览对下游的影响'} onClick={savePublished}>预览影响并发布</button>
     switch (state.recommended_action) {
       case 'generate_screenplay':
         return <button className="btn primary" disabled={Boolean(screenplayGenerateDisabledReason)}
-          aria-label={screenplayGenerateDisabledReason ? `首次生成剧本，暂不可用：${screenplayGenerateDisabledReason}` : '首次生成剧本'}
-          title={screenplayGenerateDisabledReason || '生成前将展示输入范围和人物资产影响'} onClick={openScreenplayPreview}>首次生成剧本</button>
+          aria-label={screenplayGenerateDisabledReason ? `首次生成准备包，暂不可用：${screenplayGenerateDisabledReason}` : '首次生成准备包'}
+          title={screenplayGenerateDisabledReason || '生成前将展示输入范围'} onClick={openScreenplayPreview}>首次生成准备包</button>
       case 'stop_screenplay':
         return <button className="btn ghost danger" disabled={busy}
-          aria-label={busy ? '停止剧本任务，暂不可用：正在处理上一项操作' : '停止剧本任务'}
-          title={busy ? '正在处理上一项操作' : '停止前会说明费用和保留范围'} onClick={() => setStopConfirmOpen(true)}>停止剧本任务</button>
+          aria-label={busy ? '停止准备包任务，暂不可用：正在处理上一项操作' : '停止准备包任务'}
+          title={busy ? '正在处理上一项操作' : '停止前会说明费用和保留范围'} onClick={() => setStopConfirmOpen(true)}>停止准备包任务</button>
       case 'resume_screenplay':
         return <ScreenplayResumeButton
           production={ep.screenplay_production}
@@ -722,8 +398,8 @@ export default function ScriptPage() {
       case 'generate_storyboard':
       case 'resume_storyboard':
       case 'view_storyboard':
-        return <button className="btn primary" disabled={dirty}
-          title={dirty ? '请先发布或放弃当前工作草稿' : '分镜的生成、续跑和确认统一在分镜台完成'}
+        return <button className="btn primary"
+          title="分镜的生成、续跑和确认统一在分镜台完成"
           onClick={() => go('board', projectId, ep.id)}>进入分镜台</button>
       case 'view_save_progress':
         return <button className="btn primary" disabled>正在安全停止下游…</button>
@@ -734,16 +410,15 @@ export default function ScriptPage() {
     }
   }
 
-  const structureItems = [
-    ['开端', script?.opening], ['发展', script?.development], ['冲突', script?.conflict],
-    ['高潮', script?.climax], ['结尾钩子', script?.ending_hook],
-  ].filter(([, value]) => Boolean(value?.trim()))
+  // 后端把两种产物形状投影到不同字段（见 Episode.prep_pack 注释）：新形状在 prep_pack，
+  // screenplay 此时为 null；旧形状仍在 screenplay。两个字段都要看，不能只看其中一个。
+  const packRaw = ep.prep_pack ?? null
 
   return (
     <>
       <header className="desk-head">
         <EpisodeCrumb label="剧本台" view="script" episodeNo={ep.episode_no} />
-        <h1>剧本台 <span className="sub">《{ep.title}》 · 先完成可拍剧本，再进入镜头设计</span></h1>
+        <h1>剧本台 <span className="sub">《{ep.title}》 · 先备齐本集事件链与资源，再进入镜头设计</span></h1>
         <hr className="rule" />
       </header>
 
@@ -761,101 +436,39 @@ export default function ScriptPage() {
           </div>
         </div>
 
-        {ep.screenplay_production?.stages?.length ? (
-          <>
-            <ol className="screenplay-stage-rail" aria-label="剧本制作阶段">
-              {ep.screenplay_production.stages.map((stage, index) => (
-                <li key={stage.key} data-status={stage.status}
-                  aria-current={['in_progress', 'paused', 'blocked', 'failed'].includes(stage.status) ? 'step' : undefined}>
-                  <i>{stage.status === 'completed' ? '✓' : index + 1}</i>
-                  <span>{stage.label}</span>
-                  <small>{
-                    stage.status === 'completed' ? '已完成'
-                      : stage.status === 'in_progress' ? '进行中'
-                        : stage.status === 'blocked' ? '门禁未通过'
-                          : stage.status === 'failed' ? '异常中断'
-                        : stage.status === 'paused' ? '已暂停'
-                          : '待开始'
-                  }</small>
-                </li>
-              ))}
-            </ol>
-            {ep.screenplay_production.shard_progress?.total ? (
-              <p className="screenplay-quality-summary" role="status">
-                场次写作已完成 {ep.screenplay_production.shard_progress.validated}/
-                {ep.screenplay_production.shard_progress.total} 组
-                {ep.screenplay_production.shard_progress.failed
-                  ? ` · ${ep.screenplay_production.shard_progress.failed} 组等待重试`
-                  : ep.screenplay_production.shard_progress.running
-                    ? ` · ${ep.screenplay_production.shard_progress.running} 组进行中`
-                    : ''}
-                <small>技术错误与单组重试记录可在任务中心查看</small>
-              </p>
-            ) : null}
-            {ep.screenplay_production.quality_score != null && (
-              <p className={`screenplay-quality-summary ${
-                (ep.screenplay_production.quality_issue_count ?? 0) > 0 ? 'warning' : ''
-              }`}>
-                质量评分 {ep.screenplay_production.quality_score.toFixed(0)} 分
-                {ep.screenplay_production.quality_issue_count
-                  ? ` · ${ep.screenplay_production.quality_issue_count} 项评审风险`
-                  : ' · 未发现评审风险'}
-                <small>生产门禁问题会阻断发布并进入局部修复；零 blocker 后才可交付</small>
+        {/* 紧凑步进器完全由后端下发的真实阶段列表驱动，不写死步骤名/步数；
+            旧十步重型流水线的大灰框到此不再出现，新旧两种载荷都紧凑呈现。 */}
+        {stages.length > 0 && (
+          <div className="prep-stepper-block">
+            {screenplayTaskActive && ep.screenplay_production?.task_started_at && (
+              <p className="prep-stepper-status" role="status">
+                <ServerTaskTimer
+                  label={activeStage ? `正在${activeStage.text}` : '生成中'}
+                  startedAt={ep.screenplay_production.task_started_at}
+                  finishedAt={ep.screenplay_production.task_finished_at}
+                  running={screenplayTaskActive}
+                />
               </p>
             )}
-          </>
-        ) : null}
+            <PrepStepper stages={stages} />
+          </div>
+        )}
 
         <div className="screenplay-secondary-row">
-          {ep.screenplay && !editing && (
-            <button className="btn" disabled={busy || screenplayTaskActive}
-              title={screenplayTaskActive ? '剧本流程运行中，完成或停止后才能编辑已发布版本' : undefined}
-              onClick={() => beginEditing()}>手工编辑全文</button>
-          )}
-          {editing && (
-            <>
-              <button className="btn ghost" disabled={!historyRef.current.length}
-                title={!historyRef.current.length ? '当前草稿还没有可撤销的修改' : '撤销上一步修改'}
-                onClick={undo}>撤销</button>
-              <button className="btn ghost" disabled={!redoRef.current.length}
-                title={!redoRef.current.length ? '撤销修改后才可重做' : '恢复上一步已撤销的修改'}
-                onClick={redo}>重做</button>
-              <button className="btn ghost" disabled={busy} onClick={() => setDiscardDraftOpen(true)}>放弃工作草稿</button>
-              <span className={`draft-state ${draftSaveState}`}>
-                {draftSaveState === 'saving' ? '草稿保存中…'
-                  : draftSaveState === 'saved' ? '草稿已自动保存'
-                    : draftSaveState === 'error' ? '草稿云端保存失败（本地已保留）' : ''}
-              </span>
-            </>
-          )}
-          {!screenplayTaskActive && (ep.screenplay || canResumeFlow) && (
+          {!screenplayTaskActive && (ep.screenplay || packRaw || canResumeFlow) && (
             <button className="btn ghost danger" disabled={busy} onClick={deleteCurrentScreenplay}>
-              {ep.screenplay ? '删除当前剧本' : '删除失败剧本'}
+              {(ep.screenplay || packRaw) ? '删除当前准备包' : '删除失败准备包'}
             </button>
           )}
           <span className="screenplay-row-spacer" />
-          {ep.screenplay_evidence && <EvidenceDrawer evidence={ep.screenplay_evidence} label="剧本证据" />}
+          {ep.screenplay_evidence && <EvidenceDrawer evidence={ep.screenplay_evidence} label="准备包证据" />}
           <ServerTaskTimer
-            label="剧本"
+            label="准备包"
             startedAt={ep.screenplay_production?.task_started_at}
             finishedAt={ep.screenplay_production?.task_finished_at}
             running={screenplayTaskActive}
           />
         </div>
-
-        {recoverable && !editing && (
-          <div className="draft-recovery-banner" role="status">
-            <span>发现未发布的工作草稿，基线 {recoverable.baseline || '空版本'}。</span>
-            <div>
-              <button className="btn small" onClick={() => {
-                if (recoverable.content) beginEditing(recoverable.content, recoverable.baseline ?? null)
-                setDirty(true)
-                setRecoverable(null)
-              }}>恢复草稿</button>
-              <button className="btn small ghost" onClick={() => setDiscardDraftOpen(true)}>放弃</button>
-            </div>
-          </div>
-        )}
 
         <button type="button" className="script-details-toggle" onClick={() => setDetailsExpanded(value => !value)} aria-expanded={detailsExpanded}>
           {detailsExpanded ? '收起详情' : '查看计时、来源与技术详情'}
@@ -863,8 +476,10 @@ export default function ScriptPage() {
         {detailsExpanded && (
           <div className="screenplay-detail-grid">
             <div className="kv"><b>当前分集</b>第{numToCn(ep.episode_no)}集</div>
-            <div className="kv"><b>原文来源范围</b>{script?.source_text_range || sourceRangeText(ep.source_chapters)}{!script?.source_text_range && <em>推断显示</em>}</div>
-            <div className="kv"><b>剧本状态</b>{ep.screenplay_status ?? 'unknown'}</div>
+            <div className="kv"><b>原文来源范围</b>{isPrepPack(packRaw)
+              ? `${sourceRangeText(packRaw.episode_scope?.chapter_indexes ?? ep.source_chapters)} · 原文段 ${packRaw.episode_scope?.source_segment_count ?? '—'} 段`
+              : sourceRangeText(ep.source_chapters)}</div>
+            <div className="kv"><b>准备包状态</b>{ep.screenplay_status ?? 'unknown'}</div>
             {ep.screenplay_production && (
               <div className="kv"><b>当前阶段</b>
                 {ep.screenplay_production.phase_label ?? ep.screenplay_production.phase} ·
@@ -874,26 +489,13 @@ export default function ScriptPage() {
             )}
           </div>
         )}
-        {qaFailure && (
-          <div className="editor-validation screenplay-qa-failure" role="alert">
-            <b>结构或人物上下文校验未通过</b>
-            {qaFailure.errors.slice(0, 6).map(item => <span key={item}>{item}</span>)}
-            {draft && (
-              <button type="button" className="btn small"
-                disabled={busy}
-                aria-label={busy ? '送修草稿，暂不可用：正在处理上一项操作' : '送修草稿'}
-                title={busy ? '正在处理上一项操作' : '把当前工作草稿交给独立修复环节，完成后自动重新校验'}
-                onClick={sendDraftToRepair}>送修草稿</button>
-            )}
-          </div>
-        )}
         {screenplayNotice && (
           <OperationError
             title={screenplayNotice.severity === 'error' ? '剧本流程未完成' : '剧本流程等待继续'}
             message={screenplayNotice.message}
             guidance={screenplayNotice.severity === 'error'
-              ? '已发布剧本和工作草稿会保留。请按顶部主操作重新生成。'
-              : '这不是失败结果；工作副本和安全恢复点已保留，可按顶部主操作继续剧本流程。'}
+              ? '已发布准备包和工作草稿会保留。请按顶部主操作重新生成。'
+              : '这不是失败结果；工作副本和安全恢复点已保留，可按顶部主操作继续流程。'}
             variant={screenplayNotice.severity}
             detailLabel={screenplayNotice.severity === 'error' ? '查看剧本错误详情' : '查看剧本处理详情'}
           />
@@ -902,59 +504,31 @@ export default function ScriptPage() {
 
       <div className="workspace-gap" />
 
-      {!script ? (
-        <div className="empty screenplay-mobile-summary"><div className="big">剧</div>{screenplayStateMessage}<br />请使用顶部唯一主操作</div>
-      ) : editing ? (
-        <ScreenplayEditor
-          draft={draft!}
-          section={editorSection}
-          setSection={setEditorSection}
-          validation={validation}
-          updateScript={updateScript}
-          updateSpine={updateSpine}
-          sourceFallback={sourceRangeText(ep.source_chapters)}
-          restoreDrop={item => setDropWizard({ item, reason: '', rewrite: '', targetType: 'beat', targetIndex: 0, step: 1 })}
-        />
+      {isPrepPack(packRaw) ? (
+        <PrepPackView pack={packRaw} bible={project?.bible} sourceFallback={sourceRangeText(ep.source_chapters)} />
+      ) : ep.screenplay ? (
+        <section className="card">
+          <div className="empty">
+            <div className="big">旧</div>
+            旧版产物，转型后需重新生成
+            <br />
+            <small>本集内容仍是转型前的格式，界面无法解析展示；请使用顶部主操作重新生成准备包。</small>
+          </div>
+        </section>
+      ) : screenplayTaskActive ? (
+        // 生成中还没有可展示的准备包内容：不摆大面积空框，主视觉就是上面的步进器 + 计时 + 这一句。
+        <section className="card prep-generating-hint" role="status">
+          <p>{generatingHint}</p>
+        </section>
       ) : (
-        <ScreenplayReader
-          script={script}
-          epTitle={ep.title}
-          expanded={manuscriptExpanded}
-          setExpanded={setManuscriptExpanded}
-          search={manuscriptSearch}
-          setSearch={setManuscriptSearch}
-          manuscriptRef={manuscriptRef}
-          exportScript={exportScript}
-          toast={toast}
-          structureItems={structureItems}
-        />
-      )}
-
-      {discardDraftOpen && (
-        <DecisionDialog
-          title="永久放弃工作草稿？"
-          summary="未发布修改将无法恢复"
-          message="本机草稿和云端工作草稿都会删除；当前已发布剧本及其下游产物不受影响。"
-          details={[
-            draft ? `当前草稿“${draft.title || '未命名剧本'}”将被移除` : '待恢复的工作草稿将被移除',
-            '此操作不会删除已发布剧本',
-          ]}
-          confirmLabel="确认放弃草稿"
-          cancelLabel="保留草稿"
-          danger
-          onClose={() => setDiscardDraftOpen(false)}
-          onConfirm={() => {
-            setDiscardDraftOpen(false)
-            void clearWorkingDraft().then(() => toast('工作草稿已放弃'))
-          }}
-        />
+        <div className="empty screenplay-mobile-summary"><div className="big">备</div>{screenplayStateMessage}<br />请使用顶部唯一主操作</div>
       )}
 
       {stopConfirmOpen && (
         <DecisionDialog
           title="停止本集剧本任务？"
           summary={`第 ${ep.episode_no} 集《${ep.title}》仍在生成`}
-          message="系统会停止当前剧本生成或局部修复；已写入的工作副本会保留，尚未发布的内容不会进入分镜。"
+          message="系统会停止当前准备包生成或局部修复；已写入的工作副本会保留，尚未发布的内容不会进入分镜。"
           details={[
             '停止可能需要等待当前模型请求返回，界面不会提前宣称已终止',
             '已经发生的模型调用费用不会退回；停止后可从工作副本恢复或重新发起',
@@ -970,119 +544,33 @@ export default function ScriptPage() {
         />
       )}
 
-      {conflict && (
-        <div className="evidence-backdrop" role="presentation">
-          <section ref={conflictTrapRef} className="impact-dialog" role="dialog" aria-modal="true" aria-label="剧本版本冲突">
-            <h3>当前剧本已被更新</h3>
-            <p>我的工作草稿仍完整保留，没有覆盖新发布版。</p>
-            <p><code>{conflict.expected_version || '空基线'}</code> → <code>{conflict.current_version || '空版本'}</code></p>
-            <ul>{(conflict.diff ?? []).map((item: any) => <li key={item.field}>{item.section} / {item.field}</li>)}</ul>
-            <div className="dialog-actions">
-              <button className="btn" onClick={() => setConflict(null)}>继续保留我的草稿</button>
-              <button className="btn primary" onClick={async () => {
-                const latest = await refresh({ force: true })
-                if (latest?.screenplay) beginEditing(latest.screenplay, latest.screenplay_artifact_id ?? null)
-                setConflict(null)
-              }}>重新加载发布版</button>
-            </div>
-          </section>
-        </div>
-      )}
-
       {preview && (
         <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
           if (event.currentTarget === event.target) setPreview(null)
         }}>
           <section ref={previewTrapRef} className="impact-dialog" role="dialog" aria-modal="true" aria-label={preview.title}>
             <h3>{preview.title}</h3>
-            <p>{preview.kind === 'screenplay-save'
-              ? '此预览只读，尚未发布。确认后才会写入新版本。'
-              : '预检不会创建任务；只有点击下方执行按钮才会发起。'}</p>
+            <p>预检不会创建任务；只有点击下方执行按钮才会发起。</p>
             <ul>
-              {preview.kind === 'screenplay' ? (
-                <>
-                  <li>
-                    原文 {preview.data.input?.source_chars ?? '—'} 字，
-                    覆盖 {preview.data.input?.source_chapters?.length ?? '—'} 个源章节
-                  </li>
-                  <li>
-                    疑似新增人物 {preview.data.cast_impact?.candidate_count ?? 0} 名；
-                    剧本阶段只补人物文字卡，不生成定妆图片
-                  </li>
-                  <li>
-                    定妆资产预计最多 {preview.data.cast_impact?.portrait_asset_stage?.estimated_images ?? 0} 张，
-                    将在独立资产环节确认后补齐
-                  </li>
-                  {preview.data.blueprint_budget?.requires_fresh_retry_grant && (
-                    <li className="danger">
-                      上次蓝图生成的模型调用被中断、结果未知（常见于服务重启或网络波动）。
-                      为避免重复扣费，系统已暂停自动重试；确认继续将授权对同一环节重新发起一次付费调用。
-                    </li>
-                  )}
-                </>
-              ) : preview.kind === 'screenplay-save' ? (
-                <>
-                  <li>{preview.data.unchanged ? '可编辑内容没有变化，确认后也不会创建新版本' : `变更 ${preview.data.diff?.length ?? 0} 个字段`}</li>
-                  {(preview.data.diff ?? []).map((item: any) => (
-                    <li key={item.field}>{item.section}：{item.before_chars} 字符 → {item.after_chars} 字符</li>
-                  ))}
-                  {preview.data.character_identity_preflight?.required && (
-                    <li>{preview.data.character_identity_preflight.message}</li>
-                  )}
-                  <li>{preview.data.impact}</li>
-                </>
-              ) : null}
+              <li>
+                原文 {preview.data.input?.source_chars ?? '—'} 字，
+                覆盖 {preview.data.input?.source_chapters?.length ?? '—'} 个源章节
+              </li>
+              {preview.data.blueprint_budget?.requires_fresh_retry_grant && (
+                <li className="danger">
+                  上次生成的模型调用被中断、结果未知（常见于服务重启或网络波动）。
+                  为避免重复扣费，系统已暂停自动重试；确认继续将授权对同一环节重新发起一次付费调用。
+                </li>
+              )}
             </ul>
             <div className="dialog-actions">
               <button className="btn" onClick={() => setPreview(null)}>取消（不执行）</button>
               <button className="btn primary" onClick={executePreview}>
-                {preview.kind === 'screenplay'
-                  ? (preview.data.blueprint_budget?.requires_fresh_retry_grant
-                      ? '授权并重试（可能重新计费）'
-                      : '启动首版剧本生成')
-                  : (preview.data.unchanged ? '确认无变更' : '确认发布')}
+                {preview.data.blueprint_budget?.requires_fresh_retry_grant
+                  ? '授权并重试（可能重新计费）'
+                  : '启动首版准备包生成'}
               </button>
             </div>
-          </section>
-        </div>
-      )}
-
-      {dropWizard && draft && (
-        <div className="evidence-backdrop" role="presentation">
-          <section ref={dropTrapRef} className="impact-dialog drop-wizard" role="dialog" aria-modal="true" aria-label="恢复为可拍内容">
-            <h3>恢复“{dropWizard.item}”</h3>
-            {dropWizard.step === 1 ? (
-              <>
-                <label className="f">恢复原因
-                  <textarea rows={3} value={dropWizard.reason} onChange={event => setDropWizard({ ...dropWizard, reason: event.target.value })} />
-                </label>
-                <label className="f">改写为可见 / 可听的内容
-                  <textarea rows={4} value={dropWizard.rewrite} onChange={event => setDropWizard({ ...dropWizard, rewrite: event.target.value })} />
-                </label>
-                <div className="dialog-actions">
-                  <button className="btn" onClick={() => setDropWizard(null)}>取消</button>
-                  <button className="btn primary" disabled={!dropWizard.reason.trim() || !dropWizard.rewrite.trim()} onClick={() => setDropWizard({ ...dropWizard, step: 2 })}>选择落点</button>
-                </div>
-              </>
-            ) : (
-              <>
-                <label className="f">落入结构
-                  <select value={dropWizard.targetType} onChange={event => setDropWizard({ ...dropWizard, targetType: event.target.value as 'beat' | 'scene', targetIndex: 0 })}>
-                    <option value="beat">主线节拍</option><option value="scene">场次</option>
-                  </select>
-                </label>
-                <select aria-label="选择具体落点" value={dropWizard.targetIndex} onChange={event => setDropWizard({ ...dropWizard, targetIndex: Number(event.target.value) })}>
-                  {(dropWizard.targetType === 'beat' ? draft.plot_spine?.spine_beats ?? [] : draft.scene_outline ?? []).map((item: any, index: number) => (
-                    <option key={index} value={index}>{dropWizard.targetType === 'beat' ? item.beat_id || `节拍 ${index + 1}` : item.scene_heading || `场 ${index + 1}`}</option>
-                  ))}
-                </select>
-                <div className="drop-diff-preview"><b>草稿 diff</b><del>{dropWizard.item}</del><ins>{dropWizard.rewrite}</ins></div>
-                <div className="dialog-actions">
-                  <button className="btn" onClick={() => setDropWizard({ ...dropWizard, step: 1 })}>上一步</button>
-                  <button className="btn primary" onClick={applyDropWizard}>写入工作草稿</button>
-                </div>
-              </>
-            )}
           </section>
         </div>
       )}
@@ -1090,434 +578,184 @@ export default function ScriptPage() {
   )
 }
 
-function ScreenplayEditor({
-  draft,
-  section,
-  setSection,
-  validation,
-  updateScript,
-  updateSpine,
+export function PrepPackView({
+  pack,
+  bible,
   sourceFallback,
-  restoreDrop,
 }: {
-  draft: EpisodeScreenplay
-  section: EditorSection
-  setSection: (section: EditorSection) => void
-  validation: Record<EditorSection, string[]>
-  updateScript: (patch: Partial<EpisodeScreenplay>) => void
-  updateSpine: (patch: Partial<PlotSpine>) => void
+  pack: EpisodePrepPack
+  bible: Bible | null | undefined
   sourceFallback: string
-  restoreDrop: (item: string) => void
 }) {
-  const tabs: [EditorSection, string][] = [['spine', '主线'], ['body', '正文'], ['scenes', '场次'], ['evidence', '依据与状态']]
-  const beats = draft.plot_spine?.spine_beats ?? []
-  const scenes = draft.scene_outline ?? []
-  const stateChanges = draft.character_state_changes ?? []
-  const panelId = 'screenplay-editor-panel'
-  const focusSection = (next: EditorSection) => {
-    setSection(next)
-    window.requestAnimationFrame(() => {
-      document.getElementById(`screenplay-editor-tab-${next}`)?.focus()
-    })
-  }
-  const onTabKeyDown = (event: React.KeyboardEvent, index: number) => {
-    let nextIndex = index
-    if (event.key === 'ArrowRight') nextIndex = (index + 1) % tabs.length
-    else if (event.key === 'ArrowLeft') nextIndex = (index - 1 + tabs.length) % tabs.length
-    else if (event.key === 'Home') nextIndex = 0
-    else if (event.key === 'End') nextIndex = tabs.length - 1
-    else return
-    event.preventDefault()
-    focusSection(tabs[nextIndex][0])
-  }
-  return (
-    <section className="screenplay-editor-shell">
-      <nav className="screenplay-editor-tabs" role="tablist" aria-label="剧本编辑目录">
-        {tabs.map(([key, label], index) => (
-          <button id={`screenplay-editor-tab-${key}`} key={key} type="button" role="tab"
-            aria-selected={section === key} aria-controls={panelId} tabIndex={section === key ? 0 : -1}
-            className={section === key ? 'active' : ''} onClick={() => setSection(key)}
-            onKeyDown={event => onTabKeyDown(event, index)}>
-            {label}{validation[key].length > 0 && <span>{validation[key].length}</span>}
-          </button>
-        ))}
-      </nav>
-      <div id={panelId} className="screenplay-editor-panel" role="tabpanel" aria-labelledby={`screenplay-editor-tab-${section}`}>
-      {validation[section].length > 0 && <div className="editor-validation"><b>本区待修复</b>{validation[section].map(item => <span key={item}>{item}</span>)}</div>}
-
-      {section === 'spine' && (
-        <div className="card screenplay-editor-section">
-          <label className="f">本集前提</label>
-          <textarea aria-label="本集前提" rows={2} value={draft.plot_spine?.episode_premise ?? ''} onChange={event => updateSpine({ episode_premise: event.target.value })} />
-          <div className="structured-section-head"><b>主线节拍</b><button className="btn small" type="button" onClick={() => updateSpine({ spine_beats: [...beats, { beat_id: `S${String(beats.length + 1).padStart(2, '0')}`, who: '', does: '', turn: '', must_keep: true }] })}>新增节拍</button></div>
-          <div className="structured-list">
-            {beats.map((beat, index) => (
-              <article className="structured-row" key={`${beat.beat_id}-${index}`}>
-                <header><b>{beat.beat_id || `S${index + 1}`}</b><StructuredListActions index={index} length={beats.length} onMove={direction => updateSpine({ spine_beats: moveItem(beats, index, direction) })} onDelete={() => updateSpine({ spine_beats: beats.filter((_, itemIndex) => itemIndex !== index) })} /></header>
-                <div className="structured-fields">
-                  <label>谁<input value={beat.who ?? ''} onChange={event => updateSpine({ spine_beats: beats.map((item, itemIndex) => itemIndex === index ? { ...item, who: event.target.value } : item) })} /></label>
-                  <label>做了什么<textarea rows={2} value={beat.does ?? ''} onChange={event => updateSpine({ spine_beats: beats.map((item, itemIndex) => itemIndex === index ? { ...item, does: event.target.value } : item) })} /></label>
-                  <label>局势变化<textarea rows={2} value={beat.turn ?? ''} onChange={event => updateSpine({ spine_beats: beats.map((item, itemIndex) => itemIndex === index ? { ...item, turn: event.target.value } : item) })} /></label>
-                  <label className="check"><input type="checkbox" checked={beat.must_keep !== false} onChange={event => updateSpine({ spine_beats: beats.map((item, itemIndex) => itemIndex === index ? { ...item, must_keep: event.target.checked } : item) })} />必保留</label>
-                </div>
-              </article>
-            ))}
-          </div>
-          <label className="f">必须收束</label>
-          <textarea aria-label="必须收束" rows={2} value={draft.plot_spine?.must_keep_ending ?? ''} onChange={event => updateSpine({ must_keep_ending: event.target.value })} />
-          <div className="structured-section-head"><b>本集不拍（默认排除）</b></div>
-          <div className="drop-restore-list">
-            {(draft.plot_spine?.drop_list ?? []).map((item, index) => (
-              <div key={`${item}-${index}`}><textarea aria-label={`默认不拍内容 ${index + 1}`} rows={2} value={item} onChange={event => updateSpine({ drop_list: (draft.plot_spine?.drop_list ?? []).map((value, itemIndex) => itemIndex === index ? event.target.value : value) })} /><button type="button" className="btn small ghost" onClick={() => restoreDrop(item)}>改写为可拍内容</button></div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {section === 'body' && (
-        <div className="card script-editor editing">
-          <div className="full"><label className="f">标题<input value={draft.title ?? ''} onChange={event => updateScript({ title: event.target.value })} /></label></div>
-          <div className="full"><label className="f">原文来源范围<input value={draft.source_text_range ?? sourceFallback} onChange={event => updateScript({ source_text_range: event.target.value })} /></label><small>{!draft.source_text_range && '当前为本集章节范围的推断显示'}</small></div>
-          <div className="full"><label className="f">本集一句话梗概<textarea rows={2} value={draft.logline ?? ''} onChange={event => updateScript({ logline: event.target.value })} /></label></div>
-          <div><label className="f">本集戏剧问题<textarea rows={2} value={draft.dramatic_question ?? ''} onChange={event => updateScript({ dramatic_question: event.target.value })} /></label></div>
-          <div><label className="f">主角目标<textarea rows={2} value={draft.protagonist_goal ?? ''} onChange={event => updateScript({ protagonist_goal: event.target.value })} /></label></div>
-          <div><label className="f">阻力<textarea rows={2} value={draft.obstacle ?? ''} onChange={event => updateScript({ obstacle: event.target.value })} /></label></div>
-          <div><label className="f">失败代价<textarea rows={2} value={draft.stakes ?? ''} onChange={event => updateScript({ stakes: event.target.value })} /></label></div>
-          <div className="full"><label className="f">完整剧本正文 · {(draft.full_script_text ?? '').length.toLocaleString()} 字<textarea rows={24} value={draft.full_script_text ?? ''} onChange={event => updateScript({ full_script_text: event.target.value })} /></label></div>
-          <div className="full">
-            <div className="structured-section-head">
-              <b>主线对白链</b>
-              <span>对白链是权威数据；主线台词由系统按话轮顺序自动生成。</span>
-            </div>
-            <DialogueChainsEditor
-              chains={draft.dialogue_chains ?? []}
-              onChange={dialogue_chains => updateScript({ dialogue_chains })}
-            />
-          </div>
-          <div className="full"><label className="f">派生主线台词（只读）<textarea readOnly rows={5} value={(draft.dialogue_chains ?? []).flatMap(chain => chain.turns ?? []).filter(turn => turn.speaker.trim() && turn.line.trim()).map(turn => `${turn.speaker}：${turn.line}`).join('\n')} /></label></div>
-          <div className="full"><label className="f">主线剧情点（每行一条）<textarea rows={5} value={(draft.key_plot_points ?? []).join('\n')} onChange={event => updateScript({ key_plot_points: splitLines(event.target.value) })} /></label></div>
-        </div>
-      )}
-
-      {section === 'scenes' && (
-        <div className="card screenplay-editor-section">
-          <div className="structured-section-head"><b>场次结构</b><span>每个字段独立存储；正文中的 | 只是普通字符。</span><button className="btn small" type="button" onClick={() => updateScript({ scene_outline: [...scenes, { scene_no: scenes.length + 1, scene_heading: '', story_function: '', summary: '', conflict: '', turn: '', source_basis: '', entry_state: '', exit_state: '', context_requirements: [], characters: [] }] })}>新增场次</button></div>
-          <div className="structured-list">
-            {scenes.map((scene, index) => (
-              <article className="structured-row" key={`${scene.scene_no}-${index}`}>
-                <header><b>场 {index + 1}</b><StructuredListActions index={index} length={scenes.length} onMove={direction => updateScript({ scene_outline: moveItem(scenes, index, direction).map((item, itemIndex) => ({ ...item, scene_no: itemIndex + 1 })) })} onDelete={() => updateScript({ scene_outline: scenes.filter((_, itemIndex) => itemIndex !== index).map((item, itemIndex) => ({ ...item, scene_no: itemIndex + 1 })) })} /></header>
-                <SceneFields scene={scene} update={patch => updateScript({ scene_outline: scenes.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item) })} />
-              </article>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {section === 'evidence' && (
-        <div className="card script-editor editing">
-          <div className="full"><label className="f">原文依据<textarea rows={5} value={draft.source_basis ?? ''} onChange={event => updateScript({ source_basis: event.target.value })} /></label></div>
-          <div className="full">
-            <div className="structured-section-head"><b>主要人物状态变化</b><button className="btn small" type="button" onClick={() => updateScript({ character_state_changes: [...stateChanges, ''] })}>新增状态</button></div>
-            <div className="structured-list compact">
-              {stateChanges.map((value, index) => (
-                <article className="structured-row" key={`state-${index}`}>
-                  <header><b>状态 {index + 1}</b><StructuredListActions index={index} length={stateChanges.length} onMove={direction => updateScript({ character_state_changes: moveItem(stateChanges, index, direction) })} onDelete={() => updateScript({ character_state_changes: stateChanges.filter((_, itemIndex) => itemIndex !== index) })} /></header>
-                  <textarea rows={2} aria-label={`人物状态变化 ${index + 1}`} value={value} onChange={event => updateScript({ character_state_changes: stateChanges.map((item, itemIndex) => itemIndex === index ? event.target.value : item) })} />
-                </article>
-              ))}
-            </div>
-          </div>
-          <div><label className="f">情绪曲线<textarea rows={3} value={draft.emotional_curve ?? ''} onChange={event => updateScript({ emotional_curve: event.target.value })} /></label></div>
-          <div><label className="f">结尾钩子<textarea rows={3} value={draft.ending_hook ?? ''} onChange={event => updateScript({ ending_hook: event.target.value })} /></label></div>
-          <div className="full"><label className="f">改编方向<textarea rows={3} value={draft.adaptation_direction ?? ''} onChange={event => updateScript({ adaptation_direction: event.target.value })} /></label></div>
-          <div><label className="f">开端摘要<textarea rows={2} value={draft.opening ?? ''} onChange={event => updateScript({ opening: event.target.value })} /></label></div>
-          <div><label className="f">发展摘要<textarea rows={2} value={draft.development ?? ''} onChange={event => updateScript({ development: event.target.value })} /></label></div>
-          <div><label className="f">冲突摘要<textarea rows={2} value={draft.conflict ?? ''} onChange={event => updateScript({ conflict: event.target.value })} /></label></div>
-          <div><label className="f">高潮摘要<textarea rows={2} value={draft.climax ?? ''} onChange={event => updateScript({ climax: event.target.value })} /></label></div>
-        </div>
-      )}
-      </div>
-    </section>
-  )
-}
-
-function DialogueChainsEditor({
-  chains,
-  onChange,
-}: {
-  chains: KeyDialogueChain[]
-  onChange: (chains: KeyDialogueChain[]) => void
-}) {
-  const updateChain = (index: number, patch: Partial<KeyDialogueChain>) => {
-    onChange(chains.map((chain, chainIndex) => chainIndex === index ? { ...chain, ...patch } : chain))
-  }
-  return (
-    <div className="structured-list dialogue-chain-list">
-      {chains.map((chain, chainIndex) => (
-        <article className="structured-row" key={`${chain.chain_id}-${chainIndex}`}>
-          <header>
-            <b>{chain.chain_id || `DC${chainIndex + 1}`}</b>
-            <StructuredListActions
-              index={chainIndex}
-              length={chains.length}
-              onMove={direction => onChange(moveItem(chains, chainIndex, direction))}
-              onDelete={() => onChange(chains.filter((_, index) => index !== chainIndex))}
-            />
-          </header>
-          <div className="structured-fields">
-            <label>对白链编号<input value={chain.chain_id} onChange={event => updateChain(chainIndex, { chain_id: event.target.value })} /></label>
-            <label>同一话题<input value={chain.topic} onChange={event => updateChain(chainIndex, { topic: event.target.value })} /></label>
-          </div>
-          <div className="structured-list compact">
-            {(chain.turns ?? []).map((turn, turnIndex) => (
-              <article className="structured-row" key={`${chain.chain_id}-turn-${turnIndex}`}>
-                <header>
-                  <b>话轮 {turnIndex + 1}</b>
-                  <StructuredListActions
-                    index={turnIndex}
-                    length={chain.turns.length}
-                    onMove={direction => updateChain(chainIndex, { turns: moveItem(chain.turns, turnIndex, direction) })}
-                    onDelete={() => updateChain(chainIndex, { turns: chain.turns.filter((_, index) => index !== turnIndex) })}
-                  />
-                </header>
-                <div className="structured-fields">
-                  <label>说话人<input value={turn.speaker} onChange={event => updateChain(chainIndex, { turns: chain.turns.map((item, index) => index === turnIndex ? { ...item, speaker: event.target.value } : item) })} /></label>
-                  <label>功能
-                    <select value={turn.function} onChange={event => updateChain(chainIndex, { turns: chain.turns.map((item, index) => index === turnIndex ? { ...item, function: event.target.value } : item) })}>
-                      <option value="trigger">触发</option><option value="announcement">宣布</option>
-                      <option value="question">提问</option><option value="response">回应</option>
-                      <option value="decision">决定</option><option value="statement">陈述</option>
-                    </select>
-                  </label>
-                  <label className="wide">剧本台词<textarea rows={2} value={turn.line} onChange={event => updateChain(chainIndex, { turns: chain.turns.map((item, index) => index === turnIndex ? { ...item, line: event.target.value } : item) })} /></label>
-                  <label className="wide">原文台词依据<textarea rows={2} value={turn.source_text} onChange={event => updateChain(chainIndex, { turns: chain.turns.map((item, index) => index === turnIndex ? { ...item, source_text: event.target.value } : item) })} /></label>
-                </div>
-              </article>
-            ))}
-          </div>
-          <button className="btn small" type="button" onClick={() => updateChain(chainIndex, {
-            turns: [...(chain.turns ?? []), { speaker: '', line: '', function: 'statement', source_text: '' }],
-          })}>新增话轮</button>
-        </article>
-      ))}
-      <button className="btn" type="button" onClick={() => onChange([
-        ...chains,
-        { chain_id: `DC${chains.length + 1}`, topic: '', turns: [] },
-      ])}>新增对白链</button>
-    </div>
-  )
-}
-
-function SceneFields({ scene, update }: { scene: ScriptScene; update: (patch: Partial<ScriptScene>) => void }) {
-  return (
-    <div className="structured-fields scene-fields">
-      <label>场次标题<input value={scene.scene_heading} onChange={event => update({ scene_heading: event.target.value })} /></label>
-      <label>本场功能<input value={scene.story_function} onChange={event => update({ story_function: event.target.value })} /></label>
-      <label className="wide">本场内容<textarea rows={3} value={scene.summary} onChange={event => update({ summary: event.target.value })} /></label>
-      <label>冲突<textarea rows={2} value={scene.conflict ?? ''} onChange={event => update({ conflict: event.target.value })} /></label>
-      <label>转折 / 交接<textarea rows={2} value={scene.turn ?? ''} onChange={event => update({ turn: event.target.value })} /></label>
-      <label className="wide">入场状态<textarea rows={2} value={scene.entry_state ?? ''} onChange={event => update({ entry_state: event.target.value })} /></label>
-      <label className="wide">离场状态<textarea rows={2} value={scene.exit_state ?? ''} onChange={event => update({ exit_state: event.target.value })} /></label>
-      <label className="wide">必须建立的上下文（每行一项）<textarea rows={3} value={(scene.context_requirements ?? []).join('\n')} onChange={event => update({ context_requirements: event.target.value.split('\n').map(value => value.trim()).filter(Boolean) })} /></label>
-      <label className="wide">原文依据<textarea rows={2} value={scene.source_basis ?? ''} onChange={event => update({ source_basis: event.target.value })} /></label>
-      <label className="wide">角色（顿号或逗号分隔）<input value={(scene.characters ?? []).join('、')} onChange={event => update({ characters: event.target.value.split(/[、,，/]/).map(value => value.trim()).filter(Boolean) })} /></label>
-    </div>
-  )
-}
-
-function ReaderPagination({
-  label,
-  page,
-  pageCount,
-  summary,
-  onPage,
-}: {
-  label: string
-  page: number
-  pageCount: number
-  summary: string
-  onPage: (page: number) => void
-}) {
-  return (
-    <nav className="script-reader-pagination" aria-label={`${label}分页`}>
-      <button
-        className="btn small ghost"
-        type="button"
-        disabled={page <= 0}
-        aria-label={page <= 0 ? `${label}上一页，暂不可用：当前已是第一页` : `${label}上一页`}
-        onClick={() => onPage(page - 1)}
-      >← 上一页</button>
-      <span aria-live="polite">第 {page + 1} / {pageCount} 页 · {summary}</span>
-      <button
-        className="btn small ghost"
-        type="button"
-        disabled={page >= pageCount - 1}
-        aria-label={page >= pageCount - 1 ? `${label}下一页，暂不可用：当前已是最后一页` : `${label}下一页`}
-        onClick={() => onPage(page + 1)}
-      >下一页 →</button>
-    </nav>
-  )
-}
-
-function ScreenplayReader({
-  script,
-  epTitle,
-  expanded,
-  setExpanded,
-  search,
-  setSearch,
-  manuscriptRef,
-  exportScript,
-  toast,
-  structureItems,
-}: {
-  script: EpisodeScreenplay
-  epTitle: string
-  expanded: boolean
-  setExpanded: (value: boolean) => void
-  search: string
-  setSearch: (value: string) => void
-  manuscriptRef: React.RefObject<HTMLDivElement>
-  exportScript: () => void
-  toast: (message: string, error?: boolean) => void
-  structureItems: Array<(string | undefined)[]>
-}) {
-  const spine = script.plot_spine
-  const manuscriptText = script.full_script_text || '暂无完整剧本文本'
-  const spinePages = useMemo(() => spine ? paginateSpine(spine) : [], [spine])
-  const keyLinePages = useMemo(() => paginateItems(script.key_lines ?? [], 6), [script.key_lines])
-  const manuscriptPages = useMemo(() => paginateManuscript(manuscriptText), [manuscriptText])
-  const [spinePage, setSpinePage] = useState(0)
-  const [keyLinePage, setKeyLinePage] = useState(0)
-  const [manuscriptPage, setManuscriptPage] = useState(0)
-  const spinePageRef = useRef<HTMLDivElement>(null)
-  const keyLinePageRef = useRef<HTMLDivElement>(null)
-  const safeSpinePage = Math.min(spinePage, Math.max(0, spinePages.length - 1))
-  const safeKeyLinePage = Math.min(keyLinePage, Math.max(0, keyLinePages.length - 1))
-  const safeManuscriptPage = Math.min(manuscriptPage, Math.max(0, manuscriptPages.length - 1))
-  const currentSpineItems = spinePages[safeSpinePage] ?? []
-  const currentPremise = currentSpineItems.find(item => item.kind === 'premise')
-  const currentEnding = currentSpineItems.find(item => item.kind === 'ending')
-  const currentBeats = currentSpineItems.flatMap(item => item.kind === 'beat' ? [item] : [])
-  const currentDrops = currentSpineItems.flatMap(item => item.kind === 'drop' ? [item] : [])
-  const query = search.trim().toLowerCase()
-  // 整份正文的 toLowerCase + split 原本写在 render 体里，阅读器的每一次重渲染
-  // （翻页、轮询回包、父组件更新）都会重算一遍全文。
-  const matches = useMemo(
-    () => (query ? (script.full_script_text ?? '').toLowerCase().split(query).length - 1 : 0),
-    [query, script.full_script_text],
-  )
-
-  useEffect(() => {
-    setSpinePage(0)
-    setKeyLinePage(0)
-    setManuscriptPage(0)
-  }, [script.episode_no])
-
-  useEffect(() => {
-    if (!query) return
-    const matchIndex = manuscriptText.toLowerCase().indexOf(query)
-    let pageStart = 0
-    const matchPage = manuscriptPages.findIndex(page => {
-      const containsMatch = matchIndex >= pageStart && matchIndex < pageStart + page.length
-      pageStart += page.length
-      return containsMatch
-    })
-    if (matchPage >= 0) setManuscriptPage(matchPage)
-  }, [manuscriptPages, manuscriptText, query])
-
-  useEffect(() => {
-    if (spinePageRef.current) spinePageRef.current.scrollTop = 0
-  }, [safeSpinePage])
-
-  useEffect(() => {
-    if (keyLinePageRef.current) keyLinePageRef.current.scrollTop = 0
-  }, [safeKeyLinePage])
-
-  useEffect(() => {
-    if (manuscriptRef.current) manuscriptRef.current.scrollTop = 0
-  }, [manuscriptRef, safeManuscriptPage])
+  const events = useMemo(() => sortedEventChain(pack.event_chain), [pack.event_chain])
+  const gate = useMemo(() => coverageGateSummary(pack.coverage_ledger), [pack.coverage_ledger])
+  const characters = pack.asset_manifest?.characters ?? []
+  const scenes = pack.asset_manifest?.scenes ?? []
+  const functionalExtras = pack.asset_manifest?.functional_extras ?? []
+  const scopeText = pack.episode_scope?.chapter_indexes?.length
+    ? sourceRangeText(pack.episode_scope.chapter_indexes)
+    : sourceFallback
+  const coveredSegments = gate.totalSegments
+    || gate.deliveredCount + gate.mergedCount + gate.retainedCount + gate.duplicateCount
 
   return (
     <>
-      {spine && (
-        <section className="card spine-card" id="script-spine">
-          <details open>
-            <summary><b>主线骨架</b><span>保留本集故事主线；排除内容默认不拍</span></summary>
-            <div className="script-paged-frame spine-paged-frame">
-              <div ref={spinePageRef} className="shot-body script-paged-content">
-                {currentPremise?.kind === 'premise' && <div className="kv full"><b>本集前提</b>{currentPremise.text}</div>}
-                {!!currentBeats.length && <div className="kv full"><b>主线节拍 · 第 {currentBeats[0].index + 1}–{currentBeats[currentBeats.length - 1].index + 1} 项</b><ol className="spine-beat-list" start={currentBeats[0].index + 1}>{currentBeats.map(({ beat, index }) => <li key={beat.beat_id || index}><code>{beat.beat_id || `S${index + 1}`}</code><span>{beat.who}｜{beat.does}→{beat.turn}</span>{beat.must_keep === false && <em className="spine-optional">可删过渡</em>}</li>)}</ol></div>}
-                {currentEnding?.kind === 'ending' && <div className="kv full"><b>必须收束</b>{currentEnding.text}</div>}
-                {!!currentDrops.length && <div className="kv full"><b>本集不拍 · 第 {currentDrops[0].index + 1}–{currentDrops[currentDrops.length - 1].index + 1} 项</b><ul className="key-list drop-list">{currentDrops.map(item => <li key={item.index}>{item.text}</li>)}</ul></div>}
+      {/* 门禁状态灯：全宽细条带，不占大块版面 */}
+      <div className={`prep-gate-strip ${gate.ok ? 'ok' : 'blocked'}`} role="status">
+        <span className="prep-gate-strip-icon" aria-hidden="true">{gate.ok ? '✓' : '!'}</span>
+        <strong>{gate.ok
+          ? `全部原文段已覆盖（${coveredSegments}/${coveredSegments} 段）`
+          : `原文覆盖门禁未通过 · 缺失 ${gate.uncoveredCount} 段`}</strong>
+        <span className="prep-gate-strip-chips">
+          <span className="prep-gate-chip">已交付 {gate.deliveredCount}</span>
+          <span className="prep-gate-chip">已合并 {gate.mergedCount}</span>
+          <span className="prep-gate-chip">保留上下文 {gate.retainedCount}</span>
+          <span className="prep-gate-chip">判定重复 {gate.duplicateCount}</span>
+        </span>
+      </div>
+      {!gate.ok && (
+        <p className="prep-gate-missing">缺失原文段索引：{gate.uncoveredLabels.join('、') || '未知'}</p>
+      )}
+
+      {/* 主体两栏：左 2/3 事件链（含末尾 hook/cliffhanger），右 1/3 粘性侧栏 */}
+      <div className="prep-pack-layout">
+        <div className="prep-pack-main">
+          <section className="card">
+            <div className="card-heading-row"><h3>事件链<span className="hint">{events.length} 个事件 · 按剧情顺序</span></h3></div>
+            {events.length ? (
+              <ol className="prep-timeline">
+                {events.map(event => {
+                  const span = formatSourceSpan(event.source_span)
+                  return (
+                    <li key={event.event_id || event.order} className="prep-timeline-item">
+                      <span className="prep-timeline-marker" aria-hidden="true">{event.order}</span>
+                      <details className="prep-timeline-details">
+                        <summary className="prep-timeline-summary">
+                          <span className="prep-timeline-headline">{event.summary || '（未填写事件概述）'}</span>
+                          {span && <span className="prep-timeline-span">{span}</span>}
+                        </summary>
+                        <div className="prep-timeline-body">
+                          <div>
+                            <b>原文依据</b>
+                            {event.source_evidence?.length ? (
+                              <ul className="prep-timeline-quotes">
+                                {event.source_evidence.map((item, index) => (
+                                  <li key={index}>“{item.quote}”<span className="prep-timeline-idx">#{item.segment_index}</span></li>
+                                ))}
+                              </ul>
+                            ) : <span>无</span>}
+                          </div>
+                          <div>
+                            <b>关键台词</b>
+                            {event.key_lines?.length ? (
+                              <ul className="prep-timeline-lines">
+                                {event.key_lines.map((line, index) => (
+                                  <li key={index}>{line.speaker}：{line.line}<span className="prep-timeline-idx">#{line.segment_index}</span></li>
+                                ))}
+                              </ul>
+                            ) : <span>无</span>}
+                          </div>
+                        </div>
+                      </details>
+                    </li>
+                  )
+                })}
+              </ol>
+            ) : <p className="prep-empty-hint">本集准备包尚无事件</p>}
+          </section>
+
+          <section className="card">
+            <div className="card-heading-row"><h3>Hook / Cliffhanger<span className="hint">集级叙事钩子</span></h3></div>
+            <div className="prep-quote-grid">
+              <div className={`prep-quote-card ${pack.hook ? '' : 'empty'}`}>
+                <b>Hook</b>
+                <p>{pack.hook || '（空）'}</p>
               </div>
-              <ReaderPagination
-                label="主线骨架"
-                page={safeSpinePage}
-                pageCount={Math.max(1, spinePages.length)}
-                summary={`共 ${spinePages.flat().length} 项`}
-                onPage={setSpinePage}
-              />
+              <div className={`prep-quote-card ${pack.cliffhanger ? '' : 'empty'}`}>
+                <b>Cliffhanger</b>
+                <p>{pack.cliffhanger || '（空）'}</p>
+              </div>
             </div>
-          </details>
-        </section>
-      )}
-      {!!script.source_coverage?.length && (
-        <><div className="workspace-gap" /><section className="card">
-          <details><summary><b>原文交付覆盖</b><span>{script.source_coverage.length} 个原文段均有明确去向</span></summary>
-            <div className="shot-body"><ul className="key-list">{script.source_coverage.map(item => <li key={item.source_segment_id}><code>{item.source_segment_id}</code> · {item.disposition} · {item.beat_ids?.join('、') || item.duplicate_of || item.reason || '作为上下文保留'}</li>)}</ul></div>
-          </details>
-        </section></>
-      )}
-      <div className="workspace-gap" />
-      <section className="card script-editor">
-        <div className="kv full"><b>标题</b>{script.title || epTitle}</div>
-        <div className="kv full"><b>本集一句话梗概</b>{script.logline}</div>
-        {!!script.key_lines?.length && <div className="kv full script-paged-module key-lines-module">
-          <div className="script-paged-heading"><b>主线台词</b><span>{script.key_lines.length} 条</span></div>
-          <div className="script-paged-frame key-lines-paged-frame">
-            <div ref={keyLinePageRef} className="script-paged-content">
-              <ul className="key-list">{(keyLinePages[safeKeyLinePage] ?? []).map((item, index) => <li key={safeKeyLinePage * 6 + index}>{item}</li>)}</ul>
-            </div>
-            <ReaderPagination
-              label="主线台词"
-              page={safeKeyLinePage}
-              pageCount={Math.max(1, keyLinePages.length)}
-              summary={`共 ${script.key_lines.length} 条`}
-              onPage={setKeyLinePage}
-            />
-          </div>
-        </div>}
-        <div className={`kv full script-manuscript-section ${expanded ? 'expanded' : 'collapsed'}`}>
-          <div className="script-manuscript-head">
-            <div><b>完整剧本文本</b><span>{(script.full_script_text ?? '').length.toLocaleString()} 字 · {(script.full_script_text ?? '').split('\n').filter(Boolean).length} 行</span></div>
-            <div className="manuscript-tools">
-              <input type="search" value={search} onChange={event => { setSearch(event.target.value); setExpanded(true) }} placeholder="搜索全文" aria-label="搜索剧本正文" />
-              {search && <span>{matches} 处</span>}
-              <button className="btn small ghost" type="button" onClick={() => navigator.clipboard.writeText(script.full_script_text ?? '').then(() => toast('剧本正文已复制'))}>复制</button>
-              <button className="btn small ghost" type="button" onClick={exportScript}>导出</button>
-              <button type="button" className="script-manuscript-toggle" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? '收起全文 ↑' : '展开全文 ↓'}</button>
-            </div>
-          </div>
-          {expanded ? <div className="script-paged-frame manuscript-paged-frame">
-            <div ref={manuscriptRef} className="script-manuscript script-paged-content"><HighlightedText text={manuscriptPages[safeManuscriptPage] ?? manuscriptText} query={search} /></div>
-            <ReaderPagination
-              label="完整剧本文本"
-              page={safeManuscriptPage}
-              pageCount={Math.max(1, manuscriptPages.length)}
-              summary={`共 ${(script.full_script_text ?? '').length.toLocaleString()} 字`}
-              onPage={setManuscriptPage}
-            />
-          </div> : <button type="button" className="script-manuscript-collapsed" onClick={() => setExpanded(true)}><span>正文已收起</span><small>点击展开并阅读完整剧本</small></button>}
+          </section>
         </div>
-        <div className="kv"><b>情绪曲线说明</b>{script.emotional_curve}</div>
-        <div className="kv"><b>结尾钩子</b>{script.ending_hook}</div>
-        <div className="kv full"><b>原文依据</b>{script.source_basis}</div>
-      </section>
 
-      {!!script.scene_outline?.length && <><div className="workspace-gap" /><section className="card"><details open><summary><b>场次结构</b><span>可跳转到正文对应场次</span></summary><div className="scene-outline-grid">{script.scene_outline.map(scene => <article key={scene.scene_no} className="scene-outline-card"><div className="scene-outline-head"><span className="sn">场{scene.scene_no}</span><span className="meta">{scene.scene_heading}</span><button className="btn small ghost" onClick={() => { setExpanded(true); setSearch(scene.scene_heading); window.setTimeout(() => manuscriptRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0) }}>跳转正文</button></div><div className="scene-outline-body"><div className="kv full"><b>本场功能</b>{scene.story_function}</div><div className="kv full"><b>本场内容</b>{scene.summary}</div>{scene.entry_state && <div className="kv full"><b>入场状态</b>{scene.entry_state}</div>}{scene.context_requirements?.length ? <div className="kv full"><b>上下文要求</b>{scene.context_requirements.join('；')}</div> : null}{scene.exit_state && <div className="kv full"><b>离场状态</b>{scene.exit_state}</div>}{scene.conflict && <div className="kv"><b>冲突</b>{scene.conflict}</div>}{scene.turn && <div className="kv"><b>转折 / 交接</b>{scene.turn}</div>}{scene.source_basis && <div className="kv full"><b>原文依据</b>{scene.source_basis}</div>}</div></article>)}</div></details></section></>}
+        <aside className="prep-pack-sidebar">
+          <section className="card prep-scope-card">
+            <h3 className="prep-sidebar-heading">本集范围</h3>
+            <p>{scopeText}</p>
+            <p className="prep-sidebar-meta">原文段 {pack.episode_scope?.source_segment_count ?? '—'} 段</p>
+          </section>
 
-      {structureItems.length > 0 && <><div className="workspace-gap" /><section className="card auxiliary-structure"><details><summary><b>辅助结构</b><span>与主线 / 场次重复的内容默认折叠</span></summary><div className="shot-body">{structureItems.map(([label, value]) => <div key={label} className="kv full"><b>{label}</b>{value}</div>)}</div></details></section></>}
+          <section className="card">
+            <h3 className="prep-sidebar-heading">出场角色 · {characters.length}</h3>
+            <div className="prep-roster">
+              {characters.map(character => {
+                const imageUrl = findPortraitImage(bible, character.portrait_id)
+                const name = character.display_name || character.identity_id || '未命名角色'
+                const aliases = character.aliases?.filter(alias => alias.trim()) ?? []
+                return (
+                  <div className="prep-roster-item" key={character.identity_id || character.display_name}>
+                    {imageUrl
+                      ? <img className="prep-roster-thumb" src={imageUrl} alt={name} loading="lazy" decoding="async" />
+                      : <div className="prep-roster-thumb-empty" aria-hidden="true">无图</div>}
+                    <div className="prep-roster-body">
+                      <span className="prep-roster-name">
+                        <span className="prep-roster-name-text">{name}</span>
+                        {!!aliases.length && (
+                          <span className="prep-roster-alias" title="本集称谓">{aliases.join('、')}</span>
+                        )}
+                      </span>
+                      <span className="prep-roster-meta">覆盖 {character.event_ids?.length ?? 0} 个事件</span>
+                    </div>
+                  </div>
+                )
+              })}
+              {!characters.length && <p className="prep-empty-hint">未列出出场角色</p>}
+            </div>
+          </section>
+
+          {!!functionalExtras.length && (
+            <section className="card">
+              <h3 className="prep-sidebar-heading">群演 / 一次性人物 · {functionalExtras.length}</h3>
+              <div className="prep-roster">
+                {functionalExtras.map((extra, index) => (
+                  <div className="prep-roster-item" key={`${extra.label || 'extra'}-${index}`}>
+                    {/* 群演没有定妆照是设计使然（不进人物谱身份体系），不是数据缺失，
+                        用统一占位图标而不是"无图"——那个措辞是给真正缺图的具名角色用的。 */}
+                    <div className="prep-roster-icon" aria-hidden="true">👤</div>
+                    <div className="prep-roster-body">
+                      <span className="prep-roster-name"><span className="prep-roster-name-text">{extra.label || '未命名群演'}</span></span>
+                      <span className="prep-roster-meta">覆盖 {extra.event_ids?.length ?? 0} 个事件</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          <section className="card">
+            <h3 className="prep-sidebar-heading">出场场景 · {scenes.length}</h3>
+            <div className="prep-roster">
+              {scenes.map(scene => {
+                const imageUrl = findSceneReferenceImage(bible, scene.scene_reference_id)
+                const name = scene.display_name || scene.scene_id || '未命名场景'
+                return (
+                  <div className="prep-roster-item" key={scene.scene_id || scene.display_name}>
+                    {imageUrl
+                      ? <img className="prep-roster-thumb" src={imageUrl} alt={name} loading="lazy" decoding="async" />
+                      : <div className="prep-roster-thumb-empty" aria-hidden="true">无图</div>}
+                    <div className="prep-roster-body">
+                      <span className="prep-roster-name"><span className="prep-roster-name-text">{name}</span></span>
+                      <span className="prep-roster-meta">覆盖 {scene.event_ids?.length ?? 0} 个事件</span>
+                    </div>
+                  </div>
+                )
+              })}
+              {!scenes.length && <p className="prep-empty-hint">未列出场景</p>}
+            </div>
+          </section>
+        </aside>
+      </div>
     </>
   )
 }

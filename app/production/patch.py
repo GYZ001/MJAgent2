@@ -542,12 +542,20 @@ def _assert_screenplay_artifact_contract(
     content: object,
 ) -> None:
     from app.production.screenplay_authority import (
+        screenplay_contract_is_prep_pack,
         screenplay_contract_requires_narrative,
         screenplay_contract_tracks_bible_projection,
     )
 
     artifact_contract = str(art.get("contract_version") or "")
     requires_narrative = screenplay_contract_requires_narrative(artifact_contract)
+    if not requires_narrative and screenplay_contract_is_prep_pack(artifact_contract):
+        # Explicit contract self-declaration (major >= 6, episode_prep_pack)
+        # must not be second-guessed by _historical_screenplay_artifact_is_bound's
+        # proxy below -- that proxy is only meaningful for legacy rows with a
+        # missing/old contract_version. See screenplay_contract_is_prep_pack's
+        # docstring for the real-EP1-output evidence this short-circuit fixes.
+        return
     requires_current_lineage = screenplay_contract_tracks_bible_projection(
         artifact_contract
     )

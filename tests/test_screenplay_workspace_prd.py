@@ -1130,19 +1130,69 @@ def test_1646_episode_picker_and_light_status_reduce_minute_payload_over_80_perc
 
 
 def test_script_page_has_pure_navigation_and_no_pipe_parser() -> None:
+    """剧本台整改 PRD 的前端契约锁——转型后改锁准备包页面的真实不变量。
+
+    旧断言逐字锁死的是转型前的重型剧本页面（十步阶段带、shard_progress 场次写作
+    进度等）；ScriptPage.tsx 已按冻结方案整体重写为 episode_prep_pack 只读视图，
+    那些字面量在源码里已经不存在，锁旧字面量等于锁一个已经不存在的页面。这里换成
+    仍然适用的负向防回归 + 准备包页面真正要守住的新不变量，每条锁什么在注释里写明。
+    """
     source = Path("frontend/src/pages/ScriptPage.tsx").read_text(encoding="utf-8")
-    assert "split('|')" not in source
-    assert "window.confirm(`确认恢复" not in source
-    assert "查看分镜台 →" in source
-    assert "go('board', projectId, ep.id)" in source
-    assert "storyboardTaskNotice" not in source
-    assert "EpisodeStatusStamp" not in source
+
+    # ---- 仍然适用的负向防回归：这些旧问题模式与页面具体形状无关，不该再出现 ----
+    assert "split('|')" not in source, "结构化字段不得靠 | 分隔符土解析"
+    assert "window.confirm(`确认恢复" not in source, "内容相关弹窗不得用原生 window.confirm"
+    assert "storyboardTaskNotice" not in source, "分镜任务通知是分镜台职责，不属于剧本台"
+    assert "EpisodeStatusStamp" not in source, "剧本台状态用 ScreenplayStatusStamp，非分集级状态章"
     assert "分镜生成未完成" not in source
     assert "查看分镜错误详情" not in source
     assert "必保留原文台词" not in source
     assert "/target-duration" not in source
     assert "required_dialogue" not in source
+
+    # ---- 决策③：三道内容质量人工确认门已整体移除；这三个是旧编辑态"预览-确认发布"
+    #      体系的标志性符号，出现即说明该门禁 UI 被重新引入 ----
+    assert "预览影响并发布" not in source, "剧本发布前的人工内容确认门不应回归"
+    assert "screenplay-save" not in source, "旧发布差异预览弹窗的 kind 判别值不应回归"
+    assert "classifyScreenplayWriteError" not in source, "旧编辑态写错误分类器不应回归"
+
+    # ---- 通往分镜台的出口：两轮改造都没有动这条主导航路径 ----
+    assert "查看分镜台 →" in source
+    assert "go('board', projectId, ep.id)" in source
+
+    # ---- 阶段带不得硬编码旧十步重型流水线的具体阶段名；新阶段带完全由后端下发的
+    #      真实阶段列表驱动渲染（"结构校验"/"已完成" 在新页面里另有合法用途——分别是
+    #      续跑摘要文案与状态标签的合法取值，不在此列，避免锁出假阳性）----
+    for legacy_stage_name in (
+        "人物识别", "叙事蓝图", "身份冻结", "全局包络",
+        "场次写作", "全局编译", "质量评分", "原子发布",
+    ):
+        assert legacy_stage_name not in source, f"旧十步阶段名硬编码回来了：{legacy_stage_name}"
+    # shard_progress 是旧场次分片流水线专属的进度指标，准备包视图不再展示它
+    assert "shard_progress" not in source
+
+    # ---- 新准备包页面的正向契约：本轮真正要守住的新不变量 ----
+    # 阶段列表选源：已定稿的 prep_pack_stages（轻量流程真实阶段）优先于旧 stages
+    assert "resolveStages" in source
+    assert "prep_pack_stages" in source
+    # 阶段文本三级回退（display_name -> label -> key）与状态双读（state -> status），
+    # 防止后端渐进上线两种字段名并存期间渲出空文本（对应 2026-08-24 的 #310 前一次事故）
+    assert "normalizeStage" in source
+    assert "stage.display_name || ''" in source
+    assert "stage.label || ''" in source
+    assert "stage.state || ''" in source
+    assert "stage.status || ''" in source
+    # 旧产物（转型前）兼容：不按旧形状硬渲染，只给"需要重新生成"占位，不许崩溃
+    assert "isPrepPack" in source
+    assert "旧版产物" in source
+    # 门禁状态灯 / 事件链时间线 / 两栏版式：准备包视图三块核心渲染入口仍在
+    assert "prep-gate-strip" in source
+    assert "prep-timeline" in source
+    assert "prep-pack-layout" in source
+    # 紧凑步进器：取代旧十步大灰框的渲染入口
+    assert "prep-stepper" in source
+
+    # ---- 生产任务续跑摘要：这两条文案属于"继续生成任务"而非"编辑内容"，两轮改造
+    #      都刻意保留（对应 screenplayResumeActionLabel 的返回值）----
     assert "继续首版场次生成" in source
     assert "继续完整剧本校验" in source
-    assert "场次写作已完成 {ep.screenplay_production.shard_progress.validated}/" in source
-    assert "shard_progress" in source

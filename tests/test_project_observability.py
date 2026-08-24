@@ -299,7 +299,7 @@ def test_trace_labels_hide_technical_keys_but_keep_them_in_metadata() -> None:
     assert observability_api._trace_step_label("screenplay_envelope") == "规划全剧叙事框架"
     assert observability_api._trace_step_label("screenplay_scene_shards") == "逐场撰写剧本"
     assert observability_api._trace_step_label("screenplay_merge") == "合并并校验完整剧本"
-    assert observability_api._trace_step_label("screenplay_document") == "生成并验收完整剧本"
+    assert observability_api._trace_step_label("screenplay_document") == "生成并验收分集准备包"
     assert (
         observability_api._trace_step_label("storyboard_shot_12.iteration", 2)
         == "生成第12镜分镜"

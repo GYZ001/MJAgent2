@@ -6,7 +6,7 @@ import { useNav, usePoll, useProject } from '../App'
 import { ServerTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
-import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
+import type { ImpactSummary } from '../components/harness/ImpactDialog'
 import PaymentConfirmDialog from '../components/PaymentConfirmDialog'
 import GenerationParamsDialog from '../components/GenerationParamsDialog'
 import QueryState from '../components/QueryState'
@@ -389,7 +389,7 @@ function promptSegments(prompt: string | undefined): { label: string; text: stri
 
 export default function BiblePage() {
   const { projectId, toast, go, registerNavigationGuard } = useNav()
-  const { data: p, refresh, error, loading } = useProject(projectId!, undefined, 'bible')
+  const { data: p, refresh, error, status, loading } = useProject(projectId!, undefined, 'bible')
   const [editing, setEditing] = useState<Bible | null>(null)
   const [editBaseVersion, setEditBaseVersion] = useState<number | null>(null)
   const [editBaseBible, setEditBaseBible] = useState<Bible | null>(null)
@@ -410,10 +410,6 @@ export default function BiblePage() {
   const [timelineCharacter, setTimelineCharacter] = useState('')
   const [skipConfirm, setSkipConfirm] = useState<{ count: number; names: string[] } | null>(null)
   const [stopConfirm, setStopConfirm] = useState(false)
-  const [impactOpen, setImpactOpen] = useState(false)
-  const [impactLoading, setImpactLoading] = useState(false)
-  const [impactError, setImpactError] = useState<string | null>(null)
-  const [impactPreview, setImpactPreview] = useState<BibleImpactPreview | null>(null)
   const [conflict, setConflict] = useState<{
     message: string
     current_version?: number
@@ -433,8 +429,6 @@ export default function BiblePage() {
   const [styleError, setStyleError] = useState<string | null>(null)
   const [styleOptions, setStyleOptions] = useState<VisualStyleOption[]>([])
   const [selectedStyle, setSelectedStyle] = useState('')
-  const [impactMode, setImpactMode] = useState<'bible' | 'character'>('bible')
-  const [pendingCharacterSave, setPendingCharacterSave] = useState<{ name: string; character: Character } | null>(null)
   const editingRef = useRef<Bible | null>(null)
 
   const biblePreview = editing ?? p?.bible
@@ -601,7 +595,7 @@ export default function BiblePage() {
     } catch { /* local backup is best-effort */ }
   }, [projectId, editing, dirty, currentEditVersion])
 
-  if (error && !p) return <QueryState loading={false} error={error} hasData={false} objectName="人物谱" onRetry={refresh}>{null}</QueryState>
+  if (error && !p) return <QueryState loading={false} error={error} status={status} hasData={false} objectName="人物谱" onRetry={refresh}>{null}</QueryState>
   if (!p) return <QueryState loading={loading !== false} error={null} hasData={false} objectName="人物谱" onRetry={refresh}>{null}</QueryState>
 
   const act = async (fn: () => Promise<unknown>, doneMsg?: string) => {
@@ -868,20 +862,18 @@ export default function BiblePage() {
     }
   }
 
-  const openImpactPreview = async () => {
+  // 决策③：三道内容质量人工确认门取消。定稿人物谱不再停下来等一次额外的“批准影响”点击——
+  // 影响预检仍然照算（版本冲突等正确性问题必须能拦住），只是算完立即自动放行写入，
+  // 不再弹窗等待人工二次确认。清库/删除类破坏性操作的确认（如项目/剧本删除）不在此列，均保留。
+  const finalizeBible = async () => {
     if (!editing) return
-    setImpactMode('bible')
-    setPendingCharacterSave(null)
-    setImpactOpen(true)
-    setImpactLoading(true)
-    setImpactError(null)
-    setImpactPreview(null)
+    setBusy(true)
     try {
       const preview = await api.bibleImpactPreview(p.id, {
         bible: editing,
         expected_version: currentEditVersion,
       })
-      setImpactPreview(preview)
+      await saveBible(preview.fingerprint)
     } catch (e: unknown) {
       if (e instanceof ApiError && e.status === 409) {
         const detail = e.detail as {
@@ -893,7 +885,6 @@ export default function BiblePage() {
         } | undefined
         if (detail?.code === 'BIBLE_VERSION_CONFLICT') {
           trackBible('bible_conflict', p.id, { conflict: true, source: 'impact_preview' })
-          setImpactOpen(false)
           setConflict({
             message: detail.message || e.message,
             current_version: detail.current_version,
@@ -903,25 +894,21 @@ export default function BiblePage() {
           return
         }
       }
-      setImpactError((e as Error).message)
+      toast((e as Error).message, true)
     } finally {
-      setImpactLoading(false)
+      setBusy(false)
     }
   }
 
-  const saveBible = async () => {
-    if (!editing || !impactPreview) return
-    if (impactMode === 'character' && pendingCharacterSave) {
-      await saveCharacterDraft(pendingCharacterSave.character, impactPreview.fingerprint)
-      return
-    }
+  const saveBible = async (fingerprint: string) => {
+    if (!editing) return
     setBusy(true)
     try {
       const r = await api.put(`/projects/${p.id}/bible`, {
         bible: editing,
         expected_version: currentEditVersion,
         confirm: true,
-        impact_preview_fingerprint: impactPreview.fingerprint,
+        impact_preview_fingerprint: fingerprint,
       }) as {
         style_changed?: boolean
         purged?: { versions: number } | null
@@ -931,8 +918,6 @@ export default function BiblePage() {
       setEditBaseVersion(null)
       setEditBaseBible(null)
       setUndoStack([])
-      setImpactOpen(false)
-      setImpactPreview(null)
       try {
         window.localStorage.removeItem(bibleDraftKey(p.id, currentEditVersion))
       } catch { /* ignore */ }
@@ -952,7 +937,6 @@ export default function BiblePage() {
         } | undefined
         if (detail?.code === 'BIBLE_VERSION_CONFLICT') {
           trackBible('bible_conflict', p.id, { conflict: true, source: 'bible_save' })
-          setImpactOpen(false)
           setConflict({
             message: detail.message || e.message,
             current_version: detail.current_version,
@@ -962,8 +946,9 @@ export default function BiblePage() {
           return
         }
         if (detail?.code === 'IMPACT_PREVIEW_STALE' && detail.preview) {
-          setImpactPreview(detail.preview)
-          setImpactError('影响预检已过期，已刷新最新结果，请再次确认')
+          // 指纹在两次请求之间过期是正确性校验（防止用旧快照覆盖新写入），不是需要人工
+          // 点头的内容质量门；直接用服务端刷新出的最新指纹自动重试一次。
+          await saveBible(detail.preview.fingerprint)
           return
         }
       }
@@ -987,10 +972,6 @@ export default function BiblePage() {
       setEditing(current => current ? replaceCharacter(current, character.name, nextCharacter) : current)
       setEditBaseBible(current => current ? replaceCharacter(current, character.name, nextCharacter) : current)
       if (typeof result.bible_version === 'number') setEditBaseVersion(result.bible_version)
-      setImpactOpen(false)
-      setImpactPreview(null)
-      setPendingCharacterSave(null)
-      setImpactMode('bible')
       toast(`「${character.name}」已保存为角色级修订`)
       refresh()
     } catch (e: unknown) {
@@ -1014,11 +995,8 @@ export default function BiblePage() {
               return
             }
           }
-          setPendingCharacterSave({ name: character.name, character: cloneCharacter(character) })
-          setImpactMode('character')
-          setImpactOpen(true)
-          setImpactError(null)
-          setImpactPreview(preview)
+          // 决策③：不再弹窗等待人工点头，算完影响立即自动放行、原样重试一次写入。
+          await saveCharacterDraft(character, preview.fingerprint)
           return
         }
         if (detail?.code === 'BIBLE_VERSION_CONFLICT') {
@@ -1216,8 +1194,8 @@ export default function BiblePage() {
                 ? <button className="btn small" onClick={() => void beginRevision()}>修订人物谱</button>
                 : <>
                   <button className="btn small primary" disabled={busy}
-                    aria-label={busy ? '预览影响并定稿，暂不可用：正在处理上一项操作' : '预览影响并定稿'}
-                    onClick={() => void openImpactPreview()}>预览影响并定稿</button>
+                    aria-label={busy ? '定稿人物谱，暂不可用：正在处理上一项操作' : '定稿人物谱'}
+                    onClick={() => void finalizeBible()}>定稿人物谱</button>
                   <button className="btn small" disabled={!undoStack.length}
                     aria-label={!undoStack.length ? '撤销上次修改，暂不可用：还没有可撤销的修改' : '撤销上次修改'}
                     onClick={undoEdit}>撤销上次修改</button>
@@ -1420,22 +1398,6 @@ export default function BiblePage() {
           )}
         </section>
       )}
-      <ImpactDialog
-        open={impactOpen}
-        title={impactMode === 'character' && pendingCharacterSave
-          ? `保存「${pendingCharacterSave.name}」并传播影响`
-          : '定稿人物谱并传播影响'}
-        impact={impactPreview}
-        loading={impactLoading}
-        error={impactError}
-        onClose={() => {
-          setImpactOpen(false)
-          setImpactError(null)
-          setImpactMode('bible')
-          setPendingCharacterSave(null)
-        }}
-        onConfirm={() => { void saveBible() }}
-      />
       <PaymentConfirmDialog
         open={payOpen}
         title={payTitle}
@@ -1882,6 +1844,7 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
           <figure key={key} className="character-portrait-slide">
             <img src={imageUrl}
               alt={`${character.name} · ${portrait ? portraitVersionLabel(portrait) : '定妆照'} · ${VIEW_ROLE_LABELS[view?.view_role || ''] || view?.view_role || '正面'}`}
+              loading="lazy" decoding="async"
               style={{ opacity: fitting ? 0.45 : 1, transition: 'opacity 0.3s' }} />
             {portrait && <figcaption className="portrait-version-label">
               <span>

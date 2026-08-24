@@ -2,11 +2,18 @@
 
 Only root-level ``_*`` entries and legacy root ``*.log`` files are removed by
 default. Use ``--caches`` to also clear reproducible tool caches/build output.
+
+Also sweeps ``/tmp`` for ``manju-pytest-*`` and ``manju-verify-*`` sandboxes
+left behind by hard-killed ``pytest`` / ``scripts/verify.py`` runs (normal
+runs clean up after themselves; only dirs older than 24h are touched, so a
+sandbox owned by a currently running process is never removed).
 """
 from __future__ import annotations
 
 import argparse
 import shutil
+import tempfile
+import time
 from pathlib import Path
 
 
@@ -16,6 +23,9 @@ CACHE_PATHS = (
     ROOT / ".ruff_cache",
     ROOT / "frontend" / "dist",
 )
+
+TMP_SANDBOX_PREFIXES = ("manju-pytest-", "manju-verify-")
+TMP_SANDBOX_MAX_AGE_HOURS = 24.0
 
 
 def disposable_paths(include_caches: bool = False) -> list[Path]:
@@ -27,6 +37,27 @@ def disposable_paths(include_caches: bool = False) -> list[Path]:
     if include_caches:
         paths.extend(path for path in CACHE_PATHS if path.exists())
     return sorted(set(paths), key=lambda path: str(path).lower())
+
+
+def stale_tmp_sandboxes(max_age_hours: float = TMP_SANDBOX_MAX_AGE_HOURS) -> list[Path]:
+    """Orphaned pytest/verify sandboxes under /tmp older than ``max_age_hours``."""
+    cutoff = time.time() - max_age_hours * 3600
+    tmp_root = Path(tempfile.gettempdir())
+    try:
+        entries = list(tmp_root.iterdir())
+    except OSError:
+        return []
+    stale: list[Path] = []
+    for entry in entries:
+        if not entry.name.startswith(TMP_SANDBOX_PREFIXES):
+            continue
+        try:
+            if entry.stat().st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        stale.append(entry)
+    return sorted(stale, key=lambda path: str(path).lower())
 
 
 def _assert_safe(path: Path) -> None:
@@ -43,7 +74,8 @@ def main() -> int:
     args = parser.parse_args()
 
     paths = disposable_paths(args.caches)
-    if not paths:
+    tmp_paths = stale_tmp_sandboxes()
+    if not paths and not tmp_paths:
         print("Workspace is already clean.")
         return 0
     for path in paths:
@@ -55,7 +87,13 @@ def main() -> int:
             shutil.rmtree(path)
         else:
             path.unlink(missing_ok=True)
-    print(f"{'Found' if args.dry_run else 'Removed'} {len(paths)} disposable item(s).")
+    for path in tmp_paths:
+        print(f"{'would remove' if args.dry_run else 'removing'} {path} (stale >{TMP_SANDBOX_MAX_AGE_HOURS:.0f}h)")
+        if args.dry_run:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+    total = len(paths) + len(tmp_paths)
+    print(f"{'Found' if args.dry_run else 'Removed'} {total} disposable item(s).")
     return 0
 
 

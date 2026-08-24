@@ -26,7 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 BASE = "http://127.0.0.1:8230"
-SESSION = (ROOT / "data" / "local_session_secret.txt").read_text(encoding="utf-8").strip()
+SESSION = (ROOT / "data" / "regression_session_token.txt").read_text(encoding="utf-8").strip()  # 2026-08-24 legacy 通道关闭后迁移
 
 
 def timed_get(path: str, timeout: int = 120) -> dict:

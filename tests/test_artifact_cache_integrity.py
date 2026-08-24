@@ -62,6 +62,31 @@ def _legacy_screenplay_artifact() -> dict:
     return evidence_repository.get_artifact(created["id"])
 
 
+def _prep_pack_artifact() -> dict:
+    """一份 episode_prep_pack（screenplay 契约 6.0.0，无 narrative_plan 概念）。"""
+    created = evidence_repository.create_artifact(EvidenceArtifact(
+        type="episode_prep_pack",
+        scope_type="episode",
+        scope_id="episode-prep-pack-cache",
+        status="validated",
+        trust_level="T2",
+        content={
+            "prep_pack_version": "1.1.0",
+            "episode_no": 1,
+            "episode_scope": {"chapter_indexes": [1], "source_segment_count": 1},
+            "event_chain": [],
+            "asset_manifest": {"characters": [], "scenes": []},
+            "coverage_ledger": {
+                "total_segments": 0, "delivered": [], "merged": [],
+                "retained_as_context": [], "proven_duplicates": [], "uncovered": [],
+            },
+            "hook": "", "cliffhanger": "",
+        },
+        contract_version="6.0.0",
+    ))
+    return evidence_repository.get_artifact(created["id"])
+
+
 # ------------------------------------------------------------------ 缺陷 1
 
 def test_contract_gate_runs_on_every_call_not_just_on_cache_miss() -> None:
@@ -277,3 +302,46 @@ def test_read_scope_still_memoises_when_nothing_is_written() -> None:
 def test_invalidate_outside_a_scope_is_a_noop() -> None:
     evidence_repository.invalidate_artifact_read_scope("art_whatever")
     evidence_repository.invalidate_artifact_read_scope()
+
+
+# ---------------------------------------------------------- episode_prep_pack
+
+def test_prep_pack_contract_is_not_second_guessed_by_the_historical_bind_proxy() -> None:
+    """回归用例（真实 EP1 生成暴露，run_17fb9f04ee8d 之前的失败）。
+
+    _historical_screenplay_artifact_is_bound 把"被 production_revisions/
+    completion_certificates/episodes 指针引用过"当作"这是需要 narrative_plan
+    的历史重型产物"的代理判据。episode_prep_pack（screenplay 契约 6.0.0+）
+    的原子发布同样会绑定 completion_certificates 与 episodes 指针（这正是
+    发布语义要求的），代理因此在**每一次** prep_pack 发布后都会误命中，把
+    刚发布的 'ready' 集重启后打回 'failed'（用户能看到的现象：观测台 run
+    记录正常成功，但重启后的恢复扫描——app.domain.screenplay_ops.
+    recover_screenplay_tasks，由 app.recovery.recover_all 在进程启动时调用
+    ——把它标记为需要重建）。
+
+    契约版本 >= 6 是显式自我声明："我是 prep_pack，没有 narrative_plan"；
+    这个声明必须压过代理推断。"""
+    art = _prep_pack_artifact()
+
+    # 未绑定任何东西：本来就该过。
+    screenplay_from_artifact_record(art)
+
+    # 现在把它绑成 completion_certificates 的引用目标——这正是
+    # _publish_prep_pack 的原子发布事务对每一份成功产物做的事，
+    # 复现的是"发布后"的真实状态，不是假设。
+    conn = db.get_conn()
+    # completion_certificates alone is enough:
+    # _historical_screenplay_artifact_is_bound checks
+    # production_revisions/completion_certificates/episodes/evaluations/
+    # lineage and returns True on the first match.
+    conn.execute(
+        """INSERT INTO completion_certificates
+               (id, kind, scope_id, artifact_id, artifact_hash, issued_at)
+           VALUES ('cert-prep-pack-cache', 'screenplay', 'episode-prep-pack-cache', ?, 'hash', 0)""",
+        (art["id"],),
+    )
+    conn.commit()
+
+    # Still must not raise: the explicit contract_version=6.0.0 declaration
+    # short-circuits before the now-True historical-bind proxy is consulted.
+    screenplay_from_artifact_record(evidence_repository.get_artifact(art["id"]))
