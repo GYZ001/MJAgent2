@@ -191,6 +191,50 @@ def create_workspace(body: dict):
     return {"id": ws_id, "name": name}
 
 
+@router.put("/workspaces/{workspace_id}", dependencies=[Depends(require_system_admin)])
+def update_workspace(workspace_id: str, body: dict):
+    """改团队名 / 停用启用。
+
+    停用是真的收权，不是打个标记：``resolve_session`` 只把 status='active' 的团队
+    放进 Principal，所以停用后该团队全体成员立即失去其下所有项目的访问权，且它会
+    同步从登录载荷里消失（见 app/auth/api.py 的单一真源说明）。系统管理员不受影响
+    ——``is_system_admin`` 隐式放行，否则停错一个团队就没人能救回来了。
+    """
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "团队不存在")
+
+    fields: list[str] = []
+    values: list[object] = []
+    if "name" in body:
+        name = str(body["name"] or "").strip()
+        if not name:
+            raise HTTPException(422, "团队名称不能为空")
+        fields.append("name=?")
+        values.append(name)
+    if "status" in body:
+        status = str(body["status"])
+        if status not in ("active", "disabled"):
+            raise HTTPException(422, "status 必须是 active 或 disabled")
+        fields.append("status=?")
+        values.append(status)
+    if not fields:
+        raise HTTPException(422, "没有可更新的字段")
+
+    values.append(workspace_id)
+    conn.execute(f"UPDATE workspaces SET {', '.join(fields)} WHERE id=?", values)
+    conn.commit()
+    row = conn.execute(
+        "SELECT w.*, "
+        "(SELECT COUNT(*) FROM workspace_members m WHERE m.workspace_id=w.id) AS member_count, "
+        "(SELECT COUNT(*) FROM projects p WHERE p.workspace_id=w.id) AS project_count "
+        "FROM workspaces w WHERE w.id=?",
+        (workspace_id,),
+    ).fetchone()
+    return dict(row)
+
+
 @router.put("/workspaces/{workspace_id}/members/{user_id}", dependencies=[Depends(require_system_admin)])
 def set_member_role(workspace_id: str, user_id: str, body: dict):
     role = str(body.get("role") or "")

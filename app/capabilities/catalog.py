@@ -860,7 +860,11 @@ def _register_commands(registry) -> None:
             description="集级 Supervisor：持续生成与修复，直到每个分镜都有可用视频",
             input_model=I.VideoCompleteEpisodeInput,
             risk=RiskLevel.R2_MATERIAL,
-            confirmation=ConfirmationPolicy.ALWAYS,
+            # 人工门取消（决策③，docs/TRANSFORM_FREEZE_PLAN.md）：这是内容质量
+            # 确认门（"确认分镜后再解锁付费视频"的下一步），不是清库/删数据类
+            # 破坏性操作，命令总线两阶段审批对它自动放行。破坏性操作
+            # （project.delete / video.clear_* / delivery.review）保持不变。
+            confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.REQUIRED,
             scopes={"manju:generation-media"},
             side_effect="creates_paid_video_completion_run",
@@ -1359,6 +1363,10 @@ def _register_exemptions(registry) -> None:
     registry.exempt_rest(
         "POST /api/system/workspaces",
         "建团队是运维身份管理，不是制作领域命令；仅系统管理员可调用",
+    )
+    registry.exempt_rest(
+        "PUT /api/system/workspaces/{workspace_id}",
+        "改团队名/停用启用属运维身份管理，不是制作领域命令；仅系统管理员可调用",
     )
     registry.exempt_rest(
         "PUT /api/system/workspaces/{workspace_id}/members/{user_id}",

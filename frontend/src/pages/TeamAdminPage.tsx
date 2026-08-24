@@ -30,6 +30,7 @@ interface UserRow {
 interface WorkspaceRow {
   id: string;
   name: string;
+  status: "active" | "disabled";
   member_count: number;
   project_count: number;
 }
@@ -116,6 +117,20 @@ export default function TeamAdminPage() {
     ).then(() => setForm((current) => ({ ...current, username: "", password: "", displayName: "" })));
   };
 
+  const toggleTeamStatus = (w: WorkspaceRow) => {
+    const next = w.status === "active" ? "disabled" : "active";
+    if (next === "disabled") {
+      const warn = w.project_count > 0
+        ? `「${w.name}」下有 ${w.project_count} 个项目、${w.member_count} 名成员。停用后这些成员会立即失去对这些项目的全部访问权（系统管理员不受影响）。确定停用？`
+        : `停用「${w.name}」？其 ${w.member_count} 名成员会立即失去该团队下的访问权。`;
+      if (!window.confirm(warn)) return;
+    }
+    void runAction(
+      () => api.put(`/system/workspaces/${w.id}`, { status: next }),
+      `团队「${w.name}」已${next === "active" ? "启用" : "停用"}`,
+    );
+  };
+
   const changeRole = (workspaceId: string, userId: string, role: string) => {
     void runAction(
       () => api.put(`/system/workspaces/${workspaceId}/members/${userId}`, { role }),
@@ -184,12 +199,23 @@ export default function TeamAdminPage() {
           <button type="button" className="btn primary" disabled={busy} onClick={createTeam}>创建团队</button>
         </div>
         <table className="team-admin-table">
-          <thead><tr><th>团队</th><th>成员数</th><th>项目数</th></tr></thead>
+          <thead><tr><th>团队</th><th>状态</th><th>成员数</th><th>项目数</th><th>操作</th></tr></thead>
           <tbody>
             {(workspaces ?? []).map((w) => (
-              <tr key={w.id}><td>{w.name}</td><td>{w.member_count}</td><td>{w.project_count}</td></tr>
+              <tr key={w.id} className={w.status === "disabled" ? "team-admin-row-disabled" : undefined}>
+                <td>{w.name}</td>
+                <td>{w.status === "active" ? "启用中" : "已停用"}</td>
+                <td>{w.member_count}</td>
+                <td>{w.project_count}</td>
+                <td>
+                  <button type="button" className={`btn small ${w.status === "active" ? "danger ghost" : ""}`}
+                    disabled={busy} onClick={() => toggleTeamStatus(w)}>
+                    {w.status === "active" ? "停用" : "启用"}
+                  </button>
+                </td>
+              </tr>
             ))}
-            {workspaces && !workspaces.length && <tr><td colSpan={3}>暂无团队</td></tr>}
+            {workspaces && !workspaces.length && <tr><td colSpan={5}>暂无团队</td></tr>}
           </tbody>
         </table>
       </section>
