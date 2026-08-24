@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
+from app.auth.deps import require_system_admin
 from fastapi.responses import PlainTextResponse
 
 from app import config
@@ -712,7 +713,7 @@ def delete_model(model_id: str):
 
 
 @router.put("/models/{model_id}/credentials")
-def put_model_credentials(model_id: str, body: dict):
+def put_model_credentials(model_id: str, body: dict, _admin: None = Depends(require_system_admin)):
     item = next((m for m in _model_catalog() if m.get("id") == model_id), None)
     if not item:
         raise HTTPException(404, "模型不存在")
@@ -1467,7 +1468,7 @@ def job_detail(job_id: str, source: str = "job"):
 
 
 @router.post("/system/jobs/{job_id}/retry")
-def retry_job(job_id: str, body: dict | None = None):
+def retry_job(job_id: str, body: dict | None = None, _admin: None = Depends(require_system_admin)):
     """低层媒体 Job 的显式重试/恢复；Run 任务继续使用统一 Run 控制接口。"""
     from app import worker
     from app.hiagent import ProviderFailureDisposition
@@ -2214,7 +2215,7 @@ def get_keys():
 
 
 @router.put("/keys")
-def put_keys(body: dict):
+def put_keys(body: dict, _admin: None = Depends(require_system_admin)):
     """保存 API Key 到 .env 并热更新运行时变量。
 
     body 格式：{"confirm": true, "hiagent": "sk-xxx", ...}

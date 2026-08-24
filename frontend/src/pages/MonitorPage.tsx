@@ -8,6 +8,7 @@ import {
 } from "react";
 import { api, ApiError } from "../api";
 import { useNav, usePoll } from "../App";
+import { useAuth } from "../auth/AuthContext";
 import type { NavigationGuardPrompt } from "../App";
 import JsonViewer from "../components/JsonViewer";
 import SearchField from "../components/SearchField";
@@ -2885,12 +2886,18 @@ export default function MonitorPage({
   projectName?: string;
 }) {
   const { go, toast, registerNavigationGuard, requestNavigation } = useNav();
+  const { isSystemAdmin } = useAuth();
   const initial = nowQuery();
+  // 「系统设置」子页只对系统管理员开放：App.tsx 已经在路由层拦住非管理员进入
+  // mode="system"，这里是同一条边界在组件内部的兜底，两处都只是 UX 层面的隐藏，
+  // 真正的授权仍由后端 403/404 兜底。
   const allowedSections = useMemo(() => mode === "project"
     ? SECTIONS.filter((item) => ["jobs", "calls"].includes(item.key))
     : mode === "system"
-      ? SECTIONS.filter((item) => ["overview", "models", "settings"].includes(item.key))
-      : SECTIONS, [mode]);
+      ? SECTIONS.filter((item) =>
+          ["overview", "models", "settings"].includes(item.key)
+          && (item.key !== "settings" || isSystemAdmin))
+      : SECTIONS, [mode, isSystemAdmin]);
   const defaultSection: MonitorSection = mode === "project" ? "jobs" : "overview";
   const initialSection = querySection();
   const [activeSection, setActiveSection] =
