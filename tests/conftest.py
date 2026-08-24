@@ -4,6 +4,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,35 @@ _SANDBOX: Path | None = None
 _SANDBOX_OWNED = False
 _DATABASE_TEMPLATE: Path | None = None
 _DATABASE_TEMPLATE_INITIALIZED = False
+
+_STALE_SANDBOX_MAX_AGE_HOURS = 24.0
+
+
+def _purge_stale_sandboxes(prefix: str, *, max_age_hours: float = _STALE_SANDBOX_MAX_AGE_HOURS) -> None:
+    """Best-effort startup sweep for orphaned ``prefix*`` dirs under /tmp.
+
+    ``pytest_unconfigure`` below already removes this run's own sandbox on
+    normal completion and on most exceptions (including KeyboardInterrupt).
+    Neither that nor any ``finally``/``atexit`` hook runs when the process is
+    hard-killed (SIGKILL, or the default SIGTERM action) -- that is how
+    sandboxes actually accumulated in /tmp. This sweep is the backstop: it
+    only ever removes dirs older than ``max_age_hours``, so a sandbox still
+    owned by a running process is never touched.
+    """
+    cutoff = time.time() - max_age_hours * 3600
+    try:
+        entries = list(Path(tempfile.gettempdir()).iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.name.startswith(prefix):
+            continue
+        try:
+            if entry.stat().st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -56,6 +86,7 @@ def pytest_configure(config: pytest.Config) -> None:
         _SANDBOX.mkdir(parents=True, exist_ok=True)
         _SANDBOX_OWNED = False
     else:
+        _purge_stale_sandboxes("manju-pytest-")
         _SANDBOX = Path(tempfile.mkdtemp(prefix="manju-pytest-")).resolve()
         _SANDBOX_OWNED = True
     os.environ["MANJU_TEST_SANDBOX"] = str(_SANDBOX)
@@ -245,6 +276,7 @@ def _reset_capability_runtime(
         yield
         return
 
+    from app.auth.principal import Principal, set_current_principal
     from app.capabilities import bus as capability_bus
     from app.capabilities.policy import reset_approvals_for_tests
     from app import db
@@ -260,6 +292,13 @@ def _reset_capability_runtime(
     _reset_command_bus_runtime(capability_bus)
     _reset_media_worker_runtime()
     reset_approvals_for_tests()
+    # 直接调用 Command Bus 的测试（不经 HTTP，也就绕过 require_local_session）
+    # 兜底注入一个系统管理员身份，后续阶段 Command Bus 收紧 scope 校验时
+    # 这批测试不需要逐个改造。
+    set_current_principal(
+        Principal(user_id="test-bus-admin", username="test-bus-admin",
+                  is_system_admin=True, workspace_roles={})
+    )
 
     try:
         yield
@@ -270,15 +309,57 @@ def _reset_capability_runtime(
             _reset_command_bus_runtime(capability_bus)
             _reset_media_worker_runtime()
             reset_approvals_for_tests()
+            set_current_principal(None)
             _release_local_connection(db, owned_database=test_database)
             _restore_isolated_runtime(db, database_path=_DATABASE_TEMPLATE)
 
 
-def session_headers() -> dict[str, str]:
-    """测试用：领取当前进程本机会话头。"""
-    from app.local_session import ensure_session_secret
+_TEST_ADMIN_USERNAME = "test-admin"
 
-    return {"X-Manju-Session": ensure_session_secret()}
+
+def ensure_test_admin() -> str:
+    """确保当前（隔离沙盒）数据库里有一个系统管理员账号，返回其 user_id。"""
+    from app.auth.passwords import hash_password
+    from app.db import get_conn, new_id, now
+
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT id FROM users WHERE username=?", (_TEST_ADMIN_USERNAME,)
+    ).fetchone()
+    if row is not None:
+        return str(row["id"])
+    user_id = new_id("user")
+    ts = now()
+    conn.execute(
+        """INSERT INTO users(
+               id, username, display_name, password_hash, auth_provider,
+               status, is_system_admin, must_change_password, created_at,
+               password_changed_at
+           ) VALUES(?,?,?,?,'local','active',1,0,?,?)""",
+        (
+            user_id,
+            _TEST_ADMIN_USERNAME,
+            "测试系统管理员",
+            hash_password("test-admin-password-000"),
+            ts,
+            ts,
+        ),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO workspace_members(workspace_id, user_id, role, created_at) "
+        "VALUES('ws_default', ?, 'workspace_admin', ?)",
+        (user_id, ts),
+    )
+    conn.commit()
+    return user_id
+
+
+def session_headers() -> dict[str, str]:
+    """测试用：为隔离测试库里的系统管理员账号签发一枚真实登录会话。"""
+    from app.auth.sessions import create_session
+
+    user_id = ensure_test_admin()
+    return {"X-Manju-Session": create_session(user_id)}
 
 
 class SessionTestClient:

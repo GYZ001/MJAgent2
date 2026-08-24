@@ -5,6 +5,7 @@
 保证 UI、Agent 和直接 REST 调用的口径一致。
 """
 from __future__ import annotations
+from app.auth.principal import current_actor_name
 
 import hashlib
 import json
@@ -972,7 +973,7 @@ def archive_video_version(version_id: str, body: dict | None = Body(None)):
                VALUES(?,?,?,?) ON CONFLICT(version_id) DO NOTHING""",
             (
                 version_id,
-                str(body.get("archived_by") or "user"),
+                current_actor_name(),
                 str(body.get("reason") or "").strip() or None,
                 now(),
             ),

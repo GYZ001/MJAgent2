@@ -25,6 +25,7 @@ from app.harness.contracts import get_contract
 from app.harness.types import Evaluation, EvidenceArtifact
 from app.harness.context import ContextPack
 from app.ingest import chapter_is_stub, chapter_titles_match, ingest_novel
+from app.media_urls import build_media_url
 from app.novel_formats import (
     SUPPORTED_NOVEL_LABEL,
     novel_file_suffix,
@@ -249,7 +250,33 @@ def _load_screenplay(ep) -> EpisodeScreenplay | None:
         raise rebuild_error
     if not ep["screenplay_json"]:
         return None
-    return EpisodeScreenplay.model_validate(json.loads(ep["screenplay_json"]))
+    payload = json.loads(ep["screenplay_json"])
+    if isinstance(payload, dict) and "prep_pack_version" in payload:
+        # episode_prep_pack (screenplay contract 6.0.0+,
+        # docs/TRANSFORM_FREEZE_PLAN.md) is a structurally different artifact
+        # from the legacy EpisodeScreenplay projection this function loads --
+        # callers built for the legacy shape must see "no legacy projection"
+        # rather than a validation crash. Callers that need the new shape use
+        # episode_prep_pack_payload() below.
+        return None
+    return EpisodeScreenplay.model_validate(payload)
+
+
+def episode_prep_pack_payload(ep) -> dict | None:
+    """Return the raw episode_prep_pack payload if this episode's current
+    screenplay_json holds one (screenplay contract 6.0.0+); otherwise None.
+    Counterpart to _load_screenplay()'s legacy-shape branch above.
+    """
+    raw = ep["screenplay_json"]
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(payload, dict) and "prep_pack_version" in payload:
+        return payload
+    return None
 
 
 # 剧本台工作区既不展示也不编辑这些字段：它们由生成管线撰写，是叙事权威的一部分。
@@ -490,11 +517,51 @@ def _screenplay_ready(ep) -> bool:
     return verdict
 
 
+def _prep_pack_ready_uncached(data: dict, payload: dict) -> bool:
+    """Readiness check for the lightweight episode_prep_pack pipeline
+    (screenplay contract 6.0.0+, docs/TRANSFORM_FREEZE_PLAN.md). Mirrors the
+    legacy check's shape below (published pointer must be current, the
+    artifact must exist/approve/hash-match) without any narrative_plan
+    concept, which prep_pack does not have.
+    """
+    current_artifact_id = str(data.get("screenplay_artifact_id") or "")
+    published_artifact_id = str(data.get("published_screenplay_artifact_id") or "")
+    if not current_artifact_id or current_artifact_id != published_artifact_id:
+        return False
+    artifact = evidence_repository.get_artifact(published_artifact_id)
+    if (
+        artifact is None
+        or artifact.get("type") != "episode_prep_pack"
+        or artifact.get("scope_type") != "episode"
+        or artifact.get("scope_id") != str(data.get("id") or "")
+        or artifact.get("status") != "approved"
+    ):
+        return False
+    try:
+        current_hash = evidence_repository.content_hash(
+            artifact.get("content"), artifact.get("file_path"),
+        )
+    except Exception:  # noqa: BLE001 - readiness is fail closed
+        return False
+    if current_hash != str(artifact.get("content_hash") or ""):
+        return False
+    coverage = payload.get("coverage_ledger") or {}
+    if coverage.get("uncovered"):
+        return False
+    return bool(str(payload.get("hook") or "").strip())
+
+
 def _screenplay_ready_uncached(data: dict) -> bool:
     screenplay_json = data.get("screenplay_json")
     try:
-        script = EpisodeScreenplay.model_validate(json.loads(screenplay_json))
+        parsed = json.loads(screenplay_json)
     except (json.JSONDecodeError, TypeError, ValueError):
+        return False
+    if isinstance(parsed, dict) and "prep_pack_version" in parsed:
+        return _prep_pack_ready_uncached(data, parsed)
+    try:
+        script = EpisodeScreenplay.model_validate(parsed)
+    except (TypeError, ValueError):
         return False
     if not (script.full_script_text or "").strip():
         return False
@@ -638,24 +705,16 @@ def _screenplay_ready_uncached(data: dict) -> bool:
     )
 
 def _media_url(path_str: str | None) -> str | None:
-    """把绝对落盘路径转成前端可取的 /media URL（带 mtime 版本号防缓存）。"""
-    from app.config import PROJECTS_DIR
+    """把绝对落盘路径转成前端可取的 /media URL（带 mtime 版本号防缓存 + 访问票据）。"""
     if not path_str or not os.path.exists(path_str):
         return None
-    rel_path = Path(path_str).relative_to(PROJECTS_DIR).as_posix()
-    return f"/media/{rel_path}?v={int(os.path.getmtime(path_str))}"
+    return build_media_url(path_str, version=int(os.path.getmtime(path_str)))
 
 
 def _public_reference_image(ref: dict) -> dict:
     """参考图对外表示：只透出前端需要的字段。绝不带上 base64 的 url 与本地 path，
     否则单集响应会因每张参考图内嵌 ~500KB base64 膨胀到数百 MB，拖垮页面甚至崩溃标签页。"""
-    from app.config import PROJECTS_DIR
-    image_url = None
-    if ref.get("path"):
-        try:
-            image_url = f"/media/{Path(ref['path']).relative_to(PROJECTS_DIR).as_posix()}"
-        except ValueError:
-            image_url = None
+    image_url = build_media_url(ref.get("path"))
     return {
         "id": ref.get("id"),
         "type": ref.get("type"),

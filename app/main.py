@@ -16,6 +16,10 @@ from app import errors, task_registry, worker
 from app.agent.api import router as agent_conversation_router
 from app.agent_api import router as agent_capabilities_router
 from app.api import purge_legacy_screenplays, router
+from app.auth.admin_api import router as auth_admin_router
+from app.auth.api import router as auth_router
+from app.auth.principal import set_current_principal
+from app.authz import require_workspace_access
 from app.capabilities import ensure_catalog_loaded
 from app.config import PROJECTS_DIR, ROOT
 from app.db import init_db
@@ -23,6 +27,8 @@ from app.mcp import router as mcp_router
 from app.capabilities.bus import set_request_approval_token
 from app.local_session import (
     APPROVAL_HEADER,
+    bind_request_principal,
+    clear_principal_token,
     bind_verified_session,
     ensure_session_secret,
     public_session_payload,
@@ -30,6 +36,7 @@ from app.local_session import (
     set_request_session_id,
 )
 from app.mcp.auth import ensure_bootstrap_token
+from app.media_urls import media_ticket_required, verify_media_ticket
 from app.planning import router as planning_router
 from app.recovery import (
     acquire_runtime_recovery_lock,
@@ -44,6 +51,11 @@ from app.system_api import router as system_router
 
 # 除 health / session 领取外，全部 /api/* 强制本机会话（Todolist T1）。
 _SESSION_DEPS = [Depends(require_local_session)]
+# RBAC 第四阶段：工作空间隔离。必须排在 require_local_session 之后——
+# require_workspace_access 只读 get_current_principal()，执行到这里时
+# Principal 必定已由中间件（bind_request_principal）解析好；session 闸门
+# 自身没通过的请求也不会走到这一步。
+_WORKSPACE_DEPS = _SESSION_DEPS + [Depends(require_workspace_access)]
 
 
 @asynccontextmanager
@@ -84,20 +96,41 @@ async def _inject_session_and_approval(request: Request, call_next):
     token = request.headers.get(APPROVAL_HEADER)
     set_request_approval_token(token)
     bind_verified_session(request)
+    # Principal 必须在这里注入：同步依赖里写 ContextVar 会被 threadpool 丢弃，
+    # 详见 local_session.bind_request_principal 的说明。
+    bind_request_principal(request)
     try:
         return await call_next(request)
     finally:
         set_request_approval_token(None)
         set_request_session_id(None)
+        set_current_principal(None)
+        clear_principal_token()
 
 
 @app.get("/api/session")
 def get_local_session(request: Request):
-    """本机前端领取会话秘密（无鉴权；仅本机 Origin/Host 可领取）。"""
-    from app.local_session import assert_session_bootstrap_allowed
+    """本机前端领取会话凭证。
+
+    RBAC 第二阶段收紧：请求若带着一枚已登录的真实用户会话 token，原样确认
+    返回（不下发共享秘密）；否则只在兼容开关开启期间（默认开启，Stage 8
+    移除）继续下发旧的进程级共享秘密。开关关闭后没有有效用户会话一律 401——
+    这正是本阶段要收紧的口子：不能再无条件把共享秘密发给任何同源请求。
+    """
+    from app.auth.sessions import resolve_session
+    from app.local_session import (
+        assert_session_bootstrap_allowed,
+        extract_raw_session_token,
+        legacy_shared_session_enabled,
+    )
 
     assert_session_bootstrap_allowed(request)
-    return public_session_payload()
+    token = extract_raw_session_token(request)
+    if token and resolve_session(token) is not None:
+        return {"session_token": token, "header": "X-Manju-Session"}
+    if legacy_shared_session_enabled():
+        return public_session_payload()
+    raise HTTPException(401, "缺少或无效的用户会话")
 
 
 _SENSITIVE_KEYS = {"api_key", "apikey", "authorization", "password", "secret", "token", "access_token"}
@@ -194,17 +227,45 @@ async def _on_unhandled(request: Request, exc: Exception):
 
 
 app.include_router(system_public_router)  # health 等公开探活，不要求会话
-app.include_router(router, dependencies=_SESSION_DEPS)
-app.include_router(planning_router, dependencies=_SESSION_DEPS)
-app.include_router(orchestration_router, dependencies=_SESSION_DEPS)
-app.include_router(observability_router, dependencies=_SESSION_DEPS)
-app.include_router(system_router, dependencies=_SESSION_DEPS)
-app.include_router(agent_capabilities_router, prefix="/api", dependencies=_SESSION_DEPS)
-app.include_router(agent_conversation_router, prefix="/api")  # 路由自身已带 session deps
+app.include_router(auth_router)  # /api/auth/*：login 本身必须公开，路由自身按需挂 session deps
+app.include_router(auth_admin_router)  # /api/system/users、/api/system/workspaces：路由自身逐条挂 require_system_admin
+app.include_router(router, dependencies=_WORKSPACE_DEPS)
+app.include_router(planning_router, dependencies=_WORKSPACE_DEPS)
+app.include_router(orchestration_router, dependencies=_WORKSPACE_DEPS)
+app.include_router(observability_router, dependencies=_WORKSPACE_DEPS)
+app.include_router(system_router, dependencies=_WORKSPACE_DEPS)
+app.include_router(agent_capabilities_router, prefix="/api", dependencies=_WORKSPACE_DEPS)
+# agent_conversation_router 的 require_local_session 由路由自身声明（见
+# app/agent/api.py 的 APIRouter(dependencies=...)），这里只需再叠一层工作空间隔离。
+app.include_router(agent_conversation_router, prefix="/api", dependencies=[Depends(require_workspace_access)])
 # /mcp 必须在 StaticFiles("/") 挂载之前注册，否则会被前端静态资源路由抢先吞掉。
 # MCP 使用 Bearer Token，不叠本机会话闸门。
 app.include_router(mcp_router)
-app.mount("/media", StaticFiles(directory=PROJECTS_DIR), name="media")
+# /media 曾经是零鉴权的裸 StaticFiles 挂载：/api/* 已经有工作空间隔离，但浏览器的
+# <img>/<video> 标签不会带 X-Manju-Session 头，那套方案在结构上保护不了 /media，
+# 凭据必须放进 URL 里（见 app/media_urls.py 的 build_media_url + mt= 票据）。
+# 这里不能直接 app.mount(StaticFiles)，因为要在真正读文件前插一道票据校验；
+# Range/If-Range/ETag/Last-Modified/HEAD/416 仍然全部复用 StaticFiles.get_response
+# 本身的实现（与下面 SpaStaticFiles 同一手法），不手撸 Range 解析。
+_media_static = StaticFiles(directory=PROJECTS_DIR)
+
+
+@app.get("/media/{path:path}")
+async def _serve_media(path: str, request: Request):
+    """鉴权收口的 /media：路径穿越防护 + 按天分桶票据校验，其余行为与旧挂载一致。"""
+    try:
+        target = (PROJECTS_DIR / path).resolve()
+        target.relative_to(PROJECTS_DIR.resolve())
+    except ValueError:
+        raise HTTPException(404, "Not Found")
+    # MJ_MEDIA_REQUIRE_TICKET 默认关闭：关闭时只签发票据不校验，行为与改造前的
+    # 裸 StaticFiles 挂载完全一致，避免打断本机正在跑的多小时回归；观察一段时间
+    # 稳定后再打开，此时页面里早已渲染出的 URL 也都带着合法票据，不需要重新加载。
+    if media_ticket_required():
+        ticket = request.query_params.get("mt")
+        if not verify_media_ticket(path, ticket):
+            raise HTTPException(403, "无效或缺失的媒体访问票据")
+    return await _media_static.get_response(path, request.scope)
 
 
 class SpaStaticFiles(StaticFiles):

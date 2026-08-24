@@ -1337,6 +1337,38 @@ def _register_exemptions(registry) -> None:
         "本机人工授权可浏览/建目录根；仅本机会话可写，不向 Agent/MCP 开放",
     )
     registry.exempt_rest(
+        "POST /api/auth/login",
+        "账号登录是鉴权入口本身：签发会话先于任何 workspace/scope 判定，不经 Command Bus",
+    )
+    registry.exempt_rest(
+        "POST /api/auth/logout",
+        "只撤销调用者自己当前的会话，不改变任何制作领域状态",
+    )
+    registry.exempt_rest(
+        "POST /api/auth/change-password",
+        "账号自助改密：仅影响操作者自身口令与会话，不是领域命令，不向 Agent/MCP 开放",
+    )
+    registry.exempt_rest(
+        "POST /api/system/users",
+        "开户是运维身份管理，不是制作领域命令；仅系统管理员可调用，不向 Agent/MCP 开放",
+    )
+    registry.exempt_rest(
+        "PUT /api/system/users/{user_id}",
+        "编辑账号（改密/启停/管理员标记）同上，仅系统管理员可调用",
+    )
+    registry.exempt_rest(
+        "POST /api/system/workspaces",
+        "建团队是运维身份管理，不是制作领域命令；仅系统管理员可调用",
+    )
+    registry.exempt_rest(
+        "PUT /api/system/workspaces/{workspace_id}/members/{user_id}",
+        "团队成员角色分配是运维身份管理，仅系统管理员可调用",
+    )
+    registry.exempt_rest(
+        "DELETE /api/system/workspaces/{workspace_id}/members/{user_id}",
+        "移出团队成员是运维身份管理，仅系统管理员可调用",
+    )
+    registry.exempt_rest(
         "POST /api/agent/conversations",
         "Agent 会话编排入口，不直接改变制作领域状态",
     )

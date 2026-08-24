@@ -4266,7 +4266,6 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
         version for version in rows_to_dicts(rows)
         if not bool(version.pop("delivery_fallback", 0))
     ]
-    from app.config import PROJECTS_DIR
     reference_lineage: dict[str, list[str]] = {}
     if include_inputs:
         for version in versions:
@@ -4346,11 +4345,7 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
             "omitted_for_size": inputs_omitted,
         }
         if version.get("video_path"):
-            try:
-                rel_path = Path(version["video_path"]).relative_to(PROJECTS_DIR).as_posix()
-                version["video_url"] = f"/media/{rel_path}"
-            except ValueError:
-                version["video_url"] = None
+            version["video_url"] = build_media_url(version["video_path"])
     return versions
 
 
@@ -4393,6 +4388,14 @@ def _episode_detail_projection(episode_id: str, view: str | None) -> dict:
         screenplay_payload = screenplay_workspace_projection(screenplay_payload)
         ep["screenplay_withheld_fields"] = list(SCREENPLAY_WORKSPACE_WITHHELD_FIELDS)
     ep["screenplay"] = screenplay_payload
+    # episode_prep_pack（screenplay 契约 6.0.0+，见 docs/TRANSFORM_FREEZE_PLAN.md）
+    # 是与 EpisodeScreenplay 完全不同的形状；script 为 None 且原始 JSON 命中新形状时
+    # 走这个专用投影字段，而不是让前端从 ep["screenplay"]=null 里读不到任何内容。
+    ep["prep_pack"] = (
+        episode_prep_pack_payload(ep)
+        if script is None and (full or view in ("script", "board"))
+        else None
+    )
     narrative_workspace = view in ("script", "board")
     ep["narrative_contract_summary"] = (
         _narrative_contract_summary(script) if narrative_workspace else None

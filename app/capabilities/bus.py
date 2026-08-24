@@ -13,6 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from app.auth.principal import get_current_principal
 from app.capabilities import idempotency as idem_store
 from app.capabilities import policy
 from app.capabilities.registry import CapabilityRegistry, CommandSpec, get_registry
@@ -38,6 +39,26 @@ _STRICT_IDEMPOTENCY_COMMANDS = frozenset({
     "delivery.concatenate",
     "delivery.create_package",
     "delivery.review",
+})
+
+# RBAC 第三阶段人工门禁白名单：现有 62 个 command 的 scope 是按“资源种类”
+# （项目写入 / 生成媒体 / 交付）切分的，不是按角色切分的。这几个命令恰好落在
+# 审校（review）角色本职工作范围内，却被划进了 production 才有的
+# manju:generation-media / manju:project-write：
+#   storyboard.confirm  （人工门禁：确认分镜，解锁付费视频）-> manju:generation-media
+#   video.adopt_version （定稿采纳）                          -> manju:project-write
+#   reference.review    （参考图验收）                        -> manju:project-write
+#   video.stop_shot / video.stop_episode（审校叫停在跑的生成）-> manju:generation-media
+# 如果不开这个白名单，只持有 {read, delivery} 的 review 角色将无法确认分镜、
+# 无法采纳定稿、无法验收参考图——干不了审校的本职工作。
+# 不要反过来给 review 角色的 ROLE_SCOPES 加 manju:generation-media：那会
+# 连带放行 video.generate_shot 等花钱生成命令，违背“审校只决策、不花钱”。
+_HUMAN_GATE_COMMANDS = frozenset({
+    "storyboard.confirm",
+    "video.adopt_version",
+    "reference.review",
+    "video.stop_shot",
+    "video.stop_episode",
 })
 
 
@@ -164,6 +185,15 @@ class CommandBus:
 
     def _run_pipeline(self, name, raw_args, *, session_id, outcome_resolver) -> CommandResult:
         spec = self.registry.get_command(name)
+        # RBAC 第三阶段：鉴权必须是拿到 spec 之后做的第一件事，尤其要排在下面
+        # 的幂等缓存查找（idem_store.lookup）之前。_gate() 是在幂等命中之后才
+        # 跑的，如果把鉴权检查挪到 _gate 附近，一个用相同参数重放请求的未授权
+        # 调用者会直接命中缓存、拿到别人此前已授权那次调用的成功结果——读到了
+        # 本不该看到的数据。这里的顺序是安全要求，不是代码整洁问题，不要为了
+        # “看起来更集中”而把它挪到 _gate 旁边。
+        authz_rejection = self._authorize(name, spec)
+        if authz_rejection is not None:
+            return authz_rejection
         args = self._inject_approval(self._parse_input(spec, raw_args))
         if name in _STRICT_IDEMPOTENCY_COMMANDS and not args.idempotency_key:
             return CommandResult(
@@ -263,6 +293,11 @@ class CommandBus:
 
     async def _run_pipeline_async(self, name, raw_args, *, session_id, outcome_resolver) -> CommandResult:
         spec = self.registry.get_command(name)
+        # 顺序原因同步版 _run_pipeline 中的注释：鉴权必须先于幂等缓存查找，
+        # 否则未授权调用者重放已授权请求的参数即可从缓存里读到别人的结果。
+        authz_rejection = self._authorize(name, spec)
+        if authz_rejection is not None:
+            return authz_rejection
         args = self._inject_approval(self._parse_input(spec, raw_args))
         if name in _STRICT_IDEMPOTENCY_COMMANDS and not args.idempotency_key:
             return CommandResult(
@@ -359,6 +394,51 @@ class CommandBus:
                     claim_token=claim_token,
                 )
             raise
+    def _authorize(self, name: str, spec: CommandSpec) -> CommandResult | None:
+        """RBAC 第三阶段：Command Bus 层的准入闸门。
+
+        这里只回答“这个角色到底能不能做这类操作”（按 ``spec.scopes`` /
+        ``spec.admin_only`` 判定），不回答“这个具体资源是不是你的空间”——
+        后者由 Stage 4 在 HTTP 边缘按 workspace 校验。原因是本层看到的是
+        62 种互不相同的 ``input_model``，没有一个统一的“归属资源”字段可供
+        总线可靠地判断目标属于哪个 workspace；而 ``principal.all_scopes``
+        是跨该用户所有 workspace 的并集，天然只能做前一种判断。
+        """
+        principal = get_current_principal()
+        if principal is None:
+            # MCP 路径在 app/mcp/auth.py 里自行做过 scope 校验；后台/内部调用
+            # 以及早于本阶段编写、尚未注入 Principal 的测试，一律放行。
+            return None
+        if principal.is_system_admin:
+            return None
+        if spec.admin_only:
+            return CommandResult(
+                status=CommandStatus.REJECTED,
+                summary=f"命令 {name} 仅限系统管理员执行",
+                command=name,
+                error_code="forbidden_admin_only",
+            )
+        if name in _HUMAN_GATE_COMMANDS and "manju:delivery" in principal.all_scopes:
+            # 人工门禁白名单，见模块顶部 _HUMAN_GATE_COMMANDS 的说明：这几个
+            # 命令按资源种类被划进了 generation-media / project-write，但审校
+            # 角色必须能执行它们才算得上审校，因此在 scope 差集比较之前放行。
+            #
+            # 门槛是 manju:delivery 而**不是** manju:read：read 是所有角色都有的，
+            # 用它当门槛会把「只读」也放进来，让只读用户能确认分镜、采纳定稿、
+            # 验收参考图——那是提权，不是便利。delivery 恰好只有审校与空间管理员
+            # 持有；制作角色本就直接持有这些命令的原始 scope，走正常判定即可，
+            # 不依赖这条白名单。
+            return None
+        missing = spec.scopes - principal.all_scopes
+        if missing:
+            return CommandResult(
+                status=CommandStatus.REJECTED,
+                summary=f"当前角色缺少 scope：{', '.join(sorted(missing))}，无法执行 {name}",
+                command=name,
+                error_code="forbidden_scope",
+            )
+        return None
+
     def _gate(
         self,
         name: str,

@@ -23,9 +23,17 @@ _ERROR_CODE_HTTP_STATUS: dict[str, int] = {
     "attachment_invalid": 400,
     "policy_denied": 403,
     "approval_invalid": 403,
+    # RBAC：授权失败必须是 403，不能落到 REJECTED 的默认 409。前端要靠状态码
+    # 区分「你没有权限」和「当前状态不允许」——两者的处置方式完全不同：前者该
+    # 提示联系管理员，后者该提示刷新或先完成上游步骤。
+    "forbidden_scope": 403,
+    "forbidden_admin_only": 403,
     "handler_not_implemented": 501,
     "version_conflict": 409,
 }
+
+# 授权拒绝码：REJECTED 状态下需要覆盖默认 409 的那一小撮。
+_AUTHZ_REJECTION_CODES = frozenset({"forbidden_scope", "forbidden_admin_only"})
 
 _STATUS_HTTP: dict[CommandStatus, int] = {
     CommandStatus.REJECTED: 409,
@@ -96,6 +104,11 @@ def _http_status_for(result: CommandResult) -> int | None:
             except ValueError:
                 return 409
         return _ERROR_CODE_HTTP_STATUS.get(code, 409)
+    # REJECTED 默认是 409，但授权类拒绝必须还原成 403。这里刻意只放行
+    # _AUTHZ_REJECTION_CODES 这两个码，不整体改成「REJECTED 也查错误码表」——
+    # 那会顺带把 approval_invalid（当前 409）变成 403，属于计划外的行为变更。
+    if result.status == CommandStatus.REJECTED and result.error_code in _AUTHZ_REJECTION_CODES:
+        return _ERROR_CODE_HTTP_STATUS[result.error_code]
     return _STATUS_HTTP.get(result.status)
 
 

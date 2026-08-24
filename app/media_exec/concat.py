@@ -247,10 +247,7 @@ def _concat_promotion_checkpoint(_phase: str) -> None:
 
 
 def _content_versioned_final_url(final_path: Path, content_hash: str) -> str:
-    from app.config import PROJECTS_DIR
-
-    rel_path = final_path.relative_to(PROJECTS_DIR).as_posix()
-    return f"/media/{rel_path}?v={content_hash.removeprefix('sha256:')}"
+    return build_media_url(final_path, version=content_hash.removeprefix("sha256:"))
 
 
 def _assert_concat_sources_current(
@@ -750,13 +747,7 @@ def episode_mix_status(episode_id: str) -> dict:
                 v and not _is_delivery_fallback(v)
                 and v["video_path"] and Path(v["video_path"]).is_file()
             ):
-                from app.config import PROJECTS_DIR
-                try:
-                    rel_path = Path(v["video_path"]).relative_to(PROJECTS_DIR).as_posix()
-                except ValueError:
-                    rel_path = None
-                if rel_path:
-                    vid = f"/media/{rel_path}"
+                vid = build_media_url(v["video_path"])
         playback_rate = float(v["playback_rate"] or 1.0) if vid and v else 1.0
         model_candidate = _playable_model_candidate(conn, s["id"])
         out.append({"shot_id": s["id"], "shot_no": s["shot_no"],
@@ -807,12 +798,9 @@ def _existing_final_url(ep_row) -> str | None:
 
 def _versioned_final_url(final_path: Path) -> str:
     """返回随成品文件变化的 URL，避免重新合成后浏览器继续播放旧缓存。"""
-    from app.config import PROJECTS_DIR
-
-    rel_path = final_path.relative_to(PROJECTS_DIR).as_posix()
     stat = final_path.stat()
     revision = f"{stat.st_mtime_ns}-{stat.st_size}"
-    return f"/media/{rel_path}?v={revision}"
+    return build_media_url(final_path, version=revision)
 
 
 def _final_video_is_stale(ep_row) -> bool:

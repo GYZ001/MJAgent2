@@ -9,17 +9,24 @@ import {
   useMemo,
   useRef,
   useState,
+  type FormEvent,
+  type RefObject,
 } from "react";
-import { api, Episode, Project } from "./api";
+import { api, ApiError, changePassword, Episode, Project } from "./api";
 import Studio from "./pages/Studio";
+import LoginPage from "./pages/LoginPage";
+import ForcePasswordChangePage from "./pages/ForcePasswordChangePage";
 import CapabilityApprovalHost from "./components/CapabilityApprovalHost";
 import DecisionDialog from "./components/DecisionDialog";
+import ErrorBoundary from "./components/ErrorBoundary";
 import EpisodeCrumb from "./components/EpisodeCrumb";
 import SearchField from "./components/SearchField";
 import { useFocusTrap } from "./hooks/useFocusTrap";
 import { useScrollContainment } from "./useScrollContainment";
 import { AdaptivePoller, type PollInterval } from "./adaptivePoller";
 import { pickerWindowParams, resolveWindowedEpisodeId } from "./episodePicker";
+import { AuthProvider, useAuth } from "./auth/AuthContext";
+import { canSeeSystemSettings, roleLabel } from "./auth/session";
 
 // 加载器单独具名：lazy() 与 hover 预取共用同一个引用，import() 天然去重。
 const loadBiblePage = () => import("./pages/BiblePage");
@@ -31,6 +38,7 @@ const loadWallPage = () => import("./pages/WallPage");
 const loadCinemaPage = () => import("./pages/CinemaPage");
 const loadMonitorPage = () => import("./pages/MonitorPage");
 const loadReaderPage = () => import("./pages/ReaderPage");
+const loadTeamAdminPage = () => import("./pages/TeamAdminPage");
 
 const BiblePage = lazy(loadBiblePage);
 const ScenesPage = lazy(loadScenesPage);
@@ -41,6 +49,7 @@ const WallPage = lazy(loadWallPage);
 const CinemaPage = lazy(loadCinemaPage);
 const MonitorPage = lazy(loadMonitorPage);
 const ReaderPage = lazy(loadReaderPage);
+const TeamAdminPage = lazy(loadTeamAdminPage);
 
 export type View =
   | "studio"
@@ -69,6 +78,10 @@ const PAGE_LOADERS: Partial<Record<View, () => Promise<unknown>>> = {
   monitor: loadMonitorPage,
   reader: loadReaderPage,
 };
+
+/** 项目清单拉取失败后的重试退避区间。 */
+const PROJECTS_RETRY_MIN_MS = 2000;
+const PROJECTS_RETRY_MAX_MS = 30000;
 
 const prefetchedViews = new Set<View>();
 
@@ -201,9 +214,10 @@ const SECTIONS: {
   { key: "observability", label: "观测台", icon: "观", group: "项目观测", needProject: true },
 ];
 
-const SYSTEM_SECTIONS: Array<{ key: "overview" | "models" | "settings"; label: string; icon: string }> = [
+const SYSTEM_SECTIONS: Array<{ key: "overview" | "models" | "settings" | "members"; label: string; icon: string }> = [
   { key: "overview", label: "总览", icon: "总" },
   { key: "models", label: "模型中心", icon: "模" },
+  { key: "members", label: "成员与团队", icon: "员" },
   { key: "settings", label: "系统设置", icon: "设" },
 ];
 
@@ -305,7 +319,34 @@ export function locationFor(
   return `${project}/${view}`;
 }
 
+/** 应用真正的默认导出：先过登录闸门，未登录/校验中都不挂载下面的工作台外壳。 */
 export default function App() {
+  return (
+    <AuthProvider>
+      <AuthGate />
+    </AuthProvider>
+  );
+}
+
+function AuthGate() {
+  const { status, mustChangePassword } = useAuth();
+  if (status === "loading") {
+    return (
+      <div className="login-shell">
+        <div className="empty" role="status">正在校验登录状态…</div>
+      </div>
+    );
+  }
+  if (status === "anonymous") return <LoginPage />;
+  // 管理员开户设的初始密码经过管理员之手，不换掉审计署名从第一天就不可信。
+  // 置位期间整个工作台外壳都不挂载，只留改密与登出两条路。
+  if (mustChangePassword) return <ForcePasswordChangePage />;
+  return <AppShell />;
+}
+
+function AppShell() {
+  const auth = useAuth();
+  const isSystemAdminUser = canSeeSystemSettings(auth);
   const initial = readLocation();
   const initialWasRootRef = useRef(window.location.pathname === "/");
   const [view, setView] = useState<View>(initial.view);
@@ -334,6 +375,7 @@ export default function App() {
   );
   const toastTimerRef = useRef<number>();
   const projectsRetryTimerRef = useRef<number>();
+  const projectsRetryDelayRef = useRef(PROJECTS_RETRY_MIN_MS);
   const spineRef = useRef<HTMLElement | null>(null);
   const workspaceSwitcherRef = useRef<HTMLDivElement | null>(null);
   const closeMobileNav = useCallback(() => setMobileNavOpen(false), []);
@@ -374,6 +416,27 @@ export default function App() {
     };
   }, [projectSwitcherOpen]);
 
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const closeOutside = (event: MouseEvent) => {
+      if (!userMenuRef.current?.contains(event.target as Node)) {
+        setUserMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setUserMenuOpen(false);
+    };
+    document.addEventListener("mousedown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [userMenuOpen]);
+
   const refreshProjects = useCallback(() => {
     if (projectsRetryTimerRef.current) {
       window.clearTimeout(projectsRetryTimerRef.current);
@@ -382,9 +445,14 @@ export default function App() {
     void api.get("/projects").then((items: Project[]) => {
       setProjects(items);
       setProjectsLoaded(true);
+      projectsRetryDelayRef.current = PROJECTS_RETRY_MIN_MS;
     }).catch(() => {
       setProjectsLoaded(true);
-      projectsRetryTimerRef.current = window.setTimeout(refreshProjects, 2000);
+      // 后端长时间不可达时，固定 2s 重试会一直空转打链路。改成退避到 30s 封顶，
+      // 成功后立刻复位，恢复瞬间仍然跟得上。
+      const delay = projectsRetryDelayRef.current;
+      projectsRetryDelayRef.current = Math.min(delay * 2, PROJECTS_RETRY_MAX_MS);
+      projectsRetryTimerRef.current = window.setTimeout(refreshProjects, delay);
     });
   }, []);
   useEffect(() => {
@@ -519,6 +587,14 @@ export default function App() {
     },
     [chapterIdx, episodeId, projectId],
   );
+
+  // 前端隐藏只是体验层面；真正的边界在后端（403/404）。这里只兜底手输
+  // /system/overview 之类的地址——非系统管理员一律不该停在系统设置页上。
+  useEffect(() => {
+    if (view === "system" && !isSystemAdminUser) {
+      go("studio", null, null, null, "replace");
+    }
+  }, [view, isSystemAdminUser, go]);
 
   const requestNavigation = useCallback(
     (target: string, commit: () => void) => {
@@ -832,7 +908,7 @@ export default function App() {
             )}
           </div>
         )}
-        {view === "system" ? (
+        {view === "system" && isSystemAdminUser ? (
           <nav aria-label="系统设置">
             <div className="spine-group">
               <div className="spine-group-label">系统设置</div>
@@ -895,7 +971,7 @@ export default function App() {
         </nav>
         )}
         <div className="spine-foot">
-          {view === "system" ? (
+          {view === "system" && isSystemAdminUser ? (
             <button className="spine-foot-action" type="button" aria-label="返回项目空间"
               onMouseEnter={() => prefetchView("bible")}
               onFocus={() => prefetchView("bible")}
@@ -917,7 +993,7 @@ export default function App() {
               <span className="spine-foot-copy"><b>返回项目空间</b><span>继续当前小说创作</span></span>
               <i className="spine-foot-arrow" aria-hidden="true">←</i>
             </button>
-          ) : (
+          ) : isSystemAdminUser ? (
             <button
               className="spine-foot-action"
               type="button"
@@ -931,11 +1007,33 @@ export default function App() {
               <span className="spine-foot-copy"><b>系统设置</b><span>模型与全局策略</span></span>
               <i className="spine-foot-arrow" aria-hidden="true">→</i>
             </button>
-          )}
+          ) : null}
+          <UserMenu
+            auth={auth}
+            open={userMenuOpen}
+            onToggle={() => setUserMenuOpen((open) => !open)}
+            onChangePassword={() => {
+              setUserMenuOpen(false);
+              setChangePasswordOpen(true);
+            }}
+            onLogout={() => {
+              setUserMenuOpen(false);
+              void auth.logout();
+            }}
+            menuRef={userMenuRef}
+          />
           <small>漫剧案头 · 2.0</small>
         </div>
       </aside>
       <main className={`desk ${view === "board" ? "board-desk" : ""} ${view === "system" ? "system-desk" : ""}`}>
+        <ErrorBoundary
+          resetKey={`${view}:${projectId}:${episodeId}:${chapterIdx}`}
+          actions={
+            <button type="button" className="btn" onClick={() => go("studio", null, null)}>
+              返回项目空间
+            </button>
+          }
+        >
         <Suspense
           fallback={
             <div className="empty route-loading" role="status">
@@ -975,9 +1073,14 @@ export default function App() {
         {view === "observability" && projectId && (
           <MonitorPage mode="project" projectId={projectId} projectName={currentProject?.name} />
         )}
-        {view === "system" && <MonitorPage mode="system" />}
+        {view === "system" && isSystemAdminUser && (
+          currentPathname.endsWith("/members")
+            ? <TeamAdminPage />
+            : <MonitorPage mode="system" />
+        )}
         {view === "monitor" && <LegacyMonitorRedirect loaded={projectsLoaded} toast={toast} />}
         </Suspense>
+        </ErrorBoundary>
       </main>
       {pendingNavigation && (
         <DecisionDialog
@@ -993,12 +1096,169 @@ export default function App() {
         />
       )}
       <CapabilityApprovalHost />
+      {changePasswordOpen && (
+        <ChangePasswordDialog
+          onClose={() => setChangePasswordOpen(false)}
+          toast={toast}
+        />
+      )}
       {toastMsg && (
         <div role="status" className={`toast ${toastMsg.err ? "err" : ""}`}>
           {toastMsg.text}
         </div>
       )}
     </NavCtx.Provider>
+  );
+}
+
+/** 侧栏底部的用户菜单：显示当前用户名 + 团队角色，收纳登出/改密。
+ *  「团队」是本阶段引入的租户边界措辞，不与既有「项目空间」混用。 */
+function UserMenu({
+  auth,
+  open,
+  onToggle,
+  onChangePassword,
+  onLogout,
+  menuRef,
+}: {
+  auth: ReturnType<typeof useAuth>;
+  open: boolean;
+  onToggle: () => void;
+  onChangePassword: () => void;
+  onLogout: () => void;
+  menuRef: RefObject<HTMLDivElement>;
+}) {
+  const membership = auth.workspaces.find((w) => w.id === auth.currentWorkspaceId) ?? null;
+  const roleText = auth.isSystemAdmin ? "系统管理员" : membership ? roleLabel(membership.role) : "";
+  const teamText = membership?.name ?? (auth.isSystemAdmin ? "全部团队" : "");
+  const subtitle = [teamText, roleText].filter(Boolean).join(" · ") || "未加入任何团队";
+  return (
+    <div className="user-menu" ref={menuRef}>
+      <button
+        type="button"
+        className="workspace-switcher-trigger user-menu-trigger"
+        aria-expanded={open}
+        aria-label="用户菜单"
+        onClick={onToggle}
+      >
+        <span className="workspace-avatar" aria-hidden="true">人</span>
+        <span><b>{auth.user?.username || "未登录"}</b><small>{subtitle}</small></span>
+        <i aria-hidden="true">{open ? "⌃" : "⌄"}</i>
+      </button>
+      {open && (
+        <div className="user-menu-popover">
+          <button type="button" onClick={onChangePassword}>修改密码</button>
+          <button type="button" className="danger" onClick={onLogout}>登出</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 修改密码：后端成功后会吊销其余会话并签发新 token（api.ts 的 changePassword
+ *  已经把新 token 记进内存），这里只负责表单与提示。 */
+function ChangePasswordDialog({
+  onClose,
+  toast,
+}: {
+  onClose: () => void;
+  toast: (message: string, isErr?: boolean) => void;
+}) {
+  const titleId = useId();
+  const oldId = useId();
+  const newId = useId();
+  const confirmId = useId();
+  const trapRef = useFocusTrap(true, onClose);
+  const [oldPassword, setOldPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (busy) return;
+    if (newPassword.length < 8) {
+      setError("新口令至少 8 位");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError("两次输入的新口令不一致");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await changePassword(oldPassword, newPassword);
+      toast("密码已修改");
+      onClose();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "修改失败，请检查网络后重试");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="evidence-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target) onClose();
+      }}
+    >
+      <section
+        ref={trapRef}
+        className="impact-dialog decision-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+      >
+      <form onSubmit={submit}>
+        <h3 id={titleId}>修改密码</h3>
+        <div className="login-field">
+          <label className="f" htmlFor={oldId}>原密码</label>
+          <input
+            id={oldId}
+            type="password"
+            autoComplete="current-password"
+            disabled={busy}
+            value={oldPassword}
+            onChange={(event) => setOldPassword(event.target.value)}
+          />
+        </div>
+        <div className="login-field">
+          <label className="f" htmlFor={newId}>新密码（至少 8 位）</label>
+          <input
+            id={newId}
+            type="password"
+            autoComplete="new-password"
+            disabled={busy}
+            value={newPassword}
+            onChange={(event) => setNewPassword(event.target.value)}
+          />
+        </div>
+        <div className="login-field">
+          <label className="f" htmlFor={confirmId}>确认新密码</label>
+          <input
+            id={confirmId}
+            type="password"
+            autoComplete="new-password"
+            disabled={busy}
+            value={confirmPassword}
+            onChange={(event) => setConfirmPassword(event.target.value)}
+          />
+        </div>
+        {error && <p className="field-error" role="alert">{error}</p>}
+        <div className="dialog-actions">
+          <button type="button" className="btn" onClick={onClose} disabled={busy}>取消</button>
+          <button type="submit" className="btn primary" disabled={busy}>
+            {busy ? "提交中…" : "确认修改"}
+          </button>
+        </div>
+      </form>
+      </section>
+    </div>
   );
 }
 
@@ -1109,34 +1369,27 @@ export function usePoll<T>(
 ) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // ApiError 的 status（403/404/…）单独存一份，供 QueryState 判断「无权访问」/
+  // 「跨团队资源不存在」——error 本身只是拼好的展示文案，不该反过来解析它。
+  const [errorStatus, setErrorStatus] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const pollerRef = useRef<AdaptivePoller<T>>();
+  const onData = (next: T) => {
+    setData(next);
+    setError(null);
+    setErrorStatus(null);
+    setLoading(false);
+  };
+  const onError = (e: unknown) => {
+    setError(String((e as Error).message || e));
+    setErrorStatus(Number((e as { status?: number } | null)?.status ?? NaN) || null);
+    setLoading(false);
+    return shouldRetryPollError(e);
+  };
   if (!pollerRef.current) {
-    pollerRef.current = new AdaptivePoller(fetcher, intervalMs, {
-      onData: (next) => {
-        setData(next);
-        setError(null);
-        setLoading(false);
-      },
-      onError: (e: unknown) => {
-        setError(String((e as Error).message || e));
-        setLoading(false);
-        return shouldRetryPollError(e);
-      },
-    });
+    pollerRef.current = new AdaptivePoller(fetcher, intervalMs, { onData, onError });
   }
-  pollerRef.current.update(fetcher, intervalMs, {
-    onData: (next) => {
-      setData(next);
-      setError(null);
-      setLoading(false);
-    },
-    onError: (e: unknown) => {
-      setError(String((e as Error).message || e));
-      setLoading(false);
-      return shouldRetryPollError(e);
-    },
-  });
+  pollerRef.current.update(fetcher, intervalMs, { onData, onError });
 
   const refresh = useCallback(
     (options?: { force?: boolean }): Promise<T | null> =>
@@ -1172,7 +1425,7 @@ export function usePoll<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
-  return { data, error, loading, refresh };
+  return { data, error, status: errorStatus, loading, refresh };
 }
 
 /** 项目是否处于运行态——空闲时停轮询，避免反复拉取数 MB 的项目 payload。 */
@@ -1329,6 +1582,7 @@ export function useScriptEpisode(episodeId: string) {
   return {
     data,
     error: detail.error || (!full ? status.error : null),
+    status: detail.status ?? (!full ? status.status : null),
     loading: detail.loading,
     refresh: async (options?: { force?: boolean }) => {
       const [next] = await Promise.all([

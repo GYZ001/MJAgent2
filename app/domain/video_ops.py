@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.auth.principal import current_actor_name
 
 try:
     router
@@ -2550,7 +2551,7 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
         None,
         artifact["id"],
         [Evaluation(
-            evaluator_type="human", evaluator_name=str(body.get("decided_by") or "user"),
+            evaluator_type="human", evaluator_name=current_actor_name(),
             evaluator_version="1.0.0", status="passed", hard_gate_passed=True,
             score=100, evidence={
                 "decision": "adopt", "reason": reason, "playback_rate": playback_rate,
@@ -2570,7 +2571,7 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
            ) VALUES(?,?,?,?,?,?,?)""",
         (
             new_id("gate"), artifact["id"], "video_adoption", "approve",
-            str(body.get("decided_by") or "user"), reason, now(),
+            current_actor_name(), reason, now(),
         ),
     )
     from app.video_plan import reconcile_adopted_revision

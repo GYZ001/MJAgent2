@@ -1262,6 +1262,19 @@ label.f {
   display: block;
   background: var(--paper-deep);
 }
+/* 准备包资产映射：定妆照/场景参考图还未解析到具体图片时的占位（剧本台只读视图） */
+.asset-thumb-placeholder {
+  width: 100%;
+  aspect-ratio: 9/16;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 8px;
+  color: var(--ink-faint);
+  font-size: 11.5px;
+  background: var(--paper-deep);
+}
 .scene-thumb .st-body {
   padding: 6px 8px;
   font-size: 11.5px;
@@ -14467,4 +14480,206 @@ summary:focus-visible,
   .narrative-calibration-form .wide {
     grid-column: auto;
   }
+}
+
+/* 渲染兜底：报错原文只作为线索给用户复述，不抢主文案的视觉重量。 */
+.error-boundary-detail {
+  width: min(640px, 100%);
+  margin: 10px auto 0;
+  text-align: left;
+}
+
+.error-boundary-detail code {
+  display: block;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--paper-deep, rgba(0, 0, 0, 0.05));
+  color: var(--ink-faint);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* ————— 登录页：匿名态下唯一挂载的界面，应用外壳（侧栏/主区）不渲染 ————— */
+.login-shell {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.login-card {
+  width: min(360px, 100%);
+  display: grid;
+  gap: 14px;
+}
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.login-seal {
+  display: grid;
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border-radius: 12px;
+  background: linear-gradient(145deg, #b64b3b, #843126);
+  color: #fff7ed;
+  font: 600 22px var(--serif);
+  box-shadow: 0 8px 20px rgba(142, 49, 38, 0.22);
+}
+.login-brand-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.login-brand-copy b {
+  font: 600 16px var(--serif);
+  letter-spacing: 0.06em;
+  color: var(--ink);
+}
+.login-brand-copy span {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+.login-field input {
+  width: 100%;
+  margin-top: 4px;
+}
+.login-submit {
+  width: 100%;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+/* ————— 侧栏底部用户菜单：复用工作空间切换器同一套深色弹层视觉 ————— */
+.user-menu {
+  position: relative;
+}
+.user-menu-trigger {
+  min-height: 52px;
+}
+.user-menu-popover {
+  position: fixed;
+  z-index: 90;
+  bottom: 74px;
+  left: 12px;
+  width: 220px;
+  padding: 6px;
+  display: grid;
+  gap: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 14px;
+  background: rgba(29, 34, 42, 0.97);
+  color: #eef1f4;
+  box-shadow:
+    0 24px 64px rgba(8, 11, 16, 0.34),
+    inset 0 1px rgba(255, 255, 255, 0.055);
+  backdrop-filter: blur(18px) saturate(118%);
+}
+.user-menu-popover button {
+  appearance: none;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #c1c8d0;
+  text-align: left;
+  font: 600 12px var(--ui);
+  cursor: pointer;
+  transition: color 0.16s ease, background 0.16s ease;
+}
+.user-menu-popover button:hover {
+  color: #fff;
+  background: rgba(197, 79, 61, 0.18);
+}
+.user-menu-popover button.danger {
+  color: #e89888;
+}
+.user-menu-popover button.danger:hover {
+  color: #ffc1b5;
+  background: rgba(201, 80, 62, 0.14);
+}
+.spine.collapsed .user-menu-trigger {
+  grid-template-columns: 1fr;
+  padding: 8px;
+}
+.spine.collapsed .user-menu-trigger > span:nth-child(2),
+.spine.collapsed .user-menu-trigger > i {
+  display: none;
+}
+
+/* 成员与团队页：复用现有 .card / .btn / .empty 词汇，不新起设计系统。 */
+.team-admin-section {
+  margin-bottom: 20px;
+}
+
+.team-admin-section h2 {
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+
+.team-admin-inline-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.team-admin-inline-form .f {
+  flex: 1;
+  max-width: 320px;
+}
+
+.team-admin-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.team-admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.team-admin-table th,
+.team-admin-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--hairline);
+  text-align: left;
+  vertical-align: top;
+}
+
+.team-admin-row-disabled {
+  opacity: 0.55;
+}
+
+.team-admin-member-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.team-admin-add-row {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--hairline);
+}
+
+.team-admin-muted {
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+
+.team-admin-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 110px;
 }

@@ -1,4 +1,5 @@
 import { requestCapabilityApproval } from "./capabilityApproval";
+import type { AuthUser, WorkspaceMembership } from "./auth/session";
 
 class ApiError extends Error {
   // code/category/errorId 来自后端报错码系统：技术类报错前端只拿到这三样，原文留后端日志。
@@ -34,30 +35,24 @@ function normalizeNetworkError(error: unknown): Error {
 const SESSION_HEADER = "X-Manju-Session";
 const APPROVAL_HEADER = "X-Manju-Approval-Token";
 
+// 登录签发的会话令牌只存在这一份模块内存变量里，不落 localStorage/sessionStorage：
+// 与改造前保持同一套 XSS posture（凭证不进任何持久化存储）。代价是整页刷新会
+// 丢失这份内存状态，需要重新登录——这是有意的取舍，不是遗漏。
 let sessionToken: string | null = null;
-let sessionReady: Promise<void> | null = null;
 const inflightGets = new Map<string, Promise<any>>();
 
-async function ensureSession(forceRefresh = false): Promise<void> {
-  if (forceRefresh) {
-    sessionToken = null;
-    sessionReady = null;
-  }
-  if (sessionToken) return;
-  if (!sessionReady) {
-    sessionReady = fetch("/api/session")
-      .then(async (resp) => {
-        if (!resp.ok)
-          throw new Error(`无法领取本机会话凭证：HTTP ${resp.status}`);
-        const body = (await resp.json()) as { session_token?: string };
-        sessionToken = body.session_token || null;
-      })
-      .catch((err) => {
-        sessionReady = null;
-        throw normalizeNetworkError(err);
-      });
-  }
-  await sessionReady;
+/** AuthContext 订阅这个信号：一次真正判定为「登录已失效」时回调，值切回登录页。
+ *  只留一个模块级回调而非事件总线——全局只有一个 AuthProvider 需要它。 */
+type UnauthenticatedListener = () => void;
+let unauthenticatedListener: UnauthenticatedListener | null = null;
+
+export function onUnauthenticated(listener: UnauthenticatedListener | null): void {
+  unauthenticatedListener = listener;
+}
+
+function notifyUnauthenticated(): void {
+  sessionToken = null;
+  unauthenticatedListener?.();
 }
 
 function baseHeaders(extra?: HeadersInit, approvalToken?: string): Headers {
@@ -117,7 +112,6 @@ async function request(
     _sessionRefreshed?: boolean;
   },
 ): Promise<any> {
-  await ensureSession(false);
   const isForm = Boolean(options?.form);
   const headers = baseHeaders(
     !isForm && body !== undefined
@@ -140,14 +134,24 @@ async function request(
     throw normalizeNetworkError(error);
   }
 
-  // 后端重启后，已打开页面可能仍缓存旧会话。401 表示请求尚未进入业务处理，
-  // 因此可以安全地重新领取会话并只重试一次，避免页面永久停在失败/加载状态。
-  if (resp.status === 401 && !options?._sessionRefreshed) {
-    await ensureSession(true);
+  // /auth/login 的 401 是「密码错」这一正常业务结果，不是"登录已过期"——
+  // 它不该走下面的重试（后端登录限流是 5 次/5 分钟，重试一次等于让一次输错
+  // 顶两次额度），也不该触发全局的「未登录」信号（本来就还没登录成功）。
+  // 直接交给 handle() 把 401/429 原样抛给 LoginPage 的表单。
+  const isLoginEndpoint = path === "/auth/login";
+
+  // 401 意味着登录已失效（会话过期/被登出/被吊销），不再是"共享秘密要轮换"——
+  // 内存里也不存在能静默换新的凭证了。先按当前 sessionToken 重试一次，只覆盖
+  // "登录刚完成、这个请求发出时用的还是旧值"的竞态；仍是 401 才真正判定为登录
+  // 过期，通知 AuthContext 切回登录页。
+  if (resp.status === 401 && !isLoginEndpoint && !options?._sessionRefreshed) {
     return request(method, path, body, {
       ...options,
       _sessionRefreshed: true,
     });
+  }
+  if (resp.status === 401 && !isLoginEndpoint) {
+    notifyUnauthenticated();
   }
 
   if (resp.status === 202) {
@@ -193,11 +197,75 @@ function mutate(
   return request(method, path, body);
 }
 
-async function download(path: string): Promise<Blob> {
-  await ensureSession();
-  const resp = await fetch(`/api${path}`, { headers: baseHeaders() });
+async function download(path: string, sessionRefreshed = false): Promise<Blob> {
+  let resp: Response;
+  try {
+    resp = await fetch(`/api${path}`, { headers: baseHeaders() });
+  } catch (error: unknown) {
+    // 与 request() 对齐：断网时给出可读文案，而不是原始的 "Failed to fetch"。
+    throw normalizeNetworkError(error);
+  }
+  // 同样与 request() 对齐：401 只重试一次（覆盖登录竞态），仍失败才判定登录过期。
+  if (resp.status === 401 && !sessionRefreshed) {
+    return download(path, true);
+  }
+  if (resp.status === 401) {
+    notifyUnauthenticated();
+  }
   if (!resp.ok) await handle(resp);
   return resp.blob();
+}
+
+export interface AuthMeResponse {
+  user: AuthUser;
+  workspaces: WorkspaceMembership[];
+  is_system_admin: boolean;
+  must_change_password: boolean;
+}
+
+export interface AuthLoginResponse extends AuthMeResponse {
+  session_token: string;
+  header: string;
+}
+
+/** 账号密码登录；成功后把签发的会话令牌记进内存，供后续请求带上。 */
+export async function login(
+  username: string,
+  password: string,
+): Promise<AuthLoginResponse> {
+  const data = (await request("POST", "/auth/login", {
+    username,
+    password,
+  })) as AuthLoginResponse;
+  sessionToken = data.session_token;
+  return data;
+}
+
+/** 登出：无论后端调用是否成功，本地内存里的令牌都要清掉。 */
+export async function logout(): Promise<void> {
+  try {
+    await request("POST", "/auth/logout");
+  } finally {
+    sessionToken = null;
+  }
+}
+
+/** 「我是否已登录」探针；401 由 request() 统一处理（触发 onUnauthenticated）。 */
+export function me(): Promise<AuthMeResponse> {
+  return request("GET", "/auth/me");
+}
+
+/** 改密成功后后端会吊销其余会话并签发一枚新 token，同样要更新到内存里。 */
+export async function changePassword(
+  oldPassword: string,
+  newPassword: string,
+): Promise<AuthLoginResponse> {
+  const data = (await request("POST", "/auth/change-password", {
+    old_password: oldPassword,
+    new_password: newPassword,
+  })) as AuthLoginResponse;
+  sessionToken = data.session_token;
+  return data;
 }
 
 export const api = {
@@ -1169,6 +1237,81 @@ export interface EpisodeScreenplay {
   updated_at?: number | null;
 }
 
+/**
+ * 剧本台转型后的轻量分集准备包（episode_prep_pack v1.0.0）。取代 EpisodeScreenplay
+ * 成为剧本台的发布产物；旧产物（无 prep_pack_version 字段）仍可能出现在
+ * `Episode.screenplay` 中，调用方必须先按 prep_pack_version 判别，见 ScriptPage.tsx
+ * 的 isPrepPack。冻结形状见 docs/TRANSFORM_FREEZE_PLAN.md §3，字段名不再变。
+ */
+export interface PrepPackSourceEvidence {
+  segment_index: number;
+  quote: string;
+}
+
+export interface PrepPackKeyLine {
+  speaker: string;
+  line: string;
+  segment_index: number;
+}
+
+export interface PrepPackEvent {
+  event_id: string;
+  order: number;
+  summary: string;
+  source_evidence: PrepPackSourceEvidence[];
+  key_lines: PrepPackKeyLine[];
+}
+
+export interface PrepPackCharacterAsset {
+  identity_id: string;
+  display_name: string;
+  portrait_id: string;
+  event_ids: string[];
+}
+
+export interface PrepPackSceneAsset {
+  scene_id: string;
+  display_name: string;
+  scene_reference_id: string;
+  event_ids: string[];
+}
+
+export interface PrepPackAssetManifest {
+  characters: PrepPackCharacterAsset[];
+  scenes: PrepPackSceneAsset[];
+}
+
+export interface PrepPackEpisodeScope {
+  chapter_indexes: number[];
+  source_segment_count: number;
+}
+
+/**
+ * 覆盖账本四账 + uncovered 的元素形状后端未最终敲定（frozen payload 示例给的是空数组），
+ * 防御性地按 number 或 {segment_index} 两种可能解析，两者都不匹配时原样兜底展示。
+ */
+export type PrepPackCoverageEntry = number | { segment_index?: number | string } | Record<string, unknown>;
+
+export interface PrepPackCoverageLedger {
+  total_segments: number;
+  delivered: PrepPackCoverageEntry[];
+  merged: PrepPackCoverageEntry[];
+  retained_as_context: PrepPackCoverageEntry[];
+  proven_duplicates: PrepPackCoverageEntry[];
+  uncovered: PrepPackCoverageEntry[];
+}
+
+export interface EpisodePrepPack {
+  prep_pack_version: string;
+  episode_no: number;
+  episode_scope: PrepPackEpisodeScope;
+  event_chain: PrepPackEvent[];
+  asset_manifest: PrepPackAssetManifest;
+  coverage_ledger: PrepPackCoverageLedger;
+  hook: string;
+  cliffhanger: string;
+}
+
 export interface NarrativeContractSummary {
   contract_version: string;
   proposition_count: number;
@@ -1767,6 +1910,13 @@ export interface Episode {
   screenplay_error?: string | null;
   screenplay_updated_at?: number | null;
   screenplay?: EpisodeScreenplay | null;
+  /**
+   * 转型后的轻量分集准备包（screenplay 契约 6.0.0+）。后端 _episode_detail_projection
+   * 把这两种产物形状投影到不同字段：旧形状仍在 `screenplay`；新形状在 `prep_pack`，
+   * `screenplay` 此时为 null（不会把新形状塞进旧字段）。ScriptPage 必须两个字段都看：
+   * prep_pack 非空 → 渲染准备包；否则 screenplay 非空 → 旧产物占位提示；否则 → 尚无产物。
+   */
+  prep_pack?: EpisodePrepPack | null;
   narrative_contract_summary?: NarrativeContractSummary | null;
   narrative_review_summary?: NarrativeReviewSummary | null;
   narrative_calibration_summary?: NarrativeCalibrationSummary | null;

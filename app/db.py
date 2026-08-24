@@ -47,6 +47,67 @@ CREATE TABLE IF NOT EXISTS projects (
     harness_engine_enabled INTEGER NOT NULL DEFAULT 1,
     created_at REAL NOT NULL
 );
+-- RBAC 第一阶段：纯附加建表 + 引导数据，不改变任何现有行为。
+-- workspace_members.role 仅限 4 个 ASCII 枚举值：
+--   workspace_admin / production / review / readonly。
+-- 系统管理员不是某个空间的成员行，而是 users.is_system_admin=1。
+CREATE TABLE IF NOT EXISTS tenants (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workspaces (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL DEFAULT 'tenant_default',
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at REAL NOT NULL,
+    created_by TEXT,
+    FOREIGN KEY(tenant_id) REFERENCES tenants(id)
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    password_hash TEXT,
+    auth_provider TEXT NOT NULL DEFAULT 'local',
+    external_subject TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    is_system_admin INTEGER NOT NULL DEFAULT 0,
+    must_change_password INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    created_by TEXT,
+    password_changed_at REAL,
+    last_login_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS workspace_members (
+    workspace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY(workspace_id, user_id),
+    FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_id);
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    secret_hash TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    last_seen_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    revoked_at REAL,
+    user_agent TEXT,
+    ip TEXT,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_expires ON user_sessions(expires_at);
 CREATE TABLE IF NOT EXISTS chapters (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id TEXT NOT NULL,
@@ -1526,6 +1587,9 @@ MIGRATIONS = (
     "ALTER TABLE evaluations ADD COLUMN score_status TEXT",
     "ALTER TABLE evaluations ADD COLUMN runtime_blocking INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE evaluations ADD COLUMN retry_eligible INTEGER NOT NULL DEFAULT 0",
+    # RBAC 第一阶段：项目挂到空间下。SQLite 对 ALTER 加常量 DEFAULT 会顺带回填
+    # 所有历史行，因此旧项目自动归入默认空间，无需额外 UPDATE。
+    "ALTER TABLE projects ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'ws_default'",
 )
 
 
@@ -2232,6 +2296,30 @@ def _backfill_multiview_assets(conn: sqlite3.Connection) -> None:
                     )
 
 
+def _bootstrap_identity(conn: sqlite3.Connection) -> None:
+    """RBAC 第一阶段引导：只播种唯一的默认租户/空间，绝不创建任何账号。
+
+    账号必须由运维通过 scripts/create_admin.py 显式创建；init_db 是无人值守的
+    启动路径，创建账号会带来不受控的默认口令。这里只做到“项目有地方挂”为止。
+    """
+    ts = now()
+    conn.execute(
+        "INSERT OR IGNORE INTO tenants(id,name,created_at) VALUES('tenant_default','默认租户',?)",
+        (ts,),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO workspaces(id,tenant_id,name,status,created_at) "
+        "VALUES('ws_default','tenant_default','默认空间','active',?)",
+        (ts,),
+    )
+    # MIGRATIONS 先跑完 workspace_id 加列才存在，索引建表放在这里而不是 SCHEMA。
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_workspace ON projects(workspace_id)")
+    # 修复历史脏值（理论上 ALTER 的常量 DEFAULT 已回填，这里兜底 NULL/空串）。
+    conn.execute(
+        "UPDATE projects SET workspace_id='ws_default' WHERE workspace_id IS NULL OR workspace_id=''"
+    )
+
+
 def init_db(*, reconcile_interrupted: bool = False) -> None:
     """初始化/迁移数据库。
 
@@ -2248,6 +2336,7 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
+    _bootstrap_identity(conn)
     # Provider claims are a project-owned accounting ledger. Migrate their
     # ownership before any integrity repair can delete disposable jobs/assets.
     from app.completion_grant import (
@@ -2255,6 +2344,11 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
         migrate_legacy_video_liabilities,
     )
     ensure_video_budget_authority_tables(conn)
+    # 历史内嵌模型一次性搬进模型库。放在这里而不是应用启动钩子里：CLI 与测试
+    # 也会 init_db，模型解析对它们同样是前提。迁移自身幂等，标记位落库。
+    from app.model_migration import migrate_builtin_models
+
+    migrate_builtin_models()
     conn.execute(
         """UPDATE provider_calls
               SET project_id=COALESCE(

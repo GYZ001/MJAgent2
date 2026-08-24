@@ -307,9 +307,25 @@ async def create_project_from_attachment(
 
 @router.get("/projects")
 def list_projects():
+    from app.auth.principal import get_current_principal
+
     conn = get_conn()
-    rows = rows_to_dicts(conn.execute(
-        "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at FROM projects ORDER BY created_at DESC").fetchall())
+    principal = get_current_principal()
+    # 系统管理员看全部；普通用户只看自己所属工作空间下的项目——RBAC 第四阶段
+    # 收紧点之一，此前这里没有任何 WHERE，任何登录用户都能看到全量项目列表。
+    if principal is not None and not principal.is_system_admin:
+        workspace_ids = list(principal.workspace_roles.keys())
+        if not workspace_ids:
+            return []
+        marks = ",".join("?" for _ in workspace_ids)
+        rows = rows_to_dicts(conn.execute(
+            "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at "
+            f"FROM projects WHERE workspace_id IN ({marks}) ORDER BY created_at DESC",
+            workspace_ids,
+        ).fetchall())
+    else:
+        rows = rows_to_dicts(conn.execute(
+            "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at FROM projects ORDER BY created_at DESC").fetchall())
     _recover_orphan_bible_dicts(conn, rows)
     for p in rows:
         p["chapter_count"] = conn.execute("SELECT COUNT(*) c FROM chapters WHERE project_id=?", (p["id"],)).fetchone()["c"]
@@ -706,16 +722,13 @@ def project_detail(
     p["bible_evidence"] = bible_artifact
     p.pop("bible_json", None)
     if p["bible"]:
-        from app.config import PROJECTS_DIR
         from app.refs import effective_portrait_prompt
         style = p["bible"].get("world", {}).get("visual_style_canonical", "")
         import os
         for c in p["bible"].get("characters", []):
             path_str = c.get("ref_image_path")
             if path_str and os.path.exists(path_str):
-                # 使用 Path.relative_to(PROJECTS_DIR).as_posix() 确保 Windows 下路径分隔符正确转换为 /
-                rel_path = Path(path_str).relative_to(PROJECTS_DIR).as_posix()
-                c["ref_image_url"] = f"/media/{rel_path}?v={int(os.path.getmtime(path_str))}"
+                c["ref_image_url"] = build_media_url(path_str, version=int(os.path.getmtime(path_str)))
             else:
                 c["ref_image_url"] = None
             override = (c.get("portrait_prompt_override") or "").strip()
@@ -727,8 +740,7 @@ def project_detail(
         for s in p["bible"].get("scenes", []):
             spath = s.get("ref_image_path")
             if spath and os.path.exists(spath):
-                rel_path = Path(spath).relative_to(PROJECTS_DIR).as_posix()
-                s["ref_image_url"] = f"/media/{rel_path}?v={int(os.path.getmtime(spath))}"
+                s["ref_image_url"] = build_media_url(spath, version=int(os.path.getmtime(spath)))
             else:
                 s["ref_image_url"] = None
             soverride = (s.get("scene_prompt_override") or "").strip()

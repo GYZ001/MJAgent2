@@ -14,6 +14,7 @@ export type QueryKind =
 export default function QueryState({
   loading,
   error,
+  status,
   hasData,
   kind,
   objectName = '内容',
@@ -25,6 +26,8 @@ export default function QueryState({
 }: {
   loading?: boolean
   error?: string | null
+  /** ApiError.status：403 渲染「无权访问」，跨团队 404 渲染「资源不存在」。 */
+  status?: number | null
   hasData: boolean
   kind?: QueryKind
   objectName?: string
@@ -35,13 +38,15 @@ export default function QueryState({
   children: ReactNode
 }) {
   const resolved: QueryKind = kind
-    || (error && !hasData
-      ? (/网络|fetch|Failed to fetch|timeout/i.test(error) ? 'network' : 'server')
-      : loading && !hasData
-        ? 'loading'
-        : !hasData
-          ? 'empty'
-          : 'ready')
+    || (status === 403 || status === 404
+      ? 'forbidden'
+      : error && !hasData
+        ? (/网络|fetch|Failed to fetch|timeout/i.test(error) ? 'network' : 'server')
+        : loading && !hasData
+          ? 'loading'
+          : !hasData
+            ? 'empty'
+            : 'ready')
 
   if (resolved === 'loading') {
     return (
@@ -52,10 +57,15 @@ export default function QueryState({
     )
   }
   if (resolved === 'forbidden') {
+    const notFound = status === 404
     return (
       <div className="empty query-error" role="alert">
-        <strong>无权限查看{objectName}</strong>
-        <p>当前会话不能访问该项目。请确认后重试。</p>
+        <strong>{notFound ? '资源不存在或你不在该团队' : '无权访问'}</strong>
+        <p>
+          {notFound
+            ? '请确认链接是否正确；如果你确认应该看到它，请联系团队管理员确认是否已把你加入该团队。'
+            : `当前账号没有权限查看${objectName}，请联系团队管理员分配相应角色。`}
+        </p>
         {onRetry && <button type="button" className="btn" onClick={onRetry}>重试</button>}
       </div>
     )

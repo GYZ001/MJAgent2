@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.auth.principal import current_actor_name
 
 try:
     router
@@ -4165,7 +4166,7 @@ async def adopt_scene_candidate_route(
             scene_name,
             artifact_id,
             reason=str((body or {}).get("reason") or ""),
-            decided_by=str((body or {}).get("decided_by") or "user"),
+            decided_by=current_actor_name(),
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc) or "候选不存在") from exc

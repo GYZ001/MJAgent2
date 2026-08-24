@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.auth.principal import current_actor_name
 
 import asyncio
 import hashlib
@@ -6,10 +7,11 @@ import json
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from app import config, task_registry
+from app.auth.principal import get_current_principal
 from app.db import get_conn, new_id, now
 from app.evidence import repository
 from app.orchestration.engine import WorkflowRecorder, fingerprint
@@ -18,7 +20,29 @@ from app.orchestration.engine import WorkflowRecorder, fingerprint
 router = APIRouter(prefix="/api")
 
 
-@router.get("/runs")
+def _require_system_admin() -> None:
+    """跨项目全局观测入口只对系统管理员开放（RBAC 第四阶段收紧）。
+
+    这几个端点（``/runs``、``/runs/query``、``/runs/{run_id}`` 及其
+    ``/steps``/``/events``、``/gates``）天生没有 project_id 边界——路径参数
+    本身就是全库范围查询，``app.authz.require_workspace_access`` 的按对象
+    归属放行在这里不适用，必须显式收紧。``principal is None`` 保留给未挂会话
+    闸门的内部调用（与 Command Bus 的既有约定一致），不拦。
+
+    **必须挂成 FastAPI 路由级 ``dependencies=[Depends(...)]``，不能写进函数体**：
+    ``app/observability/api.py`` 的项目内观测入口（``_assert_scope`` 已经做了
+    更细粒度的项目级校验）直接拿这几个函数当内部实现复用（比如
+    ``scoped_run`` 调 ``orchestration_api.get_run(run_id)``）——那是纯 Python
+    函数调用，不经过 ASGI 路由，写进函数体的检查会把这些内部复用一起拦下，
+    表现为项目内观测台对普通成员集体 403。挂在路由 ``dependencies`` 上则只有
+    真正经 HTTP 命中 ``/api/runs...``/``/api/gates`` 这几条路由时才会触发。
+    """
+    principal = get_current_principal()
+    if principal is not None and not principal.is_system_admin:
+        raise HTTPException(403, "仅系统管理员可访问跨项目观测入口")
+
+
+@router.get("/runs", dependencies=[Depends(_require_system_admin)])
 def list_runs(
     active: bool | None = Query(default=None),
     project_id: str | None = Query(default=None),
@@ -33,7 +57,7 @@ RUN_ACTIONABLE_STATUSES = {
 }
 
 
-@router.get("/runs/query")
+@router.get("/runs/query", dependencies=[Depends(_require_system_admin)])
 def query_runs(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
@@ -109,7 +133,7 @@ def query_runs(
     }
 
 
-@router.get("/runs/{run_id}")
+@router.get("/runs/{run_id}", dependencies=[Depends(_require_system_admin)])
 def get_run(run_id: str):
     run = repository.get_run(run_id)
     if not run:
@@ -118,14 +142,14 @@ def get_run(run_id: str):
     return run
 
 
-@router.get("/runs/{run_id}/steps")
+@router.get("/runs/{run_id}/steps", dependencies=[Depends(_require_system_admin)])
 def get_steps(run_id: str):
     if not repository.get_run(run_id):
         raise HTTPException(404, "运行不存在")
     return repository.get_steps(run_id)
 
 
-@router.get("/runs/{run_id}/events")
+@router.get("/runs/{run_id}/events", dependencies=[Depends(_require_system_admin)])
 def get_events(
     run_id: str,
     after: float | None = Query(default=None),
@@ -934,7 +958,7 @@ def get_artifact_lineage(artifact_id: str):
     return repository.get_lineage(artifact_id)
 
 
-@router.get("/gates")
+@router.get("/gates", dependencies=[Depends(_require_system_admin)])
 def list_pending_gates(
     project_id: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
@@ -950,7 +974,7 @@ def decide_gate(artifact_id: str, body: dict = Body(...)):
 
     decision = str(body.get("decision") or "").strip()
     reason = str(body.get("reason") or "").strip()
-    decided_by = str(body.get("decided_by") or "monitor_user").strip()
+    decided_by = current_actor_name("monitor_user")
     expected_version = body.get("expected_version")
     idem = str(body.get("idempotency_key") or "").strip()
     if decision not in {"approve", "reject", "approve_with_risk"}:
@@ -1374,7 +1398,7 @@ async def decide_delivery(episode_id: str, body: dict = Body(...)):
             return await asyncio.to_thread(
                 approve_delivery,
                 episode_id,
-                decided_by=str(payload.get("decided_by") or "user"),
+                decided_by=current_actor_name(),
                 decision=str(payload.get("decision") or ""),
                 reason=str(payload.get("reason") or ""),
                 accepted_risk=payload.get("accepted_risk"),
@@ -1487,7 +1511,7 @@ async def _resume_delivery_approval(
             return await asyncio.to_thread(
                 approve_delivery,
                 episode_id,
-                decided_by=str(payload.get("decided_by") or "user"),
+                decided_by=current_actor_name(),
                 decision=str(payload.get("decision") or ""),
                 reason=str(payload.get("reason") or ""),
                 accepted_risk=payload.get("accepted_risk"),
@@ -1608,7 +1632,7 @@ async def create_customer_feedback(episode_id: str, body: dict = Body(...)):
         return add_customer_feedback(
             episode_id,
             message=message,
-            created_by=str(body.get("created_by") or "customer"),
+            created_by=current_actor_name("customer"),
             issue_code=body.get("issue_code"),
             rating=body.get("rating"),
             request_revision=bool(body.get("request_revision")),

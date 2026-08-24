@@ -39,10 +39,12 @@ from app.db import (
 )
 from app.hiagent import ProviderError
 from app.evidence import media as media_evidence
+from app.media_urls import build_media_url
 from app.orchestration import media_scheduler
 from app.orchestration.media_runs import ensure_media_trace, mark_media_job_state
 
 __all__ = [
+    "build_media_url",
     "clear_episode_artifacts", "clear_episode_video_assets", "clear_shot_artifacts",
     "clear_shot_reference_assets", "clear_shot_video_assets", "delete_episode_shots",
     "delete_project_episodes", "delete_video_version", "invalidate_episode_final",
