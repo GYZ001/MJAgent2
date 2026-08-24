@@ -63,6 +63,15 @@ def _make_conn() -> sqlite3.Connection:
         "CREATE TABLE scene_references(id TEXT, project_id TEXT, scene_name TEXT, "
         "ep_start INTEGER, ep_end INTEGER)"
     )
+    # 1.5.0: only used by app.portraits._future_chapter_context, which
+    # _prep_pack_verify_true_name_hypothesis reuses for the suspected_true_name
+    # forward-window check. Existing tests never set suspected_true_name, so
+    # they never reach that code path -- these two empty-by-default tables
+    # are additive and safe.
+    conn.execute(
+        "CREATE TABLE episodes(project_id TEXT, episode_no INTEGER, source_chapters TEXT)"
+    )
+    conn.execute("CREATE TABLE chapters(project_id TEXT, idx INTEGER, content TEXT)")
     conn.execute(
         "INSERT INTO projects(id, bible_json) VALUES ('p1', ?)",
         (json.dumps({
@@ -123,8 +132,12 @@ def test_fully_known_cast_triggers_zero_discovery_calls(monkeypatch):
         characters=[{"display_name": "萧炎", "is_background_extra": False}],
         scenes_=[{"display_name": "宗门广场"}],
     )]
-    characters, scene_list, functional_extras, errors, stats = _resolve(
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(
         conn, episode_no=1, events=events,
+        # 1.4.2 称谓/场景名证据闸要求直接命中必须有本集文本证据 -- 两个提及都
+        # 得逐字出现在这里，否则会被误当成"裸命中没证据"（这不是本测试要覆盖
+        # 的场景，本测试要的是"零调用发现"，所以必须让直接命中干净通过）。
+        source_text="萧炎快步穿过宗门广场，众弟子纷纷让路。",
     )
 
     assert errors == []
@@ -189,7 +202,13 @@ def test_known_alias_flagged_as_background_extra_still_binds_to_its_portrait(mon
             {"display_name": "小胖子", "is_background_extra": True},
         ]),
     ]
-    characters, scene_list, functional_extras, errors, stats = _resolve(conn, events=events)
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(
+        conn, events=events,
+        # 1.4.2 称谓证据闸：小胖子是原文里对他的真实称呼，天然会出现在原文中
+        # -- 这正是合法前瞻解析该有的样子，跟真实 EP5 裸幻觉绑定（"丹鬼"原文
+        # 0 次出现）的区别就在这里。
+        source_text="孟浩看着小胖子，觉得这称呼倒也贴切，小胖子憨憨一笑。",
+    )
 
     assert calls["n"] == 1
     assert stats["character_discovery_calls"] == 1
@@ -260,7 +279,12 @@ def test_occupation_title_extras_absorbed_into_functional_extras(monkeypatch):
             {"display_name": "围观弟子", "is_background_extra": True},
         ]),
     ]
-    characters, scene_list, functional_extras, errors, stats = _resolve(conn, events=events)
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(
+        conn, events=events,
+        # 1.4.2 称谓证据闸只管走 portrait_id 解析的名字（孟浩/曹阳）；职业称谓
+        # 类群演走 skip_character_names 分支，从不到达证据闸，不需要出现在这里。
+        source_text="孟浩与曹阳并肩走在外宗广场上，四周弟子纷纷侧目。",
+    )
 
     assert errors == [], f"职业称谓类龙套不应阻断门禁：{errors}"
     assert stats["character_discovery_calls"] == 1
@@ -294,7 +318,7 @@ def test_default_functional_fallback_still_excludes_non_person_skips(monkeypatch
     monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_not_person)
     monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "天启宗", "is_background_extra": False}])]
-    characters, scene_list, functional_extras, errors, stats = _resolve(conn, events=events)
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(conn, events=events)
 
     assert errors == []
     assert characters == []
@@ -327,7 +351,12 @@ def test_unresolved_new_character_routes_through_discovery_and_resolves(monkeypa
     events = [_event(
         "ev_001", characters=[{"display_name": "沈青梧", "is_background_extra": False}],
     )]
-    characters, scene_list, functional_extras, errors, stats = _resolve(conn, events=events)
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(
+        conn, events=events,
+        # 1.4.2 称谓证据闸：discovery 在本例里直接以原始提及字符串建卡（沒有
+        # rename），第二遍走的仍是裸直接命中路径，一样要求证据。
+        source_text="沈青梧提剑而立，目光冷冽。",
+    )
 
     assert calls["n"] == 1
     assert stats["character_discovery_calls"] == 1
@@ -357,7 +386,7 @@ def test_unresolved_new_scene_routes_through_discovery_and_resolves(monkeypatch)
     monkeypatch.setattr(scenes, "ensure_scenes_for_labels", fake_ensure_scenes_for_labels)
 
     events = [_event("ev_001", scenes_=[{"display_name": "藏经阁"}])]
-    characters, scene_list, functional_extras, errors, stats = _resolve(conn, events=events)
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(conn, events=events)
 
     assert calls["n"] == 1
     assert stats["scene_discovery_calls"] == 1
@@ -384,7 +413,7 @@ def test_alias_scene_resolves_via_canonical_name_after_discovery(monkeypatch):
 
     monkeypatch.setattr(scenes, "ensure_scenes_for_labels", fake_ensure_scenes_for_labels)
     events = [_event("ev_001", scenes_=[{"display_name": "门派前庭"}])]
-    characters, scene_list, functional_extras, errors, stats = _resolve(conn, events=events)
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(conn, events=events)
 
     assert errors == []
     assert scene_list == [{
@@ -415,7 +444,7 @@ def test_functional_identity_after_discovery_needs_no_portrait(monkeypatch):
     monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_functional)
     monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "黑衣人", "is_background_extra": False}])]
-    characters, scene_list, functional_extras, errors, stats = _resolve(conn, events=events)
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(conn, events=events)
 
     assert errors == []
     assert characters == []
@@ -439,7 +468,7 @@ def test_skipped_not_person_after_discovery_needs_no_portrait(monkeypatch):
     monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_not_person)
     monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "天启宗", "is_background_extra": False}])]
-    characters, scene_list, functional_extras, errors, stats = _resolve(conn, events=events)
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(conn, events=events)
 
     assert errors == []
     assert characters == []
@@ -469,7 +498,13 @@ def test_alias_rename_after_discovery_resolves_to_real_name(monkeypatch):
     monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_rename)
     monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "神秘老者", "is_background_extra": False}])]
-    characters, scene_list, functional_extras, errors, stats = _resolve(conn, events=events)
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(
+        conn, events=events,
+        # 1.4.2 称谓证据闸：discovery 之所以能提出这条改名，前提就是它自己在
+        # 本集文本里找到了"神秘老者"这个称谓；真实场景里这原本就该出现在原文，
+        # 这里补上让夹具符合这个前提（不是放宽门禁本身）。
+        source_text="一名神秘老者悄然现身，气息深不可测。",
+    )
 
     assert errors == []
     assert functional_extras == []
@@ -507,7 +542,7 @@ def test_discovery_explicit_named_error_still_gate_fails(monkeypatch):
         "ev_001",
         characters=[{"display_name": "神秘蒙面人", "is_background_extra": True}],
     )]
-    characters, scene_list, functional_extras, errors, stats = _resolve(conn, events=events)
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(conn, events=events)
 
     assert stats["character_discovery_calls"] == 1
     assert any("神秘蒙面人" in message for message in errors), (
@@ -527,7 +562,7 @@ def test_scene_discovery_finding_nothing_still_gate_fails(monkeypatch):
 
     monkeypatch.setattr(scenes, "ensure_scenes_for_labels", noop_scene_discovery)
     events = [_event("ev_001", scenes_=[{"display_name": "无名之地"}])]
-    characters, scene_list, functional_extras, errors, stats = _resolve(conn, events=events)
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(conn, events=events)
 
     assert stats["scene_discovery_calls"] == 1
     assert errors, "场景 discovery 无结果时必须门禁失败，不能静默放行"
@@ -547,7 +582,288 @@ def test_discovery_error_entries_surface_in_final_gate_message(monkeypatch):
     monkeypatch.setattr(portraits, "ensure_cards_for_text", failing_discovery)
     monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "无名之人", "is_background_extra": False}])]
-    characters, scene_list, functional_extras, errors, stats = _resolve(conn, events=events)
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(conn, events=events)
 
     assert any("ABC123" in message for message in errors)
     assert functional_extras == []
+
+
+# ---------------------------------------------------------------------------
+# 1.4.2 -- real round-16 EP5 regression: text-evidence gate for direct
+# character/scene binds. Real EP5 output resolved two events describing an
+# unnamed pair of old men on an unrelated mountain peak near 靠山宗 to a
+# pre-existing character ("丹鬼") and scene ("大青山山顶") from elsewhere in
+# the story, purely because the event-chain extraction model happened to
+# write those exact already-registered names directly as display_name --
+# chapter 5's own text has zero occurrences of either string (verified
+# against the real chapters row, proj_3ac0b627fa46 idx=5). Fixture below
+# mirrors that exact shape: bible already carries 丹鬼/大青山山顶 from
+# "elsewhere", this episode's own text only ever describes the pair
+# generically ("两个老者盘膝而坐"), never naming them.
+# ---------------------------------------------------------------------------
+
+def test_ep5_hallucinated_character_bind_with_no_text_evidence_is_gate_blocked(monkeypatch):
+    """红灯（协调方点名，2c）：裸直接命中在人物谱里找到了「丹鬼」，但「丹鬼」
+    在本集原文里 0 次出现——必须门禁具名拦截，且绝不能静默改路由去发现（发现
+    有可能重犯同一种臆断错误，协调方明确要求"具名拦截"而非"回炉"）。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-dg','p1','丹鬼',1,NULL)"
+    )
+    conn.commit()
+
+    def boom_character(*_a, **_k):
+        raise AssertionError("裸命中没有证据应门禁具名拦截，不应该回炉重新发现")
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+
+    events = [_event(
+        "ev_008", characters=[{"display_name": "丹鬼", "is_background_extra": False}],
+    )]
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(
+        conn, events=events,
+        source_text="山顶上，两个老者盘膝而坐，笑眯眯地看着山下的广场。",
+    )
+
+    assert characters == [], "没有证据的裸命中绝不能进入 asset_manifest"
+    assert stats["character_discovery_calls"] == 0
+    assert any(
+        "丹鬼" in message and "缺少称谓证据" in message and "门禁具名拦截" in message
+        for message in errors
+    )
+
+
+def test_ep5_hallucinated_scene_bind_with_no_text_evidence_routes_through_discovery(monkeypatch):
+    """红灯（协调方点名，2c）：裸直接命中在场景库里找到了「大青山山顶」（孟浩
+    老家的山，跟本集靠山宗旁的山峰毫无关系），但「大青山山顶」在本集原文里
+    0 次出现——必须当作未解析改走场景发现（本例应新建"靠山宗外围山峰"），
+    绝不能静默沿用谱内那个不相关的既有场景。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end) "
+        "VALUES ('sr-dqs','p1','大青山山顶',1,NULL)"
+    )
+    conn.commit()
+
+    calls = {"n": 0}
+
+    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels):
+        calls["n"] += 1
+        assert labels == ["大青山山顶"]
+        conn.execute(
+            "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end) "
+            "VALUES ('sr-new','p1','靠山宗外围山峰',2,NULL)"
+        )
+        conn.commit()
+        return {
+            "added": [{"name": "靠山宗外围山峰"}], "errors": [],
+            "ready_scenes": ["靠山宗外围山峰"],
+            "resolved_names": {"大青山山顶": "靠山宗外围山峰"},
+        }
+
+    monkeypatch.setattr(scenes, "ensure_scenes_for_labels", fake_ensure_scenes_for_labels)
+
+    events = [_event("ev_008", scenes_=[{"display_name": "大青山山顶"}])]
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(
+        conn, events=events,
+        source_text="山顶上，两个老者盘膝而坐，笑眯眯地看着山下的广场。",
+    )
+
+    assert calls["n"] == 1  # 没证据的裸命中被当成未解析，触发了场景发现
+    assert stats["scene_discovery_calls"] == 1
+    assert errors == []
+    assert scene_list == [{
+        "scene_id": "scene:靠山宗外围山峰", "display_name": "靠山宗外围山峰",
+        "scene_reference_id": "sr-new", "event_ids": ["ev_008"],
+    }]
+    assert not any(s["scene_reference_id"] == "sr-dqs" for s in scene_list), (
+        "绝不能静默沿用谱内那个不相关的「大青山山顶」"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 1.5.0 -- 用户修正令：outright 禁止先验知识会扔掉真正猜对的真名（"丹鬼"这
+# 类猜对了本该是加分项）。模型可以申报 suspected_true_name，但从不被直接
+# 采信——必须经 _prep_pack_verify_true_name_hypothesis 核验：申报名解析到
+# 已有谱内身份，且该名本身出现在本集原文或 app.portraits 同一条前瞻窗口
+# （IDENTITY_DISCOVERY_FORWARD_CHAPTERS）的文本里，两条都满足才采信。
+# ---------------------------------------------------------------------------
+
+def test_suspected_true_name_hypothesis_verified_via_forward_window_binds_with_alias(monkeypatch):
+    """红灯（协调方点名 1.5.0-4a）：模型申报"灰袍老者"疑似真名"丹鬼"，本集
+    原文没有"丹鬼"，但前瞻窗口（本集源章节之后 IDENTITY_DISCOVERY_FORWARD_
+    CHAPTERS 章内）的原文确实提到"丹鬼"——核验通过，绑定到丹鬼已有的
+    portrait_id，走的是核验快车道，不再触发全量身份消歧模型调用，
+    aliases=["灰袍老者"]。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-dg','p1','丹鬼',1,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO episodes(project_id, episode_no, source_chapters) VALUES ('p1', 2, '[5]')"
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id, idx, content) VALUES ('p1', 6, '丹鬼缓缓摘下兜帽，露出真容。')"
+    )
+    conn.commit()
+
+    def boom_character(*_a, **_k):
+        raise AssertionError("核验通过的假设应走确定性快车道，不应该再触发全量身份发现")
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+
+    events = [_event("ev_013", characters=[
+        {"display_name": "灰袍老者", "is_background_extra": False, "suspected_true_name": "丹鬼"},
+    ])]
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(
+        conn, events=events,
+        source_text="山顶上，灰袍老者哈哈大笑起来。",
+    )
+
+    assert errors == []
+    assert stats["character_discovery_calls"] == 0
+    assert characters == [{
+        "identity_id": "bible:丹鬼", "display_name": "丹鬼",
+        "portrait_id": "cp-dg", "event_ids": ["ev_013"], "aliases": ["灰袍老者"],
+    }]
+    assert any(
+        h["status"] == "accepted" and h["mention"] == "灰袍老者"
+        and h["suspected_true_name"] == "丹鬼"
+        for h in true_name_hints
+    )
+
+
+def test_suspected_true_name_hypothesis_rejected_with_no_evidence_routes_to_discovery(monkeypatch):
+    """红灯（协调方点名 1.5.0-4b）：模型申报"山峰"疑似正名"大青山"，本集原文
+    和前瞻窗口都没有任何"大青山"的踪迹——假设核验失败、丢弃，回退到"山峰"
+    本身的常规解析（未注册场景→走场景发现），rejected 计数=1，绝不能静默
+    沿用谱内那个不相关的"大青山"。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end) "
+        "VALUES ('sr-dqs','p1','大青山',1,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO episodes(project_id, episode_no, source_chapters) VALUES ('p1', 2, '[5]')"
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id, idx, content) VALUES ('p1', 6, '完全不相关的后续剧情。')"
+    )
+    conn.commit()
+
+    calls = {"n": 0}
+
+    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels):
+        calls["n"] += 1
+        assert labels == ["山峰"]
+        conn.execute(
+            "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end) "
+            "VALUES ('sr-new','p1','靠山宗外围山峰',2,NULL)"
+        )
+        conn.commit()
+        return {
+            "added": [{"name": "靠山宗外围山峰"}], "errors": [],
+            "ready_scenes": ["靠山宗外围山峰"],
+            "resolved_names": {"山峰": "靠山宗外围山峰"},
+        }
+
+    monkeypatch.setattr(scenes, "ensure_scenes_for_labels", fake_ensure_scenes_for_labels)
+
+    events = [_event("ev_008", scenes_=[
+        {"display_name": "山峰", "suspected_true_name": "大青山"},
+    ])]
+    characters, scene_list, functional_extras, errors, stats, true_name_hints = _resolve(
+        conn, events=events,
+        source_text="靠山宗四周的山峰上，两个老者盘膝而坐。",
+    )
+
+    assert calls["n"] == 1
+    assert stats["scene_discovery_calls"] == 1
+    assert errors == []
+    assert scene_list == [{
+        "scene_id": "scene:靠山宗外围山峰", "display_name": "靠山宗外围山峰",
+        "scene_reference_id": "sr-new", "event_ids": ["ev_008"],
+    }]
+    rejected = [h for h in true_name_hints if h["status"] == "rejected"]
+    assert len(rejected) == 1
+    assert rejected[0] == {
+        "kind": "scene", "mention": "山峰", "suspected_true_name": "大青山", "status": "rejected",
+    }
+    assert not any(s["scene_reference_id"] == "sr-dqs" for s in scene_list), (
+        "绝不能静默沿用谱内那个不相关的「大青山」"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 1.5.0 -- speaker 名册引用化（真实 EP2 回归：关键台词"割舌头"的 speaker 被
+# 写成"韩宗"，实际说话人是"绿袍男子"，韩宗第 5 章才出场，speaker 字段从未
+# 进任何校验管线）。这两个函数是纯确定性查表，不需要 DB/异步，直接单测。
+# ---------------------------------------------------------------------------
+
+def test_speaker_with_no_roster_match_is_gate_blocked():
+    """红灯（协调方点名 1.5.0-speaker-a，真实 EP2 回归）：台词说话人"韩宗"
+    没有出现在本集资产名册里（本集角色/群演都不是韩宗，韩宗第 5 章才出场）
+    ——必须门禁具名阻断，绝不能静默放行。"""
+    payload_events = [{
+        "event_id": "ev_003",
+        "key_lines": [{"speaker": "韩宗", "line": "割了他的舌头。", "segment_index": 10}],
+    }]
+    roster = prep_pack._prep_pack_build_speaker_roster(
+        characters=[{"display_name": "绿袍男子", "identity_id": "bible:绿袍男子", "aliases": []}],
+        functional_extras=[],
+    )
+    errors = prep_pack._prep_pack_resolve_key_line_speakers(payload_events, roster)
+    assert any("韩宗" in message and "ev_003" in message for message in errors)
+    assert "speaker_ref" not in payload_events[0]["key_lines"][0]
+
+
+def test_speaker_matching_real_character_display_name_resolves():
+    """红灯（协调方点名 1.5.0-speaker-b）：台词说话人"绿袍男子"是本集资产
+    名册里真实出场的角色（本集原文称谓），必须正确解析出 speaker_ref。"""
+    payload_events = [{
+        "event_id": "ev_003",
+        "key_lines": [{"speaker": "绿袍男子", "line": "割了他的舌头。", "segment_index": 10}],
+    }]
+    roster = prep_pack._prep_pack_build_speaker_roster(
+        characters=[{"display_name": "绿袍男子", "identity_id": "bible:绿袍男子", "aliases": []}],
+        functional_extras=[],
+    )
+    errors = prep_pack._prep_pack_resolve_key_line_speakers(payload_events, roster)
+    assert errors == []
+    assert payload_events[0]["key_lines"][0]["speaker_ref"] == "bible:绿袍男子"
+
+
+def test_speaker_matching_registered_alias_resolves_to_owning_character():
+    """红灯（协调方点名 1.5.0-speaker-c）：台词说话人是名册角色的已登记别名
+    （比如"小胖子"是李富贵记录在案的 alias），必须正确落到该角色的
+    speaker_ref，不能因为字面量不是 display_name 就拦截。"""
+    payload_events = [{
+        "event_id": "ev_002",
+        "key_lines": [{"speaker": "小胖子", "line": "……", "segment_index": 5}],
+    }]
+    roster = prep_pack._prep_pack_build_speaker_roster(
+        characters=[{
+            "display_name": "李富贵", "identity_id": "bible:李富贵", "aliases": ["小胖子"],
+        }],
+        functional_extras=[],
+    )
+    errors = prep_pack._prep_pack_resolve_key_line_speakers(payload_events, roster)
+    assert errors == []
+    assert payload_events[0]["key_lines"][0]["speaker_ref"] == "bible:李富贵"
+
+
+def test_speaker_matching_functional_extra_label_resolves():
+    """补充覆盖：speaker 是群演 label（functional_extras），同样应该正确
+    解析到 extra: 前缀的 speaker_ref，不应被具名阻断。"""
+    payload_events = [{
+        "event_id": "ev_008",
+        "key_lines": [{"speaker": "山顶老者", "line": "……", "segment_index": 29}],
+    }]
+    roster = prep_pack._prep_pack_build_speaker_roster(
+        characters=[], functional_extras=[{"label": "山顶老者", "event_ids": ["ev_008"]}],
+    )
+    errors = prep_pack._prep_pack_resolve_key_line_speakers(payload_events, roster)
+    assert errors == []
+    assert payload_events[0]["key_lines"][0]["speaker_ref"] == "extra:山顶老者"

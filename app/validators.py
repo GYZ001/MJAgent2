@@ -2736,89 +2736,105 @@ PREP_PACK_SPAN_LAZINESS_MULTIPLIER = 3
 _PREP_PACK_QUOTE_MIN_MATCH_CHARS = 2
 
 
-# --- Paratext ledger account (coordinator decision, 2026-08-24) ------------
+# --- Paratext ledger account v3 (coordinator decision, 2026-08-24) ---------
 # Users do not want "chapter heading" or "author's note" text to show up as
-# events in the event chain, but 洞即删戏 (rule a below) still applies -- a
-# segment cannot just vanish from the ledger to make that happen. Paratext
-# segments get their own fifth account instead: exempted from "must be
-# inside some event's span", not exempted from being accounted for.
+# events in the event chain, but 洞即删戏 still applies -- a segment cannot
+# just vanish from the ledger to make that happen. Paratext segments get
+# their own fifth account instead: exempted from "must be inside some
+# event's span", not exempted from being accounted for.
 #
-# Classification is 100% deterministic (no model call) and, unlike a bare
-# keyword scan, deliberately POSITION-constrained. app/source_paratext.py's
-# own module docstring documents why a keyword/position-only classifier was
-# explicitly *rejected* for the narrative-blueprint layer: it misfires on a
-# character name that happens to contain "他" or a mid-chapter line that
-# mentions "收藏" in real dialogue. The two rules below are narrower than
-# that rejected design specifically so they cannot repeat the mistake:
-#   ① chapter heading: ONLY segment #1 (plus a short segment #2 subtitle)
-#      can ever match, via the same first-segment-only regex the narrative
-#      blueprint layer already uses (structural_front_matter_ids) -- a
-#      chapter-heading-shaped line anywhere else in the document is never
-#      even examined by this rule, let alone classified by it.
-#   ② author's note: ONLY a segment inside the unbroken run counting
-#      backward from the very last segment can ever match, and only via one
-#      of the fixed keywords below -- the backward scan stops at the first
-#      segment (from the end) that does NOT match, so a real story segment
-#      earlier in the document is never reached no matter what words it
-#      contains. This is exactly what keeps a mid-body line mentioning
-#      "推荐票" in dialogue/narration from being misclassified: something
-#      after it in document order fails to match, halting the scan before
-#      it ever reaches that segment.
-# Anything neither rule reaches stays "real content" -- fail-closed per
-# instruction: 拿不准就是戏, never paratext.
-_PARATEXT_AUTHOR_NOTE_KEYWORDS = (
-    # Same vocabulary as PARATEXT_RULE (app/source_paratext.py) plus the
-    # coordinator's own example words -- one shared definition, just also
-    # frozen here as a deterministic keyword table for this position-scoped
-    # use.
-    "求收藏", "求推荐", "推荐票", "求月票", "月票", "求订阅", "订阅",
-    "感谢读者", "感谢大家", "感谢支持", "新书", "求追读", "求点击",
-    "更新", "上架", "加更", "求打赏", "打赏", "求评论", "求书评",
-    "读者群", "书友群", "作者的话", "作者有话说", "书架",
-)
+# v1/v2 (both retired the same day, 2026-08-24 -- real round-15 EP2
+# regression against a real chapter, proj_3ac0b627fa46 chapters.idx=2,
+# exposed that a purely deterministic *classifier* -- keyword table +
+# position rules, whichever exact shape -- cannot reliably separate a real
+# author's judgment call from ordinary narration using only the source
+# text. The model itself already recognizes an author's note when it reads
+# one (real EP2: it spontaneously summarized segments 47-50 as an event
+# named "作者发布留言"); the missing piece was never model comprehension,
+# it was that nothing captured that comprehension as a first-class
+# declaration instead of an ordinary (and therefore coverage-gated) event.
+#
+# v3: the model DECLARES which segments in its own chunk are paratext
+# (chapter title / author's request-for-votes-collections-etc. / site
+# announcement) via a new ``paratext_segments`` field alongside its normal
+# event list (see _ChunkResponse / _extract_chunk's prompt in
+# app.production.prep_pack), and does not build narrative events for them.
+# That declaration is then run through three independent DETERMINISTIC veto
+# gates here -- untrusted prose from a model call is never taken as truth by
+# itself anywhere else in this file either (see e.g. the is_background_extra
+# discussion in app.production.prep_pack._resolve_assets), and this is no
+# exception:
+#   a) 位置闸 (position): an accepted segment must be either (i) the
+#      structural front-matter segment (chapter-heading regex, unchanged
+#      across v1/v2/v3 -- reuses structural_front_matter_ids) or (ii) part
+#      of the declared candidates that fall in the last
+#      PARATEXT_TAIL_WINDOW_SEGMENTS segments AND form an exact contiguous
+#      run ending at the very last segment (no holes -- see (d) below). A
+#      segment declared anywhere else, or a tail declaration with a gap in
+#      it, fails this gate.
+#   b) 无依赖闸 (no dependency): a position-gate survivor must not be
+#      referenced by any event's source_evidence or key_lines segment_index
+#      -- if some event actually quotes or cites it, the model is using its
+#      content as real dramatic material, contradicting its own paratext
+#      claim on the very same segment. (hook/cliffhanger grounding is not
+#      re-checked separately here: hook/cliffhanger only ever grounds
+#      against an event's summary, per app.production.prep_pack._validate_
+#      hook_grounding, and gate (c) below already guarantees no event's
+#      validated span -- what its summary is derived from -- can include an
+#      accepted paratext segment, so this is transitively covered.)
+#   c) 排他闸 (exclusivity, FATAL, not a silent veto): a survivor of (a)+(b)
+#      must not fall inside ANY event's validated span (the existing
+#      paratext_conflict mechanism, unchanged in spirit from v1/v2) -- if it
+#      does, the ledger is internally self-contradictory (an event claims
+#      the segment's territory while it is also being accounted for as
+#      non-story), which blocks publish via ``errors`` exactly like rules
+#      (b)/(c) of the span ledger itself, not a quiet reroute.
+# A segment that fails gate (a) or (b) is NOT silently dropped and is NOT
+# fatal either -- it simply returns to being an ordinary segment, still
+# subject to the pre-existing "must be inside some event's span" gate
+# (洞即删戏). This is the deliberate asymmetry the coordinator specified:
+# the model over-claiming a segment as paratext has no silent path (worst
+# case, that segment now needs a real event to cover it, and the run fails
+# loudly with a named missing segment if none exists); the model under-
+# claiming (declaring nothing, or missing one) only costs a slightly silly
+# extra event -- 宁漏勿误, but never 宁误勿漏. Rejections are recorded (not
+# just discarded) as ``rejected_paratext_claims`` -- observability only,
+# never part of the frozen artifact payload, same status as
+# ``normalized_span_extensions``.
+PARATEXT_TAIL_WINDOW_SEGMENTS = 6  # K: an accepted tail declaration can only
+# ever reach this many segments from the end of the document -- a model
+# mislabeling something deep in normal chapter content can, at most, get
+# vetoed back to ordinary content; it can never smuggle real narration past
+# this far from the tail into the paratext account merely by declaring it.
 
 
-def _prep_pack_paratext_indexes_from_segments(segments: list[SourceSegment]) -> set[int]:
-    """Core classification, operating on already-indexed segments (shared by
-    ``prep_pack_paratext_segment_indexes`` and ``build_prep_pack_span_ledger``
-    so the latter does not re-run ``index_source_segments`` a second time).
-    See the module comment above for the position-constraint safety
-    argument. Returns 1-based segment_index values."""
+def _prep_pack_structural_paratext_indexes(segments: list[SourceSegment]) -> set[int]:
+    """Rule (a)(i) building block: which segment_index values are the
+    document's own structural front matter (chapter heading, unchanged
+    across v1/v2/v3 -- reuses app.source_excerpt.structural_front_matter_ids,
+    the same first-segment-only regex the narrative blueprint layer already
+    uses). This alone is NOT the paratext account -- see build_prep_pack_
+    span_ledger's gate (a): the model must still have declared the segment
+    for it to be accepted, matching every other declared-then-gated
+    candidate rather than being auto-applied regardless of the model's own
+    output."""
     if not segments:
         return set()
     index_by_segment_id = {
         segment.segment_id: index for index, segment in enumerate(segments, start=1)
     }
-    paratext: set[int] = set()
-    for segment_id in structural_front_matter_ids(segments):
-        index = index_by_segment_id.get(segment_id)
-        if index is not None:
-            paratext.add(index)
-    for segment in reversed(segments):
-        if any(keyword in segment.text for keyword in _PARATEXT_AUTHOR_NOTE_KEYWORDS):
-            paratext.add(index_by_segment_id[segment.segment_id])
-        else:
-            break
-    return paratext
-
-
-def prep_pack_paratext_segment_indexes(source_text: str) -> set[int]:
-    """Deterministically classify which indexed segments of ``source_text``
-    are paratext (chapter heading / trailing author's note) for the
-    prep_pack coverage ledger's fifth account and for the event-chain
-    extraction prompt (app.production.prep_pack._extract_chunk tells the
-    model these segment numbers do not need to fall inside any event's
-    span). See the module comment above ``_prep_pack_paratext_indexes_from_
-    segments`` for the position-constraint safety argument.
-    """
-    return _prep_pack_paratext_indexes_from_segments(index_source_segments(source_text or ""))
-
+    return {
+        index_by_segment_id[segment_id]
+        for segment_id in structural_front_matter_ids(segments)
+        if segment_id in index_by_segment_id
+    }
 
 def build_prep_pack_span_ledger(
     source_text: str,
     *,
     events: list[dict[str, Any]],
-) -> tuple[dict[str, Any], list[str], list[dict[str, Any]]]:
+    declared_paratext_segments: list[int] | None = None,
+) -> tuple[dict[str, Any], list[str], list[dict[str, Any]], list[dict[str, Any]]]:
     """Deterministically validate event spans and project the coverage ledger.
 
     Coverage accounting design (screenplay contract 6.0.0, invariant ①; see
@@ -2831,8 +2847,19 @@ def build_prep_pack_span_ledger(
 
     ``events``: ordered list of dicts, each ``{"event_id": str, "order": int,
     "from_segment": int, "to_segment": int, "source_evidence":
-    [{"segment_index": int, "quote": str}, ...]}`` (raw model output, not yet
-    alignment-verified -- this function does that itself).
+    [{"segment_index": int, "quote": str}, ...], "key_lines":
+    [{"segment_index": int, ...}, ...]}`` (raw model output, not yet
+    alignment-verified -- this function does that itself). ``key_lines``
+    entries only need ``segment_index`` for this function's purposes (gate
+    (b) below); other keys are ignored here.
+
+    ``declared_paratext_segments``: the model's own claim (aggregated across
+    all chunks) of which segment_index values are non-story paratext
+    (chapter title / author's note) -- see the module comment above
+    PARATEXT_TAIL_WINDOW_SEGMENTS for the full v3 design (model declares,
+    this function runs three deterministic veto gates before accepting any
+    of it). ``None``/empty means the model declared nothing, which is a
+    legal (if a little silly) outcome, not an error.
 
     **确定性跨度扩展**（EP2 首次正式回归暴露，ERR-20260824-9babad：模型对
     ev_003 声明 span=[13,16] 却引用了 segment 17，方差性的"跨度写窄一格"，
@@ -2874,40 +2901,46 @@ def build_prep_pack_span_ledger(
     somewhere in it, so oversized spans need two quotes spread across their
     own front/back halves.
 
-    Returns ``(ledger, errors, normalized_span_extensions)``. The ledger has
-    five accounts; four are a pure PROJECTION of the validated (extended)
-    spans, not a model declaration, and the fifth (paratext) is an
-    independent deterministic classification (prep_pack_version 1.4.0, see
-    ``prep_pack_paratext_segment_indexes`` above) that exempts chapter-
-    heading / trailing-author's-note segments from needing event coverage
-    without letting them silently disappear:
+    Returns ``(ledger, errors, normalized_span_extensions,
+    rejected_paratext_claims)``. The ledger has five accounts; four are a
+    pure PROJECTION of the validated (extended) spans, not a model
+    declaration, and the fifth (paratext) is the model's own declaration
+    after surviving the three v3 gates (see the module comment above
+    PARATEXT_TAIL_WINDOW_SEGMENTS) that exempts chapter-heading /
+    author's-note segments from needing event coverage without letting them
+    silently disappear:
       delivered = segments with a verbatim-aligned quote in their owning
         event's source_evidence
       retained_as_context = other segments inside some validated span
-      paratext = chapter heading / trailing author's note segments,
-        classified independently of any event span (see above); a segment
-        here is, by construction, never also in delivered/retained_as_context
-        -- if the model's own span somehow covers one anyway, that is a
-        contradiction (see paratext_conflict below), not a silent merge
+      paratext = declared segments that passed gates (a) position and (b)
+        no-dependency; a segment here is, by construction, never also in
+        delivered/retained_as_context -- if some event's span somehow
+        covers one anyway, that is gate (c)'s fatal contradiction (see
+        paratext_conflict below), not a silent merge
       uncovered = segments outside every span AND not paratext (rule a's
         fatal case)
       merged / proven_duplicates = always [] -- the model no longer declares
         per-segment disposition, so these accounts have nothing to populate
-    ``errors`` describes rule (b)/(c) violations (an event's own claims are
-    internally inconsistent, even after extension) *and* a paratext/covered
-    overlap (ledger self-contradiction, coordinator red test (c)); a
-    non-empty ``uncovered`` is rule (a) and is reported by
+    ``errors`` describes rule (b)/(c) span violations (an event's own claims
+    are internally inconsistent, even after extension) *and* gate (c)'s
+    paratext/covered overlap (ledger self-contradiction, coordinator v3 red
+    test (c)); a non-empty ``uncovered`` is rule (a) and is reported by
     ``assert_prep_pack_coverage_complete`` instead, not here.
     ``normalized_span_extensions`` is
     ``[{"event_id", "from", "to", "extended_by"}]`` for every event whose
     final span differs from its raw declared one -- observability only, the
     caller (app.production.prep_pack) also uses it to publish the extended
     span in the artifact payload's event_chain[].source_span.
+    ``rejected_paratext_claims`` is ``[{"segment_index", "gate", "reason"}]``
+    for every declared segment that failed gate (a) or (b) -- observability
+    only (never part of the frozen artifact payload), not a subset of
+    ``errors`` since a silent veto/reroute is by design not fatal by itself
+    (see module comment).
     """
     segments = index_source_segments(source_text or "")
     by_index = {index: segment for index, segment in enumerate(segments, start=1)}
     total = len(segments)
-    paratext = _prep_pack_paratext_indexes_from_segments(segments)
+    structural_indexes = _prep_pack_structural_paratext_indexes(segments)
     errors: list[str] = []
     extensions: list[dict[str, Any]] = []
     ordered = sorted(events, key=lambda e: int(e.get("order") or 0))
@@ -2917,11 +2950,24 @@ def build_prep_pack_span_ledger(
 
     delivered: set[int] = set()
     covered: set[int] = set()
+    # gate (b) input: every segment_index any event cites, regardless of
+    # whether that event's own span declaration turns out to be valid --
+    # citing a segment as real evidence is what matters here, not span
+    # validity.
+    referenced: set[int] = set()
     prev_to = 0
     for event in ordered:
         event_id = str(event.get("event_id") or "")
         declared_from = int(event.get("from_segment") or 0)
         declared_to = int(event.get("to_segment") or 0)
+        for item in event.get("source_evidence") or []:
+            idx = int(item.get("segment_index") or 0)
+            if idx:
+                referenced.add(idx)
+        for item in event.get("key_lines") or []:
+            idx = int(item.get("segment_index") or 0)
+            if idx:
+                referenced.add(idx)
         if declared_from < 1 or declared_to > total or declared_from > declared_to:
             errors.append(
                 f"事件 {event_id} 的 source_span [{declared_from},{declared_to}] "
@@ -2985,20 +3031,83 @@ def build_prep_pack_span_ledger(
         covered |= set(range(from_segment, to_segment + 1))
         prev_to = max(prev_to, to_segment)
 
-    # 副文本/其它账重叠 = 账本自相矛盾（协调方红灯 c）：paratext 是分类阶段独立
-    # 算出来的，不该出现在任何事件的已验证 span 里；一旦出现，说明分类判错了
-    # 或模型没照提示词跳过它，两种情况都不该被静默接受，走 errors 而不是四舍
-    # 五入吞掉——与 (b)/(c) 走同一条阻断路径（调用方看到 ledger_errors 非空
-    # 即 PrepPackGateError，不会走到下面的 uncovered 判断）。merged/proven_
-    # duplicates 在本设计下恒为空集，不需要单独再检查。
-    paratext_conflict = sorted(paratext & covered)
+    # --- Paratext v3 gates: model DECLARES, this function DISPOSES -----
+    # (see the module comment above PARATEXT_TAIL_WINDOW_SEGMENTS for the
+    # full design). declared_paratext_segments is untrusted model prose,
+    # same status as any other model claim in this file -- nothing here
+    # trusts it until it survives every applicable gate.
+    declared = {
+        int(i) for i in (declared_paratext_segments or [])
+        if 1 <= int(i) <= total
+    }
+    rejected_paratext_claims: list[dict[str, Any]] = []
+    position_accepted: set[int] = set()
+
+    # gate (a)(i): structural front matter (chapter heading) -- only if the
+    # model actually declared it; the structural regex alone is no longer
+    # sufficient by itself (v1/v2 retired -- see module comment).
+    structural_declared = declared & structural_indexes
+    position_accepted |= structural_declared
+
+    # gate (a)(ii): tail window, exact contiguous run reaching the final
+    # segment -- a declared tail set with any gap in it is rejected whole,
+    # not partially salvaged (that is precisely what a real author's-note
+    # transition sentence without its own strong signal would otherwise
+    # slip past -- but here the MODEL already told us it is paratext, so
+    # this gate only needs to confirm shape, not go hunting for evidence).
+    window_start = max(1, total - PARATEXT_TAIL_WINDOW_SEGMENTS + 1)
+    tail_declared = {i for i in declared if i >= window_start} - structural_declared
+    if tail_declared:
+        run_len = len(tail_declared)
+        expected_suffix = set(range(total - run_len + 1, total + 1))
+        if total in tail_declared and tail_declared == expected_suffix:
+            position_accepted |= tail_declared
+        else:
+            for index in sorted(tail_declared):
+                rejected_paratext_claims.append({
+                    "segment_index": index, "gate": "position",
+                    "reason": "尾窗申报不是含最末段的连续块（挖洞或未到文末）",
+                })
+
+    # anything declared but neither structural nor even inside the tail
+    # window's numeric range at all -- outright outside gate (a)'s reach.
+    outside_window_declared = declared - structural_declared - tail_declared
+    for index in sorted(outside_window_declared):
+        rejected_paratext_claims.append({
+            "segment_index": index, "gate": "position",
+            "reason": "既非首段章节名，也不在尾窗范围内",
+        })
+
+    # gate (b): no dependency -- a position-gate survivor that some event
+    # actually cites as evidence/key_line contradicts its own paratext
+    # claim; silently rerouted back to ordinary content, not fatal by
+    # itself (module comment: 宁漏勿误, never 宁误勿漏).
+    dependency_accepted: set[int] = set()
+    for index in sorted(position_accepted):
+        if index in referenced:
+            rejected_paratext_claims.append({
+                "segment_index": index, "gate": "dependency",
+                "reason": "被某个事件的 source_evidence/key_lines 引用",
+            })
+        else:
+            dependency_accepted.add(index)
+
+    # gate (c): exclusivity -- FATAL, not a silent veto (协调方红灯 c). A
+    # survivor of (a)+(b) that ALSO falls inside some event's validated span
+    # means the ledger contradicts itself about who owns that segment --
+    # walks the same errors-list path as rules (b)/(c) of the span ledger
+    # itself (caller sees ledger_errors non-empty -> PrepPackGateError,
+    # never reaches the uncovered check below). merged/proven_duplicates are
+    # always empty under this accounting, so no separate check needed there.
+    paratext_conflict = sorted(dependency_accepted & covered)
     if paratext_conflict:
         shown = "、".join(str(i) for i in paratext_conflict[:20])
         errors.append(
-            f"以下编号已被判定为副文本（章节名/作者留言），却又被某个事件的 "
+            f"以下编号已通过位置闸/无依赖闸判定为副文本申报，却又被某个事件的 "
             f"source_span 覆盖，账本自相矛盾：{shown}"
         )
 
+    paratext = dependency_accepted
     uncovered = sorted(set(by_index) - covered - paratext)
     retained_as_context = sorted(covered - delivered)
     ledger = {
@@ -3010,7 +3119,7 @@ def build_prep_pack_span_ledger(
         "paratext": sorted(paratext),
         "uncovered": uncovered,
     }
-    return ledger, errors, extensions
+    return ledger, errors, extensions, rejected_paratext_claims
 
 
 def assert_prep_pack_coverage_complete(ledger: dict[str, Any]) -> None:

@@ -73,6 +73,9 @@ _STEP_PRESENTATIONS: dict[str, WorkflowStepPresentation] = {
     "episode_prep_pack_asset_mapping": WorkflowStepPresentation(
         "资产映射", "确定性核对事件链中出场角色/场景，解析到已有定妆照/场景参考图",
     ),
+    "episode_prep_pack_speaker_resolution": WorkflowStepPresentation(
+        "台词说话人解析", "确定性核对台词说话人是否落在本集资产名册，未落入具名阻断",
+    ),
     "episode_prep_pack_character_discovery": WorkflowStepPresentation(
         "识别新出场角色", "对资产映射解析不到的角色名调用人物发现，判定改名/群演/新建人物卡",
     ),

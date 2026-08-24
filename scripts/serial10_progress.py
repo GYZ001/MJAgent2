@@ -117,6 +117,9 @@ def snapshot() -> int:
                         for item in (ledger.get("proven_duplicates") or [])
                         if isinstance(item, dict) and item.get("segment_index") is not None
                     }
+                    # 1.4.x 起的第五账：副文本（章节名/作者留言）也是门禁认定
+                    # 的合法覆盖账（免于事件覆盖但必须入账），并入显示口径。
+                    covered_union |= set(ledger.get("paratext") or [])
                     prep_info = (
                         f" pack={content.get('prep_pack_version', '?')} "
                         f"events={len(content.get('event_chain') or [])} "
