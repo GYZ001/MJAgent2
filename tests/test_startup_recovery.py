@@ -466,9 +466,16 @@ def test_monitor_tracks_recovery_child_until_it_really_succeeds(
     )
     after = system_api.jobs_overview()
 
+    # Once a continuation run exists, the parent is inert history: it must
+    # not claim to be "recovering" (waiting for a worker) — nothing will
+    # ever pick it up again. It should read as "superseded" until its
+    # successor chain resolves to a terminal state.
     parent_row = next(row for row in after["recent"] if row["id"] == parent)
-    assert parent_row["status"] == "recovering"
+    assert parent_row["status"] == "superseded"
     assert parent_row["recovered_by_run_id"] == child
+    assert child in parent_row["error"]
+    assert after["counts"].get("superseded") == 1
+    assert after["counts"].get("recovering", 0) == 0
 
     conn.execute(
         "UPDATE workflow_runs SET status='SUCCEEDED',updated_at=3 WHERE id=?",
@@ -510,6 +517,198 @@ def test_monitor_surfaces_failed_recovery_child_as_failed(
 
     assert parent_row["status"] == "failed"
     assert parent_row["error"] == "身份编译失败"
+
+
+def _chain_hop(previous_run_id: str, *, workflow_type: str, scope_id: str) -> str:
+    """Create one more continuation run on top of `previous_run_id`.
+
+    Mirrors exactly what repeated service restarts do in production: each
+    hop calls repository.create_run(parent_run_id=<previous>), which marks
+    the previous run's recovered_by_run_id (evidence/repository.py:168-182).
+    The caller decides afterwards whether the new hop itself gets paused
+    again (continuing the chain) or left at a terminal status (ending it).
+    """
+    return repository.create_run(
+        workflow_type=workflow_type,
+        scope_type="project",
+        scope_id=scope_id,
+        input_fingerprint="retry",
+        parent_run_id=previous_run_id,
+        trigger_type="resume",
+    )
+
+
+def test_monitor_resolves_multi_hop_recovery_chain_ancestors_to_tail_status(
+    tmp_path, monkeypatch,
+) -> None:
+    """Reproduces the real run_28d986df03cb -> run_bc59854f140e ->
+    run_de5ced0d9626 -> run_0ee1a6f111c4(SUCCEEDED) chain observed in
+    production: every restart in the middle of the chain leaves its own
+    PAUSED_EXTERNAL row, so a naive single-hop lookup only sees the next
+    hop (also PAUSED_EXTERNAL) and gets stuck reporting "still recovering"
+    forever. All ancestors must instead reflect the chain's real tail."""
+    conn = _fresh_database(tmp_path, monkeypatch)
+    monkeypatch.setattr(system_api, "get_conn", db.get_conn)
+
+    grandparent = _paused_run("screenplay", "project", "p1")
+    mid = _chain_hop(grandparent, workflow_type="screenplay", scope_id="p1")
+    conn.execute(
+        "UPDATE workflow_runs SET status='PAUSED_EXTERNAL',"
+        "failure_code='SERVICE_RESTART',updated_at=3 WHERE id=?",
+        (mid,),
+    )
+    conn.commit()
+    tail = _chain_hop(mid, workflow_type="screenplay", scope_id="p1")
+    conn.execute(
+        "UPDATE workflow_runs SET status='SUCCEEDED',updated_at=4 WHERE id=?",
+        (tail,),
+    )
+    conn.commit()
+
+    result = system_api.jobs_overview()
+    by_id = {row["id"]: row for row in result["recent"]}
+
+    # Both ancestors (2 and 1 hop away from the tail) must resolve through
+    # to the tail's real SUCCEEDED outcome, not get stuck on the
+    # immediate/intermediate PAUSED_EXTERNAL hop.
+    assert by_id[grandparent]["status"] == "recovered"
+    assert by_id[mid]["status"] == "recovered"
+    assert by_id[tail]["status"] == "succeeded"
+    assert result["counts"].get("recovering", 0) == 0
+    assert result["counts"].get("superseded", 0) == 0
+    assert result["counts"]["recovered"] == 2
+    assert result["counts"]["succeeded"] == 1
+
+
+def test_monitor_multi_hop_chain_with_still_running_tail_is_superseded_not_queued(
+    tmp_path, monkeypatch,
+) -> None:
+    """When the chain's tail is still genuinely in flight, ancestors must
+    read as "superseded" (historical, someone else owns the live attempt)
+    rather than "recovering" (implies this exact row is waiting for a
+    worker to pick it up, which will never happen again)."""
+    conn = _fresh_database(tmp_path, monkeypatch)
+    monkeypatch.setattr(system_api, "get_conn", db.get_conn)
+
+    grandparent = _paused_run("screenplay", "project", "p1")
+    mid = _chain_hop(grandparent, workflow_type="screenplay", scope_id="p1")
+    conn.execute(
+        "UPDATE workflow_runs SET status='PAUSED_EXTERNAL',"
+        "failure_code='SERVICE_RESTART',updated_at=3 WHERE id=?",
+        (mid,),
+    )
+    conn.commit()
+    tail = _chain_hop(mid, workflow_type="screenplay", scope_id="p1")
+    conn.execute(
+        "UPDATE workflow_runs SET status='RUNNING',updated_at=4 WHERE id=?",
+        (tail,),
+    )
+    conn.commit()
+
+    result = system_api.jobs_overview()
+    by_id = {row["id"]: row for row in result["recent"]}
+
+    assert by_id[grandparent]["status"] == "superseded"
+    assert by_id[mid]["status"] == "superseded"
+    assert by_id[tail]["status"] == "running"
+    # The ancestor's message must point at the run that is actually live,
+    # not claim this record itself is queued for a worker.
+    assert tail in by_id[grandparent]["error"]
+    assert "等待 worker 领取" not in by_id[grandparent]["error"]
+    assert by_id[grandparent]["recovered_tail_run_id"] == tail
+    assert result["counts"].get("recovering", 0) == 0
+    assert result["counts"]["superseded"] == 2
+    assert result["counts"]["running"] == 1
+
+
+def test_monitor_multi_hop_chain_with_failed_tail_surfaces_real_failure(
+    tmp_path, monkeypatch,
+) -> None:
+    """A chain that ultimately failed must still show as failed on the
+    ancestors — hardening rule: never hide a real failure just to make the
+    "superseded" bucket look clean."""
+    conn = _fresh_database(tmp_path, monkeypatch)
+    monkeypatch.setattr(system_api, "get_conn", db.get_conn)
+
+    grandparent = _paused_run("screenplay", "project", "p1")
+    mid = _chain_hop(grandparent, workflow_type="screenplay", scope_id="p1")
+    conn.execute(
+        "UPDATE workflow_runs SET status='PAUSED_EXTERNAL',"
+        "failure_code='SERVICE_RESTART',updated_at=3 WHERE id=?",
+        (mid,),
+    )
+    conn.commit()
+    tail = _chain_hop(mid, workflow_type="screenplay", scope_id="p1")
+    conn.execute(
+        "UPDATE workflow_runs SET status='FAILED',failure_message='供应商拒绝请求',"
+        "updated_at=4 WHERE id=?",
+        (tail,),
+    )
+    conn.commit()
+
+    result = system_api.jobs_overview()
+    by_id = {row["id"]: row for row in result["recent"]}
+
+    assert by_id[grandparent]["status"] == "failed"
+    assert by_id[grandparent]["error"] == "供应商拒绝请求"
+    assert by_id[mid]["status"] == "failed"
+    assert by_id[mid]["error"] == "供应商拒绝请求"
+    assert by_id[tail]["status"] == "failed"
+
+
+def test_monitor_recovery_chain_cycle_guard_does_not_hang(
+    tmp_path, monkeypatch,
+) -> None:
+    """recovered_by_run_id must never cycle by construction, but the chain
+    walk still has to defend against corrupt data (e.g. a manual DB repair
+    gone wrong) instead of hanging the request forever."""
+    conn = _fresh_database(tmp_path, monkeypatch)
+    monkeypatch.setattr(system_api, "get_conn", db.get_conn)
+
+    a = _paused_run("screenplay", "project", "p1")
+    b = _chain_hop(a, workflow_type="screenplay", scope_id="p1")
+    conn.execute(
+        "UPDATE workflow_runs SET status='PAUSED_EXTERNAL',"
+        "failure_code='SERVICE_RESTART',updated_at=3 WHERE id=?",
+        (b,),
+    )
+    # Force an artificial cycle: b claims to be superseded by a, closing
+    # the loop back on itself (a's recovered_by_run_id already points to
+    # b from _chain_hop above). This can never happen through
+    # repository.create_run (it only ever points forward), so this
+    # simulates corrupted data directly at the storage layer.
+    conn.execute(
+        "UPDATE workflow_runs SET recovered_by_run_id=? WHERE id=?", (a, b),
+    )
+    conn.commit()
+
+    result = system_api.jobs_overview()  # must return, not hang
+    by_id = {row["id"]: row for row in result["recent"]}
+    assert by_id[a]["id"] == a
+    assert by_id[b]["id"] == b
+
+
+def test_monitor_genuinely_queued_recovery_is_unaffected_by_chain_fix(
+    tmp_path, monkeypatch,
+) -> None:
+    """A run truly waiting for a worker (no successor run created yet) must
+    keep showing as "recovering" with the queued-worker message — the fix
+    only changes the *already superseded* case."""
+    conn = _fresh_database(tmp_path, monkeypatch)
+    run_id = _paused_run("video_generation", "project", "p1")
+    conn.execute(
+        "INSERT INTO jobs(id,kind,project_id,status,created_at,updated_at,run_id) "
+        "VALUES('job-queued','video','p1','queued',1,2,?)",
+        (run_id,),
+    )
+    conn.commit()
+    monkeypatch.setattr(system_api, "get_conn", db.get_conn)
+
+    result = system_api.jobs_overview()
+    row = next(r for r in result["recent"] if r["id"] == run_id)
+    assert row["status"] == "recovering"
+    assert row["error"] == "服务重启后已自动重新排队，等待 worker 领取"
+    assert result["counts"]["recovering"] == 1
 
 
 def test_monitor_links_interrupted_provider_call_to_successful_retry(
