@@ -12,6 +12,11 @@
   * 非限流失败**立即停止**，不自动重试、不自动跳过，留给人做根因分析；
   * 只有明确的供应商限流（HTTP 429 / rate_limit / quota / 限流）才自动等待重试：
     优先遵循 Retry-After，没有就等 30 分钟；
+  * 唯一的例外是 GEN-RETRY-GRANT（error_logs.category=='generation_retry_grant'，
+    见 [BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED]）：这是「上次供应商结果未知」
+    的结构化、可安全自愈的失败——重新调用本脚本已经在用的 POST /screenplay
+    两步确认协议即可由领域层签发新 Production Grant 继续生成，门禁本身不变。
+    每集最多自动恢复 RETRY_GRANT_MAX_AUTO_RECOVERIES 次，超过仍按非限流失败停下；
   * 只清理本项目这 10 集的剧本数据，绝不触碰其它项目或分集。
 """
 from __future__ import annotations
@@ -62,6 +67,24 @@ RATE_LIMIT_MARKERS = (
     "tokens per minute",
     "requests per minute",
 )
+
+# GEN-RETRY-GRANT（app/errors.py CATEGORIES["generation_retry_grant"]）是唯一一类
+# 有客观结构化证据、且领域层已经设计好全自动安全恢复路径的失败：
+#   - 判据不是文本猜测，是 error_logs.category 这一分类器自身写下的结构化字段
+#     （app/errors.py:classify 命中 [BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED] 时
+#     写入，见 app/errors.py:161-165），与本文件其它地方刻意避免裸文本匹配的
+#     RATE_LIMIT_MARKERS 判断同一纪律；
+#   - 恢复手段不是绕过门禁，是重新调用本脚本已经在用的同一个两步确认协议：
+#     POST /api/episodes/{id}/screenplay 在 requires_fresh_retry_grant 时经
+#     Command Bus 返回 202 + approval_token，`approved()` 帮助函数已经会自动
+#     用该 token 二次确认；确认后 app/domain/screenplay_ops.py 的
+#     `_spawn_screenplay_activation` 会按当前未确认调用集签发新 Production
+#     Grant 再继续生成（见该文件 1723-1809 行），门禁本身不做任何改动、不放宽。
+#     该端到端路径由 tests/test_screenplay_controls.py::
+#     test_confirmed_unknown_retry_crosses_handler_api_facade_and_mints_grant 覆盖。
+# 每集自动恢复次数设上限，防止真实故障（例如后端反复重启、或该集持续复现同一
+# 缺陷）被无限静默重试掩盖；超过上限仍按原逻辑停下等人工 RCA。
+RETRY_GRANT_MAX_AUTO_RECOVERIES = 3
 
 
 def log(msg: str) -> None:
@@ -124,8 +147,9 @@ def brief(payload: dict) -> str:
     )
 
 
-def _readonly_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{ROOT / 'data' / 'manju.db'}?mode=ro", uri=True)
+def _readonly_conn(db_path: Path | None = None) -> sqlite3.Connection:
+    path = db_path if db_path is not None else (ROOT / "data" / "manju.db")
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -201,6 +225,30 @@ def is_rate_limited(eid: str, since: float) -> bool:
         conn.close()
     text = recent_failure_evidence(eid, since).lower()
     return any(marker in text for marker in RATE_LIMIT_MARKERS)
+
+
+def is_retry_grant_recoverable(
+    eid: str, since: float, *, db_path: Path | None = None,
+) -> bool:
+    """Whether this failure is exactly GEN-RETRY-GRANT for this episode.
+
+    Structured evidence only: ``error_logs.category`` is the classifier's own
+    output (app/errors.py:classify), not a text guess. Scoped to this
+    episode's ``context_json.episode_id`` and to calls at/after ``since`` so a
+    stale, already-superseded error from an earlier attempt -- or a different
+    episode's/another session's unrelated interrupted call sharing the same
+    time window -- can never be misread as this attempt's outcome.
+    """
+    conn = _readonly_conn(db_path)
+    try:
+        return bool(conn.execute(
+            "SELECT 1 FROM error_logs "
+            "WHERE ts>=? AND category='generation_retry_grant' "
+            "AND json_extract(context_json,'$.episode_id')=? LIMIT 1",
+            (since, eid),
+        ).fetchone())
+    finally:
+        conn.close()
 
 
 def clear_one(name: str, eid: str) -> bool:
@@ -288,6 +336,7 @@ def cmd_run(args) -> int:
     log(f"=== SERIAL RUN EP{start_index + 1}-EP{len(EPISODES)} START ===")
     results: dict[str, str] = {}
     for name, eid in EPISODES[start_index:]:
+        retry_grant_recoveries = 0
         while True:
             payload = status_of(eid)
             if payload.get("screenplay_status") == "ready":
@@ -321,6 +370,19 @@ def cmd_run(args) -> int:
                     "（不修改业务代码）")
                 time.sleep(delay)
                 continue
+            if (
+                is_retry_grant_recoverable(eid, since)
+                and retry_grant_recoveries < RETRY_GRANT_MAX_AUTO_RECOVERIES
+            ):
+                retry_grant_recoveries += 1
+                log(f"{name} 判定为 GEN-RETRY-GRANT（上次供应商结果未知，蓝图分片"
+                    f"准入被安全拦截）——第 {retry_grant_recoveries}/"
+                    f"{RETRY_GRANT_MAX_AUTO_RECOVERIES} 次自动重新发起首版剧本"
+                    "（走既有两步确认协议签发新 Production Grant，不绕过门禁）")
+                continue
+            if is_retry_grant_recoverable(eid, since):
+                log(f"{name} GEN-RETRY-GRANT 已达自动恢复上限"
+                    f"（{RETRY_GRANT_MAX_AUTO_RECOVERIES} 次），判定为真实故障")
             log(f"{name} 非限流失败 —— 停止整轮，等待根因分析。证据：")
             for line in recent_failure_evidence(eid, since).splitlines()[:10]:
                 log(f"    {line}")
