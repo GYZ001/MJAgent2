@@ -255,3 +255,43 @@ def test_teamless_user_cannot_create_an_invisible_project():
         assert _creation_workspace_id() == "ws_default"
     finally:
         set_current_principal(None)
+
+
+def test_project_created_through_the_real_product_path_is_visible_to_its_creator(client: TestClient):
+    """至少一条经产品真实路径的建项目验收——这是【测试替系统完成职责】的解药。
+
+    扫描发现：全仓 170 处测试直接 ``INSERT INTO projects``，**0 处**经由
+    ``POST /api/projects``。于是"建项目时该写归属团队"这段产品逻辑从未被任何测试
+    执行过——fixture 早就把 workspace_id 写对了，等于替产品做完了它该做的判定。
+    结果就是那个"项目建完立刻从创建者眼前消失"的缺陷一路活到线上走查才暴露。
+
+    覆盖率对这类盲区无效：INSERT 那一行确实被跑过，只是少了一列。所以这里不追求
+    覆盖更多分支，只要求**这条路径真的被走一次**，从 HTTP 请求一直到能在列表里看见。
+    """
+    conn = get_conn()
+    _add_workspace("ws_creator", "active")
+    user_id = _add_user("creator")
+    _join("ws_creator", user_id, role="workspace_admin")
+    conn.commit()
+
+    headers = {**_HEADERS, "X-Manju-Session": create_session(user_id)}
+    novel = ("第一章 起\n" + "正文内容。" * 200 + "\n第二章 承\n" + "更多正文。" * 200).encode()
+    files = {"file": ("book.txt", novel, "text/plain")}
+
+    resp = client.post("/api/projects", headers=headers, files=files, data={"name": "端到端小说"})
+    # 建项目是 R2 命令，走两段式审批：先拿 approval_token 再重提。
+    if resp.status_code == 202 and resp.json().get("approval_token"):
+        resp = client.post(
+            "/api/projects",
+            headers={**headers, "X-Manju-Approval-Token": resp.json()["approval_token"]},
+            files={"file": ("book.txt", novel, "text/plain")},
+            data={"name": "端到端小说"},
+        )
+    assert resp.status_code == 200, resp.text
+    project_id = resp.json()["project_id"]
+
+    row = conn.execute("SELECT workspace_id FROM projects WHERE id=?", (project_id,)).fetchone()
+    assert row["workspace_id"] == "ws_creator", "项目没落进创建者的团队，他将看不到自己刚建的项目"
+
+    listed = {p["id"] for p in client.get("/api/projects", headers=headers).json()}
+    assert project_id in listed, "项目建成了却不在创建者的列表里——正是那个『上传完就消失』的症状"
