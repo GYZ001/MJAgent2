@@ -130,3 +130,29 @@ def test_must_change_password_is_surfaced_so_the_ui_can_enforce_it(client: TestC
     )
     assert resp.status_code == 200
     assert resp.json()["must_change_password"] is True
+
+
+def test_no_module_builds_media_urls_outside_the_signer():
+    """媒体 URL 只能由 build_media_url 产出——这是 A 类（规则在链路中丢失）的守卫。
+
+    ``/media`` 的凭证只能进查询串（``<img>``/``<video>`` 不带自定义头）。签名逻辑
+    集中在 ``app/media_urls.py``，历史上却有 8 处各自裸拼 ``f"/media/{rel}?v=..."``。
+    只要有人日后再添一处绕过签名，在 ``MJ_MEDIA_REQUIRE_TICKET`` 打开那天，那批
+    图片会静默 403——而单测全绿，因为签名函数本身没坏。
+
+    所以这里守的不是"签名函数对不对"，是"有没有人绕开它"。
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    allowed = {"app/media_urls.py", "app/main.py"}
+    offenders = []
+    for path in (root / "app").rglob("*.py"):
+        rel = path.relative_to(root).as_posix()
+        if rel in allowed:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if '"/media/' in line or 'f"/media/' in line or "/media/{" in line:
+                offenders.append(f"{rel}:{lineno}: {line.strip()}")
+    assert not offenders, "这些地方绕过了 build_media_url：\n" + "\n".join(offenders)
