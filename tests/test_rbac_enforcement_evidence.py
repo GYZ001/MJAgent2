@@ -209,3 +209,49 @@ def test_login_payload_never_lists_a_team_the_principal_cannot_access(client: Te
     assert not unauthorized, f"载荷列出了无权访问的团队：{unauthorized}"
     # 反向也要成立，否则"藏起一个其实有权访问的团队"同样是分叉。
     assert listed == set(principal.workspace_roles)
+
+
+def test_new_project_lands_in_the_creator_own_team():
+    """建项目必须落进创建者自己的团队——否则他建完就再也看不见它。
+
+    读路径（list_projects）当初加了 workspace 过滤，写路径没跟上：INSERT 不带
+    workspace_id，靠列默认值 'ws_default' 兜底。于是只属于 B 团队的用户上传小说，
+    项目落进 ws_default，而他不是那里的成员——**项目建完立刻从他眼前消失**，
+    他会以为上传失败了。
+
+    这条守的是读写两条路径对同一个归属字段的口径一致。
+    """
+    from app.auth.principal import Principal, set_current_principal
+    from app.domain.projects import _creation_workspace_id
+
+    _add_workspace("ws_team_b", "active")
+    member = Principal("u_b", "bob", False, {"ws_team_b": "production"})
+    set_current_principal(member)
+    try:
+        assert _creation_workspace_id() == "ws_team_b"
+    finally:
+        set_current_principal(None)
+
+
+def test_teamless_user_cannot_create_an_invisible_project():
+    """不属于任何团队的普通用户不能建项目——建一个自己看不见的毫无意义。"""
+    import pytest as _pytest
+    from fastapi import HTTPException
+
+    from app.auth.principal import Principal, set_current_principal
+    from app.domain.projects import _creation_workspace_id
+
+    set_current_principal(Principal("u_o", "orphan", False, {}))
+    try:
+        with _pytest.raises(HTTPException) as exc:
+            _creation_workspace_id()
+        assert exc.value.status_code == 403
+    finally:
+        set_current_principal(None)
+
+    # 系统管理员没有成员身份也不该被卡住：他看得到所有团队，不会丢件。
+    set_current_principal(Principal("u_a", "root", True, {}))
+    try:
+        assert _creation_workspace_id() == "ws_default"
+    finally:
+        set_current_principal(None)

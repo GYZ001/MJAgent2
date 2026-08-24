@@ -179,6 +179,35 @@ def _novel_import_receipt(token_hash: str) -> dict | None:
     return {**result, "idempotent_replay": True}
 
 
+def _creation_workspace_id() -> str:
+    """新项目归属哪个团队。
+
+    以前这里什么都不做，靠 ``projects.workspace_id`` 的列默认值 ``'ws_default'``
+    兜底——那是隔离做进来之前的遗留。后果很隐蔽：一个只属于 B 团队的用户上传小说，
+    项目落进 ws_default，而他不是 ws_default 的成员，于是**项目建完立刻从他眼前
+    消失**；他会以为上传失败了。读路径（list_projects）当初加了过滤，写路径没跟上。
+
+    规则：
+    - 恰好属于一个团队 -> 就是它，无歧义。
+    - 属于多个团队 -> 取字典序最小的一个，保证确定性。真要让用户选，得在上传表单
+      加团队选择器，那是独立的一次改动，不在这里悄悄塞一个隐式规则。
+    - 系统管理员且没有任何成员身份 -> ws_default（他看得到所有团队，不会丢件）。
+    - 普通用户且不属于任何团队 -> 拒绝。让他建一个自己看不见的项目毫无意义。
+    """
+    from app.auth.principal import get_current_principal
+
+    principal = get_current_principal()
+    if principal is None:
+        # 无身份上下文：兼容期共享会话、内部调用、既有测试。保持原行为。
+        return "ws_default"
+    workspace_ids = sorted(principal.workspace_roles)
+    if workspace_ids:
+        return workspace_ids[0]
+    if principal.is_system_admin:
+        return "ws_default"
+    raise HTTPException(403, "你还没有加入任何团队，无法创建项目；请联系系统管理员把你加入一个团队")
+
+
 def _create_project_core(
     name: str | None,
     filename: str,
@@ -197,6 +226,7 @@ def _create_project_core(
     if not report["chapters"]:
         raise HTTPException(422, "未能从文件中切分出任何章节，请检查正文或章节标题")
     conn = get_conn()
+    target_workspace = _creation_workspace_id()
     project_id = new_id("proj")
     fallback_name = Path(filename).stem.strip() or "未命名小说"
     project_name = (name or "").strip() or fallback_name
@@ -221,8 +251,9 @@ def _create_project_core(
     }
     try:
         conn.execute(
-            "INSERT INTO projects(id, name, status, novel_chars, created_at) VALUES(?,?,'ingested',?,?)",
-            (project_id, project_name, report["total_chars"], now()))
+            "INSERT INTO projects(id, name, status, novel_chars, created_at, workspace_id) "
+            "VALUES(?,?,'ingested',?,?,?)",
+            (project_id, project_name, report["total_chars"], now(), target_workspace))
         conn.executemany(
             "INSERT INTO chapters(project_id, idx, title, content, char_count) VALUES(?,?,?,?,?)",
             [
