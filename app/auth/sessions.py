@@ -19,7 +19,12 @@ from app.auth.principal import Principal
 from app.db import get_conn, new_id, now
 
 # 会话滑动过期窗口：每次有效访问都把 expires_at 续到 now + SESSION_TTL_S。
-SESSION_TTL_S = 12 * 60 * 60
+#
+# 原来是 12 小时，实际用起来太短：隔夜不用就超窗，第二天上班要重登一次。而且它和
+# 前端"令牌只放内存"叠加后更难受——刷新丢内存、隔夜丢会话，两头都掉。
+# 改成 7 天滑动：日常使用（每天都会碰）永远不会掉线，真正长期不用的会话仍会自然
+# 过期。绝对上限 30 天不变，所以最坏情况下一枚被窃令牌的寿命没有变长。
+SESSION_TTL_S = 7 * 24 * 60 * 60
 # 绝对上限：即便持续活跃，会话也不能超过 created_at 起 30 天。
 ABSOLUTE_TTL_S = 30 * 24 * 60 * 60
 # 续期写库节流：距离上次落库不足这个阈值就不再 UPDATE，避免轮询/媒体请求把

@@ -295,3 +295,39 @@ def test_project_created_through_the_real_product_path_is_visible_to_its_creator
 
     listed = {p["id"] for p in client.get("/api/projects", headers=headers).json()}
     assert project_id in listed, "项目建成了却不在创建者的列表里——正是那个『上传完就消失』的症状"
+
+
+def test_longer_session_window_did_not_weaken_revocation_or_the_absolute_cap():
+    """把滑动窗口从 12 小时放宽到 7 天，不能顺带削弱任何一条安全边界。
+
+    放宽是为了体验（刷新不掉线、隔夜不掉线）。这条守的是"便利没有换掉安全"：
+    绝对上限仍然封顶，停用账号仍然当场失效。只要有人日后为了更省事再去调这两个
+    值，这条会红。
+    """
+    from app.auth.sessions import ABSOLUTE_TTL_S, SESSION_TTL_S
+
+    # 体验要求：至少覆盖一天，否则隔夜必掉线。
+    assert SESSION_TTL_S >= 24 * 60 * 60
+    # 安全要求：绝对上限必须仍然严格大于滑动窗口，否则滑动就等于永不过期。
+    assert ABSOLUTE_TTL_S > SESSION_TTL_S
+
+    conn = get_conn()
+    user_id = _add_user("longlived")
+    token = create_session(user_id)
+    session_id = token.split(".", 1)[0]
+    assert resolve_session(token) is not None
+
+    # 绝对上限仍然封顶：即便滑动窗口没到期，超过 created_at + 30 天也必须失效。
+    conn.execute(
+        "UPDATE user_sessions SET created_at=?, expires_at=? WHERE id=?",
+        (now() - ABSOLUTE_TTL_S - 1, now() + SESSION_TTL_S, session_id),
+    )
+    conn.commit()
+    assert resolve_session(token) is None, "绝对上限被放宽了"
+
+    # 停用账号仍然当场失效，不受更长的窗口影响。
+    fresh = create_session(user_id)
+    assert resolve_session(fresh) is not None
+    conn.execute("UPDATE users SET status='disabled' WHERE id=?", (user_id,))
+    conn.commit()
+    assert resolve_session(fresh) is None, "停用账号后会话还活着"

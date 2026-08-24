@@ -35,10 +35,36 @@ function normalizeNetworkError(error: unknown): Error {
 const SESSION_HEADER = "X-Manju-Session";
 const APPROVAL_HEADER = "X-Manju-Approval-Token";
 
-// 登录签发的会话令牌只存在这一份模块内存变量里，不落 localStorage/sessionStorage：
-// 与改造前保持同一套 XSS posture（凭证不进任何持久化存储）。代价是整页刷新会
-// 丢失这份内存状态，需要重新登录——这是有意的取舍，不是遗漏。
-let sessionToken: string | null = null;
+// 会话令牌持久化到 localStorage。
+//
+// 最初只放模块内存、不落任何存储，理由是 XSS posture。实际用下来这个取舍是错的：
+// 整页刷新就要重登一次，而换来的安全收益很有限——真被 XSS 了，攻击者本来就能直接
+// 以当前页面身份发请求、或读走内存里的这个变量，持久化只是让被窃令牌多活一会儿。
+// 拿"每次刷新重登"去买这点边际收益，不值。
+//
+// 真正的防线在服务端而不是这里：会话可被随时吊销（停用账号/改密即刻失效）、有滑动
+// 过期与绝对上限。localStorage 里这份只是个缓存，失效了第一个请求就 401 并回登录页。
+const TOKEN_STORAGE_KEY = "manju:session-token";
+
+function readStoredToken(): string | null {
+  try {
+    return window.localStorage.getItem(TOKEN_STORAGE_KEY);
+  } catch {
+    // 隐私模式/禁用存储时 localStorage 会抛异常；退化成本次会话内可用即可，不能崩。
+    return null;
+  }
+}
+
+function writeStoredToken(token: string | null): void {
+  try {
+    if (token) window.localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    else window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch {
+    /* 同上：存不进去不影响本次会话，不要因此中断登录 */
+  }
+}
+
+let sessionToken: string | null = readStoredToken();
 const inflightGets = new Map<string, Promise<any>>();
 
 /** AuthContext 订阅这个信号：一次真正判定为「登录已失效」时回调，值切回登录页。
@@ -52,6 +78,7 @@ export function onUnauthenticated(listener: UnauthenticatedListener | null): voi
 
 function notifyUnauthenticated(): void {
   sessionToken = null;
+  writeStoredToken(null);
   unauthenticatedListener?.();
 }
 
@@ -238,6 +265,7 @@ export async function login(
     password,
   })) as AuthLoginResponse;
   sessionToken = data.session_token;
+  writeStoredToken(sessionToken);
   return data;
 }
 
@@ -247,6 +275,7 @@ export async function logout(): Promise<void> {
     await request("POST", "/auth/logout");
   } finally {
     sessionToken = null;
+    writeStoredToken(null);
   }
 }
 
@@ -265,6 +294,7 @@ export async function changePassword(
     new_password: newPassword,
   })) as AuthLoginResponse;
   sessionToken = data.session_token;
+  writeStoredToken(sessionToken);
   return data;
 }
 
