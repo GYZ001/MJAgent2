@@ -222,17 +222,52 @@ async def cancel_run(run_id: str):
     if run["status"] not in repository.ACTIVE_RUN_STATUSES:
         raise HTTPException(409, "运行已结束，不能取消")
     if run["workflow_type"] == "screenplay":
-        cancelled = await task_registry.cancel_and_wait("screenplay", run["scope_id"])
-        if not cancelled:
-            WorkflowRecorder(run_id).cancel("已取消暂停中的剧本运行")
-            cancelled = True
-        return {"cancelled": cancelled, "run": repository.get_run(run_id)}
+        # task_registry.cancel_and_wait 按 (workflow_type, scope_id) 查找进程内任务，
+        # 不校验 run_id。服务重启恢复（recover_screenplay_tasks）会把
+        # episode.active_screenplay_run_id 指向续跑出来的新 run，把旧的父 run 留成
+        # PAUSED_EXTERNAL 的历史记录。这个历史 run 在观测台上仍然可点"取消"，如果
+        # 直接按 scope 撤销，杀掉的其实是当前续跑任务，而返回体还是这条无关的历史
+        # run，调用方完全看不出真正被杀的是谁。因此先核实这个 run_id 是否仍是该
+        # 剧集当前的持有者（与 _restart_screenplay_run 的所有权校验对齐）。
+        episode = get_conn().execute(
+            "SELECT active_screenplay_run_id FROM episodes WHERE id=?", (run["scope_id"],)
+        ).fetchone()
+        active_run_id = episode["active_screenplay_run_id"] if episode else None
+        if not episode or active_run_id == run_id:
+            cancelled = await task_registry.cancel_and_wait("screenplay", run["scope_id"])
+            if not cancelled:
+                WorkflowRecorder(run_id).cancel("已取消暂停中的剧本运行")
+                cancelled = True
+            return {"cancelled": cancelled, "run": repository.get_run(run_id)}
+        # 该 run_id 已被后续续跑取代，进程内已经没有与它对应的 asyncio 任务；
+        # 只终结这条历史记录自身，绝不能按 scope_id 调 cancel_and_wait 去误伤当前 owner。
+        WorkflowRecorder(run_id).cancel("该运行已被后续续跑取代，仅标记历史记录为已取消")
+        return {
+            "cancelled": True,
+            "superseded": True,
+            "active_run_id": active_run_id,
+            "run": repository.get_run(run_id),
+        }
     if run["workflow_type"] == "character_bible":
-        cancelled = await task_registry.cancel_and_wait("bible", run["scope_id"])
-        if not cancelled:
-            WorkflowRecorder(run_id).cancel("已取消暂停中的运行")
-            cancelled = True
-        return {"cancelled": cancelled, "run": repository.get_run(run_id)}
+        # 人物谱没有 episodes.active_screenplay_run_id 这样的专属指针字段（projects
+        # 表只有 bible_status，不记录当前持有者的 run_id），但
+        # recover_bible_tasks/_new_bible_recorder 走的是同一条 parent_run_id 续跑链路：
+        # 一旦这条 run 被续跑取代，repository.create_run 会把它的 recovered_by_run_id
+        # 置位（且此后不会再清空，见 evidence/repository.create_run）。因此
+        # recovered_by_run_id 非空即等价于"不再是当前 owner"，可以复用同一处理方式。
+        if not run.get("recovered_by_run_id"):
+            cancelled = await task_registry.cancel_and_wait("bible", run["scope_id"])
+            if not cancelled:
+                WorkflowRecorder(run_id).cancel("已取消暂停中的运行")
+                cancelled = True
+            return {"cancelled": cancelled, "run": repository.get_run(run_id)}
+        WorkflowRecorder(run_id).cancel("该运行已被后续续跑取代，仅标记历史记录为已取消")
+        return {
+            "cancelled": True,
+            "superseded": True,
+            "active_run_id": run.get("recovered_by_run_id"),
+            "run": repository.get_run(run_id),
+        }
     task = task_registry.get("run", run_id)
     if task and not task.done():
         await task_registry.cancel_and_wait("run", run_id)
