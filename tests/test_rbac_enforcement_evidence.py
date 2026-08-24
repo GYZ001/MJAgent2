@@ -179,3 +179,33 @@ def test_disabled_workspace_disappears_from_the_login_payload_too(client: TestCl
     assert resp.status_code == 200
     listed = {w["id"] for w in resp.json()["workspaces"]}
     assert listed == {"ws_shown"}, f"停用团队仍出现在登录载荷里：{listed}"
+
+
+def test_login_payload_never_lists_a_team_the_principal_cannot_access(client: TestClient):
+    """跨口径一致性：登录载荷里的团队集合必须是 can_access 为真的子集。
+
+    这是【重复真源】那一类的守卫。第 12 例的教训是：单独给"授权口径"写行为测试
+    是不够的——那条测试当时是绿的，因为它只断言了我想到的那一半，另一处独立实现
+    根本不在断言范围里。这条测试同时钉住两处：任何一方将来再分叉，它就红。
+
+    真正的结构性修复是让 _workspaces_payload 只消费 principal.workspace_roles
+    （成员判定只有一个真源，这里只补团队名）；这条断言是那次收敛的回归网。
+    """
+    _add_workspace("ws_ok", "active")
+    _add_workspace("ws_off", "disabled")
+    user_id = _add_user("crosscheck")
+    _join("ws_ok", user_id)
+    _join("ws_off", user_id)
+
+    token = create_session(user_id)
+    principal = resolve_session(token)
+    assert principal is not None
+
+    resp = client.get("/api/auth/me", headers={**_HEADERS, "X-Manju-Session": token})
+    assert resp.status_code == 200
+    listed = {w["id"] for w in resp.json()["workspaces"]}
+
+    unauthorized = {ws for ws in listed if not principal.can_access(ws)}
+    assert not unauthorized, f"载荷列出了无权访问的团队：{unauthorized}"
+    # 反向也要成立，否则"藏起一个其实有权访问的团队"同样是分叉。
+    assert listed == set(principal.workspace_roles)
