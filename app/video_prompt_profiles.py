@@ -54,9 +54,9 @@ def resolve_video_prompt_profile(
     model: str = "",
 ) -> VideoPromptProfile:
     """Resolve the prompt dialect from the same provider selection used at submit."""
-    if str(provider).strip().lower() == "minimax_h3":
-        return MINIMAX_H3_PROFILE
-    return SEEDANCE_2_PROFILE
+    from app import video_providers
+
+    return video_providers.resolve(str(provider).strip().lower()).prompt_profile()
 
 
 def video_prompt_target_fingerprint(*, provider: str, model: str) -> str:

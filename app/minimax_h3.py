@@ -10,9 +10,10 @@ import mimetypes
 import re
 import socket
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
 
@@ -88,17 +89,136 @@ _PROVIDER_STAGE_LABELS = {
 }
 
 
+@dataclass(frozen=True)
+class H3Connection:
+    """一个 H3 服务实例的连接与出片参数。
+
+    协议相同、连接不同的服务（同一份 ComfyUI 工作流部署在不同机器/隧道上）
+    因此可以共用这份适配器，不必再为每个实例改代码。内置实例由
+    ``default_connection()`` 从 settings/env 组装，页面新增的实例由
+    ``connection_from_catalog_item()`` 从模型库条目组装。
+    """
+
+    base_url: str
+    api_key: str
+    model: str
+    width: int
+    height: int
+    acceleration: str
+    turbo_profile: str
+    turbo_strength: float
+    turbo_low_vram: bool
+    video_vae: str
+    steps: int
+    use_te_speed: bool
+    poll_interval: float
+
+
 def base_url() -> str:
+    """内置实例的服务地址；隧道地址轮换时改 settings 即可，不必动代码。"""
     return (
         get_setting("minimax_h3_base_url")
         or config.MINIMAX_H3_BASE_URL
     ).strip().rstrip("/")
 
 
-def _headers(*, json_content: bool = False) -> dict[str, str]:
+def default_connection() -> H3Connection:
+    return H3Connection(
+        base_url=base_url(),
+        api_key=config.MINIMAX_H3_API_KEY,
+        model=(
+            get_setting("minimax_h3_model_video")
+            or config.DEFAULT_MINIMAX_H3_MODEL_VIDEO
+        ),
+        width=config.MINIMAX_H3_VIDEO_WIDTH,
+        height=config.MINIMAX_H3_VIDEO_HEIGHT,
+        acceleration=config.MINIMAX_H3_ACCELERATION,
+        turbo_profile=config.MINIMAX_H3_TURBO_PROFILE,
+        turbo_strength=config.MINIMAX_H3_TURBO_STRENGTH,
+        turbo_low_vram=config.MINIMAX_H3_TURBO_LOW_VRAM,
+        video_vae=config.MINIMAX_H3_VIDEO_VAE,
+        steps=config.MINIMAX_H3_STEPS,
+        use_te_speed=config.MINIMAX_H3_USE_TE_SPEED,
+        poll_interval=config.MINIMAX_H3_POLL_INTERVAL,
+    )
+
+
+def _clamped_int(value: Any, low: int, high: int, fallback: int) -> int:
+    try:
+        return max(low, min(high, int(value)))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def connection_from_catalog_item(
+    item: dict[str, Any],
+    *,
+    base_url_override: str = "",
+    api_key_override: str = "",
+) -> H3Connection:
+    """把模型库里的一条自建实例翻译成连接参数。
+
+    缺省一律回落到内置实例的取值：页面上只填 Base URL 和 Key 就能跑起来，
+    加速档之类的调优项留空即沿用当前默认，而不是让实例带着一堆空值提交。
+    """
+    fallback = default_connection()
+    params = item.get("params") if isinstance(item.get("params"), dict) else {}
+    acceleration = str(
+        params.get("acceleration") or fallback.acceleration
+    ).strip().lower()
+    if acceleration not in {"standard", "turbo"}:
+        acceleration = fallback.acceleration
+    turbo_profile = str(
+        params.get("turbo_profile") or fallback.turbo_profile
+    ).strip() or fallback.turbo_profile
+    step_low, step_high = (4, 8) if acceleration == "turbo" else (1, 100)
+    return H3Connection(
+        base_url=str(
+            base_url_override or item.get("base_url") or fallback.base_url
+        ).strip().rstrip("/"),
+        api_key=str(
+            api_key_override or item.get("api_key") or fallback.api_key
+        ).strip(),
+        model=str(item.get("model") or fallback.model).strip(),
+        width=_clamped_int(
+            params.get("width", fallback.width), 32, 4096, fallback.width,
+        ) // 32 * 32,
+        height=_clamped_int(
+            params.get("height", fallback.height), 32, 4096, fallback.height,
+        ) // 32 * 32,
+        acceleration=acceleration,
+        turbo_profile=turbo_profile,
+        turbo_strength=fallback.turbo_strength,
+        turbo_low_vram=fallback.turbo_low_vram,
+        video_vae=str(
+            params.get("video_vae") or fallback.video_vae
+        ).strip() or fallback.video_vae,
+        steps=_clamped_int(
+            params.get("steps", fallback.steps),
+            step_low,
+            step_high,
+            min(step_high, max(step_low, fallback.steps)),
+        ),
+        use_te_speed=bool(
+            params.get("use_te_speed", fallback.use_te_speed)
+        ),
+        poll_interval=fallback.poll_interval,
+    )
+
+
+def _connection(connection: H3Connection | None) -> H3Connection:
+    return connection if connection is not None else default_connection()
+
+
+def _headers(
+    connection: H3Connection | None = None,
+    *,
+    json_content: bool = False,
+) -> dict[str, str]:
     headers: dict[str, str] = {}
-    if config.MINIMAX_H3_API_KEY:
-        headers["Authorization"] = f"Bearer {config.MINIMAX_H3_API_KEY}"
+    api_key = _connection(connection).api_key
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     if json_content:
         headers["Content-Type"] = "application/json"
     return headers
@@ -268,11 +388,12 @@ async def _materialize_input(
 async def _upload_file(
     client: httpx.AsyncClient,
     item: tuple[str, bytes, str],
+    connection: H3Connection,
 ) -> str:
     filename, raw, mime = item
     response = await client.post(
-        f"{base_url()}/v1/files",
-        headers=_headers(),
+        f"{connection.base_url}/v1/files",
+        headers=_headers(connection),
         files={"file": (filename, raw, mime)},
     )
     if response.status_code not in {200, 201}:
@@ -309,9 +430,12 @@ def _duration(prompt_text: str, call_meta: dict[str, Any] | None) -> float:
     return min(15.0, max(0.2, duration))
 
 
-def _output_dimensions(prompt_text: str) -> tuple[int, int]:
-    width = config.MINIMAX_H3_VIDEO_WIDTH
-    height = config.MINIMAX_H3_VIDEO_HEIGHT
+def _output_dimensions(
+    prompt_text: str,
+    connection: H3Connection,
+) -> tuple[int, int]:
+    width = connection.width
+    height = connection.height
     _body, suffix = _split_trailing_video_args(prompt_text)
     ratio = re.search(r"--ratio\s+(\d+):(\d+)", suffix)
     if ratio and int(ratio.group(1)) > int(ratio.group(2)) and width < height:
@@ -488,8 +612,8 @@ def generation_timeout_seconds(
     return max(900, round(expected * 1.75 + 600))
 
 
-def poll_interval_seconds() -> float:
-    return float(config.MINIMAX_H3_POLL_INTERVAL)
+def poll_interval_seconds(connection: H3Connection | None = None) -> float:
+    return float(_connection(connection).poll_interval)
 
 
 def provider_task_phase(result: dict[str, Any]) -> str:
@@ -545,10 +669,11 @@ def _idempotency_key(operation_id: str) -> str:
 def _load_request_checkpoint(
     operation_id: str,
     logical_fingerprint: str,
+    model: str,
 ) -> dict[str, Any] | None:
     saved = latest_provider_request_json(
         "video_create",
-        config.DEFAULT_MINIMAX_H3_MODEL_VIDEO,
+        model,
         operation_id,
     )
     if not isinstance(saved, dict):
@@ -576,12 +701,14 @@ async def create_video_task(
     image_urls: list[tuple[str, str]] | None = None,
     video_urls: list[tuple[str, str]] | None = None,
     call_meta: dict[str, Any] | None = None,
+    connection: H3Connection | None = None,
 ) -> str:
+    conn = _connection(connection)
     images = list(image_urls or [])
     videos = list(video_urls or [])
     mode = _request_mode(images, videos)
-    model = config.DEFAULT_MINIMAX_H3_MODEL_VIDEO
-    width, height = _output_dimensions(prompt_text)
+    model = conn.model
+    width, height = _output_dimensions(prompt_text, conn)
     intent = str((call_meta or {}).get("video_input_intent") or "")
     use_source_audio = intent in {"AUDIO_REFERENCE", "CONTINUE_PREVIOUS_TAKE"}
     provider_prompt = _tagged_prompt(
@@ -592,6 +719,7 @@ async def create_video_task(
         video_input_intent=intent,
     )
     logical_request: dict[str, Any] = {
+        "model": model,
         "mode": mode,
         "prompt": provider_prompt,
         "image_inputs": [
@@ -605,20 +733,16 @@ async def create_video_task(
         "width": width,
         "height": height,
         "duration": _duration(prompt_text, call_meta),
-        "acceleration": config.MINIMAX_H3_ACCELERATION,
+        "acceleration": conn.acceleration,
         "turbo_profile": (
-            config.MINIMAX_H3_TURBO_PROFILE
-            if config.MINIMAX_H3_ACCELERATION == "turbo"
-            else None
+            conn.turbo_profile if conn.acceleration == "turbo" else None
         ),
         "steps": (
-            config.MINIMAX_H3_STEPS
-            if config.MINIMAX_H3_ACCELERATION != "turbo"
-            else None
+            conn.steps if conn.acceleration != "turbo" else None
         ),
-        "video_vae": config.MINIMAX_H3_VIDEO_VAE,
+        "video_vae": conn.video_vae,
         "scheduler": "simple",
-        "use_te_speed": config.MINIMAX_H3_USE_TE_SPEED,
+        "use_te_speed": conn.use_te_speed,
         "use_source_audio": use_source_audio,
     }
     logical_fingerprint = _request_fingerprint(logical_request)
@@ -629,6 +753,7 @@ async def create_video_task(
     recovered_payload = _load_request_checkpoint(
         operation_id,
         logical_fingerprint,
+        model,
     )
     request_checkpoint: dict[str, Any] = {
         "checkpoint_version": _REQUEST_CHECKPOINT_VERSION,
@@ -669,6 +794,7 @@ async def create_video_task(
                                 media_kind="image",
                                 index=index,
                             ),
+                            conn,
                         )
                     )
                 uploaded_videos = []
@@ -681,33 +807,35 @@ async def create_video_task(
                                 media_kind="video",
                                 index=index,
                             ),
+                            conn,
                         )
                     )
 
                 payload = {
+                    "model": model,
                     "mode": mode,
                     "prompt": provider_prompt,
                     "width": width,
                     "height": height,
                     "duration": logical_request["duration"],
-                    "acceleration": config.MINIMAX_H3_ACCELERATION,
-                    "video_vae": config.MINIMAX_H3_VIDEO_VAE,
+                    "acceleration": conn.acceleration,
+                    "video_vae": conn.video_vae,
                     "seed": -1,
                     "scheduler": "simple",
-                    "use_te_speed": config.MINIMAX_H3_USE_TE_SPEED,
+                    "use_te_speed": conn.use_te_speed,
                     "output_prefix": (
                         "video/manju_"
                         + re.sub(r"[^A-Za-z0-9_-]+", "_", operation_id)
                     )[:180],
                 }
-                if config.MINIMAX_H3_ACCELERATION == "turbo":
+                if conn.acceleration == "turbo":
                     payload.update({
-                        "turbo_profile": config.MINIMAX_H3_TURBO_PROFILE,
-                        "turbo_strength": config.MINIMAX_H3_TURBO_STRENGTH,
-                        "turbo_low_vram": config.MINIMAX_H3_TURBO_LOW_VRAM,
+                        "turbo_profile": conn.turbo_profile,
+                        "turbo_strength": conn.turbo_strength,
+                        "turbo_low_vram": conn.turbo_low_vram,
                     })
                 else:
-                    payload["steps"] = config.MINIMAX_H3_STEPS
+                    payload["steps"] = conn.steps
                 if mode == "keyframes":
                     payload["first_frame"] = uploaded_images[0]
                     if len(uploaded_images) > 1:
@@ -729,9 +857,9 @@ async def create_video_task(
 
             create_request_started = True
             response = await client.post(
-                f"{base_url()}/v1/videos/generations",
+                f"{conn.base_url}/v1/videos/generations",
                 headers={
-                    **_headers(json_content=True),
+                    **_headers(conn, json_content=True),
                     "Idempotency-Key": _idempotency_key(operation_id),
                 },
                 json=payload,
@@ -822,16 +950,18 @@ async def poll_video_task(
     task_id: str,
     *,
     call_meta: dict[str, Any] | None = None,
+    connection: H3Connection | None = None,
 ) -> dict[str, Any]:
+    conn = _connection(connection)
     provider_id = _provider_task_id(task_id)
     started = time.time()
-    model = config.DEFAULT_MINIMAX_H3_MODEL_VIDEO
+    model = conn.model
     try:
         timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_VIDEO_POLL, write=10, pool=10)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.get(
-                f"{base_url()}/v1/videos/generations/{provider_id}",
-                headers=_headers(),
+                f"{conn.base_url}/v1/videos/generations/{provider_id}",
+                headers=_headers(conn),
             )
     except httpx.RequestError as exc:
         error = ProviderError(
@@ -899,9 +1029,15 @@ async def poll_video_task(
         status = "failed"
         error_text = error_text or "MiniMaxH3 队列和历史中均找不到该任务"
         failure = ProviderFailure.technical(ProviderFailureKind.TASK_NOT_FOUND)
-    if status == "succeeded" and not output.get("url"):
+    raw_output_url = str(output.get("url") or "")
+    output_url = normalize_output_url(raw_output_url, conn)
+    if status == "succeeded" and not raw_output_url:
         status = "failed"
         error_text = "MiniMaxH3 任务成功但未返回 MP4 文件"
+        failure = ProviderFailure.technical(ProviderFailureKind.OUTPUT_MISSING)
+    elif status == "succeeded" and not output_url:
+        status = "failed"
+        error_text = f"MiniMaxH3 输出 URL 不属于已配置服务：{raw_output_url}"
         failure = ProviderFailure.technical(ProviderFailureKind.OUTPUT_MISSING)
     if status == "failed" and failure is None:
         failure = ProviderFailure.from_provider_payload(data.get("failure"))
@@ -918,30 +1054,61 @@ async def poll_video_task(
         "estimated_seconds": data.get("estimated_seconds"),
         "timings": timings,
         "metadata": metadata,
-        "video_url": str(output.get("url") or ""),
+        "video_url": output_url,
         "last_frame_url": "",
         "error": error_text,
         "failure": failure.to_payload() if failure else None,
     }
 
 
-def is_output_url(value: str) -> bool:
-    candidate = urlparse(value)
-    configured = urlparse(base_url())
-    return (
-        candidate.scheme == configured.scheme
-        and candidate.netloc == configured.netloc
-        and candidate.path == "/v1/outputs"
-    )
+def normalize_output_url(
+    value: str,
+    connection: H3Connection | None = None,
+) -> str:
+    """Rebind a provider output URL onto the configured base, or return "".
+
+    H3 builds ``files[].url`` from the request Host without honouring
+    ``X-Forwarded-Proto``, so behind the public tunnel it advertises ``http://``
+    even when the service is only reachable over ``https://``. Requiring an exact
+    scheme match would reject every download, so only host and path are matched
+    and the configured scheme is reimposed — plaintext media transfers stay off
+    the public internet either way.
+    """
+    candidate = urlparse(str(value or ""))
+    configured = urlparse(_connection(connection).base_url)
+    if (
+        candidate.scheme not in {"http", "https"}
+        or candidate.netloc != configured.netloc
+        or candidate.path != "/v1/outputs"
+    ):
+        return ""
+    return urlunparse((
+        configured.scheme,
+        configured.netloc,
+        candidate.path,
+        candidate.params,
+        candidate.query,
+        candidate.fragment,
+    ))
 
 
-async def download_output(url: str, dest_path: str) -> None:
-    if not is_output_url(url):
+def is_output_url(value: str, connection: H3Connection | None = None) -> bool:
+    return bool(normalize_output_url(value, connection))
+
+
+async def download_output(
+    url: str,
+    dest_path: str,
+    connection: H3Connection | None = None,
+) -> None:
+    conn = _connection(connection)
+    target = normalize_output_url(url, conn)
+    if not target:
         raise ProviderError("MiniMaxH3 输出 URL 不属于已配置服务")
     timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_DOWNLOAD, write=30, pool=10)
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-            response = await client.get(url, headers=_headers())
+            response = await client.get(target, headers=_headers(conn))
     except httpx.RequestError as exc:
         raise ProviderError(
             f"MiniMaxH3 视频下载网络异常：{type(exc).__name__}: {exc}",
@@ -953,8 +1120,13 @@ async def download_output(url: str, dest_path: str) -> None:
     atomic_write_bytes(dest_path, response.content)
 
 
-def _probe_target(override_base_url: str | None = None) -> str:
-    target = str(override_base_url or base_url()).strip().rstrip("/")
+def _probe_target(
+    override_base_url: str | None = None,
+    connection: H3Connection | None = None,
+) -> str:
+    target = str(
+        override_base_url or _connection(connection).base_url
+    ).strip().rstrip("/")
     if not re.fullmatch(r"https?://[^\s]+", target):
         raise ProviderError("MiniMaxH3 Base URL 必须是有效的 http(s) 地址")
     return target
@@ -981,7 +1153,9 @@ def _probe_result(
     *,
     target: str,
     latency_ms: int,
+    connection: H3Connection | None = None,
 ) -> dict[str, Any]:
+    conn = _connection(connection)
     advertised_modes = [
         str(name)
         for name in (root.get("modes") or [])
@@ -1034,9 +1208,9 @@ def _probe_result(
         )
         for name in advertised_vaes
     }
-    selected_acceleration = config.MINIMAX_H3_ACCELERATION
-    selected_profile = config.MINIMAX_H3_TURBO_PROFILE
-    selected_vae = config.MINIMAX_H3_VIDEO_VAE
+    selected_acceleration = conn.acceleration
+    selected_profile = conn.turbo_profile
+    selected_vae = conn.video_vae
     api_version = str(root.get("version") or "").strip()
     problems: list[str] = []
     if health.get("status") != "ok":
@@ -1083,7 +1257,7 @@ def _probe_result(
         "steps": (
             int(profile_steps)
             if selected_acceleration == "turbo"
-            else config.MINIMAX_H3_STEPS
+            else conn.steps
         ),
         "video_vae_profiles": video_vae_profiles,
         "video_vae": selected_vae,
@@ -1091,16 +1265,20 @@ def _probe_result(
     }
 
 
-async def probe_connection(override_base_url: str | None = None) -> dict[str, Any]:
-    target = _probe_target(override_base_url)
+async def probe_connection(
+    override_base_url: str | None = None,
+    connection: H3Connection | None = None,
+) -> dict[str, Any]:
+    conn = _connection(connection)
+    target = _probe_target(override_base_url, conn)
     started = time.time()
     timeout = httpx.Timeout(connect=5, read=30, write=10, pool=5)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            root_response = await client.get(f"{target}/", headers=_headers())
+            root_response = await client.get(f"{target}/", headers=_headers(conn))
             health_response = await client.get(
                 f"{target}/health",
-                headers=_headers(),
+                headers=_headers(conn),
             )
     except httpx.RequestError as exc:
         raise ProviderError(
@@ -1115,20 +1293,23 @@ async def probe_connection(override_base_url: str | None = None) -> dict[str, An
         health,
         target=target,
         latency_ms=int((time.time() - started) * 1000),
+        connection=conn,
     )
 
 
 def probe_connection_sync(
     override_base_url: str | None = None,
+    connection: H3Connection | None = None,
 ) -> dict[str, Any]:
     """Synchronous capability discovery for sync planning boundaries."""
-    target = _probe_target(override_base_url)
+    conn = _connection(connection)
+    target = _probe_target(override_base_url, conn)
     started = time.time()
     timeout = httpx.Timeout(connect=5, read=30, write=10, pool=5)
     try:
         with httpx.Client(timeout=timeout) as client:
-            root_response = client.get(f"{target}/", headers=_headers())
-            health_response = client.get(f"{target}/health", headers=_headers())
+            root_response = client.get(f"{target}/", headers=_headers(conn))
+            health_response = client.get(f"{target}/health", headers=_headers(conn))
     except httpx.RequestError as exc:
         raise ProviderError(
             f"MiniMaxH3 连接失败：{type(exc).__name__}: {exc}",
@@ -1142,4 +1323,259 @@ def probe_connection_sync(
         health,
         target=target,
         latency_ms=int((time.time() - started) * 1000),
+        connection=conn,
     )
+
+
+class MiniMaxH3Adapter:
+    """MiniMax H3（ComfyUI 私有协议）。
+
+    模块级函数保持原样对外可用——它们既是本适配器的实现，也是既有测试与
+    运维脚本的入口；这个类只把它们组织成注册表认得的形状。
+    """
+
+    gateway = "minimax_h3"
+    serial_generation = True
+    wait_meta_keys: tuple[str, ...] = (
+        "minimax_h3_generation_started_at",
+        "minimax_h3_generation_timeout_s",
+        "minimax_h3_acceleration",
+        "minimax_h3_turbo_profile",
+        "minimax_h3_video_vae",
+        "minimax_h3_estimated_generation_s",
+        "minimax_h3_provider_status",
+        "minimax_h3_provider_stage",
+        "minimax_h3_provider_stage_label",
+        "minimax_h3_provider_phase",
+        "minimax_h3_provider_sequence",
+        "minimax_h3_provider_queue_position",
+        "minimax_h3_provider_estimated_s",
+        "minimax_h3_provider_timings",
+    )
+
+    def __init__(
+        self,
+        *,
+        provider: str = "minimax_h3",
+        connection: H3Connection | None = None,
+    ) -> None:
+        # connection 为 None 表示"跟随内置实例的当前配置"：隧道地址改了 settings
+        # 之后不必重建适配器，每次调用都重新解析。页面新增的实例则绑定一份固定连接。
+        self.provider = provider
+        self._connection = connection
+
+    @property
+    def connection(self) -> H3Connection:
+        return _connection(self._connection)
+
+    async def create_video_task(
+        self,
+        prompt_text: str,
+        *,
+        image_urls: list[tuple[str, str]] | None = None,
+        video_urls: list[tuple[str, str]] | None = None,
+        return_last_frame: bool = False,
+        call_meta: dict[str, Any] | None = None,
+    ) -> str:
+        # H3 不产出尾帧，return_last_frame 在能力快照里已声明为不支持。
+        return await create_video_task(
+            prompt_text,
+            image_urls=image_urls,
+            video_urls=video_urls,
+            call_meta=call_meta,
+            connection=self.connection,
+        )
+
+    async def poll_video_task(
+        self,
+        task_id: str,
+        *,
+        call_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await poll_video_task(
+            task_id,
+            call_meta=call_meta,
+            connection=self.connection,
+        )
+
+    def owns_task_id(self, task_id: str) -> bool:
+        return is_task_id(task_id)
+
+    def owns_output_url(self, url: str) -> bool:
+        return is_output_url(url, self.connection)
+
+    async def download_output(self, url: str, dest_path: str) -> None:
+        await download_output(url, dest_path, self.connection)
+
+    def capability_snapshot(self, *, provider: str, model: str):
+        from app.hiagent import ProviderError
+        from app.video_plan import (
+            failed_minimax_h3_snapshot,
+            minimax_h3_snapshot_from_probe,
+        )
+
+        try:
+            probe = probe_connection_sync(connection=self.connection)
+        except ProviderError as exc:
+            return failed_minimax_h3_snapshot(
+                provider=provider,
+                model=model,
+                error=exc,
+                connection=self.connection,
+            )
+        return minimax_h3_snapshot_from_probe(
+            probe,
+            provider=provider,
+            model=model,
+        )
+
+    def capability_snapshot_is_current(self, snapshot) -> bool:
+        from app.video_plan import minimax_h3_snapshot_matches_runtime
+
+        return minimax_h3_snapshot_matches_runtime(snapshot, self.connection)
+
+    def prompt_profile(self):
+        from app.video_prompt_profiles import MINIMAX_H3_PROFILE
+
+        return MINIMAX_H3_PROFILE
+
+    def estimated_generation_seconds(self, mode: str, duration_s: float) -> int:
+        return estimated_generation_seconds(
+            mode, duration_s, acceleration=self.connection.acceleration,
+        )
+
+    def generation_timeout_seconds(
+        self,
+        mode: str,
+        duration_s: float,
+        *,
+        expected_seconds: float | None = None,
+    ) -> int:
+        return generation_timeout_seconds(
+            mode,
+            duration_s,
+            acceleration=self.connection.acceleration,
+            expected_seconds=expected_seconds,
+        )
+
+    def apply_wait_policy(
+        self,
+        task_id: str,
+        result: dict[str, Any],
+        meta: dict[str, Any],
+        policy: dict[str, Any],
+        *,
+        duration_s: float,
+        current: float,
+    ) -> dict[str, Any]:
+        """H3 上报阶段与队列位置，据此把"排队"与"真正在生成"分开计时。"""
+        from app import config as app_config
+
+        policy["poll_delay_s"] = poll_interval_seconds(self.connection)
+        status = str(result.get("status") or "").strip().lower()
+        stage = str(result.get("stage") or "").strip().lower()
+        phase = provider_task_phase(result)
+        provider_observation = {
+            "minimax_h3_provider_status": status,
+            "minimax_h3_provider_stage": stage,
+            "minimax_h3_provider_stage_label": provider_stage_label(stage),
+            "minimax_h3_provider_phase": phase,
+            "minimax_h3_provider_sequence": result.get("sequence"),
+            "minimax_h3_provider_queue_position": result.get("queue_position"),
+            "minimax_h3_provider_estimated_s": result.get("estimated_seconds"),
+            "minimax_h3_provider_timings": (
+                result.get("timings")
+                if isinstance(result.get("timings"), dict)
+                else {}
+            ),
+        }
+        for key, value in provider_observation.items():
+            if meta.get(key) != value:
+                meta[key] = value
+                policy["meta_changed"] = True
+        policy["stage_progress"] = {
+            "provider": "minimax_h3",
+            "provider_label": str(result.get("provider_label") or "MiniMax H3"),
+            "provider_status": status,
+            "provider_phase": phase,
+            "provider_stage": stage,
+            "provider_stage_label": provider_observation[
+                "minimax_h3_provider_stage_label"
+            ],
+            "provider_sequence": result.get("sequence"),
+            "provider_queue_position": result.get("queue_position"),
+            "provider_estimated_s": result.get("estimated_seconds"),
+            "provider_timings": provider_observation[
+                "minimax_h3_provider_timings"
+            ],
+        }
+        if status != "running" or phase != "generating":
+            return policy
+
+        started_key = "minimax_h3_generation_started_at"
+        try:
+            generation_started_at = float(meta.get(started_key) or 0)
+        except (TypeError, ValueError):
+            generation_started_at = 0.0
+        if generation_started_at <= 0:
+            generation_started_at = current
+            mode = str(
+                meta.get("actual_mode")
+                or meta.get("mode")
+                or meta.get("planned_mode")
+                or ""
+            )
+            try:
+                provider_estimated_s = float(result.get("estimated_seconds") or 0)
+            except (TypeError, ValueError):
+                provider_estimated_s = 0
+            try:
+                estimated_s = (
+                    round(provider_estimated_s)
+                    if provider_estimated_s > 0
+                    else self.estimated_generation_seconds(mode, duration_s)
+                )
+                timeout_s = self.generation_timeout_seconds(
+                    mode,
+                    duration_s,
+                    expected_seconds=estimated_s,
+                )
+            except (TypeError, ValueError):
+                timeout_s = float(app_config.VIDEO_PROVIDER_MAX_WAIT)
+                estimated_s = 0
+            meta.update({
+                started_key: generation_started_at,
+                "minimax_h3_generation_timeout_s": timeout_s,
+                "minimax_h3_acceleration": self.connection.acceleration,
+                "minimax_h3_turbo_profile": self.connection.turbo_profile,
+                "minimax_h3_video_vae": self.connection.video_vae,
+                "minimax_h3_estimated_generation_s": estimated_s,
+            })
+            policy["meta_changed"] = True
+        try:
+            generation_timeout_s = float(
+                meta.get("minimax_h3_generation_timeout_s")
+                or self.generation_timeout_seconds(
+                    str(
+                        meta.get("actual_mode")
+                        or meta.get("mode")
+                        or meta.get("planned_mode")
+                        or ""
+                    ),
+                    duration_s,
+                )
+            )
+        except (TypeError, ValueError):
+            generation_timeout_s = float(app_config.VIDEO_PROVIDER_MAX_WAIT)
+        policy.update({
+            "elapsed_s": max(0.0, current - generation_started_at),
+            "timeout_s": min(
+                float(app_config.VIDEO_PROVIDER_MAX_WAIT),
+                generation_timeout_s,
+            ),
+            "scope": "MiniMaxH3 生成阶段",
+        })
+        policy["stage_progress"]["provider_generation_started_at"] = (
+            generation_started_at
+        )
+        return policy

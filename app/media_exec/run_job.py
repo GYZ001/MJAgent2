@@ -1875,121 +1875,19 @@ def _provider_wait_policy(
         "meta_changed": False,
         "stage_progress": None,
     }
-    from app import minimax_h3
+    from app import video_providers
 
-    if not minimax_h3.is_task_id(task_id):
+    adapter = video_providers.adapter_for_task_id(task_id)
+    if adapter is None:
         return policy
-    policy["poll_delay_s"] = minimax_h3.poll_interval_seconds()
-    status = str(result.get("status") or "").strip().lower()
-    stage = str(result.get("stage") or "").strip().lower()
-    phase = minimax_h3.provider_task_phase(result)
-    provider_observation = {
-        "minimax_h3_provider_status": status,
-        "minimax_h3_provider_stage": stage,
-        "minimax_h3_provider_stage_label": minimax_h3.provider_stage_label(stage),
-        "minimax_h3_provider_phase": phase,
-        "minimax_h3_provider_sequence": result.get("sequence"),
-        "minimax_h3_provider_queue_position": result.get("queue_position"),
-        "minimax_h3_provider_estimated_s": result.get("estimated_seconds"),
-        "minimax_h3_provider_timings": (
-            result.get("timings")
-            if isinstance(result.get("timings"), dict)
-            else {}
-        ),
-    }
-    for key, value in provider_observation.items():
-        if meta.get(key) != value:
-            meta[key] = value
-            policy["meta_changed"] = True
-    policy["stage_progress"] = {
-        "provider": "minimax_h3",
-        "provider_label": str(result.get("provider_label") or "MiniMax H3"),
-        "provider_status": status,
-        "provider_phase": phase,
-        "provider_stage": stage,
-        "provider_stage_label": provider_observation[
-            "minimax_h3_provider_stage_label"
-        ],
-        "provider_sequence": result.get("sequence"),
-        "provider_queue_position": result.get("queue_position"),
-        "provider_estimated_s": result.get("estimated_seconds"),
-        "provider_timings": provider_observation[
-            "minimax_h3_provider_timings"
-        ],
-    }
-    if status != "running" or phase != "generating":
-        return policy
-
-    started_key = "minimax_h3_generation_started_at"
-    try:
-        generation_started_at = float(meta.get(started_key) or 0)
-    except (TypeError, ValueError):
-        generation_started_at = 0.0
-    if generation_started_at <= 0:
-        generation_started_at = current
-        mode = str(
-            meta.get("actual_mode")
-            or meta.get("mode")
-            or meta.get("planned_mode")
-            or ""
-        )
-        try:
-            provider_estimated_s = float(result.get("estimated_seconds") or 0)
-        except (TypeError, ValueError):
-            provider_estimated_s = 0
-        try:
-            estimated_s = (
-                round(provider_estimated_s)
-                if provider_estimated_s > 0
-                else minimax_h3.estimated_generation_seconds(
-                    mode,
-                    duration_s,
-                )
-            )
-            timeout_s = minimax_h3.generation_timeout_seconds(
-                mode,
-                duration_s,
-                expected_seconds=estimated_s,
-            )
-        except (TypeError, ValueError):
-            timeout_s = float(config.VIDEO_PROVIDER_MAX_WAIT)
-            estimated_s = 0
-        meta.update({
-            started_key: generation_started_at,
-            "minimax_h3_generation_timeout_s": timeout_s,
-            "minimax_h3_acceleration": config.MINIMAX_H3_ACCELERATION,
-            "minimax_h3_turbo_profile": config.MINIMAX_H3_TURBO_PROFILE,
-            "minimax_h3_video_vae": config.MINIMAX_H3_VIDEO_VAE,
-            "minimax_h3_estimated_generation_s": estimated_s,
-        })
-        policy["meta_changed"] = True
-    try:
-        generation_timeout_s = float(
-            meta.get("minimax_h3_generation_timeout_s")
-            or minimax_h3.generation_timeout_seconds(
-                str(
-                    meta.get("actual_mode")
-                    or meta.get("mode")
-                    or meta.get("planned_mode")
-                    or ""
-                ),
-                duration_s,
-            )
-        )
-    except (TypeError, ValueError):
-        generation_timeout_s = float(config.VIDEO_PROVIDER_MAX_WAIT)
-    policy.update({
-        "elapsed_s": max(0.0, current - generation_started_at),
-        "timeout_s": min(
-            float(config.VIDEO_PROVIDER_MAX_WAIT),
-            generation_timeout_s,
-        ),
-        "scope": "MiniMaxH3 生成阶段",
-    })
-    policy["stage_progress"]["provider_generation_started_at"] = (
-        generation_started_at
+    return adapter.apply_wait_policy(
+        task_id,
+        result,
+        meta,
+        policy,
+        duration_s=duration_s,
+        current=current,
     )
-    return policy
 
 
 def _recover_paid_video_task(conn, operation_id: str | None) -> tuple[str, float] | None:
@@ -2081,22 +1979,9 @@ def _persist_video_resubmit(
     operation_id: str,
 ) -> None:
     """Persist the next intentional paid attempt as one recoverable checkpoint."""
-    for key in (
-        "minimax_h3_generation_started_at",
-        "minimax_h3_generation_timeout_s",
-        "minimax_h3_acceleration",
-        "minimax_h3_turbo_profile",
-        "minimax_h3_video_vae",
-        "minimax_h3_estimated_generation_s",
-        "minimax_h3_provider_status",
-        "minimax_h3_provider_stage",
-        "minimax_h3_provider_stage_label",
-        "minimax_h3_provider_phase",
-        "minimax_h3_provider_sequence",
-        "minimax_h3_provider_queue_position",
-        "minimax_h3_provider_estimated_s",
-        "minimax_h3_provider_timings",
-    ):
+    from app import video_providers
+
+    for key in video_providers.all_wait_meta_keys():
         meta.pop(key, None)
     paid_attempts = max(
         int(meta.get("provider_paid_attempts") or 0),

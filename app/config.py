@@ -28,7 +28,10 @@ DATA_DIR = RUNTIME_ROOT / "data"
 DB_PATH = DATA_DIR / "manju.db"
 
 # 可通过前端管理的 API Key 列表
-MANAGED_KEYS = ("HIAGENT_API_KEY", "OPENROUTER_API_KEY", "BAILIAN_API_KEY", "DEEPSEEK_API_KEY", "ZHIPU_API_KEY")
+MANAGED_KEYS = (
+    "HIAGENT_API_KEY", "OPENROUTER_API_KEY", "BAILIAN_API_KEY", "DEEPSEEK_API_KEY",
+    "ZHIPU_API_KEY", "MINIMAX_H3_API_KEY",
+)
 
 _env_lock = threading.Lock()
 
@@ -62,10 +65,12 @@ DEFAULT_HIAGENT_MODEL_VIDEO = "d7jf6nd5boeaebtfbdqg"
 DEFAULT_HIAGENT_MODEL_IMAGE = "d7ute7ppcc7n89uuqqp0"
 DEFAULT_MINIMAX_H3_MODEL_VIDEO = "minimax-h3"
 
-# 局域网 MiniMax H3 ComfyUI 服务。该服务默认无鉴权；如部署侧重新启用
-# Bearer Token，可仅通过环境变量注入，不在代码或数据库中保存明文。
+# MiniMax H3 ComfyUI 服务，经公网隧道暴露。隧道地址会轮换，因此以 settings 表的
+# minimax_h3_base_url 为准，这里只提供最近一次确认可用的默认值。
+# 服务端已强制 Bearer 鉴权（/ 以外的端点缺 Token 一律 401），Key 走 MANAGED_KEYS
+# 落 .env，不在代码或数据库中保存明文。
 MINIMAX_H3_BASE_URL = os.environ.get(
-    "MINIMAX_H3_BASE_URL", "http://192.168.31.232:8181"
+    "MINIMAX_H3_BASE_URL", "https://whatever-jane-circuits-cabinet.trycloudflare.com"
 ).rstrip("/")
 MINIMAX_H3_API_KEY = os.environ.get("MINIMAX_H3_API_KEY", "")
 MINIMAX_H3_VIDEO_WIDTH = max(
@@ -485,11 +490,13 @@ def save_keys_to_env(keys: dict[str, str]) -> list[str]:
 def _reload_keys() -> None:
     """从 os.environ 重新加载 API Key 相关的模块级变量。"""
     global HIAGENT_API_KEY, OPENROUTER_API_KEY, BAILIAN_API_KEY, DEEPSEEK_API_KEY, ZHIPU_API_KEY
+    global MINIMAX_H3_API_KEY
     HIAGENT_API_KEY = os.environ.get("HIAGENT_API_KEY", "")
     OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
     BAILIAN_API_KEY = os.environ.get("BAILIAN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY", "")
     DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
     ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY", "")
+    MINIMAX_H3_API_KEY = os.environ.get("MINIMAX_H3_API_KEY", "")
 
 
 def get_key_status() -> dict[str, dict]:
@@ -508,6 +515,8 @@ def get_key_status() -> dict[str, dict]:
             label = "DeepSeek"
         elif provider == "zhipu":
             label = "智谱（官方）"
+        elif provider == "minimax_h3":
+            label = "MiniMax H3"
         else:
             label = provider
         result[provider] = {

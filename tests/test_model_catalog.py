@@ -25,7 +25,9 @@ def test_custom_model_can_be_added_to_catalog(monkeypatch) -> None:
     store = _settings_store(monkeypatch)
 
     created = api.add_model({
-        "provider": "openrouter",
+        "provider": "custom", "provider_label": "OpenRouter",
+        "base_url": "https://openrouter.example.com/api/v1",
+        "api_key": "or-key", "protocol": "openrouter",
         "model": "vendor/new-model",
         "label": "New Model",
         "kinds": ["text", "vlm"],
@@ -78,10 +80,12 @@ def test_custom_model_rejects_unsupported_capability(monkeypatch) -> None:
 def test_active_custom_model_cannot_be_deleted(monkeypatch) -> None:
     store = _settings_store(monkeypatch)
     item = api.add_model({
-        "provider": "openrouter", "model": "vendor/active",
+        "provider": "custom", "provider_label": "OpenRouter",
+        "base_url": "https://openrouter.example.com/api/v1", "api_key": "k",
+        "protocol": "openrouter", "model": "vendor/active",
         "label": "Active", "kinds": ["text"],
     })
-    monkeypatch.setattr(hiagent, "active_provider", lambda kind: "openrouter")
+    monkeypatch.setattr(hiagent, "active_provider", lambda kind: item["provider"])
     monkeypatch.setattr(hiagent, "active_model", lambda kind: "vendor/active")
 
     with pytest.raises(HTTPException) as exc:
@@ -96,6 +100,7 @@ def test_custom_provider_credentials_are_private_and_model_scoped(monkeypatch) -
     created = api.add_model({
         "provider": "custom", "provider_label": "Internal Gateway",
         "base_url": "https://llm.example.com/v1/", "api_key": "secret-one",
+        "protocol": "openai",
         "model": "team/model-a", "label": "Model A", "kinds": ["text", "vlm"],
     })
 
@@ -108,67 +113,60 @@ def test_custom_provider_credentials_are_private_and_model_scoped(monkeypatch) -
     assert stored["api_key"] == "secret-one"
 
 
-def test_builtin_model_credentials_are_saved_by_model_id(monkeypatch) -> None:
+def test_model_credentials_are_saved_by_model_id(monkeypatch) -> None:
     store = _settings_store(monkeypatch)
-    model_id = "builtin:openrouter:z-ai/glm-5.2"
+    created = api.add_model({
+        "provider": "custom", "provider_label": "Gateway",
+        "base_url": "https://gw.example.com/v1", "api_key": "first",
+        "protocol": "openai", "model": "m", "label": "M", "kinds": ["text"],
+    })
 
-    api.put_model_credentials(model_id, {
+    api.put_model_credentials(created["id"], {
         "base_url": "https://gateway.example.com/v1",
         "api_key": "model-specific-key",
         "confirm": True,
     })
 
     credentials = json.loads(store["model_credentials"])
-    assert credentials[model_id]["api_key"] == "model-specific-key"
+    assert credentials[created["id"]]["api_key"] == "model-specific-key"
 
 
-def test_default_hiagent_assignments_use_configured_catalog_model_ids(monkeypatch) -> None:
-    expected = {
-        "vlm": config.DEFAULT_HIAGENT_MODEL_VLM,
-        "video": config.DEFAULT_HIAGENT_MODEL_VIDEO,
-        "image": config.DEFAULT_HIAGENT_MODEL_IMAGE,
-    }
-    credentials = {
-        f"builtin:hiagent:{model}": {
-            "base_url": "https://gateway.example.com/v1",
-            "api_key": "model-key",
-        }
-        for model in expected.values()
-    }
+def test_catalog_is_the_only_source_of_models(monkeypatch) -> None:
+    """代码里不再内嵌任何模型：空模型库就是真的没有模型。
+
+    这是产品要求——页面上每一条都必须能说清"它是通过添加模型进来的"，
+    所以不能再有一份代码内嵌清单在旁边并行存在。
+    """
+    _settings_store(monkeypatch)
+
+    assert api.get_models()["items"] == []
+
+
+def test_active_selection_resolves_from_catalog(monkeypatch) -> None:
+    catalog = [{
+        "id": "model_a", "provider": "custom:model_a", "model": "text-1",
+        "label": "文本", "kinds": ["text"], "protocol": "openai",
+        "base_url": "https://gw.example.com/v1", "api_key": "k",
+    }]
     store = {
-        "custom_models": "[]",
-        "model_credentials": json.dumps(credentials),
+        "custom_models": json.dumps(catalog),
+        "model_text_provider": "custom:model_a",
     }
-    monkeypatch.setattr(api, "get_setting", lambda key: store.get(key, ""))
-    monkeypatch.setattr(
-        hiagent,
-        "get_setting",
-        lambda key: store.get(key, config.DEFAULT_SETTINGS.get(key, "")),
-    )
-    monkeypatch.setattr(config, "HIAGENT_API_KEY", "")
+    monkeypatch.setattr(hiagent, "get_setting", lambda key: store.get(key, ""))
+    import app.db as db_module
 
-    result = api.health()
+    monkeypatch.setattr(db_module, "get_setting", lambda key: store.get(key, ""))
 
-    for kind, model in expected.items():
-        selection = result["models"][kind]
-        assert selection["provider"] == "hiagent"
-        assert selection["model"] == model
-        assert next(
-            option for option in selection["options"]
-            if option["provider"] == "hiagent"
-        )["available"] is True
+    assert hiagent.active_provider("text") == "custom:model_a"
+    assert hiagent.active_model("text") == "text-1"
 
-
-def test_default_model_ids_preserve_legacy_provider_route(monkeypatch) -> None:
-    store = {"model_route": "openrouter"}
-    monkeypatch.setattr(
-        hiagent,
-        "get_setting",
-        lambda key: store.get(key, config.DEFAULT_SETTINGS.get(key, "")),
-    )
-
-    assert hiagent.active_provider("text") == "openrouter"
-    assert hiagent.active_provider("vlm") == "openrouter"
+    # 指向一条不存在的条目时不能回落到某个写死的默认，而是退到模型库里
+    # 第一条具备该能力的条目；一条都没有就返回空串，由调用方报"未配置"。
+    store["model_text_provider"] = "custom:gone"
+    assert hiagent.active_provider("text") == "custom:model_a"
+    store["custom_models"] = "[]"
+    assert hiagent.active_provider("text") == ""
+    assert hiagent.active_model("text") == ""
 
 
 def test_connection_probe_checks_openai_response(monkeypatch) -> None:
@@ -248,11 +246,12 @@ def test_custom_model_can_be_edited_then_deleted(monkeypatch) -> None:
     store = _settings_store(monkeypatch)
     item = api.add_model({
         "provider": "custom", "provider_label": "Gateway", "base_url": "https://example.com/v1",
-        "api_key": "secret", "model": "old-model", "label": "Old", "kinds": ["text"],
+        "api_key": "secret", "protocol": "openai",
+        "model": "old-model", "label": "Old", "kinds": ["text"],
     })
     updated = api.update_model(item["id"], {"label": "New", "model": "new-model", "kinds": ["text", "vlm"]})
     assert updated["label"] == "New"
-    monkeypatch.setattr(hiagent, "active_provider", lambda kind: "hiagent")
+    monkeypatch.setattr(hiagent, "active_provider", lambda kind: "")
     api.delete_model(item["id"])
     assert json.loads(store["custom_models"]) == []
 

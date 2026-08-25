@@ -943,14 +943,16 @@ def record_minimax_h3_probe_snapshot(
     return save_capability_snapshot(candidate, conn=conn)
 
 
-def _failed_minimax_h3_snapshot(
+def failed_minimax_h3_snapshot(
     *,
     provider: str,
     model: str,
     error: Exception,
+    connection=None,
 ) -> ProviderVideoCapabilitySnapshot:
-    from app import config, minimax_h3
+    from app import minimax_h3
 
+    conn = connection or minimax_h3.default_connection()
     return ProviderVideoCapabilitySnapshot(
         id=new_id("cap"),
         provider=provider,
@@ -967,14 +969,12 @@ def _failed_minimax_h3_snapshot(
         requires_web_url_by_media_type={"image": False, "video": True},
         format_limits={
             "capability_source": "live_health_error",
-            "base_url": minimax_h3.base_url(),
-            "default_acceleration": config.MINIMAX_H3_ACCELERATION,
+            "base_url": conn.base_url,
+            "default_acceleration": conn.acceleration,
             "default_turbo_profile": (
-                config.MINIMAX_H3_TURBO_PROFILE
-                if config.MINIMAX_H3_ACCELERATION == "turbo"
-                else None
+                conn.turbo_profile if conn.acceleration == "turbo" else None
             ),
-            "default_video_vae": config.MINIMAX_H3_VIDEO_VAE,
+            "default_video_vae": conn.video_vae,
         },
         probe_time=now(),
         probe_result=f"live_health_failed:{type(error).__name__}:{error}"[:500],
@@ -983,24 +983,21 @@ def _failed_minimax_h3_snapshot(
     )
 
 
-def _minimax_h3_snapshot_matches_runtime(
+def minimax_h3_snapshot_matches_runtime(
     snapshot: ProviderVideoCapabilitySnapshot,
+    connection=None,
 ) -> bool:
-    from app import config, minimax_h3
+    from app import minimax_h3
 
+    conn = connection or minimax_h3.default_connection()
     limits = snapshot.format_limits
     source = str(limits.get("capability_source") or "")
     same_runtime = bool(
-        str(limits.get("base_url") or "").rstrip("/") == minimax_h3.base_url()
-        and limits.get("default_acceleration")
-        == config.MINIMAX_H3_ACCELERATION
+        str(limits.get("base_url") or "").rstrip("/") == conn.base_url
+        and limits.get("default_acceleration") == conn.acceleration
         and limits.get("default_turbo_profile")
-        == (
-            config.MINIMAX_H3_TURBO_PROFILE
-            if config.MINIMAX_H3_ACCELERATION == "turbo"
-            else None
-        )
-        and limits.get("default_video_vae") == config.MINIMAX_H3_VIDEO_VAE
+        == (conn.turbo_profile if conn.acceleration == "turbo" else None)
+        and limits.get("default_video_vae") == conn.video_vae
     )
     if not same_runtime:
         return False
@@ -1018,7 +1015,7 @@ def current_capability_snapshot(
     conn=None,
 ) -> ProviderVideoCapabilitySnapshot:
     """Return the latest measured snapshot for the selected provider/model."""
-    from app import hiagent
+    from app import hiagent, video_providers
 
     db = conn or get_conn()
     resolved_provider = provider or hiagent.active_provider("video")
@@ -1029,72 +1026,15 @@ def current_capability_snapshot(
            ORDER BY probe_time DESC, created_at DESC LIMIT 1""",
         (resolved_provider, resolved_model),
     ).fetchone()
+    adapter = video_providers.resolve(resolved_provider)
     if row:
         saved = _snapshot_from_row(row)
-        if resolved_provider != "minimax_h3":
-            return saved
-        if _minimax_h3_snapshot_matches_runtime(saved):
+        if adapter.capability_snapshot_is_current(saved):
             return saved
 
-    if resolved_provider == "minimax_h3":
-        from app import minimax_h3
-
-        try:
-            probe = minimax_h3.probe_connection_sync()
-            snapshot = minimax_h3_snapshot_from_probe(
-                probe,
-                provider=resolved_provider,
-                model=resolved_model,
-            )
-        except hiagent.ProviderError as exc:
-            snapshot = _failed_minimax_h3_snapshot(
-                provider=resolved_provider,
-                model=resolved_model,
-                error=exc,
-            )
-        save_capability_snapshot(snapshot, conn=db)
-        if conn is None:
-            db.commit()
-        return snapshot
-
-    active_provider = hiagent.active_provider("video")
-    active_model = hiagent.active_model("video", active_provider)
-    observed_channel = (
-        resolved_provider == active_provider and resolved_model == active_model
-    )
-    capability_verified = observed_channel
-    snapshot = ProviderVideoCapabilitySnapshot(
-        id=new_id("cap"),
+    snapshot = adapter.capability_snapshot(
         provider=resolved_provider,
         model=resolved_model,
-        gateway="hiagent",
-        api_version="2024-01-01",
-        supports_reference_image=capability_verified,
-        supports_first_frame=capability_verified,
-        supports_last_frame=capability_verified,
-        supports_first_last_pair=capability_verified,
-        supports_reference_video=capability_verified,
-        supports_true_video_continuation=False,
-        supports_return_last_frame=False,
-        supports_data_url_by_media_type={"image": True, "video": False},
-        requires_web_url_by_media_type={"image": False, "video": True},
-        mutually_exclusive_input_roles=[
-            ["reference_image", "first_frame"],
-            ["reference_image", "last_frame"],
-            ["reference_image", "reference_video"],
-            ["first_frame", "reference_video"],
-            ["last_frame", "reference_video"],
-        ],
-        duration_limits={"min_s": 5, "max_s": 10},
-        size_limits={},
-        format_limits={},
-        probe_time=now(),
-        probe_result=(
-            "observed_channel_baseline_2026_08_04"
-            if observed_channel else "unverified"
-        ),
-        technical_success=capability_verified,
-        semantic_continuation_success=False,
     )
     save_capability_snapshot(snapshot, conn=db)
     if conn is None:
@@ -1573,17 +1513,18 @@ def validate_episode_plan(
         item.estimated_cost = authoritative_cost
         item.max_cost = max(float(item.max_cost or 0), authoritative_cost)
 
-    serial_provider = snapshot.provider == "minimax_h3"
-    if serial_provider:
-        from app import minimax_h3
+    from app import video_providers
 
+    adapter = video_providers.resolve(snapshot.provider)
+    serial_provider = adapter.serial_generation
+    if serial_provider:
         for item in normalized:
             duration_s = float(by_id[item.shot_id]["duration_s"] or 5)
-            item.estimated_latency_ms = 1000 * minimax_h3.estimated_generation_seconds(
+            item.estimated_latency_ms = 1000 * adapter.estimated_generation_seconds(
                 item.mode.value,
                 duration_s,
             )
-            item.timeout_s = float(minimax_h3.generation_timeout_seconds(
+            item.timeout_s = float(adapter.generation_timeout_seconds(
                 item.mode.value,
                 duration_s,
             ))

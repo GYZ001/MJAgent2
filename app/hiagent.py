@@ -714,25 +714,19 @@ def _model_route() -> str:
 
 
 def active_provider(kind: str) -> str:
-    configured = (get_setting(f"model_{kind}_provider") or "").strip()
-    if configured.startswith("custom:"):
-        return configured
-    if kind == "video":
-        from app import video_providers
+    """当前职责选中的模型库条目（provider 就是条目的唯一标识）。
 
-        if configured in video_providers.registered_providers():
-            return configured
-    if kind == "image" and configured == "hiagent":
+    没有内置 provider 可回落了：模型库是唯一来源。设置里指向的条目不存在或不
+    具备该能力时，退而选模型库里第一条具备该能力的条目——这让"刚加完模型还没
+    保存分配"也能跑起来；一条都没有时返回空串，由调用方报"未配置模型"。
+    """
+    from app import model_registry
+
+    configured = (get_setting(f"model_{kind}_provider") or "").strip()
+    if configured and model_registry.catalog_item_for_kind(configured, kind):
         return configured
-    if kind == "text" and configured in {"hiagent", "openrouter", "bailian", "deepseek", "zhipu"}:
-        return configured
-    if kind == "vlm" and configured in {"hiagent", "openrouter", "bailian"}:
-        return configured
-    if kind in {"text", "vlm"}:
-        route = _model_route()
-        if route in {"hiagent", "openrouter"}:
-            return route
-    return "hiagent"
+    candidates = model_registry.items_for_kind(kind)
+    return str(candidates[0].get("provider") or "").strip() if candidates else ""
 
 
 def _model_setting(key: str, fallback: str) -> str:
@@ -770,50 +764,16 @@ def _absolute_provider_url(value: str, base_url: str) -> str:
 
 
 def active_model(kind: str, provider: str | None = None) -> str:
+    """当前职责选中的模型 ID；只从模型库解析。
+
+    代码里不再内嵌任何模型：模型库是唯一来源，所以选不到就是真的没配，
+    返回空串让调用方以"未配置模型"报错，而不是悄悄回落到某个写死的 ID。
+    """
+    from app import model_registry
+
     provider = provider or active_provider(kind)
-    if provider == "minimax_h3":
-        if kind == "video":
-            return _model_setting(
-                "minimax_h3_model_video",
-                config.DEFAULT_MINIMAX_H3_MODEL_VIDEO,
-            )
-        return ""
-    if provider.startswith("custom:"):
-        try:
-            custom = json.loads(get_setting("custom_models") or "[]")
-        except (TypeError, json.JSONDecodeError):
-            custom = []
-        item = next((m for m in custom if m.get("provider") == provider and kind in m.get("kinds", [])), None)
-        return str(item.get("model") or "").strip() if item else ""
-    if provider == "zhipu":
-        if kind == "text":
-            return _model_setting("zhipu_model_text", config.ZHIPU_MODEL_TEXT)
-        return ""
-    if provider == "deepseek":
-        if kind == "text":
-            return _model_setting("deepseek_model_text", config.DEEPSEEK_MODEL_TEXT)
-        return ""
-    if provider == "bailian":
-        if kind == "text":
-            return _model_setting("bailian_model_text", config.BAILIAN_MODEL_TEXT)
-        if kind == "vlm":
-            return _model_setting("bailian_model_vlm", config.BAILIAN_MODEL_VLM)
-        return ""
-    if provider == "openrouter":
-        if kind == "text":
-            return _model_setting("openrouter_model_text", config.OPENROUTER_MODEL_TEXT)
-        if kind == "vlm":
-            return _model_setting("openrouter_model_vlm", config.OPENROUTER_MODEL_VLM)
-        return ""
-    if kind == "text":
-        return _model_setting("hiagent_model_text", config.MODEL_TEXT)
-    if kind == "vlm":
-        return _model_setting("hiagent_model_vlm", config.MODEL_VLM)
-    if kind == "video":
-        return _model_setting("hiagent_model_video", config.MODEL_VIDEO)
-    if kind == "image":
-        return _model_setting("hiagent_model_image", config.MODEL_IMAGE)
-    return ""
+    item = model_registry.catalog_item_for_kind(provider, kind)
+    return str((item or {}).get("model") or "").strip()
 
 
 def _dedupe_models(models: list[str] | tuple[str, ...]) -> list[str]:
@@ -1441,7 +1401,9 @@ def text_request_token_limits(
 
 
 def text_request_semantic_settings(provider: str) -> dict[str, Any]:
-    if provider == "openrouter":
+    from app import text_providers
+
+    if text_providers.protocol_for_provider(provider) == "openrouter":
         effort = (
             config.OPENROUTER_TEXT_REASONING_EFFORT or ""
         ).strip().lower()
@@ -1536,10 +1498,13 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                 payload["response_format"] = attempt_response_format
             return payload
 
+        from app import text_providers
+
+        protocol = text_providers.protocol_for_provider(provider)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            if provider == "openrouter":
+            if protocol == "openrouter":
                 or_model = selected_model
-                base_url, model_headers = _model_connection("openrouter", or_model, config.OPENROUTER_BASE_URL, config.OPENROUTER_API_KEY)
+                base_url, model_headers = _model_connection(provider, or_model, config.OPENROUTER_BASE_URL, config.OPENROUTER_API_KEY)
                 payload: dict[str, Any] = {"model": or_model, "messages": messages, "max_tokens": max_tokens}
                 effort = (config.OPENROUTER_TEXT_REASONING_EFFORT or "").strip().lower()
                 if effort and effort != "none":
@@ -1553,7 +1518,7 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                     key_name="OPENROUTER_API_KEY", temperature=temperature, call_meta=call_meta,
                     usage_callback=usage_callback)
                 data = {}
-            elif provider == "bailian":
+            elif protocol == "bailian":
                 bailian_model = selected_model
                 payload = _with_rf({"messages": messages, "temperature": temperature, "max_tokens": max_tokens})
                 data, _, reused = await _post_bailian_chat_with_fallback(
@@ -1562,10 +1527,10 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                 _notify_completion_usage(data, usage_callback, reused=reused)
                 _reject_truncated_chat_response(data)
                 content = _chat_content(data, label="chat")
-            elif provider == "deepseek":
+            elif protocol == "deepseek":
                 deepseek_model = selected_model
                 try:
-                    base_url, model_headers = _model_connection("deepseek", deepseek_model, config.DEEPSEEK_BASE_URL, config.DEEPSEEK_API_KEY)
+                    base_url, model_headers = _model_connection(provider, deepseek_model, config.DEEPSEEK_BASE_URL, config.DEEPSEEK_API_KEY)
                 except ProviderError:
                     base_url, model_headers = config.DEEPSEEK_BASE_URL, _deepseek_headers()
                 payload = _with_rf({"model": deepseek_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens})
@@ -1575,10 +1540,10 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                     key_name="DEEPSEEK_API_KEY", temperature=temperature, call_meta=call_meta,
                     usage_callback=usage_callback)
                 data = {}
-            elif provider == "zhipu":
+            elif protocol == "zhipu":
                 zhipu_model = selected_model
                 try:
-                    base_url, model_headers = _model_connection("zhipu", zhipu_model, config.ZHIPU_BASE_URL, config.ZHIPU_API_KEY)
+                    base_url, model_headers = _model_connection(provider, zhipu_model, config.ZHIPU_BASE_URL, config.ZHIPU_API_KEY)
                 except ProviderError:
                     base_url, model_headers = config.ZHIPU_BASE_URL, _zhipu_headers()
                 payload = _with_rf({"model": zhipu_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens})
@@ -1588,9 +1553,12 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                     key_name="ZHIPU_API_KEY", temperature=temperature, call_meta=call_meta,
                     usage_callback=usage_callback)
                 data = {}
-            elif provider.startswith("custom:"):
+            else:
                 custom_model = selected_model
-                base_url, headers = _model_connection(provider, custom_model)
+                base_url, headers = _model_connection(
+                    provider, custom_model,
+                    config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY,
+                )
                 payload = _with_rf({"model": custom_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens})
                 data = _cached_successful_provider_response(
                     "chat", custom_model, payload, call_meta,
@@ -1608,29 +1576,6 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                         model=custom_model,
                         headers=headers,
                         key_name=f"model:{custom_model}",
-                        meta=call_meta,
-                    )
-                _notify_completion_usage(data, usage_callback, reused=reused)
-                _reject_truncated_chat_response(data)
-                content = _chat_content(data, label="custom chat")
-            else:
-                hiagent_model = selected_model
-                base_url, model_headers = _model_connection("hiagent", hiagent_model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
-                payload = _with_rf({"model": hiagent_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens})
-                data = _cached_successful_provider_response("chat", hiagent_model, payload, call_meta)
-                _require_cached_replay_or_raise(
-                    data, call_meta, kind="chat", model=hiagent_model, payload=payload,
-                )
-                reused = data is not None
-                if data is None:
-                    data = await _plain_chat_request(
-                        client,
-                        f"{base_url}/chat/completions",
-                        payload,
-                        kind="chat",
-                        model=hiagent_model,
-                        headers=model_headers,
-                        key_name=f"model:{hiagent_model}",
                         meta=call_meta,
                     )
                 _notify_completion_usage(data, usage_callback, reused=reused)
@@ -2046,35 +1991,27 @@ def _looks_like_response_format_unsupported(exc: ProviderError) -> bool:
 def _resolve_text_connection(
     provider: str, model_override: str | None = None
 ) -> tuple[str, str, dict[str, str], str]:
-    """返回 (chat_completions_url, model, headers, key_name)。bailian 需多模型回退，另行处理。"""
-    if provider == "openrouter":
-        model = active_model("text", "openrouter")
-        base_url, headers = _model_connection(
-            "openrouter", model, config.OPENROUTER_BASE_URL, config.OPENROUTER_API_KEY)
-        return f"{base_url}/chat/completions", model, headers, "OPENROUTER_API_KEY"
-    if provider == "deepseek":
-        model = active_model("text", "deepseek")
-        try:
-            base_url, headers = _model_connection(
-                "deepseek", model, config.DEEPSEEK_BASE_URL, config.DEEPSEEK_API_KEY)
-        except ProviderError:
-            base_url, headers = config.DEEPSEEK_BASE_URL, _deepseek_headers()
-        return f"{base_url}/chat/completions", model, headers, "DEEPSEEK_API_KEY"
-    if provider == "zhipu":
-        model = active_model("text", "zhipu")
-        try:
-            base_url, headers = _model_connection(
-                "zhipu", model, config.ZHIPU_BASE_URL, config.ZHIPU_API_KEY)
-        except ProviderError:
-            base_url, headers = config.ZHIPU_BASE_URL, _zhipu_headers()
-        return f"{base_url}/chat/completions", model, headers, "ZHIPU_API_KEY"
-    if provider.startswith("custom:"):
-        model = active_model("text", provider)
-        base_url, headers = _model_connection(provider, model)
-        return f"{base_url}/chat/completions", model, headers, f"model:{model}"
-    model = model_override or active_model("text", "hiagent")
-    base_url, headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
-    return f"{base_url}/chat/completions", model, headers, f"model:{model}"
+    """返回 (chat_completions_url, model, headers, key_name)。bailian 需多模型回退，另行处理。
+
+    连接一律从模型库条目解析；config 里的 base_url/key 只作为尚未迁移完成时的兜底。
+    """
+    from app import text_providers
+
+    protocol = text_providers.protocol_for_provider(provider)
+    model = model_override or active_model("text", provider)
+    fallback_url, fallback_key, key_name = {
+        "openrouter": (
+            config.OPENROUTER_BASE_URL, config.OPENROUTER_API_KEY, "OPENROUTER_API_KEY",
+        ),
+        "deepseek": (
+            config.DEEPSEEK_BASE_URL, config.DEEPSEEK_API_KEY, "DEEPSEEK_API_KEY",
+        ),
+        "zhipu": (
+            config.ZHIPU_BASE_URL, config.ZHIPU_API_KEY, "ZHIPU_API_KEY",
+        ),
+    }.get(protocol, (config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY, f"model:{model}"))
+    base_url, headers = _model_connection(provider, model, fallback_url, fallback_key)
+    return f"{base_url}/chat/completions", model, headers, key_name
 
 
 def _parse_tool_arguments(raw: Any) -> dict[str, Any]:
@@ -2640,11 +2577,13 @@ async def _stream_plain_chat(
     call_meta: dict | None, on_token: Callable[[str, str], None],
 ) -> str:
     """无原生 tools 的流式文本调用，仅供 Agent JSON 协议回退使用。"""
+    from app import text_providers
+
     provider = active_provider("text")
     timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_CHAT_READ, write=30, pool=10)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        if provider == "bailian":
-            preferred = active_model("text", "bailian")
+        if text_providers.protocol_for_provider(provider) == "bailian":
+            preferred = active_model("text", provider)
             payload: dict[str, Any] = {
                 "messages": messages, "temperature": temperature, "max_tokens": max_tokens,
             }
@@ -2658,7 +2597,7 @@ async def _stream_plain_chat(
                 "model": resolved_model, "messages": messages,
                 "temperature": temperature, "max_tokens": max_tokens,
             }
-            if provider == "openrouter":
+            if text_providers.protocol_for_provider(provider) == "openrouter":
                 effort = (config.OPENROUTER_TEXT_REASONING_EFFORT or "").strip().lower()
                 if effort and effort != "none":
                     payload["reasoning"] = {"effort": effort}
@@ -2702,12 +2641,14 @@ async def chat_with_tools(
             messages, tools, temperature=temperature,
             max_tokens=answer_max_tokens,
             call_meta=call_meta, on_token=on_token)
+    from app import text_providers
+
     timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_CHAT_READ, write=30, pool=10)
     stream = on_token is not None and _streaming_enabled()
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
-            if provider == "bailian":
-                bailian_model = active_model("text", "bailian")
+            if text_providers.protocol_for_provider(provider) == "bailian":
+                bailian_model = active_model("text", provider)
                 payload: dict[str, Any] = {
                     "messages": messages, "temperature": temperature, "max_tokens": max_tokens,
                     "tools": tools, "tool_choice": tool_choice,
@@ -2974,22 +2915,23 @@ async def vlm_check(frames_b64: list[str], expectation_text: str,
     ]
     timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_VLM_READ,
                             write=config.TIMEOUT_VLM_WRITE, pool=10)
+    from app import text_providers
+
     provider = active_provider("vlm")
-    if provider == "openrouter":
-        model = active_model("vlm", "openrouter")
-        base_url, headers = _model_connection("openrouter", model, config.OPENROUTER_BASE_URL, config.OPENROUTER_API_KEY)
-        url = f"{base_url}/chat/completions"
-        key_name = f"model:{model}"
-    elif provider == "bailian":
-        model = active_model("vlm", "bailian")
-    elif provider.startswith("custom:"):
-        model = active_model("vlm", provider)
-        base_url, headers = _model_connection(provider, model)
-        url = f"{base_url}/chat/completions"
-        key_name = f"model:{model}"
+    protocol = text_providers.protocol_for_provider(provider)
+    model = active_model("vlm", provider)
+    if protocol == "bailian":
+        # 百炼走自己的模型回退链，连接在下面的调用里解析。
+        pass
     else:
-        model = active_model("vlm", "hiagent")
-        base_url, headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
+        fallback_url, fallback_key = (
+            (config.OPENROUTER_BASE_URL, config.OPENROUTER_API_KEY)
+            if protocol == "openrouter"
+            else (config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
+        )
+        base_url, headers = _model_connection(
+            provider, model, fallback_url, fallback_key,
+        )
         url = f"{base_url}/chat/completions"
         key_name = f"model:{model}"
     prepared_urls, media_meta = await _prepare_image_data_urls(
@@ -2998,13 +2940,13 @@ async def vlm_check(frames_b64: list[str], expectation_text: str,
         {"type": "image_url", "image_url": {"url": url}} for url in prepared_urls
     ]]
     payload = {"model": model, "messages": messages, "temperature": 0, "max_tokens": 2048}
-    if provider == "openrouter":
+    if protocol == "openrouter":
         payload["response_format"] = {"type": "json_object"}
     merged_call_meta = {**(call_meta or {}), **media_meta}
     async with _vlm_semaphore():
         async with httpx.AsyncClient(timeout=timeout) as client:
             try:
-                if provider == "bailian":
+                if protocol == "bailian":
                     bailian_payload = {"messages": messages, "temperature": 0, "max_tokens": 2048}
                     data, _, _ = await _post_bailian_chat_with_fallback(
                         client, bailian_payload, fallback_kind="vlm", log_kind="vlm_qa",
@@ -3014,7 +2956,7 @@ async def vlm_check(frames_b64: list[str], expectation_text: str,
                                             headers=headers, key_name=key_name, meta=merged_call_meta)
             except ProviderError as exc:
                 raw = (exc.raw or str(exc)).lower()
-                if provider == "openrouter" and "response_format" in payload and (
+                if protocol == "openrouter" and "response_format" in payload and (
                         "response_format" in raw or "json" in raw or "schema" in raw):
                     payload.pop("response_format", None)
                     data = await _post_json(client, url, payload, kind="vlm_qa", model=model,

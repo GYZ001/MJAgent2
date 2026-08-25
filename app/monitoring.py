@@ -242,7 +242,13 @@ def normalize_setting(key: str, value: Any) -> str:
     raw = str(value).strip()
     if kind == "enum":
         allowed = set(spec.get("options") or [])
-        if raw not in allowed and not (key in {"model_text_provider", "model_vlm_provider"} and _custom_provider_exists(raw)):
+        if raw not in allowed and not (
+            key in {
+                "model_text_provider", "model_vlm_provider",
+                "model_video_provider", "model_image_provider",
+            }
+            and _custom_provider_exists(raw)
+        ):
             raise HTTPException(422, detail={"field": key, "message": f"只允许：{', '.join(sorted(allowed))}"})
         return raw
     if not raw and spec.get("allow_empty"):

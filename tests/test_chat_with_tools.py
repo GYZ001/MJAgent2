@@ -46,8 +46,11 @@ def test_chat_with_tools_parses_native_tool_calls(monkeypatch) -> None:
     monkeypatch.setattr(hiagent, "active_provider", lambda kind: "zhipu")
     monkeypatch.setattr(hiagent, "active_model", lambda kind, provider=None: "glm-5.2")
     monkeypatch.setattr(hiagent, "get_setting", lambda key: "")
-    monkeypatch.setattr(hiagent, "_zhipu_headers", lambda: {"Authorization": "Bearer x"})
-    monkeypatch.setattr(hiagent.config, "ZHIPU_BASE_URL", "https://z/api")
+    # 连接一律来自模型库条目：代码/环境变量里不再有可回落的凭证。
+    monkeypatch.setattr(
+        hiagent, "_model_connection",
+        lambda *_args, **_kwargs: ("https://z/api", {"Authorization": "Bearer x"}),
+    )
     monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
 
     turn = asyncio.run(hiagent.chat_with_tools([{"role": "user", "content": "hi"}], _TOOLS))
@@ -70,8 +73,11 @@ def test_chat_with_tools_returns_final_content_when_no_tool_calls(monkeypatch) -
     monkeypatch.setattr(hiagent, "active_provider", lambda kind: "zhipu")
     monkeypatch.setattr(hiagent, "active_model", lambda kind, provider=None: "glm-5.2")
     monkeypatch.setattr(hiagent, "get_setting", lambda key: "")
-    monkeypatch.setattr(hiagent, "_zhipu_headers", lambda: {"Authorization": "Bearer x"})
-    monkeypatch.setattr(hiagent.config, "ZHIPU_BASE_URL", "https://z/api")
+    # 连接一律来自模型库条目：代码/环境变量里不再有可回落的凭证。
+    monkeypatch.setattr(
+        hiagent, "_model_connection",
+        lambda *_args, **_kwargs: ("https://z/api", {"Authorization": "Bearer x"}),
+    )
     monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
 
     turn = asyncio.run(hiagent.chat_with_tools([{"role": "user", "content": "hi"}], _TOOLS))
@@ -167,8 +173,11 @@ def test_chat_with_tools_stream_switch_can_disable_streaming(monkeypatch) -> Non
     monkeypatch.setattr(hiagent, "active_provider", lambda kind: "zhipu")
     monkeypatch.setattr(hiagent, "active_model", lambda kind, provider=None: "glm-5.2")
     monkeypatch.setattr(hiagent, "get_setting", lambda key: "off" if key == "agent_stream_tokens" else "")
-    monkeypatch.setattr(hiagent, "_zhipu_headers", lambda: {"Authorization": "Bearer x"})
-    monkeypatch.setattr(hiagent.config, "ZHIPU_BASE_URL", "https://z/api")
+    # 连接一律来自模型库条目：代码/环境变量里不再有可回落的凭证。
+    monkeypatch.setattr(
+        hiagent, "_model_connection",
+        lambda *_args, **_kwargs: ("https://z/api", {"Authorization": "Bearer x"}),
+    )
     monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
     monkeypatch.setattr(hiagent, "_stream_or_fallback", fake_stream)
 

@@ -13,7 +13,6 @@ from app import (
     db,
     hiagent,
     minimax_h3,
-    monitoring,
     system_api,
     video_modes,
     video_plan,
@@ -140,6 +139,7 @@ def test_minimax_h3_maps_all_three_generation_modes(monkeypatch) -> None:
     assert keyframes == "minimax_h3:task-1"
     assert references == "minimax_h3:task-2"
     assert video == "minimax_h3:task-3"
+    assert [request["model"] for request in requests] == ["minimax-h3"] * 3
     assert requests[0]["mode"] == "keyframes"
     assert requests[0]["first_frame"] and requests[0]["last_frame"]
     assert requests[0]["duration"] == 5
@@ -355,7 +355,9 @@ def test_minimax_h3_checkpoint_rejects_changed_request_for_same_operation(
     )
 
     with pytest.raises(hiagent.ProviderError) as exc:
-        minimax_h3._load_request_checkpoint("video-create-ver_1", "expected")
+        minimax_h3._load_request_checkpoint(
+            "video-create-ver_1", "expected", "minimax-h3",
+        )
 
     assert exc.value.retryable is False
     assert "请求内容发生变化" in str(exc.value)
@@ -387,7 +389,7 @@ def test_minimax_h3_pre_create_failures_release_video_create_claim(
             raise hiagent.ProviderError("input download/decode failed")
         return f"{media_kind}_{index}.jpg", b"jpeg", "image/jpeg"
 
-    async def upload(_client, _item):
+    async def upload(_client, _item, _connection):
         raise hiagent.ProviderError("upload rejected")
 
     monkeypatch.setattr(minimax_h3.httpx, "AsyncClient", lambda **_kwargs: Client())
@@ -440,6 +442,14 @@ def test_provider_request_checkpoint_preserves_exact_long_payload(
 
 
 def test_minimax_h3_poll_maps_result_and_provider_prefix(monkeypatch) -> None:
+    # 隧道后的 H3 用请求 Host 拼 files[].url，不认 X-Forwarded-Proto，因此成功任务
+    # 回报的是 http://；下载必须回到已配置的 https 服务，而不是被判成不属于本服务。
+    monkeypatch.setattr(
+        minimax_h3,
+        "base_url",
+        lambda: "https://tunnel.example.test",
+    )
+
     class Client:
         async def __aenter__(self):
             return self
@@ -454,7 +464,7 @@ def test_minimax_h3_poll_maps_result_and_provider_prefix(monkeypatch) -> None:
                 "status": "succeeded",
                 "files": [{
                     "filename": "result.mp4",
-                    "url": "http://192.168.31.232:8181/v1/outputs?filename=result.mp4",
+                    "url": "http://tunnel.example.test/v1/outputs?filename=result.mp4",
                 }],
                 "errors": [],
             })
@@ -474,7 +484,7 @@ def test_minimax_h3_poll_maps_result_and_provider_prefix(monkeypatch) -> None:
         "estimated_seconds": None,
         "timings": {},
         "metadata": {},
-        "video_url": "http://192.168.31.232:8181/v1/outputs?filename=result.mp4",
+        "video_url": "https://tunnel.example.test/v1/outputs?filename=result.mp4",
         "last_frame_url": "",
         "error": "",
         "failure": None,
@@ -804,29 +814,104 @@ def test_hiagent_dispatches_minimax_tasks_without_api_key(monkeypatch) -> None:
     assert result["status"] == "running"
 
 
-def test_minimax_h3_is_ready_in_model_catalog_without_key(monkeypatch) -> None:
-    monkeypatch.setattr(system_api, "get_setting", lambda _key: "")
-
-    item = next(
-        model for model in system_api.get_models()["items"]
-        if model["provider"] == "minimax_h3"
+def test_minimax_h3_instance_tracks_its_own_bearer_key(monkeypatch) -> None:
+    """H3 不再作为内嵌模型存在；模型库里的实例自带 Key，缺 Key 即不可用。"""
+    store = {"custom_models": "[]"}
+    monkeypatch.setattr(system_api, "get_setting", lambda key: store.get(key, ""))
+    monkeypatch.setattr(
+        system_api, "set_setting", lambda key, value: store.__setitem__(key, value),
     )
 
-    assert item["model"] == "minimax-h3"
-    assert item["label"] == "MiniMaxH3"
-    assert item["kinds"] == ["video"]
-    assert item["requires_api_key"] is False
-    assert item["key_configured"] is True
-    assert monitoring.normalize_setting("model_video_provider", "minimax_h3") == "minimax_h3"
-    assert monitoring.normalize_setting(
-        "minimax_h3_base_url",
-        "http://192.168.31.232:8181",
-    ) == "http://192.168.31.232:8181"
+    created = system_api.add_model({
+        "provider": "custom", "provider_label": "MiniMax H3", "label": "H3",
+        "model": "minimax-h3", "kinds": ["video"], "protocol": "minimax_h3",
+        "base_url": "https://tunnel.example.test", "api_key": "h3-token",
+    })
+
+    assert created["protocol"] == "minimax_h3"
+    assert created["kinds"] == ["video"]
+    assert created["key_configured"] is True
+
+    stored = json.loads(store["custom_models"])[0]
+    assert stored["api_key"] == "h3-token"
+    assert stored["base_url"] == "https://tunnel.example.test"
+
+    # 缺 Key 的实例根本建不出来：连接测试通不过，保存这一步也拦住。
     with pytest.raises(HTTPException):
-        monitoring.normalize_setting(
-            "minimax_h3_base_url",
-            "http://192.168.31.232:8181/unexpected-path",
-        )
+        system_api.add_model({
+            "provider": "custom", "provider_label": "MiniMax H3", "label": "H3 无密钥",
+            "model": "minimax-h3", "kinds": ["video"], "protocol": "minimax_h3",
+            "base_url": "https://tunnel.example.test", "api_key": "",
+        })
+
+
+def test_minimax_h3_output_urls_rebind_to_configured_service(monkeypatch) -> None:
+    monkeypatch.setattr(
+        minimax_h3,
+        "base_url",
+        lambda: "https://tunnel.example.test",
+    )
+
+    # 协议差异来自隧道，主机与路径一致就仍是本服务的产物，回绑到已配置的 https。
+    assert minimax_h3.normalize_output_url(
+        "http://tunnel.example.test/v1/outputs?filename=a.mp4&subfolder=video"
+    ) == "https://tunnel.example.test/v1/outputs?filename=a.mp4&subfolder=video"
+    assert minimax_h3.is_output_url(
+        "http://tunnel.example.test/v1/outputs?filename=a.mp4"
+    )
+
+    # 主机、路径或协议族不符的一律不认，避免把任意地址当成 H3 输出去下载。
+    assert not minimax_h3.is_output_url(
+        "https://evil.example.test/v1/outputs?filename=a.mp4"
+    )
+    assert not minimax_h3.is_output_url(
+        "https://tunnel.example.test/v1/videos/generations/x"
+    )
+    assert not minimax_h3.is_output_url("file:///etc/passwd")
+
+    with pytest.raises(hiagent.ProviderError):
+        asyncio.run(minimax_h3.download_output(
+            "https://evil.example.test/v1/outputs?filename=a.mp4",
+            "/tmp/never-written.mp4",
+        ))
+
+
+def test_minimax_h3_download_upgrades_tunnel_scheme(monkeypatch) -> None:
+    monkeypatch.setattr(
+        minimax_h3,
+        "base_url",
+        lambda: "https://tunnel.example.test",
+    )
+    requested: list[str] = []
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, **_kwargs):
+            requested.append(url)
+            return _Response(200, {}, content=b"mp4-bytes")
+
+    monkeypatch.setattr(minimax_h3.httpx, "AsyncClient", lambda **_kwargs: Client())
+    written: list[tuple[str, bytes]] = []
+    monkeypatch.setattr(
+        minimax_h3,
+        "atomic_write_bytes",
+        lambda dest, raw: written.append((dest, raw)),
+    )
+
+    asyncio.run(minimax_h3.download_output(
+        "http://tunnel.example.test/v1/outputs?filename=a.mp4&subfolder=video",
+        "/tmp/h3-download.mp4",
+    ))
+
+    assert requested == [
+        "https://tunnel.example.test/v1/outputs?filename=a.mp4&subfolder=video"
+    ]
+    assert written == [("/tmp/h3-download.mp4", b"mp4-bytes")]
 
 
 def test_minimax_h3_capabilities_are_verified_before_model_selection(monkeypatch) -> None:
@@ -844,7 +929,7 @@ def test_minimax_h3_capabilities_are_verified_before_model_selection(monkeypatch
     monkeypatch.setattr(
         minimax_h3,
         "probe_connection_sync",
-        lambda: {
+        lambda *_args, **_kwargs: {
             "ok": True,
             "base_url": "http://192.168.31.232:8181",
             "api_version": "1.3.0",
@@ -891,7 +976,9 @@ def test_minimax_h3_failed_discovery_never_registers_static_success(
     monkeypatch.setattr(
         minimax_h3,
         "probe_connection_sync",
-        lambda: (_ for _ in ()).throw(hiagent.ProviderError("offline")),
+        lambda *_args, **_kwargs: (
+            (_ for _ in ()).throw(hiagent.ProviderError("offline"))
+        ),
     )
 
     snapshot = video_plan.current_capability_snapshot(
