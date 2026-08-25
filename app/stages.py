@@ -3447,6 +3447,28 @@ def _chapters_by_idx(chapters: list[dict]) -> dict[int, str]:
     return result
 
 
+# 逐字比对时可选脱掉的成对引号：ASCII 直引号与全角引号都要覆盖，因为模型申报
+# evidence_quote 时有时会给原本没有引号包裹（或已用另一种引号包裹）的原文自行加上
+# 一层引号，导致本来逐字正确的引句因为多出的引号字符核验不过。只有首尾字符恰好配对
+# 才脱这一层，不配对的原样保留——不能把原文本身的一部分误当引号脱掉。
+_PAIRED_QUOTE_MARKS = (('"', '"'), ('“', '”'), ("'", "'"), ('‘', '’'))
+
+
+def _quote_comparison_variants(quote: str) -> list[str]:
+    """逐字比对用的候选引句形式：原始引句本身，以及（若首尾恰好是成对的引号字符）
+    脱掉这对引号后的内文。只脱这一侧（模型申报的引句），原文一侧不做任何改写；
+    两种形式中任一比对命中即算通过。"""
+    variants = [quote]
+    if len(quote) >= 2:
+        for open_mark, close_mark in _PAIRED_QUOTE_MARKS:
+            if quote[0] == open_mark and quote[-1] == close_mark:
+                inner = quote[1:-1]
+                if inner:
+                    variants.append(inner)
+                break
+    return variants
+
+
 def _alias_declaration_verified(
     chapters_by_idx: dict[int, str],
     anchor_texts: set[str],
@@ -3462,20 +3484,104 @@ def _alias_declaration_verified(
        不能是一句不相干的话；
     3. 该章节原文里还能找到 anchor_texts（角色规范名或已确认的其它别名）中的至少一项——
        证明这条别名与该角色存在共现依据，不是张冠李戴。
+
+    条件 1、2 都按 `_quote_comparison_variants` 产出的候选引句形式判断（原始引句 /
+    脱掉一层配对引号后的内文），同一候选形式需要同时满足两个条件才算命中，避免
+    "脱引号让子串关系对不上"这种格式噪音误判为证据不足。
     """
     text = (text or "").strip()
     quote = (evidence_quote or "").strip()
-    if not text or not quote or text not in quote:
+    if not text or not quote:
         return False
     chapter_text = chapters_by_idx.get(evidence_chapter_index, "")
-    if not chapter_text or quote not in chapter_text:
+    if not chapter_text:
         return False
-    return any(anchor and anchor in chapter_text for anchor in anchor_texts)
+    if not any(anchor and anchor in chapter_text for anchor in anchor_texts):
+        return False
+    return any(
+        text in candidate and candidate in chapter_text
+        for candidate in _quote_comparison_variants(quote)
+    )
+
+
+# ---------- A1a. 桥接章确定性检索（分工修复：模型申报语义，代码检索证据所在地） ----------
+#
+# 真实回归发现的分工错误：模型申报「李富贵→小胖子」「许清→许师姐」这两条语义假设
+# 完全正确，但 evidence_chapter_index 报错了章——它引用的章节里没有角色正式姓名，
+# 共现闸（_alias_declaration_verified 条件 3）必然拒绝。根因是让模型去做"记住桥接章
+# 在哪"这件事：这是确定性检索，代码扫全部章节又快又准，模型单次扫 15 万字反而漏。
+# 参照 app/production/prep_pack.py 的裁决庭范式（_prep_pack_true_name_dossier /
+# _prep_pack_true_name_verdict / _prep_pack_pin_dossier_quote：代码检索卷宗 → 模型
+# 裁决 → 代码钉证），但这里比裁决庭少一步：裁决庭要解决的是"称谓 X 是否等于人名 Y"
+# 这个开放语义判断，需要模型独立裁决；这里模型在申报 character_name+text 这对时，
+# 已经做完了"这是不是同一个人/这是不是这个人的别名"的语义判断——剩下的只是纯字符串
+# 问题："全书哪一章能同时证明这对申报"，不需要再发一次模型调用去问一个已经有答案的
+# 语义问题，代码直接检索、钉证即可（见 _find_alias_bridge_chapter / _alias_bridge_quote）。
+# 找不到桥接章 → 维持拒绝（不确定不登记，安全默认不因为多了这条兜底而放松）。
+
+_ALIAS_BRIDGE_QUOTE_MAX_CHARS = 200  # 引句长度上限：够定位上下文，不整段搬运
+
+
+def _alias_bridge_quote(chapter_text: str, text: str) -> str | None:
+    """从桥接章原文里确定性截取包含 text 的引句：复用 `index_source_segments`
+    做自然段/句级切分（与裁决庭卷宗检索同一工具，已处理引号跨段等边界情况），
+    取第一个包含 text 的分段——分段本身就是原文的逐字切片，天然满足
+    `_alias_declaration_verified` 条件 1（逐字子串）与条件 2（text 是引句子串）。
+    调用方已确认 text 在 chapter_text 里，理论上必有命中；找不到时返回 None
+    交由调用方兜底拒绝，不强行拼一句可能不含 text 的引句。"""
+    for segment in index_source_segments(chapter_text, max_chars=_ALIAS_BRIDGE_QUOTE_MAX_CHARS):
+        if text in segment.text:
+            return segment.text
+    return None
+
+
+def _find_alias_bridge_chapter(
+    chapters_by_idx: dict[int, str], anchor_texts: set[str], text: str,
+) -> tuple[int, str] | None:
+    """桥接章确定性检索：扫描全部章节（不受 ALIAS_BACKFILL_SOURCE_BUDGET_CHARS 预算
+    限制——那个预算只约束喂给模型的上下文长度，不该约束代码自己的确定性检索范围），
+    按章节序号升序找第一个同时包含 text（申报的别名文本）与 anchor_texts（角色规范名
+    或已确认别名）中至少一项的章节。"升序取第一个命中"是多桥接章命中时的确定性选择
+    规则：同一输入任何时候重跑结果一致，可复现、可审计（与裁决庭卷宗采样同一原则）；
+    选最早出现的桥接章而非任意一个，也与"最早共现即已构成充分证据"的直觉一致。
+    全书都没有这样的章节 → 返回 None，调用方维持拒绝。"""
+    for idx in sorted(chapters_by_idx):
+        content = chapters_by_idx[idx]
+        if text not in content:
+            continue
+        if not any(anchor and anchor in content for anchor in anchor_texts):
+            continue
+        quote = _alias_bridge_quote(content, text)
+        if quote:
+            return idx, quote
+    return None
+
+
+def _alias_evidence_resolution(
+    chapters_by_idx: dict[int, str],
+    anchor_texts: set[str],
+    text: str,
+    evidence_chapter_index: int,
+    evidence_quote: str,
+) -> tuple[int, str] | None:
+    """别名证据判定的统一入口，供两处调用方（`_verify_character_aliases_in_place` /
+    `backfill_character_aliases`）共用：模型申报的章节直接核验通过，就采信模型申报的
+    (evidence_chapter_index, evidence_quote) 原样登记；不通过时不直接拒绝——模型定位
+    错了章节不代表申报的语义假设本身是错的，退一步交给 `_find_alias_bridge_chapter`
+    在全书范围内确定性检索桥接章。两条路径都没有可核验的证据 → 返回 None，调用方
+    维持拒绝（不确定不登记）。返回值是最终应当登记的 (章节序号, 引句)，桥接章路径下
+    两者都来自代码检索，与模型原始申报无关。"""
+    if _alias_declaration_verified(
+        chapters_by_idx, anchor_texts, text, evidence_chapter_index, evidence_quote,
+    ):
+        return evidence_chapter_index, evidence_quote
+    return _find_alias_bridge_chapter(chapters_by_idx, anchor_texts, text)
 
 
 def _verify_character_aliases_in_place(bible: Bible, chapters: list[dict]) -> dict[str, list[str]]:
     """`generate_bible` 主链路核验：模型随人物谱正文一并申报的 aliases 同样只是申报，
-    落库前必须过同一套代码核验（`_alias_declaration_verified`，与回填函数共用）。
+    落库前必须过同一套代码核验（`_alias_evidence_resolution`，与回填函数共用；模型
+    申报章节没通过共现闸时，退一步做全书桥接章检索，见该函数 docstring）。
     只处理 aliases 字段，绝不触碰角色的任何其它既有字段。"""
     chapters_by_idx = _chapters_by_idx(chapters)
     added: dict[str, list[str]] = {}
@@ -3487,14 +3593,16 @@ def _verify_character_aliases_in_place(bible: Bible, chapters: list[dict]) -> di
             text = (item.text or "").strip()
             if not text or text == character.name or text in anchor_texts:
                 continue
-            if _alias_declaration_verified(
+            resolved = _alias_evidence_resolution(
                 chapters_by_idx, anchor_texts, text,
                 item.evidence_chapter_index, item.evidence_quote,
-            ):
+            )
+            if resolved:
+                resolved_chapter_index, resolved_quote = resolved
                 verified.append(CharacterAlias(
                     text=text, name_kind=item.name_kind,
-                    evidence_chapter_index=item.evidence_chapter_index,
-                    evidence_quote=item.evidence_quote,
+                    evidence_chapter_index=resolved_chapter_index,
+                    evidence_quote=resolved_quote,
                 ))
                 anchor_texts.add(text)
                 added_texts.append(text)
@@ -3561,7 +3669,9 @@ async def backfill_character_aliases(
     不代表失败（可能全书确实没有可核验的别名，也可能模型调用失败——两者都已通过
     `log_provider_call` 记录，失败时 status="FAILED"，全书无可核验别名时 status="EMPTY"）。
 
-    核验规则见 `_alias_declaration_verified`：模型只负责申报，代码逐字核验，不确定不登记。
+    核验规则见 `_alias_evidence_resolution`：模型只负责申报语义假设（character_name+text），
+    代码逐字核验证据；模型申报的章节没通过共现闸时，代码在全书范围内确定性检索桥接章
+    （`_find_alias_bridge_chapter`）作为兜底，找不到才真正拒绝——不确定不登记。
     禁止任何具体称谓的硬编码——判据只看结构（逐字子串命中 + 章节内共现），不针对
     "许师姐""小胖子"等具体词做特判分支。
     """
@@ -3583,11 +3693,17 @@ async def backfill_character_aliases(
 1. 每条别名给五个字段：character_name（必须逐字等于上面角色列表中的某个名字）、
    text（该别名在原文中的逐字写法）、name_kind（personal_name=真名/honorific=尊称/
    referential=代称，按原文语境判断该称谓的性质）、evidence_chapter_index（该别名出现的
-   证据所在章节序号，取该章节【第 N 章】块头里的数字 N）、evidence_quote（该章节原文中的
-   逐字引句，必须原样照抄，一个字都不能改；且这句引文所在章节里必须能同时找到该角色的
-   正式姓名或本角色的另一条别名——如果找不到这种共现，说明这条证据站不住，不要申报）。
-2. 不确定就不要申报：证据不足、记不清原文原句、或章节序号可能有误的情况，宁可漏报，
-   绝不能编造或近似改写引句——后端会逐字核对，改写过的引句一律无法通过、白白浪费申报。
+   证据所在章节序号，取该章节【第 N 章】块头里的数字 N——注意这不是该别名第一次出现的
+   章节，而是该别名与角色正式姓名（或本角色另一条已确认别名）同时出现的那一章；很多别名
+   （尤其是真名揭晓前的描述性代称）最早出现时全书还没交代过角色真名，那一章通不过共现
+   核验，要在全书范围内找到两者共现的章节再申报——一旦登记成功，该别名会覆盖它在全书的
+   所有出现，不局限于你引用的这一章）、evidence_quote（该共现章节原文中的逐字引句，必须
+   原样照抄，一个字都不能改，也不要自己在引句前后加引号包裹——原文本来有没有引号就照抄
+   有没有，不要额外添加；且这句引文所在章节里必须能同时找到该角色的正式姓名或本角色的
+   另一条别名——如果找不到这种共现，说明这条证据站不住，不要申报）。
+2. 不确定就不要申报：证据不足、记不清原文原句、全书都找不到别名与正式姓名共现、或章节
+   序号可能有误的情况，宁可漏报，绝不能编造或近似改写引句——后端会逐字核对，改写过的
+   引句或自行添加的引号包裹都无法通过、白白浪费申报。
 3. 同一个别名同一个角色只申报一次；角色的正式姓名本身不算别名，不要重复申报。
 4. 只申报别名本身，不要输出角色的外观、性格、关系等其它信息——这些字段本次不会被采用。
 
@@ -3635,14 +3751,16 @@ async def backfill_character_aliases(
             text = (item.text or "").strip()
             if not text or text in anchor_texts:
                 continue
-            if _alias_declaration_verified(
+            resolved = _alias_evidence_resolution(
                 chapters_by_idx, anchor_texts, text,
                 item.evidence_chapter_index, item.evidence_quote,
-            ):
+            )
+            if resolved:
+                resolved_chapter_index, resolved_quote = resolved
                 character.aliases.append(CharacterAlias(
                     text=text, name_kind=item.name_kind,
-                    evidence_chapter_index=item.evidence_chapter_index,
-                    evidence_quote=item.evidence_quote,
+                    evidence_chapter_index=resolved_chapter_index,
+                    evidence_quote=resolved_quote,
                 ))
                 anchor_texts.add(text)
                 added_texts.append(text)
@@ -3751,9 +3869,14 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
    该角色的 aliases：每条给 text（原文逐字写法）、name_kind（personal_name=真名/
    honorific=尊称/referential=代称，按语境判断）、evidence_chapter_index（该别名出现的
    证据所在章节序号，取原文分块【】块头里的数字；如果看到的分块标题不是数字、无法确定
-   准确章节序号，就不要申报这条别名）、evidence_quote（该章节原文中的逐字引句，必须原样
-   照抄，一个字都不能改；且这句引文所在章节里必须能同时找到该角色的正式姓名或本角色的
-   另一条别名——找不到这种共现就不要申报，后端会逐字核对，不满足条件的申报一律不会登记）。
+   准确章节序号，就不要申报这条别名——注意这个序号不是该别名第一次出现的章节，而是该
+   别名与角色正式姓名（或本角色另一条已确认别名）同时出现的那一章；很多描述性代称最早
+   出现时全书还没交代真名，那一章通不过共现核验，要在全书范围内找到两者共现的章节再
+   申报，一旦登记成功该别名会覆盖它在全书的所有出现）、evidence_quote（该共现章节原文中
+   的逐字引句，必须原样照抄，一个字都不能改，也不要自己在引句前后加引号包裹——原文本来
+   有没有引号就照抄有没有，不要额外添加；且这句引文所在章节里必须能同时找到该角色的
+   正式姓名或本角色的另一条别名——找不到这种共现就不要申报，后端会逐字核对，不满足条件
+   的申报一律不会登记）。
    不确定就不要申报别名——宁可漏报，绝不能编造或近似改写引句。
 6. relationships 只描述【已收录角色之间】的关系：relationships.to 必须逐字等于本次 characters 里某个角色的 name，不要指向未收录的人物（否则代码校验会因「关系指向未知角色」退回重写）。与圈外人物的关系请省略，或并入 personality 文字描述。
 
