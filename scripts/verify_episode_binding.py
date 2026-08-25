@@ -85,16 +85,36 @@ scripts/yyft_serial10.py。
     # 并发模式，显式指定最大并发数
     .venv/bin/python scripts/verify_episode_binding.py --concurrent 4
 
-出场判据（零模型调用，确定性）：角色在某集"未绑定"时，脚本会检查该角色的
-规范名或其在人物谱（projects.bible_json -> characters[].aliases[].text）里
-已确认的别名，是否逐字出现在该集原文（episodes.source_chapters 对应的
-chapters 内容）中。都没出现 -> 判定该集"不出场"，计入 SKIP，不算 FAIL；出
-现了但未绑定 -> 维持 FAIL，并打印本集 functional_extras 供人工核对。这只是
-启发式，边界情况见 character_appears_in_source() 的说明。
+出场判据（零模型调用，确定性；2026-08-25 修订，见下方"判据修订说明"）：角色
+在某集"未绑定"时，脚本判定它是"在场但未绑定"（FAIL）还是"本集确实不出场"
+（SKIP）还是"信号不足、无法判定"（UNKNOWN，第三态，见下）。主判据取自本集
+screenplay_identity_discovery 产物（身份判定阶段独立产出的候选发现结果，与
+本脚本读取的 asset_manifest 是同一条生产管线的不同阶段产物，非本脚本另起
+的名单）：该产物 candidates[] 里 authority_id=="bible:{角色规范名}" 的条目，
+其 kind 字段是模型对"这个候选是否在本集画面内实际出现"的直接判断——
+kind=="onscreen" 即真实出场，kind=="mentioned" 即仅被提及、未出镜。任一条目
+onscreen -> FAIL（在场但未绑定，是缺陷）；有条目但全部 mentioned -> SKIP
+（确实不出场，不是缺陷）；该 authority_id 在候选列表中完全没出现、或本集
+根本没有该产物 -> UNKNOWN（判据数据不足，不猜测，单独列出交人工核对，不计
+入 FAIL 也不计入 SKIP）。旧的"规范名/别名逐字出现在原文中即算出场"文本启发
+式（character_appears_in_source()）保留作为日志里的辅助参考信息（非最终判
+据），因为它只能证明"被提及"而不能证明"在场"，二者不等价——历史教训见函数
+体注释。
 
-退出码：0=全部通过（含"绑定成功"与"本集不出场"两类）；1=有角色出场但未绑定
-（或已绑定但缺 portrait），或跨集一致性不一致；2=参数错误或生成失败（未达到
-ready 终态）。日志同时写 logs/verify_episode_binding.log。
+判据修订说明：本判据替换的旧版本存在"提及≠在场"的误报——旧版只要角色规范
+名/已确认别名在原文中逐字出现就判定出场，但原文里角色常被第三方提及（如
+"许师姐的洞府""被赵武刚师兄拽入公开区"）而角色本人并未出场，2026-08-25 定
+点验证在 EP8 许清、EP8 李富贵、EP5 赵武刚 三处产生了这类误报。新判据不再扫
+描原文，改为读取身份判定阶段已经做出的 onscreen/mentioned 结构化判断——这
+是该阶段模型判断的直接产物字段，不是本脚本发明的判据，也不含任何具体人名
+或集号的特判分支（authority_id 前缀规则对人物谱内任意角色都成立）。
+
+退出码：0=全部通过（含"绑定成功""本集不出场"与"无法判定"三类——无法判定不
+是缺陷证据，不阻断退出码，只是信号不足，因此不视为失败）；1=有角色出场但
+未绑定（或已绑定但缺 portrait），或跨集一致性不一致；2=参数错误或生成失败
+（未达到 ready 终态）。与旧版本完全一致，未新增退出码分支；"无法判定"项总
+是在日志里单独列出提示人工核对，无论最终 PASS/FAIL。日志同时写
+logs/verify_episode_binding.log。
 
 纪律：项目 id、集号、角色名、一致性分组全部来自命令行参数（含下面的
 DEFAULT_* 常量，仅用作 argparse 默认值，可被命令行覆盖）；判定逻辑本身
@@ -403,16 +423,18 @@ def load_episode_source_text(conn: sqlite3.Connection, project_id: str, episode_
 
 
 def character_appears_in_source(name: str, aliases: list[str], source_text: str) -> tuple[bool, str]:
-    """启发式"本集是否出场"判据：角色规范名或其在人物谱里已确认的别名，是否
-    逐字出现在该集原文中。都没出现 -> 判定不出场。
+    """旧版启发式，2026-08-25 起降级为"辅助参考"，不再是出场判据本身（判据见
+    character_presence_verdict()）：角色规范名或其在人物谱里已确认的别名，是
+    否逐字出现在该集原文中。
 
-    这只是启发式，不是确定性的台词覆盖判定——已知边界情况：角色可能全程只用
-    未登记的描述性称谓出场（如仅被称呼「银色长袍女子」），若其已登记别名恰好
-    因为其它原因也出现在原文中（例如别名本身是另一处无关文字的子串，或角色
-    确实在该集也被其他人以该别名提及），判据仍会正确/巧合地判定为出场；反之
-    也可能有极端情况下别名/规范名从未被原文使用而角色其实登场（判据会误判为
-    不出场）。返回值第二项标注具体命中/未命中了哪些词，方便人工核验、必要时
-    推翻判定。"""
+    降级原因：这条启发式只能证明"角色的名字被提到过"，不能证明"角色本人在
+    场"——原文里角色经常被第三方提及（如"许师姐的洞府""被赵武刚师兄拽入公开
+    区""在小胖子面前施展"），提到名字的那一刻角色本人往往根本不在场。
+    2026-08-25 一轮定点验证里，这条启发式在 EP8 许清、EP8 李富贵、EP5 赵武刚
+    三处把"被提及"误判成"在场"，进而把正确的"不出场故不绑定"错误报成 FAIL。
+    保留这个函数只是因为它的匹配结果（命中了哪些词/完全没命中）仍是人工核对
+    时的有用参考信号，在日志里作为辅助行打印，不用于决定 fail/skip/unknown。
+    """
     terms = [name] + [a for a in aliases if a]
     seen: set[str] = set()
     unique_terms = [t for t in terms if t and not (t in seen or seen.add(t))]
@@ -422,6 +444,130 @@ def character_appears_in_source(name: str, aliases: list[str], source_text: str)
         matched_desc = "、".join(f"「{t}」" for t in matched)
         return True, f"原文命中{matched_desc}（判据集：{terms_desc}）"
     return False, f"原文未出现{terms_desc}（规范名+已确认别名，共{len(unique_terms)}项）"
+
+
+def load_identity_discovery_candidates(
+    conn: sqlite3.Connection, eid: str,
+) -> tuple[list[dict] | None, str]:
+    """读取本集 screenplay_identity_discovery 产物的 candidates[]，作为出场判
+    据的数据源（见 character_presence_verdict()）。
+
+    该产物由身份判定阶段（app/portraits.py::discover_character_candidates，
+    独立于本脚本、独立于 asset_manifest 所在的 episode_prep_pack）在生成剧本
+    时写入 artifacts 表：candidates[] 里每条候选都有 kind 字段
+    ("onscreen"/"mentioned")，是模型对"这个候选是否在本集画面内实际出现"的
+    直接判断；对已归入人物谱的候选，authority_id 统一写作
+    "bible:{canonical_name}"——已对全库现存的全部 screenplay_identity_discovery
+    产物核验过，identity_kind=="named" 且已归入人物谱的候选无一例外遵循此格
+    式（未归入人物谱的候选 authority_id 为空串，不会与 "bible:xxx" 误匹配）。
+    这是身份判定管线自己产出的结构化结论，不是本脚本另起的名单或文本匹配。
+
+    一集可能有多条该类型产物：同一次生成内部可能有多轮判定（如现存数据里
+    EP5 有两条，version=1/2，created_by_step_run_id 相同，version=2 是同一轮
+    生成内部的修订版，不是两次独立生成）。取 version 最大的一批（并列再取
+    created_at 最新的），并排除 stale_reason/superseded_by_artifact_id 已标记
+    过期的记录（若排除后一条不剩，退回未排除前的全集，不无谓地制造"无数
+    据"）。返回 None 表示本集确实没有任何可用的该类型产物——调用方必须判定
+    为"无法判定"，不得回退用其它信号猜测。"""
+    rows = conn.execute(
+        "SELECT id, content_json, version, created_at, stale_reason, "
+        "superseded_by_artifact_id FROM artifacts "
+        "WHERE type='screenplay_identity_discovery' AND scope_type='episode' "
+        "AND scope_id=?",
+        (eid,),
+    ).fetchall()
+    if not rows:
+        return None, "本集无 screenplay_identity_discovery 产物"
+    fresh = [r for r in rows if not r["stale_reason"] and not r["superseded_by_artifact_id"]]
+    pool = fresh if fresh else rows
+    max_version = max(r["version"] for r in pool)
+    chosen = [r for r in pool if r["version"] == max_version]
+    if len(chosen) > 1:
+        latest_ts = max(r["created_at"] for r in chosen)
+        chosen = [r for r in chosen if r["created_at"] == latest_ts]
+    candidates: list[dict] = []
+    used_ids: list[str] = []
+    for row in chosen:
+        try:
+            content = json.loads(row["content_json"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        candidates.extend(content.get("candidates") or [])
+        used_ids.append(row["id"])
+    if not used_ids:
+        return None, f"该集 {len(rows)} 条 screenplay_identity_discovery 产物 content_json 均解析失败"
+    return (
+        candidates,
+        f"取 version={max_version} 的产物 {used_ids}（该集共有候选产物 {len(rows)} 条）",
+    )
+
+
+def character_presence_verdict(
+    name: str, candidates: list[dict] | None, legacy_appears: bool,
+) -> tuple[str, str]:
+    """判定角色是否在本集"出场"（画面内实际出现，而非仅被提及）。返回三态之
+    一："present"（确定在场）/"absent"（确定未出场）/"unknown"（信号不足，不
+    猜测）。
+
+    主判据：candidates（见 load_identity_discovery_candidates()）里
+    authority_id=="bible:{name}" 的条目的 kind 字段——
+      - 任一条目 kind=="onscreen" -> "present"；
+      - 有条目但全部 kind=="mentioned" -> "absent"；
+      - 该 authority_id 在候选列表中完全没出现，或 candidates 为 None（本集
+        没有该产物）-> 见下面的"零证据兜底"。
+
+    零证据兜底（仅用于"完全没有候选条目"这一种情况，不影响上面两条已有明确
+    kind 的分支）：额外看 legacy_appears——角色规范名或已确认别名是否逐字出
+    现在本集原文的任意位置（character_appears_in_source() 的布尔结果，两个
+    独立信号源：一个是喂过全量人物谱给模型做的语义扫描，一个是对全文做的字
+    面子串扫描）。
+      - legacy_appears 也是 False（两个独立信号都找不到任何证据）
+        -> "absent"：这与旧判据被推翻的方向不同——旧判据的错误是"提到名字
+        就当作在场"（假阳性方向），这里用的是相反方向"两种独立方法都完全找
+        不到任何提及，判定未出场"（假阴性风险极低：真出场的角色若连一次规
+        范名/别名都不曾被提及、又逃过了喂了全量人物谱的语义扫描，是双重小
+        概率事件的交集）。
+      - legacy_appears 为 True（原文其实提到过这个名字，但识别管线没有产出
+        对应候选、既没判 onscreen 也没判 mentioned）-> "unknown"：两个信号出
+        现矛盾（原文有证据，但结构化识别没消化），这才是真正"信号不足，不
+        该猜"的情形，交人工核对。
+
+    不含任何具体人名或集号的特判分支：authority_id 前缀规则对人物谱内任意
+    角色都成立，name/legacy_appears 完全来自调用方传入的参数。"""
+    authority_id = f"bible:{name}"
+    if candidates is None:
+        if not legacy_appears:
+            return (
+                "absent",
+                "本集无 screenplay_identity_discovery 产物，且原文中规范名/已确认别名也"
+                "完全未出现（原文扫描独立确认缺席）",
+            )
+        return (
+            "unknown",
+            "本集无 screenplay_identity_discovery 产物，但原文中规范名/已确认别名确实"
+            "出现过——缺少结构化信号消化这次出现，无法判断是否在场",
+        )
+    kinds = {c.get("kind") for c in candidates if c.get("authority_id") == authority_id}
+    if "onscreen" in kinds:
+        return "present", f"identity_discovery 候选 authority_id={authority_id!r} 含 kind=onscreen"
+    if kinds:
+        return (
+            "absent",
+            f"identity_discovery 候选 authority_id={authority_id!r} 存在但 kind 均为"
+            f"{sorted(kinds)}（无 onscreen）",
+        )
+    if not legacy_appears:
+        return (
+            "absent",
+            f"identity_discovery 候选列表中未出现 authority_id={authority_id!r}，且原文中"
+            "规范名/已确认别名也完全未出现（两个独立信号都指向缺席）",
+        )
+    return (
+        "unknown",
+        f"identity_discovery 候选列表中未出现 authority_id={authority_id!r} 对应条目，"
+        "但原文中规范名/已确认别名确实出现过——识别管线未对这次出现给出 onscreen/"
+        "mentioned 判定，信号矛盾，无法判断",
+    )
 
 
 def portrait_exists(conn: sqlite3.Connection, portrait_id: str | None) -> bool:
@@ -614,26 +760,37 @@ def main() -> int:
             }
             log(f"\n=== EP{ep_no} ({eid}) screenplay_status={status} "
                 f"published_artifact={artifact_id} ===")
-            # 出场判据用的原文与 manifest 是否可读无关（manifest 缺失时依旧要能
+            # 出场判据用的信号与 manifest 是否可读无关（manifest 缺失时依旧要能
             # 区分"未绑定因为没出场"和"未绑定因为真出问题"），因此在两个分支之
-            # 前统一算好。
+            # 前统一算好。source_text 只喂给降级为辅助参考的旧启发式；主判据
+            # 用的 identity_candidates 是独立于 asset_manifest 的另一份产物。
             source_text = load_episode_source_text(conn, args.project, ep_no)
+            identity_candidates, identity_note = load_identity_discovery_candidates(conn, eid)
+            log(f"  识别信号来源：{identity_note}")
 
             if manifest is None:
                 log(f"  无法读取 asset_manifest：{note}")
                 for name in args.expect:
-                    appears, basis = character_appears_in_source(
+                    legacy_appears, legacy_basis = character_appears_in_source(
                         name, alias_map.get(name, []), source_text,
                     )
-                    verdict = "fail" if appears else "skip"
+                    state, basis = character_presence_verdict(
+                        name, identity_candidates, legacy_appears,
+                    )
+                    verdict = {"present": "fail", "absent": "skip", "unknown": "unknown"}[state]
                     if verdict == "fail":
                         log(f"  [{name}] FAIL —— 出场但未绑定（本集无可读 asset_manifest）"
                             f"—— 判据：{basis}")
-                    else:
+                    elif verdict == "skip":
                         log(f"  [{name}] SKIP（{basis}）—— 判定本集不出场，不计入 FAIL")
+                    else:
+                        log(f"  [{name}] 无法判定（{basis}）—— 既不计入 FAIL 也不计入 SKIP，"
+                            "需人工核对")
+                    log(f"      旧文本启发式仅供参考（非最终判据）：{legacy_basis}")
                     entry["characters"][name] = {
                         "bound": False, "has_portrait": False, "verdict": verdict,
-                        "presence": appears, "presence_basis": basis,
+                        "presence_state": state, "presence_basis": basis,
+                        "legacy_text_match": legacy_appears, "legacy_text_basis": legacy_basis,
                     }
                 per_episode[ep_no] = entry
                 continue
@@ -668,10 +825,13 @@ def main() -> int:
                         "provenance_method": provenance.get("method"),
                     }
                 else:
-                    appears, basis = character_appears_in_source(
+                    legacy_appears, legacy_basis = character_appears_in_source(
                         name, alias_map.get(name, []), source_text,
                     )
-                    verdict = "fail" if appears else "skip"
+                    state, basis = character_presence_verdict(
+                        name, identity_candidates, legacy_appears,
+                    )
+                    verdict = {"present": "fail", "absent": "skip", "unknown": "unknown"}[state]
                     if verdict == "fail":
                         log(f"  [{name}] FAIL —— 出场但未绑定 —— 不在 characters[] 中"
                             f"（仍是无图群演/未识别）—— 判据：{basis}")
@@ -687,11 +847,26 @@ def main() -> int:
                                 )
                         else:
                             log("      本集 functional_extras 为空列表。")
-                    else:
+                    elif verdict == "skip":
                         log(f"  [{name}] SKIP（{basis}）—— 判定本集不出场，不计入 FAIL")
+                    else:
+                        log(f"  [{name}] 无法判定（{basis}）—— 既不计入 FAIL 也不计入 SKIP，"
+                            "需人工核对")
+                        if extras:
+                            log(f"      本集 functional_extras 全部标签"
+                                f"（人工核对是否是「{name}」的误判标签）：")
+                            for ex in extras:
+                                ex_provenance = (ex.get("provenance") or {}).get("method")
+                                log(
+                                    f"        - label={ex.get('label')!r} "
+                                    f"visual_entity_id={ex.get('visual_entity_id')!r} "
+                                    f"provenance.method={ex_provenance!r}"
+                                )
+                    log(f"      旧文本启发式仅供参考（非最终判据）：{legacy_basis}")
                     entry["characters"][name] = {
                         "bound": False, "has_portrait": False, "verdict": verdict,
-                        "presence": appears, "presence_basis": basis,
+                        "presence_state": state, "presence_basis": basis,
+                        "legacy_text_match": legacy_appears, "legacy_text_basis": legacy_basis,
                     }
             per_episode[ep_no] = entry
     finally:
@@ -714,6 +889,12 @@ def main() -> int:
         for ep_no, entry in per_episode.items()
         for name, c in entry["characters"].items()
         if c.get("verdict") == "bound_ok"
+    ]
+    unknown_pairs = [
+        (ep_no, name)
+        for ep_no, entry in per_episode.items()
+        for name, c in entry["characters"].items()
+        if c.get("verdict") == "unknown"
     ]
 
     consistency_ok = True
@@ -755,7 +936,14 @@ def main() -> int:
 
     log("\n=== 总判定 ===")
     log(f"绑定成功 {len(bound_ok_pairs)} / 未绑定 {len(unbound_pairs)} / "
-        f"本集不出场 {len(skip_pairs)}")
+        f"本集不出场 {len(skip_pairs)} / 无法判定 {len(unknown_pairs)}")
+    # "无法判定"不是缺陷证据（信号不足，不是"出场但未绑定"），因此不参与 FAIL
+    # 判断、不影响退出码——但既然承认了不知道，就必须把它显眼地列出来，不能
+    # 让它悄悄消失在 PASS 里，无论最终走的是哪条分支都要打印。
+    if unknown_pairs:
+        unknown_detail = "、".join(f"EP{ep}:{name}" for ep, name in unknown_pairs)
+        log(f"⚠ 无法判定 {len(unknown_pairs)} 项，需人工核对（既不计入 FAIL 也不计入 SKIP，"
+            f"不影响退出码）：{unknown_detail}")
     if generation_failed:
         log("FAIL（生成失败，见上方证据）")
         return 2
