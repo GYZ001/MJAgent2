@@ -8846,6 +8846,254 @@ def test_future_identity_offers_k_for_canonical_name_in_group_evidence(
     assert resolved[0]["identity_kind"] == "named"
 
 
+def test_future_identity_direct_hit_window_still_offers_k_for_registered_alias(
+    monkeypatch,
+) -> None:
+    """Control for the fallback-window fix: a real, literal hit is untouched.
+
+    正例：待消歧组自己的标签在未来文本里确实逐字出现（"正阳门弟子"），
+    命中窗口内又恰好含另一个已登记角色的别名（"小胖子"→李富贵），这是
+    真实的同窗口共现证据，不是兜底瞎抓的——K: 选项必须照常铸造，行为
+    不受"兜底证据禁止 K"这条新规则影响。
+    """
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="李富贵",
+            role="重要配角",
+            appearance_canonical="圆脸胖少年，粗麻长衫，门牙醒目",
+        )],
+    )
+    candidates = [
+        {
+            "name": "李富贵",
+            "source_label": "小胖子",
+            "identity_kind": "named",
+            "identity_group": "bible:李富贵",
+            "authority_id": "bible:李富贵",
+            "kind": "onscreen",
+        },
+        {
+            "name": "正阳门弟子",
+            "source_label": "正阳门弟子",
+            "identity_kind": "functional",
+            "identity_group": "current-2:F1",
+            "kind": "onscreen",
+        },
+    ]
+    future_text = "正阳门弟子领着孟浩与小胖子继续赶路，一路无话。"
+    assert "正阳门弟子" in future_text and "小胖子" in future_text
+
+    seen: dict[str, list] = {}
+
+    async def fake_chat(messages, **kwargs):
+        prompt = str(messages[0]["content"])
+        seen["decisions"] = _future_identity_catalog(prompt, "可选决议目录")
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        group_key = next(iter(
+            schema["properties"]["decisions"]["properties"]
+        ))
+        enum = schema["properties"]["decisions"]["properties"][
+            group_key
+        ]["enum"]
+        seen["enum"] = list(enum)
+        return json.dumps({
+            "decisions": {
+                group_key: next(v for v in enum if v.startswith("K:")),
+            },
+            "revealed_names": {group_key: ""},
+            "revealed_name_kinds": {group_key: ""},
+            "reveal_evidence_ids": {group_key: ""},
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
+        candidates,
+        source_text="正阳门弟子引着孟浩与小胖子上山。",
+        future_text=future_text,
+        bible=bible,
+        episode_no=2,
+        future_label="第 3-14 章",
+    ))
+
+    assert any(value.startswith("K:") for value in seen["enum"])
+    known = [
+        decision for decision in seen["decisions"]
+        if decision["resolution_kind"] == "known_named"
+    ]
+    assert [decision["authority_id"] for decision in known] == ["bible:李富贵"]
+    assert known[0]["proof_kind"] == "registered_alias"
+    assert known[0]["proof_anchors"] == ["小胖子"]
+    resolved_target = next(
+        item for item in resolved if item["source_label"] == "正阳门弟子"
+    )
+    assert resolved_target["name"] == "李富贵"
+    assert resolved_target["authority_id"] == "bible:李富贵"
+    assert resolved_target["identity_kind"] == "named"
+
+
+def test_future_identity_forbids_known_decision_from_fallback_window(
+    monkeypatch,
+) -> None:
+    """RCA (proj_3ac0b627fa46 EP2)：绿袍男子被误并入李富贵的真实事故形状。
+
+    绿袍男子自己的标签从未在未来文本里逐字出现过，它的证据窗口因此只能
+    走兜底分支——盲抓未来文本开头约 900 字符，跟绿袍男子毫无关系。那段
+    兜底窗口里恰好出现"小胖子"（李富贵已登记的别名），这纯属巧合共现
+    （另一场戏：虎爷欺负孟浩与小胖子），不是"绿袍男子就是李富贵"的证据。
+
+    修复前：这会铸出 K:G001:bible:李富贵（proof_kind=registered_alias），
+    模型三选一时能选中它，把两个不同的人错误地并成一个——这正是本事故
+    真正发生的经过。修复后：该组的可选项里不得出现任何 K: token。
+    """
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="李富贵",
+            role="重要配角",
+            appearance_canonical="圆脸胖少年，粗麻长衫，门牙醒目",
+        )],
+    )
+    candidates = [
+        {
+            "name": "李富贵",
+            "source_label": "小胖子",
+            "identity_kind": "named",
+            "identity_group": "bible:李富贵",
+            "authority_id": "bible:李富贵",
+            "kind": "onscreen",
+        },
+        {
+            "name": "绿袍男子",
+            "source_label": "绿袍男子",
+            "identity_kind": "functional",
+            "identity_group": "current-2:F1",
+            "kind": "onscreen",
+        },
+    ]
+    # 未来文本开头（<900 字符）是另一场戏：虎爷欺负孟浩与小胖子，跟带路的
+    # 绿袍男子完全无关；"绿袍男子"这个标签在全篇未来文本里一次都不出现。
+    future_text = (
+        "虎爷把孟浩和小胖子堵在演武场后墙，扬言再敢偷懒就打断腿。"
+        + "填充" * 400
+    )
+    assert "绿袍男子" not in future_text
+    assert "小胖子" in future_text[:900]
+
+    seen: dict[str, list] = {}
+
+    async def fake_chat(messages, **kwargs):
+        prompt = str(messages[0]["content"])
+        seen["decisions"] = _future_identity_catalog(prompt, "可选决议目录")
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        group_key = next(iter(
+            schema["properties"]["decisions"]["properties"]
+        ))
+        enum = schema["properties"]["decisions"]["properties"][
+            group_key
+        ]["enum"]
+        seen["enum"] = list(enum)
+        return json.dumps({
+            "decisions": {
+                group_key: next(v for v in enum if v.startswith("F:")),
+            },
+            "revealed_names": {group_key: ""},
+            "revealed_name_kinds": {group_key: ""},
+            "reveal_evidence_ids": {group_key: ""},
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
+        candidates,
+        source_text="绿袍男子引着孟浩与小胖子上山。",
+        future_text=future_text,
+        bible=bible,
+        episode_no=2,
+        future_label="第 3-14 章",
+    ))
+
+    assert not any(value.startswith("K:") for value in seen["enum"])
+    known = [
+        decision for decision in seen["decisions"]
+        if decision["resolution_kind"] == "known_named"
+    ]
+    assert known == []
+    resolved_target = next(
+        item for item in resolved if item["source_label"] == "绿袍男子"
+    )
+    assert resolved_target["identity_kind"] == "functional"
+
+
+def test_future_identity_fallback_window_still_allows_new_name_reveal(
+    monkeypatch,
+) -> None:
+    """反例二：兜底窗口揭示的是一个全新真名（非已登记角色）时 N: 不受影响。
+
+    禁止 K: 的新规则只针对"该窗口不得为已登记权威背书"，不改变兜底窗口
+    对 N:（首次揭示新真名）分支的既有价值——这是保留兜底窗口本身的理由。
+    """
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="李富贵",
+            role="重要配角",
+            appearance_canonical="圆脸胖少年，粗麻长衫，门牙醒目",
+        )],
+    )
+    candidates = [{
+        "name": "绿袍男子",
+        "source_label": "绿袍男子",
+        "identity_kind": "functional",
+        "identity_group": "current-2:F1",
+        "kind": "onscreen",
+    }]
+    # "绿袍男子"这个标签从未逐字出现；开头 900 字内首次揭示了一个全新
+    # 真名"沈青云"，跟已有权威目录里的"李富贵"无关。
+    future_text = (
+        "带路人自称沈青云，一路沉默寡言，只在岔路口略作停留。"
+        + "填充" * 400
+    )
+    assert "绿袍男子" not in future_text
+    assert "沈青云" in future_text[:900]
+
+    async def fake_chat(messages, **kwargs):
+        prompt = str(messages[0]["content"])
+        evidence = _future_identity_catalog(prompt, "后续证据目录")
+        anchored = next(
+            item for item in evidence if "沈青云" in item["text"]
+        )
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        group_key = next(iter(
+            schema["properties"]["decisions"]["properties"]
+        ))
+        enum = schema["properties"]["decisions"]["properties"][
+            group_key
+        ]["enum"]
+        assert not any(v.startswith("K:") for v in enum)
+        return json.dumps({
+            "decisions": {
+                group_key: next(v for v in enum if v.startswith("N:")),
+            },
+            "revealed_names": {group_key: "沈青云"},
+            "revealed_name_kinds": {group_key: "personal_name"},
+            "reveal_evidence_ids": {group_key: anchored["evidence_id"]},
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
+        candidates,
+        source_text="绿袍男子引着孟浩与小胖子上山。",
+        future_text=future_text,
+        bible=bible,
+        episode_no=2,
+        future_label="第 3-14 章",
+    ))
+
+    assert resolved[0]["name"] == "沈青云"
+    assert resolved[0]["identity_kind"] == "named"
+    assert resolved[0]["authority_id"] == "bible:沈青云"
+
+
 def test_future_identity_new_naming_existing_authority_becomes_that_k(
     monkeypatch,
 ) -> None:

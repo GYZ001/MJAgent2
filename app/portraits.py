@@ -98,7 +98,21 @@ CURRENT_IDENTITY_EVIDENCE_RECEIPT_VERSION = (
 CURRENT_IDENTITY_LITERAL_PROVENANCE = "owned_current_literal.v1"
 CURRENT_IDENTITY_SYNTHETIC_PROVENANCE = "provider_synthetic_functional.v1"
 IDENTITY_ADJUDICATION_SOURCE_PROVENANCE = "owned_ir_identity_adjudication.v2"
-FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v13"
+FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v14"  # v14:
+# 事故 RCA（EP2「绿袍男子」误并入「李富贵」，proj_3ac0b627fa46）：当某个
+# 待消歧组的标签在整段未来文本里从未逐字出现时，resolve_future_identity_
+# candidates 原先仍会盲抓未来文本开头约 900 字符当作该组的证据窗口（纯
+# 兜底，只为让 N: 分支仍有文本可看），但铸造可选决议目录时没有把"这段
+# 证据是不是兜底取得"这件事考虑进去——窗口里偶然出现的任何已登记角色的
+# 别名/真名，都会被当成"这就是该标签的身份证据"铸出 K: 选项，模型再据此
+# 选中，就把两个不同的人错误地并成了一个。现在这种纯兜底证据不再铸造任何
+# K: 选项，该组的可选项收窄到只剩 F:（证据不足）与 N:（若确实首次揭示了
+# 新真名）。这改变的是发给模型的可选决议目录内容与后端对同一份未来文本的
+# 解读结果——不换版本号，本次事故里已经生成并持久化的错误 K 决议
+# （decision_contract_version 仍是 v13）会被 screenplay_identity_
+# resolution_is_current_for_scope 判定为"仍然当前"而不会被重新解析，
+# 修复形同虚设（与 CURRENT_IDENTITY_DECISION_VERSION 历次换版本号是
+# 同一个理由）。
 # 归一规则专用 resolution_kind（真实第26轮 EP5 回归 ERR-20260824-88ece5，见
 # resolve_future_identity_candidates 内 normalize_identity_payload 的完整
 # 说明）：跟 "known_named"/"new_named" 并列的第三种决议种类——模型把
@@ -3877,6 +3891,14 @@ async def resolve_future_identity_candidates(
     ]
     evidence_by_id: dict[str, dict] = {}
     evidence_ids_by_group: dict[str, list[str]] = {}
+    # 事故 RCA（EP2「绿袍男子」误并入「李富贵」）：当某个标签在整段未来文本
+    # 里从未逐字出现，下面的 else 分支盲抓未来文本开头约 900 字符作为该组
+    # 的证据窗口，内容与该标签毫无关系——纯属兜底，只是为了让 N: 分支（发现
+    # 新真名）仍有文本可看。这样取得的窗口绝不能被当成"这就是该标签的身份
+    # 证据"去背书任何 K: 决议：窗口里偶然出现的任何已登记角色别名/真名都只
+    # 是巧合共现，不是该标签与那个角色同一人的证据。用这个集合记录哪些组是
+    # 纯兜底取得证据，供下面铸造决议时拒绝为它们产出 K: 选项。
+    fallback_evidence_group_keys: set[str] = set()
     per_group_budget = min(
         1800,
         max(
@@ -3908,6 +3930,7 @@ async def resolve_future_identity_candidates(
                 if index in context_source_indexes
             ]
         else:
+            fallback_evidence_group_keys.add(group_key)
             matching = [
                 segment for segment in future_segments
                 if segment.start_offset < 900
@@ -4014,86 +4037,97 @@ async def resolve_future_identity_candidates(
             "resolution_kind": "functional",
         }
         decision_ids = [functional_id]
-        for authority_id, authority in authority_by_id.items():
-            canonical_name = str(
-                authority.get("canonical_name") or ""
-            ).strip()
-            # K decisions need an anchor the backend can bind to this group's
-            # own evidence: a registered non-canonical alias, an authority
-            # already bound to this exact current identity group, or -- for an
-            # authority not otherwise present in this episode -- its canonical
-            # name.  Excluding the canonical name outright was the production
-            # defect: every Bible-seeded authority starts with an empty alias
-            # list, so no K decision was ever minted, "this group is an
-            # already-registered person" became unrepresentable, and the run
-            # died on rule 5 instead.
-            registered_aliases = [
-                str(value).strip()
-                for value in authority.get("aliases") or []
-                if str(value).strip()
-                and str(value).strip() != canonical_name
-            ]
-            same_group_authority = authority_id in (
-                named_authorities_by_identity_group.get(
-                    str(group.get("identity_group") or ""), set()
-                )
-            )
-            if same_group_authority:
-                proof_anchors = [
-                    str(value) for value in group.get("labels") or []
+        # 兜底证据不得为 K 决议背书（见上面 fallback_evidence_group_keys 的
+        # 注释）：这个组的证据窗口和它的标签毫无逐字关联，窗口里出现的任何
+        # 已登记权威的别名/真名都只是巧合共现，不是"这个组就是那个人"的
+        # 证据。可选项在这里被硬性收窄到只剩 F:（证据不足）与下面的 N:
+        # （若窗口内确实首次揭示了新真名）——不做成"允许但弱置信度标注"，
+        # 因为一旦选项出现在 schema 枚举里，模型就可能选中它，且后续任何
+        # 环节都无法再用"这是不是兜底窗口"这条信息去否决一个已经铸造出的
+        # decision_id。
+        if group_key not in fallback_evidence_group_keys:
+            for authority_id, authority in authority_by_id.items():
+                canonical_name = str(
+                    authority.get("canonical_name") or ""
+                ).strip()
+                # K decisions need an anchor the backend can bind to this
+                # group's own evidence: a registered non-canonical alias, an
+                # authority already bound to this exact current identity
+                # group, or -- for an authority not otherwise present in this
+                # episode -- its canonical name.  Excluding the canonical name
+                # outright was the production defect: every Bible-seeded
+                # authority starts with an empty alias list, so no K decision
+                # was ever minted, "this group is an already-registered
+                # person" became unrepresentable, and the run died on rule 5
+                # instead.
+                registered_aliases = [
+                    str(value).strip()
+                    for value in authority.get("aliases") or []
+                    if str(value).strip()
+                    and str(value).strip() != canonical_name
                 ]
-                proof_kind = "same_group_authority"
-            else:
-                canonical_anchor = (
-                    [canonical_name]
-                    if canonical_name
-                    and authority_id not in episode_named_authorities
-                    else []
-                )
-                proof_anchors = list(dict.fromkeys([
-                    *registered_aliases,
-                    *canonical_anchor,
-                ]))
-                proof_kind = (
-                    "registered_alias" if registered_aliases
-                    else "canonical_name"
-                )
-            if not proof_anchors:
-                continue
-            anchored_evidence_ids = [
-                evidence_id
-                for evidence_id in evidence_ids_by_group[group_key]
-                if any(
-                    anchor
-                    and anchor in str(
-                        evidence_by_id.get(evidence_id, {}).get("text") or ""
+                same_group_authority = authority_id in (
+                    named_authorities_by_identity_group.get(
+                        str(group.get("identity_group") or ""), set()
                     )
-                    for anchor in proof_anchors
                 )
-            ]
-            if not anchored_evidence_ids:
-                continue
-            known_hash = evidence_repository.content_hash({
-                "contract_version": FUTURE_IDENTITY_DECISION_VERSION,
-                "group_key": group_key,
-                "authority_id": authority_id,
-                "evidence_ids": anchored_evidence_ids,
-            })[:12]
-            known_id = f"K:{group_key}:{authority_id}:{known_hash}"
-            decision_by_id[known_id] = {
-                "decision_id": known_id,
-                "group_key": group_key,
-                "resolution_kind": "known_named",
-                "authority_id": authority_id,
-                "canonical_name": canonical_name,
-                "evidence_ids": anchored_evidence_ids,
-                "materialization_compatible": bool(
-                    authority.get("materialization_compatible")
-                ),
-                "proof_kind": proof_kind,
-                "proof_anchors": proof_anchors,
-            }
-            decision_ids.append(known_id)
+                if same_group_authority:
+                    proof_anchors = [
+                        str(value) for value in group.get("labels") or []
+                    ]
+                    proof_kind = "same_group_authority"
+                else:
+                    canonical_anchor = (
+                        [canonical_name]
+                        if canonical_name
+                        and authority_id not in episode_named_authorities
+                        else []
+                    )
+                    proof_anchors = list(dict.fromkeys([
+                        *registered_aliases,
+                        *canonical_anchor,
+                    ]))
+                    proof_kind = (
+                        "registered_alias" if registered_aliases
+                        else "canonical_name"
+                    )
+                if not proof_anchors:
+                    continue
+                anchored_evidence_ids = [
+                    evidence_id
+                    for evidence_id in evidence_ids_by_group[group_key]
+                    if any(
+                        anchor
+                        and anchor in str(
+                            evidence_by_id.get(evidence_id, {}).get("text")
+                            or ""
+                        )
+                        for anchor in proof_anchors
+                    )
+                ]
+                if not anchored_evidence_ids:
+                    continue
+                known_hash = evidence_repository.content_hash({
+                    "contract_version": FUTURE_IDENTITY_DECISION_VERSION,
+                    "group_key": group_key,
+                    "authority_id": authority_id,
+                    "evidence_ids": anchored_evidence_ids,
+                })[:12]
+                known_id = f"K:{group_key}:{authority_id}:{known_hash}"
+                decision_by_id[known_id] = {
+                    "decision_id": known_id,
+                    "group_key": group_key,
+                    "resolution_kind": "known_named",
+                    "authority_id": authority_id,
+                    "canonical_name": canonical_name,
+                    "evidence_ids": anchored_evidence_ids,
+                    "materialization_compatible": bool(
+                        authority.get("materialization_compatible")
+                    ),
+                    "proof_kind": proof_kind,
+                    "proof_anchors": proof_anchors,
+                }
+                decision_ids.append(known_id)
         if evidence_ids_by_group[group_key]:
             new_id = f"N:{group_key}"
             decision_by_id[new_id] = {
