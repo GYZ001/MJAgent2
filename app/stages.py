@@ -4475,8 +4475,11 @@ async def reverify_character_aliases(
 #   本身（枚举收紧候选/段号、"都不是/无法确定"选项、拒绝是非题式确认偏误）完全照搬，
 #   不是另起炉灶。
 #
-# 额外新增的核验环节：有效区间起止章（valid_from_chapter/valid_to_chapter）本身也必须
-# 有证据支撑，不能让模型随口给一个区间——见 `_status_fact_interval_resolution`。
+# 额外新增的核验环节：有效区间起止章（valid_from_chapter/valid_to_chapter）本身也应该
+# 有证据支撑，不能让模型随口给一个区间——见 `_status_fact_interval_resolution`。但区间
+# 边界与核心事实（角色+归属/关系对象+证据章+引句，已过声明核验/桥接检索+候选判别裁决）
+# 是两个独立核验的东西：边界外推没有独立支撑时只回落该边界本身（标注为回落值），不
+# 拒绝已核验的核心事实；边界与核心证据矛盾（如终点早于证据章）才整条拒绝。
 
 _STATUS_FACT_VERDICT_STAGE_KEY = "character_status_fact_backfill_verdict"
 
@@ -4495,7 +4498,23 @@ async def _status_fact_verdict_call(
     `fact_noun` 是自然语言里的关系性质描述（"势力归属"/"人物关系"），`claim_text` 是被
     判别的归属对象（org）或关系对象（to）文本。返回值语义与 `_alias_verdict_call` 完全
     一致：`selected_candidate` 命中候选集之外（含"都不是/无法确定"）一律视为没有确认
-    申报的假设，调用方据此拒绝登记。"""
+    申报的假设，调用方据此拒绝登记。
+
+    真实事故（proj_3ac0b627fa46 全量回填 22 条申报 0 条通过，误诊为"区间核验过严"，
+    追查后发现区间核验从未被触及——全部卡在这一步）：提问措辞早先写成"这段证据所描述
+    的{{fact_noun}}（对象：'{{claim_text}}'）实际说的是候选中的哪一位本人"，对关系事实
+    （`fact_noun`="人物关系"）是道错题——`claim_text` 此时是 `to`（关系对象，本身就是
+    候选集里一个现成的、无歧义的人名），模型据此老老实实回答"'{{claim_text}}'这个名字
+    指的就是候选里的{{claim_text}}本人"（如 claim_text="韩宗" → selected_candidate="韩宗"，
+    provider_calls 10692/10693/10695 等历史记录可查），但调用方 `_status_fact_evidence_
+    resolution` 比对的是 `selected_candidate != subject_name`（subject_name 是关系的
+    发起方，如"孟浩"，结构上恒不等于 `to`）——问的是"claim_text 这个词指代谁"，答案
+    自然是 claim_text 自己，比对目标却是 subject_name，二者结构性错位，导致人物关系
+    100% 必然 candidate_mismatch，与证据是否真实成立无关。现改为明确要求模型回答"谁
+    拥有/构成这层{{fact_noun}}"（fact-to-person，与本模块顶部设计注释"归属/关系要问的
+    是'与某势力/某人存在这层关系的其实是候选中的谁'"一致），并把 `claim_text` 从候选
+    列表里剔除（调用方负责，见 `_status_fact_evidence_resolution`）——它结构上不可能是
+    正确答案，留在候选里只会引诱模型选择那个"显而易见"但错误的选项。"""
     catalog = "\n\n".join(
         f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
         for item in dossier
@@ -4510,8 +4529,12 @@ async def _status_fact_verdict_call(
 该章出场的人物谱角色候选（判别范围仅限这些人，不要引入候选之外的人）：
 {candidate_list}
 
-任务：仅依据以上原文段落本身，判断这段证据所描述的{fact_noun}（对象："{claim_text}"）
-实际说的是上面候选中的哪一位本人。
+以上段落是"候选中某人与"{claim_text}"存在这层{fact_noun}"这一申报的证据来源。任务：仅
+依据原文段落本身，判断真正与"{claim_text}"存在这层{fact_noun}的，实际上是候选中的哪一位
+本人。
+- selected_candidate 回答的是"拥有/构成这层{fact_noun}的那个人是谁"，不是"'{claim_text}'
+  这个名字本身指代候选中的谁"——即使"{claim_text}"恰好也是一个现成的人名，也不能因为
+  这一点就直接选它，必须依据原文证据确认候选中"与它存在这层{fact_noun}"的是谁；
 - selected_candidate 必须从候选列表中选一个精确姓名，或者在证据不足以确定具体是谁时
   选"{_ALIAS_VERDICT_NO_MATCH_LABEL}"；不要因为某个候选在段落里出现次数多就倾向选他，
   只依据原文是否真的能确定这段{fact_noun}说的就是他本人；
@@ -4565,9 +4588,10 @@ def _status_fact_interval_resolution(
     resolved_chapter_index: int,
     declared_valid_from_chapter: int | None,
     declared_valid_to_chapter: int | None,
-) -> tuple[int, int | None] | None:
+) -> tuple[int, bool, int | None, bool] | None:
     """有效区间起止章核验：不能让模型随口给一个区间（不确定不登记，安全默认同核心
-    证据）。
+    证据），但"区间边界没独立证据"与"核心事实没证据"是两件不同的事，不能绑在一起
+    处理——见下方"拆分处置"说明（事故修复：状态事实回填 100% 拒绝）。
 
     - 起点/终点若未申报（None）：起点回退为核心证据所在的 `resolved_chapter_index`
       （它已经过声明核验或桥接检索，本身就是有证据支撑的章节）；终点回退为 None，
@@ -4577,38 +4601,53 @@ def _status_fact_interval_resolution(
       "claim_text 与 anchor_texts 至少一项同时出现"这一结构性共现判据——与
       `_find_alias_bridge_chapter` 判断某章是否构成桥接章的判据完全同构，只是这里
       章节号已经由模型给出，不需要再检索一次，只核验这一章是否真的存在支撑证据。
-    - 边界不能与核心证据点矛盾：核心证据本身已经证明该事实在 `resolved_chapter_index`
-      这一章成立，起点不能晚于它、终点不能早于它。
+    - 边界与核心证据点矛盾（起点晚于 `resolved_chapter_index`、终点早于它）：这是
+      自相矛盾——核心证据本身已经证明该事实在 `resolved_chapter_index` 这一章成立，
+      不是"外推不足"，返回 None 交由调用方整体拒绝（§4 反例，不可放松）。
 
-    任一边界核验不过就返回 None，交由调用方整体拒绝——不做"部分采信、自动收窄区间"
-    这种模型没有明确申报过的推测行为，属性错了比没有更糟（设计文档 §4.3）。
+    拆分处置（不是放宽标准）：申报的边界与核心证据不矛盾、但也找不到独立共现支撑
+    （既不等于 `resolved_chapter_index`，边界章又没有 claim_text/anchor 共现）——这
+    种"未核验的外推"只丢弃该边界本身，不牵连已经过声明核验/候选判别的核心事实：
+    对应边界回落为默认值（起点回落为 `resolved_chapter_index`、终点回落为
+    None），并把返回的第 2/4 位标记为 True，供调用方在
+    `CharacterAffiliation.valid_from_is_fallback`/`valid_to_is_fallback` 如实标注——
+    这是代码回落的默认值，不代表这就是模型申报并核验通过的原始边界。旧实现把这种
+    "外推不成立"与"核心矛盾"一视同仁地整条拒绝，等于让未核验的边界外推否决了已核验
+    的核心事实，用错了地方（真实项目 proj_3ac0b627fa46 dry-run 复现：22 条申报里这条
+    规则从未被实际触发过——回填 100% 拒绝的真正原因在候选判别裁决环节，见
+    `_status_fact_verdict_call` docstring；但这条规则本身仍是一处真实的过严设计，
+    一旦上游问题修复、更多事实进入这一步，就会开始误杀，因此一并修正）。
     """
     valid_from_chapter = resolved_chapter_index
+    valid_from_is_fallback = False
     if declared_valid_from_chapter is not None and declared_valid_from_chapter != resolved_chapter_index:
         if declared_valid_from_chapter > resolved_chapter_index:
-            return None
+            return None  # 矛盾：起点不能晚于核心证据章，整条拒绝
         boundary_text = chapters_by_idx.get(declared_valid_from_chapter, "")
-        if not boundary_text or claim_text not in boundary_text:
-            return None
-        if not any(anchor and anchor in boundary_text for anchor in anchor_texts):
-            return None
-        valid_from_chapter = declared_valid_from_chapter
+        if boundary_text and claim_text in boundary_text and any(
+            anchor and anchor in boundary_text for anchor in anchor_texts
+        ):
+            valid_from_chapter = declared_valid_from_chapter
+        else:
+            valid_from_is_fallback = True  # 外推无独立支撑：不采信，回落为核心证据章
 
     valid_to_chapter: int | None = None
+    valid_to_is_fallback = False
     if declared_valid_to_chapter is not None:
         if declared_valid_to_chapter == resolved_chapter_index:
             valid_to_chapter = resolved_chapter_index
+        elif declared_valid_to_chapter < resolved_chapter_index:
+            return None  # 矛盾：终点不能早于核心证据章，整条拒绝
         else:
-            if declared_valid_to_chapter < resolved_chapter_index:
-                return None
             boundary_text = chapters_by_idx.get(declared_valid_to_chapter, "")
-            if not boundary_text or claim_text not in boundary_text:
-                return None
-            if not any(anchor and anchor in boundary_text for anchor in anchor_texts):
-                return None
-            valid_to_chapter = declared_valid_to_chapter
+            if boundary_text and claim_text in boundary_text and any(
+                anchor and anchor in boundary_text for anchor in anchor_texts
+            ):
+                valid_to_chapter = declared_valid_to_chapter
+            else:
+                valid_to_is_fallback = True  # 外推无独立支撑：不采信，回落为开放终点
 
-    return valid_from_chapter, valid_to_chapter
+    return valid_from_chapter, valid_from_is_fallback, valid_to_chapter, valid_to_is_fallback
 
 
 async def _status_fact_evidence_resolution(
@@ -4633,15 +4672,21 @@ async def _status_fact_evidence_resolution(
     `subject_name` 是被测角色的规范名（裁决闸要求 `selected_candidate` 恰好等于它）。
 
     返回结构 `{"accepted": bool, "chapter_idx": int|None, "quote": str, "reason": str,
-    "valid_from_chapter": int|None, "valid_to_chapter": int|None}`：`accepted=True` 时
-    后四个字段是应当登记的证据与区间；`accepted=False` 时 `reason` 是机器可读拒绝原因
-    （`no_bridge_chapter`/`no_verdict_candidates`/`no_verdict_dossier`/
-    `verdict_call_failed`/`candidate_mismatch`/`candidate_uncertain`/
-    `segment_not_pinned`/`interval_unverified`）。
+    "valid_from_chapter": int|None, "valid_from_is_fallback": bool, "valid_to_chapter":
+    int|None, "valid_to_is_fallback": bool}`：`accepted=True` 时后面这些字段是应当登记
+    的证据与区间——`valid_from_is_fallback`/`valid_to_is_fallback` 为 True 表示对应边界
+    是代码回落的默认值（模型申报的边界未能独立核验、不予采信），不是模型申报并核验
+    通过的原始边界（见 `_status_fact_interval_resolution` docstring"拆分处置"一节）；
+    `accepted=False` 时 `reason` 是机器可读拒绝原因（`no_bridge_chapter`/
+    `no_verdict_candidates`/`no_verdict_dossier`/`verdict_call_failed`/
+    `candidate_mismatch`/`candidate_uncertain`/`segment_not_pinned`/
+    `interval_contradiction`——最后一项特指申报区间与核心证据点逻辑矛盾，不包含"边界
+    外推缺乏独立支撑"这种情况，后者现在走拆分处置、不再整条拒绝）。
     """
     empty = {
         "accepted": False, "chapter_idx": None, "quote": "", "reason": "",
-        "valid_from_chapter": None, "valid_to_chapter": None,
+        "valid_from_chapter": None, "valid_from_is_fallback": False,
+        "valid_to_chapter": None, "valid_to_is_fallback": False,
     }
     if _alias_declaration_verified(
         chapters_by_idx, anchor_texts, claim_text, evidence_chapter_index, evidence_quote,
@@ -4670,10 +4715,17 @@ async def _status_fact_evidence_resolution(
     )
     if not dossier:
         return {**empty, "reason": "no_verdict_dossier"}
+    # claim_text 本身若恰好也在候选集里（关系事实的 to 就是这种情况——它本就是候选中
+    # 已收录的另一个人），结构上永远不可能是"拥有这层事实的那个人"（`to == name` 早在
+    # 调用方过滤掉了自关系）。留在候选列表里会诱导裁决模型把"claim_text 这个名字指代
+    # 候选中的谁"（trivial，答案就是它自己）误当成本次要判别的问题，见
+    # `_status_fact_verdict_call` docstring 对真实事故的说明。此处剔除，双重保险：
+    # 提示词已经明确说明，这里再从 Schema enum 层面彻底堵死这个选项。
+    verdict_candidates = [c for c in candidates if c != claim_text]
     try:
         response = await _status_fact_verdict_call(
             fact_noun=fact_noun, claim_text=claim_text, dossier=dossier,
-            candidates=candidates, project_id=project_id,
+            candidates=verdict_candidates, project_id=project_id,
         )
     except Exception as exc:  # noqa: BLE001 - 裁决调用失败按不确定处理：不确定不登记
         log_provider_call(
@@ -4699,13 +4751,15 @@ async def _status_fact_evidence_resolution(
         declared_valid_from_chapter, declared_valid_to_chapter,
     )
     if interval is None:
-        return {**empty, "reason": "interval_unverified"}
-    valid_from_chapter, valid_to_chapter = interval
+        return {**empty, "reason": "interval_contradiction"}
+    valid_from_chapter, valid_from_is_fallback, valid_to_chapter, valid_to_is_fallback = interval
 
     return {
         "accepted": True, "chapter_idx": resolved_chapter_index, "quote": resolved_quote,
         "reason": "", "valid_from_chapter": valid_from_chapter,
+        "valid_from_is_fallback": valid_from_is_fallback,
         "valid_to_chapter": valid_to_chapter,
+        "valid_to_is_fallback": valid_to_is_fallback,
     }
 
 
@@ -4882,7 +4936,9 @@ async def backfill_character_status_facts(
                 evidence_chapter_index=resolved["chapter_idx"],
                 evidence_quote=resolved["quote"],
                 valid_from_chapter=resolved["valid_from_chapter"],
+                valid_from_is_fallback=resolved["valid_from_is_fallback"],
                 valid_to_chapter=resolved["valid_to_chapter"],
+                valid_to_is_fallback=resolved["valid_to_is_fallback"],
             ))
             added_affiliations.setdefault(name, []).append(org)
 
@@ -4908,7 +4964,9 @@ async def backfill_character_status_facts(
                 evidence_chapter_index=resolved["chapter_idx"],
                 evidence_quote=resolved["quote"],
                 valid_from_chapter=resolved["valid_from_chapter"],
+                valid_from_is_fallback=resolved["valid_from_is_fallback"],
                 valid_to_chapter=resolved["valid_to_chapter"],
+                valid_to_is_fallback=resolved["valid_to_is_fallback"],
             ))
             added_relations.setdefault(name, []).append(to)
 

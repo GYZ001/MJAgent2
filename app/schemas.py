@@ -139,8 +139,22 @@ class CharacterAffiliation(BaseModel):
     evidence_chapter_index: int     # 证据锚点：原著章节序号
     evidence_quote: str              # 证据锚点：逐字引句，核验规则与 CharacterAlias 完全一致
                                      # （逐字子串命中 + 角色本人在同段/同章共现）
-    valid_from_chapter: int         # 有效区间起点（含）；未申报时代码回退为 evidence_chapter_index
-    valid_to_chapter: int | None = None   # 有效区间终点（含）；None=尚无证据表明已失效
+    valid_from_chapter: int         # 有效区间起点（含）；未申报、或申报了但无法独立核验时
+                                     # 代码回退为 evidence_chapter_index（见 valid_from_is_fallback）
+    valid_to_chapter: int | None = None   # 有效区间终点（含）；None=尚无证据表明已失效（未申报、
+                                     # 或申报了但无法独立核验时代码回退为 None，见 valid_to_is_fallback）
+    # 回落标注（事故修复：状态事实回填 100% 拒绝一事排查出的相关修正，见
+    # `app/stages._status_fact_interval_resolution` docstring 的完整说明）：核心事实
+    # （角色 + 归属对象 + 证据章 + 引句）与区间边界是两件事——前者已经过
+    # 候选判别裁决核验，后者只是模型对"从哪章起/到哪章止"的外推猜测。外推猜测若无法独立找到
+    # 共现证据支撑，不应该拖累已核验的核心事实一起被拒绝（那是用未核验的部分否决已核验的部分），
+    # 但也不能悄悄冒充"这就是模型申报并核验通过的边界"——所以回落发生时用这两个布尔位如实
+    # 标注：True=当前 valid_from_chapter/valid_to_chapter 是代码回落的默认值（模型原申报的边界
+    # 未被采信，不代表这就是模型的原始申报值）；False=模型未申报该边界（值恰好等于默认值），
+    # 或模型申报的边界本身独立核验通过（值就是模型的原始申报值）。矛盾边界（如申报的终点早于
+    # 证据章）不属于本标注范围——那种情况下整条事实都不会被登记。
+    valid_from_is_fallback: bool = False
+    valid_to_is_fallback: bool = False
 
 
 class CharacterRelation(BaseModel):
@@ -152,8 +166,10 @@ class CharacterRelation(BaseModel):
     relation_kind: str              # 关系性质自由文本（如 ally/rival/hostile/master_disciple）
     evidence_chapter_index: int
     evidence_quote: str
-    valid_from_chapter: int
+    valid_from_chapter: int         # 语义与 CharacterAffiliation 同名字段完全一致，见其注释
     valid_to_chapter: int | None = None
+    valid_from_is_fallback: bool = False
+    valid_to_is_fallback: bool = False
 
 
 class Character(BaseModel):

@@ -148,20 +148,21 @@ AFFILIATION_CHAPTERS = [
 
 def test_interval_defaults_to_evidence_chapter_when_not_declared() -> None:
     """起止章都不申报时：起点回退为核心证据所在章，终点回退为 None（尚无证据表明
-    已失效）——与 character_portraits 表 ep_end IS NULL 惯例同构。"""
+    已失效）——与 character_portraits 表 ep_end IS NULL 惯例同构。未申报不是"外推被
+    丢弃"，所以两个回落标注都是 False。"""
     from app import stages
 
     chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
     result = stages._status_fact_interval_resolution(
         chapters_by_idx, {"孟浩"}, "血妖宗", 5, None, None,
     )
-    assert result == (5, None)
+    assert result == (5, False, None, False)
 
 
 def test_interval_start_accepted_when_boundary_chapter_has_support() -> None:
     """valid_from_chapter 与核心证据章不同，但申报的起点章节本身也能找到
     claim_text + anchor 共现——应当被接受（这里起点就等于核心证据章本身，
-    最简单的"有支撑"场景）。"""
+    最简单的"有支撑"场景），且不是回落值（是模型申报并独立核验通过的边界）。"""
     from app import stages
 
     chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
@@ -169,47 +170,52 @@ def test_interval_start_accepted_when_boundary_chapter_has_support() -> None:
         chapters_by_idx, {"孟浩"}, "血妖宗", 40, 5, None,
     )
     # 起点 5 章：与核心证据章（40）不同，但第 5 章确实有"孟浩"+"血妖宗"共现支撑。
-    assert result == (5, None)
+    assert result == (5, False, None, False)
 
 
 def test_interval_end_accepted_when_boundary_chapter_has_support() -> None:
     """valid_to_chapter 申报为第 40 章（叛出宗门），该章确实有"孟浩"+"血妖宗"共现
-    支撑（原文明确交代归属结束）——应当被接受。"""
+    支撑（原文明确交代归属结束）——应当被接受，非回落值。"""
     from app import stages
 
     chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
     result = stages._status_fact_interval_resolution(
         chapters_by_idx, {"孟浩"}, "血妖宗", 5, None, 40,
     )
-    assert result == (5, 40)
+    assert result == (5, False, 40, False)
 
 
-def test_interval_start_rejected_without_boundary_support() -> None:
-    """红灯：valid_from_chapter 申报了一个不存在共现支撑的章节（第 9 章只有"孟浩"，
-    没有"血妖宗"）——不能让模型随口给个区间，必须拒绝（返回 None）。"""
+def test_interval_start_declared_but_unsupported_falls_back_and_is_flagged() -> None:
+    """红灯先行核心场景（本次事故修复的直接对象）：核心证据在第 40 章（不矛盾），但
+    申报的起点边界（第 9 章）没有独立共现支撑（该章只有"孟浩"，没有"血妖宗"）——修前
+    这会让整条事实被拒绝（interval_contradiction 之外的情形也返回 None）；修后应保留
+    核心证据、起点回落为核心证据章本身，并标注 valid_from_is_fallback=True，如实反映
+    "这是代码回落值，不是模型申报并核验通过的边界"。"""
     from app import stages
 
     chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
     result = stages._status_fact_interval_resolution(
-        chapters_by_idx, {"孟浩"}, "血妖宗", 5, 9, None,
+        chapters_by_idx, {"孟浩"}, "血妖宗", 40, 9, None,
     )
-    assert result is None
+    assert result == (40, True, None, False)
 
 
-def test_interval_end_rejected_without_boundary_support() -> None:
-    """红灯：valid_to_chapter 同样没有共现支撑时必须拒绝。"""
+def test_interval_end_declared_but_unsupported_falls_back_and_is_flagged() -> None:
+    """红灯先行：valid_to_chapter 同样没有共现支撑时（第 9 章只有"孟浩"，没有
+    "血妖宗"，且 9 不早于证据章 5，不构成矛盾）——回落为开放终点（None）并标注
+    valid_to_is_fallback=True，不再拒绝整条事实。"""
     from app import stages
 
     chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
     result = stages._status_fact_interval_resolution(
         chapters_by_idx, {"孟浩"}, "血妖宗", 5, None, 9,
     )
-    assert result is None
+    assert result == (5, False, None, True)
 
 
 def test_interval_start_rejected_when_declared_after_evidence_chapter() -> None:
-    """红灯：起点不能晚于核心证据章——核心证据本身已经证明该事实在证据章成立，
-    申报一个更晚的起点与此矛盾。"""
+    """反例（守边界）：起点不能晚于核心证据章——核心证据本身已经证明该事实在证据章
+    成立，申报一个更晚的起点与此矛盾（自相矛盾，不是外推不足），必须整条拒绝。"""
     from app import stages
 
     chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
@@ -220,7 +226,7 @@ def test_interval_start_rejected_when_declared_after_evidence_chapter() -> None:
 
 
 def test_interval_end_rejected_when_declared_before_evidence_chapter() -> None:
-    """红灯：终点不能早于核心证据章，同一理由的镜像场景。"""
+    """反例（守边界）：终点不能早于核心证据章，同一理由的镜像场景，必须整条拒绝。"""
     from app import stages
 
     chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
@@ -231,14 +237,15 @@ def test_interval_end_rejected_when_declared_before_evidence_chapter() -> None:
 
 
 def test_interval_boundary_equal_to_evidence_chapter_is_trivially_accepted() -> None:
-    """起止章申报为与核心证据章相同的值——不需要额外核验（本身就是已核验的证据点）。"""
+    """起止章申报为与核心证据章相同的值——不需要额外核验（本身就是已核验的证据点），
+    非回落值。"""
     from app import stages
 
     chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
     result = stages._status_fact_interval_resolution(
         chapters_by_idx, {"孟浩"}, "血妖宗", 5, 5, 5,
     )
-    assert result == (5, 5)
+    assert result == (5, False, 5, False)
 
 
 # ---------- 3. 核心证据判定 + 候选判别裁决：_status_fact_evidence_resolution ----------
@@ -265,7 +272,9 @@ def test_status_fact_accepted_when_declaration_verified_and_candidate_matches(mo
     assert resolved["chapter_idx"] == 5
     assert resolved["quote"] == quote
     assert resolved["valid_from_chapter"] == 5
+    assert resolved["valid_from_is_fallback"] is False
     assert resolved["valid_to_chapter"] is None
+    assert resolved["valid_to_is_fallback"] is False
 
 
 def test_status_fact_rejected_when_org_never_cooccurs_with_subject() -> None:
@@ -345,10 +354,10 @@ def test_status_fact_rejected_when_candidate_verdict_uncertain(monkeypatch) -> N
     assert resolved["reason"] == "candidate_uncertain"
 
 
-def test_status_fact_rejected_when_declared_interval_has_no_support(monkeypatch) -> None:
-    """红灯：核心证据本身可核验（候选判别通过），但申报的有效区间起点没有证据支撑
-    （第 9 章只有孟浩，没有血妖宗）——即使核心事实成立，也必须整体拒绝，不做"部分
-    采信、自动收窄区间"。"""
+def test_status_fact_rejected_when_declared_interval_contradicts_evidence(monkeypatch) -> None:
+    """反例（守边界）：核心证据本身可核验（候选判别通过），但申报的起点（第 9 章）
+    晚于核心证据章（第 5 章）——这是自相矛盾（核心证据已证明该事实在第 5 章成立，
+    起点不能晚于它），不是外推不足，必须整条拒绝，reason=interval_contradiction。"""
     from app import stages
     from app.harness import model_gateway
 
@@ -361,16 +370,50 @@ def test_status_fact_rejected_when_declared_interval_has_no_support(monkeypatch)
     )
     resolved = asyncio.run(stages._status_fact_evidence_resolution(
         chapters_by_idx, {"孟浩"}, "血妖宗", "孟浩", 5, quote,
-        9,  # declared_valid_from_chapter：第 9 章没有"血妖宗"，无支撑
+        9,  # declared_valid_from_chapter 晚于核心证据章 5：自相矛盾
         None,
         fact_noun="势力归属", roster={"孟浩": ["孟浩"]},
     ))
     assert resolved["accepted"] is False
-    assert resolved["reason"] == "interval_unverified"
+    assert resolved["reason"] == "interval_contradiction"
+
+
+def test_status_fact_accepted_when_declared_interval_unverifiable_falls_back_and_is_flagged(
+    monkeypatch,
+) -> None:
+    """红灯先行核心场景（本次事故修复的直接对象，复现真实项目 proj_3ac0b627fa46 的
+    根因形状）：核心证据本身可核验（候选判别通过、核心证据在第 40 章），但申报的起点
+    边界（第 9 章，早于证据章、不构成矛盾）没有独立共现支撑（第 9 章只有"孟浩"，没有
+    "血妖宗"）——修前旧代码会让整条事实被拒绝（区间核验不通过就整体拒绝，不区分"矛盾"
+    与"外推不足"）；修后应保留已核验的核心事实，起点回落为核心证据章本身，并标注
+    valid_from_is_fallback=True，如实反映这是回落值、不是模型申报并核验通过的边界。"""
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
+    quote = "孟浩转身离开血妖宗，从此再不理会宗门事务，与血妖宗恩断义绝。"
+
+    monkeypatch.setattr(
+        model_gateway, "chat_structured",
+        _fake_verdict_chat_structured("孟浩"),
+    )
+    resolved = asyncio.run(stages._status_fact_evidence_resolution(
+        chapters_by_idx, {"孟浩"}, "血妖宗", "孟浩", 40, quote,
+        9,  # declared_valid_from_chapter：第 9 章没有"血妖宗"，无独立支撑，但不矛盾（9<40）
+        None,
+        fact_noun="势力归属", roster={"孟浩": ["孟浩"]},
+    ))
+    assert resolved["accepted"] is True
+    assert resolved["chapter_idx"] == 40
+    assert resolved["valid_from_chapter"] == 40  # 回落为核心证据章，不采信申报的第 9 章
+    assert resolved["valid_from_is_fallback"] is True
+    assert resolved["valid_to_chapter"] is None
+    assert resolved["valid_to_is_fallback"] is False
 
 
 def test_status_fact_accepted_with_verified_interval_boundaries(monkeypatch) -> None:
-    """绿灯：核心证据 + 起止章都能各自找到共现支撑 → 全部登记，区间与锚点正确。"""
+    """绿灯：核心证据 + 起止章都能各自找到共现支撑 → 全部登记，区间与锚点正确，且
+    两个边界都不是回落值（模型申报的边界本身独立核验通过，原样采信）。"""
     from app import stages
     from app.harness import model_gateway
 
@@ -389,7 +432,9 @@ def test_status_fact_accepted_with_verified_interval_boundaries(monkeypatch) -> 
     assert resolved["accepted"] is True
     assert resolved["chapter_idx"] == 5
     assert resolved["valid_from_chapter"] == 5
+    assert resolved["valid_from_is_fallback"] is False
     assert resolved["valid_to_chapter"] == 40
+    assert resolved["valid_to_is_fallback"] is False
 
 
 def test_status_fact_rejected_when_verdict_call_raises(monkeypatch) -> None:
@@ -463,6 +508,48 @@ def test_status_fact_relation_accepted_when_target_is_another_character(monkeypa
     ))
     assert resolved["accepted"] is True
     assert resolved["chapter_idx"] == 8
+
+
+def test_status_fact_verdict_excludes_claim_text_from_candidates_for_relations(
+    monkeypatch,
+) -> None:
+    """回归测试（本次"状态事实回填 100% 拒绝"事故的真实根因，不是有效区间核验）：
+    关系事实的 claim_text（关系对象 to）本身就是候选集里的另一个已收录角色——旧提示
+    词问的是"这段证据所描述的{fact_noun}（对象：'{claim_text}'）实际说的是候选中的
+    哪一位本人"，对关系事实这是道错题：模型会老实回答"'{claim_text}'这个名字指的就是
+    候选里的它自己"（真实项目 proj_3ac0b627fa46 provider_calls 10692/10693/10695 等
+    可查：claim_text=韩宗/曹阳/上官修时 selected_candidate 精确等于 claim_text），但
+    调用方比对的是 `selected_candidate != subject_name`（subject_name 是关系发起方，
+    结构上恒不等于 to）——问题与比对目标错位，导致人物关系 100% 必然 candidate_
+    mismatch，与证据是否真实成立无关；区间核验从未被触及。修复后 claim_text 必须从
+    传给裁决模型的候选枚举（call_meta 记账 + JSON Schema enum 两处）里剔除，结构上
+    让模型不可能选中它自己作为答案。"""
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters_by_idx = stages._chapters_by_idx(RELATION_CHAPTERS)
+    roster = {"孟浩": ["孟浩"], "王有材": ["王有材"]}
+    quote = "王有材与孟浩并肩作战，二人结为过命之交"
+
+    seen: dict[str, object] = {}
+
+    async def fake_chat_structured(_messages, **kwargs):
+        seen["schema"] = kwargs["output_schema"]
+        seen["candidates_meta"] = kwargs["call_meta"]["candidates"]
+        model_type = kwargs["model_type"]
+        return model_type(
+            selected_candidate="孟浩", supporting_segment_index=1, supporting_quote="",
+        )
+
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+    resolved = asyncio.run(stages._status_fact_evidence_resolution(
+        chapters_by_idx, {"孟浩"}, "王有材", "孟浩", 8, quote, None, None,
+        fact_noun="人物关系", roster=roster,
+    ))
+    assert resolved["accepted"] is True
+    assert "王有材" not in seen["candidates_meta"]
+    assert "王有材" not in seen["schema"]["properties"]["selected_candidate"]["enum"]
+    assert "孟浩" in seen["candidates_meta"]
 
 
 RELATION_CANDIDATE_CONFUSION_CHAPTER = [
