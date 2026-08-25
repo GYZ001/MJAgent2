@@ -2112,6 +2112,7 @@ def validate_storyboard_screenplay_authority(
     screenplay: EpisodeScreenplay,
     *,
     expected_scope_id: str | None = None,
+    narrative_authority_required: bool = True,
 ) -> list[str]:
     """Validate only typed facts needed to project a published screenplay.
 
@@ -2119,9 +2120,30 @@ def validate_storyboard_screenplay_authority(
     that evaluator here used to require a code suppression list and could turn
     authoring findings into paid storyboard retries.  This boundary therefore
     checks only version, scope and stable-ID uniqueness.
+
+    ``narrative_authority_required`` defaults to ``True`` so every existing
+    caller keeps its exact legacy behaviour (missing ``narrative_plan`` is
+    always a hard failure) unless it explicitly opts out.  The one caller that
+    should opt out is a shot/episode whose
+    ``resolve_downstream_screenplay(...).narrative_authority_required`` is
+    declared ``False`` -- today that is exactly ``episode_prep_pack``
+    (screenplay contract 6.0.0+), which has no ``narrative_plan`` concept by
+    design.  That flag is a declared fact from the authority resolver, not an
+    inference made here: for every ``DownstreamScreenplayContext`` it returns,
+    ``narrative_authority_required`` is always exactly
+    ``screenplay.narrative_plan is not None`` (see
+    ``resolve_current_screenplay_authority``'s ``require_narrative`` guard,
+    which raises before returning if a legacy episode's narrative_plan is
+    missing when required).  So a caller passing
+    ``narrative_authority_required=False`` for a screenplay whose
+    narrative_plan is genuinely missing-but-required is not a state this
+    resolver can produce; it is not this function's job to re-derive that
+    distinction from ``plan is None`` alone.
     """
     plan = screenplay.narrative_plan
     if plan is None:
+        if not narrative_authority_required:
+            return []
         return [
             "[NARRATIVE_PLAN_MISSING] 分镜不能在缺少剧本叙事合同的情况下投影"
         ]
@@ -2149,18 +2171,31 @@ def validate_storyboard_narrative(
     outline: StoryboardOutline | None = None,
     complete: bool = True,
     expected_scope_id: str | None = None,
+    narrative_authority_required: bool = True,
 ) -> list[str]:
     """Validate shot contribution, action/delta ownership and audience hand-offs.
 
     Pass ``complete=False`` while generating a prefix; reference and replay
     invariants still run, but future delivery ownership is not demanded yet.
+
+    See ``validate_storyboard_screenplay_authority`` for why
+    ``narrative_authority_required`` defaults to ``True`` and what it means to
+    pass ``False``: this whole function -- shot contribution ownership, action/
+    delta ownership, audience hand-offs, cold-audience readability windows --
+    is a projection of ``narrative_plan``.  A screenplay whose architecture
+    (``episode_prep_pack``) never has a ``narrative_plan`` cannot be scored
+    against a graph it was never built with; that is not the same failure as a
+    legacy screenplay that lost its graph.
     """
     plan = screenplay.narrative_plan
     if plan is None:
+        if not narrative_authority_required:
+            return []
         return ["[NARRATIVE_PLAN_MISSING] 分镜不能在缺少剧本叙事合同的情况下标记 narrative_ready"]
     errors = validate_storyboard_screenplay_authority(
         screenplay,
         expected_scope_id=expected_scope_id,
+        narrative_authority_required=narrative_authority_required,
     )
     errors.extend(action_participant_delivery_errors(screenplay))
     index = index_narrative_plan(plan)

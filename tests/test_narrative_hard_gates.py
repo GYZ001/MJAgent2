@@ -14,6 +14,7 @@ from app.narrative import (
     validate_blind_review,
     validate_screenplay_narrative,
     validate_storyboard_narrative,
+    validate_storyboard_screenplay_authority,
 )
 from app.portraits import (
     apply_screenplay_character_resolutions,
@@ -27,6 +28,7 @@ from app.schemas import (
     AudienceStatePathRef,
     AudienceStateSnapshot,
     CharacterDramaticState,
+    EpisodeScreenplay,
     NarrativeAnchor,
     NarrativeEvent,
     NarrativeEvidence,
@@ -166,6 +168,66 @@ def test_ordered_multishot_action_has_exact_phase_handoff_and_ledgers() -> None:
 
     assert validate_screenplay_narrative(screenplay, require=True) == []
     assert validate_storyboard_narrative(board, screenplay) == []
+
+
+# ---------------------------------------------------------------------------
+# narrative_authority_required: episode_prep_pack (screenplay contract 6.0.0+)
+# never has a narrative_plan by design (project_prep_pack_to_screenplay
+# honestly leaves it None rather than fabricating one).  These gates must
+# stop treating "no narrative_plan" as always an error while a legacy
+# screenplay that is *supposed* to have one keeps failing exactly as before.
+# ---------------------------------------------------------------------------
+
+
+def _prep_pack_style_screenplay() -> EpisodeScreenplay:
+    """A screenplay shaped like project_prep_pack_to_screenplay's honest
+    projection: no narrative_plan, no plot_spine -- just prose fields."""
+    return EpisodeScreenplay(episode_no=6, full_script_text="旁白：故事开始。")
+
+
+def test_validate_storyboard_narrative_default_still_requires_narrative_plan() -> None:
+    """Every existing caller omits the new kwarg; it must keep hard-failing a
+    missing narrative_plan exactly as before (this is also the invariant that
+    catches a *legacy* screenplay that lost its graph -- resolve_downstream_
+    screenplay's require_narrative guard fails closed before such a
+    screenplay could ever reach here with narrative_authority_required=False,
+    see validate_storyboard_screenplay_authority's docstring)."""
+    screenplay = _prep_pack_style_screenplay()
+    board = Storyboard(episode_no=6, shots=[_shot(shot_no=1)])
+
+    assert "NARRATIVE_PLAN_MISSING" in _codes(
+        validate_storyboard_narrative(board, screenplay)
+    )
+    assert "NARRATIVE_PLAN_MISSING" in _codes(
+        validate_storyboard_screenplay_authority(screenplay)
+    )
+
+
+def test_validate_storyboard_narrative_prep_pack_opt_out_returns_no_errors() -> None:
+    """The one caller that should pass narrative_authority_required=False is
+    an episode whose resolve_downstream_screenplay(...).narrative_authority_
+    required is declared False -- today exactly episode_prep_pack."""
+    screenplay = _prep_pack_style_screenplay()
+    board = Storyboard(episode_no=6, shots=[_shot(shot_no=1)])
+
+    assert validate_storyboard_narrative(
+        board, screenplay, narrative_authority_required=False,
+    ) == []
+    assert validate_storyboard_screenplay_authority(
+        screenplay, narrative_authority_required=False,
+    ) == []
+
+
+def test_validate_storyboard_narrative_legacy_path_unaffected_by_new_kwarg() -> None:
+    """A narrative_plan-having screenplay must validate identically whether
+    or not the caller passes narrative_authority_required=True explicitly --
+    the new parameter only changes behaviour for the narrative_plan-is-None
+    case."""
+    screenplay, board = _two_phase_action_story()
+
+    assert validate_storyboard_narrative(board, screenplay) == validate_storyboard_narrative(
+        board, screenplay, narrative_authority_required=True,
+    )
 
 
 @pytest.mark.parametrize(

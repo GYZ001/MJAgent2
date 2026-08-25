@@ -818,6 +818,7 @@ def test_final_shot_narrative_gate_uses_compiled_outline(monkeypatch) -> None:
         outline=None,
         complete=True,
         expected_scope_id=None,
+        narrative_authority_required=True,
     ):
         calls.append((outline, complete))
         return []
@@ -914,3 +915,111 @@ def test_final_passes_when_key_content_present() -> None:
                        allow_finish=True, must_finish=False, screenplay=_screenplay())
     assert not any("继续补镜" in e for e in errors)
     assert not any(e.startswith("分镜丢失了剧本标记的") for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# EP6 regression (run_ea842342b910): episode_prep_pack's director outline
+# (_generate_episode_director_outline) gives every shot a populated
+# StoryboardOutlineShot brief (shot_id/scene_id/covers all filled in) even
+# though the episode has no narrative_plan.  Before this fix,
+# ``outline_narrative_task is not None`` alone routed such shots into the
+# narrative_plan-authority structural drift comparison
+# (OUTLINE_NARRATIVE_TASK_DRIFT) -- which fires unconditionally because the
+# per-shot generation JSON contract never asks the model to emit
+# shot_id/scene_id/shot_contribution, so ``actual`` is always "" for those
+# fields while ``planned`` (from the outline brief) is not.  Meanwhile the
+# real prep_pack outline-fidelity check (validate_storyboard_shot_covers_outline)
+# never ran at all, because its call was also keyed on the same stale
+# ``outline_narrative_task is None`` proxy.  This is what produced the real
+# WAITING_HUMAN failure (run_ea842342b910): shot_no=1 stuck for 4 repair
+# rounds on a structurally unsatisfiable "must equal null" / "must be
+# non-empty" pair for shot_contribution, no matter what the model produced.
+# ---------------------------------------------------------------------------
+
+
+def test_prep_pack_outline_brief_routes_to_covers_check_not_structural_drift() -> None:
+    screenplay = _screenplay()
+    assert screenplay.narrative_plan is None  # episode_prep_pack: honestly no graph.
+    brief = StoryboardOutlineShot(
+        shot_no=1,
+        shot_id="SH0001",
+        scene_id="SC001",
+        covers="中年测验员宣读萧炎斗之力三段并定性为低级",
+    )
+
+    errors = _validate_storyboard_shot_draft(
+        _draft(_shot(1), is_final=False),
+        episode=_episode(),
+        bible=_bible(),
+        screenplay=screenplay,
+        completed_shots=[],
+        shot_no=1,
+        allow_finish=False,
+        must_finish=False,
+        outline_narrative_task=brief,
+        outline_covers=brief.covers,
+    )
+
+    # The structural narrative-authority gate must not fire for a screenplay
+    # that was never built with a narrative_plan -- shot_id/scene_id staying
+    # at their Shot defaults ("") is not "drift", it is simply a field the
+    # per-shot contract never asked for on this architecture.
+    assert not any(
+        isinstance(e, str) and "OUTLINE_NARRATIVE_TASK_DRIFT" in e for e in errors
+    )
+    # It must not be a silent no-op either: the outline's planned covers
+    # content that never made it into the shot is still caught, just by the
+    # prose-based covers check instead of the graph-based structural one.
+    assert any(
+        isinstance(e, str) and "未落实本镜大纲 covers" in e for e in errors
+    )
+
+
+def test_legacy_narrative_authority_outline_drift_still_fires() -> None:
+    """narrative_plan-having episodes keep the exact structural
+    outline-fidelity gate unchanged: a shot that silently drifts a
+    narrative-authority field away from what the outline task assigned is
+    still a hard OUTLINE_NARRATIVE_TASK_DRIFT."""
+    screenplay = _screenplay()
+    screenplay.narrative_plan = NarrativeContinuityPlan(scope_id="e2")
+    brief = StoryboardOutlineShot(
+        shot_no=1,
+        primary_action_id="ACT-1",
+    )
+    shot = _shot(1)
+    shot.primary_action_id = "ACT-DIFFERENT"
+
+    errors = _validate_storyboard_shot_draft(
+        _draft(shot, is_final=False),
+        episode=_episode(),
+        bible=_bible(),
+        screenplay=screenplay,
+        completed_shots=[],
+        shot_no=1,
+        allow_finish=False,
+        must_finish=False,
+        narrative_authority=True,
+        outline_narrative_task=brief,
+    )
+
+    assert any(
+        isinstance(e, str) and "OUTLINE_NARRATIVE_TASK_DRIFT" in e for e in errors
+    )
+
+
+def test_prep_pack_missing_narrative_plan_no_longer_blocks_shot_validation() -> None:
+    """The other half of run_ea842342b910's failure: validate_storyboard_narrative
+    used to hard-fail with NARRATIVE_PLAN_MISSING for *every* shot in an
+    episode_prep_pack episode, unconditionally, because it never consulted
+    narrative_authority_required.  It must no longer do so."""
+    screenplay = _screenplay()
+    assert screenplay.narrative_plan is None
+
+    errors = _validate(
+        _draft(_shot(1), is_final=False),
+        allow_finish=False, must_finish=False, screenplay=screenplay,
+    )
+
+    assert not any(
+        isinstance(e, str) and "NARRATIVE_PLAN_MISSING" in e for e in errors
+    )

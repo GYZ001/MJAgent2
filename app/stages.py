@@ -13180,16 +13180,44 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
         (s.action_desc or "") + _spoken_text_of(s)
         for s in board.shots[:-1]
     )
-    if outline_narrative_task is None:
+    # This used to be keyed on ``outline_narrative_task is None`` because that
+    # used to be a reliable proxy for "not on the narrative_plan authority
+    # path": only compile_authoritative_delivery_outline (narrative_plan-
+    # driven) ever populated a per-shot outline brief, so a legacy/no-outline
+    # episode always had ``outline_narrative_task is None``.  That proxy broke
+    # when episode_prep_pack got its own per-shot outline
+    # (_generate_episode_director_outline): its briefs are populated (shot_id/
+    # scene_id/covers/purpose are always filled in) even though the episode
+    # has no narrative_plan, so ``outline_narrative_task is not None`` no
+    # longer implies narrative authority.  Key on ``narrative_authority``
+    # directly -- it is derived from (and cross-checked against, see
+    # ``expected_narrative_authority`` above) ``screenplay.narrative_plan is
+    # not None``, which is what validate_storyboard_shot_covers_outline's own
+    # ``narrative_authority`` parameter actually gates on.  The ``or
+    # outline_narrative_task is None`` disjunct is kept only so a legacy
+    # narrative_authority episode that somehow ran out of outline briefs keeps
+    # its previous (degenerate, never observed in must_finish-bounded runs)
+    # behaviour byte-for-byte.
+    if not narrative_authority or outline_narrative_task is None:
         errors.extend(validate_storyboard_shot_covers_outline(
             current, outline_covers, shot_no,
             prior_text=prior_text, later_planned_covers=later_planned_covers,
+            narrative_authority=narrative_authority,
         ))
 
-    # The outline owns narrative allocation.  Compare the complete structural
-    # task instead of re-inferring it from prose, while leaving legacy outlines
-    # (whose narrative fields are all empty) on their existing compatibility path.
-    if outline_narrative_task is not None:
+    # The outline owns narrative allocation -- but only on the narrative_plan
+    # authority path.  These fields (event_ids, primary_action_id,
+    # shot_contribution, audience_state_paths, ...) are references into
+    # narrative_plan's graph; episode_prep_pack's director outline has no such
+    # graph, so its outline briefs are structurally incomparable to this
+    # field set (e.g. shot_contribution is always null there, while the
+    # per-shot generation contract is told elsewhere that shot_contribution
+    # must be non-empty -- an unsatisfiable pair that would fail every replay
+    # regardless of shot quality).  Compare the complete structural task
+    # instead of re-inferring it from prose only when narrative_authority is
+    # true; prep_pack shots get their outline-fidelity check from
+    # validate_storyboard_shot_covers_outline above instead.
+    if narrative_authority and outline_narrative_task is not None:
         narrative_fields = tuple(
             field
             for field in _STORYBOARD_NARRATIVE_AUTHORITY_FIELDS
@@ -13209,6 +13237,18 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     # graph.  Prefix mode checks references, ownership collisions, replay and
     # hand-offs without demanding delivery of future events; the closing shot
     # upgrades to the complete-episode gate.
+    #
+    # narrative_authority_required is passed through unchanged for the
+    # narrative_authority=True path (matching the function's default and thus
+    # every other existing caller's behaviour byte-for-byte).  For
+    # episode_prep_pack (narrative_authority=False, screenplay.narrative_plan
+    # is None by the honest projection in project_prep_pack_to_screenplay),
+    # this stops manufacturing a NARRATIVE_PLAN_MISSING blocker for an
+    # architecture that was never supposed to have one; it does not relax any
+    # check for an episode that is supposed to have narrative_plan but lost
+    # it -- resolve_downstream_screenplay's require_narrative guard fails
+    # closed before such a screenplay can even reach this function (see the
+    # docstring on validate_storyboard_screenplay_authority).
     from app.narrative import validate_storyboard_narrative
     errors.extend(validate_storyboard_narrative(
         board,
@@ -13218,6 +13258,7 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
         expected_scope_id=str(
             episode.get("id") or f"episode-{episode['episode_no']}"
         ),
+        narrative_authority_required=narrative_authority,
     ))
 
     if not (draft.is_final or must_finish):
