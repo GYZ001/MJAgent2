@@ -196,6 +196,7 @@ of chasing individual instances of it.
 from __future__ import annotations
 
 import json
+import re
 from contextlib import nullcontext
 from typing import Any, Literal
 
@@ -225,7 +226,7 @@ from app.validators import (
     match_scene_name,
 )
 
-PREP_PACK_VERSION = "1.8.2"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "1.8.3"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
 # gained functional_extras; 1.4.0: coverage_ledger gained paratext (deterministic
 # keyword/position classifier, since replaced); 1.4.1: paratext classification
@@ -422,6 +423,58 @@ PREP_PACK_VERSION = "1.8.2"  # 1.1.0: event_chain entries carry source_span (P1 
 # 改变发给候选判别模型的卷宗内容本身（真正的 prompt-contract 变更），
 # asset_manifest/event_chain 的 payload 结构与既有 provenance.method 取值
 # 集合均未改变，比照 1.4.1/1.6.1/1.8.1 的先例推进版本号（第三位）。
+# 1.8.3（真实数据、同一晚同一事故的第三层根因，provider_calls id=10520 可
+# 复核，prompt-contract 变更，版本推进）：1.8.2 的按层保底配额（A/B 两侧各
+# 保底 4 条）确实生效——EP1 目标标签"银色长袍女子"的卷宗从纯事件跨度变成了
+# 段 31,33-42,60，B 侧成功挤进 1 段——但目标依然失败，模型再次答"都不是/
+# 无法确定"，提示词里 `含「许师姐」: False`。两层新根因：
+#   一、条数配额没有对应的字数配额。A 侧那 11 段包含大段外貌与环境描写，
+#      几乎吃光 _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_CHARS，B 侧
+#      "保底 4 条"里只有排在最前面、恰好能塞进剩余预算的 1 条真正被
+#      _prep_pack_functional_candidate_dossier 的选择循环收录——保底的是
+#      "配额位置"，不是"配额一定进得去卷宗"，字数上限才是真正没被堵住的
+#      约束。
+#   二、B 侧唯一挤进去的那 1 段还被候选轮转顺序里排第一的主角类候选占了——
+#      "主角淹没预算"这个陷阱在这一晚已经从卷宗整体（1.8.1）、到 B 侧
+#      内部候选轮转（1.8.2 修复的问题）、到 B 侧稀缺槽位本身（这次）连续
+#      三层复现。
+# 修复分两处：
+#   改动一（本文件，_prep_pack_functional_candidate_dossier +
+#   _prep_pack_functional_candidate_anchor_pool + 新增
+#   _prep_pack_functional_candidate_truncate_segment）：保底粒度从"A 侧/B
+#   侧"下沉到"每个候选"——B 侧每个确有锚点证据的候选都独立保证至少 1 段
+#   进卷宗，不再是一个笼统的"B 侧保底 4 条"位置数字任由字数预算和轮转顺序
+#   争抢。保底层的字数预算同样按候选粒度兜底：保底段一律收录，不因为字数
+#   超限被整条跳过（这正是本轮失败的直接原因）——超过
+#   _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_GUARANTEED_ENTRY_MAX_CHARS 就
+#   做确定性截断（保留含锚点词的核心句 + 省略标记），不整段丢弃某个候选的
+#   唯一证据。A 侧保底让位给"每候选至少一段"这个硬要求：先满足每候选保底
+#   的条数名额，A 侧保底只取剩余名额与自身可用条数的较小值。两个既有上限
+#   常量（MAX_ENTRIES/MAX_CHARS）本身原样不变，只是同一份预算内部的分配
+#   规则更细颗粒度、且保底层不再因字数被挤出——不是靠放大上限绕过问题。
+#   改动二（本文件，新增 _prep_pack_functional_candidate_registered_
+#   names，_prep_pack_resolve_functional_extra_candidate 候选集改为两类
+#   并集）：候选集补全——当前候选集只看"规范名或已确认别名在本集原文逐字
+#   出现"（甲类），漏掉了一整类角色：人物谱已登记 ep_start/ep_end 覆盖本集
+#   （即人物谱自己声明"这个角色在本集是活跃的"），但本集原文只有纯外貌
+#   描写、规范名与别名一次都没出现的角色（真实 EP1 案例：李富贵第 1 章只
+#   被写成"白白净净身子较胖"，标签"白白净净的胖少年"永远无法绑定，即使
+#   人物谱早已登记他 ep_start=1、外貌"身形圆胖皮肤白净"）。乙类候选补入
+#   候选集后，若其锚点在本集原文里找不到，卷宗检索侧不受影响（乙类候选
+#   天然没有 B 侧锚点段落，不参与也不稀释每候选保底），只在发给模型的
+#   提示词里追加一段"人物谱登记显示在本集活跃、但本集原文未必直接点名的
+#   候选"，附上人物谱外貌描述作为身份背景参考，并与"本集原文中已直接出现
+#   的候选"分区展示，明确标注两者证据强度不同。乙类候选不降低任何判定
+#   门槛——候选选择题、段号钉证（仍只能引用卷宗里真实存在的段落，乙类候选
+#   没有专属段落可钉）、"都不是/无法确定"拒绝三条既有纪律原样不动，乙类
+#   候选能被选中，前提仍是模型能在卷宗的原文段落（通常是 A 侧材料）里找到
+#   支撑其身份的独立证据，只是现在多了一个可以被点名的选项。两处改动都
+#   不改变每个未解析标签仍然只发起一次模型调用这一既有约束，候选集变大
+#   不增加调用次数。会实际改变发给候选判别模型的卷宗内容与候选名单本身
+#   （真正的 prompt-contract 变更，会实际改变部分此前误落 functional_
+#   extras 的标签的判别结果），asset_manifest/event_chain 的 payload
+#   结构与既有 provenance.method 取值集合均未改变，比照 1.4.1/1.6.1/
+#   1.8.1/1.8.2 的先例推进版本号（第三位）。
 QA_PROFILE_VERSION = "prep-pack-qa-gate-1"
 _QA_EVALUATOR_NAME = "screenplay_production_qa"
 _CHUNK_MAX_CHARS = 6000
@@ -1625,22 +1678,42 @@ async def _discover_new_scenes(
 # 两个函数各自的完整 docstring）。label 逐字命中原文这条路径继续保留、
 # 不因为改用事件定位就丢弃（有些标签确实是原文用词）；事件跨度缺失/为空
 # 时防御性退回 1.8.1 之前的既有行为，不崩。
+#
+# 1.8.2/1.8.3（同一晚同一事故的第二、三层根因）：完整案情见 PREP_PACK_
+# VERSION 上方对应版本号大注释，不在这里重复——概括地说，1.8.2 把 A/B 两侧
+# 保底配额下沉到卷宗预算分配层，1.8.3 进一步把 B 侧保底粒度下沉到"每个
+# 候选"、字数预算也按同样粒度兜底（保底段一律收录，超限做确定性截断而非
+# 整段丢弃），并把候选集从"只看本集原文逐字命中"扩展为"逐字命中 ∪ 人物谱
+# 注册区间覆盖本集"两类并集。
 
 _PREP_PACK_FUNCTIONAL_CANDIDATE_NO_MATCH_LABEL = "都不是/无法确定"
 _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES = 12  # 单条候选判别卷宗最多收录的段落数
 _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_CHARS = 6000  # 单条候选判别卷宗最多收录的总字符数
-# 1.8.2 新增，见 PREP_PACK_VERSION 上方 1.8.2 大注释的完整根因：A 侧（事件
-# 跨度段+标签字面段）与 B 侧（候选锚点段）各自的保底配额——任一侧的可用
-# 证据量达到这个数，就至少能拿到这么多名额，不会被另一侧挤到 0（哪怕另
-# 一侧证据量单独就能塞满 MAX_ENTRIES，真实事故：事件跨度连续 12 段，恰好
-# 等于 MAX_ENTRIES，B 侧原本一条不剩）。取值 4：真实事故里 B 侧只需要 2
-# 段（"许师姐"两段）就足以让模型判别成功，4 留一倍余量，也够多候选场景下
-# round-robin 轮转两三个候选各自分到证据；两侧同时保底 4+4=8，不超过
-# MAX_ENTRIES(12) 的三分之二，剩下的 4 个"flex"名额仍按原有优先级（A 优先
-# 全部收录、B 按邻近度补足）竞争分配——不是靠放大两个既有上限常量本身来
-# 绕过问题（1.8.2 大注释第 4 点纪律：那只是把问题推后），MAX_ENTRIES/
-# MAX_CHARS 原样不变。
+# A 侧（事件跨度段+标签字面段）保底配额——见 PREP_PACK_VERSION 上方 1.8.2
+# 大注释的完整根因。1.8.3 起这个常量只约束 A 侧一家：B 侧的保底改为"每个
+# 候选至少一段"（见下面 _prep_pack_functional_candidate_dossier 的按候选
+# 保底逻辑），不再是一个笼统的 B 侧总量数字——1.8.2 用同一个常量给 A、B
+# 两侧各分 4 条，A 侧那 11 段大段外貌/环境描写几乎吃光 MAX_CHARS 时，B 侧
+# 名义上保底 4 条实际只有 1 条真正挤进卷宗（1.8.3 大注释根因一）；同时
+# 4 条位置数字本身也无法阻止候选轮转顺序里排最前的候选独占那唯一挤进去的
+# 名额（1.8.3 大注释根因二）。取值 4 保留给 A 侧：标签指涉对象所在的现场
+# 本身（事件跨度/标签字面）同样是判别必需材料，不能因为改成"每候选保底"
+# 就彻底不留位置；A 侧段落多时这份保底优先让位给"每候选至少一段"这个更
+# 具体的硬要求（见 dossier 函数 reserve_a 的计算）。
 _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MIN_SIDE_ENTRIES = 4
+# 1.8.3 新增：保底层（A 侧保底 + 每候选保底）单段文本被截断时的目标长度
+# 上限，见 PREP_PACK_VERSION 上方 1.8.3 大注释根因一、
+# _prep_pack_functional_candidate_truncate_segment 完整说明。取值 260：
+# 真实事故的决定性证据句"绿袍男子对着她躬身行礼，口称许师姐，随后请四人
+# 随他回宗门"不到 40 字，260 字对绝大多数单句/单个小段落都绰绰有余、
+# 几乎不会触发截断；即使 MAX_ENTRIES(12) 全部落在保底层这种极端场景，
+# 12×260=3120 字仍明显小于 MAX_CHARS(6000)，保底层因此永远不需要再跟
+# flex 层抢字数预算——这正是修复根因一的关键：保底层的收录与截断只取决于
+# 单段自身长度，不取决于其它段落已经用掉多少字数，天然确定性、跟处理
+# 顺序无关。不是靠放大 MAX_ENTRIES/MAX_CHARS 绕过问题，两个既有上限常量
+# 原样不变。
+_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_GUARANTEED_ENTRY_MAX_CHARS = 260
+_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_TRUNCATION_MARK = "…"
 
 
 def _prep_pack_functional_candidate_roster(bible: Bible) -> dict[str, list[str]]:
@@ -1668,6 +1741,36 @@ def _prep_pack_functional_candidate_names(
     return [
         name for name, surface_forms in roster.items()
         if any(form and form in source_text for form in surface_forms)
+    ]
+
+
+def _prep_pack_functional_candidate_registered_names(
+    conn, project_id: str, episode_no: int, roster: dict[str, list[str]],
+) -> list[str]:
+    """乙类候选（1.8.3 新增，见 PREP_PACK_VERSION 上方 1.8.3 大注释"改动二"
+    的完整案情）：``character_portraits`` 里注册的生效集号区间覆盖本集的
+    角色——人物谱自己声明的"这个角色在本集是活跃的"，是确定性数据，不是
+    猜测，不依赖规范名/已确认别名是否逐字出现在本集原文里（那是甲类的
+    判据，_prep_pack_functional_candidate_names）。真实案例：EP1 的李富贵
+    第 1 章只被写成"白白净净身子较胖"，规范名与已登记别名（小胖子、胖爷）
+    一次都没出现，纯字面判据下连候选都进不去；但人物谱早已登记他
+    ``ep_start=1``，本集确实活跃。
+
+    直接复用既有 ``_known_character_names``（``ep_start<=episode_no<=
+    ep_end`` 的既有查询，_resolve_portrait_id 也是同一张表同一套区间判断，
+    不重复实现一遍）取得注册名单，只保留同时存在于 ``roster``（即
+    ``bible.characters``）里的名字——``character_portraits`` 理论上只应
+    由已经跑过人物谱核验的角色产生记录，这里仍做一次交集防御，避免脏数据
+    把取不到 ``appearance_canonical`` 的名字带入候选集，调用方也需要靠
+    ``roster`` 才能取到该角色的规范名/别名文本用于卷宗检索。返回值顺序
+    由 ``_known_character_names`` 决定（该函数按 ``character_name`` 字典
+    序排序，确定性、可复现）。乙类不改变、也不放宽候选判别本身的任何门槛
+    （见调用方 ``_prep_pack_resolve_functional_extra_candidate`` 与
+    ``_prep_pack_functional_candidate_call`` 的完整说明）——只是让这一类
+    角色有资格被列入候选名单。"""
+    return [
+        name for name in _known_character_names(conn, project_id, episode_no)
+        if name in roster
     ]
 
 
@@ -1725,7 +1828,7 @@ def _prep_pack_functional_candidate_anchor_pool(
     segments: list[SourceSegment], label: str,
     candidate_anchor_texts: dict[str, list[str]],
     event_span_indexes: list[int], event_span_index_set: set[int],
-) -> tuple[list[int], list[int]]:
+) -> tuple[list[int], list[int], dict[str, list[int]]]:
     """A 侧第二层（label 逐字命中段）与 B 侧（候选锚点段落，按候选公平
     轮转合并）的联合检索，1.8.2 新增，见 PREP_PACK_VERSION 上方 1.8.2
     大注释、_prep_pack_functional_candidate_dossier 的完整说明。两者共用
@@ -1733,6 +1836,14 @@ def _prep_pack_functional_candidate_anchor_pool(
     一致：已被 ``event_span_index_set`` 收录的段不重复计入任一层；``label``
     逐字命中优先于候选锚点归入 A 侧（更直接的证据，即便同段也命中了某个
     候选的锚点文本，不占 B 侧配额）。
+
+    1.8.3 起额外返回 ``per_candidate_indexes``（分组结果本身，未经轮转
+    合并）——供 ``_prep_pack_functional_candidate_dossier`` 计算"每个候选
+    至少一段"这一按候选粒度的硬性保底（见该函数 docstring 与 PREP_PACK_
+    VERSION 上方 1.8.3 大注释）：那个保底必须精确知道某个候选自己最近的
+    锚点段落是哪一条，轮转合并之后的 ``anchor_pool_ordered`` 只是"混合好
+    的一份列表"，不再能反查某一段究竟满足了哪个候选的保底，所以两者都要
+    返回。
 
     B 侧排序是本函数真正新增的部分——1.8.1 把全部候选的锚点段落混在一起
     按"离案发现场的邻近度"整体排序，本轮真实事故的第二个根因正出在这里：
@@ -1789,7 +1900,58 @@ def _prep_pack_functional_candidate_anchor_pool(
                 continue
             seen.add(index)
             anchor_pool_ordered.append(index)
-    return label_text_indexes, anchor_pool_ordered
+    return label_text_indexes, anchor_pool_ordered, per_candidate_indexes
+
+
+def _prep_pack_functional_candidate_truncate_segment(text: str, anchor: str) -> str:
+    """确定性截断（1.8.3 新增，见 PREP_PACK_VERSION 上方 1.8.3 大注释根因一、
+    _prep_pack_functional_candidate_dossier 的完整说明）：保底层的段落绝不
+    因为字数超限被整条丢弃——某个候选唯一的锚点证据段如果恰好很长（大段
+    外貌/环境描写），必须截断而不是排除，模型才有机会看到它。
+
+    ``anchor`` 是这段文本之所以入选保底层的那个具体触发词（A 侧：``label``
+    本身；B 侧：命中该候选的那个规范名/别名字面串），用来定位"核心句"——
+    先用中文常见句子终止符（。！？换行）把 ``text`` 切成句子，取包含
+    ``anchor`` 的那一句；这句本身仍超过目标长度时，以 ``anchor`` 在句中的
+    位置为中心继续裁剪，保证锚点词始终留在截断结果里（截掉的是锚点词
+    两侧的上下文，不是锚点词本身）。裁剪掉的一侧加省略标记，让下游读者/
+    模型知道这不是段落全文。``anchor`` 为空或在 ``text`` 里根本找不到
+    （防御性：调用方按约定只会传入确实命中该段的锚点词，但不假设这个约定
+    一定成立，找不到时不崩、不猜句子边界）时退回"从头部截断到目标长度"这
+    个更保守的兜底，不做任何"哪句更重要"的语义判断。
+
+    不针对任何具体人名/称谓做特判——``anchor`` 完全是调用方传入的字符串
+    参数，本函数只做纯字符串定位与切片，是结构操作，不是语义理解。"""
+    limit = _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_GUARANTEED_ENTRY_MAX_CHARS
+    if len(text) <= limit:
+        return text
+    mark = _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_TRUNCATION_MARK
+    anchor_pos = text.find(anchor) if anchor else -1
+    if anchor_pos < 0:
+        return text[:limit].rstrip() + mark
+    # 用常见中文句子终止符切句边界，取锚点词所在的那一句：从头扫描终止符，
+    # 锚点词之前最近的终止符是句首，锚点词之后最近的终止符是句尾。
+    start, end = 0, len(text)
+    for match in re.finditer(r"[。！？\n]", text):
+        boundary = match.end()
+        if boundary <= anchor_pos:
+            start = boundary
+        else:
+            end = boundary
+            break
+    if end - start > limit:
+        # 核心句本身仍超限：以锚点词在句中的位置为中心继续裁剪，锚点词
+        # 始终落在裁剪窗口内。
+        local_pos = anchor_pos - start
+        half = max(0, (limit - len(anchor)) // 2)
+        crop_start = start + max(0, local_pos - half)
+        crop_end = min(end, crop_start + limit)
+        crop_start = max(start, crop_end - limit)
+        start, end = crop_start, crop_end
+    core = text[start:end].strip()
+    prefix = mark if start > 0 else ""
+    suffix = mark if end < len(text) else ""
+    return f"{prefix}{core}{suffix}"
 
 
 def _prep_pack_functional_candidate_dossier(
@@ -1797,37 +1959,55 @@ def _prep_pack_functional_candidate_dossier(
     candidate_anchor_texts: dict[str, list[str]],
     event_span_segments: set[int] = frozenset(),
 ) -> list[dict[str, Any]]:
-    """裁决卷宗检索（1.8.2 改为按层保底配额，见 PREP_PACK_VERSION 上方
-    1.8.2 大注释的完整根因——真实事故：1.8.1 修好了"标签逐字定位打空"，卷宗
-    也确实改成了事件跨度定位、包含了银袍女子登场那段，但事件跨度本身连续
-    覆盖 12 段，恰好塞满 MAX_ENTRIES，候选锚点段"许师姐"两段一条没进卷宗，
-    模型依旧回答"无法确定"）。
+    """裁决卷宗检索（1.8.3 保底粒度下沉到"每个候选"，见 PREP_PACK_VERSION
+    上方 1.8.3 大注释的完整根因——真实事故：1.8.2 的 A/B 两侧保底配额确实
+    让"许师姐"那一段挤进了卷宗，但只挤进 1 段，且被候选轮转顺序里排最前的
+    主角类候选占了，真正的目标候选一段都没拿到）。
 
-    两侧证据来源不变（跟 1.8.1 完全一致，这里不重复根因，只重复形状）：
+    两侧证据来源不变（跟 1.8.1/1.8.2 完全一致，这里不重复根因，只重复
+    形状）：
     - A 侧＝``primary_indexes``＝两层主锚点的并集：①``event_span_segments``
       （该标签所属事件的 source_span 覆盖段落，见
       _prep_pack_functional_candidate_event_span_segments）②``label``
       逐字命中原文的段落（未被①收录的部分）；
-    - B 侧＝``anchor_pool_ordered``＝候选（规范名∪已确认别名）逐字命中、
-      按候选公平轮转合并后的有序段落，见
+    - B 侧＝候选（规范名∪已确认别名）逐字命中的段落，按候选分组，见
       _prep_pack_functional_candidate_anchor_pool 的完整说明。
 
-    1.8.2 新增的按层保底配额（本函数真正的改动点）：A、B 两侧各自先分到
-    ``min(_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MIN_SIDE_ENTRIES, 该侧
-    实际可用条数)`` 的保底名额，谁都不能被对方挤到 0——哪怕对方证据量
-    单独就能塞满 MAX_ENTRIES。两侧保底都满足后，剩余的"flex"名额才按
-    原有优先级规则继续分配：A 侧剩余部分（仍是"主锚点必须优先"的既有
-    语义）在前，B 侧剩余部分（仍按候选轮转顺序，见上面函数）在后。这不是
-    简单地把 MAX_ENTRIES/MAX_CHARS 两个上限放大——两个常量原样不变，只是
-    在同一份预算内部重新分配谁先进卷宗，任一侧非空时必有代表段进入卷宗
-    （只要该侧保底 > 0，即该侧确有可用证据）。
+    1.8.3 的核心改动——按候选粒度的硬性保底：``candidate_anchor_texts``
+    保序遍历，每个确有锚点证据（``per_candidate_indexes[name]`` 非空）的
+    候选，独立取自己离主锚点最近的那一段（``indexes[0]``，已在
+    anchor_pool 里按邻近度排好序）纳入保底层——不是"B 侧保底 N 条"这个
+    笼统的位置数字，而是"每个候选各自的保底"，谁的锚点证据都不会被另一个
+    候选或 A 侧挤没。两个候选的最近段恰好是同一段（原文同段提到两人）时
+    天然去重——那一段同时满足两者的保底，不重复计入。A 侧的既有保底
+    （``_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MIN_SIDE_ENTRIES``）这次
+    优先让位给每候选保底：先扣掉每候选保底已经用掉的条数名额，A 侧保底
+    只取"剩余名额"与"自身可用条数"两者较小值——A 侧段落越多，让位越明显，
+    但只要还有剩余名额就仍有代表段（标签指涉对象所在的现场本身也是判别
+    必需材料，不能因为改成"每候选保底"就彻底清零）。
 
-    退化场景（不崩、不引入新失败模式，跟 1.8.1 同一纪律）：某一侧为空时
-    （例如事件跨度缺失导致 A 侧只剩 label 命中段甚至整体为空；或候选锚点
-    在本集之外，B 侧为空——理论上不应发生，候选正是靠 anchor 命中本集才
-    入选的，见 _prep_pack_functional_candidate_names），该侧保底与 flex
-    都退化为 0，另一侧可用满 MAX_ENTRIES 预算，行为退化为"这一侧全收"，
-    等价于该侧单独存在时的合理行为。两侧都为空时返回空列表，交由调用方
+    保底层（A 侧保底 + 每候选保底）在收录阶段一律直接收录，绝不因为字数
+    预算不够被跳过——这是修复的第二个关键点，也是本轮事故的直接原因（见
+    1.8.3 大注释根因一：1.8.2 的"配额位置"并不保证"配额一定进得去卷宗"）。
+    单段文本超过 ``_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_GUARANTEED_
+    ENTRY_MAX_CHARS`` 时用 ``_prep_pack_functional_candidate_truncate_
+    segment`` 做确定性截断（保留含锚点词的核心句 + 省略标记），不整段
+    丢弃——截断只取决于该段自身长度，不取决于其它段落已经用掉多少字数，
+    因此天然与处理顺序无关、确定性可复现，也不会因为保底层本身而突破
+    MAX_CHARS（见该常量上方注释的预算测算）。保底层收录完毕后，剩余的
+    "flex"名额才按原有优先级规则继续分配：A 侧剩余部分（仍是"主锚点必须
+    优先"的既有语义）在前、B 侧剩余部分（仍按候选轮转顺序）在后，这部分
+    维持 1.8.2 既有语义——字数预算不够时按原样跳过、不截断（不是任何
+    候选的唯一证据，缺了也不影响"每候选至少一段"这个硬要求）。这不是
+    简单地把 MAX_ENTRIES/MAX_CHARS 两个上限放大，两个常量原样不变，只是
+    同一份预算内部的分配规则更细颗粒度。
+
+    退化场景（不崩、不引入新失败模式，跟 1.8.1/1.8.2 同一纪律）：某个
+    候选没有任何锚点证据时（理论上不应发生，候选正是靠 anchor 命中本集
+    才入选的——1.8.3 起也可能是靠人物谱注册区间入选的乙类候选，那类候选
+    本就不指望本函数给它段落，见 PREP_PACK_VERSION 上方 1.8.3 大注释
+    "改动二"），该候选保底跳过；主锚点整体为空时 A 侧保底与 flex 都退化为
+    0，B 侧可用满 MAX_ENTRIES 预算；两侧都为空时返回空列表，交由调用方
     按既有防御性分支处理。"""
     total_segments = len(segments)
     # 主锚点第一层：段号来自调用方传入的事件跨度集合，可能包含越界/非法
@@ -1838,32 +2018,87 @@ def _prep_pack_functional_candidate_dossier(
         {index - 1 for index in event_span_segments if 1 <= index <= total_segments},
     )
     event_span_index_set = set(event_span_indexes)
-    label_text_indexes, anchor_pool_ordered = _prep_pack_functional_candidate_anchor_pool(
-        segments, label, candidate_anchor_texts, event_span_indexes, event_span_index_set,
+    label_text_indexes, anchor_pool_ordered, per_candidate_indexes = (
+        _prep_pack_functional_candidate_anchor_pool(
+            segments, label, candidate_anchor_texts, event_span_indexes, event_span_index_set,
+        )
     )
     primary_indexes = event_span_indexes + label_text_indexes
-    # 按层保底配额（1.8.2 核心改动，见本函数 docstring）：A、B 两侧各自
-    # 先分到不超过自身可用条数、也不超过 MIN_SIDE_ENTRIES 的保底名额；
-    # 保底之后剩余的名额（flex）仍按"A 优先、B 随后"的既有优先级顺序
-    # 竞争分配——两个列表用切片取，天然确定性、可复现。
-    reserve_a = min(_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MIN_SIDE_ENTRIES, len(primary_indexes))
-    reserve_b = min(_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MIN_SIDE_ENTRIES, len(anchor_pool_ordered))
+    primary_index_set = event_span_index_set | set(label_text_indexes)
+
+    # 每候选保底（1.8.3 核心改动，见本函数 docstring）：candidate_anchor_
+    # texts 保序遍历，每个确有锚点证据的候选取自己最近的一段；与另一候选
+    # 共享同一段时天然去重（该段同时满足两者的保底）。同时记录命中该段的
+    # 具体锚点词（该候选的哪个规范名/别名字面命中了这段文本），供下面截断
+    # 时定位核心句。
+    guaranteed_b_indexes: list[int] = []
+    guaranteed_b_anchor: dict[int, str] = {}
+    guaranteed_b_seen: set[int] = set()
+    for name in candidate_anchor_texts:
+        indexes = per_candidate_indexes.get(name) or []
+        if not indexes:
+            continue
+        pick = indexes[0]
+        if pick in guaranteed_b_seen:
+            continue
+        guaranteed_b_seen.add(pick)
+        guaranteed_b_indexes.append(pick)
+        pick_text = segments[pick].text
+        guaranteed_b_anchor[pick] = next(
+            (form for form in candidate_anchor_texts[name] if form and form in pick_text), "",
+        )
+    overflow_b = [index for index in anchor_pool_ordered if index not in guaranteed_b_seen]
+
+    # A 侧保底名额优先让位给每候选保底（见本函数 docstring）：先扣掉每
+    # 候选保底已经用掉的条数名额，A 侧保底只取剩余名额、自身可用条数、
+    # 既有 MIN_SIDE_ENTRIES 三者的较小值。
+    remaining_slots = max(
+        0, _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES - len(guaranteed_b_indexes),
+    )
+    reserve_a = min(
+        _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MIN_SIDE_ENTRIES, len(primary_indexes), remaining_slots,
+    )
     guaranteed_a, overflow_a = primary_indexes[:reserve_a], primary_indexes[reserve_a:]
-    guaranteed_b, overflow_b = anchor_pool_ordered[:reserve_b], anchor_pool_ordered[reserve_b:]
-    ordered_candidates = guaranteed_a + guaranteed_b + overflow_a + overflow_b
+
+    guaranteed_indexes = guaranteed_a + guaranteed_b_indexes
+    flex_indexes = overflow_a + overflow_b
+
     selected: list[int] = []
     used_chars = 0
-    for index in ordered_candidates:
+    rendered: dict[int, str] = {}
+
+    # 保底层：一律收录，绝不因为字数超限被跳过（本轮修复的直接根因，见
+    # 本函数 docstring）；单段超过 GUARANTEED_ENTRY_MAX_CHARS 时做确定性
+    # 截断，不整段丢弃。
+    for index in guaranteed_indexes:
         if len(selected) >= _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES:
             break
+        if index in rendered:
+            continue
+        seg_text = segments[index].text
+        anchor_hint = label if index in primary_index_set else guaranteed_b_anchor.get(index, "")
+        text = _prep_pack_functional_candidate_truncate_segment(seg_text, anchor_hint)
+        selected.append(index)
+        rendered[index] = text
+        used_chars += len(text)
+
+    # flex 层：维持 1.8.2 既有语义——补充材料，不是任何候选的唯一证据，
+    # 预算不够就跳过，不截断。
+    for index in flex_indexes:
+        if len(selected) >= _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES:
+            break
+        if index in rendered:
+            continue
         seg_text = segments[index].text
         if selected and used_chars + len(seg_text) > _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_CHARS:
             continue
         selected.append(index)
+        rendered[index] = seg_text
         used_chars += len(seg_text)
+
     selected.sort()
     return [
-        {"segment_index": index + 1, "text": segments[index].text}
+        {"segment_index": index + 1, "text": rendered[index]}
         for index in selected
     ]
 
@@ -1887,24 +2122,49 @@ class _PrepPackFunctionalCandidateVerdict(BaseModel):
 
 async def _prep_pack_functional_candidate_call(
     *, label: str, dossier: list[dict[str, Any]], candidates: list[str],
+    literal_candidates: list[str], registered_only_profiles: dict[str, str],
     episode_id: str, project_id: str | None,
 ) -> _PrepPackFunctionalCandidateVerdict:
     """唯一一次模型调用：只给卷宗原文与候选人名单，不点名"你猜是不是某个
     候选"——把"这个标签到底指候选里的哪一位"完全交给模型自己独立判别，
     与 app.stages._alias_verdict_call 同一范式（本文件独立实现，两个模块
-    不互相导入内部函数）。"""
+    不互相导入内部函数）。
+
+    候选名单 1.8.3 起分两段展示（见 PREP_PACK_VERSION 上方 1.8.3 大注释
+    "改动二"）：``literal_candidates``（甲类，规范名/别名在本集原文逐字
+    出现）与 ``registered_only_profiles``（乙类，人物谱注册区间覆盖本集
+    但原文未直接点名，name -> appearance_canonical 外貌档案）分区展示，
+    并在提示词里明确标注两者证据强度不同——乙类只是"有资格被点名"，是否
+    真的是"{label}"所指之人仍必须由卷宗里的原文段落本身决定；不给模型
+    任何"乙类更容易被选中"的暗示，判别门槛（候选选择题、段号必须钉在卷宗
+    实际收录的段落上、证据不足选"都不是/无法确定"）与甲类完全一致。
+    ``candidates``（=``literal_candidates`` + 乙类名单，调用方已去重保序）
+    仍是 schema enum 与 call_meta 记录用的完整候选集。"""
     catalog = "\n\n".join(
         f"[段{item['segment_index']}] {item['text']}" for item in dossier
     )
     segment_indexes = [item["segment_index"] for item in dossier]
     candidate_options = [*candidates, _PREP_PACK_FUNCTIONAL_CANDIDATE_NO_MATCH_LABEL]
-    candidate_list = "、".join(candidates)
+    literal_list = "、".join(literal_candidates) if literal_candidates else "（无）"
+    registered_section = ""
+    if registered_only_profiles:
+        registered_lines = "\n".join(
+            f"- {name}：{appearance.strip() or '（人物谱未登记外貌描述）'}"
+            for name, appearance in registered_only_profiles.items()
+        )
+        registered_section = f"""
+
+人物谱登记显示在本集活跃、但本集原文未必直接点名的候选（证据强度弱于上面那组——仅供
+身份背景参考，是否真的是"{label}"所指之人仍必须由上面的原文段落本身判断，不能仅因为
+他被人物谱登记为本集活跃就选他）：
+{registered_lines}"""
     prompt = f"""下面是本集原文中的段落（含前后语境，出现顺序不代表任何推断结论），
 每段前面标了段号：
 {catalog}
 
 本集出场的人物谱角色候选（判别范围仅限这些人，不要引入候选之外的人）：
-{candidate_list}
+本集原文中已直接出现的候选：
+{literal_list}{registered_section}
 
 任务：仅依据以上原文段落本身，判断标签"{label}"最可能指候选中的哪一位本人。
 - selected_candidate 必须从候选列表中选一个精确姓名，或者在证据不足以确定具体是谁时
@@ -1999,17 +2259,49 @@ async def _prep_pack_resolve_functional_extra_candidate(
     走既有的具名解析路线，自然带出正确的 portrait_id/identity_id/
     visual_entity_id）；``segment_index``/``text`` 是钉证命中的卷宗证据，
     供调用方写入 provenance 锚点（``text`` 是代码检索出的真实原文，不是
-    模型转录，天然满足自校验的逐字命中要求）。"""
+    模型转录，天然满足自校验的逐字命中要求）。
+
+    1.8.3 起候选集是甲乙两类的并集（见 PREP_PACK_VERSION 上方 1.8.3 大
+    注释"改动二"）：甲类＝``literal_candidates``（既有逻辑，规范名/已确认
+    别名在本集原文逐字出现，见 _prep_pack_functional_candidate_names）；
+    乙类＝``registered_only_candidates``（新增，人物谱 character_portraits
+    注册区间覆盖本集、但原文未直接点名，见
+    _prep_pack_functional_candidate_registered_names）。乙类候选没有本集
+    原文里的锚点文本，_prep_pack_functional_candidate_dossier 的按候选
+    保底逻辑对它们天然是空操作（``per_candidate_indexes[name]`` 恒为空，
+    不占用、不稀释甲类的保底名额）——它们的"证据"改由
+    ``registered_only_profiles``（name -> 人物谱 appearance_canonical）
+    传给 _prep_pack_functional_candidate_call，在提示词里单独分区展示，
+    不进入卷宗目录本身，因此也不能被模型当作段号钉证的目标（钉证只能
+    引用卷宗里真实存在的段落，乙类候选没有专属段落可钉，判别门槛不因此
+    降低）。"""
     roster = _prep_pack_functional_candidate_roster(bible)
-    candidates = _prep_pack_functional_candidate_names(source_text, roster)
+    literal_candidates = _prep_pack_functional_candidate_names(source_text, roster)
+    registered_candidates = _prep_pack_functional_candidate_registered_names(
+        conn, project_id, episode_no, roster,
+    )
+    literal_candidate_set = set(literal_candidates)
+    registered_only_candidates = [
+        name for name in registered_candidates if name not in literal_candidate_set
+    ]
+    candidates = literal_candidates + registered_only_candidates
     if not candidates:
         return None
     # 1.8.2：改传"候选名 -> 该候选自己的锚点文本"分组字典（而非拍平成一个
     # 集合），供 _prep_pack_functional_candidate_dossier 的 B 侧按候选做
     # 公平轮转合并，见该函数与 _prep_pack_functional_candidate_anchor_pool
     # 的完整说明。字典按 candidates 既有确定性顺序构造（保序，见
-    # _prep_pack_functional_candidate_names 的 roster 保序说明）。
+    # _prep_pack_functional_candidate_names 的 roster 保序说明）。乙类
+    # 候选在 roster 里的锚点文本本就不会命中本集原文（这正是它们落入乙类
+    # 而非甲类的原因），这里原样传入不需要特判——anchor_pool 扫描自然得到
+    # 空列表。
     candidate_anchor_texts = {name: roster.get(name, []) for name in candidates}
+    appearance_by_name = {
+        character.name: character.appearance_canonical for character in bible.characters
+    }
+    registered_only_profiles = {
+        name: appearance_by_name.get(name, "") for name in registered_only_candidates
+    }
     event_span_segments = _prep_pack_functional_candidate_event_span_segments(events, label)
     dossier = _prep_pack_functional_candidate_dossier(
         segments, label, candidate_anchor_texts, event_span_segments,
@@ -2018,6 +2310,8 @@ async def _prep_pack_resolve_functional_extra_candidate(
         return None
     response = await _prep_pack_functional_candidate_call(
         label=label, dossier=dossier, candidates=candidates,
+        literal_candidates=literal_candidates,
+        registered_only_profiles=registered_only_profiles,
         episode_id=episode_id, project_id=project_id,
     )
     if response.selected_candidate not in candidates:

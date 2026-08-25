@@ -51,6 +51,7 @@ import pytest
 
 from app import portraits, scenes
 from app.production import prep_pack
+from app.source_excerpt import SourceSegment
 
 
 def _make_conn() -> sqlite3.Connection:
@@ -3297,16 +3298,374 @@ def test_functional_candidate_dossier_shares_anchor_quota_fairly_across_multiple
     assert dossier_indexes == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 22}
 
 
+# ---------------------------------------------------------------------------
+# 1.8.3（真实数据、同一晚同一事故的第四层根因，provider_calls id=10520 可
+# 复核，见 PREP_PACK_VERSION 上方 1.8.3 大注释）：1.8.2 的 A/B 两侧保底
+# 配额确实生效——EP1 目标标签"银色长袍女子"的卷宗从纯事件跨度变成了段
+# 31,33-42,60，B 侧成功挤进 1 段——但目标依然失败：①条数配额没有对应的
+# 字数配额，A 侧那 11 段大段外貌/环境描写几乎吃光 MAX_CHARS，B 侧"保底
+# 4 条"里只有排在最前面、恰好塞得进剩余预算的 1 条真被选择循环收录；
+# ②那唯一挤进去的 1 段还被候选轮转顺序里排第一的主角类候选占了。以下
+# 两组用例分别覆盖改动一（保底粒度下沉到每个候选 + 字数预算同粒度兜底）
+# 与改动二（候选集补全为逐字命中∪人物谱注册区间两类并集）。
+# ---------------------------------------------------------------------------
+
+def test_functional_candidate_dossier_guarantees_every_candidate_a_segment_when_a_side_text_is_long():
+    """红→绿核心场景（1.8.3 改动一，真实事故形状复现）：A 侧（事件跨度段）
+    的 4 段文本本身很长（大段环境描写，合计吃掉 MAX_CHARS 的 99%），只给
+    B 侧留极小余量；B 侧有三个候选，候选轮转顺序里排第一的"孟浩"锚点段
+    最短、最先被选择循环尝试因此塞得进剩余预算，"许清""王有材"的唯一
+    锚点段完全没有机会——这正是 1.8.2"B 侧保底 4 条"这个位置数字治不了的
+    问题：保底的是配额位置，不是"配额一定进得去卷宗"。
+
+    修前（可用下面的变异验证复现，或直接用本文件同目录的 git 历史版本
+    验证）：_prep_pack_functional_candidate_dossier 只有"孟浩"的段进卷宗，
+    "许清""王有材"一段都没有。修后：三个候选各自的锚点段都必须进卷宗，
+    不管 A 侧文本多长。"""
+    max_chars = prep_pack._PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_CHARS
+    reserve_a = prep_pack._PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MIN_SIDE_ENTRIES
+    per_event_paragraph_chars = (max_chars * 99 // 100) // reserve_a
+
+    def _segment(index: int, text: str) -> SourceSegment:
+        return SourceSegment(segment_id=f"s{index}", text=text, start_offset=0, end_offset=len(text))
+
+    event_texts = [
+        ("殿内金碧辉煌，陈设奢华，此为事发现场描写第" + str(i) + "段。" + "香烟缭绕不散，" * 400)
+        [:per_event_paragraph_chars]
+        for i in range(1, reserve_a + 1)
+    ]
+    candidate_texts = [
+        "孟浩独自站在最前方，神情冷峻，双手负于身后，一言不发地凝视着远方的天际线。",
+        "许清安静地立于左侧，衣袂随风轻轻摆动，始终一言不发地望着前方发呆出神。",
+        "王有材缩在人群后方角落，面露惧色，双腿微微发抖，不敢抬头看向任何人。",
+    ]
+    all_texts = event_texts + candidate_texts
+    segments = [_segment(i, text) for i, text in enumerate(all_texts)]
+    assert sum(len(t) for t in event_texts) > max_chars * 0.9, (
+        "复现前提：A 侧四段合计必须几乎吃光 MAX_CHARS，B 侧才会被挤压"
+    )
+
+    label = "不存在的标签"
+    event_span_segments = set(range(1, reserve_a + 1))
+    candidate_anchor_texts = {"孟浩": ["孟浩"], "许清": ["许清"], "王有材": ["王有材"]}
+
+    dossier = prep_pack._prep_pack_functional_candidate_dossier(
+        segments, label, candidate_anchor_texts, event_span_segments,
+    )
+    dossier_indexes = {item["segment_index"] for item in dossier}
+    total_chars = sum(len(item["text"]) for item in dossier)
+
+    mengh_idx, xuqing_idx, wangyoucai_idx = len(event_texts) + 1, len(event_texts) + 2, len(event_texts) + 3
+    assert {mengh_idx, xuqing_idx, wangyoucai_idx} <= dossier_indexes, (
+        "三个候选各自的唯一锚点段都必须进卷宗，不能只有候选轮转顺序里排第一的孟浩"
+    )
+    assert any("许清" in item["text"] for item in dossier)
+    assert any("王有材" in item["text"] for item in dossier)
+    assert len(dossier) <= prep_pack._PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES
+    assert total_chars <= max_chars, "保底层的确定性截断必须仍然守住 MAX_CHARS 总预算"
+    # 确定性：同一输入任何时候重跑得到同一份卷宗（纯函数，无随机采样）。
+    dossier_again = prep_pack._prep_pack_functional_candidate_dossier(
+        segments, label, candidate_anchor_texts, event_span_segments,
+    )
+    assert dossier == dossier_again
+
+
+def test_functional_candidate_dossier_shares_char_budget_across_candidates_when_dossier_is_tight(
+    monkeypatch,
+):
+    """变异验证（1.8.3 改动一）：把"每候选保底"破坏成 1.8.2 的旧行为
+    （B 侧只按位置数量保底、不按候选粒度、保底段仍可被字数预算跳过），
+    上面那条红→绿用例必须变红——证明这条测试确实在验证按候选粒度的字数
+    保底，不是碰巧绿了。验证完立即用 monkeypatch 撤销，不污染其它用例。"""
+    def legacy_side_only_dossier(segments, label, candidate_anchor_texts, event_span_segments=frozenset()):
+        # 1.8.2 旧行为：A/B 两侧各自按位置数量保底 MIN_SIDE_ENTRIES 条，
+        # 不区分候选、保底段仍可被字数预算跳过（`continue` 而非确定性
+        # 截断）——精简复刻，只用于证明"如果退回旧逻辑，红→绿用例会变红"。
+        total_segments = len(segments)
+        event_span_indexes = sorted(
+            {i - 1 for i in event_span_segments if 1 <= i <= total_segments},
+        )
+        event_span_index_set = set(event_span_indexes)
+        label_text_indexes, anchor_pool_ordered, _per_candidate = (
+            prep_pack._prep_pack_functional_candidate_anchor_pool(
+                segments, label, candidate_anchor_texts, event_span_indexes, event_span_index_set,
+            )
+        )
+        primary_indexes = event_span_indexes + label_text_indexes
+        min_side = prep_pack._PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MIN_SIDE_ENTRIES
+        reserve_a = min(min_side, len(primary_indexes))
+        reserve_b = min(min_side, len(anchor_pool_ordered))
+        guaranteed_a, overflow_a = primary_indexes[:reserve_a], primary_indexes[reserve_a:]
+        guaranteed_b, overflow_b = anchor_pool_ordered[:reserve_b], anchor_pool_ordered[reserve_b:]
+        ordered = guaranteed_a + guaranteed_b + overflow_a + overflow_b
+        selected: list[int] = []
+        used_chars = 0
+        max_entries = prep_pack._PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES
+        max_chars = prep_pack._PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_CHARS
+        for index in ordered:
+            if len(selected) >= max_entries:
+                break
+            seg_text = segments[index].text
+            if selected and used_chars + len(seg_text) > max_chars:
+                continue
+            selected.append(index)
+            used_chars += len(seg_text)
+        selected.sort()
+        return [{"segment_index": i + 1, "text": segments[i].text} for i in selected]
+
+    monkeypatch.setattr(prep_pack, "_prep_pack_functional_candidate_dossier", legacy_side_only_dossier)
+
+    max_chars = prep_pack._PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_CHARS
+    reserve_a = prep_pack._PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MIN_SIDE_ENTRIES
+    per_event_paragraph_chars = (max_chars * 99 // 100) // reserve_a
+
+    def _segment(index: int, text: str) -> SourceSegment:
+        return SourceSegment(segment_id=f"s{index}", text=text, start_offset=0, end_offset=len(text))
+
+    event_texts = [
+        ("殿内金碧辉煌，陈设奢华，此为事发现场描写第" + str(i) + "段。" + "香烟缭绕不散，" * 400)
+        [:per_event_paragraph_chars]
+        for i in range(1, reserve_a + 1)
+    ]
+    candidate_texts = [
+        "孟浩独自站在最前方，神情冷峻，双手负于身后，一言不发地凝视着远方的天际线。",
+        "许清安静地立于左侧，衣袂随风轻轻摆动，始终一言不发地望着前方发呆出神。",
+        "王有材缩在人群后方角落，面露惧色，双腿微微发抖，不敢抬头看向任何人。",
+    ]
+    all_texts = event_texts + candidate_texts
+    segments = [_segment(i, text) for i, text in enumerate(all_texts)]
+    label = "不存在的标签"
+    event_span_segments = set(range(1, reserve_a + 1))
+    candidate_anchor_texts = {"孟浩": ["孟浩"], "许清": ["许清"], "王有材": ["王有材"]}
+
+    dossier = prep_pack._prep_pack_functional_candidate_dossier(
+        segments, label, candidate_anchor_texts, event_span_segments,
+    )
+    dossier_indexes = {item["segment_index"] for item in dossier}
+    xuqing_idx, wangyoucai_idx = len(event_texts) + 2, len(event_texts) + 3
+    assert not ({xuqing_idx, wangyoucai_idx} <= dossier_indexes), (
+        "变异验证：退回 1.8.2 旧算法后，许清/王有材必须至少缺一个——"
+        "证明红→绿用例确实在验证 1.8.3 的按候选字数保底，不是碰巧通过"
+    )
+
+
+def test_functional_candidate_registered_names_uses_character_portraits_episode_range():
+    """单元测试（1.8.3 改动二）：_prep_pack_functional_candidate_registered_
+    names 直接复用既有 _known_character_names 的 ep_start<=episode_no<=
+    ep_end 区间判断——覆盖本集、越界（ep_end 早于本集）、以及不在
+    roster（即 bible.characters）里的脏数据三种形状。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) VALUES "
+        "('cp-a','p1','李富贵',1,NULL),"      # 覆盖本集（开区间向后覆盖）
+        "('cp-b','p1','已下线角色',1,2),"      # ep_end 早于本集，越界排除
+        "('cp-c','p1','未登记进人物谱的名字',1,NULL)"  # 不在 roster 里，交集防御排除
+    )
+    roster = {"李富贵": ["李富贵", "小胖子"], "孟浩": ["孟浩"]}
+    result = prep_pack._prep_pack_functional_candidate_registered_names(conn, "p1", 3, roster)
+    assert result == ["李富贵"]
+
+
+def test_unresolved_appearance_label_binds_via_registered_only_candidate_completion(monkeypatch):
+    """红→绿核心场景（1.8.3 改动二，真实案例复现）：EP1 的李富贵第 1 章
+    只被写成"白白净净身子较胖"，规范名与已登记别名（小胖子、胖爷）一次
+    都没出现在本集原文——纯字面判据下（甲类）候选集里没有他，标签"白白
+    净净的胖少年"永远无法绑定。但人物谱早已登记他 ep_start=1（本集活跃），
+    外貌"身形圆胖皮肤白净"。修后：候选集补全为甲∪乙两类并集，李富贵作为
+    乙类候选进入候选名单，模型依据卷宗原文（含标签本身逐字出现的那段）
+    与人物谱外貌档案独立判别后选中他，同样必须走完整的候选选择题 + 段号
+    钉证流程——钉证段号取的是卷宗里真实存在的原文段落，不是虚构的"档案
+    条目"。同时验证提示词把"本集原文已直接出现"（甲，含孟浩）与"人物谱
+    登记本集活跃、原文未直接点名"（乙，李富贵）分区展示，且乙类候选的
+    外貌档案文本确实出现在提示词里。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) VALUES "
+        "('cp-lifugui','p1','李富贵',1,NULL)"
+    )
+    _seed_bible_characters(conn, "p1", [
+        _bible_character(
+            "李富贵", appearance_canonical="身形圆胖皮肤白净",
+            aliases=[_bible_alias("小胖子"), _bible_alias("胖爷")],
+        ),
+        # 决胜点：孟浩必须走"甲类"（本集原文直接出现），不该被误标成乙类。
+        _bible_character("孟浩", appearance_canonical="占位外观"),
+    ])
+
+    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    seen: dict = {}
+
+    async def fake_chat_structured(messages, **kwargs):
+        seen["prompt"] = str(messages[0]["content"])
+        seen["schema"] = kwargs.get("output_schema")
+        return prep_pack._PrepPackFunctionalCandidateVerdict(
+            selected_candidate="李富贵", supporting_segment_index=1,
+            supporting_quote="白白净净身子较胖的少年跟在孟浩身后，一声不吭。",
+        )
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
+    label = "白白净净的胖少年"
+    events = [_event("ev_001", characters=[{"display_name": label, "is_background_extra": True}])]
+    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+        conn, events=events, episode_no=2,
+        source_text=(
+            "白白净净身子较胖的少年跟在孟浩身后，一声不吭。\n\n孟浩大步向前走去，毫不在意身后的动静。"
+        ),
+    )
+
+    assert errors == []
+    by_portrait = {c["portrait_id"]: c for c in characters}
+    assert "cp-lifugui" in by_portrait, "李富贵必须真的出现在 asset_manifest.characters 中"
+    entry = by_portrait["cp-lifugui"]
+    assert entry["display_name"] == "李富贵"
+    assert entry["display_appellation"] == label, "字幕/取图措辞仍须是本集原文说法，不提前剧透"
+    assert entry["provenance"]["method"] == "candidate_verdict"
+    assert not any(e["label"] == label for e in functional_extras)
+    # 候选集必须是甲∪乙两类并集：孟浩（甲，本集原文直接出现）与李富贵
+    # （乙，人物谱注册区间覆盖本集但原文未直接点名）都要出现在候选名单/
+    # schema enum 里。
+    assert seen["schema"]["properties"]["selected_candidate"]["enum"] == [
+        "孟浩", "李富贵", "都不是/无法确定",
+    ]
+    # 提示词必须把两类分区展示，且乙类附带人物谱外貌档案。
+    assert "本集原文中已直接出现的候选" in seen["prompt"]
+    assert "人物谱登记显示在本集活跃" in seen["prompt"]
+    assert "身形圆胖皮肤白净" in seen["prompt"]
+    assert "孟浩" in seen["prompt"]
+
+
+def test_registered_only_candidate_out_of_episode_range_is_excluded_from_candidate_set(monkeypatch):
+    """反例（守边界，1.8.3 改动二）：人物谱注册区间存在，但 ep_end 早于
+    本集——不该被算作"本集活跃"，候选集必须照常为空，不发起任何候选判别
+    模型调用（跟既有"候选集为空仍不发模型调用"纪律完全一致）。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) VALUES "
+        "('cp-lifugui','p1','李富贵',1,2)"  # 只在 EP1-2 活跃，本用例测的是 EP5
+    )
+    _seed_bible_characters(conn, "p1", [
+        _bible_character("李富贵", appearance_canonical="身形圆胖皮肤白净"),
+    ])
+
+    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    async def boom_chat_structured(messages, **kwargs):
+        raise AssertionError("候选集为空时绝不该发起候选判别模型调用")
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", boom_chat_structured)
+
+    label = "白白净净的胖少年"
+    events = [_event("ev_001", characters=[{"display_name": label, "is_background_extra": True}])]
+    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+        conn, events=events, episode_no=5,
+        source_text="白白净净身子较胖的少年跟在人群身后，一声不吭。",
+    )
+
+    assert errors == []
+    assert not any(c["display_name"] == "李富贵" for c in characters)
+    assert any(e["label"] == label for e in functional_extras)
+
+
+def test_registered_only_candidate_no_match_selected_stays_functional_extra(monkeypatch):
+    """反例（守边界，1.8.3 改动二）：候选集含乙类候选（李富贵，人物谱注册
+    区间覆盖本集但原文未直接点名），模型如实回答"都不是/无法确定"——乙类
+    候选不降低判定门槛，必须维持原行为落 functional_extras，绝不因为
+    候选集里唯一有档案的人是他就强行绑定。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) VALUES "
+        "('cp-lifugui','p1','李富贵',1,NULL)"
+    )
+    _seed_bible_characters(conn, "p1", [
+        _bible_character("李富贵", appearance_canonical="身形圆胖皮肤白净"),
+    ])
+
+    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    async def fake_chat_structured(messages, **kwargs):
+        return prep_pack._PrepPackFunctionalCandidateVerdict(
+            selected_candidate="都不是/无法确定", supporting_segment_index=1,
+        )
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
+    label = "白白净净的胖少年"
+    events = [_event("ev_001", characters=[{"display_name": label, "is_background_extra": True}])]
+    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+        conn, events=events, episode_no=2,
+        source_text="白白净净身子较胖的少年跟在人群身后，一声不吭。",
+    )
+
+    assert errors == []
+    assert not any(c["display_name"] == "李富贵" for c in characters)
+    assert any(e["label"] == label for e in functional_extras)
+
+
+def test_registered_only_candidate_out_of_dossier_segment_rejected(monkeypatch):
+    """反例（守边界，1.8.3 改动二）：模型选中了乙类候选本身（李富贵，候选
+    集里真实存在），但引用的段号根本不在卷宗目录里——乙类候选没有专属
+    段落可钉，钉证仍然只能核对"这个段号是否落在本次卷宗实际收录的段号
+    集合内"，结构性拒绝，不因为候选人选对了就放行。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) VALUES "
+        "('cp-lifugui','p1','李富贵',1,NULL)"
+    )
+    _seed_bible_characters(conn, "p1", [
+        _bible_character("李富贵", appearance_canonical="身形圆胖皮肤白净"),
+    ])
+
+    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    async def fake_chat_structured(messages, **kwargs):
+        return prep_pack._PrepPackFunctionalCandidateVerdict(
+            selected_candidate="李富贵", supporting_segment_index=9999,
+        )
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
+    label = "白白净净的胖少年"
+    events = [_event("ev_001", characters=[{"display_name": label, "is_background_extra": True}])]
+    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+        conn, events=events, episode_no=2,
+        source_text="白白净净身子较胖的少年跟在人群身后，一声不吭。",
+    )
+
+    assert errors == []
+    assert not any(c["display_name"] == "李富贵" for c in characters)
+    assert any(e["label"] == label for e in functional_extras)
+
+
 def test_prep_pack_version_is_1_8_0():
     """版本号哨兵：本次改造（未解析角色标签候选判别——真实 EP1"银色长袍
     女子"应绑定许清却因标签类型对不上落 functional_extras 的用户诉求收口）
     新增 provenance.method="candidate_verdict" 取值、会实际改变部分此前落
     functional_extras 的标签的解析结果，版本必须推进到 1.8.0（见
     PREP_PACK_VERSION 上方大注释）。1.8.1（同一机制的后续事故修复：卷宗
-    检索改用事件跨度定位，见 PREP_PACK_VERSION 上方 1.8.1 大注释）与 1.8.2
+    检索改用事件跨度定位，见 PREP_PACK_VERSION 上方 1.8.1 大注释）、1.8.2
     （同一机制的第三轮事故修复：卷宗预算改为按层保底配额 + B 侧候选公平
-    轮转合并，见 PREP_PACK_VERSION 上方 1.8.2 大注释）都会实际改变发给
-    候选判别模型的卷宗内容本身，同样是 prompt-contract 变更，版本逐次
-    推进——函数名/测试名沿用旧号不改，只更新断言值，避免无谓的大范围
-    改名。"""
-    assert prep_pack.PREP_PACK_VERSION == "1.8.2"
+    轮转合并，见 PREP_PACK_VERSION 上方 1.8.2 大注释）与 1.8.3（同一机制的
+    第四轮事故修复：保底粒度下沉到每个候选、字数预算同粒度兜底 + 候选集
+    扩展为逐字命中∪人物谱注册区间两类并集，见 PREP_PACK_VERSION 上方
+    1.8.3 大注释）都会实际改变发给候选判别模型的卷宗内容/候选名单本身，
+    同样是 prompt-contract 变更，版本逐次推进——函数名/测试名沿用旧号
+    不改，只更新断言值，避免无谓的大范围改名。"""
+    assert prep_pack.PREP_PACK_VERSION == "1.8.3"
