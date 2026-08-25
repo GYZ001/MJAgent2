@@ -3868,6 +3868,76 @@ def _cognition_status_lines(card: ChapterCognitionCard | None) -> list[str]:
 
 _ALIAS_VERDICT_DOSSIER_MAX_ENTRIES = 12  # 单条别名裁决卷宗最多收录的段落数
 _ALIAS_VERDICT_DOSSIER_MAX_CHARS = 6000  # 单条别名裁决卷宗最多收录的总字符数
+# 三层保底配额（移植自 app/production/prep_pack.py 已用两轮真实生产事故验证过的
+# "按层保底配额、保底不受字数预算挤占"方案，见提交 0395a73「候选判别卷宗按层保底
+# 配额，杜绝一侧饿死」与 1f15844「卷宗每候选保底不受字数挤占」；缺陷修复见下方
+# `_alias_verdict_dossier` docstring"第二个真实回归"一节）：both/text_only/
+# anchor_only 三层各自的保底名额，任一层都不能被其它层挤到 0。
+#
+# 取值 4：不是另起炉灶拍的新数字——prep_pack 那两次修复面对的是同一形状的问题，
+# 且单卷宗最多收录条数上限恰好同为 12（`_PREP_PACK_FUNCTIONAL_CANDIDATE_
+# DOSSIER_MAX_ENTRIES == _ALIAS_VERDICT_DOSSIER_MAX_ENTRIES == 12`），两轮真实
+# 生产事故验证后收敛到的保底值就是 4，这里直接复用同一常量值，不重新调参。3 层
+# × 4 = 12，恰好等于 MAX_ENTRIES：三层证据都充足（各自 >= 4 条可用）时保底阶段
+# 直接占满预算，谁都不会被挤到 0；某一层可用证据不足 4 条时（如 both，按下方
+# docstring 所述通常很少），它的保底天然只取到自己实际拥有的条数，节省下的名额
+# 通过下面的 flex 阶段（仍按 both -> text_only -> anchor_only 既有优先级）分给
+# 证据更多的层，不需要另写"回收"逻辑。
+_ALIAS_VERDICT_DOSSIER_MIN_LAYER_ENTRIES = 4
+# 保底段的单段截断上限（1f15844 同一根因：条数保底如果仍受字数预算约束，会被排
+# 在它前面的长段落吃光字数额度，保底名额有位置却进不了卷宗——1f15844 提交信息
+# 原话"保底的是'配额位置'，不是'配额一定进得去卷宗'"）。复用 prep_pack
+# `_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_GUARANTEED_ENTRY_MAX_CHARS` 同一
+# 取值 260：三层保底最多 12 段（3x4=12，即上面注释的最坏情形），12x260=3120，
+# 仍明显小于 MAX_CHARS(6000)，保底阶段因此不需要跟 flex 阶段抢字数预算。
+_ALIAS_VERDICT_DOSSIER_GUARANTEED_ENTRY_MAX_CHARS = 260
+_ALIAS_VERDICT_DOSSIER_TRUNCATION_MARK = "…"
+
+
+def _alias_verdict_dossier_truncate_segment(text: str, anchor: str) -> str:
+    """保底段确定性截断（移植自 prep_pack.py
+    `_prep_pack_functional_candidate_truncate_segment`，逻辑不变，仅随宿主函数
+    改名）：保底层的段落绝不因为字数超限被整条丢弃——某个层唯一/仅有的证据段
+    如果恰好很长（大段环境描写、大段对话），必须截断而不是排除，模型才有机会
+    看到它。
+
+    `anchor` 是这段文本之所以入选保底层的具体触发词（调用方按层传入：both/
+    text_only 传 `text` 本身——has_text 恒为真，必然能找到；anchor_only 传命中
+    的那个具体 anchor 字面串），用来定位"核心句"：先用中文常见句子终止符
+    （。！？换行）把 `text` 切成句子，取包含 `anchor` 的那一句；这句本身仍超过
+    目标长度时，以 `anchor` 在句中的位置为中心继续裁剪，保证锚点词始终留在
+    截断结果里（截掉的是锚点词两侧的上下文，不是锚点词本身）。裁剪掉的一侧加
+    省略标记。`anchor` 为空或在 `text` 里根本找不到（防御性：调用方按约定只会
+    传入确实命中该段的锚点词，但不假设这个约定一定成立）时退回"从头部截断到
+    目标长度"这个更保守的兜底，不做任何"哪句更重要"的语义判断。不针对任何
+    具体人名/称谓做特判——`anchor` 完全是调用方传入的字符串参数，本函数只做
+    纯字符串定位与切片，是结构操作，不是语义理解。"""
+    limit = _ALIAS_VERDICT_DOSSIER_GUARANTEED_ENTRY_MAX_CHARS
+    if len(text) <= limit:
+        return text
+    mark = _ALIAS_VERDICT_DOSSIER_TRUNCATION_MARK
+    anchor_pos = text.find(anchor) if anchor else -1
+    if anchor_pos < 0:
+        return text[:limit].rstrip() + mark
+    start, end = 0, len(text)
+    for match in re.finditer(r"[。！？\n]", text):
+        boundary = match.end()
+        if boundary <= anchor_pos:
+            start = boundary
+        else:
+            end = boundary
+            break
+    if end - start > limit:
+        local_pos = anchor_pos - start
+        half = max(0, (limit - len(anchor)) // 2)
+        crop_start = start + max(0, local_pos - half)
+        crop_end = min(end, crop_start + limit)
+        crop_start = max(start, crop_end - limit)
+        start, end = crop_start, crop_end
+    core = text[start:end].strip()
+    prefix = mark if start > 0 else ""
+    suffix = mark if end < len(text) else ""
+    return f"{prefix}{core}{suffix}"
 
 
 def _alias_verdict_dossier(
@@ -3893,31 +3963,59 @@ def _alias_verdict_dossier(
     反而把本该收录的 `text` 段落、以及紧挨着 `text` 段落的关键 anchor_only 段落
     挤出预算之外（project proj_3ac0b627fa46 第 1 章："孟兄"只出现一次，"孟浩"出现
     三十余次贯穿全章——若不做优先级区分，裁决闸看到的会是章节开头孟浩独自坐在山顶
-    的大段背景描写，反而看不到"孟兄"那句台词紧邻的对话）。
+    的大段背景描写，反而看不到"孟兄"那句台词紧邻的对话）。排序规则的锚点顺序不变：
+    both 优先 → text_only 次之（这两类条数通常很少，一般不会触顶）→ anchor_only
+    按"离最近的 both/text_only 段落有多远"升序排列，越靠近别名实际出现的位置越
+    优先，距离相同按文档顺序（下标升序）确定性打破平局。
 
-    因此排序规则是确定性的三层优先级：both 全部收录 → text_only 全部收录（这两类
-    条数通常很少，一般不会触顶）→ anchor_only 按"离最近的 both/text_only 段落有多
-    远"升序补足剩余预算，越靠近别名实际出现的位置越优先，距离相同按文档顺序（下标
-    升序）确定性打破平局——这样即使预算有限，模型看到的也是"别名出现处附近这些
-    已确认称谓怎么被提及"，而不是章节任意位置的无关段落。条数与总字数超过上限后
-    按上述顺序截断，不用随机采样，同一输入任何时候重跑都得到同一份卷宗。调用方
-    已确认 `text` 在 `chapter_text` 里，理论上 both/text_only 至少有一条命中；真的
-    一条都没有（分段边界极端情况）就返回空列表，交由调用方兜底拒绝。"""
+    第二个真实回归（"主角淹没预算"第四次复发——本项目此前已在 prep_pack.py 里
+    修过三次同类问题：卷宗整体、候选判别 B 侧内部、B 侧稀缺槽位，见该文件
+    0395a73/1f15844 两次提交的完整说明）：`text`（别名场景下的别名本身；状态
+    事实场景下调用方传入的是归属对象/关系对象，见 `_status_fact_evidence_
+    resolution`）若恰好是章内高频词（结构上与主角名同样"近乎每段都出现"，
+    例如某个宗门名反复被提及），text_only 段落数量可能远超 both、也远超
+    anchor_only。旧实现"both 全部收录 → text_only 全部收录 → anchor_only 补足
+    剩余预算"里，"全部收录"没有上限——text_only 可以在任何 anchor_only 段落被
+    考虑之前，独自把 MAX_ENTRIES/MAX_CHARS 吃光。anchor_only 段落正是"这些已
+    确认称谓在这一章还出现在哪"的关键证据，一旦被整体挤出卷宗，模型只能在残缺
+    材料上判断候选是否与别名指代同一人。
+
+    修复：移植 prep_pack.py 的按层保底配额方案（0395a73）并叠加"保底不受字数
+    预算挤占"（1f15844）——both/text_only/anchor_only 三层各自先分到
+    `min(_ALIAS_VERDICT_DOSSIER_MIN_LAYER_ENTRIES, 该层实际可用条数)` 的保底
+    名额，谁都不能被其它层挤到 0；保底层的段落一律直接收录，不因为字数预算
+    不够被跳过（1f15844 的核心教训：条数保底如果仍受字数预算约束，排在前面的
+    长段落照样能把后面保底段的字数额度吃光，保底"有位置"不等于"进得去卷宗"），
+    单段超过 `_ALIAS_VERDICT_DOSSIER_GUARANTEED_ENTRY_MAX_CHARS` 时用
+    `_alias_verdict_dossier_truncate_segment` 做确定性截断（保留锚点词所在的
+    核心句 + 省略标记），不整段丢弃。三层保底收录完毕后，剩余的"flex"名额才按
+    both -> text_only -> anchor_only 既有优先级顺序（anchor_only 仍按上面的
+    邻近度排序）继续分配，这部分维持原有语义——只用字数预算约束、不截断（缺了
+    不影响"每层至少有保底代表"这个硬要求）。两个既有上限常量（MAX_ENTRIES/
+    MAX_CHARS）原样不变，只是同一份预算内部的分配规则更细颗粒度，不是靠放大
+    上限绕过问题。
+
+    条数与总字数超过上限后按上述顺序截断，不用随机采样，同一输入任何时候重跑
+    都得到同一份卷宗。调用方已确认 `text` 在 `chapter_text` 里，理论上 both/
+    text_only 至少有一条命中；真的一条都没有（分段边界极端情况）就返回空列表，
+    交由调用方兜底拒绝。"""
     segments = index_source_segments(chapter_text)
     both_indexes: list[int] = []
     text_only_indexes: list[int] = []
     anchor_only_indexes: list[int] = []
+    anchor_only_matched_anchor: dict[int, str] = {}
     for index, seg in enumerate(segments):
         has_text = text in seg.text
-        has_anchor = any(
-            anchor and anchor in seg.text for anchor in anchor_texts
+        matched_anchor = next(
+            (anchor for anchor in anchor_texts if anchor and anchor in seg.text), None,
         )
-        if has_text and has_anchor:
+        if has_text and matched_anchor is not None:
             both_indexes.append(index)
         elif has_text:
             text_only_indexes.append(index)
-        elif has_anchor:
+        elif matched_anchor is not None:
             anchor_only_indexes.append(index)
+            anchor_only_matched_anchor[index] = matched_anchor
     if not both_indexes and not text_only_indexes:
         return []
     priority_indexes = both_indexes + text_only_indexes
@@ -3925,10 +4023,49 @@ def _alias_verdict_dossier(
         anchor_only_indexes,
         key=lambda index: (min(abs(index - anchor) for anchor in priority_indexes), index),
     )
-    ordered_candidates = priority_indexes + anchor_only_by_proximity
+
+    # 按层保底配额 + 保底段免字数预算挤占（移植自 prep_pack.py 0395a73/1f15844，
+    # 见本函数 docstring"第二个真实回归"一节）：三层各自先分到不超过自身可用
+    # 条数、也不超过 MIN_LAYER_ENTRIES 的保底名额；保底之后剩余的名额（flex）
+    # 仍按既有优先级顺序竞争分配。
+    reserve_both = min(_ALIAS_VERDICT_DOSSIER_MIN_LAYER_ENTRIES, len(both_indexes))
+    reserve_text_only = min(_ALIAS_VERDICT_DOSSIER_MIN_LAYER_ENTRIES, len(text_only_indexes))
+    reserve_anchor_only = min(
+        _ALIAS_VERDICT_DOSSIER_MIN_LAYER_ENTRIES, len(anchor_only_by_proximity),
+    )
+    guaranteed_both, overflow_both = both_indexes[:reserve_both], both_indexes[reserve_both:]
+    guaranteed_text_only, overflow_text_only = (
+        text_only_indexes[:reserve_text_only], text_only_indexes[reserve_text_only:]
+    )
+    guaranteed_anchor_only, overflow_anchor_only = (
+        anchor_only_by_proximity[:reserve_anchor_only],
+        anchor_only_by_proximity[reserve_anchor_only:],
+    )
+
     selected: list[int] = []
     used_chars = 0
-    for index in ordered_candidates:
+    resolved_text: dict[int, str] = {}
+    # 保底层：both/text_only 以 `text` 本身为截断锚点（has_text 恒为真）；
+    # anchor_only 以命中该段的具体 anchor 字面串为截断锚点。一律直接收录，
+    # 不做字数预算判断——这正是 1f15844 相对 0395a73 的核心差异。
+    for index in guaranteed_both + guaranteed_text_only:
+        if len(selected) >= _ALIAS_VERDICT_DOSSIER_MAX_ENTRIES:
+            break
+        piece = _alias_verdict_dossier_truncate_segment(segments[index].text, text)
+        selected.append(index)
+        used_chars += len(piece)
+        resolved_text[index] = piece
+    for index in guaranteed_anchor_only:
+        if len(selected) >= _ALIAS_VERDICT_DOSSIER_MAX_ENTRIES:
+            break
+        anchor_word = anchor_only_matched_anchor.get(index, "")
+        piece = _alias_verdict_dossier_truncate_segment(segments[index].text, anchor_word)
+        selected.append(index)
+        used_chars += len(piece)
+        resolved_text[index] = piece
+    # flex 层：维持原有语义，按 both -> text_only -> anchor_only 优先级顺序，
+    # 仍受字数预算约束（缺了不影响"每层至少有保底代表"这个硬要求）。
+    for index in overflow_both + overflow_text_only + overflow_anchor_only:
         if len(selected) >= _ALIAS_VERDICT_DOSSIER_MAX_ENTRIES:
             break
         seg_text = segments[index].text
@@ -3940,7 +4077,7 @@ def _alias_verdict_dossier(
     return [
         {
             "chapter_idx": chapter_idx, "segment_index": index + 1,
-            "text": segments[index].text,
+            "text": resolved_text.get(index, segments[index].text),
         }
         for index in selected
     ]
@@ -4653,7 +4790,7 @@ async def _status_fact_verdict_call(
 def _status_fact_interval_resolution(
     chapters_by_idx: dict[int, str],
     anchor_texts: set[str],
-    claim_text: str,
+    object_anchor_texts: set[str],
     resolved_chapter_index: int,
     declared_valid_from_chapter: int | None,
     declared_valid_to_chapter: int | None,
@@ -4666,19 +4803,30 @@ def _status_fact_interval_resolution(
       （它已经过声明核验或桥接检索，本身就是有证据支撑的章节）；终点回退为 None，
       代表"尚无证据表明已失效"，与 `character_portraits` 表 `ep_end IS NULL` 的既有
       查询惯例同构（设计文档 §3.2）。
-    - 起点/终点若申报了与 `resolved_chapter_index` 不同的章节：该章节必须独立满足
-      "claim_text 与 anchor_texts 至少一项同时出现"这一结构性共现判据——与
-      `_find_alias_bridge_chapter` 判断某章是否构成桥接章的判据完全同构，只是这里
-      章节号已经由模型给出，不需要再检索一次，只核验这一章是否真的存在支撑证据。
+    - 起点/终点若申报了与 `resolved_chapter_index` 不同的章节：该章节必须独立通过
+      与核心证据完全同一条闸——`_status_fact_boundary_dual_anchor_verified`（复用
+      `_status_fact_quote_dual_anchor_verified` 这条双锚定原语，按自然段而非整章
+      判断）。
+
+      缺陷修复：此前这里仍是"claim_text 与 anchor_texts 之一同时出现在章节任意
+      位置"的章级共现判据，与十几行外的 `_status_fact_quote_dual_anchor_verified`
+      自相矛盾——那条闸就是专门为了堵住章级共现"对主角近乎零过滤力"这一漏洞才加的
+      （见其 docstring 引用的真实事故：王腾飞在第27章章级共现 5 次、共现闸判定
+      通过，但被登记的引句其实是韩宗对孟浩说话，那句话里根本没有王腾飞）。边界
+      判定如果继续用章级共现，同一个漏洞原样留在这里：主体若是主角（几乎每章
+      无处不在），边界章又恰好在别处提到了归属对象/关系对象，`valid_from_is_
+      fallback=False`（含义是"该边界经过独立核验"）就会被错误地记成 False——而
+      该章其实从未在同一段文字里把这条边界与主体真正连接起来。现在边界判定与
+      核心证据共用同一条双锚定原语，不再有这个不一致。
     - 边界与核心证据点矛盾（起点晚于 `resolved_chapter_index`、终点早于它）：这是
       自相矛盾——核心证据本身已经证明该事实在 `resolved_chapter_index` 这一章成立，
       不是"外推不足"，返回 None 交由调用方整体拒绝（§4 反例，不可放松）。
 
-    拆分处置（不是放宽标准）：申报的边界与核心证据不矛盾、但也找不到独立共现支撑
-    （既不等于 `resolved_chapter_index`，边界章又没有 claim_text/anchor 共现）——这
-    种"未核验的外推"只丢弃该边界本身，不牵连已经过声明核验/候选判别的核心事实：
-    对应边界回落为默认值（起点回落为 `resolved_chapter_index`、终点回落为
-    None），并把返回的第 2/4 位标记为 True，供调用方在
+    拆分处置（不是放宽标准）：申报的边界与核心证据不矛盾、但也找不到独立双锚定
+    支撑（既不等于 `resolved_chapter_index`，边界章又没有任何一段同时锚定主体
+    与对象）——这种"未核验的外推"只丢弃该边界本身，不牵连已经过声明核验/候选
+    判别的核心事实：对应边界回落为默认值（起点回落为 `resolved_chapter_index`、
+    终点回落为 None），并把返回的第 2/4 位标记为 True，供调用方在
     `CharacterAffiliation.valid_from_is_fallback`/`valid_to_is_fallback` 如实标注——
     这是代码回落的默认值，不代表这就是模型申报并核验通过的原始边界。旧实现把这种
     "外推不成立"与"核心矛盾"一视同仁地整条拒绝，等于让未核验的边界外推否决了已核验
@@ -4686,6 +4834,13 @@ def _status_fact_interval_resolution(
     规则从未被实际触发过——回填 100% 拒绝的真正原因在候选判别裁决环节，见
     `_status_fact_verdict_call` docstring；但这条规则本身仍是一处真实的过严设计，
     一旦上游问题修复、更多事实进入这一步，就会开始误杀，因此一并修正）。
+
+    `object_anchor_texts` 与调用方 `_status_fact_evidence_resolution` 核验核心
+    证据引句双锚定时用的是同一个集合（归属对象/关系对象的规范名∪已确认别名），
+    不是把 `claim_text` 原样传入——边界章里对象出现的具体措辞未必与核心证据章
+    完全一致（例如对象本身是某个已确认别名的角色，见该函数关于 `object_anchor_
+    texts` 构造方式的说明），双锚定既然要求"同一条原语"，就应当连锚点集合本身
+    也保持一致，不能只搬运判据形状、锚点集合却各用各的。
     """
     valid_from_chapter = resolved_chapter_index
     valid_from_is_fallback = False
@@ -4693,8 +4848,8 @@ def _status_fact_interval_resolution(
         if declared_valid_from_chapter > resolved_chapter_index:
             return None  # 矛盾：起点不能晚于核心证据章，整条拒绝
         boundary_text = chapters_by_idx.get(declared_valid_from_chapter, "")
-        if boundary_text and claim_text in boundary_text and any(
-            anchor and anchor in boundary_text for anchor in anchor_texts
+        if boundary_text and _status_fact_boundary_dual_anchor_verified(
+            boundary_text, anchor_texts, object_anchor_texts,
         ):
             valid_from_chapter = declared_valid_from_chapter
         else:
@@ -4709,8 +4864,8 @@ def _status_fact_interval_resolution(
             return None  # 矛盾：终点不能早于核心证据章，整条拒绝
         else:
             boundary_text = chapters_by_idx.get(declared_valid_to_chapter, "")
-            if boundary_text and claim_text in boundary_text and any(
-                anchor and anchor in boundary_text for anchor in anchor_texts
+            if boundary_text and _status_fact_boundary_dual_anchor_verified(
+                boundary_text, anchor_texts, object_anchor_texts,
             ):
                 valid_to_chapter = declared_valid_to_chapter
             else:
@@ -4758,6 +4913,34 @@ def _status_fact_quote_dual_anchor_verified(
         if (
             any(s in candidate for s in subject_forms)
             and any(o in candidate for o in object_forms)
+        ):
+            return True
+    return False
+
+
+def _status_fact_boundary_dual_anchor_verified(
+    chapter_text: str,
+    subject_anchor_texts: set[str],
+    object_anchor_texts: set[str],
+) -> bool:
+    """区间边界章的双锚定核验（缺陷修复，见 `_status_fact_interval_resolution`
+    docstring"边界章级共现"一节）：与核心证据共用同一条原语
+    `_status_fact_quote_dual_anchor_verified`，只是这里没有一句现成的
+    evidence_quote 可以直接判断，需要先在边界章内部确定性检索出候选"quote"。
+
+    做法：把边界章按 `index_source_segments`（与 `_alias_verdict_dossier` 同一
+    分段工具、同一默认粒度，不另起一套分段规则）切成自然段，只要存在至少一段
+    本身就同时双锚定通过（引号候选形式下同一形式内同时含主体锚点与对象锚点
+    各至少一项），就认为这条边界有独立支撑，返回 True。
+
+    这不是把"整章共现"换成"整章双锚定"（那仍然不够——主体在第一段、对象在
+    最后一段，整章拼起来一样能双双命中，跟章级共现是同一个漏洞的另一种写法）：
+    双锚定必须发生在同一自然段内，与核心证据的 evidence_quote 是"原文里的
+    一句/一段"这一颗粒度完全对齐，不接受跨段拼凑。全书任何一段都不满足时
+    返回 False，交由调用方按"拆分处置"回落为 fallback，不牵连核心事实。"""
+    for segment in index_source_segments(chapter_text):
+        if _status_fact_quote_dual_anchor_verified(
+            segment.text, subject_anchor_texts, object_anchor_texts,
         ):
             return True
     return False
@@ -4873,7 +5056,7 @@ async def _status_fact_evidence_resolution(
         return {**empty, "reason": "segment_not_pinned"}
 
     interval = _status_fact_interval_resolution(
-        chapters_by_idx, anchor_texts, claim_text, resolved_chapter_index,
+        chapters_by_idx, anchor_texts, object_anchor_texts, resolved_chapter_index,
         declared_valid_from_chapter, declared_valid_to_chapter,
     )
     if interval is None:

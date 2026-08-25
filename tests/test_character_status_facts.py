@@ -154,7 +154,7 @@ def test_interval_defaults_to_evidence_chapter_when_not_declared() -> None:
 
     chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
     result = stages._status_fact_interval_resolution(
-        chapters_by_idx, {"孟浩"}, "血妖宗", 5, None, None,
+        chapters_by_idx, {"孟浩"}, {"血妖宗"}, 5, None, None,
     )
     assert result == (5, False, None, False)
 
@@ -167,7 +167,7 @@ def test_interval_start_accepted_when_boundary_chapter_has_support() -> None:
 
     chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
     result = stages._status_fact_interval_resolution(
-        chapters_by_idx, {"孟浩"}, "血妖宗", 40, 5, None,
+        chapters_by_idx, {"孟浩"}, {"血妖宗"}, 40, 5, None,
     )
     # 起点 5 章：与核心证据章（40）不同，但第 5 章确实有"孟浩"+"血妖宗"共现支撑。
     assert result == (5, False, None, False)
@@ -180,7 +180,7 @@ def test_interval_end_accepted_when_boundary_chapter_has_support() -> None:
 
     chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
     result = stages._status_fact_interval_resolution(
-        chapters_by_idx, {"孟浩"}, "血妖宗", 5, None, 40,
+        chapters_by_idx, {"孟浩"}, {"血妖宗"}, 5, None, 40,
     )
     assert result == (5, False, 40, False)
 
@@ -195,7 +195,7 @@ def test_interval_start_declared_but_unsupported_falls_back_and_is_flagged() -> 
 
     chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
     result = stages._status_fact_interval_resolution(
-        chapters_by_idx, {"孟浩"}, "血妖宗", 40, 9, None,
+        chapters_by_idx, {"孟浩"}, {"血妖宗"}, 40, 9, None,
     )
     assert result == (40, True, None, False)
 
@@ -208,7 +208,7 @@ def test_interval_end_declared_but_unsupported_falls_back_and_is_flagged() -> No
 
     chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
     result = stages._status_fact_interval_resolution(
-        chapters_by_idx, {"孟浩"}, "血妖宗", 5, None, 9,
+        chapters_by_idx, {"孟浩"}, {"血妖宗"}, 5, None, 9,
     )
     assert result == (5, False, None, True)
 
@@ -220,7 +220,7 @@ def test_interval_start_rejected_when_declared_after_evidence_chapter() -> None:
 
     chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
     result = stages._status_fact_interval_resolution(
-        chapters_by_idx, {"孟浩"}, "血妖宗", 5, 40, None,
+        chapters_by_idx, {"孟浩"}, {"血妖宗"}, 5, 40, None,
     )
     assert result is None
 
@@ -231,7 +231,7 @@ def test_interval_end_rejected_when_declared_before_evidence_chapter() -> None:
 
     chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
     result = stages._status_fact_interval_resolution(
-        chapters_by_idx, {"孟浩"}, "血妖宗", 40, None, 5,
+        chapters_by_idx, {"孟浩"}, {"血妖宗"}, 40, None, 5,
     )
     assert result is None
 
@@ -243,9 +243,72 @@ def test_interval_boundary_equal_to_evidence_chapter_is_trivially_accepted() -> 
 
     chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
     result = stages._status_fact_interval_resolution(
-        chapters_by_idx, {"孟浩"}, "血妖宗", 5, 5, 5,
+        chapters_by_idx, {"孟浩"}, {"血妖宗"}, 5, 5, 5,
     )
     assert result == (5, False, 5, False)
+
+
+# 缺陷 A 专用章节：主体是"几乎每章无处不在"的主角，边界章第 20 章里主体与对象各自
+# 都出现过，但分别落在不同自然段（用空行隔开），从未在同一段里连接起来——与
+# `_status_fact_quote_dual_anchor_verified` docstring 引用的真实事故"王腾飞→韩宗"
+# 同一形状：第27章章级共现闸判定通过（王腾飞出现5次），但被登记的引句其实是韩宗
+# 对孟浩说话，句中根本没有王腾飞。
+BOUNDARY_CHAPTER_WITH_CHAPTER_WIDE_BUT_NOT_SEGMENT_LEVEL_COOCCURRENCE = {
+    "idx": 20, "title": "第二十章", "content": (
+        "孟浩独自一人在城中闲逛，心里想着修炼之事。\n\n"
+        "韩宗冷淡开口：血妖宗要对付的可不止一人，你们都得小心。"
+    ),
+}
+
+
+def test_interval_boundary_chapter_wide_cooccurrence_without_dual_anchor_falls_back() -> None:
+    """红灯先行（缺陷 A 核心场景）：declared_valid_from_chapter=20 这一章里，"孟浩"
+    （主体锚点）只出现在第一段，"血妖宗"（对象）只出现在第二段——旧实现只做章级
+    共现（claim_text 与 anchor 之一整章任意位置都出现即通过）会误判该边界"经过
+    独立核验"（valid_from_is_fallback=False），但该章其实从未把这条边界与主体接到
+    一起，与 `_status_fact_quote_dual_anchor_verified` docstring 引用的真实事故
+    同一形状。核心证据本身在别处（第40章）已核验，这里只测边界判定本身：新实现
+    改用与核心证据同一条双锚定原语按自然段核验，该章任何一段都不同时含"孟浩"与
+    "血妖宗"，必须回落为 valid_from_is_fallback=True，起点回落为核心证据章（40）。
+
+    变异验证：把 `_status_fact_interval_resolution` 里的边界判定改回
+    `claim_text in boundary_text and any(anchor in boundary_text for anchor in
+    anchor_texts)` 这种章级共现（去掉双锚定），本测试会变红（拿到
+    (20, False, None, False)，即误判为已核验）。"""
+    from app import stages
+
+    chapters = AFFILIATION_CHAPTERS + [
+        BOUNDARY_CHAPTER_WITH_CHAPTER_WIDE_BUT_NOT_SEGMENT_LEVEL_COOCCURRENCE,
+    ]
+    chapters_by_idx = stages._chapters_by_idx(chapters)
+    # 章级共现前提校验：确保这确实是"整章共现通过、但没有任何一段同时锚定"的场景，
+    # 不是测试数据本身没构造对。
+    boundary_text = chapters_by_idx[20]
+    assert "孟浩" in boundary_text and "血妖宗" in boundary_text, "前提：整章共现应通过"
+    assert not any(
+        "孟浩" in seg.text and "血妖宗" in seg.text
+        for seg in stages.index_source_segments(boundary_text)
+    ), "前提：任何一段都不应同时含主体与对象"
+
+    result = stages._status_fact_interval_resolution(
+        chapters_by_idx, {"孟浩"}, {"血妖宗"}, 40, 20, None,
+    )
+    assert result == (40, True, None, False)
+
+
+def test_interval_boundary_accepted_when_segment_level_dual_anchor_present() -> None:
+    """对照正例（不得误伤）：同一份 AFFILIATION_CHAPTERS 第 5 章本身就是单段落，
+    "孟浩"与"血妖宗"同段共现——应当被接受为独立核验通过的边界，非回落值。与
+    `test_interval_start_accepted_when_boundary_chapter_has_support` 覆盖同一
+    场景，这里换用新签名（object_anchor_texts 为集合）与新判据（段级双锚定）
+    重新确认一遍，防止双锚定改造引入回归。"""
+    from app import stages
+
+    chapters_by_idx = stages._chapters_by_idx(AFFILIATION_CHAPTERS)
+    result = stages._status_fact_interval_resolution(
+        chapters_by_idx, {"孟浩"}, {"血妖宗"}, 40, 5, None,
+    )
+    assert result == (5, False, None, False)
 
 
 # ---------- 3. 核心证据判定 + 候选判别裁决：_status_fact_evidence_resolution ----------

@@ -614,6 +614,63 @@ def test_alias_verdict_dossier_includes_segments_with_anchor_texts_only() -> Non
     assert any("许清？" in text for text in catalog_texts)
 
 
+def test_alias_verdict_dossier_reserves_anchor_only_quota_when_text_is_high_frequency() -> None:
+    """红→绿（缺陷 B，"主角淹没预算"第四次复发，移植 prep_pack.py 0395a73/1f15844
+    验证过两轮的按层保底配额修复，见 `_alias_verdict_dossier` docstring"第二个真实
+    回归"一节）。
+
+    构造 `text`（本测试模拟状态事实场景里高频出现的归属对象/关系对象，例如宗门名
+    这类"结构上与主角名同样近乎每段都出现"的词）本身是章内高频词的卷宗：5 个自然段
+    只含 `text`（"血妖宗"）、不含 `anchor_texts`（"孟浩"），每段 1160 字——
+    `index_source_segments` 默认单段上限 900 字，会把每个自然段再切成 880+280 两块，
+    合计 10 个 text_only 段落、总字数 5800；额外 1 段只含"孟浩"、不含"血妖宗"的
+    anchor_only 段落（280 字）。
+
+    旧实现"both 全部收录 → text_only 全部收录 → anchor_only 补足剩余"下可手工验证：
+    10 个 text_only 段落按顺序累加（第一条不受字数预算约束这条历史豁免）恰好用掉
+    5800 字，轮到 anchor_only 那 280 字段落时 5800+280=6080 超过 MAX_CHARS(6000)，
+    被 continue 跳过——anchor_only 一条都进不了卷宗，候选方（"孟浩"）在这一章
+    唯一的证据段落完全消失，模型只能在残缺材料上判断。
+
+    新实现必须保证 anchor_only 层拿到不受字数预算挤占的保底名额：即使前面的
+    text_only 段落已经把大半字数预算用掉，含"孟浩"的段落仍必须出现在卷宗里
+    （可能被截断，但不能被整条排除）。
+
+    变异验证：把 `_alias_verdict_dossier` 里的按层保底配额改回旧的
+    `ordered_candidates = priority_indexes + anchor_only_by_proximity` 单一
+    优先级列表（不分保底/flex），本测试会变红（anchor_only 段落从卷宗中消失）。
+    """
+    from app import stages
+
+    filler = "血妖宗近来又生变故，弟子们议论纷纷，都说此事牵连甚广，恐怕还要闹出更大的风波来。"
+    text_only_paragraph = filler * 29  # 1160 字，超过单段 900 字上限会被再切成两块
+    anchor_only_paragraph = "远处传来孟浩低声说话的声音，" * 20  # 280 字，只含孟浩
+
+    chapter_text = "\n\n".join([text_only_paragraph] * 5) + "\n\n" + anchor_only_paragraph
+
+    # 前提校验：确保测试数据本身真的构造出了"anchor_only 唯一那段会被旧算法的字数
+    # 预算挤掉"这个场景，不是数据没配对。
+    segments = stages.index_source_segments(chapter_text)
+    text_only_segments = [s for s in segments if "血妖宗" in s.text and "孟浩" not in s.text]
+    anchor_only_segments = [s for s in segments if "孟浩" in s.text and "血妖宗" not in s.text]
+    assert len(text_only_segments) >= 5, "前提：text_only 段落数量应足够多"
+    assert len(anchor_only_segments) == 1, "前提：只有一段 anchor_only 证据"
+    text_only_total_chars = sum(len(s.text) for s in text_only_segments)
+    assert (
+        text_only_total_chars + len(anchor_only_segments[0].text)
+        > stages._ALIAS_VERDICT_DOSSIER_MAX_CHARS
+    ), "前提：text_only 段落合计字数加上 anchor_only 那一段必须超过总字数预算"
+
+    dossier = stages._alias_verdict_dossier(7, chapter_text, "血妖宗", {"孟浩"})
+
+    assert any("孟浩" in item["text"] for item in dossier), (
+        "anchor_only 层（候选方唯一的证据段落）必须拿到保底名额，不能被 text_only "
+        "的字数预算挤掉"
+    )
+    assert len(dossier) <= stages._ALIAS_VERDICT_DOSSIER_MAX_ENTRIES
+    assert sum(len(item["text"]) for item in dossier) <= stages._ALIAS_VERDICT_DOSSIER_MAX_CHARS
+
+
 CHAPTER_3_LIKE = [
     {"idx": 3, "title": "第三章", "content": (
         "睡的挺早啊，都给你虎爷爷起来！随着那两扇房门的呼扇，从外面走进一个穿着"
