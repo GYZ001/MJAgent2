@@ -224,6 +224,21 @@ def _narrative_screenplay_for_artifact(
     if not raw:
         return None
     try:
+        raw_payload = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"当前剧本投影无法验证：{exc}") from exc
+    if isinstance(raw_payload, dict) and "prep_pack_version" in raw_payload:
+        # episode_prep_pack (screenplay contract 6.0.0+) never has a
+        # narrative_plan concept -- this predicate only answers "does this
+        # episode's CURRENT screenplay projection carry narrative
+        # authority", and for prep_pack the answer is unconditionally no.
+        # EpisodeScreenplay.model_validate_json(raw) below would raise on
+        # the payload's extra keys (EpisodeScreenplay is extra="forbid"),
+        # which would turn every storyboard-certificate verification for a
+        # prep_pack episode into a hard failure instead of the correct
+        # "no narrative authority" answer.
+        return None
+    try:
         screenplay = EpisodeScreenplay.model_validate_json(raw)
     except Exception as exc:  # noqa: BLE001 - malformed current projection fails closed
         raise ValueError(f"当前剧本投影无法验证：{exc}") from exc
