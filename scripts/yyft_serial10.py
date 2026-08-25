@@ -3,31 +3,66 @@
 
 用法:
     py scripts/yyft_serial10.py status
-    py scripts/yyft_serial10.py clear            # 仅清空本项目 EP1-EP10 的剧本数据
-    py scripts/yyft_serial10.py run              # EP1→EP10 串行，一集失败即停下待 RCA
-    py scripts/yyft_serial10.py run --from EP4   # 限流恢复后从当前失败集继续
+    py scripts/yyft_serial10.py clear                # 仅清空本项目 EP1-EP10 的剧本数据
+    py scripts/yyft_serial10.py run                  # 默认=自动循环模式，见下
+    py scripts/yyft_serial10.py run --from EP4       # 首轮起点；仅对第 1 轮生效——
+                                                      # 自动循环触发的每一轮之后都固定
+                                                      # 从 EP1 重跑（协议要求），不续用
+                                                      # 这个 --from
+    py scripts/yyft_serial10.py run --single-pass    # 退回旧的单轮语义：一集失败即停轮
+                                                      # 等人工 RCA，不自动重启/清库/重跑
+                                                      # （测试、以及需要人工先看一眼再决定
+                                                      # 要不要继续时用）
+
+失败后"重启后端 + 清库 + 重新发 run"有两个独立触发器，都会走到这套流程，互不冲突：
+  1) 【外部触发，协调层职责，不在本文件内实现】协调层的修复一旦落地，会**主动杀掉
+     正在跑的驱动进程**、重启后端、clear、重新发 run——不等本轮跑完。因此本文件
+     必须对"运行到任意一步突然被 SIGTERM/SIGKILL"保持健壮：进程内状态（cycle 计数、
+     上一轮失败签名、重试计数）只存在 Python 变量里，不落盘、不写锁文件、不依赖"进程
+     还活着才能恢复"的任何东西——被杀掉之后重新执行 `run` 就是全新的一次调用，配合
+     协调层已经做的 clear，天然从干净状态起步，无需本文件额外加恢复机制。
+  2) 【内部触发，本文件默认实现，2026-08-24 起】没有新修复、纯粹因为分诊后停轮
+     （见下方"失败分诊"），驱动自己在 cmd_run 内部循环：重启后端 → 健康探测 →
+     clear → 从 EP1 重新开始一轮，全程不需要人工协调。护栏（详见
+     AUTO_RUN_CYCLE_MAX/FailureSignature 处注释）：连续两轮命中同一失败签名，或
+     单次 run 调用触达轮数上限，都会停止自动循环，交回人工 RCA——这不是黑名单，是
+     防止在真实、确定性故障上死循环的保险丝。
 
 设计约束（与任务书一致）：
   * 严格串行，任何时刻只有一集在跑；
-  * 非限流失败**立即停止**，不自动重试、不自动跳过，留给人做根因分析；
-  * 只有明确的供应商限流（HTTP 429 / rate_limit / quota / 限流）才自动等待重试：
-    优先遵循 Retry-After，没有就等 30 分钟；
-  * GEN-RETRY-GRANT（error_logs.category=='generation_retry_grant'）不再自动
-    恢复——2026-08-24 剧本台改造为轻量 episode_prep_pack 流程后，这条路径在当前
-    后端下已结构性不可达（证据与判断见 is_retry_grant_category() 的 docstring），
-    命中即代表异常，只标注、不自动重试，仍按非限流失败停下；
+  * 失败分诊三族（2026-08-24 起，替代原来"限流才等/其余一律停轮"的二分；
+    判据与结构化证据来源见 classify_failure_family() docstring）：
+    - 内容族（quality_gate：PrepPackGateError/StructuredSemanticError 等门禁
+      与业务校验）—— 真信号，立即停轮，不自动重试；
+    - 瞬时族（provider/限流/ReadTimeout/INTERRUPTED/429/5xx/
+      StructuredFormatError 掷骰子失败）—— 每集最多自动重试
+      TRANSIENT_RETRY_MAX 次，阶梯退避 TRANSIENT_RETRY_BACKOFF_S
+      （60s→120s→300s）；上限用尽仍瞬时失败则停轮并汇总全部重试证据
+      （#20 债务收口：原限流固定等 1800s 的特判已并入这套统一分诊）；
+    - 未知族 —— fail-safe 默认，停轮等人工 RCA；
+  * GEN-RETRY-GRANT（error_logs.category=='generation_retry_grant'）不参与
+    上面的自动重试——2026-08-24 剧本台改造为轻量 episode_prep_pack 流程后，这条
+    路径在当前后端下已结构性不可达（证据与判断见 is_retry_grant_category() 的
+    docstring），命中即代表异常，只标注、不自动重试，按分诊结果处理（通常落
+    未知族，停轮）；
   * 只清理本项目这 10 集的剧本数据，绝不触碰其它项目或分集。
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
+import shlex
+import signal
 import sqlite3
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent
 BASE = "http://127.0.0.1:8230"
@@ -52,26 +87,41 @@ EPISODES = [
 ]
 LOG = ROOT / "logs" / "serial10.log"
 
-# 只有这些才算供应商限流。普通 timeout / 连接错误 / JSON / schema / 模型输出异常
-# 一律不算，必须停下来做根因分析。
+# --- 失败分诊（2026-08-24 起，替代原来的"限流才等/其余一律停轮"二分） -------
 #
-# 刻意不放裸 "429"/"tpm"/"rpm"：错误码形如 ERR-20260822-4295ab，裸数字与两字母
-# 缩写会在无关文本里假阳性，把一个真实缺陷误判成限流并自动等 30 分钟——那正是
-# 任务书禁止的。HTTP 429 由 provider_calls.http_status 这一**结构化**字段单独判定。
-RATE_LIMIT_MARKERS = (
-    "rate_limit",
-    "rate limit",
-    "ratelimit",
-    "too many requests",
-    "quota exceeded",
-    "quota temporarily",
-    "insufficient_quota",
-    "限流",
-    "请求过于频繁",
-    "concurrency limit",
-    "tokens per minute",
-    "requests per minute",
+# 三族：
+#   内容族 content   -- error_logs.category=='quality_gate'（PrepPackGateError/
+#     StructuredSemanticError/ContentGenerationError/ScreenplayNarrativeGateError，
+#     app/errors.py:classify 的既有结构化分类）。供应商调用本身成功，失败的是
+#     业务/QA 校验——真信号，立即停轮，不自动重试。
+#   瞬时族 transient  -- category=='provider'（含 ReadTimeout 等传输层异常，
+#     app/hiagent.py 统一包装成 ProviderError）、exc_type=='StructuredFormatError'
+#     （模型拼错字段/畸形 JSON 的掷骰子失败——后端 run 内的格式重试已经用尽才会
+#     外抛到这一层，驱动层给整个 run 重新采样一次是安全的，不是绕过门禁）、
+#     provider_calls.http_status in (429, 500..599)、provider_calls.status==
+#     'INTERRUPTED'，或下面 TRANSIENT_TEXT_MARKERS 兜底命中——每集最多自动重试
+#     TRANSIENT_RETRY_MAX 次，阶梯退避 TRANSIENT_RETRY_BACKOFF_S。
+#   未知族 unknown    -- 以上都不命中，fail-safe 默认，仍按停轮处理。
+#
+# 刻意不放裸 "429"：错误码形如 ERR-20260822-4295ab，裸数字会在无关文本里假阳性
+# ——429 一律走 provider_calls.http_status 这一**结构化**字段判定，不做文本匹配。
+CONTENT_FAILURE_CATEGORIES = frozenset({"quality_gate"})
+
+TRANSIENT_TEXT_MARKERS = (
+    "rate_limit", "rate limit", "ratelimit", "too many requests",
+    "quota exceeded", "quota temporarily", "insufficient_quota",
+    "限流", "请求过于频繁", "concurrency limit",
+    "tokens per minute", "requests per minute",
+    "readtimeout", "read timeout", "connecttimeout", "connect timeout",
+    "connection reset", "connection aborted", "connection refused",
+    "bad gateway", "gateway timeout", "service unavailable",
+    "internal server error", "temporarily unavailable",
 )
+
+# #20 债务收口：原限流固定等 1800s（或遵循 Retry-After）的特判并入统一分诊，
+# 不再单独处理——限流本就是瞬时族的一种，走同一套阶梯退避。
+TRANSIENT_RETRY_BACKOFF_S = (60.0, 120.0, 300.0)
+TRANSIENT_RETRY_MAX = len(TRANSIENT_RETRY_BACKOFF_S)
 
 # GEN-RETRY-GRANT（app/errors.py CATEGORIES["generation_retry_grant"]）曾是唯一
 # 一类有客观结构化证据、且领域层设计了全自动安全恢复路径的失败——但那条恢复路径
@@ -176,52 +226,6 @@ def recent_failure_evidence(eid: str, since: float) -> str:
     return "\n".join(chunks)
 
 
-def provider_retry_after(since: float) -> float | None:
-    """Honour a provider-declared wait when one exists in the durable record."""
-    conn = _readonly_conn()
-    try:
-        rows = conn.execute(
-            "SELECT error, response_json FROM provider_calls "
-            "WHERE ts>=? AND http_status=429 ORDER BY id DESC LIMIT 5",
-            (since,),
-        ).fetchall()
-    finally:
-        conn.close()
-    for row in rows:
-        for blob in (row["error"], row["response_json"]):
-            text = str(blob or "")
-            for key in ("retry-after", "retry_after", "retryAfter", "retry_delay"):
-                index = text.lower().find(key)
-                if index < 0:
-                    continue
-                digits = "".join(
-                    ch for ch in text[index + len(key): index + len(key) + 24]
-                    if ch.isdigit() or ch == "."
-                )
-                try:
-                    value = float(digits)
-                except ValueError:
-                    continue
-                if value > 0:
-                    return min(value, 3600.0)
-    return None
-
-
-def is_rate_limited(eid: str, since: float) -> bool:
-    """Only an explicit provider throttle counts; everything else needs an RCA."""
-    conn = _readonly_conn()
-    try:
-        if conn.execute(
-            "SELECT 1 FROM provider_calls WHERE ts>=? AND http_status=429 LIMIT 1",
-            (since,),
-        ).fetchone():
-            return True
-    finally:
-        conn.close()
-    text = recent_failure_evidence(eid, since).lower()
-    return any(marker in text for marker in RATE_LIMIT_MARKERS)
-
-
 def is_retry_grant_category(
     eid: str, since: float, *, db_path: Path | None = None,
 ) -> bool:
@@ -276,6 +280,341 @@ def is_retry_grant_category(
         conn.close()
 
 
+def classify_failure_family(
+    eid: str, since: float, *, db_path: Path | None = None,
+) -> tuple[str, str]:
+    """Diagnose the episode's most recent failure into content/transient/unknown.
+
+    Structured evidence first, same discipline as ``is_retry_grant_category``:
+    DB fields the classifier/provider layer itself wrote, not text guessing,
+    decide the family; free-text markers are only a fallback for the cases
+    that genuinely have no dedicated structured field (e.g. a bare transport
+    ``ReadTimeout`` before any HTTP status was ever assigned).
+
+    Returns ``(family, evidence)`` where ``family`` is:
+      - ``"content"``: an ``error_logs.category=='quality_gate'`` row exists
+        for this episode in the window -- a real business/QA signal (see
+        CONTENT_FAILURE_CATEGORIES docstring above) -- **and** every
+        provider_calls row in the same window is a clean OK/settled outcome.
+        Real gate signal, no自动重试.
+      - ``"transient"``: either (a) a quality_gate row exists but the window
+        also contains a provider_calls row that was itself INTERRUPTED or
+        timed out (2026-08-24 refinement, real 第 30 轮 EP7 事故: 场景发现
+        调用被供应商 ReadTimeout 打断 302s，发现空手而归才连带把资产映射判成
+        quality_gate 失败——表象是内容失败，根子是瞬时中断，值得重试而不是
+        当真门禁信号停轮); or (b) no quality_gate row, and there's
+        category=='provider', or exc_type=='StructuredFormatError', or a
+        provider_calls row with http_status in (429, 500..599) or
+        status=='INTERRUPTED', or a TRANSIENT_TEXT_MARKERS hit in the raw
+        evidence text.
+      - ``"unknown"``: none of the above -- fail-safe default, still stops
+        the run for a human RCA (unchanged from before this triage existed).
+    """
+    conn = _readonly_conn(db_path)
+    try:
+        error_rows = conn.execute(
+            "SELECT id, category, exc_type, message FROM error_logs "
+            "WHERE ts>=? AND json_extract(context_json,'$.episode_id')=? "
+            "ORDER BY ts DESC LIMIT 6",
+            (since, eid),
+        ).fetchall()
+        call_rows = conn.execute(
+            "SELECT id, http_status, status, error FROM provider_calls "
+            "WHERE ts>=? AND status!='OK' ORDER BY id DESC LIMIT 8",
+            (since,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    def _timeout_or_interrupted_call_reason(row) -> str | None:
+        """Narrow check used only to decide content-vs-hybrid: specifically an
+        INTERRUPTED call or transport-timeout evidence (the shape of the
+        real 第 30 轮 EP7 incident), not the broader 429/5xx transient set
+        (a distinct real 5xx alongside a gate failure is *not* evidence the
+        gate failure itself was timeout-induced, so it must not flip a real
+        quality_gate signal into an auto-retried one)."""
+        status = str(row["status"] or "").upper()
+        text = str(row["error"] or "").lower()
+        if status == "INTERRUPTED" or any(
+            marker in text
+            for marker in (
+                "readtimeout", "read timeout", "connecttimeout", "connect timeout",
+                "writetimeout", "write timeout", "pooltimeout", "pool timeout",
+                "timeout", "超时",
+            )
+        ):
+            return (
+                f"call {row['id']} http={row['http_status']} status={status} "
+                f"err={str(row['error'] or '')[:160]}"
+            )
+        return None
+
+    content_row = next(
+        (row for row in error_rows if row["category"] in CONTENT_FAILURE_CATEGORIES),
+        None,
+    )
+    if content_row is not None:
+        timeout_reasons = [
+            reason for reason in (
+                _timeout_or_interrupted_call_reason(row) for row in call_rows
+            )
+            if reason is not None
+        ]
+        if timeout_reasons:
+            return "transient", (
+                "内容失败疑由瞬时中断诱发：" + timeout_reasons[0]
+                + f"（quality_gate 表象：{content_row['id']} | "
+                f"{content_row['exc_type']} | "
+                f"{str(content_row['message'] or '')[:120]}）"
+            )
+        return "content", (
+            f"{content_row['id']} | {content_row['category']} | "
+            f"{content_row['exc_type']} | {str(content_row['message'] or '')[:200]}"
+        )
+
+    reasons: list[str] = []
+
+    def _mark(reason: str) -> None:
+        if reason not in reasons:
+            reasons.append(reason)
+
+    for row in error_rows:
+        if row["category"] == "provider":
+            _mark(
+                f"{row['id']} | provider | {row['exc_type']} | "
+                f"{str(row['message'] or '')[:160]}"
+            )
+        elif row["exc_type"] == "StructuredFormatError":
+            _mark(
+                f"{row['id']} | StructuredFormatError（掷骰子失败，后端格式内重试已"
+                f"用尽，驱动层给整 run 重新采样一次）| {str(row['message'] or '')[:160]}"
+            )
+    for row in call_rows:
+        http_status = row["http_status"]
+        status = str(row["status"] or "").upper()
+        is_5xx = isinstance(http_status, int) and 500 <= http_status < 600
+        if http_status == 429 or status == "INTERRUPTED" or is_5xx:
+            _mark(
+                f"call {row['id']} http={http_status} status={status} "
+                f"err={str(row['error'] or '')[:160]}"
+            )
+
+    blob = " ".join(
+        [str(row["message"] or "") for row in error_rows]
+        + [str(row["error"] or "") for row in call_rows]
+    ).lower()
+    if any(marker in blob for marker in TRANSIENT_TEXT_MARKERS):
+        _mark("文本命中瞬时故障白名单（rate_limit/ReadTimeout/5xx 说明文案等）")
+
+    if reasons:
+        return "transient", "；".join(reasons[:5])
+    return "unknown", "(未命中任何已知瞬时/内容证据，按未知族 fail-safe 停轮)"
+
+
+# --- 失败停轮后自动恢复（2026-08-24 起，内部触发器，见文件头协议说明） -------
+#
+# 单次 `run` 调用的自动循环轮数上限：不是黑名单，是防止在真实、确定性故障上
+# 死循环的保险丝。达到上限就停，把每一轮的失败签名汇总进日志交回人工。
+AUTO_RUN_CYCLE_MAX = 8
+
+
+class FailureSignature(NamedTuple):
+    """一次停轮的机械化签名，用于判断"连续两轮同一故障"（另一道死循环保险丝）。
+
+    四个字段全部从失败对象机械推导，不含任何具体业务词/硬编码名单：
+      - episode：停轮所在的集号（如 'EP4'）；
+      - family：故障族——classify_failure_family() 的返回值（content/
+        transient/unknown），或 'start_refused'（start_or_resume 被后端拒绝，
+        不在失败分诊范围内的另一种停轮原因）；
+      - exc_type：该集失败窗口内最新一条 error_logs.exc_type（结构化字段，
+        没有则为空串，不做任何文本猜测）；
+      - message_digest：失败原始文本经 _normalize_message() 机械归一化
+        （数字统一替换、空白折叠、截断）后的前缀。
+    两轮的 FailureSignature 相等（NamedTuple 逐字段比较）即视为"同一失败复现"。
+    """
+
+    episode: str
+    family: str
+    exc_type: str
+    message_digest: str
+
+
+def _normalize_message(text: str, length: int = 160) -> str:
+    """把失败文本机械归一化成可比较的摘要。
+
+    折叠连续空白、把所有数字串统一替换成 '#'（时间戳/错误码序号/延迟毫秒数
+    这类逐次必然不同的数字不该让本质相同的故障被误判成不同签名），再截断到
+    length 字符。纯正则变换，不含任何业务词表，对任何项目/任何故障文本通用。
+    """
+    collapsed = re.sub(r"\s+", " ", (text or "").strip())
+    digitless = re.sub(r"\d+", "#", collapsed)
+    return digitless[:length]
+
+
+def _latest_exc_type(eid: str, since: float, *, db_path: Path | None = None) -> str:
+    """该集失败窗口内最新一条 error_logs.exc_type（结构化字段，无则空串）。"""
+    conn = _readonly_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT exc_type FROM error_logs WHERE ts>=? AND "
+            "json_extract(context_json,'$.episode_id')=? ORDER BY ts DESC LIMIT 1",
+            (since, eid),
+        ).fetchone()
+    finally:
+        conn.close()
+    return str(row["exc_type"] or "") if row is not None else ""
+
+
+def _log_cycle_history(history: list[FailureSignature]) -> None:
+    log(f"=== AUTO-CYCLE 失败签名汇总（共 {len(history)} 轮） ===")
+    for idx, sig in enumerate(history, start=1):
+        log(f"  第 {idx} 轮：episode={sig.episode} family={sig.family} "
+            f"exc_type={sig.exc_type!r} message={sig.message_digest!r}")
+
+
+# --- 重启后端（照抄协调层已验证的安全序） ------------------------------------
+#
+# 安全序：先 import 自检（工作树可能正被其他 agent 半编辑，自检失败绝不碰旧
+# 进程，宁可用旧代码继续跑也不能把服务打死）→ 自检通过才用 `ss -ltnp` 按端口
+# 取 PID（严禁 pgrep/pkill 按名匹配——历史上自匹配翻车 4 次，见
+# mjagent2-backend-restart-on-this-box 记忆）→ kill 旧进程、等端口释放 →
+# setsid nohup 拉起新进程 → 带会话头轮询 /api/system/jobs 到 200 才算重启成功。
+BACKEND_PORT = 8230
+BACKEND_LOG_PATH = "/tmp/manju2_backend.log"
+VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
+VENV_UVICORN = ROOT / ".venv" / "bin" / "uvicorn"
+
+BACKEND_IMPORT_RETRY_MAX = 5
+BACKEND_IMPORT_RETRY_DELAY_S = 60.0
+BACKEND_PORT_RELEASE_TIMEOUT_S = 30.0
+BACKEND_PORT_RELEASE_POLL_S = 1.0
+BACKEND_HEALTH_TIMEOUT_S = 120.0
+BACKEND_HEALTH_POLL_S = 2.0
+
+
+def _backend_import_self_check() -> tuple[bool, str]:
+    """`.venv/bin/python -c "import app.main"` 一次性自检，不改动任何进程。"""
+    proc = subprocess.run(
+        [str(VENV_PYTHON), "-c", "import app.main"],
+        cwd=ROOT, capture_output=True, text=True, timeout=60,
+    )
+    detail = (proc.stderr or proc.stdout or "").strip()[-2000:]
+    return proc.returncode == 0, detail
+
+
+def _wait_for_import_self_check() -> bool:
+    """自检失败最多重试 BACKEND_IMPORT_RETRY_MAX 次（阶梯说明见任务书）：
+    工作树很可能正被其他 agent 半编辑，绝不能在这个状态下杀旧进程——旧进程
+    好歹还能跑，杀了就是把服务彻底打死。"""
+    for attempt in range(1, BACKEND_IMPORT_RETRY_MAX + 1):
+        ok, detail = _backend_import_self_check()
+        if ok:
+            if attempt > 1:
+                log(f"import app.main 自检在第 {attempt} 次尝试通过。")
+            return True
+        remaining = BACKEND_IMPORT_RETRY_MAX - attempt
+        log(f"import app.main 自检失败（第 {attempt}/{BACKEND_IMPORT_RETRY_MAX} 次）"
+            "——工作树可能正被其他 agent 半编辑，不重启旧进程。"
+            + (f"等待 {int(BACKEND_IMPORT_RETRY_DELAY_S)}s 后重试（还剩 {remaining} 次）。"
+               if remaining > 0 else "重试已用尽。")
+            + f" detail={detail[:500]}")
+        if remaining > 0:
+            time.sleep(BACKEND_IMPORT_RETRY_DELAY_S)
+    log(f"import app.main 自检连续 {BACKEND_IMPORT_RETRY_MAX} 次失败，判定工作树处于"
+        "半编辑状态。宁可用旧代码继续跑也不能把服务打死——放弃本次重启，旧进程原样保留。")
+    return False
+
+
+def _find_backend_pid() -> int | None:
+    """`ss -ltnp` 按端口取监听进程 PID——严禁 pgrep/pkill 按名匹配。"""
+    proc = subprocess.run(
+        ["ss", "-ltnp"], capture_output=True, text=True, timeout=15,
+    )
+    port_pattern = re.compile(rf":{BACKEND_PORT}\s")
+    pid_pattern = re.compile(r"pid=(\d+)")
+    for line in proc.stdout.splitlines():
+        if "LISTEN" not in line or not port_pattern.search(line):
+            continue
+        match = pid_pattern.search(line)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _kill_backend_pid(pid: int) -> bool:
+    """SIGTERM 旧进程，等端口释放；超时则 SIGKILL 后再等一轮。成功返回 True。"""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    for _escalate in (False, True):
+        deadline = time.monotonic() + BACKEND_PORT_RELEASE_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if _find_backend_pid() is None:
+                return True
+            time.sleep(BACKEND_PORT_RELEASE_POLL_S)
+        if _escalate:
+            return False
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+    return False
+
+
+def _launch_backend() -> None:
+    command = (
+        f"cd {shlex.quote(str(ROOT))} && setsid nohup {shlex.quote(str(VENV_PYTHON))} "
+        f"{shlex.quote(str(VENV_UVICORN))} app.main:app --host 127.0.0.1 "
+        f"--port {BACKEND_PORT} --timeout-graceful-shutdown 30 "
+        f"> {shlex.quote(BACKEND_LOG_PATH)} 2>&1 &"
+    )
+    subprocess.run(["bash", "-c", command], cwd=ROOT, check=True)
+
+
+def _health_probe() -> bool:
+    """带 X-Manju-Session 头轮询 GET /api/system/jobs 到 200，超时返回 False。"""
+    deadline = time.monotonic() + BACKEND_HEALTH_TIMEOUT_S
+    while time.monotonic() < deadline:
+        code, _resp = call("GET", "/api/system/jobs", timeout=10)
+        if code == 200:
+            return True
+        time.sleep(BACKEND_HEALTH_POLL_S)
+    return False
+
+
+def restart_backend() -> bool:
+    """完整重启协议：import 自检 → kill 旧进程 → 拉起新进程 → 健康探测。
+
+    任一环节失败都返回 False 且不再往下走（自检失败尤其不动旧进程）。
+    """
+    log("=== 后端重启协议开始（导入自检 → kill 旧进程 → 拉起新进程 → 健康探测） ===")
+    if not _wait_for_import_self_check():
+        return False
+    pid = _find_backend_pid()
+    if pid is not None:
+        log(f"发现监听 :{BACKEND_PORT} 的旧进程 pid={pid}"
+            "（ss -ltnp 定位，不用 pgrep/pkill 按名匹配）。")
+        if not _kill_backend_pid(pid):
+            log(f"旧进程 pid={pid} 在等待窗口内未释放端口 :{BACKEND_PORT}，停止重启。")
+            return False
+        log(f"旧进程 pid={pid} 已退出，端口 :{BACKEND_PORT} 已释放。")
+    else:
+        log(f"未发现监听 :{BACKEND_PORT} 的旧进程，直接拉起新进程。")
+    _launch_backend()
+    log(f"已提交后端拉起命令（setsid nohup ... --port {BACKEND_PORT}），等待健康探测。")
+    if not _health_probe():
+        log(f"健康探测超时（{int(BACKEND_HEALTH_TIMEOUT_S)}s 内 "
+            "GET /api/system/jobs 未返回 200），停止。")
+        return False
+    log("健康探测通过（GET /api/system/jobs -> 200）。后端重启协议完成。")
+    return True
+
+
+def _clear_all_episodes() -> bool:
+    return all([clear_one(name, eid) for name, eid in EPISODES])
+
+
 def clear_one(name: str, eid: str) -> bool:
     payload = status_of(eid)
     state = payload.get("screenplay_status")
@@ -294,7 +633,7 @@ def clear_one(name: str, eid: str) -> bool:
 
 def cmd_clear(_args) -> int:
     log("=== CLEAR EP1-EP10 (test project only) ===")
-    ok = all([clear_one(name, eid) for name, eid in EPISODES])
+    ok = _clear_all_episodes()
     log(f"=== CLEAR DONE ok={ok} ===")
     return 0 if ok else 1
 
@@ -358,17 +697,25 @@ def start_or_resume(name: str, eid: str) -> bool:
     return resp.get("status") in {"queued", "running", "repairing"}
 
 
-def cmd_run(args) -> int:
-    start_index = 0
-    if args.start_from:
-        names = [name for name, _ in EPISODES]
-        if args.start_from not in names:
-            log(f"未知起始集：{args.start_from}")
-            return 2
-        start_index = names.index(args.start_from)
+def _execute_serial_pass(start_index: int) -> tuple[int, dict, FailureSignature | None]:
+    """跑一轮 EP{start_index+1}→EP10 严格串行；一集被拒绝启动或分诊后停轮，
+    这一轮就立即返回（其余集不再动）。
+
+    这是原来 cmd_run 的全部单轮逻辑，原样保留、未改变任何判定；唯一的区别是
+    现在把结果打包返回给上层的 cmd_run 自动循环，而不是直接当 CLI 出口。
+
+    返回 (rc, results, signature)：
+      * rc==0：全部 ready，signature 恒为 None（成功不需要给自动循环判定重复）；
+      * rc==3：某集被拒绝启动/续跑；rc==4：某集分诊后停轮——这两种情况
+        signature 是这次停轮的 FailureSignature，供 cmd_run 判断"连续两轮
+        同一签名"。
+    rc 的语义与原来单轮版 cmd_run 完全一致，未新增/未挪用其它返回码。
+    """
     log(f"=== SERIAL RUN EP{start_index + 1}-EP{len(EPISODES)} START ===")
     results: dict[str, str] = {}
     for name, eid in EPISODES[start_index:]:
+        transient_retries = 0
+        transient_evidence_log: list[str] = []
         while True:
             payload = status_of(eid)
             if payload.get("screenplay_status") == "ready":
@@ -387,7 +734,13 @@ def cmd_run(args) -> int:
                 results[name] = "start_refused"
                 log("=== SERIAL RUN STOPPED ===")
                 log(json.dumps(results, ensure_ascii=False))
-                return 3
+                refusal_state = json.dumps(status_of(eid), ensure_ascii=False)
+                signature = FailureSignature(
+                    episode=name, family="start_refused",
+                    exc_type=_latest_exc_type(eid, since),
+                    message_digest=_normalize_message(refusal_state),
+                )
+                return 3, results, signature
             payload = await_terminal(name, eid)
             state = str(payload.get("screenplay_status") or "")
             if state == "ready":
@@ -396,28 +749,123 @@ def cmd_run(args) -> int:
                 break
             failure = (payload.get("screenplay_error") or "")[:400]
             log(f"{name} 未通过：state={state} err={failure}")
-            if is_rate_limited(eid, since):
-                delay = provider_retry_after(since) or 1800.0
-                log(f"{name} 判定为供应商限流，等待 {int(delay)} 秒后从本集继续"
-                    "（不修改业务代码）")
-                time.sleep(delay)
-                continue
             if is_retry_grant_category(eid, since):
                 log(f"{name} 命中 GEN-RETRY-GRANT"
                     "（error_logs.category='generation_retry_grant'）。"
                     "在当前 episode_prep_pack-only 后端下这理论上结构性不可达"
                     "（证据见 is_retry_grant_category() docstring）——出现即代表"
                     "后端行为已漂移，或该集仍绑定着改造前的旧管线残留状态，"
-                    "不再自动重试，按非限流失败停下等人工核实。")
-            log(f"{name} 非限流失败 —— 停止整轮，等待根因分析。证据：")
+                    "不参与下面的失败分诊自动重试，按分诊结果处理。")
+
+            family, evidence = classify_failure_family(eid, since)
+
+            if family == "transient" and transient_retries < TRANSIENT_RETRY_MAX:
+                delay = TRANSIENT_RETRY_BACKOFF_S[transient_retries]
+                transient_retries += 1
+                transient_evidence_log.append(f"第 {transient_retries} 次：{evidence}")
+                log(f"{name} 自动重试 {transient_retries}/{TRANSIENT_RETRY_MAX}："
+                    f"瞬时故障（{evidence}）——等待 {int(delay)}s 后从本集重新发起")
+                time.sleep(delay)
+                continue
+
+            if family == "transient":
+                log(f"{name} 瞬时故障自动重试已达上限（{TRANSIENT_RETRY_MAX} 次），"
+                    "判定为真实故障，停轮。三次证据汇总：")
+                for line in transient_evidence_log:
+                    log(f"    {line}")
+            elif family == "content":
+                log(f"{name} 内容族失败（quality_gate）—— 真信号，需人工 RCA，"
+                    f"不自动重试：{evidence}")
+            else:
+                log(f"{name} 未知族失败 —— fail-safe 默认，停轮等待人工根因分析。")
+            log(f"{name} 停止整轮。证据：")
             for line in recent_failure_evidence(eid, since).splitlines()[:10]:
                 log(f"    {line}")
             results[name] = state or "failed"
             log("=== SERIAL RUN STOPPED ===")
             log(json.dumps(results, ensure_ascii=False))
-            return 4
+            signature = FailureSignature(
+                episode=name, family=family,
+                exc_type=_latest_exc_type(eid, since),
+                message_digest=_normalize_message(failure),
+            )
+            return 4, results, signature
     log("=== SERIAL RUN DONE === " + json.dumps(results, ensure_ascii=False))
-    return 0 if all(value == "ready" for value in results.values()) else 1
+    rc = 0 if all(value == "ready" for value in results.values()) else 1
+    return rc, results, None
+
+
+def cmd_run(args) -> int:
+    """CLI 入口。默认=自动循环模式（内部触发器，见文件头协议说明）：一轮跑到
+    停轮就自动 重启后端 → 健康探测 → clear → 从 EP1 重新开始，直到全部 ready、
+    或触发下面任一护栏。`--single-pass` 退回旧的单轮语义（失败即停轮返回，不
+    自动恢复），供人工介入场景与测试单轮触发逻辑本身时使用。
+
+    `--from` 只影响第一轮的起点——自动循环触发的每一轮都固定从 EP1 开始
+    （协议要求：清库后必须从头验证，不得只续跑失败那集，参见
+    mjagent2-serial-regression-discipline 的"从第 1 集重新串行跑"纪律）。
+    """
+    start_index = 0
+    if args.start_from:
+        names = [name for name, _ in EPISODES]
+        if args.start_from not in names:
+            log(f"未知起始集：{args.start_from}")
+            return 2
+        start_index = names.index(args.start_from)
+
+    if getattr(args, "single_pass", False):
+        log("--single-pass：退回旧的单轮语义，失败即停轮，不自动重启后端/清库/重跑。")
+        rc, _results, _signature = _execute_serial_pass(start_index)
+        return rc
+
+    log("=== AUTO-CYCLE RUN（2026-08-24 起默认开启：一轮停轮后自动 重启后端 → "
+        f"健康探测 → clear → 从 EP1 重跑；--single-pass 可退回旧语义）"
+        f"单次调用最多 {AUTO_RUN_CYCLE_MAX} 轮 ===")
+    cycle = 0
+    prev_signature: FailureSignature | None = None
+    history: list[FailureSignature] = []
+    while True:
+        cycle += 1
+        log(f"--- AUTO-CYCLE {cycle}/{AUTO_RUN_CYCLE_MAX} 开始"
+            f"（起点 {EPISODES[start_index][0]}） ---")
+        rc, _results, signature = _execute_serial_pass(start_index)
+        if rc == 0:
+            log(f"=== AUTO-CYCLE {cycle} 全部 READY，自动循环结束 ===")
+            return 0
+        if signature is None:
+            log(f"AUTO-CYCLE {cycle} 失败（rc={rc}）但未产出可比较的失败签名"
+                "（不应发生），fail-safe 停止自动循环，需人工介入。")
+            return rc
+        history.append(signature)
+        log(f"AUTO-CYCLE {cycle} 失败签名：episode={signature.episode} "
+            f"family={signature.family} exc_type={signature.exc_type!r} "
+            f"message={signature.message_digest!r}")
+        if prev_signature is not None and signature == prev_signature:
+            log("同一失败签名连续出现 2 次，判定为确定性问题，停止自动循环，"
+                "需人工 RCA。")
+            _log_cycle_history(history)
+            return rc
+        if cycle >= AUTO_RUN_CYCLE_MAX:
+            log(f"自动循环已达单次 run 调用的上限（{AUTO_RUN_CYCLE_MAX} 轮），"
+                "停止自动循环，需人工介入。")
+            _log_cycle_history(history)
+            return rc
+        log(f"AUTO-CYCLE {cycle} 结束，按协议进入下一轮："
+            "重启后端 → 健康探测 → clear → 从 EP1 重跑。")
+        if not restart_backend():
+            log("后端重启/健康探测失败，停止自动循环（不清数据、不重跑，"
+                "旧进程原样保留，需人工介入）。")
+            _log_cycle_history(history)
+            return 5
+        log("AUTO-CYCLE：clear 本项目 EP1-EP10（仅本项目这 10 集，不触碰其它）。")
+        clear_ok = _clear_all_episodes()
+        log(f"AUTO-CYCLE：clear 完成 ok={clear_ok}")
+        if not clear_ok:
+            log("clear 未完全成功，停止自动循环，需人工介入。")
+            _log_cycle_history(history)
+            return 6
+        prev_signature = signature
+        start_index = 0
 
 
 EXPECTED_SCREENPLAY_CONTRACT_VERSION = "6.0.0"
@@ -573,6 +1021,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=["status", "clear", "run", "verify"])
     parser.add_argument("--from", dest="start_from", default="")
+    parser.add_argument(
+        "--single-pass", dest="single_pass", action="store_true",
+        help="run 命令退回旧的单轮语义：失败即停轮，不自动重启后端/清库/重跑"
+             "（默认=自动循环模式，见 cmd_run docstring）。",
+    )
     args = parser.parse_args()
     return {
         "status": cmd_status, "clear": cmd_clear,

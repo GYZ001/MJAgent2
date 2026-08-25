@@ -220,9 +220,18 @@ def _prep_single_episode_run(monkeypatch, tmp_path) -> None:
         yyft_serial10, "status_of",
         lambda eid: {"screenplay_status": "failed", "active": False},
     )
-    monkeypatch.setattr(yyft_serial10, "is_rate_limited", lambda eid, since: False)
+    # 默认落"未知族"（fail-safe，不自动重试）；失败分诊本身的红灯测试在
+    # tests/test_yyft_serial10_failure_triage.py，这里只需要一个不触发瞬时
+    # 重试循环的稳定桩，不重复覆盖分诊逻辑本身。
+    monkeypatch.setattr(
+        yyft_serial10, "classify_failure_family",
+        lambda eid, since: ("unknown", "(stub)"),
+    )
     monkeypatch.setattr(
         yyft_serial10, "recent_failure_evidence", lambda eid, since: "(evidence)",
+    )
+    monkeypatch.setattr(
+        yyft_serial10, "_latest_exc_type", lambda eid, since: "",
     )
 
 
@@ -252,7 +261,7 @@ def test_cmd_run_stops_immediately_without_a_retry_loop(
         },
     )
 
-    rc = yyft_serial10.cmd_run(SimpleNamespace(start_from=""))
+    rc = yyft_serial10.cmd_run(SimpleNamespace(start_from="", single_pass=True))
 
     assert rc == 4
     assert starts["n"] == 1
@@ -282,7 +291,7 @@ def test_cmd_run_does_not_auto_recover_a_non_retry_grant_failure(
         },
     )
 
-    rc = yyft_serial10.cmd_run(SimpleNamespace(start_from=""))
+    rc = yyft_serial10.cmd_run(SimpleNamespace(start_from="", single_pass=True))
 
     assert rc == 4
     assert starts["n"] == 1
