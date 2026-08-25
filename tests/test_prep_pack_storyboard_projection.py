@@ -39,6 +39,7 @@ from app.harness.contracts import get_contract
 from app.harness.types import EvidenceArtifact
 from app.production.screenplay_authority import (
     PREP_PACK_PROJECTION_FORMAT_NOTE,
+    _split_prep_pack_spoken_line,
     is_prep_pack_payload,
     project_prep_pack_to_screenplay,
     resolve_current_screenplay_authority,
@@ -302,6 +303,101 @@ def test_unsplittable_long_single_clause_falls_back_to_character_chunks():
         assert content_char_count(text) <= config.MAX_SPOKEN_CHARS_PER_SHOT
         parts.append(text)
     assert "".join(parts) == long_line
+
+
+# ---------------------------------------------------------------------------
+# Root cause 2 of the EP6 run_9bfcd5cbe128 regression (2026-08-25): splitting
+# on any punctuation boundary (commas included) with equal priority produces
+# grammatically incomplete units that trail off on a comma. See
+# _split_prep_pack_spoken_line's own docstring for the full analysis.
+# ---------------------------------------------------------------------------
+
+
+def test_split_never_lets_a_unit_span_across_a_sentence_boundary():
+    """句子优先：只要引述由多句完整句子组成，任何一个切分单元都不应该横跨到
+    下一句中途才断——旧算法（逗号/句号同权重贪心堆叠）会在"上一句尾部 + 下一句
+    开头的某个逗号小句"恰好能塞进同一单元时这么做，产出一个既含完整句又带半句
+    尾巴的单元（用同一条输入验证：旧算法确实会产出
+    ['他站起来。他知道自己错了，', '必须道歉，否则来不及了。']，
+    第一个单元把无关的完整句子和下一句的残句粘在一起）。"""
+    from app.screenplay_ir import _split_spoken_line
+    from app.spoken_contract import content_char_count
+
+    line = "他站起来。他知道自己错了，必须道歉，否则来不及了。"
+    old = _split_spoken_line(line, max_chars=11)
+    new = _split_prep_pack_spoken_line(line, max_chars=11)
+
+    assert "".join(new) == line, "拆分必须逐字可还原，不得增删改写"
+    for part in new:
+        assert content_char_count(part) <= 11
+
+    # 旧算法确实把第一句的完整收尾和第二句的开头小句揉进了同一个单元；
+    # 新算法必须避免这种跨句拼接。
+    assert old == ["他站起来。他知道自己错了，", "必须道歉，否则来不及了。"], old
+    assert new == ["他站起来。", "他知道自己错了，必须道歉，", "否则来不及了。"], new
+
+    # 任何一个单元里，句末标点（。！？…）之后不应该还跟着别的非空内容——
+    # 也就是说，一个单元最多只在结尾出现一次句末标点，不会先完整收尾一句
+    # 又在同一单元里续上下一句的开头。
+    import re
+    sentence_end = re.compile(r"[。！？…]")
+    for part in new:
+        matches = list(sentence_end.finditer(part))
+        for match in matches:
+            assert match.end() == len(part), (
+                f"单元在句末标点后仍有内容，说明跨句子拼接：{part!r}"
+            )
+
+
+def test_split_matches_old_splitter_when_no_sentence_boundary_exists():
+    """诚实的能力边界：若整条引述本身就是单个长句、除了句尾只有逗号（真实
+    EP6 案例：74 字/54 字的孟浩内心独白通篇只有最后一个句号），任何切分方案
+    都必须在最后一个句号之前至少切一刀，那一刀左边的单元只能停在逗号上——这是
+    原文标点决定的语法边界，句子优先切分对这种输入完全无能为力，因此结果必须
+    与旧算法（`app.screenplay_ir._split_spoken_line`）逐字相同，不应假装能
+    改善、也不应产生不同的（尤其是更差的）切分。"""
+    from app import config
+    from app.screenplay_ir import _split_spoken_line
+
+    # 真实 EP6 台词：run_9bfcd5cbe128 被判"未安排"的 3 条关键台词中的前两条，
+    # 正是这两句 74 字 / 54 字独白切分出的残句。
+    run_on_sentences = [
+        "仅仅几个时辰的打坐，就相当于平日里约莫一个月的修行，虽说这是因石室内灵气"
+        "天长日久的积累，此后便不会如此，可对我来说，在这里修行的速度要快出外界不少。",
+        "此地灵气之所以可以积累而不外散，想来必定是因这些印记的原因，许师姐应是用"
+        "这个方法来积累灵气，方便一次性吐纳。",
+    ]
+    for line in run_on_sentences:
+        old = _split_spoken_line(line, max_chars=config.MAX_SPOKEN_CHARS_PER_SHOT)
+        new = _split_prep_pack_spoken_line(line, max_chars=config.MAX_SPOKEN_CHARS_PER_SHOT)
+        assert new == old, (
+            f"单句超容量、无更早句末标点时不应偏离旧算法：{new!r} vs {old!r}"
+        )
+        # 非最后一个单元必然停在逗号上——这是原文标点结构决定的，不是缺陷。
+        for part in new[:-1]:
+            assert part.endswith("，"), (
+                f"结构性验证：单句独白拆分出的非末尾单元预期以逗号收尾，实际 {part!r}"
+            )
+        assert new[-1].endswith("。")
+
+
+def test_split_matches_old_splitter_for_full_ep6_fixture():
+    """把新旧切分器套在真实 EP6 fixture 的全部 key_lines 上做端到端一致性抽查：
+    句子优先切分不应该在"没有句子边界可利用"的输入上产生和旧算法不同（尤其是
+    更碎或超容量）的结果。"""
+    from app import config
+    from app.screenplay_ir import _split_spoken_line
+
+    payload = _ep6_payload()
+    for event in payload["event_chain"]:
+        for item in event.get("key_lines") or []:
+            line = str(item.get("line") or "")
+            old = _split_spoken_line(line, max_chars=config.MAX_SPOKEN_CHARS_PER_SHOT)
+            new = _split_prep_pack_spoken_line(
+                line, max_chars=config.MAX_SPOKEN_CHARS_PER_SHOT
+            )
+            assert "".join(new) == line.strip() or "".join(new) == line
+            assert new == old, f"{line!r}: {new!r} vs {old!r}"
 
 
 # ---------------------------------------------------------------------------

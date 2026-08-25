@@ -7,6 +7,7 @@ from functools import lru_cache
 from threading import RLock
 import hashlib
 import json
+import re
 from typing import Any
 
 from app import config
@@ -22,6 +23,7 @@ from app.schemas import (
     PrepPackSceneAsset,
     ScriptScene,
 )
+from app.spoken_contract import content_char_count
 
 
 SCREENPLAY_QA_PROFILE_VERSION = "screenplay-qa-gate-4"
@@ -1780,6 +1782,59 @@ def is_prep_pack_payload(payload: Any) -> bool:
     return isinstance(payload, dict) and "prep_pack_version" in payload
 
 
+_SENTENCE_UNIT_RE = re.compile(r".*?[。！？…]|.+$")
+
+
+def _split_prep_pack_spoken_line(value: str, *, max_chars: int) -> list[str]:
+    """Prep_pack 专用口播切分：句子优先，只有单句本身仍超容量才退到旧算法。
+
+    真实回归（EP6 run_9bfcd5cbe128，大纲被判「未安排 3 条必保留关键台词」，2026-08-25）
+    定位到两条根因，此函数只处理其中一条：`app.screenplay_ir._split_spoken_line`
+    把句号和逗号当成同权重的切分点，贪心地尽量堆满每个单元，容易把一句话切在句中
+    逗号处，产出以「，」收尾、单独看不像完整台词的半句。
+
+    这里先按句末标点（。！？…）切出"句子"单元，再对句子做同样的贪心堆叠；只有
+    单个句子本身仍超过 max_chars 时，才对那一句退到 `_split_spoken_line` 的逗号/
+    字级兜底。相比旧算法（逗号、句号一视同仁），这保证：一段引述只要由多句话组成，
+    切分结果里任何一刀都不会落在某句话中途——旧算法在"上一句尾部 + 下一句头部
+    的某个逗号小句"恰好能塞进同一单元时会这么做。
+
+    仍然存在、且不能靠算法"修复"的硬限制：若整条引述本身就是单个长句、除了句尾
+    只有逗号（EP6 真实案例里 74 字/54 字的孟浩内心独白，通篇只有最后一个句号），
+    任何切分方案都必须在最后一个句号之前至少切一刀，那一刀左边的单元就只能停在
+    逗号上——这是原文自身的标点结构决定的语法边界，不是切分算法的缺陷，也不能
+    靠切分算法编造原文没有的句号来消除（那会篡改台词逐字保真）。这种情况下本函数
+    的输出与旧算法逐字相同（同样退到逗号/字级兜底），不作退化，也不假装能改善。
+
+    大纲阶段是否仍会因为这类"必然以逗号收尾"的分句被判定为漏戏，交由结构化
+    key_line_ids 台账判定，不再看这段散文本身像不像完整台词
+    （见 app.validators.validate_storyboard_outline 的 missing_lines 分支）。
+    """
+    line = str(value or "").strip()
+    if not line or content_char_count(line) <= max_chars:
+        return [line] if line else []
+    from app.screenplay_ir import _split_spoken_line
+
+    sentences = [unit for unit in _SENTENCE_UNIT_RE.findall(line) if unit.strip()]
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if current and content_char_count(current + sentence) > max_chars:
+            chunks.append(current)
+            current = ""
+        if content_char_count(sentence) <= max_chars:
+            current += sentence
+            continue
+        # 单句本身仍超容量：只对这一句退到旧算法的逗号/字级兜底，不影响其余句子。
+        if current:
+            chunks.append(current)
+            current = ""
+        chunks.extend(_split_spoken_line(sentence, max_chars=max_chars))
+    if current:
+        chunks.append(current)
+    return [chunk.strip() for chunk in chunks if chunk.strip()]
+
+
 def project_prep_pack_to_screenplay(payload: dict[str, Any]) -> EpisodeScreenplay:
     """Deterministically project an episode_prep_pack payload into the legacy
     EpisodeScreenplay shape the storyboard stage (narrative_plan is None
@@ -1956,7 +2011,13 @@ def project_prep_pack_to_screenplay(payload: dict[str, Any]) -> EpisodeScreenpla
     # chunking once a clause has no more punctuation to split on) guarantees
     # every returned chunk is non-empty and <= max_chars -- there is no
     # "too long to split further" failure mode left unhandled.
-    from app.screenplay_ir import _split_spoken_line
+    #
+    # 2026-08-25 追加（同一次 EP6 回归，见 _split_prep_pack_spoken_line 的完整
+    # 说明）：把逐字拆分从 `_split_spoken_line`（逗号/句号同权重、纯贪心堆叠）
+    # 换成 `_split_prep_pack_spoken_line`（句子优先，只有单句本身超容量才退到
+    # 前者的逗号/字级兜底）。目的是减少"切分产出的单元以逗号收尾、读起来像半句"
+    # 的情况；对单句超长、通篇只有末尾一个句号的引述，两者结果逐字相同（这是
+    # 原文标点决定的语法边界，见该函数文档）。
     dialogue_chains: list[KeyDialogueChain] = []
     for event in events:
         turns: list[KeyDialogueTurn] = []
@@ -1965,7 +2026,7 @@ def project_prep_pack_to_screenplay(payload: dict[str, Any]) -> EpisodeScreenpla
                 continue
             raw_line = str(item.get("line") or "")
             speaker = str(item.get("speaker") or "")
-            for part in _split_spoken_line(
+            for part in _split_prep_pack_spoken_line(
                 raw_line, max_chars=config.MAX_SPOKEN_CHARS_PER_SHOT,
             ):
                 turns.append(KeyDialogueTurn(

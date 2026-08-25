@@ -1237,6 +1237,11 @@ KEY_POINT_COVERAGE = textmatch.KEY_POINT_COVERAGE
 KEY_CONTENT_MAX_REPORT = 4       # 单条错误最多点名几条，避免错误列表过长把 prompt 撑爆
 MIN_KEY_LINES = KEY_LINES_MIN
 MIN_KEY_PLOT_POINTS = KEY_PLOT_POINTS_MIN
+# key_line_order_errors 专用：去说话人/标点后短于此字数的关键台词（如"不对。""莫非……"，
+# 核心内容只有 1~2 个汉字）不参与顺序判定，见该函数文档字符串的真实回归案例。
+# 数值与本文件里 drop_list 判定使用的"可判定内容最短长度"（`len(_condense(d)) < 6`）
+# 保持一致，不是新引入的独立阈值。
+ORDER_CHECK_MIN_CORE_CHARS = 6
 
 
 _strip_speaker = textmatch.strip_speaker
@@ -1335,10 +1340,25 @@ def derive_key_lines(
 def key_line_order_errors(
     key_lines: list[str], ordered_texts: list[str], *, subject: str,
 ) -> list[str]:
-    """Ensure key dialogue remains in narrative order, not merely present as a bag of lines."""
+    """Ensure key dialogue remains in narrative order, not merely present as a bag of lines.
+
+    超短台词（去说话人/标点后 < ``ORDER_CHECK_MIN_CORE_CHARS`` 字，如"不对。""莫非……"）
+    被跳过，既不用来推进游标，也不因"顺序不对"而报错。原因：``_matching_text_indices``
+    的模糊匹配对 1~2 字的核心内容几乎必然在多处产生假阳性命中——任何包含这两三个字的
+    文本都会被 ``_longest_run_ratio``/``_bigram_coverage`` 判定"命中"，因为分母（台词自身
+    长度）太小。真实回归（EP6 run_9bfcd5cbe128，2026-08-25）：大纲里"孟浩：莫非……"
+    的候选命中列表里混进了一处远超其真实剧情位置的镜头，一旦当真就把 last_index
+    提前推到那里，导致其后 4 条本来顺序完全正确的台词（分别在更早的镜头里、且
+    key_line_ids 已经显式声明了正确位置）被连带误判成"打乱顺序"。这类超短台词的
+    真实位置本来就无法靠散文模糊匹配可靠判定，跳过它们不会漏判——它们是否被交付，
+    由 key_line_ids 结构化台账负责（见 validate_storyboard_outline 的 missing_lines
+    分支），这里只负责判定"可靠可判定的台词"是否被打乱顺序。
+    """
     last_index = -1
     out_of_order: list[str] = []
     for line in key_lines:
+        if len(_condense(_strip_speaker(line))) < ORDER_CHECK_MIN_CORE_CHARS:
+            continue
         candidates = _matching_text_indices(line, ordered_texts)
         if not candidates:  # Missing-content validators report this separately.
             continue
@@ -5512,13 +5532,54 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
             )
     # 关键台词/剧情点必须在大纲里被分配到某一镜（beat 或 covers 中体现），否则后段必丢戏。
     plan_text = "".join((s.beat or "") + (s.covers or "") for s in shots)
-    key_lines = list(key_line_catalog(screenplay).values())
+    catalog = key_line_catalog(screenplay)
+    key_lines = list(catalog.values())
     key_points = [pt.strip() for pt in (screenplay.key_plot_points or []) if pt and pt.strip()]
-    missing_lines = [
-        ln for ln in key_lines
-        if _longest_run_ratio(_strip_speaker(ln), plan_text) < KEY_LINE_PRESENT_RATIO
-        and _bigram_coverage(_strip_speaker(ln), plan_text) < KEY_LINE_BIGRAM_COVERAGE
-    ]
+    # 结构化 ID 优先于散文模糊匹配（真实回归：EP6 run_9bfcd5cbe128，2026-08-25）。
+    #
+    # app.textmatch 模块自己的文档已经写明这一层的定位：「PRD VAL-422 §4.4.4 之后，
+    # 这些函数的定位被下调……不得单独产生 must_keep missing blocker——结构化 ID 台账
+    # 才是主判据」。但下面这条 missing_lines 判定此前一直违反这条约定：它只看
+    # beat/covers 的散文摘要是否复述了台词字面，完全不看模型是否已经通过
+    # key_line_ids 显式声明了分配。真实案例里模型把全部 17 条 KL 逐一分配进
+    # key_line_ids（覆盖无遗漏、无重复、无超容量，三条硬性结构校验全部通过），
+    # 只是 covers 摘要用了转述而非近似引用，散文匹配就判"未安排"，用启发式否决了
+    # 已经显式声明的结构化事实。
+    #
+    # 放松之后谁来守"声明了但没交付"：
+    #   1) 就在本函数内、无条件调用的 outline_key_line_capacity_errors 已经对
+    #      "用了 key_line_ids 就必须覆盖全部 catalog" 做了硬性判定——未知 ID、
+    #      重复分配、单镜超容量、任何一条 catalog KL 未被分配，都会在那里产生
+    #      [OUTLINE_KEY_LINE_CAPACITY_INVALID] 错误，不依赖任何模糊匹配；
+    #   2) 大纲一旦进入逐镜生成，key_line_ids 不只是"计划"：
+    #      app.stages._scene_pack_dialogues 直接用 key_line_ids 从这份 catalog
+    #      逐字取出 speaker/line 构造该镜真正的 Dialogue 列表——covers 散文完全
+    #      不参与"是否真的说出口"，说不说得出口只取决于 key_line_ids 有没有分配；
+    #   3) 人工编辑阶段还有 key_line_delivery_errors（validators.py）用同样的
+    #      模糊匹配再核一遍，但比对对象是 spoken_text_of(shot)（真实口播/声轨），
+    #      不是 covers 摘要——摘要写得像不像台词，从不是这句词能否播出的决定因素。
+    #   因此对已使用 key_line_ids 规划的大纲，"是否安排"这件事只由 key_line_ids
+    #   是否覆盖 catalog 决定；covers 散文只是给人看的摘要，不应该单独否决结构化
+    #   声明。只有大纲完全没有使用 key_line_ids（旧数据/降级路径，无结构化台账可
+    #   依赖）时，才退回散文模糊匹配兜底——这与该判据历史上唯一被需要的场景一致。
+    uses_key_line_ids = any((s.key_line_ids or []) for s in shots)
+    if uses_key_line_ids:
+        assigned_kl_ids = {
+            str(kid).strip().upper()
+            for s in shots
+            for kid in (s.key_line_ids or [])
+            if str(kid).strip()
+        }
+        missing_lines = [
+            text for kid, text in catalog.items()
+            if kid not in assigned_kl_ids
+        ]
+    else:
+        missing_lines = [
+            ln for ln in key_lines
+            if _longest_run_ratio(_strip_speaker(ln), plan_text) < KEY_LINE_PRESENT_RATIO
+            and _bigram_coverage(_strip_speaker(ln), plan_text) < KEY_LINE_BIGRAM_COVERAGE
+        ]
     if missing_lines:
         shown = "；".join(missing_lines[:KEY_CONTENT_MAX_REPORT])
         extra = (f"（另有 {len(missing_lines) - KEY_CONTENT_MAX_REPORT} 条从略）"

@@ -174,6 +174,49 @@ def test_outline_rejects_missing_key_line() -> None:
     assert any("未安排" in e and "关键台词" in e for e in errors)
 
 
+def test_outline_key_line_ids_override_paraphrased_covers_for_missing_check() -> None:
+    """真实回归（EP6 run_9bfcd5cbe128，2026-08-25）：模型用 key_line_ids 正确、完整
+    地把关键台词分配到镜头，但 covers 摘要写的是转述而非近似引用原句，散文模糊
+    匹配因此把已经结构化分配的台词误判成"未安排"（真实产物：孟浩的 3 条内心独白
+    被完整分配了 key_line_ids，covers 却写成情节转述，散文匹配判定"未安排"）。
+    只要 key_line_ids 已覆盖该 catalog 条目，就不应该再被 covers 散文否决——
+    覆盖率的权威判据是结构化 ID 台账，不是散文摘要像不像台词，见
+    validate_storyboard_outline 里 missing_lines 分支的完整论证。
+
+    关键台词/beat/covers 三处文字刻意互不重叠（与 KEY_LINE/_valid_beats() 不同，
+    _valid_beats() 第 5 镜 beat 本身近似复述了 KEY_LINE，会让散文匹配意外通过，
+    掩盖这条判据到底测的是什么），确保本用例只有在真正读取 key_line_ids 时才通过。
+    """
+    key_line = "你若敢再靠近半步，我便让你后悔一生。"
+    screenplay = EpisodeScreenplay(
+        episode_no=1, title="陨落的天才", full_script_text="略",
+        key_lines=[key_line], key_plot_points=[KEY_POINT])
+    outline = _outline(_valid_beats(), covers={5: "萧炎神情冷冽地撂下一句话，转身离开测验场"})
+    # 第 5 镜 covers 只写了动作转述，从未出现 key_line 的任何字面片段；
+    # 是否"安排"完全靠 key_line_ids 结构化声明来判定。
+    outline.shots[4].key_line_ids = ["KL01"]
+
+    errors = validate_storyboard_outline(outline, screenplay, 50)
+
+    assert not any("未安排" in e and "关键台词" in e for e in errors), errors
+
+
+def test_outline_key_line_ids_used_but_one_catalog_entry_unassigned_still_flagged() -> None:
+    """结构化判据不是"用了 key_line_ids 就整体放行"：某条 catalog 台词从未出现在
+    任何一镜的 key_line_ids 里时，仍必须硬拦——这是真正的漏戏，不能因为大纲用了
+    ID 规划就一并放过。"""
+    screenplay = EpisodeScreenplay(
+        episode_no=1, title="陨落的天才", full_script_text="略",
+        key_lines=[KEY_LINE, "你们终将后悔今日的嘲笑。"], key_plot_points=[KEY_POINT])
+    outline = _outline(_valid_beats())
+    outline.shots[4].key_line_ids = ["KL01"]
+    # KL02（"你们终将后悔今日的嘲笑。"）从未分配到任何一镜的 key_line_ids。
+
+    errors = validate_storyboard_outline(outline, screenplay, 50)
+
+    assert any("未安排" in e and "关键台词" in e for e in errors), errors
+
+
 def test_render_outline_marks_current_shot() -> None:
     outline = _outline(_valid_beats(), covers={5: KEY_LINE})
     rendered = _render_storyboard_outline(outline, current_shot_no=3)

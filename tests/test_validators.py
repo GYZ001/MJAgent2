@@ -1,7 +1,8 @@
 from app.schemas import Bible, Character, Dialogue, EpisodeScreenplay, Shot, Storyboard, World
 from app.textmatch import longest_run_ratio
 from app.validators import (_contiguous_scene_move, adjacent_spoken_repeat_errors,
-                            key_line_catalog, normalize_action_desc, validate_storyboard,
+                            key_line_catalog, key_line_order_errors, normalize_action_desc,
+                            validate_storyboard,
                             storyboard_shot_count_range,
                             validate_storyboard_preserves_key_content,
                             validate_storyboard_shot_covers_outline)
@@ -318,6 +319,34 @@ def test_storyboard_preservation_rejects_reversed_key_dialogue_chain() -> None:
     )
 
     assert any("打乱了主线对白顺序" in e for e in errors), errors
+
+
+def test_key_line_order_check_ignores_ultra_short_line_spurious_match() -> None:
+    """真实回归（EP6 run_9bfcd5cbe128，2026-08-25）：核心内容只剩 1~2 字的关键台词
+    （如"不对。""莫非……"）在散文模糊匹配下几乎必然产生假阳性命中——任何包含这
+    两三个字的文本都会被 `_longest_run_ratio` 判定"命中"，因为分母（台词自身长度）
+    太小。真实案例里"莫非……"的候选命中列表是 [16, 38]，游标当场被推到 38；
+    这里复现同一机制：核心 2 字的"不对。"唯一命中位置远早于/晚于它的真实位置，
+    一旦被当真参与游标推进，就会把后面顺序完全正确的台词误判成"打乱顺序"。
+    修复后应跳过这条超短台词，不参与游标推进也不参与顺序判定，errors 应为空。
+    """
+    ordered_texts = [
+        "萧炎：先离开这里。",
+        "镜头切换：远山云雾缭绕，画面渐暗。",
+        "萧薰儿：最后再谈修炼。",
+        "镜头切换：远山云雾缭绕，画面渐暗。",
+        "镜头切换：远山云雾缭绕，画面渐暗。",
+        "画外音：气氛忽然变得不对劲，寂静无声。",
+    ]
+    key_lines = [
+        "萧炎：先离开这里。",
+        "萧炎：不对。",
+        "萧薰儿：最后再谈修炼。",
+    ]
+
+    errors = key_line_order_errors(key_lines, ordered_texts, subject="分镜大纲")
+
+    assert errors == [], errors
 
 
 def test_storyboard_order_check_uses_full_script_order_for_legacy_key_lines() -> None:
