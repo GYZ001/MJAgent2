@@ -126,6 +126,36 @@ class CharacterAlias(BaseModel):
     evidence_quote: str
 
 
+class CharacterAffiliation(BaseModel):
+    """一条阵营/宗门归属证据：模型申报 + 代码核验后才允许落库（不确定不登记）。
+    与 CharacterAlias 的区别：这是状态事实（有效区间），不是恒真事实——需要
+    valid_from_chapter/valid_to_chapter 支持"截至第 N 章"查询（见
+    docs/CHARACTER_COGNITION_LAYER_DESIGN.md §3.2）。"""
+
+    org: str                        # 归属对象逐字文本（宗门/阵营/势力名，如"血妖宗""靠山宗"）
+    relation_kind: str              # 归属性质自由文本（如 membership/allegiance/hostility），
+                                     # 不设 Literal 枚举——与 CharacterAlias.name_kind 同一
+                                     # 宽松校验风格，避免模型申报值卡在硬枚举上被整条拒绝
+    evidence_chapter_index: int     # 证据锚点：原著章节序号
+    evidence_quote: str              # 证据锚点：逐字引句，核验规则与 CharacterAlias 完全一致
+                                     # （逐字子串命中 + 角色本人在同段/同章共现）
+    valid_from_chapter: int         # 有效区间起点（含）；未申报时代码回退为 evidence_chapter_index
+    valid_to_chapter: int | None = None   # 有效区间终点（含）；None=尚无证据表明已失效
+
+
+class CharacterRelation(BaseModel):
+    """一条对人关系证据（与既有 Relationship 不同：Relationship 是无证据锚点的静态叙事关系，
+    供人物谱正文可读性使用；这是有证据锚点 + 有效区间的结构化状态事实，供判别式提问使用，
+    两者并存、互不替代，与 aliases 新增时"不改写既有字段"的纪律一致）。"""
+
+    to: str                         # 关系对象：人物谱规范名（必须是 bible.characters 中已有的名字）
+    relation_kind: str              # 关系性质自由文本（如 ally/rival/hostile/master_disciple）
+    evidence_chapter_index: int
+    evidence_quote: str
+    valid_from_chapter: int
+    valid_to_chapter: int | None = None
+
+
 class Character(BaseModel):
     name: str
     role: str
@@ -141,6 +171,12 @@ class Character(BaseModel):
     # 该角色在原文中出现过的其它称谓，逐条带证据锚点。旧 bible_json 没有这个键时，
     # default_factory 给空列表，反序列化不受影响。
     aliases: list[CharacterAlias] = Field(default_factory=list)
+    # 认知层状态事实（docs/CHARACTER_COGNITION_LAYER_DESIGN.md §4.1）：带有效区间的
+    # 阵营归属 / 对人关系，均为纯增量字段，旧 bible_json 没有这两个键时 default_factory
+    # 给空列表，反序列化不受影响。可由名字与关系确定性推导的信息（姓氏、称谓惯例）不
+    # 存储于此——存冗余早晚不一致，查询时现算。
+    affiliations: list[CharacterAffiliation] = Field(default_factory=list)
+    relations: list[CharacterRelation] = Field(default_factory=list)
 
 
 class World(BaseModel):
