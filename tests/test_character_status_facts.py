@@ -778,6 +778,102 @@ def test_status_fact_accepted_when_quote_dual_anchored_positive_shape(monkeypatc
     assert resolved["quote"] == quote
 
 
+# ---------- 3d. 桥接取句双锚定优先级：`_alias_bridge_dual_anchor_quote` /
+# `_find_alias_bridge_chapter`（事故修复：第四闸上线后状态事实产出率跌到个位数，主力
+# 拒绝原因不是"申报为假"，是桥接取句选丢了主体——旧版只看分段里有没有对象，取全书第一个
+# 含对象的分段，与被测主体是谁无关，随后必然被引句双锚定闸拒绝） ----------
+
+BRIDGE_DUAL_ANCHOR_CHAPTER = [
+    {"idx": 10, "title": "第十章", "content": (
+        "靠山宗使者登门，王腾飞躬身相迎，态度恭敬。"
+        "\n\n"
+        "赵武刚上前一步，对着靠山宗躬身行礼，郑重表示愿意加入靠山宗。"
+    )},
+]
+
+
+def test_bridge_quote_prefers_segment_with_subject_over_first_object_match() -> None:
+    """红→绿纯函数验证：全书第一个含对象（靠山宗）的分段是王腾飞那一段，不含被测
+    主体（赵武刚）；同一章后面还有一段同时含"靠山宗"与"赵武刚"。旧策略（仍保留、未删除
+    的 `_alias_bridge_quote`，不看主体）会取到王腾飞那一段——这里先证明这一点确实成立
+    （证明红灯场景真实存在，不是构造了个不可能出现的形状），再验证新入口
+    `_find_alias_bridge_chapter` 取到的是双锚定那一段。"""
+    from app import stages
+
+    chapters_by_idx = stages._chapters_by_idx(BRIDGE_DUAL_ANCHOR_CHAPTER)
+    content = chapters_by_idx[10]
+
+    # 红：不看主体的旧取句函数（仍是回落路径，未删除）确实会选到不含被测主体的那一段。
+    old_style_quote = stages._alias_bridge_quote(content, "靠山宗")
+    assert old_style_quote is not None
+    assert "王腾飞" in old_style_quote
+    assert "赵武刚" not in old_style_quote
+
+    # 绿：新入口优先选双锚定分段。
+    resolved = stages._find_alias_bridge_chapter(chapters_by_idx, {"赵武刚"}, "靠山宗")
+    assert resolved is not None
+    resolved_chapter_index, resolved_quote = resolved
+    assert resolved_chapter_index == 10
+    assert "赵武刚" in resolved_quote
+    assert "靠山宗" in resolved_quote
+    assert resolved_quote in content  # 逐字子串，不是拼接
+
+
+def test_bridge_quote_falls_back_to_first_object_match_when_no_dual_anchor_segment_exists() -> None:
+    """反例（不得放宽共现要求）：全书不存在任何双锚定分段——章级仍然共现（"血妖宗"与
+    "李四"各自都出现在本章），但没有哪一段同时包含两者。必须退回原有行为（第一个含对象
+    的分段），不能因为取句策略改动就凭空找出一个双锚定分段。"""
+    from app import stages
+
+    chapters = [{"idx": 6, "title": "第六章", "content": (
+        "血妖宗宗主在殿上训话，众弟子俯首听命。"
+        "\n\n"
+        "李四远远站在人群边缘，低头不语，未曾靠近。"
+    )}]
+    chapters_by_idx = stages._chapters_by_idx(chapters)
+
+    resolved = stages._find_alias_bridge_chapter(chapters_by_idx, {"李四"}, "血妖宗")
+    assert resolved is not None
+    resolved_chapter_index, resolved_quote = resolved
+    assert resolved_chapter_index == 6
+    assert "李四" not in resolved_quote  # 确实退回了不含主体的原有取句结果
+    assert resolved_quote == stages._alias_bridge_quote(chapters_by_idx[6], "血妖宗")
+
+    # 端到端：这条退回的引句仍然会被第四闸拒绝，取句策略改动不得放行任何原本该拒绝的
+    # 申报。
+    end_to_end = asyncio.run(stages._status_fact_evidence_resolution(
+        chapters_by_idx, {"李四"}, "血妖宗", "李四", 99,
+        "编造的、原文里根本没有的一句话", None, None,
+        fact_noun="势力归属", roster={"李四": ["李四"]},
+    ))
+    assert end_to_end["accepted"] is False
+    assert end_to_end["reason"] == "quote_missing_dual_anchor"
+
+
+def test_status_fact_accepted_end_to_end_when_bridge_quote_dual_anchored(monkeypatch) -> None:
+    """端到端绿灯：模型申报的章节/引句没通过声明核验，代码退一步做桥接检索——桥接章内
+    存在双锚定分段，取句策略修复后应当选中它、通过第四闸、候选判别裁决选中赵武刚本人，
+    最终登记成功。"""
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters_by_idx = stages._chapters_by_idx(BRIDGE_DUAL_ANCHOR_CHAPTER)
+
+    monkeypatch.setattr(
+        model_gateway, "chat_structured",
+        _fake_verdict_chat_structured("赵武刚"),
+    )
+    resolved = asyncio.run(stages._status_fact_evidence_resolution(
+        chapters_by_idx, {"赵武刚"}, "靠山宗", "赵武刚", 999,
+        "编造的、原文里根本没有的一句话", None, None,
+        fact_noun="势力归属", roster={"赵武刚": ["赵武刚"], "王腾飞": ["王腾飞"]},
+    ))
+    assert resolved["accepted"] is True
+    assert resolved["chapter_idx"] == 10
+    assert "赵武刚" in resolved["quote"]
+    assert "靠山宗" in resolved["quote"]
+
+
 # ---------- 4. backfill_character_status_facts：全书上下文一次性回填 ----------
 
 def test_backfill_registers_verified_affiliation_and_relation_and_freezes_other_fields(

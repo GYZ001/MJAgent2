@@ -3519,6 +3519,28 @@ def _alias_declaration_verified(
 # 问题："全书哪一章能同时证明这对申报"，不需要再发一次模型调用去问一个已经有答案的
 # 语义问题，代码直接检索、钉证即可（见 _find_alias_bridge_chapter / _alias_bridge_quote）。
 # 找不到桥接章 → 维持拒绝（不确定不登记，安全默认不因为多了这条兜底而放松）。
+#
+# 取句策略修复（事故：双锚定闸上线后状态事实产出率跌到个位数）：`_alias_declaration_
+# verified`/`_find_alias_bridge_chapter` 的共现闸按整章判断（text 与 anchor_texts 之一
+# 同时出现在章节任意位置即算通过），但旧版 `_alias_bridge_quote` 取句时只看"分段里有
+# 没有 text（对象）"，完全不看主体——真实 dry-run 复现："王腾飞→靠山宗""赵武刚→靠山
+# 宗""上官修→靠山宗""韩宗→靠山宗" 四条不同主体的归属申报，桥接检索给出的是同一句
+# 关于王腾飞的引文，因为那是全书第一个出现"靠山宗"的分段，与被测主体是谁无关——这句
+# 引文随后必然被 `_status_fact_quote_dual_anchor_verified`（第四闸）拒绝，不是这些申报
+# 真的都是假的，是取句本身没找对句子。反证：同一条"王腾飞→韩宗"在另一次运行里，恰好
+# 检索到一句同时提到两人的原文，就正确通过——同一条事实选对句子就过、选错句子就拒，
+# 证明第四闸本身没问题，问题在取句优先级。
+#
+# 修复：`_alias_bridge_dual_anchor_quote` 在桥接章内优先找"同时包含主体锚点与 text"的
+# 分段，`_find_alias_bridge_chapter` 相应优先选"存在这种双锚定分段"的桥接章（找不到
+# 双锚定分段/双锚定章时逐级回落到原有行为：分段回落到 `_alias_bridge_quote`——第一个
+# 含 text 的分段；章节回落到"第一个满足共现闸的章节"——两者都与修复前逐字节一致，不
+# 改变找不到双锚定时的输出）。这不是放宽共现闸：章节/分段是否"合格"仍然只看 text 是否
+# 逐字出现（不接受主体/对象的其它别名形式顶替 text 本身），双锚定只是在已经合格的分段
+# 里，多一层"优先选哪一个"的偏好，不会让原本拒绝的申报被放行，也不会让原本能找到桥接章
+# 的申报反而找不到。别名回填与状态事实回填共用同一套函数（`_alias_bridge_quote`/
+# `_find_alias_bridge_chapter`），别名场景里"主体"是角色、"对象"是别名文本，双锚定同样
+# 成立——回填 dry-run 对照见变更记录，通过条数与逐条明细未受影响。
 
 _ALIAS_BRIDGE_QUOTE_MAX_CHARS = 200  # 引句长度上限：够定位上下文，不整段搬运
 
@@ -3529,9 +3551,36 @@ def _alias_bridge_quote(chapter_text: str, text: str) -> str | None:
     取第一个包含 text 的分段——分段本身就是原文的逐字切片，天然满足
     `_alias_declaration_verified` 条件 1（逐字子串）与条件 2（text 是引句子串）。
     调用方已确认 text 在 chapter_text 里，理论上必有命中；找不到时返回 None
-    交由调用方兜底拒绝，不强行拼一句可能不含 text 的引句。"""
+    交由调用方兜底拒绝，不强行拼一句可能不含 text 的引句。
+
+    不看主体——这是 `_find_alias_bridge_chapter` 优先找不到双锚定分段/双锚定章时的
+    回落取句（见模块顶部"取句策略修复"说明），行为与该函数改名/加主体优先级之前
+    完全一致，不单独调用时不受影响。"""
     for segment in index_source_segments(chapter_text, max_chars=_ALIAS_BRIDGE_QUOTE_MAX_CHARS):
         if text in segment.text:
+            return segment.text
+    return None
+
+
+def _alias_bridge_dual_anchor_quote(
+    chapter_text: str, text: str, subject_anchor_texts: set[str],
+) -> str | None:
+    """桥接章内优先检索"同时包含主体与对象"的分段（取句策略修复，见模块顶部"取句
+    策略修复"说明）：按段号升序找第一个同时满足 text（对象：别名文本，或归属组织/
+    关系对象的申报文本）与 subject_anchor_texts（主体：被测角色规范名或已确认别名）
+    中至少一项的分段。全书该章内找不到这样的分段时返回 None，交由调用方回落到
+    `_alias_bridge_quote`（不看主体，取第一个含 text 的分段——原有行为，不变）。
+
+    不在这里扩大 text 的匹配范围：text 是否出现在某分段，仍然只按逐字子串判断
+    （不接受主体/对象的其它别名形式顶替 text 本身）——这是"桥接章/桥接分段是否合格"
+    的共现判据，本次不放宽；本函数只是在"已经含 text"的分段集合里，额外多看一眼这一段
+    是否也含主体，改变的只是"多个合格分段里优先选哪一个"，不改变"什么算合格"。"""
+    if not subject_anchor_texts:
+        return None
+    for segment in index_source_segments(chapter_text, max_chars=_ALIAS_BRIDGE_QUOTE_MAX_CHARS):
+        if text in segment.text and any(
+            anchor and anchor in segment.text for anchor in subject_anchor_texts
+        ):
             return segment.text
     return None
 
@@ -3541,17 +3590,30 @@ def _find_alias_bridge_chapter(
 ) -> tuple[int, str] | None:
     """桥接章确定性检索：扫描全部章节（不受 ALIAS_BACKFILL_SOURCE_BUDGET_CHARS 预算
     限制——那个预算只约束喂给模型的上下文长度，不该约束代码自己的确定性检索范围），
-    按章节序号升序找第一个同时包含 text（申报的别名文本）与 anchor_texts（角色规范名
-    或已确认别名）中至少一项的章节。"升序取第一个命中"是多桥接章命中时的确定性选择
-    规则：同一输入任何时候重跑结果一致，可复现、可审计（与裁决庭卷宗采样同一原则）；
-    选最早出现的桥接章而非任意一个，也与"最早共现即已构成充分证据"的直觉一致。
-    全书都没有这样的章节 → 返回 None，调用方维持拒绝。"""
-    for idx in sorted(chapters_by_idx):
-        content = chapters_by_idx[idx]
-        if text not in content:
-            continue
-        if not any(anchor and anchor in content for anchor in anchor_texts):
-            continue
+    按章节序号升序找同时包含 text（申报的别名文本/归属组织/关系对象）与 anchor_texts
+    （角色规范名或已确认别名）中至少一项的章节——"是否合格"这条共现判据本身不变。
+
+    取句优先级（两轮扫描，取句策略修复见模块顶部说明）：
+    1. 第一轮只看"合格章节中，是否存在同时包含 text 与 anchor_texts 之一的分段"
+       （`_alias_bridge_dual_anchor_quote`），按章节序号升序取第一个命中的——不是
+       任选一个双锚定章，是"最早出现双锚定证据"，与既有"最早共现即已构成充分证据"
+       的确定性选择原则一致；
+    2. 全部合格章节都没有这样的分段时，回落到原有行为：按章节序号升序取第一个能
+       用 `_alias_bridge_quote` 取到引句（第一个含 text 的分段，不看主体）的合格
+       章节——与双锚定优先级引入之前逐字节一致。
+
+    两轮都找不到 → 返回 None，调用方维持拒绝。"""
+    qualifying = [
+        (idx, chapters_by_idx[idx])
+        for idx in sorted(chapters_by_idx)
+        if text in chapters_by_idx[idx]
+        and any(anchor and anchor in chapters_by_idx[idx] for anchor in anchor_texts)
+    ]
+    for idx, content in qualifying:
+        dual_quote = _alias_bridge_dual_anchor_quote(content, text, anchor_texts)
+        if dual_quote:
+            return idx, dual_quote
+    for idx, content in qualifying:
         quote = _alias_bridge_quote(content, text)
         if quote:
             return idx, quote
