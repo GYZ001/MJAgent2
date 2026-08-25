@@ -85,6 +85,10 @@ _STEP_PRESENTATIONS: dict[str, WorkflowStepPresentation] = {
     "episode_prep_pack_hook_cliffhanger": WorkflowStepPresentation(
         "抽取开场钩子与结尾悬念", "从事件链推导本集 hook/cliffhanger 并核验接地到真实事件",
     ),
+    "episode_prep_pack_true_name_verdict": WorkflowStepPresentation(
+        "真名假设裁决",
+        "对模型申报的疑似真名，独立调用模型仅依据全书检索到的原文卷宗裁决称谓与人名是否同一人",
+    ),
     "episode_prep_pack_publish": WorkflowStepPresentation(
         "覆盖对账与原子发布", "确定性核对四账覆盖、签发完成凭证并原子发布分集准备包",
     ),

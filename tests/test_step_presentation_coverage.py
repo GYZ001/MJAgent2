@@ -43,12 +43,24 @@ APP_DIR = Path(__file__).resolve().parents[1] / "app"
 #   - app.production.prep_pack._begin_step(run_id, step_key, ...)
 #   - app.production.prep_pack._run_sync_step(run_id, step_key, fn)
 #   - app.production.prep_pack._run_async_step(run_id, step_key, fn)
+#   - app.production.prep_pack._call_structured(*, run_id, step_key, ...)
+#     (第29轮身份绑定审判程序回归发现的盲区：这是一个更高层的包装函数，
+#     自己内部再调用 _begin_step(run_id, step_key, ...) -- 但那次内部调用
+#     传的是变量 step_key，不是字面量，原扫描器天然识别不了；真正的字面量
+#     只出现在调用 _call_structured(step_key="...") 这一层，而 _call_
+#     structured 本身从未被列入识别集，所以字面量连"看得到但过滤掉"都
+#     算不上，是根本不会被访问到的调用点。凡是后续新增"包一层再转发给
+#     _begin_step/_run_async_step/_run_sync_step 的 step_key"式 helper，
+#     都必须把 helper 自己的名字加进这张表，不能假设内层调用会被扫描器
+#     顺着传播找到——本扫描器不做数据流/调用链追踪，只认字面量出现的
+#     那一个调用点。
 _STEP_KEY_ARG_POSITION = {
     "create_step": 1,
     "step": 0,
     "_begin_step": 1,
     "_run_sync_step": 1,
     "_run_async_step": 1,
+    "_call_structured": 1,
 }
 
 

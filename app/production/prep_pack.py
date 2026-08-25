@@ -142,10 +142,12 @@ regressions -- schema changed, hence the minor bump):
      (required, nullable); display_name still must be the verbatim
      in-episode term, never replaced. See
      _prep_pack_verify_true_name_hypothesis: a hypothesis is only trusted
-     once it resolves to an existing bible identity AND the guessed name
-     itself is textually corroborated (this episode's text or the same
-     forward-looking window app.portraits already uses for real-name
-     disambiguation) -- never taken on the model's word alone.
+     once it resolves to an existing bible identity AND passes the identity
+     binding trial procedure (round 29: whole-book dossier retrieval + one
+     independent model verdict + verbatim quote-pinning against the dossier;
+     see the detailed comment above _prep_pack_true_name_dossier) -- never
+     taken on the model's word alone, and never on a hand-written rule
+     guessing what "same person" phrasing looks like.
   b) Speaker roster referencing (real EP2 finding: a key line's speaker was
      written as "韩宗", a character absent until chapter 5, with zero
      validation on that field ever). event_chain[].key_lines[] gains
@@ -193,7 +195,7 @@ from __future__ import annotations
 
 import json
 from contextlib import nullcontext
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -217,9 +219,10 @@ from app.validators import (
     assert_prep_pack_coverage_complete,
     assert_prep_pack_span_union_matches_ledger,
     build_prep_pack_span_ledger,
+    match_scene_name,
 )
 
-PREP_PACK_VERSION = "1.5.0"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "1.6.1"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
 # gained functional_extras; 1.4.0: coverage_ledger gained paratext (deterministic
 # keyword/position classifier, since replaced); 1.4.1: paratext classification
@@ -241,6 +244,91 @@ PREP_PACK_VERSION = "1.5.0"  # 1.1.0: event_chain entries carry source_span (P1 
 # gains ``speaker_ref`` (deterministic roster resolution of the free-text
 # speaker field, real EP2 finding: a key line's speaker was written as
 # "韩宗" -- a character absent until chapter 5 -- with zero validation).
+# 1.5.1 (real round-18 audit finding, A2 主病灶 47 条): scene resolution
+# (_resolve_assets) now consults the bible's registered scene aliases (via
+# app.validators.match_scene_name, reused as-is from app.scenes' own
+# discovery path), not just scene_references.scene_name's exact string, and
+# persists any newly-used wording back into Bible.scenes[].aliases (see
+# _prep_pack_resolve_scene_reference_with_alias /
+# _prep_pack_register_scene_alias_if_new). asset_manifest's own shape is
+# unchanged; bumped for the same provenance reason as 1.4.2.
+# 1.5.2 (task②, real project-level finding: "小胖子" wrongly rebound to
+# "王有材" in a real EP3 artifact, zero textual evidence for "王有材" found
+# anywhere in that chapter): a character rename (from either app.portraits'
+# own character_rename or the 1.5.0 suspected_true_name fast path) is now
+# checked against every OTHER already-published episode's asset_manifest
+# before being accepted -- if the same alias string is already bound to a
+# DIFFERENT canonical name elsewhere in the project, the rebind is rejected
+# (falls back to the raw mention's own normal resolution) and logged (see
+# _prep_pack_cross_episode_alias_conflict). asset_manifest's own shape is
+# unchanged; bumped for the same provenance reason as 1.4.2/1.5.1.
+# 1.5.2 also gained (real round-21 EP1 finding ERR-20260824-34347a, version
+# NOT re-bumped -- pure gate-semantics refinement, no schema/prompt-contract
+# change): _prep_pack_resolve_key_line_speakers became an asymmetric
+# three-branch gate instead of a binary roster-hit-or-block check. speaker
+# and an event's own characters[] are two independent phrasings from the
+# SAME model call, so bare string equality is fragile ("被困者"/"王有材"/
+# "被困少年" can all name one person) -- blocking every mismatch would also
+# kill legitimate phrasing drift, not just real hallucinations ("韩宗", a
+# character absent from this episode entirely). The fix distinguishes them
+# deterministically: a speaker string that collides with ANY character name
+# in the full project bible (not just this episode's own roster) but is
+# absent from this episode's roster is still a fatal, named block (real
+# hallucinated-attribution shape); a speaker with zero collision anywhere in
+# the project bible is a purely descriptive one-off term and gets absorbed
+# into functional_extras instead (typed functional identity's original
+# meaning) rather than blocked. See _prep_pack_all_project_character_names.
+# 1.5.2 also gained (real round-24 EP3 finding ERR-20260824-d0830a, version
+# NOT re-bumped -- both fixes are internal resolution-logic/gate-semantics
+# refinements, no schema/prompt-contract change):
+#   task① 角色别名注册表读侧：裸精确匹配失败后，跟场景轴 1.5.1
+#   （_prep_pack_resolve_scene_reference_with_alias）对称地查项目内已发布
+#   分集的 asset_manifest.characters[].aliases（跟 _prep_pack_cross_episode_
+#   alias_conflict 冲突检查同一数据源）——命中唯一目标才绑定（复用同一套
+#   冲突拒绝逻辑守多目标）。此前只有写侧（角色改名落地时把 name 记进
+#   aliases）没有读侧，别名库形同虚设：EP2 一次消歧确立"小胖子"→李富贵后，
+#   EP3 仍然要重新赌一次消歧模型调用才能复现同一个结论。见
+#   _prep_pack_lookup_character_alias_canonical_name。
+#   task② 称谓证据闸语义精化：「穿杂役衫的魁梧大汉」经消歧正确解析到
+#   赵武刚，却被"称谓未逐字出现在原文"拦截——原文只有分散的描述性叙述，
+#   模型综合出的这个名词短语天然不可能逐字命中，不是幻觉归属的形状。
+#   区分裸直接命中（resolved_name==name，未经任何改名路径，如真实 EP5 的
+#   "丹鬼"案）与经消歧/发现/别名注册表解析绑定（resolved_name!=name，
+#   合法性由那条解析路径自身的证据链承担）：前者反幻觉主防线不动，仍要求
+#   逐字证据；后者不再重复要求称谓本身逐字出现。别名注册表仍只登记逐字
+#   出现于原文的称谓——组合短语不进别名库，防止注册表被合成词污染。
+# 1.6.0（第25轮收口指令，schema/payload 契约变更，版本确实推进）：审计对
+# 1.5.x 陆续放宽字面锚定要求后剩余的 83 条定性为"管线与审计标准分叉"——
+# 合成标签合法（消歧/发现/别名注册表/吸收群演都不再要求逐字命中）但不可
+# 审计（判断"这次绑定为什么合法"的依据只留在 Evaluation.evidence 里，不是
+# payload 的一等公民）。asset_manifest.characters[]/scenes[]/
+# functional_extras[] 每项新增 provenance: {method, anchor_segments,
+# anchor_phrase}；event_chain[].key_lines[] 每条新增 speaker_provenance
+# （跟绑定到的角色/群演共用同一份 provenance，不是重新算一份，协调方
+# 形状对齐指令明确的字段名）。method ∈ direct/alias/resolution/discovery/
+# absorbed_speaker，anchor_segments 是支撑这次绑定的本集原文段号，
+# anchor_phrase 是触发绑定的原文短语——必须逐字存在于 anchor_segments 所指
+# 原文（发布前 _prep_pack_verify_manifest_provenance 自校验一遍，不成立
+# 即门禁拦，见该函数与 _prep_pack_local_text_anchor 上方的完整说明）。
+# 两个字段都是新增可选结构（旧包没有这两个字段，反序列化/前端读取时按
+# "不存在"处理，不破坏任何既有消费者，payload 冻结纪律没有被打破——冻结的
+# 是既有字段的语义不变，不是禁止新增字段）。
+# 1.6.1（独立评审 blocker，prompt-contract 变更，版本确实推进）：
+# _prep_pack_true_name_verdict 被角色分支（resolve_fn=_resolve_portrait_id）
+# 与场景分支（resolve_fn=_resolve_scene_reference_id）共用，旧版裁决提示词
+# 硬编码人物语义（"判断称谓 X 与人名 Y 是否指同一个人"）——场景假设走到这
+# 条路时模型实际被问的是"这两个是不是同一个人"，问题本身跟场景/地点语义
+# 无关，裁决结果不可靠。这不属于上面 1.5.2 两条"版本未重新推进"的内部
+# 逻辑/闸门语义精化（那两条都没有改变发给模型的实际文本）——这次改的正是
+# 发给模型的提示词本身（按 subject_kind 分流为"同一个人"/"同一个场景或
+# 地点"两套措辞，见 _TRUE_NAME_VERDICT_SUBJECT_COPY），是真正的 prompt-
+# contract 变更，会实际改变场景假设裁决的模型输出，因此比照 1.4.1 的先例
+# （分类机制变更即使 payload 形状不变也要为可追溯性推进版本号）推进版本。
+# 顺带修了同一函数的一处 minor：判决缓存 verdict_cache 的键此前只有
+# (alias, suspected_true_name)，角色循环与场景循环共用同一个缓存字典对象，
+# 不按 subject_kind 隔离会导致跨域撞名时错误复用另一个域的裁决结果——键
+# 里加入 subject_kind 修复（不改变 payload 形状，仅内部正确性修复，不单独
+# 占用版本号，随本次一起推进）。
 QA_PROFILE_VERSION = "prep-pack-qa-gate-1"
 _QA_EVALUATOR_NAME = "screenplay_production_qa"
 _CHUNK_MAX_CHARS = 6000
@@ -269,7 +357,21 @@ _FUNCTIONAL_RESOLUTION_KINDS = {"functional_identity", "reference_identity"}
 
 
 class PrepPackGateError(ValueError):
-    """One generation attempt failed a deterministic hard gate; retryable."""
+    """One generation attempt failed a deterministic hard gate; retryable.
+
+    ``had_events``（第23轮 ERR-20260824-7ab7cb 真实回归修复）记录这次尝试在
+    触发这道门禁之前，事件链抽取本身是否拿到过任何事件。默认 True——绝大
+    多数门禁（跨度账本、覆盖完整性、资产映射、说话人解析、hook/cliffhanger
+    接地……）都发生在"本集未抽取到任何事件"这道最早的门禁（见
+    _generate_prep_pack_once 里 `if not raw_events` 的唯一 raise 点）之后，
+    此时事件链必然非空。只有那一道门禁本身传 False。见
+    run_episode_prep_pack 的采纳护栏：一次退化为空事件链的重试，不得静默
+    覆盖此前一次真的抽到了事件、只是被别的门禁拒绝的尝试。
+    """
+
+    def __init__(self, message: str, *, had_events: bool = True) -> None:
+        super().__init__(message)
+        self.had_events = had_events
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +529,306 @@ def _resolve_scene_reference_id(conn, project_id: str, scene_name: str, episode_
     return str(row["id"]) if row else None
 
 
+def _prep_pack_scene_reference_origin_episode(conn, scene_reference_id: str) -> int | None:
+    """"来源集号"（第30轮②）：直接复用 scene_references.ep_start——这个
+    场景参考在注册表里生效的起始集号，是现成数据，不另外发明新的追踪
+    字段（alias_inherited 绑定的合法性来源于"这个场景本来就已经在注册表
+    里"，ep_start 正是这件事本身的记录）。"""
+    row = conn.execute(
+        "SELECT ep_start FROM scene_references WHERE id=?", (scene_reference_id,),
+    ).fetchone()
+    if not row or row["ep_start"] is None:
+        return None
+    return int(row["ep_start"])
+
+
+# 场景别名锚定（1.5.1，真实第18轮审计 A2 主病灶，47 条）：场景规范名（如
+# "杂役处居所内"）往往是发现时铸造的标签，天然不在原文——本集若换了个
+# 说法提这个场景（"杂役们住的地方"），_resolve_scene_reference_id 的裸精确
+# 匹配（只查 scene_references.scene_name）找不到它，哪怕这个说法早就被
+# app.scenes._append_scene_alias 登记成了该场景的别名
+# （Bible.scenes[].aliases）也一样——写入和读取完全脱节：别名库在长，但
+# 场景解析从来不读它，同一个说法每次都要重新走一遍发现（多余的模型调用，
+# 也多一次误判机会）。
+def _prep_pack_resolve_scene_reference_with_alias(
+    conn, project_id: str, episode_no: int, resolved_name: str, bible: Bible,
+) -> tuple[str | None, str]:
+    """裸精确匹配优先；失败后复用 app.validators.match_scene_name（跟
+    app.scenes 的发现路径同一套判定，含别名，allow_fuzzy=False 避免模糊
+    误配）把 resolved_name 归一到已登记的规范场景名，再用规范名查表。
+    返回 (scene_reference_id, canonical_name)：canonical_name 供调用方判断
+    是否需要把这次的原文措辞记为新别名（不同才需要，见
+    _prep_pack_register_scene_alias_if_new）。
+    """
+    scene_reference_id = _resolve_scene_reference_id(
+        conn, project_id, resolved_name, episode_no,
+    )
+    if scene_reference_id:
+        return scene_reference_id, resolved_name
+    canonical = match_scene_name(resolved_name, bible.scenes, allow_fuzzy=False)
+    if not canonical or canonical == resolved_name:
+        return None, resolved_name
+    scene_reference_id = _resolve_scene_reference_id(
+        conn, project_id, canonical, episode_no,
+    )
+    return scene_reference_id, canonical
+
+
+def _prep_pack_register_scene_alias_if_new(
+    conn, project_id: str, *, canonical_name: str, wording: str,
+) -> bool:
+    """把本集实际用到的原文措辞记为该场景的新别名（幂等，见
+    app.scenes._append_scene_alias：已登记过直接返回 False，不重复写）。
+    别名库随集数增长越来越全，是通用设计，不认识任何具体场景/词形。
+    """
+    if not wording or wording == canonical_name:
+        return False
+    from app.scenes import _append_scene_alias
+
+    return _append_scene_alias(conn, project_id, canonical_name, wording)
+
+
+def _prep_pack_first_evidence_segment(segments: list[SourceSegment], text: str) -> int | None:
+    """观测用：`text` 第一次逐字出现在哪个 1-based segment_index，供别名
+    锚定来源段号记录（找不到就是 None，不阻断任何流程，纯观测）。"""
+    if not text:
+        return None
+    for index, segment in enumerate(segments, start=1):
+        if text in segment.text:
+            return index
+    return None
+
+
+# manifest 绑定来源证明（provenance，1.6.0，第25轮收口指令：审计剩余83条
+# 定性为"合成标签合法但不可审计"——1.5.x 各轮陆续放宽了字面锚定要求
+# （task②：经消歧/发现解析的绑定不再要求 mention 本身逐字出现），但放宽后
+# 判断"这次绑定为什么合法"的依据只留在 Evaluation.evidence 里（true_name_
+# hints/scene_alias_anchors/absorbed_speakers_count……），不是 payload 的
+# 一等公民，审计只能翻 Evaluation 观测，无法直接从 asset_manifest 本身复核
+# 每一条绑定的证据链。这个函数是所有 provenance 计算共用的确定性锚点查找：
+# 按优先级尝试一组候选逐字短语，返回第一个真的出现在本集原文里的
+# (anchor_segments, anchor_phrase)。全部候选都不出现时返回 ([], "")——不是
+# 所有合法绑定都必然有本集内的逐字锚点（比如 suspected_true_name 经前瞻
+# 窗口核验通过，证据在下一集原文里，不在本集）；空 anchor_phrase 在自校验
+# 里视为"这条绑定没有可本地核验的锚点"，直接跳过验证，不阻断——已经比
+# 1.5.x 之前"完全没有这个字段"更诚实，不需要为了填满字段而编造一个假锚点。
+def _prep_pack_local_text_anchor(
+    segments: list[SourceSegment], candidates: list[str],
+) -> tuple[list[int], str]:
+    for candidate in candidates:
+        candidate = str(candidate or "").strip()
+        if not candidate:
+            continue
+        segment_index = _prep_pack_first_evidence_segment(segments, candidate)
+        if segment_index is not None:
+            return [segment_index], candidate
+    return [], ""
+
+
+# 跨集别名场景绑定的锚点强化（第30轮②，真实 scripts/episode_source_
+# audit.py 复核实测：19 条 A2_scene_no_text_evidence，全部 provenance.
+# method="alias"、aliases=0 个、display_name 不逐字出现在本集原文——该
+# 审计脚本对 alias/direct 两个 method 走的是 TEXT_VERIFIED 标准（只查
+# display_name/aliases 字符串是否逐字出现，不看 anchor_phrase，见该脚本
+# TEXT_VERIFIED_METHODS 常量上方注释），跟 resolution/discovery/
+# absorbed_speaker 的 ANCHOR_VERIFIED 标准（查 anchor_segments/
+# anchor_phrase）是两套不同规则。旧实现只试 [name]（这次绑定用到的原始
+# 称谓本身）——这个候选之所以必然命中，只是因为它就是"别名注册表"这个
+# 称谓本身，命中的其实只是"这个称谓确实是这么写的"这件同义反复的事实
+# （对 TEXT_VERIFIED 毫无帮助：display_name 是规范名，不是这个别名字符
+# 串，name 命中不了 TEXT_VERIFIED 检查的是 display_name/aliases，scene
+# 目前没有 aliases 字段），没有独立证明本集里还有别的什么依据把它跟这个
+# 场景绑在一起。实测（真实 EP1-8 19 条）canonical_scene_name 无一逐字
+# 命中本集原文，但该场景所涉事件的 source_evidence 地点描述短语 19/19
+# 命中——这才是真正独立、有信息量的证据。改法：候选序列改成
+# [canonical_scene_name, *scene_event_evidence_quotes]（沿用第28轮①给
+# discovery/resolution 两支的同一批候选来源，故意不包含 name 本身这个
+# 同义反复候选）；命中 → 这是比"alias"更强的证据形状，跟 resolution 走
+# 同一套锚点核验标准，method 直接升级为 "resolution"（ANCHOR_VERIFIED，
+# 自校验/外部审计都认这份 anchor_phrase）；三候选（不含 name）全部落空
+# → 绝不伪造锚点，也不再谎称"alias"（同义反复的空壳），改标
+# method="alias_inherited"，用现成的 scene_references.ep_start 记这次
+# 绑定最初在注册表里生效的集号（source_episode_no，跟审计脚本
+# _verify_alias_inherited_scene 期望的字段名/类型完全对齐——那段递归核验
+# 逻辑早于本次改动已经写好，是这次改动要对齐的既有契约，不是本次新造的
+# 字段名），供审计走对应的递归核验分支（不在
+# _PREP_PACK_SCENE_METHODS_REQUIRING_ANCHOR 里，空锚合法豁免，跟
+# resolution_forward 同待遇）。
+def _prep_pack_scene_alias_provenance(
+    conn, segments: list[SourceSegment], scene_reference_id: str,
+    canonical_scene_name: str, scene_event_evidence_quotes: list[str],
+) -> tuple[str, list[int], str, int | None]:
+    """Returns ``(method, anchor_segments, anchor_phrase, source_episode_no)``
+    for a scene mention resolved via the cross-episode alias registry."""
+    anchor_segments, anchor_phrase = _prep_pack_local_text_anchor(
+        segments, [canonical_scene_name, *scene_event_evidence_quotes],
+    )
+    if anchor_segments:
+        return "resolution", anchor_segments, anchor_phrase, None
+    source_episode_no = _prep_pack_scene_reference_origin_episode(conn, scene_reference_id)
+    return "alias_inherited", [], "", source_episode_no
+
+
+def _prep_pack_provenance(
+    method: str, anchor_segments: list[int], anchor_phrase: str,
+    *, forward_chapter_label: str = "", source_episode_no: int | None = None,
+) -> dict[str, Any]:
+    """统一构造 provenance 结构，避免多处调用各自拼一份字面量字典漂移。
+    forward_chapter_label（1.6.0 第28轮）只在 method="resolution_forward"
+    时非空——见 _prep_pack_verify_manifest_provenance 上方关于
+    resolution_forward 空锚豁免的完整说明。source_episode_no（第30轮②）
+    只在 method="alias_inherited" 时非 None——字段名/类型（int，不是格式化
+    字符串）对齐 scripts/episode_source_audit.py 的
+    _verify_alias_inherited_scene 既有契约（该脚本先于本次改动就已经按
+    这个字段名写好了递归核验：来源集号须严格早于当前集、来源集需有已发布
+    pack 且同 scene_reference_id 的绑定同名、那条来源绑定自身还要递归核验
+    通过），不是本次新造的字段名，也故意不跟 forward_chapter_label 复用
+    同一个字段——两者是不同的编号域（前瞻窗口指向"章"，跨集别名继承指向
+    "集"），混装单位会重蹈第28轮排查过的"同一数据两个真源"覆辙。两者都是
+    纯附加字段，其它 method 不带这些 key，不影响既有消费者（payload 冻结
+    纪律照旧）。"""
+    provenance = {
+        "method": method,
+        "anchor_segments": list(anchor_segments),
+        "anchor_phrase": anchor_phrase,
+    }
+    if forward_chapter_label:
+        provenance["forward_chapter_label"] = forward_chapter_label
+    if source_episode_no is not None:
+        provenance["source_episode_no"] = source_episode_no
+    return provenance
+
+
+# 场景侧 resolution/discovery 两个 method 不允许空锚（第28轮 ERR-20260824，
+# v3 审计 A2_scene_no_text_evidence 25 条）：消歧/发现判定"这是哪个场景"
+# 凭的必然是本集文本依据，不存在"合法但无锚"的场景绑定——跟角色侧
+# resolution_forward（证据在前瞻窗口，本集内没有锚点是正确的）不是同一件
+# 事。direct method 已经被 _prep_pack_resolve_scene_reference_with_alias
+# 上游的证据闸挡住（见该函数与其调用点上方注释），结构上不可能出现空锚，
+# 不需要在这里重复要求——第30轮②：原来的 alias 分支不再产出裸的
+# method="alias" 挂空锚（见 _prep_pack_scene_alias_provenance 上方完整
+# 说明）：真找到独立证据就升级成 resolution（走这条锚点必填规则），真没有
+# 就诚实改标 alias_inherited，跟 resolution_forward 同样豁免、同样在这里
+# 不需要登记。
+_PREP_PACK_SCENE_METHODS_REQUIRING_ANCHOR = frozenset({"resolution", "discovery"})
+
+
+def _prep_pack_verify_manifest_provenance(
+    segments: list[SourceSegment], asset_manifest: dict[str, Any],
+) -> list[str]:
+    """发布前自校验（1.6.0）：每一条非空 anchor_phrase 必须真的逐字出现在
+    它自己 anchor_segments 指向的原文段里（至少一段命中即可，不要求每段都
+    命中——一条绑定可能引用多个证据段，只要其中一个真的载有这句 anchor_
+    phrase 就算锚定成立）。anchor_phrase 为空默认视为"这条绑定没有本集
+    本地锚点"，跳过逐字校验（见 _prep_pack_local_text_anchor 的完整说明）
+    ——但这条豁免不是无条件的：场景侧的 resolution/discovery 两个 method
+    真实回归证明"空锚"从来不是合法状态，而是 1.6.0 最初实现里
+    _prep_pack_local_text_anchor 候选序列覆盖不全（只试了触发发现/消歧的
+    原始 label，没试模型申报的规范名、也没试该场景所涉事件自己的证据
+    原文）导致的假阴性——真锚点本来就在，只是没找全；这两个 method 现在
+    强制要求非空锚，空锚直接判定自校验失败（见
+    _PREP_PACK_SCENE_METHODS_REQUIRING_ANCHOR）。resolution_forward（角色
+    与场景共用同一语义）的空 anchor_segments（本地段号）是合法的：
+    suspected_true_name 核验通过、证据在前瞻窗口而非本集，本集内找不到
+    本地锚点是正确结论，不是缺陷——但 forward_chapter_label（指向哪一章）
+    和 anchor_phrase（那一章里被钉住的支撑句）两个字段第30轮起强制同时
+    非空："半张证书等于没证书"：真实 EP2/6/8 回归过 anchor_phrase 被误写
+    成空字符串（钉住的支撑句明明存在，却没记下来）、EP2/6/8 角色侧还
+    额外查出 forward_chapter_label 本身也会在特定路径下丢失（见
+    _prep_pack_verify_true_name_hypothesis 调用点上方 via_suspected_
+    true_name 标志位的完整说明）——两种半张证书现在都在这里被拦截，不再
+    悄悄发布。
+
+    段号越界（不在 1..len(segments) 内）本身就是判定失败，不静默忽略。
+    段号取值域（第28轮排查记录，E 类重复真源变体）：本函数与
+    _prep_pack_local_text_anchor/_pass 全程共用同一个 segments 闭包变量
+    （index_source_segments(source_text) 的全局 1-based 编号），跟
+    coverage_ledger/source_span 同域；_chunk_segments 分块时用
+    list(enumerate(segments, start=1)) 保留原始全局下标分组、不做分块内
+    重新编号，_render_chunk 展示给模型的编号、event 的 source_span/
+    source_evidence[].segment_index 因此也都是全局域——沿链路排查未发现
+    第二套局部编号并存（若未来某处引入分块内局部重新编号，必须只保留
+    全局域一份，禁止两个编号域并存后再各自"验一遍"，那正是同一数据的
+    两个真源互相打架、两边各自"验过"却结论相反的形状）。见
+    tests/test_prep_pack_asset_discovery.py 里显式构造跨 chunk 场景的
+    自校验红灯，作为这条不变量的回归防线。"""
+    errors: list[str] = []
+    total_segments = len(segments)
+
+    def _check(
+        kind: str, label: str, provenance: Any, *, require_anchor: bool = False,
+    ) -> None:
+        if not isinstance(provenance, dict):
+            return
+        method = str(provenance.get("method") or "")
+        phrase = str(provenance.get("anchor_phrase") or "").strip()
+        # resolution_forward（第30轮，用户点名"半张证书等于没证书"）：证据
+        # 在前瞻/别处章节而非本集，anchor_segments 本地段号合法留空——但
+        # forward_chapter_label（指向哪一章）和 anchor_phrase（那一章里的
+        # 哪句话）两个字段必须同时非空，才是一条完整、可被
+        # scripts/episode_source_audit.py 的 _verify_provenance_forward_
+        # anchor 独立复核的证明；任一为空都是半张证书，一律拦截，不再往下
+        # 走本地 anchor_segments 逐字校验（那套校验假设短语就在本集里，对
+        # resolution_forward 从语义上就不适用）。
+        if method == "resolution_forward":
+            forward_chapter_label = str(
+                provenance.get("forward_chapter_label") or ""
+            ).strip()
+            if not forward_chapter_label or not phrase:
+                errors.append(
+                    f"{kind}「{label}」的 provenance.method=resolution_forward "
+                    f"缺少 forward_chapter_label（{forward_chapter_label!r}）或 "
+                    f"anchor_phrase（{phrase!r}）——前瞻绑定必须同时携带"
+                    "章节标注与被钉住的支撑句，半张证书等于没证书，来源"
+                    "证明自校验失败，门禁具名拦截"
+                )
+            return
+        if not phrase:
+            if require_anchor:
+                errors.append(
+                    f"{kind}「{label}」的 provenance.method="
+                    f"{provenance.get('method')!r} 缺少 anchor_phrase——"
+                    "resolution/discovery 绑定必须有本集文本依据，来源"
+                    "证明自校验失败，门禁具名拦截"
+                )
+            return
+        raw_segments = provenance.get("anchor_segments") or []
+        segment_indexes = [
+            int(value) for value in raw_segments
+            if isinstance(value, (int, float)) or (
+                isinstance(value, str) and value.strip().lstrip("-").isdigit()
+            )
+        ]
+        in_range = [
+            index for index in segment_indexes if 1 <= index <= total_segments
+        ]
+        if not in_range or not any(
+            phrase in segments[index - 1].text for index in in_range
+        ):
+            errors.append(
+                f"{kind}「{label}」的 provenance.anchor_phrase「{phrase}」未在"
+                f"anchor_segments={segment_indexes} 所指原文中逐字命中，来源"
+                "证明自校验失败，门禁具名拦截"
+            )
+
+    for character in asset_manifest.get("characters") or []:
+        _check("角色", str(character.get("display_name") or ""), character.get("provenance"))
+    for scene in asset_manifest.get("scenes") or []:
+        provenance = scene.get("provenance")
+        require_anchor = (
+            isinstance(provenance, dict)
+            and str(provenance.get("method") or "")
+            in _PREP_PACK_SCENE_METHODS_REQUIRING_ANCHOR
+        )
+        _check(
+            "场景", str(scene.get("display_name") or ""), provenance,
+            require_anchor=require_anchor,
+        )
+    for extra in asset_manifest.get("functional_extras") or []:
+        _check("群演", str(extra.get("label") or ""), extra.get("provenance"))
+    return errors
+
+
 # 称谓/场景名证据闸（1.4.2，real round-16 EP5 regression fix）. Real EP5 output
 # resolved a completely unrelated pair of mountain-top old men -- the raw
 # text only ever calls them "两个老者"/穿灰袍的高大老者", never a proper
@@ -463,47 +865,367 @@ def _prep_pack_mention_has_text_evidence(name: str, source_text: str) -> bool:
     return bool(name) and name in (source_text or "")
 
 
+# 跨集别名一致性（1.5.2/task②，真实第18轮审计 B 类缺陷）：proj_3ac0b627fa46
+# 项目内"小胖子"同时被登记为李富贵和王有材的别名——溯源确认 EP3 那次绑定
+# 完全没有本集文本依据（chapters 表 EP3 原文直查："王有材"逐字出现 0 次，
+# "小胖子"高频出现且从上下文看自始至终是同一个人）；EP2/EP6 两集独立正确
+# 绑到了李富贵。EP3 反复重新生成横跨第15-18轮，累计 80+ 次 identity.current
+# 与 144+ 次涉及"小胖子"的 identity.future 调用，未能定位到单一一次把
+# "小胖子"分组直接判给"王有材"的调用记录——大概率是 app.portraits.
+# append_candidate 的"全批唯一字面锚点自动改绑"机制或跨 chunk 的
+# functional_identity_key 合并在某次重试中产生，具体哪一次已经无法在保留的
+# provider_calls 历史里精确复现（EP3 之后的多轮重新生成覆盖了当时的中间
+# 状态）。核心事实清楚：这次改绑在其发生的那一集里没有任何逐字证据支撑，
+# 正是"真名核验佐证不足"的形状。
+def _prep_pack_cross_episode_alias_conflict(
+    conn, project_id: str, episode_id: str, *, alias: str, canonical_name: str,
+) -> str | None:
+    """项目内其它已发布分集是否已经把这同一个 alias 字符串记在了一个不同
+    的 canonical_name 名下？命中就返回那个冲突的 canonical_name（供调用方
+    拒绝这次改绑、留痕），没有冲突返回 None。纯粹按"同一别名字符串在项目
+    内是否已经指向不同的人"这个结构性事实判断，不需要认识 alias 具体是
+    什么词。只查其它分集已发布的 asset_manifest（这是目前唯一持久化角色
+    别名归属的地方——Character schema 没有 Scene 那样的项目级 aliases
+    字段，只能靠已发布分集的 manifest 做跨集比对）。
+    """
+    if not alias or not canonical_name:
+        return None
+    rows = conn.execute(
+        "SELECT screenplay_json FROM episodes WHERE project_id=? AND id!=? "
+        "AND screenplay_json IS NOT NULL",
+        (project_id, episode_id),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["screenplay_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        manifest = payload.get("asset_manifest") or {}
+        for character in manifest.get("characters") or []:
+            if alias not in (character.get("aliases") or []):
+                continue
+            other_name = str(character.get("display_name") or "").strip()
+            if other_name and other_name != canonical_name:
+                return other_name
+    return None
+
+
+# 角色别名注册表读侧（1.5.x task①，真实第24轮 EP3 回归 ERR-20260824-d0830a）：
+# 跟场景轴 1.5.1（_prep_pack_resolve_scene_reference_with_alias）完全对称的
+# 缺陷——场景侧写别名会被后续读，角色侧却只写不读。取证：全库范围内只有
+# EP2 一次新产物把"小胖子"绑定为李富贵的别名（无冲突源，没有任何其它分集
+# 把这个词绑给过别人），EP3 依然解析失败，因为角色解析管线压根不查这份
+# 已确立的跨集别名——"小胖子"每一集都要重新赌一次身份消歧模型调用，而不是
+# 复用 EP2 已经付费验证过的结论。跟 _prep_pack_cross_episode_alias_conflict
+# 同一数据源（项目内其它已发布分集的 asset_manifest.characters[].aliases，
+# Character schema 没有 Bible 级别的 aliases 字段，这是目前唯一持久化角色
+# 别名归属的地方）。只返回第一个命中的候选 canonical_name——是否唯一由
+# 调用方另外过一遍 _prep_pack_cross_episode_alias_conflict 确认（复用同一套
+# 冲突拒绝逻辑守多目标，不在这里重复实现一份等价的唯一性判断）。
+def _prep_pack_lookup_character_alias_canonical_name(
+    conn, project_id: str, episode_id: str, name: str,
+) -> str | None:
+    """项目内是否已有其它已发布分集把 ``name`` 登记为某个角色的别名？命中
+    返回该 canonical_name，没有命中返回 None。"""
+    if not name:
+        return None
+    rows = conn.execute(
+        "SELECT screenplay_json FROM episodes WHERE project_id=? AND id!=? "
+        "AND screenplay_json IS NOT NULL",
+        (project_id, episode_id),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["screenplay_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        manifest = payload.get("asset_manifest") or {}
+        for character in manifest.get("characters") or []:
+            if name in (character.get("aliases") or []):
+                canonical = str(character.get("display_name") or "").strip()
+                if canonical:
+                    return canonical
+    return None
+
+
 # 先验知识申报通道（1.5.0，用户修正令：outright 禁止会扔掉真正猜对的真名，
 # "丹鬼"这类猜对了本该是加分项）。模型可能在训练语料里读过这部小说，与其
 # 假装它不知道（禁止），不如让它把这份先验知识当一个可核验的候选申报出来
 # （_ModelCharacterMention/_ModelSceneMention.suspected_true_name），申报本身
-# 从不被直接采信——必须先通过下面这条确定性核验，核验不过就丢弃，回退到
+# 从不被直接采信——必须先通过下面这道确定性核验，核验不过就丢弃，回退到
 # display_name 本身的常规解析路线（消歧/群演/发现），不静默相信任何猜测。
-def _prep_pack_verify_true_name_hypothesis(
-    conn, *, project_id: str, episode_no: int, source_text: str,
-    suspected_true_name: str, resolve_fn,
-) -> bool:
-    """Verify (not trust) a model-declared ``suspected_true_name`` guess.
+#
+# 身份绑定审判程序（真实回归：用户抓到 EP2/EP3 把"小胖子"误绑成"王有材"，
+# 又抓到 EP6"上官修身边的男子"被绑成上官修本人——旧版核验只检查候选真名
+# 这个字符串在前瞻窗口里出现过，"名字存在"被当成了"身份链接"的充分条件。
+# 中途曾尝试过两版结构规则："列举反证"、"包含关系方向性规则"，均被用户
+# 否决——那些规则本质是穿着语法外衣的黑白名单，靠人工穷举的分隔符/方位词
+# 判断语义，覆盖不了语言的全部表达方式。最终架构改为完全不猜测语义规则，
+# 把"是否同一人"这个语义判断彻底交给模型，代码只负责三件事：把全部相关
+# 原文老老实实检索出来、把模型的结论钉在真实存在的原文引句上、以及记账）：
+#   1) 卷宗检索（代码，零语义，_prep_pack_true_name_dossier）：检索项目
+#      全书（chapters 全表，不只是本集或某个前瞻窗口）里所有含 alias 的
+#      自然段 ∪ 所有含 suspected_true_name 的自然段，段落原文 + 章节号
+#      组成"卷宗"。反证证据（比如"小胖子、王有材"这种并列举出两个不同人
+#      的段落）因为同时含两个词，天然会被检索到卷宗里，不需要另外写一条
+#      "反证"规则去猜它长什么样。卷宗超过字符预算时用
+#      _prep_pack_sample_dossier_entries_within_budget 做确定性（非随机）
+#      采样：同时含两词的段落全部保留，只含一个词的段落按下标等距抽样。
+#   2) 裁决（模型，唯一一次调用，_prep_pack_true_name_verdict）：独立
+#      调用，只给卷宗原文，不携带任何一方"是同一人"或"不是同一人"的
+#      推理引导——问"仅依据以下原文段落，判断称谓 X 与人名 Y 是否同一个
+#      人"，结论三选一 same/different/uncertain，并要求逐字引用支撑句。
+#   3) 钉证（代码，_prep_pack_pin_dossier_quote）：模型引用的支撑句必须
+#      逐字存在于卷宗某一条里（防止模型凭空编造一句"证词"）；verdict 必须
+#      是 same 且引句核验通过，才算核验通过。uncertain/different/引句核验
+#      失败，一律不采信——默认安全侧，不确定就不绑，回退到 alias 自身的
+#      常规解析路线（未被发现进一步归类时自然落为群演，见 _pass 里
+#      unresolved_characters 的处理，不需要这里单独再写一条"走群演"分支）。
+#   4) 记账（代码）：核验通过的判决连同钉住的原文引句进 provenance
+#      （anchor_phrase 就是这句被钉住的支撑句），alias 才会被写进
+#      entry["aliases"]（见调用点），写入注册表的东西天然带着完整证据链；
+#      读侧（_prep_pack_lookup_character_alias_canonical_name，task①）
+#      逻辑不变——源头干净，继承出去的自然干净。同一 (subject_kind, alias,
+#      true_name) 组合在同一次生成里只会真正发一次模型调用：_resolve_assets
+#      级别的 true_name_verdict_cache 字典按 (subject_kind, alias, true_name)
+#      缓存判决结果（subject_kind 隔离角色/场景两个共用同一字典的域），
+#      重复出现的提及直接复用（"注册表即缓存"里"注册表"指的是跨集持久化
+#      那一层，这里的进程内字典是同一次生成内的短期缓存，两者不冲突：
+#      前者防跨集重复裁决，后者防同一集内同一对提及反复调用）。
+# 跨集矛盾绑定（同一 alias 在不同已发布分集里被判给不同的 true_name）：
+# 复用既有的 _prep_pack_cross_episode_alias_conflict（task②）继续按拒绝
+# 处理——发现冲突就不接受这次改名，回退到 alias 自身的解析路线，冲突记入
+# rejected_alias_conflicts（观测）。协调方设想的"合并双方卷宗重审一次，
+# 仍矛盾则两边都降级为群演"是更精细的处理，本轮未实现（没有红灯明确要求
+# 这一步，且现状——拒绝新的改名、绝不静默接受任何一边——已经是安全默认
+# 值，不会把错误绑定放出去），留待后续有真实回归再做。
+def _prep_pack_true_name_dossier(
+    conn, project_id: str, alias: str, true_name: str,
+) -> list[dict[str, Any]]:
+    """1) 卷宗检索：零语义，纯字符串包含判断。扫描项目 chapters 全表
+    （不限本集/前瞻窗口——EP2 的真实事故正是因为旧版只查了一个有限窗口，
+    真正的反证/佐证段落可能在全书任何一章），按自然段
+    （index_source_segments）逐段检查是否包含 alias 和/或 true_name。
+    双词共现段全部保留；单词段超出预算时交给
+    _prep_pack_sample_dossier_entries_within_budget 做确定性采样。"""
+    if not alias or not true_name:
+        return []
+    from app.portraits import CAST_DISCOVERY_SOURCE_BUDGET
 
-    ``resolve_fn`` is ``_resolve_portrait_id`` or ``_resolve_scene_reference_id``
-    (character/scene share the same two-part verification shape). A
-    hypothesis is verified when BOTH hold:
-      a) ``suspected_true_name`` resolves to an EXISTING bible identity --
-         nothing to bind the guess to otherwise, no matter how well-attested
-         the guess is;
-      b) ``suspected_true_name`` itself appears verbatim somewhere in this
-         episode's own text OR the same forward-looking window
-         app.portraits' real identity-disambiguation already uses for
-         exactly this kind of question ("大汉/老者/黑衣人后来叫什么") --
-         reusing app.portraits._future_chapter_context (same
-         IDENTITY_DISCOVERY_FORWARD_CHAPTERS window/fetcher) rather than a
-         second copy of the chapter-fetching logic.
-    This performs no model call of its own -- the hypothesis is either
-    textually corroborated within a bounded, already-established window, or
-    it is not; that is what makes it a genuine fast lane (as fast as a
-    handful of DB reads + substring checks) rather than a second guess.
+    both: list[dict[str, Any]] = []
+    single: list[dict[str, Any]] = []
+    rows = conn.execute(
+        "SELECT idx, content FROM chapters WHERE project_id=? ORDER BY idx",
+        (project_id,),
+    ).fetchall()
+    for row in rows:
+        chapter_idx = int(row["idx"])
+        content = str(row["content"] or "")
+        if alias not in content and true_name not in content:
+            continue
+        for segment_index, segment in enumerate(
+            index_source_segments(content), start=1,
+        ):
+            has_alias = alias in segment.text
+            has_true_name = true_name in segment.text
+            if not has_alias and not has_true_name:
+                continue
+            entry = {
+                "chapter_idx": chapter_idx, "segment_index": segment_index,
+                "text": segment.text,
+            }
+            (both if has_alias and has_true_name else single).append(entry)
+    dossier = list(both)
+    used_chars = sum(len(item["text"]) for item in dossier)
+    remaining_budget = max(0, CAST_DISCOVERY_SOURCE_BUDGET - used_chars)
+    dossier.extend(
+        _prep_pack_sample_dossier_entries_within_budget(single, remaining_budget)
+    )
+    return dossier
+
+
+def _prep_pack_sample_dossier_entries_within_budget(
+    entries: list[dict[str, Any]], char_budget: int,
+) -> list[dict[str, Any]]:
+    """单词段的确定性（非随机）等距采样：预算充足时全收；不足时按下标
+    等距抽取，让样本铺满全书范围而不是只取前几章——同一份输入，任何时候
+    重跑都得到一模一样的卷宗，可复现、可审计，这也是不能用随机采样的
+    原因（审判程序的证据卷宗必须是确定性的，不能这次抽到反证下次抽不到）。
     """
+    if not entries or char_budget <= 0:
+        return []
+    total_chars = sum(len(item["text"]) for item in entries)
+    if total_chars <= char_budget:
+        return list(entries)
+    average_chars = max(1.0, total_chars / len(entries))
+    approx_count = max(1, int(char_budget / average_chars))
+    step = max(1.0, len(entries) / approx_count)
+    picked_indexes = sorted({
+        min(len(entries) - 1, int(i * step)) for i in range(approx_count)
+    })
+    selected: list[dict[str, Any]] = []
+    used = 0
+    for index in picked_indexes:
+        entry = entries[index]
+        entry_chars = len(entry["text"])
+        if used + entry_chars > char_budget:
+            continue
+        selected.append(entry)
+        used += entry_chars
+    return selected
+
+
+class _PrepPackTrueNameVerdictResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    verdict: Literal["same", "different", "uncertain"]
+    supporting_quote: str
+
+
+# 裁决提示词按 subject_kind 分域的措辞表（独立评审 blocker：本函数被角色
+# 分支 resolve_fn=_resolve_portrait_id 与场景分支 resolve_fn=
+# _resolve_scene_reference_id 共用，旧版提示词硬编码"是否指同一个人"——
+# 场景假设走到这里时模型被问"这两个是不是同一个人"，语义错误，裁决不可靠。
+# noun_label 是卷宗引言里第二个待查证字符串的名词身份；same_subject 是
+# "是否指同一 X"里的 X，同时出现在任务句与 verdict 三个取值的中文释义里，
+# 结构（卷宗引用、uncertain 安全默认）跟改动前完全一致，只换名词。）
+_TRUE_NAME_VERDICT_SUBJECT_COPY: dict[str, dict[str, str]] = {
+    "character": {"noun_label": "人名", "same_subject": "同一个人"},
+    "scene": {"noun_label": "地点名", "same_subject": "同一个场景或地点"},
+}
+
+
+async def _prep_pack_true_name_verdict(
+    *, run_id: str | None, episode_id: str,
+    subject_kind: Literal["character", "scene"],
+    alias: str, true_name: str, dossier: list[dict[str, Any]],
+) -> _PrepPackTrueNameVerdictResponse:
+    """2) 裁决：唯一一次模型调用，只给卷宗原文，不携带任何一方的推理
+    引导——不说"我怀疑 X 就是 Y"，只客观陈述两个字符串，把"是否同一
+    人/场景"这个语义判断完全交给模型自己独立做出。``subject_kind`` 只
+    决定问的是"同一个人"还是"同一个场景或地点"这一个名词，卷宗引用/
+    uncertain 安全默认等结构完全不变（见 _TRUE_NAME_VERDICT_SUBJECT_COPY
+    上方注释）。"""
+    copy = _TRUE_NAME_VERDICT_SUBJECT_COPY[subject_kind]
+    noun_label = copy["noun_label"]
+    same_subject = copy["same_subject"]
+    catalog = "\n\n".join(
+        f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
+        for item in dossier
+    )
+    prompt = f"""下面是从原著全书范围内检索到的原文段落，与称谓"{alias}"或{noun_label}
+"{true_name}"其中至少一个有关（出现顺序不代表任何推断结论）：
+{catalog}
+
+任务：仅依据以上原文段落本身，判断称谓"{alias}"与{noun_label}"{true_name}"是否指
+{same_subject}。
+- verdict 填 same（确定是{same_subject}）/different（确定不是{same_subject}）/uncertain
+  （原文不足以确定）三选一，无法确定就如实填 uncertain，不要勉强给出
+  same 或 different；
+- supporting_quote 必须是上面某一段落里逐字存在的一句原文，作为你得出
+  这个结论的依据。
+只输出符合 Schema 的 JSON。"""
+    return await _call_structured(
+        run_id=run_id,
+        step_key="episode_prep_pack_true_name_verdict",
+        prompt=prompt,
+        model_type=_PrepPackTrueNameVerdictResponse,
+        schema_name="episode_prep_pack_true_name_verdict_v1",
+        operation_id=(
+            f"episode_prep_pack:{episode_id}:true_name_verdict:"
+            + evidence_repository.content_hash({
+                "subject_kind": subject_kind,
+                "alias": alias, "true_name": true_name,
+                "dossier": [
+                    (item["chapter_idx"], item["segment_index"]) for item in dossier
+                ],
+            })
+        ),
+        max_tokens=500,
+        call_meta={
+            "stage_key": "episode_prep_pack_true_name_verdict",
+            "episode_id": episode_id,
+            "subject_kind": subject_kind,
+        },
+    )
+
+
+def _prep_pack_pin_dossier_quote(
+    dossier: list[dict[str, Any]], quote: str,
+) -> dict[str, Any] | None:
+    """3) 钉证：模型引用的支撑句必须逐字存在于卷宗某一条里，防止模型
+    凭空编造一句原文里根本没有的"证词"。返回命中的那条卷宗记录（带
+    chapter_idx，供 provenance 定位），没有命中返回 None。"""
+    quote = str(quote or "").strip()
+    if not quote:
+        return None
+    for item in dossier:
+        if quote in item["text"]:
+            return item
+    return None
+
+
+async def _prep_pack_verify_true_name_hypothesis(
+    conn, *, project_id: str, episode_id: str, episode_no: int, source_text: str,
+    alias: str, suspected_true_name: str,
+    subject_kind: Literal["character", "scene"], resolve_fn, run_id: str | None,
+    verdict_cache: dict[tuple[str, str, str], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Verify (not trust) a model-declared ``suspected_true_name`` guess via
+    the dossier trial procedure documented above. Returns a dict:
+    ``accepted``；不通过时的 ``reason``（rejected_no_dossier/
+    rejected_verdict_different/rejected_verdict_uncertain/
+    rejected_quote_not_pinned，都归入观测的 rejected_verdicts 概念）；
+    通过时的 ``pinned_quote``/``pinned_chapter_idx``（分别供 provenance.
+    anchor_phrase 与 method="resolution"/"resolution_forward" 判定，见
+    调用点）。``subject_kind`` 区分角色分支（resolve_fn=_resolve_portrait_id）
+    与场景分支（resolve_fn=_resolve_scene_reference_id）——两者共用本函数
+    与下面的裁决调用，但问的语义不同（"同一个人" vs "同一个场景或地点"，
+    见 _prep_pack_true_name_verdict 的 _TRUE_NAME_VERDICT_SUBJECT_COPY），
+    调用点各自传对。``verdict_cache`` 是 _resolve_assets 级别按
+    (subject_kind, alias, suspected_true_name) 缓存的判决结果，同一次
+    生成内重复出现的同一对提及不重复发起模型调用；subject_kind 纳入键是
+    因为角色循环与场景循环共用同一个缓存字典，不按域隔离会导致跨域撞名
+    时复用错误域的裁决（独立评审发现的 minor）。"""
+    empty = {
+        "accepted": False, "reason": "", "pinned_quote": "",
+        "pinned_chapter_idx": None,
+    }
     if not suspected_true_name:
-        return False
+        return empty
     if resolve_fn(conn, project_id, suspected_true_name, episode_no) is None:
-        return False
-    if _prep_pack_mention_has_text_evidence(suspected_true_name, source_text):
-        return True
-    from app.portraits import _future_chapter_context
+        return empty
+    cache_key = (subject_kind, alias, suspected_true_name)
+    if verdict_cache is not None and cache_key in verdict_cache:
+        return verdict_cache[cache_key]
 
-    forward_text, _label = _future_chapter_context(conn, project_id, episode_no)
-    return _prep_pack_mention_has_text_evidence(suspected_true_name, forward_text)
-
+    dossier = _prep_pack_true_name_dossier(conn, project_id, alias, suspected_true_name)
+    if not dossier:
+        result = {**empty, "reason": "rejected_no_dossier"}
+        if verdict_cache is not None:
+            verdict_cache[cache_key] = result
+        return result
+    response = await _prep_pack_true_name_verdict(
+        run_id=run_id, episode_id=episode_id, subject_kind=subject_kind,
+        alias=alias, true_name=suspected_true_name, dossier=dossier,
+    )
+    if response.verdict != "same":
+        result = {**empty, "reason": f"rejected_verdict_{response.verdict}"}
+        if verdict_cache is not None:
+            verdict_cache[cache_key] = result
+        return result
+    pinned = _prep_pack_pin_dossier_quote(dossier, response.supporting_quote)
+    if pinned is None:
+        result = {**empty, "reason": "rejected_quote_not_pinned"}
+        if verdict_cache is not None:
+            verdict_cache[cache_key] = result
+        return result
+    result = {
+        "accepted": True, "reason": "", "pinned_quote": pinned["text"],
+        "pinned_chapter_idx": pinned["chapter_idx"],
+    }
+    if verdict_cache is not None:
+        verdict_cache[cache_key] = result
+    return result
 
 def _load_project_bible(conn, project_id: str) -> Bible:
     row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
@@ -662,7 +1384,7 @@ async def _resolve_assets(
     source_text: str, events: list[dict[str, Any]], run_id: str | None,
 ) -> tuple[
     list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str], dict[str, int],
-    list[dict[str, Any]],
+    list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]],
 ]:
     """Resolve every event's characters/scenes (invariant③).
 
@@ -720,19 +1442,39 @@ async def _resolve_assets(
     real disposition instead of being assumed one way or the other.
     """
     stats = {"character_discovery_calls": 0, "scene_discovery_calls": 0}
+    # 场景别名锚定（1.5.1，task①）：一次性加载，供 _pass 内的场景解析复用。
+    bible = _load_project_bible(conn, project_id)
+    segments = index_source_segments(source_text)
+    scene_alias_anchors: list[dict[str, Any]] = []
+    # 跨集别名一致性（1.5.2，task②）：见 _prep_pack_cross_episode_alias_conflict
+    # 上方注释。
+    rejected_alias_conflicts: list[dict[str, Any]] = []
+    # 身份绑定审判程序的进程内判决缓存（第29轮，见 _prep_pack_verify_
+    # true_name_hypothesis 上方完整说明第 4 点）：同一次 _resolve_assets
+    # 调用内，同一个 (subject_kind, alias, suspected_true_name) 组合只真正
+    # 发起一次模型裁决调用，两遍 _pass()（pass1/pass2）与同一遍内的多个
+    # 事件共用同一份缓存；角色分支与场景分支也共用这同一个字典对象，键里
+    # 的 subject_kind 就是两域的隔离手段（独立评审发现的 minor：旧版键只有
+    # (alias, suspected_true_name)，角色域与场景域撞名会复用错误域的裁决）。
+    true_name_verdict_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
 
-    def _pass(
+    async def _pass(
         skip_character_names: set[str],
         character_rename: dict[str, str],
         scene_rename: dict[str, str],
         non_person_names: set[str] = frozenset(),
+        *,
+        newly_added_character_names: frozenset[str] = frozenset(),
+        newly_added_scene_names: frozenset[str] = frozenset(),
+        resolution_evidence_by_label: dict[str, str] | None = None,
     ) -> tuple[
-        dict[str, Any], dict[str, Any], dict[str, list[str]], list[str], list[str], list[str],
+        dict[str, Any], dict[str, Any], dict[str, dict[str, Any]], list[str], list[str], list[str],
         list[dict[str, Any]],
     ]:
+        resolution_evidence_by_label = resolution_evidence_by_label or {}
         characters: dict[str, dict[str, Any]] = {}
         scenes: dict[str, dict[str, Any]] = {}
-        functional_extras: dict[str, list[str]] = {}
+        functional_extras: dict[str, dict[str, Any]] = {}
         errors: list[str] = []
         unresolved_characters: list[str] = []
         unresolved_scenes: list[str] = []
@@ -748,19 +1490,64 @@ async def _resolve_assets(
                     continue
                 if name in skip_character_names:
                     if name not in non_person_names:
-                        extra_events = functional_extras.setdefault(name, [])
-                        if event_id not in extra_events:
-                            extra_events.append(event_id)
+                        # provenance（1.6.0）：这批 functional_extras 全部
+                        # 来自本轮的角色发现（要么发现明确判定 skip，要么是
+                        # 发现跑过之后"既没归类也没报错"的默认兜底——两种
+                        # 情形都必然经过了发现调用，method 统一记 discovery，
+                        # 锚点用触发发现的原始描述 name 自身在本集原文里的
+                        # 出现位置，找不到就是空锚点（见 _prep_pack_local_
+                        # text_anchor）。
+                        extra_anchor_segments, extra_anchor_phrase = (
+                            _prep_pack_local_text_anchor(segments, [name])
+                        )
+                        extra = functional_extras.setdefault(name, {
+                            "event_ids": [],
+                            "provenance": _prep_pack_provenance(
+                                "discovery", extra_anchor_segments, extra_anchor_phrase,
+                            ),
+                        })
+                        if event_id not in extra["event_ids"]:
+                            extra["event_ids"].append(event_id)
                     continue
                 resolved_name = character_rename.get(name, name)
+                # provenance（1.6.0）：记录这次改名到底走的是哪条路径——
+                # via_alias_registry 单独标记 task① 的注册表命中（跟
+                # character_rename/suspected_true_name 都不是同一件事，
+                # method 要区分 alias vs resolution）。
+                via_alias_registry = False
+                # 第30轮 RCA（真实 EP2/6/8 回归：resolution_forward 空
+                # forward_chapter_label/anchor_phrase）：这里曾经用
+                # "resolved_name == suspected_true_name" 反推"是否经过真名
+                # 核验"，但 resolved_name 也可能通过 character_rename（角色
+                # 发现/消歧，完全独立的另一条路径）恰好也算出同一个真名——
+                # 两条路径殊途同归到同一个名字，不代表这次核验真的跑过；一旦
+                # 走的是 character_rename 这条路，下面 if 判据里的
+                # suspected_true_name != resolved_name 从一开始就是 False，
+                # 核验分支被跳过，true_name_pinned_quote/chapter_idx 从未被
+                # 赋值，停在初始空值——但后面的 method 判定分支当年只看
+                # "resolved_name == suspected_true_name" 这个结果状态，认定
+                # 它是核验通过，于是带着两个空值直接产出 resolution_forward。
+                # 跟场景侧的 via_suspected_true_name 同一个修法：只在真正跑
+                # 过核验且 accepted 时才置位，用这个专用布尔判定，不再用状态
+                # 反推过程。
+                via_suspected_true_name = False
                 suspected_true_name = str(mention.get("suspected_true_name") or "").strip()
+                true_name_pinned_quote = ""
+                true_name_pinned_chapter_idx: int | None = None
                 if suspected_true_name and suspected_true_name != resolved_name:
-                    if _prep_pack_verify_true_name_hypothesis(
-                        conn, project_id=project_id, episode_no=episode_no,
-                        source_text=source_text, suspected_true_name=suspected_true_name,
-                        resolve_fn=_resolve_portrait_id,
-                    ):
+                    verification = await _prep_pack_verify_true_name_hypothesis(
+                        conn, project_id=project_id, episode_id=episode_id,
+                        episode_no=episode_no, source_text=source_text,
+                        alias=name, suspected_true_name=suspected_true_name,
+                        subject_kind="character",
+                        resolve_fn=_resolve_portrait_id, run_id=run_id,
+                        verdict_cache=true_name_verdict_cache,
+                    )
+                    if verification["accepted"]:
                         resolved_name = suspected_true_name
+                        via_suspected_true_name = True
+                        true_name_pinned_quote = verification["pinned_quote"]
+                        true_name_pinned_chapter_idx = verification["pinned_chapter_idx"]
                         true_name_hints.append({
                             "kind": "character", "mention": name,
                             "suspected_true_name": suspected_true_name, "status": "accepted",
@@ -769,8 +1556,60 @@ async def _resolve_assets(
                         true_name_hints.append({
                             "kind": "character", "mention": name,
                             "suspected_true_name": suspected_true_name, "status": "rejected",
+                            "reason": verification["reason"],
                         })
+                # 跨集别名一致性（task②，见 _prep_pack_cross_episode_alias_
+                # conflict 上方注释，真实 EP3 回归："小胖子"曾被误改绑到项目内
+                # 另一个已发布分集绑定的"王有材"，本集完全没有"王有材"的文本
+                # 依据）：任何改名（不管来自身份消歧的 character_rename 还是
+                # 上面刚核验通过的 suspected_true_name）落地前，检查这个称谓
+                # 是否已经在项目内被绑定给了别人——是就拒绝这次改绑，回退到
+                # name 自己的常规解析路线（不静默接受任何一边），并记入
+                # rejected_alias_conflicts（观测）。
+                if resolved_name != name:
+                    conflicting_name = _prep_pack_cross_episode_alias_conflict(
+                        conn, project_id, episode_id,
+                        alias=name, canonical_name=resolved_name,
+                    )
+                    if conflicting_name:
+                        rejected_alias_conflicts.append({
+                            "mention": name,
+                            "attempted_canonical_name": resolved_name,
+                            "conflicting_canonical_name": conflicting_name,
+                        })
+                        resolved_name = name
                 portrait_id = _resolve_portrait_id(conn, project_id, resolved_name, episode_no)
+                if not portrait_id:
+                    # 角色别名注册表读侧（task①，真实第24轮 EP3 回归
+                    # ERR-20260824-d0830a，见 _prep_pack_lookup_character_
+                    # alias_canonical_name 上方注释）：裸精确匹配失败后，查
+                    # 项目内已发布分集的别名注册表——这个称谓是否已经在别的
+                    # 分集里被确立过归属（"小胖子"经 EP2 一次消歧确立即归
+                    # 李富贵，EP3+ 应直接复用，不必每集重新赌一次消歧模型
+                    # 调用）。复用 _prep_pack_cross_episode_alias_conflict
+                    # 同一套冲突拒绝逻辑守住多目标——命中但被判定跟别的分集
+                    # 已确立的归属冲突就不绑定，回退到常规解析路线（回炉
+                    # discovery）。
+                    aliased_name = _prep_pack_lookup_character_alias_canonical_name(
+                        conn, project_id, episode_id, name,
+                    )
+                    if aliased_name and aliased_name != resolved_name:
+                        conflicting_name = _prep_pack_cross_episode_alias_conflict(
+                            conn, project_id, episode_id,
+                            alias=name, canonical_name=aliased_name,
+                        )
+                        if conflicting_name:
+                            rejected_alias_conflicts.append({
+                                "mention": name,
+                                "attempted_canonical_name": aliased_name,
+                                "conflicting_canonical_name": conflicting_name,
+                            })
+                        else:
+                            resolved_name = aliased_name
+                            via_alias_registry = True
+                            portrait_id = _resolve_portrait_id(
+                                conn, project_id, resolved_name, episode_no,
+                            )
                 if not portrait_id:
                     errors.append(
                         f"事件 {event_id} 的角色「{name}」未解析到已有 portrait_id，"
@@ -779,31 +1618,106 @@ async def _resolve_assets(
                     if name not in unresolved_characters:
                         unresolved_characters.append(name)
                     continue
-                # 称谓证据闸（1.4.2，见 _prep_pack_mention_has_text_evidence 上方
-                # 注释）：不管这个 portrait_id 是靠直接命中还是靠身份消歧的前瞻
-                # 改名解析拿到的，模型实际写下的称谓 name 本身必须逐字出现在本集
-                # 原文——这既拦得住真实 EP5 的裸直接命中幻觉（模型直接写"丹鬼"，
-                # 原文 0 次出现），也不误伤合法的前瞻解析（比如"小胖子"→李富贵，
-                # "小胖子"本就是原文里对他的真实称呼，天然会出现在原文中）。命中
-                # 失败不静默改路由到发现——这是协调方明确要求的"门禁具名拦截"，
-                # 不是"当作未解析回炉"（回炉重新发现有可能重犯同样的臆断错误）。
-                if not _prep_pack_mention_has_text_evidence(name, source_text):
+                # 称谓证据闸语义精化（1.5.x task②，真实第24轮 EP3 回归
+                # ERR-20260824-d0830a）：「穿杂役衫的魁梧大汉」经消歧正确解析到
+                # 赵武刚，却被本闸拦下——原文对这个人只有分散的描述性叙述，模型
+                # 综合出的这个名词短语天然不可能逐字出现在原文里，这不是幻觉
+                # 归属的形状。resolved_name != name（came_via_resolution）精确
+                # 区分两种情形，用的正是已经在算的同一个信号，不需要另外记状态：
+                #   - 裸直接命中（resolved_name == name，没有经过 character_
+                #     rename/suspected_true_name/别名注册表任何一条改名路径）：
+                #     反幻觉主防线不动，称谓本身仍必须逐字出现在原文——这是
+                #     真实 EP5 丹鬼案要拦的唯一形状（模型直接写下一个谱内已有
+                #     名字，未经任何消歧）。
+                #   - 经消歧/发现/别名注册表解析绑定（resolved_name != name）：
+                #     合法性由那条解析路径自身的证据链承担（身份消歧模型看的
+                #     就是本集原文；suspected_true_name 有自己独立的逐字/前瞻
+                #     窗口核验；别名注册表命中继承的是别的分集当时已经过同一套
+                #     证据核验的结论）——不再重复要求 name 本身逐字出现。
+                came_via_resolution = resolved_name != name
+                literal_evidence = _prep_pack_mention_has_text_evidence(name, source_text)
+                if not came_via_resolution and not literal_evidence:
                     errors.append(
                         f"事件 {event_id} 的角色「{name}」解析到已有角色「{resolved_name}」"
                         f"（portrait_id={portrait_id}），但称谓「{name}」未逐字出现在本集"
                         "原文中，缺少称谓证据，门禁具名拦截"
                     )
                     continue
+                # provenance method（1.6.0，第25轮收口）：discovery（本次
+                # 新建卡）优先于其它任何改名信号判定——即便新建卡的同时也发生
+                # 了改名（罕见但可能：消歧把"大汉"判成新建角色"赵武刚"），
+                # "这是一张这次才出现的新卡"是更具体、更有信息量的事实。
+                # 其次是 alias（task① 注册表命中）、resolution（消歧/真名
+                # 核验改名）、最后是 direct（裸命中，未经任何改名）。
+                forward_chapter_label = ""
+                if resolved_name in newly_added_character_names:
+                    method = "discovery"
+                    anchor_segments, anchor_phrase = _prep_pack_local_text_anchor(
+                        segments, [name],
+                    )
+                elif via_alias_registry:
+                    method = "alias"
+                    anchor_segments, anchor_phrase = _prep_pack_local_text_anchor(
+                        segments, [name],
+                    )
+                elif via_suspected_true_name:
+                    # 身份绑定审判程序核验通过（第29轮，见
+                    # _prep_pack_verify_true_name_hypothesis 上方完整
+                    # 说明）：钉住的支撑句（true_name_pinned_quote）如果
+                    # 真的落在本集自己的段落里，就是最贴切的本地锚点
+                    # （它已经在裁决时被模型独立确认"确定是同一人"，比
+                    # 泛泛的候选搜索更有信息量）；如果钉住的支撑句来自
+                    # 全书别的章节（本集原文里找不到这句话），说明这条
+                    # 绑定的真实依据不在本集，method 单独标记
+                    # "resolution_forward"，空锚（anchor_segments）豁免
+                    # 合法，但 anchor_phrase 仍然记这句被钉住的支撑句本身
+                    # （第30轮 RCA 修正：过去这里误写成空字符串——anchor_
+                    # phrase 是"引用的是哪句话"，anchor_segments 才是"这句
+                    # 话在不在本集本地"，两者不是一回事，空 anchor_segments
+                    # 不代表 anchor_phrase 也该是空的），连同裁决真正引用的
+                    # 章节号一并写进 provenance，供审计核对。
+                    local_index = _prep_pack_first_evidence_segment(
+                        segments, true_name_pinned_quote,
+                    )
+                    if local_index is not None:
+                        method = "resolution"
+                        anchor_segments = [local_index]
+                        anchor_phrase = true_name_pinned_quote
+                    else:
+                        method = "resolution_forward"
+                        anchor_segments, anchor_phrase = [], true_name_pinned_quote
+                        if true_name_pinned_chapter_idx is not None:
+                            forward_chapter_label = f"第 {true_name_pinned_chapter_idx} 章"
+                elif came_via_resolution:
+                    method = "resolution"
+                    anchor_segments, anchor_phrase = _prep_pack_local_text_anchor(
+                        segments,
+                        [resolution_evidence_by_label.get(name, ""), suspected_true_name, name],
+                    )
+                else:
+                    method = "direct"
+                    anchor_segments, anchor_phrase = _prep_pack_local_text_anchor(
+                        segments, [name],
+                    )
                 entry = characters.setdefault(portrait_id, {
                     "identity_id": f"bible:{resolved_name}",
                     "display_name": resolved_name,
                     "portrait_id": portrait_id,
                     "event_ids": [],
                     "aliases": [],
+                    "provenance": _prep_pack_provenance(
+                        method, anchor_segments, anchor_phrase,
+                        forward_chapter_label=forward_chapter_label,
+                    ),
                 })
                 if event_id not in entry["event_ids"]:
                     entry["event_ids"].append(event_id)
-                if name != resolved_name and name not in entry["aliases"]:
+                # 别名注册仍只登记逐字出现于原文的称谓（task②，见上方门禁
+                # 注释）：组合/综合描述短语（"穿杂役衫的魁梧大汉"）合法通过了
+                # 门禁，但绝不能进别名库——别名注册表是 task① 直接信任的读侧
+                # 数据源，一旦被模型综合出的合成词污染，将来会被当成"这就是
+                # 原文真实用过的称呼"重新播种给别的分集。
+                if came_via_resolution and literal_evidence and name not in entry["aliases"]:
                     entry["aliases"].append(name)
             for mention in event["scenes"]:
                 name = str(mention["display_name"] or "").strip()
@@ -812,18 +1726,28 @@ async def _resolve_assets(
                     continue
                 resolved_via_discovery = name in scene_rename
                 resolved_name = scene_rename.get(name, name)
+                via_suspected_true_name = False
+                true_name_pinned_quote = ""
+                true_name_pinned_chapter_idx: int | None = None
                 suspected_true_name = str(mention.get("suspected_true_name") or "").strip()
                 if (
                     suspected_true_name
                     and suspected_true_name != resolved_name
                     and not resolved_via_discovery
                 ):
-                    if _prep_pack_verify_true_name_hypothesis(
-                        conn, project_id=project_id, episode_no=episode_no,
-                        source_text=source_text, suspected_true_name=suspected_true_name,
-                        resolve_fn=_resolve_scene_reference_id,
-                    ):
+                    verification = await _prep_pack_verify_true_name_hypothesis(
+                        conn, project_id=project_id, episode_id=episode_id,
+                        episode_no=episode_no, source_text=source_text,
+                        alias=name, suspected_true_name=suspected_true_name,
+                        subject_kind="scene",
+                        resolve_fn=_resolve_scene_reference_id, run_id=run_id,
+                        verdict_cache=true_name_verdict_cache,
+                    )
+                    if verification["accepted"]:
                         resolved_name = suspected_true_name
+                        via_suspected_true_name = True
+                        true_name_pinned_quote = verification["pinned_quote"]
+                        true_name_pinned_chapter_idx = verification["pinned_chapter_idx"]
                         true_name_hints.append({
                             "kind": "scene", "mention": name,
                             "suspected_true_name": suspected_true_name, "status": "accepted",
@@ -832,9 +1756,12 @@ async def _resolve_assets(
                         true_name_hints.append({
                             "kind": "scene", "mention": name,
                             "suspected_true_name": suspected_true_name, "status": "rejected",
+                            "reason": verification["reason"],
                         })
-                scene_reference_id = _resolve_scene_reference_id(
-                    conn, project_id, resolved_name, episode_no,
+                scene_reference_id, canonical_scene_name = (
+                    _prep_pack_resolve_scene_reference_with_alias(
+                        conn, project_id, episode_no, resolved_name, bible,
+                    )
                 )
                 # 场景证据闸（1.4.2，见 _prep_pack_mention_has_text_evidence 上方
                 # 注释）：只在"裸直接命中"（这个 label 从未被场景发现处理过，即
@@ -861,11 +1788,112 @@ async def _resolve_assets(
                     if name not in unresolved_scenes:
                         unresolved_scenes.append(name)
                     continue
+                # 场景别名锚定（task①）：证据闸已经确认这次绑定成立——把本集
+                # 实际用到的原文措辞（name）记为该场景的新别名（幂等，见
+                # _prep_pack_register_scene_alias_if_new），别名库随集数增长；
+                # 观测元数据记录锚定来源段号，不影响任何门禁判断。
+                registered = _prep_pack_register_scene_alias_if_new(
+                    conn, project_id,
+                    canonical_name=canonical_scene_name, wording=name,
+                )
+                if registered:
+                    scene_alias_anchors.append({
+                        "canonical_scene_name": canonical_scene_name,
+                        "alias": name,
+                        "event_id": event_id,
+                        "anchor_segment": _prep_pack_first_evidence_segment(segments, name),
+                    })
+                resolved_name = canonical_scene_name
+                # provenance method（1.6.0）：跟角色侧同一优先级顺序——
+                # discovery（本次新建场景）优先于其它任何信号；然后是经
+                # 发现匹配到已有场景（resolution）；然后是 suspected_
+                # true_name 核验通过（resolution）；然后是场景别名回退命中
+                # （alias，_prep_pack_resolve_scene_reference_with_alias 内部
+                # 的 match_scene_name 回退分支）；最后是裸直接命中（direct）。
+                scene_forward_chapter_label = ""
+                scene_source_episode_no: int | None = None
+                # 场景绑定的锚点候选（第28轮 ERR-20260824，v3 审计
+                # A2_scene_no_text_evidence 25 条）：resolution/discovery
+                # 两支之前只试 [name]（触发发现/消歧的原始 label）——但
+                # 发现新建场景、或消歧把一个提及判给已有场景时，模型申报的
+                # 规范名（canonical_scene_name）本身可能才是原文里真正出现
+                # 的措辞（label 是提及方式，canonical 是模型综合出的标签，
+                # 反之亦然，取决于具体场景），单试一种会漏掉另一种真实
+                # 存在的锚点；还应该试这个场景所涉当前事件 source_evidence
+                # 里的地点描述短语——消歧/发现凭的就是这些证据判断"这是
+                # 哪个场景"，那些证据文本本身可能包含比 label/canonical
+                # 更完整的逐字地点描述。三路候选都试过仍找不到，才是真的
+                # 没有本集依据（下面 has_scene_anchor 会拦截，不再像
+                # 1.6.0 最初实现那样静默放行空锚）。
+                scene_event_evidence_quotes = [
+                    str(evidence.get("quote") or "").strip()
+                    for evidence in (event.get("source_evidence") or [])
+                    if isinstance(evidence, dict)
+                ]
+                if canonical_scene_name in newly_added_scene_names:
+                    scene_method = "discovery"
+                    scene_anchor_segments, scene_anchor_phrase = (
+                        _prep_pack_local_text_anchor(
+                            segments,
+                            [canonical_scene_name, name, *scene_event_evidence_quotes],
+                        )
+                    )
+                elif resolved_via_discovery:
+                    scene_method = "resolution"
+                    scene_anchor_segments, scene_anchor_phrase = (
+                        _prep_pack_local_text_anchor(
+                            segments,
+                            [canonical_scene_name, name, *scene_event_evidence_quotes],
+                        )
+                    )
+                elif via_suspected_true_name:
+                    # 跟角色侧同一套判定（第29轮，见
+                    # _prep_pack_verify_true_name_hypothesis 上方完整
+                    # 说明）：钉住的支撑句落在本集自己的段落里就是最贴切
+                    # 的本地锚点；落在全书别的章节，本集内没有锚点是
+                    # 正确的，不是缺陷，method 单独标记
+                    # "resolution_forward"，anchor_phrase 仍记这句被钉住的
+                    # 支撑句本身（第30轮 RCA 修正，跟角色侧同一处漏改：空的
+                    # 只该是 anchor_segments 这个"本地段号"，不该连带着把
+                    # anchor_phrase 这句话本身也清空），把裁决真正引用的
+                    # 章节号写进 provenance。
+                    local_index = _prep_pack_first_evidence_segment(
+                        segments, true_name_pinned_quote,
+                    )
+                    if local_index is not None:
+                        scene_method = "resolution"
+                        scene_anchor_segments = [local_index]
+                        scene_anchor_phrase = true_name_pinned_quote
+                    else:
+                        scene_method = "resolution_forward"
+                        scene_anchor_segments, scene_anchor_phrase = [], true_name_pinned_quote
+                        if true_name_pinned_chapter_idx is not None:
+                            scene_forward_chapter_label = (
+                                f"第 {true_name_pinned_chapter_idx} 章"
+                            )
+                elif canonical_scene_name != name:
+                    (
+                        scene_method, scene_anchor_segments, scene_anchor_phrase,
+                        scene_source_episode_no,
+                    ) = _prep_pack_scene_alias_provenance(
+                        conn, segments, scene_reference_id,
+                        canonical_scene_name, scene_event_evidence_quotes,
+                    )
+                else:
+                    scene_method = "direct"
+                    scene_anchor_segments, scene_anchor_phrase = (
+                        _prep_pack_local_text_anchor(segments, [name])
+                    )
                 entry = scenes.setdefault(scene_reference_id, {
                     "scene_id": f"scene:{resolved_name}",
                     "display_name": resolved_name,
                     "scene_reference_id": scene_reference_id,
                     "event_ids": [],
+                    "provenance": _prep_pack_provenance(
+                        scene_method, scene_anchor_segments, scene_anchor_phrase,
+                        forward_chapter_label=scene_forward_chapter_label,
+                        source_episode_no=scene_source_episode_no,
+                    ),
                 })
                 if event_id not in entry["event_ids"]:
                     entry["event_ids"].append(event_id)
@@ -875,7 +1903,7 @@ async def _resolve_assets(
         )
 
     characters, scenes, functional_extras, errors, unresolved_chars, unresolved_scenes, true_name_hints = (
-        _pass(set(), {}, {})
+        await _pass(set(), {}, {})
     )
     # 1.5.0：假设核验发生在每一遍 _pass() 内部；一个假设被拒绝的提及若同时触发
     # 发现（走到下面这个分支），第二遍 _pass() 的返回值会整体替换第一遍的——
@@ -890,6 +1918,12 @@ async def _resolve_assets(
         scene_rename: dict[str, str] = {}
         non_person_names: set[str] = set()
         discovery_diagnostics: list[str] = []
+        # provenance（1.6.0）：discovery 新建的角色/场景名单，以及角色消歧
+        # 自带的证据引文（source_quote/evidence），供 _pass 判定 method 与
+        # 计算 resolution 分支的锚点——见调用点上方各自的完整说明。
+        newly_added_character_names: frozenset[str] = frozenset()
+        newly_added_scene_names: frozenset[str] = frozenset()
+        resolution_evidence_by_label: dict[str, str] = {}
 
         if unresolved_chars:
             stats["character_discovery_calls"] += 1
@@ -903,6 +1937,18 @@ async def _resolve_assets(
             skip_character_names, character_rename, non_person_names = (
                 _character_discovery_dispositions(discovery_result)
             )
+            newly_added_character_names = frozenset(
+                str(item.get("name") or "").strip()
+                for item in (discovery_result.get("added") or [])
+                if isinstance(item, dict) and str(item.get("name") or "").strip()
+            )
+            resolution_evidence_by_label = {
+                str(item.get("source_label") or "").strip(): str(
+                    item.get("source_quote") or item.get("evidence") or ""
+                ).strip()
+                for item in (discovery_result.get("resolutions") or [])
+                if isinstance(item, dict) and str(item.get("source_label") or "").strip()
+            }
             errored_names = _discovery_errored_names(discovery_result, unresolved_chars)
             # Coordinator-mandated default: anything discovery neither
             # resolved (rename) nor explicitly disposed of (skip) nor
@@ -930,10 +1976,20 @@ async def _resolve_assets(
                 ),
             )
             scene_rename = dict(scene_discovery_result.get("resolved_names") or {})
+            newly_added_scene_names = frozenset(
+                str(item.get("name") or "").strip()
+                for item in (scene_discovery_result.get("added") or [])
+                if isinstance(item, dict) and str(item.get("name") or "").strip()
+            )
             discovery_diagnostics.extend(str(e) for e in scene_discovery_result.get("errors") or [])
 
         characters, scenes, functional_extras, errors, unresolved_chars, unresolved_scenes, true_name_hints_pass2 = (
-            _pass(skip_character_names, character_rename, scene_rename, non_person_names)
+            await _pass(
+                skip_character_names, character_rename, scene_rename, non_person_names,
+                newly_added_character_names=newly_added_character_names,
+                newly_added_scene_names=newly_added_scene_names,
+                resolution_evidence_by_label=resolution_evidence_by_label,
+            )
         )
         # 合并两遍，按内容去重（同一个提及在两遍里都核验出相同结论是正常的、
         # 无害的重复计算，不该在观测数据里出现两条一模一样的记录）。
@@ -951,12 +2007,16 @@ async def _resolve_assets(
             ]
 
     functional_extras_payload = [
-        {"label": label, "event_ids": event_ids}
-        for label, event_ids in functional_extras.items()
+        {
+            "label": label,
+            "event_ids": data["event_ids"],
+            "provenance": data["provenance"],
+        }
+        for label, data in functional_extras.items()
     ]
     return (
         list(characters.values()), list(scenes.values()), functional_extras_payload,
-        errors, stats, true_name_hints,
+        errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     )
 
 
@@ -999,29 +2059,155 @@ def _prep_pack_build_speaker_roster(
     return roster
 
 
+def _prep_pack_all_project_character_names(conn, project_id: str) -> set[str]:
+    """全谱扫描（1.5.2 语义精化，真实第21轮 EP1 回归 ERR-20260824-34347a）：
+    不限本集 ep_start/ep_end 范围的完整项目人物谱名单——跟 _prep_pack_build_
+    speaker_roster（本集名册）是两个不同的集合，用来区分 speaker 落空的两种
+    截然不同的情形（见 _prep_pack_resolve_key_line_speakers 的三分支）：
+    "项目里真有这个角色，只是没在本集出场"（幻觉归属）vs"项目里压根没有这个
+    名字"（纯描述性称谓，合法一次性群演）。
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT character_name FROM character_portraits WHERE project_id=?",
+        (project_id,),
+    ).fetchall()
+    return {str(row["character_name"]) for row in rows if row["character_name"]}
+
+
 def _prep_pack_resolve_key_line_speakers(
-    payload_events: list[dict[str, Any]], roster: dict[str, str],
-) -> list[str]:
-    """Hard gate: every key_line's ``speaker`` must resolve to a roster
-    entry, or it is named-and-blocked (the real EP2 "韩宗" bug: a speaker
-    string that resolves to NOTHING in this episode's own roster must never
-    reach the published artifact). Mutates each key_line dict in place,
-    adding ``speaker_ref``; the original ``speaker`` text is left untouched
-    for display. Returns the list of block messages (empty = all resolved)."""
+    payload_events: list[dict[str, Any]],
+    roster: dict[str, str],
+    *,
+    all_project_character_names: set[str],
+    functional_extras: list[dict[str, Any]],
+    characters: list[dict[str, Any]] | None = None,
+) -> tuple[list[str], int]:
+    """不对称三分支门禁（1.5.2 语义精化，真实第21轮 EP1 回归
+    ERR-20260824-34347a）：speaker 与事件自己的 characters[] 表是同一个模型
+    的两次独立措辞，字符串逐字相等天然脆弱（"被困者"/"王有材"/"被困少年"
+    可能同指一人）——全拦会把合法的措辞漂移一并打死，全放又退回"韩宗"式
+    幻觉。跟"洞即删戏（缺失致命）、良性重叠（冗余归一）"同构的思路：
+      a) speaker 命中本集资产名册（display_name/alias/群演 label，见
+         _prep_pack_build_speaker_roster）-> 正常引用，现状保留；
+      b) speaker 命中项目全谱人物名（不限本集，见
+         _prep_pack_all_project_character_names）但不在本集名册 ->
+         **致命具名阻断**——这是真正要拦的目标：模型把项目里某个真实存在、
+         但没有出现在本集的角色写成了说话人（真实 EP2 案例："韩宗"第5章
+         才出场，本集却被写成了台词说话人）；
+      c) speaker 与全谱零碰撞（纯描述性称谓，如"被困者"）-> **吸收为
+         functional_extras**（label=speaker 原文措辞，event_ids 记这条台词
+         所属事件），不阻断——这正是 app.portraits 一直以来的 typed
+         functional identity 正统语义：一次性、有台词、没有稳定真名的角色，
+         不是错误，是合法的资产类别。就地追加进传入的 functional_extras
+         列表（与 payload 最终装配用的是同一个列表对象），并把这次吸收
+         写回 roster，同一说话人在本集后续台词里直接走分支 a）。
+    Mutates each key_line dict in place, adding ``speaker_ref``. Returns
+    ``(block_messages, absorbed_speakers_count)`` -- the count is
+    observability only (see caller's Evaluation.evidence wiring).
+    """
     errors: list[str] = []
+    absorbed_count = 0
+    functional_extras_by_label = {
+        str(extra.get("label") or ""): extra for extra in functional_extras
+    }
+    # speaker_provenance（协调方形状对齐指令，1.6.0）：event_chain[].key_lines
+    # 每条也要带 provenance——一条台词的说话人到底是靠什么绑定的，直接继承
+    # 它绑定到的那个资产（角色/群演）自己的 provenance，不是重新算一份。
+    # ref -> provenance 的映射从当前已确定的 characters/functional_extras
+    # 建立一次；分支 c 就地吸收新群演时同步补写这份映射，保证同一说话人在
+    # 本集后续台词里走分支 a 也能查到刚吸收出来的 provenance。
+    provenance_by_ref: dict[str, dict[str, Any]] = {}
+    for character in characters or []:
+        ref = str(character.get("identity_id") or "")
+        provenance = character.get("provenance")
+        if ref and isinstance(provenance, dict):
+            provenance_by_ref[ref] = provenance
+    for extra in functional_extras:
+        label = str(extra.get("label") or "")
+        provenance = extra.get("provenance")
+        if label and isinstance(provenance, dict):
+            provenance_by_ref[f"extra:{label}"] = provenance
     for event in payload_events:
         event_id = event.get("event_id")
         for key_line in event.get("key_lines") or []:
             speaker = str(key_line.get("speaker") or "").strip()
-            ref = roster.get(speaker) if speaker else None
-            if ref is None:
+            if not speaker:
+                errors.append(f"事件 {event_id} 的台词说话人为空，门禁具名阻断")
+                continue
+            ref = roster.get(speaker)
+            if ref is not None:
+                key_line["speaker_ref"] = ref
+                provenance = provenance_by_ref.get(ref)
+                if (
+                    isinstance(provenance, dict)
+                    and not provenance.get("anchor_segments")
+                    and ref.startswith("extra:")
+                ):
+                    # discovery 类群演做 speaker 时的空锚回填（协调方第30轮
+                    # ①，v4 审计31条）：这类 functional_extra 是角色发现
+                    # 判定 skip/群演落地时创建的（method="discovery"），
+                    # 触发发现的原始描述短语（见角色循环里 extra_anchor_
+                    # phrase 的取法，只试 [name] 一个候选）未必逐字出现在
+                    # 原文——但它这次确实开口说了台词，锚点跟 absorbed_
+                    # speaker 同一套现成证据源：台词所在事件 source_
+                    # evidence 段号 ∪ 这条台词自己的 segment_index，不需要
+                    # 另外编一份。就地回填共享的 provenance 字典（跟
+                    # functional_extras 清单里那一条是同一个对象），
+                    # asset_manifest 自身与这条 key_line 的 speaker_
+                    # provenance 同步获得锚点。
+                    fallback_segments = sorted({
+                        int(item["segment_index"])
+                        for item in (event.get("source_evidence") or [])
+                        if isinstance(item, dict) and item.get("segment_index") is not None
+                    } | (
+                        {int(key_line["segment_index"])}
+                        if key_line.get("segment_index") is not None else set()
+                    ))
+                    if fallback_segments:
+                        provenance["anchor_segments"] = fallback_segments
+                        provenance["anchor_phrase"] = str(key_line.get("line") or "").strip()
+                key_line["speaker_provenance"] = provenance
+                continue
+            if speaker in all_project_character_names:
                 errors.append(
-                    f"事件 {event_id} 的台词说话人「{speaker}」未能解析到本集资产名册"
-                    "任何条目（角色/群演），门禁具名阻断"
+                    f"事件 {event_id} 的台词说话人「{speaker}」是项目人物谱中已有的"
+                    "角色，但未出现在本集资产名册中，疑似幻觉归属，门禁具名阻断"
                 )
                 continue
-            key_line["speaker_ref"] = ref
-    return errors
+            extra = functional_extras_by_label.get(speaker)
+            if extra is None:
+                # provenance（1.6.0）：吸收分支自己的锚点——"台词所在事件的
+                # 证据段"（协调方原话）：事件自身 source_evidence 的段号，
+                # 并入这条台词自己的 segment_index（key_line.line 是这条
+                # 台词自己那一段对齐后的逐字摘录，必然逐字命中它自己的
+                # segment_index，并入集合保证锚点必然可自校验通过，不是
+                # 凭空编造）。anchor_phrase 用这条台词本身的逐字摘录。
+                absorbed_segments = sorted({
+                    int(item["segment_index"])
+                    for item in (event.get("source_evidence") or [])
+                    if isinstance(item, dict) and item.get("segment_index") is not None
+                } | (
+                    {int(key_line["segment_index"])}
+                    if key_line.get("segment_index") is not None else set()
+                ))
+                extra = {
+                    "label": speaker, "event_ids": [],
+                    "provenance": _prep_pack_provenance(
+                        "absorbed_speaker", absorbed_segments,
+                        str(key_line.get("line") or "").strip(),
+                    ),
+                }
+                functional_extras_by_label[speaker] = extra
+                functional_extras.append(extra)
+                provenance_by_ref[f"extra:{speaker}"] = extra["provenance"]
+            if event_id not in extra["event_ids"]:
+                extra["event_ids"].append(event_id)
+            new_ref = f"extra:{speaker}"
+            key_line["speaker_ref"] = new_ref
+            key_line["speaker_provenance"] = provenance_by_ref.get(new_ref)
+            roster[speaker] = new_ref
+            absorbed_count += 1
+    return errors, absorbed_count
 
 
 def _prep_pack_prose_lint_warnings(
@@ -1175,6 +2361,8 @@ async def _extract_chunk(
   拼接，segment_index 必须落在本事件自己的 source_span 内；
 - key_lines：如果该事件包含台词，逐条给出 {{"speaker": "说话人", "line": "台词原文逐字摘录",
   "segment_index": span 范围内的编号}}，line 同样必须逐字取自该编号原文；没有台词就给空列表；
+  speaker 请尽量使用跟本事件 characters 列表里同一个人一致的措辞（同一个人不要在
+  characters 里写一种称呼、在 key_lines 里换另一种称呼）；
 - characters：该事件中出场的角色，每个给 {{"display_name": "角色名", "is_background_extra": 布尔,
   "suspected_true_name": "你认为的真名，不确定就填 null"}}；
   已登记角色名（仅供拼写对齐——如果原文本身就是这样称呼这个角色的，写法要跟登记名
@@ -1306,7 +2494,10 @@ async def _generate_prep_pack_once(
     source_text: str,
     run_id: str | None,
     attempt_hint: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[
+    dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]],
+    list[dict[str, Any]], list[dict[str, Any]], int,
+]:
     conn = get_conn()
     segments = index_source_segments(source_text)
     chunks = _chunk_segments(segments)
@@ -1359,7 +2550,7 @@ async def _generate_prep_pack_once(
             })
 
     if not raw_events:
-        raise PrepPackGateError("本集未抽取到任何事件")
+        raise PrepPackGateError("本集未抽取到任何事件", had_events=False)
 
     ledger, ledger_errors, span_extensions, rejected_paratext_claims = build_prep_pack_span_ledger(
         source_text, events=raw_events, declared_paratext_segments=declared_paratext_segments,
@@ -1461,14 +2652,15 @@ async def _generate_prep_pack_once(
         # uniform with every other gate here rather than a bespoke raise.
         raise PrepPackGateError(str(exc)) from exc
 
-    characters, scenes, functional_extras, asset_errors, discovery_stats, true_name_hints = (
-        await _run_async_step(
-            run_id, "episode_prep_pack_asset_mapping",
-            lambda: _resolve_assets(
-                conn, project_id=project_id, episode_id=episode_id, episode_no=episode_no,
-                source_text=source_text, events=payload_events, run_id=run_id,
-            ),
-        )
+    (
+        characters, scenes, functional_extras, asset_errors, discovery_stats,
+        true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
+    ) = await _run_async_step(
+        run_id, "episode_prep_pack_asset_mapping",
+        lambda: _resolve_assets(
+            conn, project_id=project_id, episode_id=episode_id, episode_no=episode_no,
+            source_text=source_text, events=payload_events, run_id=run_id,
+        ),
     )
     if asset_errors:
         raise PrepPackGateError(
@@ -1478,15 +2670,22 @@ async def _generate_prep_pack_once(
             + "；".join(asset_errors[:10])
         )
 
-    # 1.5.0：本集资产名册（characters+functional_extras）此刻已确定性落定，
-    # 台词说话人解析走同一份名册，见 _prep_pack_build_speaker_roster/
-    # _prep_pack_resolve_key_line_speakers 上方注释（真实 EP2 回归：台词
-    # "割舌头"的 speaker 被写成"韩宗"，韩宗第 5 章才出场，speaker 字段从未
-    # 进任何校验管线）。
+    # 1.5.2：本集资产名册（characters+functional_extras）此刻已确定性落定，
+    # 台词说话人解析走同一份名册 + 项目全谱（不对称三分支，见
+    # _prep_pack_resolve_key_line_speakers 上方注释；真实 EP2 回归："韩宗"
+    # 第5章才出场却被写成本集说话人，须致命拦截；真实 EP1 回归
+    # ERR-20260824-34347a："被困者"这类纯描述性称谓不应该被一同拦下，应
+    # 吸收为群演）。
+    all_project_character_names = _prep_pack_all_project_character_names(conn, project_id)
     speaker_roster = _prep_pack_build_speaker_roster(characters, functional_extras)
-    speaker_errors = _run_sync_step(
+    speaker_errors, absorbed_speakers_count = _run_sync_step(
         run_id, "episode_prep_pack_speaker_resolution",
-        lambda: _prep_pack_resolve_key_line_speakers(payload_events, speaker_roster),
+        lambda: _prep_pack_resolve_key_line_speakers(
+            payload_events, speaker_roster,
+            all_project_character_names=all_project_character_names,
+            functional_extras=functional_extras,
+            characters=characters,
+        ),
     )
     if speaker_errors:
         raise PrepPackGateError(
@@ -1521,6 +2720,19 @@ async def _generate_prep_pack_once(
         known_names=known_characters + known_scenes, roster_names=roster_names,
     )
 
+    asset_manifest = {
+        "characters": characters, "scenes": scenes, "functional_extras": functional_extras,
+    }
+    # provenance 发布前自校验（1.6.0，第25轮收口）：见
+    # _prep_pack_verify_manifest_provenance 上方完整说明——每一条非空
+    # anchor_phrase 必须真的逐字命中它自己 anchor_segments 指向的原文段，
+    # 不成立即门禁拦，不静默发布一份自称有证据、实际验不过的 manifest。
+    provenance_errors = _prep_pack_verify_manifest_provenance(segments, asset_manifest)
+    if provenance_errors:
+        raise PrepPackGateError(
+            "资产来源证明自校验失败：" + "；".join(provenance_errors[:10])
+        )
+
     payload = {
         "prep_pack_version": PREP_PACK_VERSION,
         "episode_no": episode_no,
@@ -1539,14 +2751,15 @@ async def _generate_prep_pack_once(
             }
             for event in payload_events
         ],
-        "asset_manifest": {
-            "characters": characters, "scenes": scenes, "functional_extras": functional_extras,
-        },
+        "asset_manifest": asset_manifest,
         "coverage_ledger": ledger,
         "hook": hook_response.hook.strip(),
         "cliffhanger": hook_response.cliffhanger.strip(),
     }
-    return payload, rejected_paratext_claims, true_name_hints, lint_warnings
+    return (
+        payload, rejected_paratext_claims, true_name_hints, lint_warnings,
+        scene_alias_anchors, rejected_alias_conflicts, absorbed_speakers_count,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1561,6 +2774,9 @@ def _publish_prep_pack(
     rejected_paratext_claims: list[dict[str, Any]] | None = None,
     true_name_hints: list[dict[str, Any]] | None = None,
     lint_warnings: list[dict[str, Any]] | None = None,
+    scene_alias_anchors: list[dict[str, Any]] | None = None,
+    rejected_alias_conflicts: list[dict[str, Any]] | None = None,
+    absorbed_speakers_count: int = 0,
 ) -> dict[str, Any]:
     conn = get_conn()
     contract = get_contract("screenplay")
@@ -1639,6 +2855,24 @@ def _publish_prep_pack(
                     # 1.5.0: prose-field lint warnings (NOT fatal, see
                     # _prep_pack_prose_lint_warnings) -- for human review.
                     "lint_warnings": lint_warnings or [],
+                    # 1.5.1 (task①): every scene alias newly registered this
+                    # episode (Bible.scenes[].aliases persistence itself
+                    # already happened synchronously in _resolve_assets;
+                    # this is observability only, records the anchor
+                    # segment for audit).
+                    "scene_alias_anchors": scene_alias_anchors or [],
+                    # 1.5.2 (task②): every rebind rejected because the same
+                    # alias string was already bound to a DIFFERENT character
+                    # elsewhere in this project (see
+                    # _prep_pack_cross_episode_alias_conflict, real EP3
+                    # regression: "小胖子" wrongly rebound to "王有材").
+                    "rejected_alias_conflicts": rejected_alias_conflicts or [],
+                    # 1.5.2 (real round-21 EP1 finding ERR-20260824-34347a):
+                    # how many key_line speakers were absorbed into
+                    # functional_extras (purely descriptive terms with zero
+                    # collision against the full project character bible,
+                    # e.g. "被困者") rather than blocked or silently trusted.
+                    "absorbed_speakers_count": absorbed_speakers_count,
                 },
             ),
             step_run_id=step_id,
@@ -1742,6 +2976,23 @@ async def run_episode_prep_pack(
     repair loop (that heavier design was explicitly retired, see
     docs/TRANSFORM_FREEZE_PLAN.md §3/§6). If the last attempt still fails a
     hard gate, the run fails with the gate's error message.
+
+    退化重试护栏（第23轮真实回归 ERR-20260824-7ab7cb）：EP3 的真实事故——
+    尝试1 的事件链抽取拿到 13 个事件，一路通过跨度账本/覆盖完整性/资产映射，
+    只在后面某道门禁被拒；尝试2 重新抽取事件链时，模型这次的原始 JSON 本身
+    在中途缺了一段结构（截断/自愈失败），格式修复重试拿到的候选又因
+    app.harness.model_gateway._latest_json_authority_root 把候选文本尾部一个
+    被截断结构"意外重新闭合"出来的嵌套片段误判成独立 root，修复提示词里
+    只剩下这个无意义的候选，模型据此"忠实"地把 events 修回空列表——事件链
+    整个退化为零。旧逻辑里 attempt_hint/last_error 每轮无条件覆盖，尝试2 的
+    "本集未抽取到任何事件"就这样悄悄盖掉了尝试1 更有信息量的失败原因，
+    最终报出的错误让人以为这一集彻头彻尾没有事件，实际上只是重试把已经
+    抽到的事件弄丢了。护栏：一旦本运行内任何一次尝试抽到过事件
+    （PrepPackGateError.had_events=True），后续任何退化为零事件
+    （had_events=False）的尝试都不得被当成普通失败静默采纳——必须把两次
+    的失败原因合并成一条具名错误，明说"这是一次退化重试，不是从未抽到过
+    事件"。只有本运行内全部尝试都是零事件，才维持原始的
+    "本集未抽取到任何事件"作为终态。
     """
     contract = get_contract("screenplay")
     project_id = str(episode["project_id"])
@@ -1759,27 +3010,47 @@ async def run_episode_prep_pack(
 
     attempt_hint = ""
     last_error: Exception | None = None
+    prior_attempt_had_events = False
+    prior_attempt_reason = ""
     for attempt in range(1, max(1, contract.max_iterations) + 1):
         try:
-            payload, rejected_paratext_claims, true_name_hints, lint_warnings = (
-                await _generate_prep_pack_once(
-                    episode_id=episode_id,
-                    episode_no=episode_no,
-                    project_id=project_id,
-                    chapter_indexes=chapter_indexes,
-                    source_text=source_text,
-                    run_id=run_id,
-                    attempt_hint=attempt_hint,
-                )
+            (
+                payload, rejected_paratext_claims, true_name_hints, lint_warnings,
+                scene_alias_anchors, rejected_alias_conflicts, absorbed_speakers_count,
+            ) = await _generate_prep_pack_once(
+                episode_id=episode_id,
+                episode_no=episode_no,
+                project_id=project_id,
+                chapter_indexes=chapter_indexes,
+                source_text=source_text,
+                run_id=run_id,
+                attempt_hint=attempt_hint,
             )
             _publish_prep_pack(
                 episode_id=episode_id, payload=payload, run_id=run_id,
                 rejected_paratext_claims=rejected_paratext_claims,
                 true_name_hints=true_name_hints, lint_warnings=lint_warnings,
+                scene_alias_anchors=scene_alias_anchors,
+                rejected_alias_conflicts=rejected_alias_conflicts,
+                absorbed_speakers_count=absorbed_speakers_count,
             )
             return payload
         except PrepPackGateError as exc:
+            had_events = bool(getattr(exc, "had_events", True))
+            if not had_events and prior_attempt_had_events:
+                # 退化重试护栏（ERR-20260824-7ab7cb）：本次重试事件链归零，
+                # 但此前一次尝试确实抽到过事件——拒绝让这次退化静默覆盖，
+                # 把两次的失败原因合并成一条具名错误。
+                exc = PrepPackGateError(
+                    "本次重试事件链退化为空，拒绝采纳该退化结果（此前一次"
+                    f"尝试已抽到事件，但因以下原因被拒：{prior_attempt_reason}）；"
+                    f"本次重试事件抽取本身失败：{exc}",
+                    had_events=False,
+                )
             last_error = exc
             attempt_hint = str(exc)[:2000]
+            if had_events:
+                prior_attempt_had_events = True
+                prior_attempt_reason = str(exc)[:500]
             continue
     raise last_error if last_error is not None else RuntimeError("分集准备包生成失败")

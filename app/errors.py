@@ -140,10 +140,17 @@ def classify(exc: BaseException | None, http_status: int | None = None) -> tuple
         return "conflict", "ARTIFACT-REBUILD"
     if name in {
         "ContentGenerationError", "ScreenplayNarrativeGateError", "PrepPackGateError",
+        "StructuredSemanticError",
     }:
         # PrepPackGateError: episode_prep_pack (screenplay 契约 6.0.0) 硬门禁
         # 未通过（覆盖账本/资产解析/hook 接地），供应商调用本身是成功的，属于
         # 业务质量校验失败，不应展示为系统内部错误（docs/TRANSFORM_FREEZE_PLAN.md）。
+        # StructuredSemanticError（真实第18轮 EP10 回归 ERR-20260824-b16bb4）：
+        # app.harness.model_gateway.chat_structured 在调用方自己的 validate
+        # 回调判定内容不通过时抛出——供应商调用同样是成功的，失败的是我们自己
+        # 的业务/身份消歧校验（如 identity.current 的 source_label 唯一性），
+        # 跟 PrepPackGateError 是同一性质，不应走 5xx 技术类外壳把真实原因
+        # （比如"source_label 重复：师弟"）藏成"系统内部错误"。
         return "quality_gate", "QA"
     if name == "ProviderError":
         return "provider", "LLM"

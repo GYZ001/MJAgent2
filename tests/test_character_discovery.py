@@ -7,6 +7,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from app import api, db, hiagent, portraits, screenplay_scene_shards, stages
+from app import errors as app_errors
 from app.harness import model_gateway
 from app.narrative_blueprint import NarrativeBlueprint
 from app.schemas import (Bible, Character, EpisodeScreenplay,
@@ -695,6 +696,134 @@ def test_current_identity_projection_accepts_long_separator_free_functional_labe
     assert errors == []
     assert len(projected) == 1
     assert projected[0]["source_label"] == long_label
+
+
+# ---------------------------------------------------------------------------
+# k/n/f 计数帽参数重推导（第22轮总审计 ERR-20260824-aeee2d）：帽子最早是
+# "每个 evidence ref 自带一份 k/n/f，各自封顶 64"形状下的产物，分母是一个
+# ≤900 字的段落；响应压平成"整批只输出一次全局 k/n/f"（RF11）后分母变成了
+# 一整批 evidence ref，但常量原样照抄，从未随分母重新推导。真实回归
+# provider_calls.id=8964（第 22 轮 EP3）：84 个 evidence ref 的对话密集批次，
+# 78 条全部合法、全部命中 known_decisions 目录的 k 决议被旧的固定 64 硬拒。
+# 见 _current_identity_decision_cap 的完整推导：
+#   cap = max(64, evidence_ref 数量 * 3)
+# ---------------------------------------------------------------------------
+
+def test_current_identity_k_cap_scales_with_evidence_batch_size_ep3_regression() -> None:
+    """红灯→绿灯（真实第22轮 EP3 回归 ERR-20260824-aeee2d，provider_calls.
+    id=8964 的真实规模）：84 个 evidence ref 的批次里，78 条全部逐字锚定、
+    全部命中 known_decisions 目录的合法 k 决议，不能被计数帽当成失控拒绝
+    ——旧的固定 64（真实响应 k=78）会硬拒，重参数化后 cap=max(64,84*3)=252
+    必须放行。"""
+    evidence_ref_count = 84
+    known_k_count = 78
+    evidence_by_ref: dict[str, dict] = {}
+    known_decisions: dict[str, dict] = {}
+    k_items: list[dict] = []
+    for index in range(1, known_k_count + 1):
+        evidence_ref = f"E{index:03d}"
+        label = f"角色{index}"
+        evidence_by_ref[evidence_ref] = {"text": f"{label}忽然开口说话。"}
+        decision_id = f"K{index:03d}"
+        known_decisions[decision_id] = {
+            "evidence_ref": evidence_ref,
+            "source_label": label,
+            "canonical_name": label,
+            "authority_id": f"bible:{label}",
+            "decision_type": "registered_authority",
+        }
+        k_items.append({"decision_id": decision_id, "kind": "mentioned"})
+    # 补齐没有出人物的多余 evidence ref，凑够真实批次的 84 个 ref，跟
+    # provider_calls.id=8964 的批规模一致。
+    for index in range(known_k_count + 1, evidence_ref_count + 1):
+        evidence_by_ref[f"E{index:03d}"] = {"text": "（无人物的过场句）。"}
+    response = portraits.CurrentIdentityCandidateResponse.model_validate({
+        "k": k_items, "n": [], "f": [],
+    })
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions=known_decisions,
+        reserved_authority_labels=set(),
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert not any("过多" in message for message in errors)
+    assert errors == []
+    assert len(projected) == known_k_count
+
+
+def _current_identity_f_items_over_shared_refs(
+    *, evidence_ref_count: int, f_count: int,
+) -> tuple[dict[str, dict], list[dict]]:
+    """构造 f_count 条各自 source_label 唯一、循环复用 evidence_ref_count 个
+    evidence ref 的合法 f 决议——每个 ref 的文本一次性拼进它将被引用到的全部
+    label，避免任何一次复用互相覆盖导致某个 label 的逐字锚定失真。"""
+    labels_by_ref: dict[str, list[str]] = {
+        f"E{index:03d}": [] for index in range(1, evidence_ref_count + 1)
+    }
+    f_items: list[dict] = []
+    for index in range(1, f_count + 1):
+        evidence_ref = f"E{(index % evidence_ref_count) + 1:03d}"
+        label = f"路人{index}"
+        labels_by_ref[evidence_ref].append(label)
+        f_items.append({
+            "evidence_ref": evidence_ref,
+            "source_label": label,
+            "functional_identity_key": f"F{index}",
+            "kind": "mentioned",
+        })
+    evidence_by_ref = {
+        ref: {"text": "、".join(labels) + "先后匆匆走过。" if labels else "占位过场句。"}
+        for ref, labels in labels_by_ref.items()
+    }
+    return evidence_by_ref, f_items
+
+
+def test_current_identity_decision_cap_floor_preserves_small_batch_headroom() -> None:
+    """帽子公式的下限分量（floor=64）必须继续生效：一个只有 10 个 evidence
+    ref 的小批次，如果单纯按"数量 * 3"算会封顶在 30，但 50 条合法、互不
+    冲突的 f 决议在改动前就能通过（旧固定帽是 64）——下限存在就是为了不让
+    任何现有小批次的既有行为变严。"""
+    evidence_by_ref, f_items = _current_identity_f_items_over_shared_refs(
+        evidence_ref_count=10, f_count=50,
+    )
+    response = portraits.CurrentIdentityCandidateResponse.model_validate({
+        "k": [], "n": [], "f": f_items,
+    })
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        reserved_authority_labels=set(),
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert errors == []
+    assert len(projected) == len(f_items)
+
+
+def test_current_identity_decision_cap_still_rejects_genuine_overflow_in_small_batch() -> None:
+    """计数帽仍然是一道真实的失控防线，不是被参数重推导拿掉了：一个只有 5
+    个 evidence ref 的小批次里出现 70 条 f 决议，远超这批次能有的正常密度
+    （cap=max(64,5*3)=64），必须继续硬拒。"""
+    evidence_by_ref, f_items = _current_identity_f_items_over_shared_refs(
+        evidence_ref_count=5, f_count=70,
+    )
+    response = portraits.CurrentIdentityCandidateResponse.model_validate({
+        "k": [], "n": [], "f": f_items,
+    })
+    _projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        reserved_authority_labels=set(),
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert any(
+        message == "current identity f decisions 过多" for message in errors
+    )
 
 
 def test_current_identity_known_decision_catalog_exposes_long_separator_free_alias() -> None:
@@ -4521,9 +4650,20 @@ def test_current_identity_empty_owned_catalog_skips_provider(monkeypatch) -> Non
     )) == []
 
 
-def test_current_identity_same_label_multiple_groups_fails_closed_once(
+def test_current_identity_same_label_multiple_groups_backfills_end_to_end(
     monkeypatch,
 ) -> None:
+    """第31轮 ERR-20260824-614276 方向变更（真实 EP5"老者"F3/F4）：这条测试
+    曾经断言"同一裸标签、不同 F 键必须致命"，现在反过来——模型已经用不同
+    functional_identity_key 结构性区分了两个人，只是没填 scope_qualifier，
+    应当被确定性补足而不是拒绝重来。全链路（discover_character_candidates，
+    不是单测 _project_current_identity_response）验证：RCA 过程中额外发现
+    _discover_character_candidates_legacy 内部还有第三处按裸 source_label
+    折叠的"resolved"聚合步骤（跨 collect() 批次做最终合并），一直没跟进
+    round-20/round-31 的 (source_label, scope_qualifier) 复合键升级，会把
+    已经成功补足限定语的两个人重新拍扁成一个——这条端到端测试正是为了
+    盯住这第三处，不能只在单元测试层面验证 _project_current_identity_
+    response 自己返回了两条就算数。"""
     calls = 0
 
     async def fake_chat(messages, **kwargs):
@@ -4552,16 +4692,23 @@ def test_current_identity_same_label_multiple_groups_fails_closed_once(
         return json.dumps(payload, ensure_ascii=False)
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    with pytest.raises(
-        model_gateway.StructuredSemanticError,
-        match="source_label 重复",
-    ):
-        asyncio.run(portraits.discover_character_candidates(
-            "两名绿袍修士同时开口。",
-            Bible(world=World(visual_style_canonical="国风"), characters=[]),
-            1,
-        ))
+    result = asyncio.run(portraits.discover_character_candidates(
+        "两名绿袍修士同时开口。",
+        Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        1,
+    ))
     assert calls == 1
+    matches = sorted(
+        (item for item in result if item["source_label"] == "绿袍修士"),
+        key=lambda item: item["identity_group"],
+    )
+    assert len(matches) == 2
+    assert [item["scope_qualifier"] for item in matches] == ["甲", "乙"]
+    assert all(
+        item.get("_current_identity_synthesized_qualifier") is True
+        for item in matches
+    )
+    assert len({item["identity_group"] for item in matches}) == 2
 
 
 def test_current_identity_named_requires_literal_selected_evidence(
@@ -7544,15 +7691,16 @@ def test_ep5_declared_repeat_label_rebinds_to_unique_literal_evidence() -> None:
     )
 
 
-def test_two_distinct_people_same_label_different_key_still_hard_fails() -> None:
-    """Reverse guard: genuinely different entities sharing a bare label must still fail.
-
-    Unlike the EP5 repair above, here the model uses two DIFFERENT
-    functional_identity_key values (F1 vs F2) and correctly cites each
-    person's own literal evidence -- the same-generic-label-but-different-
-    people shape prompt rule 4 requires distinguishing descriptions for. The
-    EP5 fix must not let this kind of pair through.
-    """
+def test_two_distinct_people_same_label_different_key_backfills_disambiguating_qualifier() -> None:
+    """第31轮 ERR-20260824-614276 方向变更（真实 EP5 回归："老者"F3/F4）：
+    这条测试曾经是"不同 F 键必须继续致命"的反向护栏，现在反过来——模型用
+    两个不同的 functional_identity_key（F1/F2）正确各自引用了各自的逐字
+    证据，这正是模型自己已经做出的"这是两个人"的结构性判断，字符串标签
+    的欠额（都没填 scope_qualifier）现在被确定性补足，不再拒绝重来。
+    按各自证据的首现顺序（E001 在前）用 _identity_disambiguating_suffix
+    盖上甲/乙，标记 synthesized（观测用）。跟马脸青年案①②分支完全不冲突
+    ——那两支处理的是"同一个复合键内部"的雷同/矛盾判定，这里处理的是
+    "复合键本身该不该被拆开"。"""
     text = "一个男子站在桥头，神色警惕。\n\n远处又有一个男子骑马而来，衣着截然不同。"
     records = portraits._current_identity_evidence_records(text)
     evidence_by_ref = {
@@ -7561,6 +7709,133 @@ def test_two_distinct_people_same_label_different_key_still_hard_fails() -> None
     payload = {"k": [], "n": [], "f": [
         {"evidence_ref": "E001", "source_label": "男子", "functional_identity_key": "F1", "kind": "onscreen"},
         {"evidence_ref": "E002", "source_label": "男子", "functional_identity_key": "F2", "kind": "onscreen"},
+    ]}
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        reserved_authority_labels=set(),
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert errors == []
+    matches = sorted(
+        (item for item in projected if item["source_label"] == "男子"),
+        key=lambda item: item["_current_response_group_key"],
+    )
+    assert len(matches) == 2
+    assert [item["scope_qualifier"] for item in matches] == ["甲", "乙"]
+    assert all(
+        item["_current_identity_synthesized_qualifier"] is True for item in matches
+    )
+    # 复合键随即互不相同，两条各自独立成组，identity_group 允许不同（不再
+    # 触发"多个 identity_group"这条既有护栏——那是给"同一个人却报了两个
+    # identity_group"设计的，两个不同的人本来就该有两个 identity_group）。
+    assert len({item["identity_group"] for item in matches}) == 2
+
+
+# ---------------------------------------------------------------------------
+# 复合键在，模型没用：申报字段雷同的重复归一 vs 真分歧升级反馈（真实第27轮
+# EP3 回归 ERR-20260824-079190，provider_calls.id=9134）。取证：模型两次
+# 声明"马脸青年"，source_label/scope_qualifier/kind/functional_identity_key
+# 逐字段完全相同（已按 prompt 规则6声明"同一 functional_identity_key=
+# 同一人"）——其中一次引用的证据段（E014："惨叫传出屋舍外……"）本身不含
+# "马脸青年"字面，而这个词在全批 84 段里出现在 6 处不同段落，自动改写要求
+# 全批唯一命中才敢做，6 处不算唯一，不触发，这次遂被判成 synthetic；另一次
+# （E062："那仿佛日夜都盘膝坐在大石上的马脸青年……"）本身逐字含"马脸青年"，
+# 判成 literal。identity_group/source_label_provenance 这两个后端为"这次
+# 具体出现"单独推导的字段因此不一致，触发旧版"source_label 重复"致命——
+# 但模型自己的申报内容从未分歧，这是后端证据判定的偶然结果，不是模型的
+# 自相矛盾。
+# ---------------------------------------------------------------------------
+
+def test_current_identity_declared_duplicate_with_literal_anchor_normalizes() -> None:
+    """红灯 a：两条"马脸青年"申报字段逐字段相等（真实第27轮 EP3 回归最小
+    复现），其中一条的证据段本身不含字面、该词在全批里另有两处不相关的
+    独立出现（自动改写因此不触发），另一条证据段本身逐字含"马脸青年"——
+    申报内容逐字段相等 + 至少一条有逐字锚定，必须确定性归一为一条，
+    errors==[]，且归一计数（_current_identity_normalized_duplicate 标记）
+    体现为 1。"""
+    text = (
+        "惨叫传出屋舍外，四周杂役纷纷侧目。\n\n"
+        "那马脸青年缓缓睁开双眼，看了一眼四周。\n\n"
+        "清晨时分，马脸青年的声音再度响起，语气冷漠。"
+    )
+    records = portraits._current_identity_evidence_records(text)
+    evidence_by_ref = {
+        f"E{index:03d}": record for index, record in enumerate(records, start=1)
+    }
+    payload = {"k": [], "n": [], "f": [
+        {
+            "evidence_ref": "E001", "source_label": "马脸青年",
+            "functional_identity_key": "F4", "kind": "onscreen",
+            "scope_qualifier": "北区杂役处负责管理杂役的马脸修士",
+        },
+        {
+            "evidence_ref": "E002", "source_label": "马脸青年",
+            "functional_identity_key": "F4", "kind": "onscreen",
+            "scope_qualifier": "北区杂役处负责管理杂役的马脸修士",
+        },
+    ]}
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        reserved_authority_labels=set(),
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert errors == []
+    matches = [item for item in projected if item["source_label"] == "马脸青年"]
+    assert len(matches) == 1
+    assert matches[0]["_current_identity_normalized_duplicate"] is True
+    normalized_duplicate_declarations = sum(
+        1 for item in projected
+        if item.get("_current_identity_normalized_duplicate")
+    )
+    assert normalized_duplicate_declarations == 1
+
+
+def test_current_identity_declared_conflict_stays_fatal_with_side_by_side_diff() -> None:
+    """红灯 b（第31轮 ERR-20260824-614276 收口：同 F 键内部字段分歧，
+    "马脸青年案②分支不动"）：两条"马脸青年"共用**同一个**
+    functional_identity_key（F4——模型自己申报"这是同一个人"），kind 却
+    自相矛盾（onscreen vs mentioned），申报字段本身就不一致，真的没法
+    确定是不是同一个人——这跟"老者"F3/F4 案不是同一个形状：那边是不同
+    F 键（模型已经区分出两个人，缺的只是限定语），这边是同一个 F 键却
+    自相矛盾（模型对"是不是同一个人"这件事本身前后矛盾），必须维持致命，
+    且错误信息并排列出两条各自的申报内容，并给出确定性的修复指令（多人
+    -> 各自 scope_qualifier；同一人 -> 合并共用同一个 ID），不能只甩一个
+    错误码。（这条测试在第31轮之前用的是不同 F 键 F4/F5 的夹具——那个
+    形状现在被第31轮的确定性补足机制正确地救回来了，不再致命，见
+    test_two_distinct_people_same_label_different_key_backfills_
+    disambiguating_qualifier；本测试改用真正的"同 F 键"夹具，继续守住
+    真矛盾这条线。）
+    """
+    # E001（逐字含"马脸青年"，本条引用，kind=onscreen）/E002（不含
+    # "马脸青年"，本条引用，kind=mentioned）/E003（逐字含"马脸青年"，本批
+    # 未引用——存在这一段是为了让"马脸青年"在全批里有两处逐字出现，全批
+    # 唯一命中改绑因此不触发，E002 保持 synthetic，不会被悄悄救回成逐字）。
+    text = (
+        "那马脸青年缓缓睁开双眼，看了一眼四周。\n\n"
+        "屋外传来一阵脚步声，气氛顿时紧张起来。\n\n"
+        "又一位马脸青年策马而来，神情冷漠。"
+    )
+    records = portraits._current_identity_evidence_records(text)
+    evidence_by_ref = {
+        f"E{index:03d}": record for index, record in enumerate(records, start=1)
+    }
+    payload = {"k": [], "n": [], "f": [
+        {
+            "evidence_ref": "E001", "source_label": "马脸青年",
+            "functional_identity_key": "F4", "kind": "onscreen",
+        },
+        {
+            "evidence_ref": "E002", "source_label": "马脸青年",
+            "functional_identity_key": "F4", "kind": "mentioned",
+        },
     ]}
     response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
     _projected, errors = portraits._project_current_identity_response(
@@ -7572,7 +7847,217 @@ def test_two_distinct_people_same_label_different_key_still_hard_fails() -> None
         existing_functional_routes=set(),
     )
     assert any("source_label 重复" in error for error in errors)
-    assert any("多个 identity_group" in error for error in errors)
+    conflict_messages = [
+        error for error in errors if "冲突内容并排对比" in error
+    ]
+    assert conflict_messages, "必须并排列出冲突内容，不能只甩错误码"
+    diff_message = conflict_messages[0]
+    assert '"functional_identity_key":"F4"' in diff_message
+    assert diff_message.count('"functional_identity_key":"F4"') == 2
+    assert '"kind":"onscreen"' in diff_message
+    assert '"kind":"mentioned"' in diff_message
+    assert "scope_qualifier" in diff_message
+    assert "合并为一条" in diff_message
+
+
+def test_current_identity_conflict_diff_survives_generic_semantic_repair_prompt(
+    monkeypatch,
+) -> None:
+    """红灯 b（断言 prompt 构造）：并排冲突内容一旦流入
+    model_gateway.chat_structured 已有的通用语义重试修复提示词机制
+    （"只修复以下业务问题...当前候选..."），重试请求的 prompt 里必须
+    完整带着这份并排对比，模型不会只收到一个孤零零的错误码。current
+    identity 这条具体调用本身被 model_gateway 的 strict_identity_
+    substage 校验显式禁止重试（"forbids structured retries"，见
+    app/harness/model_gateway.py，本轮未改动这条既有护栏，保留其余
+    ~44条既有规则不变的既定纪律）——这里用一个普通（非 identity-strict）
+    stage_key 复现同一个通用修复提示词构造路径，验证"并排冲突内容一旦
+    有机会进入任何重试 prompt，必定完整保留"这件事本身是成立的。
+    """
+    from pydantic import BaseModel
+
+    class _Payload(BaseModel):
+        value: int
+
+    prompts: list[str] = []
+    conflict_diff = (
+        'source_label 重复：马脸青年；冲突内容并排对比：'
+        '[{"kind":"onscreen","functional_identity_key":"F4"},'
+        '{"kind":"mentioned","functional_identity_key":"F5"}]；'
+        '若这几条指的是不同的人，请为每一条各自的 scope_qualifier 填写'
+        '能互相区分的限定语；若指的是同一个人，请合并为一条并共用同一个'
+        ' functional_identity_key（f 分支）或同一个 decision_id（k 分支）'
+    )
+
+    call_count = 0
+
+    async def fake_chat(messages, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        prompts.append(str(messages[0]["content"]))
+        if call_count == 1:
+            return json.dumps({"value": 1})
+        return json.dumps({"value": 2})
+
+    def flaky_validate(value: "_Payload") -> list[str]:
+        return [] if value.value == 2 else [conflict_diff]
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "resolve current identity"}],
+        model_type=_Payload,
+        validate=flaky_validate,
+        operation_id="test.current-identity-conflict-diff:v1",
+        max_tokens=128,
+        format_retry_limit=0,
+        semantic_retry_limit=1,
+    ))
+
+    assert result.value == 2
+    assert call_count == 2
+    assert conflict_diff in prompts[1], "冲突内容必须完整保留在重试 prompt 里"
+
+
+# ---------------------------------------------------------------------------
+# 真实第18轮 EP10 回归 ERR-20260824-b16bb4：「师弟」是关系称呼语，同一字符串
+# 在本批合法指向不同人（不像"男子"这种通用描述，rule 4 要求模型改用更具体
+# 的描述区分）——旧的裸 source_label 唯一键假设对关系称谓天然不成立。结构性
+# 方案 a：唯一性判定键改为 (source_label, scope_qualifier) 复合键，模型按
+# prompt 规则8申报区分限定语，不需要模型或校验代码认识"师弟"这个具体词形。
+# ---------------------------------------------------------------------------
+
+def test_relational_label_with_distinct_scope_qualifiers_resolves_as_two_people() -> None:
+    """红灯（协调方点名，ERR-20260824-b16bb4 最小复现）：'师弟'在本批分别
+    指两个不同的人，模型给了不同的 functional_identity_key，并按规则8各自
+    申报了区分限定语（scope_qualifier）——修复后两个身份组各自正确成立，
+    不再被硬拒；同一批次未申报限定语的既有场景（scope_qualifier 默认空串）
+    完全不受影响，见上一条 reverse guard。"""
+    text = "藏经阁前，一名师弟正在打扫。\n\n演武场上，另一名师弟正在练剑。"
+    records = portraits._current_identity_evidence_records(text)
+    evidence_by_ref = {
+        f"E{index:03d}": record for index, record in enumerate(records, start=1)
+    }
+    payload = {"k": [], "n": [], "f": [
+        {
+            "evidence_ref": "E001", "source_label": "师弟",
+            "functional_identity_key": "F1", "kind": "onscreen",
+            "scope_qualifier": "藏经阁前打扫的师弟",
+        },
+        {
+            "evidence_ref": "E002", "source_label": "师弟",
+            "functional_identity_key": "F2", "kind": "onscreen",
+            "scope_qualifier": "演武场上练剑的师弟",
+        },
+    ]}
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        reserved_authority_labels=set(),
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert errors == []
+    assert len(projected) == 2
+    groups = {item["identity_group"] for item in projected}
+    assert len(groups) == 2
+    labels = {item["source_label"] for item in projected}
+    assert labels == {"师弟"}
+
+
+def test_scope_qualifier_allows_natural_punctuation_but_rejects_runaway_length() -> None:
+    """红灯（真实第19轮 EP1 回归）：scope_qualifier 之前照抄了 source_label
+    的分隔符禁令，但 scope_qualifier 只作为 by_label 分组的 Python 元组键
+    第二个元素，从没被拼进任何身份列表字符串——分隔符禁令在这里是误套
+    （跟当年 source_label max_length=16 误伤自然语言值同一类错误）。真实值
+    "县城木匠铺王伯，王有材的父亲"这类带逗号顿号的自然限定语必须放行；
+    超长（>64字符）的整段抄录级失控值仍必须拒绝——这条约束只保留防御性
+    长度上限，不检查标点。"""
+    natural_qualifier = "县城木匠铺王伯，王有材的父亲"
+    decision = portraits.CurrentFunctionalIdentityDecision.model_validate({
+        "evidence_ref": "E001", "source_label": "王伯",
+        "functional_identity_key": "F1", "kind": "onscreen",
+        "scope_qualifier": natural_qualifier,
+    })
+    assert decision.scope_qualifier == natural_qualifier
+
+    runaway_qualifier = "王" * 65
+    with pytest.raises(ValidationError):
+        portraits.CurrentFunctionalIdentityDecision.model_validate({
+            "evidence_ref": "E001", "source_label": "王伯",
+            "functional_identity_key": "F1", "kind": "onscreen",
+            "scope_qualifier": runaway_qualifier,
+        })
+
+
+def test_cross_batch_projection_does_not_conflict_on_distinct_scope_qualifiers() -> None:
+    """红灯（真实第20轮 EP4 回归 ERR-20260824-407c9b）：长章节按证据切成多批
+    分别调用模型，两个不同的"外宗弟子"（不同 scope_qualifier、不同
+    identity_group）如果恰好落在不同批次——_project_current_identity_
+    response 单批内已经用 (source_label, scope_qualifier) 复合键正确放行，
+    但 _current_identity_projection_errors 这道独立的跨批一致性检查之前
+    还在按裸 source_label 分组，会把上游已经合法区分开的两个人重新判成
+    "同一 source_label 冲突"，硬拦整集。修复后两者互不冲突；裸 source_label
+    仍然相同这件事本身不构成矛盾信号。"""
+    candidates = [
+        {
+            "source_label": "外宗弟子", "scope_qualifier": "甲：负责搬运丹药的那位",
+            "identity_group": "current-1:F1", "identity_kind": "functional",
+            "name": "",
+        },
+        {
+            "source_label": "外宗弟子", "scope_qualifier": "乙：把守宗门大门的那位",
+            "identity_group": "current-2:F1", "identity_kind": "functional",
+            "name": "",
+        },
+    ]
+    errors = portraits._current_identity_projection_errors(candidates)
+    assert errors == []
+
+
+def test_cross_batch_projection_still_rejects_genuine_conflict() -> None:
+    """反向护栏：同一 (source_label, scope_qualifier) 复合键在不同批次里被
+    判成不同 identity_group/name，仍然是真矛盾，必须继续拦截——本次修复
+    只放宽了"裸 label 相同、qualifier 不同"的假冲突，不豁免真冲突。"""
+    candidates = [
+        {
+            "source_label": "外宗弟子", "scope_qualifier": "甲：负责搬运丹药的那位",
+            "identity_group": "current-1:F1", "identity_kind": "functional",
+            "name": "",
+        },
+        {
+            "source_label": "外宗弟子", "scope_qualifier": "甲：负责搬运丹药的那位",
+            "identity_group": "current-2:F9", "identity_kind": "functional",
+            "name": "",
+        },
+    ]
+    errors = portraits._current_identity_projection_errors(candidates)
+    assert any("外宗弟子" in message for message in errors)
+
+
+def test_route_name_collision_gets_deterministic_disambiguating_suffix() -> None:
+    """红灯（真实第20轮 EP4 回归，manifest/群演衔接处）：两个不同的
+    identity_group 都退回同一个裸功能性标签（"外宗弟子"）当 route_name 时，
+    第二个及以后的申领者必须带确定性后缀区分，不能让 route_name 字符串
+    本身变得完全相同——下游 functional_extras 按这个字符串聚合 event_ids，
+    字符串相同就会把两个不同的人的出场事件悄悄合并成一条群演记录。"""
+    assert portraits._identity_disambiguating_suffix(1) == "甲"
+    assert portraits._identity_disambiguating_suffix(2) == "乙"
+    assert portraits._identity_disambiguating_suffix(3) == "丙"
+    # 十天干用尽后退化为阿拉伯数字，确定性且互不相同，不会自己再撞车。
+    assert portraits._identity_disambiguating_suffix(11) == "11"
+    assert len({portraits._identity_disambiguating_suffix(i) for i in range(1, 20)}) == 19
+
+
+def test_structured_semantic_error_classifies_as_quality_gate_not_system() -> None:
+    """协调方顺带指令，ERR-20260824-b16bb4：identity.current 校验失败时抛出
+    的 app.harness.model_gateway.StructuredSemanticError 之前没有被
+    app.errors.classify 特殊处理，落到通用 SYS 兜底——用户看到"系统内部
+    错误"，而实际失败的是我们自己的业务校验（供应商调用本身是成功的）。
+    应与 PrepPackGateError 同待遇，归 quality_gate 类展示真实原因。"""
+    exc = model_gateway.StructuredSemanticError("source_label 重复：师弟")
+    assert app_errors.classify(exc) == ("quality_gate", "QA")
 
 
 def test_declared_repeat_label_with_ambiguous_literal_home_still_hard_fails() -> None:
@@ -7930,6 +8415,143 @@ def test_future_identity_new_name_without_backend_decision_stays_closed(
             future_text="小胖子第二天照常去砍柴，没有人叫破他的名字。",
             bible=_reveal_bible(),
             episode_no=2,
+        ))
+
+
+# ---------------------------------------------------------------------------
+# NEW 重签已有 authority 的归一规则（真实第26轮 EP5 回归 ERR-20260824-88ece5）：
+# 门禁立意（防重复铸造身份）没错，错在对"多报"的响应形态——模型把"引用
+# 已有身份"误说成 NEW（G001/G002 两例），是因为这个 group 自己被后端按
+# proof_anchors 预筛出的那批 evidence 里恰好没有这个 authority 的 K 选项，
+# 不是模型编造。按门禁不对称教义（缺失致命、冗余归一、矛盾致命）：
+#   a) authority_ids 唯一命中 + 真名整体确实逐字出现在这个 group 能看到的
+#      完整 future_text 里（不要求命中后端预筛的那个更窄子集）= 冗余，
+#      归一为对既有身份的引用，不再要求重新逐字锚定（见
+#      REISSUE_KNOWN_RESOLUTION_KIND）；
+#   b) authority_ids 命中多个不同的 authority_id（同一个真名字符串被项目
+#      内不同的身份记录分别持有）= 矛盾，无法确定性判断该并入哪一个，
+#      维持致命；
+#   c) 全新 authority（authority_ids 命中零个）且缺逐字真名锚 = 缺失，
+#      逐字真名锚要求原样保留（既有测试保持，见本文件其它 NEW 缺锚测试，
+#      未受本轮改动影响）。
+# ---------------------------------------------------------------------------
+
+def test_future_identity_new_reissue_normalizes_when_authority_grounded_elsewhere_in_future_text(
+    monkeypatch,
+) -> None:
+    """红灯 a：模型选了 N: token 重签"李富贵"（已有 authority），引用的
+    evidence_id 恰好不是后端按 proof_anchors 预筛出的那一条（模型引用了
+    "小胖子"在后续章节里另一次出场的证据），但"李富贵"这个真名整体确实
+    逐字出现在这个 group 能看到的完整 future_text 里——必须归一为对既有
+    身份的引用（resolution_kind=reissue_known），不再要求这次也命中窄口径
+    的逐字锚点，且计数体现为该条候选自带的 resolution_kind 标记
+    （normalized_new_reissues 观测的枚举依据）。"""
+    future_text = (
+        "小胖子在山下练功，忽然想起故人往事。"
+        "他低声自语：好人啊，孟浩，你走了这么久，依旧每天回来偷偷帮我砍柴，"
+        "孟浩，你是我李富贵这一辈子的好朋友。\n\n"
+        "又过了三日，小胖子仍旧每天在村口张望，盼着孟浩归来，却始终没有等到。"
+    )
+    candidates = [{
+        "name": "小胖子",
+        "source_label": "小胖子",
+        "identity_kind": "functional",
+        "identity_group": "current-1:F3",
+        "kind": "onscreen",
+    }]
+
+    async def fake_chat(_messages, **kwargs):
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        enum = schema["properties"]["decisions"]["properties"]["G001"]["enum"]
+        evidence_enum = schema["properties"]["reveal_evidence_ids"][
+            "properties"]["G001"]["enum"]
+        # 取最后一个非空 evidence_id——对应"又过了三日"那一段，不含"李富贵"，
+        # 不是后端按 proof_anchors 锚定给"李富贵"的那一条。
+        chosen = [value for value in evidence_enum if value][-1]
+        return json.dumps({
+            "decisions": {"G001": next(v for v in enum if v.startswith("N:"))},
+            "revealed_names": {"G001": "李富贵"},
+            "revealed_name_kinds": {"G001": "personal_name"},
+            "reveal_evidence_ids": {"G001": chosen},
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
+        candidates,
+        source_text="小胖子练功。",
+        future_text=future_text,
+        bible=_reveal_bible(),
+        episode_no=2,
+        future_label="后续章节",
+    ))
+
+    assert resolved[0]["name"] == "李富贵"
+    assert resolved[0]["authority_id"] == "bible:李富贵"
+    assert resolved[0]["identity_kind"] == "named"
+    assert resolved[0]["resolution_kind"] == portraits.REISSUE_KNOWN_RESOLUTION_KIND
+    normalized_new_reissues = sum(
+        1 for item in resolved
+        if item.get("resolution_kind") == portraits.REISSUE_KNOWN_RESOLUTION_KIND
+    )
+    assert normalized_new_reissues == 1
+
+
+def test_future_identity_new_reissue_stays_fatal_on_ambiguous_authority_conflict(
+    monkeypatch,
+) -> None:
+    """红灯 b：同一个真名字符串"李富贵"被项目内两个不同的 authority_id
+    分别持有（Bible 里的"bible:李富贵"，以及本集另一条显式带
+    authority_id 的具名候选"manual:duplicate-lifugui"）——authority_ids
+    命中多个，无法确定性判断该并入哪一个，必须维持致命，不得被归一分支
+    误吞。"""
+    future_text = (
+        "小胖子低声念叨：李富贵，你可千万要平安归来。\n\n"
+        "远处又有个陌生的声音也喊了一声李富贵，众人一时分不清是谁在说话。"
+    )
+    candidates = [
+        {
+            "name": "小胖子",
+            "source_label": "小胖子",
+            "identity_kind": "functional",
+            "identity_group": "current-1:F3",
+            "kind": "onscreen",
+        },
+        {
+            "name": "李富贵",
+            "source_label": "另一位李富贵",
+            "identity_kind": "named",
+            "identity_group": "current-1:named-dup",
+            "kind": "mentioned",
+            "authority_id": "manual:duplicate-lifugui",
+        },
+    ]
+
+    async def fake_chat(_messages, **kwargs):
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        enum = schema["properties"]["decisions"]["properties"]["G001"]["enum"]
+        evidence_enum = schema["properties"]["reveal_evidence_ids"][
+            "properties"]["G001"]["enum"]
+        return json.dumps({
+            "decisions": {"G001": next(v for v in enum if v.startswith("N:"))},
+            "revealed_names": {"G001": "李富贵"},
+            "revealed_name_kinds": {"G001": "personal_name"},
+            "reveal_evidence_ids": {
+                "G001": next(v for v in evidence_enum if v),
+            },
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="NEW 不得重新签发已有 authority",
+    ):
+        asyncio.run(portraits.resolve_future_identity_candidates(
+            candidates,
+            source_text="小胖子练功。",
+            future_text=future_text,
+            bible=_reveal_bible(),
+            episode_no=2,
+            future_label="后续章节",
         ))
 
 
@@ -8527,3 +9149,73 @@ def test_identity_discovery_failure_gets_dedicated_no_retry_budget_hint() -> Non
     # 不能被这条新分支误伤。
     generic_exc = stages.StageError("新人物发现", ["普通失败，无特殊标记"])
     assert app_errors.classify(generic_exc) == ("generation", "GEN")
+
+
+# ---------------------------------------------------------------------------
+# 第31轮 EP5 真实回归 ERR-20260824-614276："老者"F3/F4，空限定语双条。
+# ---------------------------------------------------------------------------
+
+def test_ep5_two_elders_same_label_different_functional_key_backfills_qualifiers() -> None:
+    """红灯 a（第31轮 ERR-20260824-614276 真实最小复现）：第 5 章确实有两位
+    "老者"，模型用不同 functional_identity_key（F3/F4）明确申报了两个人，
+    区分的事实判断已经做出，只是没填 scope_qualifier——必须确定性补足为
+    甲/乙，两个身份组独立成立，不得拒绝重来。"""
+    text = (
+        "石台上端坐着一位老者，白发苍苍，神情威严。\n\n"
+        "台阶另一侧，又有一位老者缓缓踱步，面容清癯，气息迥异于前者。"
+    )
+    records = portraits._current_identity_evidence_records(text)
+    evidence_by_ref = {
+        f"E{index:03d}": record for index, record in enumerate(records, start=1)
+    }
+    payload = {"k": [], "n": [], "f": [
+        {
+            "evidence_ref": "E001", "source_label": "老者",
+            "functional_identity_key": "F3", "kind": "onscreen",
+        },
+        {
+            "evidence_ref": "E002", "source_label": "老者",
+            "functional_identity_key": "F4", "kind": "onscreen",
+        },
+    ]}
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        reserved_authority_labels=set(),
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert errors == []
+    matches = sorted(
+        (item for item in projected if item["source_label"] == "老者"),
+        key=lambda item: item["_current_response_group_key"],
+    )
+    assert len(matches) == 2
+    assert [item["scope_qualifier"] for item in matches] == ["甲", "乙"]
+    assert all(
+        item["_current_identity_synthesized_qualifier"] is True for item in matches
+    )
+    assert len({item["identity_group"] for item in matches}) == 2
+
+
+def test_ep5_disambiguation_key_falls_back_to_authority_id_for_named_branch() -> None:
+    """_current_identity_disambiguation_key 单测：k 分支（已登记具名身份）
+    append_candidate 时 _current_response_group_key 恒为空串（见该调用点
+    上方注释），必须回退用 authority_id 作为区分键，不能让所有 k 分支候选
+    都退化成同一个空字符串键（那样反而会把两个不同的已登记角色错误地
+    当成"需要拆分补足限定语"的同一组处理）。"""
+    key_with_functional = portraits._current_identity_disambiguation_key({
+        "_current_response_group_key": "F3", "authority_id": "",
+    })
+    assert key_with_functional == "F3"
+    key_named_a = portraits._current_identity_disambiguation_key({
+        "_current_response_group_key": "", "authority_id": "bible:萧炎",
+    })
+    key_named_b = portraits._current_identity_disambiguation_key({
+        "_current_response_group_key": "", "authority_id": "bible:药老",
+    })
+    assert key_named_a == "bible:萧炎"
+    assert key_named_b == "bible:药老"
+    assert key_named_a != key_named_b

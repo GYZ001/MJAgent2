@@ -2220,6 +2220,19 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
     ]
     added: list[dict] = []
     errors: list[str] = []
+    # 本次调用内对每个 label 已经拿到、且经过代码核验（existing_name 必须真的
+    # 在 {scene.name for scene in scenes} 里；新场景必须真的建库成功）的裁决
+    # 结果——第32轮真实 EP7 回归 ERR-20260824-6ecfbe 根因：旧实现算完这份裁决
+    # 就扔了，转头在下面用 match_scene_name(label, scenes) 重新反查一遍
+    # resolved_names；当同一个 label 字符串因跨集历史原因已经被写成两个不同
+    # 场景各自的别名时（真实数据："洞府" 同时是 南峰山脚洞府/洞府修行石室 的
+    # 别名，_append_scene_alias 本身没有跨场景排他约束，属于合法的历史累积
+    # 结果，不是数据损坏），match_scene_name 的唯一胜者要求（len(winners)==1）
+    # 必然打平返回 None——哪怕模型这一次的裁决清清楚楚、可核验、两次调用
+    # （round 30/32）结论完全一致。裁决已经代码核验过，就是这个 label 本次
+    # 调用的权威结果，不该再喂给一个对历史别名冲突免疫力为零的通用反查函数
+    # 重新赌一次。
+    direct_resolutions: dict[str, str] = {}
     for label in unmatched:
         _scene_time, location = split_legacy_scene_setting(label)
         spatial_context = location or label
@@ -2246,9 +2259,11 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
                 "SELECT bible_json FROM projects WHERE id=?", (project_id,),
             ).fetchone()
             scenes = Bible.model_validate(json.loads(project_row["bible_json"])).scenes
+            direct_resolutions[label] = existing_name
             continue
         name = verdict["name"]
         if _exact_known_scene_name(name, scenes):
+            direct_resolutions[label] = name
             continue
         scene_payload = {
             "name": name,
@@ -2281,6 +2296,7 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
                 "name": name, "reason": verdict["reason"], "change_id": queued["id"],
                 "has_image": False,
             })
+            direct_resolutions[label] = name
         except Exception as exc:  # noqa: BLE001
             message = f"{name}：自动加入场景库失败" + code_ref(
                 exc, action="auto_apply_scene_discovery",
@@ -2300,7 +2316,12 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
     resolved_names: dict[str, str] = {}
     relevant_names: list[str] = []
     for label in labels:
-        matched = match_scene_name(label, scenes, allow_fuzzy=False)
+        # 本次调用内刚做出、已核验的裁决优先（见上方 direct_resolutions 定义
+        # 处的完整说明）；只有本来就不需要走 assess_new_scene 的 label（调用
+        # 一开始就已经能裸精确/别名匹配）才落到 match_scene_name 反查。
+        matched = direct_resolutions.get(label) or match_scene_name(
+            label, scenes, allow_fuzzy=False,
+        )
         if not matched:
             continue  # 未解析成功已在上面记过 errors
         resolved_names[label] = matched

@@ -68,7 +68,12 @@ CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
 IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v16"
-CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v13"
+CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v14"  # v14:
+# f 项新增 scope_qualifier（真实第18轮 EP10 回归 ERR-20260824-b16bb4，结构性
+# 方案 a：唯一性判定键改为 (source_label, scope_qualifier) 复合键，见 prompt
+# 规则8与 _project_current_identity_response 的 by_label 分组注释）。schema
+# 与 prompt 都变了，必须换版本号——不换会让 operation_id 撞上旧版缓存的
+# response，静默复用不含 scope_qualifier 的旧结果，本次修复形同虚设。
 CURRENT_IDENTITY_EVIDENCE_RECEIPT_VERSION = (
     "screenplay-current-identity-evidence-receipt.v2"
 )
@@ -76,6 +81,15 @@ CURRENT_IDENTITY_LITERAL_PROVENANCE = "owned_current_literal.v1"
 CURRENT_IDENTITY_SYNTHETIC_PROVENANCE = "provider_synthetic_functional.v1"
 IDENTITY_ADJUDICATION_SOURCE_PROVENANCE = "owned_ir_identity_adjudication.v2"
 FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v13"
+# 归一规则专用 resolution_kind（真实第26轮 EP5 回归 ERR-20260824-88ece5，见
+# resolve_future_identity_candidates 内 normalize_identity_payload 的完整
+# 说明）：跟 "known_named"/"new_named" 并列的第三种决议种类——模型把
+# "引用已有身份"误说成 NEW（authority_ids 唯一命中，冗余而非幻觉），后端
+# 确定性降格为对该已有身份的引用，不要求重新逐字锚定真名（锚点在该身份
+# 初次签发时已经验过）。不出现在任何 provider 可选枚举里——纯后端内部
+# 归一标记，从不作为 schema token 暴露给模型，不占用 FUTURE_IDENTITY_
+# DECISION_VERSION 的契约版本号（wire schema/prompt 都未改变）。
+REISSUE_KNOWN_RESOLUTION_KIND = "reissue_known"
 STRUCTURAL_IDENTITY_COVERAGE_VERSION = (
     "screenplay-identity-structural-coverage.v6"
 )
@@ -1185,6 +1199,32 @@ def _current_identity_durable_signature(item: dict) -> tuple[str, ...]:
     return _current_identity_semantic_signature(item)[:-1]
 
 
+def _current_identity_declared_signature(item: dict) -> tuple[str, ...]:
+    """模型自己申报的内容签名（第27轮真实回归 ERR-20260824-079190，见
+    _project_current_identity_response 的 by_label 合并循环上方完整
+    说明）：排除 identity_group/source_label_provenance 这两个后端为
+    "这次具体出现"单独推导、会随手气浮动的字段（identity_group 在
+    synthetic 分支下按 evidence_id 生成哈希；source_label_provenance
+    取决于这次引用是否恰好落在"全批唯一逐字锚点"自动改写的判定窗口
+    内），只保留模型真正申报的身份判断本身：identity_kind、canonical_
+    name（named 分支）、authority_id、existing_route_name、
+    functional_identity_key（f 分支，即 _current_response_group_key）、
+    kind（onscreen/mentioned）。跟 _current_identity_durable_signature
+    是两把不同的尺子：durable signature 问"这两次出现在后端眼里是不是
+    完全一样"，declared signature 问"模型自己申报的内容是不是完全一样"
+    ——同一 source_label 下两次出现 durable signature 不一致，不代表
+    模型自相矛盾，可能只是后端对其中一次的证据判定恰好没找到全批唯一
+    逐字锚点。"""
+    return (
+        str(item.get("identity_kind") or "").strip(),
+        str(item.get("name") or "").strip(),
+        str(item.get("authority_id") or "").strip(),
+        str(item.get("existing_route_name") or "").strip(),
+        str(item.get("_current_response_group_key") or "").strip(),
+        str(item.get("kind") or "").strip(),
+    )
+
+
 def _current_identity_receipt_sort_key(value: dict) -> tuple[object, ...]:
     return (
         str(value.get("origin") or ""),
@@ -1259,6 +1299,58 @@ def _merge_current_identity_occurrences(options: list[dict]) -> dict:
     return merged
 
 
+def _current_identity_disambiguation_key(item: dict) -> str:
+    """模型是否已经用结构性字段区分了"这是哪个人"的键（第31轮 EP5
+    ERR-20260824-614276）：功能身份（f 分支）看 functional_identity_key
+    （即 _current_response_group_key，append_candidate 只在
+    identity_kind=="functional" 时才填这个字段——prompt 规则6"同一
+    functional_identity_key=同一人"，模型自己申报的分组信号）；已登记
+    具名身份（k 分支）append_candidate 时 _current_response_group_key
+    恒为空串（见该调用点），改看 authority_id——k 分支的 decision_id 精确
+    复用同一个已登记决议才会解析出同一个 authority_id，这是同一层级的
+    "模型精确复用同一个 ID = 申报同一个人"信号，decision_id 本身在
+    _project_current_identity_response 里已经被消费掉、没有原样保留到
+    这一层，authority_id 是它解析后的等价代理。两者都拿不到时返回空串
+    ——空串一律各自成组（没有任何区分信号，不能假装它们是被区分开的）。
+    """
+    group_key = str(item.get("_current_response_group_key") or "").strip()
+    if group_key:
+        return group_key
+    authority_id = str(item.get("authority_id") or "").strip()
+    if authority_id:
+        return authority_id
+    return f"__no_key__:{id(item)}"
+
+
+def _current_identity_reconcile_as_single(options: list[dict]) -> dict | None:
+    """尝试把一组"同一 (source_label, scope_qualifier) 复合键"下的候选
+    归一成一条身份，复用既有①②判据（见 _project_current_identity_response
+    的 by_label 合并循环）：durable signature 全等 -> 直接合并；申报字段
+    签名全等 + 至少一条逐字锚定 -> 归一（标记 _current_identity_
+    normalized_duplicate）。两条都不满足则返回 None（调用方决定是当作
+    "不同人只是缺限定语"继续按子组拆分，还是真矛盾致命）——本函数纯判定，
+    不写 errors，不认识"是第几层调用"。"""
+    signatures = {_current_identity_durable_signature(item) for item in options}
+    synthetic_repeat = len(options) > 1 and any(
+        item.get("source_label_provenance") == CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+        for item in options
+    )
+    if len(signatures) == 1 and not synthetic_repeat:
+        return _merge_current_identity_occurrences(options)
+    declared_signatures = {
+        _current_identity_declared_signature(item) for item in options
+    }
+    has_literal_anchor = any(
+        item.get("source_label_provenance") == CURRENT_IDENTITY_LITERAL_PROVENANCE
+        for item in options
+    )
+    if len(declared_signatures) == 1 and has_literal_anchor:
+        normalized = _merge_current_identity_occurrences(options)
+        normalized["_current_identity_normalized_duplicate"] = True
+        return normalized
+    return None
+
+
 def _normalize_current_identity_payload(payload: dict) -> dict:
     """Drop fields the K/N/F wire declares redundant before strict validation.
 
@@ -1322,6 +1414,65 @@ def _identity_form_functional_key(identity_label: str) -> str:
     )[:12]
 
 
+_IDENTITY_DISAMBIGUATING_ORDINALS = "甲乙丙丁戊己庚辛壬癸"
+
+
+def _identity_disambiguating_suffix(collision_index: int) -> str:
+    """真实第20轮 EP4 回归 ERR-20260824-407c9b：两个不同的 identity_group
+    退回同一个裸功能性标签（"外宗弟子"）当 route_name 时的确定性区分后缀。
+    1-based collision_index -> 甲/乙/丙...；超出十天干（第11次及以后撞车，
+    极端情况）退化为阿拉伯数字，保证任意数量的碰撞都有确定性且互不相同的
+    后缀，不会自己再撞车。"""
+    if 1 <= collision_index <= len(_IDENTITY_DISAMBIGUATING_ORDINALS):
+        return _IDENTITY_DISAMBIGUATING_ORDINALS[collision_index - 1]
+    return str(collision_index)
+
+
+# k/n/f 计数帽的下限：与批规模脱钩前的历史基线（见 _current_identity_decision_cap
+# 的完整推导），任何批次都不会比这更严。
+_CURRENT_IDENTITY_DECISION_CAP_FLOOR = 64
+# 每个 evidence ref 允许的决策密度倍数：见 _current_identity_decision_cap 的
+# 完整推导与真实校准数据。
+_CURRENT_IDENTITY_DECISION_CAP_PER_REF = 3
+
+
+def _current_identity_decision_cap(evidence_ref_count: int) -> int:
+    """k/n/f 单分支计数帽（第22轮总审计 ERR-20260824-aeee2d 修复，参数重推导）。
+
+    考古：这道帽子最早（commit 5accd39/a2aeab2）是 RF10 "每个 evidence ref
+    自带一份 k/n/f、各自封顶 64" 形状下的产物——分母是"一个 evidence ref"
+    （≤900 字的一个自然段），64 对一个短段落里能出现的人数已经非常宽松。
+    紧接着的下一次改动把响应形状压平成"整批只输出一次全局 k/n/f"（RF11，
+    _current_identity_schema 的 docstring："RF10 要求每个 evidence span 都配一
+    份 K/N/F……RF11 只在三个全局数组里输出被选中的身份"），分母从"一个
+    evidence ref"变成了"一整批 evidence ref"，但那个 64 的数字被原样照抄过来，
+    从未重新推导——批规模一旦变大，同一个常量就变得越来越紧，跟它原本要防的
+    "单段文本里的失控值"已经不是同一件事。
+
+    真实回归 ERR-20260824-aeee2d（第 22 轮 EP3，provider_calls.id=8964）：该批
+    对话密集，共 84 个 evidence ref（许多角色反复对话，每次出场都是独立的
+    evidence ref），模型如实为已登记角色选了 78 条合法 k 决议（78/84≈0.93
+    条/ref），全部指向 known_decisions 目录里真实存在的条目——不是幻觉或
+    失控，只是这一集对话轮次天然多。旧的固定 64 硬把这批合法输出当成失控拒绝。
+
+    公式：max(_CURRENT_IDENTITY_DECISION_CAP_FLOOR, 批次 evidence ref 数量 *
+    _CURRENT_IDENTITY_DECISION_CAP_PER_REF)。
+    - 下限 64：保留历史基线，≤21 个 evidence ref 的批次（绝大多数集数）行为
+      与改动前完全一致，不放宽任何既有防护。
+    - 倍数 3：以 ERR-20260824-aeee2d 的真实密度（≈1 条/ref）为校准点，
+      3 倍留出多人同段出场的余量，同时仍是一个会拒绝真正失控值（比如模型
+      对同一批复读上千条重复决议）的真实上限，不是形同虚设的"数据字段"。
+    该帽子只做资源/失控防线：每一条 k/n/f 决议是否真的锚定到后端自己的证据
+    目录，由 _project_current_identity_response 里逐条的"越界"校验独立把关
+    （k：decision_id 必须命中 known_decisions；n/f：evidence_ref 必须落在
+    expected_refs 内），计数帽拿掉也不会削弱那道锚定护栏。
+    """
+    return max(
+        _CURRENT_IDENTITY_DECISION_CAP_FLOOR,
+        int(evidence_ref_count) * _CURRENT_IDENTITY_DECISION_CAP_PER_REF,
+    )
+
+
 def _project_current_identity_response(
     value: CurrentIdentityCandidateResponse,
     *,
@@ -1338,8 +1489,11 @@ def _project_current_identity_response(
     expected_refs = set(evidence_by_ref)
     if set(value.model_fields_set) != {"k", "n", "f"}:
         errors.append("current identity root keys 非闭合")
+    # 第22轮总审计 ERR-20260824-aeee2d：帽子随本批 evidence ref 数量缩放，
+    # 见 _current_identity_decision_cap 的完整推导。
+    decision_cap = _current_identity_decision_cap(len(expected_refs))
     for branch, items in (("k", value.k), ("n", value.n), ("f", value.f)):
-        if len(items) > 64:
+        if len(items) > decision_cap:
             errors.append(f"current identity {branch} decisions 过多")
 
     # rule 6 makes functional_identity_key the model's own explicit "this is
@@ -1375,10 +1529,12 @@ def _project_current_identity_response(
         known_authority: bool = False,
         materialization_compatible: bool = False,
         fixed_identity_group: str = "",
+        scope_qualifier: str = "",
     ) -> None:
         source_label = str(source_label or "")
         canonical_name = str(canonical_name or "")
         functional_key = str(functional_key or "")
+        scope_qualifier = str(scope_qualifier or "").strip()
         if source_label != source_label.strip():
             errors.append(f"source_label 含首尾空白：{source_label!r}")
         if (
@@ -1573,6 +1729,7 @@ def _project_current_identity_response(
             "_current_response_group_key": (
                 functional_key if identity_kind == "functional" else ""
             ),
+            "scope_qualifier": scope_qualifier,
             "_typed_source_evidence_owned": True,
         })
 
@@ -1660,52 +1817,146 @@ def _project_current_identity_response(
             functional_key=item.functional_identity_key,
             kind=item.kind,
             record=record,
+            scope_qualifier=item.scope_qualifier,
         )
 
     merged: list[dict] = []
-    by_label: dict[str, list[dict]] = {}
+    # 唯一性判定键（真实第18轮 EP10 回归 ERR-20260824-b16bb4，结构性方案 a）：
+    # 复合键 (source_label, scope_qualifier)，不再是裸 source_label。关系
+    # 称谓（"师弟"类）天然可以在同一章合法指向不同人——旧的裸 source_label
+    # 唯一键假设对这类称谓不成立（模型行为正确，是契约键设计过窄）。
+    # scope_qualifier 是模型自己按 prompt 规则8申报的区分限定语，默认空串
+    # （未申报=沿用旧行为，同一 source_label 仍然只有一个唯一性域，见
+    # test_two_distinct_people_same_label_different_key_still_hard_fails
+    # ——那条测试没有用到 scope_qualifier，必须继续因同一复合键
+    # ("男子","") 硬拒，不受本次改动影响）。判据是结构性的，不认识
+    # "师弟"这个具体词形，也不需要模型说明"这是关系称谓"，模型只要在
+    # 自己判断可能有歧义时给出限定语即可。
+    by_label: dict[tuple[str, str], list[dict]] = {}
     for item in projected:
-        by_label.setdefault(str(item.get("source_label") or "").strip(), []).append(
-            item
+        key = (
+            str(item.get("source_label") or "").strip(),
+            str(item.get("scope_qualifier") or "").strip(),
         )
-    for source_label, options in by_label.items():
-        signatures = {
-            _current_identity_durable_signature(item) for item in options
-        }
-        synthetic_repeat = len(options) > 1 and any(
-            item.get("source_label_provenance")
-            == CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
-            for item in options
-        )
-        if len(signatures) != 1 or synthetic_repeat:
-            errors.append(f"source_label 重复：{source_label}")
-            groups = {
-                str(item.get("identity_group") or "").strip() for item in options
-            }
-            if len(groups) > 1:
-                errors.append(
-                    "current 同一 source_label 对应多个 identity_group："
-                    f"{source_label}"
-                )
-            merged.extend(options)
+        by_label.setdefault(key, []).append(item)
+    for (source_label, _scope_qualifier), options in by_label.items():
+        reconciled = _current_identity_reconcile_as_single(options)
+        if reconciled is not None:
+            merged.append(reconciled)
             continue
-        merged.append(_merge_current_identity_occurrences(options))
+        # 第31轮真实回归 ERR-20260824-614276（EP5，两条"老者"）：跟马脸
+        # 青年案（申报逐字段雷同→归一合并）方向相反——这次模型用不同
+        # functional_identity_key（或不同 decision_id，见
+        # _current_identity_disambiguation_key）明确申报了两个人（第 5 章
+        # 确实有两位老者），只是没填人类可读的 scope_qualifier，导致两条
+        # 都落进同一个 (source_label, "") 复合键、彼此"撞车"。区分的事实
+        # 判断模型已经做出（不同 F 键本身就是模型自己的区分信号，跟"jason
+        # 逐字段雷同"是完全相反的申报形状），拒绝重来是浪费——按各子组
+        # （子组内部仍然分别用①②同一套判据核验，子组内部若还自相矛盾，
+        # 说明连"是不是同一个人"这个最基本的申报都不自洽，那才是真矛盾，
+        # 见下方 subgroup_conflict 分支）各自的最早证据首现顺序，用第20轮
+        # 既有 _identity_disambiguating_suffix 机制（甲/乙/丙...）确定性
+        # 补足 scope_qualifier，标记 synthesized（观测计数），复合键唯一性
+        # 随即满足，不需要模型重新申报。
+        identity_subgroups: dict[str, list[dict]] = {}
+        for item in options:
+            identity_subgroups.setdefault(
+                _current_identity_disambiguation_key(item), [],
+            ).append(item)
+        subgroup_conflict = False
+        resolved_subgroups: list[dict] = []
+        if len(identity_subgroups) > 1:
+            for subgroup_options in identity_subgroups.values():
+                sub_reconciled = _current_identity_reconcile_as_single(
+                    subgroup_options,
+                )
+                if sub_reconciled is None:
+                    # 同一 F 键/decision_id 内部仍然自相矛盾（马脸青年案的
+                    # ②分支，本次不动）：这不是"两个人缺限定语"的形状，是
+                    # 模型对同一个身份的申报本身自相矛盾，跌回下面原有的
+                    # 致命反馈路径，用完整的 options（不是子组）报冲突。
+                    subgroup_conflict = True
+                    break
+                resolved_subgroups.append(sub_reconciled)
+        if len(identity_subgroups) > 1 and not subgroup_conflict:
+            resolved_subgroups.sort(
+                key=lambda item: _current_identity_receipt_sort_key(
+                    item.get("source_evidence_receipt") or {},
+                ),
+            )
+            for index, resolved in enumerate(resolved_subgroups, start=1):
+                resolved["scope_qualifier"] = _identity_disambiguating_suffix(index)
+                resolved["_current_identity_synthesized_qualifier"] = True
+                merged.append(resolved)
+            continue
+        # ②实质分歧：申报内容本身就不一致（不同 kind、不同 functional_
+        # identity_key、不同 canonical_name……），真的没法确定是不是同一个
+        # 人，维持致命——但反馈必须让模型看得懂"错在哪、怎么改"，不能只
+        # 甩一个错误码：把冲突的每一条内容并排列出，并给出确定性的修复
+        # 指令（同一称谓指多人 -> 各自给 scope_qualifier；指同一人 -> 合并
+        # 为一条、共用同一个 functional_identity_key/decision_id）。
+        conflict_dump = json.dumps(
+            [
+                {
+                    "identity_kind": item.get("identity_kind"),
+                    "name": item.get("name"),
+                    "kind": item.get("kind"),
+                    "functional_identity_key": item.get(
+                        "_current_response_group_key"
+                    ),
+                    "authority_id": item.get("authority_id"),
+                }
+                for item in options
+            ],
+            ensure_ascii=False, separators=(",", ":"),
+        )
+        errors.append(
+            f"source_label 重复：{source_label}；冲突内容并排对比："
+            f"{conflict_dump}；若这几条指的是不同的人，请为每一条各自的 "
+            "scope_qualifier 填写能互相区分的限定语；若指的是同一个人，"
+            "请合并为一条并共用同一个 functional_identity_key（f 分支）"
+            "或同一个 decision_id（k 分支）"
+        )
+        groups = {
+            str(item.get("identity_group") or "").strip() for item in options
+        }
+        if len(groups) > 1:
+            errors.append(
+                "current 同一 source_label 对应多个 identity_group："
+                f"{source_label}"
+            )
+        merged.extend(options)
     return merged, errors
 
 
 def _current_identity_projection_errors(candidates: list[dict]) -> list[str]:
-    """Reject cross-batch projection conflicts instead of last/first wins."""
-    by_label: dict[str, set[tuple[str, str, str]]] = {}
+    """Reject cross-batch projection conflicts instead of last/first wins.
+
+    真实第20轮 EP4 回归 ERR-20260824-407c9b：这是 _project_current_identity_
+    response（单批内按 (source_label, scope_qualifier) 复合键判定唯一性，见
+    该函数的 by_label 分组注释）**之外**、独立的一道**跨批**一致性检查——
+    长章节按证据切成多批分别调用模型，同一 source_label 若在不同批次里被
+    判成不同 identity_group，说明模型自相矛盾，必须拒绝而不是"后者覆盖前者"
+    静默吞掉。ERR-20260824-b16bb4（"师弟"关系称谓消歧）修复时只升级了
+    单批内的判定键，这道跨批检查仍按裸 source_label 分组——上游单批内
+    已经合法放行的"两个外宗弟子"（不同 scope_qualifier、不同 identity_
+    group）跨批一比对，照样被这里当成"同一 source_label 冲突"重新拦下。
+    键同样升级为 (source_label, scope_qualifier) 复合键，跟单批内判定用
+    同一把尺子；没有 scope_qualifier（空串）的称谓不受影响，继续按裸
+    label 生效。
+    """
+    by_label: dict[tuple[str, str], set[tuple[str, str, str]]] = {}
     for item in candidates:
         label = str(item.get("source_label") or "").strip()
-        by_label.setdefault(label, set()).add((
+        qualifier = str(item.get("scope_qualifier") or "").strip()
+        by_label.setdefault((label, qualifier), set()).add((
             str(item.get("identity_group") or "").strip(),
             str(item.get("identity_kind") or "").strip(),
             str(item.get("name") or "").strip(),
         ))
     return [
         f"current 投影后同一 source_label 冲突：{label}"
-        for label, signatures in by_label.items()
+        for (label, _qualifier), signatures in by_label.items()
         if not label or len(signatures) != 1
     ]
 
@@ -2055,6 +2306,19 @@ async def _discover_character_candidates_legacy(
 7. 每个人只输出一次；不得因多次出现重复输出，不得因共用证据合并人物，
    也不得把同一 source_label 放入多个分支。后端只会聚合语义签名完全相同的合法重复，
    任何跨分支、跨分组或非逐字 synthetic 重复都会硬失败。
+8. f 每项还需要填写 scope_qualifier（默认可留空字符串）：如果同一个 source_label
+   在本批不止一次出现、且这几次实际指的不是同一个人——比如「师弟」「师兄」「道友」
+   「前辈」这类相对说话人或语境而定的关系称谓/身份指代，本就可能在同一批里对应
+   不同人——必须给每一次单独填一句简短、能从对应证据里直接读出依据的限定语，说明
+   这次具体是哪一个人（如取自证据的动作、对话对象或所在场景），确保同一 source_label
+   下不同的人各自的 scope_qualifier 互不相同。如果这几次确实是同一个人反复出现，
+   或这个称谓本就唯一指向一个人，scope_qualifier 留空即可。判断依据是"这次读到的
+   是不是同一个人"，不是称谓字面是什么词；拿不准时倾向于填写限定语而不是留空，
+   避免把两个不同的人误合并成一个人。同一 source_label 下用不同
+   functional_identity_key 申报了多个人时，必须各自填写能互相区分的
+   scope_qualifier——不要依赖后端的确定性降级补足（后端会用甲/乙/丙...
+   兜底填一个可用但没有语义信息量的限定语，只是防止拒绝重来，不是让你
+   可以不填）。
 只输出 response_format 约束的 JSON，不要复述证据、Schema 或规则。"""
 
         def validate_current_response(
@@ -2296,8 +2560,26 @@ async def _discover_character_candidates_legacy(
         )
 
     resolved: list[dict] = []
-    for source_label in dict.fromkeys(item["source_label"] for item in candidates):
-        options = [item for item in candidates if item["source_label"] == source_label]
+    # 第31轮 ERR-20260824-614276 RCA 追加发现：这一步是跨 collect() 批次
+    # （current/future/coverage）的最终折叠，一直只按裸 source_label 分组
+    # ——round-20/round-31 在 _project_current_identity_response /
+    # _current_identity_projection_errors 两处都已经升级成 (source_label,
+    # scope_qualifier) 复合键，唯独这里从未跟进：两个通过了前两道复合键
+    # 校验的不同人（比如本轮"老者"F3/F4 补足后各自拿到的 甲/乙 限定语），
+    # 走到这里又会被裸 source_label 重新拍扁成一条（strongest_occurrence
+    # 内部按 durable signature 判等，签名不等就直接"挑一个 onscreen 的"
+    # 静默丢弃另一个）——同一个漏洞类型的第三处变体，一并按同一把复合键
+    # 尺子修正。
+    for group_key in dict.fromkeys(
+        (item["source_label"], str(item.get("scope_qualifier") or "").strip())
+        for item in candidates
+    ):
+        source_label, qualifier = group_key
+        options = [
+            item for item in candidates
+            if item["source_label"] == source_label
+            and str(item.get("scope_qualifier") or "").strip() == qualifier
+        ]
         named_options_by_name: dict[str, list[dict]] = {}
         for item in options:
             if item["identity_kind"] == "named":
@@ -2407,6 +2689,14 @@ class CurrentFunctionalIdentityDecision(BaseModel):
     )
     functional_identity_key: str = Field(min_length=1, max_length=64)
     kind: Literal["onscreen", "mentioned"]
+    # 真实第18轮 EP10 回归 ERR-20260824-b16bb4：结构性方案 a（唯一性判定键
+    # 改为 (source_label, scope_qualifier) 复合键，见 prompt 规则8与
+    # _project_current_identity_response 的 by_label 分组注释）。默认空串，
+    # 不影响任何不需要区分的既有场景——模型只在自己判断同一 source_label
+    # 这次可能指向跟之前不同的人时才需要填写。max_length=64 是纯防御性
+    # 上限，拦的是整段抄录级失控值，不是语义约束——真实限定语（"县城木匠
+    # 铺王伯，王有材的父亲"）可以带逗号顿号，见 field_validator 的说明。
+    scope_qualifier: str = Field(default="", max_length=64)
 
     @field_validator("source_label")
     @classmethod
@@ -2420,6 +2710,24 @@ class CurrentFunctionalIdentityDecision(BaseModel):
                 "（、，,／/；;｜|＆&＋+ 及空白）：下游会按这些字符切分身份列表"
             )
         return value
+
+    @field_validator("scope_qualifier")
+    @classmethod
+    def _scope_qualifier_strip_only(cls, value: str) -> str:
+        # 真实第19轮 EP1 回归：分隔符禁令是从 source_label 的校验直接抄过来
+        # 的，但两者的下游数据流不一样——source_label 会被写进"身份列表"
+        # 拼接字符串（台词发言人、场次角色表等），下游按分隔符切分，所以那
+        # 条字段必须禁分隔符；scope_qualifier 只作为
+        # _project_current_identity_response 的 by_label 分组键的第二个元素
+        # （Python 元组 (source_label, scope_qualifier)，从未做过字符串拼接
+        # 或按分隔符切分——见该函数的 by_label 构造），禁令在这里没有对应的
+        # 下游风险，纯属误套（跟当年 source_label max_length=16 误伤自然语言
+        # 值是同一类错误：约束跟着字段名走，没跟着字段的实际数据流走）。这里
+        # 只做去首尾空白；长度上限（max_length=64，见字段定义）是唯一保留的
+        # 防御性约束，拦的是"整段抄录级"失控值（模型把大段原文当限定语粘贴
+        # 进来），不是语义约束，不限制标点或分隔符——"县城木匠铺王伯，王有材
+        # 的父亲"这类带逗号的自然限定语必须放行。
+        return str(value or "").strip()
 
 
 class CurrentIdentityCandidateResponse(BaseModel):
@@ -2536,6 +2844,14 @@ def _current_identity_schema(
         "CurrentNewNamedIdentityDecision": new_item,
         "CurrentFunctionalIdentityDecision": functional_item,
     }
+    # maxItems 会在 _identity_strict_provider_schema 投影到 provider 时被剥离
+    # （不在 _IDENTITY_COVERAGE_STRICT_PROVIDER_SCHEMA_KEYWORDS 白名单内，见
+    # test_current_identity_rf11_schema_stays_under_strict_property_limit 同
+    # 目录下对 provider_keywords 的 disjoint 断言），从不真正约束 provider 输出，
+    # 真正生效的计数帽在 _project_current_identity_response 里、用同一公式
+    # （_current_identity_decision_cap）计算。这里保留只为本地 schema 的自述
+    # 信息不撒谎——两处用同一个函数，不会再次跟实际生效的帽子脱节。
+    decision_cap = _current_identity_decision_cap(len(refs))
     return {
         "$defs": definitions,
         "type": "object",
@@ -2543,17 +2859,17 @@ def _current_identity_schema(
             "k": {
                 "type": "array",
                 "items": {"$ref": "#/$defs/CurrentKnownIdentityDecision"},
-                "maxItems": 64,
+                "maxItems": decision_cap,
             },
             "n": {
                 "type": "array",
                 "items": {"$ref": "#/$defs/CurrentNewNamedIdentityDecision"},
-                "maxItems": 64,
+                "maxItems": decision_cap,
             },
             "f": {
                 "type": "array",
                 "items": {"$ref": "#/$defs/CurrentFunctionalIdentityDecision"},
-                "maxItems": 64,
+                "maxItems": decision_cap,
             },
         },
         "required": ["k", "n", "f"],
@@ -3037,18 +3353,33 @@ async def resolve_future_identity_candidates(
         )
     authority_projection = list(authority_by_id.values())
 
+    # 真实第20轮 EP4 回归 ERR-20260824-407c9b 结构性排查命中：这里原本按裸
+    # source_label 键控（label_to_group: dict[str, str]），跟 _project_
+    # current_identity_response 单批内的 (source_label, scope_qualifier)
+    # 复合键判定不一致——上游合法放行的"两个外宗弟子"（不同 scope_
+    # qualifier、不同 identity_group）流到这里，因为只看裸 label 又被判成
+    # "同一称谓对应多个身份组"重新拦下。键升级为复合键；raw_group 的兜底
+    # 生成也带上 qualifier，避免两个原本不同的人在都没有 identity_group 时
+    # 被兜底成同一个 group（"label:外宗弟子"），把两个人的 candidates 揉
+    # 到一起。
     raw_groups: dict[str, dict] = {}
-    label_to_group: dict[str, str] = {}
+    label_to_group: dict[tuple[str, str], str] = {}
     for candidate in unresolved:
         source_label = str(candidate.get("source_label") or "").strip()
         if not source_label:
             raise ContentGenerationError(
                 "future identity candidate 缺少 source_label"
             )
+        scope_qualifier = str(candidate.get("scope_qualifier") or "").strip()
         raw_group = str(candidate.get("identity_group") or "").strip()
         if not raw_group:
-            raw_group = f"label:{source_label}"
-        previous_group = label_to_group.setdefault(source_label, raw_group)
+            raw_group = (
+                f"label:{source_label}:{scope_qualifier}"
+                if scope_qualifier else f"label:{source_label}"
+            )
+        previous_group = label_to_group.setdefault(
+            (source_label, scope_qualifier), raw_group,
+        )
         if previous_group != raw_group:
             raise ContentGenerationError(
                 "future identity 同一称谓对应多个身份组："
@@ -3456,9 +3787,50 @@ async def resolve_future_identity_candidates(
                 ),
                 None,
             )
-            if known is None:
+            if known is not None:
+                rewritten[group_key] = str(known["decision_id"])
                 continue
-            rewritten[group_key] = str(known["decision_id"])
+            # 归一规则（真实第26轮 EP5 回归 ERR-20260824-88ece5）：门禁立意
+            # （防重复铸造身份）本身没错，错的是对"多报"的响应形态。
+            # authority_ids 唯一命中只证明"这个真名字符串对应项目里唯一
+            # 一个已有身份"，还不足以证明"这个 group 真的是那个人"——两个
+            # 回归夹具（"三哥"被声称是"陈三"、"小胖子"被声称是"李富贵"，
+            # 但各自的 future_text 里那个真名压根不存在，是纯粹的臆断/
+            # 嫁接昵称）证明 authority_ids 唯一命中单独作为归一条件太松，
+            # 必须补一条真正的"确定性一致性比对"：真名整体是否至少在这个
+            # 组能看到的完整 future_text 里逐字出现过——不要求命中后端
+            # 预先按 proof_anchors 筛出的那个更窄的 evidence 子集（那正是
+            # 要豁免的负担：已知身份的锚点在它初次签发时已经验过，不需要
+            # 精确复现是哪一条 evidence_id 命中的），只要求这个名字本身
+            # 真的出现在模型能看到的原文里，不是凭一个昵称/称谓单方面嫁接。
+            # 按门禁不对称教义（缺失致命、冗余归一、矛盾致命）：
+            #   - authority_ids 唯一命中 + 真名整体逐字出现在 future_text
+            #     = 冗余，归一为对既有身份的引用（见 REISSUE_KNOWN_
+            #     RESOLUTION_KIND 分支在 validate_response/response_
+            #     decisions 里的处理）；
+            #   - authority_ids 命中多个（len!=1，上面已经 continue 掉）
+            #     = 矛盾，同一个真名字符串被项目内不同的 authority_id
+            #     分别持有，无法确定性判断该并入哪一个；
+            #   - authority_ids 唯一命中但真名整体不在 future_text 里
+            #     = 同样按矛盾/不相容处理，维持原始 NEW 校验路径不动
+            #     （不重写，交给下面 validate_response 的既有 NEW 规则
+            #     去拦——它本就会因为"不得重新签发已有 authority"报错）。
+            if canonical_name not in future_text:
+                continue
+            reissue_id = f"{REISSUE_KNOWN_RESOLUTION_KIND}:{group_key}:{authority_ids[0]}"
+            if reissue_id not in decision_by_id:
+                reissue_authority = authority_by_id.get(authority_ids[0], {})
+                decision_by_id[reissue_id] = {
+                    "decision_id": reissue_id,
+                    "group_key": group_key,
+                    "resolution_kind": REISSUE_KNOWN_RESOLUTION_KIND,
+                    "authority_id": authority_ids[0],
+                    "canonical_name": canonical_name,
+                    "materialization_compatible": bool(
+                        reissue_authority.get("materialization_compatible")
+                    ),
+                }
+            rewritten[group_key] = reissue_id
         if not rewritten:
             return payload
         return {
@@ -3480,8 +3852,20 @@ async def resolve_future_identity_candidates(
 
     def response_decisions(
         value: FutureIdentityCandidateResponse,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], dict[str, dict]]:
+        # resolved_by_group（真实第20轮 EP4 回归 ERR-20260824-407c9b 结构性
+        # 排查命中）：identity_group 是这条流水线里唯一真正可靠的按人区分的
+        # 键——一个 group 可能因为模型判定"这些称谓是同一个人"而含多个不同
+        # 的 source_label（见下面 group["labels"]），也可能两个不同的人
+        # 恰好共享同一个裸 source_label 字符串（"外宗弟子"甲/乙，各自不同
+        # identity_group）。旧代码只留了 decisions（按 source_label 展开的
+        # 扁平列表），下游再用 dict 推导式按裸 source_label 二次索引
+        # （resolved_by_label/candidate_by_label）——两个人共享同一个裸标签
+        # 时，字典推导式静默用后者覆盖前者，两个人的解析结果被合并成一个。
+        # 直接在这里按 identity_group（拼接的真正唯一键）建一份可靠映射，
+        # 调用方不再需要经过裸标签这一跳。
         decisions: list[dict] = []
+        resolved_by_group: dict[str, dict] = {}
         for group in group_specs:
             group_key = str(group["group_key"])
             selected_id = str(value.decisions.get(group_key) or "")
@@ -3525,6 +3909,26 @@ async def resolve_future_identity_candidates(
                     ),
                     "future_evidence": bounded_evidence,
                 }
+            elif resolution_kind == REISSUE_KNOWN_RESOLUTION_KIND:
+                # 归一分支（第26轮，见 normalize_identity_payload 上方完整
+                # 说明）：这个 group 被确定性判定为对一个已有 authority 的
+                # 冗余重复声明，不是新身份——future_evidence 留空，不假装
+                # 有一条这次才核验出的逐字锚点（已知身份的锚点在它初次
+                # 签发时已经验过，这里不重新造一份）。
+                common = {
+                    "resolution_kind": resolution_kind,
+                    "identity_kind": "named",
+                    "canonical_name": str(
+                        selected.get("canonical_name") or ""
+                    ),
+                    "authority_id": str(
+                        selected.get("authority_id") or ""
+                    ),
+                    "materialization_compatible": bool(
+                        selected.get("materialization_compatible")
+                    ),
+                    "future_evidence": "",
+                }
             elif resolution_kind == "new_named":
                 canonical_name = str(
                     value.revealed_names.get(group_key) or ""
@@ -3557,12 +3961,13 @@ async def resolve_future_identity_candidates(
                     "materialization_compatible": False,
                     "future_evidence": "",
                 }
+            resolved_by_group[str(group["identity_group"])] = common
             for source_label in group["labels"]:
                 decisions.append({
                     **common,
                     "source_label": str(source_label),
                 })
-        return decisions
+        return decisions, resolved_by_group
 
     def validate_response(
         value: FutureIdentityCandidateResponse,
@@ -3682,6 +4087,19 @@ async def resolve_future_identity_candidates(
                             "future identity known 缺少后端登记的权威锚点："
                             f"{group_key}"
                         )
+                elif resolution_kind == REISSUE_KNOWN_RESOLUTION_KIND:
+                    # 归一分支（第26轮 ERR-20260824-88ece5，见
+                    # normalize_identity_payload 上方完整说明）：已知身份
+                    # 不需要重新锚定真名——锚点在它初次签发时已经验过。
+                    # 只做最基本的健全性检查：authority_id 必须真的存在于
+                    # 权威目录（防止归一逻辑自身出 bug 生造一个不存在的
+                    # authority_id），不重新要求 proof_anchors/evidence_id
+                    # 命中——那正是这条归一规则要豁免的负担。
+                    if str(selected.get("authority_id") or "") not in authority_by_id:
+                        errors.append(
+                            "future identity reissue 指向不存在的 authority："
+                            f"{group_key}"
+                        )
                 continue
             if canonical_name != canonical_name.strip() or not canonical_name:
                 errors.append(
@@ -3799,29 +4217,16 @@ async def resolve_future_identity_candidates(
         normalize_payload=normalize_identity_payload,
     )
 
-    decisions = response_decisions(response)
-    resolved_by_label = {
-        str(item.get("source_label") or "").strip(): item
-        for item in decisions
-        if item.get("identity_kind") == "named"
-    }
-    group_resolution: dict[str, dict] = {}
-    candidate_by_label = {
-        str(item.get("source_label") or "").strip(): item
-        for item in unresolved
-    }
-    for label, resolution in resolved_by_label.items():
-        candidate = candidate_by_label.get(label)
-        group = str((candidate or {}).get("identity_group") or "").strip()
-        if group:
-            group_resolution[group] = resolution
+    # 真实第20轮 EP4 回归 ERR-20260824-407c9b 结构性排查命中：resolved_by_group
+    # 直接按 identity_group（真正唯一键，见 response_decisions 上方注释）
+    # 取解析结果，不再经过裸 source_label 的两跳字典推导式（原设计里两个
+    # 不同的人共享同一个裸标签时，Python 字典推导式会静默用后者覆盖前者，
+    # 两个人的解析结果被悄悄合并成一个——"外宗弟子"甲乙正是这个形状）。
+    _decisions, resolved_by_group = response_decisions(response)
     merged: list[dict] = []
     for item in candidates:
-        resolution = (
-            resolved_by_label.get(str(item.get("source_label") or ""))
-            or group_resolution.get(str(item.get("identity_group") or "").strip())
-        )
-        if not resolution:
+        resolution = resolved_by_group.get(str(item.get("identity_group") or "").strip())
+        if not resolution or resolution.get("identity_kind") != "named":
             merged.append(item)
             continue
         canonical_name = str(resolution.get("canonical_name") or "").strip()
@@ -3845,6 +4250,14 @@ async def resolve_future_identity_candidates(
                 resolution.get("future_evidence") or ""
             ),
             "decision_contract_version": FUTURE_IDENTITY_DECISION_VERSION,
+            # 归一观测（第26轮 ERR-20260824-88ece5）：resolution_kind 是
+            # 后端自己判定这个 group 具体走的是哪条决议（known_named/
+            # new_named/reissue_known），此前从未向调用方暴露——加上后
+            # 调用方可以直接 `sum(1 for c in result if c.get("resolution_
+            # kind") == REISSUE_KNOWN_RESOLUTION_KIND)` 得到
+            # normalized_new_reissues 计数，不需要另开一条平行的计数
+            # 通路。纯附加字段，不影响任何既有消费者。
+            "resolution_kind": str(resolution.get("resolution_kind") or ""),
         })
     return merged
 
@@ -7307,6 +7720,18 @@ async def ensure_cards_for_text(
     resolutions: list[dict] = []
     assigned_extra_names: dict[str, str] = {}
     assigned_identity_groups: dict[str, str] = {}
+    # 真实第20轮 EP4 回归 ERR-20260824-407c9b 结构性排查命中：identity_group
+    # 已经是可靠的按人区分键，但当两个不同的 identity_group 都退回同一个
+    # 裸 source_label 当 route_name（比如两个不同的"外宗弟子"）时，两者的
+    # route_name 字符串会变成完全相同的值——route_name 是这个函数唯一往
+    # 外传的东西，下游（app.production.prep_pack 的 functional_extras，按
+    # 这个字符串当 key 聚合 event_ids）拿到手就已经分不清是谁了，会把两个
+    # 人的出场事件悄悄合并进同一条群演记录。用确定性序号区分（"外宗弟子
+    # （乙）"），不是"路人甲/乙/丙"式的泛化替换——原有的功能性描述原样
+    # 保留，只在真的撞车时追加后缀（见函数上方"不得通过改成路人甲/乙/丙
+    # 来...抹掉来源身份"的既有原则，这里遵循同一原则：只加后缀，不换描述）。
+    _route_name_first_owner: dict[str, str] = {}
+    _route_name_collisions: dict[str, int] = {}
 
     # A stable referenced identity still needs an authority even when it never
     # appears visually and therefore must not create a character card.
@@ -7347,7 +7772,19 @@ async def ensure_cards_for_text(
         if not route_name:
             route_name = assigned_identity_groups.get(identity_group, "")
         if not route_name:
-            route_name = source_label
+            first_owner = _route_name_first_owner.setdefault(
+                source_label, identity_group,
+            )
+            if first_owner == identity_group:
+                route_name = source_label
+            else:
+                _route_name_collisions[source_label] = (
+                    _route_name_collisions.get(source_label, 1) + 1
+                )
+                route_name = (
+                    f"{source_label}"
+                    f"（{_identity_disambiguating_suffix(_route_name_collisions[source_label])}）"
+                )
         assigned_identity_groups[identity_group] = route_name
         assigned_extra_names[source_label] = route_name
         resolutions.append(_identity_resolution(
