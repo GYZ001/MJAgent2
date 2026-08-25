@@ -206,6 +206,36 @@ TIMEOUT_CHAT_BLUEPRINT_SHARD_READ = float(
 TIMEOUT_CHAT_IDENTITY_READ = float(
     os.environ.get("TIMEOUT_CHAT_IDENTITY_READ", "420")
 )
+# 副文本识别（app/source_paratext.py::paratext_spans，两个调用点共用同一份实现：
+# app/production/prep_pack.py 的角色发现阶段 + app/domain/screenplay_ops.py 的
+# 剧本 stage 0 发现）此前完全没有专属 stage_key，落在通用 TIMEOUT_CHAT_READ
+# （300s）兜底上——全库 provider_calls 里 status='INTERRUPTED' 且
+# latency_ms 在 295000~310000 之间的记录，8 条都是这个调用（真实卡死到通用
+# 上限才被掐断），是全部近 300s 卡死事件里占比最大的单一类型。
+# 取值方法：对 provider_calls 按两个调用点的 operation_id 前缀
+# （episode_prep_pack.character_discovery.paratext / screenplay.discovery.paratext）
+# 筛出全部 status='OK' 记录（含格式修复子调用），库内现存最早记录起到取数当天
+# 共 366 条，实测最慢一次 95.21s（其余基本在 30s 内，p99=56.10s）。按 ×1.5
+# 安全系数收紧到 150s：对历史最慢一次仍有 1.6× 余量（回溯全部 366 条 0 条会被
+# 误杀），卡死时比通用 300s 提早 150s 暴露。
+TIMEOUT_CHAT_PARATEXT_READ = float(
+    os.environ.get("TIMEOUT_CHAT_PARATEXT_READ", "150")
+)
+# 事件链/chunk 抽取（app/production/prep_pack.py::_extract_chunk，
+# stage_key=episode_prep_pack_event_chain）已经有 stage_key，但此前没有专属
+# 读超时分支，同样落在通用 300s 上——这个类型恰恰相反：它是本流水线里
+# 单章原文一次性抽全部事件链的长结构化生成，实测健康调用本身就经常跑到
+# 接近 300s，两次真实 INTERRUPTED（242.9s、302.4s）证明它已经在通用上限边缘。
+# 取值方法：2026-08-24 07:55:47 起（当前架构窗口，与本次统计口径一致）
+# 全部首次调用（不含格式修复子调用）的 status='OK' 记录，共 244 条，
+# 实测最慢一次 319.39s（p50=88.69s，p99=266.84s，多条已经越过通用 300s——
+# 靠流式分块读超时不是总时长上限而是幸存下来，见 app/hiagent.py
+# _chat_read_timeout_s 分派处的说明）。按 ×1.4 安全系数放宽到 450s：
+# 对历史最慢一次仍有 1.4× 余量，不再共享一个随时可能掐断健康长调用的
+# 通用上限。
+TIMEOUT_CHAT_EVENT_CHAIN_READ = float(
+    os.environ.get("TIMEOUT_CHAT_EVENT_CHAIN_READ", "450")
+)
 TIMEOUT_VIDEO_CREATE = 30.0
 TIMEOUT_VIDEO_POLL = 30.0
 TIMEOUT_DOWNLOAD = 180.0

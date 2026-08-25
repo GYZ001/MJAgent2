@@ -520,6 +520,34 @@ def _timeout_phase(exc: httpx.TimeoutException) -> str:
     return "unknown"
 
 
+def _timeout_diagnostic_label(
+    client: httpx.AsyncClient, meta: dict | None, kind: str,
+    *, override_threshold_s: float | None = None,
+) -> str:
+    """一句话诊断标签，附在每条超时错误里：哪种调用、配了多少读超时。
+
+    调用类型优先取 ``stage_key``（本文件超时分派的实际判据），没有就退到
+    ``stage``，再没有就退到 ``kind``（chat/vlm_qa/image_generate 等最外层
+    请求类别）——三者总有一个能定位到具体是哪一类调用。读超时默认读
+    ``client.timeout.read``，即这次请求实际生效的 httpx 超时对象，而不是
+    重新跑一遍 ``_chat_read_timeout_s`` 推导：这个函数在 chat/vlm/image 等
+    所有 kind 下都通用，client 自己的超时配置永远是唯一真实来源，不用
+    也不该关心当前 kind 具体是靠哪条分派逻辑算出来的。``override_threshold_s``
+    仅用于流式请求的外层总时长看门狗（``text_stream_total_timeout_s``）：
+    那个上限不是 httpx 的 read 超时，client.timeout.read 在那种超时下答不对。
+    """
+    call_type = str((meta or {}).get("stage_key") or (meta or {}).get("stage") or kind or "unknown")
+    if override_threshold_s is not None:
+        read_timeout = override_threshold_s
+    else:
+        try:
+            read_timeout = client.timeout.read
+        except AttributeError:
+            read_timeout = None
+    threshold = f"{read_timeout:.0f}s" if read_timeout is not None else "unknown"
+    return f"call_type={call_type} configured_read_timeout={threshold}"
+
+
 def _transport_replay_state(exc: httpx.HTTPError) -> tuple[str, bool]:
     """Return delivery evidence without inferring from provider error text."""
     if isinstance(exc, (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError)):
@@ -1045,11 +1073,12 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
         except httpx.TimeoutException as exc:
             latency = int((time.time() - start) * 1000)
             phase = _timeout_phase(exc)
+            diag = _timeout_diagnostic_label(client, merged_meta, kind)
             detail = (f"{type(exc).__name__}(phase={phase}, latency_ms={latency}, "
-                      f"request_bytes={request_bytes}): {exc!r}")
+                      f"request_bytes={request_bytes}, {diag}): {exc!r}")
             last_err = _transport_provider_error(
                 exc,
-                f"调用{phase}阶段超时（{latency}ms，请求 {request_bytes} bytes）",
+                f"调用{phase}阶段超时（{latency}ms，请求 {request_bytes} bytes，{diag}）",
                 raw=detail,
                 timeout_phase=phase,
             )
@@ -1336,6 +1365,20 @@ def _chat_read_timeout_s(call_meta: dict | None) -> float:
             config.TIMEOUT_CHAT_READ,
             config.TIMEOUT_CHAT_BLUEPRINT_REVIEW_READ,
         )
+    if stage_key == "screenplay_source_paratext":
+        # Deliberately not max()-ed against the generic ceiling, same reasoning
+        # as the blueprint shard above: this call is normally fast (see
+        # config.TIMEOUT_CHAT_PARATEXT_READ's derivation), so sharing the
+        # generic 300s only turns a real stall into a longer dead wait instead
+        # of catching it sooner.
+        return config.TIMEOUT_CHAT_PARATEXT_READ
+    if stage_key == "episode_prep_pack_event_chain":
+        # Opposite failure mode from paratext: this stage's own healthy calls
+        # routinely approach the generic 300s ceiling (see
+        # config.TIMEOUT_CHAT_EVENT_CHAIN_READ's derivation), so sharing it
+        # risks cutting off calls that were going to succeed. max()-ed so an
+        # operator raising the generic floor never accidentally tightens this.
+        return max(config.TIMEOUT_CHAT_READ, config.TIMEOUT_CHAT_EVENT_CHAIN_READ)
     if stage == "episode_video_mode_plan":
         return max(
             config.TIMEOUT_CHAT_READ,
@@ -2493,15 +2536,19 @@ async def _stream_chat_completion(
             if isinstance(exc, asyncio.TimeoutError)
             else _timeout_phase(exc)
         )
-        detail = f"{type(exc).__name__}(phase={phase}, latency_ms={latency}): {exc!r}"
+        diag = _timeout_diagnostic_label(
+            client, merged_meta, kind,
+            override_threshold_s=total_timeout_s if isinstance(exc, asyncio.TimeoutError) else None,
+        )
+        detail = f"{type(exc).__name__}(phase={phase}, latency_ms={latency}, {diag}): {exc!r}"
         http_exc = exc if isinstance(exc, httpx.HTTPError) else None
         delivery_state, replay_safe = _stream_timeout_replay_state(http_exc, received_chars)
         if replay_safe:
-            message = f"流式调用{phase}阶段超时（{latency}ms）"
+            message = f"流式调用{phase}阶段超时（{latency}ms，{diag}）"
             failure_kind = "connection_failed" if delivery_state == "not_sent" else "request_outcome_unknown"
         else:
             message = (
-                f"流式调用{phase}阶段超时（{latency}ms）；"
+                f"流式调用{phase}阶段超时（{latency}ms，{diag}）；"
                 "请求结果不确定，已禁止自动重试，请在页面确认后重试"
             )
             failure_kind = "request_outcome_unknown"

@@ -21,14 +21,20 @@
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from app import source_paratext
+from app.harness import model_gateway
 from app.source_paratext import (
     MAX_REGION_FRACTION,
     MAX_REMOVED_FRACTION,
     MIN_ANCHOR_CHARS,
     ParatextAnchor,
+    ParatextSpans,
     PARATEXT_RULE,
+    paratext_spans,
     remove_spans,
 )
 
@@ -148,6 +154,27 @@ def test_single_sentence_note_where_anchors_overlap() -> None:
 
     assert note not in out
     assert "孟浩推开院门走进屋舍" in out
+
+
+def test_paratext_spans_tags_its_own_stage_key(monkeypatch) -> None:
+    """副文本识别此前完全没有 call_meta/stage_key，读超时因此落在通用
+    TIMEOUT_CHAT_READ（300s）兜底上——全库里因此白等到 300s 才失败的记录
+    里它占比最大（见 app/config.py::TIMEOUT_CHAT_PARATEXT_READ 的实测口径）。
+    它必须带自己的 stage_key，才能走 app/hiagent.py::_chat_read_timeout_s
+    里那条专属、更短的读超时分支。"""
+    captured: dict = {}
+
+    async def fake_chat_structured(_messages, **kwargs):
+        captured.update(kwargs)
+        return ParatextSpans(spans=[])
+
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+    source_paratext.paratext_cache_clear()
+
+    body = (STORY + NOTE) * 3  # >= 200 字，避免短文本早退不发起调用
+    asyncio.run(paratext_spans(body, operation_id="op_test_paratext_stage_key"))
+
+    assert captured["call_meta"] == {"stage_key": "screenplay_source_paratext"}
 
 
 def test_rule_text_forbids_keyword_classification() -> None:

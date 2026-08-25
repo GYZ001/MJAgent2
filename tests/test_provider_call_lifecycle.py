@@ -1,7 +1,10 @@
 import asyncio
 import base64
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 
 import httpx
 import pytest
@@ -99,6 +102,70 @@ def test_screenplay_baseline_uses_dedicated_long_read_timeout(monkeypatch) -> No
     assert hiagent._chat_read_timeout_s(
         {"stage_key": "screenplay_blueprint_review"}
     ) == 735.0
+
+
+def test_paratext_read_timeout_is_a_dedicated_ceiling_not_the_generic_one(
+    monkeypatch,
+) -> None:
+    """副文本识别（app/source_paratext.py）曾经完全没有 stage_key，落在通用
+    300s 兜底上——全库里因此白等到 300s 才失败的记录里它占比最大。它自己的
+    读超时必须明显小于通用兜底，且不随通用兜底被operator调大而跟着变大
+    （否则等于没修）。"""
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_READ", 300.0)
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_PARATEXT_READ", 150.0)
+
+    assert hiagent._chat_read_timeout_s(
+        {"stage_key": "screenplay_source_paratext"}
+    ) == 150.0
+
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_READ", 700.0)
+    assert hiagent._chat_read_timeout_s(
+        {"stage_key": "screenplay_source_paratext"}
+    ) == 150.0
+
+
+def test_paratext_and_event_chain_timeouts_stay_env_overridable() -> None:
+    """两个新读超时常量必须保留 os.environ 覆盖能力（运维不改代码就能临时
+    放宽/收紧），与本文件其它 TIMEOUT_CHAT_* 常量同一约定。用子进程重新
+    import app.config，避免受当前进程里已缓存的模块状态影响。"""
+    from pathlib import Path
+
+    env = dict(os.environ)
+    env["TIMEOUT_CHAT_PARATEXT_READ"] = "77"
+    env["TIMEOUT_CHAT_EVENT_CHAIN_READ"] = "888"
+    result = subprocess.run(
+        [
+            sys.executable, "-c",
+            "from app import config; "
+            "print(config.TIMEOUT_CHAT_PARATEXT_READ, config.TIMEOUT_CHAT_EVENT_CHAIN_READ)",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.split() == ["77.0", "888.0"]
+
+
+def test_event_chain_read_timeout_is_a_floor_above_the_generic_one(
+    monkeypatch,
+) -> None:
+    """事件链/chunk 抽取（episode_prep_pack_event_chain）健康调用本身经常
+    接近通用 300s，需要比通用兜底更宽松而不是更紧——用 max() 保证 operator
+    调大通用兜底时这个类型至少跟上，不会被反过来收紧。"""
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_READ", 300.0)
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_EVENT_CHAIN_READ", 450.0)
+
+    assert hiagent._chat_read_timeout_s(
+        {"stage_key": "episode_prep_pack_event_chain"}
+    ) == 450.0
+
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_READ", 700.0)
+    assert hiagent._chat_read_timeout_s(
+        {"stage_key": "episode_prep_pack_event_chain"}
+    ) == 700.0
 
 
 def test_scene_shard_read_timeout_selector_is_stage_specific(monkeypatch) -> None:
@@ -261,6 +328,66 @@ def test_harness_chat_read_timeout_is_interrupted_without_replay(
         "recovery_disposition": "REQUIRES_EXPLICIT_RETRY",
         "response_json": None,
     }
+
+
+def test_post_json_read_timeout_message_names_call_type_and_threshold(
+    tmp_path, monkeypatch,
+) -> None:
+    """一眼看出是哪个调用类型、超了哪个阈值、实际等了多久——不能只报
+    "read阶段超时（Nms）"，那样人工排障还得先去猜是哪个 stage_key 配错了。"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-read-timeout-label.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+
+    class _LabelledReadTimeoutClient:
+        timeout = httpx.Timeout(connect=10, read=42.0, write=30, pool=10)
+
+        async def post(self, url, *, json, headers):
+            raise httpx.ReadTimeout("generation still running")
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(hiagent._post_json(
+            _LabelledReadTimeoutClient(),
+            "https://example.invalid/chat",
+            {"messages": []},
+            kind="chat",
+            model="test-model",
+            headers={"x": "y"},
+            retries=0,
+            meta={"gateway": "execution_harness", "stage_key": "screenplay_source_paratext"},
+        ))
+
+    assert "call_type=screenplay_source_paratext" in str(caught.value)
+    assert "configured_read_timeout=42s" in str(caught.value)
+
+
+def test_post_json_read_timeout_falls_back_to_kind_when_stage_is_unset(
+    tmp_path, monkeypatch,
+) -> None:
+    """没有 stage_key/stage 的调用（比如 VLM QA）仍要能定位到 kind。"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-read-timeout-label2.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+
+    class _LabelledReadTimeoutClient:
+        timeout = httpx.Timeout(connect=10, read=300.0, write=30, pool=10)
+
+        async def post(self, url, *, json, headers):
+            raise httpx.ReadTimeout("generation still running")
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(hiagent._post_json(
+            _LabelledReadTimeoutClient(),
+            "https://example.invalid/vlm",
+            {"messages": []},
+            kind="vlm_qa",
+            model="test-model",
+            headers={"x": "y"},
+            retries=0,
+        ))
+
+    assert "call_type=vlm_qa" in str(caught.value)
+    assert "configured_read_timeout=300s" in str(caught.value)
 
 
 @pytest.mark.parametrize("heartbeat", [b"\n", b": keepalive\n\n"], ids=["blank-line", "keepalive"])
@@ -526,6 +653,54 @@ def test_harness_zero_token_stream_interruption_does_not_fallback_to_second_requ
         "status": "INTERRUPTED",
         "recovery_disposition": "REQUIRES_EXPLICIT_RETRY",
     }
+
+
+def test_stream_read_timeout_message_names_call_type_and_threshold(
+    tmp_path, monkeypatch,
+) -> None:
+    """流式路径的超时错误同样要报调用类型和实际生效的阈值，不能只报耗时。"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-stream-read-timeout-label.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+
+    class ZeroByteReadTimeout(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            raise httpx.ReadTimeout("provider stalled before first byte")
+            yield b""  # pragma: no cover - makes this an async generator
+
+        async def aclose(self):
+            return None
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=ZeroByteReadTimeout(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    monkeypatch.setattr(hiagent, "get_setting", lambda _key: "60")
+
+    async def run() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=httpx.Timeout(connect=10, read=150.0, write=30, pool=10),
+        ) as client:
+            await hiagent._stream_chat_completion(
+                client,
+                "https://provider.test/chat/completions",
+                {"model": "m", "messages": []},
+                kind="chat",
+                model="m",
+                headers={},
+                meta={"stage_key": "screenplay_source_paratext"},
+                on_token=lambda kind, text: None,
+            )
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(run())
+
+    assert "call_type=screenplay_source_paratext" in str(caught.value)
+    assert "configured_read_timeout=150s" in str(caught.value)
 
 
 def test_stream_zero_byte_read_timeout_requires_explicit_retry(

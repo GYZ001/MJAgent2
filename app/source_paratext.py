@@ -181,6 +181,11 @@ async def paratext_spans(text: str, *, operation_id: str) -> tuple[ParatextAncho
             operation_id=operation_id,
             max_tokens=2048,
             temperature=0.0,
+            # 之前没有 call_meta，读超时落在通用 TIMEOUT_CHAT_READ（300s）兜底上；
+            # 这个调用正常只要几秒，全库因此白等到 300s 才失败的记录里它占比
+            # 最大（见 app/config.py::TIMEOUT_CHAT_PARATEXT_READ 的实测口径）。
+            # 这里只标 stage_key，不按 operation_id 里的项目/集号做名单式判断。
+            call_meta={"stage_key": "screenplay_source_paratext"},
         )
     except Exception:
         # 旁文本剔除是**净化**步骤，不是门禁：判不出来就退回原文，
