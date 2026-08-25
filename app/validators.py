@@ -4604,6 +4604,113 @@ def normalize_outline_spoken_durations(
     return changes
 
 
+def relieve_outline_key_line_capacity_overflow(
+    outline: StoryboardOutline,
+    screenplay: EpisodeScreenplay,
+) -> list[dict]:
+    """把仍超过最长镜头口播容量的 key_line_ids 确定性下移到相邻的后一镜。
+
+    背景（EP6 第六轮，run_d5ce2a4e7a9f，ERR-20260825-8fee67）：
+    ``normalize_outline_spoken_durations`` 只能把 ``duration_s`` 顶到能装下
+    当前分配的最短合法档位；若某镜分配到的 key_line_ids 合计字数本身已超过
+    ``max_speech_chars(config.VIDEO_DURATION_MAX_S)``（10s→36 字），任何
+    duration_s 都装不下，归一化器只能原样放行，交给
+    ``outline_key_line_capacity_errors`` 硬失败。真实案例核实：KL05(29字) 与
+    KL06(15字) 都出自 prep_pack 同一条 74 字原句（projection 层按标点切成的
+    相邻碎片，见 ``screenplay_authority._split_prep_pack_spoken_line`` 及其
+    ``KeyDialogueTurn.source_text``），模型把它们放进同一镜是语义上合理的
+    直觉（本来就是一句话的两段），只是物理上装不下——"一句话的两个碎片分别
+    落在哪一镜"不构成有意义的创作选择，属于代码可以确定性解决的部分。
+
+    处置：把超出容量的**尾部**（时序上更晚的）key_line_ids 移到紧邻的后一镜，
+    直到本镜合计字数回到容量内。边界：
+
+    1. 保序：只移到 ``outline.shots[i + 1]``（严格相邻的后一镜），且插入到该
+       镜已有 key_line_ids **之前**（``[*move, *existing]``）——被移动的台词
+       在剧情时序上早于接收镜原有的台词，不得倒序插入、不得跳镜。
+    2. 同说话人：若移动后接收镜会出现 >1 个非空说话人（与
+       ``outline_key_line_speaker_errors`` 同一判据：空说话人不计入），拒绝
+       这次移动，原样保留在本镜——留给下游校验器报真错误，不强行安放。
+    3. 同场次：相邻镜 ``scene_id`` 为空或与本镜不同一律拒绝移动（数据不确定
+       时不得假装可以安放；台词也不能跨物理场次瞬移）。
+    4. 不新建镜头、不丢弃、不截断台词——只搬移已存在的 key_line_id 引用；
+       ``duration_s`` 由调用方随后复用 ``normalize_outline_spoken_durations``
+       重算，本函数不重复实现时长归一化。
+    5. 可观测：返回值的每条记录含 from_shot_no/to_shot_no/key_line_id/reason，
+       供调用方写入 provider_call 审计轨迹，机制与
+       ``storyboard_outline_spoken_duration`` 相同。
+    6. 不放宽容量公式：判据固定用
+       ``max_speech_chars(config.VIDEO_DURATION_MAX_S)``，不读、不改任何镜的
+       当前 duration_s 上限。
+
+    终止性：本函数按 shot_no 升序对 ``outline.shots`` 做**单趟**线性扫描、
+    原地更新；镜头列表本身不增不减。当扫描到下标 i 时，任何原本该移入
+    shots[i] 的溢出都已在更早的下标（< i）处理完毕（因为只会移到 i+1，且
+    循环严格按下标递增前进），因此级联（本镜溢出移入下一镜后，下一镜自身又
+    因此超容）会在同一趟扫描内被自然处理，不需要多趟收敛。每镜最多被处理
+    一次、只做常数次列表操作，整体是 O(镜数) 且必然终止；到达最后一镜仍超容、
+    或相邻镜说话人/场次不匹配时，直接放弃移动，交由
+    ``outline_key_line_capacity_errors`` 硬失败，不产生任何循环。
+    """
+    catalog = key_line_catalog(screenplay)
+    if not catalog or not outline.shots:
+        return []
+    max_capacity = max_speech_chars(config.VIDEO_DURATION_MAX_S)
+    changes: list[dict] = []
+    shots = outline.shots
+    for i, shot in enumerate(shots):
+        kids = [str(k).strip().upper() for k in (shot.key_line_ids or []) if str(k).strip()]
+        if len(kids) < 2:
+            continue  # 单条超容量是容量公式本身的问题，不是分配问题，不在此处理
+        if any(k not in catalog for k in kids):
+            continue  # 未知 ID 由 outline_key_line_capacity_errors 单独报错，这里不代为处理
+        chars = [content_char_count(_strip_speaker(catalog[k])) for k in kids]
+        total = sum(chars)
+        if total <= max_capacity:
+            continue
+        # 从尾部开始尽量少移：保留能装下的最长前缀。
+        move_from = len(kids)
+        running = total
+        for j in range(len(kids) - 1, -1, -1):
+            if running <= max_capacity:
+                break
+            running -= chars[j]
+            move_from = j
+        move = kids[move_from:]
+        keep = kids[:move_from]
+        if not move or not keep:
+            # 理论上不应发生：每条 key_line 在投影/编译阶段
+            # （_split_prep_pack_spoken_line / _split_spoken_line）已保证
+            # <= max_speech_chars(VIDEO_DURATION_MAX_S)。防御性跳过，交给
+            # outline_key_line_capacity_errors 硬失败，不假装修好。
+            continue
+        if i + 1 >= len(shots):
+            continue  # 已是最后一镜，无处可移，交给硬失败
+        nxt = shots[i + 1]
+        if not shot.scene_id or not nxt.scene_id or shot.scene_id != nxt.scene_id:
+            continue  # 场次未知或不同，交给硬失败，不强行安放
+        existing_next = [
+            str(k).strip().upper() for k in (nxt.key_line_ids or []) if str(k).strip()
+        ]
+        speakers = {
+            _speaker_name(catalog[k])
+            for k in (*move, *existing_next)
+            if k in catalog and _speaker_name(catalog[k])
+        }
+        if len(speakers) > 1:
+            continue  # 说话人不同，交给硬失败
+        shot.key_line_ids = keep
+        nxt.key_line_ids = [*move, *existing_next]
+        for kid in move:
+            changes.append({
+                "from_shot_no": shot.shot_no,
+                "to_shot_no": nxt.shot_no,
+                "key_line_id": kid,
+                "reason": "key_line_capacity_overflow_same_speaker_scene",
+            })
+    return changes
+
+
 def assign_outline_delivery_ids(
     outline: StoryboardOutline, screenplay: EpisodeScreenplay
 ) -> list[dict]:

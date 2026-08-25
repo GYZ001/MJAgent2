@@ -105,6 +105,7 @@ from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             match_scene_name,
                             normalize_outline_spoken_durations,
                             prefer_default_shot_durations,
+                            relieve_outline_key_line_capacity_overflow,
                             relieve_spoken_overflow,
                             source_dialogue_fragments,
                             storyboard_shot_count_range,
@@ -13537,6 +13538,30 @@ async def _generate_episode_director_outline(
         # normalize_outline_spoken_durations 只能顶到上限，随后 outline_key_line_capacity_errors
         # 仍会用真实容量判定其超限并报错，逼模型把部分 key_line_ids 挪到相邻镜，
         # 不会静默丢词或截断台词。每次抬高都记入 provider 日志，可观测、不悄悄改写。
+        #
+        # EP6 第六轮（run_d5ce2a4e7a9f，ERR-20260825-8fee67）：归一化器抬满时长后
+        # 仍有镜头超容——模型把同一原句切出的两个相邻碎片（KL05/KL06）分进同一镜，
+        # 合计字数连最长 10s 档位也装不下。"一句话的两个碎片分别落在哪一镜"不是
+        # 创作选择，是可以确定性解决的物理约束，故先跑
+        # relieve_outline_key_line_capacity_overflow 把超容的尾部 key_line_ids
+        # 下移到相邻的后一镜（保序、同说话人、同场次；条件不满足则原样不动，交给
+        # 下面的容量校验硬失败）。它只搬 ID、不碰 duration_s，所以必须排在
+        # normalize_outline_spoken_durations 之前——搬完之后再统一按最终分配重算
+        # 一次时长，两个来源镜/接收镜都会被同一次调用覆盖到，不需要再调第二次。
+        for change in relieve_outline_key_line_capacity_overflow(outline, screenplay):
+            log_provider_call(
+                "storyboard_outline_key_line_capacity_relief",
+                config.MODEL_TEXT,
+                "KEY_LINE_MOVED",
+                None,
+                0,
+                meta={
+                    "episode_id": episode.get("id"),
+                    "episode_no": episode.get("episode_no"),
+                    "stage": "分镜大纲",
+                    **change,
+                },
+            )
         for change in normalize_outline_spoken_durations(outline, screenplay):
             log_provider_call(
                 "storyboard_outline_spoken_duration",
