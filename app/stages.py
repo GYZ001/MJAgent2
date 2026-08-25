@@ -103,6 +103,7 @@ from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             narrative_outline_action_capacity_errors,
                             key_line_catalog,
                             match_scene_name,
+                            normalize_outline_spoken_durations,
                             prefer_default_shot_durations,
                             relieve_spoken_overflow,
                             source_dialogue_fragments,
@@ -13476,10 +13477,12 @@ async def _generate_episode_director_outline(
 - 不得为控制总时长合并不同动作，不得为了形式变化制造无作用空镜。
 - duration_s 取 5~10 秒整数；总时长由所有有效镜头求和，不反向裁剪剧情。
 - 【硬性·音画同步】口播预算随 duration_s 增长：{director_speech_budgets}。因果方向是本镜
-  key_line_ids 合计口播纯文字字数决定 duration_s 下限，不是先选好时长再检查台词装不装得下：
-  先数清本镜分配到的关键台词合计字数，再从预算表里选出能装下它的最短 duration_s；
-  仍超过 10s 档位上限（{config.MAX_SPOKEN_CHARS_PER_SHOT}字）才需要把部分 key_line_ids
-  挪到相邻镜，禁止把不可满足的台词量交给逐镜阶段修复。
+  key_line_ids 合计口播纯文字字数决定 duration_s 下限，但这条下限不需要你手工算准：
+  你只需按叙事/动作铺陈节奏分配 key_line_ids 与选择 duration_s；若本镜分配到的关键台词
+  合计字数超过你所选 duration_s 对应的预算，系统会在校验时确定性地把 duration_s 抬高到
+  刚好能装下该字数的最短合法档位（只升不降，不会削弱你的动作铺陈意图，也不会丢弃或截断
+  台词）。但如果合计字数连最长的 10s 档位（{config.MAX_SPOKEN_CHARS_PER_SHOT}字）都装不下，
+  这仍是必须由你解决的真错误——系统不会替你拆镜，请把部分 key_line_ids 挪到相邻镜。
 
 完整剧本：
 {screenplay.full_script_text}
@@ -13525,6 +13528,29 @@ async def _generate_episode_director_outline(
 }}"""
 
     def _validate(outline: StoryboardOutline) -> list[str]:
+        # 口播容量下限是物理约束（KL 字数 -> 最短能装下的合法 duration_s），不是
+        # 需要模型算准的算术义务：模型逐镜数几十次字数、查表选档位，几乎必错一次
+        # 就整轮被拒（EP6 第五轮 run_54aaa030881f：17 条 KL 只错 1 条、只差 1 字）。
+        # 这里在校验前确定性地把每镜 duration_s 抬高到刚好装下其已分配 key_line_ids
+        # 的最短合法档位；只升不降（模型为动作铺陈选的更长时长是创作意图，不回压），
+        # 且从不超出 config.VIDEO_DURATION_MAX_S——若连最长档位都装不下，
+        # normalize_outline_spoken_durations 只能顶到上限，随后 outline_key_line_capacity_errors
+        # 仍会用真实容量判定其超限并报错，逼模型把部分 key_line_ids 挪到相邻镜，
+        # 不会静默丢词或截断台词。每次抬高都记入 provider 日志，可观测、不悄悄改写。
+        for change in normalize_outline_spoken_durations(outline, screenplay):
+            log_provider_call(
+                "storyboard_outline_spoken_duration",
+                config.MODEL_TEXT,
+                "DURATION_NORMALIZED",
+                None,
+                0,
+                meta={
+                    "episode_id": episode.get("id"),
+                    "episode_no": episode.get("episode_no"),
+                    "stage": "分镜大纲",
+                    **change,
+                },
+            )
         errors = validate_storyboard_outline(
             outline,
             screenplay,

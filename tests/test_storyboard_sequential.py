@@ -596,6 +596,137 @@ def test_director_outline_prompt_declares_context_state_and_delivery(monkeypatch
     assert "不得只声明不落地" in prompt
 
 
+def _ep6_kl05_screenplay() -> EpisodeScreenplay:
+    """EP6 第五轮真实回归的台词分布（run_54aaa030881f，ERR-20260825-f73e7f）：
+    17 条关键台词里只有 KL05 是 29 字，模型当时给它选了 8s（上限 28 字），
+    差 1 字不可满足；其余 16 条都远低于默认 5s 预算（18 字），不需要抬时长。
+    """
+    lines: list[str] = []
+    for i in range(1, 18):
+        if i == 5:
+            content = "台" * 29
+        else:
+            content = "词" * 6
+        lines.append(f"角色{i}：{content}")
+    return EpisodeScreenplay(
+        episode_no=6,
+        title="EP6",
+        full_script_text="【场1】日 / 测试场景\n占位正文用于触发大纲生成。",
+        key_lines=lines,
+        ending_hook="真相仍未揭开。",
+    )
+
+
+def _kl05_outline(duration_s: int) -> StoryboardOutline:
+    """17 镜一一对应 KL01..KL17；第 5 镜（KL05）用调用方指定的 duration_s。"""
+    shots = []
+    for i in range(1, 18):
+        shots.append(StoryboardOutlineShot(
+            shot_no=i,
+            beat=f"分镜第{i}段落交代角色{i}的独立剧情推进内容",
+            key_line_ids=[f"KL{i:02d}"],
+            duration_s=duration_s if i == 5 else 8,
+        ))
+    return StoryboardOutline(episode_no=6, shots=shots)
+
+
+def test_director_outline_validate_raises_duration_to_fit_key_line_capacity(monkeypatch) -> None:
+    """本次修复的核心：口播容量下限从"模型必须算对的算术义务"改为
+    "校验前确定性计算"。EP6 KL05 真实样本——29 字台词配 8s（上限 28 字）——
+    过去会在这里产生 [OUTLINE_KEY_LINE_CAPACITY_INVALID] 并耗尽 Agent Loop
+    的两轮重试预算而硬失败；现在 _validate 闭包必须先把该镜 duration_s
+    确定性抬到 9s（9s 上限 32 字，装得下 29 字），再跑校验器。
+    """
+    logged: list[dict] = []
+
+    def _fake_log_provider_call(kind, model, status, http_status, latency_ms, meta=None, **_kw):
+        logged.append({"kind": kind, "status": status, "meta": meta or {}})
+
+    monkeypatch.setattr(stages, "log_provider_call", _fake_log_provider_call)
+
+    screenplay = _ep6_kl05_screenplay()
+    prompt, validate = _capture_director_outline_prompt(monkeypatch, screenplay)
+    outline = _kl05_outline(duration_s=8)
+
+    errors = validate(outline)
+
+    # 确定性抬高：第 5 镜（KL05，29 字）从 8s 抬到 9s（32 字上限），只此一镜。
+    assert outline.shots[4].duration_s == 9
+    assert [s.duration_s for i, s in enumerate(outline.shots) if i != 4] == [8] * 16
+
+    # 容量错误必须消失——不再是"模型自己算对"，而是校验前已经被代码修正。
+    assert not any("OUTLINE_KEY_LINE_CAPACITY_INVALID" in e for e in errors), errors
+
+    # 纪律：自动修正必须可观测，不能悄悄改写模型输出而无人知晓。
+    duration_logs = [
+        entry for entry in logged
+        if entry["kind"] == "storyboard_outline_spoken_duration"
+    ]
+    assert len(duration_logs) == 1
+    meta = duration_logs[0]["meta"]
+    assert meta["shot_no"] == 5
+    assert meta["from_duration_s"] == 8
+    assert meta["to_duration_s"] == 9
+    assert meta["required_chars"] == 29
+    # _capture_director_outline_prompt 固定用 episode_no=1 的 episode 字典调用
+    # generate_storyboard_outline；这里核对的是日志确实带上了该 episode 上下文
+    # （可观测性要求），而不是断言剧本自身声明的集数。
+    assert meta["episode_no"] == 1
+
+
+def test_director_outline_validate_never_lowers_model_chosen_duration(monkeypatch) -> None:
+    """模型出于动作铺陈节奏主动选了比口播下限更长的时长（此处 10s，远超 29 字所需的
+    9s）；这是创作意图,不是物理约束,确定性修正只能抬高、不能替模型压回去。"""
+    screenplay = _ep6_kl05_screenplay()
+    _prompt, validate = _capture_director_outline_prompt(monkeypatch, screenplay)
+    outline = _kl05_outline(duration_s=10)
+
+    errors = validate(outline)
+
+    assert outline.shots[4].duration_s == 10
+    assert not any("OUTLINE_KEY_LINE_CAPACITY_INVALID" in e for e in errors), errors
+
+
+def test_director_outline_validate_still_fails_when_content_exceeds_max_duration(monkeypatch) -> None:
+    """连最长合法档位（10s，36 字）都装不下时仍必须是真错误：不得静默截断台词、
+    不得超出 config.VIDEO_DURATION_MAX_S，必须要求模型把部分 key_line_ids 挪到相邻镜。"""
+    screenplay = EpisodeScreenplay(
+        episode_no=6,
+        title="EP6",
+        full_script_text="【场1】日 / 测试场景\n占位正文。",
+        key_lines=["角色甲：" + ("台" * 40)],
+        ending_hook="真相仍未揭开。",
+    )
+    _prompt, validate = _capture_director_outline_prompt(monkeypatch, screenplay)
+    outline = StoryboardOutline(episode_no=6, shots=[
+        StoryboardOutlineShot(
+            shot_no=1, beat="角色甲说出无法在任何合法时长内装下的超长台词",
+            key_line_ids=["KL01"], duration_s=5,
+        ),
+    ])
+
+    errors = validate(outline)
+
+    # 顶到技术上限后仍然超容——必须仍是硬错误，且不得超出合法时长范围。
+    assert outline.shots[0].duration_s == config.VIDEO_DURATION_MAX_S
+    assert any(
+        "OUTLINE_KEY_LINE_CAPACITY_INVALID" in e and "40" in e
+        for e in errors
+    ), errors
+
+
+def test_director_outline_prompt_explains_deterministic_duration_raise(monkeypatch) -> None:
+    """提示词必须讲清真实规则：模型只管按叙事需要分配台词与选时长；时长不足会被
+    系统确定性抬高到刚好够用的最短合法档位，但连最长时长都装不下时模型必须自己
+    把 key_line_ids 挪到相邻镜——不能再让模型以为自己必须逐镜算对字数。"""
+    screenplay = _outline_key_lines_screenplay()
+    prompt, _validate = _capture_director_outline_prompt(monkeypatch, screenplay)
+
+    assert "系统会在校验时确定性地把 duration_s 抬高" in prompt
+    assert "只升不降" in prompt
+    assert "系统不会替你拆镜" in prompt
+
+
 def test_director_outline_key_content_block_matches_outline_schema_fields() -> None:
     """StoryboardOutlineShot 没有 action_desc 字段（那是详细分镜阶段 Shot 才有的字段）。
     共享的 _storyboard_key_content_block 过去对所有调用方都写死"action_desc 或有效口播"，
