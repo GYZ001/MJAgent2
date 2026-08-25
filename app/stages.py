@@ -12362,6 +12362,17 @@ def _shot_narrative_plan_context(
     )
 
 
+def _speech_budget_table_text(durations: list[int] | None = None) -> str:
+    """口播预算换算表：`{duration}s≤{cap}字`，逐镜/大纲提示词共用同一数据源。
+
+    唯一数据源是 ``config.max_spoken_chars_for_duration``；两处提示词都必须调用
+    这个函数拼装文案，禁止各自手写字面量表，否则公式一改就会有一处提示词悄悄漂移
+    成谎言（大纲/逐镜历史上就出现过这种分叉：大纲只给了 10s 天花板，逐镜给了全表）。
+    """
+    values = sorted(durations) if durations is not None else sorted(config.ALLOWED_DURATIONS)
+    return "、".join(f"{value}s≤{config.max_spoken_chars_for_duration(value)}字" for value in values)
+
+
 def _storyboard_narrative_contract_block(*, include_outline_windows: bool) -> str:
     """Return the ID-level narrative task contract shared by both shot stages.
 
@@ -13404,6 +13415,7 @@ async def _generate_episode_director_outline(
         )
         for scene in screenplay.scene_outline
     )
+    director_speech_budgets = _speech_budget_table_text()
     prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》制定整集导演规划。
 
 这是全局导演层，不是详细画面生成。镜头数量不设软上限或硬上限；由完整剧情交付、场景上下文、
@@ -13439,6 +13451,11 @@ async def _generate_episode_director_outline(
 - 动作阶段、说话人变化、注意目标变化、空间关系变化、结果反应需要时均可拆镜。
 - 不得为控制总时长合并不同动作，不得为了形式变化制造无作用空镜。
 - duration_s 取 5~10 秒整数；总时长由所有有效镜头求和，不反向裁剪剧情。
+- 【硬性·音画同步】口播预算随 duration_s 增长：{director_speech_budgets}。因果方向是本镜
+  key_line_ids 合计口播纯文字字数决定 duration_s 下限，不是先选好时长再检查台词装不装得下：
+  先数清本镜分配到的关键台词合计字数，再从预算表里选出能装下它的最短 duration_s；
+  仍超过 10s 档位上限（{config.MAX_SPOKEN_CHARS_PER_SHOT}字）才需要把部分 key_line_ids
+  挪到相邻镜，禁止把不可满足的台词量交给逐镜阶段修复。
 
 完整剧本：
 {screenplay.full_script_text}
@@ -13798,6 +13815,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
         f"场{sc.scene_no}｜{sc.scene_heading}｜功能：{sc.story_function}｜摘要：{sc.summary}｜"
         f"冲突：{sc.conflict or '（无）'}｜转折：{sc.turn or '（无）'}"
         for sc in screenplay.scene_outline) if screenplay.scene_outline else "（未提供场次结构）")
+    outline_speech_budgets = _speech_budget_table_text()
     prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》规划【分镜大纲】。
 
 你现在做的是全局节奏规划：把下方【完整剧本 / plot_spine】铺成有序的 N 条镜头。
@@ -13837,7 +13855,7 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
 1. 镜头数由完整覆盖剧本决定且不设上限；20、40、60 镜都合法，禁止为贴合目标时长主动省略剧情。shot_no 从 1 连续递增。大纲 duration_s **默认 5**，仅必要时取 6~10；每镜必须有独立作用。
 2. 每条保留 beat/covers 兼容旧流程，同时必须填写上方叙事任务合同的 shot_id、scene_id、event_ids、primary_action_id、supporting_action_ids、action_phase_ids、visible_entity_ids、offscreen_action_actor_ids、offscreen_action_target_ids、action_participant_deliveries、capacity_budget、shot_contribution、逐先验 audience_state_paths、事实状态差、动作/阶段完成账本、readability_window_ids 与 boundary。state_in/primary_action/state_out、continuity_mode、story_event_id、spine_beat_ids、key_line_ids、new_information_ids、duration_s、characters_visible、audio_cast 继续保留。beat 只作为一句话摘要，不得替代结构化任务。
 3. 相邻两镜 state_out -> state_in 与每个观众先验的 audience_state_out_target_id -> audience_state_in_id 都必须精确承接。primary_action_id 非空时必须唯一归属且不同于 completed_before_action_ids；为 null 时仍必须用 shot_contribution 证明新的叙事功能。
-4. 上方主线台词/剧情点/spine 必须分配到 covers，并填写 key_line_ids（KL01..）与 spine_beat_ids（S01..）；drop_list 禁止分配。new_information_ids 只能引用 screenplay.information_ledger 已有 info_id。同一镜必保留口播字数不得超过该镜 duration_s 容量（10s≤{config.MAX_SPOKEN_CHARS_PER_SHOT}字），超限必须拆到相邻镜。
+4. 上方主线台词/剧情点/spine 必须分配到 covers，并填写 key_line_ids（KL01..）与 spine_beat_ids（S01..）；drop_list 禁止分配。new_information_ids 只能引用 screenplay.information_ledger 已有 info_id。因果方向是台词字数决定时长下限，不是先选时长再检查台词：先数清本镜分配到的 key_line_ids 合计口播纯文字字数，再从口播预算表里选出能装下它的最短 duration_s——口播预算随 duration_s 增长：{outline_speech_budgets}（默认 5s 只能装 {config.max_spoken_chars_for_duration(config.VIDEO_DURATION_MIN_S)} 字，超过就必须取更长档位，最长 10s 也只能到 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字）。仍超过 10s 档位上限时才需要拆到相邻镜；未超过时优先直接改本镜 duration_s，不要拆镜。
 4b. 同一镜 key_line_ids 只能属于同一说话人；说话人变化就是切镜点。按“甲单人近景说完 → 乙单人反打回应”拆成相邻镜，禁止把问答双方和围观人群同时塞进一个对白镜头。
 4c. 每条 must_keep spine 的 who 必须在分配该 S* 的某一镜中成为可见动作主体，does 必须真正拍出。旁观者的宣告、转述或评论不能替代事件主体完成原子动作；是否拆成“动作完成 → 结果/反应”由 action temporal phases、镜头时长与 readability budget 共同判定。
 4d. {outline_action_capacity_rule}
@@ -16278,9 +16296,7 @@ def _storyboard_output_contract(
     min_shots, max_shots = storyboard_shot_count_range(target)
     character_names = "、".join(c.name for c in bible.characters) or "（角色圣经为空）"
     duration_options = "/".join(str(value) for value in durations)
-    speech_budgets = "、".join(
-        f"{value}s≤{config.max_spoken_chars_for_duration(value)}字" for value in durations
-    )
+    speech_budgets = _speech_budget_table_text(durations)
     if narrative_authority:
         extra_policy = (
             "非人物谱身份必须由叙事权威图的 actor/character 引用与 "

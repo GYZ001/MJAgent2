@@ -363,6 +363,55 @@ def test_storyboard_outline_uses_32k_output_budget() -> None:
     assert config.STORYBOARD_OUTLINE_MAX_TOKENS == 32768
 
 
+def test_director_outline_prompt_states_full_speech_budget_table(monkeypatch) -> None:
+    """大纲提示词必须给出与逐镜提示词同源的完整口播预算换算表。
+
+    根因：校验器 outline_key_line_capacity_errors 按每镜实际 duration_s 计算容量
+    （5s=18字...10s=36字），但大纲提示词过去只告诉模型 10s 那一档天花板，导致模型
+    合理地以为"不超过 36 字即可"，选了偏短的 duration_s 后台词超限。这里断言的是
+    从 config.max_spoken_chars_for_duration 取值动态生成的换算表，不是硬编码的
+    "18/21/25" 字面量——公式一改这条测试也要能感知偏差。
+    """
+    captured: dict[str, object] = {}
+
+    async def fake_agent_loop(*args, **_kwargs):
+        captured["prompt"] = args[2]
+        return StoryboardOutline(episode_no=1, shots=[])
+
+    monkeypatch.setattr(stages, "_run_with_agent_loop", fake_agent_loop)
+
+    # narrative_plan 默认 None：这条路径才是当前会真正调用模型的大纲生成器
+    # （app.stages._generate_episode_director_outline）。narrative_plan 非空时
+    # generate_storyboard_outline 会走确定性编译分支，直接 return，永远不会
+    # 执行到后面那段带 prompt 字符串的旧代码——这段旧代码目前是死代码。
+    screenplay = _screenplay()
+    assert screenplay.narrative_plan is None
+
+    asyncio.run(stages.generate_storyboard_outline(
+        {"episode_no": 1, "title": "测试集", "target_duration_s": 50},
+        "少年面无表情，缓缓攥紧了手掌。",
+        _bible(),
+        "",
+        screenplay,
+    ))
+
+    prompt = captured["prompt"]
+    assert isinstance(prompt, str)
+
+    # 完整换算表：与 config.max_spoken_chars_for_duration 同源，覆盖全部合法档位。
+    for duration in sorted(config.ALLOWED_DURATIONS):
+        expected_cap = config.max_spoken_chars_for_duration(duration)
+        assert f"{duration}s≤{expected_cap}字" in prompt, (
+            f"大纲提示词缺少 {duration}s 档位的口播预算（应为 {expected_cap} 字）"
+        )
+
+    # 因果方向：先数台词字数，再选能装下的时长；不是先选时长再检查。
+    assert "key_line_ids 合计口播纯文字字数决定 duration_s 下限" in prompt
+    # 保留原有"超限拆镜"出路，并补上"选择更长时长"这条此前未告知模型的出路。
+    assert "挪到相邻镜" in prompt
+    assert f"{config.MAX_SPOKEN_CHARS_PER_SHOT}字" in prompt
+
+
 def test_invalid_legacy_outline_information_id_is_not_injected_after_validation(monkeypatch) -> None:
     async def fake_agent_loop(*_args, **_kwargs):
         return _draft(_shot(1), is_final=False)
