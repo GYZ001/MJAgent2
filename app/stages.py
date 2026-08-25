@@ -81,7 +81,7 @@ from app.narrative_blueprint import (
     validate_narrative_blueprint_patch_projection,
     validate_narrative_blueprint_shard,
 )
-from app.schemas import (Bible, CAMERA_MOVES, Character, Dialogue, EMOTIONS, EpisodeScreenplay,
+from app.schemas import (Bible, CAMERA_MOVES, Character, CharacterAlias, Dialogue, EMOTIONS, EpisodeScreenplay,
                          NARRATIVE_CONTRACT_VERSION, RequiredOnScreenText,
                          SHOT_SIZES, Scene, Shot, Storyboard,
                          StoryboardContextRequirement, StoryboardOutline,
@@ -3427,6 +3427,240 @@ async def _supplement_bible_characters(bible: Bible, missing: list[tuple[str, in
     return added
 
 
+# ---------- A1. 人物别名回填（层一，见 docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.1） ----------
+
+ALIAS_BACKFILL_SOURCE_BUDGET_CHARS = 150000  # 一次性全书扫描，预算高于常规人物谱生成的 60000
+
+
+def _chapters_by_idx(chapters: list[dict]) -> dict[int, str]:
+    """按章节序号建立原文查找表，供别名证据的逐字核验使用（未经预算截断的完整正文）。"""
+    result: dict[int, str] = {}
+    for chapter in chapters:
+        content = (chapter.get("content") or "").strip()
+        if not content:
+            continue
+        try:
+            idx = int(chapter.get("idx"))
+        except (TypeError, ValueError):
+            continue
+        result[idx] = content
+    return result
+
+
+def _alias_declaration_verified(
+    chapters_by_idx: dict[int, str],
+    anchor_texts: set[str],
+    text: str,
+    evidence_chapter_index: int,
+    evidence_quote: str,
+) -> bool:
+    """别名申报的代码核验：结构性判据，不对任何具体称谓做特判（禁止黑白名单式修复）。
+
+    三个条件必须同时成立，任一不满足就不登记（不确定不登记是安全默认）：
+    1. evidence_quote 是 evidence_chapter_index 对应章节原文的逐字子串；
+    2. text（申报的别名本身）是 evidence_quote 的子串——证据必须真的提到这个别名，
+       不能是一句不相干的话；
+    3. 该章节原文里还能找到 anchor_texts（角色规范名或已确认的其它别名）中的至少一项——
+       证明这条别名与该角色存在共现依据，不是张冠李戴。
+    """
+    text = (text or "").strip()
+    quote = (evidence_quote or "").strip()
+    if not text or not quote or text not in quote:
+        return False
+    chapter_text = chapters_by_idx.get(evidence_chapter_index, "")
+    if not chapter_text or quote not in chapter_text:
+        return False
+    return any(anchor and anchor in chapter_text for anchor in anchor_texts)
+
+
+def _verify_character_aliases_in_place(bible: Bible, chapters: list[dict]) -> dict[str, list[str]]:
+    """`generate_bible` 主链路核验：模型随人物谱正文一并申报的 aliases 同样只是申报，
+    落库前必须过同一套代码核验（`_alias_declaration_verified`，与回填函数共用）。
+    只处理 aliases 字段，绝不触碰角色的任何其它既有字段。"""
+    chapters_by_idx = _chapters_by_idx(chapters)
+    added: dict[str, list[str]] = {}
+    for character in bible.characters:
+        anchor_texts = {character.name}
+        verified: list[CharacterAlias] = []
+        added_texts: list[str] = []
+        for item in character.aliases:
+            text = (item.text or "").strip()
+            if not text or text == character.name or text in anchor_texts:
+                continue
+            if _alias_declaration_verified(
+                chapters_by_idx, anchor_texts, text,
+                item.evidence_chapter_index, item.evidence_quote,
+            ):
+                verified.append(CharacterAlias(
+                    text=text, name_kind=item.name_kind,
+                    evidence_chapter_index=item.evidence_chapter_index,
+                    evidence_quote=item.evidence_quote,
+                ))
+                anchor_texts.add(text)
+                added_texts.append(text)
+        character.aliases = verified
+        if added_texts:
+            added[character.name] = added_texts
+    return added
+
+
+def _render_alias_backfill_source(
+    chapters: list[dict], budget: int = ALIAS_BACKFILL_SOURCE_BUDGET_CHARS,
+) -> str:
+    """为别名回填渲染全书原文：块头强制显示原文章节序号（idx），不像 `_render_bible_source`
+    那样优先用章节标题——回填要求模型精确报出 `evidence_chapter_index`，标题文本
+    （可能是任意小说章节名）无法保证与 idx 对应，块头必须显式给出数字。"""
+    valid = [ch for ch in chapters if (ch.get("content") or "").strip()]
+    blocks: list[str] = []
+    used = 0
+    for chapter in valid:
+        remain = budget - used
+        if remain <= 200:
+            break
+        content = chapter["content"].strip()
+        clipped = content[:remain]
+        suffix = "……（原文过长已截断）" if len(content) > remain else ""
+        blocks.append(f"【第 {chapter.get('idx', '?')} 章】\n{clipped}{suffix}")
+        used += len(clipped)
+    return "\n\n".join(blocks)
+
+
+class _AliasBackfillDeclaration(BaseModel):
+    """别名回填申报合同：模型只申报，是否登记由后端核验决定。"""
+
+    character_name: str = ""
+    text: str = ""
+    name_kind: str = ""
+    evidence_chapter_index: int = -1
+    evidence_quote: str = ""
+
+
+class _AliasBackfillDraft(BaseModel):
+    aliases: list[_AliasBackfillDeclaration] = Field(default_factory=list)
+
+
+async def backfill_character_aliases(
+    bible: Bible, chapters: list[dict], *, project_id: str | None = None,
+) -> dict[str, list[str]]:
+    """窄口径别名回填（层一，用于当前项目一次性回填历史人物谱）：全书上下文，只产出并
+    核验 `Character.aliases`，绝不改写人物谱任何其它既有字段（name/role/appearance_canonical/
+    personality/speech_style/relationships/ref_image_path/portrait_prompt_override 全部
+    原样保留，本函数不读写它们）。
+
+    调用方式：协调层在部署窗口拿到已定稿的 `bible`（`Bible` 实例）与该项目全书 `chapters`
+    （`list[dict]`，需含 `idx`/`content` 字段，与 `generate_bible` 输入同构）后直接：
+
+        added = await backfill_character_aliases(bible, chapters, project_id=project_id)
+
+    函数原地把核验通过的别名追加进对应 `Character.aliases`（幂等：已存在的别名文本、或与
+    `character.name` 相同的文本不会重复追加，可安全重跑）；调用方随后自行把更新后的
+    `bible` 序列化落库（本函数不做任何数据库读写——app/db.py 由其它 agent 并行改动，
+    不在本函数职责范围内）。
+
+    返回值 `{character_name: [本次新增别名文本, ...]}`，供调用方记账/日志展示；返回空 dict
+    不代表失败（可能全书确实没有可核验的别名，也可能模型调用失败——两者都已通过
+    `log_provider_call` 记录，失败时 status="FAILED"，全书无可核验别名时 status="EMPTY"）。
+
+    核验规则见 `_alias_declaration_verified`：模型只负责申报，代码逐字核验，不确定不登记。
+    禁止任何具体称谓的硬编码——判据只看结构（逐字子串命中 + 章节内共现），不针对
+    "许师姐""小胖子"等具体词做特判分支。
+    """
+    chapters_by_idx = _chapters_by_idx(chapters)
+    source = _render_alias_backfill_source(chapters)
+    if not source.strip() or not bible.characters:
+        return {}
+    roster = "、".join(
+        c.name + (f"（已登记别名：{'、'.join(a.text for a in c.aliases)}）" if c.aliases else "")
+        for c in bible.characters
+    )
+    prompt = f"""任务：通读下面的全书正文，为【已收录角色】找出他们在原文中出现过的其它称谓
+（外号、尊称、代称、未揭晓真名前的描述性代称等），逐条给出可核验的证据。
+
+已收录角色（只为这些人申报别名，不要发明角色列表之外的人）：
+{roster}
+
+要求：
+1. 每条别名给五个字段：character_name（必须逐字等于上面角色列表中的某个名字）、
+   text（该别名在原文中的逐字写法）、name_kind（personal_name=真名/honorific=尊称/
+   referential=代称，按原文语境判断该称谓的性质）、evidence_chapter_index（该别名出现的
+   证据所在章节序号，取该章节【第 N 章】块头里的数字 N）、evidence_quote（该章节原文中的
+   逐字引句，必须原样照抄，一个字都不能改；且这句引文所在章节里必须能同时找到该角色的
+   正式姓名或本角色的另一条别名——如果找不到这种共现，说明这条证据站不住，不要申报）。
+2. 不确定就不要申报：证据不足、记不清原文原句、或章节序号可能有误的情况，宁可漏报，
+   绝不能编造或近似改写引句——后端会逐字核对，改写过的引句一律无法通过、白白浪费申报。
+3. 同一个别名同一个角色只申报一次；角色的正式姓名本身不算别名，不要重复申报。
+4. 只申报别名本身，不要输出角色的外观、性格、关系等其它信息——这些字段本次不会被采用。
+
+全书正文（部分较长章节可能已截断，仅代表你能看到的范围，不代表原文实际只有这些）：
+{source}
+
+输出 JSON Schema：
+{{"aliases": [{{"character_name": str, "text": str, "name_kind": "personal_name|honorific|referential", "evidence_chapter_index": int, "evidence_quote": str}}]}}"""
+    try:
+        raw = await model_gateway.chat(
+            [{"role": "system", "content": SYSTEM_PREFIX},
+             {"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=8192,
+            call_meta={
+                "stage": "人物别名回填",
+                "stage_key": "character_alias_backfill",
+                "call_role": "stage_generate",
+                "call_role_label": "别名回填",
+                "expected_json": True,
+                "project_id": project_id,
+            },
+        )
+        declared = _AliasBackfillDraft.model_validate(extract_json(raw)).aliases
+    except Exception as exc:  # noqa: BLE001 - 回填失败保留已有人物谱，不阻断调用方
+        log_provider_call(
+            "character_alias_backfill", config.MODEL_TEXT, "FAILED", None, 0,
+            meta={"error": str(exc)[:300]},
+        )
+        return {}
+
+    by_name = {c.name: c for c in bible.characters}
+    grouped: dict[str, list[_AliasBackfillDeclaration]] = defaultdict(list)
+    for item in declared:
+        name = (item.character_name or "").strip()
+        if name in by_name:
+            grouped[name].append(item)
+
+    added: dict[str, list[str]] = {}
+    for name, items in grouped.items():
+        character = by_name[name]
+        anchor_texts = {character.name, *(a.text for a in character.aliases)}
+        added_texts: list[str] = []
+        for item in items:
+            text = (item.text or "").strip()
+            if not text or text in anchor_texts:
+                continue
+            if _alias_declaration_verified(
+                chapters_by_idx, anchor_texts, text,
+                item.evidence_chapter_index, item.evidence_quote,
+            ):
+                character.aliases.append(CharacterAlias(
+                    text=text, name_kind=item.name_kind,
+                    evidence_chapter_index=item.evidence_chapter_index,
+                    evidence_quote=item.evidence_quote,
+                ))
+                anchor_texts.add(text)
+                added_texts.append(text)
+        if added_texts:
+            added[name] = added_texts
+
+    log_provider_call(
+        "character_alias_backfill", config.MODEL_TEXT,
+        "OK" if added else "EMPTY", None, 0,
+        meta={
+            "declared": len(declared),
+            "verified": sum(len(v) for v in added.values()),
+            "characters_touched": list(added.keys()),
+        },
+    )
+    return added
+
+
 async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
     """把作者的话等旁文本从章节正文里剔掉，再交给人物谱这条链路。
 
@@ -3512,14 +3746,22 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
 2. appearance_canonical 是该角色的"固定外观锚点串"：40~60 字，必须包含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征。只写常规完整着装、中性站姿下可直接看见并能跨镜稳定复现的静态形态：五官、发型、体型、外层服装、可见配饰或面部标记。不写性格、欲望、气质、眼神行为、对他人的注视方式，不得写裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。原著未描写的部分，按题材合理补全并保持内部一致。
 3. visual_style_canonical：25~40 字的全局画风串，包含 美术风格/光线/色调，适配竖屏漫剧，必须依据本书题材定制。【硬性约束】必须是 CG/动画/漫画/插画类的非真人风格（如 3D 渲染、3D 写实 CG、2D 动画、动态漫画、厚涂插画、国漫风等，写实质感/照片级/胶片颗粒等氛围词可以保留），但严禁"真人实拍/真人出镜/实拍摄影"这类真人风格描述（否则后续 Seedance 视频接口会因疑似真人而报错 InputImageSensitiveContentDetected）。核心是画面为 CG/动画渲染而非真人拍摄。
 4. speech_style 用于后续台词写作：句长习惯/口头禅/敬语习惯等，15~30 字。
-5. name 必须互不重复：同一人物的别名/外号/尊称/简称统一成原文最稳定的正式姓名，不要拆成多个角色。
+5. name 必须互不重复且取原文最稳定的正式姓名；同一人物在原文中出现的其它别名/外号/尊称/
+   代称（包括真名揭晓前的描述性代称，如"银色长袍女子"）不要拆成多个角色，而是逐条列入
+   该角色的 aliases：每条给 text（原文逐字写法）、name_kind（personal_name=真名/
+   honorific=尊称/referential=代称，按语境判断）、evidence_chapter_index（该别名出现的
+   证据所在章节序号，取原文分块【】块头里的数字；如果看到的分块标题不是数字、无法确定
+   准确章节序号，就不要申报这条别名）、evidence_quote（该章节原文中的逐字引句，必须原样
+   照抄，一个字都不能改；且这句引文所在章节里必须能同时找到该角色的正式姓名或本角色的
+   另一条别名——找不到这种共现就不要申报，后端会逐字核对，不满足条件的申报一律不会登记）。
+   不确定就不要申报别名——宁可漏报，绝不能编造或近似改写引句。
 6. relationships 只描述【已收录角色之间】的关系：relationships.to 必须逐字等于本次 characters 里某个角色的 name，不要指向未收录的人物（否则代码校验会因「关系指向未知角色」退回重写）。与圈外人物的关系请省略，或并入 personality 文字描述。
 
 小说文本：
 {chapters_text}{previous_part}{feedback_part}{visual_style_part}{must_cover_part}
 
 输出 JSON Schema：
-{{"characters": [{{"name": str, "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}]}}], "world": {{"era": str, "genre": str, "visual_style_canonical": str}}}}"""
+{{"characters": [{{"name": str, "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "aliases": [{{"text": str, "name_kind": "personal_name|honorific|referential", "evidence_chapter_index": int, "evidence_quote": str}}]}}], "world": {{"era": str, "genre": str, "visual_style_canonical": str}}}}"""
     loop = AgentLoop(
         stage_key="character_bible",
         contract_key="character_bible",
@@ -3554,6 +3796,9 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
     )
     if visual_style_prompt:
         bible.world.visual_style_canonical = visual_style_prompt
+    # 规则 5 要求模型随人物谱一并申报别名，但那只是申报——落库前必须过与回填函数
+    # 同一套代码核验（逐字命中 + 章节内共现），不满足就丢弃，不阻断人物谱本身。
+    _verify_character_aliases_in_place(bible, chapters)
     missing = [item for item in must_cover if not _bible_covers_name(bible, item[0])]
     if missing:
         added = await _supplement_bible_characters(

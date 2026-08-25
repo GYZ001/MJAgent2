@@ -2754,6 +2754,134 @@ def test_bible_for_episode_picks_segment_anchor(monkeypatch) -> None:
     assert bible.characters[0].appearance_canonical == original
 
 
+def _make_conn_with_visual_entity_id() -> sqlite3.Connection:
+    """与 ``_make_conn`` 同构，但额外具备 ``character_portraits.visual_entity_id``
+    列——模拟 app/db.py 迁移落地后的目标 schema（该迁移由并行改动负责，本文件
+    不实现，只在测试里手工搭一份等价 schema 验证消费侧行为，见
+    docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.2）。"""
+    conn = _make_conn()
+    conn.execute(
+        "ALTER TABLE character_portraits ADD COLUMN visual_entity_id TEXT"
+    )
+    conn.execute(
+        "ALTER TABLE character_portraits ADD COLUMN pack_status TEXT"
+    )
+    return conn
+
+
+def _insert_portrait_with_entity(
+    conn, pid, character_name, visual_entity_id, ep_start, ep_end,
+    appearance, image_path, *, pack_status="ready",
+) -> None:
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, "
+        "ep_start, ep_end, appearance, prompt, image_path, base_portrait_id, "
+        "bible_version, created_at, visual_entity_id, pack_status) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            f"po_{character_name}_{ep_start}", pid, character_name, ep_start,
+            ep_end, appearance, "p", image_path, None, 1, 0.0,
+            visual_entity_id, pack_status,
+        ),
+    )
+    conn.commit()
+
+
+def test_portrait_for_episode_visual_entity_id_enables_unnamed_cross_episode_reuse(
+    monkeypatch, tmp_path,
+) -> None:
+    """第6项红灯目标：未具名角色（没有稳定 character_name，只有跨集稳定的
+    visual_entity_id）也能在不同集拿到同一张参考图。DB 行的 character_name
+    刻意写成与查询参数不同的字符串，证明命中路径走的是 visual_entity_id 列，
+    不是 character_name。"""
+    conn = _make_conn_with_visual_entity_id()
+    _seed_project(conn, "x")
+    _patch_settings(monkeypatch, conn)
+    image = tmp_path / "unnamed.jpg"
+    image.write_bytes(b"fake")
+    _insert_portrait_with_entity(
+        conn, "p1", "小胖子（第7集措辞）", "entity:deadbeefcafef00d",
+        1, None, "圆脸少年，粗布短打，怯生生的神情", str(image),
+    )
+
+    # 调用方传入的 name 与 DB 行的 character_name 完全不一致——如果命中，
+    # 只可能是通过 visual_entity_id 而不是 character_name。
+    for episode_no in (1, 7, 34):
+        path = portraits.portrait_for_episode(
+            "p1", "李富贵（第34集措辞）", episode_no,
+            visual_entity_id="entity:deadbeefcafef00d",
+        )
+        assert path == str(image)
+        anchor = portraits.appearance_for_episode(
+            "p1", "李富贵（第34集措辞）", episode_no,
+            visual_entity_id="entity:deadbeefcafef00d",
+        )
+        assert anchor and "圆脸少年" in anchor
+
+
+def test_portrait_for_episode_visual_entity_id_column_missing_falls_back_to_character_name(
+    monkeypatch,
+) -> None:
+    """第6项回退兼容：迁移未落地时（visual_entity_id 列不存在），传入该参数
+    不得报错，必须静默回退到既有的 character_name 路径——具名角色的既有行为
+    不受影响。"""
+    conn = _make_conn()  # 没有 visual_entity_id 列，模拟迁移前的旧 schema
+    _seed_project(conn, "x")
+    _patch_settings(monkeypatch, conn)
+    _insert_portrait(
+        conn, "p1", "萧炎", 1, None,
+        "黑发少年，玄色劲装，目光坚定", "/tmp/xiao.jpg",
+    )
+    anchor = portraits.appearance_for_episode(
+        "p1", "萧炎", 5, visual_entity_id="bible:萧炎",
+    )
+    assert anchor and "黑发少年" in anchor
+
+
+def test_open_portrait_visual_entity_id_prefers_entity_match_over_name_mismatch(
+    monkeypatch,
+) -> None:
+    conn = _make_conn_with_visual_entity_id()
+    _seed_project(conn, "x")
+    _patch_settings(monkeypatch, conn)
+    _insert_portrait_with_entity(
+        conn, "p1", "许姓女子（第5集措辞）", "bible:许清",
+        1, None, "银发女子，月白长袍", "/tmp/xu.jpg",
+    )
+    row = portraits._open_portrait(
+        conn, "p1", "许师姐（第6集措辞）", visual_entity_id="bible:许清",
+    )
+    assert row is not None
+    assert row["character_name"] == "许姓女子（第5集措辞）"
+
+
+def test_bible_for_episode_visual_entity_id_finds_portrait_registered_under_mismatched_character_name(
+    monkeypatch,
+) -> None:
+    """第6项核心场景（设计文档 §0，许清案）：定妆照当年是在角色尚未正式具名
+    绑定时创建的，落库时 character_name 写的是当时的措辞（不是 bible 里的
+    规范名），但迁移回填了正确的 visual_entity_id=bible:{规范名}。旧的
+    bible_for_episode 只按 character_name 精确匹配，找不到这张图；新路径
+    按 visual_entity_id 匹配（对已具名角色等价于 bible:{name}，零迁移成本），
+    必须命中。"""
+    conn = _make_conn_with_visual_entity_id()
+    _seed_project(conn, "x")  # bible 里角色规范名是"萧炎"，默认外观含"黑发少年"
+    _patch_settings(monkeypatch, conn)
+    # 用与默认 bible 外观完全不同的措辞，确保命中只能来自这条 portrait 行，
+    # 不会被 bible 自身默认外观文本掩盖出假阳性。
+    _insert_portrait_with_entity(
+        conn, "p1", "黑衣少年（早期未具名措辞）", "bible:萧炎",
+        1, None, "定妆照回填版：银甲战袍，眉间赤痣，右手持剑", "/tmp/early.jpg",
+    )
+
+    bible = Bible.model_validate(json.loads(
+        conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]))
+    original = bible.characters[0].appearance_canonical
+    assert "定妆照回填版" not in original
+    view = portraits.bible_for_episode("p1", bible, 1)
+    assert "定妆照回填版：银甲战袍，眉间赤痣，右手持剑" == view.characters[0].appearance_canonical
+
+
 def test_discover_character_candidates_keeps_typed_functionals(monkeypatch) -> None:
     bible = Bible(
         world=World(visual_style_canonical="国风"),
@@ -4442,17 +4570,24 @@ def test_future_known_decision_overwrites_stale_materialization_compatibility(
 
 
 @pytest.mark.parametrize(
-    ("mutation", "error_fragment"),
+    ("mutation", "error_fragment", "expect_schema_violation"),
     [
-        ("forged_k", "K decision 越界"),
-        ("sentinel", "K decision 越界"),
-        ("reserved_n", "必须选择 K decision"),
-        ("cross_f", None),
+        # RCA ERR-20260824-e3628f 收口：decision_id 是 _current_identity_
+        # schema() 里 known_item["properties"]["decision_id"]["enum"] 声明
+        # 的枚举，且该 enum 在 _identity_strict_provider_schema 的白名单内、
+        # 真正发给供应商——越界属于格式失败，不是业务分歧。
+        ("forged_k", "K decision 越界", True),
+        ("sentinel", "K decision 越界", True),
+        # "已登记身份必须选择 K decision" 只写在提示词散文里的业务约定，
+        # 从未作为 schema 约束发给供应商——维持语义失败/即停，是真信号。
+        ("reserved_n", "必须选择 K decision", False),
+        ("cross_f", None, None),
     ],
 )
 def test_current_identity_rf11_custom_exact_gates(
     mutation: str,
     error_fragment: str | None,
+    expect_schema_violation: bool | None,
 ) -> None:
     records = portraits._current_identity_evidence_records(
         "耳根站在山门。\n\n门卫守在殿前。"
@@ -4534,7 +4669,13 @@ def test_current_identity_rf11_custom_exact_gates(
         )
         assert projected[0]["identity_group"].startswith("current-1:synthetic:")
     else:
-        assert any(error_fragment in error for error in errors)
+        matching = [error for error in errors if error_fragment in error]
+        assert matching
+        assert all(
+            portraits._current_identity_is_schema_violation(error)
+            == expect_schema_violation
+            for error in matching
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -4665,6 +4806,241 @@ def test_current_identity_reserved_n_echo_different_evidence_ref_still_hard_fail
     assert any("必须选择 K decision" in message for message in errors)
 
 
+# ---------------------------------------------------------------------------
+# 第8项：同批折叠通道（absorbed_functional_keys，设计文档 §2.7/§4.2 "同批
+# 折叠通道"，直接对应 RCA ERR-20260824-bc3d14）。真实 EP10 形状：本批同时
+# 出现（a）一个仍处于 functional 状态的绰号组「小胖子」（证据里没有逐字
+# 「李富贵」）；（b）另一条证据首次逐字出现「李富贵」，命中已登记权威，
+# 产出合规 K 决议。模型判断二者是同一人，此前唯一能表达"这是同一个人"的
+# 方式是在 n 里重复申报李富贵——那是违规写法，会被 1592 的硬校验拒绝
+# （见上面 test_current_identity_reserved_n_echo_different_evidence_ref_
+# still_hard_fails，同 label 不同 evidence_ref 不属于冗余回显豁免）。
+# absorbed_functional_keys 给出合法通道：K 决议显式声明"吸收"了这个
+# functional 组，折叠成功后视觉侧统一到同一个 visual_entity_id，并留有
+# 可查询的记账（_current_identity_absorbed_visual_merges）。
+# ---------------------------------------------------------------------------
+
+def _ep10_shape_evidence_and_known() -> tuple[dict, dict]:
+    records = portraits._current_identity_evidence_records(
+        "小胖子躲在墙角瑟瑟发抖，不敢说话。\n\n"
+        "李富贵忽然开口说话：孟浩，你是我李富贵这一辈子的好朋友。"
+    )
+    evidence_by_ref = {
+        f"E{index:03d}": record for index, record in enumerate(records, start=1)
+    }
+    authorities = portraits.identity_authority_registry(
+        Bible(
+            world=World(visual_style_canonical="国风"),
+            characters=[Character(
+                name="李富贵", role="配角",
+                appearance_canonical="圆脸少年，粗布短打",
+            )],
+        ),
+        [],
+    )
+    known = portraits._current_identity_known_decision_catalog(
+        evidence_by_ref, authorities=authorities,
+    )
+    return evidence_by_ref, known
+
+
+def test_current_identity_absorbed_functional_keys_folds_same_batch_functional_group_ep10_regression() -> None:
+    evidence_by_ref, known = _ep10_shape_evidence_and_known()
+    decision_id = next(iter(known))
+    functional_ref = next(
+        ref for ref, record in evidence_by_ref.items()
+        if "小胖子" in str(record["text"]) and "李富贵" not in str(record["text"])
+    )
+    payload = {
+        "k": [{
+            "decision_id": decision_id,
+            "kind": "onscreen",
+            "absorbed_functional_keys": ["F1"],
+        }],
+        "n": [],
+        "f": [{
+            "evidence_ref": functional_ref,
+            "source_label": "小胖子",
+            "functional_identity_key": "F1",
+            "kind": "onscreen",
+        }],
+    }
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions=known,
+        reserved_authority_labels={"李富贵"},
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert errors == []
+    named = [item for item in projected if item["identity_kind"] == "named"]
+    assert len(named) == 1
+    k_item = named[0]
+    assert k_item["name"] == "李富贵"
+    assert k_item["_current_identity_absorbed_functional_keys"] == ["F1"]
+    merges = k_item["_current_identity_absorbed_visual_merges"]
+    assert len(merges) == 1
+    from app.identity_authority import visual_entity_id_for_resolution
+    expected_from = visual_entity_id_for_resolution(
+        {"source_label": "小胖子", "scope_qualifier": ""}
+    )
+    expected_to = visual_entity_id_for_resolution(
+        {"resolution": "future_identity", "canonical_name": "李富贵"}
+    )
+    assert merges[0]["from_visual_entity_id"] == expected_from
+    assert merges[0]["to_visual_entity_id"] == expected_to
+    assert expected_to == "bible:李富贵"
+    assert merges[0]["canonical_name"] == "李富贵"
+    assert merges[0]["merge_rule"] == "same_batch_k_absorption"
+    # 折叠后的功能组候选本身照常投影（naming 侧不受影响）。
+    functional = [item for item in projected if item["identity_kind"] == "functional"]
+    assert len(functional) == 1
+    assert functional[0]["source_label"] == "小胖子"
+
+
+def test_current_identity_absorbed_functional_keys_rejects_forged_token() -> None:
+    """核验不过（token 越界）必须拒绝该声明，安全默认，不得静默接受。"""
+    evidence_by_ref, known = _ep10_shape_evidence_and_known()
+    decision_id = next(iter(known))
+    payload = {
+        "k": [{
+            "decision_id": decision_id,
+            "kind": "onscreen",
+            "absorbed_functional_keys": ["F999-从未出现过"],
+        }],
+        "n": [],
+        "f": [],
+    }
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    _projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions=known,
+        reserved_authority_labels={"李富贵"},
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert any("absorbed_functional_keys 越界" in message for message in errors)
+
+
+def test_current_identity_absorbed_functional_keys_accepts_prior_batch_p_token() -> None:
+    """三类合法来源之二：前批已确定的 functional P token（跨批延续）。"""
+    evidence_by_ref, known = _ep10_shape_evidence_and_known()
+    decision_id = next(iter(known))
+    payload = {
+        "k": [{
+            "decision_id": decision_id,
+            "kind": "onscreen",
+            "absorbed_functional_keys": ["P:F:priorbatchtoken"],
+        }],
+        "n": [],
+        "f": [],
+    }
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions=known,
+        prior_functional_groups={
+            "P:F:priorbatchtoken": {
+                "decision_id": "P:F:priorbatchtoken",
+                "identity_group": "current-0:F1",
+                "existing_route_name": "",
+                "source_labels": ["小胖子"],
+                "response_group_keys": [],
+            },
+        },
+        reserved_authority_labels={"李富贵"},
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert errors == []
+    named = [item for item in projected if item["identity_kind"] == "named"]
+    assert len(named) == 1
+    merges = named[0]["_current_identity_absorbed_visual_merges"]
+    assert len(merges) == 1
+    assert merges[0]["canonical_name"] == "李富贵"
+
+
+def test_current_identity_absorbed_functional_keys_accepts_existing_functional_route_token() -> None:
+    """三类合法来源之三：本集已有功能身份决议的 canonical_name。"""
+    evidence_by_ref, known = _ep10_shape_evidence_and_known()
+    decision_id = next(iter(known))
+    payload = {
+        "k": [{
+            "decision_id": decision_id,
+            "kind": "onscreen",
+            "absorbed_functional_keys": ["existing-route-token"],
+        }],
+        "n": [],
+        "f": [],
+    }
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions=known,
+        reserved_authority_labels={"李富贵"},
+        group_scope="current-1",
+        existing_functional_routes={"existing-route-token"},
+        existing_functional_route_labels={"existing-route-token": "小胖子"},
+    )
+    assert errors == []
+    named = [item for item in projected if item["identity_kind"] == "named"]
+    assert len(named) == 1
+    merges = named[0]["_current_identity_absorbed_visual_merges"]
+    assert len(merges) == 1
+    assert merges[0]["canonical_name"] == "李富贵"
+
+
+def test_record_visual_entity_merge_writes_row_when_table_exists() -> None:
+    """有记账：表存在时真实落一条可查询记录；选图规则优先复用 to 侧 ready 图。"""
+    conn = _make_conn_with_visual_entity_id()
+    conn.execute(
+        "CREATE TABLE visual_entity_merges (id TEXT PRIMARY KEY, project_id TEXT, "
+        "from_visual_entity_id TEXT, to_visual_entity_id TEXT, canonical_name TEXT, "
+        "merge_rule TEXT, selected_portrait_id TEXT, evidence_episode_no INTEGER, "
+        "created_at REAL)"
+    )
+    _insert_portrait_with_entity(
+        conn, "p1", "李富贵", "bible:李富贵", 1, None,
+        "圆脸少年，粗布短打", "/tmp/lifugui.jpg",
+    )
+    ok = portraits._record_visual_entity_merge(
+        conn, "p1",
+        from_visual_entity_id="entity:aaaa",
+        to_visual_entity_id="bible:李富贵",
+        canonical_name="李富贵",
+        evidence_episode_no=10,
+    )
+    assert ok is True
+    row = conn.execute(
+        "SELECT * FROM visual_entity_merges WHERE project_id='p1'"
+    ).fetchone()
+    assert row is not None
+    assert row["from_visual_entity_id"] == "entity:aaaa"
+    assert row["to_visual_entity_id"] == "bible:李富贵"
+    assert row["canonical_name"] == "李富贵"
+    assert row["merge_rule"] == "same_batch_k_absorption"
+    assert row["evidence_episode_no"] == 10
+    assert row["selected_portrait_id"] == "po_李富贵_1"
+
+
+def test_record_visual_entity_merge_table_missing_is_a_silent_noop() -> None:
+    """迁移尚未落地时（表不存在）：不得抛异常，折叠命名侧结果不受影响。"""
+    conn = _make_conn()  # 没有 visual_entity_merges 表
+    ok = portraits._record_visual_entity_merge(
+        conn, "p1",
+        from_visual_entity_id="entity:aaaa",
+        to_visual_entity_id="bible:李富贵",
+        canonical_name="李富贵",
+        evidence_episode_no=10,
+    )
+    assert ok is False
+
+
 @pytest.mark.parametrize("failure", ["attempt15_rf9", "unknown_evidence"])
 def test_current_identity_rf11_rejects_unbound_provider_output_once(
     monkeypatch,
@@ -4718,12 +5094,12 @@ def test_current_identity_rf11_rejects_unbound_provider_output_once(
         "resolve_future_identity_candidates",
         forbidden_future,
     )
-    expected_error = (
-        model_gateway.StructuredFormatError
-        if failure == "attempt15_rf9"
-        else model_gateway.StructuredSemanticError
-    )
-    with pytest.raises(expected_error):
+    # RCA ERR-20260824-e3628f：F evidence_ref 越界是 wire-schema 已声明的
+    # enum 违例（CurrentFunctionalIdentityDecision.evidence_ref），改判为
+    # 格式失败——"unknown_evidence" 现在跟 "attempt15_rf9"（旧 RF9 键形状，
+    # 从来就是解析/格式失败）一样都是 StructuredFormatError，不再是
+    # StructuredSemanticError；见 _CurrentIdentitySchemaViolation。
+    with pytest.raises(model_gateway.StructuredFormatError):
         asyncio.run(portraits.discover_character_candidates(
             "门卫守在山门。",
             Bible(world=World(visual_style_canonical="国风"), characters=[]),
@@ -9061,7 +9437,97 @@ def test_current_identity_ambiguous_ref_still_fails_closed() -> None:
         existing_functional_routes=set(),
     )
 
-    assert any("evidence_ref 越界" in error for error in errors)
+    matching = [error for error in errors if "evidence_ref 越界" in error]
+    assert matching
+    # RCA ERR-20260824-e3628f：F 分支 evidence_ref 是 CurrentFunctionalIdentity
+    # Decision 上 enum 声明的字段（_current_identity_schema 的 functional_item
+    # ["properties"]["evidence_ref"]["enum"] = refs），越界是供应商违反了
+    # 自己已声明的枚举契约，判给格式失败，安全重采样——不是业务分歧。
+    assert all(
+        portraits._current_identity_is_schema_violation(error)
+        for error in matching
+    )
+
+
+def test_current_identity_n_branch_evidence_ref_out_of_range_is_schema_violation() -> None:
+    """N 分支的 evidence_ref 越界与 F 分支同理（同一 _resolved_evidence_ref
+    机制、同一 enum 声明字段 CurrentNewNamedIdentityDecision.evidence_ref），
+    补一条 N 分支专用红灯：此前只有 F 分支有直接覆盖。"""
+    records = portraits._current_identity_evidence_records(
+        "绿袍修士站在山门。"
+    )
+    evidence_by_ref = {
+        f"E{index:03d}": record for index, record in enumerate(records, start=1)
+    }
+    response = portraits.CurrentIdentityCandidateResponse.model_validate({
+        "k": [], "f": [],
+        "n": [{
+            "evidence_ref": "E999",
+            "identity_label": "绿袍修士",
+            "name_kind": "personal_name",
+            "kind": "onscreen",
+        }],
+    })
+    _projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    matching = [error for error in errors if "current N evidence_ref 越界" in error]
+    assert matching
+    assert all(
+        portraits._current_identity_is_schema_violation(error)
+        for error in matching
+    )
+
+
+def test_current_identity_source_label_duplicate_stays_semantic_not_schema() -> None:
+    """红灯 a 的对照面：source_label 重复只写在提示词散文里的业务约定
+    （"同一 source_label 若明确是同一人必须共用同一 ID"），从未作为 schema
+    约束（enum/required/additionalProperties）发给供应商——必须继续判给
+    语义失败，_current_identity_is_schema_violation 必须为 False，不能被
+    这次改判连带误伤。同一断言也覆盖"current 已登记身份必须选择 K
+    decision"和"current 同一 source_label 对应多个 identity_group"两条
+    紧邻的业务规则，一并确认没被越权改判。"""
+    # 与 test_current_identity_declared_conflict_stays_fatal_with_side_by_side_diff
+    # 同一夹具：同一个 F4 key（模型自己申报"这是同一个人"），kind 却自相
+    # 矛盾——真矛盾，必须维持致命，不是"缺限定语"那种可确定性补足的形状。
+    text = (
+        "那马脸青年缓缓睁开双眼，看了一眼四周。\n\n"
+        "屋外传来一阵脚步声，气氛顿时紧张起来。\n\n"
+        "又一位马脸青年策马而来，神情冷漠。"
+    )
+    records = portraits._current_identity_evidence_records(text)
+    evidence_by_ref = {
+        f"E{index:03d}": record for index, record in enumerate(records, start=1)
+    }
+    payload = {"k": [], "n": [], "f": [
+        {
+            "evidence_ref": "E001", "source_label": "马脸青年",
+            "functional_identity_key": "F4", "kind": "onscreen",
+        },
+        {
+            "evidence_ref": "E002", "source_label": "马脸青年",
+            "functional_identity_key": "F4", "kind": "mentioned",
+        },
+    ]}
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    _projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        reserved_authority_labels=set(),
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    duplicate_errors = [error for error in errors if "source_label 重复" in error]
+    assert duplicate_errors
+    assert not any(
+        portraits._current_identity_is_schema_violation(error)
+        for error in errors
+    )
 
 
 def _non_person_verdict(subject_kind: str, name: str) -> dict:

@@ -68,12 +68,18 @@ CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
 IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v16"
-CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v14"  # v14:
-# f 项新增 scope_qualifier（真实第18轮 EP10 回归 ERR-20260824-b16bb4，结构性
-# 方案 a：唯一性判定键改为 (source_label, scope_qualifier) 复合键，见 prompt
-# 规则8与 _project_current_identity_response 的 by_label 分组注释）。schema
-# 与 prompt 都变了，必须换版本号——不换会让 operation_id 撞上旧版缓存的
-# response，静默复用不含 scope_qualifier 的旧结果，本次修复形同虚设。
+CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v15"  # v15:
+# k 项新增 absorbed_functional_keys（RCA ERR-20260824-bc3d14，见
+# docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §2.7/§4.2 "同批折叠通道"）：模型
+# 借此声明某个 K 决议吸收了本批/前批的哪些 functional 称谓组，替代此前
+# 唯一能表达"这是同一个人"的违规写法（在 n 里重复申报已由 k 覆盖的身份）。
+# schema 与 prompt 都变了，必须换版本号——不换会让 operation_id 撞上旧版
+# 缓存的 response，静默复用不含 absorbed_functional_keys 的旧结果，本次
+# 修复形同虚设（与 v14 的 scope_qualifier 换版本号是同一个理由）。
+# v14: f 项新增 scope_qualifier（真实第18轮 EP10 回归 ERR-20260824-b16bb4，
+# 结构性方案 a：唯一性判定键改为 (source_label, scope_qualifier) 复合键，
+# 见 prompt 规则8与 _project_current_identity_response 的 by_label 分组
+# 注释）。
 CURRENT_IDENTITY_EVIDENCE_RECEIPT_VERSION = (
     "screenplay-current-identity-evidence-receipt.v2"
 )
@@ -1473,6 +1479,53 @@ def _current_identity_decision_cap(evidence_ref_count: int) -> int:
     )
 
 
+def _visual_entity_id_for_resolution_safe(value: dict[str, Any]) -> str | None:
+    """延迟导入 ``app.identity_authority.visual_entity_id_for_resolution``。
+
+    该函数按 docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.2 冻结的签名由另一
+    条并行改动落地在 app.identity_authority——本文件不实现、只消费，调用点
+    延迟到函数体内部（而非模块顶层 import），避免在依赖尚未落地的窗口期让
+    整个 app.portraits 模块导入失败。依赖缺失或调用异常时返回 None：命名侧
+    折叠（K 决议本身）不依赖这个返回值，只是暂时跳过 visual 侧记账，等依赖
+    落地后自动补齐，不需要再改这里。"""
+    try:
+        from app.identity_authority import visual_entity_id_for_resolution
+    except ImportError:
+        return None
+    try:
+        result = visual_entity_id_for_resolution(value)
+    except Exception:  # noqa: BLE001 - 防御性：绝不让记账失败拖垮身份预检
+        return None
+    return str(result).strip() or None
+
+
+class _CurrentIdentitySchemaViolation(str):
+    """A projection error whose violated constraint is declared in the wire
+    JSON schema (``_current_identity_schema()``'s ``enum``/``required``/
+    ``additionalProperties`` -- the keywords that actually survive
+    ``_identity_strict_provider_schema``'s whitelist and reach the provider;
+    ``maxItems``/``minLength``/``maxLength`` do not and so never qualify).
+
+    RCA ERR-20260824-e3628f: a supplier occasionally violates its own
+    strict-mode ``enum`` contract at low frequency (~0.5%) on deep array
+    elements. That is a format defect of the sampled answer, not a business
+    disagreement -- resampling the whole episode is safe. Behaves exactly
+    like ``str`` everywhere (equality, ``in``, ``"；".join(...)``, f-strings);
+    the one addition is letting the two callers below classify it via
+    ``isinstance`` instead of pattern-matching message text (判据必须是结构性
+    的，不是错误文案名单 -- only the handful of append_error(...,
+    schema_violation=True) call sites below ever construct one; every other
+    call site keeps appending a plain ``str`` and stays in the semantic/
+    fail-closed family).
+    """
+
+    __slots__ = ()
+
+
+def _current_identity_is_schema_violation(error: str) -> bool:
+    return isinstance(error, _CurrentIdentitySchemaViolation)
+
+
 def _project_current_identity_response(
     value: CurrentIdentityCandidateResponse,
     *,
@@ -1482,8 +1535,17 @@ def _project_current_identity_response(
     reserved_authority_labels: set[str] | None = None,
     group_scope: str,
     existing_functional_routes: set[str],
+    existing_functional_route_labels: dict[str, str] | None = None,
 ) -> tuple[list[dict], list[str]]:
-    """Resolve the RF10 K/N/F wire through backend-owned evidence receipts."""
+    """Resolve the RF10 K/N/F wire through backend-owned evidence receipts.
+
+    Returned ``errors`` stays a flat ``list[str]`` for backward compatibility
+    (every existing caller/test does ``"..." in errors`` or ``"；".join(errors)``);
+    entries that violate a wire-schema-declared constraint (see
+    ``_CurrentIdentitySchemaViolation``) are instances of that ``str``
+    subclass instead of plain ``str`` so callers can tell them apart with
+    ``_current_identity_is_schema_violation`` without touching message text.
+    """
     errors: list[str] = []
     projected: list[dict] = []
     expected_refs = set(evidence_by_ref)
@@ -1515,6 +1577,26 @@ def _project_current_identity_response(
         label for (label, key), count in functional_repeat_pairs.items()
         if count > 1 and label and key
     }
+
+    # 同批折叠通道（absorbed_functional_keys，见设计文档 §4.2 "同批折叠
+    # 通道"）需要反查每个可吸收 token 背后的 (source_label, scope_qualifier)，
+    # 用于纯函数式计算该 functional 组当时会被分配到的 visual_entity_id。
+    # 这里只建一份 token -> pairs 索引，不改变下面 f 循环本身的既有行为。
+    batch_functional_label_sources: dict[str, list[tuple[str, str]]] = {}
+    for item in value.f:
+        key = str(item.functional_identity_key or "").strip()
+        if not key:
+            continue
+        pair = (
+            str(item.source_label or "").strip(),
+            str(item.scope_qualifier or "").strip(),
+        )
+        batch_functional_label_sources.setdefault(key, []).append(pair)
+    absorbable_functional_tokens = (
+        set(batch_functional_label_sources)
+        | set(prior_functional_groups or {})
+        | set(existing_functional_routes or set())
+    )
 
     def append_candidate(
         *,
@@ -1749,7 +1831,24 @@ def _project_current_identity_response(
         evidence_ref = str((selected or {}).get("evidence_ref") or "")
         record = evidence_by_ref.get(evidence_ref)
         if selected is None or record is None:
-            errors.append(f"current K decision 越界：{decision_id}")
+            # decision_id is enum-declared in _current_identity_schema()
+            # (known_item["properties"]["decision_id"]["enum"] = decision_ids)
+            # and that enum keyword survives _identity_strict_provider_schema's
+            # whitelist, so it really is sent to the provider -- a decision_id
+            # outside it is a wire-schema violation (selected is None).
+            # `record is None` can only fire when `selected` is not None, but
+            # both _current_identity_known_decision_catalog and
+            # _current_identity_prior_decision_catalog only ever mint a
+            # known_decisions entry by iterating evidence_by_ref.items()
+            # itself, so every entry's evidence_ref is structurally guaranteed
+            # to already be a key of evidence_by_ref -- that branch is dead
+            # defensive code, not a second reachable failure mode, so the
+            # whole check is schema-declared in practice.
+            errors.append(
+                _CurrentIdentitySchemaViolation(
+                    f"current K decision 越界：{decision_id}"
+                )
+            )
             continue
         append_candidate(
             source_label=str(selected.get("source_label") or ""),
@@ -1776,13 +1875,108 @@ def _project_current_identity_response(
         k_source_label = str(selected.get("source_label") or "")
         if k_source_label and evidence_ref:
             redundant_n_echo_k_pairs[(k_source_label, evidence_ref)] = projected[-1]
+        absorbed_tokens = [
+            token for token in (
+                str(raw or "").strip()
+                for raw in (item.absorbed_functional_keys or [])
+            )
+            if token
+        ]
+        if absorbed_tokens:
+            invalid_tokens = [
+                token for token in absorbed_tokens
+                if token not in absorbable_functional_tokens
+            ]
+            if invalid_tokens:
+                # 安全默认：核验不过就拒绝该声明（硬失败强制重采样），不得
+                # 静默接受——伪造的 token 不得混入合法折叠通道。
+                errors.append(
+                    "current K decision absorbed_functional_keys 越界："
+                    f"{decision_id}->{invalid_tokens}"
+                )
+            else:
+                projected[-1]["_current_identity_absorbed_functional_keys"] = (
+                    list(absorbed_tokens)
+                )
+                canonical_name = str(selected.get("canonical_name") or "").strip()
+                to_visual_entity_id = (
+                    _visual_entity_id_for_resolution_safe({
+                        "resolution": "future_identity",
+                        "canonical_name": canonical_name,
+                    })
+                    if canonical_name else None
+                ) or (f"bible:{canonical_name}" if canonical_name else "")
+                merges: list[dict] = []
+                if to_visual_entity_id:
+                    label_pairs: list[tuple[str, str]] = []
+                    for token in absorbed_tokens:
+                        label_pairs.extend(
+                            batch_functional_label_sources.get(token, [])
+                        )
+                        prior_group = (prior_functional_groups or {}).get(token)
+                        if prior_group is not None:
+                            for label in prior_group.get("source_labels") or []:
+                                label_pairs.append(
+                                    (str(label or "").strip(), "")
+                                )
+                        existing_label = (
+                            existing_functional_route_labels or {}
+                        ).get(token)
+                        if existing_label:
+                            label_pairs.append((existing_label, ""))
+                    seen_pairs: set[tuple[str, str]] = set()
+                    for source_label_pair, scope_qualifier_pair in label_pairs:
+                        if not source_label_pair:
+                            continue
+                        pair_key = (source_label_pair, scope_qualifier_pair)
+                        if pair_key in seen_pairs:
+                            continue
+                        seen_pairs.add(pair_key)
+                        from_visual_entity_id = (
+                            _visual_entity_id_for_resolution_safe({
+                                "source_label": source_label_pair,
+                                "scope_qualifier": scope_qualifier_pair,
+                            })
+                            or ""
+                        )
+                        if (
+                            from_visual_entity_id
+                            and from_visual_entity_id != to_visual_entity_id
+                        ):
+                            merges.append({
+                                "from_visual_entity_id": from_visual_entity_id,
+                                "to_visual_entity_id": to_visual_entity_id,
+                                "canonical_name": canonical_name,
+                                "merge_rule": "same_batch_k_absorption",
+                            })
+                if merges:
+                    projected[-1][
+                        "_current_identity_absorbed_visual_merges"
+                    ] = merges
     for item in value.n:
         evidence_ref = _resolved_evidence_ref(
             item.evidence_ref, expected_refs
         )
         record = evidence_by_ref.get(evidence_ref)
         if evidence_ref not in expected_refs or record is None:
-            errors.append(f"current N evidence_ref 越界：{evidence_ref}")
+            # evidence_ref is enum-declared on CurrentNewNamedIdentityDecision
+            # in _current_identity_schema() (new_item["properties"]
+            # ["evidence_ref"]["enum"] = refs) and that enum keyword is on
+            # _identity_strict_provider_schema's whitelist, so it really is
+            # sent to the provider -- see _resolved_evidence_ref's own
+            # docstring ("The schema pins evidence_ref to a closed enum, but
+            # the provider does not always honour strict mode"). expected_refs
+            # == set(evidence_by_ref), so `record is None` cannot fire once
+            # evidence_ref is in expected_refs; the only reachable failure
+            # mode is the enum violation -- RCA ERR-20260824-e3628f (0.5%
+            # supplier-side non-strict-mode sampling defect on a deep array
+            # enum), safe to resample the whole episode instead of halting
+            # for human RCA.
+            errors.append(
+                _CurrentIdentitySchemaViolation(
+                    f"current N evidence_ref 越界：{evidence_ref}"
+                )
+            )
             continue
         identity_label = str(item.identity_label or "").strip()
         if str(item.name_kind or "") != IDENTITY_NAME_FORM_PERSONAL:
@@ -1839,7 +2033,18 @@ def _project_current_identity_response(
         )
         record = evidence_by_ref.get(evidence_ref)
         if evidence_ref not in expected_refs or record is None:
-            errors.append(f"current F evidence_ref 越界：{evidence_ref}")
+            # 同上 N 分支：evidence_ref 在 CurrentFunctionalIdentityDecision 上
+            # 同样是 enum 声明（functional_item["properties"]["evidence_ref"]
+            # ["enum"] = refs），且 enum 在 provider 白名单内，真正发给了供应商。
+            # ERR-20260824-e3628f 的 F evidence_ref="E0" 就是这条分支：目录
+            # 84 项、strict=true 全部具备，供应商依然低频（约 0.5%）吐出枚举外
+            # 的值——是供应商侧非严格解码的格式缺陷，不是我们的信息缺口，
+            # 安全可重采样整集，不需要人工 RCA。
+            errors.append(
+                _CurrentIdentitySchemaViolation(
+                    f"current F evidence_ref 越界：{evidence_ref}"
+                )
+            )
             continue
         append_candidate(
             source_label=item.source_label,
@@ -1992,6 +2197,103 @@ def _current_identity_projection_errors(candidates: list[dict]) -> list[str]:
     ]
 
 
+def _record_visual_entity_merge(
+    conn,
+    project_id: str,
+    *,
+    from_visual_entity_id: str,
+    to_visual_entity_id: str,
+    canonical_name: str,
+    evidence_episode_no: int,
+    merge_rule: str = "same_batch_k_absorption",
+) -> bool:
+    """落一条视觉实体折叠记账（``visual_entity_merges``，设计文档 §4.2）。
+
+    ``visual_entity_merges`` 表由并行改动在 ``app/db.py`` 落地迁移（本文件
+    不实现该迁移）；表尚未存在时静默跳过——折叠本身（K 决议的命名侧结果）
+    已经生效，记账是可补齐的审计侧信息，不构成折叠是否成立的前置条件，
+    避免让本文件对尚未合并的迁移产生硬依赖。选图沿用设计文档 §4.2 的规则：
+    优先复用 ``to`` 侧（规范权威）已有的 ready 定妆照。
+    """
+    if not project_id or not from_visual_entity_id or not to_visual_entity_id:
+        return False
+    if from_visual_entity_id == to_visual_entity_id:
+        return False
+    selected_portrait_id = None
+    if canonical_name:
+        try:
+            row = conn.execute(
+                "SELECT id FROM character_portraits WHERE project_id=? "
+                "AND character_name=? AND pack_status='ready' "
+                "ORDER BY ep_start DESC LIMIT 1",
+                (project_id, canonical_name),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        if row is not None:
+            selected_portrait_id = row["id"]
+    try:
+        conn.execute(
+            "INSERT INTO visual_entity_merges (id, project_id, "
+            "from_visual_entity_id, to_visual_entity_id, canonical_name, "
+            "merge_rule, selected_portrait_id, evidence_episode_no, "
+            "created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                new_id("visual_merge"),
+                project_id,
+                from_visual_entity_id,
+                to_visual_entity_id,
+                canonical_name,
+                merge_rule,
+                selected_portrait_id,
+                evidence_episode_no,
+                now(),
+            ),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        return False
+    return True
+
+
+def _record_current_identity_absorbed_visual_merges(
+    project_id: str | None,
+    episode_no: int,
+    candidates: list[dict],
+) -> None:
+    """遍历一批已通过校验的 current-identity 候选，落地同批折叠的视觉记账。
+
+    折叠的核验与纯计算已经在 ``_project_current_identity_response`` 内完成
+    （见该函数 k 循环里 ``_current_identity_absorbed_visual_merges`` 的写入）
+    ——这里只做落库这一步的副作用，且只在整批（含跨批一致性检查）都通过后
+    才调用（见 ``_discover_character_candidates_legacy`` 的调用点），避免为
+    一个最终会被拒绝重试的响应写入记账。``project_id`` 缺失时（历史调用点
+    尚未传入，见 ``discover_character_candidates`` 的可选形参）静默跳过——
+    折叠的命名侧结果不受影响，只是暂不记账。
+    """
+    if not project_id:
+        return
+    conn = get_conn()
+    for item in candidates:
+        merges = item.get("_current_identity_absorbed_visual_merges") or []
+        for merge in merges:
+            _record_visual_entity_merge(
+                conn,
+                project_id,
+                from_visual_entity_id=str(
+                    merge.get("from_visual_entity_id") or ""
+                ),
+                to_visual_entity_id=str(
+                    merge.get("to_visual_entity_id") or ""
+                ),
+                canonical_name=str(merge.get("canonical_name") or ""),
+                evidence_episode_no=episode_no,
+                merge_rule=str(
+                    merge.get("merge_rule") or "same_batch_k_absorption"
+                ),
+            )
+
+
 async def _discover_character_candidates_legacy(
     source_text: str,
     bible: Bible,
@@ -2001,6 +2303,7 @@ async def _discover_character_candidates_legacy(
     future_text: str = "",
     future_label: str = "",
     existing_resolutions: list[dict] | None = None,
+    project_id: str | None = None,
 ) -> list[dict]:
     """Resolve the current episode's cast before/after screenplay generation.
 
@@ -2034,6 +2337,16 @@ async def _discover_character_candidates_legacy(
             and str(item.get("canonical_name") or "").strip()
         )
     ]
+    # 同批折叠通道（absorbed_functional_keys）第三类可吸收来源——"本集已有
+    # 功能身份决议"——的 canonical_name -> source_label 反查表：
+    # existing_functional_routes（下方）只是扁平 canonical_name 集合，供
+    # 成员关系核验；这里额外保留 source_label，供折叠命中后计算被吸收组的
+    # visual_entity_id（见 _project_current_identity_response 的 k 循环）。
+    existing_functional_route_labels = {
+        item["canonical_name"]: item["source_label"]
+        for item in existing_resolution_projection
+        if item["canonical_name"] and item["source_label"]
+    }
     current_authorities = identity_authority_registry(
         bible,
         existing_resolutions or [],
@@ -2350,6 +2663,16 @@ async def _discover_character_candidates_legacy(
    scope_qualifier——不要依赖后端的确定性降级补足（后端会用甲/乙/丙...
    兜底填一个可用但没有语义信息量的限定语，只是防止拒绝重来，不是让你
    可以不填）。
+9. 如果某个 k 决议揭晓的真名，其实就是一个仍处于 functional 状态的称谓组
+   一路指代的同一个人——例如某绰号从更早的证据起就被追踪为 functional，
+   直到这条 k 决议对应的证据才第一次读到该人物的真名——不要把真名重复写
+   进 n（那是这条 k 决议已经覆盖的重复声明，会被拒绝）：改为在这条 k 决议
+   里填写 absorbed_functional_keys，逐项精确复制被吸收的 functional_
+   identity_key（本批 f 项自己的 key）、前批 P token（prior functional 分组
+   的 decision_id）或本集已有功能身份决议的 canonical_name。只有在你确实
+   判断这些 token 指代的是同一个人时才填写；后端只核验每个 token 是否确实
+   来自上述三类来源，越界或臆造的 token 会导致本次响应被拒绝重试。拿不准
+   是否为同一人时留空，不要吸收。
 只输出 response_format 约束的 JSON，不要复述证据、Schema 或规则。"""
 
         def validate_current_response(
@@ -2363,8 +2686,25 @@ async def _discover_character_candidates_legacy(
                 reserved_authority_labels=reserved_authority_labels,
                 group_scope=f"current-{current_batch}",
                 existing_functional_routes=existing_functional_routes,
+                existing_functional_route_labels=existing_functional_route_labels,
             )
-            return errors
+            # chat_structured has no format/semantic split on a validate()
+            # callback's return value (strict_identity_substage forbids this
+            # call from using format_retry_limit/semantic_retry_limit anyway,
+            # see app.harness.model_gateway) -- any non-empty return here
+            # raises StructuredSemanticError immediately. A response whose
+            # *only* faults are wire-schema-declared (enum out of range) must
+            # not trip that: filtering them out here lets chat_structured
+            # accept the response, and the explicit re-check right after
+            # `_identity_structured_with_resample` below raises
+            # StructuredFormatError for them instead -- see that call site's
+            # comment for the full reasoning. Any genuine semantic fault
+            # (source_label 重复 等业务判断分歧) still returns non-empty here
+            # and still halts on the first attempt, unchanged.
+            return [
+                error for error in errors
+                if not _current_identity_is_schema_violation(error)
+            ]
 
         response = await _identity_structured_with_resample(
             [{"role": "user", "content": prompt}],
@@ -2434,14 +2774,46 @@ async def _discover_character_candidates_legacy(
                 reserved_authority_labels=reserved_authority_labels,
                 group_scope=f"current-{current_batch}",
                 existing_functional_routes=existing_functional_routes,
+                existing_functional_route_labels=existing_functional_route_labels,
             )
         )
         if projection_errors:
-            raise ContentGenerationError("；".join(projection_errors))
+            schema_violations = [
+                error for error in projection_errors
+                if _current_identity_is_schema_violation(error)
+            ]
+            semantic_violations = [
+                error for error in projection_errors
+                if not _current_identity_is_schema_violation(error)
+            ]
+            if semantic_violations:
+                # 真正的业务判断分歧（如 source_label 重复），维持既有语义
+                # 失败/即停：即便同批还夹带了 wire-schema 越界，也不得靠重
+                # 采样蒙混过真信号，两类原文一并报出方便排障。
+                raise ContentGenerationError(
+                    "；".join(semantic_violations + schema_violations)
+                )
+            # 走到这里说明本批 projection_errors 只剩 wire-schema 已声明的
+            # 越界——validate_current_response 已经把这些从 chat_structured
+            # 的 validate() 反馈里过滤掉，所以 chat_structured 把 response 当
+            # 成验证通过返回；这是它们第一次真正被拦下。供应商对深层数组
+            # enum 的严格模式偶发失效（RCA ERR-20260824-e3628f，约 0.5%
+            # 采样缺陷），改判为格式失败：不在本次调用内重采样
+            # （strict_identity_substage 强制 format_retry_limit=0），而是把
+            # StructuredFormatError 交给 scripts/yyft_serial10.py 的瞬时族
+            # 分诊（exc_type=='StructuredFormatError'），本集 60s 后整体
+            # 重发一次，不需要人工 RCA。
+            raise model_gateway.StructuredFormatError(
+                "；".join(schema_violations)
+            )
         candidates.extend(batch_candidates)
 
     if projection_errors := _current_identity_projection_errors(candidates):
         raise ContentGenerationError("；".join(projection_errors))
+
+    _record_current_identity_absorbed_visual_merges(
+        project_id, episode_no, candidates
+    )
 
     unresolved_onscreen_groups = {
         str(item.get("identity_group") or "").strip()
@@ -2691,6 +3063,32 @@ class CurrentKnownIdentityDecision(BaseModel):
 
     decision_id: str = Field(min_length=1, max_length=96)
     kind: Literal["onscreen", "mentioned"]
+    # 同批折叠通道（RCA ERR-20260824-bc3d14，见
+    # docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §2.7/§4.2 "同批折叠通道"）：
+    # 模型借此声明本 K 决议吸收了哪些仍处于 functional 状态的称谓组——本批
+    # f 项自己的 functional_identity_key、前批 P token（prior functional
+    # 分组 decision_id）或本集已有功能身份决议的 canonical_name。不做 enum
+    # 约束：批内 F1/F2 这类 token 由模型在同一响应里现造，构建 schema 时
+    # 还不存在，无法预先枚举（跟 functional_identity_key 本身不能 enum
+    # 约束是同一个理由，见 CurrentFunctionalIdentityDecision.functional_
+    # identity_key）。代码侧只做集合成员关系核验（不做文本语义判断，见
+    # _project_current_identity_response），伪造或越界的 token 会被拒绝，
+    # 不静默接受——安全默认。
+    absorbed_functional_keys: list[str] = Field(
+        default_factory=list, max_length=16
+    )
+
+    @field_validator("absorbed_functional_keys")
+    @classmethod
+    def _absorbed_functional_keys_defensive_shape(
+        cls, value: list[str]
+    ) -> list[str]:
+        cleaned = [str(item or "").strip() for item in value]
+        if any(not item or len(item) > 96 for item in cleaned):
+            raise ValueError(
+                "absorbed_functional_keys 含空值或超长 token"
+            )
+        return cleaned
 
 
 class CurrentNewNamedIdentityDecision(BaseModel):
@@ -3271,6 +3669,7 @@ async def extract_current_identity_candidates(
     *,
     draft_text: str = "",
     existing_resolutions: list[dict] | None = None,
+    project_id: str | None = None,
 ) -> list[dict]:
     """Extract current-episode identities without future or coverage prompts."""
     candidates = await _discover_character_candidates_legacy(
@@ -3280,6 +3679,7 @@ async def extract_current_identity_candidates(
         draft_text=draft_text,
         future_text="",
         existing_resolutions=existing_resolutions,
+        project_id=project_id,
     )
     return _attach_candidate_source_evidence(
         candidates,
@@ -5106,6 +5506,7 @@ async def discover_character_candidates(
     existing_resolutions: list[dict] | None = None,
     structural_evidence: list[dict] | None = None,
     scope_id: str | None = None,
+    project_id: str | None = None,
 ) -> list[dict]:
     """Targeted identity pipeline: current, unresolved future, typed audit."""
     artifact_scope_id = str(scope_id or f"episode-{episode_no}")
@@ -5236,6 +5637,7 @@ async def discover_character_candidates(
             episode_no,
             draft_text=draft_text,
             existing_resolutions=existing_resolutions,
+            project_id=project_id,
         )
         resolved = await resolve_future_identity_candidates(
             current,
@@ -5263,6 +5665,7 @@ async def discover_character_candidates(
                 future_text=future_text,
                 future_label=future_label,
                 existing_resolutions=existing_resolutions,
+                project_id=project_id,
             ),
             source_text,
         )
@@ -7675,6 +8078,7 @@ async def ensure_cards_for_text(
             future_text=future_text, future_label=future_label,
             existing_resolutions=existing_resolutions,
             scope_id=str(episode_row["id"]) if episode_row else None,
+            project_id=project_id,
         )
     )
     candidates = [
@@ -9577,18 +9981,62 @@ def promote_staged_initial_portrait(conn, project_id: str, name: str, portrait_i
         )
 
 
-def _open_portrait(conn, project_id: str, name: str):
-    """该角色当前开区间（ep_end IS NULL）的最新定妆照。"""
+def _open_portrait(
+    conn, project_id: str, name: str, *, visual_entity_id: str | None = None
+):
+    """该角色当前开区间（ep_end IS NULL）的最新定妆照。
+
+    ``visual_entity_id`` 非空时优先按视觉实体 ID 查询（跨集稳定，覆盖未
+    具名角色，见 docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.2）；未命中，
+    或该列尚未迁移落地（``sqlite3.OperationalError``），回退到既有的
+    ``character_name`` 路径——迁移期双轨并存，向后兼容具名角色的既有行为。
+    """
+    if visual_entity_id:
+        try:
+            row = conn.execute(
+                "SELECT * FROM character_portraits WHERE project_id=? "
+                "AND visual_entity_id=? AND ep_end IS NULL AND ep_start<>? "
+                "ORDER BY ep_start DESC LIMIT 1",
+                (project_id, visual_entity_id, STAGED_INITIAL_EP_START),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        if row is not None:
+            return row
     return conn.execute(
         "SELECT * FROM character_portraits WHERE project_id=? AND character_name=? "
         "AND ep_end IS NULL AND ep_start<>? ORDER BY ep_start DESC LIMIT 1",
         (project_id, name, STAGED_INITIAL_EP_START)).fetchone()
 
 
-def portrait_for_episode(project_id: str, name: str, episode_no: int | None) -> str | None:
-    """返回覆盖该集的定妆照落盘路径；未命中返回 None（调用方回退到 bible.ref_image_path）。"""
+def portrait_for_episode(
+    project_id: str,
+    name: str,
+    episode_no: int | None,
+    *,
+    visual_entity_id: str | None = None,
+) -> str | None:
+    """返回覆盖该集的定妆照落盘路径；未命中返回 None（调用方回退到 bible.ref_image_path）。
+
+    ``visual_entity_id`` 非空时优先按视觉实体 ID 查询——同一视觉实体跨集
+    复用同一张脸，不受该集本次称谓/是否已具名影响（设计文档 §4.2）；未
+    命中（含该列尚未迁移落地）时回退到既有的 ``character_name`` 路径。
+    """
     if episode_no is None:
         return None
+    if visual_entity_id:
+        try:
+            row = get_conn().execute(
+                "SELECT image_path FROM character_portraits "
+                "WHERE project_id=? AND visual_entity_id=? AND ep_start<=? "
+                "AND (ep_end IS NULL OR ep_end>=?) "
+                "ORDER BY ep_start DESC LIMIT 1",
+                (project_id, visual_entity_id, episode_no, episode_no),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        if row and row["image_path"] and Path(row["image_path"]).exists():
+            return row["image_path"]
     try:
         row = get_conn().execute(
             "SELECT image_path FROM character_portraits "
@@ -9602,14 +10050,37 @@ def portrait_for_episode(project_id: str, name: str, episode_no: int | None) -> 
     return None
 
 
-def appearance_for_episode(project_id: str, name: str, episode_no: int | None) -> str | None:
+def appearance_for_episode(
+    project_id: str,
+    name: str,
+    episode_no: int | None,
+    *,
+    visual_entity_id: str | None = None,
+) -> str | None:
     """返回覆盖该集的定妆照有效外观锚点。
 
     ``appearance`` 是验收时单独持久化的结构化外观权威；不得再从
-    prompt 文案中按关键词反向提取。
+    prompt 文案中按关键词反向提取。``visual_entity_id`` 语义同
+    ``portrait_for_episode``：优先按视觉实体 ID 查询，未命中回退
+    ``character_name``。
     """
     if episode_no is None:
         return None
+    if visual_entity_id:
+        try:
+            row = get_conn().execute(
+                "SELECT appearance,prompt FROM character_portraits "
+                "WHERE project_id=? AND visual_entity_id=? AND ep_start<=? "
+                "AND (ep_end IS NULL OR ep_end>=?) "
+                "ORDER BY ep_start DESC LIMIT 1",
+                (project_id, visual_entity_id, episode_no, episode_no),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        if row:
+            anchor = production_appearance_anchor(row["appearance"] or "")
+            if anchor:
+                return anchor
     try:
         row = get_conn().execute(
             "SELECT appearance,prompt FROM character_portraits "
@@ -9625,15 +10096,37 @@ def appearance_for_episode(project_id: str, name: str, episode_no: int | None) -
 
 def bible_for_episode(project_id: str, bible: "Bible", episode_no: int | None) -> "Bible":
     """返回 bible 的【本集视图】：每个角色的 appearance_canonical / ref_image_path 用覆盖该集的分段
-    定妆照覆盖（未命中保留原值）。让关键帧文字锚点与参考图同段同源——同一集永远是同一套外观描述+图。"""
+    定妆照覆盖（未命中保留原值）。让关键帧文字锚点与参考图同段同源——同一集永远是同一套外观描述+图。
+
+    已具名角色的 ``visual_entity_id`` 与其命名权威同构（``bible:{name}``，
+    设计文档 §4.2 "已具名分支……零迁移成本"），无需 ``Character`` 新增字段
+    即可派生：优先经由 ``visual_entity_id_for_resolution`` 计算（依赖尚未
+    落地时回退等价的字面量拼接），把查图路径切到按视觉实体 ID 查询——
+    对已生效的具名绑定行为不变，同时是向"未具名角色也能查到同一张脸"
+    过渡的必要一步（本函数目前仍只遍历 ``bible.characters``，functional
+    extras 的接入点在 app/production/prep_pack.py，属另一模块边界）。
+    """
     if episode_no is None:
         return bible
     view = bible.model_copy(deep=True)
     for c in view.characters:
-        anchor = appearance_for_episode(project_id, c.name, episode_no)
+        if not c.name:
+            continue
+        visual_entity_id = (
+            _visual_entity_id_for_resolution_safe({
+                "resolution": "future_identity",
+                "canonical_name": c.name,
+            })
+            or f"bible:{c.name}"
+        )
+        anchor = appearance_for_episode(
+            project_id, c.name, episode_no, visual_entity_id=visual_entity_id
+        )
         if anchor:
             c.appearance_canonical = anchor
-        img = portrait_for_episode(project_id, c.name, episode_no)
+        img = portrait_for_episode(
+            project_id, c.name, episode_no, visual_entity_id=visual_entity_id
+        )
         if img:
             c.ref_image_path = img
     return view

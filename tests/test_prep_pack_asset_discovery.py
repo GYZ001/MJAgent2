@@ -89,6 +89,49 @@ def _make_conn() -> sqlite3.Connection:
     return conn
 
 
+def _bible_alias(
+    text: str, *, name_kind: str = "referential",
+    evidence_chapter_index: int = 1, evidence_quote: str = "",
+) -> dict:
+    """一条 CharacterAlias 字面量（app.schemas.CharacterAlias 形状），供测试
+    往 Bible.characters[].aliases 里塞数据用。prep_pack.py 的读侧只消费
+    ``text``，不重新核验证据锚点是否逐字命中——那是全书分析阶段
+    （app.stages.generate_bible）自己的职责，不在本文件测试范围内。"""
+    return {
+        "text": text, "name_kind": name_kind,
+        "evidence_chapter_index": evidence_chapter_index,
+        "evidence_quote": evidence_quote,
+    }
+
+
+def _seed_bible_characters(conn, project_id: str, characters: list[dict]) -> None:
+    """覆盖 projects.bible_json 的 characters[]，其余键保持 _make_conn 的默认
+    占位值。1.7.0（docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.1/§6 第3项）：
+    跨集别名注册表主读源切换为 Bible.characters[].aliases 后，这是驱动
+    _prep_pack_cross_episode_alias_conflict / _prep_pack_lookup_character_
+    alias_canonical_name 的主数据源。"""
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id=?",
+        (json.dumps({
+            "characters": characters, "scenes": [],
+            "world": {"era": "", "genre": "", "visual_style_canonical": "测试画风"},
+        }, ensure_ascii=False), project_id),
+    )
+    conn.commit()
+
+
+def _bible_character(
+    name: str, *, aliases: list[dict] | None = None,
+    role: str = "配角", appearance_canonical: str = "占位外观",
+) -> dict:
+    """一条 Character 字面量（app.schemas.Character 形状）的最小合法构造，
+    只填测试关心的字段，其余用 schema 自带默认值。"""
+    return {
+        "name": name, "role": role, "appearance_canonical": appearance_canonical,
+        "aliases": aliases or [],
+    }
+
+
 def _event(event_id: str, *, characters=None, scenes_=None) -> dict:
     return {
         "event_id": event_id,
@@ -152,6 +195,7 @@ def test_fully_known_cast_triggers_zero_discovery_calls(monkeypatch):
     assert characters == [{
         "identity_id": "bible:萧炎", "display_name": "萧炎",
         "portrait_id": "cp1", "event_ids": ["ev_001"], "aliases": [],
+        "visual_entity_id": "bible:萧炎", "display_appellation": "萧炎",
         "provenance": {
             "method": "direct", "anchor_segments": [1], "anchor_phrase": "萧炎",
         },
@@ -377,6 +421,7 @@ def test_unresolved_new_character_routes_through_discovery_and_resolves(monkeypa
     assert characters == [{
         "identity_id": "bible:沈青梧", "display_name": "沈青梧",
         "portrait_id": "cp-new", "event_ids": ["ev_001"], "aliases": [],
+        "visual_entity_id": "bible:沈青梧", "display_appellation": "沈青梧",
         "provenance": {
             "method": "discovery", "anchor_segments": [1], "anchor_phrase": "沈青梧",
         },
@@ -467,6 +512,7 @@ def test_functional_identity_after_discovery_needs_no_portrait(monkeypatch):
     assert characters == []
     assert functional_extras == [{
         "label": "黑衣人", "event_ids": ["ev_001"],
+        "visual_entity_id": "entity:b645a470abc42e7e",
         "provenance": {"method": "discovery", "anchor_segments": [], "anchor_phrase": ""},
     }]
     assert stats["character_discovery_calls"] == 1
@@ -531,6 +577,7 @@ def test_alias_rename_after_discovery_resolves_to_real_name(monkeypatch):
     assert characters == [{
         "identity_id": "bible:苍玄", "display_name": "苍玄",
         "portrait_id": "cp1", "event_ids": ["ev_001"], "aliases": ["神秘老者"],
+        "visual_entity_id": "bible:苍玄", "display_appellation": "神秘老者",
         "provenance": {
             "method": "resolution", "anchor_segments": [1], "anchor_phrase": "神秘老者",
         },
@@ -767,6 +814,7 @@ def test_suspected_true_name_hypothesis_verified_via_forward_window_binds_with_a
     assert characters == [{
         "identity_id": "bible:丹鬼", "display_name": "丹鬼",
         "portrait_id": "cp-dg", "event_ids": ["ev_013"], "aliases": ["灰袍老者"],
+        "visual_entity_id": "bible:丹鬼", "display_appellation": "灰袍老者",
         "provenance": {
             "method": "resolution_forward", "anchor_segments": [],
             # 第30轮 RCA 修正：anchor_phrase 记裁决钉住的支撑句本身（第29轮
@@ -908,6 +956,7 @@ def test_speaker_with_zero_bible_collision_is_absorbed_as_functional_extra():
     assert payload_events[0]["key_lines"][0]["speaker_ref"] == "extra:被困者"
     assert functional_extras == [{
         "label": "被困者", "event_ids": ["ev_005"],
+        "visual_entity_id": "entity:e2f70bd9be906dde",
         "provenance": {
             "method": "absorbed_speaker", "anchor_segments": [12], "anchor_phrase": "救命！",
         },
@@ -1256,6 +1305,169 @@ def test_character_alias_registry_ambiguous_across_episodes_falls_back_to_discov
     assert stats["character_discovery_calls"] == 1, "矛盾注册表不能静默猜绑，必须回炉发现"
     assert not any(c["display_name"] in {"李富贵", "王有材"} for c in characters)
     assert rejected_alias_conflicts, "矛盾的跨集别名必须留痕"
+
+
+# ---------------------------------------------------------------------------
+# 1.7.0（docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.1/§6 第3项/§8 判据4）：
+# 跨集别名注册表主读源切换为 Bible.characters[].aliases。上面两个测试证明
+# 旧的"扫描其它已发布分集 asset_manifest"路径仍然工作（P2 §16 双重校验期
+# 未退役）；下面三个测试证明新的主读源本身、以及主源与旧路径的优先级关系：
+#   - 死循环的真正断点：EP1（项目内还没有任何其它分集发布过）也能查到人物
+#     谱别名并直接绑定，不再要求"必须有其它已发布分集先命中过"这个前置
+#     条件（真实故障：许清 EP1/EP5/EP6 三集三种措辞、全部未绑定，直到 EP13
+#     才第一次绑上——根因正是旧路径这个前置条件在项目早期永远不成立）。
+#   - 主源结论不可被旧路径推翻：人物谱给出明确答案时，旧路径的扫描信号
+#     （哪怕存在、哪怕矛盾）不得改变结论。
+#   - 人物谱自身矛盾（同一别名字符串被登记给两个不同角色）时的安全默认：
+#     不确定不绑，回退到常规发现路线，行为跟旧路径的矛盾处理同构。
+# ---------------------------------------------------------------------------
+
+def test_character_alias_registry_binds_via_bible_aliases_with_zero_other_episodes(
+    monkeypatch,
+):
+    """红灯（核心价值点）：项目内一集都还没发布过（episodes 表完全没有这个
+    项目的行，旧的"扫描其它已发布分集"路径天然查无所获）——但全书分析阶段
+    已经把"小胖子"登记进人物谱李富贵的 aliases。裸精确匹配失败后必须直接
+    命中人物谱主读源并绑定，零消歧调用，不依赖任何其它分集先发布过。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-lfg','p1','李富贵',1,NULL)"
+    )
+    _seed_bible_characters(conn, "p1", [
+        _bible_character("李富贵", aliases=[
+            _bible_alias("小胖子", name_kind="referential", evidence_chapter_index=2,
+                         evidence_quote="小胖子憨憨一笑，抓了抓头。"),
+        ]),
+    ])
+
+    def boom_character(*_a, **_k):
+        raise AssertionError("人物谱别名命中唯一目标，不应该回炉重新消歧")
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+
+    events = [_event("ev_001", characters=[
+        {"display_name": "小胖子", "is_background_extra": False},
+    ])]
+    (
+        characters, scene_list, functional_extras, errors, stats,
+        true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
+    ) = _resolve(
+        conn, events=events, episode_no=1,
+        source_text="小胖子憨憨一笑，抓了抓头。",
+    )
+
+    assert stats["character_discovery_calls"] == 0, "人物谱注册表命中必须零消歧调用"
+    assert errors == []
+    assert rejected_alias_conflicts == []
+    assert any(
+        c["display_name"] == "李富贵" and c["portrait_id"] == "cp-lfg"
+        and "小胖子" in c["aliases"]
+        # visual_entity_id 决定取图，本集措辞"小胖子"只落进 aliases/
+        # display_appellation，不提前暴露 display_name 这个规范真名。
+        and c["visual_entity_id"] == "bible:李富贵"
+        and c["display_appellation"] == "小胖子"
+        for c in characters
+    )
+
+
+def test_bible_alias_conflict_check_is_not_overridden_by_legacy_scan(monkeypatch):
+    """红灯（"旧路径只作补充且不得覆盖主源结论"的结构性保证）：人物谱明确
+    把"小胖子"登记为李富贵一人的别名（无第二个认领者），但项目内另有一个
+    已发布分集（旧路径的数据源）把同一个字符串绑给了王有材——如果旧路径能
+    推翻主源，这里就会被误判为冲突、回退到发现；正确行为是完全信任人物谱
+    的"无冲突"结论，直接绑定李富贵，零消歧调用。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-lfg','p1','李富贵',1,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-wyc','p1','王有材',1,NULL)"
+    )
+    _seed_bible_characters(conn, "p1", [
+        _bible_character("李富贵", aliases=[_bible_alias("小胖子")]),
+    ])
+    conn.execute(
+        "INSERT INTO episodes(id, project_id, episode_no, screenplay_json) VALUES "
+        "('ep-5', 'p1', 5, ?)",
+        (json.dumps({
+            "asset_manifest": {"characters": [{
+                "identity_id": "bible:王有材", "display_name": "王有材",
+                "portrait_id": "cp-wyc", "event_ids": ["ev_002"], "aliases": ["小胖子"],
+            }]},
+        }, ensure_ascii=False),),
+    )
+    conn.commit()
+
+    def boom_character(*_a, **_k):
+        raise AssertionError("人物谱已给出明确无冲突结论，不应该回炉重新消歧")
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+
+    events = [_event("ev_010", characters=[
+        {"display_name": "小胖子", "is_background_extra": False},
+    ])]
+    (
+        characters, scene_list, functional_extras, errors, stats,
+        true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
+    ) = _resolve(
+        conn, events=events,
+        source_text="小胖子憨憨一笑，抓了抓头。",
+    )
+
+    assert stats["character_discovery_calls"] == 0
+    assert errors == []
+    assert rejected_alias_conflicts == [], (
+        "人物谱的无冲突结论不能被旧路径的扫描信号推翻"
+    )
+    assert any(c["display_name"] == "李富贵" and c["portrait_id"] == "cp-lfg" for c in characters)
+    assert not any(c["display_name"] == "王有材" for c in characters)
+
+
+def test_bible_alias_ambiguous_across_characters_falls_back_to_discovery(monkeypatch):
+    """红灯：人物谱自身把同一个别名字符串"小胖子"登记给了两个不同角色
+    （数据质量异常，理论上不该发生，但 Character.aliases 之间没有跨角色
+    唯一性约束）——必须判定为冲突、不确定不绑，回退到常规发现路线，跟旧
+    路径矛盾时的安全默认同构。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-lfg','p1','李富贵',1,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-wyc','p1','王有材',1,NULL)"
+    )
+    _seed_bible_characters(conn, "p1", [
+        _bible_character("李富贵", aliases=[_bible_alias("小胖子")]),
+        _bible_character("王有材", aliases=[_bible_alias("小胖子")]),
+    ])
+
+    async def fake_disambiguate(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {
+            "added": [], "resolutions": [], "errors": [], "warnings": [],
+            "skipped": [{"status": "skipped", "name": "小胖子", "reason": "人物谱别名矛盾，回炉观察"}],
+        }
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_disambiguate)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    events = [_event("ev_010", characters=[
+        {"display_name": "小胖子", "is_background_extra": False},
+    ])]
+    (
+        characters, scene_list, functional_extras, errors, stats,
+        true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
+    ) = _resolve(
+        conn, events=events,
+        source_text="小胖子憨憨一笑，抓了抓头。",
+    )
+
+    assert stats["character_discovery_calls"] == 1, "人物谱矛盾不能静默猜绑，必须回炉发现"
+    assert not any(c["display_name"] in {"李富贵", "王有材"} for c in characters)
+    assert rejected_alias_conflicts, "人物谱内部的矛盾别名必须留痕"
 
 
 # ---------------------------------------------------------------------------
@@ -2164,6 +2376,7 @@ def test_true_name_dossier_trial_accepts_verified_link_real_corpus(monkeypatch):
     assert characters == [{
         "identity_id": "bible:李富贵", "display_name": "李富贵",
         "portrait_id": "cp-lfg", "event_ids": ["ev_101"], "aliases": ["小胖子"],
+        "visual_entity_id": "bible:李富贵", "display_appellation": "小胖子",
         "provenance": {
             "method": "resolution_forward", "anchor_segments": [],
             # 第30轮 RCA 修正：anchor_phrase 记裁决钉住的支撑句本身。
@@ -2464,3 +2677,112 @@ def test_true_name_verdict_cache_isolated_by_subject_kind(monkeypatch):
     assert accepted_kinds == {"character", "scene"}
     assert any(c["display_name"] == "石大山" for c in characters)
     assert any(s["display_name"] == "石大山" for s in scene_list)
+
+
+# ---------------------------------------------------------------------------
+# 1.7.0（docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.3/§6 第7项/§8 判据1/2/6）：
+# asset_manifest.characters[]/functional_extras[] 新增 visual_entity_id（决定
+# 取图，跨集稳定）+ characters[] 新增 display_appellation（本集原文措辞，
+# 决定字幕/称呼）。这里直接对齐设计文档 §8 的机械判据本身：同一个角色在
+# 不同集用不同措辞出场时，visual_entity_id 必须逐字相同；display_name/
+# display_appellation 当集写什么完全不影响这个结论。
+# ---------------------------------------------------------------------------
+
+def test_visual_entity_id_stable_across_episodes_despite_different_in_episode_wording(
+    monkeypatch,
+):
+    """红灯（§8 判据1 的直接机械化：许清 EP1「银色长袍女子」/EP5「许姓女子」/
+    EP6「许师姐」三种不同措辞场景的简化复现）：同一个已具名角色在两集里用了
+    两种完全不同的本集措辞（display_appellation 因此不同），但只要都解析到
+    同一个 canonical name，visual_entity_id 必须逐字相同——画面取图只看
+    visual_entity_id，不受本集措辞影响。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-xq','p1','许清',1,NULL)"
+    )
+    conn.commit()
+
+    def boom_character(*_a, **_k):
+        raise AssertionError("裸命中/别名注册表命中都不应该回炉重新消歧")
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+
+    events_ep1 = [_event("ev_ep1", characters=[
+        {"display_name": "许清", "is_background_extra": False},
+    ])]
+    characters_ep1, _, _, errors_ep1, stats_ep1, *_ = _resolve(
+        conn, events=events_ep1, episode_no=1,
+        source_text="许清缓步走出竹林。",
+    )
+    assert errors_ep1 == [] and stats_ep1["character_discovery_calls"] == 0
+
+    _seed_bible_characters(conn, "p1", [
+        _bible_character("许清", aliases=[_bible_alias("许师姐")]),
+    ])
+    events_ep6 = [_event("ev_ep6", characters=[
+        {"display_name": "许师姐", "is_background_extra": False},
+    ])]
+    characters_ep6, _, _, errors_ep6, stats_ep6, *_ = _resolve(
+        conn, events=events_ep6, episode_no=6,
+        source_text="许师姐冷冷地看了他一眼。",
+    )
+    assert errors_ep6 == [] and stats_ep6["character_discovery_calls"] == 0
+
+    assert len(characters_ep1) == 1 and len(characters_ep6) == 1
+    ep1_entry, ep6_entry = characters_ep1[0], characters_ep6[0]
+    assert ep1_entry["display_appellation"] == "许清"
+    assert ep6_entry["display_appellation"] == "许师姐"
+    assert ep1_entry["visual_entity_id"] == ep6_entry["visual_entity_id"] == "bible:许清", (
+        "同一角色跨集出场措辞不同不得导致 visual_entity_id 漂移——那正是"
+        "「每集换脸」故障的根因，见设计文档 §0/§8 判据1"
+    )
+
+
+def test_functional_extra_visual_entity_id_stable_for_same_raw_label_across_episodes(
+    monkeypatch,
+):
+    """§8 判据的未具名侧：同一个未绑定角色在两集里都用了同一个原文标签
+    （尚未触发任何跨集别名/真名核验），functional_extras[] 的 visual_entity_id
+    必须逐字相同——未具名角色也要有跨集稳定视觉实体，这正是"不再每集换脸"
+    对群演同样成立的关键（设计文档 §4.3 动机段）。"""
+    conn = _make_conn()
+
+    async def fake_functional(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {
+            "added": [], "skipped": [],
+            "resolutions": [{
+                "source_label": "神秘蒙面客", "canonical_name": "神秘蒙面客",
+                "resolution": "functional_identity",
+            }],
+            "errors": [], "warnings": [],
+        }
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_functional)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    events = [_event("ev_a", characters=[
+        {"display_name": "神秘蒙面客", "is_background_extra": False},
+    ])]
+    _, _, extras_1, errors_1, *_ = _resolve(
+        conn, events=events, episode_no=1,
+        source_text="神秘蒙面客悄然离去。",
+    )
+    events2 = [_event("ev_b", characters=[
+        {"display_name": "神秘蒙面客", "is_background_extra": False},
+    ])]
+    _, _, extras_2, errors_2, *_ = _resolve(
+        conn, events=events2, episode_no=4,
+        source_text="神秘蒙面客再度现身。",
+    )
+
+    assert errors_1 == [] and errors_2 == []
+    assert len(extras_1) == 1 and len(extras_2) == 1
+    assert extras_1[0]["visual_entity_id"] == extras_2[0]["visual_entity_id"]
+    assert extras_1[0]["visual_entity_id"].startswith("entity:")
+
+
+def test_prep_pack_version_is_1_7_0():
+    """版本号哨兵：本次改造（跨集别名读源切换 + visual_entity_id/
+    display_appellation）是 P0 收口，schema/payload 均有变更，版本必须
+    推进到 1.7.0（docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.3 末段）。"""
+    assert prep_pack.PREP_PACK_VERSION == "1.7.0"

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
 from typing import Any, Iterable
 
 
@@ -118,6 +119,98 @@ def authority_id_for_resolution(value: dict[str, Any]) -> str:
         ).encode("utf-8")
     ).hexdigest()[:16]
     return f"functional:{digest}"
+
+
+def _normalize_visual_entity_label(text: str) -> str:
+    """纯字符串规整：只是同一字面量的等价形式折叠，不读取任何集/批上下文。
+
+    折叠内容仅限于——(1) 首尾空白；(2) 内部连续空白压成单个空格（模型偶发的
+    格式抖动，不是语义差异）；(3) Unicode NFKC 规整（全角/半角、兼容变体字符
+    统一）。三者都只是同一个字符串在不同渲染下的等价写法，机械可复算，
+    与"这是第几集/第几次调用"无关，因此对同一称谓在任意集、任意批调用都
+    返回完全相同的结果——这正是下面 ``visual_entity_id_for_resolution`` 需要
+    的稳定性前提。
+    """
+    collapsed = " ".join(text.split())
+    return unicodedata.normalize("NFKC", collapsed)
+
+
+def visual_entity_id_for_resolution(value: dict[str, Any]) -> str:
+    """Return a cross-episode-stable visual entity ID for one decision.
+
+    与 ``authority_id_for_resolution`` 并列、解耦：命名权威（上面那个函数）
+    回答"这个人叫什么"，必须保守（不确定不绑，判错=事实错误）；视觉实体（本
+    函数）回答"这张脸该配哪一张定妆照"，必须激进（同一人复用同一张脸，判错
+    代价远低于"每集换脸"）。二者共享输入形状、但绝不共享构造逻辑——本函数
+    不修改、不调用 ``authority_id_for_resolution``，也不改变它的既有行为。
+    详见 docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §3、§4.2。
+
+    - 已具名分支（``resolution`` in {future_identity, reference_identity} 且
+      ``canonical_name`` 非空）：复用 ``f"bible:{canonical_name}"``——与
+      ``authority_id_for_resolution`` 第 97 行同格式。共享前缀是刻意设计：
+      一旦具名绑定成立，命名权威与视觉实体天然是同一个键，对现有已正确工作
+      的具名绑定零迁移成本。
+
+    - 功能分支（未具名/群演/绰号阶段）：
+      ``sha256({"source_label": 归一化(source_label), "scope_qualifier":
+      归一化(scope_qualifier)})`` 取前 16 位，``f"entity:{digest}"``。
+
+      **关键约束，务必保持——种子里绝不能出现任何随集/随批变化的量：**
+
+      * ``identity_scope_fingerprint``：``authority_id_for_resolution`` 第
+        101-109 行自己的注释承认它"only meaningful inside one discovery
+        input"，换一次模型调用（=换一集）指纹就变。这正是 functional
+        authority 按构造跨集不稳定的根因（设计文档 §2.4），也是"同一个人
+        每集换脸"这个故障现象的直接成因之一。视觉实体存在的唯一意义就是
+        "跨集复用同一张脸"，一旦把这个指纹也掺进种子，稳定性诉求当场自我
+        推翻——所以本函数刻意不读取这个字段。
+      * ``identity_group``：同样是 "current-1:F1" 这类模型批内分组 token
+        （discovery projector 生成，与 ``identity_scope_fingerprint`` 在同一
+        条注释里被点名），只在一次判别调用内有意义，不是跨集语义键，同样
+        不得入种子。
+      * 任何证据侧标识（``episode_no``、``evidence_ref``、
+        ``source_segment_id`` 等）：这些描述的是"这句话在哪一集哪一句被
+        说出"，不是"这是谁"；纳入会让同一个角色因为不同集引用了不同证据
+        而派生出不同的视觉实体 ID，重新制造设计文档 §0 描述的原始症状。
+
+      种子只保留两个纯语义量：``source_label``（模型申报的称谓字符串）与
+      ``scope_qualifier``（模型按现行 K 决议提示词规则 8 申报的限定语，
+      专门用于区分"同一称谓指不同人"，见 ``app/portraits.py`` 规则 8 及
+      ``_project_current_identity_response`` 里的 ``(source_label,
+      scope_qualifier)`` 复合键逻辑）——这把尺子在批内已经被验证是消歧
+      "同一称谓、不同人" 的正确复合键；本函数只是把它的适用范围从
+      "批内去重" 扩展为 "跨集稳定键的输入"，不新增模型职责、不改变它的
+      填写规则。两者都只描述"这是谁"，不描述"这次是怎么被观测到的"，因此
+      同一角色跨集重复出现时种子恒定、digest 恒定。
+
+      新增开发者如果想"顺手"把某个 identity_scope_fingerprint / episode_no
+      / evidence_ref 之类的字段加进这个种子——请先重读这段注释：那正是
+      functional authority 当年跨集不稳定的构造性根因，把同样的错误在这里
+      重犯一次，视觉实体就会退化成 authority_id 的翻版，整个三层设计的意义
+      随之消失。
+    """
+    canonical_name = str(value.get("canonical_name") or "").strip()
+    resolution = str(value.get("resolution") or "").strip()
+    if canonical_name and resolution in {"future_identity", "reference_identity"}:
+        return f"bible:{canonical_name}"
+
+    seed = {
+        "source_label": _normalize_visual_entity_label(
+            str(value.get("source_label") or "")
+        ),
+        "scope_qualifier": _normalize_visual_entity_label(
+            str(value.get("scope_qualifier") or "")
+        ),
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            seed,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"entity:{digest}"
 
 
 def normalize_character_resolution(

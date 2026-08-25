@@ -50,6 +50,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -472,6 +473,109 @@ def _log_cycle_history(history: list[FailureSignature]) -> None:
             f"exc_type={sig.exc_type!r} message={sig.message_digest!r}")
 
 
+# --- 代码指纹护栏（2026-08-24 起，第 36 轮回归事故复盘新增） ------------------
+#
+# 事故：自愈重启从**磁盘**加载代码；第 36 轮回归期间有多个 agent 正在改
+# app/，自愈重启把半成品代码捞进了服务，导致该轮后续结果不可信——协调层只能
+# 手工终止整轮。既有的 import 自检（_backend_import_self_check）只能拦语法/
+# 导入错误，拦不住"语义半成品"（A 文件已加新字段、依赖它的 B 文件还没改完，
+# 导入完全正常但行为不一致）。
+#
+# 核心原则：一轮回归只能测一个已知的、固定的代码状态，否则它的绿灯和红灯都
+# 不能当证据用。护栏职责是**检测并诚实停下**，不是给代码加锁/阻止别人改
+# 文件——不做任何文件锁、不做任何写保护。
+#
+# 指纹覆盖范围：
+#   * app/**/*.py 的内容——sha256 逐文件摘要，按"仓库相对路径"排序后拼接
+#     （不是 mtime！mtime 会被无意义的 touch 改变，产生假阳性停轮；按内容
+#     哈希才是"代码是否真的变了"的唯一可靠判据）。文件被新增/删除也会改变
+#     参与拼接的路径集合，因此同样能被侦测到。
+#   * 当前 git HEAD——commit 切换/revert 场景下，即使 app/**/*.py 字节内容
+#     出于巧合恰好相同（理论上限，双重兜底），HEAD 变化也能单独触发侦测。
+#   * 本驱动脚本自身（scripts/yyft_serial10.py）。纳入的理由：指纹要保证的
+#     是"整个回归协议在本轮期间保持不变"，不只是被测后端代码不变——分诊
+#     阈值（TRANSIENT_RETRY_MAX 等）、退出码语义、失败签名归一化规则全部
+#     定义在这个文件里。这个文件的改动不会让"正在运行的这个 Python 进程"
+#     当场变化（模块已经导入进内存，不会热重载），但它会让接下来重启出的
+#     新一轮、以及回看本次回归日志的人，落在与本轮开头不同的协议假设上——
+#     同样属于"代码状态已经不再固定"，必须一并纳入侦测范围。
+#
+# 不覆盖（刻意）：
+#   * logs/、data/——运行期产物，理应随着每一轮跑动而变化，不该触发误停；
+#   * app/ 下非 .py 的资源文件（模板/静态资源等）——当前不参与 import 后的
+#     实际执行语义，纳入只会增加"资源文件被合理更新也误报漂移"的噪音；
+#   * .venv 等第三方依赖——不属于本仓库改动范围，且体积远大于 app/，逐字节
+#     哈希会显著拖慢每次自愈重启前的检查。
+#
+# 校验时机：只在"每次自愈重启前"（cmd_run 的自动循环里，重启后端之前）比对，
+# **不**在单集内的瞬时重试（60/120/300s 阶梯，见 TRANSIENT_RETRY_BACKOFF_S）
+# 之间比对。理由：瞬时重试不重启后端，跑的仍是同一个已经加载进内存的旧
+# 进程——磁盘上 app/ 是否漂移，不会改变这个正在跑的进程接下来的行为，因此
+# 不会污染"这一轮的结果对应哪个代码状态"这个前提；真正会把磁盘代码读进服务
+# 的唯一动作是 restart_backend()，指纹护栏卡在这个动作前面就足以保证"一轮
+# 回归只测一个已知固定代码状态"。在重试间额外校验只能换来略早一点的
+# *可观测性*（本来在本轮结束后、下次重启前也会测到同样的漂移），却要为
+# 每集最多 3 次重试各付一次哈希+git 子进程的开销，性价比不划算，故不实现。
+
+
+def _app_python_files(root: Path) -> list[Path]:
+    """`app/**/*.py`，按路径排序保证跨次运行的枚举顺序稳定（目录遍历顺序
+    依赖文件系统，不能直接信任）。"""
+    app_dir = root / "app"
+    if not app_dir.is_dir():
+        return []
+    return sorted(app_dir.rglob("*.py"))
+
+
+def _git_head(root: Path) -> str:
+    """当前 git HEAD；仓库异常（例如给了个没有 .git 的目录，测试场景会用到）
+    时不崩，退化成一个仍然确定性的占位串。"""
+    proc = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root,
+        capture_output=True, text=True, timeout=15,
+    )
+    if proc.returncode == 0:
+        return proc.stdout.strip()
+    return f"<git-head-unavailable:{proc.returncode}>"
+
+
+def compute_code_fingerprint(
+    *, root: Path | None = None, driver_path: Path | None = None,
+) -> str:
+    """回归期间代码指纹：app/**/*.py 内容 + git HEAD + 驱动脚本自身内容。
+
+    `root`/`driver_path` 仅供测试注入隔离的假仓库；生产调用（cmd_run 内）
+    不传参数，默认用真实 ROOT 与真实 __file__。
+    """
+    resolved_root = root if root is not None else ROOT
+    resolved_driver = (
+        driver_path if driver_path is not None else Path(__file__).resolve()
+    )
+    hasher = hashlib.sha256()
+    files = _app_python_files(resolved_root)
+    files.append(resolved_driver)
+    for path in files:
+        try:
+            content = path.read_bytes()
+        except OSError:
+            content = b"<unreadable>"
+        try:
+            rel = path.relative_to(resolved_root)
+        except ValueError:
+            rel = path
+        hasher.update(str(rel).replace("\\", "/").encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(hashlib.sha256(content).digest())
+        hasher.update(b"\0")
+    hasher.update(b"HEAD=")
+    hasher.update(_git_head(resolved_root).encode("utf-8"))
+    return hasher.hexdigest()
+
+
+# 与既有 run 退出码（0/2/3/4/5/6）都不冲突的专用值。
+CODE_DRIFT_EXIT_CODE = 7
+
+
 # --- 重启后端（照抄协调层已验证的安全序） ------------------------------------
 #
 # 安全序：先 import 自检（工作树可能正被其他 agent 半编辑，自检失败绝不碰旧
@@ -821,6 +925,11 @@ def cmd_run(args) -> int:
     log("=== AUTO-CYCLE RUN（2026-08-24 起默认开启：一轮停轮后自动 重启后端 → "
         f"健康探测 → clear → 从 EP1 重跑；--single-pass 可退回旧语义）"
         f"单次调用最多 {AUTO_RUN_CYCLE_MAX} 轮 ===")
+    baseline_fingerprint = compute_code_fingerprint()
+    log("AUTO-CYCLE 代码指纹基线已记录（覆盖 app/**/*.py + git HEAD + 本驱动"
+        f"脚本自身，sha256={baseline_fingerprint[:12]}…）；此后每次自愈重启前"
+        f"都会重新计算比对，指纹不一致立即停轮（退出码 {CODE_DRIFT_EXIT_CODE}），"
+        "不会带着可能已变化的代码继续重启/清库/重跑。")
     cycle = 0
     prev_signature: FailureSignature | None = None
     history: list[FailureSignature] = []
@@ -850,6 +959,14 @@ def cmd_run(args) -> int:
                 "停止自动循环，需人工介入。")
             _log_cycle_history(history)
             return rc
+        current_fingerprint = compute_code_fingerprint()
+        if current_fingerprint != baseline_fingerprint:
+            log("!!! 回归期间代码发生变更，本轮结果不可信，已停止；"
+                "请在代码稳定后重新发起 !!!")
+            log(f"    基线指纹={baseline_fingerprint} "
+                f"当前指纹={current_fingerprint}")
+            _log_cycle_history(history)
+            return CODE_DRIFT_EXIT_CODE
         log(f"AUTO-CYCLE {cycle} 结束，按协议进入下一轮："
             "重启后端 → 健康探测 → clear → 从 EP1 重跑。")
         if not restart_backend():

@@ -109,6 +109,23 @@ class Relationship(BaseModel):
     relation: str
 
 
+class CharacterAlias(BaseModel):
+    """一条别名证据：模型申报 + 代码核验后才允许落库（不确定不登记）。
+    与 Scene.aliases（纯字符串列表）不同——人物别名判错代价更高（身份分裂/合并事故，
+    见 docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §2.6/§2.7），所以每条都必须自带可机械
+    核验的证据锚点，不能只是模型自称。"""
+
+    text: str                      # 逐字称谓/别名字符串（如"许师姐""银色长袍女子""小胖子"）
+    # personal_name/honorific/referential，取值与 app.portraits.IDENTITY_NAME_FORM_*
+    # （app/portraits.py:124-126）一致——不新造平行词表，schemas.py 不反向导入 app.portraits
+    # 避免循环引用，两处的字符串常量必须保持同步。
+    name_kind: str
+    evidence_chapter_index: int    # 证据锚点：原著章节序号（对应源章节的 idx 字段）
+    # 证据锚点：逐字引句；必须能在该章节原文中作为子串命中，且该章节内需能找到角色
+    # 规范名或该角色其它已确认别名（共现依据）——两者有一处不满足就不登记。
+    evidence_quote: str
+
+
 class Character(BaseModel):
     name: str
     role: str
@@ -120,6 +137,10 @@ class Character(BaseModel):
     ref_image_path: str | None = None
     # 画像描述覆盖：人工编辑的定妆照生成词；为空时用 锚点串+画风 合成的默认描述（refs.portrait_prompt）
     portrait_prompt_override: str | None = None
+    # 人物谱别名位（层一，docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.1）：全书范围内
+    # 该角色在原文中出现过的其它称谓，逐条带证据锚点。旧 bible_json 没有这个键时，
+    # default_factory 给空列表，反序列化不受影响。
+    aliases: list[CharacterAlias] = Field(default_factory=list)
 
 
 class World(BaseModel):

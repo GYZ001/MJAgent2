@@ -1590,6 +1590,37 @@ MIGRATIONS = (
     # RBAC 第一阶段：项目挂到空间下。SQLite 对 ALTER 加常量 DEFAULT 会顺带回填
     # 所有历史行，因此旧项目自动归入默认空间，无需额外 UPDATE。
     "ALTER TABLE projects ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'ws_default'",
+    # 视觉实体解耦（P0 第4/5项，docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.2）：
+    # character_portraits 新增 visual_entity_id 列，与命名权威列 character_name
+    # 并存、互不替代——character_name 及其 UNIQUE(project_id, character_name,
+    # ep_start) 约束本次不动，主键/唯一约束切换是 P2（设计文档 §7 明确不做）。
+    # 既有行的回填在 _backfill_visual_entity_ids() 里做（机械推导，见该函数
+    # 注释），不在这里用常量 DEFAULT 回填——因为每行的正确值依赖 character_name
+    # 本身，不是一个跨行常量。
+    "ALTER TABLE character_portraits ADD COLUMN visual_entity_id TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_character_portraits_visual_entity "
+    "ON character_portraits(project_id, visual_entity_id, ep_start)",
+    # 实体合并审计表（设计文档 §4.2「实体合并」+「同批折叠通道」）：真名揭晓时
+    # （跨集或同批）把一个 functional 视觉实体并入具名实体，记一条可回溯记录。
+    # P0 范围只是建表 + 写入路径（见下方 record_visual_entity_merge）；查询/
+    # 展示留到 P1（设计文档 §6 P1 第10项）。project_id 声明真实 FK（本表是全新
+    # 表，不是历史 ALTER 上来的，可以直接声明，不需要 guard 触发器兜底）。
+    """CREATE TABLE IF NOT EXISTS visual_entity_merges (
+           id TEXT PRIMARY KEY,
+           project_id TEXT NOT NULL,
+           from_visual_entity_id TEXT NOT NULL,  -- 合并前的 functional 实体 ID
+           to_visual_entity_id TEXT NOT NULL,    -- 合并后的规范实体 ID（通常是 bible:{name}）
+           canonical_name TEXT NOT NULL,         -- 揭晓的真名
+           merge_rule TEXT NOT NULL,             -- 选图规则版本标签，确定性、可复算
+           selected_portrait_id TEXT,            -- 合并后选中的规范定妆照
+           evidence_episode_no INTEGER NOT NULL, -- 触发合并的集号
+           created_at REAL NOT NULL,
+           FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+       )""",
+    "CREATE INDEX IF NOT EXISTS idx_visual_entity_merges_from "
+    "ON visual_entity_merges(project_id, from_visual_entity_id)",
+    "CREATE INDEX IF NOT EXISTS idx_visual_entity_merges_to "
+    "ON visual_entity_merges(project_id, to_visual_entity_id)",
 )
 
 
@@ -2296,6 +2327,32 @@ def _backfill_multiview_assets(conn: sqlite3.Connection) -> None:
                     )
 
 
+def _backfill_visual_entity_ids(conn: sqlite3.Connection) -> None:
+    """既有 character_portraits 行机械回填 visual_entity_id；幂等可重复执行。
+
+    docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §2.5/§4.2 已经逐条代码核对过：
+    功能性（functional）身份从未进入查图路径（``portrait_for_episode`` 等只按
+    ``character_name`` 字符串索引，``functional_extras[]`` 从不出现在这条路径
+    的输入里），所以既有 character_portraits 行只可能来自已经跑完真名核验的
+    具名分支——不存在需要靠模型判断的歧义，可以无条件按
+    ``'bible:' || character_name`` 机械推导，不需要模型调用。
+
+    幂等性：只回填 ``visual_entity_id IS NULL`` 的行。重复执行 init_db() 时，
+    已经回填过的行（或后续被 record_visual_entity_merge 等写入路径显式设置过
+    非空值的行）不会被本函数覆盖——这与 §4.2「实体合并」允许后续把某些
+    functional 记录的 visual_entity_id 改指到合并后的规范实体是一致的，
+    回填只负责补齐"从未被设置过"的空白，不重新裁决已有值。
+    """
+    if not _table_exists(conn, "character_portraits"):
+        return
+    if "visual_entity_id" not in _column_names(conn, "character_portraits"):
+        return
+    conn.execute(
+        "UPDATE character_portraits SET visual_entity_id = 'bible:' || character_name "
+        "WHERE visual_entity_id IS NULL"
+    )
+
+
 def _bootstrap_identity(conn: sqlite3.Connection) -> None:
     """RBAC 第一阶段引导：只播种唯一的默认租户/空间，绝不创建任何账号。
 
@@ -2422,6 +2479,7 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
             WHERE screenplay_status='warning'"""
     )
     _backfill_multiview_assets(conn)
+    _backfill_visual_entity_ids(conn)
     _repair_integrity(conn)
     migrate_legacy_video_liabilities(conn)
     # 旧版把“候选已生成但缺新版 QA 证据”误归类为 ProviderError，并在项目页显示为
@@ -2591,6 +2649,52 @@ def now() -> float:
 
 def rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
+
+
+def record_visual_entity_merge(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    from_visual_entity_id: str,
+    to_visual_entity_id: str,
+    canonical_name: str,
+    merge_rule: str,
+    evidence_episode_no: int,
+    selected_portrait_id: str | None = None,
+) -> str:
+    """写入一条 visual_entity_merges 审计记录，返回新记录 id。
+
+    P0 范围（docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.2「实体合并」/
+    「同批折叠通道」，§6 P0 第5项）：这里只提供写入路径这一个机械动作——把
+    "决定要把 from 实体并入 to 实体"这件事落一条不可篡改的审计行；"要不要
+    合并"（例如 from 实体从未出镜、没有分配过 visual_entity_id 时应当跳过）
+    是调用方（真名揭晓时的 K 决议折叠逻辑，属于 app/portraits.py，不在本次
+    改动范围）的语义判断职责，本函数不重新做这层判断，也不校验 from/to 在
+    别处是否已生效。
+
+    审计表本身是追加语义（append-only），不设 UNIQUE 约束、不做去重：重复
+    调用会产生多条记录，这是刻意的——每一次真实的合并事件都应有自己可回溯
+    的一行；调用方如需避免重复记账，应在"是否需要发起一次新合并"这一步自行
+    判断，而不是依赖本函数悄悄吞掉重复写入。
+
+    不在函数内部提交事务：与 ``_backfill_multiview_assets`` 等既有写入辅助
+    函数一致，由调用方按自己的事务边界决定何时 commit，便于把这条审计写入
+    与同一批次的其它写操作合并成一次原子提交。
+    """
+    merge_id = new_id("vmerge")
+    conn.execute(
+        """INSERT INTO visual_entity_merges(
+               id, project_id, from_visual_entity_id, to_visual_entity_id,
+               canonical_name, merge_rule, selected_portrait_id,
+               evidence_episode_no, created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?)""",
+        (
+            merge_id, project_id, from_visual_entity_id, to_visual_entity_id,
+            canonical_name, merge_rule, selected_portrait_id,
+            evidence_episode_no, now(),
+        ),
+    )
+    return merge_id
 
 
 def get_setting(key: str) -> str:

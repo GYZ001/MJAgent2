@@ -35,10 +35,12 @@ change; see the task brief / docs/TRANSFORM_FREEZE_PLAN.md §3):
   }],
   "asset_manifest": {
       "characters": [{"identity_id": str, "display_name": str,
-                       "portrait_id": str, "event_ids": [str], "aliases": [str]}],
+                       "portrait_id": str, "event_ids": [str], "aliases": [str],
+                       "visual_entity_id": str, "display_appellation": str}],
       "scenes": [{"scene_id": str, "display_name": str,
                   "scene_reference_id": str, "event_ids": [str]}],
-      "functional_extras": [{"label": str, "event_ids": [str]}],
+      "functional_extras": [{"label": str, "event_ids": [str],
+                              "visual_entity_id": str}],
   },
   "coverage_ledger": {"total_segments": int, "delivered": [int], "merged": [int],
       "retained_as_context": [int],
@@ -204,6 +206,7 @@ from app.evidence import repository as evidence_repository
 from app.harness import model_gateway
 from app.harness.contracts import get_contract
 from app.harness.types import Evaluation, EvidenceArtifact
+from app.identity_authority import visual_entity_id_for_resolution
 from app.observability.tracing import bind_trace, current_trace
 from app.orchestration.state_machine import transition_step
 from app.production.certificate import (
@@ -222,7 +225,7 @@ from app.validators import (
     match_scene_name,
 )
 
-PREP_PACK_VERSION = "1.6.1"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "1.7.0"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
 # gained functional_extras; 1.4.0: coverage_ledger gained paratext (deterministic
 # keyword/position classifier, since replaced); 1.4.1: paratext classification
@@ -329,6 +332,23 @@ PREP_PACK_VERSION = "1.6.1"  # 1.1.0: event_chain entries carry source_span (P1 
 # 不按 subject_kind 隔离会导致跨域撞名时错误复用另一个域的裁决结果——键
 # 里加入 subject_kind 修复（不改变 payload 形状，仅内部正确性修复，不单独
 # 占用版本号，随本次一起推进）。
+# 1.7.0（角色身份三层架构 P0 收口，docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md
+# §4.1/§4.3/§6 第 3、7 项，schema 变更，版本推进）：
+#   a) 跨集别名读源切换：_prep_pack_cross_episode_alias_conflict /
+#      _prep_pack_lookup_character_alias_canonical_name 主读源改为
+#      Bible.characters[].aliases（内存一次拿到，见 app.schemas.CharacterAlias），
+#      直接切断"未绑定角色落 functional_extras 永不写别名 -> 下集查不到 ->
+#      仍未绑定"的死循环（真实许清 EP1/EP5/EP6 三集三种措辞、EP13 才绑上）。
+#      旧的"扫描其它已发布分集 asset_manifest"路径保留（P2 §16 尚未退役，
+#      见函数注释），但只在人物谱对这个别名毫无记录时才补充生效，绝不
+#      推翻人物谱已经给出的结论。
+#   b) asset_manifest.characters[]/functional_extras[] 每项新增
+#      visual_entity_id（app.identity_authority.visual_entity_id_for_
+#      resolution，具名/未具名都有，跨集稳定，决定取图）与
+#      display_appellation（characters[] 独有，本集原文措辞，决定字幕/
+#      台词显示，不随全局规范名改写）。display_name 语义不变（仍是消歧后
+#      的规范名，向后兼容既有消费者）——两个字段都是新增可选结构，不破坏
+#      payload 冻结纪律。
 QA_PROFILE_VERSION = "prep-pack-qa-gate-1"
 _QA_EVALUATOR_NAME = "screenplay_production_qa"
 _CHUNK_MAX_CHARS = 6000
@@ -877,17 +897,81 @@ def _prep_pack_mention_has_text_evidence(name: str, source_text: str) -> bool:
 # provider_calls 历史里精确复现（EP3 之后的多轮重新生成覆盖了当时的中间
 # 状态）。核心事实清楚：这次改绑在其发生的那一集里没有任何逐字证据支撑，
 # 正是"真名核验佐证不足"的形状。
+#
+# 1.7.0（层一，docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.1/§6 第3项）：
+# 主读源切换为 Bible.characters[].aliases（app.schemas.CharacterAlias，全书
+# 分析阶段模型申报+代码核验后落库，见 app.stages.generate_bible）。旧的
+# "扫描项目内其它已发布分集 asset_manifest" 路径不是本次要修的 bug 现场，
+# 而是 bug 本身的根因——第 1 集永远是"其它已发布分集"最空的一集，未绑定
+# 角色落 functional_extras 从不写别名，形成死循环（详见设计文档 §2.3，
+# 真实案例：许清 EP1/EP5/EP6 三集三种措辞、无一绑定，EP13 才第一次绑上）。
+# 人物谱在全书分析阶段就已经知道这些别名，不需要等任何一集先发布。
+# P2 §16 决定：旧扫描路径保留一段时间做双重校验再退役，但只在人物谱对这个
+# 别名字符串毫无记录时才补充生效——绝不允许旧路径的结论推翻人物谱已经给出
+# 的结论（人物谱是唯一被要求携带逐字证据锚点的数据源，可信度更高）。
+def _prep_pack_bible_alias_owner(bible: Bible | None, alias: str) -> str | None:
+    """人物谱里第一个（``bible.characters`` 列表顺序）在 ``aliases`` 登记了
+    这个别名字符串的角色名；没有任何角色登记则返回 ``None``。只回答"有没有
+    人认领"，不判断唯一性——唯一性/冲突判定是
+    ``_prep_pack_bible_alias_conflicting_owner`` 的职责，两者分工跟历史的
+    "读侧函数"/"冲突检查函数"两分是同构的，不合并成一个函数。"""
+    if not alias or bible is None:
+        return None
+    for character in bible.characters:
+        if any(a.text == alias for a in (character.aliases or [])):
+            return character.name
+    return None
+
+
+def _prep_pack_bible_alias_conflicting_owner(
+    bible: Bible | None, alias: str, canonical_name: str,
+) -> str | None:
+    """人物谱里除 ``canonical_name`` 本人之外，是否还有别的角色也在
+    ``aliases`` 里登记了同一个别名字符串？命中即返回那个冲突角色名。"""
+    if not alias or bible is None:
+        return None
+    for character in bible.characters:
+        if character.name == canonical_name:
+            continue
+        if any(a.text == alias for a in (character.aliases or [])):
+            return character.name
+    return None
+
+
 def _prep_pack_cross_episode_alias_conflict(
     conn, project_id: str, episode_id: str, *, alias: str, canonical_name: str,
+    bible: Bible | None = None,
 ) -> str | None:
-    """项目内其它已发布分集是否已经把这同一个 alias 字符串记在了一个不同
-    的 canonical_name 名下？命中就返回那个冲突的 canonical_name（供调用方
-    拒绝这次改绑、留痕），没有冲突返回 None。纯粹按"同一别名字符串在项目
-    内是否已经指向不同的人"这个结构性事实判断，不需要认识 alias 具体是
-    什么词。只查其它分集已发布的 asset_manifest（这是目前唯一持久化角色
-    别名归属的地方——Character schema 没有 Scene 那样的项目级 aliases
-    字段，只能靠已发布分集的 manifest 做跨集比对）。
+    """这同一个 alias 字符串是否已经被记在了一个不同的 canonical_name 名下？
+    命中就返回那个冲突的 canonical_name（供调用方拒绝这次改绑、留痕），没有
+    冲突返回 None。主读源是人物谱（``bible.characters[].aliases``，见本函数
+    上方 1.7.0 说明）；只有人物谱对这个别名毫无记录时，才补充查旧路径——
+    项目内其它已发布分集的 asset_manifest（P2 §16 双重校验期，未退役）。
     """
+    if not alias or not canonical_name:
+        return None
+    bible_conflict = _prep_pack_bible_alias_conflicting_owner(
+        bible, alias, canonical_name,
+    )
+    if bible_conflict:
+        return bible_conflict
+    if bible is not None and _prep_pack_bible_alias_owner(bible, alias) == canonical_name:
+        # 人物谱明确认领这个别名归属 canonical_name 本人、且没有第二个认领
+        # 者——这是主源给出的明确"无冲突"结论，旧路径的信号不得推翻它。
+        return None
+    return _prep_pack_cross_episode_alias_conflict_legacy_scan(
+        conn, project_id, episode_id, alias=alias, canonical_name=canonical_name,
+    )
+
+
+def _prep_pack_cross_episode_alias_conflict_legacy_scan(
+    conn, project_id: str, episode_id: str, *, alias: str, canonical_name: str,
+) -> str | None:
+    """旧路径（P2 §16，双重校验期保留，仅在人物谱对该别名毫无记录时补充
+    生效，见 ``_prep_pack_cross_episode_alias_conflict`` 调用点）：项目内其它
+    已发布分集是否已经把这同一个 alias 字符串记在了一个不同的 canonical_name
+    名下？纯粹按"同一别名字符串在项目内是否已经指向不同的人"这个结构性事实
+    判断，不需要认识 alias 具体是什么词。"""
     if not alias or not canonical_name:
         return None
     rows = conn.execute(
@@ -912,21 +996,37 @@ def _prep_pack_cross_episode_alias_conflict(
 
 # 角色别名注册表读侧（1.5.x task①，真实第24轮 EP3 回归 ERR-20260824-d0830a）：
 # 跟场景轴 1.5.1（_prep_pack_resolve_scene_reference_with_alias）完全对称的
-# 缺陷——场景侧写别名会被后续读，角色侧却只写不读。取证：全库范围内只有
-# EP2 一次新产物把"小胖子"绑定为李富贵的别名（无冲突源，没有任何其它分集
-# 把这个词绑给过别人），EP3 依然解析失败，因为角色解析管线压根不查这份
-# 已确立的跨集别名——"小胖子"每一集都要重新赌一次身份消歧模型调用，而不是
-# 复用 EP2 已经付费验证过的结论。跟 _prep_pack_cross_episode_alias_conflict
-# 同一数据源（项目内其它已发布分集的 asset_manifest.characters[].aliases，
-# Character schema 没有 Bible 级别的 aliases 字段，这是目前唯一持久化角色
-# 别名归属的地方）。只返回第一个命中的候选 canonical_name——是否唯一由
-# 调用方另外过一遍 _prep_pack_cross_episode_alias_conflict 确认（复用同一套
-# 冲突拒绝逻辑守多目标，不在这里重复实现一份等价的唯一性判断）。
+# 缺陷——场景侧写别名会被后续读，角色侧却只写不读。1.7.0 起主读源改为人物谱
+# （见 _prep_pack_cross_episode_alias_conflict 上方 1.7.0 说明，同一次切换、
+# 同一套双重校验纪律）：EP2 一次消歧确立"小胖子"→李富贵后，不必等它作为
+# "已发布分集"被扫描到——只要人物谱里已经登记了这条别名（全书分析阶段申报，
+# 不依赖任何一集先发布），EP1 起就能直接复用，不必每集重新赌一次消歧模型
+# 调用。只返回第一个命中的候选 canonical_name——是否唯一由调用方另外过一遍
+# _prep_pack_cross_episode_alias_conflict 确认（复用同一套冲突拒绝逻辑守多
+# 目标，不在这里重复实现一份等价的唯一性判断）。
 def _prep_pack_lookup_character_alias_canonical_name(
     conn, project_id: str, episode_id: str, name: str,
+    bible: Bible | None = None,
 ) -> str | None:
-    """项目内是否已有其它已发布分集把 ``name`` 登记为某个角色的别名？命中
-    返回该 canonical_name，没有命中返回 None。"""
+    """是否已有数据源把 ``name`` 登记为某个角色的别名？命中返回该
+    canonical_name，没有命中返回 None。主读源是人物谱，见本节顶部 1.7.0
+    说明；人物谱毫无记录时才补充查旧路径（项目内其它已发布分集）。"""
+    if not name:
+        return None
+    bible_owner = _prep_pack_bible_alias_owner(bible, name)
+    if bible_owner:
+        return bible_owner
+    return _prep_pack_lookup_character_alias_canonical_name_legacy_scan(
+        conn, project_id, episode_id, name,
+    )
+
+
+def _prep_pack_lookup_character_alias_canonical_name_legacy_scan(
+    conn, project_id: str, episode_id: str, name: str,
+) -> str | None:
+    """旧路径（P2 §16，双重校验期保留，仅在人物谱对该别名毫无记录时补充
+    生效）：项目内是否已有其它已发布分集把 ``name`` 登记为某个角色的别名？
+    命中返回该 canonical_name，没有命中返回 None。"""
     if not name:
         return None
     rows = conn.execute(
@@ -1500,8 +1600,18 @@ async def _resolve_assets(
                         extra_anchor_segments, extra_anchor_phrase = (
                             _prep_pack_local_text_anchor(segments, [name])
                         )
+                        # visual_entity_id（1.7.0，层三）：未具名/群演分支，
+                        # 种子只取 source_label（这批群演自己的原文标签，即
+                        # dict 键 name）+ scope_qualifier（prep_pack 自己的
+                        # 事件链抽取模型不产出这个字段，留空——跟 K 决议提示
+                        # 词规则8"留空即唯一指向一个人"同一语义，不是遗漏）。
+                        # 同一原文标签跨集重复出现时这里恒定，是"未具名角色
+                        # 也有跨集稳定视觉实体"这条设计判据的落地点。
                         extra = functional_extras.setdefault(name, {
                             "event_ids": [],
+                            "visual_entity_id": visual_entity_id_for_resolution({
+                                "source_label": name, "scope_qualifier": "",
+                            }),
                             "provenance": _prep_pack_provenance(
                                 "discovery", extra_anchor_segments, extra_anchor_phrase,
                             ),
@@ -1569,7 +1679,7 @@ async def _resolve_assets(
                 if resolved_name != name:
                     conflicting_name = _prep_pack_cross_episode_alias_conflict(
                         conn, project_id, episode_id,
-                        alias=name, canonical_name=resolved_name,
+                        alias=name, canonical_name=resolved_name, bible=bible,
                     )
                     if conflicting_name:
                         rejected_alias_conflicts.append({
@@ -1591,12 +1701,12 @@ async def _resolve_assets(
                     # 已确立的归属冲突就不绑定，回退到常规解析路线（回炉
                     # discovery）。
                     aliased_name = _prep_pack_lookup_character_alias_canonical_name(
-                        conn, project_id, episode_id, name,
+                        conn, project_id, episode_id, name, bible=bible,
                     )
                     if aliased_name and aliased_name != resolved_name:
                         conflicting_name = _prep_pack_cross_episode_alias_conflict(
                             conn, project_id, episode_id,
-                            alias=name, canonical_name=aliased_name,
+                            alias=name, canonical_name=aliased_name, bible=bible,
                         )
                         if conflicting_name:
                             rejected_alias_conflicts.append({
@@ -1699,12 +1809,27 @@ async def _resolve_assets(
                     anchor_segments, anchor_phrase = _prep_pack_local_text_anchor(
                         segments, [name],
                     )
+                # visual_entity_id / display_appellation（1.7.0，层三，见设计
+                # 文档 §4.3）：characters[] 条目永远是已解析到 portrait_id 的
+                # 具名角色（1.3.0 冻结的既有含义），resolution="future_identity"
+                # + canonical_name=resolved_name 走 visual_entity_id_for_
+                # resolution 的具名分支，恒等于 f"bible:{resolved_name}"——跟
+                # identity_id 同格式，是刻意的（设计文档 §4.2"零迁移成本"）。
+                # display_appellation 取这个 portrait_id 在本集第一次出现时的
+                # 原始提及文本 name（画面取图看 visual_entity_id，字幕/称呼看
+                # display_appellation，两者分离——本集只说本集措辞，不提前
+                # 剧透 display_name 这个全局规范名）。
                 entry = characters.setdefault(portrait_id, {
                     "identity_id": f"bible:{resolved_name}",
                     "display_name": resolved_name,
                     "portrait_id": portrait_id,
                     "event_ids": [],
                     "aliases": [],
+                    "visual_entity_id": visual_entity_id_for_resolution({
+                        "resolution": "future_identity",
+                        "canonical_name": resolved_name,
+                    }),
+                    "display_appellation": name,
                     "provenance": _prep_pack_provenance(
                         method, anchor_segments, anchor_phrase,
                         forward_chapter_label=forward_chapter_label,
@@ -2010,6 +2135,7 @@ async def _resolve_assets(
         {
             "label": label,
             "event_ids": data["event_ids"],
+            "visual_entity_id": data["visual_entity_id"],
             "provenance": data["provenance"],
         }
         for label, data in functional_extras.items()
@@ -2190,8 +2316,14 @@ def _prep_pack_resolve_key_line_speakers(
                     {int(key_line["segment_index"])}
                     if key_line.get("segment_index") is not None else set()
                 ))
+                # visual_entity_id（1.7.0，层三）：跟角色循环里的吸收分支
+                # 同一构造——source_label 取 speaker 原文措辞，scope_qualifier
+                # 留空（本函数是纯确定性名册查找，不产出/不消费这个字段）。
                 extra = {
                     "label": speaker, "event_ids": [],
+                    "visual_entity_id": visual_entity_id_for_resolution({
+                        "source_label": speaker, "scope_qualifier": "",
+                    }),
                     "provenance": _prep_pack_provenance(
                         "absorbed_speaker", absorbed_segments,
                         str(key_line.get("line") or "").strip(),
