@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import sqlite3
 from types import SimpleNamespace
@@ -4923,6 +4924,94 @@ def test_current_identity_absorbed_functional_keys_rejects_forged_token() -> Non
         existing_functional_routes=set(),
     )
     assert any("absorbed_functional_keys 越界" in message for message in errors)
+    # 越界核验是纯 Python 侧跨字段核验（token 是否属于三类合法来源），不是
+    # wire-schema 已声明约束（absorbed_functional_keys 在 schema 里没有
+    # enum，见 CurrentKnownIdentityDecision.absorbed_functional_keys 字段
+    # 注释）：按既有先例（task #35）必须留在语义族，不得被误判成可重采样
+    # 的格式族。
+    assert not any(
+        portraits._current_identity_is_schema_violation(message)
+        for message in errors
+    )
+
+
+def test_current_identity_absorbed_functional_keys_rejects_own_source_label_ep5_regression() -> None:
+    """真实 EP5 回归 ERR-20260825-0d8a29（proj_3ac0b627fa46/ep_0a7130b7b402，
+    provider_calls.id=11141）：模型把 K 决议自己的锚定 source_label（K 决议
+    目录里同一 decision_id 条目自带的 source_label，如「许师姐」）又填进了
+    自己的 absorbed_functional_keys。那个称谓已经通过选中 decision_id 表达
+    过了，不属于三类合法可吸收来源（本批 f 项自己的 key/前批 P token/本集
+    已有功能身份决议 canonical_name）中的任何一类，必须被越界核验拒绝——
+    这不是"看不到合法键清单"（清单就在同一份 K 目录里），是把已经隐含的
+    自身标签当成了需要额外声明的吸收对象。修复是 prompt 规则 9 措辞澄清
+    （CURRENT_IDENTITY_DECISION_VERSION v16->v17），不是放宽这道核验，所以
+    这里必须继续锁定硬失败，不能锁定成通过。"""
+    evidence_by_ref, known = _ep10_shape_evidence_and_known()
+    decision_id = next(iter(known))
+    own_source_label = str(known[decision_id]["source_label"])
+    assert own_source_label == "李富贵"
+    payload = {
+        "k": [{
+            "decision_id": decision_id,
+            "kind": "onscreen",
+            "absorbed_functional_keys": [own_source_label],
+        }],
+        "n": [],
+        "f": [],
+    }
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    _projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions=known,
+        reserved_authority_labels={"李富贵"},
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert any("absorbed_functional_keys 越界" in message for message in errors)
+    assert any(own_source_label in message for message in errors)
+    assert not any(
+        portraits._current_identity_is_schema_violation(message)
+        for message in errors
+    )
+
+
+def test_current_identity_absorbed_functional_keys_wire_schema_has_no_enum() -> None:
+    """锁定"为什么不上 enum"这个设计判断：批内 f 项的 functional_identity_key
+    （如 F1/F2）由模型在同一响应里现造，构建 schema 时还不存在，无法预先
+    枚举合法 absorbed_functional_keys 取值——所以这个字段在发给 provider 的
+    wire schema 里必须一直是无约束的字符串数组，不能像 decision_id 那样上
+    enum。回归防止有人不读设计注释就"顺手"加一条枚举把批内合法吸收也堵死。
+    """
+    evidence_by_ref, known = _ep10_shape_evidence_and_known()
+    schema = portraits._current_identity_schema(
+        list(evidence_by_ref), known_decision_ids=list(known),
+    )
+    absorbed_schema = (
+        schema["$defs"]["CurrentKnownIdentityDecision"]
+        ["properties"]["absorbed_functional_keys"]
+    )
+    assert "enum" not in absorbed_schema
+    assert absorbed_schema.get("type") == "array"
+    assert absorbed_schema.get("items", {}).get("type") == "string"
+    # decision_id 的越界（真正 wire-schema 声明的 enum 约束）才归格式族，
+    # 两者的核验路径不同，确认没有被这次改动混到一起。
+    decision_id_schema = (
+        schema["$defs"]["CurrentKnownIdentityDecision"]
+        ["properties"]["decision_id"]
+    )
+    assert "enum" in decision_id_schema
+
+
+def test_current_identity_prompt_forbids_absorbing_own_source_label() -> None:
+    """锁定本次修复实际落地的 prompt 措辞：规则 9 必须明确告诉模型，
+    K 决议自己的锚定 source_label 不得再出现在自己的 absorbed_functional_
+    keys 里，否则这条真实回归（ERR-20260825-0d8a29）会在下一次改动 prompt
+    时被悄悄改回去而没有测试察觉。"""
+    prompt_source = inspect.getsource(
+        portraits._discover_character_candidates_legacy
+    )
+    assert "absorbed_functional_keys 里禁止填入这条 k 决议自己的" in prompt_source
 
 
 def test_current_identity_absorbed_functional_keys_accepts_prior_batch_p_token() -> None:

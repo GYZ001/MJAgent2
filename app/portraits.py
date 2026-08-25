@@ -68,7 +68,27 @@ CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
 IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v16"
-CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v16"  # v16:
+CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v17"  # v17:
+# 真实 EP5 回归 ERR-20260825-0d8a29（proj_3ac0b627fa46/ep_0a7130b7b402，
+# provider_calls.id=11141）：K 决议把自己的锚定 source_label（即同一
+# decision_id 在本批 K 目录里自带的 source_label，如「许师姐」「孟浩」）也
+# 填进了自己的 absorbed_functional_keys，被 _project_current_identity_
+# response 的越界核验拒绝（安全默认，见该函数 K 循环注释），整集 quality_
+# gate 硬失败停跑。核对真实 request/response：absorbed_functional_keys 在
+# wire schema 里没有 enum（批内 f 项自造的 F1/F2 key 在 schema 构建时还不
+# 存在，无法预先枚举，见 CurrentKnownIdentityDecision.absorbed_functional_
+# keys 字段注释）——这条越界是纯 Python 侧跨字段核验，不是 wire-schema 已
+# 声明约束，按既有先例（task #35，_CurrentIdentitySchemaViolation 只覆盖
+# 真正的 enum/required/additionalProperties 违规）必须留在语义族硬失败，
+# 不得改判格式族重采样，也不放宽这道核验本身。真正根因是 prompt 规则 9
+# 没说清楚"决议自己的锚定 source_label 不需要、也不允许再吸收自己"：只改
+# 了下方规则 9 的措辞。换版本号只是为了让这条 prompt 变化生效——不换会让
+# current_evidence_catalog_hash 相同、current_identity_version 仍是 v16
+# 的旧输入，命中 discover_character_candidates 里 screenplay_identity_
+# discovery 的已验证缓存工件（cached.get("current_identity_version") ==
+# CURRENT_IDENTITY_DECISION_VERSION 那段），把旧 prompt 下的候选静默当成
+# 新 prompt 下的结果复用，与 v14/v15 换版本号是同一个理由。
+# v16:
 # 人物谱持久别名（Character.aliases）并入 identity_authority_registry 的
 # source_labels，且 _project_current_identity_response 里 name_kind!=
 # personal_name 的短路新增"命中 reserved_authority_labels 则放行"分支（见
@@ -2712,6 +2732,19 @@ async def _discover_character_candidates_legacy(
    判断这些 token 指代的是同一个人时才填写；后端只核验每个 token 是否确实
    来自上述三类来源，越界或臆造的 token 会导致本次响应被拒绝重试。拿不准
    是否为同一人时留空，不要吸收。
+   absorbed_functional_keys 里禁止填入这条 k 决议自己的 source_label（即
+   本批 K 决议目录里这个 decision_id 条目自带的 source_label 原文）：选中
+   decision_id 本身已经表达了这个称谓属于该决议，重复列出会被判定为越界
+   token 而拒绝，不是多填了一道保险。absorbed_functional_keys 只能用来
+   吸收这个自身称谓之外的其它称谓组——如果某个称谓只是你在证据里零散
+   认出、还没有单独作为一条 f 项列出（source_label 与 functional_
+   identity_key 均已确定），它就还不是合法的可吸收 token：必须先在本响应
+   的 f 数组里为它单独声明一条 f 项（source_label 填该称谓本身，
+   functional_identity_key 可以直接使用你打算吸收的同一个 key），再在
+   absorbed_functional_keys 里精确复制那个 key。第7条"每个人只输出一次"
+   约束的是同一个人不得被同时判给两个互相冲突的最终身份归属，不禁止你为
+   将被吸收的称谓单独声明它自己的 f 项——被吸收的 f 项与吸收它的 k 决议
+   共存，就是这条通道设计的正常形态。
 只输出 response_format 约束的 JSON，不要复述证据、Schema 或规则。"""
 
         def validate_current_response(
