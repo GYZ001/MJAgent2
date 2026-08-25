@@ -1733,6 +1733,16 @@ def _project_current_identity_response(
             "_typed_source_evidence_owned": True,
         })
 
+    # 第35轮真实回归 ERR-20260824-bc3d14（EP10，李富贵）：模型在同一次响应里
+    # 既在 k 里为 (source_label, evidence_ref) 正确签发了合规决议，又在 n 里
+    # 重复申报同一 (identity_label, evidence_ref) 作为「新」具名声明——这是
+    # 冗余回显，不是未经核验的具名注入。记录本响应内每条合规 K 决议实际锚定
+    # 的 (source_label, evidence_ref) 复合键，供下面 n 循环判断是否为冗余
+    # 回显；键里同时要求 label 与 evidence_ref 都一致（第35轮用例 C：同
+    # label 不同 ref 不算——那种情况下 k 决议并未覆盖 n 这条具体声明所引用
+    # 的证据，仍然维持硬失败，见下方 append_candidate 里 known_authority
+    # 闸门）。
+    redundant_n_echo_k_pairs: dict[tuple[str, str], dict] = {}
     for item in value.k:
         decision_id = str(item.decision_id or "")
         selected = known_decisions.get(decision_id)
@@ -1763,6 +1773,9 @@ def _project_current_identity_response(
                 else ""
             ),
         )
+        k_source_label = str(selected.get("source_label") or "")
+        if k_source_label and evidence_ref:
+            redundant_n_echo_k_pairs[(k_source_label, evidence_ref)] = projected[-1]
     for item in value.n:
         evidence_ref = _resolved_evidence_ref(
             item.evidence_ref, expected_refs
@@ -1794,6 +1807,24 @@ def _project_current_identity_response(
             # 中真正出现的称谓把这个人补回来，所以丢弃这一条声明，而不是让整集
             # 预检硬失败。
             continue
+        if identity_label in (reserved_authority_labels or set()):
+            k_echo_candidate = redundant_n_echo_k_pairs.get(
+                (identity_label, evidence_ref)
+            )
+            if k_echo_candidate is not None:
+                # 第35轮 ERR-20260824-bc3d14：这条 n 声明命中的 (identity_label,
+                # evidence_ref) 复合键已经在本响应的 k 数组里拿到一份合规决议
+                # ——模型对同一个人签发了两份声明，k 是权威、n 是冗余回显。
+                # 静默丢弃这条 n（不采信其中任何字段，包括它自己可能携带的
+                # canonical_name/identity_kind 判断），身份仍以那条 K 决议为
+                # 准；在 K 决议对应的候选上留一个可观测标记（风格对齐
+                # _current_identity_synthesized_qualifier），供测试/回归核验
+                # 丢弃确实发生，而不是让整集因模型自己已经正确处理过的人复读
+                # 一次就预检硬失败。
+                k_echo_candidate[
+                    "_current_identity_redundant_n_echo_dropped"
+                ] = True
+                continue
         append_candidate(
             source_label=identity_label,
             canonical_name=identity_label,

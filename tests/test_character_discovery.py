@@ -4537,6 +4537,134 @@ def test_current_identity_rf11_custom_exact_gates(
         assert any(error_fragment in error for error in errors)
 
 
+# ---------------------------------------------------------------------------
+# 第35轮真实回归 ERR-20260824-bc3d14（EP10，李富贵）：模型在同一次响应里
+# 既在 k 数组正确签发了 (source_label="李富贵", evidence_ref) 的合规决议，
+# 又在 n 数组重复申报同一 (identity_label, evidence_ref) 当作「新」具名声明
+# ——冗余回显，不是未经核验的具名注入。修前：append_candidate 的 n 循环从不
+# 传 known_authority，凡命中 reserved_authority_labels 且逐字出现的 n 条目
+# 一律被当成未授权申报硬拒，即便同一响应的 k 里已经有权威决议覆盖它。
+# 修复：仅当 (source_label, evidence_ref) 复合键在 k 里有对应合规决议时才
+# 静默丢弃该 n 条目；否则维持硬失败（防止模型夹带未经核验的具名声明）。
+# ---------------------------------------------------------------------------
+
+def test_current_identity_redundant_n_echo_dropped_when_k_covers_same_ref_ep10_regression() -> None:
+    """用例 A（复现 EP10）：k 含李富贵@E001 的合规决议，n 含同 label 同 ref
+    的重复条目——修前硬失败「current 已登记身份必须选择 K decision」，修后
+    必须通过：n 条目被静默丢弃（不采信其中任何声明），身份以 K 决议为准，
+    并在 K 决议对应的候选上留下可观测丢弃标记。"""
+    evidence_by_ref = {"E001": {"text": "李富贵忽然开口说话。"}}
+    decision_id = "K:E001:redundant-echo-fixture"
+    known_decisions = {
+        decision_id: {
+            "evidence_ref": "E001",
+            "source_label": "李富贵",
+            "canonical_name": "李富贵",
+            "authority_id": "bible:李富贵",
+            "decision_type": "registered_authority",
+            "materialization_compatible": True,
+        },
+    }
+    payload = {
+        "k": [{"decision_id": decision_id, "kind": "mentioned"}],
+        "n": [{
+            "evidence_ref": "E001",
+            "identity_label": "李富贵",
+            "name_kind": "personal_name",
+            "kind": "mentioned",
+        }],
+        "f": [],
+    }
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions=known_decisions,
+        reserved_authority_labels={"李富贵"},
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert errors == []
+    # 只有 k 那条决议产出候选；n 的冗余回显被丢弃，不额外产出或覆盖任何字段。
+    assert len(projected) == 1
+    assert projected[0]["identity_kind"] == "named"
+    assert projected[0]["name"] == "李富贵"
+    assert projected[0]["source_label"] == "李富贵"
+    assert projected[0]["_current_identity_redundant_n_echo_dropped"] is True
+
+
+def test_current_identity_reserved_n_without_matching_k_still_hard_fails() -> None:
+    """用例 B（闸门不许放松）：n 含 reserved label 且逐字出现在证据里，但
+    本响应的 k 数组里根本没有任何决议——冗余回显豁免不适用，必须继续硬失败。
+    这是防止模型偷偷注入未经核验具名声明的必要闸门，第35轮修复只处理"k 已
+    签发"的冗余回显场景，不放松这条无 k 兜底的路径。"""
+    evidence_by_ref = {"E001": {"text": "李富贵忽然开口说话。"}}
+    payload = {
+        "k": [],
+        "n": [{
+            "evidence_ref": "E001",
+            "identity_label": "李富贵",
+            "name_kind": "personal_name",
+            "kind": "mentioned",
+        }],
+        "f": [],
+    }
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    _projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        reserved_authority_labels={"李富贵"},
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert any("必须选择 K decision" in message for message in errors)
+
+
+def test_current_identity_reserved_n_echo_different_evidence_ref_still_hard_fails() -> None:
+    """用例 C（从严判断，见 RCA 追加结论）：n 命中的 reserved label 逐字出现
+    在证据里，且本响应 k 数组里确实有同一 source_label 的合规决议——但那条
+    K 决议锚定的是另一个 evidence_ref（E001），n 引用的是 E002。冗余回显
+    豁免要求 (source_label, evidence_ref) 复合键完全一致：K 决议没有覆盖
+    n 这条声明具体引用的证据，放行等于允许模型对着一条 K 未验证过的证据
+    夹带具名声明，必须继续硬失败。"""
+    evidence_by_ref = {
+        "E001": {"text": "李富贵在院子里说话。"},
+        "E002": {"text": "李富贵又在屋里喊了一声。"},
+    }
+    decision_id = "K:E001:redundant-echo-fixture"
+    known_decisions = {
+        decision_id: {
+            "evidence_ref": "E001",
+            "source_label": "李富贵",
+            "canonical_name": "李富贵",
+            "authority_id": "bible:李富贵",
+            "decision_type": "registered_authority",
+            "materialization_compatible": True,
+        },
+    }
+    payload = {
+        "k": [{"decision_id": decision_id, "kind": "mentioned"}],
+        "n": [{
+            "evidence_ref": "E002",
+            "identity_label": "李富贵",
+            "name_kind": "personal_name",
+            "kind": "mentioned",
+        }],
+        "f": [],
+    }
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    _projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions=known_decisions,
+        reserved_authority_labels={"李富贵"},
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert any("必须选择 K decision" in message for message in errors)
+
+
 @pytest.mark.parametrize("failure", ["attempt15_rf9", "unknown_evidence"])
 def test_current_identity_rf11_rejects_unbound_provider_output_once(
     monkeypatch,
