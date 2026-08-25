@@ -6,12 +6,14 @@ import {
   PrepPackView,
   PrepStepper,
   ScreenplayResumeButton,
+  characterAppellationTag,
   coverageGateSummary,
   findPortraitImage,
   findSceneReferenceImage,
   formatSourceSpan,
   isPrepPack,
   normalizeStage,
+  provenanceMethodHint,
   resolveStages,
   screenplayGeneratePayload,
   screenplayResumeActionLabel,
@@ -680,6 +682,127 @@ describe('PrepPackView renders aliases and functional_extras (real EP13 data)', 
   it('hides the section when functional_extras is an empty array too', () => {
     const html = renderToStaticMarkup(createElement(PrepPackView, { pack: buildPack({ ...ep13AssetManifest, functional_extras: [] }), bible: null, sourceFallback: '第 13 章' }))
     expect(html).not.toContain('群演 / 一次性人物')
+  })
+})
+
+// 画面与字幕分离（1.7.0+，见 docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.3）：
+// asset_manifest.characters[] 新增 display_appellation（本集原文称谓，决定字幕/
+// 取图措辞展示）与 visual_entity_id（取图口径，本页不直接展示，只做类型透传）。
+// 数据取自任务描述给出的真实 EP1 样本（display_name=许清/display_appellation=
+// 银色长袍女子/provenance.method=candidate_verdict，以及孟浩/王有材两条 direct
+// 绑定 display_appellation 与 display_name 相同的样本）。三种形状覆盖：不同时都
+// 显示、相同时不重复、字段整个缺失时退回只显示 display_name。
+describe('PrepPackView renders display_appellation vs display_name (画面与字幕分离)', () => {
+  const buildPack = (characters: Record<string, unknown>[]) => ({
+    prep_pack_version: '1.7.0',
+    episode_no: 1,
+    episode_scope: { chapter_indexes: [1], source_segment_count: 10 },
+    event_chain: [
+      { event_id: 'ev_001', order: 1, summary: '测试事件', source_evidence: [], key_lines: [] },
+    ],
+    asset_manifest: { characters, scenes: [] },
+    coverage_ledger: {
+      total_segments: 10, delivered: Array.from({ length: 10 }, (_, i) => i + 1),
+      merged: [], retained_as_context: [], proven_duplicates: [], uncovered: [],
+    },
+    hook: 'h', cliffhanger: 'c',
+  }) as any
+
+  it('shows both this-episode wording and the canonical name when they differ, distinguishably tagged', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, {
+      pack: buildPack([{
+        identity_id: 'bible:许清', display_name: '许清', portrait_id: 'portrait_x',
+        event_ids: ['ev_001'], visual_entity_id: 'bible:许清',
+        display_appellation: '银色长袍女子',
+        provenance: { method: 'candidate_verdict', anchor_segments: [1], anchor_phrase: '许师姐武功高强，众人皆知。' },
+      }]),
+      bible: null, sourceFallback: '第 1 章',
+    }))
+    expect(html).toContain('许清')
+    expect(html).toContain('银色长袍女子')
+    // 必须能一眼区分谁是本集叫法：本集称谓小签自带"本集："前缀，不靠悬浮才能分辨。
+    expect(html).toContain('本集：银色长袍女子')
+  })
+
+  it('does not duplicate the label when display_appellation equals display_name (most already-named characters)', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, {
+      pack: buildPack([{
+        identity_id: 'bible:孟浩', display_name: '孟浩', portrait_id: 'portrait_y',
+        event_ids: ['ev_001'], visual_entity_id: 'bible:孟浩', display_appellation: '孟浩',
+        provenance: { method: 'direct', anchor_segments: [1], anchor_phrase: '孟浩' },
+      }]),
+      bible: null, sourceFallback: '第 1 章',
+    }))
+    expect(html).not.toContain('本集：')
+    expect((html.match(/孟浩/g) ?? []).length).toBe(1)
+  })
+
+  it('falls back to display_name only when display_appellation is absent (pre-1.7.0 packs), never rendering blank/undefined', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, {
+      pack: buildPack([{
+        identity_id: 'bible:王有材', display_name: '王有材', portrait_id: 'portrait_z',
+        event_ids: ['ev_001'],
+      }]),
+      bible: null, sourceFallback: '第 1 章',
+    }))
+    expect(html).toContain('王有材')
+    expect(html).not.toContain('undefined')
+    expect(html).not.toContain('本集：')
+  })
+
+  it('renders provenance.method as a low-key title hint mapped to a Chinese label, not as visible text', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, {
+      pack: buildPack([{
+        identity_id: 'bible:许清', display_name: '许清', portrait_id: 'portrait_x',
+        event_ids: ['ev_001'], provenance: { method: 'candidate_verdict' },
+      }]),
+      bible: null, sourceFallback: '第 1 章',
+    }))
+    expect(html).toContain('title="绑定依据：候选判别"')
+  })
+
+  it('renders nothing extra when provenance is absent (pre-1.6.0 packs)', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, {
+      pack: buildPack([{
+        identity_id: 'bible:许清', display_name: '许清', portrait_id: 'portrait_x',
+        event_ids: ['ev_001'],
+      }]),
+      bible: null, sourceFallback: '第 1 章',
+    }))
+    expect(html).not.toContain('绑定依据')
+  })
+})
+
+describe('characterAppellationTag', () => {
+  it('returns the appellation when it differs from the canonical name', () => {
+    expect(characterAppellationTag({ display_appellation: '银色长袍女子' }, '许清')).toBe('银色长袍女子')
+  })
+
+  it('returns null when the appellation equals the canonical name', () => {
+    expect(characterAppellationTag({ display_appellation: '孟浩' }, '孟浩')).toBeNull()
+  })
+
+  it('returns null when the field is absent or blank', () => {
+    expect(characterAppellationTag({}, '许清')).toBeNull()
+    expect(characterAppellationTag({ display_appellation: '   ' }, '许清')).toBeNull()
+    expect(characterAppellationTag({ display_appellation: undefined }, '许清')).toBeNull()
+  })
+})
+
+describe('provenanceMethodHint', () => {
+  it('maps a known method to a Chinese label', () => {
+    expect(provenanceMethodHint('candidate_verdict')).toBe('绑定依据：候选判别')
+    expect(provenanceMethodHint('direct')).toBe('绑定依据：直接匹配')
+  })
+
+  it('falls back to the raw value for an unrecognized method (does not swallow unknown info)', () => {
+    expect(provenanceMethodHint('some_future_method')).toBe('绑定依据：some_future_method')
+  })
+
+  it('returns null when method is absent, so callers render no empty title', () => {
+    expect(provenanceMethodHint(undefined)).toBeNull()
+    expect(provenanceMethodHint(null)).toBeNull()
+    expect(provenanceMethodHint('')).toBeNull()
   })
 })
 

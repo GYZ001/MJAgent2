@@ -138,6 +138,39 @@ export function findSceneReferenceImage(bible: Bible | null | undefined, sceneRe
   return null
 }
 
+/**
+ * 画面与字幕分离（1.7.0+，见 docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.3）：
+ * display_appellation 是本集原文对这个角色的称呼（不提前剧透 display_name 这个
+ * 全局规范名）。两者不同时才需要单独标出本集称谓；相同、或字段缺失（旧产物 /
+ * 未绑定成功前）时都退回 null——调用方据此只显示 canonicalName，不重复、不空渲染。
+ */
+export function characterAppellationTag(
+  character: { display_appellation?: string | null },
+  canonicalName: string,
+): string | null {
+  const appellation = (character.display_appellation || '').trim()
+  if (!appellation || appellation === canonicalName.trim()) return null
+  return appellation
+}
+
+/** provenance.method 已知取值 -> 低调中文提示；未识别的取值原样透传，不吞信息。 */
+const PROVENANCE_METHOD_LABELS: Record<string, string> = {
+  direct: '直接匹配',
+  alias: '别名匹配',
+  resolution: '本集消歧',
+  resolution_forward: '前瞻章节判定',
+  candidate_verdict: '候选判别',
+  discovery: '新角色发现',
+  alias_inherited: '跨集别名继承',
+}
+
+/** 供角色卡 title 悬浮提示用；method 缺失（旧产物 1.6.0 之前）时返回 null，不渲染空提示。 */
+export function provenanceMethodHint(method: string | null | undefined): string | null {
+  const trimmed = (method || '').trim()
+  if (!trimmed) return null
+  return `绑定依据：${PROVENANCE_METHOD_LABELS[trimmed] ?? trimmed}`
+}
+
 // 轻量流程的真实阶段列表由后端下发（目标形状 {key, display_name, state}，
 // state: pending/active/done/blocked）。实测后端落地是渐进的：当前仍在发旧形状
 // {key, label, status}（十步重型流水线遗留），若只读 display_name/state 会读到
@@ -711,7 +744,12 @@ export function PrepPackView({
               {characters.map(character => {
                 const imageUrl = findPortraitImage(bible, character.portrait_id)
                 const name = character.display_name || character.identity_id || '未命名角色'
-                const aliases = character.aliases?.filter(alias => alias.trim()) ?? []
+                // 本集称谓（display_appellation）单独标出；旧的 aliases 小签保留，但
+                // 去掉与本集称谓重复的那一条，避免同一句话在同一行出现两遍。
+                const appellation = characterAppellationTag(character, name)
+                const aliases = (character.aliases?.filter(alias => alias.trim()) ?? [])
+                  .filter(alias => alias !== appellation)
+                const provenanceHint = provenanceMethodHint(character.provenance?.method)
                 return (
                   <div className="prep-roster-item" key={character.identity_id || character.display_name}>
                     {imageUrl
@@ -720,11 +758,14 @@ export function PrepPackView({
                     <div className="prep-roster-body">
                       <span className="prep-roster-name">
                         <span className="prep-roster-name-text">{name}</span>
+                        {appellation && (
+                          <span className="prep-roster-alias" title="本集原文称谓；谱内正名见前">本集：{appellation}</span>
+                        )}
                         {!!aliases.length && (
                           <span className="prep-roster-alias" title="本集称谓">{aliases.join('、')}</span>
                         )}
                       </span>
-                      <span className="prep-roster-meta">覆盖 {character.event_ids?.length ?? 0} 个事件</span>
+                      <span className="prep-roster-meta" title={provenanceHint ?? undefined}>覆盖 {character.event_ids?.length ?? 0} 个事件</span>
                     </div>
                   </div>
                 )

@@ -1305,6 +1305,22 @@ export interface PrepPackEvent {
   source_span?: PrepPackSourceSpan;
 }
 
+/**
+ * 1.7.0+ 字段：一条绑定的来源证明——method 取值 direct/alias/resolution/
+ * resolution_forward/candidate_verdict/discovery/alias_inherited 等，具体见
+ * app/production/prep_pack.py 的 _prep_pack_provenance。anchor_segments/
+ * anchor_phrase 是绑定判据钉住的原文证据；forward_chapter_label/
+ * source_episode_no 只在特定 method 下才非空。前端只把 method 当低调提示
+ * （悬浮提示）展示，不做任何业务判断。
+ */
+export interface PrepPackCharacterProvenance {
+  method?: string;
+  anchor_segments?: number[];
+  anchor_phrase?: string;
+  forward_chapter_label?: string;
+  source_episode_no?: number;
+}
+
 export interface PrepPackCharacterAsset {
   identity_id: string;
   display_name: string;
@@ -1312,6 +1328,21 @@ export interface PrepPackCharacterAsset {
   event_ids: string[];
   /** 1.2.0+ 字段；本集内对该角色的称谓（如「小胖子」）。之前的产物没有它。 */
   aliases?: string[];
+  /**
+   * 1.7.0+ 字段：画面与字幕分离（见 docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.3）。
+   * visual_entity_id 全局稳定，决定用哪张定妆照取图；display_name 绑定成功后会被
+   * 改写为全局规范名，取图仍看 visual_entity_id 不受影响，两者语义分工不同。
+   * 1.7.0 之前的产物没有这个字段。
+   */
+  visual_entity_id?: string;
+  /**
+   * 1.7.0+ 字段：本集原文对这个人的称呼（如第 1 集「银色长袍女子」），决定字幕/
+   * 台词显示——刻意不提前剧透 display_name 这个全局规范名。1.7.0 之前的产物没有
+   * 这个字段，此时前端只能退回展示 display_name。
+   */
+  display_appellation?: string;
+  /** 1.6.0+ 字段；这条绑定是怎么判出来的，见 PrepPackCharacterProvenance。 */
+  provenance?: PrepPackCharacterProvenance;
 }
 
 export interface PrepPackSceneAsset {
