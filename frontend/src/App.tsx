@@ -333,7 +333,7 @@ function AuthGate() {
   const { status, mustChangePassword } = useAuth();
   if (status === "loading") {
     return (
-      <div className="login-shell">
+      <div className="auth-loading">
         <div className="empty" role="status">正在校验登录状态…</div>
       </div>
     );

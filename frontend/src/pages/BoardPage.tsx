@@ -8,6 +8,7 @@ import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
 import QueryState from '../components/QueryState'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { storyboardTaskNotice } from '../lib/productionNotices'
+import "../styles/BoardPage.css";
 
 const SIZES = ['远景', '全景', '中景', '近景', '特写']
 const MOVES = ['固定', '推近', '拉远', '横摇', '跟随']

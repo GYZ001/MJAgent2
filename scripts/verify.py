@@ -278,9 +278,11 @@ def _quick_commands(paths: list[str]) -> list[tuple[list[str], Path]]:
     if any(path.startswith("app/capabilities/") or path == "app/api.py" for path in paths):
         commands.append(([sys.executable, "scripts/check_capability_coverage.py"], ROOT))
 
-    if "frontend/src/index.css" in paths:
+    if any(p == "frontend/src/index.css" or p.startswith("frontend/src/styles/") for p in paths):
         # 新写的亮色专属色值必须同时给暗色对应值，否则夜间模式会留下白面板。
         commands.append(([sys.executable, "scripts/check_dark_theme.py"], ROOT))
+        # 页面样式表只放本页独占的选择器，否则别的页面会掉样式。
+        commands.append(([sys.executable, "scripts/check_css_split.py"], ROOT))
 
     frontend_changes = [path for path in paths if path.startswith("frontend/")]
     if frontend_changes:
@@ -296,6 +298,7 @@ def _full_commands(*, live_integration: bool = False) -> list[tuple[list[str], P
         ([sys.executable, "scripts/check_contract_surface.py"], ROOT),
         ([sys.executable, "scripts/check_capability_coverage.py"], ROOT),
         ([sys.executable, "scripts/check_dark_theme.py"], ROOT),
+        ([sys.executable, "scripts/check_css_split.py"], ROOT),
         ([sys.executable, "-m", "compileall", "-q", "app"], ROOT),
         ([sys.executable, "-m", "pytest", "-q"], ROOT),
         ([_npm(), "run", "build"], FRONTEND),

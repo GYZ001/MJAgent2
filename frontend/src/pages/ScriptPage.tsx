@@ -18,6 +18,7 @@ import QueryState from '../components/QueryState'
 import OperationError from '../components/OperationError'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { screenplayTaskNotice } from '../lib/productionNotices'
+import "../styles/ScriptPage.css";
 
 type ScreenplayProduction = NonNullable<
   NonNullable<ReturnType<typeof useScriptEpisode>['data']>['screenplay_production']

@@ -27,6 +27,7 @@ import CharacterQaPanel from '../components/CharacterQaPanel'
 import DecisionDialog from '../components/DecisionDialog'
 import ImageCompareModal from '../components/ImageCompareModal'
 import OperationError from '../components/OperationError'
+import "../styles/BiblePage.css";
 
 const CHAR_QA_PASS = 0.6
 const REQUIRED_CHARACTER_VIEWS = ['front_full', 'three_quarter', 'profile'] as const

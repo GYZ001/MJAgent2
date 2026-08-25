@@ -17,6 +17,7 @@ import DecisionDialog from "../components/DecisionDialog";
 import TraceDrawer, {
   type TraceTarget,
 } from "../components/observability/TraceDrawer";
+import "../styles/MonitorPage.css";
 
 type MonitorSection =
   | "overview"

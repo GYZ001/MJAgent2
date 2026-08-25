@@ -6,6 +6,7 @@ import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import QueryState from '../components/QueryState'
 import DecisionDialog from '../components/DecisionDialog'
 import OperationError from '../components/OperationError'
+import "../styles/CinemaPage.css";
 
 const DELIVERY_STATUS_LABELS: Record<string, string> = {
   waiting_human: '待人工复验',

@@ -1,0 +1,520 @@
+/* ScriptPage 独占样式 —— 由 index.css 拆出，随该页的懒加载分包一起下载。
+
+   拆分口径：规则里的类名只被这一页用到，且没有任何「今天排在它后面、同特指度、
+   同属性、可能命中同一元素」的全局规则——否则挪到 index.css 之后会翻转层叠结果，
+   那类规则一律留在 index.css。核算见 scripts/check_css_split.py。
+
+   往这里加样式前先想清楚：它只在本页加载。跨页复用的东西属于 index.css。 */
+
+.kv {
+  font-size: 13.5px;
+}
+.kv b {
+  
+  font-weight: 400;
+  font-size: 12px;
+  
+  display: block;
+}
+.kv b {
+  color: var(--ink-faint);
+  font: 600 11.5px var(--ui);
+  letter-spacing: 0.03em;
+}
+.screenplay-primary-row,
+.screenplay-secondary-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.screenplay-primary-row {
+  justify-content: space-between;
+  align-items: flex-start;
+}
+.screenplay-state-copy {
+  display: grid;
+  gap: 5px;
+  min-width: min(100%, 340px);
+  flex: 1;
+}
+.screenplay-state-copy strong {
+  color: var(--ink);
+  font: 600 15px/1.4 var(--serif);
+  letter-spacing: 0.02em;
+}
+.screenplay-state-copy small {
+  color: var(--ink-soft);
+  font: 12.5px/1.55 var(--ui);
+}
+.screenplay-primary-actions,
+.screenplay-secondary-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.screenplay-primary-actions {
+  flex-shrink: 0;
+}
+.screenplay-secondary-row {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--hairline);
+}
+.screenplay-row-spacer {
+  flex: 1;
+}
+.screenplay-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+.screenplay-detail-grid em {
+  margin-left: 7px;
+  color: var(--gold);
+  font-size: 10px;
+}
+@media (max-width: 720px) {
+  .screenplay-primary-row {
+      align-items: flex-start;
+    }
+  .screenplay-secondary-row {
+      max-height: 112px;
+      overflow-y: auto;
+    }
+  .screenplay-row-spacer {
+      display: none;
+    }
+}
+.prep-stepper-block {
+  margin: 10px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.prep-stepper-status {
+  margin: 0;
+}
+.prep-stepper-skeleton {
+  height: 18px;
+  width: 200px;
+  max-width: 100%;
+  margin: 3px 0;
+  border-radius: 999px;
+  background: var(--paper-deep);
+}
+.prep-stepper {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0;
+}
+.prep-stepper-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+}
+.prep-stepper-item:not(:last-child)::after {
+  content: '';
+  width: 20px;
+  height: 1px;
+  margin: 0 8px;
+  background: var(--hairline);
+  flex: none;
+}
+.prep-stepper-dot {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 10px/1 var(--ui, sans-serif);
+  background: var(--paper-deep);
+  color: var(--ink-faint);
+}
+.prep-stepper-label {
+  font: 600 12px/1.3 var(--ui, sans-serif);
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.prep-stepper-item[data-tone="done"] .prep-stepper-dot {
+  background: var(--moss-surface);
+  color: #fff;
+}
+.prep-stepper-item[data-tone="done"] .prep-stepper-label {
+  color: var(--ink-soft);
+}
+.prep-stepper-item[data-tone="active"] .prep-stepper-dot {
+  background: var(--cinnabar);
+  color: #fff;
+}
+.prep-stepper-item[data-tone="active"] .prep-stepper-label {
+  color: var(--cinnabar-deep);
+  font-weight: 700;
+}
+.prep-stepper-item[data-tone="blocked"] .prep-stepper-dot {
+  background: rgba(181, 72, 56, 0.16);
+  color: var(--cinnabar-deep);
+}
+.prep-stepper-item[data-tone="blocked"] .prep-stepper-label {
+  color: var(--cinnabar-deep);
+}
+.prep-generating-hint {
+  text-align: center;
+  padding: 28px 20px;
+  color: var(--ink-soft);
+}
+.prep-generating-hint p {
+  margin: 0;
+  font: 15px/1.8 var(--serif);
+}
+.prep-gate-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 10px 16px;
+  border-radius: 9px;
+  border: 1px solid var(--hairline);
+  font: 13px/1.5 var(--ui, sans-serif);
+}
+.prep-gate-strip-icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 12px/1 var(--ui, sans-serif);
+}
+.prep-gate-strip strong {
+  font: 700 13px/1.4 var(--ui, sans-serif);
+  color: var(--ink);
+}
+.prep-gate-strip-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+.prep-gate-chip {
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(34, 38, 44, 0.05);
+  color: var(--ink-soft);
+  font: 600 11px/1.6 var(--ui, sans-serif);
+  white-space: nowrap;
+}
+.prep-gate-missing {
+  margin: 6px 2px 0;
+  color: var(--cinnabar-deep);
+  font: 12.5px/1.7 var(--ui, sans-serif);
+  word-break: break-word;
+}
+.prep-pack-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(230px, 1fr);
+  gap: 18px;
+  align-items: start;
+  margin-top: 14px;
+}
+.prep-pack-main {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.prep-pack-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  position: sticky;
+  top: 14px;
+}
+.prep-sidebar-heading {
+  margin: 0 0 8px;
+  font: 600 13px/1.4 var(--ui, sans-serif);
+  color: var(--ink-soft);
+  letter-spacing: 0.02em;
+}
+.prep-scope-card p {
+  margin: 0;
+  font: 13px/1.6 var(--ui, sans-serif);
+  color: var(--ink);
+}
+.prep-scope-card .prep-sidebar-meta {
+  margin-top: 3px;
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+.prep-empty-hint {
+  margin: 4px 0 0;
+  color: var(--ink-faint);
+  font: 12.5px/1.6 var(--ui, sans-serif);
+}
+.prep-timeline {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+.prep-timeline-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 2px 12px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.prep-timeline-item:first-child {
+  padding-top: 2px;
+}
+.prep-timeline-item:last-child {
+  border-bottom: none;
+  padding-bottom: 2px;
+}
+/* 素材面板条目点名联动命中的事件：配色与交互模式复用 .video-candidate-card.selected
+   （index.css）同一套朱砂强调色叠加 + 左侧 inset 强调条，不新起配色。 */
+.prep-timeline-item.event-linked {
+  background: rgba(181, 68, 52, 0.065);
+  box-shadow: inset 3px 0 var(--cinnabar);
+}
+.prep-timeline-marker {
+  grid-row: 1 / 2;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--cinnabar);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 11px/1 var(--ui, sans-serif);
+  margin-top: 2px;
+}
+.prep-timeline-details {
+  grid-column: 2 / 3;
+  min-width: 0;
+}
+.prep-timeline-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  cursor: pointer;
+  list-style: none;
+}
+.prep-timeline-summary::-webkit-details-marker {
+  display: none;
+}
+.prep-timeline-summary::marker {
+  content: '';
+}
+.prep-timeline-headline {
+  font: 16px/1.6 var(--serif);
+  color: var(--ink);
+}
+.prep-timeline-summary::after {
+  content: '展开';
+  margin-left: auto;
+  flex: none;
+  font: 600 11px/1.4 var(--ui, sans-serif);
+  color: var(--ink-faint);
+}
+.prep-timeline-item details[open] .prep-timeline-summary::after {
+  content: '收起';
+}
+.prep-timeline-span {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(152, 115, 36, 0.09);
+  color: var(--gold);
+  font: 600 10px/1.6 var(--ui, sans-serif);
+  white-space: nowrap;
+}
+.prep-timeline-body {
+  margin: 10px 0 4px;
+  display: grid;
+  gap: 10px;
+  font: 13px/1.75 var(--ui, sans-serif);
+  color: var(--ink-soft);
+}
+.prep-timeline-body b {
+  display: block;
+  margin-bottom: 4px;
+  font: 600 11px/1.4 var(--ui, sans-serif);
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+}
+.prep-timeline-quotes,
+.prep-timeline-lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 7px;
+}
+.prep-timeline-quotes li {
+  border-left: 2px solid var(--gold);
+  padding: 1px 0 1px 10px;
+}
+.prep-timeline-lines li {
+  border-left: 2px solid var(--cinnabar);
+  padding: 1px 0 1px 10px;
+}
+.prep-timeline-idx {
+  color: var(--ink-faint);
+  font-size: 11px;
+  margin-left: 6px;
+}
+.prep-quote-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+  margin-top: 4px;
+}
+.prep-quote-card {
+  padding: 14px 18px 14px 20px;
+  border-radius: 10px;
+  background: var(--paper-deep);
+  border-left: 3px solid var(--cinnabar);
+}
+.prep-quote-card b {
+  display: block;
+  margin-bottom: 5px;
+  font: 700 10px/1.4 var(--ui, sans-serif);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--cinnabar-deep);
+}
+.prep-quote-card p {
+  margin: 0;
+  font: 15px/1.75 var(--serif);
+  color: var(--ink);
+}
+.prep-roster {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.prep-roster-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.prep-roster-thumb {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: var(--paper-deep);
+}
+.prep-roster-thumb-empty {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background: var(--paper-deep);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-faint);
+  font-size: 9.5px;
+}
+.prep-roster-icon {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background: var(--paper-deep);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  color: var(--ink-faint);
+}
+.prep-roster-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.prep-roster-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.prep-roster-name-text {
+  min-width: 0;
+  font: 600 12.5px/1.3 var(--ui, sans-serif);
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 条目名点名联动左侧事件链：按钮化名字，font/color/ellipsis 沿用 .prep-roster-name-text
+   （两个 class 同时挂在同一个元素上），这里只清 UA 按钮默认边框/背景/内边距。选中态
+   配色复用 .episode-picker-results button.selected（index.css）同一套朱砂强调色。 */
+.prep-roster-name-btn {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  text-align: left;
+  cursor: pointer;
+}
+.prep-roster-name-btn:hover {
+  color: var(--cinnabar-deep);
+  text-decoration: underline;
+}
+.prep-roster-name-btn.selected {
+  background: rgba(181, 72, 56, 0.09);
+  color: var(--cinnabar-deep);
+  border-radius: 4px;
+  padding: 0 4px;
+  margin: 0 -4px;
+}
+.prep-roster-alias {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(152, 115, 36, 0.09);
+  color: var(--gold);
+  font: 600 10px/1.5 var(--ui, sans-serif);
+  white-space: nowrap;
+}
+.prep-roster-meta {
+  font: 11px/1.3 var(--ui, sans-serif);
+  color: var(--ink-faint);
+}
+@media (max-width: 900px) {
+  .prep-pack-layout {
+      grid-template-columns: 1fr;
+    }
+  .prep-pack-sidebar {
+      position: static;
+    }
+}
+@media (max-width: 640px) {
+  .prep-timeline-summary::after {
+      display: none;
+    }
+  .prep-gate-strip-chips {
+      margin-left: 0;
+      width: 100%;
+    }
+}
+:where(:root[data-theme="dark"]) .prep-gate-chip {
+  background: rgba(var(--ink-rgb), 0.05);
+}

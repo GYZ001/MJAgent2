@@ -1,6 +1,7 @@
 import { useId, useState, type FormEvent } from "react";
 import { ApiError, changePassword } from "../api";
 import { useAuth } from "../auth/AuthContext";
+import AuthAside from "../components/AuthAside";
 
 /** 首次登录强制改密。
  *
@@ -57,41 +58,45 @@ export default function ForcePasswordChangePage() {
   };
 
   return (
-    <div className="login-shell">
-      <form className="login-card card" onSubmit={submit} aria-busy={submitting || undefined}>
-        <div className="login-brand">
-          <b>请先修改密码</b>
-          <span>
-            {user?.display_name || user?.username} —— 这是管理员为你设置的初始密码，
-            换成只有你知道的密码后才能进入系统。
-          </span>
-        </div>
+    <div className="auth-shell">
+      <AuthAside />
+      <main className="auth-main">
+        <form className="auth-panel" onSubmit={submit} aria-busy={submitting || undefined}>
+          <header>
+            <h1>请先修改密码</h1>
+            <p>
+              {user?.display_name || user?.username} 当前用的是管理员设置的初始密码。
+              换成只有你知道的密码后才能进入系统。
+            </p>
+          </header>
 
-        <label className="f" htmlFor={oldId}>
-          当前密码
-          <input id={oldId} type="password" autoComplete="current-password" value={oldPassword}
-            disabled={submitting} onChange={(e) => setOldPassword(e.target.value)} />
-        </label>
-        <label className="f" htmlFor={nextId}>
-          新密码（至少 8 位）
-          <input id={nextId} type="password" autoComplete="new-password" value={nextPassword}
-            disabled={submitting} onChange={(e) => setNextPassword(e.target.value)} />
-        </label>
-        <label className="f" htmlFor={confirmId}>
-          确认新密码
-          <input id={confirmId} type="password" autoComplete="new-password" value={confirmPassword}
-            disabled={submitting} onChange={(e) => setConfirmPassword(e.target.value)} />
-        </label>
+          <div className="login-field">
+            <label className="f" htmlFor={oldId}>当前密码</label>
+            <input id={oldId} type="password" autoComplete="current-password" value={oldPassword}
+              autoFocus disabled={submitting} onChange={(e) => setOldPassword(e.target.value)} />
+          </div>
+          <div className="login-field">
+            <label className="f" htmlFor={nextId}>新密码（至少 8 位）</label>
+            <input id={nextId} type="password" autoComplete="new-password" value={nextPassword}
+              disabled={submitting} onChange={(e) => setNextPassword(e.target.value)} />
+          </div>
+          <div className="login-field">
+            <label className="f" htmlFor={confirmId}>确认新密码</label>
+            <input id={confirmId} type="password" autoComplete="new-password" value={confirmPassword}
+              disabled={submitting} onChange={(e) => setConfirmPassword(e.target.value)} />
+          </div>
 
-        {error && <p className="login-error" role="alert">{error}</p>}
+          {error && <p className="field-error" role="alert">{error}</p>}
 
-        <button type="submit" className="btn primary" disabled={submitting}>
-          {submitting ? "提交中…" : "修改密码并进入"}
-        </button>
-        <button type="button" className="btn ghost" disabled={submitting} onClick={() => void logout()}>
-          换个账号登录
-        </button>
-      </form>
+          <button type="submit" className="btn primary auth-submit" disabled={submitting}>
+            {submitting ? "提交中…" : "修改密码并进入"}
+          </button>
+          <button type="button" className="btn ghost auth-alt" disabled={submitting}
+            onClick={() => void logout()}>
+            换个账号登录
+          </button>
+        </form>
+      </main>
     </div>
   );
 }

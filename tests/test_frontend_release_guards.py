@@ -84,3 +84,45 @@ def test_fingerprinted_assets_are_immutably_cached() -> None:
             cache_control = response.headers.get("cache-control") or ""
             assert "no-cache" in cache_control, f"{shell} 缺少回源校验：{cache_control!r}"
             assert "immutable" not in cache_control, shell
+
+
+@pytest.mark.skipif(not _dist_ready(), reason="未构建 frontend/dist；先跑 scripts/dev.sh build")
+def test_stale_asset_requests_404_instead_of_index_html() -> None:
+    """指纹对不上的 chunk 必须 404，不能回落 index.html。
+
+    2026-08-25 线上实况：发版后老标签页里还留着旧模块图，点开某页时去拉
+    /assets/MonitorPage-<旧指纹>.js。这个文件已经不存在了，如果服务端把
+    index.html 当兜底返回，浏览器拿到 200 + text/html，模块加载器报的是
+    "'text/html' is not a valid JavaScript MIME type for module script"——
+    一句和真实原因无关的错，前端也没法识别成「分包没取到」去自助重载。
+    """
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    with TestClient(app) as client:
+        for path in (
+            "/assets/MonitorPage-DEADBEEF.js",
+            "/assets/index-00000000.css",
+            "/assets/nested/thing-00000000.js",
+        ):
+            response = client.get(path)
+            assert response.status_code == 404, path
+            assert "text/html" not in response.headers.get("content-type", ""), path
+            assert "<div id=\"root\">" not in response.text, path
+
+
+@pytest.mark.skipif(not _dist_ready(), reason="未构建 frontend/dist；先跑 scripts/dev.sh build")
+def test_real_assets_still_serve_after_the_404_guard() -> None:
+    """上一条只该拦掉不存在的指纹，真实产物必须照常发得出去。"""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    dist = Path(__file__).resolve().parents[1] / "frontend" / "dist" / "assets"
+    entry = next(dist.glob("index-*.js"))
+    with TestClient(app) as client:
+        response = client.get(f"/assets/{entry.name}")
+        assert response.status_code == 200
+        assert "javascript" in response.headers.get("content-type", "")
+        assert response.headers.get("cache-control") == "public, max-age=31536000, immutable"

@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { api, ChapterContent } from '../api'
 import { useNav } from '../App'
+import "../styles/ReaderPage.css";
 
 export default function ReaderPage() {
   const { projectId, chapterIdx, go, toast } = useNav()

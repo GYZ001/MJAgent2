@@ -20,6 +20,7 @@ import {
   statusLabel,
 } from '../lib/statusLabels'
 import { useFocusTrap } from '../hooks/useFocusTrap'
+import "../styles/WallPage.css";
 
 type ReviewTab = 'text' | 'references' | 'videos'
 type DetailState =

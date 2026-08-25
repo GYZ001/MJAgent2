@@ -1,0 +1,163 @@
+/* ReaderPage 独占样式 —— 由 index.css 拆出，随该页的懒加载分包一起下载。
+
+   拆分口径：规则里的类名只被这一页用到，且没有任何「今天排在它后面、同特指度、
+   同属性、可能命中同一元素」的全局规则——否则挪到 index.css 之后会翻转层叠结果，
+   那类规则一律留在 index.css。核算见 scripts/check_css_split.py。
+
+   往这里加样式前先想清楚：它只在本页加载。跨页复用的东西属于 index.css。 */
+
+.reader-card {
+  padding: 18px 24px 30px;
+}
+.reader-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.reader-nav-top {
+  margin: 0 0 18px;
+}
+.reader-nav-bottom {
+  margin: 28px 0 8px;
+}
+.reader-position {
+  min-width: 112px;
+  color: var(--ink-faint);
+  font-size: 13px;
+  text-align: center;
+}
+.reader-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 4px;
+  padding-left: 14px;
+  border-left: 1px solid var(--hairline);
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+.reader-jump input {
+  width: 64px;
+  min-height: 34px;
+  padding: 5px 7px;
+  border: 1px solid var(--hairline);
+  border-radius: 7px;
+  background: var(--card);
+  color: var(--ink);
+  font: 13px "SF Mono", Menlo, monospace;
+  text-align: center;
+}
+.reader-scroll {
+  padding: 8px 4px;
+}
+.reader-loading {
+  min-height: 42vh;
+}
+.reader-state {
+  max-width: 560px;
+  margin: 54px auto 70px;
+  padding: 24px;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: rgba(253, 250, 242, 0.78);
+  text-align: center;
+}
+.reader-state strong {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 17px;
+}
+.reader-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 12px;
+}
+.reader-state p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.reader-state details {
+  margin-top: 10px;
+  text-align: left;
+}
+.reader-state summary {
+  width: max-content;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  margin: 0 auto;
+  color: var(--cinnabar-deep);
+  cursor: pointer;
+  font-size: 11px;
+}
+.reader-state pre {
+  max-height: 180px;
+  margin: 4px 0 0;
+  overflow: auto;
+  padding: 9px;
+  border-radius: 7px;
+  background: rgba(181, 68, 52, 0.055);
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 10.5px/1.5 "SF Mono", Menlo, monospace;
+}
+.reader-state > div {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 18px;
+  flex-wrap: wrap;
+}
+.reader-error {
+  border-color: rgba(181, 68, 52, 0.24);
+  background: rgba(181, 68, 52, 0.045);
+}
+.reader-article {
+  max-width: 760px;
+  margin: 0 auto;
+  color: var(--ink);
+  font: 17px/2.08 var(--serif);
+  letter-spacing: 0.02em;
+}
+.reader-article p {
+  margin: 0 0 1.1em;
+  text-indent: 2em;
+}
+@media (max-width: 720px) {
+  .reader-card {
+      padding: 14px 13px 24px;
+    }
+  .reader-nav {
+      gap: 8px;
+    }
+  .reader-position {
+      order: -1;
+      width: 100%;
+    }
+  .reader-jump {
+      width: 100%;
+      justify-content: center;
+      margin: 4px 0 0;
+      padding: 10px 0 0;
+      border-top: 1px solid var(--hairline);
+      border-left: 0;
+    }
+  .reader-state {
+      margin: 28px auto 42px;
+      padding: 20px 14px;
+    }
+  .reader-article {
+      font-size: 16px;
+      line-height: 2;
+    }
+}
+:where(:root[data-theme="dark"]) .reader-state {
+  background: rgba(255, 255, 255, 0.09);
+}

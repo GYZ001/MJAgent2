@@ -87,7 +87,10 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="漫剧 Agent 2.0", lifespan=lifespan)
-app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=3)
+# compresslevel 6 而非默认 9：9 对这份产物只多省不到 1KB，CPU 却翻倍。
+# 实测（frontend/dist，2026-08-25）：入口 JS 214K -> gzip3 75.4K / gzip6 68.4K，
+# 入口 CSS 273K -> gzip3 59.2K / gzip6 48.7K，首屏关键路径合计少 17.5KB。
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
 
 @app.middleware("http")
@@ -277,7 +280,13 @@ class SpaStaticFiles(StaticFiles):
     """
 
     # 与路由前缀一致；StaticFiles 传进来的 path 不带前导斜杠。
-    _NO_FALLBACK = ("api/", "api", "media/", "media", "mcp/", "mcp")
+    #
+    # assets/ 也必须在列：vite 产物带内容指纹，发一次版旧指纹就消失。老标签页在
+    # 内存里还留着旧的模块图，点开某页时会去拉一个已经不存在的 chunk。若这里回落
+    # index.html，浏览器收到的是 200 + text/html，模块加载器只会报
+    # "'text/html' is not a valid JavaScript MIME type"——一句和真实原因无关的错，
+    # 前端也认不出来。老老实实返回 404，前端才能识别成「分包没取到」并自动重载。
+    _NO_FALLBACK = ("api/", "api", "media/", "media", "mcp/", "mcp", "assets/", "assets")
 
     async def get_response(self, path: str, scope):
         try:

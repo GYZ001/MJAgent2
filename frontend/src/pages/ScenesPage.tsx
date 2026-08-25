@@ -20,6 +20,7 @@ import { usePrepListState } from '../hooks/usePrepListState'
 import { formatBookTitle } from '../lib/bookTitle'
 import { sceneUsability } from '../lib/sceneUsability'
 import { statusLabel, statusTitle, type PrepStepStatus } from '../lib/statusLabels'
+import "../styles/ScenesPage.css";
 
 export function scenePrepStatus(
   hasUnavailable: boolean,
