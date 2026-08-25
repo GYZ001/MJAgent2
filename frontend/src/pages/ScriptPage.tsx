@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   api,
   Bible,
@@ -84,6 +84,52 @@ export function isPrepPack(value: unknown): value is EpisodePrepPack {
 
 export function sortedEventChain(events: PrepPackEvent[] | null | undefined): PrepPackEvent[] {
   return [...(events ?? [])].sort((a, b) => (Number(a?.order) || 0) - (Number(b?.order) || 0))
+}
+
+/**
+ * 区间压缩：把事件序号数组压成用户约定的展示格式（如 "1,3,5~7"）——连续 ≥2 个的
+ * 序号合并成 "起~止"（用户明确要求 `~`，不是 `-`），孤立序号单独列出，段之间用
+ * `,` 分隔、不加空格。内部先去重、按升序排列，调用方传入乱序或带重复的数组都
+ * 得到同一个结果。空数组回退空串——调用方据此退回只展示"覆盖 N 个事件"，不渲染
+ * 区间部分。 */
+export function compressEventOrders(orders: number[]): string {
+  const sorted = Array.from(new Set(orders)).sort((a, b) => a - b)
+  if (!sorted.length) return ''
+  const segments: string[] = []
+  let start = sorted[0]
+  let prev = sorted[0]
+  for (let i = 1; i <= sorted.length; i++) {
+    const current = sorted[i]
+    if (current !== undefined && current === prev + 1) {
+      prev = current
+      continue
+    }
+    segments.push(start === prev ? `${start}` : `${start}~${prev}`)
+    if (current !== undefined) {
+      start = current
+      prev = current
+    }
+  }
+  return segments.join(',')
+}
+
+/**
+ * asset_manifest 各类条目的 event_ids（形如 ["ev_002", ...]）换算成事件链的展示
+ * 序号（PrepPackEvent.order，即左侧列表 1..N 的编号）。event_chain 里找不到对应
+ * event_id 时防御性跳过——不崩、不把 undefined 混进结果，只是这个 id 不参与区间
+ * 展示（调用方不应据此断言数据丢失，可能只是准备包版本差异）。 */
+export function eventIdsToOrders(
+  eventIds: string[] | null | undefined,
+  events: PrepPackEvent[],
+): number[] {
+  if (!eventIds?.length) return []
+  const orderByEventId = new Map(events.map(event => [event.event_id, event.order]))
+  const orders: number[] = []
+  for (const id of eventIds) {
+    const order = orderByEventId.get(id)
+    if (order != null) orders.push(order)
+  }
+  return orders
 }
 
 /** 覆盖账本条目的确切子形状后端未冻结（示例只给了空数组）；数字或 {segment_index} 都按原文段号解析。 */
@@ -645,6 +691,34 @@ export function PrepPackView({
   const coveredSegments = gate.totalSegments
     || gate.deliveredCount + gate.mergedCount + gate.retainedCount + gate.duplicateCount + gate.paratextCount
 
+  // 素材面板（出场角色 / 群演 / 出场场景）点名联动左侧事件链：selectedRoster 记录
+  // 当前被点选的条目（key 按类别加前缀防跨类别撞车，见下方三处 roster 渲染）与它
+  // 覆盖的 event_ids；再点同一条目会清空回到 null，即"取消高亮与选中态"。
+  // manualOpenEventIds 单独记录用户手动展开/收起过的事件——不能让"点名联动"的
+  // 受控 open 状态在无关重渲染时把用户原本手动展开的事件强制收起回去。
+  const [selectedRoster, setSelectedRoster] = useState<{ key: string; eventIds: string[] } | null>(null)
+  const [manualOpenEventIds, setManualOpenEventIds] = useState<Set<string>>(new Set())
+  const eventNodeRefs = useRef(new Map<string, HTMLLIElement>())
+
+  const selectedEventIdSet = useMemo(
+    () => new Set(selectedRoster?.eventIds ?? []),
+    [selectedRoster],
+  )
+
+  const toggleRosterSelection = (key: string, eventIds: string[] | undefined) => {
+    setSelectedRoster(current => (current?.key === key ? null : { key, eventIds: eventIds ?? [] }))
+  }
+
+  // 选中条目变化时，把左侧事件链滚动定位到命中的第一个事件（events 已按 order
+  // 升序排列，第一个命中即最靠前的事件）。测试环境（react-test-renderer，无真实
+  // DOM）里 ref 拿不到宿主节点、scrollIntoView 也不存在，可选链短路即可，不崩。
+  useEffect(() => {
+    if (!selectedRoster) return
+    const firstMatch = events.find(event => selectedEventIdSet.has(event.event_id))
+    if (!firstMatch) return
+    eventNodeRefs.current.get(firstMatch.event_id)?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+  }, [selectedRoster, events, selectedEventIdSet])
+
   return (
     <>
       {/* 门禁状态灯：全宽细条带，不占大块版面 */}
@@ -679,10 +753,33 @@ export function PrepPackView({
               <ol className="prep-timeline">
                 {events.map(event => {
                   const span = formatSourceSpan(event.source_span)
+                  const isLinked = selectedEventIdSet.has(event.event_id)
+                  const isOpen = isLinked || manualOpenEventIds.has(event.event_id)
                   return (
-                    <li key={event.event_id || event.order} className="prep-timeline-item">
+                    <li
+                      key={event.event_id || event.order}
+                      className={`prep-timeline-item${isLinked ? ' event-linked' : ''}`}
+                      ref={node => {
+                        if (node) eventNodeRefs.current.set(event.event_id, node)
+                        else eventNodeRefs.current.delete(event.event_id)
+                      }}
+                    >
                       <span className="prep-timeline-marker" aria-hidden="true">{event.order}</span>
-                      <details className="prep-timeline-details">
+                      <details
+                        className="prep-timeline-details"
+                        open={isOpen}
+                        onToggle={domEvent => {
+                          // 复用左侧原生「展开」交互：用户手动折叠/展开时把这个事件记进
+                          // manualOpenEventIds，与点名联动的强制展开分开记账，见上方注释。
+                          const nowOpen = (domEvent.currentTarget as HTMLDetailsElement).open
+                          setManualOpenEventIds(prev => {
+                            const next = new Set(prev)
+                            if (nowOpen) next.add(event.event_id)
+                            else next.delete(event.event_id)
+                            return next
+                          })
+                        }}
+                      >
                         <summary className="prep-timeline-summary">
                           <span className="prep-timeline-headline">{event.summary || '（未填写事件概述）'}</span>
                           {span && <span className="prep-timeline-span">{span}</span>}
@@ -751,6 +848,9 @@ export function PrepPackView({
                 const aliases = (character.aliases?.filter(alias => alias.trim()) ?? [])
                   .filter(alias => alias !== appellation)
                 const provenanceHint = provenanceMethodHint(character.provenance?.method)
+                const rosterKey = `char:${character.identity_id || character.display_name}`
+                const isSelected = selectedRoster?.key === rosterKey
+                const rangeText = compressEventOrders(eventIdsToOrders(character.event_ids, events))
                 return (
                   <div className="prep-roster-item" key={character.identity_id || character.display_name}>
                     {imageUrl
@@ -758,7 +858,15 @@ export function PrepPackView({
                       : <div className="prep-roster-thumb-empty" aria-hidden="true">无图</div>}
                     <div className="prep-roster-body">
                       <span className="prep-roster-name">
-                        <span className="prep-roster-name-text">{name}</span>
+                        <button
+                          type="button"
+                          className={`prep-roster-name-text prep-roster-name-btn${isSelected ? ' selected' : ''}`}
+                          aria-pressed={isSelected}
+                          title="点击在左侧事件链中定位该角色出场的事件"
+                          onClick={() => toggleRosterSelection(rosterKey, character.event_ids)}
+                        >
+                          {name}
+                        </button>
                         {appellation && (
                           <span className="prep-roster-alias" title="本集原文称谓；谱内正名见前">本集：{appellation}</span>
                         )}
@@ -766,7 +874,9 @@ export function PrepPackView({
                           <span className="prep-roster-alias" title="本集称谓">{aliases.join('、')}</span>
                         )}
                       </span>
-                      <span className="prep-roster-meta" title={provenanceHint ?? undefined}>覆盖 {character.event_ids?.length ?? 0} 个事件</span>
+                      <span className="prep-roster-meta" title={provenanceHint ?? undefined}>
+                        覆盖 {character.event_ids?.length ?? 0} 个事件{rangeText ? ` · ${rangeText}` : ''}
+                      </span>
                     </div>
                   </div>
                 )
@@ -779,17 +889,34 @@ export function PrepPackView({
             <section className="card">
               <h3 className="prep-sidebar-heading">群演 / 一次性人物 · {functionalExtras.length}</h3>
               <div className="prep-roster">
-                {functionalExtras.map((extra, index) => (
-                  <div className="prep-roster-item" key={`${extra.label || 'extra'}-${index}`}>
-                    {/* 群演没有定妆照是设计使然（不进人物谱身份体系），不是数据缺失，
-                        用统一占位图标而不是"无图"——那个措辞是给真正缺图的具名角色用的。 */}
-                    <div className="prep-roster-icon" aria-hidden="true">👤</div>
-                    <div className="prep-roster-body">
-                      <span className="prep-roster-name"><span className="prep-roster-name-text">{extra.label || '未命名群演'}</span></span>
-                      <span className="prep-roster-meta">覆盖 {extra.event_ids?.length ?? 0} 个事件</span>
+                {functionalExtras.map((extra, index) => {
+                  const rosterKey = `extra:${extra.label || 'extra'}-${index}`
+                  const isSelected = selectedRoster?.key === rosterKey
+                  const rangeText = compressEventOrders(eventIdsToOrders(extra.event_ids, events))
+                  return (
+                    <div className="prep-roster-item" key={rosterKey}>
+                      {/* 群演没有定妆照是设计使然（不进人物谱身份体系），不是数据缺失，
+                          用统一占位图标而不是"无图"——那个措辞是给真正缺图的具名角色用的。 */}
+                      <div className="prep-roster-icon" aria-hidden="true">👤</div>
+                      <div className="prep-roster-body">
+                        <span className="prep-roster-name">
+                          <button
+                            type="button"
+                            className={`prep-roster-name-text prep-roster-name-btn${isSelected ? ' selected' : ''}`}
+                            aria-pressed={isSelected}
+                            title="点击在左侧事件链中定位该群演出场的事件"
+                            onClick={() => toggleRosterSelection(rosterKey, extra.event_ids)}
+                          >
+                            {extra.label || '未命名群演'}
+                          </button>
+                        </span>
+                        <span className="prep-roster-meta">
+                          覆盖 {extra.event_ids?.length ?? 0} 个事件{rangeText ? ` · ${rangeText}` : ''}
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             </section>
           )}
@@ -800,14 +927,29 @@ export function PrepPackView({
               {scenes.map(scene => {
                 const imageUrl = findSceneReferenceImage(bible, scene.scene_reference_id)
                 const name = scene.display_name || scene.scene_id || '未命名场景'
+                const rosterKey = `scene:${scene.scene_id || scene.display_name}`
+                const isSelected = selectedRoster?.key === rosterKey
+                const rangeText = compressEventOrders(eventIdsToOrders(scene.event_ids, events))
                 return (
                   <div className="prep-roster-item" key={scene.scene_id || scene.display_name}>
                     {imageUrl
                       ? <img className="prep-roster-thumb" src={imageUrl} alt={name} loading="lazy" decoding="async" />
                       : <div className="prep-roster-thumb-empty" aria-hidden="true">无图</div>}
                     <div className="prep-roster-body">
-                      <span className="prep-roster-name"><span className="prep-roster-name-text">{name}</span></span>
-                      <span className="prep-roster-meta">覆盖 {scene.event_ids?.length ?? 0} 个事件</span>
+                      <span className="prep-roster-name">
+                        <button
+                          type="button"
+                          className={`prep-roster-name-text prep-roster-name-btn${isSelected ? ' selected' : ''}`}
+                          aria-pressed={isSelected}
+                          title="点击在左侧事件链中定位该场景出现的事件"
+                          onClick={() => toggleRosterSelection(rosterKey, scene.event_ids)}
+                        >
+                          {name}
+                        </button>
+                      </span>
+                      <span className="prep-roster-meta">
+                        覆盖 {scene.event_ids?.length ?? 0} 个事件{rangeText ? ` · ${rangeText}` : ''}
+                      </span>
                     </div>
                   </div>
                 )

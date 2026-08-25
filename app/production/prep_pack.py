@@ -226,7 +226,7 @@ from app.validators import (
     match_scene_name,
 )
 
-PREP_PACK_VERSION = "1.8.4"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "1.8.5"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
 # gained functional_extras; 1.4.0: coverage_ledger gained paratext (deterministic
 # keyword/position classifier, since replaced); 1.4.1: paratext classification
@@ -542,6 +542,45 @@ PREP_PACK_VERSION = "1.8.4"  # 1.1.0: event_chain entries carry source_span (P1 
 # 模型的卷宗内容本身（真正的 prompt-contract 变更），asset_manifest/
 # event_chain 的 payload 结构与既有 provenance.method 取值集合均未改变，
 # 比照 1.4.1/1.6.1/1.8.1/1.8.2/1.8.3 的先例推进版本号（第三位）。
+#
+# 1.8.5（根因收口：把 1.8.0-1.8.4 一直在下游"打补丁"的候选判别卷宗/检索
+# 问题，往回收到真正的源头——事件链抽取阶段给角色起标签这一步，prompt-
+# contract 变更，版本推进）：1.8.0-1.8.4 五轮修复全部发生在
+# _prep_pack_resolve_functional_extra_candidate 这条下游候选判别通路自己
+# 身上（卷宗检索完整性、保底配额、字数分配……），从未碰过一件事——这些
+# 标签为什么一开始就没能直接命中别名注册表。真实落库复核（当前十集
+# episode_prep_pack 最新快照）：EP1"许清"display_appellation="银色长袍
+# 女子"（method=candidate_verdict，模型裁决而非确定性命中）、EP5"许清"
+# 干脆没能落进 characters[]，标签"许姓女子"整段掉进 functional_extras
+# （method=discovery，彻底未绑定）、EP8"赵武刚"display_appellation=
+# "外宗同门"（同样 method=candidate_verdict）——而人物谱（Bible.characters
+# [].aliases）里，这三个角色本来就各自登记着一个原文真实用过的称谓
+# （honorific 类，跟这三个标签毫无关系），说明不是这些称谓不存在，是事件链
+# 抽取模型在这几集里一次都没有把它写进 display_name，转而自己综合了一个
+# 外貌/关系描述短语。候选判别机制本身工作正常（EP1/EP8 最终确实判对了），
+# 但每次都要靠一次不保真的模型裁决"赌"出同一个本该靠别名表零成本查到的
+# 答案，真实回归也确实观测到同一角色跨轮结果不稳定（EP5"许清"在此前定点
+# 验证轮次绑上过，本轮又掉了）——这正是候选判别取代确定性别名命中要付的
+# 代价。
+#
+# 修复（本文件，_extract_chunk 的"命名纪律"提示词分区）：新增一条
+# characters 专属的取词优先级——本段原文中该角色只要存在称谓性表述（人名、
+# 尊称、绰号等，不含只是概括所属群体/类别、换成同类另一个人也说得通的
+# 泛称），display_name 必须逐字采用其中之一，不得改用自己综合的描述性
+# 短语；仅当该角色本段原文通篇只有描述性表述时才允许描述性标签（跟既有
+# "display_name 必须逐字出现在原文"这条硬约束正交，不放宽也不收紧那条）。
+# 同一角色本段原文若有不止一种称谓，取本段出现次数最多的一个，次数相同
+# 取最先出现的那个，本段所有事件统一取值——消除"同一角色不同事件换着用
+# 不同措辞"这个额外的不稳定源。不改 _ModelCharacterMention/_ChunkResponse
+# 的 schema 形状（display_name 仍是它，字段集合、必填/可选均未变），
+# episode_prep_pack_chunk_v3 这个 schema_name 因此不需要跟着推进——但发给
+# 模型的实际提示词文本变了，会实际改变部分角色标签的选词结果（进而改变
+# 它们在 _resolve_assets 里落地的 method：真实带称谓的角色应更多从
+# candidate_verdict/discovery 直接命中 alias/direct，不再需要那次模型
+# 裁决调用），是真正的 prompt-contract 变更，比照 1.4.1/1.6.1/1.8.1-1.8.4
+# 的先例推进版本号（第三位）。不改变候选判别机制本身、不放宽反幻觉主防线
+# （"逐字必须出现在原文"），也不影响本就没有任何称谓、只能靠描述性标签的
+# 真实无名群演——functional_extras 仍可正常吸收这类角色。
 QA_PROFILE_VERSION = "prep-pack-qa-gate-1"
 _QA_EVALUATOR_NAME = "screenplay_production_qa"
 _CHUNK_MAX_CHARS = 6000
@@ -3448,6 +3487,20 @@ async def _extract_chunk(
 - display_name 必须逐字使用本段原文中出现的称谓——原文写"灰袍老者"就填"灰袍老者"，
   禁止填任何本段原文没有出现过的名字，哪怕你认为自己知道这个人物/地点的"真名"；
   display_name 永远不能被下面这条替换；
+- characters 的 display_name 取词优先级（硬性）：如果本段原文中这个角色存在任何
+  称谓性表述——人名、尊称、绰号等原文里其他人或旁白直接用来称呼这个人本人、
+  能把他从人群里单独指认出来的说法——display_name 必须逐字采用其中一个，不允许
+  改用你自己综合出的外貌、衣着、动作等描述性短语去代替，哪怕那个描述性短语同样
+  逐字出现在原文里、哪怕你觉得它在这段更醒目或更容易辨认；只是概括这个人所属
+  群体/类别、换成同一类别里的另一个人也同样适用的泛称（哪怕形式上像称呼），不算
+  称谓性表述，仍属于描述性表述。原因：称谓才可能跟这个角色积累的其它信息对上号，
+  描述性短语（含泛称）哪怕逐字为真，也只是这一段独有、认不出具体是谁的说法，会让
+  一个本来可以确定身份的角色被迫退化成每次都要重新判断一遍是谁；只有当这个角色
+  在本段原文里通篇只有描述性表述、完全没有任何称谓性表述时，才允许 display_name
+  使用描述性短语——这种情况合法，不要因为这条优先级去勉强杜撰一个称谓出来；
+- 如果这个角色在本段原文中存在不止一种称谓性表述，取本段内出现次数最多的那一个；
+  次数相同就取最先出现的那一个；同一角色在本段所有事件里的 display_name 都按这条
+  规则统一取值，不要在不同事件里换着用不同的称谓；
 - 先验知识申报通道：你有可能在训练语料里读过这部小说——如果知道某个称谓背后的真名
   或正式名称，把它填进对应 mention 的 suspected_true_name（不确定就填 null，不要瞎猜
   硬填）；这只是申报，你的猜测会被本集原文/后续章节的文本证据核验，核验不过就不会

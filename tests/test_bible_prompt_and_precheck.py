@@ -312,3 +312,37 @@ def test_generate_bible_keeps_source_in_repair_rounds_and_supplements(monkeypatc
     assert "许师姐" in str(seen["supplement_prompt"])
     # 补录进来的关系不得指向名单外的人，否则 validate_bible 会退回重写。
     assert validate_bible(bible) == []
+
+
+def test_generate_bible_prompt_explains_bridging_chapter_for_aliases(monkeypatch) -> None:
+    """修复 B：规则 5 必须讲清楚 evidence_chapter_index 要选别名与正式姓名（或已确认别名）
+    共现的桥接章，不是别名第一次出现的章节；也要讲清楚不要自己给引句加引号包裹。这两点
+    对应全书别名回填 dry-run 12 条只过 0 条的诊断——generate_bible 内联申报别名走的是
+    同一套核验（`_verify_character_aliases_in_place`），提示词讲不清同样会全军覆没。"""
+    import asyncio
+
+    from app import stages
+    from app.schemas import Bible, Character, World
+
+    seen: dict[str, object] = {}
+
+    async def fake_loop(*args, **_kwargs):
+        seen["prompt"] = args[2]
+        return Bible(
+            world=World(visual_style_canonical="国漫3D动画电影质感，精致光影"),
+            characters=[Character(
+                name="孟浩", role="主角",
+                appearance_canonical="十六七岁少年，黑色短发额前碎发，蓝色文士长衫，身形瘦弱，腰间挂布袋",
+            )],
+        )
+
+    monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
+
+    asyncio.run(stages.generate_bible(
+        [{"idx": 1, "title": "第一章", "content": "孟浩走入山中。"}],
+    ))
+
+    prompt = str(seen["prompt"])
+    assert "不是该别名第一次出现的章节" in prompt
+    assert "同时出现" in prompt
+    assert "不要自己在引句前后加引号包裹" in prompt

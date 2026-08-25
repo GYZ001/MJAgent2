@@ -7,7 +7,9 @@ import {
   PrepStepper,
   ScreenplayResumeButton,
   characterAppellationTag,
+  compressEventOrders,
   coverageGateSummary,
+  eventIdsToOrders,
   findPortraitImage,
   findSceneReferenceImage,
   formatSourceSpan,
@@ -148,6 +150,57 @@ describe('sortedEventChain', () => {
   it('tolerates a missing or null event list', () => {
     expect(sortedEventChain(null)).toEqual([])
     expect(sortedEventChain(undefined)).toEqual([])
+  })
+})
+
+describe('compressEventOrders', () => {
+  it('merges a fully consecutive run into a single a~b segment', () => {
+    expect(compressEventOrders([1, 2, 3])).toBe('1~3')
+    expect(compressEventOrders([1, 2, 3, 4, 5, 6, 7, 8, 9])).toBe('1~9')
+  })
+
+  it('lists fully non-consecutive orders as individual comma-separated values', () => {
+    expect(compressEventOrders([1, 3, 5, 7])).toBe('1,3,5,7')
+  })
+
+  it('mixes runs and singles per the user-specified format (e.g. "1,3,5~7")', () => {
+    expect(compressEventOrders([1, 3, 5, 6, 7])).toBe('1,3,5~7')
+    expect(compressEventOrders([1, 2, 3, 7, 8, 9, 10, 11])).toBe('1~3,7~11')
+  })
+
+  it('renders a lone order as a single number, not a self-range', () => {
+    expect(compressEventOrders([5])).toBe('5')
+  })
+
+  it('returns an empty string for an empty input so callers fall back to the plain count', () => {
+    expect(compressEventOrders([])).toBe('')
+  })
+
+  it('sorts and de-duplicates unordered, repeated input before compressing', () => {
+    expect(compressEventOrders([3, 1, 3, 2])).toBe('1~3')
+    expect(compressEventOrders([7, 1, 1, 9, 8])).toBe('1,7~9')
+  })
+})
+
+describe('eventIdsToOrders', () => {
+  const events = [
+    { event_id: 'ev_001', order: 1, summary: 'a', source_evidence: [], key_lines: [] },
+    { event_id: 'ev_002', order: 2, summary: 'b', source_evidence: [], key_lines: [] },
+    { event_id: 'ev_003', order: 3, summary: 'c', source_evidence: [], key_lines: [] },
+  ]
+
+  it('resolves event_ids to their event_chain order numbers', () => {
+    expect(eventIdsToOrders(['ev_001', 'ev_003'], events)).toEqual([1, 3])
+  })
+
+  it('defensively skips an event_id absent from event_chain instead of throwing or emitting undefined', () => {
+    expect(eventIdsToOrders(['ev_001', 'ev_999', 'ev_002'], events)).toEqual([1, 2])
+  })
+
+  it('tolerates a missing or empty event_ids list without throwing', () => {
+    expect(eventIdsToOrders(undefined, events)).toEqual([])
+    expect(eventIdsToOrders(null, events)).toEqual([])
+    expect(eventIdsToOrders([], events)).toEqual([])
   })
 })
 

@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 
 import pytest
@@ -3629,6 +3630,150 @@ def test_registered_only_candidate_never_enters_candidate_set_after_1_8_4_revert
 # 调用，见上方约 2927/2968 行）已经覆盖，1.8.4 不重复造一份同形状的用例。
 
 
+# ---------------------------------------------------------------------------
+# 1.8.5：事件链抽取给角色起标签的提示词——原文有称谓就必须逐字用称谓，不能
+# 自己综合一个外貌/关系描述短语（真实回归根因：EP1/EP5/EP8"许清"/"赵武刚"
+# 明明在人物谱里登记着原文真实用过的称谓，标签却写成了模型自己综合的描述
+# 短语，导致本该零成本命中别名表的绑定退化成一次不保真的候选判别模型
+# 裁决，甚至完全绑不上，见 PREP_PACK_VERSION 上方 1.8.5 大注释）。
+#
+# 这里测的是 _extract_chunk 构造出的提示词本身，不是真实模型输出——跟
+# test_scene_true_name_hypothesis_verdict_prompt_uses_scene_semantics
+# （上方约 2581 行）同一测法：monkeypatch model_gateway.chat_structured
+# 截获发给模型的提示词全文，断言其中包含（或不包含）特定指令片段。
+# ---------------------------------------------------------------------------
+
+def _flatten(text: str) -> str:
+    """去掉全部空白（含提示词多行 f-string 里的换行/两格缩进），只留字符
+    序列本身用于子串断言——提示词源码里的换行位置属于排版细节，不是被测
+    语义的一部分，断言不该因为源码换行点挪动就跟着碎（Chinese 本身书写
+    不含空格，唯一残留的空格只来自英文标识符/数字，两边同时展平即可
+    无损对齐）。"""
+    return re.sub(r"\s+", "", text)
+
+
+def _fake_chunk_response(*, display_name: str = "沈师姐") -> "prep_pack._ChunkResponse":
+    return prep_pack._ChunkResponse(
+        events=[
+            prep_pack._ModelEvent(
+                event_id="ev_001",
+                summary="测试事件",
+                source_span=prep_pack._ModelEventSpan(from_segment=1, to_segment=1),
+                source_evidence=[
+                    prep_pack._ModelSourceEvidence(segment_index=1, quote="沈师姐"),
+                ],
+                key_lines=[],
+                characters=[
+                    prep_pack._ModelCharacterMention(
+                        display_name=display_name, is_background_extra=False,
+                        suspected_true_name=None,
+                    ),
+                ],
+                scenes=[],
+            ),
+        ],
+        paratext_segments=[],
+    )
+
+
+def test_character_label_prompt_requires_original_appellation_over_description(monkeypatch):
+    """红灯（改动前不存在这条指令，本测试会失败；改动后应变绿）：构造
+    "原文中同时存在称谓性表述与外貌描述"的形状——一句话里既有称谓又有外貌
+    描写——断言发给事件链抽取模型的提示词里，明确要求这种情况下必须逐字
+    采用称谓、不得改用自己综合的描述性短语。"""
+    segment = SourceSegment(
+        segment_id="seg-1",
+        text="院外，沈师姐一身白衣立于廊下，静静望着远处。",
+        start_offset=0, end_offset=10,
+    )
+    chunk = [(1, segment)]
+    captured: dict[str, str] = {}
+
+    async def fake_chat_structured(messages, **kwargs):
+        captured["prompt"] = str(messages[0]["content"])
+        return _fake_chunk_response()
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
+    asyncio.run(prep_pack._extract_chunk(
+        episode_id="ep-test", episode_no=1, chunk_index=1, chunk=chunk,
+        known_characters=[], known_scenes=[], attempt_hint="", run_id=None,
+    ))
+
+    prompt = _flatten(captured["prompt"])
+    assert _flatten("不允许改用你自己综合出的外貌、衣着、动作等描述性短语去代替") in prompt, (
+        "提示词必须明确要求：原文有称谓性表述时，不得改用自己综合的描述性短语"
+    )
+    # 原文本身仍然要逐字出现在提示词里（沿用既有渲染逻辑，未被本次改动破坏）。
+    assert _flatten("院外，沈师姐一身白衣立于廊下，静静望着远处。") in prompt
+
+
+def test_character_label_prompt_keeps_multi_appellation_tiebreak_rule(monkeypatch):
+    """红灯：断言提示词写清了"同一角色本段出现不止一种称谓时"的确定性取词
+    规则（出现次数最多，次数相同取最先出现），且要求本段所有事件统一
+    取值——这是防止同一角色跨事件换着用不同称谓、造成额外不稳定的规则。"""
+    segment = SourceSegment(
+        segment_id="seg-1", text="占位原文。", start_offset=0, end_offset=5,
+    )
+    chunk = [(1, segment)]
+    captured: dict[str, str] = {}
+
+    async def fake_chat_structured(messages, **kwargs):
+        captured["prompt"] = str(messages[0]["content"])
+        return _fake_chunk_response()
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
+    asyncio.run(prep_pack._extract_chunk(
+        episode_id="ep-test", episode_no=1, chunk_index=1, chunk=chunk,
+        known_characters=[], known_scenes=[], attempt_hint="", run_id=None,
+    ))
+
+    prompt = _flatten(captured["prompt"])
+    assert _flatten("取本段内出现次数最多的那一个") in prompt
+    assert _flatten("次数相同就取最先出现的那一个") in prompt
+    assert _flatten("不要在不同事件里换着用不同的称谓") in prompt
+
+
+def test_character_label_prompt_still_allows_pure_description_when_no_appellation_exists(monkeypatch):
+    """反例（守边界）：构造"原文只有描述、无任何称谓"的形状——断言提示词
+    仍然明确允许这种情况下使用描述性标签，没有被本次改动收紧成一律禁止
+    描述性标签（那会连带打掉真正无名的背景群演，functional_extras 必须
+    仍能容纳这类角色，见 _resolve_assets 对 is_background_extra 的既有
+    处理，本测试不动那部分代码，只核对提示词没有跟着收紧）。"""
+    segment = SourceSegment(
+        segment_id="seg-1", text="占位原文。", start_offset=0, end_offset=5,
+    )
+    chunk = [(1, segment)]
+    captured: dict[str, str] = {}
+
+    async def fake_chat_structured(messages, **kwargs):
+        captured["prompt"] = str(messages[0]["content"])
+        return _fake_chunk_response()
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
+    asyncio.run(prep_pack._extract_chunk(
+        episode_id="ep-test", episode_no=1, chunk_index=1, chunk=chunk,
+        known_characters=[], known_scenes=[], attempt_hint="", run_id=None,
+    ))
+
+    prompt = _flatten(captured["prompt"])
+    assert _flatten(
+        "只有当这个角色在本段原文里通篇只有描述性表述、完全没有任何称谓性"
+        "表述时，才允许 display_name 使用描述性短语"
+    ) in prompt
+    # 既有的"逐字必须出现在原文"这条硬约束原样保留，没有被本次改动替换掉。
+    assert _flatten(
+        "display_name 必须逐字使用本段原文中出现的称谓——原文写\"灰袍老者\""
+        "就填\"灰袍老者\""
+    ) in prompt
+    # 既有的纯背景群演功能性描述规则（跟本次改动语义相邻但不是同一条）原样保留。
+    assert _flatten("display_name 写功能性描述（如\"围观弟子\"）即可") in prompt
+    # 场景侧的既有规则（本次改动明确不涉及 scenes）没有被误改。
+    assert _flatten("场景地点的 display_name 一律使用原文自己的描述词") in prompt
+
+
 def test_prep_pack_version_is_1_8_0():
     """版本号哨兵：本次改造（未解析角色标签候选判别——真实 EP1"银色长袍
     女子"应绑定许清却因标签类型对不上落 functional_extras 的用户诉求收口）
@@ -3644,6 +3789,11 @@ def test_prep_pack_version_is_1_8_0():
     误绑，完整回退候选集扩展；同时修复"每候选保底"自身此前一直没暴露的
     根因——候选锚点落在事件跨度内部时旧版扫描逻辑会跳过候选匹配，见
     PREP_PACK_VERSION 上方 1.8.4 大注释）都会实际改变发给候选判别模型的
-    卷宗内容/候选名单本身，同样是 prompt-contract 变更，版本逐次推进——
-    函数名/测试名沿用旧号不改，只更新断言值，避免无谓的大范围改名。"""
-    assert prep_pack.PREP_PACK_VERSION == "1.8.4"
+    卷宗内容/候选名单本身，同样是 prompt-contract 变更，版本逐次推进。
+    1.8.5（根因收口：往回收到事件链抽取给角色起标签这一步——原文有称谓
+    就必须逐字用称谓，不能自己综合一个描述短语，见 PREP_PACK_VERSION
+    上方 1.8.5 大注释）改的是 _extract_chunk 的"命名纪律"提示词分区，
+    同样会实际改变部分角色标签的选词结果，是 prompt-contract 变更，
+    版本继续推进——函数名/测试名沿用旧号不改，只更新断言值，避免无谓的
+    大范围改名。"""
+    assert prep_pack.PREP_PACK_VERSION == "1.8.5"

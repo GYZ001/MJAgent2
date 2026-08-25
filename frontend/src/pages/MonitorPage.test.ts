@@ -95,6 +95,30 @@ describe("任务队列业务名称与恢复建议", () => {
     expect(PROVIDER_RESUBMISSION_WARNING).toContain("独立预算 claim");
     expect(PROVIDER_RESUBMISSION_WARNING).not.toContain("复用原幂等标识");
   });
+
+  it("恢复排队与已被接管的历史记录不能共用同一句“正在等待执行”文案", () => {
+    // 修复前 queued/recovering 共用一句话；已被接管(recovered_by_run_id
+    // 非空)的历史记录从未真正排队，也不会再被 worker 领取，必须与两者都区分。
+    const queuedText = jobNextStep({ ...job, status: "queued" });
+    const recoveringText = jobNextStep({ ...job, status: "recovering" });
+    const supersededText = jobNextStep({
+      ...job,
+      status: "superseded",
+      recovered_by_run_id: "run_child",
+    });
+    expect(queuedText).toBe("正在等待执行，可查看排队详情或取消任务");
+    expect(recoveringText).not.toBe(queuedText);
+    expect(recoveringText).toContain("服务重启");
+    expect(supersededText).not.toBe(queuedText);
+    expect(supersededText).not.toBe(recoveringText);
+    expect(supersededText).not.toContain("等待执行");
+    expect(supersededText).toContain("接管");
+  });
+
+  it("已自动续跑完成的历史记录仍提示无需处理", () => {
+    expect(jobNextStep({ ...job, status: "recovered" }))
+      .toBe("任务已自动续跑完成，无需处理");
+  });
 });
 
 describe("调用日志业务名称与恢复建议", () => {
