@@ -4480,6 +4480,13 @@ async def reverify_character_aliases(
 # 边界与核心事实（角色+归属/关系对象+证据章+引句，已过声明核验/桥接检索+候选判别裁决）
 # 是两个独立核验的东西：边界外推没有独立支撑时只回落该边界本身（标注为回落值），不
 # 拒绝已核验的核心事实；边界与核心证据矛盾（如终点早于证据章）才整条拒绝。
+#
+# 另一处事故修复（引句双锚定，见 `_status_fact_quote_dual_anchor_verified`）：首批真实
+# 回填产出 6 条，人工复核发现 3 条的 evidence_quote 里没有主体——章级共现闸（判据 3）
+# 按整章判断，被登记引用的却只是章内一句，章级通过不等于这一句里真锚定了主体，其中
+# 一条（关系事实"王腾飞→韩宗"，引句是韩宗对孟浩说话）是彻头彻尾的假事实，另两条结论
+# 为真但引句不合格——不可核验的正确答案与错误答案是同一等级的东西，一律拒绝。这道闸
+# 加在核心证据核验之后、候选判别裁决之前，不替换、不削弱既有三闸与候选判别，独立生效。
 
 _STATUS_FACT_VERDICT_STAGE_KEY = "character_status_fact_backfill_verdict"
 
@@ -4650,6 +4657,50 @@ def _status_fact_interval_resolution(
     return valid_from_chapter, valid_from_is_fallback, valid_to_chapter, valid_to_is_fallback
 
 
+def _status_fact_quote_dual_anchor_verified(
+    quote: str,
+    subject_anchor_texts: set[str],
+    object_anchor_texts: set[str],
+) -> bool:
+    """状态事实引句双锚定核验（事故修复：真实人物谱回填出现的假事实——"王腾飞 同党/
+    同门→韩宗"，引用的是"韩宗看都不看其他人一眼，望着孟浩，冷淡开口"这句，句中根本
+    没有王腾飞，是韩宗对孟浩说话，与王腾飞无关；另两条"孟浩→靠山宗""许清→靠山宗"引句
+    也分别缺主体、只剩三个字的组织名，同一漏洞的三种呈现）。
+
+    根因：`_alias_declaration_verified`/`_find_alias_bridge_chapter` 的"共现"判据是
+    按章节整体判断的（claim_text 与 anchor_texts 之一同时出现在该章原文任意位置即算
+    通过），但被实际登记、供人工复核的 evidence_quote 只是章节内的一句/一段——章级
+    共现通过不代表这一句里真的锚定了主体。没有主体锚点就无法区分"真但证据差"与"假"，
+    两者外观完全一致（都是"claim_text 在引句里，主体不在"），所以一律拒绝，不区分
+    对待——不可核验的正确答案与错误答案是同一等级的东西。
+
+    条件（归属/关系两类结构相同，调用方按语义传入对应的 subject/object 锚点集合）：
+    引句必须同时包含 subject_anchor_texts（主体角色的规范名或已确认别名）中至少一项，
+    与 object_anchor_texts（归属对象 org 本身；或关系对象 to 的规范名/已确认别名）中
+    至少一项——且必须在同一种引号候选形式（`_quote_comparison_variants`，处理全角/
+    半角引号导致的假阴性）下同时命中，不能分别用不同形式各自命中一侧再拼凑。任一侧
+    缺失整条拒绝，不尝试放宽或"修补"引句去凑双锚定（不确定不登记，安全默认）。
+
+    这道闸加在核心证据核验（声明核验/桥接检索）之后、候选判别裁决之前——不满足直接
+    拒绝，省一次候选判别模型调用；不替换、不削弱既有三闸（章级共现、逐字引句在原文、
+    候选判别）与后续段号钉证，只是额外补上"引句本身双锚定"这一层，四闸独立生效。
+    """
+    quote = (quote or "").strip()
+    if not quote:
+        return False
+    subject_forms = [s for s in subject_anchor_texts if s]
+    object_forms = [o for o in object_anchor_texts if o]
+    if not subject_forms or not object_forms:
+        return False
+    for candidate in _quote_comparison_variants(quote):
+        if (
+            any(s in candidate for s in subject_forms)
+            and any(o in candidate for o in object_forms)
+        ):
+            return True
+    return False
+
+
 async def _status_fact_evidence_resolution(
     chapters_by_idx: dict[int, str],
     anchor_texts: set[str],
@@ -4678,10 +4729,12 @@ async def _status_fact_evidence_resolution(
     是代码回落的默认值（模型申报的边界未能独立核验、不予采信），不是模型申报并核验
     通过的原始边界（见 `_status_fact_interval_resolution` docstring"拆分处置"一节）；
     `accepted=False` 时 `reason` 是机器可读拒绝原因（`no_bridge_chapter`/
-    `no_verdict_candidates`/`no_verdict_dossier`/`verdict_call_failed`/
-    `candidate_mismatch`/`candidate_uncertain`/`segment_not_pinned`/
-    `interval_contradiction`——最后一项特指申报区间与核心证据点逻辑矛盾，不包含"边界
-    外推缺乏独立支撑"这种情况，后者现在走拆分处置、不再整条拒绝）。
+    `quote_missing_dual_anchor`/`no_verdict_candidates`/`no_verdict_dossier`/
+    `verdict_call_failed`/`candidate_mismatch`/`candidate_uncertain`/
+    `segment_not_pinned`/`interval_contradiction`——最后一项特指申报区间与核心证据点
+    逻辑矛盾，不包含"边界外推缺乏独立支撑"这种情况，后者现在走拆分处置、不再整条
+    拒绝；`quote_missing_dual_anchor` 见 `_status_fact_quote_dual_anchor_verified`
+    docstring——章级共现通过不代表被登记的这一句引句里真的锚定了主体）。
     """
     empty = {
         "accepted": False, "chapter_idx": None, "quote": "", "reason": "",
@@ -4697,6 +4750,17 @@ async def _status_fact_evidence_resolution(
         if bridge is None:
             return {**empty, "reason": "no_bridge_chapter"}
         resolved_chapter_index, resolved_quote = bridge
+
+    # 引句双锚定闸（事故修复，见 `_status_fact_quote_dual_anchor_verified` docstring）：
+    # object 锚点复用 `roster`——claim_text 若恰好是某角色的规范名（关系事实的 to 必然
+    # 是，因为调用方已核验 `to in known_names`），取其规范名+已确认别名全集；claim_text
+    # 不是任何角色规范名时（归属事实的 org，自由文本，没有别名概念），`roster.get` 落空，
+    # 回退为 {claim_text} 本身——两种情况用同一行代码表达，不需要按归属/关系分支特判。
+    object_anchor_texts = set(roster.get(claim_text, [claim_text]) or [claim_text])
+    if not _status_fact_quote_dual_anchor_verified(
+        resolved_quote, set(anchor_texts), object_anchor_texts,
+    ):
+        return {**empty, "reason": "quote_missing_dual_anchor"}
 
     chapter_text = chapters_by_idx.get(resolved_chapter_index, "")
     candidates = _alias_verdict_candidates(chapter_text, roster)

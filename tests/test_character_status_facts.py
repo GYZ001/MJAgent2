@@ -584,6 +584,200 @@ def test_status_fact_relation_rejected_when_candidate_verdict_selects_different_
     assert resolved["reason"] == "candidate_mismatch"
 
 
+# ---------- 3c. 引句双锚定闸：_status_fact_quote_dual_anchor_verified /
+# reason=quote_missing_dual_anchor（事故修复：章级共现闸通过≠被登记引句里真锚定了
+# 主体，见 app/stages.py 模块顶部大注释与函数 docstring） ----------
+
+def test_dual_anchor_rejects_quote_missing_subject() -> None:
+    """纯函数红灯：引句里只有对象（韩宗），没有主体（王腾飞）——真实事故"王腾飞→韩宗"
+    的引句形状（引句是韩宗对孟浩说话，与王腾飞无关）。"""
+    from app import stages
+
+    assert stages._status_fact_quote_dual_anchor_verified(
+        "\"孟浩，上官师叔寻你有事，你随我走一趟吧。\"韩宗看都不看其他人一眼，"
+        "望着孟浩，冷淡开口。",
+        {"王腾飞"}, {"韩宗"},
+    ) is False
+
+
+def test_dual_anchor_rejects_quote_missing_object() -> None:
+    """纯函数红灯：引句里只有主体，没有对象——三条真实事故之外的镜像场景，直接对这个
+    纯函数验证（结构上通过整条 `_status_fact_evidence_resolution` 管线不可能触发，
+    因为 claim_text 本身已经被 `_alias_declaration_verified`/`_find_alias_bridge_chapter`
+    保证出现在引句里；这里单独验证闸门本身两侧都真的在把关，不是只查了一侧）。"""
+    from app import stages
+
+    assert stages._status_fact_quote_dual_anchor_verified(
+        "孟浩心情不错，独自离开，并未多言。", {"孟浩"}, {"血妖宗"},
+    ) is False
+
+
+def test_dual_anchor_rejects_quote_containing_only_org() -> None:
+    """纯函数红灯：引句只剩组织名三个字——真实事故"许清→靠山宗"的引句形状（引句
+    「靠山宗。」，什么主体都没锚定）。"""
+    from app import stages
+
+    assert stages._status_fact_quote_dual_anchor_verified(
+        "靠山宗。", {"许清"}, {"靠山宗"},
+    ) is False
+
+
+def test_dual_anchor_accepted_when_both_subject_and_object_present() -> None:
+    """正例（不得误伤）：主体与对象都在引句里的真实形状。"""
+    from app import stages
+
+    assert stages._status_fact_quote_dual_anchor_verified(
+        "孟浩，你是我李富贵这一辈子的好朋友", {"李富贵"}, {"孟浩"},
+    ) is True
+
+
+def test_dual_anchor_accepts_alternate_confirmed_alias_of_either_side() -> None:
+    """主体/对象只要命中各自集合中的任意一项已确认别名即可，不要求恰好是规范名——
+    集合语义，不是单一字符串相等。"""
+    from app import stages
+
+    assert stages._status_fact_quote_dual_anchor_verified(
+        "孟兄与血妖宗定下盟约", {"孟浩", "孟兄"}, {"血妖宗"},
+    ) is True
+
+
+def test_dual_anchor_rejects_when_either_anchor_set_is_empty() -> None:
+    """防御性红灯：调用方传入空锚点集合（理论上不该发生）时不能因为“没有约束”而
+    误判通过——空集合视为该侧锚点缺失，直接拒绝。"""
+    from app import stages
+
+    assert stages._status_fact_quote_dual_anchor_verified(
+        "孟浩与血妖宗结盟", set(), {"血妖宗"},
+    ) is False
+    assert stages._status_fact_quote_dual_anchor_verified(
+        "孟浩与血妖宗结盟", {"孟浩"}, set(),
+    ) is False
+
+
+def test_dual_anchor_tolerates_paired_quote_wrapping_around_whole_quote() -> None:
+    """引句被整体包了一层配对引号（全角/半角）不应引入假阴性——复用
+    `_quote_comparison_variants` 同一容错（别名回填今晚踩过的同一个坑）。"""
+    from app import stages
+
+    assert stages._status_fact_quote_dual_anchor_verified(
+        "“孟浩与靠山宗结拜为盟”", {"孟浩"}, {"靠山宗"},
+    ) is True
+
+
+ACCIDENT_MENG_KAOSHAN_CHAPTER = [
+    {"idx": 2, "title": "第二章", "content": (
+        "这里是北区杂役处，靠山宗不养废物，你二人既来到了此地，做半甲子杂役。"
+        "孟浩站在一旁，默默听着，一言不发。"
+    )},
+]
+
+
+def test_status_fact_rejected_when_quote_missing_subject_meng_kaoshan_shape() -> None:
+    """端到端红灯（真实事故复刻 1）："孟浩→靠山宗"：章级共现闸能通过（"孟浩"确实
+    出现在第 2 章），但被登记引用的这一句原文里没有"孟浩"二字——修前会走到候选判别
+    甚至登记成功，修后必须在候选判别之前就被引句双锚定闸拒绝。"""
+    from app import stages
+
+    chapters_by_idx = stages._chapters_by_idx(ACCIDENT_MENG_KAOSHAN_CHAPTER)
+    quote = "这里是北区杂役处，靠山宗不养废物，你二人既来到了此地，做半甲子杂役"
+    # 先确认：旧声明闸（不含双锚定）确实会误放行——证明这道新闸补的是真实漏洞。
+    assert stages._alias_declaration_verified(
+        chapters_by_idx, {"孟浩"}, "靠山宗", 2, quote,
+    ) is True
+
+    resolved = asyncio.run(stages._status_fact_evidence_resolution(
+        chapters_by_idx, {"孟浩"}, "靠山宗", "孟浩", 2, quote, None, None,
+        fact_noun="势力归属", roster={"孟浩": ["孟浩"]},
+    ))
+    assert resolved["accepted"] is False
+    assert resolved["reason"] == "quote_missing_dual_anchor"
+
+
+ACCIDENT_XU_QING_CHAPTER = [
+    {"idx": 1, "title": "第一章", "content": (
+        "许清抬头看了一眼，淡淡道：靠山宗。"
+    )},
+]
+
+
+def test_status_fact_rejected_when_quote_is_bare_org_xu_qing_shape() -> None:
+    """端到端红灯（真实事故复刻 2）："许清→靠山宗"：引句只剩组织名三个字，什么都没
+    锚定——同样必须在候选判别之前被拒绝。"""
+    from app import stages
+
+    chapters_by_idx = stages._chapters_by_idx(ACCIDENT_XU_QING_CHAPTER)
+    quote = "靠山宗。"
+    assert stages._alias_declaration_verified(
+        chapters_by_idx, {"许清"}, "靠山宗", 1, quote,
+    ) is True
+
+    resolved = asyncio.run(stages._status_fact_evidence_resolution(
+        chapters_by_idx, {"许清"}, "靠山宗", "许清", 1, quote, None, None,
+        fact_noun="势力归属", roster={"许清": ["许清"]},
+    ))
+    assert resolved["accepted"] is False
+    assert resolved["reason"] == "quote_missing_dual_anchor"
+
+
+ACCIDENT_WANG_HAN_CHAPTER = [
+    {"idx": 27, "title": "第二十七章", "content": (
+        "王腾飞冷笑一声，转身离去，未再多言。"
+        "\"孟浩，上官师叔寻你有事，你随我走一趟吧。\"韩宗看都不看其他人一眼，"
+        "望着孟浩，冷淡开口。王腾飞在一旁冷眼旁观，并未说话，脸色阴沉。"
+    )},
+]
+
+
+def test_status_fact_relation_rejected_when_quote_missing_subject_wang_han_shape() -> None:
+    """端到端红灯（真实事故复刻 3，彻头彻尾的假事实）："王腾飞 同党/同门→韩宗"：
+    章级共现闸通过（"王腾飞"在第 27 章确实出现多次），但被登记引用的这一句是韩宗对
+    孟浩说话，句中根本没有王腾飞——必须被引句双锚定闸拒绝，不能让"章级共现"顶替
+    "引句本身包含主体"。"""
+    from app import stages
+
+    chapters_by_idx = stages._chapters_by_idx(ACCIDENT_WANG_HAN_CHAPTER)
+    quote = (
+        "\"孟浩，上官师叔寻你有事，你随我走一趟吧。\"韩宗看都不看其他人一眼，"
+        "望着孟浩，冷淡开口。"
+    )
+    assert stages._alias_declaration_verified(
+        chapters_by_idx, {"王腾飞"}, "韩宗", 27, quote,
+    ) is True
+
+    resolved = asyncio.run(stages._status_fact_evidence_resolution(
+        chapters_by_idx, {"王腾飞"}, "韩宗", "王腾飞", 27, quote, None, None,
+        fact_noun="人物关系", roster={"王腾飞": ["王腾飞"], "韩宗": ["韩宗"]},
+    ))
+    assert resolved["accepted"] is False
+    assert resolved["reason"] == "quote_missing_dual_anchor"
+
+
+def test_status_fact_accepted_when_quote_dual_anchored_positive_shape(monkeypatch) -> None:
+    """正例（不得误伤）：主体与对象都在引句里的真实形状——李富贵与孟浩的友情关系，
+    加闸前后都应当通过（不是这道闸要拒绝的对象）。"""
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters = [{"idx": 3, "title": "第三章", "content": (
+        "李富贵拍了拍孟浩的肩膀：\"孟浩，你是我李富贵这一辈子的好朋友。\""
+    )}]
+    chapters_by_idx = stages._chapters_by_idx(chapters)
+    quote = "孟浩，你是我李富贵这一辈子的好朋友。"
+    roster = {"李富贵": ["李富贵"], "孟浩": ["孟浩"]}
+
+    monkeypatch.setattr(
+        model_gateway, "chat_structured",
+        _fake_verdict_chat_structured("李富贵"),
+    )
+    resolved = asyncio.run(stages._status_fact_evidence_resolution(
+        chapters_by_idx, {"李富贵"}, "孟浩", "李富贵", 3, quote, None, None,
+        fact_noun="人物关系", roster=roster,
+    ))
+    assert resolved["accepted"] is True
+    assert resolved["chapter_idx"] == 3
+    assert resolved["quote"] == quote
+
+
 # ---------- 4. backfill_character_status_facts：全书上下文一次性回填 ----------
 
 def test_backfill_registers_verified_affiliation_and_relation_and_freezes_other_fields(
