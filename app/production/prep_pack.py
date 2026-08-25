@@ -225,7 +225,7 @@ from app.validators import (
     match_scene_name,
 )
 
-PREP_PACK_VERSION = "1.8.0"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "1.8.1"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
 # gained functional_extras; 1.4.0: coverage_ledger gained paratext (deterministic
 # keyword/position classifier, since replaced); 1.4.1: paratext classification
@@ -379,6 +379,21 @@ PREP_PACK_VERSION = "1.8.0"  # 1.1.0: event_chain entries carry source_span (P1 
 # 结构的扩展，不破坏 payload 冻结纪律，但会实际改变一部分此前落
 # functional_extras 的标签的解析结果（真正的 prompt-contract/行为变更），
 # 比照 1.4.1/1.6.1 的先例推进版本号。
+# 1.8.1（真实数据、已完整诊断的后续事故，prompt-contract 变更，版本推进）：
+# 1.8.0 机制本身工作正常，但目标案例（"银色长袍女子"应绑定许清）仍然失败——
+# 卷宗检索（_prep_pack_functional_candidate_dossier）靠 `label in seg.text`
+# 逐字匹配定位，而标签本身是模型转述短语、原文 0 次逐字出现，定位从一开始
+# 就打空，候选锚点段落失去参照点后退化成文档顺序，主角"孟浩"开篇独白段落
+# 吃光预算，真正的证据段"许师姐"（许清已确认别名，紧邻案发现场）进不去
+# 卷宗，模型如实回答"无法确定"（模型本身没有错，是喂给它的卷宗本身没有
+# 证据）。修复：卷宗主锚点改用事件跨度定位——见 _prep_pack_functional_
+# candidate_event_span_segments（标签所属事件的 source_span 覆盖段落，
+# 事件链抽取模型必须为每个事件声明这个字段，不依赖标签措辞是否逐字命中
+# 原文）与 _prep_pack_functional_candidate_dossier 改造后的完整说明。这
+# 会实际改变发给候选判别模型的卷宗内容本身（真正的 prompt-contract 变更，
+# 会实际改变部分此前误落 functional_extras 的标签的判别结果），asset_
+# manifest/event_chain 的 payload 结构与既有 provenance.method 取值集合
+# 均未改变，比照 1.4.1/1.6.1 的先例推进版本号（第三位，不动 schema 位）。
 QA_PROFILE_VERSION = "prep-pack-qa-gate-1"
 _QA_EVALUATOR_NAME = "screenplay_production_qa"
 _CHUNK_MAX_CHARS = 6000
@@ -1537,6 +1552,8 @@ async def _discover_new_scenes(
 #      自然段切分本集原文，覆盖全部候选各自的出场证据——不能只收集被测
 #      标签周围的证据，那会让下一步的选择题名存实亡（stages.py 已验证的
 #      真实教训：模型看不到正确候选的材料，只能靠反复出现的候选拍脑袋）。
+#      1.8.1 起卷宗主锚点改为事件跨度定位，见该函数与 _prep_pack_
+#      functional_candidate_event_span_segments 的完整说明（下面单独一段）。
 #   3) 裁决（模型，唯一一次调用，_prep_pack_functional_candidate_call）：
 #      候选选择题——"标签 X 最可能指候选中的哪一位"，候选集之外强制一个
 #      "都不是/无法确定"选项，schema 用 enum 收紧到候选集与卷宗段号。不是
@@ -1561,6 +1578,25 @@ async def _discover_new_scenes(
 # 这类外貌描述在长篇小说里能撞上一大片人，模糊匹配就是下一个误绑事故）——
 # 本节全程只用"人物谱角色的规范名/已确认别名是否逐字命中原文"这一结构判据
 # 构造候选与卷宗，谁是正确答案完全交给模型基于真实原文独立判别。
+#
+# 1.8.1（真实数据、已完整诊断的后续事故）：上面 1.8.0 机制本身工作正常
+# （EP1 实测 10 次调用全部 OK），但目标案例仍然失败——标签"银色长袍女子"→
+# 候选集正确含"许清"→模型却答"都不是/无法确定"，因为卷宗（2)步骤检索出
+# 的段落里根本没有任何相关证据：`label in seg.text` 逐字匹配"银色长袍女子"
+# 在原文里 0 次命中（原文写的是"穿着一身银色长袍"，模型转述成了这个标签，
+# 不是原文字面），both/text_only 两类因此全空；候选锚点段落（anchor_only）
+# 在失去参照点后退化成文档顺序，主角"孟浩"几乎每段都出现的开篇独白段落
+# 吃光了卷宗预算，"许师姐"（许清的已确认别名，紧邻"银袍女子被绿袍男子
+# 称许师姐"这一幕）那两段根本没进卷宗——这正是 stages.py._alias_verdict_
+# dossier docstring 里写明要防的"主角淹没预算"陷阱，prep_pack 这侧因为缺
+# 标签锚点而失效。修法：卷宗主锚点改用事件跨度定位而非标签字面匹配——见
+# _prep_pack_functional_candidate_event_span_segments（标签所属事件的
+# source_span 覆盖段落，事件链抽取模型必须为每个事件声明这个字段，不依赖
+# 标签措辞是否逐字命中原文）与 _prep_pack_functional_candidate_dossier
+# 改造后的两层主锚点 + 候选锚点段落按"离事件跨度的邻近度"补足预算（详见
+# 两个函数各自的完整 docstring）。label 逐字命中原文这条路径继续保留、
+# 不因为改用事件定位就丢弃（有些标签确实是原文用词）；事件跨度缺失/为空
+# 时防御性退回 1.8.1 之前的既有行为，不崩。
 
 _PREP_PACK_FUNCTIONAL_CANDIDATE_NO_MATCH_LABEL = "都不是/无法确定"
 _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES = 12  # 单条候选判别卷宗最多收录的段落数
@@ -1595,45 +1631,134 @@ def _prep_pack_functional_candidate_names(
     ]
 
 
+def _prep_pack_functional_candidate_event_span_segments(
+    events: list[dict[str, Any]], label: str,
+) -> set[int]:
+    """标签 -> 事件跨度段号并集（1.8.1，见 PREP_PACK_VERSION 上方大注释、
+    _prep_pack_functional_candidate_dossier 的完整说明）：结构判据，零语义。
+    取本集事件链里作为某个 ``event["characters"][].display_name`` 逐字等于
+    ``label`` 出现过的全部事件，各自 ``source_span``（``{"from_segment",
+    "to_segment"}``，闭区间，跟 ``index_source_segments`` 返回的段号同一
+    全局 1-based 域，见本文件 ``_chunk_segments`` 上方"全局域"说明）取并集。
+
+    根因回顾：``label`` 本身很多时候是事件链抽取模型转述/综合出的描述短语
+    （真实事故：标签"银色长袍女子"在原文里逐字出现 0 次，原文写的是"穿着
+    一身银色长袍"），靠 label 逐字匹配原文定位卷宗从一开始就会打空、进而让
+    候选锚点段落在缺少参照点时退化成文档顺序——先出现的候选（哪怕跟这个
+    标签毫不相干，只是恰好在开篇反复出场）会吃光卷宗预算，真正相关的证据
+    段进不去卷宗，模型自然只能如实回答"无法确定"。但事件链抽取模型必须为
+    每个事件声明 source_span（硬性 schema 契约，见 ``_ModelEvent``），这个
+    字段不依赖标签措辞是否逐字命中原文，天然是比"标签字面命中"更可靠的
+    定位锚——供 ``_prep_pack_functional_candidate_dossier`` 当作卷宗主锚点
+    第一层（见该函数文档）。
+
+    防御：单个 event 的 ``source_span`` 缺失、不是 dict、``from_segment``/
+    ``to_segment`` 不是 int、或区间倒挂，一律跳过该事件、不参与并集，不崩、
+    不抛异常——调用方在整体结果为空集时自行退回既有的字面匹配行为（见
+    ``_prep_pack_functional_candidate_dossier`` 的 ``event_span_segments``
+    缺省空集分支）。返回的段号不做越界裁剪（是否落在 ``segments`` 实际
+    范围内由 ``_prep_pack_functional_candidate_dossier`` 自己核验），这里
+    只负责"结构性地把标签所属事件声明的跨度摊开成段号集合"这一件事。"""
+    spans: set[int] = set()
+    for event in events:
+        characters = event.get("characters") or []
+        if not any(
+            isinstance(mention, dict)
+            and str(mention.get("display_name") or "").strip() == label
+            for mention in characters
+        ):
+            continue
+        span = event.get("source_span")
+        if not isinstance(span, dict):
+            continue
+        from_segment = span.get("from_segment")
+        to_segment = span.get("to_segment")
+        if not isinstance(from_segment, int) or not isinstance(to_segment, int):
+            continue
+        if from_segment > to_segment:
+            continue
+        spans.update(range(from_segment, to_segment + 1))
+    return spans
+
+
 def _prep_pack_functional_candidate_dossier(
     segments: list[SourceSegment], label: str, anchor_texts: set[str],
+    event_span_segments: set[int] = frozenset(),
 ) -> list[dict[str, Any]]:
-    """裁决卷宗检索：跟 app.stages._alias_verdict_dossier 同一套三层优先级
-    （both 全收 → text_only 全收 → anchor_only 按离最近的 both/text_only
-    段落远近补足预算），这里的"章"就是本集 ``segments``（``index_source_
-    segments(source_text)`` 的结果）本身，不需要先定位桥接章。
-    ``anchor_texts`` 必须覆盖全部候选的规范名∪已确认别名（调用方负责传
-    全，不只是被测标签自己）——否则模型看不到其它候选各自的出场证据，
-    选择题就名存实亡（见本节顶部大注释）。
+    """裁决卷宗检索（1.8.1 改用事件跨度定位主锚点，见 PREP_PACK_VERSION
+    上方大注释与 _prep_pack_functional_candidate_event_span_segments 的
+    完整根因说明——真实事故：标签"银色长袍女子"逐字定位打空，卷宗被主角
+    孟浩开篇独白段落吃光预算，真正的证据段"许师姐"进不去卷宗）。
 
-    ``label`` 是原始提及文本本身（如"银色长袍女子"）——它不保证逐字出现在
-    本集原文里（事件链抽取模型有时会转述/综合），both/text_only 两类因此
-    可能为空；这时优先级退化为只剩 anchor_only（不再有"离标签最近"这个
-    参照点，按文档顺序返回，见 priority_indexes 为空的分支）。只要候选集
-    非空，anchor_only 必然非空——候选正是靠 anchor 命中本集才入选的（见
-    _prep_pack_functional_candidate_names），不会出现"候选非空但卷宗为空"
-    这种情况；调用方仍需处理空列表这个防御性分支。"""
-    both_indexes: list[int] = []
-    text_only_indexes: list[int] = []
+    两层主锚点（必须优先全部收录，受条数/字数上限约束时按段号升序做
+    确定性截断——不炸预算的前提下谁先出现在原文里谁先进卷宗）：
+      1) ``event_span_segments``：该标签所属事件（调用方用
+         _prep_pack_functional_candidate_event_span_segments 算出）的
+         source_span 覆盖到的段落——不依赖标签字面能否逐字命中原文，是
+         本轮修复的核心，见上面函数的完整说明。越界/非法段号（不在
+         ``[1, len(segments)]``）一律丢弃，不崩。
+      2) ``label`` 逐字命中原文的段落（1.8.0 起既有路径，保留：有些标签
+         确实是原文用词，这条路径不因为改用事件定位就丢弃）——已经在
+         第①层收录过的段不重复计入这一层。
+
+    候选锚点段落（``anchor_texts``，候选的规范名∪已确认别名逐字命中的段，
+    调用方负责传全部候选、不只是被测标签自己——否则模型看不到其它候选
+    各自的出场证据，选择题就名存实亡，见本节顶部大注释）不再是"离标签
+    最近"，而是按到主锚点（优先事件跨度段落；事件跨度为空时退回 label
+    逐字命中段落——即事件跨度缺失/为空的防御性回退，见下方）的邻近度
+    升序补足预算：离案发现场越近越优先，距离相同按段号升序确定性打破
+    平局。这就是"许师姐"两段能排到孟浩开篇独白前面的机制——它们紧邻
+    案发现场（银袍女子登场+绿袍男子称许师姐所在的事件跨度），孟浩的
+    开篇段落离得远。
+
+    事件跨度缺失或为空（``event_span_segments`` 为空集，例如标签不属于
+    任何声明了合法 source_span 的事件——防御性场景，正常流程下不应发生）
+    时，主锚点退化为只剩"label 逐字命中段落"，候选锚点段落的邻近度参照
+    点也相应退化为这些段落——完全等价于 1.8.1 之前的既有行为，不引入
+    任何新的失败模式。label 逐字命中段落也为空时（1.8.0 起就有的既有
+    分支：label 是转述/综合短语，原文没有这个字面）主锚点整体为空，候选
+    锚点段落此时没有邻近度参照点，按文档顺序返回（见 primary_indexes 为
+    空的分支）。只要候选集非空，候选锚点段落集合本身必然非空——候选正是
+    靠 anchor 命中本集才入选的（见 _prep_pack_functional_candidate_names），
+    不会出现"候选非空但卷宗为空"这种情况（除非事件跨度和 label 命中都为
+    空同时候选锚点也为空，理论上不可能）；调用方仍需处理空列表这个
+    防御性分支。"""
+    total_segments = len(segments)
+    # 主锚点第一层：段号来自调用方传入的事件跨度集合，可能包含越界/非法
+    # 值（防御性输入，不假设调用方一定传的是干净数据）——落在
+    # [1, total_segments] 之外的一律丢弃；转 0-based 并按段号升序排序，
+    # 截断顺序完全由段号本身决定，不依赖 set 的遍历顺序（确定性纪律）。
+    event_span_indexes = sorted(
+        {index - 1 for index in event_span_segments if 1 <= index <= total_segments},
+    )
+    event_span_index_set = set(event_span_indexes)
+    # 主锚点第二层：label 逐字命中、且未被第一层收录过的段。
+    label_text_indexes: list[int] = []
     anchor_only_indexes: list[int] = []
     for index, seg in enumerate(segments):
+        if index in event_span_index_set:
+            continue
         has_text = bool(label) and label in seg.text
+        if has_text:
+            label_text_indexes.append(index)
+            continue
         has_anchor = any(anchor and anchor in seg.text for anchor in anchor_texts)
-        if has_text and has_anchor:
-            both_indexes.append(index)
-        elif has_text:
-            text_only_indexes.append(index)
-        elif has_anchor:
+        if has_anchor:
             anchor_only_indexes.append(index)
-    priority_indexes = both_indexes + text_only_indexes
-    if priority_indexes:
+    primary_indexes = event_span_indexes + label_text_indexes
+    # 候选锚点段落的邻近度参照点：优先事件跨度段落本身（"离案发现场的
+    # 远近"，第2点要求的字面）；事件跨度为空时退回 label 命中段落——这正是
+    # 第4点"事件跨度缺失时退回既有行为"的落地点（既有行为的参照点就是
+    # label 命中段落，见本函数改造前版本的 priority_indexes）。
+    proximity_anchor = event_span_indexes or label_text_indexes
+    if proximity_anchor:
         anchor_only_ordered = sorted(
             anchor_only_indexes,
-            key=lambda index: (min(abs(index - anchor) for anchor in priority_indexes), index),
+            key=lambda index: (min(abs(index - anchor) for anchor in proximity_anchor), index),
         )
     else:
         anchor_only_ordered = anchor_only_indexes
-    ordered_candidates = priority_indexes + anchor_only_ordered
+    ordered_candidates = primary_indexes + anchor_only_ordered
     selected: list[int] = []
     used_chars = 0
     for index in ordered_candidates:
@@ -1761,6 +1886,7 @@ def _prep_pack_functional_candidate_pin_segment(
 async def _prep_pack_resolve_functional_extra_candidate(
     conn, *, project_id: str, episode_id: str, episode_no: int,
     label: str, source_text: str, segments: list[SourceSegment], bible: Bible,
+    events: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     """未解析标签的候选判别入口：候选集为空、卷宗为空、模型选"都不是/
     无法确定"、选中值不在候选集内（协议层已经不可能，这里仍防御性核验）、
@@ -1768,6 +1894,13 @@ async def _prep_pack_resolve_functional_extra_candidate(
     冲突（复用既有 _prep_pack_cross_episode_alias_conflict，同一套"不确定
     不绑"纪律），一律返回 None——调用方维持原行为，标签留在
     skip_character_names 正常落 functional_extras，绝不猜。
+
+    ``events``（1.8.1 新增参数）：本集事件链（调用方 _resolve_assets 自己
+    的 events 参数原样传入），用于 _prep_pack_functional_candidate_event_
+    span_segments 算出这个标签所属事件的 source_span 覆盖段落，作为卷宗
+    检索的主锚点——见该函数与 _prep_pack_functional_candidate_dossier 的
+    完整根因说明（标签字面定位在"标签是模型转述短语"时会打空，事件跨度
+    不依赖字面命中）。
 
     返回非 None 时是 ``{"canonical_name": ..., "segment_index": ...,
     "text": ...}``：``canonical_name`` 供调用方写入 character_rename（重新
@@ -1780,7 +1913,10 @@ async def _prep_pack_resolve_functional_extra_candidate(
     if not candidates:
         return None
     anchor_texts = {form for name in candidates for form in roster.get(name, [])}
-    dossier = _prep_pack_functional_candidate_dossier(segments, label, anchor_texts)
+    event_span_segments = _prep_pack_functional_candidate_event_span_segments(events, label)
+    dossier = _prep_pack_functional_candidate_dossier(
+        segments, label, anchor_texts, event_span_segments,
+    )
     if not dossier:
         return None
     response = await _prep_pack_functional_candidate_call(
@@ -2471,7 +2607,7 @@ async def _resolve_assets(
                 resolution = await _prep_pack_resolve_functional_extra_candidate(
                     conn, project_id=project_id, episode_id=episode_id,
                     episode_no=episode_no, label=name, source_text=source_text,
-                    segments=segments, bible=bible,
+                    segments=segments, bible=bible, events=events,
                 )
                 if resolution is None:
                     continue

@@ -132,11 +132,19 @@ def _bible_character(
     }
 
 
-def _event(event_id: str, *, characters=None, scenes_=None) -> dict:
+def _event(event_id: str, *, characters=None, scenes_=None, source_span=None) -> dict:
+    """``source_span``（可选，形状 ``{"from_segment": int, "to_segment": int}``）
+    默认 None，匹配生产 payload_events 里同名字段（见 app.production.
+    prep_pack 模块顶部 payload docstring）——只有需要驱动 1.8.1 事件跨度
+    卷宗定位（``_prep_pack_functional_candidate_event_span_segments``）的
+    测试才需要显式传入，其余既有测试留空即可（``_resolve_assets``/`_pass`
+    在这条改造前就只读 event_id/characters/scenes[/source_evidence]，
+    新增的 None 默认值不影响任何既有断言）。"""
     return {
         "event_id": event_id,
         "characters": characters or [],
         "scenes": scenes_ or [],
+        "source_span": source_span,
     }
 
 
@@ -2998,10 +3006,212 @@ def test_candidate_verdict_out_of_dossier_segment_rejected_stays_functional_extr
     assert any(e["label"] == "银色长袍女子" for e in functional_extras)
 
 
+# ---------------------------------------------------------------------------
+# 1.8.1（真实数据、已完整诊断的后续事故）：上面 1.8.0 的机制本身没坏，但
+# 目标案例仍然失败——`label in seg.text` 逐字定位卷宗时，标签"银色长袍
+# 女子"在原文里 0 次逐字出现（原文写的是"穿着一身银色长袍"），both/
+# text_only 两类全空，候选锚点段落失去参照点后退化成文档顺序，主角"孟浩"
+# 反复出现的开篇独白段落吃光卷宗预算，真正的证据段（"许师姐"，紧邻案发
+# 现场）根本没进卷宗，模型如实回答"无法确定"（模型没有错，是卷宗本身没
+# 证据）。修法：卷宗主锚点改用标签所属事件的 source_span 定位，不依赖
+# 标签字面。以下测试覆盖 PREP_PACK_VERSION 上方 1.8.1 大注释列出的五点
+# 要求：①事件跨度段落必须优先全部收录；②候选锚点段落改按到事件跨度的
+# 邻近度排序；③标签字面命中时继续收录为主锚点之一；④事件跨度缺失/为空
+# 时防御性退回既有行为；⑤全程确定性可复现。
+# ---------------------------------------------------------------------------
+
+def test_functional_candidate_event_span_segments_unions_matching_events_defensively():
+    """单元测试：_prep_pack_functional_candidate_event_span_segments 只并集
+    "标签命中该事件某个角色提及"的事件各自的 source_span，覆盖标签不匹配
+    （不计入）、区间重叠（正确并集去重）、区间倒挂/非 dict/非 int/字段缺失
+    （防御性丢弃，不崩）五种形状——零语义结构判据，不含任何具体人名特判。"""
+    events = [
+        {
+            "characters": [{"display_name": "银色长袍女子"}],
+            "source_span": {"from_segment": 3, "to_segment": 5},
+        },
+        {  # 标签不匹配，不该计入并集。
+            "characters": [{"display_name": "孟浩"}],
+            "source_span": {"from_segment": 1, "to_segment": 2},
+        },
+        {  # 区间与第一条重叠，验证并集去重而不是简单拼接。
+            "characters": [{"display_name": "银色长袍女子"}],
+            "source_span": {"from_segment": 5, "to_segment": 6},
+        },
+        {  # 区间倒挂，防御性丢弃。
+            "characters": [{"display_name": "银色长袍女子"}],
+            "source_span": {"from_segment": 9, "to_segment": 3},
+        },
+        {  # source_span 不是 dict，防御性丢弃。
+            "characters": [{"display_name": "银色长袍女子"}],
+            "source_span": "not-a-dict",
+        },
+        {  # source_span 字段整个缺失，防御性丢弃。
+            "characters": [{"display_name": "银色长袍女子"}],
+        },
+        {  # from_segment 不是 int，防御性丢弃。
+            "characters": [{"display_name": "银色长袍女子"}],
+            "source_span": {"from_segment": "3", "to_segment": 5},
+        },
+    ]
+    result = prep_pack._prep_pack_functional_candidate_event_span_segments(
+        events, "银色长袍女子",
+    )
+    assert result == {3, 4, 5, 6}
+
+
+def test_functional_candidate_dossier_ignores_out_of_range_event_span_segments():
+    """反例（防御）：event_span_segments 含越界（0、超出总段数）值——一律
+    丢弃，不崩；候选锚点段落仍正常收录（此时主锚点整体为空，走文档顺序
+    兜底，即事件跨度缺失时的既有行为）。"""
+    segments = prep_pack.index_source_segments("第一段。\n\n第二段。")
+    dossier = prep_pack._prep_pack_functional_candidate_dossier(
+        segments, "不存在的标签", {"第二段"}, {0, 999, -5},
+    )
+    assert dossier == [{"segment_index": 2, "text": "第二段。"}]
+
+
+def test_functional_candidate_dossier_keeps_literal_label_segment_as_primary_alongside_event_span():
+    """要求③：标签恰好逐字出现在原文时（有些标签确实是原文用词），继续把
+    这一段当作主锚点之一收录——不因为改用事件定位就丢掉这条路径。这里标签
+    在第 5 段逐字出现，且与事件跨度（第 13/14 段）完全不相邻，两处证据都
+    必须进卷宗。"""
+    paragraphs = [f"孟浩独自盘坐山顶，心绪起伏，此为第{i}段。" for i in range(1, 13)]
+    paragraphs[4] = "远处忽然传来一声轻笑，众人抬头，只见银色长袍女子缓步而来。"
+    paragraphs.append("一个面色苍白的女子，穿着一身银色长袍，站在那里面无表情地望着孟浩。")
+    paragraphs.append("绿袍男子对着她躬身行礼，口称许师姐，随后请四人随他回宗门。")
+    source_text = "\n\n".join(paragraphs)
+    segments = prep_pack.index_source_segments(source_text)
+    assert len(segments) == 14
+    label = "银色长袍女子"
+    assert label in source_text, "本用例专测字面命中路径，前提是标签确实逐字出现"
+
+    dossier = prep_pack._prep_pack_functional_candidate_dossier(
+        segments, label, {"孟浩", "许清", "许师姐"}, {13, 14},
+    )
+    dossier_indexes = {item["segment_index"] for item in dossier}
+    assert {5, 13, 14} <= dossier_indexes, "字面命中段（5）与事件跨度段（13/14）都必须进卷宗"
+
+
+def test_unresolved_appearance_label_binds_via_candidate_verdict_using_event_span_dossier(monkeypatch):
+    """红灯→绿灯核心场景（1.8.1，复现真实数据形状）：标签"银色长袍女子"不
+    逐字出现在原文里（原文写的是"穿着一身银色长袍"）；其所属事件的
+    source_span 覆盖"银袍女子登场 + 绿袍男子称许师姐"这两段；候选集含许清
+    （确认别名"许师姐"字面出现在事件跨度内）；另有主角孟浩在事件跨度之外
+    的 12 个开篇独白段落里反复出现——足以在纯字面+文档顺序算法下吃光卷宗
+    预算（_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES == 12）。
+
+    红（嵌入本测试的第一部分）：直接调用 _prep_pack_functional_candidate_
+    dossier 时不传事件跨度——1.8.1 之前唯一的定位方式——复现事故：卷宗被
+    12 段孟浩独白占满，"许师姐"所在段完全没有进卷宗。
+    绿（第二部分）：_resolve_assets 真实调用链（经 _prep_pack_resolve_
+    functional_extra_candidate 传入 events，内部用 _prep_pack_functional_
+    candidate_event_span_segments 算出事件跨度）必须让卷宗改为优先收录
+    事件跨度段落，模型因此能看到"许师姐"证据，正确绑定许清。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-xuqing','p1','许清',1,NULL)"
+    )
+    _seed_bible_characters(conn, "p1", [
+        _bible_character(
+            "许清", appearance_canonical="常年穿银色长袍，气质清冷。",
+            aliases=[_bible_alias("许师姐", evidence_chapter_index=1)],
+        ),
+        # 决胜点：孟浩必须真的入选候选集（他的姓名在开篇 12 段里反复出现），
+        # 旧算法正是被他的候选身份连累吃光了预算——这不是"孟浩不该是候选"，
+        # 而是"候选选择题的裁决必须交给模型，卷宗不能提前把真证据挤没"。
+        _bible_character("孟浩", appearance_canonical="占位外观"),
+    ])
+
+    opening_paragraphs = [
+        f"孟浩独自盘膝坐在山顶，心绪起伏，暗自思量第{i}件往事。"
+        for i in range(1, 13)
+    ]
+    rescue_paragraphs = [
+        "一个面色苍白，看不出年纪的女子，穿着一身银色长袍，站在那里面无表情地望着孟浩。",
+        "绿袍男子对着她躬身行礼，口称许师姐，随后请四人随他回宗门。",
+    ]
+    paragraphs = opening_paragraphs + rescue_paragraphs
+    source_text = "\n\n".join(paragraphs)
+    label = "银色长袍女子"
+    assert label not in source_text, "复现事故前提：标签不是原文字面，靠字面定位卷宗必然打空"
+    assert "许师姐" in source_text
+
+    segments = prep_pack.index_source_segments(source_text)
+    assert len(segments) == 14
+    from_segment, to_segment = 13, 14
+
+    # ---- 红：1.8.1 之前唯一的定位方式（纯字面匹配 + 文档顺序兜底）----
+    anchor_texts = {"孟浩", "许清", "许师姐"}
+    pre_fix_dossier = prep_pack._prep_pack_functional_candidate_dossier(
+        segments, label, anchor_texts,
+    )
+    pre_fix_indexes = {item["segment_index"] for item in pre_fix_dossier}
+    assert to_segment not in pre_fix_indexes, "红灯前提：旧算法下许师姐段未进卷宗，事故已复现"
+    assert not any("许师姐" in item["text"] for item in pre_fix_dossier)
+    assert pre_fix_indexes == set(range(1, 13)), "红灯前提：卷宗被孟浩开篇独白 12 段占满"
+
+    # ---- 绿：真实调用链（事件跨度定位）----
+    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    seen: dict = {}
+
+    async def fake_chat_structured(messages, **kwargs):
+        # 本用例源文本超过 200 字，会先触发 _discover_new_characters 内部
+        # strip_paratext -> paratext_spans 的旁文本探测模型调用（跟候选
+        # 判别共用同一个 model_gateway.chat_structured，见
+        # app.source_paratext.paratext_spans 的 200 字阈值）——按
+        # model_type 区分两路请求，旁文本探测给"无旁文本"的安全默认响应，
+        # 不干扰本测试真正关心的候选判别调用。
+        if kwargs.get("model_type") is prep_pack._PrepPackFunctionalCandidateVerdict:
+            seen["prompt"] = str(messages[0]["content"])
+            return prep_pack._PrepPackFunctionalCandidateVerdict(
+                selected_candidate="许清", supporting_segment_index=to_segment,
+                supporting_quote="绿袍男子对着她躬身行礼，口称许师姐，随后请四人随他回宗门。",
+            )
+        from app.source_paratext import ParatextSpans
+        return ParatextSpans(spans=[])
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
+    events = [_event(
+        "ev_001",
+        characters=[{"display_name": label, "is_background_extra": True}],
+        source_span={"from_segment": from_segment, "to_segment": to_segment},
+    )]
+    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+        conn, events=events, source_text=source_text,
+    )
+
+    assert errors == []
+    by_portrait = {c["portrait_id"]: c for c in characters}
+    assert "cp-xuqing" in by_portrait, "绿：许清必须真的绑定成功"
+    entry = by_portrait["cp-xuqing"]
+    assert entry["display_appellation"] == label, "字幕/取图措辞仍须是本集原文说法，不提前剧透"
+    assert entry["provenance"]["method"] == "candidate_verdict"
+    assert entry["provenance"]["anchor_segments"] == [to_segment]
+    assert "许师姐" in entry["provenance"]["anchor_phrase"]
+    assert not any(e["label"] == label for e in functional_extras), (
+        "绑定成功后，这个标签不能再出现在 functional_extras 里"
+    )
+    # 卷宗必须真的把事件跨度两段都递给了模型（不是模型碰巧选对）。
+    assert "口称许师姐" in seen["prompt"]
+    assert "面色苍白" in seen["prompt"]
+
+
 def test_prep_pack_version_is_1_8_0():
     """版本号哨兵：本次改造（未解析角色标签候选判别——真实 EP1"银色长袍
     女子"应绑定许清却因标签类型对不上落 functional_extras 的用户诉求收口）
     新增 provenance.method="candidate_verdict" 取值、会实际改变部分此前落
     functional_extras 的标签的解析结果，版本必须推进到 1.8.0（见
-    PREP_PACK_VERSION 上方大注释）。"""
-    assert prep_pack.PREP_PACK_VERSION == "1.8.0"
+    PREP_PACK_VERSION 上方大注释）。1.8.1（同一机制的后续事故修复：卷宗
+    检索改用事件跨度定位，见 PREP_PACK_VERSION 上方 1.8.1 大注释）会实际
+    改变发给候选判别模型的卷宗内容本身，同样是 prompt-contract 变更，版本
+    再次推进——函数名/测试名沿用旧号不改，只更新断言值，避免无谓的大范围
+    改名。"""
+    assert prep_pack.PREP_PACK_VERSION == "1.8.1"
