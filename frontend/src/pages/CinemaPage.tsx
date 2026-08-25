@@ -150,7 +150,7 @@ export function deliveryReviewDisabledReason(
 
 export default function CinemaPage() {
   const { episodeId, toast } = useNav()
-  const { data: ep, error, loading, refresh: refreshEpisode } = useEpisode(episodeId!, 'cinema')
+  const { data: ep, error, status, loading, refresh: refreshEpisode } = useEpisode(episodeId!, 'cinema')
   const [mix, setMix] = useState<MixStatus | null>(null)
   const [mixBusy, setMixBusy] = useState(false)
   const [mixConfirmOpen, setMixConfirmOpen] = useState(false)
@@ -180,6 +180,7 @@ export default function CinemaPage() {
   const {
     data: polledMix,
     error: mixError,
+    status: mixErrorStatus,
     refresh: refreshMix,
   } = usePoll<MixStatus>(
     () => api.get(`/episodes/${episodeId}/mix-status`),
@@ -223,6 +224,7 @@ export default function CinemaPage() {
       <QueryState
         loading={loading}
         error={error}
+        status={status}
         hasData={false}
         objectName="成片台"
         loadingText="正在加载成片、交付检查与交付记录…"
@@ -884,6 +886,7 @@ export default function CinemaPage() {
         <QueryState
           loading={!mixError}
           error={mixError}
+          status={mixErrorStatus}
           hasData={false}
           objectName="成片状态"
           loadingText="正在检查镜头就绪度与成片状态…"

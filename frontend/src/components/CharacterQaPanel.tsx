@@ -183,7 +183,7 @@ export default function CharacterQaPanel({
                     : ''
               return (
                 <article key={id} className="portrait-candidate-item">
-                  {candidate.image_url && <img src={candidate.image_url} alt={`${characterName} 候选定妆`} />}
+                  {candidate.image_url && <img src={candidate.image_url} alt={`${characterName} 候选定妆`} loading="lazy" decoding="async" />}
                   <div>
                     <div className="portrait-candidate-head">
                       <b>{isCurrent ? '当前采用' : candidate.historical ? '历史候选' : isSingleImage ? '失败单图候选' : '候选包'}</b>

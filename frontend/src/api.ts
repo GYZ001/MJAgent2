@@ -2025,8 +2025,11 @@ export interface Episode {
     stage_index?: number;
     stage_count?: number;
     /**
-     * 旧十步重型流水线遗留的阶段列表（{key, label, status}）。后端已定稿改发
-     * prep_pack_stages（见下），两个字段目前并存；stages 只作旧产物/过渡期回退。
+     * 旧十步重型流水线遗留的阶段列表（{key, label, status}）。后端正在把集详情投影
+     * 统一到 prep_pack_stages 单源；前端已不再读这个字段做任何回退渲染——用户报告过
+     * 首屏闪现旧十步阶段带，根因就是曾经的“新字段缺失时回退旧 stages”逻辑，回退
+     * 本身已被移除（见 ScriptPage.tsx 的 resolveStages）。字段仍保留在类型里只是
+     * 因为后端可能仍在下发，不代表前端会用它。
      */
     stages?: Array<{
       key: string;
@@ -2038,10 +2041,10 @@ export interface Episode {
     /**
      * 转型后的真实轻量流程阶段列表（已定稿，2026-08-24 后端上线）：
      * [{key, display_name, state}]，state: pending/active/done/blocked。
-     * ScriptPage.tsx 的选源逻辑：prep_pack_stages 存在且非空 → 用它；否则回退到
-     * 上面的旧 `stages`。两个字段的具体项都仍过 normalizeStage 的三级回退
-     * （display_name ?? label ?? key，state ?? status ?? 'pending'）防御，不假设
-     * 后端此后再也不会漏字段。
+     * 这是阶段带渲染的唯一数据源（见 ScriptPage.tsx 的 resolveStages）：缺失或为
+     * 空数组时前端不再回退到上面的旧 `stages`，只渲染轻量占位骨架或完全不渲染。
+     * 具体每一项仍过 normalizeStage 的三级文本回退（display_name ?? label ?? key，
+     * state ?? status ?? 'pending'）防御，防止这个字段自身漏子字段时渲出空文本。
      */
     prep_pack_stages?: Array<{
       key: string;

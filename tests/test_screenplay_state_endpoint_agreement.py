@@ -68,3 +68,28 @@ def test_script_view_still_withholds_the_full_projection_column() -> None:
     # 判定看得见投影，响应体依旧不回传它。
     assert "screenplay_json" not in detail
     assert detail["screenplay"]["full_script_text"].startswith("【场1】")
+
+
+def test_episode_detail_and_light_status_agree_on_prep_pack_stages() -> None:
+    """红灯（第32轮，用户报告：首屏闪现旧十步阶段带后消失，根因见
+    app.production.revision.screenplay_production_state 模块级 docstring
+    的 E 类教训——同一语义两个端点两套目录）：集详情投影
+    （episode_detail，首屏来源）与轻量状态端点
+    （screenplay_lightweight_status，轮询来源）对同一集必须给出完全一致的
+    prep_pack_stages——单一真源落地后，两个端点不该再各自算出一份不同的
+    阶段快照，不允许任何"先渲染集详情、轮询才纠正"的窗口存在。"""
+    detail = api.episode_detail("e1", view="script")
+    status = api.screenplay_lightweight_status("e1")
+
+    assert "prep_pack_stages" in detail["screenplay_production"]
+    assert (
+        detail["screenplay_production"]["prep_pack_stages"]
+        == status["prep_pack_stages"]
+    )
+    assert (
+        detail["screenplay_production"]["prep_pack_stages"]
+        == status["screenplay_production"]["prep_pack_stages"]
+    )
+    # 旧十步目录已经从 rev is None（当前架构常态）分支清理，集详情投影不
+    # 应该再带着它——这正是曾经首屏闪现的那份数据源。
+    assert "stages" not in detail["screenplay_production"]

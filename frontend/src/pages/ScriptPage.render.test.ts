@@ -117,7 +117,7 @@ const generatingEpisode = () => ({
     task_finished_at: null,
     can_resume_repair: false,
     can_resume_baseline: false,
-    stages: [
+    prep_pack_stages: [
       { key: 'event_chain_extraction', display_name: '事件链抽取', state: 'active' },
       { key: 'asset_mapping', display_name: '资产映射', state: 'pending' },
     ],
@@ -134,7 +134,7 @@ const readyEpisode = () => {
     screenplay_production: {
       ...base.screenplay_production,
       task_active: false,
-      stages: [
+      prep_pack_stages: [
         { key: 'event_chain_extraction', display_name: '事件链抽取', state: 'done' },
         { key: 'asset_mapping', display_name: '资产映射', state: 'done' },
       ],
@@ -155,6 +155,76 @@ const readyEpisode = () => {
     },
   }
 }
+
+// 用户报告过首屏闪现旧十步阶段带：后端把集详情投影统一到 prep_pack_stages 单源的
+// 过渡期里，响应有短暂窗口只带旧 `stages`（十步重型流水线遗留）、还没带
+// `prep_pack_stages`。曾经的 resolveStages 在这种情况下会回退渲染旧十步，这就是
+// 闪现的真实根因。回退已被物理移除：这里直接构造"只有旧 stages、没有
+// prep_pack_stages"的响应，断言整棵渲染树里一个旧阶段名都不出现，且换成骨架占位。
+const legacyOnlyEpisode = () => {
+  const base = generatingEpisode()
+  return {
+    ...base,
+    screenplay_production: {
+      ...base.screenplay_production,
+      // base（generatingEpisode）已经带了 prep_pack_stages；这里必须显式清掉，
+      // 否则"只有旧字段"这个前提就不成立——resolveStages 会照常选中它，
+      // 测出来的是"两字段并存"场景，不是本测试要覆盖的过渡期场景。
+      prep_pack_stages: undefined,
+      stages: [
+        { key: 'CHARACTER_DISCOVERY', label: '人物识别', status: 'completed' },
+        { key: 'BLUEPRINT_GENERATION', label: '叙事蓝图', status: 'completed' },
+        { key: 'IDENTITY_FREEZE', label: '身份冻结', status: 'in_progress' },
+        { key: 'ENVELOPE_GENERATION', label: '全局包络', status: 'pending' },
+        { key: 'SCENE_SHARD_GENERATION', label: '场次写作', status: 'pending' },
+        { key: 'IR_MERGE', label: '全局编译', status: 'pending' },
+        { key: 'STRUCTURE_VALIDATION', label: '结构校验', status: 'pending' },
+        { key: 'QUALITY_SCORING', label: '质量评分', status: 'pending' },
+        { key: 'PUBLISHING', label: '原子发布', status: 'pending' },
+        { key: 'SUCCEEDED', label: '已完成', status: 'pending' },
+      ],
+    },
+  }
+}
+describe('ScriptPage stage-bar flash regression (legacy stages must never render, not even transiently)', () => {
+  beforeEach(() => {
+    installHostStubs()
+    mockScriptState.ep = null
+    mockScriptState.project = null
+  })
+  afterEach(() => {
+    uninstallHostStubs()
+  })
+
+  it('renders the skeleton placeholder — never the old 10-step names — when only legacy stages is present', () => {
+    mockScriptState.ep = legacyOnlyEpisode()
+    let renderer: TestRenderer.ReactTestRenderer
+    act(() => { renderer = TestRenderer.create(React.createElement(ScriptPage)) })
+    const serialized = JSON.stringify(renderer!.toJSON())
+
+    for (const legacyName of ['人物识别', '叙事蓝图', '身份冻结', '全局包络', '场次写作', '全局编译', '质量评分', '原子发布']) {
+      expect(serialized).not.toContain(legacyName)
+    }
+    expect(serialized).toContain('prep-stepper-skeleton')
+    expect(serialized).not.toContain('prep-stepper-item')
+
+    act(() => { renderer!.unmount() })
+  })
+
+  it('keeps rendering the skeleton across a re-render (not just on first mount) while legacy-only data persists', () => {
+    mockScriptState.ep = null
+    let renderer: TestRenderer.ReactTestRenderer
+    act(() => { renderer = TestRenderer.create(React.createElement(ScriptPage)) })
+
+    mockScriptState.ep = legacyOnlyEpisode()
+    act(() => { renderer!.update(React.createElement(ScriptPage)) })
+    const serialized = JSON.stringify(renderer!.toJSON())
+    expect(serialized).not.toContain('人物识别')
+    expect(serialized).toContain('prep-stepper-skeleton')
+
+    act(() => { renderer!.unmount() })
+  })
+})
 
 describe('ScriptPage hook-order regression (React #310)', () => {
   beforeEach(() => {

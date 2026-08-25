@@ -125,7 +125,16 @@ def test_delete_published_screenplay_does_not_project_historical_completed_stage
     after = screenplay_production_state("e1")
     assert after["operation"] == "baseline"
     assert "quality_score" not in after
-    assert all(stage["status"] == "pending" for stage in after["stages"])
+    # 第32轮单一真源收口：rev is None 分支不再下发旧十步 "stages"（连同
+    # 硬编码的 phase="CHARACTER_DISCOVERY" 假值一起清理，见
+    # app.production.revision.screenplay_production_state 模块级 E 类
+    # 教训 docstring）——删除后回到没有任何 prep_pack workflow_run 的干净
+    # 状态，真实来源 prep_pack_stages 全部 pending，phase 投影落在第一步。
+    assert "stages" not in after
+    assert all(stage["state"] == "pending" for stage in after["prep_pack_stages"])
+    assert after["phase"] == after["prep_pack_stages"][0]["key"]
+    assert after["stage_index"] == 0
+    assert after["stage_count"] == len(after["prep_pack_stages"])
     historical = db.get_conn().execute(
         "SELECT status FROM production_revisions WHERE id=?",
         (revision.id,),

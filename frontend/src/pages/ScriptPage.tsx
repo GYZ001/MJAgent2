@@ -202,17 +202,20 @@ export function normalizeStage(stage: RawStage, index: number): NormalizedStage 
 }
 
 /**
- * 阶段列表选源：prep_pack_stages（已定稿的轻量流程真实阶段，2026-08-24 后端上线，
- * 4-5 步）存在且非空 → 用它；否则回退到旧 stages（十步重型流水线遗留，过渡期/旧产物
- * 兜底）。两个字段目前在 API 里并存，选源只发生一次，不是逐项合并。
+ * 阶段列表选源：只读 prep_pack_stages（已定稿的轻量流程真实阶段，2026-08-24 后端
+ * 上线，4-5 步），不再回退旧 stages（十步重型流水线遗留）。
+ *
+ * 用户报告过首屏闪现旧十步阶段带——根因是曾经的"prep_pack_stages 缺失/为空时
+ * 回退渲染旧 stages"逻辑：后端集详情投影统一到新阶段单源的过程中有短暂窗口两个
+ * 字段状态不一致，回退分支就把旧十步顺带渲了出来。这里直接不读旧字段，让这种
+ * 闪现在物理上不可能发生——不是"概率更低"，是这条代码路径已经不存在。
+ * PrepStepper 内部仍对 prep_pack_stages 自身的字段（display_name/label/key、
+ * state/status）做三级防御，那是防这个字段自己漏子字段，跟旧 stages 无关。
  */
 export function resolveStages(production: {
-  stages?: RawStage[]
   prep_pack_stages?: RawStage[]
 } | null | undefined): RawStage[] {
-  const prepPackStages = production?.prep_pack_stages
-  if (prepPackStages && prepPackStages.length > 0) return prepPackStages
-  return production?.stages ?? []
+  return production?.prep_pack_stages ?? []
 }
 
 /** 紧凑步进器：小号数字圆点 + 短标签，单行排布可换行；不管后端发来几步都不占大面积。 */
@@ -442,9 +445,11 @@ export default function ScriptPage() {
           </div>
         </div>
 
-        {/* 紧凑步进器完全由后端下发的真实阶段列表驱动，不写死步骤名/步数；
-            旧十步重型流水线的大灰框到此不再出现，新旧两种载荷都紧凑呈现。 */}
-        {stages.length > 0 && (
+        {/* 紧凑步进器只读 prep_pack_stages 单源（见 resolveStages）；旧十步重型流水线
+            的大灰框不会再作为回退出现——prep_pack_stages 缺失/为空时要么渲染与
+            步进器同高的占位骨架（production 存在、阶段数据在路上），要么什么都不渲染
+            （连 production 都没有，没有阶段概念可言）。 */}
+        {ep.screenplay_production && (
           <div className="prep-stepper-block">
             {screenplayTaskActive && ep.screenplay_production?.task_started_at && (
               <p className="prep-stepper-status" role="status">
@@ -456,7 +461,9 @@ export default function ScriptPage() {
                 />
               </p>
             )}
-            <PrepStepper stages={stages} />
+            {stages.length > 0
+              ? <PrepStepper stages={stages} />
+              : <div className="prep-stepper-skeleton" aria-label="阶段信息加载中" />}
           </div>
         )}
 

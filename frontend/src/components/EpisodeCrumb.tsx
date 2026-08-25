@@ -139,7 +139,10 @@ export default function EpisodeCrumb({ label, view, episodeNo, showProductionFil
   }
 
   const toggle = async () => {
-    if (total) {
+    // 首屏还在路上时 total 仍是 0。弱网下这段窗口有好几百毫秒，若此时吞掉点击，
+    // 按钮看着可用、点了却毫无反应，用户只会认为切换器坏了——所以照常展开，
+    // 由弹层内部呈现加载态。
+    if (total || loading) {
       setOpen(value => !value)
       return
     }
@@ -254,14 +257,23 @@ export default function EpisodeCrumb({ label, view, episodeNo, showProductionFil
             </div>
             {!matches.length && (
               <div className="episode-picker-empty" role="status">
-                <span>{query.trim() ? `没有匹配“${query.trim()}”的分集` : '当前筛选下没有分集'}</span>
-                {hasPickerFilter && (
+                <span>{loading
+                  ? '正在加载分集…'
+                  : error
+                    ? '分集加载失败'
+                    : query.trim()
+                      ? `没有匹配“${query.trim()}”的分集`
+                      : '当前筛选下没有分集'}</span>
+                {!loading && error && (
+                  <button type="button" onClick={() => { void refresh() }}>重试加载</button>
+                )}
+                {!loading && !error && hasPickerFilter && (
                   <button type="button" onClick={clearPickerFilters}>清除搜索与筛选</button>
                 )}
               </div>
             )}
             <div className="episode-picker-foot">
-              共 {total} 集
+              {loading && !total ? '正在加载分集…' : `共 ${total} 集`}
               {hasPickerFilter ? ` · 匹配 ${matchTotal} 条` : ''}
               {matchTotal > PICKER_WINDOW ? ` · 仅展示前 ${PICKER_WINDOW} 条，可继续输入缩小范围` : ''}
             </div>

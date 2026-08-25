@@ -1105,10 +1105,69 @@ def bind_unpublished_revision_metadata(
     return revision
 
 
-def screenplay_production_state(episode_id: str) -> dict[str, Any]:
-    """Return the persisted screenplay stage and UI-safe recovery action."""
-    from app import task_registry
+def _prep_pack_phase_projection(
+    prep_pack_stages: list[dict[str, Any]],
+) -> tuple[str, str, int]:
+    """把 prep_pack_stages（真实轻量流程 4 步：见
+    app.domain.screenplay_ops._prep_pack_stage_snapshot）投影成一份单值
+    phase/phase_label/stage_index——供 screenplay_production_state 在
+    ``rev is None``（当前架构下的常态，见该函数调用点上方注释）时替换掉
+    曾经硬编码"CHARACTER_DISCOVERY"/"人物识别"/0 这三个永远不变的假值。
+    优先级：active（正在跑的那一步）> blocked（卡住的那一步，同样是"当前
+    所在"）> 全部 done（已完成，落在最后一步）> 都还没开始（落在第一步）。
+    """
+    for index, stage in enumerate(prep_pack_stages):
+        if stage.get("state") in {"active", "blocked"}:
+            return (
+                str(stage.get("key") or ""),
+                str(stage.get("display_name") or ""),
+                index,
+            )
+    if prep_pack_stages and all(
+        stage.get("state") == "done" for stage in prep_pack_stages
+    ):
+        last = prep_pack_stages[-1]
+        return (
+            str(last.get("key") or ""),
+            str(last.get("display_name") or ""),
+            len(prep_pack_stages) - 1,
+        )
+    if prep_pack_stages:
+        first = prep_pack_stages[0]
+        return (
+            str(first.get("key") or ""),
+            str(first.get("display_name") or ""),
+            0,
+        )
+    return "", "", 0
 
+
+def screenplay_production_state(episode_id: str) -> dict[str, Any]:
+    """Return the persisted screenplay stage and UI-safe recovery action.
+
+    E 类教训（同一语义两个端点两套目录，真实用户回归：首屏闪现旧十步阶段
+    带后消失）：这个函数最初只服务于已废弃的重型 10 步 ProductionRevision
+    流水线（``stage_order`` 下面这十步）。app/domain/screenplay_ops.py 的
+    ``/episodes/{id}/screenplay/status`` 轮询端点后来为当前实际生效的轻量
+    prep_pack 流水线（4 步，真实反映进度，见 ``_prep_pack_stage_snapshot``）
+    单独长出了一套 ``prep_pack_stages``，但集详情投影
+    （app.domain.storyboard_ops，把这个函数的返回值整个塞进
+    ``ep["screenplay_production"]``）从未跟进——首屏读集详情拿到的是旧十步
+    目录（``rev`` 在当前架构下恒为 None，这十步永远卡在硬编码的"人物识别
+    第 1 步"，从不反映真实进度），随后 status 轮询带着真实的 4 步覆盖过来，
+    产生用户看到的"闪现"。修法：单一真源——``prep_pack_stages`` 直接复用
+    ``_prep_pack_stage_snapshot``（不复制一份实现），塞进本函数的返回值；
+    ``rev is None``（当前架构下的常态分支）下不再硬编码 phase/phase_label/
+    stage_index/stage_count 这几个永远不变的假值，改用
+    ``_prep_pack_phase_projection`` 从真实的 prep_pack_stages 投影出来。
+    ``rev is not None`` 分支（真正还有旧重型流水线 revision 记录的遗留
+    episode）保留原样不动——那十步对那条分支是真实数据，不是假值，不能
+    跟着一起被"清理"掉。
+    """
+    from app import task_registry
+    from app.domain.screenplay_ops import _prep_pack_stage_snapshot
+
+    prep_pack_stages = _prep_pack_stage_snapshot(episode_id)
     stage_order = [
         ("CHARACTER_DISCOVERY", "人物识别"),
         ("BLUEPRINT_GENERATION", "叙事蓝图"),
@@ -1177,16 +1236,23 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         None if active or not episode else episode["screenplay_updated_at"]
     )
     if rev is None:
+        # 常态分支（当前架构下 rev 恒为 None，见函数 docstring 的 E 类
+        # 教训说明）：phase/phase_label/stage_index/stage_count 改指真实的
+        # prep_pack_stages 投影，不再是硬编码的旧十步第一步假值；旧的
+        # ``stages``（十步 key/label/status 目录）在这个分支彻底清理——
+        # 没有任何 Python 调用方读它（本模块内外均已核查），frontend 也已经
+        # 停止读取它（见 frontend/src/pages/ScriptPage.tsx 的
+        # resolveStages），留着只是继续误导。
+        prep_phase, prep_phase_label, prep_stage_index = (
+            _prep_pack_phase_projection(prep_pack_stages)
+        )
         return {
             "operation": "baseline",
-            "phase": "CHARACTER_DISCOVERY",
-            "phase_label": "人物识别",
-            "stage_index": 0,
-            "stage_count": len(stage_order),
-            "stages": [
-                {"key": key, "label": label, "status": "pending"}
-                for key, label in stage_order
-            ],
+            "phase": prep_phase,
+            "phase_label": prep_phase_label,
+            "stage_index": prep_stage_index,
+            "stage_count": len(prep_pack_stages),
+            "prep_pack_stages": prep_pack_stages,
             "baseline_done": False,
             "first_evaluation_done": False,
             "task_active": active,
@@ -1297,6 +1363,13 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         "stage_index": stage_index,
         "stage_count": len(stage_order),
         "stages": stages,
+        # 单一真源（见函数 docstring 的 E 类教训）：这条分支是真的还有旧
+        # 重型流水线 revision 记录的遗留 episode，上面的 phase/phase_label/
+        # stage_index/stage_count/stages 五个字段对它是真实数据，不属于本轮
+        # 清理范围，原样保留；prep_pack_stages 仍然一并下发，跟 rev is None
+        # 分支用同一个字段名，前端统一只读这一个字段，不需要关心当前
+        # episode 内部走的是哪条流水线。
+        "prep_pack_stages": prep_pack_stages,
         "baseline_done": rev.baseline_done,
         "first_evaluation_done": rev.first_evaluation_done,
         "task_active": active,

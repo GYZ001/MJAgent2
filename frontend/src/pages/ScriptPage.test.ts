@@ -357,8 +357,9 @@ describe('normalizeStage', () => {
 })
 
 describe('resolveStages', () => {
-  // 后端已定稿上线：status payload 新增 prep_pack_stages（轻量流程真实阶段，4-5 步），
-  // 与旧 stages（十步重型流水线遗留）并存。选源规则：prep_pack_stages 存在且非空 → 用它。
+  // 用户报告过首屏闪现旧十步阶段带；根因是曾经"prep_pack_stages 缺失/为空时回退
+  // 渲染旧 stages"的逻辑，该回退已被物理移除——resolveStages 现在只读
+  // prep_pack_stages，压根不看旧 stages 字段，不管它是否存在、是否非空。
   const legacyTenStages = Array.from({ length: 10 }, (_, i) => ({
     key: `STAGE_${i}`, label: `阶段${i + 1}`, status: 'completed',
   }))
@@ -369,8 +370,11 @@ describe('resolveStages', () => {
     { key: 'coverage_and_publish', display_name: '覆盖对账与原子发布', state: 'done' },
   ]
 
-  it('prefers prep_pack_stages (4 items) over the legacy 10-item stages when both are present', () => {
-    const stages = resolveStages({ stages: legacyTenStages, prep_pack_stages: realPrepPackStages })
+  it('uses prep_pack_stages (4 items) and ignores a legacy stages field entirely when both happen to be present', () => {
+    // 后端投影还没完全统一到单源的过渡期，理论上两个字段可能同时出现在同一份响应里；
+    // 即便如此，旧字段也必须被彻底忽略——用 any 绕过类型（resolveStages 的参数类型
+    // 已经不再声明 stages），验证运行时行为，不只是类型层面的"不用它"。
+    const stages = resolveStages({ stages: legacyTenStages, prep_pack_stages: realPrepPackStages } as any)
     expect(stages).toHaveLength(4)
     expect(stages).toBe(realPrepPackStages)
     const html = renderToStaticMarkup(PrepStepper({ stages }))
@@ -378,15 +382,15 @@ describe('resolveStages', () => {
     for (const stage of realPrepPackStages) expect(html).toContain(stage.display_name)
   })
 
-  it('falls back to the legacy stages when prep_pack_stages is absent', () => {
-    expect(resolveStages({ stages: legacyTenStages })).toHaveLength(10)
+  it('returns an empty list — NOT the legacy 10-step stages — when prep_pack_stages is absent', () => {
+    expect(resolveStages({ stages: legacyTenStages } as any)).toEqual([])
   })
 
-  it('falls back to the legacy stages when prep_pack_stages is present but empty', () => {
-    expect(resolveStages({ stages: legacyTenStages, prep_pack_stages: [] })).toHaveLength(10)
+  it('returns an empty list when prep_pack_stages is present but empty, even with legacy stages alongside', () => {
+    expect(resolveStages({ stages: legacyTenStages, prep_pack_stages: [] } as any)).toEqual([])
   })
 
-  it('returns an empty list, not throwing, when production is null/undefined or both fields are missing', () => {
+  it('returns an empty list, not throwing, when production is null/undefined or the field is missing', () => {
     expect(resolveStages(null)).toEqual([])
     expect(resolveStages(undefined)).toEqual([])
     expect(resolveStages({})).toEqual([])

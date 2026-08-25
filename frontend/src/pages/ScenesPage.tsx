@@ -72,7 +72,7 @@ export function writeScenePreviewDraft(
 
 export default function ScenesPage() {
   const { projectId, toast, registerNavigationGuard } = useNav()
-  const { data: p, refresh, error, loading } = useProject(projectId!, undefined, 'scenes')
+  const { data: p, refresh, error, status, loading } = useProject(projectId!, undefined, 'scenes')
   const [busy, setBusy] = useState(false)
   const [pageSize, sceneGridRef] = useFillPageSize(SINGLE_ROW_ASSET_PAGE)
   const [listState, setListState] = usePrepListState(projectId!, 'scene-library', pageSize)
@@ -178,7 +178,7 @@ export default function ScenesPage() {
     if (restored) setScenePreview(restored)
   }, [p, payOpen, scenePreview, scenes.length])
 
-  if (error && !p) return <QueryState loading={false} error={error} hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
+  if (error && !p) return <QueryState loading={false} error={error} status={status} hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
   if (loading && !p) return <QueryState loading hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
   if (!p) return <QueryState loading hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
 
@@ -1209,7 +1209,7 @@ function SceneRefStrip({ projectId, sceneName, segments, disabled, onChanged, on
                     <button type="button" className="scene-image-button" onClick={() => onCompare([{
                       src: view.image_url!, label: `${sceneRangeLabel(seg.ep_start, seg.ep_end)} · ${sceneViewPresentation(view.view_role).label}`,
                     }])} aria-label={`放大查看${sceneViewPresentation(view.view_role).label}`}>
-                      <img src={view.image_url} alt={sceneViewPresentation(view.view_role).label} />
+                      <img src={view.image_url} alt={sceneViewPresentation(view.view_role).label} loading="lazy" decoding="async" />
                     </button>
                     <figcaption>
                       <b>{sceneViewPresentation(view.view_role).label}</b>
@@ -1243,7 +1243,7 @@ function SceneRefStrip({ projectId, sceneName, segments, disabled, onChanged, on
             ) : (
               <div style={{ width: 104, textAlign: 'center' }}>
                 {seg.image_url
-                  ? <img src={seg.image_url} alt={sceneRangeLabel(seg.ep_start, seg.ep_end)}
+                  ? <img src={seg.image_url} alt={sceneRangeLabel(seg.ep_start, seg.ep_end)} loading="lazy" decoding="async"
                       style={{ width: 104, height: 184, objectFit: 'cover', borderRadius: 6, border: '1px solid var(--hairline)' }} />
                   : <div style={{ width: 104, height: 184, borderRadius: 6, border: '1px dashed var(--hairline)',
                                   display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -1692,7 +1692,7 @@ function SceneCardImage({ src, name, dimmed, onOpen }: {
   )
   return (
     <button type="button" className="scene-visual scene-image-button" onClick={onOpen} aria-label={`放大查看${name}`}>
-      <img key={retry} src={src} alt={name} onError={() => setFailed(true)}
+      <img key={retry} src={src} alt={name} onError={() => setFailed(true)} loading="lazy" decoding="async"
         style={{ opacity: dimmed ? 0.45 : 1, transition: 'opacity 0.3s' }} />
     </button>
   )
@@ -1709,7 +1709,7 @@ function CandidateImage({ src, alt, onOpen }: { src: string; alt: string; onOpen
   )
   return (
     <button type="button" className="scene-image-button" onClick={onOpen} aria-label={`放大查看${alt}`}>
-      <img key={retry} src={src} alt={alt} onError={() => setFailed(true)} />
+      <img key={retry} src={src} alt={alt} onError={() => setFailed(true)} loading="lazy" decoding="async" />
     </button>
   )
 }

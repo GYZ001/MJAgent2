@@ -506,7 +506,7 @@ function matchesFilter(shot: Shot, filter: ShotFilter) {
 
 export default function WallPage() {
   const { projectId, episodeId, go } = useNav()
-  const { data: ep, refresh, error, loading } = useEpisode(
+  const { data: ep, refresh, error, status, loading } = useEpisode(
     episodeId || '',
     'wall',
     current => episodeBusy(current) ? 8000 : 0,
@@ -921,7 +921,7 @@ export default function WallPage() {
     finally { setStaleBusy(false) }
   }
 
-  if (error && !ep) return <QueryState loading={false} error={error} hasData={false}>{null}</QueryState>
+  if (error && !ep) return <QueryState loading={false} error={error} status={status} hasData={false}>{null}</QueryState>
   if (!ep) return <QueryState loading={loading !== false} error={null} hasData={false}>{null}</QueryState>
   const incompleteSupervisor = incompleteVideoSupervisorState(ep.video_supervisor)
   const episodeState = incompleteSupervisor

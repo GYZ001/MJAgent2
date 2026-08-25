@@ -27,6 +27,7 @@ import { AdaptivePoller, type PollInterval } from "./adaptivePoller";
 import { pickerWindowParams, resolveWindowedEpisodeId } from "./episodePicker";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
 import { canSeeSystemSettings, roleLabel } from "./auth/session";
+import ThemeSwitch from "./theme/ThemeSwitch";
 
 // 加载器单独具名：lazy() 与 hover 预取共用同一个引用，import() 天然去重。
 const loadBiblePage = () => import("./pages/BiblePage");
@@ -1147,6 +1148,7 @@ function UserMenu({
       </button>
       {open && (
         <div className="user-menu-popover">
+          <ThemeSwitch />
           <button type="button" onClick={onChangePassword}>修改密码</button>
           <button type="button" className="danger" onClick={onLogout}>登出</button>
         </div>

@@ -108,7 +108,7 @@ export default function EpisodesPage() {
   const [deleteTarget, setDeleteTarget] = useState<NonNullable<Project['episodes']>[number] | null>(null)
   const deferredSearch = useDeferredValue(search)
   const query = deferredSearch.trim().toLowerCase()
-  const { data: p, refresh, error, loading } = usePoll<Project>(
+  const { data: p, refresh, error, status, loading } = usePoll<Project>(
     () => api.get(
       `/projects/${projectId}?view=episodes&page=${page + 1}&page_size=${PAGE_SIZE}`
       + `&query=${encodeURIComponent(query)}&status_filter=${encodeURIComponent(statusFilter)}`,
@@ -202,6 +202,7 @@ export default function EpisodesPage() {
       <QueryState
         loading={loading}
         error={error}
+        status={status}
         hasData={false}
         objectName="分集规划"
         loadingText="正在加载分集、剧本与分镜制作状态…"

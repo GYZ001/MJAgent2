@@ -578,18 +578,26 @@ def screenplay_lightweight_status(episode_id: str):
     # ledger (app.production.revision.screenplay_production_state) -- for the
     # lightweight prep_pack flow (screenplay contract 6.0.0+) no
     # ProductionRevision is ever created, so ``rev`` there is always None and
-    # this field is permanently the hardcoded all-"pending" 10-step list, never
-    # reflecting real progress. ``prep_pack_stages`` below is the real,
-    # always-4-item, actual-progress-driven source for the current flow; a
-    # real mobile observation during this task's live verification run showed
-    # the old 10-step list still rendering mid-generation because the frontend
-    # fallback picked up this always-non-empty legacy field. Every other
-    # backend caller of screenplay_production_state()/_screenplay_production_state()
-    # reads the function's return value directly in Python (grepped: none read
-    # this "stages" key from this HTTP response), so dropping it only from
-    # this response shape is safe -- the underlying function/table and its own
+    # this field used to be the hardcoded all-"pending" 10-step list, never
+    # reflecting real progress. A real mobile observation during this task's
+    # live verification run showed the old 10-step list still rendering
+    # mid-generation because the frontend fallback picked up this
+    # always-non-empty legacy field. Every other backend caller of
+    # screenplay_production_state()/_screenplay_production_state() reads the
+    # function's return value directly in Python (grepped: none read this
+    # "stages" key from this HTTP response), so dropping it only from this
+    # response shape is safe -- the underlying function/table and its own
     # tests (test_screenplay_controls.py, test_screenplay_delete.py) are
     # untouched.
+    #
+    # 单一真源收口（另一轮真实回归：集详情投影首屏闪现同一套旧十步，见
+    # app.production.revision.screenplay_production_state 的模块级 E 类
+    # 教训 docstring）：``production`` 现在自带一份 ``production["prep_pack_
+    # stages"]``（跟下面显式下发的顶层 ``prep_pack_stages`` 出自同一个
+    # _prep_pack_stage_snapshot 调用，值必然一致，允许重复但不允许来源
+    # 不同）——这里的过滤只挑掉 "stages" 一个 key，不影响它随 production_
+    # for_response 原样透出，storyboard_ops.py 的集详情投影因此也拿到同一
+    # 份数据，不需要在那边另写一次。
     production_for_response = {k: v for k, v in production.items() if k != "stages"}
     return {
         "id": episode_id,
