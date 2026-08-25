@@ -62,6 +62,7 @@ from app.scene_contract import (
 from app.source_excerpt import (
     SourceSegment,
     align_source_excerpt,
+    chapter_title_segment_indexes,
     index_source_segments,
     structural_front_matter_ids,
 )
@@ -2829,11 +2830,46 @@ def _prep_pack_structural_paratext_indexes(segments: list[SourceSegment]) -> set
         if segment_id in index_by_segment_id
     }
 
+
+def _prep_pack_deterministic_title_indexes(
+    segments: list[SourceSegment], chapter_titles: list[str] | None,
+) -> set[int]:
+    """DB-anchored chapter-title segments (1.9.0, see PREP_PACK_VERSION's
+    1.9.0 note in app.production.prep_pack for the full regression history).
+
+    Unlike ``_prep_pack_structural_paratext_indexes`` above (which is only
+    ever a *candidate* the model must still separately declare in
+    ``paratext_segments`` before gate (a)(i) accepts it), this is trusted
+    unconditionally -- see this function's only caller,
+    ``build_prep_pack_span_ledger``, for where it is merged straight into
+    the ``paratext`` account without going through the declare-then-veto
+    pipeline at all. That is safe specifically *because* it is derived from
+    ``chapters.title``, a real database column, not guessed from the
+    source text's own shape or a hardcoded name/keyword list (project rule:
+    no blacklist/whitelist judgments) -- the same reasoning that sank v1
+    (a pure structural/keyword classifier, 5a67511, retired the same day)
+    does not apply here, because v1 was trying to *guess* paratext from
+    generic text shape; this only ever fires for a segment that is
+    byte-for-byte (modulo whitespace) one of THIS episode's own chapters'
+    titles.
+
+    ``chapter_titles`` is expected to already exclude NULL/blank titles (see
+    app.production.prep_pack's chapter-titles query) -- a chapter with no
+    title in the DB simply contributes nothing here, which is exactly the
+    "fall back to the pre-existing regex+model-declare path" behavior the
+    caller wants for that chapter (see build_prep_pack_span_ledger's
+    docstring)."""
+    if not segments or not chapter_titles:
+        return set()
+    return chapter_title_segment_indexes(segments, chapter_titles)
+
+
 def build_prep_pack_span_ledger(
     source_text: str,
     *,
     events: list[dict[str, Any]],
     declared_paratext_segments: list[int] | None = None,
+    chapter_titles: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[str], list[dict[str, Any]], list[dict[str, Any]]]:
     """Deterministically validate event spans and project the coverage ledger.
 
@@ -2860,6 +2896,45 @@ def build_prep_pack_span_ledger(
     this function runs three deterministic veto gates before accepting any
     of it). ``None``/empty means the model declared nothing, which is a
     legal (if a little silly) outcome, not an error.
+
+    ``chapter_titles`` (1.9.0): this episode's own ``chapters.title`` values
+    (NULL/blank titles already filtered out by the caller). Every segment
+    whose entire text is exactly one of these titles (see
+    app.source_excerpt.chapter_title_segment_ids for the exact matching
+    rule, including the known "content repeats its own title" join
+    artifact) is a DB-anchored structural fact, not a model claim -- it is
+    merged into the ``paratext`` account unconditionally, WITHOUT going
+    through the declared_paratext_segments pipeline above (the model may
+    still also declare it; the two are just unioned, see 语义 below). If
+    such a segment also happens to fall inside some event's validated span,
+    that is not gate (c)'s fatal exclusivity contradiction the way an
+    over-claimed ``declared_paratext_segments`` entry is -- the segment is
+    deterministically trimmed off that event's span edge instead (an event
+    whose span is NOTHING BUT title segments, after trimming, is a
+    different fatal case: see 确定性标题裁边 below). A chapter with no DB
+    title simply contributes nothing here, which is exactly "fall back to
+    the pre-1.9.0 behavior" for that chapter (regex structural guess still
+    requires the model's own paratext_segments declaration, unchanged).
+
+    **确定性标题裁边**（1.9.0，见 app.production.prep_pack.PREP_PACK_VERSION
+    的 1.9.0 大注释根因）：真实 EP5 回归——章节标题段（SRC0001）只在模型
+    这次调用申报了 paratext_segments 时才免于事件覆盖（1.4.1 起的既有设计），
+    而模型申报是非确定性的，漏报时"洞即删戏"仍逼着某个事件去覆盖这一段，
+    模型最省力的满足方式就是编一个只覆盖标题这一段的伪事件，其逐字抄自
+    标题原文的引文又恰好能通过引文锚地闸门——合法通过全部三道致命闸门。
+    修复只把"这一段是不是本集自己某一章的标题"这个有 chapters.title 数据库
+    锚点的窄场景改回确定性：deterministic_title_indexes 从 chapter_titles
+    算出后，每个事件计算出自己的（申报∪证据扩展）span 后，先从这个 span
+    的两端向内裁掉任何确定性标题段（例如 [1,5] 因为段 1 是标题被裁成
+    [2,5]），裁边后的边界才是最终发布的 source_span、参与 covered/delivered
+    记账；裁掉的标题段永远只计入 paratext，不计入 covered，五账因此自动
+    保持自洽。裁边只处理跨度两端（真实数据里标题段只可能出现在章节起止
+    边界，不可能出现在一个事件跨度的正中间）——如果裁边后仍有确定性标题段
+    残留在跨度内部（无法通过裁边消除的反常形状），这不属于"良性边缘重合"，
+    仍是账本自相矛盾，致命阻断，不静默处理。若一个事件的 span 裁掉标题段后
+    变空（即该事件从头到尾只覆盖标题段——这正是本缺陷的伪事件形态），同样
+    致命阻断并明确报出"事件仅覆盖章节标题段"，防止 1.9.0 之后模型公然违背
+    _extract_chunk 新增的确定性提示（见 prep_pack 模块）时问题被静默吞掉。
 
     **确定性跨度扩展**（EP2 首次正式回归暴露，ERR-20260824-9babad：模型对
     ev_003 声明 span=[13,16] 却引用了 segment 17，方差性的"跨度写窄一格"，
@@ -2954,6 +3029,14 @@ def build_prep_pack_span_ledger(
     by_index = {index: segment for index, segment in enumerate(segments, start=1)}
     total = len(segments)
     structural_indexes = _prep_pack_structural_paratext_indexes(segments)
+    # 1.9.0: DB-anchored chapter-title segments -- see
+    # _prep_pack_deterministic_title_indexes and this function's own
+    # "确定性标题裁边" docstring section. Unconditional, unlike
+    # structural_indexes above (which still needs the model's own
+    # paratext_segments declaration to be accepted).
+    deterministic_title_indexes = _prep_pack_deterministic_title_indexes(
+        segments, chapter_titles,
+    )
     errors: list[str] = []
     extensions: list[dict[str, Any]] = []
     ordered = sorted(events, key=lambda e: int(e.get("order") or 0))
@@ -3032,29 +3115,73 @@ def build_prep_pack_span_ledger(
         # spillover), see ERR-20260824-22cb1c above.
         from_segment = min(declared_from, min(anchored))
         to_segment = max(declared_to, max(anchored))
-        if (from_segment, to_segment) != (declared_from, declared_to):
+
+        # 1.9.0 确定性标题裁边（见本函数 docstring "确定性标题裁边"）：从
+        # 这个（申报∪证据扩展）span 的两端向内裁掉任何 DB 锚定的章节标题
+        # 段——真实数据里标题段只会出现在章节起止边界，不会出现在一个事件
+        # 跨度正中间，所以只处理两端；裁边不影响上面已经跑完的跨度有序
+        # 检查（那条检查只看申报值，1.5.0 语义分离原则的直接延伸）。
+        trimmed_from, trimmed_to = from_segment, to_segment
+        while trimmed_from <= trimmed_to and trimmed_from in deterministic_title_indexes:
+            trimmed_from += 1
+        while trimmed_to >= trimmed_from and trimmed_to in deterministic_title_indexes:
+            trimmed_to -= 1
+        if trimmed_from > trimmed_to:
+            errors.append(
+                f"事件 {event_id} 的 source_span [{declared_from},{declared_to}] "
+                "裁掉确定性章节标题段后为空——事件仅覆盖章节标题段，不是真实剧情，"
+                "禁止为章节标题创建事件"
+            )
+            continue
+        # 反常形状防御：裁边只能消除跨度两端的标题段，如果裁边后跨度内部
+        # 仍残留标题段，说明它被夹在两段真实内容中间——这不是"良性边缘
+        # 重合"，裁边无法安全解决，必须致命阻断而不是静默吞掉。
+        interior_title_conflict = sorted(
+            idx for idx in deterministic_title_indexes
+            if trimmed_from <= idx <= trimmed_to
+        )
+        if interior_title_conflict:
+            shown = "、".join(str(i) for i in interior_title_conflict)
+            errors.append(
+                f"事件 {event_id} 的 span 裁边后仍在跨度内部残留确定性章节标题段"
+                f"（{shown}，不在跨度边界，无法通过裁边消除）——账本自相矛盾"
+            )
+            continue
+
+        final_from, final_to = trimmed_from, trimmed_to
+        # delivered/laziness 都只看裁边后仍在最终跨度内的证据——一条只
+        # 命中已被裁掉的标题段的引文不再算这个事件自己的交付证据（否则会让
+        # 同一个段号同时落进 delivered 和 paratext 两个账户，破坏五账互斥）。
+        anchored_in_span = {idx for idx in anchored if final_from <= idx <= final_to}
+        if not anchored_in_span:
+            errors.append(
+                f"事件 {event_id} 的 span 裁掉确定性章节标题段后，剩余跨度 "
+                f"[{final_from},{final_to}] 内没有任何逐字引文命中原文，缺少可核验证据"
+            )
+            continue
+        if (final_from, final_to) != (declared_from, declared_to):
             extended_by = sorted(
-                idx for idx in anchored if idx < declared_from or idx > declared_to
+                idx for idx in anchored_in_span if idx < declared_from or idx > declared_to
             )
             extensions.append({
                 "event_id": event_id,
-                "from": from_segment,
-                "to": to_segment,
+                "from": final_from,
+                "to": final_to,
                 "extended_by": extended_by,
             })
-        span_len = to_segment - from_segment + 1
+        span_len = final_to - final_from + 1
         if span_len > laziness_threshold:
-            midpoint = (from_segment + to_segment) / 2
-            front = [a for a in anchored if a <= midpoint]
-            back = [a for a in anchored if a > midpoint]
-            if len(anchored) < 2 or not front or not back:
+            midpoint = (final_from + final_to) / 2
+            front = [a for a in anchored_in_span if a <= midpoint]
+            back = [a for a in anchored_in_span if a > midpoint]
+            if len(anchored_in_span) < 2 or not front or not back:
                 errors.append(
                     f"事件 {event_id} 的 span 跨度 {span_len} 段，超过均值×"
                     f"{PREP_PACK_SPAN_LAZINESS_MULTIPLIER}（{laziness_threshold:.1f}），"
                     "但引文少于两条或未分布在跨度前后半，疑似整段打包偷懒"
                 )
-        delivered |= anchored
-        covered |= set(range(from_segment, to_segment + 1))
+        delivered |= anchored_in_span
+        covered |= set(range(final_from, final_to + 1))
         prev_declared_to = max(prev_declared_to, declared_to)
 
     # --- Paratext v3 gates: model DECLARES, this function DISPOSES -----
@@ -3133,7 +3260,13 @@ def build_prep_pack_span_ledger(
             f"source_span 覆盖，账本自相矛盾：{shown}"
         )
 
-    paratext = dependency_accepted
+    # 1.9.0: DB-anchored chapter-title segments are merged in unconditionally
+    # (see this function's "确定性标题裁边" docstring section) -- they never
+    # went through the declared/position/dependency pipeline above at all,
+    # and the per-event loop's trim-or-fatal handling above already
+    # guarantees deterministic_title_indexes is disjoint from ``covered``,
+    # so this union can never trigger gate (c)'s paratext_conflict check.
+    paratext = dependency_accepted | deterministic_title_indexes
     uncovered = sorted(set(by_index) - covered - paratext)
     retained_as_context = sorted(covered - delivered)
     ledger = {

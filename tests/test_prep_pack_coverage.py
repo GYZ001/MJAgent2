@@ -560,3 +560,207 @@ def test_declared_segment_referenced_by_event_key_line_is_vetoed_by_dependency_g
     with pytest.raises(ValueError) as exc_info:
         assert_prep_pack_coverage_complete(ledger)
     assert "7" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# prep_pack_version 1.9.0 (real EP5 regression): a chapter title segment (the
+# document's own paragraph-merge artifact -- app.domain.common.
+# _episode_source_text joins "【{chapters.title}】\n{chapters.content}", and
+# chapters.content itself typically repeats its own title as its first
+# line, so index_source_segments collapses the wrapper title and content's
+# own first line into ONE segment, e.g. real EP5 data: chapters.idx=5,
+# title="第五章此子不错" -> segment text
+# "【第五章此子不错】\n第五章此子不错") is now recognized DETERMINISTICALLY
+# from chapters.title (a DB-anchored fact), not from the model's own
+# non-deterministic paratext_segments declaration -- see
+# app.validators.build_prep_pack_span_ledger's new ``chapter_titles``
+# parameter and its "确定性标题裁边" docstring section for the full design.
+# ---------------------------------------------------------------------------
+
+TITLE_SOURCE = (
+    "【第五章此子不错】\n第五章此子不错\n\n"
+    "孟浩推开柴门，看见院子里落满黄叶。\n\n"
+    "他叹了口气，转身回屋取来扫帚，开始清扫满地的落叶。\n\n"
+    "邻居王婶端着一碗热汤走了过来，说道：“浩儿，快趁热喝了。”"
+)
+TITLE_SOURCE_CHAPTER_TITLES = ["第五章此子不错"]
+
+
+def _title_seg_text(index: int) -> str:
+    return index_source_segments(TITLE_SOURCE)[index - 1].text
+
+
+def test_title_source_fixture_has_four_segments_and_segment_one_is_the_title():
+    # Guard the fixture itself, including the real "title repeated twice"
+    # join artifact this whole test section exists to exercise.
+    segments = index_source_segments(TITLE_SOURCE)
+    assert len(segments) == 4
+    assert segments[0].text == "【第五章此子不错】\n第五章此子不错"
+
+
+def test_deterministic_chapter_title_lands_in_paratext_without_model_declaration():
+    """场景1：模型完全没有申报任何 paratext_segments（真实 EP5 漏报的形状）
+    ——章节标题段仍必须自动计入 paratext，uncovered 为空，且不需要、也没有
+    任何事件为它创建"显示标题"这类伪事件。"""
+    events = [
+        {
+            "event_id": "ev_001", "order": 1, "from_segment": 2, "to_segment": 4,
+            "source_evidence": [{"segment_index": 2, "quote": _title_seg_text(2)}],
+        },
+    ]
+    ledger, errors, extensions, rejected = build_prep_pack_span_ledger(
+        TITLE_SOURCE, events=events, chapter_titles=TITLE_SOURCE_CHAPTER_TITLES,
+    )
+    assert errors == []
+    assert ledger["paratext"] == [1]
+    assert ledger["uncovered"] == []
+    assert 1 not in ledger["delivered"]
+    assert 1 not in ledger["retained_as_context"]
+    assert_prep_pack_coverage_complete(ledger)  # must not raise
+
+
+def test_event_covering_only_the_title_segment_is_fatal():
+    """场景2：这正是真实缺陷的伪事件形态本身——一个事件的 source_span 从头到
+    尾只覆盖确定性标题段。裁边把它的跨度裁空，必须致命阻断，错误信息须点明
+    "事件仅覆盖章节标题段"，不能被静默丢弃或悄悄并入别的事件。"""
+    events = [
+        {
+            "event_id": "ev_001", "order": 1, "from_segment": 1, "to_segment": 1,
+            "source_evidence": [{"segment_index": 1, "quote": _title_seg_text(1)}],
+        },
+        {
+            "event_id": "ev_002", "order": 2, "from_segment": 2, "to_segment": 4,
+            "source_evidence": [{"segment_index": 2, "quote": _title_seg_text(2)}],
+        },
+    ]
+    ledger, errors, extensions, rejected = build_prep_pack_span_ledger(
+        TITLE_SOURCE, events=events, chapter_titles=TITLE_SOURCE_CHAPTER_TITLES,
+    )
+    assert any("仅覆盖章节标题段" in message for message in errors)
+    assert any("ev_001" in message for message in errors)
+
+
+def test_event_span_spanning_title_and_content_is_trimmed_not_rejected():
+    """场景3：事件 span [1,4] 跨越标题段(1)与真实内容(2-4)——不是致命的排他
+    冲突，确定性裁边成 [2,4]，事件本身保留，五账仍自洽（相加等于总段数），
+    且裁边结果同步反映进返回的 extensions（供调用方发布裁边后的
+    source_span）。"""
+    events = [
+        {
+            "event_id": "ev_001", "order": 1, "from_segment": 1, "to_segment": 4,
+            "source_evidence": [
+                {"segment_index": 2, "quote": _title_seg_text(2)},
+                {"segment_index": 4, "quote": _title_seg_text(4)},
+            ],
+        },
+    ]
+    ledger, errors, extensions, rejected = build_prep_pack_span_ledger(
+        TITLE_SOURCE, events=events, chapter_titles=TITLE_SOURCE_CHAPTER_TITLES,
+    )
+    assert errors == []
+    assert ledger["paratext"] == [1]
+    assert ledger["uncovered"] == []
+    assert 1 not in ledger["delivered"]
+    assert 1 not in ledger["retained_as_context"]
+    assert (
+        len(ledger["delivered"]) + len(ledger["retained_as_context"])
+        + len(ledger["paratext"]) + len(ledger["uncovered"])
+        == ledger["total_segments"]
+    )
+    assert any(
+        item["event_id"] == "ev_001" and item["from"] == 2 and item["to"] == 4
+        for item in extensions
+    )
+    assert_prep_pack_coverage_complete(ledger)  # must not raise
+
+
+@pytest.mark.parametrize("missing_chapter_titles", [None, [], [""], ["   "]])
+def test_missing_chapter_title_falls_back_to_pre_1_9_0_behavior(missing_chapter_titles):
+    """场景4：chapters.title 为 NULL/空串（这里以 None/空列表/空白字符串
+    模拟调用方过滤后传入的"没有可用标题"信号）——退回 1.9.0 之前的行为：
+    标题段不再被自动接受，模型不申报就仍然是洞，必须继续按旧路径要求模型
+    申报。不产生任何新的失败面（跟不传 chapter_titles 参数完全等价）。"""
+    events = [
+        {
+            "event_id": "ev_001", "order": 1, "from_segment": 2, "to_segment": 4,
+            "source_evidence": [{"segment_index": 2, "quote": _title_seg_text(2)}],
+        },
+    ]
+    ledger, errors, extensions, rejected = build_prep_pack_span_ledger(
+        TITLE_SOURCE, events=events, chapter_titles=missing_chapter_titles,
+    )
+    assert errors == []
+    assert ledger["paratext"] == []
+    assert ledger["uncovered"] == [1]
+    with pytest.raises(ValueError) as exc_info:
+        assert_prep_pack_coverage_complete(ledger)
+    assert "1" in str(exc_info.value)
+
+
+TWO_CHAPTER_TITLE_1 = "第一章初入宗门"
+TWO_CHAPTER_CONTENT_1 = "第一章初入宗门\n\n孟浩背着行囊，走进宗门大门。"
+TWO_CHAPTER_TITLE_2 = "第二章拜师风波"
+TWO_CHAPTER_CONTENT_2 = (
+    "第二章拜师风波\n\n老者捋须而笑，点了点头。\n\n孟浩心中一喜，连忙行礼。"
+)
+TWO_CHAPTER_SOURCE = "\n\n".join([
+    f"【{TWO_CHAPTER_TITLE_1}】\n{TWO_CHAPTER_CONTENT_1}",
+    f"【{TWO_CHAPTER_TITLE_2}】\n{TWO_CHAPTER_CONTENT_2}",
+])
+TWO_CHAPTER_TITLES = [TWO_CHAPTER_TITLE_1, TWO_CHAPTER_TITLE_2]
+
+
+def _two_chapter_seg_text(index: int) -> str:
+    return index_source_segments(TWO_CHAPTER_SOURCE)[index - 1].text
+
+
+def test_two_chapter_fixture_has_five_segments_with_titles_at_one_and_three():
+    segments = index_source_segments(TWO_CHAPTER_SOURCE)
+    assert len(segments) == 5
+    assert segments[0].text == "【第一章初入宗门】\n第一章初入宗门"
+    assert segments[2].text == "【第二章拜师风波】\n第二章拜师风波"
+
+
+def test_multi_chapter_episode_recognizes_each_chapters_own_title_segment():
+    """场景5：一集跨两章——两章各自的标题段（1 和 3）都必须被识别，不只是
+    文档第 1 段；规则是"任一段，若其文本仅由本集某一章的标题构成"，不是
+    "只看第 1 段"。"""
+    events = [
+        {
+            "event_id": "ev_001", "order": 1, "from_segment": 2, "to_segment": 2,
+            "source_evidence": [{"segment_index": 2, "quote": _two_chapter_seg_text(2)}],
+        },
+        {
+            "event_id": "ev_002", "order": 2, "from_segment": 4, "to_segment": 5,
+            "source_evidence": [{"segment_index": 4, "quote": _two_chapter_seg_text(4)}],
+        },
+    ]
+    ledger, errors, extensions, rejected = build_prep_pack_span_ledger(
+        TWO_CHAPTER_SOURCE, events=events, chapter_titles=TWO_CHAPTER_TITLES,
+    )
+    assert errors == []
+    assert ledger["paratext"] == [1, 3]
+    assert ledger["uncovered"] == []
+    assert_prep_pack_coverage_complete(ledger)  # must not raise
+
+
+def test_title_segment_stranded_inside_event_span_is_fatal_not_silently_absorbed():
+    """防御性补充（不在协调方点名的 1-5 条场景之列，但属于裁边设计本身必须
+    守住的边界）：一个事件的申报+证据把 span 拉成 [1,5]，中间恰好夹着第二章
+    的标题段(3)，两端(2,5)都是真实内容——裁边只能处理跨度两端，段 3 处于
+    跨度内部、不在边界上，无法通过裁边安全消除，必须致命阻断，不能被悄悄
+    并入这个事件的正文，也不能被静默挪进 paratext（那样会让它同时出现在
+    delivered/retained_as_context 与 paratext 两个账户，破坏五账互斥）。"""
+    events = [
+        {
+            "event_id": "ev_001", "order": 1, "from_segment": 1, "to_segment": 5,
+            "source_evidence": [
+                {"segment_index": 2, "quote": _two_chapter_seg_text(2)},
+                {"segment_index": 5, "quote": _two_chapter_seg_text(5)},
+            ],
+        },
+    ]
+    ledger, errors, extensions, rejected = build_prep_pack_span_ledger(
+        TWO_CHAPTER_SOURCE, events=events, chapter_titles=TWO_CHAPTER_TITLES,
+    )
+    assert any("无法通过裁边消除" in message for message in errors)

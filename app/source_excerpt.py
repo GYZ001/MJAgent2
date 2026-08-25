@@ -214,6 +214,96 @@ def structural_front_matter_ids(
     return result
 
 
+def _normalize_whitespace_compact(text: str) -> str:
+    """Strip every whitespace run for a pure structural-equality comparison
+    (归一化空白) -- used only by chapter_title_segment_ids below, never for
+    any other kind of text matching in this module (align_source_excerpt's
+    own normalization is unrelated and untouched)."""
+    return re.sub(r"\s+", "", text or "")
+
+
+def chapter_title_segment_ids(
+    segments: list[SourceSegment],
+    chapter_titles: list[str],
+) -> set[str]:
+    """Return segment_ids whose ENTIRE text is composed of nothing but one of
+    ``chapter_titles`` -- i.e. the segment IS a chapter heading, decided from
+    the project's own ``chapters.title`` column (a DB-anchored fact) instead
+    of a hardcoded name/keyword list or a generic structural guess (project
+    rule: judgments must be derived from data, see CLAUDE.md's blacklist
+    ban) or the model's own free-text declaration (see app.validators.
+    build_prep_pack_span_ledger's chapter_titles parameter / PREP_PACK_
+    VERSION's 1.9.0 note in app.production.prep_pack for the regression this
+    fixes -- a real EP5 chapter-title segment became a pseudo "显示章节标题"
+    event because the model's own paratext_segments declaration is non-
+    deterministic and randomly omits it).
+
+    A segment counts as a pure title segment if, after stripping all
+    whitespace, its text equals one of ``title``, ``【title】``, ``[title]``,
+    or any concatenation of two of those three forms -- the last case covers
+    a known web-novel join artifact (not something this function invents):
+    app.domain.common._episode_source_text joins each chapter as
+    ``"【{chapters.title}】\\n{chapters.content}"``, and chapters.content
+    itself frequently repeats its own title as its first line (real EP5
+    data: chapters.idx=5, title="第五章此子不错", content starts with
+    "第五章此子不错\\n\\n..."), so the wrapper title and content's own first
+    line collapse into one index_source_segments paragraph, literally
+    "【第五章此子不错】\\n第五章此子不错". Multiple chapters (an episode
+    spanning more than one chapter) and multiple candidate titles are all
+    checked against every segment, not just the first one -- a title can
+    legitimately appear at any chapter-start boundary inside the document,
+    not only at offset 0.
+
+    Titles that are empty/whitespace-only are ignored (this is exactly the
+    NULL/blank chapters.title case the caller is expected to filter out
+    before calling, so that chapter falls back to the regex+model-declare
+    path in structural_front_matter_ids/build_prep_pack_span_ledger instead
+    of being silently treated as "no title anywhere").
+    """
+    result: set[str] = set()
+    normalized_titles = {
+        _normalize_whitespace_compact(title)
+        for title in chapter_titles
+        if title and title.strip()
+    }
+    normalized_titles.discard("")
+    if not segments or not normalized_titles:
+        return result
+    for segment in segments:
+        compact = _normalize_whitespace_compact(segment.text)
+        if not compact:
+            continue
+        for title in normalized_titles:
+            variants = {title, f"【{title}】", f"[{title}]"}
+            if compact in variants or any(
+                compact == first + second
+                for first in variants
+                for second in variants
+            ):
+                result.add(segment.segment_id)
+                break
+    return result
+
+
+def chapter_title_segment_indexes(
+    segments: list[SourceSegment],
+    chapter_titles: list[str],
+) -> set[int]:
+    """1-based-index form of chapter_title_segment_ids -- both
+    app.production.prep_pack._extract_chunk (prompt injection) and
+    app.validators.build_prep_pack_span_ledger (ledger gate) key segments by
+    their ordinal position among index_source_segments' output, not by the
+    fixed-width SRC%04d segment_id string, so this is the one shared
+    conversion both call sites use rather than each re-deriving it."""
+    if not segments or not chapter_titles:
+        return set()
+    ids = chapter_title_segment_ids(segments, chapter_titles)
+    return {
+        index for index, segment in enumerate(segments, start=1)
+        if segment.segment_id in ids
+    }
+
+
 def index_compact_source_segments(
     source: str,
     *,

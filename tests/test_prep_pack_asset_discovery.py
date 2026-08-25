@@ -3774,6 +3774,91 @@ def test_character_label_prompt_still_allows_pure_description_when_no_appellatio
     assert _flatten("场景地点的 display_name 一律使用原文自己的描述词") in prompt
 
 
+# ---------------------------------------------------------------------------
+# 1.9.0：真实 EP5 回归——章节标题段（app.domain.common._episode_source_text
+# 拼接 "【{chapters.title}】\n{chapters.content}" 时，content 自己的首行又
+# 重复了一遍标题，两者只隔单换行，被 index_source_segments 合并成同一段）
+# 只在模型这次调用恰好把它写进 paratext_segments 时才免于事件覆盖，模型
+# 申报是非确定性的，漏报时"洞即删戏"逼着某个事件去覆盖它，最省力的满足
+# 方式就是编一个只覆盖标题这一段的伪事件。修复：确定性算出的标题段号直接
+# 告知模型（既成事实，不是让它判断），见 PREP_PACK_VERSION 上方 1.9.0
+# 大注释与 app.validators.build_prep_pack_span_ledger 的"确定性标题裁边"
+# 一节。这里测的是 _extract_chunk 构造出的提示词本身，同上面 1.8.5 一节
+# 同一测法。
+# ---------------------------------------------------------------------------
+
+def test_extract_chunk_prompt_identical_when_no_confirmed_title_segments_in_chunk(monkeypatch):
+    """场景6红灯核心用例（同 92c9e7a 认知卡注入的空态处理惯例，
+    tests/test_chapter_cognition_card.py::test_prompt_identical_when_
+    cognition_card_has_no_facts 同一测法）：不硬编码整段提示词文本，改用
+    两次调用对比——一次完全不传新参数（默认 None，等价于改动前的旧行为），
+    一次传一个跟本 chunk 段号完全不相交的集合（模拟"功能存在但这个 chunk
+    用不上"），两次捕获的提示词必须逐字相同，证明本 chunk 无标题段时提示词
+    与改动前逐字节一致。"""
+    segment_a = SourceSegment(
+        segment_id="seg-1", text="孟浩推开柴门，看见院子里落满黄叶。",
+        start_offset=0, end_offset=10,
+    )
+    segment_b = SourceSegment(
+        segment_id="seg-2", text="他叹了口气，转身回屋取来扫帚。",
+        start_offset=20, end_offset=30,
+    )
+    chunk = [(1, segment_a), (2, segment_b)]
+    captured: list[str] = []
+
+    async def fake_chat_structured(messages, **kwargs):
+        captured.append(str(messages[0]["content"]))
+        return _fake_chunk_response()
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
+    asyncio.run(prep_pack._extract_chunk(
+        episode_id="ep-test", episode_no=1, chunk_index=1, chunk=chunk,
+        known_characters=[], known_scenes=[], attempt_hint="", run_id=None,
+        confirmed_title_indexes=None,
+    ))
+    asyncio.run(prep_pack._extract_chunk(
+        episode_id="ep-test", episode_no=1, chunk_index=1, chunk=chunk,
+        known_characters=[], known_scenes=[], attempt_hint="", run_id=None,
+        confirmed_title_indexes={999},  # not in this chunk's {1, 2}
+    ))
+    assert len(captured) == 2
+    assert captured[0] == captured[1]
+    assert "已由系统确定性判定" not in captured[0]
+
+
+def test_extract_chunk_prompt_names_confirmed_title_segment_when_present(monkeypatch):
+    """本 chunk 确实包含确定性标题段号时，提示词必须明确点出该段号（既成
+    事实，不是让模型判断），并告知不需要为它创建事件、不需要重复申报。"""
+    segment_title = SourceSegment(
+        segment_id="seg-1", text="【第五章此子不错】\n第五章此子不错",
+        start_offset=0, end_offset=10,
+    )
+    segment_body = SourceSegment(
+        segment_id="seg-2", text="孟浩推开柴门，看见院子里落满黄叶。",
+        start_offset=20, end_offset=30,
+    )
+    chunk = [(1, segment_title), (2, segment_body)]
+    captured: dict[str, str] = {}
+
+    async def fake_chat_structured(messages, **kwargs):
+        captured["prompt"] = str(messages[0]["content"])
+        return _fake_chunk_response()
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
+    asyncio.run(prep_pack._extract_chunk(
+        episode_id="ep-test", episode_no=1, chunk_index=1, chunk=chunk,
+        known_characters=[], known_scenes=[], attempt_hint="", run_id=None,
+        confirmed_title_indexes={1},
+    ))
+
+    prompt = _flatten(captured["prompt"])
+    assert _flatten("编号 1 已由系统确定性判定为本集所属章节的标题") in prompt
+    assert _flatten("不要为它们创建事件") in prompt
+    assert _flatten("不需要在 paratext_segments 里重复申报") in prompt
+
+
 def test_prep_pack_version_is_1_8_0():
     """版本号哨兵：本次改造（未解析角色标签候选判别——真实 EP1"银色长袍
     女子"应绑定许清却因标签类型对不上落 functional_extras 的用户诉求收口）
@@ -3795,5 +3880,9 @@ def test_prep_pack_version_is_1_8_0():
     上方 1.8.5 大注释）改的是 _extract_chunk 的"命名纪律"提示词分区，
     同样会实际改变部分角色标签的选词结果，是 prompt-contract 变更，
     版本继续推进——函数名/测试名沿用旧号不改，只更新断言值，避免无谓的
-    大范围改名。"""
-    assert prep_pack.PREP_PACK_VERSION == "1.8.5"
+    大范围改名。1.9.0（真实 EP5 回归：章节标题段因模型 paratext_segments
+    申报非确定性漏报，被包装成一个只覆盖 SRC0001 的"显示标题"伪事件，见
+    PREP_PACK_VERSION 上方 1.9.0 大注释）把 coverage_ledger.paratext 对
+    chapters.title 这一 DB 锚定子集的判定改回确定性——不再要求模型申报，
+    是 ledger 判定语义变更，同样比照 1.4.1 的先例推进版本号。"""
+    assert prep_pack.PREP_PACK_VERSION == "1.9.0"

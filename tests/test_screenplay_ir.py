@@ -54,6 +54,8 @@ from app.screenplay_ir import (
     screenplay_ir_source_audit_contract_errors,
 )
 from app.source_excerpt import (
+    chapter_title_segment_ids,
+    chapter_title_segment_indexes,
     index_compact_source_segments,
     index_source_segments,
     structural_front_matter_ids,
@@ -3769,6 +3771,58 @@ def test_structural_front_matter_only_exempts_chapter_heading_and_subtitle() -> 
     assert structural_front_matter_ids(segments) == {
         "SRC0001", "SRC0002",
     }
+
+
+def test_chapter_title_segment_ids_matches_db_anchored_title_repeated_twice() -> None:
+    """1.9.0（真实 EP5 回归）：app.domain.common._episode_source_text 把每章
+    拼成 "【{chapters.title}】\n{chapters.content}"，而 chapters.content 自己
+    的首段又常常原样重复标题文本（真实 EP5 数据：chapters.idx=5，
+    title="第五章此子不错"，content 以 "第五章此子不错\n\n……" 开头），两者
+    只隔单换行，被 index_source_segments 的空行分段规则合并成同一段。
+    chapter_title_segment_ids 必须从 chapters.title 这个数据库锚点确定性
+    识别出这一整段，不需要模型申报。"""
+    source = "\n\n".join([
+        "【第五章此子不错】\n第五章此子不错",
+        "孟浩推开柴门，看见院子里落满黄叶。",
+    ])
+    segments = index_source_segments(source)
+
+    assert chapter_title_segment_ids(segments, ["第五章此子不错"]) == {"SRC0001"}
+    assert chapter_title_segment_indexes(segments, ["第五章此子不错"]) == {1}
+
+
+def test_chapter_title_segment_ids_checks_every_segment_not_just_the_first() -> None:
+    """一集可能跨多章——判据是"任一段，若其文本仅由本集某一章的标题构成"，
+    不是"只看第 1 段"（structural_front_matter_ids 那条既有正则才是只看
+    segments[0] 的降级兜底，chapter_title_segment_ids 不继承这个限制）。"""
+    source = "\n\n".join([
+        "【第一章初入宗门】\n第一章初入宗门",
+        "孟浩背着行囊，走进宗门大门。",
+        "【第二章拜师风波】\n第二章拜师风波",
+        "老者捋须而笑，点了点头。",
+    ])
+    segments = index_source_segments(source)
+
+    assert chapter_title_segment_ids(
+        segments, ["第一章初入宗门", "第二章拜师风波"],
+    ) == {"SRC0001", "SRC0003"}
+
+
+def test_chapter_title_segment_ids_ignores_blank_titles_and_real_content() -> None:
+    """空白/NULL 标题（调用方过滤后传入空字符串）不匹配任何段；真实剧情段落
+    即使提到"标题"一词也不会被误判——判据是"整段文本恰好等于标题"，不是
+    子串命中。"""
+    source = "\n\n".join([
+        "【第五章此子不错】\n第五章此子不错",
+        "孟浩心想，这书名起得真怪，此子不错什么的，真是老套。",
+    ])
+    segments = index_source_segments(source)
+
+    assert chapter_title_segment_ids(segments, ["", "   "]) == set()
+    assert chapter_title_segment_ids(segments, []) == set()
+    hits = chapter_title_segment_ids(segments, ["第五章此子不错"])
+    assert hits == {"SRC0001"}
+    assert segments[1].segment_id not in hits
 
 
 def test_multi_location_scene_heading_is_detected_structurally() -> None:

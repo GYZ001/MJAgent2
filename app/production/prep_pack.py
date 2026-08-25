@@ -217,7 +217,12 @@ from app.production.certificate import (
     verify_completion_certificate,
 )
 from app.schemas import Bible
-from app.source_excerpt import SourceSegment, align_source_excerpt, index_source_segments
+from app.source_excerpt import (
+    SourceSegment,
+    align_source_excerpt,
+    chapter_title_segment_indexes,
+    index_source_segments,
+)
 from app.textmatch import bigram_coverage
 from app.validators import (
     assert_prep_pack_coverage_complete,
@@ -226,7 +231,7 @@ from app.validators import (
     match_scene_name,
 )
 
-PREP_PACK_VERSION = "1.8.5"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "1.9.0"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
 # gained functional_extras; 1.4.0: coverage_ledger gained paratext (deterministic
 # keyword/position classifier, since replaced); 1.4.1: paratext classification
@@ -581,6 +586,62 @@ PREP_PACK_VERSION = "1.8.5"  # 1.1.0: event_chain entries carry source_span (P1 
 # 的先例推进版本号（第三位）。不改变候选判别机制本身、不放宽反幻觉主防线
 # （"逐字必须出现在原文"），也不影响本就没有任何称谓、只能靠描述性标签的
 # 真实无名群演——functional_extras 仍可正常吸收这类角色。
+# 1.9.0（真实 EP5 回归 + 十集存量扫描确认为系统性问题，coverage_ledger 判定
+# 语义变更，版本推进）：EP5 事件链第 1 个事件是"显示第五章标题《此子不错》"，
+# 只覆盖 SRC0001 一段——章节标题（排版元素）被当成了剧情事件，一路流到分镜
+# 台和视频。根因链条（已核实，不是猜测）：
+#   a) app.domain.common._episode_source_text 把每章拼成
+#      "【{chapters.title}】\n{chapters.content}"，而 chapters.content 自己
+#      的首段又是原样重复的标题文本（真实数据：proj_3ac0b627fa46 EP5
+#      chapters.idx=5，title="第五章此子不错"，content 以"第五章此子不错\n\n
+#      ……"开头）——【标题】与 content 首段标题正文之间只隔一个换行，被
+#      app.source_excerpt.index_source_segments 的空行分段规则合并成同一个
+#      段 SRC0001，两次标题文本挤在同一段里。
+#   b) 这不是这个问题第一次出现：5a67511（1.4.0）第一次给 paratext 账，用的
+#      是纯确定性关键词+位置分类器，真实回归（proj_3ac0b627fa46,
+#      chapters.idx=2）证明关键词表覆盖不住作者写法的多样性，遂在 6e27764
+#      （1.4.1，同批次并入本文件当时的 1.5.0）整个改成"模型自报
+#      paratext_segments + 三道确定性否决闸"——章节标题从"代码直接认定"
+#      退化成"模型这次调用愿不愿意申报"。模型申报是非确定性的：EP5 自身
+#      17 次历史重跑里，1.4.1 上线后 16 次中有 3 次漏报（约 19%）；EP1-EP10
+#      当前产物 1/10 命中该缺陷。漏报时"洞即删戏"
+#      （app.validators.assert_prep_pack_coverage_complete）仍强制 SRC0001
+#      必须被某个事件覆盖，模型最省力的满足方式就是编一个只覆盖这一段的
+#      "显示标题"伪事件——它逐字抄自标题原文的引文又恰好能通过引文锚地闸门，
+#      于是合法通过洞即删戏/引文锚地/跨度有序全部三道致命闸门，无任何报错。
+#      1.4.1 的三道否决闸从设计上就只否决"错误的申报"，从未被设计为补上
+#      "模型压根没申报"这种缺失。
+#   c) v1（5a67511）真正失败在"想用确定性规则覆盖一个本质上需要语义判断的
+#      场景"——尾部作者求票/求收藏留言这类没有数据库锚点、只能靠语义理解
+#      识别的通用 paratext，关键词表天然覆盖不全。本次不重蹈覆辙：只把
+#      "这一段是不是本集自己某一章的标题"这个有 chapters.title 数据库列
+#      作锚点、可以逐字比对的窄场景改回确定性判定（见
+#      app.source_excerpt.chapter_title_segment_ids：段文本归一化空白后与
+#      本集所属各章的 chapters.title 逐一比对，容许【】包裹与"标题在段内
+#      重复出现两遍"这一已核实的拼接形态；判据完全从数据推导，不使用任何
+#      人名/称谓硬编码名单）；尾部作者留言等没有数据库锚点的 paratext 判定
+#      继续保持模型自报 + 三道否决闸不变，不扩大确定性判定的适用范围。
+#      chapters.title 为 NULL/空串的章节退回 1.4.1 原有行为（既有
+#      _CHAPTER_HEADING_RE 正则降级兜底，仍需模型申报），不产生新的失败面。
+#   修复四处联动（app.validators.build_prep_pack_span_ledger 新增
+#   chapter_titles 参数，详见该函数 docstring"确定性标题裁边"一节）：
+#   ① 本文件 _extract_chunk 的提示词把确定性算出的标题段号直接告知模型
+#      （既成事实，不是让它判断），本 chunk 不含标题段时提示词逐字节不变
+#      （同 92c9e7a 认知卡注入的空态处理惯例）；
+#   ② 确定性命中的标题段无条件计入 coverage_ledger.paratext 账户，不再
+#      要求模型申报，模型申报了也不冲突（取并集）；
+#   ③ 原排他闸（申报的 paratext 段落在某事件已验证 span 内即致命报错）对
+#      确定性标题段改为确定性裁边（如 [1,5] 因段 1 是标题裁成 [2,5]），
+#      同步更新该事件发布的 source_span；模型自报（非 DB 锚定）的 paratext
+#      与事件 span 冲突仍然致命，未受影响；
+#   ④ 事件裁边后 span 变空（即该事件从头到尾只覆盖标题段——正是本缺陷的
+#      伪事件形态）新增为致命错误，明确报出"事件仅覆盖章节标题段"，防止
+#      模型公然违背 ① 的确定性提示时问题被静默吞掉。
+# 不改变 event_chain/asset_manifest/coverage_ledger 的字段集合（paratext
+# 仍是既有的 flat [int] list），但会实际改变 coverage_ledger.paratext 的
+# 判定结果与部分事件发布的 source_span（真正的判定语义变更，不只是提示词
+# 措辞），比照 1.4.1 的先例（分类机制变更即使 payload 形状不变也要推进
+# 版本号）推进版本号第二位。
 QA_PROFILE_VERSION = "prep-pack-qa-gate-1"
 _QA_EVALUATOR_NAME = "screenplay_production_qa"
 _CHUNK_MAX_CHARS = 6000
@@ -761,6 +822,30 @@ def _known_scene_names(conn, project_id: str, episode_no: int) -> list[str]:
         (project_id, episode_no, episode_no),
     ).fetchall()
     return [str(row["scene_name"]) for row in rows]
+
+
+def _prep_pack_chapter_titles(
+    conn, project_id: str, chapter_indexes: list[int],
+) -> list[str]:
+    """This episode's own DB-anchored chapter titles (1.9.0, see
+    PREP_PACK_VERSION's 1.9.0 note above). Only non-NULL, non-blank titles
+    are returned -- a chapter whose ``chapters.title`` is NULL/blank is
+    simply absent from the result, which is exactly the signal
+    app.source_excerpt.chapter_title_segment_indexes and
+    app.validators.build_prep_pack_span_ledger's chapter_titles parameter
+    need to fall back to the pre-1.9.0 regex+model-declare path for that
+    one chapter (see build_prep_pack_span_ledger's docstring)."""
+    if not chapter_indexes:
+        return []
+    placeholders = ",".join("?" for _ in chapter_indexes)
+    rows = conn.execute(
+        f"SELECT title FROM chapters WHERE project_id=? AND idx IN ({placeholders})",
+        (project_id, *chapter_indexes),
+    ).fetchall()
+    return [
+        str(row["title"]) for row in rows
+        if row["title"] is not None and str(row["title"]).strip()
+    ]
 
 
 def _resolve_portrait_id(conn, project_id: str, character_name: str, episode_no: int) -> str | None:
@@ -3456,9 +3541,32 @@ async def _extract_chunk(
     known_scenes: list[str],
     attempt_hint: str,
     run_id: str | None,
+    confirmed_title_indexes: set[int] | None = None,
 ) -> _ChunkResponse:
     rendered = _render_chunk(chunk)
     hint = f"\n上一次尝试未通过校验，请修正：{attempt_hint}\n" if attempt_hint else ""
+    # 1.9.0（见 PREP_PACK_VERSION 上方大注释）：把确定性算出的章节标题段号
+    # 作为既成事实告知模型，而不是让它再判断一遍——这些段号已经被
+    # app.source_excerpt.chapter_title_segment_indexes 从 chapters.title
+    # 这个数据库锚点确定性算出，会无条件计入 coverage_ledger.paratext（见
+    # app.validators.build_prep_pack_span_ledger），模型不需要也不应该再
+    # 为它们创建事件。本 chunk 不含任何这类段号时 chunk_title_indexes 为
+    # 空，confirmed_title_section 保持空字符串，prompt 与改动前逐字节一致
+    # （同 92c9e7a 认知卡注入的空态处理惯例，见该函数与
+    # tests/test_chapter_cognition_card.py 的先例）。
+    chunk_title_indexes = sorted(
+        index for index, _segment in chunk
+        if index in (confirmed_title_indexes or ())
+    )
+    confirmed_title_section = ""
+    if chunk_title_indexes:
+        shown = "、".join(str(index) for index in chunk_title_indexes)
+        confirmed_title_section = (
+            f"编号 {shown} 已由系统确定性判定为本集所属章节的标题（排版元素，不是"
+            "故事内容），已计入副文本账：不要为它们创建事件，也不要把它们纳入任何"
+            "事件的 source_span，不需要在 paratext_segments 里重复申报；上面关于"
+            "事件 span 必须覆盖本段全部编号的要求，不适用于这些编号。\n\n"
+        )
     prompt = f"""你在为一部网络小说改编的短剧准备第 {episode_no} 集的事件链（不改编台词、不生成分镜）。
 
 任务：把下面按顺序编号的原文片段（编号即 segment_index，本段范围 {chunk[0][0]}~{chunk[-1][0]}）
@@ -3515,7 +3623,7 @@ async def _extract_chunk(
 为它们创建事件。你自己就能判断哪些是——按内容本身判断，不用管它们在本段的位置。
 没有就给空列表。
 
-硬性要求（关于 source_span）：
+{confirmed_title_section}硬性要求（关于 source_span）：
 - 除 paratext_segments 声明的编号外，所有事件的 span 首尾相接，必须完整覆盖本段
   其余全部编号 {chunk[0][0]}~{chunk[-1][0]}，不允许任何编号既不在某个事件的 span
   内、也不在 paratext_segments 里——那等于把那段原文删掉了；
@@ -3628,6 +3736,15 @@ async def _generate_prep_pack_once(
     chunks = _chunk_segments(segments)
     known_characters = _known_character_names(conn, project_id, episode_no)
     known_scenes = _known_scene_names(conn, project_id, episode_no)
+    # 1.9.0 (see PREP_PACK_VERSION's 1.9.0 note above): DB-anchored chapter
+    # titles for this episode's own chapters -- fed to both _extract_chunk
+    # (prompt injection, told to the model as an already-decided fact) and
+    # build_prep_pack_span_ledger (the actual deterministic ledger gate).
+    # Chapters with no DB title contribute nothing here, which is exactly
+    # the "fall back to the pre-1.9.0 regex+model-declare path" behavior
+    # for that chapter.
+    chapter_titles = _prep_pack_chapter_titles(conn, project_id, chapter_indexes)
+    deterministic_title_indexes = chapter_title_segment_indexes(segments, chapter_titles)
 
     raw_events: list[dict[str, Any]] = []  # fed to build_prep_pack_span_ledger
     events: list[dict[str, Any]] = []  # payload-shaped, built after the gate passes
@@ -3648,6 +3765,7 @@ async def _generate_prep_pack_once(
             known_scenes=known_scenes,
             attempt_hint=attempt_hint,
             run_id=run_id,
+            confirmed_title_indexes=deterministic_title_indexes,
         )
         declared_paratext_segments.extend(response.paratext_segments)
         for model_event in response.events:
@@ -3679,6 +3797,7 @@ async def _generate_prep_pack_once(
 
     ledger, ledger_errors, span_extensions, rejected_paratext_claims = build_prep_pack_span_ledger(
         source_text, events=raw_events, declared_paratext_segments=declared_paratext_segments,
+        chapter_titles=chapter_titles,
     )
     if ledger_errors:
         raise PrepPackGateError(
