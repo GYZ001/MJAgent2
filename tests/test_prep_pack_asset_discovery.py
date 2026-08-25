@@ -3066,7 +3066,7 @@ def test_functional_candidate_dossier_ignores_out_of_range_event_span_segments()
     兜底，即事件跨度缺失时的既有行为）。"""
     segments = prep_pack.index_source_segments("第一段。\n\n第二段。")
     dossier = prep_pack._prep_pack_functional_candidate_dossier(
-        segments, "不存在的标签", {"第二段"}, {0, 999, -5},
+        segments, "不存在的标签", {"角色甲": ["第二段"]}, {0, 999, -5},
     )
     assert dossier == [{"segment_index": 2, "text": "第二段。"}]
 
@@ -3087,7 +3087,7 @@ def test_functional_candidate_dossier_keeps_literal_label_segment_as_primary_alo
     assert label in source_text, "本用例专测字面命中路径，前提是标签确实逐字出现"
 
     dossier = prep_pack._prep_pack_functional_candidate_dossier(
-        segments, label, {"孟浩", "许清", "许师姐"}, {13, 14},
+        segments, label, {"孟浩": ["孟浩"], "许清": ["许清", "许师姐"]}, {13, 14},
     )
     dossier_indexes = {item["segment_index"] for item in dossier}
     assert {5, 13, 14} <= dossier_indexes, "字面命中段（5）与事件跨度段（13/14）都必须进卷宗"
@@ -3101,9 +3101,18 @@ def test_unresolved_appearance_label_binds_via_candidate_verdict_using_event_spa
     的 12 个开篇独白段落里反复出现——足以在纯字面+文档顺序算法下吃光卷宗
     预算（_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES == 12）。
 
-    红（嵌入本测试的第一部分）：直接调用 _prep_pack_functional_candidate_
-    dossier 时不传事件跨度——1.8.1 之前唯一的定位方式——复现事故：卷宗被
-    12 段孟浩独白占满，"许师姐"所在段完全没有进卷宗。
+    对照组（嵌入本测试的第一部分）：直接调用 _prep_pack_functional_
+    candidate_dossier 时不传事件跨度——1.8.1 之前唯一的定位方式。1.8.2
+    起，B 侧改为按候选公平轮转合并（见 _prep_pack_functional_candidate_
+    anchor_pool 的完整说明）：候选集里许清只对应"许师姐"那一段，孟浩对应
+    密集的开篇独白十余段，轮转合并让许清那一段排到全局第 2 位，即使不传
+    事件跨度也能挤进 B 侧保底配额——这是候选粒度公平性机制的加成效果，
+    不代表事件跨度定位从此可有可无（候选证据本身分散在离案发现场很远处、
+    或候选数量更多时，事件跨度仍是唯一能锚定"案发现场本身长什么样"的
+    机制；1.8.2 真正修复的新事故——事件跨度本身连续覆盖到占满预算、B 侧
+    只有一位候选——是候选公平轮转救不了的形状，见另一条独立回归
+    test_functional_candidate_dossier_reserves_quota_for_candidate_anchor_
+    when_event_span_fills_budget）。
     绿（第二部分）：_resolve_assets 真实调用链（经 _prep_pack_resolve_
     functional_extra_candidate 传入 events，内部用 _prep_pack_functional_
     candidate_event_span_segments 算出事件跨度）必须让卷宗改为优先收录
@@ -3142,15 +3151,14 @@ def test_unresolved_appearance_label_binds_via_candidate_verdict_using_event_spa
     assert len(segments) == 14
     from_segment, to_segment = 13, 14
 
-    # ---- 红：1.8.1 之前唯一的定位方式（纯字面匹配 + 文档顺序兜底）----
-    anchor_texts = {"孟浩", "许清", "许师姐"}
-    pre_fix_dossier = prep_pack._prep_pack_functional_candidate_dossier(
-        segments, label, anchor_texts,
+    # ---- 对照组：不传事件跨度（1.8.1 之前唯一的定位方式）----
+    candidate_anchor_texts_no_span = {"孟浩": ["孟浩"], "许清": ["许清", "许师姐"]}
+    no_span_dossier = prep_pack._prep_pack_functional_candidate_dossier(
+        segments, label, candidate_anchor_texts_no_span,
     )
-    pre_fix_indexes = {item["segment_index"] for item in pre_fix_dossier}
-    assert to_segment not in pre_fix_indexes, "红灯前提：旧算法下许师姐段未进卷宗，事故已复现"
-    assert not any("许师姐" in item["text"] for item in pre_fix_dossier)
-    assert pre_fix_indexes == set(range(1, 13)), "红灯前提：卷宗被孟浩开篇独白 12 段占满"
+    no_span_indexes = {item["segment_index"] for item in no_span_dossier}
+    assert to_segment in no_span_indexes, "1.8.2 候选公平轮转让许师姐段即使没有事件跨度也能进卷宗"
+    assert any("许师姐" in item["text"] for item in no_span_dossier)
 
     # ---- 绿：真实调用链（事件跨度定位）----
     async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
@@ -3204,14 +3212,101 @@ def test_unresolved_appearance_label_binds_via_candidate_verdict_using_event_spa
     assert "面色苍白" in seen["prompt"]
 
 
+# ---------------------------------------------------------------------------
+# 1.8.2（真实数据、同一事故的第三层根因，见 PREP_PACK_VERSION 上方 1.8.2
+# 大注释，provider_calls id=10469 可复核）：1.8.1 的事件跨度定位本身工作
+# 正常——EP1 目标标签"银色长袍女子"的卷宗确实改成了事件跨度定位、也确实
+# 包含了银袍女子登场那段——但目标案例仍然失败，因为事件跨度本身连续覆盖
+# 12 段，恰好把 MAX_ENTRIES 占满，B 侧（候选锚点段"许师姐"）一条都没进
+# 卷宗。修法：_prep_pack_functional_candidate_dossier 的预算分配改为按层
+# 保底配额（A、B 两侧各自不可被对方挤占的最低名额），且 B 侧内部改为按
+# 候选公平轮转合并（不再是全部候选锚点段落混在一起整体按邻近度排序，
+# 那样会让本章高频出现的候选把 B 侧配额全占了，害其它候选零证据）。
+# ---------------------------------------------------------------------------
+
+def test_functional_candidate_dossier_reserves_quota_for_candidate_anchor_when_event_span_fills_budget():
+    """红→绿核心场景（1.8.2，真实事故形状复现）：标签所属事件的
+    source_span 连续覆盖 12 段，恰好等于 _PREP_PACK_FUNCTIONAL_CANDIDATE_
+    DOSSIER_MAX_ENTRIES；候选"许清"唯一的锚点段（含已确认别名"许师姐"）
+    落在事件跨度之外。1.8.1 的"A 侧全收，剩余预算才给 B 侧"在这里必然打空
+    B 侧——A 侧单独就有 12 条，选择循环遍历完 A 侧时 selected 已经等于
+    MAX_ENTRIES，B 侧一条都轮不到（可用下面的变异验证复现：把保底配额改回
+    "reserve_a = len(primary_indexes)"、"reserve_b = 0" 就会看到这个用例
+    变红）。1.8.2 按层保底配额后，A、B 两侧都必须有代表段进卷宗。"""
+    event_scene_paragraphs = [
+        f"殿内烛火摇曳，气氛凝重，此为事发经过第{i}段。" for i in range(1, 13)
+    ]
+    candidate_paragraphs = [
+        "一个面色苍白，看不出年纪的女子，穿着一身银色长袍，站在那里面无表情地望着孟浩。",
+        "绿袍男子对着她躬身行礼，口称许师姐，随后请四人随他回宗门。",
+    ]
+    paragraphs = event_scene_paragraphs + candidate_paragraphs
+    source_text = "\n\n".join(paragraphs)
+    segments = prep_pack.index_source_segments(source_text)
+    assert len(segments) == 14
+    label = "银色长袍女子"
+    assert label not in source_text, "复现前提：标签不是原文字面，逐字定位必然打空"
+
+    event_span_segments = set(range(1, 13))  # 连续 12 段，恰好等于条数上限
+    assert len(event_span_segments) == prep_pack._PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES, (
+        "复现前提：事件跨度本身就能塞满整份卷宗预算"
+    )
+
+    candidate_anchor_texts = {"许清": ["许清", "许师姐"]}
+    dossier = prep_pack._prep_pack_functional_candidate_dossier(
+        segments, label, candidate_anchor_texts, event_span_segments,
+    )
+    dossier_indexes = {item["segment_index"] for item in dossier}
+    assert len(dossier) <= prep_pack._PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES
+    assert 14 in dossier_indexes, "B 侧（候选锚点段：许师姐所在段）必须有代表段进卷宗"
+    assert any("许师姐" in item["text"] for item in dossier)
+    assert dossier_indexes & event_span_segments, "A 侧（事件跨度段）也必须有代表段进卷宗，不能被B侧反向挤没"
+    # 确定性：同一输入精确复现同一份卷宗（按层保底配额 + 既有优先级/邻近度
+    # 规则完全是纯函数，没有随机采样）。
+    assert dossier_indexes == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14}
+
+
+def test_functional_candidate_dossier_shares_anchor_quota_fairly_across_multiple_candidates():
+    """用例二（1.8.2 多候选公平性，见 PREP_PACK_VERSION 上方 1.8.2 大注释第
+    3 点纪律：'多候选时 B 侧配额要在候选之间公平分配'）：两个候选，"孟浩"
+    模拟本章高频出现的主角（20 段独立提及），"许清"只出现 2 次且都排在
+    文档末尾。若 B 侧仍按 1.8.1 的"全部候选锚点段落混在一起、无邻近度参照
+    时退化为文档顺序"处理，前 12 个文档顺序命中全部是孟浩，许清两段（排在
+    第 21、22 段）一条都进不了卷宗——跟 A 侧曾经淹没 B 侧是同一个"主角
+    淹没预算"陷阱，只是这次发生在 B 侧内部的候选粒度。1.8.2 的按候选
+    公平轮转合并必须让许清至少有一段进卷宗。"""
+    paragraphs = [
+        f"孟浩在演武场上独自练剑，汗流浃背，此为第{i}件事。" for i in range(1, 21)
+    ]
+    paragraphs.append("许清默默递上一方手帕，什么话也没说。")
+    paragraphs.append("许清转身离开，衣袂翻飞，再未回头。")
+    source_text = "\n\n".join(paragraphs)
+    segments = prep_pack.index_source_segments(source_text)
+    assert len(segments) == 22
+    label = "不存在的标签"  # 无字面命中、无事件跨度：纯 B 侧候选公平性测试
+
+    candidate_anchor_texts = {"孟浩": ["孟浩"], "许清": ["许清"]}
+    dossier = prep_pack._prep_pack_functional_candidate_dossier(
+        segments, label, candidate_anchor_texts,
+    )
+    dossier_indexes = {item["segment_index"] for item in dossier}
+    assert len(dossier) <= prep_pack._PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES
+    assert {21, 22} <= dossier_indexes, "低频候选许清必须也有代表段进入卷宗，不能被高频候选孟浩挤没"
+    assert any("孟浩" in item["text"] for item in dossier), "高频候选孟浩仍应正常占用剩余配额，不是被排斥"
+    # 确定性：同一输入精确复现同一份卷宗。
+    assert dossier_indexes == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 22}
+
+
 def test_prep_pack_version_is_1_8_0():
     """版本号哨兵：本次改造（未解析角色标签候选判别——真实 EP1"银色长袍
     女子"应绑定许清却因标签类型对不上落 functional_extras 的用户诉求收口）
     新增 provenance.method="candidate_verdict" 取值、会实际改变部分此前落
     functional_extras 的标签的解析结果，版本必须推进到 1.8.0（见
     PREP_PACK_VERSION 上方大注释）。1.8.1（同一机制的后续事故修复：卷宗
-    检索改用事件跨度定位，见 PREP_PACK_VERSION 上方 1.8.1 大注释）会实际
-    改变发给候选判别模型的卷宗内容本身，同样是 prompt-contract 变更，版本
-    再次推进——函数名/测试名沿用旧号不改，只更新断言值，避免无谓的大范围
+    检索改用事件跨度定位，见 PREP_PACK_VERSION 上方 1.8.1 大注释）与 1.8.2
+    （同一机制的第三轮事故修复：卷宗预算改为按层保底配额 + B 侧候选公平
+    轮转合并，见 PREP_PACK_VERSION 上方 1.8.2 大注释）都会实际改变发给
+    候选判别模型的卷宗内容本身，同样是 prompt-contract 变更，版本逐次
+    推进——函数名/测试名沿用旧号不改，只更新断言值，避免无谓的大范围
     改名。"""
-    assert prep_pack.PREP_PACK_VERSION == "1.8.1"
+    assert prep_pack.PREP_PACK_VERSION == "1.8.2"

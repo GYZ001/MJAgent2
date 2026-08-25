@@ -225,7 +225,7 @@ from app.validators import (
     match_scene_name,
 )
 
-PREP_PACK_VERSION = "1.8.1"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "1.8.2"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
 # gained functional_extras; 1.4.0: coverage_ledger gained paratext (deterministic
 # keyword/position classifier, since replaced); 1.4.1: paratext classification
@@ -394,6 +394,34 @@ PREP_PACK_VERSION = "1.8.1"  # 1.1.0: event_chain entries carry source_span (P1 
 # 会实际改变部分此前误落 functional_extras 的标签的判别结果），asset_
 # manifest/event_chain 的 payload 结构与既有 provenance.method 取值集合
 # 均未改变，比照 1.4.1/1.6.1 的先例推进版本号（第三位，不动 schema 位）。
+# 1.8.2（真实数据、当晚同一事故的第二层根因，prompt-contract 变更，版本
+# 推进）：1.8.1 修好了"标签逐字定位打空"，EP1 目标标签"银色长袍女子"的卷宗
+# 确实改成了事件跨度定位、也确实包含了银袍女子登场那段——但目标依然失败
+# （provider_calls id=10469）：这次事件跨度本身连续覆盖 12 段（35-46），
+# 恰好把 _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES 占满，候选
+# 锚点段落（"许师姐"那两段，紧邻案发现场之后、绿袍男子称呼她的地方，但不
+# 落在事件跨度本身之内）一条都没进卷宗（该次调用提示词 `含许师姐: False`）。
+# 模型的回答本身是对的——它引用的支撑句正是银袍女子的外貌描写，说明它确实
+# "看到"了这个人，只是卷宗里没有任何材料能把这个人和候选"许清"连起来。
+#
+# 根因：1.8.1 的预算分配是"A 侧（事件跨度段+标签字面段）全收，剩余预算才
+# 给 B 侧（候选锚点段）"——只要 A 侧单独就能塞满 12 条上限，B 侧永远轮不到，
+# 跟 A 侧具体有多长完全无关，是一个结构性的"严格优先级会让一侧饿死"缺陷，
+# 不是"这次事件跨度恰好长"的偶然。修复：_prep_pack_functional_candidate_
+# dossier 改为按层保底配额（_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_
+# MIN_SIDE_ENTRIES），A、B 两侧各自先分到一份不可被对方挤占的保底名额（受
+# 各自实际可用证据量与总上限约束），保底满足后剩余的"flex"名额才按原有的
+# "A 优先、B 按邻近度补足"规则继续分配——这样即使 A 侧证据再长，B 侧只要
+# 非空就必有代表段进卷宗。B 侧内部这次也改为按候选做轮转合并
+# （_prep_pack_functional_candidate_anchor_pool 的 round-robin 排序，非
+# 简单邻近度全局排序），避免同一个"主角淹没预算"陷阱在 B 侧内部以候选粒度
+# 重演——多候选场景下，本章高频出现的候选不能吃光 B 侧保底配额，害其它候选
+# 零证据（同一晚在这条判别链上反复出现的失败形状）。详见
+# _prep_pack_functional_candidate_dossier 与
+# _prep_pack_functional_candidate_anchor_pool 各自完整 docstring。会实际
+# 改变发给候选判别模型的卷宗内容本身（真正的 prompt-contract 变更），
+# asset_manifest/event_chain 的 payload 结构与既有 provenance.method 取值
+# 集合均未改变，比照 1.4.1/1.6.1/1.8.1 的先例推进版本号（第三位）。
 QA_PROFILE_VERSION = "prep-pack-qa-gate-1"
 _QA_EVALUATOR_NAME = "screenplay_production_qa"
 _CHUNK_MAX_CHARS = 6000
@@ -1601,6 +1629,18 @@ async def _discover_new_scenes(
 _PREP_PACK_FUNCTIONAL_CANDIDATE_NO_MATCH_LABEL = "都不是/无法确定"
 _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES = 12  # 单条候选判别卷宗最多收录的段落数
 _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_CHARS = 6000  # 单条候选判别卷宗最多收录的总字符数
+# 1.8.2 新增，见 PREP_PACK_VERSION 上方 1.8.2 大注释的完整根因：A 侧（事件
+# 跨度段+标签字面段）与 B 侧（候选锚点段）各自的保底配额——任一侧的可用
+# 证据量达到这个数，就至少能拿到这么多名额，不会被另一侧挤到 0（哪怕另
+# 一侧证据量单独就能塞满 MAX_ENTRIES，真实事故：事件跨度连续 12 段，恰好
+# 等于 MAX_ENTRIES，B 侧原本一条不剩）。取值 4：真实事故里 B 侧只需要 2
+# 段（"许师姐"两段）就足以让模型判别成功，4 留一倍余量，也够多候选场景下
+# round-robin 轮转两三个候选各自分到证据；两侧同时保底 4+4=8，不超过
+# MAX_ENTRIES(12) 的三分之二，剩下的 4 个"flex"名额仍按原有优先级（A 优先
+# 全部收录、B 按邻近度补足）竞争分配——不是靠放大两个既有上限常量本身来
+# 绕过问题（1.8.2 大注释第 4 点纪律：那只是把问题推后），MAX_ENTRIES/
+# MAX_CHARS 原样不变。
+_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MIN_SIDE_ENTRIES = 4
 
 
 def _prep_pack_functional_candidate_roster(bible: Bible) -> dict[str, list[str]]:
@@ -1681,48 +1721,114 @@ def _prep_pack_functional_candidate_event_span_segments(
     return spans
 
 
+def _prep_pack_functional_candidate_anchor_pool(
+    segments: list[SourceSegment], label: str,
+    candidate_anchor_texts: dict[str, list[str]],
+    event_span_indexes: list[int], event_span_index_set: set[int],
+) -> tuple[list[int], list[int]]:
+    """A 侧第二层（label 逐字命中段）与 B 侧（候选锚点段落，按候选公平
+    轮转合并）的联合检索，1.8.2 新增，见 PREP_PACK_VERSION 上方 1.8.2
+    大注释、_prep_pack_functional_candidate_dossier 的完整说明。两者共用
+    同一次 segments 扫描（避免重复遍历），扫描本身零语义、跟 1.8.1 完全
+    一致：已被 ``event_span_index_set`` 收录的段不重复计入任一层；``label``
+    逐字命中优先于候选锚点归入 A 侧（更直接的证据，即便同段也命中了某个
+    候选的锚点文本，不占 B 侧配额）。
+
+    B 侧排序是本函数真正新增的部分——1.8.1 把全部候选的锚点段落混在一起
+    按"离案发现场的邻近度"整体排序，本轮真实事故的第二个根因正出在这里：
+    整体排序下，本章出场次数越多的候选，越多段落挤进排序靠前的位置，一旦
+    配额有限（受 A 侧保底挤压后更是如此），出场次数少的候选会被排到全部
+    落选——跟"A 侧全收挤没 B 侧"是同一个"主角淹没预算"陷阱，只是这次发生
+    在 B 侧内部的候选粒度，光靠 A/B 两侧保底配额堵不住。
+
+    做法：先按候选分组，每个候选自己的锚点段落仍按"离主锚点（事件跨度
+    段落；事件跨度为空时退回 label 命中段落）的邻近度升序、距离相同段号
+    升序"排序——邻近度规则本身不变，只是分组后各自排序，不再混在一起
+    整体排序；随后按"每个候选轮流各出一段"合并：候选①最近的一段、候选②
+    最近的一段、……、候选①第二近的一段、候选②第二近的一段、……
+    （``candidate_anchor_texts`` 的 key 顺序即调用方 ``candidates`` 的既有
+    确定性顺序，见 _prep_pack_functional_candidate_names 的 roster 保序
+    说明）。这样任何前缀配额下的候选出现次数最多相差 1——不管某个候选在
+    原文里反复出场多少次，只要还没轮到把其它候选的锚点段落全部轮完，它
+    都不会占用超过"自己的份额+1"的位置。同一段落同时命中多个候选（原文
+    同段提到两人）按候选顺序谁先轮到归谁，其余候选这一轮空转、不影响
+    自己后续轮次的进度，也不重复计入卷宗或重复占用配额。"""
+    label_text_indexes: list[int] = []
+    per_candidate_indexes: dict[str, list[int]] = {name: [] for name in candidate_anchor_texts}
+    for index, seg in enumerate(segments):
+        if index in event_span_index_set:
+            continue
+        if label and label in seg.text:
+            label_text_indexes.append(index)
+            continue
+        for name, forms in candidate_anchor_texts.items():
+            if any(form and form in seg.text for form in forms):
+                per_candidate_indexes[name].append(index)
+    # 邻近度参照点：优先事件跨度段落（"离案发现场的远近"）；事件跨度为空
+    # 时退回 label 命中段落——事件跨度缺失/为空的防御性回退，跟 1.8.1 的
+    # 既有语义完全一致。两者都为空时（label 是转述短语、原文无字面）候选
+    # 段落没有邻近度参照点，保持扫描得到的文档顺序，等价于改造前的既有
+    # 行为，不引入新的失败模式。
+    proximity_anchor = event_span_indexes or label_text_indexes
+    if proximity_anchor:
+        for indexes in per_candidate_indexes.values():
+            indexes.sort(
+                key=lambda index: (min(abs(index - anchor) for anchor in proximity_anchor), index),
+            )
+    candidate_order = list(candidate_anchor_texts.keys())
+    seen: set[int] = set()
+    anchor_pool_ordered: list[int] = []
+    max_round = max((len(indexes) for indexes in per_candidate_indexes.values()), default=0)
+    for round_idx in range(max_round):
+        for name in candidate_order:
+            indexes = per_candidate_indexes[name]
+            if round_idx >= len(indexes):
+                continue
+            index = indexes[round_idx]
+            if index in seen:
+                continue
+            seen.add(index)
+            anchor_pool_ordered.append(index)
+    return label_text_indexes, anchor_pool_ordered
+
+
 def _prep_pack_functional_candidate_dossier(
-    segments: list[SourceSegment], label: str, anchor_texts: set[str],
+    segments: list[SourceSegment], label: str,
+    candidate_anchor_texts: dict[str, list[str]],
     event_span_segments: set[int] = frozenset(),
 ) -> list[dict[str, Any]]:
-    """裁决卷宗检索（1.8.1 改用事件跨度定位主锚点，见 PREP_PACK_VERSION
-    上方大注释与 _prep_pack_functional_candidate_event_span_segments 的
-    完整根因说明——真实事故：标签"银色长袍女子"逐字定位打空，卷宗被主角
-    孟浩开篇独白段落吃光预算，真正的证据段"许师姐"进不去卷宗）。
+    """裁决卷宗检索（1.8.2 改为按层保底配额，见 PREP_PACK_VERSION 上方
+    1.8.2 大注释的完整根因——真实事故：1.8.1 修好了"标签逐字定位打空"，卷宗
+    也确实改成了事件跨度定位、包含了银袍女子登场那段，但事件跨度本身连续
+    覆盖 12 段，恰好塞满 MAX_ENTRIES，候选锚点段"许师姐"两段一条没进卷宗，
+    模型依旧回答"无法确定"）。
 
-    两层主锚点（必须优先全部收录，受条数/字数上限约束时按段号升序做
-    确定性截断——不炸预算的前提下谁先出现在原文里谁先进卷宗）：
-      1) ``event_span_segments``：该标签所属事件（调用方用
-         _prep_pack_functional_candidate_event_span_segments 算出）的
-         source_span 覆盖到的段落——不依赖标签字面能否逐字命中原文，是
-         本轮修复的核心，见上面函数的完整说明。越界/非法段号（不在
-         ``[1, len(segments)]``）一律丢弃，不崩。
-      2) ``label`` 逐字命中原文的段落（1.8.0 起既有路径，保留：有些标签
-         确实是原文用词，这条路径不因为改用事件定位就丢弃）——已经在
-         第①层收录过的段不重复计入这一层。
+    两侧证据来源不变（跟 1.8.1 完全一致，这里不重复根因，只重复形状）：
+    - A 侧＝``primary_indexes``＝两层主锚点的并集：①``event_span_segments``
+      （该标签所属事件的 source_span 覆盖段落，见
+      _prep_pack_functional_candidate_event_span_segments）②``label``
+      逐字命中原文的段落（未被①收录的部分）；
+    - B 侧＝``anchor_pool_ordered``＝候选（规范名∪已确认别名）逐字命中、
+      按候选公平轮转合并后的有序段落，见
+      _prep_pack_functional_candidate_anchor_pool 的完整说明。
 
-    候选锚点段落（``anchor_texts``，候选的规范名∪已确认别名逐字命中的段，
-    调用方负责传全部候选、不只是被测标签自己——否则模型看不到其它候选
-    各自的出场证据，选择题就名存实亡，见本节顶部大注释）不再是"离标签
-    最近"，而是按到主锚点（优先事件跨度段落；事件跨度为空时退回 label
-    逐字命中段落——即事件跨度缺失/为空的防御性回退，见下方）的邻近度
-    升序补足预算：离案发现场越近越优先，距离相同按段号升序确定性打破
-    平局。这就是"许师姐"两段能排到孟浩开篇独白前面的机制——它们紧邻
-    案发现场（银袍女子登场+绿袍男子称许师姐所在的事件跨度），孟浩的
-    开篇段落离得远。
+    1.8.2 新增的按层保底配额（本函数真正的改动点）：A、B 两侧各自先分到
+    ``min(_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MIN_SIDE_ENTRIES, 该侧
+    实际可用条数)`` 的保底名额，谁都不能被对方挤到 0——哪怕对方证据量
+    单独就能塞满 MAX_ENTRIES。两侧保底都满足后，剩余的"flex"名额才按
+    原有优先级规则继续分配：A 侧剩余部分（仍是"主锚点必须优先"的既有
+    语义）在前，B 侧剩余部分（仍按候选轮转顺序，见上面函数）在后。这不是
+    简单地把 MAX_ENTRIES/MAX_CHARS 两个上限放大——两个常量原样不变，只是
+    在同一份预算内部重新分配谁先进卷宗，任一侧非空时必有代表段进入卷宗
+    （只要该侧保底 > 0，即该侧确有可用证据）。
 
-    事件跨度缺失或为空（``event_span_segments`` 为空集，例如标签不属于
-    任何声明了合法 source_span 的事件——防御性场景，正常流程下不应发生）
-    时，主锚点退化为只剩"label 逐字命中段落"，候选锚点段落的邻近度参照
-    点也相应退化为这些段落——完全等价于 1.8.1 之前的既有行为，不引入
-    任何新的失败模式。label 逐字命中段落也为空时（1.8.0 起就有的既有
-    分支：label 是转述/综合短语，原文没有这个字面）主锚点整体为空，候选
-    锚点段落此时没有邻近度参照点，按文档顺序返回（见 primary_indexes 为
-    空的分支）。只要候选集非空，候选锚点段落集合本身必然非空——候选正是
-    靠 anchor 命中本集才入选的（见 _prep_pack_functional_candidate_names），
-    不会出现"候选非空但卷宗为空"这种情况（除非事件跨度和 label 命中都为
-    空同时候选锚点也为空，理论上不可能）；调用方仍需处理空列表这个
-    防御性分支。"""
+    退化场景（不崩、不引入新失败模式，跟 1.8.1 同一纪律）：某一侧为空时
+    （例如事件跨度缺失导致 A 侧只剩 label 命中段甚至整体为空；或候选锚点
+    在本集之外，B 侧为空——理论上不应发生，候选正是靠 anchor 命中本集才
+    入选的，见 _prep_pack_functional_candidate_names），该侧保底与 flex
+    都退化为 0，另一侧可用满 MAX_ENTRIES 预算，行为退化为"这一侧全收"，
+    等价于该侧单独存在时的合理行为。两侧都为空时返回空列表，交由调用方
+    按既有防御性分支处理。"""
     total_segments = len(segments)
     # 主锚点第一层：段号来自调用方传入的事件跨度集合，可能包含越界/非法
     # 值（防御性输入，不假设调用方一定传的是干净数据）——落在
@@ -1732,33 +1838,19 @@ def _prep_pack_functional_candidate_dossier(
         {index - 1 for index in event_span_segments if 1 <= index <= total_segments},
     )
     event_span_index_set = set(event_span_indexes)
-    # 主锚点第二层：label 逐字命中、且未被第一层收录过的段。
-    label_text_indexes: list[int] = []
-    anchor_only_indexes: list[int] = []
-    for index, seg in enumerate(segments):
-        if index in event_span_index_set:
-            continue
-        has_text = bool(label) and label in seg.text
-        if has_text:
-            label_text_indexes.append(index)
-            continue
-        has_anchor = any(anchor and anchor in seg.text for anchor in anchor_texts)
-        if has_anchor:
-            anchor_only_indexes.append(index)
+    label_text_indexes, anchor_pool_ordered = _prep_pack_functional_candidate_anchor_pool(
+        segments, label, candidate_anchor_texts, event_span_indexes, event_span_index_set,
+    )
     primary_indexes = event_span_indexes + label_text_indexes
-    # 候选锚点段落的邻近度参照点：优先事件跨度段落本身（"离案发现场的
-    # 远近"，第2点要求的字面）；事件跨度为空时退回 label 命中段落——这正是
-    # 第4点"事件跨度缺失时退回既有行为"的落地点（既有行为的参照点就是
-    # label 命中段落，见本函数改造前版本的 priority_indexes）。
-    proximity_anchor = event_span_indexes or label_text_indexes
-    if proximity_anchor:
-        anchor_only_ordered = sorted(
-            anchor_only_indexes,
-            key=lambda index: (min(abs(index - anchor) for anchor in proximity_anchor), index),
-        )
-    else:
-        anchor_only_ordered = anchor_only_indexes
-    ordered_candidates = primary_indexes + anchor_only_ordered
+    # 按层保底配额（1.8.2 核心改动，见本函数 docstring）：A、B 两侧各自
+    # 先分到不超过自身可用条数、也不超过 MIN_SIDE_ENTRIES 的保底名额；
+    # 保底之后剩余的名额（flex）仍按"A 优先、B 随后"的既有优先级顺序
+    # 竞争分配——两个列表用切片取，天然确定性、可复现。
+    reserve_a = min(_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MIN_SIDE_ENTRIES, len(primary_indexes))
+    reserve_b = min(_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MIN_SIDE_ENTRIES, len(anchor_pool_ordered))
+    guaranteed_a, overflow_a = primary_indexes[:reserve_a], primary_indexes[reserve_a:]
+    guaranteed_b, overflow_b = anchor_pool_ordered[:reserve_b], anchor_pool_ordered[reserve_b:]
+    ordered_candidates = guaranteed_a + guaranteed_b + overflow_a + overflow_b
     selected: list[int] = []
     used_chars = 0
     for index in ordered_candidates:
@@ -1912,10 +2004,15 @@ async def _prep_pack_resolve_functional_extra_candidate(
     candidates = _prep_pack_functional_candidate_names(source_text, roster)
     if not candidates:
         return None
-    anchor_texts = {form for name in candidates for form in roster.get(name, [])}
+    # 1.8.2：改传"候选名 -> 该候选自己的锚点文本"分组字典（而非拍平成一个
+    # 集合），供 _prep_pack_functional_candidate_dossier 的 B 侧按候选做
+    # 公平轮转合并，见该函数与 _prep_pack_functional_candidate_anchor_pool
+    # 的完整说明。字典按 candidates 既有确定性顺序构造（保序，见
+    # _prep_pack_functional_candidate_names 的 roster 保序说明）。
+    candidate_anchor_texts = {name: roster.get(name, []) for name in candidates}
     event_span_segments = _prep_pack_functional_candidate_event_span_segments(events, label)
     dossier = _prep_pack_functional_candidate_dossier(
-        segments, label, anchor_texts, event_span_segments,
+        segments, label, candidate_anchor_texts, event_span_segments,
     )
     if not dossier:
         return None
