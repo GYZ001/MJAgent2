@@ -3926,22 +3926,27 @@ def test_unresolved_appearance_label_binds_via_candidate_verdict_using_event_spa
     by_portrait = {c["portrait_id"]: c for c in characters}
     assert "cp-xuqing" in by_portrait, "绿：许清必须真的绑定成功"
     entry = by_portrait["cp-xuqing"]
-    # 1.11.0（任务①，见 PREP_PACK_VERSION 上方大注释）：这正是任务①的真实
-    # 触发案例本身——label"银色长袍女子"不是原文逐字（open 断言已经确认），
-    # candidate_verdict 只核验了"这个标签指向许清"这件事，从没核验过标签
-    # 字符串本身。此前 display_appellation 直接沿用了这个不逐字的合成标签，
-    # 字幕会显示原文里根本不存在的说法；现在改为确定性替换成这条绑定分支
-    # 本来就要算的 anchor_phrase（候选判别钉证命中的卷宗段落原文，见下面
-    # anchor_phrase 断言）——这句话是本集原文的真实逐字内容，不是新编的
-    # 证据链。label_literal 显式记为 True，可观测地区分"用户看到的是原文
-    # 逐字替代品"而不是"模型综合的合成短语"。
-    assert entry["display_appellation"] == (
-        "绿袍男子对着她躬身行礼，口称许师姐，随后请四人随他回宗门。"
-    ), "标签本身非逐字时，display_appellation 必须确定性替换为逐字 anchor_phrase，不能沿用合成标签"
+    # 1.11.0（任务①）→1.11.1（真实回归，撤回替换手段，见 PREP_PACK_VERSION
+    # 上方 1.11.1 大注释）：这正是任务①的真实触发案例本身——label"银色长袍
+    # 女子"不是原文逐字（open 断言已经确认），candidate_verdict 只核验了
+    # "这个标签指向许清"这件事，从没核验过标签字符串本身。1.11.0 曾经把
+    # display_appellation 确定性替换成这条绑定分支算出的 anchor_phrase
+    # （候选判别钉证命中的卷宗段落原文），但真实生产数据证明这条 anchor_
+    # phrase 不保证是短语——它是钉证命中的整段证据句，真实 EP1 复现里
+    # 长达数十字、带引号和句号，替换后字幕显示的是一整句旁白而非称谓，比
+    # 替换前更差（真实回归，见 1.11.1 大注释）。1.11.1 撤回替换，改为跟
+    # functional_extras[] 侧同一处置：display_appellation 保留原始合成
+    # 标签 label 不变，只用 provenance.label_literal 如实标记"这个称谓不是
+    # 原文逐字"，不伪造一个看起来逐字、实则不可用的替代品。
+    assert entry["display_appellation"] == label, (
+        "标签本身非逐字时，display_appellation 必须原样保留合成标签，"
+        "绝不能替换成 anchor_phrase 这类证据段落——1.11.0 曾经替换、"
+        "1.11.1 因真实回归撤回"
+    )
     assert entry["provenance"]["method"] == "candidate_verdict"
     assert entry["provenance"]["anchor_segments"] == [to_segment]
     assert "许师姐" in entry["provenance"]["anchor_phrase"]
-    assert entry["provenance"]["label_literal"] is True
+    assert entry["provenance"]["label_literal"] is False
     assert not any(e["label"] == label for e in functional_extras), (
         "绑定成功后，这个标签不能再出现在 functional_extras 里"
     )
@@ -3966,12 +3971,13 @@ def test_unresolved_appearance_label_binds_via_candidate_verdict_using_event_spa
 def test_character_non_literal_name_with_no_usable_anchor_keeps_raw_label_and_marks_false(
     monkeypatch,
 ):
-    """红灯（分支：literal_evidence=False 且该绑定分支算出的 anchor_phrase
-    也是空——alias/discovery 两支的候选序列只试 ``[name]`` 本身，见
-    _prep_pack_local_text_anchor 的调用点）：没有任何可用的逐字材料时，
-    display_appellation 必须原样保留合成标签（不伪造替换），provenance.
-    label_literal 诚实标 False，绝不阻断——这是"标记不修"兜底分支，跟
-    characters 侧成本可控（1/25 条量级）的取舍直接对应。"""
+    """红灯（分支：literal_evidence=False，alias/discovery 两支的
+    anchor_phrase 候选序列只试 ``[name]`` 本身，见 _prep_pack_local_text_
+    anchor 的调用点，本用例里该候选查无结果、anchor_phrase 为空——1.11.1
+    撤回替换分支后，这份 anchor_phrase 是否可用已经不影响结论，characters
+    侧无条件不替换，见下）：display_appellation 必须原样保留合成标签
+    （不伪造替换），provenance.label_literal 诚实标 False，绝不阻断——
+    跟 functional_extras[] 侧同一处置：只标记，不修正取值。"""
     conn = _make_conn()
     conn.execute(
         "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
@@ -4023,12 +4029,18 @@ def test_character_non_literal_name_with_no_usable_anchor_keeps_raw_label_and_ma
 def test_character_candidate_verdict_truncated_dossier_entry_not_used_as_literal_substitute(
     monkeypatch,
 ):
-    """红灯（防御性分支：candidate_verdict 钉中的卷宗条目字数超过
+    """回归防线（1.11.1 撤回替换后，本用例仍是有效的最强反例）：
+    candidate_verdict 钉中的卷宗条目字数超过
     _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_GUARANTEED_ENTRY_MAX_CHARS，被
     _prep_pack_functional_candidate_truncate_segment 做过确定性截断、带省略
-    标记——这份 anchor_phrase 不再是原文纯净子串，绝不能被当成 display_
-    appellation 的逐字替代品使用，否则字幕会显示原文里同样不存在的省略号
-    拼接文本，等于把任务①要修的问题换了一种方式重新引入。"""
+    标记——这份 anchor_phrase 既不是原文纯净子串、也不是称谓，绝不能被当成
+    display_appellation 的替代品使用，否则字幕会显示原文里同样不存在的
+    省略号拼接文本。1.11.0 曾经在 anchor_phrase 非空且逐字命中时替换
+    display_appellation（本用例专门验证截断后的 anchor_phrase 不满足
+    "逐字"这个前提、因此不会被那条已撤回的替换分支误用）；1.11.1 撤回了
+    整条替换分支（见 PREP_PACK_VERSION 上方 1.11.1 大注释），display_
+    appellation 现在无条件保留原始标签，本用例的断言因此仍然成立，继续
+    留作防止替换分支被重新引入的回归防线。"""
     conn = _make_conn()
     conn.execute(
         "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
@@ -4911,10 +4923,19 @@ def test_prep_pack_version_is_1_8_0():
     display_appellation 是模型综合的合成短语，非逐字，见 PREP_PACK_
     VERSION 上方 1.11.0 大注释的测量数据与方案取舍）：新增
     provenance.label_literal 独立判定字段（characters[]/functional_
-    extras[] 每项都带），characters[] 侧非逐字时确定性替换为已有的
+    extras[] 每项都带），characters[] 侧非逐字时曾经确定性替换为已有的
     anchor_phrase（不新开证据检索），functional_extras[] 侧只标记（label
     同时是台词说话人匹配的连接键，不能改值）——会实际改变部分 characters[]
     条目的 display_appellation 取值，是真正的产出语义变更，比照 1.9.0 的
-    先例推进版本号——函数名/测试名沿用旧号不改，只更新断言值，避免无谓的
-    大范围改名。"""
-    assert prep_pack.PREP_PACK_VERSION == "1.11.0"
+    先例推进版本号。1.11.1（真实回归，1.11.0 上线后首次真实生成 EP1 当场
+    复现，见 PREP_PACK_VERSION 上方 1.11.1 大注释）：1.11.0 的 characters[]
+    替换手段撤回——真实数据证明 candidate_verdict 分支的 anchor_phrase 是
+    钉证命中的整段证据句而非称谓（EP1"许清"replace 后变成一整句带引号的
+    旁白，字段不可用，比替换前更差），characters[] 改回跟 functional_
+    extras[] 侧同一处置：只标记 provenance.label_literal，不替换 display_
+    appellation 的取值。literal_evidence 无条件计算、label_literal 标记
+    机制、functional_extras[] 侧处置三者均不变。是判定语义变更（处置手段
+    从确定性替换降为如实标记），比照 1.4.1/1.6.1/1.8.1-1.8.5/1.9.0/1.10.0
+    的先例推进版本号（第三位）——函数名/测试名沿用旧号不改，只更新断言
+    值，避免无谓的大范围改名。"""
+    assert prep_pack.PREP_PACK_VERSION == "1.11.1"

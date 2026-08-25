@@ -232,7 +232,7 @@ from app.validators import (
     match_scene_name,
 )
 
-PREP_PACK_VERSION = "1.11.0"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "1.11.1"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
 # gained functional_extras; 1.4.0: coverage_ledger gained paratext (deterministic
 # keyword/position classifier, since replaced); 1.4.1: paratext classification
@@ -848,6 +848,54 @@ PREP_PACK_VERSION = "1.11.0"  # 1.1.0: event_chain entries carry source_span (P1
 # （见 tests/test_prep_pack_asset_discovery.py 的并发完成顺序确定性红灯：
 # 两次以相反完成顺序跑完同一份输入，characters/functional_extras 逐字节
 # 相同），所以不占用版本号——版本号是产物契约的版本，不是实现细节的版本。
+# 1.11.1（真实回归，1.11.0 上线后首次真实生成 EP1 当场复现，characters[]
+# 侧处置手段撤回，判定语义变更，版本推进）：1.11.0 批准时没有核实
+# anchor_phrase 的实际形态就拍板了替换方案。真实证据（1.11.0 生成的 EP1
+# 产物，data/manju.db 只读复核确认）：许清 display_appellation 变成
+# ``“许师姐好手段，出门一次竟带回了四个拥有资质的小娃。”两个男子中的一人，
+# 带着恭维向着那女子说道。``——candidate_verdict 分支的 anchor_phrase 取的
+# 是钉证命中的整条卷宗段落原文（见上面该分支"anchor_phrase 直接取钉证命中
+# 的卷宗段落原文本身"的既有注释），从设计上就不保证是短语；对当前十集已
+# 发布产物全量复核（characters[]/functional_extras[] 两侧、全部 method）
+# 证实这不是孤例：anchor_phrase 非空样本里，characters[] 侧 25 条中位数
+# 长度 3 字符但均值 22.8 字符、最长 130 字符（李富贵，EP6，整段场景描写），
+# functional_extras[] 侧 25 条中位数 5 字符、均值 16.5 字符、最长 58 字符，
+# 两侧均有 7-10 条明显是带句号/引号的完整叙述句而非称谓（"围观弟子"←
+# "竟然是上官师叔亲自来发丹……"56 字整句）。anchor_phrase 的真实身份是
+# "证据段落"（钉证机制拿它证明"这段话支持这个绑定"），不是"称谓候选"，
+# 1.11.0 把两者当同一种东西处理是这次误判的根因。替换前的合成标签
+# （如"银色长袍女子"）虽非逐字，但至少是原文措辞组成的、观众能看懂的称谓，
+# 替换后的整句旁白让字段直接不可用——严格更差，是真实回归不是改进。影响面
+# （只读 SQL 复核，同上范围）：当前十集已发布产物里仅 1 条 characters[]
+# 记录被 1.11.0 实际替换成了句子——EP1"许清"（上面的复现案例本身，唯一
+# method=candidate_verdict 且非逐字的记录）；EP6 也在 1.11.0 版本重新生成
+# 过，但 EP6"许清"/"李富贵"两条的 name 本身逐字出现在原文（literal_
+# evidence=True），从未进入替换分支，不受影响。
+#
+# 修复：characters[] 侧改为跟 functional_extras[] 侧同一处置——只标记
+# provenance.label_literal，不替换 display_appellation 的取值（撤回
+# 1.11.0"用 anchor_phrase 替换 display_appellation"这一段，1.11.0 大注释
+# 原文保留作历史记录，不删除）。"标签用词接地"（label_literal）与"身份指向
+# 正确"（method/anchor_segments 既有职责）仍是两个独立判定，只是前者的
+# 处置手段从"确定性替换"降为"如实标记"——可替换的确定性来源只有
+# anchor_phrase，而它是证据段落不是称谓，替换会让字段不可用；宁可保留一个
+# 非逐字但可用的称谓（原始 name）并如实标记 label_literal=False，也不要
+# 一个逐字但不可用的整句旁白。评估过、本次不做：有没有一条确定性的办法从
+# anchor_phrase 里抽出一个真正的称谓短语？没有找到——从证据段落里抽短语
+# 需要语义判断（"这段话里哪几个字是在称呼这个人"），任何基于长度阈值/
+# 标点切分/首尾N字的启发式都对真实语料（钉证命中的段落里称谓可能在句首、
+# 句中引号内、或整句都是叙述完全不含称谓）系统性失效，且本项目禁止名单式
+# 判定（见 no-blacklist-fixes 纪律）——留给以后有专门语义抽取机制时再做，
+# 不在这次回归修复范围内伪造一个脆弱的替代方案。
+# 保留不动：literal_evidence 计算本身仍是 unconditional（不受 came_via_
+# resolution 短路，1.11.0 这条改动本身是对的）；provenance.label_literal
+# 标记机制不变；functional_extras[] 侧处置不变（本来就只标记）。不改变
+# event_chain/asset_manifest 既有字段集合（label_literal 仍是纯附加可选
+# 字段），但 characters[] 部分条目（EP1 许清这一类）的 display_appellation
+# 实际取值会变回 1.11.0 之前的合成标签而非替换后的整句，是真正的产出语义
+# 变更，比照 1.4.1/1.6.1/1.8.1-1.8.5/1.9.0/1.10.0 的先例推进版本号（第三
+# 位，不动 schema 位——跟 1.8.4 同一类"协调层复核，真实数据落库后确认误
+# 绑，回退处置手段"的先例）。
 QA_PROFILE_VERSION = "prep-pack-qa-gate-1"
 _QA_EVALUATOR_NAME = "screenplay_production_qa"
 _CHUNK_MAX_CHARS = 6000
@@ -3446,28 +3494,26 @@ async def _resolve_assets(
                 # 原始提及文本 name（画面取图看 visual_entity_id，字幕/称呼看
                 # display_appellation，两者分离——本集只说本集措辞，不提前
                 # 剧透 display_name 这个全局规范名）。
-                # 标签接地（1.11.0，任务①，见 PREP_PACK_VERSION 上方大注释）：
-                # literal_evidence 只回答"name 这个字符串是否逐字出现在本集
-                # 原文"，跟上面 came_via_resolution 决定的门禁分支（是否要求
-                # 逐字命中才能绑定）是两件事——不管走的是哪条解析路径，这里
-                # 都要如实判定"给观众看的这个称谓，逐字，是不是原文自己写的"。
-                # 命中：display_appellation 保持 name（现状不变）。未命中：
-                # 若这条绑定分支自己已经算出的 anchor_phrase 非空、且确实
-                # 逐字出现在本集 source_text（防御性复核——candidate_verdict
-                # 保底层可能命中过 _prep_pack_functional_candidate_truncate_
-                # segment 的截断，带省略标记后不再是原文纯净子串，不能盲信
-                # anchor_phrase 非空就等于逐字），用 anchor_phrase 顶替
-                # display_appellation——不新开任何证据检索，anchor_phrase是
-                # 这条绑定分支本来就要算的既有变量。两条都不满足时保留 name，
-                # 只标 label_literal=False，不伪造替换材料，也绝不回退到
-                # resolved_name（那会提前剧透，是这次要修的问题的另一种
-                # 形态，见上面 display_appellation 分离设计的既有说明）。
-                if literal_evidence:
-                    display_appellation, label_literal = name, True
-                elif anchor_phrase and anchor_phrase in source_text:
-                    display_appellation, label_literal = anchor_phrase, True
-                else:
-                    display_appellation, label_literal = name, False
+                # 标签接地（1.11.0 引入，1.11.1 撤回替换手段，见
+                # PREP_PACK_VERSION 上方 1.11.1 大注释）：literal_evidence
+                # 只回答"name 这个字符串是否逐字出现在本集原文"，跟上面
+                # came_via_resolution 决定的门禁分支（是否要求逐字命中才能
+                # 绑定）是两件事——不管走的是哪条解析路径，这里都要如实判定
+                # "给观众看的这个称谓，逐字，是不是原文自己写的"。display_
+                # appellation 永远保持 name（不替换）：唯一可能的确定性替换
+                # 来源是 anchor_phrase，但 anchor_phrase 是"钉证命中的证据
+                # 段落"，不是"称谓"——真实 EP1 数据坐实二者不可互换
+                # （candidate_verdict 分支 anchor_phrase 直接取钉证命中的整段
+                # 卷宗原文；其它分支靠 _prep_pack_local_text_anchor 生成的
+                # anchor_phrase 同样不保证结果是短语而非整句），1.11.0 曾经
+                # 在这里替换，产出的
+                # display_appellation 变成一整句旁白，字段不可用，比替换前
+                # 的合成短语更差。跟 functional_extras[] 侧同一处置：只标记
+                # provenance.label_literal，不改 display_appellation 的取值
+                # ——命中 True，未命中 False，均不落回 resolved_name（那会
+                # 提前剧透，是另一种形态的同一问题，见上面 display_
+                # appellation 分离设计的既有说明）。
+                display_appellation, label_literal = name, literal_evidence
                 entry = characters.setdefault(portrait_id, {
                     "identity_id": f"bible:{resolved_name}",
                     "display_name": resolved_name,
