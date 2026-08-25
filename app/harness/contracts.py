@@ -55,8 +55,20 @@ _CONTRACTS: dict[str, StageContract] = {
     ),
     "storyboard": StageContract(
         key="storyboard",
-        version="4.0.0",
-        input_types=["episode_screenplay"],
+        # 5.0.0: input switched from episode_screenplay to episode_prep_pack
+        # (docs/TRANSFORM_FREEZE_PLAN.md P1 -- screenplay stage stopped
+        # producing episode_screenplay at contract 6.0.0; storyboard's
+        # declared input must follow its actual producer). Same precedent as
+        # the screenplay contract's own 5.1.0 -> 6.0.0 bump for its output
+        # type change: a breaking change to a declared input/output type is a
+        # major version bump, not a patch. The storyboard stage itself is
+        # unchanged this round -- it still consumes the legacy
+        # EpisodeScreenplay shape, now populated by a deterministic
+        # projection (app.production.screenplay_authority.
+        # project_prep_pack_to_screenplay) instead of the retired heavy
+        # blueprint pipeline.
+        version="5.0.0",
+        input_types=["episode_prep_pack"],
         output_type="storyboard",
         invariants=[
             "the model selects each shot duration as an integer from 5 through 10 seconds",

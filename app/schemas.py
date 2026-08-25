@@ -1024,7 +1024,39 @@ class NarrativeContinuityPlan(BaseModel):
     identity_contracts: list[NarrativeIdentityContract] = Field(default_factory=list)
 
 
+class PrepPackCharacterAsset(BaseModel):
+    """Identity triad carried verbatim from episode_prep_pack's
+    asset_manifest.characters[] (screenplay contract 6.0.0+) into the legacy
+    EpisodeScreenplay projection used by the storyboard stage.
+
+    This is a lossless passthrough only -- no downstream prompt/consumption
+    logic reads it yet (that is explicitly the next phase). Its purpose is to
+    guarantee the projection layer cannot silently drop the character
+    identity binding (visual_entity_id / portrait_id / display_appellation)
+    that the screenplay stage already resolved.
+    """
+
+    identity_id: str = ""
+    display_name: str = ""
+    display_appellation: str = ""
+    visual_entity_id: str = ""
+    portrait_id: str | None = None
+    event_ids: list[str] = Field(default_factory=list)
+
+
+class PrepPackSceneAsset(BaseModel):
+    """Scene identity carried verbatim from episode_prep_pack's
+    asset_manifest.scenes[]; sibling of ``PrepPackCharacterAsset``."""
+
+    scene_id: str = ""
+    display_name: str = ""
+    scene_reference_id: str | None = None
+    event_ids: list[str] = Field(default_factory=list)
+
+
 class EpisodeScreenplay(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     episode_no: int
     # 完整剧本源数据（新格式）
     id: str | None = None
@@ -1068,6 +1100,12 @@ class EpisodeScreenplay(BaseModel):
     # Optional only so legacy published artifacts remain readable; every newly
     # generated artifact is hard-gated by app.narrative.validate_*.
     narrative_plan: NarrativeContinuityPlan | None = None
+    # episode_prep_pack (screenplay contract 6.0.0+) identity passthrough --
+    # populated only by app.production.screenplay_authority's projection of
+    # an episode_prep_pack payload into this legacy shape; empty for every
+    # screenplay produced by the retired heavy blueprint pipeline.
+    prep_pack_character_assets: list[PrepPackCharacterAsset] = Field(default_factory=list)
+    prep_pack_scene_assets: list[PrepPackSceneAsset] = Field(default_factory=list)
     created_at: float | None = None
     updated_at: float | None = None
 

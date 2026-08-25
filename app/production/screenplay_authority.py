@@ -13,7 +13,15 @@ from app import config
 from app.db import get_conn
 from app.evidence import repository as evidence_repository
 from app.ingest import chapter_is_stub, chapter_titles_match
-from app.schemas import Bible, EpisodeScreenplay
+from app.schemas import (
+    Bible,
+    EpisodeScreenplay,
+    KeyDialogueChain,
+    KeyDialogueTurn,
+    PrepPackCharacterAsset,
+    PrepPackSceneAsset,
+    ScriptScene,
+)
 
 
 SCREENPLAY_QA_PROFILE_VERSION = "screenplay-qa-gate-4"
@@ -1740,6 +1748,226 @@ def published_stale_screenplay_rebuild_error(
     return None
 
 
+# ---------------------------------------------------------------------------
+# episode_prep_pack projection (screenplay contract 6.0.0+, see
+# docs/TRANSFORM_FREEZE_PLAN.md P1). The storyboard stage still consumes the
+# legacy EpisodeScreenplay shape; this section projects the lightweight
+# prep_pack payload into that shape deterministically instead of rewriting
+# the storyboard's consumption logic. See resolve_current_screenplay_authority
+# and app.production.patch.screenplay_from_artifact_record for the two call
+# sites that must route a prep_pack payload here instead of the legacy parse.
+# ---------------------------------------------------------------------------
+
+#: Recorded on ``EpisodeScreenplay.script_format_note`` for every projected
+#: prep_pack screenplay. ``full_script_text`` on that object is NOT authored
+#: prose -- it is a deterministic splice of verbatim quotes already inside
+#: the published prep_pack (source_evidence[].quote + key_lines[].line),
+#: ordered by segment_index. This marker lets any caller tell the two shapes
+#: apart without re-deriving it, without leaking a disclaimer sentence into
+#: the storyboard prompt text itself (which reads full_script_text directly).
+PREP_PACK_PROJECTION_FORMAT_NOTE = "prep_pack_quote_splice:v1"
+
+
+def is_prep_pack_payload(payload: Any) -> bool:
+    """Return whether ``payload`` is a raw episode_prep_pack dict.
+
+    The marker is the payload's own ``prep_pack_version`` key -- the same
+    explicit self-declaration ``app.domain.common._load_screenplay`` already
+    keys off of (see its docstring). Centralized here so every parse site
+    that might see either the legacy EpisodeScreenplay shape or the
+    episode_prep_pack shape uses the identical predicate.
+    """
+    return isinstance(payload, dict) and "prep_pack_version" in payload
+
+
+def project_prep_pack_to_screenplay(payload: dict[str, Any]) -> EpisodeScreenplay:
+    """Deterministically project an episode_prep_pack payload into the legacy
+    EpisodeScreenplay shape the storyboard stage (narrative_plan is None
+    branch) already knows how to consume.
+
+    This is a projection, not a re-generation: every field is either copied
+    verbatim from the already-published, already-QA'd prep_pack payload, or
+    mechanically derived from verbatim quotes already inside it. No prose is
+    authored here and no model is called. Fields with no prep_pack
+    equivalent (dramatic_question/protagonist_goal/obstacle/stakes,
+    plot_spine, narrative_plan, information_ledger, voice_bible, ...) are
+    left at their EpisodeScreenplay default (empty string / empty list /
+    None) rather than invented -- the legacy (non-narrative_plan) storyboard
+    path already null/empty-checks every one of them.
+
+    The identity triad (visual_entity_id / portrait_id / display_appellation)
+    from ``asset_manifest.characters[]`` is carried on
+    ``prep_pack_character_assets`` (and the scene equivalent on
+    ``prep_pack_scene_assets``) purely as a lossless passthrough; no
+    consumption logic reads them yet (next phase, see
+    docs/TRANSFORM_FREEZE_PLAN.md P1's remaining prompt-consumption item).
+    """
+    if not is_prep_pack_payload(payload):
+        raise ValueError("payload 不是 episode_prep_pack：缺少 prep_pack_version 标记")
+
+    events = sorted(
+        (event for event in (payload.get("event_chain") or []) if isinstance(event, dict)),
+        key=lambda ev: (int(ev.get("order") or 0), str(ev.get("event_id") or "")),
+    )
+    asset_manifest = payload.get("asset_manifest") or {}
+    characters = [c for c in (asset_manifest.get("characters") or []) if isinstance(c, dict)]
+    scenes = [s for s in (asset_manifest.get("scenes") or []) if isinstance(s, dict)]
+
+    # -- identity triad passthrough: never consumed here, never dropped --
+    character_assets = [
+        PrepPackCharacterAsset(
+            identity_id=str(c.get("identity_id") or ""),
+            display_name=str(c.get("display_name") or ""),
+            display_appellation=str(
+                c.get("display_appellation") or c.get("display_name") or ""
+            ),
+            visual_entity_id=str(c.get("visual_entity_id") or c.get("identity_id") or ""),
+            portrait_id=c.get("portrait_id"),
+            event_ids=[str(x) for x in (c.get("event_ids") or [])],
+        )
+        for c in characters
+    ]
+    scene_assets = [
+        PrepPackSceneAsset(
+            scene_id=str(s.get("scene_id") or ""),
+            display_name=str(s.get("display_name") or ""),
+            scene_reference_id=s.get("scene_reference_id"),
+            event_ids=[str(x) for x in (s.get("event_ids") or [])],
+        )
+        for s in scenes
+    ]
+
+    # -- full_script_text: deterministic quote splice, zero authored prose --
+    fragments: list[tuple[int, int, str]] = []  # (segment_index, kind_rank, text)
+    seen_texts: set[str] = set()
+
+    def _add_fragment(segment_index: Any, text: Any, kind_rank: int) -> None:
+        clean = str(text or "").strip()
+        if not clean or clean in seen_texts:
+            return
+        seen_texts.add(clean)
+        try:
+            idx = int(segment_index)
+        except (TypeError, ValueError):
+            idx = 0
+        fragments.append((idx, kind_rank, clean))
+
+    for event in events:
+        for item in event.get("source_evidence") or []:
+            if isinstance(item, dict):
+                _add_fragment(item.get("segment_index"), item.get("quote"), 0)
+        for item in event.get("key_lines") or []:
+            if isinstance(item, dict):
+                speaker = str(item.get("speaker") or "").strip()
+                line = str(item.get("line") or "").strip()
+                text = f"{speaker}：{line}" if speaker and line else line
+                _add_fragment(item.get("segment_index"), text, 1)
+
+    fragments.sort(key=lambda item: (item[0], item[1]))
+    full_script_text = "\n".join(text for _idx, _rank, text in fragments)
+
+    # -- scene_outline: one ScriptScene per asset_manifest scene, ordered by
+    #    the lowest event order it participates in (deterministic from the
+    #    event chain's own order; does not trust the payload array order) --
+    event_order_by_id = {
+        str(ev.get("event_id") or ""): int(ev.get("order") or 0) for ev in events
+    }
+    event_summary_by_id = {
+        str(ev.get("event_id") or ""): str(ev.get("summary") or "") for ev in events
+    }
+
+    def _scene_sort_key(scene: dict[str, Any]) -> tuple[int, str]:
+        ids = [str(x) for x in (scene.get("event_ids") or [])]
+        orders = [event_order_by_id.get(eid, 0) for eid in ids]
+        return (min(orders) if orders else 0, str(scene.get("scene_id") or ""))
+
+    ordered_scenes = sorted(scenes, key=_scene_sort_key)
+
+    scene_outline: list[ScriptScene] = []
+    event_to_scene_heading: dict[str, str] = {}
+    for scene_no, scene in enumerate(ordered_scenes, start=1):
+        heading = str(scene.get("display_name") or "")
+        scene_event_ids = [str(x) for x in (scene.get("event_ids") or [])]
+        for eid in scene_event_ids:
+            event_to_scene_heading[eid] = heading
+        scene_characters = list(dict.fromkeys(
+            asset.display_name
+            for asset in character_assets
+            if asset.display_name and set(asset.event_ids) & set(scene_event_ids)
+        ))
+        ordered_event_ids = sorted(
+            scene_event_ids, key=lambda eid: event_order_by_id.get(eid, 0),
+        )
+        summary = "；".join(
+            event_summary_by_id[eid] for eid in ordered_event_ids
+            if event_summary_by_id.get(eid)
+        )
+        scene_outline.append(ScriptScene(
+            scene_no=scene_no,
+            scene_heading=heading,
+            story_function="",
+            characters=scene_characters,
+            summary=summary,
+        ))
+
+    # -- dialogue_chains: one chain per event with key_lines, turns verbatim
+    #    from key_lines[]; key_lines (flat) re-derived through the project's
+    #    own canonical algorithm so this projection produces the identical
+    #    shape a legacy screenplay would (see app.validators.derive_key_lines
+    #    -- "Single source of truth for EpisodeScreenplay.key_lines") --
+    dialogue_chains: list[KeyDialogueChain] = []
+    for event in events:
+        turns = [
+            KeyDialogueTurn(
+                speaker=str(item.get("speaker") or ""),
+                line=str(item.get("line") or ""),
+                source_text=str(item.get("line") or ""),
+            )
+            for item in (event.get("key_lines") or [])
+            if isinstance(item, dict) and str(item.get("line") or "").strip()
+        ]
+        if not turns:
+            continue
+        event_id = str(event.get("event_id") or "")
+        dialogue_chains.append(KeyDialogueChain(
+            chain_id=event_id,
+            scene_id=event_to_scene_heading.get(event_id, ""),
+            topic=str(event.get("summary") or "")[:60],
+            turns=turns,
+        ))
+
+    from app.validators import derive_key_lines
+
+    key_lines = derive_key_lines(dialogue_chains, full_script_text)
+    key_plot_points = [
+        str(ev.get("summary") or "").strip() for ev in events
+        if str(ev.get("summary") or "").strip()
+    ]
+
+    episode_scope = payload.get("episode_scope") or {}
+    chapter_indexes = [int(x) for x in (episode_scope.get("chapter_indexes") or [])]
+    if len(chapter_indexes) == 1:
+        source_text_range = f"第 {chapter_indexes[0]} 章"
+    elif chapter_indexes:
+        source_text_range = f"第 {chapter_indexes[0]}-{chapter_indexes[-1]} 章"
+    else:
+        source_text_range = ""
+
+    return EpisodeScreenplay(
+        episode_no=int(payload.get("episode_no") or 0),
+        source_text_range=source_text_range,
+        script_format_note=PREP_PACK_PROJECTION_FORMAT_NOTE,
+        key_lines=key_lines,
+        dialogue_chains=dialogue_chains,
+        key_plot_points=key_plot_points,
+        scene_outline=scene_outline,
+        full_script_text=full_script_text,
+        ending_hook=str(payload.get("cliffhanger") or "").strip(),
+        prep_pack_character_assets=character_assets,
+        prep_pack_scene_assets=scene_assets,
+    )
+
+
 def resolve_downstream_screenplay(
     episode_id: str,
     *,
@@ -1761,22 +1989,39 @@ def resolve_downstream_screenplay(
     if not raw_projection:
         raise ValueError("当前剧集缺少剧本投影")
     try:
-        projection = _validated_screenplay_projection(raw_projection)
-    except Exception as exc:
-        if not episode_requires_immutable_screenplay_authority(
-            episode,
-            conn=db,
-        ):
-            return DownstreamScreenplayContext(
-                screenplay=EpisodeScreenplay(
-                    episode_no=int(
-                        _episode_value(episode, "episode_no", 1) or 1
+        raw_projection_payload = json.loads(raw_projection)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"当前剧本投影无法解析：{exc}") from exc
+    if is_prep_pack_payload(raw_projection_payload):
+        # episode_prep_pack (screenplay contract 6.0.0+) is a structurally
+        # different payload from the legacy EpisodeScreenplay projection
+        # _validated_screenplay_projection parses -- route it through the
+        # deterministic projection instead of the legacy parser (which would
+        # either raise on the payload's extra keys, now that
+        # EpisodeScreenplay is extra="forbid", or -- before that hardening --
+        # silently succeed with an almost-empty object).
+        try:
+            projection = project_prep_pack_to_screenplay(raw_projection_payload)
+        except Exception as exc:
+            raise ValueError(f"当前分集准备包投影无法验证：{exc}") from exc
+    else:
+        try:
+            projection = _validated_screenplay_projection(raw_projection)
+        except Exception as exc:
+            if not episode_requires_immutable_screenplay_authority(
+                episode,
+                conn=db,
+            ):
+                return DownstreamScreenplayContext(
+                    screenplay=EpisodeScreenplay(
+                        episode_no=int(
+                            _episode_value(episode, "episode_no", 1) or 1
+                        ),
                     ),
-                ),
-                narrative_authority_required=False,
-                immutable_authority_required=False,
-            )
-        raise ValueError(f"当前剧本投影无法验证：{exc}") from exc
+                    narrative_authority_required=False,
+                    immutable_authority_required=False,
+                )
+            raise ValueError(f"当前剧本投影无法验证：{exc}") from exc
 
     durable_authority = episode_requires_immutable_screenplay_authority(
         episode,
@@ -1831,6 +2076,119 @@ def resolve_downstream_screenplay(
     )
 
 
+def _resolve_current_prep_pack_authority(
+    episode_id: str,
+    *,
+    conn: Any,
+    episode: Any,
+    artifact: dict[str, Any],
+    artifact_id: str,
+) -> ResolvedScreenplayAuthority:
+    """Resolve one immutable published episode_prep_pack, fail closed on drift.
+
+    Sibling of resolve_current_screenplay_authority (same return type, same
+    fail-closed posture), dispatched from it once the published Artifact's
+    type is known. Verifies the prep_pack-specific immutable chain:
+    app.production.prep_pack._publish_prep_pack issues its completion
+    certificate with production_revision_id=None (prep_pack never creates a
+    production_revisions row) and its QA evaluation uses
+    app.production.prep_pack.QA_PROFILE_VERSION rather than
+    SCREENPLAY_QA_PROFILE_VERSION -- both asserted explicitly here rather
+    than making the legacy resolver's revision/QA-profile checks conditional.
+    """
+    db = conn
+    if (
+        artifact.get("scope_type") != "episode"
+        or artifact.get("scope_id") != episode_id
+        or artifact.get("status") != "approved"
+    ):
+        raise ValueError("已发布分集准备包 Artifact 的作用域或状态无效")
+    artifact_hash = _verified_artifact_hash(artifact, label="已发布分集准备包 Artifact")
+    payload = artifact.get("content")
+    if not is_prep_pack_payload(payload):
+        raise ValueError("已发布分集准备包 Artifact 内容不是有效的 episode_prep_pack")
+    screenplay = project_prep_pack_to_screenplay(payload)
+
+    raw_projection = _episode_value(episode, "screenplay_json", "")
+    if not raw_projection:
+        raise ValueError("已发布分集准备包缺少页面投影")
+    try:
+        projection_payload = json.loads(raw_projection)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"页面 screenplay_json 无法解析：{exc}") from exc
+    if projection_payload != payload:
+        raise ValueError("页面 screenplay_json 与已发布 Artifact 内容漂移")
+
+    certificate_id = str(
+        _episode_value(episode, "screenplay_completion_certificate_id", "") or ""
+    )
+    if not certificate_id:
+        raise ValueError("已发布分集准备包缺少当前完成凭证")
+    contract_version = str(artifact.get("contract_version") or "")
+    input_fingerprint = evidence_repository.content_hash({
+        "episode_id": episode_id,
+        "episode_scope": payload["episode_scope"],
+    })
+    from app.production.certificate import verify_completion_certificate
+    from app.production.prep_pack import (
+        QA_PROFILE_VERSION as PREP_PACK_QA_PROFILE_VERSION,
+    )
+
+    cert = verify_completion_certificate(
+        certificate_id,
+        expected_kind="screenplay",
+        expected_scope_id=episode_id,
+        expected_artifact_id=artifact_id,
+        expected_artifact_hash=artifact_hash,
+        expected_input_fingerprint=input_fingerprint,
+        expected_contract_version=contract_version,
+        expected_qa_profile_version=PREP_PACK_QA_PROFILE_VERSION,
+        allow_consumed=True,
+    )
+    if cert.consumed_at is None:
+        raise ValueError("分集准备包完成凭证尚未被原子发布消费")
+
+    evaluation_ids = list(cert.evaluation_ids)
+    if not evaluation_ids:
+        raise ValueError("分集准备包完成凭证缺少 QA 证据")
+    marks = ",".join("?" for _ in evaluation_ids)
+    evaluations = db.execute(
+        f"SELECT * FROM evaluations WHERE id IN ({marks})", evaluation_ids,
+    ).fetchall()
+    qa_rows = [
+        row for row in evaluations
+        if row["evaluator_name"] == "screenplay_production_qa"
+    ]
+    if len(qa_rows) != 1:
+        raise ValueError("分集准备包权威链必须精确绑定一个生产 QA")
+    qa_row = qa_rows[0]
+    if (
+        qa_row["artifact_id"] != artifact_id
+        or qa_row["evaluator_version"] != PREP_PACK_QA_PROFILE_VERSION
+        or qa_row["evaluation_role"] != "score_only"
+        or bool(qa_row["runtime_blocking"])
+        or qa_row["status"] != "passed"
+    ):
+        raise ValueError("分集准备包质量评分 Evaluation 已漂移或版本不匹配")
+    try:
+        evidence = json.loads(qa_row["evidence_json"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("分集准备包 QA 证据无法解析") from exc
+    if evidence.get("prep_pack_version") != payload.get("prep_pack_version"):
+        raise ValueError("分集准备包 QA 证据与当前发布版本不一致")
+
+    _records, source_text = _source_records(db, episode)
+    return ResolvedScreenplayAuthority(
+        episode_id=episode_id,
+        screenplay=screenplay,
+        source_text=source_text,
+        artifact_id=artifact_id,
+        artifact_hash=artifact_hash,
+        certificate_id=certificate_id,
+        input_fingerprint=input_fingerprint,
+    )
+
+
 def resolve_current_screenplay_authority(
     episode_id: str,
     *,
@@ -1851,6 +2209,27 @@ def resolve_current_screenplay_authority(
     if not artifact_id or artifact_id != projection_artifact_id:
         raise ValueError("当前剧本投影未绑定唯一已发布 Artifact")
     artifact = evidence_repository.get_artifact(artifact_id)
+    if artifact is not None and artifact.get("type") == "episode_prep_pack":
+        # Dispatch here (rather than duplicating this branch in every one of
+        # resolve_current_screenplay_authority's ~7 direct callers) so every
+        # caller -- resolve_downstream_screenplay and the handful of modules
+        # that call this function directly (storyboard_supervisor,
+        # narrative_review, narrative_calibration_ops, completion_grant,
+        # domain.common) -- gets correct episode_prep_pack handling for free.
+        # A separate resolver rather than branching every check below: the
+        # two immutable chains are structurally different (prep_pack has no
+        # production_revision, no v7 scene-shard source projection, and a
+        # different QA profile/evaluator payload shape -- see
+        # app.production.prep_pack._publish_prep_pack), so interleaving both
+        # into one function would make neither chain independently auditable.
+        if require_narrative:
+            raise ValueError(
+                "已发布产物是分集准备包（episode_prep_pack），不具备叙事权威图"
+                "（narrative_plan）概念，无法满足 require_narrative=True 的调用"
+            )
+        return _resolve_current_prep_pack_authority(
+            episode_id, conn=db, episode=episode, artifact=artifact, artifact_id=artifact_id,
+        )
     if (
         artifact is None
         or artifact.get("type") != "screenplay_document"

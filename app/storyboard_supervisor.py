@@ -2479,6 +2479,23 @@ async def run_storyboard_supervisor(
     conn.commit()
 
     spine_n = len((screenplay.plot_spine.spine_beats if screenplay.plot_spine else None) or [])
+    if not spine_n and screenplay.plot_spine is None:
+        from app.production.screenplay_authority import (
+            PREP_PACK_PROJECTION_FORMAT_NOTE,
+        )
+
+        if screenplay.script_format_note == PREP_PACK_PROJECTION_FORMAT_NOTE:
+            # episode_prep_pack (screenplay contract 6.0.0+) has no
+            # plot_spine/spine_beats concept at all -- event_chain's event
+            # count is the structurally closest substitute for
+            # episode_target_from_spine's "beat" unit: both are the set of
+            # enumerated narrative-advancing units extracted from the same
+            # source text at roughly one-beat-per-unit granularity. Reuse
+            # key_plot_points's count (derived 1:1 from event_chain by
+            # app.production.screenplay_authority.project_prep_pack_to_screenplay)
+            # rather than threading a new field through EpisodeScreenplay
+            # just for this one estimate.
+            spine_n = len(screenplay.key_plot_points or [])
     compact_target = _storyboard_target_for_source(
         ep_data.get("target_duration_s"), len(source_text), spine_beat_count=spine_n or None
     )

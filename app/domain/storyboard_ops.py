@@ -1364,7 +1364,22 @@ async def _prepare_storyboard_assets_background_detached(episode_id: str) -> Non
     bible = _project_bible_or_placeholder(project)
     screenplay = _load_screenplay(ep)
     if screenplay is None:
-        return
+        # _load_screenplay() deliberately returns None for an
+        # episode_prep_pack projection (screenplay contract 6.0.0+) --
+        # callers built for the legacy EpisodeScreenplay shape must not get
+        # a silently-empty object (see its docstring in app.domain.common).
+        # That guard must not become "skip asset prep for every prep_pack
+        # episode": the storyboard stage still needs portrait/scene assets
+        # resolved before it can run, so project the prep_pack payload here
+        # instead of reusing _load_screenplay's legacy-only return value.
+        prep_pack_payload = episode_prep_pack_payload(ep)
+        if prep_pack_payload is None:
+            return
+        from app.production.screenplay_authority import (
+            project_prep_pack_to_screenplay,
+        )
+
+        screenplay = project_prep_pack_to_screenplay(prep_pack_payload)
     try:
         from app.portraits import ensure_cards_for_screenplay
 

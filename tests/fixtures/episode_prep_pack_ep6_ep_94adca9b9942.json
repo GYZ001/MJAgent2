@@ -1,0 +1,775 @@
+{
+  "asset_manifest": {
+    "characters": [
+      {
+        "aliases": [
+          "许师姐"
+        ],
+        "display_appellation": "许师姐",
+        "display_name": "许清",
+        "event_ids": [
+          "ev_001",
+          "ev_005",
+          "ev_007"
+        ],
+        "identity_id": "bible:许清",
+        "portrait_id": "portrait_e01eec6ef5ef",
+        "provenance": {
+          "anchor_phrase": "许师姐的名头在靠山宗内不小，可以说无人不知，因如今的靠山宗内门弟子，实际上只有两人。",
+          "anchor_segments": [
+            2
+          ],
+          "label_literal": true,
+          "method": "resolution"
+        },
+        "visual_entity_id": "bible:许清"
+      },
+      {
+        "aliases": [],
+        "display_appellation": "上官修",
+        "display_name": "上官修",
+        "event_ids": [
+          "ev_001"
+        ],
+        "identity_id": "bible:上官修",
+        "portrait_id": "portrait_b1c0065ab947",
+        "provenance": {
+          "anchor_phrase": "上官修",
+          "anchor_segments": [
+            3
+          ],
+          "label_literal": true,
+          "method": "direct"
+        },
+        "visual_entity_id": "bible:上官修"
+      },
+      {
+        "aliases": [],
+        "display_appellation": "孟浩",
+        "display_name": "孟浩",
+        "event_ids": [
+          "ev_002",
+          "ev_003",
+          "ev_004",
+          "ev_005",
+          "ev_006",
+          "ev_007",
+          "ev_008",
+          "ev_009",
+          "ev_010",
+          "ev_011",
+          "ev_012",
+          "ev_013",
+          "ev_014"
+        ],
+        "identity_id": "bible:孟浩",
+        "portrait_id": "portrait_ecc9491a63f4",
+        "provenance": {
+          "anchor_phrase": "孟浩",
+          "anchor_segments": [
+            4
+          ],
+          "label_literal": true,
+          "method": "direct"
+        },
+        "visual_entity_id": "bible:孟浩"
+      },
+      {
+        "aliases": [
+          "小胖子"
+        ],
+        "display_appellation": "小胖子",
+        "display_name": "李富贵",
+        "event_ids": [
+          "ev_009",
+          "ev_011"
+        ],
+        "identity_id": "bible:李富贵",
+        "portrait_id": "portrait_9e2209df3692",
+        "provenance": {
+          "anchor_phrase": "坐在洞府内，孟浩摸了摸肚子，琢磨着有些日子没有看到小胖子，就连野味也都有大半个月没吃，尽是一些野果，暗道成为外宗弟子后，反倒不如杂役处吃的饱，除非是有足够的灵石去宗门的养丹坊换些辟谷丹或是御食丹等据说吃一粒数日不饿的灵药，否则的话，大都要自己去想办法解决温饱。",
+          "anchor_segments": [
+            24
+          ],
+          "label_literal": true,
+          "method": "resolution"
+        },
+        "visual_entity_id": "bible:李富贵"
+      }
+    ],
+    "functional_extras": [
+      {
+        "event_ids": [
+          "ev_010"
+        ],
+        "label": "宝阁的师兄",
+        "provenance": {
+          "anchor_phrase": "宝阁的师兄",
+          "anchor_segments": [
+            26
+          ],
+          "candidate_verdict_attempted": true,
+          "label_literal": true,
+          "method": "discovery"
+        },
+        "visual_entity_id": "entity:1431cc9e890a5288"
+      }
+    ],
+    "scenes": [
+      {
+        "display_name": "靠山宗外宗广场",
+        "event_ids": [
+          "ev_001"
+        ],
+        "provenance": {
+          "anchor_phrase": "广场",
+          "anchor_segments": [
+            4
+          ],
+          "method": "resolution"
+        },
+        "scene_id": "scene:靠山宗外宗广场",
+        "scene_reference_id": "scene_425e99e10132"
+      },
+      {
+        "display_name": "靠山宗外宗区域",
+        "event_ids": [
+          "ev_002"
+        ],
+        "provenance": {
+          "anchor_phrase": "直至退出了老远，孟浩背后已被冷汗浸湿，来自身后的一道道目光他尽管看不到，可却能强烈的感受仿佛有一把把无形的刀子，正随着自己快速远去渐渐消散。",
+          "anchor_segments": [
+            5
+          ],
+          "method": "resolution"
+        },
+        "scene_id": "scene:靠山宗外宗区域",
+        "scene_reference_id": "scene_05d482b34f00"
+      },
+      {
+        "display_name": "洞府修行石室",
+        "event_ids": [
+          "ev_003",
+          "ev_004",
+          "ev_005",
+          "ev_006",
+          "ev_007",
+          "ev_008",
+          "ev_009"
+        ],
+        "provenance": {
+          "anchor_phrase": "这洞府外有一处两丈左右的石台，尽头处山体间青石门耸立，四周有藤枝缠绕，看起来就明显不俗，超出孟浩之前两处居所。",
+          "anchor_segments": [
+            7
+          ],
+          "method": "resolution"
+        },
+        "scene_id": "scene:洞府修行石室",
+        "scene_reference_id": "scene_9a8a07352402"
+      },
+      {
+        "display_name": "靠山宗荒山丛林",
+        "event_ids": [
+          "ev_010"
+        ],
+        "provenance": {
+          "anchor_phrase": "略一思索，孟浩索性走出洞府，清风吹抚中身影没入山莽丛林间，一边走着，孟浩习惯性的从储物袋里拿出了那面铜镜。",
+          "anchor_segments": [
+            25
+          ],
+          "method": "resolution"
+        },
+        "scene_id": "scene:靠山宗荒山丛林",
+        "scene_reference_id": "scene_04acf1ee391c"
+      },
+      {
+        "display_name": "黑山林区",
+        "event_ids": [
+          "ev_011",
+          "ev_012",
+          "ev_013",
+          "ev_014"
+        ],
+        "provenance": {
+          "anchor_phrase": "正行走时，忽然孟浩脚步一顿，猛地抬头看向不远处的山林，有一抹颜色在那里一闪而过，速度不快，孟浩双眼一亮，以他这几个月抓野鸡的经验，这是一只野鸡。",
+          "anchor_segments": [
+            29
+          ],
+          "method": "resolution"
+        },
+        "scene_id": "scene:黑山林区",
+        "scene_reference_id": "scene_93e39f79c2c1"
+      }
+    ]
+  },
+  "cliffhanger": "怪异铜镜照过的山兽竟纷纷屁股爆开，这来历不明的便宜货到底藏着什么惊人秘密？",
+  "coverage_ledger": {
+    "delivered": [
+      2,
+      4,
+      5,
+      6,
+      7,
+      9,
+      10,
+      11,
+      12,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      22,
+      23,
+      24,
+      25,
+      26,
+      28,
+      29,
+      31,
+      33,
+      35,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      45
+    ],
+    "merged": [],
+    "paratext": [
+      1
+    ],
+    "proven_duplicates": [],
+    "retained_as_context": [
+      3,
+      8,
+      13,
+      14,
+      21,
+      27,
+      30,
+      32,
+      34,
+      36,
+      43,
+      44
+    ],
+    "total_segments": 45,
+    "uncovered": []
+  },
+  "episode_no": 6,
+  "episode_scope": {
+    "chapter_indexes": [
+      6
+    ],
+    "source_segment_count": 45
+  },
+  "event_chain": [
+    {
+      "event_id": "ev_001",
+      "key_lines": [],
+      "order": 1,
+      "source_evidence": [
+        {
+          "quote": "许师姐的名头在靠山宗内不小，可以说无人不知，因如今的靠山宗内门弟子，实际上只有两人。",
+          "segment_index": 2
+        },
+        {
+          "quote": "如此一来，许师姐的借出洞府之事，起到的震慑作用，使得孟浩安全的带着灵石与凝灵丹，在众目睽睽之下退出了这片广场。",
+          "segment_index": 4
+        }
+      ],
+      "source_span": {
+        "from_segment": 2,
+        "to_segment": 4
+      },
+      "summary": "靠山宗内门弟子仅许师姐和上官修身边的男子两人，许师姐借出洞府的震慑作用让孟浩安全带着灵石与凝灵丹退出广场。"
+    },
+    {
+      "event_id": "ev_002",
+      "key_lines": [],
+      "order": 2,
+      "source_evidence": [
+        {
+          "quote": "直至退出了老远，孟浩背后已被冷汗浸湿，来自身后的一道道目光他尽管看不到，可却能强烈的感受仿佛有一把把无形的刀子，正随着自己快速远去渐渐消散。",
+          "segment_index": 5
+        },
+        {
+          "quote": "三炷香后，孟浩一路没有丝毫停顿，甚至都没回外宗住所，而是用最快的速度按照许师姐玉简内的标示，去了靠山宗南峰，在此峰的山脚下，找到了许师姐所说的洞府。",
+          "segment_index": 6
+        }
+      ],
+      "source_span": {
+        "from_segment": 5,
+        "to_segment": 6
+      },
+      "summary": "孟浩退出广场后心有余悸，一路不停按照许师姐玉简的标示找到南峰山脚下的洞府。"
+    },
+    {
+      "event_id": "ev_003",
+      "key_lines": [],
+      "order": 3,
+      "source_evidence": [
+        {
+          "quote": "这洞府外有一处两丈左右的石台，尽头处山体间青石门耸立，四周有藤枝缠绕，看起来就明显不俗，超出孟浩之前两处居所。",
+          "segment_index": 7
+        },
+        {
+          "quote": "孟浩站在洞府口半晌，神色渐渐露出满足，这处洞府他非常满意，此刻他也已明白所谓的洞府，实际上要比那些居所珍贵太多，难怪之前那些外宗同门听到许师姐借出洞府后，大都露出羡慕嫉妒之意。",
+          "segment_index": 9
+        }
+      ],
+      "source_span": {
+        "from_segment": 7,
+        "to_segment": 9
+      },
+      "summary": "孟浩看到洞府环境清幽不俗，对此十分满意，也明白了洞府比普通居所珍贵很多。"
+    },
+    {
+      "event_id": "ev_004",
+      "key_lines": [
+        {
+          "line": "这才应该是仙人居住的地方。",
+          "segment_index": 10,
+          "speaker": "孟浩",
+          "speaker_provenance": {
+            "anchor_phrase": "孟浩",
+            "anchor_segments": [
+              4
+            ],
+            "label_literal": true,
+            "method": "direct"
+          },
+          "speaker_ref": "bible:孟浩"
+        }
+      ],
+      "order": 4,
+      "source_evidence": [
+        {
+          "quote": "孟浩右手一挥，立刻那白色的玉简直奔洞府青石门而去，啪的一声落在上面，顿时嗡嗡之声传出，这洞府的大门缓缓打开。",
+          "segment_index": 10
+        },
+        {
+          "quote": "洞府不大，只有两间石室，一个是作息修行之地，另外一个被石门封死，孟浩踏入洞府时，青石门缓缓闭合，直至砰的一声完全关闭后，白色玉简飞来，落入孟浩手中，与此同时在这洞府顶端，有柔和光芒从岩壁散出。",
+          "segment_index": 11
+        }
+      ],
+      "source_span": {
+        "from_segment": 10,
+        "to_segment": 11
+      },
+      "summary": "孟浩用玉简打开洞府石门进入，发现洞府内有两间石室，其中一间被石门封死。"
+    },
+    {
+      "event_id": "ev_005",
+      "key_lines": [
+        {
+          "line": "许师姐这座洞府，这礼……太大了。",
+          "segment_index": 13,
+          "speaker": "孟浩",
+          "speaker_provenance": {
+            "anchor_phrase": "孟浩",
+            "anchor_segments": [
+              4
+            ],
+            "label_literal": true,
+            "method": "direct"
+          },
+          "speaker_ref": "bible:孟浩"
+        },
+        {
+          "line": "居然是灵泉……",
+          "segment_index": 14,
+          "speaker": "孟浩",
+          "speaker_provenance": {
+            "anchor_phrase": "孟浩",
+            "anchor_segments": [
+              4
+            ],
+            "label_literal": true,
+            "method": "direct"
+          },
+          "speaker_ref": "bible:孟浩"
+        }
+      ],
+      "order": 5,
+      "source_evidence": [
+        {
+          "quote": "在这洞府内看了一圈，孟浩越加满意，最后目光落在那封闭的石室前，略一沉吟，孟浩将手中玉简按在上面，立刻这石室的石门缓缓开阖，在这一刹那，一股浓郁的灵气扑面而来，孟浩看着石室内之物，目瞪口呆。",
+          "segment_index": 12
+        },
+        {
+          "quote": "此地的灵泉很小，已露出枯竭之迹，灵气散出只是比外面浓郁一些，对凝气三四层以上用处不大，毕竟超过了三层，因所需灵气太多，故而用处甚微。",
+          "segment_index": 15
+        }
+      ],
+      "source_span": {
+        "from_segment": 12,
+        "to_segment": 15
+      },
+      "summary": "孟浩用玉简打开封闭石室，发现里面有一处灵泉，意识到许师姐送的这份礼物十分贵重。"
+    },
+    {
+      "event_id": "ev_006",
+      "key_lines": [],
+      "order": 6,
+      "source_evidence": [
+        {
+          "quote": "但即便如此，孟浩也知对自己而言，此地珍贵的程度难以形容，绝对超越了一颗旱灵丹。有了这样的发现，孟浩心中狂喜。",
+          "segment_index": 16
+        },
+        {
+          "quote": "来不及多想，孟浩立刻盘膝坐下，闭目赶紧吐纳，数个时辰后，此地积累的灵气散了大半，孟浩睁开了眼，他目中露出明亮的光芒。",
+          "segment_index": 17
+        }
+      ],
+      "source_span": {
+        "from_segment": 16,
+        "to_segment": 17
+      },
+      "summary": "孟浩知道灵泉对自己十分珍贵，立刻盘膝吐纳，数个时辰后石室内积累的灵气散了大半。"
+    },
+    {
+      "event_id": "ev_007",
+      "key_lines": [
+        {
+          "line": "仅仅几个时辰的打坐，就相当于平日里约莫一个月的修行，虽说这是因石室内灵气天长日久的积累，此后便不会如此，可对我来说，在这里修行的速度要快出外界不少。",
+          "segment_index": 18,
+          "speaker": "孟浩",
+          "speaker_provenance": {
+            "anchor_phrase": "孟浩",
+            "anchor_segments": [
+              4
+            ],
+            "label_literal": true,
+            "method": "direct"
+          },
+          "speaker_ref": "bible:孟浩"
+        },
+        {
+          "line": "此地灵气之所以可以积累而不外散，想来必定是因这些印记的原因，许师姐应是用这个方法来积累灵气，方便一次性吐纳。",
+          "segment_index": 19,
+          "speaker": "孟浩",
+          "speaker_provenance": {
+            "anchor_phrase": "孟浩",
+            "anchor_segments": [
+              4
+            ],
+            "label_literal": true,
+            "method": "direct"
+          },
+          "speaker_ref": "bible:孟浩"
+        }
+      ],
+      "order": 7,
+      "source_evidence": [
+        {
+          "quote": "孟浩深吸口气，目光落在了四周的墙壁上，渐渐看到了四周刻着一些他看不懂的印记。",
+          "segment_index": 18
+        },
+        {
+          "quote": "孟浩沉思少顷有了猜测，神色振奋，在内又打坐吐纳起来。",
+          "segment_index": 19
+        }
+      ],
+      "source_span": {
+        "from_segment": 18,
+        "to_segment": 19
+      },
+      "summary": "孟浩发现几个时辰的修行抵得上平日一个月，猜到是墙上的印记让灵气不消散，继续打坐吐纳。"
+    },
+    {
+      "event_id": "ev_008",
+      "key_lines": [
+        {
+          "line": "若能再这么修行几次，我就可以突破凝气一层，迈入凝气二层！",
+          "segment_index": 22,
+          "speaker": "孟浩",
+          "speaker_provenance": {
+            "anchor_phrase": "孟浩",
+            "anchor_segments": [
+              4
+            ],
+            "label_literal": true,
+            "method": "direct"
+          },
+          "speaker_ref": "bible:孟浩"
+        }
+      ],
+      "order": 8,
+      "source_evidence": [
+        {
+          "quote": "很快一夜过去，第二天清晨时，孟浩睁开了眼，石室内灵气已稀薄，可有灵泉在，估计过一段日子这里的灵气又会浓郁。",
+          "segment_index": 20
+        },
+        {
+          "quote": "他渴望突破成为凝气二层，因只有到了二层，才可以展开凝气卷里的第一个仙术。",
+          "segment_index": 22
+        }
+      ],
+      "source_span": {
+        "from_segment": 20,
+        "to_segment": 22
+      },
+      "summary": "一夜修行后，孟浩的修为相当于近两个月的修行，他渴望尽快突破到凝气二层学习仙术。"
+    },
+    {
+      "event_id": "ev_009",
+      "key_lines": [],
+      "order": 9,
+      "source_evidence": [
+        {
+          "quote": "想着仙术，孟浩退出石室后视若珍宝般将石门关闭，等待其内灵气积累，他已决定采用许师姐曾经的方法，不是时刻守在灵泉旁，而是等其积攒足够。",
+          "segment_index": 23
+        },
+        {
+          "quote": "坐在洞府内，孟浩摸了摸肚子，琢磨着有些日子没有看到小胖子，就连野味也都有大半个月没吃，尽是一些野果，暗道成为外宗弟子后，反倒不如杂役处吃的饱，除非是有足够的灵石去宗门的养丹坊换些辟谷丹或是御食丹等据说吃一粒数日不饿的灵药，否则的话，大都要自己去想办法解决温饱。",
+          "segment_index": 24
+        }
+      ],
+      "source_span": {
+        "from_segment": 23,
+        "to_segment": 24
+      },
+      "summary": "孟浩关闭石室石门准备等灵气积累后再使用，他感到饥饿，想起许久没见小胖子也没吃野味，打算自己想办法解决温饱。"
+    },
+    {
+      "event_id": "ev_010",
+      "key_lines": [
+        {
+          "line": "可惜了储物袋里的半块灵石，估计去宝阁换其他宝贝，怎么也要贿赂一些才好。",
+          "segment_index": 28,
+          "speaker": "孟浩",
+          "speaker_provenance": {
+            "anchor_phrase": "孟浩",
+            "anchor_segments": [
+              4
+            ],
+            "label_literal": true,
+            "method": "direct"
+          },
+          "speaker_ref": "bible:孟浩"
+        }
+      ],
+      "order": 10,
+      "source_evidence": [
+        {
+          "quote": "略一思索，孟浩索性走出洞府，清风吹抚中身影没入山莽丛林间，一边走着，孟浩习惯性的从储物袋里拿出了那面铜镜。",
+          "segment_index": 25
+        },
+        {
+          "quote": "如今他已确定自己被那宝阁的师兄蒙骗，这镜子根本就没有丝毫用处，他这大半个月来时常研究，也没有找出这镜子有什么奇特的地方。",
+          "segment_index": 26
+        },
+        {
+          "quote": "孟浩伸手摸向怀里的储物袋，光芒一闪，拿出了那半块灵石，颇为肉痛。",
+          "segment_index": 28
+        }
+      ],
+      "source_span": {
+        "from_segment": 25,
+        "to_segment": 28
+      },
+      "summary": "孟浩走出洞府进入丛林，拿出之前买的铜镜把玩，确定被宝阁师兄蒙骗，为花出去的半块灵石肉痛。"
+    },
+    {
+      "event_id": "ev_011",
+      "key_lines": [
+        {
+          "line": "也不知小胖子如今怎么样。",
+          "segment_index": 32,
+          "speaker": "孟浩",
+          "speaker_provenance": {
+            "anchor_phrase": "孟浩",
+            "anchor_segments": [
+              4
+            ],
+            "label_literal": true,
+            "method": "direct"
+          },
+          "speaker_ref": "bible:孟浩"
+        }
+      ],
+      "order": 11,
+      "source_evidence": [
+        {
+          "quote": "正行走时，忽然孟浩脚步一顿，猛地抬头看向不远处的山林，有一抹颜色在那里一闪而过，速度不快，孟浩双眼一亮，以他这几个月抓野鸡的经验，这是一只野鸡。",
+          "segment_index": 29
+        },
+        {
+          "quote": "也就是几十息的时间，孟浩就一把抓住了那只惊慌的野鸡，这野鸡只要被抓住两个翅膀提起来，便不会再扑腾。",
+          "segment_index": 31
+        }
+      ],
+      "source_span": {
+        "from_segment": 29,
+        "to_segment": 32
+      },
+      "summary": "孟浩发现一只野鸡，将铜镜和灵石放进口袋后抓住野鸡，想起小胖子打算找对方一起吃野味。"
+    },
+    {
+      "event_id": "ev_012",
+      "key_lines": [
+        {
+          "line": "怎么回事？",
+          "segment_index": 36,
+          "speaker": "孟浩",
+          "speaker_provenance": {
+            "anchor_phrase": "孟浩",
+            "anchor_segments": [
+              4
+            ],
+            "label_literal": true,
+            "method": "direct"
+          },
+          "speaker_ref": "bible:孟浩"
+        }
+      ],
+      "order": 12,
+      "source_evidence": [
+        {
+          "quote": "紧接着，他手中那只被抓了翅膀安静下来的野鸡，突然间发出了凄厉的惨叫，身体更是瞬间挣扎，力气大的让孟浩险些抓持不住。",
+          "segment_index": 33
+        },
+        {
+          "quote": "这一幕发生的太突然，孟浩彻底愣在那里，他上山近四个月，野鸡抓了不少，这还是第一次遇到这种事情，尤其是看着那此刻已经死去的野鸡炸开的屁股，孟浩满脸诧异，连忙四下看去，可四周很安静，没什么身影出没。",
+          "segment_index": 35
+        },
+        {
+          "quote": "孟浩深吸口气，压下内心的紧张，这野鸡死的太蹊跷，太凄惨，孟浩这里甚至有种身后腰部以下凉风阵阵的感觉。",
+          "segment_index": 37
+        }
+      ],
+      "source_span": {
+        "from_segment": 33,
+        "to_segment": 37
+      },
+      "summary": "孟浩口袋里的东西突然发热，手中的野鸡惨叫着剧烈挣扎，屁股直接爆开死去，孟浩十分诧异紧张。"
+    },
+    {
+      "event_id": "ev_013",
+      "key_lines": [
+        {
+          "line": "不对。",
+          "segment_index": 38,
+          "speaker": "孟浩",
+          "speaker_provenance": {
+            "anchor_phrase": "孟浩",
+            "anchor_segments": [
+              4
+            ],
+            "label_literal": true,
+            "method": "direct"
+          },
+          "speaker_ref": "bible:孟浩"
+        },
+        {
+          "line": "不可能是灵石……",
+          "segment_index": 39,
+          "speaker": "孟浩",
+          "speaker_provenance": {
+            "anchor_phrase": "孟浩",
+            "anchor_segments": [
+              4
+            ],
+            "label_literal": true,
+            "method": "direct"
+          },
+          "speaker_ref": "bible:孟浩"
+        },
+        {
+          "line": "莫非……",
+          "segment_index": 40,
+          "speaker": "孟浩",
+          "speaker_provenance": {
+            "anchor_phrase": "孟浩",
+            "anchor_segments": [
+              4
+            ],
+            "label_literal": true,
+            "method": "direct"
+          },
+          "speaker_ref": "bible:孟浩"
+        }
+      ],
+      "order": 13,
+      "source_evidence": [
+        {
+          "quote": "孟浩一把扔了手中屁股炸开的野鸡，连忙将衣衫口袋中的镜子和灵石取出，他想起了之前这野鸡出现异常前，口袋里有什么东西热了一下。",
+          "segment_index": 38
+        },
+        {
+          "quote": "孟浩双眼直勾勾的落在了铜镜上，心跳加速，双眼露出强烈的光芒。",
+          "segment_index": 39
+        },
+        {
+          "quote": "此刻顾不得野鸡与去寻找小胖子的事情，而是拿着镜子用最快的速度直奔山林，他要再寻找一个山兽，去看看那爆开野鸡屁股的凶手，是否正是此境。",
+          "segment_index": 40
+        }
+      ],
+      "source_span": {
+        "from_segment": 38,
+        "to_segment": 40
+      },
+      "summary": "孟浩怀疑是铜镜导致野鸡死亡，扔掉野鸡拿出铜镜，打算再找山兽验证自己的猜测。"
+    },
+    {
+      "event_id": "ev_014",
+      "key_lines": [
+        {
+          "line": "宝物，这一定是宝物！！",
+          "segment_index": 44,
+          "speaker": "孟浩",
+          "speaker_provenance": {
+            "anchor_phrase": "孟浩",
+            "anchor_segments": [
+              4
+            ],
+            "label_literal": true,
+            "method": "direct"
+          },
+          "speaker_ref": "bible:孟浩"
+        },
+        {
+          "line": "只是……这宝物怎么有些怪异，喜欢爆掉野兽的屁股……",
+          "segment_index": 45,
+          "speaker": "孟浩",
+          "speaker_provenance": {
+            "anchor_phrase": "孟浩",
+            "anchor_segments": [
+              4
+            ],
+            "label_literal": true,
+            "method": "direct"
+          },
+          "speaker_ref": "bible:孟浩"
+        }
+      ],
+      "order": 14,
+      "source_evidence": [
+        {
+          "quote": "正奔跑间，没过多久，立刻在孟浩的前方，出现了一只狍子，正呆头呆脑的看着孟浩，很快就露出凶芒，孟浩临近立刻用手中的镜子一照。",
+          "segment_index": 41
+        },
+        {
+          "quote": "那狍子原本呆滞的表情立刻大变，整个身子瞬间跳起，发出凄厉的惨叫就要逃跑，这惨叫的声音难以形容，如撕心裂肺，让人听之就可以想象到那必定是至极的凄惨，可孟浩分明看到这狍子跳起时露出的屁股，此刻仿佛有无形的力量冲击，连续两下，这狍子的惨叫也是一波二起，身体还没等落下，屁股就砰的一声爆了开来，抽搐身亡。",
+          "segment_index": 42
+        },
+        {
+          "quote": "孟浩虽然有些费解，但此刻毕竟兴奋居多，也不在乎这宝贝为何这般怪异，反倒有种跃跃欲试寻找其他野兽的冲动。",
+          "segment_index": 45
+        }
+      ],
+      "source_span": {
+        "from_segment": 41,
+        "to_segment": 45
+      },
+      "summary": "孟浩用铜镜照射遇到的狍子，狍子也屁股爆开死亡，孟浩确认铜镜是宝物，虽然功能怪异但十分兴奋。"
+    }
+  ],
+  "hook": "靠山宗广场上，全靠许师姐借出的洞府撑腰，孟浩才得以抱着灵石和凝灵丹全身而退。",
+  "prep_pack_version": "1.11.0"
+}

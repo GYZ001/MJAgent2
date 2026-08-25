@@ -695,7 +695,22 @@ def screenplay_from_artifact_record(art: dict[str, Any]) -> EpisodeScreenplay:
         if cached_json is not None:
             _SCREENPLAY_ARTIFACT_MODEL_CACHE.move_to_end(cache_key)
     if cached_json is None:
-        if "_projection" in content:
+        if isinstance(content, dict) and "prep_pack_version" in content:
+            # episode_prep_pack (screenplay contract 6.0.0+) has no
+            # "_projection"/"screenplay_metadata" wrapper -- it is the raw
+            # prep_pack payload itself. EpisodeScreenplay.model_validate(content)
+            # below would either raise on its extra keys (now that
+            # EpisodeScreenplay is extra="forbid") or -- before that
+            # hardening -- silently succeed with an almost-empty object (no
+            # full_script_text, no scene_outline). Project it deterministically
+            # instead; see app.production.screenplay_authority for the
+            # "no authored prose" contract this projection must honour.
+            from app.production.screenplay_authority import (
+                project_prep_pack_to_screenplay,
+            )
+
+            screenplay = project_prep_pack_to_screenplay(content)
+        elif "_projection" in content:
             screenplay = EpisodeScreenplay.model_validate(content["_projection"])
         elif "screenplay_metadata" in content:
             screenplay = document_to_screenplay(

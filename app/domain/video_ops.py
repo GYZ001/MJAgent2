@@ -2242,10 +2242,23 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
         "SELECT * FROM projects WHERE id=?", (ep["project_id"],),
     ).fetchone()
     bible = _project_bible_or_placeholder(project)
-    projection = EpisodeScreenplay.model_validate_json(ep["screenplay_json"])
     try:
         screenplay = resolve_downstream_screenplay(episode_id, conn=conn).screenplay
     except ValueError as exc:
+        # Only parse the raw projection lazily, on this failure path -- a
+        # healthy episode_prep_pack episode (screenplay contract 6.0.0+)
+        # never reaches here (resolve_downstream_screenplay already resolves
+        # it). EpisodeScreenplay.model_validate(raw_payload) would raise on a
+        # prep_pack payload's extra keys (EpisodeScreenplay is
+        # extra="forbid"); prep_pack never has narrative_plan by
+        # construction, so skip straight to that fallback instead of parsing.
+        from app.production.screenplay_authority import is_prep_pack_payload
+
+        raw_payload = json.loads(ep["screenplay_json"])
+        if is_prep_pack_payload(raw_payload):
+            projection = EpisodeScreenplay(episode_no=int(ep["episode_no"] or 0))
+        else:
+            projection = EpisodeScreenplay.model_validate(raw_payload)
         if projection.narrative_plan is not None:
             raise HTTPException(
                 409, f"当前叙事剧本权威链无法验证：{exc}",
