@@ -3558,6 +3558,209 @@ def _find_alias_bridge_chapter(
     return None
 
 
+# ---------- B. 章级认知卡（确定性组装，零模型调用，见 docs/CHARACTER_COGNITION_LAYER_DESIGN.md
+# §4.2） ----------
+#
+# 三类事实的时间语义完全不同（设计文档 §3），认知卡把这条语义结构化摆出来，供下面 A1b
+# 裁决闸（`_alias_verdict_call`）当候选判别的背景参考。本身不发起任何模型调用、不做
+# 任何语义判断，只是纯字符串/区间运算：
+# - 身份事实（`Character.aliases`）恒真，不受章节号 N 影响，只用于"在场判定"（角色
+#   规范名或已确认别名逐字命中本章原文即算在场，与 `_alias_verdict_candidates`
+#   同一判据，零语义、不针对具体称谓特判）；
+# - 状态事实（`Character.affiliations`/`relations`）带有效区间，按"截至第 N 章"过滤
+#   （`valid_from_chapter <= N` 且 `valid_to_chapter` 为空或 `>= N`），避免拿后期状态
+#   描写当下（§3.2），区间重叠时同一归属对象/关系对象只取最近生效的一条，与
+#   `character_portraits` 表 `ORDER BY ep_start DESC LIMIT 1` 的既有惯例同构
+#   （`app/portraits.py` `portrait_for_episode`）；
+# - 前瞻信号（`forward_appearance_hits`）复用既有 `CHARACTER_IMPORTANCE_FORWARD_
+#   CHAPTERS` 前瞻窗口常量（`app/portraits.py`），统计方式与 `_recurring_character_
+#   names` 的 `window_raw.count(name)` 同一惯例（§3.3），不新造常量、不重新发明统计
+#   口径。本次只组装该字段供未来消费点使用（§9 P1 第 7 项——未具名角色建卡触发点，
+#   本次不实现触发逻辑本身）；当前唯一接入的裁决闸注入（下方 A1b）不读取这个字段，
+#   只用 affiliations_as_of/relations_as_of。
+#
+# 同一 (bible 快照, chapter_idx, forward_window_chapters) 输入任何时候重建结果逐字节
+# 相同（§11 判据 2）：不依赖模型调用，`bible.characters`/`character.affiliations`/
+# `character.relations` 都是列表，遍历顺序本身就是确定的。
+
+CHAPTER_COGNITION_CARD_MAX_CHARACTERS = 8  # 单卡最多收录角色数：裁决闸候选集通常就是该
+    # 章出场的人物谱角色，规模个位数（`_alias_verdict_candidates`）；8 留出冗余，同时
+    # 防止人物扎堆的章节把提示词拖长——超限时按调用方给定范围内 bible.characters 的
+    # 原始顺序截断，不做二次排序，保证可复现。
+CHAPTER_COGNITION_FACTS_MAX_PER_KIND = 3  # 每个角色的 affiliations_as_of / relations_as_of
+    # 各自最多展示的条数：每条状态事实入库前都要单独过一遍候选判别裁决（§4.1），门槛
+    # 高，正常不会在单角色名下堆积大量条目；3 条留有冗余又不至于让单个角色的背景摘要
+    # 过长——超限按角色 affiliations/relations 的原始登记顺序（区间去重取最新一条后）
+    # 截断，不做二次排序。
+CHAPTER_COGNITION_SUMMARY_MAX_CHARS = 60  # 单条归属/关系摘要（org/to + relation_kind
+    # 拼装后）最长字符数：org/relation_kind 是模型自由文本，理论上无长度上限，必须有
+    # 硬顶防止个别异常长文本拖长提示词；60 字足够容纳"血妖宗（效忠），第X章证据"这类
+    # 正常长度还留有余量。
+
+
+class ChapterCognitionEntry(BaseModel):
+    """认知卡单个角色条目（§4.2）：全部字段均为确定性拼装的只读展示值，不是新的存储
+    字段——真实数据仍在 `Character.aliases`/`affiliations`/`relations`，这里只是按
+    章节号 N 过滤/统计后的摘要视图。"""
+
+    name: str                                              # 人物谱规范名
+    matched_surface_forms: list[str] = Field(default_factory=list)  # 命中的称谓：规范名
+    # 或已确认别名，逐字子串命中，零语义、不针对具体称谓特判（复用
+    # `_alias_verdict_candidates` 的判据模式）
+    affiliations_as_of: list[str] = Field(default_factory=list)  # 截至本章生效的归属摘要
+    # （org + relation_kind 拼装只读字符串，供提示词展示，不是新的存储字段）
+    relations_as_of: list[str] = Field(default_factory=list)  # 截至本章生效的关系摘要，
+    # 拼装方式同上
+    forward_appearance_hits: int = 0  # 前瞻窗口内该角色规范名/别名的逐字出现次数
+
+
+class ChapterCognitionCard(BaseModel):
+    """章级认知卡（§4.2）：同一 (bible 快照, chapter_idx, forward_window_chapters) 输入
+    任何时候重建结果逐字节相同（§11 判据 2，机械回归测试）。"""
+
+    chapter_idx: int                            # 本卡对应的原著章节序号（进度锚点）
+    forward_window_chapters: int                # 本次使用的前瞻窗口大小 K，记账供审计复现
+    present_characters: list[ChapterCognitionEntry] = Field(default_factory=list)
+
+
+def _status_facts_as_of_chapter(
+    entries: list[Any], chapter_idx: int, *, group_key: Callable[[Any], str],
+) -> list[Any]:
+    """状态事实"截至第 N 章"区间过滤 + 同对象最新一条优先（§4.2 point 2，与
+    `character_portraits` 表 `ORDER BY ep_start DESC LIMIT 1` 的既有惯例同构，见
+    `app/portraits.py` `portrait_for_episode`）：先筛出 `valid_from_chapter <=
+    chapter_idx` 且（`valid_to_chapter` 为空或 `>= chapter_idx`）的条目；`group_key`
+    相同的多条（同一归属对象 org、或同一关系对象 to）若区间重叠都满足，只保留
+    `valid_from_chapter` 最大（最近生效）的一条——同一角色可以同时对不同 org/to 各有
+    一条独立生效的事实，只有指向同一对象的多条才互相竞争。返回顺序按 `group_key`
+    首次出现顺序（即 `entries` 原始顺序）排列，保证同一输入任何时候重建结果逐字节
+    相同。"""
+    valid = [
+        item for item in entries
+        if item.valid_from_chapter <= chapter_idx
+        and (item.valid_to_chapter is None or item.valid_to_chapter >= chapter_idx)
+    ]
+    best: dict[str, Any] = {}
+    order: list[str] = []
+    for item in valid:
+        key = group_key(item)
+        if key not in best:
+            order.append(key)
+            best[key] = item
+        elif item.valid_from_chapter > best[key].valid_from_chapter:
+            best[key] = item
+    return [best[key] for key in order]
+
+
+def _cognition_affiliation_summary(item: CharacterAffiliation) -> str:
+    """归属摘要拼装：纯字符串运算，不做任何语义判断。"""
+    label = item.org + (f"（{item.relation_kind}）" if item.relation_kind else "")
+    text = f"{label}，第{item.evidence_chapter_index}章证据"
+    return text[:CHAPTER_COGNITION_SUMMARY_MAX_CHARS]
+
+
+def _cognition_relation_summary(item: CharacterRelation) -> str:
+    """关系摘要拼装：与 `_cognition_affiliation_summary` 同构，`org` 换成 `to`。"""
+    label = item.to + (f"（{item.relation_kind}）" if item.relation_kind else "")
+    text = f"{label}，第{item.evidence_chapter_index}章证据"
+    return text[:CHAPTER_COGNITION_SUMMARY_MAX_CHARS]
+
+
+def build_chapter_cognition_card(
+    bible: Bible,
+    chapters_by_idx: dict[int, str],
+    chapter_idx: int,
+    *,
+    character_names: list[str] | None = None,
+    forward_window_chapters: int | None = None,
+) -> ChapterCognitionCard:
+    """章级认知卡组装（§4.2）：代码零语义，纯字符串/区间运算，不发起模型调用。
+    `character_names` 是需要纳入的角色范围，由调用方给定（本文件唯一调用点
+    `_alias_evidence_resolution` 传入的是裁决闸已经结构性算出的候选集
+    `_alias_verdict_candidates`）；缺省（`None`）时对 `bible.characters` 全量扫描
+    （§4.2 point 1 "遍历 bible.characters"）。`Character.affiliations`/`relations`
+    当前项目尚未真实回填过（均为空列表）时，本函数优雅退化为只含
+    `matched_surface_forms`（无归属/关系摘要）的条目，不报错、不拒绝工作——见 §12
+    "回滚"对这一退化路径的要求。同一 `(bible 快照, chapter_idx, forward_window_
+    chapters)` 输入任何时候重建结果逐字节相同（§11 判据 2）。"""
+    if forward_window_chapters is None:
+        from app.portraits import CHARACTER_IMPORTANCE_FORWARD_CHAPTERS
+        forward_window_chapters = CHARACTER_IMPORTANCE_FORWARD_CHAPTERS
+
+    chapter_text = chapters_by_idx.get(chapter_idx, "")
+    forward_text = "\n".join(
+        chapters_by_idx[idx]
+        for idx in range(chapter_idx + 1, chapter_idx + forward_window_chapters + 1)
+        if idx in chapters_by_idx
+    )
+    wanted = set(character_names) if character_names is not None else None
+
+    present: list[tuple[Character, list[str], list[str]]] = []
+    for character in bible.characters:
+        if wanted is not None and character.name not in wanted:
+            continue
+        surface_forms = [character.name, *(a.text for a in character.aliases if a.text)]
+        matched = [form for form in surface_forms if form and form in chapter_text]
+        if matched:  # 在场判定：规范名或已确认别名逐字命中本章原文（§4.2 point 1）
+            present.append((character, surface_forms, matched))
+
+    entries: list[ChapterCognitionEntry] = []
+    # 确定性截断：按调用方给定范围内 bible.characters 的原始顺序取前
+    # CHAPTER_COGNITION_CARD_MAX_CHARACTERS 个在场角色，不做二次排序。
+    for character, surface_forms, matched in present[:CHAPTER_COGNITION_CARD_MAX_CHARACTERS]:
+        affiliations_as_of = [
+            _cognition_affiliation_summary(item)
+            for item in _status_facts_as_of_chapter(
+                character.affiliations, chapter_idx, group_key=lambda a: a.org,
+            )
+        ][:CHAPTER_COGNITION_FACTS_MAX_PER_KIND]
+        relations_as_of = [
+            _cognition_relation_summary(item)
+            for item in _status_facts_as_of_chapter(
+                character.relations, chapter_idx, group_key=lambda r: r.to,
+            )
+        ][:CHAPTER_COGNITION_FACTS_MAX_PER_KIND]
+        forward_hits = (
+            sum(forward_text.count(form) for form in surface_forms if form)
+            if forward_text else 0
+        )
+        entries.append(ChapterCognitionEntry(
+            name=character.name,
+            matched_surface_forms=matched,
+            affiliations_as_of=affiliations_as_of,
+            relations_as_of=relations_as_of,
+            forward_appearance_hits=forward_hits,
+        ))
+    return ChapterCognitionCard(
+        chapter_idx=chapter_idx,
+        forward_window_chapters=forward_window_chapters,
+        present_characters=entries,
+    )
+
+
+def _cognition_status_lines(card: ChapterCognitionCard | None) -> list[str]:
+    """把认知卡中"有归属或关系摘要"的角色条目渲染成提示词"候选人已知状态"文本块的
+    逐行文本（§4.3）：只展示状态事实（affiliations_as_of/relations_as_of），不展示
+    `forward_appearance_hits`——前瞻信号服务重要性判断（§3.3），与判别式提问无关，
+    §9 P1 第 7 项才会消费它，本函数不注入到裁决闸提示词里。角色没有任何状态事实
+    摘要时不出现在结果里；`card` 为 `None`，或全部在场角色都没有状态事实摘要（当前
+    真实状态：`backfill_character_status_facts` 尚未真实跑过，`affiliations`/
+    `relations` 均为空）时返回空列表，供调用方据此把整段"候选人已知状态"文本块省略，
+    不留空标题、不留占位噪声。"""
+    if card is None:
+        return []
+    lines: list[str] = []
+    for entry in card.present_characters:
+        facts: list[str] = []
+        if entry.affiliations_as_of:
+            facts.append("归属 " + "、".join(entry.affiliations_as_of))
+        if entry.relations_as_of:
+            facts.append("关系 " + "、".join(entry.relations_as_of))
+        if facts:
+            lines.append(f"- {entry.name}：" + "；".join(facts))
+    return lines
+
+
 # ---------- A1b. 裁决闸：桥接章原文独立裁决（补上"同章共现"证明不了"指同一人"的漏洞） ----------
 #
 # 真实误登记事故：全书别名回填写库后核验发现「孟浩←虎爷爷」（第 3 章）——第 3 章原文
@@ -3741,6 +3944,7 @@ class _AliasVerdictResponse(BaseModel):
 async def _alias_verdict_call(
     *, alias: str, true_name: str, dossier: list[dict[str, Any]],
     candidates: list[str], project_id: str | None,
+    cognition_card: ChapterCognitionCard | None = None,
 ) -> _AliasVerdictResponse:
     """裁决：唯一一次独立模型调用，只给卷宗原文与候选人名单，不点名"你猜是不是
     true_name"——把"这称谓到底指代候选里的哪一位"这个判别完全交给模型自己独立
@@ -3748,7 +3952,18 @@ async def _alias_verdict_call(
     与 `_prep_pack_true_name_verdict` 同一范式（先给独立卷宗，再让模型做判断，
     不预设结论）。`candidates` 由调用方 `_alias_verdict_candidates` 结构性算出，
     保证包含 `true_name` 本人（该章一定命中，见 `_alias_evidence_resolution` 对
-    候选集为空的防御性拒绝分支的说明）。"""
+    候选集为空的防御性拒绝分支的说明）。
+
+    `cognition_card`（可选，见 docs/CHARACTER_COGNITION_LAYER_DESIGN.md §4.3）：认知层
+    章级认知卡，附带每个候选"截至本章"的归属/关系背景摘要。这是 §1.3 指出的缺口的
+    直接修复——裁决闸原先只能看"这一章本身"的原文，现在额外看到候选人跨章建立的
+    状态事实。注入的文本块与卷宗原文段落明确分区、分别标注，并显式声明"判定仍须
+    基于原文段落，认知卡只能辅助区分候选，不得仅凭认知卡下结论"（§4.3 防幻觉纪律：
+    属性错了比没有更糟），不放松段号钉证、候选 enum、"都不是/无法确定"即拒绝等既有
+    闸门。`cognition_card` 为 `None`，或其中没有任何候选带归属/关系摘要（当前真实
+    状态：状态事实回填尚未真实跑过，`affiliations`/`relations` 均为空）时，
+    `_cognition_status_lines` 返回空列表，下面拼出的 `cognition_section` 为空字符串，
+    prompt 与本次改造前逐字一致——不留空标题、不留占位噪声。"""
     catalog = "\n\n".join(
         f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
         for item in dossier
@@ -3756,7 +3971,17 @@ async def _alias_verdict_call(
     segment_indexes = [item["segment_index"] for item in dossier]
     candidate_options = [*candidates, _ALIAS_VERDICT_NO_MATCH_LABEL]
     candidate_list = "、".join(candidates)
-    prompt = f"""下面是原著第 {dossier[0]['chapter_idx']} 章中包含称谓"{alias}"的原文段落
+    cognition_lines = _cognition_status_lines(cognition_card)
+    cognition_section = ""
+    if cognition_lines:
+        cognition_section = (
+            "候选人已知状态（认知卡背景参考，来自结构化的归属/关系历史证据，不是本次"
+            "卷宗原文）：\n" + "\n".join(cognition_lines) + "\n"
+            "以上认知卡只用于辅助区分候选身份，本身不构成判定依据；下面才是本次判定"
+            "必须依据的卷宗原文段落，若认知卡与原文段落冲突、或认知卡未提及，一律以"
+            "原文段落为准，不得仅凭以上认知卡下结论。\n\n"
+        )
+    prompt = f"""{cognition_section}下面是原著第 {dossier[0]['chapter_idx']} 章中包含称谓"{alias}"的原文段落
 （含前后语境，出现顺序不代表任何推断结论），每段前面标了段号：
 {catalog}
 
@@ -3779,6 +4004,7 @@ async def _alias_verdict_call(
                 "dossier": [
                     (item["chapter_idx"], item["segment_index"]) for item in dossier
                 ],
+                "cognition": cognition_lines,
             },
             ensure_ascii=False, sort_keys=True,
         ).encode("utf-8")
@@ -3860,6 +4086,7 @@ async def _alias_evidence_resolution(
     *,
     roster: dict[str, list[str]],
     project_id: str | None = None,
+    bible: Bible | None = None,
 ) -> dict[str, Any]:
     """别名证据判定的统一入口，供三处调用方（`_verify_character_aliases_in_place` /
     `backfill_character_aliases` / `reverify_character_aliases`）共用。分两段：
@@ -3885,7 +4112,13 @@ async def _alias_evidence_resolution(
     返回统一结构 {"accepted": bool, "chapter_idx": int|None, "quote": str,
     "reason": str}：accepted=True 时 chapter_idx/quote 是应当登记的证据（来自第一段，
     与裁决闸引用的卷宗原文无关——裁决闸只是额外必须通过的门槛，不改写已核验证据的
-    内容）；accepted=False 时 reason 是机器可读的拒绝原因，供调用方记账与复核报告。"""
+    内容）；accepted=False 时 reason 是机器可读的拒绝原因，供调用方记账与复核报告。
+
+    `bible`（可选，见 docs/CHARACTER_COGNITION_LAYER_DESIGN.md §4.3）：调用方若提供
+    完整 `Bible`，会额外组装一张章级认知卡（`build_chapter_cognition_card`，候选范围
+    限定为本次裁决闸算出的 `candidates`）注入 `_alias_verdict_call` 的提示词，帮助
+    模型看到候选人跨章建立的归属/关系背景，不改变裁决规则本身。缺省 `None`（例如
+    测试直接构造裁决场景、不需要认知卡）时行为与认知卡引入前完全一致。"""
     empty = {"accepted": False, "chapter_idx": None, "quote": "", "reason": ""}
     if _alias_declaration_verified(
         chapters_by_idx, anchor_texts, text, evidence_chapter_index, evidence_quote,
@@ -3918,10 +4151,17 @@ async def _alias_evidence_resolution(
     )
     if not dossier:
         return {**empty, "reason": "no_verdict_dossier"}
+    cognition_card = (
+        build_chapter_cognition_card(
+            bible, chapters_by_idx, resolved_chapter_index, character_names=candidates,
+        )
+        if bible is not None else None
+    )
     try:
         response = await _alias_verdict_call(
             alias=text, true_name=true_name, dossier=dossier,
             candidates=candidates, project_id=project_id,
+            cognition_card=cognition_card,
         )
     except Exception as exc:  # noqa: BLE001 - 裁决调用失败按不确定处理：不确定不登记
         log_provider_call(
@@ -3966,7 +4206,7 @@ async def _verify_character_aliases_in_place(
             resolved = await _alias_evidence_resolution(
                 chapters_by_idx, anchor_texts, text, character.name,
                 item.evidence_chapter_index, item.evidence_quote,
-                roster=roster, project_id=project_id,
+                roster=roster, project_id=project_id, bible=bible,
             )
             if resolved["accepted"]:
                 verified.append(CharacterAlias(
@@ -4125,7 +4365,7 @@ async def backfill_character_aliases(
             resolved = await _alias_evidence_resolution(
                 chapters_by_idx, anchor_texts, text, character.name,
                 item.evidence_chapter_index, item.evidence_quote,
-                roster=verdict_roster, project_id=project_id,
+                roster=verdict_roster, project_id=project_id, bible=bible,
             )
             if resolved["accepted"]:
                 character.aliases.append(CharacterAlias(
@@ -4194,7 +4434,7 @@ async def reverify_character_aliases(
             resolved = await _alias_evidence_resolution(
                 chapters_by_idx, anchor_texts, text, character.name,
                 item.evidence_chapter_index, item.evidence_quote,
-                roster=roster, project_id=project_id,
+                roster=roster, project_id=project_id, bible=bible,
             )
             if resolved["accepted"]:
                 kept.append(CharacterAlias(
