@@ -208,6 +208,7 @@ def test_fully_known_cast_triggers_zero_discovery_calls(monkeypatch):
         "visual_entity_id": "bible:萧炎", "display_appellation": "萧炎",
         "provenance": {
             "method": "direct", "anchor_segments": [1], "anchor_phrase": "萧炎",
+            "label_literal": True,
         },
     }]
     assert scene_list == [{
@@ -434,6 +435,7 @@ def test_unresolved_new_character_routes_through_discovery_and_resolves(monkeypa
         "visual_entity_id": "bible:沈青梧", "display_appellation": "沈青梧",
         "provenance": {
             "method": "discovery", "anchor_segments": [1], "anchor_phrase": "沈青梧",
+            "label_literal": True,
         },
     }]
 
@@ -528,6 +530,9 @@ def test_functional_identity_after_discovery_needs_no_portrait(monkeypatch):
             # 1.10.0 缺陷 A 顺带修复：候选集为空（bible 未注册任何角色），
             # 候选判别从未获得发起机会。
             "candidate_verdict_attempted": False,
+            # 1.11.0（任务①）：默认占位 source_text 里没有"黑衣人"这个字面，
+            # 独立判定标签本身逐字失据——不影响这条群演合法收编。
+            "label_literal": False,
         },
     }]
     assert stats["character_discovery_calls"] == 1
@@ -595,6 +600,7 @@ def test_alias_rename_after_discovery_resolves_to_real_name(monkeypatch):
         "visual_entity_id": "bible:苍玄", "display_appellation": "神秘老者",
         "provenance": {
             "method": "resolution", "anchor_segments": [1], "anchor_phrase": "神秘老者",
+            "label_literal": True,
         },
     }]
 
@@ -849,6 +855,10 @@ def test_suspected_true_name_hypothesis_verified_via_forward_window_binds_with_a
             # 1.10.0 缺陷 A：这条支撑句同时逐字包含 alias 与 true_name，是
             # 结构上可能存在的双锚定证据，钉证钉在了它上面，非退化路径。
             "dual_anchor": True,
+            # 1.11.0（任务①）：alias"灰袍老者"本身逐字出现在本集 source_text
+            # 里（跟 anchor_phrase/forward_chapter_label 指向全书第 6 章是
+            # 两件事——alias 才是 display_appellation 取的值），无需替换。
+            "label_literal": True,
         },
     }]
     assert any(
@@ -983,6 +993,10 @@ def test_speaker_with_zero_bible_collision_is_absorbed_as_functional_extra():
         "visual_entity_id": "entity:e2f70bd9be906dde",
         "provenance": {
             "method": "absorbed_speaker", "anchor_segments": [12], "anchor_phrase": "救命！",
+            # 1.11.0（任务①）：本用例没有传 source_text（默认空串），"被困者"
+            # 这个 speaker 字面无从判定逐字——独立判定诚实标 False，不影响
+            # 吸收为群演这条既有行为。
+            "label_literal": False,
         },
     }]
 
@@ -1693,6 +1707,7 @@ def _provenance_self_verify(source_text, characters, scene_list, functional_extr
     return prep_pack._prep_pack_verify_manifest_provenance(
         segments,
         {"characters": characters, "scenes": scene_list, "functional_extras": functional_extras},
+        source_text,
     )
 
 
@@ -1717,6 +1732,7 @@ def test_provenance_direct_method_self_verifies():
     xiao_yan = next(c for c in characters if c["display_name"] == "萧炎")
     assert xiao_yan["provenance"] == {
         "method": "direct", "anchor_segments": [1], "anchor_phrase": "萧炎",
+        "label_literal": True,
     }
     assert _provenance_self_verify(source_text, characters, scene_list, functional_extras) == []
 
@@ -1758,6 +1774,7 @@ def test_provenance_alias_method_self_verifies(monkeypatch):
     lfg = next(c for c in characters if c["display_name"] == "李富贵")
     assert lfg["provenance"] == {
         "method": "alias", "anchor_segments": [1], "anchor_phrase": "小胖子",
+        "label_literal": True,
     }
     assert _provenance_self_verify(source_text, characters, scene_list, functional_extras) == []
 
@@ -1889,6 +1906,7 @@ def test_provenance_resolution_method_self_verifies(monkeypatch):
     cangxuan = next(c for c in characters if c["display_name"] == "苍玄")
     assert cangxuan["provenance"] == {
         "method": "resolution", "anchor_segments": [1], "anchor_phrase": "神秘老者",
+        "label_literal": True,
     }
     assert _provenance_self_verify(source_text, characters, scene_list, functional_extras) == []
 
@@ -1920,6 +1938,7 @@ def test_provenance_discovery_method_self_verifies(monkeypatch):
     shen = next(c for c in characters if c["display_name"] == "沈青梧")
     assert shen["provenance"] == {
         "method": "discovery", "anchor_segments": [1], "anchor_phrase": "沈青梧",
+        "label_literal": True,
     }
     assert _provenance_self_verify(source_text, characters, scene_list, functional_extras) == []
 
@@ -1951,6 +1970,11 @@ def test_provenance_absorbed_speaker_method_self_verifies_and_propagates_to_key_
         "method": "absorbed_speaker",
         "anchor_segments": [11, 12],
         "anchor_phrase": "救命！",
+        # 本用例没有把 source_text 传给 _prep_pack_resolve_key_line_speakers
+        # （默认空串），"被困者"逐字判定因此诚实地是 False——这不影响吸收
+        # 本身，也不影响下面的自校验（自校验同样默认空串，跟这里判定的
+        # 依据一致，不会出现自相矛盾）。
+        "label_literal": False,
     }
     key_line = payload_events[0]["key_lines"][0]
     assert key_line["speaker_provenance"] == extra["provenance"]
@@ -2430,6 +2454,8 @@ def test_true_name_dossier_trial_accepts_verified_link_real_corpus(monkeypatch):
             "anchor_phrase": "他是当年的小胖子，李富贵。",
             "forward_chapter_label": "第 692 章",
             "dual_anchor": True,
+            # 1.11.0（任务①）：alias"小胖子"本身逐字出现在本集 source_text。
+            "label_literal": True,
         },
     }]
     assert any(
@@ -2917,6 +2943,8 @@ def test_true_name_verdict_accepts_degraded_in_episode_pin_when_no_dual_anchor_e
             "method": "resolution", "anchor_segments": [1],
             "anchor_phrase": "山道上走来一位银发老者，负手而立。",
             "dual_anchor": False,
+            # 1.11.0（任务①）：alias"银发老者"本身逐字出现在本集 source_text。
+            "label_literal": True,
         },
     }]
     assert any(
@@ -2924,6 +2952,335 @@ def test_true_name_verdict_accepts_degraded_in_episode_pin_when_no_dual_anchor_e
         and h["suspected_true_name"] == "沈无极" and h["dual_anchor"] is False
         for h in true_name_hints
     )
+
+
+# ---------------------------------------------------------------------------
+# 任务②（K/M 并发化，见 PREP_PACK_VERSION 上方大注释"并发闸"一节）最重要
+# 的一条红灯：确定性——两个互相独立的裁决任务，不管谁先完成，最终产物必须
+# 逐字节一致。用可控延迟制造两种相反的完成顺序，断言两次真实产物完全相同。
+# ---------------------------------------------------------------------------
+
+def test_true_name_verification_concurrent_completion_order_does_not_affect_output(
+    monkeypatch,
+):
+    """红灯（K 并发化确定性）：两条互相独立的 suspected_true_name 核验
+    （"银发老者"→"沈无极"、"小胖子"→"李富贵"，各自的卷宗互不相干）现在会
+    被 asyncio.gather 并发发起。用可控的 sleep 延迟制造两种相反的完成
+    顺序（先银发老者后小胖子 / 先小胖子后银发老者），两次调用
+    _resolve_assets 的最终 characters/true_name_hints 必须逐字节相同——
+    并发完成顺序不能影响 true_name_verdict_cache 的最终内容，也不能影响
+    _pass() 主循环按事件原始顺序写回 characters 字典的既有确定性。"""
+
+    def make_conn():
+        conn = _make_conn()
+        conn.execute(
+            "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+            "VALUES ('cp-swj','p1','沈无极',1,NULL)"
+        )
+        conn.execute(
+            "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+            "VALUES ('cp-lfg','p1','李富贵',1,NULL)"
+        )
+        conn.execute(
+            "INSERT INTO chapters(project_id, idx, content) VALUES ('p1', 7, ?)",
+            ("山道上走来一位银发老者，负手而立。",),
+        )
+        conn.execute(
+            "INSERT INTO chapters(project_id, idx, content) VALUES ('p1', 8, ?)",
+            ("他是当年的小胖子，李富贵。",),
+        )
+        conn.commit()
+        return conn
+
+    source_text = "山道上走来一位银发老者，负手而立。\n\n他是当年的小胖子，李富贵。"
+    events = [
+        _event("ev_a", characters=[
+            {"display_name": "银发老者", "is_background_extra": False, "suspected_true_name": "沈无极"},
+        ]),
+        _event("ev_b", characters=[
+            {"display_name": "小胖子", "is_background_extra": False, "suspected_true_name": "李富贵"},
+        ]),
+    ]
+
+    def boom_character(*_a, **_k):
+        raise AssertionError("核验通过的假设应走确定性快车道，不应该再触发全量身份发现")
+
+    async def run_once(*, slow_alias: str) -> dict:
+        conn = make_conn()
+        call_order: list[str] = []
+
+        async def fake_chat_structured(messages, **kwargs):
+            prompt = str(messages[0]["content"])
+            if "银发老者" in prompt:
+                alias, candidate = "银发老者", "沈无极"
+            elif "小胖子" in prompt:
+                alias, candidate = "小胖子", "李富贵"
+            else:
+                raise AssertionError(f"未识别的裁决提示词：{prompt[:50]}")
+            # 可控延迟：让 slow_alias 那一路故意晚完成，制造两种相反的完成
+            # 顺序——不引入真实网络等待，只是确定性地翻转 asyncio 事件循环
+            # 的调度顺序。
+            await asyncio.sleep(0.02 if alias == slow_alias else 0.0)
+            call_order.append(alias)
+            return prep_pack._PrepPackTrueNameVerdictResponse(
+                selected_candidate=candidate, supporting_entry_index=1,
+            )
+
+        monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+        monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+
+        result = await prep_pack._resolve_assets(
+            conn, project_id="p1", episode_id="ep-test", episode_no=2,
+            source_text=source_text, events=events, run_id=None,
+        )
+        characters, _scene_list, _functional_extras, errors, _stats, true_name_hints, *_ = result
+        assert errors == []
+        return {
+            "characters": characters,
+            "true_name_hints": sorted(
+                true_name_hints, key=lambda h: (h["kind"], h["mention"]),
+            ),
+            "call_order": list(call_order),
+        }
+
+    result_a = asyncio.run(run_once(slow_alias="银发老者"))
+    result_b = asyncio.run(run_once(slow_alias="小胖子"))
+
+    # 前提校验：两次真的以不同顺序完成——不是延迟设置无效导致的假阳性
+    # （sleep(0) 的那一路应该先完成，sleep(0.02) 的那一路后完成）。
+    assert result_a["call_order"] == ["小胖子", "银发老者"]
+    assert result_b["call_order"] == ["银发老者", "小胖子"]
+    assert result_a["call_order"] != result_b["call_order"], "夹具没能制造出不同的完成顺序"
+
+    assert len(result_a["characters"]) == 2, "两条独立核验都必须真的绑定成功"
+    assert json.dumps(result_a["characters"], sort_keys=True, ensure_ascii=False) == json.dumps(
+        result_b["characters"], sort_keys=True, ensure_ascii=False,
+    ), "并发完成顺序不能影响最终 characters 产物，必须逐字节一致"
+    assert result_a["true_name_hints"] == result_b["true_name_hints"], (
+        "并发完成顺序不能影响 true_name_hints 观测记录"
+    )
+
+
+def test_functional_extra_candidate_concurrent_completion_order_does_not_affect_output(
+    monkeypatch,
+):
+    """红灯（M 并发化确定性）：两个互相独立的未解析角色标签候选判别
+    （"绿袍男子"→许清、"白袍老者"→上官笑，各自的候选/卷宗互不相干）现在
+    会被 asyncio.gather 并发发起。用可控延迟制造两种相反的完成顺序，两次
+    调用 _resolve_assets 的最终 characters 产物必须逐字节一致——并发完成
+    顺序不能影响 skip_character_names/character_rename/candidate_verdict_
+    pins 这几个共享容器最终按 unresolved_chars 原始顺序写回的确定性。"""
+
+    def make_conn():
+        conn = _make_conn()
+        conn.execute(
+            "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+            "VALUES ('cp-xuqing','p1','许清',1,NULL)"
+        )
+        conn.execute(
+            "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+            "VALUES ('cp-sgx','p1','上官笑',1,NULL)"
+        )
+        _seed_bible_characters(conn, "p1", [
+            _bible_character(
+                "许清", appearance_canonical="常年穿银色长袍，气质清冷。",
+                aliases=[_bible_alias("许师姐", evidence_chapter_index=1)],
+            ),
+            _bible_character(
+                "上官笑", appearance_canonical="面容清瘦，常着白袍。",
+                aliases=[_bible_alias("上官师兄", evidence_chapter_index=1)],
+            ),
+        ])
+        conn.commit()
+        return conn
+
+    source_text = "\n\n".join([
+        "绿袍男子对着那女子躬身行礼，口称许师姐，随后请四人随他一同返回宗门。",
+        "白袍老者缓步上前，众人纷纷让开道路，齐声唤他上官师兄。",
+    ])
+    events = [
+        _event("ev_a", characters=[
+            {"display_name": "绿袍男子", "is_background_extra": True},
+        ]),
+        _event("ev_b", characters=[
+            {"display_name": "白袍老者", "is_background_extra": True},
+        ]),
+    ]
+
+    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
+
+    async def run_once(*, slow_label: str) -> dict:
+        conn = make_conn()
+        call_order: list[str] = []
+
+        async def fake_chat_structured(messages, **kwargs):
+            if kwargs.get("model_type") is prep_pack._PrepPackFunctionalCandidateVerdict:
+                prompt = str(messages[0]["content"])
+                # 卷宗（原文段落）两段都会出现在每一次调用的提示词里（候选
+                # 判别的候选名单是全集共享的，不是按标签各自切分卷宗）——
+                # 不能用"许师姐"/"上官师兄"这两个字面区分是哪次调用，两段
+                # 原文各自的锚点词在任一次调用里都存在；只有"判断标签...”
+                # 这一行的标签本身才是这次调用独有的，用它来区分。
+                if '标签"绿袍男子"' in prompt:
+                    label, candidate = "绿袍男子", "许清"
+                elif '标签"白袍老者"' in prompt:
+                    label, candidate = "白袍老者", "上官笑"
+                else:
+                    raise AssertionError(f"未识别的候选判别提示词：{prompt[:50]}")
+                await asyncio.sleep(0.02 if label == slow_label else 0.0)
+                call_order.append(label)
+                return prep_pack._PrepPackFunctionalCandidateVerdict(
+                    selected_candidate=candidate, supporting_segment_index=1,
+                    supporting_quote="",
+                )
+            from app.source_paratext import ParatextSpans
+            return ParatextSpans(spans=[])
+
+        monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
+        monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+        monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
+        result = await prep_pack._resolve_assets(
+            conn, project_id="p1", episode_id="ep-test", episode_no=2,
+            source_text=source_text, events=events, run_id=None,
+        )
+        characters, _scene_list, functional_extras, errors, _stats, *_ = result
+        assert errors == []
+        return {
+            "characters": characters, "functional_extras": functional_extras,
+            "call_order": list(call_order),
+        }
+
+    result_a = asyncio.run(run_once(slow_label="绿袍男子"))
+    result_b = asyncio.run(run_once(slow_label="白袍老者"))
+
+    # 前提校验：两次真的以不同顺序完成——不是延迟设置无效导致的假阳性。
+    assert result_a["call_order"] == ["白袍老者", "绿袍男子"]
+    assert result_b["call_order"] == ["绿袍男子", "白袍老者"]
+    assert result_a["call_order"] != result_b["call_order"], "夹具没能制造出不同的完成顺序"
+
+    assert len(result_a["characters"]) == 2, "两条独立候选判别都必须真的绑定成功"
+    assert result_a["functional_extras"] == [], "绑定成功后不应残留在 functional_extras 里"
+    assert json.dumps(result_a["characters"], sort_keys=True, ensure_ascii=False) == json.dumps(
+        result_b["characters"], sort_keys=True, ensure_ascii=False,
+    ), "并发完成顺序不能影响最终 characters 产物，必须逐字节一致"
+
+
+# ---------------------------------------------------------------------------
+# 任务②失败语义（见 _prep_pack_gather_concurrent 上方大注释）：某个并发任务
+# 抛异常时不得被吞掉，也不得让其它任务的结果被静默丢弃导致部分写回。
+# ---------------------------------------------------------------------------
+
+def test_gather_concurrent_reraises_first_exception_after_all_tasks_complete():
+    """红灯（_prep_pack_gather_concurrent 单元测试）：多个任务里有一个抛
+    异常时，必须等全部任务真正跑完（不产生"孤儿"后台任务）后，把这个异常
+    原样重新抛出——不吞、不改写成别的异常类型、不静默丢弃。用一个可变列表
+    记录每个任务是否真的跑到了自己的结尾，证明"等全部完成"这个承诺成立。"""
+    completed: list[str] = []
+
+    async def ok(tag: str, delay: float) -> str:
+        await asyncio.sleep(delay)
+        completed.append(tag)
+        return tag
+
+    async def boom(tag: str, delay: float) -> str:
+        await asyncio.sleep(delay)
+        completed.append(tag)
+        raise ValueError(f"{tag} 失败")
+
+    async def scenario() -> None:
+        with pytest.raises(ValueError, match="任务B 失败"):
+            await prep_pack._prep_pack_gather_concurrent([
+                ok("任务A", 0.03),
+                boom("任务B", 0.0),
+                ok("任务C", 0.02),
+            ])
+
+    asyncio.run(scenario())
+    # 三个任务全部真正跑完了（包括比失败任务更晚完成的任务A），不是"任务B
+    # 一失败就立刻甩出异常、任务A被扔下孤儿运行/结果被丢弃"。
+    assert set(completed) == {"任务A", "任务B", "任务C"}
+
+
+def test_gather_concurrent_returns_all_results_in_input_order_when_nothing_fails():
+    """绿灯对照：没有任务失败时，返回值必须是按传入顺序（不是完成顺序）的
+    全部结果——这正是 K/M 两条并发化循环用来保证确定性写回的基础保证。"""
+    async def slow_first(value: int) -> int:
+        await asyncio.sleep(0.03 if value == 0 else 0.0)
+        return value
+
+    async def scenario() -> list[int]:
+        return await prep_pack._prep_pack_gather_concurrent(
+            [slow_first(i) for i in range(5)],
+        )
+
+    results = asyncio.run(scenario())
+    assert results == [0, 1, 2, 3, 4]
+
+
+def test_true_name_verification_task_failure_aborts_pass_without_partial_writeback(
+    monkeypatch,
+):
+    """红灯（K 失败语义的集成验证）：两条独立核验里有一条的模型调用直接
+    抛异常（模拟 provider 调用失败）——_resolve_assets 必须整体失败（异常
+    原样传播出去，不是吞掉后继续拿一份只写了一半的 characters），另一条
+    本该成功的核验也不能悄悄留下部分产物：这一整次生成尝试要么完整成功，
+    要么完整失败，不允许"一部分角色已经绑定、另一部分因为并发同伴失败而
+    从未绑定"这种介于两者之间的产物流出——跟现有门禁失败即整包重试的既有
+    纪律一致，不是本次新引入的语义。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-swj','p1','沈无极',1,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-lfg','p1','李富贵',1,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id, idx, content) VALUES ('p1', 7, ?)",
+        ("山道上走来一位银发老者，负手而立。",),
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id, idx, content) VALUES ('p1', 8, ?)",
+        ("他是当年的小胖子，李富贵。",),
+    )
+    conn.commit()
+
+    source_text = "山道上走来一位银发老者，负手而立。\n\n他是当年的小胖子，李富贵。"
+    events = [
+        _event("ev_a", characters=[
+            {"display_name": "银发老者", "is_background_extra": False, "suspected_true_name": "沈无极"},
+        ]),
+        _event("ev_b", characters=[
+            {"display_name": "小胖子", "is_background_extra": False, "suspected_true_name": "李富贵"},
+        ]),
+    ]
+
+    async def fake_chat_structured(messages, **kwargs):
+        prompt = str(messages[0]["content"])
+        if "小胖子" in prompt:
+            # 模拟 provider 调用本身失败（网络错误/schema 校验失败等），
+            # 不是业务上的"都不是/无法确定"。
+            raise RuntimeError("模拟 provider 调用失败")
+        await asyncio.sleep(0.02)  # 比失败的那一路更晚完成
+        return prep_pack._PrepPackTrueNameVerdictResponse(
+            selected_candidate="沈无极", supporting_entry_index=1,
+        )
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
+    def boom_character(*_a, **_k):
+        raise AssertionError("核验通过的假设应走确定性快车道，不应该再触发全量身份发现")
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+
+    with pytest.raises(RuntimeError, match="模拟 provider 调用失败"):
+        asyncio.run(prep_pack._resolve_assets(
+            conn, project_id="p1", episode_id="ep-test", episode_no=2,
+            source_text=source_text, events=events, run_id=None,
+        ))
 
 
 def test_true_name_verdict_rejects_degraded_pin_from_unrelated_out_of_episode_chapter(monkeypatch):
@@ -3569,16 +3926,306 @@ def test_unresolved_appearance_label_binds_via_candidate_verdict_using_event_spa
     by_portrait = {c["portrait_id"]: c for c in characters}
     assert "cp-xuqing" in by_portrait, "绿：许清必须真的绑定成功"
     entry = by_portrait["cp-xuqing"]
-    assert entry["display_appellation"] == label, "字幕/取图措辞仍须是本集原文说法，不提前剧透"
+    # 1.11.0（任务①，见 PREP_PACK_VERSION 上方大注释）：这正是任务①的真实
+    # 触发案例本身——label"银色长袍女子"不是原文逐字（open 断言已经确认），
+    # candidate_verdict 只核验了"这个标签指向许清"这件事，从没核验过标签
+    # 字符串本身。此前 display_appellation 直接沿用了这个不逐字的合成标签，
+    # 字幕会显示原文里根本不存在的说法；现在改为确定性替换成这条绑定分支
+    # 本来就要算的 anchor_phrase（候选判别钉证命中的卷宗段落原文，见下面
+    # anchor_phrase 断言）——这句话是本集原文的真实逐字内容，不是新编的
+    # 证据链。label_literal 显式记为 True，可观测地区分"用户看到的是原文
+    # 逐字替代品"而不是"模型综合的合成短语"。
+    assert entry["display_appellation"] == (
+        "绿袍男子对着她躬身行礼，口称许师姐，随后请四人随他回宗门。"
+    ), "标签本身非逐字时，display_appellation 必须确定性替换为逐字 anchor_phrase，不能沿用合成标签"
     assert entry["provenance"]["method"] == "candidate_verdict"
     assert entry["provenance"]["anchor_segments"] == [to_segment]
     assert "许师姐" in entry["provenance"]["anchor_phrase"]
+    assert entry["provenance"]["label_literal"] is True
     assert not any(e["label"] == label for e in functional_extras), (
         "绑定成功后，这个标签不能再出现在 functional_extras 里"
     )
     # 卷宗必须真的把事件跨度两段都递给了模型（不是模型碰巧选对）。
     assert "口称许师姐" in seen["prompt"]
     assert "面色苍白" in seen["prompt"]
+
+
+# ---------------------------------------------------------------------------
+# 1.11.0（任务①，见 PREP_PACK_VERSION 上方大注释）：反幻觉主防线的姊妹
+# 判定——标签用词接地（provenance.label_literal）。上面的 candidate_verdict
+# 测试覆盖了"非逐字但有可用的逐字 anchor_phrase 可替换"这条分支；下面四条
+# 红灯分别补齐其余分支：(1) 非逐字且没有任何可用的本地逐字材料时，绝不
+# 伪造替换，保留原始标签、只标记 label_literal=False；(2) candidate_verdict
+# 钉中的卷宗条目若被确定性截断（带省略标记，不再是原文纯净子串）时，同样
+# 不得当作逐字替代品使用；(3)/(4) functional_extras 侧 label_literal 的
+# True/False 两个取值都要有覆盖（此前只测过 discovery 分支的 False 与
+# absorbed_speaker 分支的 False，两条 True 分支此前完全没有回归）；最后一条
+# 覆盖发布前自校验能抓出 label_literal 声明与实际复核结果不一致的情形。
+# ---------------------------------------------------------------------------
+
+def test_character_non_literal_name_with_no_usable_anchor_keeps_raw_label_and_marks_false(
+    monkeypatch,
+):
+    """红灯（分支：literal_evidence=False 且该绑定分支算出的 anchor_phrase
+    也是空——alias/discovery 两支的候选序列只试 ``[name]`` 本身，见
+    _prep_pack_local_text_anchor 的调用点）：没有任何可用的逐字材料时，
+    display_appellation 必须原样保留合成标签（不伪造替换），provenance.
+    label_literal 诚实标 False，绝不阻断——这是"标记不修"兜底分支，跟
+    characters 侧成本可控（1/25 条量级）的取舍直接对应。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-lfg','p1','李富贵',1,NULL)"
+    )
+    conn.commit()
+
+    async def fake_rename(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {
+            "added": [], "skipped": [],
+            "resolutions": [{
+                "source_label": "穿杂役衫的魁梧大汉", "canonical_name": "李富贵",
+                "resolution": "future_identity",
+                # source_quote 本身也不逐字出现在原文——真实场景里 discovery
+                # 自己的证据引文有时是转述/摘要，不保证逐字命中（跟任务①
+                # 根因分析一致：只有身份指向的证据链，标签用词的证据链是
+                # 独立的另一件事）。
+                "evidence": "一名魁梧大汉打扮成杂役模样",
+            }],
+            "errors": [], "warnings": [],
+        }
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_rename)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    # 原文只有分散的描述性叙述，"穿杂役衫的魁梧大汉"这个综合短语逐字形式
+    # 不存在（跟真实第24轮 EP3 回归 ERR-20260824-d0830a 同一形状）。
+    source_text = "一名身穿杂役服饰的男子体格魁梧，站在门口。"
+    events = [_event("ev_001", characters=[
+        {"display_name": "穿杂役衫的魁梧大汉", "is_background_extra": False},
+    ])]
+    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+        conn, events=events, source_text=source_text,
+    )
+
+    assert errors == []
+    lfg = next(c for c in characters if c["display_name"] == "李富贵")
+    assert lfg["display_appellation"] == "穿杂役衫的魁梧大汉", (
+        "没有任何逐字材料可替换时必须原样保留合成标签，不伪造证据"
+    )
+    assert lfg["provenance"]["label_literal"] is False
+    assert lfg["provenance"]["method"] == "resolution"
+    # 别名库仍只登记逐字出现于原文的称谓（task②既有纪律不受影响）：这个
+    # 合成短语不逐字，不应该被写进 aliases。
+    assert lfg["aliases"] == []
+    assert _provenance_self_verify(source_text, characters, scene_list, functional_extras) == []
+
+
+def test_character_candidate_verdict_truncated_dossier_entry_not_used_as_literal_substitute(
+    monkeypatch,
+):
+    """红灯（防御性分支：candidate_verdict 钉中的卷宗条目字数超过
+    _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_GUARANTEED_ENTRY_MAX_CHARS，被
+    _prep_pack_functional_candidate_truncate_segment 做过确定性截断、带省略
+    标记——这份 anchor_phrase 不再是原文纯净子串，绝不能被当成 display_
+    appellation 的逐字替代品使用，否则字幕会显示原文里同样不存在的省略号
+    拼接文本，等于把任务①要修的问题换了一种方式重新引入。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-xuqing','p1','许清',1,NULL)"
+    )
+    _seed_bible_characters(conn, "p1", [
+        _bible_character(
+            "许清", appearance_canonical="常年穿银色长袍，气质清冷。",
+            aliases=[_bible_alias("许师姐", evidence_chapter_index=1)],
+        ),
+    ])
+
+    # 第二段刻意超过 260 字上限（GUARANTEED_ENTRY_MAX_CHARS），"许师姐"落在
+    # 中段——_prep_pack_functional_candidate_truncate_segment 必然两侧都要
+    # 截断、两侧都会加省略标记，见该函数 docstring 的裁剪算法。
+    long_prefix = (
+        "孟浩独自站在原地愣愣出神心绪难平反复回想方才发生的一切一时竟不知该"
+        "如何是好只觉得眼前种种皆如梦幻泡影令人难以置信却又真实地摆在眼前"
+        "四周一片寂静唯有风声在耳畔呼啸而过更添几分萧瑟之意让人不由自主地"
+        "打了个寒颤心头涌起一股说不清道不明的滋味此刻天色渐晚"
+    )
+    long_mid = "绿袍男子对着那女子躬身行礼口称许师姐随后请四人随他一同返回宗门"
+    long_suffix = (
+        "他缓缓低下头去又猛地抬起头来望着远处天际线出神半晌无言心中翻涌起"
+        "无数念头却始终理不出一个头绪只能任由思绪四处飘荡不知飘向何方仿佛"
+        "整个世界都已远去只剩下他一人独自伫立在这苍茫天地之间感受着那份"
+        "挥之不去的孤独与迷惘久久无法释怀"
+    )
+    long_segment_text = long_prefix + long_mid + long_suffix
+    assert len(long_segment_text) > 260, "夹具必须真的触发确定性截断才有意义"
+    assert "…" not in long_segment_text, "夹具本身不能含省略标记，否则不能证明截断标记的来源"
+
+    label = "银色长袍女子"
+    source_text = "\n\n".join(["孟浩缓缓抬起头，环顾四周。", long_segment_text])
+    assert label not in source_text
+    segments = prep_pack.index_source_segments(source_text)
+    assert len(segments) == 2
+
+    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    seen_dossier_text: dict = {}
+
+    async def fake_chat_structured(messages, **kwargs):
+        if kwargs.get("model_type") is prep_pack._PrepPackFunctionalCandidateVerdict:
+            prompt = str(messages[0]["content"])
+            seen_dossier_text["prompt"] = prompt
+            # 卷宗里第2段必须已经是截断过、带省略标记的版本，不是长段原文——
+            # 这是本测试要证实的前提本身，不是断言目标。
+            assert "…" in prompt, "夹具没能触发截断，测试前提不成立"
+            return prep_pack._PrepPackFunctionalCandidateVerdict(
+                selected_candidate="许清", supporting_segment_index=2,
+                supporting_quote="口称许师姐",
+            )
+        from app.source_paratext import ParatextSpans
+        return ParatextSpans(spans=[])
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
+    events = [_event(
+        "ev_001",
+        characters=[{"display_name": label, "is_background_extra": True}],
+        source_span={"from_segment": 1, "to_segment": 1},
+    )]
+    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+        conn, events=events, source_text=source_text,
+    )
+
+    assert errors == []
+    by_portrait = {c["portrait_id"]: c for c in characters}
+    assert "cp-xuqing" in by_portrait, "身份指向仍然必须正确绑定——candidate_verdict 的既有职责不受影响"
+    entry = by_portrait["cp-xuqing"]
+    assert entry["provenance"]["method"] == "candidate_verdict"
+    # 钉中的卷宗条目确实带省略标记（防御性检查的输入前提）。
+    assert "…" in entry["provenance"]["anchor_phrase"]
+    # 核心断言：这份带省略标记的 anchor_phrase 不是原文纯净子串，绝不能被
+    # 当作 display_appellation 的逐字替代品——必须原样保留合成标签 label，
+    # label_literal 诚实标 False（不是伪造一个"看起来逐字"的假象）。
+    assert entry["display_appellation"] == label
+    assert entry["provenance"]["label_literal"] is False
+    # 注：本用例不断言 _provenance_self_verify(...) == []——这个夹具刻意让
+    # 候选判别钉中一条被截断的卷宗条目，anchor_phrase 因此带省略标记，会被
+    # _prep_pack_verify_manifest_provenance 既有的 anchor_phrase 逐字自校验
+    # （跟本次任务①的 label_literal 判定是两套独立检查）判定"未在
+    # anchor_segments 所指原文中逐字命中"而拦截发布——这是候选判别钉证机制
+    # 本身"钉住的卷宗条目截断后不再是原文纯净子串"这一更早就存在、且独立于
+    # 本次任务的既有缺口（截断只在 1.8.3 引入，此前的自校验从未考虑过钉中
+    # 的条目可能是截断版本），不在任务①范围内，如实记录、不顺手改动。本
+    # 测试只关心它范围内的问题：截断后的 anchor_phrase 绝不能被误用成
+    # display_appellation 的替代品，上面的断言已经证明这一点成立。
+
+
+def test_functional_extra_discovery_label_literal_true_when_label_is_verbatim(monkeypatch):
+    """红灯（functional_extras 侧 label_literal 的 True 分支，此前只有
+    discovery 方法的 False 分支被覆盖过）：群演标签就是原文本身写的称谓时，
+    label_literal 必须诚实标 True——不能因为"functional_extras 多数非逐字"
+    这个统计事实就把这个字段焊死成 False，独立判定必须真的逐字复核。"""
+    conn = _make_conn()
+
+    async def fake_functional(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {
+            "added": [], "skipped": [],
+            "resolutions": [{
+                "source_label": "围观弟子", "canonical_name": "围观弟子",
+                "resolution": "functional_identity",
+            }],
+            "errors": [], "warnings": [],
+        }
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_functional)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    events = [_event("ev_001", characters=[
+        {"display_name": "围观弟子", "is_background_extra": True},
+    ])]
+    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+        conn, events=events,
+        source_text="周围一群围观弟子交头接耳，议论纷纷。",
+    )
+
+    assert errors == []
+    assert characters == []
+    extra = next(e for e in functional_extras if e["label"] == "围观弟子")
+    assert extra["provenance"]["label_literal"] is True
+    assert extra["provenance"]["anchor_phrase"] == "围观弟子"
+
+
+def test_absorbed_speaker_label_literal_true_when_speaker_is_verbatim():
+    """红灯（functional_extras 侧 label_literal 的 True 分支，absorbed_speaker
+    方法）：跟上一条对称——台词说话人字面本身确实逐字出现在本集原文时，
+    label_literal 必须标 True，而不是继承此前"absorbed_speaker 只测过 False"
+    的默认印象。"""
+    payload_events = [{
+        "event_id": "ev_005",
+        "key_lines": [{"speaker": "被困者", "line": "救命！", "segment_index": 2}],
+    }]
+    roster = prep_pack._prep_pack_build_speaker_roster(
+        characters=[{"display_name": "绿袍男子", "identity_id": "bible:绿袍男子", "aliases": []}],
+        functional_extras=[],
+    )
+    functional_extras: list[dict] = []
+    source_text = "山洞里传来求救声。\n\n一名被困者高声呼喊：救命！"
+    errors, absorbed_count = prep_pack._prep_pack_resolve_key_line_speakers(
+        payload_events, roster,
+        all_project_character_names={"韩宗", "绿袍男子"},
+        functional_extras=functional_extras,
+        source_text=source_text,
+    )
+    assert errors == []
+    assert absorbed_count == 1
+    extra = next(e for e in functional_extras if e["label"] == "被困者")
+    assert extra["provenance"]["label_literal"] is True
+
+
+def test_label_literal_self_verify_catches_tampered_claim():
+    """红灯（自校验一致性）：provenance.label_literal 的声明必须能被发布前
+    自校验独立复核出来——伪造一个跟本集原文实际情况不符的声明（谎称非逐字
+    的标签逐字命中）必须被拦截，不能只靠生成侧自己算一遍就永久免检，跟
+    anchor_phrase 的既有自校验同一条纪律（不信任自己此前算出来的结论）。"""
+    source_text = "萧炎快步穿过宗门广场，众弟子纷纷让路。"
+    segments = prep_pack.index_source_segments(source_text)
+
+    tampered_characters = [{
+        "identity_id": "bible:萧炎", "display_name": "萧炎",
+        "portrait_id": "cp1", "event_ids": ["ev_001"], "aliases": [],
+        "display_appellation": "这个说法原文根本没有",
+        "provenance": {
+            "method": "direct", "anchor_segments": [1], "anchor_phrase": "萧炎",
+            "label_literal": True,  # 谎称——这句话根本不在原文里
+        },
+    }]
+    errors = prep_pack._prep_pack_verify_manifest_provenance(
+        segments, {"characters": tampered_characters, "scenes": [], "functional_extras": []},
+        source_text,
+    )
+    assert errors, "label_literal 声明与本集原文实际情况不符必须被自校验拦截"
+    assert any(
+        "label_literal" in message and "这个说法原文根本没有" in message
+        for message in errors
+    )
+
+    honest_characters = [{
+        "identity_id": "bible:萧炎", "display_name": "萧炎",
+        "portrait_id": "cp1", "event_ids": ["ev_001"], "aliases": [],
+        "display_appellation": "这个说法原文根本没有",
+        "provenance": {
+            "method": "direct", "anchor_segments": [1], "anchor_phrase": "萧炎",
+            "label_literal": False,  # 如实标注——自校验必须放行
+        },
+    }]
+    errors_honest = prep_pack._prep_pack_verify_manifest_provenance(
+        segments, {"characters": honest_characters, "scenes": [], "functional_extras": []},
+        source_text,
+    )
+    assert errors_honest == []
 
 
 # ---------------------------------------------------------------------------
@@ -4257,6 +4904,17 @@ def test_prep_pack_version_is_1_8_0():
     skip_character_names 短路不再作废已核验通过的 suspected_true_name
     结论，见 PREP_PACK_VERSION 上方 1.10.0 大注释）会实际改变真名裁决的
     模型输出与部分绑定的钉证通过与否，同样是 prompt-contract 变更，版本
-    继续推进——函数名/测试名沿用旧号不改，只更新断言值，避免无谓的大范围
-    改名。"""
-    assert prep_pack.PREP_PACK_VERSION == "1.10.0"
+    继续推进。1.11.0（任务①，独立评审 blocker：反幻觉主防线覆盖面比它
+    宣称的窄——candidate_verdict/resolution/alias/discovery 等解析路径
+    只核验"标签指向谁"，从未核验"标签字符串本身是否逐字出现在本集原文"，
+    真实 EP1"银色长袍女子"绑定许清即是一例：身份指向正确，但
+    display_appellation 是模型综合的合成短语，非逐字，见 PREP_PACK_
+    VERSION 上方 1.11.0 大注释的测量数据与方案取舍）：新增
+    provenance.label_literal 独立判定字段（characters[]/functional_
+    extras[] 每项都带），characters[] 侧非逐字时确定性替换为已有的
+    anchor_phrase（不新开证据检索），functional_extras[] 侧只标记（label
+    同时是台词说话人匹配的连接键，不能改值）——会实际改变部分 characters[]
+    条目的 display_appellation 取值，是真正的产出语义变更，比照 1.9.0 的
+    先例推进版本号——函数名/测试名沿用旧号不改，只更新断言值，避免无谓的
+    大范围改名。"""
+    assert prep_pack.PREP_PACK_VERSION == "1.11.0"
