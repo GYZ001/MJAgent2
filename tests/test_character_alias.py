@@ -29,6 +29,32 @@ def _character(**overrides: object) -> Character:
     return Character(**base)
 
 
+def _fake_verdict_chat_structured(
+    selected_candidate: str,
+    supporting_segment_index: int = 1,
+    supporting_quote: str = "",
+):
+    """构造 model_gateway.chat_structured 的假实现，固定返回给定的裁决结论——测试里
+    把"裁决闸"这一步钉死成确定性结果，不依赖真实模型调用。`model_type` 由调用方
+    （`app.stages._alias_verdict_call`）在 kwargs 里传入，就是 `stages._AliasVerdictResponse`
+    本身，用它构造返回值即可，测试文件不需要 import 这个私有类。
+
+    `supporting_segment_index` 默认 1：本文件里绝大多数测试用的章节原文都是单一
+    自然段（不含空行），`_alias_verdict_dossier` 对这种章节只会产出 segment_index=1
+    这一条记录，默认值省得每个调用点都要重复写；需要构造"段号非法"场景的测试自己
+    显式传一个卷宗里不存在的段号。"""
+
+    async def fake(_messages, **kwargs):
+        model_type = kwargs["model_type"]
+        return model_type(
+            selected_candidate=selected_candidate,
+            supporting_segment_index=supporting_segment_index,
+            supporting_quote=supporting_quote,
+        )
+
+    return fake
+
+
 # ---------- 1. CharacterAlias 结构 + Character.aliases 字段 ----------
 
 def test_character_alias_requires_all_evidence_fields() -> None:
@@ -260,12 +286,14 @@ BRIDGE_CHAPTERS = [
 ]
 
 
-def test_bridge_chapter_found_when_model_cites_wrong_chapter() -> None:
+def test_bridge_chapter_found_when_model_cites_wrong_chapter(monkeypatch) -> None:
     """红灯先行场景：模型申报"许清→许清师妹"语义正确，但引用的第 20 章没有"许清"这个
     正式姓名，旧版逻辑（_alias_declaration_verified）必须拒绝——先确认这一步确实拒绝，
-    再验证新入口 _alias_evidence_resolution 能在全书范围内找到真正的桥接章（第 34 章）
-    并登记该章代码提取的引句（不是模型给的引句）。"""
+    再验证新入口 _alias_evidence_resolution 能在全书范围内找到真正的桥接章（第 34 章），
+    过裁决闸（这里 mock 裁决结论为 same），并登记该章代码提取的引句（不是模型给的
+    引句）。"""
     from app import stages
+    from app.harness import model_gateway
 
     chapters_by_idx = stages._chapters_by_idx(BRIDGE_CHAPTERS)
     model_quote = "许师姐的传说在坊间流传已久"
@@ -275,21 +303,27 @@ def test_bridge_chapter_found_when_model_cites_wrong_chapter() -> None:
         chapters_by_idx, {"许清"}, "许清师妹", 20, model_quote,
     ) is False
 
-    # 绿：新入口不直接拒绝，而是全书检索出第 34 章作为桥接章。
-    resolved = stages._alias_evidence_resolution(
-        chapters_by_idx, {"许清"}, "许清师妹", 20, model_quote,
+    # 绿：新入口不直接拒绝，而是全书检索出第 34 章作为桥接章，再过裁决闸。
+    monkeypatch.setattr(
+        model_gateway, "chat_structured",
+        _fake_verdict_chat_structured("许清"),
     )
-    assert resolved is not None
-    resolved_chapter_index, resolved_quote = resolved
-    assert resolved_chapter_index == 34
-    assert resolved_chapter_index != 20  # 登记的不是模型指错的那一章
-    assert resolved_quote != model_quote  # 登记的引句是代码从桥接章提取的，不是模型给的
-    assert "许清师妹" in resolved_quote
-    assert resolved_quote in chapters_by_idx[34]  # 引句必须是桥接章原文的逐字子串
+    resolved = asyncio.run(stages._alias_evidence_resolution(
+        chapters_by_idx, {"许清"}, "许清师妹", "许清", 20, model_quote,
+        roster={"许清": ["许清"]},
+    ))
+    assert resolved["accepted"] is True
+    assert resolved["chapter_idx"] == 34
+    assert resolved["chapter_idx"] != 20  # 登记的不是模型指错的那一章
+    assert resolved["quote"] != model_quote  # 登记的引句是代码从桥接章提取的，不是模型给的
+    assert "许清师妹" in resolved["quote"]
+    assert resolved["quote"] in chapters_by_idx[34]  # 引句必须是桥接章原文的逐字子串
 
 
 def test_bridge_chapter_none_when_no_chapter_has_cooccurrence() -> None:
-    """全书都没有"别名 + 正式姓名"共现的章节 → 维持拒绝（安全默认不放松）。"""
+    """全书都没有"别名 + 正式姓名"共现的章节 → 维持拒绝（安全默认不放松）。裁决闸
+    根本不会被触发（没有 mock model_gateway.chat_structured 也能通过，证明确实
+    没有发起模型调用）。"""
     from app import stages
 
     chapters = [
@@ -298,23 +332,31 @@ def test_bridge_chapter_none_when_no_chapter_has_cooccurrence() -> None:
     ]
     chapters_by_idx = stages._chapters_by_idx(chapters)
     assert stages._find_alias_bridge_chapter(chapters_by_idx, {"许清"}, "许师姐") is None
-    assert stages._alias_evidence_resolution(
-        chapters_by_idx, {"许清"}, "许师姐", 2, "许师姐的传说流传已久",
-    ) is None
+    resolved = asyncio.run(stages._alias_evidence_resolution(
+        chapters_by_idx, {"许清"}, "许师姐", "许清", 2, "许师姐的传说流传已久",
+        roster={"许清": ["许清"]},
+    ))
+    assert resolved == {
+        "accepted": False, "chapter_idx": None, "quote": "",
+        "reason": "no_bridge_chapter",
+    }
 
 
 def test_bridge_chapter_none_when_alias_text_absent_from_every_chapter() -> None:
     """模型申报的别名文本压根不在任何章节原文里出现（比如模型记错了字）→ 全书检索
-    也找不到任何桥接章，维持拒绝。"""
+    也找不到任何桥接章，维持拒绝，同样不触发裁决闸。"""
     from app import stages
 
     chapters_by_idx = stages._chapters_by_idx(BRIDGE_CHAPTERS)
     assert stages._find_alias_bridge_chapter(
         chapters_by_idx, {"许清"}, "压根不存在的称呼ZZZZ",
     ) is None
-    assert stages._alias_evidence_resolution(
-        chapters_by_idx, {"许清"}, "压根不存在的称呼ZZZZ", 1, "随便一句引文",
-    ) is None
+    resolved = asyncio.run(stages._alias_evidence_resolution(
+        chapters_by_idx, {"许清"}, "压根不存在的称呼ZZZZ", "许清", 1, "随便一句引文",
+        roster={"许清": ["许清"]},
+    ))
+    assert resolved["accepted"] is False
+    assert resolved["reason"] == "no_bridge_chapter"
 
 
 def test_bridge_chapter_picks_earliest_when_multiple_hits() -> None:
@@ -373,6 +415,10 @@ def test_backfill_registers_bridge_chapter_not_models_declared_chapter(monkeypat
         ]}, ensure_ascii=False)
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(
+        model_gateway, "chat_structured",
+        _fake_verdict_chat_structured("许清"),
+    )
     added = asyncio.run(stages.backfill_character_aliases(bible, BRIDGE_CHAPTERS))
 
     assert added == {"许清": ["许清师妹"]}
@@ -386,7 +432,10 @@ def test_backfill_registers_bridge_chapter_not_models_declared_chapter(monkeypat
 
 # ---------- 3. generate_bible 主链路后处理：_verify_character_aliases_in_place ----------
 
-def test_verify_in_place_drops_unverified_and_keeps_verified() -> None:
+def test_verify_in_place_drops_unverified_and_keeps_verified(monkeypatch) -> None:
+    from app import stages
+    from app.harness import model_gateway
+
     character = _character(aliases=[
         CharacterAlias(
             text="银色长袍女子", name_kind="referential",
@@ -400,8 +449,13 @@ def test_verify_in_place_drops_unverified_and_keeps_verified() -> None:
     snapshot = character.model_dump(exclude={"aliases"})
     bible = Bible(characters=[character], world=World(visual_style_canonical="国漫3D动画电影质感，精致光影"))
 
-    from app import stages
-    added = stages._verify_character_aliases_in_place(bible, CHAPTERS)
+    # "编造的别名"在任何章节都不出现，桥接检索直接拒绝，不会走到裁决闸；
+    # "银色长袍女子"直接通过声明核验，需要裁决闸放行才能最终登记。
+    monkeypatch.setattr(
+        model_gateway, "chat_structured",
+        _fake_verdict_chat_structured("许清"),
+    )
+    added = asyncio.run(stages._verify_character_aliases_in_place(bible, CHAPTERS))
 
     assert added == {"许清": ["银色长袍女子"]}
     kept = bible.characters[0].aliases
@@ -437,6 +491,10 @@ def test_backfill_registers_verified_alias_and_freezes_other_fields(monkeypatch)
         ]}, ensure_ascii=False)
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(
+        model_gateway, "chat_structured",
+        _fake_verdict_chat_structured("许清"),
+    )
     added = asyncio.run(stages.backfill_character_aliases(bible, CHAPTERS))
 
     assert added == {"许清": ["银色长袍女子"]}
@@ -512,3 +570,446 @@ def test_backfill_returns_empty_and_keeps_bible_on_model_failure(monkeypatch) ->
 
     assert added == {}
     assert bible.characters[0].model_dump() == snapshot
+
+
+# ---------- 5. 裁决闸：桥接章原文独立裁决（候选判别式） ----------
+#
+# 背景（真实误登记事故 1）：全书别名回填写库后核验发现"孟浩←虎爷爷"（第 3 章）被登记
+# 进 bible——第 3 章原文里"虎爷爷"明确是欺负孟浩的另一个"魁梧大汉"，根本不是孟浩
+# 本人。旧三闸（_alias_declaration_verified 的逐字命中 + 别名在引句里 + 章节内共现）
+# 只能证明"同章出现"，证明不了"指同一人"：孟浩作为主角在第 3 章出现 59 次，几乎
+# 和任何称谓都能满足共现条件。下面用真实引句复刻这个案例的形状，先证明"修前"（只用
+# 旧三闸）会通过，再验证新入口 `_alias_evidence_resolution` 补上裁决闸后必须拒绝。
+#
+# 背景（真实误登记事故 2）：人工抽查又发现"王腾飞←王师弟"（第 189 章）被裁决闸放行，
+# 而"王师弟"实际指的是同章另一个人（王有材）——王腾飞只是同章反复出现、恰好同姓的
+# 敌对角色。根因是裁决问法本身是一道是非题（"称谓 X 是不是人名 Y 本人"），模型看到
+# 卷宗里反复出现的名字就倾向点头，属于确认偏误，与具体是哪个姓氏无关。修复：裁决从
+# "确认单一假设"改造成"从候选集中判别"——候选集是该章结构性命中的全部人物谱角色
+# （`_alias_verdict_candidates`，零语义、不针对任何具体人名/姓氏特判）外加一个显式的
+# "都不是/无法确定"选项，只有模型选中的候选恰好是本次申报的 true_name 才登记。
+#
+# 两条真实事故合起来说明裁决闸不针对任何具体称谓做特判，只是让模型看着桥接章真实
+# 原文、在真实候选之间重新独立判别一次"称谓指代的到底是谁"。
+
+
+def test_alias_verdict_dossier_includes_segments_with_anchor_texts_only() -> None:
+    """真实回归：对生产项目跑复核时发现，桥接章里角色规范名（anchor_texts）经常单独
+    出现在跟别名（text）不相邻的段落——只搜别名会把这些段落漏掉，模型只能被迫回答
+    不确定（本该能判断的证据没有被喂给它）。卷宗检索必须同时搜别名和 anchor_texts，
+    两者共现的段落优先，只含其中一个的段落也要收录进卷宗。"""
+    from app import stages
+
+    chapter_text = (
+        "期间他没有看到闭关多月的许师姐，但却看到了那位穿着银袍的陈凡师兄。\n\n"
+        "不知道许师姐什么时候出关，孟浩心想。\n\n"
+        "小师弟不用害羞，许清师妹天生丽质，你偷偷喜欢也是正常，陈凡师兄微笑说道。\n\n"
+        "许清？咳咳，没有没有，孟浩赶紧开口，连忙转开话题。"
+    )
+    dossier = stages._alias_verdict_dossier(34, chapter_text, "许师姐", {"许清"})
+    catalog_texts = [item["text"] for item in dossier]
+    assert any("许师姐" in text for text in catalog_texts)
+    # 只含 anchor_texts（不含别名本身）的段落必须也被收录，否则模型看不到角色规范名
+    # 单独出现的位置，无法判断两者是否指同一人。
+    assert any("许清？" in text for text in catalog_texts)
+
+
+CHAPTER_3_LIKE = [
+    {"idx": 3, "title": "第三章", "content": (
+        "睡的挺早啊，都给你虎爷爷起来！随着那两扇房门的呼扇，从外面走进一个穿着"
+        "杂役衫的魁梧大汉，他凶狠的看了孟浩与还在睡觉的小胖子一眼。"
+    )},
+]
+
+
+def test_old_three_gate_alone_would_have_accepted_the_false_alias() -> None:
+    """"修前"：只用旧三闸（不含裁决闸）判断"孟浩←虎爷爷"，逐字命中 + 别名在引句里 +
+    章节内共现三个条件全部满足，会被判定通过——这正是已发生的真实误登记的根因，
+    证明裁决闸补的是真实漏洞，不是臆造的假想敌。"""
+    from app import stages
+
+    chapters_by_idx = stages._chapters_by_idx(CHAPTER_3_LIKE)
+    quote = "都给你虎爷爷起来"
+    assert stages._alias_declaration_verified(
+        chapters_by_idx, {"孟浩"}, "虎爷爷", 3, quote,
+    ) is True
+
+
+def test_bridging_verdict_rejects_false_alias_when_selected_candidate_differs(
+    monkeypatch,
+) -> None:
+    """"修后"：裁决闸看到桥接章真实原文后，从候选集（孟浩、大汉——"大汉"是该章原文
+    里"魁梧大汉"这个真正称谓对象的结构性候选占位）里选中的不是本次申报的孟浩，即便
+    旧三闸会放行，新入口也必须拒绝——这就是已确认错误的"孟浩←虎爷爷"必须被拒才算
+    闸门有效的那条红灯用例。"""
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters_by_idx = stages._chapters_by_idx(CHAPTER_3_LIKE)
+    quote = "都给你虎爷爷起来"
+    roster = {"孟浩": ["孟浩"], "大汉": ["大汉"]}
+
+    monkeypatch.setattr(
+        model_gateway, "chat_structured",
+        _fake_verdict_chat_structured("大汉"),
+    )
+    resolved = asyncio.run(stages._alias_evidence_resolution(
+        chapters_by_idx, {"孟浩"}, "虎爷爷", "孟浩", 3, quote,
+        roster=roster,
+    ))
+    assert resolved["accepted"] is False
+    assert resolved["reason"] == "candidate_mismatch"
+
+
+def test_bridging_verdict_rejects_false_alias_when_uncertain(monkeypatch) -> None:
+    """裁决结论"都不是/无法确定"（原文不足以确定，即使候选集里只有孟浩一个真实人物谱
+    角色）同样必须拒绝——不确定不登记的安全默认，不是只拒绝"确定选了别人"这一种
+    情况。"""
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters_by_idx = stages._chapters_by_idx(CHAPTER_3_LIKE)
+    quote = "都给你虎爷爷起来"
+    roster = {"孟浩": ["孟浩"]}
+
+    monkeypatch.setattr(
+        model_gateway, "chat_structured",
+        _fake_verdict_chat_structured(stages._ALIAS_VERDICT_NO_MATCH_LABEL),
+    )
+    resolved = asyncio.run(stages._alias_evidence_resolution(
+        chapters_by_idx, {"孟浩"}, "虎爷爷", "孟浩", 3, quote,
+        roster=roster,
+    ))
+    assert resolved["accepted"] is False
+    assert resolved["reason"] == "candidate_uncertain"
+
+
+# 真实误登记事故 2 的原样复刻（第 189 章，人工抽查发现，见本节顶部大注释）：
+# "王师弟"这句台词是李诗琪替另一个血妖宗弟子王有材求情（王有材当章已经站到孟浩
+# 一边）；王腾飞是同章与孟浩敌对、正瞪着孟浩的另一个人，二者只是同姓，"王腾飞"在该
+# 章反复出现、"王师弟"只出现一次且紧挨着王腾飞的戏份——这正是诱发"是非题式"裁决
+# 确认偏误的真实条件。
+WANG_TENGFEI_CHAPTER = [
+    {"idx": 189, "title": "第一百八十九章", "content": (
+        "血妖宗那里，王有材默默的站起身，一语不发，但却站在了孟浩的身后。\n\n"
+        "王腾飞身子向前迈出一步，一脸杀气，眼中杀机毕露，更是双眼露出寒芒，"
+        "死死的盯着孟浩。\n\n"
+        "“虽然你那顶帽子很让人厌烦，但看在王师弟的份上，我血妖宗也算一个，"
+        "倒要看看今日，谁敢动你。”李诗琪冷声开口。"
+    )},
+]
+
+
+def test_bridging_verdict_rejects_when_selected_candidate_is_a_different_registered_character(
+    monkeypatch,
+) -> None:
+    """真实误登记事故 2 复刻：申报"王腾飞←王师弟"实际是错的——候选判别式裁决必须把
+    该章出场的其它人物谱角色（王有材、李诗琪）也摆上候选台面，一旦模型选中候选集里
+    的其他人（这里选王有材，不是本次申报的王腾飞），必须拒绝，
+    reason=candidate_mismatch。代码本身不对"王腾飞""王师弟"等具体姓氏/称谓做任何
+    特判——候选集完全靠结构性扫描 roster（人物谱规范名/已登记别名的逐字子串命中）
+    算出，换成任何其它同章出场、同姓或不同姓的角色组合都是同一套判断路径。"""
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters_by_idx = stages._chapters_by_idx(WANG_TENGFEI_CHAPTER)
+    quote = "但看在王师弟的份上"
+    roster = {
+        "孟浩": ["孟浩"], "王有材": ["王有材"],
+        "李诗琪": ["李诗琪"], "王腾飞": ["王腾飞"],
+    }
+
+    monkeypatch.setattr(
+        model_gateway, "chat_structured",
+        _fake_verdict_chat_structured("王有材"),
+    )
+    resolved = asyncio.run(stages._alias_evidence_resolution(
+        chapters_by_idx, {"王腾飞"}, "王师弟", "王腾飞", 189, quote,
+        roster=roster,
+    ))
+    assert resolved["accepted"] is False
+    assert resolved["reason"] == "candidate_mismatch"
+
+
+XUQING_XUSHIJIE_CHAPTERS = [
+    {"idx": 1, "title": "第一章", "content": "许清缓步走入大殿，无人知晓她的来历。"},
+    {"idx": 34, "title": "第三十四章", "content": (
+        "许师姐缓步走来，众人纷纷起身行礼，原来她正是许清。"
+    )},
+]
+
+
+def test_bridging_verdict_accepts_true_alias_with_real_shape_positive_case(
+    monkeypatch,
+) -> None:
+    """正例：许清←许师姐（第 34 章）——桥接章真实存在"许师姐"与"许清"同段出现，
+    裁决闸看到原文后独立选中候选"许清"（即本次申报的 true_name），最终应当登记成功，
+    证明裁决闸不会连正确的别名也一并拒绝。"""
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters_by_idx = stages._chapters_by_idx(XUQING_XUSHIJIE_CHAPTERS)
+    roster = {"许清": ["许清"]}
+
+    monkeypatch.setattr(
+        model_gateway, "chat_structured",
+        _fake_verdict_chat_structured("许清"),
+    )
+    resolved = asyncio.run(stages._alias_evidence_resolution(
+        chapters_by_idx, {"许清"}, "许师姐", "许清", 34,
+        "许师姐缓步走来，众人纷纷起身行礼，原来她正是许清",
+        roster=roster,
+    ))
+    assert resolved["accepted"] is True
+    assert resolved["chapter_idx"] == 34
+    assert resolved["quote"] in chapters_by_idx[34]
+
+
+def test_bridging_verdict_rejects_when_selected_segment_index_out_of_dossier(
+    monkeypatch,
+) -> None:
+    """红灯：候选选对了（same/许清），但模型给出的 supporting_segment_index 不在
+    本次卷宗实际收录的段号集合内（这里卷宗只有 segment_index=1 一条，模型却给了
+    99）——钉证是结构性判断，段号越界必须拒绝，不能因为候选选对了就放行。这也是
+    schema 层 enum 之外，代码侧必须再做一次结构校验的原因：provider 对 enum 的遵守
+    不是可证明保证（见 `_alias_verdict_call` 里对 output_schema 的注释）。"""
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters_by_idx = stages._chapters_by_idx(XUQING_XUSHIJIE_CHAPTERS)
+    roster = {"许清": ["许清"]}
+
+    monkeypatch.setattr(
+        model_gateway, "chat_structured",
+        _fake_verdict_chat_structured("许清", supporting_segment_index=99),
+    )
+    resolved = asyncio.run(stages._alias_evidence_resolution(
+        chapters_by_idx, {"许清"}, "许师姐", "许清", 34,
+        "许师姐缓步走来，众人纷纷起身行礼，原来她正是许清",
+        roster=roster,
+    ))
+    assert resolved["accepted"] is False
+    assert resolved["reason"] == "segment_not_pinned"
+
+
+def test_bridging_verdict_accepts_regardless_of_supporting_quote_transcription_noise(
+    monkeypatch,
+) -> None:
+    """绿灯：真实回归——钉证曾经要求 supporting_quote 逐字命中卷宗，"李富贵←小胖子"
+    （原文"小胖子、王有材、还有那虎头虎脑的少年，当初我们四人被一起带上靠山宗"）与
+    "上官修←上官师叔"两条本该通过的正确别名，分别因模型转录跨段拼接/加省略号/微调
+    标点被误杀，或同一输入两次给出不同结果。钉证已改为选段号（结构性核验，见
+    `_alias_verdict_pin_segment`），supporting_quote 退化为纯观测字段——模型给出任何
+    转录噪音甚至编造的引句都不应该影响登记结果，只要 selected_candidate 与
+    supporting_segment_index 合法。"""
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters_by_idx = stages._chapters_by_idx(XUQING_XUSHIJIE_CHAPTERS)
+    roster = {"许清": ["许清"]}
+    noisy_quote = "……编造的、卷宗原文里根本没有的一句转录噪音……"
+
+    monkeypatch.setattr(
+        model_gateway, "chat_structured",
+        _fake_verdict_chat_structured("许清", supporting_quote=noisy_quote),
+    )
+    resolved = asyncio.run(stages._alias_evidence_resolution(
+        chapters_by_idx, {"许清"}, "许师姐", "许清", 34,
+        "许师姐缓步走来，众人纷纷起身行礼，原来她正是许清",
+        roster=roster,
+    ))
+    assert resolved["accepted"] is True
+    assert resolved["reason"] == ""
+
+
+def test_bridging_verdict_rejects_when_candidate_roster_is_empty(monkeypatch) -> None:
+    """防御性分支：候选集为空（正常不应触发，见 `_alias_evidence_resolution` docstring
+    ——true_name 或其已登记别名命中该章是走到这一步的前提，必然会被
+    `_alias_verdict_candidates` 收进候选集）也必须拒绝，不能因为拿不到候选列表就跳过
+    判别直接放行。不 mock chat_structured 也能通过，证明这一分支在发起裁决调用之前
+    就已经拒绝。"""
+    from app import stages
+
+    chapters_by_idx = stages._chapters_by_idx(XUQING_XUSHIJIE_CHAPTERS)
+    resolved = asyncio.run(stages._alias_evidence_resolution(
+        chapters_by_idx, {"许清"}, "许师姐", "许清", 34,
+        "许师姐缓步走来，众人纷纷起身行礼，原来她正是许清",
+        roster={},
+    ))
+    assert resolved["accepted"] is False
+    assert resolved["reason"] == "no_verdict_candidates"
+
+
+def test_pin_segment_returns_matching_dossier_record_when_index_is_valid() -> None:
+    """钉证结构性核验：段号命中卷宗集合内某条记录即通过，返回该条记录（自带
+    chapter_idx，供调用方记账）。"""
+    from app import stages
+
+    dossier = [
+        {"chapter_idx": 5, "segment_index": 2, "text": "无关段落。"},
+        {"chapter_idx": 5, "segment_index": 3, "text": "老夫上官修，今日放丹。"},
+    ]
+    pinned = stages._alias_verdict_pin_segment(dossier, 3)
+    assert pinned is not None
+    assert pinned["segment_index"] == 3
+    assert pinned["text"] == "老夫上官修，今日放丹。"
+
+
+def test_pin_segment_rejects_index_outside_dossier() -> None:
+    """段号不在卷宗集合内——模型选错/瞎编——必须拒绝，不确定不登记的安全默认。"""
+    from app import stages
+
+    dossier = [{"chapter_idx": 5, "segment_index": 2, "text": "无关段落。"}]
+    assert stages._alias_verdict_pin_segment(dossier, 99) is None
+
+
+def test_pin_segment_rejects_non_integer_index() -> None:
+    """代码侧对非法类型的防御：不信任 provider 一定严格遵守 schema 声明的 int 类型
+    （enum/type 约束不是可证明保证，见 `_alias_verdict_call` 对 output_schema 的
+    注释），非整数输入一律视为无效裁决而非报错崩溃。"""
+    from app import stages
+
+    dossier = [{"chapter_idx": 5, "segment_index": 2, "text": "无关段落。"}]
+    assert stages._alias_verdict_pin_segment(dossier, "not-a-number") is None
+    assert stages._alias_verdict_pin_segment(dossier, None) is None
+
+
+def test_bridging_verdict_rejects_when_verdict_call_raises(monkeypatch) -> None:
+    """裁决调用本身失败（网络/鉴权/供应商故障）按不确定处理——不能因为拿不到裁决
+    结果就放行，同样是不确定不登记。"""
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters_by_idx = stages._chapters_by_idx(XUQING_XUSHIJIE_CHAPTERS)
+
+    async def failing_chat_structured(_messages, **_kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(model_gateway, "chat_structured", failing_chat_structured)
+    resolved = asyncio.run(stages._alias_evidence_resolution(
+        chapters_by_idx, {"许清"}, "许师姐", "许清", 34,
+        "许师姐缓步走来，众人纷纷起身行礼，原来她正是许清",
+        roster={"许清": ["许清"]},
+    ))
+    assert resolved["accepted"] is False
+    assert resolved["reason"] == "verdict_call_failed"
+
+
+# ---------- 5b. 候选集与候选面快照：_alias_verdict_candidates / _alias_verdict_roster ----------
+
+def test_alias_verdict_candidates_collects_all_roster_names_present_in_chapter() -> None:
+    """结构判据：候选集就是该章原文里逐字命中的全部 roster 规范名，与命中次数、出现
+    顺序无关，只看是否出现过；未出现的角色不进候选集。"""
+    from app import stages
+
+    chapter_text = "孟浩与王有材、李诗琪三人一同前往，路上偶遇王腾飞。"
+    roster = {
+        "孟浩": ["孟浩"], "王有材": ["王有材"], "李诗琪": ["李诗琪"],
+        "王腾飞": ["王腾飞"], "许清": ["许清"],
+    }
+    candidates = stages._alias_verdict_candidates(chapter_text, roster)
+    assert candidates == ["孟浩", "王有材", "李诗琪", "王腾飞"]  # 许清没出现，不进候选集
+
+
+def test_alias_verdict_candidates_matches_via_confirmed_alias_not_only_canonical_name() -> None:
+    """候选命中不局限于角色规范名本身，已登记别名命中也算这个角色在场——与
+    `_alias_verdict_dossier` 的 anchor_texts 检索范围保持同一原则（候选集不能比
+    共现闸更窄）。"""
+    from app import stages
+
+    chapter_text = "胖爷冷笑一声，转身离去。"
+    roster = {"李富贵": ["李富贵", "小胖子", "胖爷"]}
+    assert stages._alias_verdict_candidates(chapter_text, roster) == ["李富贵"]
+
+
+def test_alias_verdict_roster_snapshots_names_and_confirmed_aliases() -> None:
+    """`_alias_verdict_roster` 把 bible.characters 的规范名与已登记别名投影成
+    候选面快照，键是规范名，值以规范名本身打头。"""
+    from app import stages
+
+    character = Character(
+        name="李富贵", role="配角", appearance_canonical=APPEARANCE,
+        personality="", speech_style="",
+        aliases=[CharacterAlias(
+            text="小胖子", name_kind="referential",
+            evidence_chapter_index=1, evidence_quote="小胖子",
+        )],
+    )
+    bible = Bible(characters=[character], world=World(visual_style_canonical="国漫3D动画电影质感，精致光影"))
+    roster = stages._alias_verdict_roster(bible)
+    assert roster == {"李富贵": ["李富贵", "小胖子"]}
+
+
+# ---------- 6. reverify_character_aliases：历史别名批次复核 ----------
+
+def test_reverify_removes_alias_rejected_by_verdict_gate(monkeypatch) -> None:
+    """复现"补闸前已落库"的真实场景：孟浩的 aliases 里混进了一条已通过旧三闸、
+    但过不了新裁决闸的"虎爷爷"——reverify 必须把它从 bible 中移除并原地写回。这个
+    bible 里只登记了"孟浩"一个角色，候选集里只有他自己，模型选"都不是/无法确定"
+    即可复现"确实不是这个人"的拒绝结论（reason=candidate_uncertain）。"""
+    from app import stages
+    from app.harness import model_gateway
+
+    character = Character(
+        name="孟浩", role="主角",
+        appearance_canonical=APPEARANCE,
+        personality="坚韧",
+        speech_style="直接",
+        aliases=[CharacterAlias(
+            text="虎爷爷", name_kind="personal_name",
+            evidence_chapter_index=3, evidence_quote="都给你虎爷爷起来",
+        )],
+    )
+    bible = Bible(characters=[character], world=World(visual_style_canonical="国漫3D动画电影质感，精致光影"))
+
+    monkeypatch.setattr(
+        model_gateway, "chat_structured",
+        _fake_verdict_chat_structured(stages._ALIAS_VERDICT_NO_MATCH_LABEL),
+    )
+    report = asyncio.run(
+        stages.reverify_character_aliases(bible, CHAPTER_3_LIKE)
+    )
+
+    assert report == {
+        "孟浩": [{"text": "虎爷爷", "kept": False, "reason": "candidate_uncertain"}],
+    }
+    assert bible.characters[0].aliases == []
+
+
+def test_reverify_keeps_alias_that_passes_verdict_gate(monkeypatch) -> None:
+    """正确登记的别名重新过闸应当保留（幂等），reason 为空字符串。"""
+    from app import stages
+    from app.harness import model_gateway
+
+    character = _character(aliases=[CharacterAlias(
+        text="许师姐", name_kind="honorific",
+        evidence_chapter_index=34,
+        evidence_quote="许师姐缓步走来，众人纷纷起身行礼，原来她正是许清",
+    )])
+    bible = Bible(characters=[character], world=World(visual_style_canonical="国漫3D动画电影质感，精致光影"))
+
+    monkeypatch.setattr(
+        model_gateway, "chat_structured",
+        _fake_verdict_chat_structured("许清"),
+    )
+    report = asyncio.run(
+        stages.reverify_character_aliases(bible, XUQING_XUSHIJIE_CHAPTERS)
+    )
+
+    assert report == {
+        "许清": [{"text": "许师姐", "kept": True, "reason": ""}],
+    }
+    assert [a.text for a in bible.characters[0].aliases] == ["许师姐"]
+
+
+def test_reverify_skips_characters_without_any_alias() -> None:
+    """没有别名的角色不出现在复核报告里，也不会触发任何模型调用（不 mock
+    chat_structured 也能通过，证明没有发起裁决）。"""
+    from app import stages
+
+    character = _character()
+    bible = Bible(characters=[character], world=World(visual_style_canonical="国漫3D动画电影质感，精致光影"))
+
+    report = asyncio.run(stages.reverify_character_aliases(bible, CHAPTERS))
+
+    assert report == {}

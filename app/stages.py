@@ -16,7 +16,7 @@ import re
 import time
 from typing import Any, Callable, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app import config, hiagent, textmatch
 from app.character_policy import (
@@ -3557,33 +3557,402 @@ def _find_alias_bridge_chapter(
     return None
 
 
-def _alias_evidence_resolution(
+# ---------- A1b. 裁决闸：桥接章原文独立裁决（补上"同章共现"证明不了"指同一人"的漏洞） ----------
+#
+# 真实误登记事故：全书别名回填写库后核验发现「孟浩←虎爷爷」（第 3 章）——第 3 章原文
+# 里「虎爷爷」明确是欺负孟浩的另一个魁梧大汉，根本不是孟浩本人。根因：`_alias_
+# declaration_verified`/`_find_alias_bridge_chapter`（条件 3）只证明"别名文本与角色
+# 规范名在同一章出现"，证明不了"这个别名指的就是这个角色"——指代关系是模型在没看到
+# 桥接章原文的情况下凭全书记忆断言的（它把这个称谓和另一段记忆搞混了）。且主角类角色
+# 几乎每章都出场，共现闸对这类角色的过滤力接近零：随便一个同章出现的称谓，不管是不是
+# 主角本人，都能通过共现闸。
+#
+# 修复：回到项目既有的裁决庭范式（`app/production/prep_pack.py` 的
+# `_prep_pack_true_name_dossier` / `_prep_pack_true_name_verdict` /
+# `_prep_pack_pin_dossier_quote`：代码检索卷宗 → 独立模型裁决 → 代码钉证），在代码
+# 定位到桥接章（或模型自己申报的章节已经通过共现闸）之后，带着该章的真实原文段落
+# 再做一次独立裁决调用，问模型"依据这些原文，称谓 X 是否指代角色 Y 本人"，三态回答
+# same/different/uncertain，uncertain 与 different 一律拒绝登记（不确定不登记，安全
+# 默认）。
+#
+# 钉证方式：引用卷宗段号，不要求模型逐字复述原文。最初的实现要求模型的
+# supporting_quote 逐字（经引号规范化后）命中卷宗某条，线上复核暴露这个钉证方式本身
+# 不可靠——"李富贵←小胖子"（第 10 章）与"上官修←上官师叔"两条本该通过的正确别名，
+# 分别被 quote_not_pinned 误杀、以及同一输入两次复核给出不同结果，根因是模型转录
+# 原文时会跨段拼接、加省略号、微调标点，这些噪音跟"证据是否成立"无关，却被当成了
+# 拒绝理由。改为让模型在 verdict 之外只需引用卷宗目录里某一条的段号
+# （supporting_segment_index），JSON Schema 用 enum 把候选值限定为本次卷宗实际收录的
+# 段号集合（参照 `app/portraits.py` `_current_identity_schema()` 给 `evidence_ref`
+# 注入 enum 的写法），钉证退化为一次整数是否落在集合内的结构性判断——模型选中的段落
+# 本身就是代码检索出的真实原文，无从编造，也不存在转录误差。supporting_quote 保留为
+# 可选的观测字段（写进裁决通过日志，便于人工复核），不再是钉证硬闸的一部分。
+#
+# 卷宗构造是确定性的：只从已经定位到的那一章取证据（不是整章、也不是全书），取该章
+# 里包含别名文本 `text` 和/或角色规范名 `true_name` 的自然段（与
+# `_prep_pack_true_name_dossier` 同一检索原则，缩小到已定位的单章）——两者共现的
+# 段落、以及只含 `text` 的段落必须收录；只含 `true_name` 的段落按"离最近的别名相关
+# 段落有多近"补足剩余预算（不是按章节开头起的文档顺序），因为桥接章里真正点明
+# `true_name` 身份的那段，很多时候并不挨着 `text` 出现，而 `true_name` 若是主角，
+# 几乎每段都会出现——按文档顺序截断会被开头大段无关独白占满预算，把真正有用的
+# `true_name` 段落挤出去（真实回归：project proj_3ac0b627fa46 第 1 章"孟兄"只出现
+# 一次，"孟浩"贯穿全章出现三十余次，见 `_alias_verdict_dossier` 的完整说明）。条数
+# 与总字数超过上限时按"两者共现段落 / 只含别名段落全部优先、只含真名段落按接近别名
+# 段落的程度补足预算"的确定性规则截断——不用随机采样，同一输入任何时候重跑都得到
+# 同一份卷宗。
+
+_ALIAS_VERDICT_DOSSIER_MAX_ENTRIES = 12  # 单条别名裁决卷宗最多收录的段落数
+_ALIAS_VERDICT_DOSSIER_MAX_CHARS = 6000  # 单条别名裁决卷宗最多收录的总字符数
+
+
+def _alias_verdict_dossier(
+    chapter_idx: int, chapter_text: str, text: str, anchor_texts: set[str],
+) -> list[dict[str, Any]]:
+    """裁决卷宗检索：零语义，纯字符串包含判断，只从已定位到的这一章本身取证，不整章
+    塞给模型。把该章按自然段切分（`index_source_segments`）后分三类：
+    - both：同段同时含别名 `text` 与 `anchor_texts`（角色规范名、或本角色已确认的
+      其它别名）中至少一项——最直接的证据；
+    - text_only：只含 `text`——必须收录，模型至少要看到别名本身被怎么用的；
+    - anchor_only：只含 `anchor_texts` 中至少一项、不含 `text`——用来在别名段落之外
+      补充"这些已确认的称谓在这一章还出现在哪"，帮模型判断两者是否指同一人。
+
+    为什么要搜整个 `anchor_texts` 而不是只搜角色规范名：真实回归——李富贵的别名
+    "胖爷"在桥接章里的连接证据是"（胖爷）……此刻小胖子正蹲在那里"，这段原文压根
+    没提"李富贵"三个字，"小胖子"（李富贵已确认的另一条别名）才是真正的桥梁。只搜
+    角色规范名会把这段关键证据漏掉，模型看不到任何连接就只能回答 uncertain——与
+    `_alias_declaration_verified` 条件 3 的共现闸本就允许"该章节找到角色规范名或
+    已确认的其它别名"任一项是同一个道理，裁决闸的证据检索范围不能比共现闸更窄。
+
+    真实回归暴露的另一个坑：`anchor_texts` 里若含主角规范名，几乎每段都会出现，
+    如果只按"从章节开头数第几段"这种文档顺序截断，预算会被开头大段无关的独白占满，
+    反而把本该收录的 `text` 段落、以及紧挨着 `text` 段落的关键 anchor_only 段落
+    挤出预算之外（project proj_3ac0b627fa46 第 1 章："孟兄"只出现一次，"孟浩"出现
+    三十余次贯穿全章——若不做优先级区分，裁决闸看到的会是章节开头孟浩独自坐在山顶
+    的大段背景描写，反而看不到"孟兄"那句台词紧邻的对话）。
+
+    因此排序规则是确定性的三层优先级：both 全部收录 → text_only 全部收录（这两类
+    条数通常很少，一般不会触顶）→ anchor_only 按"离最近的 both/text_only 段落有多
+    远"升序补足剩余预算，越靠近别名实际出现的位置越优先，距离相同按文档顺序（下标
+    升序）确定性打破平局——这样即使预算有限，模型看到的也是"别名出现处附近这些
+    已确认称谓怎么被提及"，而不是章节任意位置的无关段落。条数与总字数超过上限后
+    按上述顺序截断，不用随机采样，同一输入任何时候重跑都得到同一份卷宗。调用方
+    已确认 `text` 在 `chapter_text` 里，理论上 both/text_only 至少有一条命中；真的
+    一条都没有（分段边界极端情况）就返回空列表，交由调用方兜底拒绝。"""
+    segments = index_source_segments(chapter_text)
+    both_indexes: list[int] = []
+    text_only_indexes: list[int] = []
+    anchor_only_indexes: list[int] = []
+    for index, seg in enumerate(segments):
+        has_text = text in seg.text
+        has_anchor = any(
+            anchor and anchor in seg.text for anchor in anchor_texts
+        )
+        if has_text and has_anchor:
+            both_indexes.append(index)
+        elif has_text:
+            text_only_indexes.append(index)
+        elif has_anchor:
+            anchor_only_indexes.append(index)
+    if not both_indexes and not text_only_indexes:
+        return []
+    priority_indexes = both_indexes + text_only_indexes
+    anchor_only_by_proximity = sorted(
+        anchor_only_indexes,
+        key=lambda index: (min(abs(index - anchor) for anchor in priority_indexes), index),
+    )
+    ordered_candidates = priority_indexes + anchor_only_by_proximity
+    selected: list[int] = []
+    used_chars = 0
+    for index in ordered_candidates:
+        if len(selected) >= _ALIAS_VERDICT_DOSSIER_MAX_ENTRIES:
+            break
+        seg_text = segments[index].text
+        if selected and used_chars + len(seg_text) > _ALIAS_VERDICT_DOSSIER_MAX_CHARS:
+            continue
+        selected.append(index)
+        used_chars += len(seg_text)
+    selected.sort()
+    return [
+        {
+            "chapter_idx": chapter_idx, "segment_index": index + 1,
+            "text": segments[index].text,
+        }
+        for index in selected
+    ]
+
+
+# 真实误登记事故 2：「王腾飞←王师弟」（第 189 章）——同一人工抽查发现的另一条误登记，
+# 裁决闸两次都放行。原文里"看在王师弟的份上"这句话是血妖宗的李诗琪替另一个血妖宗
+# 弟子王有材求情（王有材当章已经站到了孟浩一边），"王师弟"指王有材；王腾飞是同章
+# 与孟浩敌对、正瞪着孟浩的另一个人，二者只是同姓。该章"王腾飞"出现 6 次、"王师弟"
+# 只出现 1 次且恰好挨着王腾飞的戏份，卷宗按"离别名最近"的规则把王腾飞相关段落选进
+# 去；根因不在卷宗检索，而在提问方式——"称谓 X 是否指代人名 Y 本人"是一道是非题，
+# 模型看到卷宗里反复出现的是王腾飞，天然倾向对"是不是王腾飞"点头，这是确认偏误，
+# 跟王腾飞与王有材同姓与否无关（换成任何两个同章出场、其中一个反复出现的角色都会
+# 触发同样的偏误）。
+#
+# 修复：把裁决从"确认单一假设"改造成"从候选集中判别"。`selected_candidate` 取值
+# 收紧为该章节里结构性命中的全部人物谱角色（角色规范名或其已确认别名的逐字子串命中，
+# 见 `_alias_verdict_candidates`，零语义、不针对任何具体人名/姓氏特判）外加一个
+# 显式的"都不是/无法确定"选项，schema 用 enum 同时限定候选集（与段号 enum 同一套
+# 写法）。只有选中的候选恰好是本次申报的 `true_name` 才登记；选了候选集里的其他人、
+# 选了"都不是/无法确定"、或候选集本身为空（不应该发生，防御性分支），一律拒绝。
+# 这样"王师弟"这条会强迫模型在孟浩、王有材、李诗琪、王腾飞之间明确选一个并说出
+# 理由，而不是回答一道"是不是"的确认题。
+
+
+_ALIAS_VERDICT_NO_MATCH_LABEL = "都不是/无法确定"
+
+
+def _alias_verdict_candidates(chapter_text: str, roster: dict[str, list[str]]) -> list[str]:
+    """该章出现的全部人物谱候选人：结构判据，角色规范名或其任一已登记别名在章节原文
+    里逐字子串命中即算该角色在这一章"出场"，零语义、不针对任何具体人名/姓氏做特判
+    （见本节"真实误登记事故 2"）。`roster` 是调用方在本轮核验开始前对 `bible.characters`
+    取的一次性快照（规范名 -> [规范名, 已登记别名...]），同一批核验内所有裁决调用
+    共用同一份快照，不随本轮核验进度中途变化——避免同一批别名因处理顺序不同算出
+    不同候选集，保证结构判据可复现。返回值按 `roster` 的登记顺序（即人物谱原始顺序）
+    去重后的规范名列表；一个角色只要任一称谓命中就只计入一次，不按命中次数排序。"""
+    return [
+        name for name, surface_forms in roster.items()
+        if any(form and form in chapter_text for form in surface_forms)
+    ]
+
+
+class _AliasVerdictResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # 候选判别（见本节"真实误登记事故 2"）：不再回答"是不是 true_name"的是非题，
+    # 而是在候选集（该章出场的全部人物谱角色 + "都不是/无法确定"）里选一个。
+    # schema 层面用 enum 收紧到 `_alias_verdict_call` 构造的候选集（与段号 enum
+    # 同一写法），代码层面只有选中值恰好等于 true_name 才登记。
+    selected_candidate: str
+    # 钉证判据（见本节顶部大注释）：模型只需引用卷宗目录里某一条的段号，不再要求
+    # 逐字复述原文。schema 层面用 enum 把候选值限定为本次卷宗实际收录的段号集合
+    # （见 `_alias_verdict_call` 里对 `output_schema` 的 enum 注入），代码层面
+    # `_alias_verdict_pin_segment` 再做一次结构性核验——两层防线都不依赖模型转录
+    # 原文是否精确。
+    supporting_segment_index: int
+    # 可选的观测字段：模型仍可以给出一句引文供人工复核参考，但不再逐字比对、也不
+    # 作为通过与否的判据（真实回归：this 字段之前叫钉证硬闸，"李富贵←小胖子"
+    # "上官修←上官师叔"两条正确别名分别被误杀 / 同一输入两次结果不一致，根因是
+    # 逐字复述本身脆弱，见本节顶部大注释）。
+    supporting_quote: str = ""
+
+
+async def _alias_verdict_call(
+    *, alias: str, true_name: str, dossier: list[dict[str, Any]],
+    candidates: list[str], project_id: str | None,
+) -> _AliasVerdictResponse:
+    """裁决：唯一一次独立模型调用，只给卷宗原文与候选人名单，不点名"你猜是不是
+    true_name"——把"这称谓到底指代候选里的哪一位"这个判别完全交给模型自己独立
+    做出，答案落在候选集之外（含"都不是/无法确定"）一律视为没有确认申报的假设，
+    与 `_prep_pack_true_name_verdict` 同一范式（先给独立卷宗，再让模型做判断，
+    不预设结论）。`candidates` 由调用方 `_alias_verdict_candidates` 结构性算出，
+    保证包含 `true_name` 本人（该章一定命中，见 `_alias_evidence_resolution` 对
+    候选集为空的防御性拒绝分支的说明）。"""
+    catalog = "\n\n".join(
+        f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
+        for item in dossier
+    )
+    segment_indexes = [item["segment_index"] for item in dossier]
+    candidate_options = [*candidates, _ALIAS_VERDICT_NO_MATCH_LABEL]
+    candidate_list = "、".join(candidates)
+    prompt = f"""下面是原著第 {dossier[0]['chapter_idx']} 章中包含称谓"{alias}"的原文段落
+（含前后语境，出现顺序不代表任何推断结论），每段前面标了段号：
+{catalog}
+
+该章出场的人物谱角色候选（判别范围仅限这些人，不要引入候选之外的人）：
+{candidate_list}
+
+任务：仅依据以上原文段落本身，判断称谓"{alias}"最可能指代上面候选中的哪一位本人。
+- selected_candidate 必须从候选列表中选一个精确姓名，或者在证据不足以确定具体是谁时
+  选"{_ALIAS_VERDICT_NO_MATCH_LABEL}"；不要因为某个候选在段落里出现次数多就倾向选他，
+  只依据原文是否真的能确定"{alias}"说的就是他本人；
+- supporting_segment_index 必须填上面某一段落标注的段号（取值只能是 {segment_indexes}
+  之一），选你得出这个结论最主要依据的那一段，不要凭空填一个没在目录里出现的段号；
+- supporting_quote 可选，若填写请给该段里的一句原文摘录供人工复核参考，不要求逐字
+  精确，留空也可以。
+只输出符合 Schema 的 JSON。"""
+    operation_id = "character_alias_backfill_verdict:" + hashlib.sha256(
+        json.dumps(
+            {
+                "alias": alias, "true_name": true_name, "candidates": candidates,
+                "dossier": [
+                    (item["chapter_idx"], item["segment_index"]) for item in dossier
+                ],
+            },
+            ensure_ascii=False, sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    schema = _AliasVerdictResponse.model_json_schema()
+    # 参照 app/portraits.py `_current_identity_schema()` 给 evidence_ref 注入 enum
+    # 的写法：把候选段号、候选人名单都收紧到本次实际可用的集合，模型在协议层面就
+    # 选不出卷宗外的段号或候选集之外的人；真正生效的核验仍在
+    # `_alias_verdict_pin_segment` 与 `_alias_evidence_resolution` 里做代码侧结构
+    # 校验（provider 对 enum 的遵守不是可证明保证，见这两处调用点的说明）。
+    schema["properties"]["supporting_segment_index"]["enum"] = segment_indexes
+    schema["properties"]["selected_candidate"]["enum"] = candidate_options
+    return await model_gateway.chat_structured(
+        [{"role": "user", "content": prompt}],
+        model_type=_AliasVerdictResponse,
+        validate=None,
+        operation_id=operation_id,
+        max_tokens=500,
+        # 低温：这道闸的语义判断要稳定——同一份卷宗重跑不该一次选中一次不确定。
+        # 真实回归：0.2 时同一批别名重跑三次，多条会在 same/uncertain 之间摇摆；
+        # 降到 0 后结论稳定下来（钉证已改为选段号/选候选人，不再依赖模型逐字复述
+        # 原文，温度对钉证成功率不再有直接影响，但仍保留低温以稳定判别结论本身）。
+        temperature=0.0,
+        format_retry_limit=1,
+        semantic_retry_limit=1,
+        output_schema=schema,
+        call_meta={
+            "stage": "别名回填桥接章裁决",
+            "stage_key": "character_alias_backfill_verdict",
+            "call_role": "stage_generate",
+            "call_role_label": "别名桥接章裁决",
+            "expected_json": True,
+            "project_id": project_id,
+            "alias": alias,
+            "true_name": true_name,
+            "candidates": candidates,
+        },
+    )
+
+
+def _alias_verdict_pin_segment(
+    dossier: list[dict[str, Any]], segment_index: Any,
+) -> dict[str, Any] | None:
+    """钉证：结构性校验，不再要求模型逐字复述原文（原 `_alias_verdict_pin_quote` 的
+    做法，见本节顶部大注释）。模型只需要在响应里选一个段号，这里核对该段号是否落在
+    本次卷宗实际收录的段号集合内——命中即视为钉证通过，因为卷宗内容本身就是代码
+    检索出的真实原文，模型选中某一条不存在"编造"或"转录出错"的空间，只可能选中
+    （合法）或选错/瞎编（非法）。非法输入（不是整数、或不在集合内）一律返回 None，
+    交由调用方按无效裁决拒绝——不确定不登记的安全默认在这里同样成立：宁可拒绝一个
+    只是格式不对的合法裁决，也不放宽到"看起来像是"就算数。命中返回该条卷宗记录
+    （自带 chapter_idx，供调用方记账）。"""
+    try:
+        target = int(segment_index)
+    except (TypeError, ValueError):
+        return None
+    for item in dossier:
+        if item["segment_index"] == target:
+            return item
+    return None
+
+
+def _alias_verdict_roster(bible: Bible) -> dict[str, list[str]]:
+    """裁决候选面快照：规范名 -> [规范名, 已登记别名...]，取 `bible.characters` 当前
+    状态的一次性快照。调用方（`_verify_character_aliases_in_place` /
+    `backfill_character_aliases` / `reverify_character_aliases`）各自在本轮核验开始前
+    构造一次，循环内对同一个 bible 的所有裁决调用共用同一份，不随本轮核验进度中途
+    变化——结构判据要求同一输入任何时候重跑结果一致，如果候选面随每条别名的核验
+    结果实时增减，同一批别名先后处理顺序不同会算出不同的候选集，不可复现。"""
+    return {c.name: [c.name, *(a.text for a in c.aliases)] for c in bible.characters}
+
+
+async def _alias_evidence_resolution(
     chapters_by_idx: dict[int, str],
     anchor_texts: set[str],
     text: str,
+    true_name: str,
     evidence_chapter_index: int,
     evidence_quote: str,
-) -> tuple[int, str] | None:
-    """别名证据判定的统一入口，供两处调用方（`_verify_character_aliases_in_place` /
-    `backfill_character_aliases`）共用：模型申报的章节直接核验通过，就采信模型申报的
-    (evidence_chapter_index, evidence_quote) 原样登记；不通过时不直接拒绝——模型定位
-    错了章节不代表申报的语义假设本身是错的，退一步交给 `_find_alias_bridge_chapter`
-    在全书范围内确定性检索桥接章。两条路径都没有可核验的证据 → 返回 None，调用方
-    维持拒绝（不确定不登记）。返回值是最终应当登记的 (章节序号, 引句)，桥接章路径下
-    两者都来自代码检索，与模型原始申报无关。"""
+    *,
+    roster: dict[str, list[str]],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    """别名证据判定的统一入口，供三处调用方（`_verify_character_aliases_in_place` /
+    `backfill_character_aliases` / `reverify_character_aliases`）共用。分两段：
+
+    第一段（既有逻辑不变）：模型申报的章节直接核验通过，就采信模型申报的
+    (evidence_chapter_index, evidence_quote)；不通过时不直接拒绝——模型定位错了章节
+    不代表申报的语义假设本身是错的，退一步交给 `_find_alias_bridge_chapter` 在全书
+    范围内确定性检索桥接章。两条路径都没有可核验的证据 → 拒绝
+    （reason="no_bridge_chapter"）。
+
+    第二段（裁决闸，见本节顶部大注释）：无论证据来自哪条路径，"该章节同时出现别名与
+    角色规范名（或已确认别名）"只证明"同章共现"，证明不了"指代同一人"——必须让模型
+    看着这一章的真实原文，从该章出场的全部人物谱候选（`roster` 经
+    `_alias_verdict_candidates` 结构性算出，见"真实误登记事故 2"）里判别称谓 text
+    最可能指代谁；裁决结果必须恰好选中 true_name 本人，且支撑段号钉证在卷宗段号
+    集合内，才算真正核验通过。选中候选集里的其他人（reason="candidate_mismatch"）、
+    选"都不是/无法确定"（reason="candidate_uncertain"）、候选集为空（防御性分支，
+    reason="no_verdict_candidates"，正常不应触发——true_name 或其已登记别名命中
+    该章是本函数走到这一步的前提，必然会被 `_alias_verdict_candidates` 收进候选集，
+    见该函数 docstring）、裁决调用失败（reason="verdict_call_failed"）、段号钉证
+    失败（reason="segment_not_pinned"），一律拒绝（不确定不登记）。
+
+    返回统一结构 {"accepted": bool, "chapter_idx": int|None, "quote": str,
+    "reason": str}：accepted=True 时 chapter_idx/quote 是应当登记的证据（来自第一段，
+    与裁决闸引用的卷宗原文无关——裁决闸只是额外必须通过的门槛，不改写已核验证据的
+    内容）；accepted=False 时 reason 是机器可读的拒绝原因，供调用方记账与复核报告。"""
+    empty = {"accepted": False, "chapter_idx": None, "quote": "", "reason": ""}
     if _alias_declaration_verified(
         chapters_by_idx, anchor_texts, text, evidence_chapter_index, evidence_quote,
     ):
-        return evidence_chapter_index, evidence_quote
-    return _find_alias_bridge_chapter(chapters_by_idx, anchor_texts, text)
+        resolved_chapter_index, resolved_quote = evidence_chapter_index, evidence_quote
+    else:
+        bridge = _find_alias_bridge_chapter(chapters_by_idx, anchor_texts, text)
+        if bridge is None:
+            return {**empty, "reason": "no_bridge_chapter"}
+        resolved_chapter_index, resolved_quote = bridge
+
+    chapter_text = chapters_by_idx.get(resolved_chapter_index, "")
+    candidates = _alias_verdict_candidates(chapter_text, roster)
+    if not candidates:
+        return {**empty, "reason": "no_verdict_candidates"}
+    # 卷宗证据锚点必须覆盖全部候选人，不能只锚定被测的这一位（真实误登记事故 2、
+    # 见本节顶部大注释）：只把候选名单摆给模型看，卷宗本身若只收录"text 与被测
+    # true_name 共现"的段落，模型就永远看不到"另一个候选人在这章别的地方被点名"
+    # 这条关键证据——第 189 章"王有材默默站起身站在孟浩身后"这段原文既不含
+    # "王师弟"也不含被测的"王腾飞"，只按 anchor_texts={"王腾飞"} 检索会把它漏掉，
+    # 模型只能看着反复出现的"王腾飞"就近作答，重演确认偏误。把全部候选人（结构性
+    # 算出，来自 `_alias_verdict_candidates`）的规范名与已登记别名一并纳入锚点，
+    # dossier 的 anchor_only 类别就能把"王有材"那一段也按接近别名段落的程度收录
+    # 进来，模型才有机会看到真正指向正确候选的证据，而不只是被反复出现的名字带偏。
+    dossier_anchor_texts = set(anchor_texts) | {
+        form for name in candidates for form in roster.get(name, [])
+    }
+    dossier = _alias_verdict_dossier(
+        resolved_chapter_index, chapter_text, text, dossier_anchor_texts,
+    )
+    if not dossier:
+        return {**empty, "reason": "no_verdict_dossier"}
+    try:
+        response = await _alias_verdict_call(
+            alias=text, true_name=true_name, dossier=dossier,
+            candidates=candidates, project_id=project_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - 裁决调用失败按不确定处理：不确定不登记
+        log_provider_call(
+            "character_alias_backfill_verdict", config.MODEL_TEXT, "FAILED", None, 0,
+            meta={"alias": text, "true_name": true_name, "error": str(exc)[:300]},
+        )
+        return {**empty, "reason": "verdict_call_failed"}
+    if response.selected_candidate != true_name:
+        reason = (
+            "candidate_uncertain"
+            if response.selected_candidate == _ALIAS_VERDICT_NO_MATCH_LABEL
+            else "candidate_mismatch"
+        )
+        return {**empty, "reason": reason}
+    if _alias_verdict_pin_segment(dossier, response.supporting_segment_index) is None:
+        return {**empty, "reason": "segment_not_pinned"}
+    return {
+        "accepted": True, "chapter_idx": resolved_chapter_index,
+        "quote": resolved_quote, "reason": "",
+    }
 
 
-def _verify_character_aliases_in_place(bible: Bible, chapters: list[dict]) -> dict[str, list[str]]:
+async def _verify_character_aliases_in_place(
+    bible: Bible, chapters: list[dict], *, project_id: str | None = None,
+) -> dict[str, list[str]]:
     """`generate_bible` 主链路核验：模型随人物谱正文一并申报的 aliases 同样只是申报，
     落库前必须过同一套代码核验（`_alias_evidence_resolution`，与回填函数共用；模型
-    申报章节没通过共现闸时，退一步做全书桥接章检索，见该函数 docstring）。
-    只处理 aliases 字段，绝不触碰角色的任何其它既有字段。"""
+    申报章节没通过共现闸时，退一步做全书桥接章检索，通过共现闸后还要再过一道桥接章
+    原文独立裁决，见该函数 docstring）。只处理 aliases 字段，绝不触碰角色的任何其它
+    既有字段。"""
     chapters_by_idx = _chapters_by_idx(chapters)
+    roster = _alias_verdict_roster(bible)
     added: dict[str, list[str]] = {}
     for character in bible.characters:
         anchor_texts = {character.name}
@@ -3593,16 +3962,16 @@ def _verify_character_aliases_in_place(bible: Bible, chapters: list[dict]) -> di
             text = (item.text or "").strip()
             if not text or text == character.name or text in anchor_texts:
                 continue
-            resolved = _alias_evidence_resolution(
-                chapters_by_idx, anchor_texts, text,
+            resolved = await _alias_evidence_resolution(
+                chapters_by_idx, anchor_texts, text, character.name,
                 item.evidence_chapter_index, item.evidence_quote,
+                roster=roster, project_id=project_id,
             )
-            if resolved:
-                resolved_chapter_index, resolved_quote = resolved
+            if resolved["accepted"]:
                 verified.append(CharacterAlias(
                     text=text, name_kind=item.name_kind,
-                    evidence_chapter_index=resolved_chapter_index,
-                    evidence_quote=resolved_quote,
+                    evidence_chapter_index=resolved["chapter_idx"],
+                    evidence_quote=resolved["quote"],
                 ))
                 anchor_texts.add(text)
                 added_texts.append(text)
@@ -3679,7 +4048,8 @@ async def backfill_character_aliases(
     source = _render_alias_backfill_source(chapters)
     if not source.strip() or not bible.characters:
         return {}
-    roster = "、".join(
+    verdict_roster = _alias_verdict_roster(bible)
+    roster_text = "、".join(
         c.name + (f"（已登记别名：{'、'.join(a.text for a in c.aliases)}）" if c.aliases else "")
         for c in bible.characters
     )
@@ -3687,7 +4057,7 @@ async def backfill_character_aliases(
 （外号、尊称、代称、未揭晓真名前的描述性代称等），逐条给出可核验的证据。
 
 已收录角色（只为这些人申报别名，不要发明角色列表之外的人）：
-{roster}
+{roster_text}
 
 要求：
 1. 每条别名给五个字段：character_name（必须逐字等于上面角色列表中的某个名字）、
@@ -3751,16 +4121,16 @@ async def backfill_character_aliases(
             text = (item.text or "").strip()
             if not text or text in anchor_texts:
                 continue
-            resolved = _alias_evidence_resolution(
-                chapters_by_idx, anchor_texts, text,
+            resolved = await _alias_evidence_resolution(
+                chapters_by_idx, anchor_texts, text, character.name,
                 item.evidence_chapter_index, item.evidence_quote,
+                roster=verdict_roster, project_id=project_id,
             )
-            if resolved:
-                resolved_chapter_index, resolved_quote = resolved
+            if resolved["accepted"]:
                 character.aliases.append(CharacterAlias(
                     text=text, name_kind=item.name_kind,
-                    evidence_chapter_index=resolved_chapter_index,
-                    evidence_quote=resolved_quote,
+                    evidence_chapter_index=resolved["chapter_idx"],
+                    evidence_quote=resolved["quote"],
                 ))
                 anchor_texts.add(text)
                 added_texts.append(text)
@@ -3777,6 +4147,69 @@ async def backfill_character_aliases(
         },
     )
     return added
+
+
+async def reverify_character_aliases(
+    bible: Bible, chapters: list[dict], *, project_id: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """层一别名复核：对 bible 中已登记的全部 `Character.aliases` 逐条重跑
+    `_alias_evidence_resolution`（含裁决闸，见该函数与上方"A1b. 裁决闸"注释），不通过
+    的从该角色的 aliases 中移除。用于清理裁决闸补上之前落库的历史别名，也可作为未来
+    任何别名批次的通用复核工具重复调用（幂等：已经通过新闸的别名重跑仍然通过，不会
+    被误删）。
+
+    背景（真实事故）：裁决闸补上之前落库的别名只过了"同章共现"这一道更弱的核验，
+    证明不了"指代同一人"——已发生的误登记是模型在没看到桥接章原文的情况下凭全书
+    记忆断言的语义假设，实际那一章里该称谓明确是另一个人；共现闸对几乎每章都出场的
+    角色近乎零过滤力。本函数让所有既有别名重新过一遍现在的完整核验链，是清理这类
+    历史误登记的通用工具，不针对任何具体人名做特判。
+
+    调用方式：
+
+        report = await reverify_character_aliases(bible, chapters, project_id=project_id)
+
+    与 `backfill_character_aliases` 共享同一套核验入口、同一个"不确定不登记"默认——
+    唯一区别是候选来源：这里不发起新的模型申报，直接把 `character.aliases` 里已有的
+    (text, evidence_chapter_index, evidence_quote) 当作待复核的申报重新核验一遍。每个
+    角色内部按既有别名的列表顺序增量建立 anchor_texts（与 backfill 的建表方式一致）：
+    前面的别名先通过复核才会被后面同角色的别名当作共现锚点，避免"用一条本身尚未证实
+    的别名去证明另一条别名"的循环依赖。
+
+    返回 `{character_name: [{"text":, "kept": bool, "reason": str}, ...]}`，逐条给出
+    复核结论与拒绝原因（`kept=True` 时 `reason==""`），供调用方生成复核报告；只原地
+    改写 `Character.aliases`，不触碰角色的任何其它既有字段。角色本来就没有别名的
+    不出现在返回结果里。"""
+    chapters_by_idx = _chapters_by_idx(chapters)
+    roster = _alias_verdict_roster(bible)
+    report: dict[str, list[dict[str, Any]]] = {}
+    for character in bible.characters:
+        if not character.aliases:
+            continue
+        anchor_texts = {character.name}
+        kept: list[CharacterAlias] = []
+        entries: list[dict[str, Any]] = []
+        for item in character.aliases:
+            text = (item.text or "").strip()
+            resolved = await _alias_evidence_resolution(
+                chapters_by_idx, anchor_texts, text, character.name,
+                item.evidence_chapter_index, item.evidence_quote,
+                roster=roster, project_id=project_id,
+            )
+            if resolved["accepted"]:
+                kept.append(CharacterAlias(
+                    text=text, name_kind=item.name_kind,
+                    evidence_chapter_index=resolved["chapter_idx"],
+                    evidence_quote=resolved["quote"],
+                ))
+                anchor_texts.add(text)
+                entries.append({"text": text, "kept": True, "reason": ""})
+            else:
+                entries.append({
+                    "text": text, "kept": False, "reason": resolved["reason"],
+                })
+        character.aliases = kept
+        report[character.name] = entries
+    return report
 
 
 async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
@@ -3920,8 +4353,9 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
     if visual_style_prompt:
         bible.world.visual_style_canonical = visual_style_prompt
     # 规则 5 要求模型随人物谱一并申报别名，但那只是申报——落库前必须过与回填函数
-    # 同一套代码核验（逐字命中 + 章节内共现），不满足就丢弃，不阻断人物谱本身。
-    _verify_character_aliases_in_place(bible, chapters)
+    # 同一套代码核验（逐字命中 + 章节内共现 + 桥接章原文独立裁决），不满足就丢弃，
+    # 不阻断人物谱本身。
+    await _verify_character_aliases_in_place(bible, chapters, project_id=project_id)
     missing = [item for item in must_cover if not _bible_covers_name(bible, item[0])]
     if missing:
         added = await _supplement_bible_characters(

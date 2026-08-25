@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
-"""人物别名回填部署脚本（层一，一次性历史人物谱回填）。
+"""人物别名回填部署脚本（层一，一次性历史人物谱回填 + 历史批次复核）。
 
-背景：`app/stages.py:backfill_character_aliases()` 是纯函数——接受已完成的
-`Bible` 实例 + chapters 列表，就地核验并追加 `Character.aliases`，不做任何
-DB 读写（见该函数 docstring）。本脚本是它的唯一调用方：负责从 DB 读出项目
-的 bible_json 与全部 chapters、调用回填、把结果写回 DB。
+背景：`app/stages.py:backfill_character_aliases()` / `reverify_character_aliases()`
+都是纯函数——接受已完成的 `Bible` 实例 + chapters 列表，就地核验并改写
+`Character.aliases`，不做任何 DB 读写（见各自 docstring）。本脚本是它们的唯一
+调用方：负责从 DB 读出项目的 bible_json 与全部 chapters、调用回填/复核、把结果
+写回 DB。
 
 用法：
     .venv/bin/python scripts/backfill_character_aliases.py --dry-run
     .venv/bin/python scripts/backfill_character_aliases.py
     .venv/bin/python scripts/backfill_character_aliases.py --project proj_xxx --dry-run
+    .venv/bin/python scripts/backfill_character_aliases.py --reverify --dry-run
+    .venv/bin/python scripts/backfill_character_aliases.py --reverify
 
---dry-run 只调用模型 + 核验 + 打印将要登记的别名（含证据），不写库；
-不带 --dry-run 时才会把核验通过的别名落库（bible_version 乐观并发 CAS，
-写入前检查该项目没有正在跑的 jobs/workflow_runs，避免覆盖后端并发写入）。
+--dry-run 只调用模型 + 核验 + 打印将要登记/移除的别名（含证据/理由），不写库；
+不带 --dry-run 时才会把核验结果落库（bible_version 乐观并发 CAS，写入前检查该
+项目没有正在跑的 jobs/workflow_runs，避免覆盖后端并发写入）。
+
+--reverify 切换到复核模式：不发起新的模型申报回填，而是对 bible 中**已经登记**
+的全部别名重跑一遍当前完整核验闸门（含裁决闸——见 `app/stages.py` "A1b. 裁决闸"
+一节），过不了闸的别名从 bible 中移除。用于清理裁决闸补上之前已经落库、但实际
+未必真的"指同一人"的历史误登记（真实事故：孟浩←虎爷爷）。不加 --reverify 时是
+原有的回填模式，行为不变。
 
 日志写 logs/backfill_character_aliases.log（同时打印到终端）。
 """
@@ -26,13 +35,14 @@ import logging
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app import db  # noqa: E402
 from app.schemas import Bible  # noqa: E402
-from app.stages import backfill_character_aliases  # noqa: E402
+from app.stages import backfill_character_aliases, reverify_character_aliases  # noqa: E402
 
 DEFAULT_PROJECT_ID = "proj_3ac0b627fa46"
 LOG_PATH = ROOT / "logs" / "backfill_character_aliases.log"
@@ -135,6 +145,71 @@ def _print_result(added: dict[str, list[str]], bible: Bible, logger: logging.Log
             )
 
 
+def _print_reverify_result(
+    report: dict[str, list[dict[str, Any]]], logger: logging.Logger,
+) -> None:
+    if not report:
+        logger.info("没有带别名的角色，复核范围为空。")
+        return
+    for name, entries in report.items():
+        kept = [e for e in entries if e["kept"]]
+        dropped = [e for e in entries if not e["kept"]]
+        logger.info(
+            f"\n■ {name}：{len(entries)} 条别名，保留 {len(kept)} 条，移除 {len(dropped)} 条"
+        )
+        for entry in entries:
+            mark = "保留" if entry["kept"] else "移除"
+            reason = f"（拒绝原因：{entry['reason']}）" if entry["reason"] else ""
+            logger.info(f"  - 「{entry['text']}」{mark}{reason}")
+
+
+async def _guarded_cas_write(
+    project_id: str, bible: Bible, expected_version: int, logger: logging.Logger,
+) -> int:
+    """写库前的并发安全闸 + bible_version 乐观并发 CAS 写入，供回填与复核两条命令
+    共用。返回 0=成功（已记录日志），1=失败（已记录日志，未发生任何数据覆盖）。"""
+    reasons = _active_work_reasons(project_id)
+    if reasons:
+        logger.error(
+            "检测到该项目当前有并发活动，为避免覆盖后端正在写入的数据，本次拒绝落库："
+            + "; ".join(reasons)
+        )
+        return 1
+
+    payload = json.dumps(bible.model_dump(mode="json"), ensure_ascii=False)
+
+    def _write(conn: sqlite3.Connection) -> int:
+        cursor = conn.execute(
+            "UPDATE projects SET bible_json=?, bible_version=? "
+            "WHERE id=? AND COALESCE(bible_version,0)=?",
+            (payload, expected_version + 1, project_id, expected_version),
+        )
+        return cursor.rowcount
+
+    rowcount = await db.run_write_transaction(_write)
+    if rowcount != 1:
+        logger.error(
+            f"写入失败：bible_version 已不再是 {expected_version}（写入期间被后端并发改写），"
+            "本次改动未落库，未发生任何数据覆盖；请重新运行脚本。"
+        )
+        return 1
+
+    logger.info(f"已写库：bible_version {expected_version} -> {expected_version + 1}")
+    return 0
+
+
+def _log_db_alias_snapshot(project_id: str, before_count: int, logger: logging.Logger) -> None:
+    """写库后重新从 DB 读取，打印落库核验（回填/复核共用）。"""
+    proj2, _ = _load_project_and_chapters(project_id)
+    bible2 = Bible.model_validate(json.loads(proj2["bible_json"]))
+    after_count = sum(len(c.aliases) for c in bible2.characters)
+    logger.info("\n===== 落库核验（重新从 DB 读取）=====")
+    logger.info(f"别名总数: {before_count} -> {after_count}")
+    for c in bible2.characters:
+        if c.aliases:
+            logger.info(f"  {c.name}: " + "、".join(f"「{a.text}」" for a in c.aliases))
+
+
 async def _run(project_id: str, dry_run: bool, logger: logging.Logger) -> int:
     proj, chapters = _load_project_and_chapters(project_id)
     logger.info(
@@ -151,7 +226,7 @@ async def _run(project_id: str, dry_run: bool, logger: logging.Logger) -> int:
 
     added = await backfill_character_aliases(bible, chapters, project_id=project_id)
 
-    logger.info("\n===== 回填结果（模型申报 + 代码三闸核验后通过的别名）=====")
+    logger.info("\n===== 回填结果（模型申报 + 代码核验闸门核验后通过的别名）=====")
     _print_result(added, bible, logger)
 
     if dry_run:
@@ -162,67 +237,89 @@ async def _run(project_id: str, dry_run: bool, logger: logging.Logger) -> int:
         logger.info("\n没有新增别名，无需写库。")
         return 0
 
-    reasons = _active_work_reasons(project_id)
-    if reasons:
-        logger.error(
-            "检测到该项目当前有并发活动，为避免覆盖后端正在写入的数据，本次拒绝落库："
-            + "; ".join(reasons)
-        )
-        return 1
+    expected_version = int(proj["bible_version"] or 0)
+    result = await _guarded_cas_write(project_id, bible, expected_version, logger)
+    if result != 0:
+        return result
+    _log_db_alias_snapshot(project_id, before_count, logger)
+    return 0
+
+
+async def _run_reverify(project_id: str, dry_run: bool, logger: logging.Logger) -> int:
+    """复核模式：对 bible 中已登记的全部别名重跑 `reverify_character_aliases`
+    （核验入口与回填共用，见 `app/stages.py`），不通过的移除并写库。用于清理裁决闸
+    补上之前已经落库的历史误登记别名（真实事故：孟浩←虎爷爷）。"""
+    proj, chapters = _load_project_and_chapters(project_id)
+    logger.info(
+        f"项目: {proj['name']} ({project_id})，章节数: {len(chapters)}，"
+        f"当前 bible_version: {proj['bible_version']}"
+    )
+    bible = Bible.model_validate(json.loads(proj["bible_json"]))
+    logger.info(
+        f"人物谱角色数: {len(bible.characters)} -> "
+        + "、".join(c.name for c in bible.characters)
+    )
+    before_count = sum(len(c.aliases) for c in bible.characters)
+    logger.info(f"复核前已登记别名总数: {before_count}")
+
+    report = await reverify_character_aliases(bible, chapters, project_id=project_id)
+
+    logger.info("\n===== 复核结果（对已登记别名重跑完整核验闸门，含裁决闸）=====")
+    _print_reverify_result(report, logger)
+
+    after_count = sum(len(c.aliases) for c in bible.characters)
+    removed_count = before_count - after_count
+    logger.info(
+        f"\n别名总数变化（内存中，尚未写库）: {before_count} -> {after_count}"
+        f"（移除 {removed_count} 条）"
+    )
+
+    if dry_run:
+        logger.info("\n[dry-run] 未写库，未持久化任何改动。")
+        return 0
+
+    if removed_count == 0:
+        logger.info("\n没有需要移除的别名，无需写库。")
+        return 0
 
     expected_version = int(proj["bible_version"] or 0)
-    payload = json.dumps(bible.model_dump(mode="json"), ensure_ascii=False)
-
-    def _write(conn: sqlite3.Connection) -> int:
-        cursor = conn.execute(
-            "UPDATE projects SET bible_json=?, bible_version=? "
-            "WHERE id=? AND COALESCE(bible_version,0)=?",
-            (payload, expected_version + 1, project_id, expected_version),
-        )
-        return cursor.rowcount
-
-    rowcount = await db.run_write_transaction(_write)
-    if rowcount != 1:
-        logger.error(
-            f"写入失败：bible_version 已不再是 {expected_version}（写入期间被后端并发改写），"
-            "本次回填未落库，未发生任何数据覆盖；请重新运行脚本。"
-        )
-        return 1
-
-    logger.info(f"已写库：bible_version {expected_version} -> {expected_version + 1}")
-
-    proj2, _ = _load_project_and_chapters(project_id)
-    bible2 = Bible.model_validate(json.loads(proj2["bible_json"]))
-    after_count = sum(len(c.aliases) for c in bible2.characters)
-    logger.info(f"\n===== 落库核验（重新从 DB 读取）=====")
-    logger.info(f"别名总数: {before_count} -> {after_count}")
-    for c in bible2.characters:
-        if c.aliases:
-            logger.info(f"  {c.name}: " + "、".join(f"「{a.text}」" for a in c.aliases))
+    result = await _guarded_cas_write(project_id, bible, expected_version, logger)
+    if result != 0:
+        return result
+    _log_db_alias_snapshot(project_id, before_count, logger)
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="人物别名回填（层一，一次性历史人物谱回填）")
+    parser = argparse.ArgumentParser(
+        description="人物别名回填 / 复核（层一，一次性历史人物谱回填与历史批次复核）"
+    )
     parser.add_argument(
         "--project", default=DEFAULT_PROJECT_ID,
         help=f"project_id（默认当前回归项目 {DEFAULT_PROJECT_ID}）",
     )
-    parser.add_argument("--dry-run", action="store_true", help="只报告将登记的别名，不写库")
+    parser.add_argument("--dry-run", action="store_true", help="只报告将登记/移除的别名，不写库")
+    parser.add_argument(
+        "--reverify", action="store_true",
+        help="复核模式：不回填新别名，对 bible 中已登记的全部别名重跑完整核验闸门"
+             "（含裁决闸），不通过的移除并写库",
+    )
     args = parser.parse_args()
 
     logger = _setup_logging()
+    mode = "reverify" if args.reverify else "backfill"
     logger.info(
         f"\n===== backfill_character_aliases 开始 project={args.project} "
-        f"dry_run={args.dry_run} ====="
+        f"mode={mode} dry_run={args.dry_run} ====="
     )
     try:
-        return asyncio.run(_run(args.project, args.dry_run, logger))
+        runner = _run_reverify if args.reverify else _run
+        return asyncio.run(runner(args.project, args.dry_run, logger))
     except SystemExit as exc:
         logger.error(f"终止: {exc}")
         return 1
     except Exception:
-        logger.exception("回填脚本异常退出")
+        logger.exception("脚本异常退出")
         return 1
 
 
