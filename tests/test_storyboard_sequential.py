@@ -11,12 +11,14 @@ import asyncio
 
 import pytest
 
-from app import config, stages
+from app import config, stages, validators
 from app.compiler import CompileError
+from app.continuity import outline_atomic_errors
 from app.harness.types import Issue, IssueSeverity
 from app.schemas import (Bible, Character, Dialogue, EpisodeScreenplay,
-                         InformationItem, Scene, Shot, StoryboardOutline,
-                         StoryboardOutlineShot, NarrativeContinuityPlan,
+                         InformationItem, Scene, Shot, StoryboardContextRequirement,
+                         StoryboardOutline, StoryboardOutlineShot,
+                         StoryboardSceneContext, NarrativeContinuityPlan,
                          RequiredOnScreenText, World)
 from app.stages import (StoryboardShotDraft, _storyboard_progress_block,
                         _project_shot_scene_from_outline,
@@ -410,6 +412,207 @@ def test_director_outline_prompt_states_full_speech_budget_table(monkeypatch) ->
     # 保留原有"超限拆镜"出路，并补上"选择更长时长"这条此前未告知模型的出路。
     assert "挪到相邻镜" in prompt
     assert f"{config.MAX_SPOKEN_CHARS_PER_SHOT}字" in prompt
+
+
+def _outline_key_lines_screenplay() -> EpisodeScreenplay:
+    """两句不同说话人的关键台词，供说话人/台词归属类校验测试复用。"""
+    return EpisodeScreenplay(
+        episode_no=1,
+        title="测试集",
+        key_lines=["甲：这是甲说的第一句台词。", "乙：这是乙说的第二句台词。"],
+        full_script_text="【场1】日 / 测试场景\n甲和乙在场景中对话。",
+        ending_hook="留待下集揭晓。",
+    )
+
+
+def _capture_director_outline_prompt(monkeypatch, screenplay: EpisodeScreenplay) -> str:
+    """跑一次 generate_storyboard_outline，拦截真正发给模型的大纲提示词文本。"""
+    captured: dict[str, object] = {}
+
+    async def fake_agent_loop(*args, **_kwargs):
+        captured["prompt"] = args[2]
+        captured["validate"] = args[4]
+        return StoryboardOutline(episode_no=1, shots=[])
+
+    monkeypatch.setattr(stages, "_run_with_agent_loop", fake_agent_loop)
+    asyncio.run(stages.generate_storyboard_outline(
+        {"episode_no": 1, "title": "测试集", "target_duration_s": 50},
+        "正文占位", _bible(), "", screenplay,
+    ))
+    prompt = captured["prompt"]
+    assert isinstance(prompt, str)
+    return prompt, captured["validate"]
+
+
+def test_director_outline_prompt_declares_beat_length_and_no_stalling(monkeypatch) -> None:
+    """校验器 validate_storyboard_outline 要求 beat >= 若干字且不得与上一镜几乎逐字重复
+    （app/validators.py ~5497/~5500）。过去提示词只在 JSON schema 写了 "beat": str，
+    一个字没提这条约束——EP6 run_eee27c4130a3 真实撞过
+    「大纲第 2/3/4/5/6 镜 beat 过短或缺失」。
+
+    该阈值是 validators.py 里的裸字面量，而 validators.py 属于本次禁止改动的文件，
+    所以这里不引入共享常量，改为直接探测校验器的真实行为，防止提示词字面量与
+    校验器字面量各写各的、以后各自漂移都没人发现。
+    """
+    screenplay = _outline_key_lines_screenplay()
+
+    def _beat_too_short(chars: int) -> bool:
+        shot = StoryboardOutlineShot(shot_no=1, beat="字" * chars, scene_id="SC001")
+        outline = StoryboardOutline(episode_no=1, shots=[shot])
+        errors = validators.validate_storyboard_outline(outline, screenplay, 50, bible=None)
+        return any("beat 过短或缺失" in e for e in errors)
+
+    min_ok = next((n for n in range(0, 12) if not _beat_too_short(n)), None)
+    assert min_ok, "校验器前提已变化：beat 过短判定测不到边界，需要重新核对本测试"
+
+    # 反停留：相邻镜 beat 几乎逐字重复也是硬错误。
+    stalled = StoryboardOutline(episode_no=1, shots=[
+        StoryboardOutlineShot(shot_no=1, beat="他缓缓走向窗边看着远方发呆"),
+        StoryboardOutlineShot(shot_no=2, beat="他缓缓走向窗边看着远方发呆"),
+    ])
+    stall_errors = validators.validate_storyboard_outline(stalled, screenplay, 50, bible=None)
+    assert any("停留在同一节拍" in e for e in stall_errors)
+
+    prompt, _validate = _capture_director_outline_prompt(monkeypatch, screenplay)
+    assert f"不少于 {min_ok} 字" in prompt, (
+        f"提示词未声明与校验器同源的 beat 最短字数（校验器实测 {min_ok} 字）"
+    )
+    assert "谁做了什么" in prompt and "局势如何变化" in prompt, "未复用校验器给出的范例措辞"
+    assert "逐字重复" in prompt, "未声明相邻镜 beat 反停留约束"
+
+
+def test_director_outline_prompt_declares_state_in_out_must_differ(monkeypatch) -> None:
+    """continuity.outline_atomic_errors 要求 state_in != state_out（app/continuity.py:1810 起）；
+    过去 JSON schema 只把两者列成普通字符串字段，一个字没提必须不同。"""
+    screenplay = _outline_key_lines_screenplay()
+    same_state = StoryboardOutline(episode_no=1, shots=[
+        StoryboardOutlineShot(
+            shot_no=1, beat="有效的剧情推进内容示例",
+            state_in="他站在门口张望", state_out="他站在门口张望",
+        ),
+    ])
+    errors = outline_atomic_errors(same_state)
+    assert any("state_in 与 state_out 相同" in e for e in errors), (
+        "校验器前提已变化：state_in==state_out 不再报错，需要重新核对本测试"
+    )
+
+    prompt, _validate = _capture_director_outline_prompt(monkeypatch, screenplay)
+    assert "state_in" in prompt and "state_out" in prompt and "真实差异" in prompt
+
+
+def test_director_outline_prompt_declares_single_speaker_per_shot(monkeypatch) -> None:
+    """outline_key_line_speaker_errors 禁止同一镜混入多个说话人的关键台词
+    （app/validators.py:4637）；这是上一轮 agent 发现但未修的两处遗漏之一——
+    活代码提示词里完全没提，死代码分支的 4b 条反而写清楚了。"""
+    screenplay = _outline_key_lines_screenplay()
+    mixed = StoryboardOutline(episode_no=1, shots=[
+        StoryboardOutlineShot(
+            shot_no=1, beat="甲乙两人先后发言的镜头示例",
+            key_line_ids=["KL01", "KL02"],
+        ),
+    ])
+    errors = validators.outline_key_line_speaker_errors(mixed, screenplay)
+    assert any("OUTLINE_KEY_LINE_SPEAKER_MIXED" in e for e in errors), (
+        "校验器前提已变化：混合说话人不再报错，需要重新核对本测试"
+    )
+
+    prompt, _validate = _capture_director_outline_prompt(monkeypatch, screenplay)
+    assert "同一镜 key_line_ids 只能属于同一说话人" in prompt
+
+
+def test_director_outline_prompt_declares_key_line_single_owner(monkeypatch) -> None:
+    """同一条关键台词只能分配给一镜：outline_key_line_capacity_errors 的
+    OUTLINE_KEY_LINE_OWNER_DUPLICATE（app/validators.py ~4505）覆盖全集范围内的重复分配，
+    validate_storyboard_outline 里的相邻镜检查（~5505）是它的子集。两条提示词过去都没提。"""
+    screenplay = _outline_key_lines_screenplay()
+    duplicated = StoryboardOutline(episode_no=1, shots=[
+        StoryboardOutlineShot(shot_no=1, beat="甲说出关键台词的镜头", key_line_ids=["KL01"], duration_s=5),
+        StoryboardOutlineShot(shot_no=2, beat="甲的台词又被重复说一次", key_line_ids=["KL01"], duration_s=5),
+    ])
+    capacity_errors = validators.outline_key_line_capacity_errors(duplicated, screenplay)
+    assert any("OUTLINE_KEY_LINE_OWNER_DUPLICATE" in e for e in capacity_errors), (
+        "校验器前提已变化：重复分配关键台词不再报错，需要重新核对本测试"
+    )
+    adjacent_errors = validators.validate_storyboard_outline(duplicated, screenplay, 50, bible=None)
+    assert any("重复分配关键台词" in e for e in adjacent_errors)
+
+    prompt, _validate = _capture_director_outline_prompt(monkeypatch, screenplay)
+    assert "每条关键台词" in prompt and "只能分配给一镜" in prompt
+
+
+def test_director_outline_prompt_declares_shot_no_must_be_sequential(monkeypatch) -> None:
+    """validate_storyboard_outline 要求 shot_no 从 1 连续递增（app/validators.py ~5493）；
+    死代码分支第 1 条已有"shot_no 从 1 连续递增"这句现成措辞，活代码提示词没有照抄。"""
+    screenplay = _outline_key_lines_screenplay()
+    skipped = StoryboardOutline(episode_no=1, shots=[
+        StoryboardOutlineShot(shot_no=1, beat="第一镜的有效剧情内容"),
+        StoryboardOutlineShot(shot_no=3, beat="跳号后的第二个镜头内容"),
+    ])
+    errors = validators.validate_storyboard_outline(skipped, screenplay, 50, bible=None)
+    assert any("shot_no 必须为连续递增" in e for e in errors), (
+        "校验器前提已变化：shot_no 跳号不再报错，需要重新核对本测试"
+    )
+
+    prompt, _validate = _capture_director_outline_prompt(monkeypatch, screenplay)
+    assert "shot_no 从 1 连续递增" in prompt
+
+
+def test_director_outline_prompt_declares_context_state_and_delivery(monkeypatch) -> None:
+    """_generate_episode_director_outline 自带的本地 _validate 闭包（不在 validators.py 里，
+    随本次提示词改动一起补齐）要求：
+    1. scene_contexts.entry_state/exit_state 不少于 _OUTLINE_CONTEXT_STATE_MIN_CHARS 字；
+    2. 每条 context_requirements 必须被某一镜的 context_requirement_ids 实际交付。
+    两个阈值/规则与提示词共用同一个模块级常量，不存在裸字面量各写各的风险。
+    """
+    screenplay = _outline_key_lines_screenplay()
+    prompt, validate = _capture_director_outline_prompt(monkeypatch, screenplay)
+
+    too_short = "短" * (stages._OUTLINE_CONTEXT_STATE_MIN_CHARS - 1)
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1, beat="有效的剧情推进内容示例", scene_id="SC001",
+                context_requirement_ids=[],
+            ),
+        ],
+        scene_contexts=[
+            StoryboardSceneContext(
+                scene_id="SC001", scene_no=1,
+                entry_state=too_short, exit_state=too_short,
+                context_requirements=[
+                    StoryboardContextRequirement(
+                        requirement_id="CTX-SC001-01", description="需要建立时间地点",
+                    ),
+                ],
+            ),
+        ],
+    )
+    errors = validate(outline)
+    assert any("缺少可执行的 entry_state/exit_state" in e for e in errors)
+    assert any("导演规划未安排上下文要求" in e for e in errors)
+
+    assert f"不少于 {stages._OUTLINE_CONTEXT_STATE_MIN_CHARS} 字" in prompt
+    assert "不得只声明不落地" in prompt
+
+
+def test_director_outline_key_content_block_matches_outline_schema_fields() -> None:
+    """StoryboardOutlineShot 没有 action_desc 字段（那是详细分镜阶段 Shot 才有的字段）。
+    共享的 _storyboard_key_content_block 过去对所有调用方都写死"action_desc 或有效口播"，
+    大纲阶段引用了一个模型根本填不到的字段名；剧情点校验实际检查的是 beat/covers
+    （validate_storyboard_outline 的 plan_text = beat+covers）。"""
+    assert "action_desc" not in StoryboardOutlineShot.model_fields
+
+    screenplay = _outline_key_lines_screenplay()
+    outline_block = stages._storyboard_key_content_block(
+        screenplay, plot_point_field_hint="beat/covers",
+    )
+    assert "action_desc" not in outline_block
+    assert "beat/covers" in outline_block
+
+    # 其余调用方（真正生成 Shot、确有 action_desc 字段）行为不变，默认值没有被误改。
+    default_block = stages._storyboard_key_content_block(screenplay)
+    assert "action_desc" in default_block
 
 
 def test_invalid_legacy_outline_information_id_is_not_injected_after_validation(monkeypatch) -> None:

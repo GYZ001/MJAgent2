@@ -12540,6 +12540,7 @@ def _storyboard_key_content_block(
     screenplay: EpisodeScreenplay,
     *,
     brief: StoryboardOutlineShot | None = None,
+    plot_point_field_hint: str = "action_desc",
 ) -> str:
     """把剧本台主线合同渲染成分镜 prompt 区块（spine + key_lines/points + drop_list）。"""
     key_lines = [ln.strip() for ln in (screenplay.key_lines or []) if ln and ln.strip()]
@@ -12615,7 +12616,7 @@ def _storyboard_key_content_block(
         "【本集主线对白链】（KL 顺序就是剧情顺序；每条必须写进某镜有效口播并填 key_line_ids。回答/安慰/反驳必须与其触发台词放在同镜或相邻镜，禁止孤立摘句；代码校验存在性与顺序）：",
         lines_text,
         "",
-        "【本集主线剧情点】（每条必须在某镜的 action_desc 或有效口播中体现，代码逐条校验）：",
+        f"【本集主线剧情点】（每条必须在某镜的 {plot_point_field_hint} 或有效口播中体现，代码逐条校验）：",
         points_text,
     ])
     return "\n".join(blocks) + "\n"
@@ -13396,6 +13397,12 @@ def validate_storyboard_visual_identity_contract(
     return list(dict.fromkeys(issue.message for issue in issues))
 
 
+# scene_contexts.entry_state/exit_state 最短可执行字数；提示词与本地校验共用同一常量，
+# 避免两侧各写一份字面量后随时间漂移（对照 validators.py 侧同类阈值目前仍是裸字面量，
+# 因该文件被排除在本次改动范围之外）。
+_OUTLINE_CONTEXT_STATE_MIN_CHARS = 6
+
+
 async def _generate_episode_director_outline(
     episode: dict,
     source_text: str,
@@ -13404,7 +13411,9 @@ async def _generate_episode_director_outline(
     screenplay: EpisodeScreenplay,
 ) -> StoryboardOutline:
     """Plan the whole episode once; detailed shots are generated per scene."""
-    key_content_block = _storyboard_key_content_block(screenplay)
+    key_content_block = _storyboard_key_content_block(
+        screenplay, plot_point_field_hint="beat/covers",
+    )
     scene_library_block = _scene_library_block(bible, screenplay)
     scene_block = "\n".join(
         (
@@ -13423,11 +13432,15 @@ async def _generate_episode_director_outline(
 
 【每场上下文合同】
 1. scene_contexts 必须逐场覆盖剧本 scene_outline，scene_id 使用 SC001、SC002 连续编号。
-2. 每场填写 entry_state、exit_state、transition_from_previous、spatial_axis。
+2. 每场填写 entry_state、exit_state、transition_from_previous、spatial_axis；entry_state/
+   exit_state 必须各写清具体可执行的情境（时间、地点、在场人物与道具的状态），
+   不少于 {_OUTLINE_CONTEXT_STATE_MIN_CHARS} 字，禁止用“平静”“紧张”等抽象情绪词单独代替具体状态。
 3. context_requirements 把剧本的上下文要求改成稳定 ID（如 CTX-SC001-01）。
 4. 新时空通常在前 1~3 镜建立时间、地点、空间轴线、人物位置和关键道具；若上一场已经通过
    动作、声音、视线或道具连续承接，可以只做必要的空间重定位，禁止机械重复远景。
-5. required_before_shot_no 指向首次依赖该上下文的镜号，交付镜必须更早或同镜完成。
+5. required_before_shot_no 指向首次依赖该上下文的镜号，交付镜必须更早或同镜完成；
+   每条 context_requirements 都必须被某一镜的 context_requirement_ids 实际交付，
+   不得只声明不落地。
 
 【每镜作用】
 - purpose：明确本镜为什么存在，是推进事件、建立上下文、动作阶段、人物反应、情绪转折、
@@ -13436,6 +13449,16 @@ async def _generate_episode_director_outline(
 - 每镜必须交付 spine_beat_ids、key_line_ids、information_ids 或 context_requirement_ids 中至少一类。
 - 相同剧情与相同结果不得重复；有意重复必须填写 repeat_of_shot_id 和 repeat_gain，
   说明新增视角、反应、验证或兑现价值。
+- 【硬性·beat】beat 必须用一句话写清本镜推进的剧情（谁做了什么/局势如何变化），不少于 6 字；
+  禁止空泛描述，也禁止与上一镜几乎逐字重复——每镜必须推进到新的剧情进展，不得把同一情绪/
+  同一句原文拆成多镜空耗时长。
+- 【硬性·状态链】state_in 与 state_out 必须写出真实差异；两者相同视为本镜没有推进任何
+  可见/可听状态变化，属于无效镜。
+- 【硬性·说话人】同一镜 key_line_ids 只能属于同一说话人；说话人变化就是切镜点，按
+  “甲单人近景说完 → 乙单人反打回应”拆成相邻镜，禁止把问答双方或围观人群同时塞进一个
+  对白镜头。
+- 【硬性·台词归属】每条关键台词（key_line_ids）全集只能分配给一镜；说完之后如需承接，
+  用反应镜/新信息镜续接，禁止把同一句台词重复摆放到多镜（含相邻镜）。
 
 【摄影三元组】
 - 每镜都规划 camera_size、camera_angle、camera_movement、camera_motivation。
@@ -13447,6 +13470,7 @@ async def _generate_episode_director_outline(
 - transition：运动只服务动作、声音、视线、道具或因果承接，不能掩盖换人换装换景。
 
 【拆镜原则】
+- shot_no 从 1 连续递增，不得跳号、重复或乱序。
 - 单镜只演一个连续主动作或一个明确观看任务。
 - 动作阶段、说话人变化、注意目标变化、空间关系变化、结果反应需要时均可拆镜。
 - 不得为控制总时长合并不同动作，不得为了形式变化制造无作用空镜。
@@ -13520,7 +13544,10 @@ async def _generate_episode_director_outline(
             if not context.scene_id.strip() or context.scene_id in scene_ids:
                 errors.append(f"scene_contexts 含空或重复 scene_id：{context.scene_id!r}")
             scene_ids.add(context.scene_id)
-            if len(context.entry_state.strip()) < 6 or len(context.exit_state.strip()) < 6:
+            if (
+                len(context.entry_state.strip()) < _OUTLINE_CONTEXT_STATE_MIN_CHARS
+                or len(context.exit_state.strip()) < _OUTLINE_CONTEXT_STATE_MIN_CHARS
+            ):
                 errors.append(f"{context.scene_id} 缺少可执行的 entry_state/exit_state")
             if not context.context_requirements:
                 errors.append(f"{context.scene_id} 没有 context_requirements")
