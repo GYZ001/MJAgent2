@@ -139,7 +139,18 @@ MIN_SCAN_NAME_CHARS = 2
 #     集自己的原文）——不是只看"来源集里有没有同名条目"，还要看那条条目本
 #     身站不站得住。见 _verify_alias_inherited_character/_scene。
 TEXT_VERIFIED_METHODS = {"direct", "alias"}
-ANCHOR_VERIFIED_METHODS = {"resolution", "discovery", "absorbed_speaker"}
+# candidate_verdict（1.8.0，见 app/production/prep_pack.py PREP_PACK_VERSION
+# 上方大注释与 _prep_pack_resolve_functional_extra_candidate 的完整说明）：
+# 未解析角色标签的候选判别命中——代码检索卷宗 → 模型候选选择题（enum 收紧到
+# 候选集 + "都不是/无法确定"）→ 段号钉证（enum 限定卷宗段号，结构性核对，不
+# 比对模型转录）。与 resolution/discovery/absorbed_speaker 同构：anchor_
+# segments/anchor_phrase 是这次绑定的证据链本身，且 anchor_phrase 直接取
+# 钉中段落的原文文本（代码检索所得，非模型转录），天然满足逐字命中。目前只
+# 在 asset_manifest.characters[] 上产出（未用于 scenes/key_lines），但核验
+# 分支按 method 值分型、不按字段位置分型，登记进本集合即对三处调用点
+# （check_manifest_characters/check_manifest_scenes/check_key_line_speakers）
+# 统一生效，是安全的超集登记。
+ANCHOR_VERIFIED_METHODS = {"resolution", "discovery", "absorbed_speaker", "candidate_verdict"}
 FORWARD_ANCHOR_METHOD = "resolution_forward"
 INHERITED_ALIAS_METHOD = "alias_inherited"
 KNOWN_PROVENANCE_METHODS = (
@@ -413,13 +424,14 @@ def _find_accepted_hint(
 def _verify_provenance_anchor(
     segments: list[SourceSegment], provenance: dict[str, Any],
 ) -> tuple[bool, str]:
-    """1.6.0 provenance 的锚点核验（resolution/discovery/absorbed_speaker 三
-    种方法用）：anchor_segments 每个段号必须落在 [1, len(segments)]（与
-    app.source_excerpt.index_source_segments 的 1-based 编号同一套，就是生成
-    器自己的 segment_index），且 anchor_phrase 必须逐字出现在这些段号拼接后
-    的原文里。这三种方法允许 display_name/speaker 本身是合成规范名或群演标
-    签、不再直接苛求逐字命中，换成要求锚点链本身确定性成立——段号必须真实存
-    在，短语必须是那几段原文里真写过的话，不能是模型编的。返回
+    """1.6.0 provenance 的锚点核验（resolution/discovery/absorbed_speaker/
+    candidate_verdict 四种方法用，见 ANCHOR_VERIFIED_METHODS）：anchor_
+    segments 每个段号必须落在 [1, len(segments)]（与 app.source_excerpt.
+    index_source_segments 的 1-based 编号同一套，就是生成器自己的
+    segment_index），且 anchor_phrase 必须逐字出现在这些段号拼接后的原文
+    里。这四种方法允许 display_name/speaker 本身是合成规范名或群演标签、不
+    再直接苛求逐字命中，换成要求锚点链本身确定性成立——段号必须真实存在，
+    短语必须是那几段原文里真写过的话，不能是模型编的。返回
     (是否通过, 失败原因；通过时为空串)。"""
     anchor_segments = provenance.get("anchor_segments")
     anchor_phrase = str(provenance.get("anchor_phrase") or "").strip()
@@ -696,10 +708,10 @@ def check_manifest_characters(
     """A1。逐条委派给 _verify_character_entry（判定逻辑、method 分型、
     resolution_forward/alias_inherited 的核验规则都在那，这里只负责把结果
     拼成 Issue——见该函数 docstring 了解完整规则，包括：direct/alias 维持逐
-    字标准；resolution/discovery/absorbed_speaker 用锚点核验；resolution_
-    forward 核验前瞻章节；alias_inherited 递归核验来源集；不带 provenance
-    的旧包回退现行标准 + true_name_hints 例外；未识别 method 一律 fail-
-    closed。
+    字标准；resolution/discovery/absorbed_speaker/candidate_verdict 用锚点
+    核验；resolution_forward 核验前瞻章节；alias_inherited 递归核验来源集；
+    不带 provenance 的旧包回退现行标准 + true_name_hints 例外；未识别 method
+    一律 fail-closed。
 
     返回 (issues, checked, passed, legacy_fallback_count)：legacy_fallback_
     count 是走了"无 provenance"回退路径的条目数，调用方据此在报告里标注
@@ -891,12 +903,16 @@ def check_key_line_speakers(
     1.6.0 provenance 升级（协调方指令，形状假定，见模块顶部常量注释）：
     key_line 若带 provenance（假定字段名 ``speaker_provenance``，缺失时兼容
     读取 ``provenance``——真实字段名以后端实物为准），按 method 分型，direct/
-    alias 复用上面这条 round-18 判据；resolution/discovery/absorbed_speaker
-    改用 anchor_segments + anchor_phrase 的锚点核验（_verify_provenance_
-    anchor）——"absorbed_speaker" 这个方法名本身指向的正是"speaker 是群演/
-    功能性标签但确有一句话可锚定到具体原文"这种场景，锚点核验就是为它设计
-    的。不带 provenance 的 key_line（<=1.5.x 旧包）走 round-18 判据的旧路径，
-    不受这次升级影响，只是在失败信息里加注"无来源证明（旧版产物）"。
+    alias 复用上面这条 round-18 判据；resolution/discovery/absorbed_speaker/
+    candidate_verdict（ANCHOR_VERIFIED_METHODS 全体）改用 anchor_segments +
+    anchor_phrase 的锚点核验（_verify_provenance_anchor）——"absorbed_
+    speaker" 这个方法名本身指向的正是"speaker 是群演/功能性标签但确有一句
+    话可锚定到具体原文"这种场景，锚点核验就是为它设计的；candidate_verdict
+    （1.8.0）目前生成器只在 asset_manifest.characters[] 上产出，未见于
+    key_lines，登记进这里是为了跟另外两处调用点保持同一套按 method 值分型
+    （而非按字段位置分型）的统一处理，不代表已实际观测到这种数据。不带
+    provenance 的 key_line（<=1.5.x 旧包）走 round-18 判据的旧路径，不受这
+    次升级影响，只是在失败信息里加注"无来源证明（旧版产物）"。
 
     收尾单新增（real 1.6.0 live data 实测口径修正——协调方的两个新方法工单原
     文只提"该资产"/manifest 绑定，字面上没提 key_lines，但对本项目 proj_

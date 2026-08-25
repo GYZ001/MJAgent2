@@ -1020,6 +1020,178 @@ def test_provenance_method_alias_inherited_rejects_non_earlier_source(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# candidate_verdict（1.8.0，见 app/production/prep_pack.py PREP_PACK_VERSION
+# 上方大注释、_prep_pack_resolve_functional_extra_candidate 的完整说明）：
+# 未解析角色标签的候选判别命中，anchor_segments/anchor_phrase 与
+# resolution/discovery/absorbed_speaker 同构（anchor_phrase 是钉中卷宗段落
+# 的原文文本，代码检索所得而非模型转录）——登记进 ANCHOR_VERIFIED_METHODS，
+# 走同一套锚点核验。登记前这个 method 会被 fail-closed 判为
+# A1_character_unknown_provenance_method（未知枚举），是这次要修的红灯。
+# ---------------------------------------------------------------------------
+
+def test_provenance_method_candidate_verdict_passes_with_valid_anchor(tmp_path):
+    """candidate_verdict 锚点齐全且短语命中 -> 通过核验，不再被误判为未知
+    method（登记前会报 A1_character_unknown_provenance_method；这是红灯先行
+    的红灯用例，登记后应变绿）。"""
+    db_path = _make_db(tmp_path)
+    conn = _writer(db_path)
+    _insert_project(conn, "proj_q")
+    _insert_chapter(
+        conn, "proj_q", 1, "第一章",
+        "许师姐一身银色长袍飘然而至，众弟子纷纷行礼。",
+    )
+    _insert_character(conn, "portrait_xu", "proj_q", "许清")
+    pack = _base_pack(
+        chapter_indexes=[1],
+        characters=[
+            {"identity_id": "bible:许清", "display_name": "许清", "portrait_id": "portrait_xu",
+             "event_ids": ["ev_001"], "aliases": [],
+             "provenance": {
+                 "method": "candidate_verdict", "anchor_segments": [1],
+                 "anchor_phrase": "许师姐一身银色长袍飘然而至",
+             }},
+        ],
+        scenes=[],
+        event_chain=[{
+            "event_id": "ev_001", "order": 1, "summary": "银色长袍女子现身",
+            "source_span": {"from_segment": 1, "to_segment": 1},
+            "source_evidence": [{"segment_index": 1, "quote": "许师姐一身银色长袍飘然而至"}],
+            "key_lines": [],
+        }],
+    )
+    _insert_episode(conn, "ep_q1", "proj_q", 1, [1], "art_q1")
+    _insert_pack_artifact(conn, "art_q1", "ep_q1", pack)
+    conn.commit()
+    conn.close()
+
+    ro = audit.readonly_connection(db_path)
+    result = audit.audit_episode(ro, "proj_q", 1)
+    ro.close()
+
+    assert result.a_issues == []
+    tally = result.tallies["A1 角色绑定文本依据"]
+    assert (tally.checked, tally.passed, tally.legacy_fallback) == (1, 1, 0)
+
+
+def test_provenance_method_candidate_verdict_anchor_mismatch_still_fails(tmp_path):
+    """登记进 ANCHOR_VERIFIED_METHODS 不等于免检（反例二之一）：anchor_phrase
+    与 anchor_segments 指向的原文不逐字命中，仍要报 A 类
+    （A1_character_anchor_invalid），不能因为 method 已登记就放行。"""
+    db_path = _make_db(tmp_path)
+    conn = _writer(db_path)
+    _insert_project(conn, "proj_r")
+    _insert_chapter(
+        conn, "proj_r", 1, "第一章",
+        "许师姐一身银色长袍飘然而至，众弟子纷纷行礼。",
+    )
+    _insert_character(conn, "portrait_xu", "proj_r", "许清")
+    pack = _base_pack(
+        chapter_indexes=[1],
+        characters=[
+            {"identity_id": "bible:许清", "display_name": "许清", "portrait_id": "portrait_xu",
+             "event_ids": ["ev_001"], "aliases": [],
+             "provenance": {
+                 "method": "candidate_verdict", "anchor_segments": [1],
+                 "anchor_phrase": "这句话原文根本没有",
+             }},
+        ],
+        scenes=[],
+        event_chain=[{
+            "event_id": "ev_001", "order": 1, "summary": "银色长袍女子现身",
+            "source_span": {"from_segment": 1, "to_segment": 1},
+            "source_evidence": [{"segment_index": 1, "quote": "许师姐一身银色长袍飘然而至"}],
+            "key_lines": [],
+        }],
+    )
+    _insert_episode(conn, "ep_r1", "proj_r", 1, [1], "art_r1")
+    _insert_pack_artifact(conn, "art_r1", "ep_r1", pack)
+    conn.commit()
+    conn.close()
+
+    ro = audit.readonly_connection(db_path)
+    result = audit.audit_episode(ro, "proj_r", 1)
+    ro.close()
+
+    assert [i.code for i in result.a_issues] == ["A1_character_anchor_invalid"]
+    assert "命中" in result.a_issues[0].detail["reason"]
+
+
+def test_provenance_method_candidate_verdict_empty_anchor_phrase_still_fails(tmp_path):
+    """反例二之二：anchor_phrase 为空同样必须报 A 类，登记不等于免检。"""
+    db_path = _make_db(tmp_path)
+    conn = _writer(db_path)
+    _insert_project(conn, "proj_s")
+    _insert_chapter(conn, "proj_s", 1, "第一章", "许师姐一身银色长袍飘然而至。")
+    _insert_character(conn, "portrait_xu", "proj_s", "许清")
+    pack = _base_pack(
+        chapter_indexes=[1],
+        characters=[
+            {"identity_id": "bible:许清", "display_name": "许清", "portrait_id": "portrait_xu",
+             "event_ids": ["ev_001"], "aliases": [],
+             "provenance": {"method": "candidate_verdict", "anchor_segments": [1], "anchor_phrase": ""}},
+        ],
+        scenes=[],
+        event_chain=[{
+            "event_id": "ev_001", "order": 1, "summary": "银色长袍女子现身",
+            "source_span": {"from_segment": 1, "to_segment": 1},
+            "source_evidence": [{"segment_index": 1, "quote": "许师姐一身银色长袍飘然而至"}],
+            "key_lines": [],
+        }],
+    )
+    _insert_episode(conn, "ep_s1", "proj_s", 1, [1], "art_s1")
+    _insert_pack_artifact(conn, "art_s1", "ep_s1", pack)
+    conn.commit()
+    conn.close()
+
+    ro = audit.readonly_connection(db_path)
+    result = audit.audit_episode(ro, "proj_s", 1)
+    ro.close()
+
+    assert [i.code for i in result.a_issues] == ["A1_character_anchor_invalid"]
+    assert "为空" in result.a_issues[0].detail["reason"]
+
+
+def test_unknown_provenance_method_still_fails_closed(tmp_path):
+    """守 fail-closed（反例一）：真正未知的 method（既不是 candidate_verdict，
+    也不在任何已登记集合内）必须继续报 A1_character_unknown_provenance_
+    method——这次只是给 candidate_verdict 一个正式判据，不能连带放宽对其它
+    未知值的门禁。"""
+    db_path = _make_db(tmp_path)
+    conn = _writer(db_path)
+    _insert_project(conn, "proj_t")
+    _insert_chapter(conn, "proj_t", 1, "第一章", "许清站在广场上，看着人群。")
+    _insert_character(conn, "portrait_xu", "proj_t", "许清")
+    pack = _base_pack(
+        chapter_indexes=[1],
+        characters=[
+            {"identity_id": "bible:许清", "display_name": "许清", "portrait_id": "portrait_xu",
+             "event_ids": ["ev_001"], "aliases": [],
+             "provenance": {
+                 "method": "totally_new_method", "anchor_segments": [1], "anchor_phrase": "许清",
+             }},
+        ],
+        scenes=[],
+        event_chain=[{
+            "event_id": "ev_001", "order": 1, "summary": "许清站在广场上",
+            "source_span": {"from_segment": 1, "to_segment": 1},
+            "source_evidence": [{"segment_index": 1, "quote": "许清站在广场上，看着人群。"}],
+            "key_lines": [],
+        }],
+    )
+    _insert_episode(conn, "ep_t1", "proj_t", 1, [1], "art_t1")
+    _insert_pack_artifact(conn, "art_t1", "ep_t1", pack)
+    conn.commit()
+    conn.close()
+
+    ro = audit.readonly_connection(db_path)
+    result = audit.audit_episode(ro, "proj_t", 1)
+    ro.close()
+
+    assert [i.code for i in result.a_issues] == ["A1_character_unknown_provenance_method"]
+    assert "totally_new_method" in result.a_issues[0].message
+
+
+# ---------------------------------------------------------------------------
 # exit code 契约
 # ---------------------------------------------------------------------------
 
