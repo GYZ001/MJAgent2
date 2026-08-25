@@ -1910,22 +1910,74 @@ def project_prep_pack_to_screenplay(payload: dict[str, Any]) -> EpisodeScreenpla
             summary=summary,
         ))
 
-    # -- dialogue_chains: one chain per event with key_lines, turns verbatim
+    # -- dialogue_chains: one chain per event with key_lines, turns derived
     #    from key_lines[]; key_lines (flat) re-derived through the project's
     #    own canonical algorithm so this projection produces the identical
     #    shape a legacy screenplay would (see app.validators.derive_key_lines
     #    -- "Single source of truth for EpisodeScreenplay.key_lines") --
+    #
+    # Per-turn spoken-capacity split (real EP6 failure, run_8c369bc4da23,
+    # ERR-20260825-07c92e, 2026-08-25): prep_pack's key_lines[].line is a
+    # VERBATIM novel excerpt -- its own extraction prompt requires "line 同样
+    # 必须逐字取自该编号原文" (app/production/prep_pack.py, ~line 4321) and its
+    # payload docstring frames key_lines/speaker_ref as speaker-roster/
+    # identity-anchoring evidence (prep_pack 1.5.0b), not a pre-compressed
+    # spoken-form line. It is therefore NOT capacity-bounded the way the
+    # legacy screenplay generator's key_lines always were: every dialogue
+    # unit's adapted text there is passed through
+    # `_split_spoken_line(unit.text, max_chars=MAX_SPOKEN_CHARS_PER_SHOT)`
+    # before becoming a KeyDialogueTurn (app/screenplay_ir.py, function
+    # compile_screenplay_ir, ~line 5266) -- confirmed against the live DB:
+    # all 41 historical screenplay_document artifacts' derived key_lines
+    # (1372 lines) top out at exactly 36 chars (MAX_SPOKEN_CHARS_PER_SHOT),
+    # min=1 p50=16 p90=33, 0 over 36, even though the underlying authored
+    # dialogue is frequently longer. EP6's own prep_pack has a 74-char
+    # verbatim quote (event ev_007, 孟浩's internal monologue) that cannot
+    # fit any shot at all (max shot capacity is 36 chars at 10s) -- the
+    # outline's OUTLINE_KEY_LINE_CAPACITY_INVALID gate correctly refused an
+    # unsatisfiable contract; that is not a false positive to relax.
+    #
+    # Internal monologue is not exempt from the spoken-time budget either:
+    # it plays back as offscreen_voice (see
+    # app.spoken_contract.SPOKEN_DELIVERIES), which consumes the same
+    # shot-duration seconds as spoken dialogue, so it still needs a home in
+    # some shot's key_line_ids. The fix mirrors the legacy generator exactly:
+    # split each raw quote on its own punctuation boundaries into
+    # shot-capacity-sized units, byte-for-byte verbatim, deterministically
+    # (`_split_spoken_line` is pure function of its input), never rewritten,
+    # never dropped -- not exempting long quotes from the budget (that would
+    # only move the "can't fit" failure downstream into per-shot repair,
+    # which the gate's own message explicitly forbids: "不可满足合同交给
+    # 逐镜修复"), and not inventing an undocumented length-based "this one
+    # doesn't count as a key line" rule (the frozen prep_pack payload has no
+    # field distinguishing monologue from dialogue; a threshold-only carve-
+    # out would just be "short lines are key lines, long ones aren't" with no
+    # semantic basis). `_split_spoken_line`'s own fallback (character-level
+    # chunking once a clause has no more punctuation to split on) guarantees
+    # every returned chunk is non-empty and <= max_chars -- there is no
+    # "too long to split further" failure mode left unhandled.
+    from app.screenplay_ir import _split_spoken_line
     dialogue_chains: list[KeyDialogueChain] = []
     for event in events:
-        turns = [
-            KeyDialogueTurn(
-                speaker=str(item.get("speaker") or ""),
-                line=str(item.get("line") or ""),
-                source_text=str(item.get("line") or ""),
-            )
-            for item in (event.get("key_lines") or [])
-            if isinstance(item, dict) and str(item.get("line") or "").strip()
-        ]
+        turns: list[KeyDialogueTurn] = []
+        for item in (event.get("key_lines") or []):
+            if not isinstance(item, dict):
+                continue
+            raw_line = str(item.get("line") or "")
+            speaker = str(item.get("speaker") or "")
+            for part in _split_spoken_line(
+                raw_line, max_chars=config.MAX_SPOKEN_CHARS_PER_SHOT,
+            ):
+                turns.append(KeyDialogueTurn(
+                    speaker=speaker,
+                    line=part,
+                    # source_text keeps the full original quote (not the
+                    # split part) as provenance evidence for every part cut
+                    # from it, matching the legacy compiler's own
+                    # dialogue_source_evidence convention of citing the whole
+                    # authored utterance rather than a sub-fragment.
+                    source_text=raw_line,
+                ))
         if not turns:
             continue
         event_id = str(event.get("event_id") or "")

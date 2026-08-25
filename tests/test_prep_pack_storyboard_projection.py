@@ -148,6 +148,14 @@ def test_scene_no_is_contiguous_from_one():
 
 
 def test_key_lines_are_derived_from_real_quotes_only():
+    """Each projected key_line is verbatim text from a real prep_pack quote --
+    but not necessarily the *whole* quote: see
+    test_key_lines_over_capacity_are_split_verbatim_not_rewritten below for
+    why a too-long quote is deterministically split on punctuation
+    boundaries into several shot-capacity-sized key_lines before this
+    function returns. "Derived from a real quote" now means "a verbatim
+    substring of one", not "textually identical to one".
+    """
     payload = _ep6_payload()
     screenplay = project_prep_pack_to_screenplay(payload)
     real_lines = {
@@ -158,7 +166,61 @@ def test_key_lines_are_derived_from_real_quotes_only():
     assert screenplay.key_lines
     for key_line in screenplay.key_lines:
         _speaker, _sep, line = key_line.partition("：")
-        assert (line or key_line) in real_lines
+        text = line or key_line
+        assert any(text in real for real in real_lines), (
+            f"key_line not traceable to any real quote: {text!r}"
+        )
+
+
+def test_key_lines_over_capacity_are_split_verbatim_not_rewritten():
+    """Real EP6 failure (run_8c369bc4da23, ERR-20260825-07c92e): prep_pack's
+    key_lines[].line is a verbatim novel excerpt, not a pre-compressed
+    spoken-form line (unlike the legacy screenplay generator's key_lines,
+    which are always <= MAX_SPOKEN_CHARS_PER_SHOT by construction -- see
+    app.screenplay_ir's `_split_spoken_line` call and
+    project_prep_pack_to_screenplay's module comment for the historical-DB
+    evidence). EP6's own prep_pack has a 74-char verbatim quote that fits no
+    shot at all. The projection must split it -- deterministically, on
+    punctuation boundaries, without touching a single character -- into
+    units that each satisfy every shot's spoken-capacity ceiling.
+    """
+    from app import config
+    from app.spoken_contract import content_char_count
+
+    payload = _ep6_payload()
+    screenplay = project_prep_pack_to_screenplay(payload)
+
+    long_quotes = [
+        item["line"].strip()
+        for event in payload["event_chain"]
+        for item in event["key_lines"]
+        if content_char_count(item["line"]) > config.MAX_SPOKEN_CHARS_PER_SHOT
+    ]
+    assert long_quotes, "fixture should exercise at least one over-capacity quote"
+
+    # 1) No projected key_line ever exceeds the largest single-shot budget.
+    for key_line in screenplay.key_lines:
+        _speaker, _sep, text = key_line.partition("：")
+        text = text or key_line
+        assert content_char_count(text) <= config.MAX_SPOKEN_CHARS_PER_SHOT, (
+            f"key_line still exceeds shot capacity after projection: {key_line!r}"
+        )
+        assert text.strip(), "projection must never emit an empty key_line unit"
+
+    # 2) Splitting a long quote is lossless: its parts, in projected order,
+    #    concatenate back to the exact original bytes -- no rewriting, no
+    #    dropped characters, no reordering within the quote itself.
+    projected_texts = []
+    for key_line in screenplay.key_lines:
+        _speaker, _sep, text = key_line.partition("：")
+        projected_texts.append(text or key_line)
+    for quote in long_quotes:
+        parts = [text for text in projected_texts if text and text in quote]
+        assert parts, f"no projected parts trace back to over-capacity quote {quote!r}"
+        assert "".join(parts) == quote, (
+            f"split parts do not losslessly reconstruct the source quote: "
+            f"{parts!r} vs {quote!r}"
+        )
 
 
 def test_projection_is_deterministic():
@@ -166,6 +228,80 @@ def test_projection_is_deterministic():
     first = project_prep_pack_to_screenplay(payload).model_dump(mode="json")
     second = project_prep_pack_to_screenplay(payload).model_dump(mode="json")
     assert first == second
+
+
+def _minimal_prep_pack(key_lines: list[dict]) -> dict:
+    """Smallest payload project_prep_pack_to_screenplay actually reads from,
+    for boundary cases the real EP6 fixture does not happen to contain."""
+    return {
+        "prep_pack_version": "1.5.0",
+        "episode_no": 99,
+        "episode_scope": {"chapter_indexes": [1]},
+        "event_chain": [{
+            "event_id": "ev_001",
+            "order": 1,
+            "summary": "边界用例",
+            "source_evidence": [],
+            "key_lines": key_lines,
+        }],
+        "asset_manifest": {"characters": [], "scenes": []},
+        "cliffhanger": "",
+    }
+
+
+def test_empty_key_line_produces_no_unit_not_a_silent_placeholder():
+    """An empty (or whitespace-only) line has nothing to speak; it must
+    disappear entirely rather than surface as a hollow key_line entry that
+    would occupy a KL* slot the outline is then forced to "assign"."""
+    payload = _minimal_prep_pack([
+        {"speaker": "甲", "line": "", "segment_index": 1},
+        {"speaker": "甲", "line": "   ", "segment_index": 1},
+        {"speaker": "甲", "line": "有效台词。", "segment_index": 1},
+    ])
+    screenplay = project_prep_pack_to_screenplay(payload)
+    assert screenplay.key_lines == ["甲：有效台词。"]
+
+
+def test_punctuation_only_key_line_is_kept_verbatim_and_never_over_capacity():
+    """A line that is pure punctuation (e.g. an ellipsis reaction) has zero
+    *spoken* content by app.spoken_contract.content_char_count's own
+    definition (punctuation is not counted), so it can never itself violate
+    the capacity gate -- but it must still survive the projection verbatim,
+    not be dropped just because it looks contentless."""
+    from app.spoken_contract import content_char_count
+
+    payload = _minimal_prep_pack([
+        {"speaker": "甲", "line": "……", "segment_index": 1},
+    ])
+    screenplay = project_prep_pack_to_screenplay(payload)
+    assert screenplay.key_lines == ["甲：……"]
+    assert content_char_count("……") == 0
+
+
+def test_unsplittable_long_single_clause_falls_back_to_character_chunks():
+    """A single run-on clause with no internal punctuation to split on (the
+    "超长且无法再切的单句" case) must not be silently dropped, truncated, or
+    left over-capacity. `_split_spoken_line`'s character-level fallback
+    guarantees every resulting chunk is non-empty and <= max_chars; this
+    test pins that guarantee at the projection's own boundary, not just
+    inside app.screenplay_ir's unit tests."""
+    from app import config
+    from app.spoken_contract import content_char_count
+
+    long_line = "甲" * 80  # no punctuation anywhere; nothing to split on
+    payload = _minimal_prep_pack([
+        {"speaker": "某", "line": long_line, "segment_index": 1},
+    ])
+    screenplay = project_prep_pack_to_screenplay(payload)
+    assert screenplay.key_lines, "must not silently drop an unsplittable long line"
+
+    parts = []
+    for key_line in screenplay.key_lines:
+        _speaker, _sep, text = key_line.partition("：")
+        assert text, "must never emit an empty unit"
+        assert content_char_count(text) <= config.MAX_SPOKEN_CHARS_PER_SHOT
+        parts.append(text)
+    assert "".join(parts) == long_line
 
 
 # ---------------------------------------------------------------------------
