@@ -523,7 +523,12 @@ def test_functional_identity_after_discovery_needs_no_portrait(monkeypatch):
     assert functional_extras == [{
         "label": "黑衣人", "event_ids": ["ev_001"],
         "visual_entity_id": "entity:b645a470abc42e7e",
-        "provenance": {"method": "discovery", "anchor_segments": [], "anchor_phrase": ""},
+        "provenance": {
+            "method": "discovery", "anchor_segments": [], "anchor_phrase": "",
+            # 1.10.0 缺陷 A 顺带修复：候选集为空（bible 未注册任何角色），
+            # 候选判别从未获得发起机会。
+            "candidate_verdict_attempted": False,
+        },
     }]
     assert stats["character_discovery_calls"] == 1
 
@@ -772,13 +777,15 @@ def test_ep5_hallucinated_scene_bind_with_no_text_evidence_routes_through_discov
 # ---------------------------------------------------------------------------
 
 def test_suspected_true_name_hypothesis_verified_via_forward_window_binds_with_alias(monkeypatch):
-    """红灯（第29轮身份绑定审判程序）：模型申报"灰袍老者"疑似真名"丹鬼"，
-    本集原文没有"丹鬼"，但全书 chapters 扫描（卷宗检索不再局限于某个前瞻
-    窗口）能找到含"丹鬼"的第 6 章原文——卷宗非空，裁决模型独立判 same 并
-    逐字引用第 6 章原句，引句核验通过——核验通过，绑定到丹鬼已有的
-    portrait_id，走的是核验快车道，不再触发全量身份消歧模型调用，
-    aliases=["灰袍老者"]，method 标注 resolution_forward（钉住的支撑句
-    不落在本集自己的段落里）。"""
+    """红灯（第29轮身份绑定审判程序，1.10.0 缺陷 A 修复后改写为候选判别 +
+    双锚定钉证）：模型申报"灰袍老者"疑似真名"丹鬼"，本集原文没有"丹鬼"，
+    但全书 chapters 扫描（卷宗检索不再局限于某个前瞻窗口）能找到第 6 章
+    一句同时点出"灰袍老者"与"丹鬼"的揭示原文——卷宗非空且构成双锚定证据
+    （dual_anchor_available），裁决模型独立选中候选"丹鬼"并钉住这条双锚定
+    卷宗条目，钉证通过（引句同时逐字包含 alias 与 true_name）——核验通过，
+    绑定到丹鬼已有的 portrait_id，走的是核验快车道，不再触发全量身份消歧
+    模型调用，aliases=["灰袍老者"]，method 标注 resolution_forward（钉住的
+    支撑句不落在本集自己的段落里），provenance.dual_anchor=True。"""
     conn = _make_conn()
     conn.execute(
         "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
@@ -788,7 +795,8 @@ def test_suspected_true_name_hypothesis_verified_via_forward_window_binds_with_a
         "INSERT INTO episodes(project_id, episode_no, source_chapters) VALUES ('p1', 2, '[5]')"
     )
     conn.execute(
-        "INSERT INTO chapters(project_id, idx, content) VALUES ('p1', 6, '丹鬼缓缓摘下兜帽，露出真容。')"
+        "INSERT INTO chapters(project_id, idx, content) VALUES ('p1', 6, "
+        "'灰袍老者缓缓摘下兜帽，露出真容，他正是丹鬼。')"
     )
     conn.commit()
 
@@ -803,9 +811,12 @@ def test_suspected_true_name_hypothesis_verified_via_forward_window_binds_with_a
         verdict_calls["n"] += 1
         prompt = str(messages[0]["content"])
         assert "灰袍老者" in prompt and "丹鬼" in prompt
-        assert "丹鬼缓缓摘下兜帽" in prompt, "卷宗必须真的把第6章原文塞进裁决提示词"
+        assert "灰袍老者缓缓摘下兜帽" in prompt, "卷宗必须真的把第6章原文塞进裁决提示词"
+        assert kwargs.get("output_schema")["properties"]["selected_candidate"]["enum"] == [
+            "丹鬼", "都不是/无法确定",
+        ]
         return prep_pack._PrepPackTrueNameVerdictResponse(
-            verdict="same", supporting_quote="丹鬼缓缓摘下兜帽，露出真容。",
+            selected_candidate="丹鬼", supporting_entry_index=1,
         )
 
     monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
@@ -829,17 +840,20 @@ def test_suspected_true_name_hypothesis_verified_via_forward_window_binds_with_a
             "method": "resolution_forward", "anchor_segments": [],
             # 第30轮 RCA 修正：anchor_phrase 记裁决钉住的支撑句本身（第29轮
             # 曾误写成空字符串），只有 anchor_segments（本地段号）合法留空。
-            "anchor_phrase": "丹鬼缓缓摘下兜帽，露出真容。",
+            "anchor_phrase": "灰袍老者缓缓摘下兜帽，露出真容，他正是丹鬼。",
             # 第29轮：suspected_true_name 经身份绑定审判程序核验通过，但钉住
             # 的支撑句来自全书检索出的第 6 章（不是本集自己的段落）——method
             # 标注 resolution_forward，空锚合法豁免，附带裁决真正引用的章节号
             # 供审计核对（不是场景侧那批真正的空锚缺陷）。
             "forward_chapter_label": "第 6 章",
+            # 1.10.0 缺陷 A：这条支撑句同时逐字包含 alias 与 true_name，是
+            # 结构上可能存在的双锚定证据，钉证钉在了它上面，非退化路径。
+            "dual_anchor": True,
         },
     }]
     assert any(
         h["status"] == "accepted" and h["mention"] == "灰袍老者"
-        and h["suspected_true_name"] == "丹鬼"
+        and h["suspected_true_name"] == "丹鬼" and h["dual_anchor"] is True
         for h in true_name_hints
     )
 
@@ -2232,12 +2246,12 @@ def test_true_name_dossier_trial_rejects_enumeration_counter_evidence_real_corpu
             "小胖子、王有材、还有那虎头虎脑的少年，当初我们四人被一起带上"
             "靠山宗，不知此刻他们怎样。" in prompt
         ), "第10章列举反证段落必须真的进入裁决卷宗"
+        # 1.10.0 缺陷 A：是非题改候选判别——候选集里唯一的候选就是假设本身
+        # "王有材"（roster 未注册其它角色），列举反证段落明确把"小胖子"跟
+        # "王有材"并列举成两个不同的人，模型据此选"都不是/无法确定"，不是
+        # 勉强确认候选。
         return prep_pack._PrepPackTrueNameVerdictResponse(
-            verdict="different",
-            supporting_quote=(
-                "小胖子、王有材、还有那虎头虎脑的少年，当初我们四人被一起带上"
-                "靠山宗，不知此刻他们怎样。"
-            ),
+            selected_candidate="都不是/无法确定", supporting_entry_index=1,
         )
 
     monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
@@ -2269,7 +2283,7 @@ def test_true_name_dossier_trial_rejects_enumeration_counter_evidence_real_corpu
     rejected = [h for h in true_name_hints if h["status"] == "rejected"]
     assert rejected == [{
         "kind": "character", "mention": "小胖子", "suspected_true_name": "王有材",
-        "status": "rejected", "reason": "rejected_verdict_different",
+        "status": "rejected", "reason": "rejected_verdict_uncertain",
     }]
     assert not any(c["portrait_id"] == "cp-wyc" for c in characters), (
         "绝不能把「小胖子」误绑给列举反证已经证明是另一个人的「王有材」"
@@ -2304,8 +2318,11 @@ def test_true_name_dossier_trial_rejects_containment_false_positive_real_corpus(
         assert "除了许师姐外，便是上官修身边的男子。" in prompt, (
             "第6章反证段落必须真的进入裁决卷宗"
         )
+        # 1.10.0 缺陷 A：是非题改候选判别——alias 本身包含 true_name 子串，
+        # 这条卷宗记录天然构成"双锚定"（正是本用例要测的误绑陷阱：字面包含
+        # 不等于身份链接），模型据此选"都不是/无法确定"，不是勉强确认候选。
         return prep_pack._PrepPackTrueNameVerdictResponse(
-            verdict="different", supporting_quote="除了许师姐外，便是上官修身边的男子。",
+            selected_candidate="都不是/无法确定", supporting_entry_index=1,
         )
 
     monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
@@ -2343,7 +2360,7 @@ def test_true_name_dossier_trial_rejects_containment_false_positive_real_corpus(
     rejected = [h for h in true_name_hints if h["status"] == "rejected"]
     assert rejected == [{
         "kind": "character", "mention": "上官修身边的男子", "suspected_true_name": "上官修",
-        "status": "rejected", "reason": "rejected_verdict_different",
+        "status": "rejected", "reason": "rejected_verdict_uncertain",
     }]
     assert not any(c["portrait_id"] == "cp-sgx" for c in characters), (
         "含有目标人名子串不等于同一人，绝不能因包含关系静默绑定"
@@ -2375,8 +2392,11 @@ def test_true_name_dossier_trial_accepts_verified_link_real_corpus(monkeypatch):
         verdict_calls["n"] += 1
         prompt = str(messages[0]["content"])
         assert "他是当年的小胖子，李富贵。" in prompt, "第692章链接段落必须真的进入裁决卷宗"
+        # 1.10.0 缺陷 A：这句原文同时逐字包含 alias"小胖子"与 true_name
+        # "李富贵"，是结构上真实存在的双锚定证据，候选判别选中"李富贵"、
+        # 钉证钉在这条双锚定条目上。
         return prep_pack._PrepPackTrueNameVerdictResponse(
-            verdict="same", supporting_quote="他是当年的小胖子，李富贵。",
+            selected_candidate="李富贵", supporting_entry_index=1,
         )
 
     monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
@@ -2409,21 +2429,25 @@ def test_true_name_dossier_trial_accepts_verified_link_real_corpus(monkeypatch):
             # 第30轮 RCA 修正：anchor_phrase 记裁决钉住的支撑句本身。
             "anchor_phrase": "他是当年的小胖子，李富贵。",
             "forward_chapter_label": "第 692 章",
+            "dual_anchor": True,
         },
     }]
     assert any(
         h["status"] == "accepted" and h["mention"] == "小胖子"
-        and h["suspected_true_name"] == "李富贵"
+        and h["suspected_true_name"] == "李富贵" and h["dual_anchor"] is True
         for h in true_name_hints
     )
 
 
-def test_true_name_dossier_trial_rejects_unpinnable_quote_anti_forgery(monkeypatch):
-    """红灯 d（防编证词）：裁决模型判 same，但引用的"支撑句"根本不在卷宗
-    任何一条原文里逐字存在（编造证词，或者只是意译/概括而非逐字摘录）——
-    钉证（_prep_pack_pin_dossier_quote）必须失败，reason=
-    rejected_quote_not_pinned，绝不能仅凭模型说"same"就采信，防止模型在
-    没有真实依据时也能编一句听起来像证据的话蒙混过关。"""
+def test_true_name_dossier_trial_rejects_unpinnable_entry_index_anti_forgery(monkeypatch):
+    """红灯 d（防编证词，1.10.0 缺陷 A 修复后钉证机制改为段号钉证，见
+    PREP_PACK_VERSION 上方大注释——旧版逐字引句比对被真实生产数据证明会
+    因模型转录噪音系统性误杀，改为结构性段号核验）：裁决模型选中了正确
+    候选"李富贵"，但引用的 supporting_entry_index 不在本次卷宗实际收录的
+    候选编号集合内（协议层 enum 已经不允许，这里模拟 provider 未必遵守
+    enum 的防御性核验）——钉证（_prep_pack_true_name_pin_dossier_entry）
+    必须失败，reason=rejected_entry_not_pinned，绝不能仅凭模型选中正确
+    候选就采信，还必须验证它真的钉在卷宗里真实存在的条目上。"""
     conn = _make_conn()
     conn.execute(
         "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
@@ -2440,9 +2464,10 @@ def test_true_name_dossier_trial_rejects_unpinnable_quote_anti_forgery(monkeypat
     async def fake_chat_structured(messages, **kwargs):
         verdict_calls["n"] += 1
         return prep_pack._PrepPackTrueNameVerdictResponse(
-            verdict="same",
-            # 卷宗里根本没有这句话——编造的"证词"。
-            supporting_quote="两人身份完全一致，毫无疑问是同一个人。",
+            selected_candidate="李富贵",
+            # 卷宗只有 1 条记录（entry_index=1）——99 不在集合内，模拟
+            # provider 未遵守协议层 enum 约束的防御性场景。
+            supporting_entry_index=99,
         )
 
     monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
@@ -2474,10 +2499,10 @@ def test_true_name_dossier_trial_rejects_unpinnable_quote_anti_forgery(monkeypat
     rejected = [h for h in true_name_hints if h["status"] == "rejected"]
     assert rejected == [{
         "kind": "character", "mention": "小胖子", "suspected_true_name": "李富贵",
-        "status": "rejected", "reason": "rejected_quote_not_pinned",
+        "status": "rejected", "reason": "rejected_entry_not_pinned",
     }]
     assert not any(c["portrait_id"] == "cp-lfg" for c in characters), (
-        "编造的证词不得被钉证接受，绝不能因模型口头声称 same 就静默采信"
+        "编造的证词不得被钉证接受，绝不能因模型口头声称选中正确候选就静默采信"
     )
 
 
@@ -2518,7 +2543,7 @@ def test_character_rename_coincidentally_matching_suspected_true_name_uses_resol
         verdict_calls["n"] += 1
         # pass 1 的裁决态度不确定——假设不被采信，"小胖子"留作未解析。
         return prep_pack._PrepPackTrueNameVerdictResponse(
-            verdict="uncertain", supporting_quote="",
+            selected_candidate="都不是/无法确定", supporting_entry_index=1,
         )
 
     monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
@@ -2606,7 +2631,7 @@ def test_scene_true_name_hypothesis_verdict_prompt_uses_scene_semantics(monkeypa
             "第50章链接段落必须真的进入裁决卷宗"
         )
         return prep_pack._PrepPackTrueNameVerdictResponse(
-            verdict="same", supporting_quote="众人所说的荒地，其实正是宗门秘境无极峰绝顶。",
+            selected_candidate="无极峰绝顶", supporting_entry_index=1,
         )
 
     monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
@@ -2668,7 +2693,7 @@ def test_true_name_verdict_cache_isolated_by_subject_kind(monkeypatch):
     async def fake_chat_structured(messages, **kwargs):
         verdict_calls["n"] += 1
         return prep_pack._PrepPackTrueNameVerdictResponse(
-            verdict="same", supporting_quote="阿石本名就是石大山，村里人都爱这么叫他。",
+            selected_candidate="石大山", supporting_entry_index=1,
         )
 
     monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
@@ -2704,6 +2729,340 @@ def test_true_name_verdict_cache_isolated_by_subject_kind(monkeypatch):
     assert accepted_kinds == {"character", "scene"}
     assert any(c["display_name"] == "石大山" for c in characters)
     assert any(s["display_name"] == "石大山" for s in scene_list)
+
+
+# ---------------------------------------------------------------------------
+# 1.10.0（缺陷 A：真名裁决从是非题改候选判别，钉证要求引句含 alias 本身，
+# 双锚定优先、结构上不存在双锚定证据时退化为集内指代段落且可观测标记，见
+# PREP_PACK_VERSION 上方 1.10.0 大注释）。下面四条红灯用真实生产数据坐实
+# 过的失败/成功形状覆盖新钉证规则的四个分支。
+# ---------------------------------------------------------------------------
+
+def test_true_name_verdict_rejects_pinned_entry_missing_alias_real_data_shape(monkeypatch):
+    """红灯（"零保护"形状，真实数据坐实：114 条真实 same 判决里 56 条支撑句
+    缺 alias/true_name 至少一个，明确询问人名的 75 条里 2 条连 alias 本身
+    都不含）：裁决模型选中了正确候选"王有材"，钉证段号本身合法（真实落在
+    卷宗集合内），但钉住的那条卷宗记录通篇只提到"王有材"，一个字都没提到
+    待判别名"小胖子"——这条"证据"证不出"小胖子就是王有材"，必须拒绝，
+    reason=rejected_pinned_entry_missing_alias，不能仅凭模型选对候选就
+    采信。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-wyc','p1','王有材',1,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id, idx, content) VALUES ('p1', 15, ?)",
+        ("王有材是个内门弟子，为人低调，从不与人争执。",),
+    )
+    conn.commit()
+
+    verdict_calls = {"n": 0}
+
+    async def fake_chat_structured(messages, **kwargs):
+        verdict_calls["n"] += 1
+        return prep_pack._PrepPackTrueNameVerdictResponse(
+            selected_candidate="王有材", supporting_entry_index=1,
+        )
+
+    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {"added": [], "resolutions": [], "errors": [], "skipped": [], "warnings": []}
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    events = [_event("ev_301", characters=[
+        {"display_name": "小胖子", "is_background_extra": False, "suspected_true_name": "王有材"},
+    ])]
+    (
+        characters, scene_list, functional_extras, errors, stats,
+        true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
+    ) = _resolve(
+        conn, events=events,
+        source_text="小胖子摸了摸后脑勺，嘿嘿一笑。",
+    )
+
+    assert verdict_calls["n"] == 1
+    assert errors == []
+    rejected = [h for h in true_name_hints if h["status"] == "rejected"]
+    assert rejected == [{
+        "kind": "character", "mention": "小胖子", "suspected_true_name": "王有材",
+        "status": "rejected", "reason": "rejected_pinned_entry_missing_alias",
+    }]
+    assert not any(c["portrait_id"] == "cp-wyc" for c in characters), (
+        "钉住的证据压根没提到待判别名，绝不能采信"
+    )
+    assert any(e["label"] == "小胖子" for e in functional_extras)
+
+
+def test_true_name_verdict_requires_dual_anchor_pin_when_available(monkeypatch):
+    """红灯（双锚定优先，见 PREP_PACK_VERSION 上方 1.10.0 大注释）：全卷宗
+    结构上确实存在能同时证明 alias 与 true_name 的双锚定条目（第10章），
+    但模型选对候选后却把钉证钉在了另一条只含 alias 的弱证据（第20章）上——
+    卷宗里明明有更强的桥接句摆在模型面前，不能接受它舍强就弱，reason=
+    rejected_dual_anchor_available_not_pinned。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-wyc','p1','王有材',1,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id, idx, content) VALUES ('p1', 10, ?)",
+        ("小胖子其实就是王有材的绰号。",),
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id, idx, content) VALUES ('p1', 20, ?)",
+        ("小胖子路过集市，买了个白面馒头。",),
+    )
+    conn.commit()
+
+    verdict_calls = {"n": 0}
+
+    async def fake_chat_structured(messages, **kwargs):
+        verdict_calls["n"] += 1
+        prompt = str(messages[0]["content"])
+        assert "小胖子其实就是王有材的绰号。" in prompt
+        assert "小胖子路过集市，买了个白面馒头。" in prompt
+        # 候选编号1是双锚定条目（both桶排在前面），候选编号2是弱证据——
+        # 模型选对了候选人本身，却钉在了编号2上。
+        return prep_pack._PrepPackTrueNameVerdictResponse(
+            selected_candidate="王有材", supporting_entry_index=2,
+        )
+
+    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {"added": [], "resolutions": [], "errors": [], "skipped": [], "warnings": []}
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    events = [_event("ev_302", characters=[
+        {"display_name": "小胖子", "is_background_extra": False, "suspected_true_name": "王有材"},
+    ])]
+    (
+        characters, scene_list, functional_extras, errors, stats,
+        true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
+    ) = _resolve(
+        conn, events=events,
+        source_text="小胖子摸了摸后脑勺，嘿嘿一笑。",
+    )
+
+    assert verdict_calls["n"] == 1
+    assert errors == []
+    rejected = [h for h in true_name_hints if h["status"] == "rejected"]
+    assert rejected == [{
+        "kind": "character", "mention": "小胖子", "suspected_true_name": "王有材",
+        "status": "rejected", "reason": "rejected_dual_anchor_available_not_pinned",
+    }]
+    assert not any(c["portrait_id"] == "cp-wyc" for c in characters)
+
+
+def test_true_name_verdict_accepts_degraded_in_episode_pin_when_no_dual_anchor_exists(monkeypatch):
+    """红灯（退化路径，真实 EP5"许姓女子"→"许清"案例的简化复现——"许清"要到
+    全书第34章才第一次出现，跟"许姓女子"在任何一段里都不会同时出现，双锚定
+    在这类跨章绑定上结构上不可能存在，见 PREP_PACK_VERSION 上方 1.10.0
+    大注释）：全卷宗不存在任何双锚定条目，唯一的卷宗记录只含 alias，但这条
+    记录确实来自本集自己的原文（"集内指代段落"）——允许退化接受，
+    provenance.dual_anchor 显式标记 False（不是静默降级），method 判定为
+    本地锚点（resolution，不是 resolution_forward——退化接受的前提正是
+    钉住的段落必须在本集内）。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-swj','p1','沈无极',1,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id, idx, content) VALUES ('p1', 7, ?)",
+        ("山道上走来一位银发老者，负手而立。",),
+    )
+    conn.commit()
+
+    verdict_calls = {"n": 0}
+
+    async def fake_chat_structured(messages, **kwargs):
+        verdict_calls["n"] += 1
+        assert kwargs.get("output_schema")["properties"]["selected_candidate"]["enum"] == [
+            "沈无极", "都不是/无法确定",
+        ]
+        return prep_pack._PrepPackTrueNameVerdictResponse(
+            selected_candidate="沈无极", supporting_entry_index=1,
+        )
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
+    def boom_character(*_a, **_k):
+        raise AssertionError("核验通过的假设应走确定性快车道，不应该再触发全量身份发现")
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+
+    events = [_event("ev_303", characters=[
+        {"display_name": "银发老者", "is_background_extra": False, "suspected_true_name": "沈无极"},
+    ])]
+    (
+        characters, scene_list, functional_extras, errors, stats,
+        true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
+    ) = _resolve(
+        conn, events=events,
+        source_text="山道上走来一位银发老者，负手而立。",
+    )
+
+    assert verdict_calls["n"] == 1
+    assert errors == []
+    assert characters == [{
+        "identity_id": "bible:沈无极", "display_name": "沈无极",
+        "portrait_id": "cp-swj", "event_ids": ["ev_303"], "aliases": ["银发老者"],
+        "visual_entity_id": "bible:沈无极", "display_appellation": "银发老者",
+        "provenance": {
+            "method": "resolution", "anchor_segments": [1],
+            "anchor_phrase": "山道上走来一位银发老者，负手而立。",
+            "dual_anchor": False,
+        },
+    }]
+    assert any(
+        h["status"] == "accepted" and h["mention"] == "银发老者"
+        and h["suspected_true_name"] == "沈无极" and h["dual_anchor"] is False
+        for h in true_name_hints
+    )
+
+
+def test_true_name_verdict_rejects_degraded_pin_from_unrelated_out_of_episode_chapter(monkeypatch):
+    """红灯（退化路径的安全网，真实数据坐实的风险：project_id=
+    proj_3ac0b627fa46 第981章有一处"许姓女子"，是完全不相关的转世预言
+    片段，跟 EP5 的孟浩/上官修剧情毫无关系，见 PREP_PACK_VERSION 上方
+    1.10.0 大注释）：全卷宗不存在双锚定条目，唯一命中的卷宗记录含 alias，
+    但来自一处跟本集毫无关系的其它章节（不是本集自己的段落）——退化接受
+    只对"集内指代段落"开放，这条不满足，必须拒绝，reason=
+    rejected_degraded_pin_out_of_episode。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-swj','p1','沈无极',1,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id, idx, content) VALUES ('p1', 500, ?)",
+        ("远处那银发老者转身离去，再未回头，与此集剧情毫无关系。",),
+    )
+    conn.commit()
+
+    verdict_calls = {"n": 0}
+
+    async def fake_chat_structured(messages, **kwargs):
+        verdict_calls["n"] += 1
+        return prep_pack._PrepPackTrueNameVerdictResponse(
+            selected_candidate="沈无极", supporting_entry_index=1,
+        )
+
+    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {"added": [], "resolutions": [], "errors": [], "skipped": [], "warnings": []}
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    events = [_event("ev_304", characters=[
+        {"display_name": "银发老者", "is_background_extra": False, "suspected_true_name": "沈无极"},
+    ])]
+    (
+        characters, scene_list, functional_extras, errors, stats,
+        true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
+    ) = _resolve(
+        conn, events=events,
+        source_text="山顶上，银发老者哈哈大笑起来。",
+    )
+
+    assert verdict_calls["n"] == 1
+    assert errors == []
+    rejected = [h for h in true_name_hints if h["status"] == "rejected"]
+    assert rejected == [{
+        "kind": "character", "mention": "银发老者", "suspected_true_name": "沈无极",
+        "status": "rejected", "reason": "rejected_degraded_pin_out_of_episode",
+    }]
+    assert not any(c["portrait_id"] == "cp-swj" for c in characters)
+
+
+# ---------------------------------------------------------------------------
+# 1.10.0（缺陷 B：skip_character_names 短路抢在 suspected_true_name 核验
+# 之前执行，作废已通过的裁决——真实 EP5 完整因果链，见 PREP_PACK_VERSION
+# 上方 1.10.0 大注释）。
+# ---------------------------------------------------------------------------
+
+def test_pass2_discovery_skip_name_collision_does_not_discard_pass1_accepted_true_name(monkeypatch):
+    """红灯（缺陷 B 核心场景，真实 EP5 完整因果链复现）：pass1 里
+    "许姓女子"→"许清"的 suspected_true_name 核验已经通过（双锚定卷宗，
+    accepted=True），但同一轮里另一个提及"神秘人"未能直接解析，触发 pass2
+    的角色发现——discovery 是本函数之外一次独立的全集重新通读，即使本集
+    其实只有一处"许姓女子"，它也可能把这同一个原文标签独立判定为"没有
+    归类结论"（跟 pass1 已经核验通过的结论毫无关系，只是撞了同一个字面
+    量）。旧代码里 pass2 的 `if name in skip_character_names: continue`
+    排在核验代码之前，会把"许姓女子"重新划进 skip_character_names 后
+    直接短路，作废 pass1 已经成立的绑定；修复后 suspected_true_name 核验
+    优先于这个短路，"许姓女子"必须仍然绑定到"许清"，且只发起一次模型
+    调用（pass2 命中 true_name_verdict_cache，不重复发起裁决）。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-xuqing','p1','许清',1,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id, idx, content) VALUES ('p1', 34, ?)",
+        ("许姓女子其实就是许清本人。",),
+    )
+    conn.commit()
+
+    verdict_calls = {"n": 0}
+
+    async def fake_chat_structured(messages, **kwargs):
+        verdict_calls["n"] += 1
+        return prep_pack._PrepPackTrueNameVerdictResponse(
+            selected_candidate="许清", supporting_entry_index=1,
+        )
+
+    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        # discovery 独立通读全集正文，跟 pass1 的核验毫无关系地把"许姓女子"
+        # 判成"没有归类结论"（真实 EP5 事故的确切因果链：角色发现自己的
+        # 候选面/措辞跟本集原文不完全对齐，撞上同一个字面量）。
+        return {
+            "added": [], "resolutions": [],
+            "skipped": [{"name": "许姓女子", "status": "skipped"}],
+            "errors": [], "warnings": [],
+        }
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    events = [_event("ev_401", characters=[
+        {"display_name": "许姓女子", "is_background_extra": False, "suspected_true_name": "许清"},
+        {"display_name": "神秘人", "is_background_extra": True},
+    ])]
+    (
+        characters, scene_list, functional_extras, errors, stats,
+        true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
+    ) = _resolve(
+        conn, events=events,
+        source_text="许姓女子从人群中走过，无人问津。神秘人则悄然隐入暗处。",
+    )
+
+    assert errors == []
+    assert verdict_calls["n"] == 1, (
+        "pass2 重新核验同一个 (subject_kind, alias, suspected_true_name) 必须"
+        "命中 true_name_verdict_cache，不重复发起模型调用"
+    )
+    by_portrait = {c["portrait_id"]: c for c in characters}
+    assert "cp-xuqing" in by_portrait, (
+        "「许姓女子」必须仍然绑定到许清，pass1 的结论不能被 pass2 静默作废"
+    )
+    assert by_portrait["cp-xuqing"]["display_appellation"] == "许姓女子"
+    assert not any(e["label"] == "许姓女子" for e in functional_extras), (
+        "绝不能因为角色发现独立通读凑巧撞出同名功能簇，就把已核验通过的绑定重新打回群演"
+    )
+    assert any(e["label"] == "神秘人" for e in functional_extras)
+    assert any(
+        h["status"] == "accepted" and h["mention"] == "许姓女子"
+        and h["suspected_true_name"] == "许清"
+        for h in true_name_hints
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2927,7 +3286,12 @@ def test_candidate_verdict_empty_candidate_set_stays_functional_extra(monkeypatc
 
 def test_candidate_verdict_no_match_selected_stays_functional_extra(monkeypatch):
     """反例②：候选集非空（许清入选），但模型如实回答"都不是/无法确定"——
-    必须维持原行为落 functional_extras，绝不强行绑定候选集里的任何一人。"""
+    必须维持原行为落 functional_extras，绝不强行绑定候选集里的任何一人。
+    1.10.0 缺陷 A 顺带修复：这批 functional_extras 确实发起过一次候选判别
+    模型调用（候选集/卷宗均非空）只是没选中，provenance.candidate_verdict_
+    attempted 必须是 True——跟"候选集为空、从未获得机会"的 False 区分开，
+    此前两者会坍缩成同一个 method="discovery" 值，只能翻 provider_calls
+    反推。"""
     conn = _make_conn()
     conn.execute(
         "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
@@ -2964,6 +3328,9 @@ def test_candidate_verdict_no_match_selected_stays_functional_extra(monkeypatch)
     assert errors == []
     assert not any(c["display_name"] == "许清" for c in characters)
     assert any(e["label"] == "银色长袍女子" for e in functional_extras)
+    extra = next(e for e in functional_extras if e["label"] == "银色长袍女子")
+    assert extra["provenance"]["method"] == "discovery"
+    assert extra["provenance"]["candidate_verdict_attempted"] is True
 
 
 def test_candidate_verdict_out_of_dossier_segment_rejected_stays_functional_extra(monkeypatch):
@@ -3884,5 +4251,12 @@ def test_prep_pack_version_is_1_8_0():
     申报非确定性漏报，被包装成一个只覆盖 SRC0001 的"显示标题"伪事件，见
     PREP_PACK_VERSION 上方 1.9.0 大注释）把 coverage_ledger.paratext 对
     chapters.title 这一 DB 锚定子集的判定改回确定性——不再要求模型申报，
-    是 ledger 判定语义变更，同样比照 1.4.1 的先例推进版本号。"""
-    assert prep_pack.PREP_PACK_VERSION == "1.9.0"
+    是 ledger 判定语义变更，同样比照 1.4.1 的先例推进版本号。1.10.0（两个
+    已完成根因定位的缺陷：真名裁决是非题改候选判别 + 钉证要求引句含 alias
+    本身/双锚定优先、结构上不存在双锚定证据时退化为集内指代段落且可观测、
+    skip_character_names 短路不再作废已核验通过的 suspected_true_name
+    结论，见 PREP_PACK_VERSION 上方 1.10.0 大注释）会实际改变真名裁决的
+    模型输出与部分绑定的钉证通过与否，同样是 prompt-contract 变更，版本
+    继续推进——函数名/测试名沿用旧号不改，只更新断言值，避免无谓的大范围
+    改名。"""
+    assert prep_pack.PREP_PACK_VERSION == "1.10.0"

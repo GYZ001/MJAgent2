@@ -231,7 +231,7 @@ from app.validators import (
     match_scene_name,
 )
 
-PREP_PACK_VERSION = "1.9.0"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "1.10.0"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
 # gained functional_extras; 1.4.0: coverage_ledger gained paratext (deterministic
 # keyword/position classifier, since replaced); 1.4.1: paratext classification
@@ -642,6 +642,123 @@ PREP_PACK_VERSION = "1.9.0"  # 1.1.0: event_chain entries carry source_span (P1 
 # 判定结果与部分事件发布的 source_span（真正的判定语义变更，不只是提示词
 # 措辞），比照 1.4.1 的先例（分类机制变更即使 payload 形状不变也要推进
 # 版本号）推进版本号第二位。
+# 1.10.0（两个已完成根因定位的缺陷，独立评审 blocker，prompt-contract 变更，
+# 版本推进）：
+#
+# 缺陷 A 根因（_prep_pack_true_name_verdict 一族）：真名裁决问的是
+# same/different/uncertain 是非题——app/stages.py 那条孪生路径（别名裁决庭）
+# 在 7959b48 已经把同一种是非题形态改成候选判别（该提交信息原话："是非题
+# 改为候选判别"），理由是是非题会诱发确认偏误：模型被直接问"X 是不是 Y"时，
+# 倾向于确认递给它的假设，而不是独立枚举"X 还可能是谁"。prep_pack.py 这条
+# 更早落地、结构几乎一样的孪生路径（角色/场景改名共用）当时没有跟着迁移。
+# 本项目已有四次真实误绑事故印证这个失败形状：小胖子→王有材、上官修身边
+# 男子→上官修（这两条被后续的反证/包含关系检查拦下，但拦截靠的是运气好
+# 卷宗里恰好有反证段，不是机制本身不会诱发确认偏误）、孟浩←虎爷爷、
+# 王腾飞←王师弟（后两条是 app/stages.py 那条孪生路径迁移前的真实误登记，
+# 印证的正是同一种是非题问法的通病）。
+# 钉证同样零保护：_prep_pack_pin_dossier_quote 只检查模型引用的
+# supporting_quote 逐字存在于卷宗某一条里，不检查这条引句是否包含 alias
+# 本身——卷宗的 single 桶天然会收录只含 alias 或只含 true_name 其中一个词
+# 的段落，一个 same 判决完全可能钉在一句只谈 true_name、压根没提到 alias
+# 的段落上。生产数据实测（data/manju.db，project_id=proj_3ac0b627fa46，
+# 397 条历史 true_name_verdict 调用）坐实了这个数量级：114 条真实 same
+# 判决里 56 条（49%）引用的 supporting_quote 缺 alias/true_name 至少一个；
+# 只看明确询问人名（noun_label="人名"）的 75 条，18 条（24%）缺至少一个，
+# 其中 16 条缺的是 true_name（下面会说明这类基本合法，不该拦）、2 条缺的
+# 是 alias 本身（这才是真正的"零保护"——钉的话跟待判标签毫无关系）。
+#
+# 为什么不能一刀切要求引句同时字面包含 alias 与 true_name（双锚定）：
+# 真名裁决的卷宗检索范围是全书 chapters 全表（_prep_pack_true_name_dossier
+# docstring 开宗明义），不是本集正文——这是它跟 app/stages.py 那条孪生路径
+# 的关键差异，后者的裁决卷宗缩小到已经定位到的单一桥接章（见 app/stages.py
+# 模块顶部"A1a. 桥接章确定性检索"一节），本函数的检索对象天生跨章。别名
+# 出现在本集，真名往往要到全书更靠后的章节才第一次被作者直接点名——这不是
+# 理论推测，是本次修复前用真实语料验证过的结构性事实：EP5 目标标签
+# "许姓女子"→"许清"，"许姓女子"只在第 5 章出现（4 次），"许清"二字在全书
+# 第 34 章才第一次逐字出现（第 1-33 章全部是 0 次），中间桥接的是已确认
+# 别名"许师姐"（第 5 章 6 次、第 12 章 18 次……），"许姓女子"与"许清"两个
+# 字符串在全书任何一段里都不会同时出现——不是这次采样漏了，是结构上不存在
+# 这样的段落。强制双锚定会把这条本该成立的绑定直接判死。
+#
+# 钉证规则（最终选定，三条约束叠加，都用真实数据验证过对目标场景零误伤）：
+#   1. 是非题改候选判别（_prep_pack_true_name_verdict_candidates）：候选集
+#      = suspected_true_name 本身 ∪ 人物谱/场景谱里在卷宗文本中有字面命中
+#      的其它候选，加一个显式"都不是/无法确定"出口（enum 收紧协议层选项，
+#      同 _prep_pack_functional_candidate_call 的写法）。候选来源完全是
+#      结构化数据（Bible.characters/Bible.scenes）+ 卷宗文本的逐字包含
+#      判断，不硬编码任何具体人名/场景名。
+#   2. 钉证至少要求引句逐字包含被解析的那个 alias 本身（新增的结构性
+#      前提，_prep_pack_verify_true_name_hypothesis 里
+#      `alias not in pinned["text"]` 即拒）——这是零保护的主要来源，加上
+#      这一条对上面 EP5 真实案例零伤害（"许姓女子"那两段本来就含 alias）。
+#   3. 分情况处理 true_name 是否也要求逐字出现：
+#      - 若全卷宗存在同时含 alias 与 true_name 的条目（both 桶非空，
+#        dual_anchor_available=True），钉证必须钉在其中一条上，不接受
+#        只钉了 alias 那一侧的弱证据——卷宗里明明有更强的桥接句摆在模型
+#        面前，没有理由接受它舍强就弱；
+#      - 若全卷宗结构上不存在双锚定条目（本项目 EP5 案例即此，
+#        dual_anchor_available=False），退化为只要求钉住的条目含 alias、
+#        且这个条目确实来自本集自己的原文（``pinned["text"] in
+#        source_text``）——即"集内指代段落"，不是全书任意位置巧合复现的
+#        同一个短语。这条限制不是理论推演：真实语料里"许姓女子"这个短语
+#        在第 981 章又出现一次，但那段是完全不相关的转世预言片段（"第九山
+#        轮回之魂，许姓女子，万鬼护送……"），跟 EP5 的孟浩/上官修剧情毫无
+#        关系——没有"集内"这条限制，钉证可能钉在这类不相关的巧合复现上。
+#      两种情形是否发生的判定结果（``dual_anchor`` 布尔值）不静默吞掉，写进
+#      asset_manifest 条目的 provenance.dual_anchor 与 true_name_hints 里
+#      accepted 记录的 dual_anchor 字段，可观测、可审计，符合本项目"禁止
+#      静默降级"的硬性纪律。
+#   钉证机制本身也从"逐字引句比对"改为"段号钉证"（_prep_pack_true_name_
+#   pin_dossier_entry，参照 _prep_pack_functional_candidate_pin_segment 与
+#   app/stages.py._alias_verdict_pin_segment 的既有先例）：生产数据里能
+#   看到模型的 supporting_quote 有把多个卷宗段落拼接、摘要成一整句"证词"
+#   的情形（provider_calls id=9700/10498），逐字比对因此系统性误杀部分
+#   真正成立的判定；卷宗内容本身是代码检索出的真实原文，模型只需引用目录
+#   编号，不存在编造空间，钉证退化为整数是否落在集合内的结构性判断。
+#   顺带修一处可观测性缺口（未解析角色标签候选判别机制，1.8.0）：
+#   provenance.method="discovery" 此前把"从未获得候选判别机会"（候选集/
+#   卷宗为空，压根没发起模型调用）与"候选判别跑过但没选中"（发起了模型
+#   调用，模型选了"都不是"或钉证未通过）坍缩成同一个值，只能翻
+#   provider_calls 反推。新增 provenance.candidate_verdict_attempted
+#   布尔字段区分两种情形（未新增 method 取值，scripts/episode_source_
+#   audit.py 的 ANCHOR_VERIFIED_METHODS 无需同步登记）。
+#
+# 缺陷 B 根因（_pass 里的 skip_character_names 短路）：pass2 里
+# `if name in skip_character_names: continue` 排在 suspected_true_name
+# 核验代码之前执行——一旦某个提及的原始 name 恰好也被角色发现（本函数之外
+# 一次独立的全集重新通读）判定为需要 skip（跟本提及毫无关系的另一处同名
+# 巧合），这个 continue 会在核验代码执行之前就跳出循环，即使
+# suspected_true_name 早在 pass1（skip_character_names 为空集，不存在
+# 短路可能）里已经核验通过、钉证成功、accepted=True，pass2 重跑同一个提及
+# 时这个已经成立的结论会被无声作废——4 条提及从未进入 unresolved_
+# characters，候选判别循环里从未出现以这个字符串为标的的记录，
+# true_name_verdict_cache 里明明已经缓存着 accepted 判决，却因为 continue
+# 提前执行，代码根本没有运行到读缓存的那一行。真实 EP5 数据完整复现了这条
+# 因果链（"许姓女子"→"许清"：pass1 accepted，pass2 因角色发现独立判定
+# 另一段"许姓女子"为群演而被撞名短路作废，最终发布产物里"许姓女子"整段
+# 掉进 functional_extras，method="discovery"）。
+# 修法：把 suspected_true_name 核验代码移到 skip_character_names 短路
+# 判断之前无条件执行（对所有提及一视同仁，包括最终会落 skip 的那些——
+# 多数提及的 suspected_true_name 为空，核验代码内部第一行就直接返回，
+# 不产生额外模型调用），短路条件追加 `and not via_suspected_true_name`：
+# 已核验通过的信号优先于"角色发现独立通读凑巧撞出同名功能簇"这个更弱的
+# 兜底信号。因为 pass1 与 pass2 遍历的是同一份 events 列表（同一组
+# (alias, suspected_true_name) 组合），这次重排不增加任何新的模型调用——
+# pass2 里被重新算到的核验请求，其 (subject_kind, alias, suspected_true_
+# name) 组合在 pass1 已经跑过并写入 true_name_verdict_cache，直接命中
+# 缓存复用，成本为零。
+#
+# 两个缺陷的交互（验收纪律）：缺陷 A 让钉证变严（alias 必须逐字出现、
+# 双锚定优先），可能使某条此前"侥幸"通过的绑定在新规则下判定证据不足；
+# 缺陷 B 修好只是让"已经成立的判决不再被短路作废"，不改变判决本身是否
+# 成立。若 A 的新规则判定某条绑定证据不足，B 修好也不会让它重新绑上——
+# 不为了让测试/某条真实数据"看起来绑上了"而放宽 A 新增的任何一条约束。
+#
+# 不改变 event_chain/asset_manifest 既有字段集合（新增字段均为可选，
+# dual_anchor/candidate_verdict_attempted 都是纯附加），但会实际改变
+# suspected_true_name 裁决的模型输出与部分绑定的钉证通过与否（真正的
+# prompt-contract 变更），比照 1.6.1（同一类"是非题改措辞/范式"的先例）
+# 推进版本号。
 QA_PROFILE_VERSION = "prep-pack-qa-gate-1"
 _QA_EVALUATOR_NAME = "screenplay_production_qa"
 _CHUNK_MAX_CHARS = 6000
@@ -1009,6 +1126,8 @@ def _prep_pack_scene_alias_provenance(
 def _prep_pack_provenance(
     method: str, anchor_segments: list[int], anchor_phrase: str,
     *, forward_chapter_label: str = "", source_episode_no: int | None = None,
+    dual_anchor: bool | None = None,
+    candidate_verdict_attempted: bool | None = None,
 ) -> dict[str, Any]:
     """统一构造 provenance 结构，避免多处调用各自拼一份字面量字典漂移。
     forward_chapter_label（1.6.0 第28轮）只在 method="resolution_forward"
@@ -1021,9 +1140,20 @@ def _prep_pack_provenance(
     pack 且同 scene_reference_id 的绑定同名、那条来源绑定自身还要递归核验
     通过），不是本次新造的字段名，也故意不跟 forward_chapter_label 复用
     同一个字段——两者是不同的编号域（前瞻窗口指向"章"，跨集别名继承指向
-    "集"），混装单位会重蹈第28轮排查过的"同一数据两个真源"覆辙。两者都是
-    纯附加字段，其它 method 不带这些 key，不影响既有消费者（payload 冻结
-    纪律照旧）。"""
+    "集"），混装单位会重蹈第28轮排查过的"同一数据两个真源"覆辙。
+    dual_anchor（1.10.0，缺陷 A 修复）只在 suspected_true_name 核验通过
+    时非 None——True 表示钉证命中的是同时含 alias 与 true_name 的双锚定
+    条目，False 表示全卷宗结构上不存在双锚定证据、退化为仅含 alias 的
+    集内指代条目（见 _prep_pack_verify_true_name_hypothesis docstring）。
+    显式记录这个布尔值是可观测降级的落地点——本项目明令禁止静默降级，不能
+    只在 provider_calls 里才看得出这次绑定走的是退化路径。
+    candidate_verdict_attempted（1.10.0，缺陷 A 顺带修复的可观测性缺口）
+    只在 method="discovery" 时非 None——区分这批 functional_extras 是
+    「从未获得候选判别机会」（候选集为空/卷宗为空，True 之前从未发起过
+    候选判别模型调用）还是「候选判别跑过但没选中」（发起过调用，模型选了
+    "都不是/无法确定"或钉证未通过），此前两者坍缩成同一个 method 值，只能
+    翻 provider_calls 反推。三者都是纯附加字段，其它 method/情形不带这些
+    key，不影响既有消费者（payload 冻结纪律照旧）。"""
     provenance = {
         "method": method,
         "anchor_segments": list(anchor_segments),
@@ -1033,6 +1163,10 @@ def _prep_pack_provenance(
         provenance["forward_chapter_label"] = forward_chapter_label
     if source_episode_no is not None:
         provenance["source_episode_no"] = source_episode_no
+    if dual_anchor is not None:
+        provenance["dual_anchor"] = dual_anchor
+    if candidate_verdict_attempted is not None:
+        provenance["candidate_verdict_attempted"] = candidate_verdict_attempted
     return provenance
 
 
@@ -1388,16 +1522,25 @@ def _prep_pack_lookup_character_alias_canonical_name_legacy_scan(
 #      "反证"规则去猜它长什么样。卷宗超过字符预算时用
 #      _prep_pack_sample_dossier_entries_within_budget 做确定性（非随机）
 #      采样：同时含两词的段落全部保留，只含一个词的段落按下标等距抽样。
-#   2) 裁决（模型，唯一一次调用，_prep_pack_true_name_verdict）：独立
-#      调用，只给卷宗原文，不携带任何一方"是同一人"或"不是同一人"的
-#      推理引导——问"仅依据以下原文段落，判断称谓 X 与人名 Y 是否同一个
-#      人"，结论三选一 same/different/uncertain，并要求逐字引用支撑句。
-#   3) 钉证（代码，_prep_pack_pin_dossier_quote）：模型引用的支撑句必须
-#      逐字存在于卷宗某一条里（防止模型凭空编造一句"证词"）；verdict 必须
-#      是 same 且引句核验通过，才算核验通过。uncertain/different/引句核验
-#      失败，一律不采信——默认安全侧，不确定就不绑，回退到 alias 自身的
-#      常规解析路线（未被发现进一步归类时自然落为群演，见 _pass 里
-#      unresolved_characters 的处理，不需要这里单独再写一条"走群演"分支）。
+#   2) 裁决（模型，唯一一次调用，_prep_pack_true_name_verdict，1.10.0 改为
+#      候选判别，不再是同一人是非题——见 PREP_PACK_VERSION 上方 1.10.0 大
+#      注释的完整根因与数据）：给模型卷宗原文 + 一份候选真名/候选场景名单
+#      （suspected_true_name 本身 ∪ 人物谱/场景谱里在卷宗文本中有字面命中
+#      的其它候选）+ 显式"都不是/无法确定"出口，问"称谓 alias 最可能指候选
+#      中的哪一个"，不是"是不是 Y"——避免旧版是非题诱发确认偏误。
+#   3) 钉证（代码，_prep_pack_true_name_pin_dossier_entry，1.10.0 改为段号
+#      钉证）：模型只需引用卷宗目录里的候选编号（entry_index），不比对
+#      模型转录的逐字引句（真实生产数据证明旧版逐字比对会被模型的跨段
+#      拼接/摘要噪音误杀，见 PREP_PACK_VERSION 上方大注释）；钉中的卷宗
+#      条目还必须逐字包含 alias 本身（待判标签，此前零要求，是"钉证在近半
+#      数真实 same 判决里形同虚设"的主因）；若全卷宗存在同时含 alias 与
+#      true_name 的双锚定条目，钉中的条目必须就是双锚定条目之一，否则必须
+#      钉在本集自己的（alias 逐字命中的）段落上——两种情形都不满足则拒绝。
+#      selected_candidate 必须精确等于 suspected_true_name 且钉证通过，才
+#      算核验通过；其它任何结果（选了别的候选/选了"都不是"/钉证失败）一律
+#      不采信——默认安全侧，不确定就不绑，回退到 alias 自身的常规解析路线
+#      （未被发现进一步归类时自然落为群演，见 _pass 里 unresolved_
+#      characters 的处理，不需要这里单独再写一条"走群演"分支）。
 #   4) 记账（代码）：核验通过的判决连同钉住的原文引句进 provenance
 #      （anchor_phrase 就是这句被钉住的支撑句），alias 才会被写进
 #      entry["aliases"]（见调用点），写入注册表的东西天然带着完整证据链；
@@ -1424,7 +1567,14 @@ def _prep_pack_true_name_dossier(
     真正的反证/佐证段落可能在全书任何一章），按自然段
     （index_source_segments）逐段检查是否包含 alias 和/或 true_name。
     双词共现段全部保留；单词段超出预算时交给
-    _prep_pack_sample_dossier_entries_within_budget 做确定性采样。"""
+    _prep_pack_sample_dossier_entries_within_budget 做确定性采样。每条记录
+    额外带 ``entry_index``（1.10.0，缺陷 A 修复新增，见 PREP_PACK_VERSION
+    上方大注释）：1-based、按本函数返回顺序（both 在前、single 采样结果在
+    后）分配的扁平序号，供候选判别改用段号钉证（_prep_pack_true_name_pin_
+    dossier_entry）——卷宗跨多章检索，(chapter_idx, segment_index) 二元组
+    不是一个单值 enum 候选，需要一个扁平序号才能像 _prep_pack_functional_
+    candidate_dossier 那样把钉证收紧成"选中的序号是否落在卷宗集合内"的结构
+    判断。"""
     if not alias or not true_name:
         return []
     from app.portraits import CAST_DISCOVERY_SOURCE_BUDGET
@@ -1458,6 +1608,8 @@ def _prep_pack_true_name_dossier(
     dossier.extend(
         _prep_pack_sample_dossier_entries_within_budget(single, remaining_budget)
     )
+    for entry_index, item in enumerate(dossier, start=1):
+        item["entry_index"] = entry_index
     return dossier
 
 
@@ -1492,91 +1644,173 @@ def _prep_pack_sample_dossier_entries_within_budget(
     return selected
 
 
+# 候选判别响应（1.10.0，缺陷 A 修复，见 PREP_PACK_VERSION 上方大注释）：
+# 替换掉旧版 same/different/uncertain 是非题——selected_candidate 是一道
+# 候选选择题（候选集 = suspected_true_name 本身 ∪ 人物谱/场景谱里在卷宗
+# 文本中有字面命中的其它候选 ∪ 显式"都不是/无法确定"），跟
+# _PrepPackFunctionalCandidateVerdict 同一范式，两者独立定义，互不复用
+# （问的语义/候选来源不同，见 _prep_pack_true_name_verdict_candidates 与
+# _prep_pack_true_name_verdict 的说明）。supporting_entry_index 钉的是
+# 卷宗目录里的候选编号（entry_index，见 _prep_pack_true_name_dossier），
+# 不是逐字引句——真实生产数据证明逐字引句钉证在跨章场景下会被模型的
+# 拼接/摘要噪音系统性误杀。supporting_quote 保留为可选观测字段，不参与
+# 判定。
 class _PrepPackTrueNameVerdictResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    verdict: Literal["same", "different", "uncertain"]
-    supporting_quote: str
+    selected_candidate: str
+    supporting_entry_index: int
+    supporting_quote: str = ""
 
+
+_PREP_PACK_TRUE_NAME_VERDICT_NO_MATCH_LABEL = "都不是/无法确定"
 
 # 裁决提示词按 subject_kind 分域的措辞表（独立评审 blocker：本函数被角色
 # 分支 resolve_fn=_resolve_portrait_id 与场景分支 resolve_fn=
 # _resolve_scene_reference_id 共用，旧版提示词硬编码"是否指同一个人"——
 # 场景假设走到这里时模型被问"这两个是不是同一个人"，语义错误，裁决不可靠。
-# noun_label 是卷宗引言里第二个待查证字符串的名词身份；same_subject 是
-# "是否指同一 X"里的 X，同时出现在任务句与 verdict 三个取值的中文释义里，
-# 结构（卷宗引用、uncertain 安全默认）跟改动前完全一致，只换名词。）
+# noun_label 是候选的名词身份；same_subject 是任务句里"是否指同一 X"的
+# X，结构（卷宗引用、显式拒绝出口）跟 1.10.0 改动前完全一致，只换名词。）
 _TRUE_NAME_VERDICT_SUBJECT_COPY: dict[str, dict[str, str]] = {
     "character": {"noun_label": "人名", "same_subject": "同一个人"},
     "scene": {"noun_label": "地点名", "same_subject": "同一个场景或地点"},
 }
 
 
+def _prep_pack_true_name_verdict_roster(
+    bible: Bible, subject_kind: Literal["character", "scene"],
+) -> dict[str, list[str]]:
+    """候选面快照（1.10.0，缺陷 A 修复）：规范名 -> [规范名, 已确认别名...]，
+    按 subject_kind 分流。character 分支直接复用 _prep_pack_functional_
+    candidate_roster（人物谱同一构造，避免重复实现）；scene 分支同构，读
+    bible.scenes[].aliases（纯字符串列表，跟 Character.aliases 的
+    CharacterAlias 对象列表结构不同，见 app.schemas.Scene 字段说明）。"""
+    if subject_kind == "character":
+        return _prep_pack_functional_candidate_roster(bible)
+    return {scene.name: [scene.name, *scene.aliases] for scene in bible.scenes}
+
+
+def _prep_pack_true_name_verdict_candidates(
+    dossier: list[dict[str, Any]], roster: dict[str, list[str]], true_name: str,
+) -> list[str]:
+    """候选判别候选集（1.10.0，缺陷 A 修复）：确定性、零语义——人物谱/
+    场景谱（按 subject_kind 对应的 roster）里，规范名或已确认别名在卷宗
+    （已经检索出的真实原文段落，覆盖全书范围）文本里逐字命中的候选。这样
+    候选永远有真实卷宗材料支撑，不会出现"选项本身卷宗里毫无证据"的名存
+    实亡选择题。``true_name``（即 suspected_true_name，被验证的假设）永远
+    强制在候选集内——dossier 检索本身就是按"含 alias 和/或 true_name"筛选
+    出来的，卷宗非空时通常已经命中，这里防御性再保证一次，候选判别不能连
+    被测假设本身都问不出来。不针对任何具体人名/场景名做特判——candidates
+    完全来自卷宗文本与人物谱/场景谱两份结构化数据的逐字包含判断，跟
+    _prep_pack_functional_candidate_names 同一纪律。"""
+    dossier_text = "".join(item["text"] for item in dossier)
+    candidates = [
+        name for name, forms in roster.items()
+        if any(form and form in dossier_text for form in forms)
+    ]
+    if true_name not in candidates:
+        candidates.insert(0, true_name)
+    return candidates
+
+
 async def _prep_pack_true_name_verdict(
-    *, run_id: str | None, episode_id: str,
+    *, run_id: str | None, episode_id: str, project_id: str | None,
     subject_kind: Literal["character", "scene"],
     alias: str, true_name: str, dossier: list[dict[str, Any]],
+    candidates: list[str],
 ) -> _PrepPackTrueNameVerdictResponse:
-    """2) 裁决：唯一一次模型调用，只给卷宗原文，不携带任何一方的推理
-    引导——不说"我怀疑 X 就是 Y"，只客观陈述两个字符串，把"是否同一
-    人/场景"这个语义判断完全交给模型自己独立做出。``subject_kind`` 只
+    """2) 裁决：唯一一次模型调用，只给卷宗原文 + 候选名单，不携带任何
+    "我怀疑 X 就是 Y"的推理引导——问"称谓 alias 最可能指候选中的哪一位/
+    哪一处"，候选集之外强制一个"都不是/无法确定"选项（1.10.0，缺陷 A
+    修复，见 PREP_PACK_VERSION 上方大注释：旧版 same/different/uncertain
+    是非题诱发确认偏误，本项目已有四次真实误绑事故）。``subject_kind`` 只
     决定问的是"同一个人"还是"同一个场景或地点"这一个名词，卷宗引用/
-    uncertain 安全默认等结构完全不变（见 _TRUE_NAME_VERDICT_SUBJECT_COPY
+    显式拒绝出口等结构完全不变（见 _TRUE_NAME_VERDICT_SUBJECT_COPY
     上方注释）。"""
     copy = _TRUE_NAME_VERDICT_SUBJECT_COPY[subject_kind]
     noun_label = copy["noun_label"]
     same_subject = copy["same_subject"]
     catalog = "\n\n".join(
-        f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
+        f"[候选{item['entry_index']}][第{item['chapter_idx']}章·段{item['segment_index']}] "
+        f"{item['text']}"
         for item in dossier
     )
-    prompt = f"""下面是从原著全书范围内检索到的原文段落，与称谓"{alias}"或{noun_label}
-"{true_name}"其中至少一个有关（出现顺序不代表任何推断结论）：
+    entry_indexes = [item["entry_index"] for item in dossier]
+    candidate_options = [*candidates, _PREP_PACK_TRUE_NAME_VERDICT_NO_MATCH_LABEL]
+    candidate_list = "、".join(candidates)
+    prompt = f"""下面是从原著全书范围内检索到的原文段落，与称谓"{alias}"或候选{noun_label}
+有关（出现顺序不代表任何推断结论），每段前标了候选编号：
 {catalog}
 
-任务：仅依据以上原文段落本身，判断称谓"{alias}"与{noun_label}"{true_name}"是否指
-{same_subject}。
-- verdict 填 same（确定是{same_subject}）/different（确定不是{same_subject}）/uncertain
-  （原文不足以确定）三选一，无法确定就如实填 uncertain，不要勉强给出
-  same 或 different；
-- supporting_quote 必须是上面某一段落里逐字存在的一句原文，作为你得出
-  这个结论的依据。
+候选{noun_label}名单（判别范围仅限以下几项，不要引入名单之外的{same_subject}）：
+{candidate_list}
+
+任务：仅依据以上原文段落本身，判断称谓"{alias}"是否与候选名单中的某一位属于
+{same_subject}，是的话具体是哪一位。
+- selected_candidate 必须从候选名单中选一个精确的{noun_label}；原文不足以确定
+  "{alias}"具体对应候选中的哪一个时，选"{_PREP_PACK_TRUE_NAME_VERDICT_NO_MATCH_LABEL}"，
+  不要勉强给出确定结论；不要因为某个候选在段落里出现次数多、看起来眼熟就倾向选它，
+  只依据原文是否真的能确定二者是{same_subject}；
+- supporting_entry_index 必须填上面某个候选编号（取值只能是 {entry_indexes} 之一），
+  选你得出这个结论最主要依据的那一段；
+- supporting_quote 可选，若填写请给该段里的一句原文摘录供人工复核参考，不要求逐字
+  精确，留空也可以。
 只输出符合 Schema 的 JSON。"""
+    schema = _PrepPackTrueNameVerdictResponse.model_json_schema()
+    # 参照 _prep_pack_functional_candidate_call 对 output_schema 注入 enum
+    # 的写法：候选段号、候选名单都收紧到本次实际可用的集合，模型在协议层面
+    # 就选不出卷宗外的编号或候选集之外的人/地；真正生效的核验仍在
+    # _prep_pack_true_name_pin_dossier_entry 与
+    # _prep_pack_verify_true_name_hypothesis 里做代码侧结构校验。
+    schema["properties"]["supporting_entry_index"]["enum"] = entry_indexes
+    schema["properties"]["selected_candidate"]["enum"] = candidate_options
     return await _call_structured(
         run_id=run_id,
         step_key="episode_prep_pack_true_name_verdict",
         prompt=prompt,
         model_type=_PrepPackTrueNameVerdictResponse,
-        schema_name="episode_prep_pack_true_name_verdict_v1",
+        schema_name="episode_prep_pack_true_name_verdict_v2",
         operation_id=(
             f"episode_prep_pack:{episode_id}:true_name_verdict:"
             + evidence_repository.content_hash({
                 "subject_kind": subject_kind,
                 "alias": alias, "true_name": true_name,
-                "dossier": [
-                    (item["chapter_idx"], item["segment_index"]) for item in dossier
-                ],
+                "candidates": candidates,
+                "dossier": [item["entry_index"] for item in dossier],
             })
         ),
         max_tokens=500,
+        output_schema=schema,
+        # 低温：这道闸的语义判断要稳定——同一份卷宗重跑不该一次选中一次
+        # 不确定，跟 _prep_pack_functional_candidate_call 同一考量。
+        temperature=0.0,
         call_meta={
             "stage_key": "episode_prep_pack_true_name_verdict",
             "episode_id": episode_id,
             "subject_kind": subject_kind,
+            "project_id": project_id,
+            "candidates": candidates,
         },
     )
 
 
-def _prep_pack_pin_dossier_quote(
-    dossier: list[dict[str, Any]], quote: str,
+def _prep_pack_true_name_pin_dossier_entry(
+    dossier: list[dict[str, Any]], entry_index: Any,
 ) -> dict[str, Any] | None:
-    """3) 钉证：模型引用的支撑句必须逐字存在于卷宗某一条里，防止模型
-    凭空编造一句原文里根本没有的"证词"。返回命中的那条卷宗记录（带
-    chapter_idx，供 provenance 定位），没有命中返回 None。"""
-    quote = str(quote or "").strip()
-    if not quote:
+    """3) 钉证：结构性核验，模型只需引用卷宗目录里某个候选编号
+    （entry_index），不要求逐字复述原文（1.10.0，缺陷 A 修复，见
+    PREP_PACK_VERSION 上方大注释）——真实生产数据（provider_calls
+    id=9700/10498）证明旧版逐字引句比对会被模型的跨段拼接/摘要噪音系统性
+    误杀（同一失败模式 stages.py._alias_verdict_pin_segment 已经修过一次，
+    见该函数 docstring），跟 _prep_pack_functional_candidate_pin_segment
+    同一修法：卷宗内容本身就是代码检索出的真实原文，模型选中某一条不存在
+    "编造"或"转录出错"的空间，钉证退化为一次整数是否落在集合内的结构性
+    判断。非法输入（不是整数、或不在本次卷宗集合内）一律返回 None。"""
+    try:
+        target = int(entry_index)
+    except (TypeError, ValueError):
         return None
     for item in dossier:
-        if quote in item["text"]:
+        if item["entry_index"] == target:
             return item
     return None
 
@@ -1585,27 +1819,36 @@ async def _prep_pack_verify_true_name_hypothesis(
     conn, *, project_id: str, episode_id: str, episode_no: int, source_text: str,
     alias: str, suspected_true_name: str,
     subject_kind: Literal["character", "scene"], resolve_fn, run_id: str | None,
+    bible: Bible | None = None,
     verdict_cache: dict[tuple[str, str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Verify (not trust) a model-declared ``suspected_true_name`` guess via
     the dossier trial procedure documented above. Returns a dict:
     ``accepted``；不通过时的 ``reason``（rejected_no_dossier/
     rejected_verdict_different/rejected_verdict_uncertain/
-    rejected_quote_not_pinned，都归入观测的 rejected_verdicts 概念）；
+    rejected_entry_not_pinned/rejected_pinned_entry_missing_alias/
+    rejected_dual_anchor_available_not_pinned/
+    rejected_degraded_pin_out_of_episode，都归入观测的 rejected_verdicts
+    概念，1.10.0 缺陷 A 修复新增后三种，见 PREP_PACK_VERSION 上方大注释）；
     通过时的 ``pinned_quote``/``pinned_chapter_idx``（分别供 provenance.
-    anchor_phrase 与 method="resolution"/"resolution_forward" 判定，见
-    调用点）。``subject_kind`` 区分角色分支（resolve_fn=_resolve_portrait_id）
-    与场景分支（resolve_fn=_resolve_scene_reference_id）——两者共用本函数
+    anchor_phrase 与 method="resolution"/"resolution_forward" 判定）与
+    ``dual_anchor``（1.10.0 新增：钉证命中的是双锚定条目还是退化后的
+    集内别名指代条目——不可观测的静默降级本项目明令禁止，调用方须把这个
+    布尔值写进 provenance/true_name_hints，见 _pass 里两处调用点）。
+    ``subject_kind`` 区分角色分支（resolve_fn=_resolve_portrait_id）与
+    场景分支（resolve_fn=_resolve_scene_reference_id）——两者共用本函数
     与下面的裁决调用，但问的语义不同（"同一个人" vs "同一个场景或地点"，
     见 _prep_pack_true_name_verdict 的 _TRUE_NAME_VERDICT_SUBJECT_COPY），
-    调用点各自传对。``verdict_cache`` 是 _resolve_assets 级别按
-    (subject_kind, alias, suspected_true_name) 缓存的判决结果，同一次
+    调用点各自传对。``bible`` 由调用方（_resolve_assets 的 _pass 闭包）
+    传入已加载好的项目圣经，避免每次核验重复查库；缺省时现查一次（防御性
+    兜底，理论上调用点都会传）。``verdict_cache`` 是 _resolve_assets 级别
+    按 (subject_kind, alias, suspected_true_name) 缓存的判决结果，同一次
     生成内重复出现的同一对提及不重复发起模型调用；subject_kind 纳入键是
     因为角色循环与场景循环共用同一个缓存字典，不按域隔离会导致跨域撞名
     时复用错误域的裁决（独立评审发现的 minor）。"""
     empty = {
         "accepted": False, "reason": "", "pinned_quote": "",
-        "pinned_chapter_idx": None,
+        "pinned_chapter_idx": None, "dual_anchor": False,
     }
     if not suspected_true_name:
         return empty
@@ -1615,30 +1858,78 @@ async def _prep_pack_verify_true_name_hypothesis(
     if verdict_cache is not None and cache_key in verdict_cache:
         return verdict_cache[cache_key]
 
+    def _reject(reason: str) -> dict[str, Any]:
+        result = {**empty, "reason": reason}
+        if verdict_cache is not None:
+            verdict_cache[cache_key] = result
+        return result
+
     dossier = _prep_pack_true_name_dossier(conn, project_id, alias, suspected_true_name)
     if not dossier:
-        result = {**empty, "reason": "rejected_no_dossier"}
-        if verdict_cache is not None:
-            verdict_cache[cache_key] = result
-        return result
-    response = await _prep_pack_true_name_verdict(
-        run_id=run_id, episode_id=episode_id, subject_kind=subject_kind,
-        alias=alias, true_name=suspected_true_name, dossier=dossier,
+        return _reject("rejected_no_dossier")
+
+    project_bible = bible if bible is not None else _load_project_bible(conn, project_id)
+    roster = _prep_pack_true_name_verdict_roster(project_bible, subject_kind)
+    candidates = _prep_pack_true_name_verdict_candidates(dossier, roster, suspected_true_name)
+    # 双锚定是否结构上可能存在（1.10.0，缺陷 A 修复第②③点）：全卷宗（不只是
+    # 模型最终钉中的那一条）是否存在同时逐字含 alias 与 suspected_true_name
+    # 的条目——这份判断只用 both 桶天然的性质（budget 裁剪只影响 single 桶，
+    # both 桶全收，见 _prep_pack_true_name_dossier docstring），不依赖模型
+    # 这次选了哪一条，是纯粹的既有材料事实。
+    dual_anchor_available = any(
+        alias in item["text"] and suspected_true_name in item["text"] for item in dossier
     )
-    if response.verdict != "same":
-        result = {**empty, "reason": f"rejected_verdict_{response.verdict}"}
-        if verdict_cache is not None:
-            verdict_cache[cache_key] = result
-        return result
-    pinned = _prep_pack_pin_dossier_quote(dossier, response.supporting_quote)
+    response = await _prep_pack_true_name_verdict(
+        run_id=run_id, episode_id=episode_id, project_id=project_id,
+        subject_kind=subject_kind, alias=alias, true_name=suspected_true_name,
+        dossier=dossier, candidates=candidates,
+    )
+    if response.selected_candidate != suspected_true_name:
+        reason = (
+            "rejected_verdict_uncertain"
+            if response.selected_candidate == _PREP_PACK_TRUE_NAME_VERDICT_NO_MATCH_LABEL
+            else "rejected_verdict_different"
+        )
+        return _reject(reason)
+    pinned = _prep_pack_true_name_pin_dossier_entry(dossier, response.supporting_entry_index)
     if pinned is None:
-        result = {**empty, "reason": "rejected_quote_not_pinned"}
-        if verdict_cache is not None:
-            verdict_cache[cache_key] = result
-        return result
+        return _reject("rejected_entry_not_pinned")
+    # 钉证至少要求引句逐字包含被解析的那个别名本身（1.10.0，缺陷 A 修复
+    # 第②点）：这是"零保护"的主要来源——生产数据实测 114 条真实 same 判决
+    # 里，56 条（49%）引用的支撑句缺 alias/true_name 至少一个；只看明确
+    # 询问人名的，18/75（24%）里 2 条连 alias 本身都不含，钉的是一句跟
+    # 待判标签毫无关系的话。这一条对合法的跨章绑定（EP5"许姓女子"→"许清"
+    # 那类，见下面 dual_anchor_available 分支）零伤害——集内指代段落
+    # 天然含 alias 本身。
+    if alias not in pinned["text"]:
+        return _reject("rejected_pinned_entry_missing_alias")
+    if dual_anchor_available:
+        # 优先要求双锚定引句（1.10.0，缺陷 A 修复第③点）：卷宗结构上确实
+        # 存在能同时证明 alias 与 true_name 的桥接句时，钉证必须钉在其中
+        # 一条上——不能在更强证据摆在模型眼前时，仍然只钉一句弱证据（真实
+        # 数据：18/75 里另有一部分是"卷宗里其实有更强证据，模型没用上"的
+        # 形状，即使这次不专门统计，收紧钉证目标本身就同时堵住了这一类）。
+        if suspected_true_name not in pinned["text"]:
+            return _reject("rejected_dual_anchor_available_not_pinned")
+        dual_anchor_used = True
+    else:
+        # 退化：全卷宗都不存在双锚定证据（结构性事实，不是这次没找到——
+        # 真实 EP5 案例："许清"这个名字要到第34章才第一次在原著里出现，
+        # 跟"许姓女子"永远不会同段共现，dual anchor 在这本书里对这对
+        # (alias, true_name) 原理上不可能存在）。允许退化为"仅含别名的
+        # 集内指代段落"——但必须真的是本集自己的段落，不是全书别处巧合
+        # 复现的同一个短语（真实数据坐实的风险：proj_3ac0b627fa46 第981章
+        # 也有一处"许姓女子"，却是完全不相关的转世预言片段，跟 EP5 本集
+        # 语境毫无关系——不做这条限制，钉证可能钉在这类不相关的巧合复现
+        # 上）。dual_anchor_used=False 是显式的可观测降级标记（本项目明令
+        # 禁止静默降级），调用方须写进 provenance/true_name_hints。
+        if pinned["text"] not in source_text:
+            return _reject("rejected_degraded_pin_out_of_episode")
+        dual_anchor_used = False
+
     result = {
         "accepted": True, "reason": "", "pinned_quote": pinned["text"],
-        "pinned_chapter_idx": pinned["chapter_idx"],
+        "pinned_chapter_idx": pinned["chapter_idx"], "dual_anchor": dual_anchor_used,
     }
     if verdict_cache is not None:
         verdict_cache[cache_key] = result
@@ -2411,12 +2702,12 @@ async def _prep_pack_resolve_functional_extra_candidate(
     conn, *, project_id: str, episode_id: str, episode_no: int,
     label: str, source_text: str, segments: list[SourceSegment], bible: Bible,
     events: list[dict[str, Any]],
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     """未解析标签的候选判别入口：候选集为空、卷宗为空、模型选"都不是/
     无法确定"、选中值不在候选集内（协议层已经不可能，这里仍防御性核验）、
     段号钉证失败、候选在本集没有可用定妆照、或这次改名会与跨集别名注册表
     冲突（复用既有 _prep_pack_cross_episode_alias_conflict，同一套"不确定
-    不绑"纪律），一律返回 None——调用方维持原行为，标签留在
+    不绑"纪律），一律 ``resolved=False``——调用方维持原行为，标签留在
     skip_character_names 正常落 functional_extras，绝不猜。
 
     ``events``（1.8.1 新增参数）：本集事件链（调用方 _resolve_assets 自己
@@ -2426,12 +2717,18 @@ async def _prep_pack_resolve_functional_extra_candidate(
     完整根因说明（标签字面定位在"标签是模型转述短语"时会打空，事件跨度
     不依赖字面命中）。
 
-    返回非 None 时是 ``{"canonical_name": ..., "segment_index": ...,
-    "text": ...}``：``canonical_name`` 供调用方写入 character_rename（重新
-    走既有的具名解析路线，自然带出正确的 portrait_id/identity_id/
-    visual_entity_id）；``segment_index``/``text`` 是钉证命中的卷宗证据，
-    供调用方写入 provenance 锚点（``text`` 是代码检索出的真实原文，不是
-    模型转录，天然满足自校验的逐字命中要求）。
+    返回值恒为 dict（1.10.0 起不再用 ``None`` 表示失败，见 PREP_PACK_
+    VERSION 上方大注释"顺带修一处可观测性缺口"一节）：``resolved`` 是否
+    真的绑定成功；``attempted`` 是否真的发起过一次候选判别模型调用（候选集
+    非空且卷宗非空才会调用模型——调用方据此区分"从未获得候选判别机会"与
+    "候选判别跑过但没选中"两种此前坍缩成同一个 method="discovery" 值、
+    只能翻 provider_calls 反推的情形，见 _pass 对 functional_extras 的
+    provenance.candidate_verdict_attempted 处理）。``resolved=True`` 时
+    额外带 ``canonical_name``/``segment_index``/``text``：``canonical_name``
+    供调用方写入 character_rename（重新走既有的具名解析路线，自然带出正确
+    的 portrait_id/identity_id/visual_entity_id）；``segment_index``/
+    ``text`` 是钉证命中的卷宗证据，供调用方写入 provenance 锚点（``text``
+    是代码检索出的真实原文，不是模型转录，天然满足自校验的逐字命中要求）。
 
     候选集单一来源（1.8.4 回退，见 PREP_PACK_VERSION 上方 1.8.4 大注释）：
     ``candidates``＝规范名或已确认别名在本集原文逐字出现的人物谱角色（见
@@ -2442,10 +2739,12 @@ async def _prep_pack_resolve_functional_extra_candidate(
     "这段话真实存在"，证明不了"这段话支持这个指代关系"），真实数据已经
     出现赵武刚（人物谱登记本集活跃，原文一次都没提到他）被误判为"绿袍
     男子"的事故（method=candidate_verdict）。"""
+    not_attempted = {"resolved": False, "attempted": False}
+    attempted_no_bind = {"resolved": False, "attempted": True}
     roster = _prep_pack_functional_candidate_roster(bible)
     candidates = _prep_pack_functional_candidate_names(source_text, roster)
     if not candidates:
-        return None
+        return not_attempted
     # 1.8.2：改传"候选名 -> 该候选自己的锚点文本"分组字典（而非拍平成一个
     # 集合），供 _prep_pack_functional_candidate_dossier 的 B 侧按候选做
     # 公平轮转合并，见该函数与 _prep_pack_functional_candidate_anchor_pool
@@ -2457,28 +2756,29 @@ async def _prep_pack_resolve_functional_extra_candidate(
         segments, label, candidate_anchor_texts, event_span_segments,
     )
     if not dossier:
-        return None
+        return not_attempted
     response = await _prep_pack_functional_candidate_call(
         label=label, dossier=dossier, candidates=candidates,
         episode_id=episode_id, project_id=project_id,
     )
     if response.selected_candidate not in candidates:
-        return None
+        return attempted_no_bind
     pinned = _prep_pack_functional_candidate_pin_segment(
         dossier, response.supporting_segment_index,
     )
     if pinned is None:
-        return None
+        return attempted_no_bind
     canonical_name = response.selected_candidate
     if not _resolve_portrait_id(conn, project_id, canonical_name, episode_no):
-        return None
+        return attempted_no_bind
     conflicting_name = _prep_pack_cross_episode_alias_conflict(
         conn, project_id, episode_id,
         alias=label, canonical_name=canonical_name, bible=bible,
     )
     if conflicting_name:
-        return None
+        return attempted_no_bind
     return {
+        "resolved": True, "attempted": True,
         "canonical_name": canonical_name,
         "segment_index": pinned["segment_index"], "text": pinned["text"],
     }
@@ -2573,6 +2873,7 @@ async def _resolve_assets(
         newly_added_scene_names: frozenset[str] = frozenset(),
         resolution_evidence_by_label: dict[str, str] | None = None,
         candidate_verdict_pins: dict[str, dict[str, Any]] | None = None,
+        functional_candidate_attempted_names: frozenset[str] = frozenset(),
     ) -> tuple[
         dict[str, Any], dict[str, Any], dict[str, dict[str, Any]], list[str], list[str], list[str],
         list[dict[str, Any]],
@@ -2584,6 +2885,13 @@ async def _resolve_assets(
         # method 判定分支单独标记 "candidate_verdict"、并直接复用钉证段落
         # 本身（代码检索出的真实原文）作为 anchor_phrase，不依赖模型转录。
         candidate_verdict_pins = candidate_verdict_pins or {}
+        # functional_candidate_attempted_names（1.10.0，缺陷 A 顺带修复的
+        # 可观测性缺口，见 PREP_PACK_VERSION 上方大注释）：这批标签虽然没被
+        # 候选判别选中（否则会在 candidate_verdict_pins 里），但确实发起过
+        # 一次模型调用——供 method="discovery" 的 functional_extras 条目
+        # 标注 candidate_verdict_attempted=True，跟"候选集/卷宗为空，从未
+        # 获得候选判别机会"（此参数不含该标签，provenance 里这个字段留空）
+        # 区分开。
         characters: dict[str, dict[str, Any]] = {}
         scenes: dict[str, dict[str, Any]] = {}
         functional_extras: dict[str, dict[str, Any]] = {}
@@ -2600,7 +2908,80 @@ async def _resolve_assets(
                 if not name:
                     errors.append(f"事件 {event_id} 存在空白角色名")
                     continue
-                if name in skip_character_names:
+                resolved_name = character_rename.get(name, name)
+                # provenance（1.6.0）：记录这次改名到底走的是哪条路径——
+                # via_alias_registry 单独标记 task① 的注册表命中（跟
+                # character_rename/suspected_true_name 都不是同一件事，
+                # method 要区分 alias vs resolution）。
+                via_alias_registry = False
+                # 第30轮 RCA（真实 EP2/6/8 回归：resolution_forward 空
+                # forward_chapter_label/anchor_phrase）：这里曾经用
+                # "resolved_name == suspected_true_name" 反推"是否经过真名
+                # 核验"，但 resolved_name 也可能通过 character_rename（角色
+                # 发现/消歧，完全独立的另一条路径）恰好也算出同一个真名——
+                # 两条路径殊途同归到同一个名字，不代表这次核验真的跑过；一旦
+                # 走的是 character_rename 这条路，下面 if 判据里的
+                # suspected_true_name != resolved_name 从一开始就是 False，
+                # 核验分支被跳过，true_name_pinned_quote/chapter_idx 从未被
+                # 赋值，停在初始空值——但后面的 method 判定分支当年只看
+                # "resolved_name == suspected_true_name" 这个结果状态，认定
+                # 它是核验通过，于是带着两个空值直接产出 resolution_forward。
+                # 跟场景侧的 via_suspected_true_name 同一个修法：只在真正跑
+                # 过核验且 accepted 时才置位，用这个专用布尔判定，不再用状态
+                # 反推过程。
+                via_suspected_true_name = False
+                true_name_dual_anchor: bool | None = None
+                suspected_true_name = str(mention.get("suspected_true_name") or "").strip()
+                true_name_pinned_quote = ""
+                true_name_pinned_chapter_idx: int | None = None
+                if suspected_true_name and suspected_true_name != resolved_name:
+                    verification = await _prep_pack_verify_true_name_hypothesis(
+                        conn, project_id=project_id, episode_id=episode_id,
+                        episode_no=episode_no, source_text=source_text,
+                        alias=name, suspected_true_name=suspected_true_name,
+                        subject_kind="character", bible=bible,
+                        resolve_fn=_resolve_portrait_id, run_id=run_id,
+                        verdict_cache=true_name_verdict_cache,
+                    )
+                    if verification["accepted"]:
+                        resolved_name = suspected_true_name
+                        via_suspected_true_name = True
+                        true_name_pinned_quote = verification["pinned_quote"]
+                        true_name_pinned_chapter_idx = verification["pinned_chapter_idx"]
+                        true_name_dual_anchor = verification["dual_anchor"]
+                        true_name_hints.append({
+                            "kind": "character", "mention": name,
+                            "suspected_true_name": suspected_true_name, "status": "accepted",
+                            "dual_anchor": true_name_dual_anchor,
+                        })
+                    else:
+                        true_name_hints.append({
+                            "kind": "character", "mention": name,
+                            "suspected_true_name": suspected_true_name, "status": "rejected",
+                            "reason": verification["reason"],
+                        })
+                # 缺陷 B 修复（1.10.0，见 PREP_PACK_VERSION 上方大注释的完整
+                # 根因）：skip_character_names 短路必须排在 suspected_true_
+                # name 核验之后、且核验通过时不得短路。角色发现
+                # （_discover_new_characters）是本函数之外一次独立的全集
+                # 重新通读，产出的 source_label 只是字符串，可能跟本提及的
+                # 原始 name 恰好撞同一个字面量却指向完全不相关的判定（真实
+                # EP5 事故：pass1 已核验通过"许姓女子"→"许清"、钉证成功、
+                # accepted=True；同一轮 pass2 因角色发现独立判定另一处
+                # "许姓女子"字面为功能性群演，把这个字符串加进了
+                # skip_character_names——旧代码里这个 continue 排在核验之前
+                # 执行，短路掉了本该重新核验（或至少复用 true_name_verdict_
+                # cache 里 pass1 已经算好的 accepted 判决）的机会，pass1 的
+                # 结论被静默作废，4 条提及从未进 unresolved_characters，也就
+                # 从未有机会触发以"许姓女子"为标的的候选判别）。已核验通过的
+                # 信号必须优先于"角色发现独立通读凑巧撞出同名功能簇"这个更
+                # 弱的兜底信号，故 continue 的条件追加
+                # `and not via_suspected_true_name`；缓存复用则由上面
+                # _prep_pack_verify_true_name_hypothesis 内部的
+                # true_name_verdict_cache 命中自动生效（pass1 已经缓存过的
+                # (subject_kind, alias, suspected_true_name) 组合，pass2
+                # 重新执行到这里时直接命中缓存，不会真的再发一次模型调用）。
+                if name in skip_character_names and not via_suspected_true_name:
                     if name not in non_person_names:
                         # provenance（1.6.0）：这批 functional_extras 全部
                         # 来自本轮的角色发现（要么发现明确判定 skip，要么是
@@ -2626,60 +3007,14 @@ async def _resolve_assets(
                             }),
                             "provenance": _prep_pack_provenance(
                                 "discovery", extra_anchor_segments, extra_anchor_phrase,
+                                candidate_verdict_attempted=(
+                                    name in functional_candidate_attempted_names
+                                ),
                             ),
                         })
                         if event_id not in extra["event_ids"]:
                             extra["event_ids"].append(event_id)
                     continue
-                resolved_name = character_rename.get(name, name)
-                # provenance（1.6.0）：记录这次改名到底走的是哪条路径——
-                # via_alias_registry 单独标记 task① 的注册表命中（跟
-                # character_rename/suspected_true_name 都不是同一件事，
-                # method 要区分 alias vs resolution）。
-                via_alias_registry = False
-                # 第30轮 RCA（真实 EP2/6/8 回归：resolution_forward 空
-                # forward_chapter_label/anchor_phrase）：这里曾经用
-                # "resolved_name == suspected_true_name" 反推"是否经过真名
-                # 核验"，但 resolved_name 也可能通过 character_rename（角色
-                # 发现/消歧，完全独立的另一条路径）恰好也算出同一个真名——
-                # 两条路径殊途同归到同一个名字，不代表这次核验真的跑过；一旦
-                # 走的是 character_rename 这条路，下面 if 判据里的
-                # suspected_true_name != resolved_name 从一开始就是 False，
-                # 核验分支被跳过，true_name_pinned_quote/chapter_idx 从未被
-                # 赋值，停在初始空值——但后面的 method 判定分支当年只看
-                # "resolved_name == suspected_true_name" 这个结果状态，认定
-                # 它是核验通过，于是带着两个空值直接产出 resolution_forward。
-                # 跟场景侧的 via_suspected_true_name 同一个修法：只在真正跑
-                # 过核验且 accepted 时才置位，用这个专用布尔判定，不再用状态
-                # 反推过程。
-                via_suspected_true_name = False
-                suspected_true_name = str(mention.get("suspected_true_name") or "").strip()
-                true_name_pinned_quote = ""
-                true_name_pinned_chapter_idx: int | None = None
-                if suspected_true_name and suspected_true_name != resolved_name:
-                    verification = await _prep_pack_verify_true_name_hypothesis(
-                        conn, project_id=project_id, episode_id=episode_id,
-                        episode_no=episode_no, source_text=source_text,
-                        alias=name, suspected_true_name=suspected_true_name,
-                        subject_kind="character",
-                        resolve_fn=_resolve_portrait_id, run_id=run_id,
-                        verdict_cache=true_name_verdict_cache,
-                    )
-                    if verification["accepted"]:
-                        resolved_name = suspected_true_name
-                        via_suspected_true_name = True
-                        true_name_pinned_quote = verification["pinned_quote"]
-                        true_name_pinned_chapter_idx = verification["pinned_chapter_idx"]
-                        true_name_hints.append({
-                            "kind": "character", "mention": name,
-                            "suspected_true_name": suspected_true_name, "status": "accepted",
-                        })
-                    else:
-                        true_name_hints.append({
-                            "kind": "character", "mention": name,
-                            "suspected_true_name": suspected_true_name, "status": "rejected",
-                            "reason": verification["reason"],
-                        })
                 # 跨集别名一致性（task②，见 _prep_pack_cross_episode_alias_
                 # conflict 上方注释，真实 EP3 回归："小胖子"曾被误改绑到项目内
                 # 另一个已发布分集绑定的"王有材"，本集完全没有"王有材"的文本
@@ -2864,6 +3199,7 @@ async def _resolve_assets(
                     "provenance": _prep_pack_provenance(
                         method, anchor_segments, anchor_phrase,
                         forward_chapter_label=forward_chapter_label,
+                        dual_anchor=(true_name_dual_anchor if via_suspected_true_name else None),
                     ),
                 })
                 if event_id not in entry["event_ids"]:
@@ -2883,6 +3219,7 @@ async def _resolve_assets(
                 resolved_via_discovery = name in scene_rename
                 resolved_name = scene_rename.get(name, name)
                 via_suspected_true_name = False
+                true_name_dual_anchor: bool | None = None
                 true_name_pinned_quote = ""
                 true_name_pinned_chapter_idx: int | None = None
                 suspected_true_name = str(mention.get("suspected_true_name") or "").strip()
@@ -2895,7 +3232,7 @@ async def _resolve_assets(
                         conn, project_id=project_id, episode_id=episode_id,
                         episode_no=episode_no, source_text=source_text,
                         alias=name, suspected_true_name=suspected_true_name,
-                        subject_kind="scene",
+                        subject_kind="scene", bible=bible,
                         resolve_fn=_resolve_scene_reference_id, run_id=run_id,
                         verdict_cache=true_name_verdict_cache,
                     )
@@ -2904,9 +3241,11 @@ async def _resolve_assets(
                         via_suspected_true_name = True
                         true_name_pinned_quote = verification["pinned_quote"]
                         true_name_pinned_chapter_idx = verification["pinned_chapter_idx"]
+                        true_name_dual_anchor = verification["dual_anchor"]
                         true_name_hints.append({
                             "kind": "scene", "mention": name,
                             "suspected_true_name": suspected_true_name, "status": "accepted",
+                            "dual_anchor": true_name_dual_anchor,
                         })
                     else:
                         true_name_hints.append({
@@ -3049,6 +3388,7 @@ async def _resolve_assets(
                         scene_method, scene_anchor_segments, scene_anchor_phrase,
                         forward_chapter_label=scene_forward_chapter_label,
                         source_episode_no=scene_source_episode_no,
+                        dual_anchor=(true_name_dual_anchor if via_suspected_true_name else None),
                     ),
                 })
                 if event_id not in entry["event_ids"]:
@@ -3085,6 +3425,12 @@ async def _resolve_assets(
         # label -> 钉证命中的卷宗记录，供下面 _pass() 的 method 判定分支
         # 单独标记 "candidate_verdict"。
         candidate_verdict_pins: dict[str, dict[str, Any]] = {}
+        # 发起过候选判别模型调用、但没有选中任何候选的标签集合（1.10.0，
+        # 缺陷 A 顺带修复的可观测性缺口，见 PREP_PACK_VERSION 上方大注释）：
+        # 供 _pass() 把 functional_extras 条目的 provenance 标注
+        # candidate_verdict_attempted=True，跟"候选集/卷宗为空、从未获得
+        # 候选判别机会"的 method="discovery" 条目区分开。
+        functional_candidate_attempted_names: set[str] = set()
 
         if unresolved_chars:
             stats["character_discovery_calls"] += 1
@@ -3148,7 +3494,9 @@ async def _resolve_assets(
                     episode_no=episode_no, label=name, source_text=source_text,
                     segments=segments, bible=bible, events=events,
                 )
-                if resolution is None:
+                if resolution["attempted"]:
+                    functional_candidate_attempted_names.add(name)
+                if not resolution["resolved"]:
                     continue
                 skip_character_names.discard(name)
                 character_rename[name] = resolution["canonical_name"]
@@ -3178,6 +3526,9 @@ async def _resolve_assets(
                 newly_added_scene_names=newly_added_scene_names,
                 resolution_evidence_by_label=resolution_evidence_by_label,
                 candidate_verdict_pins=candidate_verdict_pins,
+                functional_candidate_attempted_names=frozenset(
+                    functional_candidate_attempted_names,
+                ),
             )
         )
         # 合并两遍，按内容去重（同一个提及在两遍里都核验出相同结论是正常的、
@@ -3505,25 +3856,49 @@ async def _call_structured(
     max_tokens: int,
     call_meta: dict[str, Any],
     iteration_no: int = 1,
+    output_schema: dict[str, Any] | None = None,
+    temperature: float = 0.2,
 ) -> Any:
+    """``output_schema`` (1.10.0, 缺陷 A 修复引入)：可选的手写 JSON Schema
+    覆盖——真名裁决候选判别需要把 selected_candidate/supporting_entry_index
+    收紧到本次卷宗实际算出的 enum（参照 _prep_pack_functional_candidate_call
+    对 model_gateway.chat_structured 的直接调用写法），而不是走
+    ``_response_format``/``require_response_format`` 这条固定 schema 路径。
+    传入时用 ``output_schema`` 直接驱动 provider 调用；不传（默认）时行为与
+    改动前逐字节一致。这是同一个 step 封装（_begin_step/_finish_step 观测
+    埋点）下的一个可选分支，不是新建一条调用路径。"""
     step_id = _begin_step(run_id, step_key, iteration_no=iteration_no)
     trace = current_trace()
     ctx = bind_trace(run_id, step_id, trace.trace_id) if run_id else nullcontext()
     try:
         with ctx:
-            result = await model_gateway.chat_structured(
-                [{"role": "user", "content": prompt}],
-                model_type=model_type,
-                validate=None,
-                operation_id=operation_id,
-                max_tokens=max_tokens,
-                temperature=0.2,
-                format_retry_limit=1,
-                semantic_retry_limit=1,
-                call_meta=call_meta,
-                response_format=_response_format(model_type, schema_name),
-                require_response_format=True,
-            )
+            if output_schema is not None:
+                result = await model_gateway.chat_structured(
+                    [{"role": "user", "content": prompt}],
+                    model_type=model_type,
+                    validate=None,
+                    operation_id=operation_id,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    format_retry_limit=1,
+                    semantic_retry_limit=1,
+                    call_meta=call_meta,
+                    output_schema=output_schema,
+                )
+            else:
+                result = await model_gateway.chat_structured(
+                    [{"role": "user", "content": prompt}],
+                    model_type=model_type,
+                    validate=None,
+                    operation_id=operation_id,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    format_retry_limit=1,
+                    semantic_retry_limit=1,
+                    call_meta=call_meta,
+                    response_format=_response_format(model_type, schema_name),
+                    require_response_format=True,
+                )
     except BaseException as exc:
         _finish_step(step_id, exc)
         raise
