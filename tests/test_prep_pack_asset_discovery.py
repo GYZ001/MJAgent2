@@ -3449,108 +3449,154 @@ def test_functional_candidate_dossier_shares_char_budget_across_candidates_when_
     )
 
 
-def test_functional_candidate_registered_names_uses_character_portraits_episode_range():
-    """单元测试（1.8.3 改动二）：_prep_pack_functional_candidate_registered_
-    names 直接复用既有 _known_character_names 的 ep_start<=episode_no<=
-    ep_end 区间判断——覆盖本集、越界（ep_end 早于本集）、以及不在
-    roster（即 bible.characters）里的脏数据三种形状。"""
-    conn = _make_conn()
-    conn.execute(
-        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) VALUES "
-        "('cp-a','p1','李富贵',1,NULL),"      # 覆盖本集（开区间向后覆盖）
-        "('cp-b','p1','已下线角色',1,2),"      # ep_end 早于本集，越界排除
-        "('cp-c','p1','未登记进人物谱的名字',1,NULL)"  # 不在 roster 里，交集防御排除
+# ---------------------------------------------------------------------------
+# 1.8.4（协调层复核，见 PREP_PACK_VERSION 上方 1.8.4 大注释）：两件事。
+# 一，1.8.3 改动二（候选集补入人物谱注册区间覆盖本集的"乙类"候选）真实
+# 落库后确认误绑（EP1/EP2 的"赵武刚"被误判为"绿袍男子"，赵武刚在这两章
+# 原文一次都没被提到）——原理性失效，已完整回退，候选集恢复为甲类单一
+# 来源。二，真实数据复核发现"每候选保底"自身此前一直没暴露的根因：候选
+# 锚点段落如果恰好落在事件跨度（A 侧主锚点）内部，旧版
+# _prep_pack_functional_candidate_anchor_pool 对事件跨度内的段落一律
+# 跳过候选匹配，这个候选就从 per_candidate_indexes 里彻底消失，保底对它
+# 形同虚设——目标案例"许清"的确认别名"许师姐"两次出现都恰好落在事件跨度
+# 并集内部，1.8.1-1.8.3 三轮修复因此全部失效。已修复：候选匹配现在覆盖
+# 全部段落，不再因为段落已被事件跨度收录就跳过。
+# ---------------------------------------------------------------------------
+
+def test_functional_candidate_dossier_guarantees_candidate_anchor_segment_inside_event_span():
+    """红→绿核心场景（1.8.4，真实数据形状复现，provider_calls id=10582 可
+    复核）：事件链抽取模型给标签"银色长袍女子"关联的事件 source_span 并集
+    真实连续覆盖 25 段（本用例用等价的 20 段复现同一形状），候选"许清"的
+    确认别名"许师姐"真实出现在这个并集内部的第 15 段——不是在事件跨度
+    之外（那种形状 1.8.2/1.8.3 已经用另外两条用例覆盖过，见上面
+    test_functional_candidate_dossier_reserves_quota_for_candidate_anchor_
+    when_event_span_fills_budget 与 test_functional_candidate_dossier_
+    guarantees_every_candidate_a_segment_when_a_side_text_is_long，那两条
+    在 1.8.4 之前就已经绿了，不是这次要修的缺口）。
+
+    旧版 _prep_pack_functional_candidate_anchor_pool 对"已被事件跨度收录
+    的段"统一 continue，候选匹配根本不会执行到这些段落——第 15 段因此从
+    per_candidate_indexes["许清"] 里永远消失，每候选保底对它形同虚设，
+    最终卷宗只有事件跨度自己按文档顺序排前面的 12 段（1-12），第 15 段
+    一条都不在（可用下面的变异验证复现）。修后：候选匹配对事件跨度内的
+    段落同样执行，第 15 段必须作为"许清"的保底段进入卷宗，不管它是否也在
+    事件跨度集合里。"""
+    event_paragraphs = [f"殿内烛火摇曳，气氛凝重，此为事发经过第{i}段。" for i in range(1, 21)]
+    event_paragraphs[14] = "许师姐默默立于人群之中，一言不发，此为事发经过第15段。"
+    source_text = "\n\n".join(event_paragraphs)
+    segments = prep_pack.index_source_segments(source_text)
+    assert len(segments) == 20
+    label = "不存在的标签"
+    event_span_segments = set(range(1, 21))  # 连续 20 段，远超 MAX_ENTRIES
+    assert len(event_span_segments) > prep_pack._PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES, (
+        "复现前提：事件跨度本身就远超卷宗预算，候选锚点段必须靠每候选保底才能挤进去"
     )
-    roster = {"李富贵": ["李富贵", "小胖子"], "孟浩": ["孟浩"]}
-    result = prep_pack._prep_pack_functional_candidate_registered_names(conn, "p1", 3, roster)
-    assert result == ["李富贵"]
+
+    candidate_anchor_texts = {"许清": ["许清", "许师姐"]}
+
+    dossier = prep_pack._prep_pack_functional_candidate_dossier(
+        segments, label, candidate_anchor_texts, event_span_segments,
+    )
+    dossier_indexes = {item["segment_index"] for item in dossier}
+    assert len(dossier) <= prep_pack._PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES
+    assert 15 in dossier_indexes, (
+        "候选'许清'唯一的锚点段（第15段，落在事件跨度内部）必须作为每候选"
+        "保底段进入卷宗，即使它同时也是事件跨度的一部分"
+    )
+    assert any(
+        item["segment_index"] == 15 and "许师姐" in item["text"] for item in dossier
+    )
+    # 确定性：同一输入任何时候重跑得到同一份卷宗（纯函数，无随机采样）。
+    dossier_again = prep_pack._prep_pack_functional_candidate_dossier(
+        segments, label, candidate_anchor_texts, event_span_segments,
+    )
+    assert dossier == dossier_again
 
 
-def test_unresolved_appearance_label_binds_via_registered_only_candidate_completion(monkeypatch):
-    """红→绿核心场景（1.8.3 改动二，真实案例复现）：EP1 的李富贵第 1 章
-    只被写成"白白净净身子较胖"，规范名与已登记别名（小胖子、胖爷）一次
-    都没出现在本集原文——纯字面判据下（甲类）候选集里没有他，标签"白白
-    净净的胖少年"永远无法绑定。但人物谱早已登记他 ep_start=1（本集活跃），
-    外貌"身形圆胖皮肤白净"。修后：候选集补全为甲∪乙两类并集，李富贵作为
-    乙类候选进入候选名单，模型依据卷宗原文（含标签本身逐字出现的那段）
-    与人物谱外貌档案独立判别后选中他，同样必须走完整的候选选择题 + 段号
-    钉证流程——钉证段号取的是卷宗里真实存在的原文段落，不是虚构的"档案
-    条目"。同时验证提示词把"本集原文已直接出现"（甲，含孟浩）与"人物谱
-    登记本集活跃、原文未直接点名"（乙，李富贵）分区展示，且乙类候选的
-    外貌档案文本确实出现在提示词里。"""
+def test_functional_candidate_dossier_loses_in_span_candidate_anchor_with_legacy_anchor_pool(
+    monkeypatch,
+):
+    """变异验证（1.8.4）：把 _prep_pack_functional_candidate_anchor_pool
+    退回旧版"事件跨度内的段一律跳过候选匹配"的行为，上面那条红→绿用例的
+    核心断言必须变红——证明这条测试确实在验证 1.8.4 的修复，不是碰巧绿了。
+    验证完立即用 monkeypatch 撤销，不污染其它用例。"""
+    def legacy_anchor_pool(segments, label, candidate_anchor_texts, event_span_indexes, event_span_index_set):
+        # 旧版（1.8.1-1.8.3）行为：事件跨度内的段一律 continue，候选匹配
+        # 根本不会执行到——精简复刻，只用于证明"如果退回旧逻辑，红→绿
+        # 用例会变红"。
+        label_text_indexes: list[int] = []
+        per_candidate_indexes: dict[str, list[int]] = {name: [] for name in candidate_anchor_texts}
+        for index, seg in enumerate(segments):
+            if index in event_span_index_set:
+                continue
+            if label and label in seg.text:
+                label_text_indexes.append(index)
+                continue
+            for name, forms in candidate_anchor_texts.items():
+                if any(form and form in seg.text for form in forms):
+                    per_candidate_indexes[name].append(index)
+        proximity_anchor = event_span_indexes or label_text_indexes
+        if proximity_anchor:
+            for indexes in per_candidate_indexes.values():
+                indexes.sort(
+                    key=lambda index: (min(abs(index - anchor) for anchor in proximity_anchor), index),
+                )
+        candidate_order = list(candidate_anchor_texts.keys())
+        seen: set[int] = set()
+        anchor_pool_ordered: list[int] = []
+        max_round = max((len(indexes) for indexes in per_candidate_indexes.values()), default=0)
+        for round_idx in range(max_round):
+            for name in candidate_order:
+                indexes = per_candidate_indexes[name]
+                if round_idx >= len(indexes):
+                    continue
+                index = indexes[round_idx]
+                if index in seen:
+                    continue
+                seen.add(index)
+                anchor_pool_ordered.append(index)
+        return label_text_indexes, anchor_pool_ordered, per_candidate_indexes
+
+    monkeypatch.setattr(prep_pack, "_prep_pack_functional_candidate_anchor_pool", legacy_anchor_pool)
+
+    event_paragraphs = [f"殿内烛火摇曳，气氛凝重，此为事发经过第{i}段。" for i in range(1, 21)]
+    event_paragraphs[14] = "许师姐默默立于人群之中，一言不发，此为事发经过第15段。"
+    source_text = "\n\n".join(event_paragraphs)
+    segments = prep_pack.index_source_segments(source_text)
+    label = "不存在的标签"
+    event_span_segments = set(range(1, 21))
+    candidate_anchor_texts = {"许清": ["许清", "许师姐"]}
+
+    dossier = prep_pack._prep_pack_functional_candidate_dossier(
+        segments, label, candidate_anchor_texts, event_span_segments,
+    )
+    dossier_indexes = {item["segment_index"] for item in dossier}
+    assert 15 not in dossier_indexes, (
+        "变异验证：退回旧版 anchor_pool 后，候选'许清'落在事件跨度内的唯一"
+        "锚点段必须缺失——证明红→绿用例确实在验证 1.8.4 的修复，不是碰巧通过"
+    )
+
+
+def test_registered_only_candidate_never_enters_candidate_set_after_1_8_4_revert(monkeypatch):
+    """回退验证（1.8.4，见 PREP_PACK_VERSION 上方 1.8.4 大注释）：1.8.3
+    改动二曾经让"人物谱注册区间覆盖本集、但本集原文未直接点名"的角色
+    （乙类）也能进候选集——本用例正是那条回退验证：李富贵人物谱
+    ep_start=1（覆盖本集），有已确认别名（小胖子、胖爷），但本集原文一次
+    都没提到他本人或任何别名，只有一句纯外貌描写。回退后，候选集必须
+    只剩甲类判据（规范名/已确认别名在本集原文逐字出现），李富贵不再有
+    资格进候选集——候选集因此为空，函数必须在发起任何模型调用之前就
+    返回 None（跟既有"候选集为空仍不发模型调用"纪律完全一致），绝不能
+    再走到"人物谱登记显示在本集活跃"那条已删除的提示词分区。"""
     conn = _make_conn()
     conn.execute(
         "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) VALUES "
-        "('cp-lifugui','p1','李富贵',1,NULL)"
+        "('cp-lifugui','p1','李富贵',1,NULL)"  # ep_start=1 覆盖本集，人物谱确实登记本集活跃
     )
     _seed_bible_characters(conn, "p1", [
         _bible_character(
             "李富贵", appearance_canonical="身形圆胖皮肤白净",
             aliases=[_bible_alias("小胖子"), _bible_alias("胖爷")],
         ),
-        # 决胜点：孟浩必须走"甲类"（本集原文直接出现），不该被误标成乙类。
-        _bible_character("孟浩", appearance_canonical="占位外观"),
-    ])
-
-    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
-        return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
-
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
-
-    seen: dict = {}
-
-    async def fake_chat_structured(messages, **kwargs):
-        seen["prompt"] = str(messages[0]["content"])
-        seen["schema"] = kwargs.get("output_schema")
-        return prep_pack._PrepPackFunctionalCandidateVerdict(
-            selected_candidate="李富贵", supporting_segment_index=1,
-            supporting_quote="白白净净身子较胖的少年跟在孟浩身后，一声不吭。",
-        )
-
-    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
-
-    label = "白白净净的胖少年"
-    events = [_event("ev_001", characters=[{"display_name": label, "is_background_extra": True}])]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
-        conn, events=events, episode_no=2,
-        source_text=(
-            "白白净净身子较胖的少年跟在孟浩身后，一声不吭。\n\n孟浩大步向前走去，毫不在意身后的动静。"
-        ),
-    )
-
-    assert errors == []
-    by_portrait = {c["portrait_id"]: c for c in characters}
-    assert "cp-lifugui" in by_portrait, "李富贵必须真的出现在 asset_manifest.characters 中"
-    entry = by_portrait["cp-lifugui"]
-    assert entry["display_name"] == "李富贵"
-    assert entry["display_appellation"] == label, "字幕/取图措辞仍须是本集原文说法，不提前剧透"
-    assert entry["provenance"]["method"] == "candidate_verdict"
-    assert not any(e["label"] == label for e in functional_extras)
-    # 候选集必须是甲∪乙两类并集：孟浩（甲，本集原文直接出现）与李富贵
-    # （乙，人物谱注册区间覆盖本集但原文未直接点名）都要出现在候选名单/
-    # schema enum 里。
-    assert seen["schema"]["properties"]["selected_candidate"]["enum"] == [
-        "孟浩", "李富贵", "都不是/无法确定",
-    ]
-    # 提示词必须把两类分区展示，且乙类附带人物谱外貌档案。
-    assert "本集原文中已直接出现的候选" in seen["prompt"]
-    assert "人物谱登记显示在本集活跃" in seen["prompt"]
-    assert "身形圆胖皮肤白净" in seen["prompt"]
-    assert "孟浩" in seen["prompt"]
-
-
-def test_registered_only_candidate_out_of_episode_range_is_excluded_from_candidate_set(monkeypatch):
-    """反例（守边界，1.8.3 改动二）：人物谱注册区间存在，但 ep_end 早于
-    本集——不该被算作"本集活跃"，候选集必须照常为空，不发起任何候选判别
-    模型调用（跟既有"候选集为空仍不发模型调用"纪律完全一致）。"""
-    conn = _make_conn()
-    conn.execute(
-        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) VALUES "
-        "('cp-lifugui','p1','李富贵',1,2)"  # 只在 EP1-2 活跃，本用例测的是 EP5
-    )
-    _seed_bible_characters(conn, "p1", [
-        _bible_character("李富贵", appearance_canonical="身形圆胖皮肤白净"),
     ])
 
     async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
@@ -3560,52 +3606,13 @@ def test_registered_only_candidate_out_of_episode_range_is_excluded_from_candida
     monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     async def boom_chat_structured(messages, **kwargs):
-        raise AssertionError("候选集为空时绝不该发起候选判别模型调用")
+        raise AssertionError("候选集为空时绝不该发起候选判别模型调用——乙类候选已在1.8.4回退")
 
     monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", boom_chat_structured)
 
     label = "白白净净的胖少年"
     events = [_event("ev_001", characters=[{"display_name": label, "is_background_extra": True}])]
     characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
-        conn, events=events, episode_no=5,
-        source_text="白白净净身子较胖的少年跟在人群身后，一声不吭。",
-    )
-
-    assert errors == []
-    assert not any(c["display_name"] == "李富贵" for c in characters)
-    assert any(e["label"] == label for e in functional_extras)
-
-
-def test_registered_only_candidate_no_match_selected_stays_functional_extra(monkeypatch):
-    """反例（守边界，1.8.3 改动二）：候选集含乙类候选（李富贵，人物谱注册
-    区间覆盖本集但原文未直接点名），模型如实回答"都不是/无法确定"——乙类
-    候选不降低判定门槛，必须维持原行为落 functional_extras，绝不因为
-    候选集里唯一有档案的人是他就强行绑定。"""
-    conn = _make_conn()
-    conn.execute(
-        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) VALUES "
-        "('cp-lifugui','p1','李富贵',1,NULL)"
-    )
-    _seed_bible_characters(conn, "p1", [
-        _bible_character("李富贵", appearance_canonical="身形圆胖皮肤白净"),
-    ])
-
-    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
-        return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
-
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
-
-    async def fake_chat_structured(messages, **kwargs):
-        return prep_pack._PrepPackFunctionalCandidateVerdict(
-            selected_candidate="都不是/无法确定", supporting_segment_index=1,
-        )
-
-    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
-
-    label = "白白净净的胖少年"
-    events = [_event("ev_001", characters=[{"display_name": label, "is_background_extra": True}])]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
         conn, events=events, episode_no=2,
         source_text="白白净净身子较胖的少年跟在人群身后，一声不吭。",
     )
@@ -3615,43 +3622,11 @@ def test_registered_only_candidate_no_match_selected_stays_functional_extra(monk
     assert any(e["label"] == label for e in functional_extras)
 
 
-def test_registered_only_candidate_out_of_dossier_segment_rejected(monkeypatch):
-    """反例（守边界，1.8.3 改动二）：模型选中了乙类候选本身（李富贵，候选
-    集里真实存在），但引用的段号根本不在卷宗目录里——乙类候选没有专属
-    段落可钉，钉证仍然只能核对"这个段号是否落在本次卷宗实际收录的段号
-    集合内"，结构性拒绝，不因为候选人选对了就放行。"""
-    conn = _make_conn()
-    conn.execute(
-        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) VALUES "
-        "('cp-lifugui','p1','李富贵',1,NULL)"
-    )
-    _seed_bible_characters(conn, "p1", [
-        _bible_character("李富贵", appearance_canonical="身形圆胖皮肤白净"),
-    ])
-
-    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
-        return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
-
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
-
-    async def fake_chat_structured(messages, **kwargs):
-        return prep_pack._PrepPackFunctionalCandidateVerdict(
-            selected_candidate="李富贵", supporting_segment_index=9999,
-        )
-
-    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
-
-    label = "白白净净的胖少年"
-    events = [_event("ev_001", characters=[{"display_name": label, "is_background_extra": True}])]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
-        conn, events=events, episode_no=2,
-        source_text="白白净净身子较胖的少年跟在人群身后，一声不吭。",
-    )
-
-    assert errors == []
-    assert not any(c["display_name"] == "李富贵" for c in characters)
-    assert any(e["label"] == label for e in functional_extras)
+# "都不是/无法确定"落 functional_extras、段号不在卷宗则拒绝这两条通用
+# 边界，既有的 test_candidate_verdict_no_match_selected_stays_functional_
+# extra / test_candidate_verdict_out_of_dossier_segment_rejected_stays_
+# functional_extra（1.8.0 时代已落地，均使用甲类候选"许清"真实触发模型
+# 调用，见上方约 2927/2968 行）已经覆盖，1.8.4 不重复造一份同形状的用例。
 
 
 def test_prep_pack_version_is_1_8_0():
@@ -3662,10 +3637,13 @@ def test_prep_pack_version_is_1_8_0():
     PREP_PACK_VERSION 上方大注释）。1.8.1（同一机制的后续事故修复：卷宗
     检索改用事件跨度定位，见 PREP_PACK_VERSION 上方 1.8.1 大注释）、1.8.2
     （同一机制的第三轮事故修复：卷宗预算改为按层保底配额 + B 侧候选公平
-    轮转合并，见 PREP_PACK_VERSION 上方 1.8.2 大注释）与 1.8.3（同一机制的
+    轮转合并，见 PREP_PACK_VERSION 上方 1.8.2 大注释）、1.8.3（同一机制的
     第四轮事故修复：保底粒度下沉到每个候选、字数预算同粒度兜底 + 候选集
     扩展为逐字命中∪人物谱注册区间两类并集，见 PREP_PACK_VERSION 上方
-    1.8.3 大注释）都会实际改变发给候选判别模型的卷宗内容/候选名单本身，
-    同样是 prompt-contract 变更，版本逐次推进——函数名/测试名沿用旧号
-    不改，只更新断言值，避免无谓的大范围改名。"""
-    assert prep_pack.PREP_PACK_VERSION == "1.8.3"
+    1.8.3 大注释）与 1.8.4（协调层复核：1.8.3 候选集扩展真实落库后确认
+    误绑，完整回退候选集扩展；同时修复"每候选保底"自身此前一直没暴露的
+    根因——候选锚点落在事件跨度内部时旧版扫描逻辑会跳过候选匹配，见
+    PREP_PACK_VERSION 上方 1.8.4 大注释）都会实际改变发给候选判别模型的
+    卷宗内容/候选名单本身，同样是 prompt-contract 变更，版本逐次推进——
+    函数名/测试名沿用旧号不改，只更新断言值，避免无谓的大范围改名。"""
+    assert prep_pack.PREP_PACK_VERSION == "1.8.4"
