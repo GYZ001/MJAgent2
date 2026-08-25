@@ -68,7 +68,19 @@ CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
 IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v16"
-CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v15"  # v15:
+CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v16"  # v16:
+# 人物谱持久别名（Character.aliases）并入 identity_authority_registry 的
+# source_labels，且 _project_current_identity_response 里 name_kind!=
+# personal_name 的短路新增"命中 reserved_authority_labels 则放行"分支（见
+# 该函数内注释）。两者都改变了这份契约的决议语义：前者让 K 决议目录/
+# reserved_authority_labels 内容本身变化（已随 evidence_catalog_hash 的
+# contract_version 输入自然失效缓存），后者改变了对同一份 raw provider
+# 响应中 n 项的后端解读结果——即使某一集的人物谱还没人登记别名、catalog
+# 内容不变，这条解读规则本身也变了。contract_version 直接进 evidence_
+# catalog_hash 的 hash 输入（见 _project_current_identity_response 调用处），
+# 不换版本号会让同一份缓存 raw response 被新逻辑静默复用/重新解读，
+# 与 v14/v15 换版本号是同一个理由。
+# v15:
 # k 项新增 absorbed_functional_keys（RCA ERR-20260824-bc3d14，见
 # docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §2.7/§4.2 "同批折叠通道"）：模型
 # 借此声明某个 K 决议吸收了本批/前批的哪些 functional 称谓组，替代此前
@@ -1979,9 +1991,22 @@ def _project_current_identity_response(
             )
             continue
         identity_label = str(item.identity_label or "").strip()
-        if str(item.name_kind or "") != IDENTITY_NAME_FORM_PERSONAL:
+        if (
+            str(item.name_kind or "") != IDENTITY_NAME_FORM_PERSONAL
+            and identity_label not in (reserved_authority_labels or set())
+        ):
             # 尊称与代称永远不能签发新的人物权威。它们先落为功能身份，保留原文
             # 里的逐字称谓，等真名真正出现在证据中时再由 K 决议认领同一个人。
+            #
+            # 例外：identity_label 命中 reserved_authority_labels 时不适用这条
+            # 短路。该集合只收录人物谱已登记的真名/别名，以及本集之前批次已由
+            # K/N 决议确认过的身份称谓——都是经过核验的既成事实，不是模型这次
+            # 现场的臆测。真名>尊称>代称这条阶梯是为了拦截模型凭空签发新人物卡
+            # （生产事故：模型据"许师姐"擅自签发过一张全新人物卡），对已核验
+            # 事实继续套用同一条防臆测规则就是把规则用错了对象——未登记的尊称/
+            # 代称仍然一律在这里落 functional，不受影响。命中后放行到下面与
+            # personal_name 相同的处理路径，由已有的 reserved_authority_labels
+            # 命中逻辑（含"必须选择 K decision"的强制与 K/N 冗余回显丢弃）接管。
             append_candidate(
                 source_label=identity_label,
                 canonical_name="",

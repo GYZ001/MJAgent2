@@ -10,7 +10,7 @@ from app import api, db, hiagent, portraits, screenplay_scene_shards, stages
 from app import errors as app_errors
 from app.harness import model_gateway
 from app.narrative_blueprint import NarrativeBlueprint
-from app.schemas import (Bible, Character, EpisodeScreenplay,
+from app.schemas import (Bible, Character, CharacterAlias, EpisodeScreenplay,
                          IdentityContractEvidence, InformationItem,
                          KeyDialogueChain, KeyDialogueTurn,
                          NarrativeContinuityPlan, NarrativeIdentityContract,
@@ -9813,3 +9813,211 @@ def test_ep5_disambiguation_key_falls_back_to_authority_id_for_named_branch() ->
     assert key_named_a == "bible:萧炎"
     assert key_named_b == "bible:药老"
     assert key_named_a != key_named_b
+
+
+# --- 持久别名（Character.aliases）打通 Stage 0 身份决议层：断点二 -----------
+#
+# 背景：app/identity_authority.py 的 identity_authority_registry 现在把
+# Character.aliases 并入 bible:{name} authority 的 source_labels（断点一），
+# 但 _project_current_identity_response 里 name_kind != personal_name 的
+# 短路此前无条件把这类候选降级为 functional，永远走不到下面对
+# reserved_authority_labels 的命中处理，两处都要修才能让别名在这条链路
+# 生效。以下测试覆盖：正例（K 分支吸收，不再产生幻影 functional 身份）、
+# 边界反例（未登记的尊称/代称必须继续落 functional）、反例二
+# （已登记别名若缺配套 K 决议，必须强制走 K，不得静默绑定/落空绑定）。
+
+def _reserved_authority_labels(authorities: list[dict]) -> set[str]:
+    return {
+        str(label).strip()
+        for authority in authorities
+        if str(authority.get("identity_kind") or "") != "functional"
+        for label in (
+            authority.get("canonical_name"),
+            *(authority.get("source_labels") or []),
+        )
+        if str(label or "").strip()
+    }
+
+
+def _xu_qing_bible_with_shishi_alias() -> Bible:
+    return Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="许清",
+            role="重要配角",
+            appearance_canonical="青衣长剑，眉目清冷",
+            aliases=[CharacterAlias(
+                text="许师姐",
+                name_kind="honorific",
+                evidence_chapter_index=1,
+                evidence_quote="许师姐提剑而立",
+            )],
+        )],
+    )
+
+
+def test_current_identity_registered_alias_n_echo_absorbed_by_k_branch() -> None:
+    """正例：许师姐是许清已登记别名。模型对同一条证据既选中匹配的 K 决议，
+    又用 honorific 形态在 n 里重复申报"许师姐"——修复前，n 循环在 name_kind
+    短路处无条件把它降级为 functional，产生一个与 K 决议并存的幻影功能
+    身份；修复后，该 n 项必须识别出自己是 K 决议的冗余回显并静默丢弃，
+    最终只留下正确绑定到 bible:许清 的那一个候选。"""
+    records = portraits._current_identity_evidence_records("许师姐提剑而立。")
+    evidence_by_ref = {
+        f"E{index:03d}": record
+        for index, record in enumerate(records, start=1)
+    }
+    bible = _xu_qing_bible_with_shishi_alias()
+    authorities = portraits.identity_authority_registry(bible, [])
+    reserved_authority_labels = _reserved_authority_labels(authorities)
+    assert "许师姐" in reserved_authority_labels  # 断点一已闭环
+
+    known = portraits._current_identity_known_decision_catalog(
+        evidence_by_ref, authorities=authorities,
+    )
+    k_decision = next(
+        item for item in known.values() if item["source_label"] == "许师姐"
+    )
+    assert k_decision["authority_id"] == "bible:许清"
+
+    payload = {
+        "k": [{"decision_id": k_decision["decision_id"], "kind": "onscreen"}],
+        "n": [{
+            "evidence_ref": k_decision["evidence_ref"],
+            "identity_label": "许师姐",
+            "name_kind": "honorific",
+            "kind": "onscreen",
+        }],
+        "f": [],
+    }
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions=known,
+        reserved_authority_labels=reserved_authority_labels,
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+
+    assert errors == []
+    assert len(projected) == 1
+    assert projected[0]["authority_id"] == "bible:许清"
+    assert projected[0]["identity_kind"] == "named"
+    assert not any(item["identity_kind"] == "functional" for item in projected)
+
+
+def test_current_identity_unregistered_honorific_still_falls_to_functional() -> None:
+    """边界反例（必须守住）：一个尊称未在任何角色的人物谱别名里登记过时，
+    即便系统里已经存在别的已登记别名，这个未登记称谓也必须继续无条件落
+    functional——放宽通道只对"已登记别名"生效，不能变成对所有尊称/代称
+    放行。"""
+    records = portraits._current_identity_evidence_records(
+        "看门人在门口张望，许师姐提剑而立。"
+    )
+    evidence_by_ref = {
+        f"E{index:03d}": record
+        for index, record in enumerate(records, start=1)
+    }
+    bible = _xu_qing_bible_with_shishi_alias()
+    authorities = portraits.identity_authority_registry(bible, [])
+    reserved_authority_labels = _reserved_authority_labels(authorities)
+    assert "看门人" not in reserved_authority_labels
+
+    evidence_ref = next(
+        ref for ref, record in evidence_by_ref.items()
+        if "看门人" in str(record.get("text") or "")
+    )
+    payload = {"k": [], "n": [{
+        "evidence_ref": evidence_ref,
+        "identity_label": "看门人",
+        "name_kind": "referential",
+        "kind": "mentioned",
+    }], "f": []}
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        reserved_authority_labels=reserved_authority_labels,
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+
+    assert errors == []
+    assert len(projected) == 1
+    assert projected[0]["identity_kind"] == "functional"
+    assert projected[0]["source_label"] == "看门人"
+
+
+def test_current_identity_registered_alias_without_k_forces_resample_not_silent_bind() -> None:
+    """反例二守边界：已登记别名"许师姐"若只出现在 n（模型没有配套选中
+    K 决议），后端绝不能在这里就地静默把它绑成一个新的 named 身份（那样
+    等于绕过了 authority_id 精确核验，存在张冠李戴风险），也不能落回
+    functional（那会重新制造断点二试图修复的幻影身份）。唯一允许的结果
+    是复用既有的"已登记身份必须选择 K decision"强制失败，逼模型下一轮
+    正确引用 K 目录里绑定到 bible:许清 的那个 decision_id。"""
+    records = portraits._current_identity_evidence_records("许师姐提剑而立。")
+    evidence_by_ref = {
+        f"E{index:03d}": record
+        for index, record in enumerate(records, start=1)
+    }
+    bible = _xu_qing_bible_with_shishi_alias()
+    authorities = portraits.identity_authority_registry(bible, [])
+    reserved_authority_labels = _reserved_authority_labels(authorities)
+    evidence_ref = next(iter(evidence_by_ref))
+
+    payload = {"k": [], "n": [{
+        "evidence_ref": evidence_ref,
+        "identity_label": "许师姐",
+        "name_kind": "honorific",
+        "kind": "onscreen",
+    }], "f": []}
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        reserved_authority_labels=reserved_authority_labels,
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+
+    assert any("必须选择 K decision" in str(error) for error in errors)
+    assert not any(item.get("identity_kind") == "functional" for item in projected)
+
+
+def test_current_identity_alias_only_binds_true_owner_not_namesake() -> None:
+    """反例二（张冠李戴防护）：两个角色恰好都被称"师姐"，但只有许清在人物谱
+    里登记了这个别名。K 决议目录必须只把"师姐"签给真正的所有者
+    bible:许清，另一位角色 bible:沈婉 绝不能出现任何以"师姐"为 source_label
+    的可选 K 决议。"""
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[
+            Character(
+                name="许清", role="重要配角", appearance_canonical="青衣长剑",
+                aliases=[CharacterAlias(
+                    text="师姐", name_kind="honorific",
+                    evidence_chapter_index=1, evidence_quote="许师姐来了",
+                )],
+            ),
+            Character(
+                name="沈婉", role="重要配角", appearance_canonical="红衣软剑",
+            ),
+        ],
+    )
+    authorities = portraits.identity_authority_registry(bible, [])
+    records = portraits._current_identity_evidence_records("师姐缓步走来。")
+    evidence_by_ref = {
+        f"E{index:03d}": record
+        for index, record in enumerate(records, start=1)
+    }
+    known = portraits._current_identity_known_decision_catalog(
+        evidence_by_ref, authorities=authorities,
+    )
+    shishi_decisions = [
+        item for item in known.values() if item["source_label"] == "师姐"
+    ]
+    assert shishi_decisions
+    assert {item["authority_id"] for item in shishi_decisions} == {"bible:许清"}

@@ -317,11 +317,25 @@ def identity_authority_registry(
         authorities_by_named_canonical.setdefault(name, set()).add(
             f"bible:{name}"
         )
+        # 持久别名（Character.aliases，docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md
+        # §4.1）已经过代码三闸核验 + 候选判别裁决 + 段号钉证才登记进人物谱，
+        # 不再是模型的临时猜测——必须并入该角色的 source_labels，否则身份决议
+        # 层永远看不到"许师姐"这类只以别名出现的角色，K 决议目录与
+        # reserved_authority_labels 都不会收录它，别名在这条链路上就完全无效。
+        # 防御：aliases 可能缺字段/为空串/与真名或彼此重复，一律去重后再收录。
+        seen_labels: set[str] = {name}
+        alias_labels: list[str] = []
+        for alias in getattr(character, "aliases", None) or []:
+            alias_text = str(getattr(alias, "text", "") or "").strip()
+            if not alias_text or alias_text in seen_labels:
+                continue
+            seen_labels.add(alias_text)
+            alias_labels.append(alias_text)
         entries[f"bible:{name}"] = {
             "authority_id": f"bible:{name}",
             "canonical_name": name,
             "identity_kind": "named",
-            "source_labels": [name],
+            "source_labels": [name, *alias_labels],
             "identity_group": f"bible:{name}",
             "source_instance_key": f"bible:{name}",
             "evidence": "角色圣经已登记身份",

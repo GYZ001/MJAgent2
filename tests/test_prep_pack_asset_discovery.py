@@ -1454,6 +1454,20 @@ def test_bible_alias_ambiguous_across_characters_falls_back_to_discovery(monkeyp
     monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_disambiguate)
     monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
+    # 1.8.0：discovery 判定 skip 后，"小胖子"落入未解析角色标签候选判别
+    # （_prep_pack_resolve_functional_extra_candidate）——它字面命中了
+    # 李富贵、王有材两个人的已确认别名，两者都会入选候选集，真的会发起一次
+    # 候选判别模型调用。这条红灯只关心"矛盾不能静默猜绑"这个安全默认，
+    # 如实模拟模型在证据不足以区分时诚实回答"都不是/无法确定"（原文只有
+    # "小胖子憨憨一笑，抓了抓头。"一句，确实分不出是谁）——候选判别机制
+    # 因此也维持"不确定不绑"的原行为，两道防线殊途同归。
+    async def fake_chat_structured(messages, **kwargs):
+        return prep_pack._PrepPackFunctionalCandidateVerdict(
+            selected_candidate="都不是/无法确定", supporting_segment_index=1,
+        )
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
     events = [_event("ev_010", characters=[
         {"display_name": "小胖子", "is_background_extra": False},
     ])]
@@ -1468,6 +1482,9 @@ def test_bible_alias_ambiguous_across_characters_falls_back_to_discovery(monkeyp
     assert stats["character_discovery_calls"] == 1, "人物谱矛盾不能静默猜绑，必须回炉发现"
     assert not any(c["display_name"] in {"李富贵", "王有材"} for c in characters)
     assert rejected_alias_conflicts, "人物谱内部的矛盾别名必须留痕"
+    assert any(e["label"] == "小胖子" for e in functional_extras), (
+        "候选判别在证据不足时也必须维持原行为，落 functional_extras"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2781,8 +2798,210 @@ def test_functional_extra_visual_entity_id_stable_for_same_raw_label_across_epis
     assert extras_1[0]["visual_entity_id"].startswith("entity:")
 
 
-def test_prep_pack_version_is_1_7_0():
-    """版本号哨兵：本次改造（跨集别名读源切换 + visual_entity_id/
-    display_appellation）是 P0 收口，schema/payload 均有变更，版本必须
-    推进到 1.7.0（docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.3 末段）。"""
-    assert prep_pack.PREP_PACK_VERSION == "1.7.0"
+# ---------------------------------------------------------------------------
+# 未解析角色标签候选判别（1.8.0，见 app.production.prep_pack.PREP_PACK_
+# VERSION 上方大注释、_prep_pack_resolve_functional_extra_candidate 的完整
+# 说明）：用户原始诉求——同一角色在不同集换脸，真名揭晓前人物建模持续
+# 漂移。真实第 37 轮 EP1 现场：许清人物谱已登记确认别名"许师姐"、
+# appearance_canonical 写着"常年穿银色长袍"、定妆照 ep_start=1 已就绪，
+# 本集原文两次出现"许师姐"，但事件链抽取模型给出场角色起的标签是外貌描述
+# "银色长袍女子"——跟别名库登记的称谓类型对不上，此前一路落
+# functional_extras 当无图群演。下面几条红灯覆盖：核心红→绿（标签类型
+# 对不上时，候选判别机制正确绑定到人物谱候选并保留本集原文措辞）、以及
+# 三条必须守住的反例（候选集为空 / 模型选"都不是无法确定" / 模型引用卷宗
+# 外段号，三种情形都必须维持原行为落群演，绝不猜）。
+# ---------------------------------------------------------------------------
+
+def test_unresolved_appearance_label_binds_via_candidate_verdict(monkeypatch):
+    """红灯→绿灯核心场景：discovery 干净运行却没能给"银色长袍女子"任何
+    归类结论（真实场景——discovery 自己的候选面用的也是称谓/姓名，同样
+    对不上外貌描述这个标签类型），落入 Coordinator-mandated default 兜底，
+    即将落 functional_extras 之前，候选判别机制必须介入：本集原文里许清的
+    已确认别名"许师姐"字面出现，候选集只有许清一人入选（另一个人物谱角色
+    "孟浩"的姓名/别名本集原文里从未出现，不该被拉进候选集，也不该出现在
+    发给模型的候选名单里）；候选判别模型调用选中许清、引用卷宗内的段号，
+    最终必须绑定到许清已有的 portrait_id/identity_id/visual_entity_id，
+    但 display_appellation 仍须是本集原文措辞"银色长袍女子"（不提前剧透
+    许清这个规范名），且这个标签不能再出现在 functional_extras 里。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-xuqing','p1','许清',1,NULL)"
+    )
+    _seed_bible_characters(conn, "p1", [
+        _bible_character(
+            "许清", appearance_canonical="常年穿银色长袍，气质清冷。",
+            aliases=[_bible_alias("许师姐", evidence_chapter_index=1)],
+        ),
+        # 决胜点：孟浩不该入选候选集——他的规范名/别名本集原文里完全没出现。
+        _bible_character("孟浩", appearance_canonical="占位外观"),
+    ])
+
+    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    seen: dict = {}
+
+    async def fake_chat_structured(messages, **kwargs):
+        seen["prompt"] = str(messages[0]["content"])
+        seen["schema"] = kwargs.get("output_schema")
+        return prep_pack._PrepPackFunctionalCandidateVerdict(
+            selected_candidate="许清", supporting_segment_index=1,
+            supporting_quote="许师姐武功高强，众人皆知。",
+        )
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
+    events = [_event("ev_001", characters=[
+        {"display_name": "银色长袍女子", "is_background_extra": True},
+    ])]
+    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
+        conn, events=events,
+        source_text="许师姐武功高强，众人皆知。\n\n银色长袍女子缓步走出大殿，无人认得她的身份。",
+    )
+
+    assert errors == []
+    assert stats["character_discovery_calls"] == 1
+    by_portrait = {c["portrait_id"]: c for c in characters}
+    assert "cp-xuqing" in by_portrait, "许清必须真的出现在 asset_manifest.characters 中"
+    entry = by_portrait["cp-xuqing"]
+    assert entry["display_name"] == "许清"
+    assert entry["identity_id"] == "bible:许清"
+    assert entry["visual_entity_id"] == "bible:许清"
+    assert entry["display_appellation"] == "银色长袍女子", "字幕/取图措辞必须是本集原文说法，不提前剧透"
+    assert entry["provenance"]["method"] == "candidate_verdict"
+    assert entry["provenance"]["anchor_segments"] == [1]
+    assert "许师姐" in entry["provenance"]["anchor_phrase"]
+    assert not any(e["label"] == "银色长袍女子" for e in functional_extras), (
+        "绑定成功后，这个标签不能再出现在 functional_extras 里"
+    )
+    # 候选面必须只含真正命中本集原文的角色：孟浩不该入选。
+    assert "许清" in seen["prompt"] and "孟浩" not in seen["prompt"]
+    assert seen["schema"]["properties"]["selected_candidate"]["enum"] == [
+        "许清", "都不是/无法确定",
+    ]
+
+
+def test_candidate_verdict_empty_candidate_set_stays_functional_extra(monkeypatch):
+    """反例①：人物谱里没有任何角色的规范名/已确认别名字面出现在本集原文
+    里，候选集为空——必须直接维持原行为落 functional_extras，且绝不发起
+    任何候选判别模型调用（候选集为空时连卷宗都不该检索，更不该问模型）。"""
+    conn = _make_conn()
+
+    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    async def boom_chat_structured(messages, **kwargs):
+        raise AssertionError("候选集为空时绝不该发起候选判别模型调用")
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", boom_chat_structured)
+
+    events = [_event("ev_001", characters=[
+        {"display_name": "银色长袍女子", "is_background_extra": True},
+    ])]
+    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+        conn, events=events,
+        source_text="银色长袍女子缓步走出大殿，无人认得她的身份。",
+    )
+
+    assert errors == []
+    assert not any(c["display_name"] == "许清" for c in characters)
+    assert any(e["label"] == "银色长袍女子" for e in functional_extras)
+
+
+def test_candidate_verdict_no_match_selected_stays_functional_extra(monkeypatch):
+    """反例②：候选集非空（许清入选），但模型如实回答"都不是/无法确定"——
+    必须维持原行为落 functional_extras，绝不强行绑定候选集里的任何一人。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-xuqing','p1','许清',1,NULL)"
+    )
+    _seed_bible_characters(conn, "p1", [
+        _bible_character(
+            "许清", appearance_canonical="常年穿银色长袍，气质清冷。",
+            aliases=[_bible_alias("许师姐", evidence_chapter_index=1)],
+        ),
+    ])
+
+    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    async def fake_chat_structured(messages, **kwargs):
+        return prep_pack._PrepPackFunctionalCandidateVerdict(
+            selected_candidate="都不是/无法确定", supporting_segment_index=1,
+        )
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
+    events = [_event("ev_001", characters=[
+        {"display_name": "银色长袍女子", "is_background_extra": True},
+    ])]
+    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+        conn, events=events,
+        source_text="许师姐武功高强，众人皆知。\n\n银色长袍女子缓步走出大殿，无人认得她的身份。",
+    )
+
+    assert errors == []
+    assert not any(c["display_name"] == "许清" for c in characters)
+    assert any(e["label"] == "银色长袍女子" for e in functional_extras)
+
+
+def test_candidate_verdict_out_of_dossier_segment_rejected_stays_functional_extra(monkeypatch):
+    """反例③：模型选中了候选集里真实存在的人（许清），但引用的段号根本
+    不在卷宗目录里（凭空编造/协议之外的取值）——结构性钉证必须拒绝，绝不
+    因为候选人本身选对了就放行，一律维持原行为落 functional_extras。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-xuqing','p1','许清',1,NULL)"
+    )
+    _seed_bible_characters(conn, "p1", [
+        _bible_character(
+            "许清", appearance_canonical="常年穿银色长袍，气质清冷。",
+            aliases=[_bible_alias("许师姐", evidence_chapter_index=1)],
+        ),
+    ])
+
+    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    async def fake_chat_structured(messages, **kwargs):
+        return prep_pack._PrepPackFunctionalCandidateVerdict(
+            selected_candidate="许清", supporting_segment_index=9999,
+        )
+
+    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
+
+    events = [_event("ev_001", characters=[
+        {"display_name": "银色长袍女子", "is_background_extra": True},
+    ])]
+    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+        conn, events=events,
+        source_text="许师姐武功高强，众人皆知。\n\n银色长袍女子缓步走出大殿，无人认得她的身份。",
+    )
+
+    assert errors == []
+    assert not any(c["display_name"] == "许清" for c in characters)
+    assert any(e["label"] == "银色长袍女子" for e in functional_extras)
+
+
+def test_prep_pack_version_is_1_8_0():
+    """版本号哨兵：本次改造（未解析角色标签候选判别——真实 EP1"银色长袍
+    女子"应绑定许清却因标签类型对不上落 functional_extras 的用户诉求收口）
+    新增 provenance.method="candidate_verdict" 取值、会实际改变部分此前落
+    functional_extras 的标签的解析结果，版本必须推进到 1.8.0（见
+    PREP_PACK_VERSION 上方大注释）。"""
+    assert prep_pack.PREP_PACK_VERSION == "1.8.0"

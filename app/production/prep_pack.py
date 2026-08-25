@@ -225,7 +225,7 @@ from app.validators import (
     match_scene_name,
 )
 
-PREP_PACK_VERSION = "1.7.0"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "1.8.0"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
 # gained functional_extras; 1.4.0: coverage_ledger gained paratext (deterministic
 # keyword/position classifier, since replaced); 1.4.1: paratext classification
@@ -349,6 +349,36 @@ PREP_PACK_VERSION = "1.7.0"  # 1.1.0: event_chain entries carry source_span (P1 
 #      台词显示，不随全局规范名改写）。display_name 语义不变（仍是消歧后
 #      的规范名，向后兼容既有消费者）——两个字段都是新增可选结构，不破坏
 #      payload 冻结纪律。
+# 1.8.0（用户诉求收口，schema/prompt-contract 变更，版本推进）：真实第 37
+# 轮 EP1 复核——"许清"人物谱已登记确认别名"许师姐"（app.stages 全书别名
+# 回填核验通过）、appearance_canonical 明确写着"常年穿银色长袍"、定妆照
+# ep_start=1 已就绪，本集原文两次出现"许师姐"，但事件链抽取模型给出场的
+# 标签是外貌描述"银色长袍女子"——跟别名库登记的称谓类型对不上，两个字符串
+# 毫不相干，_resolve_portrait_id 与别名注册表查找都必然落空，此前一路落
+# functional_extras 当无图群演。根因不是别名机制坏了，是这类"既查不到
+# portrait、也命中不了别名"、即将落入 functional_extras 的标签从未真正过
+# 一遍"人物谱里有没有人已经在本集原文里跟它共现"的判别。
+# 修复：_resolve_assets 在这类标签真正落 functional_extras 之前，补一次
+# 候选判别（范式完全复用 app/stages.py 当晚落地的别名裁决庭：代码检索卷宗
+# → 模型候选判别 → 段号钉证，见 _prep_pack_functional_candidate_roster /
+# _prep_pack_functional_candidate_names / _prep_pack_functional_candidate_
+# dossier / _prep_pack_functional_candidate_call / _prep_pack_functional_
+# candidate_pin_segment / _prep_pack_resolve_functional_extra_candidate 的
+# docstring）：候选集是本集 source_text 里规范名或已确认别名有字面命中的
+# 人物谱角色（零语义，候选集为空直接维持原行为）；卷宗覆盖全部候选各自的
+# 出场证据（不只是被测标签周围），避免"选择题名存实亡"；模型做的是候选
+# 选择题（"标签 X 最可能指候选中的哪一位"，含"都不是/无法确定"选项），不是
+# 诱发确认偏误的是非题；钉证只要求引用卷宗段号（schema enum 收紧），不比对
+# 模型转录的引句。命中后 asset_manifest.characters[] 新增 provenance.method
+# 取值 "candidate_verdict"（与既有 direct/alias/resolution/discovery/
+# absorbed_speaker/resolution_forward/alias_inherited 并列，如实标注这次
+# 绑定走的是本机制，供审计区分），anchor_segments/anchor_phrase 是钉证命中
+# 的卷宗段落本身（代码检索出的真实原文，天然满足自校验的逐字命中）；
+# display_appellation 仍是本集原文措辞（"银色长袍女子"），不提前剧透
+# display_name 这个全局规范名。schema 新增取值属于 provenance 既有可选
+# 结构的扩展，不破坏 payload 冻结纪律，但会实际改变一部分此前落
+# functional_extras 的标签的解析结果（真正的 prompt-contract/行为变更），
+# 比照 1.4.1/1.6.1 的先例推进版本号。
 QA_PROFILE_VERSION = "prep-pack-qa-gate-1"
 _QA_EVALUATOR_NAME = "screenplay_production_qa"
 _CHUNK_MAX_CHARS = 6000
@@ -1479,6 +1509,306 @@ async def _discover_new_scenes(
     return await ensure_scenes_for_labels(project_id, episode_no, labels)
 
 
+# ---------- 未解析角色标签候选判别（1.8.0，见 PREP_PACK_VERSION 上方大注释
+# 的完整案情）：用户原始诉求——同一角色在不同集换脸，真名揭晓前人物建模
+# 持续漂移。真实 EP1 现场：标签"银色长袍女子"本该绑定许清（appearance_
+# canonical 明确写着"常年穿银色长袍"，人物谱已登记确认别名"许师姐"，本集
+# 原文两次出现"许师姐"），却因为标签类型对不上（模型给出场角色起的是外貌
+# 描述，别名库登记的是称谓）落 functional_extras 当无图群演。
+#
+# 根因不是别名机制坏了——是这类"既查不到 portrait、也命中不了别名"、即将
+# 落入 functional_extras 的标签，从未真正过一遍"人物谱里有没有人已经在
+# 本集原文里跟它共现"的判别。skip_character_names 的两条既有来源（discovery
+# 自己判定 skip、以及 _resolve_assets 下方"Coordinator-mandated default"
+# 兜底）都只回答了"这不是一个可以直接建卡的新角色"，从未回答这个问题。
+#
+# 修复范式完全复用 app/stages.py 当晚落地的别名裁决庭三段式（_alias_
+# verdict_dossier / _alias_verdict_candidates / _alias_verdict_call /
+# _alias_verdict_pin_segment：代码检索卷宗 → 候选判别 → 段号钉证），但作用
+# 域收窄到本集自己的 source_text——prep_pack 不需要 stages.py 那样跨全书找
+# "桥接章"：这里的候选与证据都只在本集范围内找，找不到就维持原行为落群演，
+# 不做跨集检索，跟"确定性、零语义"的既有纪律一致。两个模块不允许互相导入
+# 内部函数（保持边界干净），本节是同一范式的独立实现，不是重构共享：
+#   1) 候选集（代码，零语义，_prep_pack_functional_candidate_names）：本集
+#      source_text 里规范名或已确认别名有字面命中的人物谱角色。不针对任何
+#      具体人名/姓氏做特判（真实误登记事故教训，见 stages.py 同名注释）；
+#      候选集为空直接维持原行为，不发起任何模型调用。
+#   2) 卷宗（代码，零语义，_prep_pack_functional_candidate_dossier）：按
+#      自然段切分本集原文，覆盖全部候选各自的出场证据——不能只收集被测
+#      标签周围的证据，那会让下一步的选择题名存实亡（stages.py 已验证的
+#      真实教训：模型看不到正确候选的材料，只能靠反复出现的候选拍脑袋）。
+#   3) 裁决（模型，唯一一次调用，_prep_pack_functional_candidate_call）：
+#      候选选择题——"标签 X 最可能指候选中的哪一位"，候选集之外强制一个
+#      "都不是/无法确定"选项，schema 用 enum 收紧到候选集与卷宗段号。不是
+#      "标签是不是候选 A"的是非题（stages.py 已验证是非题诱发确认偏误：
+#      模型看到反复出现的某个候选会不自觉地倾向他，跟他是不是正确答案
+#      无关）。
+#   4) 钉证（代码，结构性，_prep_pack_functional_candidate_pin_segment）：
+#      模型只需引用卷宗目录里的段号，不比对模型转录的逐字引句——今晚已
+#      证明那种比对方式会因转录波动（跨段拼接/省略号/标点微调）误杀正确
+#      判定，钉证退化为"选中的段号是否落在卷宗集合内"这一结构性判断。
+# 选中候选集里的真实一员、且段号钉证通过、且这个候选在本集确有已生成的
+# 定妆照（复用既有 _resolve_portrait_id，不重复实现一遍"有没有图"的判断）、
+# 且这次改名不会与跨集别名注册表冲突（复用既有 _prep_pack_cross_episode_
+# alias_conflict，同一套"不确定不绑"纪律），才把这个标签重新计入
+# character_rename——调用点见 _resolve_assets 内 "Coordinator-mandated
+# default" 循环之后。选了"都不是/无法确定"、选了候选集之外的值（协议层
+# 已经不可能，代码侧仍做防御性核验）、卷宗为空、候选没有可用定妆照、或
+# 存在跨集别名冲突，一律返回 None——调用方维持原行为，标签留在
+# skip_character_names 正常落 functional_extras，绝不猜。
+#
+# 严禁任何具体人名/称谓的硬编码特判；严禁外貌关键词模糊匹配（"绿袍男子"
+# 这类外貌描述在长篇小说里能撞上一大片人，模糊匹配就是下一个误绑事故）——
+# 本节全程只用"人物谱角色的规范名/已确认别名是否逐字命中原文"这一结构判据
+# 构造候选与卷宗，谁是正确答案完全交给模型基于真实原文独立判别。
+
+_PREP_PACK_FUNCTIONAL_CANDIDATE_NO_MATCH_LABEL = "都不是/无法确定"
+_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES = 12  # 单条候选判别卷宗最多收录的段落数
+_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_CHARS = 6000  # 单条候选判别卷宗最多收录的总字符数
+
+
+def _prep_pack_functional_candidate_roster(bible: Bible) -> dict[str, list[str]]:
+    """候选面快照：规范名 -> [规范名, 已确认别名...]。``bible.characters[].
+    aliases`` 里的每一条本就是全书分析阶段模型申报 + 代码核验通过后才落库
+    的确认别名（app.schemas.CharacterAlias，见该类 docstring），这里不需要
+    重新核验证据锚点，直接读取文本即可——核验是全书分析阶段
+    （app.stages.generate_bible）的职责，不在本文件重复。跟
+    app.stages._alias_verdict_roster 同一构造，两个模块不互相导入内部
+    函数，各自独立实现一份。"""
+    return {
+        character.name: [character.name, *(alias.text for alias in character.aliases)]
+        for character in bible.characters
+    }
+
+
+def _prep_pack_functional_candidate_names(
+    source_text: str, roster: dict[str, list[str]],
+) -> list[str]:
+    """结构判据，零语义：规范名或其任一已确认别名逐字子串命中本集
+    ``source_text``，即算该角色在本集"出场"，候选入选。不针对任何具体
+    人名/姓氏做特判。返回值按 ``roster``（即 bible.characters 原始登记
+    顺序构造的字典，Python 字典保序）顺序去重——一个角色只要任一称谓命中
+    就只计入一次。"""
+    return [
+        name for name, surface_forms in roster.items()
+        if any(form and form in source_text for form in surface_forms)
+    ]
+
+
+def _prep_pack_functional_candidate_dossier(
+    segments: list[SourceSegment], label: str, anchor_texts: set[str],
+) -> list[dict[str, Any]]:
+    """裁决卷宗检索：跟 app.stages._alias_verdict_dossier 同一套三层优先级
+    （both 全收 → text_only 全收 → anchor_only 按离最近的 both/text_only
+    段落远近补足预算），这里的"章"就是本集 ``segments``（``index_source_
+    segments(source_text)`` 的结果）本身，不需要先定位桥接章。
+    ``anchor_texts`` 必须覆盖全部候选的规范名∪已确认别名（调用方负责传
+    全，不只是被测标签自己）——否则模型看不到其它候选各自的出场证据，
+    选择题就名存实亡（见本节顶部大注释）。
+
+    ``label`` 是原始提及文本本身（如"银色长袍女子"）——它不保证逐字出现在
+    本集原文里（事件链抽取模型有时会转述/综合），both/text_only 两类因此
+    可能为空；这时优先级退化为只剩 anchor_only（不再有"离标签最近"这个
+    参照点，按文档顺序返回，见 priority_indexes 为空的分支）。只要候选集
+    非空，anchor_only 必然非空——候选正是靠 anchor 命中本集才入选的（见
+    _prep_pack_functional_candidate_names），不会出现"候选非空但卷宗为空"
+    这种情况；调用方仍需处理空列表这个防御性分支。"""
+    both_indexes: list[int] = []
+    text_only_indexes: list[int] = []
+    anchor_only_indexes: list[int] = []
+    for index, seg in enumerate(segments):
+        has_text = bool(label) and label in seg.text
+        has_anchor = any(anchor and anchor in seg.text for anchor in anchor_texts)
+        if has_text and has_anchor:
+            both_indexes.append(index)
+        elif has_text:
+            text_only_indexes.append(index)
+        elif has_anchor:
+            anchor_only_indexes.append(index)
+    priority_indexes = both_indexes + text_only_indexes
+    if priority_indexes:
+        anchor_only_ordered = sorted(
+            anchor_only_indexes,
+            key=lambda index: (min(abs(index - anchor) for anchor in priority_indexes), index),
+        )
+    else:
+        anchor_only_ordered = anchor_only_indexes
+    ordered_candidates = priority_indexes + anchor_only_ordered
+    selected: list[int] = []
+    used_chars = 0
+    for index in ordered_candidates:
+        if len(selected) >= _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES:
+            break
+        seg_text = segments[index].text
+        if selected and used_chars + len(seg_text) > _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_CHARS:
+            continue
+        selected.append(index)
+        used_chars += len(seg_text)
+    selected.sort()
+    return [
+        {"segment_index": index + 1, "text": segments[index].text}
+        for index in selected
+    ]
+
+
+class _PrepPackFunctionalCandidateVerdict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # 候选判别（见本节顶部大注释）：不是"标签是不是候选 A"的是非题，而是在
+    # 候选集（本集出场的全部人物谱角色 + "都不是/无法确定"）里选一个。schema
+    # 层面用 enum 收紧到 _prep_pack_functional_candidate_call 构造的候选集
+    # （与段号 enum 同一写法，参照 app/portraits.py _current_identity_
+    # schema() 给 evidence_ref 注入 enum 的写法）。
+    selected_candidate: str
+    # 钉证判据（见本节顶部大注释）：模型只需引用卷宗目录里某一条的段号，不
+    # 要求逐字复述原文。schema 层面用 enum 把候选值限定为本次卷宗实际收录
+    # 的段号集合，代码层面 _prep_pack_functional_candidate_pin_segment 再做
+    # 一次结构性核验。
+    supporting_segment_index: int
+    # 可选的观测字段，供人工复核参考，不作为通过与否的判据。
+    supporting_quote: str = ""
+
+
+async def _prep_pack_functional_candidate_call(
+    *, label: str, dossier: list[dict[str, Any]], candidates: list[str],
+    episode_id: str, project_id: str | None,
+) -> _PrepPackFunctionalCandidateVerdict:
+    """唯一一次模型调用：只给卷宗原文与候选人名单，不点名"你猜是不是某个
+    候选"——把"这个标签到底指候选里的哪一位"完全交给模型自己独立判别，
+    与 app.stages._alias_verdict_call 同一范式（本文件独立实现，两个模块
+    不互相导入内部函数）。"""
+    catalog = "\n\n".join(
+        f"[段{item['segment_index']}] {item['text']}" for item in dossier
+    )
+    segment_indexes = [item["segment_index"] for item in dossier]
+    candidate_options = [*candidates, _PREP_PACK_FUNCTIONAL_CANDIDATE_NO_MATCH_LABEL]
+    candidate_list = "、".join(candidates)
+    prompt = f"""下面是本集原文中的段落（含前后语境，出现顺序不代表任何推断结论），
+每段前面标了段号：
+{catalog}
+
+本集出场的人物谱角色候选（判别范围仅限这些人，不要引入候选之外的人）：
+{candidate_list}
+
+任务：仅依据以上原文段落本身，判断标签"{label}"最可能指候选中的哪一位本人。
+- selected_candidate 必须从候选列表中选一个精确姓名，或者在证据不足以确定具体是谁时
+  选"{_PREP_PACK_FUNCTIONAL_CANDIDATE_NO_MATCH_LABEL}"；不要因为某个候选在段落里出现
+  次数多就倾向选他，只依据原文是否真的能确定"{label}"说的就是他本人；
+- supporting_segment_index 必须填上面某一段落标注的段号（取值只能是 {segment_indexes}
+  之一），选你得出这个结论最主要依据的那一段，不要凭空填一个没在目录里出现的段号；
+- supporting_quote 可选，若填写请给该段里的一句原文摘录供人工复核参考，不要求逐字
+  精确，留空也可以。
+只输出符合 Schema 的 JSON。"""
+    schema = _PrepPackFunctionalCandidateVerdict.model_json_schema()
+    # 参照 app/portraits.py _current_identity_schema() 给 evidence_ref 注入
+    # enum 的写法：候选段号、候选人名单都收紧到本次实际可用的集合，模型在
+    # 协议层面就选不出卷宗外的段号或候选集之外的人；真正生效的核验仍在
+    # _prep_pack_functional_candidate_pin_segment 与
+    # _prep_pack_resolve_functional_extra_candidate 里做代码侧结构校验
+    # （provider 对 enum 的遵守不是可证明保证）。
+    schema["properties"]["supporting_segment_index"]["enum"] = segment_indexes
+    schema["properties"]["selected_candidate"]["enum"] = candidate_options
+    operation_id = (
+        f"episode_prep_pack:{episode_id}:functional_extra_candidate_verdict:"
+        + evidence_repository.content_hash({
+            "label": label, "candidates": candidates,
+            "dossier": [item["segment_index"] for item in dossier],
+        })
+    )
+    return await model_gateway.chat_structured(
+        [{"role": "user", "content": prompt}],
+        model_type=_PrepPackFunctionalCandidateVerdict,
+        validate=None,
+        operation_id=operation_id,
+        max_tokens=500,
+        # 低温：这道闸的语义判断要稳定——同一份卷宗重跑不该一次选中一次
+        # 不确定（跟 stages.py 同一考量）。
+        temperature=0.0,
+        format_retry_limit=1,
+        semantic_retry_limit=1,
+        output_schema=schema,
+        call_meta={
+            "stage": "未解析角色候选判别",
+            "stage_key": "episode_prep_pack_functional_extra_candidate_verdict",
+            "call_role": "stage_generate",
+            "call_role_label": "未解析角色候选判别",
+            "expected_json": True,
+            "project_id": project_id,
+            "episode_id": episode_id,
+            "label": label,
+            "candidates": candidates,
+        },
+    )
+
+
+def _prep_pack_functional_candidate_pin_segment(
+    dossier: list[dict[str, Any]], segment_index: Any,
+) -> dict[str, Any] | None:
+    """钉证：结构性校验，不要求模型逐字复述原文（见本节顶部大注释）。模型
+    只需要在响应里选一个段号，这里核对该段号是否落在本次卷宗实际收录的
+    段号集合内——命中即视为钉证通过，因为卷宗内容本身就是代码检索出的
+    真实原文，模型选中某一条不存在"编造"或"转录出错"的空间。非法输入
+    （不是整数、或不在集合内）一律返回 None，交由调用方按无效裁决拒绝。"""
+    try:
+        target = int(segment_index)
+    except (TypeError, ValueError):
+        return None
+    for item in dossier:
+        if item["segment_index"] == target:
+            return item
+    return None
+
+
+async def _prep_pack_resolve_functional_extra_candidate(
+    conn, *, project_id: str, episode_id: str, episode_no: int,
+    label: str, source_text: str, segments: list[SourceSegment], bible: Bible,
+) -> dict[str, Any] | None:
+    """未解析标签的候选判别入口：候选集为空、卷宗为空、模型选"都不是/
+    无法确定"、选中值不在候选集内（协议层已经不可能，这里仍防御性核验）、
+    段号钉证失败、候选在本集没有可用定妆照、或这次改名会与跨集别名注册表
+    冲突（复用既有 _prep_pack_cross_episode_alias_conflict，同一套"不确定
+    不绑"纪律），一律返回 None——调用方维持原行为，标签留在
+    skip_character_names 正常落 functional_extras，绝不猜。
+
+    返回非 None 时是 ``{"canonical_name": ..., "segment_index": ...,
+    "text": ...}``：``canonical_name`` 供调用方写入 character_rename（重新
+    走既有的具名解析路线，自然带出正确的 portrait_id/identity_id/
+    visual_entity_id）；``segment_index``/``text`` 是钉证命中的卷宗证据，
+    供调用方写入 provenance 锚点（``text`` 是代码检索出的真实原文，不是
+    模型转录，天然满足自校验的逐字命中要求）。"""
+    roster = _prep_pack_functional_candidate_roster(bible)
+    candidates = _prep_pack_functional_candidate_names(source_text, roster)
+    if not candidates:
+        return None
+    anchor_texts = {form for name in candidates for form in roster.get(name, [])}
+    dossier = _prep_pack_functional_candidate_dossier(segments, label, anchor_texts)
+    if not dossier:
+        return None
+    response = await _prep_pack_functional_candidate_call(
+        label=label, dossier=dossier, candidates=candidates,
+        episode_id=episode_id, project_id=project_id,
+    )
+    if response.selected_candidate not in candidates:
+        return None
+    pinned = _prep_pack_functional_candidate_pin_segment(
+        dossier, response.supporting_segment_index,
+    )
+    if pinned is None:
+        return None
+    canonical_name = response.selected_candidate
+    if not _resolve_portrait_id(conn, project_id, canonical_name, episode_no):
+        return None
+    conflicting_name = _prep_pack_cross_episode_alias_conflict(
+        conn, project_id, episode_id,
+        alias=label, canonical_name=canonical_name, bible=bible,
+    )
+    if conflicting_name:
+        return None
+    return {
+        "canonical_name": canonical_name,
+        "segment_index": pinned["segment_index"], "text": pinned["text"],
+    }
+
+
 async def _resolve_assets(
     conn, *, project_id: str, episode_id: str, episode_no: int,
     source_text: str, events: list[dict[str, Any]], run_id: str | None,
@@ -1567,11 +1897,18 @@ async def _resolve_assets(
         newly_added_character_names: frozenset[str] = frozenset(),
         newly_added_scene_names: frozenset[str] = frozenset(),
         resolution_evidence_by_label: dict[str, str] | None = None,
+        candidate_verdict_pins: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[
         dict[str, Any], dict[str, Any], dict[str, dict[str, Any]], list[str], list[str], list[str],
         list[dict[str, Any]],
     ]:
         resolution_evidence_by_label = resolution_evidence_by_label or {}
+        # 未解析角色标签候选判别（1.8.0，见 PREP_PACK_VERSION 上方大注释、
+        # _prep_pack_resolve_functional_extra_candidate 的完整说明）：
+        # label -> 钉证命中的卷宗记录（{"segment_index", "text"}），供下面
+        # method 判定分支单独标记 "candidate_verdict"、并直接复用钉证段落
+        # 本身（代码检索出的真实原文）作为 anchor_phrase，不依赖模型转录。
+        candidate_verdict_pins = candidate_verdict_pins or {}
         characters: dict[str, dict[str, Any]] = {}
         scenes: dict[str, dict[str, Any]] = {}
         functional_extras: dict[str, dict[str, Any]] = {}
@@ -1798,6 +2135,25 @@ async def _resolve_assets(
                         anchor_segments, anchor_phrase = [], true_name_pinned_quote
                         if true_name_pinned_chapter_idx is not None:
                             forward_chapter_label = f"第 {true_name_pinned_chapter_idx} 章"
+                elif name in candidate_verdict_pins:
+                    # 未解析角色标签候选判别命中（1.8.0，见 PREP_PACK_
+                    # VERSION 上方大注释、_prep_pack_resolve_functional_
+                    # extra_candidate 的完整说明）：method 单独标记，不
+                    # 复用泛化的 "resolution"——那个标签专指 discovery 自身
+                    # 消歧结果（resolution_evidence_by_label 的来源），这里
+                    # 走的是另一条独立证据链：本函数内代码检索卷宗 → 候选
+                    # 选择题 → 段号钉证，provenance 要如实标注两者的区别，
+                    # 供审计区分走哪条核验路径复核。anchor_phrase 直接取
+                    # 钉证命中的卷宗段落原文本身（代码检索出的真实原文，
+                    # 不是模型转录），天然满足自校验的逐字命中要求。这个
+                    # elif 分支必须排在 via_suspected_true_name 之后、
+                    # came_via_resolution 之前——同一提及若恰好也核验通过
+                    # 了 suspected_true_name，那条更具体的证据链优先（elif
+                    # 链短路，不会执行到这里）。
+                    method = "candidate_verdict"
+                    pin = candidate_verdict_pins[name]
+                    anchor_segments = [pin["segment_index"]]
+                    anchor_phrase = pin["text"]
                 elif came_via_resolution:
                     method = "resolution"
                     anchor_segments, anchor_phrase = _prep_pack_local_text_anchor(
@@ -2049,6 +2405,11 @@ async def _resolve_assets(
         newly_added_character_names: frozenset[str] = frozenset()
         newly_added_scene_names: frozenset[str] = frozenset()
         resolution_evidence_by_label: dict[str, str] = {}
+        # 未解析角色标签候选判别（1.8.0，见 PREP_PACK_VERSION 上方大注释、
+        # _prep_pack_resolve_functional_extra_candidate 的完整说明）：
+        # label -> 钉证命中的卷宗记录，供下面 _pass() 的 method 判定分支
+        # 单独标记 "candidate_verdict"。
+        candidate_verdict_pins: dict[str, dict[str, Any]] = {}
 
         if unresolved_chars:
             stats["character_discovery_calls"] += 1
@@ -2091,6 +2452,33 @@ async def _resolve_assets(
                 skip_character_names.add(name)
             discovery_diagnostics.extend(str(e) for e in discovery_result.get("errors") or [])
 
+            # 未解析角色标签候选判别（1.8.0，见 PREP_PACK_VERSION 上方大
+            # 注释、_prep_pack_resolve_functional_extra_candidate 的完整
+            # 说明）：discovery 与上面的兜底默认都没能给出任何归类结论、
+            # 即将落 functional_extras 的标签（skip_character_names 减去
+            # non_person_names——非人物标签不该被判给任何真人候选），补一
+            # 次代码检索卷宗 + 模型候选判别 + 段号钉证。命中就把
+            # skip_character_names 里的这条移进 character_rename，让它
+            # 重新走既有的具名解析路线（自然带出正确的 portrait_id/
+            # identity_id/visual_entity_id；display_appellation 仍由下面
+            # _pass 内的 name 本身承担，本集原文措辞不受这次改名影响，不
+            # 提前剧透）。按 unresolved_chars 的原始出场顺序遍历，保证同一
+            # 输入任何时候重跑判别顺序一致；未命中的维持原行为，留在
+            # skip_character_names 正常落 functional_extras。
+            for name in unresolved_chars:
+                if name not in skip_character_names or name in non_person_names:
+                    continue
+                resolution = await _prep_pack_resolve_functional_extra_candidate(
+                    conn, project_id=project_id, episode_id=episode_id,
+                    episode_no=episode_no, label=name, source_text=source_text,
+                    segments=segments, bible=bible,
+                )
+                if resolution is None:
+                    continue
+                skip_character_names.discard(name)
+                character_rename[name] = resolution["canonical_name"]
+                candidate_verdict_pins[name] = resolution
+
         if unresolved_scenes:
             stats["scene_discovery_calls"] += 1
             scene_discovery_result = await _run_async_step(
@@ -2114,6 +2502,7 @@ async def _resolve_assets(
                 newly_added_character_names=newly_added_character_names,
                 newly_added_scene_names=newly_added_scene_names,
                 resolution_evidence_by_label=resolution_evidence_by_label,
+                candidate_verdict_pins=candidate_verdict_pins,
             )
         )
         # 合并两遍，按内容去重（同一个提及在两遍里都核验出相同结论是正常的、
