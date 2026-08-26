@@ -35,7 +35,11 @@ from app.production.storyboard_pack import (
     _AiStoryboardSegmentDraft,
     _dialect_for_target_video_model,
     _enrich_asset_manifest_canonical_visuals,
+    _paratext_exclusion_rule,
+    _paratext_segment_indexes,
     _segment_content_advisories,
+    _source_block_for_prompt,
+    _strip_paratext_from_beat_draft,
     _validate_all_segments_draft,
     _validate_beat_sheet_draft,
     _validate_segment_draft,
@@ -118,6 +122,118 @@ def test_dialect_maps_minimax_h3():
         "<d>",
     ):
         assert literal in instructions
+
+
+# ---------------------------------------------------------------------------
+# 作者的话（paratext）复用映射台已算好的账（2.0.4）
+# ---------------------------------------------------------------------------
+
+def test_paratext_segment_indexes_reads_coverage_ledger():
+    payload = {"coverage_ledger": {"paratext": [1, 52, 53, 54]}}
+    assert _paratext_segment_indexes(payload) == {1, 52, 53, 54}
+
+
+def test_paratext_segment_indexes_empty_when_coverage_ledger_missing():
+    """旧契约分集兜底：没有 coverage_ledger 时返回空集（退化为全量路径），
+    不能把"账不存在"误读成"全部段落都是 paratext"。"""
+    assert _paratext_segment_indexes({}) == set()
+
+
+def test_paratext_segment_indexes_empty_when_paratext_key_missing():
+    assert _paratext_segment_indexes({"coverage_ledger": {}}) == set()
+
+
+def test_paratext_segment_indexes_empty_when_paratext_is_not_a_list():
+    assert _paratext_segment_indexes({"coverage_ledger": {"paratext": "oops"}}) == set()
+
+
+def test_paratext_segment_indexes_ignores_non_int_entries():
+    payload = {"coverage_ledger": {"paratext": [1, "not-an-int", None, 3]}}
+    assert _paratext_segment_indexes(payload) == {1, 3}
+
+
+def test_source_block_for_prompt_omits_paratext_text_but_keeps_numbering():
+    segments = [
+        SourceSegment(segment_id="s1", text="【第八章】\n第八章", start_offset=0, end_offset=1),
+        SourceSegment(segment_id="s2", text="孟浩推开院门。", start_offset=1, end_offset=2),
+        SourceSegment(
+            segment_id="s3", text="又是大章，求推荐票，谢谢诸位道友！",
+            start_offset=2, end_offset=3,
+        ),
+    ]
+    block = _source_block_for_prompt(segments, {1, 3})
+
+    assert "[段1]" in block and "[段2]" in block and "[段3]" in block
+    assert "孟浩推开院门。" in block
+    # 作者的话的原文一个字都不能出现在喂给模型的文本里。
+    assert "求推荐票" not in block
+    assert "诸位道友" not in block
+    assert "【第八章】" not in block
+    # 段号不重新编号：段2（唯一的正文段）紧跟在 [段2] 后面，不是 [段1]。
+    assert "[段2] 孟浩推开院门。" in block
+
+
+def test_source_block_for_prompt_full_text_when_no_paratext():
+    segments = [SourceSegment(segment_id="s1", text="正文。", start_offset=0, end_offset=1)]
+    block = _source_block_for_prompt(segments, set())
+    assert block == "[段1] 正文。"
+
+
+def test_paratext_exclusion_rule_none_when_no_paratext():
+    assert _paratext_exclusion_rule(set()) is None
+
+
+def test_paratext_exclusion_rule_names_the_segment_numbers():
+    rule = _paratext_exclusion_rule({3, 1})
+    assert rule is not None
+    assert "[1, 3]" in rule
+
+
+def test_strip_paratext_from_beat_draft_removes_paratext_only_from_mixed_references():
+    draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1, 2, 3])],
+        segments=[
+            _AiSegmentPlan(
+                segment_no=1, synopsis="x",
+                source_segment_indexes=[2, 3], beat_ids=["B1"],
+            )
+        ],
+    )
+    notes = _strip_paratext_from_beat_draft(draft, {3})
+
+    assert draft.beat_sheet[0].segment_indexes == [1, 2]
+    assert draft.segments[0].source_segment_indexes == [2]
+    assert notes == []
+
+
+def test_strip_paratext_from_beat_draft_keeps_reference_when_filtering_would_empty_it():
+    """全部引用都落在 paratext 账内时保留原样，不产出空引用（那会让
+    _resolve_segment_source_binding 直接抛错，整集生成失败）；但要留痕。"""
+    draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[9])],
+        segments=[
+            _AiSegmentPlan(
+                segment_no=1, synopsis="x", source_segment_indexes=[9], beat_ids=["B1"],
+            )
+        ],
+    )
+    notes = _strip_paratext_from_beat_draft(draft, {9})
+
+    assert draft.beat_sheet[0].segment_indexes == [9]
+    assert draft.segments[0].source_segment_indexes == [9]
+    assert len(notes) == 2
+    assert any("beat B1" in n for n in notes)
+    assert any("段 1" in n for n in notes)
+
+
+def test_strip_paratext_from_beat_draft_noop_when_no_paratext():
+    draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1])],
+        segments=[_AiSegmentPlan(segment_no=1, synopsis="x", source_segment_indexes=[1])],
+    )
+    notes = _strip_paratext_from_beat_draft(draft, set())
+    assert notes == []
+    assert draft.beat_sheet[0].segment_indexes == [1]
 
 
 # ---------------------------------------------------------------------------
