@@ -766,6 +766,12 @@ export function PrepPackView({
                 .filter(alias => alias !== appellation)
               const provenanceHint = provenanceMethodHint(character.provenance?.method)
               const isSelected = selectedIdentityId != null && selectedIdentityId === character.identity_id
+              // 覆盖段号区间在数据量大时会很长（真实 EP1：孟浩覆盖 34 段，压缩后仍是
+              // 一长串不含空格的数字，撑破卡片、和相邻内容叠印）——CSS 把它收成单行
+              // 省略号（次要信息，不抢缩略图/正名这些主体），完整压缩格式原样放进
+              // title，悬停即可拿到，不因为收窄展示就把信息丢掉。
+              const coverageText = assetCoverageText(character.segment_indexes)
+              const metaTitle = [coverageText, provenanceHint].filter(Boolean).join('\n')
               return (
                 <div className="prep-roster-item" key={character.identity_id || character.display_name}>
                   {imageUrl
@@ -785,14 +791,14 @@ export function PrepPackView({
                         </button>
                       ) : <span className="prep-roster-name-text">{name}</span>}
                       {appellation && (
-                        <span className="prep-roster-alias" title="本集原文称谓；谱内正名见前">本集：{appellation}</span>
+                        <span className="prep-roster-alias" title={`本集原文称谓；谱内正名见前：${appellation}`}>本集：{appellation}</span>
                       )}
                       {!!aliases.length && (
-                        <span className="prep-roster-alias" title="本集称谓">{aliases.join('、')}</span>
+                        <span className="prep-roster-alias" title={`本集称谓：${aliases.join('、')}`}>{aliases.join('、')}</span>
                       )}
                     </span>
-                    <span className="prep-roster-meta" title={provenanceHint ?? undefined}>
-                      {assetCoverageText(character.segment_indexes)}
+                    <span className="prep-roster-meta" title={metaTitle || undefined}>
+                      {coverageText}
                     </span>
                   </div>
                 </div>
@@ -806,19 +812,22 @@ export function PrepPackView({
         <section className="card">
           <h3 className="prep-section-heading">群演 / 一次性人物 · {functionalExtras.length}</h3>
           <div className="prep-roster">
-            {functionalExtras.map((extra, index) => (
-              <div className="prep-roster-item" key={`extra:${extra.label || 'extra'}-${index}`}>
-                {/* 群演没有定妆照是设计使然（不进人物谱身份体系），不是数据缺失，
-                    用统一占位图标而不是"无图"——那个措辞是给真正缺图的具名角色用的。 */}
-                <div className="prep-roster-icon" aria-hidden="true">👤</div>
-                <div className="prep-roster-body">
-                  <span className="prep-roster-name">
-                    <span className="prep-roster-name-text">{extra.label || '未命名群演'}</span>
-                  </span>
-                  <span className="prep-roster-meta">{assetCoverageText(extra.segment_indexes)}</span>
+            {functionalExtras.map((extra, index) => {
+              const coverageText = assetCoverageText(extra.segment_indexes)
+              return (
+                <div className="prep-roster-item" key={`extra:${extra.label || 'extra'}-${index}`}>
+                  {/* 群演没有定妆照是设计使然（不进人物谱身份体系），不是数据缺失，
+                      用统一占位图标而不是"无图"——那个措辞是给真正缺图的具名角色用的。 */}
+                  <div className="prep-roster-icon" aria-hidden="true">👤</div>
+                  <div className="prep-roster-body">
+                    <span className="prep-roster-name">
+                      <span className="prep-roster-name-text">{extra.label || '未命名群演'}</span>
+                    </span>
+                    <span className="prep-roster-meta" title={coverageText}>{coverageText}</span>
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </section>
       )}
@@ -830,6 +839,7 @@ export function PrepPackView({
             {scenes.map(scene => {
               const imageUrl = findSceneReferenceImage(bible, scene.scene_reference_id)
               const name = scene.display_name || scene.scene_id || '未命名场景'
+              const coverageText = assetCoverageText(scene.segment_indexes)
               return (
                 <div className="prep-roster-item" key={scene.scene_id || scene.display_name}>
                   {imageUrl
@@ -837,9 +847,11 @@ export function PrepPackView({
                     : <div className="prep-roster-thumb-empty" aria-hidden="true">无图</div>}
                   <div className="prep-roster-body">
                     <span className="prep-roster-name">
-                      <span className="prep-roster-name-text">{name}</span>
+                      {/* 长场景名同样会被 .prep-roster-name-text 的单行省略号截断
+                          （顺带修复：这里之前没有 title，截断后无法找回全名）。 */}
+                      <span className="prep-roster-name-text" title={name}>{name}</span>
                     </span>
-                    <span className="prep-roster-meta">{assetCoverageText(scene.segment_indexes)}</span>
+                    <span className="prep-roster-meta" title={coverageText}>{coverageText}</span>
                   </div>
                 </div>
               )
@@ -852,23 +864,28 @@ export function PrepPackView({
         <section className="card">
           <h3 className="prep-section-heading">道具 · {props.length}</h3>
           <div className="prep-roster">
-            {props.map((prop, index) => (
-              <div className="prep-roster-item" key={`prop:${prop.label || 'prop'}-${index}`}>
-                {/* 道具没有世界书图像素材库（设计使然，见 app/production/prep_pack.py
-                    _prep_pack_build_prop_manifest），只有文字描述，用统一占位图标。 */}
-                <div className="prep-roster-icon" aria-hidden="true">物</div>
-                <div className="prep-roster-body">
-                  <span className="prep-roster-name">
-                    <span className="prep-roster-name-text" title={prop.description || undefined}>
-                      {prop.label || '未命名道具'}
+            {props.map((prop, index) => {
+              const coverageText = assetCoverageText(prop.segment_indexes)
+              return (
+                <div className="prep-roster-item" key={`prop:${prop.label || 'prop'}-${index}`}>
+                  {/* 道具没有世界书图像素材库（设计使然，见 app/production/prep_pack.py
+                      _prep_pack_build_prop_manifest），只有文字描述，用统一占位图标。 */}
+                  <div className="prep-roster-icon" aria-hidden="true">物</div>
+                  <div className="prep-roster-body">
+                    <span className="prep-roster-name">
+                      <span className="prep-roster-name-text" title={prop.description || undefined}>
+                        {prop.label || '未命名道具'}
+                      </span>
                     </span>
-                  </span>
-                  <span className="prep-roster-meta" title={prop.description || undefined}>
-                    {assetCoverageText(prop.segment_indexes)}
-                  </span>
+                    {/* meta 的 title 改成覆盖段号全文（原来复用了 description，
+                        跟名字那格的 title 重复，且丢了"悬停拿完整区间"这个诉求）。 */}
+                    <span className="prep-roster-meta" title={coverageText}>
+                      {coverageText}
+                    </span>
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </section>
       )}

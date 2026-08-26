@@ -909,7 +909,10 @@ describe('PrepPackView renders display_appellation vs display_name (画面与字
       }]),
       bible: null, sourceFallback: '第 1 章',
     }))
-    expect(html).toContain('title="绑定依据：候选判别"')
+    // title 现在是覆盖区间全文 + 绑定依据两行拼接（见 assetCoverageText 溢出修复：
+    // meta 的 title 不再只放 provenanceHint，还要能悬停拿到完整压缩区间），
+    // 绑定依据本身仍然在 title 里，只是不再是唯一内容。
+    expect(html).toContain('title="覆盖 1 段原文 · 第 1 段\n绑定依据：候选判别"')
   })
 
   it('renders nothing extra when provenance is absent (pre-1.6.0 packs)', () => {
@@ -993,5 +996,117 @@ describe('PrepPackView renders the paratext gate chip (5th account)', () => {
     })
     const htmlEmpty = renderToStaticMarkup(createElement(PrepPackView, { pack: withEmpty, bible: null, sourceFallback: '第 1 章' }))
     expect(htmlEmpty).not.toContain('副文本')
+  })
+})
+
+// 真 bug 修复（协调方截图复现）：资源卡「覆盖 N 段原文 · 第 X~Y,Z 段」这一行没有
+// 任何换行/截断处理，真实 EP1 数据里主角一集覆盖三十多段是常态（孟浩 34 段、
+// 王有材 15 段），压缩后的区间字符串是一长串不含空格的数字，默认换行找不到断点，
+// 会整段溢出卡片、和相邻内容叠印，糊成一团读不出来。
+//
+// 修复在 CSS 层（styles/ScriptPage.css 的 .prep-roster-meta：nowrap + ellipsis +
+// overflow:hidden），这里的渲染测试测不到"是否真的单行不溢出"（jsdom 都没装，
+// 更不用说布局引擎），只能锁住 DOM 契约：不管段数多少，完整的压缩区间字符串
+// 始终原样出现在文档里（渲染文本 + title 双重存在），CSS 截断只影响视觉呈现，
+// 不会把数据本身删掉——用户 2026-08-25 专门要过 `1,3,5~7` 这套压缩格式，
+// 不许为了排版好看而丢信息。
+describe('PrepPackView coverage text stays intact and recoverable at real EP1 scale (overflow/overlap fix)', () => {
+  // 真实量级样本：EP1 共 62 段原文，孟浩覆盖 34 段（协调方给出的真实分布形状，
+  // 压缩后形如 "3~7,10~12,14~17,20,22,...32~34…"）；许清只覆盖 3 段，作为短卡对照。
+  const mengHaoSegments = [
+    3, 4, 5, 6, 7, 10, 11, 12, 14, 15, 16, 17, 20, 22, 24, 25, 28, 29, 30,
+    32, 33, 34, 36, 37, 40, 41, 42, 45, 47, 50, 51, 55, 58, 60,
+  ]
+  const expectedMengHaoRange = compressSegmentIndexes(mengHaoSegments)
+
+  const buildPack = () => ({
+    prep_pack_version: '2.0.0',
+    episode_no: 1,
+    episode_scope: { chapter_indexes: [1], source_segment_count: 62 },
+    asset_manifest: {
+      characters: [
+        { identity_id: 'bible:孟浩', display_name: '孟浩', portrait_id: '', segment_indexes: mengHaoSegments },
+        { identity_id: 'bible:许清', display_name: '许清', portrait_id: '', segment_indexes: [3, 10, 24] },
+      ],
+      scenes: [
+        { scene_id: 'scene:大青山山顶', display_name: '大青山山顶', scene_reference_id: '', segment_indexes: Array.from({ length: 24 }, (_, i) => i + 1) },
+      ],
+    },
+    coverage_ledger: {
+      total_segments: 62, delivered: mengHaoSegments, merged: [], retained_as_context: [], proven_duplicates: [], uncovered: [],
+    },
+  }) as any
+
+  it('locks the real 34-segment compressed shape so a future edit cannot silently shorten the sample without anyone noticing', () => {
+    expect(mengHaoSegments).toHaveLength(34)
+    expect(expectedMengHaoRange).toBe('3~7,10~12,14~17,20,22,24~25,28~30,32~34,36~37,40~42,45,47,50~51,55,58,60')
+  })
+
+  it('renders the full 34-segment compressed range as visible text — CSS truncation clips display, never the data', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, { pack: buildPack(), bible: null, sourceFallback: '第 1 章' }))
+    expect(html).toContain(`覆盖 34 段原文 · 第 ${expectedMengHaoRange} 段`)
+  })
+
+  it('also carries the full 34-segment range in the meta span title, so it is recoverable on hover after the line is visually clipped', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, { pack: buildPack(), bible: null, sourceFallback: '第 1 章' }))
+    expect(html).toContain(`title="覆盖 34 段原文 · 第 ${expectedMengHaoRange} 段`)
+  })
+
+  it('renders the short 3-segment card with the same untruncated text+title contract as the 34-segment card', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, { pack: buildPack(), bible: null, sourceFallback: '第 1 章' }))
+    expect(html).toContain('覆盖 3 段原文 · 第 3,10,24 段')
+    expect(html).toContain('title="覆盖 3 段原文 · 第 3,10,24 段"')
+  })
+
+  it('carries the 24-segment scene coverage range in both text and title (props/scenes get the same treatment as characters)', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, { pack: buildPack(), bible: null, sourceFallback: '第 1 章' }))
+    const expectedSceneRange = compressSegmentIndexes(Array.from({ length: 24 }, (_, i) => i + 1))
+    expect(expectedSceneRange).toBe('1~24')
+    expect(html).toContain(`覆盖 24 段原文 · 第 ${expectedSceneRange} 段`)
+    expect(html).toContain(`title="覆盖 24 段原文 · 第 ${expectedSceneRange} 段"`)
+  })
+
+  it('gives the long scene name a title too, so a truncated display name is still recoverable on hover (顺带修复)', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, { pack: buildPack(), bible: null, sourceFallback: '第 1 章' }))
+    expect(html).toContain('title="大青山山顶"')
+  })
+})
+
+// 顺带修复：本集称谓/别名小签（.prep-roster-alias）原来是 flex:none + 无宽度上限，
+// 长称谓会撑破徽标本身、把整行名字挤出卡片。CSS 加了 max-width + 省略号兜底
+// （styles/ScriptPage.css），title 也从纯占位说明改成拼接真实称谓文本——原来
+// title 只有"本集原文称谓；谱内正名见前"这句解释，看不到实际内容，截断后更看不到。
+describe('PrepPackView appellation/alias badge title carries the real content, not just the static hint (顺带修复：长称谓同类溢出)', () => {
+  const buildPack = (characters: Record<string, unknown>[]) => ({
+    prep_pack_version: '2.0.0',
+    episode_no: 1,
+    episode_scope: { chapter_indexes: [1], source_segment_count: 10 },
+    asset_manifest: { characters, scenes: [] },
+    coverage_ledger: {
+      total_segments: 10, delivered: Array.from({ length: 10 }, (_, i) => i + 1),
+      merged: [], retained_as_context: [], proven_duplicates: [], uncovered: [],
+    },
+  }) as any
+
+  it('embeds the appellation text itself in the badge title (not just the generic explanation)', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, {
+      pack: buildPack([{
+        identity_id: 'bible:许清', display_name: '许清', portrait_id: 'portrait_x',
+        segment_indexes: [1], display_appellation: '银色长袍女子',
+      }]),
+      bible: null, sourceFallback: '第 1 章',
+    }))
+    expect(html).toContain('title="本集原文称谓；谱内正名见前：银色长袍女子"')
+  })
+
+  it('embeds the joined alias text itself in the badge title', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, {
+      pack: buildPack([{
+        identity_id: 'bible:x', display_name: '甲', portrait_id: '',
+        segment_indexes: [1], aliases: ['乙名', '丙名'],
+      }]),
+      bible: null, sourceFallback: '第 1 章',
+    }))
+    expect(html).toContain('title="本集称谓：乙名、丙名"')
   })
 })
