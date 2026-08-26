@@ -239,9 +239,11 @@ def test_select_best_immediately_adopts_first_technical_candidate(monkeypatch) -
     assert forced["fallback"] is True
 
 
-def test_select_best_skips_identity_corrupted_candidate_even_when_forced(
+def test_select_best_ignores_stale_qa_json_and_uses_technical_only(
     monkeypatch,
 ) -> None:
+    """VLM 质检已下线：即使历史 qa_json 里还留着 runtime_blocking 等旧字段，
+    候选筛选也只看技术校验，不再读取/排除它们。"""
     import json
     import sqlite3
 
@@ -258,7 +260,7 @@ def test_select_best_skips_identity_corrupted_candidate_even_when_forced(
     """)
     technical = json.dumps({"passed": True})
     conn.execute(
-        "INSERT INTO shot_versions VALUES('bad','s',1,'succeeded',?,?,NULL,?)",
+        "INSERT INTO shot_versions VALUES('first','s',1,'succeeded',?,?,NULL,?)",
         (
             technical,
             json.dumps({
@@ -271,7 +273,7 @@ def test_select_best_skips_identity_corrupted_candidate_even_when_forced(
         ),
     )
     conn.execute(
-        "INSERT INTO shot_versions VALUES('good','s',2,'succeeded',?,?,NULL,?)",
+        "INSERT INTO shot_versions VALUES('second','s',2,'succeeded',?,?,NULL,?)",
         (
             technical,
             json.dumps({
@@ -287,7 +289,7 @@ def test_select_best_skips_identity_corrupted_candidate_even_when_forced(
     monkeypatch.setattr(
         media,
         "grade_shot_video",
-        lambda *a, **k: {"grade": "B"},
+        lambda *a, **k: {"grade": "A"},
     )
     monkeypatch.setattr(
         media,
@@ -298,7 +300,7 @@ def test_select_best_skips_identity_corrupted_candidate_even_when_forced(
     selected = select_best_video_candidate("s", force_best=True)
 
     assert selected is not None
-    assert selected["version_id"] == "good"
+    assert selected["version_id"] == "first"
     assert conn.execute(
         "SELECT adopted_version_id FROM shots WHERE id='s'",
-    ).fetchone()[0] == "good"
+    ).fetchone()[0] == "first"

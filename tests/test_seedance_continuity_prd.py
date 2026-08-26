@@ -648,7 +648,8 @@ def test_select_best_video_candidate_adopts_first_technical_version(monkeypatch)
 
 
 def test_select_best_video_candidate_does_not_replace_existing_adoption(monkeypatch) -> None:
-    """后续候选分数更高也不得自动替换当前采用版。"""
+    """后续技术有效候选也不得自动替换当前采用版；VLM 质检已下线，两个候选都
+    只按技术校验判定，均为 A 级（fallback=False）。"""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""
@@ -663,13 +664,13 @@ def test_select_best_video_candidate_does_not_replace_existing_adoption(monkeypa
     technical = json.dumps({"passed": True})
     conn.execute(
         "INSERT INTO shot_versions VALUES('low','s',1,'succeeded',?,?,NULL,?)",
-        (technical, json.dumps({"overall": 0.55}), json.dumps({"auto_retake_count": 1})),
+        (technical, json.dumps({}), json.dumps({"auto_retake_count": 1})),
     )
     conn.execute(
         "INSERT INTO shot_versions VALUES('best_low','s',2,'succeeded',?,?,NULL,?)",
         (
             technical,
-            json.dumps({"overall": 0.72, "contract_facts": ["no_story_repeat_failed"]}),
+            json.dumps({}),
             json.dumps({"auto_retake_count": 2}),
         ),
     )
@@ -681,7 +682,7 @@ def test_select_best_video_candidate_does_not_replace_existing_adoption(monkeypa
     selected = media.select_best_video_candidate("s", force_best=True)
 
     assert selected and selected["version_id"] == "low"
-    assert selected["fallback"] is True
+    assert selected["fallback"] is False
     assert "首个技术有效视频" in selected["reason"]
     assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "low"
 

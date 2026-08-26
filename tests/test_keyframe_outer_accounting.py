@@ -77,33 +77,6 @@ def test_completed_reference_slots_includes_all_timeline_keyframe_slots() -> Non
     assert run_job._completed_reference_slots(raw) == 3
 
 
-def test_timeline_keyframe_visual_anchors_only_include_selected_winners(tmp_path) -> None:
-    winner = tmp_path / "winner.jpg"
-    loser = tmp_path / "loser.jpg"
-    winner.write_bytes(b"winner")
-    loser.write_bytes(b"loser")
-
-    anchors = run_job._visual_anchors_from_version_meta({
-        "reference_images": [
-            {
-                "type": "generated",
-                "slot_key": "narrative_keyframe_01",
-                "path": str(winner),
-                "selectedForSeedance": True,
-            },
-            {
-                "type": "generated",
-                "slot_key": "narrative_keyframe_02",
-                "path": str(loser),
-                "selectedForSeedance": False,
-            },
-        ],
-    })
-
-    assert [item["path"] for item in anchors] == [str(winner)]
-    assert anchors[0]["role"] == "keyframe"
-
-
 def test_video_cost_model_uses_full_timeline_generation_estimate(monkeypatch) -> None:
     monkeypatch.setattr(video_cost_model, "shot_cost_cny", lambda _duration: 5.0)
     monkeypatch.setattr(video_cost_model, "IMAGE_PRICE_PER_UNIT", 0.2)

@@ -2,42 +2,15 @@ import asyncio
 import hashlib
 import json
 import sqlite3
-from pathlib import Path
 
-from app import compiler, db, stages, video_modes, worker
-from app.schemas import Bible, Character, Dialogue, RequiredOnScreenText, Shot, World
-
-
-def test_video_qa_anchors_ignore_loser_deleted_and_missing_keyframes(tmp_path) -> None:
-    from app.media_exec.run_job import _visual_anchors_from_version_meta
-
-    winner = tmp_path / "winner.jpg"
-    loser = tmp_path / "loser.jpg"
-    deleted = tmp_path / "deleted.jpg"
-    scene = tmp_path / "scene.jpg"
-    for path in (winner, loser, deleted, scene):
-        path.write_bytes(path.name.encode())
-
-    anchors = _visual_anchors_from_version_meta({
-        "reference_images": [
-            {"type": "plot_key_frame", "path": str(winner), "selectedForSeedance": True},
-            {"type": "plot_key_frame", "path": str(loser), "selectedForSeedance": False},
-            {
-                "type": "plot_key_frame", "path": str(deleted),
-                "selectedForSeedance": True, "deleted": True,
-            },
-            {
-                "type": "plot_key_frame", "path": str(tmp_path / "missing.jpg"),
-                "selectedForSeedance": True,
-            },
-            {"type": "scene", "path": str(scene), "purposes": ["qa_anchor"]},
-        ],
-    })
-
-    assert {Path(item["path"]).name for item in anchors} == {"winner.jpg", "scene.jpg"}
+from app import compiler, db, video_modes, worker
+from app.schemas import Bible, Character, Shot, World
 
 
-def test_video_qa_contract_does_not_require_offscreen_listener_reaction() -> None:
+def test_visible_cast_projection_does_not_require_offscreen_listener_reaction() -> None:
+    """VLM 视频质检（qa_shot/_video_qa_contract）已下线，但这条画面可见名单投影逻辑
+    （project_visual_contract_to_visible_cast）仍是付费视频 prompt 编译的活路径
+    （app/compiler.py 的 compile_prompt），直接对其断言，覆盖不随质检下线而丢失。"""
     shot = Shot(
         shot_no=14, duration_s=10, shot_size="中景", camera_move="固定",
         scene_setting="夜，后山悬崖",
@@ -51,32 +24,26 @@ def test_video_qa_contract_does_not_require_offscreen_listener_reaction() -> Non
         continuity_mode="reverse_angle",
     )
 
-    contract = worker._video_qa_contract(shot, ["药老", "萧炎"])
-
-    assert "萧炎沉默" not in contract["state_out"]
-    assert "画外萧炎方向等待回应" in contract["state_out"]
-    assert "画内角色合同：可辨识画面人物仅限：药老" in contract["action_desc"]
-    assert "萧炎只作为画外叙事关系" in contract["action_desc"]
-
-
-def test_video_qa_contract_carries_dialogue_and_exact_screen_text() -> None:
-    shot = Shot(
-        shot_no=3,
-        duration_s=5,
-        shot_size="特写",
-        camera_move="固定",
-        scene_setting="室内，公告栏前",
-        action_desc="主角读出公告。",
-        dialogues=[Dialogue(speaker="主角", line="我被录取了。")],
-        required_text=RequiredOnScreenText(
-            surface="公告", exact_text="录取通知", strategy="embedded_prop",
-        ),
+    state_in, state_out, primary_action, full_action, visible_contract = (
+        compiler.project_visual_contract_to_visible_cast(
+            shot,
+            state_in=shot.state_in,
+            state_out=shot.state_out,
+            primary_action=shot.primary_action,
+            full_action=shot.action_desc,
+            visible_names=["药老"],
+            bible_names=["药老", "萧炎"],
+            continuity_mode="reverse_angle",
+        )
     )
+    action_desc = full_action or primary_action
+    if visible_contract:
+        action_desc = f"{action_desc}\n画内角色合同：{visible_contract}"
 
-    contract = worker._video_qa_contract(shot, ["主角"])
-
-    assert contract["required_dialogue"] == "主角：我被录取了。"
-    assert contract["required_text"] == "录取通知"
+    assert "萧炎沉默" not in state_out
+    assert "画外萧炎方向等待回应" in state_out
+    assert "画内角色合同：可辨识画面人物仅限：药老" in action_desc
+    assert "萧炎只作为画外叙事关系" in action_desc
 
 
 def _conn() -> sqlite3.Connection:
@@ -577,82 +544,14 @@ def test_auto_retake_count_is_persisted_on_child_video_version(monkeypatch) -> N
     assert meta["auto_retake_count"] == 1
 
 
-def test_low_qa_video_never_enqueues_retake(monkeypatch) -> None:
+def test_maybe_auto_qa_is_a_noop_and_never_enqueues_retake(monkeypatch) -> None:
+    """VLM 视觉质检已下线：_maybe_auto_qa 不再调用模型、不再写 qa_json，只
+    原样返回 True，且绝不因「低分」触发重抽。qa_shot 本身已删除，不再需要 monkeypatch 佯装低分。"""
     conn = _conn()
     _seed_project(conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
-    monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 5")
-    monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/tool")
-    monkeypatch.setattr(worker, "_extract_frames", lambda _path: ["frame"])
-    monkeypatch.setattr(
-        worker,
-        "get_setting",
-        lambda key: {"auto_qa": "true", "auto_retake_threshold": "0.6", "video_auto_retake_limit": "2"}.get(key),
-    )
-
-    async def low_qa(*_args, **_kwargs):
-        return {"overall": 0.1, "issues": ["角色漂移"]}
-
-    monkeypatch.setattr(stages, "qa_shot", low_qa)
-    enqueued: list[dict] = []
-    monkeypatch.setattr(
-        worker,
-        "enqueue_shot",
-        lambda shot_id, **kwargs: enqueued.append({"shot_id": shot_id, **kwargs}) or {},
-    )
-
-    version = worker.new_id("ver")
-    conn.execute(
-        """INSERT INTO shot_versions(
-               id, shot_id, version_no, prompt_text, idem_key, status, video_path,
-               image_inputs, created_at
-           ) VALUES(?, 's1', 2, 'PROMPT', 'idem', 'succeeded', '/tmp/v.mp4', ?, 1.0)""",
-        (version, json.dumps({
-            "mode": "REFERENCE_IMAGE_MODE",
-            "reference_images": [{"id": "r1", "selectedForSeedance": True}],
-            "auto_retake_count": 2,
-        })),
-    )
-    conn.execute(
-        """INSERT INTO jobs(id, kind, shot_id, version_id, episode_id, project_id, status, created_at, updated_at)
-           VALUES('j1','video','s1',?, 'e1','p1','succeeded',1.0,1.0)""",
-        (version,),
-    )
-    conn.commit()
-
-    force_best = asyncio.run(worker._maybe_auto_qa({
-        "id": "j1",
-        "shot_id": "s1",
-        "project_id": "p1",
-        "after_shot_id": None,
-    }, version, "/tmp/v.mp4"))
-
-    assert enqueued == []
-    assert force_best is True
-
-
-def test_low_qa_video_records_score_only_without_retake(monkeypatch) -> None:
-    conn = _conn()
-    _seed_project(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/tool")
-    monkeypatch.setattr(worker, "_extract_frames", lambda _path: ["frame"])
-    monkeypatch.setattr(
-        worker,
-        "get_setting",
-        lambda key: {
-            "auto_qa": "true",
-            "auto_retake_threshold": "0.6",
-            "video_auto_retake_limit": "2",
-        }.get(key),
-    )
     monkeypatch.setattr(worker, "log_provider_call", lambda *_args, **_kwargs: None)
 
-    async def low_qa(*_args, **_kwargs):
-        return {"overall": 0.2, "issues": ["核心动作没有完成"]}
-
-    monkeypatch.setattr(stages, "qa_shot", low_qa)
     enqueued: list[dict] = []
     monkeypatch.setattr(
         worker,
@@ -679,36 +578,25 @@ def test_low_qa_video_records_score_only_without_retake(monkeypatch) -> None:
 
     assert force_best is True
     assert enqueued == []
-    qa = json.loads(conn.execute(
+    qa_json = conn.execute(
         "SELECT qa_json FROM shot_versions WHERE id=?", (version,),
-    ).fetchone()["qa_json"])
-    assert qa["evaluation_role"] == "score_only"
-    assert qa["retry_eligible"] is False
+    ).fetchone()["qa_json"]
+    assert qa_json is None
 
 
-def test_complete_mode_qa_is_also_score_only(monkeypatch) -> None:
+def test_complete_mode_maybe_auto_qa_is_also_a_noop(monkeypatch) -> None:
+    """Supervisor 完整补齐模式下同样不再调用模型或写 qa_json。"""
     conn = _conn()
     _seed_project(conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/tool")
-    monkeypatch.setattr(worker, "_extract_frames", lambda _path: ["frame"])
-    monkeypatch.setattr(
-        worker,
-        "get_setting",
-        lambda key: {"auto_qa": "true", "auto_retake_threshold": "0.6", "video_auto_retake_limit": "2"}.get(key),
-    )
+    monkeypatch.setattr(worker, "log_provider_call", lambda *_args, **_kwargs: None)
 
-    async def low_qa(*_args, **_kwargs):
-        return {"overall": 0.1, "issues": ["角色漂移"]}
-
-    monkeypatch.setattr(stages, "qa_shot", low_qa)
     enqueued: list[dict] = []
     monkeypatch.setattr(
         worker,
         "enqueue_shot",
         lambda shot_id, **kwargs: enqueued.append({"shot_id": shot_id, **kwargs}) or {},
     )
-    monkeypatch.setattr(worker, "log_provider_call", lambda *_args, **_kwargs: None)
     version = worker.new_id("ver")
     conn.execute(
         """INSERT INTO shot_versions(
@@ -732,10 +620,7 @@ def test_complete_mode_qa_is_also_score_only(monkeypatch) -> None:
 
     assert enqueued == []
     assert force_best is True
-    qa = json.loads(conn.execute(
+    qa_json = conn.execute(
         "SELECT qa_json FROM shot_versions WHERE id=?", (version,),
-    ).fetchone()["qa_json"])
-    assert qa["overall"] == 0.1
-    assert qa.get("evaluation_role") == "score_only"
-    assert qa.get("runtime_blocking") is False
-    assert qa.get("retry_eligible") is False
+    ).fetchone()["qa_json"]
+    assert qa_json is None

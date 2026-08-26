@@ -6,12 +6,9 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from app.continuity import classify_video_hard_failures
 from app.db import get_conn
 from app.evidence import repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
-
-VIDEO_QUALITY_REVIEW_THRESHOLD = 0.6
 
 
 def _issue(code: str, message: str, subject: str, *, blocker: bool = True) -> Issue:
@@ -275,13 +272,6 @@ def record_video_candidate(version_id: str, *, step_run_id: str | None = None) -
     return artifact
 
 
-def _qa_overall(qa: dict[str, Any]) -> float | None:
-    try:
-        return float(qa.get("overall"))
-    except (TypeError, ValueError):
-        return None
-
-
 def _version_is_delivery_fallback(row: Any) -> bool:
     """历史图片/静音占位版本不具备模型视频资格。"""
     if row is None:
@@ -302,10 +292,14 @@ def grade_shot_video(
     version_row: dict[str, Any] | None = None,
     continuity_degraded: bool = False,
 ) -> dict[str, Any]:
-    """可用视频三级判定（A/B/C），确定性、不调用模型。
+    """可用视频二级判定（A/B，技术校验是唯一客观判据），确定性、不调用模型。
 
-    可传入已加载的 technical/qa，或 shot_id（读采用版/最佳成功版）。
+    VLM 视觉质检已下线：不再读取/依赖 qa 的分数或结构化事实。``qa`` 形参保留
+    仅为调用方兼容，本函数不再解析其内容。
+
+    可传入已加载的 technical，或 shot_id（读采用版/最佳成功版）。
     """
+    del qa
     conn = get_conn()
     row = dict(version_row) if version_row is not None else None
     rejected_fallback = _version_is_delivery_fallback(row)
@@ -335,18 +329,14 @@ def grade_shot_video(
     if row is not None and not isinstance(row, dict):
         row = dict(row)
 
-    # 调用方若显式传入了历史占位版本的检测结果，不能让它们在
-    # 已拒绝该版本后继续伪装成 A/B 级视频。找到真实候选时由其落库证据重算。
+    # 调用方若显式传入了历史占位版本的检测结果，不能让它继续伪装成 A 级视频。
+    # 找到真实候选时由其落库证据重算。
     if rejected_fallback:
         technical = None
-        qa = None
 
     if technical is None and row is not None:
         technical = json.loads(row.get("technical_validation_json") or "{}")
-    if qa is None and row is not None:
-        qa = json.loads(row.get("qa_json") or "{}")
     technical = technical or {}
-    qa = qa or {}
 
     if row is not None and not continuity_degraded:
         try:
@@ -355,55 +345,24 @@ def grade_shot_video(
         except (TypeError, ValueError):
             pass
 
-    threshold = VIDEO_QUALITY_REVIEW_THRESHOLD
-
-    hard_failures = classify_video_hard_failures(qa, technical=technical) if technical or qa else []
-    runtime_blocking = bool(qa.get("runtime_blocking"))
-    score = _qa_overall(qa)
-    qa_recovered = bool(qa.get("qa_recovered"))
-    whole_clip_usable = qa.get("whole_clip_usable")
     passed = bool(technical.get("passed"))
     version_id = (row or {}).get("id") if row else None
 
     fallback_reason: str | None = None
     if not passed:
         grade = "C"
-    elif whole_clip_usable is False or runtime_blocking:
-        grade = "C"
-        fallback_reason = "完整片段生产合同未通过，禁止自动采用"
+        fallback_reason = "视频文件技术校验未通过"
     elif continuity_degraded:
         grade = "B"
         fallback_reason = "连续性已降链（纯参考图模式），衔接可能变弱"
-    elif (
-        not qa_recovered
-        and not hard_failures
-        and score is not None
-        and score >= threshold
-    ):
-        grade = "A"
-    elif passed:
-        grade = "B"
-        reasons = []
-        if score is None or score < threshold:
-            reasons.append(f"QA {score if score is not None else 'n/a'} < 阈值 {threshold:.2f}")
-        if hard_failures:
-            reasons.append("结构化合同事实：" + ",".join(hard_failures))
-        if qa_recovered:
-            reasons.append("QA 结果为 recovered 占位")
-        fallback_reason = "；".join(reasons) or "技术合格但未达 A 级标准"
     else:
-        grade = "C"
+        grade = "A"
 
     return {
         "grade": grade,
         "version_id": version_id,
         "technical_passed": passed,
-        "hard_failures": hard_failures,
-        "runtime_blocking": runtime_blocking,
-        "whole_clip_usable": whole_clip_usable,
-        "qa_overall": score,
-        "threshold": threshold,
-        "qa_recovered": qa_recovered,
+        "qa_overall": None,
         "continuity_degraded": continuity_degraded,
         "fallback_reason": fallback_reason,
     }
@@ -423,7 +382,11 @@ def video_candidate_selection_score(
 def select_best_video_candidate(
     shot_id: str, *, force_best: bool = False
 ) -> dict[str, Any] | None:
-    """Adopt the first technically valid video that passes the clip contract."""
+    """Adopt the first technically valid video that passes the clip contract.
+
+    技术校验（文件存在、容器格式、时长）是唯一客观判据。VLM 视觉质检已下线，
+    不再参与候选筛选或排序；``force_best`` 参数保留仅为调用方兼容。
+    """
     del force_best
 
     conn = get_conn()
@@ -447,30 +410,11 @@ def select_best_video_candidate(
             technical = json.loads(row["technical_validation_json"] or "{}")
         if not technical.get("passed"):
             continue
-        qa = json.loads(row["qa_json"] or "{}")
-        score = _qa_overall(qa)
-        hard_failures = classify_video_hard_failures(qa, technical=technical)
-        # Semantic/VLM QA is score-only. Only an explicitly typed runtime
-        # blocker may override an otherwise valid technical media contract.
-        if qa.get("runtime_blocking") is True:
-            continue
-        entry = {
+        technical_pool.append({
             "id": row["id"],
             "version_no": row["version_no"],
-            "score": score if score is not None else -1.0,
-            "qa": qa,
             "adoption_reason": row["adoption_reason"],
-            "hard_failures": hard_failures,
-            "qa_recovered": bool(
-                qa.get("qa_recovered")
-                or qa.get("status") in {"unverified", "pending"}
-                or score is None
-            ),
-        }
-        entry["selection_score"] = video_candidate_selection_score(
-            entry["score"], hard_failures, qa_recovered=entry["qa_recovered"]
-        )
-        technical_pool.append(entry)
+        })
 
     if not technical_pool:
         return None
@@ -483,30 +427,16 @@ def select_best_video_candidate(
         (entry for entry in technical_pool if entry["id"] == adopted_id),
         technical_pool[0],
     )
-    ordered = sorted(
-        technical_pool,
-        key=lambda item: (
-            not item["qa_recovered"],
-            item["selection_score"],
-            item["score"],
-            item["version_no"],
-        ),
-        reverse=True,
-    )
     already_adopted = adopted_id == best["id"]
     if already_adopted:
         reason = best.get("adoption_reason") or (
-            f"保留当前采用版 v{best['version_no']}；后续候选和 QA 评分不得自动替换。"
+            f"保留当前采用版 v{best['version_no']}；后续候选不得自动替换。"
         )
     else:
         reason = (
-            f"默认采用首个技术有效视频 v{best['version_no']}（完整片段合同已通过）；"
-            f"QA={best['score']:.3f}、质量问题={best['hard_failures']} 仅供复核，"
-            "不触发重做或阻止采用。"
+            f"默认采用首个技术有效视频 v{best['version_no']}"
+            "（文件存在、容器格式、时长校验均通过）。"
         )
-    observed_state_out = (best.get("qa") or {}).get("observed_state_out")
-    if observed_state_out:
-        persist_candidate_observed_state_out(best["id"], str(observed_state_out))
     if not already_adopted:
         conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (best["id"], shot_id))
         conn.execute("UPDATE shot_versions SET adoption_reason=? WHERE id=?", (reason, best["id"]))
@@ -542,7 +472,6 @@ def select_best_video_candidate(
     graded = grade_shot_video(
         shot_id,
         technical=json.loads((tech_row["technical_validation_json"] if tech_row else None) or "{}"),
-        qa=best.get("qa") or {},
         version_row={"id": best["id"], "image_inputs": image_inputs},
     )
     grade = graded["grade"]
@@ -550,7 +479,6 @@ def select_best_video_candidate(
     return {
         "version_id": best["id"],
         "reason": reason,
-        "comparison": ordered,
         "fallback": fallback,
         "grade": grade,
         "fallback_reason": graded.get("fallback_reason") if grade == "B" else None,

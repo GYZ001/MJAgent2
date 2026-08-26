@@ -222,8 +222,8 @@ describe("系统设置功能分类", () => {
       "video_submit_concurrency",
     ]);
     expect(
-      groups.find((group) => group.id === "quality-repair")?.affects,
-    ).toContain("视频质检");
+      groups.find((group) => group.id === "reference-images")?.keys,
+    ).toContain("vlm_request_concurrency");
     expect(groups.find((group) => group.id === "other")?.keys).toEqual([
       "future_setting",
     ]);

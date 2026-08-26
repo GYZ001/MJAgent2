@@ -286,16 +286,3 @@ def load_reference_set(set_id: str, *, conn=None) -> dict[str, Any] | None:
     return result
 
 
-def apply_set_to_meta(meta: dict[str, Any], set_id: str, *, conn=None) -> dict[str, Any]:
-    loaded = load_reference_set(set_id, conn=conn)
-    if not loaded:
-        return meta
-    meta = dict(meta)
-    meta["reference_set_id"] = set_id
-    meta["reference_images"] = loaded["reference_images"]
-    meta["reference_gallery_fingerprint"] = loaded["fingerprint"]
-    meta["reference_gallery_revision"] = loaded["revision"]
-    if loaded.get("reference_manifest"):
-        meta["reference_manifest"] = loaded["reference_manifest"]
-        meta["reference_manifest_frozen"] = True
-    return meta

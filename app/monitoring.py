@@ -129,7 +129,6 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "provider_call_retention_days": _number("模型调用日志保留天数", "30", 1, 365, unit="天", immediate=False),
     "error_log_retention_days": _number("错误日志保留天数", "30", 1, 365, unit="天", immediate=False),
     "use_character_refs": _boolean("定妆照参考图", "true"),
-    "auto_qa": _boolean("自动质检", "true"),
     "storyboard_workspace_safe_readonly": _boolean("分镜台安全只读模式", "false"),
     "storyboard_structure_edit_enabled": _boolean("分镜结构编辑", "true", experimental=True),
     "storyboard_source_rebind_enabled": _boolean("分镜原文重绑定", "true", experimental=True),

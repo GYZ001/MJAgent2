@@ -657,8 +657,10 @@ def test_collective_roster_is_a_group_not_one_identity(monkeypatch) -> None:
     )
     monkeypatch.setattr("app.multiview.portrait_views_for_episode", lambda *_a, **_k: [])
     monkeypatch.setattr("app.multiview.portrait_row_for_episode", lambda *_a, **_k: None)
+    from app.db import get_conn
+
     manifest = resolve_shot_asset_dependencies(
-        project_id="p", episode_no=1, shot_id="s", shot=shot,
+        project_id="p", episode_no=1, shot_id="s", shot=shot, conn=get_conn(),
     )
     group = next(
         item

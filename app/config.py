@@ -398,7 +398,6 @@ DEFAULT_SETTINGS = {
     "episode_cost_limit_cny": "100",
     "use_character_refs": "true",     # 出场角色定妆照随镜头注入 reference_image（跨集一致性核心）
     "max_ref_images": "2",            # 单镜头最多附几张定妆照
-    "auto_qa": "true",
     # VAL-422：口播一致性 / 结构化主线门禁分阶段开关
     "spoken_contract_audit_mode": "enforce",  # audit_only | enforce
     "spine_structured_hard_gate": "true",     # false 时 LEGACY_COVERAGE_UNCERTAIN 降为 warning

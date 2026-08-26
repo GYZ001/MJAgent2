@@ -1188,9 +1188,9 @@ const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
   {
     id: "text-generation",
     title: "剧本与分镜生成",
-    description: "控制文本模型可同时推进的剧集数量；排队任务会按新值立即扩缩容。",
+    description: "控制文本模型可同时推进的剧集数量，以及输出校验失败后的修复重试次数。",
     affects: ["剧本批量生成", "分镜批量生成", "文本模型"],
-    keys: ["text_generation_concurrency"],
+    keys: ["text_generation_concurrency", "max_repair_attempts"],
   },
   {
     id: "video-flow",
@@ -1216,27 +1216,17 @@ const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
   {
     id: "reference-images",
     title: "参考图与视觉生成",
-    description: "控制人物、场景和镜头参考图的生成速度、批次与输入方式。",
+    description: "控制人物、场景和镜头参考图的生成速度、批次、输入方式与质检并发。",
     affects: ["人物定妆照", "场景参考图", "关键帧与视频输入"],
     keys: [
       "reference_pipeline_concurrency",
       "image_request_concurrency",
+      "vlm_request_concurrency",
       "reference_shot_cohort_limit",
       "max_ref_images",
       "use_character_refs",
       "video_reference_batch_prompt",
       "video_reference_role_adaptive",
-    ],
-  },
-  {
-    id: "quality-repair",
-    title: "视觉质检与评分",
-    description: "控制视觉质检评分开关与并发；质检分数不触发自动重做或重试。",
-    affects: ["视频质检", "生成台", "评分记录"],
-    keys: [
-      "vlm_request_concurrency",
-      "auto_qa",
-      "max_repair_attempts",
     ],
   },
   {
@@ -1297,8 +1287,7 @@ const SETTING_FIELD_IMPACTS: Record<string, string> = {
   use_character_refs: "视频生成时是否携带人物定妆照",
   video_reference_batch_prompt: "是否批量生成视频参考图提示词",
   video_reference_role_adaptive: "是否根据镜头角色自动调整参考图策略",
-  vlm_request_concurrency: "同时执行多少个视觉质量检查",
-  auto_qa: "生成完成后是否自动进入质量检查",
+  vlm_request_concurrency: "同时执行多少个人物定妆照/场景参考图质检请求",
   auto_retake_threshold: "兼容历史配置；质检分数不再触发自动重做",
   max_repair_attempts: "同一问题允许自动修复的最大次数",
   download_concurrency: "同时下载多少个模型生成结果",
