@@ -328,10 +328,16 @@ STORYBOARD_SCENE_PACK_MAX_SHOTS = max(
     ),
 )
 
-# 分镜时长：默认 5s（PREFERRED）；6~10s 仅当口播/连续动作需要，并进入 AI 审核。
+# 分镜时长：默认 5s（PREFERRED）；6~15s 仅当口播/连续动作需要，并进入 AI 审核。
 # DEFAULT 仅用于人工输入缺省值，模型输出必须经校验器显式落在合法区间内。
+# 一个剧本事件=一个分镜=15s（分镜内部由模型划分 3~4 次镜头切换，写在提示词文本里，
+# 不是独立数据行）；15 是我们自己设定的产品上限，不是供应商上限——MiniMax H3 实测
+# duration_limits={"min_s":0.2,"max_s":15}，与此处上限恰好一致纯属巧合，不代表两者
+# 有耦合依赖。所有面向模型的时长/节拍档位文案必须由本模块函数派生，禁止在
+# app/stages.py、app/renderability.py 等处另写字面量表（见 _speech_budget_table_text
+# 与 storyboard_duration_capacity_table_text 的用法）。
 VIDEO_DURATION_MIN_S = 5
-VIDEO_DURATION_MAX_S = 10
+VIDEO_DURATION_MAX_S = 15
 DEFAULT_VIDEO_DURATION_S = VIDEO_DURATION_MIN_S
 ALLOWED_DURATIONS = frozenset(range(VIDEO_DURATION_MIN_S, VIDEO_DURATION_MAX_S + 1))
 EPISODE_TARGET_MIN_S = 40
@@ -342,8 +348,9 @@ EPISODE_TARGET_STEP_S = 10  # 用户输入是最低节奏参考；生成后只�
 STORYBOARD_MAX_SHOTS = 1_000_000
 # 常用建议值仅供 UI 快捷输入，不构成合法值上限。
 EPISODE_TARGET_CHOICES = tuple(range(EPISODE_TARGET_MIN_S, 181, EPISODE_TARGET_STEP_S))
-# 口播预算（纯文字、不计标点）：5 秒 18 字，10 秒 36 字。
-# 超过 10 秒所能承载的口播仍必须拆镜，不能靠延长 duration_s 合并不同节拍。
+# 口播预算（纯文字、不计标点）：5 秒 18 字，按每 5 秒 18 字线性换算到 VIDEO_DURATION_MAX_S
+# （当前 15 秒 54 字）。超过 VIDEO_DURATION_MAX_S 所能承载的口播仍必须拆镜，不能靠延长
+# duration_s 合并不同节拍。
 SPOKEN_CHARS_PER_5_SECONDS = 18
 
 

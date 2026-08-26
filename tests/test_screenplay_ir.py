@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from app import db, portraits, stages
+from app import config, db, portraits, stages
 from app import errors as app_errors
 from app import identity_adjudication
 from app.evidence import repository as evidence_repository
@@ -2028,7 +2028,7 @@ def test_compiler_repairs_dangling_unit_context_and_time_budget() -> None:
     assert (
         screenplay.narrative_plan.readability_windows[-1]
         .scheduled_processing_s
-        == 10
+        == config.VIDEO_DURATION_MAX_S
     )
 
 
@@ -2036,7 +2036,8 @@ def test_compiler_splits_long_dialogue_without_rewriting_source_evidence() -> No
     payload = _ir_payload()
     long_line = (
         "我已经在这里等了很久，但你一直没有出现，"
-        "现在请把发生的事情从头到尾说清楚，不要再隐瞒。"
+        "现在请把发生的事情从头到尾说清楚，不要再隐瞒，"
+        "因为我们都已经等待了太久太久，没有人能再忍受下去。"
     )
     payload["scenes"][0]["units"][1]["text"] = long_line
 
@@ -2055,7 +2056,8 @@ def test_compiler_splits_long_dialogue_without_rewriting_source_evidence() -> No
     assert len(turns) > 1
     assert "".join(turn.line for turn in turns) == long_line
     assert all(
-        len("".join(char for char in turn.line if char.isalnum())) <= 36
+        len("".join(char for char in turn.line if char.isalnum()))
+        <= config.MAX_SPOKEN_CHARS_PER_SHOT
         for turn in turns
     )
     assert len({turn.source_text for turn in turns}) == 1

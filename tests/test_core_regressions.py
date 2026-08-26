@@ -937,4 +937,5 @@ def test_manual_duration_inputs_clamp_to_supported_range() -> None:
     assert clip_duration_value(4) == 5
     assert clip_duration_value(7) == 7
     assert clip_duration_value("9") == 9
-    assert clip_duration_value(15) == 10
+    assert clip_duration_value(15) == 15
+    assert clip_duration_value(20) == 15

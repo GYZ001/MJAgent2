@@ -195,12 +195,15 @@ def duration_gt5_errors(
     action_beats: int,
 ) -> list[str]:
     """超过 5s 且内容装得进 5s → 硬拦；真正需要更长则留给 AI 审核标记。"""
+    from app import config
+
     if int(duration_s or 0) <= PREFERRED_SHOT_DURATION_S:
         return []
     if shot_duration_should_prefer_five(spoken_chars=spoken_chars, action_beats=action_beats):
         return [
             f"shots shot_no={shot_no} duration_s={duration_s} 过长：口播与单主动作均可在 "
             f"{PREFERRED_SHOT_DURATION_S}s 内完成；请改回 {PREFERRED_SHOT_DURATION_S}s。"
-            f"仅当口播超 {PREFERRED_SHOT_DURATION_S}s 预算或确需连续铺陈时才取 6~10s，并接受 AI 审核"
+            f"仅当口播超 {PREFERRED_SHOT_DURATION_S}s 预算或确需连续铺陈时才取 "
+            f"{PREFERRED_SHOT_DURATION_S + 1}~{config.VIDEO_DURATION_MAX_S}s，并接受 AI 审核"
         ]
     return []

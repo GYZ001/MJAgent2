@@ -688,13 +688,14 @@ def test_director_outline_validate_never_lowers_model_chosen_duration(monkeypatc
 
 
 def test_director_outline_validate_still_fails_when_content_exceeds_max_duration(monkeypatch) -> None:
-    """连最长合法档位（10s，36 字）都装不下时仍必须是真错误：不得静默截断台词、
-    不得超出 config.VIDEO_DURATION_MAX_S，必须要求模型把部分 key_line_ids 挪到相邻镜。"""
+    """连最长合法档位（config.VIDEO_DURATION_MAX_S 秒，config.MAX_SPOKEN_CHARS_PER_SHOT
+    字）都装不下时仍必须是真错误：不得静默截断台词、不得超出
+    config.VIDEO_DURATION_MAX_S，必须要求模型把部分 key_line_ids 挪到相邻镜。"""
     screenplay = EpisodeScreenplay(
         episode_no=6,
         title="EP6",
         full_script_text="【场1】日 / 测试场景\n占位正文。",
-        key_lines=["角色甲：" + ("台" * 40)],
+        key_lines=["角色甲：" + ("台" * 60)],
         ending_hook="真相仍未揭开。",
     )
     _prompt, validate = _capture_director_outline_prompt(monkeypatch, screenplay)
@@ -710,7 +711,7 @@ def test_director_outline_validate_still_fails_when_content_exceeds_max_duration
     # 顶到技术上限后仍然超容——必须仍是硬错误，且不得超出合法时长范围。
     assert outline.shots[0].duration_s == config.VIDEO_DURATION_MAX_S
     assert any(
-        "OUTLINE_KEY_LINE_CAPACITY_INVALID" in e and "40" in e
+        "OUTLINE_KEY_LINE_CAPACITY_INVALID" in e and "60" in e
         for e in errors
     ), errors
 

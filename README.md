@@ -18,7 +18,7 @@
 
 当前默认 Engine 已覆盖人物谱、场景 Bible、剧本、逐镜分镜、参考资产、关键帧、视频候选和交付包。每次长任务都有持久 Run/Step/Event；每个采用结果都有 Artifact、Evaluation、血缘和明确采用理由。媒体队列使用 lease、持久重试与原子预算预留，重启后不依赖进程内业务状态恢复。
 
-产品合同固定为“一章一集、单镜由模型判断 5~10 秒整数时长”。Episode Mapping 不调用模型；模型选择能自然完成单一连续动作与口播的最短时长，超过 10 秒仍放不下或进入不同节拍时拆镜，单集镜头数和总时长不设产品上限。成片台通过 Delivery Readiness 生成带 manifest、质量报告、known issues 和 ZIP 的交付候选，经人工批准后成为 T5。
+产品合同固定为“一章一集、单镜由模型判断 5~15 秒整数时长”。Episode Mapping 不调用模型；模型选择能自然完成单一连续动作与口播的最短时长，超过 15 秒仍放不下或进入不同节拍时拆镜，单集镜头数和总时长不设产品上限。成片台通过 Delivery Readiness 生成带 manifest、质量报告、known issues 和 ZIP 的交付候选，经人工批准后成为 T5。
 
 运行、恢复、灰度、双轨基准和 T5 复验方法见 [Evidence Harness 运行手册](docs/HARNESS_RUNBOOK.md)；数据库兼容与回滚见 [迁移与回滚](docs/MIGRATION_ROLLBACK.md)。
 

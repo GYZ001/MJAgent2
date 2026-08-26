@@ -13,7 +13,10 @@ import "../styles/BoardPage.css";
 const SIZES = ['远景', '全景', '中景', '近景', '特写']
 const MOVES = ['固定', '推近', '拉远', '横摇', '跟随']
 const TRANSITIONS = ['硬切', '叠化', '淡出淡入', '黑场', '闪黑', '闪白', '甩镜', '遮挡转场', '匹配剪辑', '声音延续+叠化', '声音先行+淡入']
-const DURATIONS = [5, 6, 7, 8, 9, 10]
+// 与后端 config.VIDEO_DURATION_MIN_S~MAX_S 对齐；后端一改这个区间这里也要同步改
+// （两套语言各自维护常量，无法共享同一个源），否则人工编辑镜头时长会被静默限制在
+// 旧区间内，即便模型生成的镜头已经能用到新上限（A1 时长上限改造教训）。
+const DURATIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 const SCENE_TIMES = ['清晨', '早晨', '上午', '中午', '午后', '傍晚', '黄昏', '夜晚', '深夜']
 const CONTINUITY_MODES: Record<string, string> = {
   action_continuation: '动作延续', same_scene_cut: '同场切换', reaction_cut: '反应镜头',
@@ -186,14 +189,16 @@ export function storyboardSpokenChars(shot: Shot): number {
 }
 
 // 口播容量上限的唯一口径，对齐后端 config.max_spoken_chars_for_duration：
-// clamp(duration_s, 5, 10) * 18 // 5（3.6 字/秒，纯文字不计标点）。后端在所有含镜头的视图里
+// clamp(duration_s, 5, 15) * 18 // 5（3.6 字/秒，纯文字不计标点）。后端在所有含镜头的视图里
 // 都会注入 spoken_limit（storyboard_ops.py:210），优先采信；仅当缺失时按同一公式兜底，
 // 避免列表徽标与编辑器保存判定使用两套标准而互相矛盾。
+// 时长上限（15）与后端 config.VIDEO_DURATION_MAX_S 是两套语言各自维护的常量，
+// 后端一改这里必须同步改，否则 11~15s 镜头会被误判超出口播上限（A1 时长上限改造教训）。
 export function shotSpokenLimit(shot: Pick<Shot, 'spoken_limit' | 'duration_s'>): number {
   if (typeof shot.spoken_limit === 'number' && Number.isFinite(shot.spoken_limit)) {
     return shot.spoken_limit
   }
-  const duration = Math.min(Math.max(Math.trunc(shot.duration_s || 5), 5), 10)
+  const duration = Math.min(Math.max(Math.trunc(shot.duration_s || 5), 5), 15)
   return Math.floor((duration * 18) / 5)
 }
 

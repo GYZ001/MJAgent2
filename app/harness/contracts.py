@@ -71,7 +71,7 @@ _CONTRACTS: dict[str, StageContract] = {
         input_types=["episode_prep_pack"],
         output_type="storyboard",
         invariants=[
-            "the model selects each shot duration as an integer from 5 through 10 seconds",
+            "the model selects each shot duration as an integer from 5 through 15 seconds",
             "spoken-content budget scales with the selected shot duration",
             "shot numbers are contiguous",
             "shot count has no product ceiling and completion is defined by content and context delivery",
@@ -97,7 +97,7 @@ _CONTRACTS: dict[str, StageContract] = {
         output_type="shot_video",
         invariants=[
             "video is decodable",
-            "duration approximately matches the storyboard-selected value between 5 and 10 seconds",
+            "duration approximately matches the storyboard-selected value between 5 and 15 seconds",
         ],
         max_iterations=2,
         requires_human_gate=False,

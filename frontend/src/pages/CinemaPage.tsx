@@ -112,7 +112,9 @@ export function deliveryWarningLabel(value: string): string {
 
 export function deliveryCheckLabel(value: string): string {
   return value
-    .replace('每镜时长为模型选择的 5~10 秒整数', '每镜时长为 5 到 10 秒整数')
+    // 时长区间由后端 config.VIDEO_DURATION_MIN_S~MAX_S 决定；这里用正则而不是
+    // 写死 "5~10"，避免后端上限一变前端文案就悄悄对不上（历史教训见 A1 时长上限改造）。
+    .replace(/每镜时长为模型选择的 (\d+)~(\d+) 秒整数/, '每镜时长为 $1 到 $2 秒整数')
     .replace('每镜都有已采用且通过技术校验的视频', '每镜都有已采用且可正常播放的视频')
 }
 

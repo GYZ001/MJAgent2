@@ -9,6 +9,7 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app import config
 from app.harness import model_gateway
 from app.harness.types import Issue
 from app.narrative import index_narrative_plan
@@ -881,7 +882,8 @@ async def diagnose_narrative_repair(
             "至少比较两个候选，不得由 issue code 直接选唯一动作",
             "能改现镜时不增镜；增镜必须通过 gap 与 marginal gain",
             "key_line_catalog 中的 KL* 是逐字必保留合同；只能在相邻镜间重分配，禁止删除、改写或遗漏，且顺序不变",
-            "单镜时长必须为 5~10 秒；当必保留台词总字数超过 10 秒容量时，原镜压缩在数学上不可行，结构拆分具有可验证边际收益",
+            f"单镜时长必须为 {config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S} 秒；"
+            f"当必保留台词总字数超过 {config.VIDEO_DURATION_MAX_S} 秒容量时，原镜压缩在数学上不可行，结构拆分具有可验证边际收益",
             "选中候选只能包含 1~3 个局部 outline_operations，不得借局部问题重写整集大纲",
             (
                 "逐镜失败必须先只修 focus_shot_no；只有关系证据证明相邻镜也必须改变时，"

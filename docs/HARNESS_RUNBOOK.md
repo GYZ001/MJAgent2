@@ -3,8 +3,8 @@
 ## 冻结合同
 
 - Episode Mapping 由确定性代码执行，一章严格对应一集，不调用模型。
-- 每个视频镜头由分镜模型按单一连续动作与口播密度选择 5~10 秒整数时长；选择能自然完成内容的最短时长，超过 10 秒仍放不下或出现不同节拍时拆成相邻镜头。
-- Storyboard 逐镜循环每轮只接受单数 `shot`；超出 10 秒口播容量的大纲内容由 Harness 在模型调用前确定性拆成多个 checkpoint，模型不得用 `shots` 数组绕过合同。
+- 每个视频镜头由分镜模型按单一连续动作与口播密度选择 5~15 秒整数时长；选择能自然完成内容的最短时长，超过 15 秒仍放不下或出现不同节拍时拆成相邻镜头。
+- Storyboard 逐镜循环每轮只接受单数 `shot`；超出 15 秒口播容量的大纲内容由 Harness 在模型调用前确定性拆成多个 checkpoint，模型不得用 `shots` 数组绕过合同。
 - 功能身份由 owned SRC、`source_instance_key`、`identity_group` 和 authority ID 确定；禁止用姓名、职业、年龄、服饰、题材或称谓后缀白名单推断实体同一性。
 - 新 validator 必须直接填写 `Issue.category=structural|quality|operational`；AgentLoop 不读取错误码或文案决定修复类别。`must_fix/runtime_blocking` 独立决定发布门禁。
 - 模型、文件校验器失败不能伪装成通过；恢复结果不能独立触发自动采用。

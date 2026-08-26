@@ -582,8 +582,20 @@ def count_sequential_action_beats(text: str) -> int:
 
 
 def action_capacity_limit(duration_s: int | None) -> int:
-    """Return the shared storyboard/video limit for sequential action beats."""
-    return 2 if int(duration_s or 5) <= 6 else 3
+    """Return the shared storyboard/video limit for sequential action beats.
+
+    Tier breakpoints (6s/10s) are a product-defined pacing ladder, independent
+    of the provider's actual duration ceiling. The top tier is capped at 4 per
+    product requirement (每分镜 3~4 次镜头切换) and automatically covers every
+    duration up to ``config.VIDEO_DURATION_MAX_S``; raising that ceiling again
+    does not require touching this function.
+    """
+    duration = int(duration_s or config.VIDEO_DURATION_MIN_S)
+    if duration <= 6:
+        return 2
+    if duration <= 10:
+        return 3
+    return 4
 
 
 def narrative_action_capacity_profile(

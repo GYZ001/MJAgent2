@@ -181,7 +181,8 @@ def _assert_shot_character_contract(
 
 
 def clip_duration_value(value: int | float | str | None) -> int:
-    """把人工/历史输入收敛到供应商支持的 5~10 秒整数区间。"""
+    """把人工/历史输入收敛到当前允许的时长整数区间（config.VIDEO_DURATION_MIN_S~MAX_S；
+    该上限是产品自定的，供应商实测上限更高，见 config.VIDEO_DURATION_MAX_S 注释）。"""
     try:
         duration = int(float(value))
     except (TypeError, ValueError, OverflowError):
@@ -1742,7 +1743,7 @@ SCENE_RUNTIME_CONTRACT = (
 SCENE_QUALITY = (
     "竖屏 9:16 单帧定格画面，构图完整，人物五官清晰稳定、表情自然，手部与所持道具关系正常稳定，"
     "光影与色调统一，电影质感，高清")
-# 角色不漂移 + 同镜两帧同机位 + 特效克制（与视频侧一致，三者是 5~10s 成片稳定的关键）
+# 角色不漂移 + 同镜两帧同机位 + 特效克制（与视频侧一致，三者是全时长区间成片稳定的关键）
 SCENE_CONSISTENCY = (
     "人物形象严格遵循上方角色锚点串与参考图：同一张脸、同一发型、同一服装、同一年龄与体型，跨镜不漂移；"
     "同框多人物默认站立身高与眼线齐平、体型尺度协调，除非画面描述已写明身高差，禁止随意一高一低"

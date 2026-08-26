@@ -192,11 +192,11 @@ def test_storyboard_accepts_model_selected_duration_and_scales_spoken_budget() -
 
 def test_storyboard_rejects_duration_outside_model_contract() -> None:
     shot = _compact_shot(1)
-    shot.duration_s = 11
+    shot.duration_s = 16
 
     errors = validate_storyboard(Storyboard(episode_no=1, shots=[shot]), _bible(), target_duration_s=50)
 
-    assert any("duration_s=11" in error and "5~10s" in error for error in errors), errors
+    assert any("duration_s=16" in error and "5~15s" in error for error in errors), errors
 
 
 def test_storyboard_allows_extra_split_shots_for_dense_dialogue() -> None:

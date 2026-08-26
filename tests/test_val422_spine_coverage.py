@@ -398,12 +398,13 @@ def test_outline_spoken_duration_normalizer_only_raises_to_supported_capacity() 
 
 
 def _ep6_two_fragment_screenplay() -> EpisodeScreenplay:
-    """真实 EP6 第六轮数字：KL05(29字)+KL06(15字) 合计 44 字，超过 10s/36 字上限。
+    """原型：EP6 第六轮真实事故（ERR-20260825-8fee67）KL05(29字)+KL06(15字)
+    合计 44 字，超过当时 10s/36 字上限。A1 时长上限改造（10s→15s，36 字→54 字）
+    后该原始数字不再溢出，故按等比放大到 KL05(30字)+KL06(30字)=60 字，
+    继续超过新的 15s/54 字上限，以保留这条回归对"容量溢出下移"机制本身的覆盖。
 
-    两条台词是同一句 74 字原句被 projection 层按标点切出的相邻碎片（已用
-    project_prep_pack_to_screenplay 对 EP6 真实夹具核实，见任务报告），同一
-    说话人「孟浩」。key_lines 前 4 条只是占位，让 KL05/KL06 编号与真实事故
-    对齐。
+    两条台词模拟同一句原句被 projection 层按标点切出的相邻碎片，同一说话人
+    「孟浩」。key_lines 前 4 条只是占位，让 KL05/KL06 编号与真实事故对齐。
     """
     return EpisodeScreenplay(
         episode_no=6,
@@ -412,8 +413,8 @@ def _ep6_two_fragment_screenplay() -> EpisodeScreenplay:
             "孟浩：占位二。",
             "孟浩：占位三。",
             "孟浩：占位四。",
-            "孟浩：" + ("甲" * 29),
-            "孟浩：" + ("乙" * 15),
+            "孟浩：" + ("甲" * 30),
+            "孟浩：" + ("乙" * 30),
         ],
     )
 
@@ -441,7 +442,7 @@ def test_relieve_overflow_moves_trailing_key_line_ep6_numbers() -> None:
 
     # 红：移动前，模型的原始分配确实不可满足（复现真实报错的判据）。
     before = outline_key_line_capacity_errors(outline, sp)
-    assert any("[OUTLINE_KEY_LINE_CAPACITY_INVALID]" in e and "44" in e for e in before), before
+    assert any("[OUTLINE_KEY_LINE_CAPACITY_INVALID]" in e and "60" in e for e in before), before
 
     changes = relieve_outline_key_line_capacity_overflow(outline, sp)
 
@@ -458,9 +459,9 @@ def test_relieve_overflow_moves_trailing_key_line_ep6_numbers() -> None:
     normalize_outline_spoken_durations(outline, sp)
     assert outline_key_line_capacity_errors(outline, sp) == []
     assert outline_key_line_speaker_errors(outline, sp) == []
-    # 只升不降：shot20 原已是 10s（模型的动作铺陈意图），29 字本只需 9s 也不回压。
+    # 只升不降：shot20 原已是 10s（模型的动作铺陈意图），30 字本只需 9s 也不回压。
     assert shot20.duration_s == 10
-    assert shot21.duration_s == 5   # 15 字 -> 5s 档位(18字)已够，无需抬高
+    assert shot21.duration_s == 9   # 30 字需要 9s 档位(32字)才够，原 5s 被抬高
 
 
 def test_relieve_overflow_prepends_before_existing_next_shot_key_lines() -> None:
@@ -487,8 +488,8 @@ def test_relieve_overflow_blocks_on_speaker_mismatch() -> None:
     sp = EpisodeScreenplay(
         episode_no=6,
         key_lines=[
-            "孟浩：" + ("甲" * 29),
-            "孟浩：" + ("乙" * 15),
+            "孟浩：" + ("甲" * 30),
+            "孟浩：" + ("乙" * 30),
             "许师姐：" + ("丙" * 10),
         ],
     )
@@ -553,9 +554,9 @@ def test_relieve_overflow_cascades_through_chain_in_a_single_call() -> None:
     sp = EpisodeScreenplay(
         episode_no=6,
         key_lines=[
-            "甲：" + ("A" * 20),  # KL01
-            "甲：" + ("B" * 20),  # KL02
-            "甲：" + ("C" * 20),  # KL03
+            "甲：" + ("A" * 30),  # KL01
+            "甲：" + ("B" * 30),  # KL02
+            "甲：" + ("C" * 30),  # KL03
         ],
     )
     shots = [
@@ -586,7 +587,7 @@ def test_relieve_overflow_cascades_through_chain_in_a_single_call() -> None:
         "from_shot_no": 2, "to_shot_no": 3, "key_line_id": "KL03",
         "reason": "key_line_capacity_overflow_same_speaker_scene",
     }
-    # 第三镜接住 KL03 后 duration_s 仍是原始的 5s（容量 18 字装不下 20 字）；
+    # 第三镜接住 KL03 后 duration_s 仍是原始的 5s（容量 18 字装不下 30 字）；
     # relieve 本身不碰 duration_s，交由归一化器按最终分配统一重算。
     normalize_outline_spoken_durations(outline, sp)
     assert outline_key_line_capacity_errors(outline, sp) == []

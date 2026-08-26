@@ -9,14 +9,14 @@ ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = {
     "app/config.py": [
         "VIDEO_DURATION_MIN_S = 5",
-        "VIDEO_DURATION_MAX_S = 10",
+        "VIDEO_DURATION_MAX_S = 15",
         "STORYBOARD_SHOT_MAX_TOKENS",
         "TEXT_PROVIDER_MAX_RETRIES",
     ],
     "app/planning.py": ["one episode", "without an LLM"],
     "app/harness/contracts.py": [
         "one chapter maps to exactly one episode",
-        "the model selects each shot duration as an integer from 5 through 10 seconds",
+        "the model selects each shot duration as an integer from 5 through 15 seconds",
         "shot count has no product ceiling",
         "detailed shots are generated and checkpointed as complete scene packs",
         "every shot has a motivated shot-size, camera-angle, and camera-movement triple",
@@ -35,7 +35,7 @@ REQUIRED = {
     ],
     "docs/PROMPT_SPEC.md": [
         "确定性剧集映射（非 Agent 阶段）",
-        "duration_s 全部为 5~10 秒整数",
+        "duration_s 全部为 5~15 秒整数",
         "镜头数量不设产品上限",
         "按场景批量生成",
         "景别 + 角度 + 运动",

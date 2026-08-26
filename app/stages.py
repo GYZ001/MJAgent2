@@ -23,9 +23,9 @@ from app.character_policy import (
     functional_extra_policy_text,
     resolution_declares_functional_identity,
 )
-from app.continuity import (adaptation_hook_errors, ensure_audio_timeline,
-                            information_ledger_errors, ledger_context_for_shot,
-                            sync_shot_continuity_fields)
+from app.continuity import (action_capacity_limit, adaptation_hook_errors,
+                            ensure_audio_timeline, information_ledger_errors,
+                            ledger_context_for_shot, sync_shot_continuity_fields)
 from app.db import get_conn, get_setting, log_provider_call
 from app.evaluations.issues import issues_from_messages
 from app.errors import ArtifactNeedsRebuildError, ContentGenerationError
@@ -12375,6 +12375,41 @@ def _speech_budget_table_text(durations: list[int] | None = None) -> str:
     return "、".join(f"{value}s≤{config.max_spoken_chars_for_duration(value)}字" for value in values)
 
 
+def _duration_range_text() -> str:
+    """时长合法区间文案：`{min}~{max}`（不带单位，调用方按语境自行拼接"秒"/"s"）。
+
+    唯一数据源是 config.VIDEO_DURATION_MIN_S / VIDEO_DURATION_MAX_S；禁止在提示词
+    里另写 "5~10"/"6~10" 这类字面量区间——上限一改这里就全部跟着变，否则会出现
+    「校验器已放宽到新上限，提示词还在暗示旧上限」的静默偏差。
+    """
+    return f"{config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}"
+
+
+def _duration_action_capacity_table_text(durations: list[int] | None = None) -> str:
+    """时长-动作节拍档位换算表：`{lo}~{hi}s 最多 {cap} 个`，逐镜/大纲提示词共用同一数据源。
+
+    唯一数据源是 ``continuity.action_capacity_limit``；连续时长若映射到同一容量就合并
+    成一个区间显示（如 5~6s/7~10s/11~15s）。区间边界（6s/10s）是产品自定义的节奏分层，
+    与视频供应商能力无关；顶档上限固定跟随 config.VIDEO_DURATION_MAX_S，时长上限改变时
+    这张表会自动扩展到新的顶档区间，不需要手改字面量。
+    """
+    values = sorted(durations) if durations is not None else sorted(config.ALLOWED_DURATIONS)
+    groups: list[list[int]] = []
+    caps: list[int] = []
+    for value in values:
+        cap = action_capacity_limit(value)
+        if caps and caps[-1] == cap:
+            groups[-1].append(value)
+        else:
+            groups.append([value])
+            caps.append(cap)
+    parts = []
+    for group, cap in zip(groups, caps):
+        span = f"{group[0]}s" if len(group) == 1 else f"{group[0]}~{group[-1]}s"
+        parts.append(f"{span} 最多 {cap} 个")
+    return "，".join(parts)
+
+
 def _storyboard_narrative_contract_block(*, include_outline_windows: bool) -> str:
     """Return the ID-level narrative task contract shared by both shot stages.
 
@@ -13517,13 +13552,13 @@ async def _generate_episode_director_outline(
 - 单镜只演一个连续主动作或一个明确观看任务。
 - 动作阶段、说话人变化、注意目标变化、空间关系变化、结果反应需要时均可拆镜。
 - 不得为控制总时长合并不同动作，不得为了形式变化制造无作用空镜。
-- duration_s 取 5~10 秒整数；总时长由所有有效镜头求和，不反向裁剪剧情。
+- duration_s 取 {_duration_range_text()} 秒整数；总时长由所有有效镜头求和，不反向裁剪剧情。
 - 【硬性·音画同步】口播预算随 duration_s 增长：{director_speech_budgets}。因果方向是本镜
   key_line_ids 合计口播纯文字字数决定 duration_s 下限，但这条下限不需要你手工算准：
   你只需按叙事/动作铺陈节奏分配 key_line_ids 与选择 duration_s；若本镜分配到的关键台词
   合计字数超过你所选 duration_s 对应的预算，系统会在校验时确定性地把 duration_s 抬高到
   刚好能装下该字数的最短合法档位（只升不降，不会削弱你的动作铺陈意图，也不会丢弃或截断
-  台词）。但如果合计字数连最长的 10s 档位（{config.MAX_SPOKEN_CHARS_PER_SHOT}字）都装不下，
+  台词）。但如果合计字数连最长的 {config.VIDEO_DURATION_MAX_S}s 档位（{config.MAX_SPOKEN_CHARS_PER_SHOT}字）都装不下，
   这仍是必须由你解决的真错误——系统不会替你拆镜，请把部分 key_line_ids 挪到相邻镜。
 
 完整剧本：
@@ -13582,7 +13617,7 @@ async def _generate_episode_director_outline(
         #
         # EP6 第六轮（run_d5ce2a4e7a9f，ERR-20260825-8fee67）：归一化器抬满时长后
         # 仍有镜头超容——模型把同一原句切出的两个相邻碎片（KL05/KL06）分进同一镜，
-        # 合计字数连最长 10s 档位也装不下。"一句话的两个碎片分别落在哪一镜"不是
+        # 合计字数连最长 config.VIDEO_DURATION_MAX_S 档位也装不下。"一句话的两个碎片分别落在哪一镜"不是
         # 创作选择，是可以确定性解决的物理约束，故先跑
         # relieve_outline_key_line_capacity_overflow 把超容的尾部 key_line_ids
         # 下移到相邻的后一镜（保序、同说话人、同场次；条件不满足则原样不动，交给
@@ -13921,8 +13956,8 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
             "必须规划为中景/全景动作对白镜；必须看见接触点的双人肢体互动才允许双人同框。"
         )
         outline_action_capacity_rule = (
-            "动作容量与视频生成门禁一致：5~6s 最多 2 个顺序动作节拍，"
-            "7~10s 最多 3 个；primary_action、beat、covers 任一字段超限都要拆镜。"
+            f"动作容量与视频生成门禁一致：{_duration_action_capacity_table_text()}"
+            "个顺序动作节拍；primary_action、beat、covers 任一字段超限都要拆镜。"
         )
     ending_rule = (
         f"最后一镜落到本集真实尾钩：{episode_cliffhanger}，用本集已有内容据实呈现，"
@@ -13971,10 +14006,10 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
 {scene_library_block}
 {narrative_shot_contract}
 硬性约束：
-1. 镜头数由完整覆盖剧本决定且不设上限；20、40、60 镜都合法，禁止为贴合目标时长主动省略剧情。shot_no 从 1 连续递增。大纲 duration_s **默认 5**，仅必要时取 6~10；每镜必须有独立作用。
+1. 镜头数由完整覆盖剧本决定且不设上限；20、40、60 镜都合法，禁止为贴合目标时长主动省略剧情。shot_no 从 1 连续递增。大纲 duration_s **默认 {config.VIDEO_DURATION_MIN_S}**，仅必要时取 {config.VIDEO_DURATION_MIN_S + 1}~{config.VIDEO_DURATION_MAX_S}；每镜必须有独立作用。
 2. 每条保留 beat/covers 兼容旧流程，同时必须填写上方叙事任务合同的 shot_id、scene_id、event_ids、primary_action_id、supporting_action_ids、action_phase_ids、visible_entity_ids、offscreen_action_actor_ids、offscreen_action_target_ids、action_participant_deliveries、capacity_budget、shot_contribution、逐先验 audience_state_paths、事实状态差、动作/阶段完成账本、readability_window_ids 与 boundary。state_in/primary_action/state_out、continuity_mode、story_event_id、spine_beat_ids、key_line_ids、new_information_ids、duration_s、characters_visible、audio_cast 继续保留。beat 只作为一句话摘要，不得替代结构化任务。
 3. 相邻两镜 state_out -> state_in 与每个观众先验的 audience_state_out_target_id -> audience_state_in_id 都必须精确承接。primary_action_id 非空时必须唯一归属且不同于 completed_before_action_ids；为 null 时仍必须用 shot_contribution 证明新的叙事功能。
-4. 上方主线台词/剧情点/spine 必须分配到 covers，并填写 key_line_ids（KL01..）与 spine_beat_ids（S01..）；drop_list 禁止分配。new_information_ids 只能引用 screenplay.information_ledger 已有 info_id。因果方向是台词字数决定时长下限，不是先选时长再检查台词：先数清本镜分配到的 key_line_ids 合计口播纯文字字数，再从口播预算表里选出能装下它的最短 duration_s——口播预算随 duration_s 增长：{outline_speech_budgets}（默认 5s 只能装 {config.max_spoken_chars_for_duration(config.VIDEO_DURATION_MIN_S)} 字，超过就必须取更长档位，最长 10s 也只能到 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字）。仍超过 10s 档位上限时才需要拆到相邻镜；未超过时优先直接改本镜 duration_s，不要拆镜。
+4. 上方主线台词/剧情点/spine 必须分配到 covers，并填写 key_line_ids（KL01..）与 spine_beat_ids（S01..）；drop_list 禁止分配。new_information_ids 只能引用 screenplay.information_ledger 已有 info_id。因果方向是台词字数决定时长下限，不是先选时长再检查台词：先数清本镜分配到的 key_line_ids 合计口播纯文字字数，再从口播预算表里选出能装下它的最短 duration_s——口播预算随 duration_s 增长：{outline_speech_budgets}（默认 {config.VIDEO_DURATION_MIN_S}s 只能装 {config.max_spoken_chars_for_duration(config.VIDEO_DURATION_MIN_S)} 字，超过就必须取更长档位，最长 {config.VIDEO_DURATION_MAX_S}s 也只能到 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字）。仍超过 {config.VIDEO_DURATION_MAX_S}s 档位上限时才需要拆到相邻镜；未超过时优先直接改本镜 duration_s，不要拆镜。
 4b. 同一镜 key_line_ids 只能属于同一说话人；说话人变化就是切镜点。按“甲单人近景说完 → 乙单人反打回应”拆成相邻镜，禁止把问答双方和围观人群同时塞进一个对白镜头。
 4c. 每条 must_keep spine 的 who 必须在分配该 S* 的某一镜中成为可见动作主体，does 必须真正拍出。旁观者的宣告、转述或评论不能替代事件主体完成原子动作；是否拆成“动作完成 → 结果/反应”由 action temporal phases、镜头时长与 readability budget 共同判定。
 4d. {outline_action_capacity_rule}
@@ -15390,9 +15425,10 @@ def _hydrate_directed_scene_pack(
     # Duration is graph/program authority in a directed scene pack, so a model
     # repair cannot change it.  Apply the shared deterministic duration policy
     # before validating the pack: shots that genuinely need extra speech or
-    # viewing time keep 6~10s with the normal review tag, while a stale 10s
-    # allocation for one 5s action is compressed instead of wasting every
-    # AgentLoop iteration on an immutable field.
+    # viewing time keep their longer duration_s (up to config.VIDEO_DURATION_MAX_S)
+    # with the normal review tag, while a stale longer allocation for one
+    # PREFERRED_SHOT_DURATION_S-sized action is compressed instead of wasting
+    # every AgentLoop iteration on an immutable field.
     prefer_default_shot_durations(
         normalized_board,
         narrative_authority=screenplay.narrative_plan is not None,
@@ -15689,7 +15725,9 @@ atomic action 的 actor/target 关系登记为画外身份，不得为了同场�
         for shot in pack.shots:
             tag = f"shot_no={shot.shot_no}"
             if shot.duration_s not in config.ALLOWED_DURATIONS:
-                errors.append(f"{tag}.duration_s 必须为 5~10 秒整数")
+                errors.append(
+                    f"{tag}.duration_s 必须为 {_duration_range_text()} 秒整数"
+                )
             if shot.shot_size not in SHOT_SIZES:
                 errors.append(f"{tag}.shot_size 非法")
             if shot.camera_move not in CAMERA_MOVES:
@@ -15992,8 +16030,8 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
         )
     else:
         shot_action_capacity_rule = (
-            "5~6s 的 action_desc/primary_action 最多 2 个顺序动作节拍，"
-            "7~10s 最多 3 个；入画、转身、穿行、停下、道具操作、结果显现与开口按顺序计数。"
+            f"{_duration_action_capacity_table_text()}顺序动作节拍的 action_desc/primary_action；"
+            "入画、转身、穿行、停下、道具操作、结果显现与开口按顺序计数。"
         )
         shot_staging_rule = (
             "characters 里新增人物必须写清如何进入画面；减少人物必须写清离开、遮挡、画外或换场原因。"
@@ -16228,7 +16266,7 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
 角色圣经成员：{'/'.join(c.name for c in bible.characters)}
 功能性路人：{extra_policy}。
 合法时长：{config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}s 整数，由模型按动作与口播选择最短可用时长；
-口播上限随时长变化（5s={config.max_spoken_chars_for_duration(5)}字，10s={config.max_spoken_chars_for_duration(10)}字）。
+口播上限随时长变化（{_speech_budget_table_text()}）。
 动作上限：{shot_action_capacity_rule}
 合法景别：{'|'.join(sorted(SHOT_SIZES))}；合法运镜：{'|'.join(sorted(CAMERA_MOVES))}；合法转场：{transition_options}。
 上一镜详细承接：{_render_completed_shots_context(completed_shots[-1:])}
@@ -16384,7 +16422,8 @@ def _first_shot_rule(
             f"    - action_desc 写一个能代表本片世界观/主角日常处境的【建立性画面】（establishing shot），"
             f"人物动作克制、信息靠画面与必要对白承载；禁止旁白/内心OS；不要在第一镜就让主角做剧烈动作或触发核心冲突。\n"
             f"    - narration 必须为空字符串；shot_size 优先用远景/全景做开场建场，先把环境和主角位置交代清楚。\n"
-            "    - 开场需要更长铺陈时，可为单一连续建场动作选择 5~10 秒；超过 10 秒或进入新节拍时拆成相邻建场镜，逐步完成环境建立与人物入场，"
+            f"    - 开场需要更长铺陈时，可为单一连续建场动作选择 {_duration_range_text()} 秒；"
+            f"超过 {config.VIDEO_DURATION_MAX_S} 秒或进入新节拍时拆成相邻建场镜，逐步完成环境建立与人物入场，"
             f"所以 action_desc/首尾帧请按\"远景缓慢推近、镜头从环境推向主角\"来写：首帧是交代环境的大远景，"
             f"尾帧镜头推近到主角、但仍是同一机位的连续推进，人物动作保持克制连贯。\n"
             + (
@@ -16450,8 +16489,8 @@ def _storyboard_output_contract(
     else:
         extra_policy = functional_extra_policy_text()
         action_capacity_contract = (
-            "6a. 【硬性·动作容量】与视频生成前门禁使用同一阈值：5~6s 最多 2 个顺序动作节拍，"
-            "7~10s 最多 3 个；超限时在大纲阶段拆成前后相邻两镜。"
+            f"6a. 【硬性·动作容量】与视频生成前门禁使用同一阈值：{_duration_action_capacity_table_text()}"
+            "顺序动作节拍；超限时在大纲阶段拆成前后相邻两镜。"
         )
         staging_contract = (
             "8c. 【导演调度】无对白的建立镜/动作镜只写实际进入构图的人物；人物进出画需交代大动作。\n"
@@ -16471,7 +16510,7 @@ def _storyboard_output_contract(
 2. 整集镜头数由完整覆盖 must_keep spine、上下文与主线台词决定，不设数量上限；重复由每镜作用门禁拦截。
 3. 复杂动作可拆，但优先删减超纲细节而非无限拆镜；禁止为碎镜而合并删主线。
 4. duration_s **默认 {PREFERRED_SHOT_DURATION_S}s**；只能取整数 {duration_options} 秒。
-   - 【选择原则】绝大多数镜用 {PREFERRED_SHOT_DURATION_S}s。仅当口播超过 {PREFERRED_SHOT_DURATION_S}s 预算、或同一连续动作确需铺陈时，才取 6~10s；超过 5s 的镜会进入 AI 时长审核。禁止无内容拉长。
+   - 【选择原则】绝大多数镜用 {PREFERRED_SHOT_DURATION_S}s。仅当口播超过 {PREFERRED_SHOT_DURATION_S}s 预算、或同一连续动作确需铺陈时，才取 {PREFERRED_SHOT_DURATION_S + 1}~{config.VIDEO_DURATION_MAX_S}s；超过 {PREFERRED_SHOT_DURATION_S}s 的镜会进入 AI 时长审核。禁止无内容拉长。
    - 【硬性·音画同步】口播预算随 duration_s 增长：{speech_budgets}。选择时长后，动作与口播必须都能在该时长内自然完成。
    - 【硬性·拆镜边界】不同时间、地点、主动作必须拆镜；同 spine 事件通常 1~2 镜封顶。
 5. 关键：每条 shot 只表现【一个】连贯主动作（大形体可读）。严禁出现"切到/切至/镜头切/镜头转向/闪回/回忆画面/分屏/下一个镜头/→"。禁止微表情/衣角/眼泪/指节等超纲词。
@@ -16491,7 +16530,7 @@ def _storyboard_output_contract(
 10. 字数只校验必要下限；优先保证主线可看，不要为凑数字堆细节。
 11. 信息密度靠"一个清晰动作 + 必要台词"；禁止呆立、氛围空镜、重复上一镜。
 12. 【硬性·禁旁白】narration 必须为空字符串 ""；禁止内心OS/画外解说/旁白员。无法开口的信息改用画面姿态表达。
-12a. 【口播优先】单镜台词纯文字（不计标点）受第 4 条约束（最长 10s 也不得超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字）。环境群像声优先写进 action_desc。
+12a. 【口播优先】单镜台词纯文字（不计标点）受第 4 条约束（最长 {config.VIDEO_DURATION_MAX_S}s 也不得超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字）。环境群像声优先写进 action_desc。
 12b. 【声轨时序】同一说话人的连续短句可按剧情顺序放在同镜；说话人一变化就必须切到下一镜，勿内容重复撞车。
 13. 角色名必须准确：characters 不能为空；有姓名角色只能使用角色圣经准确姓名：{character_names}。{extra_policy}。
 14. action_desc 必须显式写出本镜头主要角色的准确姓名。
@@ -16529,7 +16568,7 @@ def _storyboard_preflight_contract(
 10. source_excerpt 必须是当前授权来源的可追溯证据，不得进入视频提示词。
 11. 在输出前对本镜执行状态方程、阶段时间、动作防重演、观众状态交接与窗口截止时间的联合校验。"""
     return f"""首轮输出前必须逐镜预检（这些就是代码校验器的具体判定条件，不要等返工）：
-1. 镜头数由完整覆盖剧情与上下文决定，不设数量上限；每条 duration_s **默认 {PREFERRED_SHOT_DURATION_S}s**，仅当口播或连续动作需要时取到 {config.VIDEO_DURATION_MAX_S}s。动作容量与视频门禁一致：5~6s≤2 个顺序节拍，7~10s≤3 个；超限在自然动作边界拆镜，每镜必须有独立作用。
+1. 镜头数由完整覆盖剧情与上下文决定，不设数量上限；每条 duration_s **默认 {PREFERRED_SHOT_DURATION_S}s**，仅当口播或连续动作需要时取到 {config.VIDEO_DURATION_MAX_S}s。动作容量与视频门禁一致：{_duration_action_capacity_table_text()}顺序节拍；超限在自然动作边界拆镜，每镜必须有独立作用。
 2. 第 1 镜 continuity_mode 不得为 action_continuation；第 2 镜开始逐条和上一镜比较 state_out、scene_name、scene_time 与角色可见状态。
 3. 如果本镜 scene_name 与 scene_time 均与上一镜相同：
    - continuity_mode 必须是 same_scene_cut / reaction_cut / reverse_angle / insert_detail / action_continuation 之一；

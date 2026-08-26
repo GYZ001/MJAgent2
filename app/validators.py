@@ -109,7 +109,8 @@ def _named_character_is_explicitly_offscreen(name: str, text: str) -> bool:
         re.search(rf"(?:画外|镜外|不入画|留在画外)[^，。；]{{0,12}}{escaped}", text)
         or re.search(rf"{escaped}[^，。；]{{0,12}}(?:在画外|于画外|不入画|留在画外)", text)
     )
-# 目标时长只提供初始节拍参考；剧情未完整覆盖时可继续补 5~10 秒镜头。
+# 目标时长只提供初始节拍参考；剧情未完整覆盖时可继续补
+# config.VIDEO_DURATION_MIN_S~config.VIDEO_DURATION_MAX_S 秒镜头。
 SCENE_CUT_TRANSITIONS = TRANSITIONS - {"硬切"}
 SAME_SCENE_CONTINUITY_MODES = {
     "same_scene_cut",
@@ -268,7 +269,10 @@ def validate_storyboard(
     errors: list[str] = []
     shots = board.shots
     if not shots:
-        return ["shots 为空；请按完整剧本至少生成一个 5~10 秒镜头"]
+        return [
+            "shots 为空；请按完整剧本至少生成一个 "
+            f"{config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S} 秒镜头"
+        ]
 
     # 先将模糊/旧式输入归一成规范 scene_name，后续连续性只比较
     # 场景图身份，不再把时间文案混进场景图外键。
@@ -4613,7 +4617,8 @@ def relieve_outline_key_line_capacity_overflow(
     背景（EP6 第六轮，run_d5ce2a4e7a9f，ERR-20260825-8fee67）：
     ``normalize_outline_spoken_durations`` 只能把 ``duration_s`` 顶到能装下
     当前分配的最短合法档位；若某镜分配到的 key_line_ids 合计字数本身已超过
-    ``max_speech_chars(config.VIDEO_DURATION_MAX_S)``（10s→36 字），任何
+    ``max_speech_chars(config.VIDEO_DURATION_MAX_S)``（原 10s→36 字，A1 时长
+    上限改造后为 15s→54 字），任何
     duration_s 都装不下，归一化器只能原样放行，交给
     ``outline_key_line_capacity_errors`` 硬失败。真实案例核实：KL05(29字) 与
     KL06(15字) 都出自 prep_pack 同一条 74 字原句（projection 层按标点切成的
@@ -5993,8 +5998,9 @@ def relieve_spoken_overflow(board: Storyboard) -> list[dict]:
 def _retime_coherent_spoken_timeline(shot: Shot) -> bool:
     """Duration normalization must not manufacture an out-of-range timeline.
 
-    A generated candidate may legitimately choose 6~10 seconds and place its
-    spoken segments across that interval.  ``prefer_default_shot_durations``
+    A generated candidate may legitimately choose any duration above
+    PREFERRED_SHOT_DURATION_S (up to config.VIDEO_DURATION_MAX_S) and place
+    its spoken segments across that interval.  ``prefer_default_shot_durations``
     can subsequently compress the shot to five seconds.  When dialogues and
     timeline still describe the same speech, retiming is an unambiguous
     derived-field repair.  A genuine dialogues/timeline fork remains untouched
@@ -6019,7 +6025,7 @@ def prefer_default_shot_durations(
     narrative_authority: bool = False,
     narrative_plan: NarrativeContinuityPlan | None = None,
 ) -> list[dict]:
-    """主线压缩：能 5s 讲完的镜压回 5s；仍需 6~10s 的镜打上 AI 审核标记。"""
+    """主线压缩：能 5s 讲完的镜压回 5s；仍需更长时长的镜打上 AI 审核标记。"""
     changes: list[dict] = []
     for shot in board.shots:
         spoken = spoken_char_count(shot)

@@ -1401,7 +1401,7 @@ def test_empty_dialogue_chain_accepts_only_bounded_source_grounded_turns() -> No
     assert not _dialogue_chain_replacement_is_local(
         document,
         chain_id="DC2",
-        turns=[{**turns[0], "line": "甲" * 37}],
+        turns=[{**turns[0], "line": "甲" * 55}],
         source_text=source,
     )
     assert not _dialogue_chain_replacement_is_local(
