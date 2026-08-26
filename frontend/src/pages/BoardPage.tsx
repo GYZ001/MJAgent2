@@ -1,29 +1,15 @@
-import { ReactNode, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { api, ApiError, Bible, Episode, Shot, StoryboardPackResources, StoryboardStatus } from '../api'
 import { useEpisode, useNav, useProject } from '../App'
 import EpisodeCrumb from '../components/EpisodeCrumb'
 import { ItemTaskTimer, ServerTaskTimer } from '../components/TaskTimer'
 import DecisionDialog from '../components/DecisionDialog'
-import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
 import QueryState from '../components/QueryState'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { storyboardTaskNotice } from '../lib/productionNotices'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
 import { findPortraitImage, findSceneReferenceImage } from '../lib/bibleAssets'
 import "../styles/BoardPage.css";
-
-const SIZES = ['远景', '全景', '中景', '近景', '特写']
-const MOVES = ['固定', '推近', '拉远', '横摇', '跟随']
-const TRANSITIONS = ['硬切', '叠化', '淡出淡入', '黑场', '闪黑', '闪白', '甩镜', '遮挡转场', '匹配剪辑', '声音延续+叠化', '声音先行+淡入']
-// 与后端 config.VIDEO_DURATION_MIN_S~MAX_S 对齐；后端一改这个区间这里也要同步改
-// （两套语言各自维护常量，无法共享同一个源），否则人工编辑镜头时长会被静默限制在
-// 旧区间内，即便模型生成的镜头已经能用到新上限（A1 时长上限改造教训）。
-const DURATIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-const SCENE_TIMES = ['清晨', '早晨', '上午', '中午', '午后', '傍晚', '黄昏', '夜晚', '深夜']
-const CONTINUITY_MODES: Record<string, string> = {
-  action_continuation: '动作延续', same_scene_cut: '同场切换', reaction_cut: '反应镜头',
-  reverse_angle: '反打', insert_detail: '细节插入', scene_change: '转场换景',
-}
 
 // 视频生成模型选择：与生成台强绑定（app/video_providers.py 的 provider key）。
 // 两个供应商的提示词方言互不兼容，这里只列这两个已接入的模型，不做自动发现——
@@ -48,30 +34,6 @@ const STORYBOARD_PACK_TARGET_MODEL_LABELS: Record<string, string> = {
 }
 export function storyboardPackTargetModelLabel(targetModel: string): string {
   return STORYBOARD_PACK_TARGET_MODEL_LABELS[targetModel] ?? targetModel
-}
-
-const EDITABLE_FIELDS: Array<keyof Shot> = [
-  'duration_s', 'shot_size', 'camera_angle', 'camera_move', 'scene_time', 'scene_name', 'characters', 'action_desc',
-  'first_frame_desc', 'last_frame_desc', 'dialogues', 'transition', 'continuity_from_prev',
-  'continuity_mode', 'state_in', 'primary_action', 'state_out', 'characters_visible',
-  'audio_cast', 'new_information_ids', 'spine_beat_ids', 'key_line_ids',
-  'purpose', 'resulting_change', 'readability_focus', 'camera_motivation',
-  'repeat_of_shot_id', 'repeat_gain',
-]
-
-type EditSession = {
-  edit_session_token: string
-  baseline_artifact_id?: string | null
-  baseline_content_hash: string
-  lease_expires_at: number
-}
-
-type SourceChapter = {
-  id: number; idx: number; title: string; content: string; source_version_hash: string
-}
-
-type SourceBindingInput = {
-  chapter_id: number; source_version_hash: string; start_offset: number; end_offset: number
 }
 
 export type StartPreview = {
@@ -99,39 +61,29 @@ export type StartPreview = {
   }
 }
 
-export function storyboardCharacterFilterOptions(shots: Shot[]): string[] {
-  const internalIdentity = /^(?:character|entity|speaker|voice|passerby)[-_]/i
-  const internalSlug = /^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)+$/i
-  return [...new Set(
-    shots
-      .flatMap(shot => [...(shot.characters ?? []), ...(shot.audio_cast ?? [])])
-      .map(value => value.trim())
-      .filter(value => value && !internalIdentity.test(value) && !internalSlug.test(value)),
-  )]
-}
-
-export type StoryboardPackBeatOverviewEntry = { beat_id: string; segment_nos: number[] }
+export type StoryboardPackBeatOverviewEntry = { beat_id: string; summary: string; segment_nos: number[] }
 
 /**
- * 节拍概览：按每段自带的 beat_ids 反推"哪个节拍进了哪一段"（要求 5：beat_sheet
- * 展示为这一集的节拍概览，能和 segments 对上）。当前持久化路径只把 beat_id 落进
- * 段记录，没有随段落带 summary 摘要文本（见 StoryboardPackSegment 注释），这里
- * 如实只产出 ID 与去向，调用方据此显示"摘要待后端补充"，不得为了好看编造摘要。
+ * 节拍概览：按每段自带的 beats（自包含 beat_id/summary/segment_indexes，见
+ * api.ts 的 StoryboardPackSegmentBeat 注释）反推"哪个节拍进了哪一段、在讲什么"。
+ * 不再读裸 beat_ids——那是没有摘要的过渡期字段，展示一律改用 beats。
+ * 同一 beat_id 在多段间重复出现时，摘要取首次遇到的非空值，不逐段覆盖。
  */
 export function storyboardPackBeatOverview(shots: Shot[]): StoryboardPackBeatOverviewEntry[] {
-  const segmentNosByBeat = new Map<string, Set<number>>()
+  const byBeat = new Map<string, { summary: string; segmentNos: Set<number> }>()
   for (const shot of shots) {
     const segment = shot.storyboard_pack_segment
     if (!segment) continue
-    for (const beatId of segment.beat_ids ?? []) {
-      const segmentNos = segmentNosByBeat.get(beatId) ?? new Set<number>()
-      segmentNos.add(segment.segment_no)
-      segmentNosByBeat.set(beatId, segmentNos)
+    for (const beat of segment.beats ?? []) {
+      const entry = byBeat.get(beat.beat_id) ?? { summary: '', segmentNos: new Set<number>() }
+      if (!entry.summary && beat.summary) entry.summary = beat.summary
+      entry.segmentNos.add(segment.segment_no)
+      byBeat.set(beat.beat_id, entry)
     }
   }
-  return [...segmentNosByBeat.entries()]
+  return [...byBeat.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([beat_id, segmentNos]) => ({ beat_id, segment_nos: [...segmentNos].sort((a, b) => a - b) }))
+    .map(([beat_id, entry]) => ({ beat_id, summary: entry.summary, segment_nos: [...entry.segmentNos].sort((a, b) => a - b) }))
 }
 
 export type StoryboardPackResourceGapSummary = {
@@ -201,31 +153,6 @@ type ConfirmPreview = {
   recovery_action?: string | null
 }
 
-type DraftItem = {
-  id: string; version: number; content: Partial<Shot>; baseline_artifact_ids: string[]
-  issues: string[]; created_at: number
-}
-
-type SpokenConflictPreview = ImpactSummary & {
-  preview_token: string
-  edit_session_token: string
-  baseline_content_hash: string
-  choice: 'rebuild_timeline_from_dialogues' | 'rebuild_dialogues_from_timeline'
-}
-
-type StructurePreview = ImpactSummary & {
-  preview_token: string
-  operation: 'add_after' | 'duplicate_after' | 'delete' | 'move'
-  shot_id: string
-  target_index: number
-  new_final_shot_id?: string | null
-  before_count: number
-  after_count: number
-  renumbered_shots: number
-  revalidation_shots: number[]
-  final_shot_impact: string
-}
-
 type StoryboardClearPreview = {
   preview_token: string
   shot_count: number
@@ -244,88 +171,12 @@ type VideoModelSwitchConfirm = {
   prompt_artifact_count: number
 }
 
-function cloneShot(shot: Shot): Shot {
-  return JSON.parse(JSON.stringify(shot)) as Shot
-}
-
-export type StoryboardInputStrategy = {
-  kind: 'scene_library' | 'previous_video_tail' | 'reference_video'
-  label: string
-  detail: string
-}
-
-export function storyboardInputStrategy(shot: Shot, previous?: Shot): StoryboardInputStrategy {
-  if (shot.mode_plan?.mode === 'VIDEO_INPUT_MODE') {
-    return {
-      kind: 'reference_video',
-      label: '参考视频（原逻辑）',
-      detail: '继续按既有参考视频计划执行，不改变视频来源与依赖关系。',
-    }
-  }
-  const scene = (shot.scene_name || shot.scene_setting || '').trim()
-  const previousScene = (previous?.scene_name || previous?.scene_setting || '').trim()
-  const sceneTime = (shot.scene_time || '').replace(/\s+/g, '')
-  const previousSceneTime = (previous?.scene_time || '').replace(/\s+/g, '')
-  if (previous && scene === previousScene && sceneTime === previousSceneTime) {
-    return {
-      kind: 'previous_video_tail',
-      label: '上一视频真实尾帧 → 本镜唯一首帧',
-      detail: '同场景自动承接上一条采用视频的真实尾帧，不单独生成剧情首帧或静态尾帧。',
-    }
-  }
-  return {
-    kind: 'scene_library',
-    label: '人物谱 + 场景库',
-    detail: '换场起点只使用人物谱与场景库中的图片，不额外生成剧情参考图。',
-  }
-}
-
-function same(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
-}
-
-export function buildStoryboardChanges(original: Shot, edit: Shot, sourceBinding: SourceBindingInput | null): Record<string, unknown> {
-  const changes: Record<string, unknown> = {}
-  for (const key of EDITABLE_FIELDS) {
-    if (!same(original[key], edit[key])) changes[key] = edit[key]
-  }
-  if (sourceBinding) changes.source_binding = sourceBinding
-  return changes
-}
-
-export function storyboardSpokenChars(shot: Shot): number {
-  const punctuation = /[\s\u2000-\u206F\u3000-\u303F\uFF00-\uFFEF!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~，。！？：；、…—·「」『』【】（）《》〈〉“”‘’]/g
-  return (shot.dialogues ?? []).reduce((total, line) => total + (line.line || '').replace(punctuation, '').length, 0)
-}
-
-// 口播容量上限的唯一口径，对齐后端 config.max_spoken_chars_for_duration：
-// clamp(duration_s, 5, 15) * 18 // 5（3.6 字/秒，纯文字不计标点）。后端在所有含镜头的视图里
-// 都会注入 spoken_limit（storyboard_ops.py:210），优先采信；仅当缺失时按同一公式兜底，
-// 避免列表徽标与编辑器保存判定使用两套标准而互相矛盾。
-// 时长上限（15）与后端 config.VIDEO_DURATION_MAX_S 是两套语言各自维护的常量，
-// 后端一改这里必须同步改，否则 11~15s 镜头会被误判超出口播上限（A1 时长上限改造教训）。
-export function shotSpokenLimit(shot: Pick<Shot, 'spoken_limit' | 'duration_s'>): number {
-  if (typeof shot.spoken_limit === 'number' && Number.isFinite(shot.spoken_limit)) {
-    return shot.spoken_limit
-  }
-  const duration = Math.min(Math.max(Math.trunc(shot.duration_s || 5), 5), 15)
-  return Math.floor((duration * 18) / 5)
-}
-
-// 分镜台 2.0.0（docs/STORYBOARD_PROMPT_IR_DESIGN.md）：一个 15 秒段 = shots 表一行，
-// 段内 3-4 镜写进 prompt_text 文本、不拆成独立数据行。这一行非 null 的
-// storyboard_pack_segment 是唯一权威标记，见 api.ts 的 StoryboardPackSegment 注释。
+// 分镜台只剩段视图一条渲染路径（旧的逐镜编辑连同它绑定的经典字段形状已整块拆除，
+// 2026-08-26 用户拍板：测试期没有需要兼容的重要数据）。一个 15 秒段 = shots 表
+// 一行，段内 3-4 镜写进 prompt_text 文本、不拆成独立数据行；storyboard_pack_segment
+// 非 null 是这一行有内容可展示的唯一标记，见 api.ts 的 StoryboardPackSegment 注释。
 export function isStoryboardPackSegmentShot(shot: Shot): boolean {
   return shot.storyboard_pack_segment != null
-}
-
-// 口播超限判据（storyboardSpokenChars/shotSpokenLimit）只对经典逐镜行有意义：
-// 分镜台 2.0.0 段落行的口播预算由模型在 prompt_text 里自行把控，不受这条经典公式
-// 约束，强算会对着新架构行打出无意义的"口播超限"标记（A1 时长上限改造教训的同类
-// 问题：两套语义混用一条判据）。
-export function storyboardShotOverCapacity(shot: Shot): boolean {
-  if (isStoryboardPackSegmentShot(shot)) return false
-  return storyboardSpokenChars(shot) > shotSpokenLimit(shot)
 }
 
 export function isStoryboardProblemShot(shot: Shot): boolean {
@@ -333,12 +184,7 @@ export function isStoryboardProblemShot(shot: Shot): boolean {
   return shot.spoken_contract_status === 'conflict'
     || Boolean(shot.legacy_unvalidated)
     || ['candidate', 'needs_revision', 'rejected', 'stale', 'superseded'].includes(status)
-    || storyboardShotOverCapacity(shot)
     || Boolean(shot.preflight_errors?.length)
-}
-
-export function storyboardDeleteUsesFullClear(shots: Shot[], selectedShotId: string): boolean {
-  return shots.length === 1 && shots[0]?.id === selectedShotId
 }
 
 export function storyboardToolbarActions(state: StoryboardStatus['state']): {
@@ -353,25 +199,14 @@ export function storyboardToolbarActions(state: StoryboardStatus['state']): {
 
 export function storyboardGateIssueLabel(message: string): string {
   return message
-    .replace(/^shots\[\d+\]\(shot_no=(\d+)\)\./, '第 $1 镜：')
-    .replace(/^shot_no=(\d+)\./, '第 $1 镜：')
+    .replace(/^shots\[\d+\]\(shot_no=(\d+)\)\./, '第 $1 段：')
+    .replace(/^shot_no=(\d+)\./, '第 $1 段：')
     .replaceAll('action_desc', '画面动作')
     .replaceAll('primary_action', '镜头动作')
     .replaceAll('first_frame_desc', '生成起点')
     .replaceAll('last_frame_desc', '结束状态')
     .replaceAll('QA', '质检')
     .replaceAll('门禁', '必检项')
-}
-
-export function storyboardSaveDisabledReason(
-  dirty: boolean,
-  overCapacity: boolean,
-  characterCount: number,
-): string {
-  if (!dirty) return '尚未修改任何内容'
-  if (overCapacity) return '口播超出本镜容量，请删减台词或调整镜头'
-  if (!characterCount) return '请至少选择一个画面角色'
-  return ''
 }
 
 type StoryboardProgressCopy = {
@@ -403,10 +238,10 @@ export function storyboardPrimaryAction(
   }
   const labels: Record<StoryboardStatus['recommended_action'], string> = {
     go_screenplay: '先去映射台',
-    generate_storyboard: '开始分镜任务',
+    generate_storyboard: '生成视频提示词',
     view_progress: '查看任务详情',
-    resume_storyboard: finalizingEvidence ? '完成发布证据' : '继续分镜任务',
-    confirm_storyboard: '确认分镜',
+    resume_storyboard: finalizingEvidence ? '完成发布证据' : '继续生成视频提示词',
+    confirm_storyboard: '确认视频提示词',
     go_review_wall: '进入生成台',
     refresh_status: '状态同步中',
   }
@@ -420,8 +255,8 @@ export function storyboardProgressCopy(status: StoryboardStatus): StoryboardProg
   const working = status.draft_shots ?? status.produced_shots
   const validated = Math.min(working, status.safe_checkpoint_shots ?? status.validated_shots)
   const resumeFrom = status.resume_from_shot ?? Math.max(1, validated + 1)
-  const target = status.planned_shots > 0 ? `${status.planned_shots} 镜` : '待确定'
-  const summary = `目标 ${target} · 工作副本 ${working} 镜 · 已校验 ${validated} 镜`
+  const target = status.planned_shots > 0 ? `${status.planned_shots} 段` : '待确定'
+  const summary = `目标 ${target} · 工作副本 ${working} 段 · 已校验 ${validated} 段`
 
   if (!['running', 'paused', 'failed'].includes(status.state)) return { summary, detail: null }
   const pending = status.pending_revalidation_shots ?? Math.max(0, working - validated)
@@ -436,13 +271,13 @@ export function storyboardProgressCopy(status: StoryboardStatus): StoryboardProg
   if (repairsExisting) {
     return {
       summary,
-      detail: `当前 ${working} 镜已完成逐镜校验，但整集仍有 ${gateIssueCount} 个确认门禁问题。继续任务会重开整集修复，不是从第 ${resumeFrom} 镜续写；修复候选通过前不会覆盖现有镜头。`,
+      detail: `当前 ${working} 段已完成逐段校验，但整集仍有 ${gateIssueCount} 个确认门禁问题。继续任务会重开整集修复，不是从第 ${resumeFrom} 段续写；修复候选通过前不会覆盖现有段落。`,
     }
   }
   if (status.resume_mode === 'finalize_evidence') {
     return {
       summary,
-      detail: '镜头内容与整集硬门禁已通过；继续任务只会完成冷观众审读、校准校验和发布证据签发，不会改写现有镜头。',
+      detail: '段落内容与整集硬门禁已通过；继续任务只会完成冷观众审读、校准校验和发布证据签发，不会改写现有段落。',
     }
   }
   const finalDraftNote = status.final_shot_valid
@@ -451,21 +286,21 @@ export function storyboardProgressCopy(status: StoryboardStatus): StoryboardProg
   if (pending > 0) {
     return {
       summary,
-      detail: `第 ${validated + 1}–${working} 镜仍待校验；任务将从第 ${resumeFrom} 镜继续修复。人工确认前，轨道中的内容都只是工作副本。${finalDraftNote}`,
+      detail: `第 ${validated + 1}–${working} 段仍待校验；任务将从第 ${resumeFrom} 段继续修复。人工确认前，轨道中的内容都只是工作副本。${finalDraftNote}`,
     }
   }
   return {
     summary,
-    detail: `当前 ${validated} 镜已通过逐镜校验；任务将从第 ${resumeFrom} 镜继续。整集门禁通过并经人工确认后才会交给生成台。${finalDraftNote}`,
+    detail: `当前 ${validated} 段已通过逐段校验；任务将从第 ${resumeFrom} 段继续。整集门禁通过并经人工确认后才会交给生成台。${finalDraftNote}`,
   }
 }
 
 export function storyboardEmptyCopy(status: StoryboardStatus): string {
-  if (status.state === 'no_screenplay') return '尚无可用于分镜的剧本，请先去映射台。'
-  if (status.state === 'running') return '首批分镜正在生成与逐镜校验，通过后会自动展示。'
-  if (status.state === 'failed') return '分镜任务未完成，尚无通过校验的工作镜头；请查看原因后继续处理。'
-  if (status.state === 'paused') return '分镜任务已暂停，尚无通过校验的工作镜头。'
-  return '剧本已就绪，尚未生成分镜。'
+  if (status.state === 'no_screenplay') return '尚无可用于生成视频提示词的映射结果，请先去映射台。'
+  if (status.state === 'running') return '首批视频提示词正在生成与逐段校验，通过后会自动展示。'
+  if (status.state === 'failed') return '视频提示词任务未完成，尚无通过校验的工作段落；请查看原因后继续处理。'
+  if (status.state === 'paused') return '视频提示词任务已暂停，尚无通过校验的工作段落。'
+  return '映射已就绪，尚未生成视频提示词。'
 }
 
 export function storyboardStartPreviewCopy(preview: StartPreview): {
@@ -476,12 +311,12 @@ export function storyboardStartPreviewCopy(preview: StartPreview): {
 } {
   if (preview.action === 'create') {
     return {
-      title: '开始本集分镜任务',
-      confirmLabel: '开始任务',
-      summary: '从空白开始生成本集分镜。',
+      title: '生成本集视频提示词',
+      confirmLabel: '开始生成',
+      summary: '从空白开始生成本集分段视频提示词。',
       detail: preview.planned_shots
-        ? `计划 ${preview.planned_shots} 镜。`
-        : '任务启动后会先规划镜头数量。',
+        ? `计划 ${preview.planned_shots} 段。`
+        : '任务启动后会先规划分段数量。',
     }
   }
   if (preview.resume_mode === 'repair_existing') {
@@ -490,26 +325,26 @@ export function storyboardStartPreviewCopy(preview: StartPreview): {
       ?? preview.repair?.last_issue_messages.length
       ?? 0
     return {
-      title: '继续修复分镜',
+      title: '继续修复视频提示词',
       confirmLabel: '开始修复',
-      summary: `现有 ${preview.kept_validated_shots} 镜保持不变，重新校验并修复${issueCount ? ` ${issueCount} 个` : ''}确认门禁问题。`,
-      detail: `这是重开整集修复，不是从第 ${preview.checkpoint.resume_from_shot} 镜续写；候选通过前不会覆盖现有镜头。`,
+      summary: `现有 ${preview.kept_validated_shots} 段保持不变，重新校验并修复${issueCount ? ` ${issueCount} 个` : ''}确认门禁问题。`,
+      detail: `这是重开整集修复，不是从第 ${preview.checkpoint.resume_from_shot} 段续写；候选通过前不会覆盖现有段落。`,
     }
   }
   if (preview.resume_mode === 'finalize_evidence') {
     return {
-      title: '完成分镜发布证据',
+      title: '完成视频提示词发布证据',
       confirmLabel: '继续审读发布',
-      summary: `现有 ${preview.kept_validated_shots} 镜已完成结构与逐镜校验。`,
-      detail: '将保留全部镜头，仅继续冷观众审读、校准校验与发布证据签发。',
+      summary: `现有 ${preview.kept_validated_shots} 段已完成结构与逐段校验。`,
+      detail: '将保留全部段落，仅继续冷观众审读、校准校验与发布证据签发。',
     }
   }
   return {
-    title: '继续分镜任务',
+    title: '继续生成视频提示词',
     confirmLabel: '继续任务',
-    summary: `从第 ${preview.checkpoint.resume_from_shot} 镜继续；前 ${preview.kept_validated_shots} 镜已通过逐镜校验。`,
+    summary: `从第 ${preview.checkpoint.resume_from_shot} 段继续；前 ${preview.kept_validated_shots} 段已通过逐段校验。`,
     detail: preview.planned_shots
-      ? `计划 ${preview.planned_shots} 镜${preview.remaining_shots != null ? `，剩余 ${preview.remaining_shots} 镜` : ''}。`
+      ? `计划 ${preview.planned_shots} 段${preview.remaining_shots != null ? `，剩余 ${preview.remaining_shots} 段` : ''}。`
       : '继续任务后会先恢复已有计划。',
   }
 }
@@ -522,13 +357,9 @@ export function storyboardShotCheckpointLabel(
   const draft = status.draft_shots ?? status.produced_shots
   const safe = Math.min(draft, status.safe_checkpoint_shots ?? status.validated_shots)
   if (shotNo <= safe) {
-    return { label: '已校验', className: 'checkpoint-safe', title: '本轮已通过逐镜校验；整集仍需通过门禁并由人工确认' }
+    return { label: '已校验', className: 'checkpoint-safe', title: '本轮已通过逐段校验；整集仍需通过门禁并由人工确认' }
   }
   return { label: '待校验', className: 'checkpoint-pending', title: '仍在工作副本中，继续任务时可能更新' }
-}
-
-function fieldId(shotId: string, name: string): string {
-  return `shot-${shotId}-${name}`
 }
 
 function Modal({ open, title, children, onClose, actions }: {
@@ -556,27 +387,27 @@ function StoryboardLaunchPanel({ episode, status, busy, onPrimary }: {
   busy: boolean
   onPrimary: () => void
 }) {
-  const screenplayReady = status.screenplay_available
+  const mappingReady = status.screenplay_available
 
   return (
-    <section className={`storyboard-launch card ${screenplayReady ? 'is-ready' : 'needs-screenplay'}`} aria-labelledby="storyboard-launch-title">
+    <section className={`storyboard-launch card ${mappingReady ? 'is-ready' : 'needs-screenplay'}`} aria-labelledby="storyboard-launch-title">
       <header className="storyboard-launch-head">
         <div className="storyboard-launch-status">
-          <span className="storyboard-launch-mark" aria-hidden="true">镜</span>
-          <div><b>{screenplayReady ? '剧本已就绪' : '等待剧本'}</b><small>{screenplayReady ? '分镜尚未生成' : '完成剧本后才能拆解镜头'}</small></div>
+          <span className="storyboard-launch-mark" aria-hidden="true">词</span>
+          <div><b>{mappingReady ? '映射已就绪' : '等待映射'}</b><small>{mappingReady ? '视频提示词尚未生成' : '完成映射后才能生成视频提示词'}</small></div>
         </div>
       </header>
       <div className="storyboard-launch-action" aria-label="下一步">
-        <h2 id="storyboard-launch-title">{screenplayReady ? '开始本集分镜任务' : '请先完成本集剧本'}</h2>
-        <p>{screenplayReady
-          ? `将按照《${episode.title}》当前定稿剧本生成分镜，生成后可逐镜审阅。`
-          : '当前没有可用剧本，完成剧本后再返回这里开始。'}</p>
+        <h2 id="storyboard-launch-title">{mappingReady ? '生成本集视频提示词' : '请先完成本集映射'}</h2>
+        <p>{mappingReady
+          ? `将按照《${episode.title}》当前映射结果生成分段视频提示词，生成后可逐段复制。`
+          : '当前没有可用的映射结果，完成映射后再返回这里开始。'}</p>
         <button id="storyboard-primary-action" type="button" className="btn primary storyboard-launch-button" disabled={busy}
-          aria-label={busy ? '开始分镜任务，暂不可用：正在准备' : screenplayReady ? '开始分镜任务' : '先去映射台'}
+          aria-label={busy ? '生成视频提示词，暂不可用：正在准备' : mappingReady ? '生成视频提示词' : '先去映射台'}
           onClick={onPrimary}>
-          {busy ? '正在准备…' : screenplayReady ? '开始分镜任务' : '先去映射台'}
+          {busy ? '正在准备…' : mappingReady ? '生成视频提示词' : '先去映射台'}
         </button>
-        {screenplayReady && <small>只生成分镜，不会自动提交付费视频。</small>}
+        {mappingReady && <small>只生成视频提示词，不会自动提交付费视频。</small>}
       </div>
     </section>
   )
@@ -863,7 +694,7 @@ function NarrativeReadinessPanel({
 
   return <section className="card narrative-readiness" aria-label="全链路叙事一致性">
     <header>
-      <div><b>全链路叙事一致性</b><span>同一事件、动作、人物认知与观众理解合同贯穿剧本和分镜</span></div>
+      <div><b>全链路叙事一致性</b><span>同一事件、动作、人物认知与观众理解合同贯穿映射和分镜</span></div>
       <span className={`stamp ${ready ? 'green' : 'gold'}`}>{ready ? '叙事就绪' : reviewCopy}</span>
     </header>
     <dl>
@@ -900,7 +731,7 @@ function statusFallback(ep: Episode): StoryboardStatus {
 }
 
 export default function BoardPage() {
-  const { episodeId, go, projectId, toast, registerNavigationGuard } = useNav()
+  const { episodeId, go, projectId, toast } = useNav()
   const { data: ep, refresh, error, status: queryErrorStatus, loading } = useEpisode(episodeId!, 'board')
   // 分镜台 2.0.0 段落资源清单里的 portrait_id/scene_reference_id 指向项目人物谱/
   // 场景库，需要同一份 bible 才能查缩略图；口径与用法都照抄 ScriptPage.tsx（同一个
@@ -908,17 +739,10 @@ export default function BoardPage() {
   const { data: project } = useProject(projectId!, 0, 'bible')
   const [busy, setBusy] = useState(false)
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null)
-  const [shotEditDirty, setShotEditDirty] = useState(false)
-  const [pendingShotId, setPendingShotId] = useState<string | null>(null)
   const [onlyProblems, setOnlyProblems] = useState(false)
-  const [sceneFilter, setSceneFilter] = useState('')
-  const [characterFilter, setCharacterFilter] = useState('')
-  const [capacityFilter, setCapacityFilter] = useState(false)
-  const [riskFilter, setRiskFilter] = useState(false)
   const [recoveredStatus, setRecoveredStatus] = useState<StoryboardStatus | null>(null)
   const [startPreview, setStartPreview] = useState<StartPreview | null>(null)
   const [confirmPreview, setConfirmPreview] = useState<ConfirmPreview | null>(null)
-  const [structurePreview, setStructurePreview] = useState<StructurePreview | null>(null)
   const [clearPreview, setClearPreview] = useState<StoryboardClearPreview | null>(null)
   const [videoModelConfirm, setVideoModelConfirm] = useState<VideoModelSwitchConfirm | null>(null)
   const [videoModelBusy, setVideoModelBusy] = useState(false)
@@ -928,18 +752,13 @@ export default function BoardPage() {
   const shots = ep?.shots ?? []
   const visibleShots = useMemo(() => shots.filter(shot => {
     if (onlyProblems && !isStoryboardProblemShot(shot)) return false
-    if (sceneFilter && (shot.scene_name || shot.scene_setting) !== sceneFilter) return false
-    if (characterFilter && ![...(shot.characters ?? []), ...(shot.audio_cast ?? [])].includes(characterFilter)) return false
-    if (capacityFilter && !storyboardShotOverCapacity(shot)) return false
-    if (riskFilter && !shot.preflight_errors?.length && !shot.continuity_degraded && !(shot.risk_tags?.length)) return false
     return true
-  }), [shots, onlyProblems, sceneFilter, characterFilter, capacityFilter, riskFilter])
+  }), [shots, onlyProblems])
   // 节拍概览与素材缺口统计按全量 shots（不受筛选影响），反映"这一集"整体口径，
-  // 不随镜头筛选变化而变化。
+  // 不随段落筛选变化而变化。
   const packBeatOverview = useMemo(() => storyboardPackBeatOverview(shots), [shots])
   const packResourceGap = useMemo(() => storyboardPackResourceGapSummary(shots), [shots])
   const packDegradedExportText = useMemo(() => storyboardPackDegradedCapabilitiesExportText(shots), [shots])
-  const hasPackSegments = shots.some(isStoryboardPackSegmentShot)
   const copyPackDegradedExport = async () => {
     if (!packDegradedExportText) return
     if (!navigator.clipboard) {
@@ -953,47 +772,21 @@ export default function BoardPage() {
       toast('复制失败，请允许浏览器访问剪贴板后重试', true)
     }
   }
-  // 先在全量 shots 里按当前选中 id 解析，避免轮询刷新使选中镜因“问题态”变化离开
-  // visibleShots 时被静默跳到第一条；仅当尚无选中或该镜确实被删除时，才回退到 visibleShots[0]。
+  // 先在全量 shots 里按当前选中 id 解析，避免轮询刷新使选中段因"问题态"变化离开
+  // visibleShots 时被静默跳到第一条；仅当尚无选中或该段确实被删除时，才回退到 visibleShots[0]。
   const selectedShot = shots.find(shot => shot.id === selectedShotId) ?? visibleShots[0]
   const selectedIndex = visibleShots.findIndex(shot => shot.id === selectedShot?.id)
-  const absoluteIndex = shots.findIndex(shot => shot.id === selectedShot?.id)
   const selectionOutsideFilters = Boolean(
     selectedShot && visibleShots.length > 0 && !visibleShots.some(shot => shot.id === selectedShot.id),
   )
   const status = ep?.storyboard_status ?? recoveredStatus ?? (ep ? statusFallback(ep) : null)
   const taskNotice = ep ? storyboardTaskNotice(ep, status?.state) : null
-  const filterDisabledReason = shotEditDirty ? '请先保存或放弃当前镜头修改' : ''
-  const hasActiveFilters = onlyProblems || Boolean(sceneFilter) || Boolean(characterFilter) || capacityFilter || riskFilter
-
-  useLayoutEffect(() => {
-    if (!shotEditDirty) {
-      registerNavigationGuard(null, false)
-      return
-    }
-    registerNavigationGuard({
-      title: '放弃未保存的镜头修改？',
-      summary: selectedShot ? `镜 ${selectedShot.shot_no} 仍在编辑` : '当前镜头仍在编辑',
-      message: '逐镜字段修改尚未保存，离开分镜台会丢失当前输入；发布版、失败草稿和下游产物不会变化。',
-      details: ['当前逐镜编辑不会自动保存', '返回继续编辑可保留当前输入'],
-      confirmLabel: '放弃修改并离开',
-      cancelLabel: '继续编辑',
-      danger: true,
-    }, true)
-    return () => registerNavigationGuard(null, false)
-  }, [registerNavigationGuard, selectedShot, shotEditDirty])
-
-  const scenes = useMemo(() => [...new Set(shots.map(shot => shot.scene_name || shot.scene_setting).filter(Boolean))], [shots])
-  const characters = useMemo(() => storyboardCharacterFilterOptions(shots), [shots])
+  const hasActiveFilters = onlyProblems
 
   useEffect(() => {
     if (!selectedShot || selectedShot.id === selectedShotId) return
-    if (shotEditDirty && selectedShotId) {
-      setPendingShotId(selectedShot.id)
-      return
-    }
     setSelectedShotId(selectedShot.id)
-  }, [selectedShot?.id, selectedShotId, shotEditDirty])
+  }, [selectedShot?.id, selectedShotId])
 
   useEffect(() => {
     timelineRef.current?.querySelector<HTMLElement>('[aria-selected="true"]')
@@ -1015,10 +808,6 @@ export default function BoardPage() {
 
   const requestShotSelect = (shotId: string) => {
     if (shotId === selectedShot?.id) return
-    if (shotEditDirty) {
-      setPendingShotId(shotId)
-      return
-    }
     setSelectedShotId(shotId)
   }
 
@@ -1030,10 +819,6 @@ export default function BoardPage() {
 
   const clearShotFilters = () => {
     setOnlyProblems(false)
-    setSceneFilter('')
-    setCharacterFilter('')
-    setCapacityFilter(false)
-    setRiskFilter(false)
     window.requestAnimationFrame(() => timelineRef.current?.focus())
   }
 
@@ -1052,7 +837,7 @@ export default function BoardPage() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [visibleShots, selectedIndex, selectedShot?.id, shotEditDirty])
+  }, [visibleShots, selectedIndex, selectedShot?.id])
 
   if (!ep || !status) {
     return (
@@ -1062,7 +847,7 @@ export default function BoardPage() {
         status={queryErrorStatus}
         hasData={false}
         objectName="分镜台"
-        loadingText="正在加载分镜、镜头列表与确认状态…"
+        loadingText="正在加载分镜、段落列表与确认状态…"
         emptyText="未找到可展示的分镜数据，请稍后重新进入本页。"
         onRetry={() => void refresh()}
       >
@@ -1128,8 +913,8 @@ export default function BoardPage() {
         preflight_token: preview.preview_token,
       }),
       preview.resume_mode === 'repair_existing'
-        ? '已开始重新校验并修复现有分镜'
-        : preview.action === 'resume' ? '已从安全检查点继续生成' : '分镜生成已开始',
+        ? '已开始重新校验并修复现有视频提示词'
+        : preview.action === 'resume' ? '已从安全检查点继续生成' : '视频提示词生成已开始',
     )
   }
 
@@ -1178,43 +963,8 @@ export default function BoardPage() {
       () => api.post(`/episodes/${ep.id}/confirm`, {
         preview_token: preview.preview_token,
       }),
-      '分镜已确认，可以进入生成台',
+      '视频提示词已确认，可以进入生成台',
     )
-  }
-
-  const previewStructure = async (operation: StructurePreview['operation'], targetIndex = absoluteIndex) => {
-    if (!selectedShot) return
-    if (operation === 'delete' && storyboardDeleteUsesFullClear(shots, selectedShot.id)) {
-      await previewClearStoryboard()
-      return
-    }
-    const newFinalShotId = operation === 'delete' && selectedShot.is_final
-      ? shots[Math.max(0, absoluteIndex - 1)]?.id
-      : undefined
-    setBusy(true)
-    try {
-      const preview = await api.post(`/episodes/${ep.id}/storyboard/structure-preview`, {
-        operation, shot_id: selectedShot.id, target_index: targetIndex,
-        new_final_shot_id: newFinalShotId,
-      }) as StructurePreview
-      setStructurePreview(preview)
-    } catch (caught) {
-      toast((caught as Error).message, true)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const applyStructure = async () => {
-    if (!structurePreview) return
-    const preview = structurePreview
-    setStructurePreview(null)
-    const result = await run(() => api.post(`/episodes/${ep.id}/storyboard/structure`, {
-      preview_token: preview.preview_token, operation: preview.operation,
-      shot_id: preview.shot_id, target_index: preview.target_index,
-      new_final_shot_id: preview.new_final_shot_id,
-    }), '镜头结构已更新，相邻窗口已进入重新校验') as { created_shot_id?: string } | undefined
-    if (result?.created_shot_id) setSelectedShotId(result.created_shot_id)
   }
 
   async function previewClearStoryboard() {
@@ -1238,18 +988,17 @@ export default function BoardPage() {
     setClearPreview(null)
     const result = await run(
       () => api.post(`/episodes/${ep.id}/storyboard/clear`, { preview_token: previewToken }),
-      `已清空 ${deletedShots} 个镜头及其下游资源，剧本已保留`,
+      `已清空 ${deletedShots} 个视频提示词段落及其下游资源，映射结果已保留`,
     )
     if (!result) return
     setSelectedShotId(null)
-    setShotEditDirty(false)
     clearShotFilters()
   }
 
   const pauseStoryboard = async () => {
     const result = await run(
       () => api.post(`/episodes/${ep.id}/storyboard/cancel`, {}),
-      '分镜任务已暂停，工作镜头和安全检查点已保留',
+      '视频提示词任务已暂停，工作段落和安全检查点已保留',
     )
   }
 
@@ -1306,7 +1055,7 @@ export default function BoardPage() {
     <>
       <header className="desk-head">
         <EpisodeCrumb label="分镜台" view="board" episodeNo={ep.episode_no} />
-        <h1>分镜台 <span className="sub">《{ep.title}》 · 安全审阅、修镜并交接下游</span></h1>
+        <h1>分镜台 <span className="sub">《{ep.title}》 · 安全审阅分段视频提示词并交接下游</span></h1>
         <hr className="rule" />
       </header>
 
@@ -1320,7 +1069,7 @@ export default function BoardPage() {
             <span className={`storyboard-state-dot state-${status.state}`} aria-hidden="true" />
             <div>
               <strong id="storyboard-state-title">{status.headline}</strong>
-              <small>{progressCopy.summary}{terminalFinalShot ? ' · 收尾镜有效' : ''}</small>
+              <small>{progressCopy.summary}{terminalFinalShot ? ' · 收尾段有效' : ''}</small>
             </div>
           </div>
           <div className="board-action-group">
@@ -1339,7 +1088,7 @@ export default function BoardPage() {
             </label>
             {toolbarActions.pause ? <>
               <button id="storyboard-primary-action" type="button" className="btn board-primary-action danger"
-                disabled={busy} aria-label={busy ? '暂停任务，正在处理' : '暂停分镜任务'}
+                disabled={busy} aria-label={busy ? '暂停任务，正在处理' : '暂停视频提示词任务'}
                 onClick={() => void pauseStoryboard()}>
                 {busy ? '正在暂停…' : '暂停任务'}
               </button>
@@ -1353,16 +1102,16 @@ export default function BoardPage() {
                 {busy ? '处理中…' : primaryAction.label}
               </button>
               {toolbarActions.clear && <button type="button" className="btn danger"
-                disabled={busy || shotEditDirty}
-                title={shotEditDirty ? '请先保存或放弃当前镜头修改' : '清空全部镜头、检查点及下游资源，保留剧本'}
+                disabled={busy}
+                title="清空全部视频提示词段落、检查点及下游资源，保留映射结果"
                 onClick={() => void previewClearStoryboard()}>
-                清空分镜
+                清空视频提示词
               </button>}
             </>}
           </div>
           {status.state === 'running' && (
             <ServerTaskTimer
-              label="分镜"
+              label="视频提示词"
               startedAt={status.task_started_at}
               finishedAt={status.task_finished_at}
               running
@@ -1386,26 +1135,24 @@ export default function BoardPage() {
           <div className="storyboard-error-details open" role="alert">
             <b>{gateIssueCount} 个问题需要处理</b>
             <ul>{status.hard_gate_issues.slice(0, 3).map((item, index) => <li key={`${index}-${item}`}>{storyboardGateIssueLabel(item)}</li>)}</ul>
-            {gateIssueCount > 3 && <small>其余问题会在对应镜头中标出。</small>}
+            {gateIssueCount > 3 && <small>其余问题会在对应段落中标出。</small>}
           </div>
         )}
       </section>
 
-      {hasPackSegments && (
-        <section className="card storyboard-pack-overview" aria-label="分镜台 2.0.0 节拍与素材概览">
+      {shots.length > 0 && (
+        <section className="card storyboard-pack-overview" aria-label="分镜台节拍与素材概览">
           <div className="storyboard-pack-overview-head">
             <b>节拍概览</b>
-            <small>
-              {packBeatOverview.length ? `${packBeatOverview.length} 个节拍` : '暂无数据'} ·
-              摘要文本暂未随段落持久化，仅展示节拍 ID 与去向
-            </small>
+            <small>{packBeatOverview.length ? `${packBeatOverview.length} 个节拍` : '暂无数据'}</small>
           </div>
           {packBeatOverview.length ? (
             <ul className="storyboard-pack-beat-list">
               {packBeatOverview.map(entry => (
                 <li key={entry.beat_id}>
                   <b>{entry.beat_id}</b>
-                  <span>第 {compressSegmentIndexes(entry.segment_nos)} 段</span>
+                  <span className="storyboard-pack-beat-summary">{entry.summary || '暂无摘要'}</span>
+                  <span className="storyboard-pack-beat-locator">第 {compressSegmentIndexes(entry.segment_nos)} 段</span>
                 </li>
               ))}
             </ul>
@@ -1427,63 +1174,47 @@ export default function BoardPage() {
 
       {!shots.length ? (
         <div className="empty storyboard-empty">
-          <div className="big">镜</div>
+          <div className="big">词</div>
           {storyboardEmptyCopy(status)}
         </div>
       ) : (
         <div className="board-workspace">
-          <section className="shot-navigator" aria-label="镜头轨道">
-            <div className="shot-filter-bar" aria-label="镜头筛选">
-              <label title={filterDisabledReason || undefined}><input type="checkbox" disabled={shotEditDirty} checked={onlyProblems}
-                aria-label={filterDisabledReason ? `仅看问题镜，暂不可用：${filterDisabledReason}` : '仅看问题镜'}
-                onChange={event => setOnlyProblems(event.target.checked)} />仅看问题镜</label>
-              <label title={filterDisabledReason || undefined}><span>场景</span><select
-                aria-label={filterDisabledReason ? `按场景筛选，暂不可用：${filterDisabledReason}` : '按场景筛选'}
-                disabled={shotEditDirty} value={sceneFilter} onChange={event => setSceneFilter(event.target.value)}>
-                <option value="">全部</option>{scenes.map(scene => <option key={scene}>{scene}</option>)}
-              </select></label>
-              <label title={filterDisabledReason || undefined}><span>角色</span><select
-                aria-label={filterDisabledReason ? `按角色筛选，暂不可用：${filterDisabledReason}` : '按角色筛选'}
-                disabled={shotEditDirty} value={characterFilter} onChange={event => setCharacterFilter(event.target.value)}>
-                <option value="">全部</option>{characters.map(name => <option key={name}>{name}</option>)}
-              </select></label>
-              <label title={filterDisabledReason || undefined}><input type="checkbox" disabled={shotEditDirty} checked={capacityFilter}
-                aria-label={filterDisabledReason ? `仅看口播超限镜头，暂不可用：${filterDisabledReason}` : '仅看口播超限镜头'}
-                onChange={event => setCapacityFilter(event.target.checked)} />口播超限</label>
-              <label title={filterDisabledReason || undefined}><input type="checkbox" disabled={shotEditDirty} checked={riskFilter}
-                aria-label={filterDisabledReason ? `仅看连续性风险镜头，暂不可用：${filterDisabledReason}` : '仅看连续性风险镜头'}
-                onChange={event => setRiskFilter(event.target.checked)} />连续性风险</label>
-              {hasActiveFilters && <button type="button" className="btn small ghost clear-shot-filters" disabled={shotEditDirty}
-                aria-label={filterDisabledReason ? `清除全部镜头筛选，暂不可用：${filterDisabledReason}` : '清除全部镜头筛选'}
+          <section className="shot-navigator" aria-label="段落轨道">
+            <div className="shot-filter-bar" aria-label="段落筛选">
+              <label><input type="checkbox" checked={onlyProblems}
+                aria-label="仅看问题段"
+                onChange={event => setOnlyProblems(event.target.checked)} />仅看问题段</label>
+              {hasActiveFilters && <button type="button" className="btn small ghost clear-shot-filters"
+                aria-label="清除全部段落筛选"
                 onClick={clearShotFilters}>清除筛选</button>}
-              <span className="shot-keyboard-hint">{shotEditDirty ? '保存或放弃后可切镜与筛选' : '← → 切镜（输入时不会触发）'}</span>
+              <span className="shot-keyboard-hint">← → 切段（输入时不会触发）</span>
             </div>
             <div className="shot-navigator-head">
-              <b>镜头轨道</b>
+              <b>段落轨道</b>
               <div className="shot-navigator-actions" aria-live="polite">
-                <span>{visibleShots.length ? selectedIndex + 1 : 0} / {visibleShots.length}，问题镜 {shots.filter(isStoryboardProblemShot).length}{pendingRevalidation > 0 ? ` · 待校验 ${pendingRevalidation} 镜` : ''}</span>
+                <span>{visibleShots.length ? selectedIndex + 1 : 0} / {visibleShots.length}，问题段 {shots.filter(isStoryboardProblemShot).length}{pendingRevalidation > 0 ? ` · 待校验 ${pendingRevalidation} 段` : ''}</span>
                 <button type="button"
-                  aria-label={!visibleShots.length ? '上一镜，暂不可用：当前筛选下没有镜头' : selectedIndex <= 0 ? '上一镜，暂不可用：当前已是筛选结果中的第一镜' : '上一镜'}
+                  aria-label={!visibleShots.length ? '上一段，暂不可用：当前筛选下没有段落' : selectedIndex <= 0 ? '上一段，暂不可用：当前已是筛选结果中的第一段' : '上一段'}
                   disabled={selectedIndex <= 0} onClick={() => selectRelative(-1)}>←</button>
                 <button type="button"
-                  aria-label={!visibleShots.length ? '下一镜，暂不可用：当前筛选下没有镜头' : selectedIndex >= visibleShots.length - 1 ? '下一镜，暂不可用：当前已是筛选结果中的最后一镜' : '下一镜'}
+                  aria-label={!visibleShots.length ? '下一段，暂不可用：当前筛选下没有段落' : selectedIndex >= visibleShots.length - 1 ? '下一段，暂不可用：当前已是筛选结果中的最后一段' : '下一段'}
                   disabled={selectedIndex >= visibleShots.length - 1} onClick={() => selectRelative(1)}>→</button>
               </div>
             </div>
-            <div ref={timelineRef} className="shot-navigator-list" role="listbox" aria-label="镜头列表" tabIndex={0}>
+            <div ref={timelineRef} className="shot-navigator-list" role="listbox" aria-label="段落列表" tabIndex={0}>
               {visibleShots.map(shot => {
                 const checkpoint = storyboardShotCheckpointLabel(shot.shot_no, status)
-                const packSegment = shot.storyboard_pack_segment
+                const segment = shot.storyboard_pack_segment
                 return <button key={shot.id} type="button" role="option" aria-selected={shot.id === selectedShot?.id}
                   className={shot.id === selectedShot?.id ? 'active' : ''}
                   onClick={() => requestShotSelect(shot.id)}>
                   <span className="shot-nav-top">
-                    <span className="shot-nav-no">{packSegment ? '段' : '镜'} {String(shot.shot_no).padStart(2, '0')}</span>
-                    <span>{shot.duration_s}s</span>
+                    <span className="shot-nav-no">段 {String(shot.shot_no).padStart(2, '0')}</span>
+                    <span>{segment?.duration_s ?? shot.duration_s}s</span>
                   </span>
                   <span className="shot-nav-main">
-                    <b>{packSegment ? `${packSegment.shot_count} 镜切换` : `${shot.shot_size} · ${shot.camera_angle || '平视'} · ${shot.camera_move}`}</b>
-                    <small>{packSegment ? (packSegment.synopsis || '（无梗概）') : `${shot.scene_time ? `${shot.scene_time} · ` : ''}${shot.scene_name || shot.scene_setting}`}</small>
+                    <b>{segment ? `${segment.shot_count} 镜切换` : '暂无数据'}</b>
+                    <small>{segment?.synopsis || '（无梗概）'}</small>
                   </span>
                   <span className="shot-nav-badges">
                     {shotTiming(shot.shot_no) && (
@@ -1496,15 +1227,14 @@ export default function BoardPage() {
                     )}
                     {checkpoint && <i className={checkpoint.className} title={checkpoint.title}>{checkpoint.label}</i>}
                     {isStoryboardProblemShot(shot) && <i className="problem">需处理</i>}
-                    {shot.is_final && <i>{checkpoint?.className === 'checkpoint-pending' ? '草稿收尾' : '收尾镜'}</i>}
-                    {storyboardShotOverCapacity(shot) && <i className="problem">口播超限</i>}
-                    {!!packSegment?.degraded_capabilities.length && <i className="problem" title="本段存在能力降级项，详见段落详情">能力降级</i>}
+                    {shot.is_final && <i>{checkpoint?.className === 'checkpoint-pending' ? '草稿收尾' : '收尾段'}</i>}
+                    {!!segment?.degraded_capabilities.length && <i className="problem" title="本段存在能力降级项，详见段落详情">能力降级</i>}
                   </span>
                 </button>
               })}
               {!visibleShots.length && <div className="shot-filter-empty" role="status">
-                <b>当前筛选下没有镜头</b>
-                <span>清除筛选后可恢复全部 {shots.length} 镜。</span>
+                <b>当前筛选下没有段落</b>
+                <span>清除筛选后可恢复全部 {shots.length} 段。</span>
                 <button type="button" className="btn small" onClick={clearShotFilters}>清除筛选</button>
               </div>}
             </div>
@@ -1512,55 +1242,29 @@ export default function BoardPage() {
 
           <section className="shot-editor-pane">
             {selectionOutsideFilters && (
-              <div className="filter-selection-note" role="status">当前镜头已不在筛选结果内，已保留当前对象；只有你主动切换时才会离开。</div>
+              <div className="filter-selection-note" role="status">当前段落已不在筛选结果内，已保留当前对象；只有你主动切换时才会离开。</div>
             )}
             {selectedShot && (
-              isStoryboardPackSegmentShot(selectedShot) ? (
-                <StoryboardPackSegmentView key={`${selectedShot.id}:pack`}
-                  shot={selectedShot} bible={project?.bible} notify={toast} />
-              ) : (
-                <ShotWorkspace key={`${selectedShot.id}:${selectedShot.storyboard_artifact_id ?? ''}`}
-                  shot={selectedShot} episode={ep} status={status}
-                  previous={shots[absoluteIndex - 1]} next={shots[absoluteIndex + 1]}
-                  onChanged={() => { void refresh({ force: true }) }} onSelect={requestShotSelect}
-                  onDirtyChange={setShotEditDirty}
-                  onStructure={previewStructure} disabled={busy} />
-              )
+              <StoryboardPackSegmentView key={selectedShot.id}
+                shot={selectedShot} bible={project?.bible} notify={toast} />
             )}
           </section>
         </div>
       )}</>}
 
-      <Modal
-        open={!!pendingShotId}
-        title="切换镜头前放弃当前修改？"
-        onClose={() => setPendingShotId(null)}
-        actions={<>
-          <button className="btn" onClick={() => setPendingShotId(null)}>返回继续编辑</button>
-          <button className="btn danger" onClick={() => {
-            const target = pendingShotId
-            setPendingShotId(null)
-            setShotEditDirty(false)
-            if (target) setSelectedShotId(target)
-          }}>放弃修改并切镜</button>
-        </>}
-      >
-        <p>当前镜头的逐字段修改尚未保存。切换后输入无法恢复；发布版、失败草稿和下游产物不会变化。</p>
-      </Modal>
-
       {clearPreview && <DecisionDialog
-        title="清空本集全部分镜？"
-        summary={`${clearPreview.shot_count} 个镜头、${clearPreview.video_version_count} 个视频版本、${clearPreview.reference_asset_count} 个参考图资源将被删除`}
-        message="将把本集分镜工作区恢复到未生成状态；当前剧本会完整保留，之后可以从头生成新的分镜。"
+        title="清空本集全部视频提示词？"
+        summary={`${clearPreview.shot_count} 个段落、${clearPreview.video_version_count} 个视频版本、${clearPreview.reference_asset_count} 个参考图资源将被删除`}
+        message="将把本集视频提示词工作区恢复到未生成状态；当前映射结果会完整保留，之后可以从头生成新的视频提示词。"
         details={[
-          ...(clearPreview.active_task_will_stop ? ['正在运行的分镜或视频任务会先安全停止'] : []),
+          ...(clearPreview.active_task_will_stop ? ['正在运行的视频提示词或视频任务会先安全停止'] : []),
           `将终止当前任务并重置修复检查点；${clearPreview.workflow_run_count} 条历史任务记录保留用于审计，不参与下次生成`,
           clearPreview.delivery_package_count
             ? `将删除 ${clearPreview.delivery_package_count} 个下游交付包`
             : '当前没有下游交付包',
           '此操作不可撤销，已经产生的模型调用费用不会退回',
         ]}
-        confirmLabel="确认清空并保留剧本"
+        confirmLabel="确认清空并保留映射结果"
         cancelLabel="取消"
         danger
         onClose={() => setClearPreview(null)}
@@ -1583,7 +1287,7 @@ export default function BoardPage() {
         onConfirm={() => void submitVideoModel(videoModelConfirm.requested_target_video_model, true)}
       />}
 
-      <Modal open={!!startPreview} title={startPreviewCopy?.title ?? '分镜任务'} onClose={closeStartPreview}
+      <Modal open={!!startPreview} title={startPreviewCopy?.title ?? '视频提示词任务'} onClose={closeStartPreview}
         actions={<><button className="btn" onClick={closeStartPreview}>取消</button><button className="btn primary" disabled={startPreview?.can_start === false} onClick={() => void submitStart()}>
           {startPreviewCopy?.confirmLabel ?? '继续'}
         </button></>}>
@@ -1593,7 +1297,7 @@ export default function BoardPage() {
           {startPreview.repair && startPreview.action === 'resume'
             && startPreview.resume_mode !== 'finalize_evidence' && <p>
             历史修复 {startPreview.repair.lifetime_repair_count} 次；将开启第 {startPreview.repair.activation_no + 1} 轮，
-            每轮最多 {startPreview.repair.max_attempts_per_activation} 次。候选通过校验前不会覆盖现有分镜。
+            每轮最多 {startPreview.repair.max_attempts_per_activation} 次。候选通过校验前不会覆盖现有视频提示词。
           </p>}
           {startPreview.blocking_reason && <div className="error-banner" role="alert">{startPreview.blocking_reason}</div>}
           {startPreview.warning && <div className="warning-banner">{startPreview.warning}</div>}
@@ -1603,14 +1307,14 @@ export default function BoardPage() {
         </div>}
       </Modal>
 
-      {/* 决策③：确认分镜不再是需要人工点头的内容质量门——必检项全部通过时已在 autoConfirmStoryboard
+      {/* 决策③：确认视频提示词不再是需要人工点头的内容质量门——必检项全部通过时已在 autoConfirmStoryboard
           里自动放行，走不到这个弹窗。这里只在必检项未通过（真实阻断，不是审美取舍）时出现，
           纯粹展示要修什么，不提供"确认"按钮。 */}
-      <Modal open={!!confirmPreview} title="暂不能确认分镜" onClose={() => setConfirmPreview(null)}
+      <Modal open={!!confirmPreview} title="暂不能确认视频提示词" onClose={() => setConfirmPreview(null)}
         actions={<button className="btn" onClick={() => setConfirmPreview(null)}>返回审阅</button>}>
         {confirmPreview && <div className="storyboard-preview-card">
-          <dl><div><dt>当前分镜</dt><dd>{confirmPreview.storyboard_artifact_id ? '已生成，等待确认' : '待定稿'}</dd></div><div><dt>镜头完整性</dt><dd>{confirmPreview.shot_count}/{confirmPreview.planned_shots}</dd></div>
-            <div><dt>总时长</dt><dd>{confirmPreview.total_duration_s}s</dd></div><div><dt>收尾镜</dt><dd>{confirmPreview.final_shot_valid ? '有效' : '缺失'}</dd></div>
+          <dl><div><dt>当前视频提示词</dt><dd>{confirmPreview.storyboard_artifact_id ? '已生成，等待确认' : '待定稿'}</dd></div><div><dt>段落完整性</dt><dd>{confirmPreview.shot_count}/{confirmPreview.planned_shots}</dd></div>
+            <div><dt>总时长</dt><dd>{confirmPreview.total_duration_s}s</dd></div><div><dt>收尾段</dt><dd>{confirmPreview.final_shot_valid ? '有效' : '缺失'}</dd></div>
             <div><dt>必检项</dt><dd>未通过</dd></div><div><dt>预计视频成本</dt><dd>¥{confirmPreview.estimated_video_cost_cny.min}–¥{confirmPreview.estimated_video_cost_cny.max}</dd></div></dl>
           {!!confirmPreview.warnings.length && <div className="warning-banner">{confirmPreview.warnings.map(storyboardGateIssueLabel).join('；')}</div>}
           {!!confirmPreview.hard_gates.errors.length && <div className="error-banner" role="alert"><b>请先处理以下问题：</b><ul>{confirmPreview.hard_gates.errors.map((item, index) => <li key={`${index}-${item}`}>{storyboardGateIssueLabel(item)}</li>)}</ul></div>}
@@ -1618,26 +1322,21 @@ export default function BoardPage() {
           <small>{confirmPreview.estimated_video_cost_cny.note}</small>
         </div>}
       </Modal>
-
-      <ImpactDialog open={!!structurePreview} title="镜头结构调整影响预览" impact={structurePreview}
-        knownEffects={structurePreview ? [
-          `镜头数：${structurePreview.before_count} → ${structurePreview.after_count}`,
-          `将重排 ${structurePreview.renumbered_shots} 个镜号`,
-          `相邻重验：${structurePreview.revalidation_shots.map(no => `镜 ${no}`).join('、')}`,
-          structurePreview.final_shot_impact,
-        ] : []}
-        confirmLabel="批准并调整结构" onClose={() => setStructurePreview(null)} onConfirm={() => void applyStructure()} />
     </>
   )
 }
 
 /**
- * 分镜台 2.0.0 段落只读展示（docs/STORYBOARD_PROMPT_IR_DESIGN.md 冻结契约）。
+ * 分镜台唯一的段落展示（docs/STORYBOARD_PROMPT_IR_DESIGN.md 冻结契约）。
  * shot_size/camera_move/first_frame_desc 等经典逐镜字段在这一行没有意义
- * （见 api.ts 的 StoryboardPackSegment 注释），因此不复用 ShotWorkspace 那一整套
- * 逐字段编辑/影响预览/草稿机制——这里只做展示，不提供编辑入口；结构调整
- * （删除/复制/移动镜头）仍按经典 shots 行语义工作，但字段级编辑对这一行没有
- * 落点，本次改造范围也只是展示，不新增编辑路径。
+ * （见 api.ts 的 StoryboardPackSegment 注释）；后端也没有提供段落编辑能力，
+ * 这里只做展示、只保留一个动作——复制整段提示词，不做没有动作的编辑入口。
+ *
+ * 信息分层（用户拍板，不得自由发挥）：
+ * 1. 永远可见——段号 + 时长 + 一句话梗概；右侧素材缩略图行。
+ * 2. 主体——prompt_text 整块，唯一动作是整段复制；这是本页主交付物，视觉权重最高。
+ * 3. 次要——shot_count/目标模型/原文段号回指/台词条数/节拍/降级角标，小字与角标，
+ *    不占正文层级，用 <details> 收起可展开的长内容（台词全文、节拍摘要、素材详情）。
  */
 function StoryboardPackSegmentView({ shot, bible, notify }: {
   shot: Shot
@@ -1645,8 +1344,15 @@ function StoryboardPackSegmentView({ shot, bible, notify }: {
   notify: (message: string, error?: boolean) => void
 }) {
   const segment = shot.storyboard_pack_segment
-  if (!segment) return null
+  if (!segment) {
+    return (
+      <article className="shot-strip storyboard-pack-segment">
+        <p className="storyboard-pack-empty-hint">本段暂无数据</p>
+      </article>
+    )
+  }
   const rangeText = compressSegmentIndexes(segment.source_segment_indexes ?? [])
+  const beats = segment.beats ?? []
 
   const copyPromptText = async () => {
     if (!navigator.clipboard) {
@@ -1662,27 +1368,21 @@ function StoryboardPackSegmentView({ shot, bible, notify }: {
   }
 
   return (
-    <div className="shot-strip storyboard-pack-segment">
+    <article className="shot-strip storyboard-pack-segment">
       <header className="storyboard-pack-segment-head">
-        <div>
-          <b>段 {segment.segment_no}</b>
-          <span>{segment.duration_s}s · {segment.shot_count} 镜切换 · 目标模型 {storyboardPackTargetModelLabel(segment.target_model)}</span>
+        <div className="storyboard-pack-segment-head-copy">
+          <div className="storyboard-pack-segment-head-top">
+            <b>第 {segment.segment_no} 段</b>
+            <span>{segment.duration_s}s</span>
+          </div>
+          <p className="storyboard-pack-synopsis">{segment.synopsis || '（本段无梗概）'}</p>
         </div>
-        {!!segment.beat_ids.length && (
-          <span className="storyboard-pack-beat-tags" title="本段所属节拍 ID">
-            {segment.beat_ids.map(beatId => <i key={beatId}>{beatId}</i>)}
-          </span>
-        )}
+        <StoryboardPackResourceStrip resources={segment.resources} bible={bible} />
       </header>
-
-      <p className="storyboard-pack-synopsis">{segment.synopsis || '（本段无梗概）'}</p>
-      <p className="storyboard-pack-source-range">
-        对应原文{rangeText ? ` 第 ${rangeText} 段` : '暂无数据'}
-      </p>
 
       <section className="storyboard-pack-prompt-block">
         <div className="storyboard-pack-prompt-head">
-          <b>提示词（整块可复制，不拆分）</b>
+          <b>视频生成提示词</b>
           <button type="button" className="text-action" onClick={() => void copyPromptText()}>复制整段提示词</button>
         </div>
         {segment.prompt_text
@@ -1690,31 +1390,80 @@ function StoryboardPackSegmentView({ shot, bible, notify }: {
           : <p className="storyboard-pack-empty-hint">暂无数据</p>}
       </section>
 
-      <section className="storyboard-pack-degraded">
-        <b>能力降级</b>
-        {segment.degraded_capabilities.length ? (
-          <ul className="warning-banner storyboard-pack-degraded-list">
-            {segment.degraded_capabilities.map((item, index) => <li key={index}>{item}</li>)}
-          </ul>
-        ) : <p className="storyboard-pack-empty-hint">本段无能力降级项</p>}
-      </section>
-
-      <section className="storyboard-pack-dialogue">
-        <b>台词 · {segment.dialogue.length}</b>
+      <section className="storyboard-pack-meta-strip" aria-label="次要信息">
+        <span className="pack-meta-chip">{segment.shot_count} 镜切换</span>
+        <span className="pack-meta-chip">{storyboardPackTargetModelLabel(segment.target_model)}</span>
+        <span className="pack-meta-chip">对应原文{rangeText ? ` 第 ${rangeText} 段` : '暂无数据'}</span>
         {segment.dialogue.length ? (
-          <ul className="storyboard-pack-dialogue-list">
-            {segment.dialogue.map((line, index) => (
-              <li key={index}>
-                <span className="storyboard-pack-dialogue-speaker">{line.speaker_identity_id || '未知说话人'}</span>
-                <span className="storyboard-pack-dialogue-line">{line.line}</span>
-                <span className="storyboard-pack-dialogue-source">原文第 {line.source_segment_index} 段</span>
-              </li>
-            ))}
-          </ul>
-        ) : <p className="storyboard-pack-empty-hint">本段无台词</p>}
+          <details className="pack-meta-details">
+            <summary className="pack-meta-chip">台词 {segment.dialogue.length} 条</summary>
+            <ul className="storyboard-pack-dialogue-list">
+              {segment.dialogue.map((line, index) => (
+                <li key={index}>
+                  <span className="storyboard-pack-dialogue-speaker">{line.speaker_identity_id || '未知说话人'}</span>
+                  <span className="storyboard-pack-dialogue-line">{line.line}</span>
+                  <span className="storyboard-pack-dialogue-source">原文第 {line.source_segment_index} 段</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        ) : <span className="pack-meta-chip muted">无台词</span>}
+        {!!beats.length && (
+          <details className="pack-meta-details">
+            <summary className="pack-meta-chip">节拍 {beats.length} 个</summary>
+            <ul className="storyboard-pack-beat-detail-list">
+              {beats.map(beat => (
+                <li key={beat.beat_id}><b>{beat.beat_id}</b>{beat.summary ? `：${beat.summary}` : '（暂无摘要）'}</li>
+              ))}
+            </ul>
+          </details>
+        )}
+        <details className="pack-meta-details">
+          <summary className="pack-meta-chip">素材详情</summary>
+          <StoryboardPackResourceRoster resources={segment.resources} bible={bible} />
+        </details>
+        {segment.degraded_capabilities.map((item, index) => (
+          <span key={index} className="pack-meta-chip degraded">{item}</span>
+        ))}
       </section>
+    </article>
+  )
+}
 
-      <StoryboardPackResourceRoster resources={segment.resources} bible={bible} />
+/** 永远可见层的素材缩略图行：能用视觉表达的不用文字——人物/场景绑了素材显示缩略图，
+ *  没绑上显示灰位占位（用户一眼数得出有多少没映射上）；道具没有世界书图像素材库，
+ *  设计使然地走文字。名称与描述收进 title 悬浮提示，不占正文层级。 */
+function StoryboardPackResourceStrip({ resources, bible }: {
+  resources: StoryboardPackResources
+  bible: Bible | null | undefined
+}) {
+  const characters = resources.characters ?? []
+  const scenes = resources.scenes ?? []
+  const props = resources.props ?? []
+  if (!characters.length && !scenes.length && !props.length) {
+    return <div className="storyboard-pack-resource-strip-empty">暂无数据</div>
+  }
+  return (
+    <div className="storyboard-pack-resource-strip" aria-label="本段素材">
+      {characters.map((character, index) => {
+        const imageUrl = findPortraitImage(bible, character.portrait_id)
+        const label = character.identity_id || '未命名角色'
+        const tip = character.description ? `${label} · ${character.description}` : label
+        return imageUrl
+          ? <img key={`c-${index}`} className="pack-resource-chip-thumb" src={imageUrl} alt={label} title={tip} loading="lazy" decoding="async" />
+          : <div key={`c-${index}`} className="pack-resource-chip-empty" title={tip} aria-label={tip}>{label.slice(0, 1) || '无'}</div>
+      })}
+      {scenes.map((scene, index) => {
+        const imageUrl = findSceneReferenceImage(bible, scene.scene_reference_id)
+        const label = scene.scene_id || '未命名场景'
+        const tip = scene.description ? `${label} · ${scene.description}` : label
+        return imageUrl
+          ? <img key={`s-${index}`} className="pack-resource-chip-thumb pack-resource-chip-scene" src={imageUrl} alt={label} title={tip} loading="lazy" decoding="async" />
+          : <div key={`s-${index}`} className="pack-resource-chip-empty pack-resource-chip-scene" title={tip} aria-label={tip}>{label.slice(0, 1) || '无'}</div>
+      })}
+      {props.map((prop, index) => (
+        <span key={`p-${index}`} className="pack-resource-chip-text" title={prop.description || prop.label}>{prop.label || '未命名道具'}</span>
+      ))}
     </div>
   )
 }
@@ -1790,459 +1539,5 @@ function StoryboardPackResourceRoster({ resources, bible }: {
         </div>
       </div>
     </section>
-  )
-}
-
-function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSelect, onDirtyChange, onStructure, disabled }: {
-  shot: Shot; episode: Episode; status: StoryboardStatus; previous?: Shot; next?: Shot
-  onChanged: () => void; onSelect: (id: string) => void
-  onDirtyChange: (dirty: boolean) => void
-  onStructure: (operation: StructurePreview['operation'], targetIndex?: number) => Promise<void>
-  disabled: boolean
-}) {
-  const { toast } = useNav()
-  const [edit, setEdit] = useState<Shot | null>(null)
-  const [baseline, setBaseline] = useState<Shot | null>(null)
-  const [session, setSession] = useState<EditSession | null>(null)
-  const [impact, setImpact] = useState<(ImpactSummary & { preview_token: string; normalized_changes: Record<string, unknown> }) | null>(null)
-  const [impactLoading, setImpactLoading] = useState(false)
-  const [impactError, setImpactError] = useState<string | null>(null)
-  const [saveErrors, setSaveErrors] = useState<string[]>([])
-  const [drafts, setDrafts] = useState<DraftItem[]>([])
-  const [sourceChapters, setSourceChapters] = useState<SourceChapter[]>([])
-  const [sourceChapterId, setSourceChapterId] = useState<number | null>(shot.source_binding?.chapter_id ?? null)
-  const [sourceBinding, setSourceBinding] = useState<SourceBindingInput | null>(null)
-  const [advancedOpen, setAdvancedOpen] = useState(false)
-  const [detailTab, setDetailTab] = useState<'frames' | 'script'>('frames')
-  const [deletedDialogue, setDeletedDialogue] = useState<{ value: Shot['dialogues'][number]; index: number } | null>(null)
-  const [conflictOpen, setConflictOpen] = useState(false)
-  const [conflictImpact, setConflictImpact] = useState<SpokenConflictPreview | null>(null)
-  const [conflictImpactLoading, setConflictImpactLoading] = useState(false)
-  const [conflictImpactError, setConflictImpactError] = useState<string | null>(null)
-  const [discardDraftId, setDiscardDraftId] = useState<string | null>(null)
-  const [discardEditOpen, setDiscardEditOpen] = useState(false)
-  const [reloadLatestOpen, setReloadLatestOpen] = useState(false)
-  const sourceTextRef = useRef<HTMLTextAreaElement>(null)
-  const current = edit ?? shot
-  const inputStrategy = storyboardInputStrategy(current, previous)
-  const effectiveFirstFrameDesc = inputStrategy.kind === 'previous_video_tail'
-    ? (previous?.last_frame_desc || current.first_frame_desc)
-    : current.first_frame_desc
-  const firstFrameLabel = inputStrategy.kind === 'previous_video_tail'
-    ? '生成起点（继承前镜视频尾帧）'
-    : inputStrategy.kind === 'reference_video'
-      ? '参考视频起点（原逻辑）'
-      : '场景首镜起点（人物谱/场景库）'
-  const changes = edit && baseline ? buildStoryboardChanges(baseline, edit, sourceBinding) : {}
-  const dirty = Object.keys(changes).length > 0
-  const currentChars = storyboardSpokenChars(current)
-  const spokenLimit = shotSpokenLimit(current)
-  const overCapacity = currentChars > spokenLimit
-  const prevConflict = Boolean(edit && previous?.state_out?.trim() && edit.state_in?.trim() && previous.state_out.trim() !== edit.state_in.trim())
-  const nextConflict = Boolean(edit && next?.state_in?.trim() && edit.state_out?.trim() && next.state_in.trim() !== edit.state_out.trim())
-  const structureEditEnabled = status.feature_flags?.structure_edit !== false
-  const writeBlockReason = status.write_block_reason || '当前状态暂不可修改，请等待状态同步'
-  const editDisabledReason = disabled
-    ? '正在处理上一项操作'
-    : !status.editable
-      ? writeBlockReason
-      : ''
-  const deleteDisabledReason = editDisabledReason || (!structureEditEnabled ? '镜头结构编辑已由管理员关闭' : '')
-  const isOnlyShot = !previous && !next
-  const deleteActionTitle = deleteDisabledReason || (isOnlyShot
-    ? '删除最后一镜将清空本集分镜工作区及下游资源，剧本保留；执行前会再次确认'
-    : '删除前会展示镜号重排、相邻重验和媒体失效影响')
-  const saveDisabledReason = storyboardSaveDisabledReason(dirty, overCapacity, current.characters.length)
-  const structureDisabledReason = disabled
-    ? '正在处理上一项操作'
-    : dirty
-      ? '请先保存或放弃当前字段修改'
-      : ''
-  const detailPanelId = `shot-detail-panel-${shot.id}`
-
-  useLayoutEffect(() => {
-    onDirtyChange(dirty)
-    return () => onDirtyChange(false)
-  }, [dirty, onDirtyChange])
-  const focusDetailTab = (nextTab: 'frames' | 'script') => {
-    setDetailTab(nextTab)
-    window.requestAnimationFrame(() => {
-      document.getElementById(`shot-detail-tab-${shot.id}-${nextTab}`)?.focus()
-    })
-  }
-
-  const characterOptions = useMemo(() => [...new Set([
-    ...(episode.shots ?? []).flatMap(item => item.characters ?? []),
-    ...(episode.screenplay?.scene_outline ?? []).flatMap(scene => scene.characters ?? []),
-  ].filter(Boolean))], [episode.shots, episode.screenplay])
-  const sceneOptions = useMemo(() => [...new Set([
-    ...(episode.scene_options ?? []),
-    ...(episode.shots ?? []).map(item => item.scene_name || item.scene_setting),
-  ].filter(Boolean))], [episode.scene_options, episode.shots])
-  const informationOptions = useMemo(() => {
-    const ledger = episode.screenplay?.information_ledger ?? []
-    return ledger.map((item, index) => {
-      const value = item as Record<string, unknown>
-      return {
-        id: String(value.info_id ?? value.id ?? `I${index + 1}`),
-        label: String(value.content ?? value.title ?? value.summary ?? `信息点 ${index + 1}`),
-      }
-    })
-  }, [episode.screenplay])
-
-  const loadDrafts = async () => {
-    try {
-      const result = await api.get(`/shots/${shot.id}/drafts`) as { items: DraftItem[] }
-      setDrafts(result.items ?? [])
-    } catch { setDrafts([]) }
-  }
-
-  const beginEdit = async () => {
-    try {
-      const [editSession, sourceResult] = await Promise.all([
-        api.post(`/shots/${shot.id}/edit-session`) as Promise<EditSession>,
-        api.get(`/episodes/${episode.id}/storyboard/source`) as Promise<{ chapters: SourceChapter[] }>,
-      ])
-      setSession(editSession)
-      setBaseline(cloneShot(shot))
-      setEdit(cloneShot(shot))
-      setSourceChapters(sourceResult.chapters ?? [])
-      setSourceChapterId(shot.source_binding?.chapter_id ?? sourceResult.chapters?.[0]?.id ?? null)
-      setSourceBinding(null)
-      setSaveErrors([])
-      await loadDrafts()
-    } catch (caught) {
-      toast((caught as Error).message, true)
-    }
-  }
-
-  const previewSave = async () => {
-    if (!session || !edit || !dirty) return
-    setImpactLoading(true); setImpactError(null)
-    try {
-      const result = await api.post(`/shots/${shot.id}/impact-preview`, {
-        edit_session_token: session.edit_session_token,
-        changes,
-      }) as ImpactSummary & { unchanged?: boolean; preview_token?: string; normalized_changes?: Record<string, unknown> }
-      if (result.unchanged || !result.preview_token) {
-        toast('没有实际变化，无需保存')
-        return
-      }
-      setImpact(result as ImpactSummary & { preview_token: string; normalized_changes: Record<string, unknown> })
-    } catch (caught) {
-      const error = caught as ApiError
-      setImpactError(error.message)
-      if (error.status === 409) setSaveErrors(['编辑期间分镜已被其他操作更新。可复制当前草稿后重新载入最新内容。'])
-    } finally { setImpactLoading(false) }
-  }
-
-  const save = async () => {
-    if (!session || !edit || !impact) return
-    const approved = impact
-    setImpact(null)
-    try {
-      const payload: Record<string, unknown> = {
-        ...Object.fromEntries(Object.entries(changes).filter(([key]) => key !== 'source_binding')),
-        expected_version: session.baseline_artifact_id ?? undefined,
-        baseline_content_hash: session.baseline_content_hash,
-        edit_session_token: session.edit_session_token,
-        preview_token: approved.preview_token,
-        change_source: 'standard_edit',
-      }
-      if (sourceBinding) payload.source_binding = sourceBinding
-      const result = await api.put(`/shots/${shot.id}`, payload) as { unchanged?: boolean; impact?: ImpactSummary }
-      toast(result.unchanged ? '内容未变化，无需保存' : `镜 ${shot.shot_no} 已保存并完成影响传播`)
-      setEdit(null); setBaseline(null); setSession(null); setSaveErrors([]); onChanged()
-    } catch (caught) {
-      const error = caught as ApiError
-      const detail = error.detail as { issues?: string[]; checkpoint_preserved?: boolean } | undefined
-      setSaveErrors(detail?.issues?.length ? detail.issues : [error.message])
-      if (detail?.checkpoint_preserved) toast('保存未通过；输入已保留为失败草稿，发布版未改变', true)
-      await loadDrafts()
-    }
-  }
-
-  const discard = () => {
-    setEdit(null); setBaseline(null); setSession(null); setSaveErrors([]); setSourceBinding(null); setDeletedDialogue(null)
-  }
-
-  const requestDiscard = () => {
-    if (dirty) setDiscardEditOpen(true)
-    else discard()
-  }
-
-  const copyDraft = async () => {
-    if (!edit || !navigator.clipboard) {
-      toast('当前浏览器无法访问剪贴板，请检查浏览器权限后重试', true)
-      return
-    }
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(edit, null, 2))
-      toast('当前草稿已复制')
-    } catch {
-      toast('复制失败，请允许浏览器访问剪贴板后重试', true)
-    }
-  }
-
-  const bindSelectedSource = () => {
-    if (!edit || sourceChapterId == null) return
-    const chapter = sourceChapters.find(item => item.id === sourceChapterId)
-    const textarea = sourceTextRef.current
-    if (!chapter || !textarea || textarea.selectionEnd <= textarea.selectionStart) {
-      toast('请先在本集原文中拖选一个连续片段', true); return
-    }
-    const selected = chapter.content.slice(textarea.selectionStart, textarea.selectionEnd)
-    setEdit({ ...edit, source_excerpt: selected })
-    setSourceBinding({
-      chapter_id: chapter.id, source_version_hash: chapter.source_version_hash,
-      start_offset: textarea.selectionStart, end_offset: textarea.selectionEnd,
-    })
-  }
-
-  const toggleCharacter = (name: string) => {
-    if (!edit) return
-    const active = edit.characters.includes(name)
-    const characters = active ? edit.characters.filter(item => item !== name) : [...edit.characters, name]
-    setEdit({ ...edit, characters, characters_visible: characters })
-  }
-
-  const toggleInformation = (id: string) => {
-    if (!edit) return
-    const values = edit.new_information_ids ?? []
-    setEdit({ ...edit, new_information_ids: values.includes(id) ? values.filter(item => item !== id) : [...values, id] })
-  }
-
-  const previewConflictResolution = async (
-    choice: SpokenConflictPreview['choice'],
-  ) => {
-    setConflictImpactLoading(true)
-    setConflictImpactError(null)
-    try {
-      const preview = await api.post(
-        `/shots/${shot.id}/spoken-conflict-preview`,
-        { choice },
-      ) as SpokenConflictPreview
-      setConflictImpact(preview)
-    } catch (caught) {
-      setConflictImpactError((caught as Error).message)
-    } finally {
-      setConflictImpactLoading(false)
-    }
-  }
-
-  const resolveConflict = async () => {
-    if (!conflictImpact) return
-    const preview = conflictImpact
-    setConflictImpact(null)
-    try {
-      await api.post(`/shots/${shot.id}/resolve-spoken-conflict`, {
-        choice: preview.choice, invalidate_media: true, preview_token: preview.preview_token,
-        edit_session_token: preview.edit_session_token,
-        baseline_content_hash: preview.baseline_content_hash,
-      })
-      toast(preview.choice === 'rebuild_timeline_from_dialogues' ? '已按台词重建时间轴' : '已按时间轴重建台词')
-      setConflictOpen(false); discard(); onChanged()
-    } catch (caught) { toast((caught as Error).message, true) }
-  }
-
-  return (
-    <article className={`shot-strip ${edit ? 'editing' : 'reviewing'}`}>
-      <header className="shot-head">
-        <div className="shot-head-copy"><span className="sn">镜{String(shot.shot_no).padStart(2, '0')}</span>
-          <span className="meta">{current.duration_s}s · {current.shot_size} · {current.camera_angle || '平视'} · {current.camera_move} · {current.transition}</span>
-          <span className="meta shot-characters">{current.characters.join(' / ') || '缺角色（需修改）'}</span>
-          <span className="shot-badge gate" title={inputStrategy.detail}>{inputStrategy.label}</span>
-          {isStoryboardProblemShot(shot) && <span className="shot-badge status-needs_revision">需处理</span>}
-          {shot.is_final && <span className="shot-badge gate">收尾镜</span>}
-        </div>
-        <div className="shot-head-actions">
-          {shot.spoken_contract_status === 'conflict' && <button className="btn small ghost" onClick={() => setConflictOpen(true)}>解决口播冲突</button>}
-          {!edit && !status.editable && <span className="shot-actions-locked" role="status">{writeBlockReason}</span>}
-          {!edit ? <>
-            <button className="btn small danger shot-delete-action" disabled={Boolean(deleteDisabledReason)}
-              aria-label={deleteDisabledReason ? `删除镜头，暂不可用：${deleteDisabledReason}` : '删除镜头'}
-              title={deleteActionTitle}
-              onClick={() => void onStructure('delete')}>删除镜头</button>
-            <button className="btn small" disabled={Boolean(editDisabledReason)}
-              aria-label={editDisabledReason ? `修改镜头，暂不可用：${editDisabledReason}` : '修改镜头'}
-              title={editDisabledReason || undefined} onClick={() => void beginEdit()}>修改</button>
-          </> : <>
-            <button className="btn small primary" disabled={Boolean(saveDisabledReason)}
-              aria-label={saveDisabledReason ? `保存前预览，暂不可用：${saveDisabledReason}` : '保存前预览'}
-              onClick={() => void previewSave()}>保存前预览</button>
-            <button className="btn small ghost" onClick={requestDiscard}>{dirty ? '放弃修改' : '退出编辑'}</button>
-          </>}
-        </div>
-      </header>
-
-      {conflictOpen && <div className="shot-conflict-panel" role="region" aria-label="口播冲突修复">
-        <p>台词与高级时间轴分别发生了变化。选择前会先计算视频、成片与重新确认影响。</p>
-        <div className="shot-conflict-actions"><button className="btn small primary" onClick={() => void previewConflictResolution('rebuild_timeline_from_dialogues')}>以台词为准</button>
-          <button className="btn small" onClick={() => void previewConflictResolution('rebuild_dialogues_from_timeline')}>以时间轴为准</button>
-          <button className="btn small ghost" onClick={() => setConflictOpen(false)}>稍后处理</button></div>
-      </div>}
-
-      {!!shot.qa_warnings?.length && <details className="shot-drafts"><summary>质量优化建议（{shot.qa_warnings.length}）</summary>
-        <ul>{shot.qa_warnings.map((item, index) => <li key={`${item}-${index}`}>{storyboardGateIssueLabel(item)}</li>)}</ul>
-      </details>}
-
-      {!!saveErrors.length && <div className="shot-validation-summary" role="alert"><b>修改尚未通过，共 {saveErrors.length} 个问题</b><ul>{saveErrors.map((item, index) => <li key={`${item}-${index}`}>{storyboardGateIssueLabel(item)}</li>)}</ul>
-        <button className="btn small ghost" onClick={() => void copyDraft()}>复制我的草稿</button>
-        <button className="btn small ghost" onClick={() => setReloadLatestOpen(true)}>重新载入最新版</button></div>}
-
-      {!!drafts.length && edit && <details className="shot-drafts"><summary>失败草稿（{drafts.length}）</summary>{drafts.map(draft => <div key={draft.id} className="shot-draft-row">
-        <div><b>{new Date(draft.created_at * 1000).toLocaleString()}</b><small>{draft.baseline_artifact_ids.length ? '基于较早分镜内容' : '未记录保存基线'} · {storyboardGateIssueLabel(draft.issues[0] || '业务校验未通过')}</small></div>
-        <button className="btn small" disabled={dirty}
-          aria-label={dirty ? '继续编辑此失败草稿，暂不可用：请先保存或放弃当前修改' : '继续编辑此失败草稿'}
-          onClick={() => { setEdit({ ...cloneShot(shot), ...draft.content } as Shot); setSaveErrors(draft.issues) }}>继续编辑</button>
-        <button className="btn small ghost" onClick={() => setDiscardDraftId(draft.id)}>丢弃</button>
-      </div>)}</details>}
-
-      {edit ? (
-        <div className="shot-edit-form">
-          <section aria-labelledby={fieldId(shot.id, 'basic-title')}>
-            <h3 id={fieldId(shot.id, 'basic-title')}>常用修改</h3>
-            <div className="shot-edit-grid">
-              <label htmlFor={fieldId(shot.id, 'duration')}>时长<select id={fieldId(shot.id, 'duration')} value={edit.duration_s} onChange={event => setEdit({ ...edit, duration_s: Number(event.target.value) })}>{DURATIONS.map(value => <option key={value} value={value}>{value}s</option>)}</select><small>{edit.duration_s > 5 ? '保存后进入自动与规则审核，通过前不会发布' : '标准时长'}</small></label>
-              <label htmlFor={fieldId(shot.id, 'size')}>景别<select id={fieldId(shot.id, 'size')} value={edit.shot_size} onChange={event => setEdit({ ...edit, shot_size: event.target.value })}>{SIZES.map(value => <option key={value}>{value}</option>)}</select></label>
-              <label htmlFor={fieldId(shot.id, 'angle')}>角度<input id={fieldId(shot.id, 'angle')} value={edit.camera_angle ?? ''} placeholder="平视 / 过肩 / 低角度 / 俯拍" onChange={event => setEdit({ ...edit, camera_angle: event.target.value })} /></label>
-              <label htmlFor={fieldId(shot.id, 'move')}>运镜<select id={fieldId(shot.id, 'move')} value={edit.camera_move} onChange={event => setEdit({ ...edit, camera_move: event.target.value })}>{MOVES.map(value => <option key={value}>{value}</option>)}</select></label>
-              <label htmlFor={fieldId(shot.id, 'transition')}>转场<select id={fieldId(shot.id, 'transition')} value={edit.transition} onChange={event => setEdit({ ...edit, transition: event.target.value })}>{TRANSITIONS.map(value => <option key={value}>{value}</option>)}</select></label>
-            </div>
-            <div className="shot-edit-grid">
-              <label htmlFor={fieldId(shot.id, 'scene-time')}>时间标签<input id={fieldId(shot.id, 'scene-time')} list={fieldId(shot.id, 'scene-time-options')} value={edit.scene_time ?? ''} placeholder="黄昏 / 18:30 / 次日清晨" onChange={event => setEdit({ ...edit, scene_time: event.target.value })} /><datalist id={fieldId(shot.id, 'scene-time-options')}>{SCENE_TIMES.map(value => <option key={value} value={value} />)}</datalist><small>可输入早中晚、黄昏或具体时刻</small></label>
-              <label htmlFor={fieldId(shot.id, 'scene-name')}>场景图标签<input id={fieldId(shot.id, 'scene-name')} list={fieldId(shot.id, 'scene-name-options')} value={edit.scene_name ?? ''} required placeholder="选择或输入接近的场景名" onChange={event => setEdit({ ...edit, scene_name: event.target.value })} /><datalist id={fieldId(shot.id, 'scene-name-options')}>{sceneOptions.map(value => <option key={value} value={value} />)}</datalist><small>保存时可模糊匹配，命中后会归一成场景库规范名</small></label>
-            </div>
-            <label htmlFor={fieldId(shot.id, 'action')}>画面与动作<textarea id={fieldId(shot.id, 'action')} rows={3} value={edit.action_desc} required onChange={event => setEdit({ ...edit, action_desc: event.target.value })} /></label>
-            <label htmlFor={fieldId(shot.id, 'purpose')}>本镜作用<textarea id={fieldId(shot.id, 'purpose')} rows={2} value={edit.purpose ?? ''} onChange={event => setEdit({ ...edit, purpose: event.target.value })} /></label>
-            <label htmlFor={fieldId(shot.id, 'resulting-change')}>本镜结果变化<textarea id={fieldId(shot.id, 'resulting-change')} rows={2} value={edit.resulting_change ?? ''} onChange={event => setEdit({ ...edit, resulting_change: event.target.value })} /></label>
-            <label htmlFor={fieldId(shot.id, 'camera-motivation')}>摄影动机<textarea id={fieldId(shot.id, 'camera-motivation')} rows={2} value={edit.camera_motivation ?? ''} onChange={event => setEdit({ ...edit, camera_motivation: event.target.value })} /></label>
-            <div className="shot-edit-grid frames"><label htmlFor={fieldId(shot.id, 'first')}>{firstFrameLabel}<textarea id={fieldId(shot.id, 'first')} rows={2} value={effectiveFirstFrameDesc} readOnly={inputStrategy.kind === 'previous_video_tail'} onChange={event => setEdit({ ...edit, first_frame_desc: event.target.value })} /><small>{inputStrategy.detail}</small></label>
-              <label htmlFor={fieldId(shot.id, 'last')}>结束状态（仅作视频目标）<textarea id={fieldId(shot.id, 'last')} rows={2} value={edit.last_frame_desc} onChange={event => setEdit({ ...edit, last_frame_desc: event.target.value })} /><small>不生成静态尾帧参考图</small></label></div>
-          </section>
-
-          <section><h3>画面角色与信息点</h3><fieldset className="token-picker"><legend>画面角色（人物谱）</legend>{characterOptions.map(name => <label key={name}><input type="checkbox" checked={edit.characters.includes(name)} onChange={() => toggleCharacter(name)} />{name}</label>)}{!characterOptions.length && <small>人物谱暂无可选角色</small>}</fieldset>
-            {!edit.characters.length && <p className="field-error" role="alert">至少选择一个画面角色；“缺角色”会从这里修复。</p>}
-            <fieldset className="token-picker"><legend>声音角色</legend>{characterOptions.map(name => <label key={name}><input type="checkbox" checked={(edit.audio_cast ?? []).includes(name)} onChange={() => {
-              const active = (edit.audio_cast ?? []).includes(name); setEdit({ ...edit, audio_cast: active ? (edit.audio_cast ?? []).filter(item => item !== name) : [...(edit.audio_cast ?? []), name] })
-            }} />{name}</label>)}</fieldset>
-            <fieldset className="token-picker"><legend>本镜新信息（来自剧本清单）</legend>{informationOptions.map(item => <label key={item.id}><input type="checkbox" checked={(edit.new_information_ids ?? []).includes(item.id)} onChange={() => toggleInformation(item.id)} />{item.label}</label>)}{!informationOptions.length && <small>本集剧本没有结构化信息清单</small>}</fieldset>
-          </section>
-
-          <section aria-labelledby={fieldId(shot.id, 'dialogue-title')}><div className="section-heading-row"><h3 id={fieldId(shot.id, 'dialogue-title')}>台词</h3><span className={overCapacity ? 'capacity-count over' : 'capacity-count'} aria-live="polite">{currentChars} / {spokenLimit} 字</span></div>
-            {overCapacity && <p id={fieldId(shot.id, 'capacity-error')} className="field-error" role="alert">口播超出容量 {currentChars - spokenLimit} 字，请删减台词或调整镜头。</p>}
-            {edit.dialogues.map((dialogue, index) => <div key={index} className="dlg-line">
-              <label><span>说话人 {index + 1}</span><select value={dialogue.speaker} onChange={event => { const values = [...edit.dialogues]; values[index] = { ...dialogue, speaker: event.target.value }; setEdit({ ...edit, dialogues: values }) }}><option value="">请选择</option>{characterOptions.map(name => <option key={name}>{name}</option>)}</select></label>
-              <label className="dialogue-copy"><span>台词 {index + 1}</span><input value={dialogue.line} aria-describedby={overCapacity ? fieldId(shot.id, 'capacity-error') : undefined} onChange={event => { const values = [...edit.dialogues]; values[index] = { ...dialogue, line: event.target.value }; setEdit({ ...edit, dialogues: values }) }} /></label>
-              <label><span>情绪 {index + 1}</span><input value={dialogue.emotion} onChange={event => { const values = [...edit.dialogues]; values[index] = { ...dialogue, emotion: event.target.value }; setEdit({ ...edit, dialogues: values }) }} /></label>
-              <button className="btn small ghost" aria-label={`删除第 ${index + 1} 条台词`} onClick={() => { setDeletedDialogue({ value: dialogue, index }); setEdit({ ...edit, dialogues: edit.dialogues.filter((_, itemIndex) => itemIndex !== index) }) }}>删除</button>
-            </div>)}
-            <div className="dialogue-actions"><button className="btn small" onClick={() => setEdit({ ...edit, dialogues: [...edit.dialogues, { speaker: edit.characters[0] || '', line: '', emotion: '平静' }] })}>+ 加一句</button>
-              {deletedDialogue && <button className="btn small ghost" onClick={() => { const values = [...edit.dialogues]; values.splice(deletedDialogue.index, 0, deletedDialogue.value); setEdit({ ...edit, dialogues: values }); setDeletedDialogue(null) }}>撤销删除</button>}</div>
-          </section>
-
-          <section><h3>原文依据（只从本集授权原文框选，不送视频模型）</h3>
-            <p className="source-bound-preview">当前依据：{edit.source_excerpt || '尚未绑定'} {shot.source_binding && !sourceBinding ? `· 已绑定第 ${shot.source_binding.chapter_idx} 章原文片段` : ''}</p>
-            {sourceChapters.length ? <><label htmlFor={fieldId(shot.id, 'source-chapter')}>授权章节<select id={fieldId(shot.id, 'source-chapter')} value={sourceChapterId ?? ''} onChange={event => setSourceChapterId(Number(event.target.value))}>{sourceChapters.map(chapter => <option key={chapter.id} value={chapter.id}>第 {chapter.idx} 章 · {chapter.title}</option>)}</select></label>
-              <label htmlFor={fieldId(shot.id, 'source-text')}>在原文中拖选连续片段<textarea ref={sourceTextRef} id={fieldId(shot.id, 'source-text')} rows={7} readOnly value={sourceChapters.find(item => item.id === sourceChapterId)?.content ?? ''} /></label>
-              <button className="btn small" onClick={bindSelectedSource}>使用当前选区作为证据</button></> : <p className="field-error">本集原文暂不可用；现有证据只读，不能修改。</p>}
-          </section>
-
-          <details open={advancedOpen} onToggle={event => setAdvancedOpen(event.currentTarget.open)} className="shot-advanced"><summary>高级：连续性与制作约束</summary>
-            <div className="neighbor-continuity" aria-label="邻镜连续性对照">
-              <button type="button" disabled={!previous} aria-label={previous ? `切换到前镜 ${previous.shot_no}` : '切换到前镜，暂不可用：当前已是第一镜'}
-                onClick={() => previous && onSelect(previous.id)}><b>{previous ? `前镜 ${previous.shot_no} · 离开` : '首镜边界'}</b><span>{previous?.state_out || previous?.last_frame_desc || '无前镜依赖'}</span></button>
-              <div className={prevConflict || nextConflict ? 'current conflict' : 'current'}><b>本镜 {shot.shot_no}</b><span>{edit.state_in || '未设进入'} → {edit.state_out || '未设离开'}</span></div>
-              <button type="button" disabled={!next} aria-label={next ? `切换到后镜 ${next.shot_no}` : '切换到后镜，暂不可用：当前已是收尾镜'}
-                onClick={() => next && onSelect(next.id)}><b>{next ? `后镜 ${next.shot_no} · 进入` : '末镜边界'}</b><span>{next?.state_in || next?.first_frame_desc || '无后镜依赖'}</span></button>
-            </div>
-            {(prevConflict || nextConflict) && <p className="field-error" role="alert">{prevConflict ? '前镜离开与本镜进入不一致。' : ''}{nextConflict ? '本镜离开与后镜进入不一致。' : ''} 可点击邻镜定位。</p>}
-            <div className="shot-edit-grid continuity"><label htmlFor={fieldId(shot.id, 'state-in')}>进入状态<textarea id={fieldId(shot.id, 'state-in')} value={edit.state_in ?? ''} onChange={event => setEdit({ ...edit, state_in: event.target.value })} /></label>
-              <label htmlFor={fieldId(shot.id, 'primary-action')}>镜头动作<textarea id={fieldId(shot.id, 'primary-action')} value={edit.primary_action ?? ''} onChange={event => setEdit({ ...edit, primary_action: event.target.value })} /></label>
-              <label htmlFor={fieldId(shot.id, 'state-out')}>离开状态<textarea id={fieldId(shot.id, 'state-out')} value={edit.state_out ?? ''} onChange={event => setEdit({ ...edit, state_out: event.target.value })} /></label></div>
-            <label htmlFor={fieldId(shot.id, 'continuity-mode')}>与上镜关系<select id={fieldId(shot.id, 'continuity-mode')} value={edit.continuity_mode ?? ''} onChange={event => setEdit({ ...edit, continuity_mode: event.target.value })}><option value="">自动/未设定</option>{Object.entries(CONTINUITY_MODES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-          </details>
-
-          {status.feature_flags?.structure_edit !== false && <section className="shot-structure-actions"><h3>镜头结构</h3><p>{structureDisabledReason || '所有结构动作都会先展示镜号、收尾镜、相邻校验和媒体失效影响。'}</p><div>
-            <button className="btn small" disabled={Boolean(structureDisabledReason)}
-              aria-label={structureDisabledReason ? `在当前镜后新增，暂不可用：${structureDisabledReason}` : '在当前镜后新增'}
-              onClick={() => void onStructure('add_after')}>在当前镜后新增</button>
-            <button className="btn small" disabled={Boolean(structureDisabledReason)}
-              aria-label={structureDisabledReason ? `复制为下一镜，暂不可用：${structureDisabledReason}` : '复制为下一镜'}
-              onClick={() => void onStructure('duplicate_after')}>复制为下一镜</button>
-            <button className="btn small" disabled={Boolean(structureDisabledReason) || !previous}
-              aria-label={structureDisabledReason ? `前移，暂不可用：${structureDisabledReason}` : !previous ? '前移，暂不可用：当前已是第一镜' : '前移'}
-              onClick={() => void onStructure('move', Math.max(0, shot.shot_no - 2))}>前移</button>
-            <button className="btn small" disabled={Boolean(structureDisabledReason) || !next}
-              aria-label={structureDisabledReason ? `后移，暂不可用：${structureDisabledReason}` : !next ? '后移，暂不可用：当前已是收尾镜' : '后移'}
-              onClick={() => void onStructure('move', shot.shot_no)}>后移</button>
-            <button className="btn small danger" disabled={Boolean(structureDisabledReason)}
-              aria-label={structureDisabledReason ? `删除镜头，暂不可用：${structureDisabledReason}` : '删除镜头'}
-              onClick={() => void onStructure('delete')}>删除镜头</button></div></section>}
-
-          <footer className="shot-edit-sticky"><span aria-live="polite">{dirty ? `${Object.keys(changes).length} 个字段域有变化` : '尚无改动'}</span><button className="btn ghost" onClick={requestDiscard}>{dirty ? '放弃修改' : '退出编辑'}</button><button className="btn primary" disabled={Boolean(saveDisabledReason)}
-            aria-label={saveDisabledReason ? `保存前预览，暂不可用：${saveDisabledReason}` : '保存前预览'}
-            onClick={() => void previewSave()}>保存前预览</button></footer>
-        </div>
-      ) : (
-        <div className="shot-review-body">
-          <section className="shot-overview"><div className="shot-visual-brief"><span className="shot-section-label">画面设计</span><h2>{current.scene_name || current.scene_setting}</h2>{current.scene_time && <small>时间：{current.scene_time}</small>}<p>{current.action_desc}</p></div>
-            <dl className="shot-specs"><div><dt>时长</dt><dd>{current.duration_s}s</dd></div><div><dt>景别</dt><dd>{current.shot_size}</dd></div><div><dt>角度</dt><dd>{current.camera_angle || '平视'}</dd></div><div><dt>运镜</dt><dd>{current.camera_move}</dd></div><div><dt>转场</dt><dd>{current.transition}</dd></div></dl></section>
-          <div className="shot-frame-pair shot-continuity-chain" aria-label="镜头状态链"><div className="shot-frame-card"><b>进入状态</b><p>{current.state_in || current.first_frame_desc || '未设置'}</p></div><span aria-hidden>→</span><div className="shot-frame-card"><b>镜头动作</b><p>{current.primary_action || current.action_desc}</p></div><span aria-hidden>→</span><div className="shot-frame-card"><b>离开状态</b><p>{current.state_out || current.last_frame_desc || '未设置'}</p></div></div>
-          <section className="shot-spoken-panel"><header className="shot-context-head"><b>本镜台词</b><span>{currentChars} / {spokenLimit} 字</span></header>{overCapacity && <p className="shot-spoken-warn">口播已超出本镜容量</p>}{current.dialogues.length ? current.dialogues.map((line, index) => <div key={index} className="shot-audio-line"><b>{line.speaker}<small>{line.emotion}</small></b><p>「{line.line}」</p></div>) : <p>本镜无台词</p>}</section>
-          <section className="shot-context-panel"><h3>镜头要素</h3><dl className="shot-context-grid"><div><dt>本镜作用</dt><dd>{current.purpose || '旧版镜头未单列'}</dd></div><div><dt>结果变化</dt><dd>{current.resulting_change || current.state_out || '未单列'}</dd></div><div><dt>摄影动机</dt><dd>{current.camera_motivation || '旧版镜头未单列'}</dd></div><div><dt>画面角色</dt><dd>{current.characters.join('、') || '无'}</dd></div><div><dt>声音角色</dt><dd>{current.audio_cast?.join('、') || '无'}</dd></div><div><dt>本镜新信息</dt><dd>{current.new_information_items?.map(item => item.content).join('；') || '无'}</dd></div></dl></section>
-          <div className="shot-detail-tabs" role="tablist" aria-label="镜头详情"><button id={`shot-detail-tab-${shot.id}-frames`} type="button" role="tab" aria-selected={detailTab === 'frames'} aria-controls={detailPanelId} tabIndex={detailTab === 'frames' ? 0 : -1} className={detailTab === 'frames' ? 'active' : ''} onClick={() => setDetailTab('frames')} onKeyDown={event => { if (event.key === 'ArrowRight' || event.key === 'End') { event.preventDefault(); focusDetailTab('script') } }}>生成起点与结束状态</button><button id={`shot-detail-tab-${shot.id}-script`} type="button" role="tab" aria-selected={detailTab === 'script'} aria-controls={detailPanelId} tabIndex={detailTab === 'script' ? 0 : -1} className={detailTab === 'script' ? 'active' : ''} onClick={() => setDetailTab('script')} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'Home') { event.preventDefault(); focusDetailTab('frames') } }}>声音与原文</button></div>
-          {detailTab === 'frames' ? <div id={detailPanelId} className="shot-frame-pair" role="tabpanel" aria-labelledby={`shot-detail-tab-${shot.id}-frames`}><div className="shot-frame-card"><b>01 · {inputStrategy.kind === 'previous_video_tail' ? '上一视频真实尾帧' : inputStrategy.kind === 'reference_video' ? '参考视频起点' : '图库生成起点'}</b><p>{effectiveFirstFrameDesc || '暂未描述'}</p><small>{inputStrategy.detail}</small></div><span aria-hidden>→</span><div className="shot-frame-card"><b>02 · 视频结束状态目标</b><p>{current.last_frame_desc || '暂未描述'}</p><small>不生成静态尾帧参考图</small></div></div>
-            : <div id={detailPanelId} className="shot-script-grid" role="tabpanel" aria-labelledby={`shot-detail-tab-${shot.id}-script`}><div className="shot-script-copy"><b>原文依据（不送视频模型）</b><p>{current.source_excerpt || '暂无对应原文'}</p><small>{current.source_binding ? `已绑定第 ${current.source_binding.chapter_idx} 章原文片段` : '当前只保留原文内容，确认前会检查来源位置'}</small></div><div className="shot-audio-copy">{current.dialogues.map((line, index) => <div key={index} className="shot-audio-line"><b>{line.speaker}</b><p>「{line.line}」</p></div>)}</div></div>}
-        </div>
-      )}
-
-      <ImpactDialog open={!!impact || impactLoading || !!impactError} title={`保存镜 ${shot.shot_no} 的精确影响`}
-        impact={impact} loading={impactLoading} error={impactError} confirmLabel="批准影响并保存"
-        knownEffects={impact ? [`重新校验：${((impact as unknown as { revalidation_shots?: number[] }).revalidation_shots ?? []).join('、') || '本镜与相邻镜'}`, '失败时只保留工作草稿，不覆盖发布版'] : []}
-        onClose={() => { setImpact(null); setImpactError(null); setImpactLoading(false) }} onConfirm={() => void save()} />
-      <ImpactDialog
-        open={!!conflictImpact || conflictImpactLoading || !!conflictImpactError}
-        title={`解决镜 ${shot.shot_no} 的口播冲突`}
-        impact={conflictImpact}
-        loading={conflictImpactLoading}
-        error={conflictImpactError}
-        confirmLabel="批准影响并解决冲突"
-        knownEffects={[
-          conflictImpact?.choice === 'rebuild_timeline_from_dialogues'
-            ? '将以当前台词重建口播时间轴'
-            : '将以当前口播时间轴重建台词',
-          '关联媒体失效后需要重新生成，不会沿用旧视频',
-        ]}
-        onClose={() => {
-          setConflictImpact(null)
-          setConflictImpactError(null)
-          setConflictImpactLoading(false)
-        }}
-        onConfirm={() => void resolveConflict()}
-      />
-      <Modal open={discardEditOpen} title={`放弃镜 ${shot.shot_no} 的未保存修改？`} onClose={() => setDiscardEditOpen(false)}
-        actions={<><button className="btn" onClick={() => setDiscardEditOpen(false)}>继续编辑</button><button className="btn danger" onClick={() => {
-          setDiscardEditOpen(false)
-          discard()
-        }}>确认放弃修改</button></>}>
-        <p>将丢失当前 {Object.keys(changes).length} 个字段域的输入；发布版、失败草稿和下游产物不会变化。</p>
-      </Modal>
-      <Modal open={reloadLatestOpen} title={`重新载入镜 ${shot.shot_no} 的最新版？`} onClose={() => setReloadLatestOpen(false)}
-        actions={<><button className="btn" onClick={() => setReloadLatestOpen(false)}>保留当前输入</button><button className="btn danger" onClick={() => {
-          setReloadLatestOpen(false)
-          discard()
-          onChanged()
-        }}>放弃输入并重新载入</button></>}>
-        <p>当前输入和未提交的修改会被清除，再从已发布的最新版加载；失败草稿仍会保留。</p>
-      </Modal>
-      <Modal open={!!discardDraftId} title="丢弃失败草稿？" onClose={() => setDiscardDraftId(null)}
-        actions={<><button className="btn" onClick={() => setDiscardDraftId(null)}>保留</button><button className="btn danger" onClick={async () => {
-          const draftId = discardDraftId; setDiscardDraftId(null)
-          if (draftId) { await api.del(`/shots/${shot.id}/drafts/${draftId}`); await loadDrafts() }
-        }}>确认丢弃</button></>}>
-        <p>只会删除该工作草稿，当前发布版和下游不会改变。</p>
-      </Modal>
-    </article>
   )
 }

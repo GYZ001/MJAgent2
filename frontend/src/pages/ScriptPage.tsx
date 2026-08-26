@@ -243,7 +243,7 @@ export function resolveStages(production: {
 /** 紧凑步进器：小号数字圆点 + 短标签，单行排布可换行；不管后端发来几步都不占大面积。 */
 export function PrepStepper({ stages }: { stages: RawStage[] }) {
   return (
-    <ol className="prep-stepper" aria-label="剧本制作阶段">
+    <ol className="prep-stepper" aria-label="准备包制作阶段">
       {stages.map((stage, index) => {
         const normalized = normalizeStage(stage, index)
         return (
@@ -518,13 +518,13 @@ export default function ScriptPage() {
         )}
         {screenplayNotice && (
           <OperationError
-            title={screenplayNotice.severity === 'error' ? '剧本流程未完成' : '剧本流程等待继续'}
+            title={screenplayNotice.severity === 'error' ? '准备包流程未完成' : '准备包流程等待继续'}
             message={screenplayNotice.message}
             guidance={screenplayNotice.severity === 'error'
               ? '已发布准备包和工作草稿会保留。请按顶部主操作重新生成。'
               : '这不是失败结果；工作副本和安全恢复点已保留，可按顶部主操作继续流程。'}
             variant={screenplayNotice.severity}
-            detailLabel={screenplayNotice.severity === 'error' ? '查看剧本错误详情' : '查看剧本处理详情'}
+            detailLabel={screenplayNotice.severity === 'error' ? '查看准备包错误详情' : '查看准备包处理详情'}
           />
         )}
       </section>
@@ -553,14 +553,14 @@ export default function ScriptPage() {
 
       {stopConfirmOpen && (
         <DecisionDialog
-          title="停止本集剧本任务？"
+          title="停止本集准备包任务？"
           summary={`第 ${ep.episode_no} 集《${ep.title}》仍在生成`}
           message="系统会停止当前准备包生成或局部修复；已写入的工作副本会保留，尚未发布的内容不会进入分镜。"
           details={[
             '停止可能需要等待当前模型请求返回，界面不会提前宣称已终止',
             '已经发生的模型调用费用不会退回；停止后可从工作副本恢复或重新发起',
           ]}
-          confirmLabel="确认停止剧本任务"
+          confirmLabel="确认停止准备包任务"
           cancelLabel="继续生成"
           danger
           onClose={() => setStopConfirmOpen(false)}

@@ -30,7 +30,7 @@ function resumableScreenplayMessage(
   production: NonNullable<ScreenplayNoticeInput['screenplay_production']>,
   message: string,
 ): string {
-  const phase = production.phase_label ?? '剧本流程'
+  const phase = production.phase_label ?? '准备包流程'
   const prefix = production.stage_stop_reason === 'failed'
     ? `${phase}异常中断`
     : production.stage_stop_reason === 'blocked'

@@ -1908,6 +1908,16 @@ export interface StoryboardPackDialogueLine {
   source_segment_index: number;
 }
 
+/**
+ * 段所属节拍的自包含记录（2026-08-26 补齐）：拿到一个 shot 就能渲染它承载哪几个
+ * 节拍、分别在讲什么，不必再跨行反查。取代裸 beat_ids 数组作为展示用真源。
+ */
+export interface StoryboardPackSegmentBeat {
+  beat_id: string;
+  summary: string;
+  segment_indexes: number[];
+}
+
 export interface StoryboardPackResourceCharacter {
   identity_id: string;
   portrait_id?: string | null;
@@ -1943,11 +1953,12 @@ export interface StoryboardPackSegment {
   resources: StoryboardPackResources;
   /** 能力降级清单（如 Seedance 侧屏上文字改「无字」）；不许静默吞掉，必须显示。 */
   degraded_capabilities: string[];
+  /** 段所属节拍，自包含（含摘要），展示时的唯一真源——见 StoryboardPackSegmentBeat 注释。 */
+  beats: StoryboardPackSegmentBeat[];
   /**
-   * 段所属节拍 ID。冻结契约顶层还有一份 beat_sheet（beat_id/summary/segment_indexes），
-   * 但当前持久化路径（app/production/storyboard_pack.py persist_storyboard_pack）
-   * 只把 beat_id 落进每段记录，summary 摘要文本未随段落持久化——前端只能展示 ID
-   * 与去向，不得为了好看编造摘要文本。
+   * @deprecated 前端不再读取。早期持久化路径只落了裸 ID，无摘要；现在 beats 已
+   * 自包含摘要，展示一律改读 beats。字段仍随行下发（后端过渡期兼容），不属于
+   * 前端消费的形状，留着只是避免破坏未迁移的调用方。
    */
   beat_ids: string[];
   /**
