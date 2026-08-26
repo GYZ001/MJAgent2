@@ -1,6 +1,6 @@
 import { ReactNode, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { api, ApiError, Episode, Shot, StoryboardStatus } from '../api'
-import { useEpisode, useNav } from '../App'
+import { api, ApiError, Bible, Episode, Shot, StoryboardPackResources, StoryboardStatus } from '../api'
+import { useEpisode, useNav, useProject } from '../App'
 import EpisodeCrumb from '../components/EpisodeCrumb'
 import { ItemTaskTimer, ServerTaskTimer } from '../components/TaskTimer'
 import DecisionDialog from '../components/DecisionDialog'
@@ -8,6 +8,8 @@ import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
 import QueryState from '../components/QueryState'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { storyboardTaskNotice } from '../lib/productionNotices'
+import { compressSegmentIndexes } from '../lib/segmentIndexes'
+import { findPortraitImage, findSceneReferenceImage } from '../lib/bibleAssets'
 import "../styles/BoardPage.css";
 
 const SIZES = ['远景', '全景', '中景', '近景', '特写']
@@ -33,6 +35,19 @@ const VIDEO_MODEL_OPTIONS: Array<{ value: string; label: string }> = [
 
 function videoModelLabel(value: string): string {
   return VIDEO_MODEL_OPTIONS.find(option => option.value === value)?.label ?? value
+}
+
+// StoryboardPackSegment.target_model 用的是冻结契约自己的词表（"seedance_2" |
+// "minimax_h3"，见 app/production/storyboard_pack.py _dialect_for_target_video_model），
+// 与上面 VIDEO_MODEL_OPTIONS 的供应商 key（"hiagent" | "minimax_h3"）不是同一套
+// 词表——两者恰好共享 "minimax_h3" 这一个值是巧合，不能假设通用，不能复用
+// videoModelLabel 给段落记录查标签。
+const STORYBOARD_PACK_TARGET_MODEL_LABELS: Record<string, string> = {
+  seedance_2: 'Seedance 2.0',
+  minimax_h3: 'MiniMax H3',
+}
+export function storyboardPackTargetModelLabel(targetModel: string): string {
+  return STORYBOARD_PACK_TARGET_MODEL_LABELS[targetModel] ?? targetModel
 }
 
 const EDITABLE_FIELDS: Array<keyof Shot> = [
@@ -93,6 +108,83 @@ export function storyboardCharacterFilterOptions(shots: Shot[]): string[] {
       .map(value => value.trim())
       .filter(value => value && !internalIdentity.test(value) && !internalSlug.test(value)),
   )]
+}
+
+export type StoryboardPackBeatOverviewEntry = { beat_id: string; segment_nos: number[] }
+
+/**
+ * 节拍概览：按每段自带的 beat_ids 反推"哪个节拍进了哪一段"（要求 5：beat_sheet
+ * 展示为这一集的节拍概览，能和 segments 对上）。当前持久化路径只把 beat_id 落进
+ * 段记录，没有随段落带 summary 摘要文本（见 StoryboardPackSegment 注释），这里
+ * 如实只产出 ID 与去向，调用方据此显示"摘要待后端补充"，不得为了好看编造摘要。
+ */
+export function storyboardPackBeatOverview(shots: Shot[]): StoryboardPackBeatOverviewEntry[] {
+  const segmentNosByBeat = new Map<string, Set<number>>()
+  for (const shot of shots) {
+    const segment = shot.storyboard_pack_segment
+    if (!segment) continue
+    for (const beatId of segment.beat_ids ?? []) {
+      const segmentNos = segmentNosByBeat.get(beatId) ?? new Set<number>()
+      segmentNos.add(segment.segment_no)
+      segmentNosByBeat.set(beatId, segmentNos)
+    }
+  }
+  return [...segmentNosByBeat.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([beat_id, segmentNos]) => ({ beat_id, segment_nos: [...segmentNos].sort((a, b) => a - b) }))
+}
+
+export type StoryboardPackResourceGapSummary = {
+  charactersLinked: number
+  charactersTotal: number
+  scenesLinked: number
+  scenesTotal: number
+  propsTotal: number
+}
+
+/**
+ * 要求 2：一眼看出这一集有多少素材没映射上。linked = portrait_id/scene_reference_id
+ * 非空；未 link 的与全部 props 都只有文字描述（世界书没有道具素材库）。按段落
+ * 出现次数计数，不去重——同一角色在不同段落可能一段有素材、另一段没有，逐段计数
+ * 才能反映"这一集"整体的映射缺口，而不是掩盖某几段的缺失。
+ */
+export function storyboardPackResourceGapSummary(shots: Shot[]): StoryboardPackResourceGapSummary {
+  let charactersLinked = 0
+  let charactersTotal = 0
+  let scenesLinked = 0
+  let scenesTotal = 0
+  let propsTotal = 0
+  for (const shot of shots) {
+    const resources = shot.storyboard_pack_segment?.resources
+    if (!resources) continue
+    for (const character of resources.characters ?? []) {
+      charactersTotal += 1
+      if (character.portrait_id) charactersLinked += 1
+    }
+    for (const scene of resources.scenes ?? []) {
+      scenesTotal += 1
+      if (scene.scene_reference_id) scenesLinked += 1
+    }
+    propsTotal += resources.props?.length ?? 0
+  }
+  return { charactersLinked, charactersTotal, scenesLinked, scenesTotal, propsTotal }
+}
+
+/**
+ * 要求 4：degraded_capabilities 必须显示出来，不许静默吞掉，且能据此导出后期文字
+ * 合成清单。把每段的降级项摊平成一行一条、带段号回指的纯文本；没有任何降级项时
+ * 返回空串，调用方据此显示"本集无降级项"而不是复制出一段空文本。
+ */
+export function storyboardPackDegradedCapabilitiesExportText(shots: Shot[]): string {
+  const lines: string[] = []
+  for (const shot of shots) {
+    const segment = shot.storyboard_pack_segment
+    if (!segment?.degraded_capabilities?.length) continue
+    for (const item of segment.degraded_capabilities) {
+      lines.push(`第 ${segment.segment_no} 段：${item}`)
+    }
+  }
+  return lines.join('\n')
 }
 
 type ConfirmPreview = {
@@ -220,12 +312,28 @@ export function shotSpokenLimit(shot: Pick<Shot, 'spoken_limit' | 'duration_s'>)
   return Math.floor((duration * 18) / 5)
 }
 
+// 分镜台 2.0.0（docs/STORYBOARD_PROMPT_IR_DESIGN.md）：一个 15 秒段 = shots 表一行，
+// 段内 3-4 镜写进 prompt_text 文本、不拆成独立数据行。这一行非 null 的
+// storyboard_pack_segment 是唯一权威标记，见 api.ts 的 StoryboardPackSegment 注释。
+export function isStoryboardPackSegmentShot(shot: Shot): boolean {
+  return shot.storyboard_pack_segment != null
+}
+
+// 口播超限判据（storyboardSpokenChars/shotSpokenLimit）只对经典逐镜行有意义：
+// 分镜台 2.0.0 段落行的口播预算由模型在 prompt_text 里自行把控，不受这条经典公式
+// 约束，强算会对着新架构行打出无意义的"口播超限"标记（A1 时长上限改造教训的同类
+// 问题：两套语义混用一条判据）。
+export function storyboardShotOverCapacity(shot: Shot): boolean {
+  if (isStoryboardPackSegmentShot(shot)) return false
+  return storyboardSpokenChars(shot) > shotSpokenLimit(shot)
+}
+
 export function isStoryboardProblemShot(shot: Shot): boolean {
   const status = shot.storyboard_evidence?.status || ''
   return shot.spoken_contract_status === 'conflict'
     || Boolean(shot.legacy_unvalidated)
     || ['candidate', 'needs_revision', 'rejected', 'stale', 'superseded'].includes(status)
-    || storyboardSpokenChars(shot) > shotSpokenLimit(shot)
+    || storyboardShotOverCapacity(shot)
     || Boolean(shot.preflight_errors?.length)
 }
 
@@ -794,6 +902,10 @@ function statusFallback(ep: Episode): StoryboardStatus {
 export default function BoardPage() {
   const { episodeId, go, projectId, toast, registerNavigationGuard } = useNav()
   const { data: ep, refresh, error, status: queryErrorStatus, loading } = useEpisode(episodeId!, 'board')
+  // 分镜台 2.0.0 段落资源清单里的 portrait_id/scene_reference_id 指向项目人物谱/
+  // 场景库，需要同一份 bible 才能查缩略图；口径与用法都照抄 ScriptPage.tsx（同一个
+  // 项目、一次性拉取、不轮询）。
+  const { data: project } = useProject(projectId!, 0, 'bible')
   const [busy, setBusy] = useState(false)
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null)
   const [shotEditDirty, setShotEditDirty] = useState(false)
@@ -818,10 +930,29 @@ export default function BoardPage() {
     if (onlyProblems && !isStoryboardProblemShot(shot)) return false
     if (sceneFilter && (shot.scene_name || shot.scene_setting) !== sceneFilter) return false
     if (characterFilter && ![...(shot.characters ?? []), ...(shot.audio_cast ?? [])].includes(characterFilter)) return false
-    if (capacityFilter && storyboardSpokenChars(shot) <= shotSpokenLimit(shot)) return false
+    if (capacityFilter && !storyboardShotOverCapacity(shot)) return false
     if (riskFilter && !shot.preflight_errors?.length && !shot.continuity_degraded && !(shot.risk_tags?.length)) return false
     return true
   }), [shots, onlyProblems, sceneFilter, characterFilter, capacityFilter, riskFilter])
+  // 节拍概览与素材缺口统计按全量 shots（不受筛选影响），反映"这一集"整体口径，
+  // 不随镜头筛选变化而变化。
+  const packBeatOverview = useMemo(() => storyboardPackBeatOverview(shots), [shots])
+  const packResourceGap = useMemo(() => storyboardPackResourceGapSummary(shots), [shots])
+  const packDegradedExportText = useMemo(() => storyboardPackDegradedCapabilitiesExportText(shots), [shots])
+  const hasPackSegments = shots.some(isStoryboardPackSegmentShot)
+  const copyPackDegradedExport = async () => {
+    if (!packDegradedExportText) return
+    if (!navigator.clipboard) {
+      toast('当前浏览器无法访问剪贴板，请检查浏览器权限后重试', true)
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(packDegradedExportText)
+      toast('后期文字合成清单已复制')
+    } catch {
+      toast('复制失败，请允许浏览器访问剪贴板后重试', true)
+    }
+  }
   // 先在全量 shots 里按当前选中 id 解析，避免轮询刷新使选中镜因“问题态”变化离开
   // visibleShots 时被静默跳到第一条；仅当尚无选中或该镜确实被删除时，才回退到 visibleShots[0]。
   const selectedShot = shots.find(shot => shot.id === selectedShotId) ?? visibleShots[0]
@@ -1260,6 +1391,38 @@ export default function BoardPage() {
         )}
       </section>
 
+      {hasPackSegments && (
+        <section className="card storyboard-pack-overview" aria-label="分镜台 2.0.0 节拍与素材概览">
+          <div className="storyboard-pack-overview-head">
+            <b>节拍概览</b>
+            <small>
+              {packBeatOverview.length ? `${packBeatOverview.length} 个节拍` : '暂无数据'} ·
+              摘要文本暂未随段落持久化，仅展示节拍 ID 与去向
+            </small>
+          </div>
+          {packBeatOverview.length ? (
+            <ul className="storyboard-pack-beat-list">
+              {packBeatOverview.map(entry => (
+                <li key={entry.beat_id}>
+                  <b>{entry.beat_id}</b>
+                  <span>第 {compressSegmentIndexes(entry.segment_nos)} 段</span>
+                </li>
+              ))}
+            </ul>
+          ) : <p className="storyboard-pack-empty-hint">暂无数据</p>}
+          <div className="storyboard-pack-resource-gap" role="status">
+            <span>角色素材命中 <b>{packResourceGap.charactersLinked}/{packResourceGap.charactersTotal}</b>（按段落引用计）</span>
+            <span>场景素材命中 <b>{packResourceGap.scenesLinked}/{packResourceGap.scenesTotal}</b>（按段落引用计）</span>
+            <span>道具 <b>{packResourceGap.propsTotal}</b>（世界书无道具素材库，均为文字描述）</span>
+            <button type="button" className="text-action storyboard-pack-degraded-copy" disabled={!packDegradedExportText}
+              title={packDegradedExportText ? '复制全集能力降级项，用于后期文字合成' : '本集暂无能力降级项'}
+              onClick={() => void copyPackDegradedExport()}>
+              复制后期文字合成清单{packDegradedExportText ? '' : '（暂无）'}
+            </button>
+          </div>
+        </section>
+      )}
+
       <div className="workspace-gap" />
 
       {!shots.length ? (
@@ -1310,11 +1473,18 @@ export default function BoardPage() {
             <div ref={timelineRef} className="shot-navigator-list" role="listbox" aria-label="镜头列表" tabIndex={0}>
               {visibleShots.map(shot => {
                 const checkpoint = storyboardShotCheckpointLabel(shot.shot_no, status)
+                const packSegment = shot.storyboard_pack_segment
                 return <button key={shot.id} type="button" role="option" aria-selected={shot.id === selectedShot?.id}
                   className={shot.id === selectedShot?.id ? 'active' : ''}
                   onClick={() => requestShotSelect(shot.id)}>
-                  <span className="shot-nav-top"><span className="shot-nav-no">镜 {String(shot.shot_no).padStart(2, '0')}</span><span>{shot.duration_s}s</span></span>
-                  <span className="shot-nav-main"><b>{shot.shot_size} · {shot.camera_angle || '平视'} · {shot.camera_move}</b><small>{shot.scene_time ? `${shot.scene_time} · ` : ''}{shot.scene_name || shot.scene_setting}</small></span>
+                  <span className="shot-nav-top">
+                    <span className="shot-nav-no">{packSegment ? '段' : '镜'} {String(shot.shot_no).padStart(2, '0')}</span>
+                    <span>{shot.duration_s}s</span>
+                  </span>
+                  <span className="shot-nav-main">
+                    <b>{packSegment ? `${packSegment.shot_count} 镜切换` : `${shot.shot_size} · ${shot.camera_angle || '平视'} · ${shot.camera_move}`}</b>
+                    <small>{packSegment ? (packSegment.synopsis || '（无梗概）') : `${shot.scene_time ? `${shot.scene_time} · ` : ''}${shot.scene_name || shot.scene_setting}`}</small>
+                  </span>
                   <span className="shot-nav-badges">
                     {shotTiming(shot.shot_no) && (
                       <ItemTaskTimer
@@ -1327,7 +1497,8 @@ export default function BoardPage() {
                     {checkpoint && <i className={checkpoint.className} title={checkpoint.title}>{checkpoint.label}</i>}
                     {isStoryboardProblemShot(shot) && <i className="problem">需处理</i>}
                     {shot.is_final && <i>{checkpoint?.className === 'checkpoint-pending' ? '草稿收尾' : '收尾镜'}</i>}
-                    {storyboardSpokenChars(shot) > shotSpokenLimit(shot) && <i className="problem">口播超限</i>}
+                    {storyboardShotOverCapacity(shot) && <i className="problem">口播超限</i>}
+                    {!!packSegment?.degraded_capabilities.length && <i className="problem" title="本段存在能力降级项，详见段落详情">能力降级</i>}
                   </span>
                 </button>
               })}
@@ -1344,12 +1515,17 @@ export default function BoardPage() {
               <div className="filter-selection-note" role="status">当前镜头已不在筛选结果内，已保留当前对象；只有你主动切换时才会离开。</div>
             )}
             {selectedShot && (
-              <ShotWorkspace key={`${selectedShot.id}:${selectedShot.storyboard_artifact_id ?? ''}`}
-                shot={selectedShot} episode={ep} status={status}
-                previous={shots[absoluteIndex - 1]} next={shots[absoluteIndex + 1]}
-                onChanged={() => { void refresh({ force: true }) }} onSelect={requestShotSelect}
-                onDirtyChange={setShotEditDirty}
-                onStructure={previewStructure} disabled={busy} />
+              isStoryboardPackSegmentShot(selectedShot) ? (
+                <StoryboardPackSegmentView key={`${selectedShot.id}:pack`}
+                  shot={selectedShot} bible={project?.bible} notify={toast} />
+              ) : (
+                <ShotWorkspace key={`${selectedShot.id}:${selectedShot.storyboard_artifact_id ?? ''}`}
+                  shot={selectedShot} episode={ep} status={status}
+                  previous={shots[absoluteIndex - 1]} next={shots[absoluteIndex + 1]}
+                  onChanged={() => { void refresh({ force: true }) }} onSelect={requestShotSelect}
+                  onDirtyChange={setShotEditDirty}
+                  onStructure={previewStructure} disabled={busy} />
+              )
             )}
           </section>
         </div>
@@ -1452,6 +1628,168 @@ export default function BoardPage() {
         ] : []}
         confirmLabel="批准并调整结构" onClose={() => setStructurePreview(null)} onConfirm={() => void applyStructure()} />
     </>
+  )
+}
+
+/**
+ * 分镜台 2.0.0 段落只读展示（docs/STORYBOARD_PROMPT_IR_DESIGN.md 冻结契约）。
+ * shot_size/camera_move/first_frame_desc 等经典逐镜字段在这一行没有意义
+ * （见 api.ts 的 StoryboardPackSegment 注释），因此不复用 ShotWorkspace 那一整套
+ * 逐字段编辑/影响预览/草稿机制——这里只做展示，不提供编辑入口；结构调整
+ * （删除/复制/移动镜头）仍按经典 shots 行语义工作，但字段级编辑对这一行没有
+ * 落点，本次改造范围也只是展示，不新增编辑路径。
+ */
+function StoryboardPackSegmentView({ shot, bible, notify }: {
+  shot: Shot
+  bible: Bible | null | undefined
+  notify: (message: string, error?: boolean) => void
+}) {
+  const segment = shot.storyboard_pack_segment
+  if (!segment) return null
+  const rangeText = compressSegmentIndexes(segment.source_segment_indexes ?? [])
+
+  const copyPromptText = async () => {
+    if (!navigator.clipboard) {
+      notify('当前浏览器无法访问剪贴板，请检查浏览器权限后重试', true)
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(segment.prompt_text)
+      notify('提示词已整块复制')
+    } catch {
+      notify('复制失败，请允许浏览器访问剪贴板后重试', true)
+    }
+  }
+
+  return (
+    <div className="shot-strip storyboard-pack-segment">
+      <header className="storyboard-pack-segment-head">
+        <div>
+          <b>段 {segment.segment_no}</b>
+          <span>{segment.duration_s}s · {segment.shot_count} 镜切换 · 目标模型 {storyboardPackTargetModelLabel(segment.target_model)}</span>
+        </div>
+        {!!segment.beat_ids.length && (
+          <span className="storyboard-pack-beat-tags" title="本段所属节拍 ID">
+            {segment.beat_ids.map(beatId => <i key={beatId}>{beatId}</i>)}
+          </span>
+        )}
+      </header>
+
+      <p className="storyboard-pack-synopsis">{segment.synopsis || '（本段无梗概）'}</p>
+      <p className="storyboard-pack-source-range">
+        对应原文{rangeText ? ` 第 ${rangeText} 段` : '暂无数据'}
+      </p>
+
+      <section className="storyboard-pack-prompt-block">
+        <div className="storyboard-pack-prompt-head">
+          <b>提示词（整块可复制，不拆分）</b>
+          <button type="button" className="text-action" onClick={() => void copyPromptText()}>复制整段提示词</button>
+        </div>
+        {segment.prompt_text
+          ? <pre className="storyboard-pack-prompt-text">{segment.prompt_text}</pre>
+          : <p className="storyboard-pack-empty-hint">暂无数据</p>}
+      </section>
+
+      <section className="storyboard-pack-degraded">
+        <b>能力降级</b>
+        {segment.degraded_capabilities.length ? (
+          <ul className="warning-banner storyboard-pack-degraded-list">
+            {segment.degraded_capabilities.map((item, index) => <li key={index}>{item}</li>)}
+          </ul>
+        ) : <p className="storyboard-pack-empty-hint">本段无能力降级项</p>}
+      </section>
+
+      <section className="storyboard-pack-dialogue">
+        <b>台词 · {segment.dialogue.length}</b>
+        {segment.dialogue.length ? (
+          <ul className="storyboard-pack-dialogue-list">
+            {segment.dialogue.map((line, index) => (
+              <li key={index}>
+                <span className="storyboard-pack-dialogue-speaker">{line.speaker_identity_id || '未知说话人'}</span>
+                <span className="storyboard-pack-dialogue-line">{line.line}</span>
+                <span className="storyboard-pack-dialogue-source">原文第 {line.source_segment_index} 段</span>
+              </li>
+            ))}
+          </ul>
+        ) : <p className="storyboard-pack-empty-hint">本段无台词</p>}
+      </section>
+
+      <StoryboardPackResourceRoster resources={segment.resources} bible={bible} />
+    </div>
+  )
+}
+
+/** 要求 2：区分"有素材"（人物 portrait_id / 场景 scene_reference_id 非空，显示缩略图）
+ *  与"只有文字描述"（为 null，以及全部 props——世界书没有道具素材库）两种状态，
+ *  视觉上一眼能分：有图用缩略图，无图用占位块 + 文字描述。 */
+function StoryboardPackResourceRoster({ resources, bible }: {
+  resources: StoryboardPackResources
+  bible: Bible | null | undefined
+}) {
+  const characters = resources.characters ?? []
+  const scenes = resources.scenes ?? []
+  const props = resources.props ?? []
+  return (
+    <section className="storyboard-pack-resources">
+      <div className="storyboard-pack-resource-group">
+        <b>人物 · {characters.length}</b>
+        <div className="pack-resource-list">
+          {characters.map((character, index) => {
+            const imageUrl = findPortraitImage(bible, character.portrait_id)
+            return (
+              <div className="pack-resource-item" key={`${character.identity_id || 'character'}-${index}`}>
+                {imageUrl
+                  ? <img className="pack-resource-thumb" src={imageUrl} alt={character.identity_id} loading="lazy" decoding="async" />
+                  : <div className="pack-resource-thumb-empty" aria-hidden="true">无图</div>}
+                <div className="pack-resource-body">
+                  <span className="pack-resource-name">{character.identity_id || '未命名角色'}</span>
+                  <span className="pack-resource-desc">{character.description || (imageUrl ? '' : '暂无文字描述')}</span>
+                </div>
+              </div>
+            )
+          })}
+          {!characters.length && <p className="storyboard-pack-empty-hint">本段无人物资源</p>}
+        </div>
+      </div>
+
+      <div className="storyboard-pack-resource-group">
+        <b>场景 · {scenes.length}</b>
+        <div className="pack-resource-list">
+          {scenes.map((scene, index) => {
+            const imageUrl = findSceneReferenceImage(bible, scene.scene_reference_id)
+            return (
+              <div className="pack-resource-item" key={`${scene.scene_id || 'scene'}-${index}`}>
+                {imageUrl
+                  ? <img className="pack-resource-thumb" src={imageUrl} alt={scene.scene_id} loading="lazy" decoding="async" />
+                  : <div className="pack-resource-thumb-empty" aria-hidden="true">无图</div>}
+                <div className="pack-resource-body">
+                  <span className="pack-resource-name">{scene.scene_id || '未命名场景'}</span>
+                  <span className="pack-resource-desc">{scene.description || (imageUrl ? '' : '暂无文字描述')}</span>
+                </div>
+              </div>
+            )
+          })}
+          {!scenes.length && <p className="storyboard-pack-empty-hint">本段无场景资源</p>}
+        </div>
+      </div>
+
+      <div className="storyboard-pack-resource-group">
+        <b>道具 · {props.length}</b>
+        <div className="pack-resource-list">
+          {/* 道具没有世界书图像素材库（设计使然），一律只有文字描述，用统一占位图标。 */}
+          {props.map((prop, index) => (
+            <div className="pack-resource-item" key={`${prop.label || 'prop'}-${index}`}>
+              <div className="pack-resource-icon" aria-hidden="true">物</div>
+              <div className="pack-resource-body">
+                <span className="pack-resource-name">{prop.label || '未命名道具'}</span>
+                <span className="pack-resource-desc">{prop.description || '暂无文字描述'}</span>
+              </div>
+            </div>
+          ))}
+          {!props.length && <p className="storyboard-pack-empty-hint">本段无道具</p>}
+        </div>
+      </div>
+    </section>
   )
 }
 

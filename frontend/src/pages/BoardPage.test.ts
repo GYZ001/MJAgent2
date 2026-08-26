@@ -1,17 +1,23 @@
 import { describe, expect, it } from 'vitest'
-import type { Shot, StoryboardStatus } from '../api'
+import type { Shot, StoryboardPackSegment, StoryboardStatus } from '../api'
 import {
   buildStoryboardChanges,
+  isStoryboardPackSegmentShot,
   isStoryboardProblemShot,
   storyboardGateIssueLabel,
   storyboardDeleteUsesFullClear,
   storyboardEmptyCopy,
   storyboardCharacterFilterOptions,
+  storyboardPackBeatOverview,
+  storyboardPackDegradedCapabilitiesExportText,
+  storyboardPackResourceGapSummary,
+  storyboardPackTargetModelLabel,
   storyboardProgressCopy,
   storyboardInputStrategy,
   storyboardPrimaryAction,
   storyboardSaveDisabledReason,
   storyboardShotCheckpointLabel,
+  storyboardShotOverCapacity,
   storyboardSpokenChars,
   shotSpokenLimit,
   storyboardStartPreviewCopy,
@@ -29,6 +35,27 @@ function shot(overrides: Partial<Shot> = {}): Shot {
     spoken_limit: 12, audio_timeline: [{ start_s: 0, end_s: 2, type: 'dialogue', text: '旧台词' }],
     ...overrides,
   }
+}
+
+function packSegment(overrides: Partial<StoryboardPackSegment> = {}): StoryboardPackSegment {
+  return {
+    segment_no: 1, duration_s: 15, synopsis: '少年拿到密信', source_segment_indexes: [1, 2],
+    prompt_text: '电影级预告片质感，多镜头叙事，镜头之间硬切。镜头1……',
+    shot_count: 3, dialogue: [], resources: { characters: [], scenes: [], props: [] },
+    degraded_capabilities: [], beat_ids: ['B01'], target_model: 'seedance_2',
+    storyboard_version: '2.0.0',
+    ...overrides,
+  }
+}
+
+/** 分镜台 2.0.0 段落行：经典逐镜字段留空，storyboard_pack_segment 才是权威内容。 */
+function packShot(overrides: Partial<Shot> = {}, segmentOverrides: Partial<StoryboardPackSegment> = {}): Shot {
+  return shot({
+    shot_size: '', camera_move: '', duration_s: 15,
+    dialogues: [], spoken_limit: undefined,
+    storyboard_pack_segment: packSegment(segmentOverrides),
+    ...overrides,
+  })
 }
 
 function storyboardStatus(overrides: Partial<StoryboardStatus> = {}): StoryboardStatus {
@@ -304,5 +331,95 @@ describe('分镜台结构化 diff 与问题筛选', () => {
     expect(storyboardShotCheckpointLabel(2, storyboardStatus())?.label).toBe('已校验')
     expect(storyboardShotCheckpointLabel(3, storyboardStatus())?.label).toBe('待校验')
     expect(storyboardShotCheckpointLabel(3, storyboardStatus({ state: 'confirmed' }))).toBeNull()
+  })
+})
+
+describe('分镜台 2.0.0 段落展示（docs/STORYBOARD_PROMPT_IR_DESIGN.md 冻结契约）', () => {
+  it('storyboard_pack_segment 非 null 是唯一权威标记', () => {
+    expect(isStoryboardPackSegmentShot(shot())).toBe(false)
+    expect(isStoryboardPackSegmentShot(packShot())).toBe(true)
+  })
+
+  it('段落行的口播超限公式不适用，不管台词多长都不算超限', () => {
+    const overflowing = packShot({
+      dialogues: [
+        { speaker: 'char-1', line: '这句台词长到足以超过经典逐镜口播公式的任何合理上限，反复重复反复重复反复重复', emotion: '平静' },
+      ],
+      spoken_limit: 1,
+    })
+    expect(storyboardShotOverCapacity(overflowing)).toBe(false)
+    expect(isStoryboardProblemShot(overflowing)).toBe(false)
+    // 对照：经典逐镜行同样的台词/上限组合应判定超限，确认没有把判据本身削弱了。
+    const classicOverflowing = shot({
+      dialogues: [
+        { speaker: '少年', line: '这句台词长到足以超过经典逐镜口播公式的任何合理上限，反复重复反复重复反复重复', emotion: '平静' },
+      ],
+      spoken_limit: 1,
+    })
+    expect(storyboardShotOverCapacity(classicOverflowing)).toBe(true)
+  })
+
+  it('契约自己的模型词表与视频模型选择器的供应商 key 不是同一套', () => {
+    expect(storyboardPackTargetModelLabel('seedance_2')).toBe('Seedance 2.0')
+    expect(storyboardPackTargetModelLabel('minimax_h3')).toBe('MiniMax H3')
+    expect(storyboardPackTargetModelLabel('unknown_model')).toBe('unknown_model')
+  })
+
+  it('节拍概览按 beat_ids 反推段落去向，按 beat_id 升序排列', () => {
+    const shots = [
+      packShot({ id: 's1' }, { segment_no: 1, beat_ids: ['B02'] }),
+      packShot({ id: 's2' }, { segment_no: 2, beat_ids: ['B01', 'B02'] }),
+      packShot({ id: 's3' }, { segment_no: 3, beat_ids: ['B01'] }),
+      shot({ id: 's4' }), // 经典逐镜行没有 storyboard_pack_segment，必须被忽略而不是报错
+    ]
+    expect(storyboardPackBeatOverview(shots)).toEqual([
+      { beat_id: 'B01', segment_nos: [2, 3] },
+      { beat_id: 'B02', segment_nos: [1, 2] },
+    ])
+  })
+
+  it('节拍概览在没有任何段落行时返回空数组，不是抛错或编造数据', () => {
+    expect(storyboardPackBeatOverview([shot(), shot({ id: 's2' })])).toEqual([])
+  })
+
+  it('资源缺口统计按段落引用计数，区分有素材与只有文字描述两种状态', () => {
+    const shots = [
+      packShot({ id: 's1' }, {
+        resources: {
+          characters: [
+            { identity_id: 'char-1', portrait_id: 'portrait-1', description: '' },
+            { identity_id: 'char-2', portrait_id: null, description: '一名少年' },
+          ],
+          scenes: [
+            { scene_id: 'scene-1', scene_reference_id: null, description: '破旧的柴房' },
+          ],
+          props: [{ label: '密信', description: '一封火漆密封的信' }],
+        },
+      }),
+      packShot({ id: 's2' }, {
+        resources: {
+          characters: [{ identity_id: 'char-1', portrait_id: 'portrait-1', description: '' }],
+          scenes: [{ scene_id: 'scene-2', scene_reference_id: 'ref-2', description: '' }],
+          props: [],
+        },
+      }),
+    ]
+    expect(storyboardPackResourceGapSummary(shots)).toEqual({
+      charactersLinked: 2, charactersTotal: 3,
+      scenesLinked: 1, scenesTotal: 2,
+      propsTotal: 1,
+    })
+  })
+
+  it('degraded_capabilities 必须显示出来，导出清单带段号回指，没有降级项时返回空串', () => {
+    const shots = [
+      packShot({ id: 's1' }, { segment_no: 1, degraded_capabilities: ['牌匾文字改「无字」，交后期合成「靠山宗」'] }),
+      packShot({ id: 's2' }, { segment_no: 2, degraded_capabilities: [] }),
+      packShot({ id: 's3' }, { segment_no: 3, degraded_capabilities: ['书信内容改「无字」，交后期合成「三日后，城西见」'] }),
+    ]
+    expect(storyboardPackDegradedCapabilitiesExportText(shots)).toBe(
+      '第 1 段：牌匾文字改「无字」，交后期合成「靠山宗」\n第 3 段：书信内容改「无字」，交后期合成「三日后，城西见」',
+    )
+    expect(storyboardPackDegradedCapabilitiesExportText([shot(), packShot({ id: 's4' }, { degraded_capabilities: [] })])).toBe('')
   })
 })

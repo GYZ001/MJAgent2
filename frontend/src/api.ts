@@ -1895,6 +1895,70 @@ export interface StopShotVideoResult {
   }[];
 }
 
+/**
+ * 分镜台 2.0.0（docs/STORYBOARD_PROMPT_IR_DESIGN.md）冻结契约：一个 15 秒段的完整
+ * 记录。落在 Shot.storyboard_pack_segment 上（后端 app/production/storyboard_pack.py
+ * persist_storyboard_pack 写入），非 null 是唯一权威标记——这一行的
+ * shot_size/camera_move/camera_angle/first_frame_desc/last_frame_desc 等描述单个
+ * 连续镜头的字段在这里粒度失效，段内 3-4 个镜头切换全部写在 prompt_text 文本里。
+ */
+export interface StoryboardPackDialogueLine {
+  speaker_identity_id: string;
+  line: string;
+  source_segment_index: number;
+}
+
+export interface StoryboardPackResourceCharacter {
+  identity_id: string;
+  portrait_id?: string | null;
+  description?: string;
+}
+
+export interface StoryboardPackResourceScene {
+  scene_id: string;
+  scene_reference_id?: string | null;
+  description?: string;
+}
+
+export interface StoryboardPackResourceProp {
+  label: string;
+  description?: string;
+}
+
+export interface StoryboardPackResources {
+  characters: StoryboardPackResourceCharacter[];
+  scenes: StoryboardPackResourceScene[];
+  props: StoryboardPackResourceProp[];
+}
+
+export interface StoryboardPackSegment {
+  segment_no: number;
+  duration_s: number;
+  synopsis: string;
+  source_segment_indexes: number[];
+  /** 模型直接产出的整块可复制提示词；代码不拼装、不挂尾缀，必须整块展示与复制。 */
+  prompt_text: string;
+  shot_count: number;
+  dialogue: StoryboardPackDialogueLine[];
+  resources: StoryboardPackResources;
+  /** 能力降级清单（如 Seedance 侧屏上文字改「无字」）；不许静默吞掉，必须显示。 */
+  degraded_capabilities: string[];
+  /**
+   * 段所属节拍 ID。冻结契约顶层还有一份 beat_sheet（beat_id/summary/segment_indexes），
+   * 但当前持久化路径（app/production/storyboard_pack.py persist_storyboard_pack）
+   * 只把 beat_id 落进每段记录，summary 摘要文本未随段落持久化——前端只能展示 ID
+   * 与去向，不得为了好看编造摘要文本。
+   */
+  beat_ids: string[];
+  /**
+   * 冻结契约自己的模型词表（"seedance_2" | "minimax_h3"），由后端从解析出的
+   * prompt profile 派生；与 Episode.target_video_model 的供应商 key
+   * （"hiagent" | "minimax_h3"）不是同一套词表，不能互相当同义词直接查表。
+   */
+  target_model: string;
+  storyboard_version: string;
+}
+
 export interface Shot {
   id: string;
   episode_id: string;
@@ -2007,6 +2071,8 @@ export interface Shot {
     excerpt_hash: string;
   } | null;
   pipeline?: ShotPipelineStatus | null;
+  /** 非 null 时这一行是分镜台 2.0.0 的 15 秒段落，见 StoryboardPackSegment 注释。 */
+  storyboard_pack_segment?: StoryboardPackSegment | null;
 }
 
 export interface Episode {

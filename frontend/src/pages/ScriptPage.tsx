@@ -18,6 +18,8 @@ import QueryState from '../components/QueryState'
 import OperationError from '../components/OperationError'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { screenplayTaskNotice } from '../lib/productionNotices'
+import { compressSegmentIndexes } from '../lib/segmentIndexes'
+import { findPortraitImage, findSceneReferenceImage } from '../lib/bibleAssets'
 import "../styles/ScriptPage.css";
 
 type ScreenplayProduction = NonNullable<
@@ -82,37 +84,10 @@ export function isPrepPack(value: unknown): value is EpisodePrepPack {
   return typeof version === 'string' && version.length > 0
 }
 
-/**
- * 区间压缩：把段号/序号数组压成用户约定的展示格式（如 "1,3,5~7"）——连续 ≥2 个的
- * 数字合并成 "起~止"（用户明确要求 `~`，不是 `-`），孤立数字单独列出，段之间用
- * `,` 分隔、不加空格。内部先去重、按升序排列，调用方传入乱序或带重复的数组都
- * 得到同一个结果。空数组回退空串——调用方据此退回只展示"覆盖 N 段"，不渲染
- * 区间部分。
- *
- * 2.0.0（原名 compressEventOrders）：函数本身逐字节未变——它从来只是纯数字数组
- * 压缩，不含任何"事件"语义；重命名是因为调用方从换算"事件序号"改成直接使用
- * asset_manifest 条目自带的 segment_indexes（原文段号），不再需要 eventIdsToOrders
- * 这层换算，见 app/production/prep_pack.py 模块 docstring 的 2.0.0 说明。 */
-export function compressSegmentIndexes(indexes: number[]): string {
-  const sorted = Array.from(new Set(indexes)).sort((a, b) => a - b)
-  if (!sorted.length) return ''
-  const segments: string[] = []
-  let start = sorted[0]
-  let prev = sorted[0]
-  for (let i = 1; i <= sorted.length; i++) {
-    const current = sorted[i]
-    if (current !== undefined && current === prev + 1) {
-      prev = current
-      continue
-    }
-    segments.push(start === prev ? `${start}` : `${start}~${prev}`)
-    if (current !== undefined) {
-      start = current
-      prev = current
-    }
-  }
-  return segments.join(',')
-}
+// compressSegmentIndexes 已提取到 lib/segmentIndexes.ts（BoardPage.tsx 需要同一份
+// 区间压缩逻辑，不得复制第二份实现）；这里重新导出保持既有对外接口与测试导入路径
+// 不变，函数体没有改动。
+export { compressSegmentIndexes }
 
 /** 覆盖账本条目的确切子形状后端未冻结（示例只给了空数组）；数字或 {segment_index} 都按原文段号解析。 */
 function coverageEntryLabel(entry: PrepPackCoverageEntry): string {
@@ -147,25 +122,10 @@ export function coverageGateSummary(ledger: PrepPackCoverageLedger | null | unde
   }
 }
 
-/** 复用 BiblePage 展示 character_portraits 的口径：在项目人物谱的 portraits[] 里按 id 查图。 */
-export function findPortraitImage(bible: Bible | null | undefined, portraitId: string | null | undefined): string | null {
-  if (!portraitId) return null
-  for (const character of bible?.characters ?? []) {
-    const match = (character.portraits ?? []).find(portrait => portrait.id === portraitId)
-    if (match?.image_url) return match.image_url
-  }
-  return null
-}
-
-/** 复用 ScenesPage 展示 scene_references 的口径：在项目场景库的 scene_refs[] 里按 id 查图。 */
-export function findSceneReferenceImage(bible: Bible | null | undefined, sceneReferenceId: string | null | undefined): string | null {
-  if (!sceneReferenceId) return null
-  for (const scene of bible?.scenes ?? []) {
-    const match = (scene.scene_refs ?? []).find(ref => ref.id === sceneReferenceId)
-    if (match?.image_url) return match.image_url
-  }
-  return null
-}
+// findPortraitImage / findSceneReferenceImage 已提取到 lib/bibleAssets.ts
+// （BoardPage.tsx 分镜台 2.0.0 段落资源清单需要同一份素材查找逻辑，不得复制第二份
+// 实现）；这里重新导出保持既有对外接口与测试导入路径不变，函数体没有改动。
+export { findPortraitImage, findSceneReferenceImage }
 
 /**
  * 画面与字幕分离（1.7.0+，见 docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.3）：
