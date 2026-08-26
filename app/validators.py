@@ -274,6 +274,27 @@ def validate_storyboard(
             f"{config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S} 秒镜头"
         ]
 
+    if all(shot.storyboard_pack_segment is not None for shot in shots):
+        # 分镜台 2.0.0（app.production.storyboard_pack）的段行不满足本函数其余
+        # 500 行假设的「一个 Shot 行 = 一个连续镜头」前提：shot_size/camera_move
+        # 枚举、场景连续性、台词按 shot.characters 逐句核验等，对「一行 = 15 秒
+        # 段、段内 3-4 镜写在 prompt_text 文本里」的行都无意义。退役声明与
+        # app.continuity.dialogue_framing_errors 是同一决策
+        # （docs/STORYBOARD_PROMPT_IR_DESIGN.md），这里同样整体短路，只保留对
+        # 这类行仍然成立的两条结构检查，不把旧的单镜假设静默套用在新行上。
+        pack_errors: list[str] = []
+        for i, shot in enumerate(shots):
+            if shot.duration_s != 15:
+                pack_errors.append(
+                    f"shots[{i}](shot_no={shot.shot_no}).duration_s=「{shot.duration_s}」"
+                    "不是分镜台 2.0.0 冻结的段时长 15s"
+                )
+        expected_nos = list(range(1, len(shots) + 1))
+        actual_nos = [s.shot_no for s in shots]
+        if actual_nos != expected_nos:
+            pack_errors.append(f"shot_no 必须为连续递增 1..{len(shots)}，当前为 {actual_nos}")
+        return pack_errors
+
     # 先将模糊/旧式输入归一成规范 scene_name，后续连续性只比较
     # 场景图身份，不再把时间文案混进场景图外键。
     errors.extend(validate_storyboard_scenes(board, bible))
@@ -778,6 +799,66 @@ def validate_storyboard(
     errors.extend(shot_count_budget_errors(len(shots), context="分镜"))
 
     return errors
+
+
+# ---------- 分镜台 2.0.0 台词闸门（唯一从 F1-F6 那批幸存的闸门，判据已放宽） ----------
+#
+# docs/STORYBOARD_PROMPT_IR_DESIGN.md「台词闸门」：原 F1-F6「内容不许编」批次
+# 是老「事件链 -> 分镜大纲 -> 逐镜」管线的闸门，管线拆了闸门跟着作废，不在
+# 分镜台 2.0.0 里复活。只有 F3 的内核（说话人张冠李戴 / 凭空造话）升级留用，
+# 且判据已于 2026-08-26 由用户放宽：台词不要求逐字出自原文，允许省略、压缩、
+# 改写措辞，只要不偏离本章剧情；只保留两条——
+#   1. 说话人必须在场：该角色在这一段原文里有在场证据，不是只出现过名字。
+#   2. 每句台词必须有可溯源的原文段落：source_segment_index 指向的原文里，
+#      确实是这个人在这个位置说了意思相当的话。比对出处，不比对措辞。
+# 「在场证据」用 app.production.storyboard_pack 生成时已经算好的
+# resources.characters（来自 asset_manifest 的 segment_indexes 交集，即
+# prep_pack 自己对「这个人物在这些段落被提到/在场」的判定），不在这里重新
+# 从原文做字符串匹配——避免和映射台的在场判据产生第二套、可能漂移的实现。
+
+def storyboard_pack_dialogue_errors(shot: Shot) -> list[str]:
+    """分镜台 2.0.0 段行的台词闸门：说话人在场 + 台词有可溯源原文段落。
+
+    只对 ``shot.storyboard_pack_segment is not None`` 的行生效（分镜台 2.0.0
+    产出）；旧架构的行没有这个字段，返回空列表，不受影响。
+    """
+    segment = shot.storyboard_pack_segment
+    if segment is None:
+        return []
+    errors: list[str] = []
+    known_character_ids = {
+        str(c.get("identity_id") or "")
+        for c in ((segment.get("resources") or {}).get("characters") or [])
+    }
+    allowed_segment_indexes = set(segment.get("source_segment_indexes") or [])
+    for index, line in enumerate(segment.get("dialogue") or []):
+        speaker_id = str(line.get("speaker_identity_id") or "")
+        source_index = line.get("source_segment_index")
+        if not speaker_id or speaker_id not in known_character_ids:
+            errors.append(
+                f"[STORYBOARD_PACK_DIALOGUE_SPEAKER_ABSENT] shot_no={shot.shot_no} "
+                f"dialogue[{index}] 的说话人「{speaker_id}」在本段原文中没有在场证据"
+                "（不在本段 resources.characters 内）"
+            )
+        try:
+            source_index_int = int(source_index)
+        except (TypeError, ValueError):
+            source_index_int = None
+        if source_index_int is None or source_index_int not in allowed_segment_indexes:
+            errors.append(
+                f"[STORYBOARD_PACK_DIALOGUE_NO_SOURCE] shot_no={shot.shot_no} "
+                f"dialogue[{index}] 的 source_segment_index={source_index!r} "
+                f"不在本段引用的原文段号 {sorted(allowed_segment_indexes)} 内，无法溯源"
+            )
+    return errors
+
+
+def validate_storyboard_pack_dialogue(board: Storyboard) -> list[str]:
+    errors: list[str] = []
+    for shot in board.shots:
+        errors.extend(storyboard_pack_dialogue_errors(shot))
+    return errors
+
 
 # ---------- 场景图素材库：场景标签 → 库内规范场景的归一化匹配 ----------
 

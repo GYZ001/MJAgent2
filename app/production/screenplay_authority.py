@@ -1907,23 +1907,36 @@ def project_prep_pack_to_screenplay(payload: dict[str, Any]) -> EpisodeScreenpla
             idx = 0
         fragments.append((idx, kind_rank, clean))
 
-    for event in events:
-        for item in event.get("source_evidence") or []:
-            if isinstance(item, dict):
-                _add_fragment(item.get("segment_index"), item.get("quote"), 0)
-        for item in event.get("key_lines") or []:
-            if isinstance(item, dict):
-                speaker = str(item.get("speaker") or "").strip()
-                line = str(item.get("line") or "").strip()
-                text = f"{speaker}：{line}" if speaker and line else line
-                _add_fragment(item.get("segment_index"), text, 1)
+    # event_chain (and with it source_evidence/key_lines quotes) does not
+    # exist in prep_pack 2.0.0 (commit 48e01ff) -- ``events`` above is always
+    # ``[]`` for a 2.0.0 payload, not a bug to route around. Looping over it
+    # here would silently produce an empty full_script_text while looking
+    # like real quote-splicing logic; instead branch explicitly so the empty
+    # result is a documented consequence of the field genuinely not existing
+    # upstream, not an accident of reading a dead key (docs/
+    # STORYBOARD_PROMPT_IR_DESIGN.md; this is the storyboard-core fix for the
+    # "静默退化" this function used to have). The storyboard stage itself
+    # (app.production.storyboard_pack) does not consume this projection at
+    # all -- it reads the raw prep_pack payload plus the real chapter text
+    # directly -- so this branch only matters for other, non-generation
+    # consumers of ``resolve_downstream_screenplay`` (e.g. patch/editing UI).
+    is_legacy_event_chain_payload = "event_chain" in payload
+    if is_legacy_event_chain_payload:
+        for event in events:
+            for item in event.get("source_evidence") or []:
+                if isinstance(item, dict):
+                    _add_fragment(item.get("segment_index"), item.get("quote"), 0)
+            for item in event.get("key_lines") or []:
+                if isinstance(item, dict):
+                    speaker = str(item.get("speaker") or "").strip()
+                    line = str(item.get("line") or "").strip()
+                    text = f"{speaker}：{line}" if speaker and line else line
+                    _add_fragment(item.get("segment_index"), text, 1)
 
     fragments.sort(key=lambda item: (item[0], item[1]))
     full_script_text = "\n".join(text for _idx, _rank, text in fragments)
 
-    # -- scene_outline: one ScriptScene per asset_manifest scene, ordered by
-    #    the lowest event order it participates in (deterministic from the
-    #    event chain's own order; does not trust the payload array order) --
+    # -- scene_outline: one ScriptScene per asset_manifest scene. --
     event_order_by_id = {
         str(ev.get("event_id") or ""): int(ev.get("order") or 0) for ev in events
     }
@@ -1931,39 +1944,66 @@ def project_prep_pack_to_screenplay(payload: dict[str, Any]) -> EpisodeScreenpla
         str(ev.get("event_id") or ""): str(ev.get("summary") or "") for ev in events
     }
 
-    def _scene_sort_key(scene: dict[str, Any]) -> tuple[int, str]:
-        ids = [str(x) for x in (scene.get("event_ids") or [])]
-        orders = [event_order_by_id.get(eid, 0) for eid in ids]
-        return (min(orders) if orders else 0, str(scene.get("scene_id") or ""))
-
-    ordered_scenes = sorted(scenes, key=_scene_sort_key)
-
     scene_outline: list[ScriptScene] = []
     event_to_scene_heading: dict[str, str] = {}
-    for scene_no, scene in enumerate(ordered_scenes, start=1):
-        heading = str(scene.get("display_name") or "")
-        scene_event_ids = [str(x) for x in (scene.get("event_ids") or [])]
-        for eid in scene_event_ids:
-            event_to_scene_heading[eid] = heading
-        scene_characters = list(dict.fromkeys(
-            asset.display_name
-            for asset in character_assets
-            if asset.display_name and set(asset.event_ids) & set(scene_event_ids)
-        ))
-        ordered_event_ids = sorted(
-            scene_event_ids, key=lambda eid: event_order_by_id.get(eid, 0),
-        )
-        summary = "；".join(
-            event_summary_by_id[eid] for eid in ordered_event_ids
-            if event_summary_by_id.get(eid)
-        )
-        scene_outline.append(ScriptScene(
-            scene_no=scene_no,
-            scene_heading=heading,
-            story_function="",
-            characters=scene_characters,
-            summary=summary,
-        ))
+    if is_legacy_event_chain_payload:
+        # Ordered by the lowest event order it participates in (deterministic
+        # from the event chain's own order; does not trust the payload array
+        # order).
+        def _scene_sort_key(scene: dict[str, Any]) -> tuple[int, str]:
+            ids = [str(x) for x in (scene.get("event_ids") or [])]
+            orders = [event_order_by_id.get(eid, 0) for eid in ids]
+            return (min(orders) if orders else 0, str(scene.get("scene_id") or ""))
+
+        ordered_scenes = sorted(scenes, key=_scene_sort_key)
+        for scene_no, scene in enumerate(ordered_scenes, start=1):
+            heading = str(scene.get("display_name") or "")
+            scene_event_ids = [str(x) for x in (scene.get("event_ids") or [])]
+            for eid in scene_event_ids:
+                event_to_scene_heading[eid] = heading
+            scene_characters = list(dict.fromkeys(
+                asset.display_name
+                for asset in character_assets
+                if asset.display_name and set(asset.event_ids) & set(scene_event_ids)
+            ))
+            ordered_event_ids = sorted(
+                scene_event_ids, key=lambda eid: event_order_by_id.get(eid, 0),
+            )
+            summary = "；".join(
+                event_summary_by_id[eid] for eid in ordered_event_ids
+                if event_summary_by_id.get(eid)
+            )
+            scene_outline.append(ScriptScene(
+                scene_no=scene_no,
+                scene_heading=heading,
+                story_function="",
+                characters=scene_characters,
+                summary=summary,
+            ))
+    else:
+        # 2.0.0: no event order to sort by -- keep the manifest's own order
+        # (already emitted in source-scan order by the mapping stage) and
+        # derive each scene's character roster from the one anchor 2.0.0
+        # actually carries: segment_indexes intersection (real evidence of
+        # "this character and this scene co-occur in the same source
+        # segments"), instead of the now-permanently-empty event_ids
+        # intersection this used to (silently) compute to nothing.
+        for scene_no, scene in enumerate(scenes, start=1):
+            heading = str(scene.get("display_name") or "")
+            scene_segment_indexes = {int(x) for x in (scene.get("segment_indexes") or [])}
+            scene_characters = list(dict.fromkeys(
+                str(c.get("display_name") or "")
+                for c in characters
+                if str(c.get("display_name") or "")
+                and scene_segment_indexes & {int(x) for x in (c.get("segment_indexes") or [])}
+            ))
+            scene_outline.append(ScriptScene(
+                scene_no=scene_no,
+                scene_heading=heading,
+                story_function="",
+                characters=scene_characters,
+                summary="",
+            ))
 
     # -- dialogue_chains: one chain per event with key_lines, turns derived
     #    from key_lines[]; key_lines (flat) re-derived through the project's
@@ -2018,6 +2058,10 @@ def project_prep_pack_to_screenplay(payload: dict[str, Any]) -> EpisodeScreenpla
     # 前者的逗号/字级兜底）。目的是减少"切分产出的单元以逗号收尾、读起来像半句"
     # 的情况；对单句超长、通篇只有末尾一个句号的引述，两者结果逐字相同（这是
     # 原文标点决定的语法边界，见该函数文档）。
+    # events is [] for a 2.0.0 payload (see is_legacy_event_chain_payload
+    # above) so this naturally yields dialogue_chains=[]/key_plot_points=[]
+    # below -- correctly empty because prep_pack 2.0.0 genuinely extracts no
+    # dialogue/plot-point data, not a silent failure to route around.
     dialogue_chains: list[KeyDialogueChain] = []
     for event in events:
         turns: list[KeyDialogueTurn] = []

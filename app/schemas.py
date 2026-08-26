@@ -1543,6 +1543,15 @@ class Shot(BaseModel):
     reserved_future_event_ids: list[str] = Field(default_factory=list)
     readability_window_ids: list[str] = Field(default_factory=list)
     narrative_boundary_from_previous: "NarrativeBoundaryContract | None" = None
+    # 分镜台 2.0.0（docs/STORYBOARD_PROMPT_IR_DESIGN.md）：episode_prep_pack 输入
+    # 走 app.production.storyboard_pack 的新生成路径，一行 = 一个 15 秒段，段内
+    # 3-4 镜写进 prompt_text 文本、不拆成独立 Shot。这个字段非 None 是唯一权威
+    # 标记：shot_size/camera_move/camera_angle/first_frame_desc/last_frame_desc
+    # 等描述单个连续镜头的字段在这行上不再有意义，校验器与生成台据此字段显式
+    # 跳过那些假设，而不是对空值静默判错或静默放行。字段内容即冻结契约的
+    # segments[] 一条记录（prompt_text/resources/dialogue/degraded_capabilities/
+    # source_segment_indexes/shot_count/beat_ids/target_model/storyboard_version）。
+    storyboard_pack_segment: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def _sync_information_ids(self) -> "Shot":

@@ -13873,6 +13873,23 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
     The published narrative graph already owns global event/state relations.
     Requiring a model to restate the complete graph as one JSON object is both
     redundant and unbounded, so only later bounded scene packs use the model.
+
+    DORMANT for episode_prep_pack (screenplay contract 2.0.0+, commit 48e01ff)
+    episodes: this function, and everything it calls (event_ids/event_chain-
+    referencing narrative-contract plumbing throughout this file), is only
+    reachable via its sole caller, app.storyboard_supervisor
+    .run_storyboard_supervisor -- which now branches to
+    app.production.storyboard_pack.run_storyboard_pack_generation for any
+    prep_pack-sourced episode *before* reaching this call (see that
+    function's top, right after the screenplay_json/screenplay_status
+    check). prep_pack payloads never populate screenplay.events /
+    screenplay.narrative_plan (the mapping stage stopped producing an event
+    list by design), so this code path was never valid for them; it remains
+    the live, correct path for legacy (pre-48e01ff) EpisodeScreenplay
+    artifacts that still have narrative_plan. Same dormancy applies to
+    generate_storyboard_next_shot and generate_storyboard_scene_pack below
+    (both also called exclusively from run_storyboard_supervisor, after the
+    same branch) -- see docs/STORYBOARD_PROMPT_IR_DESIGN.md.
     """
     if not (screenplay.full_script_text or "").strip():
         raise StageError("分镜大纲", ["请先生成完整剧本，再规划分镜大纲"])
@@ -15599,7 +15616,14 @@ async def generate_storyboard_scene_pack(
     *,
     shot_nos: set[int] | None = None,
 ) -> StoryboardScenePack:
-    """Generate one bounded scene chunk; independent chunks may run in parallel."""
+    """Generate one bounded scene chunk; independent chunks may run in parallel.
+
+    DORMANT for episode_prep_pack episodes -- see the dormancy note on
+    generate_storyboard_outline above (same reachability root: this
+    function's sole caller is app.storyboard_supervisor
+    .run_storyboard_supervisor, after the branch that routes prep_pack
+    episodes to app.production.storyboard_pack instead).
+    """
     briefs = [
         item for item in outline.shots
         if (
@@ -15989,7 +16013,14 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
                                         outline: StoryboardOutline | None = None,
                                         repair_feedback: list[str] | None = None,
                                         semantic_attempt_id: str | None = None) -> StoryboardShotDraft:
-    """基于已通过镜头生成下一个镜头；业务校验通过才返回，调用方可立即落库给前端增量展示。"""
+    """基于已通过镜头生成下一个镜头；业务校验通过才返回，调用方可立即落库给前端增量展示。
+
+    DORMANT for episode_prep_pack episodes -- see the dormancy note on
+    generate_storyboard_outline above (same reachability root: this
+    function's sole caller is app.storyboard_supervisor
+    .run_storyboard_supervisor, after the branch that routes prep_pack
+    episodes to app.production.storyboard_pack instead).
+    """
     if not (screenplay.full_script_text or "").strip():
         raise StageError("分镜脚本", ["旧版拍卡剧本已下线，请先重新生成完整剧本，再进入分镜台"])
 

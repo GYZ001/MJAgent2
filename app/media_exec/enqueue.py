@@ -1443,6 +1443,14 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     from app.portraits import bible_for_episode
     bible = bible_for_episode(ep["project_id"], bible, ep["episode_no"])
     shot = _load_shot_model(shot_row)
+    # 分镜台 2.0.0（app.production.storyboard_pack）行：prompt_text 已在分镜台
+    # 阶段由模型直接产出并原样持久化到 shot_versions.prompt_text（见该模块
+    # persist_storyboard_pack 的文档）。这里必须原样复用，不能再走
+    # compile_prompt 重新拼装——那会用代码把模型产出的整块提示词打散成结构化
+    # 字段再拼回去，正是分镜台 2.0.0 要去掉的行为。设计决策「只用参考图模式，
+    # 首尾帧链不做」（docs/STORYBOARD_PROMPT_IR_DESIGN.md）在这类行上同样要
+    # 显式落地，不依赖 derive_continuity_mode 从空字段间接猜出同一结论。
+    is_storyboard_pack_shot = shot.storyboard_pack_segment is not None
     screenplay = authority_context.screenplay
     prior_rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? AND shot_no<? ORDER BY shot_no",
@@ -1571,11 +1579,21 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         if previous_prompt_text
         else ""
     )
-    continuity_mode = derive_continuity_mode(shot, prev_shot)
-    shot.continuity_mode = continuity_mode
-    shot.continuity_from_prev = uses_previous_tail_frame(continuity_mode)
-    if continuity_mode != "scene_change":
+    if is_storyboard_pack_shot:
+        # 冻结的设计决策：分镜台 2.0.0 只用参考图模式，跨段不做首尾帧链
+        # （docs/STORYBOARD_PROMPT_IR_DESIGN.md「跨段一致性」）。强制这两个
+        # 字段，不让 derive_continuity_mode 从空的 state_in/state_out 间接
+        # 猜出 action_continuation 之类需要真实上一镜尾帧的结论。
+        continuity_mode = "scene_change"
+        shot.continuity_mode = continuity_mode
+        shot.continuity_from_prev = False
         shot.transition = "硬切"
+    else:
+        continuity_mode = derive_continuity_mode(shot, prev_shot)
+        shot.continuity_mode = continuity_mode
+        shot.continuity_from_prev = uses_previous_tail_frame(continuity_mode)
+        if continuity_mode != "scene_change":
+            shot.transition = "硬切"
     boundary_relation_edit = (
         shot_plan.relations.edit if shot_plan is not None else None
     )
@@ -1634,79 +1652,101 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         if incoming_transition == "硬切":
             incoming_transition = None
 
-    preflight_errors = preflight_seedance_gates(
-        shot,
-        prev=prev_shot,
-        prompt_text=None,
-        screenplay=screenplay,
-    )
-    if preflight_errors:
-        raise CompileError("；".join(preflight_errors))
-
-    raw_prompt_text = compile_prompt(
-        shot,
-        bible,
-        extra_negative,
-        with_refs=True,
-        from_scene=False,
-        chained=bool(chain_after_shot_id),
-        critique=critique,
-        prev_tail_action=None,
-        with_last_frame=False,
-        incoming_transition=incoming_transition,
-        outgoing_transition=(
-            outgoing_transition["transition"]
-            if outgoing_transition else None
-        ),
-        next_scene=(
-            outgoing_transition["next_scene"]
-            if outgoing_transition else None
-        ),
-        next_first_frame_desc=(
-            outgoing_transition["next_first_frame_desc"]
-            if outgoing_transition else None
-        ),
-        continuity_mode=continuity_mode,
-        prev_state_out=prompt_prev_state_out,
-        voice_bible=screenplay.voice_bible,
-        screenplay=screenplay,
-        video_generation_mode=(
-            shot_plan.mode.value if shot_plan is not None else decision.mode
-        ),
-        first_frame_source=first_frame_source,
-        boundary_relation_edit=boundary_relation_edit,
-        boundary_relation_action=boundary_relation_action,
-        boundary_start_state=boundary_start_state,
-        previous_prompt_text=previous_prompt_text,
-    )
-    raw_source_errors = prompt_source_provenance_errors(raw_prompt_text, shot)
-    prompt_text = ensure_source_excerpt_in_prompt(raw_prompt_text, shot)
-    if raw_source_errors:
-        prompt_scrub = {
-            "repair": "source_excerpt_prompt_scrub",
-            "matched_rules": raw_source_errors,
-        }
-        if preflight_repair:
-            preflight_repair = {
-                **preflight_repair,
-                "prompt_scrubbed": True,
-                "prompt_scrub_rules": raw_source_errors,
-            }
-        else:
-            preflight_repair = prompt_scrub
-    preflight_errors = preflight_seedance_gates(
-        shot,
-        prev=prev_shot,
-        prompt_text=prompt_text,
-        screenplay=screenplay,
-    )
-    if preflight_errors:
-        source_errors = prompt_source_provenance_errors(prompt_text, shot)
-        raise CompileError(
-            "；".join(preflight_errors),
-            retryable=bool(source_errors),
-            failure_kind="prompt_source_provenance" if source_errors else None,
+    if is_storyboard_pack_shot:
+        # prompt_text 已在分镜台阶段由模型直接产出并存进这一行的 adopted
+        # shot_versions.prompt_text（app.production.storyboard_pack.
+        # persist_storyboard_pack）；原样复用，不跑 compile_prompt/
+        # preflight_seedance_gates——那一整套面向单镜叙事契约字段
+        # （first_frame_desc/state_in/primary_action/...）的检查在这类行上
+        # 全部是空字段，不是"通过"也不是"该拦"，是这条检查本身不适用。
+        adopted_version_id = _row_value(shot_row, "adopted_version_id")
+        stored_version = (
+            conn.execute(
+                "SELECT prompt_text FROM shot_versions WHERE id=? AND shot_id=?",
+                (adopted_version_id, shot_id),
+            ).fetchone()
+            if adopted_version_id else None
         )
+        if stored_version is None or not str(stored_version["prompt_text"] or "").strip():
+            raise ValueError(
+                "[STORYBOARD_PACK_PROMPT_MISSING] 该分镜台 2.0.0 段没有已产出的 "
+                "prompt_text，请先在分镜台重新生成本段"
+            )
+        prompt_text = str(stored_version["prompt_text"])
+    else:
+        preflight_errors = preflight_seedance_gates(
+            shot,
+            prev=prev_shot,
+            prompt_text=None,
+            screenplay=screenplay,
+        )
+        if preflight_errors:
+            raise CompileError("；".join(preflight_errors))
+
+        raw_prompt_text = compile_prompt(
+            shot,
+            bible,
+            extra_negative,
+            with_refs=True,
+            from_scene=False,
+            chained=bool(chain_after_shot_id),
+            critique=critique,
+            prev_tail_action=None,
+            with_last_frame=False,
+            incoming_transition=incoming_transition,
+            outgoing_transition=(
+                outgoing_transition["transition"]
+                if outgoing_transition else None
+            ),
+            next_scene=(
+                outgoing_transition["next_scene"]
+                if outgoing_transition else None
+            ),
+            next_first_frame_desc=(
+                outgoing_transition["next_first_frame_desc"]
+                if outgoing_transition else None
+            ),
+            continuity_mode=continuity_mode,
+            prev_state_out=prompt_prev_state_out,
+            voice_bible=screenplay.voice_bible,
+            screenplay=screenplay,
+            video_generation_mode=(
+                shot_plan.mode.value if shot_plan is not None else decision.mode
+            ),
+            first_frame_source=first_frame_source,
+            boundary_relation_edit=boundary_relation_edit,
+            boundary_relation_action=boundary_relation_action,
+            boundary_start_state=boundary_start_state,
+            previous_prompt_text=previous_prompt_text,
+        )
+        raw_source_errors = prompt_source_provenance_errors(raw_prompt_text, shot)
+        prompt_text = ensure_source_excerpt_in_prompt(raw_prompt_text, shot)
+        if raw_source_errors:
+            prompt_scrub = {
+                "repair": "source_excerpt_prompt_scrub",
+                "matched_rules": raw_source_errors,
+            }
+            if preflight_repair:
+                preflight_repair = {
+                    **preflight_repair,
+                    "prompt_scrubbed": True,
+                    "prompt_scrub_rules": raw_source_errors,
+                }
+            else:
+                preflight_repair = prompt_scrub
+        preflight_errors = preflight_seedance_gates(
+            shot,
+            prev=prev_shot,
+            prompt_text=prompt_text,
+            screenplay=screenplay,
+        )
+        if preflight_errors:
+            source_errors = prompt_source_provenance_errors(prompt_text, shot)
+            raise CompileError(
+                "；".join(preflight_errors),
+                retryable=bool(source_errors),
+                failure_kind="prompt_source_provenance" if source_errors else None,
+            )
 
     # 参考图是分镜级素材。重抽、改词或带评语只创建新视频版本，不能重新跑参考图生成。
     reference_gallery = _load_reference_gallery(conn, shot_row)
@@ -1857,7 +1897,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         "supervisor_run_id": supervisor_run_id,
         "shot_contract_json": json.dumps(shot_contract_dict(shot), ensure_ascii=False),
         "video_prompt_contract_version": VIDEO_PROMPT_CONTRACT_VERSION,
-        "ai_video_prompt_required": True,
+        "ai_video_prompt_required": not is_storyboard_pack_shot,
         "ai_video_prompt_contract_target": AI_VIDEO_PROMPT_CONTRACT_VERSION,
         "ai_video_prompt_profile_target": target_prompt_profile.profile_id,
         "ai_video_prompt_profile_version_target": target_prompt_profile.version,

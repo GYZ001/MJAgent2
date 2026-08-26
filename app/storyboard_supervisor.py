@@ -2267,6 +2267,31 @@ async def run_storyboard_supervisor(
 
     if not ep["screenplay_json"] or ep["screenplay_status"] != "ready":
         raise StageError("分镜脚本", ["请先生成并确认本集可拍剧本，再展开分镜"])
+
+    # episode_prep_pack (screenplay contract 2.0.0, commit 48e01ff) episodes
+    # branch to a structurally different, much simpler generation path here
+    # -- before any of the legacy narrative_plan/outline/repair machinery
+    # below runs -- because that machinery is built around
+    # screenplay.narrative_plan / screenplay.events, which prep_pack payloads
+    # never have (the mapping stage stopped producing an event list by
+    # design; see docs/STORYBOARD_PROMPT_IR_DESIGN.md). Routing here instead
+    # of trying to patch each of the ~50 narrative-contract fields the legacy
+    # path assumes is what actually eliminates the silent-empty-projection
+    # failure mode (app.production.screenplay_authority
+    # .project_prep_pack_to_screenplay used to be reached from here with an
+    # always-empty event_chain): prep_pack episodes now simply never execute
+    # that code, instead of executing it against data it was never designed
+    # to consume.
+    from app.production.screenplay_authority import is_prep_pack_payload
+
+    raw_screenplay_payload = json.loads(ep["screenplay_json"])
+    if is_prep_pack_payload(raw_screenplay_payload):
+        from app.production.storyboard_pack import run_storyboard_pack_generation
+
+        return await run_storyboard_pack_generation(
+            episode_id, ep=ep, conn=conn, payload=raw_screenplay_payload, resume=resume,
+        )
+
     from app.production.screenplay_authority import resolve_downstream_screenplay
 
     try:

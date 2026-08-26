@@ -132,6 +132,24 @@ def _storyboard_structural_errors(storyboard: Storyboard) -> list[str]:
             seen.add(shot_no)
         if shot_no and shot_no != index:
             errors.append(f"shot_no={shot_no} 与顺序 {index} 不一致")
+        if shot.storyboard_pack_segment is not None:
+            # 分镜台 2.0.0（app.production.storyboard_pack）行：一行 = 一个 15
+            # 秒段，段内 3-4 镜写进 prompt_text 文本。shot_size/camera_move/
+            # first_frame_desc/last_frame_desc 描述单个连续镜头，在这类行上
+            # 结构性不存在，不能再要求非空——那会把这个字段集合从"必填"错误
+            # 地变成"永远不可能满足"。改要求这类行真正必须有的东西：
+            # prompt_text（模型产出、未经代码加工，见该模块 persist_storyboard_pack
+            # 的文档）与来源原文回指。
+            segment = shot.storyboard_pack_segment
+            if not str(segment.get("prompt_text") or "").strip():
+                errors.append(f"第 {shot_no or index} 镜（分镜台 2.0.0 段）缺少 prompt_text")
+            if not segment.get("source_segment_indexes"):
+                errors.append(f"第 {shot_no or index} 镜（分镜台 2.0.0 段）缺少 source_segment_indexes")
+            if not str(shot.scene_name or "").strip() and not str(shot.action_desc or "").strip():
+                errors.append(f"第 {shot_no or index} 镜缺少 scene_name/action_desc")
+            if int(shot.duration_s or 0) <= 0:
+                errors.append(f"第 {shot_no or index} 镜缺少有效 duration_s")
+            continue
         required = {
             "shot_size": shot.shot_size,
             "camera_move": shot.camera_move,
@@ -200,6 +218,56 @@ def _storyboard_operational_projection_errors(
     return errors
 
 
+def _evaluate_storyboard_pack_for_confirmation(
+    episode, storyboard: Storyboard, bible: Bible, *, target_duration_s: int | None = None,
+) -> ConfirmationEvaluation:
+    """确认评估：分镜台 2.0.0（app.production.storyboard_pack）产出的分支。
+
+    这条分支存在的原因：``evaluate_storyboard_for_confirmation`` 主体的
+    ``normalize_offbible_characters`` / ``prefer_default_shot_durations`` /
+    ``validate_storyboard_direction_contract`` / 逐镜 ``compile_prompt`` 等一整
+    条链路，都是为「一行 = 一个连续镜头、有完整叙事契约字段」的旧架构写的。
+    尤其是 ``compile_prompt`` 会用代码把 Shot 字段重新拼成一条提示词——这正是
+    分镜台 2.0.0 要去掉的行为（prompt_text 已由模型在分镜台阶段直接产出并
+    原样持久化，见 app.production.storyboard_pack 模块文档"交付前必须回答 #2"
+    的答案）。对分镜台 2.0.0 的行重新跑一遍旧链路，轻则产生一堆对空字段的
+    错误噪音，重则用编译器悄悄覆盖模型产出的 prompt_text，两者都不可接受，
+    所以整体短路成这一条专用、轻量的评估，而不是在旧函数里散落十几个
+    ``if shot.storyboard_pack_segment is not None`` 补丁。
+    """
+    from app.evaluations.issues import issues_from_messages
+    from app.harness.types import IssueSeverity
+    from app.validators import validate_storyboard, validate_storyboard_pack_dialogue
+
+    board = Storyboard.model_validate(storyboard.model_dump(mode="json"))
+    structural_errors = _storyboard_structural_errors(board)
+    structural_errors.extend(validate_storyboard_pack_dialogue(board))
+    # validate_storyboard 对这类行本身也已经短路成同一条最小结构检查（见其
+    # 函数体开头 storyboard_pack_segment 分支），这里复用而不是重复实现，
+    # 保持"判据只有一处"。
+    structural_errors.extend(
+        validate_storyboard(board, bible, target_duration_s or 0)
+    )
+    compact_target = sum(int(s.duration_s or 0) for s in board.shots) or _compact_episode_target(
+        target_duration_s if target_duration_s is not None else episode["target_duration_s"]
+    )
+    issues = issues_from_messages(
+        structural_errors,
+        subject=f"episode:{episode['id']}",
+        severity=IssueSeverity.ERROR,
+    )
+    est = sum(shot_cost_cny(s.duration_s) for s in board.shots)
+    return ConfirmationEvaluation(
+        passed=not structural_errors,
+        errors=structural_errors,
+        warnings=[],
+        issues=issues,
+        board=board,
+        compact_target=compact_target,
+        estimated_cost_cny=round(est, 2),
+    )
+
+
 def evaluate_storyboard_for_confirmation(
     episode,
     storyboard: Storyboard,
@@ -215,6 +283,13 @@ def evaluate_storyboard_for_confirmation(
 
     Supervisor 与确认门必须共用此函数，避免「Supervisor 认为通过、确认门又用另一套规则失败」。
     """
+    if storyboard.shots and all(
+        shot.storyboard_pack_segment is not None for shot in storyboard.shots
+    ):
+        return _evaluate_storyboard_pack_for_confirmation(
+            episode, storyboard, bible, target_duration_s=target_duration_s,
+        )
+
     from app.evaluations.issues import issues_from_messages
     from app.harness.types import IssueSeverity
     from app.continuity import dialogue_framing_errors

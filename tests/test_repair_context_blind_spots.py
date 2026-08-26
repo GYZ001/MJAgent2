@@ -171,6 +171,13 @@ _INTENTIONALLY_UNROUTED = {
     # 不在 ScreenplayDocument 上，剧本修复上下文里没有可切的目标。
     "characters",
     "scenes",
+    # 分镜台 2.0.0（app.production.storyboard_pack，见
+    # app.validators.storyboard_pack_dialogue_errors 的
+    # dialogue[{index}]）：这是 Shot.storyboard_pack_segment 冻结契约段记录
+    # 里的 dialogue[] 台词数组下标，不是 ScreenplayDocument 上的字段——
+    # episode_prep_pack 2.0.0 输入走的是全新的、不经过老「事件链->剧本
+    # ->大纲->逐镜」修复管线的生成路径，没有 ScreenplayDocument 可切。
+    "dialogue",
 }
 
 

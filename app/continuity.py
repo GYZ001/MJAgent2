@@ -210,7 +210,21 @@ def dialogue_framing_errors(
     strict_composition: bool = True,
     narrative_authority: bool = False,
 ) -> list[str]:
-    """对白镜头构图门禁：一镜一位画内说话人，默认单人近景/特写。"""
+    """对白镜头构图门禁：一镜一位画内说话人，默认单人近景/特写。
+
+    退役声明（docs/STORYBOARD_PROMPT_IR_DESIGN.md，用户 2026-08-26 拍板）：这条
+    规则的前提是「一个 Shot 行 = 一个连续镜头」，一行有唯一的 shot_size/
+    camera_move/characters_visible。分镜台 2.0.0（app.production.storyboard_pack）
+    产出的行是「一个 15 秒段 = 一个 Shot 行，段内 3-4 次镜头切换写在 prompt_text
+    文本里」，一行不再对应单一构图，这条规则的前提在这类行上不成立。这类行
+    的对白构图（谁近景、谁画外）由生成该段 prompt_text 的模型按方言规则自行
+    决定，不再由本函数逐镜校验；唯一还检查的对白正确性是「说话人在场 + 台词
+    有可溯源原文段落」，见 app.validators 的分镜台 2.0.0 台词闸门。因此这里对
+    Shot.storyboard_pack_segment 非 None 的行整体退役，不做静默改判（既不悄悄
+    通过也不悄悄报错），显式跳过。
+    """
+    if shot.storyboard_pack_segment is not None:
+        return []
     speakers = onscreen_dialogue_speakers(shot)
     if not speakers:
         return []
@@ -1643,6 +1657,10 @@ def shot_contract_dict(shot: Shot) -> dict[str, Any]:
         "reserved_future_event_ids": list(shot.reserved_future_event_ids or []),
         "readability_window_ids": list(shot.readability_window_ids or []),
         "narrative_boundary_from_previous": narrative_boundary,
+        # 分镜台 2.0.0（app.production.storyboard_pack）新架构行的冻结契约段
+        # 记录；非 None 时是本行 shot_size/camera_move 等单镜字段不再权威的
+        # 唯一权威标记，见 Shot.storyboard_pack_segment 的字段注释。
+        "storyboard_pack_segment": shot.storyboard_pack_segment,
     }
 
 
@@ -1724,6 +1742,9 @@ def apply_shot_contract(shot: Shot, payload: dict[str, Any] | str | None) -> Sho
         shot.legacy_unvalidated = bool(data["legacy_unvalidated"])
     if "is_final" in data:
         shot.is_final = bool(data["is_final"])
+    if "storyboard_pack_segment" in data:
+        segment = data["storyboard_pack_segment"]
+        shot.storyboard_pack_segment = dict(segment) if segment else None
     return shot
 
 
