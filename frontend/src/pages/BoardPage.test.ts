@@ -5,6 +5,7 @@ import {
   isStoryboardProblemShot,
   storyboardGateIssueLabel,
   storyboardEmptyCopy,
+  storyboardHeadlineLabel,
   storyboardPackBeatOverview,
   storyboardPackDegradedCapabilitiesExportText,
   storyboardPackResourceGapSummary,
@@ -235,6 +236,20 @@ describe('分镜台状态文案与问题筛选', () => {
     expect(storyboardShotCheckpointLabel(3, storyboardStatus())?.label).toBe('待校验')
     expect(storyboardShotCheckpointLabel(3, storyboardStatus({ state: 'confirmed' }))).toBeNull()
   })
+
+  it('顶部状态条把后端"镜已通过"文案收窄成"段"，与段落轨道的叫法统一，不误伤"分镜"本身', () => {
+    expect(storyboardHeadlineLabel('10/10 镜已通过，待完成发布证据')).toBe('10/10 段已通过，待完成发布证据')
+    expect(storyboardHeadlineLabel('9/17 镜已通过，待更新发布证据')).toBe('9/17 段已通过，待更新发布证据')
+    expect(storyboardHeadlineLabel('9/17 镜已通过，等待确认')).toBe('9/17 段已通过，等待确认')
+    expect(storyboardHeadlineLabel('分镜任务进行中，当前处理第 3 镜')).toBe('分镜任务进行中，当前处理第 3 段')
+    expect(storyboardHeadlineLabel('局部修复已暂停，将从第 3 镜继续')).toBe('局部修复已暂停，将从第 3 段继续')
+    expect(storyboardHeadlineLabel('整集修复已暂停，可继续修复现有问题镜')).toBe('整集修复已暂停，可继续修复现有问题段')
+    expect(storyboardHeadlineLabel('生成停在第 5 镜，可继续处理')).toBe('生成停在第 5 段，可继续处理')
+    // "分镜"本身不受影响：不含数字/问题的"镜"字样原样保留
+    expect(storyboardHeadlineLabel('当前分镜已确认')).toBe('当前分镜已确认')
+    expect(storyboardHeadlineLabel('分镜台处于安全只读模式，可继续审阅')).toBe('分镜台处于安全只读模式，可继续审阅')
+    expect(storyboardHeadlineLabel('剧本已就绪，尚未生成分镜')).toBe('剧本已就绪，尚未生成分镜')
+  })
 })
 
 describe('分镜台段落展示（docs/STORYBOARD_PROMPT_IR_DESIGN.md 冻结契约）', () => {
@@ -266,6 +281,32 @@ describe('分镜台段落展示（docs/STORYBOARD_PROMPT_IR_DESIGN.md 冻结契�
       { beat_id: 'B01', summary: '获得密信', segment_nos: [2, 3] },
       { beat_id: 'B02', summary: '密信现踪', segment_nos: [1, 2] },
     ])
+  })
+
+  it('节拍概览按 beat_id 里的数字自然排序，不按字符串字典序（真实 EP1 数据：b10/b11.../b16 不会插到 b1 和 b2 之间）', () => {
+    const naturalOrder = [
+      'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9',
+      'b10', 'b11', 'b12', 'b13', 'b14', 'b15', 'b16',
+    ]
+    // 字符串字典序会把这份输入排成 b1,b10,b11..b16,b2,b3..b9——这正是线上复现的乱序；
+    // 这里故意打乱输入的 shots 顺序、segment_no 也不按 beat 编号递增，
+    // 证明排序结果只取决于 beat_id 的数字，不依赖 shots 数组或段号顺序。
+    const shuffled = [...naturalOrder].sort((a, b) => a.localeCompare(b))
+    const shots = shuffled.map((beatId, index) => packShot(
+      { id: `s-${beatId}` },
+      { segment_no: shuffled.length - index, beats: [{ beat_id: beatId, summary: `节拍 ${beatId}`, segment_indexes: [shuffled.length - index] }] },
+    ))
+    expect(storyboardPackBeatOverview(shots).map(entry => entry.beat_id)).toEqual(naturalOrder)
+  })
+
+  it('beat_id 没有数字时排到最后而不是抛错或打乱其余节拍', () => {
+    const shots = [
+      packShot({ id: 's1' }, { segment_no: 1, beats: [{ beat_id: 'intro', summary: '开场', segment_indexes: [1] }] }),
+      packShot({ id: 's2' }, { segment_no: 2, beats: [{ beat_id: 'b2', summary: '密信现踪', segment_indexes: [2] }] }),
+      packShot({ id: 's3' }, { segment_no: 3, beats: [{ beat_id: 'b1', summary: '获得密信', segment_indexes: [3] }] }),
+    ]
+    expect(() => storyboardPackBeatOverview(shots)).not.toThrow()
+    expect(storyboardPackBeatOverview(shots).map(entry => entry.beat_id)).toEqual(['b1', 'b2', 'intro'])
   })
 
   it('节拍概览在没有任何段落行时返回空数组，不是抛错或编造数据', () => {

@@ -64,6 +64,24 @@ export type StartPreview = {
 export type StoryboardPackBeatOverviewEntry = { beat_id: string; summary: string; segment_nos: number[] }
 
 /**
+ * 节拍表的排序键：从 beat_id 里提取数字自然排序，不按字符串字典序——字典序会把
+ * "b10" 排到 "b2" 前面（真实 EP1 数据验证过：16 个节拍字符串排序后是
+ * b1,b10,b11..b16,b2,b3..b9，整张节拍表的推进顺序全乱）。beat_id 的具体形状
+ * （"b<数字>"）不是冻结契约保证的稳定形状，所以只抓"第一段数字"，前缀是什么不重要；
+ * 抓不到数字的 id 统一排到最后（Infinity），不抛错也不按字典序静默重排——多个 id
+ * 并列同一个数字（或都没有数字）时，交给下面 Array.prototype.sort 的稳定排序退回
+ * byBeat 的插入顺序，也就是遍历 shots/beats[] 的原始次序，不需要额外写 tie-break。
+ * 没有采用"按 segment_indexes 最小值排序"：那个信号在 B01 先出现于后段、B02
+ * 先出现于前段这类真实场景里可能和 beat_id 本身的编号方向相反，会引入一个新的
+ * 不一致来源；beat_id 的数字就是用户在节拍表里直接看到的东西，按它自然排序最直接
+ * 对应"一眼看出这一集怎么推进"的诉求。
+ */
+function naturalBeatOrderKey(beatId: string): number {
+  const match = beatId.match(/\d+/)
+  return match ? Number(match[0]) : Number.POSITIVE_INFINITY
+}
+
+/**
  * 节拍概览：按每段自带的 beats（自包含 beat_id/summary/segment_indexes，见
  * api.ts 的 StoryboardPackSegmentBeat 注释）反推"哪个节拍进了哪一段、在讲什么"。
  * 不再读裸 beat_ids——那是没有摘要的过渡期字段，展示一律改用 beats。
@@ -82,7 +100,7 @@ export function storyboardPackBeatOverview(shots: Shot[]): StoryboardPackBeatOve
     }
   }
   return [...byBeat.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
+    .sort(([a], [b]) => naturalBeatOrderKey(a) - naturalBeatOrderKey(b))
     .map(([beat_id, entry]) => ({ beat_id, summary: entry.summary, segment_nos: [...entry.segmentNos].sort((a, b) => a - b) }))
 }
 
@@ -207,6 +225,24 @@ export function storyboardGateIssueLabel(message: string): string {
     .replaceAll('last_frame_desc', '结束状态')
     .replaceAll('QA', '质检')
     .replaceAll('门禁', '必检项')
+}
+
+/**
+ * status.headline 是后端整集状态文案（app/domain/storyboard_ops.py），那边把 shots
+ * 表的每一行统称"镜"；但分镜台的段落视图早就只剩"段"一种展示单位（见本文件
+ * isStoryboardPackSegmentShot 的注释：一个 15 秒段 = shots 表一行，段内 3-4 镜写进
+ * prompt_text 文本、不拆成独立数据行）。顶部状态条一句"10/10 镜已通过"和下方
+ * "段落轨道""段 01""3 镜切换"同屏出现，会让人误以为 10 个 15 秒段还要再拆成
+ * 10 个镜头。这里只在展示层收窄，不改后端措辞：只替换"数字/数字 镜已通过""第 N
+ * 镜""问题镜"这几个明确指"shots 表一行"的模式，不动"分镜"这个词本身（下面两条
+ * 正则都要求"镜"前面紧跟数字或"问题"二字，不会命中"分镜任务""当前分镜已确认"里的
+ * "分镜"）。
+ */
+export function storyboardHeadlineLabel(headline: string): string {
+  return headline
+    .replace(/(\d+\/\d+)\s*镜已通过/g, '$1 段已通过')
+    .replace(/第\s*(\d+)\s*镜/g, '第 $1 段')
+    .replaceAll('问题镜', '问题段')
 }
 
 type StoryboardProgressCopy = {
@@ -1068,7 +1104,7 @@ export default function BoardPage() {
           <div className="board-state-copy">
             <span className={`storyboard-state-dot state-${status.state}`} aria-hidden="true" />
             <div>
-              <strong id="storyboard-state-title">{status.headline}</strong>
+              <strong id="storyboard-state-title">{storyboardHeadlineLabel(status.headline)}</strong>
               <small>{progressCopy.summary}{terminalFinalShot ? ' · 收尾段有效' : ''}</small>
             </div>
           </div>

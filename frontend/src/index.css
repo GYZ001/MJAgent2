@@ -7234,6 +7234,11 @@ label.f {
   .shot-navigator-head > div:first-child > span {
     display: none;
   }
+  /* 分镜台移动端整改：段落轨道横向滚动在窄屏下只够露出两张半卡片，翻页体验差；
+     比 800px 断点再收窄一档，让一屏能看到约三张完整卡片。 */
+  .shot-navigator-list button {
+    flex-basis: 112px;
+  }
 }
 
 /* 分镜台整改：权威状态、筛选、分层编辑与窄屏安全区 */

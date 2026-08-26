@@ -420,6 +420,57 @@
   .storyboard-preview-card dl {
       grid-template-columns: 1fr;
     }
+  /* 移动端主诉①：视频模型选择器与两个操作按钮换行后各自靠右对齐，行与行错位。
+     改成整组纵向堆叠、每行一个控件，彻底消掉"换行后对不齐"的问题；
+     .board-action-group 的 align-items:stretch 让每个控件自然撑满整行宽度，
+     不需要逐个再写 width:100%。 */
+  .board-action-group {
+      flex-direction: column;
+      align-items: stretch;
+      justify-content: flex-start;
+    }
+  .board-action-group > label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+  /* 移动端主诉①：节拍概览每一行左边长文本、右边"第 N 段"徽标同层排布，
+     文本换行后徽标被挤到第二行末尾，行与行对不齐。窄屏下把徽标挪到 beat_id
+     同一行（用 order 把它排在 <b> 后面），摘要整行独占第二行，不再抢位置。 */
+  .storyboard-pack-beat-list li {
+      align-items: center;
+    }
+  .storyboard-pack-beat-list b {
+      order: 1;
+    }
+  .storyboard-pack-beat-locator {
+      order: 2;
+    }
+  .storyboard-pack-beat-summary {
+      order: 3;
+      flex-basis: 100%;
+    }
+  /* 移动端主诉①：段落卡片底部六个信息 chip 挤成两行、间距过紧，加宽行间距
+     （row-gap）与列间距，不增删任何 chip。 */
+  .storyboard-pack-meta-strip {
+      gap: 8px 10px;
+    }
+  /* 移动端主诉①：段落轨道横向滚动只能看到两张半卡片，不好靠滑动翻页；
+     窄屏下收窄单卡宽度的覆盖规则在 index.css（.shot-navigator-list button 的基础
+     定义就在那——check_css_split.py 把它判给"共享/全局"：BoardPage.tsx 里
+     shot.id === selectedShot?.id 这个动态 className 表达式被脚本的类名提取逻辑
+     误当成"shot"这个类在本页出现，恰好 WallPage 也有同名误判，脚本按类名前缀
+     shot- 判归属时就冲突了，是脚本对动态 className 的已知局限，不是真的跨页复用；
+     照抄这条选择器本来就住在 index.css 的先例，见下方同名规则）。 */
+  /* 移动端主诉②：固定定位的汉堡菜单按钮（.mobile-nav-trigger，见 index.css）
+     滚动时会短暂盖住刚滚到视口顶部的一行文字——这是应用外壳里任何固定角标按钮
+     的通用副作用，不专属本页，也不该为了它改全站导航的视觉方案。这里只做本页
+     力所能及的缓解：节拍概览是页面最早出现、最容易在自然停手的滚动位置正好卡在
+     按钮下方的卡片，加一点顶部间距降低这种停手位置的命中概率。 */
+  .storyboard-pack-overview {
+      margin-top: 24px;
+    }
 }
 .narrative-readiness {
   position: relative;
