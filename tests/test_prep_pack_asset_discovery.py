@@ -4167,6 +4167,377 @@ def _fake_chunk_response(*, display_name: str = "沈师姐") -> "prep_pack._Chun
     )
 
 
+# ---------------------------------------------------------------------------
+# 2.0.0 新增字段补测（架构改造 48e01ff 遗留的测试缺口）：props（道具，文字
+# 描述，无图像素材库）与 appellation_map（模糊称谓 -> 人物谱正名的显式映射
+# 表）此前在整个 tests/ 目录下没有任何断言落在产出的 payload 上——128 个
+# 测试全绿是因为没有一条在看新东西。断言必须落在 _resolve_assets/
+# _prep_pack_build_prop_manifest/_prep_pack_build_appellation_map 实际产出
+# 的字典/列表内容上，不是"字段存在"这种空判据。
+# ---------------------------------------------------------------------------
+
+def test_prop_mention_with_literal_evidence_appears_in_asset_manifest_props():
+    """模型报了一个道具、逐字出现在它自己申报的段落里——必须出现在
+    asset_manifest.props，label/description/segment_indexes 三项均须与
+    提及一致（还原生产 payload 形状，不是只查字段是否存在）。"""
+    conn = _make_conn()
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
+        conn,
+        source_text="萧炎从怀中取出一枚血玉玦，放在桌上。",
+        prop_mentions=[{
+            "label": "血玉玦",
+            "description": "一枚泛着血光的玉玦，边缘刻着古老符文",
+            "segment_indexes": [1],
+        }],
+    )
+    assert errors == []
+    assert props == [{
+        "label": "血玉玦",
+        "description": "一枚泛着血光的玉玦，边缘刻着古老符文",
+        "segment_indexes": [1],
+        "provenance": {
+            "method": "direct", "anchor_segments": [1], "anchor_phrase": "血玉玦",
+        },
+    }]
+
+
+def test_prop_mention_without_literal_evidence_is_blocked_not_published():
+    """道具没有角色/场景侧那种别名注册表/身份发现豁免路径（2.0.0 有意
+    为之，见 _prep_pack_build_prop_manifest 上方大注释）：编造的、原文里
+    查无实据的道具必须被挡掉，绝不能进 asset_manifest.props——跟场景侧
+    "没证据就当未解析"同一处置，是合法丢弃，不是需要报错阻断门禁的失败。"""
+    conn = _make_conn()
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
+        conn,
+        source_text="萧炎从怀中取出一枚血玉玦，放在桌上。",
+        prop_mentions=[{
+            "label": "屠龙宝刀",
+            "description": "一把传说中的绝世神兵",
+            "segment_indexes": [1],
+        }],
+    )
+    assert props == [], "原文里一次都没出现过的道具绝不能进 asset_manifest.props"
+    assert errors == [], "道具证据缺失是合法丢弃，不是需要阻断整体发布的门禁错误"
+
+
+def test_prop_mention_claiming_unverified_segment_keeps_only_evidenced_segment():
+    """混合场景：提及自报了两个段号，但道具字样只在其中一段真的逐字出现——
+    逐段字面证据闸必须只保留验得过的那一段，不是"整条提及要么全收要么
+    全弃"，也不是把没证据的段号一并放行发布。"""
+    conn = _make_conn()
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
+        conn,
+        source_text=(
+            "萧炎从怀中取出一枚血玉玦，放在桌上。"
+            "\n\n林動只是随口一提往事，并未提到那枚玉玦。"
+        ),
+        prop_mentions=[{
+            "label": "血玉玦",
+            "description": "一枚泛着血光的玉玦",
+            "segment_indexes": [1, 2],
+        }],
+    )
+    assert len(props) == 1
+    assert props[0]["segment_indexes"] == [1], (
+        "第2段申报没有道具字样的字面证据，必须被剔除，不能整条放行"
+    )
+
+
+def test_prop_appearing_in_multiple_segments_merges_segment_indexes_as_union():
+    """同一道具由两条不同提及分别在两段各命中一次——manifest 里必须是并集
+    [1, 2]，不能被后处理的第二条提及覆盖成只剩最后一次命中的段号。"""
+    conn = _make_conn()
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
+        conn,
+        source_text=(
+            "萧炎从怀中取出一枚血玉玦，放在桌上。"
+            "\n\n林動盯着那枚血玉玦，若有所思。"
+        ),
+        prop_mentions=[
+            {"label": "血玉玦", "description": "一枚泛着血光的玉玦", "segment_indexes": [1]},
+            {"label": "血玉玦", "description": "一枚泛着血光的玉玦", "segment_indexes": [2]},
+        ],
+    )
+    assert len(props) == 1, "同一 label 的两条提及必须合并为 manifest 里的同一条道具，不是两条"
+    assert props[0]["segment_indexes"] == [1, 2], (
+        "两条提及各自命中不同段落，必须合并为排序去重的并集，不是被第二条覆盖"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 角色侧 segment_indexes 并集推导：既有断言只覆盖过单条提及、单段命中的
+# entry["segment_indexes"] == [1] 这一种最简单形状（test_known_alias_
+# flagged_as_background_extra_still_binds_to_its_portrait 等）。这里补一条
+# 同一角色被两条不同措辞的提及分别命中、分落不同段落的场景。
+# ---------------------------------------------------------------------------
+
+def test_character_manifest_segment_indexes_is_union_of_multiple_mentions_not_overwrite(
+    monkeypatch,
+):
+    """manifest 条目的 segment_indexes 必须是全部贡献提及的并集（排序
+    去重）：如果实现退化成"后一条提及直接覆盖"，第二条提及处理完后 entry
+    会丢失第一条提及贡献的段号 1。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-lfg','p1','李富贵',1,NULL)"
+    )
+    _seed_bible_characters(conn, "p1", [
+        _bible_character("李富贵", aliases=[_bible_alias("小胖子")]),
+    ])
+
+    def boom_character(*_a, **_k):
+        raise AssertionError("别名注册表命中唯一目标，不应该回炉重新消歧")
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+
+    events = [_event("ev_001", characters=[
+        {"display_name": "李富贵", "is_background_extra": False},
+        {"display_name": "小胖子", "is_background_extra": False},
+    ])]
+    characters, *_ = _resolve(
+        conn, events=events, episode_no=1,
+        source_text="李富贵站在门口。\n\n小胖子挥了挥手。\n\n小胖子又笑了笑。",
+    )
+    by_portrait = {c["portrait_id"]: c for c in characters}
+    assert by_portrait["cp-lfg"]["segment_indexes"] == [1, 2, 3], (
+        "'李富贵'命中段1、'小胖子'命中段2和3，必须在同一 manifest 条目里"
+        "合并为排序去重的并集 [1, 2, 3]，不能被后处理的提及覆盖丢失先前"
+        "贡献的段号"
+    )
+
+
+# ---------------------------------------------------------------------------
+# appellation_map（2.0.0 新增，2.0.1 重做真源）：直接消费 _resolve_assets
+# 解析每条角色提及时原地记下的结论（见 _prep_pack_build_appellation_map
+# 上方"2.0.1 根因"大注释），不再拿 characters[].aliases 反查
+# character_mentions——旧实现把"能不能安全进跨集别名注册表"（aliases 的
+# 门槛）误当成"这条提及有没有解析出身份"的判据，导致合成描述性称谓
+# （"穿杂役衫的魁梧大汉"一类）已经真实解析成功却从映射表里静默消失，
+# 详见 tests/test_prep_pack_asset_discovery.py 里 2.0.1 之前的
+# _known_bug 版本（已改成正向断言，见下方
+# test_appellation_map_includes_resolved_composite_description_mention）。
+# ---------------------------------------------------------------------------
+
+def test_appellation_map_maps_ambiguous_mention_to_canonical_name_not_raw_text():
+    """单元测试：直接喂给 _prep_pack_build_appellation_map 一条已解析
+    结论（_resolve_assets 通过 appellation_resolutions 出参记录的形状），
+    映射行必须给出人物谱正名，不是把模糊称谓原样透传。"""
+    resolutions = [{
+        "raw_mention": "小胖子", "segment_indexes": [3],
+        "identity_id": "bible:李富贵", "canonical_appellation": "李富贵",
+    }]
+    rows = prep_pack._prep_pack_build_appellation_map(resolutions)
+    assert rows == [{
+        "raw_mention": "小胖子", "segment_index": 3,
+        "identity_id": "bible:李富贵", "canonical_appellation": "李富贵",
+    }]
+    assert rows[0]["canonical_appellation"] != "小胖子", (
+        "canonical_appellation 必须是人物谱正名，不是原始模糊称谓原样透传"
+    )
+
+
+def test_appellation_map_multiple_appellations_for_same_person_all_point_to_same_identity():
+    """同一个人的多个不同称谓（小胖子/胖公子/李富贵本名）各自成行，必须
+    都指向同一个 identity_id、同一个正名——不是各算各的、也不是只保留
+    最后一个。"""
+    resolutions = [
+        {"raw_mention": "小胖子", "segment_indexes": [1],
+         "identity_id": "bible:李富贵", "canonical_appellation": "李富贵"},
+        {"raw_mention": "胖公子", "segment_indexes": [2],
+         "identity_id": "bible:李富贵", "canonical_appellation": "李富贵"},
+        {"raw_mention": "李富贵", "segment_indexes": [3],
+         "identity_id": "bible:李富贵", "canonical_appellation": "李富贵"},
+    ]
+    rows = prep_pack._prep_pack_build_appellation_map(resolutions)
+    assert {row["raw_mention"] for row in rows} == {"小胖子", "胖公子", "李富贵"}
+    assert {row["identity_id"] for row in rows} == {"bible:李富贵"}
+    assert {row["canonical_appellation"] for row in rows} == {"李富贵"}
+    assert len(rows) == 3
+
+
+def test_appellation_map_matches_resolve_assets_alias_registry_conclusion(monkeypatch):
+    """appellation_map 不是第二条消歧路径：人物谱别名注册表命中（零消歧
+    调用直接绑定"小胖子"->李富贵，见 test_character_alias_registry_binds_
+    via_bible_aliases_with_zero_other_episodes）时，_resolve_assets 通过
+    appellation_resolutions 出参记下的结论必须原样流进 appellation_map，
+    不是另算一遍消歧。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-lfg','p1','李富贵',1,NULL)"
+    )
+    _seed_bible_characters(conn, "p1", [
+        _bible_character("李富贵", aliases=[
+            _bible_alias("小胖子", name_kind="referential", evidence_chapter_index=2,
+                         evidence_quote="小胖子憨憨一笑，抓了抓头。"),
+        ]),
+    ])
+
+    def boom_character(*_a, **_k):
+        raise AssertionError("人物谱别名命中唯一目标，不应该回炉重新消歧")
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+
+    events = [_event("ev_001", characters=[
+        {"display_name": "小胖子", "is_background_extra": False},
+    ])]
+    source_text = "小胖子憨憨一笑，抓了抓头。"
+    appellation_resolutions: list[dict] = []
+    _resolve(
+        conn, events=events, episode_no=1, source_text=source_text,
+        appellation_resolutions=appellation_resolutions,
+    )
+
+    appellation_map = prep_pack._prep_pack_build_appellation_map(appellation_resolutions)
+    rows = [row for row in appellation_map if row["raw_mention"] == "小胖子"]
+    assert rows, "appellation_map 必须收录别名注册表命中的这条称谓"
+    assert all(row["identity_id"] == "bible:李富贵" for row in rows)
+    assert all(row["canonical_appellation"] == "李富贵" for row in rows)
+    assert all(row["segment_index"] == 1 for row in rows)
+
+
+def test_appellation_map_includes_resolved_composite_description_mention(monkeypatch):
+    """2.0.1 回归（原为已知 bug 的红灯，现改为正向断言，见
+    _prep_pack_build_appellation_map 上方"2.0.1 根因"大注释）：合成描述性
+    称谓（"穿杂役衫的魁梧大汉"经消歧正确解析到赵武刚，按 aliases 的字面
+    证据门槛不会进别名库——见 test_composite_description_resolved_via_
+    discovery_bypasses_literal_gate）真实发布进 asset_manifest.characters
+    之后，必须出现在 appellation_map 里——这正是这个字段存在的理由本身
+    （模糊称谓 -> 正名）。appellation_map 不该拿 aliases 的字面证据门槛
+    当自己的真源。
+
+    生产链路里 segment_indexes 由模型自报、只经过结构闸（见
+    _prep_pack_gate_segment_indexes 上方说明），不要求标签本身逐字出现——
+    跟本文件模块级 _mentions_with_segment_indexes 测试夹具（逐字搜索算
+    段号，会让这种合成标签自然拿到空段号，从而巧合地掩盖这条回归想验证
+    的东西）不同，这里手写 character_mentions 还原生产真实形态：合成
+    标签依然携带非空 segment_indexes。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-zwg','p1','赵武刚',1,NULL)"
+    )
+    conn.commit()
+
+    async def fake_disambiguate(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {
+            "added": [], "skipped": [],
+            "resolutions": [{
+                "source_label": "穿杂役衫的魁梧大汉", "canonical_name": "赵武刚",
+                "resolution": "future_identity",
+            }],
+            "errors": [], "warnings": [],
+        }
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_disambiguate)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    character_mentions = [{
+        "display_name": "穿杂役衫的魁梧大汉", "suspected_true_name": None,
+        "segment_indexes": [1],
+    }]
+    source_text = "一个穿着杂役衫的魁梧男子闯了进来，凶狠地看了众人一眼。"
+    appellation_resolutions: list[dict] = []
+    characters, *_ = _resolve(
+        conn, character_mentions=character_mentions, source_text=source_text,
+        appellation_resolutions=appellation_resolutions,
+    )
+    zwg = next(c for c in characters if c["display_name"] == "赵武刚")
+    assert "穿杂役衫的魁梧大汉" not in zwg["aliases"], (
+        "既有既定行为不变：合成描述短语不进别名注册表（防止污染跨集别名库）"
+    )
+
+    appellation_map = prep_pack._prep_pack_build_appellation_map(appellation_resolutions)
+    assert appellation_map == [{
+        "raw_mention": "穿杂役衫的魁梧大汉", "segment_index": 1,
+        "identity_id": "bible:赵武刚", "canonical_appellation": "赵武刚",
+    }], (
+        "合成描述性称谓已经真实解析成功、发布进 asset_manifest.characters，"
+        "必须出现在 appellation_map 里，不能因为它同时也不满足 aliases 的"
+        "字面证据门槛就被连带静默丢弃"
+    )
+
+
+def test_appellation_map_identity_id_always_matches_asset_manifest_characters(monkeypatch):
+    """协调方验收要求：appellation_map 每一行的 identity_id 必须能在
+    asset_manifest.characters 里找到同一个 identity_id 的条目，且
+    canonical_appellation 与那个条目的 display_name 一致——两处不能各说
+    各话。混合三种解析路径覆盖：裸直接命中（孟浩）、别名注册表命中
+    （小胖子 -> 李富贵）、消歧发现命中的合成描述（穿杂役衫的魁梧大汉 ->
+    赵武刚，唯一会触发发现调用的一条，因为它既不是已知名字也不在别名
+    注册表里）。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-mh','p1','孟浩',1,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-lfg','p1','李富贵',1,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp-zwg','p1','赵武刚',1,NULL)"
+    )
+    _seed_bible_characters(conn, "p1", [
+        _bible_character("孟浩"),
+        _bible_character("李富贵", aliases=[_bible_alias("小胖子")]),
+        _bible_character("赵武刚"),
+    ])
+
+    async def fake_disambiguate(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        return {
+            "added": [], "skipped": [],
+            "resolutions": [{
+                "source_label": "穿杂役衫的魁梧大汉", "canonical_name": "赵武刚",
+                "resolution": "future_identity",
+            }],
+            "errors": [], "warnings": [],
+        }
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_disambiguate)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+
+    character_mentions = [
+        {"display_name": "孟浩", "suspected_true_name": None, "segment_indexes": [1]},
+        {"display_name": "小胖子", "suspected_true_name": None, "segment_indexes": [1]},
+        {"display_name": "穿杂役衫的魁梧大汉", "suspected_true_name": None, "segment_indexes": [2]},
+    ]
+    source_text = (
+        "孟浩看着小胖子憨憨一笑。"
+        "\n\n一个穿着杂役衫的魁梧男子闯了进来，凶狠地看了众人一眼。"
+    )
+    appellation_resolutions: list[dict] = []
+    characters, *_ = _resolve(
+        conn, character_mentions=character_mentions, source_text=source_text,
+        appellation_resolutions=appellation_resolutions,
+    )
+    assert {c["display_name"] for c in characters} == {"孟浩", "李富贵", "赵武刚"}, (
+        "夹具前提：三条提及必须都真的解析成功，否则下面的一致性断言没有意义"
+    )
+
+    appellation_map = prep_pack._prep_pack_build_appellation_map(appellation_resolutions)
+    assert appellation_map, "映射表不能是空的，否则一致性断言是空真"
+
+    characters_by_identity = {c["identity_id"]: c for c in characters}
+    for row in appellation_map:
+        match = characters_by_identity.get(row["identity_id"])
+        assert match is not None, (
+            f"appellation_map 行 identity_id={row['identity_id']!r} 在 "
+            "asset_manifest.characters 里找不到同一个 identity_id 的条目"
+            "——两处各说各话"
+        )
+        assert row["canonical_appellation"] == match["display_name"], (
+            "canonical_appellation 必须和 asset_manifest.characters 里同一"
+            "实体的 display_name 一致"
+        )
+    # 反向也要成立：三个身份都真的在映射表里露过面，不是巧合只覆盖了其中
+    # 一部分——排除掉两处"各说各话"以另一种方式蒙混过关（比如某个身份
+    # 干脆没有任何映射行、却也没有被上面的循环揭穿）。
+    assert {row["identity_id"] for row in appellation_map} == set(characters_by_identity)
+
+
 def test_prep_pack_version_is_1_8_0():
     """版本号哨兵：本次改造（未解析角色标签候选判别——真实 EP1"银色长袍
     女子"应绑定许清却因标签类型对不上落 functional_extras 的用户诉求收口）
@@ -4228,5 +4599,17 @@ def test_prep_pack_version_is_1_8_0():
     段号，真实重新推导，不是改名），新增 props（道具，文字描述，无图像
     素材）与 appellation_map（模糊称谓 -> 人物谱精准称谓的显式映射表）。
     这是本文件版本号推进历史里第一次真正的 schema 大版本位变更（此前全部
-    是次版本/修订号），函数名沿用旧号不改，只更新断言值。"""
-    assert prep_pack.PREP_PACK_VERSION == "2.0.0"
+    是次版本/修订号），函数名沿用旧号不改，只更新断言值。
+
+    2.0.1（bug fix，补 2.0.0 appellation_map/props 测试缺口过程中发现、
+    协调方独立复现确认，见 app/production/prep_pack.py 模块 docstring 的
+    2.0.1 大注释与 _prep_pack_build_appellation_map 上方"2.0.1 根因"）：
+    appellation_map 的构造真源从"拿 characters[].aliases 反查
+    character_mentions"改成"_resolve_assets 解析每条角色提及时原地记录
+    自己的结论"——旧实现把 aliases 的字面证据门槛（保护跨集别名注册表）
+    误当成"这条提及有没有解析出身份"的判据，导致已经真实解析成功、发布进
+    asset_manifest.characters 的合成描述性称谓（"穿杂役衫的魁梧大汉"一类）
+    从 appellation_map 里静默消失。产出语义变更（appellation_map 实际
+    行数），比照 1.4.1/1.6.1/1.8.1-1.8.5/1.9.0/1.10.0/1.11.1 的先例推进
+    版本号第三位，不动 schema 位。"""
+    assert prep_pack.PREP_PACK_VERSION == "2.0.1"

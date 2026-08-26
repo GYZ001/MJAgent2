@@ -236,7 +236,7 @@ from app.validators import (
 # stay defined in app/validators.py, unused-but-not-deleted (same "dormant,
 # not deleted" precedent as app/production/screenplay_repair.py), still
 # exercised directly by tests/test_prep_pack_coverage.py.
-PREP_PACK_VERSION = "2.0.0"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "2.0.1"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
 # gained functional_extras; 1.4.0: coverage_ledger gained paratext (deterministic
 # keyword/position classifier, since replaced); 1.4.1: paratext classification
@@ -975,6 +975,20 @@ PREP_PACK_VERSION = "2.0.0"  # 1.1.0: event_chain entries carry source_span (P1 
 # episodes.hook/episodes.cliffhanger 写入本来就会被 app/production/
 # publish.py 在真正发布时用 script.ending_hook 覆盖（那是发布时的权威
 # 来源，不是 prep_pack 阶段的），prep_pack 不再预写这两列不是能力回退。
+#
+# 2.0.1（bug fix，补测试缺口过程中发现、协调方独立复现确认）：appellation_
+# map 的构造真源从"拿 characters[].aliases 反查 character_mentions"改成
+# "_resolve_assets 在解析每条角色提及时原地记录自己的结论"（见
+# _prep_pack_build_appellation_map 上方"2.0.1 根因"大注释）。根因是拿
+# aliases 的字面证据门槛（保护跨集别名注册表不被合成标签污染的判据）冒充
+# "这条提及有没有解析出身份"的判据——两者是不同维度，混用后模糊/描述性
+# 称谓（"穿杂役衫的魁梧大汉"一类，恰是这张表存在的理由本身）在已经真实
+# 解析成功、发布进 asset_manifest.characters 的情况下仍会从 appellation_
+# map 里静默消失。aliases 字段本身的语义/门槛不变；_resolve_assets 新增
+# 可选出参 appellation_resolutions（默认 None，不影响其余全部既有调用点
+# 的返回元组形状）。产出语义变更（appellation_map 的实际行数、不是字段
+# 形状），比照 1.4.1/1.6.1/1.8.1-1.8.5/1.9.0/1.10.0/1.11.1 的先例推进
+# 版本号第三位，不动 schema 位。
 QA_PROFILE_VERSION = "prep-pack-qa-gate-1"
 _QA_EVALUATOR_NAME = "screenplay_production_qa"
 _CHUNK_MAX_CHARS = 6000
@@ -3111,6 +3125,7 @@ async def _resolve_assets(
     scene_mentions: list[dict[str, Any]],
     prop_mentions: list[dict[str, Any]],
     run_id: str | None,
+    appellation_resolutions: list[dict[str, Any]] | None = None,
 ) -> tuple[
     list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]],
     list[str], dict[str, int],
@@ -3180,6 +3195,21 @@ async def _resolve_assets(
     exact known name (a genuine one-off extra with no real name, not just a
     new named character) also routes through discovery so it can receive a
     real disposition instead of being assumed one way or the other.
+
+    ``appellation_resolutions`` (2.0.1 bug fix, see the note above
+    ``_prep_pack_build_appellation_map``): an optional out-parameter -- when
+    the caller passes a list, this function extends it in place with one
+    record per successfully-resolved character mention (``raw_mention``,
+    ``segment_indexes``, ``identity_id``, ``canonical_appellation``), read
+    directly off the same manifest entry each mention just resolved to
+    inside ``_pass()``. This is deliberately NOT folded into this function's
+    own return tuple: that tuple is asserted against verbatim (fixed arity,
+    no ``*_``) by dozens of existing tests, and this is a pure additive
+    capability for one caller (``_generate_prep_pack_once``'s appellation_map
+    construction) -- an optional, ignore-by-default parameter keeps every
+    existing caller's contract untouched. Defaults to ``None`` (no
+    recording), which is what every call site except
+    ``_generate_prep_pack_once`` uses.
     """
     stats = {"character_discovery_calls": 0, "scene_discovery_calls": 0}
     # 场景别名锚定（1.5.1，task①）：一次性加载，供 _pass 内的场景解析复用。
@@ -3211,7 +3241,7 @@ async def _resolve_assets(
         functional_candidate_attempted_names: frozenset[str] = frozenset(),
     ) -> tuple[
         dict[str, Any], dict[str, Any], dict[str, dict[str, Any]], list[str], list[str], list[str],
-        list[dict[str, Any]],
+        list[dict[str, Any]], list[dict[str, Any]],
     ]:
         resolution_evidence_by_label = resolution_evidence_by_label or {}
         # 未解析角色标签候选判别（1.8.0，见 PREP_PACK_VERSION 上方大注释、
@@ -3233,6 +3263,13 @@ async def _resolve_assets(
         errors: list[str] = []
         unresolved_characters: list[str] = []
         unresolved_scenes: list[str] = []
+        # appellation_map 真源（2.0.1 bug fix，见 _prep_pack_build_
+        # appellation_map 上方大注释）：每条真正走到 characters.setdefault
+        # 那一步的角色提及，在这里原地记一行它自己刚刚解析出的结论
+        # （identity_id/canonical_appellation 直接取自那个 entry，不是
+        # 事后另算）。跟 characters/scenes 同一条"pass2 整体替换 pass1"
+        # 规则——这个列表每次 _pass() 调用都是全新的，不跨两遍累加。
+        character_appellation_rows: list[dict[str, Any]] = []
         # 1.5.0 观测记录：每条模型申报的 suspected_true_name 假设最终是被核验
         # 采信还是拒绝，都记一条（不影响门禁本身，见函数上方注释）。
         true_name_hints: list[dict[str, Any]] = []
@@ -3582,6 +3619,22 @@ async def _resolve_assets(
             entry["segment_indexes"] = sorted(
                 set(entry["segment_indexes"]) | set(mention_segment_indexes)
             )
+            # appellation_map 真源（2.0.1 bug fix）：这条提及已经真正走到
+            # 这里——有 portrait_id、通过了称谓证据闸——就是一条真实的
+            # "模糊称谓 -> 身份"结论，读的是 entry 自己（跟 asset_manifest.
+            # characters[] 发布出去的是同一个字典对象）刚定下的
+            # identity_id/display_name，不是另算一遍。这一行故意不看
+            # aliases（下面几行）：aliases 的字面证据门槛是为了保护跨集
+            # 别名注册表不被合成标签污染，是另一个维度的判据，"能不能安全
+            # 进注册表"不等于"这条提及有没有解析出身份"——把 aliases 当成
+            # 后者的真源用，正是"穿杂役衫的魁梧大汉"这类合成描述提及在旧
+            # 实现里从 appellation_map 里静默消失的根因。
+            character_appellation_rows.append({
+                "raw_mention": name,
+                "segment_indexes": list(mention_segment_indexes),
+                "identity_id": entry["identity_id"],
+                "canonical_appellation": entry["display_name"],
+            })
             # 别名注册仍只登记逐字出现于原文的称谓（task②，见上方门禁
             # 注释）：组合/综合描述短语（"穿杂役衫的魁梧大汉"）合法通过了
             # 门禁，但绝不能进别名库——别名注册表是 task① 直接信任的读侧
@@ -3770,11 +3823,13 @@ async def _resolve_assets(
         return (
             characters, scenes, functional_extras, errors,
             unresolved_characters, unresolved_scenes, true_name_hints,
+            character_appellation_rows,
         )
 
-    characters, scenes, functional_extras, errors, unresolved_chars, unresolved_scenes, true_name_hints = (
-        await _pass(set(), {}, {})
-    )
+    (
+        characters, scenes, functional_extras, errors, unresolved_chars, unresolved_scenes,
+        true_name_hints, character_appellation_rows,
+    ) = await _pass(set(), {}, {})
     # 1.5.0：假设核验发生在每一遍 _pass() 内部；一个假设被拒绝的提及若同时触发
     # 发现（走到下面这个分支），第二遍 _pass() 的返回值会整体替换第一遍的——
     # 但第一遍已经记下的 true_name_hints 不该因此凭空消失（红灯 4b 明确要求
@@ -3913,17 +3968,18 @@ async def _resolve_assets(
             )
             discovery_diagnostics.extend(str(e) for e in scene_discovery_result.get("errors") or [])
 
-        characters, scenes, functional_extras, errors, unresolved_chars, unresolved_scenes, true_name_hints_pass2 = (
-            await _pass(
-                skip_character_names, character_rename, scene_rename, non_person_names,
-                newly_added_character_names=newly_added_character_names,
-                newly_added_scene_names=newly_added_scene_names,
-                resolution_evidence_by_label=resolution_evidence_by_label,
-                candidate_verdict_pins=candidate_verdict_pins,
-                functional_candidate_attempted_names=frozenset(
-                    functional_candidate_attempted_names,
-                ),
-            )
+        (
+            characters, scenes, functional_extras, errors, unresolved_chars, unresolved_scenes,
+            true_name_hints_pass2, character_appellation_rows,
+        ) = await _pass(
+            skip_character_names, character_rename, scene_rename, non_person_names,
+            newly_added_character_names=newly_added_character_names,
+            newly_added_scene_names=newly_added_scene_names,
+            resolution_evidence_by_label=resolution_evidence_by_label,
+            candidate_verdict_pins=candidate_verdict_pins,
+            functional_candidate_attempted_names=frozenset(
+                functional_candidate_attempted_names,
+            ),
         )
         # 合并两遍，按内容去重（同一个提及在两遍里都核验出相同结论是正常的、
         # 无害的重复计算，不该在观测数据里出现两条一模一样的记录）。
@@ -3950,6 +4006,12 @@ async def _resolve_assets(
         for label, data in functional_extras.items()
     ]
     props_payload = _prep_pack_build_prop_manifest(prop_mentions, segments)
+    # appellation_map 真源出参（2.0.1 bug fix，见本函数 docstring
+    # ``appellation_resolutions`` 一节与 _prep_pack_build_appellation_map
+    # 上方大注释）：只在调用方真的传了列表时才写，默认 None 不记录，
+    # 不影响这个函数自己的返回元组形状。
+    if appellation_resolutions is not None:
+        appellation_resolutions.extend(character_appellation_rows)
     return (
         list(characters.values()), list(scenes.values()), props_payload, functional_extras_payload,
         errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
@@ -4274,45 +4336,47 @@ def _prep_pack_build_coverage_ledger(
     return ledger, rejected_paratext_claims
 
 
-# 2.0.0 新增：appellation_map——把 _resolve_assets 已经算出的别名消歧结论
-# （identity_id + aliases，_prep_pack_bible_alias_owner/_prep_pack_cross_
-# episode_alias_conflict 等既有机制的产物）显式摊平成逐段的 (raw_mention,
-# segment_index) -> (identity_id, canonical_appellation) 映射表，不重新
-# 发起任何消歧判断（任务要求"不要另起炉灶"）。每个已解析角色的 aliases 与
-# 它自己的 display_name 一起构成"这个身份在本集被叫过的全部说法"这个精确
-# 集合（aliases 由 _resolve_assets 内 came_via_resolution 分支写入；direct
-# 裸命中不进 aliases，但此时 display_name 本身就是那次命中的原始称谓，
-# 两者合起来覆盖全部命中形态，不遗漏）；character_mentions 里的每条原始
-# 提及按 display_name 精确匹配回它归属的那个身份，为它自己（已核验的）
-# 每一个 segment_index 各产出一行。未解析到 identity_id 的提及（落
-# functional_extras 的那些）不出现在这张表里——appellation_map 的存在意义
-# 是"把模糊称谓映射到人物谱精确称谓"，functional_extras 没有精确身份可
-# 映射。
+# 2.0.0 新增，2.0.1 重做真源（协调方复核确认的 bug，见下段"2.0.1 根因"）：
+# appellation_map 把每条原文里的模糊称谓摊平成逐段的 (raw_mention,
+# segment_index) -> (identity_id, canonical_appellation) 映射表。
+#
+# 2.0.1 根因（测试缺口补齐过程中发现，协调方独立复现确认）：2.0.0 最初实现
+# 拿 characters[].aliases 当"这个身份在本集被叫过的全部说法"的真源反查
+# character_mentions——但 aliases 只登记逐字出现于原文的称谓（_resolve_
+# assets 内 came_via_resolution and literal_evidence 双重门槛，见
+# test_composite_description_resolved_via_discovery_bypasses_literal_gate：
+# "穿杂役衫的魁梧大汉"经消歧正确解析到赵武刚、真实发布进 asset_manifest.
+# characters，但明确不进 aliases）。aliases 担保的是"能不能安全进跨集别名
+# 注册表而不污染它"，不是"这条提及有没有解析出身份"——拿前者的真源冒充
+# 后者用，漏掉的恰好是模糊/描述性称谓，而那正是这张表存在的全部理由（"那
+# 少年""小胖子""李管事"这类）。
+#
+# 修法：appellation_map 不再对 characters[]/character_mentions 做事后
+# 反查，直接消费 _resolve_assets 在解析过程中就已经算出的结论——每条
+# 提及在 _pass() 里真正解析到 portrait_id、通过称谓证据闸的那一刻，就地
+# 记一行（见 _resolve_assets 内 character_appellation_rows 与其
+# docstring 的 ``appellation_resolutions`` 出参说明），identity_id/
+# canonical_appellation 直接读自它自己刚写入的 manifest entry——跟
+# asset_manifest.characters[] 发布的是同一个字典对象，结构上保证两处不会
+# 各说各话，不是靠这里再校验一遍。aliases 的既有语义（跨集别名注册表的
+# 保护门槛）完全不受影响，未解析到身份的提及（落 functional_extras 的
+# 那些）在 _pass() 里从未走到记录这一步，天然不出现在这张表里。
 def _prep_pack_build_appellation_map(
-    characters: list[dict[str, Any]], character_mentions: list[dict[str, Any]],
+    character_appellation_resolutions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    lookup: dict[str, dict[str, str]] = {}
-    for character in characters:
-        identity_id = str(character.get("identity_id") or "")
-        canonical = str(character.get("display_name") or "")
-        if not identity_id or not canonical:
-            continue
-        target = {"identity_id": identity_id, "canonical_appellation": canonical}
-        lookup[canonical] = target
-        for alias in character.get("aliases") or []:
-            lookup[str(alias)] = target
     rows: list[dict[str, Any]] = []
-    for mention in character_mentions:
-        name = str(mention.get("display_name") or "").strip()
-        target = lookup.get(name)
-        if target is None:
+    for resolution in character_appellation_resolutions:
+        raw_mention = str(resolution.get("raw_mention") or "").strip()
+        identity_id = str(resolution.get("identity_id") or "")
+        canonical_appellation = str(resolution.get("canonical_appellation") or "")
+        if not raw_mention or not identity_id or not canonical_appellation:
             continue
-        for segment_index in mention.get("segment_indexes") or []:
+        for segment_index in resolution.get("segment_indexes") or []:
             rows.append({
-                "raw_mention": name,
+                "raw_mention": raw_mention,
                 "segment_index": int(segment_index),
-                "identity_id": target["identity_id"],
-                "canonical_appellation": target["canonical_appellation"],
+                "identity_id": identity_id,
+                "canonical_appellation": canonical_appellation,
             })
     return rows
 
@@ -4424,6 +4488,11 @@ async def _generate_prep_pack_once(
         # 论证）——留作纵深防御，不静默吞掉一个理论上不可能出现的账本矛盾。
         raise PrepPackGateError(str(exc)) from exc
 
+    # appellation_map 真源出参（2.0.1 bug fix，见 _prep_pack_build_
+    # appellation_map 上方大注释）：这个函数是 _resolve_assets 的唯一
+    # 生产调用点，传一份空列表进去，_resolve_assets 在解析每条角色提及
+    # 时原地写入，调用返回后就是这一集完整、真实的解析结论。
+    character_appellation_resolutions: list[dict[str, Any]] = []
     (
         characters, scenes, props, functional_extras, asset_errors, discovery_stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
@@ -4434,6 +4503,7 @@ async def _generate_prep_pack_once(
             source_text=source_text,
             character_mentions=character_mentions, scene_mentions=scene_mentions,
             prop_mentions=prop_mentions, run_id=run_id,
+            appellation_resolutions=character_appellation_resolutions,
         ),
     )
     if asset_errors:
@@ -4460,7 +4530,7 @@ async def _generate_prep_pack_once(
             "资产来源证明自校验失败：" + "；".join(provenance_errors[:10])
         )
 
-    appellation_map = _prep_pack_build_appellation_map(characters, character_mentions)
+    appellation_map = _prep_pack_build_appellation_map(character_appellation_resolutions)
 
     payload = {
         "prep_pack_version": PREP_PACK_VERSION,

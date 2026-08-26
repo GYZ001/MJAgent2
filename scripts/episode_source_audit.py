@@ -1207,6 +1207,35 @@ def check_missing_scenes(
 
 
 # ---------------------------------------------------------------------------
+# 契约版本闸（2.0.0 收口，见 app/production/prep_pack.py PREP_PACK_VERSION
+# 上方 2.0.0 大注释与提交 48e01ff）：2.0.0 把剧本台改造成映射台，砍掉了
+# event_chain/hook/cliffhanger——A3（key_lines[].speaker 文本依据）/A3b
+# （speaker_ref 名册核验）/A4（source_evidence 引文抽查）三项检查的判据全部
+# 挂在 event_chain 下的 key_lines/source_evidence 上。这两个字段在 2.0.0
+# payload 里根本不存在，check_key_line_speakers/sample_source_evidence 对
+# ``pack.get("event_chain") or []`` 取到空列表后循环体一次都不会进入，
+# checked/passed 双双停在 0——不是"全部核验通过"，是"什么都没查"，但
+# exit_code() 只看 a_issues/b_issues 是否非空，0 条差异等价于"全清"，会把
+# 一份实际上只查了 A1/A2/B1/B2 的审计报告静默当成方向 A 全绿放行。
+#
+# A1（characters[].display_name/aliases）/A2（scenes[].display_name）依赖
+# 的是 provenance.{method,anchor_segments,anchor_phrase}，这个形状 2.0.0
+# 没有变，两者对 2.0.0 包仍然是真核验，不受影响，不在这道闸的管控范围内。
+_A3_A4_EVENT_CHAIN_UNSUPPORTED_MAJOR = 2
+
+
+def _prep_pack_major_version(version: str | None) -> int | None:
+    """从形如 "2.0.0" 的 prep_pack_version 里取主版本号（第一个点号前的
+    整数段）。解析失败（None/空串/非"数字.任意"形状）返回 None——调用方对
+    None 一律按"版本不确定，不能断言它就是安全的旧契约"处理，不是当作已知
+    安全版本静默放行。"""
+    if not version:
+        return None
+    head = str(version).split(".", 1)[0].strip()
+    return int(head) if head.isdigit() else None
+
+
+# ---------------------------------------------------------------------------
 # 单集审计入口
 # ---------------------------------------------------------------------------
 
@@ -1274,17 +1303,35 @@ def audit_episode(
     result.a_issues.extend(issues)
     result.tallies["A2 场景绑定文本依据"] = CheckTally(checked, passed, legacy)
 
-    issues, (checked_text, passed_text, legacy), (checked_ref, passed_ref) = check_key_line_speakers(
-        conn, project_id, episode_no, pack, source_text, segments, verify_hint,
-    )
-    result.a_issues.extend(issues)
-    result.tallies["A3 台词说话人文本依据"] = CheckTally(checked_text, passed_text, legacy)
-    result.tallies["A3b 说话人 speaker_ref 名册核验"] = CheckTally(checked_ref, passed_ref)
+    contract_major = _prep_pack_major_version(result.prep_pack_version)
+    if contract_major is not None and contract_major >= _A3_A4_EVENT_CHAIN_UNSUPPORTED_MAJOR:
+        # 不静默空转（见上方 _A3_A4_EVENT_CHAIN_UNSUPPORTED_MAJOR 大注释）：
+        # 明确报一条方向 A 差异并让 exit_code() 非零退出，不给这两项留
+        # "0/0 通过"这种看起来像"全部核验通过"的假象。
+        result.a_issues.append(Issue(
+            code="A0_unsupported_contract_version",
+            message=(
+                f"本工具尚不支持 prep_pack_version={result.prep_pack_version!r} 契约下的 "
+                "A3（台词说话人文本依据）/A3b（speaker_ref 名册核验）/A4（source_evidence "
+                "引文抽查）——2.0.0 起 event_chain/key_lines/source_evidence 已被撤销"
+                "（改为 asset_manifest.appellation_map，定量节拍职责移交分镜台），这三项"
+                "检查仍按旧字段读取，对本集永远得到 0 条检查、0 条差异。本集的方向 A 审计"
+                "只覆盖了 A1/A2，不完整，不能当作这三项已经核验通过。"
+            ),
+            detail={"prep_pack_version": result.prep_pack_version},
+        ))
+    else:
+        issues, (checked_text, passed_text, legacy), (checked_ref, passed_ref) = check_key_line_speakers(
+            conn, project_id, episode_no, pack, source_text, segments, verify_hint,
+        )
+        result.a_issues.extend(issues)
+        result.tallies["A3 台词说话人文本依据"] = CheckTally(checked_text, passed_text, legacy)
+        result.tallies["A3b 说话人 speaker_ref 名册核验"] = CheckTally(checked_ref, passed_ref)
 
-    sample = sample_source_evidence(pack, sample_size)
-    issues, checked, passed = check_evidence_sample(sample, source_text)
-    result.a_issues.extend(issues)
-    result.tallies["A4 source_evidence 引文抽查"] = CheckTally(checked, passed)
+        sample = sample_source_evidence(pack, sample_size)
+        issues, checked, passed = check_evidence_sample(sample, source_text)
+        result.a_issues.extend(issues)
+        result.tallies["A4 source_evidence 引文抽查"] = CheckTally(checked, passed)
 
     issues, scanned, clean = check_missing_characters(
         conn, project_id, episode_no, pack, source_text, char_registry,

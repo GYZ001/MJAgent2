@@ -1192,6 +1192,110 @@ def test_unknown_provenance_method_still_fails_closed(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 契约版本闸（app/production/prep_pack.py 2.0.0，提交 48e01ff 遗留的测试
+# 缺口）：2.0.0 撤销了 event_chain/key_lines/source_evidence，A3/A3b/A4 的
+# 判据全部挂在这些字段上。不加防护时 check_key_line_speakers/
+# sample_source_evidence 对 pack.get("event_chain") or [] 取到空列表，循环
+# 体一次都不进，checked=passed=0——不是"通过"，是"没查"，但 exit_code() 只
+# 看 issue 列表是否非空，会把这份实际上只查了 A1/A2 的报告静默当成方向 A
+# 全绿放行。
+# ---------------------------------------------------------------------------
+
+def _v2_pack(*, chapter_indexes: list[int], characters: list[dict], scenes: list[dict]) -> dict:
+    """2.0.0 契约下真实产出的 payload 形状（见 app.production.prep_pack.
+    _generate_prep_pack_once 的 payload 构造）：没有 event_chain/hook/
+    cliffhanger，新增 appellation_map，其余字段名不变。"""
+    return {
+        "prep_pack_version": "2.0.0",
+        "episode_no": 1,
+        "episode_scope": {"chapter_indexes": chapter_indexes, "source_segment_count": 1},
+        "asset_manifest": {"characters": characters, "scenes": scenes, "props": [], "functional_extras": []},
+        "appellation_map": [],
+        "coverage_ledger": {},
+    }
+
+
+def test_2_0_0_pack_reports_unsupported_a3_a4_instead_of_silently_passing(tmp_path):
+    db_path = _make_db(tmp_path)
+    conn = _writer(db_path)
+    _insert_project(conn, "proj_v2")
+    _insert_chapter(conn, "proj_v2", 1, "第一章", "许清说道：今日比试，我必胜！")
+    _insert_character(conn, "portrait_xu", "proj_v2", "许清")
+    pack = _v2_pack(
+        chapter_indexes=[1],
+        characters=[{
+            "identity_id": "bible:许清", "display_name": "许清", "portrait_id": "portrait_xu",
+            "segment_indexes": [1], "aliases": [],
+            "provenance": {"method": "direct", "anchor_segments": [1], "anchor_phrase": "许清"},
+        }],
+        scenes=[],
+    )
+    _insert_episode(conn, "ep_v2_1", "proj_v2", 1, [1], "art_v2_1")
+    _insert_pack_artifact(conn, "art_v2_1", "ep_v2_1", pack)
+    conn.commit()
+    conn.close()
+
+    ro = audit.readonly_connection(db_path)
+    result = audit.audit_episode(ro, "proj_v2", 1)
+    ro.close()
+
+    assert result.skipped_reason is None
+    assert result.prep_pack_version == "2.0.0"
+    a_codes = [issue.code for issue in result.a_issues]
+    assert a_codes == ["A0_unsupported_contract_version"], (
+        "2.0.0 包缺少 event_chain，A3/A3b/A4 必须明确报出'本工具不支持该契约版本'，"
+        "不能悄悄得到 0 条检查、0 条差异就被当成通过"
+    )
+    assert "2.0.0" in result.a_issues[0].message
+    # A1 本身仍然真实核验通过（许清逐字出现在原文里），不应该被这道闸连带拖累。
+    assert result.tallies["A1 角色绑定文本依据"].passed == 1
+    # A3/A3b/A4 不产出"0/0 通过"这种会被误读成"全部核验通过"的假计数。
+    assert "A3 台词说话人文本依据" not in result.tallies
+    assert "A3b 说话人 speaker_ref 名册核验" not in result.tallies
+    assert "A4 source_evidence 引文抽查" not in result.tallies
+    assert audit.exit_code([result]) == 1, "契约版本不支持必须以非零码退出，不能静默通过"
+
+
+def test_1_x_pack_unaffected_by_contract_version_gate(tmp_path):
+    """回归防线：契约版本闸只挡 2.0.0+，既有 1.x 包的 A3/A3b/A4 行为必须
+    分毫不变——本文件其它既有测试已经隐式覆盖这一点（_base_pack 默认
+    prep_pack_version="1.4.2"），这里再显式断言一次，防止未来有人把判据
+    写反（比如 >= 误改成 <=）。"""
+    db_path = _make_db(tmp_path)
+    conn = _writer(db_path)
+    _insert_project(conn, "proj_v1")
+    _insert_chapter(conn, "proj_v1", 1, "第一章", "许清说道：“今日比试，我必胜！”")
+    _insert_character(conn, "portrait_xu", "proj_v1", "许清")
+    pack = _base_pack(
+        chapter_indexes=[1],
+        characters=[{
+            "identity_id": "bible:许清", "display_name": "许清", "portrait_id": "portrait_xu",
+            "event_ids": ["ev_001"], "aliases": [],
+        }],
+        scenes=[],
+        event_chain=[{
+            "event_id": "ev_001", "order": 1, "summary": "许清参加比试",
+            "source_span": {"from_segment": 1, "to_segment": 1},
+            "source_evidence": [{"segment_index": 1, "quote": "许清说道：“今日比试，我必胜！”"}],
+            "key_lines": [{"speaker": "许清", "line": "今日比试，我必胜！", "segment_index": 1}],
+        }],
+    )
+    _insert_episode(conn, "ep_v1_1", "proj_v1", 1, [1], "art_v1_1")
+    _insert_pack_artifact(conn, "art_v1_1", "ep_v1_1", pack)
+    conn.commit()
+    conn.close()
+
+    ro = audit.readonly_connection(db_path)
+    result = audit.audit_episode(ro, "proj_v1", 1)
+    ro.close()
+
+    a_codes = [issue.code for issue in result.a_issues]
+    assert "A0_unsupported_contract_version" not in a_codes
+    assert "A3 台词说话人文本依据" in result.tallies
+    assert "A4 source_evidence 引文抽查" in result.tallies
+
+
+# ---------------------------------------------------------------------------
 # exit code 契约
 # ---------------------------------------------------------------------------
 
