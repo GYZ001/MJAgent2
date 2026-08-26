@@ -443,17 +443,136 @@ def build_reference_manifest(
     shot_id: str,
     characters: list[dict[str, Any]],
     scene: dict[str, Any] | None,
+    additional_scenes: list[dict[str, Any]] | None = None,
     keyframe_slot: str = NARRATIVE_KEYFRAME_SLOT,
 ) -> dict[str, Any]:
+    """``scene`` 是主场景（沿用既有单场景形状，兼容全部现有调用方的读法）；
+    ``additional_scenes`` 是同一段声明的第二个及以后的场景——多场景转场镜头
+    （分镜台 2.0.0 一段 = 多镜，段内可以转场到另一地点）才会非空。旧调用方
+    忽略这个字段没有风险：它们本来就只关心「有没有一个可用场景」。"""
     payload = {
         "episode_no": episode_no,
         "shot_id": shot_id,
         "characters": characters,
         "scene": scene,
+        "additional_scenes": list(additional_scenes or []),
         "keyframe_slot": keyframe_slot,
     }
     payload["input_fingerprint"] = fingerprint_payload(payload)
     return payload
+
+
+def _storyboard_pack_asset_dependencies(
+    *, episode_no: int, shot_id: str, segment: dict[str, Any], conn: Any,
+) -> dict[str, Any]:
+    """分镜台 2.0.0 段的资源依赖：直接按 ID 查库，不按名字选视角。
+
+    这一段自己的 ``resources.characters[].portrait_id`` /
+    ``resources.scenes[].scene_reference_id`` 已经由分镜台在生成时按本集
+    集号解析过一次（app.production.prep_pack._resolve_portrait_id /
+    _resolve_scene_reference_id），指向 character_portraits / scene_references
+    里唯一确定的一行。下面 name-based 分支（``select_character_view_roles`` /
+    ``select_scene_view_roles`` 之类）是给"一行 = 一个连续镜头、有
+    shot_size/camera_move/scene_time 等契约字段"的旧架构按名字重新挑视角用
+    的——这类行结构性没有那些字段（persist_storyboard_pack 留空），套用旧
+    分支只会读到错的/空的视角选择，实测复现：场景参考图因此从未被附加过
+    （只有角色定妆照命中，纯属它的默认视角选择在空字段下恰好兜底成
+    front_full）。这里改成不经过视角选择，直接信任分镜台自己已经做过的
+    资源解析——冻结设计决策"只用参考图模式"的字面意思就是每个角色/场景
+    一张确定的图，不是从多视角包里再挑一张。
+    """
+    resources = segment.get("resources") or {}
+
+    def _display_name(identity_or_scene_id: str) -> str:
+        return str(identity_or_scene_id).split(":", 1)[-1] if identity_or_scene_id else ""
+
+    characters_out: list[dict[str, Any]] = []
+    for entry in resources.get("characters") or []:
+        identity_id = str(entry.get("identity_id") or "")
+        name = _display_name(identity_id) or identity_id
+        portrait_id = entry.get("portrait_id")
+        row = (
+            conn.execute(
+                "SELECT id, image_path FROM character_portraits WHERE id=?", (portrait_id,),
+            ).fetchone()
+            if portrait_id else None
+        )
+        image_path = str(row["image_path"] or "") if row else ""
+        usable = bool(image_path) and Path(image_path).is_file()
+        selected_view = {
+            "id": portrait_id,
+            "view_role": "front_full",
+            "image_path": image_path,
+            "input_fingerprint": portrait_id,
+            "purposes": [PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT],
+        } if usable else None
+        characters_out.append({
+            "name": name,
+            "identity_id": identity_id,
+            "asset_name": name,
+            "role_kind": "storyboard_pack",
+            "asset_required": bool(portrait_id),
+            "look_revision_id": portrait_id if row else None,
+            "pack_status": PACK_STATUS_READY if usable else None,
+            "selected_view_ids": [portrait_id] if selected_view else [],
+            "selected_views": [selected_view] if selected_view else [],
+            "available_view_roles": ["front_full"] if selected_view else [],
+            "missing_required": [] if (selected_view or not portrait_id) else ["front_full"],
+        })
+
+    def _resolve_scene_entry(scene_entry: dict[str, Any]) -> dict[str, Any]:
+        scene_reference_id = scene_entry.get("scene_reference_id")
+        sname = _display_name(str(scene_entry.get("scene_id") or ""))
+        row = (
+            conn.execute(
+                "SELECT id, image_path FROM scene_references WHERE id=?", (scene_reference_id,),
+            ).fetchone()
+            if scene_reference_id else None
+        )
+        image_path = str(row["image_path"] or "") if row else ""
+        usable = bool(image_path) and Path(image_path).is_file()
+        selected_view = {
+            "id": scene_reference_id,
+            "view_role": "establishing",
+            "image_path": image_path,
+            "input_fingerprint": scene_reference_id,
+            "purposes": [PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT],
+        } if usable else None
+        return {
+            "name": sname,
+            "asset_required": bool(scene_reference_id),
+            "scene_revision_id": scene_reference_id if row else None,
+            "pack_status": PACK_STATUS_READY if usable else None,
+            "asset_usable": usable,
+            "pack_usable": usable,
+            "primary_usable": usable,
+            "selected_view_ids": [scene_reference_id] if selected_view else [],
+            "selected_views": [selected_view] if selected_view else [],
+            "available_view_roles": ["establishing"] if selected_view else [],
+            "missing_required": [] if (selected_view or not scene_reference_id) else ["establishing"],
+        }
+
+    # 一段可以在中途转场到第二个（甚至更多）场景——之前这里写死只取
+    # scene_entries[0]，多场景转场镜实测（EP2 段2/shot_53d87e5d107d，两个
+    # scene 声明）只挂上第一个，第二个连同它的参考图完全消失，没有任何可
+    # 见信号。这里改成解析全部声明：第一个仍作为 ``scene``（兼容读它当单
+    # 场景用的既有调用方——review-wall 门禁、QA 锚点选择等只关心"有没有
+    # 可用场景"，这些语义对多场景镜头里的主场景仍然成立），第二个及以后
+    # 放进 ``additional_scenes`` 交给 library_anchor_assets_from_manifest
+    # 一并展开进参考图列表；受 Seedance 协议张数上限截断的降级标记见
+    # build_seedance_image_inputs。
+    scene_entries = resources.get("scenes") or []
+    scene_outs = [_resolve_scene_entry(entry) for entry in scene_entries]
+    scene_out = scene_outs[0] if scene_outs else None
+    additional_scenes = scene_outs[1:]
+
+    return build_reference_manifest(
+        episode_no=episode_no,
+        shot_id=shot_id,
+        characters=characters_out,
+        scene=scene_out,
+        additional_scenes=additional_scenes,
+    )
 
 
 def resolve_shot_asset_dependencies(
@@ -462,16 +581,34 @@ def resolve_shot_asset_dependencies(
     episode_no: int,
     shot_id: str,
     shot: Any,
+    conn: Any,
     scene_name: str | None = None,
     ready_only: bool = True,
-    conn=None,
     bible=None,
     screenplay=None,
 ) -> dict[str, Any]:
     """解析本镜人物/场景多视角依赖，供关键帧生成与 QA 冻结。
 
     生产路径默认 ready_only=True：非 ready 视角不得进入依赖与后续生成。
+
+    ``conn`` 必填、不留默认值：分镜包分支（见下方短路）对 conn 是硬依赖
+    （直接按 ID 查 character_portraits / scene_references，无条件
+    ``conn.execute(...)``），name-based 旧分支下面也已经把 conn 当成真正
+    要用的连接而不是可选缓存。曾经的 ``conn=None`` 默认值就是 ERR-
+    20260826-99049d 事故的根因：调用方漏传时不会在调用点报错，而是拖到
+    三层深处才炸出一个无法定位的 AttributeError。这里刻意不回退到
+    ``get_conn()``——那个函数按 asyncio task 缓存连接，拿到的可能不是调用
+    方正处在事务里的那个连接，会读到不一致状态，而且会把「少传一个参数」
+    这个缺陷永久藏起来，不再有任何信号。漏传现在必须在调用那一刻就是
+    TypeError。
     """
+    # 分镜台 2.0.0 段落分支不做 ready_only 门禁（见下方短路说明），该形参只
+    # 供下面 name-based 旧分支使用。
+    segment = getattr(shot, "storyboard_pack_segment", None)
+    if segment is not None:
+        return _storyboard_pack_asset_dependencies(
+            episode_no=episode_no, shot_id=shot_id, segment=segment, conn=conn,
+        )
     from app.continuity import effective_characters_visible
 
     managed_characters, managed_scenes = project_bible_asset_names(project_id, conn=conn)
@@ -624,9 +761,10 @@ def manifest_asset_revision_ids(manifest: dict[str, Any] | None) -> dict[str, st
         name = ch.get("name")
         if name:
             out[f"character:{name}"] = ch.get("look_revision_id")
-    scene = manifest.get("scene") or {}
-    if isinstance(scene, dict) and scene.get("name"):
-        out[f"scene:{scene['name']}"] = scene.get("scene_revision_id")
+    scenes = [manifest.get("scene") or {}, *(manifest.get("additional_scenes") or [])]
+    for scene in scenes:
+        if isinstance(scene, dict) and scene.get("name"):
+            out[f"scene:{scene['name']}"] = scene.get("scene_revision_id")
     return out
 
 
@@ -644,8 +782,10 @@ def manifest_asset_view_fingerprints(
             fp = str(view.get("input_fingerprint") or "")
             if name and role and fp:
                 out[("character", name, role)] = fp
-    scene = manifest.get("scene") or {}
-    if isinstance(scene, dict):
+    scenes = [manifest.get("scene") or {}, *(manifest.get("additional_scenes") or [])]
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
         name = str(scene.get("name") or "")
         for view in scene.get("selected_views") or []:
             role = str(view.get("view_role") or "")
@@ -653,6 +793,18 @@ def manifest_asset_view_fingerprints(
             if name and role and fp:
                 out[("scene", name, role)] = fp
     return out
+
+
+def _manifest_scenes_asset_required(manifest: dict[str, Any] | None) -> dict[str, bool]:
+    scenes = [
+        (manifest or {}).get("scene") or {},
+        *((manifest or {}).get("additional_scenes") or []),
+    ]
+    return {
+        str(scene.get("name") or ""): bool(scene.get("asset_required", True))
+        for scene in scenes
+        if isinstance(scene, dict)
+    }
 
 
 def manifest_revisions_match(frozen: dict[str, Any] | None, current: dict[str, Any] | None) -> bool:
@@ -666,8 +818,7 @@ def manifest_revisions_match(frozen: dict[str, Any] | None, current: dict[str, A
             str(ch.get("name") or ""): bool(ch.get("asset_required", True))
             for ch in ((current or {}).get("characters") or [])
         }
-        and bool(((frozen or {}).get("scene") or {}).get("asset_required", True))
-        == bool(((current or {}).get("scene") or {}).get("asset_required", True))
+        and _manifest_scenes_asset_required(frozen) == _manifest_scenes_asset_required(current)
     )
 
 
@@ -693,8 +844,14 @@ def manifest_production_blockers(manifest: dict[str, Any] | None) -> list[str]:
             blockers.append(f"人物「{name}」缺少必需视角：{','.join(missing)}")
         elif not (ch.get("selected_view_ids") or ch.get("selected_views")):
             blockers.append(f"人物「{name}」无可用 ready 视角")
-    scene = manifest.get("scene")
-    if isinstance(scene, dict) and scene.get("name"):
+    # 主场景 + 多场景转场镜头的第二个及以后（见 build_reference_manifest 的
+    # additional_scenes 说明）：同一套检查逐个套用，任何一个没挂上参考图都
+    # 要在这里冒出来——这是"可见不拦截"的降级信号通道，assert_manifest_
+    # allows_production 只把它们记进 warnings，从不用它们挡生产。
+    scenes = [manifest.get("scene"), *(manifest.get("additional_scenes") or [])]
+    for scene in scenes:
+        if not (isinstance(scene, dict) and scene.get("name")):
+            continue
         name = scene.get("name")
         if not scene.get("scene_revision_id"):
             if scene.get("asset_required", True):
@@ -716,10 +873,17 @@ def scan_episode_reference_asset_gaps(
     project_id: str,
     episode_no: int,
     shots: list[tuple[str, Any]],
+    conn: Any,
     bible=None,
     screenplay=None,
 ) -> dict[str, Any]:
-    """Read-only production preflight for the reusable assets used by an episode."""
+    """Read-only production preflight for the reusable assets used by an episode.
+
+    ``conn`` 是必填形参，不给默认值：调用方（整集生成/补齐到全片预检）都是
+    在已经拿到 conn 的路径上跑的，分镜包分支对 conn 是硬依赖（见
+    ``resolve_shot_asset_dependencies`` 里的说明），留一个 None 默认值只会
+    邀请下一个调用方重新踩中同一个三层深的 AttributeError。
+    """
     missing_characters: set[str] = set()
     missing_scenes: set[str] = set()
     blockers: list[str] = []
@@ -730,6 +894,7 @@ def scan_episode_reference_asset_gaps(
             shot_id=shot_id,
             shot=shot,
             scene_name=(getattr(shot, "scene_name", None) or None),
+            conn=conn,
             bible=bible,
             screenplay=screenplay,
         )
@@ -749,8 +914,10 @@ def scan_episode_reference_asset_gaps(
                 name = str(character.get("name") or "").strip()
                 if name:
                     missing_characters.add(name)
-        scene = manifest.get("scene") or {}
-        if isinstance(scene, dict) and scene.get("asset_required", True):
+        scenes = [manifest.get("scene") or {}, *(manifest.get("additional_scenes") or [])]
+        for scene in scenes:
+            if not (isinstance(scene, dict) and scene.get("asset_required", True)):
+                continue
             if (
                 not scene.get("scene_revision_id")
                 or scene.get("pack_status") not in {None, PACK_STATUS_READY}
@@ -779,7 +946,12 @@ def assert_manifest_allows_production(manifest: dict[str, Any] | None) -> list[s
 
 
 def library_anchor_assets_from_manifest(manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    """把依赖 manifest 展开为 QA/关键帧可用的视觉锚点列表。"""
+    """把依赖 manifest 展开为 QA/关键帧可用的视觉锚点列表。
+
+    ``scene`` 是主场景；``additional_scenes``（多场景转场镜头才非空，见
+    ``_storyboard_pack_asset_dependencies``）用同样的形状展开，让转场到的
+    第二个及以后的场景也能进最终的参考图列表，而不是在这里就被漏掉。
+    """
     anchors: list[dict[str, Any]] = []
     for ch in manifest.get("characters") or []:
         for view in ch.get("selected_views") or []:
@@ -797,22 +969,23 @@ def library_anchor_assets_from_manifest(manifest: dict[str, Any]) -> list[dict[s
                 "type": "character",
                 "source": "asset_library",
             })
-    scene = manifest.get("scene") or {}
-    for view in scene.get("selected_views") or []:
-        path = view.get("image_path")
-        if not path or not Path(path).exists():
-            continue
-        anchors.append({
-            "entity_type": "scene",
-            "entity_name": scene.get("name"),
-            "library_revision_id": scene.get("scene_revision_id"),
-            "library_view_id": view.get("id"),
-            "view_role": view.get("view_role"),
-            "image_path": path,
-            "purposes": list(view.get("purposes") or [PURPOSE_QA_ANCHOR, PURPOSE_KEYFRAME_SEED]),
-            "type": "scene",
-            "source": "asset_library",
-        })
+    scenes = [manifest.get("scene") or {}, *(manifest.get("additional_scenes") or [])]
+    for scene in scenes:
+        for view in scene.get("selected_views") or []:
+            path = view.get("image_path")
+            if not path or not Path(path).exists():
+                continue
+            anchors.append({
+                "entity_type": "scene",
+                "entity_name": scene.get("name"),
+                "library_revision_id": scene.get("scene_revision_id"),
+                "library_view_id": view.get("id"),
+                "view_role": view.get("view_role"),
+                "image_path": path,
+                "purposes": list(view.get("purposes") or [PURPOSE_QA_ANCHOR, PURPOSE_KEYFRAME_SEED]),
+                "type": "scene",
+                "source": "asset_library",
+            })
     return anchors
 
 

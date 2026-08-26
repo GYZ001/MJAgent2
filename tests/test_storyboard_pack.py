@@ -1033,3 +1033,198 @@ def test_resume_reuses_existing_shots_without_regenerating_despite_scripting_sta
 
     after_calls = conn.execute("SELECT COUNT(*) AS c FROM provider_calls").fetchone()["c"]
     assert after_calls == before_calls
+
+
+# ---------------------------------------------------------------------------
+# resolve_shot_asset_dependencies 分镜包分支的 conn 依赖
+# （回归锁 -- ERR-20260826-99049d 事故：整集生成 500，
+# AttributeError: 'NoneType' object has no attribute 'execute'。
+# app/domain/video_ops.py:_generate_episode_core -> scan_episode_reference_
+# asset_gaps -> resolve_shot_asset_dependencies(conn=None，默认值) ->
+# _storyboard_pack_asset_dependencies 里对段落 portrait_id / scene_
+# reference_id 无条件 conn.execute(...)。当天 EP2/3/4/7/8/9/10 的每个片段
+# 都至少带一个非空 portrait_id/scene_reference_id，所以每一集都必崩。）
+# ---------------------------------------------------------------------------
+
+def test_scan_episode_reference_asset_gaps_requires_conn_kwarg():
+    """scan_episode_reference_asset_gaps 的 conn 形参不再有默认值——两个真正
+    调用方（video_ops._generate_episode_core、video_supervisor._reference_
+    asset_scan）手上都已经有 conn，留 None 默认值只会邀请下一个调用方漏传，
+    在分镜包分支里静默摔进三层深的 AttributeError。这里锁死：漏传必须在
+    调用边界就地报错（TypeError），不能悄悄用 None 往下传。
+    """
+    from app.multiview import scan_episode_reference_asset_gaps
+
+    with pytest.raises(TypeError):
+        scan_episode_reference_asset_gaps(  # type: ignore[call-arg]
+            project_id="proj-1", episode_no=1, shots=[],
+        )
+
+
+def test_resolve_shot_asset_dependencies_requires_conn_kwarg():
+    """resolve_shot_asset_dependencies 的 conn 也不再有默认值——分镜包分支
+    （segment 不为 None）对 conn 是硬依赖：段落里的 portrait_id/scene_
+    reference_id 要求直接按 ID 查 character_portraits/scene_references，无
+    条件 conn.execute(...)。曾经的 conn=None 默认值就是 ERR-20260826-99049d
+    事故的根因：调用方漏传时不在调用点报错，而是拖到三层深处才炸出一个
+    无法定位的 AttributeError。这里锁死：漏传必须在调用那一刻就是
+    TypeError，不能悄悄用 None 往下传（也不允许回退到 get_conn() 静默补
+    上——get_conn() 按 asyncio task 缓存连接，可能不是调用方事务里的那个
+    连接，用它兜底等于把「少传一个参数」的缺陷永久藏起来）。
+    """
+    from app.multiview import resolve_shot_asset_dependencies
+    from app.schemas import Shot
+
+    shot = Shot(
+        shot_no=1, duration_s=5, shot_size="近景", camera_move="固定",
+        scene_setting="室内", characters=[], characters_visible=[],
+        action_desc="x", first_frame_desc="x", last_frame_desc="x",
+        state_in="x", primary_action="x", state_out="x", source_excerpt="x",
+    )
+    with pytest.raises(TypeError):
+        resolve_shot_asset_dependencies(  # type: ignore[call-arg]
+            project_id="proj-1", episode_no=1, shot_id="s", shot=shot,
+        )
+
+
+def test_resolve_shot_asset_dependencies_storyboard_pack_branch_resolves_real_assets_when_conn_passed(
+    tmp_path,
+):
+    """正向路径：调用方按契约真正传了 conn 时，分镜包分支必须解析出刚插入
+    的资产行——不是空/半成品 manifest（那正是这条修复要避免重蹈的旧覆
+    辙：场景参考图从来没挂上、跑了无数次没人发现）。这里复现整集生成入口
+    实际会构造的段落形状（真实 persist_storyboard_pack 落库），验证按正确
+    契约调用能拿到与单段生成一致的数据。
+    """
+    from app.media_exec.enqueue import _load_shot_model
+    from app.multiview import resolve_shot_asset_dependencies
+
+    conn = db.get_conn()
+    episode_id = "ep-pack-conn-regress"
+    _seed_episode(conn, episode_id=episode_id)
+    portrait_image = tmp_path / "portrait.png"
+    portrait_image.write_bytes(b"fake-png")
+    scene_image = tmp_path / "scene.png"
+    scene_image.write_bytes(b"fake-png")
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, "
+        "image_path, created_at) VALUES(?,?,?,?,?,?,?)",
+        ("portrait_1", "proj-1", "少年", 1, None, str(portrait_image), db.now()),
+    )
+    conn.execute(
+        "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end, "
+        "image_path, created_at) VALUES(?,?,?,?,?,?,?)",
+        ("scene_ref_1", "proj-1", "山顶", 1, None, str(scene_image), db.now()),
+    )
+    conn.commit()
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    payload = _prep_pack_2_0_0_payload()
+    segments = _real_segments(conn, ep)
+    shot_ids = persist_storyboard_pack(conn, episode_id, ep, payload, _pack(), segments=segments)
+    row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_ids[0],)).fetchone()
+    shot = _load_shot_model(row)
+    assert shot.storyboard_pack_segment is not None
+
+    manifest = resolve_shot_asset_dependencies(
+        project_id="proj-1", episode_no=1, shot_id=row["id"], shot=shot, conn=conn,
+    )
+    character = manifest["characters"][0]
+    assert character["look_revision_id"] == "portrait_1"
+    assert character["selected_views"][0]["image_path"] == str(portrait_image)
+    scene = manifest["scene"]
+    assert scene["scene_revision_id"] == "scene_ref_1"
+    assert scene["selected_views"][0]["image_path"] == str(scene_image)
+
+
+def test_storyboard_pack_asset_dependencies_resolves_every_declared_scene_not_just_first(
+    tmp_path,
+):
+    """多场景转场段（一段 = 多镜，段内转场到第二个地点）此前只挂第一个
+    scene 的参考图：``_storyboard_pack_asset_dependencies`` 写死取
+    ``resources.scenes[0]``，第二个及以后声明的场景连同它的参考图整个消
+    失，没有任何可见信号。实测复现见 EP2 段2/shot_53d87e5d107d（两个 scene
+    声明，镜头3/4 确实转场到了第二个地点）。这里构造同样形状的两场景段，
+    验证修复后两个场景都进了 manifest，且都能展开成可提交的参考图锚点。
+    """
+    from app.multiview import _storyboard_pack_asset_dependencies, library_anchor_assets_from_manifest
+
+    conn = db.get_conn()
+    episode_id = "ep-pack-multiscene"
+    _seed_episode(conn, episode_id=episode_id)
+    scene_image_1 = tmp_path / "scene1.png"
+    scene_image_1.write_bytes(b"fake-png-1")
+    scene_image_2 = tmp_path / "scene2.png"
+    scene_image_2.write_bytes(b"fake-png-2")
+    conn.execute(
+        "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end, "
+        "image_path, created_at) VALUES(?,?,?,?,?,?,?)",
+        ("scene_ref_a", "proj-1", "山顶", 1, None, str(scene_image_1), db.now()),
+    )
+    conn.execute(
+        "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end, "
+        "image_path, created_at) VALUES(?,?,?,?,?,?,?)",
+        ("scene_ref_b", "proj-1", "山脚", 1, None, str(scene_image_2), db.now()),
+    )
+    conn.commit()
+
+    segment = {
+        "segment_no": 1,
+        "resources": {
+            "characters": [],
+            "scenes": [
+                {"scene_id": "scene:山顶", "scene_reference_id": "scene_ref_a"},
+                {"scene_id": "scene:山脚", "scene_reference_id": "scene_ref_b"},
+            ],
+        },
+    }
+    manifest = _storyboard_pack_asset_dependencies(
+        episode_no=1, shot_id="shot-x", segment=segment, conn=conn,
+    )
+    assert manifest["scene"]["name"] == "山顶"
+    assert manifest["scene"]["scene_revision_id"] == "scene_ref_a"
+    assert [s["name"] for s in manifest["additional_scenes"]] == ["山脚"]
+    assert manifest["additional_scenes"][0]["scene_revision_id"] == "scene_ref_b"
+
+    anchors = library_anchor_assets_from_manifest(manifest)
+    scene_anchors = {a["entity_name"]: a["image_path"] for a in anchors if a["entity_type"] == "scene"}
+    assert scene_anchors == {
+        "山顶": str(scene_image_1),
+        "山脚": str(scene_image_2),
+    }
+
+
+def test_storyboard_pack_asset_dependencies_second_scene_unresolvable_is_visible_not_silent(
+    tmp_path,
+):
+    """第二个场景声明了但 scene_reference_id 查不到可用图（同样的失败模式，
+    主场景一直就有这条检查）时，manifest_production_blockers 必须报出来——
+    可见不拦截，不能像旧代码那样连声明都消失，事后无法核对。"""
+    from app.multiview import _storyboard_pack_asset_dependencies, manifest_production_blockers
+
+    conn = db.get_conn()
+    episode_id = "ep-pack-multiscene-gap"
+    _seed_episode(conn, episode_id=episode_id)
+    scene_image_1 = tmp_path / "scene1.png"
+    scene_image_1.write_bytes(b"fake-png-1")
+    conn.execute(
+        "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end, "
+        "image_path, created_at) VALUES(?,?,?,?,?,?,?)",
+        ("scene_ref_a", "proj-1", "山顶", 1, None, str(scene_image_1), db.now()),
+    )
+    conn.commit()
+
+    segment = {
+        "segment_no": 1,
+        "resources": {
+            "characters": [],
+            "scenes": [
+                {"scene_id": "scene:山顶", "scene_reference_id": "scene_ref_a"},
+                {"scene_id": "scene:失踪场景", "scene_reference_id": "scene_ref_missing"},
+            ],
+        },
+    }
+    manifest = _storyboard_pack_asset_dependencies(
+        episode_no=1, shot_id="shot-x", segment=segment, conn=conn,
+    )
+    blockers = manifest_production_blockers(manifest)
+    assert any("失踪场景" in b for b in blockers)

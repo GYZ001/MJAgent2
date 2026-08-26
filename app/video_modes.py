@@ -4496,18 +4496,31 @@ REFERENCE_PROMPT_NOTE_MARKER = " Use the provided reference images as follows: "
 def append_reference_prompt_notes_from_dicts(
     prompt_text: str,
     packed_refs: list[dict[str, Any]],
+    *,
+    duration_s: float | int | None = None,
 ) -> str:
     """Bind each provider image to stable Seedance subject labels.
 
     Seedance 2.0's official guidance requires explicit ``image N -> subject``
     definitions and stable reuse of those subject labels. Asset IDs alone are
     not understood by the model.
+
+    ``duration_s``：legacy single-shot callers already have ``--dur`` embedded
+    in ``prompt_text`` by ``ensure_source_excerpt_in_prompt`` before this runs,
+    so ``_split_video_args`` finds and preserves it even with no explicit
+    duration passed here. 分镜台 2.0.0 段落绕过了那一步（会把模型写的换行压成
+    空格，见 app.media_exec.run_job._run_job 的说明），它的 prompt_text 从没
+    嵌过 ``--dur``，不传就会落到 ``_split_video_args`` 的兜底默认值
+    ``config.DEFAULT_VIDEO_DURATION_S``（5 秒，给旧架构最短单镜头用的）而不是
+    这一段真正的时长（15 秒）——实测复现：EP1 第 3 段 duration_s=15，不传
+    duration_s 时最终提交给供应商的是 ``--dur 5``。调用方在有 shot 时必须把
+    ``shot.duration_s`` 传进来。
     """
     from app.compiler import _split_video_args
 
     if REFERENCE_PROMPT_NOTE_MARKER in prompt_text:
         return prompt_text
-    prompt_body, prompt_args = _split_video_args(prompt_text)
+    prompt_body, prompt_args = _split_video_args(prompt_text, duration_s)
     lines: list[str] = []
     for idx, ref in enumerate(packed_refs, 1):
         label = {
@@ -4576,13 +4589,57 @@ def append_reference_prompt_notes(
     assets: list[ReferenceImageAsset],
     *,
     required_identity_names: list[str] | None = None,
+    duration_s: float | int | None = None,
 ) -> str:
     # Notes and provider inputs must use the exact same packed order.
     packed_refs = pack_reference_images_for_seedance(
         [asset.public_dict() for asset in assets],
         required_identity_names=required_identity_names,
     )
-    return append_reference_prompt_notes_from_dicts(prompt_text, packed_refs)
+    return append_reference_prompt_notes_from_dicts(
+        prompt_text, packed_refs, duration_s=duration_s,
+    )
+
+
+def _reference_input_label(ref: dict[str, Any], role: str) -> dict[str, Any]:
+    """构造一张参考图的可展示标注：谁（角色/场景）、什么用途，不含像素数据。
+
+    观测台链路详情不能把 base64 图片原样塞进 JSON 视图（动辄 1MB+），但用户
+    要看清"每张图绑的是谁"——这个标注就是那份轻量元数据，随 provider_calls.meta
+    一起落库，和巨大的 request_json 图片字节完全分开存放。
+    """
+    ref_type = str(ref.get("type") or "").strip()
+    entity_name = str(ref.get("entity_name") or "").strip()
+    related = [
+        str(name).strip()
+        for name in (ref.get("relatedCharacterIds") or ref.get("related_character_ids") or [])
+        if str(name).strip()
+    ]
+    if ref_type == "character" and entity_name:
+        label = f"角色参考 · {entity_name}"
+    elif ref_type == "scene" and entity_name:
+        label = f"场景参考 · {entity_name}"
+    elif ref_type == "plot_key_frame":
+        who = "、".join(related) if related else entity_name
+        label = f"关键帧 · {who}" if who else "关键帧（未标注人物）"
+    elif entity_name:
+        label = entity_name
+    else:
+        label = "参考图（未标注身份）"
+    return {
+        "role": role,
+        "type": ref_type or None,
+        "entity_name": entity_name or None,
+        "related_character_ids": related,
+        "slot_key": ref.get("slot_key"),
+        "label": label,
+    }
+
+
+_CONTINUITY_FRAME_LABELS = {
+    "first_frame": "衔接首帧（上一镜尾帧）",
+    "last_frame": "衔接尾帧",
+}
 
 
 def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
@@ -4636,16 +4693,44 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
                 "REFERENCE_IMAGE_MODE 缺少必需人物身份参考图："
                 + "、".join(missing_identities)
             )
+        # 场景不像人物身份那样硬拦截（同一段可以声明多个转场场景，挤不下
+        # 时该丢谁本来就该由 Seedance 张数上限的装箱优先级决定，不该整段
+        # 直接失败）。但"声明过、最终没挂上"不能沉默——按用户既定方向做成
+        # 可见的降级标记，写回 meta 供观测台/前端展示，不拦截生产。
+        declared_scene_names = {
+            name
+            for ref in refs
+            if str(ref.get("type") or "") == "scene"
+            and ref.get("selectedForSeedance")
+            and not ref.get("deleted")
+            for name in (str(ref.get("entity_name") or "").strip(),)
+            if name
+        }
+        covered_scene_names = {
+            name
+            for ref in usable
+            if str(ref.get("type") or "") == "scene"
+            for name in (str(ref.get("entity_name") or "").strip(),)
+            if name
+        }
+        dropped_scenes = sorted(declared_scene_names - covered_scene_names)
+        if dropped_scenes:
+            meta["_seedance_scene_reference_degraded"] = dropped_scenes
         out: list[tuple[str, str]] = []
+        labels: list[dict[str, Any]] = []
         for ref in usable:
             if ref.get("path"):
                 out.append((hiagent.data_url_from_file(ref["path"]), "reference_image"))
             elif ref.get("url"):
                 out.append((ref["url"], "reference_image"))
+            else:
+                continue
+            labels.append(_reference_input_label(ref, "reference_image"))
         if not out:
             raise ProviderError(
                 "REFERENCE_IMAGE_MODE 的 reference_image 文件或 URL 不可用"
             )
+        meta["_seedance_image_input_labels"] = labels
         return out
 
     if mode == FIRST_FRAME_MODE:
@@ -4657,6 +4742,11 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
         if not first:
             raise ProviderError("FIRST_FRAME_MODE 缺少 first_frame")
 
+        meta["_seedance_image_input_labels"] = [
+            {"role": "first_frame", "type": "continuity_frame", "entity_name": None,
+             "related_character_ids": [], "slot_key": None,
+             "label": _CONTINUITY_FRAME_LABELS["first_frame"]},
+        ]
         if first.startswith(("data:", "http://", "https://")):
             return [(first, "first_frame")]
         path = Path(first)
@@ -4682,6 +4772,12 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
                 raise ProviderError(f"首尾帧文件不存在：{value}")
             return hiagent.data_url_from_file(value)
 
+        meta["_seedance_image_input_labels"] = [
+            {"role": role, "type": "continuity_frame", "entity_name": None,
+             "related_character_ids": [], "slot_key": None,
+             "label": _CONTINUITY_FRAME_LABELS[role]}
+            for role in ("first_frame", "last_frame")
+        ]
         return [(_resolve(first), "first_frame"), (_resolve(last), "last_frame")]
 
     if mode == VIDEO_INPUT_MODE:

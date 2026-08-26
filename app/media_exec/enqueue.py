@@ -1653,26 +1653,27 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
             incoming_transition = None
 
     if is_storyboard_pack_shot:
-        # prompt_text 已在分镜台阶段由模型直接产出并存进这一行的 adopted
-        # shot_versions.prompt_text（app.production.storyboard_pack.
-        # persist_storyboard_pack）；原样复用，不跑 compile_prompt/
+        # prompt_text 已在分镜台阶段由模型直接产出，原样存在这一行的
+        # shots.shot_contract_json.storyboard_pack_segment.prompt_text
+        # （app.production.storyboard_pack.persist_storyboard_pack 把
+        # segment.model_dump(mode="json") 整段存进 shot_contract_json，
+        # prompt_text 是其中一个字段）；原样复用，不跑 compile_prompt/
         # preflight_seedance_gates——那一整套面向单镜叙事契约字段
         # （first_frame_desc/state_in/primary_action/...）的检查在这类行上
         # 全部是空字段，不是"通过"也不是"该拦"，是这条检查本身不适用。
-        adopted_version_id = _row_value(shot_row, "adopted_version_id")
-        stored_version = (
-            conn.execute(
-                "SELECT prompt_text FROM shot_versions WHERE id=? AND shot_id=?",
-                (adopted_version_id, shot_id),
-            ).fetchone()
-            if adopted_version_id else None
-        )
-        if stored_version is None or not str(stored_version["prompt_text"] or "").strip():
+        # 分镜台落库不再插入一条"占位已采纳"的 shot_versions 行去当
+        # prompt_text 的载体（那条占位行会让每个镜头一落库就显示"已采纳"，
+        # 却没有真实视频；也会占掉 version_no=1，让第一次真生成变成 v2）——
+        # shot_contract_json 才是权威来源，这里直接读 shot 模型上已解析好的
+        # storyboard_pack_segment（_load_shot_model 在上面已经把
+        # shot_contract_json 解析进 shot.storyboard_pack_segment），不必再查
+        # 一次 shot_versions，也不再依赖 adopted_version_id。
+        prompt_text = str((shot.storyboard_pack_segment or {}).get("prompt_text") or "")
+        if not prompt_text.strip():
             raise ValueError(
                 "[STORYBOARD_PACK_PROMPT_MISSING] 该分镜台 2.0.0 段没有已产出的 "
                 "prompt_text，请先在分镜台重新生成本段"
             )
-        prompt_text = str(stored_version["prompt_text"])
     else:
         preflight_errors = preflight_seedance_gates(
             shot,

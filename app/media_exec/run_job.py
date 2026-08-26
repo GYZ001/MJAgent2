@@ -1964,6 +1964,7 @@ async def _prepare_reference_mode_inputs(
                         video_modes.append_reference_prompt_notes_from_dicts(
                             prompt_text,
                             packed_refs,
+                            duration_s=shot_model.duration_s,
                         )
                     )
                 set_pipeline_stage(
@@ -2090,6 +2091,7 @@ async def _prepare_reference_mode_inputs(
             prompt_text = video_modes.append_reference_prompt_notes(
                 prompt_text,
                 assets,
+                duration_s=shot_model.duration_s,
                 required_identity_names=list(
                     meta.get("required_reference_characters") or []
                 ),
@@ -2277,6 +2279,7 @@ async def _prepare_reference_mode_inputs(
         prompt_text = video_modes.append_reference_prompt_notes(
             prompt_text,
             assets,
+            duration_s=shot_model.duration_s,
             required_identity_names=list(
                 meta.get("required_reference_characters") or []
             ),
@@ -3429,12 +3432,29 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             )
         prompt_text = version["prompt_text"]
         if not provider_recovery_only:
-            prompt_text = ensure_source_excerpt_in_prompt(
-                prompt_text,
-                _load_shot_model(shot),
+            shot_model_for_prompt = _load_shot_model(shot)
+            # 分镜台 2.0.0（app.production.storyboard_pack）行：prompt_text 已由
+            # 模型直接产出并原样持久化（见该模块 persist_storyboard_pack 的文
+            # 档），必须逐字送达供应商。ensure_source_excerpt_in_prompt 末尾会
+            # 跑 sanitize_seedance_prompt——这类段落的 prompt_text 不含旧架构的
+            # "[...]" 分段标记，会落进它的兜底分支 ``re.sub(r"\s+", " ", body)``，
+            # 把模型写的镜头换行全部压成空格，等于在最后一公里悄悄改写了模型
+            # 产出（实测复现：EP1 第 2 段入队时 858 字符、四行分镜头文本，经这
+            # 一步变成 1143 字符的单行文本）。这道防线本身是为旧架构"一行 = 一
+            # 个连续镜头"设计的原文重合擦除，对这类一段 = 3-4 镜的自由文本不适
+            # 用也不必要，跳过。``getattr`` 防的是测试把 ``_load_shot_model``
+            # 换成不带这个字段的替身对象。
+            is_storyboard_pack_shot = (
+                getattr(shot_model_for_prompt, "storyboard_pack_segment", None)
+                is not None
             )
-            if prompt_text != version["prompt_text"]:
-                _set_version(version["id"], prompt_text=prompt_text)
+            if not is_storyboard_pack_shot:
+                prompt_text = ensure_source_excerpt_in_prompt(
+                    prompt_text,
+                    shot_model_for_prompt,
+                )
+                if prompt_text != version["prompt_text"]:
+                    _set_version(version["id"], prompt_text=prompt_text)
         try:
             if not task_id:
                 operation_conn = _connection_for_heartbeat_operation(conn)
