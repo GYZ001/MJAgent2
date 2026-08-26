@@ -331,3 +331,125 @@ def test_longer_session_window_did_not_weaken_revocation_or_the_absolute_cap():
     conn.execute("UPDATE users SET status='disabled' WHERE id=?", (user_id,))
     conn.commit()
     assert resolve_session(fresh) is None, "停用账号后会话还活着"
+
+
+def _seed_video_model_episode(
+    workspace_id: str, project_id: str, episode_id: str, *, with_video_product: bool
+) -> None:
+    """播种一集绑定到给定 workspace 的项目 + 分集；按需再挂一条 shot_versions
+    产物，用来触发 ``set_episode_video_model`` 的破坏性清空分支（本集已有产物时
+    ``confirm_clear_prompts=true`` 会连带清空它们）。``status='confirmed'`` 且不带
+    任何 ``active_*_run_id`` 是为了不撞上 ``_review_upstream_snapshot`` 的『上游任务
+    仍在写入』fail-closed 分支，专注只测 scope 闸门。"""
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,workspace_id,created_at) VALUES(?,?,?,?)",
+        (project_id, project_id, workspace_id, now()),
+    )
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,target_video_model,created_at) "
+        "VALUES(?,?,1,'confirmed','hiagent',?)",
+        (episode_id, project_id, now()),
+    )
+    if with_video_product:
+        shot_id = f"{episode_id}-s1"
+        conn.execute(
+            "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES(?,?,1,5)",
+            (shot_id, episode_id),
+        )
+        conn.execute(
+            """INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,created_at)
+               VALUES(?,?,1,'prompt','idem-1','succeeded',?)""",
+            (f"{shot_id}-v1", shot_id, now()),
+        )
+    conn.commit()
+
+
+def test_video_model_switch_destructive_clear_blocks_review_without_project_write(
+    client: TestClient,
+) -> None:
+    """review 只有 manju:read + manju:delivery，没有 manju:project-write。
+
+    本集已有视频产物时，切换模型要连带清空它们——这是不可逆操作，和
+    ``video.clear_episode_videos`` 同档要求写权限。挡住的必须是这次真实
+    HTTP 请求本身（403），而不是事后检查某个字段没变。
+    """
+    _add_workspace("ws_video_review")
+    user_id = _add_user("video_review")
+    _join("ws_video_review", user_id, role="review")
+    _seed_video_model_episode(
+        "ws_video_review", "proj_video_review", "ep_video_review", with_video_product=True
+    )
+
+    resp = client.post(
+        "/api/episodes/ep_video_review/video-model",
+        headers={**_HEADERS, "X-Manju-Session": create_session(user_id)},
+        json={"target_video_model": "minimax_h3", "confirm_clear_prompts": True},
+    )
+    assert resp.status_code == 403, resp.text
+
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT target_video_model FROM episodes WHERE id='ep_video_review'"
+    ).fetchone()
+    assert row["target_video_model"] == "hiagent", "被 403 挡住之前不能已经切换了模型"
+    remaining = conn.execute(
+        "SELECT COUNT(*) AS c FROM shot_versions v JOIN shots s ON s.id=v.shot_id "
+        "WHERE s.episode_id='ep_video_review'"
+    ).fetchone()["c"]
+    assert remaining == 1, "被 403 挡住之前不能已经清空了产物"
+
+
+def test_video_model_switch_destructive_clear_is_not_blocked_for_production(
+    client: TestClient,
+) -> None:
+    """production 持有 manju:project-write，走同一条确认清空分支不能被 403 挡住。
+
+    这条不要求清空最终一定成功——业务原因（例如供应商任务未结清）导致的失败
+    可以接受；不能接受的是权限层本身把持有写权限的角色也挡在门外。
+    """
+    _add_workspace("ws_video_prod")
+    user_id = _add_user("video_prod")
+    _join("ws_video_prod", user_id, role="production")
+    _seed_video_model_episode(
+        "ws_video_prod", "proj_video_prod", "ep_video_prod", with_video_product=True
+    )
+
+    resp = client.post(
+        "/api/episodes/ep_video_prod/video-model",
+        headers={**_HEADERS, "X-Manju-Session": create_session(user_id)},
+        json={"target_video_model": "minimax_h3", "confirm_clear_prompts": True},
+    )
+    assert resp.status_code != 403, f"production 持有 manju:project-write，不该被 403 挡住：{resp.text}"
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["changed"] is True
+    assert resp.json()["cleared_videos"] == 1
+
+
+def test_video_model_switch_without_existing_products_is_not_gated_for_review(
+    client: TestClient,
+) -> None:
+    """没有已生成产物时的切换是分镜台日常操作，不是不可逆清空。
+
+    只应该收紧『清空』这一支，收紧理由是不可逆，不是『改一个字段』——这条证明
+    没有产物时 review 角色仍然能正常切换，没有被误伤。
+    """
+    _add_workspace("ws_video_switch")
+    user_id = _add_user("video_switch")
+    _join("ws_video_switch", user_id, role="review")
+    _seed_video_model_episode(
+        "ws_video_switch", "proj_video_switch", "ep_video_switch", with_video_product=False
+    )
+
+    resp = client.post(
+        "/api/episodes/ep_video_switch/video-model",
+        headers={**_HEADERS, "X-Manju-Session": create_session(user_id)},
+        json={"target_video_model": "minimax_h3"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["changed"] is True
+
+    row = get_conn().execute(
+        "SELECT target_video_model FROM episodes WHERE id='ep_video_switch'"
+    ).fetchone()
+    assert row["target_video_model"] == "minimax_h3", "普通切换必须真的写进去，否则这条只是在测 200"
