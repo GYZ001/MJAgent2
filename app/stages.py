@@ -3197,6 +3197,58 @@ BIBLE_LOOKAHEAD_CHAPTERS = 10    # 判定「这个角色重不重要」时再往
 BIBLE_RECURRING_MIN_HITS = 3     # 在通读窗口内逐字出现多少次才算重要角色
 BIBLE_MUST_COVER_MAX = 12        # 必收名单上限，避免把生成预算耗在龙套身上
 
+# 旁文本净化的三个闸（见 `_chapters_without_paratext` docstring 里的事故口径）：
+BIBLE_PARATEXT_MARGIN_CHAPTERS = 3   # 净化只会让正文变短，头部因此可能多吃进几章
+BIBLE_PARATEXT_CONCURRENCY = 8       # 净化各章互不依赖，chat 路径也没有全局信号量
+BIBLE_PARATEXT_BUDGET_S = 120.0      # 净化阶段总时限，超时的章原样进入下游
+
+
+def _bible_source_plan(
+    valid: list[dict], budget: int, head_chapters: int | None,
+) -> list[tuple[int, int, bool]]:
+    """规划人物谱源文本读哪几章、每章读多少字：`(章在 valid 里的下标, 截取字数, 是否节选)`。
+
+    渲染（`_render_bible_source`）和「哪几章需要先净化旁文本」
+    （`_bible_paratext_scope`）共用这一份规划：口径只有一处，不会漂移出
+    「净化了 643 章、真正读的只有 33 章」那种落差。
+    """
+    plan: list[tuple[int, int, bool]] = []
+    # 头部顺序铺设：用至多 70% 预算（其余留给后段抽样）。
+    head_budget = int(budget * 0.7)
+    if head_chapters:
+        # 首版人物谱要求「完整读完前 N 章」。按比例切的头部会随章节长度漂移：
+        # 长章小说可能读到第三、四章就把头部预算用光，主要配角整体缺席。
+        head_budget = min(budget, max(head_budget, sum(
+            len(ch["content"].strip()) for ch in valid[:head_chapters]
+        )))
+    used = 0
+    head_count = 0
+    for index, ch in enumerate(valid):
+        remain = head_budget - used
+        if remain <= 200:
+            break
+        take = min(len(ch["content"].strip()), remain)
+        plan.append((index, take, False))
+        used += take
+        head_count += 1
+
+    # 后段抽样：在头部未覆盖的章节里均匀取样，注入每章开头若干字，覆盖后期登场人物。
+    later = valid[head_count:]
+    remain_budget = budget - used
+    if later and remain_budget > 200:
+        sample_n = min(len(later), _BIBLE_TAIL_SAMPLE_MAX, max(1, remain_budget // _BIBLE_TAIL_SLICE_CHARS))
+        if sample_n > 0:
+            step = len(later) / sample_n
+            picked_idx = sorted({min(len(later) - 1, int(i * step)) for i in range(sample_n)})
+            for li in picked_idx:
+                if remain_budget <= 200:
+                    break
+                content = later[li]["content"].strip()
+                take = min(len(content), _BIBLE_TAIL_SLICE_CHARS, remain_budget)
+                plan.append((head_count + li, take, True))
+                remain_budget -= take
+    return plan
+
 
 def _render_bible_source(chapters: list[dict], budget: int = BIBLE_SOURCE_BUDGET_CHARS,
                          *, head_chapters: int | None = None) -> str:
@@ -3211,46 +3263,17 @@ def _render_bible_source(chapters: list[dict], budget: int = BIBLE_SOURCE_BUDGET
     def _title(ch: dict) -> str:
         return ch.get("title") or f"第{ch.get('idx', '?')}章"
 
-    # 头部顺序铺设：用至多 70% 预算（其余留给后段抽样）。
-    head_budget = int(budget * 0.7)
-    if head_chapters:
-        # 首版人物谱要求「完整读完前 N 章」。按比例切的头部会随章节长度漂移：
-        # 长章小说可能读到第三、四章就把头部预算用光，主要配角整体缺席。
-        head_budget = min(budget, max(head_budget, sum(
-            len(ch["content"].strip()) for ch in valid[:head_chapters]
-        )))
     blocks: list[str] = []
-    used = 0
-    head_count = 0
-    for ch in valid:
-        remain = head_budget - used
-        if remain <= 200:
-            break
+    for index, take, excerpt in _bible_source_plan(valid, budget, head_chapters):
+        ch = valid[index]
         content = ch["content"].strip()
-        clipped = content[:remain]
-        suffix = "……（原文过长已截断）" if len(content) > remain else ""
-        blocks.append(f"【{_title(ch)}】\n{clipped}{suffix}")
-        used += len(clipped)
-        head_count += 1
-
-    # 后段抽样：在头部未覆盖的章节里均匀取样，注入每章开头若干字，覆盖后期登场人物。
-    later = valid[head_count:]
-    remain_budget = budget - used
-    if later and remain_budget > 200:
-        sample_n = min(len(later), _BIBLE_TAIL_SAMPLE_MAX, max(1, remain_budget // _BIBLE_TAIL_SLICE_CHARS))
-        if sample_n > 0:
-            step = len(later) / sample_n
-            picked_idx = sorted({min(len(later) - 1, int(i * step)) for i in range(sample_n)})
-            for li in picked_idx:
-                if remain_budget <= 200:
-                    break
-                ch = later[li]
-                slice_chars = min(_BIBLE_TAIL_SLICE_CHARS, remain_budget)
-                content = ch["content"].strip()
-                clipped = content[:slice_chars]
-                suffix = "……（节选开头，仅供识别后期登场角色）" if len(content) > slice_chars else ""
-                blocks.append(f"【{_title(ch)}·节选】\n{clipped}{suffix}")
-                remain_budget -= len(clipped)
+        clipped = content[:take]
+        if excerpt:
+            suffix = "……（节选开头，仅供识别后期登场角色）" if len(content) > take else ""
+            blocks.append(f"【{_title(ch)}·节选】\n{clipped}{suffix}")
+        else:
+            suffix = "……（原文过长已截断）" if len(content) > take else ""
+            blocks.append(f"【{_title(ch)}】\n{clipped}{suffix}")
 
     return "\n\n".join(blocks)
 
@@ -5294,6 +5317,26 @@ async def backfill_character_status_facts(
     return {"affiliations": added_affiliations, "relations": added_relations}
 
 
+def _bible_paratext_scope(valid: list[dict]) -> list[int]:
+    """人物谱真正会读到的章（下标落在 `valid` 上）：头部 + 后段抽样 + 必收统计窗口。
+
+    净化按章一次模型调用，范围必须跟「读了什么」对齐，否则代价随书长线性增长
+    而收益为零。
+    """
+    plan = _bible_source_plan(valid, BIBLE_SOURCE_BUDGET_CHARS, BIBLE_HEAD_CHAPTERS)
+    scope = {index for index, _, _ in plan}
+    head_end = max((index for index, _, excerpt in plan if not excerpt), default=-1) + 1
+    # 净化只会让正文变短，头部因此可能比按原文规划时多吃进几章；同时
+    # `_recurring_character_names` 的逐字统计窗口是前 HEAD+LOOKAHEAD 章，
+    # 必收名单正是被旁文本污染的那一环，这段必须整段净化。
+    window = max(
+        head_end + BIBLE_PARATEXT_MARGIN_CHAPTERS,
+        BIBLE_HEAD_CHAPTERS + BIBLE_LOOKAHEAD_CHAPTERS,
+    )
+    scope |= set(range(min(window, len(valid))))
+    return sorted(index for index in scope if 0 <= index < len(valid))
+
+
 async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
     """把作者的话等旁文本从章节正文里剔掉，再交给人物谱这条链路。
 
@@ -5308,21 +5351,67 @@ async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
     共用一份（`app/source_paratext.PARATEXT_RULE`）。
 
     净化失败一律退回原文：人物谱不能因为这一步判不出来就产不出来。
+
+    **2026-08-25 事故（run_8388b4e31301）**：这里原本 `for ch in chapters` 串行
+    净化**全书**，一章一次模型调用。643 章的项目在 15 分钟闸门内只跑完 126 次
+    （其中 3 次读超时各 152s），人物谱本体一次调用都没轮上，整轮超时作废；
+    而这本书人物谱真正读到的只有 33 章，610 次调用是纯浪费。因此这里定死三条：
+    只净化 `_bible_paratext_scope` 圈出的章、并发跑、整段封顶
+    `BIBLE_PARATEXT_BUDGET_S`。净化本来就是「判不出就退回原文」的净化步骤而不是
+    闸门，超时未完成的章原样进入下游，绝不能再把人物谱拖死。
     """
     from app.source_paratext import strip_paratext
 
-    cleaned: list[dict] = []
-    for index, chapter in enumerate(chapters):
-        content = (chapter.get("content") or "")
-        if not content.strip():
-            cleaned.append(chapter)
+    positions = [i for i, ch in enumerate(chapters) if (ch.get("content") or "").strip()]
+    valid = [chapters[i] for i in positions]
+    if not valid:
+        return chapters
+    scope = _bible_paratext_scope(valid)
+    limiter = asyncio.Semaphore(BIBLE_PARATEXT_CONCURRENCY)
+    started = time.time()
+
+    async def _clean(slot: int) -> tuple[int, str]:
+        chapter = valid[slot]
+        async with limiter:
+            stripped = await strip_paratext(
+                chapter["content"],
+                operation_id=f"bible.paratext:{chapter.get('id') or positions[slot]}",
+            )
+        return slot, stripped
+
+    tasks = [asyncio.create_task(_clean(slot)) for slot in scope]
+    try:
+        done, pending = await asyncio.wait(tasks, timeout=BIBLE_PARATEXT_BUDGET_S)
+    except BaseException:  # 外层取消/关服：不留悬挂任务
+        for task in tasks:
+            task.cancel()
+        raise
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    cleaned = list(chapters)
+    changed = 0
+    for task in done:
+        if task.cancelled() or task.exception() is not None:
             continue
-        stripped = await strip_paratext(
-            content, operation_id=f"bible.paratext:{chapter.get('id') or index}"
-        )
-        cleaned.append(
-            chapter if stripped == content else {**chapter, "content": stripped}
-        )
+        slot, stripped = task.result()
+        original = valid[slot]
+        if stripped != (original.get("content") or ""):
+            cleaned[positions[slot]] = {**original, "content": stripped}
+            changed += 1
+    log_provider_call(
+        "character_bible_paratext", config.MODEL_TEXT,
+        "OK" if not pending else "PARTIAL", None, int((time.time() - started) * 1000),
+        meta={
+            "chapters_total": len(valid),
+            "chapters_in_scope": len(scope),
+            "chapters_stripped": changed,
+            "unfinished": len(pending),
+            "budget_s": BIBLE_PARATEXT_BUDGET_S,
+        },
+    )
     return cleaned
 
 

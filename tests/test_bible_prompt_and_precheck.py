@@ -346,3 +346,63 @@ def test_generate_bible_prompt_explains_bridging_chapter_for_aliases(monkeypatch
     assert "不是该别名第一次出现的章节" in prompt
     assert "同时出现" in prompt
     assert "不要自己在引句前后加引号包裹" in prompt
+
+
+def test_paratext_scope_does_not_scale_with_book_length() -> None:
+    """旁文本净化只覆盖人物谱真正读到的章：代价不随书长增长。
+
+    回归 run_8388b4e31301：净化原本串行跑全书，643 章的项目 15 分钟闸门内
+    连人物谱本体调用都没轮上就超时作废。
+    """
+    from app import stages
+
+    def _book(n: int) -> list[dict]:
+        return [
+            {"idx": i, "title": f"第{i}章", "content": f"第{i}章开头。" + "文" * 4000}
+            for i in range(1, n + 1)
+        ]
+
+    short = stages._bible_paratext_scope(_book(40))
+    long = stages._bible_paratext_scope(_book(1600))
+
+    # 书长翻 40 倍，净化章数不得跟着涨：上限只由「读多少」的常量决定。
+    cap = (stages.BIBLE_HEAD_CHAPTERS + stages.BIBLE_LOOKAHEAD_CHAPTERS
+           + stages.BIBLE_PARATEXT_MARGIN_CHAPTERS + stages._BIBLE_TAIL_SAMPLE_MAX)
+    assert len(short) <= cap
+    assert len(long) <= cap
+    assert len(long) - len(short) <= stages._BIBLE_TAIL_SAMPLE_MAX
+    # 必收名单的逐字统计窗口（前 HEAD+LOOKAHEAD 章）必须整段净化——作者笔名
+    # 正是从这个窗口混进必收名单的。
+    window = stages.BIBLE_HEAD_CHAPTERS + stages.BIBLE_LOOKAHEAD_CHAPTERS
+    assert set(range(window)).issubset(set(long))
+    # 后段抽样章也读进了提示词，同样要净化。
+    plan = stages._bible_source_plan(_book(1600), stages.BIBLE_SOURCE_BUDGET_CHARS,
+                                     stages.BIBLE_HEAD_CHAPTERS)
+    assert set(index for index, _, _ in plan).issubset(set(long))
+
+
+def test_paratext_cleaning_is_capped_and_fails_open(monkeypatch) -> None:
+    """净化是净化步骤不是闸门：超时未完成的章原样进入下游，不拖死人物谱。"""
+    import asyncio
+
+    from app import source_paratext, stages
+
+    chapters = [
+        {"id": f"ch{i}", "idx": i, "title": f"第{i}章", "content": f"第{i}章开头。" + "文" * 4000}
+        for i in range(1, 40)
+    ]
+
+    async def _never_returns(text: str, *, operation_id: str) -> str:
+        await asyncio.sleep(3600)
+        return ""
+
+    monkeypatch.setattr(source_paratext, "strip_paratext", _never_returns)
+    monkeypatch.setattr(stages, "BIBLE_PARATEXT_BUDGET_S", 0.2)
+
+    started = asyncio.get_event_loop_policy().new_event_loop()
+    try:
+        cleaned = started.run_until_complete(stages._chapters_without_paratext(chapters))
+    finally:
+        started.close()
+
+    assert cleaned == chapters
