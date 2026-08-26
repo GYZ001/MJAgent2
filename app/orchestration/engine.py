@@ -18,6 +18,36 @@ from app.observability.tracing import bind_trace
 T = TypeVar("T")
 
 
+def refresh_run_cost(run_id: str) -> float:
+    """Sum ``shot_versions.cost_cny`` across jobs owned by ``run_id`` and persist it.
+
+    Pulled out of ``WorkflowRecorder.refresh_cost`` so run-status transitions
+    that happen *outside* an in-process recorder instance -- notably
+    ``app.orchestration.media_runs.mark_media_job_state``, which the durable
+    async video worker calls when a per-shot job reaches a terminal state --
+    can keep ``workflow_runs.cost_cny`` in sync too. Without this, a run whose
+    lifecycle is driven entirely through ``mark_media_job_state`` (every
+    per-shot ``video_generation`` run) never had its cost refreshed at all,
+    even though the underlying ``shot_versions.cost_cny`` was correctly
+    recorded (¥12/段).
+    """
+    conn = get_conn()
+    row = conn.execute(
+        """SELECT COALESCE(SUM(v.cost_cny), 0) AS total
+           FROM jobs j
+           LEFT JOIN shot_versions v ON v.id=j.version_id
+           WHERE j.run_id=?""",
+        (run_id,),
+    ).fetchone()
+    total = float(row["total"] if row else 0)
+    conn.execute(
+        "UPDATE workflow_runs SET cost_cny=?, updated_at=? WHERE id=?",
+        (total, now(), run_id),
+    )
+    conn.commit()
+    return total
+
+
 @dataclass(frozen=True, slots=True)
 class WorkflowStepPresentation:
     name: str
@@ -320,21 +350,7 @@ class WorkflowRecorder:
 
     def refresh_cost(self) -> float:
         """Project the currently attributable media spend onto the persisted run."""
-        conn = get_conn()
-        row = conn.execute(
-            """SELECT COALESCE(SUM(v.cost_cny), 0) AS total
-               FROM jobs j
-               LEFT JOIN shot_versions v ON v.id=j.version_id
-               WHERE j.run_id=?""",
-            (self.run_id,),
-        ).fetchone()
-        total = float(row["total"] if row else 0)
-        conn.execute(
-            "UPDATE workflow_runs SET cost_cny=?, updated_at=? WHERE id=?",
-            (total, now(), self.run_id),
-        )
-        conn.commit()
-        return total
+        return refresh_run_cost(self.run_id)
 
     def succeed(self, message: str = "运行完成") -> None:
         self.refresh_cost()

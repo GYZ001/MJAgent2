@@ -5,7 +5,7 @@ import logging
 from app.db import get_conn
 from app.evidence import repository
 from app.observability.tracing import current_trace
-from app.orchestration.engine import WorkflowRecorder, fingerprint
+from app.orchestration.engine import WorkflowRecorder, fingerprint, refresh_run_cost
 from app.orchestration.state_machine import transition_run, transition_step
 
 logger = logging.getLogger(__name__)
@@ -123,6 +123,11 @@ def mark_media_job_state(run_id: str | None, step_id: str | None, status: str, m
             current = conn.execute("SELECT status FROM workflow_runs WHERE id=?", (run_id,)).fetchone()["status"]
             if current in {"RUNNING", "WAITING_RETRY", "PAUSED_BUDGET", "PAUSED_EXTERNAL"}:
                 transition_run(run_id, current, "FAILED", reason, failure_code="MEDIA_FAILED")
+        if status in {"succeeded", "cancelled", "abandoned", "failed"}:
+            # 这条运行的整个生命周期都走这个函数而不是 WorkflowRecorder 实例方法，
+            # 所以 refresh_cost 必须在这里手动补一次，否则 shot_versions.cost_cny
+            # 已经记着 ¥12/段，workflow_runs.cost_cny 却永远停在 0。
+            refresh_run_cost(run_id)
         repository.append_event(
             run_id, f"MEDIA_{status.upper()}", "error" if status == "failed" else "info",
             reason, step_run_id=step_id,
