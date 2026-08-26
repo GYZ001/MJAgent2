@@ -16,19 +16,6 @@ def _shot_contract_json(shot: Shot) -> str:
     return json.dumps(shot_contract_dict(shot), ensure_ascii=False)
 
 
-def _narrative_contract_summary(screenplay: EpisodeScreenplay | None) -> dict | None:
-    """Project the episode narrative contract without duplicating its graph."""
-    plan = screenplay.narrative_plan if screenplay is not None else None
-    if plan is None:
-        return None
-    return {
-        "contract_version": plan.contract_version,
-        "proposition_count": len(plan.propositions),
-        "event_count": len(plan.events),
-        "audience_prior_count": len(plan.audience_priors),
-        "experience_intent_count": len(plan.experience_intents),
-        "assimilation_task_count": len(plan.assimilation_tasks),
-    }
 
 
 _NARRATIVE_PRESENTATION_EDIT_FIELDS = frozenset({
@@ -95,85 +82,6 @@ def _raise_narrative_semantic_mutation_required(
     if fields:
         detail["fields"] = fields
     raise HTTPException(409, detail)
-
-
-def _latest_narrative_review_summary(conn, episode_id: str) -> dict | None:
-    """Return only the current review decision, never the full evidence payload."""
-    row = conn.execute(
-        """SELECT id, version, status, content_json
-           FROM artifacts
-           WHERE type='narrative_review_report'
-             AND scope_type='episode' AND scope_id=? AND status!='stale'
-           ORDER BY version DESC LIMIT 1""",
-        (episode_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    try:
-        content = json.loads(row["content_json"] or "{}")
-    except (TypeError, ValueError):
-        content = {}
-    if not isinstance(content, dict):
-        content = {}
-    low_percentile = content.get("low_percentile_result")
-    if not isinstance(low_percentile, dict):
-        low_percentile = {}
-    try:
-        inference_variance = float(content.get("inference_variance") or 0.0)
-    except (TypeError, ValueError):
-        inference_variance = 0.0
-    return {
-        "artifact_id": row["id"],
-        "version": int(row["version"]),
-        "status": row["status"],
-        "decision": content.get("decision"),
-        "low_percentile": low_percentile,
-        "inference_variance": inference_variance,
-        "reason": str(content.get("reason") or ""),
-    }
-
-
-def _narrative_calibration_summary(episode: dict) -> dict:
-    bound_artifact_id = str(
-        episode.get("narrative_calibration_artifact_id") or ""
-    )
-    try:
-        from app.narrative_calibration import require_current_calibration_authority
-
-        authority = require_current_calibration_authority()
-    except Exception as exc:  # noqa: BLE001 - presentation of a blocked gate
-        errors = list(getattr(exc, "errors", []) or [str(exc)])
-        return {
-            "ready": False,
-            "status": "needs_review",
-            "artifact_id": None,
-            "bound_artifact_id": bound_artifact_id or None,
-            "model_pass_threshold": None,
-            "blockers": errors,
-        }
-    return {
-        "ready": bool(
-            bound_artifact_id
-            and bound_artifact_id == authority.artifact_id
-            and episode.get("narrative_status") == "ready"
-        ),
-        "status": (
-            "calibrated"
-            if bound_artifact_id == authority.artifact_id
-            else "awaiting_republish"
-        ),
-        "artifact_id": authority.artifact_id,
-        "bound_artifact_id": bound_artifact_id or None,
-        "authority_mode": authority.authority_mode,
-        "model_pass_threshold": authority.model_pass_threshold,
-        "calibration_score": authority.report.calibration_score,
-        "sample_summary": authority.report.sample_summary,
-        "blockers": (
-            []
-            if bound_artifact_id == authority.artifact_id
-            else ["当前分镜尚未绑定最新真人一次观看校准，请重新完成审读发布"]
-        ),
-    }
 
 
 def _apply_contract_to_public_shot(target: dict) -> None:
@@ -973,13 +881,8 @@ def _storyboard_publication_evidence_state(
 def _finalize_storyboard_evidence(
     episode_id: str,
     board: Storyboard,
-    *,
-    narrative_review_report=None,
-    narrative_review_artifact_ids: list[str] | None = None,
 ) -> str:
     conn = get_conn()
-    verified_review_artifact_id: str | None = None
-    calibration_authority = None
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     planned_total = 0
     try:
@@ -1013,7 +916,6 @@ def _finalize_storyboard_evidence(
         from app.narrative import (
             validate_storyboard_narrative,
         )
-        from app.narrative_review import verify_persisted_narrative_review
 
         narrative_errors = validate_storyboard_narrative(
             board,
@@ -1030,37 +932,17 @@ def _finalize_storyboard_evidence(
             raise RuntimeError(
                 "分镜叙事硬门禁未通过：" + "；".join(narrative_errors[:8])
             )
-        if narrative_review_report is None:
-            raise RuntimeError("分镜冷观众审读报告缺失，禁止发布")
-        try:
-            verified_review_artifact_id = verify_persisted_narrative_review(
-                episode_id=episode_id,
-                screenplay=screenplay,
-                board=board,
-                report=narrative_review_report,
-                artifact_ids=list(narrative_review_artifact_ids or []),
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                f"分镜冷观众审读未通过或已因分镜变化失效：{exc}"
-            ) from exc
-        try:
-            from app.narrative_calibration import (
-                assert_report_meets_current_calibration,
-            )
-
-            calibration_authority = assert_report_meets_current_calibration(
-                narrative_review_report,
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                f"一次观看校准未就绪，禁止发布叙事分镜：{exc}"
-            ) from exc
-        # ``assert_report_meets_current_calibration`` already verifies the
-        # authority artifact, lineage, runtime gate and effective threshold.
-        # Publication must consume that typed result directly instead of
-        # maintaining a second mode-name allowlist that can drift from the
-        # calibration contract.
+        # 冷观众审读（narrative_review）与一次观看校准（narrative_calibration）
+        # 已整体下线（用户拍板）：这里曾经的强制要求在删除前就已经是一个必死
+        # 分支——本函数在活代码里的两个调用方（app.production.storyboard_pack.
+        # run_storyboard_pack_generation、app.domain.video_ops._confirm_storyboard_
+        # impl）都只按位置参数传 (episode_id, board)，从未提供过
+        # narrative_review_report，所以 narrative_authority=True 时这里过去
+        # 100% 抛 RuntimeError（分镜冷观众审读报告缺失，禁止发布）。删除这段
+        # 不会让任何当前可达路径从"会拒绝"变成"会放行"——上面的
+        # validate_storyboard_narrative 结构化叙事硬门禁（108e2c1 修的那道）
+        # 原样保留，narrative_authority 的分类判据本身（screenplay_context.
+        # narrative_authority_required）也原样保留，没有被本次改动放宽。
     if _sync_storyboard_scene_bindings(conn, episode_id, board):
         # 这是由当前门禁确定的派生外键修复，即使后续证据发布失败也应保留，
         # 避免下次重试继续读取已经证伪的历史场景绑定。
@@ -1108,11 +990,6 @@ def _finalize_storyboard_evidence(
             project["bible_artifact_id"],
             ep["screenplay_artifact_id"],
             *shot_parent_ids,
-            *(narrative_review_artifact_ids or []),
-            (
-                calibration_authority.artifact_id
-                if calibration_authority is not None else None
-            ),
         )
         if artifact_id
     ))
@@ -1154,38 +1031,6 @@ def _finalize_storyboard_evidence(
         },
     )
     artifact = evidence_repository.commit_artifact(None, artifact["id"], [evaluation])
-    if narrative_authority:
-        narrative_evaluation = Evaluation(
-            evaluator_type="model",
-            evaluator_name="narrative_blind_comparator",
-            evaluator_version="narrative-comparator.v1",
-            status="passed",
-            hard_gate_passed=True,
-            evaluation_role="runtime_gate",
-            runtime_blocking=True,
-            retry_eligible=False,
-            score=100,
-            evidence={
-                "narrative_review_report": narrative_review_report.model_dump(
-                    mode="json"
-                ),
-                "narrative_review_artifact_ids": list(
-                    narrative_review_artifact_ids or []
-                ),
-                "narrative_calibration_artifact_id": (
-                    calibration_authority.artifact_id
-                ),
-                "human_calibrated_model_threshold": (
-                    calibration_authority.model_pass_threshold
-                ),
-                "calibration_authority_mode": (
-                    calibration_authority.authority_mode
-                ),
-            },
-        )
-        evidence_repository.create_evaluation(
-            artifact["id"], narrative_evaluation,
-        )
     from app.production.publish import publish_storyboard
     from app.production.revision import (
         bind_unpublished_revision_metadata,
@@ -1237,24 +1082,6 @@ def _finalize_storyboard_evidence(
         contract_version=contract_version,
         qa_profile_version=revision.qa_profile_version or "storyboard-full-gate-2",
     )
-    if narrative_authority:
-        conn.execute(
-            "UPDATE episodes SET narrative_status='ready', "
-            "narrative_review_artifact_id=?, narrative_calibration_artifact_id=? "
-            "WHERE id=?",
-            (
-                verified_review_artifact_id,
-                calibration_authority.artifact_id,
-                episode_id,
-            ),
-        )
-    else:
-        conn.execute(
-            "UPDATE episodes SET narrative_status='legacy_unvalidated', "
-            "narrative_review_artifact_id=NULL, "
-            "narrative_calibration_artifact_id=NULL WHERE id=?",
-            (episode_id,),
-        )
     conn.commit()
     return str(artifact["id"])
 
@@ -1678,10 +1505,7 @@ async def _storyboard_task(
                               working_storyboard_artifact_id=NULL,
                               published_storyboard_artifact_id=NULL,
                               storyboard_completion_certificate_id=NULL,
-                              storyboard_production_revision_id=NULL,
-                              narrative_status='needs_review',
-                              narrative_review_artifact_id=NULL,
-                              narrative_calibration_artifact_id=NULL
+                              storyboard_production_revision_id=NULL
                         WHERE id=? AND status IN ('scripted','scripting')
                           AND published_storyboard_artifact_id=?
                           AND storyboard_completion_certificate_id=?""",
@@ -3053,14 +2877,6 @@ async def clear_storyboard_projection(episode_id: str) -> dict:
             shot_count = int(conn.execute(
                 "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,),
             ).fetchone()["c"])
-            prior_shot_artifact_ids = [
-                str(row["storyboard_artifact_id"])
-                for row in conn.execute(
-                    "SELECT storyboard_artifact_id FROM shots WHERE episode_id=?",
-                    (episode_id,),
-                ).fetchall()
-                if row["storyboard_artifact_id"]
-            ]
             media_versions = int(conn.execute(
                 """SELECT COUNT(*) AS c FROM shot_versions v
                    JOIN shots s ON s.id=v.shot_id WHERE s.episode_id=?""",
@@ -3170,14 +2986,6 @@ async def clear_storyboard_projection(episode_id: str) -> dict:
             clear_storyboard_outline_authority(
                 episode_id,
                 conn=conn,
-            )
-            from app.narrative_review import invalidate_episode_narrative_review
-
-            invalidate_episode_narrative_review(
-                conn,
-                episode_id,
-                "用户已清空分镜工作区，旧叙事审读失效",
-                upstream_artifact_ids=prior_shot_artifact_ids,
             )
             if "storyboard_control_json" in {
                 str(row["name"])
@@ -4164,11 +3972,6 @@ def _apply_storyboard_structure_transaction(episode_id: str, body: dict):
         invalidated += int(cleanup.get("videos", 0)) + int(cleanup.get("references", 0))
         if cleanup.get("outbox_id"):
             cleanup_outbox_ids.append(str(cleanup["outbox_id"]))
-    prior_shot_artifact_ids = [
-        str(row["storyboard_artifact_id"])
-        for row in rows
-        if row["storyboard_artifact_id"]
-    ]
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     screenplay_context = _resolve_storyboard_mutation_screenplay(conn, episode_id)
     screenplay = screenplay_context.screenplay
@@ -4292,14 +4095,6 @@ def _apply_storyboard_structure_transaction(episode_id: str, body: dict):
                   storyboard_artifact_id=NULL
             WHERE id=?""",
         (episode_id,),
-    )
-    from app.narrative_review import invalidate_episode_narrative_review
-
-    invalidate_episode_narrative_review(
-        conn,
-        episode_id,
-        f"分镜结构已执行 {operation}，旧叙事审读失效",
-        upstream_artifact_ids=prior_shot_artifact_ids,
     )
     _ensure_current_storyboard_shot_artifacts(
         conn,
@@ -4525,20 +4320,6 @@ def _episode_detail_projection(episode_id: str, view: str | None) -> dict:
         if script is None and (full or view in ("script", "board"))
         else None
     )
-    narrative_workspace = view in ("script", "board")
-    ep["narrative_contract_summary"] = (
-        _narrative_contract_summary(script) if narrative_workspace else None
-    )
-    ep["narrative_review_summary"] = (
-        _latest_narrative_review_summary(conn, episode_id)
-        if narrative_workspace else None
-    )
-    ep["narrative_calibration_summary"] = (
-        _narrative_calibration_summary(ep)
-        if narrative_workspace and script is not None
-        and script.narrative_plan is not None
-        else None
-    )
     ep["scene_options"] = []
     if full or view in ("board", "wall"):
         project = conn.execute(
@@ -4675,57 +4456,11 @@ def _episode_detail_projection(episode_id: str, view: str | None) -> dict:
 
     shot_rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall()
+    # 冷观众审读驱动的叙事指标面板（NarrativeReadinessPanel）已随观众深读/
+    # 校准校验功能一起下线（用户拍板）：这里曾经的 compute_narrative_metrics
+    # 调用只在 script.narrative_plan is not None 时才执行，对 prep_pack
+    # （契约 6.0.0+）分集永远是 None，本就是死分支，不留兼容。
     ep["narrative_metrics"] = None
-    if script is not None and script.narrative_plan is not None and (full or view == "board"):
-        from app.narrative import compute_narrative_metrics
-        from app.schemas import (
-            BlindAudienceObservation,
-            NarrativeReviewReport,
-            StoryboardOutline,
-        )
-
-        review_report = None
-        review_observations: list[BlindAudienceObservation] | None = None
-        review_artifact_id = ep.get("narrative_review_artifact_id")
-        if review_artifact_id:
-            review_artifact = evidence_repository.get_artifact(review_artifact_id)
-            if (
-                review_artifact is not None
-                and review_artifact.get("type") == "narrative_review_report"
-                and review_artifact.get("status")
-                not in {"stale", "rejected", "superseded", "needs_revision"}
-            ):
-                try:
-                    review_report = NarrativeReviewReport.model_validate(
-                        review_artifact.get("content") or {}
-                    )
-                    review_observations = []
-                    for parent_id in review_artifact.get("parent_artifact_ids") or []:
-                        parent = evidence_repository.get_artifact(str(parent_id))
-                        if parent is None or parent.get("type") != "blind_audience_observation":
-                            continue
-                        review_observations.append(
-                            BlindAudienceObservation.model_validate(
-                                parent.get("content") or {}
-                            )
-                        )
-                except (TypeError, ValueError):
-                    review_report = None
-                    review_observations = None
-        try:
-            narrative_outline = (
-                StoryboardOutline.model_validate(outline) if outline else None
-            )
-        except (TypeError, ValueError):
-            narrative_outline = None
-        ep["narrative_metrics"] = compute_narrative_metrics(
-            script,
-            _board_from_shot_rows(shot_rows, int(ep.get("episode_no") or 1)),
-            review_report,
-            outline=narrative_outline,
-            observations=review_observations,
-            human_calibration=ep.get("narrative_calibration_summary"),
-        )
     # 预估只按模型选择的实际分镜时长累计；单集不设总时长产品上限。
     ep["cost_cny"] = worker.episode_cost(episode_id)
     ep["cost_limit_cny"] = float(get_setting("episode_cost_limit_cny") or 100)
@@ -5280,7 +5015,6 @@ async def edit_shot(shot_id: str, body: dict):
         flush_media_cleanup_outbox,
         stage_shot_artifact_cleanup,
     )
-    from app.narrative_review import invalidate_episode_narrative_review
 
     conn.execute("BEGIN IMMEDIATE")
     cleanup_outbox_id = None
@@ -5304,12 +5038,6 @@ async def edit_shot(shot_id: str, body: dict):
              json.dumps([d.model_dump() for d in instance.dialogues], ensure_ascii=False),
              instance.transition, int(instance.continuity_from_prev), _shot_contract_json(instance),
              instance.continuity_mode, instance.observed_state_out, shot_id))
-        invalidate_episode_narrative_review(
-            conn,
-            episode_id,
-            f"镜头 {shot_id} 已人工修订，旧叙事审读失效",
-            upstream_artifact_ids=[previous_artifact_id] if previous_artifact_id else [],
-        )
         if normalized_source_binding is not None:
             persist_source_binding(
                 shot_id,
@@ -5457,7 +5185,6 @@ def migrate_episode_shot_ids(episode_id: str, body: dict | None = Body(None)):
     by_no = {int(r["shot_no"]): r for r in rows}
     changed = []
     changed_shots: list[Shot] = []
-    changed_artifact_ids: list[str] = []
     for shot in board.shots:
         actions = migrate_shot_id_spaces(shot)
         if not actions:
@@ -5471,8 +5198,6 @@ def migrate_episode_shot_ids(episode_id: str, body: dict | None = Body(None)):
             row = by_no.get(shot.shot_no)
             if row is None:
                 continue
-            if row["storyboard_artifact_id"]:
-                changed_artifact_ids.append(str(row["storyboard_artifact_id"]))
             conn.execute(
                 "UPDATE shots SET shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE id=?",
                 (
@@ -5483,14 +5208,6 @@ def migrate_episode_shot_ids(episode_id: str, body: dict | None = Body(None)):
                 ),
             )
     if not dry_run and changed:
-        from app.narrative_review import invalidate_episode_narrative_review
-
-        invalidate_episode_narrative_review(
-            conn,
-            episode_id,
-            "分镜 ID 空间已迁移，旧叙事审读失效",
-            upstream_artifact_ids=changed_artifact_ids,
-        )
         conn.commit()
         current_rows = conn.execute(
             "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",

@@ -87,7 +87,7 @@ def test_workspace_episode_views_do_not_expand_historical_inputs(monkeypatch) ->
     assert not any("json_extract" in sql.lower() for sql in statements)
 
 
-def test_narrative_summaries_and_shot_contract_are_scoped_to_script_and_board(
+def test_shot_contract_is_scoped_to_script_and_board(
     monkeypatch,
 ) -> None:
     conn = _conn()
@@ -173,76 +173,13 @@ def test_narrative_summaries_and_shot_contract_are_scoped_to_script_and_board(
         "UPDATE shots SET shot_contract_json=? WHERE id='s1'",
         (json.dumps(shot_contract),),
     )
-    report_rows = [
-        (
-            "review-1",
-            1,
-            "validated",
-            {"decision": "pass", "low_percentile_result": {"score": 0.9}},
-        ),
-        (
-            "review-2",
-            2,
-            "needs_revision",
-            {
-                "decision": "revise",
-                "low_percentile_result": {"score": 0.35, "prior_id": "PRIOR-1"},
-                "inference_variance": 0.42,
-                "reason": "The causal link is not yet readable.",
-                "evidence_gap_ids": ["PRIVATE-GAP-1"],
-            },
-        ),
-        (
-            "review-3",
-            3,
-            "stale",
-            {"decision": "pass", "reason": "Historical result"},
-        ),
-    ]
-    conn.executemany(
-        """INSERT INTO artifacts(
-               id, type, scope_type, scope_id, version, status, trust_level,
-               content_json, content_hash, created_at
-           ) VALUES(?, 'narrative_review_report', 'episode', 'e1', ?, ?, 'T2', ?, ?, ?)""",
-        [
-            (artifact_id, version, status, json.dumps(content), artifact_id, version)
-            for artifact_id, version, status, content in report_rows
-        ],
-    )
     conn.commit()
     _patch_storyboard_db(monkeypatch, conn)
 
-    script = storyboard_ops.episode_detail("e1", "script")
+    # script 视图仍需过一遍投影，确认叙事蓝图分集在这个视图下不崩；
+    # 断言全部落在下面的 board 公开镜头字段投影上。
+    storyboard_ops.episode_detail("e1", "script")
     board = storyboard_ops.episode_detail("e1", "board")
-    wall = storyboard_ops.episode_detail("e1", "wall")
-
-    expected_contract_summary = {
-        "contract_version": "narrative-continuity.v1",
-        "proposition_count": 1,
-        "event_count": 1,
-        "audience_prior_count": 1,
-        "experience_intent_count": 1,
-        "assimilation_task_count": 1,
-    }
-    expected_review_summary = {
-        "artifact_id": "review-2",
-        "version": 2,
-        "status": "needs_revision",
-        "decision": "revise",
-        "low_percentile": {"score": 0.35, "prior_id": "PRIOR-1"},
-        "inference_variance": 0.42,
-        "reason": "The causal link is not yet readable.",
-    }
-    assert script["narrative_contract_summary"] == expected_contract_summary
-    assert board["narrative_contract_summary"] == expected_contract_summary
-    assert script["narrative_review_summary"] == expected_review_summary
-    assert board["narrative_review_summary"] == expected_review_summary
-    assert "evidence_gap_ids" not in board["narrative_review_summary"]
-    assert wall["narrative_contract_summary"] is None
-    assert wall["narrative_review_summary"] is None
-    assert board["narrative_metrics"]["contract_present"] is True
-    assert "audience_processing_debt" in board["narrative_metrics"]
-    assert wall["narrative_metrics"] is None
 
     public_shot = board["shots"][0]
     for key, expected in shot_contract.items():

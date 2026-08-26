@@ -26,7 +26,6 @@ from app.video_supervisor import (
     _semantic_storyboard_repair_proposal,
     _ensure_supervisor_video_plan,
 )
-from tests.test_narrative_review_wall_fence import _published_authority_case
 
 
 @pytest.fixture(autouse=True)
@@ -34,19 +33,6 @@ def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "video-completion-authority.db")
     monkeypatch.setattr(db._local, "conn", None, raising=False)
     db.init_db()
-
-
-def _issue_published_grant(case: dict):
-    episode = db.get_conn().execute(
-        "SELECT project_id,storyboard_artifact_id FROM episodes WHERE id='episode-generic'"
-    ).fetchone()
-    grant, _token = issue_video_completion_grant(
-        episode_id="episode-generic",
-        project_id=episode["project_id"],
-        storyboard_artifact_id=episode["storyboard_artifact_id"],
-        shots_total=len(case["board"].shots),
-    )
-    return grant
 
 
 def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
@@ -63,7 +49,7 @@ def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
                id,episode_id,shot_no,duration_s,characters,dialogues
            ) VALUES('budget-s','budget-e',1,5,'[]','[]')"""
     )
-    for index in (1, 2):
+    for index in (1, 2, 3, 4):
         conn.execute(
             """INSERT INTO shot_versions(
                    id,shot_id,version_no,prompt_text,idem_key,status,created_at
@@ -92,32 +78,38 @@ def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
         )
     conn.commit()
 
+    # 授权口径见 completion_grant.VIDEO_BUDGET_RETRY_MARGIN_MULTIPLIER：cap
+    # 不再等于首轮预估的 4.0，而是含重试余量的 4.0*3=12.0——覆盖同一镜头
+    # 最多 2 次自动重投（合计 3 次付费尝试），但余量不是无限的。
     cap = authorize_episode_video_budget_increment(
         "budget-e",
         4.0,
         source="test-approval",
     )
-    assert cap == 4.0
+    assert cap == 12.0
+    for index in (1, 2, 3):
+        assert reserve_provider_video_budget(
+            episode_id="budget-e",
+            job_id=f"budget-j{index}",
+            version_id=f"budget-v{index}",
+            operation_id=f"video-create-budget-v{index}",
+            amount_cny=4.0,
+        ) is True
+        mark_provider_video_budget_claim(f"video-create-budget-v{index}", "accepted")
+    # 第 4 次尝试超出含余量的 cap（12.0）——余量覆盖真实重投需求，但仍是
+    # 有限的，超出仍必须被拦，不能靠它把预算保护整个放宽。
     assert reserve_provider_video_budget(
         episode_id="budget-e",
-        job_id="budget-j1",
-        version_id="budget-v1",
-        operation_id="video-create-budget-v1",
-        amount_cny=4.0,
-    ) is True
-    mark_provider_video_budget_claim("video-create-budget-v1", "accepted")
-    assert reserve_provider_video_budget(
-        episode_id="budget-e",
-        job_id="budget-j2",
-        version_id="budget-v2",
-        operation_id="video-create-budget-v2",
+        job_id="budget-j4",
+        version_id="budget-v4",
+        operation_id="video-create-budget-v4",
         amount_cny=4.0,
     ) is False
     assert episode_video_budget_snapshot("budget-e") == {
         "baseline_cny": 0.0,
-        "claimed_cny": 4.0,
-        "used_cny": 4.0,
-        "cap_cny": 4.0,
+        "claimed_cny": 12.0,
+        "used_cny": 12.0,
+        "cap_cny": 12.0,
         "remaining_cny": 0.0,
     }
 
@@ -128,9 +120,9 @@ def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
     )
     assert reserve_provider_video_budget(
         episode_id="budget-e",
-        job_id="budget-j2",
-        version_id="budget-v2",
-        operation_id="video-create-budget-v2",
+        job_id="budget-j4",
+        version_id="budget-v4",
+        operation_id="video-create-budget-v4",
         amount_cny=4.0,
     ) is True
 
@@ -177,6 +169,10 @@ def test_concurrent_provider_video_budget_claims_share_one_atomic_cap() -> None:
             ),
         )
     conn.commit()
+    # 授权 4.0 首轮预估，含重试余量后 cap=12.0（见
+    # completion_grant.VIDEO_BUDGET_RETRY_MARGIN_MULTIPLIER）。两笔并发认领
+    # 各 7.0：合计 14.0 超过 12.0，只有一笔能挤进去——用来测原子互斥，claim
+    # 金额必须仍大到能撞上含余量后的新 cap，不能沿用旧的零余量数字。
     authorize_episode_video_budget_increment(
         "race-e",
         4.0,
@@ -191,7 +187,7 @@ def test_concurrent_provider_video_budget_claims_share_one_atomic_cap() -> None:
             job_id=f"race-j{index}",
             version_id=f"race-v{index}",
             operation_id=f"video-create-race-v{index}",
-            amount_cny=4.0,
+            amount_cny=7.0,
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -200,10 +196,10 @@ def test_concurrent_provider_video_budget_claims_share_one_atomic_cap() -> None:
     assert sorted(results) == [False, True]
     assert episode_video_budget_snapshot("race-e") == {
         "baseline_cny": 0.0,
-        "claimed_cny": 4.0,
-        "used_cny": 4.0,
-        "cap_cny": 4.0,
-        "remaining_cny": 0.0,
+        "claimed_cny": 7.0,
+        "used_cny": 7.0,
+        "cap_cny": 12.0,
+        "remaining_cny": 5.0,
     }
 
 
@@ -276,14 +272,154 @@ def test_completion_budget_requirement_includes_sunk_duplicate_claims() -> None:
     }
 
 
+def _narrative_authority_case() -> dict:
+    """Publish a narrative-authority screenplay + storyboard with a real
+    certificate/revision chain, then issue a video completion grant against it.
+
+    This intentionally does not use the deleted cold-audience-review/
+    calibration path (``app.narrative_review`` / ``app.narrative_calibration``,
+    removed together with their certificate-authority tests). Those were
+    already score-only/non-authoritative for release qualification --
+    ``_narrative_review_material`` in app.completion_grant hardcodes
+    ``required=False, verified=True`` -- so the certificate/shots drift
+    detection under test here does not depend on them at all.
+
+    Reuses ``tests.test_narrative_continuity._persist_review_projection``,
+    which was explicitly kept alive (with an in-file docstring explaining
+    why) after that deletion specifically because it is a generic "publish
+    one narrative-authority screenplay" fixture with no such dependency,
+    and is already relied on by tests/test_screenplay_authority.py.
+    """
+    from app.continuity import PROMPT_CONTRACT_VERSION
+    from app.evidence import repository as evidence_repository
+    from app.harness.types import Evaluation, EvidenceArtifact
+    from app.production.certificate import (
+        consume_completion_certificate,
+        issue_completion_certificate,
+    )
+    from app.production.revision import (
+        ensure_production_revision,
+        mark_baseline_generated,
+        set_published_artifact,
+    )
+    from app.schemas import StoryboardOutline, StoryboardOutlineShot
+    from app.storyboard_authority import persist_storyboard_outline_authority
+    from tests.test_narrative_continuity import _board, _persist_review_projection, _screenplay
+
+    screenplay = _screenplay()
+    screenplay.full_script_text = "A complete source-grounded screenplay projection."
+    board = _board()
+    board.shots[-1].is_final = True
+    for shot in board.shots:
+        shot.prompt_contract_version = PROMPT_CONTRACT_VERSION
+    screenplay_artifact, _shot_artifacts = _persist_review_projection(screenplay, board)
+
+    outline = StoryboardOutline(
+        episode_no=board.episode_no,
+        shots=[
+            StoryboardOutlineShot.model_validate({
+                key: value
+                for key, value in shot.model_dump(mode="json").items()
+                if key in StoryboardOutlineShot.model_fields
+            })
+            for shot in board.shots
+        ],
+    )
+    persist_storyboard_outline_authority("episode-generic", outline)
+
+    contract_version = "narrative-continuity.v1"
+    working_candidate = evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="storyboard_document",
+            scope_type="episode",
+            scope_id="episode-generic",
+            status="approved",
+            trust_level="T2",
+            content=board.model_dump(mode="json"),
+            parent_artifact_ids=[screenplay_artifact["id"]],
+            contract_version=contract_version,
+        )
+    )
+    revision = ensure_production_revision(
+        episode_id="episode-generic",
+        kind="storyboard",
+        resume=False,
+    )
+    mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=working_candidate["id"],
+        working_artifact_id=working_candidate["id"],
+    )
+    conn = db.get_conn()
+    conn.execute(
+        """UPDATE production_revisions
+              SET input_fingerprint='storyboard-input-v1',
+                  contract_version=?,qa_profile_version='storyboard-full-gate-2'
+            WHERE id=?""",
+        (contract_version, revision.id),
+    )
+    conn.commit()
+    full_gate = evidence_repository.create_evaluation(
+        working_candidate["id"],
+        Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="storyboard_full_gate",
+            evaluator_version=contract_version,
+            status="passed",
+            hard_gate_passed=True,
+            evaluation_role="runtime_gate",
+            runtime_blocking=True,
+            score=100,
+        ),
+    )
+    storyboard_certificate = issue_completion_certificate(
+        kind="storyboard",
+        scope_id="episode-generic",
+        artifact_id=working_candidate["id"],
+        artifact_hash=working_candidate["content_hash"],
+        input_fingerprint="storyboard-input-v1",
+        contract_version=contract_version,
+        qa_profile_version="storyboard-full-gate-2",
+        evaluation_ids=[full_gate["id"]],
+        production_revision_id=revision.id,
+    )
+    consume_completion_certificate(storyboard_certificate.certificate_id)
+    set_published_artifact(
+        revision.id,
+        working_candidate["id"],
+        certificate_id=storyboard_certificate.certificate_id,
+    )
+    conn.execute("UPDATE episodes SET status='confirmed' WHERE id='episode-generic'")
+    conn.commit()
+
+    episode = conn.execute(
+        "SELECT project_id,storyboard_artifact_id FROM episodes WHERE id='episode-generic'"
+    ).fetchone()
+    grant, _token = issue_video_completion_grant(
+        episode_id="episode-generic",
+        project_id=episode["project_id"],
+        storyboard_artifact_id=episode["storyboard_artifact_id"],
+        shots_total=len(board.shots),
+    )
+    return {"board": board, "working_candidate": working_candidate, "grant": grant}
+
+
 @pytest.mark.parametrize("drift", ["certificate", "shots"])
 @pytest.mark.asyncio
 async def test_asset_preparation_has_zero_calls_after_release_authority_drift(
     monkeypatch,
     drift: str,
 ) -> None:
-    case = await _published_authority_case(monkeypatch)
-    grant = _issue_published_grant(case)
+    """A narrative-authority episode's completion certificate binds an exact
+    artifact hash; its storyboard release authority separately binds the
+    live shots table's projection to that same frozen artifact content
+    (app.production.certificate.verify_current_storyboard_completion_authority).
+    Corrupting either after the grant was issued must fail the paid-asset
+    boundary closed, before any external provider call is made -- not
+    silently generate against stale/tampered authority.
+    """
+    case = _narrative_authority_case()
+    grant = case["grant"]
     conn = db.get_conn()
     if drift == "certificate":
         certificate_id = conn.execute(
@@ -338,26 +474,6 @@ async def test_asset_preparation_has_zero_calls_after_release_authority_drift(
         "RELEASE_QUALIFICATION_CHANGED",
     }
     assert calls == []
-
-
-@pytest.mark.asyncio
-async def test_optional_review_drift_does_not_revoke_video_grant(monkeypatch) -> None:
-    case = await _published_authority_case(monkeypatch)
-    grant = _issue_published_grant(case)
-    conn = db.get_conn()
-    conn.execute(
-        "UPDATE artifacts SET status='stale' WHERE id=?",
-        (case["report_artifact"]["id"],),
-    )
-    conn.commit()
-
-    validated = validate_video_grant(
-        grant.grant_id,
-        episode_id="episode-generic",
-        storyboard_artifact_id=grant.storyboard_artifact_id,
-    )
-
-    assert validated.grant_id == grant.grant_id
 
 
 def test_grant_recomputes_bound_plan_and_capability_snapshot(monkeypatch) -> None:

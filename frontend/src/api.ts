@@ -1436,37 +1436,6 @@ export interface EpisodePrepPack {
   coverage_ledger: PrepPackCoverageLedger;
 }
 
-export interface NarrativeContractSummary {
-  contract_version: string;
-  proposition_count: number;
-  event_count: number;
-  audience_prior_count: number;
-  experience_intent_count: number;
-  assimilation_task_count: number;
-}
-
-export interface NarrativeReviewSummary {
-  artifact_id: string;
-  version: number;
-  status: string;
-  decision: string | null;
-  low_percentile: Record<string, unknown>;
-  inference_variance: number;
-  reason: string;
-}
-
-export interface NarrativeCalibrationSummary {
-  ready: boolean;
-  status: "calibrated" | "awaiting_republish" | "needs_review";
-  artifact_id?: string | null;
-  bound_artifact_id?: string | null;
-  authority_mode?: "human_calibration" | "ai_simulation" | "waived";
-  model_pass_threshold?: number | null;
-  calibration_score?: number | null;
-  sample_summary?: Record<string, unknown>;
-  blockers: string[];
-}
-
 export interface ShotContribution {
   shot_contribution_id: string;
   experience_intent_ids: string[];
@@ -2118,10 +2087,6 @@ export interface Episode {
    * prep_pack 非空 → 渲染映射包；否则 screenplay 非空 → 旧产物占位提示；否则 → 尚无产物。
    */
   prep_pack?: EpisodePrepPack | null;
-  narrative_contract_summary?: NarrativeContractSummary | null;
-  narrative_review_summary?: NarrativeReviewSummary | null;
-  narrative_calibration_summary?: NarrativeCalibrationSummary | null;
-  narrative_metrics?: Record<string, unknown> | null;
   scene_options?: string[];
   shot_count?: number;
   video_count?: number;

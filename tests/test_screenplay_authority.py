@@ -13,7 +13,6 @@ from app.capabilities.direct import enter_handler
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact
 from app.narrative import NARRATIVE_CONTRACT_VERSION
-from app.narrative_review import NarrativeReviewError, run_blind_audience_review
 from app.production.publish import publish_screenplay
 from app.production.patch import (
     load_screenplay_from_artifact,
@@ -33,8 +32,7 @@ from app.screenplay_scene_shards import (
     SCREENPLAY_MERGED_IR_VERSION,
     SCREENPLAY_SCENE_SHARD_VERSION,
 )
-from tests.test_narrative_continuity import _board, _screenplay
-from tests.test_narrative_review import _persist_review_projection
+from tests.test_narrative_continuity import _board, _persist_review_projection, _screenplay
 
 
 MERGED_IR_ARTIFACT_FIXTURE = (
@@ -2414,21 +2412,6 @@ def test_authority_fingerprint_recovers_legacy_empty_hook_certificate() -> None:
     assert resolved.screenplay is not None
 
 
-@pytest.mark.asyncio
-async def test_blind_review_rejects_supplied_screenplay_drift_before_model_use() -> None:
-    screenplay, artifact, _authority = _published_case()
-    supplied = screenplay.model_copy(deep=True)
-    supplied.title = "Caller-side mutable draft"
-
-    with pytest.raises(NarrativeReviewError, match="REVIEW_INPUT_SCREENPLAY_DRIFT"):
-        await run_blind_audience_review(
-            episode_id="episode-generic",
-            screenplay=supplied,
-            board=_board(),
-            screenplay_artifact_id=artifact["id"],
-        )
-
-
 def test_unbound_historical_contract_plan_null_loads_as_legacy_display() -> None:
     screenplay = _screenplay()
     screenplay.narrative_plan = None
@@ -2603,7 +2586,7 @@ def _publish_episode_with_hook(
     """Publish a minimal narrative-authority screenplay for one episode.
 
     Mirrors the proven-working setup in
-    tests.test_narrative_review._persist_review_projection (same one-chapter
+    tests.test_narrative_continuity._persist_review_projection (same one-chapter
     project scaffolding and runtime_gate evaluation shape), but parameterized
     so several sequential episodes can share one project and be published
     (or republished) independently. Returns (artifact, publish_result).

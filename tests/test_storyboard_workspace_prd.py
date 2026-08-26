@@ -8,7 +8,7 @@ import threading
 import pytest
 from fastapi import HTTPException
 
-from app import api, db, narrative_review, task_registry
+from app import api, db, task_registry
 from app.capabilities.direct import enter_handler
 from app.evidence import repository
 from app.harness.types import EvidenceArtifact
@@ -187,9 +187,13 @@ def _seed_narrative_review_lineage(conn):
         content={"derived": True},
         parent_artifact_ids=[report["id"]],
     ))
+    # narrative_review_artifact_id 非空是 episode_requires_immutable_screenplay_
+    # authority（app/production/screenplay_authority.py）判定"必须走不可变权威
+    # 解析"的判据之一——观众深读/校准校验功能虽然整体下线，这个列和这条
+    # fail-closed 判据都保留（不是本次删除范围），这里必须继续写，否则下面
+    # 两个测试测的"screenplay 权威链无效时拒绝编辑"根本触发不了。
     conn.execute(
-        "UPDATE episodes SET narrative_status='ready',narrative_review_artifact_id=? "
-        "WHERE id='e1'",
+        "UPDATE episodes SET narrative_review_artifact_id=? WHERE id='e1'",
         (report["id"],),
     )
     conn.commit()
@@ -200,74 +204,6 @@ def _seed_narrative_review_lineage(conn):
         "report": report["id"],
         "future_consumer": future_consumer["id"],
     }
-
-
-def test_narrative_review_input_parents_current_screenplay_and_every_shot_artifact(
-    storyboard_db,
-    monkeypatch,
-):
-    screenplay_artifact = repository.create_artifact(EvidenceArtifact(
-        type="screenplay_document",
-        scope_type="episode",
-        scope_id="e1",
-        status="validated",
-        trust_level="T2",
-        content={"episode_no": 1},
-    ))
-    storyboard_db.execute(
-        "UPDATE episodes SET screenplay_artifact_id=? WHERE id='e1'",
-        (screenplay_artifact["id"],),
-    )
-    storyboard_db.commit()
-    screenplay = EpisodeScreenplay.model_validate({
-        "episode_no": 1,
-        "narrative_plan": {
-            "scope_id": "e1",
-            "audience_priors": [{
-                "audience_prior_id": "PRIOR-1",
-                "audience_description": "A first-time viewer",
-            }],
-        },
-    })
-    rows = storyboard_db.execute(
-        "SELECT * FROM shots WHERE episode_id='e1' ORDER BY shot_no"
-    ).fetchall()
-    board = api._board_from_shot_rows(rows, 1)
-    api._ensure_current_storyboard_shot_artifacts(
-        storyboard_db,
-        "e1",
-        board,
-    )
-
-    async def stop_after_review_input(**_kwargs):
-        raise RuntimeError("review input captured")
-
-    monkeypatch.setattr(
-        narrative_review,
-        "_resolve_review_screenplay_authority",
-        lambda **_kwargs: (screenplay, screenplay_artifact["id"]),
-    )
-    monkeypatch.setattr(narrative_review, "_structured_call", stop_after_review_input)
-    with pytest.raises(RuntimeError, match="review input captured"):
-        asyncio.run(narrative_review.run_blind_audience_review(
-            episode_id="e1",
-            screenplay=screenplay,
-            board=board,
-            screenplay_artifact_id=screenplay_artifact["id"],
-        ))
-
-    review_input = storyboard_db.execute(
-        """SELECT parent_artifact_ids_json FROM artifacts
-           WHERE type='storyboard_review_input' AND scope_id='e1'
-           ORDER BY version DESC LIMIT 1"""
-    ).fetchone()
-    shot_artifact_id = storyboard_db.execute(
-        "SELECT storyboard_artifact_id FROM shots WHERE id='s1'"
-    ).fetchone()[0]
-    assert json.loads(review_input["parent_artifact_ids_json"]) == [
-        screenplay_artifact["id"],
-        shot_artifact_id,
-    ]
 
 
 def test_snapshot_version_is_monotonic_and_action_is_unique(storyboard_db):
@@ -1598,12 +1534,11 @@ def test_manual_shot_edit_rejects_review_pointer_without_published_authority(
         })
 
     episode = storyboard_db.execute(
-        "SELECT narrative_status,narrative_review_artifact_id FROM episodes WHERE id='e1'"
+        "SELECT narrative_review_artifact_id FROM episodes WHERE id='e1'"
     ).fetchone()
     assert caught.value.status_code == 409
     assert caught.value.detail["code"] == "storyboard_screenplay_authority_invalid"
     assert dict(storyboard_db.execute("SELECT * FROM shots WHERE id='s1'").fetchone()) == before
-    assert episode["narrative_status"] == "ready"
     assert episode["narrative_review_artifact_id"] == lineage["report"]
     assert {
         row["id"]: row["status"]
@@ -1804,11 +1739,10 @@ def test_structure_mutation_rejects_review_pointer_without_published_authority(s
         })
 
     episode = storyboard_db.execute(
-        "SELECT narrative_status,narrative_review_artifact_id FROM episodes WHERE id='e1'"
+        "SELECT narrative_review_artifact_id FROM episodes WHERE id='e1'"
     ).fetchone()
     assert caught.value.status_code == 409
     assert caught.value.detail["code"] == "storyboard_screenplay_authority_invalid"
-    assert episode["narrative_status"] == "ready"
     assert episode["narrative_review_artifact_id"] == lineage["report"]
     statuses = {
         row["id"]: row["status"]

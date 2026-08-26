@@ -314,8 +314,6 @@ def _review_narrative_authority_snapshot(conn, ep: dict[str, Any]) -> dict[str, 
     errors: list[str] = []
     screenplay_id = ep.get("published_screenplay_artifact_id")
     storyboard_id = ep.get("published_storyboard_artifact_id")
-    report_id = ep.get("narrative_review_artifact_id")
-    calibration_id = ep.get("narrative_calibration_artifact_id")
     if screenplay_id != ep.get("screenplay_artifact_id"):
         errors.append("NARRATIVE_SCREENPLAY_NOT_CURRENT_PUBLISHED_ARTIFACT")
     if storyboard_id != ep.get("storyboard_artifact_id"):
@@ -333,39 +331,10 @@ def _review_narrative_authority_snapshot(conn, ep: dict[str, Any]) -> dict[str, 
         episode_id=episode_id,
         expected_types={"storyboard", "storyboard_document"},
     )
-    review_artifact = _review_artifact_binding(
-        conn,
-        artifact_id=report_id,
-        episode_id=episode_id,
-        expected_types={"narrative_review_report"},
-    )
-    calibration_artifact = (
-        evidence_repository.get_artifact(str(calibration_id))
-        if calibration_id else None
-    )
     if not screenplay_artifact["verified"]:
         errors.append("NARRATIVE_SCREENPLAY_ARTIFACT_UNVERIFIED")
     if not storyboard_artifact["verified"]:
         errors.append("NARRATIVE_STORYBOARD_ARTIFACT_UNVERIFIED")
-    calibration_verified = False
-    if calibration_id:
-        try:
-            from app.narrative_calibration import (
-                require_current_calibration_authority,
-            )
-
-            calibration = require_current_calibration_authority(
-                expected_artifact_id=str(calibration_id),
-            )
-            calibration_verified = bool(
-                calibration_artifact is not None
-                and calibration.artifact_hash
-                == calibration_artifact.get("content_hash")
-                and str(calibration_id)
-                in set(storyboard_artifact["parent_artifact_ids"])
-            )
-        except Exception:
-            calibration_verified = False
 
     screenplay_projection_verified = False
     if screenplay_artifact["verified"]:
@@ -427,35 +396,6 @@ def _review_narrative_authority_snapshot(conn, ep: dict[str, Any]) -> dict[str, 
     if not shots_projection_verified:
         errors.append("NARRATIVE_SHOTS_PROJECTION_DRIFT")
 
-    review_verified = False
-    if (
-        ep.get("narrative_status") == "ready"
-        and board is not None
-        and storyboard_artifact["verified"]
-        and review_artifact["verified"]
-        and report_id in storyboard_artifact["parent_artifact_ids"]
-    ):
-        try:
-            from app.narrative_review import verify_review_chain_for_storyboard_artifact
-
-            persisted = {
-                "id": storyboard_artifact["artifact_id"],
-                "type": storyboard_artifact["artifact_type"],
-                "scope_type": "episode",
-                "scope_id": episode_id,
-                "status": storyboard_artifact["status"],
-                "content": storyboard_artifact["content"],
-                "content_hash": storyboard_artifact["content_hash"],
-                "parent_artifact_ids": storyboard_artifact["parent_artifact_ids"],
-            }
-            verified_report_id = verify_review_chain_for_storyboard_artifact(
-                episode_id=episode_id,
-                screenplay=screenplay,
-                storyboard_artifact=persisted,
-            )
-            review_verified = verified_report_id == report_id
-        except Exception:
-            review_verified = False
     screenplay_certificate = _review_certificate_binding(
         conn,
         certificate_id=ep.get("screenplay_completion_certificate_id"),
@@ -539,15 +479,6 @@ def _review_narrative_authority_snapshot(conn, ep: dict[str, Any]) -> dict[str, 
         "published_screenplay_artifact_hash": screenplay_artifact.get("content_hash"),
         "published_storyboard_artifact_id": storyboard_artifact.get("artifact_id"),
         "published_storyboard_artifact_hash": storyboard_artifact.get("content_hash"),
-        "narrative_review_artifact_id": review_artifact.get("artifact_id"),
-        "narrative_review_artifact_hash": review_artifact.get("content_hash"),
-        "narrative_review_verified": review_verified,
-        "narrative_calibration_artifact_id": calibration_id,
-        "narrative_calibration_artifact_hash": (
-            calibration_artifact.get("content_hash")
-            if calibration_artifact else None
-        ),
-        "narrative_calibration_verified": calibration_verified,
         "screenplay_completion_certificate_id": screenplay_certificate.get("certificate_id"),
         "screenplay_certificate_verified": screenplay_certificate.get("verified", False),
         "storyboard_completion_certificate_id": storyboard_certificate.get("certificate_id"),

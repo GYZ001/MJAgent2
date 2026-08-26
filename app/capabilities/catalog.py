@@ -346,44 +346,6 @@ def _register_human_only(registry) -> None:
             rest_routes=("DELETE /api/episodes/{episode_id}",),
             tags=("human", "episode", "destructive"),
         ),
-        HumanOnlySpec(
-            "human.activate_ai_narrative_simulation",
-            "运行 AI 一次观看模拟",
-            "用户在分镜台显式运行 AI 多先验模拟并激活对应校准权威",
-            reason=(
-                "AI 模拟只能作为独立的机器评估路径，不能伪造或替代真人参与者的"
-                "一次观看、自由复述与观察记录，且不得向 Agent/MCP 开放"
-            ),
-            rest_routes=(
-                "POST /api/episodes/{episode_id}/narrative-calibration/ai-simulate",
-            ),
-            tags=("human", "narrative", "calibration", "ai-simulation"),
-        ),
-        HumanOnlySpec(
-            "human.record_narrative_one_watch",
-            "记录真人一次观看校准",
-            "用户亲自确认观看协议、冻结首次复述并在冻结后记录逐目标观察",
-            reason=(
-                "真人观看事实与理解判断必须由实际参与者或研究人员提交，"
-                "Agent 不得伪造参与者、回放状态或观察结论"
-            ),
-            rest_routes=(
-                "POST /api/episodes/{episode_id}/narrative-calibration/freeze",
-                "POST /api/episodes/{episode_id}/narrative-calibration/observations",
-            ),
-            tags=("human", "narrative", "calibration"),
-        ),
-        HumanOnlySpec(
-            "human.activate_narrative_calibration",
-            "激活真人叙事校准",
-            "用户审阅跨作品样本覆盖、相关性和模型阈值后激活全局校准版本",
-            reason=(
-                "激活会使所有绑定旧校准版本的分镜、视频计划和交付资格失效，"
-                "必须由用户基于预览指纹显式确认"
-            ),
-            rest_routes=("POST /api/narrative-calibration/rebuild",),
-            tags=("human", "narrative", "calibration", "high-impact"),
-        ),
     ]:
         registry.register_human_only(spec)
 

@@ -1966,3 +1966,177 @@ def test_clear_ungrounded_ending_hook_is_noop_when_grounded() -> None:
         "SELECT COUNT(*) AS n FROM provider_calls WHERE kind='ending_hook_grounding_rejected'",
     ).fetchone()["n"]
     assert after == before
+
+
+def _persist_review_projection(screenplay, board, screenplay_artifact=None):
+    """发布一份 screenplay + storyboard shots 夹具，绑定完整不可变权威链。
+
+    从 tests/test_narrative_review.py 搬来（观众深读/一次观看校准功能已
+    整体下线，那个文件已删除）：这个 helper 本身从不依赖 app.narrative_review
+    /app.narrative_calibration，只是"发布一份可用于叙事权威解析的
+    screenplay+storyboard"这个通用夹具，被 test_screenplay_authority.py 等
+    与审读/校准无关的测试大量复用，随文件一起删会连带打断它们。
+    """
+    from app import db
+    from app.evidence import repository as evidence_repository
+    from app.harness.types import Evaluation, EvidenceArtifact
+    from app.narrative import NARRATIVE_CONTRACT_VERSION
+    from app.production.publish import publish_screenplay
+    from app.production.revision import ensure_production_revision, mark_baseline_generated
+    from app.production.screenplay_authority import (
+        SCREENPLAY_QA_PROFILE_VERSION,
+        screenplay_authority_fingerprint,
+    )
+
+    if screenplay_artifact is None:
+        screenplay_artifact = evidence_repository.create_artifact(
+            EvidenceArtifact(
+                type="screenplay_document",
+                scope_type="episode",
+                scope_id="episode-generic",
+                status="approved",
+                trust_level="T2",
+                content=screenplay.model_dump(mode="json"),
+                contract_version=(
+                    NARRATIVE_CONTRACT_VERSION
+                    if screenplay.narrative_plan is not None
+                    else None
+                ),
+            )
+        )
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES(?,?,?,?)",
+        ("project-generic", "Generic", "created", db.now()),
+    )
+    conn.execute(
+        """INSERT INTO chapters(project_id,idx,title,content)
+           VALUES('project-generic',1,'Chapter 1',
+                  'An observable change occurs.')""",
+    )
+    conn.execute(
+        """INSERT INTO episodes(
+               id,project_id,episode_no,screenplay_json,screenplay_status,
+               screenplay_artifact_id,source_chapters,status,created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?)""",
+        (
+            "episode-generic",
+            "project-generic",
+            board.episode_no,
+            screenplay.model_dump_json(),
+            "ready",
+            screenplay_artifact["id"],
+            "[1]",
+            "scripted",
+            db.now(),
+        ),
+    )
+    conn.commit()
+    if screenplay.narrative_plan is not None:
+        # Blind review is downstream of the published screenplay authority,
+        # never of a merely approved test artifact.  Keep this common fixture
+        # on the same certificate/revision path as production so old publish
+        # and video tests cannot accidentally exercise a weaker boundary.
+        conn.execute(
+            "UPDATE artifacts SET contract_version=? WHERE id=?",
+            (NARRATIVE_CONTRACT_VERSION, screenplay_artifact["id"]),
+        )
+        conn.commit()
+        input_fingerprint = screenplay_authority_fingerprint(
+            "episode-generic",
+            contract_version=NARRATIVE_CONTRACT_VERSION,
+            qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        )
+        revision = ensure_production_revision(
+            episode_id="episode-generic",
+            kind="screenplay",
+            input_fingerprint=input_fingerprint,
+            contract_version=NARRATIVE_CONTRACT_VERSION,
+            qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+            resume=False,
+        )
+        mark_baseline_generated(
+            revision.id,
+            baseline_artifact_id=screenplay_artifact["id"],
+            working_artifact_id=screenplay_artifact["id"],
+        )
+        qa_gate = evidence_repository.create_evaluation(
+            screenplay_artifact["id"],
+            Evaluation(
+                evaluator_type="deterministic",
+                evaluator_name="screenplay_production_qa",
+                evaluator_version=SCREENPLAY_QA_PROFILE_VERSION,
+                status="passed",
+                hard_gate_passed=True,
+                evaluation_role="runtime_gate",
+                runtime_blocking=True,
+                score=100,
+                evidence={"authority_input_fingerprint": input_fingerprint},
+            ),
+        )
+        publish_screenplay(
+            episode_id="episode-generic",
+            revision_id=revision.id,
+            artifact_id=screenplay_artifact["id"],
+            artifact_hash=screenplay_artifact["content_hash"],
+            evaluation_ids=[qa_gate["id"]],
+            input_fingerprint=input_fingerprint,
+            contract_version=NARRATIVE_CONTRACT_VERSION,
+            qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+            clear_downstream=False,
+        )
+        screenplay_artifact = evidence_repository.get_artifact(screenplay_artifact["id"])
+        assert screenplay_artifact is not None
+    shot_artifact_ids = []
+    for shot in board.shots:
+        artifact = evidence_repository.create_artifact(
+            EvidenceArtifact(
+                type="storyboard_shot",
+                scope_type="storyboard_checkpoint",
+                scope_id=f"episode-generic:{shot.shot_no}",
+                status="validated",
+                trust_level="T2",
+                content=shot.model_dump(mode="json"),
+                parent_artifact_ids=[screenplay_artifact["id"]],
+            )
+        )
+        shot_artifact_ids.append(artifact["id"])
+        conn.execute(
+            """INSERT INTO shots(
+                   id,episode_id,shot_no,duration_s,shot_size,camera_move,
+                   scene_setting,characters,action_desc,first_frame_desc,
+                   last_frame_desc,source_excerpt,narration,dialogues,transition,
+                   continuity_from_prev,shot_contract_json,storyboard_artifact_id
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                f"shot-row-{shot.shot_no}",
+                "episode-generic",
+                shot.shot_no,
+                shot.duration_s,
+                shot.shot_size,
+                shot.camera_move,
+                shot.scene_setting,
+                json.dumps(shot.characters),
+                shot.action_desc,
+                shot.first_frame_desc,
+                shot.last_frame_desc,
+                shot.source_excerpt,
+                shot.narration,
+                json.dumps([item.model_dump(mode="json") for item in shot.dialogues]),
+                shot.transition,
+                int(shot.continuity_from_prev),
+                json.dumps(shot_contract_dict(shot)),
+                artifact["id"],
+            ),
+        )
+        from app.storyboard_workspace import realign_generated_source_binding
+
+        realign_generated_source_binding(
+            "episode-generic",
+            f"shot-row-{shot.shot_no}",
+            shot.source_excerpt,
+            conn=conn,
+            commit=False,
+        )
+    conn.commit()
+    return screenplay_artifact, shot_artifact_ids

@@ -273,8 +273,6 @@ def publish_screenplay(
                           working_storyboard_artifact_id=NULL, active_storyboard_run_id=NULL,
                           storyboard_production_revision_id=NULL,
                           storyboard_completion_certificate_id=NULL,
-                          narrative_status='needs_review', narrative_review_artifact_id=NULL,
-                          narrative_calibration_artifact_id=NULL,
                           active_video_run_id=NULL, video_control_json=NULL,
                           delivery_artifact_id=NULL, delivery_status='not_ready'
                     WHERE id=?""",
@@ -511,8 +509,6 @@ def publish_storyboard(
         "shots": shots_payload,
     })
     board_artifact = evidence_repository.get_artifact(artifact_id)
-    verified_review_artifact_id: str | None = None
-    calibration_authority = None
     if (
         board_artifact is None
         or board_artifact.get("type") not in {"storyboard", "storyboard_document"}
@@ -778,35 +774,19 @@ def publish_storyboard(
                 narrative_authority=narrative_authority,
             )
 
-        if narrative_authority and verified_review_artifact_id and calibration_authority:
-            episode_cursor = conn.execute(
-                """UPDATE episodes
-                      SET status='scripted', script_error=NULL, storyboard_warning=NULL,
-                          storyboard_artifact_id=?, narrative_status='ready',
-                          narrative_review_artifact_id=?,
-                          narrative_calibration_artifact_id=?
-                    WHERE id=?""",
-                (
-                    artifact_id,
-                    verified_review_artifact_id,
-                    calibration_authority.artifact_id,
-                    episode_id,
-                ),
-            )
-        else:
-            episode_cursor = conn.execute(
-                """UPDATE episodes
-                      SET status='scripted', script_error=NULL, storyboard_warning=NULL,
-                          storyboard_artifact_id=?, narrative_status=?,
-                          narrative_review_artifact_id=NULL,
-                          narrative_calibration_artifact_id=NULL
-                    WHERE id=?""",
-                (
-                    artifact_id,
-                    "score_unavailable" if narrative_authority else "legacy_unvalidated",
-                    episode_id,
-                ),
-            )
+        # 冷观众审读/一次观看校准（narrative_review/narrative_calibration）已
+        # 整体下线（用户拍板）：这里曾经按是否拿到已验证的审读+校准结果分两
+        # 支写 narrative_status，但两个局部变量在删除前就从未被真正赋值过
+        # （历史遗留——没有任何调用方补上产出它们的那一步），narrative_
+        # authority=True 分支已经是永远不可达的死分支，删除不改变任何当前
+        # 可达路径的行为。
+        episode_cursor = conn.execute(
+            """UPDATE episodes
+                  SET status='scripted', script_error=NULL, storyboard_warning=NULL,
+                      storyboard_artifact_id=?
+                WHERE id=?""",
+            (artifact_id, episode_id),
+        )
         if episode_cursor.rowcount != 1:
             raise ValueError("分镜发布 episode 更新发生冲突")
         set_published_artifact(

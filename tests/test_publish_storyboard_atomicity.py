@@ -262,7 +262,9 @@ def test_publish_storyboard_commits_complete_legacy_release(publish_db) -> None:
     assert episode["working_storyboard_artifact_id"] == case["artifact_id"]
     assert episode["storyboard_production_revision_id"] == case["revision_id"]
     assert episode["status"] == "scripted"
-    assert episode["narrative_status"] == "legacy_unvalidated"
+    # 观众深读/一次观看校准功能已整体下线（用户拍板）：publish_storyboard 不再
+    # 写 narrative_status，这一列停在 schema 默认值 'needs_review' 上不再变化。
+    assert episode["narrative_status"] == "needs_review"
     storyboard_artifact = snapshot["storyboard_artifacts"][0]
     assert {
         key: storyboard_artifact[key]
