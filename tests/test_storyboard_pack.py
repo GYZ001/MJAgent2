@@ -5,7 +5,7 @@
 以及 project_prep_pack_to_screenplay 对真正 2.0.0（无 event_chain）payload
 的分支（此前只有 1.x 形态的 EP6 历史夹具覆盖，2.0.0 分支此前无测试）。
 
-不覆盖：_generate_beat_sheet / _generate_segment_prompt 真正的模型调用
+不覆盖：_generate_beat_sheet / _generate_all_segment_prompts 真正的模型调用
 （需要 mock model_gateway.chat_structured，属于更大规模的集成测试，此文件
 只测纯函数与 DB 落库/读回，不引入 mock 基础设施）。
 """
@@ -26,6 +26,7 @@ from app.production.storyboard_pack import (
     StoryboardPack,
     StoryboardPackBeat,
     StoryboardPackSegment,
+    _AiAllSegmentsDraft,
     _AiBeat,
     _AiBeatSheetDraft,
     _AiDialogueLine,
@@ -35,6 +36,7 @@ from app.production.storyboard_pack import (
     _dialect_for_target_video_model,
     _enrich_asset_manifest_canonical_visuals,
     _segment_content_advisories,
+    _validate_all_segments_draft,
     _validate_beat_sheet_draft,
     _validate_segment_draft,
     persist_storyboard_pack,
@@ -172,6 +174,7 @@ def test_validate_beat_sheet_draft_rejects_unknown_beat_id_reference():
 
 def _draft(**overrides) -> _AiStoryboardSegmentDraft:
     base = dict(
+        segment_no=1,
         prompt_text="电影级预告片质感，多镜头叙事，镜头之间硬切。……",
         shot_count=3,
         dialogue=[_AiDialogueLine(speaker_identity_id="id_a", line="走吧", source_segment_index=1)],
@@ -232,6 +235,52 @@ def test_validate_segment_draft_does_not_block_on_unknown_character_resource():
 
 
 # ---------------------------------------------------------------------------
+# _validate_all_segments_draft：2.0.3 整集批量调用的顶层校验——segment_no
+# 完整性（新增，单段版本不需要）+ 逐项复用 _validate_segment_draft（不重复
+# 发明格式检查）。
+# ---------------------------------------------------------------------------
+
+def test_validate_all_segments_draft_accepts_well_formed_batch():
+    draft = _AiAllSegmentsDraft(segments=[_draft(segment_no=1), _draft(segment_no=2)])
+    errors = _validate_all_segments_draft(
+        draft, expected_segment_nos=[1, 2], dialect_render_format="seedance_compact_director_brief",
+    )
+    assert errors == []
+
+
+def test_validate_all_segments_draft_rejects_missing_segment_no():
+    draft = _AiAllSegmentsDraft(segments=[_draft(segment_no=1)])
+    errors = _validate_all_segments_draft(
+        draft, expected_segment_nos=[1, 2], dialect_render_format="seedance_compact_director_brief",
+    )
+    assert any("缺失 [2]" in e for e in errors)
+
+
+def test_validate_all_segments_draft_rejects_extra_segment_no():
+    draft = _AiAllSegmentsDraft(segments=[_draft(segment_no=1), _draft(segment_no=2), _draft(segment_no=3)])
+    errors = _validate_all_segments_draft(
+        draft, expected_segment_nos=[1, 2], dialect_render_format="seedance_compact_director_brief",
+    )
+    assert any("包含不存在的 [3]" in e for e in errors)
+
+
+def test_validate_all_segments_draft_rejects_duplicate_segment_no():
+    draft = _AiAllSegmentsDraft(segments=[_draft(segment_no=1), _draft(segment_no=1)])
+    errors = _validate_all_segments_draft(
+        draft, expected_segment_nos=[1, 2], dialect_render_format="seedance_compact_director_brief",
+    )
+    assert any("重复 [1]" in e for e in errors)
+
+
+def test_validate_all_segments_draft_prefixes_per_item_format_errors_with_segment_no():
+    draft = _AiAllSegmentsDraft(segments=[_draft(segment_no=1, prompt_text=" "), _draft(segment_no=2)])
+    errors = _validate_all_segments_draft(
+        draft, expected_segment_nos=[1, 2], dialect_render_format="seedance_compact_director_brief",
+    )
+    assert any(e.startswith("segment_no=1：") and "为空" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
 # _segment_content_advisories：内容判断照算，只是结论不再是拦截，而是
 # 附在产物 degraded_capabilities[] 上的信息（不许用删掉校验函数来实现）。
 # ---------------------------------------------------------------------------
@@ -279,6 +328,38 @@ def test_segment_content_advisories_flags_unknown_character_and_scene_resource()
     )
     assert any("不是映射台已知的人物身份" in a for a in advisories)
     assert any("不是映射台已知场景" in a for a in advisories)
+
+
+def test_segment_content_advisories_flags_invented_identity_id_even_when_manifest_is_empty():
+    """真实 EP7 回归的最小复现：本集 asset_manifest.characters/scenes 都恰好是
+    空集（映射台这次没能解析出任何角色/场景），模型对同一个角色自造了三种
+    不同前缀（character:/char:/ch:）。旧代码里 `known_character_ids and
+    identity_id not in known_character_ids` 在 known_character_ids 为空集时
+    整条判断短路成 False，八条越界引用一条告警都不产出——比 EP6 用旧映射包
+    跑、至少还挂出 CHARACTER_UNKNOWN 标记的年代更静默。空取值域必须被判定
+    成"取值域里什么都不合法"，而不是"这一项不用查"。"""
+    draft = _draft(
+        resources=_AiSegmentResources(
+            characters=[
+                {"identity_id": "character:孟浩", "description": "x"},
+                {"identity_id": "char:孟浩", "description": "x"},
+                {"identity_id": "ch:孟浩", "description": "x"},
+            ],
+            scenes=[{"scene_id": "scene:荒山", "description": "y"}],
+        ),
+        dialogue=[],
+    )
+    advisories = _segment_content_advisories(
+        draft, known_character_ids=set(), known_scene_ids=set(), source_segment_indexes=[1, 2],
+    )
+    unknown_character_advisories = [
+        a for a in advisories if "STORYBOARD_PACK_RESOURCE_CHARACTER_UNKNOWN" in a
+    ]
+    unknown_scene_advisories = [
+        a for a in advisories if "STORYBOARD_PACK_RESOURCE_SCENE_UNKNOWN" in a
+    ]
+    assert len(unknown_character_advisories) == 3
+    assert len(unknown_scene_advisories) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -560,19 +641,48 @@ def test_persist_storyboard_pack_writes_one_shots_row_per_segment():
     # _resolve_segment_source_binding 取回可核验的原文切片，不再是
     # "\n".join(segment.text ...) 重组文本，见该函数文档）。
     assert row["source_excerpt"] == "少年站在山顶。\n\n他扔掉了葫芦。"
-    assert row["adopted_version_id"]
+    # 落库时不再有任何"已采用"版本 -- 这一镜此刻还没有生成出任何视频，
+    # adopted_version_id 必须诚实地保持空（现象1 的回归防线：分镜台写了
+    # 提示词不等于「已采纳」，「已采纳」只能表示真的生成出可用视频并被选中）。
+    assert row["adopted_version_id"] is None
+    # 同理：落库不再插入占位 shot_versions 行 -- 第一次真实生成才应该是 v1
+    # （现象2 的回归防线：占位行曾经白白占掉 version_no=1）。
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM shot_versions WHERE shot_id=?", (row["id"],),
+    ).fetchone()["c"] == 0
 
     contract = json.loads(row["shot_contract_json"])
     assert contract["prompt_contract_version"] == STORYBOARD_PACK_CONTRACT_MARKER
     assert contract["is_final"] is True
+    # prompt_text 落库必须与模型草稿逐字一致 -- 中间没有任何代码重新拼装
+    # （交付前必须回答 #2 的验证：见 persist_storyboard_pack 的文档）。落库
+    # 前没有 shot_versions 行可读，prompt_text 唯一权威来源就是这里
+    # （app.media_exec.enqueue 第一次生成时也是从这个字段读，不再经过
+    # adopted_version_id 转一手）。
     assert contract["storyboard_pack_segment"]["prompt_text"] == _pack().segments[0].prompt_text
 
-    version = conn.execute(
-        "SELECT prompt_text FROM shot_versions WHERE id=?", (row["adopted_version_id"],),
-    ).fetchone()
-    # prompt_text 落库必须与模型草稿逐字一致 -- 中间没有任何代码重新拼装
-    # （交付前必须回答 #2 的验证：见 persist_storyboard_pack 的文档）。
-    assert version["prompt_text"] == _pack().segments[0].prompt_text
+
+def test_enqueue_reads_prompt_text_from_contract_not_adopted_version():
+    # app.media_exec.enqueue 的 is_storyboard_pack_shot 分支不再查
+    # shot_versions（该行落库时已经没有任何版本了），而是直接读
+    # _load_shot_model(shot_row).storyboard_pack_segment["prompt_text"]。
+    # 这条测试锁定 enqueue 实际依赖的那条读取路径本身 -- 不是重复上面已经
+    # 验过的落库内容，是验证 enqueue 真正会走的代码（app.media_exec.enqueue
+    # 的 is_storyboard_pack_shot 分支）拿到的值。
+    from app.media_exec.enqueue import _load_shot_model
+
+    conn = db.get_conn()
+    episode_id = "ep-pack-enqueue-prompt"
+    _seed_episode(conn, episode_id=episode_id)
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    payload = _prep_pack_2_0_0_payload()
+    segments = _real_segments(conn, ep)
+    persist_storyboard_pack(conn, episode_id, ep, payload, _pack(), segments=segments)
+
+    shot_row = conn.execute("SELECT * FROM shots WHERE episode_id=?", (episode_id,)).fetchone()
+    shot = _load_shot_model(shot_row)
+    assert shot.storyboard_pack_segment is not None
+    assert shot.storyboard_pack_segment["prompt_text"] == _pack().segments[0].prompt_text
 
 
 def test_persist_storyboard_pack_segment_carries_beat_summary_self_contained():
@@ -700,7 +810,8 @@ def test_misattributed_speaker_segment_persists_successfully_not_dropped():
     contract = json.loads(row["shot_contract_json"])
     # prompt_text 原样落库，未被这条内容缺陷影响。
     assert contract["storyboard_pack_segment"]["prompt_text"] == pack.segments[0].prompt_text
-    assert row["adopted_version_id"]
+    # 落库不等于已采纳：这一镜还没有生成任何视频。
+    assert row["adopted_version_id"] is None
 
     board = Storyboard(episode_no=1, shots=[_shot_with_segment(
         dialogue=contract["storyboard_pack_segment"]["dialogue"],
