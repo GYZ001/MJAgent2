@@ -32,6 +32,7 @@ from app.production.storyboard_pack import (
     _AiSegmentResources,
     _AiStoryboardSegmentDraft,
     _dialect_for_target_video_model,
+    _segment_content_advisories,
     _validate_beat_sheet_draft,
     _validate_segment_draft,
     persist_storyboard_pack,
@@ -160,45 +161,27 @@ def _draft(**overrides) -> _AiStoryboardSegmentDraft:
     return _AiStoryboardSegmentDraft(**base)
 
 
+# 2026-08-26（用户拍板，第一版分镜提示词不设任何内容门禁）：
+# _validate_segment_draft 现在只剩「下一环节会真的用不了」的形状检查
+# （prompt_text 空/超限、H3 固定字段名）；内容判断（说话人在场、资源身份是否
+# 映射台已知）移到 _segment_content_advisories，只计算、不参与
+# model_gateway.chat_structured 的语义重试/失败判定。
+
 def test_validate_segment_draft_accepts_well_formed_draft():
-    errors = _validate_segment_draft(
-        _draft(),
-        known_character_ids={"id_a"},
-        known_scene_ids=set(),
-        source_segment_indexes=[1, 2],
-        dialect_render_format="seedance_compact_director_brief",
-    )
+    errors = _validate_segment_draft(_draft(), dialect_render_format="seedance_compact_director_brief")
     assert errors == []
 
 
-def test_validate_segment_draft_rejects_dialogue_source_outside_segment():
+def test_validate_segment_draft_rejects_empty_prompt_text():
     errors = _validate_segment_draft(
-        _draft(dialogue=[_AiDialogueLine(speaker_identity_id="id_a", line="走吧", source_segment_index=9)]),
-        known_character_ids={"id_a"},
-        known_scene_ids=set(),
-        source_segment_indexes=[1, 2],
-        dialect_render_format="seedance_compact_director_brief",
+        _draft(prompt_text=" "), dialect_render_format="seedance_compact_director_brief",
     )
-    assert any("不在本段引用的原文段号" in e for e in errors)
-
-
-def test_validate_segment_draft_rejects_unknown_character_resource():
-    errors = _validate_segment_draft(
-        _draft(resources=_AiSegmentResources(characters=[{"identity_id": "id_ghost", "description": "x"}])),
-        known_character_ids={"id_a"},
-        known_scene_ids=set(),
-        source_segment_indexes=[1, 2],
-        dialect_render_format="seedance_compact_director_brief",
-    )
-    assert any("不是映射台已知的人物身份" in e for e in errors)
+    assert any("为空" in e for e in errors)
 
 
 def test_validate_segment_draft_requires_h3_literal_fields():
     errors = _validate_segment_draft(
         _draft(prompt_text="没有按 H3 格式写的自由散文"),
-        known_character_ids={"id_a"},
-        known_scene_ids=set(),
-        source_segment_indexes=[1, 2],
         dialect_render_format="minimax_h3_native_fields",
     )
     assert any("integrated_multimodal_description:" in e for e in errors)
@@ -206,14 +189,76 @@ def test_validate_segment_draft_requires_h3_literal_fields():
 
 def test_validate_segment_draft_rejects_over_char_limit(monkeypatch):
     monkeypatch.setattr(config, "PROMPT_CHAR_LIMIT", 10)
+    errors = _validate_segment_draft(_draft(), dialect_render_format="seedance_compact_director_brief")
+    assert any("超过上限" in e for e in errors)
+
+
+def test_validate_segment_draft_does_not_block_on_dialogue_source_outside_segment():
+    # 这条以前会拦截/触发语义重试；用户拍板后必须完全不出现在这个函数里，
+    # 即使内容明显有问题（source_segment_index=9 越界）。
     errors = _validate_segment_draft(
-        _draft(),
+        _draft(dialogue=[_AiDialogueLine(speaker_identity_id="id_a", line="走吧", source_segment_index=9)]),
+        dialect_render_format="seedance_compact_director_brief",
+    )
+    assert errors == []
+
+
+def test_validate_segment_draft_does_not_block_on_unknown_character_resource():
+    errors = _validate_segment_draft(
+        _draft(resources=_AiSegmentResources(characters=[{"identity_id": "id_ghost", "description": "x"}])),
+        dialect_render_format="seedance_compact_director_brief",
+    )
+    assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# _segment_content_advisories：内容判断照算，只是结论不再是拦截，而是
+# 附在产物 degraded_capabilities[] 上的信息（不许用删掉校验函数来实现）。
+# ---------------------------------------------------------------------------
+
+def test_segment_content_advisories_empty_for_well_formed_draft():
+    advisories = _segment_content_advisories(
+        _draft(resources=_AiSegmentResources(characters=[{"identity_id": "id_a", "description": "x"}])),
         known_character_ids={"id_a"},
         known_scene_ids=set(),
         source_segment_indexes=[1, 2],
-        dialect_render_format="seedance_compact_director_brief",
     )
-    assert any("超过上限" in e for e in errors)
+    assert advisories == []
+
+
+def test_segment_content_advisories_flags_misattributed_speaker_but_does_not_raise():
+    # 用户判据的原始场景：台词安给了当时不在场的人。必须能算出来、必须不抛异常。
+    draft = _draft(
+        dialogue=[_AiDialogueLine(speaker_identity_id="id_absent", line="走吧", source_segment_index=1)],
+        resources=_AiSegmentResources(characters=[{"identity_id": "id_a", "description": "x"}]),
+    )
+    advisories = _segment_content_advisories(
+        draft, known_character_ids={"id_a", "id_absent"}, known_scene_ids=set(),
+        source_segment_indexes=[1, 2],
+    )
+    assert any("不在本段 resources.characters 内" in a for a in advisories)
+
+
+def test_segment_content_advisories_flags_untraceable_dialogue_source():
+    draft = _draft(dialogue=[_AiDialogueLine(speaker_identity_id="id_a", line="走吧", source_segment_index=9)])
+    advisories = _segment_content_advisories(
+        draft, known_character_ids={"id_a"}, known_scene_ids=set(), source_segment_indexes=[1, 2],
+    )
+    assert any("不在本段引用的原文段号" in a for a in advisories)
+
+
+def test_segment_content_advisories_flags_unknown_character_and_scene_resource():
+    draft = _draft(
+        resources=_AiSegmentResources(
+            characters=[{"identity_id": "id_ghost", "description": "x"}],
+            scenes=[{"scene_id": "scene_ghost", "description": "y"}],
+        ),
+    )
+    advisories = _segment_content_advisories(
+        draft, known_character_ids={"id_a"}, known_scene_ids={"scene_1"}, source_segment_indexes=[1, 2],
+    )
+    assert any("不是映射台已知的人物身份" in a for a in advisories)
+    assert any("不是映射台已知场景" in a for a in advisories)
 
 
 # ---------------------------------------------------------------------------
@@ -431,3 +476,72 @@ def test_persist_storyboard_pack_writes_one_shots_row_per_segment():
     # prompt_text 落库必须与模型草稿逐字一致 -- 中间没有任何代码重新拼装
     # （交付前必须回答 #2 的验证：见 persist_storyboard_pack 的文档）。
     assert version["prompt_text"] == _pack().segments[0].prompt_text
+
+
+# ---------------------------------------------------------------------------
+# 判据（用户 2026-08-26 原话）：一个「台词安给了当时不在场的人」的段落，必须
+# 能顺利生成、顺利保存、顺利进入下一环节，同时那条不一致要能在产物里被看见
+# （记录下来，不是消失）——两件事同时成立。
+# ---------------------------------------------------------------------------
+
+def _pack_with_misattributed_speaker() -> StoryboardPack:
+    pack = _pack()
+    segment = pack.segments[0]
+    # 台词的说话人 "id_absent" 不在本段 resources.characters（只有 id_a）——
+    # 这正是"当时不在场的人"这一情形的落库形态。
+    segment.dialogue = [
+        {"speaker_identity_id": "id_absent", "line": "我不该在这", "source_segment_index": 1},
+    ]
+    return pack
+
+
+def test_misattributed_speaker_segment_persists_successfully_not_dropped():
+    conn = db.get_conn()
+    episode_id = "ep-pack-misattributed"
+    _seed_episode(conn, episode_id=episode_id)
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    payload = _prep_pack_2_0_0_payload()
+    segments = [
+        SourceSegment(segment_id="SRC0001", text="少年站在山顶。", start_offset=0, end_offset=1),
+        SourceSegment(segment_id="SRC0002", text="他扔掉了葫芦。", start_offset=1, end_offset=2),
+        SourceSegment(segment_id="SRC0003", text="葫芦落入河中。", start_offset=2, end_offset=3),
+    ]
+    pack = _pack_with_misattributed_speaker()
+    # 顺利保存：persist 不抛异常、不丢段落。
+    shot_ids = persist_storyboard_pack(conn, episode_id, ep, payload, pack, segments=segments)
+    assert len(shot_ids) == 1
+
+    row = conn.execute("SELECT * FROM shots WHERE episode_id=?", (episode_id,)).fetchone()
+    contract = json.loads(row["shot_contract_json"])
+    # prompt_text 原样落库，未被这条内容缺陷影响。
+    assert contract["storyboard_pack_segment"]["prompt_text"] == pack.segments[0].prompt_text
+    assert row["adopted_version_id"]
+
+    board = Storyboard(episode_no=1, shots=[_shot_with_segment(
+        dialogue=contract["storyboard_pack_segment"]["dialogue"],
+        resources=contract["storyboard_pack_segment"]["resources"],
+    )])
+    # 顺利进入下一环节：真正阻断确认的结构检查不受影响。
+    assert _storyboard_structural_errors(board) == []
+    # 不一致仍然算得出来、看得见——只是不再是 structural_errors。
+    dialogue_errors = storyboard_pack_dialogue_errors(board.shots[0])
+    assert any("SPEAKER_ABSENT" in e for e in dialogue_errors)
+
+
+def test_evaluate_storyboard_pack_for_confirmation_passes_despite_misattributed_speaker():
+    from app.domain.video_ops import _evaluate_storyboard_pack_for_confirmation
+
+    shot = _shot_with_segment(
+        dialogue=[{"speaker_identity_id": "id_absent", "line": "我不该在这", "source_segment_index": 1}],
+        resources={"characters": [{"identity_id": "id_a", "description": "x"}], "scenes": [], "props": []},
+    )
+    shot.scene_name = "山顶"
+    board = Storyboard(episode_no=1, shots=[shot])
+    episode_row = {"id": "ep-x", "target_duration_s": 15}
+    evaluation = _evaluate_storyboard_pack_for_confirmation(episode_row, board, _bible(), target_duration_s=15)
+    # 顺利进入下一环节：确认必须通过。
+    assert evaluation.passed is True
+    assert evaluation.errors == []
+    # 记录下来，不是消失：不一致出现在 warnings（进而是返回的 issues）里。
+    assert any("SPEAKER_ABSENT" in w for w in evaluation.warnings)
+    assert any("SPEAKER_ABSENT" in issue.message for issue in evaluation.issues)

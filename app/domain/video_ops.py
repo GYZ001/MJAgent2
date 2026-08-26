@@ -234,6 +234,15 @@ def _evaluate_storyboard_pack_for_confirmation(
     错误噪音，重则用编译器悄悄覆盖模型产出的 prompt_text，两者都不可接受，
     所以整体短路成这一条专用、轻量的评估，而不是在旧函数里散落十几个
     ``if shot.storyboard_pack_segment is not None`` 补丁。
+
+    2026-08-26（用户拍板，第一版分镜提示词不设任何内容门禁）：
+    ``validate_storyboard_pack_dialogue``（说话人在场 + 台词来源可溯源）不再
+    计入 ``structural_errors``——校验本身照算，只是不再让确认失败。判据
+    "校验照算，只是结论不再是拦截"：这里把它挪进 ``warnings``，和旧架构里
+    ``dialogue_framing_errors`` 的既有先例（同一函数下方的 legacy 分支，那
+    条规则也是算出来但只喂 score_warnings、不喂 structural_errors）完全同构，
+    不是新发明的机制。``warnings`` 仍然转成 WARNING 级 Issue 返回，"记录下来
+    但不拦截"在这里的意思是可见、不是消失。
     """
     from app.evaluations.issues import issues_from_messages
     from app.harness.types import IssueSeverity
@@ -241,26 +250,30 @@ def _evaluate_storyboard_pack_for_confirmation(
 
     board = Storyboard.model_validate(storyboard.model_dump(mode="json"))
     structural_errors = _storyboard_structural_errors(board)
-    structural_errors.extend(validate_storyboard_pack_dialogue(board))
+    warnings = validate_storyboard_pack_dialogue(board)
     # validate_storyboard 对这类行本身也已经短路成同一条最小结构检查（见其
-    # 函数体开头 storyboard_pack_segment 分支），这里复用而不是重复实现，
-    # 保持"判据只有一处"。
+    # 函数体开头 storyboard_pack_segment 分支：段时长必须 15s、shot_no 连续
+    # 递增），这两条是格式/结构问题，不是内容判断，保留阻断，复用而不是
+    # 重复实现，保持"判据只有一处"。
     structural_errors.extend(
         validate_storyboard(board, bible, target_duration_s or 0)
     )
     compact_target = sum(int(s.duration_s or 0) for s in board.shots) or _compact_episode_target(
         target_duration_s if target_duration_s is not None else episode["target_duration_s"]
     )
+    # 与 evaluate_storyboard_for_confirmation 主体的 legacy 分支同构：只把
+    # warnings（非阻断）转成 Issue，severity=WARNING；structural_errors 仍
+    # 通过 errors= / passed=False 直接暴露给调用方，不重复包一层 Issue。
     issues = issues_from_messages(
-        structural_errors,
+        warnings,
         subject=f"episode:{episode['id']}",
-        severity=IssueSeverity.ERROR,
+        severity=IssueSeverity.WARNING,
     )
     est = sum(shot_cost_cny(s.duration_s) for s in board.shots)
     return ConfirmationEvaluation(
         passed=not structural_errors,
         errors=structural_errors,
-        warnings=[],
+        warnings=warnings,
         issues=issues,
         board=board,
         compact_target=compact_target,

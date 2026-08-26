@@ -387,39 +387,92 @@ def _segment_relevant_assets(
 def _validate_segment_draft(
     draft: _AiStoryboardSegmentDraft,
     *,
-    known_character_ids: set[str],
-    known_scene_ids: set[str],
-    source_segment_indexes: list[int],
     dialect_render_format: str,
 ) -> list[str]:
+    """Blocking (format-only) checks -- the only things that can make
+    ``model_gateway.chat_structured`` retry or fail this segment.
+
+    2026-08-26（用户拍板，第一版分镜提示词不设任何内容门禁）：内容类判断
+    （台词说话人是否在场、对白/资源是否能溯源到映射台已知身份）一律不许
+    再出现在这个函数里——不是因为它们不该算，是因为算完之后的结论不能是
+    "拦截生成"。它们移到 ``_segment_content_advisories``，在模型已经产出
+    通过格式校验的 draft 之后再算一遍，结果记进 degraded_capabilities，
+    不参与重试/失败判定。这里只留"下一环节会真的用不了"的形状问题：
+    prompt_text 是否为空/超限、H3 的三个固定字段名是否存在——写错字段名
+    H3 不会报错，只会静默降级成自由文本理解，这条不是内容质量判断，是
+    接口语法对不对。
+    """
     errors: list[str] = []
-    if len(draft.prompt_text) > config.PROMPT_CHAR_LIMIT:
+    if not draft.prompt_text.strip():
+        errors.append("prompt_text 为空")
+    elif len(draft.prompt_text) > config.PROMPT_CHAR_LIMIT:
         errors.append(
             f"prompt_text 长度 {len(draft.prompt_text)} 超过上限 {config.PROMPT_CHAR_LIMIT}"
         )
-    allowed_segments = set(source_segment_indexes)
-    for index, line in enumerate(draft.dialogue):
-        if line.source_segment_index not in allowed_segments:
-            errors.append(
-                f"dialogue[{index}].source_segment_index={line.source_segment_index} "
-                f"不在本段引用的原文段号 {sorted(allowed_segments)} 内"
-            )
-    for index, character in enumerate(draft.resources.characters):
-        if known_character_ids and character.identity_id not in known_character_ids:
-            errors.append(
-                f"resources.characters[{index}].identity_id="
-                f"「{character.identity_id}」不是映射台已知的人物身份"
-            )
-    for index, scene in enumerate(draft.resources.scenes):
-        if known_scene_ids and scene.scene_id not in known_scene_ids:
-            errors.append(
-                f"resources.scenes[{index}].scene_id=「{scene.scene_id}」不是映射台已知场景"
-            )
     if dialect_render_format == "minimax_h3_native_fields":
         for field in ("integrated_multimodal_description:", "overall_soundscape:", "non_diegetic_music:"):
             if field not in draft.prompt_text:
                 errors.append(f"prompt_text 缺少 H3 固定字段「{field}」")
     return errors
+
+
+def _segment_content_advisories(
+    draft: _AiStoryboardSegmentDraft,
+    *,
+    known_character_ids: set[str],
+    known_scene_ids: set[str],
+    source_segment_indexes: list[int],
+) -> list[str]:
+    """Non-blocking content checks: computed every time, never gate generation.
+
+    2026-08-26（用户拍板）：「我认为第一版的分镜提示词先不需要任何门禁……
+    只要格式没问题就直接作用到下一环节」。这些判断此前是
+    ``_validate_segment_draft`` 的一部分，会触发 chat_structured 的语义重试
+    直到耗尽预算后整段失败；现在原样保留计算，只是结论从「拦截」改成
+    「附在产物 degraded_capabilities[] 上的信息」——校验照算，不是删掉，
+    删掉以后就永远看不到这条不一致了。台词说话人是否在场的第三条（rule 1）
+    对照的是这一段自己的 resources.characters（映射台对"这个人物在这些
+    段落里在场"的结论），不是全集已知人物表，与
+    app.validators.storyboard_pack_dialogue_errors 用的是同一套判据，只是
+    这里在生成时就先算一遍、写进产物，那边在确认时再算一遍、当作可见但
+    不拦截的 warning——两处判据不重复发明，只是消费方式不同。
+    """
+    # Tag names deliberately match app.validators.storyboard_pack_dialogue_errors'
+    # [STORYBOARD_PACK_DIALOGUE_*] codes -- same underlying judgment computed
+    # at two points in the pipeline (here at generation time, there again at
+    # confirmation time against the persisted row), so a search for one code
+    # finds both occurrences instead of two unrelated-looking strings.
+    advisories: list[str] = []
+    allowed_segments = set(source_segment_indexes)
+    segment_character_ids = {c.identity_id for c in draft.resources.characters}
+    for index, line in enumerate(draft.dialogue):
+        if line.speaker_identity_id not in segment_character_ids:
+            advisories.append(
+                f"[STORYBOARD_PACK_DIALOGUE_SPEAKER_ABSENT][未拦截] dialogue[{index}] "
+                f"的说话人「{line.speaker_identity_id}」不在本段 resources.characters 内，"
+                "没有在场证据"
+            )
+        if line.source_segment_index not in allowed_segments:
+            advisories.append(
+                f"[STORYBOARD_PACK_DIALOGUE_NO_SOURCE][未拦截] dialogue[{index}]"
+                f".source_segment_index={line.source_segment_index} "
+                f"不在本段引用的原文段号 {sorted(allowed_segments)} 内"
+            )
+    for index, character in enumerate(draft.resources.characters):
+        if known_character_ids and character.identity_id not in known_character_ids:
+            advisories.append(
+                f"[STORYBOARD_PACK_RESOURCE_CHARACTER_UNKNOWN][未拦截] "
+                f"resources.characters[{index}].identity_id=「{character.identity_id}」"
+                "不是映射台已知的人物身份，已按纯文字描述处理"
+            )
+    for index, scene in enumerate(draft.resources.scenes):
+        if known_scene_ids and scene.scene_id not in known_scene_ids:
+            advisories.append(
+                f"[STORYBOARD_PACK_RESOURCE_SCENE_UNKNOWN][未拦截] "
+                f"resources.scenes[{index}].scene_id=「{scene.scene_id}」"
+                "不是映射台已知场景，已按纯文字描述处理"
+            )
+    return advisories
 
 
 async def _generate_segment_prompt(
@@ -499,7 +552,7 @@ async def _generate_segment_prompt(
     fingerprint = hashlib.sha256(
         json.dumps(task_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:24]
-    return await model_gateway.chat_structured(
+    draft = await model_gateway.chat_structured(
         [
             {
                 "role": "system",
@@ -515,9 +568,6 @@ async def _generate_segment_prompt(
         model_type=_AiStoryboardSegmentDraft,
         validate=lambda value: _validate_segment_draft(
             value,
-            known_character_ids=known_character_ids,
-            known_scene_ids=known_scene_ids,
-            source_segment_indexes=segment_plan.source_segment_indexes,
             dialect_render_format=profile.render_format,
         ),
         operation_id=f"storyboard_pack_segment_{episode_id}_{segment_plan.segment_no}_{fingerprint}",
@@ -536,6 +586,15 @@ async def _generate_segment_prompt(
         },
         repair_context=f"本段原文段号={segment_plan.source_segment_indexes}",
     )
+    advisories = _segment_content_advisories(
+        draft,
+        known_character_ids=known_character_ids,
+        known_scene_ids=known_scene_ids,
+        source_segment_indexes=segment_plan.source_segment_indexes,
+    )
+    if advisories:
+        draft.degraded_capabilities = [*draft.degraded_capabilities, *advisories]
+    return draft
 
 
 # ---------------------------------------------------------------------------
