@@ -10,7 +10,7 @@ export type QueryKind =
   | 'stale'
   | 'ready'
 
-/** 前期准备共用查询态：页面只注入对象名与允许动作。 */
+/** 世界书共用查询态：页面只注入对象名与允许动作。 */
 export default function QueryState({
   loading,
   error,

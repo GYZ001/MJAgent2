@@ -22,7 +22,7 @@ function storageKey(projectId: string, pageKey: string) {
   return `prep-list:${projectId}:${pageKey}`
 }
 
-/** 前期准备列表状态：跨详情返回时恢复筛选/页码/滚动。 */
+/** 世界书列表状态：跨详情返回时恢复筛选/页码/滚动。 */
 export function usePrepListState(projectId: string, pageKey: string, fallbackPageSize: number) {
   const [state, setState] = useState<PrepListState>(() => {
     try {

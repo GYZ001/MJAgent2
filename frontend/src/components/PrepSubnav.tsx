@@ -9,7 +9,7 @@ const TABS: { key: View; label: string; description: string }[] = [
 
 export type PrepStepStatuses = Partial<Record<'bible' | 'scenes' | 'episodes', PrepStepStatus>>
 
-/** 前期准备三页共用的一级任务导航（含任务状态）。 */
+/** 世界书三页共用的一级任务导航（含任务状态）。 */
 export default function PrepSubnav({
   current,
   statuses,
@@ -24,7 +24,7 @@ export default function PrepSubnav({
   const { go, projectId } = useNav()
   if (!projectId) return null
   return (
-    <nav className="prep-subnav" aria-label="前期准备">
+    <nav className="prep-subnav" aria-label="世界书">
       {TABS.map((tab, index) => {
         const status = statuses?.[tab.key as 'bible' | 'scenes' | 'episodes']
         const label = status ? prepStepLabel(status) : ''

@@ -178,9 +178,9 @@ const SECTIONS: {
 }[] = [
   {
     key: "bible",
-    label: "前期准备",
-    icon: "备",
-    group: "前期准备",
+    label: "世界书",
+    icon: "书",
+    group: "世界书",
     needProject: true,
     matchViews: ["bible", "scenes", "episodes"],
   },

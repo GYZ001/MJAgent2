@@ -18,7 +18,7 @@ export default function AuthAside() {
           每一步的产物、质检与模型调用都留痕可查。
         </p>
         <ul className="auth-flow">
-          <li><span>前期准备</span></li>
+          <li><span>世界书</span></li>
           <li><span>剧本台</span></li>
           <li><span>分镜台</span></li>
           <li><span>生成台</span></li>
