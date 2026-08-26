@@ -236,7 +236,7 @@ from app.validators import (
 # stay defined in app/validators.py, unused-but-not-deleted (same "dormant,
 # not deleted" precedent as app/production/screenplay_repair.py), still
 # exercised directly by tests/test_prep_pack_coverage.py.
-PREP_PACK_VERSION = "2.0.1"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "2.0.2"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
 # gained functional_extras; 1.4.0: coverage_ledger gained paratext (deterministic
 # keyword/position classifier, since replaced); 1.4.1: paratext classification
@@ -989,6 +989,63 @@ PREP_PACK_VERSION = "2.0.1"  # 1.1.0: event_chain entries carry source_span (P1 
 # 的返回元组形状）。产出语义变更（appellation_map 的实际行数、不是字段
 # 形状），比照 1.4.1/1.6.1/1.8.1-1.8.5/1.9.0/1.10.0/1.11.1 的先例推进
 # 版本号第三位，不动 schema 位。
+#
+# 2.0.2（真实回归，48e01ff 当晚上线即复现，ERR-20260826-37cf79，EP1 五个
+# 场景全灭）：修 2.0.0 砍事件链时留下的一个真实证据源缺口，不是新功能。
+# 根因：场景 resolution/discovery 两支的锚点候选（见下面 _pass() 里
+# "场景绑定的锚点候选"一节）原本是 [canonical_scene_name, name,
+# *scene_event_evidence_quotes]——第三路 scene_event_evidence_quotes 来自
+# event_chain[].source_evidence[].quote（事件抽取模型逐字摘录、经
+# _prep_pack_local_text_anchor 逐字校验的原文片段），是唯一一路"独立于
+# 场景名本身"的证据；前两路（canonical_scene_name/name）在场景名是模型
+# 综合出的合成标签时结构上必然落空（EP1 五个场景全部如此："大青山山顶"/
+# "大青山半山腰裂缝"等无一逐字出现在原文，原文写的是"这青山顶端"/"山腰
+# 裂缝"）。48e01ff 砍掉 event_chain 时，_pass() 里的候选表被如实收窄成
+# [canonical_scene_name, name]（见该处注释"2.0.0 起不再额外拼接
+# scene_event_evidence_quotes——那是该场景所涉事件的 source_evidence 地点
+# 描述短语，event_chain 撤销后不再存在"），但没有补一条替代的独立证据
+# 源——candidate_verdict_pins（人物侧候选判别）、true_name_pinned_quote
+# （suspected_true_name 核验）这些独立证据机制场景侧本来就没有，唯一
+# 依赖的正是被砍掉的那一路，结果 resolution/discovery 两支合成场景名
+# 100% 落空，has_scene_anchor 门禁具名拦截——这是 48e01ff 引入的结构性
+# 回归，不是本次新发现的既有缺陷（has_scene_anchor 门禁本身、
+# _PREP_PACK_SCENE_METHODS_REQUIRING_ANCHOR 判据均不动，见该常量与
+# _prep_pack_verify_manifest_provenance 上方各自的完整说明——这道门禁
+# 是 scripts/episode_source_audit.py 实测 19 条 A2_scene_no_text_evidence
+# 换来的，绝不放宽）。
+#
+# 修复：不是在事件层面恢复证据（事件链本身不回来，产品判断不变），是把
+# 同一个"逐字引文"证据形状下沉到 _ModelSceneMention 自己身上——新增
+# ``quote``（required str，可以是空字符串，语义严格对齐旧
+# _ModelSourceEvidence.quote：从这条提及自己申报的 segment_indexes 任一
+# 编号原文里逐字摘录、能证明"这就是这个地点"的一段原文，不得改写/概括/
+# 跨编号拼接；这条提及在本段确实没有可摘录证据时如实留空，不编造）。
+# _extract_chunk 提示词新增对应字段说明；_pass() 里 scenes 的 resolution/
+# discovery 两支候选表恢复成 [canonical_scene_name, name, scene_quote]
+# （跟旧候选表同构，唯一区别是第三路的申报粒度从"事件"下沉到"提及"，
+# 对审计而言是更精确的绑定，不是更弱的证据）；alias 分支
+# （_prep_pack_scene_alias_provenance 的第三个参数）同样恢复传入这条
+# 提及自己的 quote，不再传空列表——该函数早就为这个用途保留了这个参数
+# （见其 docstring），只是 48e01ff 之后一直传空。
+#
+# 为什么这不是同义反复（红线判据，见 _prep_pack_local_text_anchor 上方
+# "跨集别名场景绑定的锚点强化"一节对"同义反复"的完整定义）：quote 不是
+# name/canonical_scene_name 的重复或变体，是模型对"这段原文是不是在写
+# 这个地点"这个独立语义问题给出的另一次单独申报，且必须逐字命中它自己
+# 声称的原文段落才会被 _prep_pack_verify_manifest_provenance 采信——跟
+# name 本身是否逐字出现是两个不同的判据，二者可能同时为真、同时为假、
+# 或一真一假（EP1 五个场景就是"name 假、quote 真"的真实样本）。
+#
+# 人物侧核实（用户点名"查清楚，别只修报错的那一半"）：characters[] 从
+# 1.6.0 引入 _PREP_PACK_SCENE_METHODS_REQUIRING_ANCHOR 起就只对 scenes[]
+# 生效——_prep_pack_verify_manifest_provenance 对角色调用 _check(...) 时
+# 从未传过 require_anchor=True（characters 侧从未存在过 requiring-anchor
+# 常量，见该函数与 _check 内部逻辑），48e01ff 之前如此、之后也如此，不是
+# 今晚改出来的差异。这不是"角色侧恰好没触发"——是角色侧的空 anchor_
+# phrase 结构上永远被自校验豁免放行，has_scene_anchor 这类具名拦截压根
+# 不适用于 characters[]。这本身是一个更宽松的既有判据（跟本次事故的
+# 因果链无关，48e01ff 没有改动它），不在这次回归修复范围内收紧——收紧
+# 门禁判据是范围外的产品决策，不是"修一个当晚引入的回归"应该顺带做的事。
 QA_PROFILE_VERSION = "prep-pack-qa-gate-1"
 _QA_EVALUATOR_NAME = "screenplay_production_qa"
 _CHUNK_MAX_CHARS = 6000
@@ -1056,6 +1113,21 @@ class _ModelSceneMention(BaseModel):
     display_name: str
     suspected_true_name: str | None  # isomorphic to the character field above
     segment_indexes: list[int]
+    # 2.0.2 (real regression fix, see PREP_PACK_VERSION's 2.0.2 note above):
+    # a verbatim excerpt from one of this mention's own segment_indexes that
+    # supports "this is that place" -- isomorphic to the old, now-removed
+    # event_chain[].source_evidence[].quote, just declared at mention grain
+    # instead of event grain. Required (not Optional) matching this module's
+    # strict-schema convention; legal to be "" when this mention genuinely
+    # has no excerptable evidence in this chunk (never fabricate one). This
+    # is the sole reason the field exists: display_name/canonical scene
+    # names are frequently model-synthesized labels that never appear
+    # verbatim in the source text (real EP1: "大青山山顶" vs source "这青山
+    # 顶端"), so they cannot themselves serve as independent local-text-
+    # anchor evidence for resolution/discovery scene bindings -- see
+    # _prep_pack_local_text_anchor's "同义反复" note and _pass()'s scene
+    # anchor-candidate section below for how this flows into anchor_phrase.
+    quote: str
 
 
 class _ModelPropMention(BaseModel):
@@ -1361,6 +1433,15 @@ def _prep_pack_local_text_anchor(
 # 字段名），供审计走对应的递归核验分支（不在
 # _PREP_PACK_SCENE_METHODS_REQUIRING_ANCHOR 里，空锚合法豁免，跟
 # resolution_forward 同待遇）。
+#
+# 2.0.2 更新（见 PREP_PACK_VERSION 上方 2.0.2 大注释）：2.0.0 砍
+# event_chain 后，调用方一度把 scene_event_evidence_quotes 传空列表
+# （event_chain 没了，暂时没有替代来源）——这不是这份函数签名/判据本身
+# 的改动，函数体一行未动，仍然是"给一份候选引文列表，命中就升级
+# resolution，不命中就诚实降级 alias_inherited"这同一套判据；变化只在
+# 调用方现在恢复传入这条场景提及自己申报的 quote（_ModelSceneMention.
+# quote，isomorphic 于旧 event_chain[].source_evidence[].quote，只是
+# 粒度从"事件"下沉到"提及"，见调用点上方注释）。
 def _prep_pack_scene_alias_provenance(
     conn, segments: list[SourceSegment], scene_reference_id: str,
     canonical_scene_name: str, scene_event_evidence_quotes: list[str],
@@ -3650,6 +3731,10 @@ async def _resolve_assets(
             mention_segment_indexes = sorted(
                 {int(index) for index in mention.get("segment_indexes") or []}
             )
+            # 2.0.2：这条提及自己申报的逐字引文（见 _ModelSceneMention.quote
+            # 与 PREP_PACK_VERSION 上方 2.0.2 大注释）——resolution/discovery
+            # 锚点候选表下面会用到，独立于 name/canonical_scene_name 本身。
+            scene_quote = str(mention.get("quote") or "").strip()
             resolved_via_discovery = name in scene_rename
             resolved_name = scene_rename.get(name, name)
             via_suspected_true_name = False
@@ -3742,29 +3827,36 @@ async def _resolve_assets(
             scene_forward_chapter_label = ""
             scene_source_episode_no: int | None = None
             # 场景绑定的锚点候选（第28轮 ERR-20260824，v3 审计
-            # A2_scene_no_text_evidence 25 条；2.0.0 起不再额外拼接
-            # scene_event_evidence_quotes——那是"该场景所涉事件的
-            # source_evidence 地点描述短语"，event_chain 撤销后不再存在，
-            # 见 PREP_PACK_VERSION 上方 2.0.0 大注释）：resolution/discovery
-            # 两支试 [canonical_scene_name, name]——发现新建场景、或消歧把
-            # 一个提及判给已有场景时，模型申报的规范名（canonical_scene_
-            # name）本身可能才是原文里真正出现的措辞（label 是提及方式，
-            # canonical 是模型综合出的标签，反之亦然，取决于具体场景），
-            # 单试一种会漏掉另一种真实存在的锚点。两路候选都试过仍找不到，
-            # 才是真的没有本集依据（下面 has_scene_anchor 会拦截，不再像
-            # 1.6.0 最初实现那样静默放行空锚）。
+            # A2_scene_no_text_evidence 25 条；2.0.2 恢复第三路候选，见
+            # PREP_PACK_VERSION 上方 2.0.2 大注释——48e01ff 砍 event_chain
+            # 时曾把这里收窄成只剩 [canonical_scene_name, name]，两路都是
+            # 模型综合出的合成标签时结构上必然两路皆空，是当晚引入的真实
+            # 回归，不是本条注释历史上就接受的设计）：resolution/discovery
+            # 两支试 [canonical_scene_name, name, scene_quote]——发现新建
+            # 场景、或消歧把一个提及判给已有场景时，模型申报的规范名
+            # （canonical_scene_name）本身可能才是原文里真正出现的措辞
+            # （label 是提及方式，canonical 是模型综合出的标签，反之亦然，
+            # 取决于具体场景），scene_quote 是这条提及自己申报、经
+            # _prep_pack_local_text_anchor 逐字核验的独立证据（isomorphic
+            # 于旧 event_chain[].source_evidence[].quote，见 _ModelSceneMention.
+            # quote 上方注释）——不是同义反复：它不是 name/canonical_scene_
+            # name 的重复或变体，是模型对"这段原文写的是不是这个地点"这个
+            # 独立问题的另一次单独申报，真假不由申报本身决定，由它是否
+            # 逐字命中原文决定。三路候选都试过仍找不到，才是真的没有本集
+            # 依据（下面 has_scene_anchor 会拦截，不再像 1.6.0 最初实现
+            # 那样静默放行空锚）。
             if canonical_scene_name in newly_added_scene_names:
                 scene_method = "discovery"
                 scene_anchor_segments, scene_anchor_phrase = (
                     _prep_pack_local_text_anchor(
-                        segments, [canonical_scene_name, name],
+                        segments, [canonical_scene_name, name, scene_quote],
                     )
                 )
             elif resolved_via_discovery:
                 scene_method = "resolution"
                 scene_anchor_segments, scene_anchor_phrase = (
                     _prep_pack_local_text_anchor(
-                        segments, [canonical_scene_name, name],
+                        segments, [canonical_scene_name, name, scene_quote],
                     )
                 )
             elif via_suspected_true_name:
@@ -3793,12 +3885,18 @@ async def _resolve_assets(
                             f"第 {true_name_pinned_chapter_idx} 章"
                         )
             elif canonical_scene_name != name:
+                # 2.0.2：恢复传入这条提及自己的 quote 作为第三方参数
+                # scene_event_evidence_quotes（该形参名未改——语义仍是
+                # "候选独立证据引文列表"，只是来源粒度从"事件"下沉到
+                # "提及"，见该函数 docstring 与 PREP_PACK_VERSION 上方
+                # 2.0.2 大注释）；找不到独立证据时函数自身仍会诚实降级为
+                # alias_inherited，不在这里改判据。
                 (
                     scene_method, scene_anchor_segments, scene_anchor_phrase,
                     scene_source_episode_no,
                 ) = _prep_pack_scene_alias_provenance(
                     conn, segments, scene_reference_id,
-                    canonical_scene_name, [],
+                    canonical_scene_name, [scene_quote],
                 )
             else:
                 scene_method = "direct"
@@ -4229,7 +4327,10 @@ async def _extract_chunk(
   保持一致；原文没有这样称呼，就不要往上面靠）：{known_characters}；
 - scenes：本段原文中角色实际所在的场景/地点，每个给 {{"display_name": "场景名",
   "suspected_true_name": "你认为的正名，不确定就填 null", "segment_indexes": [该场景实际
-  在画面中出现的编号列表]}}；已登记场景名（仅供拼写对齐，同上一条的原则）：{known_scenes}；
+  在画面中出现的编号列表], "quote": "从上面 segment_indexes 任一编号原文中逐字摘录的一段
+  原文（不超过约60字），要能证明这里写的就是这个地点——不得改写/概括/跨编号拼接；这个场景
+  在本段确实没有可摘录的原文依据就填空字符串，绝不编造"}}；已登记场景名（仅供拼写对齐，同
+  上一条的原则）：{known_scenes}；
 - props：本段原文中画面里明确出现、有辨识度的物品/道具（不是随口一提，例如武器、信物、
   法宝、书信等），每个给 {{"label": "道具名称", "description": "这个道具的外观/特征简述",
   "segment_indexes": [该道具实际出现的编号列表]}}；没有就给空列表，不要为了填满而虚构。
@@ -4457,6 +4558,13 @@ async def _generate_prep_pack_once(
                 "display_name": mention.display_name.strip(),
                 "suspected_true_name": mention.suspected_true_name,
                 "segment_indexes": valid_indexes,
+                # 2.0.2：该提及自己申报的逐字引文，见 _ModelSceneMention.quote
+                # 上方注释与 PREP_PACK_VERSION 上方 2.0.2 大注释。不做结构闸
+                # （不要求落在 valid_indexes 范围内）——它本来就要在下游经
+                # _prep_pack_local_text_anchor 全书逐字复核，跟 canonical_
+                # scene_name/name 两个既有候选走的是同一条核验路径，不重复
+                # 造一遍。
+                "quote": mention.quote.strip(),
             })
         for mention in response.props:
             valid_indexes = _prep_pack_gate_segment_indexes(
@@ -4601,7 +4709,7 @@ def _publish_prep_pack(
     })
 
     if conn.in_transaction:
-        raise RuntimeError("分集准备包发布前存在未收口事务")
+        raise RuntimeError("分集映射包发布前存在未收口事务")
     conn.execute("BEGIN IMMEDIATE")
     try:
         cursor = conn.execute(
@@ -4705,7 +4813,7 @@ def _publish_prep_pack(
             ),
         )
         if episode_cursor.rowcount != 1:
-            raise ValueError("分集准备包发布 episode 更新发生冲突")
+            raise ValueError("分集映射包发布 episode 更新发生冲突")
         # 2.0.0：不再预写 episodes.cliffhanger/hook（payload 不再携带这两个
         # 字段，见 PREP_PACK_VERSION 上方 2.0.0 大注释）——这两列本来就会被
         # app/production/publish.py 在真正发布时用 script.ending_hook（发布
@@ -4821,4 +4929,4 @@ async def run_episode_prep_pack(
                 prior_attempt_had_events = True
                 prior_attempt_reason = str(exc)[:500]
             continue
-    raise last_error if last_error is not None else RuntimeError("分集准备包生成失败")
+    raise last_error if last_error is not None else RuntimeError("分集映射包生成失败")

@@ -1073,10 +1073,13 @@ def test_synthetic_scene_labels_get_independent_anchor_from_mention_quote(monkey
     )
 
     assert errors == []
-    assert stats["scene_discovery_calls"] == 0, (
-        "五个场景都已经在 scene_references 挂号，裸精确匹配就该命中，不该"
-        "触发发现调用"
-    )
+    # 五个场景虽然已经在 scene_references 挂号（模拟"这不是这个项目第一次
+    # 生成 EP1"——真实事故对照的老包 art_89068e6b5606 证明这五个场景名此前
+    # 就已经存在），但场景证据闸（1.4.2，见上方"场景证据闸"注释）只信任
+    # "经发现处理过"的绑定，裸直接命中且原文无字面证据时会被打回未解析、
+    # 强制回炉发现——这正是真实事故报告 method='resolution'（不是
+    # 'discovery'：发现判定"这不是新场景"，不落 added）的由来。
+    assert stats["scene_discovery_calls"] == 1
     assert len(scene_list) == 5
     by_name = {s["display_name"]: s for s in scene_list}
     for label, segment, quote in _EP1_REAL_SCENE_QUOTES:
@@ -1104,7 +1107,7 @@ def test_synthetic_scene_labels_get_independent_anchor_from_mention_quote(monkey
     )
 
 
-def test_synthetic_scene_label_without_any_independent_evidence_still_blocked():
+def test_synthetic_scene_label_without_any_independent_evidence_still_blocked(monkeypatch):
     """红灯（红线①反向验证：绝不允许放宽 has_scene_anchor 门禁）：合成场景名
     不逐字出现在原文，且这条提及自己也没有申报任何 quote（模型如实留空，
     不是漏填字段）——candidate 三路全空，anchor_phrase 必须仍是空字符串，
@@ -1116,6 +1119,15 @@ def test_synthetic_scene_label_without_any_independent_evidence_still_blocked():
         "VALUES ('sr-dqssd','p1','大青山山顶',1,NULL)"
     )
     conn.commit()
+
+    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels):
+        assert labels == ["大青山山顶"]
+        return {
+            "added": [], "errors": [], "ready_scenes": list(labels),
+            "resolved_names": {label: label for label in labels},
+        }
+
+    monkeypatch.setattr(scenes, "ensure_scenes_for_labels", fake_ensure_scenes_for_labels)
 
     scene_mentions = [
         {"display_name": "大青山山顶", "segment_indexes": [1], "quote": ""},
