@@ -51,14 +51,25 @@ from app.schemas import Bible, Dialogue
 from app.source_excerpt import SourceSegment, index_source_segments
 from app.video_prompt_profiles import VideoPromptProfile
 
-STORYBOARD_PACK_VERSION = "2.0.0"
+#: 2.0.1（真实 EP1 回归，ep_3d523ff4d0a4/run_46660b74d025，三个逐段核对发现
+#: 的产出缺陷）：送模型的 task_payload 形状变了——relevant_assets.
+#: characters[]/functional_extras[]/scenes[] 新增世界书标准外观/场景锚点
+#: （appearance/scene_canonical），phase 2 新增 rules[] 三条自洽要求；两个
+#: 方言指令块也各补了一条硬要求。持久化契约（StoryboardPack/
+#: StoryboardPackSegment 的字段名与形状）没有变，只是补丁级修正，不是 minor
+#: ——但必须换版本号：不换的话 run_storyboard_pack_generation 的 resume 分支
+#: 会看见 EP1 已持久化 shots 的 shot_contract_json 里仍带着旧版
+#: STORYBOARD_PACK_CONTRACT_MARKER，判定"已经用同一套契约生成过"直接复用
+#: 旧结果，不会真的用新 prompt 重新调模型（resume 短路机制本身不动，只是
+#: marker 值变了才会让它对旧行判"不算数"）。
+STORYBOARD_PACK_VERSION = "2.0.1"
 
 #: Written to Shot.prompt_contract_version for every row this module writes.
 #: This is the single, principled marker every downstream consumer keys off
 #: of to know "this row's shot_size/camera_move/first_frame_desc/... are not
 #: authoritative -- read storyboard_pack_segment.prompt_text instead". It is
 #: a data-derived version tag, not a per-episode/per-shot allowlist.
-STORYBOARD_PACK_CONTRACT_MARKER = "storyboard_pack/2.0.0"
+STORYBOARD_PACK_CONTRACT_MARKER = "storyboard_pack/2.0.1"
 
 SEGMENT_DURATION_S = 15
 MIN_SHOTS_PER_SEGMENT = 3
@@ -85,7 +96,12 @@ JSON 字段或分点罗列）。
 - 角色第一次出现时用至少三个可视觉验证特征定义（年龄区间、体型脸型、发型
   头饰、服装颜色材质、随身物）；此后每一个「镜头N」都要重新 @点名，并把
   头巾/伤疤/随身物等连续性元素重复写一遍——不能只在开头写一次就假设模型
-  记得，这是段内漂移最常见的根因。
+  记得，这是段内漂移最常见的根因。relevant_assets 里每个角色/场景都带一个
+  外观/场景字段（角色是 appearance，场景是 scene_canonical）：内容是一段
+  具体描述时，那就是这个角色/场景在本集的标准锚点，第一次出现时的特征定义
+  必须逐字沿用这段描述本身，不得改写、精简、替换或按本段情境调整；内容是
+  「没有标准外观/场景……」这类说明文字时，才由你自行确定特征，并让同一
+  角色/场景在本集所有出现它的镜头里沿用同一套自定特征。
 - 情绪一律写成面部肌肉动作和肢体动作（例如「眉毛拧起、嘴大张、眼睛瞪圆」），
   不写抽象情绪词（「惊恐」「释然」这类词模型没有稳定映射）。
 - 承担叙事功能的关键道具要写成构图约束——「XX始终清晰可见，位于画面XX」，
@@ -98,7 +114,10 @@ JSON 字段或分点罗列）。
   人物中近景上。
 - 结尾必须有一段「全片贯穿：音频……；风格……；约束……」，音频（环境音/对白/
   配乐）不能留空，约束里必须包含「面部一致、手指正确、人数锁定、无字幕
-  水印」。
+  水印」。dialogue[] 里的每一句台词都必须在这段音频描述里用引号带出原话、
+  逐句出现，不能只写「XX说话声」这类概括；反过来，音频描述里用引号写出的
+  台词原话也必须逐句同时登记进 dialogue[]——两处台词是同一份清单的两种
+  呈现，不是各自独立的两份内容。
 - 画面中任何需要出现的文字（牌匾、书信、标题）一律写「无字」/「空白」，交给
   后期合成——Seedance 对汉字字形的还原极不稳定，这是能力缺失，不是可选项。
   凡是写了「无字」的地方，必须在 degraded_capabilities 里对应记一条后期文字
@@ -251,6 +270,90 @@ def _manifest_brief_for_prompt(payload: dict[str, Any]) -> dict[str, Any]:
             for p in (manifest.get("props") or [])
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# 世界书标准外观/场景锚点接入（问题一修复，2026-08-26 真实 EP1 回归：孟浩在
+# 10 段里换了三套衣服）。根因不是模型能力，是管道没接上——prep_pack 装配
+# asset_manifest.characters[]/scenes[] 时只写 identity_id/display_name/
+# portrait_id/scene_reference_id 等身份字段，从不带外观/场景描述本身；模型
+# 只能从自己这一段的原文现推，原文没写衣着的段落只能各段各编。世界书里的
+# 标准外观/场景锚点（character_portraits.appearance / scene_references.
+# scene_canonical）一直都在，只是没被送给模型。
+# ---------------------------------------------------------------------------
+
+_NO_CANONICAL_APPEARANCE_NOTE = (
+    "素材库没有为这个角色建立标准外观定妆照（群演/一次性人物，没有定妆照）："
+    "由你在本集第一次出现这个角色时自行确定其外观特征（年龄体型、发型头饰、"
+    "服装颜色材质、随身物等可视信息），并在本集所有涉及这个角色的段落里原样"
+    "沿用同一套自定特征，不得每段重新编写。"
+)
+
+_NO_CANONICAL_SCENE_NOTE = (
+    "素材库没有为这个场景建立标准场景描述：由你在本集第一次出现这个场景时"
+    "自行确定其可视特征（空间格局、主要陈设、光线氛围等），并在本集所有涉及"
+    "这个场景的段落里原样沿用同一套自定特征，不得每段重新编写。"
+)
+
+
+def _character_canonical_appearance(conn, portrait_id: str | None) -> str | None:
+    """这个已解析 portrait_id 对应的世界书标准外观锚点串。
+
+    ``portrait_id`` 在传入这里之前，已经由映射台
+    ``app.production.prep_pack._resolve_portrait_id`` 按本集集号在
+    ``character_portraits.ep_start``/``ep_end`` 区间里选定过一次（见该函数
+    与 asset_manifest.characters[] 的装配处）——本函数只按这个已选定的 id
+    取值，不重新做一遍区间选择，选取逻辑只有一套。
+    """
+    if not portrait_id:
+        return None
+    row = conn.execute(
+        "SELECT appearance FROM character_portraits WHERE id=?", (portrait_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    appearance = str(row["appearance"] or "").strip()
+    return appearance or None
+
+
+def _scene_canonical_description(conn, scene_reference_id: str | None) -> str | None:
+    """场景侧同构：``scene_reference_id`` 同样已由
+    ``app.production.prep_pack._resolve_scene_reference_id`` 按本集集号选定
+    过一次，这里只按这个已选定的 id 取 ``scene_references.scene_canonical``。
+    """
+    if not scene_reference_id:
+        return None
+    row = conn.execute(
+        "SELECT scene_canonical FROM scene_references WHERE id=?", (scene_reference_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    canonical = str(row["scene_canonical"] or "").strip()
+    return canonical or None
+
+
+def _enrich_asset_manifest_canonical_visuals(conn, payload: dict[str, Any]) -> None:
+    """原地把世界书标准外观/场景锚点补进 ``payload["asset_manifest"]``。
+
+    在 ``_generate_beat_sheet``/``_generate_segment_prompt`` 之前调用一次
+    （逐 identity 只查一次，不在逐段循环里重复查询）；``_segment_relevant_
+    assets`` 之后按段筛选时拿到的就是同一批已带 appearance/scene_canonical
+    的条目对象，不需要再改那个函数。只多一次查询，不建新表也不建新缓存。
+
+    ``functional_extras``（群演/一次性人物）没有 portrait_id、天生没有标准
+    外观：这里显式写一条说明而不是留空——留空会被模型读成"没有任何关于外观
+    的信息"，导致同一群演在不同段落里各编一套，是问题一的同一种漂移换了个
+    没有 portrait_id 的马甲，不是不同的问题。
+    """
+    manifest = payload.get("asset_manifest") or {}
+    for character in manifest.get("characters") or []:
+        appearance = _character_canonical_appearance(conn, character.get("portrait_id"))
+        character["appearance"] = appearance or _NO_CANONICAL_APPEARANCE_NOTE
+    for extra in manifest.get("functional_extras") or []:
+        extra["appearance"] = _NO_CANONICAL_APPEARANCE_NOTE
+    for scene in manifest.get("scenes") or []:
+        canonical = _scene_canonical_description(conn, scene.get("scene_reference_id"))
+        scene["scene_canonical"] = canonical or _NO_CANONICAL_SCENE_NOTE
 
 
 async def _generate_beat_sheet(
@@ -502,8 +605,16 @@ async def _generate_segment_prompt(
         for beat_id in segment_plan.beat_ids
         if beat_id in beats_by_id
     ]
+    # functional_extras（群演/一次性人物）没有 identity_id，用自己的
+    # visual_entity_id 当作 resources.characters[].identity_id 的合法来源
+    # （问题三：模型确实会正确引用群演的 visual_entity_id，例如真实 EP1
+    # 第10段绿袍男子=entity:fdd28fea634a6cdc；漏掉这一路会让本来合法的引用
+    # 被 _segment_content_advisories 误判成"不是映射台已知的人物身份"）。
     known_character_ids = {
         str(c.get("identity_id") or "") for c in (payload.get("asset_manifest") or {}).get("characters") or []
+    } | {
+        str(e.get("visual_entity_id") or "")
+        for e in (payload.get("asset_manifest") or {}).get("functional_extras") or []
     }
     known_scene_ids = {
         str(s.get("scene_id") or "") for s in (payload.get("asset_manifest") or {}).get("scenes") or []
@@ -515,6 +626,24 @@ async def _generate_segment_prompt(
             "关键词——你产出的字符串会被原样保存并原样提交给视频生成接口，不会再被代码"
             "拼接、改写或补充任何后缀。"
         ),
+        "rules": [
+            "relevant_assets 里每个角色/场景都带一个外观/场景字段（角色和"
+            "群演统一叫 appearance；场景叫 scene_canonical）：内容是一段"
+            "具体描述时，那就是这个角色/场景在本集的标准锚点，写它时必须"
+            "逐字沿用这段描述本身，不得改写、精简、替换或按本段情境调整；"
+            "内容是「没有标准外观/场景……」这类说明文字时，才由你自行确定"
+            "特征，并让同一角色/场景在本集所有涉及它的段落里保持同一套"
+            "自定特征。",
+            "dialogue[] 与 prompt_text 两处的台词必须互相覆盖、逐句一致："
+            "dialogue[] 列出的每一句台词都必须能在 prompt_text 里找到对应"
+            "原话，prompt_text 里写出的台词原话也必须同时登记进 "
+            "dialogue[]，不得只在一处出现。",
+            "prompt_text 里出场或说话的每一个角色都必须同时列进 "
+            "resources.characters；resources.characters[].identity_id 只能"
+            "使用 relevant_assets.characters 的 identity_id 或 "
+            "relevant_assets.functional_extras 的 visual_entity_id，不得"
+            "自造新 id。",
+        ],
         "segment_no": segment_plan.segment_no,
         "synopsis": segment_plan.synopsis,
         "beats": beat_summaries,
@@ -673,6 +802,7 @@ async def generate_storyboard_pack(
     if not segments:
         raise ValueError(f"episode {episode_id} 没有可用原文，无法生成分镜")
     target_video_model = str(ep["target_video_model"] or "hiagent").strip() or "hiagent"
+    _enrich_asset_manifest_canonical_visuals(conn, payload)
 
     bible: Bible | None = None
     project = conn.execute(
@@ -737,6 +867,116 @@ def _resource_identity_display_names(payload: dict[str, Any], identity_ids: list
     return [by_id.get(identity_id, identity_id) for identity_id in identity_ids]
 
 
+def _largest_contiguous_source_run(indexes: list[int]) -> list[int]:
+    """Pick the one run this shot's source binding can honestly prove.
+
+    ``storyboard_source_bindings`` is schema-fixed to one (chapter, start,
+    end) span per shot (app/db.py: ``shot_id TEXT PRIMARY KEY``), and
+    ``assert_storyboard_source_bindings_complete`` requires the sliced
+    ``content[start:end]`` to equal ``shots.source_excerpt`` byte-for-byte.
+    Real ``source_segment_indexes`` are routinely non-contiguous (EP1 data:
+    shot 2 = [12,14,15,16,17], skipping 13; shot 6 = [44,46,47,48], skipping
+    45) because the model omits a connective paragraph it judged irrelevant
+    to this narrative beat. Taking the naive ``min(indexes)..max(indexes)``
+    envelope would silently claim the skipped paragraph as part of this
+    shot's verified excerpt -- pretending a non-contiguous reference is
+    contiguous. Instead this keeps only the longest actually-contiguous run
+    (ties broken toward the earliest/smallest-starting run, for
+    determinism); indexes outside that run are not represented in
+    ``shots.source_excerpt`` or the binding.
+    """
+    unique_sorted = sorted(set(indexes))
+    if not unique_sorted:
+        return []
+    runs: list[list[int]] = []
+    current = [unique_sorted[0]]
+    for value in unique_sorted[1:]:
+        if value == current[-1] + 1:
+            current.append(value)
+        else:
+            runs.append(current)
+            current = [value]
+    runs.append(current)
+    return max(runs, key=lambda run: (len(run), -run[0]))
+
+
+def _resolve_segment_source_binding(
+    *,
+    segment_no: int,
+    source_segment_indexes: list[int],
+    segments: list[SourceSegment],
+    full_source_text: str,
+    authorized_sources: list[dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    """Derive (source_excerpt, normalized binding) for one persisted shot row.
+
+    ``normalized`` matches exactly the shape ``app.storyboard_workspace.
+    persist_source_binding`` expects and the legacy pipeline already produces
+    (see ``verify_or_bind_existing_excerpt``/``align_generated_source_evidence``
+    in app/storyboard_workspace.py): binding_kind/chapter_id/chapter_idx/
+    source_version_hash/start_offset/end_offset/excerpt_hash, offsets always
+    chapter-local (matched against ``chapters.content``, not the multi-chapter
+    joined text ``index_source_segments`` was run against).
+
+    The excerpt text itself is the literal joined-text slice for the chosen
+    contiguous run (``full_source_text[start:end]``), not a
+    ``"\\n".join(segment.text ...)`` reconstruction -- ``index_source_segments``
+    splits on blank-line boundaries (``\\n\\s*\\n``), so a single ``\\n`` join
+    does not reproduce the real inter-paragraph whitespace and would already
+    fail the binding's byte-for-byte check even for a fully contiguous run.
+    Locating which authorized chapter contains that literal slice (and its
+    chapter-local offset) is done the same way the legacy pipeline does it --
+    ``content.find(excerpt)`` against each authorized chapter -- rather than
+    re-deriving offsets from the join format, which would be fragile across
+    multi-chapter episodes.
+
+    One join artifact needs an explicit unwrap: ``_episode_source_text``
+    (app/domain/common.py) prefixes each chapter's block with
+    ``【{title}】\\n`` before joining, so ``index_source_segments`` frequently
+    folds that bracketed heading into segment 1 of a chapter (real EP1 data:
+    segment 1's text is literally ``"【第一章书生孟浩】\\n第一章书生孟浩"`` --
+    chapters.content itself repeats its own title as its first line, see
+    ``app.source_excerpt.chapter_title_segment_ids``'s docstring for the same
+    join artifact). ``chapters.content`` never contains the bracket wrapper,
+    only chapters.content's own text, so a run starting at a chapter's first
+    segment must have that wrapper stripped before ``content.find`` can ever
+    match -- this is not a fuzzy/best-effort fallback, the wrapper is a fixed,
+    known literal (``_episode_source_text``'s own format string), so this
+    reproduces exactly the bytes ``chapters.content`` actually holds rather
+    than approximating them.
+    """
+    valid_indexes = sorted({i for i in source_segment_indexes if 1 <= i <= len(segments)})
+    if not valid_indexes:
+        raise ValueError(
+            f"第 {segment_no} 段没有落在原文分段范围内的段号（{source_segment_indexes}），无法生成原文绑定"
+        )
+    run = _largest_contiguous_source_run(valid_indexes)
+    start = segments[run[0] - 1].start_offset
+    end = segments[run[-1] - 1].end_offset
+    excerpt = full_source_text[start:end]
+    for source in authorized_sources:
+        content = str(source.get("content") or "")
+        title = str(source.get("title") or "")
+        candidate = excerpt
+        wrapper = f"【{title}】\n"
+        if title and excerpt.startswith(wrapper):
+            candidate = excerpt[len(wrapper):]
+        local_start = content.find(candidate)
+        if local_start >= 0:
+            return candidate, {
+                "binding_kind": "source_excerpt",
+                "chapter_id": int(source["id"]),
+                "chapter_idx": int(source["idx"]),
+                "source_version_hash": source["source_version_hash"],
+                "start_offset": local_start,
+                "end_offset": local_start + len(candidate),
+                "excerpt_hash": hashlib.sha256(candidate.encode("utf-8")).hexdigest(),
+            }
+    raise ValueError(
+        f"第 {segment_no} 段原文摘录（原文段号 {valid_indexes}）无法在本集授权章节中定位"
+    )
+
+
 def persist_storyboard_pack(
     conn,
     episode_id: str,
@@ -767,10 +1007,13 @@ def persist_storyboard_pack(
     silently failing or silently passing on empty values.
     """
     from app.domain.storyboard_ops import _assert_storyboard_write_authorized
+    from app.storyboard_workspace import chapter_sources, persist_source_binding
 
     _assert_storyboard_write_authorized(conn, episode_id, None)
     if segments is None:
         segments = _load_indexed_source_segments(conn, ep)
+    full_source_text = _episode_source_text(conn, ep)
+    authorized_sources = chapter_sources(episode_id, conn=conn)
     conn.execute("DELETE FROM shots WHERE episode_id=?", (episode_id,))
     beats_by_id = {beat.beat_id: beat for beat in pack.beat_sheet}
     shot_ids: list[str] = []
@@ -780,8 +1023,12 @@ def persist_storyboard_pack(
         ]
         scene_entries = segment.resources.get("scenes") or []
         scene_display_name = str(scene_entries[0].get("display_name") or "") if scene_entries else ""
-        source_excerpt = "\n".join(
-            segments[i - 1].text for i in segment.source_segment_indexes if 1 <= i <= len(segments)
+        source_excerpt, source_binding = _resolve_segment_source_binding(
+            segment_no=segment.segment_no,
+            source_segment_indexes=segment.source_segment_indexes,
+            segments=segments,
+            full_source_text=full_source_text,
+            authorized_sources=authorized_sources,
         )
         shot_id = new_id("shot")
         shot_uid = new_id("shotuid")
@@ -880,6 +1127,12 @@ def persist_storyboard_pack(
         conn.execute(
             "UPDATE shots SET adopted_version_id=? WHERE id=?", (version_id, shot_id),
         )
+        # storyboard_source_bindings is the provable "this excerpt really is
+        # this chapter, this offset range, source unchanged since" pointer
+        # app.storyboard_workspace.assert_storyboard_source_bindings_complete
+        # gates on -- without this the row's source_excerpt above is an
+        # unverifiable free-text field and every shot fails that gate.
+        persist_source_binding(shot_id, source_binding, conn=conn, commit=False)
         shot_ids.append(shot_id)
 
     # Full beat_sheet (with summaries), stored once per generation independent
@@ -956,15 +1209,41 @@ async def run_storyboard_pack_generation(
             "SELECT id, shot_contract_json FROM shots WHERE episode_id=? ORDER BY shot_no",
             (episode_id,),
         ).fetchall()
-        if existing and all(
-            STORYBOARD_PACK_CONTRACT_MARKER
-            in (row["shot_contract_json"] or "") for row in existing
-        ) and str(ep["status"] or "") in ("scripted", "confirmed", "generating", "done"):
-            # 已经用同一套分镜台 2.0.0 契约生成过，且集状态显示流程已经往前走了
-            # （不是半途失败的残留）。resume 语义下不重新调模型、不 DELETE 重灌——
-            # 那会连同已经采纳/生成的视频版本一起级联删掉（shots -> shot_versions
-            # -> jobs 都是 ON DELETE CASCADE）。直接把已持久化的结果重建成
-            # checkpoint 返回。
+        tail_contract: dict[str, Any] = {}
+        if existing:
+            try:
+                tail_contract = json.loads(existing[-1]["shot_contract_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                tail_contract = {}
+        if (
+            existing
+            and all(
+                STORYBOARD_PACK_CONTRACT_MARKER
+                in (row["shot_contract_json"] or "") for row in existing
+            )
+            and bool(tail_contract.get("is_final"))
+        ):
+            # 判据完全落在产物本身，不看 episodes.status：
+            # 1) 每一行都带当前 STORYBOARD_PACK_CONTRACT_MARKER —— 同一套契约生成的。
+            # 2) 尾镜自带 is_final=True —— persist_storyboard_pack 只在
+            #    generate_storyboard_pack 一次整跑成功、写完 pack.segments 的最后一段
+            #    时才会落这个标记（本模块的持久化是单事务、一次性全写，不存在
+            #    "写了一半"的中间态），所以 is_final=True 就等价于"这是一整套完整
+            #    产物，不是半途残留"。
+            # 之前这里判的是 ``ep["status"] in ("scripted","confirmed","generating",
+            # "done")``——事故根因就在这儿：resume_storyboard()（app/domain/
+            # storyboard_ops.py）这个 HTTP 路由，在派发生成任务之前，自己会先把
+            # episodes.status 改成 'scripting' 并提交（给 _storyboard_generation_is_live
+            # 之类的去重用），然后才 spawn 任务；run_storyboard_supervisor 随后重新
+            # SELECT 出来的 ep 快照因此必然是 'scripting'——不在允许列表里，短路
+            # 必然判不过，100% 落到下面的全量重灌分支，不是偶发。真实事故
+            # （ep_3d523ff4d0a4，run_84f1d96f9963 把已通过的 10 段吃成 7 段）正是
+            # 这个必然失败的短路触发的。episodes.status 是会被同一次请求自己的写
+            # 操作耦合改动的外部可变字段，不该是"这批产物完不完整"的判据——判据必须
+            # 只看产物自己（marker + is_final）。resume 语义下不重新调模型、不 DELETE
+            # 重灌——那会连同已经采纳/生成的视频版本一起级联删掉（shots ->
+            # shot_versions -> jobs 都是 ON DELETE CASCADE）。直接把已持久化的结果
+            # 重建成 checkpoint 返回。
             rows = conn.execute(
                 "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
             ).fetchall()

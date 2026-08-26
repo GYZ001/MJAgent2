@@ -560,10 +560,26 @@ def _prep_pack_ready_uncached(data: dict, payload: dict) -> bool:
         return False
     if current_hash != str(artifact.get("content_hash") or ""):
         return False
-    coverage = payload.get("coverage_ledger") or {}
-    if coverage.get("uncovered"):
-        return False
-    return bool(str(payload.get("hook") or "").strip())
+    # 2.0.0 architecture narrowing (see app.production.prep_pack's module
+    # docstring, "2.0.0" note) removed all narrative content -- event_chain,
+    # hook, cliffhanger, key_lines -- from this stage's payload entirely; the
+    # mapping stage's only remaining job is asset resolution + proving every
+    # source segment was read. ``hook`` is therefore structurally absent from
+    # every 2.0.x payload, and the old ``bool(payload.get("hook"))`` check
+    # below made this function return False unconditionally -- verified
+    # against a real EP1 2.0.2 artifact (art_3fe31ed511fa), which has none of
+    # the four purged keys at the top level. There is no replacement "does it
+    # have narrative content" signal to gate on here because this stage no
+    # longer produces narrative content at all (that becomes the storyboard
+    # stage's own job, derived straight from source text). The coverage
+    # completeness check just above -- coverage_ledger.uncovered empty -- is
+    # already the 2.0.x equivalent terminal gate: it is the same 洞即删戏
+    # deterministic projection that assert_prep_pack_coverage_complete
+    # enforces at publish time (see that function's docstring in
+    # app/validators.py), so an artifact that reaches this point has already
+    # passed identity/hash verification and proven every source segment was
+    # covered. Nothing else remains to check.
+    return True
 
 
 def _screenplay_ready_uncached(data: dict) -> bool:

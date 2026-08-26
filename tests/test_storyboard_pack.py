@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -32,13 +33,14 @@ from app.production.storyboard_pack import (
     _AiSegmentResources,
     _AiStoryboardSegmentDraft,
     _dialect_for_target_video_model,
+    _enrich_asset_manifest_canonical_visuals,
     _segment_content_advisories,
     _validate_beat_sheet_draft,
     _validate_segment_draft,
     persist_storyboard_pack,
 )
 from app.schemas import Bible, Shot, Storyboard, World
-from app.source_excerpt import SourceSegment
+from app.source_excerpt import SourceSegment, index_source_segments
 from app.validators import storyboard_pack_dialogue_errors, validate_storyboard
 
 
@@ -70,6 +72,24 @@ def _seed_episode(conn, *, episode_id: str, project_id: str = "proj-1") -> None:
         ),
     )
     conn.commit()
+
+
+def _real_segments(conn, ep) -> list[SourceSegment]:
+    """Real ``index_source_segments`` offsets for ``_seed_episode``'s chapter.
+
+    persist_storyboard_pack now derives storyboard_source_bindings straight
+    from segment start/end offsets (app.production.storyboard_pack.
+    _resolve_segment_source_binding slices the joined episode source text and
+    locates that literal slice inside the authorized chapter) -- a fixture
+    with hand-picked offsets that don't correspond to any real slice of
+    _seed_episode's chapter content would make every persist call fail to
+    find a binding, not just look unrealistic. Computed the same way
+    app.production.storyboard_pack._load_indexed_source_segments does it, so
+    this always matches whatever _seed_episode's chapter text actually is.
+    """
+    from app.domain.common import _episode_source_text
+
+    return index_source_segments(_episode_source_text(conn, ep))
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +435,82 @@ def test_project_prep_pack_to_screenplay_2_0_0_leaves_dialogue_fields_empty_not_
 
 
 # ---------------------------------------------------------------------------
+# _enrich_asset_manifest_canonical_visuals：世界书标准外观/场景锚点接入
+# （问题一修复，真实 EP1 回归：孟浩在 10 段提示词里换了三套衣服。根因是
+# asset_manifest.characters[] 从不带外观描述，模型只能从自己这一段的原文
+# 现推；原文没写衣着的段落只能各段各编。世界书里的标准外观/场景锚点
+# character_portraits.appearance / scene_references.scene_canonical 一直
+# 都在，只是没被送给模型——这里补的是管道，不是"叮嘱模型别漂"。）
+# ---------------------------------------------------------------------------
+
+def test_enrich_asset_manifest_canonical_visuals_adds_appearance_from_character_portraits():
+    conn = db.get_conn()
+    _seed_episode(conn, episode_id="ep-visuals-1")
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, "
+        "appearance, created_at) VALUES(?,?,?,?,?,?,?)",
+        (
+            "portrait_1", "proj-1", "少年", 1, None,
+            "十六七岁的少年男性，黑发碎短利落，皮肤偏黑身形瘦削，常年穿干净的蓝色文士长衫。",
+            db.now(),
+        ),
+    )
+    conn.commit()
+    payload = _prep_pack_2_0_0_payload()
+    _enrich_asset_manifest_canonical_visuals(conn, payload)
+    character = payload["asset_manifest"]["characters"][0]
+    assert character["appearance"] == (
+        "十六七岁的少年男性，黑发碎短利落，皮肤偏黑身形瘦削，常年穿干净的蓝色文士长衫。"
+    )
+
+
+def test_enrich_asset_manifest_canonical_visuals_adds_scene_canonical_from_scene_references():
+    conn = db.get_conn()
+    _seed_episode(conn, episode_id="ep-visuals-2")
+    conn.execute(
+        "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end, "
+        "scene_canonical, created_at) VALUES(?,?,?,?,?,?,?)",
+        ("scene_ref_1", "proj-1", "山顶", 1, None, "云雾缭绕的山顶，一块巨石立于中央。", db.now()),
+    )
+    conn.commit()
+    payload = _prep_pack_2_0_0_payload()
+    _enrich_asset_manifest_canonical_visuals(conn, payload)
+    scene = payload["asset_manifest"]["scenes"][0]
+    assert scene["scene_canonical"] == "云雾缭绕的山顶，一块巨石立于中央。"
+
+
+def test_enrich_asset_manifest_canonical_visuals_notes_functional_extras_have_no_canonical_appearance():
+    # 群演/一次性人物没有 portrait_id，天生没有定妆照：必须给出显式说明，
+    # 不能静默留空——留空会被模型读成"没有任何相关信息"，导致同一群演在
+    # 不同段落里各编一套外观，这是问题一的同一种漂移换了个没有 portrait_id
+    # 的马甲。
+    conn = db.get_conn()
+    _seed_episode(conn, episode_id="ep-visuals-3")
+    conn.commit()
+    payload = _prep_pack_2_0_0_payload()
+    payload["asset_manifest"]["functional_extras"] = [
+        {"label": "绿袍男子", "visual_entity_id": "entity:abc123", "segment_indexes": [1]},
+    ]
+    _enrich_asset_manifest_canonical_visuals(conn, payload)
+    extra = payload["asset_manifest"]["functional_extras"][0]
+    assert extra["appearance"]
+    assert "没有为这个角色建立标准外观" in extra["appearance"]
+
+
+def test_enrich_asset_manifest_canonical_visuals_notes_missing_portrait_row_instead_of_empty():
+    # 边界：portrait_id 存在但 character_portraits 里查不到这一行（或该行
+    # appearance 列本身为空）——同样不得静默留空，退回显式说明而不是空字符串。
+    conn = db.get_conn()
+    _seed_episode(conn, episode_id="ep-visuals-4")
+    conn.commit()
+    payload = _prep_pack_2_0_0_payload()  # portrait_id="portrait_1"，未插入任何 character_portraits 行
+    _enrich_asset_manifest_canonical_visuals(conn, payload)
+    character = payload["asset_manifest"]["characters"][0]
+    assert character["appearance"]
+    assert "没有为这个角色建立标准外观" in character["appearance"]
+
+
+# ---------------------------------------------------------------------------
 # persist_storyboard_pack：DB 落库形状
 # ---------------------------------------------------------------------------
 
@@ -448,11 +544,7 @@ def test_persist_storyboard_pack_writes_one_shots_row_per_segment():
     _seed_episode(conn, episode_id=episode_id)
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     payload = _prep_pack_2_0_0_payload()
-    segments = [
-        SourceSegment(segment_id="SRC0001", text="少年站在山顶。", start_offset=0, end_offset=1),
-        SourceSegment(segment_id="SRC0002", text="他扔掉了葫芦。", start_offset=1, end_offset=2),
-        SourceSegment(segment_id="SRC0003", text="葫芦落入河中。", start_offset=2, end_offset=3),
-    ]
+    segments = _real_segments(conn, ep)
     shot_ids = persist_storyboard_pack(conn, episode_id, ep, payload, _pack(), segments=segments)
     assert len(shot_ids) == 1
 
@@ -463,7 +555,11 @@ def test_persist_storyboard_pack_writes_one_shots_row_per_segment():
     assert row["duration_s"] == 15
     assert row["shot_size"] == ""
     assert row["camera_move"] == ""
-    assert row["source_excerpt"] == "少年站在山顶。\n他扔掉了葫芦。"
+    # 逐字契约切片 -- 段落间的真实空白是 index_source_segments 的 "\n\s*\n"
+    # 段落分隔，不是代码拼装用的单个 "\n"（persist_storyboard_pack 现在从
+    # _resolve_segment_source_binding 取回可核验的原文切片，不再是
+    # "\n".join(segment.text ...) 重组文本，见该函数文档）。
+    assert row["source_excerpt"] == "少年站在山顶。\n\n他扔掉了葫芦。"
     assert row["adopted_version_id"]
 
     contract = json.loads(row["shot_contract_json"])
@@ -488,11 +584,7 @@ def test_persist_storyboard_pack_segment_carries_beat_summary_self_contained():
     _seed_episode(conn, episode_id=episode_id)
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     payload = _prep_pack_2_0_0_payload()
-    segments = [
-        SourceSegment(segment_id="SRC0001", text="少年站在山顶。", start_offset=0, end_offset=1),
-        SourceSegment(segment_id="SRC0002", text="他扔掉了葫芦。", start_offset=1, end_offset=2),
-        SourceSegment(segment_id="SRC0003", text="葫芦落入河中。", start_offset=2, end_offset=3),
-    ]
+    segments = _real_segments(conn, ep)
     persist_storyboard_pack(conn, episode_id, ep, payload, _pack(), segments=segments)
 
     row = conn.execute("SELECT * FROM shots WHERE episode_id=?", (episode_id,)).fetchone()
@@ -515,11 +607,7 @@ def test_persist_storyboard_pack_segment_beats_empty_when_declared_beat_ids_empt
     _seed_episode(conn, episode_id=episode_id)
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     payload = _prep_pack_2_0_0_payload()
-    segments = [
-        SourceSegment(segment_id="SRC0001", text="少年站在山顶。", start_offset=0, end_offset=1),
-        SourceSegment(segment_id="SRC0002", text="他扔掉了葫芦。", start_offset=1, end_offset=2),
-        SourceSegment(segment_id="SRC0003", text="葫芦落入河中。", start_offset=2, end_offset=3),
-    ]
+    segments = _real_segments(conn, ep)
     pack = _pack()
     # 模型自报本段不承载任何节拍：即使 source_segment_indexes 仍与 beat.segment_indexes
     # 重叠，落库也必须服从模型自报，不得靠交集"顺手"补回一个模型没声明的节拍。
@@ -541,11 +629,7 @@ def test_persist_storyboard_pack_segment_beats_follow_declared_ids_not_index_ove
     _seed_episode(conn, episode_id=episode_id)
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     payload = _prep_pack_2_0_0_payload()
-    segments = [
-        SourceSegment(segment_id="SRC0001", text="少年站在山顶。", start_offset=0, end_offset=1),
-        SourceSegment(segment_id="SRC0002", text="他扔掉了葫芦。", start_offset=1, end_offset=2),
-        SourceSegment(segment_id="SRC0003", text="葫芦落入河中。", start_offset=2, end_offset=3),
-    ]
+    segments = _real_segments(conn, ep)
     pack = _pack()
     # 节拍 B1.segment_indexes=[1, 2]；把段的原文范围挪到不重叠的第 3 段，
     # 但仍保留 beat_ids=["B1"]（模型自报本段承载 B1）。
@@ -568,11 +652,7 @@ def test_persist_storyboard_pack_writes_standalone_beat_sheet_artifact():
     _seed_episode(conn, episode_id=episode_id)
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     payload = _prep_pack_2_0_0_payload()
-    segments = [
-        SourceSegment(segment_id="SRC0001", text="少年站在山顶。", start_offset=0, end_offset=1),
-        SourceSegment(segment_id="SRC0002", text="他扔掉了葫芦。", start_offset=1, end_offset=2),
-        SourceSegment(segment_id="SRC0003", text="葫芦落入河中。", start_offset=2, end_offset=3),
-    ]
+    segments = _real_segments(conn, ep)
     persist_storyboard_pack(conn, episode_id, ep, payload, _pack(), segments=segments)
 
     artifact_row = conn.execute(
@@ -610,11 +690,7 @@ def test_misattributed_speaker_segment_persists_successfully_not_dropped():
     _seed_episode(conn, episode_id=episode_id)
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     payload = _prep_pack_2_0_0_payload()
-    segments = [
-        SourceSegment(segment_id="SRC0001", text="少年站在山顶。", start_offset=0, end_offset=1),
-        SourceSegment(segment_id="SRC0002", text="他扔掉了葫芦。", start_offset=1, end_offset=2),
-        SourceSegment(segment_id="SRC0003", text="葫芦落入河中。", start_offset=2, end_offset=3),
-    ]
+    segments = _real_segments(conn, ep)
     pack = _pack_with_misattributed_speaker()
     # 顺利保存：persist 不抛异常、不丢段落。
     shot_ids = persist_storyboard_pack(conn, episode_id, ep, payload, pack, segments=segments)
@@ -654,3 +730,79 @@ def test_evaluate_storyboard_pack_for_confirmation_passes_despite_misattributed_
     # 记录下来，不是消失：不一致出现在 warnings（进而是返回的 issues）里。
     assert any("SPEAKER_ABSENT" in w for w in evaluation.warnings)
     assert any("SPEAKER_ABSENT" in issue.message for issue in evaluation.issues)
+
+
+# ---------------------------------------------------------------------------
+# run_storyboard_pack_generation 的 resume 短路：判据必须只看产物本身
+# （回归锁 -- ep_3d523ff4d0a4 事故：10 段成品被 resume 悄悄吃成 7 段）
+# ---------------------------------------------------------------------------
+
+def test_resume_reuses_existing_shots_without_regenerating_despite_scripting_status(monkeypatch):
+    """resume_storyboard()（app/domain/storyboard_ops.py）这个 HTTP 路由，在派发
+    生成任务之前会先把 episodes.status 改成 'scripting' 并提交（供
+    _storyboard_generation_is_live 之类的去重使用），然后才 spawn 任务；
+    run_storyboard_supervisor 随后重新 SELECT 出来的 ep 快照因此必然是
+    'scripting'。旧短路条件判 ``ep["status"] in ("scripted","confirmed",
+    "generating","done")``，'scripting' 不在其中——短路对任何一次真实 resume
+    请求都必然判不过（不是偶发），直接落到下面的全量重灌分支：DELETE 全部
+    shots、重新调模型、段数因模型自由裁量而不稳定。真实事故（ep_3d523ff4d0a4，
+    run_84f1d96f9963）就是这样把已通过、已采纳的 10 段吃成了 7 段。
+
+    这里直接复现那个必然出现的中间状态（episodes.status='scripting'），锁死
+    修复后的行为：判据只看产物本身（每行都带当前 STORYBOARD_PACK_CONTRACT_
+    MARKER、尾镜 is_final=True），不再看 episodes.status——短路必须仍然生效：
+    不调用 generate_storyboard_pack（不重新调模型/不产生新 provider_calls）、
+    shots 行数与 id 原封不动。
+    """
+    import app.production.storyboard_pack as storyboard_pack_module
+
+    conn = db.get_conn()
+    episode_id = "ep-resume-guard"
+    _seed_episode(conn, episode_id=episode_id)
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    payload = _prep_pack_2_0_0_payload()
+    segments = _real_segments(conn, ep)
+    shot_ids = persist_storyboard_pack(conn, episode_id, ep, payload, _pack(), segments=segments)
+    assert shot_ids
+
+    # 复现 resume_storyboard() 派发任务前必然造成的中间状态。
+    conn.execute("UPDATE episodes SET status='scripting' WHERE id=?", (episode_id,))
+    conn.commit()
+    ep_mid_resume = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    assert ep_mid_resume["status"] == "scripting"
+
+    before_shots = [
+        dict(row) for row in conn.execute(
+            "SELECT id, shot_no FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
+        ).fetchall()
+    ]
+    before_calls = conn.execute("SELECT COUNT(*) AS c FROM provider_calls").fetchone()["c"]
+
+    def _must_not_call(*_args, **_kwargs):
+        raise AssertionError(
+            "generate_storyboard_pack 不应被调用：已有完整产物必须走 resume 短路，"
+            "绝不重新调模型"
+        )
+
+    monkeypatch.setattr(storyboard_pack_module, "generate_storyboard_pack", _must_not_call)
+
+    cp = asyncio.run(
+        storyboard_pack_module.run_storyboard_pack_generation(
+            episode_id, ep=ep_mid_resume, conn=conn, payload=payload, resume=True,
+        )
+    )
+
+    assert cp.phase == "SUCCEEDED"
+    assert cp.outcome == "SUCCEEDED_READY_FOR_CONFIRM"
+    assert cp.validated_prefix_end == len(before_shots)
+    assert cp.expected_total == len(before_shots)
+
+    after_shots = [
+        dict(row) for row in conn.execute(
+            "SELECT id, shot_no FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
+        ).fetchall()
+    ]
+    assert after_shots == before_shots
+
+    after_calls = conn.execute("SELECT COUNT(*) AS c FROM provider_calls").fetchone()["c"]
+    assert after_calls == before_calls

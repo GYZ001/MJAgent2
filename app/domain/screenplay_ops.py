@@ -392,7 +392,21 @@ def _published_screenplay_revalidation_eligibility(
             "published 剧本指向的 Artifact 不存在",
         )
     if (
-        artifact.get("type") != "screenplay_document"
+        artifact.get("type")
+        not in (
+            # "screenplay_document" is the retired heavy-pipeline shape
+            # (contract major < 6); "episode_prep_pack" is the lightweight
+            # replacement (contract 6.0.0+, docs/TRANSFORM_FREEZE_PLAN.md).
+            # Both are legitimate published_screenplay_artifact_id targets --
+            # see app.production.certificate.issue_completion_certificate's
+            # identical two-type set for the same "screenplay" stage. A
+            # prep_pack artifact parses fine below:
+            # screenplay_from_artifact_record dispatches on its own
+            # "prep_pack_version" marker (app.production.patch), and
+            # assert_screenplay_matches_validated_v7_source no-ops for it
+            # (no v7 shard/merged-IR lineage exists to check).
+            {"screenplay_document", "episode_prep_pack"}
+        )
         or artifact.get("scope_type") != "episode"
         or artifact.get("scope_id") != episode_id
     ):
