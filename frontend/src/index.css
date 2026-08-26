@@ -2776,6 +2776,71 @@ table.ledger tr.ledger-detail-row td {
   border-color: #e1e6ed;
   background: #fff;
 }
+.trace-media-gallery {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid #e1e6ed;
+  border-radius: 8px;
+  background: #fff;
+}
+.trace-media-gallery-title {
+  font-size: 11px;
+  color: #566574;
+  margin-bottom: 10px;
+}
+.trace-media-gallery-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.trace-media-thumb {
+  width: 104px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.trace-media-thumb-frame {
+  width: 104px;
+  height: 104px;
+  border: 1px solid #e1e6ed;
+  border-radius: 6px;
+  background: #f4f6f9;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+.trace-media-thumb-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.trace-media-thumb-frame a {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.trace-media-thumb-state {
+  font-size: 10px;
+  color: #8a94a3;
+  text-align: center;
+  padding: 0 6px;
+}
+.trace-media-thumb figcaption {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 10px;
+  line-height: 1.3;
+}
+.trace-media-thumb figcaption b {
+  font-weight: 600;
+  color: #2b3648;
+  word-break: break-all;
+}
+.trace-media-thumb figcaption span {
+  color: #8a94a3;
+}
 @media (max-width: 900px) {
   .trace-drawer {
     width: 100vw;
@@ -9397,6 +9462,24 @@ summary:focus-visible,
 :where(:root[data-theme="dark"]) .trace-json .json-viewer {
   border-color: var(--hairline);
   background: var(--card);
+}
+:where(:root[data-theme="dark"]) .trace-media-gallery {
+  border: 1px solid var(--hairline);
+  background: var(--card);
+}
+:where(:root[data-theme="dark"]) .trace-media-gallery-title {
+  color: var(--ink-soft);
+}
+:where(:root[data-theme="dark"]) .trace-media-thumb-frame {
+  border: 1px solid var(--hairline);
+  background: color-mix(in srgb, var(--card) 85%, black);
+}
+:where(:root[data-theme="dark"]) .trace-media-thumb figcaption b {
+  color: var(--ink);
+}
+:where(:root[data-theme="dark"]) .trace-media-thumb figcaption span,
+:where(:root[data-theme="dark"]) .trace-media-thumb-state {
+  color: var(--ink-faint);
 }
 @media (max-width: 640px) {
   :where(:root[data-theme="dark"]) .trace-head-count {

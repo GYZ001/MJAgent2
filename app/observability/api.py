@@ -6,14 +6,17 @@ object back to one project before returning data or dispatching an action.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 import time
 from collections import Counter
 from typing import Any
+from urllib.parse import unquote_to_bytes
 
 from fastapi import APIRouter, Body, HTTPException, Query
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 
 from app.db import get_conn
 from app.evidence import repository
@@ -1201,11 +1204,12 @@ def _trace_tree(
             "sequence": job.get("shot_no"),
             "name": job_name,
             "subtitle": job_subtitle,
-            "status": (
-                job.get("status")
-                if is_video_completion_job
-                else job.get("stage_status") or job.get("status")
-            ) or "unknown",
+            # jobs.status 是权威的任务终态（succeeded/failed/...）；jobs.stage_status
+            # 只是"pipeline_stage 刚变过"的新鲜度标记（set_pipeline_stage 每次换阶段
+            # 都无条件写 'active'，从不写成功/失败），拿它当节点状态优先级更高，会让
+            # 一个已成功的任务显示成不认识的 "active"（前端兜底成"状态待确认"），
+            # 和链路总状态的"成功"看着自相矛盾。两种任务都必须用 jobs.status。
+            "status": job.get("status") or "unknown",
             "started_at": job.get("stage_started_at") or job.get("created_at"),
             "finished_at": job.get("stage_updated_at") or job.get("updated_at"),
             "latency_ms": max(
@@ -1687,6 +1691,174 @@ def _video_completion_stage_detail(
     return None
 
 
+_DATA_URI_MIME_RE = re.compile(r"^data:([^;,]*)")
+
+
+def _video_create_version_id(item: dict[str, Any]) -> str | None:
+    """恢复这条 video_create 调用对应的 shot_versions.id。
+
+    ``operation_id`` 是 provider_calls 上的独立列，不受 ``meta`` 800 字符截断
+    影响；生成时它固定形如 ``video-create-<version_id>``（见
+    app.media_exec.run_job / app.seedance.create_video_task），先信它。
+    ``meta.version_id`` 只作兜底，因为 meta 超预算时会被压缩成
+    ``{"type":"list"/"dict",...}`` 之类的摘要，未必总能读到。
+    """
+    operation_id = str(item.get("operation_id") or "")
+    prefix = "video-create-"
+    if operation_id.startswith(prefix):
+        candidate = operation_id[len(prefix):]
+        if candidate:
+            return candidate
+    try:
+        meta = json.loads(item.get("meta") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        meta = {}
+    if isinstance(meta, dict):
+        candidate = str(meta.get("version_id") or "").strip()
+        if candidate:
+            return candidate
+    return None
+
+
+def _video_create_reference_labels(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """按 image_url 在 content[] 里出现的顺序，取回每张图绑定的角色/场景标注。
+
+    标注是 app.video_modes.build_seedance_image_inputs 在挑图时同步生成的，
+    随 shot_versions.image_inputs 落库（这一列没有 provider_calls.meta 那种
+    800 字符摘要上限，所以能放心存完整标注，不必也不该塞进 meta）。
+    """
+    version_id = _video_create_version_id(item)
+    if not version_id:
+        return []
+    row = get_conn().execute(
+        "SELECT image_inputs FROM shot_versions WHERE id=?", (version_id,),
+    ).fetchone()
+    if not row or not row["image_inputs"]:
+        return []
+    try:
+        version_meta = json.loads(row["image_inputs"])
+    except (TypeError, json.JSONDecodeError):
+        return []
+    labels = (
+        version_meta.get("_seedance_image_input_labels")
+        if isinstance(version_meta, dict)
+        else None
+    )
+    return [item for item in labels if isinstance(item, dict)] if isinstance(labels, list) else []
+
+
+def _video_create_degraded_scenes(item: dict[str, Any]) -> list[str]:
+    """本段声明过、最终没能挂上参考图的场景名（多场景转场镜头才可能非空）。
+
+    与 ``_video_create_reference_labels`` 同源：都是从 shot_versions.
+    image_inputs 里取，build_seedance_image_inputs 挑图时把两者一起写回。
+    这是"可见不拦截"的降级信号——不是缺陷，静默丢弃才是。
+    """
+    version_id = _video_create_version_id(item)
+    if not version_id:
+        return []
+    row = get_conn().execute(
+        "SELECT image_inputs FROM shot_versions WHERE id=?", (version_id,),
+    ).fetchone()
+    if not row or not row["image_inputs"]:
+        return []
+    try:
+        version_meta = json.loads(row["image_inputs"])
+    except (TypeError, json.JSONDecodeError):
+        return []
+    degraded = (
+        version_meta.get("_seedance_scene_reference_degraded")
+        if isinstance(version_meta, dict)
+        else None
+    )
+    return [str(name) for name in degraded if str(name).strip()] if isinstance(degraded, list) else []
+
+
+def _data_uri_bytes(value: str) -> tuple[bytes, str] | None:
+    if not value.startswith("data:"):
+        return None
+    header, _, payload = value.partition(",")
+    if not payload:
+        return None
+    mime = "application/octet-stream"
+    is_base64 = False
+    for segment in header[len("data:"):].split(";"):
+        if segment == "base64":
+            is_base64 = True
+        elif segment:
+            mime = segment
+    try:
+        raw = base64.b64decode(payload) if is_base64 else unquote_to_bytes(payload)
+    except (binascii.Error, ValueError):
+        return None
+    return raw, mime
+
+
+def _compact_media_call_input(item: dict[str, Any], project_id: str) -> Any:
+    """把 video_create 请求里内嵌的 base64 图片换成轻量占位 + 可点开的原图链接。
+
+    request_json.content[] 里每张参考图都是 0.3~1.5MB 的 ``data:`` base64
+    URI；原样吐给前端 JSON 树会尝试渲染几 MB 文本，直接把页面卡死（这条链路
+    本来就是因为"看不清图片传了什么"被投诉的，不能用"卡死页面"去换"能看见"）。
+    这里只裁剪 image_url/video_url 里的 data: 负载本身，文字提示词
+    （content[0] 及其余非媒体字段）原样保留、可展开查看全文；每张图片换成
+    一个小对象：角色（reference_image/first_frame/...）、大致字节数、MIME、
+    以及从 shot_versions.image_inputs 里取回的身份标注（角色"孟浩"/场景名/
+    衔接帧），外加一个可以按需拉取这一张原图字节的 view_url。
+    """
+    raw = item.get("request_json")
+    if not raw:
+        return None
+    try:
+        request_obj = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return _trace_json_value(raw)
+    if not isinstance(request_obj, dict) or not isinstance(request_obj.get("content"), list):
+        return request_obj
+    labels = (
+        _video_create_reference_labels(item)
+        if item.get("kind") == "video_create"
+        else []
+    )
+    label_cursor = 0
+    compact_content: list[Any] = []
+    for index, part in enumerate(request_obj["content"]):
+        part_type = part.get("type") if isinstance(part, dict) else None
+        if part_type not in {"image_url", "video_url"}:
+            compact_content.append(part)  # 文本提示词等非媒体字段，原样保留
+            continue
+        url_field = "image_url" if part_type == "image_url" else "video_url"
+        url = str((part.get(url_field) or {}).get("url") or "")
+        label = None
+        if part_type == "image_url":
+            if label_cursor < len(labels):
+                label = labels[label_cursor]
+            label_cursor += 1
+        if not url.startswith("data:"):
+            compact_content.append(part)  # 已是普通 URL，体积小，原样展示
+            continue
+        mime_match = _DATA_URI_MIME_RE.match(url)
+        compact_content.append({
+            "type": part_type,
+            "role": part.get("role"),
+            "payload_omitted": True,
+            "approx_base64_bytes": len(url),
+            "mime_type": mime_match.group(1) if mime_match and mime_match.group(1) else None,
+            "identity_label": (label or {}).get("label"),
+            "identity_type": (label or {}).get("type"),
+            "identity_entity_name": (label or {}).get("entity_name"),
+            "view_url": (
+                f"/projects/{project_id}/observability/calls/{item.get('id')}/content/{index}"
+            ),
+        })
+    result = {**request_obj, "content": compact_content}
+    if item.get("kind") == "video_create":
+        degraded_scenes = _video_create_degraded_scenes(item)
+        if degraded_scenes:
+            result["degraded_scenes"] = degraded_scenes
+    return result
+
+
 def _trace_node_detail(
     project_id: str,
     object_type: str,
@@ -1929,7 +2101,11 @@ def _trace_node_detail(
         item = _call_row(int(raw_id))
         if not item:
             raise HTTPException(404, "调用节点不存在")
-        request_value = _trace_json_value(item.get("request_json"))
+        request_value = (
+            _compact_media_call_input(item, project_id)
+            if item.get("kind") in {"video_create"}
+            else _trace_json_value(item.get("request_json"))
+        )
         response_value = _trace_json_value(item.get("response_json"))
         meta_value = _trace_json_value(item.get("meta"))
         if node.get("node_role") == "program_processing" and request_value is None:
@@ -2088,6 +2264,35 @@ def scoped_call_download(project_id: str, call_id: int):
         ensure_ascii=False,
         indent=2,
     )
+
+
+@router.get("/projects/{project_id}/observability/calls/{call_id}/content/{index}")
+def scoped_call_content_asset(project_id: str, call_id: int, index: int):
+    """按需解码并回传 request_json.content[index] 里内嵌的一张原图/视频帧。
+
+    链路详情不会把 base64 塞进节点 JSON（见 _compact_media_call_input），点开
+    某张参考图时才走这个接口现场解码，返回真实字节而不是文本。
+    """
+    _assert_scope(project_id, _call_project(call_id), "调用记录")
+    row = _call_row(call_id)
+    if not row:
+        raise HTTPException(404, "调用记录不存在")
+    try:
+        request_obj = json.loads(row.get("request_json") or "null")
+    except (TypeError, json.JSONDecodeError):
+        request_obj = None
+    content = request_obj.get("content") if isinstance(request_obj, dict) else None
+    if not isinstance(content, list) or not (0 <= index < len(content)):
+        raise HTTPException(404, "该调用记录没有这一项内容")
+    part = content[index]
+    part_type = part.get("type") if isinstance(part, dict) else None
+    url_field = {"image_url": "image_url", "video_url": "video_url"}.get(str(part_type))
+    url = str(((part or {}).get(url_field) or {}).get("url") or "") if url_field else ""
+    parsed = _data_uri_bytes(url)
+    if parsed is None:
+        raise HTTPException(404, "这一项内容不是内嵌的媒体数据，或已不是 data: 格式")
+    raw_bytes, mime = parsed
+    return Response(content=raw_bytes, media_type=mime)
 
 
 @router.get("/projects/{project_id}/observability/traces/{object_type}/{object_id}")

@@ -76,6 +76,10 @@ const STATUS_LABELS: Record<string, string> = {
   succeeded: "成功",
   failed: "失败",
   cancelled: "已取消",
+  waiting_human: "等待人工",
+  waiting_provider: "等待供应商",
+  waiting_retry: "等待重试",
+  paused_budget: "预算暂停",
 };
 
 const KIND_LABELS: Record<TraceNode["kind"], string> = {
@@ -177,6 +181,115 @@ function formatDuration(value?: number | null) {
   if (milliseconds < 1000) return `${Math.round(milliseconds)}ms`;
   if (milliseconds < 60_000) return `${(milliseconds / 1000).toFixed(1)} 秒`;
   return `${Math.floor(milliseconds / 60_000)} 分 ${Math.round((milliseconds % 60_000) / 1000)} 秒`;
+}
+
+interface TraceMediaContentItem {
+  type?: string;
+  role?: string | null;
+  payload_omitted?: boolean;
+  approx_base64_bytes?: number;
+  mime_type?: string | null;
+  identity_label?: string | null;
+  identity_type?: string | null;
+  identity_entity_name?: string | null;
+  view_url?: string;
+}
+
+const MEDIA_ROLE_LABELS: Record<string, string> = {
+  reference_image: "参考图",
+  first_frame: "首帧",
+  last_frame: "尾帧",
+  reference_video: "参考视频",
+};
+
+function formatBytes(value?: number) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB（base64 文本，原图更小）`;
+}
+
+/** 惰性拉取一张参考图/衔接帧：链路详情不把 base64 塞进节点 JSON，点开这张缩略图
+ * 才现场向 /calls/{id}/content/{index} 要一次真实字节，避免几十张图一次性把页面拖垮。 */
+function ReferenceMediaThumb({ item }: { item: TraceMediaContentItem }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [state, setState] = useState<"idle" | "loading" | "error">("idle");
+  const viewUrl = item.view_url;
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    if (!viewUrl) return undefined;
+    setState("loading");
+    setSrc(null);
+    void (async () => {
+      try {
+        const blob = await api.download(viewUrl);
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setSrc(objectUrl);
+        setState("idle");
+      } catch {
+        if (!cancelled) setState("error");
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [viewUrl]);
+
+  const roleLabel = (item.role && MEDIA_ROLE_LABELS[item.role]) || item.role || "未标注角色";
+  const caption = item.identity_label || roleLabel;
+  const isVideo = item.type === "video_url" || (item.mime_type || "").startsWith("video/");
+
+  return (
+    <figure className="trace-media-thumb">
+      <div className="trace-media-thumb-frame">
+        {state === "loading" && <span className="trace-media-thumb-state">加载中…</span>}
+        {state === "error" && <span className="trace-media-thumb-state">加载失败</span>}
+        {state === "idle" && src && !isVideo && (
+          <a href={src} target="_blank" rel="noreferrer" title="点击查看原图">
+            <img src={src} alt={caption} />
+          </a>
+        )}
+        {state === "idle" && src && isVideo && (
+          <a href={src} target="_blank" rel="noreferrer" title="点击查看原始片段">
+            视频片段 · 点击查看
+          </a>
+        )}
+      </div>
+      <figcaption>
+        <b>{caption}</b>
+        <span>
+          {roleLabel} · {formatBytes(item.approx_base64_bytes)}
+        </span>
+      </figcaption>
+    </figure>
+  );
+}
+
+/** 只有当输入里真有"被省略的媒体负载"时才渲染；纯文本 prompt 调用不会多出这块。 */
+function TraceMediaGallery({ content }: { content: unknown }) {
+  if (!Array.isArray(content)) return null;
+  const mediaItems = content.filter(
+    (part): part is TraceMediaContentItem =>
+      Boolean(part && typeof part === "object" && (part as TraceMediaContentItem).payload_omitted
+        && (part as TraceMediaContentItem).view_url),
+  );
+  if (mediaItems.length === 0) return null;
+  return (
+    <div className="trace-media-gallery" aria-label="参考图与衔接帧">
+      <div className="trace-media-gallery-title">
+        传给模型的图片/视频 · 共 {mediaItems.length} 项 —— base64 原始数据未展示在下方 JSON 里，点击缩略图查看原图
+      </div>
+      <div className="trace-media-gallery-grid">
+        {mediaItems.map((item, index) => (
+          <ReferenceMediaThumb key={`${item.view_url}:${index}`} item={item} />
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export function traceRoots(nodes: TraceNode[]) {
@@ -489,6 +602,13 @@ export default function TraceDrawer({
   const selectedNode = trace?.nodes.find((node) => node.id === selectedId);
   const detailValue =
     tab === "input" ? detail?.input : tab === "output" ? detail?.output : detail?.metadata;
+  const mediaContentItems = useMemo(() => {
+    const raw = (detail?.input as { content?: unknown } | undefined)?.content;
+    return Array.isArray(raw) ? raw : [];
+  }, [detail]);
+  const hasOmittedMedia = mediaContentItems.some(
+    (part) => Boolean(part && typeof part === "object" && (part as { payload_omitted?: boolean }).payload_omitted),
+  );
   const toggleNode = (nodeId: string) => {
     setExpandedIds((current) => {
       const next = new Set(current);
@@ -665,7 +785,9 @@ export default function TraceDrawer({
                   ))}
                 </nav>
                 <div className="trace-raw-notice" role="note">
-                  当前展示项目观测账本中的完整原始数据，未做文字替换、星号遮罩或字段省略。
+                  {tab === "input" && hasOmittedMedia
+                    ? "文字字段（提示词等）为完整原始数据，未做任何替换或省略；下方图片/视频的 base64 原始负载改为按需加载的缩略图，不在 JSON 树里重复展示。"
+                    : "当前展示项目观测账本中的完整原始数据，未做文字替换、星号遮罩或字段省略。"}
                 </div>
                 {detailLoading && (
                   <div className="monitor-loading" role="status">
@@ -682,6 +804,7 @@ export default function TraceDrawer({
                 )}
                 {detail && !detailLoading && (
                   <div className="trace-json">
+                    {tab === "input" && <TraceMediaGallery content={mediaContentItems} />}
                     <JsonViewer
                       key={`${selectedId}:${tab}`}
                       data={detailValue}

@@ -3545,6 +3545,12 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
     job = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
     if not job or job["status"] != "running" or job["lease_owner"] != owner:
         return
+    # 这个 worker task 会在同一个 asyncio Task/Context 里连续 await 很多个 job；
+    # 不重新绑定的话，provider_calls（尤其 video_create/video_poll）会带着上一个
+    # job 的 trace，或者干脆一直是启动时的空 trace，链路树永远关联不到它们。
+    # 详见 set_worker_trace 的说明：这里必须在本 job 的第一次供应商调用之前、
+    # 每个 job 都调用一次，即使 run_id 为空也要显式清空上一个 job 留下的痕迹。
+    set_worker_trace(job["run_id"], job["step_run_id"])
     if job["kind"] != "video":
         # 旧版关键帧 job 可能在升级前已持久化。它们不再恢复或执行，避免继续消耗图片额度，
         # 同时清除造成前端长期显示“生成中”的遗留状态。

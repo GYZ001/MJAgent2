@@ -42,6 +42,7 @@ from app.evidence import media as media_evidence
 from app.media_urls import build_media_url
 from app.orchestration import media_scheduler
 from app.orchestration.media_runs import ensure_media_trace, mark_media_job_state
+from app.observability.tracing import set_worker_trace
 
 __all__ = [
     "build_media_url",
