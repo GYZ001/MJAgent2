@@ -38,6 +38,16 @@ const sourceRangeText = (chapters: number[]) => chapters.length <= 1
 
 const stableKey = (prefix: string) => `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2)}`
 
+/**
+ * app/domain/screenplay_ops.py 的一句话状态（Episode.screenplay_state.message）
+ * 还没跟上映射台改名，仍在吐"剧本已交付"这类措辞；那个模块归另一个并发 agent，
+ * 边界不允许这里改 app/。这个业务域里"剧本"只用来指这一个交付物（映射台产出的
+ * 映射包），没有其它含义会被误伤，全词替换是安全的兜底，不是猜内容改写。
+ */
+export function prepPackStatusMessage(message: string): string {
+  return message.replaceAll('剧本', '映射包')
+}
+
 export function screenplayResumeActionLabel(
   production: ScreenplayProduction | null | undefined,
 ): string {
@@ -77,11 +87,39 @@ export function screenplayGeneratePayload(
   return payload
 }
 
-/** 旧产物（转型前的重型剧本）没有这个字段；出现即说明后端还没换成准备包，前端绝不按旧形状渲染。 */
+/** 旧产物（转型前的重型剧本）没有这个字段；出现即说明后端还没换成映射包，前端绝不按旧形状渲染。 */
 export function isPrepPack(value: unknown): value is EpisodePrepPack {
   if (!value || typeof value !== 'object') return false
   const version = (value as { prep_pack_version?: unknown }).prep_pack_version
   return typeof version === 'string' && version.length > 0
+}
+
+/** 主版本号；解析不出来时按 0 处理（比任何真实版本都旧，稳妥地被判定为旧格式）。 */
+export function prepPackMajorVersion(version: string): number {
+  const match = /^(\d+)\./.exec(version.trim())
+  return match ? Number(match[1]) : 0
+}
+
+/**
+ * 2.0.0 架构收窄之前的映射包（旧「剧本台」产出，如 1.11.x）不含
+ * segment_indexes / appellation_map / props——不是测量出来的 0，是这些字段在
+ * 这份数据里压根不存在。这里用主版本号 < 2 一刀切判定，界面必须据此显式说明，
+ * 不许把「字段缺失」渲染成「结果是 0 / 未发现」（同一个维度的东西不能冒充
+ * 另一个维度）。
+ */
+export function isLegacyPrepPackFormat(pack: Pick<EpisodePrepPack, 'prep_pack_version'>): boolean {
+  return prepPackMajorVersion(pack.prep_pack_version) < 2
+}
+
+/**
+ * 资源覆盖范围文案：segment_indexes 是 2.0.0+ 字段，undefined 说明这份映射包
+ * 是旧格式、这个维度根本没被测量过；长度为 0 的数组才是「测量后确实是 0 段」。
+ * 两种情况必须区分展示，否则用户会把「没测过」误读成「测过是零」。
+ */
+export function assetCoverageText(indexes: number[] | undefined): string {
+  if (indexes === undefined) return '旧版数据，未记录原文覆盖'
+  const rangeText = compressSegmentIndexes(indexes)
+  return rangeText ? `覆盖 ${indexes.length} 段原文 · 第 ${rangeText} 段` : `覆盖 ${indexes.length} 段原文`
 }
 
 // compressSegmentIndexes 已提取到 lib/segmentIndexes.ts（BoardPage.tsx 需要同一份
@@ -243,7 +281,7 @@ export function resolveStages(production: {
 /** 紧凑步进器：小号数字圆点 + 短标签，单行排布可换行；不管后端发来几步都不占大面积。 */
 export function PrepStepper({ stages }: { stages: RawStage[] }) {
   return (
-    <ol className="prep-stepper" aria-label="准备包制作阶段">
+    <ol className="prep-stepper" aria-label="映射包制作阶段">
       {stages.map((stage, index) => {
         const normalized = normalizeStage(stage, index)
         return (
@@ -305,7 +343,7 @@ export default function ScriptPage() {
   const stages = resolveStages(ep?.screenplay_production)
   const normalizedStages = useMemo(() => stages.map(normalizeStage), [stages])
   const activeStage = normalizedStages.find(item => item.tone === 'active')
-  const generatingHint = activeStage ? `正在${activeStage.text}…` : '正在生成准备包…'
+  const generatingHint = activeStage ? `正在${activeStage.text}…` : '正在生成映射包…'
 
   const run = async (fn: () => Promise<any>, done?: string) => {
     setBusy(true)
@@ -333,7 +371,7 @@ export default function ScriptPage() {
     try {
       const data = await api.post(`/episodes/${ep.id}/screenplay/preflight`, {})
       setPreview({
-        title: '首次生成准备包预检',
+        title: '首次生成映射包预检',
         data,
         idempotencyKey: stableKey(`screenplay:${ep.id}`),
       })
@@ -349,7 +387,7 @@ export default function ScriptPage() {
     await run(() => api.post(
       `/episodes/${ep.id}/screenplay`,
       screenplayGeneratePayload(current.idempotencyKey, current.data?.blueprint_budget),
-    ), '准备包生成任务已受理').catch(() => undefined)
+    ), '映射包生成任务已受理').catch(() => undefined)
   }
 
   const resumeRepair = async () => {
@@ -373,7 +411,7 @@ export default function ScriptPage() {
     if (!ep) return
     try {
       const result = await run(() => api.del(`/episodes/${ep.id}/screenplay`))
-      if (result) toast('当前准备包及下游已删除')
+      if (result) toast('当前映射包及下游已删除')
     } catch { /* run 已呈现结果 */ }
   }
 
@@ -398,20 +436,22 @@ export default function ScriptPage() {
     message: '状态同步中',
     recommended_action: 'refresh' as const,
   }
-  // 直接透传后端已压好的一句话状态；后端已区分"准备包已交付｜分镜生成中/停在第 N 镜/待人工确认"等细节。
-  const screenplayStateMessage = state.message
+  // 后端这条一句话状态（app/domain/screenplay_ops.py）还没跟上映射台改名，仍在吐
+  // "剧本已交付"这类措辞——那个模块归另一个并发 agent，此处不越界改 app/。用词替换
+  // 兜底：这个业务域里"剧本"只指这一个交付物，全词替换不会误伤其余语义。
+  const screenplayStateMessage = prepPackStatusMessage(state.message)
   const screenplayGenerateDisabledReason = busy ? '正在处理上一项操作' : ''
 
   const primaryAction = () => {
     switch (state.recommended_action) {
       case 'generate_screenplay':
         return <button className="btn primary" disabled={Boolean(screenplayGenerateDisabledReason)}
-          aria-label={screenplayGenerateDisabledReason ? `首次生成准备包，暂不可用：${screenplayGenerateDisabledReason}` : '首次生成准备包'}
-          title={screenplayGenerateDisabledReason || '生成前将展示输入范围'} onClick={openScreenplayPreview}>首次生成准备包</button>
+          aria-label={screenplayGenerateDisabledReason ? `首次生成映射包，暂不可用：${screenplayGenerateDisabledReason}` : '首次生成映射包'}
+          title={screenplayGenerateDisabledReason || '生成前将展示输入范围'} onClick={openScreenplayPreview}>首次生成映射包</button>
       case 'stop_screenplay':
         return <button className="btn ghost danger" disabled={busy}
-          aria-label={busy ? '停止准备包任务，暂不可用：正在处理上一项操作' : '停止准备包任务'}
-          title={busy ? '正在处理上一项操作' : '停止前会说明费用和保留范围'} onClick={() => setStopConfirmOpen(true)}>停止准备包任务</button>
+          aria-label={busy ? '停止映射包任务，暂不可用：正在处理上一项操作' : '停止映射包任务'}
+          title={busy ? '正在处理上一项操作' : '停止前会说明费用和保留范围'} onClick={() => setStopConfirmOpen(true)}>停止映射包任务</button>
       case 'resume_screenplay':
         return <ScreenplayResumeButton
           production={ep.screenplay_production}
@@ -441,7 +481,7 @@ export default function ScriptPage() {
     <>
       <header className="desk-head">
         <EpisodeCrumb label="映射台" view="script" episodeNo={ep.episode_no} />
-        <h1>映射台 <span className="sub">《{ep.title}》 · 先发现本集人物/场景并映射到世界书素材，再进入镜头设计</span></h1>
+        <h1>映射台 <span className="sub">《{ep.title}》 · 先发现本集人物/场景并映射到世界书素材，再交给分镜台生成视频提示词</span></h1>
         <hr className="rule" />
       </header>
 
@@ -453,9 +493,6 @@ export default function ScriptPage() {
           </div>
           <div className="screenplay-primary-actions">
             {primaryAction()}
-            {ep.screenplay_status === 'ready' && state.recommended_action !== 'view_storyboard' && (
-              <button className="btn ghost" type="button" onClick={() => go('board', projectId, ep.id)}>查看分镜台 →</button>
-            )}
           </div>
         </div>
 
@@ -484,13 +521,13 @@ export default function ScriptPage() {
         <div className="screenplay-secondary-row">
           {!screenplayTaskActive && (ep.screenplay || packRaw || canResumeFlow) && (
             <button className="btn ghost danger" disabled={busy} onClick={deleteCurrentScreenplay}>
-              {(ep.screenplay || packRaw) ? '删除当前准备包' : '删除失败准备包'}
+              {(ep.screenplay || packRaw) ? '删除当前映射包' : '删除失败映射包'}
             </button>
           )}
           <span className="screenplay-row-spacer" />
-          {ep.screenplay_evidence && <EvidenceDrawer evidence={ep.screenplay_evidence} label="准备包证据" />}
+          {ep.screenplay_evidence && <EvidenceDrawer evidence={ep.screenplay_evidence} label="映射包证据" />}
           <ServerTaskTimer
-            label="准备包"
+            label="映射包"
             startedAt={ep.screenplay_production?.task_started_at}
             finishedAt={ep.screenplay_production?.task_finished_at}
             running={screenplayTaskActive}
@@ -506,7 +543,7 @@ export default function ScriptPage() {
             <div className="kv"><b>原文来源范围</b>{isPrepPack(packRaw)
               ? `${sourceRangeText(packRaw.episode_scope?.chapter_indexes ?? ep.source_chapters)} · 原文段 ${packRaw.episode_scope?.source_segment_count ?? '—'} 段`
               : sourceRangeText(ep.source_chapters)}</div>
-            <div className="kv"><b>准备包状态</b>{ep.screenplay_status ?? 'unknown'}</div>
+            <div className="kv"><b>映射包状态</b>{ep.screenplay_status ?? 'unknown'}</div>
             {ep.screenplay_production && (
               <div className="kv"><b>当前阶段</b>
                 {ep.screenplay_production.phase_label ?? ep.screenplay_production.phase} ·
@@ -518,13 +555,13 @@ export default function ScriptPage() {
         )}
         {screenplayNotice && (
           <OperationError
-            title={screenplayNotice.severity === 'error' ? '准备包流程未完成' : '准备包流程等待继续'}
-            message={screenplayNotice.message}
+            title={screenplayNotice.severity === 'error' ? '映射包流程未完成' : '映射包流程等待继续'}
+            message={prepPackStatusMessage(screenplayNotice.message)}
             guidance={screenplayNotice.severity === 'error'
-              ? '已发布准备包和工作草稿会保留。请按顶部主操作重新生成。'
+              ? '已发布映射包和工作草稿会保留。请按顶部主操作重新生成。'
               : '这不是失败结果；工作副本和安全恢复点已保留，可按顶部主操作继续流程。'}
             variant={screenplayNotice.severity}
-            detailLabel={screenplayNotice.severity === 'error' ? '查看准备包错误详情' : '查看准备包处理详情'}
+            detailLabel={screenplayNotice.severity === 'error' ? '查看映射包错误详情' : '查看映射包处理详情'}
           />
         )}
       </section>
@@ -539,11 +576,11 @@ export default function ScriptPage() {
             <div className="big">旧</div>
             旧版产物，转型后需重新生成
             <br />
-            <small>本集内容仍是转型前的格式，界面无法解析展示；请使用顶部主操作重新生成准备包。</small>
+            <small>本集内容仍是转型前的格式，界面无法解析展示；请使用顶部主操作重新生成映射包。</small>
           </div>
         </section>
       ) : screenplayTaskActive ? (
-        // 生成中还没有可展示的准备包内容：不摆大面积空框，主视觉就是上面的步进器 + 计时 + 这一句。
+        // 生成中还没有可展示的映射包内容：不摆大面积空框，主视觉就是上面的步进器 + 计时 + 这一句。
         <section className="card prep-generating-hint" role="status">
           <p>{generatingHint}</p>
         </section>
@@ -553,14 +590,14 @@ export default function ScriptPage() {
 
       {stopConfirmOpen && (
         <DecisionDialog
-          title="停止本集准备包任务？"
+          title="停止本集映射包任务？"
           summary={`第 ${ep.episode_no} 集《${ep.title}》仍在生成`}
-          message="系统会停止当前准备包生成或局部修复；已写入的工作副本会保留，尚未发布的内容不会进入分镜。"
+          message="系统会停止当前映射包生成或局部修复；已写入的工作副本会保留，尚未发布的内容不会进入分镜。"
           details={[
             '停止可能需要等待当前模型请求返回，界面不会提前宣称已终止',
             '已经发生的模型调用费用不会退回；停止后可从工作副本恢复或重新发起',
           ]}
-          confirmLabel="确认停止准备包任务"
+          confirmLabel="确认停止映射包任务"
           cancelLabel="继续生成"
           danger
           onClose={() => setStopConfirmOpen(false)}
@@ -595,7 +632,7 @@ export default function ScriptPage() {
               <button className="btn primary" onClick={executePreview}>
                 {preview.data.blueprint_budget?.requires_fresh_retry_grant
                   ? '授权并重试（可能重新计费）'
-                  : '启动首版准备包生成'}
+                  : '启动首版映射包生成'}
               </button>
             </div>
           </section>
@@ -621,40 +658,47 @@ export function PrepPackView({
   sourceFallback: string
 }) {
   const gate = useMemo(() => coverageGateSummary(pack.coverage_ledger), [pack.coverage_ledger])
+  const legacy = isLegacyPrepPackFormat(pack)
   const characters = pack.asset_manifest?.characters ?? []
   const scenes = pack.asset_manifest?.scenes ?? []
   const props = pack.asset_manifest?.props ?? []
   const functionalExtras = pack.asset_manifest?.functional_extras ?? []
-  // 2.0.0：映射台不再产出事件链，左栏改为称谓映射表——把 asset_manifest.
-  // characters[] 已有的别名消歧结论按 (原文称谓, 原文段号) 逐条摊平展示，见
-  // app/production/prep_pack.py 的 _prep_pack_build_appellation_map。按
-  // segment_index 排序，跟原文阅读顺序一致。
+  const hasAnyAsset = Boolean(characters.length || scenes.length || props.length || functionalExtras.length)
+  // 称谓总表是角色的附属信息，不是并列的主体内容——次要、可折叠，且没有条目
+  // 时整块不渲染（旧产物没有 appellation_map 字段，落到同一个空数组分支，
+  // 不会把"字段缺失"误渲染成"核对后确实没有"）。按 segment_index 排序，跟原文
+  // 阅读顺序一致，见 app/production/prep_pack.py 的 _prep_pack_build_appellation_map。
   const appellationMap = useMemo(
     () => [...(pack.appellation_map ?? [])].sort(
       (a, b) => (a.segment_index ?? 0) - (b.segment_index ?? 0),
     ),
     [pack.appellation_map],
   )
+  const canLocateAppellation = appellationMap.length > 0
   const scopeText = pack.episode_scope?.chapter_indexes?.length
     ? sourceRangeText(pack.episode_scope.chapter_indexes)
     : sourceFallback
   const coveredSegments = gate.totalSegments
     || gate.deliveredCount + gate.mergedCount + gate.retainedCount + gate.duplicateCount + gate.paratextCount
 
-  // 出场角色点名联动左侧称谓映射表：selectedIdentityId 记录当前被点选的角色
-  // identity_id；再点同一条目会清空回到 null，即"取消高亮与选中态"。场景/
-  // 群演/道具没有 appellation_map 条目可联动，不参与这套选中态（渲染为纯
-  // 文本，不是可点按钮）。
+  // 资源卡点名联动称谓总表：selectedIdentityId 记录当前被点选的角色 identity_id；
+  // 再点同一条目会清空回到 null。总表本身默认折叠，点名时一并展开
+  // （appellationOpen），否则联动定位会滚到一个看不见的容器里。
   const [selectedIdentityId, setSelectedIdentityId] = useState<string | null>(null)
+  const [appellationOpen, setAppellationOpen] = useState(false)
   const appellationNodeRefs = useRef(new Map<string, HTMLLIElement>())
 
   const toggleCharacterSelection = (identityId: string | null | undefined) => {
     if (!identityId) return
-    setSelectedIdentityId(current => (current === identityId ? null : identityId))
+    setSelectedIdentityId(current => {
+      const next = current === identityId ? null : identityId
+      if (next) setAppellationOpen(true)
+      return next
+    })
   }
 
-  // 选中角色变化时，把左侧称谓映射表滚动定位到命中的第一行（appellationMap 已
-  // 按 segment_index 升序排列，第一个命中即最靠前的原文位置）。测试环境
+  // 选中角色变化时，把称谓总表滚动定位到命中的第一行（appellationMap 已按
+  // segment_index 升序排列，第一个命中即最靠前的原文位置）。测试环境
   // （react-test-renderer，无真实 DOM）里 ref 拿不到宿主节点、scrollIntoView
   // 也不存在，可选链短路即可，不崩。
   useEffect(() => {
@@ -690,176 +734,181 @@ export function PrepPackView({
         <p className="prep-gate-missing">缺失原文段索引：{gate.uncoveredLabels.join('、') || '未知'}</p>
       )}
 
-      {/* 主体两栏：左 2/3 称谓映射表，右 1/3 粘性侧栏（出场角色/群演/场景/道具） */}
-      <div className="prep-pack-layout">
-        <div className="prep-pack-main">
-          <section className="card">
-            <div className="card-heading-row"><h3>称谓映射<span className="hint">{appellationMap.length} 条 · 按原文段落顺序</span></h3></div>
-            {appellationMap.length ? (
-              <ol className="prep-timeline">
-                {appellationMap.map((entry, index) => {
-                  const key = appellationRowKey(entry, index)
-                  const isLinked = selectedIdentityId != null && entry.identity_id === selectedIdentityId
-                  return (
-                    <li
-                      key={key}
-                      className={`prep-timeline-item${isLinked ? ' event-linked' : ''}`}
-                      ref={node => {
-                        if (node) appellationNodeRefs.current.set(key, node)
-                        else appellationNodeRefs.current.delete(key)
-                      }}
-                    >
-                      <span className="prep-timeline-marker" aria-hidden="true">{entry.segment_index}</span>
-                      <div className="prep-timeline-details">
-                        <div className="prep-timeline-summary">
-                          <span className="prep-timeline-headline">「{entry.raw_mention}」→ {entry.canonical_appellation}</span>
-                        </div>
-                      </div>
-                    </li>
-                  )
-                })}
-              </ol>
-            ) : <p className="prep-empty-hint">本集未发现需要归一的模糊人物称谓</p>}
-          </section>
-        </div>
+      {/* 真 bug 修复：旧版（转型前）映射包没有 segment_indexes/appellation_map/props
+          字段，字段缺失绝不能渲染成"测量后是 0"或"核对后未发现"——这里换成显式
+          说明，而不是任由下面各处的空数组分支默默吞掉这个区别。 */}
+      {legacy && (
+        <p className="warning-banner" role="status">
+          此集使用转型前的旧版映射包（v{pack.prep_pack_version}）：不包含素材原文覆盖范围、称谓归一与道具清单。
+          当前界面按 2.0.0 契约呈现，以下资源卡不显示覆盖段号；如需完整信息，请用顶部主操作重新生成映射包。
+        </p>
+      )}
 
-        <aside className="prep-pack-sidebar">
-          <section className="card prep-scope-card">
-            <h3 className="prep-sidebar-heading">本集范围</h3>
-            <p>{scopeText}</p>
-            <p className="prep-sidebar-meta">原文段 {pack.episode_scope?.source_segment_count ?? '—'} 段</p>
-          </section>
+      <p className="prep-scope-line">
+        {scopeText}
+        {pack.episode_scope?.source_segment_count != null ? ` · 原文段 ${pack.episode_scope.source_segment_count} 段` : ''}
+      </p>
 
-          <section className="card">
-            <h3 className="prep-sidebar-heading">出场角色 · {characters.length}</h3>
-            <div className="prep-roster">
-              {characters.map(character => {
-                const imageUrl = findPortraitImage(bible, character.portrait_id)
-                const name = character.display_name || character.identity_id || '未命名角色'
-                // 本集称谓（display_appellation）单独标出；旧的 aliases 小签保留，但
-                // 去掉与本集称谓重复的那一条，避免同一句话在同一行出现两遍。
-                const appellation = characterAppellationTag(character, name)
-                const aliases = (character.aliases?.filter(alias => alias.trim()) ?? [])
-                  .filter(alias => alias !== appellation)
-                const provenanceHint = provenanceMethodHint(character.provenance?.method)
-                const isSelected = selectedIdentityId != null && selectedIdentityId === character.identity_id
-                const rangeText = compressSegmentIndexes(character.segment_indexes ?? [])
-                return (
-                  <div className="prep-roster-item" key={character.identity_id || character.display_name}>
-                    {imageUrl
-                      ? <img className="prep-roster-thumb" src={imageUrl} alt={name} loading="lazy" decoding="async" />
-                      : <div className="prep-roster-thumb-empty" aria-hidden="true">无图</div>}
-                    <div className="prep-roster-body">
-                      <span className="prep-roster-name">
+      {/* 资源清单是这一页的交付物主体，不是塞进窄侧栏的附属——人物/场景/道具
+          各自独立成节，用得开的宽度展示缩略图、正名、称谓变体与覆盖范围；
+          某一类没有数据就整节不渲染，不留空容器。 */}
+      {!!characters.length && (
+        <section className="card">
+          <h3 className="prep-section-heading">出场人物 · {characters.length}</h3>
+          <div className="prep-roster">
+            {characters.map(character => {
+              const imageUrl = findPortraitImage(bible, character.portrait_id)
+              const name = character.display_name || character.identity_id || '未命名角色'
+              // 本集称谓（display_appellation）单独标出；旧的 aliases 小签保留，但
+              // 去掉与本集称谓重复的那一条，避免同一句话在同一行出现两遍。
+              const appellation = characterAppellationTag(character, name)
+              const aliases = (character.aliases?.filter(alias => alias.trim()) ?? [])
+                .filter(alias => alias !== appellation)
+              const provenanceHint = provenanceMethodHint(character.provenance?.method)
+              const isSelected = selectedIdentityId != null && selectedIdentityId === character.identity_id
+              return (
+                <div className="prep-roster-item" key={character.identity_id || character.display_name}>
+                  {imageUrl
+                    ? <img className="prep-roster-thumb" src={imageUrl} alt={name} loading="lazy" decoding="async" />
+                    : <div className="prep-roster-thumb-empty" aria-hidden="true">无图</div>}
+                  <div className="prep-roster-body">
+                    <span className="prep-roster-name">
+                      {canLocateAppellation ? (
                         <button
                           type="button"
                           className={`prep-roster-name-text prep-roster-name-btn${isSelected ? ' selected' : ''}`}
                           aria-pressed={isSelected}
-                          title="点击在左侧称谓映射表中定位该角色对应的原文称谓"
+                          title="点击在称谓总表中定位该角色对应的原文称谓"
                           onClick={() => toggleCharacterSelection(character.identity_id)}
                         >
                           {name}
                         </button>
-                        {appellation && (
-                          <span className="prep-roster-alias" title="本集原文称谓；谱内正名见前">本集：{appellation}</span>
-                        )}
-                        {!!aliases.length && (
-                          <span className="prep-roster-alias" title="本集称谓">{aliases.join('、')}</span>
-                        )}
-                      </span>
-                      <span className="prep-roster-meta" title={provenanceHint ?? undefined}>
-                        覆盖 {character.segment_indexes?.length ?? 0} 段原文{rangeText ? ` · 第 ${rangeText} 段` : ''}
-                      </span>
-                    </div>
+                      ) : <span className="prep-roster-name-text">{name}</span>}
+                      {appellation && (
+                        <span className="prep-roster-alias" title="本集原文称谓；谱内正名见前">本集：{appellation}</span>
+                      )}
+                      {!!aliases.length && (
+                        <span className="prep-roster-alias" title="本集称谓">{aliases.join('、')}</span>
+                      )}
+                    </span>
+                    <span className="prep-roster-meta" title={provenanceHint ?? undefined}>
+                      {assetCoverageText(character.segment_indexes)}
+                    </span>
                   </div>
-                )
-              })}
-              {!characters.length && <p className="prep-empty-hint">未列出出场角色</p>}
-            </div>
-          </section>
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      )}
 
-          {!!functionalExtras.length && (
-            <section className="card">
-              <h3 className="prep-sidebar-heading">群演 / 一次性人物 · {functionalExtras.length}</h3>
-              <div className="prep-roster">
-                {functionalExtras.map((extra, index) => {
-                  const rangeText = compressSegmentIndexes(extra.segment_indexes ?? [])
-                  return (
-                    <div className="prep-roster-item" key={`extra:${extra.label || 'extra'}-${index}`}>
-                      {/* 群演没有定妆照是设计使然（不进人物谱身份体系），不是数据缺失，
-                          用统一占位图标而不是"无图"——那个措辞是给真正缺图的具名角色用的。 */}
-                      <div className="prep-roster-icon" aria-hidden="true">👤</div>
-                      <div className="prep-roster-body">
-                        <span className="prep-roster-name">
-                          <span className="prep-roster-name-text">{extra.label || '未命名群演'}</span>
-                        </span>
-                        <span className="prep-roster-meta">
-                          覆盖 {extra.segment_indexes?.length ?? 0} 段原文{rangeText ? ` · 第 ${rangeText} 段` : ''}
-                        </span>
-                      </div>
-                    </div>
-                  )
-                })}
+      {!!functionalExtras.length && (
+        <section className="card">
+          <h3 className="prep-section-heading">群演 / 一次性人物 · {functionalExtras.length}</h3>
+          <div className="prep-roster">
+            {functionalExtras.map((extra, index) => (
+              <div className="prep-roster-item" key={`extra:${extra.label || 'extra'}-${index}`}>
+                {/* 群演没有定妆照是设计使然（不进人物谱身份体系），不是数据缺失，
+                    用统一占位图标而不是"无图"——那个措辞是给真正缺图的具名角色用的。 */}
+                <div className="prep-roster-icon" aria-hidden="true">👤</div>
+                <div className="prep-roster-body">
+                  <span className="prep-roster-name">
+                    <span className="prep-roster-name-text">{extra.label || '未命名群演'}</span>
+                  </span>
+                  <span className="prep-roster-meta">{assetCoverageText(extra.segment_indexes)}</span>
+                </div>
               </div>
-            </section>
-          )}
+            ))}
+          </div>
+        </section>
+      )}
 
-          <section className="card">
-            <h3 className="prep-sidebar-heading">出场场景 · {scenes.length}</h3>
-            <div className="prep-roster">
-              {scenes.map(scene => {
-                const imageUrl = findSceneReferenceImage(bible, scene.scene_reference_id)
-                const name = scene.display_name || scene.scene_id || '未命名场景'
-                const rangeText = compressSegmentIndexes(scene.segment_indexes ?? [])
-                return (
-                  <div className="prep-roster-item" key={scene.scene_id || scene.display_name}>
-                    {imageUrl
-                      ? <img className="prep-roster-thumb" src={imageUrl} alt={name} loading="lazy" decoding="async" />
-                      : <div className="prep-roster-thumb-empty" aria-hidden="true">无图</div>}
-                    <div className="prep-roster-body">
-                      <span className="prep-roster-name">
-                        <span className="prep-roster-name-text">{name}</span>
-                      </span>
-                      <span className="prep-roster-meta">
-                        覆盖 {scene.segment_indexes?.length ?? 0} 段原文{rangeText ? ` · 第 ${rangeText} 段` : ''}
-                      </span>
-                    </div>
+      {!!scenes.length && (
+        <section className="card">
+          <h3 className="prep-section-heading">出场场景 · {scenes.length}</h3>
+          <div className="prep-roster">
+            {scenes.map(scene => {
+              const imageUrl = findSceneReferenceImage(bible, scene.scene_reference_id)
+              const name = scene.display_name || scene.scene_id || '未命名场景'
+              return (
+                <div className="prep-roster-item" key={scene.scene_id || scene.display_name}>
+                  {imageUrl
+                    ? <img className="prep-roster-thumb" src={imageUrl} alt={name} loading="lazy" decoding="async" />
+                    : <div className="prep-roster-thumb-empty" aria-hidden="true">无图</div>}
+                  <div className="prep-roster-body">
+                    <span className="prep-roster-name">
+                      <span className="prep-roster-name-text">{name}</span>
+                    </span>
+                    <span className="prep-roster-meta">{assetCoverageText(scene.segment_indexes)}</span>
                   </div>
-                )
-              })}
-              {!scenes.length && <p className="prep-empty-hint">未列出场景</p>}
-            </div>
-          </section>
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      )}
 
-          {!!props.length && (
-            <section className="card">
-              <h3 className="prep-sidebar-heading">道具 · {props.length}</h3>
-              <div className="prep-roster">
-                {props.map((prop, index) => {
-                  const rangeText = compressSegmentIndexes(prop.segment_indexes ?? [])
-                  return (
-                    <div className="prep-roster-item" key={`prop:${prop.label || 'prop'}-${index}`}>
-                      {/* 道具没有世界书图像素材库（设计使然，见 app/production/prep_pack.py
-                          _prep_pack_build_prop_manifest），只有文字描述，用统一占位图标。 */}
-                      <div className="prep-roster-icon" aria-hidden="true">物</div>
-                      <div className="prep-roster-body">
-                        <span className="prep-roster-name">
-                          <span className="prep-roster-name-text" title={prop.description || undefined}>
-                            {prop.label || '未命名道具'}
-                          </span>
-                        </span>
-                        <span className="prep-roster-meta" title={prop.description || undefined}>
-                          覆盖 {prop.segment_indexes?.length ?? 0} 段原文{rangeText ? ` · 第 ${rangeText} 段` : ''}
-                        </span>
-                      </div>
-                    </div>
-                  )
-                })}
+      {!!props.length && (
+        <section className="card">
+          <h3 className="prep-section-heading">道具 · {props.length}</h3>
+          <div className="prep-roster">
+            {props.map((prop, index) => (
+              <div className="prep-roster-item" key={`prop:${prop.label || 'prop'}-${index}`}>
+                {/* 道具没有世界书图像素材库（设计使然，见 app/production/prep_pack.py
+                    _prep_pack_build_prop_manifest），只有文字描述，用统一占位图标。 */}
+                <div className="prep-roster-icon" aria-hidden="true">物</div>
+                <div className="prep-roster-body">
+                  <span className="prep-roster-name">
+                    <span className="prep-roster-name-text" title={prop.description || undefined}>
+                      {prop.label || '未命名道具'}
+                    </span>
+                  </span>
+                  <span className="prep-roster-meta" title={prop.description || undefined}>
+                    {assetCoverageText(prop.segment_indexes)}
+                  </span>
+                </div>
               </div>
-            </section>
-          )}
-        </aside>
-      </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {!hasAnyAsset && (
+        <p className="prep-empty-hint">本集尚未识别到任何人物、场景或道具。</p>
+      )}
+
+      {/* 称谓总表：角色的附属信息，不是并列主体——次要、可折叠，没有条目整块
+          不渲染（不管是本集确实没有模糊称谓，还是旧产物压根没有这个字段）。 */}
+      {canLocateAppellation && (
+        <details
+          className="card prep-appellation-details"
+          open={appellationOpen}
+          onToggle={event => setAppellationOpen(event.currentTarget.open)}
+        >
+          <summary className="prep-section-heading">称谓映射 · {appellationMap.length} 条</summary>
+          <ol className="prep-timeline">
+            {appellationMap.map((entry, index) => {
+              const key = appellationRowKey(entry, index)
+              const isLinked = selectedIdentityId != null && entry.identity_id === selectedIdentityId
+              return (
+                <li
+                  key={key}
+                  className={`prep-timeline-item${isLinked ? ' event-linked' : ''}`}
+                  ref={node => {
+                    if (node) appellationNodeRefs.current.set(key, node)
+                    else appellationNodeRefs.current.delete(key)
+                  }}
+                >
+                  <span className="prep-timeline-marker" aria-hidden="true">{entry.segment_index}</span>
+                  <div className="prep-timeline-details">
+                    <span className="prep-timeline-headline">「{entry.raw_mention}」→ {entry.canonical_appellation}</span>
+                  </div>
+                </li>
+              )
+            })}
+          </ol>
+        </details>
+      )}
     </>
   )
 }

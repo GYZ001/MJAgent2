@@ -1157,7 +1157,10 @@ def test_script_page_has_pure_navigation_and_no_pipe_parser() -> None:
     assert "classifyScreenplayWriteError" not in source, "旧编辑态写错误分类器不应回归"
 
     # ---- 通往分镜台的出口：两轮改造都没有动这条主导航路径 ----
-    assert "查看分镜台 →" in source
+    # 字面量随第三轮改造更新：原来并排的「进入分镜台」主按钮与「查看分镜台 →」
+    # 副按钮语义重复，第三轮把两个合并成一个「进入分镜台」；这条断言守的是「必须
+    # 存在通往分镜台的入口」这个性质，性质没变，只是入口按钮的文案变了。
+    assert "进入分镜台" in source
     assert "go('board', projectId, ep.id)" in source
 
     # ---- 阶段带不得硬编码旧十步重型流水线的具体阶段名；新阶段带完全由后端下发的
@@ -1185,10 +1188,15 @@ def test_script_page_has_pure_navigation_and_no_pipe_parser() -> None:
     # 旧产物（转型前）兼容：不按旧形状硬渲染，只给"需要重新生成"占位，不许崩溃
     assert "isPrepPack" in source
     assert "旧版产物" in source
-    # 门禁状态灯 / 事件链时间线 / 两栏版式：准备包视图三块核心渲染入口仍在
+    # 门禁状态灯 / 称谓总表 / 资源清单网格：准备包视图三块核心渲染入口仍在。
+    # 第三轮布局重做（用户打回「右边有内容，左边是大片空的」后的重做，已获用户
+    # 认可）把两栏版式（称谓表在左、资源挤进窄侧栏）整体换成单栏纵向流——资源
+    # 清单是主体内容，称谓总表降为角色卡下的次要可折叠块。prep-pack-layout 这个
+    # 锚点类名随两栏骨架一起被移除，换成新版主体内容的锚点 prep-roster（资源卡
+    # 网格）；被守住的性质不变，仍是"这三块核心渲染入口都在"。
     assert "prep-gate-strip" in source
     assert "prep-timeline" in source
-    assert "prep-pack-layout" in source
+    assert "prep-roster" in source
     # 紧凑步进器：取代旧十步大灰框的渲染入口
     assert "prep-stepper" in source
 

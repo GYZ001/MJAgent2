@@ -122,7 +122,7 @@ const generatingEpisode = () => ({
       { key: 'asset_mapping', display_name: '资产映射', state: 'pending' },
     ],
   },
-  screenplay_state: { version: 1, code: 'running', message: '正在生成准备包', recommended_action: 'stop_screenplay' as const, screenplay_status: 'running', storyboard_status: 'no_screenplay', storyboard_running: false, publish_blocked: true },
+  screenplay_state: { version: 1, code: 'running', message: '正在生成映射包', recommended_action: 'stop_screenplay' as const, screenplay_status: 'running', storyboard_status: 'no_screenplay', storyboard_running: false, publish_blocked: true },
 })
 
 const readyEpisode = () => {
@@ -139,7 +139,7 @@ const readyEpisode = () => {
         { key: 'asset_mapping', display_name: '资产映射', state: 'done' },
       ],
     },
-    screenplay_state: { version: 2, code: 'ready', message: '准备包已交付', recommended_action: 'generate_storyboard' as const, screenplay_status: 'ready', storyboard_status: 'no_screenplay', storyboard_running: false, publish_blocked: false },
+    screenplay_state: { version: 2, code: 'ready', message: '映射包已交付', recommended_action: 'generate_storyboard' as const, screenplay_status: 'ready', storyboard_status: 'no_screenplay', storyboard_running: false, publish_blocked: false },
     prep_pack: {
       prep_pack_version: '2.0.0',
       episode_no: 1,
@@ -151,6 +151,58 @@ const readyEpisode = () => {
     },
   }
 }
+
+// 协调方打回复现（真实 episode ep_3d523ff4d0a4，prep_pack_version 1.11.1）：转型前
+// 的旧版映射包没有 segment_indexes/appellation_map/props 字段。整页（不只
+// PrepPackView 单测）过一遍，确认后端仍在吐的"剧本已交付"一类措辞在这条路径上
+// 也被改写，且资源卡不把字段缺失渲染成"覆盖 0 段"。
+const legacyPackEpisode = () => {
+  const base = readyEpisode()
+  return {
+    ...base,
+    prep_pack: {
+      prep_pack_version: '1.11.1',
+      episode_no: 1,
+      episode_scope: { chapter_indexes: [1], source_segment_count: 40 },
+      asset_manifest: {
+        characters: [
+          { identity_id: 'bible:许清', display_name: '许清', portrait_id: '', aliases: [], display_appellation: '许师姐' },
+        ],
+        scenes: [
+          { scene_id: 'scene:靠山宗', display_name: '靠山宗', scene_reference_id: '' },
+        ],
+      },
+      coverage_ledger: {
+        total_segments: 40, delivered: Array.from({ length: 40 }, (_, i) => i + 1),
+        merged: [], retained_as_context: [], proven_duplicates: [], uncovered: [],
+      },
+    },
+    screenplay_state: { ...base.screenplay_state, message: '剧本已交付' },
+  }
+}
+
+// 没有任何映射包的全新分集：screenplay_status='pending'，prep_pack/screenplay
+// 都是 null，production 都还没起。这条路径不经过 PrepPackView（isPrepPack 判
+// false），主视觉是顶部主操作 + 后端状态一句话——同样不许出现看起来像测量结果的
+// 假 0（如 QueryState 兜底态里编出"0 个人物"这类文案）。
+const emptyNewEpisode = () => ({
+  id: 'ep_test',
+  episode_no: 4,
+  title: '空白集',
+  hook: '',
+  cliffhanger: '',
+  synopsis: '',
+  source_chapters: [4],
+  target_duration_s: 300,
+  status: 'planned',
+  cost_cny: 0,
+  screenplay_status: 'pending',
+  screenplay: null,
+  prep_pack: null,
+  screenplay_artifact_id: null,
+  screenplay_evidence: null,
+  screenplay_state: { version: 1, code: 'pending', message: '尚未生成可交付剧本', recommended_action: 'generate_screenplay' as const, screenplay_status: 'pending', storyboard_status: 'no_screenplay', storyboard_running: false, publish_blocked: true },
+})
 
 // 用户报告过首屏闪现旧十步阶段带：后端把集详情投影统一到 prep_pack_stages 单源的
 // 过渡期里，响应有短暂窗口只带旧 `stages`（十步重型流水线遗留）、还没带
@@ -222,14 +274,13 @@ describe('ScriptPage stage-bar flash regression (legacy stages must never render
   })
 })
 
-// 素材面板点名联动左侧称谓映射表（2.0.0：事件链撤销后的替代交互，见
-// app/production/prep_pack.py 模块 docstring 的 2.0.0 说明）：点击出场角色的
-// 名字，appellation_map 里属于同一 identity_id 的行在左侧被高亮
-// （.prep-timeline-item.event-linked），再点同一条目取消。场景/群演/道具没有
-// appellation_map 条目可联动，渲染为纯文本、不是可点按钮（见 PrepPackView）。
+// 资源卡点名联动称谓总表（次要、可折叠，见 PrepPackView 的信息分层注释）：
+// 点击出场人物的名字，appellation_map 里属于同一 identity_id 的行被高亮
+// （.prep-timeline-item.event-linked）并展开总表，再点同一条目取消。场景/群演/
+// 道具没有 appellation_map 条目可联动，渲染为纯文本、不是可点按钮（见 PrepPackView）。
 // PrepPackView 本身不依赖 useNav/useScriptEpisode，直接渲染，不需要上面的
 // vi.mock('../App', ...) 桩件。
-describe('PrepPackView roster-name click links the left appellation map', () => {
+describe('PrepPackView roster-name click links the appellation table', () => {
   beforeEach(() => {
     installHostStubs()
   })
@@ -282,12 +333,11 @@ describe('PrepPackView roster-name click links the left appellation map', () => 
         React.createElement(PrepPackView, { pack: linkedPack(), bible: null, sourceFallback: '第 3 章' }),
       )
     })
-    // react-test-renderer 把 JSX 里 `覆盖 {n} 段原文{rangeText && ...}` 的每个花括号
-    // 表达式序列化成 children 数组的独立元素（不是拼接成一整段字符串），逐段拼接
-    // 后再比对，语义上等价于用户在页面上实际读到的那一整行文字。
+    // .prep-roster-meta 现在只有一个花括号表达式（assetCoverageText 的返回值），
+    // react-test-renderer 对单一子节点不会包成数组，直接是字符串本体。
     const metaTexts = renderer!.root
       .findAll(node => typeof node.props.className === 'string' && node.props.className === 'prep-roster-meta')
-      .map(node => node.props.children.join(''))
+      .map(node => String(node.props.children))
     expect(metaTexts).toContain('覆盖 3 段原文 · 第 1~2,4 段')
     expect(metaTexts).toContain('覆盖 1 段原文 · 第 3 段')
     act(() => { renderer!.unmount() })
@@ -407,6 +457,66 @@ describe('ScriptPage hook-order regression (React #310)', () => {
     expect(() => {
       act(() => { renderer!.update(element()) })
     }).not.toThrow()
+
+    act(() => { renderer!.unmount() })
+  })
+})
+
+// 协调方明确要求：改完在两种数据下把整页过一遍——旧版本映射包（1.11.1，真实
+// episode ep_3d523ff4d0a4 那种形状）与没有任何映射包的空集。两种都不能出现
+// "看起来像真实测量的零值"。这里渲染的是完整 ScriptPage（含顶部状态行/主操作），
+// 不只是 PrepPackView 片段，覆盖 screenplayStateMessage 的改写路径。
+describe('ScriptPage full-page walkthrough — legacy prep pack & empty episode (真 bug 回归 + 布局重做验收)', () => {
+  beforeEach(() => {
+    installHostStubs()
+    mockScriptState.ep = null
+    mockScriptState.project = null
+  })
+  afterEach(() => {
+    uninstallHostStubs()
+  })
+
+  it('legacy pack (1.11.1): renames the backend "剧本" status line and shows the explicit legacy notice, never a fake 0', () => {
+    mockScriptState.ep = legacyPackEpisode()
+    let renderer: TestRenderer.ReactTestRenderer
+    act(() => { renderer = TestRenderer.create(React.createElement(ScriptPage)) })
+    const serialized = JSON.stringify(renderer!.toJSON())
+
+    // 状态行改写：后端仍吐"剧本已交付"，页面必须显示"映射包已交付"。
+    expect(serialized).toContain('映射包已交付')
+    expect(serialized).not.toContain('剧本已交付')
+    // 旧版映射包的显式说明必须出现，带上真实版本号。
+    expect(serialized).toContain('旧版映射包')
+    expect(serialized).toContain('1.11.1')
+    // 绝不能把 segment_indexes 缺失渲染成"覆盖 0 段"或未验证的"未发现"断言。
+    expect(serialized).not.toContain('覆盖 0 段原文')
+    expect(serialized).not.toContain('本集未发现需要归一的模糊人物称谓')
+    // 资源清单仍然是主体内容：许清这张资源卡照常渲染，且带着本集称谓
+    // （JSON.stringify 把 JSX 的 `本集：{appellation}` 序列化成两个相邻数组元素，
+    // 不是拼接后的一整段字符串，所以分开断言，语义上等价于用户读到的那一整行）。
+    expect(serialized).toContain('许清')
+    expect(serialized).toContain('本集：')
+    expect(serialized).toContain('许师姐')
+    // 两个"进入分镜台"按钮的重复语义已合并为一个。
+    expect((serialized!.match(/进入分镜台/g) ?? []).length).toBeLessThanOrEqual(1)
+    expect(serialized).not.toContain('查看分镜台')
+
+    act(() => { renderer!.unmount() })
+  })
+
+  it('empty episode (no prep_pack, no screenplay): renders the primary action with a renamed status line, no PrepPackView, no fabricated zeros', () => {
+    mockScriptState.ep = emptyNewEpisode()
+    let renderer: TestRenderer.ReactTestRenderer
+    act(() => { renderer = TestRenderer.create(React.createElement(ScriptPage)) })
+    const serialized = JSON.stringify(renderer!.toJSON())
+
+    expect(serialized).toContain('映射包')
+    expect(serialized).not.toContain('尚未生成可交付剧本')
+    // 空集没有资源清单可言，不应该出现资源卡片或覆盖计数网格。
+    expect(serialized).not.toContain('prep-roster')
+    expect(serialized).not.toContain('覆盖 0 段原文')
+    expect(serialized).not.toContain('出场人物')
+    expect(serialized).not.toContain('称谓映射')
 
     act(() => { renderer!.unmount() })
   })

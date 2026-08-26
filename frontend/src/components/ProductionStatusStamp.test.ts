@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest'
 import { episodeStatusMeta, screenplayStatusMeta } from './ProductionStatusStamp'
 
 describe('制作状态文案', () => {
-  it('使用完整、跨页面一致的剧本状态', () => {
-    expect(screenplayStatusMeta('pending').label).toBe('剧本待生成')
-    expect(screenplayStatusMeta('ready').label).toBe('剧本已就绪')
-    expect(screenplayStatusMeta('failed').label).toBe('剧本生成失败')
+  it('使用完整、跨页面一致的映射包状态', () => {
+    expect(screenplayStatusMeta('pending').label).toBe('映射包待生成')
+    expect(screenplayStatusMeta('ready').label).toBe('映射包已就绪')
+    expect(screenplayStatusMeta('failed').label).toBe('映射包生成失败')
   })
 
   it('覆盖当前与兼容分集状态', () => {
@@ -21,7 +21,7 @@ describe('制作状态文案', () => {
 
   it('未知状态不向普通界面泄漏内部状态码', () => {
     expect(screenplayStatusMeta('new_backend_state')).toEqual({
-      label: '剧本状态待确认',
+      label: '映射包状态待确认',
       tone: 'grey',
       known: false,
     })

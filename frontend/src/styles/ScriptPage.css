@@ -220,41 +220,20 @@
   font: 12.5px/1.7 var(--ui, sans-serif);
   word-break: break-word;
 }
-.prep-pack-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(230px, 1fr);
-  gap: 18px;
-  align-items: start;
-  margin-top: 14px;
-}
-.prep-pack-main {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  min-width: 0;
-}
-.prep-pack-sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  position: sticky;
-  top: 14px;
-}
-.prep-sidebar-heading {
-  margin: 0 0 8px;
+/* 资源清单是这一页的交付物主体：人物/场景/道具各自成节，纵向堆叠、每节
+   独占整页宽度（沿用 index.css 的 .card + .card 卡间距），取代旧的"称谓表在左、
+   资源挤进窄侧栏"两栏骨架。 */
+.prep-section-heading {
+  margin: 0 0 10px;
   font: 600 13px/1.4 var(--ui, sans-serif);
   color: var(--ink-soft);
   letter-spacing: 0.02em;
 }
-.prep-scope-card p {
-  margin: 0;
-  font: 13px/1.6 var(--ui, sans-serif);
-  color: var(--ink);
-}
-.prep-scope-card .prep-sidebar-meta {
-  margin-top: 3px;
+/* 本集范围压缩成一行小字，不占一张卡。 */
+.prep-scope-line {
+  margin: 10px 2px 0;
   color: var(--ink-faint);
-  font-size: 12px;
+  font: 12.5px/1.6 var(--ui, sans-serif);
 }
 .prep-empty-hint {
   margin: 4px 0 0;
@@ -281,7 +260,7 @@
   border-bottom: none;
   padding-bottom: 2px;
 }
-/* 素材面板条目点名联动命中的事件：配色与交互模式复用 .video-candidate-card.selected
+/* 资源卡点名联动命中的称谓总表条目：配色与交互模式复用 .video-candidate-card.selected
    （index.css）同一套朱砂强调色叠加 + 左侧 inset 强调条，不新起配色。 */
 .prep-timeline-item.event-linked {
   background: rgba(181, 68, 52, 0.065);
@@ -304,143 +283,55 @@
   grid-column: 2 / 3;
   min-width: 0;
 }
-.prep-timeline-summary {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  flex-wrap: wrap;
-  cursor: pointer;
-  list-style: none;
-}
-.prep-timeline-summary::-webkit-details-marker {
-  display: none;
-}
-.prep-timeline-summary::marker {
-  content: '';
-}
 .prep-timeline-headline {
   font: 16px/1.6 var(--serif);
   color: var(--ink);
 }
-.prep-timeline-summary::after {
-  content: '展开';
-  margin-left: auto;
-  flex: none;
-  font: 600 11px/1.4 var(--ui, sans-serif);
-  color: var(--ink-faint);
-}
-.prep-timeline-item details[open] .prep-timeline-summary::after {
-  content: '收起';
-}
-.prep-timeline-span {
-  flex: none;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: rgba(152, 115, 36, 0.09);
-  color: var(--gold);
-  font: 600 10px/1.6 var(--ui, sans-serif);
-  white-space: nowrap;
-}
-.prep-timeline-body {
-  margin: 10px 0 4px;
-  display: grid;
-  gap: 10px;
-  font: 13px/1.75 var(--ui, sans-serif);
-  color: var(--ink-soft);
-}
-.prep-timeline-body b {
-  display: block;
-  margin-bottom: 4px;
-  font: 600 11px/1.4 var(--ui, sans-serif);
-  letter-spacing: 0.04em;
-  color: var(--ink-faint);
-}
-.prep-timeline-quotes,
-.prep-timeline-lines {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 7px;
-}
-.prep-timeline-quotes li {
-  border-left: 2px solid var(--gold);
-  padding: 1px 0 1px 10px;
-}
-.prep-timeline-lines li {
-  border-left: 2px solid var(--cinnabar);
-  padding: 1px 0 1px 10px;
-}
-.prep-timeline-idx {
-  color: var(--ink-faint);
-  font-size: 11px;
-  margin-left: 6px;
-}
-.prep-quote-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 14px;
-  margin-top: 4px;
-}
-.prep-quote-card {
-  padding: 14px 18px 14px 20px;
-  border-radius: 10px;
-  background: var(--paper-deep);
-  border-left: 3px solid var(--cinnabar);
-}
-.prep-quote-card b {
-  display: block;
-  margin-bottom: 5px;
-  font: 700 10px/1.4 var(--ui, sans-serif);
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--cinnabar-deep);
-}
-.prep-quote-card p {
-  margin: 0;
-  font: 15px/1.75 var(--serif);
-  color: var(--ink);
-}
+/* 资源卡网格：用得开主区宽度，多列自适应；每类资源（人物/群演/场景/道具）
+   独立一个 .prep-roster，卡片本身带边框，取代旧侧栏里的窄列表行。 */
 .prep-roster {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
 }
 .prep-roster-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
 }
 .prep-roster-thumb {
   flex: none;
-  width: 40px;
-  height: 40px;
+  width: 56px;
+  height: 56px;
   border-radius: 8px;
   object-fit: cover;
   background: var(--paper-deep);
 }
 .prep-roster-thumb-empty {
   flex: none;
-  width: 40px;
-  height: 40px;
+  width: 56px;
+  height: 56px;
   border-radius: 8px;
   background: var(--paper-deep);
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--ink-faint);
-  font-size: 9.5px;
+  font-size: 10.5px;
 }
 .prep-roster-icon {
   flex: none;
-  width: 40px;
-  height: 40px;
+  width: 56px;
+  height: 56px;
   border-radius: 8px;
   background: var(--paper-deep);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 16px;
+  font-size: 22px;
   color: var(--ink-faint);
 }
 .prep-roster-body {
@@ -463,7 +354,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 条目名点名联动左侧事件链：按钮化名字，font/color/ellipsis 沿用 .prep-roster-name-text
+/* 条目名点名联动称谓总表：按钮化名字，font/color/ellipsis 沿用 .prep-roster-name-text
    （两个 class 同时挂在同一个元素上），这里只清 UA 按钮默认边框/背景/内边距。选中态
    配色复用 .episode-picker-results button.selected（index.css）同一套朱砂强调色。 */
 .prep-roster-name-btn {
@@ -498,17 +389,28 @@
   font: 11px/1.3 var(--ui, sans-serif);
   color: var(--ink-faint);
 }
-@media (max-width: 900px) {
-  .prep-pack-layout {
-      grid-template-columns: 1fr;
-    }
-  .prep-pack-sidebar {
-      position: static;
-    }
+/* 称谓总表：角色的附属信息，次要、可折叠，summary 复用 .prep-section-heading
+   的文字样式，这里只补 <details>/<summary> 需要的交互态。 */
+.prep-appellation-details > summary {
+  cursor: pointer;
+  list-style: none;
+}
+.prep-appellation-details > summary::-webkit-details-marker {
+  display: none;
+}
+.prep-appellation-details > summary::before {
+  content: '▸ ';
+  color: var(--ink-faint);
+}
+.prep-appellation-details[open] > summary::before {
+  content: '▾ ';
+}
+.prep-appellation-details[open] > summary {
+  margin-bottom: 8px;
 }
 @media (max-width: 640px) {
-  .prep-timeline-summary::after {
-      display: none;
+  .prep-roster {
+      grid-template-columns: 1fr;
     }
   .prep-gate-strip-chips {
       margin-left: 0;

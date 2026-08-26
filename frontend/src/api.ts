@@ -1268,8 +1268,9 @@ export interface EpisodeScreenplay {
 }
 
 /**
- * 映射台（原「剧本台」，2.0.0 架构收窄）转型后的轻量分集准备包
- * （episode_prep_pack）。取代 EpisodeScreenplay 成为映射台的发布产物，投影在
+ * 映射台（原「剧本台」，2.0.0 架构收窄）转型后的轻量分集映射包
+ * （episode_prep_pack，字段/类型名不改，仅界面文案改名）。取代 EpisodeScreenplay
+ * 成为映射台的发布产物，投影在
  * `Episode.prep_pack` 字段（不是 `Episode.screenplay`——后端把两种产物形状分到
  * 不同字段，见 Episode.prep_pack 上的注释）。旧产物（无 prep_pack_version 字段）
  * 仍可能出现在 `Episode.screenplay` 中，调用方必须先按 prep_pack_version 判别，
@@ -1316,8 +1317,13 @@ export interface PrepPackCharacterAsset {
   identity_id: string;
   display_name: string;
   portrait_id: string | null;
-  /** 2.0.0：取代 event_ids，这个角色真正在场（画面出场）的原文段号，1-based。 */
-  segment_indexes: number[];
+  /**
+   * 2.0.0+ 字段：取代 event_ids，这个角色真正在场（画面出场）的原文段号，1-based。
+   * 2.0.0 之前的产物（如 1.11.x）没有这个字段——运行时是 undefined，不是空数组；
+   * 调用方必须把「字段不存在」和「测量后是 0 段」分开显示，不许把前者渲染成后者，
+   * 见 ScriptPage.tsx 的 isLegacyPrepPackFormat / assetCoverageText。
+   */
+  segment_indexes?: number[];
   /** 1.2.0+ 字段；本集内对该角色的称谓（如「小胖子」）。之前的产物没有它。 */
   aliases?: string[];
   /**
@@ -1341,8 +1347,8 @@ export interface PrepPackSceneAsset {
   scene_id: string;
   display_name: string;
   scene_reference_id: string | null;
-  /** 2.0.0：取代 event_ids，这个场景真正出现的原文段号，1-based。 */
-  segment_indexes: number[];
+  /** 2.0.0+ 字段，undefined 于旧产物——语义同 PrepPackCharacterAsset.segment_indexes。 */
+  segment_indexes?: number[];
   provenance?: PrepPackProvenance;
 }
 
@@ -1354,7 +1360,8 @@ export interface PrepPackSceneAsset {
 export interface PrepPackProp {
   label: string;
   description: string;
-  segment_indexes: number[];
+  /** 2.0.0+ 字段，undefined 于旧产物——语义同 PrepPackCharacterAsset.segment_indexes。 */
+  segment_indexes?: number[];
   provenance?: PrepPackProvenance;
 }
 
@@ -1364,8 +1371,8 @@ export interface PrepPackProp {
  */
 export interface PrepPackFunctionalExtra {
   label: string;
-  /** 2.0.0：取代 event_ids，这个群演真正出场的原文段号，1-based。 */
-  segment_indexes: number[];
+  /** 2.0.0+ 字段，undefined 于旧产物——语义同 PrepPackCharacterAsset.segment_indexes。 */
+  segment_indexes?: number[];
   visual_entity_id?: string;
   provenance?: PrepPackProvenance;
 }
@@ -2105,10 +2112,10 @@ export interface Episode {
   screenplay_updated_at?: number | null;
   screenplay?: EpisodeScreenplay | null;
   /**
-   * 转型后的轻量分集准备包（screenplay 契约 6.0.0+）。后端 _episode_detail_projection
+   * 转型后的轻量分集映射包（screenplay 契约 6.0.0+）。后端 _episode_detail_projection
    * 把这两种产物形状投影到不同字段：旧形状仍在 `screenplay`；新形状在 `prep_pack`，
    * `screenplay` 此时为 null（不会把新形状塞进旧字段）。ScriptPage 必须两个字段都看：
-   * prep_pack 非空 → 渲染准备包；否则 screenplay 非空 → 旧产物占位提示；否则 → 尚无产物。
+   * prep_pack 非空 → 渲染映射包；否则 screenplay 非空 → 旧产物占位提示；否则 → 尚无产物。
    */
   prep_pack?: EpisodePrepPack | null;
   narrative_contract_summary?: NarrativeContractSummary | null;

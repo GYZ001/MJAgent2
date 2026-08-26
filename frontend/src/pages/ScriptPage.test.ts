@@ -6,13 +6,17 @@ import {
   PrepPackView,
   PrepStepper,
   ScreenplayResumeButton,
+  assetCoverageText,
   characterAppellationTag,
   compressSegmentIndexes,
   coverageGateSummary,
   findPortraitImage,
   findSceneReferenceImage,
+  isLegacyPrepPackFormat,
   isPrepPack,
   normalizeStage,
+  prepPackMajorVersion,
+  prepPackStatusMessage,
   provenanceMethodHint,
   resolveStages,
   screenplayGeneratePayload,
@@ -131,6 +135,57 @@ describe('isPrepPack', () => {
     expect(isPrepPack(undefined)).toBe(false)
     expect(isPrepPack('episode_prep_pack')).toBe(false)
     expect(isPrepPack({ prep_pack_version: '' })).toBe(false)
+  })
+})
+
+describe('prepPackMajorVersion / isLegacyPrepPackFormat', () => {
+  it('parses the major version out of a dotted version string', () => {
+    expect(prepPackMajorVersion('1.11.1')).toBe(1)
+    expect(prepPackMajorVersion('2.0.0')).toBe(2)
+    expect(prepPackMajorVersion('10.2.3')).toBe(10)
+  })
+
+  it('treats an unparseable version as older than anything real (major 0)', () => {
+    expect(prepPackMajorVersion('')).toBe(0)
+    expect(prepPackMajorVersion('not-a-version')).toBe(0)
+  })
+
+  it('flags the real-world regression pack (1.11.1, pre-2.0.0 architecture narrowing) as legacy', () => {
+    expect(isLegacyPrepPackFormat({ prep_pack_version: '1.11.1' })).toBe(true)
+  })
+
+  it('does not flag 2.0.0+ packs as legacy', () => {
+    expect(isLegacyPrepPackFormat({ prep_pack_version: '2.0.0' })).toBe(false)
+    expect(isLegacyPrepPackFormat({ prep_pack_version: '2.3.1' })).toBe(false)
+  })
+})
+
+describe('assetCoverageText — 真 bug 修复：字段缺失不能渲染成测量后的 0', () => {
+  it('says the field is absent (not "0 segments") when segment_indexes is undefined', () => {
+    // 1.11.x 等旧产物没有这个字段——运行时是 undefined，不是空数组。
+    expect(assetCoverageText(undefined)).toBe('旧版数据，未记录原文覆盖')
+  })
+
+  it('reports a real measured zero distinctly from an absent field', () => {
+    expect(assetCoverageText([])).toBe('覆盖 0 段原文')
+    expect(assetCoverageText([])).not.toContain('旧版数据')
+  })
+
+  it('reports the compressed range for a real non-empty measurement', () => {
+    expect(assetCoverageText([1, 2, 4])).toBe('覆盖 3 段原文 · 第 1~2,4 段')
+    expect(assetCoverageText([3])).toBe('覆盖 1 段原文 · 第 3 段')
+  })
+})
+
+describe('prepPackStatusMessage', () => {
+  it('renames the backend screenplay-era wording to the current prep-pack deliverable name', () => {
+    expect(prepPackStatusMessage('剧本已交付，尚无分镜')).toBe('映射包已交付，尚无分镜')
+    expect(prepPackStatusMessage('剧本已交付｜分镜生成中')).toBe('映射包已交付｜分镜生成中')
+    expect(prepPackStatusMessage('剧本已交付｜分镜停在第 3 镜')).toBe('映射包已交付｜分镜停在第 3 镜')
+  })
+
+  it('leaves messages without the stale wording untouched', () => {
+    expect(prepPackStatusMessage('状态同步中')).toBe('状态同步中')
   })
 })
 
@@ -652,6 +707,136 @@ describe('PrepPackView renders aliases and functional_extras (real EP13 data)', 
   it('hides the section when functional_extras is an empty array too', () => {
     const html = renderToStaticMarkup(createElement(PrepPackView, { pack: buildPack({ ...ep13AssetManifest, functional_extras: [] }), bible: null, sourceFallback: '第 13 章' }))
     expect(html).not.toContain('群演 / 一次性人物')
+  })
+
+  it('hides the props section entirely when the field is absent (pre-2.0.0 packs)', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, { pack: buildPack(ep13AssetManifest), bible: null, sourceFallback: '第 13 章' }))
+    expect(html).not.toContain('道具')
+  })
+})
+
+// 真 bug 回归（协调方截图复现，episode ep_3d523ff4d0a4，prep_pack_version 1.11.1）：
+// 转型前的旧版映射包没有 segment_indexes / appellation_map / props 字段——运行时
+// 是 undefined，不是空数组。之前的实现把 undefined 兜底成 [] 再取 .length，
+// 于是渲染出「覆盖 0 段原文」「称谓映射 0 条 · 本集未发现需要归一的模糊人物称谓」，
+// 看起来像真实测量结果，实际含义是"这份数据是旧格式，这个维度压根没跑过"。
+describe('PrepPackView legacy-format regression (真 bug：字段缺失不能冒充测量结果)', () => {
+  // 真实旧产物形状：无 segment_indexes（用 event_ids 记账）、无 appellation_map、
+  // 无 props——这里用 `as any` 显式不带这三个字段，而不是赋 undefined，更贴近
+  // 后端真实响应里"这个键压根不存在"的情形。
+  const legacyPack = {
+    prep_pack_version: '1.11.1',
+    episode_no: 7,
+    episode_scope: { chapter_indexes: [7], source_segment_count: 40 },
+    asset_manifest: {
+      characters: [
+        { identity_id: 'bible:许清', display_name: '许清', portrait_id: 'portrait_x', aliases: [], display_appellation: '许师姐' },
+      ],
+      scenes: [
+        { scene_id: 'scene:靠山宗', display_name: '靠山宗', scene_reference_id: 'scene_y' },
+      ],
+    },
+    coverage_ledger: {
+      total_segments: 40, delivered: Array.from({ length: 40 }, (_, i) => i + 1),
+      merged: [], retained_as_context: [], proven_duplicates: [], uncovered: [],
+    },
+  } as any
+
+  it('shows an explicit legacy-format notice naming the actual version, not a silent blank', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, { pack: legacyPack, bible: null, sourceFallback: '第 7 章' }))
+    expect(html).toContain('旧版映射包')
+    expect(html).toContain('1.11.1')
+    expect(html).toContain('重新生成映射包')
+  })
+
+  it('never renders "覆盖 0 段原文" for a character whose segment_indexes field is simply absent', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, { pack: legacyPack, bible: null, sourceFallback: '第 7 章' }))
+    expect(html).not.toContain('覆盖 0 段原文')
+    expect(html).toContain('旧版数据，未记录原文覆盖')
+    expect(html).toContain('许清')
+  })
+
+  it('never asserts "本集未发现需要归一的模糊人物称谓" — that claim was never verified on this data', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, { pack: legacyPack, bible: null, sourceFallback: '第 7 章' }))
+    expect(html).not.toContain('本集未发现需要归一的模糊人物称谓')
+    expect(html).not.toContain('称谓映射')
+  })
+
+  it('still renders per-character appellation tags from the pre-2.0.0 display_appellation field (unaffected by the legacy gate)', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, { pack: legacyPack, bible: null, sourceFallback: '第 7 章' }))
+    expect(html).toContain('本集：许师姐')
+  })
+
+  it('does not show the legacy notice for a 2.0.0+ pack', () => {
+    const modernPack = { ...legacyPack, prep_pack_version: '2.0.0' }
+    const html = renderToStaticMarkup(createElement(PrepPackView, { pack: modernPack, bible: null, sourceFallback: '第 7 章' }))
+    expect(html).not.toContain('旧版映射包')
+  })
+})
+
+// 布局重做（协调方打回：「右边有内容，左边是大片空的」——不是重设计，是把事件链
+// 从两栏骨架里挖走）：资源清单是主体内容，不是塞进窄侧栏的附属；任何一类没有
+// 数据就整节不渲染，不留空容器；完全没有素材时只留一行纯文字，不留占位框。
+describe('PrepPackView layout — no empty containers, resource manifest is the primary content', () => {
+  const buildPack = (assetManifest: Record<string, unknown>) => ({
+    prep_pack_version: '2.0.0',
+    episode_no: 9,
+    episode_scope: { chapter_indexes: [9], source_segment_count: 12 },
+    asset_manifest: assetManifest,
+    coverage_ledger: {
+      total_segments: 12, delivered: Array.from({ length: 12 }, (_, i) => i + 1),
+      merged: [], retained_as_context: [], proven_duplicates: [], uncovered: [],
+    },
+  }) as any
+
+  it('renders a single plain-text line — no per-category empty placeholder cards — when nothing was found at all', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, {
+      pack: buildPack({ characters: [], scenes: [] }), bible: null, sourceFallback: '第 9 章',
+    }))
+    expect(html).toContain('本集尚未识别到任何人物、场景或道具')
+    expect(html).not.toContain('prep-roster')
+    expect(html).not.toContain('未列出')
+  })
+
+  it('renders only the categories that actually have data — a scenes-only pack shows no 人物/群演/道具 heading', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, {
+      pack: buildPack({
+        characters: [],
+        scenes: [{ scene_id: 'scene:x', display_name: '场景X', scene_reference_id: null, segment_indexes: [1, 2] }],
+      }),
+      bible: null, sourceFallback: '第 9 章',
+    }))
+    expect(html).toContain('出场场景')
+    expect(html).not.toContain('出场人物')
+    expect(html).not.toContain('群演')
+    expect(html).not.toContain('道具')
+    expect(html).not.toContain('本集尚未识别到任何人物、场景或道具')
+  })
+
+  it('compresses episode scope into a single small-text line, not a card section', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, {
+      pack: buildPack({ characters: [], scenes: [] }), bible: null, sourceFallback: '第 9 章',
+    }))
+    expect(html).toContain('prep-scope-line')
+    expect(html).toContain('原文段 12 段')
+    expect(html).not.toContain('本集范围')
+  })
+
+  it('merges the appellation table into the character card (no separate half-screen block) and keeps it collapsed by default', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, {
+      pack: {
+        ...buildPack({
+          characters: [{ identity_id: 'bible:许清', display_name: '许清', portrait_id: '', segment_indexes: [1], display_appellation: '许师姐' }],
+          scenes: [],
+        }),
+        appellation_map: [{ raw_mention: '许师姐', segment_index: 1, identity_id: 'bible:许清', canonical_appellation: '许清' }],
+      },
+      bible: null, sourceFallback: '第 9 章',
+    }))
+    expect(html).toContain('本集：许师姐')
+    // <details> without an `open` attribute renders collapsed by default.
+    expect(html).toContain('<details')
+    expect(html).not.toMatch(/<details[^>]*\bopen\b/)
   })
 })
 
