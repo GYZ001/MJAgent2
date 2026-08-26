@@ -542,6 +542,7 @@ def test_attempt7_call_63139_has_no_complete_json_root_to_accept() -> None:
     assert authority_root == (
         "object",
         case["content_non_whitespace_prefix"],
+        1,  # a single truncated candidate -- nothing else to discard
     )
     assert model_gateway._json_candidates(content) == []
     with pytest.raises(json.JSONDecodeError, match="Invalid control character"):

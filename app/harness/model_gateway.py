@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -197,11 +198,19 @@ def _json_candidates(value: str) -> list[dict[str, Any]]:
     return [payload for _end, payload in sorted(candidates, key=lambda item: item[0], reverse=True)]
 
 
-def _latest_json_authority_root(value: str) -> tuple[str, str] | None:
-    """Return the latest object/array root proven not to be a child."""
-    text = str(value or "").strip()
+def _json_authority_candidates(text: str) -> list[tuple[int, str, str]]:
+    """Enumerate every object/array root proven not to be a child, in order.
+
+    A single corrupted response can contain more than one substring that
+    independently proves out as an unnested top-level JSON value (a
+    duplicated/malformed key mid-stream can close a container early and what
+    follows then reads as a fresh root). This only *enumerates* them -- it
+    makes no claim about which one, if any, the provider actually intended
+    as its answer; that judgement belongs to the caller
+    (:func:`_latest_json_authority_root`).
+    """
     decoder = json.JSONDecoder()
-    latest_root: tuple[str, str] | None = None
+    candidates: list[tuple[int, str, str]] = []
     for index, char in enumerate(text):
         if char not in "{[":
             continue
@@ -214,8 +223,71 @@ def _latest_json_authority_root(value: str) -> tuple[str, str] | None:
         if not _is_nested_json_candidate(text, index, end):
             root_type = "object" if char == "{" else "array"
             root_text = text[index:] if root_type == "object" else text[index:end]
-            latest_root = (root_type, root_text)
-    return latest_root
+            candidates.append((index, root_type, root_text))
+    return candidates
+
+
+# A candidate is a "dangling container child" when the text immediately
+# before it (skipping whitespace) is either a bare comma, or a JSON string
+# literal directly followed by a colon (a dict "key": prefix). Both are
+# syntax proof -- not a guess -- that this candidate was authored as a
+# *value inside* some enclosing list/object, never as a fresh top-level
+# answer: valid JSON allows exactly one top-level value, so a raw "," or
+# '"key":' can only legally precede another element of the same container.
+# The only reason such a candidate ever reads as "top-level" at all is that
+# its true parent container was closed early by earlier corruption (see
+# ERR-20260824-7ab7cb: duplicated/malformed keys mid-stream). This is
+# deliberately narrower than "does it look incomplete" -- prose, an explicit
+# correction marker ("以下是最新修正版"/"最终答案:"), or simply nothing
+# (start of the response) never match, so a model's own free-standing
+# restart is never misclassified as a dangling fragment.
+_DANGLING_CONTAINER_CHILD_RE = re.compile(r'(,|"(?:[^"\\]|\\.)*"\s*:)\s*\Z')
+
+
+def _is_dangling_container_child(text: str, index: int) -> bool:
+    return bool(_DANGLING_CONTAINER_CHILD_RE.search(text[:index]))
+
+
+def _latest_json_authority_root(value: str) -> tuple[str, str, int] | None:
+    """Return the latest object/array root proven not to be a child, plus how
+    many independently well-formed roots were in play.
+
+    This restores the original "latest wins" position rule -- a real,
+    tested design (``tests/test_screenplay_structured_runner.py``): the
+    provider's most recent complete/attempted top-level answer is treated as
+    authoritative even when it is the wrong root type or outright
+    unparseable, and the run must fail rather than silently resurrect an
+    older, already-superseded draft (a stale-data bug is just as real as a
+    dropped-field bug, in the opposite direction).
+
+    The one narrowing on top of that rule: a candidate proven to be a
+    dangling container child (see ``_is_dangling_container_child``) is
+    excluded from "latest" consideration entirely, unless every candidate
+    found is one. This is what fixes ERR-20260824-7ab7cb without touching
+    the general rule -- the EP7 corruption's trailing ``scenes`` array (and
+    every other array in that response) is provably a stranded dict value,
+    not a fresh restart, so it never competes for "latest" against the
+    earlier, genuine, complete object that actually carried ``characters``.
+    A response with no such stranded fragments behaves identically to
+    before: whichever candidate is positionally last simply wins.
+
+    The third tuple element is the total number of independently
+    well-formed roots found, regardless of eligibility; the caller treats
+    anything above 1 as "more than one candidate existed" and must surface
+    that on its own (see ``_append_recovery_discard_event``) even when the
+    chosen one later validates fine -- a discarded sibling is invisible to
+    schema validation of the winner alone.
+    """
+    text = str(value or "").strip()
+    candidates = _json_authority_candidates(text)
+    if not candidates:
+        return None
+    eligible = [
+        c for c in candidates if not _is_dangling_container_child(text, c[0])
+    ]
+    pool = eligible or candidates
+    _, root_type, root_text = max(pool, key=lambda c: c[0])
+    return root_type, root_text, len(candidates)
 
 
 def _model_schema(model_type: Any) -> dict[str, Any]:
@@ -342,6 +414,49 @@ def _append_interrupted_event(
             "delivery_state": exc.delivery_state,
             "failure_kind": exc.failure_kind,
             "requires_explicit_retry": True,
+            "stage_key": call_meta.get("stage_key"),
+            "call_role": call_meta.get("call_role"),
+        },
+    )
+
+
+def _append_recovery_discard_event(
+    *,
+    operation_id: str,
+    root_type: str | None,
+    candidate_count: int,
+    call_meta: dict[str, Any],
+) -> None:
+    """Make a discarded JSON authority-root candidate visible, never blocking.
+
+    ``_latest_json_authority_root`` had to choose one root among several
+    independently well-formed ones; this records that a choice was made and
+    something was left behind, even when the choice turns out fine and the
+    call ultimately validates -- schema validation of the winner alone can
+    never distinguish "this field was legitimately empty" from "this field
+    had data in a candidate we didn't pick" (see ERR-20260824-7ab7cb, where
+    the picked candidate validated to an empty ``characters`` list without
+    raising anything). Visible, not blocking: this never changes control
+    flow, it only leaves a trail so a repeat of this failure shape can be
+    found instead of silently reproducing the same data loss.
+    """
+    trace = current_trace()
+    if not trace.run_id:
+        return
+    repository.append_event(
+        trace.run_id,
+        "STRUCTURED_JSON_RECOVERY_CANDIDATE_DISCARDED",
+        "warning",
+        (
+            f"{operation_id}：响应中存在多个互不嵌套的顶层 JSON 根，"
+            "已按“最新且非悬空容器子片段”选取一个，其余候选未被采用"
+            "（可能包含未被采用的有效数据）"
+        ),
+        step_run_id=trace.step_run_id,
+        trace_id=trace.trace_id,
+        payload={
+            "chosen_root_type": root_type,
+            "candidate_count": candidate_count,
             "stage_key": call_meta.get("stage_key"),
             "call_role": call_meta.get("call_role"),
         },
@@ -589,6 +704,7 @@ async def chat_structured(
     semantic_attempt = 0
     last_raw = ""
     local_recovery = False
+    recovery_candidate_discarded = False
     while True:
         attempt_operation_id = operation_id
         if format_attempt or semantic_attempt:
@@ -620,6 +736,7 @@ async def chat_structured(
             "format_attempt": format_attempt,
             "semantic_attempt": semantic_attempt,
             "local_recovery": local_recovery,
+            "recovery_candidate_discarded": recovery_candidate_discarded,
         }
         if require_response_format:
             meta["response_format_required"] = True
@@ -655,9 +772,21 @@ async def chat_structured(
         parsed: T | None = None
         parse_error: Exception | None = None
         repair_payload: dict[str, Any] | None = None
-        # Only the latest provenance-qualified root may represent this response.
+        # The latest non-nested root wins (see _latest_json_authority_root's
+        # docstring) unless it is proven to be a dangling container child --
+        # a fragment stranded by earlier corruption, not a fresh answer.
         authority_root = _latest_json_authority_root(last_raw)
-        root_type, recovery_root = authority_root or (None, None)
+        root_type, recovery_root, candidate_count = (
+            authority_root or (None, None, 0)
+        )
+        if candidate_count > 1:
+            recovery_candidate_discarded = True
+            _append_recovery_discard_event(
+                operation_id=attempt_operation_id,
+                root_type=root_type,
+                candidate_count=candidate_count,
+                call_meta=meta,
+            )
         repair_candidate_text = recovery_root or last_raw
         payload: dict[str, Any] | None = None
         decoded: Any = None
