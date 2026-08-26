@@ -10,12 +10,14 @@ RBAC 这边的 ``users.must_change_password`` 与 ``workspaces.status``。
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
 from app.auth.passwords import hash_password
 from app.auth.sessions import create_session, resolve_session
-from app.db import get_conn, new_id, now
+from app.db import get_conn, new_id, now, set_setting
 from app.main import app
 
 _HEADERS = {"Host": "43.153.78.247", "Origin": "http://43.153.78.247"}
@@ -453,3 +455,109 @@ def test_video_model_switch_without_existing_products_is_not_gated_for_review(
         "SELECT target_video_model FROM episodes WHERE id='ep_video_switch'"
     ).fetchone()
     assert row["target_video_model"] == "minimax_h3", "普通切换必须真的写进去，否则这条只是在测 200"
+
+
+def _seed_text_model_project(workspace_id: str, project_id: str) -> None:
+    """播种一个挂到给定 workspace 的项目，用于测世界书/映射台/分镜台分环节
+    文本模型切换（PUT /projects/{id}/text-models）的 scope 闸门。"""
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,workspace_id,created_at) VALUES(?,?,?,?)",
+        (project_id, project_id, workspace_id, now()),
+    )
+    conn.commit()
+
+
+@pytest.fixture()
+def _text_model_catalog():
+    """真库落一条已配凭据的 kind=text 条目，走 text_model_choices() 的真实校验路径。"""
+    set_setting("custom_models", json.dumps([{
+        "id": "model_rbac_text", "provider": "custom:model_rbac_text", "model": "rbac-test-model",
+        "label": "RBAC 测试文本模型", "kinds": ["text"], "builtin": False,
+        "protocol": "openai", "base_url": "https://rbac.example.test", "api_key": "sk-test",
+    }], ensure_ascii=False))
+    try:
+        yield "custom:model_rbac_text"
+    finally:
+        set_setting("custom_models", "[]")
+
+
+def test_text_model_switch_blocks_review_without_project_write(
+    client: TestClient, _text_model_catalog: str,
+) -> None:
+    """review 只有 manju:read + manju:delivery，没有 manju:project-write。
+
+    世界书/映射台/分镜台分环节文本模型是项目级设置，会改变之后新发起的生成
+    调用选哪个 provider——与 video-model 的清空分支同档收在 manju:project-write。
+    挡住的必须是这次真实 HTTP 请求本身（403），不是事后检查字段没变。
+    """
+    _add_workspace("ws_text_model_review")
+    user_id = _add_user("text_model_review")
+    _join("ws_text_model_review", user_id, role="review")
+    _seed_text_model_project("ws_text_model_review", "proj_text_model_review")
+
+    resp = client.put(
+        "/api/projects/proj_text_model_review/text-models",
+        headers={**_HEADERS, "X-Manju-Session": create_session(user_id)},
+        json={"board_text_provider": _text_model_catalog},
+    )
+    assert resp.status_code == 403, resp.text
+
+    row = get_conn().execute(
+        "SELECT board_text_provider FROM projects WHERE id='proj_text_model_review'"
+    ).fetchone()
+    assert row["board_text_provider"] == "", "被 403 挡住之前不能已经写入了选择"
+
+
+def test_text_model_switch_is_not_blocked_for_production(
+    client: TestClient, _text_model_catalog: str,
+) -> None:
+    """production 持有 manju:project-write，同一条切换入口不能被 403 挡住，
+    且必须真的写进 projects 表——不是只测个 200。"""
+    _add_workspace("ws_text_model_prod")
+    user_id = _add_user("text_model_prod")
+    _join("ws_text_model_prod", user_id, role="production")
+    _seed_text_model_project("ws_text_model_prod", "proj_text_model_prod")
+
+    resp = client.put(
+        "/api/projects/proj_text_model_prod/text-models",
+        headers={**_HEADERS, "X-Manju-Session": create_session(user_id)},
+        json={
+            "bible_text_provider": _text_model_catalog,
+            "script_text_provider": _text_model_catalog,
+            "board_text_provider": _text_model_catalog,
+        },
+    )
+    assert resp.status_code != 403, f"production 持有 manju:project-write，不该被 403 挡住：{resp.text}"
+    assert resp.status_code == 200, resp.text
+
+    row = get_conn().execute(
+        "SELECT bible_text_provider, script_text_provider, board_text_provider "
+        "FROM projects WHERE id='proj_text_model_prod'"
+    ).fetchone()
+    assert row["bible_text_provider"] == _text_model_catalog
+    assert row["script_text_provider"] == _text_model_catalog
+    assert row["board_text_provider"] == _text_model_catalog
+
+
+def test_text_model_switch_rejects_provider_without_credentials(
+    client: TestClient, _text_model_catalog: str,
+) -> None:
+    """不能选一个没配凭据、必然失败的 provider——服务端要真的拒绝，不能只靠
+    前端下拉不显示来兜底（Agent/脚本可以绕过前端直接打这个接口）。"""
+    _add_workspace("ws_text_model_bad")
+    user_id = _add_user("text_model_bad")
+    _join("ws_text_model_bad", user_id, role="production")
+    _seed_text_model_project("ws_text_model_bad", "proj_text_model_bad")
+
+    resp = client.put(
+        "/api/projects/proj_text_model_bad/text-models",
+        headers={**_HEADERS, "X-Manju-Session": create_session(user_id)},
+        json={"bible_text_provider": "custom:model_never_configured"},
+    )
+    assert resp.status_code == 422, resp.text
+
+    row = get_conn().execute(
+        "SELECT bible_text_provider FROM projects WHERE id='proj_text_model_bad'"
+    ).fetchone()
+    assert row["bible_text_provider"] == "", "被拒绝之前不能已经写入了无效选择"

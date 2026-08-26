@@ -81,6 +81,43 @@ def items_for_kind(kind: str) -> list[dict[str, Any]]:
     ]
 
 
+def _has_credentials(item: dict[str, Any]) -> bool:
+    """条目是否真的能打通连接；口径与 app/system_api.py::_public_model 的
+    key_configured 一致（多数条目要求 api_key 非空；条目显式声明
+    requires_api_key=False 时只要求 base_url，用于极少数不需要 Key 的自建服务）。"""
+    if item.get("requires_api_key") is False:
+        return bool(str(item.get("base_url") or "").strip())
+    return bool(str(item.get("api_key") or "").strip())
+
+
+def text_model_choices() -> list[dict[str, str]]:
+    """世界书/映射台/分镜台的分环节文本模型下拉可选清单：kind=text 且已配凭据的
+    条目。不返回没配凭据的条目——不能让用户选一个必然失败的模型。"""
+    return [
+        {
+            "provider": str(item.get("provider") or ""),
+            "label": str(item.get("label") or item.get("model") or ""),
+            "model": str(item.get("model") or ""),
+        }
+        for item in items_for_kind("text")
+        if _has_credentials(item)
+    ]
+
+
+def resolve_stage_text_provider(value: str | None) -> str | None:
+    """校验某环节保存的 provider 选择当前是否仍然可用。
+
+    返回 None 时调用方按"未设置"处理，回落到全局默认文本 provider——不让一条
+    后来被删除或掉了凭据的陈旧选择打断生成；这不是给模型库开回落口子（模型库
+    本身该报错的地方仍然报错），只是分环节覆盖这一层的失败姿态选择可用性优先。
+    """
+    provider = str(value or "").strip()
+    if not provider:
+        return None
+    valid = {choice["provider"] for choice in text_model_choices()}
+    return provider if provider in valid else None
+
+
 def protocol_for_provider(
     provider: str,
     *,

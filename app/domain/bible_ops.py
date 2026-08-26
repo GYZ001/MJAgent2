@@ -716,13 +716,25 @@ async def _bible_task(
         old_bible = None
         if old_row and old_row["bible_json"]:
             old_bible = json.loads(old_row["bible_json"])
-        bible = await asyncio.wait_for(
-            generate_bible(
-                chapters, feedback=feedback, previous_bible=old_bible,
-                project_id=project_id, visual_style_prompt=style_prompt,
-            ),
-            timeout=timeout_s,
-        )
+        from app import model_registry
+        from app.harness.text_provider_scope import stage_text_provider
+
+        resolved_text_provider = None
+        if "bible_text_provider" in _project_columns(conn):
+            provider_row = conn.execute(
+                "SELECT bible_text_provider FROM projects WHERE id=?", (project_id,),
+            ).fetchone()
+            resolved_text_provider = model_registry.resolve_stage_text_provider(
+                provider_row["bible_text_provider"] if provider_row else None
+            )
+        with stage_text_provider(resolved_text_provider):
+            bible = await asyncio.wait_for(
+                generate_bible(
+                    chapters, feedback=feedback, previous_bible=old_bible,
+                    project_id=project_id, visual_style_prompt=style_prompt,
+                ),
+                timeout=timeout_s,
+            )
         if old_bible:
             old_style = (old_bible.get("world") or {}).get("visual_style_canonical")
             old_refs = {c.get("name"): c.get("ref_image_path")

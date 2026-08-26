@@ -2590,11 +2590,28 @@ export interface ShotTiming {
   iterations: number;
 }
 
+/** 世界书/映射台/分镜台分环节文本模型下拉的单个可选项；只包含已配凭据的模型，
+ *  不会出现选了就必然失败的条目（见 app/model_registry.py::text_model_choices）。*/
+export interface TextModelChoice {
+  provider: string;
+  label: string;
+  model: string;
+}
+
 export interface Project {
   id: string;
   name: string;
   status: string;
   novel_chars: number;
+  /** 世界书环节专属文本模型（provider key）；空串＝未设置，回落到系统默认文本模型。 */
+  bible_text_provider?: string;
+  /** 映射台环节专属文本模型；含义同上。 */
+  script_text_provider?: string;
+  /** 分镜台环节专属文本模型；含义同上。与「视频模型」是两回事：视频模型控制
+   *  实际提交视频生成用哪个供应商，这里控制分镜台自身生成分镜内容用哪个文本模型。 */
+  board_text_provider?: string;
+  /** 当前可选的文本模型清单，三个环节共用同一份（凭据配置是全局的）。 */
+  text_model_choices?: TextModelChoice[];
   /** 各项目级任务的服务端计时。前端本地起点会在刷新后搁浅，一律以此为准。 */
   task_timings?: {
     bible?: TaskTiming;

@@ -1283,13 +1283,22 @@ async def _screenplay_task(
             run_id = None
 
         from app.production.prep_pack import run_episode_prep_pack
+        from app import model_registry
+        from app.harness.text_provider_scope import stage_text_provider
 
-        payload = await run_episode_prep_pack(
-            episode_id=episode_id,
-            episode=ep_data,
-            source_text=source_text,
-            run_id=run_id,
+        provider_row = conn.execute(
+            "SELECT script_text_provider FROM projects WHERE id=?", (ep["project_id"],),
+        ).fetchone()
+        resolved_text_provider = model_registry.resolve_stage_text_provider(
+            provider_row["script_text_provider"] if provider_row else None
         )
+        with stage_text_provider(resolved_text_provider):
+            payload = await run_episode_prep_pack(
+                episode_id=episode_id,
+                episode=ep_data,
+                source_text=source_text,
+                run_id=run_id,
+            )
         return payload
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():

@@ -20,6 +20,7 @@ import { useFocusTrap } from '../hooks/useFocusTrap'
 import { screenplayTaskNotice } from '../lib/productionNotices'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
 import { findPortraitImage, findSceneReferenceImage } from '../lib/bibleAssets'
+import StageTextModelPicker from '../components/StageTextModelPicker'
 import "../styles/ScriptPage.css";
 
 type ScreenplayProduction = NonNullable<
@@ -317,7 +318,7 @@ export function ScreenplayResumeButton({
 export default function ScriptPage() {
   const { episodeId, projectId, go, toast } = useNav()
   const { data: ep, refresh, error, status, loading } = useScriptEpisode(episodeId!)
-  const { data: project } = useProject(projectId!, 0, 'bible')
+  const { data: project, refresh: refreshProject } = useProject(projectId!, 0, 'bible')
   const [busy, setBusy] = useState(false)
   const [detailsExpanded, setDetailsExpanded] = useState(false)
   const [preview, setPreview] = useState<ActionPreview | null>(null)
@@ -482,6 +483,19 @@ export default function ScriptPage() {
       <header className="desk-head">
         <EpisodeCrumb label="映射台" view="script" episodeNo={ep.episode_no} />
         <h1>映射台 <span className="sub">《{ep.title}》 · 先发现本集人物/场景并映射到世界书素材，再交给分镜台生成视频提示词</span></h1>
+        <div className="stage-model-picker-row">
+          <StageTextModelPicker
+            projectId={projectId!}
+            field="script_text_provider"
+            label="文本模型（项目）"
+            title="映射台生成使用的文本模型（本页当前显示的是分集，但这个选择对整个项目所有分集的映射台生效，不是只对本集）。不选则使用系统默认文本模型，只影响之后新发起的映射，不影响已生成内容"
+            value={project?.script_text_provider}
+            choices={project?.text_model_choices ?? []}
+            disabled={busy}
+            toast={toast}
+            onSaved={() => void refreshProject({ force: true })}
+          />
+        </div>
         <hr className="rule" />
       </header>
 

@@ -735,6 +735,13 @@ def project_detail(
     full = view is None
     p = dict(_project_or_404(project_id))
     conn = get_conn()
+    from app import model_registry
+
+    # 世界书/映射台/分镜台分环节文本模型下拉的可选清单；p 里已经带着三个环节各自
+    # 保存的选择（bible_text_provider/script_text_provider/board_text_provider，
+    # 空串＝未设置，直接来自 projects 表原始行，不需要额外处理）。清单本身很小，
+    # 各视图都带上，不按 view 特判。
+    p["text_model_choices"] = model_registry.text_model_choices()
     p["refs_error"] = _present_refs_error(conn, p.get("refs_error"))
     if full or view in ("bible", "scenes", "episodes"):
         p["task_timings"] = _project_task_timings(conn, p)
@@ -937,6 +944,65 @@ def project_detail(
         ).fetchone()
         p["first_chapter_idx"] = first["idx"]
     return p
+
+
+_TEXT_MODEL_STAGE_COLUMNS = {
+    "bible_text_provider": "bible_text_provider",
+    "script_text_provider": "script_text_provider",
+    "board_text_provider": "board_text_provider",
+}
+
+
+def _require_project_write_scope(project_id: str) -> None:
+    """分环节文本模型选择改变的是"之后新发起的生成调用选哪个 provider"，会影响
+    产出一致性与费用；与 app/domain/storyboard_ops.py::_require_video_clear_write_scope
+    同档收在 manju:project-write（workspace_admin/production 持有，review/readonly
+    没有）——review 角色能看审阅但不该悄悄改别人后续任务用的模型。principal is
+    None 视为未挂会话闸门的内部调用，直接放行，约定与该函数一致。
+    """
+    from app.auth.principal import get_current_principal
+    from app.authz.resolve import _workspace_of_project
+
+    principal = get_current_principal()
+    if principal is None:
+        return
+    resolution = _workspace_of_project(get_conn(), project_id)
+    workspace_id = resolution.value if resolution.kind == "workspace" else None
+    if "manju:project-write" not in principal.scopes_for(workspace_id):
+        raise HTTPException(403, "修改分环节文本模型需要 manju:project-write 权限")
+
+
+@router.put("/projects/{project_id}/text-models")
+def set_project_text_models(project_id: str, body: dict):
+    """保存世界书/映射台/分镜台各自的专属文本模型（项目级，三个环节共用一个项目
+    设置，不按分集单独选）。body 只需带想改的字段；值为空串表示回落到全局默认
+    文本 provider。每个非空值都必须出现在当前 text_model_choices() 里——不接受
+    选一个没配凭据或已被删除的 provider，防止保存一个必然失败的选项。
+    """
+    from app import model_registry
+
+    _project_or_404(project_id)
+    _require_project_write_scope(project_id)
+    body = _as_body_dict(body)
+    valid_providers = {choice["provider"] for choice in model_registry.text_model_choices()}
+    updates: dict[str, str] = {}
+    for field, column in _TEXT_MODEL_STAGE_COLUMNS.items():
+        if field not in body:
+            continue
+        value = str(body.get(field) or "").strip()
+        if value and value not in valid_providers:
+            raise HTTPException(422, f"未知或不可用的文本模型：{field}={value}")
+        updates[column] = value
+    if not updates:
+        raise HTTPException(400, "未提供任何字段：bible_text_provider/script_text_provider/board_text_provider")
+    conn = get_conn()
+    set_clause = ", ".join(f"{column}=?" for column in updates)
+    conn.execute(
+        f"UPDATE projects SET {set_clause} WHERE id=?",
+        (*updates.values(), project_id),
+    )
+    conn.commit()
+    return {"project_id": project_id, **updates}
 
 
 @router.get("/projects/{project_id}/chapters/{idx}")

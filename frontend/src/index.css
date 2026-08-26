@@ -256,9 +256,42 @@ body {
 }
 .desk-head h1 .sub {
   font-size: 14px;
-  
+
   font-weight: 400;
-  
+
+}
+/* 世界书/映射台/分镜台共用：分环节文本模型下拉（StageTextModelPicker 组件）。
+   跨页复用，只能放在 index.css（放进任一页的 styles/*.css 会被
+   scripts/check_css_split.py 判成"不属于本页"）。分镜台把它塞进已有的
+   .board-action-group，不需要这个行容器；世界书/映射台的页头没有现成的工具条，
+   用它在 desk-head 里单独占一行、靠右对齐。 */
+.stage-model-picker-row {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+.stage-model-picker-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.stage-model-picker-item select {
+  min-width: 132px;
+}
+@media (max-width: 640px) {
+  .stage-model-picker-row {
+    justify-content: flex-start;
+  }
+  .stage-model-picker-item {
+    flex: 1 1 100%;
+    justify-content: space-between;
+    white-space: normal;
+  }
 }
 .prep-subnav {
   display: grid;

@@ -1626,6 +1626,14 @@ MIGRATIONS = (
     # 提交；切换必须走 app/domain/storyboard_ops.py 的显式确认清空入口，禁止
     # 静默转换（两套供应商的提示词方言互不兼容）。默认值对齐既有 provider 默认。
     "ALTER TABLE episodes ADD COLUMN target_video_model TEXT NOT NULL DEFAULT 'hiagent'",
+    # 世界书/映射台/分镜台分环节文本模型选择（项目级：三个环节挂在同一个项目下，
+    # 不按分集单独选）。值为 app/model_registry.py 目录条目的 provider key；空串
+    # 表示未设置，回落到全局默认文本 provider（app/hiagent.py::active_provider
+    # ("text")）。与视频模型不同，这里不做强绑定校验、不清空已有产出——切换只影响
+    # 之后新发起的该环节生成调用选哪个 provider，见 app/harness/text_provider_scope.py。
+    "ALTER TABLE projects ADD COLUMN bible_text_provider TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE projects ADD COLUMN script_text_provider TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE projects ADD COLUMN board_text_provider TEXT NOT NULL DEFAULT ''",
 )
 
 

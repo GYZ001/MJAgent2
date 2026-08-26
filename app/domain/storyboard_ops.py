@@ -1993,7 +1993,11 @@ async def _recorded_storyboard_task(
     try:
         conn = get_conn()
         ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
-        project = conn.execute("SELECT bible_artifact_id FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+        # 旧的最小化测试 schema 可能没有 board_text_provider 列（真实数据库总有，见
+        # app/db.py 迁移）；SELECT * 拿满全部列，缺列时下面按 None 处理，不炸查询。
+        project = conn.execute(
+            "SELECT * FROM projects WHERE id=?", (ep["project_id"],),
+        ).fetchone()
         bible_artifact_id = _storyboard_bound_bible_artifact_id(
             episode_id,
             ep,
@@ -2012,19 +2016,26 @@ async def _recorded_storyboard_task(
                 "screenplay", ep["screenplay_json"],
                 source_artifact_id=ep["screenplay_artifact_id"], limit=24000,
             )
-        _step_id, supervisor_result = await recorder.step(
-            "storyboard",
-            lambda: _storyboard_task_with_sqlite_lock_retry(
-                episode_id,
-                resume=resume,
-                run_id=getattr(recorder, "run_id", None),
-                new_activation=new_activation,
-            ),
-            contract_key="storyboard",
-            agent_name="storyboard_supervisor",
-            input_artifact_ids=input_ids,
-            context_manifest=context.manifest(),
+        from app import model_registry
+        from app.harness.text_provider_scope import stage_text_provider
+
+        resolved_text_provider = model_registry.resolve_stage_text_provider(
+            dict(project).get("board_text_provider") if project else None
         )
+        with stage_text_provider(resolved_text_provider):
+            _step_id, supervisor_result = await recorder.step(
+                "storyboard",
+                lambda: _storyboard_task_with_sqlite_lock_retry(
+                    episode_id,
+                    resume=resume,
+                    run_id=getattr(recorder, "run_id", None),
+                    new_activation=new_activation,
+                ),
+                contract_key="storyboard",
+                agent_name="storyboard_supervisor",
+                input_artifact_ids=input_ids,
+                context_manifest=context.manifest(),
+            )
         result = conn.execute(
             "SELECT status, script_error, storyboard_artifact_id FROM episodes WHERE id=?",
             (episode_id,),

@@ -27,6 +27,7 @@ import CharacterQaPanel from '../components/CharacterQaPanel'
 import DecisionDialog from '../components/DecisionDialog'
 import ImageCompareModal from '../components/ImageCompareModal'
 import OperationError from '../components/OperationError'
+import StageTextModelPicker from '../components/StageTextModelPicker'
 import "../styles/BiblePage.css";
 
 const CHAR_QA_PASS = 0.6
@@ -1058,6 +1059,19 @@ export default function BiblePage() {
           }}
         />
         <h1>人物谱 <span className="sub">角色资产与定妆版本中心 · 保持跨镜头、跨分集一致</span></h1>
+        <div className="stage-model-picker-row">
+          <StageTextModelPicker
+            projectId={projectId!}
+            field="bible_text_provider"
+            label="文本模型（项目）"
+            title="世界书生成使用的文本模型。作用域：整个项目；不选则使用系统默认文本模型，只影响之后新发起的谱写，不影响已生成内容"
+            value={p.bible_text_provider}
+            choices={p.text_model_choices ?? []}
+            disabled={busy}
+            toast={toast}
+            onSaved={() => void refresh({ force: true })}
+          />
+        </div>
         <hr className="rule" />
       </header>
 

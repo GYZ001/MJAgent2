@@ -1499,7 +1499,8 @@ async def _plain_chat_request(
 _RESPONSE_FORMAT_REQUIRED_JSON_SCHEMA_RETRIES = 2
 
 
-async def chat(messages: list[dict], *, model: str | None = None, temperature: float = 0.7,
+async def chat(messages: list[dict], *, model: str | None = None, provider: str | None = None,
+               temperature: float = 0.7,
                max_tokens: int = 65535, call_meta: dict | None = None,
                usage_callback: Callable[[dict[str, Any]], None] | None = None,
                response_format: dict[str, Any] | None = None) -> str:
@@ -1510,10 +1511,15 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
     response_format 用于让网关在生成时就约束输出为合法 JSON（json_object / json_schema）。
     这些供应商都实现 OpenAI 兼容协议，普遍支持该字段；若某 provider/model 以客户端错误
     明确拒绝该字段，普通调用会记为不支持并去掉该字段重试一次。声明
-    ``response_format_required`` 的权威调用则原样失败，绝不降级结构化约束。"""
+    ``response_format_required`` 的权威调用则原样失败，绝不降级结构化约束。
+
+    ``provider`` 显式指定时覆盖 ``active_provider("text")``（世界书/映射台/分镜台
+    的分环节模型选择用它连带换对连接，而不是只换模型 ID——同一 provider 下的
+    base_url/api_key/协议才是一致的；不传时行为与此前完全一致。"""
     timeout = httpx.Timeout(connect=10, read=_chat_read_timeout_s(call_meta), write=30, pool=10)
     provider, selected_model, effective_max_tokens = text_request_token_limits(
         requested_max_tokens=max_tokens,
+        provider=provider,
         model=model,
     )
     token_limits = active_model_token_limits(provider, selected_model, get_setting)
