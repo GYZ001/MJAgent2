@@ -4797,3 +4797,132 @@ def test_prep_pack_version_is_1_8_0():
     第三位，不动 schema 位（asset_manifest.scenes[] 自身字段集合不变，
     quote 只是 _ModelSceneMention 这一模型响应内部字段，不进入发布产物）。"""
     assert prep_pack.PREP_PACK_VERSION == "2.0.2"
+
+
+# ---------------------------------------------------------------------------
+# 角色维度单独退化的可见性信号（第31轮真实回归 EP7，ep_621d93ac1231）：见
+# _generate_prep_pack_once 里 character_manifest_anomaly 那段大注释。真实
+# 事故——chunk 抽取第一次调用本已正确报出主角，但那次调用所在的 run 中途
+# 被打断；同一 run_id 重新整体起跑后，chunk 抽取的原始 JSON 结构中途缺了
+# 一段，本地格式修复 candidate 被 app.harness.model_gateway.
+# _latest_json_authority_root 误判成末尾一个只含 scenes 的孤立片段，格式
+# 修复调用据此"忠实"地只交回 scenes、把 characters/props 一并修没了——
+# scene_mentions 非空使"三项任一非空就放行"的门禁直接放行，角色维度归零
+# 这件事从此再没有任何信号能被看见（该集最终发布的 asset_manifest.
+# characters == []，唯一主角出场约43次却被漏光）。这里不复现 model_
+# gateway 的 JSON 误判本身（那是另一层、更底层的既有缺陷点，见
+# ERR-20260824-7ab7cb 的既有说明），只验证 prep_pack.py 这一层新增的可见
+# 性信号：_extract_chunk 返回空 characters + 非空 scenes 时，
+# character_manifest_anomaly 必须被计算出来、不能是 None——不拦截发布
+# （既定方向是必被看见，不是必被拦住）。
+# ---------------------------------------------------------------------------
+
+def test_empty_character_mentions_with_nonempty_scene_mentions_is_flagged_visible(
+    monkeypatch,
+) -> None:
+    """红灯改绿灯：EP7 真实事故的最小复现。已登记角色谱非空
+    （known_characters=['李四']），chunk 抽取回来的 characters 却是空
+    列表，scenes 非空——这正是那道"三项任一非空即放行"门禁天生看不见的
+    单维度退化。断言 character_manifest_anomaly 非 None、且里面记录的
+    计数跟真实输入一致；同时确认这不是拦截（payload 仍然正常产出，
+    characters 确实是空列表——可见不拦停）。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp1','p1','李四',1,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end) "
+        "VALUES ('sr1','p1','演武场',1,NULL)"
+    )
+    conn.commit()
+    # _generate_prep_pack_once 内部不接受 conn 参数，永远读模块级 get_conn()
+    # （生产环境下指向 app.db 的任务级/线程级单例连接）——跟本文件其余测试
+    # 直接调用 _resolve_assets(conn, ...)（显式传参）不是同一层级。这里换成
+    # monkeypatch 模块级 get_conn，让它在测试范围内返回上面搭好的内存夹具，
+    # 不触碰真实数据库（pytest 的 sandbox 隔离本身已经保证 app.db 不会碰到
+    # 真实 data/manju.db，这里再加一层是为了让 _generate_prep_pack_once
+    # 真正读到本测试插入的 character_portraits/scene_references 行）。
+    monkeypatch.setattr(prep_pack, "get_conn", lambda: conn)
+
+    source_text = "老者站在演武场上说话。"
+
+    async def fake_extract_chunk(**_kwargs) -> prep_pack._ChunkResponse:
+        return prep_pack._ChunkResponse(
+            characters=[],
+            scenes=[
+                prep_pack._ModelSceneMention(
+                    display_name="演武场",
+                    suspected_true_name=None,
+                    segment_indexes=[1],
+                    quote=source_text,
+                )
+            ],
+            props=[],
+            paratext_segments=[],
+        )
+
+    monkeypatch.setattr(prep_pack, "_extract_chunk", fake_extract_chunk)
+
+    (
+        payload, _rejected_paratext_claims, _true_name_hints,
+        _scene_alias_anchors, _rejected_alias_conflicts, character_manifest_anomaly,
+    ) = asyncio.run(prep_pack._generate_prep_pack_once(
+        episode_id="ep-test", episode_no=2, project_id="p1",
+        chapter_indexes=[], source_text=source_text, run_id=None, attempt_hint="",
+    ))
+
+    assert payload["asset_manifest"]["characters"] == [], (
+        "复现前提：角色维度确实退化为空（不是这条测试断言的目标，是它的前提）"
+    )
+    assert payload["asset_manifest"]["scenes"], "场景维度必须仍然非空，门禁才会被放行"
+    assert character_manifest_anomaly is not None, (
+        "已登记角色谱非空、scenes 非空、characters 却整段为空——"
+        "这个可疑信号必须被记录下来，不能悄悄消失"
+    )
+    assert character_manifest_anomaly["known_character_count"] == 1
+    assert character_manifest_anomaly["scene_mention_count"] == 1
+    assert character_manifest_anomaly["prop_mention_count"] == 0
+
+
+def test_empty_character_mentions_without_known_roster_is_not_flagged(monkeypatch) -> None:
+    """对照绿灯：这个信号判据必须是"从数据推导"，不是"角色是空的就报警"。
+    项目根本没有登记过任何角色（known_characters 为空）时，即便本集
+    characters 确实是空列表，也不该被标为异常——空谱本身就说明"没有已知
+    角色可比对"，不是可疑的单维度退化。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end) "
+        "VALUES ('sr1','p1','演武场',1,NULL)"
+    )
+    conn.commit()
+    monkeypatch.setattr(prep_pack, "get_conn", lambda: conn)
+
+    source_text = "老者站在演武场上说话。"
+
+    async def fake_extract_chunk(**_kwargs) -> prep_pack._ChunkResponse:
+        return prep_pack._ChunkResponse(
+            characters=[],
+            scenes=[
+                prep_pack._ModelSceneMention(
+                    display_name="演武场",
+                    suspected_true_name=None,
+                    segment_indexes=[1],
+                    quote=source_text,
+                )
+            ],
+            props=[],
+            paratext_segments=[],
+        )
+
+    monkeypatch.setattr(prep_pack, "_extract_chunk", fake_extract_chunk)
+
+    (
+        _payload, _rejected_paratext_claims, _true_name_hints,
+        _scene_alias_anchors, _rejected_alias_conflicts, character_manifest_anomaly,
+    ) = asyncio.run(prep_pack._generate_prep_pack_once(
+        episode_id="ep-test", episode_no=2, project_id="p1",
+        chapter_indexes=[], source_text=source_text, run_id=None, attempt_hint="",
+    ))
+
+    assert character_manifest_anomaly is None

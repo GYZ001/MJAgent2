@@ -4493,7 +4493,7 @@ async def _generate_prep_pack_once(
     attempt_hint: str,
 ) -> tuple[
     dict[str, Any], list[int], list[dict[str, Any]],
-    list[dict[str, Any]], list[dict[str, Any]],
+    list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None,
 ]:
     conn = get_conn()
     segments = index_source_segments(source_text)
@@ -4582,6 +4582,35 @@ async def _generate_prep_pack_once(
     if not character_mentions and not scene_mentions and not prop_mentions:
         raise PrepPackGateError("本集未发现任何人物/场景/道具", had_events=False)
 
+    # 角色单项退化的可见性信号（第31轮真实回归 EP7，ep_621d93ac1231；不
+    # 拦截，只留痕）：上面这道门禁是 OR 判据——character_mentions/scene_
+    # mentions/prop_mentions 任一非空就放行，天然覆盖不到"角色这一项单独
+    # 退化为零、其它维度仍有实质内容"的情形。真实事故正是这种：本集主角
+    # 在原文单块 45 段内出场约 43 次，chunk 抽取的原始响应第一次调用本已
+    # 正确报出该角色，但那次调用所在的 run 中途被打断，同一 run_id 重新
+    # 整体起跑后，chunk 抽取的原始 JSON 结构中途缺了一段，本地格式修复
+    # candidate 被 app.harness.model_gateway._latest_json_authority_root
+    # 误判成末尾一个只含 scenes 的孤立片段（详见该函数与
+    # ERR-20260824-7ab7cb 的既有说明），格式修复调用据此"忠实"地只交回
+    # scenes、把 characters/props 一并修没了——scene_mentions 非空使上面
+    # 那道门禁直接放行，角色维度归零这件事从此再没有任何信号能被看见。
+    # 判据纯数据推导，不认名字：known_characters 非空说明本项目已有登记
+    # 角色谱、这一集理应有角色可映射；scene_mentions/prop_mentions 任一
+    # 非空说明这段原文确有实质内容被成功抽取，不是"这段原文本来就没有
+    # 角色出场"（例如纯风景过场）——两个条件同时成立时 character_mentions
+    # 仍整段为空就是可疑信号。只记录进 _publish_prep_pack 的 evaluation.
+    # evidence（同 rejected_paratext_claims 等既有观测字段的路子），不
+    # raise：既定方向是必被看见，不是必被拦住，交付判据仍然是逐条对原文。
+    character_manifest_anomaly = (
+        {
+            "known_character_count": len(known_characters),
+            "scene_mention_count": len(scene_mentions),
+            "prop_mention_count": len(prop_mentions),
+        }
+        if known_characters and not character_mentions and (scene_mentions or prop_mentions)
+        else None
+    )
+
     delivered_indexes: set[int] = set()
     for mention in (*character_mentions, *scene_mentions, *prop_mentions):
         delivered_indexes.update(mention["segment_indexes"])
@@ -4653,7 +4682,7 @@ async def _generate_prep_pack_once(
     }
     return (
         payload, rejected_paratext_claims, true_name_hints,
-        scene_alias_anchors, rejected_alias_conflicts,
+        scene_alias_anchors, rejected_alias_conflicts, character_manifest_anomaly,
     )
 
 
@@ -4670,6 +4699,7 @@ def _publish_prep_pack(
     true_name_hints: list[dict[str, Any]] | None = None,
     scene_alias_anchors: list[dict[str, Any]] | None = None,
     rejected_alias_conflicts: list[dict[str, Any]] | None = None,
+    character_manifest_anomaly: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     conn = get_conn()
     contract = get_contract("screenplay")
@@ -4759,6 +4789,20 @@ def _publish_prep_pack(
                     # _prep_pack_cross_episode_alias_conflict, real EP3
                     # regression: "小胖子" wrongly rebound to "王有材").
                     "rejected_alias_conflicts": rejected_alias_conflicts or [],
+                    # 第31轮真实回归 EP7, ep_621d93ac1231, version NOT
+                    # re-bumped -- pure observability addition, no schema/
+                    # prompt-contract/resolution-logic change (same footnote
+                    # convention as the 1.5.2 "version NOT re-bumped" notes
+                    # above): non-null only when character_mentions came back
+                    # empty from chunk extraction while known_characters and
+                    # (scene_mentions or prop_mentions) were both non-empty --
+                    # a suspicious single-dimension degeneration that the "any
+                    # one of characters/scenes/props non-empty" gate above
+                    # cannot see (see _generate_prep_pack_once's comment at
+                    # that same gate). Observability only, never blocks
+                    # publish -- see that comment for why this data-derived
+                    # signal exists and why it stays non-blocking.
+                    "character_manifest_anomaly": character_manifest_anomaly,
                 },
             ),
             step_run_id=step_id,
@@ -4894,6 +4938,7 @@ async def run_episode_prep_pack(
             (
                 payload, rejected_paratext_claims, true_name_hints,
                 scene_alias_anchors, rejected_alias_conflicts,
+                character_manifest_anomaly,
             ) = await _generate_prep_pack_once(
                 episode_id=episode_id,
                 episode_no=episode_no,
@@ -4909,6 +4954,7 @@ async def run_episode_prep_pack(
                 true_name_hints=true_name_hints,
                 scene_alias_anchors=scene_alias_anchors,
                 rejected_alias_conflicts=rejected_alias_conflicts,
+                character_manifest_anomaly=character_manifest_anomaly,
             )
             return payload
         except PrepPackGateError as exc:
