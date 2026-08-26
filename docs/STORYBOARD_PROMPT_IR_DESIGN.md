@@ -1,55 +1,136 @@
-# 分镜提示词架构决策：结构化 IR + 双供应商编译器（P1 设计输入）
+# 分镜提示词架构决策
 
-日期：2026-08-24。用户提供 Seedance / MiniMax H3 两套提示词 skill（已归档
-docs/prompt-skills/），问：分镜台生成提示词前先选视频模型，还是直接生成两套？
+## 决策变更记录
 
-## 决策：都不是——单一 IR 真源，供应商编译器按需渲染
+**2026-08-24 原决策（已废止）**：分镜台产出供应商无关的结构化 IR，每个供应商一个
+确定性编译器，派发时（生成台）选模型并编译；需要两套时对同一 IR 跑两个编译器。
+IR 含 `frame_chain_intent` 支持 I2VA/FL2VA/L2VA 首尾帧链。
 
-- 分镜台产出**供应商无关的结构化分镜 IR**；
-- 每个供应商一个**确定性编译器**（Seedance / H3），派发时（生成台）选模型并编译；
-- 需要"两套"时对同一 IR 跑两个编译器，成本为纯计算。
+**2026-08-26 现决策（用户拍板，本文其余部分依此）**：三处推翻。
 
-依据：
-1. 两模型提示词哲学相反（中文散文暗示 vs 英文结构化字段），手维护两套 = 内容层
-   E 类重复真源，必然漂移（P0 期间刚因版本常量重复真源挨过独立 Review 的 P0 判）。
-2. skill 自带的 seedance-vs-h3.md 证明双向迁移是**机械七步**（拆头/镜头改写/翻译/
-   运镜升维/音频拆分/约束移位/引用改编号）——机械变换是编译器职责，不是模型创作。
-3. 决策④（HiAgent 主力、H3 版权兜底）要求切换零重做；IR+编译器把切换降为派发开关，
-   且支持将来混合策略（私有 H3 跑草稿、Seedance 出终版）。
+| | 原 | 现 | 用户依据 |
+|---|---|---|---|
+| 提示词怎么来 | 模型填结构化 IR，代码确定性编译成提示词文本 | **模型直接产出整块提示词文本** | 「提示词必须让模型生成，要把小说原文和事件划分都发给模型，让模型针对每个事件出提示词」 |
+| 什么时候选模型 | 供应商无关，派发时选 | **分镜台前端先选，与生成台强绑定** | 「只需要在分镜台前端加个按钮…选择了哪个模型就只能用哪个模型生成视频」 |
+| 跨段一致性 | 首尾帧链（段 N 末帧 → 段 N+1 首帧） | **只用参考图模式**，首尾帧链不做 | 「以后不用首尾帧这种方式了，只用参考图模式」 |
 
-## IR 字段超集（每镜，冻结草案，P1 细化）
+原决策的核心顾虑——两套提示词手工维护会漂移——在现决策下由**强绑定**解决：一集只
+存在一套方言的提示词，不存在两份需要保持同步的真源。切换模型作废该集已生成的提示词，
+不做静默转换。
 
-| 字段 | Seedance 编译 | H3 编译 |
-|------|---------------|---------|
-| duration_s + cut_intent | 括号软提示；节奏靠镜头数（3-4 镜/段） | `At MM:SS.mmm` 精确切点，严格递增 |
-| camera{type, amplitude, speed} | 降维单个中文运镜词（一镜一词） | 三维英文句嵌进动作 |
-| shot_size（六级景别） | 中文词 | 英文并入构图描述 |
-| action（单一具体动词核心） | 成分顺序：运镜→主体→动作→场景→光影 | 沿时间线写进 integrated_multimodal_description |
-| subjects[]（identity_id→定妆照） | `@角色名` | `Picture N` + 职责声明行 |
-| dialogue[]{speaker, line} | 融进音频描述散文 | `(S1)` + `<d>[Chinese] 原话</d>` |
-| on_screen_text | **能力缺失**：编译为"无字"+ 后期合成标记 | 双引号原文（官方能力） |
-| soundscape / bgm | 合写"全片贯穿"一段 | 拆 overall_soundscape / non_diegetic_music 两字段 |
-| style_anchor | 首句预告片质感暗示（多镜触发器） | `[Shot 1]` 开头风格词 |
-| frame_chain_intent（首尾帧链） | **能力缺失**：降级为参考图+文字重锚 | I2VA/FL2VA/L2VA 固定指令行（逐字符，不许改写） |
+## 上游变更：事件链取消
 
-**降级纪律**：单侧能力编译到不支持侧时按 skill 的反向迁移规则降级，且降级项必须
-写入编译产物元数据（`degraded_capabilities[]`）——不做静默降级（家规 A 类）。
+同日决策：剧本台改造成**映射台**，不再产出事件列表，只做三件事——本章新人物/新场景
+发现、人物与地点到世界书图像素材的映射、模糊称谓到人物谱正名的映射。
 
-## 模型无关内容层（进 IR 生成 prompt，只维护一份）
+因此「这一集有几段」的定量职责**搬到分镜台**：按 novel-to-storyboard SOP 第 1 步，
+分镜台通读本章原文列节拍表，节拍按叙事单元归段，每段 15 秒 / 3-4 镜。段数由节拍决定，
+不由上游给。这一条是整个改造的支点——不定死它，取消事件列表就等于没有任何东西决定
+段数。
 
-情绪写成面部肌肉动作；关键道具锚定为构图约束；连续性元素逐镜重复；群像写死人数；
-特效用物理描述不用文化词；收尾用格局镜；一次只改一处再重跑。
-（源：novel-to-storyboard/references/failure-modes.md）
+## 分镜台契约（2.0.0，冻结）
+
+输入：本章小说原文（按 segment_index 分段）+ 映射台的 asset_manifest / appellation_map
++ 该集选定的 `target_video_model`。
+
+```
+{
+  "storyboard_version": "2.0.0",
+  "episode_no": int,
+  "target_model": "seedance_2" | "minimax_h3",
+  "beat_sheet": [{"beat_id": str, "summary": str, "segment_indexes": [int]}],
+  "segments": [{
+    "segment_no": int,
+    "duration_s": 15,
+    "synopsis": str,
+    "source_segment_indexes": [int],
+    "prompt_text": str,
+    "shot_count": int,
+    "dialogue": [{"speaker_identity_id": str, "line": str, "source_segment_index": int}],
+    "resources": {
+      "characters": [{"identity_id": str, "portrait_id": str|null, "description": str}],
+      "scenes": [{"scene_id": str, "scene_reference_id": str|null, "description": str}],
+      "props": [{"label": str, "description": str}]
+    },
+    "degraded_capabilities": [str]
+  }]
+}
+```
+
+三个字段的存在理由，不许在实现时"简化"掉：
+
+- **`prompt_text` 是模型直接产出的整块可复制文本**，代码不再拼装、不再挂尾缀。skill
+  明确要求每段提示词是一整块可直接复制的文本——把风格尾缀拆出去让用户自己拼，是最
+  常见的人为失误来源。
+- **`dialogue` 与 `prompt_text` 并存不是冗余**：`prompt_text` 是给模型看的，`dialogue`
+  是给闸门看的，用于逐字回查原文（见下）。
+- **`source_segment_indexes` 是验收的抓手**：交付判据是逐条比对原文，没有这个回指就
+  只能靠人肉找。
+
+`resources` 的映射规则：人物与场景尽量指向映射台的真实素材（`portrait_id` /
+`scene_reference_id`）；实在映射不到的，以及物品类（世界书没有物品素材库），
+`*_id` 留 null，只出文字描述。
+
+## 台词闸门（唯一从 F1-F6 那批幸存的闸门）
+
+原 F1-F6「内容不许编」批次是老「事件链→分镜大纲→逐镜」管线上的闸门，管线拆了闸门
+跟着走。只有 F3 的内核升级留用：
+
+**模型写进提示词的每一句台词，必须逐字出自本章原文。** 校验对象是 `dialogue[]` 以及
+`prompt_text` 里的台词块（H3 的 `<d>[Chinese] …</d>`、Seedance 音频描述里的引语），
+回查 `source_segment_index` 指向的原文段落，切点必须落在句子边界。
+
+EP6「李富贵那条编造台词」的根因是台词经过事件 summary 的压缩改写。新架构里台词不再
+经过 summary，模型直接引原文——这个根因是被结构消掉的，不是被闸门拦住的。闸门留着是
+为了证明它确实被消掉了。
+
+## 两套方言的差异（实现时按 target_model 二选一，不并存）
+
+| | Seedance 2.0（provider `hiagent`） | MiniMax H3（provider `minimax_h3`） |
+|---|---|---|
+| 形态 | 中文自由散文 | 三字段 `integrated_multimodal_description` / `overall_soundscape` / `non_diegetic_music` |
+| 时间 | 「镜头1/2/3」序号；秒数只写括号里当软提示 | `[Shot N] At 00:03.500` 严格递增真切点 |
+| 多镜触发 | 15s 时长 + 首句「电影级预告片质感，多镜头叙事，镜头之间硬切」 | 原生，写几个 `[Shot N]` 就是几镜 |
+| 语言 | 全中文 | 描述用英文；台词与屏上文字保留原文 |
+| 角色引用 | `@角色名` + 参考图 | 素材编号 + 一句职责声明 |
+| 台词 | 融进音频描述 | `(S1)` 说话人 ID + `<d>[Chinese] 原话</d>` |
+| 屏上文字 | **能力缺失**：汉字必乱码 → 写「无字」，进后期合成清单 | 官方强项 → 双引号原文 |
+| 音频 | 「全片贯穿」一段带过 | 拆两个字段，且**不许留空**（留空不等于静音，模型会自己补且不受控） |
+
+**降级不许静默**：Seedance 侧的屏上文字能力缺失，必须写进该段的
+`degraded_capabilities[]` 并产出后期文字合成清单。
+
+## 模型无关的内容层（两套方言共用，只维护一份）
+
+来自 novel-to-storyboard/references/failure-modes.md，每条都对应一个实测踩过的坑。
+放弃首尾帧链后，前三条从"建议"提升为**生成时校验**——它们是跨段一致性仅剩的防线：
+
+1. **连续性元素逐镜重复写**（头巾、发髻、腰带、伤疤）；只在开头的角色定义里写一次，
+   段边界必掉。
+2. **角色锚每镜重新点名**，不能指望模型记住三次切镜。
+3. **群像锁死人数并加负向约束**；不锁，模型会自己加人，且加进来的往往面部崩坏。
+4. 情绪写成面部肌肉动作，不写抽象情绪词。
+5. 关键叙事道具锚定为构图约束（「始终清晰可见 + 画面位置」），不写「道具被抛出」。
+6. 特效用物理描述代替文化词（「化作长虹」→「一道细长银白光带高速横穿画面并留下拖影」）。
+7. 收尾段最后一镜必须是格局镜（大远景/升起拉远），否则片子断在人物中景上没有落点。
+8. 失败重跑一次只改一处（主体、运镜、光线三者之一），否则无法归因。
 
 ## QC
 
-成片质检（切点、色温、响度、面部一致性）模型无关，直接收编
-docs/prompt-skills/novel-to-storyboard/scripts/qc_video.py，接入生成台验收链。
+成片质检（切点、色温、响度、面部一致性）与模型无关，直接收编
+`docs/prompt-skills/novel-to-storyboard/scripts/qc_video.py`，接入生成台验收链。
+依赖 ffmpeg/ffprobe 与 cv2/PIL/numpy，属 P2——先得有成片。
 
 ## 与既有代码的衔接
 
-- `app/video_prompt_profiles.py` 已是"每供应商一个 profile"的正确接缝，P1 在此扩展
-  为完整编译器（现 SEEDANCE_2_PROFILE 的单镜头规则整段重写，见冻结方案 P1 节）。
-- `app/compiler.py` 时长夹取（5-10s）放开到两家实测上限 15s。
-- H3 编译器的固定指令行（模式信标）必须逐字符照抄 official-format.md——加结构性
-  断言测试锁字面量，防止被"顺手改写"（C 类守卫）。
+- `app/video_prompt_profiles.py` 的 `SEEDANCE_2_PROFILE` / `MINIMAX_H3_PROFILE` 是正确
+  接缝，保留；但职责从「编译器规则」收窄为「交给模型的方言约束」。
+- `app/video_prompt_ai.py` 的 `generate_ai_video_prompt` 位置不对：它挂在
+  `app/media_exec/run_job.py:3393`，视频任务执行时才跑，吃的是单个 `Shot` 和内部
+  Cinematic Continuity Contract，不是小说原文；且最终提示词字符串由
+  `_render_seedance_prompt` / `_render_minimax_h3_prompt` 用代码拼。这条路径要上移到
+  分镜台、换输入为原文+映射、去掉代码拼装。
+- `app/compiler.py` 时长夹取已放开到 15s（提交 5d77e45）。
+- H3 的固定指令行是模式信标，逐字符照抄 `official-format.md`，加断言测试锁字面量，
+  防止被「顺手改写」。放弃首尾帧链后只剩 T2VA 与参考图模式，I2VA/FL2VA/L2VA 的对齐
+  指令行不再需要。
