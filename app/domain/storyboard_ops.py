@@ -2869,6 +2869,8 @@ async def clear_storyboard_projection(episode_id: str) -> dict:
     def _reset_projection() -> dict:
         import shutil
 
+        from app.completion_grant import ProviderTasksNotTerminalError
+
         ep = _episode_or_404(episode_id)
         if ep["screenplay_publish_fence"]:
             raise HTTPException(409, "剧本正在发布，请完成后再清空分镜")
@@ -3039,6 +3041,11 @@ async def clear_storyboard_projection(episode_id: str) -> dict:
                 "screenplay_preserved": True,
                 "audit_history_preserved": True,
             }
+        except ProviderTasksNotTerminalError as exc:
+            conn = get_conn()
+            if conn.in_transaction:
+                conn.rollback()
+            raise HTTPException(409, exc.detail) from exc
         except Exception:
             conn = get_conn()
             if conn.in_transaction:
@@ -3062,6 +3069,8 @@ async def clear_storyboard(episode_id: str):
     removes checkpoints, workflow/provider cache rows, active revisions and all
     shot-derived media so the next start is observably and behaviorally clean.
     """
+    from app.completion_grant import ProviderTasksNotTerminalError
+
     ep = _episode_or_404(episode_id)
     if ep["screenplay_publish_fence"]:
         raise HTTPException(409, "剧本正在发布，请完成后再清空分镜")
@@ -3311,6 +3320,11 @@ async def clear_storyboard(episode_id: str):
             "cancelled_tasks": cancelled_tasks,
             "screenplay_preserved": True,
         }
+    except ProviderTasksNotTerminalError as exc:
+        conn = get_conn()
+        if conn.in_transaction:
+            conn.rollback()
+        raise HTTPException(409, exc.detail) from exc
     except Exception:
         conn = get_conn()
         if conn.in_transaction:
@@ -3929,9 +3943,15 @@ def _set_row_final_contract(conn, shot_id: str, final: bool) -> None:
 
 @router.post("/episodes/{episode_id}/storyboard/structure")
 def apply_storyboard_structure(episode_id: str, body: dict):
+    from app.completion_grant import ProviderTasksNotTerminalError
+
     conn = get_conn()
     try:
         return _apply_storyboard_structure_transaction(episode_id, body)
+    except ProviderTasksNotTerminalError as exc:
+        if conn.in_transaction:
+            conn.rollback()
+        raise HTTPException(409, exc.detail) from exc
     except Exception:
         if conn.in_transaction:
             conn.rollback()

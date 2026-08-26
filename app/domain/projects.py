@@ -1532,6 +1532,8 @@ def _assert_no_other_episode_work(project_id: str, deleting_episode_id: str) -> 
 
 async def _delete_episode_core(episode_id: str) -> dict:
     """Permanently remove one episode and every downstream production asset."""
+    from app.completion_grant import ProviderTasksNotTerminalError
+
     ep = dict(_episode_or_404(episode_id))
     project = get_conn().execute(
         "SELECT plan_status FROM projects WHERE id=?", (ep["project_id"],)
@@ -1555,10 +1557,29 @@ async def _delete_episode_core(episode_id: str) -> dict:
     ).fetchone()
     if not ep:
         raise HTTPException(404, f"分集不存在：{episode_id}")
-    evidence_removed = _delete_episode_evidence(conn, episode_id)
-    worker.delete_episode_shots(episode_id)
-    conn.execute("DELETE FROM episodes WHERE id=?", (episode_id,))
-    conn.commit()
+    # 与 _delete_project_core 同一个理由、同一种写法：_delete_episode_evidence →
+    # worker.delete_episode_shots → DELETE episodes → commit 中途任何未捕获异常
+    # 冒到 app/main.py 的全局处理器都会调 errors.log_error，而 log_error 目前在
+    # 调用方的 task 缓存连接上隐式 commit——谁先提交谁定型，回滚必须在那之前，
+    # 且必须是 except 分支的第一条语句（同一顺序要求见 _storyboard_task 顶层
+    # except 分支上方的大注释）。这里只加回滚兜底，不改变任何拦截判定：内层
+    # ProviderTasksNotTerminalError 分支仍然优先命中并把 409 转换好，外层
+    # except 只在它重新抛出的 HTTPException 上做一次空操作回滚（此时事务已经
+    # 不在途）再原样重新抛出，不会把 409 吞成别的状态码。
+    try:
+        evidence_removed = _delete_episode_evidence(conn, episode_id)
+        try:
+            worker.delete_episode_shots(episode_id)
+        except ProviderTasksNotTerminalError as exc:
+            if conn.in_transaction:
+                conn.rollback()
+            raise HTTPException(409, exc.detail) from exc
+        conn.execute("DELETE FROM episodes WHERE id=?", (episode_id,))
+        conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
 
     import shutil
     shutil.rmtree(
