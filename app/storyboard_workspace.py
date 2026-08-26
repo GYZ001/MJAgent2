@@ -366,15 +366,6 @@ def require_preview(
         raise
 
 
-def consume_preview(token: str) -> None:
-    conn = get_conn()
-    conn.execute(
-        "UPDATE storyboard_action_previews SET consumed_at=COALESCE(consumed_at,?) WHERE token=?",
-        (now(), token),
-    )
-    conn.commit()
-
-
 def shot_content_hash(shot_row) -> str:
     artifact_id = shot_row["storyboard_artifact_id"]
     if artifact_id:
@@ -442,10 +433,6 @@ def assert_storyboard_mutation_allowed(conn, episode_id: str) -> None:
         raise HTTPException(409, reason)
 
 
-def _storyboard_run_active(conn, episode_id: str) -> bool:
-    return storyboard_mutation_block_reason(conn, episode_id) is not None
-
-
 def create_edit_session(shot_id: str) -> dict[str, Any]:
     conn = get_conn()
     shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
@@ -501,12 +488,6 @@ def require_edit_session(token: str | None, shot_id: str) -> dict[str, Any]:
             "current_hash": current_hash,
         })
     return dict(row)
-
-
-def close_edit_session(token: str, status: str = "saved") -> None:
-    conn = get_conn()
-    conn.execute("UPDATE storyboard_edit_sessions SET status=? WHERE token=?", (status, token))
-    conn.commit()
 
 
 def chapter_sources(episode_id: str, *, conn=None) -> list[dict[str, Any]]:

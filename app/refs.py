@@ -72,12 +72,6 @@ PRODUCTION_APPEARANCE_MIN_CHARS = 20
 PRODUCTION_APPEARANCE_MAX_CHARS = 80
 
 
-def contains_non_production_appearance(anchor: str) -> bool:
-    """Legacy compatibility: prose content is never classified by word lists."""
-    _ = anchor
-    return False
-
-
 def production_appearance_anchor(anchor: str) -> str:
     """Preserve the approved appearance contract without lexical filtering."""
     return normalize_prompt_text(anchor or "").strip()

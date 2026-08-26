@@ -8,7 +8,6 @@ from typing import Any
 from app.db import get_conn
 
 
-REFERENCE_ARTIFACT_TYPES = {"character_portrait", "scene_reference"}
 REJECTED_CANDIDATE_STATUSES = {
     "blocked_deleted",
     "cleanup_pending",

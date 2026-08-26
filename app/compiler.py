@@ -25,7 +25,6 @@ QUALITY_SUFFIX = (
     "镜头运动平滑稳定，光线方向、色调和整体美术风格统一，保持竖屏电影质感")
 # 成片不要任何配乐：只保留人物台词/旁白人声与必要环境音
 NO_BGM_SUFFIX = "全程不要任何背景音乐、不要配乐、不要 BGM；声音只保留人物台词、旁白人声与必要的环境音"
-SOURCE_EXCERPT_PROMPT_MAX = 260
 SOURCE_EXCERPT_MARKER = "小说原文兜底参考："
 VIDEO_PROMPT_CONTRACT_VERSION = "cinematic_continuity_v1"
 
@@ -34,33 +33,6 @@ def _clean_transition(transition: str | None) -> str:
     if not transition or transition == "硬切":
         return ""
     return transition
-
-def _incoming_transition_line(transition: str | None) -> str:
-    transition = _clean_transition(transition)
-    if not transition:
-        return ""
-    return (
-        f"最终编辑会用「{transition}」将上一镜接入本镜；"
-        "原始片段从稳定、干净的本镜首帧开始，不自行叠化、闪黑、闪白或重复转场。"
-    )
-
-
-def _outgoing_transition_line(transition: str | None, next_scene: str | None = None,
-                              next_first_frame_desc: str | None = None) -> str:
-    transition = _clean_transition(transition)
-    if not transition:
-        return ""
-    target = f"；下一镜场景：{next_scene.strip()}" if next_scene and next_scene.strip() else ""
-    first_frame = (
-        f"；下一镜首帧意向：{next_first_frame_desc.strip()[:80]}"
-        if next_first_frame_desc and next_first_frame_desc.strip() else ""
-    )
-    return (
-        f"最终编辑会以「{transition}」连接下一镜{target}{first_frame}。"
-        "本镜末尾预留约0.3秒稳定的动作结果；不自行生成转场特效，"
-        "不要把下一场景拍成本镜内容。"
-    )
-
 
 def _scene_tail_transition_line(transition: str | None, next_scene: str | None = None,
                                 next_first_frame_desc: str | None = None) -> str:
@@ -210,15 +182,6 @@ def normalize_video_args(prompt_text: str, duration: int | None = None) -> str:
     return f"{text} --dur {dur}"
 
 
-def _source_excerpt_line(shot: Shot, max_chars: int = SOURCE_EXCERPT_PROMPT_MAX) -> str:
-    source_excerpt = (shot.source_excerpt or "").strip()
-    if not source_excerpt:
-        return ""
-    if len(source_excerpt) > max_chars:
-        source_excerpt = source_excerpt[:max_chars].rstrip() + "……"
-    return f"{SOURCE_EXCERPT_MARKER}{source_excerpt}"
-
-
 def _split_video_args(prompt_text: str, duration: int | None = None) -> tuple[str, str]:
     normalized = normalize_video_args(prompt_text, duration)
     dur_match = re.search(r"--dur\s+(\d+)$", normalized)
@@ -333,18 +296,6 @@ def shot_contact_phase(shot: Shot) -> str:
         }:
             return value
     return "none"
-
-
-def contains_contact_action(text: str | None) -> bool:
-    """Unstructured text does not carry an authoritative interaction phase."""
-    _ = text
-    return False
-
-
-def contains_established_contact_action(text: str | None) -> bool:
-    """一段画面描述是否明确表示接触已经成立。"""
-    _ = text
-    return False
 
 
 def contact_action_phase(text: str | None) -> str:

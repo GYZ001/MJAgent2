@@ -1,15 +1,10 @@
 """媒体流水线的并发水位与技术重提次数配置。"""
 from __future__ import annotations
 
-from app import config
 from app.db import get_setting
 
 def technical_resubmit_limit() -> int:
     return 2
-
-
-def job_transient_max_retries() -> int:
-    return int(config.VIDEO_JOB_MAX_RETRIES)
 
 
 def first_pass_retake_slot_fraction() -> float:

@@ -217,13 +217,6 @@ def get_registry() -> CapabilityRegistry:
     return _REGISTRY
 
 
-def reset_registry_for_tests() -> CapabilityRegistry:
-    """测试专用：清空全局注册表。"""
-    global _REGISTRY
-    _REGISTRY = CapabilityRegistry()
-    return _REGISTRY
-
-
 def _normalize_route(route: str) -> str:
     text = " ".join(route.strip().split())
     method, _, path = text.partition(" ")

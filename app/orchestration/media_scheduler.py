@@ -256,40 +256,6 @@ def renew_lease(job_id: str, owner: str, *, lease_seconds: float = 120.0) -> boo
     return cursor.rowcount == 1
 
 
-def release_lease(job_id: str, owner: str, status: str, error: str | None = None) -> bool:
-    db = get_conn()
-    cursor = db.execute(
-        """UPDATE jobs SET status=?, error=?, lease_owner=NULL, lease_expires_at=NULL,
-                  updated_at=? WHERE id=? AND lease_owner=?""",
-        (status, error, now(), job_id, owner),
-    )
-    db.commit()
-    return cursor.rowcount == 1
-
-
-def schedule_retry(job_id: str, message: str, *, max_retries: int, base_delay: float) -> float | None:
-    """Persist retry count and due time. Returns due timestamp, or None when exhausted."""
-    db = get_conn()
-    row = db.execute("SELECT retry_count FROM jobs WHERE id=?", (job_id,)).fetchone()
-    if not row:
-        return None
-    attempt = int(row["retry_count"] or 0) + 1
-    if attempt > max(0, int(max_retries)):
-        return None
-    due = now() + max(0.0, float(base_delay)) * (2 ** (attempt - 1))
-    db.execute(
-        """UPDATE jobs SET status='queued', error=?, retry_count=?, next_retry_at=?,
-                  lease_owner=NULL, lease_expires_at=NULL, updated_at=? WHERE id=?""",
-        (message, attempt, due, now(), job_id),
-    )
-    db.execute(
-        "UPDATE budget_reservations SET status='reserved' WHERE job_id=? AND status='running'",
-        (job_id,),
-    )
-    db.commit()
-    return due
-
-
 def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") -> dict[str, object]:
     """Release local generation authority without losing accepted provider work."""
     db = get_conn()

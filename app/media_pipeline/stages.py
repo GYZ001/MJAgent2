@@ -13,7 +13,6 @@ WAITING_HUMAN = "waiting_human"
 SUCCEEDED = "succeeded"
 FAILED = "failed"
 CANCELLED = "cancelled"
-ABANDONED = "abandoned"
 PAUSED = "paused"
 
 # 兼容旧粗粒度阶段名（读旧数据 / 迁移）
@@ -96,10 +95,8 @@ RESOURCE_VIDEO_INFLIGHT = "video_inflight"
 RESOURCE_VIDEO_POLL = "video_poll"
 RESOURCE_DOWNLOAD = "download"
 RESOURCE_FINALIZE = "finalize"
-RESOURCE_VIDEO_CONTROL = "video_control"
 
 # 调度车道
-LANE_FINALIZE = "finalize"
 LANE_VIDEO_READY = "video_ready_first_pass"
 LANE_REFERENCE_CRITICAL = "reference_critical"
 LANE_REFERENCE_NORMAL = "reference_normal"
@@ -108,7 +105,6 @@ LANE_RETAKE = "retake"
 ACTIVE_JOB_STATUSES = frozenset({
     QUEUED, RUNNING, WAITING_PROVIDER, WAITING_RETRY, WAITING_BUDGET, WAITING,
 })
-PROVIDER_HELD_STATUSES = frozenset({WAITING_PROVIDER, RUNNING})
 
 PIPELINE_STAGE_LABELS = {
     STAGE_PREFLIGHT_VALIDATING: "正在校验视频输入",

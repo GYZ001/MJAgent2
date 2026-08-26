@@ -1661,12 +1661,6 @@ class StoryboardSceneContext(BaseModel):
     context_requirements: list[StoryboardContextRequirement] = Field(default_factory=list)
 
 
-class StoryboardScenePack(BaseModel):
-    episode_no: int
-    scene_id: str
-    shots: list[Shot] = Field(default_factory=list)
-
-
 class BoundaryStateTransition(BaseModel):
     """Auditable reason for a world-state difference across a cut.
 

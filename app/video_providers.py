@@ -268,6 +268,3 @@ def all_wait_meta_keys() -> tuple[str, ...]:
     return tuple(keys)
 
 
-def reset_cache() -> None:
-    """丢弃已构造的适配器；配置变更或测试隔离后调用。"""
-    _CACHE.clear()

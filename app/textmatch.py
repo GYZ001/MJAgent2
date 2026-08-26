@@ -172,9 +172,3 @@ def atomize_claim(text: str) -> list[str]:
     return atoms
 
 
-def key_line_present(needle: str, haystack: str) -> bool:
-    """一条关键台词是否仍大体存在于文本中（连续块或 2-gram 覆盖任一达标）。"""
-    return (
-        longest_run_ratio(needle, haystack) >= KEY_LINE_PRESENT_RATIO
-        or bigram_coverage(needle, haystack) >= KEY_LINE_BIGRAM_COVERAGE
-    )

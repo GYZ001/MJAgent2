@@ -27,26 +27,6 @@ _STRUCTURAL_SECTION_DIVIDER = re.compile(
 )
 
 
-class SourceFactQuotationError(ValueError):
-    """A source unit contains an opening quote with no structural close."""
-
-    def __init__(
-        self,
-        source_segment_id: str,
-        *,
-        opening: str,
-        offset: int,
-    ) -> None:
-        self.source_segment_id = source_segment_id
-        self.opening = opening
-        self.offset = offset
-        super().__init__(
-            "[SOURCE_FACT_QUOTE_UNCLOSED] "
-            f"{source_segment_id} offset={offset} 的开引号 "
-            f"{opening!r} 没有闭引号"
-        )
-
-
 class SourceFact(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 

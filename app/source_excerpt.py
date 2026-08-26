@@ -344,20 +344,6 @@ def index_compact_source_segments(
     ]
 
 
-def render_compact_indexed_source(
-    source: str,
-    *,
-    max_chars: int = 900,
-) -> str:
-    return "\n\n".join(
-        f"【{segment.segment_id}】\n{segment.text}"
-        for segment in index_compact_source_segments(
-            source,
-            max_chars=max_chars,
-        )
-    )
-
-
 def _alignment_view(text: str) -> tuple[str, list[int]]:
     chars: list[str] = []
     offsets: list[int] = []

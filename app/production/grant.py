@@ -212,13 +212,3 @@ def assert_grant_allows(
             f"Patch 触及节点数 {touched_nodes} 超过授权上限 {g.max_touched_nodes}"
         )
     return g
-
-
-def revoke_production_grant(grant_id: str) -> None:
-    ensure_production_grants_table()
-    conn = get_conn()
-    conn.execute(
-        "UPDATE production_grants SET revoked_at=? WHERE id=? AND revoked_at IS NULL",
-        (now(), grant_id),
-    )
-    conn.commit()

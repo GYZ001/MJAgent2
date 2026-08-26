@@ -428,16 +428,6 @@ async def _run_loop(conversation_id: str, turn_id: str, state: _LoopState) -> No
         state.pending_tool_calls = list(assistant.tool_calls)
 
 
-async def handle_user_message(conversation_id: str, content: str, context: ContextEnvelope | None) -> dict[str, Any]:
-    """同步跑完一整轮（测试/兼容）；生产 HTTP 入口请用 prepare + BackgroundTasks。"""
-    prepared = await prepare_user_message(conversation_id, content, context)
-    await run_prepared_turn(conversation_id, prepared["turn"]["id"], prepared["state"])
-    return {
-        "turn": store.get_turn(prepared["turn"]["id"]),
-        "user_message": prepared["user_message"],
-    }
-
-
 async def prepare_user_message(
     conversation_id: str, content: str, context: ContextEnvelope | None,
 ) -> dict[str, Any]:
@@ -489,17 +479,6 @@ def spawn_prepared_turn(conversation_id: str, turn_id: str, state: _LoopState) -
 
     task.add_done_callback(_cleanup)
     return task
-
-
-async def start_user_message(conversation_id: str, content: str, context: ContextEnvelope | None) -> dict[str, Any]:
-    """兼容旧名：准备 turn 后在当前任务中启动循环（不等同于 HTTP 异步入口）。"""
-    prepared = await prepare_user_message(conversation_id, content, context)
-    spawn_prepared_turn(
-        conversation_id,
-        prepared["turn"]["id"],
-        prepared["state"],
-    )
-    return {"turn": prepared["turn"], "user_message": prepared["user_message"]}
 
 
 async def approve_tool_call(tool_call_id: str, *, decided_by: str | None = None, reason: str | None = None) -> dict[str, Any]:

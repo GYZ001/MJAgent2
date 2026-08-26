@@ -21,12 +21,3 @@ class ForbiddenError(Exception):
         self.message = message
         self.code = code
         super().__init__(message)
-
-
-class NotFoundError(Exception):
-    """通用资源/工具未找到。"""
-
-    def __init__(self, message: str, *, code: str = "not_found") -> None:
-        self.message = message
-        self.code = code
-        super().__init__(message)
