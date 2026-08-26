@@ -2119,6 +2119,12 @@ export interface Episode {
   active_storyboard_run_id?: string | null;
   active_video_run_id?: string | null;
   video_completion_mode?: string | null;
+  /**
+   * 本集绑定的视频生成供应商 key（'hiagent' = Seedance 2.0 / 'minimax_h3' =
+   * MiniMax H3）。与生成台强绑定：提交视频生成时后端会拿这个值和模型中心当前
+   * 生效供应商比对，不一致即拒绝。切换走 POST .../video-model，见 BoardPage。
+   */
+  target_video_model?: string | null;
   video_supervisor?: {
     phase?: string | null;
     run_id?: string | null;

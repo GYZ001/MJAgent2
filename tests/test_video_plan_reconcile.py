@@ -41,8 +41,8 @@ def _conn() -> sqlite3.Connection:
     conn.execute("INSERT INTO projects(id,name,created_at) VALUES('p','P',0)")
     conn.execute(
         """INSERT INTO episodes(
-               id,project_id,episode_no,storyboard_artifact_id,created_at
-           ) VALUES('e','p',1,'storyboard_rev_1',0)"""
+               id,project_id,episode_no,storyboard_artifact_id,target_video_model,created_at
+           ) VALUES('e','p',1,'storyboard_rev_1','provider',0)"""
     )
     for number in (1, 2):
         conn.execute(

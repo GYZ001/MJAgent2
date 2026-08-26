@@ -23,6 +23,18 @@ const CONTINUITY_MODES: Record<string, string> = {
   reverse_angle: '反打', insert_detail: '细节插入', scene_change: '转场换景',
 }
 
+// 视频生成模型选择：与生成台强绑定（app/video_providers.py 的 provider key）。
+// 两个供应商的提示词方言互不兼容，这里只列这两个已接入的模型，不做自动发现——
+// 新增供应商需要先接入 app/video_providers.py，再在这里补一条。
+const VIDEO_MODEL_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'hiagent', label: 'Seedance 2.0' },
+  { value: 'minimax_h3', label: 'MiniMax H3' },
+]
+
+function videoModelLabel(value: string): string {
+  return VIDEO_MODEL_OPTIONS.find(option => option.value === value)?.label ?? value
+}
+
 const EDITABLE_FIELDS: Array<keyof Shot> = [
   'duration_s', 'shot_size', 'camera_angle', 'camera_move', 'scene_time', 'scene_name', 'characters', 'action_desc',
   'first_frame_desc', 'last_frame_desc', 'dialogues', 'transition', 'continuity_from_prev',
@@ -132,6 +144,12 @@ type StoryboardClearPreview = {
   active_task_will_stop: boolean
   screenplay_preserved: true
   irreversible: true
+}
+
+type VideoModelSwitchConfirm = {
+  requested_target_video_model: string
+  current_target_video_model: string
+  prompt_artifact_count: number
 }
 
 function cloneShot(shot: Shot): Shot {
@@ -790,6 +808,8 @@ export default function BoardPage() {
   const [confirmPreview, setConfirmPreview] = useState<ConfirmPreview | null>(null)
   const [structurePreview, setStructurePreview] = useState<StructurePreview | null>(null)
   const [clearPreview, setClearPreview] = useState<StoryboardClearPreview | null>(null)
+  const [videoModelConfirm, setVideoModelConfirm] = useState<VideoModelSwitchConfirm | null>(null)
+  const [videoModelBusy, setVideoModelBusy] = useState(false)
   const timelineRef = useRef<HTMLDivElement>(null)
   const startPreviewTriggerRef = useRef<HTMLElement | null>(null)
 
@@ -1102,6 +1122,43 @@ export default function BoardPage() {
     )
   }
 
+  const currentVideoModel = ep.target_video_model || 'hiagent'
+
+  // 与生成台强绑定：切换视频模型不做静默转换。首次提交不带 confirm，若本集已有
+  // 视频生成产物后端会用 409 + VIDEO_MODEL_SWITCH_REQUIRES_CONFIRMATION 挡下来，
+  // 这里弹二次确认；确认后带 confirm_clear_prompts=true 重新提交才真正执行清空。
+  const submitVideoModel = async (target: string, confirmClearPrompts?: boolean) => {
+    if (target === currentVideoModel) return
+    setVideoModelBusy(true)
+    try {
+      const result = await api.post(`/episodes/${ep.id}/video-model`, {
+        target_video_model: target,
+        ...(confirmClearPrompts ? { confirm_clear_prompts: true } : {}),
+      }) as { changed: boolean; cleared_videos: number; target_video_model: string }
+      setVideoModelConfirm(null)
+      if (result.changed) {
+        toast(result.cleared_videos
+          ? `已切换为 ${videoModelLabel(result.target_video_model)}，清空了 ${result.cleared_videos} 个旧方言视频`
+          : `已切换为 ${videoModelLabel(result.target_video_model)}`)
+      }
+      await refresh({ force: true })
+    } catch (caught) {
+      const apiError = caught as ApiError
+      if (apiError.code === 'VIDEO_MODEL_SWITCH_REQUIRES_CONFIRMATION') {
+        const detail = apiError.detail as Partial<VideoModelSwitchConfirm> | undefined
+        setVideoModelConfirm({
+          requested_target_video_model: detail?.requested_target_video_model ?? target,
+          current_target_video_model: detail?.current_target_video_model ?? currentVideoModel,
+          prompt_artifact_count: detail?.prompt_artifact_count ?? 0,
+        })
+      } else {
+        toast(apiError.message, true)
+      }
+    } finally {
+      setVideoModelBusy(false)
+    }
+  }
+
   const showLaunchPanel = !shots.length && (status.state === 'empty' || status.state === 'no_screenplay')
   const primaryBlocked = status.recommended_action === 'refresh_status'
   const gateIssueCount = status.hard_gate_issue_count ?? status.hard_gate_issues?.length ?? 0
@@ -1136,6 +1193,19 @@ export default function BoardPage() {
             </div>
           </div>
           <div className="board-action-group">
+            <label title="切换本集绑定的视频生成模型；两个供应商提示词方言不兼容，与生成台强绑定">
+              <span>视频模型</span>
+              <select
+                aria-label="切换本集视频生成模型"
+                disabled={busy || videoModelBusy}
+                value={currentVideoModel}
+                onChange={event => void submitVideoModel(event.target.value)}
+              >
+                {VIDEO_MODEL_OPTIONS.map(option => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
             {toolbarActions.pause ? <>
               <button id="storyboard-primary-action" type="button" className="btn board-primary-action danger"
                 disabled={busy} aria-label={busy ? '暂停任务，正在处理' : '暂停分镜任务'}
@@ -1319,6 +1389,22 @@ export default function BoardPage() {
         danger
         onClose={() => setClearPreview(null)}
         onConfirm={() => void clearStoryboard()}
+      />}
+
+      {videoModelConfirm && <DecisionDialog
+        title="切换视频生成模型？"
+        summary={`本集已有 ${videoModelConfirm.prompt_artifact_count} 条视频生成产物（提示词方言绑定于 ${videoModelLabel(videoModelConfirm.current_target_video_model)}）`}
+        message={`两个供应商的提示词语法互不兼容，不能混用；切换到 ${videoModelLabel(videoModelConfirm.requested_target_video_model)} 会清空本集已生成的视频提示词与产物，且不可撤销。`}
+        details={[
+          `${videoModelLabel(videoModelConfirm.current_target_video_model)} → ${videoModelLabel(videoModelConfirm.requested_target_video_model)}`,
+          '参考图与人物谱不受影响，只清空视频生成产物',
+          '已经产生的模型调用费用不会退回',
+        ]}
+        confirmLabel="确认切换并清空"
+        cancelLabel="取消"
+        danger
+        onClose={() => setVideoModelConfirm(null)}
+        onConfirm={() => void submitVideoModel(videoModelConfirm.requested_target_video_model, true)}
       />}
 
       <Modal open={!!startPreview} title={startPreviewCopy?.title ?? '分镜任务'} onClose={closeStartPreview}

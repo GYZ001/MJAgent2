@@ -1418,6 +1418,20 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         raise ValueError("该项目的 Harness Engine 已由灰度开关隔离")
     if ep["status"] not in ("confirmed", "generating", "done"):
         raise ValueError("分镜脚本未确认，不能生成视频（PRD 原则 P3：贵的环节前人工把关）")
+    episode_bound_provider = str(_row_value(ep, "target_video_model") or "").strip() or "hiagent"
+    # 按适配器族比较，不按 provider key 原始字符串比：自建实例（custom:xxx）
+    # 复用内置协议实现，字符串比较会把"同协议、不同连接"误判成绑定不一致
+    # （本机部署的历史模型迁移已经把内嵌 Seedance/MiniMax H3 包装成了
+    # custom:<id>，字符串比较在这台机器上会 100% 误判，见 video_providers.same_family）。
+    from app import video_providers
+
+    if not video_providers.same_family(episode_bound_provider, target_video_provider):
+        raise ValueError(
+            f"[VIDEO_MODEL_BINDING_MISMATCH] 本集绑定的视频模型是 {episode_bound_provider}，"
+            f"当前生效模型是 {target_video_provider or '(未配置)'}"
+            "（两者提示词方言不兼容，不能混投）；"
+            "请在分镜台切换回本集绑定的模型，或先在模型中心把生效模型切到该值再重试"
+        )
 
     from app.domain.common import _project_bible_or_placeholder
 

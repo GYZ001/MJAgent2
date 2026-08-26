@@ -1474,6 +1474,7 @@ def _register_exemptions(registry) -> None:
         "POST /api/episodes/{episode_id}/storyboard/preflight": "分镜生成前只读预检与短时凭证签发",
         "POST /api/episodes/{episode_id}/storyboard/clear-preview": "整集分镜清空前的影响预览与短时凭证签发；不删除制作数据",
         "POST /api/episodes/{episode_id}/storyboard/clear": "分镜台本机人工清空入口；必须消费当前影响预览凭证，不向 Agent/MCP 开放",
+        "POST /api/episodes/{episode_id}/video-model": "分镜台人工切换本集绑定视频模型入口；已有生成产物时必须显式 confirm_clear_prompts 二次确认，不向 Agent/MCP 开放",
         "POST /api/episodes/{episode_id}/storyboard/structure-preview": "分镜结构变更前只读预览",
         "POST /api/episodes/{episode_id}/storyboard/structure": "分镜台人工结构编辑入口；必须消费页面预览凭证",
         "POST /api/gates/{artifact_id}/decision": "证据门禁的人工决策入口；禁止 Agent 自行代替人类批准",

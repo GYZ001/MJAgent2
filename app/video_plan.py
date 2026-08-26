@@ -2468,10 +2468,38 @@ def assert_video_provider_submission_authority(
 
     db = conn or get_conn()
     shot = db.execute(
-        "SELECT episode_id FROM shots WHERE id=?",
+        """SELECT s.episode_id AS episode_id, e.target_video_model AS target_video_model
+             FROM shots s JOIN episodes e ON e.id=s.episode_id
+            WHERE s.id=?""",
         (shot_id,),
     ).fetchone()
     issues: list[dict[str, Any]] = []
+    # Episode/generation binding is mode-agnostic and independent of the plan:
+    # the operator selects a video model per episode on the storyboard page,
+    # and every provider submission must be re-checked against it here, at the
+    # last reversible boundary, because the globally active provider (Model
+    # Center) can drift after enqueue while a job sits queued.  A mismatch is
+    # a caller bug (stale binding, or someone flipped the global provider
+    # underneath a bound episode) and must be rejected, never silently
+    # rewritten — the two providers' prompt dialects are incompatible.
+    active_provider = hiagent.active_provider("video")
+    if shot is not None:
+        from app import video_providers
+
+        episode_bound_provider = str(shot["target_video_model"] or "").strip() or "hiagent"
+        # 按适配器族比较，不按 provider key 原始字符串比：自建实例（custom:xxx）
+        # 复用内置协议实现，字符串比较会把"同协议、不同连接"误判成绑定不一致
+        # （本机部署的历史模型迁移已经把内嵌 Seedance/MiniMax H3 包装成了
+        # custom:<id>，字符串比较在这台机器上会 100% 误判，见
+        # video_providers.same_family）。下面的能力快照解析仍使用未归一化的
+        # 原始 active_provider，保持与改动前完全一致的行为。
+        if not video_providers.same_family(episode_bound_provider, active_provider):
+            issues.append({
+                "code": "VIDEO_SUBMISSION_EPISODE_MODEL_BINDING_MISMATCH",
+                "shot_id": shot_id,
+                "episode_bound_provider": episode_bound_provider,
+                "active_provider": active_provider,
+            })
     plan = load_latest_plan(str(shot["episode_id"]), conn=db) if shot else None
     if shot is None:
         issues.append({"code": "VIDEO_SUBMISSION_SHOT_MISSING", "shot_id": shot_id})
@@ -2542,7 +2570,6 @@ def assert_video_provider_submission_authority(
             selected.capability_snapshot_id,
             conn=db,
         )
-        active_provider = hiagent.active_provider("video")
         active_model = hiagent.active_model("video", active_provider)
         latest_snapshot = current_capability_snapshot(
             provider=active_provider,

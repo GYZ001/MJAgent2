@@ -1621,6 +1621,11 @@ MIGRATIONS = (
     "ON visual_entity_merges(project_id, from_visual_entity_id)",
     "CREATE INDEX IF NOT EXISTS idx_visual_entity_merges_to "
     "ON visual_entity_merges(project_id, to_visual_entity_id)",
+    # 分镜台视频模型强绑定：一集一个目标供应商 key（video_providers 注册表键，
+    # 如 'hiagent'/'minimax_h3'）。生成台按这个字段校验 provider，不一致即拒绝
+    # 提交；切换必须走 app/domain/storyboard_ops.py 的显式确认清空入口，禁止
+    # 静默转换（两套供应商的提示词方言互不兼容）。默认值对齐既有 provider 默认。
+    "ALTER TABLE episodes ADD COLUMN target_video_model TEXT NOT NULL DEFAULT 'hiagent'",
 )
 
 

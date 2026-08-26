@@ -200,6 +200,20 @@ def resolve(provider: str) -> VideoProviderAdapter:
     return resolve("hiagent")
 
 
+def same_family(a: str, b: str) -> bool:
+    """两个 provider key 是否共用同一套底层适配器（因此同一套提示词方言）。
+
+    自建实例复用内置协议实现（见 ``_build_custom``）：只要两者解析到同一个
+    适配器类，提示词方言就完全一样，即使 provider key 字符串不同——例如内置
+    ``"hiagent"`` 和一个协议同样声明为 ``seedance`` 的自建实例 ``"custom:xxx"``。
+    集级视频模型强绑定（分镜台选择 vs 生成台实际生效供应商）必须按这个比，
+    不能按 provider key 原始字符串比：本机部署的历史迁移会把内嵌模型自动包装
+    成 ``custom:<id>``（见 app/model_migration.py），字符串比较会让每一集都被
+    误判成"绑定不一致"。
+    """
+    return type(resolve(a)) is type(resolve(b))
+
+
 def all_adapters() -> list[VideoProviderAdapter]:
     """内置适配器；用于 task_id / 产物 URL 的归属路由。
 
