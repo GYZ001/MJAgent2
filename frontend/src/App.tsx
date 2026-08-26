@@ -186,8 +186,8 @@ const SECTIONS: {
   },
   {
     key: "script",
-    label: "剧本台",
-    icon: "剧",
+    label: "映射台",
+    icon: "映",
     group: "内容制作",
     needEpisode: true,
   },
@@ -1051,7 +1051,7 @@ function AppShell() {
           (episodeId ? (
             <ScriptPage key={episodeId} />
           ) : (
-            <WorkspaceEmpty label="剧本台" view="script" />
+            <WorkspaceEmpty label="映射台" view="script" />
           ))}
         {view === "board" &&
           (episodeId ? (
@@ -1531,7 +1531,7 @@ export function screenplayStatusPollInterval(
 }
 
 /**
- * 剧本台初始/终态拉详情，运行中高频、终态低频轮询轻量快照。
+ * 映射台初始/终态拉详情，运行中高频、终态低频轮询轻量快照。
  * 1646 集项目不再每 2s 重复传输正文和全部台词。
  */
 /**

@@ -19,7 +19,7 @@ export default function AuthAside() {
         </p>
         <ul className="auth-flow">
           <li><span>世界书</span></li>
-          <li><span>剧本台</span></li>
+          <li><span>映射台</span></li>
           <li><span>分镜台</span></li>
           <li><span>生成台</span></li>
           <li><span>成片台</span></li>

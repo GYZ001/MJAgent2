@@ -141,17 +141,13 @@ const readyEpisode = () => {
     },
     screenplay_state: { version: 2, code: 'ready', message: '准备包已交付', recommended_action: 'generate_storyboard' as const, screenplay_status: 'ready', storyboard_status: 'no_screenplay', storyboard_running: false, publish_blocked: false },
     prep_pack: {
-      prep_pack_version: '1.1.0',
+      prep_pack_version: '2.0.0',
       episode_no: 1,
       episode_scope: { chapter_indexes: [1], source_segment_count: 10 },
-      event_chain: [
-        { event_id: 'ev_001', order: 1, summary: '测试事件', source_evidence: [], key_lines: [] },
-      ],
       asset_manifest: { characters: [], scenes: [] },
       coverage_ledger: {
         total_segments: 10, delivered: [1], merged: [], retained_as_context: [], proven_duplicates: [], uncovered: [],
       },
-      hook: 'h', cliffhanger: 'c',
     },
   }
 }
@@ -226,11 +222,14 @@ describe('ScriptPage stage-bar flash regression (legacy stages must never render
   })
 })
 
-// 素材面板点名联动左侧事件链：点击出场角色/群演/出场场景的名字，对应事件在左侧
-// 事件链里被高亮（.prep-timeline-item.event-linked）并展开（<details open>），
-// 再点同一条目取消。PrepPackView 本身不依赖 useNav/useScriptEpisode，直接渲染，
-// 不需要上面的 vi.mock('../App', ...) 桩件。
-describe('PrepPackView roster-name click links the left event chain', () => {
+// 素材面板点名联动左侧称谓映射表（2.0.0：事件链撤销后的替代交互，见
+// app/production/prep_pack.py 模块 docstring 的 2.0.0 说明）：点击出场角色的
+// 名字，appellation_map 里属于同一 identity_id 的行在左侧被高亮
+// （.prep-timeline-item.event-linked），再点同一条目取消。场景/群演/道具没有
+// appellation_map 条目可联动，渲染为纯文本、不是可点按钮（见 PrepPackView）。
+// PrepPackView 本身不依赖 useNav/useScriptEpisode，直接渲染，不需要上面的
+// vi.mock('../App', ...) 桩件。
+describe('PrepPackView roster-name click links the left appellation map', () => {
   beforeEach(() => {
     installHostStubs()
   })
@@ -239,29 +238,30 @@ describe('PrepPackView roster-name click links the left event chain', () => {
   })
 
   const linkedPack = () => ({
-    prep_pack_version: '1.3.0',
+    prep_pack_version: '2.0.0',
     episode_no: 3,
     episode_scope: { chapter_indexes: [3], source_segment_count: 20 },
-    event_chain: [
-      { event_id: 'ev_001', order: 1, summary: '事件一', source_evidence: [], key_lines: [] },
-      { event_id: 'ev_002', order: 2, summary: '事件二', source_evidence: [], key_lines: [] },
-      { event_id: 'ev_003', order: 3, summary: '事件三', source_evidence: [], key_lines: [] },
-      { event_id: 'ev_004', order: 4, summary: '事件四', source_evidence: [], key_lines: [] },
-    ],
     asset_manifest: {
-      // 孟浩覆盖 ev_001/ev_002/ev_004（序号 1、2、4，压缩成 "1~2,4"）；许清覆盖 ev_003。
+      // 孟浩覆盖段 1/2/4（压缩成 "1~2,4"）；许清覆盖段 3。
       characters: [
-        { identity_id: 'char:孟浩', display_name: '孟浩', portrait_id: '', event_ids: ['ev_001', 'ev_002', 'ev_004'] },
+        { identity_id: 'char:孟浩', display_name: '孟浩', portrait_id: '', segment_indexes: [1, 2, 4] },
+        { identity_id: 'char:许清', display_name: '许清', portrait_id: '', segment_indexes: [3] },
       ],
       scenes: [
-        { scene_id: 'scene:靠山宗', display_name: '靠山宗', scene_reference_id: '', event_ids: ['ev_003'] },
+        { scene_id: 'scene:靠山宗', display_name: '靠山宗', scene_reference_id: '', segment_indexes: [3] },
       ],
       functional_extras: [],
     },
+    // 孟浩两行（段 1/2）、许清一行（段 3）——覆盖"点一个角色只高亮它自己的行，
+    // 不牵连另一个角色"这条核心断言。
+    appellation_map: [
+      { raw_mention: '那少年', segment_index: 1, identity_id: 'char:孟浩', canonical_appellation: '孟浩' },
+      { raw_mention: '书生', segment_index: 2, identity_id: 'char:孟浩', canonical_appellation: '孟浩' },
+      { raw_mention: '女子', segment_index: 3, identity_id: 'char:许清', canonical_appellation: '许清' },
+    ],
     coverage_ledger: {
       total_segments: 20, delivered: [], merged: [], retained_as_context: [], proven_duplicates: [], uncovered: [],
     },
-    hook: 'h', cliffhanger: 'c',
   }) as any
 
   const findRosterButtons = (renderer: TestRenderer.ReactTestRenderer) =>
@@ -275,9 +275,6 @@ describe('PrepPackView roster-name click links the left event chain', () => {
       .filter(node => typeof node.props.className === 'string' && node.props.className.includes('prep-timeline-item'))
       .map(node => node.props.className.includes('event-linked'))
 
-  const detailsOpenFlags = (renderer: TestRenderer.ReactTestRenderer) =>
-    renderer.root.findAllByType('details').map(node => Boolean(node.props.open))
-
   it('renders the compressed range next to the plain count for each roster item', () => {
     let renderer: TestRenderer.ReactTestRenderer
     act(() => {
@@ -285,26 +282,36 @@ describe('PrepPackView roster-name click links the left event chain', () => {
         React.createElement(PrepPackView, { pack: linkedPack(), bible: null, sourceFallback: '第 3 章' }),
       )
     })
-    // react-test-renderer 把 JSX 里 `覆盖 {n} 个事件{rangeText && ...}` 的每个花括号
+    // react-test-renderer 把 JSX 里 `覆盖 {n} 段原文{rangeText && ...}` 的每个花括号
     // 表达式序列化成 children 数组的独立元素（不是拼接成一整段字符串），逐段拼接
     // 后再比对，语义上等价于用户在页面上实际读到的那一整行文字。
     const metaTexts = renderer!.root
       .findAll(node => typeof node.props.className === 'string' && node.props.className === 'prep-roster-meta')
       .map(node => node.props.children.join(''))
-    expect(metaTexts).toContain('覆盖 3 个事件 · 1~2,4')
-    expect(metaTexts).toContain('覆盖 1 个事件 · 3')
+    expect(metaTexts).toContain('覆盖 3 段原文 · 第 1~2,4 段')
+    expect(metaTexts).toContain('覆盖 1 段原文 · 第 3 段')
     act(() => { renderer!.unmount() })
   })
 
-  it('nothing is highlighted/open/selected before any roster item is clicked', () => {
+  it('only characters get a clickable roster button — scenes render as plain text (no appellation_map entries to link to)', () => {
     let renderer: TestRenderer.ReactTestRenderer
     act(() => {
       renderer = TestRenderer.create(
         React.createElement(PrepPackView, { pack: linkedPack(), bible: null, sourceFallback: '第 3 章' }),
       )
     })
-    expect(timelineItemFlags(renderer!)).toEqual([false, false, false, false])
-    expect(detailsOpenFlags(renderer!)).toEqual([false, false, false, false])
+    expect(findRosterButtons(renderer!)).toHaveLength(2)
+    act(() => { renderer!.unmount() })
+  })
+
+  it('nothing is highlighted/selected before any roster item is clicked', () => {
+    let renderer: TestRenderer.ReactTestRenderer
+    act(() => {
+      renderer = TestRenderer.create(
+        React.createElement(PrepPackView, { pack: linkedPack(), bible: null, sourceFallback: '第 3 章' }),
+      )
+    })
+    expect(timelineItemFlags(renderer!)).toEqual([false, false, false])
     for (const button of findRosterButtons(renderer!)) {
       expect(button.props['aria-pressed']).toBe(false)
       expect(button.props.className).not.toContain('selected')
@@ -312,7 +319,7 @@ describe('PrepPackView roster-name click links the left event chain', () => {
     act(() => { renderer!.unmount() })
   })
 
-  it('clicking a roster name highlights + expands exactly its own events, and a second click clears it', () => {
+  it('clicking a roster name highlights exactly its own appellation rows, and a second click clears it', () => {
     let renderer: TestRenderer.ReactTestRenderer
     act(() => {
       renderer = TestRenderer.create(
@@ -320,11 +327,10 @@ describe('PrepPackView roster-name click links the left event chain', () => {
       )
     })
 
-    // 孟浩（第一个 roster 按钮）覆盖事件 1/2/4，不覆盖事件 3。
+    // 孟浩（第一个 roster 按钮）对应称谓映射表的前两行，不牵连许清那一行。
     act(() => { findRosterButtons(renderer!)[0].props.onClick() })
 
-    expect(timelineItemFlags(renderer!)).toEqual([true, true, false, true])
-    expect(detailsOpenFlags(renderer!)).toEqual([true, true, false, true])
+    expect(timelineItemFlags(renderer!)).toEqual([true, true, false])
     const mengHaoButton = findRosterButtons(renderer!)[0]
     expect(mengHaoButton.props['aria-pressed']).toBe(true)
     expect(mengHaoButton.props.className).toContain('selected')
@@ -332,8 +338,7 @@ describe('PrepPackView roster-name click links the left event chain', () => {
     // 再点同一条目：取消高亮与选中态。
     act(() => { findRosterButtons(renderer!)[0].props.onClick() })
 
-    expect(timelineItemFlags(renderer!)).toEqual([false, false, false, false])
-    expect(detailsOpenFlags(renderer!)).toEqual([false, false, false, false])
+    expect(timelineItemFlags(renderer!)).toEqual([false, false, false])
     const mengHaoButtonAfter = findRosterButtons(renderer!)[0]
     expect(mengHaoButtonAfter.props['aria-pressed']).toBe(false)
     expect(mengHaoButtonAfter.props.className).not.toContain('selected')
@@ -349,13 +354,12 @@ describe('PrepPackView roster-name click links the left event chain', () => {
       )
     })
 
-    // 先选孟浩（事件 1/2/4），再选靠山宗（只覆盖事件 3）——应切换，不叠加。
+    // 先选孟浩（两行），再选许清（一行）——应切换，不叠加。
     act(() => { findRosterButtons(renderer!)[0].props.onClick() })
-    expect(timelineItemFlags(renderer!)).toEqual([true, true, false, true])
+    expect(timelineItemFlags(renderer!)).toEqual([true, true, false])
 
     act(() => { findRosterButtons(renderer!)[1].props.onClick() })
-    expect(timelineItemFlags(renderer!)).toEqual([false, false, true, false])
-    expect(detailsOpenFlags(renderer!)).toEqual([false, false, true, false])
+    expect(timelineItemFlags(renderer!)).toEqual([false, false, true])
 
     const buttons = findRosterButtons(renderer!)
     expect(buttons[0].props['aria-pressed']).toBe(false)

@@ -7,12 +7,10 @@ import {
   PrepStepper,
   ScreenplayResumeButton,
   characterAppellationTag,
-  compressEventOrders,
+  compressSegmentIndexes,
   coverageGateSummary,
-  eventIdsToOrders,
   findPortraitImage,
   findSceneReferenceImage,
-  formatSourceSpan,
   isPrepPack,
   normalizeStage,
   provenanceMethodHint,
@@ -20,7 +18,6 @@ import {
   screenplayGeneratePayload,
   screenplayResumeActionLabel,
   screenplayResumeOutcomeSummary,
-  sortedEventChain,
   stageStateLabel,
   stageStateTone,
 } from './ScriptPage'
@@ -137,70 +134,32 @@ describe('isPrepPack', () => {
   })
 })
 
-describe('sortedEventChain', () => {
-  it('sorts events by order regardless of input order', () => {
-    const events = [
-      { event_id: 'ev_003', order: 3, summary: 'c', source_evidence: [], key_lines: [] },
-      { event_id: 'ev_001', order: 1, summary: 'a', source_evidence: [], key_lines: [] },
-      { event_id: 'ev_002', order: 2, summary: 'b', source_evidence: [], key_lines: [] },
-    ]
-    expect(sortedEventChain(events).map(e => e.event_id)).toEqual(['ev_001', 'ev_002', 'ev_003'])
-  })
-
-  it('tolerates a missing or null event list', () => {
-    expect(sortedEventChain(null)).toEqual([])
-    expect(sortedEventChain(undefined)).toEqual([])
-  })
-})
-
-describe('compressEventOrders', () => {
+describe('compressSegmentIndexes', () => {
   it('merges a fully consecutive run into a single a~b segment', () => {
-    expect(compressEventOrders([1, 2, 3])).toBe('1~3')
-    expect(compressEventOrders([1, 2, 3, 4, 5, 6, 7, 8, 9])).toBe('1~9')
+    expect(compressSegmentIndexes([1, 2, 3])).toBe('1~3')
+    expect(compressSegmentIndexes([1, 2, 3, 4, 5, 6, 7, 8, 9])).toBe('1~9')
   })
 
-  it('lists fully non-consecutive orders as individual comma-separated values', () => {
-    expect(compressEventOrders([1, 3, 5, 7])).toBe('1,3,5,7')
+  it('lists fully non-consecutive segment indexes as individual comma-separated values', () => {
+    expect(compressSegmentIndexes([1, 3, 5, 7])).toBe('1,3,5,7')
   })
 
   it('mixes runs and singles per the user-specified format (e.g. "1,3,5~7")', () => {
-    expect(compressEventOrders([1, 3, 5, 6, 7])).toBe('1,3,5~7')
-    expect(compressEventOrders([1, 2, 3, 7, 8, 9, 10, 11])).toBe('1~3,7~11')
+    expect(compressSegmentIndexes([1, 3, 5, 6, 7])).toBe('1,3,5~7')
+    expect(compressSegmentIndexes([1, 2, 3, 7, 8, 9, 10, 11])).toBe('1~3,7~11')
   })
 
-  it('renders a lone order as a single number, not a self-range', () => {
-    expect(compressEventOrders([5])).toBe('5')
+  it('renders a lone index as a single number, not a self-range', () => {
+    expect(compressSegmentIndexes([5])).toBe('5')
   })
 
   it('returns an empty string for an empty input so callers fall back to the plain count', () => {
-    expect(compressEventOrders([])).toBe('')
+    expect(compressSegmentIndexes([])).toBe('')
   })
 
   it('sorts and de-duplicates unordered, repeated input before compressing', () => {
-    expect(compressEventOrders([3, 1, 3, 2])).toBe('1~3')
-    expect(compressEventOrders([7, 1, 1, 9, 8])).toBe('1,7~9')
-  })
-})
-
-describe('eventIdsToOrders', () => {
-  const events = [
-    { event_id: 'ev_001', order: 1, summary: 'a', source_evidence: [], key_lines: [] },
-    { event_id: 'ev_002', order: 2, summary: 'b', source_evidence: [], key_lines: [] },
-    { event_id: 'ev_003', order: 3, summary: 'c', source_evidence: [], key_lines: [] },
-  ]
-
-  it('resolves event_ids to their event_chain order numbers', () => {
-    expect(eventIdsToOrders(['ev_001', 'ev_003'], events)).toEqual([1, 3])
-  })
-
-  it('defensively skips an event_id absent from event_chain instead of throwing or emitting undefined', () => {
-    expect(eventIdsToOrders(['ev_001', 'ev_999', 'ev_002'], events)).toEqual([1, 2])
-  })
-
-  it('tolerates a missing or empty event_ids list without throwing', () => {
-    expect(eventIdsToOrders(undefined, events)).toEqual([])
-    expect(eventIdsToOrders(null, events)).toEqual([])
-    expect(eventIdsToOrders([], events)).toEqual([])
+    expect(compressSegmentIndexes([3, 1, 3, 2])).toBe('1~3')
+    expect(compressSegmentIndexes([7, 1, 1, 9, 8])).toBe('1,7~9')
   })
 })
 
@@ -483,65 +442,37 @@ describe('PrepStepper renders non-empty labels for any stage shape (self-check)'
   })
 })
 
-describe('formatSourceSpan', () => {
-  it('formats a multi-segment span as a range', () => {
-    expect(formatSourceSpan({ from_segment: 12, to_segment: 15 })).toBe('覆盖原文段 12-15')
-  })
-
-  it('formats a single-segment span without a dash', () => {
-    expect(formatSourceSpan({ from_segment: 7, to_segment: 7 })).toBe('覆盖原文段 7')
-  })
-
-  it('returns null for 1.0.0 payloads that lack source_span entirely', () => {
-    expect(formatSourceSpan(undefined)).toBeNull()
-    expect(formatSourceSpan(null)).toBeNull()
-  })
-})
-
 // 真实 EP1 数据自证（project proj_3ac0b627fa46 / episode ep_3d523ff4d0a4，取自
-// data/manju.db 的 screenplay_json，prep_pack_version 1.1.0，2026-08-24 落表）。
-// 环境里新落地的登录鉴权拦住了匿名 curl 走查 API，改为在这里把库里的真实产物直接
-// 当固定样本跑一遍渲染管线，比单次 curl 快照更可回归。stages 取自
-// app/production/revision.py 的真实 stage_order（十步重型流水线遗留，EP1 已发布，
-// 全部 status="completed"）——这正是用户反馈里"十个框"的真实来源。
+// data/manju.db 的 screenplay_json）。环境里新落地的登录鉴权拦住了匿名 curl 走查
+// API，改为在这里把库里的真实产物直接当固定样本跑一遍渲染管线，比单次 curl 快照
+// 更可回归。stages 取自 app/production/revision.py 的真实 stage_order（十步重型
+// 流水线遗留，EP1 已发布，全部 status="completed"）——这正是用户反馈里"十个框"的
+// 真实来源。
+//
+// 2.0.0：event_chain/hook/cliffhanger 已从 payload 撤销（见 app/production/
+// prep_pack.py 模块 docstring 的 2.0.0 说明），asset_manifest 条目改用
+// segment_indexes（原文段号）取代 event_ids——这里改用与原真实样本 event_ids
+// 数量一致的段号占位（不是真实回放的段号本身，真实段号需要重新生成一份 2.0.0
+// 产物才能拿到；本测试关心的是"字段读取路径正确"，不依赖具体段号取值）。
 describe('real EP1 payload walkthrough (no live auth session available; verified against the DB row + backend source directly)', () => {
   const ep1Pack = {
-    prep_pack_version: '1.1.0',
+    prep_pack_version: '2.0.0',
     episode_no: 1,
     episode_scope: { chapter_indexes: [1], source_segment_count: 62 },
-    event_chain: [
-      {
-        event_id: 'ev_001', order: 1,
-        summary: '黄昏时分，孟浩坐在大青山山顶，背景介绍赵国书生对东土大唐的向往。',
-        source_span: { from_segment: 1, to_segment: 3 },
-        source_evidence: [
-          { segment_index: 1, quote: '第一章书生孟浩' },
-          { segment_index: 3, quote: '落在了此刻于这青山顶端，坐在那里的一个文生少年身上。' },
-        ],
-        key_lines: [],
-      },
-      {
-        event_id: 'ev_017', order: 17,
-        summary: '作者现身呼吁读者收藏、投推荐票，并预告晚间新书发布会活动。',
-        source_span: { from_segment: 60, to_segment: 62 },
-        source_evidence: [
-          { segment_index: 60, quote: '书生孟浩和大家见面啦，收藏和推荐票，一个都不要少呀' },
-          { segment_index: 62, quote: '晚上还有一章，今晚八点有语音活动，新书发布会。' },
-        ],
-        key_lines: [],
-      },
-    ],
     asset_manifest: {
       characters: [
-        { identity_id: 'bible:孟浩', display_name: '孟浩', portrait_id: 'portrait_ecc9491a63f4', event_ids: ['ev_001', 'ev_002'] },
-        { identity_id: 'bible:王有材', display_name: '王有材', portrait_id: 'portrait_bb6813d0733d', event_ids: ['ev_006', 'ev_007'] },
-        { identity_id: 'bible:许清', display_name: '许清', portrait_id: 'portrait_e01eec6ef5ef', event_ids: ['ev_010'] },
+        { identity_id: 'bible:孟浩', display_name: '孟浩', portrait_id: 'portrait_ecc9491a63f4', segment_indexes: [1, 2] },
+        { identity_id: 'bible:王有材', display_name: '王有材', portrait_id: 'portrait_bb6813d0733d', segment_indexes: [6, 7] },
+        { identity_id: 'bible:许清', display_name: '许清', portrait_id: 'portrait_e01eec6ef5ef', segment_indexes: [10] },
       ],
       scenes: [
-        { scene_id: 'scene:大青山山顶', display_name: '大青山山顶', scene_reference_id: 'scene_e6dab3555673', event_ids: ['ev_001'] },
-        { scene_id: 'scene:半山青石空地', display_name: '半山青石空地', scene_reference_id: 'scene_a9c9f33fad29', event_ids: ['ev_014', 'ev_017'] },
+        { scene_id: 'scene:大青山山顶', display_name: '大青山山顶', scene_reference_id: 'scene_e6dab3555673', segment_indexes: [1] },
+        { scene_id: 'scene:半山青石空地', display_name: '半山青石空地', scene_reference_id: 'scene_a9c9f33fad29', segment_indexes: [14, 17] },
       ],
     },
+    appellation_map: [
+      { raw_mention: '文生少年', segment_index: 3, identity_id: 'bible:孟浩', canonical_appellation: '孟浩' },
+    ],
     coverage_ledger: {
       total_segments: 62,
       delivered: Array.from({ length: 29 }, (_, i) => i + 1),
@@ -550,8 +481,6 @@ describe('real EP1 payload walkthrough (no live auth session available; verified
       proven_duplicates: [],
       uncovered: [],
     },
-    hook: '三年科举再次落榜，孟浩一贫如洗，坐在山顶为欠债和生计发愁，看不到希望。',
-    cliffhanger: '孟浩得知自己即将进入靠山宗当杂役，内心充满期待，却不知等待他的将是何种命运。',
   }
 
   // app/production/revision.py 的真实 stage_order；EP1 published=true 时全部 status="completed"。
@@ -570,15 +499,6 @@ describe('real EP1 payload walkthrough (no live auth session available; verified
 
   it('is recognized as a valid prep pack', () => {
     expect(isPrepPack(ep1Pack)).toBe(true)
-  })
-
-  it('sorts and preserves non-empty summaries for every real event', () => {
-    const events = sortedEventChain(ep1Pack.event_chain as any)
-    expect(events.map(e => e.order)).toEqual([1, 17])
-    for (const event of events) {
-      expect(event.summary.trim().length).toBeGreaterThan(0)
-      expect(formatSourceSpan(event.source_span)).toMatch(/^覆盖原文段 \d+-\d+$/)
-    }
   })
 
   it('computes a green coverage gate matching the real ledger (0 uncovered out of 62 segments)', () => {
@@ -629,63 +549,60 @@ describe('real EP1 payload walkthrough (no live auth session available; verified
     expect(doneCount).toBe(10)
   })
 
-  it('produces a non-empty hook and cliffhanger', () => {
-    expect(ep1Pack.hook.trim().length).toBeGreaterThan(0)
-    expect(ep1Pack.cliffhanger.trim().length).toBeGreaterThan(0)
+  it('renders the appellation map row linking the raw in-text mention to the canonical name', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, { pack: ep1Pack as any, bible: null, sourceFallback: '第 1 章' }))
+    expect(html).toContain('「文生少年」→ 孟浩')
   })
 })
 
 // P1 补渲染：asset_manifest.characters[].aliases（1.2.0+）与 asset_manifest.functional_extras
 // （1.3.0+，群演/一次性人物）。真实样本取自 EP13（project proj_3ac0b627fa46 / episode
-// ep_820ad3cefde7，data/manju.db 的 screenplay_json，prep_pack_version 1.3.0）：
-// 3 个具名角色 aliases 均为空数组（这个项目目前没有产出过非空 aliases 的真实样本），
-// 5 条 functional_extras。用真实数据验证字段读取正确性，再用一条合成数据验证
-// aliases 非空时小签确实渲染（覆盖协调方举的"小胖子"场景）。
+// ep_820ad3cefde7，data/manju.db 的 screenplay_json）：3 个具名角色 aliases 均为
+// 空数组（这个项目目前没有产出过非空 aliases 的真实样本），5 条 functional_extras。
+// 用真实数据验证字段读取正确性，再用一条合成数据验证 aliases 非空时小签确实渲染
+// （覆盖协调方举的"小胖子"场景）。2.0.0：event_ids 改用 segment_indexes（原文段号）
+// 取代，数量与原真实样本保持一致，不代表重新回放出的真实段号。
 describe('PrepPackView renders aliases and functional_extras (real EP13 data)', () => {
   const ep13AssetManifest = {
     characters: [
-      { identity_id: 'bible:孟浩', display_name: '孟浩', portrait_id: 'portrait_ecc9491a63f4', event_ids: Array.from({ length: 12 }, (_, i) => `ev_${String(i + 1).padStart(3, '0')}`), aliases: [] },
-      { identity_id: 'bible:许清', display_name: '许清', portrait_id: 'portrait_e01eec6ef5ef', event_ids: ['ev_001', 'ev_002', 'ev_003'], aliases: [] },
-      { identity_id: 'bible:曹阳', display_name: '曹阳', portrait_id: 'portrait_95288d031252', event_ids: ['ev_005', 'ev_006', 'ev_007', 'ev_008', 'ev_009', 'ev_010', 'ev_011', 'ev_012'], aliases: [] },
+      { identity_id: 'bible:孟浩', display_name: '孟浩', portrait_id: 'portrait_ecc9491a63f4', segment_indexes: Array.from({ length: 12 }, (_, i) => i + 1), aliases: [] },
+      { identity_id: 'bible:许清', display_name: '许清', portrait_id: 'portrait_e01eec6ef5ef', segment_indexes: [1, 2, 3], aliases: [] },
+      { identity_id: 'bible:曹阳', display_name: '曹阳', portrait_id: 'portrait_95288d031252', segment_indexes: [5, 6, 7, 8, 9, 10, 11, 12], aliases: [] },
     ],
     scenes: [
-      { scene_id: 'scene:靠山宗外宗区域', display_name: '靠山宗外宗区域', scene_reference_id: 'scene_05d482b34f00', event_ids: ['ev_001', 'ev_002', 'ev_003', 'ev_004'] },
+      { scene_id: 'scene:靠山宗外宗区域', display_name: '靠山宗外宗区域', scene_reference_id: 'scene_05d482b34f00', segment_indexes: [1, 2, 3, 4] },
     ],
     functional_extras: [
-      { label: '外宗弟子', event_ids: ['ev_001'] },
-      { label: '养丹坊中年男子', event_ids: ['ev_002'] },
-      { label: '宝阁弟子', event_ids: ['ev_002'] },
-      { label: '昨日被坑修士', event_ids: ['ev_005', 'ev_006', 'ev_008', 'ev_011'] },
-      { label: '公开区其他修士', event_ids: ['ev_005', 'ev_006', 'ev_009', 'ev_010'] },
+      { label: '外宗弟子', segment_indexes: [1] },
+      { label: '养丹坊中年男子', segment_indexes: [2] },
+      { label: '宝阁弟子', segment_indexes: [2] },
+      { label: '昨日被坑修士', segment_indexes: [5, 6, 8, 11] },
+      { label: '公开区其他修士', segment_indexes: [5, 6, 9, 10] },
     ],
   }
 
   const buildPack = (assetManifest: typeof ep13AssetManifest) => ({
-    prep_pack_version: '1.3.0',
+    prep_pack_version: '2.0.0',
     episode_no: 13,
     episode_scope: { chapter_indexes: [13], source_segment_count: 52 },
-    event_chain: [
-      { event_id: 'ev_001', order: 1, summary: '测试事件', source_evidence: [], key_lines: [] },
-    ],
     asset_manifest: assetManifest,
     coverage_ledger: {
       total_segments: 52, delivered: Array.from({ length: 27 }, (_, i) => i + 1),
       merged: [], retained_as_context: Array.from({ length: 25 }, (_, i) => i + 28),
       proven_duplicates: [], uncovered: [],
     },
-    hook: 'h', cliffhanger: 'c',
   }) as any
 
-  it('renders all 5 real functional_extras with correct labels and event counts, using the icon placeholder (no <img>)', () => {
+  it('renders all 5 real functional_extras with correct labels and segment coverage, using the icon placeholder (no <img>)', () => {
     const html = renderToStaticMarkup(createElement(PrepPackView, { pack: buildPack(ep13AssetManifest), bible: null, sourceFallback: '第 13 章' }))
     expect(html).toContain('群演 / 一次性人物')
     expect(html).toContain('群演 / 一次性人物 · 5')
     for (const extra of ep13AssetManifest.functional_extras) {
       expect(html).toContain(extra.label)
     }
-    // 事件覆盖数按各自 event_ids 长度展示
-    expect(html).toContain('覆盖 4 个事件') // 昨日被坑修士 / 公开区其他修士 都是 4
-    expect(html).toContain('覆盖 1 个事件') // 外宗弟子 / 养丹坊中年男子 / 宝阁弟子 都是 1
+    // 段落覆盖数按各自 segment_indexes 长度展示
+    expect(html).toContain('覆盖 4 段原文') // 昨日被坑修士 / 公开区其他修士 都是 4
+    expect(html).toContain('覆盖 1 段原文') // 外宗弟子 / 养丹坊中年男子 / 宝阁弟子 都是 1
     // 群演占位用统一图标，不生成 <img> 标签（它们没有 portrait_id/scene_reference_id 可查图）
     const extrasSectionStart = html.indexOf('群演 / 一次性人物')
     const extrasSectionEnd = html.indexOf('出场场景')
@@ -706,7 +623,7 @@ describe('PrepPackView renders aliases and functional_extras (real EP13 data)', 
     const withAlias = {
       ...ep13AssetManifest,
       characters: [
-        { identity_id: 'bible:李富贵', display_name: '李富贵', portrait_id: 'portrait_x', event_ids: ['ev_001'], aliases: ['小胖子'] },
+        { identity_id: 'bible:李富贵', display_name: '李富贵', portrait_id: 'portrait_x', segment_indexes: [1], aliases: ['小胖子'] },
       ],
     }
     const html = renderToStaticMarkup(createElement(PrepPackView, { pack: buildPack(withAlias), bible: null, sourceFallback: '第 13 章' }))
@@ -719,7 +636,7 @@ describe('PrepPackView renders aliases and functional_extras (real EP13 data)', 
     const withAliases = {
       ...ep13AssetManifest,
       characters: [
-        { identity_id: 'bible:x', display_name: '甲', portrait_id: '', event_ids: [], aliases: ['乙名', '  ', '丙名'] },
+        { identity_id: 'bible:x', display_name: '甲', portrait_id: '', segment_indexes: [], aliases: ['乙名', '  ', '丙名'] },
       ],
     }
     const html = renderToStaticMarkup(createElement(PrepPackView, { pack: buildPack(withAliases), bible: null, sourceFallback: '第 13 章' }))
@@ -747,25 +664,21 @@ describe('PrepPackView renders aliases and functional_extras (real EP13 data)', 
 // 显示、相同时不重复、字段整个缺失时退回只显示 display_name。
 describe('PrepPackView renders display_appellation vs display_name (画面与字幕分离)', () => {
   const buildPack = (characters: Record<string, unknown>[]) => ({
-    prep_pack_version: '1.7.0',
+    prep_pack_version: '2.0.0',
     episode_no: 1,
     episode_scope: { chapter_indexes: [1], source_segment_count: 10 },
-    event_chain: [
-      { event_id: 'ev_001', order: 1, summary: '测试事件', source_evidence: [], key_lines: [] },
-    ],
     asset_manifest: { characters, scenes: [] },
     coverage_ledger: {
       total_segments: 10, delivered: Array.from({ length: 10 }, (_, i) => i + 1),
       merged: [], retained_as_context: [], proven_duplicates: [], uncovered: [],
     },
-    hook: 'h', cliffhanger: 'c',
   }) as any
 
   it('shows both this-episode wording and the canonical name when they differ, distinguishably tagged', () => {
     const html = renderToStaticMarkup(createElement(PrepPackView, {
       pack: buildPack([{
         identity_id: 'bible:许清', display_name: '许清', portrait_id: 'portrait_x',
-        event_ids: ['ev_001'], visual_entity_id: 'bible:许清',
+        segment_indexes: [1], visual_entity_id: 'bible:许清',
         display_appellation: '银色长袍女子',
         provenance: { method: 'candidate_verdict', anchor_segments: [1], anchor_phrase: '许师姐武功高强，众人皆知。' },
       }]),
@@ -781,7 +694,7 @@ describe('PrepPackView renders display_appellation vs display_name (画面与字
     const html = renderToStaticMarkup(createElement(PrepPackView, {
       pack: buildPack([{
         identity_id: 'bible:孟浩', display_name: '孟浩', portrait_id: 'portrait_y',
-        event_ids: ['ev_001'], visual_entity_id: 'bible:孟浩', display_appellation: '孟浩',
+        segment_indexes: [1], visual_entity_id: 'bible:孟浩', display_appellation: '孟浩',
         provenance: { method: 'direct', anchor_segments: [1], anchor_phrase: '孟浩' },
       }]),
       bible: null, sourceFallback: '第 1 章',
@@ -794,7 +707,7 @@ describe('PrepPackView renders display_appellation vs display_name (画面与字
     const html = renderToStaticMarkup(createElement(PrepPackView, {
       pack: buildPack([{
         identity_id: 'bible:王有材', display_name: '王有材', portrait_id: 'portrait_z',
-        event_ids: ['ev_001'],
+        segment_indexes: [1],
       }]),
       bible: null, sourceFallback: '第 1 章',
     }))
@@ -807,7 +720,7 @@ describe('PrepPackView renders display_appellation vs display_name (画面与字
     const html = renderToStaticMarkup(createElement(PrepPackView, {
       pack: buildPack([{
         identity_id: 'bible:许清', display_name: '许清', portrait_id: 'portrait_x',
-        event_ids: ['ev_001'], provenance: { method: 'candidate_verdict' },
+        segment_indexes: [1], provenance: { method: 'candidate_verdict' },
       }]),
       bible: null, sourceFallback: '第 1 章',
     }))
@@ -818,7 +731,7 @@ describe('PrepPackView renders display_appellation vs display_name (画面与字
     const html = renderToStaticMarkup(createElement(PrepPackView, {
       pack: buildPack([{
         identity_id: 'bible:许清', display_name: '许清', portrait_id: 'portrait_x',
-        event_ids: ['ev_001'],
+        segment_indexes: [1],
       }]),
       bible: null, sourceFallback: '第 1 章',
     }))
@@ -862,13 +775,11 @@ describe('provenanceMethodHint', () => {
 // 覆盖门禁第五账（1.4.0+）：副文本 chip 只在非空时出现，且不影响绿灯判定。
 describe('PrepPackView renders the paratext gate chip (5th account)', () => {
   const basePack = (coverageLedger: Record<string, unknown>) => ({
-    prep_pack_version: '1.4.0',
+    prep_pack_version: '2.0.0',
     episode_no: 1,
     episode_scope: { chapter_indexes: [1], source_segment_count: 5 },
-    event_chain: [],
     asset_manifest: { characters: [], scenes: [] },
     coverage_ledger: coverageLedger,
-    hook: 'h', cliffhanger: 'c',
   }) as any
 
   it('shows the "副文本 N 段" chip with the segment list in its title when paratext is non-empty', () => {

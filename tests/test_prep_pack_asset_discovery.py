@@ -135,13 +135,14 @@ def _bible_character(
 
 
 def _event(event_id: str, *, characters=None, scenes_=None, source_span=None) -> dict:
-    """``source_span``（可选，形状 ``{"from_segment": int, "to_segment": int}``）
-    默认 None，匹配生产 payload_events 里同名字段（见 app.production.
-    prep_pack 模块顶部 payload docstring）——只有需要驱动 1.8.1 事件跨度
-    卷宗定位（``_prep_pack_functional_candidate_event_span_segments``）的
-    测试才需要显式传入，其余既有测试留空即可（``_resolve_assets``/`_pass`
-    在这条改造前就只读 event_id/characters/scenes[/source_evidence]，
-    新增的 None 默认值不影响任何既有断言）。"""
+    """2.0.0 兼容外壳：event_chain/event_id/source_span 概念本身已随架构
+    收窄撤销（见 app.production.prep_pack.PREP_PACK_VERSION 上方 2.0.0
+    大注释），保留这个构造函数只是为了不用逐一改写本文件里近百处既有
+    调用点——真正喂给 ``_resolve_assets`` 的是 ``_resolve()`` 内部经
+    ``_mentions_with_segment_indexes`` 摊平、并用生产代码自己的逐段证据
+    闸（``prep_pack._prep_pack_gate_segment_indexes``）算出真实
+    segment_indexes 之后的扁平提及列表，不是这个函数返回的字典本身。
+    ``source_span`` 不再被任何生产代码读取，仅为兼容旧调用点签名保留。"""
     return {
         "event_id": event_id,
         "characters": characters or [],
@@ -150,12 +151,56 @@ def _event(event_id: str, *, characters=None, scenes_=None, source_span=None) ->
     }
 
 
+def _mentions_with_segment_indexes(
+    events: list[dict], source_text: str, group_key: str,
+) -> list[dict]:
+    """2.0.0 兼容外壳：把旧版按事件分组的提及（``_event()`` 构造）摊平成
+    ``_resolve_assets`` 现在期望的扁平提及列表。生产代码的段号入口闸
+    （``_prep_pack_gate_segment_indexes``）刻意只做结构核验、不做逐字
+    核验（见该函数上方说明——逐字核验会在候选判别机会到来之前堵死合成
+    描述性标签，真实 EP1"银色长袍女子"案例即此），所以不能拿它来算这里
+    的 segment_indexes；改为直接在测试夹具这一层做逐段字面搜索——对绝大
+    多数既有测试用例（display_name/label 本来就是原文逐字用词）这就是
+    它们真实会落在哪些段落，等价于真实产线上模型自己会申报的段号。少数
+    故意构造"标签不逐字出现在原文"的测试（模拟合成描述性标签）会在这里
+    自然得到空 segment_indexes，与 _resolve_assets 里"裸命中要求逐字/
+    解析路径豁免"的既有分支语义完全吻合，不是伪造。"""
+    from app.source_excerpt import index_source_segments
+
+    segments = index_source_segments(source_text)
+    mentions: list[dict] = []
+    for event in events:
+        for mention in event[group_key]:
+            label = mention.get("display_name") or mention.get("label") or ""
+            valid_indexes = [
+                index for index, segment in enumerate(segments, start=1)
+                if label and label in segment.text
+            ]
+            new_mention = dict(mention)
+            new_mention.setdefault("segment_indexes", valid_indexes)
+            if not new_mention.get("segment_indexes"):
+                new_mention["segment_indexes"] = valid_indexes
+            mentions.append(new_mention)
+    return mentions
+
+
 def _resolve(conn, **kwargs):
     defaults = dict(
         project_id="p1", episode_id="ep-test", episode_no=2,
         source_text="占位原文。", run_id=None,
     )
     defaults.update(kwargs)
+    events = defaults.pop("events", [])
+    source_text = defaults["source_text"]
+    defaults.setdefault(
+        "character_mentions",
+        _mentions_with_segment_indexes(events, source_text, "characters"),
+    )
+    defaults.setdefault(
+        "scene_mentions",
+        _mentions_with_segment_indexes(events, source_text, "scenes"),
+    )
+    defaults.setdefault("prop_mentions", [])
     return asyncio.run(prep_pack._resolve_assets(conn, **defaults))
 
 
@@ -191,7 +236,7 @@ def test_fully_known_cast_triggers_zero_discovery_calls(monkeypatch):
         characters=[{"display_name": "萧炎", "is_background_extra": False}],
         scenes_=[{"display_name": "宗门广场"}],
     )]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
         conn, episode_no=1, events=events,
         # 1.4.2 称谓/场景名证据闸要求直接命中必须有本集文本证据 -- 两个提及都
         # 得逐字出现在这里，否则会被误当成"裸命中没证据"（这不是本测试要覆盖
@@ -204,16 +249,15 @@ def test_fully_known_cast_triggers_zero_discovery_calls(monkeypatch):
     assert functional_extras == []
     assert characters == [{
         "identity_id": "bible:萧炎", "display_name": "萧炎",
-        "portrait_id": "cp1", "event_ids": ["ev_001"], "aliases": [],
+        "portrait_id": "cp1", "segment_indexes": [1], "aliases": [],
         "visual_entity_id": "bible:萧炎", "display_appellation": "萧炎",
         "provenance": {
             "method": "direct", "anchor_segments": [1], "anchor_phrase": "萧炎",
-            "label_literal": True,
         },
     }]
     assert scene_list == [{
         "scene_id": "scene:宗门广场", "display_name": "宗门广场",
-        "scene_reference_id": "sr1", "event_ids": ["ev_001"],
+        "scene_reference_id": "sr1", "segment_indexes": [1],
         "provenance": {
             "method": "direct", "anchor_segments": [1], "anchor_phrase": "宗门广场",
         },
@@ -269,7 +313,7 @@ def test_known_alias_flagged_as_background_extra_still_binds_to_its_portrait(mon
             {"display_name": "小胖子", "is_background_extra": True},
         ]),
     ]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
         conn, events=events,
         # 1.4.2 称谓证据闸：小胖子是原文里对他的真实称呼，天然会出现在原文中
         # -- 这正是合法前瞻解析该有的样子，跟真实 EP5 裸幻觉绑定（"丹鬼"原文
@@ -286,7 +330,7 @@ def test_known_alias_flagged_as_background_extra_still_binds_to_its_portrait(mon
     entry = by_portrait["cp-lfg"]
     assert entry["display_name"] == "李富贵"
     assert entry["aliases"] == ["小胖子"]
-    assert entry["event_ids"] == ["ev_002", "ev_003"]
+    assert entry["segment_indexes"] == [1]
 
 
 # ---------------------------------------------------------------------------
@@ -346,11 +390,21 @@ def test_occupation_title_extras_absorbed_into_functional_extras(monkeypatch):
             {"display_name": "围观弟子", "is_background_extra": True},
         ]),
     ]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
+    # 2.0.0：segment_indexes 是逐段真实推导的，三个自然段依次对应旧版
+    # ev_002/ev_008/ev_011 三个事件各自的原文位置，让每个群演标签的
+    # segment_indexes 聚合仍然是可断言、有信息量的（不是随便给个占位段号）。
+    source_text = (
+        "孟浩来到外院，向养丹坊掌柜和宝阁执事分别行礼问候。"
+        "\n\n"
+        "孟浩与曹阳并肩走在外宗广场上，四周围观弟子纷纷侧目。"
+        "\n\n"
+        "曹阳身旁，一名外宗弟子低声议论，围观弟子越聚越多。"
+    )
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
         conn, events=events,
         # 1.4.2 称谓证据闸只管走 portrait_id 解析的名字（孟浩/曹阳）；职业称谓
-        # 类群演走 skip_character_names 分支，从不到达证据闸，不需要出现在这里。
-        source_text="孟浩与曹阳并肩走在外宗广场上，四周弟子纷纷侧目。",
+        # 类群演走 skip_character_names 分支，不要求逐字证据，不需要出现在这里。
+        source_text=source_text,
     )
 
     assert errors == [], f"职业称谓类龙套不应阻断门禁：{errors}"
@@ -360,12 +414,12 @@ def test_occupation_title_extras_absorbed_into_functional_extras(monkeypatch):
     assert "曹阳" in by_name, "同一次发现调用里的真新角色必须正常建卡入谱"
     assert by_name["曹阳"]["portrait_id"] == "cp-cy"
 
-    extras_by_label = {e["label"]: e["event_ids"] for e in functional_extras}
+    extras_by_label = {e["label"]: e["segment_indexes"] for e in functional_extras}
     assert extras_by_label == {
-        "养丹坊掌柜": ["ev_002"],
-        "宝阁执事": ["ev_002"],
-        "围观弟子": ["ev_008", "ev_011"],
-        "一名外宗弟子": ["ev_011"],
+        "养丹坊掌柜": [1],
+        "宝阁执事": [1],
+        "围观弟子": [2, 3],
+        "一名外宗弟子": [3],
     }
 
 
@@ -385,7 +439,7 @@ def test_default_functional_fallback_still_excludes_non_person_skips(monkeypatch
     monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_not_person)
     monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "天启宗", "is_background_extra": False}])]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
 
     assert errors == []
     assert characters == []
@@ -418,7 +472,7 @@ def test_unresolved_new_character_routes_through_discovery_and_resolves(monkeypa
     events = [_event(
         "ev_001", characters=[{"display_name": "沈青梧", "is_background_extra": False}],
     )]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
         conn, events=events,
         # 1.4.2 称谓证据闸：discovery 在本例里直接以原始提及字符串建卡（沒有
         # rename），第二遍走的仍是裸直接命中路径，一样要求证据。
@@ -431,11 +485,10 @@ def test_unresolved_new_character_routes_through_discovery_and_resolves(monkeypa
     assert functional_extras == []
     assert characters == [{
         "identity_id": "bible:沈青梧", "display_name": "沈青梧",
-        "portrait_id": "cp-new", "event_ids": ["ev_001"], "aliases": [],
+        "portrait_id": "cp-new", "segment_indexes": [1], "aliases": [],
         "visual_entity_id": "bible:沈青梧", "display_appellation": "沈青梧",
         "provenance": {
             "method": "discovery", "anchor_segments": [1], "anchor_phrase": "沈青梧",
-            "label_literal": True,
         },
     }]
 
@@ -458,14 +511,14 @@ def test_unresolved_new_scene_routes_through_discovery_and_resolves(monkeypatch)
     monkeypatch.setattr(scenes, "ensure_scenes_for_labels", fake_ensure_scenes_for_labels)
 
     events = [_event("ev_001", scenes_=[{"display_name": "藏经阁"}])]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
 
     assert calls["n"] == 1
     assert stats["scene_discovery_calls"] == 1
     assert errors == []
     assert scene_list == [{
         "scene_id": "scene:藏经阁", "display_name": "藏经阁",
-        "scene_reference_id": "sr-new", "event_ids": ["ev_001"],
+        "scene_reference_id": "sr-new", "segment_indexes": [],
         "provenance": {"method": "discovery", "anchor_segments": [], "anchor_phrase": ""},
     }]
 
@@ -486,12 +539,12 @@ def test_alias_scene_resolves_via_canonical_name_after_discovery(monkeypatch):
 
     monkeypatch.setattr(scenes, "ensure_scenes_for_labels", fake_ensure_scenes_for_labels)
     events = [_event("ev_001", scenes_=[{"display_name": "门派前庭"}])]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
 
     assert errors == []
     assert scene_list == [{
         "scene_id": "scene:宗门广场", "display_name": "宗门广场",
-        "scene_reference_id": "sr1", "event_ids": ["ev_001"],
+        "scene_reference_id": "sr1", "segment_indexes": [],
         "provenance": {"method": "resolution", "anchor_segments": [], "anchor_phrase": ""},
     }]
 
@@ -518,21 +571,18 @@ def test_functional_identity_after_discovery_needs_no_portrait(monkeypatch):
     monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_functional)
     monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "黑衣人", "is_background_extra": False}])]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
 
     assert errors == []
     assert characters == []
     assert functional_extras == [{
-        "label": "黑衣人", "event_ids": ["ev_001"],
+        "label": "黑衣人", "segment_indexes": [],
         "visual_entity_id": "entity:b645a470abc42e7e",
         "provenance": {
             "method": "discovery", "anchor_segments": [], "anchor_phrase": "",
             # 1.10.0 缺陷 A 顺带修复：候选集为空（bible 未注册任何角色），
             # 候选判别从未获得发起机会。
             "candidate_verdict_attempted": False,
-            # 1.11.0（任务①）：默认占位 source_text 里没有"黑衣人"这个字面，
-            # 独立判定标签本身逐字失据——不影响这条群演合法收编。
-            "label_literal": False,
         },
     }]
     assert stats["character_discovery_calls"] == 1
@@ -554,7 +604,7 @@ def test_skipped_not_person_after_discovery_needs_no_portrait(monkeypatch):
     monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_not_person)
     monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "天启宗", "is_background_extra": False}])]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
 
     assert errors == []
     assert characters == []
@@ -584,7 +634,7 @@ def test_alias_rename_after_discovery_resolves_to_real_name(monkeypatch):
     monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_rename)
     monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "神秘老者", "is_background_extra": False}])]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
         conn, events=events,
         # 1.4.2 称谓证据闸：discovery 之所以能提出这条改名，前提就是它自己在
         # 本集文本里找到了"神秘老者"这个称谓；真实场景里这原本就该出现在原文，
@@ -596,11 +646,10 @@ def test_alias_rename_after_discovery_resolves_to_real_name(monkeypatch):
     assert functional_extras == []
     assert characters == [{
         "identity_id": "bible:苍玄", "display_name": "苍玄",
-        "portrait_id": "cp1", "event_ids": ["ev_001"], "aliases": ["神秘老者"],
+        "portrait_id": "cp1", "segment_indexes": [1], "aliases": ["神秘老者"],
         "visual_entity_id": "bible:苍玄", "display_appellation": "神秘老者",
         "provenance": {
             "method": "resolution", "anchor_segments": [1], "anchor_phrase": "神秘老者",
-            "label_literal": True,
         },
     }]
 
@@ -633,7 +682,7 @@ def test_discovery_explicit_named_error_still_gate_fails(monkeypatch):
         "ev_001",
         characters=[{"display_name": "神秘蒙面人", "is_background_extra": True}],
     )]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
 
     assert stats["character_discovery_calls"] == 1
     assert any("神秘蒙面人" in message for message in errors), (
@@ -653,7 +702,7 @@ def test_scene_discovery_finding_nothing_still_gate_fails(monkeypatch):
 
     monkeypatch.setattr(scenes, "ensure_scenes_for_labels", noop_scene_discovery)
     events = [_event("ev_001", scenes_=[{"display_name": "无名之地"}])]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
 
     assert stats["scene_discovery_calls"] == 1
     assert errors, "场景 discovery 无结果时必须门禁失败，不能静默放行"
@@ -673,7 +722,7 @@ def test_discovery_error_entries_surface_in_final_gate_message(monkeypatch):
     monkeypatch.setattr(portraits, "ensure_cards_for_text", failing_discovery)
     monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "无名之人", "is_background_extra": False}])]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
 
     assert any("ABC123" in message for message in errors)
     assert functional_extras == []
@@ -712,7 +761,7 @@ def test_ep5_hallucinated_character_bind_with_no_text_evidence_is_gate_blocked(m
     events = [_event(
         "ev_008", characters=[{"display_name": "丹鬼", "is_background_extra": False}],
     )]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
         conn, events=events,
         source_text="山顶上，两个老者盘膝而坐，笑眯眯地看着山下的广场。",
     )
@@ -756,7 +805,7 @@ def test_ep5_hallucinated_scene_bind_with_no_text_evidence_routes_through_discov
     monkeypatch.setattr(scenes, "ensure_scenes_for_labels", fake_ensure_scenes_for_labels)
 
     events = [_event("ev_008", scenes_=[{"display_name": "大青山山顶"}])]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
         conn, events=events,
         source_text="山顶上，两个老者盘膝而坐，笑眯眯地看着山下的广场。",
     )
@@ -766,7 +815,7 @@ def test_ep5_hallucinated_scene_bind_with_no_text_evidence_routes_through_discov
     assert errors == []
     assert scene_list == [{
         "scene_id": "scene:靠山宗外围山峰", "display_name": "靠山宗外围山峰",
-        "scene_reference_id": "sr-new", "event_ids": ["ev_008"],
+        "scene_reference_id": "sr-new", "segment_indexes": [],
         "provenance": {"method": "discovery", "anchor_segments": [], "anchor_phrase": ""},
     }]
     assert not any(s["scene_reference_id"] == "sr-dqs" for s in scene_list), (
@@ -830,7 +879,7 @@ def test_suspected_true_name_hypothesis_verified_via_forward_window_binds_with_a
     events = [_event("ev_013", characters=[
         {"display_name": "灰袍老者", "is_background_extra": False, "suspected_true_name": "丹鬼"},
     ])]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
         conn, events=events,
         source_text="山顶上，灰袍老者哈哈大笑起来。",
     )
@@ -840,7 +889,7 @@ def test_suspected_true_name_hypothesis_verified_via_forward_window_binds_with_a
     assert verdict_calls["n"] == 1
     assert characters == [{
         "identity_id": "bible:丹鬼", "display_name": "丹鬼",
-        "portrait_id": "cp-dg", "event_ids": ["ev_013"], "aliases": ["灰袍老者"],
+        "portrait_id": "cp-dg", "segment_indexes": [1], "aliases": ["灰袍老者"],
         "visual_entity_id": "bible:丹鬼", "display_appellation": "灰袍老者",
         "provenance": {
             "method": "resolution_forward", "anchor_segments": [],
@@ -855,10 +904,6 @@ def test_suspected_true_name_hypothesis_verified_via_forward_window_binds_with_a
             # 1.10.0 缺陷 A：这条支撑句同时逐字包含 alias 与 true_name，是
             # 结构上可能存在的双锚定证据，钉证钉在了它上面，非退化路径。
             "dual_anchor": True,
-            # 1.11.0（任务①）：alias"灰袍老者"本身逐字出现在本集 source_text
-            # 里（跟 anchor_phrase/forward_chapter_label 指向全书第 6 章是
-            # 两件事——alias 才是 display_appellation 取的值），无需替换。
-            "label_literal": True,
         },
     }]
     assert any(
@@ -907,7 +952,7 @@ def test_suspected_true_name_hypothesis_rejected_with_no_evidence_routes_to_disc
     events = [_event("ev_008", scenes_=[
         {"display_name": "山峰", "suspected_true_name": "大青山"},
     ])]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
         conn, events=events,
         source_text="靠山宗四周的山峰上，两个老者盘膝而坐。",
     )
@@ -917,7 +962,7 @@ def test_suspected_true_name_hypothesis_rejected_with_no_evidence_routes_to_disc
     assert errors == []
     assert scene_list == [{
         "scene_id": "scene:靠山宗外围山峰", "display_name": "靠山宗外围山峰",
-        "scene_reference_id": "sr-new", "event_ids": ["ev_008"],
+        "scene_reference_id": "sr-new", "segment_indexes": [1],
         "provenance": {"method": "discovery", "anchor_segments": [1], "anchor_phrase": "山峰"},
     }]
     rejected = [h for h in true_name_hints if h["status"] == "rejected"]
@@ -938,143 +983,6 @@ def test_suspected_true_name_hypothesis_rejected_with_no_evidence_routes_to_disc
 # 1.5.0 -- speaker 名册引用化（真实 EP2 回归：关键台词"割舌头"的 speaker 被
 # 写成"韩宗"，实际说话人是"绿袍男子"，韩宗第 5 章才出场，speaker 字段从未
 # 进任何校验管线）。这两个函数是纯确定性查表，不需要 DB/异步，直接单测。
-# ---------------------------------------------------------------------------
-
-def test_speaker_matching_full_bible_name_absent_from_episode_roster_is_gate_blocked():
-    """红灯 a（第 21 轮 ERR-20260824-34347a，韩宗形状——既有测试保持）：台词
-    说话人"韩宗"是项目人物谱里真实存在的角色（character_portraits 里有此
-    人，只是本集尚未出场，韩宗第 5 章才登场），本集资产名册/群演都不是他
-    ——这是三分支里唯一仍然致命的一支：谱内名 + 本集无证据 = 疑似幻觉归
-    属，必须门禁具名阻断，绝不能被吸收为群演静默放行。"""
-    payload_events = [{
-        "event_id": "ev_003",
-        "key_lines": [{"speaker": "韩宗", "line": "割了他的舌头。", "segment_index": 10}],
-    }]
-    roster = prep_pack._prep_pack_build_speaker_roster(
-        characters=[{"display_name": "绿袍男子", "identity_id": "bible:绿袍男子", "aliases": []}],
-        functional_extras=[],
-    )
-    functional_extras: list[dict] = []
-    errors, absorbed_count = prep_pack._prep_pack_resolve_key_line_speakers(
-        payload_events, roster,
-        all_project_character_names={"韩宗", "绿袍男子"},
-        functional_extras=functional_extras,
-    )
-    assert any("韩宗" in message and "ev_003" in message for message in errors)
-    assert "speaker_ref" not in payload_events[0]["key_lines"][0]
-    assert absorbed_count == 0
-    assert functional_extras == []
-
-
-def test_speaker_with_zero_bible_collision_is_absorbed_as_functional_extra():
-    """红灯 b（第 21 轮 ERR-20260824-34347a，"被困者"形状——新增）：台词说话
-    人"被困者"跟项目人物谱（含本集之外的全部角色）零碰撞，是纯描述性的
-    一次性称谓，不是幻觉归属——必须吸收进 functional_extras（label 用原文
-    措辞），门禁放行、absorbed 计数=1，而不是被当成韩宗那样具名阻断。"""
-    payload_events = [{
-        "event_id": "ev_005",
-        "key_lines": [{"speaker": "被困者", "line": "救命！", "segment_index": 12}],
-    }]
-    roster = prep_pack._prep_pack_build_speaker_roster(
-        characters=[{"display_name": "绿袍男子", "identity_id": "bible:绿袍男子", "aliases": []}],
-        functional_extras=[],
-    )
-    functional_extras: list[dict] = []
-    errors, absorbed_count = prep_pack._prep_pack_resolve_key_line_speakers(
-        payload_events, roster,
-        all_project_character_names={"韩宗", "绿袍男子"},
-        functional_extras=functional_extras,
-    )
-    assert errors == []
-    assert absorbed_count == 1
-    assert payload_events[0]["key_lines"][0]["speaker_ref"] == "extra:被困者"
-    assert functional_extras == [{
-        "label": "被困者", "event_ids": ["ev_005"],
-        "visual_entity_id": "entity:e2f70bd9be906dde",
-        "provenance": {
-            "method": "absorbed_speaker", "anchor_segments": [12], "anchor_phrase": "救命！",
-            # 1.11.0（任务①）：本用例没有传 source_text（默认空串），"被困者"
-            # 这个 speaker 字面无从判定逐字——独立判定诚实标 False，不影响
-            # 吸收为群演这条既有行为。
-            "label_literal": False,
-        },
-    }]
-
-
-def test_speaker_matching_real_character_display_name_resolves():
-    """红灯 c（协调方点名 1.5.0-speaker-b）：台词说话人"绿袍男子"是本集资产
-    名册里真实出场的角色（本集原文称谓），必须正确解析出 speaker_ref。"""
-    payload_events = [{
-        "event_id": "ev_003",
-        "key_lines": [{"speaker": "绿袍男子", "line": "割了他的舌头。", "segment_index": 10}],
-    }]
-    roster = prep_pack._prep_pack_build_speaker_roster(
-        characters=[{"display_name": "绿袍男子", "identity_id": "bible:绿袍男子", "aliases": []}],
-        functional_extras=[],
-    )
-    errors, absorbed_count = prep_pack._prep_pack_resolve_key_line_speakers(
-        payload_events, roster,
-        all_project_character_names={"绿袍男子"},
-        functional_extras=[],
-    )
-    assert errors == []
-    assert absorbed_count == 0
-    assert payload_events[0]["key_lines"][0]["speaker_ref"] == "bible:绿袍男子"
-
-
-def test_speaker_matching_registered_alias_resolves_to_owning_character():
-    """红灯 c（协调方点名 1.5.0-speaker-c）：台词说话人是名册角色的已登记别名
-    （比如"小胖子"是李富贵记录在案的 alias），必须正确落到该角色的
-    speaker_ref，不能因为字面量不是 display_name 就拦截。"""
-    payload_events = [{
-        "event_id": "ev_002",
-        "key_lines": [{"speaker": "小胖子", "line": "……", "segment_index": 5}],
-    }]
-    roster = prep_pack._prep_pack_build_speaker_roster(
-        characters=[{
-            "display_name": "李富贵", "identity_id": "bible:李富贵", "aliases": ["小胖子"],
-        }],
-        functional_extras=[],
-    )
-    errors, absorbed_count = prep_pack._prep_pack_resolve_key_line_speakers(
-        payload_events, roster,
-        all_project_character_names={"李富贵"},
-        functional_extras=[],
-    )
-    assert errors == []
-    assert absorbed_count == 0
-    assert payload_events[0]["key_lines"][0]["speaker_ref"] == "bible:李富贵"
-
-
-def test_speaker_matching_functional_extra_label_resolves():
-    """红灯 c 补充覆盖：speaker 是群演 label（functional_extras），同样应该
-    正确解析到 extra: 前缀的 speaker_ref，不应被具名阻断。"""
-    payload_events = [{
-        "event_id": "ev_008",
-        "key_lines": [{"speaker": "山顶老者", "line": "……", "segment_index": 29}],
-    }]
-    roster = prep_pack._prep_pack_build_speaker_roster(
-        characters=[], functional_extras=[{"label": "山顶老者", "event_ids": ["ev_008"]}],
-    )
-    errors, absorbed_count = prep_pack._prep_pack_resolve_key_line_speakers(
-        payload_events, roster,
-        all_project_character_names=set(),
-        functional_extras=[{"label": "山顶老者", "event_ids": ["ev_008"]}],
-    )
-    assert errors == []
-    assert absorbed_count == 0
-    assert payload_events[0]["key_lines"][0]["speaker_ref"] == "extra:山顶老者"
-
-
-# ---------------------------------------------------------------------------
-# 1.5.1 -- 场景别名锚定（task①，真实第18轮审计 A2 主病灶，47 条）：场景规范
-# 名（如"杂役处居所内"）是发现时铸造的标签，天然不在原文——本集若换了个
-# 说法提这个场景，裸精确匹配 scene_references.scene_name 找不到它，哪怕这
-# 个说法早就被登记成了该场景的别名（Bible.scenes[].aliases）也一样，因为
-# 场景解析从来不读别名表。修法：读侧接上既有别名判定
-# （app.validators.match_scene_name，跟 app.scenes 发现路径同一套逻辑）；
-# 写侧把本集实际用到的新说法记回别名表（复用既有 app.scenes._append_scene_
-# alias，幂等）。
 # ---------------------------------------------------------------------------
 
 def test_scene_alias_fallback_resolves_via_registered_alias_without_discovery():
@@ -1264,7 +1172,7 @@ def test_character_alias_registry_binds_ep2_shape_alias_in_ep3_zero_discovery(
         {"display_name": "小胖子", "is_background_extra": False},
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events,
@@ -1333,7 +1241,7 @@ def test_character_alias_registry_ambiguous_across_episodes_falls_back_to_discov
         {"display_name": "小胖子", "is_background_extra": False},
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events,
@@ -1388,7 +1296,7 @@ def test_character_alias_registry_binds_via_bible_aliases_with_zero_other_episod
         {"display_name": "小胖子", "is_background_extra": False},
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events, episode_no=1,
@@ -1448,7 +1356,7 @@ def test_bible_alias_conflict_check_is_not_overridden_by_legacy_scan(monkeypatch
         {"display_name": "小胖子", "is_background_extra": False},
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events,
@@ -1510,7 +1418,7 @@ def test_bible_alias_ambiguous_across_characters_falls_back_to_discovery(monkeyp
         {"display_name": "小胖子", "is_background_extra": False},
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events,
@@ -1641,7 +1549,7 @@ def test_composite_description_resolved_via_discovery_bypasses_literal_gate(
         {"display_name": "穿杂役衫的魁梧大汉", "is_background_extra": False},
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events,
@@ -1679,7 +1587,7 @@ def test_composite_description_discovery_failure_still_gate_blocked(monkeypatch)
         {"display_name": "穿杂役衫的魁梧大汉", "is_background_extra": False},
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events,
@@ -1725,14 +1633,13 @@ def test_provenance_direct_method_self_verifies():
     events = [_event("ev_001", characters=[
         {"display_name": "萧炎", "is_background_extra": False},
     ])]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
         conn, events=events, source_text=source_text,
     )
     assert errors == []
     xiao_yan = next(c for c in characters if c["display_name"] == "萧炎")
     assert xiao_yan["provenance"] == {
         "method": "direct", "anchor_segments": [1], "anchor_phrase": "萧炎",
-        "label_literal": True,
     }
     assert _provenance_self_verify(source_text, characters, scene_list, functional_extras) == []
 
@@ -1767,28 +1674,29 @@ def test_provenance_alias_method_self_verifies(monkeypatch):
     events = [_event("ev_010", characters=[
         {"display_name": "小胖子", "is_background_extra": False},
     ])]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
         conn, events=events, source_text=source_text,
     )
     assert errors == []
     lfg = next(c for c in characters if c["display_name"] == "李富贵")
     assert lfg["provenance"] == {
         "method": "alias", "anchor_segments": [1], "anchor_phrase": "小胖子",
-        "label_literal": True,
     }
     assert _provenance_self_verify(source_text, characters, scene_list, functional_extras) == []
 
 
-def test_provenance_scene_alias_hit_with_event_evidence_upgrades_to_resolution():
-    """红灯 a（第30轮②，真实 scripts/episode_source_audit.py 复核实测：19 条
-    A2_scene_no_text_evidence，全部 provenance.method=alias、canonical
-    display_name 无一逐字出现在本集原文，但该场景所涉事件的 source_evidence
-    地点描述短语 19/19 逐字命中）：跨集别名命中的场景，若该场景所涉事件的
-    source_evidence 里有独立于"这个别名本身"之外的地点描述短语逐字出现，
-    这才是真正有信息量的证据（不是"这个别名确实这么写"的同义反复）——
-    provenance.method 升级为 resolution（走锚点核验标准，审计脚本对
-    resolution 用 ANCHOR_VERIFIED，不像 alias 那样要求 display_name 本身
-    逐字出现），anchor_phrase 记这句独立证据。"""
+def test_provenance_scene_alias_hit_with_no_independent_evidence_stays_alias_inherited():
+    """红灯 a（第30轮②的历史根因，2.0.0 起行为改变，见下方说明）：跨集别名
+    命中的场景（本集只写了已确认别名"杂役们住的地方"，canonical 规范名
+    "杂役处居所内"本身不逐字出现在本集原文）——第30轮②当年能把这种情形
+    升级成 method="resolution"，靠的是该场景所涉**事件**自己 source_evidence
+    里独立于别名本身之外的地点描述短语。event_chain 在 2.0.0 被撤销后，
+    "事件的 source_evidence"这个证据来源不复存在（见 app/production/
+    prep_pack.py 模块 docstring 的 2.0.0 说明，_prep_pack_scene_alias_
+    provenance 的第三个候选参数固定传空列表）——本场景不再有独立于别名本身
+    的额外证据可用，诚实退回 method="alias_inherited"（第30轮②本来就设计
+    的"真没有独立证据就诚实改标，不伪造锚点"分支），不是回归缺陷：宁可少
+    一次升级到 resolution 的精确分类，也不凭空捏造一个不存在的锚点。"""
     conn = _make_conn()
     conn.execute(
         "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end) "
@@ -1808,21 +1716,17 @@ def test_provenance_scene_alias_hit_with_event_evidence_upgrades_to_resolution()
     conn.commit()
 
     source_text = "杂役们住的地方，简陋异常，木床吱呀作响。"
-    events = [{
-        "event_id": "ev_020",
-        "characters": [],
-        "scenes": [{"display_name": "杂役们住的地方"}],
-        "source_evidence": [{"segment_index": 1, "quote": "杂役们住的地方，简陋异常"}],
-    }]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+    events = [_event("ev_020", scenes_=[{"display_name": "杂役们住的地方"}])]
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
         conn, events=events, source_text=source_text,
     )
     assert errors == []
     entry = next(s for s in scene_list if s["scene_reference_id"] == "sr1")
     assert entry["display_name"] == "杂役处居所内"
+    assert entry["segment_indexes"] == [1]
     assert entry["provenance"] == {
-        "method": "resolution", "anchor_segments": [1],
-        "anchor_phrase": "杂役们住的地方，简陋异常",
+        "method": "alias_inherited", "anchor_segments": [], "anchor_phrase": "",
+        "source_episode_no": 1,
     }
     assert _provenance_self_verify(source_text, characters, scene_list, functional_extras) == []
 
@@ -1858,7 +1762,7 @@ def test_provenance_scene_alias_hit_with_no_independent_evidence_becomes_alias_i
         "characters": [],
         "scenes": [{"display_name": "藏书的阁楼"}],
     }]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
         conn, events=events, source_text=source_text, episode_no=5,
     )
     assert errors == []
@@ -1899,14 +1803,13 @@ def test_provenance_resolution_method_self_verifies(monkeypatch):
     events = [_event("ev_001", characters=[
         {"display_name": "神秘老者", "is_background_extra": False},
     ])]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
         conn, events=events, source_text=source_text,
     )
     assert errors == []
     cangxuan = next(c for c in characters if c["display_name"] == "苍玄")
     assert cangxuan["provenance"] == {
         "method": "resolution", "anchor_segments": [1], "anchor_phrase": "神秘老者",
-        "label_literal": True,
     }
     assert _provenance_self_verify(source_text, characters, scene_list, functional_extras) == []
 
@@ -1931,146 +1834,15 @@ def test_provenance_discovery_method_self_verifies(monkeypatch):
     events = [_event("ev_001", characters=[
         {"display_name": "沈青梧", "is_background_extra": False},
     ])]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
         conn, events=events, source_text=source_text,
     )
     assert errors == []
     shen = next(c for c in characters if c["display_name"] == "沈青梧")
     assert shen["provenance"] == {
         "method": "discovery", "anchor_segments": [1], "anchor_phrase": "沈青梧",
-        "label_literal": True,
     }
     assert _provenance_self_verify(source_text, characters, scene_list, functional_extras) == []
-
-
-def test_provenance_absorbed_speaker_method_self_verifies_and_propagates_to_key_line():
-    """红灯 a（method=absorbed_speaker）：台词说话人被吸收为群演时，
-    functional_extras 条目和它触发的那条 key_line 的 speaker_provenance
-    共用同一份 provenance；anchor_segments 是"台词所在事件的证据段"（协调方
-    原话），自校验通过。"""
-    payload_events = [{
-        "event_id": "ev_005",
-        "source_evidence": [{"segment_index": 11, "quote": "山洞里传来求救声。"}],
-        "key_lines": [{"speaker": "被困者", "line": "救命！", "segment_index": 12}],
-    }]
-    roster = prep_pack._prep_pack_build_speaker_roster(
-        characters=[{"display_name": "绿袍男子", "identity_id": "bible:绿袍男子", "aliases": []}],
-        functional_extras=[],
-    )
-    functional_extras: list[dict] = []
-    errors, absorbed_count = prep_pack._prep_pack_resolve_key_line_speakers(
-        payload_events, roster,
-        all_project_character_names={"韩宗", "绿袍男子"},
-        functional_extras=functional_extras,
-    )
-    assert errors == []
-    assert absorbed_count == 1
-    extra = next(e for e in functional_extras if e["label"] == "被困者")
-    assert extra["provenance"] == {
-        "method": "absorbed_speaker",
-        "anchor_segments": [11, 12],
-        "anchor_phrase": "救命！",
-        # 本用例没有把 source_text 传给 _prep_pack_resolve_key_line_speakers
-        # （默认空串），"被困者"逐字判定因此诚实地是 False——这不影响吸收
-        # 本身，也不影响下面的自校验（自校验同样默认空串，跟这里判定的
-        # 依据一致，不会出现自相矛盾）。
-        "label_literal": False,
-    }
-    key_line = payload_events[0]["key_lines"][0]
-    assert key_line["speaker_provenance"] == extra["provenance"]
-
-    source_text = "\n\n".join(
-        [f"占位段落{i}。" for i in range(1, 11)] + ["山洞里传来求救声。", "救命！"],
-    )
-    segments = prep_pack.index_source_segments(source_text)
-    assert segments[10].text == "山洞里传来求救声。"
-    assert segments[11].text == "救命！"
-    verify_errors = prep_pack._prep_pack_verify_manifest_provenance(
-        segments, {"characters": [], "scenes": [], "functional_extras": functional_extras},
-    )
-    assert verify_errors == []
-
-
-def test_provenance_discovery_extra_speaker_backfills_empty_anchor_from_key_line():
-    """红灯（第30轮①，真实 scripts/episode_source_audit.py 复核实测：31 条
-    A3_speaker_anchor_invalid，全部 provenance.method=discovery、
-    anchor_segments 为空）：discovery 类群演（角色发现判定 skip 落地时创建
-    的 functional_extra，触发发现的原始描述短语未必逐字出现在原文，见角色
-    循环 extra_anchor_phrase 的取法，anchor 天然可能是空的）这次真开口说了
-    台词——回填锚点跟 absorbed_speaker 同一套证据源：台词所在事件的
-    source_evidence 段号 ∪ 这条台词自己的 segment_index。回填是就地修改
-    functional_extras 里那条共享的 provenance 字典，manifest 自身
-    （functional_extras[].provenance）与 key_line.speaker_provenance 必须
-    同步拿到锚点，不是只改 speaker 这一侧。"""
-    payload_events = [{
-        "event_id": "ev_004",
-        "source_evidence": [{"segment_index": 8, "quote": "围观弟子纷纷议论起来。"}],
-        "key_lines": [{"speaker": "围观弟子", "line": "这下有好戏看了！", "segment_index": 9}],
-    }]
-    roster = prep_pack._prep_pack_build_speaker_roster(
-        characters=[], functional_extras=[{"label": "围观弟子", "event_ids": ["ev_002"]}],
-    )
-    # discovery 落地时锚点搜索失败的真实形状：anchor_segments/anchor_phrase
-    # 均为空，method=discovery（不是 absorbed_speaker——这条群演不是本函数
-    # 吸收出来的，是角色发现那条路径更早创建好、这里只是复用）。
-    functional_extras = [{
-        "label": "围观弟子", "event_ids": ["ev_002"],
-        "provenance": {"method": "discovery", "anchor_segments": [], "anchor_phrase": ""},
-    }]
-    errors, absorbed_count = prep_pack._prep_pack_resolve_key_line_speakers(
-        payload_events, roster,
-        all_project_character_names=set(),
-        functional_extras=functional_extras,
-    )
-    assert errors == []
-    assert absorbed_count == 0, "复用既有群演不是新吸收，absorbed 计数不应变化"
-    extra = next(e for e in functional_extras if e["label"] == "围观弟子")
-    assert extra["provenance"] == {
-        "method": "discovery",
-        "anchor_segments": [8, 9],
-        "anchor_phrase": "这下有好戏看了！",
-    }
-    key_line = payload_events[0]["key_lines"][0]
-    assert key_line["speaker_provenance"] == extra["provenance"]
-
-    source_text = "\n\n".join(
-        [f"占位段落{i}。" for i in range(1, 8)]
-        + ["围观弟子纷纷议论起来。", "这下有好戏看了！"],
-    )
-    segments = prep_pack.index_source_segments(source_text)
-    assert segments[7].text == "围观弟子纷纷议论起来。"
-    assert segments[8].text == "这下有好戏看了！"
-    verify_errors = prep_pack._prep_pack_verify_manifest_provenance(
-        segments, {"characters": [], "scenes": [], "functional_extras": functional_extras},
-    )
-    assert verify_errors == []
-
-
-def test_provenance_discovery_extra_speaker_with_no_recoverable_evidence_stays_empty():
-    """回填只在真有证据可用时才做——事件没有 source_evidence、台词自己也没
-    segment_index 时，fallback_segments 是空集合，provenance 原样保留空锚
-    （不伪造锚点），跟第29轮"默认安全侧"是同一条纪律。"""
-    payload_events = [{
-        "event_id": "ev_099",
-        "key_lines": [{"speaker": "围观弟子", "line": "……"}],
-    }]
-    roster = prep_pack._prep_pack_build_speaker_roster(
-        characters=[], functional_extras=[{"label": "围观弟子", "event_ids": ["ev_002"]}],
-    )
-    functional_extras = [{
-        "label": "围观弟子", "event_ids": ["ev_002"],
-        "provenance": {"method": "discovery", "anchor_segments": [], "anchor_phrase": ""},
-    }]
-    errors, absorbed_count = prep_pack._prep_pack_resolve_key_line_speakers(
-        payload_events, roster,
-        all_project_character_names=set(),
-        functional_extras=functional_extras,
-    )
-    assert errors == []
-    extra = next(e for e in functional_extras if e["label"] == "围观弟子")
-    assert extra["provenance"] == {
-        "method": "discovery", "anchor_segments": [], "anchor_phrase": "",
-    }
 
 
 def test_provenance_anchor_mismatch_blocks_publish():
@@ -2295,7 +2067,7 @@ def test_true_name_dossier_trial_rejects_enumeration_counter_evidence_real_corpu
         {"display_name": "小胖子", "is_background_extra": False, "suspected_true_name": "王有材"},
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events,
@@ -2372,7 +2144,7 @@ def test_true_name_dossier_trial_rejects_containment_false_positive_real_corpus(
         },
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events,
@@ -2434,7 +2206,7 @@ def test_true_name_dossier_trial_accepts_verified_link_real_corpus(monkeypatch):
         {"display_name": "小胖子", "is_background_extra": False, "suspected_true_name": "李富贵"},
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events,
@@ -2446,7 +2218,7 @@ def test_true_name_dossier_trial_accepts_verified_link_real_corpus(monkeypatch):
     assert stats["character_discovery_calls"] == 0
     assert characters == [{
         "identity_id": "bible:李富贵", "display_name": "李富贵",
-        "portrait_id": "cp-lfg", "event_ids": ["ev_101"], "aliases": ["小胖子"],
+        "portrait_id": "cp-lfg", "segment_indexes": [1], "aliases": ["小胖子"],
         "visual_entity_id": "bible:李富贵", "display_appellation": "小胖子",
         "provenance": {
             "method": "resolution_forward", "anchor_segments": [],
@@ -2454,8 +2226,6 @@ def test_true_name_dossier_trial_accepts_verified_link_real_corpus(monkeypatch):
             "anchor_phrase": "他是当年的小胖子，李富贵。",
             "forward_chapter_label": "第 692 章",
             "dual_anchor": True,
-            # 1.11.0（任务①）：alias"小胖子"本身逐字出现在本集 source_text。
-            "label_literal": True,
         },
     }]
     assert any(
@@ -2513,7 +2283,7 @@ def test_true_name_dossier_trial_rejects_unpinnable_entry_index_anti_forgery(mon
         {"display_name": "小胖子", "is_background_extra": False, "suspected_true_name": "李富贵"},
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events,
@@ -2594,7 +2364,7 @@ def test_character_rename_coincidentally_matching_suspected_true_name_uses_resol
         {"display_name": "小胖子", "is_background_extra": False, "suspected_true_name": "李富贵"},
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events,
@@ -2670,7 +2440,7 @@ def test_scene_true_name_hypothesis_verdict_prompt_uses_scene_semantics(monkeypa
     events = [_event("ev_201", scenes_=[
         {"display_name": "荒地", "suspected_true_name": "无极峰绝顶"},
     ])]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
         conn, events=events,
         source_text="荒地上尘土飞扬，无人问津。",
     )
@@ -2741,7 +2511,7 @@ def test_true_name_verdict_cache_isolated_by_subject_kind(monkeypatch):
         }],
         scenes_=[{"display_name": "阿石", "suspected_true_name": "石大山"}],
     )]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
         conn, events=events,
         source_text="阿石本名就是石大山，村里人都爱这么叫他。",
     )
@@ -2802,7 +2572,7 @@ def test_true_name_verdict_rejects_pinned_entry_missing_alias_real_data_shape(mo
         {"display_name": "小胖子", "is_background_extra": False, "suspected_true_name": "王有材"},
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events,
@@ -2867,7 +2637,7 @@ def test_true_name_verdict_requires_dual_anchor_pin_when_available(monkeypatch):
         {"display_name": "小胖子", "is_background_extra": False, "suspected_true_name": "王有材"},
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events,
@@ -2926,7 +2696,7 @@ def test_true_name_verdict_accepts_degraded_in_episode_pin_when_no_dual_anchor_e
         {"display_name": "银发老者", "is_background_extra": False, "suspected_true_name": "沈无极"},
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events,
@@ -2937,14 +2707,12 @@ def test_true_name_verdict_accepts_degraded_in_episode_pin_when_no_dual_anchor_e
     assert errors == []
     assert characters == [{
         "identity_id": "bible:沈无极", "display_name": "沈无极",
-        "portrait_id": "cp-swj", "event_ids": ["ev_303"], "aliases": ["银发老者"],
+        "portrait_id": "cp-swj", "segment_indexes": [1], "aliases": ["银发老者"],
         "visual_entity_id": "bible:沈无极", "display_appellation": "银发老者",
         "provenance": {
             "method": "resolution", "anchor_segments": [1],
             "anchor_phrase": "山道上走来一位银发老者，负手而立。",
             "dual_anchor": False,
-            # 1.11.0（任务①）：alias"银发老者"本身逐字出现在本集 source_text。
-            "label_literal": True,
         },
     }]
     assert any(
@@ -3031,9 +2799,12 @@ def test_true_name_verification_concurrent_completion_order_does_not_affect_outp
 
         result = await prep_pack._resolve_assets(
             conn, project_id="p1", episode_id="ep-test", episode_no=2,
-            source_text=source_text, events=events, run_id=None,
+            source_text=source_text,
+            character_mentions=_mentions_with_segment_indexes(events, source_text, "characters"),
+            scene_mentions=_mentions_with_segment_indexes(events, source_text, "scenes"),
+            prop_mentions=[], run_id=None,
         )
-        characters, _scene_list, _functional_extras, errors, _stats, true_name_hints, *_ = result
+        characters, _scene_list, _props, _functional_extras, errors, _stats, true_name_hints, *_ = result
         assert errors == []
         return {
             "characters": characters,
@@ -3143,9 +2914,12 @@ def test_functional_extra_candidate_concurrent_completion_order_does_not_affect_
 
         result = await prep_pack._resolve_assets(
             conn, project_id="p1", episode_id="ep-test", episode_no=2,
-            source_text=source_text, events=events, run_id=None,
+            source_text=source_text,
+            character_mentions=_mentions_with_segment_indexes(events, source_text, "characters"),
+            scene_mentions=_mentions_with_segment_indexes(events, source_text, "scenes"),
+            prop_mentions=[], run_id=None,
         )
-        characters, _scene_list, functional_extras, errors, _stats, *_ = result
+        characters, _scene_list, _props, functional_extras, errors, _stats, *_ = result
         assert errors == []
         return {
             "characters": characters, "functional_extras": functional_extras,
@@ -3279,7 +3053,10 @@ def test_true_name_verification_task_failure_aborts_pass_without_partial_writeba
     with pytest.raises(RuntimeError, match="模拟 provider 调用失败"):
         asyncio.run(prep_pack._resolve_assets(
             conn, project_id="p1", episode_id="ep-test", episode_no=2,
-            source_text=source_text, events=events, run_id=None,
+            source_text=source_text,
+            character_mentions=_mentions_with_segment_indexes(events, source_text, "characters"),
+            scene_mentions=_mentions_with_segment_indexes(events, source_text, "scenes"),
+            prop_mentions=[], run_id=None,
         ))
 
 
@@ -3321,7 +3098,7 @@ def test_true_name_verdict_rejects_degraded_pin_from_unrelated_out_of_episode_ch
         {"display_name": "银发老者", "is_background_extra": False, "suspected_true_name": "沈无极"},
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events,
@@ -3394,7 +3171,7 @@ def test_pass2_discovery_skip_name_collision_does_not_discard_pass1_accepted_tru
         {"display_name": "神秘人", "is_background_extra": True},
     ])]
     (
-        characters, scene_list, functional_extras, errors, stats,
+        characters, scene_list, props, functional_extras, errors, stats,
         true_name_hints, scene_alias_anchors, rejected_alias_conflicts,
     ) = _resolve(
         conn, events=events,
@@ -3454,7 +3231,7 @@ def test_visual_entity_id_stable_across_episodes_despite_different_in_episode_wo
     events_ep1 = [_event("ev_ep1", characters=[
         {"display_name": "许清", "is_background_extra": False},
     ])]
-    characters_ep1, _, _, errors_ep1, stats_ep1, *_ = _resolve(
+    characters_ep1, _, _, _, errors_ep1, stats_ep1, *_ = _resolve(
         conn, events=events_ep1, episode_no=1,
         source_text="许清缓步走出竹林。",
     )
@@ -3466,7 +3243,7 @@ def test_visual_entity_id_stable_across_episodes_despite_different_in_episode_wo
     events_ep6 = [_event("ev_ep6", characters=[
         {"display_name": "许师姐", "is_background_extra": False},
     ])]
-    characters_ep6, _, _, errors_ep6, stats_ep6, *_ = _resolve(
+    characters_ep6, _, _, _, errors_ep6, stats_ep6, *_ = _resolve(
         conn, events=events_ep6, episode_no=6,
         source_text="许师姐冷冷地看了他一眼。",
     )
@@ -3506,14 +3283,14 @@ def test_functional_extra_visual_entity_id_stable_for_same_raw_label_across_epis
     events = [_event("ev_a", characters=[
         {"display_name": "神秘蒙面客", "is_background_extra": False},
     ])]
-    _, _, extras_1, errors_1, *_ = _resolve(
+    _, _, _, extras_1, errors_1, *_ = _resolve(
         conn, events=events, episode_no=1,
         source_text="神秘蒙面客悄然离去。",
     )
     events2 = [_event("ev_b", characters=[
         {"display_name": "神秘蒙面客", "is_background_extra": False},
     ])]
-    _, _, extras_2, errors_2, *_ = _resolve(
+    _, _, _, extras_2, errors_2, *_ = _resolve(
         conn, events=events2, episode_no=4,
         source_text="神秘蒙面客再度现身。",
     )
@@ -3584,7 +3361,7 @@ def test_unresolved_appearance_label_binds_via_candidate_verdict(monkeypatch):
     events = [_event("ev_001", characters=[
         {"display_name": "银色长袍女子", "is_background_extra": True},
     ])]
-    characters, scene_list, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
         conn, events=events,
         source_text="许师姐武功高强，众人皆知。\n\n银色长袍女子缓步走出大殿，无人认得她的身份。",
     )
@@ -3631,7 +3408,7 @@ def test_candidate_verdict_empty_candidate_set_stays_functional_extra(monkeypatc
     events = [_event("ev_001", characters=[
         {"display_name": "银色长袍女子", "is_background_extra": True},
     ])]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
         conn, events=events,
         source_text="银色长袍女子缓步走出大殿，无人认得她的身份。",
     )
@@ -3677,7 +3454,7 @@ def test_candidate_verdict_no_match_selected_stays_functional_extra(monkeypatch)
     events = [_event("ev_001", characters=[
         {"display_name": "银色长袍女子", "is_background_extra": True},
     ])]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
         conn, events=events,
         source_text="许师姐武功高强，众人皆知。\n\n银色长袍女子缓步走出大殿，无人认得她的身份。",
     )
@@ -3722,7 +3499,7 @@ def test_candidate_verdict_out_of_dossier_segment_rejected_stays_functional_extr
     events = [_event("ev_001", characters=[
         {"display_name": "银色长袍女子", "is_background_extra": True},
     ])]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
         conn, events=events,
         source_text="许师姐武功高强，众人皆知。\n\n银色长袍女子缓步走出大殿，无人认得她的身份。",
     )
@@ -3745,46 +3522,6 @@ def test_candidate_verdict_out_of_dossier_segment_rejected_stays_functional_extr
 # 邻近度排序；③标签字面命中时继续收录为主锚点之一；④事件跨度缺失/为空
 # 时防御性退回既有行为；⑤全程确定性可复现。
 # ---------------------------------------------------------------------------
-
-def test_functional_candidate_event_span_segments_unions_matching_events_defensively():
-    """单元测试：_prep_pack_functional_candidate_event_span_segments 只并集
-    "标签命中该事件某个角色提及"的事件各自的 source_span，覆盖标签不匹配
-    （不计入）、区间重叠（正确并集去重）、区间倒挂/非 dict/非 int/字段缺失
-    （防御性丢弃，不崩）五种形状——零语义结构判据，不含任何具体人名特判。"""
-    events = [
-        {
-            "characters": [{"display_name": "银色长袍女子"}],
-            "source_span": {"from_segment": 3, "to_segment": 5},
-        },
-        {  # 标签不匹配，不该计入并集。
-            "characters": [{"display_name": "孟浩"}],
-            "source_span": {"from_segment": 1, "to_segment": 2},
-        },
-        {  # 区间与第一条重叠，验证并集去重而不是简单拼接。
-            "characters": [{"display_name": "银色长袍女子"}],
-            "source_span": {"from_segment": 5, "to_segment": 6},
-        },
-        {  # 区间倒挂，防御性丢弃。
-            "characters": [{"display_name": "银色长袍女子"}],
-            "source_span": {"from_segment": 9, "to_segment": 3},
-        },
-        {  # source_span 不是 dict，防御性丢弃。
-            "characters": [{"display_name": "银色长袍女子"}],
-            "source_span": "not-a-dict",
-        },
-        {  # source_span 字段整个缺失，防御性丢弃。
-            "characters": [{"display_name": "银色长袍女子"}],
-        },
-        {  # from_segment 不是 int，防御性丢弃。
-            "characters": [{"display_name": "银色长袍女子"}],
-            "source_span": {"from_segment": "3", "to_segment": 5},
-        },
-    ]
-    result = prep_pack._prep_pack_functional_candidate_event_span_segments(
-        events, "银色长袍女子",
-    )
-    assert result == {3, 4, 5, 6}
-
 
 def test_functional_candidate_dossier_ignores_out_of_range_event_span_segments():
     """反例（防御）：event_span_segments 含越界（0、超出总段数）值——一律
@@ -3819,30 +3556,35 @@ def test_functional_candidate_dossier_keeps_literal_label_segment_as_primary_alo
     assert {5, 13, 14} <= dossier_indexes, "字面命中段（5）与事件跨度段（13/14）都必须进卷宗"
 
 
-def test_unresolved_appearance_label_binds_via_candidate_verdict_using_event_span_dossier(monkeypatch):
-    """红灯→绿灯核心场景（1.8.1，复现真实数据形状）：标签"银色长袍女子"不
-    逐字出现在原文里（原文写的是"穿着一身银色长袍"）；其所属事件的
-    source_span 覆盖"银袍女子登场 + 绿袍男子称许师姐"这两段；候选集含许清
-    （确认别名"许师姐"字面出现在事件跨度内）；另有主角孟浩在事件跨度之外
-    的 12 个开篇独白段落里反复出现——足以在纯字面+文档顺序算法下吃光卷宗
-    预算（_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES == 12）。
+def test_unresolved_appearance_label_binds_via_candidate_verdict_using_own_segment_indexes(monkeypatch):
+    """红灯→绿灯核心场景（1.8.1 引入，2.0.0 起改用提及自报 segment_indexes
+    直接定位，见 app/production/prep_pack.py 模块 docstring 的 2.0.0 说明、
+    _prep_pack_functional_candidate_label_segments 的完整对比）：标签"银色
+    长袍女子"不逐字出现在原文里（原文写的是"穿着一身银色长袍"）；这条提及
+    自己申报的 segment_indexes 覆盖"银袍女子登场 + 绿袍男子称许师姐"这两段
+    （2.0.0 下不再经过"先分事件、再从事件粗粒度跨度反推段号"这层间接——
+    模型对每条提及直接申报它在哪些段落画面出场）；候选集含许清（确认别名
+    "许师姐"字面出现在这两段内）；另有主角孟浩在这两段之外的 12 个开篇
+    独白段落里反复出现——足以在纯字面+文档顺序算法下吃光卷宗预算
+    （_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES == 12）。
 
     对照组（嵌入本测试的第一部分）：直接调用 _prep_pack_functional_
-    candidate_dossier 时不传事件跨度——1.8.1 之前唯一的定位方式。1.8.2
+    candidate_dossier 时不传主锚点段号——1.8.1 之前唯一的定位方式。1.8.2
     起，B 侧改为按候选公平轮转合并（见 _prep_pack_functional_candidate_
     anchor_pool 的完整说明）：候选集里许清只对应"许师姐"那一段，孟浩对应
     密集的开篇独白十余段，轮转合并让许清那一段排到全局第 2 位，即使不传
-    事件跨度也能挤进 B 侧保底配额——这是候选粒度公平性机制的加成效果，
-    不代表事件跨度定位从此可有可无（候选证据本身分散在离案发现场很远处、
-    或候选数量更多时，事件跨度仍是唯一能锚定"案发现场本身长什么样"的
-    机制；1.8.2 真正修复的新事故——事件跨度本身连续覆盖到占满预算、B 侧
+    主锚点段号也能挤进 B 侧保底配额——这是候选粒度公平性机制的加成效果，
+    不代表主锚点定位从此可有可无（候选证据本身分散在离案发现场很远处、
+    或候选数量更多时，主锚点段号仍是唯一能锚定"案发现场本身长什么样"的
+    机制；1.8.2 真正修复的新事故——主锚点本身连续覆盖到占满预算、B 侧
     只有一位候选——是候选公平轮转救不了的形状，见另一条独立回归
     test_functional_candidate_dossier_reserves_quota_for_candidate_anchor_
     when_event_span_fills_budget）。
     绿（第二部分）：_resolve_assets 真实调用链（经 _prep_pack_resolve_
-    functional_extra_candidate 传入 events，内部用 _prep_pack_functional_
-    candidate_event_span_segments 算出事件跨度）必须让卷宗改为优先收录
-    事件跨度段落，模型因此能看到"许师姐"证据，正确绑定许清。"""
+    functional_extra_candidate 传入 character_mentions，内部用
+    _prep_pack_functional_candidate_label_segments 直接读这条提及自己的
+    segment_indexes 当主锚点）必须让卷宗改为优先收录这两段，模型因此能
+    看到"许师姐"证据，正确绑定许清。"""
     conn = _make_conn()
     conn.execute(
         "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
@@ -3913,12 +3655,19 @@ def test_unresolved_appearance_label_binds_via_candidate_verdict_using_event_spa
 
     monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
 
+    # 2.0.0：不再靠 event 的 source_span 间接反推段号——这条提及直接自报
+    # segment_indexes（模型自己的语义判断："银色长袍女子"这个人真的在这两
+    # 段画面里出场"，见 _prep_pack_gate_segment_indexes 上方说明：段号入口
+    # 只做结构核验，不要求 display_name 本身逐字命中，合成描述性标签的
+    # segment_indexes 因此不会被这道结构闸打回空）。
     events = [_event(
         "ev_001",
-        characters=[{"display_name": label, "is_background_extra": True}],
-        source_span={"from_segment": from_segment, "to_segment": to_segment},
+        characters=[{
+            "display_name": label, "is_background_extra": True,
+            "segment_indexes": list(range(from_segment, to_segment + 1)),
+        }],
     )]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
         conn, events=events, source_text=source_text,
     )
 
@@ -3926,18 +3675,19 @@ def test_unresolved_appearance_label_binds_via_candidate_verdict_using_event_spa
     by_portrait = {c["portrait_id"]: c for c in characters}
     assert "cp-xuqing" in by_portrait, "绿：许清必须真的绑定成功"
     entry = by_portrait["cp-xuqing"]
-    # 1.11.0（任务①）→1.11.1（真实回归，撤回替换手段，见 PREP_PACK_VERSION
-    # 上方 1.11.1 大注释）：这正是任务①的真实触发案例本身——label"银色长袍
-    # 女子"不是原文逐字（open 断言已经确认），candidate_verdict 只核验了
-    # "这个标签指向许清"这件事，从没核验过标签字符串本身。1.11.0 曾经把
+    # 1.11.0→1.11.1（真实回归，撤回替换手段）→2.0.0（label_literal 字段
+    # 整体撤下，纯范围收窄，不是结构性恒真——见 PREP_PACK_VERSION 上方
+    # 2.0.0 大注释、_prep_pack_gate_segment_indexes 上方说明）：这正是
+    # label_literal 机制当初要防的真实触发案例本身——label"银色长袍女子"
+    # 不是原文逐字（open 断言已经确认），candidate_verdict 只核验了"这个
+    # 标签指向许清"这件事，从没核验过标签字符串本身。1.11.0 曾经把
     # display_appellation 确定性替换成这条绑定分支算出的 anchor_phrase
     # （候选判别钉证命中的卷宗段落原文），但真实生产数据证明这条 anchor_
     # phrase 不保证是短语——它是钉证命中的整段证据句，真实 EP1 复现里
     # 长达数十字、带引号和句号，替换后字幕显示的是一整句旁白而非称谓，比
-    # 替换前更差（真实回归，见 1.11.1 大注释）。1.11.1 撤回替换，改为跟
-    # functional_extras[] 侧同一处置：display_appellation 保留原始合成
-    # 标签 label 不变，只用 provenance.label_literal 如实标记"这个称谓不是
-    # 原文逐字"，不伪造一个看起来逐字、实则不可用的替代品。
+    # 替换前更差（真实回归，见 1.11.1 大注释）。1.11.1 撤回替换，
+    # display_appellation 保留原始合成标签 label 不变；2.0.0 进一步撤下
+    # label_literal 这个纯观测性标记字段（映射台只对"绑定到谁"负责）。
     assert entry["display_appellation"] == label, (
         "标签本身非逐字时，display_appellation 必须原样保留合成标签，"
         "绝不能替换成 anchor_phrase 这类证据段落——1.11.0 曾经替换、"
@@ -3946,7 +3696,6 @@ def test_unresolved_appearance_label_binds_via_candidate_verdict_using_event_spa
     assert entry["provenance"]["method"] == "candidate_verdict"
     assert entry["provenance"]["anchor_segments"] == [to_segment]
     assert "许师姐" in entry["provenance"]["anchor_phrase"]
-    assert entry["provenance"]["label_literal"] is False
     assert not any(e["label"] == label for e in functional_extras), (
         "绑定成功后，这个标签不能再出现在 functional_extras 里"
     )
@@ -3966,290 +3715,6 @@ def test_unresolved_appearance_label_binds_via_candidate_verdict_using_event_spa
 # True/False 两个取值都要有覆盖（此前只测过 discovery 分支的 False 与
 # absorbed_speaker 分支的 False，两条 True 分支此前完全没有回归）；最后一条
 # 覆盖发布前自校验能抓出 label_literal 声明与实际复核结果不一致的情形。
-# ---------------------------------------------------------------------------
-
-def test_character_non_literal_name_with_no_usable_anchor_keeps_raw_label_and_marks_false(
-    monkeypatch,
-):
-    """红灯（分支：literal_evidence=False，alias/discovery 两支的
-    anchor_phrase 候选序列只试 ``[name]`` 本身，见 _prep_pack_local_text_
-    anchor 的调用点，本用例里该候选查无结果、anchor_phrase 为空——1.11.1
-    撤回替换分支后，这份 anchor_phrase 是否可用已经不影响结论，characters
-    侧无条件不替换，见下）：display_appellation 必须原样保留合成标签
-    （不伪造替换），provenance.label_literal 诚实标 False，绝不阻断——
-    跟 functional_extras[] 侧同一处置：只标记，不修正取值。"""
-    conn = _make_conn()
-    conn.execute(
-        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
-        "VALUES ('cp-lfg','p1','李富贵',1,NULL)"
-    )
-    conn.commit()
-
-    async def fake_rename(project_id, episode_no, source_text, bible, *, generate_portraits=True):
-        return {
-            "added": [], "skipped": [],
-            "resolutions": [{
-                "source_label": "穿杂役衫的魁梧大汉", "canonical_name": "李富贵",
-                "resolution": "future_identity",
-                # source_quote 本身也不逐字出现在原文——真实场景里 discovery
-                # 自己的证据引文有时是转述/摘要，不保证逐字命中（跟任务①
-                # 根因分析一致：只有身份指向的证据链，标签用词的证据链是
-                # 独立的另一件事）。
-                "evidence": "一名魁梧大汉打扮成杂役模样",
-            }],
-            "errors": [], "warnings": [],
-        }
-
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_rename)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
-
-    # 原文只有分散的描述性叙述，"穿杂役衫的魁梧大汉"这个综合短语逐字形式
-    # 不存在（跟真实第24轮 EP3 回归 ERR-20260824-d0830a 同一形状）。
-    source_text = "一名身穿杂役服饰的男子体格魁梧，站在门口。"
-    events = [_event("ev_001", characters=[
-        {"display_name": "穿杂役衫的魁梧大汉", "is_background_extra": False},
-    ])]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
-        conn, events=events, source_text=source_text,
-    )
-
-    assert errors == []
-    lfg = next(c for c in characters if c["display_name"] == "李富贵")
-    assert lfg["display_appellation"] == "穿杂役衫的魁梧大汉", (
-        "没有任何逐字材料可替换时必须原样保留合成标签，不伪造证据"
-    )
-    assert lfg["provenance"]["label_literal"] is False
-    assert lfg["provenance"]["method"] == "resolution"
-    # 别名库仍只登记逐字出现于原文的称谓（task②既有纪律不受影响）：这个
-    # 合成短语不逐字，不应该被写进 aliases。
-    assert lfg["aliases"] == []
-    assert _provenance_self_verify(source_text, characters, scene_list, functional_extras) == []
-
-
-def test_character_candidate_verdict_truncated_dossier_entry_not_used_as_literal_substitute(
-    monkeypatch,
-):
-    """回归防线（1.11.1 撤回替换后，本用例仍是有效的最强反例）：
-    candidate_verdict 钉中的卷宗条目字数超过
-    _PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_GUARANTEED_ENTRY_MAX_CHARS，被
-    _prep_pack_functional_candidate_truncate_segment 做过确定性截断、带省略
-    标记——这份 anchor_phrase 既不是原文纯净子串、也不是称谓，绝不能被当成
-    display_appellation 的替代品使用，否则字幕会显示原文里同样不存在的
-    省略号拼接文本。1.11.0 曾经在 anchor_phrase 非空且逐字命中时替换
-    display_appellation（本用例专门验证截断后的 anchor_phrase 不满足
-    "逐字"这个前提、因此不会被那条已撤回的替换分支误用）；1.11.1 撤回了
-    整条替换分支（见 PREP_PACK_VERSION 上方 1.11.1 大注释），display_
-    appellation 现在无条件保留原始标签，本用例的断言因此仍然成立，继续
-    留作防止替换分支被重新引入的回归防线。"""
-    conn = _make_conn()
-    conn.execute(
-        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
-        "VALUES ('cp-xuqing','p1','许清',1,NULL)"
-    )
-    _seed_bible_characters(conn, "p1", [
-        _bible_character(
-            "许清", appearance_canonical="常年穿银色长袍，气质清冷。",
-            aliases=[_bible_alias("许师姐", evidence_chapter_index=1)],
-        ),
-    ])
-
-    # 第二段刻意超过 260 字上限（GUARANTEED_ENTRY_MAX_CHARS），"许师姐"落在
-    # 中段——_prep_pack_functional_candidate_truncate_segment 必然两侧都要
-    # 截断、两侧都会加省略标记，见该函数 docstring 的裁剪算法。
-    long_prefix = (
-        "孟浩独自站在原地愣愣出神心绪难平反复回想方才发生的一切一时竟不知该"
-        "如何是好只觉得眼前种种皆如梦幻泡影令人难以置信却又真实地摆在眼前"
-        "四周一片寂静唯有风声在耳畔呼啸而过更添几分萧瑟之意让人不由自主地"
-        "打了个寒颤心头涌起一股说不清道不明的滋味此刻天色渐晚"
-    )
-    long_mid = "绿袍男子对着那女子躬身行礼口称许师姐随后请四人随他一同返回宗门"
-    long_suffix = (
-        "他缓缓低下头去又猛地抬起头来望着远处天际线出神半晌无言心中翻涌起"
-        "无数念头却始终理不出一个头绪只能任由思绪四处飘荡不知飘向何方仿佛"
-        "整个世界都已远去只剩下他一人独自伫立在这苍茫天地之间感受着那份"
-        "挥之不去的孤独与迷惘久久无法释怀"
-    )
-    long_segment_text = long_prefix + long_mid + long_suffix
-    assert len(long_segment_text) > 260, "夹具必须真的触发确定性截断才有意义"
-    assert "…" not in long_segment_text, "夹具本身不能含省略标记，否则不能证明截断标记的来源"
-
-    label = "银色长袍女子"
-    source_text = "\n\n".join(["孟浩缓缓抬起头，环顾四周。", long_segment_text])
-    assert label not in source_text
-    segments = prep_pack.index_source_segments(source_text)
-    assert len(segments) == 2
-
-    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
-        return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
-
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
-
-    seen_dossier_text: dict = {}
-
-    async def fake_chat_structured(messages, **kwargs):
-        if kwargs.get("model_type") is prep_pack._PrepPackFunctionalCandidateVerdict:
-            prompt = str(messages[0]["content"])
-            seen_dossier_text["prompt"] = prompt
-            # 卷宗里第2段必须已经是截断过、带省略标记的版本，不是长段原文——
-            # 这是本测试要证实的前提本身，不是断言目标。
-            assert "…" in prompt, "夹具没能触发截断，测试前提不成立"
-            return prep_pack._PrepPackFunctionalCandidateVerdict(
-                selected_candidate="许清", supporting_segment_index=2,
-                supporting_quote="口称许师姐",
-            )
-        from app.source_paratext import ParatextSpans
-        return ParatextSpans(spans=[])
-
-    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
-
-    events = [_event(
-        "ev_001",
-        characters=[{"display_name": label, "is_background_extra": True}],
-        source_span={"from_segment": 1, "to_segment": 1},
-    )]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
-        conn, events=events, source_text=source_text,
-    )
-
-    assert errors == []
-    by_portrait = {c["portrait_id"]: c for c in characters}
-    assert "cp-xuqing" in by_portrait, "身份指向仍然必须正确绑定——candidate_verdict 的既有职责不受影响"
-    entry = by_portrait["cp-xuqing"]
-    assert entry["provenance"]["method"] == "candidate_verdict"
-    # 钉中的卷宗条目确实带省略标记（防御性检查的输入前提）。
-    assert "…" in entry["provenance"]["anchor_phrase"]
-    # 核心断言：这份带省略标记的 anchor_phrase 不是原文纯净子串，绝不能被
-    # 当作 display_appellation 的逐字替代品——必须原样保留合成标签 label，
-    # label_literal 诚实标 False（不是伪造一个"看起来逐字"的假象）。
-    assert entry["display_appellation"] == label
-    assert entry["provenance"]["label_literal"] is False
-    # 注：本用例不断言 _provenance_self_verify(...) == []——这个夹具刻意让
-    # 候选判别钉中一条被截断的卷宗条目，anchor_phrase 因此带省略标记，会被
-    # _prep_pack_verify_manifest_provenance 既有的 anchor_phrase 逐字自校验
-    # （跟本次任务①的 label_literal 判定是两套独立检查）判定"未在
-    # anchor_segments 所指原文中逐字命中"而拦截发布——这是候选判别钉证机制
-    # 本身"钉住的卷宗条目截断后不再是原文纯净子串"这一更早就存在、且独立于
-    # 本次任务的既有缺口（截断只在 1.8.3 引入，此前的自校验从未考虑过钉中
-    # 的条目可能是截断版本），不在任务①范围内，如实记录、不顺手改动。本
-    # 测试只关心它范围内的问题：截断后的 anchor_phrase 绝不能被误用成
-    # display_appellation 的替代品，上面的断言已经证明这一点成立。
-
-
-def test_functional_extra_discovery_label_literal_true_when_label_is_verbatim(monkeypatch):
-    """红灯（functional_extras 侧 label_literal 的 True 分支，此前只有
-    discovery 方法的 False 分支被覆盖过）：群演标签就是原文本身写的称谓时，
-    label_literal 必须诚实标 True——不能因为"functional_extras 多数非逐字"
-    这个统计事实就把这个字段焊死成 False，独立判定必须真的逐字复核。"""
-    conn = _make_conn()
-
-    async def fake_functional(project_id, episode_no, source_text, bible, *, generate_portraits=True):
-        return {
-            "added": [], "skipped": [],
-            "resolutions": [{
-                "source_label": "围观弟子", "canonical_name": "围观弟子",
-                "resolution": "functional_identity",
-            }],
-            "errors": [], "warnings": [],
-        }
-
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_functional)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
-    events = [_event("ev_001", characters=[
-        {"display_name": "围观弟子", "is_background_extra": True},
-    ])]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
-        conn, events=events,
-        source_text="周围一群围观弟子交头接耳，议论纷纷。",
-    )
-
-    assert errors == []
-    assert characters == []
-    extra = next(e for e in functional_extras if e["label"] == "围观弟子")
-    assert extra["provenance"]["label_literal"] is True
-    assert extra["provenance"]["anchor_phrase"] == "围观弟子"
-
-
-def test_absorbed_speaker_label_literal_true_when_speaker_is_verbatim():
-    """红灯（functional_extras 侧 label_literal 的 True 分支，absorbed_speaker
-    方法）：跟上一条对称——台词说话人字面本身确实逐字出现在本集原文时，
-    label_literal 必须标 True，而不是继承此前"absorbed_speaker 只测过 False"
-    的默认印象。"""
-    payload_events = [{
-        "event_id": "ev_005",
-        "key_lines": [{"speaker": "被困者", "line": "救命！", "segment_index": 2}],
-    }]
-    roster = prep_pack._prep_pack_build_speaker_roster(
-        characters=[{"display_name": "绿袍男子", "identity_id": "bible:绿袍男子", "aliases": []}],
-        functional_extras=[],
-    )
-    functional_extras: list[dict] = []
-    source_text = "山洞里传来求救声。\n\n一名被困者高声呼喊：救命！"
-    errors, absorbed_count = prep_pack._prep_pack_resolve_key_line_speakers(
-        payload_events, roster,
-        all_project_character_names={"韩宗", "绿袍男子"},
-        functional_extras=functional_extras,
-        source_text=source_text,
-    )
-    assert errors == []
-    assert absorbed_count == 1
-    extra = next(e for e in functional_extras if e["label"] == "被困者")
-    assert extra["provenance"]["label_literal"] is True
-
-
-def test_label_literal_self_verify_catches_tampered_claim():
-    """红灯（自校验一致性）：provenance.label_literal 的声明必须能被发布前
-    自校验独立复核出来——伪造一个跟本集原文实际情况不符的声明（谎称非逐字
-    的标签逐字命中）必须被拦截，不能只靠生成侧自己算一遍就永久免检，跟
-    anchor_phrase 的既有自校验同一条纪律（不信任自己此前算出来的结论）。"""
-    source_text = "萧炎快步穿过宗门广场，众弟子纷纷让路。"
-    segments = prep_pack.index_source_segments(source_text)
-
-    tampered_characters = [{
-        "identity_id": "bible:萧炎", "display_name": "萧炎",
-        "portrait_id": "cp1", "event_ids": ["ev_001"], "aliases": [],
-        "display_appellation": "这个说法原文根本没有",
-        "provenance": {
-            "method": "direct", "anchor_segments": [1], "anchor_phrase": "萧炎",
-            "label_literal": True,  # 谎称——这句话根本不在原文里
-        },
-    }]
-    errors = prep_pack._prep_pack_verify_manifest_provenance(
-        segments, {"characters": tampered_characters, "scenes": [], "functional_extras": []},
-        source_text,
-    )
-    assert errors, "label_literal 声明与本集原文实际情况不符必须被自校验拦截"
-    assert any(
-        "label_literal" in message and "这个说法原文根本没有" in message
-        for message in errors
-    )
-
-    honest_characters = [{
-        "identity_id": "bible:萧炎", "display_name": "萧炎",
-        "portrait_id": "cp1", "event_ids": ["ev_001"], "aliases": [],
-        "display_appellation": "这个说法原文根本没有",
-        "provenance": {
-            "method": "direct", "anchor_segments": [1], "anchor_phrase": "萧炎",
-            "label_literal": False,  # 如实标注——自校验必须放行
-        },
-    }]
-    errors_honest = prep_pack._prep_pack_verify_manifest_provenance(
-        segments, {"characters": honest_characters, "scenes": [], "functional_extras": []},
-        source_text,
-    )
-    assert errors_honest == []
-
-
-# ---------------------------------------------------------------------------
-# 1.8.2（真实数据、同一事故的第三层根因，见 PREP_PACK_VERSION 上方 1.8.2
-# 大注释，provider_calls id=10469 可复核）：1.8.1 的事件跨度定位本身工作
-# 正常——EP1 目标标签"银色长袍女子"的卷宗确实改成了事件跨度定位、也确实
-# 包含了银袍女子登场那段——但目标案例仍然失败，因为事件跨度本身连续覆盖
-# 12 段，恰好把 MAX_ENTRIES 占满，B 侧（候选锚点段"许师姐"）一条都没进
-# 卷宗。修法：_prep_pack_functional_candidate_dossier 的预算分配改为按层
-# 保底配额（A、B 两侧各自不可被对方挤占的最低名额），且 B 侧内部改为按
-# 候选公平轮转合并（不再是全部候选锚点段落混在一起整体按邻近度排序，
-# 那样会让本章高频出现的候选把 B 侧配额全占了，害其它候选零证据）。
 # ---------------------------------------------------------------------------
 
 def test_functional_candidate_dossier_reserves_quota_for_candidate_anchor_when_event_span_fills_budget():
@@ -4639,7 +4104,7 @@ def test_registered_only_candidate_never_enters_candidate_set_after_1_8_4_revert
 
     label = "白白净净的胖少年"
     events = [_event("ev_001", characters=[{"display_name": label, "is_background_extra": True}])]
-    characters, scene_list, functional_extras, errors, stats, *_ = _resolve(
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
         conn, events=events, episode_no=2,
         source_text="白白净净身子较胖的少年跟在人群身后，一声不吭。",
     )
@@ -4702,189 +4167,6 @@ def _fake_chunk_response(*, display_name: str = "沈师姐") -> "prep_pack._Chun
     )
 
 
-def test_character_label_prompt_requires_original_appellation_over_description(monkeypatch):
-    """红灯（改动前不存在这条指令，本测试会失败；改动后应变绿）：构造
-    "原文中同时存在称谓性表述与外貌描述"的形状——一句话里既有称谓又有外貌
-    描写——断言发给事件链抽取模型的提示词里，明确要求这种情况下必须逐字
-    采用称谓、不得改用自己综合的描述性短语。"""
-    segment = SourceSegment(
-        segment_id="seg-1",
-        text="院外，沈师姐一身白衣立于廊下，静静望着远处。",
-        start_offset=0, end_offset=10,
-    )
-    chunk = [(1, segment)]
-    captured: dict[str, str] = {}
-
-    async def fake_chat_structured(messages, **kwargs):
-        captured["prompt"] = str(messages[0]["content"])
-        return _fake_chunk_response()
-
-    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
-
-    asyncio.run(prep_pack._extract_chunk(
-        episode_id="ep-test", episode_no=1, chunk_index=1, chunk=chunk,
-        known_characters=[], known_scenes=[], attempt_hint="", run_id=None,
-    ))
-
-    prompt = _flatten(captured["prompt"])
-    assert _flatten("不允许改用你自己综合出的外貌、衣着、动作等描述性短语去代替") in prompt, (
-        "提示词必须明确要求：原文有称谓性表述时，不得改用自己综合的描述性短语"
-    )
-    # 原文本身仍然要逐字出现在提示词里（沿用既有渲染逻辑，未被本次改动破坏）。
-    assert _flatten("院外，沈师姐一身白衣立于廊下，静静望着远处。") in prompt
-
-
-def test_character_label_prompt_keeps_multi_appellation_tiebreak_rule(monkeypatch):
-    """红灯：断言提示词写清了"同一角色本段出现不止一种称谓时"的确定性取词
-    规则（出现次数最多，次数相同取最先出现），且要求本段所有事件统一
-    取值——这是防止同一角色跨事件换着用不同称谓、造成额外不稳定的规则。"""
-    segment = SourceSegment(
-        segment_id="seg-1", text="占位原文。", start_offset=0, end_offset=5,
-    )
-    chunk = [(1, segment)]
-    captured: dict[str, str] = {}
-
-    async def fake_chat_structured(messages, **kwargs):
-        captured["prompt"] = str(messages[0]["content"])
-        return _fake_chunk_response()
-
-    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
-
-    asyncio.run(prep_pack._extract_chunk(
-        episode_id="ep-test", episode_no=1, chunk_index=1, chunk=chunk,
-        known_characters=[], known_scenes=[], attempt_hint="", run_id=None,
-    ))
-
-    prompt = _flatten(captured["prompt"])
-    assert _flatten("取本段内出现次数最多的那一个") in prompt
-    assert _flatten("次数相同就取最先出现的那一个") in prompt
-    assert _flatten("不要在不同事件里换着用不同的称谓") in prompt
-
-
-def test_character_label_prompt_still_allows_pure_description_when_no_appellation_exists(monkeypatch):
-    """反例（守边界）：构造"原文只有描述、无任何称谓"的形状——断言提示词
-    仍然明确允许这种情况下使用描述性标签，没有被本次改动收紧成一律禁止
-    描述性标签（那会连带打掉真正无名的背景群演，functional_extras 必须
-    仍能容纳这类角色，见 _resolve_assets 对 is_background_extra 的既有
-    处理，本测试不动那部分代码，只核对提示词没有跟着收紧）。"""
-    segment = SourceSegment(
-        segment_id="seg-1", text="占位原文。", start_offset=0, end_offset=5,
-    )
-    chunk = [(1, segment)]
-    captured: dict[str, str] = {}
-
-    async def fake_chat_structured(messages, **kwargs):
-        captured["prompt"] = str(messages[0]["content"])
-        return _fake_chunk_response()
-
-    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
-
-    asyncio.run(prep_pack._extract_chunk(
-        episode_id="ep-test", episode_no=1, chunk_index=1, chunk=chunk,
-        known_characters=[], known_scenes=[], attempt_hint="", run_id=None,
-    ))
-
-    prompt = _flatten(captured["prompt"])
-    assert _flatten(
-        "只有当这个角色在本段原文里通篇只有描述性表述、完全没有任何称谓性"
-        "表述时，才允许 display_name 使用描述性短语"
-    ) in prompt
-    # 既有的"逐字必须出现在原文"这条硬约束原样保留，没有被本次改动替换掉。
-    assert _flatten(
-        "display_name 必须逐字使用本段原文中出现的称谓——原文写\"灰袍老者\""
-        "就填\"灰袍老者\""
-    ) in prompt
-    # 既有的纯背景群演功能性描述规则（跟本次改动语义相邻但不是同一条）原样保留。
-    assert _flatten("display_name 写功能性描述（如\"围观弟子\"）即可") in prompt
-    # 场景侧的既有规则（本次改动明确不涉及 scenes）没有被误改。
-    assert _flatten("场景地点的 display_name 一律使用原文自己的描述词") in prompt
-
-
-# ---------------------------------------------------------------------------
-# 1.9.0：真实 EP5 回归——章节标题段（app.domain.common._episode_source_text
-# 拼接 "【{chapters.title}】\n{chapters.content}" 时，content 自己的首行又
-# 重复了一遍标题，两者只隔单换行，被 index_source_segments 合并成同一段）
-# 只在模型这次调用恰好把它写进 paratext_segments 时才免于事件覆盖，模型
-# 申报是非确定性的，漏报时"洞即删戏"逼着某个事件去覆盖它，最省力的满足
-# 方式就是编一个只覆盖标题这一段的伪事件。修复：确定性算出的标题段号直接
-# 告知模型（既成事实，不是让它判断），见 PREP_PACK_VERSION 上方 1.9.0
-# 大注释与 app.validators.build_prep_pack_span_ledger 的"确定性标题裁边"
-# 一节。这里测的是 _extract_chunk 构造出的提示词本身，同上面 1.8.5 一节
-# 同一测法。
-# ---------------------------------------------------------------------------
-
-def test_extract_chunk_prompt_identical_when_no_confirmed_title_segments_in_chunk(monkeypatch):
-    """场景6红灯核心用例（同 92c9e7a 认知卡注入的空态处理惯例，
-    tests/test_chapter_cognition_card.py::test_prompt_identical_when_
-    cognition_card_has_no_facts 同一测法）：不硬编码整段提示词文本，改用
-    两次调用对比——一次完全不传新参数（默认 None，等价于改动前的旧行为），
-    一次传一个跟本 chunk 段号完全不相交的集合（模拟"功能存在但这个 chunk
-    用不上"），两次捕获的提示词必须逐字相同，证明本 chunk 无标题段时提示词
-    与改动前逐字节一致。"""
-    segment_a = SourceSegment(
-        segment_id="seg-1", text="孟浩推开柴门，看见院子里落满黄叶。",
-        start_offset=0, end_offset=10,
-    )
-    segment_b = SourceSegment(
-        segment_id="seg-2", text="他叹了口气，转身回屋取来扫帚。",
-        start_offset=20, end_offset=30,
-    )
-    chunk = [(1, segment_a), (2, segment_b)]
-    captured: list[str] = []
-
-    async def fake_chat_structured(messages, **kwargs):
-        captured.append(str(messages[0]["content"]))
-        return _fake_chunk_response()
-
-    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
-
-    asyncio.run(prep_pack._extract_chunk(
-        episode_id="ep-test", episode_no=1, chunk_index=1, chunk=chunk,
-        known_characters=[], known_scenes=[], attempt_hint="", run_id=None,
-        confirmed_title_indexes=None,
-    ))
-    asyncio.run(prep_pack._extract_chunk(
-        episode_id="ep-test", episode_no=1, chunk_index=1, chunk=chunk,
-        known_characters=[], known_scenes=[], attempt_hint="", run_id=None,
-        confirmed_title_indexes={999},  # not in this chunk's {1, 2}
-    ))
-    assert len(captured) == 2
-    assert captured[0] == captured[1]
-    assert "已由系统确定性判定" not in captured[0]
-
-
-def test_extract_chunk_prompt_names_confirmed_title_segment_when_present(monkeypatch):
-    """本 chunk 确实包含确定性标题段号时，提示词必须明确点出该段号（既成
-    事实，不是让模型判断），并告知不需要为它创建事件、不需要重复申报。"""
-    segment_title = SourceSegment(
-        segment_id="seg-1", text="【第五章此子不错】\n第五章此子不错",
-        start_offset=0, end_offset=10,
-    )
-    segment_body = SourceSegment(
-        segment_id="seg-2", text="孟浩推开柴门，看见院子里落满黄叶。",
-        start_offset=20, end_offset=30,
-    )
-    chunk = [(1, segment_title), (2, segment_body)]
-    captured: dict[str, str] = {}
-
-    async def fake_chat_structured(messages, **kwargs):
-        captured["prompt"] = str(messages[0]["content"])
-        return _fake_chunk_response()
-
-    monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
-
-    asyncio.run(prep_pack._extract_chunk(
-        episode_id="ep-test", episode_no=1, chunk_index=1, chunk=chunk,
-        known_characters=[], known_scenes=[], attempt_hint="", run_id=None,
-        confirmed_title_indexes={1},
-    ))
-
-    prompt = _flatten(captured["prompt"])
-    assert _flatten("编号 1 已由系统确定性判定为本集所属章节的标题") in prompt
-    assert _flatten("不要为它们创建事件") in prompt
-    assert _flatten("不需要在 paratext_segments 里重复申报") in prompt
-
-
 def test_prep_pack_version_is_1_8_0():
     """版本号哨兵：本次改造（未解析角色标签候选判别——真实 EP1"银色长袍
     女子"应绑定许清却因标签类型对不上落 functional_extras 的用户诉求收口）
@@ -4937,5 +4219,14 @@ def test_prep_pack_version_is_1_8_0():
     机制、functional_extras[] 侧处置三者均不变。是判定语义变更（处置手段
     从确定性替换降为如实标记），比照 1.4.1/1.6.1/1.8.1-1.8.5/1.9.0/1.10.0
     的先例推进版本号（第三位）——函数名/测试名沿用旧号不改，只更新断言
-    值，避免无谓的大范围改名。"""
-    assert prep_pack.PREP_PACK_VERSION == "1.11.1"
+    值，避免无谓的大范围改名。
+
+    2.0.0（用户判定链路错误，架构收窄，schema 大幅变更，版本主位推进，见
+    app/production/prep_pack.py 模块 docstring 的 2.0.0 大注释）：本模块从
+    "剧本台"改造成"映射台"——event_chain/hook/cliffhanger 全部砍掉，
+    asset_manifest 各类条目的锚点从 event_ids 换成 segment_indexes（原文
+    段号，真实重新推导，不是改名），新增 props（道具，文字描述，无图像
+    素材）与 appellation_map（模糊称谓 -> 人物谱精准称谓的显式映射表）。
+    这是本文件版本号推进历史里第一次真正的 schema 大版本位变更（此前全部
+    是次版本/修订号），函数名沿用旧号不改，只更新断言值。"""
+    assert prep_pack.PREP_PACK_VERSION == "2.0.0"

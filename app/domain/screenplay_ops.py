@@ -506,10 +506,18 @@ def _screenplay_authority_state(
 # derived from app.orchestration.engine._STEP_PRESENTATIONS at read time (the
 # same registry the observability trace renders from) -- single source of
 # truth for step business names, not a second copy kept in sync by hand.
+#
+# 2.0.0（映射台架构收窄，见 app/production/prep_pack.py 模块 docstring 的
+# 2.0.0 说明）：hook_cliffhanger 阶段已撤销——那一步（episode_prep_pack_
+# hook_cliffhanger）不再被调用，若继续声明这个阶段，它会永远停在
+# "pending"，前端阶段条会显示一个再也不会推进的死格子，比彻底不声明
+# 更误导。event_chain_extraction 这个分组 key 字符串本身沿用不改（同
+# episode_prep_pack_event_chain_chunk 的既有理由：只是内部标识符，用户
+# 可读文案由 app.orchestration.engine._STEP_PRESENTATIONS 单独承载，已
+# 同步更新）。
 _PREP_PACK_STAGE_STEP_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("event_chain_extraction", ("episode_prep_pack_event_chain_chunk",)),
     ("asset_mapping", ("episode_prep_pack_asset_mapping",)),
-    ("hook_cliffhanger", ("episode_prep_pack_hook_cliffhanger",)),
     ("coverage_and_publish", ("episode_prep_pack_publish",)),
 )
 
@@ -1232,9 +1240,12 @@ async def _screenplay_task(
     """轻量分集准备包生成（screenplay 契约 6.0.0，episode_prep_pack）。
 
     替代原先的蓝图→场次分片→编译→修复回路（休眠保留于
-    app/production/screenplay_repair.py 等，未从本调用路径引用）：事件链抽取
-    （模型）→ 覆盖/资产确定性核对 → 原子发布，全部逻辑见
-    app/production/prep_pack.py。``preflight_result`` 形参保留仅为兼容旧调用签名
+    app/production/screenplay_repair.py 等，未从本调用路径引用）：资源发现/
+    映射抽取（模型）→ 覆盖/资产确定性核对 → 原子发布，全部逻辑见
+    app/production/prep_pack.py。2.0.0 起本模块不再产出事件链——职责收窄为
+    映射台（新人物/新场景发现 + 世界书图像素材映射 + 称谓归一），事件链的
+    定量职责已转交分镜台，见 app.production.prep_pack 模块 docstring 的
+    2.0.0 说明。``preflight_result`` 形参保留仅为兼容旧调用签名
     （recover_screenplay_tasks 等），本流程不消费它。
     """
     conn = get_conn()
@@ -1245,7 +1256,7 @@ async def _screenplay_task(
         source_text = _episode_source_text(conn, ep)
         conn.execute(
             "UPDATE episodes SET screenplay_status=?, screenplay_error=?, screenplay_updated_at=? WHERE id=?",
-            ("running", "正在抽取事件链与资产映射", now(), episode_id),
+            ("running", "正在发现新人物/新场景并映射世界书素材", now(), episode_id),
         )
         conn.commit()
 

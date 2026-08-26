@@ -294,7 +294,7 @@ export function storyboardPrimaryAction(
     }
   }
   const labels: Record<StoryboardStatus['recommended_action'], string> = {
-    go_screenplay: '先去剧本台',
+    go_screenplay: '先去映射台',
     generate_storyboard: '开始分镜任务',
     view_progress: '查看任务详情',
     resume_storyboard: finalizingEvidence ? '完成发布证据' : '继续分镜任务',
@@ -353,7 +353,7 @@ export function storyboardProgressCopy(status: StoryboardStatus): StoryboardProg
 }
 
 export function storyboardEmptyCopy(status: StoryboardStatus): string {
-  if (status.state === 'no_screenplay') return '尚无可用于分镜的剧本，请先去剧本台。'
+  if (status.state === 'no_screenplay') return '尚无可用于分镜的剧本，请先去映射台。'
   if (status.state === 'running') return '首批分镜正在生成与逐镜校验，通过后会自动展示。'
   if (status.state === 'failed') return '分镜任务未完成，尚无通过校验的工作镜头；请查看原因后继续处理。'
   if (status.state === 'paused') return '分镜任务已暂停，尚无通过校验的工作镜头。'
@@ -464,9 +464,9 @@ function StoryboardLaunchPanel({ episode, status, busy, onPrimary }: {
           ? `将按照《${episode.title}》当前定稿剧本生成分镜，生成后可逐镜审阅。`
           : '当前没有可用剧本，完成剧本后再返回这里开始。'}</p>
         <button id="storyboard-primary-action" type="button" className="btn primary storyboard-launch-button" disabled={busy}
-          aria-label={busy ? '开始分镜任务，暂不可用：正在准备' : screenplayReady ? '开始分镜任务' : '先去剧本台'}
+          aria-label={busy ? '开始分镜任务，暂不可用：正在准备' : screenplayReady ? '开始分镜任务' : '先去映射台'}
           onClick={onPrimary}>
-          {busy ? '正在准备…' : screenplayReady ? '开始分镜任务' : '先去剧本台'}
+          {busy ? '正在准备…' : screenplayReady ? '开始分镜任务' : '先去映射台'}
         </button>
         {screenplayReady && <small>只生成分镜，不会自动提交付费视频。</small>}
       </div>

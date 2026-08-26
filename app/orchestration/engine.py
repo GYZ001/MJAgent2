@@ -67,14 +67,20 @@ _STEP_PRESENTATIONS: dict[str, WorkflowStepPresentation] = {
         "生成并验收分集准备包",
         "抽取本集事件链、确定性核对覆盖与角色/场景资产、签发完成凭证并原子发布",
     ),
+    # 2.0.0（映射台架构收窄，见 app/production/prep_pack.py 模块 docstring
+    # 的 2.0.0 说明）：这一步不再抽取事件链——模型按原文分块直接申报本段
+    # 出场的人物/场景/道具及其画面出场的原文段号。step_key 字符串本身
+    # （episode_prep_pack_event_chain_chunk）沿用不改，是既有的 HiAgent
+    # 供应商路由/可观测性追踪键，跟这里的用户可读 display_name/description
+    # 是两回事，不需要同步改名。
     "episode_prep_pack_event_chain_chunk": WorkflowStepPresentation(
-        "事件链抽取", "模型按原文分块抽取事件链，声明每个事件的原文跨度与逐字引文证据",
+        "素材发现与映射申报", "模型按原文分块申报本段出场的人物/场景/道具及其画面出场的原文段号",
     ),
     "episode_prep_pack_asset_mapping": WorkflowStepPresentation(
-        "资产映射", "确定性核对事件链中出场角色/场景，解析到已有定妆照/场景参考图",
+        "资产映射", "确定性核对申报出场的角色/场景，解析到已有定妆照/场景参考图",
     ),
     "episode_prep_pack_speaker_resolution": WorkflowStepPresentation(
-        "台词说话人解析", "确定性核对台词说话人是否落在本集资产名册，未落入具名阻断",
+        "台词说话人解析（已停用）", "2.0.0 起台词/说话人解析不再是映射台职责，此步骤不再运行",
     ),
     "episode_prep_pack_character_discovery": WorkflowStepPresentation(
         "识别新出场角色", "对资产映射解析不到的角色名调用人物发现，判定改名/群演/新建人物卡",
@@ -83,7 +89,7 @@ _STEP_PRESENTATIONS: dict[str, WorkflowStepPresentation] = {
         "识别新出场场景", "对资产映射解析不到的场景名调用场景发现，判定改名或登记新场景",
     ),
     "episode_prep_pack_hook_cliffhanger": WorkflowStepPresentation(
-        "抽取开场钩子与结尾悬念", "从事件链推导本集 hook/cliffhanger 并核验接地到真实事件",
+        "抽取开场钩子与结尾悬念（已停用）", "2.0.0 起 hook/cliffhanger 不再是映射台职责，此步骤不再运行",
     ),
     "episode_prep_pack_true_name_verdict": WorkflowStepPresentation(
         "真名假设裁决",

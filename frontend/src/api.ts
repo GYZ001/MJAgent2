@@ -1268,42 +1268,26 @@ export interface EpisodeScreenplay {
 }
 
 /**
- * 剧本台转型后的轻量分集准备包（episode_prep_pack）。取代 EpisodeScreenplay 成为
- * 剧本台的发布产物，投影在 `Episode.prep_pack` 字段（不是 `Episode.screenplay`——
- * 后端把两种产物形状分到不同字段，见 Episode.prep_pack 上的注释）。旧产物（无
- * prep_pack_version 字段）仍可能出现在 `Episode.screenplay` 中，调用方必须先按
- * prep_pack_version 判别，见 ScriptPage.tsx 的 isPrepPack。基础形状冻结见
- * docs/TRANSFORM_FREEZE_PLAN.md §3；字段随版本持续演进，均按可选处理，不假设
- * 某个具体版本号是终点：1.1.0 起 event_chain[].source_span，1.2.0 起
- * asset_manifest.characters[].aliases，1.3.0 起 asset_manifest.functional_extras，
- * 1.4.0 起 coverage_ledger.paratext。
+ * 映射台（原「剧本台」，2.0.0 架构收窄）转型后的轻量分集准备包
+ * （episode_prep_pack）。取代 EpisodeScreenplay 成为映射台的发布产物，投影在
+ * `Episode.prep_pack` 字段（不是 `Episode.screenplay`——后端把两种产物形状分到
+ * 不同字段，见 Episode.prep_pack 上的注释）。旧产物（无 prep_pack_version 字段）
+ * 仍可能出现在 `Episode.screenplay` 中，调用方必须先按 prep_pack_version 判别，
+ * 见 ScriptPage.tsx 的 isPrepPack。基础形状冻结见 docs/TRANSFORM_FREEZE_PLAN.md
+ * §3；字段随版本持续演进，均按可选处理，不假设某个具体版本号是终点。
+ *
+ * 2.0.0（架构收窄，见 app/production/prep_pack.py 模块 docstring 的 2.0.0
+ * 说明）：映射台不再产出任何叙事内容——`event_chain`/`hook`/`cliffhanger` 全部
+ * 撤销，职责收窄为三件事：①发现本章新人物/新场景；②把人物/地点映射到世界书
+ * 已有的图像素材；③把原文里的模糊人物称谓映射成人物谱里的精准称谓
+ * （`appellation_map`，新增）。哪一集有几个叙事节拍是分镜台自己从原文提炼的
+ * 职责，不再是这里的产物。资产条目原来用 `event_ids` 记账"这个资产出现在哪些
+ * 事件"，事件没了，改用 `segment_indexes`（原文段落序号，1-based）直接记录
+ * "这个资产真正在场的原文段"——不是改名，是从原文重新推导，语义更精确。旧产物
+ * （`event_chain`/`event_ids`/`hook`/`cliffhanger`）仍可能出现在尚未重新生成的
+ * 已发布集里，前端不假设一定是新形状；本文件的类型只描述当前后端产出的新形状，
+ * 读取旧产物时这些字段就是 undefined，调用方需按可选处理（同旧例）。
  */
-export interface PrepPackSourceEvidence {
-  segment_index: number;
-  quote: string;
-}
-
-export interface PrepPackKeyLine {
-  speaker: string;
-  line: string;
-  segment_index: number;
-}
-
-/** 1.1.0 新增：事件覆盖的原文段区间，闭区间、以 segment_index 计。 */
-export interface PrepPackSourceSpan {
-  from_segment: number;
-  to_segment: number;
-}
-
-export interface PrepPackEvent {
-  event_id: string;
-  order: number;
-  summary: string;
-  source_evidence: PrepPackSourceEvidence[];
-  key_lines: PrepPackKeyLine[];
-  /** 1.1.0+ 字段；1.0.0 产物没有它，读取时必须容忍缺失。 */
-  source_span?: PrepPackSourceSpan;
-}
 
 /**
  * 1.7.0+ 字段：一条绑定的来源证明——method 取值 direct/alias/resolution/
@@ -1311,21 +1295,29 @@ export interface PrepPackEvent {
  * app/production/prep_pack.py 的 _prep_pack_provenance。anchor_segments/
  * anchor_phrase 是绑定判据钉住的原文证据；forward_chapter_label/
  * source_episode_no 只在特定 method 下才非空。前端只把 method 当低调提示
- * （悬浮提示）展示，不做任何业务判断。
+ * （悬浮提示）展示，不做任何业务判断。2.0.0 起 characters/scenes/
+ * functional_extras/props 四类资产共用同一个 provenance 形状（此前只有
+ * characters 有类型化的 provenance）。
  */
-export interface PrepPackCharacterProvenance {
+export interface PrepPackProvenance {
   method?: string;
   anchor_segments?: number[];
   anchor_phrase?: string;
   forward_chapter_label?: string;
   source_episode_no?: number;
+  dual_anchor?: boolean;
+  candidate_verdict_attempted?: boolean;
 }
+
+/** @deprecated 2.0.0 起改名 PrepPackProvenance（不再是 characters 独有），保留别名兼容旧引用。 */
+export type PrepPackCharacterProvenance = PrepPackProvenance;
 
 export interface PrepPackCharacterAsset {
   identity_id: string;
   display_name: string;
-  portrait_id: string;
-  event_ids: string[];
+  portrait_id: string | null;
+  /** 2.0.0：取代 event_ids，这个角色真正在场（画面出场）的原文段号，1-based。 */
+  segment_indexes: number[];
   /** 1.2.0+ 字段；本集内对该角色的称谓（如「小胖子」）。之前的产物没有它。 */
   aliases?: string[];
   /**
@@ -1341,15 +1333,29 @@ export interface PrepPackCharacterAsset {
    * 这个字段，此时前端只能退回展示 display_name。
    */
   display_appellation?: string;
-  /** 1.6.0+ 字段；这条绑定是怎么判出来的，见 PrepPackCharacterProvenance。 */
-  provenance?: PrepPackCharacterProvenance;
+  /** 1.6.0+ 字段；这条绑定是怎么判出来的，见 PrepPackProvenance。 */
+  provenance?: PrepPackProvenance;
 }
 
 export interface PrepPackSceneAsset {
   scene_id: string;
   display_name: string;
-  scene_reference_id: string;
-  event_ids: string[];
+  scene_reference_id: string | null;
+  /** 2.0.0：取代 event_ids，这个场景真正出现的原文段号，1-based。 */
+  segment_indexes: number[];
+  provenance?: PrepPackProvenance;
+}
+
+/**
+ * 2.0.0 新增：道具/物品——世界书没有道具图像素材库，只有文字描述
+ * （description），不映射任何图片，见 app/production/prep_pack.py 的
+ * _prep_pack_build_prop_manifest。
+ */
+export interface PrepPackProp {
+  label: string;
+  description: string;
+  segment_indexes: number[];
+  provenance?: PrepPackProvenance;
 }
 
 /**
@@ -1358,14 +1364,33 @@ export interface PrepPackSceneAsset {
  */
 export interface PrepPackFunctionalExtra {
   label: string;
-  event_ids: string[];
+  /** 2.0.0：取代 event_ids，这个群演真正出场的原文段号，1-based。 */
+  segment_indexes: number[];
+  visual_entity_id?: string;
+  provenance?: PrepPackProvenance;
 }
 
 export interface PrepPackAssetManifest {
   characters: PrepPackCharacterAsset[];
   scenes: PrepPackSceneAsset[];
+  /** 2.0.0+ 字段；更早的产物没有它，读取时按可选处理。 */
+  props?: PrepPackProp[];
   /** 1.3.0+ 字段；1.2.0 及更早的产物没有它，读取时按可选处理。 */
   functional_extras?: PrepPackFunctionalExtra[];
+}
+
+/**
+ * 2.0.0 新增：把原文里的模糊人物称谓（如「那少年」「小胖子」）映射到人物谱里的
+ * 精准称谓——asset_manifest.characters[] 已有的别名消歧结论，按 (原文称谓,
+ * 原文段号) 逐条摊平展示，供人工核对"这一段原文里的这个称谓，系统认为指的是
+ * 谱内哪个人"。只覆盖已解析到 identity_id 的人物提及，不含 functional_extras
+ * （群演没有精准身份可映射）。
+ */
+export interface PrepPackAppellationMapEntry {
+  raw_mention: string;
+  segment_index: number;
+  identity_id: string;
+  canonical_appellation: string;
 }
 
 export interface PrepPackEpisodeScope {
@@ -1388,7 +1413,7 @@ export interface PrepPackCoverageLedger {
   uncovered: PrepPackCoverageEntry[];
   /**
    * 第五账（1.4.0+ 字段，1.3.0 及更早的产物没有它）：副文本——章节名/作者留言段等
-   * 不属于正文事件链、但已被合法计入覆盖的原文段。不算未覆盖，参与"已覆盖"总数
+   * 不属于正文、但已被合法计入覆盖的原文段。不算未覆盖，参与"已覆盖"总数
    * 的并集计算，见 ScriptPage.tsx 的 coverageGateSummary。
    */
   paratext?: PrepPackCoverageEntry[];
@@ -1398,11 +1423,10 @@ export interface EpisodePrepPack {
   prep_pack_version: string;
   episode_no: number;
   episode_scope: PrepPackEpisodeScope;
-  event_chain: PrepPackEvent[];
   asset_manifest: PrepPackAssetManifest;
+  /** 2.0.0+ 字段；更早的产物没有它，读取时按可选处理。 */
+  appellation_map?: PrepPackAppellationMapEntry[];
   coverage_ledger: PrepPackCoverageLedger;
-  hook: string;
-  cliffhanger: string;
 }
 
 export interface NarrativeContractSummary {
