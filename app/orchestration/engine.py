@@ -64,7 +64,7 @@ _STEP_PRESENTATIONS: dict[str, WorkflowStepPresentation] = {
         "合并并校验完整剧本", "合并全部场次并检查原文、人物和剧情一致性",
     ),
     "screenplay_document": WorkflowStepPresentation(
-        "生成并验收分集准备包",
+        "生成并验收分集映射包",
         "抽取本集事件链、确定性核对覆盖与角色/场景资产、签发完成凭证并原子发布",
     ),
     # 2.0.0（映射台架构收窄，见 app/production/prep_pack.py 模块 docstring
@@ -96,7 +96,7 @@ _STEP_PRESENTATIONS: dict[str, WorkflowStepPresentation] = {
         "对模型申报的疑似真名，独立调用模型仅依据全书检索到的原文卷宗裁决称谓与人名是否同一人",
     ),
     "episode_prep_pack_publish": WorkflowStepPresentation(
-        "覆盖对账与原子发布", "确定性核对四账覆盖、签发完成凭证并原子发布分集准备包",
+        "覆盖对账与原子发布", "确定性核对四账覆盖、签发完成凭证并原子发布分集映射包",
     ),
     "storyboard": WorkflowStepPresentation(
         "生成可执行分镜", "把剧本拆解为可以生成画面和视频的镜头",

@@ -19,7 +19,6 @@ from app.schemas import (
     StoryboardOutlineShot,
     World,
 )
-from app.stages import _scene_library_block
 from app.domain.storyboard_ops import (
     _reconcile_storyboard_scene_projection,
     _sync_storyboard_scene_bindings,
@@ -28,8 +27,6 @@ from app.validators import (
     match_scene_name,
     validate_storyboard_screenplay_scene_alignment,
     validate_storyboard_scenes,
-    validate_storyboard_outline_scene_alignment,
-    validate_storyboard_shot_scene_alignment,
 )
 
 
@@ -137,36 +134,6 @@ def _install_fake_scene_generator(tmp_path, monkeypatch, generated: list[str]) -
 
     monkeypatch.setattr(scenes, "_generate_and_register_scene", fake_generate)
     monkeypatch.setattr("app.multiview.scene_multiview_enabled", lambda: False)
-
-
-def test_scene_prompt_and_outline_cannot_borrow_unrelated_library_scene() -> None:
-    bible = _bible("萧家迎客大厅", "萧家测验广场", "蛇人族大殿", "蛇人族城墙上空")
-    screenplay = _screenplay()
-
-    block = _scene_library_block(bible, screenplay)
-    assert "蛇人族大殿" in block and "蛇人族城墙上空" in block
-    assert "萧家迎客大厅" not in block and "萧家测验广场" not in block
-
-    wrong = StoryboardOutline(
-        episode_no=209,
-        shots=[
-            StoryboardOutlineShot(shot_no=1, scene_setting="日，萧家迎客大厅", beat="月媚通报敌情并等待墨巴斯"),
-            StoryboardOutlineShot(shot_no=2, scene_setting="日，萧家测验广场", beat="墨巴斯飞到城墙上空质问古河"),
-        ],
-    )
-    errors = validate_storyboard_outline_scene_alignment(wrong, screenplay, bible)
-    assert any("大纲第 1 镜误用了" in error and "萧家迎客大厅" in error for error in errors)
-
-
-def test_each_shot_must_follow_its_outline_scene() -> None:
-    bible = _bible("蛇人族大殿", "蛇人族城墙上空")
-    errors = validate_storyboard_shot_scene_alignment(
-        _shot("日，蛇人族城墙上空"),
-        _screenplay(),
-        bible,
-        expected_scene_setting="日，蛇人族大殿",
-    )
-    assert any("第 1 镜" in error and "本镜必须使用「蛇人族大殿」" in error for error in errors)
 
 
 def test_overlapping_scene_aliases_do_not_create_false_missing_scene() -> None:

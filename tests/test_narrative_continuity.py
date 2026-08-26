@@ -1494,55 +1494,12 @@ def test_ai_human_calibration_requires_enough_nonconstant_paired_samples() -> No
 
 
 # ---------------------------------------------------------------------------
-# episodes.hook / episodes.cliffhanger 承接文案（app.stages._first_shot_rule
-# 是逐镜层规则 6/7 的第二套实现，见 app.stages 顶部同名规则）与溯源校验
+# episodes.hook / episodes.cliffhanger 溯源校验
+# （app.stages._first_shot_rule 连同它所属的逐镜生成管线
+# generate_storyboard_next_shot 已删除——storyboard 2.0.0 起 prep_pack 集全部
+# 走 app/production/storyboard_pack.py，不再逐镜套用该规则；原有的
+# _first_shot_rule 专项测试已随之移除，此处只保留仍然存在的溯源校验测试）
 # ---------------------------------------------------------------------------
-
-
-def test_first_episode_shot_rule_uses_special_branch_and_stays_blank() -> None:
-    from app.stages import _first_shot_rule
-
-    rule = _first_shot_rule(
-        {"episode_no": 1, "hook": "", "cliffhanger": ""},
-        narrative_authority=False,
-    )
-    assert "【第一集第一镜=全片开场建场镜" in rule
-    assert "本集开场无需承接钩子" in rule
-    # Empty hook must never be string-interpolated into a "承接上一集结尾：" style
-    # instruction; EP1 has no previous episode so this must read as a plain
-    # statement, not a broken reference to a blank value.
-    assert "承接上一集真实结尾：" not in rule
-
-
-def test_second_episode_shot_rule_carries_prev_ending_hook_not_old_ban() -> None:
-    from app.stages import _first_shot_rule
-
-    hook = "神秘来电在深夜再次响起，屏幕上显示的是三年前失联的号码。"
-    rule = _first_shot_rule(
-        {"episode_no": 2, "hook": hook, "cliffhanger": ""},
-        narrative_authority=False,
-    )
-    assert f"第 1 个镜头必须承接上一集真实结尾：{hook}" in rule
-    assert f"不得凭空续写 {hook} 之外的新剧情" in rule
-    # The old field-empty-implies-forbidden phrasing must be gone from this
-    # branch now that hook is non-empty.
-    assert "禁止发明额外开场钩子" not in rule
-    assert "禁止因 hook 为空发明额外钩子" not in rule
-
-
-def test_empty_hook_and_cliffhanger_never_interpolate_blank_value() -> None:
-    from app.stages import _first_shot_rule
-
-    rule = _first_shot_rule(
-        {"episode_no": 3, "hook": "", "cliffhanger": ""},
-        narrative_authority=False,
-    )
-    assert "承接上一集真实结尾：" not in rule
-    assert "本集真实尾钩：" not in rule
-    assert "（空）" not in rule
-    assert "第 1 个镜头按剧本真实开场自然进入" in rule
-    assert "最后 1 个镜头只收束到剧本/原文已有状态" in rule
-    assert "不得发明下一集钩子" in rule
 
 
 def test_ending_hook_is_grounded_rejects_fabricated_content() -> None:

@@ -614,6 +614,17 @@ class StoryboardPackSegment(BaseModel):
     duration_s: int = SEGMENT_DURATION_S
     synopsis: str
     source_segment_indexes: list[int]
+    # Carries forward the model's own self-declared association from the
+    # beat-sheet stage (_AiSegmentPlan.beat_ids) -- the same list already used
+    # to build ``beat_summaries`` for this segment's own prompt (see
+    # _generate_segment_prompt). This is the authoritative source for "which
+    # beats does this segment cover"; persist_storyboard_pack must key off it
+    # directly instead of re-deriving via segment_indexes/source_segment_indexes
+    # set intersection, which is only a proxy and can disagree with what the
+    # prompt was actually built from at edges (e.g. a beat whose
+    # segment_indexes happens to overlap this segment's source range without
+    # the model having assigned it here, or vice versa).
+    beat_ids: list[str] = Field(default_factory=list)
     prompt_text: str
     shot_count: int
     dialogue: list[dict[str, Any]]
@@ -695,6 +706,7 @@ async def generate_storyboard_pack(
             duration_s=SEGMENT_DURATION_S,
             synopsis=segment_plan.synopsis,
             source_segment_indexes=list(segment_plan.source_segment_indexes),
+            beat_ids=list(segment_plan.beat_ids),
             prompt_text=draft.prompt_text.strip(),
             shot_count=draft.shot_count,
             dialogue=[line.model_dump(mode="json") for line in draft.dialogue],
@@ -760,6 +772,7 @@ def persist_storyboard_pack(
     if segments is None:
         segments = _load_indexed_source_segments(conn, ep)
     conn.execute("DELETE FROM shots WHERE episode_id=?", (episode_id,))
+    beats_by_id = {beat.beat_id: beat for beat in pack.beat_sheet}
     shot_ids: list[str] = []
     for segment in pack.segments:
         character_ids = [
@@ -773,9 +786,20 @@ def persist_storyboard_pack(
         shot_id = new_id("shot")
         shot_uid = new_id("shotuid")
         segment_record = segment.model_dump(mode="json")
+        # Single source of truth: the model's own self-declared segment.beat_ids
+        # (_AiSegmentPlan.beat_ids, carried through StoryboardPackSegment) --
+        # the same list that built this segment's own prompt (see
+        # _generate_segment_prompt's beat_summaries). _validate_beat_sheet_draft
+        # already rejects any beat_id that doesn't exist in pack.beat_sheet, so
+        # the lookup below cannot silently drop a real beat; the ``in
+        # beats_by_id`` guard is defense in depth, not a coverage gap.
+        # Previously this was re-derived from
+        # ``set(beat.segment_indexes) & set(segment.source_segment_indexes)`` --
+        # a different field (segment_indexes) standing in for beat_ids, which
+        # could disagree with what the model actually declared/was prompted
+        # with at the edges. See the "拿一个维度的代理担保另一个维度" note.
         matched_beats = [
-            beat for beat in pack.beat_sheet
-            if set(beat.segment_indexes) & set(segment.source_segment_indexes)
+            beats_by_id[beat_id] for beat_id in segment.beat_ids if beat_id in beats_by_id
         ]
         # ``beat_ids`` (bare id list) is the pre-existing key frontend/api.ts and
         # BoardPage.tsx already read (StoryboardPackSegment.beat_ids) -- kept

@@ -980,6 +980,162 @@ def test_suspected_true_name_hypothesis_rejected_with_no_evidence_routes_to_disc
 
 
 # ---------------------------------------------------------------------------
+# 2.0.2 -- 真实事故回归（48e01ff 当晚上线即复现，ERR-20260826-37cf79，
+# EP1「大青山山顶」/「大青山半山腰裂缝」/「大青山脚下大河」/「大青山上空」/
+# 「半山青石空地」五个场景全部 has_scene_anchor 门禁具名拦截）：2.0.0 砍掉
+# event_chain 时，场景 resolution/discovery 两支的锚点候选只剩
+# [canonical_scene_name, name]——EP1 这五个场景名都是模型综合出的合成
+# 标签，原文只写"这青山顶端"/"山腰裂缝"等，两路候选逐字子串搜索结构上
+# 必然全部落空。下面用真实 EP1 原文（data/manju.db，project_id=
+# proj_3ac0b627fa46，chapters.idx=1）与真实事故的五个场景名构造红灯，
+# 覆盖"合成场景名不逐字出现在原文，但模型自己申报的 quote 能取到独立的
+# 本集锚点"这条——quote 不是 name/canonical_scene_name 的重复或变体
+# （见 PREP_PACK_VERSION 上方 2.0.2 大注释"为什么这不是同义反复"一节），
+# 是对"这段原文是不是在写这个地点"这个独立问题的另一次申报，真假由它
+# 是否逐字命中原文决定，不是靠申报本身。
+# ---------------------------------------------------------------------------
+
+# 真实 EP1 第一章原文节录（chapters.idx=1，五段分别是五个受灾场景各自的
+# 依据段落，逐字摘自 data/manju.db，不是编造的样例）。
+_EP1_REAL_SOURCE_TEXT = (
+    "四月的季节，说不出冷，也自然没有难熬的热，轻微的风抚过大地，掠过了"
+    "北漠羌笛，吹过了东土大唐，掀起一些尘土如雾，在黄昏的夕阳下，转了个"
+    "弯儿，卷在南域边缘赵国的大青山，落在了此刻于这青山顶端，坐在那里的"
+    "一个文生少年身上。"
+    "\n\n"
+    "孟浩快走几步，到了山顶的边缘，向下看时，立刻看到在这峭壁的半山腰上，"
+    "似乎存在了一处裂缝，有人从那里探出半个身子，面色苍白带着惊恐绝望，"
+    "正在呼喊。"
+    "\n\n"
+    "青山下有一条大河，河水寒冬不冻，传说通往东土大唐。"
+    "\n\n"
+    "女子没有说话，右手抬起一挥，绿风再次出现，呼啸卷起孟浩以及王有材等"
+    "人，与这女子一同飞出了洞穴，直奔天空而去，刹那不见了踪影，只有这大"
+    "青山，依旧耸立，在这黄昏里渐渐融到了黑夜中。"
+    "\n\n"
+    "当他睁开眼睛时，已经在了一处半山腰的青石空地上，四周山峦起伏，云雾"
+    "缭绕绝非凡尘，能看到一些精美的阁楼环绕山峦八方，满眼陌生。"
+)
+
+# 五个场景各自的 display_name（真实事故名单）、declared segment（1-based，
+# 对应上面 _EP1_REAL_SOURCE_TEXT 的五段）、以及模型对这条提及自己申报的
+# quote（逐字摘自对应段落，不是全段照抄——跟真实模型输出的摘录粒度一致）。
+_EP1_REAL_SCENE_QUOTES = [
+    ("大青山山顶", 1, "落在了此刻于这青山顶端，坐在那里的一个文生少年身上。"),
+    ("大青山半山腰裂缝", 2, "在这峭壁的半山腰上，似乎存在了一处裂缝"),
+    ("大青山脚下大河", 3, "青山下有一条大河，河水寒冬不冻"),
+    ("大青山上空", 4, "与这女子一同飞出了洞穴，直奔天空而去"),
+    ("半山青石空地", 5, "已经在了一处半山腰的青石空地上"),
+]
+
+
+def test_synthetic_scene_labels_get_independent_anchor_from_mention_quote(monkeypatch):
+    """红灯（真实事故复现 + 修复验证，ERR-20260826-37cf79）：EP1 五个场景名
+    对原文做裸字面搜索 100% 落空——如果修复退化回只试
+    [canonical_scene_name, name]（2.0.0 砍 event_chain 后的回归态），本测试
+    必须失败（_provenance_self_verify 非空、has_scene_anchor 具名拦截）。
+    模拟真实链路：这五个场景在 EP1 里都是首次出现的新地名，走场景发现
+    （ensure_scenes_for_labels 返回 resolved_names 自映射、未落 added——
+    也就是"发现判定为已注册场景"这一支，跟真实事故报告里
+    provenance.method='resolution' 完全对齐，不是随手选的另一条分支）。"""
+    conn = _make_conn()
+    for label, _segment, _quote in _EP1_REAL_SCENE_QUOTES:
+        conn.execute(
+            "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end) "
+            "VALUES (?, 'p1', ?, 1, NULL)",
+            (f"sr-{label}", label),
+        )
+    conn.commit()
+
+    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels):
+        assert set(labels) == {label for label, _s, _q in _EP1_REAL_SCENE_QUOTES}
+        return {
+            "added": [],  # 已经在 scene_references 里挂号，不是"新建"
+            "errors": [], "ready_scenes": list(labels),
+            "resolved_names": {label: label for label in labels},
+        }
+
+    monkeypatch.setattr(scenes, "ensure_scenes_for_labels", fake_ensure_scenes_for_labels)
+
+    # 直接构造扁平 scene_mentions（不走 _event()/_mentions_with_segment_
+    # indexes 的裸字面自动定位——那条自动定位对这五个合成场景名会算出空
+    # segment_indexes，掩盖了真实场景：生产链路里 segment_indexes 来自
+    # 模型自己申报的"画面出场"编号，跟 display_name 是否逐字出现无关，见
+    # _prep_pack_gate_segment_indexes 上方说明）。
+    scene_mentions = [
+        {"display_name": label, "segment_indexes": [segment], "quote": quote}
+        for label, segment, quote in _EP1_REAL_SCENE_QUOTES
+    ]
+
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
+        conn, source_text=_EP1_REAL_SOURCE_TEXT,
+        character_mentions=[], scene_mentions=scene_mentions, prop_mentions=[],
+    )
+
+    assert errors == []
+    assert stats["scene_discovery_calls"] == 0, (
+        "五个场景都已经在 scene_references 挂号，裸精确匹配就该命中，不该"
+        "触发发现调用"
+    )
+    assert len(scene_list) == 5
+    by_name = {s["display_name"]: s for s in scene_list}
+    for label, segment, quote in _EP1_REAL_SCENE_QUOTES:
+        entry = by_name[label]
+        provenance = entry["provenance"]
+        assert provenance["method"] == "resolution", (
+            f"「{label}」真实事故报告里就是 method='resolution'"
+        )
+        assert provenance["anchor_phrase"] == quote, (
+            f"「{label}」的 anchor_phrase 必须来自这条提及自己申报的 quote"
+            "（canonical_scene_name/name 两路候选对这个合成标签结构上必然"
+            "落空，不能是同义反复命中的假阳性）"
+        )
+        assert provenance["anchor_segments"] == [segment]
+        assert label not in provenance["anchor_phrase"] or quote != label, (
+            "quote 不能退化成场景名本身的复读"
+        )
+
+    verify_errors = _provenance_self_verify(
+        _EP1_REAL_SOURCE_TEXT, characters, scene_list, functional_extras,
+    )
+    assert verify_errors == [], (
+        "发布前来源证明自校验必须全绿——这正是真实事故里 RUNTIMEERROR 具名"
+        "拦截的那道门禁"
+    )
+
+
+def test_synthetic_scene_label_without_any_independent_evidence_still_blocked():
+    """红灯（红线①反向验证：绝不允许放宽 has_scene_anchor 门禁）：合成场景名
+    不逐字出现在原文，且这条提及自己也没有申报任何 quote（模型如实留空，
+    不是漏填字段）——candidate 三路全空，anchor_phrase 必须仍是空字符串，
+    has_scene_anchor 门禁必须照样具名拦截。修复绝不能让"quote 存在这个
+    字段"本身变成放行条件，必须是"quote 逐字命中原文"才放行。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end) "
+        "VALUES ('sr-dqssd','p1','大青山山顶',1,NULL)"
+    )
+    conn.commit()
+
+    scene_mentions = [
+        {"display_name": "大青山山顶", "segment_indexes": [1], "quote": ""},
+    ]
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
+        conn, source_text=_EP1_REAL_SOURCE_TEXT,
+        character_mentions=[], scene_mentions=scene_mentions, prop_mentions=[],
+    )
+    assert errors == []
+    entry = next(s for s in scene_list if s["display_name"] == "大青山山顶")
+    assert entry["provenance"]["anchor_phrase"] == ""
+    verify_errors = _provenance_self_verify(
+        _EP1_REAL_SOURCE_TEXT, characters, scene_list, functional_extras,
+    )
+    assert len(verify_errors) == 1
+    assert "缺少 anchor_phrase" in verify_errors[0]
+    assert "大青山山顶" in verify_errors[0]
+
+
+# ---------------------------------------------------------------------------
 # 1.5.0 -- speaker 名册引用化（真实 EP2 回归：关键台词"割舌头"的 speaker 被
 # 写成"韩宗"，实际说话人是"绿袍男子"，韩宗第 5 章才出场，speaker 字段从未
 # 进任何校验管线）。这两个函数是纯确定性查表，不需要 DB/异步，直接单测。
@@ -4611,5 +4767,21 @@ def test_prep_pack_version_is_1_8_0():
     asset_manifest.characters 的合成描述性称谓（"穿杂役衫的魁梧大汉"一类）
     从 appellation_map 里静默消失。产出语义变更（appellation_map 实际
     行数），比照 1.4.1/1.6.1/1.8.1-1.8.5/1.9.0/1.10.0/1.11.1 的先例推进
-    版本号第三位，不动 schema 位。"""
-    assert prep_pack.PREP_PACK_VERSION == "2.0.1"
+    版本号第三位，不动 schema 位。
+
+    2.0.2（真实回归，48e01ff 当晚上线即复现，ERR-20260826-37cf79，见
+    app/production/prep_pack.py 模块 docstring 与 PREP_PACK_VERSION 上方
+    2.0.2 大注释）：48e01ff 砍掉 event_chain 时，场景 resolution/discovery
+    两支的锚点候选表被收窄成 [canonical_scene_name, name]，丢了唯一一路
+    独立于场景名本身的证据（原来是 event_chain[].source_evidence[].quote）
+    ——场景名是模型综合出的合成标签时（EP1 真实五例："大青山山顶"等，
+    原文只写"这青山顶端"）两路候选结构上必然落空，has_scene_anchor 门禁
+    具名拦截。修复：_ModelSceneMention 新增 ``quote``（required str，
+    可空），模型对这条场景提及自己申报一条逐字引文；resolution/discovery
+    两支候选表恢复成 [canonical_scene_name, name, scene_quote]，alias 分支
+    同样恢复传入这条提及的 quote。是 prompt-contract 变更（新增模型必须
+    申报的字段）且实际改变部分场景绑定的 anchor_phrase 取值，比照
+    1.4.1/1.6.1/1.8.1-1.8.5/1.9.0/1.10.0/1.11.1/2.0.1 的先例推进版本号
+    第三位，不动 schema 位（asset_manifest.scenes[] 自身字段集合不变，
+    quote 只是 _ModelSceneMention 这一模型响应内部字段，不进入发布产物）。"""
+    assert prep_pack.PREP_PACK_VERSION == "2.0.2"

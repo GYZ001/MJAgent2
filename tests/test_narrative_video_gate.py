@@ -270,7 +270,18 @@ async def test_stale_published_baseline_blocks_direct_supervisor_resume(
         ).fetchall(),
         1,
     ).model_dump(mode="json")
-    with pytest.raises(StageError, match="已发布叙事分镜不能作为普通续跑工作区"):
+    # The narrative_plan-driven generation+repair pipeline that used to hold
+    # this scenario's specific "已发布叙事分镜不能作为普通续跑工作区" guard was
+    # deleted (storyboard 2.0.0: every screenplay the mapping stage produces is
+    # an episode_prep_pack payload, which routes to
+    # app.production.storyboard_pack.run_storyboard_pack_generation instead).
+    # This case's screenplay is a non-prep_pack narrative-authority document
+    # (built by _published_narrative_case), so it now hits the blanket
+    # rejection for any screenplay that isn't episode_prep_pack -- a stricter
+    # superset of the old check that still upholds the property this test
+    # guards: a stale working candidate must never let direct supervisor
+    # resume silently touch an already-published narrative storyboard.
+    with pytest.raises(StageError, match="旧的叙事权威分镜管线已下线"):
         await run_storyboard_supervisor(
             "episode-generic",
             resume=True,

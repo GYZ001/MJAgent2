@@ -20,12 +20,6 @@ from app.schemas import (
     Shot,
     World,
 )
-from app.stages import (
-    DirectedPhysicalInteraction,
-    _directed_interaction_risk_tags,
-)
-
-
 def _bible() -> Bible:
     return Bible(
         characters=[
@@ -328,22 +322,6 @@ def test_ai_prompt_generation_uses_structured_model_output(monkeypatch) -> None:
         SEEDANCE_2_PROFILE.profile_id
     )
     assert "别走。" in prompt
-
-
-def test_directed_contact_contract_preserves_two_shot_tags() -> None:
-    interaction = DirectedPhysicalInteraction(
-        kind="person_person_contact",
-        participants=["甲", "乙"],
-        phase="established",
-        contact_point="甲的右手与乙的左手腕",
-        contact_point_visible=True,
-    )
-
-    assert _directed_interaction_risk_tags(interaction) == [
-        "dialogue_action_staging",
-        "dialogue_two_shot_required",
-        "contact_phase:established",
-    ]
 
 
 def _reference(name: str) -> dict:

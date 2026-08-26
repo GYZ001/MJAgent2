@@ -1,15 +1,16 @@
 """分镜大纲（先规划后逐镜填充，方案 B）的单测：
 
-- validate_storyboard_outline：镜头数范围 / shot_no 连续 / 反停留 / 必保留内容全覆盖；
-- _render_storyboard_outline / _outline_brief：把大纲渲染进逐镜 prompt 并标出"本镜"。
+- validate_storyboard_outline：镜头数范围 / shot_no 连续 / 反停留 / 必保留内容全覆盖。
+
+（_render_storyboard_outline / _outline_brief 连同它们所属的逐镜生成管线
+generate_storyboard_next_shot 已删除——storyboard 2.0.0 起 prep_pack 集全部
+走 app/production/storyboard_pack.py，不再逐镜渲染大纲；这两个函数原有的
+测试已随之移除。）
 """
 
 from app.schemas import (Bible, Character, EpisodeScreenplay, StoryboardOutline,
                          StoryboardOutlineShot, World)
-from app.stages import (_outline_brief, _split_atoms_to_content_budget,
-                        _render_storyboard_outline)
-from app.validators import (_atomize_claim, _condense,
-                            split_outline_over_action_capacity,
+from app.validators import (split_outline_over_action_capacity,
                             validate_storyboard_outline)
 
 KEY_LINE = "我一定要查清斗气消失的真相。"
@@ -217,33 +218,6 @@ def test_outline_key_line_ids_used_but_one_catalog_entry_unassigned_still_flagge
     assert any("未安排" in e and "关键台词" in e for e in errors), errors
 
 
-def test_render_outline_marks_current_shot() -> None:
-    outline = _outline(_valid_beats(), covers={5: KEY_LINE})
-    rendered = _render_storyboard_outline(outline, current_shot_no=3)
-    assert "第3/5镜" in rendered
-    # 行级标记用两个前导空格，唯一标在第 3 镜那一行（表头说明里的「← 本镜」不带前导空格）
-    assert rendered.count("  ← 本镜") == 1
-    marked = [ln for ln in rendered.splitlines() if "  ← 本镜" in ln][0]
-    assert marked.startswith("第3/5镜")
-
-
-def test_render_outline_hides_legacy_information_ids() -> None:
-    outline = _outline(_valid_beats(), covers={5: KEY_LINE})
-    outline.shots[0].new_information_ids = ["I1", "legacy_snake_case"]
-
-    rendered = _render_storyboard_outline(outline, current_shot_no=1, valid_info_ids={"I1"})
-
-    assert "info:I1" in rendered
-    assert "legacy_snake_case" not in rendered
-
-
-def test_outline_brief_lookup() -> None:
-    outline = _outline(_valid_beats(), covers={5: KEY_LINE})
-    assert _outline_brief(outline, 5).covers == KEY_LINE
-    assert _outline_brief(outline, 99) is None
-    assert _outline_brief(None, 1) is None
-
-
 def test_outline_allows_large_storyboards_when_every_shot_advances() -> None:
     beats = [f"主线推进节拍第{i}镜发生独立局势变化" for i in range(1, 51)]
     outline = _outline(beats, covers={50: KEY_LINE})
@@ -257,12 +231,3 @@ def test_outline_allows_long_atom_for_deterministic_pre_split() -> None:
 
     assert validate_storyboard_outline(outline, _screenplay(), 50) == []
 
-
-def test_real_shot_12_cover_split_avoids_tiny_tail() -> None:
-    covers = "萧炎哥哥；以前你曾经与薰儿说过；要能放下；才能拿起；提放自如；是自在人"
-
-    # 用固定预算测装箱算法；产品口播上限已随 VAL-422 上调到 36，不能再绑死 MAX_SPOKEN。
-    chunks = _split_atoms_to_content_budget(_atomize_claim(covers), 16)
-
-    assert [len(_condense(chunk)) for chunk in chunks] == [14, 16]
-    assert _condense("".join(chunks)) == _condense("".join(_atomize_claim(covers)))

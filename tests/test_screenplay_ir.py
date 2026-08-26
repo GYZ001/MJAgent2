@@ -32,7 +32,6 @@ from app.schemas import (
     Character,
     EpisodeScreenplay,
     InformationItem,
-    Scene,
     VoiceCanonical,
     World,
     system_environment_entity_id,
@@ -2108,51 +2107,6 @@ def test_compiled_ir_identity_contract_is_storyboard_resolvable() -> None:
     assert resolver.resolve("旧友", usage="voice").display_name == "旧友"
 
 
-def test_compiled_ir_storyboard_outline_never_calls_full_outline_model(
-    monkeypatch,
-) -> None:
-    screenplay = _compile()
-    bible = _bible()
-    bible.scenes = [
-        Scene(name="咖啡厅里侧", scene_canonical="夜晚咖啡厅里侧座位区"),
-        Scene(name="咖啡厅门口", scene_canonical="夜晚咖啡厅门口"),
-        Scene(name="咖啡厅座位", scene_canonical="夜晚咖啡厅座位区"),
-    ]
-
-    async def forbidden_model_call(*_args, **_kwargs):
-        raise AssertionError("narrative outline must compile locally")
-
-    monkeypatch.setattr(
-        stages,
-        "_run_with_agent_loop",
-        forbidden_model_call,
-    )
-    outline = asyncio.run(stages.generate_storyboard_outline(
-        {
-            "id": "ep-ir-1",
-            "episode_no": 1,
-            "title": "雨夜敲门",
-            "target_duration_s": 50,
-            "screenplay_artifact_id": "art-screenplay-ir-1",
-        },
-        SOURCE,
-        bible,
-        prev_ending="",
-        screenplay=screenplay,
-    ))
-
-    assert {
-        event_id
-        for shot in outline.shots
-        for event_id in shot.event_ids
-    } == {
-        event.event_id
-        for event in screenplay.narrative_plan.events
-    }
-    assert len(outline.scene_contexts) == len(screenplay.scene_outline)
-    assert outline.evidence_artifact_id
-
-
 def test_duplicate_identity_uses_owned_source_functional_resolution() -> None:
     payload = _v13_payload()
     payload["identities"][1]["display_name"] = "谷言"
@@ -3088,20 +3042,6 @@ def test_legacy_full_screenplay_candidate_remains_compatible() -> None:
 
     assert compiled.title == "旧格式"
     assert compiled.id == "ep-legacy"
-
-
-def test_storyboard_context_consumes_compiled_ids_without_adapter() -> None:
-    screenplay = _compile()
-
-    narrative_context = stages._compact_narrative_plan_context(screenplay)
-    key_context = stages._storyboard_key_content_block(screenplay)
-
-    assert '"event_id":"E1"' in narrative_context
-    assert '"action_id":"A-1"' in narrative_context
-    assert '"scene_id":"SC01"' in narrative_context
-    assert '"readability_window_id":"RW-1"' in narrative_context
-    assert "KL01｜谷言：再等十分钟。" in key_context
-    assert "S01｜谷言｜独自在咖啡厅等待旧友" in key_context
 
 
 def test_generation_entry_uses_compact_ir_model_and_bounded_output(

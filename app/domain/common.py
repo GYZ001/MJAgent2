@@ -37,8 +37,7 @@ from app.planning import chapter_preview
 from app.schemas import (Bible, EpisodeScreenplay, Shot, Storyboard,
                          StoryboardOutline, StoryboardOutlineShot, schema_errors)
 from app.stages import (SCREENPLAY_SOURCE_BUDGET_CHARS, StageError, generate_bible,
-                        generate_screenplay, generate_storyboard_next_shot,
-                        generate_storyboard_outline)
+                        generate_screenplay)
 from app.validators import (relieve_spoken_overflow,
                             normalize_action_desc, normalize_continuity,
                             normalize_offbible_characters,

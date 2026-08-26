@@ -427,6 +427,7 @@ def _pack() -> StoryboardPack:
             StoryboardPackSegment(
                 segment_no=1, synopsis="他扔掉了理想",
                 source_segment_indexes=[1, 2],
+                beat_ids=["B1"],
                 prompt_text="电影级预告片质感，多镜头叙事，镜头之间硬切。……",
                 shot_count=3,
                 dialogue=[{"speaker_identity_id": "id_a", "line": "走了", "source_segment_index": 1}],
@@ -505,7 +506,10 @@ def test_persist_storyboard_pack_segment_carries_beat_summary_self_contained():
     ]
 
 
-def test_persist_storyboard_pack_segment_beats_empty_when_no_beat_overlaps():
+def test_persist_storyboard_pack_segment_beats_empty_when_declared_beat_ids_empty():
+    # beat_ids 的真源是模型在节拍阶段自报的 segment.beat_ids（与该段自身提示词
+    # beat_summaries 同源），不是 segment_indexes 与 beat.segment_indexes 的交集
+    # 代理判定——交集只是代理，两个维度可能在边界处各说各话。
     conn = db.get_conn()
     episode_id = "ep-pack-beats-empty"
     _seed_episode(conn, episode_id=episode_id)
@@ -517,14 +521,43 @@ def test_persist_storyboard_pack_segment_beats_empty_when_no_beat_overlaps():
         SourceSegment(segment_id="SRC0003", text="葫芦落入河中。", start_offset=2, end_offset=3),
     ]
     pack = _pack()
-    # 节拍只覆盖原文第 1/2 段，把段的原文范围挪到不重叠的第 3 段。
-    pack.segments[0].source_segment_indexes = [3]
+    # 模型自报本段不承载任何节拍：即使 source_segment_indexes 仍与 beat.segment_indexes
+    # 重叠，落库也必须服从模型自报，不得靠交集"顺手"补回一个模型没声明的节拍。
+    pack.segments[0].beat_ids = []
     persist_storyboard_pack(conn, episode_id, ep, payload, pack, segments=segments)
 
     row = conn.execute("SELECT * FROM shots WHERE episode_id=?", (episode_id,)).fetchone()
     segment_record = json.loads(row["shot_contract_json"])["storyboard_pack_segment"]
     assert segment_record["beat_ids"] == []
     assert segment_record["beats"] == []
+
+
+def test_persist_storyboard_pack_segment_beats_follow_declared_ids_not_index_overlap():
+    # 反向证明：即使 source_segment_indexes 挪到与 beat.segment_indexes 不再重叠的
+    # 段号，只要模型自报的 beat_ids 仍引用该节拍，落库的 beats 就必须保留它——
+    # 证明真源是 beat_ids，不是交集代理（交集判定会在这个场景下把它错误地判空）。
+    conn = db.get_conn()
+    episode_id = "ep-pack-beats-follow-declared"
+    _seed_episode(conn, episode_id=episode_id)
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    payload = _prep_pack_2_0_0_payload()
+    segments = [
+        SourceSegment(segment_id="SRC0001", text="少年站在山顶。", start_offset=0, end_offset=1),
+        SourceSegment(segment_id="SRC0002", text="他扔掉了葫芦。", start_offset=1, end_offset=2),
+        SourceSegment(segment_id="SRC0003", text="葫芦落入河中。", start_offset=2, end_offset=3),
+    ]
+    pack = _pack()
+    # 节拍 B1.segment_indexes=[1, 2]；把段的原文范围挪到不重叠的第 3 段，
+    # 但仍保留 beat_ids=["B1"]（模型自报本段承载 B1）。
+    pack.segments[0].source_segment_indexes = [3]
+    persist_storyboard_pack(conn, episode_id, ep, payload, pack, segments=segments)
+
+    row = conn.execute("SELECT * FROM shots WHERE episode_id=?", (episode_id,)).fetchone()
+    segment_record = json.loads(row["shot_contract_json"])["storyboard_pack_segment"]
+    assert segment_record["beat_ids"] == ["B1"]
+    assert segment_record["beats"] == [
+        {"beat_id": "B1", "summary": "他扔掉了理想", "segment_indexes": [1, 2]},
+    ]
 
 
 def test_persist_storyboard_pack_writes_standalone_beat_sheet_artifact():

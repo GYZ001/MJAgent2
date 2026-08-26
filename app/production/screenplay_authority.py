@@ -2160,7 +2160,7 @@ def resolve_downstream_screenplay(
         try:
             projection = project_prep_pack_to_screenplay(raw_projection_payload)
         except Exception as exc:
-            raise ValueError(f"当前分集准备包投影无法验证：{exc}") from exc
+            raise ValueError(f"当前分集映射包投影无法验证：{exc}") from exc
     else:
         try:
             projection = _validated_screenplay_projection(raw_projection)
@@ -2259,16 +2259,16 @@ def _resolve_current_prep_pack_authority(
         or artifact.get("scope_id") != episode_id
         or artifact.get("status") != "approved"
     ):
-        raise ValueError("已发布分集准备包 Artifact 的作用域或状态无效")
-    artifact_hash = _verified_artifact_hash(artifact, label="已发布分集准备包 Artifact")
+        raise ValueError("已发布分集映射包 Artifact 的作用域或状态无效")
+    artifact_hash = _verified_artifact_hash(artifact, label="已发布分集映射包 Artifact")
     payload = artifact.get("content")
     if not is_prep_pack_payload(payload):
-        raise ValueError("已发布分集准备包 Artifact 内容不是有效的 episode_prep_pack")
+        raise ValueError("已发布分集映射包 Artifact 内容不是有效的 episode_prep_pack")
     screenplay = project_prep_pack_to_screenplay(payload)
 
     raw_projection = _episode_value(episode, "screenplay_json", "")
     if not raw_projection:
-        raise ValueError("已发布分集准备包缺少页面投影")
+        raise ValueError("已发布分集映射包缺少页面投影")
     try:
         projection_payload = json.loads(raw_projection)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -2280,7 +2280,7 @@ def _resolve_current_prep_pack_authority(
         _episode_value(episode, "screenplay_completion_certificate_id", "") or ""
     )
     if not certificate_id:
-        raise ValueError("已发布分集准备包缺少当前完成凭证")
+        raise ValueError("已发布分集映射包缺少当前完成凭证")
     contract_version = str(artifact.get("contract_version") or "")
     input_fingerprint = evidence_repository.content_hash({
         "episode_id": episode_id,
@@ -2303,11 +2303,11 @@ def _resolve_current_prep_pack_authority(
         allow_consumed=True,
     )
     if cert.consumed_at is None:
-        raise ValueError("分集准备包完成凭证尚未被原子发布消费")
+        raise ValueError("分集映射包完成凭证尚未被原子发布消费")
 
     evaluation_ids = list(cert.evaluation_ids)
     if not evaluation_ids:
-        raise ValueError("分集准备包完成凭证缺少 QA 证据")
+        raise ValueError("分集映射包完成凭证缺少 QA 证据")
     marks = ",".join("?" for _ in evaluation_ids)
     evaluations = db.execute(
         f"SELECT * FROM evaluations WHERE id IN ({marks})", evaluation_ids,
@@ -2317,7 +2317,7 @@ def _resolve_current_prep_pack_authority(
         if row["evaluator_name"] == "screenplay_production_qa"
     ]
     if len(qa_rows) != 1:
-        raise ValueError("分集准备包权威链必须精确绑定一个生产 QA")
+        raise ValueError("分集映射包权威链必须精确绑定一个生产 QA")
     qa_row = qa_rows[0]
     if (
         qa_row["artifact_id"] != artifact_id
@@ -2326,13 +2326,13 @@ def _resolve_current_prep_pack_authority(
         or bool(qa_row["runtime_blocking"])
         or qa_row["status"] != "passed"
     ):
-        raise ValueError("分集准备包质量评分 Evaluation 已漂移或版本不匹配")
+        raise ValueError("分集映射包质量评分 Evaluation 已漂移或版本不匹配")
     try:
         evidence = json.loads(qa_row["evidence_json"] or "{}")
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError("分集准备包 QA 证据无法解析") from exc
+        raise ValueError("分集映射包 QA 证据无法解析") from exc
     if evidence.get("prep_pack_version") != payload.get("prep_pack_version"):
-        raise ValueError("分集准备包 QA 证据与当前发布版本不一致")
+        raise ValueError("分集映射包 QA 证据与当前发布版本不一致")
 
     _records, source_text = _source_records(db, episode)
     return ResolvedScreenplayAuthority(
@@ -2381,7 +2381,7 @@ def resolve_current_screenplay_authority(
         # into one function would make neither chain independently auditable.
         if require_narrative:
             raise ValueError(
-                "已发布产物是分集准备包（episode_prep_pack），不具备叙事权威图"
+                "已发布产物是分集映射包（episode_prep_pack），不具备叙事权威图"
                 "（narrative_plan）概念，无法满足 require_narrative=True 的调用"
             )
         return _resolve_current_prep_pack_authority(

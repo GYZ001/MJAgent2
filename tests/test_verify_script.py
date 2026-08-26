@@ -8,6 +8,7 @@ from scripts.verify import (
     ROOT,
     _full_commands,
     _isolated_environment,
+    _quick_commands,
     _run,
     _runtime_facade_modules,
     affected_python_tests,
@@ -27,6 +28,70 @@ def test_media_exec_change_selects_worker_regressions() -> None:
 
     assert "tests/test_media_pipeline_v2.py" in selected
     assert "tests/test_media_job_recovery.py" in selected
+
+
+def test_deleted_test_file_is_excluded_from_pytest_targets() -> None:
+    """Reproduces a real incident: a bulk deletion put a gone test file into
+    ``git diff --diff-filter=ACMRD`` output (``D`` is in the filter on purpose,
+    see the next test), and that path used to be handed straight to pytest as
+    a literal target. pytest then exits 4 ("file or directory not found")
+    before a single test runs -- not even the surviving tests execute.
+
+    A deleted test file has nothing left to select: it must be dropped, not
+    substituted with anything.
+    """
+    ghost_test = "tests/test_this_file_was_deleted_in_bulk_cleanup.py"
+    assert not (ROOT / ghost_test).exists()  # sanity: genuinely absent from disk
+
+    selected = affected_python_tests([ghost_test])
+
+    assert ghost_test not in selected
+
+
+def test_deleted_source_file_still_selects_its_dependents() -> None:
+    """The other half of the same fix: deleting *app* code (as opposed to a
+    test) must still surface the tests that import it, because deleting
+    source is exactly what breaks imports elsewhere. ``affected_python_tests``
+    resolves module dependents by import scanning, not by checking whether
+    the changed app path still exists on disk -- so a path that never existed
+    stands in fine for "just deleted" here.
+    """
+    selected = affected_python_tests([
+        "tests/test_a_bulk_deleted_test_file.py",  # deleted test: must drop out
+        "app/media_exec/run_job.py",  # deleted source: dependents must survive
+    ])
+
+    assert "tests/test_a_bulk_deleted_test_file.py" not in selected
+    assert "tests/test_media_pipeline_v2.py" in selected
+    assert "tests/test_media_job_recovery.py" in selected
+
+
+def test_quick_commands_pytest_target_list_is_collectible() -> None:
+    """End-to-end proof, not just unit-level: the exact pytest command line
+    ``_quick_commands`` would hand to ``subprocess.run`` in the real deletion
+    scenario must not exit 4. ``--collect-only`` keeps this fast while still
+    exercising real pytest argument parsing against the real filesystem,
+    which is where the original bug actually bit (a unit test of the
+    selection logic alone would not have caught the crash).
+    """
+    paths = [
+        "tests/test_yet_another_bulk_deleted_test_file.py",
+        "app/media_exec/run_job.py",
+    ]
+    commands = _quick_commands(paths)
+    pytest_commands = [command for command, _cwd in commands if "pytest" in command]
+    assert len(pytest_commands) == 1
+    command = pytest_commands[0]
+    assert "tests/test_yet_another_bulk_deleted_test_file.py" not in command
+
+    result = subprocess.run(
+        [*command, "--collect-only"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_isolated_environment_removes_runtime_provider_access(

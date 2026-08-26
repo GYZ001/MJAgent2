@@ -1237,7 +1237,7 @@ async def _screenplay_task(
     *,
     preflight_result: dict | None = None,
 ) -> dict | None:
-    """轻量分集准备包生成（screenplay 契约 6.0.0，episode_prep_pack）。
+    """轻量分集映射包生成（screenplay 契约 6.0.0，episode_prep_pack）。
 
     替代原先的蓝图→场次分片→编译→修复回路（休眠保留于
     app/production/screenplay_repair.py 等，未从本调用路径引用）：资源发现/

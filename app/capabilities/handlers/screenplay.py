@@ -61,7 +61,7 @@ async def generate(args: I.ScreenplayGenerateInput) -> CommandResult:
         return outcome
     run_id = outcome.get("run_id")
     return succeeded(
-        "分集准备包生成已启动（事件链抽取 → 覆盖/资产确定性核对 → 原子发布，screenplay 契约 6.0.0）",
+        "分集映射包生成已启动（事件链抽取 → 覆盖/资产确定性核对 → 原子发布，screenplay 契约 6.0.0）",
         data=outcome,
         run_id=run_id,
         resource_uris=[f"manju://runs/{run_id}"] if run_id else [],

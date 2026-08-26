@@ -34,10 +34,8 @@ from app.schemas import (
 from app.scene_contract import same_scene, scene_time_of
 from app.spoken_contract import (
     RULE_SPOKEN_CAPACITY,
-    build_timeline_from_segments,
     capacity_issue,
     effective_spoken_segments,
-    segments_from_dialogues,
     spoken_char_total,
     spoken_speakers,
     synchronize_spoken_contract,
@@ -805,13 +803,6 @@ def action_capacity_errors(
     return []
 
 
-def speech_capacity_budget(duration_s: int, *, lead_in: float = 0.3, lead_out: float = 0.3,
-                           action_reserve: float = 0.5) -> float:
-    """可用说话时长（秒）：镜头时长减去起音/收音/必要动作占用。"""
-    duration = float(min(max(int(duration_s), config.VIDEO_DURATION_MIN_S), config.VIDEO_DURATION_MAX_S))
-    return max(0.5, duration - lead_in - lead_out - action_reserve)
-
-
 def spoken_chars_from_shot(shot: Shot) -> int:
     """本镜真实台词纯文字字数（不计标点、不计旁白）。
 
@@ -893,17 +884,6 @@ def migrate_shot_id_spaces(shot: Shot) -> list[str]:
         shot.legacy_unvalidated = True
         actions.append(f"moved_story_event_id_{beat_id}_to_spine_beat_ids")
     return actions
-
-
-def build_audio_timeline_from_legacy(shot: Shot, voice_bible: list[VoiceCanonical] | None = None
-                                     ) -> list[AudioTimelineItem]:
-    """从 dialogues 推导音频时间线（产品禁止旁白，不再写入 narration 轨）。"""
-    if shot.audio_timeline:
-        # 历史脏数据：丢掉 narration 轨，只保留真实台词与环境声
-        return [item for item in shot.audio_timeline if item.type != "narration"]
-    return build_timeline_from_segments(
-        shot, segments_from_dialogues(shot, voice_bible), voice_bible
-    )
 
 
 def ensure_audio_timeline(shot: Shot, voice_bible: list[VoiceCanonical] | None = None) -> None:
@@ -1560,17 +1540,6 @@ def preflight_seedance_gates(
     return errors
 
 
-def mark_legacy_unvalidated(shot: Shot) -> None:
-    missing = not (
-        (shot.state_in or shot.first_frame_desc)
-        and (shot.state_out or shot.last_frame_desc)
-        and (shot.continuity_mode in CONTINUITY_MODES)
-        and (shot.audio_timeline or shot.dialogues is not None)
-        and (shot.story_event_id or shot.new_information_ids or shot.shot_contribution)
-    )
-    shot.legacy_unvalidated = bool(missing)
-
-
 def shot_contract_dict(shot: Shot) -> dict[str, Any]:
     """持久化到 shots.shot_contract_json 的生产契约字段。"""
     required = None
@@ -1746,65 +1715,6 @@ def apply_shot_contract(shot: Shot, payload: dict[str, Any] | str | None) -> Sho
         segment = data["storyboard_pack_segment"]
         shot.storyboard_pack_segment = dict(segment) if segment else None
     return shot
-
-
-def ledger_context_for_shot(
-    screenplay: EpisodeScreenplay,
-    completed_shots: list[Shot],
-    current_info_ids: list[str] | None = None,
-) -> dict[str, list[Any]]:
-    """已交付 / 当前交付 / 待交付三栏，同时提供稳定 ID 与中文语义。"""
-    ledger = list(screenplay.information_ledger or [])
-    delivered: list[str] = []
-    for shot in completed_shots:
-        for info_id in shot.new_information_ids or []:
-            if info_id not in delivered:
-                delivered.append(info_id)
-    current = list(current_info_ids or [])
-    pending = [
-        item.info_id for item in ledger
-        if item.info_id not in delivered and item.info_id not in current
-    ]
-    ledger_by_id = {item.info_id: item for item in ledger}
-    delivered_items = []
-    for info_id in delivered:
-        item = ledger_by_id.get(info_id)
-        if item and (item.content or "").strip():
-            delivered_items.append({"info_id": info_id, "content": item.content.strip()})
-            continue
-        source_shot = next(
-            (shot for shot in completed_shots if info_id in (shot.new_information_ids or [])),
-            None,
-        )
-        if source_shot:
-            match = next((x for x in information_items_for_shot(source_shot, screenplay)
-                          if x["info_id"] == info_id), None)
-            if match:
-                delivered_items.append({"info_id": info_id, "content": match["content"]})
-    current_items = [
-        {"info_id": info_id, "content": ledger_by_id[info_id].content}
-        for info_id in current if info_id in ledger_by_id
-    ]
-    pending_items = [
-        {"info_id": item.info_id, "content": item.content}
-        for item in ledger if item.info_id in pending
-    ]
-    do_not_repeat = list(dict.fromkeys(
-        item["content"] for item in delivered_items
-        if item["content"] and not (
-            ledger_by_id.get(item["info_id"])
-            and ledger_by_id[item["info_id"]].reinforcement_allowed
-        )
-    ))
-    return {
-        "delivered_ids": delivered,
-        "current_ids": current,
-        "pending_ids": pending,
-        "delivered_items": delivered_items,
-        "current_items": current_items,
-        "pending_items": pending_items,
-        "do_not_repeat": do_not_repeat,
-    }
 
 
 def adaptation_hook_errors(screenplay: EpisodeScreenplay, episode: dict | None = None) -> list[str]:

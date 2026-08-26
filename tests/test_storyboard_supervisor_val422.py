@@ -5,10 +5,6 @@ from app.evaluations.issues import issue_code, issues_from_messages
 from app.harness.types import IssueSeverity
 from app.loops.base import AgentLoopPolicy
 from app.schemas import Dialogue, PlotSpine, PlotSpineBeat, EpisodeScreenplay, Shot, Storyboard, StoryboardOutline, StoryboardOutlineShot
-from app.hiagent import ProviderError
-from app.storyboard_supervisor import (
-    _is_retryable_external_error,
-)
 from app.spoken_contract import spoken_text_of
 from app.validators import (
     key_line_catalog,
@@ -162,18 +158,6 @@ def test_issue_code_dialogue_context_break_is_key_line_failure():
 
 def test_issue_code_does_not_infer_from_prose() -> None:
     assert issue_code("主线对白上下文断裂：角色突然冒出一句回应") == "BUSINESS_RULE_FAILED"
-
-
-def test_retryable_provider_failure_survives_orchestration_wrapping():
-    provider_error = ProviderError("TPM limit exceeded", retryable=True)
-    wrapped = RuntimeError("outline failed")
-    wrapped.__cause__ = provider_error
-
-    assert _is_retryable_external_error(provider_error)
-    assert _is_retryable_external_error(wrapped)
-    assert not _is_retryable_external_error(
-        ProviderError("invalid credentials", retryable=False)
-    )
 
 
 def test_warning_candidate_policy_rejects_blocker_concept():

@@ -26,12 +26,29 @@ REQUIRED = {
     "app/validators.py": [
         "shot.duration_s not in config.ALLOWED_DURATIONS",
         "spoken_chars_from_shot(shot)",
-    ],
-    "app/stages.py": [
-        "镜头数量不设软上限或硬上限",
-        "generate_storyboard_scene_pack",
+        # camera_motivation/context_requirement_ids used to be guarded via
+        # app/stages.py's narrative_plan-driven per-shot generation contract
+        # (generate_storyboard_outline/_next_shot). That pipeline was deleted
+        # once storyboard 2.0.0 (app/production/storyboard_pack.py) became
+        # the only path prep_pack episodes ever reach -- see
+        # app/storyboard_supervisor.py::run_storyboard_supervisor's
+        # unconditional early return. Both fields still gate real, live
+        # narrative-authority shot validation here, so the surface check
+        # moved with them instead of just disappearing.
         "camera_motivation",
         "context_requirement_ids",
+    ],
+    "app/production/storyboard_pack.py": [
+        # storyboard 2.0.0's generation entry point, replacing the deleted
+        # app/stages.py::generate_storyboard_scene_pack for prep_pack
+        # episodes (docs/STORYBOARD_PROMPT_IR_DESIGN.md).
+        "async def generate_storyboard_pack(",
+        # Segment count is decided by the model's own beat/narrative-unit
+        # judgement, not mechanically capped or divided -- the 2.0.0
+        # equivalent of the old "镜头数量不设软上限或硬上限" invariant
+        # (also guarded in English as "shot count has no product ceiling"
+        # in app/harness/contracts.py's storyboard contract).
+        "段落数量由节拍的叙事单元数量决定，不是按原文段数或时长机械平分",
     ],
     "docs/PROMPT_SPEC.md": [
         "确定性剧集映射（非 Agent 阶段）",

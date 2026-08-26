@@ -1,6 +1,6 @@
 from app.schemas import Bible, Character, Dialogue, EpisodeScreenplay, Shot, Storyboard, World
 from app.textmatch import longest_run_ratio
-from app.validators import (_contiguous_scene_move, adjacent_spoken_repeat_errors,
+from app.validators import (adjacent_spoken_repeat_errors,
                             key_line_catalog, key_line_order_errors, normalize_action_desc,
                             validate_storyboard,
                             storyboard_shot_count_range,
@@ -34,16 +34,6 @@ def _bible() -> Bible:
         ],
         world=World(era="玄幻古代", genre="玄幻", visual_style_canonical="国风玄幻漫剧厚涂风，暖冷对比光"),
     )
-
-
-def test_contiguous_sublocation_move_is_explained() -> None:
-    assert _contiguous_scene_move("日，萧家测验广场", "日，萧家测验广场边缘")
-    assert _contiguous_scene_move("日，萧家测验广场边缘", "日，萧家测验广场外小路")
-
-
-def test_distinct_scene_jump_is_not_treated_as_contiguous() -> None:
-    assert not _contiguous_scene_move("夜，地下室", "日，海边沙滩")
-    assert not _contiguous_scene_move("夜，城南客栈", "夜，城南码头")
 
 
 def test_storyboard_no_false_missing_transition_for_walk_to_adjacent_area() -> None:

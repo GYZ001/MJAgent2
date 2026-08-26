@@ -86,20 +86,7 @@ from app.renderability import (
 )
 
 
-# 字数约束设计原则（2026-06-15 v12：旁白改为「选填且少用」；2026-07-25 Renderability First）：
-# ① 叙事主力改为【台词 + 可见画面动作】；旁白(narration)默认留空，只在画面与台词都
-#    无法传达关键信息时（较大时间跳跃/必要内心独白/隐藏因果）才写一句短旁白。
-#    因此取消旁白下限校验、取消「纯画面空镜必须加旁白」的硬性要求。
-# ② 旁白仍保留上限校验：若写，必须短到最短 5s 镜头也能念完，避免又退回到旁白堆砌。
-# ③ action_desc 只要求单主动作可读（硬下限约 18 字，目标 25~55），禁止堆微细节。
-NARRATION_TARGET_CHARS = 12
-NARRATION_HARD_MAX = 14
-# 兼容旧 import：目标字数取区间中位偏下，prompt 引导用
-ACTION_DESC_MIN_CHARS = ACTION_DESC_TARGET_MIN
 SOURCE_EXCERPT_MIN_CHARS = 8
-# 已废除「至少 2 个动作片段」硬门槛；保留符号供旧测试 import 时不崩，值为 0 表示不校验。
-VIDEO_SEGMENT_MIN_BEATS = 0
-SCENE_SETTING_MAX_CHARS = 18        # 仅作 prompt 建议值，不再参与校验
 
 
 def _named_character_is_explicitly_offscreen(name: str, text: str) -> bool:
@@ -133,14 +120,6 @@ def storyboard_shot_count_range(target_duration_s: int) -> tuple[int, int]:
     """镜头数由剧情交付决定；上界仅为旧调用方需要的无界整数哨兵。"""
     _ = target_duration_s
     return 1, sys.maxsize
-
-
-def _voiced_shot_count(shots: list[Shot]) -> int:
-    return sum(1 for shot in shots if (shot.narration or "").strip() or shot.dialogues)
-
-
-def _soundtrack_text(shot: Shot) -> str:
-    return "".join([shot.narration or "", *(d.line for d in shot.dialogues)])
 
 
 def _normalized_spoken_text(text: str | None) -> str:
@@ -192,28 +171,6 @@ def _too_similar(a: str, b: str) -> bool:
     if a == b:
         return True
     return difflib.SequenceMatcher(None, a, b).ratio() >= 0.85
-
-
-def _scene_location(scene: str) -> str:
-    """兼容旧的「时间，地点」字段；新流程传入的就是 scene_name。"""
-    return split_legacy_scene_setting(scene)[1]
-
-
-def _contiguous_scene_move(prev_scene: str, scene: str) -> bool:
-    """相邻两镜是否为同一片连续空间内的子区域移动（如 广场→广场边缘→广场外小路）。
-    主地点相同、只是换到相邻子区域时，人物走过去本身即承接，无需额外的时间跳跃说明——
-    模型常把一片连续场地切成多个子标签（preflight 已劝阻但仍会发生），不应再因此误判缺少承接。"""
-    a, b = _scene_location(prev_scene), _scene_location(scene)
-    if not a or not b:
-        return False
-    if a in b or b in a:
-        return True
-    common = 0
-    for ca, cb in zip(a, b):
-        if ca != cb:
-            break
-        common += 1
-    return common >= 3
 
 
 def _scene_time_key(scene_time: str) -> str:
@@ -1018,16 +975,6 @@ def canonicalize_storyboard_scene(
     return matched
 
 
-def resolve_screenplay_scene_names(
-    screenplay: EpisodeScreenplay | None,
-    bible: Bible,
-) -> list[str]:
-    """Return unique allowed scene names in first screenplay appearance order."""
-    return list(dict.fromkeys(
-        resolve_screenplay_scene_sequence(screenplay, bible)
-    ))
-
-
 def resolve_screenplay_scene_sequence(
     screenplay: EpisodeScreenplay | None,
     bible: Bible,
@@ -1106,38 +1053,6 @@ def validate_storyboard_outline_scene_alignment(
             )
             continue
         search_from = matched_index + 1
-    return errors
-
-
-def validate_storyboard_shot_scene_alignment(
-    shot: Shot,
-    screenplay: EpisodeScreenplay | None,
-    bible: Bible,
-    *,
-    expected_scene_name: str = "",
-    expected_scene_setting: str = "",
-) -> list[str]:
-    """逐镜硬门禁：当前镜既要属于本集剧本，也要服从本镜大纲指定场景。"""
-    errors = _screenplay_scene_resolution_errors(screenplay, bible)
-    if errors:
-        return errors
-    actual = canonicalize_storyboard_scene(shot, bible)
-    allowed = resolve_screenplay_scene_names(screenplay, bible)
-    if allowed and actual not in set(allowed):
-        errors.append(
-            f"第 {shot.shot_no} 镜 scene_name「{shot.scene_name or shot.scene_setting}」与本集剧本不一致；"
-            f"只能使用：{'、'.join(allowed)}"
-        )
-    expected_label = expected_scene_name or expected_scene_setting
-    expected = (
-        match_scene_name(expected_label, bible.scenes)
-        if expected_label else None
-    )
-    if expected and actual != expected:
-        errors.append(
-            f"第 {shot.shot_no} 镜 scene_name「{shot.scene_name or shot.scene_setting}」偏离本镜大纲；"
-            f"本镜必须使用「{expected}」"
-        )
     return errors
 
 
@@ -1459,33 +1374,6 @@ def key_line_order_errors(
         f"{subject}打乱了主线对白顺序：{shown}；key_lines 是按剧情发生顺序排列的对白链，"
         "提问/刺激必须先于回答/安慰/反驳，禁止只保留一组无序金句"
     ]
-
-
-def _source_bible_dialogues(source_text: str | None, bible: Bible) -> list[str]:
-    """Extract source dialogue lines spoken by characters already present in the bible."""
-    if not source_text:
-        return []
-    bible_names = [c.name.strip() for c in bible.characters if c.name and c.name.strip()]
-    if not bible_names:
-        return []
-    names = "|".join(re.escape(name) for name in sorted(bible_names, key=len, reverse=True))
-    prefix_re = re.compile(
-        rf"^\s*({names})(?:[（(][^）)]{{1,12}}[）)])?\s*[:：]\s*(\S.+?)\s*$",
-        flags=re.MULTILINE,
-    )
-    found: list[str] = []
-    seen: set[str] = set()
-    for match in prefix_re.finditer(source_text):
-        speaker = match.group(1).strip()
-        line = match.group(2).strip().strip("“”\"'")
-        if len(_condense(line)) < 2:
-            continue
-        item = f"{speaker}：{line}"
-        key = _condense(item)
-        if key not in seen:
-            seen.add(key)
-            found.append(item)
-    return found
 
 
 _condense = textmatch.condense
@@ -2056,51 +1944,6 @@ def validate_dialogue_chains(
 # 会拉低覆盖率，故只在"整件事几乎零命中"时才算漏，容忍同义改写，专拦真正被整段略过的事实。
 COVERS_ATOM_ABSENT_RUN = 0.3
 COVERS_ATOM_ABSENT_COVERAGE = 0.25
-def defer_establishing_covers(outline: StoryboardOutline, episode_no: int) -> list[dict]:
-    """减重试 #2：第一集第 1 镜被 _first_shot_rule 强制为「开场建场镜」——只交代世界观/主角处境、
-    动作克制、不抛核心冲突。但大纲常把判决/反转类 covers（如「全场最低」）也派给第 1 镜，于是逐镜
-    阶段陷入两条硬指令对冲：照建场写→漏 covers（报「未落实本镜大纲」）；硬塞判决→只能借测验员/
-    围观者开口→characters 圣经校验失败。实测会先漏 covers、再引入圣经外角色，连打两轮修复。
-
-    这里把第 1 镜的 covers 顺延合并到第 2 镜：建场镜不再被要求落实关键内容（brief.covers 清空，
-    模型可专心建场），关键内容仍留在大纲（第 2 镜）里、整集 covers 覆盖校验不会判漏；第 2 镜不受
-    建场约束，可正常把判决拍出来/念出来。只对第一集生效；常规集第 1 镜是 hook 镜、不受建场约束，
-    原样保留。就地修改 outline，返回调整记录供监控日志。"""
-    if int(episode_no or 0) != 1:
-        return []
-    shots = outline.shots
-    if len(shots) < 2:
-        return []
-    first, second = shots[0], shots[1]
-    moved = (first.covers or "").strip()
-    if not moved:
-        return []
-    first.covers = ""
-    existing = (second.covers or "").strip()
-    second.covers = f"{moved}；{existing}" if existing else moved
-    moved_key_lines = list(first.key_line_ids or [])
-    if moved_key_lines:
-        second.key_line_ids = list(dict.fromkeys([
-            *moved_key_lines,
-            *(second.key_line_ids or []),
-        ]))
-        first.key_line_ids = []
-    moved_audio_cast = list(first.audio_cast or [])
-    if moved_audio_cast:
-        second.audio_cast = list(dict.fromkeys([
-            *moved_audio_cast,
-            *(second.audio_cast or []),
-        ]))
-        first.audio_cast = []
-    return [{
-        "shot_no": 1,
-        "deferred_to": 2,
-        "covers": moved[:80],
-        "key_line_ids": moved_key_lines,
-        "audio_cast": moved_audio_cast,
-    }]
-
-
 def _claim_clearly_absent(atom: str, haystack: str) -> bool:
     """这条原子在文本里是否"几乎完全没出现"——主干连续命中和 2-gram 覆盖都低于宽松下限才算缺失。"""
     core = _strip_speaker(atom)
@@ -4689,114 +4532,6 @@ def normalize_outline_spoken_durations(
     return changes
 
 
-def relieve_outline_key_line_capacity_overflow(
-    outline: StoryboardOutline,
-    screenplay: EpisodeScreenplay,
-) -> list[dict]:
-    """把仍超过最长镜头口播容量的 key_line_ids 确定性下移到相邻的后一镜。
-
-    背景（EP6 第六轮，run_d5ce2a4e7a9f，ERR-20260825-8fee67）：
-    ``normalize_outline_spoken_durations`` 只能把 ``duration_s`` 顶到能装下
-    当前分配的最短合法档位；若某镜分配到的 key_line_ids 合计字数本身已超过
-    ``max_speech_chars(config.VIDEO_DURATION_MAX_S)``（原 10s→36 字，A1 时长
-    上限改造后为 15s→54 字），任何
-    duration_s 都装不下，归一化器只能原样放行，交给
-    ``outline_key_line_capacity_errors`` 硬失败。真实案例核实：KL05(29字) 与
-    KL06(15字) 都出自 prep_pack 同一条 74 字原句（projection 层按标点切成的
-    相邻碎片，见 ``screenplay_authority._split_prep_pack_spoken_line`` 及其
-    ``KeyDialogueTurn.source_text``），模型把它们放进同一镜是语义上合理的
-    直觉（本来就是一句话的两段），只是物理上装不下——"一句话的两个碎片分别
-    落在哪一镜"不构成有意义的创作选择，属于代码可以确定性解决的部分。
-
-    处置：把超出容量的**尾部**（时序上更晚的）key_line_ids 移到紧邻的后一镜，
-    直到本镜合计字数回到容量内。边界：
-
-    1. 保序：只移到 ``outline.shots[i + 1]``（严格相邻的后一镜），且插入到该
-       镜已有 key_line_ids **之前**（``[*move, *existing]``）——被移动的台词
-       在剧情时序上早于接收镜原有的台词，不得倒序插入、不得跳镜。
-    2. 同说话人：若移动后接收镜会出现 >1 个非空说话人（与
-       ``outline_key_line_speaker_errors`` 同一判据：空说话人不计入），拒绝
-       这次移动，原样保留在本镜——留给下游校验器报真错误，不强行安放。
-    3. 同场次：相邻镜 ``scene_id`` 为空或与本镜不同一律拒绝移动（数据不确定
-       时不得假装可以安放；台词也不能跨物理场次瞬移）。
-    4. 不新建镜头、不丢弃、不截断台词——只搬移已存在的 key_line_id 引用；
-       ``duration_s`` 由调用方随后复用 ``normalize_outline_spoken_durations``
-       重算，本函数不重复实现时长归一化。
-    5. 可观测：返回值的每条记录含 from_shot_no/to_shot_no/key_line_id/reason，
-       供调用方写入 provider_call 审计轨迹，机制与
-       ``storyboard_outline_spoken_duration`` 相同。
-    6. 不放宽容量公式：判据固定用
-       ``max_speech_chars(config.VIDEO_DURATION_MAX_S)``，不读、不改任何镜的
-       当前 duration_s 上限。
-
-    终止性：本函数按 shot_no 升序对 ``outline.shots`` 做**单趟**线性扫描、
-    原地更新；镜头列表本身不增不减。当扫描到下标 i 时，任何原本该移入
-    shots[i] 的溢出都已在更早的下标（< i）处理完毕（因为只会移到 i+1，且
-    循环严格按下标递增前进），因此级联（本镜溢出移入下一镜后，下一镜自身又
-    因此超容）会在同一趟扫描内被自然处理，不需要多趟收敛。每镜最多被处理
-    一次、只做常数次列表操作，整体是 O(镜数) 且必然终止；到达最后一镜仍超容、
-    或相邻镜说话人/场次不匹配时，直接放弃移动，交由
-    ``outline_key_line_capacity_errors`` 硬失败，不产生任何循环。
-    """
-    catalog = key_line_catalog(screenplay)
-    if not catalog or not outline.shots:
-        return []
-    max_capacity = max_speech_chars(config.VIDEO_DURATION_MAX_S)
-    changes: list[dict] = []
-    shots = outline.shots
-    for i, shot in enumerate(shots):
-        kids = [str(k).strip().upper() for k in (shot.key_line_ids or []) if str(k).strip()]
-        if len(kids) < 2:
-            continue  # 单条超容量是容量公式本身的问题，不是分配问题，不在此处理
-        if any(k not in catalog for k in kids):
-            continue  # 未知 ID 由 outline_key_line_capacity_errors 单独报错，这里不代为处理
-        chars = [content_char_count(_strip_speaker(catalog[k])) for k in kids]
-        total = sum(chars)
-        if total <= max_capacity:
-            continue
-        # 从尾部开始尽量少移：保留能装下的最长前缀。
-        move_from = len(kids)
-        running = total
-        for j in range(len(kids) - 1, -1, -1):
-            if running <= max_capacity:
-                break
-            running -= chars[j]
-            move_from = j
-        move = kids[move_from:]
-        keep = kids[:move_from]
-        if not move or not keep:
-            # 理论上不应发生：每条 key_line 在投影/编译阶段
-            # （_split_prep_pack_spoken_line / _split_spoken_line）已保证
-            # <= max_speech_chars(VIDEO_DURATION_MAX_S)。防御性跳过，交给
-            # outline_key_line_capacity_errors 硬失败，不假装修好。
-            continue
-        if i + 1 >= len(shots):
-            continue  # 已是最后一镜，无处可移，交给硬失败
-        nxt = shots[i + 1]
-        if not shot.scene_id or not nxt.scene_id or shot.scene_id != nxt.scene_id:
-            continue  # 场次未知或不同，交给硬失败，不强行安放
-        existing_next = [
-            str(k).strip().upper() for k in (nxt.key_line_ids or []) if str(k).strip()
-        ]
-        speakers = {
-            _speaker_name(catalog[k])
-            for k in (*move, *existing_next)
-            if k in catalog and _speaker_name(catalog[k])
-        }
-        if len(speakers) > 1:
-            continue  # 说话人不同，交给硬失败
-        shot.key_line_ids = keep
-        nxt.key_line_ids = [*move, *existing_next]
-        for kid in move:
-            changes.append({
-                "from_shot_no": shot.shot_no,
-                "to_shot_no": nxt.shot_no,
-                "key_line_id": kid,
-                "reason": "key_line_capacity_overflow_same_speaker_scene",
-            })
-    return changes
-
-
 def assign_outline_delivery_ids(
     outline: StoryboardOutline, screenplay: EpisodeScreenplay
 ) -> list[dict]:
@@ -5046,20 +4781,6 @@ def _split_outline_text_outside_quotes(
     if part:
         parts.append(part)
     return parts
-
-
-def _outline_quotes_balanced(text: str) -> bool:
-    parts = _split_outline_text_outside_quotes(text, separators="")
-    if not parts:
-        return True
-    raw = str(text or "")
-    return (
-        raw.count("“") == raw.count("”")
-        and raw.count("「") == raw.count("」")
-        and raw.count("『") == raw.count("』")
-        and raw.count('"') % 2 == 0
-        and raw.count("'") % 2 == 0
-    )
 
 
 def normalize_outline_dialogue_ownership(
@@ -6279,53 +6000,6 @@ def _strip_shot_character_contract(shot: Shot, name: str) -> list[str]:
         merged = (shot.action_desc or "").rstrip("。； ")
         shot.action_desc = f"{merged}；{evidence}。" if merged else f"{evidence}。"
     return moved
-
-
-def normalize_dialogue_focus_offscreen_mentions(
-    board: Storyboard,
-    bible: Bible | None,
-) -> list[dict]:
-    """Project pure dialogue closeups to one visible speaker before validation."""
-    bible_names = {character.name for character in bible.characters} if bible else set()
-    changes: list[dict] = []
-    for shot in board.shots:
-        focus = dialogue_focus_subject(shot)
-        if not focus or dialogue_two_shot_required(shot):
-            continue
-        mutated_fields: list[str] = []
-        if shot.characters != [focus]:
-            shot.characters = [focus]
-            mutated_fields.append("characters")
-        if shot.characters_visible != [focus]:
-            shot.characters_visible = [focus]
-            mutated_fields.append("characters_visible")
-        offscreen_names: list[str] = []
-        for name in sorted(bible_names - {focus}, key=len, reverse=True):
-            pattern = re.compile(rf"(?<!画外){re.escape(name)}")
-            name_changed = False
-            for field in (
-                "action_desc", "state_in", "primary_action", "state_out",
-                "first_frame_desc", "last_frame_desc", "spatial_anchor",
-            ):
-                value = getattr(shot, field, None)
-                if (
-                    value
-                    and name in value
-                    and not _named_character_is_explicitly_offscreen(name, value)
-                ):
-                    setattr(shot, field, pattern.sub(f"画外{name}", value))
-                    mutated_fields.append(field)
-                    name_changed = True
-            if name_changed:
-                offscreen_names.append(name)
-        if mutated_fields:
-            changes.append({
-                "shot_no": shot.shot_no,
-                "dialogue_focus": focus,
-                "marked_offscreen": offscreen_names,
-                "fields": list(dict.fromkeys(mutated_fields)),
-            })
-    return changes
 
 
 def normalize_offbible_characters(board: Storyboard, bible: Bible | None) -> list[dict]:

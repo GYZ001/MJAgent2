@@ -11,7 +11,6 @@ from app.schemas import Shot, Storyboard, StoryboardOutline, StoryboardOutlineSh
 from app.storyboard_supervisor import (
     SupervisorCheckpoint,
     _apply_repair,
-    _merge_repair_candidate,
     _outline_changed_window,
 )
 from tests.test_narrative_continuity import (
@@ -370,42 +369,3 @@ def test_open_strategy_applies_its_typed_semantic_operations(
     assert _ids(candidate_outline) == ["SH-1", "SH-2"]
     assert _ids(official_outline) == ["SH-1"]
 
-
-@pytest.mark.parametrize(
-    ("window_start", "old_end", "candidate_ids", "expected_ids"),
-    [
-        (2, 1, ("SH-X",), ("SH-A", "SH-X", "SH-B", "SH-C", "SH-D")),
-        (2, 2, (), ("SH-A", "SH-C", "SH-D")),
-        (2, 3, ("SH-C", "SH-B"), ("SH-A", "SH-C", "SH-B", "SH-D")),
-    ],
-    ids=("insert", "delete", "move"),
-)
-def test_structure_mode_merges_candidate_without_mutating_official_board(
-    window_start: int,
-    old_end: int,
-    candidate_ids: tuple[str, ...],
-    expected_ids: tuple[str, ...],
-) -> None:
-    official = _board("SH-A", "SH-B", "SH-C", "SH-D")
-    official_dump = official.model_dump(mode="json")
-    checkpoint = SupervisorCheckpoint(
-        episode_id="episode-generic",
-        last_repair={
-            "mode": "structure",
-            "window_start": window_start,
-            "structure_old_end": old_end,
-        },
-        repair_candidate_shots=[
-            shot.model_dump(mode="json")
-            for shot in _board(*candidate_ids).shots
-        ],
-    )
-
-    merged = _merge_repair_candidate(official, checkpoint)
-
-    assert _ids(merged) == list(expected_ids)
-    assert [shot.shot_no for shot in merged.shots] == list(
-        range(1, len(expected_ids) + 1)
-    )
-    assert official.model_dump(mode="json") == official_dump
-    assert _ids(official) == ["SH-A", "SH-B", "SH-C", "SH-D"]

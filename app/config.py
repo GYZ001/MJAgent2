@@ -314,11 +314,6 @@ STORYBOARD_SHOT_MAX_TOKENS = max(
     1024, min(int(os.environ.get("STORYBOARD_SHOT_MAX_TOKENS", "8192")), 16384)
 )
 
-# 仅供无 narrative_plan 的历史大纲路径使用；新叙事剧本由本地编译器生成大纲。
-STORYBOARD_OUTLINE_MAX_TOKENS = max(
-    8192, min(int(os.environ.get("STORYBOARD_OUTLINE_MAX_TOKENS", "32768")), 65536)
-)
-
 # 场景画面创作按有界镜头块调用模型，避免长场次重新形成整集大响应。
 STORYBOARD_SCENE_PACK_MAX_SHOTS = max(
     1,

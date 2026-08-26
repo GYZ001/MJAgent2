@@ -122,8 +122,18 @@ def affected_python_tests(paths: list[str]) -> list[str]:
     module_by_file = {path: _module_name(path) for path in python_files}
     known_modules = {module for module in module_by_file.values() if module}
 
+    # ``paths`` comes from a diff filter that includes deletions (see
+    # ``changed_files``), on purpose: a deleted app module must still surface
+    # its now-orphaned test dependents below (imports break at collection
+    # time, so those tests are exactly what should run). A deleted *test*
+    # file is different -- pytest is handed this string as a literal target,
+    # and a target that doesn't exist on disk makes the whole invocation exit
+    # 4 ("file or directory not found") before a single test runs, anywhere.
+    # So test paths are filtered to ones still present; app paths are not.
     changed_test_paths = {
-        path for path in paths if path.startswith("tests/test_") and path.endswith(".py")
+        path
+        for path in paths
+        if path.startswith("tests/test_") and path.endswith(".py") and (ROOT / path).exists()
     }
     changed_app_paths = {
         path for path in paths if path.startswith("app/") and path.endswith(".py")

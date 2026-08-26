@@ -14,7 +14,6 @@ from app.harness.types import EvidenceArtifact, Issue, IssueSeverity
 from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
 from app.orchestration.engine import WorkflowRecorder
 from app.schemas import EpisodeScreenplay
-from app.stages import StoryboardShotDraft
 
 
 class Candidate(BaseModel):
@@ -567,67 +566,6 @@ def test_warning_fallback_keeps_value_issues_and_artifact_from_same_iteration(
     ).fetchall())
     assert len(artifacts) >= 1
     assert artifacts[0]["status"] == "approved"
-
-
-def test_storyboard_plural_shots_gets_targeted_repair_and_singular_contract(
-    monkeypatch,
-) -> None:
-    shot = {
-        "shot_no": 1,
-        "duration_s": 5,
-        "shot_size": "中景",
-        "camera_move": "固定",
-        "scene_setting": "日，庭院",
-        "characters": ["萧炎"],
-        "action_desc": "萧炎站在庭院中央缓缓握紧拳头。",
-        "first_frame_desc": "萧炎站在庭院中央，双手自然垂落。",
-        "last_frame_desc": "同一机位，萧炎握紧拳头，目光变得坚定。",
-        "source_excerpt": "萧炎站在庭院里，沉默地握紧了自己的拳头。",
-        "narration": "",
-        "dialogues": [],
-        "transition": "硬切",
-        "continuity_from_prev": False,
-    }
-    outputs = [
-        json.dumps(
-            {"episode_no": 1, "is_final": False, "shots": [shot, {**shot, "shot_no": 2}]},
-            ensure_ascii=False,
-        ),
-        json.dumps(
-            {"episode_no": 1, "is_final": False, "shot": shot},
-            ensure_ascii=False,
-        ),
-    ]
-    prompts: list[str] = []
-
-    async def fake_chat(messages, **_kwargs):
-        prompts.append(messages[-1]["content"])
-        return outputs[len(prompts) - 1]
-
-    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
-    loop = AgentLoop(
-        stage_key="storyboard_shot_1",
-        contract_key="storyboard",
-        goal="one shot",
-        scope_type="storyboard_checkpoint",
-        scope_id="e1:1",
-        artifact_type="storyboard_shot",
-    )
-    result = asyncio.run(stages._run_with_agent_loop(
-        "分镜脚本",
-        "storyboard",
-        "只生成第一镜",
-        StoryboardShotDraft,
-        lambda _draft: [],
-        loop=loop,
-        repair_output_contract="根对象只能包含单数 shot；禁止 shots 数组。",
-        prefill={"episode_no": 1},
-    ))
-
-    assert result.shot.shot_no == 1
-    assert len(prompts) == 2
-    assert "逐镜合同只允许单数 shot 对象" in prompts[1]
-    assert prompts[1].endswith("根对象只能包含单数 shot；禁止 shots 数组。")
 
 
 def test_repair_loop_can_retain_complete_task_and_candidate(monkeypatch) -> None:

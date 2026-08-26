@@ -38,8 +38,6 @@ from app.validators import (
     validate_storyboard_preserves_key_content,
     validate_storyboard_shot_covers_outline,
 )
-from app.stages import _storyboard_output_contract, _storyboard_preflight_contract
-
 
 def _plan(*, phase_durations: list[float]) -> NarrativeContinuityPlan:
     return NarrativeContinuityPlan(
@@ -259,34 +257,6 @@ def test_authority_role_and_action_are_not_blocked_by_legacy_word_lists() -> Non
 
     assert not any("功能性路人" in error or "角色圣经中" in error for error in errors)
     assert not any("NARRATIVE_CHARACTER_REF_MISSING" in error for error in errors)
-
-
-def test_authority_prompt_contract_uses_relations_not_story_examples() -> None:
-    bible = Bible(
-        characters=[],
-        world=World(era="fictional", genre="fictional", visual_style_canonical="abstract"),
-    )
-    episode = {"episode_no": 2, "target_duration_s": 50}
-    output_contract = _storyboard_output_contract(
-        episode,
-        bible,
-        [5, 6, 7, 8, 9, 10],
-        "",
-        narrative_authority=True,
-    )
-    preflight_contract = _storyboard_preflight_contract(
-        episode,
-        narrative_authority=True,
-    )
-    combined = output_contract + preflight_contract
-
-    assert "temporal_phases" in combined
-    assert "action_phase_ids" in combined
-    assert "capacity_budget" in combined
-    assert "splittable_boundaries" in combined
-    assert "precondition/effects/completion" in combined
-    for story_bound_example in ("石碑", "测验员", "守卫", "触碰", "按压", "走进", "转身", "伸手"):
-        assert story_bound_example not in combined
 
 
 def test_video_preflight_uses_the_supplied_narrative_authority() -> None:

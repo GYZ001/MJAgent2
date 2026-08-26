@@ -28,15 +28,11 @@ from app.schemas import (
     World,
 )
 from app.validators import (
-    defer_establishing_covers,
-    normalize_dialogue_focus_offscreen_mentions,
     outline_key_line_speaker_errors,
     split_outline_on_speaker_changes,
     validate_storyboard,
 )
 from app.video_modes import reference_generation_prompt
-from app.storyboard_supervisor import _is_structural_storyboard_issue
-from app.stages import _filter_partial_storyboard_errors
 
 
 def _bible() -> Bible:
@@ -173,49 +169,6 @@ def test_storyboard_gate_has_no_arbitrary_three_character_limit() -> None:
     )
 
 
-def test_dialogue_focus_normalization_marks_listener_offscreen_before_validation() -> None:
-    shot = _shot(
-        characters=["甲", "乙"],
-        characters_visible=["甲", "乙"],
-        action_desc="甲正对乙站定，以克制语气说出自己的最终决定。",
-        first_frame_desc="甲与乙同处近景，甲看向乙，嘴唇尚未张开。",
-        last_frame_desc="同一机位，甲说完后仍注视乙，神情已经转为坚定。",
-        state_in="甲看向乙，尚未开口。",
-        primary_action="甲向乙说出自己的决定。",
-        state_out="甲说完后等待乙回应。",
-    )
-    board = Storyboard(episode_no=1, shots=[shot])
-
-    assert any("只保留说话人" in error for error in dialogue_framing_errors(shot))
-
-    changes = normalize_dialogue_focus_offscreen_mentions(board, _bible())
-
-    assert shot.characters == ["甲"]
-    assert shot.characters_visible == ["甲"]
-    assert "画外乙" in shot.action_desc
-    assert "画外乙" in shot.first_frame_desc
-    assert "画外乙" in shot.last_frame_desc
-    assert changes == [{
-        "shot_no": 2,
-        "dialogue_focus": "甲",
-        "marked_offscreen": ["乙"],
-        "fields": [
-            "characters",
-            "characters_visible",
-            "action_desc",
-            "state_in",
-            "primary_action",
-            "state_out",
-            "first_frame_desc",
-            "last_frame_desc",
-        ],
-    }]
-
-    errors = validate_storyboard(board, _bible(), target_duration_s=40)
-    assert not any("只保留说话人" in error for error in errors)
-    assert not any("单人对白近景" in error for error in errors)
-
-
 def test_two_visible_speakers_must_split_into_reverse_shots() -> None:
     shot = _shot(
         characters=["甲", "乙"],
@@ -240,7 +193,6 @@ def test_dialogue_framing_issue_routes_to_current_shot_repair() -> None:
     )
 
     assert issue_code(message) == "DIALOGUE_FRAMING_INVALID"
-    assert _is_structural_storyboard_issue("quality") is False
     plan = route_issues(
         [message],
         validated_prefix_end=5,
@@ -294,22 +246,6 @@ def test_storyboard_issue_localization_does_not_prefix_match_shot_numbers() -> N
 
     assert _storyboard_issue_targets_shot(message, index=9, shot_no=10) is True
     assert _storyboard_issue_targets_shot(message, index=0, shot_no=1) is False
-
-
-def test_partial_filter_drops_prior_shot_no_errors() -> None:
-    errors = [
-        "shot_no=5 是单人对白镜头，shot_size 应为近景或特写",
-        "[SHOT_SPOKEN_TEXT_CAPACITY_EXCEEDED] SH013(shot_no=13) "
-        "口播/屏幕文字最少需要 1.100s",
-        "shot_no=16 是单人对白镜头，camera_move 应为固定或推近",
-        "shots[15](shot_no=16).action_desc 缺少当前角色名",
-    ]
-
-    assert _filter_partial_storyboard_errors(
-        errors,
-        current_index=15,
-        current_shot_no=16,
-    ) == errors[2:]
 
 
 def test_typed_two_shot_contract_allows_exactly_two_people() -> None:
@@ -601,40 +537,6 @@ def test_outline_keeps_required_two_person_contact() -> None:
     assert events == []
     assert outline.shots[0].characters_visible == ["甲", "乙"]
     assert outline.shots[0].audio_cast == ["甲"]
-
-
-def test_first_episode_establishing_shot_defers_dialogue_ids_and_cast() -> None:
-    outline = StoryboardOutline(
-        episode_no=1,
-        shots=[
-            StoryboardOutlineShot(
-                shot_no=1,
-                scene_setting="日，议事厅",
-                beat="先建立议事厅与人物位置",
-                covers="甲：你留下。",
-                key_line_ids=["KL01"],
-                audio_cast=["甲"],
-            ),
-            StoryboardOutlineShot(
-                shot_no=2,
-                scene_setting="日，议事厅",
-                beat="切入甲的单人对白近景",
-                covers="甲抬眼看向画外",
-                key_line_ids=[],
-                audio_cast=[],
-            ),
-        ],
-    )
-
-    changes = defer_establishing_covers(outline, 1)
-
-    assert changes
-    assert outline.shots[0].covers == ""
-    assert outline.shots[0].key_line_ids == []
-    assert outline.shots[0].audio_cast == []
-    assert outline.shots[1].key_line_ids == ["KL01"]
-    assert outline.shots[1].audio_cast == ["甲"]
-    assert "甲：你留下" in outline.shots[1].covers
 
 
 def test_video_and_keyframe_prompts_enforce_speaker_only_closeup() -> None:
