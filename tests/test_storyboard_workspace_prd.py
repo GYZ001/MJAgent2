@@ -23,6 +23,7 @@ from app.storyboard_supervisor import (
     save_checkpoint,
 )
 from app.domain.storyboard_ops import (
+    _assert_storyboard_write_authorized,
     _recorded_storyboard_task,
     _storyboard_has_persisted_work,
     _storyboard_task,
@@ -802,6 +803,155 @@ def test_storyboard_task_does_not_mask_current_failure_with_stale_fallback(
     assert episode["status"] == "scripted"
     assert "本轮真实权威链异常" in episode["script_error"]
     assert "旧的场景包降级提示" not in episode["script_error"]
+
+
+def test_storyboard_task_rolls_back_partial_replace_before_recording_failure(
+    storyboard_db,
+    monkeypatch,
+):
+    """回归锁：「重新生成」中途失败不能把旧产出连同已生成的真实视频一起吞掉。
+
+    app.production.storyboard_pack.persist_storyboard_pack 先 ``DELETE FROM
+    shots WHERE episode_id=?``（ON DELETE CASCADE 级联删掉 shot_versions——
+    已经生成好的真实视频记录）再逐段 INSERT 新 shots，整段过程故意不提交，只
+    想在成功写完全部新段落后一次性 conn.commit()，以此做到「要么整批换成
+    新的、要么旧的原封不动」。这里复现的正是它真实的失败形状：调用方（此处
+    monkeypatch 的 run_storyboard_supervisor）在 _storyboard_task 的同一个
+    asyncio task 里拿到与 _storyboard_task 完全相同的 db.get_conn() 缓存连接
+    （app/db.py 按 asyncio.current_task() 缓存连接，同一个 task 内的所有
+    get_conn() 调用返回同一个对象），DELETE 旧行、INSERT 一行新的、不提交
+    就抛异常——这才是同一个未提交事务，不是两个独立连接各写各的。
+
+    _storyboard_task 的失败处理分支（app/domain/storyboard_ops.py）此前在这
+    类失败后无条件 conn.commit()，会把这个还没走到 persist_storyboard_pack
+    自己那次 commit 的半成品事务一起提交下去。修复后必须先 conn.rollback()
+    再记录失败状态：旧行原封不动，新插入的半成品行必须完全不可见。
+    """
+    screenplay = EpisodeScreenplay.model_validate_json(storyboard_db.execute(
+        "SELECT screenplay_json FROM episodes WHERE id='e1'"
+    ).fetchone()["screenplay_json"])
+
+    monkeypatch.setattr(
+        "app.production.screenplay_authority.resolve_downstream_screenplay",
+        lambda *_args, **_kwargs: type("ScreenplayContext", (), {
+            "screenplay": screenplay,
+            "narrative_authority_required": False,
+        })(),
+    )
+    monkeypatch.setattr(
+        task_registry,
+        "active",
+        lambda kind, _episode_id: kind == "storyboard_assets",
+    )
+
+    # 给 s1 挂一条「已经生成好的真实视频」版本：这是本回归要保护的东西——
+    # DELETE FROM shots 是 ON DELETE CASCADE，级联会把它也删掉。
+    storyboard_db.execute(
+        "INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,"
+        "status,video_path,created_at) VALUES('v-real','s1',1,'p','idem-1',"
+        "'succeeded','/data/videos/s1-v1.mp4',?)",
+        (db.now(),),
+    )
+    storyboard_db.commit()
+
+    before = [
+        dict(row) for row in storyboard_db.execute(
+            "SELECT id, shot_no FROM shots WHERE episode_id='e1' ORDER BY shot_no",
+        ).fetchall()
+    ]
+    assert before, "fixture 必须先有旧产出（s1），否则测不出「旧的没了」"
+    before_versions = storyboard_db.execute(
+        "SELECT COUNT(*) c FROM shot_versions WHERE shot_id IN "
+        "(SELECT id FROM shots WHERE episode_id='e1')"
+    ).fetchone()["c"]
+    assert before_versions == 1, "真实视频版本必须先落库，才能验证回滚保住了它"
+
+    async def failing_supervisor(episode_id, **_kwargs):
+        # 拿到与 _storyboard_task 同一个 task 缓存连接 -- 复现
+        # persist_storyboard_pack 真实的「同一未提交事务内 DELETE+INSERT」。
+        same_task_conn = db.get_conn()
+        assert same_task_conn is not storyboard_db, (
+            "fixture 连接与 task 内连接必须不是同一个对象，"
+            "否则没有测出未提交事务的隔离性"
+        )
+        same_task_conn.execute("DELETE FROM shots WHERE episode_id=?", (episode_id,))
+        same_task_conn.execute(
+            "INSERT INTO shots(id,episode_id,shot_no,duration_s,shot_size,camera_move,"
+            "scene_setting,characters,action_desc,first_frame_desc,last_frame_desc,"
+            "source_excerpt,narration,dialogues,transition,continuity_from_prev,"
+            "shot_contract_json) VALUES('s-partial-new',?,1,15,'','','','[]','','','','',"
+            "'','[]','硬切',0,'{}')",
+            (episode_id,),
+        )
+        # 不提交：模拟「新产出还没写完就失败」的中途状态。
+        raise RuntimeError("模拟第 2 段生成失败，第 1 段已经 INSERT 但整批还没提交")
+
+    monkeypatch.setattr(
+        "app.storyboard_supervisor.run_storyboard_supervisor",
+        failing_supervisor,
+    )
+
+    with pytest.raises(RuntimeError, match="模拟第 2 段生成失败"):
+        asyncio.run(_storyboard_task("e1", resume=False))
+
+    after = [
+        dict(row) for row in storyboard_db.execute(
+            "SELECT id, shot_no FROM shots WHERE episode_id='e1' ORDER BY shot_no",
+        ).fetchall()
+    ]
+    assert after == before, "旧 shots 必须原封不动；未提交的半成品替换必须被回滚"
+    after_versions = storyboard_db.execute(
+        "SELECT COUNT(*) c FROM shot_versions WHERE shot_id IN "
+        "(SELECT id FROM shots WHERE episode_id='e1')"
+    ).fetchone()["c"]
+    assert after_versions == before_versions, "旧 shot_versions（已生成的真实视频）不能被级联清空"
+
+    episode = storyboard_db.execute(
+        "SELECT status,script_error FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert episode["status"] == "scripted"
+    assert "模拟第 2 段生成失败" in episode["script_error"]
+
+
+def test_write_guard_rejection_rolls_back_pending_write_before_logging(storyboard_db):
+    """回归锁：结构编辑事务内，_assert_storyboard_write_authorized 的守卫失败
+    不能把同一未提交事务里更早的写入一起提交掉。
+
+    真实复现路径：app.domain.storyboard_ops._apply_storyboard_structure_transaction
+    显式 ``conn.execute("BEGIN IMMEDIATE")`` 后，第一步是
+    ``UPDATE shots SET shot_no=-shot_no WHERE episode_id=?``（结构编辑的中间状态：
+    先把全部序号取负腾位置，稍后再重新编号），随后才调用 _insert_storyboard_shot
+    → _assert_storyboard_write_authorized 校验上游剧本版本/发布栅栏在这次编辑
+    期间没有变化。若并发的剧本重新发布在此之前已经推进了
+    episodes.screenplay_publish_fence，守卫失败即 ``errors.log_error(None, ...)``
+    + ``raise RuntimeError``；errors.log_error 内部 app.db.insert_error_log 在
+    调用方传入的这同一个连接上无条件 conn.commit()。如果守卫不先自己回滚，这次
+    commit 会把「shot_no 全部取负」这个半成品状态提交进库——等异常传播到
+    apply_storyboard_structure 路由那层 ``except Exception: if conn.in_transaction:
+    conn.rollback()`` 时，事务早已经不在途，这层保护网只是一次空操作。
+    """
+    conn = storyboard_db
+    # 模拟并发剧本重新发布：在这次结构编辑事务开始之前就已经推进并提交。
+    conn.execute("UPDATE episodes SET screenplay_publish_fence=1 WHERE id='e1'")
+    conn.commit()
+
+    # 模拟 _apply_storyboard_structure_transaction 已经显式 BEGIN IMMEDIATE
+    # 并执行了「先把全部 shot_no 取负腾位置」这一步，但还没来得及重新编号或提交。
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("UPDATE shots SET shot_no=-shot_no WHERE episode_id='e1'")
+    assert conn.in_transaction is True
+    pending = conn.execute("SELECT shot_no FROM shots WHERE id='s1'").fetchone()
+    assert pending["shot_no"] == -1, "fixture 必须先证明半成品写入在自己的连接里可见"
+
+    with pytest.raises(RuntimeError, match="分镜写入被拒绝"):
+        _assert_storyboard_write_authorized(conn, "e1", None)
+
+    # 回滚必须先于 log_error 的隐式 commit：shot_no 取负这个半成品状态不能落库。
+    assert conn.in_transaction is False, (
+        "守卫拒绝写入后必须已经回滚，不能把半成品事务悬空或被后续 commit 定型"
+    )
+    after = conn.execute("SELECT shot_no FROM shots WHERE id='s1'").fetchone()
+    assert after["shot_no"] == 1, "shot_no 取负这个半成品状态绝不能被提交进库"
 
 
 @pytest.mark.asyncio

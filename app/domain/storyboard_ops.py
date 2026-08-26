@@ -131,6 +131,22 @@ def _assert_storyboard_write_authorized(
     current = row["screenplay_artifact_id"] or ""
     expected = expected_screenplay_artifact_id or ""
     if row["screenplay_publish_fence"] or (expected and expected != current):
+        # 回滚必须在 errors.log_error() 之前——同一原因见
+        # _storyboard_task 顶层 except 分支上方的大注释：app.db.insert_error_log
+        # 在这同一个 task 缓存连接上落一条 error_logs 行并 conn.commit()，谁先
+        # 调用谁就先把此刻挂起的写入定型。这个守卫函数不止在事务开局被调用——
+        # _insert_storyboard_shot 会在 _apply_storyboard_structure_transaction
+        # 已经显式 BEGIN IMMEDIATE、且已执行过
+        # ``UPDATE shots SET shot_no=-shot_no WHERE episode_id=?``（结构编辑的
+        # 中间步骤：先把全部 shot_no 取负腾位置，稍后再重新编号）之后才调用它。
+        # 如果这里先 log_error 后置守卫失败即抛，实现在 apply_storyboard_structure
+        # 路由处的 ``except Exception: if conn.in_transaction: conn.rollback()``
+        # 保护网会晚一步——commit 已经在这条 log_error 里发生，事务已经不在途，
+        # 外层的 rollback 变成空操作，shot_no 全部取负这个半成品状态就被当成正常
+        # 结果提交进库，后续重新编号/收尾镜设置永远不会补上。回滚只丢弃这次被拒
+        # 写入自己遗留的挂起状态，不影响调用方更早已经各自 commit 过的检查点。
+        if conn.in_transaction:
+            conn.rollback()
         errors.log_error(
             None,
             action="storyboard_stale_run_write_rejected",
@@ -1606,6 +1622,27 @@ async def _storyboard_task(
             new_activation=new_activation,
         )
     except (StageError, Exception) as exc:  # noqa: BLE001
+        # 回滚这次失败尝试自己遗留的未提交写入，必须在任何其他 conn.execute 之前做，
+        # 包括紧接着的 errors.log_error() 调用——app.db.insert_error_log 自己也在
+        # 这同一个 task 缓存连接（app.db.get_conn() 按 asyncio.current_task() 缓存，
+        # 同一个 task 内所有 get_conn() 调用拿到同一个连接对象）上落一条 error_logs
+        # 行并 conn.commit()，如果先调用 log_error 再回滚，回滚已经来不及——error_logs
+        # 那次 commit 会把此刻这个连接上任何未提交的挂起写入一起提交掉，回滚这一步就
+        # 成了马后炮。app.production.storyboard_pack.persist_storyboard_pack 先 DELETE
+        # 本集旧 shots（ON DELETE CASCADE 一并删掉 shot_versions——已经生成好的真实
+        # 视频记录）再逐段 INSERT 新 shots，整段过程故意不提交，只在函数末尾成功写完
+        # 全部段落后 commit 一次，靠"从不中途提交"做到"要么整批换成新的、要么旧的
+        # 原封不动"。这里如果不在最前面先回滚，随后不管是 log_error 的隐式 commit
+        # 还是下面给 episodes 表写状态后的显式 conn.commit()，都会把这个还没走到
+        # persist_storyboard_pack 自己那次 commit 的半成品事务提交下去：旧集已经被
+        # 删，新集只写了一部分（甚至一行都没来得及写），这一集就空了——这正是"重新
+        # 生成"中途失败导致已产出真实视频被连带清空的根因。回滚只丢弃这次失败尝试
+        # 自己产生的未提交写入；本函数在调用 run_storyboard_supervisor 之前的每一步
+        # 都已经在各自的检查点上 conn.commit() 过（例如上面的 status='scripting'
+        # 那次），回滚不会波及那些已经落盘的状态，也不影响下面重新读到的 saved 计数
+        # ——修复后 saved 永远只反映"最后一次真正提交成功"的那份数据。
+        if conn.in_transaction:
+            conn.rollback()
         rec = errors.log_error(exc, action="storyboard_generate", context={"episode_id": episode_id})
         saved = conn.execute("SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)).fetchone()["c"]
         if run_id:
@@ -1651,9 +1688,17 @@ async def _storyboard_task(
                     f"{rec.message}（{rec.code} · {rec.error_id}）"
                 )
             else:
+                # 修复回滚之后，这里的 saved/rows 一定是"最后一次真正提交成功"的
+                # 那份数据，不会再是这次失败尝试留下的半成品——分镜台 2.0.0
+                # （episode_prep_pack）路径的持久化本身就是单事务、一次性全写，
+                # 已经没有"逐镜追加、可从中间补写"的旧管线语义了（那套按镜头
+                # 逐个提交的修复状态机已随 event_chain 驱动的旧分镜管线一起下线，
+                # 见 app/storyboard_supervisor.py run_storyboard_supervisor 的
+                # 说明）。这条提示不再暗示"接着上次断点补写"，只如实说明当前
+                # 保留的是上一次成功持久化的版本，未被本轮失败改动。
                 note = (
-                    f"追加镜生成失败，已保留前 {saved} 个 QA 通过镜头，"
-                    "可人工补写最后一镜、修改后确认，或重新生成分镜。"
+                    f"分镜生成失败，数据库中的 {saved} 个镜头是上一次成功持久化的"
+                    "版本，未被本轮失败改动；可重新生成分镜。"
                     f"本轮失败原因：{rec.message}"
                     f"（{rec.code} · {rec.error_id}）"
                 )

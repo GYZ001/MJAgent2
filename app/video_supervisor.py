@@ -2579,7 +2579,29 @@ def _adopt_ready_candidates(
     *,
     run_id: str | None,
 ) -> int:
-    """正常运行期采用首个技术有效候选；QA 只影响风险展示。"""
+    """正常运行期采用首个技术有效候选；QA 只影响风险展示。
+
+    每处理完一个镜头就立即 ``conn.commit()``，不攒到循环末尾再提交一次。
+    ``reconcile_adopted_revision`` 是显式 ``conn=`` 调用，按契约故意不提
+    交（见 app/video_plan.py 尾部 ``if conn is None: db.commit()``），历史
+    上靠"调用方之后紧接着的 save_checkpoint 恰好在同一根线程上顺带把它提
+    交掉"补上——那只是 threading.local 连接缓存在同步顺序调用下的副作用，
+    不是契约保证；并发补齐把 asyncio.to_thread 派到另一根线程时，
+    save_checkpoint 会拿到全新连接（``in_transaction=False``），只提交它
+    自己那次写入，这里的写入就悬空，或被未来某次不相关提交顺走。
+    按镜头提交而不是整批提交一次，是因为这个函数本来就不是"全部采用成
+    功或都不生效"的单一事务：``select_best_video_candidate`` 对每个镜头
+    的采用（shots.adopted_version_id / shot_versions.adoption_reason /
+    delivery_packages 失效）早已经自成一次独立提交，在 ``reconcile_
+    adopted_revision`` 被调用之前就已经落盘。如果改成攒到循环末尾统一提
+    交一次，一旦后面某个镜头的 ``reconcile_adopted_revision`` 抛出异常，
+    外层 ``run_video_completion_resilient`` 的回滚会把本次循环里此前已经
+    成功处理、且其采用早已独立落盘的镜头的依赖图同步（video_plan_
+    dependencies / shot_video_generation_plans / jobs 的 stale 标记）一并
+    卷入回滚，造成"已采用但依赖图未同步"的新不一致——比现在的悬空提交更
+    糟。按镜头提交把每次失败的影响面收窄到当前镜头自己，不新增跨镜头的
+    原子性假设。
+    """
     adopted = 0
     from app.video_plan import reconcile_adopted_revision
     conn = get_conn()
@@ -2591,6 +2613,7 @@ def _adopt_ready_candidates(
                 entry.adopted_version_id,
                 conn=conn,
             )
+            conn.commit()
             continue
         if not entry.best_version_id:
             continue
@@ -2605,6 +2628,7 @@ def _adopt_ready_candidates(
             entry.adopted_version_id,
             conn=conn,
         )
+        conn.commit()
         entry.fallback_reason = result.get("fallback_reason")
         adopted += 1
         if run_id:
@@ -3002,6 +3026,7 @@ def _reference_asset_scan(episode_id: str) -> tuple[dict[str, Any], dict[str, An
         project_id=episode["project_id"],
         episode_no=int(episode["episode_no"]),
         shots=[(row["id"], board.shots[index]) for index, row in enumerate(rows)],
+        conn=conn,
         bible=bible,
         screenplay=screenplay,
     )
@@ -3994,6 +4019,24 @@ async def reconcile_stale_video_supervisors() -> int:
             )
             recorder.partial(result.outcome or result.phase)
         except Exception as exc:  # noqa: BLE001
+            # 必须在 _mark_failed_closed / recorder.fail 之前回滚，且回滚要放在这
+            # 个 except 块的第一条语句：_deadline_closeout 内部与本函数共用同一
+            # 个 task 缓存连接，它对每个镜头调用
+            # app.evidence.media.select_best_video_candidate 采用最佳候选——那
+            # 个函数先 UPDATE shots.adopted_version_id 与
+            # shot_versions.adoption_reason，再调用
+            # invalidate_episode_delivery_authority 写 delivery_packages，最后才
+            # 一次性 conn.commit()；这几条语句之间没有中间提交点。如果
+            # _deadline_closeout 在这个窗口内抛出异常，这份半途的采用写入就会挂
+            # 在 conn 上。_mark_failed_closed 内部会调用 save_checkpoint，
+            # 它的写入逻辑是「如果 conn 已经在事务中就不再开新事务，直接复用」
+            # （见 app/video_supervisor.py::save_checkpoint），所以它的
+            # conn.commit() 会把上面挂起的半途采用一并提交下去；recorder.fail()
+            # 的 refresh_cost()/transition_run() 同理。回滚只丢弃这次失败尝试自
+            # 己产生的未提交写入，不影响 _deadline_closeout 已经在别处提交过的
+            # 状态（例如它自己那次 conn.commit() 已经落盘的镜头）。
+            if conn.in_transaction:
+                conn.rollback()
             _mark_failed_closed(
                 cp,
                 run_id=recorder.run_id,

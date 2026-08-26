@@ -824,6 +824,21 @@ async def _bible_task(
             conn.commit()
         raise
     except (StageError, Exception) as exc:  # noqa: BLE001
+        # 回滚必须在 errors.record_and_format() 之前（同一根因见
+        # app.domain.storyboard_ops._storyboard_task 顶层 except 上方的大注释：
+        # app.db.insert_error_log 在这同一个 task 缓存连接上落一条 error_logs 行
+        # 并 conn.commit()，谁先调用谁就先把此刻挂起的写入定型）。这条 try 里画风
+        # 变更时会走到 _purge_for_style_change → worker.purge_project_video_
+        # artifacts，后者对全项目逐镜头 DELETE shot_versions/shot_scenes/jobs、
+        # 逐集回退状态，整段过程故意不提交，只在处理完全部镜头后 commit 一次；
+        # 中途任何一步失败（文件 I/O、约束冲突等）都会把尚未提交的部分 DELETE
+        # 留在这个连接上。这里如果先记日志再回滚，日志落库的隐式 commit 会把这份
+        # 半成品（部分镜头的视频记录已删、其余镜头未处理）直接定型进库，且波及的
+        # 是整个项目而不止一集——这正是本文件同类 purge 调用（_refs_task 的
+        # errors.record_and_format 同理）必须先回滚的原因。回滚只丢弃这次失败尝试
+        # 自己产生的未提交写入，不影响更早已经各自 commit 过的检查点。
+        if conn.in_transaction:
+            conn.rollback()
         public = errors.record_and_format(exc, action="bible_generate", context={"project_id": project_id})
         conn.execute("UPDATE projects SET bible_status='failed', bible_error=? WHERE id=?", (public, project_id))
         conn.commit()
@@ -2711,6 +2726,20 @@ async def _refs_task(
             recorder.cancel()
         raise
     except Exception as exc:  # noqa: BLE001
+        # 回滚必须在本 except 块的第一条语句做——不止要早于 errors.record_and_format()，
+        # 还要早于上面这行 recorder.fail(exc)。WorkflowRecorder.fail() 内部调用
+        # app.orchestration.state_machine.transition_run(..., conn=None)，后者
+        # ``db = conn or get_conn()`` 取的是同一个 task 缓存连接，并且在
+        # ``conn is None`` 时自己 db.commit()——跟 app.db.insert_error_log 是完全
+        # 同一类隐式提交，谁先调用谁就先把此刻挂起的写入定型。这条 try 里
+        # ``if not resume: worker.purge_character_video_artifacts(...)`` 对本项目
+        # 命中角色的镜头逐条 DELETE shot_versions/shot_scenes/jobs、回退所属剧集
+        # 状态，整段不提交，只在处理完全部镜头后 conn.commit() 一次；中途失败会把
+        # 未提交的部分 DELETE 留在这个连接上。如果不把回滚提到 recorder.fail(exc)
+        # 之前，这一行自己的隐式 commit 就会先把半成品定型进库——回滚只丢弃这次
+        # 失败尝试自己产生的未提交写入，不影响更早已经各自 commit 过的检查点。
+        if conn.in_transaction:
+            conn.rollback()
         recorder.fail(exc)
         public = errors.record_and_format(exc, action="refs_generate", context={"project_id": project_id})
         conn.execute("UPDATE projects SET refs_status='failed', refs_error=? WHERE id=?",

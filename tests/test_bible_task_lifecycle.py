@@ -161,6 +161,87 @@ def test_bible_completion_preserves_planned_project_status(monkeypatch) -> None:
     assert row["status"] == "planned"
 
 
+def test_bible_task_rolls_back_pending_purge_before_logging_style_change_failure(monkeypatch) -> None:
+    """回归锁：画风变更触发的全项目视频产物清理若中途失败，_bible_task 的顶层
+    异常处理不能把这次失败尝试自己产生的未提交半成品写入一起提交掉。
+
+    真实复现路径：app.domain.bible_ops._bible_task 重谱后发现
+    bible.world.visual_style_canonical 变化，调用 _purge_for_style_change →
+    worker.purge_project_video_artifacts，后者对全项目逐镜头 DELETE
+    shot_versions/shot_scenes/jobs、逐集回退状态，整段过程故意不提交，只在
+    处理完全部镜头后 conn.commit() 一次——中途任何一步失败（文件 I/O、约束
+    冲突等）都会把尚未提交的部分 DELETE 留在这个连接上。_bible_task 的
+    ``except (StageError, Exception)`` 此前直接调用 errors.record_and_format
+    而不先回滚；errors.log_error 内部 app.db.insert_error_log 在同一个连接上
+    无条件 conn.commit()，会把这份半成品定型进库——而且波及的是整个项目的
+    视频产物，不止一集。这里用同一连接上的等价写入直接验证「守卫失败即回滚」
+    这条边界，不依赖完整 shots/shot_versions schema。
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE chapters(project_id TEXT, idx INTEGER)")
+    conn.execute(
+        "CREATE TABLE projects("
+        "id TEXT PRIMARY KEY, bible_json TEXT, bible_version INTEGER DEFAULT 0, "
+        "bible_status TEXT, bible_error TEXT, status TEXT, "
+        "bible_text_provider TEXT NOT NULL DEFAULT '')"
+    )
+    # 模拟真实清理会做的「未提交批量写入」：真实场景是 shot_versions 等表的
+    # DELETE，这里用同一连接上的等价占位表验证事务边界，不引入完整 shots
+    # schema。
+    conn.execute("CREATE TABLE fake_video_artifact(marker TEXT)")
+    conn.execute("INSERT INTO fake_video_artifact(marker) VALUES('pre-existing-real-video')")
+
+    old_bible = Bible(
+        world=World(visual_style_canonical="国风水墨"),
+        characters=[Character(name="萧炎", role="主角", appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩")],
+    )
+    conn.execute(
+        "INSERT INTO projects(id, bible_json, bible_version, bible_status, bible_error, status) "
+        "VALUES('proj_test', ?, 1, 'running', NULL, 'bible_ready')",
+        (old_bible.model_dump_json(),),
+    )
+    conn.commit()
+
+    async def fake_generate_bible(*_args, **_kwargs):
+        return Bible(
+            world=World(visual_style_canonical="赛博朋克"),  # 画风变化，触发 purge 分支
+            characters=[Character(name="萧炎", role="主角", appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩")],
+        )
+
+    purge_calls: list[str] = []
+
+    def fake_purge_for_style_change(project_id, instance):
+        # 复现真实 purge 的失败形状：先在这个连接上做一次未提交的写入
+        # （模拟"部分镜头已经 DELETE"），再中途失败（模拟文件 I/O 报错）。
+        purge_calls.append(project_id)
+        conn.execute("DELETE FROM fake_video_artifact WHERE marker='pre-existing-real-video'")
+        raise OSError("模拟清理旧画风视频文件时中途失败")
+
+    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    monkeypatch.setattr(api, "generate_bible", fake_generate_bible)
+    monkeypatch.setattr(api, "_purge_for_style_change", fake_purge_for_style_change)
+
+    asyncio.run(api._bible_task("proj_test", trigger_full_refs=False))
+
+    assert purge_calls == ["proj_test"], (
+        "本测试要验证的正是 _purge_for_style_change 失败后的回滚时机；"
+        "没有走到这一步说明测试提前在别处失败，结论不成立"
+    )
+    # 回滚必须先于 record_and_format 的隐式 commit：半成品清理痕迹不能落库。
+    assert conn.in_transaction is False
+    remaining = conn.execute(
+        "SELECT COUNT(*) c FROM fake_video_artifact WHERE marker='pre-existing-real-video'"
+    ).fetchone()["c"]
+    assert remaining == 1, "画风变更清理中途失败时，已提交的真实视频记录绝不能被连带清空"
+
+    row = conn.execute("SELECT bible_status, bible_error FROM projects WHERE id='proj_test'").fetchone()
+    assert row["bible_status"] == "failed"
+    # OSError 归类为技术类「媒体处理」错误，前端只看安全提示+错误码（原文脱敏
+    # 进 error_logs），故这里只断言失败态已落库，不断言原始异常文案。
+    assert row["bible_error"]
+
+
 @pytest.mark.asyncio
 async def test_bible_spawn_failure_restores_state_and_keeps_quote(
     tmp_path, monkeypatch,

@@ -125,6 +125,68 @@ def test_screenplay_resume_spawn_failure_restores_previous_state(tmp_path, monke
     assert seen["eligibility"].revision_action == "none"
 
 
+def test_refs_task_rolls_back_pending_purge_before_logging_failure(tmp_path, monkeypatch) -> None:
+    """回归锁：定妆重做后清理已用旧定妆照角色的镜头产物若中途失败，_refs_task
+    的顶层异常处理不能把这次失败尝试自己产生的未提交半成品写入一起提交掉。
+
+    真实复现路径：app.domain.bible_ops._refs_task 在非 resume 模式下调用
+    worker.purge_character_video_artifacts，对命中角色的镜头逐条 DELETE
+    shot_versions/shot_scenes/jobs、回退所属剧集状态，整段过程故意不提交，只
+    在处理完全部镜头后 conn.commit() 一次；中途任何一步失败都会把未提交的
+    部分 DELETE 留在这个连接上。_refs_task 的 ``except Exception`` 此前先调用
+    recorder.fail(exc)——WorkflowRecorder.fail() 内部
+    app.orchestration.state_machine.transition_run(conn=None) 同样会对这同一个
+    task 缓存连接无条件 db.commit()，比随后的 errors.record_and_format 更早
+    触发同一类隐式提交。如果回滚不是这个 except 块的第一条语句（既要早于
+    record_and_format，也要早于 recorder.fail()），半成品清理就会被定型进库。
+    """
+    conn = _fresh_database(tmp_path, monkeypatch)
+    conn.execute("ALTER TABLE projects ADD COLUMN test_purge_marker TEXT")
+    from app.schemas import Bible, Character, World
+
+    bible = Bible(
+        world=World(visual_style_canonical="国风水墨"),
+        characters=[Character(
+            name="萧炎", role="主角",
+            appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩",
+        )],
+    )
+    conn.execute("UPDATE projects SET bible_json=? WHERE id='p1'", (bible.model_dump_json(),))
+    conn.commit()
+
+    async def fake_generate_refs(*_args, **_kwargs):
+        return None
+
+    purge_calls: list[str] = []
+
+    def fake_purge(project_id, names):
+        # 复现真实 purge 的失败形状：先在 _refs_task 所在 task 的缓存连接上做
+        # 一次未提交的写入（模拟"部分镜头已经 DELETE"），再中途失败。
+        purge_calls.append(project_id)
+        same_task_conn = db.get_conn()
+        same_task_conn.execute(
+            "UPDATE projects SET test_purge_marker='half-purged' WHERE id=?", (project_id,)
+        )
+        raise RuntimeError("模拟清理旧定妆视频产物时中途失败")
+
+    monkeypatch.setattr("app.refs.generate_refs", fake_generate_refs)
+    monkeypatch.setattr(worker, "purge_character_video_artifacts", fake_purge)
+
+    asyncio.run(api._refs_task("p1", None, resume=False))
+
+    assert purge_calls == ["p1"], (
+        "本测试要验证的正是 purge_character_video_artifacts 失败后的回滚时机；"
+        "没有走到这一步说明测试提前在别处失败，结论不成立"
+    )
+    row = conn.execute(
+        "SELECT refs_status, test_purge_marker FROM projects WHERE id='p1'"
+    ).fetchone()
+    assert row["refs_status"] == "failed"
+    assert row["test_purge_marker"] is None, (
+        "清理中途失败留下的半成品写入绝不能被提交进库"
+    )
+
+
 def test_reference_spawn_failures_restore_project_state(tmp_path, monkeypatch) -> None:
     conn = _fresh_database(tmp_path, monkeypatch)
     conn.execute(

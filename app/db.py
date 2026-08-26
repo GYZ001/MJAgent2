@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import hashlib
+import logging
 import sqlite3
 import threading
 import time
@@ -12,6 +13,8 @@ from typing import Any, Callable, TypeVar
 import weakref
 
 from app.config import DATA_DIR, DB_PATH, DEFAULT_SETTINGS
+
+_LOGGER = logging.getLogger(__name__)
 
 _local = threading.local()
 _task_connections: weakref.WeakKeyDictionary[
@@ -3298,16 +3301,39 @@ def insert_error_log(error_id: str, *, category: str, category_label: str, code:
                      is_technical: bool, http_status: int | None, action: str | None,
                      context: Any | None, message: str | None, traceback_text: str | None,
                      exc_type: str | None, meta: dict | None = None) -> None:
-    """落库一条报错日志。原文/堆栈/上下文全留后端，前端只拿 error_id+code+category。"""
-    conn = get_conn()
-    conn.execute(
-        """INSERT OR REPLACE INTO error_logs(
-            id, ts, category, category_label, code, is_technical, http_status,
-            action, context_json, message, traceback, exc_type, meta_json
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (error_id, now(), category, category_label, code, 1 if is_technical else 0, http_status,
-         action, _dump_call_json(context), (message or "")[:20_000] or None,
-         (traceback_text or "")[:40_000] or None, exc_type,
-         json.dumps(meta or {}, ensure_ascii=False)[:1000]),
-    )
-    conn.commit()
+    """落库一条报错日志。原文/堆栈/上下文全留后端，前端只拿 error_id+code+category。
+
+    在独立连接上写入并自行 commit，绝不触碰调用方（``get_conn()``）持有的
+    事务状态。历史上这里直接在调用方的 task 缓存连接上 ``conn.commit()``，
+    于是任何持有未提交多语句事务的异常处理器只要在回滚前记一条错误日志，
+    就会把未提交的中间态一起提交进库——已经用这个模式毁过真实业务数据
+    （详见 app/domain/storyboard_ops.py、bible_ops.py 的相关修复提交）。
+
+    取舍（SQLite 单写者语义）：如果调用方此刻仍持有未提交的写事务，这个独立
+    连接抢不到写锁，``BEGIN IMMEDIATE`` 会立刻失败（``timeout=0``，不阻塞调用
+    方等锁）——这种情况下这条错误日志会丢失。这是可接受的代价：错误日志丢失
+    远好于把半途的业务写入静默提交进库。「先回滚再记日志」仍然值得坚持（能
+    提高日志落库成功率），但改造后它不再是数据安全的承重墙。
+
+    写失败一律吞掉（调用方 errors.log_error 同样外层吞异常，记日志绝不能
+    掩盖/中断原始业务错误），但不能完全无痕，所以在进程日志留一行 WARNING。
+    """
+    def operation(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """INSERT OR REPLACE INTO error_logs(
+                id, ts, category, category_label, code, is_technical, http_status,
+                action, context_json, message, traceback, exc_type, meta_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (error_id, now(), category, category_label, code, 1 if is_technical else 0, http_status,
+             action, _dump_call_json(context), (message or "")[:20_000] or None,
+             (traceback_text or "")[:40_000] or None, exc_type,
+             json.dumps(meta or {}, ensure_ascii=False)[:1000]),
+        )
+
+    try:
+        _run_write_transaction_once(operation)
+    except BaseException as exc:  # noqa: BLE001 日志落库失败绝不能上抛/掩盖调用方的原始错误
+        _LOGGER.warning(
+            "insert_error_log failed for %s (code=%s action=%s): %r",
+            error_id, code, action, exc,
+        )
