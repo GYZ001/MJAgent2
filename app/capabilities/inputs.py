@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from app.capabilities.schemas import StandardCommandInput
 
@@ -99,6 +99,28 @@ class SelectorInput(StandardCommandInput):
 
 class EpisodeScopedInput(StandardCommandInput):
     episode_id: str
+
+
+class VideoGenerateEpisodeInput(EpisodeScopedInput):
+    """整集生成视频（``video.generate_episode``）专用输入。
+
+    ``EpisodeScopedInput`` 被 storyboard.cancel / video.stop_episode /
+    video.clear_episode / video.clear_episode_videos / video.resume_episode /
+    delivery.concatenate / delivery.check / delivery.create_package 共 8 个命令
+    复用，其 Schema 会原样生成那些命令的 REST/Agent Tool/MCP inputSchema——直接
+    往 ``EpisodeScopedInput`` 上加 ``only_incomplete``/``qualification_version``
+    会把这两个只对本命令有意义的字段污染进那 8 个不相关命令的对外契约，所以在
+    这里新建一个专用子类，只挂在 ``video.generate_episode`` 一个命令上。
+
+    ``extra="forbid"``：REST 包装层与 handler 都必须显式声明要转发的字段，
+    命令总线看不到的参数在这里会直接报错而不是被 pydantic 默认的
+    ``extra="ignore"`` 静默吞掉——这正是本次要修的“丢参数”问题的同类保险丝。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    only_incomplete: bool = False
+    qualification_version: str | None = None
 
 
 class ScreenplayGenerateInput(StandardCommandInput):

@@ -803,7 +803,7 @@ def _register_commands(registry) -> None:
             "video.generate_episode",
             title="全片生成视频",
             description="批量生成整集待办镜头视频",
-            input_model=I.EpisodeScopedInput,
+            input_model=I.VideoGenerateEpisodeInput,
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.ALWAYS,
             idempotency=IdempotencyPolicy.REQUIRED,

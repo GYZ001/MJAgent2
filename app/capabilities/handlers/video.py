@@ -6,7 +6,7 @@ from app.capabilities.handlers.common import call_guarded, failed, succeeded
 from app.capabilities.schemas import CommandResult
 
 
-async def generate_episode(args: I.EpisodeScopedInput) -> CommandResult:
+async def generate_episode(args: I.VideoGenerateEpisodeInput) -> CommandResult:
     from app import api
     from app.capabilities.preflight import video_generate_episode
     from app.completion_grant import authorize_episode_video_budget_increment
@@ -65,6 +65,8 @@ async def generate_episode(args: I.EpisodeScopedInput) -> CommandResult:
             "request_id": args.request_id,
             "operation_request_fingerprint": request_fingerprint,
             "operation_claim_token": operation_owner,
+            "only_incomplete": args.only_incomplete,
+            "qualification_version": args.qualification_version,
         },
     )
     if isinstance(outcome, CommandResult):

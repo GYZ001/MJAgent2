@@ -49,14 +49,43 @@ async def dispatch(
     initiator: str = "ui",
     session_id: str | None = None,
 ) -> CommandResult:
-    """执行一次领域命令。任何 initiator 都不会自动批准。"""
+    """执行一次领域命令。任何 initiator 都不会自动批准。
+
+    ``CommandBus._parse_input`` 在入参不满足命令的 input model 时抛 ``ValueError``
+    （见 ``app/capabilities/bus.py``）。Agent（``app/agent/orchestrator.py``）与
+    MCP（``app/mcp/tools.py``）两条调用路径已经各自捕获这个 ``ValueError`` 并转成
+    对应协议的「参数不合法」错误；REST 是唯一直接调 ``bus.execute_async`` 而不捕获
+    的路径，不接住就会冒泡成通用 500。这里补上同款捕获，统一转成 422，不改变
+    Agent/MCP 路径的既有处理。
+    """
     del initiator  # 保留参数以兼容旧调用方；策略已统一。
     ensure_catalog_loaded()
     if session_id is None:
         from app.local_session import get_request_session_id
         session_id = get_request_session_id()
     bus = get_command_bus()
-    return await bus.execute_async(name, args, session_id=session_id)
+    try:
+        return await bus.execute_async(name, args, session_id=session_id)
+    except ValueError as exc:
+        detail: dict[str, Any] = {
+            "code": "invalid_command_input",
+            "message": str(exc),
+            "command": name,
+        }
+        errors_fn = getattr(exc.__cause__, "errors", None)
+        if callable(errors_fn):
+            try:
+                detail["errors"] = [
+                    {
+                        "field": ".".join(str(part) for part in err.get("loc", ())),
+                        "message": err.get("msg"),
+                        "type": err.get("type"),
+                    }
+                    for err in errors_fn()
+                ]
+            except Exception:  # noqa: BLE001 - 结构化字段详情是锦上添花，取不到不影响主流程
+                pass
+        raise HTTPException(422, detail) from exc
 
 
 def waiting_approval_payload(result: CommandResult, *, session_id: str | None = None) -> dict[str, Any]:
