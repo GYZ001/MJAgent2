@@ -68,7 +68,33 @@ CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
 IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v16"
-CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v17"  # v17:
+CURRENT_IDENTITY_DECISION_VERSION = "screenplay-current-identity.v18"  # v18:
+# 真实 EP1 回归 ERR-20260826-d6fba4（proj_3ac0b627fa46/ep_3d523ff4d0a4，
+# run_c313b5138699，provider_calls.id=11909，contract_version=screenplay-
+# identity-discovery.v16）：K:E001:2690631a491d4e5ef3729ebf 把
+# ['孟才子','孟兄']、K:E024:a3d42d9e45e09ef8776d0901 把 ['王伯的儿子']、
+# K:E052:38f03a2cabff8be22d106f12 把 ['许师姐'] 填进了各自的
+# absorbed_functional_keys，全部命中 v17 那道越界核验（安全默认，见
+# _project_current_identity_response K 循环注释）被拒绝，整集 quality_gate
+# 硬失败停跑。四个 token 均不在本批 F 声明、前批 P token 或既有 functional
+# 组任一来源里——它们是有名有姓角色的其它称谓（孟才子/孟兄=孟浩、王伯的
+# 儿子=王有材、许师姐=许清），模型想表达"这是同一个人"语义不算错，但用
+# 错了通道。这是与 v17 同族但不同症状的变体：v17 只堵了"K 决议吸收自己的
+# 锚定 source_label"这一个具体写法，从未正面陈述 absorbed_functional_
+# keys 的完整合法取值域，模型换一种越界方式（吸收别人的称谓而非自己的）
+# 照样命中同一道核验——补了实例、没补判据。真正根因还是 prompt 规则 9：
+# 只改了下方规则 9 的措辞，把"禁止某个具体写法"改成"正面陈述可填值的完整
+# 判据"（合法域=本批 F 声明过的 key/前批 P token/既有 functional 组，且
+# 这三类来源的共同前提是背后实体仍处于"真名未定"的功能性占位状态；已有
+# 确定真名之人的其它称谓从一开始就不满足这个前提，不得为了吸收而现造一条
+# f 项）。不放宽越界核验本身，也不改判成可重采样的格式族——这两条结论 v17
+# 已经写死，本次不推翻。换版本号只是为了让这条 prompt 变化生效——不换会让
+# current_evidence_catalog_hash 相同、current_identity_version 仍是 v17
+# 的旧输入，命中 discover_character_candidates 里 screenplay_identity_
+# discovery 的已验证缓存工件（cached.get("current_identity_version") ==
+# CURRENT_IDENTITY_DECISION_VERSION 那段），把旧 prompt 下的候选静默当成
+# 新 prompt 下的结果复用，与 v14/v15/v16/v17 换版本号是同一个理由。
+# v17:
 # 真实 EP5 回归 ERR-20260825-0d8a29（proj_3ac0b627fa46/ep_0a7130b7b402，
 # provider_calls.id=11141）：K 决议把自己的锚定 source_label（即同一
 # decision_id 在本批 K 目录里自带的 source_label，如「许师姐」「孟浩」）也
@@ -2722,22 +2748,42 @@ async def _discover_character_candidates_legacy(
    scope_qualifier——不要依赖后端的确定性降级补足（后端会用甲/乙/丙...
    兜底填一个可用但没有语义信息量的限定语，只是防止拒绝重来，不是让你
    可以不填）。
-9. 如果某个 k 决议揭晓的真名，其实就是一个仍处于 functional 状态的称谓组
-   一路指代的同一个人——例如某绰号从更早的证据起就被追踪为 functional，
-   直到这条 k 决议对应的证据才第一次读到该人物的真名——不要把真名重复写
-   进 n（那是这条 k 决议已经覆盖的重复声明，会被拒绝）：改为在这条 k 决议
-   里填写 absorbed_functional_keys，逐项精确复制被吸收的 functional_
-   identity_key（本批 f 项自己的 key）、前批 P token（prior functional 分组
-   的 decision_id）或本集已有功能身份决议的 canonical_name。只有在你确实
-   判断这些 token 指代的是同一个人时才填写；后端只核验每个 token 是否确实
-   来自上述三类来源，越界或臆造的 token 会导致本次响应被拒绝重试。拿不准
-   是否为同一人时留空，不要吸收。
+9. absorbed_functional_keys 的合法取值域只有三类，逐项必须精确复制其中
+   之一——本批 f 项自己声明过的 functional_identity_key、前批 P token
+   （prior functional 分组的 decision_id）、或本集已有功能身份决议的
+   canonical_name；不是任意你认为"指代同一人"的称谓原文。后端只核验每个
+   token 是否确实来自这三类来源，不做文本语义判断，越界或臆造的 token
+   （包括任何未按上述三类之一先行声明过的称谓原文）都会导致本次响应被
+   拒绝重试。
+
+   这三类来源有一个共同前提：token 背后的实体在被吸收前必须处于"稳定真名
+   尚未确认"的功能性占位状态——这正是规则4"若…无法确认稳定真名，放入 f"
+   的适用范围。一个人只要已经有确定真名（不论是这条 k 决议刚揭晓的，还是
+   人物谱/更早证据里早已确认的），TA 的其它称谓从一开始就不满足"功能性
+   占位"这个前提，永远不构成合法的 f 项，也就永远不会出现在上述三类合法
+   来源里——不得为了让某个称谓能被吸收，倒着现造一条 f 项把它包装成功能性
+   占位；f 项存在的理由是"真名未定"，不是"我想吸收它"。这类已有确定真名
+   之人的其它称谓，走称谓解析的正常渠道（n 的逐字自称谓声明、或人物谱别名
+   登记），不进 absorbed_functional_keys。（真实事故：「孟才子」「孟兄」是
+   孟浩的称谓、「王伯的儿子」是王有材的称谓、「许师姐」是许清的称谓——这
+   四人都已有确定真名，从一开始就不是合法的 f 项，任何 k 决议都不得把这类
+   称谓原文填入 absorbed_functional_keys。）
+
+   合法用例：如果某个 k 决议揭晓的真名，其实就是一个仍处于 functional 状态
+   的称谓组一路指代的同一个人——例如某绰号从更早的证据起就被追踪为
+   functional，直到这条 k 决议对应的证据才第一次读到该人物的真名——不要
+   把真名重复写进 n（那是这条 k 决议已经覆盖的重复声明，会被拒绝）：改为
+   在这条 k 决议里填写 absorbed_functional_keys，逐项精确复制被吸收的
+   functional_identity_key/P token/canonical_name。只有在你确实判断这些
+   token 指代的是同一个人时才填写；拿不准是否为同一人时留空，不要吸收。
+
    absorbed_functional_keys 里禁止填入这条 k 决议自己的 source_label（即
    本批 K 决议目录里这个 decision_id 条目自带的 source_label 原文）：选中
    decision_id 本身已经表达了这个称谓属于该决议，重复列出会被判定为越界
    token 而拒绝，不是多填了一道保险。absorbed_functional_keys 只能用来
-   吸收这个自身称谓之外的其它称谓组——如果某个称谓只是你在证据里零散
-   认出、还没有单独作为一条 f 项列出（source_label 与 functional_
+   吸收这个自身称谓之外的、真正处于功能性占位状态的其它称谓组（不是任何
+   已有确定真名之人的称谓，见本条前半段）——如果某个这样的称谓只是你在
+   证据里零散认出、还没有单独作为一条 f 项列出（source_label 与 functional_
    identity_key 均已确定），它就还不是合法的可吸收 token：必须先在本响应
    的 f 数组里为它单独声明一条 f 项（source_label 填该称谓本身，
    functional_identity_key 可以直接使用你打算吸收的同一个 key），再在

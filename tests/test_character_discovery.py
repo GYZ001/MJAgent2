@@ -4976,6 +4976,110 @@ def test_current_identity_absorbed_functional_keys_rejects_own_source_label_ep5_
     )
 
 
+def _ep1_named_appellation_evidence_and_known() -> tuple[dict, dict]:
+    """孟浩/王有材/许清 都是人物谱已有确定真名的角色，证据里各自还有另一个
+    称谓（孟才子/孟兄、王伯的儿子、许师姐）——这些称谓从未被声明为本批 f 项
+    的 functional_identity_key，也不在 prior_functional_groups 或
+    existing_functional_routes 里，从一开始就不满足"稳定真名尚未确认"这个
+    functional 占位前提，不构成合法的可吸收 token。"""
+    records = portraits._current_identity_evidence_records(
+        "孟才子今日心情不错，众人都唤他孟兄。\n\n"
+        "王伯的儿子最近很少露面。\n\n"
+        "许师姐转身离去，气度不凡。\n\n"
+        "孟浩笑着对众人说话。\n\n"
+        "王有材站在王伯身边，低头不语。\n\n"
+        "许清缓缓抬起头来。"
+    )
+    evidence_by_ref = {
+        f"E{index:03d}": record for index, record in enumerate(records, start=1)
+    }
+    authorities = portraits.identity_authority_registry(
+        Bible(
+            world=World(visual_style_canonical="国风"),
+            characters=[
+                Character(
+                    name="孟浩", role="主角", appearance_canonical="青衫少年",
+                ),
+                Character(
+                    name="王有材", role="配角", appearance_canonical="富家子弟",
+                ),
+                Character(
+                    name="许清", role="配角", appearance_canonical="银色长袍女子",
+                ),
+            ],
+        ),
+        [],
+    )
+    known = portraits._current_identity_known_decision_catalog(
+        evidence_by_ref, authorities=authorities,
+    )
+    return evidence_by_ref, known
+
+
+def test_current_identity_absorbed_functional_keys_rejects_named_characters_other_appellations_ep1_regression() -> None:
+    """真实 EP1 回归 ERR-20260826-d6fba4（proj_3ac0b627fa46/ep_3d523ff4d0a4，
+    run_c313b5138699，provider_calls.id=11909，contract_version=screenplay-
+    identity-discovery.v16）：三条 K 决议把已有确定真名之人的其它称谓——
+    孟才子/孟兄（=孟浩）、王伯的儿子（=王有材）、许师姐（=许清）——填进了
+    各自的 absorbed_functional_keys。这四个 token 从未在本批 f 数组里被
+    声明为 functional_identity_key，也不在 prior_functional_groups 或
+    existing_functional_routes 里，不属于三类合法可吸收来源中的任何一类，
+    必须被越界核验拒绝。修复是 prompt 规则 9 从"只禁止吸收自己的锚定
+    source_label"改成正面陈述 absorbed_functional_keys 的完整合法取值域
+    （CURRENT_IDENTITY_DECISION_VERSION v17->v18），不是放宽这道核验，所以
+    这里必须继续锁定硬失败，不能锁定成通过。"""
+    evidence_by_ref, known = _ep1_named_appellation_evidence_and_known()
+
+    def decision_for(canonical_name: str) -> str:
+        return next(
+            decision_id for decision_id, record in known.items()
+            if record["canonical_name"] == canonical_name
+        )
+
+    meng_decision = decision_for("孟浩")
+    wang_decision = decision_for("王有材")
+    xu_decision = decision_for("许清")
+    payload = {
+        "k": [
+            {
+                "decision_id": meng_decision,
+                "kind": "onscreen",
+                "absorbed_functional_keys": ["孟才子", "孟兄"],
+            },
+            {
+                "decision_id": wang_decision,
+                "kind": "onscreen",
+                "absorbed_functional_keys": ["王伯的儿子"],
+            },
+            {
+                "decision_id": xu_decision,
+                "kind": "onscreen",
+                "absorbed_functional_keys": ["许师姐"],
+            },
+        ],
+        "n": [],
+        "f": [],
+    }
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    _projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions=known,
+        reserved_authority_labels={"孟浩", "王有材", "许清"},
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    joined = " | ".join(errors)
+    error_count = sum(1 for message in errors if "absorbed_functional_keys 越界" in message)
+    assert error_count == 3
+    for token in ("孟才子", "孟兄", "王伯的儿子", "许师姐"):
+        assert token in joined
+    assert not any(
+        portraits._current_identity_is_schema_violation(message)
+        for message in errors
+    )
+
+
 def test_current_identity_absorbed_functional_keys_wire_schema_has_no_enum() -> None:
     """锁定"为什么不上 enum"这个设计判断：批内 f 项的 functional_identity_key
     （如 F1/F2）由模型在同一响应里现造，构建 schema 时还不存在，无法预先
