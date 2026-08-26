@@ -478,6 +478,82 @@ def test_persist_storyboard_pack_writes_one_shots_row_per_segment():
     assert version["prompt_text"] == _pack().segments[0].prompt_text
 
 
+def test_persist_storyboard_pack_segment_carries_beat_summary_self_contained():
+    # 段记录必须自包含：拿到这一个 shot 就能知道它承载的节拍在讲什么，不必
+    # 反查一份独立的全集 beat_sheet 去 join。字段名照冻结契约
+    # （beat_id/summary/segment_indexes），不发明新名。
+    conn = db.get_conn()
+    episode_id = "ep-pack-beats"
+    _seed_episode(conn, episode_id=episode_id)
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    payload = _prep_pack_2_0_0_payload()
+    segments = [
+        SourceSegment(segment_id="SRC0001", text="少年站在山顶。", start_offset=0, end_offset=1),
+        SourceSegment(segment_id="SRC0002", text="他扔掉了葫芦。", start_offset=1, end_offset=2),
+        SourceSegment(segment_id="SRC0003", text="葫芦落入河中。", start_offset=2, end_offset=3),
+    ]
+    persist_storyboard_pack(conn, episode_id, ep, payload, _pack(), segments=segments)
+
+    row = conn.execute("SELECT * FROM shots WHERE episode_id=?", (episode_id,)).fetchone()
+    segment_record = json.loads(row["shot_contract_json"])["storyboard_pack_segment"]
+
+    # 既有裸 ID 键原样保留，不贸然删 -- 老消费方（若有）不受影响。
+    assert segment_record["beat_ids"] == ["B1"]
+    # 新键携带完整节拍记录，字段名与冻结契约 beat_sheet[] 项一致。
+    assert segment_record["beats"] == [
+        {"beat_id": "B1", "summary": "他扔掉了理想", "segment_indexes": [1, 2]},
+    ]
+
+
+def test_persist_storyboard_pack_segment_beats_empty_when_no_beat_overlaps():
+    conn = db.get_conn()
+    episode_id = "ep-pack-beats-empty"
+    _seed_episode(conn, episode_id=episode_id)
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    payload = _prep_pack_2_0_0_payload()
+    segments = [
+        SourceSegment(segment_id="SRC0001", text="少年站在山顶。", start_offset=0, end_offset=1),
+        SourceSegment(segment_id="SRC0002", text="他扔掉了葫芦。", start_offset=1, end_offset=2),
+        SourceSegment(segment_id="SRC0003", text="葫芦落入河中。", start_offset=2, end_offset=3),
+    ]
+    pack = _pack()
+    # 节拍只覆盖原文第 1/2 段，把段的原文范围挪到不重叠的第 3 段。
+    pack.segments[0].source_segment_indexes = [3]
+    persist_storyboard_pack(conn, episode_id, ep, payload, pack, segments=segments)
+
+    row = conn.execute("SELECT * FROM shots WHERE episode_id=?", (episode_id,)).fetchone()
+    segment_record = json.loads(row["shot_contract_json"])["storyboard_pack_segment"]
+    assert segment_record["beat_ids"] == []
+    assert segment_record["beats"] == []
+
+
+def test_persist_storyboard_pack_writes_standalone_beat_sheet_artifact():
+    # 顺带确认：整份节拍表（含摘要）除了段记录之外，必须还有一个独立落点，
+    # 否则事后无法复盘"段数是怎么定出来的"。
+    conn = db.get_conn()
+    episode_id = "ep-pack-artifact"
+    _seed_episode(conn, episode_id=episode_id)
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    payload = _prep_pack_2_0_0_payload()
+    segments = [
+        SourceSegment(segment_id="SRC0001", text="少年站在山顶。", start_offset=0, end_offset=1),
+        SourceSegment(segment_id="SRC0002", text="他扔掉了葫芦。", start_offset=1, end_offset=2),
+        SourceSegment(segment_id="SRC0003", text="葫芦落入河中。", start_offset=2, end_offset=3),
+    ]
+    persist_storyboard_pack(conn, episode_id, ep, payload, _pack(), segments=segments)
+
+    artifact_row = conn.execute(
+        "SELECT content_json FROM artifacts WHERE type='storyboard_pack_beat_sheet' AND scope_id=?",
+        (episode_id,),
+    ).fetchone()
+    assert artifact_row is not None
+    content = json.loads(artifact_row["content_json"])
+    assert content["segment_count"] == 1
+    assert content["beat_sheet"] == [
+        {"beat_id": "B1", "summary": "他扔掉了理想", "segment_indexes": [1, 2]},
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 判据（用户 2026-08-26 原话）：一个「台词安给了当时不在场的人」的段落，必须
 # 能顺利生成、顺利保存、顺利进入下一环节，同时那条不一致要能在产物里被看见

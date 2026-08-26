@@ -1550,7 +1550,11 @@ class Shot(BaseModel):
     # 等描述单个连续镜头的字段在这行上不再有意义，校验器与生成台据此字段显式
     # 跳过那些假设，而不是对空值静默判错或静默放行。字段内容即冻结契约的
     # segments[] 一条记录（prompt_text/resources/dialogue/degraded_capabilities/
-    # source_segment_indexes/shot_count/beat_ids/target_model/storyboard_version）。
+    # source_segment_indexes/shot_count/beat_ids/beats/target_model/
+    # storyboard_version）。``beat_ids`` 是历史裸 ID 列表（兼容旧消费方）；
+    # ``beats`` 是本段命中的节拍全量记录（beat_id/summary/segment_indexes，
+    # 字段名与冻结契约 beat_sheet[] 一致），供前端展示节拍摘要用，见
+    # app/production/storyboard_pack.py persist_storyboard_pack。
     storyboard_pack_segment: dict[str, Any] | None = None
 
     @model_validator(mode="after")

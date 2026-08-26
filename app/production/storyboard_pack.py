@@ -44,7 +44,9 @@ from pydantic import BaseModel, Field
 from app import config
 from app.db import new_id, now
 from app.domain.common import _episode_source_text
+from app.evidence import repository as evidence_repository
 from app.harness import model_gateway
+from app.harness.types import EvidenceArtifact
 from app.schemas import Bible, Dialogue
 from app.source_excerpt import SourceSegment, index_source_segments
 from app.video_prompt_profiles import VideoPromptProfile
@@ -771,9 +773,27 @@ def persist_storyboard_pack(
         shot_id = new_id("shot")
         shot_uid = new_id("shotuid")
         segment_record = segment.model_dump(mode="json")
-        segment_record["beat_ids"] = [
-            beat.beat_id for beat in pack.beat_sheet
+        matched_beats = [
+            beat for beat in pack.beat_sheet
             if set(beat.segment_indexes) & set(segment.source_segment_indexes)
+        ]
+        # ``beat_ids`` (bare id list) is the pre-existing key frontend/api.ts and
+        # BoardPage.tsx already read (StoryboardPackSegment.beat_ids) -- kept
+        # unchanged for that consumer plus any historical row shape. ``beats``
+        # is the new self-contained field: each shot dict must be renderable on
+        # its own (docs/STORYBOARD_PROMPT_IR_DESIGN.md's beat_sheet exists for
+        # 留痕 -- a bare id conveys nothing without the summary next to it), so
+        # this carries the frozen contract's own per-beat shape
+        # (beat_id/summary/segment_indexes, no invented field names) rather
+        # than making the frontend join against the episode-level beat_sheet.
+        segment_record["beat_ids"] = [beat.beat_id for beat in matched_beats]
+        segment_record["beats"] = [
+            {
+                "beat_id": beat.beat_id,
+                "summary": beat.summary,
+                "segment_indexes": list(beat.segment_indexes),
+            }
+            for beat in matched_beats
         ]
         segment_record["target_model"] = pack.target_model
         segment_record["storyboard_version"] = pack.storyboard_version
@@ -837,6 +857,39 @@ def persist_storyboard_pack(
             "UPDATE shots SET adopted_version_id=? WHERE id=?", (version_id, shot_id),
         )
         shot_ids.append(shot_id)
+
+    # Full beat_sheet (with summaries), stored once per generation independent
+    # of any single segment row. Per-segment ``beats`` above only carries the
+    # beats each segment overlaps -- it cannot answer "how was the segment
+    # count decided" on its own if a beat somehow ends up unclaimed by every
+    # segment, and it duplicates the same beat's summary across every segment
+    # it touches instead of having one canonical copy. This artifact is that
+    # canonical copy: an auditable record of exactly what
+    # ``_generate_beat_sheet`` produced (segment_count here is
+    # ``len(pack.segments)``, i.e. the number this whole module exists to
+    # decide -- see ``generate_storyboard_pack``'s docstring).
+    evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="storyboard_pack_beat_sheet",
+            scope_type="episode",
+            scope_id=episode_id,
+            status="validated",
+            trust_level="T2",
+            content={
+                "storyboard_version": pack.storyboard_version,
+                "episode_no": pack.episode_no,
+                "target_model": pack.target_model,
+                "segment_count": len(pack.segments),
+                "beat_sheet": [beat.model_dump(mode="json") for beat in pack.beat_sheet],
+            },
+            parent_artifact_ids=(
+                [str(ep["screenplay_artifact_id"])] if ep["screenplay_artifact_id"] else []
+            ),
+            contract_version=pack.storyboard_version,
+        ),
+        conn=conn,
+        commit=False,
+    )
     conn.commit()
     return shot_ids
 
