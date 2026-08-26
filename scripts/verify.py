@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import ast
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,6 +21,11 @@ ROOT = Path(__file__).resolve().parent.parent
 APP = ROOT / "app"
 TESTS = ROOT / "tests"
 FRONTEND = ROOT / "frontend"
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.sandbox_lifecycle import mark_sandbox_owner, purge_stale_sandboxes  # noqa: E402
 
 
 def _git_lines(*args: str) -> list[str]:
@@ -213,37 +217,6 @@ def _live_integration_environment() -> dict[str, str]:
     return env
 
 
-_STALE_SANDBOX_MAX_AGE_HOURS = 24.0
-
-
-def _purge_stale_sandboxes(prefix: str, *, max_age_hours: float = _STALE_SANDBOX_MAX_AGE_HOURS) -> None:
-    """Best-effort startup sweep for orphaned ``prefix*`` dirs under /tmp.
-
-    The ``with tempfile.TemporaryDirectory(...)`` block below already removes
-    this run's own sandbox on normal completion and on most exceptions
-    (including KeyboardInterrupt). Neither that nor any ``finally``/``atexit``
-    hook runs when the process is hard-killed (SIGKILL, or the default
-    SIGTERM action) -- that is how sandboxes actually accumulated in /tmp.
-    This sweep is the backstop: it only ever removes dirs older than
-    ``max_age_hours``, so a sandbox still owned by a running process is never
-    touched.
-    """
-    cutoff = time.time() - max_age_hours * 3600
-    try:
-        entries = list(Path(tempfile.gettempdir()).iterdir())
-    except OSError:
-        return
-    for entry in entries:
-        if not entry.name.startswith(prefix):
-            continue
-        try:
-            if entry.stat().st_mtime >= cutoff:
-                continue
-        except OSError:
-            continue
-        shutil.rmtree(entry, ignore_errors=True)
-
-
 def _quick_commands(paths: list[str]) -> list[tuple[list[str], Path]]:
     commands: list[tuple[list[str], Path]] = []
     python_changes = [path for path in paths if path.endswith(".py")]
@@ -359,8 +332,9 @@ def main() -> int:
     if not commands:
         print("No code changes need verification.")
         return 0
-    _purge_stale_sandboxes("manju-verify-")
+    purge_stale_sandboxes("manju-verify-")
     with tempfile.TemporaryDirectory(prefix="manju-verify-") as sandbox_dir:
+        mark_sandbox_owner(Path(sandbox_dir))
         isolated_env = _isolated_environment(Path(sandbox_dir))
         live_env = _live_integration_environment()
         try:

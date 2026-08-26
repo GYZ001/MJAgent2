@@ -4,28 +4,31 @@ Only root-level ``_*`` entries and legacy root ``*.log`` files are removed by
 default. Use ``--caches`` to also clear reproducible tool caches/build output.
 
 Also sweeps ``/tmp`` for ``manju-pytest-*`` and ``manju-verify-*`` sandboxes
-left behind by hard-killed ``pytest`` / ``scripts/verify.py`` runs (normal
-runs clean up after themselves; only dirs older than 24h are touched, so a
-sandbox owned by a currently running process is never removed).
+left behind by hard-killed ``pytest`` / ``scripts/verify.py`` runs. Staleness
+is judged primarily by process ownership (see ``scripts/sandbox_lifecycle``):
+a sandbox is only removed once the PID recorded in its ``owner.pid`` marker
+is no longer alive, so one still owned by a currently running process is
+never touched, regardless of how new or old it is. An age cutoff is only a
+fallback for sandboxes with no readable marker.
 """
 from __future__ import annotations
 
 import argparse
 import shutil
-import tempfile
-import time
+import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.sandbox_lifecycle import DEFAULT_MAX_AGE_HOURS, find_stale_sandboxes  # noqa: E402
+
 CACHE_PATHS = (
     ROOT / ".pytest_cache",
     ROOT / ".ruff_cache",
     ROOT / "frontend" / "dist",
 )
-
-TMP_SANDBOX_PREFIXES = ("manju-pytest-", "manju-verify-")
-TMP_SANDBOX_MAX_AGE_HOURS = 24.0
 
 
 def disposable_paths(include_caches: bool = False) -> list[Path]:
@@ -37,27 +40,6 @@ def disposable_paths(include_caches: bool = False) -> list[Path]:
     if include_caches:
         paths.extend(path for path in CACHE_PATHS if path.exists())
     return sorted(set(paths), key=lambda path: str(path).lower())
-
-
-def stale_tmp_sandboxes(max_age_hours: float = TMP_SANDBOX_MAX_AGE_HOURS) -> list[Path]:
-    """Orphaned pytest/verify sandboxes under /tmp older than ``max_age_hours``."""
-    cutoff = time.time() - max_age_hours * 3600
-    tmp_root = Path(tempfile.gettempdir())
-    try:
-        entries = list(tmp_root.iterdir())
-    except OSError:
-        return []
-    stale: list[Path] = []
-    for entry in entries:
-        if not entry.name.startswith(TMP_SANDBOX_PREFIXES):
-            continue
-        try:
-            if entry.stat().st_mtime >= cutoff:
-                continue
-        except OSError:
-            continue
-        stale.append(entry)
-    return sorted(stale, key=lambda path: str(path).lower())
 
 
 def _assert_safe(path: Path) -> None:
@@ -74,7 +56,7 @@ def main() -> int:
     args = parser.parse_args()
 
     paths = disposable_paths(args.caches)
-    tmp_paths = stale_tmp_sandboxes()
+    tmp_paths = find_stale_sandboxes()
     if not paths and not tmp_paths:
         print("Workspace is already clean.")
         return 0
@@ -88,7 +70,7 @@ def main() -> int:
         else:
             path.unlink(missing_ok=True)
     for path in tmp_paths:
-        print(f"{'would remove' if args.dry_run else 'removing'} {path} (stale >{TMP_SANDBOX_MAX_AGE_HOURS:.0f}h)")
+        print(f"{'would remove' if args.dry_run else 'removing'} {path} (orphaned; owner dead or >{DEFAULT_MAX_AGE_HOURS:.0f}h with no owner marker)")
         if args.dry_run:
             continue
         shutil.rmtree(path, ignore_errors=True)

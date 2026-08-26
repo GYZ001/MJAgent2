@@ -4,7 +4,6 @@ import shutil
 import sqlite3
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
@@ -20,6 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.sandbox_lifecycle import mark_sandbox_owner, purge_stale_sandboxes
+
 _LIVE_INTEGRATION = False
 _ISOLATION_SESSION: IsolationSession | None = None
 _PROVIDER_ISOLATION: ProviderConfigurationIsolation | None = None
@@ -27,36 +28,6 @@ _SANDBOX: Path | None = None
 _SANDBOX_OWNED = False
 _DATABASE_TEMPLATE: Path | None = None
 _DATABASE_TEMPLATE_INITIALIZED = False
-
-_STALE_SANDBOX_MAX_AGE_HOURS = 24.0
-
-
-def _purge_stale_sandboxes(prefix: str, *, max_age_hours: float = _STALE_SANDBOX_MAX_AGE_HOURS) -> None:
-    """Best-effort startup sweep for orphaned ``prefix*`` dirs under /tmp.
-
-    ``pytest_unconfigure`` below already removes this run's own sandbox on
-    normal completion and on most exceptions (including KeyboardInterrupt).
-    Neither that nor any ``finally``/``atexit`` hook runs when the process is
-    hard-killed (SIGKILL, or the default SIGTERM action) -- that is how
-    sandboxes actually accumulated in /tmp. This sweep is the backstop: it
-    only ever removes dirs older than ``max_age_hours``, so a sandbox still
-    owned by a running process is never touched.
-    """
-    cutoff = time.time() - max_age_hours * 3600
-    try:
-        entries = list(Path(tempfile.gettempdir()).iterdir())
-    except OSError:
-        return
-    for entry in entries:
-        if not entry.name.startswith(prefix):
-            continue
-        try:
-            if entry.stat().st_mtime >= cutoff:
-                continue
-        except OSError:
-            continue
-        shutil.rmtree(entry, ignore_errors=True)
-
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     group = parser.getgroup("manju test isolation")
@@ -86,9 +57,10 @@ def pytest_configure(config: pytest.Config) -> None:
         _SANDBOX.mkdir(parents=True, exist_ok=True)
         _SANDBOX_OWNED = False
     else:
-        _purge_stale_sandboxes("manju-pytest-")
+        purge_stale_sandboxes("manju-pytest-")
         _SANDBOX = Path(tempfile.mkdtemp(prefix="manju-pytest-")).resolve()
         _SANDBOX_OWNED = True
+        mark_sandbox_owner(_SANDBOX)
     os.environ["MANJU_TEST_SANDBOX"] = str(_SANDBOX)
     config.option.basetemp = str(_SANDBOX / "pytest-tmp")
 
