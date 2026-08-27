@@ -1,539 +1,343 @@
 import { describe, expect, it } from 'vitest'
-import { createElement } from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
-import type { Shot, ShotVersion, ReferenceImage } from '../api'
+import { ApiError, type ReferenceImage, type Shot, type ShotVersion, type StoryboardPackSegment } from '../api'
 import {
-  EPISODE_COMPLETION_BUDGET_CAP_CNY,
-  EPISODE_COMPLETION_WALL_CLOCK_CAP_S,
-  InfoSection,
-  MaterialGallery,
-  PROVIDER_RESUBMISSION_WARNING,
-  REVIEW_TABS,
-  boundarySourceLabel,
-  currentMaterialVersion,
-  classifyReferenceBuckets,
-  countReferenceImages,
-  describeShotUpdate,
-  episodeCompletionBudgetCap,
-  episodeCompletionRequest,
-  episodeCompletionWallClockCap,
-  episodeGenerationAction,
-  episodeGenerationIsActive,
-  incompleteVideoSupervisorState,
-  isProviderCreateUnresolved,
-  isVideoModelInputRejection,
-  refSourceLabel,
-  referenceLibraryLabel,
-  reviewWallPositionKey,
-  resolvePreviewVersionId,
-  resolveStableShotSelection,
-  reviewContextRefreshKey,
-  shouldRetryReviewContextError,
-  shotDetailRefreshKey,
-  shotHasActiveGeneration,
-  shotHasPausedGeneration,
-  shotMaterialLibraryKind,
-  shouldCommitShotDetail,
-  shouldPersistReviewWallPosition,
-  videoCandidateNote,
-  videoPlaybackRate,
-  videoGenerationConfirmLabel,
-  videoModeReasonText,
-  visibleVideoVersions,
+  bulkGenerateDialogCopy,
+  bulkGenerateDisabledReason,
+  bulkGenerateEstimate,
+  episodeSpentCny,
+  extractReferenceImagesByVersion,
+  formatResolution,
+  isSegmentShot,
+  parseTechnicalValidation,
+  qualificationChangedRetryVersion,
+  referenceImageLabel,
+  resolveCurrentVersion,
+  resolveSelectedShotId,
+  segmentGenerateDisabledReason,
+  segmentPhase,
+  segmentPhaseCounts,
+  stampClassForStatus,
+  versionStatusLabel,
+  versionStatusTone,
 } from './WallPage'
 
-function version(
-  id: string,
-  status: string,
-  refs: NonNullable<ShotVersion['image_inputs']>['reference_images'],
-  versionNo: number,
-): ShotVersion {
+// 生成台只剩段视图一条渲染路径（2026-08-26 用户拍板：storyboard_pack/2.0.1，一个
+// 15 秒段 = shots 表一行）。shot() 只构造满足 Shot 接口必填字段的最小基座，
+// packShot() 在其上叠加 storyboard_pack_segment 才是生成台唯一消费的形状。
+function shot(overrides: Partial<Shot> = {}): Shot {
   return {
-    id,
-    version_no: versionNo,
-    prompt_text: '',
-    status,
-    cost_cny: 0,
-    latency_s: 0,
-    image_inputs: { reference_images: refs },
+    id: 's1', episode_id: 'e1', shot_no: 1, duration_s: 15, shot_size: '', camera_move: '',
+    scene_time: '', scene_name: '', scene_setting: '',
+    characters: [], action_desc: '',
+    first_frame_desc: '', last_frame_desc: '', source_excerpt: '',
+    narration: '', dialogues: [], transition: '',
+    continuity_from_prev: 0, adopted_version_id: null, est_cost_cny: 4.5, versions: [], video_stale: false,
+    ...overrides,
   }
 }
 
-describe('供应商重新提交文案', () => {
-  it('明确新 operation ID、独立 claim 与重新核算额度', () => {
-    expect(PROVIDER_RESUBMISSION_WARNING).toContain('新的 operation ID')
-    expect(PROVIDER_RESUBMISSION_WARNING).toContain('独立预算 claim')
-    expect(PROVIDER_RESUBMISSION_WARNING).not.toContain('复用原幂等标识')
+function packSegment(overrides: Partial<StoryboardPackSegment> = {}): StoryboardPackSegment {
+  return {
+    segment_no: 1, duration_s: 15, synopsis: '少年拿到密信', source_segment_indexes: [1, 2],
+    prompt_text: '电影级预告片质感，多镜头叙事……',
+    shot_count: 3, dialogue: [], resources: { characters: [], scenes: [], props: [] },
+    degraded_capabilities: [], beats: [], beat_ids: [], target_model: 'seedance_2',
+    storyboard_version: '2.0.1',
+    ...overrides,
+  }
+}
+
+function packShot(overrides: Partial<Shot> = {}, segmentOverrides: Partial<StoryboardPackSegment> = {}): Shot {
+  return shot({
+    storyboard_pack_segment: packSegment(segmentOverrides),
+    ...overrides,
+  })
+}
+
+function version(overrides: Partial<ShotVersion> = {}): ShotVersion {
+  return {
+    id: 'v1', version_no: 1, prompt_text: '', status: 'succeeded', cost_cny: 12, latency_s: 5.2,
+    ...overrides,
+  }
+}
+
+describe('段落是唯一渲染单位', () => {
+  it('storyboard_pack_segment 非 null 才是可展示的段落行', () => {
+    expect(isSegmentShot(shot())).toBe(false)
+    expect(isSegmentShot(packShot())).toBe(true)
   })
 })
 
-describe('生成台三类分组与视角标签', () => {
-  it('按用途分为视频实际输入 / QA 依据 / 废弃候选', () => {
-    const refs: ReferenceImage[] = [
-      {
-        id: 'kf',
-        type: 'plot_key_frame',
-        source: 'seedream_generated',
-        selectedForSeedance: true,
-        slot_key: 'narrative_keyframe',
-        purposes: ['video_input', 'qa_anchor'],
-      },
-      {
-        id: 'char-profile',
-        type: 'character',
-        source: 'asset_library',
-        selectedForSeedance: false,
-        entity_type: 'character',
-        view_role: 'profile',
-        purposes: ['keyframe_seed', 'qa_anchor'],
-      },
-      {
-        id: 'scene-rev',
-        type: 'scene',
-        source: 'asset_library',
-        selectedForSeedance: false,
-        entity_type: 'scene',
-        view_role: 'reverse_angle',
-        purposes: ['qa_anchor'],
-      },
-      {
-        id: 'bad',
-        type: 'plot_key_frame',
-        source: 'seedream_generated',
-        selectedForSeedance: false,
-        rejectReason: 'quality_below_threshold',
-        purposes: ['video_input'],
-      },
+describe('当前版本解析', () => {
+  it('优先展示已采纳版本，即使它不是版本号最大的一条', () => {
+    const s = packShot({
+      adopted_version_id: 'v1',
+      versions: [version({ id: 'v1', version_no: 1 }), version({ id: 'v2', version_no: 2, status: 'failed' })],
+    })
+    expect(resolveCurrentVersion(s)?.id).toBe('v1')
+  })
+
+  it('未采纳时回退到版本号最大的最新尝试', () => {
+    const s = packShot({
+      versions: [version({ id: 'v1', version_no: 1 }), version({ id: 'v2', version_no: 3 }), version({ id: 'v3', version_no: 2 })],
+    })
+    expect(resolveCurrentVersion(s)?.id).toBe('v2')
+  })
+
+  it('没有任何尝试时返回 null，不编造数据', () => {
+    expect(resolveCurrentVersion(packShot({ versions: [] }))).toBeNull()
+  })
+})
+
+describe('段落生成阶段与统计', () => {
+  it('四种阶段：待生成 / 生成中 / 已完成 / 需处理', () => {
+    expect(segmentPhase(packShot({ versions: [] }))).toBe('pending')
+    expect(segmentPhase(packShot({ versions: [version({ status: 'queued' })] }))).toBe('generating')
+    expect(segmentPhase(packShot({ versions: [version({ status: 'waiting_provider' })] }))).toBe('generating')
+    expect(segmentPhase(packShot({ versions: [version({ status: 'succeeded' })] }))).toBe('succeeded')
+    expect(segmentPhase(packShot({ versions: [version({ status: 'failed' })] }))).toBe('attention')
+    expect(segmentPhase(packShot({ versions: [version({ status: 'waiting_human' })] }))).toBe('attention')
+    expect(segmentPhase(packShot({ versions: [version({ status: 'quarantined' })] }))).toBe('attention')
+  })
+
+  it('按全部段落汇总四态计数', () => {
+    const shots = [
+      packShot({ id: 's1' }, {}),
+      packShot({ id: 's2', versions: [version({ status: 'running' })] }),
+      packShot({ id: 's3', versions: [version({ status: 'succeeded' })] }),
+      packShot({ id: 's4', versions: [version({ status: 'failed' })] }),
     ]
-
-    const buckets = classifyReferenceBuckets(refs)
-    expect(buckets.video.map(r => r.id)).toEqual(['kf'])
-    expect(buckets.evidence.map(r => r.id)).toEqual(['char-profile', 'scene-rev'])
-    expect(buckets.discarded.map(r => r.id)).toEqual(['bad'])
+    expect(segmentPhaseCounts(shots)).toEqual({ pending: 1, generating: 1, succeeded: 1, attention: 1 })
   })
 
-  it('关键帧与多视角显示专用标签', () => {
-    expect(refSourceLabel({
-      id: 'kf',
-      type: 'plot_key_frame',
-      source: 'seedream_generated',
-      slot_key: 'narrative_keyframe',
-    })).toBe('关键帧')
-    expect(refSourceLabel({
-      id: 'c',
-      type: 'character',
-      source: 'asset_library',
-      entity_type: 'character',
-      view_role: 'profile',
-    })).toBe('人物参考 · 侧面')
-    expect(refSourceLabel({
-      id: 's',
-      type: 'scene',
-      source: 'asset_library',
-      entity_type: 'scene',
-      view_role: 'reverse_angle',
-    })).toBe('场景参考 · 反打')
+  it('已产生费用按全部尝试累加，不是只算已采纳版本', () => {
+    const shots = [
+      packShot({ id: 's1', versions: [version({ id: 'v1', cost_cny: 12, status: 'failed' }), version({ id: 'v2', cost_cny: 8, status: 'succeeded' })] }),
+      packShot({ id: 's2', versions: [version({ id: 'v3', cost_cny: 5 })] }),
+    ]
+    expect(episodeSpentCny(shots)).toBe(25)
   })
 })
 
-describe('模式化素材库', () => {
-  const renderLibrary = (shot: Shot) => renderToStaticMarkup(createElement(
-    MaterialGallery,
-    {
-      shot,
-      productionEligible: true,
-      onOpen: () => undefined,
-      onRefresh: async () => undefined,
-      onToast: () => undefined,
-    },
-  ))
-
-  const materialShot = (
-    mode: NonNullable<Shot['mode_plan']>['mode'],
-    imageInputs: NonNullable<ShotVersion['image_inputs']>,
-  ) => ({
-    id: `shot-${mode}`,
-    shot_no: 1,
-    mode_plan: { mode, confidence: 1 },
-    adopted_version_id: null,
-    versions: [{
-      ...version('v1', 'succeeded', imageInputs.reference_images ?? [], 1),
-      image_inputs: imageInputs,
-    }],
-  }) as unknown as Shot
-
-  it('按计划模式选择唯一素材类型', () => {
-    expect(shotMaterialLibraryKind(materialShot(
-      'FIRST_LAST_FRAME_MODE', {},
-    ))).toBe('keyframes')
-    expect(shotMaterialLibraryKind(materialShot(
-      'REFERENCE_IMAGE_MODE', {},
-    ))).toBe('references')
-    expect(shotMaterialLibraryKind(materialShot(
-      'VIDEO_INPUT_MODE', {},
-    ))).toBe('video')
+describe('选中段落的稳定性', () => {
+  it('当前选中仍存在时保持不变', () => {
+    expect(resolveSelectedShotId([{ id: 's1' }, { id: 's2' }], 's2')).toBe('s2')
   })
-
-  it('首尾帧模式只展示关键帧', () => {
-    const shot = materialShot('FIRST_LAST_FRAME_MODE', {
-      mode: 'FIRST_LAST_FRAME_MODE',
-      first_frame_image_url: '/media/first.jpg',
-      first_frame_source: 'PREVIOUS_STATIC_TAIL',
-      last_frame_image_url: '/media/last.jpg',
-      last_frame_source: 'STATIC_BOUNDARY_ASSET',
-    })
-    const html = renderLibrary(shot)
-
-    expect(html).toContain('本镜关键帧')
-    expect(html).toContain('首帧')
-    expect(html).toContain('尾帧')
-    expect(html).toContain('上一镜静态尾帧')
-    expect(html).not.toContain('实际提交参考图')
-    expect(html).not.toContain('<video')
-    expect(currentMaterialVersion(shot)?.version.id).toBe('v1')
+  it('当前选中已消失时回退到第一段', () => {
+    expect(resolveSelectedShotId([{ id: 's1' }, { id: 's2' }], 's9')).toBe('s1')
   })
-
-  it('参考图模式只展示参考图', () => {
-    const shot = materialShot('REFERENCE_IMAGE_MODE', {
-      mode: 'REFERENCE_IMAGE_MODE',
-      reference_images: [{
-        id: 'ref',
-        type: 'scene',
-        source: 'asset_library',
-        image_url: '/media/ref.jpg',
-        selectedForSeedance: true,
-      }],
-    })
-    const html = renderLibrary(shot)
-
-    expect(html).toContain('本镜参考图')
-    expect(html).toContain('实际提交参考图')
-    expect(html).toContain('场景参考')
-    expect(html).not.toContain('关键帧 ·')
-    expect(html).not.toContain('<video')
-  })
-
-  it('视频参考模式只展示视频输入', () => {
-    const shot = materialShot('VIDEO_INPUT_MODE', {
-      mode: 'VIDEO_INPUT_MODE',
-      video_input_url: '/media/upstream.mp4',
-      video_input_source_revision_id: 'upstream-v1',
-    })
-    const html = renderLibrary(shot)
-
-    expect(html).toContain('本镜视频输入')
-    expect(html).toContain('<video')
-    expect(html).toContain('/media/upstream.mp4')
-    expect(html).not.toContain('实际提交参考图')
-    expect(html).not.toContain('关键帧 ·')
-    expect(boundarySourceLabel('PREVIOUS_ADOPTED_TAIL'))
-      .toBe('上一镜真实视频尾帧')
-    expect(referenceLibraryLabel({
-      id: 'plot',
-      type: 'plot_key_frame',
-      source: 'seedream_generated',
-    })).toBe('剧情参考图')
+  it('没有任何段落时返回 null', () => {
+    expect(resolveSelectedShotId([], 's1')).toBeNull()
   })
 })
 
-describe('生成台对象稳定性', () => {
-  it('视频模型拒绝输入时展示换模型提示，不视为自动降级', () => {
-    expect(isVideoModelInputRejection(
-      '当前模型拒绝（VIDEO_INPUT_PRIVACY_REJECTED · ERR-1）',
-      null,
-    )).toBe(true)
-    expect(isVideoModelInputRejection(
-      '普通网络错误',
-      'VIDEO_INPUT_PRIVACY_REJECTED',
-    )).toBe(true)
-    expect(isVideoModelInputRejection('普通网络错误', null)).toBe(false)
-  })
-
-  it('历史模式计划缺少 reason_codes 时使用兼容文案', () => {
-    expect(videoModeReasonText(undefined)).toBe('由整集关系计划生成')
-    expect(videoModeReasonText(['FIRST_SHOT_NO_PREDECESSOR']))
-      .toBe('FIRST_SHOT_NO_PREDECESSOR')
-  })
-
-  it('历史模式计划可完整渲染文字内容，不因缺少新字段崩溃', () => {
-    const shot = {
-      id: 's1',
-      shot_no: 1,
-      mode_plan: {
-        mode: 'REFERENCE_IMAGE_MODE',
-        confidence: 1,
-      },
-      dialogues: [],
-      characters: [],
-      versions: [],
-      duration_s: 5,
-      shot_size: '远景',
-      camera_move: '固定',
-      scene_setting: '广场',
-      transition: '硬切',
-      continuity_from_prev: 0,
-      action_desc: '角色走入画面。',
-      source_excerpt: '',
-    } as unknown as Shot
-
-    const html = renderToStaticMarkup(createElement(InfoSection, { shot }))
-
-    expect(html).toContain('由整集关系计划生成')
-    expect(html).toContain('参考图')
-    expect(html).toContain('等待 AI 完成 Physical Performance 编译')
-  })
-
-  it('上游确认或运行指针收口时会重新加载生成资格', () => {
-    const running = reviewContextRefreshKey({
-      status: 'scripting',
-      storyboard_artifact_id: 'board-1',
-      active_storyboard_run_id: 'run-1',
+describe('技术校验解析', () => {
+  it('解出时长、体积与校验结论', () => {
+    const raw = JSON.stringify({
+      passed: true, issues: [], evidence: { duration_s: 15.104, size_bytes: 6164748 },
     })
-    const confirmed = reviewContextRefreshKey({
-      status: 'confirmed',
-      storyboard_artifact_id: 'board-2',
-      active_storyboard_run_id: null,
+    expect(parseTechnicalValidation(raw)).toEqual({
+      passed: true, issues: [], durationS: 15.104, sizeBytes: 6164748,
     })
-    expect(confirmed).not.toBe(running)
+  })
+  it('空值或非法 JSON 返回 null，不抛错', () => {
+    expect(parseTechnicalValidation(null)).toBeNull()
+    expect(parseTechnicalValidation(undefined)).toBeNull()
+    expect(parseTechnicalValidation('{not json')).toBeNull()
+  })
+})
+
+describe('分辨率展示', () => {
+  it('有宽高时格式化为 宽×高', () => {
+    expect(formatResolution(720, 1280)).toBe('720×1280')
+  })
+  it('尚未取得宽高时提示解析中，不显示 0×0', () => {
+    expect(formatResolution(0, 0)).toBe('解析中…')
+  })
+})
+
+describe('参考图按版本摊平', () => {
+  it('只摊平真正带参考图的版本', () => {
+    const refs: ReferenceImage[] = [{ id: 'r1', type: 'character', source: 'asset_library' }]
+    const s = packShot({
+      versions: [
+        version({ id: 'v1', image_inputs: { reference_images: refs } }),
+        version({ id: 'v2', image_inputs: { reference_images: [] } }),
+        version({ id: 'v3' }),
+      ],
+    })
+    expect(extractReferenceImagesByVersion(s)).toEqual({ v1: refs })
   })
 
-  it('生成资格永久错误停止自动重试，服务端和网络故障继续恢复', () => {
-    expect(shouldRetryReviewContextError({ status: 422 })).toBe(false)
-    expect(shouldRetryReviewContextError({ status: 500 })).toBe(true)
-    expect(shouldRetryReviewContextError({ status: 0 })).toBe(true)
-    expect(shouldRetryReviewContextError(new Error('网络中断'))).toBe(true)
+  it('人物/场景参考图带身份标签，其余退回来源', () => {
+    expect(referenceImageLabel({ id: 'r1', type: 'character', source: 'asset_library', entity_name: '孟浩' }))
+      .toBe('人物 · 孟浩')
+    expect(referenceImageLabel({ id: 'r2', type: 'scene', source: 'asset_library', entity_name: '山巅' }))
+      .toBe('场景 · 山巅')
+    expect(referenceImageLabel({ id: 'r3', type: 'plot_key_frame', source: 'seedream_generated' }))
+      .toBe('seedream_generated')
+  })
+})
+
+describe('生成按钮可用性判据', () => {
+  it('提交中时禁用', () => {
+    expect(segmentGenerateDisabledReason({ submitting: true, currentStatus: null, eligible: true, blockers: [] }))
+      .toBe('正在提交生成请求')
+  })
+  it('已有活动任务时禁用，不允许重复提交', () => {
+    expect(segmentGenerateDisabledReason({ submitting: false, currentStatus: 'running', eligible: true, blockers: [] }))
+      .toBe('当前已有任务在处理中')
+    expect(segmentGenerateDisabledReason({ submitting: false, currentStatus: 'queued', eligible: true, blockers: [] }))
+      .toBe('当前已有任务在处理中')
+  })
+  it('生成资格尚未加载完成时给出等待文案，不是假装通过', () => {
+    expect(segmentGenerateDisabledReason({ submitting: false, currentStatus: null, eligible: null, blockers: [] }))
+      .toBe('正在核对生成资格')
+  })
+  it('资格未通过时把 blockers 原文透出', () => {
+    expect(segmentGenerateDisabledReason({
+      submitting: false, currentStatus: null, eligible: false, blockers: ['分镜尚未确认'],
+    })).toBe('分镜尚未确认')
+    expect(segmentGenerateDisabledReason({ submitting: false, currentStatus: null, eligible: false, blockers: [] }))
+      .toBe('当前生成资格未通过')
+  })
+  it('满足全部条件时可用', () => {
+    expect(segmentGenerateDisabledReason({ submitting: false, currentStatus: 'succeeded', eligible: true, blockers: [] }))
+      .toBe('')
+    expect(segmentGenerateDisabledReason({ submitting: false, currentStatus: null, eligible: true, blockers: [] }))
+      .toBe('')
+  })
+})
+
+describe('八态状态文案与色调', () => {
+  it('覆盖任务状态流转要求的全部状态', () => {
+    expect(versionStatusLabel('queued')).toBe('排队中')
+    expect(versionStatusLabel('waiting_provider')).toBe('等待生成服务')
+    expect(versionStatusLabel('running')).toBe('生成中')
+    expect(versionStatusLabel('succeeded')).toBe('已完成')
+    expect(versionStatusLabel('failed')).toBe('失败')
+    expect(versionStatusLabel('waiting_human')).toBe('等待人工处理')
+    expect(versionStatusLabel('quarantined')).toBe('已隔离（不可用）')
+  })
+  it('未知状态原样透出，不假装成已知值', () => {
+    expect(versionStatusLabel('some_new_status')).toBe('some_new_status')
+  })
+  it('色调三分：成功绿、失败/隔离红、活动态金，其余灰', () => {
+    expect(versionStatusTone('succeeded')).toBe('green')
+    expect(versionStatusTone('failed')).toBe('red')
+    expect(versionStatusTone('quarantined')).toBe('red')
+    expect(versionStatusTone('running')).toBe('gold')
+    expect(versionStatusTone('waiting_human')).toBe('grey')
+    expect(stampClassForStatus('succeeded')).toBe('stamp green')
+  })
+})
+
+// 「生成所有视频」批量入口（2026-08-26 加）：按钮 -> DecisionDialog -> POST
+// /episodes/{id}/generate（only_incomplete=true）。判据必须与后端
+// _generate_episode_core 的 completed_ids 查询同一口径：只有已采纳或已有成功候选
+// 的段才算「已完成」被跳过，生成中/需处理的段仍会被送进这次请求。
+describe('批量生成预估：口径对齐后端 only_incomplete（只有已完成的段被跳过）', () => {
+  const pending = shot({ id: 's-pending', est_cost_cny: 12 })
+  const generating = shot({
+    id: 's-generating', est_cost_cny: 12, versions: [version({ id: 'v-g', status: 'running' })],
+  })
+  const succeeded = shot({
+    id: 's-done', est_cost_cny: 12, versions: [version({ id: 'v-s', status: 'succeeded' })],
+  })
+  const attention = shot({
+    id: 's-attn', est_cost_cny: 12, versions: [version({ id: 'v-a', status: 'failed' })],
   })
 
-  it('5 镜变 4 镜时不会把已删镜头静默换成相邻镜头', () => {
-    const result = resolveStableShotSelection(
-      [{ id: 's1' }, { id: 's2' }, { id: 's3' }, { id: 's4' }],
-      's5',
-      true,
+  it('已完成的段不计入提交数，也不计入新增费用', () => {
+    const estimate = bulkGenerateEstimate([pending, generating, succeeded, attention])
+    expect(estimate.totalCount).toBe(4)
+    expect(estimate.succeededCount).toBe(1)
+    expect(estimate.generatingCount).toBe(1)
+    expect(estimate.attentionCount).toBe(1)
+    expect(estimate.pendingCount).toBe(1)
+    expect(estimate.submitCount).toBe(3)
+  })
+
+  it('新增费用只算待生成 + 需处理，生成中的段走去重复用不计费', () => {
+    const estimate = bulkGenerateEstimate([pending, generating, succeeded, attention])
+    expect(estimate.newCostShotIds.slice().sort()).toEqual(['s-attn', 's-pending'])
+    expect(estimate.estimatedNewCostCny).toBeCloseTo(24)
+  })
+
+  it('全部已完成时提交数与新增费用都是 0，不虚报', () => {
+    const estimate = bulkGenerateEstimate([succeeded])
+    expect(estimate.submitCount).toBe(0)
+    expect(estimate.estimatedNewCostCny).toBe(0)
+    expect(estimate.newCostShotIds).toEqual([])
+  })
+})
+
+describe('批量生成按钮可用性判据', () => {
+  it('提交中时禁用', () => {
+    expect(bulkGenerateDisabledReason({ submitting: true, eligible: true, blockers: [], submitCount: 3 }))
+      .toBe('正在提交批量生成请求')
+  })
+  it('资格尚未加载完成时给出等待文案，不是假装通过', () => {
+    expect(bulkGenerateDisabledReason({ submitting: false, eligible: null, blockers: [], submitCount: 3 }))
+      .toBe('正在核对生成资格')
+  })
+  it('资格未通过时把 blockers 原文透出，不吞掉真实原因', () => {
+    expect(bulkGenerateDisabledReason({
+      submitting: false, eligible: false, blockers: ['分镜尚未确认'], submitCount: 3,
+    })).toBe('分镜尚未确认')
+    expect(bulkGenerateDisabledReason({ submitting: false, eligible: false, blockers: [], submitCount: 3 }))
+      .toBe('当前生成资格未通过')
+  })
+  it('没有待提交片段时禁用并如实说明原因', () => {
+    expect(bulkGenerateDisabledReason({ submitting: false, eligible: true, blockers: [], submitCount: 0 }))
+      .toBe('全部片段已完成，无需再次生成')
+  })
+  it('满足全部条件时可用', () => {
+    expect(bulkGenerateDisabledReason({ submitting: false, eligible: true, blockers: [], submitCount: 3 }))
+      .toBe('')
+  })
+})
+
+describe('批量生成确认弹窗文案：写什么就必须做什么，不许弹窗一套、实际另一套', () => {
+  it('三种命运在 details 里逐条交代：待生成/需处理会花钱，生成中去重不花钱，已完成不会重来', () => {
+    const estimate = bulkGenerateEstimate([
+      shot({ id: 'p1', est_cost_cny: 12 }),
+      shot({ id: 'g1', est_cost_cny: 12, versions: [version({ id: 'vg', status: 'running' })] }),
+      shot({ id: 'd1', est_cost_cny: 12, versions: [version({ id: 'vd', status: 'succeeded' })] }),
+      shot({ id: 'a1', est_cost_cny: 12, versions: [version({ id: 'va', status: 'failed' })] }),
+    ])
+    const copy = bulkGenerateDialogCopy(estimate)
+    expect(copy.summary).toBe('本次将提交 3 段，预计新增费用 ￥24.00')
+    expect(copy.details.some(line => line.includes('待生成 1 段'))).toBe(true)
+    expect(copy.details.some(line => line.includes('需处理 1 段将重新尝试生成'))).toBe(true)
+    expect(copy.details.some(line => line.includes('生成中的 1 段') && line.includes('不会重复扣费'))).toBe(true)
+    expect(copy.details.some(line => line.includes('已完成的 1 段不会重新生成'))).toBe(true)
+  })
+  it('没有可提交片段时如实说明，不留一句诱导确认的旧文案', () => {
+    const estimate = bulkGenerateEstimate([
+      shot({ id: 'd1', est_cost_cny: 12, versions: [version({ id: 'vd', status: 'succeeded' })] }),
+    ])
+    expect(bulkGenerateDialogCopy(estimate).summary).toBe('本次没有可提交的片段')
+  })
+})
+
+describe('CON-409（REVIEW_QUALIFICATION_CHANGED）自动重试：只认这一种 409，只重试一次', () => {
+  it('命中时直接取服务端已经带回来的新资格版本号，不用再发一次 GET', () => {
+    const err = new ApiError(
+      409, '上游或资产资格已变化，请重新预演', 'REVIEW_QUALIFICATION_CHANGED', undefined, undefined,
+      { code: 'REVIEW_QUALIFICATION_CHANGED', qualification: { qualification_version: 'fresh-v2' } },
     )
-    expect(result).toEqual({ selectedShotId: 's5', tombstoneShotId: 's5' })
+    expect(qualificationChangedRetryVersion(err)).toBe('fresh-v2')
   })
-
-  it('只有从未保存过镜头身份时才默认首镜', () => {
-    expect(resolveStableShotSelection([{ id: 's1' }], null, false))
-      .toEqual({ selectedShotId: 's1', tombstoneShotId: null })
+  it('其余 409（资格未通过/资产未就绪等）原样交还，不在这里悄悄吞掉', () => {
+    const blocked = new ApiError(
+      409, '当前不可执行正向媒体生产', 'REVIEW_PRODUCTION_BLOCKED', undefined, undefined,
+      { code: 'REVIEW_PRODUCTION_BLOCKED' },
+    )
+    expect(qualificationChangedRetryVersion(blocked)).toBeNull()
   })
-
-  it('不同分镜制品使用独立位置键，重生成后不会读取旧镜头身份', () => {
-    expect(reviewWallPositionKey('p1', 'e1', 'board-v1'))
-      .toBe('manju:review-wall:p1:e1:board-v1')
-    expect(reviewWallPositionKey('p1', 'e1', 'board-v2'))
-      .toBe('manju:review-wall:p1:e1:board-v2')
-    expect(shouldPersistReviewWallPosition(
-      'manju:review-wall:p1:e1:board-v1',
-      'manju:review-wall:p1:e1:board-v2',
-      'old-shot',
-    )).toBe(false)
-    expect(shouldPersistReviewWallPosition(
-      'manju:review-wall:p1:e1:board-v2',
-      'manju:review-wall:p1:e1:board-v2',
-      'new-shot',
-    )).toBe(true)
-  })
-
-  it('丢弃乱序返回的旧镜头详情', () => {
-    expect(shouldCommitShotDetail(4, 5, 's1', 's2')).toBe(false)
-    expect(shouldCommitShotDetail(5, 5, 's2', 's2')).toBe(true)
-  })
-
-  it('同一 shotId 的内容/版本刷新会生成可见差异摘要', () => {
-    const before = { id: 's1', source_excerpt: '旧原文', action_desc: '动作', versions: [] } as unknown as Shot
-    const after = { id: 's1', source_excerpt: '新原文', action_desc: '动作', versions: [version('v1', 'queued', [], 1)] } as unknown as Shot
-    expect(describeShotUpdate(before, after)).toContain('镜头文字/连续性内容已更新')
-    expect(describeShotUpdate(before, after)).toContain('视频版本或采用关系已更新')
-  })
-
-  it('轮询返回等价的新对象时不重复请求镜头详情', () => {
-    const first = {
-      id: 's1',
-      adopted_version_id: null,
-      video_status: 'generating',
-      video_stale: false,
-      versions: [version('v1', 'running', [], 1)],
-    } as Shot
-    const sameSnapshot = JSON.parse(JSON.stringify(first)) as Shot
-
-    expect(shotDetailRefreshKey(sameSnapshot)).toBe(shotDetailRefreshKey(first))
-  })
-
-  it('视频状态或参考图流出时会刷新镜头详情', () => {
-    const running = {
-      id: 's1',
-      adopted_version_id: null,
-      video_status: 'generating',
-      video_stale: false,
-      versions: [version('v1', 'running', [], 1)],
-    } as Shot
-    const withReference = {
-      ...running,
-      versions: [version('v1', 'running', [{
-        id: 'ref-1',
-        type: 'character',
-        source: 'asset_library',
-        image_url: '/assets/ref-1.png',
-        selectedForSeedance: true,
-      }], 1)],
-    } as Shot
-
-    expect(shotDetailRefreshKey(withReference)).not.toBe(shotDetailRefreshKey(running))
-  })
-})
-
-describe('视频预览工作区', () => {
-  it('只把类型化 create 未决状态进入人工恢复路径', () => {
-    expect(isProviderCreateUnresolved({
-      pipeline_status: 'waiting_human',
-      reason_code: 'VIDEO_PROVIDER_CREATE_UNRESOLVED',
-      candidate_count: 0,
-      retake_count: 0,
-    })).toBe(true)
-    expect(isProviderCreateUnresolved({
-      pipeline_status: 'waiting_human',
-      reason_code: 'VIDEO_INPUT_REPAIR_REQUIRED',
-      candidate_count: 0,
-      retake_count: 0,
-    })).toBe(false)
-  })
-
-  it('每个候选读取独立的定稿倍速，并对异常历史值回退为 1×', () => {
-    expect(videoPlaybackRate({ playback_rate: 1.5 })).toBe(1.5)
-    expect(videoPlaybackRate({ playback_rate: null })).toBe(1)
-    expect(videoPlaybackRate({ playback_rate: 9 })).toBe(1)
-  })
-
-  it('只保留生成与预览相关页签', () => {
-    expect(REVIEW_TABS.map(tab => tab.label)).toEqual(['文字内容', '素材库', '视频预览'])
-  })
-
-  it('默认预览最新的可播放候选，并保留用户当前选择', () => {
-    const versions = [
-      { ...version('v1', 'succeeded', [], 1), video_url: '/v1.mp4' },
-      version('v3', 'running', [], 3),
-      { ...version('v2', 'succeeded', [], 2), video_url: '/v2.mp4' },
-    ]
-
-    expect(resolvePreviewVersionId(versions, null)).toBe('v2')
-    expect(resolvePreviewVersionId(versions, 'v1')).toBe('v1')
-    expect(resolvePreviewVersionId(versions, 'deleted')).toBe('v2')
-  })
-
-  it('参考图承载记录不会进入视频候选列表', () => {
-    const versions = [
-      version('refs', 'references_ready', [], 3),
-      version('failed', 'failed', [], 2),
-      version('ready', 'succeeded', [], 1),
-    ]
-    expect(visibleVideoVersions(versions).map(item => item.id)).toEqual(['failed', 'ready'])
-  })
-
-  it('只有图像没有视频时仍能识别可清空资源', () => {
-    const versions = [
-      version('refs', 'references_ready', [
-        { id: 'character', type: 'character', source: 'asset_library' },
-        { id: 'keyframe', type: 'plot_key_frame', source: 'seedream_generated' },
-      ], 1),
-    ]
-    expect(visibleVideoVersions(versions)).toEqual([])
-    expect(countReferenceImages(versions)).toBe(2)
-  })
-
-  it('失败候选只在列表显示可操作摘要，原始错误留给详情区', () => {
-    const failed = {
-      ...version('failed', 'failed', [], 2),
-      error: 'provider_internal_stack_trace',
-    }
-    expect(videoCandidateNote(failed)).toBe('生成未完成，点击查看错误详情')
-    expect(videoCandidateNote({ ...version('ready', 'succeeded', [], 1), video_url: '/v1.mp4' }))
-      .toBe('点击卡片预览此候选')
-  })
-
-  it('付费提交按钮直接说明动作与预计费用，不暗示还有下一步确认', () => {
-    expect(videoGenerationConfirmLabel('reroll', 4)).toBe('确认新建候选 · 预计 ￥4.00')
-    expect(videoGenerationConfirmLabel('rewrite', 4)).toBe('确认让 AI 按要求重写 · 预计 ￥4.00')
-    expect(videoGenerationConfirmLabel('critique', 4)).toBe('确认按质检问题修复 · 预计 ￥4.00')
-  })
-})
-
-describe('整集生成按钮状态', () => {
-  it('新建整集任务走可补齐资产的 Supervisor，并绑定当前资格版本', () => {
-    expect(episodeCompletionRequest('qualification-v3', 593.6)).toEqual({
-      mode: 'fresh',
-      budget_cap_cny: 593.6,
-      wall_clock_cap_s: EPISODE_COMPLETION_WALL_CLOCK_CAP_S,
-      allow_fallback_adopt: true,
-      allow_storyboard_edit: false,
-      qualification_version: 'qualification-v3',
-    })
-    expect(EPISODE_COMPLETION_BUDGET_CAP_CNY).toBe(150)
-    expect(episodeCompletionBudgetCap(20)).toBe(150)
-    expect(episodeCompletionBudgetCap(593.601)).toBe(593.61)
-    expect(episodeCompletionBudgetCap(593.6, 621.6)).toBe(621.6)
-    expect(episodeCompletionWallClockCap(29_681_000)).toBe(11 * 60 * 60)
-    expect(episodeCompletionRequest(
-      'qualification-v3',
-      593.6,
-      621.6,
-      29_681_000,
-    )).toEqual({
-      mode: 'fresh',
-      budget_cap_cny: 621.6,
-      wall_clock_cap_s: 11 * 60 * 60,
-      allow_fallback_adopt: true,
-      allow_storyboard_edit: false,
-      qualification_version: 'qualification-v3',
-    })
-    expect(EPISODE_COMPLETION_WALL_CLOCK_CAP_S).toBe(4 * 60 * 60)
-  })
-
-  it('运行时停止，暂停或失败停止后继续，其余情况生成', () => {
-    expect(episodeGenerationIsActive(false, 'run-active', 0)).toBe(true)
-    expect(episodeGenerationIsActive(false, null, 0)).toBe(false)
-    expect(episodeGenerationAction(true, 0, 0)).toBe('stop')
-    expect(episodeGenerationAction(false, 2, 0)).toBe('resume')
-    expect(episodeGenerationAction(false, 0, 1)).toBe('resume')
-    expect(episodeGenerationAction(false, 2, 1, false)).toBe('generate')
-    expect(episodeGenerationAction(false, 0, 0)).toBe('generate')
-  })
-
-  it('预算暂停镜头不冒充活动任务', () => {
-    const paused = {
-      video_status: 'generating',
-      pipeline: { pipeline_status: 'paused_budget' },
-      versions: [],
-    } as unknown as Shot
-    const running = {
-      video_status: 'generating',
-      pipeline: { pipeline_status: 'waiting_provider' },
-      versions: [],
-    } as unknown as Shot
-
-    expect(shotHasActiveGeneration(paused)).toBe(false)
-    expect(shotHasPausedGeneration(paused)).toBe(true)
-    expect(shotHasActiveGeneration(running)).toBe(true)
-    expect(shotHasPausedGeneration(running)).toBe(false)
-  })
-
-  it('异步任务部分完成后暴露持久错误，不再冒充视频生成中', () => {
-    expect(incompleteVideoSupervisorState({
-      run_id: 'run-partial',
-      run_status: 'PARTIAL',
-      outcome: 'VIDEO_PLAN_INVALID',
-      task_running: false,
-      active_media_jobs: 0,
-    })).toEqual({
-      outcome: 'VIDEO_PLAN_INVALID',
-      runId: 'run-partial',
-    })
-    expect(incompleteVideoSupervisorState({
-      run_id: 'run-live',
-      run_status: 'RUNNING',
-      outcome: null,
-      task_running: true,
-      active_media_jobs: 0,
-    })).toBeNull()
+  it('非 409 或非 ApiError 都不触发重试', () => {
+    expect(qualificationChangedRetryVersion(new Error('network down'))).toBeNull()
+    expect(qualificationChangedRetryVersion(new ApiError(500, 'boom'))).toBeNull()
   })
 })

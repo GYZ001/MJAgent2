@@ -308,9 +308,15 @@ export const api = {
     request("POST", path, undefined, { form }),
 
   /* ── 便捷方法 ── */
-  episodeGenerate: (episodeId: string, idempotencyKey: string) =>
+  episodeGenerate: (
+    episodeId: string,
+    idempotencyKey: string,
+    options?: { onlyIncomplete?: boolean; qualificationVersion?: string },
+  ): Promise<EpisodeGenerateResult> =>
     request("POST", `/episodes/${episodeId}/generate`, {
       idempotency_key: idempotencyKey,
+      only_incomplete: options?.onlyIncomplete,
+      qualification_version: options?.qualificationVersion,
     }),
   createVideoGenerationPlan: (
     episodeId: string,
@@ -1614,6 +1620,36 @@ export interface EpisodeVideoGenerationPlan {
   created_at: number;
 }
 
+/** POST /episodes/{id}/generate 单条镜头入队结果——成功态在 job_id/reused/active
+ *  之外还可能带 version_id（幂等复用了一条已交付版本）；失败态只有 error/issue_codes，
+ *  整批请求仍返回 200，不会因为其中一段失败让其余段落一起回滚（见
+ *  app/domain/video_ops.py::_generate_episode_core）。 */
+export interface EpisodeGenerateEnqueueResult {
+  shot_id: string;
+  reused?: boolean;
+  job_id?: string;
+  task_accepted?: boolean;
+  active?: boolean;
+  version_id?: string;
+  error?: string;
+  issue_codes?: string[];
+}
+
+export interface EpisodeGenerateResult {
+  episode_video_plan_id: string;
+  plan_revision: number;
+  mode_distribution: Record<string, number>;
+  critical_path_latency_ms: number;
+  estimated_cost: number;
+  enqueued: EpisodeGenerateEnqueueResult[];
+  /** only_incomplete=true 时被跳过的已完成段数——服务端口径，不是前端猜的。 */
+  skipped_completed: number;
+  /** 本次实际提交入队循环的段数（已完成段被 only_incomplete 过滤后剩下的）。 */
+  selected_shots: number;
+  recovered_partial_operation?: boolean;
+  remaining_requires_new_idempotency_key?: boolean;
+}
+
 export interface ReferenceImage {
   id: string;
   image_url?: string | null;
@@ -1688,6 +1724,9 @@ export interface ShotVersion {
   latency_s: number;
   /** 在跑任务的服务端起点（秒）；有值表示这条正在生成，用于实时计时。 */
   running_since?: number | null;
+  /** 供应商任务编号（app/media_exec/run_job.py 写入 shot_versions.provider_task_id）；
+   *  失败/隔离候选排障用，原样透传不翻译。 */
+  provider_task_id?: string | null;
   artifact_id?: string | null;
   adoption_reason?: string | null;
   playback_rate?: number | null;
