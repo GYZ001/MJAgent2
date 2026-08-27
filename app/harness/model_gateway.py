@@ -471,6 +471,7 @@ async def chat(
     call_meta: dict[str, Any] | None = None,
     usage_callback: Callable[[dict[str, Any]], None] | None = None,
     response_format: dict[str, Any] | None = None,
+    provider: str | None = None,
 ) -> str:
     """The only text-model entry point for business stages.
 
@@ -479,7 +480,17 @@ async def chat(
 
     ``response_format`` 用于让网关在生成阶段就约束输出为合法 JSON（json_object /
     json_schema）；仅结构化调用会传入，供应商不支持时适配层自动去掉并重试。
+
+    ``provider`` 显式传入时优先；否则读取
+    ``app.harness.text_provider_scope.current_stage_text_provider()``——世界书/
+    映射台/分镜台的领域任务入口用 ``stage_text_provider(...)`` 包一层后，本函数
+    下游所有调用不必逐个改调用点就能拿到该环节配置的专属文本 provider；两者都
+    没有时为 None，即此前的默认行为（走 ``active_provider("text")``）。
     """
+    if provider is None:
+        from app.harness.text_provider_scope import current_stage_text_provider
+
+        provider = current_stage_text_provider()
     trace = current_trace()
     meta = {
         "gateway": "execution_harness",
@@ -517,6 +528,8 @@ async def chat(
                 "max_tokens": max_tokens,
                 "call_meta": meta,
             }
+            if provider is not None:
+                provider_kwargs["provider"] = provider
             if usage_callback is not None:
                 provider_kwargs["usage_callback"] = usage_callback
             if effective_response_format is not None:
