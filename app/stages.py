@@ -2190,6 +2190,10 @@ async def _resolve_generic_character_candidates(
                 [{"role": "system", "content": SYSTEM_PREFIX},
                  {"role": "user", "content": prompt}],
                 model_type=_RosterIdentityResolution,
+                validate=None,
+                operation_id="character_identity_resolution:" + hashlib.sha256(
+                    f"{label}:{chr(10).join(evidence_blocks)}".encode("utf-8")
+                ).hexdigest(),
                 temperature=0.0,
                 max_tokens=512,
                 call_meta={
@@ -2475,6 +2479,10 @@ async def _recurring_character_names(
                 [{"role": "system", "content": SYSTEM_PREFIX},
                  {"role": "user", "content": prompt}],
                 model_type=_MentionedCharacterImportanceResolution,
+                validate=None,
+                operation_id="mentioned_character_importance:" + hashlib.sha256(
+                    f"{appellation}:{catalog}".encode("utf-8")
+                ).hexdigest(),
                 temperature=0.0,
                 max_tokens=384,
                 call_meta={

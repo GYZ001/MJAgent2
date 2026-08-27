@@ -111,6 +111,45 @@ def test_normalize_roster_prefers_real_name_and_marks_mentioned_only() -> None:
     assert normalized.characters[1].portrait_eligible is False
 
 
+    async def fake_chat(messages, **kwargs):
+        if (kwargs.get("call_meta") or {}).get("stage_key") == "mentioned_character_importance":
+            model_type = kwargs["model_type"]
+            return model_type(
+                verdict="retain", supporting_chapter_index=1,
+                reason="建立持续生效的宗门规则",
+            )
+        return json.dumps({
+            "candidates": [
+                {
+                    "primary_appellation": "靠山老祖",
+                    "formal_name": "",
+                    "onstage_evidence": [
+                        {"chapter_index": 1, "quote": "靠山老祖定下门规。"},
+                        {"chapter_index": 2, "quote": "靠山老祖留下规矩。"},
+                    ],
+                }
+            ]
+        }, ensure_ascii=False)
+
+    async def fake_chat_structured(messages, **kwargs):
+        stage_key = (kwargs.get("call_meta") or {}).get("stage_key")
+        model_type = kwargs["model_type"]
+        if stage_key == "mentioned_character_importance":
+            return model_type(
+                verdict="retain", supporting_chapter_index=1,
+                reason="建立持续生效的宗门规则",
+            )
+        return model_type(verdict="mentioned_only", supporting_segment_index=1)
+
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_chat_structured)
+    ranked = await stages._recurring_character_names([
+        {"idx": 1, "title": "一", "content": "靠山老祖定下门规。"},
+        {"idx": 2, "title": "二", "content": "靠山老祖留下规矩。"},
+    ])
+    assert ranked == [("靠山老祖", "", 0, 2, 2, [])]
+
+
 @pytest.mark.asyncio
 async def test_roll_call_sends_small_parallel_chunks(monkeypatch) -> None:
     active = 0
