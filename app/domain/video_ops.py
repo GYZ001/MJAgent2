@@ -2244,8 +2244,19 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
             if not verify_episode_plan_is_current(plan, conn=conn):
                 raise HTTPException(409, "请求执行的计划已不符合当前生成台输入策略，请重新生成计划")
         elif not bound_plan_id:
+            # Quick generation must never be gated on the AI mode-planning call:
+            # its mode/dependency output is discarded unconditionally by
+            # app.media_exec.enqueue for every episode with
+            # narrative_authority_required=False (100% of the current dataset).
+            # Skip the AI call and publish a deterministic all-reference plan
+            # instead -- real upstream-contract checks (shots exist, storyboard
+            # published, assets resolvable) still run inside generate_episode_plan
+            # and can still raise. The AI-classified path is unchanged for the
+            # explicit /video-generation-plan endpoints and for
+            # app.video_supervisor/app.completion_grant.
             plan = await generate_episode_plan(
                 episode_id, force=bool(body.get("force_replan")), conn=conn,
+                deterministic_only=True,
             )
     except VideoPlanValidationError as exc:
         raise HTTPException(409, {
@@ -2577,7 +2588,14 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
         generate_episode_plan,
     )
     try:
-        plan = await generate_episode_plan(shot_row["episode_id"], conn=conn)
+        # Same rationale as _generate_episode_core: single-shot generate also
+        # triggered a full-episode AI mode-planning call, so one bad model
+        # output anywhere in the episode locked both entry points for every
+        # shot. Skip the AI call here too; real upstream-contract checks still
+        # run and can still raise.
+        plan = await generate_episode_plan(
+            shot_row["episode_id"], conn=conn, deterministic_only=True,
+        )
         if (
             body.get("reroll")
             or body.get("with_critique")

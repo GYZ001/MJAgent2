@@ -403,7 +403,23 @@ def apply_scene_boundary_strategy(
     *,
     scene_identity_by_shot_id: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Turn scene relations into a deterministic shared-boundary execution plan."""
+    """Force every shot to reference-image mode; frame-chaining is retired.
+
+    2026-08-26 (docs/STORYBOARD_PROMPT_IR_DESIGN.md, product decision frozen by
+    the user): only ``REFERENCE_IMAGE_MODE`` is ever executed. This function used
+    to assign ``FIRST_FRAME_MODE`` + a previous-adopted-tail dependency to shots
+    that share a scene with their predecessor. That plan data was silently
+    discarded at generation time -- ``app.media_exec.enqueue`` forces
+    ``REFERENCE_IMAGE_MODE`` unconditionally for every episode with
+    ``narrative_authority_required=False`` (verified against real generated
+    ``shot_versions.image_inputs.mode`` for EP1/EP6, where the persisted plan
+    said ``FIRST_FRAME_MODE`` but the actual video was generated in reference
+    mode). Keeping the plan in that shape wrote a fact into ``shots.mode_plan``
+    (displayed read-only to the user as "the model's decision") that never
+    matched what actually happened. Scene-entry classification is kept only to
+    label *why* a shot's mode is what it is in the audit trail below, not to
+    branch the outcome.
+    """
     changes: list[dict[str, Any]] = []
     ordered = sorted(shots, key=lambda item: item.shot_no)
     previous: ShotVideoGenerationPlan | None = None
@@ -415,64 +431,34 @@ def apply_scene_boundary_strategy(
             previous=previous,
             scene_identity_by_shot_id=scene_identities,
         )
-        if scene_entry:
-            previous_mode = item.mode
-            item.mode = VideoGenerationMode.REFERENCE_IMAGE_MODE
-            item.planned_mode = item.mode
-            item.video_input_intent = None
-            item.depends_on_shot_id = None
-            item.state_dependency = "none"
-            item.motion_dependency = "none"
-            item.required_assets = [
-                asset for asset in item.required_assets
-                if asset.role in {
-                    "identity_reference",
-                    "scene_reference",
-                }
-            ]
-            reason_code = (
-                "FIRST_SHOT_NO_PREDECESSOR"
-                if index == 0 else "SCENE_ENTRY_REFERENCE_IMAGE"
-            )
-            if reason_code not in item.reason_codes:
-                item.reason_codes.append(reason_code)
-            if previous_mode != item.mode:
-                changes.append({
-                    "shot_id": item.shot_id,
-                    "field": "mode",
-                    "from": previous_mode.value,
-                    "to": item.mode.value,
-                    "reason": "scene_entry_requires_reference_image",
-                })
-            previous = item
-            continue
-
-        if previous is None:
-            continue
         previous_mode = item.mode
-        item.mode = VideoGenerationMode.FIRST_FRAME_MODE
+        item.mode = VideoGenerationMode.REFERENCE_IMAGE_MODE
         item.planned_mode = item.mode
         item.video_input_intent = None
-        first_source = AssetSource.PREVIOUS_ADOPTED_TAIL
-        item.depends_on_shot_id = previous.shot_id
+        item.depends_on_shot_id = None
+        item.state_dependency = "none"
+        item.motion_dependency = "none"
         item.required_assets = [
-            PlanAssetRequirement(
-                role="first_frame",
-                source=first_source,
-                source_shot_id=previous.shot_id,
-            ),
+            asset for asset in item.required_assets
+            if asset.role in {
+                "identity_reference",
+                "scene_reference",
+            }
         ]
-        reason_code = "IN_SCENE_PREVIOUS_VIDEO_TAIL"
+        reason_code = (
+            "FIRST_SHOT_NO_PREDECESSOR" if index == 0
+            else "SCENE_ENTRY_REFERENCE_IMAGE" if scene_entry
+            else "IN_SCENE_REFERENCE_IMAGE_ONLY"
+        )
         if reason_code not in item.reason_codes:
             item.reason_codes.append(reason_code)
         if previous_mode != item.mode:
             changes.append({
                 "shot_id": item.shot_id,
-                "field": "mode_and_boundary_source",
+                "field": "mode",
                 "from": previous_mode.value,
                 "to": item.mode.value,
-                "first_frame_source": first_source.value,
-                "reason": "shared_scene_boundary_strategy",
+                "reason": "reference_image_mode_only",
             })
         previous = item
     return changes
@@ -1281,64 +1267,27 @@ def validate_episode_plan(
     if normalized and normalized[0].depends_on_shot_id:
         issues.append({"code": "FIRST_SHOT_HAS_DEPENDENCY", "shot_id": normalized[0].shot_id})
 
-    previous_item: ShotVideoGenerationPlan | None = None
-    scene_identity_by_shot_id = {
-        shot_id: _scene_identity(row)
-        for shot_id, row in by_id.items()
-    }
-    for index, item in enumerate(normalized):
-        scene_entry = _is_scene_entry(
-            index=index,
-            item=item,
-            previous=previous_item,
-            scene_identity_by_shot_id=scene_identity_by_shot_id,
-        )
-        if scene_entry:
-            if item.mode != VideoGenerationMode.REFERENCE_IMAGE_MODE:
-                issues.append({
-                    "code": "SCENE_ENTRY_MODE_MISMATCH",
-                    "shot_id": item.shot_id,
-                    "expected_mode": VideoGenerationMode.REFERENCE_IMAGE_MODE.value,
-                })
-            previous_item = item
-            continue
-        if item.mode != VideoGenerationMode.FIRST_FRAME_MODE:
-            issues.append({
-                "code": "IN_SCENE_MODE_MISMATCH",
-                "shot_id": item.shot_id,
-                "expected_mode": VideoGenerationMode.FIRST_FRAME_MODE.value,
-            })
-            previous_item = item
-            continue
-        first = next(
-            (asset for asset in item.required_assets if asset.role == "first_frame"),
-            None,
-        )
-        expected_source = AssetSource.PREVIOUS_ADOPTED_TAIL
-        if first is None or first.source != expected_source:
-            issues.append({
-                "code": "SCENE_BOUNDARY_SOURCE_MISMATCH",
-                "shot_id": item.shot_id,
-                "expected_source": expected_source.value,
-            })
-        if (
-            first is not None
-            and previous_item is not None
-            and first.source_shot_id != previous_item.shot_id
-        ):
-            issues.append({
-                "code": "SCENE_BOUNDARY_PREVIOUS_SHOT_MISMATCH",
-                "shot_id": item.shot_id,
-                "expected_source_shot_id": previous_item.shot_id,
-            })
-        expected_dependency = previous_item.shot_id if previous_item is not None else None
-        if item.depends_on_shot_id != expected_dependency:
-            issues.append({
-                "code": "SCENE_VIDEO_DEPENDENCY_MISMATCH",
-                "shot_id": item.shot_id,
-                "expected_depends_on_shot_id": expected_dependency,
-            })
-        previous_item = item
+    # 2026-08-26: this used to be a scene-entry/continuation dichotomy loop
+    # (_is_scene_entry() -> REFERENCE_IMAGE_MODE else required FIRST_FRAME_MODE
+    # with a previous-adopted-tail boundary, checked here via
+    # SCENE_ENTRY_MODE_MISMATCH/IN_SCENE_MODE_MISMATCH/SCENE_BOUNDARY_*).  Removed
+    # along with apply_scene_boundary_strategy's FIRST_FRAME_MODE production (see
+    # its docstring): that was the *only* producer of FIRST_FRAME_MODE on the
+    # active generation path, and this loop applied to every shot regardless of
+    # mode, so it would have wrongly rejected any legitimate VIDEO_INPUT_MODE or
+    # FIRST_LAST_FRAME_MODE shot at a "continuation" position too (caught by this
+    # file's own test suite: a VIDEO_INPUT_MODE fixture shot at index 1 with no
+    # explicit scene identity started failing SCENE_ENTRY_MODE_MISMATCH once this
+    # loop was broadened to "every shot must be REFERENCE_IMAGE_MODE" instead of
+    # deleted outright). Per-mode structural correctness (including for
+    # FIRST_FRAME_MODE shots that can still arrive via manual override or the
+    # legacy narrative_authority_required=True path -- enqueue.py:1486-1497 is
+    # unchanged) is still enforced below by the mode dispatch
+    # (``if item.mode == REFERENCE_IMAGE_MODE: ... elif ... FIRST_FRAME_MODE: ...
+    # elif ... FIRST_LAST_FRAME_MODE: ... elif ... VIDEO_INPUT_MODE: ...``); the
+    # first-shot invariant (index 0 must be REFERENCE_IMAGE_MODE, no dependency)
+    # is enforced separately just above by FIRST_SHOT_NO_PREDECESSOR /
+    # FIRST_SHOT_HAS_DEPENDENCY.
 
     graph: dict[str, str | None] = {}
     for item in normalized:
@@ -1631,8 +1580,34 @@ async def generate_episode_plan(
     *,
     force: bool = False,
     conn=None,
+    deterministic_only: bool = False,
 ) -> EpisodeVideoGenerationPlan:
-    """Ask AI once for the whole episode, then publish only a deterministic-valid plan."""
+    """Ask AI once for the whole episode, then publish only a deterministic-valid plan.
+
+    ``deterministic_only=True`` skips the AI relation-classification call
+    entirely and publishes an all-``REFERENCE_IMAGE_MODE`` plan straight from
+    the shot rows (same shape as the pre-existing single-shot special case
+    below, generalized to N shots). Real upstream-contract checks (shots
+    exist, storyboard is published, per-shot asset resolution) still run and
+    can still raise -- those are genuine preconditions, not AI self-report.
+
+    Used by the quick "generate video" entry points
+    (``app.domain.video_ops._generate_episode_core`` /
+    ``_generate_shot_core``): the AI call's mode/dependency output is
+    discarded unconditionally by ``app.media_exec.enqueue`` for every episode
+    with ``narrative_authority_required=False`` -- 100% of episodes in the
+    current dataset (verified: 0/2259 episodes carry a ``narrative_plan``) --
+    so gating those user-facing actions on that call succeeding/parsing/being
+    confident enough is pure risk with no corresponding benefit; three
+    independent real failures this way (self-reported uncertainty, low
+    confidence, an enum literal outside the closed Literal set for a genuine
+    film term the model used) each blocked "generate all videos" or single-shot
+    generate for episodes whose actual generation never consulted the plan's
+    mode decision anyway. The AI-classified path stays intact and is still used
+    by the explicit ``/video-generation-plan`` endpoints and by
+    ``app.video_supervisor``/``app.completion_grant``, where a failed plan
+    should continue to surface as a real, visible error.
+    """
     from app import hiagent
     from app.schemas import extract_json
 
@@ -1921,6 +1896,56 @@ async def generate_episode_plan(
                 "capability_snapshot_id": snapshot.id,
             }),
             shots=[item],
+        )
+        bind_plan_release_identity(plan, list(rows), release_manifest)
+        validate_episode_plan(
+            plan,
+            list(rows),
+            snapshot,
+            release_manifest=release_manifest,
+        )
+        publish_plan(plan, conn=db)
+        db.commit()
+        return plan
+    if deterministic_only:
+        shot_plans = [
+            ShotVideoGenerationPlan(
+                shot_plan_id=new_id("svp"),
+                episode_video_plan_id=plan_id,
+                plan_revision=next_revision,
+                source_storyboard_revision_id=revision_id,
+                shot_id=str(row["id"]),
+                published_shot_id=str(payload["shot_id"]),
+                shot_no=index + 1,
+                mode=VideoGenerationMode.REFERENCE_IMAGE_MODE,
+                reason_codes=(
+                    ["FIRST_SHOT_NO_PREDECESSOR"] if index == 0
+                    else ["DETERMINISTIC_REFERENCE_IMAGE_PLAN"]
+                ),
+                confidence=1.0,
+                estimated_latency_ms=690_000,
+                estimated_cost=0.0,
+                capability_snapshot_id=snapshot.id,
+                input_revision_fingerprints={
+                    "asset_revisions": asset_fingerprints.get(str(row["id"]), ""),
+                },
+            )
+            for index, (row, payload) in enumerate(zip(rows, shot_payload))
+        ]
+        plan = EpisodeVideoGenerationPlan(
+            episode_video_plan_id=plan_id,
+            episode_id=episode_id,
+            plan_revision=next_revision,
+            source_storyboard_revision_id=revision_id,
+            capability_snapshot_id=snapshot.id,
+            planner_provider="deterministic",
+            planner_model="reference-image-only-no-ai-call",
+            planner_prompt_fingerprint=_hash({
+                "shot_ids": [str(row["id"]) for row in rows],
+                "capability_snapshot_id": snapshot.id,
+                "reason": "quick_generation_entry_point_skips_ai_mode_planning",
+            }),
+            shots=shot_plans,
         )
         bind_plan_release_identity(plan, list(rows), release_manifest)
         validate_episode_plan(

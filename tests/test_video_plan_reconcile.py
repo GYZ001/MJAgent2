@@ -94,12 +94,21 @@ def _conn() -> sqlite3.Connection:
                 shot_id="SH-2",
                 published_shot_id="SH-2",
                 shot_no=2,
-                mode=VideoGenerationMode.FIRST_FRAME_MODE,
+                # 2026-08-26: FIRST_FRAME_MODE is retired (first/last-frame
+                # chaining is gone, see apply_scene_boundary_strategy's
+                # docstring) -- validate_episode_plan now rejects it
+                # unconditionally. This fixture's actual point is a shot that
+                # *depends on its predecessor's adopted output* (for the
+                # adoption/staleness/replan tests below); VIDEO_INPUT_MODE is
+                # the still-supported mode that carries that same dependency
+                # shape now.
+                mode=VideoGenerationMode.VIDEO_INPUT_MODE,
+                video_input_intent="MOTION_REFERENCE",
                 depends_on_shot_id="SH-1",
                 required_assets=[
                     PlanAssetRequirement(
-                        role="first_frame",
-                        source=AssetSource.PREVIOUS_ADOPTED_TAIL,
+                        role="previous_adopted_video",
+                        source=AssetSource.PREVIOUS_ADOPTED_VIDEO,
                         source_shot_id="SH-1",
                     ),
                 ],
@@ -295,17 +304,23 @@ def test_scene_boundary_strategy_waits_for_each_previous_video_tail() -> None:
 
     apply_scene_boundary_strategy(shots)
 
-    assert [item.mode for item in shots] == [
-        VideoGenerationMode.REFERENCE_IMAGE_MODE,
-        VideoGenerationMode.FIRST_FRAME_MODE,
-        VideoGenerationMode.FIRST_FRAME_MODE,
-        VideoGenerationMode.REFERENCE_IMAGE_MODE,
-        VideoGenerationMode.FIRST_FRAME_MODE,
-        VideoGenerationMode.FIRST_FRAME_MODE,
-    ]
-    assert [item.depends_on_shot_id for item in shots] == [
-        None, "shot-1", "shot-2", None, "shot-4", "shot-5",
-    ]
+    # 2026-08-26: first/last-frame chaining is retired (product decision frozen
+    # by the user, see apply_scene_boundary_strategy's docstring) -- the function
+    # no longer branches its *output* on relations at all; every shot becomes
+    # REFERENCE_IMAGE_MODE with no dependency and no first_frame asset, no matter
+    # what the model reported. What's lost: the old dependency-chain-wiring
+    # coverage (FIRST_FRAME_MODE + depends_on_shot_id + PREVIOUS_ADOPTED_TAIL
+    # first_frame asset resetting at each scene boundary) has no replacement --
+    # that behavior was deleted, not relocated, so there is nothing left to
+    # protect it.
+    # What's kept: the scene-entry classification is still computed internally
+    # (for the audit-trail reason_codes below) exactly as before, so this test
+    # still protects that _is_scene_entry's relation-based fallback keeps working
+    # when no published scene_identity is supplied (see the companion test
+    # test_published_scene_identity_overrides_ai_boundary_drift below for the
+    # published-identity-overrides-relations precedence case).
+    assert [item.mode for item in shots] == [VideoGenerationMode.REFERENCE_IMAGE_MODE] * 6
+    assert [item.depends_on_shot_id for item in shots] == [None] * 6
     assert [
         next(
             (
@@ -316,13 +331,14 @@ def test_scene_boundary_strategy_waits_for_each_previous_video_tail() -> None:
             None,
         )
         for item in shots
-    ] == [
-        None,
-        AssetSource.PREVIOUS_ADOPTED_TAIL,
-        AssetSource.PREVIOUS_ADOPTED_TAIL,
-        None,
-        AssetSource.PREVIOUS_ADOPTED_TAIL,
-        AssetSource.PREVIOUS_ADOPTED_TAIL,
+    ] == [None] * 6
+    assert [item.reason_codes[-1] for item in shots] == [
+        "FIRST_SHOT_NO_PREDECESSOR",
+        "IN_SCENE_REFERENCE_IMAGE_ONLY",
+        "IN_SCENE_REFERENCE_IMAGE_ONLY",
+        "SCENE_ENTRY_REFERENCE_IMAGE",
+        "IN_SCENE_REFERENCE_IMAGE_ONLY",
+        "IN_SCENE_REFERENCE_IMAGE_ONLY",
     ]
 
 
@@ -356,14 +372,27 @@ def test_published_scene_identity_overrides_ai_boundary_drift() -> None:
         },
     )
 
-    assert [item.mode for item in shots] == [
-        VideoGenerationMode.REFERENCE_IMAGE_MODE,
-        VideoGenerationMode.FIRST_FRAME_MODE,
-        VideoGenerationMode.REFERENCE_IMAGE_MODE,
-        VideoGenerationMode.FIRST_FRAME_MODE,
-    ]
-    assert [item.depends_on_shot_id for item in shots] == [
-        None, "shot-1", None, "shot-3",
+    # 2026-08-26: first/last-frame chaining is retired -- mode/dependency no
+    # longer vary by scene-entry classification at all (see
+    # apply_scene_boundary_strategy's docstring and the companion test above),
+    # so every shot is REFERENCE_IMAGE_MODE with no dependency regardless of
+    # which side (published identity vs. AI-reported relations) "wins". What
+    # this test still protects: shot-2's published identity ("set-a", same as
+    # shot-1) overrides its own relations (spatial=new_space/edit=scene_cut,
+    # which would claim a scene *entry*) into an IN_SCENE_* classification, and
+    # shot-3's published identity ("set-b", different from shot-2's "set-a")
+    # overrides its relations (spatial=same_space/edit=angle_cut, which would
+    # claim a *continuation*) into a SCENE_ENTRY_* classification -- i.e. the
+    # precedence logic itself (published DB identity beats self-reported
+    # relations) still runs and is still observable via reason_codes, even
+    # though it no longer has a mode/dependency consequence.
+    assert [item.mode for item in shots] == [VideoGenerationMode.REFERENCE_IMAGE_MODE] * 4
+    assert [item.depends_on_shot_id for item in shots] == [None] * 4
+    assert [item.reason_codes[-1] for item in shots] == [
+        "FIRST_SHOT_NO_PREDECESSOR",
+        "IN_SCENE_REFERENCE_IMAGE_ONLY",
+        "SCENE_ENTRY_REFERENCE_IMAGE",
+        "IN_SCENE_REFERENCE_IMAGE_ONLY",
     ]
 
 
@@ -700,10 +729,13 @@ def test_recover_equivalent_stale_provider_job_without_new_create(monkeypatch) -
     current = next(item for item in replacement.shots if item.shot_id == "s2")
     assert active_plan_is_current("svp-2", conn=conn) is True
 
+    # mode/planned_mode/actual_mode below must match the fixture's svp-2 mode
+    # (VIDEO_INPUT_MODE, see _conn()'s comment -- FIRST_FRAME_MODE is retired)
+    # for this stale job to read as "equivalent" to the current plan's shot.
     meta = {
-        "mode": "FIRST_FRAME_MODE",
-        "planned_mode": "FIRST_FRAME_MODE",
-        "actual_mode": "FIRST_FRAME_MODE",
+        "mode": "VIDEO_INPUT_MODE",
+        "planned_mode": "VIDEO_INPUT_MODE",
+        "actual_mode": "VIDEO_INPUT_MODE",
         "episode_video_plan_id": "evp-1",
         "shot_plan_id": "svp-2",
         "plan_revision": 1,
@@ -739,8 +771,8 @@ def test_recover_equivalent_stale_provider_job_without_new_create(monkeypatch) -
         """INSERT INTO video_generation_attempts(
                id,shot_plan_id,version_id,attempt_no,planned_mode,actual_mode,
                status,provider_task_id,created_at,updated_at
-           ) VALUES('attempt-stale','svp-2','stale-v',1,'FIRST_FRAME_MODE',
-                    'FIRST_FRAME_MODE','provider_running','provider-task',1,1)"""
+           ) VALUES('attempt-stale','svp-2','stale-v',1,'VIDEO_INPUT_MODE',
+                    'VIDEO_INPUT_MODE','provider_running','provider-task',1,1)"""
     )
     conn.commit()
     monkeypatch.setattr(worker, "get_conn", lambda: conn)

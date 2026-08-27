@@ -121,6 +121,14 @@ def _validate_plan(
 
 
 def test_dependency_dag_keeps_independent_shots_parallel() -> None:
+    # 2026-08-26: FIRST_FRAME_MODE is retired (first/last-frame chaining is gone,
+    # see apply_scene_boundary_strategy's docstring) -- it can no longer appear in
+    # any plan validate_episode_plan accepts. This test's actual subject is the
+    # dependency-DAG / critical-path / parallelism-ratio machinery, which is
+    # mode-agnostic; re-exercise it with VIDEO_INPUT_MODE (still a supported,
+    # dependency-carrying mode; test_first_shot_and_cycle_are_rejected_before_queue
+    # and test_unverified_true_continuation_is_rejected below already use it the
+    # same way) instead of inventing a new fixture shape.
     conn = _conn()
     plan = EpisodeVideoGenerationPlan(
         episode_video_plan_id="evp-1",
@@ -132,24 +140,26 @@ def test_dependency_dag_keeps_independent_shots_parallel() -> None:
             _shot(1, VideoGenerationMode.REFERENCE_IMAGE_MODE),
             _shot(
                 2,
-                VideoGenerationMode.FIRST_FRAME_MODE,
+                VideoGenerationMode.VIDEO_INPUT_MODE,
                 depends_on="SH-1",
+                intent=VideoInputIntent.MOTION_REFERENCE,
                 required_assets=[
                     PlanAssetRequirement(
-                        role="first_frame",
-                        source=AssetSource.PREVIOUS_ADOPTED_TAIL,
+                        role="previous_adopted_video",
+                        source=AssetSource.PREVIOUS_ADOPTED_VIDEO,
                         source_shot_id="SH-1",
                     ),
                 ],
             ),
             _shot(
                 3,
-                VideoGenerationMode.FIRST_FRAME_MODE,
+                VideoGenerationMode.VIDEO_INPUT_MODE,
                 depends_on="SH-2",
+                intent=VideoInputIntent.MOTION_REFERENCE,
                 required_assets=[
                     PlanAssetRequirement(
-                        role="first_frame",
-                        source=AssetSource.PREVIOUS_ADOPTED_TAIL,
+                        role="previous_adopted_video",
+                        source=AssetSource.PREVIOUS_ADOPTED_VIDEO,
                         source_shot_id="SH-2",
                     ),
                 ],
@@ -162,7 +172,7 @@ def test_dependency_dag_keeps_independent_shots_parallel() -> None:
     assert result.shots[0].mode == VideoGenerationMode.REFERENCE_IMAGE_MODE
     assert result.shots[1].depends_on_shot_id == "s1"
     assert result.shots[2].depends_on_shot_id == "s2"
-    assert result.shots[2].required_assets[0].source == AssetSource.PREVIOUS_ADOPTED_TAIL
+    assert result.shots[2].required_assets[0].source == AssetSource.PREVIOUS_ADOPTED_VIDEO
     assert result.shots[2].required_assets[0].source_shot_id == "s2"
     assert result.safe_parallelism_ratio == pytest.approx(1 / 3, abs=0.001)
     assert result.critical_path_latency_ms == 300
@@ -325,14 +335,23 @@ async def test_ai_episode_plan_is_single_call_versioned_and_first_shot_is_fixed(
     assert plan.shots[0].mode == VideoGenerationMode.REFERENCE_IMAGE_MODE
     assert plan.shots[0].depends_on_shot_id is None
     assert "FIRST_SHOT_NO_PREDECESSOR" in plan.shots[0].reason_codes
-    assert plan.shots[1].mode == VideoGenerationMode.FIRST_FRAME_MODE
-    assert plan.shots[1].depends_on_shot_id == "s1"
-    assert [asset.role for asset in plan.shots[1].required_assets] == [
-        "first_frame",
-    ]
-    assert plan.shots[1].required_assets[0].source == (
-        AssetSource.PREVIOUS_ADOPTED_TAIL
-    )
+    # 2026-08-26 (docs/STORYBOARD_PROMPT_IR_DESIGN.md, product decision frozen by
+    # the user): first/last-frame chaining is retired -- only REFERENCE_IMAGE_MODE
+    # is ever executed. This shot's fake AI response deliberately proposes
+    # FIRST_FRAME_MODE + a previous-adopted-tail dependency + required_assets
+    # (exactly the "model returned execution fields" case the system prompt says
+    # the planner must never emit) specifically to prove those self-proposed
+    # execution fields are discarded and apply_scene_boundary_strategy's
+    # deterministic compiler wins -- previously that compiler could itself land on
+    # FIRST_FRAME_MODE for an in-scene continuation shot (this fixture's shots
+    # share no scene_name, so it fell back to relation-driven classification);
+    # now the compiler is unconditional, so this assertion also subsumes what
+    # used to be a second, separate "in-scene shots get chained" behavior with no
+    # dedicated coverage left after its removal (see apply_scene_boundary_strategy
+    # and tests/test_video_plan_reconcile.py for that removal).
+    assert plan.shots[1].mode == VideoGenerationMode.REFERENCE_IMAGE_MODE
+    assert plan.shots[1].depends_on_shot_id is None
+    assert plan.shots[1].required_assets == []
     assert conn.execute(
         "SELECT COUNT(*) FROM shot_video_generation_plans"
     ).fetchone()[0] == 3
