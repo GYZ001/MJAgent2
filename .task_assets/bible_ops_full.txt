@@ -1,0 +1,2002 @@
+Read "/Users/bytedance/Desktop/漫剧Agent2.0/app/domain/bible_ops.py":
+
+     1	from __future__ import annotations
+     2	from app.auth.principal import current_actor_name
+     3	
+     4	try:
+     5	    router
+     6	except NameError:  # pragma: no cover - used when importing this module directly
+     7	    from app.domain.common import *
+     8	
+     9	from app.visual_styles import (
+    10	    DEFAULT_VISUAL_STYLE_NAME,
+    11	    default_visual_style_prompt,
+    12	    visual_style_options,
+    13	    visual_style_prompt,
+    14	)
+    15	
+    16	
+    17	def _project_columns(conn) -> set[str]:
+    18	    return {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
+    19	
+    20	
+    21	def _supports_bible_style_name(conn) -> bool:
+    22	    return "bible_style_name" in _project_columns(conn)
+    23	
+    24	
+    25	def _normalize_visual_style_name(style_name: str | None) -> str:
+    26	    name = (style_name or DEFAULT_VISUAL_STYLE_NAME).strip()
+    27	    if visual_style_prompt(name) is None:
+    28	        raise HTTPException(422, "请选择有效的统一画面风格")
+    29	    return name
+    30	
+    31	
+    32	def _visual_style_prompt_or_default(style_name: str | None) -> str:
+    33	    name = _normalize_visual_style_name(style_name)
+    34	    return visual_style_prompt(name) or default_visual_style_prompt()
+    35	
+    36	
+    37	def _parse_json_value(value, default=None):
+    38	    if value in (None, ""):
+    39	        return default
+    40	    if isinstance(value, (dict, list)):
+    41	        return value
+    42	    try:
+    43	        return json.loads(value)
+    44	    except (TypeError, ValueError, json.JSONDecodeError):
+    45	        return default
+    46	
+    47	
+    48	def _normalize_character_selection(value) -> list[str] | None:
+    49	    if value in (None, ""):
+    50	        return None
+    51	    raw_items = value
+    52	    if isinstance(value, str):
+    53	        parsed = _parse_json_value(value)
+    54	        raw_items = parsed if isinstance(parsed, list) else value.split(",")
+    55	    if not isinstance(raw_items, list):
+    56	        raise HTTPException(422, "characters 必须是角色名数组")
+    57	    names: list[str] = []
+    58	    for item in raw_items:
+    59	        name = str(item or "").strip()
+    60	        if name and name not in names:
+    61	            names.append(name)
+    62	    return names or None
+    63	
+    64	
+    65	def _refs_target_payload(only_character: str | None, only_characters: list[str] | None) -> str | None:
+    66	    if only_characters:
+    67	        return json.dumps(only_characters, ensure_ascii=False)
+    68	    return only_character
+    69	
+    70	
+    71	def _decode_refs_target(value: str | None) -> tuple[str | None, list[str] | None]:
+    72	    parsed = _parse_json_value(value)
+    73	    if isinstance(parsed, list):
+    74	        names = _normalize_character_selection(parsed)
+    75	        if names:
+    76	            return (names[0] if len(names) == 1 else None), names
+    77	    # 历史单角色 refs_target 为纯字符串，不升格为 only_characters 列表
+    78	    target = str(value or "").strip() or None
+    79	    return target, None
+    80	
+    81	
+    82	def _quote_stale(precheck: dict, message: str = "费用预检已过期或范围变化，请重新确认") -> HTTPException:
+    83	    return HTTPException(
+    84	        409,
+    85	        detail={
+    86	            "code": "QUOTE_STALE",
+    87	            "message": message,
+    88	            "precheck": precheck,
+    89	        },
+    90	    )
+    91	
+    92	
+    93	def _payment_confirm_required(precheck: dict | None = None) -> HTTPException:
+    94	    detail = {
+    95	        "code": "PAYMENT_CONFIRM_REQUIRED",
+    96	        "message": "必须先完成费用预检并显式确认（confirm=true）",
+    97	    }
+    98	    if precheck is not None:
+    99	        detail["precheck"] = precheck
+   100	    return HTTPException(409, detail=detail)
+   101	
+   102	
+   103	def _ensure_character_payment_quotes(conn) -> None:
+   104	    """兼容单测中的最小化 schema；正式数据库由 app.db.SCHEMA 创建。"""
+   105	    conn.execute(
+   106	        """CREATE TABLE IF NOT EXISTS character_payment_quotes (
+   107	            quote_id TEXT PRIMARY KEY,
+   108	            project_id TEXT NOT NULL,
+   109	            action TEXT NOT NULL,
+   110	            scope_fingerprint TEXT NOT NULL,
+   111	            payload_json TEXT NOT NULL,
+   112	            expires_at REAL NOT NULL,
+   113	            consumed_task_id TEXT,
+   114	            consumed_run_id TEXT,
+   115	            created_at REAL NOT NULL,
+   116	            consumed_at REAL
+   117	        )"""
+   118	    )
+   119	
+   120	
+   121	def _issue_payment_quote(precheck: dict) -> dict:
+   122	    """将付费预检签发为有时效、可消费的服务端凭证。"""
+   123	    issued = dict(precheck)
+   124	    issued["quote_id"] = new_id("quote")
+   125	    issued["computed_at"] = now()
+   126	    issued["quote_expires_at"] = issued["computed_at"] + 300
+   127	    conn = get_conn()
+   128	    _ensure_character_payment_quotes(conn)
+   129	    conn.execute(
+   130	        "INSERT INTO character_payment_quotes(quote_id,project_id,action,scope_fingerprint,"
+   131	        "payload_json,expires_at,created_at) VALUES(?,?,?,?,?,?,?)",
+   132	        (
+   133	            issued["quote_id"], issued["project_id"], issued["action"],
+   134	            issued["scope_fingerprint"], json.dumps(issued, ensure_ascii=False),
+   135	            issued["quote_expires_at"], issued["computed_at"],
+   136	        ),
+   137	    )
+   138	    conn.commit()
+   139	    return issued
+   140	
+   141	
+   142	def _validate_payment_quote(project_id: str, quote_id: str | None, current: dict):
+   143	    if not quote_id:
+   144	        raise _quote_stale(current, "费用预检缺失，请重新确认")
+   145	    conn = get_conn()
+   146	    _ensure_character_payment_quotes(conn)
+   147	    row = conn.execute(
+   148	        "SELECT * FROM character_payment_quotes WHERE quote_id=? AND project_id=?",
+   149	        (quote_id, project_id),
+   150	    ).fetchone()
+   151	    if not row:
+   152	        raise _quote_stale(current)
+   153	    if row["consumed_at"] is not None:
+   154	        return row
+   155	    if float(row["expires_at"] or 0) < now():
+   156	        raise _quote_stale(current, "费用预检已过期，请重新确认")
+   157	    if row["action"] != current.get("action") or row["scope_fingerprint"] != current.get("scope_fingerprint"):
+   158	        raise _quote_stale(current)
+   159	    return row
+   160	
+   161	
+   162	def _consume_payment_quote(quote_id: str, *, task_id: str, run_id: str | None) -> None:
+   163	    conn = get_conn()
+   164	    _ensure_character_payment_quotes(conn)
+   165	    conn.execute(
+   166	        "UPDATE character_payment_quotes SET consumed_task_id=?, consumed_run_id=?, consumed_at=? "
+   167	        "WHERE quote_id=? AND consumed_at IS NULL",
+   168	        (task_id, run_id, now(), quote_id),
+   169	    )
+   170	    conn.commit()
+   171	
+   172	
+   173	def _new_refs_recorder(
+   174	    project_id: str,
+   175	    only_character: str | None,
+   176	    only_characters: list[str] | None,
+   177	    *,
+   178	    resume: bool,
+   179	    fresh_after: float | None,
+   180	    parent_run_id: str | None,
+   181	    requested_by: str,
+   182	    trigger_type: str,
+   183	) -> WorkflowRecorder:
+   184	    return WorkflowRecorder.create(
+   185	        workflow_type="character_references",
+   186	        scope_type="project",
+   187	        scope_id=project_id,
+   188	        input_fingerprint=fingerprint(
+   189	            project_id, only_character, only_characters, "character_references",
+   190	            resume, fresh_after,
+   191	        ),
+   192	        requested_by=requested_by,
+   193	        trigger_type=trigger_type,
+   194	        config_snapshot={
+   195	            "only_character": only_character,
+   196	            "only_characters": only_characters,
+   197	            "resume": resume,
+   198	            "fresh_after": fresh_after,
+   199	        },
+   200	        budget_limit_cny=float(get_setting("episode_cost_limit_cny") or 100),
+   201	        parent_run_id=parent_run_id,
+   202	    )
+   203	
+   204	
+   205	def _active_refs_run(project_id: str):
+   206	    return get_conn().execute(
+   207	        """SELECT id FROM workflow_runs
+   208	           WHERE workflow_type='character_references'
+   209	             AND scope_type='project'
+   210	             AND scope_id=?
+   211	             AND status='RUNNING'
+   212	           ORDER BY updated_at DESC LIMIT 1""",
+   213	        (project_id,),
+   214	    ).fetchone()
+   215	
+   216	
+   217	def _refs_generation_busy(project_id: str) -> bool:
+   218	    return _refs_task_active(project_id) or _active_refs_run(project_id) is not None
+   219	
+   220	
+   221	def _start_refs_generation(
+   222	    project_id: str,
+   223	    only_character: str | None,
+   224	    *,
+   225	    only_characters: list[str] | None = None,
+   226	    resume: bool = False,
+   227	    fresh_after: float | None = None,
+   228	    parent_run_id: str | None = None,
+   229	) -> dict | None:
+   230	    """启动定妆照任务。
+   231	
+   232	    返回可追踪的任务与 run id；已有同项目任务时返回 None。
+   233	    """
+   234	    if _refs_generation_busy(project_id):
+   235	        return None
+   236	    conn = get_conn()
+   237	    previous = conn.execute(
+   238	        "SELECT refs_status,refs_error,refs_target,refs_resume,refs_batch_started_at "
+   239	        "FROM projects WHERE id=?",
+   240	        (project_id,),
+   241	    ).fetchone()
+   242	    target_payload = _refs_target_payload(only_character, only_characters)
+   243	    # ``fresh_after`` controls which ready packs resume may skip.  The operation
+   244	    # batch timestamp is separate and always durable so paid image calls can be
+   245	    # reused after a restart, including gap-only resume batches.
+   246	    previous_batch_started_at = previous["refs_batch_started_at"] if previous else None
+   247	    batch_started_at = (
+   248	        fresh_after
+   249	        if fresh_after is not None
+   250	        else previous_batch_started_at
+   251	        if resume and previous_batch_started_at is not None
+   252	        else now()
+   253	    )
+   254	    persisted_resume = 1 if resume and fresh_after is None else 0
+   255	    if target_payload is None:
+   256	        conn.execute(
+   257	            "UPDATE projects SET refs_status='running', refs_error=NULL, refs_target=NULL, "
+   258	            "refs_resume=?, refs_batch_started_at=? WHERE id=?",
+   259	            (persisted_resume, batch_started_at, project_id),
+   260	        )
+   261	    else:
+   262	        conn.execute(
+   263	            "UPDATE projects SET refs_status='running', refs_error=NULL, refs_target=?, "
+   264	            "refs_resume=?, refs_batch_started_at=? WHERE id=?",
+   265	            (target_payload, persisted_resume, batch_started_at, project_id),
+   266	        )
+   267	    conn.commit()
+   268	    requested_by = "system" if resume else "user"
+   269	    trigger_type = "resume" if resume else "manual"
+   270	    recorder = None
+   271	    try:
+   272	        recorder = _new_refs_recorder(
+   273	            project_id, only_character, only_characters,
+   274	            resume=resume, fresh_after=batch_started_at, parent_run_id=parent_run_id,
+   275	            requested_by=requested_by, trigger_type=trigger_type,
+   276	        )
+   277	        task_registry.spawn(
+   278	            "refs", project_id,
+   279	            _refs_task(
+   280	                project_id, only_character, only_characters=only_characters,
+   281	                resume=resume, fresh_after=fresh_after,
+   282	                operation_started_at=batch_started_at,
+   283	                parent_run_id=parent_run_id,
+   284	                requested_by=requested_by, trigger_type=trigger_type, recorder=recorder,
+   285	            ),
+   286	            project_id=project_id,
+   287	        )
+   288	    except Exception as exc:
+   289	        if previous:
+   290	            conn.execute(
+   291	                "UPDATE projects SET refs_status=?,refs_error=?,refs_target=?,"
+   292	                "refs_resume=?,refs_batch_started_at=? WHERE id=?",
+   293	                (
+   294	                    previous["refs_status"], previous["refs_error"], previous["refs_target"],
+   295	                    previous["refs_resume"], previous["refs_batch_started_at"], project_id,
+   296	                ),
+   297	            )
+   298	            conn.commit()
+   299	        if recorder is not None:
+   300	            try:
+   301	                recorder.cancel("定妆任务未能启动，项目状态已回滚", conn=None)
+   302	            except Exception:  # noqa: BLE001
+   303	                pass
+   304	        raise ValueError("定妆任务未能启动，原状态和费用凭证已保留，请重试") from exc
+   305	    return {
+   306	        "status": "accepted",
+   307	        "task_id": f"refs:{project_id}",
+   308	        "run_id": recorder.run_id,
+   309	    }
+   310	
+   311	def _start_scene_refs_generation(
+   312	    project_id: str,
+   313	    only_scene: str | list[str] | None,
+   314	    *,
+   315	    resume: bool = False,
+   316	    parent_run_id: str | None = None,
+   317	) -> bool:
+   318	    """启动场景图素材库生成任务。已有同项目任务在跑则返回 False。"""
+   319	    if _scene_refs_task_active(project_id):
+   320	        return False
+   321	    conn = get_conn()
+   322	    project_columns = {
+   323	        row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()
+   324	    }
+   325	    batch_column_supported = "scene_refs_batch_started_at" in project_columns
+   326	    previous = conn.execute(
+   327	        "SELECT scene_refs_status,scene_refs_error,scene_refs_target,"
+   328	        + ("scene_refs_batch_started_at" if batch_column_supported else "NULL AS scene_refs_batch_started_at")
+   329	        + " FROM projects WHERE id=?",
+   330	        (project_id,),
+   331	    ).fetchone()
+   332	    batch_started_at = (
+   333	        previous["scene_refs_batch_started_at"]
+   334	        if resume and previous and previous["scene_refs_batch_started_at"] is not None
+   335	        else now()
+   336	    )
+   337	    target_payload = (
+   338	        json.dumps(only_scene, ensure_ascii=False)
+   339	        if isinstance(only_scene, list) else only_scene
+   340	    )
+   341	    if batch_column_supported:
+   342	        conn.execute(
+   343	            "UPDATE projects SET scene_refs_status='running',scene_refs_error=NULL,"
+   344	            "scene_refs_target=?,scene_refs_batch_started_at=? WHERE id=?",
+   345	            (target_payload, batch_started_at, project_id),
+   346	        )
+   347	    else:
+   348	        conn.execute(
+   349	            "UPDATE projects SET scene_refs_status='running',scene_refs_error=NULL,"
+   350	            "scene_refs_target=? WHERE id=?",
+   351	            (target_payload, project_id),
+   352	        )
+   353	    conn.commit()
+   354	    try:
+   355	        task_registry.spawn(
+   356	            "scene_refs", project_id,
+   357	            _scene_refs_task(
+   358	                project_id, only_scene, resume=resume, parent_run_id=parent_run_id,
+   359	                operation_started_at=batch_started_at,
+   360	                requested_by="system" if resume else "user",
+   361	                trigger_type="resume" if resume else "manual",
+   362	            ),
+   363	            project_id=project_id,
+   364	        )
+   365	    except Exception as exc:
+   366	        if previous:
+   367	            if batch_column_supported:
+   368	                conn.execute(
+   369	                    "UPDATE projects SET scene_refs_status=?,scene_refs_error=?,scene_refs_target=?,"
+   370	                    "scene_refs_batch_started_at=? WHERE id=?",
+   371	                    (
+   372	                        previous["scene_refs_status"], previous["scene_refs_error"],
+   373	                        previous["scene_refs_target"], previous["scene_refs_batch_started_at"],
+   374	                        project_id,
+   375	                    ),
+   376	                )
+   377	            else:
+   378	                conn.execute(
+   379	                    "UPDATE projects SET scene_refs_status=?,scene_refs_error=?,scene_refs_target=? "
+   380	                    "WHERE id=?",
+   381	                    (
+   382	                        previous["scene_refs_status"], previous["scene_refs_error"],
+   383	                        previous["scene_refs_target"], project_id,
+   384	                    ),
+   385	                )
+   386	            conn.commit()
+   387	        raise ValueError("场景图任务未能启动，原状态和费用凭证已保留，请重试") from exc
+   388	    return True
+   389	
+   390	
+   391	def _start_scene_bible_preparation(
+   392	    project_id: str,
+   393	    *,
+   394	    parent_run_id: str | None = None,
+   395	    requested_by: str = "system",
+   396	    trigger_type: str = "automatic",
+   397	) -> bool:
+   398	    """后台准备免费场景清单；图片生成仍必须经过独立费用确认。"""
+   399	    if _scene_assets_task_active(project_id):
+   400	        return False
+   401	    conn = get_conn()
+   402	    previous = conn.execute(
+   403	        "SELECT scene_refs_status,scene_refs_error FROM projects WHERE id=?",
+   404	        (project_id,),
+   405	    ).fetchone()
+   406	    conn.execute(
+   407	        "UPDATE projects SET scene_refs_status='running',scene_refs_error=NULL WHERE id=?",
+   408	        (project_id,),
+   409	    )
+   410	    conn.commit()
+   411	    try:
+   412	        task_registry.spawn(
+   413	            "scene_bible",
+   414	            project_id,
+   415	            _scene_bible_task(
+   416	                project_id,
+   417	                parent_run_id=parent_run_id,
+   418	                requested_by=requested_by,
+   419	                trigger_type=trigger_type,
+   420	            ),
+   421	            project_id=project_id,
+   422	        )
+   423	    except Exception as exc:
+   424	        if previous:
+   425	            conn.execute(
+   426	                "UPDATE projects SET scene_refs_status=?,scene_refs_error=? WHERE id=?",
+   427	                (previous["scene_refs_status"], previous["scene_refs_error"], project_id),
+   428	            )
+   429	            conn.commit()
+   430	        raise ValueError("场景设定任务未能启动，原状态已保留，请重试") from exc
+   431	    return True
+   432	
+   433	
+   434	def _decode_scene_target(value: str | list[str] | None) -> str | list[str] | None:
+   435	    if not isinstance(value, str):
+   436	        return value
+   437	    parsed = _parse_json_value(value)
+   438	    if isinstance(parsed, list):
+   439	        names = [str(item).strip() for item in parsed if str(item).strip()]
+   440	        return list(dict.fromkeys(names)) or None
+   441	    return value.strip() or None
+   442	
+   443	
+   444	async def _scene_bible_task(
+   445	    project_id: str,
+   446	    *,
+   447	    parent_run_id: str | None = None,
+   448	    requested_by: str = "system",
+   449	    trigger_type: str = "automatic",
+   450	) -> None:
+   451	    """生成并落库场景清单，不绕过费用确认自动生成图片。"""
+   452	    from app.stages import generate_scene_bible
+   453	    conn = get_conn()
+   454	    recorder = WorkflowRecorder.create(
+   455	        workflow_type="scene_bible",
+   456	        scope_type="project",
+   457	        scope_id=project_id,
+   458	        input_fingerprint=fingerprint(project_id, "scene_bible"),
+   459	        requested_by=requested_by,
+   460	        trigger_type=trigger_type,
+   461	        policy_snapshot={"max_iterations": 4, "warning_blocks_downstream": True},
+   462	        parent_run_id=parent_run_id,
+   463	    )
+   464	    try:
+   465	        recorder.start()
+   466	        p = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+   467	        if not p or not p["bible_json"]:
+   468	            raise ValueError("人物谱不存在，不能生成场景 Bible")
+   469	        bible = Bible.model_validate(json.loads(p["bible_json"]))
+   470	        # 初始场景清单只取前 N 章：避免一上来就铺满全片场景；更靠后的新场景留到分镜阶段反应式补图。
+   471	        from app.scenes import SCENE_BIBLE_CHAPTER_WINDOW
+   472	        chapters = rows_to_dicts(conn.execute(
+   473	            "SELECT * FROM chapters WHERE project_id=? ORDER BY idx LIMIT ?",
+   474	            (project_id, SCENE_BIBLE_CHAPTER_WINDOW)).fetchall())
+   475	        _, scenes = await recorder.step(
+   476	            "scene_bible",
+   477	            lambda: generate_scene_bible(chapters, bible, project_id=project_id),
+   478	            contract_key="scene_bible",
+   479	            agent_name="scene_bible",
+   480	        )
+   481	        # 重读 bible（人物谱可能已被并发流程更新），只覆盖 scenes 字段后回写。
+   482	        p2 = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+   483	        data = json.loads(p2["bible_json"]) if p2 and p2["bible_json"] else bible.model_dump()
+   484	        data["scenes"] = [s.model_dump() for s in scenes]
+   485	        conn.execute(
+   486	            "UPDATE projects SET bible_json=?,scene_refs_status='idle',scene_refs_error=NULL "
+   487	            "WHERE id=?",
+   488	            (json.dumps(data, ensure_ascii=False), project_id),
+   489	        )
+   490	        conn.commit()
+   491	        recorder.succeed("场景设定已准备，场景图等待费用确认", conn=None)
+   492	    except asyncio.CancelledError:
+   493	        if task_registry.shutdown_in_progress():
+   494	            recorder.pause_external("服务重启，场景设定任务等待自动恢复", conn=None)
+   495	        else:
+   496	            recorder.cancel(conn=None)
+   497	        raise
+   498	    except Exception as exc:  # noqa: BLE001 场景设定失败不阻断人物谱主流程
+   499	        recorder.fail(exc, conn=None)
+   500	        public = errors.record_and_format(exc, action="scene_bible_generate", context={"project_id": project_id})
+   501	        conn.execute("UPDATE projects SET scene_refs_status='failed', scene_refs_error=? WHERE id=?",
+   502	                     (public, project_id))
+   503	        conn.commit()
+   504	
+   505	
+   506	def recover_bible_tasks() -> int:
+   507	    """启动时恢复人物谱任务（对齐 worker.recover_and_start 的语义）：
+   508	    进程重启/reload 会丢掉内存里的 asyncio.Task，但 DB 仍是 running。
+   509	    与其在下次访问时判孤儿并报错，不如用持久化的 feedback 重新拉起任务续跑。"""
+   510	    conn = get_conn()
+   511	    style_column = "bible_style_name" if _supports_bible_style_name(conn) else "NULL AS bible_style_name"
+   512	    rows = conn.execute(
+   513	        f"SELECT id, bible_feedback, {style_column} FROM projects WHERE bible_status='running'"
+   514	    ).fetchall()
+   515	    resumed = 0
+   516	    for r in rows:
+   517	        pid = r["id"]
+   518	        if _bible_task_active(pid):
+   519	            continue
+   520	        feedback = r["bible_feedback"] or ""
+   521	        parent = conn.execute(
+   522	            "SELECT id FROM workflow_runs WHERE workflow_type='character_bible' "
+   523	            "AND scope_type='project' AND scope_id=? AND status='PAUSED_EXTERNAL' "
+   524	            "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
+   525	            (pid,),
+   526	        ).fetchone()
+   527	        recorder = None
+   528	        try:
+   529	            recorder = _new_bible_recorder(
+   530	                pid, trigger_type="resume", requested_by="system",
+   531	                parent_run_id=parent["id"] if parent else None,
+   532	                style_name=r["bible_style_name"],
+   533	            )
+   534	            task_registry.spawn(
+   535	                "bible",
+   536	                pid,
+   537	                _recorded_bible_task(
+   538	                    pid, feedback, recorder, trigger_full_refs=True,
+   539	                    style_name=r["bible_style_name"],
+   540	                ),
+   541	                project_id=pid,
+   542	            )
+   543	            resumed += 1
+   544	        except Exception as exc:  # one project must not block all startup recovery
+   545	            public = errors.record_and_format(
+   546	                exc,
+   547	                action="bible_recovery_spawn",
+   548	                context={"project_id": pid},
+   549	            )
+   550	            conn.execute(
+   551	                "UPDATE projects SET bible_status='failed', bible_error=? WHERE id=?",
+   552	                (f"人物谱自动恢复未能启动，原文和反馈已保留，可重新发起。{public}", pid),
+   553	            )
+   554	            conn.commit()
+   555	            if recorder is not None:
+   556	                try:
+   557	                    recorder.cancel("人物谱恢复任务未能启动", conn=None)
+   558	                except Exception:  # noqa: BLE001
+   559	                    pass
+   560	    return resumed
+   561	
+   562	
+   563	def recover_character_ref_tasks() -> int:
+   564	    """Resume portrait batches without changing their original refresh semantics."""
+   565	    conn = get_conn()
+   566	    rows = conn.execute(
+   567	        """SELECT id, refs_target, refs_resume, refs_batch_started_at
+   568	           FROM projects p
+   569	           WHERE refs_status='running'
+   570	              OR EXISTS (
+   571	                  SELECT 1 FROM workflow_runs wr
+   572	                   WHERE wr.workflow_type='character_references'
+   573	                     AND wr.scope_type='project'
+   574	                     AND wr.scope_id=p.id
+   575	                     AND wr.status='PAUSED_EXTERNAL'
+   576	                     AND wr.recovered_by_run_id IS NULL
+   577	              )"""
+   578	    ).fetchall()
+   579	    resumed = 0
+   580	    for row in rows:
+   581	        project_id = row["id"]
+   582	        if _refs_task_active(project_id):
+   583	            continue
+   584	        parent = conn.execute(
+   585	            "SELECT id FROM workflow_runs WHERE workflow_type='character_references' "
+   586	            "AND scope_type='project' AND scope_id=? AND status='PAUSED_EXTERNAL' "
+   587	            "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
+   588	            (project_id,),
+   589	        ).fetchone()
+   590	        only_character, only_characters = _decode_refs_target(row["refs_target"])
+   591	        was_gap_resume = bool(row["refs_resume"])
+   592	        fresh_after = None if was_gap_resume else row["refs_batch_started_at"]
+   593	        try:
+   594	            if _start_refs_generation(
+   595	                project_id,
+   596	                only_character,
+   597	                only_characters=only_characters,
+   598	                resume=True,
+   599	                fresh_after=fresh_after,
+   600	                parent_run_id=parent["id"] if parent else None,
+   601	            ):
+   602	                resumed += 1
+   603	        except Exception as exc:  # noqa: BLE001
+   604	            public = errors.record_and_format(
+   605	                exc, action="refs_recovery_spawn", context={"project_id": project_id},
+   606	            )
+   607	            conn.execute(
+   608	                "UPDATE projects SET refs_status='failed',refs_error=? WHERE id=?",
+   609	                (f"定妆自动恢复未能启动，已完成素材仍保留，可重试缺口。{public}", project_id),
+   610	            )
+   611	            conn.commit()
+   612	    return resumed
+   613	
+   614	
+   615	def recover_scene_ref_tasks() -> int:
+   616	    """Resume persisted scene-asset work after a reload or process restart.
+   617	
+   618	    Scene generation is idempotent: approved references are skipped, so an
+   619	    interrupted batch safely continues from the first missing scene instead of
+   620	    regenerating accepted assets.
+   621	    """
+   622	    conn = get_conn()
+   623	    rows = conn.execute(
+   624	        "SELECT id,bible_json,bible_status,scene_refs_status,scene_refs_target "
+   625	        "FROM projects WHERE scene_refs_status='running' "
+   626	        "OR (scene_refs_status='idle' AND bible_status='ready')"
+   627	    ).fetchall()
+   628	    resumed = 0
+   629	    for row in rows:
+   630	        project_id = row["id"]
+   631	        # A recovered character-bible task will start a fresh scene pipeline
+   632	        # after committing its new Bible.  Starting from the old Bible here
+   633	        # would race it and could generate obsolete assets.
+   634	        if (row["bible_status"] == "running"
+   635	                or _scene_assets_task_active(project_id)):
+   636	            continue
+   637	        try:
+   638	            bible = json.loads(row["bible_json"] or "{}")
+   639	        except (TypeError, ValueError, json.JSONDecodeError):
+   640	            bible = {}
+   641	        if bible.get("scenes"):
+   642	            if row["scene_refs_status"] != "running":
+   643	                continue
+   644	            parent = conn.execute(
+   645	                "SELECT id FROM workflow_runs WHERE workflow_type='scene_references' "
+   646	                "AND scope_type='project' AND scope_id=? AND status='PAUSED_EXTERNAL' "
+   647	                "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
+   648	                (project_id,),
+   649	            ).fetchone()
+   650	            try:
+   651	                if _start_scene_refs_generation(
+   652	                    project_id,
+   653	                    _decode_scene_target(row["scene_refs_target"]),
+   654	                    resume=True,
+   655	                    parent_run_id=parent["id"] if parent else None,
+   656	                ):
+   657	                    resumed += 1
+   658	            except Exception as exc:  # noqa: BLE001
+   659	                public = errors.record_and_format(
+   660	                    exc, action="scene_refs_recovery_spawn",
+   661	                    context={"project_id": project_id},
+   662	                )
+   663	                conn.execute(
+   664	                    "UPDATE projects SET scene_refs_status='failed',scene_refs_error=? WHERE id=?",
+   665	                    (f"场景图自动恢复未能启动，已完成素材仍保留，可重试缺口。{public}", project_id),
+   666	                )
+   667	                conn.commit()
+   668	            continue
+   669	        parent = conn.execute(
+   670	            "SELECT id FROM workflow_runs WHERE workflow_type='scene_bible' "
+   671	            "AND scope_type='project' AND scope_id=? AND status='PAUSED_EXTERNAL' "
+   672	            "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
+   673	            (project_id,),
+   674	        ).fetchone()
+   675	        try:
+   676	            if _start_scene_bible_preparation(
+   677	                project_id,
+   678	                parent_run_id=parent["id"] if parent else None,
+   679	                requested_by="system",
+   680	                trigger_type="resume" if row["scene_refs_status"] == "running" else "automatic",
+   681	            ):
+   682	                resumed += 1
+   683	        except Exception as exc:  # noqa: BLE001
+   684	            public = errors.record_and_format(
+   685	                exc, action="scene_bible_recovery_spawn", context={"project_id": project_id},
+   686	            )
+   687	            conn.execute(
+   688	                "UPDATE projects SET scene_refs_status='failed',scene_refs_error=? WHERE id=?",
+   689	                (f"场景清单自动恢复未能启动，可重新发起。{public}", project_id),
+   690	            )
+   691	            conn.commit()
+   692	    return resumed
+   693	
+   694	async def _bible_task(
+   695	    project_id: str,
+   696	    feedback: str = "",
+   697	    *,
+   698	    trigger_full_refs: bool = True,
+   699	    style_name: str | None = None,
+   700	):
+   701	    conn = get_conn()
+   702	    try:
+   703	        if style_name is None and _supports_bible_style_name(conn):
+   704	            style_row = conn.execute(
+   705	                "SELECT bible_style_name FROM projects WHERE id=?", (project_id,),
+   706	            ).fetchone()
+   707	            style_name = style_row["bible_style_name"] if style_row else None
+   708	        style_name = _normalize_visual_style_name(style_name)
+   709	        style_prompt = _visual_style_prompt_or_default(style_name)
+   710	        chapters = rows_to_dicts(conn.execute(
+   711	            "SELECT * FROM chapters WHERE project_id=? ORDER BY idx", (project_id,)).fetchall())
+   712	        timeout_s = max(int(get_setting("bible_task_timeout_s") or BIBLE_TASK_TIMEOUT_S), 60)
+   713	        # 重新谱写时按角色名保留已有定妆照（重生圣经不应丢失一致性锚点）
+   714	        old_row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+   715	        old_style = None
+   716	        old_bible = None
+   717	        if old_row and old_row["bible_json"]:
+   718	            old_bible = json.loads(old_row["bible_json"])
+   719	        from app import model_registry
+   720	        from app.harness.text_provider_scope import stage_text_provider
+   721	
+   722	        resolved_text_provider = None
+   723	        if "bible_text_provider" in _project_columns(conn):
+   724	            provider_row = conn.execute(
+   725	                "SELECT bible_text_provider FROM projects WHERE id=?", (project_id,),
+   726	            ).fetchone()
+   727	            resolved_text_provider = model_registry.resolve_stage_text_provider(
+   728	                provider_row["bible_text_provider"] if provider_row else None
+   729	            )
+   730	        with stage_text_provider(resolved_text_provider):
+   731	            bible = await asyncio.wait_for(
+   732	                generate_bible(
+   733	                    chapters, feedback=feedback, previous_bible=old_bible,
+   734	                    project_id=project_id, visual_style_prompt=style_prompt,
+   735	                ),
+   736	                timeout=timeout_s,
+   737	            )
+   738	        if old_bible:
+   739	            old_style = (old_bible.get("world") or {}).get("visual_style_canonical")
+   740	            old_refs = {c.get("name"): c.get("ref_image_path")
+   741	                        for c in old_bible.get("characters", [])}
+   742	            for c in bible.characters:
+   743	                c.ref_image_path = old_refs.get(c.name) or None
+   744	        # 重谱后画风变化 → 旧画风定妆照与旧视频全部作废（否则图像信号会把新画风拉回旧画风）
+   745	        if old_style and bible.world.visual_style_canonical != old_style:
+   746	            _purge_for_style_change(project_id, bible)
+   747	        residual = list(getattr(bible, "residual_errors", []) or [])
+   748	        artifact_id = getattr(bible, "evidence_artifact_id", None)
+   749	        bible_status = "warning" if residual else "ready"
+   750	        bible_error = (
+   751	            "人物谱存在阻塞问题，允许人工修订，但不会进入下游：" + "；".join(residual[:8])
+   752	            if residual else None
+   753	        )
+   754	        # A few unit tests intentionally use a minimal legacy schema.  Production
+   755	        # databases always receive the incremental migration in app.db, while the
+   756	        # fallback keeps the stage function independently testable.
+   757	        project_columns = {
+   758	            row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()
+   759	        }
+   760	        final_project_status = "bible_ready"
+   761	        if "plan_status" in project_columns:
+   762	            plan_row = conn.execute(
+   763	                "SELECT plan_status FROM projects WHERE id=?", (project_id,)
+   764	            ).fetchone()
+   765	            if plan_row and plan_row["plan_status"] == "ready":
+   766	                final_project_status = "planned"
+   767	        if "bible_artifact_id" in project_columns:
+   768	            conn.execute(
+   769	                "UPDATE projects SET bible_json=?, bible_version=bible_version+1, bible_status=?, "
+   770	                "bible_error=?, bible_artifact_id=?, status=? WHERE id=?",
+   771	                (
+   772	                    bible.model_dump_json(), bible_status, bible_error, artifact_id,
+   773	                    final_project_status if not residual else "created", project_id,
+   774	                ))
+   775	        else:
+   776	            conn.execute(
+   777	                "UPDATE projects SET bible_json=?, bible_version=bible_version+1, bible_status=?, "
+   778	                "bible_error=?, status=? WHERE id=?",
+   779	                (
+   780	                    bible.model_dump_json(), bible_status, bible_error,
+   781	                    final_project_status if not residual else "created", project_id,
+   782	                ))
+   783	        conn.commit()
+   784	        if trigger_full_refs and not residual:
+   785	            try:
+   786	                _start_refs_generation(project_id, None)
+   787	            except Exception as exc:  # noqa: BLE001 bible remains deliverable
+   788	                public = errors.record_and_format(
+   789	                    exc, action="refs_spawn_after_bible", context={"project_id": project_id},
+   790	                )
+   791	                conn.execute(
+   792	                    "UPDATE projects SET refs_status='failed',refs_error=? WHERE id=?",
+   793	                    (f"人物谱已完成，但定妆任务未能启动，可直接重试定妆。{public}", project_id),
+   794	                )
+   795	                conn.commit()
+   796	            if "scene_refs_status" in project_columns:
+   797	                try:
+   798	                    _start_scene_bible_preparation(project_id)
+   799	                except Exception as exc:  # noqa: BLE001 bible remains deliverable
+   800	                    public = errors.record_and_format(
+   801	                        exc, action="scene_bible_spawn_after_bible",
+   802	                        context={"project_id": project_id},
+   803	                    )
+   804	                    conn.execute(
+   805	                        "UPDATE projects SET scene_refs_status='failed',scene_refs_error=? WHERE id=?",
+   806	                        (f"人物谱已完成，但场景设定未能启动，可在场景库重试。{public}", project_id),
+   807	                    )
+   808	                    conn.commit()
+   809	    except asyncio.TimeoutError:
+   810	        conn.execute(
+   811	            "UPDATE projects SET bible_status='failed', bible_error=? WHERE id=?",
+   812	            (f"人物谱解析/修复超时（超过 {timeout_s} 秒），请重新谱写。", project_id),
+   813	        )
+   814	        conn.commit()
+   815	    except asyncio.CancelledError:
+   816	        if task_registry.shutdown_in_progress():
+   817	            raise
+   818	        row = conn.execute("SELECT bible_status FROM projects WHERE id=?", (project_id,)).fetchone()
+   819	        if row and row["bible_status"] == "running":
+   820	            conn.execute(
+   821	                "UPDATE projects SET bible_status='failed', bible_error=? WHERE id=?",
+   822	                (BIBLE_INTERRUPTED_ERROR, project_id),
+   823	            )
+   824	            conn.commit()
+   825	        raise
+   826	    except (StageError, Exception) as exc:  # noqa: BLE001
+   827	        # 回滚必须在 errors.record_and_format() 之前（同一根因见
+   828	        # app.domain.storyboard_ops._storyboard_task 顶层 except 上方的大注释：
+   829	        # app.db.insert_error_log 在这同一个 task 缓存连接上落一条 error_logs 行
+   830	        # 并 conn.commit()，谁先调用谁就先把此刻挂起的写入定型）。这条 try 里画风
+   831	        # 变更时会走到 _purge_for_style_change → worker.purge_project_video_
+   832	        # artifacts，后者对全项目逐镜头 DELETE shot_versions/shot_scenes/jobs、
+   833	        # 逐集回退状态，整段过程故意不提交，只在处理完全部镜头后 commit 一次；
+   834	        # 中途任何一步失败（文件 I/O、约束冲突等）都会把尚未提交的部分 DELETE
+   835	        # 留在这个连接上。这里如果先记日志再回滚，日志落库的隐式 commit 会把这份
+   836	        # 半成品（部分镜头的视频记录已删、其余镜头未处理）直接定型进库，且波及的
+   837	        # 是整个项目而不止一集——这正是本文件同类 purge 调用（_refs_task 的
+   838	        # errors.record_and_format 同理）必须先回滚的原因。回滚只丢弃这次失败尝试
+   839	        # 自己产生的未提交写入，不影响更早已经各自 commit 过的检查点。
+   840	        if conn.in_transaction:
+   841	            conn.rollback()
+   842	        public = errors.record_and_format(exc, action="bible_generate", context={"project_id": project_id})
+   843	        conn.execute("UPDATE projects SET bible_status='failed', bible_error=? WHERE id=?", (public, project_id))
+   844	        conn.commit()
+   845	
+   846	
+   847	def _new_bible_recorder(
+   848	    project_id: str,
+   849	    *,
+   850	    requested_by: str = "user",
+   851	    trigger_type: str = "manual",
+   852	    parent_run_id: str | None = None,
+   853	    style_name: str | None = None,
+   854	) -> WorkflowRecorder:
+   855	    conn = get_conn()
+   856	    chapters = rows_to_dicts(conn.execute(
+   857	        "SELECT idx, title, content FROM chapters WHERE project_id=? ORDER BY idx", (project_id,)
+   858	    ).fetchall())
+   859	    if style_name is None and _supports_bible_style_name(conn):
+   860	        row = conn.execute("SELECT bible_style_name FROM projects WHERE id=?", (project_id,)).fetchone()
+   861	        style_name = row["bible_style_name"] if row else None
+   862	    style_name = _normalize_visual_style_name(style_name)
+   863	    project = conn.execute(
+   864	        "SELECT bible_version, bible_feedback FROM projects WHERE id=?", (project_id,)
+   865	    ).fetchone()
+   866	    return WorkflowRecorder.create(
+   867	        workflow_type="character_bible",
+   868	        scope_type="project",
+   869	        scope_id=project_id,
+   870	        input_fingerprint=fingerprint(
+   871	            chapters, project["bible_version"] if project else 0,
+   872	            project["bible_feedback"] if project else None, style_name,
+   873	        ),
+   874	        requested_by=requested_by,
+   875	        trigger_type=trigger_type,
+   876	        policy_snapshot={"max_iterations": 4, "warning_blocks_downstream": True},
+   877	        config_snapshot={"style_name": style_name},
+   878	        parent_run_id=parent_run_id,
+   879	    )
+   880	
+   881	
+   882	async def _recorded_bible_task(
+   883	    project_id: str,
+   884	    feedback: str,
+   885	    recorder: WorkflowRecorder,
+   886	    *,
+   887	    trigger_full_refs: bool,
+   888	    style_name: str | None = None,
+   889	) -> None:
+   890	    recorder.start()
+   891	    try:
+   892	        conn = get_conn()
+   893	        chapters = rows_to_dicts(conn.execute(
+   894	            "SELECT idx, title, content FROM chapters WHERE project_id=? ORDER BY idx", (project_id,)
+   895	        ).fetchall())
+   896	        context = ContextPack(goal="生成可追溯人物圣经")
+   897	        context.add_text("chapters", "\n\n".join(ch["content"] for ch in chapters), limit=60000)
+   898	        await recorder.step(
+   899	            "character_bible",
+   900	            lambda: _bible_task(
+   901	                project_id, feedback, trigger_full_refs=trigger_full_refs,
+   902	                style_name=style_name,
+   903	            ),
+   904	            contract_key="character_bible",
+   905	            agent_name="character_bible",
+   906	            context_manifest=context.manifest(),
+   907	        )
+   908	        row = conn.execute("SELECT bible_status, bible_error FROM projects WHERE id=?", (project_id,)).fetchone()
+   909	        if row and row["bible_status"] == "ready":
+   910	            recorder.succeed("人物谱已通过确定性门禁", conn=None)
+   911	        elif row and row["bible_status"] == "warning":
+   912	            recorder.partial(row["bible_error"] or "人物谱需要人工修订", conn=None)
+   913	        else:
+   914	            recorder.fail(RuntimeError(row["bible_error"] if row else "人物谱生成失败"), conn=None)
+   915	    except asyncio.CancelledError:
+   916	        if task_registry.shutdown_in_progress():
+   917	            recorder.pause_external("服务重启，人物谱任务等待自动恢复", conn=None)
+   918	        else:
+   919	            recorder.cancel(conn=None)
+   920	        raise
+   921	    except Exception as exc:
+   922	        recorder.fail(exc, conn=None)
+   923	        raise
+   924	
+   925	
+   926	async def _start_bible_core(
+   927	    project_id: str,
+   928	    feedback: str,
+   929	    *,
+   930	    confirm: bool = False,
+   931	    quote_id: str | None = None,
+   932	    require_quote_id: bool = False,
+   933	    style_name: str | None = None,
+   934	) -> dict:
+   935	    """启动人物谱生成的领域逻辑，供 REST 路由与 ``bible.generate`` Command Handler 共用。"""
+   936	    p = _project_or_404(project_id)
+   937	    _require_harness_engine(project_id)
+   938	    if p["bible_status"] == "running" and _bible_task_active(project_id):
+   939	        raise HTTPException(409, "角色圣经正在生成中")
+   940	    if p["refs_status"] == "running":
+   941	        raise HTTPException(409, "定妆照正在生成中，请先停止后再重生人物谱")
+   942	    feedback = feedback.strip()
+   943	    if len(feedback) > 2000:
+   944	        raise HTTPException(400, "打回要求过长，请控制在 2000 字以内")
+   945	    style_name = _normalize_visual_style_name(style_name)
+   946	    precheck = _compute_bible_generate_precheck(project_id, style_name=style_name)
+   947	    if not confirm:
+   948	        raise _payment_confirm_required(precheck)
+   949	    quote_row = _validate_payment_quote(project_id, quote_id, precheck)
+   950	    if quote_row["consumed_at"] is not None:
+   951	        return {
+   952	            "status": "accepted", "idempotent_replay": True,
+   953	            "task_id": quote_row["consumed_task_id"], "run_id": quote_row["consumed_run_id"],
+   954	        }
+   955	    conn = get_conn()
+   956	    # 持久化 feedback：进程重启后 recover_bible_tasks 能用相同入参续跑，而非中断报错
+   957	    if _supports_bible_style_name(conn):
+   958	        conn.execute(
+   959	            "UPDATE projects SET bible_status='running', bible_error=NULL, "
+   960	            "bible_feedback=?, bible_style_name=? WHERE id=?",
+   961	            (feedback, style_name, project_id),
+   962	        )
+   963	    else:
+   964	        conn.execute(
+   965	            "UPDATE projects SET bible_status='running', bible_error=NULL, bible_feedback=? WHERE id=?",
+   966	            (feedback, project_id),
+   967	        )
+   968	    conn.commit()
+   969	    recorder = None
+   970	    try:
+   971	        recorder = _new_bible_recorder(project_id, style_name=style_name)
+   972	        task_registry.spawn(
+   973	            "bible",
+   974	            project_id,
+   975	            _recorded_bible_task(
+   976	                project_id, feedback, recorder, trigger_full_refs=True,
+   977	                style_name=style_name,
+   978	            ),
+   979	            project_id=project_id,
+   980	        )
+   981	    except Exception as exc:
+   982	        if _supports_bible_style_name(conn):
+   983	            conn.execute(
+   984	                "UPDATE projects SET bible_status=?, bible_error=?, "
+   985	                "bible_feedback=?, bible_style_name=? WHERE id=?",
+   986	                (
+   987	                    p["bible_status"],
+   988	                    p["bible_error"],
+   989	                    p.get("bible_feedback"),
+   990	                    p.get("bible_style_name"),
+   991	                    project_id,
+   992	                ),
+   993	            )
+   994	        else:
+   995	            conn.execute(
+   996	                "UPDATE projects SET bible_status=?, bible_error=?, bible_feedback=? WHERE id=?",
+   997	                (
+   998	                    p["bible_status"],
+   999	                    p["bible_error"],
+  1000	                    p.get("bible_feedback"),
+  1001	                    project_id,
+  1002	                ),
+  1003	            )
+  1004	        conn.commit()
+  1005	        if recorder is not None:
+  1006	            try:
+  1007	                recorder.cancel("人物谱任务未能启动，项目状态已回滚", conn=None)
+  1008	            except Exception:  # noqa: BLE001
+  1009	                pass
+  1010	        raise HTTPException(503, {
+  1011	            "code": "BIBLE_START_FAILED",
+  1012	            "message": "人物谱任务未能启动，项目原状态和费用凭证均已保留，请重试",
+  1013	            "action": "retry_generate",
+  1014	        }) from exc
+  1015	    _consume_payment_quote(
+  1016	        str(quote_id), task_id=f"bible:{project_id}", run_id=recorder.run_id,
+  1017	    )
+  1018	    return {"status": "running", "task_id": f"bible:{project_id}", "run_id": recorder.run_id}
+  1019	
+  1020	
+  1021	@router.post("/projects/{project_id}/bible")
+  1022	async def start_bible(project_id: str, body: dict | None = Body(None)):
+  1023	    from app.capabilities.dispatch import dispatch, respond_ui
+  1024	
+  1025	    payload = _as_body_dict(body)
+  1026	    feedback = str(payload.get("feedback") or "")
+  1027	    result = await dispatch(
+  1028	        "bible.generate",
+  1029	        {
+  1030	            "project_id": project_id,
+  1031	            "feedback": feedback,
+  1032	            "confirm": payload.get("confirm") is True,
+  1033	            "quote_id": payload.get("quote_id"),
+  1034	            "require_quote_id": True,
+  1035	            "style_name": payload.get("style_name"),
+  1036	            "idempotency_key": payload.get("idempotency_key") or payload.get("quote_id"),
+  1037	        },
+  1038	        initiator="ui",
+  1039	    )
+  1040	    return respond_ui(result)
+  1041	
+  1042	
+  1043	async def _cancel_bible_core(project_id: str) -> dict:
+  1044	    """停止人物谱生成的领域逻辑，供 REST 路由与 ``bible.cancel`` Command Handler 共用。
+  1045	    若人物谱尚未完成，停止后不会继续触发后续定妆照任务。"""
+  1046	    p = _project_or_404(project_id)
+  1047	    stopped = await task_registry.cancel_and_wait("bible", project_id)
+  1048	    conn = get_conn()
+  1049	    conn.execute(
+  1050	        "UPDATE projects SET bible_status='idle', bible_error=NULL, bible_feedback=NULL WHERE id=?",
+  1051	        (project_id,),
+  1052	    )
+  1053	    conn.commit()
+  1054	    was_running = p["bible_status"] == "running"
+  1055	    return {"stopped": stopped or was_running}
+  1056	
+  1057	
+  1058	@router.post("/projects/{project_id}/bible/cancel")
+  1059	async def cancel_bible(project_id: str):
+  1060	    from app.capabilities.dispatch import dispatch, respond_ui
+  1061	
+  1062	    result = await dispatch("bible.cancel", {"project_id": project_id}, initiator="ui")
+  1063	    return respond_ui(result)
+  1064	
+  1065	
+  1066	def _purge_for_style_change(project_id: str, instance: "Bible") -> dict:
+  1067	    """画风变更的连锁失效：清理全项目旧画风视频产物，并作废旧画风定妆照
+  1068	    （旧定妆照/旧尾帧是比文字 prompt 更强的画风信号，残留会把新画风拉回旧画风）。"""
+  1069	    purged = worker.purge_project_video_artifacts(project_id)
+  1070	    refs_cleared = 0
+  1071	    for c in instance.characters:
+  1072	        if c.ref_image_path:
+  1073	            try:
+  1074	                Path(c.ref_image_path).unlink()
+  1075	            except OSError:
+  1076	                pass
+  1077	            c.ref_image_path = None
+  1078	            refs_cleared += 1
+  1079	    # 画风变更 → 旧画风场景图同样是强画风信号，连带作废（落盘文件 + 分段表），并清空 bible.scenes 的图路径。
+  1080	    scene_refs_cleared = 0
+  1081	    for sc in getattr(instance, "scenes", None) or []:
+  1082	        if sc.ref_image_path:
+  1083	            try:
+  1084	                Path(sc.ref_image_path).unlink()
+  1085	            except OSError:
+  1086	                pass
+  1087	            sc.ref_image_path = None
+  1088	            scene_refs_cleared += 1
+  1089	    conn = get_conn()
+  1090	    # 画风变更 → 旧画风的分段定妆照全部作废，重新定妆后由分镜阶段按集反应式重建分段。
+  1091	    conn.execute("DELETE FROM character_portraits WHERE project_id=?", (project_id,))
+  1092	    conn.execute("DELETE FROM scene_references WHERE project_id=?", (project_id,))
+  1093	    conn.execute("UPDATE projects SET refs_status='idle', scene_refs_status='idle' WHERE id=?", (project_id,))
+  1094	    conn.commit()
+  1095	    return {**purged, "refs_cleared": refs_cleared, "scene_refs_cleared": scene_refs_cleared}
+  1096	
+  1097	
+  1098	def _parse_bible_write_body(body: dict) -> tuple[dict, object, bool, str | None]:
+  1099	    """拆出 bible 正文、expected_version、confirm 标志与影响预检指纹。"""
+  1100	    expected_version = body.get("expected_version")
+  1101	    confirm = body.get("confirm") is True
+  1102	    impact_fp = body.get("impact_preview_fingerprint")
+  1103	    if "bible" in body and isinstance(body.get("bible"), dict):
+  1104	        bible_body = dict(body["bible"])
+  1105	    else:
+  1106	        skip = {
+  1107	            "expected_version", "confirm", "impact_preview_fingerprint",
+  1108	            "quote_id", "dry_run",
+  1109	        }
+  1110	        bible_body = {k: v for k, v in body.items() if k not in skip}
+  1111	    if "expected_version" in bible_body:
+  1112	        expected_version = bible_body.pop("expected_version", expected_version)
+  1113	    if "confirm" in bible_body:
+  1114	        confirm = bible_body.pop("confirm") is True or confirm
+  1115	    if "impact_preview_fingerprint" in bible_body:
+  1116	        impact_fp = bible_body.pop("impact_preview_fingerprint", impact_fp)
+  1117	    return bible_body, expected_version, confirm, impact_fp
+  1118	
+  1119	
+  1120	def _bible_conflict_detail(p: dict, expected_version) -> dict:
+  1121	    server_bible = None
+  1122	    if p.get("bible_json"):
+  1123	        try:
+  1124	            server_bible = json.loads(p["bible_json"])
+  1125	        except (TypeError, ValueError, json.JSONDecodeError):
+  1126	            server_bible = None
+  1127	    return {
+  1128	        "code": "BIBLE_VERSION_CONFLICT",
+  1129	        "message": (
+  1130	            f"人物谱版本冲突：当前版本 {p.get('bible_version')}，"
+  1131	            f"请求基于 {expected_version}，请刷新后重试"
+  1132	        ),
+  1133	        "current_version": int(p.get("bible_version") or 0),
+  1134	        "expected_version": expected_version,
+  1135	        "server_bible": server_bible,
+  1136	        "character_names": [
+  1137	            c.get("name") for c in (server_bible or {}).get("characters", []) if c.get("name")
+  1138	        ],
+  1139	    }
+  1140	
+  1141	
+  1142	def _classify_bible_changes(old_bible: dict | None, new_bible: dict) -> list[str]:
+  1143	    """区分仅文字 / 角色外观 / 全局画风变更，供定稿影响预检展示。"""
+  1144	    changes: list[str] = []
+  1145	    old = old_bible or {}
+  1146	    old_style = (old.get("world") or {}).get("visual_style_canonical")
+  1147	    new_style = (new_bible.get("world") or {}).get("visual_style_canonical")
+  1148	    if old_style and new_style and old_style != new_style:
+  1149	        changes.append("global_style")
+  1150	    old_chars = {c.get("name"): c for c in old.get("characters", []) if c.get("name")}
+  1151	    new_chars = {c.get("name"): c for c in new_bible.get("characters", []) if c.get("name")}
+  1152	    appearance_changed = False
+  1153	    text_changed = False
+  1154	    if set(old_chars) != set(new_chars):
+  1155	        text_changed = True
+  1156	    for name, nc in new_chars.items():
+  1157	        oc = old_chars.get(name) or {}
+  1158	        if (oc.get("appearance_canonical") or "") != (nc.get("appearance_canonical") or ""):
+  1159	            appearance_changed = True
+  1160	        for field in ("personality", "speech_style", "role", "portrait_prompt_override"):
+  1161	            if (oc.get(field) or "") != (nc.get(field) or ""):
+  1162	                text_changed = True
+  1163	        if (oc.get("relationships") or []) != (nc.get("relationships") or []):
+  1164	            text_changed = True
+  1165	    if appearance_changed:
+  1166	        changes.append("character_appearance")
+  1167	    if text_changed and "character_appearance" not in changes:
+  1168	        changes.append("text_only")
+  1169	    elif text_changed:
+  1170	        changes.append("text_fields")
+  1171	    if not changes:
+  1172	        changes.append("text_only")
+  1173	    return changes
+  1174	
+  1175	
+  1176	def _artifact_type_counts(artifact_ids: list[str]) -> dict[str, int]:
+  1177	    if not artifact_ids:
+  1178	        return {}
+  1179	    conn = get_conn()
+  1180	    counts: dict[str, int] = {}
+  1181	    for i in range(0, len(artifact_ids), 400):
+  1182	        chunk = artifact_ids[i:i + 400]
+  1183	        placeholders = ",".join("?" for _ in chunk)
+  1184	        rows = conn.execute(
+  1185	            f"SELECT type, COUNT(*) AS c FROM artifacts WHERE id IN ({placeholders}) GROUP BY type",
+  1186	            chunk,
+  1187	        ).fetchall()
+  1188	        for row in rows:
+  1189	            counts[row["type"]] = counts.get(row["type"], 0) + int(row["c"])
+  1190	    return counts
+  1191	
+  1192	
+  1193	def compute_bible_impact_preview(
+  1194	    project_id: str,
+  1195	    bible_body: dict,
+  1196	    *,
+  1197	    expected_version=None,
+  1198	) -> dict:
+  1199	    """定稿前只读影响预检：不写库、不失效下游。"""
+  1200	    from app.config import IMAGE_PRICE_PER_UNIT
+  1201	    from app.multiview import CHARACTER_REQUIRED_VIEWS
+  1202	
+  1203	    p = _project_or_404(project_id)
+  1204	    current_version = int(p.get("bible_version") or 0)
+  1205	    if expected_version is not None and int(expected_version) != current_version:
+  1206	        raise HTTPException(409, detail=_bible_conflict_detail(p, expected_version))
+  1207	
+  1208	    instance, errors = schema_errors(Bible, bible_body)
+  1209	    if errors:
+  1210	        raise HTTPException(422, "；".join(errors))
+  1211	    from app.validators import validate_bible
+  1212	    v_errors = validate_bible(instance)
+  1213	    if v_errors:
+  1214	        raise HTTPException(422, "；".join(v_errors))
+  1215	
+  1216	    old_bible = json.loads(p["bible_json"]) if p.get("bible_json") else None
+  1217	    new_bible = instance.model_dump(mode="json")
+  1218	    change_types = _classify_bible_changes(old_bible, new_bible)
+  1219	    style_changed = "global_style" in change_types
+  1220	    previous_artifact_id = p.get("bible_artifact_id")
+  1221	    stale_ids = (
+  1222	        evidence_repository.list_descendants(previous_artifact_id)
+  1223	        if previous_artifact_id else []
+  1224	    )
+  1225	    by_type = _artifact_type_counts(stale_ids)
+  1226	    conn = get_conn()
+  1227	    stale_assets: list[dict] = []
+  1228	    if stale_ids:
+  1229	        for i in range(0, min(len(stale_ids), 100), 400):
+  1230	            chunk = stale_ids[i:i + 400]
+  1231	            placeholders = ",".join("?" for _ in chunk)
+  1232	            rows = conn.execute(
+  1233	                f"SELECT id, type, status, scope_type, scope_id FROM artifacts WHERE id IN ({placeholders})",
+  1234	                chunk,
+  1235	            ).fetchall()
+  1236	            found = {row["id"]: dict(row) for row in rows}
+  1237	            stale_assets.extend(found[asset_id] for asset_id in chunk if asset_id in found)
+  1238	    portraits = conn.execute(
+  1239	        "SELECT COUNT(*) AS c FROM character_portraits WHERE project_id=?", (project_id,)
+  1240	    ).fetchone()["c"]
+  1241	    scenes = conn.execute(
+  1242	        "SELECT COUNT(*) AS c FROM scene_references WHERE project_id=?", (project_id,)
+  1243	    ).fetchone()["c"]
+  1244	    char_count = len(instance.characters)
+  1245	    views_per = len(CHARACTER_REQUIRED_VIEWS)
+  1246	    rebuild_images = 0
+  1247	    if style_changed:
+  1248	        rebuild_images = char_count * views_per + int(scenes or 0) * 2
+  1249	    elif "character_appearance" in change_types:
+  1250	        old_chars = {
+  1251	            c.get("name"): c for c in (old_bible or {}).get("characters", []) if c.get("name")
+  1252	        }
+  1253	        affected = 0
+  1254	        for c in new_bible.get("characters", []):
+  1255	            name = c.get("name")
+  1256	            oc = old_chars.get(name) or {}
+  1257	            if (oc.get("appearance_canonical") or "") != (c.get("appearance_canonical") or ""):
+  1258	                affected += 1
+  1259	        rebuild_images = affected * views_per
+  1260	    unit = float(IMAGE_PRICE_PER_UNIT)
+  1261	    estimated = round(rebuild_images * unit, 2)
+  1262	    max_retry = round(estimated * 1.5, 2)
+  1263	    computed_at = now()
+  1264	    fingerprint_payload = {
+  1265	        "project_id": project_id,
+  1266	        "bible_version": current_version,
+  1267	        "bible_artifact_id": previous_artifact_id,
+  1268	        "change_types": change_types,
+  1269	        "stale_descendant_ids": stale_ids,
+  1270	        "portraits": int(portraits or 0),
+  1271	        "scenes": int(scenes or 0),
+  1272	        "rebuild_images": rebuild_images,
+  1273	    }
+  1274	    preview_fp = fingerprint(fingerprint_payload)
+  1275	    return {
+  1276	        "project_id": project_id,
+  1277	        "bible_version": current_version,
+  1278	        "computed_at": computed_at,
+  1279	        "fingerprint": preview_fp,
+  1280	        "change_types": change_types,
+  1281	        "style_changed": style_changed,
+  1282	        "stale_descendant_ids": stale_ids,
+  1283	        "stale_assets": stale_assets,
+  1284	        "stale_assets_truncated": len(stale_ids) > 100,
+  1285	        "stale_count": len(stale_ids),
+  1286	        "by_artifact_type": by_type,
+  1287	        "paid_assets": {
+  1288	            "character_portraits": int(portraits or 0),
+  1289	            "scene_references": int(scenes or 0),
+  1290	        },
+  1291	        "rebuild": {
+  1292	            "image_count": rebuild_images,
+  1293	            "unit_price_cny": unit,
+  1294	            "estimated_cost_cny": estimated,
+  1295	            "max_retry_budget_cny": max_retry,
+  1296	            "note": "费用来自服务端口径；实际生成以任务账单为准",
+  1297	        },
+  1298	        "requires_reconfirm": bool(stale_ids),
+  1299	        "paid_media_invalidated": bool(style_changed or stale_ids),
+  1300	        "old_asset_policy": "定稿后下游证据标记失效；画风变更会作废旧定妆/场景图",
+  1301	    }
+  1302	
+  1303	
+  1304	def compute_refs_cost_precheck(
+  1305	    project_id: str,
+  1306	    *,
+  1307	    character: str | None = None,
+  1308	    characters: list[str] | None = None,
+  1309	    resume: bool = False,
+  1310	    view_role: str | None = None,
+  1311	) -> dict:
+  1312	    """人物定妆/单视角付费预检（只读）。"""
+  1313	    from app.config import IMAGE_PRICE_PER_UNIT
+  1314	    from app.multiview import CHARACTER_REQUIRED_VIEWS
+  1315	
+  1316	    p = _project_or_404(project_id)
+  1317	    if not p.get("bible_json"):
+  1318	        raise HTTPException(409, "请先生成角色圣经")
+  1319	    bible = json.loads(p["bible_json"])
+  1320	    bible_characters = bible.get("characters") or []
+  1321	    selected_names = _normalize_character_selection(characters)
+  1322	    if character and selected_names and character not in selected_names:
+  1323	        raise HTTPException(422, "character 与 characters 范围不一致")
+  1324	    if character:
+  1325	        bible_characters = [c for c in bible_characters if c.get("name") == character]
+  1326	        if not bible_characters:
+  1327	            raise HTTPException(404, f"角色不存在：{character}")
+  1328	    elif selected_names:
+  1329	        by_name = {c.get("name"): c for c in bible_characters if c.get("name")}
+  1330	        missing = [name for name in selected_names if name not in by_name]
+  1331	        if missing:
+  1332	            raise HTTPException(404, f"角色不存在：{missing[0]}")
+  1333	        bible_characters = [by_name[name] for name in selected_names]
+  1334	    views_per = 1 if view_role else len(CHARACTER_REQUIRED_VIEWS)
+  1335	    conn = get_conn()
+  1336	    missing_roles: list[dict] = []
+  1337	    image_count = 0
+  1338	    if view_role:
+  1339	        image_count = 1
+  1340	        missing_roles.append({
+  1341	            "character": character, "view_role": view_role, "reason": "单视角重做",
+  1342	        })
+  1343	    elif resume:
+  1344	        for c in bible_characters:
+  1345	            name = c.get("name")
+  1346	            row = conn.execute(
+  1347	                """SELECT id, pack_status FROM character_portraits
+  1348	                   WHERE project_id=? AND character_name=? AND ep_end IS NULL
+  1349	                   ORDER BY ep_start DESC LIMIT 1""",
+  1350	                (project_id, name),
+  1351	            ).fetchone()
+  1352	            if not row or row["pack_status"] not in (None, "ready"):
+  1353	                image_count += views_per
+  1354	                missing_roles.append({
+  1355	                    "character": name, "views": list(CHARACTER_REQUIRED_VIEWS),
+  1356	                    "reason": "缺包或未通过",
+  1357	                })
+  1358	                continue
+  1359	            view_rows = conn.execute(
+  1360	                "SELECT view_role, status, image_path FROM character_portrait_views WHERE portrait_id=?",
+  1361	                (row["id"],),
+  1362	            ).fetchall()
+  1363	            have = {
+  1364	                v["view_role"] for v in view_rows
+  1365	                if v["status"] == "ready" and v["image_path"]
+  1366	            }
+  1367	            need = [r for r in CHARACTER_REQUIRED_VIEWS if r not in have]
+  1368	            if need:
+  1369	                image_count += len(need)
+  1370	                missing_roles.append({
+  1371	                    "character": name, "views": need, "reason": "缺失视角",
+  1372	                })
+  1373	    else:
+  1374	        image_count = len(bible_characters) * views_per
+  1375	        for c in bible_characters:
+  1376	            missing_roles.append({
+  1377	                "character": c.get("name"),
+  1378	                "views": list(CHARACTER_REQUIRED_VIEWS) if not view_role else [view_role],
+  1379	                "reason": "整包生成",
+  1380	            })
+  1381	    unit = float(IMAGE_PRICE_PER_UNIT)
+  1382	    estimated = round(image_count * unit, 2)
+  1383	    max_retry = round(estimated * 1.5, 2)
+  1384	    computed_at = now()
+  1385	    scope_fingerprint = fingerprint({
+  1386	        "project_id": project_id,
+  1387	        "character": character,
+  1388	        "characters": selected_names,
+  1389	        "resume": resume,
+  1390	        "view_role": view_role,
+  1391	        "image_count": image_count,
+  1392	        "unit": unit,
+  1393	        "bible_version": p.get("bible_version"),
+  1394	    })
+  1395	    return {
+  1396	        "quote_id": scope_fingerprint,
+  1397	        "scope_fingerprint": scope_fingerprint,
+  1398	        "computed_at": computed_at,
+  1399	        "quote_expires_at": computed_at + 300,
+  1400	        "project_id": project_id,
+  1401	        "action": (
+  1402	            "regenerate_view" if view_role
+  1403	            else ("resume_missing" if resume else ("regenerate_pack" if character else "generate_all"))
+  1404	        ),
+  1405	        "character": character,
+  1406	        "characters": selected_names,
+  1407	        "view_role": view_role,
+  1408	        "character_count": len(bible_characters),
+  1409	        "views_per_character": views_per,
+  1410	        "image_count": image_count,
+  1411	        "unit_price_cny": unit,
+  1412	        "estimated_cost_cny": estimated,
+  1413	        "max_retry_budget_cny": max_retry,
+  1414	        "budget_cap_cny": max_retry,
+  1415	        "scope": missing_roles,
+  1416	        "old_asset_policy": (
+  1417	            "已落盘且可读取的视角保留；技术失败不替换当前采用包"
+  1418	            if resume else
+  1419	            "使用最新角色设定与全局画风生成；新包三视角文件齐全并可读取后替换旧包，质量评分只作提示"
+  1420	        ),
+  1421	        "idempotency_hint": "同一 quote_id 重复确认不会扩大范围；服务端仍做最终校验",
+  1422	        "stop_policy": "可停止；已扣费步骤不退款，已完成成品保留",
+  1423	    }
+  1424	
+  1425	
+  1426	@router.post("/projects/{project_id}/bible/impact-preview")
+  1427	async def bible_impact_preview(project_id: str, body: dict):
+  1428	    """定稿人物谱前的只读影响预检。"""
+  1429	    bible_body, expected_version, _, _ = _parse_bible_write_body(body or {})
+  1430	    return compute_bible_impact_preview(
+  1431	        project_id, bible_body, expected_version=expected_version,
+  1432	    )
+  1433	
+  1434	
+  1435	@router.post("/projects/{project_id}/refs/precheck")
+  1436	async def refs_cost_precheck(project_id: str, body: dict | None = None):
+  1437	    """定妆照/造型包付费预检。"""
+  1438	    payload = body or {}
+  1439	    return _issue_payment_quote(compute_refs_cost_precheck(
+  1440	        project_id,
+  1441	        character=payload.get("character"),
+  1442	        characters=_normalize_character_selection(payload.get("characters")),
+  1443	        resume=bool(payload.get("resume", False)),
+  1444	        view_role=payload.get("view_role"),
+  1445	    ))
+  1446	
+  1447	
+  1448	def _compute_bible_generate_precheck(project_id: str, *, style_name: str | None = None) -> dict:
+  1449	    """计算首次人物谱+定妆范围；不签发可执行凭证。"""
+  1450	    from app.config import IMAGE_PRICE_PER_UNIT
+  1451	    from app.multiview import CHARACTER_REQUIRED_VIEWS
+  1452	    from app.stages import BIBLE_MUST_COVER_MAX
+  1453	
+  1454	    style_name = _normalize_visual_style_name(style_name)
+  1455	    p = _project_or_404(project_id)
+  1456	    unit = float(IMAGE_PRICE_PER_UNIT)
+  1457	    views_per = len(CHARACTER_REQUIRED_VIEWS)
+  1458	    # 首版谱写按必收名单上限估算；若已有 bible 则用真实角色数
+  1459	    if p.get("bible_json"):
+  1460	        bible = json.loads(p["bible_json"])
+  1461	        chars = bible.get("characters") or []
+  1462	        char_count = len(chars)
+  1463	        names = [c.get("name") for c in chars if c.get("name")]
+  1464	        estimate_note = "基于当前人物谱角色数"
+  1465	    else:
+  1466	        char_count = BIBLE_MUST_COVER_MAX
+  1467	        names = []
+  1468	        estimate_note = (
+  1469	            f"尚无人物谱，按首版必收名单上限 {BIBLE_MUST_COVER_MAX} 角色估算；"
+  1470	            "谱写完成后按真实角色数出图"
+  1471	        )
+  1472	    image_count = char_count * views_per
+  1473	    estimated = round(image_count * unit, 2)
+  1474	    max_retry = round(estimated * 1.5, 2)
+  1475	    computed_at = now()
+  1476	    scope_fingerprint = fingerprint({
+  1477	        "project_id": project_id,
+  1478	        "action": "generate_bible_and_refs",
+  1479	        "character_count": char_count,
+  1480	        "image_count": image_count,
+  1481	        "unit": unit,
+  1482	        "bible_version": p.get("bible_version"),
+  1483	        "style_name": style_name,
+  1484	    })
+  1485	    return {
+  1486	        "quote_id": scope_fingerprint,
+  1487	        "scope_fingerprint": scope_fingerprint,
+  1488	        "computed_at": computed_at,
+  1489	        "quote_expires_at": computed_at + 300,
+  1490	        "project_id": project_id,
+  1491	        "action": "generate_bible_and_refs",
+  1492	        "style_name": style_name,
+  1493	        "character_count": char_count,
+  1494	        "character_names": names,
+  1495	        "views_per_character": views_per,
+  1496	        "image_count": image_count,
+  1497	        "unit_price_cny": unit,
+  1498	        "estimated_cost_cny": estimated,
+  1499	        "max_retry_budget_cny": max_retry,
+  1500	        "budget_cap_cny": max_retry,
+  1501	        "estimated_duration_min": [max(3, char_count), max(8, char_count * 3)],
+  1502	        "estimate_note": estimate_note,
+  1503	        "old_asset_policy": "停止后保留已落盘成品；未开始项可稍后补齐",
+  1504	        "stop_policy": "可按阶段停止谱写或定妆；已扣费步骤不退款",
+  1505	        "scope": [
+  1506	            {"character": n or f"角色{i+1}", "views": list(CHARACTER_REQUIRED_VIEWS), "reason": "首次/重生"}
+  1507	            for i, n in enumerate(names or [None] * char_count)
+  1508	        ],
+  1509	    }
+  1510	
+  1511	
+  1512	@router.post("/projects/{project_id}/bible/generate-precheck")
+  1513	async def bible_generate_precheck(project_id: str, body: dict | None = None):
+  1514	    """签发首次生成人物谱+定妆的服务端费用凭证。"""
+  1515	    payload = body or {}
+  1516	    return _issue_payment_quote(_compute_bible_generate_precheck(
+  1517	        project_id, style_name=payload.get("style_name"),
+  1518	    ))
+  1519	
+  1520	
+  1521	@router.get("/projects/{project_id}/bible/visual-styles")
+  1522	async def bible_visual_styles(project_id: str):
+  1523	    _project_or_404(project_id)
+  1524	    return {
+  1525	        "default": DEFAULT_VISUAL_STYLE_NAME,
+  1526	        "items": visual_style_options(),
+  1527	    }
+  1528	
+  1529	
+  1530	@router.get("/projects/{project_id}/refs/gaps")
+  1531	async def refs_gaps(project_id: str):
+  1532	    """扫描定妆缺口：按角色/视角列出缺失原因。"""
+  1533	    quote = _issue_payment_quote(compute_refs_cost_precheck(project_id, resume=True))
+  1534	    return {
+  1535	        "project_id": project_id,
+  1536	        "missing_count": len(quote.get("scope") or []),
+  1537	        "image_count": quote.get("image_count"),
+  1538	        "items": quote.get("scope") or [],
+  1539	        "precheck": quote,
+  1540	    }
+  1541	
+  1542	
+  1543	@router.get("/projects/{project_id}/refs/progress")
+  1544	async def refs_progress(project_id: str):
+  1545	    """定妆细粒度进度：完成/当前/缺失/失败分项。"""
+  1546	    from app.multiview import CHARACTER_REQUIRED_VIEWS
+  1547	
+  1548	    p = _project_or_404(project_id)
+  1549	    effective_refs_status = "running" if _refs_generation_busy(project_id) else p.get("refs_status")
+  1550	    if not p.get("bible_json"):
+  1551	        return {
+  1552	            "project_id": project_id,
+  1553	            "refs_status": effective_refs_status,
+  1554	            "total": 0,
+  1555	            "ready": 0,
+  1556	            "failed": 0,
+  1557	            "missing": 0,
+  1558	            "items": [],
+  1559	        }
+  1560	    bible = json.loads(p["bible_json"])
+  1561	    conn = get_conn()
+  1562	    items = []
+  1563	    ready = failed = missing = 0
+  1564	    for c in bible.get("characters") or []:
+  1565	        name = c.get("name")
+  1566	        row = conn.execute(
+  1567	            """SELECT id, pack_status FROM character_portraits
+  1568	               WHERE project_id=? AND character_name=? AND ep_end IS NULL
+  1569	               ORDER BY ep_start DESC LIMIT 1""",
+  1570	            (project_id, name),
+  1571	        ).fetchone()
+  1572	        if not row:
+  1573	            missing += 1
+  1574	            items.append({"character": name, "status": "missing", "missing_views": list(CHARACTER_REQUIRED_VIEWS)})
+  1575	            continue
+  1576	        views = conn.execute(
+  1577	            "SELECT view_role, status FROM character_portrait_views WHERE portrait_id=?",
+  1578	            (row["id"],),
+  1579	        ).fetchall()
+  1580	        have = {v["view_role"] for v in views if v["status"] == "ready"}
+  1581	        need = [r for r in CHARACTER_REQUIRED_VIEWS if r not in have]
+  1582	        pack = row["pack_status"] or "unknown"
+  1583	        if pack == "ready" and not need:
+  1584	            ready += 1
+  1585	            status = "ready"
+  1586	        elif pack == "failed" or need:
+  1587	            if pack == "failed":
+  1588	                failed += 1
+  1589	                status = "failed"
+  1590	            else:
+  1591	                missing += 1
+  1592	                status = "missing"
+  1593	        else:
+  1594	            status = pack
+  1595	        items.append({
+  1596	            "character": name,
+  1597	            "status": status,
+  1598	            "pack_status": pack,
+  1599	            "missing_views": need,
+  1600	            "current": effective_refs_status == "running" and (
+  1601	                p.get("refs_target") == name or not p.get("refs_target")
+  1602	            ),
+  1603	        })
+  1604	    return {
+  1605	        "project_id": project_id,
+  1606	        "refs_status": effective_refs_status,
+  1607	        "refs_target": p.get("refs_target"),
+  1608	        "total": len(items),
+  1609	        "ready": ready,
+  1610	        "failed": failed,
+  1611	        "missing": missing,
+  1612	        "items": items,
+  1613	        "updated_at": now(),
+  1614	    }
+  1615	
+  1616	
+  1617	@router.post("/projects/{project_id}/bible/draft")
+  1618	async def save_bible_draft(project_id: str, body: dict):
+  1619	    """保存人物谱草稿（不定稿、不失效下游、不升版本）。"""
+  1620	    p = _project_or_404(project_id)
+  1621	    expected_version = body.get("expected_version")
+  1622	    if expected_version is not None and int(expected_version) != int(p.get("bible_version") or 0):
+  1623	        raise HTTPException(409, detail=_bible_conflict_detail(p, expected_version))
+  1624	    draft = body.get("bible") if isinstance(body.get("bible"), dict) else {
+  1625	        k: v for k, v in (body or {}).items()
+  1626	        if k not in {"expected_version", "confirm", "impact_preview_fingerprint"}
+  1627	    }
+  1628	    conn = get_conn()
+  1629	    # 兼容旧库：无列时写入 bible_feedback 旁路字段不可行，使用独立列迁移
+  1630	    try:
+  1631	        conn.execute(
+  1632	            "UPDATE projects SET bible_draft_json=?, bible_draft_updated_at=? WHERE id=?",
+  1633	            (json.dumps(draft, ensure_ascii=False), now(), project_id),
+  1634	        )
+  1635	    except Exception:
+  1636	        conn.execute("ALTER TABLE projects ADD COLUMN bible_draft_json TEXT")
+  1637	        conn.execute("ALTER TABLE projects ADD COLUMN bible_draft_updated_at REAL")
+  1638	        conn.execute(
+  1639	            "UPDATE projects SET bible_draft_json=?, bible_draft_updated_at=? WHERE id=?",
+  1640	            (json.dumps(draft, ensure_ascii=False), now(), project_id),
+  1641	        )
+  1642	    conn.commit()
+  1643	    return {
+  1644	        "saved": True,
+  1645	        "draft": True,
+  1646	        "bible_version": int(p.get("bible_version") or 0),
+  1647	        "updated_at": now(),
+  1648	    }
+  1649	
+  1650	
+  1651	@router.get("/projects/{project_id}/bible/draft")
+  1652	async def get_bible_draft(project_id: str):
+  1653	    p = _project_or_404(project_id)
+  1654	    conn = get_conn()
+  1655	    try:
+  1656	        row = conn.execute(
+  1657	            "SELECT bible_draft_json, bible_draft_updated_at, bible_version FROM projects WHERE id=?",
+  1658	            (project_id,),
+  1659	        ).fetchone()
+  1660	    except Exception:
+  1661	        return {"draft": None, "bible_version": int(p.get("bible_version") or 0)}
+  1662	    draft = None
+  1663	    if row and row["bible_draft_json"]:
+  1664	        try:
+  1665	            draft = json.loads(row["bible_draft_json"])
+  1666	        except (TypeError, ValueError, json.JSONDecodeError):
+  1667	            draft = None
+  1668	    return {
+  1669	        "draft": draft,
+  1670	        "updated_at": row["bible_draft_updated_at"] if row else None,
+  1671	        "bible_version": int((row["bible_version"] if row else p.get("bible_version")) or 0),
+  1672	    }
+  1673	
+  1674	
+  1675	def _auto_change_payload(item: dict) -> dict:
+  1676	    payload = item.get("payload")
+  1677	    return payload if isinstance(payload, dict) else {}
+  1678	
+  1679	
+  1680	def _auto_change_character_card(item: dict) -> dict | None:
+  1681	    payload = _auto_change_payload(item)
+  1682	    candidates = [
+  1683	        payload.get("character"),
+  1684	        payload.get("character_card"),
+  1685	        item.get("character_card"),
+  1686	    ]
+  1687	    if isinstance(item.get("character"), dict):
+  1688	        candidates.append(item.get("character"))
+  1689	    if item.get("appearance_canonical") or payload.get("appearance_canonical"):
+  1690	        candidates.append({**payload, **item})
+  1691	    for card in candidates:
+  1692	        if not isinstance(card, dict):
+  1693	            continue
+  1694	        name = (
+  1695	            card.get("name")
+  1696	            or payload.get("character_name")
+  1697	            or item.get("character_name")
+  1698	            or (item.get("character") if isinstance(item.get("character"), str) else None)
+  1699	        )
+  1700	        if not name:
+  1701	            continue
+  1702	        merged = dict(card)
+  1703	        merged["name"] = name
+  1704	        merged.setdefault("role", payload.get("role") or item.get("role") or "重要配角")
+  1705	        merged.setdefault("appearance_canonical", payload.get("appearance_canonical") or item.get("appearance_canonical") or "")
+  1706	        merged.setdefault("personality", payload.get("personality") or item.get("personality") or "")
+  1707	        merged.setdefault("speech_style", payload.get("speech_style") or item.get("speech_style") or "")
+  1708	        merged.setdefault("relationships", payload.get("relationships") or item.get("relationships") or [])
+  1709	        return merged
+  1710	    return None
+  1711	
+  1712	
+  1713	def _auto_change_portrait_id(change_id: str, item: dict | None = None) -> str | None:
+  1714	    if change_id.startswith("portrait:"):
+  1715	        return change_id.split(":", 1)[1]
+  1716	    payload = _auto_change_payload(item or {})
+  1717	    return (
+  1718	        payload.get("portrait_id")
+  1719	        or payload.get("previous_portrait_id")
+  1720	        or payload.get("base_portrait_id")
+  1721	        or (item or {}).get("portrait_id")
+  1722	        or (item or {}).get("previous_portrait_id")
+  1723	        or (item or {}).get("base_portrait_id")
+  1724	    )
+  1725	
+  1726	
+  1727	@router.get("/projects/{project_id}/auto-changes")
+  1728	async def list_auto_changes(project_id: str):
+  1729	    """自动变更/待审队列（人物发现与漂移记录）。"""
+  1730	    _project_or_404(project_id)
+  1731	    conn = get_conn()
+  1732	    try:
+  1733	        row = conn.execute(
+  1734	            "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
+  1735	        ).fetchone()
+  1736	    except Exception:
+  1737	        return {"items": []}
+  1738	    items = []
+  1739	    if row and row["bible_auto_changes_json"]:
+  1740	        try:
+  1741	            items = json.loads(row["bible_auto_changes_json"]) or []
+  1742	        except (TypeError, ValueError, json.JSONDecodeError):
+  1743	            items = []
+  1744	    # 同时从定妆 change_json 汇总漂移记录
+  1745	    portraits = conn.execute(
+  1746	        """SELECT id, character_name, ep_start, change_json, pack_status, created_at
+  1747	           FROM character_portraits WHERE project_id=? AND change_json IS NOT NULL
+  1748	           ORDER BY created_at DESC LIMIT 50""",
+  1749	        (project_id,),
+  1750	    ).fetchall()
+  1751	    for r in portraits:
+  1752	        try:
+  1753	            change = json.loads(r["change_json"] or "{}")
+  1754	        except (TypeError, ValueError, json.JSONDecodeError):
+  1755	            change = {}
+  1756	        items.append({
+  1757	            "id": f"portrait:{r['id']}",
+  1758	            "kind": "appearance_drift",
+  1759	            "status": change.get("review_status") or "recorded",
+  1760	            "character": r["character_name"],
+  1761	            "ep_start": r["ep_start"],
+  1762	            "reason": change.get("reason"),
+  1763	            "change_dimensions": change.get("change_dimensions") or [],
+  1764	            "persistence": change.get("persistence"),
+  1765	            "pack_status": r["pack_status"],
+  1766	            "created_at": r["created_at"],
+  1767	            "source": "portrait_change",
+  1768	        })
+  1769	    return {"items": items}
+  1770	
+  1771	
+  1772	@router.post("/projects/{project_id}/auto-changes/{change_id}/decide")
+  1773	async def decide_auto_change(project_id: str, change_id: str, body: dict | None = None):
+  1774	    """批准/拒绝/回滚自动变更记录。"""
+  1775	    project = _project_or_404(project_id)
+  1776	    payload = body or {}
+  1777	    decision = payload.get("decision") or "approve"
+  1778	    if decision not in {"approve", "reject", "rollback", "merge"}:
+  1779	        raise HTTPException(422, "decision 须为 approve/reject/rollback/merge")
+  1780	    conn = get_conn()
+  1781	    try:
+  1782	        row = conn.execute(
+  1783	            "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
+  1784	        ).fetchone()
+  1785	        items = json.loads(row["bible_auto_changes_json"] or "[]") if row and row["bible_auto_changes_json"] else []
+  1786	    except Exception:
+  1787	        conn.execute("ALTER TABLE projects ADD COLUMN bible_auto_changes_json TEXT")
+  1788	        items = []
+  1789	    found = False
+  1790	    matched_item = None
+  1791	    for item in items:
+  1792	        if item.get("id") == change_id:
+  1793	            item["status"] = decision
+  1794	            item["decided_at"] = now()
+  1795	            item["decision_reason"] = payload.get("reason") or ""
+  1796	            if decision == "merge":
+  1797	                item["merge_into_character"] = payload.get("merge_into_character")
+  1798	                item["merge_into_scene"] = payload.get("merge_into_scene")
+  1799	            if payload.get("ep_start") is not None:
+  1800	                try:
+  1801	                    item["ep_start"] = max(1, int(payload["ep_start"]))
+  1802	                except (TypeError, ValueError) as exc:
+  1803	                    raise HTTPException(422, "ep_start 必须是正整数") from exc
+  1804	            found = True
+  1805	            matched_item = item
+  1806	            break
+  1807	    action_result: dict = {}
+  1808	    if change_id.startswith("portrait:"):
+  1809	        portrait_id = change_id.split(":", 1)[1]
+  1810	        prow = conn.execute(
+  1811	            "SELECT change_json, pack_status FROM character_portraits WHERE id=? AND project_id=?",
+  1812	            (portrait_id, project_id),
+  1813	        ).fetchone()
+  1814	        if prow:
+  1815	            try:
+  1816	                change = json.loads(prow["change_json"] or "{}")
+  1817	            except (TypeError, ValueError, json.JSONDecodeError):
+  1818	                change = {}
+  1819	            change["review_status"] = decision
+  1820	            change["decision_reason"] = payload.get("reason") or ""
+  1821	            change["decided_at"] = now()
+  1822	            if decision == "approve":
+  1823	                change["review_status"] = "approved"
+  1824	            conn.execute(
+  1825	                "UPDATE character_portraits SET change_json=? WHERE id=?",
+  1826	                (json.dumps(change, ensure_ascii=False), portrait_id),
+  1827	            )
+  1828	            if decision == "reject" and prow["pack_status"] != "ready":
+  1829	                conn.execute(
+  1830	                    "UPDATE character_portraits SET pack_status='rejected' WHERE id=?",
+  1831	                    (portrait_id,),
+  1832	                )
+  1833	            found = True
+  1834	            action_result["portrait_id"] = portrait_id
+  1835	    if matched_item and decision == "approve":
+  1836	        kind = matched_item.get("kind")
+  1837	        if kind in {"new_character", "character_discovery", "new_bible_character"}:
+  1838	            card = _auto_change_character_card(matched_item)
+  1839	            if card:
+  1840	                bible = json.loads(project["bible_json"] or '{"characters":[],"world":{"visual_style_canonical":""}}')
+  1841	                if not any(c.get("name") == card.get("name") for c in bible.get("characters", [])):
+  1842	                    bible.setdefault("characters", []).append(card)
+  1843	                    instance, errors = schema_errors(Bible, bible)
+  1844	                    if errors:
+  1845	                        raise HTTPException(422, "；".join(errors))
+  1846	                    revision = _commit_bible_revision(
+  1847	                        project_id, project, instance, reason=f"批准新增角色：{card.get('name')}"
+  1848	                    )
+  1849	                    action_result.update({
+  1850	                        "bible_version": revision["bible_version"],
+  1851	                        "artifact_id": revision["artifact_id"],
+  1852	                        "added_character": card.get("name"),
+  1853	                    })
+  1854	        elif kind == "appearance_drift":
+  1855	            portrait_id = _auto_change_portrait_id(change_id, matched_item)
+  1856	            if portrait_id:
+  1857	                prow = conn.execute(
+  1858	                    "SELECT change_json FROM character_portraits WHERE id=? AND project_id=?",
+  1859	                    (portrait_id, project_id),
+  1860	                ).fetchone()
+  1861	                if prow:
+  1862	                    change = _parse_json_value(prow["change_json"], {})
+  1863	                    if not isinstance(change, dict):
+  1864	                        change = {}
+  1865	                    change["review_status"] = "approved"
+  1866	                    change["decision_reason"] = payload.get("reason") or ""
+  1867	                    change["decided_at"] = now()
+  1868	                    conn.execute(
+  1869	                        "UPDATE character_portraits SET change_json=? WHERE id=?",
+  1870	                        (json.dumps(change, ensure_ascii=False), portrait_id),
+  1871	                    )
+  1872	                    found = True
+  1873	                    action_result["portrait_id"] = portrait_id
+  1874	        elif kind == "scene_discovery":
+  1875	            scene = _auto_change_payload(matched_item).get("scene")
+  1876	            if isinstance(scene, dict) and scene.get("name"):
+  1877	                bible = json.loads(project["bible_json"] or '{}')
+  1878	                if not any(item.get("name") == scene["name"] for item in bible.get("scenes", [])):
+  1879	                    bible.setdefault("scenes", []).append(scene)
+  1880	                    instance, validation_errors = schema_errors(Bible, bible)
+  1881	                    if validation_errors:
+  1882	                        raise HTTPException(422, "；".join(validation_errors))
+  1883	                    conn.execute(
+  1884	                        "UPDATE projects SET bible_json=?,bible_version=bible_version+1 WHERE id=?",
+  1885	                        (instance.model_dump_json(), project_id),
+  1886	                    )
+  1887	                    action_result.update({
+  1888	                        "added_scene": scene["name"], "requires_payment_confirmation": True,
+  1889	                        "message": "场景锚点已批准入库；出图仍需在场景库完成费用预检",
+  1890	                    })
+  1891	        elif kind == "scene_state_change":
+  1892	            scene_name = str(matched_item.get("scene") or "").strip()
+  1893	            change_payload = _auto_change_payload(matched_item)
+  1894	            new_canonical = str(change_payload.get("new_scene_canonical") or "").strip()
+  1895	            ep_start = max(1, int(matched_item.get("ep_start") or 1))
+  1896	            bible = json.loads(project["bible_json"] or '{}')
+  1897	            target_scene = next(
+  1898	                (item for item in bible.get("scenes", []) if item.get("name") == scene_name), None,
+  1899	            )
+  1900	            if not target_scene or not new_canonical:
+  1901	                raise HTTPException(422, "场景状态变化缺少目标场景或新锚点")
+  1902	            target_scene["pending_state_canonical"] = new_canonical
+  1903	            target_scene["pending_state_ep_start"] = ep_start
+  1904	            instance, validation_errors = schema_errors(Bible, bible)
+  1905	            if validation_errors:
+  1906	                raise HTTPException(422, "；".join(validation_errors))
+  1907	            conn.execute(
+  1908	                "UPDATE projects SET bible_json=?,bible_version=bible_version+1 WHERE id=?",
+  1909	                (instance.model_dump_json(), project_id),
+  1910	            )
+  1911	            current_ref = _scene_current_row(conn, project_id, scene_name)
+  1912	            if current_ref and "change_json" in current_ref.keys():
+  1913	                ref_change = _parse_json_value(current_ref["change_json"], {}) or {}
+  1914	                ref_change.update({
+  1915	                    "pending_redraw": True, "pending_state_canonical": new_canonical,
+  1916	                    "pending_state_ep_start": ep_start, "approved_change_id": change_id,
+  1917	                    "approved_at": now(),
+  1918	                })
+  1919	                conn.execute(
+  1920	                    "UPDATE scene_references SET change_json=? WHERE id=?",
+  1921	                    (json.dumps(ref_change, ensure_ascii=False), current_ref["id"]),
+  1922	                )
+  1923	            action_result.update({
+  1924	                "approved_scene_change": scene_name,
+  1925	                "requires_payment_confirmation": True,
+  1926	                "pending_state_ep_start": ep_start,
+  1927	                "message": "状态变化锚点已保存为待重绘版本；仍需在场景库完成费用预检",
+  1928	            })
+  1929	    elif matched_item and decision == "rollback":
+  1930	        portrait_id = _auto_change_portrait_id(change_id, matched_item)
+  1931	        if portrait_id:
+  1932	            row = conn.execute(
+  1933	                "SELECT * FROM character_portraits WHERE id=? AND project_id=?",
+  1934	                (portrait_id, project_id),
+  1935	            ).fetchone()
+  1936	            if row:
+  1937	                target_id = (
+  1938	                    _auto_change_payload(matched_item).get("previous_portrait_id")
+  1939	                    or _auto_change_payload(matched_item).get("base_portrait_id")
+  1940	                    or matched_item.get("previous_portrait_id")
+  1941	                    or matched_item.get("base_portrait_id")
+  1942	                    or row["base_portrait_id"]
+  1943	                )
+  1944	                target = None
+  1945	                if target_id:
+  1946	                    target = conn.execute(
+  1947	                        "SELECT * FROM character_portraits WHERE id=? AND project_id=? AND character_name=?",
+  1948	                        (target_id, project_id, row["character_name"]),
+  1949	                    ).fetchone()
+  1950	                if target is None:
+  1951	                    target = conn.execute(
+  1952	                        "SELECT * FROM character_portraits WHERE project_id=? AND character_name=? AND id<>? "
+  1953	                        "AND (pack_status IS NULL OR pack_status='ready') ORDER BY created_at DESC LIMIT 1",
+  1954	                        (project_id, row["character_name"], portrait_id),
+  1955	                    ).fetchone()
+  1956	                if target:
+  1957	                    action_result.update(_set_current_portrait(
+  1958	                        conn,
+  1959	                        project_id,
+  1960	                        row["character_name"],
+  1961	                        target,
+  1962	                        reason=payload.get("reason") or "自动变更回滚",
+  1963	                        decision="rollback",
+  1964	                    ))
+  1965	                    found = True
+  1966	    elif matched_item and decision == "merge":
+  1967	        is_scene_change = str(matched_item.get("kind") or "").startswith("scene_")
+  1968	        target_name = payload.get("merge_into_scene") if is_scene_change else payload.get("merge_into_character")
+  1969	        if not target_name:
+  1970	            raise HTTPException(422, "merge 需要明确合并目标")
+  1971	        bible = json.loads(project["bible_json"] or '{"characters":[]}')
+  1972	        collection = bible.get("scenes", []) if is_scene_change else bible.get("characters", [])
+  1973	        if not any(c.get("name") == target_name for c in collection):
+  1974	            raise HTTPException(422, f"合并目标不存在：{target_name}")
+  1975	        matched_item["decision_reason"] = (
+  1976	            (payload.get("reason") or "").strip()
+  1977	            or f"合并到已有{'场景' if is_scene_change else '角色'}：{target_name}"
+  1978	        )
+  1979	        action_result["merge_into_scene" if is_scene_change else "merge_into_character"] = target_name
+  1980	    if not found:
+  1981	        raise HTTPException(404, "自动变更记录不存在")
+  1982	    conn.execute(
+  1983	        "UPDATE projects SET bible_auto_changes_json=? WHERE id=?",
+  1984	        (json.dumps(items, ensure_ascii=False), project_id),
+  1985	    )
+  1986	    conn.commit()
+  1987	    return {"ok": True, "change_id": change_id, "decision": decision, **action_result}
+  1988	
+  1989	
+  1990	
+  1991	
+  1992	
+  1993	@router.put("/projects/{project_id}/bible")
+  1994	async def edit_bible(project_id: str, body: dict):
+  1995	    from app.capabilities.dispatch import ui_route
+  1996	
+  1997	    bible_body, expected_version, confirm, impact_fp = _parse_bible_write_body(body or {})
+  1998	
+  1999	    routed = await ui_route(
+  2000	        "bible.update",
