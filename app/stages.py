@@ -1950,12 +1950,14 @@ BIBLE_FIRST_TOKEN_TIMEOUT_S = 20.0
 
 
 def _bible_short_json_call_meta(meta: dict[str, Any]) -> dict[str, Any]:
-    """人物谱短 JSON 调用：关掉 thinking，并给 0 字节流式空等一个 20s 首字上限。"""
-    return {
-        **meta,
-        "disable_thinking": True,
-        "first_token_timeout_s": BIBLE_FIRST_TOKEN_TIMEOUT_S,
-    }
+    """人物谱短 JSON 调用：关掉 thinking，并给 0 字节流式空等一个首字上限。
+
+    调用方传入的 ``first_token_timeout_s`` 优先；详情比点名长，需要更宽的首字窗。
+    """
+    merged = {**meta, "disable_thinking": True}
+    if "first_token_timeout_s" not in meta:
+        merged["first_token_timeout_s"] = BIBLE_FIRST_TOKEN_TIMEOUT_S
+    return merged
 
 # 旁文本净化的三个闸（见 `_chapters_without_paratext` docstring 里的事故口径）：
 BIBLE_PARATEXT_MARGIN_CHAPTERS = 3   # 净化只会让正文变短，头部因此可能多吃进几章
@@ -5048,6 +5050,8 @@ BIBLE_ROSTER_INPUT_MAX_CHARS = 16000
 BIBLE_DETAIL_TIMEOUT_S = 90.0
 BIBLE_DETAIL_MAX_ATTEMPTS = 2
 BIBLE_DETAIL_MAX_TOKENS = 4096
+# 单角色详情比点名/裁决长，20s 首字会把已发出的成功流误杀；60s 仍切断 0 字节空等。
+BIBLE_DETAIL_FIRST_TOKEN_TIMEOUT_S = 60.0
 
 
 class _BibleRosterEntry(BaseModel):
@@ -5074,6 +5078,54 @@ class _CharacterDetail(BaseModel):
     relationships: list[Relationship] = Field(default_factory=list)
     aliases: list[CharacterAlias] = Field(default_factory=list)
     source_evidence: list[AppearanceEvidence] = Field(default_factory=list)
+
+
+def _sanitize_character_detail_payload(payload: dict) -> dict:
+    """丢掉缺证据锚点的别名/外观证据，不让整条角色详情校验失败。
+
+    真实事故：孟浩详情三次都因 aliases[].evidence_chapter_index=null 整单作废，
+    随后被 `_generate_character_detail_batch` 从名单静默删除，人物谱里没有主角。
+    别名合同是「不确定不登记」，缺锚点应丢那一条，不是拒绝这个人。
+    """
+    data = dict(payload)
+    aliases = data.get("aliases")
+    if isinstance(aliases, list):
+        data["aliases"] = [
+            item for item in aliases
+            if isinstance(item, dict)
+            and item.get("evidence_chapter_index") is not None
+            and str(item.get("text") or "").strip()
+            and str(item.get("evidence_quote") or "").strip()
+        ]
+    evidence = data.get("source_evidence")
+    if isinstance(evidence, list):
+        data["source_evidence"] = [
+            item for item in evidence
+            if isinstance(item, dict)
+            and item.get("evidence_chapter_index") is not None
+            and str(item.get("evidence_quote") or "").strip()
+        ]
+    return data
+
+
+def _character_stub_from_roster(entry: _BibleRosterEntry) -> Character:
+    """名单已锁定时，详情失败也要留下这个人，外观留空待补，不编造长相。"""
+    return Character(
+        name=entry.name,
+        role=entry.role,
+        appearance_canonical="外观待补全，详情生成未通过校验，当前不自动定妆",
+        personality="",
+        speech_style="",
+        relationships=[],
+        aliases=[],
+        source_evidence=[],
+        presence_status=entry.presence_status,
+        importance_score=entry.importance_score,
+        importance_signals=entry.importance_signals,
+        portrait_eligible=False,
+        appearance_status="insufficient_evidence",
+        period_costume_canonical="待详情通过后再依据年代与身份补全",
+    )
 
 
 def _character_detail_evidence_pack(
@@ -5296,11 +5348,14 @@ async def _generate_character_detail(
                         "attempt": attempt,
                         "input_chars": len(pack),
                         "project_id": project_id,
+                        "first_token_timeout_s": BIBLE_DETAIL_FIRST_TOKEN_TIMEOUT_S,
                     }),
                 ),
                 timeout=BIBLE_DETAIL_TIMEOUT_S,
             )
-            detail = _CharacterDetail.model_validate(extract_json(raw))
+            detail = _CharacterDetail.model_validate(
+                _sanitize_character_detail_payload(extract_json(raw))
+            )
             character = Character(
                 name=entry.name,
                 role=entry.role,
@@ -5366,7 +5421,11 @@ async def _generate_character_detail_batch(
     results = await asyncio.gather(*tasks, return_exceptions=True)
     characters: list[Character] = []
     for entry, result in zip(entries, results, strict=True):
+        if isinstance(result, asyncio.CancelledError):
+            raise result
         if isinstance(result, BaseException) or result is None:
+            # 名单已锁定。详情失败留下占位，禁止把主角/配角从人物谱抹掉。
+            characters.append(_character_stub_from_roster(entry))
             continue
         characters.append(result)
     return characters

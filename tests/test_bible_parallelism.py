@@ -95,6 +95,101 @@ async def test_mentioned_only_character_skips_detail_model_and_portrait() -> Non
     assert character.source_evidence == []
 
 
+def test_sanitize_character_detail_drops_aliases_without_chapter_index() -> None:
+    payload = {
+        "appearance_canonical": "黑色短发，青色长衫，身形修长，腰系深色布带，脚穿布靴",
+        "period_costume_canonical": "青布长衫布靴，束发挽髻，禁用现代面料拉链",
+        "personality": "沉稳",
+        "speech_style": "句式简短，语气平稳，少用修饰",
+        "relationships": [],
+        "aliases": [
+            {
+                "text": "孟才子",
+                "name_kind": "honorific",
+                "evidence_chapter_index": None,
+                "evidence_quote": "孟才子救我",
+            },
+            {
+                "text": "孟兄",
+                "name_kind": "honorific",
+                "evidence_chapter_index": 1,
+                "evidence_quote": "孟兄来了",
+            },
+        ],
+        "source_evidence": [
+            {"evidence_chapter_index": None, "evidence_quote": "无效"},
+            {"evidence_chapter_index": 1, "evidence_quote": "孟浩拔剑"},
+        ],
+    }
+    cleaned = stages._sanitize_character_detail_payload(payload)
+    assert [item["text"] for item in cleaned["aliases"]] == ["孟兄"]
+    assert cleaned["source_evidence"] == [
+        {"evidence_chapter_index": 1, "evidence_quote": "孟浩拔剑"},
+    ]
+    detail = stages._CharacterDetail.model_validate(cleaned)
+    assert [item.text for item in detail.aliases] == ["孟兄"]
+
+
+@pytest.mark.asyncio
+async def test_generate_character_detail_keeps_character_when_alias_index_null(monkeypatch) -> None:
+    async def fake_chat(messages, **_kwargs):
+        return json.dumps({
+            "appearance_canonical": "眉目清俊的少年书生模样，皮肤偏白，眼神藏着韧劲，身形偏瘦",
+            "period_costume_canonical": "青布交领短褐粗棉面料，脚蹬粗布黑面布鞋，束发木簪",
+            "personality": "聪颖坚韧",
+            "speech_style": "语气平和带点少年人的自嘲，说话实在",
+            "relationships": [],
+            "aliases": [{
+                "text": "孟才子",
+                "name_kind": "honorific",
+                "evidence_chapter_index": None,
+                "evidence_quote": "孟才子救我",
+            }],
+            "source_evidence": [],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    result = await stages._generate_character_detail_batch(
+        [stages._BibleRosterEntry(name="孟浩", role="主角")],
+        [{"idx": 1, "content": "孟浩拔剑。"}],
+        style="国漫三维动画电影质感，统一自然光影与细腻材质",
+        chapters_by_idx={1: "孟浩拔剑。"},
+        project_id="p1",
+    )
+    assert [item.name for item in result] == ["孟浩"]
+    assert result[0].role == "主角"
+    assert result[0].aliases == []
+
+
+@pytest.mark.asyncio
+async def test_generate_character_detail_batch_keeps_stub_when_detail_fails(monkeypatch) -> None:
+    async def fake_chat(messages, **_kwargs):
+        raise RuntimeError("forced detail failure")
+
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    result = await stages._generate_character_detail_batch(
+        [stages._BibleRosterEntry(name="孟浩", role="主角")],
+        [{"idx": 1, "content": "孟浩拔剑。"}],
+        style="国漫三维动画电影质感，统一自然光影与细腻材质",
+        chapters_by_idx={1: "孟浩拔剑。"},
+        project_id="p1",
+    )
+    assert [item.name for item in result] == ["孟浩"]
+    assert result[0].role == "主角"
+    assert result[0].appearance_status == "insufficient_evidence"
+    assert result[0].portrait_eligible is False
+
+
+def test_bible_short_json_call_meta_keeps_explicit_first_token_timeout() -> None:
+    meta = stages._bible_short_json_call_meta({
+        "stage_key": "character_bible_detail",
+        "first_token_timeout_s": stages.BIBLE_DETAIL_FIRST_TOKEN_TIMEOUT_S,
+    })
+    assert meta["first_token_timeout_s"] == stages.BIBLE_DETAIL_FIRST_TOKEN_TIMEOUT_S
+    defaulted = stages._bible_short_json_call_meta({"stage_key": "character_roll_call"})
+    assert defaulted["first_token_timeout_s"] == stages.BIBLE_FIRST_TOKEN_TIMEOUT_S
+
+
 def test_normalize_roster_prefers_real_name_and_marks_mentioned_only() -> None:
     draft = stages._BibleRosterDraft(
         characters=[stages._BibleRosterEntry(name="小胖子", role="重要配角")],
