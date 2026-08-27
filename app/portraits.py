@@ -262,6 +262,40 @@ def _identity_operation_retry_epoch() -> str:
 # Schema-invalid and semantically-invalid answers keep the strict one-call rule.
 IDENTITY_UNUSABLE_RESPONSE_RESAMPLES = 1
 
+# Real incident ERR-20260826-93c8e3 (run_f8a23b28d098/ep_e4b00ccc7db5, provider_calls
+# id 12985/12986): the resample above was firing a byte-identical request -- same
+# messages, same temperature, same schema -- as the failed first attempt (verified via
+# provider_request_hash: both attempts hashed to f373f285a84961da09d2aa54).  Two calls
+# with the same input landed on the same decision point and failed the same way, which
+# means the "resample" was spending a second provider call to relearn the same outcome,
+# not actually giving the model a second, different shot.  A resample must change
+# something about the request, or it is not a retry, it is a repeat.
+#
+# This only fires once the first attempt is already known to carry zero identity
+# judgement (unparseable format failure or an undelivered transport stall -- see the
+# docstring below), so nudging the second attempt is not "re-rolling a wrong answer
+# until it passes": there is no answer yet to preserve or bias.
+#
+# +0.2 keeps the resample's temperature well above the identity contracts' normal
+# 0.05-0.1 range (enough to plausibly avoid repeating the same premature stop) while
+# staying far short of a value that would let the model wander off the identity rules
+# themselves -- the rules, schema and evidence requirements are untouched; only the
+# sampling entropy and a narrow formatting reminder change.
+IDENTITY_RESAMPLE_TEMPERATURE_BUMP = 0.2
+IDENTITY_RESAMPLE_TEMPERATURE_CAP = 1.0
+# Targets the specific failure shape seen in the incident: the model stopped
+# (finish_reason=stop, not a token-budget truncation) after writing a complete-looking
+# value but before closing every open container ('{'/'[' left unmatched at EOF). This
+# reminder does not touch a single word of the identity-judgement rules -- only asks
+# for syntactically closed JSON.
+IDENTITY_RESAMPLE_FORMAT_REMINDER = (
+    "\n\n【重试须知】上一次尝试没有交付一个语法完整的 JSON 对象（可能是提前结束、"
+    "遗漏了收尾的 } 或 ]）。本次请确保输出的 JSON 里每一个 { [ 都有对应的 } ] 严格"
+    "闭合，写完最后一个字段后立即补齐所有尚未闭合的容器，不要在结构闭合之前结束"
+    "响应，也不要输出 JSON 对象之外的任何文字。除此之外，判断规则、证据要求与输出"
+    "内容本身不变。"
+)
+
 
 async def _identity_structured_with_resample(
     messages: list[dict[str, str]],
@@ -283,20 +317,44 @@ async def _identity_structured_with_resample(
     all, or a transport stall that produced zero characters.  Schema-invalid
     answers and business-validation failures are re-raised on the first
     attempt.
+
+    A resample attempt (``attempt > 0``) must never send the byte-identical
+    request the failed attempt sent -- see
+    ``IDENTITY_RESAMPLE_TEMPERATURE_BUMP`` above for why replaying the same
+    request is not a real second chance.  The bumped temperature and appended
+    reminder apply only from the second attempt onward; the first attempt is
+    unchanged from the caller's exact input.
     """
     last_error: Exception | None = None
     for attempt in range(IDENTITY_UNUSABLE_RESPONSE_RESAMPLES + 1):
+        attempt_messages = messages
+        attempt_kwargs = kwargs
+        if attempt > 0:
+            attempt_messages = list(messages)
+            if attempt_messages:
+                last_message = dict(attempt_messages[-1])
+                last_message["content"] = (
+                    str(last_message.get("content") or "")
+                    + IDENTITY_RESAMPLE_FORMAT_REMINDER
+                )
+                attempt_messages[-1] = last_message
+            attempt_kwargs = dict(kwargs)
+            base_temperature = float(attempt_kwargs.get("temperature") or 0.0)
+            attempt_kwargs["temperature"] = min(
+                IDENTITY_RESAMPLE_TEMPERATURE_CAP,
+                base_temperature + IDENTITY_RESAMPLE_TEMPERATURE_BUMP,
+            )
         try:
             # model_type/validate/max_tokens stay explicit here so the
             # gateway call-site contract test still sees them named.
             return await model_gateway.chat_structured(
-                messages,
+                attempt_messages,
                 model_type=model_type,
                 validate=validate,
                 max_tokens=max_tokens,
                 operation_id=operation_id_for_attempt(attempt),
                 call_meta={**call_meta, "resample_attempt": attempt},
-                **kwargs,
+                **attempt_kwargs,
             )
         except model_gateway.StructuredFormatError as exc:
             if not getattr(exc, "unparseable", False):

@@ -1887,14 +1887,36 @@ def _escape_unescaped_inner_quotes(text: str) -> str:
     return "".join(repaired)
 
 
-def _close_missing_root_object(text: str) -> str:
-    """Close one unambiguous missing root ``}`` at end-of-output.
+def _close_missing_trailing_containers(text: str) -> str:
+    """Close every still-open container at end-of-output, innermost first.
 
-    Providers occasionally emit an otherwise complete object but stop after the
-    final child value (commonly an array), omitting only the outermost closing
-    brace.  This repair is intentionally narrower than a general JSON repairer:
-    strings must be closed, every nested container must already be balanced,
-    and the root object must be the sole remaining open container.
+    Providers occasionally stop generating right after a complete, well-formed
+    child value while one or more ancestor containers remain open -- e.g. an
+    object nested inside an array nested inside the root, with only the
+    deepest value fully written and none of the closing brackets above it ever
+    emitted (real incident ERR-20260826-93c8e3: one ``}`` and one ``]`` both
+    missing, response ended exactly at ``len(content)`` with
+    ``finish_reason=stop`` -- not a token-budget truncation).
+
+    This repair only ever sees ``finish_reason=stop`` content: a
+    ``finish_reason=='length'`` response is converted into a ``ProviderError``
+    by ``app.hiagent._reject_truncated_chat_response`` before ``chat()``
+    returns anything, at every one of its call sites (streaming and
+    non-streaming) -- so truncated output never reaches ``extract_json`` in
+    the first place, and this function does not need to (and must not try to)
+    re-derive that distinction from the text alone.
+
+    It is still a pure syntax completion, not a guess: the whole text is
+    walked once, string contents are tracked so brackets inside them are
+    ignored, and the fix is applied only when the walk finishes cleanly
+    outside any string with a non-empty stack of still-open containers -- any
+    closer encountered along the way that does not match the top of the stack
+    proves the document is corrupt beyond "trailing closers omitted", and this
+    refuses to guess (returns the text unchanged). Ending the walk still
+    inside an open string (or mid-escape) is refused for the same reason: that
+    is a value cut off mid-write, not a value that is complete except for its
+    ancestors' closers, and closing containers over it would paper over
+    missing content instead of completing it.
     """
     expected_closers: list[str] = []
     in_string = False
@@ -1919,8 +1941,8 @@ def _close_missing_root_object(text: str) -> str:
                 return text
             expected_closers.pop()
 
-    if not in_string and not escaped and expected_closers == ["}"]:
-        return text + "}"
+    if not in_string and not escaped and expected_closers:
+        return text + "".join(reversed(expected_closers))
     return text
 
 
@@ -2398,7 +2420,7 @@ def extract_json(
                             return obj
                     candidate = repaired
                     if candidate_error.pos >= len(candidate):
-                        repaired = _close_missing_root_object(candidate)
+                        repaired = _close_missing_trailing_containers(candidate)
                         if repaired != candidate:
                             try:
                                 obj, _ = json.JSONDecoder().raw_decode(repaired)
@@ -2461,7 +2483,7 @@ def extract_json(
             # inner structure fail before EOF and must still enter the repair
             # loop instead of being silently guessed here.
             if candidate_error.pos >= len(candidate):
-                repaired = _close_missing_root_object(candidate)
+                repaired = _close_missing_trailing_containers(candidate)
                 if repaired != candidate:
                     try:
                         obj, _ = json.JSONDecoder().raw_decode(repaired)

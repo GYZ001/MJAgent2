@@ -8911,6 +8911,81 @@ def test_two_undelivered_identity_answers_still_fail(monkeypatch) -> None:
     assert calls == portraits.IDENTITY_UNUSABLE_RESPONSE_RESAMPLES + 1
 
 
+# --- ERR-20260826-93c8e3 -----------------------------------------------------
+# provider_calls id 12985/12986 (run_f8a23b28d098/ep_e4b00ccc7db5): both attempts
+# hashed to the exact same provider_request_hash (f373f285a84961da09d2aa54) --
+# identical messages, identical temperature -- so the resample was a repeat, not a
+# retry.  This test observes the request the resample actually sends (an
+# independent observation point: it inspects what the caller receives, not
+# anything the production code asserts about itself) and requires it to differ.
+
+
+def test_resample_actually_sends_a_different_request(monkeypatch) -> None:
+    seen: list[dict] = []
+
+    async def fake_structured(messages, **kwargs):
+        seen.append({
+            "messages": messages,
+            "temperature": kwargs.get("temperature"),
+        })
+        if len(seen) == 1:
+            error = model_gateway.StructuredFormatError("derailed mid-object")
+            error.unparseable = True
+            raise error
+        return "recovered"
+
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_structured)
+
+    result = asyncio.run(portraits._identity_structured_with_resample(
+        [{"role": "user", "content": "prompt"}],
+        model_type=_IdentityResampleShape,
+        validate=lambda _value: [],
+        max_tokens=256,
+        operation_id_for_attempt=lambda attempt: f"op:{attempt}",
+        call_meta={"stage_key": "screenplay_character_discovery"},
+        temperature=0.1,
+    ))
+
+    assert result == "recovered"
+    assert len(seen) == 2
+    # The first attempt must stay exactly what the caller passed in.
+    assert seen[0]["messages"] == [{"role": "user", "content": "prompt"}]
+    assert seen[0]["temperature"] == 0.1
+    # The resample must not be a byte-identical replay of the first request --
+    # this is the actual defect: two identical requests landing on the same
+    # decision point and failing the same way.
+    assert seen[1]["messages"] != seen[0]["messages"]
+    assert seen[1]["temperature"] != seen[0]["temperature"]
+    assert seen[1]["temperature"] > seen[0]["temperature"]
+    assert seen[1]["temperature"] == pytest.approx(0.3)
+
+
+def test_first_attempt_unchanged_when_no_resample_is_needed(monkeypatch) -> None:
+    """A successful first attempt must never see the resample-only reminder/bump."""
+    seen: list[dict] = []
+
+    async def fake_structured(messages, **kwargs):
+        seen.append({"messages": messages, "temperature": kwargs.get("temperature")})
+        return "ok"
+
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_structured)
+
+    result = asyncio.run(portraits._identity_structured_with_resample(
+        [{"role": "user", "content": "prompt"}],
+        model_type=_IdentityResampleShape,
+        validate=lambda _value: [],
+        max_tokens=256,
+        operation_id_for_attempt=lambda attempt: f"op:{attempt}",
+        call_meta={"stage_key": "screenplay_character_discovery"},
+        temperature=0.1,
+    ))
+
+    assert result == "ok"
+    assert len(seen) == 1
+    assert seen[0]["messages"] == [{"role": "user", "content": "prompt"}]
+    assert seen[0]["temperature"] == 0.1
+
+
 def test_gateway_tags_corrupt_and_schema_invalid_responses_differently(
     monkeypatch,
 ) -> None:

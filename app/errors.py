@@ -134,13 +134,26 @@ def _extract_message(exc: BaseException | None) -> str:
 def classify(exc: BaseException | None, http_status: int | None = None) -> tuple[str, str]:
     """归类并产出报错码。返回 (category_key, code)。
 
-    用类名判断 ProviderError/StageError，避免 import app.hiagent/app.stages 造成环依赖。"""
-    name = type(exc).__name__ if exc is not None else ""
-    if name == "ArtifactNeedsRebuildError":
+    用类名判断 ProviderError/StageError，避免 import app.hiagent/app.stages 造成环依赖。
+
+    匹配对象是 ``type(exc).__mro__`` 里全部类名的集合，不是只匹配 ``exc`` 自己的类名：
+    这样一个新异常类只要选择继承某个已分类的基类（例如
+    ``SceneAssetQualityError(ContentGenerationError)``），就自动沿用父类的分类，不需要
+    在这里逐个子类补一行——过去用精确类名匹配时，``SceneAssetQualityError`` 就是活的
+    反例：它显式继承了 ``ContentGenerationError`` 却因为类名不同完全绕过了这条分支，
+    落到系统兜底分类。仓库内 57 个自定义异常类名互不重复（已用脚本核实），所以按名字
+    集合匹配不会引入跨继承体系的误判。"""
+    exc_names: frozenset[str] = (
+        frozenset(klass.__name__ for klass in type(exc).__mro__)
+        if exc is not None else frozenset()
+    )
+    if "ArtifactNeedsRebuildError" in exc_names:
         return "conflict", "ARTIFACT-REBUILD"
-    if name in {
+    if exc_names & {
         "ContentGenerationError", "ScreenplayNarrativeGateError", "PrepPackGateError",
-        "StructuredSemanticError",
+        "StructuredSemanticError", "ScreenplayIdentityGateError",
+        "IdentityAuthorityConflictError", "BlueprintSourceOwnershipError",
+        "BlueprintSourceOccurrenceError", "StoryboardOutlineAuthorityError",
     }:
         # PrepPackGateError: episode_prep_pack (screenplay 契约 6.0.0) 硬门禁
         # 未通过（覆盖账本/资产解析/hook 接地），供应商调用本身是成功的，属于
@@ -151,12 +164,44 @@ def classify(exc: BaseException | None, http_status: int | None = None) -> tuple
         # 的业务/身份消歧校验（如 identity.current 的 source_label 唯一性），
         # 跟 PrepPackGateError 是同一性质，不应走 5xx 技术类外壳把真实原因
         # （比如"source_label 重复：师弟"）藏成"系统内部错误"。
+        # ScreenplayIdentityGateError（app.production.screenplay_repair，与已覆盖的
+        # 同文件 ScreenplayNarrativeGateError 同一套硬门禁模式）、
+        # IdentityAuthorityConflictError（app.identity_authority，身份权威冲突，
+        # 与上面 StructuredSemanticError 讨论的 source_label 消歧同一性质）、
+        # BlueprintSourceOwnershipError/BlueprintSourceOccurrenceError
+        # （app.narrative_blueprint，蓝图来源归属/去重的一致性硬门禁）、
+        # StoryboardOutlineAuthorityError（app.storyboard_authority，持久化的
+        # outline 权威快照缺失或内部分裂——含其子类
+        # StoryboardOutlineMigrationRequired，MRO 匹配自动覆盖）——2026-08-26
+        # 排查 ERR-20260826-93c8e3 时发现这几个此前从未在这里命中过任何分支，
+        # 全部落到系统兜底分类；语义上都跟 ContentGenerationError 一样，是
+        # "供应商调用成功、我方业务一致性校验没通过"，理应同一类。
         return "quality_gate", "QA"
-    if name == "ProviderError":
+    if "ProviderError" in exc_names:
         return "provider", "LLM"
-    if name == "ScreenplaySceneShardError":
+    if "StructuredProviderRejection" in exc_names:
+        # app.harness.model_gateway.chat_structured 在供应商返回显式
+        # {"error": ...} 拒答信封时抛出——不是格式/语义失败，是供应商层面的
+        # 明确拒绝（常见于内容策略拒答），性质与 ProviderError 相同。
+        # app/media_exec/run_job.py 里已经有先例把它显式转成 ProviderError 再
+        # 记日志，但只在那一条调用路径生效；本类未被任何地方以原始类型捕获时
+        # （如 app.portraits._identity_structured_with_resample 的身份判定
+        # 调用），会带着原始类型一路冒泡到这里，此前完全没有分支命中。
+        return "provider", "LLM"
+    if "ScreenplaySceneShardError" in exc_names or "ScreenplaySceneMergeError" in exc_names:
+        # ScreenplaySceneMergeError 是 app.screenplay_scene_shards 里
+        # ScreenplaySceneShardError 的合并阶段对应物（同一套场次分片生成合同的
+        # 两半），此前漏了分支，2026-08-26 随 ERR-20260826-93c8e3 排查一并补上。
         return "generation_contract", "GEN-CONTRACT"
-    if name == "StageError" and any(
+    if "StructuredFormatError" in exc_names:
+        # 真实故障 ERR-20260826-93c8e3：app.harness.model_gateway.chat_structured
+        # 未能把响应解析成契约对象时抛出（未交付任何可解析 JSON，或解析出的
+        # 对象不符合 schema）——供应商调用本身成功，属于与下面 StageError +
+        # "JSON 解析失败" 同一性质的格式失败，理应同一类、同一条"可点击重试"
+        # 提示，而不是落到系统兜底显示"系统内部错误"。此前完全没有分支命中，
+        # 是本次任务要修的直接根因。
+        return "generation", "JSON"
+    if "StageError" in exc_names and any(
         marker in _extract_message(exc)
         for marker in (
             "[BLUEPRINT_GENERATION_CALL_BUDGET]",
@@ -168,28 +213,32 @@ def classify(exc: BaseException | None, http_status: int | None = None) -> tuple
         # capacity, not on a format or business check, so it must not carry the
         # generic "内容生成未通过格式或业务校验" hint.
         return "generation_budget", "GEN-BUDGET"
-    if name == "StageError" and "JSON 解析失败" in _extract_message(exc):
+    if "StageError" in exc_names and "JSON 解析失败" in _extract_message(exc):
         return "generation", "JSON"
     if (
-        name == "StageError"
+        "StageError" in exc_names
         and "BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED" in _extract_message(exc)
     ):
         return "generation_retry_grant", "GEN-RETRY-GRANT"
     if (
-        name == "StageError"
+        "StageError" in exc_names
         and "IDENTITY_DISCOVERY_FIXED_RETRY_BUDGET" in _extract_message(exc)
     ):
         # 人物身份判定 fail-closed，format_retry_limit/semantic_retry_limit
         # 硬编码为 0（见 app/portraits.py 身份判定调用点），通用的
         # "调整「修复重试上限」" 提示对这条路径不成立，必须走专用提示。
         return "generation_identity_fixed_budget", "GEN-IDENTITY-BUDGET"
-    if name in {
+    if exc_names & {
         "StageError",
         "CompileError",
         "ScreenplayIRIdentityConflictError",
+        "ScreenplayIRFidelityError",
     }:
+        # ScreenplayIRFidelityError（app.screenplay_ir，与已覆盖的同文件兄弟类
+        # ScreenplayIRIdentityConflictError 同属 IR 构建期的业务保真度校验）
+        # 此前漏了分支，2026-08-26 随 ERR-20260826-93c8e3 排查一并补上。
         return "generation", "GEN"
-    if name == "FullRegenDenied":
+    if "FullRegenDenied" in exc_names:
         return "conflict", "FULL-REGEN-DENIED"
     status = http_status if http_status is not None else getattr(exc, "status_code", None)
     if status is not None:

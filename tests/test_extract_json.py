@@ -189,8 +189,31 @@ def test_extract_json_uses_formal_payload_after_think_marker() -> None:
     }
 
 
-def test_extract_json_does_not_guess_multiple_missing_closers() -> None:
+def test_extract_json_closes_multiple_missing_trailing_containers() -> None:
+    # ERR-20260826-93c8e3 (run_f8a23b28d098, provider_calls id 12985/12986): the
+    # model stopped (finish_reason=stop, not a token-budget truncation) right
+    # after writing a complete value two containers deep, with neither the
+    # array's nor the root object's closing bracket ever emitted. This used to
+    # be refused outright (`_close_missing_root_object` only handled exactly
+    # one missing `}`); it is now a supported case of
+    # `_close_missing_trailing_containers`, which is deliberately updated here
+    # -- see logs/structured_output_resilience_plan.md P0-B for why closing an
+    # unbounded (not just single) stack of trailing containers is still a
+    # syntax-only, fail-closed repair, not a semantic guess.
     text = '{"episode_no": 9, "events": [{"event_id": "E1"'
+
+    assert extract_json(text) == {
+        "episode_no": 9,
+        "events": [{"event_id": "E1"}],
+    }
+
+
+def test_extract_json_refuses_multi_closer_repair_inside_unterminated_string() -> None:
+    # Same shape as above, but the final string was itself cut off mid-write
+    # (no closing quote on "E1). This is the ambiguous case the syntax-only
+    # repair must still refuse: appending closers over a dangling string would
+    # paper over missing content, not complete a finished value.
+    text = '{"episode_no": 9, "events": [{"event_id": "E1'
 
     with pytest.raises(ValueError, match="JSON 解析失败"):
         extract_json(text)
@@ -333,3 +356,43 @@ def test_json_stage_failure_has_specific_error_code_and_non_blind_hint() -> None
     assert errors.classify(exc) == ("generation", "JSON")
     hint = errors.CATEGORIES["generation"]["hint"]
     assert "先按错误码检查具体原因" in hint
+
+
+def test_structured_format_error_no_longer_falls_back_to_system_category() -> None:
+    # ERR-20260826-93c8e3: app.harness.model_gateway.StructuredFormatError had no
+    # classify() branch at all, so it fell to the "system"/"SYS" fallback and the
+    # user saw "系统内部错误，请把错误码反馈给技术人员" for what was actually a
+    # retryable structured-output failure. It must land in the same
+    # generation/JSON bucket as the StageError + "JSON 解析失败" case above, with
+    # the same "可点击重试" hint.
+    from app.harness.model_gateway import StructuredFormatError
+
+    exc = StructuredFormatError("op 结构化输出失败：Expecting ',' delimiter")
+    assert errors.classify(exc) == ("generation", "JSON")
+    hint = errors.CATEGORIES["generation"]["hint"]
+    assert "可点击重试" in hint
+
+
+def test_structured_provider_rejection_classifies_as_provider_failure() -> None:
+    # Sibling of StructuredFormatError/StructuredSemanticError, raised by the
+    # same chat_structured() for an explicit provider refusal envelope. Only
+    # one call site (app/media_exec/run_job.py) converted it to ProviderError
+    # before logging; every other caller (e.g. the identity-resample path in
+    # app/portraits.py) let it bubble up with its raw type, which classify()
+    # had no branch for.
+    from app.harness.model_gateway import StructuredProviderRejection
+
+    exc = StructuredProviderRejection("content policy rejection")
+    assert errors.classify(exc) == ("provider", "LLM")
+
+
+def test_classify_dispatch_follows_inheritance_not_just_exact_class_name() -> None:
+    # SceneAssetQualityError(ContentGenerationError) is a live example of the
+    # structural gap: classify() used to match only `type(exc).__name__`
+    # exactly, so a subclass of an already-classified exception silently
+    # bypassed its parent's classification and fell through to the system
+    # fallback. classify() now matches against the full MRO name set instead.
+    from app.scenes import SceneAssetQualityError
+
+    exc = SceneAssetQualityError("场景状态变化版本未能创建：卧室")
+    assert errors.classify(exc) == ("quality_gate", "QA")
