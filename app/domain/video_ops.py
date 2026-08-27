@@ -2417,6 +2417,7 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
         project_id=ep["project_id"],
         episode_no=int(ep["episode_no"]),
         shots=[(item["row"]["id"], item["shot"]) for item in selected],
+        conn=conn,
         bible=bible,
         screenplay=screenplay,
     )
