@@ -276,7 +276,7 @@ def test_recurring_character_names_ranks_by_verified_onstage_evidence(monkeypatc
     monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
     ranked = asyncio.run(stages._recurring_character_names(chapters))
 
-    assert ranked == [("孟浩", "", 2)]
+    assert ranked == [("孟浩", "", 2, 21, 20, [])]
 
 
 def test_recurring_character_names_structural_gate_rejects_each_failure_mode(monkeypatch) -> None:
@@ -374,7 +374,7 @@ def test_recurring_character_names_presence_verdict_gate(monkeypatch) -> None:
     monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
     ranked = asyncio.run(stages._recurring_character_names(chapters))
 
-    assert ranked == [("丙", "", 2)]
+    assert ranked == [("丙", "", 2, 20, 20, [])]
 
 
 def test_recurring_character_names_matches_real_project_evidence_shapes(monkeypatch) -> None:
@@ -516,7 +516,7 @@ def test_recurring_character_names_matches_real_project_evidence_shapes(monkeypa
     monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
     ranked = asyncio.run(stages._recurring_character_names(chapters))
 
-    assert ranked == [("小胖子", "李富贵", 2)]
+    assert ranked == [("小胖子", "李富贵", 2, 5, 4, ["小胖子"])]
 
 
 def test_bible_covers_name_matches_verified_alias_not_only_canonical_name() -> None:

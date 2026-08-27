@@ -1,0 +1,1112 @@
+Command 'cd "/Users/bytedance/Desktop/漫剧Agent2.0" && .venv/bin/python -m py_compile app/stages.py && .venv/bin/python -m pytest tests/test_bible_parallelism.py tests/test_bible_prompt_and_precheck.py tests/test_appearance_evidence.py -q' exited with code 1. stdout: ...F.........F.FFFF...F...s...s......                                    [100%]
+=================================== FAILURES ===================================
+__________________ test_roll_call_sends_small_parallel_chunks __________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10d137620>
+
+    @pytest.mark.asyncio
+    async def test_roll_call_sends_small_parallel_chunks(monkeypatch) -> None:
+        active = 0
+        peak = 0
+        inputs: list[str] = []
+    
+        async def fake_chat(messages, **kwargs):
+            nonlocal active, peak
+            if (kwargs.get("call_meta") or {}).get("stage_key") != "character_roll_call":
+                model_type = kwargs["model_type"]
+                return model_type(verdict="onstage", supporting_segment_index=1)
+            inputs.append(messages[-1]["content"])
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return json.dumps({"candidates": []})
+    
+        monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+        chapters = [{"idx": i, "title": f"第{i}章", "content": "正文" * 100} for i in range(1, 11)]
+>       await stages._recurring_character_names(chapters)
+
+tests/test_bible_parallelism.py:91: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+chapters = [{'idx': 1, 'title': '第1章', 'content': '正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文...文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文'}, ...]
+project_id = None
+
+    async def _recurring_character_names(
+        chapters: list[dict], *, project_id: str | None = None,
+    ) -> list[tuple[str, str, int, int, int, list[str]]]:
+        """产出「必收角色名单」：先点名+自报在场证据，再用结构闸+独立裁决闸核验每条
+        证据是不是真的证明本人在场，核验通过的证据条数（`verified_onstage_count`）
+        才是判据——不再是"名字字符串在原文窗口里出现的次数"。
+    
+        根因：旧判据把字符串出现次数当"重不重要"的代理信号，两个方向都会失效。
+        假阳性方向——王伯/周员外/靠山老祖的命中全部来自旁白交代身份或他人台词提及，
+        本人从未真正在场，却因为次数够多进了必收名单。假阴性方向——这个信号只统计
+        模型报出的候选名字本身的出现次数，原文如果通篇用绰号称呼一个人（本人几乎
+        只以"小胖子"出现，正式姓名仅出现一两次）而此刻圣经正文还没生成、没有别名表
+        能把绰号翻译回正式姓名，这个人就会被判定为不重要。
+    
+        新流程：
+        1. 模型只在前 BIBLE_HEAD_CHAPTERS 章里点名，每个候选申报 primary_appellation
+           （原文最常用写法，允许绰号）+ formal_name（原文已揭示的正式姓名，未揭示则
+           空）+ onstage_evidence（能证明本人在场的原文引句列表）——绰号本身就能直接
+           充当"必收货币"，不需要一张此刻还不存在的别名表做转译。
+        2. 代码结构闸，逐条证据：G1 引句所在章节必须落在统计窗口（前 HEAD+LOOKAHEAD
+           章）内；G2 引句必须逐字命中该章原文（允许模型自行加/脱一层引号的噪音）；
+           G3 称呼（primary_appellation 或 formal_name 中非空的那个）必须是引句子串。
+           任一不满足直接丢弃该条证据，不发起裁决调用。
+        3. 结构闸通过的证据才发起独立低温模型裁决（`_roster_presence_verdict_call`，
+           与别名裁决闸同一分工范式：代码检索卷宗 → 模型独立裁决 → 代码结构性钉证）：
+           只问这段原文里称呼所指的人物本人是不是真的在场（本人说话/动作/被叙述在场，
+           而不是被谈论、被指涉、被交代来历的对象）；裁决通过（verdict=="onstage" 且
+           段号钉证通过）才计入该候选的 `verified_onstage_count`。
+        4. 按 `verified_onstage_count` 降序（同分按 primary_appellation 字典序打破
+           平局）排序，取 >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES 的候选，最多保留
+           BIBLE_MUST_COVER_MAX 个。
+    
+        点名调用失败时返回空名单，绝不阻断人物谱本身；结构闸/裁决闸任一步不通过，
+        该条证据直接丢弃，不确定不登记（不会因为某一条证据没通过就拒绝整个候选，
+        只是那一条不计数）。
+        """
+        valid = [ch for ch in chapters if (ch.get("content") or "").strip()]
+        if not valid:
+            return []
+        head = validIBLE_HEAD_CHAPTERS]
+        chunks = [
+            head[index:index + BIBLE_ROLL_CALL_CHUNK_CHAPTERS]
+            for index in range(0, len(head), BIBLE_ROLL_CALL_CHUNK_CHAPTERS)
+        ]
+    
+        async def _call_chunk(chunk: list[dict], chunk_index: int) -> list[_RosterCandidate]:
+            chunk_text = _render_bible_source(
+                chunk, budget=BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS,
+                head_chapters=len(chunk),
+            )
+            if not chunk_text.strip():
+                return []
+            if len(chunk_text) > BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS:
+                raise ValueError("人物点名分块输入超过硬上限")
+            prompt = f"""任务：从下面的小说正文里找出【出场人物】，为每个人物申报能证明他本人真的出现在画面中的证据，不要只给名字。
+    
+    要求：
+    1. primary_appellation：本章里称呼这个人物最常用、最稳定的一种写法，可以是正式姓名、外号、绰号、尊称或代称，必须逐字照抄。
+    2. formal_name：本章已经明确揭示的正式姓名；未揭示就填空字符串，禁止猜测。若“孙天地自称……”或“众人称小胖子李富贵”这种同一人物身份链接出现，必须填 formal_name。
+    3. aliases：本章明确指向同一人物的其它称呼；只有本章有明确身份链接才填，不能凭外貌相似猜。
+    4. identity_evidence：证明 formal_name/aliases 与 primary_appellation 是同一人的逐字引句，最多 2 条；引句需同时包含两种称呼或明确自称结构。
+    5. onstage_evidence：每人最多 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条，格式为 chapter_index + quote；quote 必须是本块原文不超过约 80 字的逐字引句，并包含 primary_appellation、formal_name 或 alias。
+    6. 只有本人说话、行动或被直接叙述为在场才算；被谈论、回忆或背景介绍不算。
+    7. 不输出无法单独指认的泛称、宗门、地名、法宝；同一个人在本块只输出一次。
+    
+    小说正文：
+    {chunk_text}
+    
+    输出 JSON Schema：
+    {{"candidates": [{{"primary_appellation": str, "formal_name": str, "aliases": [str], "identity_evidence": [{{"chapter_index": int, "quote": str}}], "onstage_evidence": [{{"chapter_index": int, "quote": str}}]}}]}}"""
+            try:
+                raw = await model_gateway.chat(
+                    [{"role": "system", "content": SYSTEM_PREFIX},
+                     {"role": "user", "content": prompt}],
+                    temperature=0.2,
+                    max_tokens=BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS,
+                    call_meta={
+                        "stage": "人物点名",
+                        "stage_key": "character_roll_call",
+                        "call_role": "stage_generate",
+                        "call_role_label": "人物点名分块",
+                        "expected_json": True,
+                        "chunk_index": chunk_index,
+                        "chunk_count": len(chunks),
+                        "input_chars": len(chunk_text),
+                    },
+                )
+                return _CharacterRollCall.model_validate(extract_json(raw)).candidates
+            except Exception as exc:  # noqa: BLE001 - 单块失败不阻断其它块和人物谱
+                log_provider_call(
+                    "character_roll_call", config.MODEL_TEXT, "OK", None, 0,
+                    meta={
+                        "chunk_index": chunk_index,
+                        "outcome": "best_effort_bypass",
+                        "error": str(exc),
+                    },
+                )
+                return []
+    
+        chunk_results = await asyncio.gather(*(
+            _call_chunk(chunk, index) for index, chunk in enumerate(chunks)
+        ))
+        candidates = _merge_roll_call_candidates(chunk_results)
+        candidates = await _resolve_generic_character_candidates(
+>           candidates, chapters_by_idx, project_id=project_id,
+                        ^^^^^^^^^^^^^^^
+        )
+E       NameError: name 'chapters_by_idx' is not defined
+
+app/stages.py:2334: NameError
+____________ test_generate_bible_forces_backend_visual_style_prompt ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10d3f2cc0>
+
+    def test_generate_bible_forces_backend_visual_style_prompt(monkeypatch) -> None:
+        from app import stages
+        import asyncio
+    
+        seen = {}
+    
+        async def fake_roll_call(*_args, **_kwargs):
+            return []
+    
+        async def fake_loop(*_args, **_kwargs):
+            seen["allow_warning_candidate"] = _kwargs["loop"].policy.allow_warning_candidate
+            seen["repair_all_blockers"] = _kwargs["loop"].policy.repair_all_blockers
+            candidate = stages._BibleRosterDraft(
+                world=World(visual_style_canonical="模型自行写的画风"),
+                characters=[stages._BibleRosterEntry(name="孟浩", role="主角")],
+            )
+            assert _args(candidate) == []
+            seen["style_during_validation"] = candidate.world.visual_style_canonical
+            return candidate
+    
+        async def fake_details(entries, *_args, **_kwargs):
+            return [Character(
+                name=entries.name, role=entries.role,
+                appearance_canonical="黑发少年，青色长衫，目光沉稳，身形清瘦，腰间系旧布袋",
+            )]
+    
+        monkeypatch.setattr(stages, "_recurring_character_names", fake_roll_call)
+        monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
+        monkeypatch.setattr(stages, "_generate_character_detail_batch", fake_details)
+        monkeypatch.setattr(stages, "_verify_character_aliases_in_place", lambda *_args, **_kwargs: asyncio.sleep(0))
+    
+>       result = asyncio.run(stages.generate_bible(
+            [{"idx": 1, "title": "第一章", "content": "孟浩走入山中。"}],
+            visual_style_prompt="电影级真实质感，现实人物建模，自然光影，细节丰富，东方仙侠风。",
+        ))
+
+tests/test_bible_prompt_and_precheck.py:191: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+app/stages.py:5126: in generate_bible
+    roster = await _run_with_agent_loop(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+_args = ('人物名单', 'character_bible_roster', '任务：根据已经完成代码归并和在场核验的候选摘要，只确定人物谱最终角色名单、角色类型和世界观；不要生成外观、性格、台词风格、关系或证据。\n\n已核验候选摘要：\n-...al": str}}', <class 'app.stages._BibleRosterDraft'>, <function generate_bible.<locals>.validate_roster at 0x10e2d1120>)
+_kwargs = {'loop': <app.loops.base.AgentLoop object at 0x10d358200>, 'temperature': 0.3, 'max_tokens': 4096, 'repair_user_prompt_limit': 16000, ...}
+
+    async def fake_loop(*_args, **_kwargs):
+        seen["allow_warning_candidate"] = _kwargs["loop"].policy.allow_warning_candidate
+        seen["repair_all_blockers"] = _kwargs["loop"].policy.repair_all_blockers
+        candidate = stages._BibleRosterDraft(
+            world=World(visual_style_canonical="模型自行写的画风"),
+            characters=[stages._BibleRosterEntry(name="孟浩", role="主角")],
+        )
+>       assert _args(candidate) == []
+E       AssertionError: assert ['characters 数量 0，要求 1~20 个'] == []
+E         
+E         Left contains one more item: 'characters 数量 0，要求 1~20 个'
+E         Use -v to get more diff
+
+tests/test_bible_prompt_and_precheck.py:176: AssertionError
+______ test_recurring_character_names_ranks_by_verified_onstage_evidence _______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bbb1a90>
+
+    def test_recurring_character_names_ranks_by_verified_onstage_evidence(monkeypatch) -> None:
+        """点名之后由结构闸 + 独立裁决闸核验：只有真的证明本人在场、且核验通过的证据
+        才计数（verified_onstage_count），不再是名字字符串出现次数。编造的引句（结构闸
+        挡下）、只出现一次的候选（低于阈值）都不该进必收名单。"""
+        import asyncio
+        import json
+    
+        from app import stages
+        from app.harness import model_gateway
+    
+        chapters = [
+            {"idx": 1, "title": "第一章", "content": "孟浩与王有材同行，孟浩开口说话。"},
+            {"idx": 2, "title": "第二章", "content": "孟浩再遇王有材，路人甲一闪而过。"},
+        ] + [
+            {"idx": i, "title": f"第{i}章", "content": f"第{i}章：孟浩独行，王有材追来。"}
+            for i in range(3, 21)
+        ]
+    
+        async def fake_chat(_messages, **_kwargs):
+            return json.dumps({
+                "candidates": [
+                    {
+                        "primary_appellation": "孟浩", "formal_name": "",
+                        "onstage_evidence": [
+                            {"chapter_index": 1, "quote": "孟浩与王有材同行，孟浩开口说话。"},
+                            {"chapter_index": 2, "quote": "孟浩再遇王有材，路人甲一闪而过。"},
+                        ],
+                    },
+                    {
+                        # 只有一条通过结构闸+裁决闸的证据：低于阈值 2，不该进名单。
+                        "primary_appellation": "王有材", "formal_name": "",
+                        "onstage_evidence": [
+                            {"chapter_index": 1, "quote": "孟浩与王有材同行，孟浩开口说话。"},
+                        ],
+                    },
+                    {
+                        # 编造出来的引句：结构闸 G2（逐字命中原文）会挡下，0 条通过。
+                        "primary_appellation": "孟浩然", "formal_name": "",
+                        "onstage_evidence": [
+                            {"chapter_index": 1, "quote": "孟浩然从天而降大喝一声。"},
+                        ],
+                    },
+                    {
+                        "primary_appellation": "路人甲", "formal_name": "",
+                        "onstage_evidence": [
+                            {"chapter_index": 2, "quote": "孟浩再遇王有材，路人甲一闪而过。"},
+                        ],
+                    },
+                ],
+            }, ensure_ascii=False)
+    
+        async def fake_chat_structured(_messages, **kwargs):
+            model_type = kwargs["model_type"]
+            return model_type(verdict="onstage", supporting_segment_index=1)
+    
+        monkeypatch.setattr(model_gateway, "chat", fake_chat)
+        monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+>       ranked = asyncio.run(stages._recurring_character_names(chapters))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_bible_prompt_and_precheck.py:277: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+chapters = [{'idx': 1, 'title': '第一章', 'content': '孟浩与王有材同行，孟浩开口说话。'}, {'idx': 2, 'title': '第二章', 'content': '孟浩再遇王有材，路人甲一闪而过。'},...'idx': 5, 'title': '第5章', 'content': '第5章：孟浩独行，王有材追来。'}, {'idx': 6, 'title': '第6章', 'content': '第6章：孟浩独行，王有材追来。'}, ...]
+project_id = None
+
+    async def _recurring_character_names(
+        chapters: list[dict], *, project_id: str | None = None,
+    ) -> list[tuple[str, str, int, int, int, list[str]]]:
+        """产出「必收角色名单」：先点名+自报在场证据，再用结构闸+独立裁决闸核验每条
+        证据是不是真的证明本人在场，核验通过的证据条数（`verified_onstage_count`）
+        才是判据——不再是"名字字符串在原文窗口里出现的次数"。
+    
+        根因：旧判据把字符串出现次数当"重不重要"的代理信号，两个方向都会失效。
+        假阳性方向——王伯/周员外/靠山老祖的命中全部来自旁白交代身份或他人台词提及，
+        本人从未真正在场，却因为次数够多进了必收名单。假阴性方向——这个信号只统计
+        模型报出的候选名字本身的出现次数，原文如果通篇用绰号称呼一个人（本人几乎
+        只以"小胖子"出现，正式姓名仅出现一两次）而此刻圣经正文还没生成、没有别名表
+        能把绰号翻译回正式姓名，这个人就会被判定为不重要。
+    
+        新流程：
+        1. 模型只在前 BIBLE_HEAD_CHAPTERS 章里点名，每个候选申报 primary_appellation
+           （原文最常用写法，允许绰号）+ formal_name（原文已揭示的正式姓名，未揭示则
+           空）+ onstage_evidence（能证明本人在场的原文引句列表）——绰号本身就能直接
+           充当"必收货币"，不需要一张此刻还不存在的别名表做转译。
+        2. 代码结构闸，逐条证据：G1 引句所在章节必须落在统计窗口（前 HEAD+LOOKAHEAD
+           章）内；G2 引句必须逐字命中该章原文（允许模型自行加/脱一层引号的噪音）；
+           G3 称呼（primary_appellation 或 formal_name 中非空的那个）必须是引句子串。
+           任一不满足直接丢弃该条证据，不发起裁决调用。
+        3. 结构闸通过的证据才发起独立低温模型裁决（`_roster_presence_verdict_call`，
+           与别名裁决闸同一分工范式：代码检索卷宗 → 模型独立裁决 → 代码结构性钉证）：
+           只问这段原文里称呼所指的人物本人是不是真的在场（本人说话/动作/被叙述在场，
+           而不是被谈论、被指涉、被交代来历的对象）；裁决通过（verdict=="onstage" 且
+           段号钉证通过）才计入该候选的 `verified_onstage_count`。
+        4. 按 `verified_onstage_count` 降序（同分按 primary_appellation 字典序打破
+           平局）排序，取 >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES 的候选，最多保留
+           BIBLE_MUST_COVER_MAX 个。
+    
+        点名调用失败时返回空名单，绝不阻断人物谱本身；结构闸/裁决闸任一步不通过，
+        该条证据直接丢弃，不确定不登记（不会因为某一条证据没通过就拒绝整个候选，
+        只是那一条不计数）。
+        """
+        valid = [ch for ch in chapters if (ch.get("content") or "").strip()]
+        if not valid:
+            return []
+        head = validIBLE_HEAD_CHAPTERS]
+        chunks = [
+            head[index:index + BIBLE_ROLL_CALL_CHUNK_CHAPTERS]
+            for index in range(0, len(head), BIBLE_ROLL_CALL_CHUNK_CHAPTERS)
+        ]
+    
+        async def _call_chunk(chunk: list[dict], chunk_index: int) -> list[_RosterCandidate]:
+            chunk_text = _render_bible_source(
+                chunk, budget=BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS,
+                head_chapters=len(chunk),
+            )
+            if not chunk_text.strip():
+                return []
+            if len(chunk_text) > BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS:
+                raise ValueError("人物点名分块输入超过硬上限")
+            prompt = f"""任务：从下面的小说正文里找出【出场人物】，为每个人物申报能证明他本人真的出现在画面中的证据，不要只给名字。
+    
+    要求：
+    1. primary_appellation：本章里称呼这个人物最常用、最稳定的一种写法，可以是正式姓名、外号、绰号、尊称或代称，必须逐字照抄。
+    2. formal_name：本章已经明确揭示的正式姓名；未揭示就填空字符串，禁止猜测。若“孙天地自称……”或“众人称小胖子李富贵”这种同一人物身份链接出现，必须填 formal_name。
+    3. aliases：本章明确指向同一人物的其它称呼；只有本章有明确身份链接才填，不能凭外貌相似猜。
+    4. identity_evidence：证明 formal_name/aliases 与 primary_appellation 是同一人的逐字引句，最多 2 条；引句需同时包含两种称呼或明确自称结构。
+    5. onstage_evidence：每人最多 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条，格式为 chapter_index + quote；quote 必须是本块原文不超过约 80 字的逐字引句，并包含 primary_appellation、formal_name 或 alias。
+    6. 只有本人说话、行动或被直接叙述为在场才算；被谈论、回忆或背景介绍不算。
+    7. 不输出无法单独指认的泛称、宗门、地名、法宝；同一个人在本块只输出一次。
+    
+    小说正文：
+    {chunk_text}
+    
+    输出 JSON Schema：
+    {{"candidates": [{{"primary_appellation": str, "formal_name": str, "aliases": [str], "identity_evidence": [{{"chapter_index": int, "quote": str}}], "onstage_evidence": [{{"chapter_index": int, "quote": str}}]}}]}}"""
+            try:
+                raw = await model_gateway.chat(
+                    [{"role": "system", "content": SYSTEM_PREFIX},
+                     {"role": "user", "content": prompt}],
+                    temperature=0.2,
+                    max_tokens=BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS,
+                    call_meta={
+                        "stage": "人物点名",
+                        "stage_key": "character_roll_call",
+                        "call_role": "stage_generate",
+                        "call_role_label": "人物点名分块",
+                        "expected_json": True,
+                        "chunk_index": chunk_index,
+                        "chunk_count": len(chunks),
+                        "input_chars": len(chunk_text),
+                    },
+                )
+                return _CharacterRollCall.model_validate(extract_json(raw)).candidates
+            except Exception as exc:  # noqa: BLE001 - 单块失败不阻断其它块和人物谱
+                log_provider_call(
+                    "character_roll_call", config.MODEL_TEXT, "OK", None, 0,
+                    meta={
+                        "chunk_index": chunk_index,
+                        "outcome": "best_effort_bypass",
+                        "error": str(exc),
+                    },
+                )
+                return []
+    
+        chunk_results = await asyncio.gather(*(
+            _call_chunk(chunk, index) for index, chunk in enumerate(chunks)
+        ))
+        candidates = _merge_roll_call_candidates(chunk_results)
+        candidates = await _resolve_generic_character_candidates(
+>           candidates, chapters_by_idx, project_id=project_id,
+                        ^^^^^^^^^^^^^^^
+        )
+E       NameError: name 'chapters_by_idx' is not defined
+
+app/stages.py:2334: NameError
+___ test_recurring_character_names_structural_gate_rejects_each_failure_mode ___
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10cc5f3b0>
+
+    def test_recurring_character_names_structural_gate_rejects_each_failure_mode(monkeypatch) -> None:
+        """结构闸 G1-G3 逐条独立核验：引句不是原文逐字子串（G2）、称呼不在引句里（G3）、
+        章节号落在统计窗口之外（G1）——任一不满足直接丢弃该条证据，不发起裁决调用
+        （省模型调用，也是"不确定不登记"的第一道闸）。"""
+        import asyncio
+        import json
+    
+        from app import stages
+        from app.harness import model_gateway
+    
+        chapters = [
+            {"idx": i, "title": f"第{i}章", "content": f"第{i}章：真实原文占位。"}
+            for i in range(1, 21)
+        ]
+    
+        async def fake_chat(_messages, **_kwargs):
+            return json.dumps({
+                "candidates": [
+                    {
+                        # G2：quote 不是该章原文的逐字子串（编造的引句）。
+                        "primary_appellation": "甲", "formal_name": "",
+                        "onstage_evidence": [{"chapter_index": 1, "quote": "甲从天而降。"}],
+                    },
+                    {
+                        # G3：appellation 既不在 quote 里也不是其子串。
+                        "primary_appellation": "乙", "formal_name": "",
+                        "onstage_evidence": [{"chapter_index": 2, "quote": "第2章：真实原文占位。"}],
+                    },
+                    {
+                        # G1：chapter_index 落在统计窗口（1~20）之外。
+                        "primary_appellation": "丙", "formal_name": "",
+                        "onstage_evidence": [{"chapter_index": 99, "quote": "丙的引句。"}],
+                    },
+                ],
+            }, ensure_ascii=False)
+    
+        verdict_calls: list[str] = []
+    
+        async def fake_chat_structured(_messages, **kwargs):
+            verdict_calls.append((kwargs.get("call_meta") or {}).get("appellation", ""))
+            model_type = kwargs["model_type"]
+            return model_type(verdict="onstage", supporting_segment_index=1)
+    
+        monkeypatch.setattr(model_gateway, "chat", fake_chat)
+        monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+>       ranked = asyncio.run(stages._recurring_character_names(chapters))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_bible_prompt_and_precheck.py:327: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+chapters = [{'idx': 1, 'title': '第1章', 'content': '第1章：真实原文占位。'}, {'idx': 2, 'title': '第2章', 'content': '第2章：真实原文占位。'}, {'idx': 3...占位。'}, {'idx': 5, 'title': '第5章', 'content': '第5章：真实原文占位。'}, {'idx': 6, 'title': '第6章', 'content': '第6章：真实原文占位。'}, ...]
+project_id = None
+
+    async def _recurring_character_names(
+        chapters: list[dict], *, project_id: str | None = None,
+    ) -> list[tuple[str, str, int, int, int, list[str]]]:
+        """产出「必收角色名单」：先点名+自报在场证据，再用结构闸+独立裁决闸核验每条
+        证据是不是真的证明本人在场，核验通过的证据条数（`verified_onstage_count`）
+        才是判据——不再是"名字字符串在原文窗口里出现的次数"。
+    
+        根因：旧判据把字符串出现次数当"重不重要"的代理信号，两个方向都会失效。
+        假阳性方向——王伯/周员外/靠山老祖的命中全部来自旁白交代身份或他人台词提及，
+        本人从未真正在场，却因为次数够多进了必收名单。假阴性方向——这个信号只统计
+        模型报出的候选名字本身的出现次数，原文如果通篇用绰号称呼一个人（本人几乎
+        只以"小胖子"出现，正式姓名仅出现一两次）而此刻圣经正文还没生成、没有别名表
+        能把绰号翻译回正式姓名，这个人就会被判定为不重要。
+    
+        新流程：
+        1. 模型只在前 BIBLE_HEAD_CHAPTERS 章里点名，每个候选申报 primary_appellation
+           （原文最常用写法，允许绰号）+ formal_name（原文已揭示的正式姓名，未揭示则
+           空）+ onstage_evidence（能证明本人在场的原文引句列表）——绰号本身就能直接
+           充当"必收货币"，不需要一张此刻还不存在的别名表做转译。
+        2. 代码结构闸，逐条证据：G1 引句所在章节必须落在统计窗口（前 HEAD+LOOKAHEAD
+           章）内；G2 引句必须逐字命中该章原文（允许模型自行加/脱一层引号的噪音）；
+           G3 称呼（primary_appellation 或 formal_name 中非空的那个）必须是引句子串。
+           任一不满足直接丢弃该条证据，不发起裁决调用。
+        3. 结构闸通过的证据才发起独立低温模型裁决（`_roster_presence_verdict_call`，
+           与别名裁决闸同一分工范式：代码检索卷宗 → 模型独立裁决 → 代码结构性钉证）：
+           只问这段原文里称呼所指的人物本人是不是真的在场（本人说话/动作/被叙述在场，
+           而不是被谈论、被指涉、被交代来历的对象）；裁决通过（verdict=="onstage" 且
+           段号钉证通过）才计入该候选的 `verified_onstage_count`。
+        4. 按 `verified_onstage_count` 降序（同分按 primary_appellation 字典序打破
+           平局）排序，取 >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES 的候选，最多保留
+           BIBLE_MUST_COVER_MAX 个。
+    
+        点名调用失败时返回空名单，绝不阻断人物谱本身；结构闸/裁决闸任一步不通过，
+        该条证据直接丢弃，不确定不登记（不会因为某一条证据没通过就拒绝整个候选，
+        只是那一条不计数）。
+        """
+        valid = [ch for ch in chapters if (ch.get("content") or "").strip()]
+        if not valid:
+            return []
+        head = validIBLE_HEAD_CHAPTERS]
+        chunks = [
+            head[index:index + BIBLE_ROLL_CALL_CHUNK_CHAPTERS]
+            for index in range(0, len(head), BIBLE_ROLL_CALL_CHUNK_CHAPTERS)
+        ]
+    
+        async def _call_chunk(chunk: list[dict], chunk_index: int) -> list[_RosterCandidate]:
+            chunk_text = _render_bible_source(
+                chunk, budget=BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS,
+                head_chapters=len(chunk),
+            )
+            if not chunk_text.strip():
+                return []
+            if len(chunk_text) > BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS:
+                raise ValueError("人物点名分块输入超过硬上限")
+            prompt = f"""任务：从下面的小说正文里找出【出场人物】，为每个人物申报能证明他本人真的出现在画面中的证据，不要只给名字。
+    
+    要求：
+    1. primary_appellation：本章里称呼这个人物最常用、最稳定的一种写法，可以是正式姓名、外号、绰号、尊称或代称，必须逐字照抄。
+    2. formal_name：本章已经明确揭示的正式姓名；未揭示就填空字符串，禁止猜测。若“孙天地自称……”或“众人称小胖子李富贵”这种同一人物身份链接出现，必须填 formal_name。
+    3. aliases：本章明确指向同一人物的其它称呼；只有本章有明确身份链接才填，不能凭外貌相似猜。
+    4. identity_evidence：证明 formal_name/aliases 与 primary_appellation 是同一人的逐字引句，最多 2 条；引句需同时包含两种称呼或明确自称结构。
+    5. onstage_evidence：每人最多 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条，格式为 chapter_index + quote；quote 必须是本块原文不超过约 80 字的逐字引句，并包含 primary_appellation、formal_name 或 alias。
+    6. 只有本人说话、行动或被直接叙述为在场才算；被谈论、回忆或背景介绍不算。
+    7. 不输出无法单独指认的泛称、宗门、地名、法宝；同一个人在本块只输出一次。
+    
+    小说正文：
+    {chunk_text}
+    
+    输出 JSON Schema：
+    {{"candidates": [{{"primary_appellation": str, "formal_name": str, "aliases": [str], "identity_evidence": [{{"chapter_index": int, "quote": str}}], "onstage_evidence": [{{"chapter_index": int, "quote": str}}]}}]}}"""
+            try:
+                raw = await model_gateway.chat(
+                    [{"role": "system", "content": SYSTEM_PREFIX},
+                     {"role": "user", "content": prompt}],
+                    temperature=0.2,
+                    max_tokens=BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS,
+                    call_meta={
+                        "stage": "人物点名",
+                        "stage_key": "character_roll_call",
+                        "call_role": "stage_generate",
+                        "call_role_label": "人物点名分块",
+                        "expected_json": True,
+                        "chunk_index": chunk_index,
+                        "chunk_count": len(chunks),
+                        "input_chars": len(chunk_text),
+                    },
+                )
+                return _CharacterRollCall.model_validate(extract_json(raw)).candidates
+            except Exception as exc:  # noqa: BLE001 - 单块失败不阻断其它块和人物谱
+                log_provider_call(
+                    "character_roll_call", config.MODEL_TEXT, "OK", None, 0,
+                    meta={
+                        "chunk_index": chunk_index,
+                        "outcome": "best_effort_bypass",
+                        "error": str(exc),
+                    },
+                )
+                return []
+    
+        chunk_results = await asyncio.gather(*(
+            _call_chunk(chunk, index) for index, chunk in enumerate(chunks)
+        ))
+        candidates = _merge_roll_call_candidates(chunk_results)
+        candidates = await _resolve_generic_character_candidates(
+>           candidates, chapters_by_idx, project_id=project_id,
+                        ^^^^^^^^^^^^^^^
+        )
+E       NameError: name 'chapters_by_idx' is not defined
+
+app/stages.py:2334: NameError
+_____________ test_recurring_character_names_presence_verdict_gate _____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10d3a71a0>
+
+    def test_recurring_character_names_presence_verdict_gate(monkeypatch) -> None:
+        """结构闸通过后仍要过独立低温裁决闸：verdict=="mentioned_only" 不计入；
+        verdict=="onstage" 但段号钉证失败（模型编造卷宗外的段号）不计入；
+        verdict=="onstage" 且钉证通过才计入 verified_onstage_count。"""
+        import asyncio
+        import json
+    
+        from app import stages
+        from app.harness import model_gateway
+    
+        chapters = [
+            {"idx": i, "title": f"第{i}章", "content": f"第{i}章：甲现身，乙现身，丙现身。"}
+            for i in range(1, 21)
+        ]
+    
+        def _evidence() -> list[dict]:
+            return [
+                {"chapter_index": 1, "quote": "第1章：甲现身，乙现身，丙现身。"},
+                {"chapter_index": 2, "quote": "第2章：甲现身，乙现身，丙现身。"},
+            ]
+    
+        async def fake_chat(_messages, **_kwargs):
+            return json.dumps({
+                "candidates": [
+                    {"primary_appellation": "甲", "formal_name": "", "onstage_evidence": _evidence()},
+                    {"primary_appellation": "乙", "formal_name": "", "onstage_evidence": _evidence()},
+                    {"primary_appellation": "丙", "formal_name": "", "onstage_evidence": _evidence()},
+                ],
+            }, ensure_ascii=False)
+    
+        async def fake_chat_structured(_messages, **kwargs):
+            appellation = (kwargs.get("call_meta") or {}).get("appellation", "")
+            model_type = kwargs["model_type"]
+            if appellation == "甲":
+                return model_type(verdict="mentioned_only", supporting_segment_index=1)
+            if appellation == "乙":
+                # 钉证失败：段号伪造成卷宗里不存在的编号。
+                return model_type(verdict="onstage", supporting_segment_index=99)
+            return model_type(verdict="onstage", supporting_segment_index=1)
+    
+        monkeypatch.setattr(model_gateway, "chat", fake_chat)
+        monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+>       ranked = asyncio.run(stages._recurring_character_names(chapters))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_bible_prompt_and_precheck.py:375: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+chapters = [{'idx': 1, 'title': '第1章', 'content': '第1章：甲现身，乙现身，丙现身。'}, {'idx': 2, 'title': '第2章', 'content': '第2章：甲现身，乙现身，丙现身。'},...dx': 5, 'title': '第5章', 'content': '第5章：甲现身，乙现身，丙现身。'}, {'idx': 6, 'title': '第6章', 'content': '第6章：甲现身，乙现身，丙现身。'}, ...]
+project_id = None
+
+    async def _recurring_character_names(
+        chapters: list[dict], *, project_id: str | None = None,
+    ) -> list[tuple[str, str, int, int, int, list[str]]]:
+        """产出「必收角色名单」：先点名+自报在场证据，再用结构闸+独立裁决闸核验每条
+        证据是不是真的证明本人在场，核验通过的证据条数（`verified_onstage_count`）
+        才是判据——不再是"名字字符串在原文窗口里出现的次数"。
+    
+        根因：旧判据把字符串出现次数当"重不重要"的代理信号，两个方向都会失效。
+        假阳性方向——王伯/周员外/靠山老祖的命中全部来自旁白交代身份或他人台词提及，
+        本人从未真正在场，却因为次数够多进了必收名单。假阴性方向——这个信号只统计
+        模型报出的候选名字本身的出现次数，原文如果通篇用绰号称呼一个人（本人几乎
+        只以"小胖子"出现，正式姓名仅出现一两次）而此刻圣经正文还没生成、没有别名表
+        能把绰号翻译回正式姓名，这个人就会被判定为不重要。
+    
+        新流程：
+        1. 模型只在前 BIBLE_HEAD_CHAPTERS 章里点名，每个候选申报 primary_appellation
+           （原文最常用写法，允许绰号）+ formal_name（原文已揭示的正式姓名，未揭示则
+           空）+ onstage_evidence（能证明本人在场的原文引句列表）——绰号本身就能直接
+           充当"必收货币"，不需要一张此刻还不存在的别名表做转译。
+        2. 代码结构闸，逐条证据：G1 引句所在章节必须落在统计窗口（前 HEAD+LOOKAHEAD
+           章）内；G2 引句必须逐字命中该章原文（允许模型自行加/脱一层引号的噪音）；
+           G3 称呼（primary_appellation 或 formal_name 中非空的那个）必须是引句子串。
+           任一不满足直接丢弃该条证据，不发起裁决调用。
+        3. 结构闸通过的证据才发起独立低温模型裁决（`_roster_presence_verdict_call`，
+           与别名裁决闸同一分工范式：代码检索卷宗 → 模型独立裁决 → 代码结构性钉证）：
+           只问这段原文里称呼所指的人物本人是不是真的在场（本人说话/动作/被叙述在场，
+           而不是被谈论、被指涉、被交代来历的对象）；裁决通过（verdict=="onstage" 且
+           段号钉证通过）才计入该候选的 `verified_onstage_count`。
+        4. 按 `verified_onstage_count` 降序（同分按 primary_appellation 字典序打破
+           平局）排序，取 >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES 的候选，最多保留
+           BIBLE_MUST_COVER_MAX 个。
+    
+        点名调用失败时返回空名单，绝不阻断人物谱本身；结构闸/裁决闸任一步不通过，
+        该条证据直接丢弃，不确定不登记（不会因为某一条证据没通过就拒绝整个候选，
+        只是那一条不计数）。
+        """
+        valid = [ch for ch in chapters if (ch.get("content") or "").strip()]
+        if not valid:
+            return []
+        head = validIBLE_HEAD_CHAPTERS]
+        chunks = [
+            head[index:index + BIBLE_ROLL_CALL_CHUNK_CHAPTERS]
+            for index in range(0, len(head), BIBLE_ROLL_CALL_CHUNK_CHAPTERS)
+        ]
+    
+        async def _call_chunk(chunk: list[dict], chunk_index: int) -> list[_RosterCandidate]:
+            chunk_text = _render_bible_source(
+                chunk, budget=BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS,
+                head_chapters=len(chunk),
+            )
+            if not chunk_text.strip():
+                return []
+            if len(chunk_text) > BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS:
+                raise ValueError("人物点名分块输入超过硬上限")
+            prompt = f"""任务：从下面的小说正文里找出【出场人物】，为每个人物申报能证明他本人真的出现在画面中的证据，不要只给名字。
+    
+    要求：
+    1. primary_appellation：本章里称呼这个人物最常用、最稳定的一种写法，可以是正式姓名、外号、绰号、尊称或代称，必须逐字照抄。
+    2. formal_name：本章已经明确揭示的正式姓名；未揭示就填空字符串，禁止猜测。若“孙天地自称……”或“众人称小胖子李富贵”这种同一人物身份链接出现，必须填 formal_name。
+    3. aliases：本章明确指向同一人物的其它称呼；只有本章有明确身份链接才填，不能凭外貌相似猜。
+    4. identity_evidence：证明 formal_name/aliases 与 primary_appellation 是同一人的逐字引句，最多 2 条；引句需同时包含两种称呼或明确自称结构。
+    5. onstage_evidence：每人最多 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条，格式为 chapter_index + quote；quote 必须是本块原文不超过约 80 字的逐字引句，并包含 primary_appellation、formal_name 或 alias。
+    6. 只有本人说话、行动或被直接叙述为在场才算；被谈论、回忆或背景介绍不算。
+    7. 不输出无法单独指认的泛称、宗门、地名、法宝；同一个人在本块只输出一次。
+    
+    小说正文：
+    {chunk_text}
+    
+    输出 JSON Schema：
+    {{"candidates": [{{"primary_appellation": str, "formal_name": str, "aliases": [str], "identity_evidence": [{{"chapter_index": int, "quote": str}}], "onstage_evidence": [{{"chapter_index": int, "quote": str}}]}}]}}"""
+            try:
+                raw = await model_gateway.chat(
+                    [{"role": "system", "content": SYSTEM_PREFIX},
+                     {"role": "user", "content": prompt}],
+                    temperature=0.2,
+                    max_tokens=BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS,
+                    call_meta={
+                        "stage": "人物点名",
+                        "stage_key": "character_roll_call",
+                        "call_role": "stage_generate",
+                        "call_role_label": "人物点名分块",
+                        "expected_json": True,
+                        "chunk_index": chunk_index,
+                        "chunk_count": len(chunks),
+                        "input_chars": len(chunk_text),
+                    },
+                )
+                return _CharacterRollCall.model_validate(extract_json(raw)).candidates
+            except Exception as exc:  # noqa: BLE001 - 单块失败不阻断其它块和人物谱
+                log_provider_call(
+                    "character_roll_call", config.MODEL_TEXT, "OK", None, 0,
+                    meta={
+                        "chunk_index": chunk_index,
+                        "outcome": "best_effort_bypass",
+                        "error": str(exc),
+                    },
+                )
+                return []
+    
+        chunk_results = await asyncio.gather(*(
+            _call_chunk(chunk, index) for index, chunk in enumerate(chunks)
+        ))
+        candidates = _merge_roll_call_candidates(chunk_results)
+        candidates = await _resolve_generic_character_candidates(
+>           candidates, chapters_by_idx, project_id=project_id,
+                        ^^^^^^^^^^^^^^^
+        )
+E       NameError: name 'chapters_by_idx' is not defined
+
+app/stages.py:2334: NameError
+_____ test_recurring_character_names_matches_real_project_evidence_shapes ______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10d228140>
+
+    def test_recurring_character_names_matches_real_project_evidence_shapes(monkeypatch) -> None:
+        """本项目真实数据验收（proj_3ac0b627fa46 前 20 章逐字核实过的引句）：王伯/周员外/
+        靠山老祖三个假阳性角色在前 20 章窗口内的命中全部是身份/背景交代（旁白转述、
+        他人台词提及），没有一条是本人在场；小胖子（=李富贵）则有本人真实的动作/情绪
+        细节描写。字符串用 \\uXXXX 转义逐字录入，保证与原文数据库取值字节一致，不依赖
+        人工誊抄中文标点的准确性。
+    
+        裁决闸本身用 mock 固定为人工研判结论（结构闸+聚合逻辑是本测试真正要验证的
+        东西，不是"真的调用模型会不会判对"——那需要不 mock 的真实集成 dry run，
+        不适合放进自动化单元测试套件）。"""
+        import asyncio
+        import json
+    
+        from app import stages
+        from app.harness import model_gateway
+    
+        # 王伯：孟浩自陈家境时顺带比较（"甚至不如王伯的木匠铺子赚钱"），本人未出场。
+        wang_bo_a = (
+            "“哪怕是县城里的教习先生，"
+            "每月也只有几钱银子，甚至不"
+            "如王伯的木匠铺子赚钱，早知"
+            "如此头些年不去读书，和王老"
+            "伯去学木匠手艺，想来日后总"
+            "算能解决温饱，好过如今一无"
+            "所有。"
+        )
+        # 王伯：孟浩感慨木匠铺的王伯只剩这一个儿子，仍是背景交代，本人未出场。
+        wang_bo_b = (
+            "小胖子神色露出悲伤，孟浩叹"
+            "了口气，当年一同上山的四人"
+            "，这还不到一年就听闻死去一"
+            "个，他内心也很不好受，尤其"
+            "想到木匠铺的王伯只有这一子"
+            "，心里更为难受起来。"
+        )
+        # 周员外：孟浩的内心独白提及欠债对象，周员外本人未出场。
+        zhou_a = (
+            "“家里已经没有多少粮食了，"
+            "银两也都花的所剩无几，还欠"
+            "了周员外三两银子，以后……"
+            "怎么办。"
+        )
+        zhou_b = (
+            "孟浩神色有些古怪，暗道这小"
+            "胖子人不大，居然都说了亲，"
+            "自己这么大年纪，如今连女人"
+            "手都没摸过，不由的感慨还是"
+            "有钱好啊，这小胖子家里家财"
+            "万贯，衣食无忧，而自己一穷"
+            "二白，祖屋去年都卖掉，如今"
+            "还欠下周员外一屁股债。"
+        )
+        # 靠山老祖：宗门历史沿革交代，"失踪四百余年"，本人显然不可能出场。
+        kao_a = (
+            "实际上靠山宗原本也不是叫这"
+            "个名字，只不过在千年前出了"
+            "一位轰动整个南域的修士，此"
+            "人自号靠山老祖，更是强行将"
+            "宗门之名改为靠山宗，横行霸"
+            "道，几乎搜刮了赵国所有宗门"
+            "之宝，风光一时无两。"
+        )
+        kao_b = (
+            "靠山宗与其他宗门有些不同，"
+            "外宗在下，反倒是杂役可以居"
+            "住半山腰，这一点是当年靠山"
+            "老祖不知什么原因定下的门规。"
+        )
+        # 小胖子（=李富贵）：本人的动作/情绪描写，真正在场。
+        fatty_a = (
+            "小胖子身子猛地哆嗦了一下，"
+            "双眼露出强烈的恐惧，连忙把"
+            "自己的嘴捂住，身子颤抖的越"
+            "加剧烈。"
+        )
+        fatty_b = (
+            "“我爹是财主，我应该也是财"
+            "主，我不做杂役……”小胖子"
+            "哭的极为伤心，身子哆嗦时肥"
+            "肉也随着颤抖。"
+        )
+    
+        chapters = [
+            {"idx": 1, "title": "第一章", "content": wang_bo_a},
+            {"idx": 2, "title": "第二章", "content": wang_bo_b},
+            {"idx": 3, "title": "第三章", "content": zhou_a},
+            {"idx": 4, "title": "第四章", "content": zhou_b},
+            {"idx": 5, "title": "第五章", "content": kao_a},
+            {"idx": 6, "title": "第六章", "content": kao_b},
+            {"idx": 7, "title": "第七章", "content": fatty_a},
+            {"idx": 8, "title": "第八章", "content": fatty_b},
+        ]
+    
+        async def fake_chat(_messages, **_kwargs):
+            return json.dumps({
+                "candidates": [
+                    {
+                        "primary_appellation": "王伯", "formal_name": "",
+                        "onstage_evidence": [
+                            {"chapter_index": 1, "quote": wang_bo_a},
+                            {"chapter_index": 2, "quote": wang_bo_b},
+                        ],
+                    },
+                    {
+                        "primary_appellation": "周员外", "formal_name": "",
+                        "onstage_evidence": [
+                            {"chapter_index": 3, "quote": zhou_a},
+                            {"chapter_index": 4, "quote": zhou_b},
+                        ],
+                    },
+                    {
+                        "primary_appellation": "靠山老祖", "formal_name": "",
+                        "onstage_evidence": [
+                            {"chapter_index": 5, "quote": kao_a},
+                            {"chapter_index": 6, "quote": kao_b},
+                        ],
+                    },
+                    {
+                        "primary_appellation": "小胖子", "formal_name": "李富贵",
+                        "onstage_evidence": [
+                            {"chapter_index": 7, "quote": fatty_a},
+                            {"chapter_index": 8, "quote": fatty_b},
+                        ],
+                    },
+                ],
+            }, ensure_ascii=False)
+    
+        mentioned_only = {"王伯", "周员外", "靠山老祖"}
+    
+        async def fake_chat_structured(_messages, **kwargs):
+            appellation = (kwargs.get("call_meta") or {}).get("appellation", "")
+            model_type = kwargs["model_type"]
+            verdict = "mentioned_only" if appellation in mentioned_only else "onstage"
+            return model_type(verdict=verdict, supporting_segment_index=1)
+    
+        monkeypatch.setattr(model_gateway, "chat", fake_chat)
+        monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+>       ranked = asyncio.run(stages._recurring_character_names(chapters))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_bible_prompt_and_precheck.py:517: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+chapters = [{'idx': 1, 'title': '第一章', 'content': '“哪怕是县城里的教习先生，每月也只有几钱银子，甚至不如王伯的木匠铺子赚钱，早知如此头些年不去读书，和王老伯去学木匠手艺，想来日后总算能解决温饱，好过如今一无...国所有宗门之宝，风光一时无两。'}, {'idx': 6, 'title': '第六章', 'content': '靠山宗与其他宗门有些不同，外宗在下，反倒是杂役可以居住半山腰，这一点是当年靠山老祖不知什么原因定下的门规。'}, ...]
+project_id = None
+
+    async def _recurring_character_names(
+        chapters: list[dict], *, project_id: str | None = None,
+    ) -> list[tuple[str, str, int, int, int, list[str]]]:
+        """产出「必收角色名单」：先点名+自报在场证据，再用结构闸+独立裁决闸核验每条
+        证据是不是真的证明本人在场，核验通过的证据条数（`verified_onstage_count`）
+        才是判据——不再是"名字字符串在原文窗口里出现的次数"。
+    
+        根因：旧判据把字符串出现次数当"重不重要"的代理信号，两个方向都会失效。
+        假阳性方向——王伯/周员外/靠山老祖的命中全部来自旁白交代身份或他人台词提及，
+        本人从未真正在场，却因为次数够多进了必收名单。假阴性方向——这个信号只统计
+        模型报出的候选名字本身的出现次数，原文如果通篇用绰号称呼一个人（本人几乎
+        只以"小胖子"出现，正式姓名仅出现一两次）而此刻圣经正文还没生成、没有别名表
+        能把绰号翻译回正式姓名，这个人就会被判定为不重要。
+    
+        新流程：
+        1. 模型只在前 BIBLE_HEAD_CHAPTERS 章里点名，每个候选申报 primary_appellation
+           （原文最常用写法，允许绰号）+ formal_name（原文已揭示的正式姓名，未揭示则
+           空）+ onstage_evidence（能证明本人在场的原文引句列表）——绰号本身就能直接
+           充当"必收货币"，不需要一张此刻还不存在的别名表做转译。
+        2. 代码结构闸，逐条证据：G1 引句所在章节必须落在统计窗口（前 HEAD+LOOKAHEAD
+           章）内；G2 引句必须逐字命中该章原文（允许模型自行加/脱一层引号的噪音）；
+           G3 称呼（primary_appellation 或 formal_name 中非空的那个）必须是引句子串。
+           任一不满足直接丢弃该条证据，不发起裁决调用。
+        3. 结构闸通过的证据才发起独立低温模型裁决（`_roster_presence_verdict_call`，
+           与别名裁决闸同一分工范式：代码检索卷宗 → 模型独立裁决 → 代码结构性钉证）：
+           只问这段原文里称呼所指的人物本人是不是真的在场（本人说话/动作/被叙述在场，
+           而不是被谈论、被指涉、被交代来历的对象）；裁决通过（verdict=="onstage" 且
+           段号钉证通过）才计入该候选的 `verified_onstage_count`。
+        4. 按 `verified_onstage_count` 降序（同分按 primary_appellation 字典序打破
+           平局）排序，取 >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES 的候选，最多保留
+           BIBLE_MUST_COVER_MAX 个。
+    
+        点名调用失败时返回空名单，绝不阻断人物谱本身；结构闸/裁决闸任一步不通过，
+        该条证据直接丢弃，不确定不登记（不会因为某一条证据没通过就拒绝整个候选，
+        只是那一条不计数）。
+        """
+        valid = [ch for ch in chapters if (ch.get("content") or "").strip()]
+        if not valid:
+            return []
+        head = validIBLE_HEAD_CHAPTERS]
+        chunks = [
+            head[index:index + BIBLE_ROLL_CALL_CHUNK_CHAPTERS]
+            for index in range(0, len(head), BIBLE_ROLL_CALL_CHUNK_CHAPTERS)
+        ]
+    
+        async def _call_chunk(chunk: list[dict], chunk_index: int) -> list[_RosterCandidate]:
+            chunk_text = _render_bible_source(
+                chunk, budget=BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS,
+                head_chapters=len(chunk),
+            )
+            if not chunk_text.strip():
+                return []
+            if len(chunk_text) > BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS:
+                raise ValueError("人物点名分块输入超过硬上限")
+            prompt = f"""任务：从下面的小说正文里找出【出场人物】，为每个人物申报能证明他本人真的出现在画面中的证据，不要只给名字。
+    
+    要求：
+    1. primary_appellation：本章里称呼这个人物最常用、最稳定的一种写法，可以是正式姓名、外号、绰号、尊称或代称，必须逐字照抄。
+    2. formal_name：本章已经明确揭示的正式姓名；未揭示就填空字符串，禁止猜测。若“孙天地自称……”或“众人称小胖子李富贵”这种同一人物身份链接出现，必须填 formal_name。
+    3. aliases：本章明确指向同一人物的其它称呼；只有本章有明确身份链接才填，不能凭外貌相似猜。
+    4. identity_evidence：证明 formal_name/aliases 与 primary_appellation 是同一人的逐字引句，最多 2 条；引句需同时包含两种称呼或明确自称结构。
+    5. onstage_evidence：每人最多 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条，格式为 chapter_index + quote；quote 必须是本块原文不超过约 80 字的逐字引句，并包含 primary_appellation、formal_name 或 alias。
+    6. 只有本人说话、行动或被直接叙述为在场才算；被谈论、回忆或背景介绍不算。
+    7. 不输出无法单独指认的泛称、宗门、地名、法宝；同一个人在本块只输出一次。
+    
+    小说正文：
+    {chunk_text}
+    
+    输出 JSON Schema：
+    {{"candidates": [{{"primary_appellation": str, "formal_name": str, "aliases": [str], "identity_evidence": [{{"chapter_index": int, "quote": str}}], "onstage_evidence": [{{"chapter_index": int, "quote": str}}]}}]}}"""
+            try:
+                raw = await model_gateway.chat(
+                    [{"role": "system", "content": SYSTEM_PREFIX},
+                     {"role": "user", "content": prompt}],
+                    temperature=0.2,
+                    max_tokens=BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS,
+                    call_meta={
+                        "stage": "人物点名",
+                        "stage_key": "character_roll_call",
+                        "call_role": "stage_generate",
+                        "call_role_label": "人物点名分块",
+                        "expected_json": True,
+                        "chunk_index": chunk_index,
+                        "chunk_count": len(chunks),
+                        "input_chars": len(chunk_text),
+                    },
+                )
+                return _CharacterRollCall.model_validate(extract_json(raw)).candidates
+            except Exception as exc:  # noqa: BLE001 - 单块失败不阻断其它块和人物谱
+                log_provider_call(
+                    "character_roll_call", config.MODEL_TEXT, "OK", None, 0,
+                    meta={
+                        "chunk_index": chunk_index,
+                        "outcome": "best_effort_bypass",
+                        "error": str(exc),
+                    },
+                )
+                return []
+    
+        chunk_results = await asyncio.gather(*(
+            _call_chunk(chunk, index) for index, chunk in enumerate(chunks)
+        ))
+        candidates = _merge_roll_call_candidates(chunk_results)
+        candidates = await _resolve_generic_character_candidates(
+>           candidates, chapters_by_idx, project_id=project_id,
+                        ^^^^^^^^^^^^^^^
+        )
+E       NameError: name 'chapters_by_idx' is not defined
+
+app/stages.py:2334: NameError
+_ test_generate_bible_uses_small_roster_contract_and_single_character_details __
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10d229a90>
+
+    def test_generate_bible_uses_small_roster_contract_and_single_character_details(monkeypatch) -> None:
+        import asyncio
+        from app import stages
+    
+        seen: dict[str, object] = {}
+    
+        async def fake_roll_call(*_args, **_kwargs):
+            return [("小胖子", "李富贵", 2)]
+    
+        async def fake_loop(*args, **kwargs):
+            seen["prompt"] = args
+            seen["repair_user_prompt_limit"] = kwargs["repair_user_prompt_limit"]
+            return stages._BibleRosterDraft(
+                world=World(visual_style_canonical="国漫3D动画电影质感，精致光影，统一电影画面"),
+                characters=[stages._BibleRosterEntry(
+                    name="李富贵", role="重要配角", source_appellations=["小胖子"],
+                )],
+            )
+    
+        async def fake_details(entries, *_args, **_kwargs):
+            seen["entries"] = entries
+            return [Character(
+                name="李富贵", role="重要配角",
+                appearance_canonical="十六七岁少年，黑色短发，深棕短打，身形敦实，腰间挂木尺",
+            )]
+    
+        monkeypatch.setattr(stages, "_recurring_character_names", fake_roll_call)
+        monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
+        monkeypatch.setattr(stages, "_generate_character_detail_batch", fake_details)
+        monkeypatch.setattr(stages, "_verify_character_aliases_in_place", lambda *_args, **_kwargs: asyncio.sleep(0))
+    
+>       bible = asyncio.run(stages.generate_bible([
+            {"idx": 1, "title": "第一章", "content": "小胖子与孟浩同行。"}
+        ]))
+
+tests/test_bible_prompt_and_precheck.py:601: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+chapters = [{'idx': 1, 'title': '第一章', 'content': '小胖子与孟浩同行。'}], feedback = ''
+previous_bible = None, project_id = None, visual_style_prompt = None
+
+    async def generate_bible(chapters: list[dict], feedback: str = "", previous_bible: dict | None = None,
+                             project_id: str | None = None,
+                             visual_style_prompt: str | None = None) -> Bible:
+        """Generate a small roster first, then fan out bounded per-character requests."""
+        chapters = await _chapters_without_paratext(chapters)
+        chapters_by_idx = _chapters_by_idx(chapters)
+        must_cover = await _recurring_character_names(chapters, project_id=project_id)
+    
+        must_cover_lines = [
+            (
+                f"{formal or appellation}（原文称呼：{'、'.join(dict.fromkeys([appellation, *aliases]))}；"
+                f"核验在场 {onstage_count} 次；全文命中 {mention_count} 次；覆盖 {chapter_count} 章）"
+            )
+>           for appellation, formal, onstage_count, mention_count, chapter_count, aliases in must_cover
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        ]
+E       ValueError: not enough values to unpack (expected 6, got 3)
+
+app/stages.py:5078: ValueError
+=========================== short test summary info ============================
+FAILED tests/test_bible_parallelism.py::test_roll_call_sends_small_parallel_chunks
+FAILED tests/test_bible_prompt_and_precheck.py::test_generate_bible_forces_backend_visual_style_prompt
+FAILED tests/test_bible_prompt_and_precheck.py::test_recurring_character_names_ranks_by_verified_onstage_evidence
+FAILED tests/test_bible_prompt_and_precheck.py::test_recurring_character_names_structural_gate_rejects_each_failure_mode
+FAILED tests/test_bible_prompt_and_precheck.py::test_recurring_character_names_presence_verdict_gate
+FAILED tests/test_bible_prompt_and_precheck.py::test_recurring_character_names_matches_real_project_evidence_shapes
+FAILED tests/test_bible_prompt_and_precheck.py::test_generate_bible_uses_small_roster_contract_and_single_character_details
+7 failed, 28 passed, 2 skipped in 2.74s

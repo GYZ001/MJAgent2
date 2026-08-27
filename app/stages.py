@@ -14,7 +14,7 @@ import json
 import math
 import re
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -2128,6 +2128,99 @@ def _merge_roll_call_candidates(
     return merged
 
 
+async def _resolve_generic_character_candidates(
+    candidates: list[_RosterCandidate],
+    chapters_by_idx: dict[int, str],
+    *,
+    project_id: str | None = None,
+) -> list[_RosterCandidate]:
+    """把描述性称呼裁决到已有实体；不确定时不再凭空创建新角色。"""
+    specific = [candidate for candidate in candidates if not _is_generic_character_appellation(
+        candidate.formal_name or candidate.primary_appellation
+    )]
+    if not specific:
+        return candidates
+    kept: list[_RosterCandidate] = []
+    for candidate in candidates:
+        label = (candidate.formal_name or candidate.primary_appellation).strip()
+        if not _is_generic_character_appellation(label):
+            kept.append(candidate)
+            continue
+        evidence_blocks: list[str] = []
+        for evidence in candidate.onstage_evidence[:2]:
+            chapter_text = chapters_by_idx.get(evidence.chapter_index, "")
+            dossier = _roster_presence_dossier(
+                evidence.chapter_index, chapter_text, evidence.quote,
+            )
+            if dossier:
+                evidence_blocks.append(json.dumps(dossier, ensure_ascii=False))
+        candidate_names = [
+            {
+                "canonical": item.formal_name or item.primary_appellation,
+                "appellations": sorted(_candidate_appellations(item)),
+            }
+            for item in specific
+        ]
+        if not evidence_blocks:
+            continue
+        prompt = f"""任务：判断描述性称呼「{label}」是否是候选实体名单中的同一个人物。
+
+候选实体：
+{json.dumps(candidate_names, ensure_ascii=False)}
+
+描述性称呼的原文卷宗：
+{chr(10).join(evidence_blocks)}
+
+硬规则：
+1. 只有原文中的同场连续指代、动作连续、对话连续或明确命名句才能判 same。
+2. 外貌相似、年龄相近、都在同一宗门、常识猜测都不能判 same。
+3. canonical_appellation 只能逐字选择候选实体的 canonical 值。
+4. 无法充分证明时 verdict=uncertain；描述性称呼不能因此创建独立人物谱角色。
+"""
+        try:
+            resolution = await model_gateway.chat_structured(
+                [{"role": "system", "content": SYSTEM_PREFIX},
+                 {"role": "user", "content": prompt}],
+                model_type=_RosterIdentityResolution,
+                temperature=0.0,
+                max_tokens=512,
+                call_meta={
+                    "stage": "人物身份归一",
+                    "stage_key": "character_identity_resolution",
+                    "call_role": "stage_validate",
+                    "character_name": label,
+                    "project_id": project_id,
+                },
+            )
+        except Exception:  # noqa: BLE001 - 不确定时宁可不新建泛称角色
+            continue
+        if resolution.verdict != "same":
+            continue
+        target = next((
+            item for item in specific
+            if (item.formal_name or item.primary_appellation) == resolution.canonical_appellation
+        ), None)
+        if target is None:
+            continue
+        aliases = list(dict.fromkeys([
+            *target.aliases, candidate.primary_appellation, candidate.formal_name,
+            *candidate.aliases,
+        ]))
+        target.aliases = [
+            value for value in aliases
+            if value and value not in {target.primary_appellation, target.formal_name}
+        ]
+        target.onstage_evidence = list({
+            (item.chapter_index, item.quote): item
+            for item in [*target.onstage_evidence, *candidate.onstage_evidence]
+        }.values())[:BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE]
+        target.identity_evidence = list({
+            (item.chapter_index, item.quote): item
+            for item in [*target.identity_evidence, *candidate.onstage_evidence]
+        }.values())[:BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE]
+    return kept
+
+
 class _BibleSupplement(BaseModel):
     """补录合同：只为「必收名单里还缺的人」补出完整角色条目。"""
 
@@ -2178,6 +2271,7 @@ async def _recurring_character_names(
         head[index:index + BIBLE_ROLL_CALL_CHUNK_CHAPTERS]
         for index in range(0, len(head), BIBLE_ROLL_CALL_CHUNK_CHAPTERS)
     ]
+    chapters_by_idx = _chapters_by_idx(valid)
 
     async def _call_chunk(chunk: list[dict], chunk_index: int) -> list[_RosterCandidate]:
         chunk_text = _render_bible_source(
@@ -2237,6 +2331,9 @@ async def _recurring_character_names(
         _call_chunk(chunk, index) for index, chunk in enumerate(chunks)
     ))
     candidates = _merge_roll_call_candidates(chunk_results)
+    candidates = await _resolve_generic_character_candidates(
+        candidates, chapters_by_idx, project_id=project_id,
+    )
 
     # 结构闸 G1 用的窗口原文：前 HEAD 章 + 往后 LOOKAHEAD 章，按章节序号建索引
     # （复用 `_chapters_by_idx`，与别名核验同一个查找表构造方式）。
@@ -4815,11 +4912,31 @@ def _character_detail_evidence_pack(
     return "\n\n".join(selected)
 
 
+def _normalize_must_cover_rows(
+    rows: list[tuple],
+) -> list[tuple[str, str, int, int, int, list[str]]]:
+    """兼容旧三元组调用方；生产路径使用带全文统计与别名的六元组。"""
+    normalized: list[tuple[str, str, int, int, int, list[str]]] = []
+    for row in rows:
+        if len(row) >= 6:
+            appellation, formal, onstage, mentions, chapters, aliases = row[:6]
+        else:
+            appellation, formal, onstage = row[:3]
+            mentions, chapters, aliases = onstage, 1, []
+        normalized.append((
+            str(appellation), str(formal), int(onstage), int(mentions), int(chapters),
+            [str(alias) for alias in aliases if str(alias).strip()],
+        ))
+    return normalized
+
+
 def _normalize_roster_against_candidates(
     draft: _BibleRosterDraft,
     must_cover: list[tuple[str, str, int, int, int, list[str]]],
 ) -> _BibleRosterDraft:
     """代码拥有名单最终权：模型只分配 role，不得拆人、改名或漏人。"""
+    if not must_cover:
+        return draft
     model_entries = list(draft.characters)
     normalized: list[_BibleRosterEntry] = []
     for appellation, formal, _onstage, _mentions, _chapters, aliases in must_cover:
@@ -4972,7 +5089,9 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
     """Generate a small roster first, then fan out bounded per-character requests."""
     chapters = await _chapters_without_paratext(chapters)
     chapters_by_idx = _chapters_by_idx(chapters)
-    must_cover = await _recurring_character_names(chapters, project_id=project_id)
+    must_cover = _normalize_must_cover_rows(
+        await _recurring_character_names(chapters, project_id=project_id)
+    )
 
     must_cover_lines = [
         (
