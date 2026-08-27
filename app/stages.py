@@ -2241,6 +2241,14 @@ def _pin_roster_candidates_to_source(
     return pinned
 
 
+def _identity_merge_keys(candidate: _RosterCandidate) -> set[str]:
+    """连通分量只用可指认称呼。胖子/少年这种类别词会把李富贵和王有材并成一个人。"""
+    return {
+        value for value in _candidate_appellations(candidate)
+        if value and not _is_generic_character_appellation(value)
+    }
+
+
 def _merge_roll_call_candidates(
     chunk_results: list[list[_RosterCandidate]],
 ) -> list[_RosterCandidate]:
@@ -2261,9 +2269,11 @@ def _merge_roll_call_candidates(
             parent[right_root] = left_root
 
     for left in range(len(flattened)):
-        left_names = _candidate_appellations(flattened[left])
+        left_names = _identity_merge_keys(flattened[left])
+        if not left_names:
+            continue
         for right in range(left + 1, len(flattened)):
-            if left_names & _candidate_appellations(flattened[right]):
+            if left_names & _identity_merge_keys(flattened[right]):
                 union(left, right)
 
     groups: dict[int, list[_RosterCandidate]] = {}
@@ -2688,6 +2698,8 @@ supporting_chapter_index 必须是卷宗里出现过的章号；supporting_quote
             resolution.verdict != "revealed"
             or not true_name
             or true_name == appellation
+            or _TRUE_NAME_REJECT_RE.search(true_name)
+            or _is_generic_character_appellation(true_name)
             or true_name in occupied_elsewhere
             or resolution.supporting_chapter_index not in valid_chapters
             or true_name not in chapter_text
