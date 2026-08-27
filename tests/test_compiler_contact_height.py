@@ -12,7 +12,7 @@ def _bible() -> Bible:
     return Bible(
         characters=[
             Character(
-                name="萧炎",
+                name="甲一",
                 role="主角",
                 appearance_canonical=(
                     "十五岁左右男性少年，墨色利落短发，常穿灰黑色劲装，"
@@ -21,7 +21,7 @@ def _bible() -> Bible:
                 personality="坚韧",
             ),
             Character(
-                name="萧薰儿",
+                name="甲二儿",
                 role="女主",
                 appearance_canonical=(
                     "十五岁左右少女，青丝挽成云髻，月白襦裙配淡金纹样，"
@@ -44,17 +44,17 @@ def _contact_shot(**kwargs) -> Shot:
         duration_s=5,
         shot_size="中景",
         camera_move="固定",
-        scene_setting="日，萧家测验广场",
-        characters=["萧炎", "萧薰儿"],
-        action_desc="萧炎抬手按住石碑，萧薰儿侧身注视。",
-        first_frame_desc="萧炎手掌刚贴上石碑。",
-        last_frame_desc="萧炎手掌仍按住石碑，碑面亮起。",
-        state_in="萧炎抬起右手靠近石碑，萧薰儿立于一侧。",
-        primary_action="萧炎抬手按住冰冷石碑，碑面光纹扩散。",
-        state_out="萧炎手掌仍按住石碑，碑面亮起。",
+        scene_setting="日，甲家测验广场",
+        characters=["甲一", "甲二儿"],
+        action_desc="甲一抬手按住石碑，甲二儿侧身注视。",
+        first_frame_desc="甲一手掌刚贴上石碑。",
+        last_frame_desc="甲一手掌仍按住石碑，碑面亮起。",
+        state_in="甲一抬起右手靠近石碑，甲二儿立于一侧。",
+        primary_action="甲一抬手按住冰冷石碑，碑面光纹扩散。",
+        state_out="甲一手掌仍按住石碑，碑面亮起。",
         continuity_mode="same_scene_cut",
         risk_tags=["contact_phase:established"],
-        source_excerpt="萧炎抬起手掌，轻轻按在了那块黑色石碑之上。",
+        source_excerpt="甲一抬起手掌，轻轻按在了那块黑色石碑之上。",
     )
     base.update(kwargs)
     return Shot(**base)
@@ -63,12 +63,12 @@ def _contact_shot(**kwargs) -> Shot:
 def test_has_contact_action_detects_press() -> None:
     assert has_contact_action(_contact_shot()) is True
     assert has_contact_action(_contact_shot(
-        primary_action="萧炎独自站在广场中央环顾四周。",
-        action_desc="萧炎独自站在广场中央环顾四周。",
-        state_in="萧炎站在广场中央。",
-        state_out="萧炎仍站在广场中央。",
-        first_frame_desc="萧炎站在广场中央。",
-        last_frame_desc="萧炎环顾四周。",
+        primary_action="甲一独自站在广场中央环顾四周。",
+        action_desc="甲一独自站在广场中央环顾四周。",
+        state_in="甲一站在广场中央。",
+        state_out="甲一仍站在广场中央。",
+        first_frame_desc="甲一站在广场中央。",
+        last_frame_desc="甲一环顾四周。",
         risk_tags=[],
     )) is False
 
@@ -97,10 +97,10 @@ def test_compile_prompt_equal_height_for_multi_character() -> None:
 
 def test_compile_prompt_skips_equal_height_when_diff_stated() -> None:
     shot = _contact_shot(
-        primary_action="萧薰儿仰头看高他一头的萧炎，伸手扶住他手臂。",
-        action_desc="萧薰儿仰头看高他一头的萧炎，伸手扶住他手臂。",
-        first_frame_desc="萧薰儿仰头看高他一头的萧炎。",
-        last_frame_desc="萧薰儿手扶住萧炎手臂。",
+        primary_action="甲二儿仰头看高他一头的甲一，伸手扶住他手臂。",
+        action_desc="甲二儿仰头看高他一头的甲一，伸手扶住他手臂。",
+        first_frame_desc="甲二儿仰头看高他一头的甲一。",
+        last_frame_desc="甲二儿手扶住甲一手臂。",
         risk_tags=["contact_phase:established", "explicit_height_difference"],
     )
     assert has_explicit_height_difference(shot, _bible()) is True
@@ -110,7 +110,7 @@ def test_compile_prompt_skips_equal_height_when_diff_stated() -> None:
 
 
 def test_compile_prompt_skips_equal_height_for_single_character() -> None:
-    shot = _contact_shot(characters=["萧炎"])
+    shot = _contact_shot(characters=["甲一"])
     prompt = compile_prompt(shot, _bible())
     assert "站立身高与眼线尽量齐平" not in prompt
 

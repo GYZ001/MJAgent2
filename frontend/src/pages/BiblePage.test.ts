@@ -15,19 +15,19 @@ const character = (name: string) => ({ name } as Character)
 
 describe('characterIsFitting', () => {
   it('全量批次在 refs_target 为空时标记所有角色', () => {
-    expect(characterIsFitting({ refs_status: 'running', refs_target: null }, character('萧炎'))).toBe(true)
-    expect(characterIsFitting({ refs_status: 'running', refs_target: null }, character('药老'))).toBe(true)
+    expect(characterIsFitting({ refs_status: 'running', refs_target: null }, character('甲一'))).toBe(true)
+    expect(characterIsFitting({ refs_status: 'running', refs_target: null }, character('丙老'))).toBe(true)
   })
 
   it('批量选角时只标记 refs_target JSON 中的角色', () => {
-    const project = { refs_status: 'running', refs_target: JSON.stringify(['萧炎', '药老']) }
-    expect(characterIsFitting(project, character('药老'))).toBe(true)
+    const project = { refs_status: 'running', refs_target: JSON.stringify(['甲一', '丙老']) }
+    expect(characterIsFitting(project, character('丙老'))).toBe(true)
     expect(characterIsFitting(project, character('熏儿'))).toBe(false)
   })
 
   it('保持兼容历史单角色 target', () => {
     expect(characterIsFitting(
-      { refs_status: 'running', refs_target: '萧炎' }, character('萧炎'),
+      { refs_status: 'running', refs_target: '甲一' }, character('甲一'),
     )).toBe(true)
   })
 })
@@ -40,7 +40,7 @@ const bible = (characters: Character[], style = '国风') => ({
 describe('人物谱步骤状态', () => {
   it('定妆生成中不会把尚未产出的图片误报为有问题', () => {
     expect(bibleStepStatus({
-      bible: bible([character('萧炎')]),
+      bible: bible([character('甲一')]),
       bible_status: 'ready',
       refs_status: 'running',
     })).toBe('running')
@@ -48,7 +48,7 @@ describe('人物谱步骤状态', () => {
 
   it('任务明确失败时仍优先显示有问题', () => {
     expect(bibleStepStatus({
-      bible: bible([character('萧炎')]),
+      bible: bible([character('甲一')]),
       bible_status: 'ready',
       refs_status: 'failed',
     })).toBe('problem')
@@ -56,7 +56,7 @@ describe('人物谱步骤状态', () => {
 
   it('结构完整的低分定妆只提示质量风险，不标记为不可用', () => {
     const lowScoreCharacter = {
-      name: '萧炎',
+      name: '甲一',
       portraits: [{
         id: 'current',
         ep_start: 1,
@@ -88,27 +88,27 @@ describe('人物谱步骤状态', () => {
 
 describe('mergeBibleThreeWay', () => {
   it('保留本地字段修订和服务端新角色', () => {
-    const base = bible([{ name: '萧炎', role: '主角', personality: '冷静' } as Character])
-    const local = bible([{ name: '萧炎', role: '主角', personality: '坚定' } as Character])
+    const base = bible([{ name: '甲一', role: '主角', personality: '冷静' } as Character])
+    const local = bible([{ name: '甲一', role: '主角', personality: '坚定' } as Character])
     const server = bible([
-      { name: '萧炎', role: '主角', personality: '冷静' } as Character,
-      { name: '药老', role: '导师' } as Character,
+      { name: '甲一', role: '主角', personality: '冷静' } as Character,
+      { name: '丙老', role: '导师' } as Character,
     ])
     const merged = mergeBibleThreeWay(base, local, server)
     expect(merged.conflicts).toHaveLength(0)
-    expect(merged.bible.characters.map(item => item.name)).toEqual(['萧炎', '药老'])
+    expect(merged.bible.characters.map(item => item.name)).toEqual(['甲一', '丙老'])
     expect(merged.bible.characters[0].personality).toBe('坚定')
   })
 
   it('同字段双改时必须显式选择', () => {
-    const base = bible([{ name: '萧炎', role: '主角', personality: '冷静' } as Character])
-    const local = bible([{ name: '萧炎', role: '主角', personality: '坚定' } as Character])
-    const server = bible([{ name: '萧炎', role: '主角', personality: '果断' } as Character])
+    const base = bible([{ name: '甲一', role: '主角', personality: '冷静' } as Character])
+    const local = bible([{ name: '甲一', role: '主角', personality: '坚定' } as Character])
+    const server = bible([{ name: '甲一', role: '主角', personality: '果断' } as Character])
     const preview = mergeBibleThreeWay(base, local, server)
-    expect(preview.conflicts.map(item => item.path)).toContain('characters.萧炎.personality')
+    expect(preview.conflicts.map(item => item.path)).toContain('characters.甲一.personality')
     expect(preview.bible.characters[0].personality).toBe('果断')
     const resolved = mergeBibleThreeWay(base, local, server, {
-      'characters.萧炎.personality': 'local',
+      'characters.甲一.personality': 'local',
     })
     expect(resolved.bible.characters[0].personality).toBe('坚定')
   })
@@ -116,7 +116,7 @@ describe('mergeBibleThreeWay', () => {
 
 describe('人物谱冲突字段文案', () => {
   it('把内部字段路径翻译为角色可读名称', () => {
-    expect(bibleConflictFieldLabel('characters.萧炎.personality')).toBe('萧炎 · 性格')
+    expect(bibleConflictFieldLabel('characters.甲一.personality')).toBe('甲一 · 性格')
     expect(bibleConflictFieldLabel('world.visual_style_canonical')).toBe('统一画面风格')
   })
 })
@@ -124,7 +124,7 @@ describe('人物谱冲突字段文案', () => {
 describe('人物定妆主画廊', () => {
   it('多套历史定妆各有三视角时只展示当前版三张', () => {
     const withPortraitHistory = {
-      name: '萧薰儿',
+      name: '甲二儿',
       portraits: [
         {
           id: 'history-1',
@@ -169,7 +169,7 @@ describe('人物定妆主画廊', () => {
 
   it('重复和扩展视角混入时仍只展示当前版三个主视角', () => {
     const withDuplicateViews = {
-      name: '萧薰儿',
+      name: '甲二儿',
       portraits: [{
         id: 'current',
         ep_start: 1,

@@ -27,7 +27,7 @@ def _bible() -> Bible:
     return Bible(
         characters=[
             Character(
-                name="萧炎",
+                name="甲一",
                 role="主角",
                 appearance_canonical="十五岁少年，黑发束起，黑色劲装，眉眼倔强坚毅",
                 personality="坚韧",
@@ -47,20 +47,20 @@ def _real_shot_2() -> Shot:
         duration_s=10,
         shot_size="中景",
         camera_move="固定",
-        scene_setting="日，萧家测验广场",
-        characters=["萧炎"],
+        scene_setting="日，甲家测验广场",
+        characters=["甲一"],
         action_desc=(
-            "萧炎右手仍紧贴黑色魔石碑表面，碑面骤然亮起白光；碑旁functional:examiner确认碑面信息，"
-            "面无表情地公布成绩，萧炎听完后握紧拳头压住情绪。"
+            "甲一右手仍紧贴黑色魔石碑表面，碑面骤然亮起白光；碑旁functional:examiner确认碑面信息，"
+            "面无表情地公布成绩，甲一听完后握紧拳头压住情绪。"
         ),
-        first_frame_desc="萧炎右手贴住黑色魔石碑，functional:examiner站在碑旁低头等待结果。",
-        last_frame_desc="同一机位，functional:examiner已经公布成绩，萧炎仍站在碑前握紧拳头。",
+        first_frame_desc="甲一右手贴住黑色魔石碑，functional:examiner站在碑旁低头等待结果。",
+        last_frame_desc="同一机位，functional:examiner已经公布成绩，甲一仍站在碑前握紧拳头。",
         source_excerpt="测验员看了一眼碑上所显示出来的信息，语气漠然地将之公布了出来。",
         narration="",
         dialogues=[
             Dialogue(
                 speaker="functional:examiner",
-                line="萧炎，斗之力，三段！级别：低级！",
+                line="甲一，测验力，三段！级别：低级！",
                 emotion="平静",
             )
         ],
@@ -73,7 +73,7 @@ def test_functional_extra_classifier_is_bounded_and_deterministic() -> None:
     assert is_functional_extra("functional:examiner")
     assert all(not is_functional_extra(name) for name in (
         "路人甲", "路人乙", "路人12", "测验员", "中年测验员", "测验员甲", "族人甲", "弟子乙",
-        "守卫3", "老管家", "二长老", "萧炎", "韩枫",
+        "守卫3", "老管家", "二长老", "甲一", "韩枫",
         "黑袍老者", "神秘黑袍老者", "绿袍男子", "青衣女子",
     ))
 
@@ -88,8 +88,8 @@ def test_real_shot_2_speaker_is_added_as_visible_functional_extra() -> None:
         Storyboard(episode_no=1, shots=[shot]), _bible(), target_duration_s=50
     )
 
-    assert shot.characters == ["萧炎", "functional:examiner"]
-    assert shot.characters_visible == ["萧炎", "functional:examiner"]
+    assert shot.characters == ["甲一", "functional:examiner"]
+    assert shot.characters_visible == ["甲一", "functional:examiner"]
     assert shot.audio_cast == ["functional:examiner"]
     assert shot.audio_timeline[0].type == "spoken_dialogue"
     assert shot.audio_timeline[0].lip_sync is True
@@ -105,9 +105,9 @@ def test_real_shot_2_speaker_is_added_as_visible_functional_extra() -> None:
 def test_source_described_person_cannot_bypass_screenplay_identity_resolution() -> None:
     """历史分镜若残留“绿袍男子”，不得把它当功能路人直接放行。"""
     shot = _real_shot_2()
-    shot.characters = ["萧炎"]
-    shot.characters_visible = ["萧炎"]
-    shot.action_desc = "绿袍男子站在萧炎面前厉声警告，萧炎紧张地看向他。"
+    shot.characters = ["甲一"]
+    shot.characters_visible = ["甲一"]
+    shot.action_desc = "绿袍男子站在甲一面前厉声警告，甲一紧张地看向他。"
     shot.dialogues = [
         Dialogue(speaker="绿袍男子", line="再说一句废话，直接割了你的舌头。", delivery="spoken_dialogue")
     ]
@@ -127,8 +127,8 @@ def test_source_described_person_cannot_bypass_screenplay_identity_resolution() 
         Storyboard(episode_no=1, shots=[shot]), _bible()
     )
 
-    assert shot.characters == ["萧炎"]
-    assert shot.characters_visible == ["萧炎"]
+    assert shot.characters == ["甲一"]
+    assert shot.characters_visible == ["甲一"]
     assert shot.audio_cast == []
     assert shot.dialogues == []
     assert shot.audio_timeline == []
@@ -144,14 +144,14 @@ def test_functional_extra_compiles_without_persistent_bible_asset() -> None:
 
     assert "功能性路人「functional:examiner」" in video_prompt
     assert "功能性路人「functional:examiner」" in frame_prompt
-    assert "functional:examiner" in video_prompt and "萧炎，斗之力，三段" in video_prompt
+    assert "functional:examiner" in video_prompt and "甲一，测验力，三段" in video_prompt
     assert "[AUDIO TIMELINE]" in video_prompt
 
 
 def test_legacy_functional_name_requires_persisted_typed_voice_contract() -> None:
     shot = _real_shot_2()
-    shot.characters = ["萧炎", "测验员"]
-    shot.characters_visible = ["萧炎", "测验员"]
+    shot.characters = ["甲一", "测验员"]
+    shot.characters_visible = ["甲一", "测验员"]
     shot.audio_cast = ["测验员"]
     shot.dialogues[0].speaker = "测验员"
     screenplay = EpisodeScreenplay(
@@ -212,8 +212,8 @@ def test_offbible_normalization_removes_ghost_character_from_full_contract() -> 
     ``not a functional extra``。规范化必须以整个镜头合同为原子单位。
     """
     shot = _real_shot_2()
-    shot.characters = ["萧炎", "韩枫"]
-    shot.characters_visible = ["韩枫", "萧炎"]
+    shot.characters = ["甲一", "韩枫"]
+    shot.characters_visible = ["韩枫", "甲一"]
     shot.dialogues = [
         Dialogue(speaker="韩枫", line="再说一句废话，直接割了你的舌头。")
     ]
@@ -234,8 +234,8 @@ def test_offbible_normalization_removes_ghost_character_from_full_contract() -> 
         Storyboard(episode_no=1, shots=[shot]), _bible()
     )
 
-    assert shot.characters == ["萧炎"]
-    assert shot.characters_visible == ["萧炎"]
+    assert shot.characters == ["甲一"]
+    assert shot.characters_visible == ["甲一"]
     assert shot.dialogues == []
     assert shot.audio_cast == []
     assert shot.audio_timeline == []
@@ -248,7 +248,7 @@ def test_offbible_normalization_removes_ghost_character_from_full_contract() -> 
 
 def test_prompt_compiler_reports_stale_visible_character_as_contract_error() -> None:
     shot = _real_shot_2()
-    shot.characters_visible = ["萧炎", "韩枫"]
+    shot.characters_visible = ["甲一", "韩枫"]
 
     errors = validate_storyboard(
         Storyboard(episode_no=1, shots=[shot]), _bible(), target_duration_s=50
@@ -262,7 +262,7 @@ def test_prompt_compiler_never_leaks_raw_functional_extra_error_without_bible() 
     shot = _real_shot_2()
     empty_bible = Bible(characters=[], world=_bible().world)
 
-    with pytest.raises(CompileError, match="萧炎"):
+    with pytest.raises(CompileError, match="甲一"):
         compile_prompt(shot, empty_bible)
 
 
@@ -329,7 +329,7 @@ def test_historical_shot_repair_creates_lineaged_t1_candidate(
     row = conn.execute(
         "SELECT characters, storyboard_artifact_id FROM shots WHERE id='s1'"
     ).fetchone()
-    assert json.loads(row["characters"]) == ["萧炎", "functional:examiner"]
+    assert json.loads(row["characters"]) == ["甲一", "functional:examiner"]
     assert row["storyboard_artifact_id"] == artifact_ids[0]
     assert repaired["status"] == "candidate"
     assert repaired["trust_level"] == "T1"
@@ -359,8 +359,8 @@ def test_historical_ghost_repair_persists_the_complete_character_contract(
     shot = _real_shot_2()
     # 复制真实事故状态：legacy characters/dialogues 已被部分修复，
     # 但扩展合同仍保留非法角色和发声轨。
-    shot.characters = ["萧炎"]
-    shot.characters_visible = ["韩枫", "萧炎"]
+    shot.characters = ["甲一"]
+    shot.characters_visible = ["韩枫", "甲一"]
     shot.dialogues = []
     shot.audio_cast = ["韩枫"]
     shot.audio_timeline = [
@@ -409,9 +409,9 @@ def test_historical_ghost_repair_persists_the_complete_character_contract(
     assert len(artifact_ids) == 1
     row = conn.execute("SELECT * FROM shots WHERE id='s1'").fetchone()
     contract = json.loads(row["shot_contract_json"])
-    assert json.loads(row["characters"]) == ["萧炎"]
+    assert json.loads(row["characters"]) == ["甲一"]
     assert json.loads(row["dialogues"]) == []
-    assert contract["characters_visible"] == ["萧炎"]
+    assert contract["characters_visible"] == ["甲一"]
     assert contract["audio_cast"] == []
     assert contract["audio_timeline"] == []
     assert contract["reference_roles"] == []

@@ -38,20 +38,20 @@ def test_provider_visual_retry_rephrases_without_keyword_routing(monkeypatch) ->
 def test_environment_only_prompt_preserves_approved_canonical_without_word_filtering() -> None:
     from app.scenes import environment_only_scene_canonical, scene_ref_prompt
 
-    canonical = "热闹露天坊市，摊位林立，人流穿梭，周围有萧家护卫巡视，色彩明快"
+    canonical = "热闹露天坊市，摊位林立，人流穿梭，周围有甲家护卫巡视，色彩明快"
     cleaned = environment_only_scene_canonical(canonical)
     assert "摊位林立" in cleaned
     assert cleaned == canonical
-    prompt = scene_ref_prompt("国风厚涂", canonical, scene_name="萧家坊市")
+    prompt = scene_ref_prompt("国风厚涂", canonical, scene_name="甲家坊市")
     assert canonical in prompt
     assert "无人物" in prompt
-    assert "规范地点名称：萧家坊市" in prompt
+    assert "规范地点名称：甲家坊市" in prompt
     assert "不得替换成其他地点" in prompt
     assert "地点名是独立且最高优先级的场景语义输入" in prompt
     assert "即使后续场景描述没有重复某个名称限定词，也不得忽略或替换它" in prompt
     assert "画风最高优先级：必须严格保持「国风厚涂」" in prompt
     assert "不得擅自切换成与该画风冲突的真人摄影" in prompt
-    assert "再次确认：地点是「萧家坊市」，画风是「国风厚涂」" in prompt
+    assert "再次确认：地点是「甲家坊市」，画风是「国风厚涂」" in prompt
 
 
 def test_environment_prompt_keeps_the_complete_scene_contract() -> None:
@@ -208,8 +208,8 @@ def _seed_project(conn) -> None:
         "characters": [],
         "world": {"era": "玄幻", "genre": "玄幻", "visual_style_canonical": "国风厚涂"},
         "scenes": [{
-            "name": "萧家坊市",
-            "scene_canonical": "白日萧家坊市，古风木制商铺与青石长街，阳光明亮，空间开阔，纯环境无人物",
+            "name": "甲家坊市",
+            "scene_canonical": "白日甲家坊市，古风木制商铺与青石长街，阳光明亮，空间开阔，纯环境无人物",
             "location_kind": "室外",
         }],
     }
@@ -226,11 +226,11 @@ def _candidate(tmp_path) -> dict:
     return repository.create_artifact(EvidenceArtifact(
         type="scene_reference",
         scope_type="reference_asset",
-        scope_id="p:萧家坊市:1",
+        scope_id="p:甲家坊市:1",
         status="candidate",
         trust_level="T1",
         file_path=str(path),
-        content={"scene_name": "萧家坊市", "prompt": "国风厚涂纯环境坊市", "attempt": 1},
+        content={"scene_name": "甲家坊市", "prompt": "国风厚涂纯环境坊市", "attempt": 1},
     ))
 
 
@@ -284,7 +284,7 @@ def test_hard_gate_retry_uses_failed_candidate_as_edit_seed(tmp_path, monkeypatc
     monkeypatch.setattr("app.multiview.scene_multiview_enabled", lambda: False)
 
     from app.scenes import generate_scene_refs
-    asyncio.run(generate_scene_refs("p", ["萧家坊市"]))
+    asyncio.run(generate_scene_refs("p", ["甲家坊市"]))
 
     assert [call["attempt"] for call in calls] == [1, 2]
     assert calls[0]["anchor_url"] is None
@@ -349,7 +349,7 @@ def test_review_existing_candidate_adds_new_qa_without_regenerating(tmp_path, mo
     monkeypatch.setattr("app.scenes._review_scene_ref", reviewed)
     monkeypatch.setattr("app.scenes._generate_scene_image", must_not_generate)
     from app.scenes import review_scene_candidate
-    result = asyncio.run(review_scene_candidate("p", "萧家坊市", artifact["id"]))
+    result = asyncio.run(review_scene_candidate("p", "甲家坊市", artifact["id"]))
     assert result["reviewed"] is True
     assert result["image_regenerated"] is False
     assert result["gate"]["verified"] is True
@@ -396,7 +396,7 @@ def test_batch_completion_rechecks_best_old_candidate_before_generating(tmp_path
     monkeypatch.setattr("app.scenes._generate_scene_image", must_not_generate)
 
     from app.scenes import generate_scene_refs
-    asyncio.run(generate_scene_refs("p", ["萧家坊市"]))
+    asyncio.run(generate_scene_refs("p", ["甲家坊市"]))
 
     assert len(reviewed_ids) == 1
     assert adopted_ids == reviewed_ids
@@ -410,7 +410,7 @@ def test_manual_review_adopts_only_unverified_candidate_with_audit(tmp_path, mon
     from app.scenes import manually_review_and_adopt_scene_candidate
     result = asyncio.run(manually_review_and_adopt_scene_candidate(
         "p",
-        "萧家坊市",
+        "甲家坊市",
         artifact["id"],
         confirmations={
             "person_free": True,
@@ -450,7 +450,7 @@ def test_manual_review_preserves_historical_hard_failure_as_warning(tmp_path, mo
     monkeypatch.setattr("app.multiview.scene_multiview_enabled", lambda: False)
     from app.scenes import manually_review_and_adopt_scene_candidate
     result = asyncio.run(manually_review_and_adopt_scene_candidate(
-        "p", "萧家坊市", artifact["id"],
+        "p", "甲家坊市", artifact["id"],
         confirmations={
             "person_free": True, "watermark_free": True,
             "forbidden_text_free": True, "space_type_matches": True,

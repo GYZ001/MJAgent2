@@ -271,14 +271,14 @@ def test_glued_scene_heading_dialogue_is_not_offbible_speaker() -> None:
     from app.validators import _iter_script_sound_matches
 
     text = "\n".join([
-        "【场1】魂天帝：今日便结束一切。",
-        "萧炎：那就一战。",
-        "【场2】夜 / 中州天际：这是地点梗概不是对白",
+        "【场1】角色丙：今日便结束一切。",
+        "甲一：那就一战。",
+        "【场2】夜 / 中域天际：这是地点梗概不是对白",
         "【场3】测验广场",
         "测验员：报出成绩。",
     ])
     speakers = [m.group(1).strip() for m in _iter_script_sound_matches(text)]
-    assert speakers == ["魂天帝", "萧炎", "测验员"]
+    assert speakers == ["角色丙", "甲一", "测验员"]
     assert all("【" not in s and "/" not in s for s in speakers)
 
 
@@ -811,22 +811,22 @@ def test_long_screenplay_source_retains_head_middle_dialogue_and_tail() -> None:
 
 def _screenplay_with_source_dialogue_chain() -> tuple[EpisodeScreenplay, str]:
     source = "\n".join([
-        "测验员：“斗之力，三段！”",
+        "测验员：“测验力，三段！”",
         "谷言：“只有三段？”",
         "测验员：“结果无误。”",
     ])
     script = _valid_rainy_script()
     script.full_script_text = script.full_script_text.replace(
         "谷言（压低声音）：还有十分钟，他要是再不来，我就走。",
-        "测验员：斗之力，三段！\n谷言：只有三段？\n测验员：结果无误。",
+        "测验员：测验力，三段！\n谷言：只有三段？\n测验员：结果无误。",
     )
     script.dialogue_chains = [KeyDialogueChain(
         chain_id="DC1",
         topic="测验员宣布结果并确认",
         turns=[
             KeyDialogueTurn(
-                speaker="测验员", line="斗之力，三段！",
-                function="announcement", source_text="斗之力，三段！",
+                speaker="测验员", line="测验力，三段！",
+                function="announcement", source_text="测验力，三段！",
             ),
             KeyDialogueTurn(
                 speaker="谷言", line="只有三段？",
@@ -846,7 +846,7 @@ def test_source_dialogue_inventory_keeps_first_utterance_in_order() -> None:
     _script, source = _screenplay_with_source_dialogue_chain()
 
     assert source_dialogue_fragments(source) == [
-        "斗之力，三段！", "只有三段？", "结果无误。",
+        "测验力，三段！", "只有三段？", "结果无误。",
     ]
 
 
@@ -856,13 +856,13 @@ def test_dialogue_normalization_restores_exact_source_utterance() -> None:
     script, source = _screenplay_with_source_dialogue_chain()
     script.narrative_plan = NarrativeContinuityPlan(scope_id="test-dialogue")
     turn = script.dialogue_chains[0].turns[0]
-    old_line = "测验员宣布谷言只有三段斗之力"
+    old_line = "测验员宣布谷言只有三段测验力"
     script.full_script_text = script.full_script_text.replace(
         f"测验员：{turn.line}",
         f"测验员：{old_line}",
     )
     turn.line = old_line
-    turn.source_text = "斗之力"
+    turn.source_text = "测验力"
 
     changes = _normalize_screenplay_narrative_graph(
         script,
@@ -871,11 +871,11 @@ def test_dialogue_normalization_restores_exact_source_utterance() -> None:
 
     assert changes
     normalized_turn = script.dialogue_chains[0].turns[0]
-    assert normalized_turn.line == "斗之力，三段！"
-    assert normalized_turn.source_text == "斗之力，三段！"
-    assert "测验员：斗之力，三段！" in script.full_script_text
+    assert normalized_turn.line == "测验力，三段！"
+    assert normalized_turn.source_text == "测验力，三段！"
+    assert "测验员：测验力，三段！" in script.full_script_text
     assert old_line not in script.full_script_text
-    assert script.key_lines[0] == "测验员：斗之力，三段！"
+    assert script.key_lines[0] == "测验员：测验力，三段！"
 
 
 def test_dialogue_chain_is_authoritative_and_allows_functional_trigger() -> None:
@@ -894,7 +894,7 @@ def test_dialogue_chain_is_authoritative_and_allows_functional_trigger() -> None
 
     assert script.key_lines == ["模型错误挑选的孤立金句"]
     assert normalized.key_lines == [
-        "测验员：斗之力，三段！", "谷言：只有三段？", "测验员：结果无误。",
+        "测验员：测验力，三段！", "谷言：只有三段？", "测验员：结果无误。",
     ]
     assert not any("dialogue_chains" in error or "开场第一句对白" in error for error in errors), errors
     assert not any("非人物谱角色台词" in error for error in errors), errors
@@ -929,7 +929,7 @@ def test_single_speaker_monologue_may_span_adjacent_scene_blocks() -> None:
     script.dialogue_chains[0].turns[1].speaker = "测验员"
     script.dialogue_chains[0].turns[1].function = "statement"
     script.full_script_text = (
-        "【场1】夜 / 山崖\n测验员：斗之力，三段！\n"
+        "【场1】夜 / 山崖\n测验员：测验力，三段！\n"
         "【场2】夜 / 山崖\n测验员：只有三段？"
     )
 
@@ -945,14 +945,14 @@ def test_single_speaker_monologue_may_span_adjacent_scene_blocks() -> None:
 def test_dialogue_chain_may_continue_into_adjacent_subarea_of_same_location() -> None:
     script, source = _screenplay_with_source_dialogue_chain()
     script.scene_outline = [
-        _scene(1, "【场1】日 / 萧家迎客大厅", "长老当众刁难，冲突在大厅爆发。"),
-        _scene(2, "【场2】日 / 萧家迎客大厅角落", "薰儿从大厅角落回应并完成解围。"),
+        _scene(1, "【场1】日 / 甲家迎客大厅", "长老当众刁难，冲突在大厅爆发。"),
+        _scene(2, "【场2】日 / 甲家迎客大厅角落", "二儿从大厅角落回应并完成解围。"),
     ]
     script.full_script_text = (
-        "【场1】日 / 萧家迎客大厅\n"
-        "测验员：斗之力，三段！\n"
+        "【场1】日 / 甲家迎客大厅\n"
+        "测验员：测验力，三段！\n"
         "谷言：只有三段？\n"
-        "【场2】日 / 萧家迎客大厅角落\n"
+        "【场2】日 / 甲家迎客大厅角落\n"
         "测验员：结果无误。"
     )
 
@@ -966,7 +966,7 @@ def test_source_grounded_single_character_reply_is_not_rejected_as_empty() -> No
     script.dialogue_chains[0].turns[-1].line = "哦。"
     script.dialogue_chains[0].turns[-1].source_text = "哦。"
     script.full_script_text = script.full_script_text.replace("结果无误。", "哦。")
-    source = "测验员：“斗之力，三段！”\n谷言：“只有三段？”\n测验员：“哦。”"
+    source = "测验员：“测验力，三段！”\n谷言：“只有三段？”\n测验员：“哦。”"
 
     errors = validate_dialogue_chains(script, source_text=source, required=True)
 
@@ -979,7 +979,7 @@ def test_narrative_grounded_single_character_reply_is_not_rejected_as_empty() ->
     script.dialogue_chains[0].turns[-1].line = "好。"
     script.dialogue_chains[0].turns[-1].source_text = "测验员点头同意。"
     script.full_script_text = script.full_script_text.replace("结果无误。", "好。")
-    source = "测验员：“斗之力，三段！”\n谷言：“只有三段？”\n测验员点头同意。"
+    source = "测验员：“测验力，三段！”\n谷言：“只有三段？”\n测验员点头同意。"
 
     errors = validate_dialogue_chains(script, source_text=source, required=True)
 
@@ -1024,7 +1024,7 @@ def test_dialogue_chain_rejects_first_adapted_turn_with_unrelated_source() -> No
     script, source = _screenplay_with_source_dialogue_chain()
     script.dialogue_chains[0].turns[0].line = "今天天气不错。"
     script.full_script_text = script.full_script_text.replace(
-        "测验员：斗之力，三段！", "测验员：今天天气不错。",
+        "测验员：测验力，三段！", "测验员：今天天气不错。",
     )
 
     errors = validate_screenplay(
@@ -1058,7 +1058,7 @@ def test_dialogue_chain_accepts_digit_identifier_spoken_in_chinese() -> None:
     script.dialogue_chains[0].turns[0].source_text = "7-3-1"
     script.dialogue_chains[0].turns[0].line = "七、三、一。"
     script.full_script_text = script.full_script_text.replace(
-        "测验员：斗之力，三段！", "测验员：七、三、一。",
+        "测验员：测验力，三段！", "测验员：七、三、一。",
     )
     source = "测验员：“7-3-1”\n谷言：“只有三段？”\n测验员：“结果无误。”"
 
@@ -1072,21 +1072,21 @@ def test_dialogue_chain_accepts_digit_identifier_spoken_in_chinese() -> None:
 
 def test_dialogue_chain_scene_check_prefers_declared_speaker_over_fuzzy_name_match() -> None:
     source = "\n".join([
-        "测验员：“斗之力，三段！”",
+        "测验员：“测验力，三段！”",
         "围观者：“三段？果然不出所料。”",
-        "萧薰儿：“萧炎哥哥。”",
-        "萧炎：“我现在还有资格让你这么叫吗？”",
-        "萧薰儿：“薰儿相信，你会重新站起来。”",
+        "甲二儿：“甲一哥哥。”",
+        "甲一：“我现在还有资格让你这么叫吗？”",
+        "甲二儿：“二儿相信，你会重新站起来。”",
     ])
     script = _valid_rainy_script()
     script.full_script_text = "\n".join([
         "【场1】日 / 测验广场",
-        "测验员：萧炎，斗之力，三段！级别：低级！",
+        "测验员：甲一，测验力，三段！级别：低级！",
         "围观者：三段？果然不出所料。",
         "【场2】日 / 队伍末尾",
-        "萧薰儿：萧炎哥哥。",
-        "萧炎：我现在还有资格让你这么叫吗？",
-        "萧薰儿：薰儿相信，你会重新站起来。",
+        "甲二儿：甲一哥哥。",
+        "甲一：我现在还有资格让你这么叫吗？",
+        "甲二儿：二儿相信，你会重新站起来。",
     ])
     script.dialogue_chains = [
         KeyDialogueChain(
@@ -1095,9 +1095,9 @@ def test_dialogue_chain_scene_check_prefers_declared_speaker_over_fuzzy_name_mat
             turns=[
                 KeyDialogueTurn(
                     speaker="测验员",
-                    line="萧炎，斗之力，三段！级别：低级！",
+                    line="甲一，测验力，三段！级别：低级！",
                     function="announcement",
-                    source_text="斗之力，三段！",
+                    source_text="测验力，三段！",
                 ),
                 KeyDialogueTurn(
                     speaker="围观者",
@@ -1109,25 +1109,25 @@ def test_dialogue_chain_scene_check_prefers_declared_speaker_over_fuzzy_name_mat
         ),
         KeyDialogueChain(
             chain_id="DC2",
-            topic="薰儿鼓励萧炎",
+            topic="二儿鼓励甲一",
             turns=[
                 KeyDialogueTurn(
-                    speaker="萧薰儿",
-                    line="萧炎哥哥。",
+                    speaker="甲二儿",
+                    line="甲一哥哥。",
                     function="trigger",
-                    source_text="萧炎哥哥。",
+                    source_text="甲一哥哥。",
                 ),
                 KeyDialogueTurn(
-                    speaker="萧炎",
+                    speaker="甲一",
                     line="我现在还有资格让你这么叫吗？",
                     function="response",
                     source_text="我现在还有资格让你这么叫吗？",
                 ),
                 KeyDialogueTurn(
-                    speaker="萧薰儿",
-                    line="薰儿相信，你会重新站起来。",
+                    speaker="甲二儿",
+                    line="二儿相信，你会重新站起来。",
                     function="statement",
-                    source_text="薰儿相信，你会重新站起来。",
+                    source_text="二儿相信，你会重新站起来。",
                 ),
             ],
         ),
@@ -1202,7 +1202,7 @@ def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(mon
 
     assert "【首条改编对白来源锚点·硬门禁】" in prompts[0]
     assert "D001 是本集实际采用的第一条对白" in prompts[0]
-    assert "D001：斗之力，三段！" not in prompts[0]
+    assert "D001：测验力，三段！" not in prompts[0]
     assert "用户多选的必保留台词" not in prompts[0]
     assert '"dialogue_chains"' in prompts[0]
     assert "`key_lines` 由后端按 dialogue_chains.turns 确定性回填" in prompts[0]
@@ -1378,60 +1378,60 @@ def test_full_script_screenplay_does_not_reject_story_vocabulary() -> None:
 def test_full_script_screenplay_allows_new_names_without_bible() -> None:
     full_script_text = "\n\n".join([
         "【场1】夜 / 旧宅门口",
-        "萧炎站在门外盯着半开的门缝，掌心慢慢收紧，呼吸压得很低。",
-        "萧炎：门既然开了，就别躲着不见我。",
+        "甲一站在门外盯着半开的门缝，掌心慢慢收紧，呼吸压得很低。",
+        "甲一：门既然开了，就别躲着不见我。",
         "【场2】夜 / 旧宅前厅",
-        "薰儿从暗处走出来，没有立刻解释，只把一枚染血的玉牌递到萧炎眼前，逼他先看清裂痕。",
-        "薰儿：先看这个，再决定该不该进去。",
+        "二儿从暗处走出来，没有立刻解释，只把一枚染血的玉牌递到甲一眼前，逼他先看清裂痕。",
+        "二儿：先看这个，再决定该不该进去。",
         "【场3】夜 / 旧宅回廊",
         "两人一前一后沿着回廊逼近尽头，脚步声被风声吞掉，尽头那扇门却自己慢慢打开。",
-        "萧炎：里面的人，已经知道我们来了。",
+        "甲一：里面的人，已经知道我们来了。",
     ])
     script = EpisodeScreenplay(
         episode_no=1,
         mode="full_script",
         title="旧宅开门",
-        logline="萧炎夜探旧宅，薰儿递出血玉引出更深的埋伏。",
+        logline="甲一夜探旧宅，二儿递出血玉引出更深的埋伏。",
         script_format_note="场次化台本稿，含场标、动作段与对白段",
         scene_outline=[
-            _scene(1, "【场1】夜 / 旧宅门口", "萧炎夜探旧宅，在门口试探暗中的回应。").model_copy(update={"characters": ["萧炎"]}),
-            _scene(2, "【场2】夜 / 旧宅前厅", "薰儿现身递出血玉，逼迫萧炎先看线索再做选择。").model_copy(update={"characters": ["萧炎", "薰儿"]}),
-            _scene(3, "【场3】夜 / 旧宅回廊", "两人沿回廊逼近尽头，未知埋伏正式露出威胁。").model_copy(update={"characters": ["萧炎", "薰儿"]}),
+            _scene(1, "【场1】夜 / 旧宅门口", "甲一夜探旧宅，在门口试探暗中的回应。").model_copy(update={"characters": ["甲一"]}),
+            _scene(2, "【场2】夜 / 旧宅前厅", "二儿现身递出血玉，逼迫甲一先看线索再做选择。").model_copy(update={"characters": ["甲一", "二儿"]}),
+            _scene(3, "【场3】夜 / 旧宅回廊", "两人沿回廊逼近尽头，未知埋伏正式露出威胁。").model_copy(update={"characters": ["甲一", "二儿"]}),
         ],
         full_script_text=full_script_text,
         emotional_curve="从试探压抑一路拉升到共同逼近危险的紧绷感。",
         ending_hook="回廊尽头那扇门自己打开，门后的人却始终没有露面。",
         source_basis="保留夜探旧宅、递出血玉、回廊逼近与暗门自开的关键推进。",
-        character_state_changes=["萧炎从试探转为警觉进逼", "薰儿从隐身观察转为主动示警"],
+        character_state_changes=["甲一从试探转为警觉进逼", "二儿从隐身观察转为主动示警"],
         key_lines=[
             "门既然开了，就别躲着不见我。",
             "先看这个，再决定该不该进去。",
             "里面的人，已经知道我们来了。",
         ],
         key_plot_points=[
-            "萧炎夜探旧宅在门口试探暗中的回应",
-            "薰儿现身把染血的玉牌递到萧炎眼前逼他先看线索",
+            "甲一夜探旧宅在门口试探暗中的回应",
+            "二儿现身把染血的玉牌递到甲一眼前逼他先看线索",
             "回廊尽头那扇门自己慢慢打开",
             "两人沿回廊逼近尽头面对未知埋伏",
         ],
         plot_spine=PlotSpine(
-            episode_premise="萧炎要安全查清旧宅血玉背后的真相",
+            episode_premise="甲一要安全查清旧宅血玉背后的真相",
             spine_beats=[
-                PlotSpineBeat(beat_id="S01", who="萧炎", does="夜探旧宅门口试探", turn="确认门后有人", must_keep=True),
-                PlotSpineBeat(beat_id="S02", who="薰儿", does="现身递出血玉", turn="萧炎被迫先看线索", must_keep=True),
+                PlotSpineBeat(beat_id="S01", who="甲一", does="夜探旧宅门口试探", turn="确认门后有人", must_keep=True),
+                PlotSpineBeat(beat_id="S02", who="二儿", does="现身递出血玉", turn="甲一被迫先看线索", must_keep=True),
                 PlotSpineBeat(beat_id="S03", who="两人", does="沿回廊逼近尽头", turn="危险感升级", must_keep=True),
                 PlotSpineBeat(beat_id="S04", who="暗门", does="自己慢慢打开", turn="埋伏被提前唤醒", must_keep=True),
-                PlotSpineBeat(beat_id="S05", who="萧炎", does="停在门前警戒", turn="本章收束于未知门后", must_keep=True),
+                PlotSpineBeat(beat_id="S05", who="甲一", does="停在门前警戒", turn="本章收束于未知门后", must_keep=True),
             ],
             must_keep_ending="暗门自开，危险逼近，本章当场收束",
             drop_list=["回廊风声的散文描写", "无关路人对话"],
         ),
-        dramatic_question="萧炎能否在看清血玉线索后安全闯过这座旧宅？",
-        protagonist_goal="进入旧宅查清薰儿示警背后的真相",
-        obstacle="暗处埋伏未明、血玉线索可疑，萧炎又急于求证",
-        stakes="若贸然深入或信错薰儿，两人会落入门后埋伏",
+        dramatic_question="甲一能否在看清血玉线索后安全闯过这座旧宅？",
+        protagonist_goal="进入旧宅查清二儿示警背后的真相",
+        obstacle="暗处埋伏未明、血玉线索可疑，甲一又急于求证",
+        stakes="若贸然深入或信错二儿，两人会落入门后埋伏",
         opening="夜探旧宅",
-        development="薰儿现身递出血玉",
+        development="二儿现身递出血玉",
         conflict="两人必须决定是否继续深入",
         climax="尽头暗门无声打开，危险被提前唤醒",
     )

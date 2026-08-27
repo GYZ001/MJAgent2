@@ -21,12 +21,12 @@ describe('场景缺口扫描弹窗交接', () => {
     const events: string[] = []
 
     await handoffGapSelectionToPayment(
-      ['萧家广场'],
+      ['甲家广场'],
       () => { events.push('close-gap') },
       async scenes => { events.push(`open-payment:${scenes.join(',')}`) },
     )
 
-    expect(events).toEqual(['close-gap', 'open-payment:萧家广场'])
+    expect(events).toEqual(['close-gap', 'open-payment:甲家广场'])
   })
 })
 
@@ -102,7 +102,7 @@ function memoryStorage() {
 }
 
 const previewScenes: Scene[] = [{
-  name: '萧家测验广场',
+  name: '甲家测验广场',
   scene_canonical: '室外开阔青石广场，中央立有测验魔石碑，四周为家族看台，日光明亮且空间规整。',
 }]
 

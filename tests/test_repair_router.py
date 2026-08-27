@@ -184,7 +184,7 @@ def test_persisted_fingerprint_count_escalates_without_current_level() -> None:
 
 
 def test_frontier_from_message():
-    issues = [_issue("KEY_LINE_MISSING", "分镜丢失了剧本标记的 1 条主线台词：薰儿相信", 5)]
+    issues = [_issue("KEY_LINE_MISSING", "分镜丢失了剧本标记的 1 条主线台词：二儿相信", 5)]
     frontier = compute_invalidation_frontier(
         issues, level="L2", validated_prefix_end=10, next_shot_no=11,
     )

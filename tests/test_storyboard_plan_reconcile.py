@@ -15,11 +15,11 @@ def _shot(no: int) -> Shot:
         duration_s=5,
         shot_size="中景",
         camera_move="固定",
-        scene_setting="日，萧家广场",
-        characters=["萧炎"],
-        action_desc=f"萧炎在测验碑前推进第 {no} 段剧情，掌心收力，眼神转冷。",
-        first_frame_desc="萧炎站在测验碑前，手掌贴着碑面，神情平静。",
-        last_frame_desc="同一机位，萧炎手掌攥成拳。",
+        scene_setting="日，甲家广场",
+        characters=["甲一"],
+        action_desc=f"甲一在测验碑前推进第 {no} 段剧情，掌心收力，眼神转冷。",
+        first_frame_desc="甲一站在测验碑前，手掌贴着碑面，神情平静。",
+        last_frame_desc="同一机位，甲一手掌攥成拳。",
         source_excerpt="少年面无表情，唇角有着一抹自嘲，缓缓攥紧了手掌。",
     )
 
@@ -27,7 +27,7 @@ def _shot(no: int) -> Shot:
 def _outline(n: int) -> StoryboardOutline:
     return StoryboardOutline(
         episode_no=2,
-        shots=[StoryboardOutlineShot(shot_no=i, scene_setting="日，萧家广场",
+        shots=[StoryboardOutlineShot(shot_no=i, scene_setting="日，甲家广场",
                                      beat=f"节拍{i}") for i in range(1, n + 1)],
     )
 

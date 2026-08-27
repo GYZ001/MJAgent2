@@ -41,7 +41,7 @@ def _db(tmp_path, monkeypatch):
             "p1",
             1,
             "第一章",
-            "测验员：斗之力，三段！\n萧炎：只有三段？\n测验员：结果无误。",
+            "测验员：测验力，三段！\n甲一：只有三段？\n测验员：结果无误。",
             40,
         ),
     )
@@ -55,7 +55,7 @@ def _db(tmp_path, monkeypatch):
                     'art-published','art-working','art-published','scripted',?)""",
         (
             json.dumps({"episode_no": 1, "title": "第一集"}, ensure_ascii=False),
-            json.dumps(["斗之力，三段！", "只有三段？"], ensure_ascii=False),
+            json.dumps(["测验力，三段！", "只有三段？"], ensure_ascii=False),
             db.now(),
         ),
     )

@@ -83,38 +83,38 @@ def _script(story_function: str = "升级") -> EpisodeScreenplay:
     return EpisodeScreenplay(
         episode_no=1,
         title="陨落的天才",
-        logline="萧炎在家族测验中面对公开羞辱",
-        dramatic_question="萧炎能否守住最后的尊严？",
-        protagonist_goal="萧炎要面对测验结果并离开广场",
+        logline="甲一在家族测验中面对公开羞辱",
+        dramatic_question="甲一能否守住最后的尊严？",
+        protagonist_goal="甲一要面对测验结果并离开广场",
         obstacle="测验结果与围观者嘲讽构成双重压力",
-        stakes="失败将令萧炎失去家族中的最后尊严",
-        key_lines=["测验员：斗之力，三段！"],
+        stakes="失败将令甲一失去家族中的最后尊严",
+        key_lines=["测验员：测验力，三段！"],
         dialogue_chains=[
             KeyDialogueChain(
                 chain_id="DC1",
-                topic="公开测验结果并改变萧炎处境",
+                topic="公开测验结果并改变甲一处境",
                 turns=[
                     KeyDialogueTurn(
                         speaker="测验员",
-                        line="斗之力，三段！",
+                        line="测验力，三段！",
                         function="announcement",
-                        source_text="斗之力，三段！",
+                        source_text="测验力，三段！",
                     ),
                 ],
             ),
         ],
-        key_plot_points=["测验结果公开，萧炎遭到嘲讽"],
+        key_plot_points=["测验结果公开，甲一遭到嘲讽"],
         scene_outline=[ScriptScene(
             scene_no=1,
-            scene_heading="日 / 萧家测验广场",
+            scene_heading="日 / 甲家测验广场",
             story_function=story_function,
-            characters=["萧炎"],
-            summary="测验员公开萧炎的三段结果，围观者随即发出嘲讽。",
-            conflict="公开羞辱冲击萧炎的尊严",
-            turn="萧炎退回队尾",
+            characters=["甲一"],
+            summary="测验员公开甲一的三段结果，围观者随即发出嘲讽。",
+            conflict="公开羞辱冲击甲一的尊严",
+            turn="甲一退回队尾",
             source_basis="保留原文测验结果公布与围观者嘲讽",
         )],
-        full_script_text="【场1】日 / 萧家测验广场\n测验员：斗之力，三段！",
+        full_script_text="【场1】日 / 甲家测验广场\n测验员：测验力，三段！",
         emotional_curve="压抑后保持克制",
         ending_hook="无集级钩子",
         source_basis="原文第一章测验广场段落",
@@ -191,7 +191,7 @@ def _create_working_artifact(
             NarrativeProposition(
                 proposition_id="P001",
                 semantic_identity_key="public-test-result",
-                canonical_statement="测验员公开萧炎的三段结果。",
+                canonical_statement="测验员公开甲一的三段结果。",
                 narrative_domain="source_canon",
                 entity_ids=["identity-examiner", "identity-xiao-yan"],
                 direct_source_evidence_ids=["SE001"],
@@ -203,7 +203,7 @@ def _create_working_artifact(
                 proposition_ids=["P001"],
                 action_ids=["ACT001"],
                 onscreen_entity_ids=["identity-examiner", "identity-xiao-yan"],
-                effects_add=["萧炎的三段结果被公开"],
+                effects_add=["甲一的三段结果被公开"],
                 narrative_layer="story",
                 event_priority="causal",
                 render_policy="standalone",
@@ -225,17 +225,17 @@ def _create_working_artifact(
                     identity_keys=["identity-examiner", "identity-xiao-yan"],
                     source_segment_ids=["SRC0001"],
                 ),
-                dialogue_text="斗之力，三段！",
+                dialogue_text="测验力，三段！",
                 participant_deliveries=[],
-                semantic_intent="公开测验结果并改变萧炎的处境。",
-                effects_add=["萧炎的三段结果被公开"],
-                completion_condition="围观者听见结果且萧炎退回队尾。",
+                semantic_intent="公开测验结果并改变甲一的处境。",
+                effects_add=["甲一的三段结果被公开"],
+                completion_condition="围观者听见结果且甲一退回队尾。",
             ),
         ],
         identity_contracts=[
             NarrativeIdentityContract(
                 identity_id="identity-xiao-yan",
-                display_name="萧炎",
+                display_name="甲一",
                 kind="persistent dramatic person",
                 visual_policy="canonical",
                 visual_canonical="黑发少年，深色练功服，神情克制",
@@ -243,7 +243,7 @@ def _create_working_artifact(
                 evidence=IdentityContractEvidence(
                     source_evidence_ids=["SE001"],
                     proposition_ids=["P001"],
-                    rationale="萧炎是本场持续可见并承受结果的主体。",
+                    rationale="甲一是本场持续可见并承受结果的主体。",
                 ),
             ),
             NarrativeIdentityContract(
@@ -423,7 +423,7 @@ def _create_working_artifact(
 def test_scene_validator_message_is_structured_as_scene_field_issue():
     message = (
         "[SCENE_STORY_FUNCTION_TOO_SHORT] "
-        "scene_outline 第1场「日 / 萧家测验广场」.story_function "
+        "scene_outline 第1场「日 / 甲家测验广场」.story_function "
         "过短；请说明本场戏剧功能"
     )
     issue = issues_from_validator_messages(
@@ -969,7 +969,7 @@ def test_legacy_scene_message_is_not_inferred_as_a_shot():
         severity=IssueSeverity.BLOCKER,
         subject="screenplay",
         message=(
-            "scene_outline 第1场「日 / 萧家测验广场」.story_function "
+            "scene_outline 第1场「日 / 甲家测验广场」.story_function "
             "过短；请说明本场戏剧功能"
         ),
         repairable=True,
@@ -996,7 +996,7 @@ async def test_story_function_patch_targets_scene_when_graph_reuses_scene_id(
     })
     message = (
         "[SCENE_STORY_FUNCTION_TOO_SHORT] "
-        "scene_outline 第1场「日 / 萧家测验广场」.story_function "
+        "scene_outline 第1场「日 / 甲家测验广场」.story_function "
         "过短；请说明本场戏剧功能"
     )
     issue = issues_from_validator_messages(
@@ -1004,7 +1004,7 @@ async def test_story_function_patch_targets_scene_when_graph_reuses_scene_id(
         subject="screenplay",
         stage="screenplay",
     )[0]
-    replacement = "建立公开测验冲突并推动萧炎退场"
+    replacement = "建立公开测验冲突并推动甲一退场"
     candidate = {
         "candidate_id": "SCENE-FIELD",
         "operations": [{
@@ -1141,7 +1141,7 @@ async def test_old_exhausted_checkpoint_resumes_without_second_baseline(monkeypa
         return [PatchOperation(
             op="replace_field",
             path="story_function",
-            value="建立公开测验冲突并推动萧炎退场",
+            value="建立公开测验冲突并推动甲一退场",
             target={"kind": "screenplay_scene", "id": "SC01"},
         )]
 
@@ -1202,7 +1202,7 @@ async def test_business_qa_issue_blocks_when_no_repair_strategy_exists(monkeypat
         qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         resume=False,
     )
-    script = _script(story_function="建立公开测验冲突并推动萧炎退场")
+    script = _script(story_function="建立公开测验冲突并推动甲一退场")
     artifact = _create_working_artifact(
         evidence_repository,
         screenplay_repair,

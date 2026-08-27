@@ -14,7 +14,7 @@ from app.validators import (split_outline_over_action_capacity,
                             validate_storyboard_outline)
 
 KEY_LINE = "我一定要查清斗气消失的真相。"
-KEY_POINT = "萧炎测出斗之力三段被族人嘲讽"
+KEY_POINT = "甲一测出测验力三段被族人嘲讽"
 
 
 def _bible_with(*names: str) -> Bible:
@@ -39,7 +39,7 @@ def _screenplay() -> EpisodeScreenplay:
     )
 
 
-def _outline(beats: list[str], *, scene: str = "日，萧家测验广场",
+def _outline(beats: list[str], *, scene: str = "日，甲家测验广场",
             covers: dict[int, str] | None = None) -> StoryboardOutline:
     covers = covers or {}
     return StoryboardOutline(
@@ -53,11 +53,11 @@ def _outline(beats: list[str], *, scene: str = "日，萧家测验广场",
 
 def _valid_beats() -> list[str]:
     return [
-        "萧炎站上测验台，魔石碑亮起准备测验",
-        "魔石碑显出斗之力三段，全场哗然",
+        "甲一站上测验台，魔石碑亮起准备测验",
+        "魔石碑显出测验力三段，全场哗然",
         "测验员宣布等级低级，族人哄笑嘲讽",
-        "萧炎强忍屈辱，落寞转身回到队伍末尾",
-        "萧炎暗下决心立誓查清斗气消失的真相",
+        "甲一强忍屈辱，落寞转身回到队伍末尾",
+        "甲一暗下决心立誓查清斗气消失的真相",
     ]
 
 
@@ -72,25 +72,25 @@ def test_legacy_outline_prose_is_not_split_by_action_words() -> None:
         shots=[
             StoryboardOutlineShot(
                 shot_no=1,
-                scene_setting="日，萧家广场",
-                beat="萧薰儿转身穿过人群走向萧炎，在他面前停下叫他萧炎哥哥",
-                covers="萧薰儿走到萧炎面前停下，叫出萧炎哥哥",
+                scene_setting="日，甲家广场",
+                beat="甲二儿转身穿过人群走向甲一，在他面前停下叫他甲一哥哥",
+                covers="甲二儿走到甲一面前停下，叫出甲一哥哥",
                 story_event_id="E03",
                 spine_beat_ids=["S05"],
                 key_line_ids=["KL06"],
                 information_ids=["I6"],
-                state_in="萧薰儿受称赞后站在石碑前",
-                primary_action="萧薰儿转身穿过人群走向萧炎并停下",
-                state_out="萧薰儿站在萧炎面前",
+                state_in="甲二儿受称赞后站在石碑前",
+                primary_action="甲二儿转身穿过人群走向甲一并停下",
+                state_out="甲二儿站在甲一面前",
                 continuity_mode="same_scene_cut",
                 duration_s=5,
-                characters_visible=["萧薰儿"],
-                audio_cast=["萧薰儿"],
+                characters_visible=["甲二儿"],
+                audio_cast=["甲二儿"],
             ),
             StoryboardOutlineShot(
                 shot_no=2,
-                scene_setting="日，萧家广场",
-                beat="萧炎抬头回应",
+                scene_setting="日，甲家广场",
+                beat="甲一抬头回应",
                 duration_s=5,
             ),
         ],
@@ -102,7 +102,7 @@ def test_legacy_outline_prose_is_not_split_by_action_words() -> None:
     assert len(outline.shots) == 2
     assert outline.shots[0].key_line_ids == ["KL06"]
     assert outline.shots[0].information_ids == ["I6"]
-    assert outline.shots[0].audio_cast == ["萧薰儿"]
+    assert outline.shots[0].audio_cast == ["甲二儿"]
     assert split_outline_over_action_capacity(outline, max_shots=16) == []
 
 
@@ -111,14 +111,14 @@ def test_action_split_can_be_forced_when_detailed_shot_expands_outline() -> None
         episode_no=1,
         shots=[StoryboardOutlineShot(
             shot_no=1,
-            scene_setting="日，萧家广场",
-            beat="萧薰儿走到魔石碑前触碑，石碑亮起耀眼光芒",
-            covers="萧薰儿走到魔石碑前，手掌触碑面，石碑亮起耀眼光芒",
-            primary_action="萧薰儿走到碑前触碑",
-            state_in="萧薰儿尚在人群中",
+            scene_setting="日，甲家广场",
+            beat="甲二儿走到魔石碑前触碑，石碑亮起耀眼光芒",
+            covers="甲二儿走到魔石碑前，手掌触碑面，石碑亮起耀眼光芒",
+            primary_action="甲二儿走到碑前触碑",
+            state_in="甲二儿尚在人群中",
             state_out="石碑亮起耀眼光芒",
             duration_s=5,
-            characters_visible=["萧薰儿"],
+            characters_visible=["甲二儿"],
         )],
     )
 
@@ -192,7 +192,7 @@ def test_outline_key_line_ids_override_paraphrased_covers_for_missing_check() ->
     screenplay = EpisodeScreenplay(
         episode_no=1, title="陨落的天才", full_script_text="略",
         key_lines=[key_line], key_plot_points=[KEY_POINT])
-    outline = _outline(_valid_beats(), covers={5: "萧炎神情冷冽地撂下一句话，转身离开测验场"})
+    outline = _outline(_valid_beats(), covers={5: "甲一神情冷冽地撂下一句话，转身离开测验场"})
     # 第 5 镜 covers 只写了动作转述，从未出现 key_line 的任何字面片段；
     # 是否"安排"完全靠 key_line_ids 结构化声明来判定。
     outline.shots[4].key_line_ids = ["KL01"]
@@ -226,7 +226,7 @@ def test_outline_allows_large_storyboards_when_every_shot_advances() -> None:
 
 
 def test_outline_allows_long_atom_for_deterministic_pre_split() -> None:
-    covers = KEY_LINE + "萧炎握紧拳头决心查清斗气消失真相" * 3
+    covers = KEY_LINE + "甲一握紧拳头决心查清斗气消失真相" * 3
     outline = _outline(_valid_beats(), covers={5: covers})
 
     assert validate_storyboard_outline(outline, _screenplay(), 50) == []

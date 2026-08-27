@@ -96,11 +96,11 @@ def test_storyboard_allows_characters_without_bible() -> None:
         shot_size="中景",
         camera_move="固定",
         scene_setting="夜，旧宅回廊",
-        characters=["萧炎"],
-        action_desc="萧炎贴着回廊立柱侧身前探，萧炎先压住呼吸再抬手按住门框，目光紧盯门内暗处，脚下同时缓慢逼近准备先发制人。",
-        first_frame_desc="萧炎贴着回廊立柱侧身站定，右手刚抬到门框边，目光向门内探去。",
-        last_frame_desc="同一机位下萧炎已经半步逼近门框，右手压住门沿，肩背绷紧，视线更深地刺向暗处。",
-        source_excerpt="萧炎贴着回廊的柱影慢慢逼近门口，手掌按上门框，凝神望向里面。",
+        characters=["甲一"],
+        action_desc="甲一贴着回廊立柱侧身前探，甲一先压住呼吸再抬手按住门框，目光紧盯门内暗处，脚下同时缓慢逼近准备先发制人。",
+        first_frame_desc="甲一贴着回廊立柱侧身站定，右手刚抬到门框边，目光向门内探去。",
+        last_frame_desc="同一机位下甲一已经半步逼近门框，右手压住门沿，肩背绷紧，视线更深地刺向暗处。",
+        source_excerpt="甲一贴着回廊的柱影慢慢逼近门口，手掌按上门框，凝神望向里面。",
         narration="门内迟迟没有回应，空气反而更沉了。",
         dialogues=[],
     )
@@ -113,13 +113,13 @@ def test_storyboard_allows_characters_without_bible() -> None:
 
 def test_generated_source_excerpt_is_realigned_to_contiguous_original() -> None:
     source = (
-        "“斗之力，三段！”\n"
+        "“测验力，三段！”\n"
         "少年面无表情，唇角有着一抹自嘲，紧握的手掌微微发白。\n"
-        "“萧炎，斗之力，三段！级别：低级！”"
+        "“甲一，测验力，三段！级别：低级！”"
     )
     stitched = (
         "少年面无表情，唇角有着一抹自嘲……"
-        '"萧炎，斗之力，三段！级别：低级！"'
+        '"甲一，测验力，三段！级别：低级！"'
     )
 
     aligned = align_source_excerpt(stitched, source)
@@ -133,8 +133,8 @@ def test_generated_source_excerpt_is_realigned_to_contiguous_original() -> None:
 
 def test_generated_source_excerpt_rejects_weak_name_only_overlap() -> None:
     aligned = align_source_excerpt(
-        "萧炎站在完全不存在的星舰上启动跃迁引擎。",
-        "萧炎站在测验石碑前，沉默地看着碑面。",
+        "甲一站在完全不存在的星舰上启动跃迁引擎。",
+        "甲一站在测验石碑前，沉默地看着碑面。",
     )
 
     assert aligned is None

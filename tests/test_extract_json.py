@@ -31,8 +31,8 @@ def test_extract_json_does_not_accept_nested_object_from_broken_root() -> None:
     text = '''{
   "episode_no": 1,
   "shot": {
-    "source_excerpt": "少女轻声唤他"萧炎哥哥。"随后弯腰",
-    "dialogues": [{"speaker": "萧薰儿", "line": "萧炎哥哥。"}]
+    "source_excerpt": "少女轻声唤他"甲一哥哥。"随后弯腰",
+    "dialogues": [{"speaker": "甲二儿", "line": "甲一哥哥。"}]
   }
 }'''
 

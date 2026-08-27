@@ -9,21 +9,21 @@ from tests.test_validators import _bible, _compact_shot
 
 
 def test_content_char_count_skips_punctuation() -> None:
-    assert content_char_count("下一个，萧媚！") == 5
-    assert content_char_count("萧媚，斗之气，七段！级别：高级！") == 11
-    assert content_char_count("下一个，萧媚！") + content_char_count("萧媚，斗之气，七段！级别：高级！") == 16
+    assert content_char_count("下一个，甲三！") == 5
+    assert content_char_count("甲三，测验力，七段！级别：高级！") == 11
+    assert content_char_count("下一个，甲三！") + content_char_count("甲三，测验力，七段！级别：高级！") == 16
 
 
 def test_shot4_style_dialogue_fits_five_seconds() -> None:
     shot = _compact_shot(4)
     shot.duration_s = 5
-    shot.characters = ["测验员", "萧炎"]
+    shot.characters = ["测验员", "甲一"]
     shot.dialogues = [
-        Dialogue(speaker="测验员", line="下一个，萧媚！", emotion="平静"),
-        Dialogue(speaker="测验员", line="萧媚，斗之气，七段！级别：高级！", emotion="平静"),
+        Dialogue(speaker="测验员", line="下一个，甲三！", emotion="平静"),
+        Dialogue(speaker="测验员", line="甲三，测验力，七段！级别：高级！", emotion="平静"),
     ]
     shot.action_desc = (
-        "测验员当众点名萧媚上前，萧炎立在队伍末尾听着宣告，碑面亮起七段光芒"
+        "测验员当众点名甲三上前，甲一立在队伍末尾听着宣告，碑面亮起七段光芒"
     )
     shot.narration = ""
     assert spoken_chars_from_shot(shot) == 16
@@ -36,7 +36,7 @@ def test_shot4_style_dialogue_fits_five_seconds() -> None:
 
 def test_narration_excluded_from_spoken_count_and_banned() -> None:
     shot = _compact_shot(1)
-    shot.dialogues = [Dialogue(speaker="萧炎", line="三段。", emotion="平静")]
+    shot.dialogues = [Dialogue(speaker="甲一", line="三段。", emotion="平静")]
     shot.narration = "同族少年，天壤之别"
     assert spoken_chars_from_shot(shot) == content_char_count("三段")
     errors = validate_storyboard(Storyboard(episode_no=1, shots=[shot]), _bible(), target_duration_s=50)
@@ -45,10 +45,10 @@ def test_narration_excluded_from_spoken_count_and_banned() -> None:
 
 def test_timeline_narration_not_counted_and_stripped() -> None:
     shot = _compact_shot(1)
-    shot.dialogues = [Dialogue(speaker="萧炎", line="下一个，萧媚！", emotion="平静")]
+    shot.dialogues = [Dialogue(speaker="甲一", line="下一个，甲三！", emotion="平静")]
     shot.audio_timeline = [
         AudioTimelineItem(start_s=0.3, end_s=1.5, type="spoken_dialogue",
-                          speaker_id="萧炎", text="下一个，萧媚！", lip_sync=True),
+                          speaker_id="甲一", text="下一个，甲三！", lip_sync=True),
         AudioTimelineItem(start_s=1.5, end_s=3.0, type="narration",
                           speaker_id="旁白", text="同族少年，天壤之别", lip_sync=False),
     ]
@@ -63,7 +63,7 @@ def test_speech_capacity_error_mentions_dialogue_not_narration() -> None:
     shot.duration_s = 5
     shot.dialogues = [
         Dialogue(
-            speaker="萧炎",
+            speaker="甲一",
             line="这扇门背后藏着我们寻找多年的真相现在必须立刻进去确认到底发生了什么",
             emotion="坚定",
         )

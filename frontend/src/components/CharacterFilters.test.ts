@@ -17,7 +17,7 @@ describe('人物谱筛选', () => {
 
   it('未出图筛选不会误命中已有定妆角色', () => {
     expect(matchCharacterFilters(
-      { name: '萧炎', role: '主角' },
+      { name: '甲一', role: '主角' },
       '',
       { ...EMPTY_CHARACTER_FILTERS, portrait: 'no' },
       { availability: 'passed', hasPortrait: true },

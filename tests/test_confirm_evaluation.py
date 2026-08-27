@@ -16,7 +16,7 @@ from app.validators import validate_storyboard_preserves_key_content
 def _minimal_bible() -> Bible:
     return Bible(
         characters=[
-            Character(name="萧炎", role="主角", appearance_canonical="黑发少年", personality="倔强"),
+            Character(name="甲一", role="主角", appearance_canonical="黑发少年", personality="倔强"),
         ],
         world=World(era="玄幻", genre="玄幻", visual_style_canonical="国风厚涂"),
     )
@@ -29,12 +29,12 @@ def _shot(no: int = 1, **kwargs) -> Shot:
         shot_size="中景",
         camera_move="固定",
         scene_setting="日，广场",
-        characters=["萧炎"],
-        action_desc="萧炎站在测验石碑前测验斗气，碑面只亮起三段斗气微光，他被当众羞辱攥拳。",
-        first_frame_desc="萧炎手贴石碑，神情紧绷，准备开始测验。",
-        last_frame_desc="同一机位，石碑仅亮三段，萧炎攥拳垂眸。",
+        characters=["甲一"],
+        action_desc="甲一站在测验石碑前测验斗气，碑面只亮起三段斗气微光，他被当众羞辱攥拳。",
+        first_frame_desc="甲一手贴石碑，神情紧绷，准备开始测验。",
+        last_frame_desc="同一机位，石碑仅亮三段，甲一攥拳垂眸。",
         source_excerpt="测验石碑只亮起三段斗气，全场哗然议论纷纷。",
-        dialogues=[Dialogue(speaker="萧炎", line="三年斗气十段？", emotion="愤怒")],
+        dialogues=[Dialogue(speaker="甲一", line="三年斗气十段？", emotion="愤怒")],
         is_final=True,
     )
     base.update(kwargs)
@@ -143,7 +143,7 @@ def test_evaluate_is_readonly_and_returns_structured_result():
     screenplay = EpisodeScreenplay(
         episode_no=1,
         key_lines=["三年斗气十段？"],
-        key_plot_points=["萧炎测验只剩三段斗气被当众羞辱"],
+        key_plot_points=["甲一测验只剩三段斗气被当众羞辱"],
     )
     result = evaluate_storyboard_for_confirmation(
         ep, board, screenplay, _minimal_bible(), has_real_bible=False,
@@ -179,8 +179,8 @@ def test_dialogue_composition_is_score_warning_not_confirmation_blocker() -> Non
     ep = {"id": "ep1", "target_duration_s": 50}
     shot = _shot(
         shot_size="中景",
-        characters=["萧炎", "functional:observer"],
-        characters_visible=["萧炎", "functional:observer"],
+        characters=["甲一", "functional:observer"],
+        characters_visible=["甲一", "functional:observer"],
     )
 
     result = evaluate_storyboard_for_confirmation(
@@ -198,24 +198,24 @@ def test_dialogue_composition_is_score_warning_not_confirmation_blocker() -> Non
 def test_episode_scene_alignment_is_confirmation_blocker() -> None:
     bible = _minimal_bible()
     bible.scenes.extend([
-        Scene(name="萧家广场", scene_canonical="石碑与青石地面固定空间锚点"),
-        Scene(name="萧家后山", scene_canonical="山崖与树林固定空间锚点"),
+        Scene(name="甲家广场", scene_canonical="石碑与青石地面固定空间锚点"),
+        Scene(name="甲家后山", scene_canonical="山崖与树林固定空间锚点"),
     ])
     screenplay = EpisodeScreenplay(
         episode_no=1,
         scene_outline=[
             ScriptScene(
                 scene_no=1,
-                scene_heading="白天 / 萧家广场",
-                story_function="萧炎完成斗气测验",
-                summary="萧炎在广场石碑前接受测验。",
+                scene_heading="白天 / 甲家广场",
+                story_function="甲一完成斗气测验",
+                summary="甲一在广场石碑前接受测验。",
             ),
         ],
     )
     shot = _shot(
         scene_time="白天",
-        scene_name="萧家后山",
-        scene_setting="白天，萧家后山",
+        scene_name="甲家后山",
+        scene_setting="白天，甲家后山",
     )
 
     result = evaluate_storyboard_for_confirmation(

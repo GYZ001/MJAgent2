@@ -508,7 +508,7 @@ def test_unresolved_character_identity_is_reported_by_runtime_gate() -> None:
         script,
         bible=Bible(
             characters=[Character(
-                name="萧炎",
+                name="甲一",
                 role="主角",
                 appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩",
             )],
@@ -607,7 +607,7 @@ async def test_retry_exhaustion_never_publishes_unresolved_character_identity(mo
             source_text="原文",
             bible=Bible(
                 characters=[Character(
-                    name="萧炎",
+                    name="甲一",
                     role="主角",
                     appearance_canonical="黑发少年，玄色劲装，目光坚定",
                 )],
@@ -1221,16 +1221,16 @@ def test_dialogue_chain_turn_patch_changes_only_opening_source_anchor():
         full_script_text=(
             "【场1】夜 / 场地\n"
             "甲站在场地中央。\n"
-            "测验员：萧炎，斗之力，三段！级别：低级！"
+            "测验员：甲一，测验力，三段！级别：低级！"
         ),
         dialogue_chains=[KeyDialogueChain(
             chain_id="DC1",
             topic="测验结果公开",
             turns=[KeyDialogueTurn(
                 speaker="测验员",
-                line="萧炎，斗之力，三段！级别：低级！",
+                line="甲一，测验力，三段！级别：低级！",
                 function="announcement",
-                source_text="萧炎，斗之力，三段！级别：低级！",
+                source_text="甲一，测验力，三段！级别：低级！",
             )],
         )],
     )
@@ -1239,7 +1239,7 @@ def test_dialogue_chain_turn_patch_changes_only_opening_source_anchor():
     patched, touched = apply_field_patch(
         doc,
         path="source_text",
-        value="斗之力，三段！",
+        value="测验力，三段！",
         target={
             "kind": "dialogue_chain_turn",
             "chain_id": "DC1",
@@ -1248,8 +1248,8 @@ def test_dialogue_chain_turn_patch_changes_only_opening_source_anchor():
     )
     out = document_to_screenplay(patched)
 
-    assert out.dialogue_chains[0].turns[0].source_text == "斗之力，三段！"
-    assert out.dialogue_chains[0].turns[0].line == "萧炎，斗之力，三段！级别：低级！"
+    assert out.dialogue_chains[0].turns[0].source_text == "测验力，三段！"
+    assert out.dialogue_chains[0].turns[0].line == "甲一，测验力，三段！级别：低级！"
     assert out.full_script_text == script.full_script_text
     assert touched == ["DC1-T1", "DC1"]
 

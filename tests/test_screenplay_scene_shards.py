@@ -5530,7 +5530,7 @@ def test_written_quote_keeps_owner_out_of_executable_scene_identity() -> None:
 
 def test_unspoken_quote_owner_becomes_exact_single_state_subject() -> None:
     source_text = (
-        "萧炎微笑着安慰父亲。"
+        "甲一微笑着安慰父亲。"
         "“一年四段，换作以前或许可能，现在却没有机会。”"
         "他心中自嘲地苦笑。"
     )
@@ -5545,7 +5545,7 @@ def test_unspoken_quote_owner_becomes_exact_single_state_subject() -> None:
         "nodes": [{
             "key": "n1",
             "source_segment_ids": ["SRC0001"],
-            "summary": "萧炎表面安慰父亲，心中判断希望渺茫",
+            "summary": "甲一表面安慰父亲，心中判断希望渺茫",
             "narrative_layer": "story",
             "event_priority": "causal",
             "render_policy": "standalone",
@@ -5554,10 +5554,10 @@ def test_unspoken_quote_owner_becomes_exact_single_state_subject() -> None:
             "time_relation": "episode_start",
             "location_key": "cliff",
             "location_label": "山崖",
-            "participants": ["萧炎"],
+            "participants": ["甲一"],
             "participant_evidence": [
                 {
-                    "identity_key": "萧炎",
+                    "identity_key": "甲一",
                     "source_segment_ids": ["SRC0001"],
                     "source_unit_keys": [
                         fact.source_unit_key
@@ -5568,7 +5568,7 @@ def test_unspoken_quote_owner_becomes_exact_single_state_subject() -> None:
                 },
                 *[
                     {
-                        "identity_key": "萧炎",
+                        "identity_key": "甲一",
                         "source_segment_ids": ["SRC0001"],
                         "source_unit_keys": [fact.source_unit_key],
                         "usage": "state_subject",
@@ -5580,16 +5580,16 @@ def test_unspoken_quote_owner_becomes_exact_single_state_subject() -> None:
             "source_unit_deliveries": [{
                 "source_unit_key": quoted_key,
                 "mode": "unspoken_reference",
-                "content_owner_key": "萧炎",
+                "content_owner_key": "甲一",
             }],
-            "action_logic": "萧炎表面安慰父亲，内心作出相反判断",
+            "action_logic": "甲一表面安慰父亲，内心作出相反判断",
         }],
     })
     identity_registry = [{
-        "identity_key": "person_xiaoyan",
-        "authority_id": "bible:萧炎",
-        "canonical_name": "萧炎",
-        "source_labels": ["萧炎"],
+        "identity_key": "person_role_a",
+        "authority_id": "bible:甲一",
+        "canonical_name": "甲一",
+        "source_labels": ["甲一"],
     }]
     plan = build_screenplay_scene_shard_plans(
         blueprint,
@@ -5618,10 +5618,10 @@ def test_unspoken_quote_owner_becomes_exact_single_state_subject() -> None:
 
     assert compiled_slot.delivery_mode == "unspoken_reference"
     assert compiled_slot.speaker_key is None
-    assert compiled_slot.state_subject_keys == ["person_xiaoyan"]
-    assert compiled_slot.state_subject_key == "person_xiaoyan"
-    assert compiled_slot.actor_keys == ["person_xiaoyan"]
-    assert compiled_slot.onscreen_entity_keys == ["person_xiaoyan"]
+    assert compiled_slot.state_subject_keys == ["person_role_a"]
+    assert compiled_slot.state_subject_key == "person_role_a"
+    assert compiled_slot.actor_keys == ["person_role_a"]
+    assert compiled_slot.onscreen_entity_keys == ["person_role_a"]
     assert compiled_slot.participant_deliveries == []
     assert compiled_slot.environment_only is False
 

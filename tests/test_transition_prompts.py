@@ -7,13 +7,13 @@ def _bible() -> Bible:
     return Bible(
         characters=[
             Character(
-                name="萧炎",
+                name="甲一",
                 role="主角",
                 appearance_canonical="十五岁少年，黑发束起，黑色劲装，眉眼倔强",
                 personality="坚韧",
             ),
             Character(
-                name="萧薰儿",
+                name="甲二儿",
                 role="重要配角",
                 appearance_canonical="十五岁少女，长发垂肩，淡青衣裙，眼神清澈",
                 personality="温柔",
@@ -32,8 +32,8 @@ def _shot(shot_no: int, scene: str, chars: list[str], action: str, **kwargs) -> 
         scene_setting=scene,
         characters=chars,
         action_desc=action,
-        source_excerpt="萧炎沉默片刻，萧薰儿怔住，话音仍在耳边回荡。",
-        narration=kwargs.pop("narration", "萧炎的话音仍在耳边回荡。"),
+        source_excerpt="甲一沉默片刻，甲二儿怔住，话音仍在耳边回荡。",
+        narration=kwargs.pop("narration", "甲一的话音仍在耳边回荡。"),
         **kwargs,
     )
 
@@ -46,8 +46,8 @@ def test_normalize_continuity_chooses_structural_scene_transition() -> None:
     board = Storyboard(
         episode_no=1,
         shots=[
-            _shot(1, "首日上午，广场", ["萧炎", "萧薰儿"], "萧炎转身离开，萧薰儿怔住，眼眶泛红。"),
-            _shot(2, "首日傍晚，藏书阁", ["萧薰儿"], "萧薰儿独坐书案前，萧炎的话音仍在耳边回响。", transition="硬切"),
+            _shot(1, "首日上午，广场", ["甲一", "甲二儿"], "甲一转身离开，甲二儿怔住，眼眶泛红。"),
+            _shot(2, "首日傍晚，藏书阁", ["甲二儿"], "甲二儿独坐书案前，甲一的话音仍在耳边回响。", transition="硬切"),
         ],
     )
 
@@ -62,9 +62,9 @@ def test_normalize_continuity_chooses_structural_scene_transition() -> None:
 def test_video_prompt_contains_incoming_and_outgoing_transition() -> None:
     bible = _bible()
     shot = _shot(
-        4, "首日上午，广场", ["萧炎", "萧薰儿"],
-        "萧炎背对石碑停住脚步，萧薰儿怔在原地。",
-        first_frame_desc="萧炎背对石碑停住，萧薰儿怔在原地。",
+        4, "首日上午，广场", ["甲一", "甲二儿"],
+        "甲一背对石碑停住脚步，甲二儿怔在原地。",
+        first_frame_desc="甲一背对石碑停住，甲二儿怔在原地。",
         last_frame_desc="广场光影压暗，两人轮廓逐渐隐入暗部。",
     )
 
@@ -74,7 +74,7 @@ def test_video_prompt_contains_incoming_and_outgoing_transition() -> None:
         incoming_transition="叠化",
         outgoing_transition="淡出淡入",
         next_scene="首日傍晚，藏书阁",
-        next_first_frame_desc="藏书阁暖黄灯光下，萧薰儿独坐书案前。",
+        next_first_frame_desc="藏书阁暖黄灯光下，甲二儿独坐书案前。",
     )
 
     assert "最终编辑会以「叠化」接入本镜" in prompt
@@ -82,16 +82,16 @@ def test_video_prompt_contains_incoming_and_outgoing_transition() -> None:
     assert "不自行生成渐变、闪光或叠化" in prompt
     assert "首日傍晚，藏书阁" in prompt
     # 禁止把下一镜详细首帧剧情注入当前提示词
-    assert "萧薰儿独坐书案前" not in prompt
+    assert "甲二儿独坐书案前" not in prompt
 
 def test_tail_keyframe_prompt_contains_transition_tail_requirement() -> None:
     bible = _bible()
     shot = _shot(
         4,
         "首日上午，广场",
-        ["萧炎", "萧薰儿"],
-        "萧炎背对石碑停住脚步，萧薰儿怔在原地。",
-        last_frame_desc="萧薰儿眼眶发红，广场人声渐弱。",
+        ["甲一", "甲二儿"],
+        "甲一背对石碑停住脚步，甲二儿怔在原地。",
+        last_frame_desc="甲二儿眼眶发红，广场人声渐弱。",
     )
 
     prompt = compile_scene_prompt(

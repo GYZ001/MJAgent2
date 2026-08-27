@@ -25,10 +25,10 @@ def test_longest_run_ratio_keeps_contiguous_match_semantics() -> None:
 def _bible() -> Bible:
     return Bible(
         characters=[
-            Character(name="萧炎", role="主角",
+            Character(name="甲一", role="主角",
                       appearance_canonical="十五岁少年，黑发束起，黑色劲装，眉眼倔强坚毅",
                       personality="坚韧"),
-            Character(name="萧薰儿", role="配角",
+            Character(name="甲二儿", role="配角",
                       appearance_canonical="十五岁少女，长发垂肩，淡青衣裙，眼神清澈温润",
                       personality="温柔"),
         ],
@@ -43,18 +43,18 @@ def test_storyboard_no_false_missing_transition_for_walk_to_adjacent_area() -> N
         episode_no=1,
         shots=[
             Shot(shot_no=1, duration_s=5, shot_size="全景", camera_move="固定",
-                 scene_setting="日，萧家测验广场边缘", characters=["萧炎", "萧薰儿"],
-                 action_desc="萧薰儿走到广场边缘的萧炎面前站定，唤他萧炎哥哥，萧炎扯出一个自嘲表情",
-                 first_frame_desc="日光下萧炎独自立在广场边缘，神情自嘲，萧薰儿正走近",
-                 last_frame_desc="萧薰儿在萧炎面前弯腰示意，萧炎侧脸僵硬，画面渐暗",
-                 source_excerpt="萧薰儿走到萧炎面前，唤他萧炎哥哥。",
+                 scene_setting="日，甲家测验广场边缘", characters=["甲一", "甲二儿"],
+                 action_desc="甲二儿走到广场边缘的甲一面前站定，唤他甲一哥哥，甲一扯出一个自嘲表情",
+                 first_frame_desc="日光下甲一独自立在广场边缘，神情自嘲，甲二儿正走近",
+                 last_frame_desc="甲二儿在甲一面前弯腰示意，甲一侧脸僵硬，画面渐暗",
+                 source_excerpt="甲二儿走到甲一面前，唤他甲一哥哥。",
                  narration="", transition="硬切", continuity_from_prev=False),
             Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="跟随",
-                 scene_setting="日，萧家测验广场外小路", characters=["萧炎", "萧薰儿"],
-                 action_desc="萧炎不愿留在广场受人议论，转身离开测验广场，走到外侧的小路上，萧薰儿快步跟上",
-                 first_frame_desc="广场外小路上，萧炎背对人群迈步，萧薰儿在身后跟来",
-                 last_frame_desc="小路尽头，萧炎停下脚步，萧薰儿立在他身侧",
-                 source_excerpt="萧炎转身离开广场，走上外侧的小路。",
+                 scene_setting="日，甲家测验广场外小路", characters=["甲一", "甲二儿"],
+                 action_desc="甲一不愿留在广场受人议论，转身离开测验广场，走到外侧的小路上，甲二儿快步跟上",
+                 first_frame_desc="广场外小路上，甲一背对人群迈步，甲二儿在身后跟来",
+                 last_frame_desc="小路尽头，甲一停下脚步，甲二儿立在他身侧",
+                 source_excerpt="甲一转身离开广场，走上外侧的小路。",
                  narration="",
                  transition="淡出淡入", continuity_from_prev=False),
         ],
@@ -71,18 +71,18 @@ def test_storyboard_scene_jump_does_not_depend_on_transition_words() -> None:
         episode_no=1,
         shots=[
             Shot(shot_no=1, duration_s=5, shot_size="全景", camera_move="固定",
-                 scene_setting="夜，地下密室", characters=["萧炎"],
-                 action_desc="萧炎盯着密室石壁上的古老纹路，眉头紧锁，指尖缓缓抚过冰冷的刻痕",
-                 first_frame_desc="昏暗密室里萧炎独自站在石壁前，神情凝重",
-                 last_frame_desc="萧炎收回手掌，垂眸沉思，密室一片死寂",
-                 source_excerpt="萧炎在密室中观察石壁纹路。",
+                 scene_setting="夜，地下密室", characters=["甲一"],
+                 action_desc="甲一盯着密室石壁上的古老纹路，眉头紧锁，指尖缓缓抚过冰冷的刻痕",
+                 first_frame_desc="昏暗密室里甲一独自站在石壁前，神情凝重",
+                 last_frame_desc="甲一收回手掌，垂眸沉思，密室一片死寂",
+                 source_excerpt="甲一在密室中观察石壁纹路。",
                  narration="", transition="硬切", continuity_from_prev=False),
             Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="固定",
-                 scene_setting="夜，城外山巅", characters=["萧炎"],
-                 action_desc="萧炎独自伫立在山巅之上，望着翻涌的云海，神情复杂，衣袍无风自动",
-                 first_frame_desc="开阔山巅上萧炎背对镜头眺望远方云海",
-                 last_frame_desc="萧炎侧过身，目光投向天际，云海翻涌",
-                 source_excerpt="萧炎站在山巅望着云海。",
+                 scene_setting="夜，城外山巅", characters=["甲一"],
+                 action_desc="甲一独自伫立在山巅之上，望着翻涌的云海，神情复杂，衣袍无风自动",
+                 first_frame_desc="开阔山巅上甲一背对镜头眺望远方云海",
+                 last_frame_desc="甲一侧过身，目光投向天际，云海翻涌",
+                 source_excerpt="甲一站在山巅望着云海。",
                  narration="", transition="淡出淡入", continuity_from_prev=False),
         ],
     )
@@ -98,21 +98,21 @@ def test_storyboard_allows_explicit_time_jump_with_new_scene_establishing_frame(
         episode_no=1,
         shots=[
             Shot(shot_no=1, duration_s=5, shot_size="近景", camera_move="固定",
-                 scene_setting="白天，萧家斗技堂", characters=["萧炎"],
-                 action_desc="萧炎抱紧卷轴走向斗技堂门口，回头看了一眼身后的高大书架",
-                 first_frame_desc="白天斗技堂内，萧炎抱着卷轴站在书架旁",
-                 last_frame_desc="萧炎走到门边，室内光线渐暗，准备淡出淡入下一场景",
-                 source_excerpt="萧炎抱着卷轴离开了斗技堂。", narration="",
+                 scene_setting="白天，甲家斗技堂", characters=["甲一"],
+                 action_desc="甲一抱紧卷轴走向斗技堂门口，回头看了一眼身后的高大书架",
+                 first_frame_desc="白天斗技堂内，甲一抱着卷轴站在书架旁",
+                 last_frame_desc="甲一走到门边，室内光线渐暗，准备淡出淡入下一场景",
+                 source_excerpt="甲一抱着卷轴离开了斗技堂。", narration="",
                  transition="硬切", continuity_from_prev=False),
             Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="固定",
-                 scene_setting="夜晚，萧炎卧室", characters=["萧炎"],
-                 action_desc="萧炎将怀中的黑色卷轴放在卧室木桌上，抬手按住桌沿站定",
-                 first_frame_desc="夜晚卧室内，萧炎抱着黑色卷轴站在木桌前",
-                 last_frame_desc="同一机位，黑色卷轴已经放在桌上，萧炎在桌边站定",
-                 source_excerpt="夜里萧炎回到房间，将卷轴放在桌上。", narration="",
+                 scene_setting="夜晚，甲一卧室", characters=["甲一"],
+                 action_desc="甲一将怀中的黑色卷轴放在卧室木桌上，抬手按住桌沿站定",
+                 first_frame_desc="夜晚卧室内，甲一抱着黑色卷轴站在木桌前",
+                 last_frame_desc="同一机位，黑色卷轴已经放在桌上，甲一在桌边站定",
+                 source_excerpt="夜里甲一回到房间，将卷轴放在桌上。", narration="",
                  transition="淡出淡入", continuity_from_prev=False,
                  continuity_mode="scene_change",
-                 state_in="夜幕降临后，萧炎回到卧室，怀中仍抱着卷轴。"),
+                 state_in="夜幕降临后，甲一回到卧室，怀中仍抱着卷轴。"),
         ],
     )
 
@@ -128,14 +128,14 @@ def _compact_shot(no: int) -> Shot:
         duration_s=5,
         shot_size=sizes[(no - 1) % len(sizes)],
         camera_move="固定",
-        scene_setting="日，萧家测验广场",
-        characters=["萧炎"],
+        scene_setting="日，甲家测验广场",
+        characters=["甲一"],
         action_desc=(
-            f"萧炎承接上一刻的沉默站在测验广场边缘，萧炎第{no}次抬眼看向人群，"
+            f"甲一承接上一刻的沉默站在测验广场边缘，甲一第{no}次抬眼看向人群，"
             "手掌缓缓收紧又放开，脸上自嘲逐渐压成克制的平静"
         ),
-        first_frame_desc=f"测验广场边缘，萧炎垂眼站定，右手刚刚收向袖口，第{no}次呼吸压低。",
-        last_frame_desc=f"同一机位下，萧炎已经抬眼望向人群，右手握紧，神情比开头更冷。",
+        first_frame_desc=f"测验广场边缘，甲一垂眼站定，右手刚刚收向袖口，第{no}次呼吸压低。",
+        last_frame_desc=f"同一机位下，甲一已经抬眼望向人群，右手握紧，神情比开头更冷。",
         source_excerpt="少年面无表情，安静的回到了队伍的最后一排。",
         narration="",
         dialogues=[],
@@ -147,8 +147,8 @@ def _compact_shot(no: int) -> Shot:
 def test_adjacent_repeated_dialogue_is_rejected_even_when_punctuation_differs() -> None:
     first = _compact_shot(1)
     second = _compact_shot(2)
-    first.dialogues = [Dialogue(speaker="萧炎", line="我绝不会忘记今日受到的羞辱", emotion="坚定")]
-    second.dialogues = [Dialogue(speaker="萧炎", line="不会忘记，今日受到的羞辱！", emotion="低沉")]
+    first.dialogues = [Dialogue(speaker="甲一", line="我绝不会忘记今日受到的羞辱", emotion="坚定")]
+    second.dialogues = [Dialogue(speaker="甲一", line="不会忘记，今日受到的羞辱！", emotion="低沉")]
 
     errors = validate_storyboard(Storyboard(episode_no=1, shots=[first, second]), _bible(), 20)
 
@@ -158,8 +158,8 @@ def test_adjacent_repeated_dialogue_is_rejected_even_when_punctuation_differs() 
 def test_adjacent_new_dialogue_is_not_mistaken_for_a_repeat() -> None:
     first = _compact_shot(1)
     second = _compact_shot(2)
-    first.dialogues = [Dialogue(speaker="萧炎", line="我绝不会忘记今日受到的羞辱", emotion="坚定")]
-    second.dialogues = [Dialogue(speaker="萧炎", line="我要从今天开始重新修炼", emotion="坚定")]
+    first.dialogues = [Dialogue(speaker="甲一", line="我绝不会忘记今日受到的羞辱", emotion="坚定")]
+    second.dialogues = [Dialogue(speaker="甲一", line="我要从今天开始重新修炼", emotion="坚定")]
 
     errors = adjacent_spoken_repeat_errors(Storyboard(episode_no=1, shots=[first, second]))
 
@@ -169,7 +169,7 @@ def test_adjacent_new_dialogue_is_not_mistaken_for_a_repeat() -> None:
 def test_storyboard_accepts_model_selected_duration_and_scales_spoken_budget() -> None:
     shot = _compact_shot(1)
     shot.duration_s = 10
-    shot.dialogues = [Dialogue(speaker="萧炎", line="我一定会查清真相，让所有人知道当年究竟发生了什么", emotion="坚定")]
+    shot.dialogues = [Dialogue(speaker="甲一", line="我一定会查清真相，让所有人知道当年究竟发生了什么", emotion="坚定")]
     board = Storyboard(episode_no=1, shots=[shot])
 
     ten_second_errors = validate_storyboard(board, _bible(), target_duration_s=50)
@@ -246,8 +246,8 @@ def test_storyboard_count_range_is_not_derived_from_target_duration() -> None:
 def _screenplay_with_manifest(**overrides) -> EpisodeScreenplay:
     base = dict(
         episode_no=1,
-        key_lines=["三年斗气十段，废物也配姓萧？", "我萧炎，从今天起，绝不再让人看轻。"],
-        key_plot_points=["萧炎测验只剩三段斗气被当众羞辱", "萧薰儿在众人嘲讽中走到萧炎身边为他解围"],
+        key_lines=["三年斗气十段，废物也配姓萧？", "我甲一，从今天起，绝不再让人看轻。"],
+        key_plot_points=["甲一测验只剩三段斗气被当众羞辱", "甲二儿在众人嘲讽中走到甲一身边为他解围"],
     )
     base.update(overrides)
     return EpisodeScreenplay(**base)
@@ -258,20 +258,20 @@ def _board_preserving_key_content() -> Storyboard:
         episode_no=1,
         shots=[
             Shot(shot_no=1, duration_s=5, shot_size="全景", camera_move="固定",
-                 scene_setting="日，萧家测验广场", characters=["萧炎"],
-                 action_desc="萧炎站在测验石碑前测验斗气，碑面只亮起三段斗气微光，他被当众羞辱，垂手攥拳脸色铁青",
-                 first_frame_desc="测验广场上萧炎手贴石碑，神情紧绷",
-                 last_frame_desc="石碑仅亮三段，萧炎攥拳垂眸，画面定在羞辱一刻",
+                 scene_setting="日，甲家测验广场", characters=["甲一"],
+                 action_desc="甲一站在测验石碑前测验斗气，碑面只亮起三段斗气微光，他被当众羞辱，垂手攥拳脸色铁青",
+                 first_frame_desc="测验广场上甲一手贴石碑，神情紧绷",
+                 last_frame_desc="石碑仅亮三段，甲一攥拳垂眸，画面定在羞辱一刻",
                  source_excerpt="测验石碑只亮起三段斗气，全场哗然。",
-                 dialogues=[Dialogue(speaker="萧炎", line="三年斗气十段，废物也配姓萧？", emotion="愤怒")],
+                 dialogues=[Dialogue(speaker="甲一", line="三年斗气十段，废物也配姓萧？", emotion="愤怒")],
                  transition="硬切", continuity_from_prev=False),
             Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="跟随",
-                 scene_setting="日，萧家测验广场", characters=["萧炎", "萧薰儿"],
-                 action_desc="萧薰儿在众人嘲讽中走到萧炎身边为他解围，伸手扶住他手臂，萧炎抬眼",
-                 first_frame_desc="萧薰儿快步走近被孤立的萧炎",
-                 last_frame_desc="萧薰儿立在萧炎身侧，萧炎眼神重新聚起",
-                 source_excerpt="萧薰儿排开众人，走到萧炎身边。",
-                 dialogues=[Dialogue(speaker="萧炎", line="我萧炎，从今天起，绝不再让人看轻。", emotion="坚定")],
+                 scene_setting="日，甲家测验广场", characters=["甲一", "甲二儿"],
+                 action_desc="甲二儿在众人嘲讽中走到甲一身边为他解围，伸手扶住他手臂，甲一抬眼",
+                 first_frame_desc="甲二儿快步走近被孤立的甲一",
+                 last_frame_desc="甲二儿立在甲一身侧，甲一眼神重新聚起",
+                 source_excerpt="甲二儿排开众人，走到甲一身边。",
+                 dialogues=[Dialogue(speaker="甲一", line="我甲一，从今天起，绝不再让人看轻。", emotion="坚定")],
                  transition="硬切", continuity_from_prev=True),
         ],
     )
@@ -287,8 +287,8 @@ def test_storyboard_preservation_flags_dropped_key_line() -> None:
     """分镜把剧本标记的一句金句整句丢掉——必须点名报"丢失了…关键台词"。"""
     board = _board_preserving_key_content()
     # 抹掉第 2 镜那句决定性台词，换成无关口水话。
-    board.shots[1].dialogues = [Dialogue(speaker="萧炎", line="走吧。", emotion="平静")]
-    board.shots[1].action_desc = "萧薰儿走到萧炎身边站定，两人沉默对视片刻，随后一起转身走开"
+    board.shots[1].dialogues = [Dialogue(speaker="甲一", line="走吧。", emotion="平静")]
+    board.shots[1].action_desc = "甲二儿走到甲一身边站定，两人沉默对视片刻，随后一起转身走开"
 
     errors = validate_storyboard_preserves_key_content(board, _screenplay_with_manifest())
 
@@ -321,17 +321,17 @@ def test_key_line_order_check_ignores_ultra_short_line_spurious_match() -> None:
     修复后应跳过这条超短台词，不参与游标推进也不参与顺序判定，errors 应为空。
     """
     ordered_texts = [
-        "萧炎：先离开这里。",
+        "甲一：先离开这里。",
         "镜头切换：远山云雾缭绕，画面渐暗。",
-        "萧薰儿：最后再谈修炼。",
+        "甲二儿：最后再谈修炼。",
         "镜头切换：远山云雾缭绕，画面渐暗。",
         "镜头切换：远山云雾缭绕，画面渐暗。",
         "画外音：气氛忽然变得不对劲，寂静无声。",
     ]
     key_lines = [
-        "萧炎：先离开这里。",
-        "萧炎：不对。",
-        "萧薰儿：最后再谈修炼。",
+        "甲一：先离开这里。",
+        "甲一：不对。",
+        "甲二儿：最后再谈修炼。",
     ]
 
     errors = key_line_order_errors(key_lines, ordered_texts, subject="分镜大纲")
@@ -344,18 +344,18 @@ def test_storyboard_order_check_uses_full_script_order_for_legacy_key_lines() ->
     screenplay = EpisodeScreenplay(
         episode_no=1,
         full_script_text=(
-            "【场1】白天 / 斗技堂\n萧炎：先离开这里。\n"
-            "【场2】夜晚 / 卧室\n萧薰儿：最后再谈修炼。"
+            "【场1】白天 / 斗技堂\n甲一：先离开这里。\n"
+            "【场2】夜晚 / 卧室\n甲二儿：最后再谈修炼。"
         ),
         key_lines=[
-            "萧薰儿：最后再谈修炼。",
-            "萧炎：先离开这里。",
+            "甲二儿：最后再谈修炼。",
+            "甲一：先离开这里。",
         ],
     )
     first = _compact_shot(1)
-    first.dialogues = [Dialogue(speaker="萧炎", line="先离开这里。", emotion="平静")]
+    first.dialogues = [Dialogue(speaker="甲一", line="先离开这里。", emotion="平静")]
     second = _compact_shot(2)
-    second.dialogues = [Dialogue(speaker="萧薰儿", line="最后再谈修炼。", emotion="平静")]
+    second.dialogues = [Dialogue(speaker="甲二儿", line="最后再谈修炼。", emotion="平静")]
 
     errors = validate_storyboard_preserves_key_content(
         Storyboard(episode_no=1, shots=[first, second]), screenplay,
@@ -369,27 +369,27 @@ def test_storyboard_ignores_legacy_narrator_key_line_without_renumbering_ids() -
         episode_no=1,
         full_script_text=(
             "【场1】白天 / 山林\n旁白：砰、轰。\n"
-            "萧炎：先离开这里。\n萧薰儿：最后再谈修炼。"
+            "甲一：先离开这里。\n甲二儿：最后再谈修炼。"
         ),
         key_lines=[
             "旁白：砰、轰。",
-            "萧炎：先离开这里。",
-            "萧薰儿：最后再谈修炼。",
+            "甲一：先离开这里。",
+            "甲二儿：最后再谈修炼。",
         ],
     )
     first = _compact_shot(1)
-    first.dialogues = [Dialogue(speaker="萧炎", line="先离开这里。", emotion="平静")]
+    first.dialogues = [Dialogue(speaker="甲一", line="先离开这里。", emotion="平静")]
     second = _compact_shot(2)
-    second.dialogues = [Dialogue(speaker="萧薰儿", line="最后再谈修炼。", emotion="平静")]
-    second.dialogues.append(Dialogue(speaker="萧炎", line="砰、轰。", emotion="平静"))
+    second.dialogues = [Dialogue(speaker="甲二儿", line="最后再谈修炼。", emotion="平静")]
+    second.dialogues.append(Dialogue(speaker="甲一", line="砰、轰。", emotion="平静"))
 
     errors = validate_storyboard_preserves_key_content(
         Storyboard(episode_no=1, shots=[first, second]), screenplay,
     )
 
     assert key_line_catalog(screenplay) == {
-        "KL02": "萧炎：先离开这里。",
-        "KL03": "萧薰儿：最后再谈修炼。",
+        "KL02": "甲一：先离开这里。",
+        "KL03": "甲二儿：最后再谈修炼。",
     }
     assert not any("打乱了主线对白顺序" in error for error in errors), errors
     assert not any("丢失了剧本标记" in error for error in errors), errors
@@ -407,15 +407,15 @@ def test_storyboard_shot_covers_outline_requires_current_shot_text() -> None:
     shot = _board_preserving_key_content().shots[0]
     errors = validate_storyboard_shot_covers_outline(
         shot,
-        "中年测验员当众宣读萧炎斗之力三段并定性为低级",
+        "中年测验员当众宣读甲一测验力三段并定性为低级",
         shot.shot_no,
     )
     assert any("未落实本镜大纲 covers" in e for e in errors)
 
-    shot.action_desc += "，中年测验员当众宣读萧炎斗之力三段，并定性为低级。"
+    shot.action_desc += "，中年测验员当众宣读甲一测验力三段，并定性为低级。"
     assert validate_storyboard_shot_covers_outline(
         shot,
-        "中年测验员当众宣读萧炎斗之力三段并定性为低级",
+        "中年测验员当众宣读甲一测验力三段并定性为低级",
         shot.shot_no,
     ) == []
 
@@ -447,20 +447,20 @@ def test_shot_covers_tolerates_synonym_paraphrase() -> None:
     同一件事的同义改写不应判漏戏（避免逐字纠词把已落实的一拍卡死、反复重试到上限）。"""
     shot = _board_preserving_key_content().shots[0]
     shot.dialogues = [
-        Dialogue(speaker="测验员", line="萧炎，斗之力，三段！级别：低级！", emotion="平静")
+        Dialogue(speaker="测验员", line="甲一，测验力，三段！级别：低级！", emotion="平静")
     ]
     shot.action_desc = (
-        "测验员当众宣读萧炎结果，碑面只亮起三段微光，萧炎站在石碑前一动不动"
+        "测验员当众宣读甲一结果，碑面只亮起三段微光，甲一站在石碑前一动不动"
     )
     errors = validate_storyboard_shot_covers_outline(
-        shot, "萧炎被测验员当众宣告为低级", shot.shot_no)
+        shot, "甲一被测验员当众宣告为低级", shot.shot_no)
     assert errors == [], errors
 
 
 def test_narrative_authority_does_not_interpret_covers_vocabulary() -> None:
     """权威路径由稳定 ID 和证据关系校验，不从 covers 词汇推断语义。"""
     shot = _board_preserving_key_content().shots[0]
-    shot.action_desc = "萧媚小跑上前触摸魔石碑，碑面亮起'斗之气：七段！'，人群赞叹声浪骤起"
+    shot.action_desc = "甲三小跑上前触摸魔石碑，碑面亮起'测验力：七段！'，人群赞叹声浪骤起"
     errors = validate_storyboard_shot_covers_outline(
         shot,
         "任意开放词汇均不作为控制协议",
@@ -473,9 +473,9 @@ def test_narrative_authority_does_not_interpret_covers_vocabulary() -> None:
 def test_scene_contiguity_key_ignores_sublocation_suffix() -> None:
     """同一地点的子机位标签归一到同一主键：'广场' 与 '广场·中央石台' 不算两个场景。"""
     from app.validators import _scene_contiguity_key
-    base = _scene_contiguity_key("日，乌坦城萧家测验广场")
-    assert _scene_contiguity_key("日，乌坦城萧家测验广场·中央石台") == base
-    assert _scene_contiguity_key("日，乌坦城萧家测验广场-树荫下") == base
+    base = _scene_contiguity_key("日，地点甲甲家测验广场")
+    assert _scene_contiguity_key("日，地点甲甲家测验广场·中央石台") == base
+    assert _scene_contiguity_key("日，地点甲甲家测验广场-树荫下") == base
 
 
 def test_continuity_same_scene_new_focus_char_with_movement_passes() -> None:
@@ -484,16 +484,16 @@ def test_continuity_same_scene_new_focus_char_with_movement_passes() -> None:
         episode_no=1,
         shots=[
             Shot(shot_no=1, duration_s=5, shot_size="特写", camera_move="固定",
-                 scene_setting="日，萧家测验广场", characters=["萧炎"],
-                 action_desc="萧炎垂眸凝视紧攥的左手，血丝渗出，喉结滚动，未发一言，肩背绷紧",
-                 first_frame_desc="萧炎左手特写，掌心发力", last_frame_desc="同机位血丝渗出，他仍低头",
-                 source_excerpt="萧炎看着自己的手，一言不发。", narration="", dialogues=[],
+                 scene_setting="日，甲家测验广场", characters=["甲一"],
+                 action_desc="甲一垂眸凝视紧攥的左手，血丝渗出，喉结滚动，未发一言，肩背绷紧",
+                 first_frame_desc="甲一左手特写，掌心发力", last_frame_desc="同机位血丝渗出，他仍低头",
+                 source_excerpt="甲一看着自己的手，一言不发。", narration="", dialogues=[],
                  transition="硬切", continuity_from_prev=False, continuity_mode="same_scene_cut"),
             Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="固定",
-                 scene_setting="日，萧家测验广场", characters=["萧媚"],
-                 action_desc="萧媚小跑上前，伸手轻触魔石碑，碑面亮起七段光芒，人群赞叹声浪骤起",
-                 first_frame_desc="萧媚从人群侧面上前", last_frame_desc="萧媚触碑后转身，碑面仍亮",
-                 source_excerpt="萧媚走上前去，伸手触碰魔石碑。", narration="",
+                 scene_setting="日，甲家测验广场", characters=["甲三"],
+                 action_desc="甲三小跑上前，伸手轻触魔石碑，碑面亮起七段光芒，人群赞叹声浪骤起",
+                 first_frame_desc="甲三从人群侧面上前", last_frame_desc="甲三触碑后转身，碑面仍亮",
+                 source_excerpt="甲三走上前去，伸手触碰魔石碑。", narration="",
                  dialogues=[], transition="硬切", continuity_from_prev=False,
                  continuity_mode="reaction_cut"),
         ],
@@ -509,16 +509,16 @@ def test_action_continuation_without_shared_char_or_movement_fails() -> None:
         episode_no=1,
         shots=[
             Shot(shot_no=1, duration_s=5, shot_size="特写", camera_move="固定",
-                 scene_setting="日，萧家测验广场", characters=["萧炎"],
-                 action_desc="萧炎垂眸凝视紧攥的左手，血丝渗出，喉结滚动，肩背绷紧",
-                 first_frame_desc="萧炎左手特写，掌心发力", last_frame_desc="同机位血丝渗出，他仍低头",
-                 source_excerpt="萧炎看着自己的手，一言不发。", narration="", dialogues=[],
+                 scene_setting="日，甲家测验广场", characters=["甲一"],
+                 action_desc="甲一垂眸凝视紧攥的左手，血丝渗出，喉结滚动，肩背绷紧",
+                 first_frame_desc="甲一左手特写，掌心发力", last_frame_desc="同机位血丝渗出，他仍低头",
+                 source_excerpt="甲一看着自己的手，一言不发。", narration="", dialogues=[],
                  transition="硬切", continuity_from_prev=False, continuity_mode="same_scene_cut"),
             Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="固定",
-                 scene_setting="日，萧家测验广场", characters=["萧媚"],
-                 action_desc="萧媚立于碑前，碑面亮起七段光芒，人群赞叹，她抬眼扫过周围",
-                 first_frame_desc="萧媚立于碑前静立", last_frame_desc="萧媚抬眼，碑面仍亮",
-                 source_excerpt="萧媚站在碑前，碑面亮起光。", narration="",
+                 scene_setting="日，甲家测验广场", characters=["甲三"],
+                 action_desc="甲三立于碑前，碑面亮起七段光芒，人群赞叹，她抬眼扫过周围",
+                 first_frame_desc="甲三立于碑前静立", last_frame_desc="甲三抬眼，碑面仍亮",
+                 source_excerpt="甲三站在碑前，碑面亮起光。", narration="",
                  dialogues=[], transition="硬切", continuity_from_prev=True,
                  continuity_mode="action_continuation"),
         ],

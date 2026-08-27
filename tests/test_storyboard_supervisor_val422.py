@@ -20,10 +20,10 @@ def _shot(**kwargs) -> Shot:
         shot_size="中景",
         camera_move="固定",
         scene_setting="日，大厅",
-        characters=["萧炎"],
-        action_desc="萧炎站在大厅中央，抬手看向石碑，神情凝重，周围人群注视着他。",
-        first_frame_desc="萧炎站在大厅中央，手还未抬起，面向石碑。",
-        last_frame_desc="同一机位，萧炎手掌贴上石碑，眉头紧锁。",
+        characters=["甲一"],
+        action_desc="甲一站在大厅中央，抬手看向石碑，神情凝重，周围人群注视着他。",
+        first_frame_desc="甲一站在大厅中央，手还未抬起，面向石碑。",
+        last_frame_desc="同一机位，甲一手掌贴上石碑，眉头紧锁。",
         source_excerpt="原文摘录至少二十个字用来过审计门槛啊啊啊",
         dialogues=[],
     )
@@ -33,7 +33,7 @@ def _shot(**kwargs) -> Shot:
 
 def test_key_line_uses_spoken_not_source_excerpt():
     """关键台词只认有效口播；source_excerpt 不能充当已说出证据。"""
-    line = "薰儿相信，你会重新站起来，取回属于你的荣耀与尊严"
+    line = "二儿相信，你会重新站起来，取回属于你的荣耀与尊严"
     shot = _shot(
         source_excerpt=line + "额外填充审计长度的原文摘录内容",
         dialogues=[],
@@ -44,7 +44,7 @@ def test_key_line_uses_spoken_not_source_excerpt():
         key_lines=[line],
         plot_spine=PlotSpine(
             episode_premise="测灵",
-            spine_beats=[PlotSpineBeat(beat_id="S01", who="萧炎", does="测灵", turn="被判定低级", must_keep=True)],
+            spine_beats=[PlotSpineBeat(beat_id="S01", who="甲一", does="测灵", turn="被判定低级", must_keep=True)],
             must_keep_ending="收束",
         ),
     )
@@ -53,7 +53,7 @@ def test_key_line_uses_spoken_not_source_excerpt():
     assert any("主线台词" in e for e in errors)
     # 写入 dialogues 后应通过关键台词
     shot2 = _shot(
-        dialogues=[Dialogue(speaker="薰儿", line=line, emotion="坚定")],
+        dialogues=[Dialogue(speaker="二儿", line=line, emotion="坚定")],
         spine_beat_ids=["S01"],
     )
     assert spoken_text_of(shot2)
@@ -71,18 +71,18 @@ def test_spine_beat_ids_cover_must_keep():
         plot_spine=PlotSpine(
             episode_premise="测灵",
             spine_beats=[
-                PlotSpineBeat(beat_id="S04", who="萧媚", does="测出七段", turn="成为焦点", must_keep=True),
+                PlotSpineBeat(beat_id="S04", who="甲三", does="测出七段", turn="成为焦点", must_keep=True),
             ],
             must_keep_ending="收束",
         ),
     )
     # 可见主体与动作已经落地；spine_beat_ids 负责稳定归属，不要求逐字复述策划摘要。
     shot = _shot(
-        characters=["萧媚"],
-        characters_visible=["萧媚"],
-        action_desc="萧媚完成测试，玉石显示七段，人群望向她，她没有走向萧炎。",
-        first_frame_desc="萧媚站在测试台前，掌心贴上玉石。",
-        last_frame_desc="同一机位，玉石亮起，萧媚收回手，人群侧目。",
+        characters=["甲三"],
+        characters_visible=["甲三"],
+        action_desc="甲三完成测试，玉石显示七段，人群望向她，她没有走向甲一。",
+        first_frame_desc="甲三站在测试台前，掌心贴上玉石。",
+        last_frame_desc="同一机位，玉石亮起，甲三收回手，人群侧目。",
         spine_beat_ids=["S04"],
     )
     errors = validate_storyboard_preserves_key_content(
@@ -96,8 +96,8 @@ def test_outline_key_line_capacity_blocks_overload():
     screenplay = EpisodeScreenplay(
         episode_no=1,
         key_lines=[
-            "薰儿相信，你会重新站起来，取回属于你的荣耀与尊严",
-            "萧炎自嘲一笑，说自己果然是废物",
+            "二儿相信，你会重新站起来，取回属于你的荣耀与尊严",
+            "甲一自嘲一笑，说自己果然是废物",
             "放下吧，拿起吧，这是你自己的路",
         ],
     )

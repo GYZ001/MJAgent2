@@ -44,7 +44,7 @@ def test_bible_task_starts_full_refs_after_success(monkeypatch) -> None:
     async def fake_generate_bible(*_args, **_kwargs):
         return Bible(
             world=World(visual_style_canonical="国风水墨"),
-            characters=[Character(name="萧炎", role="主角", appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩")],
+            characters=[Character(name="甲一", role="主角", appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩")],
         )
 
     started: dict[str, object] = {}
@@ -87,7 +87,7 @@ def test_bible_task_starts_scene_preparation_without_unquoted_images(monkeypatch
             world=World(visual_style_canonical="国风水墨"),
             characters=[
                 Character(
-                    name="萧炎",
+                    name="甲一",
                     role="主角",
                     appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩",
                 )
@@ -194,7 +194,7 @@ def test_bible_task_rolls_back_pending_purge_before_logging_style_change_failure
 
     old_bible = Bible(
         world=World(visual_style_canonical="国风水墨"),
-        characters=[Character(name="萧炎", role="主角", appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩")],
+        characters=[Character(name="甲一", role="主角", appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩")],
     )
     conn.execute(
         "INSERT INTO projects(id, bible_json, bible_version, bible_status, bible_error, status) "
@@ -206,7 +206,7 @@ def test_bible_task_rolls_back_pending_purge_before_logging_style_change_failure
     async def fake_generate_bible(*_args, **_kwargs):
         return Bible(
             world=World(visual_style_canonical="赛博朋克"),  # 画风变化，触发 purge 分支
-            characters=[Character(name="萧炎", role="主角", appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩")],
+            characters=[Character(name="甲一", role="主角", appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩")],
         )
 
     purge_calls: list[str] = []

@@ -28,12 +28,12 @@ def _seed_project(conn, project_id: str = "p") -> None:
         "world": {"era": "玄幻", "genre": "玄幻", "visual_style_canonical": "国风厚涂"},
         "scenes": [
             {
-                "name": "萧炎卧室", "location_kind": "室内",
-                "scene_canonical": "夜晚萧家旧宅卧室，木床书案与药炉位置固定，月光穿窗，冷灰安静，无人物",
+                "name": "甲一卧室", "location_kind": "室内",
+                "scene_canonical": "夜晚甲家旧宅卧室，木床书案与药炉位置固定，月光穿窗，冷灰安静，无人物",
             },
             {
-                "name": "萧家测验广场", "location_kind": "室外",
-                "scene_canonical": "白日萧家测验广场，中央测验石碑，青石地面与看台围合，阳光明亮，空间开阔",
+                "name": "甲家测验广场", "location_kind": "室外",
+                "scene_canonical": "白日甲家测验广场，中央测验石碑，青石地面与看台围合，阳光明亮，空间开阔",
             },
         ],
     }
@@ -233,7 +233,7 @@ def test_gap_scan_ignores_optional_views_when_primary_is_video_usable(tmp_path, 
     }
     conn.execute(
         "INSERT INTO scene_references(id,project_id,scene_name,ep_start,ep_end,image_path,qa_json,"
-        "pack_status,group_qa_json,created_at) VALUES('usable','p','萧炎卧室',1,NULL,?,?, 'failed',?,?)",
+        "pack_status,group_qa_json,created_at) VALUES('usable','p','甲一卧室',1,NULL,?,?, 'failed',?,?)",
         (str(image), json.dumps(primary_qa), json.dumps(group_qa), db.now()),
     )
     conn.execute(
@@ -246,7 +246,7 @@ def test_gap_scan_ignores_optional_views_when_primary_is_video_usable(tmp_path, 
     from app.api import scan_scene_asset_gaps
 
     result = scan_scene_asset_gaps("p")
-    assert [item["scene"] for item in result["items"]] == ["萧家测验广场"]
+    assert [item["scene"] for item in result["items"]] == ["甲家测验广场"]
     assert result["counts"]["warning"] == 0
 
 
@@ -256,9 +256,9 @@ def test_manual_adoption_keeps_explicit_scene_hard_failure_as_warning(tmp_path, 
     image = tmp_path / "watermarked.jpg"
     image.write_bytes(b"\xff\xd8\xff\xe0fake-jpeg")
     artifact = repository.create_artifact(EvidenceArtifact(
-        type="scene_reference", scope_type="reference_asset", scope_id="p:萧炎卧室:1",
+        type="scene_reference", scope_type="reference_asset", scope_id="p:甲一卧室:1",
         status="candidate", trust_level="T1", file_path=str(image),
-        content={"scene_name": "萧炎卧室", "prompt": "纯环境，无水印"},
+        content={"scene_name": "甲一卧室", "prompt": "纯环境，无水印"},
     ))
     repository.create_evaluation(artifact["id"], Evaluation(
         evaluator_type="model", evaluator_name="scene_reference_consistency_qa",
@@ -271,7 +271,7 @@ def test_manual_adoption_keeps_explicit_scene_hard_failure_as_warning(tmp_path, 
     from app.scenes import adopt_scene_candidate
 
     result = asyncio.run(adopt_scene_candidate(
-        "p", "萧炎卧室", artifact["id"], reason="已知风险仍采用",
+        "p", "甲一卧室", artifact["id"], reason="已知风险仍采用",
     ))
     assert result["adopted"] is True
     assert result["gate_retry_exhausted"] is True
@@ -291,7 +291,7 @@ def _seed_ready_scene_pack(conn, tmp_path):
     conn.execute(
         "INSERT INTO scene_references(id,project_id,scene_name,ep_start,ep_end,scene_canonical,prompt,"
         "image_path,qa_json,base_scene_id,bible_version,artifact_id,pack_status,group_qa_json,created_at) "
-        "VALUES('current','p','萧炎卧室',1,NULL,'卧室','旧词',?, '{}',NULL,1,NULL,'ready',?,?)",
+        "VALUES('current','p','甲一卧室',1,NULL,'卧室','旧词',?, '{}',NULL,1,NULL,'ready',?,?)",
         (str(old), json.dumps(group, ensure_ascii=False), db.now()),
     )
     for role, path in (("establishing", old), ("reverse_angle", reverse)):
@@ -363,9 +363,9 @@ def test_scene_pack_accepts_descriptive_vlm_role_labels_by_input_order(tmp_path,
 def _strict_candidate(tmp_path):
     image = tmp_path / "candidate.jpg"; image.write_bytes(b"candidate")
     artifact = repository.create_artifact(EvidenceArtifact(
-        type="scene_reference", scope_type="reference_asset", scope_id="p:萧炎卧室:1",
+        type="scene_reference", scope_type="reference_asset", scope_id="p:甲一卧室:1",
         status="candidate", trust_level="T1", file_path=str(image),
-        content={"scene_name": "萧炎卧室", "prompt": "新候选"},
+        content={"scene_name": "甲一卧室", "prompt": "新候选"},
     ))
     qa = normalize_scene_image_qa({
         "overall": 0.9, "person_count": 0, "watermark_detected": False,
@@ -389,7 +389,7 @@ def test_candidate_pack_qa_failure_still_adopts_when_files_ready(tmp_path, monke
 
     monkeypatch.setattr("app.multiview.review_scene_pack_consistency", failed_group)
     from app.scenes import adopt_scene_candidate
-    result = asyncio.run(adopt_scene_candidate("p", "萧炎卧室", artifact["id"], reason="测试"))
+    result = asyncio.run(adopt_scene_candidate("p", "甲一卧室", artifact["id"], reason="测试"))
     assert result["adopted"] is True
     current = conn.execute("SELECT * FROM scene_references WHERE ep_end IS NULL").fetchone()
     assert current["image_path"] == candidate_path
@@ -409,7 +409,7 @@ def test_candidate_pack_success_preserves_rollback_history(tmp_path, monkeypatch
 
     monkeypatch.setattr("app.multiview.review_scene_pack_consistency", passed_group)
     from app.scenes import adopt_scene_candidate
-    result = asyncio.run(adopt_scene_candidate("p", "萧炎卧室", artifact["id"], reason="测试"))
+    result = asyncio.run(adopt_scene_candidate("p", "甲一卧室", artifact["id"], reason="测试"))
     assert result["adopted"] is True
     current = conn.execute("SELECT * FROM scene_references WHERE ep_end IS NULL").fetchone()
     history = conn.execute("SELECT * FROM scene_references WHERE ep_end=0").fetchone()
@@ -428,14 +428,14 @@ def test_project_context_never_falls_back_to_blocked_bible_scene_cache(tmp_path,
     conn.execute("UPDATE projects SET bible_json=? WHERE id='p'", (json.dumps(bible, ensure_ascii=False),))
     conn.execute(
         "INSERT INTO scene_references(id,project_id,scene_name,ep_start,ep_end,image_path,pack_status,"
-        "group_qa_json,created_at) VALUES('blocked','p','萧炎卧室',1,NULL,?,'failed',?,?)",
+        "group_qa_json,created_at) VALUES('blocked','p','甲一卧室',1,NULL,?,'failed',?,?)",
         (str(cached), json.dumps({"status": "failed", "hard_failures": ["检测到水印"]}, ensure_ascii=False), db.now()),
     )
     conn.commit()
     from app.schemas import Bible
     from app.scenes import scene_refs_as_image_inputs
     inputs = scene_refs_as_image_inputs(
-        Bible.model_validate(bible), ["萧炎卧室"], 1, project_id="p", episode_no=1,
+        Bible.model_validate(bible), ["甲一卧室"], 1, project_id="p", episode_no=1,
     )
     assert inputs == []
 
@@ -444,9 +444,9 @@ def test_soft_warning_adoption_requires_explicit_reason(tmp_path, monkeypatch) -
     conn = _fresh_db(tmp_path, monkeypatch); _seed_project(conn)
     image = tmp_path / "warning.jpg"; image.write_bytes(b"warning")
     artifact = repository.create_artifact(EvidenceArtifact(
-        type="scene_reference", scope_type="reference_asset", scope_id="p:萧炎卧室:1",
+        type="scene_reference", scope_type="reference_asset", scope_id="p:甲一卧室:1",
         status="candidate", trust_level="T1", file_path=str(image),
-        content={"scene_name": "萧炎卧室", "prompt": "纯环境"},
+        content={"scene_name": "甲一卧室", "prompt": "纯环境"},
     ))
     qa = normalize_scene_image_qa({
         "overall": 0.8, "person_count": 0, "watermark_detected": False,
@@ -461,7 +461,7 @@ def test_soft_warning_adoption_requires_explicit_reason(tmp_path, monkeypatch) -
     monkeypatch.setattr("app.multiview.scene_multiview_enabled", lambda: False)
     from app.scenes import adopt_scene_candidate
     with pytest.raises(ValueError, match="必须填写采纳理由"):
-        asyncio.run(adopt_scene_candidate("p", "萧炎卧室", artifact["id"], reason=""))
+        asyncio.run(adopt_scene_candidate("p", "甲一卧室", artifact["id"], reason=""))
     assert conn.execute("SELECT COUNT(*) n FROM scene_references").fetchone()["n"] == 0
 
 

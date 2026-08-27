@@ -240,7 +240,7 @@ def _seed_episode(conn, n_shots: int = 11, *, episode_id: str = "ep_int", projec
             ) VALUES(?,?,?,?, '中景', '固定', '日，大厅', ?, ?, '[]', ?)""",
             (
                 sid, episode_id, i, 5,
-                json.dumps(["萧炎"]),
+                json.dumps(["甲一"]),
                 f"角色完成第{i}镜主动作并收束姿态。",
                 1 if i > 1 else 0,
             ),

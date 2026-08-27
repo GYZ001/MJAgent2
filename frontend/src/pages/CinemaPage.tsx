@@ -94,8 +94,6 @@ export function deliveryWarningLabel(value: string): string {
     .replace(/target character/gi, '目标角色')
     .replace(/is not present in the scene/gi, '未出现在画面中')
     .replace(/the girl is bowing instead of standing calmly as expected/gi, '角色正在鞠躬，而预期为平静站立')
-    .replace(/Xiao Xun'er/gi, '萧薰儿')
-    .replace(/Xiao Yan/gi, '萧炎')
     .replace(/'s outfit has incorrect accessory\s*/gi, '的服装配饰与人物设定不一致：')
     .replace(/'s outfit does not match the character anchor/gi, '的服装与人物设定不一致')
     .replace(/'s outfit does not match the expected light green top and tight pants, instead wearing a purple dress/gi, '的服装不符合预期：应为淡绿色上衣搭配紧腿长裤，实际为紫色连衣裙')

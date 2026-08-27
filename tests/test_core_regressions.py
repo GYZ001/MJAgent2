@@ -579,19 +579,19 @@ def test_regex_replan_skips_existing_title_only_duplicate_and_cleans_media(
         );
         INSERT INTO projects VALUES('p1','running',NULL,NULL,'ingested');
         INSERT INTO chapters VALUES(
-          'p1',1926,'第一千六百二十二章 双帝之战！（上）',
-          '第一千六百二十二章 双帝之战！（上） 正文 第一千六百二十二章 双帝之战！（上）'
+          'p1',1926,'第一千六百二十二章 对决之战！（上）',
+          '第一千六百二十二章 对决之战！（上） 正文 第一千六百二十二章 对决之战！（上）'
         );
         INSERT INTO chapters VALUES(
-          'p1',1927,'第一千六百二十二章双帝之战',
-          '第一千六百二十二章双帝之战 魂天帝踏着血云现身，萧炎迎空而起。'
+          'p1',1927,'第一千六百二十二章对决之战',
+          '第一千六百二十二章对决之战 角色丙踏着血云现身，甲一迎空而起。'
         );
         INSERT INTO episodes VALUES(
           'old','p1',99,'旧分集','','','','[99]',50,'done',1
         );
         """
     )
-    rich_body = "魂天帝与萧炎连续交锋，天地在帝境力量下震颤。" * 12
+    rich_body = "角色丙与甲一连续交锋，天地在强者力量下震颤。" * 12
     conn.execute(
         "UPDATE chapters SET content=content || ? WHERE idx=1927",
         (rich_body,),

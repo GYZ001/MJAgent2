@@ -483,15 +483,15 @@ def test_repeated_info_id_without_reinforcement_fails_ledger_and_preflight() -> 
 
 def test_legacy_information_id_gets_chinese_display_content() -> None:
     shot = _shot(
-        new_information_ids=["xiaoyan_test_result_3duan"],
-        purpose="公布萧炎的斗气测试结果为三段",
+        new_information_ids=["role_a_test_result_3duan"],
+        purpose="公布甲一的斗气测试结果为三段",
     )
 
     items = information_items_for_shot(shot)
 
     assert items == [{
-        "info_id": "xiaoyan_test_result_3duan",
-        "content": "公布萧炎的斗气测试结果为三段",
+        "info_id": "role_a_test_result_3duan",
+        "content": "公布甲一的斗气测试结果为三段",
         "source": "derived",
     }]
 
@@ -499,22 +499,22 @@ def test_legacy_information_id_gets_chinese_display_content() -> None:
 def test_do_not_repeat_ids_resolve_to_chinese_before_seedance() -> None:
     prior = _shot(
         shot_no=1,
-        new_information_ids=["world_setup_qidou_mainland", "xiaoyan_status_testing"],
-        purpose="建立斗气大陆规则并交代萧炎正在接受测试",
+        new_information_ids=["world_setup_generic_mainland", "role_a_status_testing"],
+        purpose="建立大陆甲规则并交代甲一正在接受测试",
     )
     current = _shot(
         shot_no=2,
-        do_not_repeat=["world_setup_qidou_mainland", "xiaoyan_status_testing", "unknown_raw_id"],
+        do_not_repeat=["world_setup_generic_mainland", "role_a_status_testing", "unknown_raw_id"],
     )
 
     resolved = resolve_do_not_repeat_texts(current, prior_shots=[prior])
     current.do_not_repeat = resolved
     prompt = compile_prompt(current, _bible())
 
-    assert resolved == ["建立斗气大陆规则并交代萧炎正在接受测试"]
-    assert "不要重复：建立斗气大陆规则并交代萧炎正在接受测试" in prompt
-    assert "world_setup_qidou_mainland" not in prompt
-    assert "xiaoyan_status_testing" not in prompt
+    assert resolved == ["建立大陆甲规则并交代甲一正在接受测试"]
+    assert "不要重复：建立大陆甲规则并交代甲一正在接受测试" in prompt
+    assert "world_setup_generic_mainland" not in prompt
+    assert "role_a_status_testing" not in prompt
     assert "unknown_raw_id" not in prompt
 
 
@@ -523,7 +523,7 @@ def test_ledger_chinese_content_takes_priority_over_legacy_fallback() -> None:
         episode_no=1,
         information_ledger=[InformationItem(
             info_id="I1",
-            content="石碑显示萧炎的斗气测试结果为三段",
+            content="石碑显示甲一的斗气测试结果为三段",
         )],
     )
     shot = _shot(
@@ -531,7 +531,7 @@ def test_ledger_chinese_content_takes_priority_over_legacy_fallback() -> None:
         purpose="泛化的镜头目的",
     )
 
-    assert information_items_for_shot(shot, screenplay)[0]["content"] == "石碑显示萧炎的斗气测试结果为三段"
+    assert information_items_for_shot(shot, screenplay)[0]["content"] == "石碑显示甲一的斗气测试结果为三段"
 
 
 def test_required_prompt_sections_not_truncated_when_required_content_over_limit(monkeypatch) -> None:
@@ -786,8 +786,8 @@ def test_continuity_mode_is_derived_from_scene_and_time_context() -> None:
 
 def test_dialogue_matching_source_excerpt_prefix_respects_provenance() -> None:
     """ERR-20260725-f24b91：台词与 source_excerpt 前缀相同且只出现在对白中，不得误杀。"""
-    line = "萧炎哥哥，以前你曾经与薰儿说过，要能放下，才能拿起，提放自如，是自在人！"
-    excerpt = line + "萧薰儿微笑着柔声道，略微稚嫩的嗓音，却是暖人心肺。"
+    line = "甲一哥哥，以前你曾经与二儿说过，要能放下，才能拿起，提放自如，是自在人！"
+    excerpt = line + "甲二儿微笑着柔声道，略微稚嫩的嗓音，却是暖人心肺。"
     shot = _shot(
         shot_no=10,
         characters=["林风", "苏婉"],

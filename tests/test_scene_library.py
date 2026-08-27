@@ -15,7 +15,7 @@ def _scenes() -> list[Scene]:
 
 def _bible_with_scenes() -> Bible:
     return Bible(
-        characters=[Character(name="萧炎", role="主角",
+        characters=[Character(name="甲一", role="主角",
                               appearance_canonical="十五岁少年，黑发束起，黑色劲装，眉眼倔强坚毅")],
         world=World(era="玄幻", genre="玄幻", visual_style_canonical="国风玄幻漫剧厚涂风，暖冷对比光"),
         scenes=_scenes(),
@@ -132,10 +132,10 @@ def test_match_scene_name_uses_text_order_for_compound_location() -> None:
 
 def _shot(no: int, scene_setting: str) -> Shot:
     return Shot(shot_no=no, duration_s=5, shot_size="全景", camera_move="固定",
-                scene_setting=scene_setting, characters=["萧炎"],
-                action_desc="萧炎站在场景中，缓缓抬头环视四周，眼神逐渐变得坚定，握紧了拳头",
-                first_frame_desc="萧炎立于场景中神情平静", last_frame_desc="萧炎握拳神情坚定",
-                source_excerpt="萧炎抬头环视四周。")
+                scene_setting=scene_setting, characters=["甲一"],
+                action_desc="甲一站在场景中，缓缓抬头环视四周，眼神逐渐变得坚定，握紧了拳头",
+                first_frame_desc="甲一立于场景中神情平静", last_frame_desc="甲一握拳神情坚定",
+                source_excerpt="甲一抬头环视四周。")
 
 
 def test_validate_storyboard_scenes_empty_library_is_noop() -> None:

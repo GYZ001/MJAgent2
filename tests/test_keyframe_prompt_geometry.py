@@ -23,8 +23,8 @@ from app.schemas import Bible, Character, RequiredOnScreenText, Shot, World
 def _bible() -> Bible:
     return Bible(
         characters=[
-            Character(name="萧炎", role="主角", appearance_canonical="十五岁少年，黑发，灰黑劲装"),
-            Character(name="萧薰儿", role="女主", appearance_canonical="十五岁少女，黑发云髻，月白长裙"),
+            Character(name="甲一", role="主角", appearance_canonical="十五岁少年，黑发，灰黑劲装"),
+            Character(name="甲二儿", role="女主", appearance_canonical="十五岁少女，黑发云髻，月白长裙"),
         ],
         world=World(visual_style_canonical="3D 国漫电影风"),
     )
@@ -38,14 +38,14 @@ def _contact_shot(**overrides) -> Shot:
         "camera_move": "固定",
         "camera_angle": "平视",
         "scene_setting": "日，测验广场",
-        "characters": ["萧炎", "functional:examiner"],
-        "characters_visible": ["萧炎", "functional:examiner"],
-        "action_desc": "萧炎走到黑色石碑前，抬起右手按住石碑，functional:examiner在侧方观察。",
-        "first_frame_desc": "萧炎从人群中走出，右手尚未碰到石碑。",
-        "last_frame_desc": "萧炎右掌已贴住石碑，functional:examiner侧身看向接触点。",
-        "state_in": "萧炎靠近石碑。",
-        "primary_action": "萧炎抬手按住石碑。",
-        "state_out": "萧炎右掌仍贴住石碑。",
+        "characters": ["甲一", "functional:examiner"],
+        "characters_visible": ["甲一", "functional:examiner"],
+        "action_desc": "甲一走到黑色石碑前，抬起右手按住石碑，functional:examiner在侧方观察。",
+        "first_frame_desc": "甲一从人群中走出，右手尚未碰到石碑。",
+        "last_frame_desc": "甲一右掌已贴住石碑，functional:examiner侧身看向接触点。",
+        "state_in": "甲一靠近石碑。",
+        "primary_action": "甲一抬手按住石碑。",
+        "state_out": "甲一右掌仍贴住石碑。",
         "source_excerpt": "他走到石碑之前，缓缓把手掌贴在冰冷的石面上。",
         "dialogues": [],
         "risk_tags": ["contact_phase:established"],
@@ -55,14 +55,14 @@ def _contact_shot(**overrides) -> Shot:
 
 
 def test_provider_prompt_overrides_conflicting_front_view_and_scale() -> None:
-    shot = _contact_shot(characters=["萧炎", "萧薰儿"], characters_visible=["萧炎", "萧薰儿"])
+    shot = _contact_shot(characters=["甲一", "甲二儿"], characters_visible=["甲一", "甲二儿"])
     prompt = video_modes.reference_generation_prompt(
         shot,
         _bible(),
         "plot_key_frame",
         1,
         content_override=(
-            "Front-facing portrait. Xiao Yan is huge in the foreground while Xun'er is tiny in the background."
+            "Front-facing portrait. Character A is huge in the foreground while Character B is tiny in the background."
         ),
     )
 
@@ -81,9 +81,9 @@ def test_seeded_keyframe_omits_redundant_textual_character_appearance() -> None:
     bible.characters[0].appearance_canonical = marker
     bible.world.visual_style_canonical = style_marker
     shot = _contact_shot(
-        characters=["萧炎"],
-        characters_visible=["萧炎"],
-        last_frame_desc="萧炎右掌贴住石碑，萧薰儿留在画外。",
+        characters=["甲一"],
+        characters_visible=["甲一"],
+        last_frame_desc="甲一右掌贴住石碑，甲二儿留在画外。",
     )
 
     unseeded = video_modes.reference_generation_prompt(
@@ -105,8 +105,8 @@ def test_seeded_keyframe_omits_redundant_textual_character_appearance() -> None:
     assert marker not in seeded
     assert style_marker not in seeded
     assert "SEEDED KEYFRAME CONTRACT" in seeded
-    assert "萧炎" not in seeded
-    assert "萧薰儿" not in seeded
+    assert "甲一" not in seeded
+    assert "甲二儿" not in seeded
     assert "Visible named identities, each exactly once: subject 1" in seeded
     assert "subject 2留在画外" in seeded
     assert "Reference images are authoritative for identity, outfit" in seeded
@@ -156,21 +156,21 @@ def test_seeded_keyframe_requests_photographic_medium_for_photographic_style_pre
 
 def test_seeded_terminal_keyframe_compiles_typed_endpoint_without_free_prose() -> None:
     shot = _contact_shot(
-        characters=["萧炎", "萧薰儿"],
-        characters_visible=["萧炎", "萧薰儿"],
+        characters=["甲一", "甲二儿"],
+        characters_visible=["甲一", "甲二儿"],
         last_frame_desc=(
-            "萧薰儿站到梯子顶端，上半身探向壁橱；"
-            "萧炎仍在下方扶住梯子。"
+            "甲二儿站到梯子顶端，上半身探向壁橱；"
+            "甲一仍在下方扶住梯子。"
         ),
         continuity_state_out={
             "characters": {
-                "萧炎": {
+                "甲一": {
                     "pose": "站在梯子旁",
                     "facing": "朝向梯子",
                     "left_hand": "扶住梯子左侧",
                     "right_hand": "扶住梯子右侧",
                 },
-                "萧薰儿": {
+                "甲二儿": {
                     "pose": "站在梯子上层踏板",
                     "facing": "朝向壁橱",
                     "left_hand": "扶在壁橱边缘",
@@ -210,10 +210,10 @@ def test_seeded_terminal_keyframe_compiles_typed_endpoint_without_free_prose() -
 
 def test_seeded_opening_beat_does_not_reuse_structured_closing_state() -> None:
     shot = _contact_shot(
-        first_frame_desc="萧炎站在石碑前，右手尚未抬起。",
+        first_frame_desc="甲一站在石碑前，右手尚未抬起。",
         continuity_state_out={
             "characters": {
-                "萧炎": {
+                "甲一": {
                     "pose": "STRUCTURED_CLOSING_MARKER",
                 },
             },
@@ -237,10 +237,10 @@ def test_seeded_opening_beat_does_not_reuse_structured_closing_state() -> None:
 
 def test_keyframe_contract_fingerprint_changes_with_dialogue_emotion() -> None:
     winning = _contact_shot(dialogues=[{
-        "speaker": "萧炎", "line": "我赢了", "emotion": "兴奋",
+        "speaker": "甲一", "line": "我赢了", "emotion": "兴奋",
     }])
     losing = winning.model_copy(update={"dialogues": [{
-        "speaker": "萧炎", "line": "我输了", "emotion": "绝望",
+        "speaker": "甲一", "line": "我输了", "emotion": "绝望",
     }]})
 
     assert video_modes.keyframe_contract_fingerprint(
@@ -250,10 +250,10 @@ def test_keyframe_contract_fingerprint_changes_with_dialogue_emotion() -> None:
 
 def test_explicit_story_height_difference_is_preserved_without_forced_perspective() -> None:
     shot = _contact_shot(
-        characters=["萧炎", "萧薰儿"],
-        characters_visible=["萧炎", "萧薰儿"],
-        action_desc="萧薰儿仰头看向高她一头的萧炎，伸手扶住他的手臂。",
-        last_frame_desc="萧薰儿仍仰头，手已扶住萧炎手臂。",
+        characters=["甲一", "甲二儿"],
+        characters_visible=["甲一", "甲二儿"],
+        action_desc="甲二儿仰头看向高她一头的甲一，伸手扶住他的手臂。",
+        last_frame_desc="甲二儿仍仰头，手已扶住甲一手臂。",
         risk_tags=["contact_phase:established", "explicit_height_difference"],
     )
     prompt = video_modes.reference_generation_prompt(shot, _bible(), "plot_key_frame", 1)
@@ -265,7 +265,7 @@ def test_explicit_story_height_difference_is_preserved_without_forced_perspectiv
 
 
 def test_single_character_keyframe_does_not_invent_equal_height_rule() -> None:
-    shot = _contact_shot(characters=["萧炎"], characters_visible=["萧炎"])
+    shot = _contact_shot(characters=["甲一"], characters_visible=["甲一"])
     prompt = video_modes.reference_generation_prompt(shot, _bible(), "plot_key_frame", 1)
 
     assert "SIDE CAMERA REQUIRED" in prompt
@@ -289,8 +289,8 @@ def test_contact_target_is_one_established_contact_instant() -> None:
 
 def test_every_timeline_beat_of_contact_shot_inherits_side_axis() -> None:
     shot = _contact_shot(
-        first_frame_desc="萧炎站在人群前抬眼看向黑色石碑。",
-        state_in="萧炎站在石碑前准备测试。",
+        first_frame_desc="甲一站在人群前抬眼看向黑色石碑。",
+        state_in="甲一站在石碑前准备测试。",
     )
     beats = video_modes.narrative_keyframe_beats(shot, 7)
     contracts = [
@@ -308,10 +308,10 @@ def test_every_timeline_beat_of_contact_shot_inherits_side_axis() -> None:
 
 def test_every_timeline_beat_preserves_explicit_height_difference() -> None:
     shot = _contact_shot(
-        characters=["萧炎", "萧薰儿"],
-        characters_visible=["萧炎", "萧薰儿"],
+        characters=["甲一", "甲二儿"],
+        characters_visible=["甲一", "甲二儿"],
         first_frame_desc="两人站在广场入口。",
-        primary_action="萧薰儿仰头看向高她一头的萧炎，伸手扶住他的手臂。",
+        primary_action="甲二儿仰头看向高她一头的甲一，伸手扶住他的手臂。",
         state_out="两人转身看向石碑。",
         last_frame_desc="两人并肩看向石碑。",
         risk_tags=["contact_phase:established", "explicit_height_difference"],
@@ -338,7 +338,7 @@ def test_functional_extra_is_kept_in_keyframe_roster_and_anchor() -> None:
 
 
 def test_contact_action_selects_profile_seed_even_for_closeup() -> None:
-    roles = select_character_view_roles(_contact_shot(shot_size="特写"), "萧炎")
+    roles = select_character_view_roles(_contact_shot(shot_size="特写"), "甲一")
     assert roles == ["profile", "three_quarter"]
 
 
@@ -383,9 +383,9 @@ def test_required_text_contract_is_consistent_across_beat_prompt_generation_and_
 
     monkeypatch.setattr(video_modes.model_gateway, "chat", fake_chat)
     shot = _contact_shot(
-        last_frame_desc="萧炎手掌贴住石碑，碑面显示金色文字。",
+        last_frame_desc="甲一手掌贴住石碑，碑面显示金色文字。",
         required_text=RequiredOnScreenText(
-            surface="石碑", exact_text="斗之力三段", strategy="embedded_prop",
+            surface="石碑", exact_text="测验力三段", strategy="embedded_prop",
             appear_start_s=4.0, stable_until_s=5.0,
         ),
     )
@@ -397,7 +397,7 @@ def test_required_text_contract_is_consistent_across_beat_prompt_generation_and_
     provider_prompt = video_modes.reference_generation_prompt(
         beat_shot, _bible(), "plot_key_frame", 1,
     )
-    assert "the only permitted text is the exact string '斗之力三段'" in provider_prompt
+    assert "the only permitted text is the exact string '测验力三段'" in provider_prompt
     assert "Clean 9:16 portrait still; no text or subtitles." not in provider_prompt
 
     prompts = asyncio.run(video_modes.write_reference_prompt_batch(
@@ -411,7 +411,7 @@ def test_required_text_contract_is_consistent_across_beat_prompt_generation_and_
     assert prompts == ["prompt-narrative_keyframe"]
     planned = calls[0]["slots"][0]
     assert planned["geometry_contract"]["required_text_expected"] is True
-    assert "the only permitted text is the exact string '斗之力三段'" in planned["text_constraint"]
+    assert "the only permitted text is the exact string '测验力三段'" in planned["text_constraint"]
 
 
 def test_batch_prompt_uses_each_timeline_beats_own_text_contract(monkeypatch) -> None:
@@ -428,7 +428,7 @@ def test_batch_prompt_uses_each_timeline_beats_own_text_contract(monkeypatch) ->
 
     monkeypatch.setattr(video_modes.model_gateway, "chat", fake_chat)
     shot = _contact_shot(required_text=RequiredOnScreenText(
-        surface="石碑", exact_text="斗之力三段", strategy="embedded_prop",
+        surface="石碑", exact_text="测验力三段", strategy="embedded_prop",
         appear_start_s=4.0, stable_until_s=5.0,
     ))
     beats = video_modes.narrative_keyframe_beats(shot, 2)
@@ -446,7 +446,7 @@ def test_batch_prompt_uses_each_timeline_beats_own_text_contract(monkeypatch) ->
     assert opening["geometry_contract"]["required_text_expected"] is False
     assert opening["text_constraint"] == "no text or subtitles."
     assert decisive["geometry_contract"]["required_text_expected"] is True
-    assert "the only permitted text is the exact string '斗之力三段'" in decisive["text_constraint"]
+    assert "the only permitted text is the exact string '测验力三段'" in decisive["text_constraint"]
 
 
 def test_keyframe_qa_contract_checks_side_contact_height_and_target(monkeypatch) -> None:
@@ -471,7 +471,7 @@ def test_keyframe_qa_contract_checks_side_contact_height_and_target(monkeypatch)
 
     monkeypatch.setattr("app.hiagent.vlm_check", fake_vlm)
     monkeypatch.setattr("app.multiview.visual_evidence_qa_enabled", lambda: True)
-    shot = _contact_shot(characters=["萧炎", "萧薰儿"], characters_visible=["萧炎", "萧薰儿"])
+    shot = _contact_shot(characters=["甲一", "甲二儿"], characters_visible=["甲一", "甲二儿"])
     qa = asyncio.run(review_keyframe_with_evidence(
         "candidate", shot=shot, bible=_bible(), visual_anchors=[],
     ))
@@ -503,8 +503,8 @@ def test_independent_geometry_guard_overrides_false_high_height_score(
         if payload["task"].startswith("Strict independent"):
             return json.dumps({
                 "postures": [
-                    {"character": "萧炎", "posture": "standing"},
-                    {"character": "萧薰儿", "posture": "standing"},
+                    {"character": "甲一", "posture": "standing"},
+                    {"character": "甲二儿", "posture": "standing"},
                 ],
                 "same_depth_plane": True,
                 "max_height_div_min_height": 1.55,
@@ -537,7 +537,7 @@ def test_independent_geometry_guard_overrides_false_high_height_score(
                         "outfit_match": True,
                         "instance_count": 1,
                     }
-                    for name in ("萧炎", "萧薰儿")
+                    for name in ("甲一", "甲二儿")
                 ],
                 "unexpected_recognizable_people": 0,
             },
@@ -548,7 +548,7 @@ def test_independent_geometry_guard_overrides_false_high_height_score(
     monkeypatch.setattr("app.hiagent.vlm_check", fake_vlm)
     monkeypatch.setattr("app.multiview.visual_evidence_qa_enabled", lambda: True)
     anchors = []
-    for name in ("萧炎", "萧薰儿"):
+    for name in ("甲一", "甲二儿"):
         path = tmp_path / f"{name}.jpg"
         path.write_bytes(b"anchor")
         anchors.append({
@@ -556,7 +556,7 @@ def test_independent_geometry_guard_overrides_false_high_height_score(
             "entity_type": "character",
             "entity_name": name,
         })
-    shot = _contact_shot(characters=["萧炎", "萧薰儿"], characters_visible=["萧炎", "萧薰儿"])
+    shot = _contact_shot(characters=["甲一", "甲二儿"], characters_visible=["甲一", "甲二儿"])
     qa = asyncio.run(review_keyframe_with_evidence(
         "candidate", shot=shot, bible=_bible(), visual_anchors=anchors,
     ))
@@ -581,10 +581,10 @@ def test_contact_phase_is_never_inferred_from_prose() -> None:
 
 def test_aborted_contact_keeps_visible_gap_and_side_camera() -> None:
     shot = _contact_shot(
-        primary_action="萧炎试图抓住落下的令牌。",
-        action_desc="萧炎伸手抓向令牌，但未能接住。",
-        last_frame_desc="令牌从萧炎指尖前落下，他仍未碰到它。",
-        state_out="萧炎的手与令牌仍有清晰缝隙。",
+        primary_action="甲一试图抓住落下的令牌。",
+        action_desc="甲一伸手抓向令牌，但未能接住。",
+        last_frame_desc="令牌从甲一指尖前落下，他仍未碰到它。",
+        state_out="甲一的手与令牌仍有清晰缝隙。",
         risk_tags=["contact_phase:approach"],
     )
     contract = keyframe_visual_contract(shot, _bible())
@@ -599,9 +599,9 @@ def test_aborted_contact_keeps_visible_gap_and_side_camera() -> None:
 
 def test_release_end_state_beats_earlier_established_contact() -> None:
     shot = _contact_shot(
-        primary_action="萧炎抓住对方的手。",
-        action_desc="萧炎先抓住对方，随后松开手。",
-        last_frame_desc="萧炎已松开对方的手，两手之间留有空隙。",
+        primary_action="甲一抓住对方的手。",
+        action_desc="甲一先抓住对方，随后松开手。",
+        last_frame_desc="甲一已松开对方的手，两手之间留有空隙。",
         state_out="两人的手已分开。",
         risk_tags=["contact_phase:separated"],
     )
@@ -616,12 +616,12 @@ def test_release_end_state_beats_earlier_established_contact() -> None:
 
 def test_incidental_start_contact_does_not_hijack_new_keyframe() -> None:
     shot = _contact_shot(
-        primary_action="萧炎起身走到窗边。",
-        action_desc="萧炎放下茶杯，起身走到窗边看雨。",
-        first_frame_desc="萧炎仍握着茶杯坐在桌前。",
-        state_in="萧炎仍握着茶杯坐在桌前。",
-        last_frame_desc="萧炎已站在窗前看雨。",
-        state_out="萧炎站在窗前。",
+        primary_action="甲一起身走到窗边。",
+        action_desc="甲一放下茶杯，起身走到窗边看雨。",
+        first_frame_desc="甲一仍握着茶杯坐在桌前。",
+        state_in="甲一仍握着茶杯坐在桌前。",
+        last_frame_desc="甲一已站在窗前看雨。",
+        state_out="甲一站在窗前。",
         risk_tags=[],
     )
     contract = keyframe_visual_contract(shot, _bible())
@@ -632,9 +632,9 @@ def test_incidental_start_contact_does_not_hijack_new_keyframe() -> None:
 
 
 def test_height_evidence_requires_a_real_relative_height_relation() -> None:
-    for description in ("萧炎仰头看向天空", "萧炎俯身看地上的信", "萧炎比起昨天更高兴"):
+    for description in ("甲一仰头看向天空", "甲一俯身看地上的信", "甲一比起昨天更高兴"):
         shot = _contact_shot(
-            characters=["萧炎", "萧薰儿"], characters_visible=["萧炎", "萧薰儿"],
+            characters=["甲一", "甲二儿"], characters_visible=["甲一", "甲二儿"],
             action_desc=description, primary_action=description,
             first_frame_desc=description, last_frame_desc=description,
             state_in=description, state_out=description,
@@ -643,8 +643,8 @@ def test_height_evidence_requires_a_real_relative_height_relation() -> None:
         assert keyframe_visual_contract(shot, _bible())["relative_height_policy"] == "equal_scale"
 
     taller = _contact_shot(
-        characters=["萧炎", "萧薰儿"], characters_visible=["萧炎", "萧薰儿"],
-        action_desc="萧炎比萧薰儿高一头。", primary_action="两人并肩站立。",
+        characters=["甲一", "甲二儿"], characters_visible=["甲一", "甲二儿"],
+        action_desc="甲一比甲二儿高一头。", primary_action="两人并肩站立。",
         last_frame_desc="两人并肩站立。",
         risk_tags=["contact_phase:established", "explicit_height_difference"],
     )
@@ -653,45 +653,45 @@ def test_height_evidence_requires_a_real_relative_height_relation() -> None:
 
 def test_offscreen_child_does_not_disable_equal_scale_for_visible_adults() -> None:
     shot = _contact_shot(
-        characters=["萧炎", "萧薰儿", "孩童"],
-        characters_visible=["萧炎", "萧薰儿"],
+        characters=["甲一", "甲二儿", "孩童"],
+        characters_visible=["甲一", "甲二儿"],
     )
     contract = keyframe_visual_contract(shot, _bible())
     prompt = video_modes.reference_generation_prompt(shot, _bible(), "plot_key_frame", 1)
 
-    assert contract["visible_characters"] == ["萧炎", "萧薰儿"]
+    assert contract["visible_characters"] == ["甲一", "甲二儿"]
     assert contract["relative_height_policy"] == "equal_scale"
     assert "孩童" not in prompt
 
 
 def test_collective_roster_is_a_group_not_one_identity(monkeypatch) -> None:
     shot = _contact_shot(
-        characters=["collective:萧家子弟", "萧薰儿"],
-        characters_visible=["collective:萧家子弟", "萧薰儿"],
-        primary_action="几名萧家子弟交头接耳。",
-        action_desc="萧家子弟们纷纷议论，其中一人回头，背景中萧薰儿沉默站立。",
-        last_frame_desc="众人仍在议论，其中一人回头，背景中萧薰儿沉默站立。",
-        state_out="萧家子弟们仍在议论。",
+        characters=["collective:甲家子弟", "甲二儿"],
+        characters_visible=["collective:甲家子弟", "甲二儿"],
+        primary_action="几名甲家子弟交头接耳。",
+        action_desc="甲家子弟们纷纷议论，其中一人回头，背景中甲二儿沉默站立。",
+        last_frame_desc="众人仍在议论，其中一人回头，背景中甲二儿沉默站立。",
+        state_out="甲家子弟们仍在议论。",
     )
     contract = keyframe_visual_contract(shot, _bible())
     prompt = video_modes.reference_generation_prompt(shot, _bible(), "plot_key_frame", 1)
 
-    assert is_collective_role("collective:萧家子弟") is True
-    assert is_collective_role("萧家子弟") is False
+    assert is_collective_role("collective:甲家子弟") is True
+    assert is_collective_role("甲家子弟") is False
     assert is_collective_role("一名观众") is False
     assert is_collective_role("两名弟子") is False
-    assert contract["individual_visible_characters"] == ["萧薰儿"]
-    assert contract["collective_visible_roles"] == ["collective:萧家子弟"]
+    assert contract["individual_visible_characters"] == ["甲二儿"]
+    assert contract["collective_visible_roles"] == ["collective:甲家子弟"]
     assert contract["collective_presence_required"] is True
     assert contract["relative_height_policy"] == "single_subject"
-    assert "Scripted collective/group roles: collective:萧家子弟" in prompt
+    assert "Scripted collective/group roles: collective:甲家子弟" in prompt
     assert "never as one fixed identity" in prompt
-    assert "Named/individual visible identities, each exactly once: collective:萧家子弟" not in prompt
-    assert "Named/individual visible identities, each exactly once: 萧薰儿" in prompt
+    assert "Named/individual visible identities, each exactly once: collective:甲家子弟" not in prompt
+    assert "Named/individual visible identities, each exactly once: 甲二儿" in prompt
 
     monkeypatch.setattr(
         "app.multiview.project_bible_asset_names",
-        lambda _project, **_kwargs: ({"萧薰儿"}, set()),
+        lambda _project, **_kwargs: ({"甲二儿"}, set()),
     )
     monkeypatch.setattr("app.multiview.portrait_views_for_episode", lambda *_a, **_k: [])
     monkeypatch.setattr("app.multiview.portrait_row_for_episode", lambda *_a, **_k: None)
@@ -703,7 +703,7 @@ def test_collective_roster_is_a_group_not_one_identity(monkeypatch) -> None:
     group = next(
         item
         for item in manifest["characters"]
-        if item["name"] == "collective:萧家子弟"
+        if item["name"] == "collective:甲家子弟"
     )
     assert group["role_kind"] == "collective"
     assert group["asset_required"] is False
@@ -712,21 +712,21 @@ def test_collective_roster_is_a_group_not_one_identity(monkeypatch) -> None:
 
 def test_collective_presence_comes_only_from_typed_roster() -> None:
     optional = _contact_shot(
-        characters=["萧炎"], characters_visible=["萧炎"],
-        scene_setting="萧炎当众站在广场上。",
-        action_desc="萧炎抬头看向石碑。",
-        primary_action="萧炎抬头看向石碑。",
-        last_frame_desc="萧炎独自站在石碑前。",
-        state_out="萧炎独自站在石碑前。",
+        characters=["甲一"], characters_visible=["甲一"],
+        scene_setting="甲一当众站在广场上。",
+        action_desc="甲一抬头看向石碑。",
+        primary_action="甲一抬头看向石碑。",
+        last_frame_desc="甲一独自站在石碑前。",
+        state_out="甲一独自站在石碑前。",
     )
     optional_contract = keyframe_visual_contract(optional, _bible())
     assert optional_contract["anonymous_background_allowed"] is False
     assert optional_contract["collective_presence_required"] is False
 
     required = optional.model_copy(update={
-        "characters": ["萧炎", "collective:background_crowd"],
-        "characters_visible": ["萧炎", "collective:background_crowd"],
-        "last_frame_desc": "众人围观中，萧炎站在石碑前。",
+        "characters": ["甲一", "collective:background_crowd"],
+        "characters_visible": ["甲一", "collective:background_crowd"],
+        "last_frame_desc": "众人围观中，甲一站在石碑前。",
     })
     required_contract = keyframe_visual_contract(required, _bible())
     required_prompt = video_modes.reference_generation_prompt(required, _bible(), "plot_key_frame", 1)
@@ -734,7 +734,7 @@ def test_collective_presence_comes_only_from_typed_roster() -> None:
     assert "collective:background_crowd" in required_prompt
 
     prose_only = optional.model_copy(update={
-        "last_frame_desc": "身后族人纷纷跟着发出嘲笑声，萧炎仍站在石碑前。",
+        "last_frame_desc": "身后族人纷纷跟着发出嘲笑声，甲一仍站在石碑前。",
     })
     assert keyframe_visual_contract(prose_only, _bible())["collective_presence_required"] is False
 
@@ -742,17 +742,17 @@ def test_collective_presence_comes_only_from_typed_roster() -> None:
 @pytest.mark.parametrize(
     "wording",
     [
-        "众人已经散去，萧炎独自站在石碑前。",
+        "众人已经散去，甲一独自站在石碑前。",
         "人群已经全部离开画面。",
-        "家族子弟已退到画外，只剩萧炎一人。",
+        "家族子弟已退到画外，只剩甲一一人。",
         "画外传来人群的嘲笑声。",
-        "萧炎回忆起众人的嘲笑。",
+        "甲一回忆起众人的嘲笑。",
     ],
 )
 def test_absent_offscreen_or_remembered_crowd_is_forbidden_not_required(wording: str) -> None:
     shot = _contact_shot(
-        characters=["萧炎"], characters_visible=["萧炎"],
-        primary_action="萧炎独立。", action_desc=wording,
+        characters=["甲一"], characters_visible=["甲一"],
+        primary_action="甲一独立。", action_desc=wording,
         last_frame_desc=wording, state_out=wording,
         risk_tags=["contact_phase:established", "collective_presence_forbidden"],
     )
@@ -782,12 +782,12 @@ def test_real_group_wording_is_a_required_qa_diagnostic(monkeypatch) -> None:
     monkeypatch.setattr("app.hiagent.vlm_check", fake_vlm)
     monkeypatch.setattr("app.multiview.visual_evidence_qa_enabled", lambda: True)
     shot = _contact_shot(
-        characters=["萧炎", "collective:background_crowd"],
-        characters_visible=["萧炎", "collective:background_crowd"],
-        primary_action="萧炎沉默地站在石碑前。",
-        action_desc="萧炎沉默地站在石碑前，族人从身后走来。",
-        last_frame_desc="身后族人纷纷跟着发出嘲笑声，萧炎仍站在石碑前。",
-        state_out="萧炎站在石碑前。",
+        characters=["甲一", "collective:background_crowd"],
+        characters_visible=["甲一", "collective:background_crowd"],
+        primary_action="甲一沉默地站在石碑前。",
+        action_desc="甲一沉默地站在石碑前，族人从身后走来。",
+        last_frame_desc="身后族人纷纷跟着发出嘲笑声，甲一仍站在石碑前。",
+        state_out="甲一站在石碑前。",
     )
 
     qa = asyncio.run(review_keyframe_with_evidence(
@@ -802,11 +802,11 @@ def test_real_group_wording_is_a_required_qa_diagnostic(monkeypatch) -> None:
 
 def test_required_text_is_only_forced_when_active_at_target_instant() -> None:
     early = _contact_shot(
-        primary_action="萧炎抬手按住尚未发光的石碑。",
+        primary_action="甲一抬手按住尚未发光的石碑。",
         last_frame_desc="",
         state_out="",
         required_text=RequiredOnScreenText(
-            surface="石碑", exact_text="斗之气：七段", strategy="embedded_prop",
+            surface="石碑", exact_text="测验力：七段", strategy="embedded_prop",
             appear_start_s=4.0,
         ),
     )
@@ -817,13 +817,13 @@ def test_required_text_is_only_forced_when_active_at_target_instant() -> None:
     assert "the only permitted text" not in early_prompt
 
     end = _contact_shot(required_text=RequiredOnScreenText(
-        surface="石碑", exact_text="斗之气：七段", strategy="embedded_prop",
+        surface="石碑", exact_text="测验力：七段", strategy="embedded_prop",
         appear_start_s=4.0,
     ))
     end_contract = keyframe_visual_contract(end, _bible())
     end_prompt = video_modes.reference_generation_prompt(end, _bible(), "plot_key_frame", 1)
     assert end_contract["required_text_expected"] is True
-    assert "the only permitted text is the exact string '斗之气：七段'" in end_prompt
+    assert "the only permitted text is the exact string '测验力：七段'" in end_prompt
 
 
 @pytest.mark.parametrize(
@@ -839,7 +839,7 @@ def test_required_text_end_target_respects_inclusive_timing_boundaries(
     appear_start: float, stable_until: float | None, expected: bool,
 ) -> None:
     shot = _contact_shot(required_text=RequiredOnScreenText(
-        surface="石碑", exact_text="斗之气：七段", strategy="embedded_prop",
+        surface="石碑", exact_text="测验力：七段", strategy="embedded_prop",
         appear_start_s=appear_start, stable_until_s=stable_until,
     ))
     assert keyframe_visual_contract(shot, _bible())["required_text_expected"] is expected
@@ -867,11 +867,11 @@ def test_keyframe_qa_hides_inactive_text_payload_and_explicitly_forbids_text(mon
     monkeypatch.setattr("app.hiagent.vlm_check", fake_vlm)
     monkeypatch.setattr("app.multiview.visual_evidence_qa_enabled", lambda: True)
     shot = _contact_shot(
-        primary_action="萧炎抬手按住尚未发光的石碑。",
+        primary_action="甲一抬手按住尚未发光的石碑。",
         last_frame_desc="",
         state_out="",
         required_text=RequiredOnScreenText(
-            surface="石碑", exact_text="斗之气：七段", appear_start_s=4.0,
+            surface="石碑", exact_text="测验力：七段", appear_start_s=4.0,
         ),
     )
 
@@ -901,7 +901,7 @@ def test_provider_boundary_keeps_contract_seeds_and_unique_history(monkeypatch, 
         project_id="p", episode_no=1, shot=_contact_shot(), bible=_bible(),
         ref_type="plot_key_frame", index=100,
         content_override="Front-facing giant character lineup.",
-        seed_inputs=["seed-a"], extra_instruction="REFERENCE IMAGE ROLE MAP: input image 1 = character '萧炎', profile",
+        seed_inputs=["seed-a"], extra_instruction="REFERENCE IMAGE ROLE MAP: input image 1 = character '甲一', profile",
         skip_inline_qa=True,
     )
     first = asyncio.run(video_modes._generate_one_reference(**kwargs))
@@ -926,7 +926,7 @@ def test_missing_geometry_diagnostics_are_unverified(monkeypatch) -> None:
     monkeypatch.setattr("app.multiview.visual_evidence_qa_enabled", lambda: True)
     qa = asyncio.run(review_keyframe_with_evidence(
         "candidate", shot=_contact_shot(
-            characters=["萧炎", "萧薰儿"], characters_visible=["萧炎", "萧薰儿"],
+            characters=["甲一", "甲二儿"], characters_visible=["甲一", "甲二儿"],
         ), bible=_bible(), visual_anchors=[],
     ))
 

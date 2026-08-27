@@ -17,12 +17,12 @@ from app.schemas import Storyboard
 def _shot_with_line(line: str, *, duration_s: int = 10) -> Shot:
     shot = _compact_shot(1)
     shot.duration_s = duration_s
-    shot.characters = ["薰儿", "萧炎"]
-    shot.dialogues = [Dialogue(speaker="薰儿", line=line, emotion="坚定")]
+    shot.characters = ["二儿", "甲一"]
+    shot.dialogues = [Dialogue(speaker="二儿", line=line, emotion="坚定")]
     shot.audio_timeline = [
         AudioTimelineItem(
             start_s=0.3, end_s=min(duration_s - 0.2, 8.0),
-            type="spoken_dialogue", speaker_id="薰儿", text=line, lip_sync=True,
+            type="spoken_dialogue", speaker_id="二儿", text=line, lip_sync=True,
         )
     ]
     shot.narration = ""
@@ -30,7 +30,7 @@ def _shot_with_line(line: str, *, duration_s: int = 10) -> Shot:
 
 
 def test_coherent_dialogues_and_timeline_pass() -> None:
-    line = "薰儿相信，你会重新站起来"
+    line = "二儿相信，你会重新站起来"
     shot = _shot_with_line(line)
     issues = validate_spoken_contract(shot)
     assert not any(i.code == "SPOKEN_CONTRACT_CONFLICT" for i in issues)
@@ -40,13 +40,13 @@ def test_coherent_dialogues_and_timeline_pass() -> None:
 def test_timeline_has_key_line_dialogues_missing_is_conflict() -> None:
     shot = _compact_shot(9)
     shot.duration_s = 10
-    shot.characters = ["薰儿"]
-    shot.dialogues = [Dialogue(speaker="薰儿", line="走吧。", emotion="平静")]
+    shot.characters = ["二儿"]
+    shot.dialogues = [Dialogue(speaker="二儿", line="走吧。", emotion="平静")]
     shot.audio_timeline = [
         AudioTimelineItem(
             start_s=0.3, end_s=8.0, type="spoken_dialogue",
-            speaker_id="薰儿",
-            text="薰儿相信，你会重新站起来，取回属于你的荣耀与尊严",
+            speaker_id="二儿",
+            text="二儿相信，你会重新站起来，取回属于你的荣耀与尊严",
             lip_sync=True,
         )
     ]
@@ -61,7 +61,7 @@ def test_timeline_has_key_line_dialogues_missing_is_conflict() -> None:
 
 def test_human_edit_dialogues_rebuilds_timeline() -> None:
     shot = _shot_with_line("旧台词。")
-    shot.dialogues = [Dialogue(speaker="薰儿", line="新的短句。", emotion="平静")]
+    shot.dialogues = [Dialogue(speaker="二儿", line="新的短句。", emotion="平静")]
     result = synchronize_spoken_contract(shot, changed_fields={"dialogues"})
     assert result.status == "coherent"
     assert any(item.text == "新的短句。" for item in shot.audio_timeline if item.type == "spoken_dialogue")
@@ -70,7 +70,7 @@ def test_human_edit_dialogues_rebuilds_timeline() -> None:
 
 def test_human_submit_conflicting_fields_returns_conflict() -> None:
     shot = _shot_with_line("甲。")
-    shot.dialogues = [Dialogue(speaker="薰儿", line="乙。", emotion="平静")]
+    shot.dialogues = [Dialogue(speaker="二儿", line="乙。", emotion="平静")]
     # 两侧都改且不一致 → conflict，不静默择一
     result = synchronize_spoken_contract(
         shot, changed_fields={"dialogues", "audio_timeline"},
@@ -232,14 +232,14 @@ def test_shot83_onscreen_claim_cannot_pass_episode_gate_after_prompt_compile() -
 
     shot = _compact_shot(83)
     shot.duration_s = 6
-    shot.characters = ["萧薰儿"]
-    shot.characters_visible = ["萧薰儿"]
+    shot.characters = ["甲二儿"]
+    shot.characters_visible = ["甲二儿"]
     shot.dialogues = [Dialogue(
-        speaker="萧炎", line="我会追上来。", delivery="spoken_dialogue",
+        speaker="甲一", line="我会追上来。", delivery="spoken_dialogue",
     )]
     shot.audio_timeline = [AudioTimelineItem(
         start_s=0.0, end_s=3.0, type="spoken_dialogue",
-        speaker_id="萧炎", text="我会追上来。", lip_sync=True,
+        speaker_id="甲一", text="我会追上来。", lip_sync=True,
     )]
 
     # The visual prompt can be compiled from syntactically complete data.  That
@@ -299,15 +299,15 @@ def test_genuine_text_divergence_still_conflicts() -> None:
 
 
 def test_key_line_only_in_source_excerpt_not_delivered() -> None:
-    key = "薰儿相信，你会重新站起来，取回属于你的荣耀与尊严"
+    key = "二儿相信，你会重新站起来，取回属于你的荣耀与尊严"
     shot = _compact_shot(9)
-    shot.characters = ["薰儿"]
-    shot.dialogues = [Dialogue(speaker="薰儿", line="走吧。", emotion="平静")]
+    shot.characters = ["二儿"]
+    shot.dialogues = [Dialogue(speaker="二儿", line="走吧。", emotion="平静")]
     shot.source_excerpt = key
     shot.audio_timeline = [
         AudioTimelineItem(
             start_s=0.3, end_s=2.0, type="spoken_dialogue",
-            speaker_id="薰儿", text="走吧。", lip_sync=True,
+            speaker_id="二儿", text="走吧。", lip_sync=True,
         )
     ]
     assert key not in spoken_text_of(shot)

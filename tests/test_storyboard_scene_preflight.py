@@ -47,7 +47,7 @@ def _bible(*names: str) -> Bible:
 def _screenplay() -> EpisodeScreenplay:
     return EpisodeScreenplay(
         episode_no=209,
-        title="美杜莎女王",
+        title="蛇后",
         full_script_text="【场1】日 / 蛇人族大殿内\n月媚：你可终于赶来了。",
         scene_outline=[
             ScriptScene(
@@ -65,7 +65,7 @@ def _screenplay() -> EpisodeScreenplay:
                 story_function="蛇人族首领与古河一行在城墙上空正面对峙",
                 characters=[],
                 summary="墨巴斯与月媚飞到蛇人族城墙上空，质问古河一行擅闯的目的。",
-                turn="古河传声呼唤美杜莎女王",
+                turn="古河传声呼唤蛇后",
                 source_basis="双方在蛇人族城墙上空对峙",
             ),
         ],
@@ -268,7 +268,7 @@ def test_scene_projection_reconciliation_does_not_wait_for_full_episode_success(
 
 
 def test_scene_preflight_waits_for_each_relevant_scene_image(tmp_path, monkeypatch) -> None:
-    bible = _bible("萧家迎客大厅", "蛇人族大殿", "蛇人族城墙上空")
+    bible = _bible("甲家迎客大厅", "蛇人族大殿", "蛇人族城墙上空")
     _fresh_project(tmp_path, monkeypatch, bible)
     generated: list[str] = []
     _install_fake_scene_generator(tmp_path, monkeypatch, generated)
@@ -278,7 +278,7 @@ def test_scene_preflight_waits_for_each_relevant_scene_image(tmp_path, monkeypat
 
     assert result["blocking_errors"] == []
     assert generated == ["蛇人族大殿", "蛇人族城墙上空"]
-    assert "萧家迎客大厅" not in generated
+    assert "甲家迎客大厅" not in generated
     for name in generated:
         row = db.get_conn().execute(
             "SELECT image_path FROM scene_references WHERE project_id='p1' AND scene_name=?",
@@ -430,7 +430,7 @@ def test_reactive_scene_pack_failure_preserves_paid_main_image(
 
 
 def test_new_screenplay_scene_is_ai_adopted_and_hidden_from_human_queue(tmp_path, monkeypatch) -> None:
-    bible = _bible("萧家迎客大厅")
+    bible = _bible("甲家迎客大厅")
     _fresh_project(tmp_path, monkeypatch, bible)
     generated: list[str] = []
     _install_fake_scene_generator(tmp_path, monkeypatch, generated)
@@ -470,7 +470,7 @@ def test_scene_discovery_receives_spatial_context_without_plot_summary(
     tmp_path,
     monkeypatch,
 ) -> None:
-    bible = _bible("萧家迎客大厅")
+    bible = _bible("甲家迎客大厅")
     _fresh_project(tmp_path, monkeypatch, bible)
     generated: list[str] = []
     _install_fake_scene_generator(tmp_path, monkeypatch, generated)

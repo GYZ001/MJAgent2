@@ -147,7 +147,7 @@ def test_refs_task_rolls_back_pending_purge_before_logging_failure(tmp_path, mon
     bible = Bible(
         world=World(visual_style_canonical="国风水墨"),
         characters=[Character(
-            name="萧炎", role="主角",
+            name="甲一", role="主角",
             appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩",
         )],
     )
@@ -309,7 +309,7 @@ async def test_scene_review_spawn_failure_does_not_leave_false_queued_batch(
 def test_character_reference_restart_preserves_target_and_parent(tmp_path, monkeypatch) -> None:
     conn = _fresh_database(tmp_path, monkeypatch)
     conn.execute(
-        "UPDATE projects SET refs_status='running', refs_target='萧炎' WHERE id='p1'"
+        "UPDATE projects SET refs_status='running', refs_target='甲一' WHERE id='p1'"
     )
     parent = _paused_run("character_references", "project", "p1")
     seen: list[dict] = []
@@ -324,7 +324,7 @@ def test_character_reference_restart_preserves_target_and_parent(tmp_path, monke
 
     assert api.recover_character_ref_tasks() == 1
     assert seen == [{
-        "project_id": "p1", "target": "萧炎", "only_characters": None,
+        "project_id": "p1", "target": "甲一", "only_characters": None,
         "resume": True, "fresh_after": None, "parent_run_id": parent,
     }]
 
@@ -384,7 +384,7 @@ def test_fresh_character_reference_batch_persists_restart_mode(tmp_path, monkeyp
     monkeypatch.setattr(api, "_refs_task_active", lambda _pid: False)
 
     started = api._start_refs_generation(
-        "p1", None, only_characters=["萧炎", "药老"], resume=False,
+        "p1", None, only_characters=["甲一", "丙老"], resume=False,
     )
     assert started and started["task_id"] == "refs:p1" and started["run_id"]
 
@@ -393,7 +393,7 @@ def test_fresh_character_reference_batch_persists_restart_mode(tmp_path, monkeyp
         "FROM projects WHERE id='p1'"
     ).fetchone()
     assert row["refs_status"] == "running"
-    assert json.loads(row["refs_target"]) == ["萧炎", "药老"]
+    assert json.loads(row["refs_target"]) == ["甲一", "丙老"]
     assert row["refs_resume"] == 0
     assert row["refs_batch_started_at"] is not None
     assert spawned == [("refs", "p1")]
@@ -405,7 +405,7 @@ def test_gap_character_reference_batch_persists_operation_boundary(tmp_path, mon
     monkeypatch.setattr(api, "_refs_task_active", lambda _pid: False)
 
     started = api._start_refs_generation(
-        "p1", None, only_characters=["药老"], resume=True,
+        "p1", None, only_characters=["丙老"], resume=True,
     )
 
     assert started and started["task_id"] == "refs:p1"
@@ -423,7 +423,7 @@ def test_running_character_reference_run_keeps_refs_busy_when_project_flag_is_id
     conn = _fresh_database(tmp_path, monkeypatch)
     bible = {
         "characters": [{
-            "name": "萧炎",
+            "name": "甲一",
             "role": "主角",
             "appearance_canonical": "黑发少年，身穿玄色劲装，目光坚定，身形修长，腰佩玉佩",
             "personality": "坚韧",
@@ -457,7 +457,7 @@ def test_portrait_view_redo_is_recreated_from_paused_run(tmp_path, monkeypatch) 
     parent = _paused_run(
         "portrait_view_redo", "project", "p1",
         config={
-            "task_key": "portrait_1:profile", "character_name": "萧炎",
+            "task_key": "portrait_1:profile", "character_name": "甲一",
             "portrait_id": "portrait_1", "view_role": "profile",
             "quote_id": "quote_1", "budget_limit_cny": 1.5,
         },

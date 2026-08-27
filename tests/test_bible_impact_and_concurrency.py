@@ -113,7 +113,7 @@ def _seed_bible(conn: sqlite3.Connection, *, version: int = 1, artifact_id: str 
         },
         "characters": [
             {
-                "name": "萧炎",
+                "name": "甲一",
                 "role": "主角",
                 "appearance_canonical": "黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩，英气逼人",
                 "personality": "坚韧",
@@ -210,7 +210,7 @@ def test_edit_bible_conflict_keeps_server_characters(monkeypatch) -> None:
     bible = _seed_bible(conn, version=2)
     server = json.loads(conn.execute("SELECT bible_json FROM projects WHERE id='proj_test'").fetchone()["bible_json"])
     server["characters"].append({
-        "name": "药老",
+        "name": "丙老",
         "role": "配角",
         "appearance_canonical": "白发老者，道袍飘逸，目光深邃，手持药鼎，气质出尘，须发皆白",
         "personality": "慈祥",
@@ -242,7 +242,7 @@ def test_edit_bible_conflict_keeps_server_characters(monkeypatch) -> None:
         assert exc.value.status_code == 409
         detail = exc.value.detail
         assert detail["code"] == "BIBLE_VERSION_CONFLICT"
-        assert "药老" in detail["character_names"]
+        assert "丙老" in detail["character_names"]
         assert detail["current_version"] == 3
 
     import asyncio
@@ -296,7 +296,7 @@ def test_refs_precheck_filters_characters(monkeypatch) -> None:
     conn = _memory_conn()
     bible = _seed_bible(conn)
     bible["characters"].append({
-        "name": "药老",
+        "name": "丙老",
         "role": "导师",
         "appearance_canonical": "白发老者，道袍飘逸，目光深邃，手持药鼎，气质出尘，须发皆白",
         "personality": "慈祥",
@@ -314,11 +314,11 @@ def test_refs_precheck_filters_characters(monkeypatch) -> None:
     ).fetchone()))
 
     all_quote = bible_ops.compute_refs_cost_precheck("proj_test")
-    filtered = bible_ops.compute_refs_cost_precheck("proj_test", characters=["药老"])
+    filtered = bible_ops.compute_refs_cost_precheck("proj_test", characters=["丙老"])
     assert all_quote["character_count"] == 2
     assert filtered["character_count"] == 1
-    assert filtered["scope"][0]["character"] == "药老"
-    assert filtered["characters"] == ["药老"]
+    assert filtered["scope"][0]["character"] == "丙老"
+    assert filtered["characters"] == ["丙老"]
     assert filtered["image_count"] == 3
 
 
@@ -359,7 +359,7 @@ def test_adopt_portrait_candidate_accepts_hard_failure_as_warning(monkeypatch, t
         "base_portrait_id, bible_version, artifact_id, pack_status, group_qa_json, change_json, created_at"
         ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            "portrait_bad", "proj_test", "萧炎", 1, None, "黑发少年", "prompt", str(image),
+            "portrait_bad", "proj_test", "甲一", 1, None, "黑发少年", "prompt", str(image),
             None, 1, None, "failed",
             json.dumps({"status": "failed", "hard_failures": ["face_mismatch"], "issues": []}),
             None, 1.0,
@@ -374,7 +374,7 @@ def test_adopt_portrait_candidate_accepts_hard_failure_as_warning(monkeypatch, t
 
     async def _run():
         result = await bible_ops.adopt_portrait_candidate(
-            "proj_test", "萧炎", "portrait_bad",
+            "proj_test", "甲一", "portrait_bad",
             {"reason": "人工检查", "bypass_soft": True},
         )
         assert result["adopted"] is True
@@ -396,7 +396,7 @@ def test_adopt_portrait_candidate_accepts_missing_views_as_warning(monkeypatch, 
         "base_portrait_id, bible_version, artifact_id, pack_status, group_qa_json, change_json, created_at"
         ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            "portrait_partial", "proj_test", "萧炎", 1, None, "黑发少年", "prompt", str(image),
+            "portrait_partial", "proj_test", "甲一", 1, None, "黑发少年", "prompt", str(image),
             None, 1, None, "ready", json.dumps({"status": "ready", "issues": []}), None, 1.0,
         ),
     )
@@ -415,7 +415,7 @@ def test_adopt_portrait_candidate_accepts_missing_views_as_warning(monkeypatch, 
     import asyncio
     async def _run():
         result = await bible_ops.adopt_portrait_candidate(
-            "proj_test", "萧炎", "portrait_partial",
+            "proj_test", "甲一", "portrait_partial",
             {"reason": "人工检查", "bypass_soft": True},
         )
         assert result["adopted"] is True

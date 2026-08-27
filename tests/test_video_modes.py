@@ -1626,7 +1626,7 @@ def _shot_row(**kwargs) -> dict:
         "duration_s": 5,
         "shot_size": "特写",
         "camera_move": "推近",
-        "scene_setting": "日, 萧家广场",
+        "scene_setting": "日, 甲家广场",
         "characters": json.dumps(["A"]),
         "action_desc": "A站在魔石碑前，碑面爆发出嘈杂声，A紧握双拳，淡出淡入。",
         "first_frame_desc": "A站在魔石碑前。",

@@ -4094,7 +4094,7 @@ def validate_storyboard_preserves_key_content(board: Storyboard,
     spine = screenplay.plot_spine
     # textmatch 模糊匹配只用于没有稳定 ID 的旧数据降级判定。新版剧本已有 plot_spine，
     # 其 must_keep 由下方 validate_spine_delivery_ledger 逐 ID 校验；若仍用自由文本摘要的
-    # 2-gram 重合率单独报 blocker，会把“萧炎三段低级已由 S01+KL01/KL02 交付”误判成
+    # 2-gram 重合率单独报 blocker，会把”甲一三段低级已由 S01+KL01/KL02 交付”误判成
     # 没逐字写“天才跌落谷底”而缺剧情，与 textmatch 模块的主从口径相冲突。
     if not (spine and spine.spine_beats):
         missing_points = [
@@ -5901,8 +5901,8 @@ def prefer_default_shot_durations(
 def _canonical_bible_name(name: str, bible_names: set[str]) -> str | None:
     """把疑似别名/简称/错字的角色名【唯一】对应到圣经正名；无唯一命中返回 None（按路人剥离）。
 
-    只认包含关系：圣经名是该名子串（"萧炎少爷"→"萧炎"）或该名（≥2字）是圣经名子串（"萧薰"→"萧薰儿"）。
-    命中多于一个圣经名（如"萧"同时命中萧炎/萧媚）视为不可判定，返回 None——宁可剥离也不错配。"""
+    只认包含关系：圣经名是该名子串（"甲一少爷"→"甲一"）或该名（≥2字）是圣经名子串（"甲二"→"甲二儿"）。
+    命中多于一个圣经名（如"甲"同时命中甲一/甲三）视为不可判定，返回 None——宁可剥离也不错配。"""
     name = (name or "").strip()
     if not name:
         return None
@@ -5925,8 +5925,8 @@ def _dedupe_names(values: list[str]) -> list[str]:
 def _replace_character_mention(text: str, old: str, new: str) -> str:
     """在不把正名撑长的前提下替换别名。
 
-    例如「萧薰」→「萧薰儿」时，已有「萧薰儿」不能变成「萧薰儿儿」，
-    但单独的「萧薰」仍应同步，否则会留下新的合同分叉。
+    例如「甲二」→「甲二儿」时，已有「甲二儿」不能变成「甲二儿儿」，
+    但单独的「甲二」仍应同步，否则会留下新的合同分叉。
     """
     if not text or old == new:
         return text

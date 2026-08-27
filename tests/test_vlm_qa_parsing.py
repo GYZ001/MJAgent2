@@ -212,7 +212,7 @@ def test_scene_reference_qa_treats_empty_environment_as_required(monkeypatch) ->
     monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
     monkeypatch.setattr("app.multiview.watermark_qa_mode", lambda: "ignore_unless_occluding")
     qa = asyncio.run(review_scene_image(
-        "frame", "古风斗技堂，中央石质擂台", "萧家斗技堂", [], kind="head",
+        "frame", "古风斗技堂，中央石质擂台", "甲家斗技堂", [], kind="head",
         initiator_label="场景资产主图QA", environment_only=True,
     ))
 
@@ -234,7 +234,7 @@ def test_scene_reference_qa_ignores_non_occluding_provider_watermark(monkeypatch
     monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
     monkeypatch.setattr("app.multiview.watermark_qa_mode", lambda: "ignore_unless_occluding")
     qa = asyncio.run(review_scene_image(
-        "frame", "古风斗技堂，中央石质擂台", "萧家斗技堂", [],
+        "frame", "古风斗技堂，中央石质擂台", "甲家斗技堂", [],
         environment_only=True,
     ))
 
@@ -328,7 +328,7 @@ def test_scene_reference_qa_keeps_real_overlay_text_as_hard_failure(monkeypatch)
     monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
     monkeypatch.setattr("app.multiview.watermark_qa_mode", lambda: "ignore_unless_occluding")
     qa = asyncio.run(review_scene_image(
-        "frame", "古风斗技堂，中央石质擂台", "萧家斗技堂", [],
+        "frame", "古风斗技堂，中央石质擂台", "甲家斗技堂", [],
         environment_only=True,
     ))
 
@@ -354,14 +354,14 @@ def test_scene_reference_review_uses_effective_override(monkeypatch) -> None:
     monkeypatch.setattr("app.stages.review_scene_image", fake_review)
     qa = asyncio.run(_review_scene_ref(
         "unused.jpg",
-        {"name": "萧家斗技堂", "scene_canonical": "错误的藏书阁描述"},
+        {"name": "甲家斗技堂", "scene_canonical": "错误的藏书阁描述"},
         expected_description="古风斗技堂，中央石质擂台，四周观战席",
     ))
 
     assert qa["overall"] == 0.9
     assert captured == {
         "frame_desc": "古风斗技堂，中央石质擂台，四周观战席",
-        "scene_setting": "萧家斗技堂",
+        "scene_setting": "甲家斗技堂",
         "anchors": [],
         "environment_only": True,
     }

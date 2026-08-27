@@ -166,7 +166,7 @@ def test_episode_bible_uses_persisted_appearance_not_prompt_word_extraction(monk
     conn.execute(
         "INSERT INTO character_portraits VALUES(?,?,?,?,?,?,?)",
         (
-            "p", "萧薰儿", 1, None, "淡绿色上衣搭配紧腿长裤",
+            "p", "甲二儿", 1, None, "淡绿色上衣搭配紧腿长裤",
             "全身角色立绘定妆照：黑色长发，淡紫色古风长裙，金色刺绣。"
             "正面站立，纯浅米色背景。",
             None,
@@ -175,7 +175,7 @@ def test_episode_bible_uses_persisted_appearance_not_prompt_word_extraction(monk
     monkeypatch.setattr("app.portraits.get_conn", lambda: conn)
     bible = Bible(
         characters=[Character(
-            name="萧薰儿", role="主角", appearance_canonical="淡绿色上衣搭配紧腿长裤",
+            name="甲二儿", role="主角", appearance_canonical="淡绿色上衣搭配紧腿长裤",
         )],
         world=World(visual_style_canonical="3D国漫"),
     )
@@ -191,12 +191,12 @@ def test_portrait_completion_merges_without_erasing_concurrent_scenes() -> None:
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT)")
     bible = {
-        "characters": [{"name": "药老", "ref_image_path": None}],
+        "characters": [{"name": "丙老", "ref_image_path": None}],
         "scenes": [{"name": "后山山崖", "scene_canonical": "并发场景任务已写入"}],
     }
     conn.execute("INSERT INTO projects VALUES('p', ?)", (json.dumps(bible, ensure_ascii=False),))
     character = Character(
-        name="药老", role="配角", appearance_canonical="透明苍老人影",
+        name="丙老", role="配角", appearance_canonical="透明苍老人影",
         ref_image_path="accepted.jpg",
     )
 

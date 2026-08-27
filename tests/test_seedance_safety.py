@@ -19,15 +19,15 @@ def test_seedance_normalization_preserves_story_content() -> None:
 
 
 def test_legacy_retry_parameters_do_not_mutate_content() -> None:
-    prompt = "镜头动作：萧薰儿追上萧炎。 --ratio 9:16 --dur 8"
+    prompt = "镜头动作：甲二儿追上甲一。 --ratio 9:16 --dur 8"
 
     normalized = sanitize_seedance_prompt(
         prompt,
         aggressive=True,
-        extra_terms=(("萧薰儿", "角色甲"), ("萧炎", "角色乙")),
+        extra_terms=(("甲二儿", "角色甲"), ("甲一", "角色乙")),
     )
 
-    assert "萧薰儿追上萧炎" in normalized
+    assert "甲二儿追上甲一" in normalized
     assert "角色甲" not in normalized
     assert "角色乙" not in normalized
     assert normalized.endswith("--ratio 9:16 --dur 8")

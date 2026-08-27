@@ -20,11 +20,11 @@ def test_migrate_shot_id_spaces_moves_s_star() -> None:
 
 def test_audit_legacy_spoken_conflict() -> None:
     shot = _compact_shot(9)
-    shot.dialogues = [Dialogue(speaker="薰儿", line="走吧。", emotion="平静")]
+    shot.dialogues = [Dialogue(speaker="二儿", line="走吧。", emotion="平静")]
     shot.audio_timeline = [
         AudioTimelineItem(
             start_s=0.3, end_s=5.0, type="spoken_dialogue",
-            speaker_id="薰儿", text="你会重新站起来", lip_sync=True,
+            speaker_id="二儿", text="你会重新站起来", lip_sync=True,
         )
     ]
     assert audit_legacy_spoken_contract(shot) == "conflict"

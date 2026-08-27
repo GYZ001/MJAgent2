@@ -45,7 +45,7 @@ def test_approved_scene_bible_restores_only_missing_scenes() -> None:
 def test_scene_path_merge_preserves_concurrent_character_update() -> None:
     conn = _conn()
     latest = {
-        "characters": [{"name": "药老", "ref_image_path": "portrait.jpg"}],
+        "characters": [{"name": "丙老", "ref_image_path": "portrait.jpg"}],
         "scenes": [{"name": "后山", "scene_canonical": "后山", "ref_image_path": None}],
     }
     conn.execute("INSERT INTO projects VALUES('p', ?)", (json.dumps(latest, ensure_ascii=False),))

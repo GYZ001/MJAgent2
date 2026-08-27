@@ -1122,7 +1122,7 @@ def split_dialogue_chain_by_scene(
         return re.sub(r"[\s\W_]+", "", str(value or ""), flags=re.UNICODE)
 
     def compact_speaker(value: Any) -> str:
-        # 正文允许把表演提示写在角色名后（如「萧战（关切）」），而对白链中的
+        # 正文允许把表演提示写在角色名后（如「甲四（关切）」），而对白链中的
         # speaker 只保存角色名。定位时先去掉这类提示，否则会把所有话轮错误地
         # 回退到首场，最终把本可修复的跨场链误判成 no-op。
         base = re.sub(r"[（(][^）)]*[）)]", "", str(value or ""))

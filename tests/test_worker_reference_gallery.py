@@ -14,13 +14,13 @@ def test_visible_cast_projection_does_not_require_offscreen_listener_reaction() 
     shot = Shot(
         shot_no=14, duration_s=10, shot_size="中景", camera_move="固定",
         scene_setting="夜，后山悬崖",
-        characters=["药老", "萧炎"], characters_visible=["药老"],
-        action_desc="药老悬浮于戒指上方，抬手抚须，向萧炎说明缘由。",
-        first_frame_desc="药老独自悬浮于戒指上方，面朝萧炎方向。",
-        last_frame_desc="药老仍悬浮于戒指上方，望向萧炎方向等待回应。",
-        state_in="萧炎质问完毕，药老面对萧炎，双方对峙持续。",
-        primary_action="药老向萧炎说明缘由。",
-        state_out="药老说完，萧炎沉默并转向理性思考。",
+        characters=["丙老", "甲一"], characters_visible=["丙老"],
+        action_desc="丙老悬浮于戒指上方，抬手抚须，向甲一说明缘由。",
+        first_frame_desc="丙老独自悬浮于戒指上方，面朝甲一方向。",
+        last_frame_desc="丙老仍悬浮于戒指上方，望向甲一方向等待回应。",
+        state_in="甲一质问完毕，丙老面对甲一，双方对峙持续。",
+        primary_action="丙老向甲一说明缘由。",
+        state_out="丙老说完，甲一沉默并转向理性思考。",
         continuity_mode="reverse_angle",
     )
 
@@ -31,8 +31,8 @@ def test_visible_cast_projection_does_not_require_offscreen_listener_reaction() 
             state_out=shot.state_out,
             primary_action=shot.primary_action,
             full_action=shot.action_desc,
-            visible_names=["药老"],
-            bible_names=["药老", "萧炎"],
+            visible_names=["丙老"],
+            bible_names=["丙老", "甲一"],
             continuity_mode="reverse_angle",
         )
     )
@@ -40,10 +40,10 @@ def test_visible_cast_projection_does_not_require_offscreen_listener_reaction() 
     if visible_contract:
         action_desc = f"{action_desc}\n画内角色合同：{visible_contract}"
 
-    assert "萧炎沉默" not in state_out
-    assert "画外萧炎方向等待回应" in state_out
-    assert "画内角色合同：可辨识画面人物仅限：药老" in action_desc
-    assert "萧炎只作为画外叙事关系" in action_desc
+    assert "甲一沉默" not in state_out
+    assert "画外甲一方向等待回应" in state_out
+    assert "画内角色合同：可辨识画面人物仅限：丙老" in action_desc
+    assert "甲一只作为画外叙事关系" in action_desc
 
 
 def _conn() -> sqlite3.Connection:

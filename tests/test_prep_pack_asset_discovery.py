@@ -214,7 +214,7 @@ def test_fully_known_cast_triggers_zero_discovery_calls(monkeypatch):
     conn = _make_conn()
     conn.execute(
         "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
-        "VALUES ('cp1','p1','萧炎',1,NULL)"
+        "VALUES ('cp1','p1','甲一',1,NULL)"
     )
     conn.execute(
         "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end) "
@@ -233,7 +233,7 @@ def test_fully_known_cast_triggers_zero_discovery_calls(monkeypatch):
 
     events = [_event(
         "ev_001",
-        characters=[{"display_name": "萧炎", "is_background_extra": False}],
+        characters=[{"display_name": "甲一", "is_background_extra": False}],
         scenes_=[{"display_name": "宗门广场"}],
     )]
     characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
@@ -241,18 +241,18 @@ def test_fully_known_cast_triggers_zero_discovery_calls(monkeypatch):
         # 1.4.2 称谓/场景名证据闸要求直接命中必须有本集文本证据 -- 两个提及都
         # 得逐字出现在这里，否则会被误当成"裸命中没证据"（这不是本测试要覆盖
         # 的场景，本测试要的是"零调用发现"，所以必须让直接命中干净通过）。
-        source_text="萧炎快步穿过宗门广场，众弟子纷纷让路。",
+        source_text="甲一快步穿过宗门广场，众弟子纷纷让路。",
     )
 
     assert errors == []
     assert stats == {"character_discovery_calls": 0, "scene_discovery_calls": 0}
     assert functional_extras == []
     assert characters == [{
-        "identity_id": "bible:萧炎", "display_name": "萧炎",
+        "identity_id": "bible:甲一", "display_name": "甲一",
         "portrait_id": "cp1", "segment_indexes": [1], "aliases": [],
-        "visual_entity_id": "bible:萧炎", "display_appellation": "萧炎",
+        "visual_entity_id": "bible:甲一", "display_appellation": "甲一",
         "provenance": {
-            "method": "direct", "anchor_segments": [1], "anchor_phrase": "萧炎",
+            "method": "direct", "anchor_segments": [1], "anchor_phrase": "甲一",
         },
     }]
     assert scene_list == [{
@@ -1794,20 +1794,20 @@ def test_provenance_direct_method_self_verifies():
     conn = _make_conn()
     conn.execute(
         "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
-        "VALUES ('cp1','p1','萧炎',1,NULL)"
+        "VALUES ('cp1','p1','甲一',1,NULL)"
     )
     conn.commit()
-    source_text = "萧炎快步穿过宗门广场，众弟子纷纷让路。"
+    source_text = "甲一快步穿过宗门广场，众弟子纷纷让路。"
     events = [_event("ev_001", characters=[
-        {"display_name": "萧炎", "is_background_extra": False},
+        {"display_name": "甲一", "is_background_extra": False},
     ])]
     characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
         conn, events=events, source_text=source_text,
     )
     assert errors == []
-    xiao_yan = next(c for c in characters if c["display_name"] == "萧炎")
+    xiao_yan = next(c for c in characters if c["display_name"] == "甲一")
     assert xiao_yan["provenance"] == {
-        "method": "direct", "anchor_segments": [1], "anchor_phrase": "萧炎",
+        "method": "direct", "anchor_segments": [1], "anchor_phrase": "甲一",
     }
     assert _provenance_self_verify(source_text, characters, scene_list, functional_extras) == []
 
@@ -2016,10 +2016,10 @@ def test_provenance_discovery_method_self_verifies(monkeypatch):
 def test_provenance_anchor_mismatch_blocks_publish():
     """红灯 b：anchor_phrase 不在 anchor_segments 指定的原文段里——自校验
     必须失败并具名报出，供 _generate_prep_pack_once 在发布前门禁拦截。"""
-    source_text = "萧炎快步穿过宗门广场，众弟子纷纷让路。"
+    source_text = "甲一快步穿过宗门广场，众弟子纷纷让路。"
     segments = prep_pack.index_source_segments(source_text)
     tampered_characters = [{
-        "identity_id": "bible:萧炎", "display_name": "萧炎",
+        "identity_id": "bible:甲一", "display_name": "甲一",
         "portrait_id": "cp1", "event_ids": ["ev_001"], "aliases": [],
         "provenance": {
             "method": "direct", "anchor_segments": [1], "anchor_phrase": "根本不存在的短语",
@@ -2029,7 +2029,7 @@ def test_provenance_anchor_mismatch_blocks_publish():
         segments, {"characters": tampered_characters, "scenes": [], "functional_extras": []},
     )
     assert errors, "anchor_phrase 未逐字命中所指段落必须门禁拦截"
-    assert any("萧炎" in message and "根本不存在的短语" in message for message in errors)
+    assert any("甲一" in message and "根本不存在的短语" in message for message in errors)
 
 
 def test_provenance_resolution_forward_half_certificate_blocks_publish():
@@ -2097,7 +2097,7 @@ def test_provenance_missing_field_on_legacy_manifest_does_not_crash():
     segments = prep_pack.index_source_segments(source_text)
     legacy_manifest = {
         "characters": [{
-            "identity_id": "bible:萧炎", "display_name": "萧炎",
+            "identity_id": "bible:甲一", "display_name": "甲一",
             "portrait_id": "cp1", "event_ids": ["ev_001"], "aliases": [],
         }],
         "scenes": [{
@@ -4351,7 +4351,7 @@ def test_prop_mention_with_literal_evidence_appears_in_asset_manifest_props():
     conn = _make_conn()
     characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
         conn,
-        source_text="萧炎从怀中取出一枚血玉玦，放在桌上。",
+        source_text="甲一从怀中取出一枚血玉玦，放在桌上。",
         prop_mentions=[{
             "label": "血玉玦",
             "description": "一枚泛着血光的玉玦，边缘刻着古老符文",
@@ -4377,7 +4377,7 @@ def test_prop_mention_without_literal_evidence_is_blocked_not_published():
     conn = _make_conn()
     characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
         conn,
-        source_text="萧炎从怀中取出一枚血玉玦，放在桌上。",
+        source_text="甲一从怀中取出一枚血玉玦，放在桌上。",
         prop_mentions=[{
             "label": "屠龙宝刀",
             "description": "一把传说中的绝世神兵",
@@ -4396,7 +4396,7 @@ def test_prop_mention_claiming_unverified_segment_keeps_only_evidenced_segment()
     characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
         conn,
         source_text=(
-            "萧炎从怀中取出一枚血玉玦，放在桌上。"
+            "甲一从怀中取出一枚血玉玦，放在桌上。"
             "\n\n林動只是随口一提往事，并未提到那枚玉玦。"
         ),
         prop_mentions=[{
@@ -4418,7 +4418,7 @@ def test_prop_appearing_in_multiple_segments_merges_segment_indexes_as_union():
     characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
         conn,
         source_text=(
-            "萧炎从怀中取出一枚血玉玦，放在桌上。"
+            "甲一从怀中取出一枚血玉玦，放在桌上。"
             "\n\n林動盯着那枚血玉玦，若有所思。"
         ),
         prop_mentions=[

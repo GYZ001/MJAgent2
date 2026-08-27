@@ -24,7 +24,7 @@ describe('filterAutoChangeItems', () => {
   it('keeps internal character discovery out of the scene review queue', () => {
     const items = [
       { id: 'character', kind: 'new_character', character: '葛叶', status: 'auto_applied' },
-      { id: 'scene', kind: 'scene_discovery', scene: '云岚宗广场', status: 'pending' },
+      { id: 'scene', kind: 'scene_discovery', scene: '宗门甲广场', status: 'pending' },
     ]
 
     expect(filterAutoChangeItems(items, 'scene').map(item => item.id)).toEqual(['scene'])
@@ -35,7 +35,7 @@ describe('filterAutoChangeItems', () => {
 describe('更新建议影响确认', () => {
   it('新增场景明确说明不自动出图和收费', () => {
     const copy = autoChangeDecisionCopy(
-      { kind: 'scene_discovery', scene: '云岚宗广场' },
+      { kind: 'scene_discovery', scene: '宗门甲广场' },
       'approve',
     )
     expect(copy.message).toContain('加入当前场景库')
@@ -44,7 +44,7 @@ describe('更新建议影响确认', () => {
 
   it('忽略建议说明当前采用版本保持不变', () => {
     const copy = autoChangeDecisionCopy(
-      { kind: 'scene_state_change', scene: '萧家广场' },
+      { kind: 'scene_state_change', scene: '甲家广场' },
       'reject',
     )
     expect(copy.details.join('；')).toContain('当前已采用版本')

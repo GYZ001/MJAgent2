@@ -2156,7 +2156,7 @@ def test_reference_identity_cannot_hide_visible_blueprint_participant(
 
 def _seed_project(conn: sqlite3.Connection, chapter_content: str) -> None:
     bible = Bible(world=World(visual_style_canonical="国风"),
-                  characters=[Character(name="萧炎", role="主角",
+                  characters=[Character(name="甲一", role="主角",
                                         appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩")])
     conn.execute("INSERT INTO projects(id, bible_json, bible_version) VALUES('p1', ?, 1)",
                  (json.dumps(bible.model_dump(), ensure_ascii=False),))
@@ -2175,15 +2175,15 @@ def _patch_settings(monkeypatch, conn) -> dict:
 
 def test_ensure_character_card_auto_adds_prominent_character_and_portrait(monkeypatch) -> None:
     conn = _make_conn()
-    _seed_project(conn, "美杜莎现身，紫色长发，妖娆冷艳。美杜莎再次出手。美杜莎统领蛇人一族。" * 3)
+    _seed_project(conn, "蛇后现身，紫色长发，妖娆冷艳。蛇后再次出手。蛇后统领蛇人一族。" * 3)
     _patch_settings(monkeypatch, conn)
 
     async def fake_assess(name, fragments, *, style, known_names, ep_label, **_kwargs):
-        assert name == "美杜莎" and "美杜莎" in fragments  # 检索到的是该角色片段
+        assert name == "蛇后" and "蛇后" in fragments  # 检索到的是该角色片段
         return {"subject_kind": "person", "important": True, "reason": "反复出场", "role": "重要配角",
                 "appearance_canonical": "紫发妖娆女子，紫色长发，金瞳蛇眸，蛇纹长裙，气场冷艳标志性蛇瞳",
                 "personality": "高傲", "speech_style": "冷冽",
-                "relationships": [{"to": "萧炎", "relation": "宿敌"}]}
+                "relationships": [{"to": "甲一", "relation": "宿敌"}]}
 
     async def fake_portrait(project_id, name, style, appearance, *, ep_start):
         return (f"/tmp/{name}.jpg", "fake prompt")
@@ -2191,25 +2191,25 @@ def test_ensure_character_card_auto_adds_prominent_character_and_portrait(monkey
     monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
     monkeypatch.setattr(portraits, "_generate_fresh_portrait", fake_portrait)
 
-    res = asyncio.run(portraits.ensure_character_card("p1", "美杜莎", 21))
+    res = asyncio.run(portraits.ensure_character_card("p1", "蛇后", 21))
     assert res["status"] == "added"
     assert res["has_portrait"] is True
 
     names = [c["name"] for c in json.loads(
         conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"])["characters"]]
-    assert "美杜莎" in names
+    assert "蛇后" in names
     assert conn.execute("SELECT bible_version FROM projects WHERE id='p1'").fetchone()["bible_version"] == 2
-    assert conn.execute("SELECT COUNT(*) c FROM character_portraits WHERE character_name='美杜莎'").fetchone()["c"] == 1
+    assert conn.execute("SELECT COUNT(*) c FROM character_portraits WHERE character_name='蛇后'").fetchone()["c"] == 1
     queue = json.loads(conn.execute(
         "SELECT bible_auto_changes_json FROM projects WHERE id='p1'"
     ).fetchone()["bible_auto_changes_json"])
     assert queue[0]["status"] == "auto_applied"
-    assert queue[0]["payload"]["character_card"]["name"] == "美杜莎"
+    assert queue[0]["payload"]["character_card"]["name"] == "蛇后"
 
     # 幂等：第二次识别到同名角色时不重复建卡/出图。
-    res2 = asyncio.run(portraits.ensure_character_card("p1", "美杜莎", 22))
+    res2 = asyncio.run(portraits.ensure_character_card("p1", "蛇后", 22))
     assert res2["status"] == "exists"
-    cnt = conn.execute("SELECT COUNT(*) c FROM character_portraits WHERE character_name='美杜莎'").fetchone()["c"]
+    cnt = conn.execute("SELECT COUNT(*) c FROM character_portraits WHERE character_name='蛇后'").fetchone()["c"]
     assert cnt == 1
 
 
@@ -2284,7 +2284,7 @@ def test_required_identity_card_prompt_does_not_reapply_importance_gate(
         "丁力",
         "丁力听令后带人巡查山门。",
         style="国风",
-        known_names=["萧炎"],
+        known_names=["甲一"],
         ep_label="第 21 集",
         require_identity_card=True,
     ))
@@ -2340,7 +2340,7 @@ def test_required_identity_card_retries_once_when_first_card_too_thin(
         "丁力",
         "丁力听令后带人巡查山门。",
         style="国风",
-        known_names=["萧炎"],
+        known_names=["甲一"],
         ep_label="第 21 集",
         require_identity_card=True,
     ))
@@ -2380,7 +2380,7 @@ def test_mentioned_only_unknown_character_does_not_require_identity_card() -> No
     ) is False
     assert portraits._candidate_requires_identity_card(
         {
-            "name": "魂天帝",
+            "name": "角色丙",
             "kind": "onscreen",
         },
         known,
@@ -2411,7 +2411,7 @@ def test_character_card_truncation_is_reported_as_generation_error(
 
 def test_ensure_character_card_keeps_auto_added_card_when_portrait_fails(monkeypatch) -> None:
     conn = _make_conn()
-    _seed_project(conn, "美杜莎现身，紫色长发。美杜莎再次出手。美杜莎统领蛇人一族。" * 3)
+    _seed_project(conn, "蛇后现身，紫色长发。蛇后再次出手。蛇后统领蛇人一族。" * 3)
     _patch_settings(monkeypatch, conn)
 
     async def fake_assess(*a, **k):
@@ -2430,14 +2430,14 @@ def test_ensure_character_card_keeps_auto_added_card_when_portrait_fails(monkeyp
     monkeypatch.setattr(portraits, "_generate_fresh_portrait", boom)
     monkeypatch.setattr(portraits, "code_ref", lambda *_args, **_kwargs: "（测试错误）")
 
-    res = asyncio.run(portraits.ensure_character_card("p1", "美杜莎", 21))
+    res = asyncio.run(portraits.ensure_character_card("p1", "蛇后", 21))
     assert res["status"] == "added" and res["has_portrait"] is False
     assert portrait_calls == 1
     # 供应商失败不回滚 AI 已确认的卡片；分镜前自动重试定妆资产。
     names = [c["name"] for c in json.loads(
         conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"])["characters"]]
-    assert "美杜莎" in names
-    assert conn.execute("SELECT COUNT(*) c FROM character_portraits WHERE character_name='美杜莎'").fetchone()["c"] == 0
+    assert "蛇后" in names
+    assert conn.execute("SELECT COUNT(*) c FROM character_portraits WHERE character_name='蛇后'").fetchone()["c"] == 0
     queue = json.loads(conn.execute(
         "SELECT bible_auto_changes_json FROM projects WHERE id='p1'"
     ).fetchone()["bible_auto_changes_json"])
@@ -2446,13 +2446,13 @@ def test_ensure_character_card_keeps_auto_added_card_when_portrait_fails(monkeyp
 
 def test_existing_pending_character_is_auto_applied_without_reassessment(monkeypatch) -> None:
     conn = _make_conn()
-    _seed_project(conn, "葛叶陪同纳兰嫣然现身。葛叶出手阻拦萧炎。" * 4)
+    _seed_project(conn, "葛叶陪同角色丁现身。葛叶出手阻拦甲一。" * 4)
     _patch_settings(monkeypatch, conn)
     conn.execute("ALTER TABLE projects ADD COLUMN bible_auto_changes_json TEXT")
     card = Character(
         name="葛叶",
         role="重要配角",
-        appearance_canonical="老年男性，灰白长发束起，身着云岚宗青灰长袍，面容沉稳，腰佩宗门令牌",
+        appearance_canonical="老年男性，灰白长发束起，身着宗门甲青灰长袍，面容沉稳，腰佩宗门令牌",
     )
     pending = [{
         "id": "change_old",
@@ -2500,7 +2500,7 @@ def test_auto_discovered_character_pack_starts_at_first_appearance(tmp_path, mon
     bible = Bible(
         world=World(visual_style_canonical="国风"),
         characters=[Character(
-            name="萧炎", role="主角",
+            name="甲一", role="主角",
             appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩",
         )],
     )
@@ -2511,7 +2511,7 @@ def test_auto_discovered_character_pack_starts_at_first_appearance(tmp_path, mon
     )
     conn.execute(
         "INSERT INTO chapters(project_id,idx,title,content,char_count) VALUES(?,?,?,?,?)",
-        ("p1", 5, "葛叶登场", "葛叶陪同纳兰嫣然现身，并与萧炎正面交锋。" * 8, 240),
+        ("p1", 5, "葛叶登场", "葛叶陪同角色丁现身，并与甲一正面交锋。" * 8, 240),
     )
     conn.execute(
         "INSERT INTO episodes(id,project_id,episode_no,title,source_chapters,status,created_at) "
@@ -2523,7 +2523,7 @@ def test_auto_discovered_character_pack_starts_at_first_appearance(tmp_path, mon
         return {
             "subject_kind": "person",
             "important": True, "reason": "具名对手且持续参与主线", "role": "重要配角",
-            "appearance_canonical": "老年男性，灰白长发束起，身着云岚宗青灰长袍，面容沉稳，腰佩宗门令牌",
+            "appearance_canonical": "老年男性，灰白长发束起，身着宗门甲青灰长袍，面容沉稳，腰佩宗门令牌",
             "personality": "沉稳", "speech_style": "克制", "relationships": [],
         }
 
@@ -2585,7 +2585,7 @@ def test_minor_character_is_skipped_and_negatively_cached(monkeypatch) -> None:
 
 def test_ensure_cards_for_screenplay_blocks_unknown_names_without_building_cards(monkeypatch) -> None:
     conn = _make_conn()
-    _seed_project(conn, "美杜莎现身，紫色长发。美杜莎再次出手。美杜莎统领蛇人一族。" * 3)
+    _seed_project(conn, "蛇后现身，紫色长发。蛇后再次出手。蛇后统领蛇人一族。" * 3)
     _patch_settings(monkeypatch, conn)
 
     seen: list[tuple[str, int]] = []
@@ -2600,7 +2600,7 @@ def test_ensure_cards_for_screenplay_blocks_unknown_names_without_building_cards
         def __init__(self, chars): self.characters = chars
 
     class _Screenplay:
-        scene_outline = [_Scene(["萧炎", "美杜莎"]), _Scene(["美杜莎", "纳兰嫣然"])]
+        scene_outline = [_Scene(["甲一", "蛇后"]), _Scene(["蛇后", "角色丁"])]
         beats: list = []
 
     bible = Bible.model_validate(json.loads(
@@ -2623,14 +2623,14 @@ def _insert_portrait(conn, pid, name, ep_start, ep_end, appearance, image_path) 
 
 def test_ensure_cards_for_screenplay_redraws_on_appearance_drift(monkeypatch) -> None:
     conn = _make_conn()
-    _seed_project(conn, "萧炎一夜白头，玄色劲装染血，左眼覆着一道狰狞刀疤。萧炎冷然出手。" * 3)
+    _seed_project(conn, "甲一一夜白头，玄色劲装染血，左眼覆着一道狰狞刀疤。甲一冷然出手。" * 3)
     _patch_settings(monkeypatch, conn)
     # 已有开区间定妆照（适用集 1~ 至今）
-    _insert_portrait(conn, "p1", "萧炎", 1, None, "黑发少年，玄色劲装，目光坚定，身形修长", "/tmp/xiao_ep1.jpg")
+    _insert_portrait(conn, "p1", "甲一", 1, None, "黑发少年，玄色劲装，目光坚定，身形修长", "/tmp/xiao_ep1.jpg")
 
     async def fake_screen(entries, ep_label):
-        assert any(e["name"] == "萧炎" for e in entries) and "萧炎" in entries[0]["fragments"]
-        return {"萧炎": {"new_appearance": "白发青年，玄色染血劲装，左眼狰狞刀疤，目光冷峻", "reason": "白头+刀疤"}}
+        assert any(e["name"] == "甲一" for e in entries) and "甲一" in entries[0]["fragments"]
+        return {"甲一": {"new_appearance": "白发青年，玄色染血劲装，左眼狰狞刀疤，目光冷峻", "reason": "白头+刀疤"}}
 
     async def fake_redraw(project_id, name, style, appearance, *, base_path, ep_start):
         assert base_path == "/tmp/xiao_ep1.jpg" and ep_start == 21  # 以旧图为底、新段从本集起
@@ -2643,16 +2643,16 @@ def test_ensure_cards_for_screenplay_redraws_on_appearance_drift(monkeypatch) ->
         def __init__(self, chars): self.characters = chars
 
     class _Screenplay:
-        scene_outline = [_Scene(["萧炎"])]
+        scene_outline = [_Scene(["甲一"])]
         beats: list = []
 
     bible = Bible.model_validate(json.loads(
         conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]))
     out = asyncio.run(portraits.ensure_cards_for_screenplay("p1", 21, _Screenplay(), bible))
 
-    assert [r["name"] for r in out["redrawn"]] == ["萧炎"]
+    assert [r["name"] for r in out["redrawn"]] == ["甲一"]
     rows = conn.execute(
-        "SELECT ep_start, ep_end, appearance FROM character_portraits WHERE character_name='萧炎' ORDER BY ep_start"
+        "SELECT ep_start, ep_end, appearance FROM character_portraits WHERE character_name='甲一' ORDER BY ep_start"
     ).fetchall()
     # 旧段右区间关到本集-1，新开区间段从本集起
     assert (rows[0]["ep_start"], rows[0]["ep_end"]) == (1, 20)
@@ -2660,15 +2660,15 @@ def test_ensure_cards_for_screenplay_redraws_on_appearance_drift(monkeypatch) ->
     assert "白发" in rows[1]["appearance"]
     # bible 锚点同步成最新（供人物谱 UI 展示）
     chars = json.loads(conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"])["characters"]
-    assert "白发" in next(c for c in chars if c["name"] == "萧炎")["appearance_canonical"]
+    assert "白发" in next(c for c in chars if c["name"] == "甲一")["appearance_canonical"]
 
 
 def test_no_drift_redraw_when_portrait_starts_at_or_after_this_episode(monkeypatch) -> None:
     """本集（之后）才登场的定妆照天然是最新，不应再判漂移/重绘。"""
     conn = _make_conn()
-    _seed_project(conn, "萧炎一夜白头，玄色劲装染血，左眼覆着一道狰狞刀疤。" * 3)
+    _seed_project(conn, "甲一一夜白头，玄色劲装染血，左眼覆着一道狰狞刀疤。" * 3)
     _patch_settings(monkeypatch, conn)
-    _insert_portrait(conn, "p1", "萧炎", 21, None, "黑发少年，玄色劲装，目光坚定", "/tmp/xiao_ep21.jpg")
+    _insert_portrait(conn, "p1", "甲一", 21, None, "黑发少年，玄色劲装，目光坚定", "/tmp/xiao_ep21.jpg")
 
     calls = {"screen": 0}
 
@@ -2682,7 +2682,7 @@ def test_no_drift_redraw_when_portrait_starts_at_or_after_this_episode(monkeypat
         def __init__(self, chars): self.characters = chars
 
     class _Screenplay:
-        scene_outline = [_Scene(["萧炎"])]
+        scene_outline = [_Scene(["甲一"])]
         beats: list = []
 
     bible = Bible.model_validate(json.loads(
@@ -2695,12 +2695,12 @@ def test_ensure_cards_backfills_identical_ready_future_portrait(
     monkeypatch, tmp_path,
 ) -> None:
     conn = _make_conn()
-    _seed_project(conn, "萧炎在本集登场。")
+    _seed_project(conn, "甲一在本集登场。")
     _patch_settings(monkeypatch, conn)
     image = tmp_path / "xiao_ep22.jpg"
     image.write_bytes(b"ready")
     appearance = "黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩"
-    _insert_portrait(conn, "p1", "萧炎", 22, None, appearance, str(image))
+    _insert_portrait(conn, "p1", "甲一", 22, None, appearance, str(image))
 
     async def unexpected_screen(*_args, **_kwargs):
         raise AssertionError("向前扩展相同完整包后不应再判外观漂移")
@@ -2708,7 +2708,7 @@ def test_ensure_cards_backfills_identical_ready_future_portrait(
     monkeypatch.setattr(portraits, "screen_appearance_changes", unexpected_screen)
 
     class _Scene:
-        characters = ["萧炎"]
+        characters = ["甲一"]
 
     class _Screenplay:
         scene_outline = [_Scene()]
@@ -2721,12 +2721,12 @@ def test_ensure_cards_backfills_identical_ready_future_portrait(
     )
 
     row = conn.execute(
-        "SELECT ep_start,ep_end FROM character_portraits WHERE character_name='萧炎'"
+        "SELECT ep_start,ep_end FROM character_portraits WHERE character_name='甲一'"
     ).fetchone()
     assert (row["ep_start"], row["ep_end"]) == (21, None)
     assert out["backfilled"] == [{
-        "name": "萧炎",
-        "portrait_id": "po_萧炎_22",
+        "name": "甲一",
+        "portrait_id": "po_甲一_22",
         "ep_start": 21,
         "previous_ep_start": 22,
         "image_path": str(image),
@@ -2740,8 +2740,8 @@ def test_bible_for_episode_picks_segment_anchor(monkeypatch) -> None:
     conn = _make_conn()
     _seed_project(conn, "x")
     _patch_settings(monkeypatch, conn)
-    _insert_portrait(conn, "p1", "萧炎", 1, 20, "早期：黑发少年，玄色劲装，目光坚定", "/tmp/a.jpg")
-    _insert_portrait(conn, "p1", "萧炎", 21, None, "后期：白发青年，染血劲装，左眼刀疤", "/tmp/b.jpg")
+    _insert_portrait(conn, "p1", "甲一", 1, 20, "早期：黑发少年，玄色劲装，目光坚定", "/tmp/a.jpg")
+    _insert_portrait(conn, "p1", "甲一", 21, None, "后期：白发青年，染血劲装，左眼刀疤", "/tmp/b.jpg")
 
     bible = Bible.model_validate(json.loads(
         conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]))
@@ -2830,11 +2830,11 @@ def test_portrait_for_episode_visual_entity_id_column_missing_falls_back_to_char
     _seed_project(conn, "x")
     _patch_settings(monkeypatch, conn)
     _insert_portrait(
-        conn, "p1", "萧炎", 1, None,
+        conn, "p1", "甲一", 1, None,
         "黑发少年，玄色劲装，目光坚定", "/tmp/xiao.jpg",
     )
     anchor = portraits.appearance_for_episode(
-        "p1", "萧炎", 5, visual_entity_id="bible:萧炎",
+        "p1", "甲一", 5, visual_entity_id="bible:甲一",
     )
     assert anchor and "黑发少年" in anchor
 
@@ -2866,12 +2866,12 @@ def test_bible_for_episode_visual_entity_id_finds_portrait_registered_under_mism
     按 visual_entity_id 匹配（对已具名角色等价于 bible:{name}，零迁移成本），
     必须命中。"""
     conn = _make_conn_with_visual_entity_id()
-    _seed_project(conn, "x")  # bible 里角色规范名是"萧炎"，默认外观含"黑发少年"
+    _seed_project(conn, "x")  # bible 里角色规范名是"甲一"，默认外观含"黑发少年"
     _patch_settings(monkeypatch, conn)
     # 用与默认 bible 外观完全不同的措辞，确保命中只能来自这条 portrait 行，
     # 不会被 bible 自身默认外观文本掩盖出假阳性。
     _insert_portrait_with_entity(
-        conn, "p1", "黑衣少年（早期未具名措辞）", "bible:萧炎",
+        conn, "p1", "黑衣少年（早期未具名措辞）", "bible:甲一",
         1, None, "定妆照回填版：银甲战袍，眉间赤痣，右手持剑", "/tmp/early.jpg",
     )
 
@@ -2887,7 +2887,7 @@ def test_discover_character_candidates_keeps_typed_functionals(monkeypatch) -> N
     bible = Bible(
         world=World(visual_style_canonical="国风"),
         characters=[Character(
-            name="萧炎",
+            name="甲一",
             role="主角",
             appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩",
         )],
@@ -2900,14 +2900,14 @@ def test_discover_character_candidates_keeps_typed_functionals(monkeypatch) -> N
         assert kwargs["call_meta"]["reuse_successful_operation"] is False
         return json.dumps(_identity_wire_for_call(kwargs, [
                 {
-                    "source_label": "魂天帝", "canonical_name": "魂天帝",
+                    "source_label": "角色丙", "canonical_name": "角色丙",
                     "identity_kind": "named", "kind": "onscreen",
-                    "evidence": "魂天帝踏着血云现身",
+                    "evidence": "角色丙踏着血云现身",
                 },
                 {
-                    "source_label": "萧炎", "canonical_name": "萧炎",
+                    "source_label": "甲一", "canonical_name": "甲一",
                     "identity_kind": "named", "kind": "onscreen",
-                    "evidence": "萧炎迎空而起",
+                    "evidence": "甲一迎空而起",
                 },
                 {
                     "source_label": "守卫", "canonical_name": "",
@@ -2918,12 +2918,12 @@ def test_discover_character_candidates_keeps_typed_functionals(monkeypatch) -> N
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     result = asyncio.run(portraits.discover_character_candidates(
-        "魂天帝踏着血云现身，萧炎迎空而起，守卫仓促后退。",
+        "角色丙踏着血云现身，甲一迎空而起，守卫仓促后退。",
         bible,
         1926,
     ))
 
-    assert [item["name"] for item in result] == ["魂天帝", "萧炎", "守卫"]
+    assert [item["name"] for item in result] == ["角色丙", "甲一", "守卫"]
     assert result[-1]["identity_kind"] == "functional"
 
 
@@ -2996,7 +2996,7 @@ def test_current_identity_rejects_same_scene_person_misbinding(
 
 def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(monkeypatch) -> None:
     conn = _make_conn()
-    _seed_project(conn, "绿袍男子拦在萧炎面前，厉声呵斥。")
+    _seed_project(conn, "绿袍男子拦在甲一面前，厉声呵斥。")
     conn.execute(
         "INSERT INTO chapters(project_id,idx,content) VALUES('p1',31,?)",
         ("绿袍男子摘下斗笠，众人这才认出他正是丁力。",),
@@ -3058,7 +3058,7 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
     ))
 
     result = asyncio.run(portraits.ensure_cards_for_text(
-        "p1", 21, "绿袍男子拦在萧炎面前，厉声呵斥。", bible,
+        "p1", 21, "绿袍男子拦在甲一面前，厉声呵斥。", bible,
         generate_portraits=False,
     ))
 
@@ -3084,7 +3084,7 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
     bible = Bible(
         world=World(visual_style_canonical="国风"),
         characters=[Character(
-            name="萧炎",
+            name="甲一",
             role="主角",
             appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩",
         )],
@@ -3092,7 +3092,7 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
     future_text = (
         "前批章节暂无身份线索。"
         + "甲" * (portraits.CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET * 2)
-        + "青衣人摘下面具，萧炎这才认出他就是丁力。"
+        + "青衣人摘下面具，甲一这才认出他就是丁力。"
     )
     prompts: list[str] = []
 
@@ -3107,7 +3107,7 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
                 "identity_kind": "named",
                 "kind": "onscreen",
                 "evidence": "青衣人拦路",
-                "future_evidence": "青衣人摘下面具，萧炎这才认出他就是丁力。",
+                "future_evidence": "青衣人摘下面具，甲一这才认出他就是丁力。",
             }], messages=messages), ensure_ascii=False)
         return json.dumps(_identity_wire_for_call(_kwargs, [{
             "source_label": "青衣人",
@@ -3120,7 +3120,7 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
     candidates = asyncio.run(portraits.discover_character_candidates(
-        "青衣人拦住萧炎。",
+        "青衣人拦住甲一。",
         bible,
         21,
         future_text=future_text,
@@ -6404,16 +6404,16 @@ def test_character_resolution_merge_preserves_distinct_scoped_authorities() -> N
 
 def test_character_importance_window_remains_twenty_chapters() -> None:
     conn = _make_conn()
-    _seed_project(conn, "美杜莎短暂现身。")
+    _seed_project(conn, "蛇后短暂现身。")
     conn.execute(
         "INSERT INTO chapters(project_id,idx,content) VALUES('p1',50,?)",
-        ("美杜莎在二十章窗口边界再次登场。",),
+        ("蛇后在二十章窗口边界再次登场。",),
     )
-    fragments, label, chapters_by_idx = portraits._forward_fragments(conn, "p1", "美杜莎", 21)
+    fragments, label, chapters_by_idx = portraits._forward_fragments(conn, "p1", "蛇后", 21)
 
     assert "二十章窗口边界" in fragments
     assert "+20 章" in label
-    assert chapters_by_idx.get(50) == "美杜莎在二十章窗口边界再次登场。"
+    assert chapters_by_idx.get(50) == "蛇后在二十章窗口边界再次登场。"
 
 
 def test_unresolved_descriptive_people_keep_source_labels(monkeypatch) -> None:
@@ -6542,7 +6542,7 @@ def test_baseline_audit_uses_model_to_classify_arbitrary_descriptive_identity(mo
     bible = Bible(
         world=World(visual_style_canonical="国风"),
         characters=[Character(
-            name="萧炎", role="主角",
+            name="甲一", role="主角",
             appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩",
         )],
     )
@@ -6564,13 +6564,13 @@ def test_baseline_audit_uses_model_to_classify_arbitrary_descriptive_identity(mo
             scene_no=1,
             scene_heading="【场1】日 / 山门",
             story_function="触发拦路冲突",
-            characters=["萧炎", "紫甲女子"],
-            summary="紫甲女子在山门前拦住萧炎，双方的冲突随即升级。",
+            characters=["甲一", "紫甲女子"],
+            summary="紫甲女子在山门前拦住甲一，双方的冲突随即升级。",
         )],
     ).model_dump_json()
 
     candidates = asyncio.run(portraits.discover_character_candidates(
-        "萧炎来到山门。", bible, 21, draft_text=draft,
+        "甲一来到山门。", bible, 21, draft_text=draft,
     ))
 
     assert [(item["source_label"], item["identity_kind"]) for item in candidates] == [
@@ -6592,7 +6592,7 @@ def test_baseline_audit_sends_typed_identity_projection_only(monkeypatch) -> Non
     bible = Bible(
         world=World(visual_style_canonical="国风"),
         characters=[Character(
-            name="萧炎", role="主角",
+            name="甲一", role="主角",
             appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩",
         )],
     )
@@ -6621,7 +6621,7 @@ def test_baseline_audit_sends_typed_identity_projection_only(monkeypatch) -> Non
             scene_no=1,
             scene_heading="【场1】日 / 山门",
             story_function="SCRIPT_ACTION_MARKER",
-            characters=["萧炎", "紫甲女子"],
+            characters=["甲一", "紫甲女子"],
             summary="SCRIPT_ACTION_MARKER",
         )],
         full_script_text="【场1】日 / 山门\nSCRIPT_ACTION_MARKER",
@@ -6774,11 +6774,11 @@ def test_screenplay_resolution_is_applied_before_publish_and_keeps_source_eviden
             scene_no=1,
             scene_heading="【场1】日 / 山门",
             story_function="绿袍男子拦路并触发冲突",
-            characters=["萧炎", "绿袍男子"],
-            summary="绿袍男子站到萧炎面前，厉声阻止他继续前行。",
+            characters=["甲一", "绿袍男子"],
+            summary="绿袍男子站到甲一面前，厉声阻止他继续前行。",
             source_basis="原文写绿袍男子拦在山门前。",
         )],
-        full_script_text="【场1】日 / 山门\n绿袍男子拦住萧炎。\n绿袍男子：止步！\n萧炎：让开。",
+        full_script_text="【场1】日 / 山门\n绿袍男子拦住甲一。\n绿袍男子：止步！\n甲一：让开。",
         dialogue_chains=[KeyDialogueChain(
             chain_id="DC1",
             turns=[KeyDialogueTurn(
@@ -6788,7 +6788,7 @@ def test_screenplay_resolution_is_applied_before_publish_and_keeps_source_eviden
             )],
         )],
         information_ledger=[InformationItem(
-            info_id="I1", content="绿袍男子拦住萧炎", speaker_id="绿袍男子",
+            info_id="I1", content="绿袍男子拦住甲一", speaker_id="绿袍男子",
         )],
         voice_bible=[VoiceCanonical(
             speaker_id="绿袍男子", voice_canonical="低沉粗粝",
@@ -6807,8 +6807,8 @@ def test_screenplay_resolution_is_applied_before_publish_and_keeps_source_eviden
         "source_label": "绿袍男子", "canonical_name": "路人甲",
         "resolution": "functional_extra",
     }]
-    assert script.scene_outline[0].characters == ["萧炎", "路人甲"]
-    assert "路人甲拦住萧炎" in script.full_script_text
+    assert script.scene_outline[0].characters == ["甲一", "路人甲"]
+    assert "路人甲拦住甲一" in script.full_script_text
     assert "路人甲：止步！" in script.full_script_text
     assert script.dialogue_chains[0].turns[0].speaker == "路人甲"
     assert script.dialogue_chains[0].turns[0].source_text == "绿袍男子厉声道：止步！"
@@ -6876,7 +6876,7 @@ def test_identity_gate_uses_shared_speaker_parser_and_allows_narrator() -> None:
     bible = Bible(
         world=World(visual_style_canonical="国风"),
         characters=[Character(
-            name="萧炎", role="主角",
+            name="甲一", role="主角",
             appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩",
         )],
     )
@@ -6886,10 +6886,10 @@ def test_identity_gate_uses_shared_speaker_parser_and_allows_narrator() -> None:
             scene_no=1,
             scene_heading="【场1】日 / 山门",
             story_function="交代山门对峙",
-            characters=["萧炎"],
-            summary="山门骤然安静，萧炎站到众人面前准备迎战。",
+            characters=["甲一"],
+            summary="山门骤然安静，甲一站到众人面前准备迎战。",
         )],
-        full_script_text="【场1】日 / 山门\n旁白：山门骤然安静。\n萧炎：我来应战。",
+        full_script_text="【场1】日 / 山门\n旁白：山门骤然安静。\n甲一：我来应战。",
         information_ledger=[InformationItem(
             info_id="I1", content="山门骤然安静", delivery_owner="narration", speaker_id="旁白",
         )],
@@ -7176,7 +7176,7 @@ def test_late_episode_screenplay_auto_adds_character_and_defers_portrait_generat
     bible = Bible(
         world=World(visual_style_canonical="国风"),
         characters=[Character(
-            name="萧炎",
+            name="甲一",
             role="主角",
             appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩",
         )],
@@ -7188,21 +7188,21 @@ def test_late_episode_screenplay_auto_adds_character_and_defers_portrait_generat
     )
     conn.execute(
         "INSERT INTO chapters(project_id,idx,title,content,char_count) VALUES(?,?,?,?,?)",
-        ("p1", 1926, "第一千六百二十二章 双帝之战",
-         "魂天帝踏着血云现身。魂天帝与萧炎在中州上空连续交锋。" * 8, 240),
+        ("p1", 1926, "第一千六百二十二章 对决之战",
+         "角色丙踏着血云现身。角色丙与甲一在中域上空连续交锋。" * 8, 240),
     )
     conn.execute(
         """INSERT INTO episodes(
             id,project_id,episode_no,title,hook,cliffhanger,synopsis,source_chapters,
             target_duration_s,screenplay_status,status,created_at
-        ) VALUES('e1926','p1',1926,'双帝之战','','','魂天帝现身','[1926]',50,'running','planned',1)"""
+        ) VALUES('e1926','p1',1926,'对决之战','','','角色丙现身','[1926]',50,'running','planned',1)"""
     )
     conn.commit()
 
     async def fake_candidates(source_text, current_bible, episode_no, *, draft_text="", **_kwargs):
         assert episode_no == 1926
-        assert "魂天帝" in source_text
-        return [{"name": "魂天帝", "kind": "onscreen", "evidence": "魂天帝踏着血云现身"}]
+        assert "角色丙" in source_text
+        return [{"name": "角色丙", "kind": "onscreen", "evidence": "角色丙踏着血云现身"}]
 
     async def fake_assess(*_args, **_kwargs):
         return {
@@ -7213,7 +7213,7 @@ def test_late_episode_screenplay_auto_adds_character_and_defers_portrait_generat
             "appearance_canonical": "中年男性，黑色长发披肩，暗红帝袍覆身，血色双瞳冷漠，周身缠绕血云",
             "personality": "冷酷",
             "speech_style": "低沉威压",
-            "relationships": [{"to": "萧炎", "relation": "决战对手"}],
+            "relationships": [{"to": "甲一", "relation": "决战对手"}],
         }
 
     async def portrait_failure(*_args, **_kwargs):
@@ -7224,25 +7224,25 @@ def test_late_episode_screenplay_auto_adds_character_and_defers_portrait_generat
     async def fake_generate(ep_data, source_text, current_bible, prev_ending=""):
         names = {character.name for character in current_bible.characters}
         generated_with.append(names)
-        assert "魂天帝" in names
+        assert "角色丙" in names
         scenes = [
             ScriptScene(
                 scene_no=index,
-                scene_heading=f"【场{index}】日 / 中州天际",
+                scene_heading=f"【场{index}】日 / 中域天际",
                 story_function="推进双帝决战并交接下一场冲突",
-                characters=["萧炎", "魂天帝"],
-                summary="萧炎与魂天帝在中州天际正面交锋，帝境力量持续碰撞。",
+                characters=["甲一", "角色丙"],
+                summary="甲一与角色丙在中域天际正面交锋，强者力量持续碰撞。",
                 conflict="双方争夺天地存亡的最终胜负",
-                turn="帝境交锋进一步升级",
-                source_basis="保留魂天帝现身并与萧炎连续交锋的原文事件",
+                turn="强者交锋进一步升级",
+                source_basis="保留角色丙现身并与甲一连续交锋的原文事件",
             )
             for index in range(1, 4)
         ]
         return EpisodeScreenplay(
             episode_no=ep_data["episode_no"],
-            title="双帝之战",
+            title="对决之战",
             scene_outline=scenes,
-            full_script_text="【场1】魂天帝：今日便结束一切。\n萧炎：那就一战。",
+            full_script_text="【场1】角色丙：今日便结束一切。\n甲一：那就一战。",
         )
 
     async def fake_production(*, episode_id, episode, source_text, bible, **_kwargs):
@@ -7276,17 +7276,17 @@ def test_late_episode_screenplay_auto_adds_character_and_defers_portrait_generat
         "SELECT screenplay_status,screenplay_json,screenplay_error FROM episodes WHERE id='e1926'"
     ).fetchone()
     assert result is not None
-    assert result.title == "双帝之战"
-    assert names == {"萧炎", "魂天帝"}
+    assert result.title == "对决之战"
+    assert names == {"甲一", "角色丙"}
     assert project["bible_version"] == 2
-    assert generated_with == [{"萧炎", "魂天帝"}]
+    assert generated_with == [{"甲一", "角色丙"}]
     assert episode["screenplay_status"] == "ready"
     assert episode["screenplay_json"] is not None
     assert episode["screenplay_error"] is None
     queue = json.loads(conn.execute(
         "SELECT bible_auto_changes_json FROM projects WHERE id='p1'"
     ).fetchone()["bible_auto_changes_json"])
-    assert queue[0]["character"] == "魂天帝"
+    assert queue[0]["character"] == "角色丙"
     assert queue[0]["status"] == "auto_applied_asset_pending"
 
 
@@ -10322,13 +10322,13 @@ def test_ep5_disambiguation_key_falls_back_to_authority_id_for_named_branch() ->
     })
     assert key_with_functional == "F3"
     key_named_a = portraits._current_identity_disambiguation_key({
-        "_current_response_group_key": "", "authority_id": "bible:萧炎",
+        "_current_response_group_key": "", "authority_id": "bible:甲一",
     })
     key_named_b = portraits._current_identity_disambiguation_key({
-        "_current_response_group_key": "", "authority_id": "bible:药老",
+        "_current_response_group_key": "", "authority_id": "bible:丙老",
     })
-    assert key_named_a == "bible:萧炎"
-    assert key_named_b == "bible:药老"
+    assert key_named_a == "bible:甲一"
+    assert key_named_b == "bible:丙老"
     assert key_named_a != key_named_b
 
 

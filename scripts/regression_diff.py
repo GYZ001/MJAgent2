@@ -37,7 +37,7 @@ def _diff(before: str, after: str, label: str) -> bool:
 def _bible() -> Bible:
     return Bible(
         characters=[
-            Character(name="萧炎", role="主角",
+            Character(name="甲一", role="主角",
                       appearance_canonical="十六七岁少年，黑色短发，墨绿色窄袖劲装，眉心一点朱砂，神情清冷"),
             Character(name="林梦", role="重要配角",
                       appearance_canonical="二十岁女性，栗色长发束马尾，米白色针织衫配牛仔裤，左腕银色细手链"),
@@ -49,11 +49,11 @@ def _bible() -> Bible:
 def _shot(**kw) -> Shot:
     base = dict(
         shot_no=1, duration_s=5, shot_size="中景", camera_move="固定",
-        scene_setting="夜晚，出租屋", characters=["萧炎"],
-        action_desc="萧炎盘坐在卧室床上，淡白气流顺着口鼻钻入体内，他愤怒地攥紧拳头，神色诡异地盯着戒指。",
-        first_frame_desc="萧炎盘坐床上，掌心托着黑色戒指，神情平静。",
-        last_frame_desc="萧炎盘坐床上，戒指微微发亮，他眉头骤紧、掌心收力。",
-        source_excerpt="萧炎闭目盘坐，气流钻入体内，黑戒指诡异发光。",
+        scene_setting="夜晚，出租屋", characters=["甲一"],
+        action_desc="甲一盘坐在卧室床上，淡白气流顺着口鼻钻入体内，他愤怒地攥紧拳头，神色诡异地盯着戒指。",
+        first_frame_desc="甲一盘坐床上，掌心托着黑色戒指，神情平静。",
+        last_frame_desc="甲一盘坐床上，戒指微微发亮，他眉头骤紧、掌心收力。",
+        source_excerpt="甲一闭目盘坐，气流钻入体内，黑戒指诡异发光。",
         narration=None, dialogues=[], transition="硬切", continuity_from_prev=False,
     )
     base.update(kw)
@@ -117,14 +117,14 @@ def section_b_mode(bible: Bible) -> bool:
     _hr("B. 视频模式选择（已锁定 reference_image）")
     fixtures = {
         "首镜·建立场景": _shot(shot_no=1, continuity_from_prev=False,
-                            action_desc="萧炎走进药店，环视四周，停在柜台前。", dialogues=[]),
+                            action_desc="甲一走进药店，环视四周，停在柜台前。", dialogues=[]),
         "连贯镜·同场景接续": _shot(shot_no=2, continuity_from_prev=True,
-                              action_desc="萧炎仍站在柜台前，伸手拿起药瓶端详。"),
+                              action_desc="甲一仍站在柜台前，伸手拿起药瓶端详。"),
         "对话镜·非连贯": _shot(shot_no=3, continuity_from_prev=False, scene_setting="夜晚，巷口",
-                          action_desc="萧炎与林梦交谈，林梦轻声解释。",
+                          action_desc="甲一与林梦交谈，林梦轻声解释。",
                           dialogues=[Dialogue(speaker="林梦", line="你不该来。", emotion="平静")]),
         "强动作镜·打斗": _shot(shot_no=4, continuity_from_prev=False, scene_setting="清晨，广场",
-                          action_desc="萧炎快速转身释放法术与敌人打斗，保证结尾落点。"),
+                          action_desc="甲一快速转身释放法术与敌人打斗，保证结尾落点。"),
     }
     for name, _shot_obj in fixtures.items():
         decision = video_modes.default_reference_decision()
@@ -178,7 +178,7 @@ def section_c_trim() -> bool:
     _hr("C. 超长 prompt 裁剪顺序 diff（#5 保住负向词/重生针对性负词）")
     limit = 1500
     # core 撑到约 1265 字：core+完整负向 ≤1500（可保住），但 core+filler+完整负向 >1500（必须裁）。
-    core = ["镜头动作：" + "萧炎缓缓抬手按住石碑，掌心收力，碑面渐亮。" * 60]
+    core = ["镜头动作：" + "甲一缓缓抬手按住石碑，掌心收力，碑面渐亮。" * 60]
     filler = ["环境：夜晚出租屋", compiler.QUALITY_SUFFIX, compiler.NO_BGM_SUFFIX]
     extra = "，本次必须改正：上一版手指畸形/出现多余文字水印"  # 重生针对性负词
     negative = compiler.NEGATIVE_SUFFIX + extra
