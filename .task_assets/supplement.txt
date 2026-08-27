@@ -1,0 +1,266 @@
+  2200	    # `model_gateway.chat`→`run_with_provider_call_slot` 那道进程级 `text_provider_calls`
+  2201	    # 优先级闸门统一节流（见 app/generation_concurrency.py），不额外起一套并发框架。
+  2202	    # 失败隔离：单条证据裁决失败/不通过只让这一个 job 判 0 票，不影响其它 job，
+  2203	    # 语义与原来的 continue 完全一致（不确定不登记）；裁决闸本身的提示词/温度/
+  2204	    # 候选集算法（`_roster_presence_verdict_call`）原样未动。
+  2205	    verdict_pass = 0
+  2206	
+  2207	    async def _judge_evidence(appellation: str, dossier: list[dict[str, Any]]) -> bool:
+  2208	        try:
+  2209	            verdict = await _roster_presence_verdict_call(
+  2210	                appellation=appellation, dossier=dossier, project_id=project_id,
+  2211	            )
+  2212	        except Exception as exc:  # noqa: BLE001 - 裁决失败按不确定处理：不确定不登记
+  2213	            log_provider_call(
+  2214	                "character_roster_presence_verdict", config.MODEL_TEXT,
+  2215	                "FAILED", None, 0,
+  2216	                meta={"appellation": appellation, "error": str(exc)[:300]},
+  2217	            )
+  2218	            return False
+  2219	        if verdict.verdict != "onstage":
+  2220	            return False
+  2221	        if _alias_verdict_pin_segment(dossier, verdict.supporting_segment_index) is None:
+  2222	            return False
+  2223	        return True
+  2224	
+  2225	    judged = await asyncio.gather(
+  2226	        *(_judge_evidence(appellation, dossier) for appellation, dossier in verdict_jobs)
+  2227	    )
+  2228	    for (appellation, _dossier), passed in zip(verdict_jobs, judged, strict=True):
+  2229	        if not passed:
+  2230	            continue
+  2231	        verdict_pass += 1
+  2232	        verified_counts[appellation] += 1
+  2233	
+  2234	    ranked = [
+  2235	        (appellation, formal_names.get(appellation, ""), count)
+  2236	        for appellation, count in verified_counts.items()
+  2237	        if count >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
+  2238	    ]
+  2239	    ranked.sort(key=lambda item: (-item[2], item[0]))
+  2240	    result = ranked[:BIBLE_MUST_COVER_MAX]
+  2241	    # 记账：供人工从数字上判断「这次点名是不是明显偏少/裁决通过率是不是异常低」，
+  2242	    # 不是核验闸门本身。
+  2243	    log_provider_call(
+  2244	        "character_roll_call_coverage", config.MODEL_TEXT, "OK", None, 0,
+  2245	        meta={
+  2246	            "candidates": len(candidates),
+  2247	            "evidence_total": evidence_total,
+  2248	            "structural_gate_passed": structural_pass,
+  2249	            "presence_verdict_passed": verdict_pass,
+  2250	            "must_cover": len(result),
+  2251	        },
+  2252	    )
+  2253	    return result
+  2254	
+  2255	
+  2256	def _bible_covers_name(bible: Bible, appellations: set[str]) -> bool:
+  2257	    """必收名单条目是否已经在人物谱里覆盖。`appellations` 是调用方传入的待匹配称呼
+  2258	    集合（如 `{primary_appellation, formal_name}`，已过滤空值）——传集合而不是单个
+  2259	    字符串，是因为一个必收条目现在可能同时有原文常用称呼（可以是绰号）和正式姓名
+  2260	    两种写法，任一种在人物谱里出现都算已覆盖。
+  2261	
+  2262	    命中条件二选一：
+  2263	    1. 待匹配称呼中任一项与角色 `character.name` 存在子串关系（原有行为不变，
+  2264	       允许模型用更完整的正式姓名收录同一人）；
+  2265	    2. 待匹配称呼中任一项与角色 `character.aliases[].text` **精确相等**（不用
+  2266	       子串——别名本身已经是核验过的精确称谓，用子串关系反而可能对上不相关的短
+  2267	       别名，比如单字"老"作为子串命中一堆无关别名；相等判断更安全，且 aliases.text
+  2268	       本身就是逐字原文称谓，绰号能否被人物谱覆盖就看这一条）。
+  2269	
+  2270	    `appellations` 为空集合时内层循环天然不执行、直接返回 False（未覆盖）——不是
+  2271	    因为显式判断"集合为空就跳过检查"而短路，是 `any()`/for 循环对空可迭代对象的
+  2272	    自然行为，不会误判为已覆盖。
+  2273	    """
+  2274	    for character in bible.characters:
+  2275	        for appellation in appellations:
+  2276	            if not appellation:
+  2277	                continue
+  2278	            if (
+  2279	                appellation == character.name
+  2280	                or appellation in character.name
+  2281	                or character.name in appellation
+  2282	            ):
+  2283	                return True
+  2284	            if any(appellation == alias.text for alias in character.aliases):
+  2285	                return True
+  2286	    return False
+  2287	
+  2288	
+  2289	async def _supplement_bible_characters(bible: Bible, missing: list[tuple[str, str, int]],
+  2290	                                       chapters_text: str, *,
+  2291	                                       chapters_by_idx: dict[int, str],
+  2292	                                       visual_style_prompt: str | None = None,
+  2293	                                       project_id: str | None = None) -> list[str]:
+  2294	    """为必收名单里仍然缺席的角色补一次条目；失败或不合格就放弃该角色。
+  2295	
+  2296	    这一步刻意放在 AgentLoop 之外：人物谱缺角色是质量问题，不该把整个项目
+  2297	    卡在 bible_status=warning 上（那会连带停掉定妆照与场景库）。
+  2298	
+  2299	    `missing` 是 `_recurring_character_names` 产出的 (primary_appellation,
+  2300	    formal_name, verified_onstage_count) 三元组：formal_name 非空时指示模型把它
+  2301	    用作 character.name、并把 primary_appellation 登记为一条别名（绰号做正式姓名
+  2302	    的补充记录，而不是丢弃）；formal_name 为空时直接用 primary_appellation 作
+  2303	    character.name。补录角色新增的 aliases 同样只是模型申报，append 成功后必须
+  2304	    过与主生成同一套核验（`_verify_character_aliases_for_subset`，只核验本次新增
+  2305	    的角色，不对已核验过的角色重复发起模型调用）才会真正登记。
+  2306	
+  2307	    chapters_by_idx：全书原文查找表（`_chapters_by_idx(chapters)`），用于核验模型
+  2308	    随外观一并申报的 source_evidence（本函数没有 AgentLoop 重试，核验失败的证据
+  2309	    条目直接从列表里剔除，不拒绝整个角色）与随 name 一并申报的 aliases（核验失败
+  2310	    的别名条目同样直接剔除，不影响角色本身的补录）。
+  2311	    """
+  2312	    from app.refs import (
+  2313	        PRODUCTION_APPEARANCE_MAX_CHARS,
+  2314	        PRODUCTION_APPEARANCE_MIN_CHARS,
+  2315	    )
+  2316	
+  2317	    expected_names = {(formal_name or appellation) for appellation, formal_name, _ in missing}
+  2318	    wanted_lines = [
+  2319	        (
+  2320	            f'{formal_name}（原文常用称呼"{appellation}"，已核验在场证据 {count} 条）'
+  2321	            if formal_name else
+  2322	            f"{appellation}（已核验在场证据 {count} 条）"
+  2323	        )
+  2324	        for appellation, formal_name, count in missing
+  2325	    ]
+  2326	    wanted = "、".join(wanted_lines)
+  2327	    style = visual_style_prompt or bible.world.visual_style_canonical
+  2328	    prompt = f"""任务：为下列【已确认重要但人物谱漏收】的角色补出角色条目，用于 AI 视频生成的一致性控制。
+  2329	
+  2330	必须补录的角色（name 取值规则见要求 6；不得改写或合并）：
+  2331	{wanted}
+  2332	
+  2333	已收录角色（不要重复输出）：{'、'.join(c.name for c in bible.characters) or '无'}
+  2334	全片统一画风（角色外观必须服从）：{style}
+  2335	
+  2336	要求：
+  2337	1. 只输出上面「必须补录」的角色，也不要多输出别人。唯一例外：其中某个名字如果其实不是人物（是宗门、地名或法宝名），跳过它，不要硬编成角色。
+  2338	2. appearance_canonical 是固定外观锚点串：{PRODUCTION_APPEARANCE_MIN_CHARS}~{PRODUCTION_APPEARANCE_MAX_CHARS} 字，只写常规完整着装、中性站姿下
+  2339	   可直接看见并能跨镜稳定复现的静态形态；不写性格、情绪、眼神行为，不得写裸体或私密身体
+  2340	   部位。通用形态（性别年龄感/发型发色/服装款式颜色）原文没写时可按题材合理设定，不需要
+  2341	   举证；是否再写 1 个标志性特征取决于原文对这个角色本人是否确有描写——有就写且逐字取用
+  2342	   并在 source_evidence 里举证（evidence_chapter_index + 40 字以内的原文逐字短句，短句里
+  2343	   要能直接读出是在写这个角色本人，不是同段落里的其他人），没有就不写，不必凑数。
+  2344	3. role 取"主角|重要配角|反派"之一。
+  2345	4. speech_style 15~30 字，描述句长习惯/口头禅/敬语习惯。
+  2346	5. relationships.to 只能指向【已收录角色或本次补录角色】的 name；无法确定就留空数组。
+  2347	6. name 取值：上面的写法括号里标了"原文常用称呼『XX』"的条目，character.name 用括号外给出的
+  2348	   正式姓名，并把括号里那个原文常用称呼登记为一条 aliases（text=该称呼，name_kind 按语境判断
+  2349	   取 personal_name/honorific/referential，evidence_chapter_index + evidence_quote 给一条
+  2350	   能同时看到这个称呼与这个正式姓名的原文逐字引句，原样照抄不得改写；找不到这种共现就不要
+  2351	   申报这条别名，不影响角色本身的补录）；没有标注原文常用称呼的条目，character.name 直接用
+  2352	   给出的那个写法，不需要另外申报别名。
+  2353	
+  2354	小说文本：
+  2355	{chapters_text}
+  2356	
+  2357	输出 JSON Schema：
+  2358	{{"characters": [{{"name": str, "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "source_evidence": [{{"evidence_chapter_index": int, "evidence_quote": str}}], "aliases": [{{"text": str, "name_kind": "personal_name|honorific|referential", "evidence_chapter_index": int, "evidence_quote": str}}]}}]}}"""
+  2359	    try:
+  2360	        raw = await model_gateway.chat(
+  2361	            [{"role": "system", "content": SYSTEM_PREFIX},
+  2362	             {"role": "user", "content": prompt}],
+  2363	            temperature=0.4,
+  2364	            max_tokens=8192,
+  2365	            call_meta={
+  2366	                "stage": "人物谱补录",
+  2367	                "stage_key": "character_bible_supplement",
+  2368	                "call_role": "stage_generate",
+  2369	                "call_role_label": "人物谱补录",
+  2370	                "expected_json": True,
+  2371	            },
+  2372	        )
+  2373	        drafted = _BibleSupplement.model_validate(extract_json(raw)).characters
+  2374	    except Exception as exc:  # noqa: BLE001 - 补录失败保留已有人物谱，不阻断下游
+  2375	        log_provider_call(
+  2376	            "character_bible_supplement", config.MODEL_TEXT, "FAILED", None, 0,
+  2377	            meta={"error": str(exc)[:300]},
+  2378	        )
+  2379	        return []
+  2380	    added: list[str] = []
+  2381	    added_characters: list[Character] = []
+  2382	    for character in drafted:
+  2383	        name = (character.name or "").strip()
+  2384	        if (
+  2385	            name not in expected_names
+  2386	            or _bible_covers_name(bible, {name})
+  2387	            or not PRODUCTION_APPEARANCE_MIN_CHARS
+  2388	            <= len(character.appearance_canonical)
+  2389	            <= PRODUCTION_APPEARANCE_MAX_CHARS
+  2390	        ):
+  2391	            continue
+  2392	        character.name = name
+  2393	        character.ref_image_path = None
+  2394	        character.portrait_prompt_override = None
+  2395	        # 没有 AgentLoop 重试可用：核验失败的证据条目直接剔除（角色照常补录，只是
+  2396	        # 这条特征失去了申报的举证），不因为一条证据不实就放弃整个角色补录。
+  2397	        character.source_evidence = [
+  2398	            evidence for evidence in character.source_evidence
+  2399	            if _appearance_evidence_verified(
+  2400	                chapters_by_idx, {character.name},
+  2401	                evidence.evidence_chapter_index, evidence.evidence_quote,
+  2402	            )
+  2403	        ]
+  2404	        bible.characters.append(character)
+  2405	        added.append(name)
+  2406	        added_characters.append(character)
+  2407	    # 关系只能指向最终名单里的人，否则 validate_bible 会因「关系指向未知角色」退回。
+  2408	    names = {c.name for c in bible.characters}
+  2409	    for character in bible.characters:
+  2410	        character.relationships = [
+  2411	            relation for relation in character.relationships if relation.to in names
+  2412	        ]
+  2413	    # 补录角色声明的 aliases 同样只是申报，必须过与主生成同一套核验才能真正登记——
+  2414	    # 只对本次新增的角色调用，避免对已核验过的角色重复发起模型调用（难点 C 第 4 点）。
+  2415	    if added_characters:
+  2416	        await _verify_character_aliases_for_subset(
+  2417	            bible, added_characters, chapters_by_idx, project_id=project_id,
+  2418	        )
+  2419	    return added
+  2420	
+  2421	
+  2422	# ---------- A1. 人物别名回填（层一，见 docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.1） ----------
+  2423	
+  2424	ALIAS_BACKFILL_SOURCE_BUDGET_CHARS = 150000  # 一次性全书扫描，预算高于常规人物谱生成的 60000
+  2425	
+  2426	
+  2427	def _chapters_by_idx(chapters: list[dict]) -> dict[int, str]:
+  2428	    """按章节序号建立原文查找表，供别名证据的逐字核验使用（未经预算截断的完整正文）。"""
+  2429	    result: dict[int, str] = {}
+  2430	    for chapter in chapters:
+  2431	        content = (chapter.get("content") or "").strip()
+  2432	        if not content:
+  2433	            continue
+  2434	        try:
+  2435	            idx = int(chapter.get("idx"))
+  2436	        except (TypeError, ValueError):
+  2437	            continue
+  2438	        result[idx] = content
+  2439	    return result
+  2440	
+  2441	
+  2442	# 逐字比对时可选脱掉的成对引号：ASCII 直引号与全角引号都要覆盖，因为模型申报
+  2443	# evidence_quote 时有时会给原本没有引号包裹（或已用另一种引号包裹）的原文自行加上
+  2444	# 一层引号，导致本来逐字正确的引句因为多出的引号字符核验不过。只有首尾字符恰好配对
+  2445	# 才脱这一层，不配对的原样保留——不能把原文本身的一部分误当引号脱掉。
+  2446	_PAIRED_QUOTE_MARKS = (('"', '"'), ('“', '”'), ("'", "'"), ('‘', '’'))
+  2447	
+  2448	
+  2449	def _quote_comparison_variants(quote: str) -> list[str]:
+  2450	    """逐字比对用的候选引句形式：原始引句本身，以及（若首尾恰好是成对的引号字符）
+  2451	    脱掉这对引号后的内文。只脱这一侧（模型申报的引句），原文一侧不做任何改写；
+  2452	    两种形式中任一比对命中即算通过。"""
+  2453	    variants = [quote]
+  2454	    if len(quote) >= 2:
+  2455	        for open_mark, close_mark in _PAIRED_QUOTE_MARKS:
+  2456	            if quote[0] == open_mark and quote[-1] == close_mark:
+  2457	                inner = quote[1:-1]
+  2458	                if inner:
+  2459	                    variants.append(inner)
+  2460	                break
+  2461	    return variants
+  2462	
+  2463	
+  2464	def _alias_declaration_verified(
+  2465	    chapters_by_idx: dict[int, str],

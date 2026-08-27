@@ -1931,6 +1931,9 @@ BIBLE_MUST_COVER_MAX = 12        # 必收名单上限，避免把生成预算耗
 # 会让模型老实列出十几条，既拉长点名调用本身的输出（更容易撞 max_tokens 截断，撞了就要
 # 整次重试），又线性拉长下游裁决闸的调用条数。见 `_recurring_character_names` docstring。
 BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE = 3
+BIBLE_ROLL_CALL_CHUNK_CHAPTERS = 3
+BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS = 24000
+BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS = 8192
 
 # 旁文本净化的三个闸（见 `_chapters_without_paratext` docstring 里的事故口径）：
 BIBLE_PARATEXT_MARGIN_CHAPTERS = 3   # 净化只会让正文变短，头部因此可能多吃进几章
@@ -2035,6 +2038,50 @@ class _CharacterRollCall(BaseModel):
     candidates: list[_RosterCandidate] = Field(default_factory=list)
 
 
+def _merge_roll_call_candidates(
+    chunk_results: list[list[_RosterCandidate]],
+) -> list[_RosterCandidate]:
+    """按正式姓名优先、常用称呼补充的保守规则归并分块结果。"""
+    merged: list[_RosterCandidate] = []
+    for candidates in chunk_results:
+        for candidate in candidates:
+            primary = (candidate.primary_appellation or "").strip()
+            formal = (candidate.formal_name or "").strip()
+            if not primary:
+                continue
+            target = next((
+                item for item in merged
+                if (
+                    formal and (item.formal_name or "").strip() == formal
+                ) or (item.primary_appellation or "").strip() == primary
+            ), None)
+            if target is None:
+                merged.append(_RosterCandidate(
+                    primary_appellation=primary,
+                    formal_name=formal,
+                    onstage_evidence=list(candidate.onstage_evidence)[
+                        :BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE
+                    ],
+                ))
+                continue
+            if not target.formal_name and formal:
+                target.formal_name = formal
+            seen_evidence = {
+                (item.chapter_index, (item.quote or "").strip())
+                for item in target.onstage_evidence
+            }
+            for evidence in candidate.onstage_evidence:
+                key = (evidence.chapter_index, (evidence.quote or "").strip())
+                if key in seen_evidence:
+                    continue
+                target.onstage_evidence.append(evidence)
+                seen_evidence.add(key)
+            target.onstage_evidence = target.onstage_evidence[
+                :BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE
+            ]
+    return merged
+
+
 class _BibleSupplement(BaseModel):
     """补录合同：只为「必收名单里还缺的人」补出完整角色条目。"""
 
@@ -2081,70 +2128,63 @@ async def _recurring_character_names(
     if not valid:
         return []
     head = valid[:BIBLE_HEAD_CHAPTERS]
-    head_text = _render_bible_source(head, head_chapters=BIBLE_HEAD_CHAPTERS)
-    if not head_text.strip():
-        return []
-    prompt = f"""任务：从下面的小说正文里找出【出场人物】，为每个人物申报能证明他本人真的出现在画面中的证据，不要只给名字。
+    chunks = [
+        head[index:index + BIBLE_ROLL_CALL_CHUNK_CHAPTERS]
+        for index in range(0, len(head), BIBLE_ROLL_CALL_CHUNK_CHAPTERS)
+    ]
+
+    async def _call_chunk(chunk: list[dict], chunk_index: int) -> list[_RosterCandidate]:
+        chunk_text = _render_bible_source(
+            chunk, budget=BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS,
+            head_chapters=len(chunk),
+        )
+        if not chunk_text.strip():
+            return []
+        if len(chunk_text) > BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS:
+            raise ValueError("人物点名分块输入超过硬上限")
+        prompt = f"""任务：从下面的小说正文里找出【出场人物】，为每个人物申报能证明他本人真的出现在画面中的证据，不要只给名字。
 
 要求：
-1. primary_appellation：原文里称呼这个人物最常用、最稳定的一种写法——可以是正式姓名，也可以是外号、
-   绰号、尊称或代称（如"小胖子""许师姐""靠山老祖"），取原文实际出现频率最高的那一种写法，逐字照抄，
-   不得改写、简称或补全。
-2. formal_name：这个人物在原文中已经明确揭示过的正式姓名；原文尚未揭示正式姓名（只有外号/代称），
-   就填空字符串，不要猜测或编造。
-3. onstage_evidence：最多列 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条最有代表性、最容易验证
-   的原文证据，能证明这个人物本人真正出现在画面中（本人说话、本人动作、或被旁白直接叙述为身处此地），
-   每条给 {{"chapter_index": int, "quote": str}}：
-   - 戏份再多的人物也只需要挑 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条最清楚、最没有歧义的
-     证据，不需要穷举这个人物在原文里的全部出场；证据数量不影响这个人物是否重要，够用即可；
-   - chapter_index 取原文分块【】块头里的数字；
-   - quote 必须是该章原文的逐字引句（不超过约 80 字），且这句引文里必须能看到 primary_appellation
-     或 formal_name 中的至少一个——原文怎么写就怎么抄，不要自己添加或删除引号；
-   - 判断依据是这句话本身的叙述位置：这个人物是不是这句话所描述的那个时空里正在行动、正在说话、或
-     被旁白直接叙述为置身其中的人，才算在场；如果这句话里正在行动、说话、被叙述置身其中的是别人，
-     这个称呼只是作为被谈论、被指涉、被交代来历或状态的对象出现在别人的叙述或话语里，即使字面提到
-     了这个称呼，这个人物本人也没有置身在这句话所写的场景中，不算在场，不要拿这种句子当证据；
-   - 确实找不到任何在场证据的人物，onstage_evidence 给空列表，不要为了凑数编造。
-4. 不要输出"少年""女子""老者""两人"这类无法从人群中单独指认出具体是谁的泛称，也不要输出宗门名、
-   地名、法宝名。
-5. 同一个人只输出一个条目；戏份很少的人也可以列出来，后端会按核验通过的在场证据条数再筛一遍。
+1. primary_appellation：原文里称呼这个人物最常用、最稳定的一种写法，可以是正式姓名、外号、绰号、尊称或代称，必须逐字照抄。
+2. formal_name：原文已经明确揭示的正式姓名；未揭示就填空字符串，禁止猜测。
+3. onstage_evidence：每人最多 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条，格式为 chapter_index + quote；quote 必须是本块原文不超过约 80 字的逐字引句，并包含 primary_appellation 或 formal_name。
+4. 只有本人说话、行动或被直接叙述为在场才算；被谈论、回忆或背景介绍不算。
+5. 不输出无法单独指认的泛称、宗门、地名、法宝；同一个人在本块只输出一次。
 
 小说正文：
-{head_text}
+{chunk_text}
 
 输出 JSON Schema：
 {{"candidates": [{{"primary_appellation": str, "formal_name": str, "onstage_evidence": [{{"chapter_index": int, "quote": str}}]}}]}}"""
-    try:
-        raw = await model_gateway.chat(
-            [{"role": "system", "content": SYSTEM_PREFIX},
-             {"role": "user", "content": prompt}],
-            temperature=0.2,
-            # 故意不按"预期答案有多长"估算这个数字——两次真实故障（run_8ebe1225aa69，
-            # 以及本次改造实测的 run_ec9f4e97ad4e）都证明这份 JSON 答案本身很短
-            # （实测仅约 5KB），真正吃预算的是这个任务本身的思考耗费：`max_tokens=4096`
-            # 加上 `reasoning_token_reserve()`（默认 16384）合计 20480，两次都在这个
-            # 上限截断、内容作废，要等到 `hiagent.chat` 的截断自动重试把预算顶到模型
-            # 真实产出上限（本环境实测 32768）才成功——白等一次原地重试通常又是
-            # 300~400 秒。这里直接请求一个刻意超大的数字，交给 `text_request_token_limits`
-            # 的 `min(requested+reserve, max_output_tokens)` clamp 成模型的真实上限，
-            # 一次到位；不影响正常小答案的调用——供应商按实际生成量返回，不会因为
-            # 上限设大就多等。
-            max_tokens=131072,
-            call_meta={
-                "stage": "人物点名",
-                "stage_key": "character_roll_call",
-                "call_role": "stage_generate",
-                "call_role_label": "人物点名",
-                "expected_json": True,
-            },
-        )
-        candidates = _CharacterRollCall.model_validate(extract_json(raw)).candidates
-    except Exception as exc:  # noqa: BLE001 - 点名只是覆盖度提示，失败不阻断人物谱
-        log_provider_call(
-            "character_roll_call", config.MODEL_TEXT, "FAILED", None, 0,
-            meta={"error": str(exc)[:300]},
-        )
-        return []
+        try:
+            raw = await model_gateway.chat(
+                [{"role": "system", "content": SYSTEM_PREFIX},
+                 {"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS,
+                call_meta={
+                    "stage": "人物点名",
+                    "stage_key": "character_roll_call",
+                    "call_role": "stage_generate",
+                    "call_role_label": "人物点名分块",
+                    "expected_json": True,
+                    "chunk_index": chunk_index,
+                    "chunk_count": len(chunks),
+                    "input_chars": len(chunk_text),
+                },
+            )
+            return _CharacterRollCall.model_validate(extract_json(raw)).candidates
+        except Exception as exc:  # noqa: BLE001 - 单块失败不阻断其它块和人物谱
+            log_provider_call(
+                "character_roll_call", config.MODEL_TEXT, "FAILED", None, 0,
+                meta={"chunk_index": chunk_index, "error": str(exc)[:300]},
+            )
+            return []
+
+    chunk_results = await asyncio.gather(*(
+        _call_chunk(chunk, index) for index, chunk in enumerate(chunks)
+    ))
+    candidates = _merge_roll_call_candidates(chunk_results)
 
     # 结构闸 G1 用的窗口原文：前 HEAD 章 + 往后 LOOKAHEAD 章，按章节序号建索引
     # （复用 `_chapters_by_idx`，与别名核验同一个查找表构造方式）。

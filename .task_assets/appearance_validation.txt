@@ -1,0 +1,136 @@
+  2500	#
+  2501	# 根因：`appearance_canonical` 生成 prompt 曾同时放"必须包含 1 个标志性特征"的正向配额和
+  2502	# "原著未描写处按题材合理补全"的兜底授权——对一个原文毫无外貌描写的角色，这个组合逼模型
+  2503	# 编造，模型选择的解法是"就近取材"，把同场另一个角色的特征安到了这个角色头上（王有材↔
+  2504	# 小胖子）。修复分两半：prompt 删掉配额（见 generate_bible/_supplement_bible_characters/
+  2505	# assess_new_character 的规则 2 文案），并新增本节的结构性核验，逐字核对模型申报的证据。
+  2506	#
+  2507	# 40 字上限是关键判据：用真实回归数据实测，王有材事故里"把同场角色特征安到王有材头上"
+  2508	# 唯一可用的原文句子，从"王有材"三字开头到能覆盖那条借来的特征（"较胖"）为止，最短连续
+  2509	# 引句需要 44 字——40 字上限让"把别人的描写和这个人的名字圈进同一条引文"在物理上不可能。
+  2510	
+  2511	APPEARANCE_EVIDENCE_QUOTE_MAX_CHARS = 40
+  2512	
+  2513	
+  2514	def _appearance_evidence_verified(
+  2515	    chapters_by_idx: dict[int, str],
+  2516	    anchor_texts: set[str],
+  2517	    evidence_chapter_index: int,
+  2518	    evidence_quote: str,
+  2519	) -> bool:
+  2520	    """标志性特征证据核验：结构性判据，不做任何语义分类（禁止黑白名单式修复）。
+  2521	
+  2522	    两个条件必须同时成立：
+  2523	    1. evidence_quote 长度 <= APPEARANCE_EVIDENCE_QUOTE_MAX_CHARS，且是
+  2524	       evidence_chapter_index 对应章节原文的逐字连续子串（按 `_quote_comparison_variants`
+  2525	       产出的候选引句形式判断，与别名核验同一套脱引号容错）；
+  2526	    2. 角色规范名（或调用方传入的其它已确认锚点）出现在这条引句本身内部——不是出现在
+  2527	       整章的其它位置。这是与 `_alias_declaration_verified` 条件 3（整章共现）的关键
+  2528	       区别：外观证据要求"名字和描写在同一条不超过 40 字的短引句里"，因为整章共现挡不住
+  2529	       "同一句里名字属于A、描写属于B"这种跨人借用（王有材事故的实际触发路径）。
+  2530	    """
+  2531	    quote = (evidence_quote or "").strip()
+  2532	    if not quote or len(quote) > APPEARANCE_EVIDENCE_QUOTE_MAX_CHARS:
+  2533	        return False
+  2534	    chapter_text = chapters_by_idx.get(evidence_chapter_index, "")
+  2535	    if not chapter_text:
+  2536	        return False
+  2537	    for candidate in _quote_comparison_variants(quote):
+  2538	        if candidate in chapter_text and any(
+  2539	            anchor and anchor in candidate for anchor in anchor_texts
+  2540	        ):
+  2541	            return True
+  2542	    return False
+  2543	
+  2544	
+  2545	def _validate_appearance_evidence(bible: Bible, chapters_by_idx: dict[int, str]) -> list[str]:
+  2546	    """遍历每个角色的 source_evidence，只对非空条目核验；核验失败才产生 error（驱动
+  2547	    AgentLoop 的修复重试）。空 source_evidence 数组永远不产生 error——诚实的"这个角色
+  2548	    没有可举证的标志性特征"是安全默认值，不是缺陷信号，不能让"老实说没有"比"编一个能蒙混
+  2549	    过关的"更差（那会复刻本次事故的激励结构）。
+  2550	
+  2551	    锚点只用角色规范名，不用 aliases：本函数在 AgentLoop 校验闭包里对候选 Bible 逐轮调用，
+  2552	    此时 aliases 只是模型本轮申报、尚未经过 `_verify_character_aliases_in_place` 代码核验，
+  2553	    用未核验的申报去解锁另一项核验会开一个"自证"漏洞——与 `_verify_character_aliases_in_place`
+  2554	    自身"只用已验证别名扩大锚点集合"的既有规则一致（不确定不采信）。
+  2555	    """
+  2556	    errors: list[str] = []
+  2557	    for i, character in enumerate(bible.characters):
+  2558	        anchor_texts = {character.name}
+  2559	        for j, evidence in enumerate(character.source_evidence):
+  2560	            if _appearance_evidence_verified(
+  2561	                chapters_by_idx, anchor_texts,
+  2562	                evidence.evidence_chapter_index, evidence.evidence_quote,
+  2563	            ):
+  2564	                continue
+  2565	            errors.append(
+  2566	                f"characters[{i}]({character.name}).source_evidence[{j}] 未通过核验：第 "
+  2567	                f"{evidence.evidence_chapter_index} 章原文里找不到一条不超过 "
+  2568	                f"{APPEARANCE_EVIDENCE_QUOTE_MAX_CHARS} 字、且与「{character.name}」同句"
+  2569	                "出现的逐字引句；请换一条真实可查的原文短引句，或直接去掉这个特征，"
+  2570	                "appearance_canonical 只写通用形态即可，不必凑数。"
+  2571	            )
+  2572	    return errors
+  2573	
+  2574	
+  2575	# ---------- A1a. 桥接章确定性检索（分工修复：模型申报语义，代码检索证据所在地） ----------
+  2576	#
+  2577	# 真实回归发现的分工错误：模型申报「李富贵→小胖子」「许清→许师姐」这两条语义假设
+  2578	# 完全正确，但 evidence_chapter_index 报错了章——它引用的章节里没有角色正式姓名，
+  2579	# 共现闸（_alias_declaration_verified 条件 3）必然拒绝。根因是让模型去做"记住桥接章
+  2580	# 在哪"这件事：这是确定性检索，代码扫全部章节又快又准，模型单次扫 15 万字反而漏。
+  2581	# 参照 app/production/prep_pack.py 的裁决庭范式（_prep_pack_true_name_dossier /
+  2582	# _prep_pack_true_name_verdict / _prep_pack_pin_dossier_quote：代码检索卷宗 → 模型
+  2583	# 裁决 → 代码钉证），但这里比裁决庭少一步：裁决庭要解决的是"称谓 X 是否等于人名 Y"
+  2584	# 这个开放语义判断，需要模型独立裁决；这里模型在申报 character_name+text 这对时，
+  2585	# 已经做完了"这是不是同一个人/这是不是这个人的别名"的语义判断——剩下的只是纯字符串
+  2586	# 问题："全书哪一章能同时证明这对申报"，不需要再发一次模型调用去问一个已经有答案的
+  2587	# 语义问题，代码直接检索、钉证即可（见 _find_alias_bridge_chapter / _alias_bridge_quote）。
+  2588	# 找不到桥接章 → 维持拒绝（不确定不登记，安全默认不因为多了这条兜底而放松）。
+  2589	#
+  2590	# 取句策略修复（事故：双锚定闸上线后状态事实产出率跌到个位数）：`_alias_declaration_
+  2591	# verified`/`_find_alias_bridge_chapter` 的共现闸按整章判断（text 与 anchor_texts 之一
+  2592	# 同时出现在章节任意位置即算通过），但旧版 `_alias_bridge_quote` 取句时只看"分段里有
+  2593	# 没有 text（对象）"，完全不看主体——真实 dry-run 复现："王腾飞→靠山宗""赵武刚→靠山
+  2594	# 宗""上官修→靠山宗""韩宗→靠山宗" 四条不同主体的归属申报，桥接检索给出的是同一句
+  2595	# 关于王腾飞的引文，因为那是全书第一个出现"靠山宗"的分段，与被测主体是谁无关——这句
+  2596	# 引文随后必然被 `_status_fact_quote_dual_anchor_verified`（第四闸）拒绝，不是这些申报
+  2597	# 真的都是假的，是取句本身没找对句子。反证：同一条"王腾飞→韩宗"在另一次运行里，恰好
+  2598	# 检索到一句同时提到两人的原文，就正确通过——同一条事实选对句子就过、选错句子就拒，
+  2599	# 证明第四闸本身没问题，问题在取句优先级。
+  2600	#
+  2601	# 修复：`_alias_bridge_dual_anchor_quote` 在桥接章内优先找"同时包含主体锚点与 text"的
+  2602	# 分段，`_find_alias_bridge_chapter` 相应优先选"存在这种双锚定分段"的桥接章（找不到
+  2603	# 双锚定分段/双锚定章时逐级回落到原有行为：分段回落到 `_alias_bridge_quote`——第一个
+  2604	# 含 text 的分段；章节回落到"第一个满足共现闸的章节"——两者都与修复前逐字节一致，不
+  2605	# 改变找不到双锚定时的输出）。这不是放宽共现闸：章节/分段是否"合格"仍然只看 text 是否
+  2606	# 逐字出现（不接受主体/对象的其它别名形式顶替 text 本身），双锚定只是在已经合格的分段
+  2607	# 里，多一层"优先选哪一个"的偏好，不会让原本拒绝的申报被放行，也不会让原本能找到桥接章
+  2608	# 的申报反而找不到。别名回填与状态事实回填共用同一套函数（`_alias_bridge_quote`/
+  2609	# `_find_alias_bridge_chapter`），别名场景里"主体"是角色、"对象"是别名文本，双锚定同样
+  2610	# 成立——回填 dry-run 对照见变更记录，通过条数与逐条明细未受影响。
+  2611	
+  2612	_ALIAS_BRIDGE_QUOTE_MAX_CHARS = 200  # 引句长度上限：够定位上下文，不整段搬运
+  2613	
+  2614	
+  2615	def _alias_bridge_quote(chapter_text: str, text: str) -> str | None:
+  2616	    """从桥接章原文里确定性截取包含 text 的引句：复用 `index_source_segments`
+  2617	    做自然段/句级切分（与裁决庭卷宗检索同一工具，已处理引号跨段等边界情况），
+  2618	    取第一个包含 text 的分段——分段本身就是原文的逐字切片，天然满足
+  2619	    `_alias_declaration_verified` 条件 1（逐字子串）与条件 2（text 是引句子串）。
+  2620	    调用方已确认 text 在 chapter_text 里，理论上必有命中；找不到时返回 None
+  2621	    交由调用方兜底拒绝，不强行拼一句可能不含 text 的引句。
+  2622	
+  2623	    不看主体——这是 `_find_alias_bridge_chapter` 优先找不到双锚定分段/双锚定章时的
+  2624	    回落取句（见模块顶部"取句策略修复"说明），行为与该函数改名/加主体优先级之前
+  2625	    完全一致，不单独调用时不受影响。"""
+  2626	    for segment in index_source_segments(chapter_text, max_chars=_ALIAS_BRIDGE_QUOTE_MAX_CHARS):
+  2627	        if text in segment.text:
+  2628	            return segment.text
+  2629	    return None
+  2630	
+  2631	
+  2632	def _alias_bridge_dual_anchor_quote(
+  2633	    chapter_text: str, text: str, subject_anchor_texts: set[str],
+  2634	) -> str | None:
+  2635	    """桥接章内优先检索"同时包含主体与对象"的分段（取句策略修复，见模块顶部"取句

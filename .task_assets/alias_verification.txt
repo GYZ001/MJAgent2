@@ -1,0 +1,156 @@
+  3500	    内容）；accepted=False 时 reason 是机器可读的拒绝原因，供调用方记账与复核报告。
+  3501	
+  3502	    `bible`（可选，见 docs/CHARACTER_COGNITION_LAYER_DESIGN.md §4.3）：调用方若提供
+  3503	    完整 `Bible`，会额外组装一张章级认知卡（`build_chapter_cognition_card`，候选范围
+  3504	    限定为本次裁决闸算出的 `candidates`）注入 `_alias_verdict_call` 的提示词，帮助
+  3505	    模型看到候选人跨章建立的归属/关系背景，不改变裁决规则本身。缺省 `None`（例如
+  3506	    测试直接构造裁决场景、不需要认知卡）时行为与认知卡引入前完全一致。"""
+  3507	    empty = {"accepted": False, "chapter_idx": None, "quote": "", "reason": ""}
+  3508	    if _alias_declaration_verified(
+  3509	        chapters_by_idx, anchor_texts, text, evidence_chapter_index, evidence_quote,
+  3510	    ):
+  3511	        resolved_chapter_index, resolved_quote = evidence_chapter_index, evidence_quote
+  3512	    else:
+  3513	        bridge = _find_alias_bridge_chapter(chapters_by_idx, anchor_texts, text)
+  3514	        if bridge is None:
+  3515	            return {**empty, "reason": "no_bridge_chapter"}
+  3516	        resolved_chapter_index, resolved_quote = bridge
+  3517	
+  3518	    chapter_text = chapters_by_idx.get(resolved_chapter_index, "")
+  3519	    candidates = _alias_verdict_candidates(chapter_text, roster)
+  3520	    if not candidates:
+  3521	        return {**empty, "reason": "no_verdict_candidates"}
+  3522	    # 卷宗证据锚点必须覆盖全部候选人，不能只锚定被测的这一位（真实误登记事故 2、
+  3523	    # 见本节顶部大注释）：只把候选名单摆给模型看，卷宗本身若只收录"text 与被测
+  3524	    # true_name 共现"的段落，模型就永远看不到"另一个候选人在这章别的地方被点名"
+  3525	    # 这条关键证据——第 189 章"王有材默默站起身站在孟浩身后"这段原文既不含
+  3526	    # "王师弟"也不含被测的"王腾飞"，只按 anchor_texts={"王腾飞"} 检索会把它漏掉，
+  3527	    # 模型只能看着反复出现的"王腾飞"就近作答，重演确认偏误。把全部候选人（结构性
+  3528	    # 算出，来自 `_alias_verdict_candidates`）的规范名与已登记别名一并纳入锚点，
+  3529	    # dossier 的 anchor_only 类别就能把"王有材"那一段也按接近别名段落的程度收录
+  3530	    # 进来，模型才有机会看到真正指向正确候选的证据，而不只是被反复出现的名字带偏。
+  3531	    dossier_anchor_texts = set(anchor_texts) | {
+  3532	        form for name in candidates for form in roster.get(name, [])
+  3533	    }
+  3534	    dossier = _alias_verdict_dossier(
+  3535	        resolved_chapter_index, chapter_text, text, dossier_anchor_texts,
+  3536	    )
+  3537	    if not dossier:
+  3538	        return {**empty, "reason": "no_verdict_dossier"}
+  3539	    cognition_card = (
+  3540	        build_chapter_cognition_card(
+  3541	            bible, chapters_by_idx, resolved_chapter_index, character_names=candidates,
+  3542	        )
+  3543	        if bible is not None else None
+  3544	    )
+  3545	    try:
+  3546	        response = await _alias_verdict_call(
+  3547	            alias=text, true_name=true_name, dossier=dossier,
+  3548	            candidates=candidates, project_id=project_id,
+  3549	            cognition_card=cognition_card,
+  3550	        )
+  3551	    except Exception as exc:  # noqa: BLE001 - 裁决调用失败按不确定处理：不确定不登记
+  3552	        log_provider_call(
+  3553	            "character_alias_backfill_verdict", config.MODEL_TEXT, "FAILED", None, 0,
+  3554	            meta={"alias": text, "true_name": true_name, "error": str(exc)[:300]},
+  3555	        )
+  3556	        return {**empty, "reason": "verdict_call_failed"}
+  3557	    if response.selected_candidate != true_name:
+  3558	        reason = (
+  3559	            "candidate_uncertain"
+  3560	            if response.selected_candidate == _ALIAS_VERDICT_NO_MATCH_LABEL
+  3561	            else "candidate_mismatch"
+  3562	        )
+  3563	        return {**empty, "reason": reason}
+  3564	    if _alias_verdict_pin_segment(dossier, response.supporting_segment_index) is None:
+  3565	        return {**empty, "reason": "segment_not_pinned"}
+  3566	    return {
+  3567	        "accepted": True, "chapter_idx": resolved_chapter_index,
+  3568	        "quote": resolved_quote, "reason": "",
+  3569	    }
+  3570	
+  3571	
+  3572	async def _verify_character_aliases_for_subset(
+  3573	    bible: Bible, characters: list[Character], chapters_by_idx: dict[int, str], *,
+  3574	    project_id: str | None = None,
+  3575	) -> dict[str, list[str]]:
+  3576	    """`_verify_character_aliases_in_place` 的内层循环，抽成可传入显式 `characters`
+  3577	    子集的辅助函数——供 `_verify_character_aliases_in_place`（传入 `bible.characters`
+  3578	    全量，行为与抽取前完全一致）与 `_supplement_bible_characters`（补录 append 成功
+  3579	    后只对本次新增角色调用，不对已核验过的角色重复发起模型调用）共用。
+  3580	
+  3581	    候选面快照（`roster`，供裁决闸判别"这个称呼指代候选中的谁"）永远取自完整
+  3582	    `bible.characters`，不受 `characters` 子集影响：核验范围可以只挑几个角色，
+  3583	    但候选集必须是整本人物谱——否则会重演"真实误登记事故 2"同一形状的问题
+  3584	    （裁决模型看不到正确候选，只能矮子里拔将军）。只处理 aliases 字段，绝不触碰
+  3585	    角色的任何其它既有字段。"""
+  3586	    roster = _alias_verdict_roster(bible)
+  3587	    added: dict[str, list[str]] = {}
+  3588	    for character in characters:
+  3589	        anchor_texts = {character.name}
+  3590	        verified: list[CharacterAlias] = []
+  3591	        added_texts: list[str] = []
+  3592	        for item in character.aliases:
+  3593	            text = (item.text or "").strip()
+  3594	            if not text or text == character.name or text in anchor_texts:
+  3595	                continue
+  3596	            resolved = await _alias_evidence_resolution(
+  3597	                chapters_by_idx, anchor_texts, text, character.name,
+  3598	                item.evidence_chapter_index, item.evidence_quote,
+  3599	                roster=roster, project_id=project_id, bible=bible,
+  3600	            )
+  3601	            if resolved["accepted"]:
+  3602	                verified.append(CharacterAlias(
+  3603	                    text=text, name_kind=item.name_kind,
+  3604	                    evidence_chapter_index=resolved["chapter_idx"],
+  3605	                    evidence_quote=resolved["quote"],
+  3606	                ))
+  3607	                anchor_texts.add(text)
+  3608	                added_texts.append(text)
+  3609	        character.aliases = verified
+  3610	        if added_texts:
+  3611	            added[character.name] = added_texts
+  3612	    return added
+  3613	
+  3614	
+  3615	async def _verify_character_aliases_in_place(
+  3616	    bible: Bible, chapters: list[dict], *, project_id: str | None = None,
+  3617	) -> dict[str, list[str]]:
+  3618	    """`generate_bible` 主链路核验：模型随人物谱正文一并申报的 aliases 同样只是申报，
+  3619	    落库前必须过同一套代码核验（`_alias_evidence_resolution`，与回填函数共用；模型
+  3620	    申报章节没通过共现闸时，退一步做全书桥接章检索，通过共现闸后还要再过一道桥接章
+  3621	    原文独立裁决，见该函数 docstring）。只处理 aliases 字段，绝不触碰角色的任何其它
+  3622	    既有字段。核验范围是 `bible.characters` 全量（内层循环见
+  3623	    `_verify_character_aliases_for_subset`）。"""
+  3624	    chapters_by_idx = _chapters_by_idx(chapters)
+  3625	    return await _verify_character_aliases_for_subset(
+  3626	        bible, bible.characters, chapters_by_idx, project_id=project_id,
+  3627	    )
+  3628	
+  3629	
+  3630	def _render_alias_backfill_source(
+  3631	    chapters: list[dict], budget: int = ALIAS_BACKFILL_SOURCE_BUDGET_CHARS,
+  3632	) -> str:
+  3633	    """为别名回填渲染全书原文：块头强制显示原文章节序号（idx），不像 `_render_bible_source`
+  3634	    那样优先用章节标题——回填要求模型精确报出 `evidence_chapter_index`，标题文本
+  3635	    （可能是任意小说章节名）无法保证与 idx 对应，块头必须显式给出数字。"""
+  3636	    valid = [ch for ch in chapters if (ch.get("content") or "").strip()]
+  3637	    blocks: list[str] = []
+  3638	    used = 0
+  3639	    for chapter in valid:
+  3640	        remain = budget - used
+  3641	        if remain <= 200:
+  3642	            break
+  3643	        content = chapter["content"].strip()
+  3644	        clipped = content[:remain]
+  3645	        suffix = "……（原文过长已截断）" if len(content) > remain else ""
+  3646	        blocks.append(f"【第 {chapter.get('idx', '?')} 章】\n{clipped}{suffix}")
+  3647	        used += len(clipped)
+  3648	    return "\n\n".join(blocks)
+  3649	
+  3650	
+  3651	class _AliasBackfillDeclaration(BaseModel):
+  3652	    """别名回填申报合同：模型只申报，是否登记由后端核验决定。"""
+  3653	
+  3654	    character_name: str = ""
+  3655	    text: str = ""

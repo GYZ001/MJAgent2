@@ -1,0 +1,221 @@
+   450	        (
+   451	            f"{operation_id}：响应中存在多个互不嵌套的顶层 JSON 根，"
+   452	            "已按“最新且非悬空容器子片段”选取一个，其余候选未被采用"
+   453	            "（可能包含未被采用的有效数据）"
+   454	        ),
+   455	        step_run_id=trace.step_run_id,
+   456	        trace_id=trace.trace_id,
+   457	        payload={
+   458	            "chosen_root_type": root_type,
+   459	            "candidate_count": candidate_count,
+   460	            "stage_key": call_meta.get("stage_key"),
+   461	            "call_role": call_meta.get("call_role"),
+   462	        },
+   463	    )
+   464	
+   465	
+   466	async def chat(
+   467	    messages: list[dict[str, str]],
+   468	    *,
+   469	    temperature: float = 0.7,
+   470	    max_tokens: int = 8192,
+   471	    call_meta: dict[str, Any] | None = None,
+   472	    usage_callback: Callable[[dict[str, Any]], None] | None = None,
+   473	    response_format: dict[str, Any] | None = None,
+   474	    provider: str | None = None,
+   475	) -> str:
+   476	    """The only text-model entry point for business stages.
+   477	
+   478	    It enforces trace metadata at the harness boundary while retaining the
+   479	    provider adapter's retry, redaction and lifecycle recording.
+   480	
+   481	    ``response_format`` 用于让网关在生成阶段就约束输出为合法 JSON（json_object /
+   482	    json_schema）；仅结构化调用会传入，供应商不支持时适配层自动去掉并重试。
+   483	
+   484	    ``provider`` 显式传入时优先；否则读取
+   485	    ``app.harness.text_provider_scope.current_stage_text_provider()``——世界书/
+   486	    映射台/分镜台的领域任务入口用 ``stage_text_provider(...)`` 包一层后，本函数
+   487	    下游所有调用不必逐个改调用点就能拿到该环节配置的专属文本 provider；两者都
+   488	    没有时为 None，即此前的默认行为（走 ``active_provider("text")``）。
+   489	    """
+   490	    if provider is None:
+   491	        from app.harness.text_provider_scope import current_stage_text_provider
+   492	
+   493	        provider = current_stage_text_provider()
+   494	    trace = current_trace()
+   495	    meta = {
+   496	        "gateway": "execution_harness",
+   497	        "run_id": trace.run_id,
+   498	        "step_run_id": trace.step_run_id,
+   499	        "trace_id": trace.trace_id,
+   500	        **(call_meta or {}),
+   501	    }
+   502	    # 任何声明期望 JSON 的业务调用（chat_structured 及直接带 expected_json 的分片/蓝图等）
+   503	    # 都在生成阶段就约束合法 JSON。显式传入的 response_format 优先；否则按 expected_json 兜底。
+   504	    # 这样无需逐个改调用点，统一在 harness 边界收口，供应商不支持时适配层会自动去掉重试。
+   505	    effective_response_format = response_format
+   506	    if effective_response_format is None and meta.get("expected_json"):
+   507	        effective_response_format = {"type": "json_object"}
+   508	    # Strict OpenAI-compatible gateways require the prompt itself to name JSON
+   509	    # when ``json_object`` is requested.  Normalize once at the harness boundary
+   510	    # so the first provider attempt, durable request hash and any retry all use
+   511	    # the same caller-independent message snapshot.
+   512	    provider_messages = hiagent._messages_for_response_format(
+   513	        messages,
+   514	        effective_response_format,
+   515	    )
+   516	    max_retries = (
+   517	        0
+   518	        if meta.get("disable_provider_retries")
+   519	        else config.TEXT_PROVIDER_MAX_RETRIES
+   520	    )
+   521	    stage_key = str(meta.get("stage_key") or "") or None
+   522	    for failure_no in range(max_retries + 1):
+   523	        try:
+   524	            from app.generation_concurrency import run_with_provider_call_slot
+   525	
+   526	            provider_kwargs: dict[str, Any] = {
+   527	                "temperature": temperature,
+   528	                "max_tokens": max_tokens,
+   529	                "call_meta": meta,
+   530	            }
+   531	            if provider is not None:
+   532	                provider_kwargs["provider"] = provider
+   533	            if usage_callback is not None:
+   534	                provider_kwargs["usage_callback"] = usage_callback
+   535	            if effective_response_format is not None:
+   536	                provider_kwargs["response_format"] = effective_response_format
+   537	            result = await run_with_provider_call_slot(
+   538	                lambda: hiagent.chat(provider_messages, **provider_kwargs)
+   539	            )
+   540	            if meta.get("expected_json") and _is_non_candidate_json_response(result):
+   541	                raise hiagent.ProviderError(
+   542	                    "文本模型未返回任务 JSON 候选",
+   543	                    retryable=True,
+   544	                    raw=result,
+   545	                )
+   546	            return result
+   547	        except hiagent.ProviderError as exc:
+   548	            if exc.requires_explicit_retry:
+   549	                _append_interrupted_event(exc, meta)
+   550	            if (
+   551	                not exc.retryable
+   552	                or not exc.replay_safe
+   553	                or failure_no >= max_retries
+   554	            ):
+   555	                raise
+   556	
+   557	            retry_no = failure_no + 1
+   558	            delay = config.TEXT_PROVIDER_RETRY_BASE_DELAY * (2 ** failure_no)
+   559	            message = (
+   560	                f"文本模型请求明确未送达，约 {int(delay)} 秒后自动执行"
+   561	                f"第 {retry_no}/{max_retries} 次重试"
+   562	            )
+   563	            trace = current_trace()
+   564	            paused = bool(
+   565	                trace.run_id
+   566	                and _retry_can_pause_run(trace.run_id, trace.step_run_id, stage_key)
+   567	            )
+   568	            if paused:
+   569	                transition_run(trace.run_id, "RUNNING", "WAITING_RETRY", message, conn=None)
+   570	            _append_retry_event(
+   571	                "PROVIDER_RETRY_SCHEDULED",
+   572	                message,
+   573	                retry_no=retry_no,
+   574	                max_retries=max_retries,
+   575	                delay=delay,
+   576	                call_meta=meta,
+   577	            )
+   578	            try:
+   579	                await asyncio.sleep(delay)
+   580	            except asyncio.CancelledError:
+   581	                # The recorder owns cancellation and can legally cancel a run
+   582	                # from WAITING_RETRY. Do not move it back to RUNNING here.
+   583	                raise
+   584	            if paused:
+   585	                transition_run(trace.run_id, "WAITING_RETRY", "RUNNING", "重试冷却结束，恢复执行", conn=None)
+   586	            _append_retry_event(
+   587	                "PROVIDER_RETRY_RESUMED",
+   588	                "重试冷却结束，已恢复同一文本模型请求",
+   589	                retry_no=retry_no,
+   590	                max_retries=max_retries,
+   591	                delay=0.0,
+   592	                call_meta=meta,
+   593	            )
+   594	
+   595	    raise AssertionError("unreachable text provider retry state")
+   596	
+   597	
+   598	async def chat_structured(
+   599	    messages: list[dict[str, str]],
+   600	    *,
+   601	    model_type: type[T] | Callable[[dict[str, Any]], T],
+   602	    validate: Callable[[T], Any] | None,
+   603	    operation_id: str,
+   604	    max_tokens: int,
+   605	    format_retry_limit: int = 1,
+   606	    semantic_retry_limit: int = 1,
+   607	    temperature: float = 0.1,
+   608	    call_meta: dict[str, Any] | None = None,
+   609	    repair_context: str = "",
+   610	    format_repair_context: str = "",
+   611	    output_schema: dict[str, Any] | None = None,
+   612	    response_format: dict[str, Any] | None = None,
+   613	    require_response_format: bool = False,
+   614	    repair_schema: Callable[[T], dict[str, Any]] | None = None,
+   615	    normalize_payload: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+   616	    on_attempt: Callable[[dict[str, Any]], Any] | None = None,
+   617	    usage_callback: Callable[[dict[str, Any]], None] | None = None,
+   618	) -> T:
+   619	    """Run one typed model operation with separate format/semantic budgets.
+   620	
+   621	    Transport retries remain owned by :func:`chat`.  A malformed HTTP-200 is
+   622	    never returned as success: it is recovered locally when a complete trailing
+   623	    object exists, otherwise only the schema and response tail are sent for one
+   624	    bounded format repair.  Business validation uses its own retry budget.
+   625	    """
+   626	    if not operation_id.strip():
+   627	        raise ValueError("structured operation_id is required")
+   628	    if require_response_format and response_format is None:
+   629	        raise ValueError(
+   630	            "require_response_format needs an explicit response_format"
+   631	        )
+   632	    stage_key = str((call_meta or {}).get("stage_key") or "")
+   633	    substage = str((call_meta or {}).get("substage") or "")
+   634	    identity_response_format_names = {
+   635	        "current_identity": "screenplay_current_identity_discovery_v11",
+   636	        "future_identity": "screenplay_future_identity_resolution_v10",
+   637	        "structural_coverage": "screenplay_structural_identity_coverage_v6",
+   638	    }
+   639	    strict_identity_substage = (
+   640	        stage_key == "screenplay_character_discovery"
+   641	        and substage in identity_response_format_names
+   642	    )
+   643	    strict_json_schema_contract = (
+   644	        stage_key == "screenplay_scene_shard_semantic_repair"
+   645	        or strict_identity_substage
+   646	    )
+   647	    # Scope of the block below: it only validates the *caller's* arguments to
+   648	    # this function (the Python-level contract at this call boundary) -- it
+   649	    # never inspects the bytes actually sent over HTTP, so on its own it
+   650	    # cannot prove the provider received this exact json_schema. What closes
+   651	    # that gap is `require_response_format=True` (forced True here) flowing
+   652	    # into `call_meta["response_format_required"]` and from there into
+   653	    # `app.hiagent.chat()`: that function structurally guarantees a
+   654	    # response_format_required call either sends the caller's response_format
+   655	    # unmodified (retrying the identical request in place on a transient-
+   656	    # looking 400) or raises -- it never silently downgrades json_schema to
+   657	    # json_object/None the way opportunistic calls may. So the two layers
+   658	    # together do guarantee the wire payload, but neither one alone does;
+   659	    # do not read this block as a payload-level assertion by itself.
+   660	    if strict_json_schema_contract:
+   661	        json_schema = (
+   662	            response_format.get("json_schema")
+   663	            if isinstance(response_format, dict)
+   664	            else None
+   665	        )
+   666	        if (
+   667	            not require_response_format
+   668	            or not isinstance(response_format, dict)
+   669	            or response_format.get("type") != "json_schema"
+   670	            or not isinstance(json_schema, dict)
