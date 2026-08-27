@@ -150,9 +150,10 @@ def effective_portrait_prompt(
     visual_style: str,
     anchor: str,
     portrait_prompt_override: str | None = None,
+    period_costume_canonical: str = "",
 ) -> str:
     merged_anchor = portrait_override_appearance_anchor(anchor, portrait_prompt_override)
-    prompt = portrait_prompt(visual_style, merged_anchor)
+    prompt = portrait_prompt(visual_style, merged_anchor, period_costume_canonical)
     if not normalize_prompt_text(portrait_prompt_override or "").strip():
         return prompt
     return normalize_prompt_text(
@@ -161,10 +162,16 @@ def effective_portrait_prompt(
     )
 
 
-def portrait_prompt(visual_style: str, anchor: str) -> str:
+def portrait_prompt(visual_style: str, anchor: str, period_costume_canonical: str = "") -> str:
     from app.visual_styles import is_photographic_style_prompt
     style = character_visual_style_lock(visual_style)
     body = production_appearance_anchor(anchor)
+    period_costume = normalize_prompt_text(period_costume_canonical or "").strip()
+    period_contract = (
+        f"年代服饰硬约束：{period_costume}；服装形制、面料、鞋履、束发和配饰必须符合该年代、地域与身份，禁止现代、跨时代或跨文化误植。"
+        if period_costume else
+        "服装形制、面料、鞋履、束发和配饰必须服从角色外观锚点与世界年代，不得擅自加入现代或跨时代元素。"
+    )
     privacy_note = (
         _PORTRAIT_PHOTOGRAPHIC_STYLE_NOTE
         if is_photographic_style_prompt(normalize_prompt_text(visual_style or "").strip())
@@ -175,7 +182,7 @@ def portrait_prompt(visual_style: str, anchor: str) -> str:
         "完整遵循锚点声明的实体形态、空间关系、姿态和关联道具；"
         "若锚点未声明特殊姿态，则采用正面中性展示姿态。纯浅米色背景，全身完整可见。"
         "头顶、肩臂和鞋底均不得贴边或出画，主体四周保留至少 8% 安全边距。"
-        f"{_PORTRAIT_CLOTHING_CONTRACT}。{privacy_note}。"
+        f"{_PORTRAIT_CLOTHING_CONTRACT}。{period_contract}。{privacy_note}。"
         "不得添加外观合同未声明的主体或视觉元素"
     )
 
@@ -378,7 +385,7 @@ async def _generate_one_character_portrait(
     from app.stages import review_portrait_image
     override = (c.portrait_prompt_override or "").strip()
     base_prompt = effective_portrait_prompt(
-        style, c.appearance_canonical, override,
+        style, c.appearance_canonical, override, c.period_costume_canonical,
     )
     effective_appearance = portrait_override_appearance_anchor(
         c.appearance_canonical, override,

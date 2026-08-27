@@ -5185,7 +5185,7 @@ async def _generate_character_detail(
 
 
 async def _generate_character_detail_batch(
-    entries: list[_BibleRosterEntry], chapters: list[dict], *, style: str, era: str,
+    entries: list[_BibleRosterEntry], chapters: list[dict], *, style: str, era: str = "",
     chapters_by_idx: dict[int, str], project_id: str | None,
 ) -> list[Character]:
     roster_names = [entry.name for entry in entries]
@@ -5196,6 +5196,7 @@ async def _generate_character_detail_batch(
             chapters, [entry.name, *entry.source_appellations]
         ),
         style=style,
+        era=roster.world.era,
         chapters_by_idx=chapters_by_idx,
         project_id=project_id,
     )) for entry in entries]
@@ -5284,6 +5285,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
         roster.characters,
         chapters,
         style=style,
+        era=roster.world.era,
         chapters_by_idx=chapters_by_idx,
         project_id=project_id,
     )
