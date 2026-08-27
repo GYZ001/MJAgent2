@@ -43,7 +43,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app import config
+from app import config, hiagent
 from app.db import new_id
 from app.domain.common import _episode_source_text
 from app.evidence import repository as evidence_repository
@@ -206,13 +206,33 @@ from app.video_prompt_profiles import VideoPromptProfile
 #: 纯对话，也可能是遗漏，代码分不清这两种，只能标记出来交给人核对，不代为
 #: 判断）。两条标记名字互斥、依据都是确定性的集合运算（relevant_assets.
 #: scenes 是否为空），不是新的模型语义判断，也不是黑名单。
-STORYBOARD_PACK_VERSION = "2.0.5"
+#:
+#: 2.0.6（生产事故：生成可执行分镜 finish_reason=length、reasoning_present=
+#: True、completion_tokens=32768，整集 escalate）：2.0.3 把阶段二收成「整集
+#: 一次调用」，测量依据是当时模型的 5125 次历史调用 reasoning_tokens 全部
+#: 为 0，「这个模型配置不会偷输出预算去思考」。当前文本路由是思考型模型，
+#: 思考 token 与答案共用同一份 completion 预算（app.hiagent.text_request_
+#: token_limits 叠加 TEXT_REASONING_TOKEN_RESERVE=16384，再夹到模型
+#: max_output_tokens=32768）。段数 ≥7 时答案预算 2400×N 加上思考预留已经
+#: 顶满 32768，截断抬升（truncation escalation）发现自己已经在上限上，无
+#: 处可去，整集失败。2.0.3 自己写下的残留风险 ①（「段数没有代码强制上限
+#: ……真出现更长章节时上面的余量会被吃掉」）在模型换成思考型的那一刻就
+#: 提前兑现了，不是段数真的超过 12。
+#: 修复：阶段二仍按整集视野写（全部节拍/原文/素材清单每次都给，后续批次
+#: 带上 already_written_segments 承接已写提示词），但每次调用的答案预算
+#: 必须严格小于 (max_output_tokens - reasoning_reserve)，装不下就顺序分
+#: 批。这不是退回 2.0.3 之前的逐段并行——那条路径的跨段视野为零，是割裂
+#: 感的结构性根因，不能为了预算再拆回去。持久化契约字段名/形状不变，
+#: STORYBOARD_PACK_CONTRACT_MARKER 故意留在 2.0.5：resume 短路只看 marker，
+#: 这次没有改产物形状，已成功的集不该被强迫重跑一次付费生成。
+STORYBOARD_PACK_VERSION = "2.0.6"
 
 #: Written to Shot.prompt_contract_version for every row this module writes.
 #: This is the single, principled marker every downstream consumer keys off
 #: of to know "this row's shot_size/camera_move/first_frame_desc/... are not
 #: authoritative -- read storyboard_pack_segment.prompt_text instead". It is
 #: a data-derived version tag, not a per-episode/per-shot allowlist.
+#: 2.0.6 只改生成路径的调用切分，不改落库形状，因此 marker 仍钉在 2.0.5。
 STORYBOARD_PACK_CONTRACT_MARKER = "storyboard_pack/2.0.5"
 
 SEGMENT_DURATION_S = 15
@@ -225,8 +245,49 @@ MAX_SHOTS_PER_SEGMENT = 4
 #: 单段调用 completion_tokens 观测（202 次 storyboard_pack_segment 调用，
 #: 均值 1018、最大 1897），乘约 1.3 的安全系数覆盖新设计里因跨段连续性
 #: 陈述而变长的段落；下限 8000 保证段数很少的集也有余量。
+#: 2.0.6：这个数字仍然只描述「答案要多大」。一次调用能装几段，由
+#: `_segment_prompt_batch_capacity` 按「答案 + 思考预留 < 模型硬顶」计算，
+#: 不再假设整集一定装得进一次 completion。
 SEGMENT_BATCH_TOKENS_PER_SEGMENT = 2400
 SEGMENT_BATCH_TOKENS_FLOOR = 8000
+
+
+def _segment_prompt_answer_budget(segment_count: int) -> int:
+    """阶段二一次调用的答案预算，不含思考预留。"""
+    return max(
+        SEGMENT_BATCH_TOKENS_FLOOR,
+        SEGMENT_BATCH_TOKENS_PER_SEGMENT * max(1, int(segment_count)),
+    )
+
+
+def _segment_prompt_batch_capacity(total_segments: int) -> int:
+    """一次调用最多写几段，才能让答案预算给思考预留留出位置。
+
+    判据挂在这次调用自己的 token 算术上，不挂段数经验值：2.0.3 用「今天最
+    大 12 段、当时模型不思考」得出「整集一次调用装得下」，模型一换成思考
+    型，7 段就会把 32768 硬顶打满。思考预留和模型上限都来自网关同一换算
+    入口，这里不另写一份常量。
+    """
+    total = max(1, int(total_segments))
+    _, _, model_cap = hiagent.text_request_token_limits(requested_max_tokens=10**9)
+    room = int(model_cap) - hiagent.reasoning_token_reserve()
+    capacity = 1
+    for count in range(1, total + 1):
+        if _segment_prompt_answer_budget(count) >= room:
+            break
+        capacity = count
+    return capacity
+
+
+def _split_segment_prompt_batches(segment_nos: list[int]) -> list[list[int]]:
+    """按容量切成顺序批次。空列表不切，避免「空集合等于无需检查」。"""
+    if not segment_nos:
+        return []
+    capacity = _segment_prompt_batch_capacity(len(segment_nos))
+    return [
+        list(segment_nos[index:index + capacity])
+        for index in range(0, len(segment_nos), capacity)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -941,6 +1002,73 @@ def _segment_content_advisories(
     return advisories
 
 
+def _already_written_records(
+    drafts: dict[int, _AiStoryboardSegmentDraft],
+    *,
+    written_nos: list[int],
+) -> list[dict[str, Any]]:
+    """后续批次看到的已写段落。空列表表示还没有已写内容，调用方不得省略检查。"""
+    records: list[dict[str, Any]] = []
+    for segment_no in written_nos:
+        draft = drafts[segment_no]
+        records.append(
+            {
+                "segment_no": draft.segment_no,
+                "prompt_text": draft.prompt_text,
+                "shot_count": draft.shot_count,
+                "resources": draft.resources.model_dump(mode="json"),
+            }
+        )
+    return records
+
+
+def _segment_prompt_task_text(
+    *,
+    write_nos: list[int],
+    all_nos: list[int],
+    has_already_written: bool,
+) -> str:
+    """阶段二任务陈述。装得进一次调用时保持 2.0.3 原文，避免小集无故换提示词。"""
+    continuity = (
+        "你能同时看到全部段落的节拍、原文与素材清单，必须把这份整集视野真正"
+        "用起来，让相邻及跨段的画面保持连贯——同一角色的外观/服装在全集所有"
+        "出现它的段落里必须完全一致（下面的规则里也有强制要求，不是建议）；"
+        "一段的结尾场景与下一段的开头场景如果不同，下一段的第一个镜头要能看出"
+        "「从哪来」的交代（例如沿用同一光影/环境线索，或用一个明确的转场镜头"
+        "承接），不能让人觉得两段是互不相干、各自拼凑出来的；镜头语言（运镜"
+        "选择、镜头开场方式）避免连续多段使用完全相同的模式——同类型运镜可以"
+        "出现，但要与相邻段错开，读起来才不会像同一个模板在不断重复。"
+    )
+    output_shape = (
+        "segments[] 里的每一项都必须是完整、可直接复制使用的一整块文本，不要"
+        "拆成多个片段或只写关键词——你产出的每个字符串都会被原样保存并原样提交"
+        "给视频生成接口，不会再被代码拼接、改写或补充任何后缀。"
+    )
+    if write_nos == all_nos and not has_already_written:
+        return (
+            "为下面这一整集的每一段原文和节拍各写一整段可直接投喂视频生成模型的"
+            "提示词（segments[].prompt_text）。"
+            f"{output_shape}\n\n"
+            "这是本集全部段落的一次性联合产出，不是逐段割裂地各写各的："
+            f"{continuity}"
+        )
+    already_written_note = (
+        "already_written_segments 是本集已经写好的段落提示词，必须与它们保持"
+        "角色外观、场景转场、镜头语言连贯；不要重写那些段落，只要产出下面指定"
+        "的 segment_no。\n\n"
+        if has_already_written
+        else ""
+    )
+    return (
+        f"{already_written_note}"
+        f"为本集下列段落各写一整段可直接投喂视频生成模型的提示词"
+        f"（segments[].prompt_text）：{write_nos}。本集全部段落是 {all_nos}。"
+        f"{output_shape}\n\n"
+        "这不是逐段割裂地各写各的："
+        f"{continuity}"
+    )
+
+
 async def _generate_all_segment_prompts(
     *,
     episode_id: str,
@@ -951,20 +1079,23 @@ async def _generate_all_segment_prompts(
     target_video_model: str,
     bible: Bible | None,
 ) -> dict[int, _AiStoryboardSegmentDraft]:
-    """整集一次调用产出全部段落的 prompt_text（2.0.3，替代逐段并行调用）。
+    """按整集视野产出全部段落的 prompt_text（2.0.3 起，替代逐段并行调用）。
 
     与旧的逐段版本（每段一次独立 chat_structured、asyncio.gather 并行发出）
-    相比，这里把本集全部段落的节拍、原文、素材清单一次性交给模型，模型能
-    同时看到相邻/跨段的上下文，从而自己保证角色外观、场景转换、镜头语言
-    的跨段连续性——旧路径下生成第 N 段那次调用既看不到第 N-1 段写了什么、
-    也不知道第 N+1 段会写什么，跨段视野为零，是割裂感的结构性根因（见
-    STORYBOARD_PACK_VERSION 2.0.3 changelog 的完整测量数据与风险判断）。
+    相比，这里把本集全部段落的节拍、原文、素材清单交给模型，模型能同时看到
+    相邻/跨段的上下文，从而自己保证角色外观、场景转换、镜头语言的跨段连续
+    性——旧路径下生成第 N 段那次调用既看不到第 N-1 段写了什么、也不知道第
+    N+1 段会写什么，跨段视野为零，是割裂感的结构性根因（见
+    STORYBOARD_PACK_VERSION 2.0.3 changelog）。
+
+    2.0.6：一次调用的答案必须给思考预留留出位置。装得下就仍是整集一次调用
+    （小集提示词与 2.0.3/2.0.5 相同）；装不下就顺序分批，后续批次带上已写
+    段落的 prompt_text，而不是退回互不可见的逐段并行。
 
     每段仍然各用一份按 ``_segment_relevant_assets`` 筛选出的 relevant_assets
     （承袭 2.0.1/2.0.2 已验证的过滤逻辑，不重写），额外再给模型一份全集
-    source_text_by_segment 与完整 beat_sheet 作为全局上下文，让它在写每一段
-    时都能看见其余段落的原文与节拍摘要。返回值按 segment_no 建索引，供调用
-    方按 beat_draft.segments 的顺序取回、组装回 StoryboardPackSegment。
+    source_text_by_segment 与完整 beat_sheet 作为全局上下文。返回值按
+    segment_no 建索引，供调用方按 beat_draft.segments 的顺序取回。
     """
     profile, target_model_literal, dialect_instructions = _dialect_for_target_video_model(
         target_video_model
@@ -1012,161 +1143,180 @@ async def _generate_all_segment_prompts(
         }
         for unit in segment_units
     }
-    task_payload = {
-        "task": (
-            "为下面这一整集的每一段原文和节拍各写一整段可直接投喂视频生成模型的"
-            "提示词（segments[].prompt_text）。segments[] 里的每一项都必须是完整、"
-            "可直接复制使用的一整块文本，不要拆成多个片段或只写关键词——你产出的"
-            "每个字符串都会被原样保存并原样提交给视频生成接口，不会再被代码拼接、"
-            "改写或补充任何后缀。\n\n"
-            "这是本集全部段落的一次性联合产出，不是逐段割裂地各写各的：你能同时"
-            "看到全部段落的节拍、原文与素材清单，必须把这份整集视野真正用起来，"
-            "让相邻及跨段的画面保持连贯——同一角色的外观/服装在全集所有出现它的"
-            "段落里必须完全一致（下面的规则里也有强制要求，不是建议）；一段的"
-            "结尾场景与下一段的开头场景如果不同，下一段的第一个镜头要能看出"
-            "「从哪来」的交代（例如沿用同一光影/环境线索，或用一个明确的转场镜头"
-            "承接），不能让人觉得两段是互不相干、各自拼凑出来的；镜头语言（运镜"
-            "选择、镜头开场方式）避免连续多段使用完全相同的模式——同类型运镜可以"
-            "出现，但要与相邻段错开，读起来才不会像同一个模板在不断重复。"
-        ),
-        "rules": [
-            f"segments[] 必须恰好包含以下 {len(expected_segment_nos)} 个 "
-            f"segment_no，每个出现且只出现一次，不得遗漏也不得新增："
-            f"{expected_segment_nos}；数组顺序不重要，身份以 segment_no 为准。",
-            "relevant_assets 里每个角色/场景都带一个外观/场景字段（角色和"
-            "群演统一叫 appearance；场景叫 scene_canonical）：内容是一段"
-            "具体描述时，那就是这个角色/场景在本集的标准锚点，写它时必须"
-            "逐字沿用这段描述本身，不得改写、精简、替换或按本段情境调整；"
-            "内容是「没有标准外观/场景……」这类说明文字时，才由你自行确定"
-            "特征，并让同一角色/场景在本集所有涉及它的段落里保持同一套"
-            "自定特征——这条现在必须跨全部 segments[] 一起满足，不是各段"
-            "各自满足：同一 identity_id/scene_id 出现在多个段落时，它的外观/"
-            "场景描述必须逐字相同。",
-            "本段与相邻段（segment_no 前后各一）之间如果场景发生了变化，本段"
-            "的第一个镜头必须能看出与上一段场景的空间/时间关系，不能让两段像"
-            "是从完全不相关的素材里各剪一段拼起来的；连续相邻的几段也不要"
-            "重复使用完全相同的开场运镜/构图模式（例如不要每一段第一镜都是"
-            "「推近」），具体用哪种运镜由这一段的剧情动作决定，但要主动参考"
-            "相邻段已经用过的开场方式。",
-            "dialogue[] 与 prompt_text 两处的台词必须互相覆盖、逐句一致："
-            "dialogue[] 列出的每一句台词都必须能在同一段的 prompt_text 里找到"
-            "对应原话，prompt_text 里写出的台词原话也必须同时登记进同一段的 "
-            "dialogue[]，不得只在一处出现，也不得跨段登记。",
-            "每一段 prompt_text 里出场或说话的角色都必须同时列进该段自己的 "
-            "resources.characters。resources.characters[].identity_id 的合法取值"
-            "只有两处、必须逐字整串复制（含冒号与前缀，一个字符都不能改写、"
-            "简化或模仿）：该段 relevant_assets.characters[] 每一项自带的 "
-            "identity_id 字段本身，或者该段 relevant_assets.functional_extras[] "
-            "每一项自带的 visual_entity_id 字段本身——这两个列表里已经出现的"
-            "字符串，就是这一段能够使用的全部合法值，不存在第三种取值来源，也"
-            "不允许你按看到的格式风格自己拼一个新字符串（哪怕格式看起来和已有"
-            "的很像）。如果这一段确实出场或说话的某个角色，在该段 "
-            "relevant_assets.characters 和 relevant_assets.functional_extras 两处"
-            "都找不到对应条目——本集素材库还没有收录这个角色——identity_id 就"
-            "直接写这个角色在原文里的称谓原文本身，不加冒号、不加任何前缀，"
-            "尤其不要模仿已收录角色的 id 写法（那种带前缀的写法是「素材库已"
-            "收录」这个事实本身的标记，没有收录记录时自己套用等于冒充一个不"
-            "存在的收录状态）。",
-            "每一段 prompt_text 里画面实际发生的场景都必须同时列进该段自己的 "
-            "resources.scenes——这一条和上面 resources.characters 的要求同等"
-            "重要，一次性产出全部段落时不得因为已经填好角色清单就略过场景"
-            "清单，每一段都要单独核对。resources.scenes[].scene_id 的合法取值"
-            "只有一处、必须逐字整串复制：该段 relevant_assets.scenes[] 每一项"
-            "自带的 scene_id 字段本身，不允许自己新造、简化或从其他段的场景"
-            "挪用。如果该段 relevant_assets.scenes 本身是空列表——映射台没有"
-            "为这段原文范围登记任何场景——resources.scenes 留空是唯一诚实的"
-            "选择，不必也不应该勉强套用一个不属于这段的场景 id；但只要 "
-            "relevant_assets.scenes 非空且本段画面确实发生在其中某个场景，"
-            "就必须把对应 scene_id 列进 resources.scenes，不得因为篇幅或注意力"
-            "被其他字段占用而省略。",
-            *([_paratext_exclusion_rule(paratext_indexes)] if paratext_indexes else []),
-        ],
-        "shot_count_range": [MIN_SHOTS_PER_SEGMENT, MAX_SHOTS_PER_SEGMENT],
-        "beat_sheet": [
-            {
-                "beat_id": beat.beat_id,
-                "summary": beat.summary,
-                "segment_indexes": list(beat.segment_indexes),
-            }
-            for beat in beat_draft.beat_sheet
-        ],
-        "source_text_by_segment": full_source_text,
-        "segments": segment_units,
-        "visual_style": (
-            bible.world.visual_style_canonical
-            if bible is not None and bible.world is not None
-            else ""
-        ),
-        "target_video_model": target_model_literal,
-        "dialect_instructions": dialect_instructions,
-        # app.video_prompt_profiles 的 SEEDANCE_2_PROFILE/MINIMAX_H3_PROFILE 是
-        # 既有的正确接缝（docs/STORYBOARD_PROMPT_IR_DESIGN.md「与既有代码的衔接」），
-        # 职责收窄为"交给模型的方言约束"；dialect_instructions 是本模块新写的
-        # 详细版本（含 H3 字段名等接口语法），这里把 profile 自带的精简规则也一并
-        # 带上作为强化重申，避免两处描述同一模型方言、其中一处不再被任何调用方
-        # 读取而悄悄漂移。
-        "profile_generation_rules": list(profile.generation_rules),
-        "output_contract": {
-            "segments": "数组，长度必须等于段数，每一项对应一个 segment_no",
-            "segments[].segment_no": f"必须恰好是 {expected_segment_nos} 之一，且互不重复",
-            "segments[].prompt_text": "完整可复制的提示词整块文本，按上面的方言约束写",
-            "segments[].shot_count": f"{MIN_SHOTS_PER_SEGMENT}-{MAX_SHOTS_PER_SEGMENT} 之间的整数，须与该段 prompt_text 里实际写的镜头数一致",
-            "segments[].dialogue": (
-                "该段实际出现的台词（可以是原文对话的压缩/改写，不要求逐字，但不得偏离"
-                "该段剧情）；每条必须给 speaker_identity_id（引用该段 relevant_assets."
-                "characters 的 identity_id）与 source_segment_index（这句话对应原文的"
-                "哪一段，必须在该段 source_segment_indexes 范围内）"
+    shared_rules = [
+        "relevant_assets 里每个角色/场景都带一个外观/场景字段（角色和"
+        "群演统一叫 appearance；场景叫 scene_canonical）：内容是一段"
+        "具体描述时，那就是这个角色/场景在本集的标准锚点，写它时必须"
+        "逐字沿用这段描述本身，不得改写、精简、替换或按本段情境调整；"
+        "内容是「没有标准外观/场景……」这类说明文字时，才由你自行确定"
+        "特征，并让同一角色/场景在本集所有涉及它的段落里保持同一套"
+        "自定特征——这条现在必须跨全部 segments[] 一起满足，不是各段"
+        "各自满足：同一 identity_id/scene_id 出现在多个段落时，它的外观/"
+        "场景描述必须逐字相同。",
+        "本段与相邻段（segment_no 前后各一）之间如果场景发生了变化，本段"
+        "的第一个镜头必须能看出与上一段场景的空间/时间关系，不能让两段像"
+        "是从完全不相关的素材里各剪一段拼起来的；连续相邻的几段也不要"
+        "重复使用完全相同的开场运镜/构图模式（例如不要每一段第一镜都是"
+        "「推近」），具体用哪种运镜由这一段的剧情动作决定，但要主动参考"
+        "相邻段已经用过的开场方式。",
+        "dialogue[] 与 prompt_text 两处的台词必须互相覆盖、逐句一致："
+        "dialogue[] 列出的每一句台词都必须能在同一段的 prompt_text 里找到"
+        "对应原话，prompt_text 里写出的台词原话也必须同时登记进同一段的 "
+        "dialogue[]，不得只在一处出现，也不得跨段登记。",
+        "每一段 prompt_text 里出场或说话的角色都必须同时列进该段自己的 "
+        "resources.characters。resources.characters[].identity_id 的合法取值"
+        "只有两处、必须逐字整串复制（含冒号与前缀，一个字符都不能改写、"
+        "简化或模仿）：该段 relevant_assets.characters[] 每一项自带的 "
+        "identity_id 字段本身，或者该段 relevant_assets.functional_extras[] "
+        "每一项自带的 visual_entity_id 字段本身——这两个列表里已经出现的"
+        "字符串，就是这一段能够使用的全部合法值，不存在第三种取值来源，也"
+        "不允许你按看到的格式风格自己拼一个新字符串（哪怕格式看起来和已有"
+        "的很像）。如果这一段确实出场或说话的某个角色，在该段 "
+        "relevant_assets.characters 和 relevant_assets.functional_extras 两处"
+        "都找不到对应条目——本集素材库还没有收录这个角色——identity_id 就"
+        "直接写这个角色在原文里的称谓原文本身，不加冒号、不加任何前缀，"
+        "尤其不要模仿已收录角色的 id 写法（那种带前缀的写法是「素材库已"
+        "收录」这个事实本身的标记，没有收录记录时自己套用等于冒充一个不"
+        "存在的收录状态）。",
+        "每一段 prompt_text 里画面实际发生的场景都必须同时列进该段自己的 "
+        "resources.scenes——这一条和上面 resources.characters 的要求同等"
+        "重要，一次性产出全部段落时不得因为已经填好角色清单就略过场景"
+        "清单，每一段都要单独核对。resources.scenes[].scene_id 的合法取值"
+        "只有一处、必须逐字整串复制：该段 relevant_assets.scenes[] 每一项"
+        "自带的 scene_id 字段本身，不允许自己新造、简化或从其他段的场景"
+        "挪用。如果该段 relevant_assets.scenes 本身是空列表——映射台没有"
+        "为这段原文范围登记任何场景——resources.scenes 留空是唯一诚实的"
+        "选择，不必也不应该勉强套用一个不属于这段的场景 id；但只要 "
+        "relevant_assets.scenes 非空且本段画面确实发生在其中某个场景，"
+        "就必须把对应 scene_id 列进 resources.scenes，不得因为篇幅或注意力"
+        "被其他字段占用而省略。",
+        *([_paratext_exclusion_rule(paratext_indexes)] if paratext_indexes else []),
+    ]
+    by_segment_no: dict[int, _AiStoryboardSegmentDraft] = {}
+    written_nos: list[int] = []
+    for write_nos in _split_segment_prompt_batches(expected_segment_nos):
+        already_written = _already_written_records(
+            by_segment_no, written_nos=written_nos,
+        )
+        task_payload: dict[str, Any] = {
+            "task": _segment_prompt_task_text(
+                write_nos=write_nos,
+                all_nos=expected_segment_nos,
+                has_already_written=bool(already_written),
             ),
-            "segments[].resources": "该段实际用到的人物/场景/道具，identity_id/scene_id 必须来自该段 relevant_assets；素材库没有对应图的（scene_reference_id 或 portrait_id 为空）如实留空，不得编造",
-            "segments[].degraded_capabilities": "该段因模型能力缺失而做的降级处理清单（例如 Seedance 侧的屏上文字改「无字」+ 后期合成说明）；没有降级则留空数组，不得留空字符串占位",
-        },
-        "output_schema": _AiAllSegmentsDraft.model_json_schema(),
-    }
-    fingerprint = hashlib.sha256(
-        json.dumps(task_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()[:24]
-    batch_draft = await model_gateway.chat_structured(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "你是短剧分镜师和视频生成提示词撰写者。"
-                    f"当前目标模型是 {profile.model_family}。"
-                    "只输出符合 Schema 的一个 JSON 对象，不输出 Markdown 或解释；"
-                    "每段 prompt_text 字段内部可以换行，但整体是一个字符串。"
+            "rules": [
+                f"segments[] 必须恰好包含以下 {len(write_nos)} 个 "
+                f"segment_no，每个出现且只出现一次，不得遗漏也不得新增："
+                f"{write_nos}；数组顺序不重要，身份以 segment_no 为准。",
+                *shared_rules,
+            ],
+            "shot_count_range": [MIN_SHOTS_PER_SEGMENT, MAX_SHOTS_PER_SEGMENT],
+            "beat_sheet": [
+                {
+                    "beat_id": beat.beat_id,
+                    "summary": beat.summary,
+                    "segment_indexes": list(beat.segment_indexes),
+                }
+                for beat in beat_draft.beat_sheet
+            ],
+            "source_text_by_segment": full_source_text,
+            "segments": segment_units,
+            "visual_style": (
+                bible.world.visual_style_canonical
+                if bible is not None and bible.world is not None
+                else ""
+            ),
+            "target_video_model": target_model_literal,
+            "dialect_instructions": dialect_instructions,
+            # app.video_prompt_profiles 的 SEEDANCE_2_PROFILE/MINIMAX_H3_PROFILE 是
+            # 既有的正确接缝（docs/STORYBOARD_PROMPT_IR_DESIGN.md「与既有代码的衔接」），
+            # 职责收窄为"交给模型的方言约束"；dialect_instructions 是本模块新写的
+            # 详细版本（含 H3 字段名等接口语法），这里把 profile 自带的精简规则也一并
+            # 带上作为强化重申，避免两处描述同一模型方言、其中一处不再被任何调用方
+            # 读取而悄悄漂移。
+            "profile_generation_rules": list(profile.generation_rules),
+            "output_contract": {
+                "segments": "数组，长度必须等于本次要求写出的段数，每一项对应一个 segment_no",
+                "segments[].segment_no": f"必须恰好是 {write_nos} 之一，且互不重复",
+                "segments[].prompt_text": "完整可复制的提示词整块文本，按上面的方言约束写",
+                "segments[].shot_count": f"{MIN_SHOTS_PER_SEGMENT}-{MAX_SHOTS_PER_SEGMENT} 之间的整数，须与该段 prompt_text 里实际写的镜头数一致",
+                "segments[].dialogue": (
+                    "该段实际出现的台词（可以是原文对话的压缩/改写，不要求逐字，但不得偏离"
+                    "该段剧情）；每条必须给 speaker_identity_id（引用该段 relevant_assets."
+                    "characters 的 identity_id）与 source_segment_index（这句话对应原文的"
+                    "哪一段，必须在该段 source_segment_indexes 范围内）"
                 ),
+                "segments[].resources": "该段实际用到的人物/场景/道具，identity_id/scene_id 必须来自该段 relevant_assets；素材库没有对应图的（scene_reference_id 或 portrait_id 为空）如实留空，不得编造",
+                "segments[].degraded_capabilities": "该段因模型能力缺失而做的降级处理清单（例如 Seedance 侧的屏上文字改「无字」+ 后期合成说明）；没有降级则留空数组，不得留空字符串占位",
             },
-            {"role": "user", "content": json.dumps(task_payload, ensure_ascii=False)},
-        ],
-        model_type=_AiAllSegmentsDraft,
-        validate=lambda value: _validate_all_segments_draft(
-            value,
-            expected_segment_nos=expected_segment_nos,
-            dialect_render_format=profile.render_format,
-        ),
-        operation_id=f"storyboard_pack_segments_{episode_id}_{fingerprint}",
-        max_tokens=max(
-            SEGMENT_BATCH_TOKENS_FLOOR,
-            SEGMENT_BATCH_TOKENS_PER_SEGMENT * len(expected_segment_nos),
-        ),
-        format_retry_limit=1,
-        semantic_retry_limit=2,
-        temperature=0.6,
-        call_meta={
-            "stage_key": "storyboard_pack_segment",
-            "call_role": "storyboard_pack_segment_batch",
-            "initiator_label": "分镜台整集提示词",
-            "episode_id": episode_id,
-            "segment_count": len(expected_segment_nos),
-            "target_video_model": target_video_model,
-            "contract_version": STORYBOARD_PACK_VERSION,
-        },
-        repair_context=(
-            f"本集共 {len(expected_segment_nos)} 段，segments[].segment_no 必须"
-            f"恰好覆盖 {expected_segment_nos} 各一次"
-        ),
-    )
-    by_segment_no = {item.segment_no: item for item in batch_draft.segments}
+            "output_schema": _AiAllSegmentsDraft.model_json_schema(),
+        }
+        # 空列表不是「无需检查」：没有已写段落时这个键根本不该出现，避免小集
+        # 单次调用的提示词无故多出一个空数组。
+        if already_written:
+            task_payload["already_written_segments"] = already_written
+        fingerprint = hashlib.sha256(
+            json.dumps(task_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:24]
+        batch_draft = await model_gateway.chat_structured(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是短剧分镜师和视频生成提示词撰写者。"
+                        f"当前目标模型是 {profile.model_family}。"
+                        "只输出符合 Schema 的一个 JSON 对象，不输出 Markdown 或解释；"
+                        "每段 prompt_text 字段内部可以换行，但整体是一个字符串。"
+                    ),
+                },
+                {"role": "user", "content": json.dumps(task_payload, ensure_ascii=False)},
+            ],
+            model_type=_AiAllSegmentsDraft,
+            validate=lambda value, expected=list(write_nos): _validate_all_segments_draft(
+                value,
+                expected_segment_nos=expected,
+                dialect_render_format=profile.render_format,
+            ),
+            operation_id=(
+                f"storyboard_pack_segments_{episode_id}_{fingerprint}"
+            ),
+            max_tokens=_segment_prompt_answer_budget(len(write_nos)),
+            format_retry_limit=1,
+            semantic_retry_limit=2,
+            temperature=0.6,
+            call_meta={
+                "stage_key": "storyboard_pack_segment",
+                "call_role": "storyboard_pack_segment_batch",
+                "initiator_label": "分镜台整集提示词",
+                "episode_id": episode_id,
+                "segment_count": len(expected_segment_nos),
+                "write_segment_nos": list(write_nos),
+                "write_segment_count": len(write_nos),
+                "already_written_segment_nos": list(written_nos),
+                "target_video_model": target_video_model,
+                "contract_version": STORYBOARD_PACK_VERSION,
+            },
+            repair_context=(
+                f"本集共 {len(expected_segment_nos)} 段 {expected_segment_nos}；"
+                f"本次只要写出 {write_nos} 各一次"
+            ),
+        )
+        for item in batch_draft.segments:
+            if item.segment_no in by_segment_no:
+                raise ValueError(
+                    f"阶段二分批调用重复产出 segment_no={item.segment_no}"
+                )
+            by_segment_no[item.segment_no] = item
+        written_nos.extend(write_nos)
+    missing_nos = [
+        plan.segment_no for plan in beat_draft.segments
+        if plan.segment_no not in by_segment_no
+    ]
+    if missing_nos:
+        raise ValueError(
+            "阶段二分批调用结束后仍缺段落："
+            f"{missing_nos}（已写出 {sorted(by_segment_no)}）"
+        )
     result: dict[int, _AiStoryboardSegmentDraft] = {}
     for plan in beat_draft.segments:
         draft = by_segment_no[plan.segment_no]
@@ -1279,10 +1429,12 @@ async def generate_storyboard_pack(
     paratext_indexes = _paratext_segment_indexes(payload)
     paratext_strip_notes = _strip_paratext_from_beat_draft(beat_draft, paratext_indexes)
 
-    # 2.0.3：全部段落的 prompt_text 一次调用产出（见 _generate_all_segment_
-    # prompts 文档与 STORYBOARD_PACK_VERSION 的 2.0.3 changelog），不再是每段
-    # 一次独立调用、asyncio.gather 并行发出——旧路径下并行意味着生成第 N 段
-    # 的那次调用互相看不到彼此，是跨段割裂感的结构性根因。
+    # 2.0.3/2.0.6：全部段落的 prompt_text 按整集视野产出（见
+    # _generate_all_segment_prompts 文档与 STORYBOARD_PACK_VERSION 的 2.0.3/
+    # 2.0.6 changelog），不再是每段一次独立调用、asyncio.gather 并行发出——
+    # 旧路径下并行意味着生成第 N 段的那次调用互相看不到彼此，是跨段割裂感
+    # 的结构性根因。答案装不进一次 completion 时顺序分批，后续批次带着已写
+    # 段落，不退回互不可见的并行。
     segment_drafts = await _generate_all_segment_prompts(
         episode_id=episode_id,
         episode_no=episode_no,
@@ -1684,13 +1836,13 @@ async def run_storyboard_pack_generation(
     incrementally repair a 50-field per-shot narrative contract one shot at a
     time, keyed off screenplay.narrative_plan / screenplay.events, which
     episode_prep_pack (2.0.0) structurally does not have. Phase two (all
-    segments' prompt_text) is a single self-contained batch model call as of
-    2.0.3 (retried internally by model_gateway.chat_structured's own
-    format/semantic retry budget across the whole batch, not per segment), so
-    there is no equivalent multi-shot repair loop to run -- a failure there
-    fails the whole episode's generation in one shot, not one segment (see
-    STORYBOARD_PACK_VERSION's 2.0.3 changelog for the accepted trade-off and
-    the measurement behind it). On success this
+    segments' prompt_text) is a whole-episode-context generation as of 2.0.3,
+    split into sequential answer-budget batches as of 2.0.6 when thinking
+    tokens would otherwise saturate max_output_tokens; each batch is retried
+    internally by model_gateway.chat_structured's own format/semantic retry
+    budget. There is no equivalent multi-shot repair loop to run -- a failure
+    there fails the whole episode's generation, not one segment (see
+    STORYBOARD_PACK_VERSION's 2.0.3/2.0.6 changelog). On success this
     reuses the exact same completion contract the legacy path uses for its
     non-narrative-authority branch (app.storyboard_supervisor.py's own
     ``else: _finalize_storyboard_evidence(episode_id, evaluation.board)`` /

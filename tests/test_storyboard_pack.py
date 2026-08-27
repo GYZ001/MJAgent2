@@ -4,10 +4,8 @@
 台词闸门（唯一从 F1-F6 幸存的闸门）、对白构图硬规则在新架构行上的显式退役、
 以及 project_prep_pack_to_screenplay 对真正 2.0.0（无 event_chain）payload
 的分支（此前只有 1.x 形态的 EP6 历史夹具覆盖，2.0.0 分支此前无测试）。
-
-不覆盖：_generate_beat_sheet / _generate_all_segment_prompts 真正的模型调用
-（需要 mock model_gateway.chat_structured，属于更大规模的集成测试，此文件
-只测纯函数与 DB 落库/读回，不引入 mock 基础设施）。
+阶段二分批切分与 already_written 衔接用 mock chat_structured 覆盖；不覆盖
+真实供应商往返。
 """
 from __future__ import annotations
 
@@ -22,7 +20,9 @@ from app.domain.video_ops import _storyboard_structural_errors
 from app.production.screenplay_authority import project_prep_pack_to_screenplay
 from app.production.storyboard_pack import (
     STORYBOARD_PACK_CONTRACT_MARKER,
+    STORYBOARD_PACK_VERSION,
     MINIMAX_H3_DIALECT_INSTRUCTIONS,
+    SEGMENT_BATCH_TOKENS_PER_SEGMENT,
     StoryboardPack,
     StoryboardPackBeat,
     StoryboardPackSegment,
@@ -35,10 +35,15 @@ from app.production.storyboard_pack import (
     _AiStoryboardSegmentDraft,
     _dialect_for_target_video_model,
     _enrich_asset_manifest_canonical_visuals,
+    _generate_all_segment_prompts,
     _paratext_exclusion_rule,
     _paratext_segment_indexes,
     _segment_content_advisories,
+    _segment_prompt_answer_budget,
+    _segment_prompt_batch_capacity,
+    _segment_prompt_task_text,
     _source_block_for_prompt,
+    _split_segment_prompt_batches,
     _strip_paratext_from_beat_draft,
     _validate_all_segments_draft,
     _validate_beat_sheet_draft,
@@ -1280,3 +1285,232 @@ def test_storyboard_pack_asset_dependencies_second_scene_unresolvable_is_visible
     )
     blockers = manifest_production_blockers(manifest)
     assert any("失踪场景" in b for b in blockers)
+
+
+# ---------------------------------------------------------------------------
+# 2.0.6：阶段二答案预算必须给思考预留留位置，装不下就顺序分批
+# ---------------------------------------------------------------------------
+
+_LIMITS_32K = {
+    "context_window_tokens": 131072,
+    "max_output_tokens": 32768,
+    "token_limits_source": "test",
+}
+
+
+def _patch_thinking_model(monkeypatch, *, max_output: int = 32768, reserve: int | None = None) -> None:
+    from app import hiagent
+
+    monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "hiagent")
+    monkeypatch.setattr(hiagent, "active_model", lambda *_args, **_kwargs: "thinking-model")
+    monkeypatch.setattr(
+        hiagent,
+        "active_model_token_limits",
+        lambda *_args, **_kwargs: {**_LIMITS_32K, "max_output_tokens": max_output},
+    )
+    monkeypatch.setattr(
+        hiagent,
+        "get_setting",
+        lambda key: (
+            str(reserve)
+            if reserve is not None and key == "text_reasoning_token_reserve"
+            else ""
+        ),
+    )
+
+
+def test_contract_marker_stays_on_2_0_5_so_existing_packs_resume():
+    """2.0.6 只改生成切分，不改落库形状；resume 仍认 2.0.5 marker。"""
+    assert STORYBOARD_PACK_CONTRACT_MARKER == "storyboard_pack/2.0.5"
+    assert STORYBOARD_PACK_VERSION == "2.0.6"
+
+
+def test_twelve_segment_answer_budget_saturates_32k_with_reasoning(monkeypatch):
+    """生产事故指纹：12 段一次调用的答案+思考预留会把 32768 打满。"""
+    _patch_thinking_model(monkeypatch)
+    answer = _segment_prompt_answer_budget(12)
+    assert answer == 12 * SEGMENT_BATCH_TOKENS_PER_SEGMENT
+    from app import hiagent
+
+    _, _, effective = hiagent.text_request_token_limits(requested_max_tokens=answer)
+    assert effective == 32768
+    assert answer + hiagent.reasoning_token_reserve() > 32768
+
+
+def test_batch_capacity_leaves_room_for_reasoning_under_32k_cap(monkeypatch):
+    _patch_thinking_model(monkeypatch)
+    from app import hiagent
+
+    capacity = _segment_prompt_batch_capacity(12)
+    assert 1 <= capacity < 12
+    assert (
+        _segment_prompt_answer_budget(capacity) + hiagent.reasoning_token_reserve()
+        < 32768
+    )
+    assert (
+        _segment_prompt_answer_budget(capacity + 1) + hiagent.reasoning_token_reserve()
+        >= 32768
+    )
+
+
+def test_small_episode_stays_a_single_batch(monkeypatch):
+    _patch_thinking_model(monkeypatch)
+    assert _split_segment_prompt_batches([1, 2, 3, 4]) == [[1, 2, 3, 4]]
+
+
+def test_twelve_segments_split_into_batches_that_fit(monkeypatch):
+    _patch_thinking_model(monkeypatch)
+    batches = _split_segment_prompt_batches(list(range(1, 13)))
+    assert len(batches) >= 2
+    assert [no for batch in batches for no in batch] == list(range(1, 13))
+    from app import hiagent
+
+    for batch in batches:
+        assert (
+            _segment_prompt_answer_budget(len(batch)) + hiagent.reasoning_token_reserve()
+            < 32768
+        )
+
+
+def test_empty_segment_list_does_not_skip_the_split_check():
+    """空集合不是『无需检查』：没有段落就不该假装切出一批。"""
+    assert _split_segment_prompt_batches([]) == []
+
+
+def test_non_thinking_model_keeps_twelve_segments_in_one_batch(monkeypatch):
+    _patch_thinking_model(monkeypatch, reserve=0)
+    assert _split_segment_prompt_batches(list(range(1, 13))) == [list(range(1, 13))]
+
+
+def test_single_batch_task_text_keeps_whole_episode_wording():
+    text = _segment_prompt_task_text(
+        write_nos=[1, 2, 3], all_nos=[1, 2, 3], has_already_written=False,
+    )
+    assert "一次性联合产出" in text
+    assert "already_written_segments" not in text
+
+
+def test_followup_batch_task_text_points_at_already_written():
+    text = _segment_prompt_task_text(
+        write_nos=[7, 8],
+        all_nos=list(range(1, 13)),
+        has_already_written=True,
+    )
+    assert "already_written_segments" in text
+    assert "[7, 8]" in text
+    assert "一次性联合产出" not in text
+
+
+def _segment_draft(segment_no: int) -> _AiStoryboardSegmentDraft:
+    return _AiStoryboardSegmentDraft(
+        segment_no=segment_no,
+        prompt_text=f"电影级预告片质感，多镜头叙事。镜头1 段{segment_no}。",
+        shot_count=3,
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_splits_and_passes_already_written_to_later_batches(monkeypatch):
+    import app.production.storyboard_pack as storyboard_pack_module
+
+    monkeypatch.setattr(
+        storyboard_pack_module, "_segment_prompt_batch_capacity", lambda _total: 2,
+    )
+    calls: list[dict] = []
+
+    async def fake_chat_structured(messages, **kwargs):
+        payload = json.loads(messages[1]["content"])
+        write_nos = list(kwargs["call_meta"]["write_segment_nos"])
+        calls.append(
+            {
+                "payload": payload,
+                "max_tokens": kwargs["max_tokens"],
+                "write_nos": write_nos,
+            }
+        )
+        return _AiAllSegmentsDraft(
+            segments=[_segment_draft(no) for no in write_nos]
+        )
+
+    monkeypatch.setattr(
+        storyboard_pack_module.model_gateway, "chat_structured", fake_chat_structured,
+    )
+    beat_draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="他扔掉了理想", segment_indexes=[1])],
+        segments=[
+            _AiSegmentPlan(
+                segment_no=index,
+                synopsis=f"段{index}",
+                source_segment_indexes=[1],
+                beat_ids=["B1"],
+            )
+            for index in range(1, 5)
+        ],
+    )
+    source = [
+        SourceSegment(segment_id="s1", text="少年站在山顶。", start_offset=0, end_offset=7),
+    ]
+    result = await _generate_all_segment_prompts(
+        episode_id="ep-truncation",
+        episode_no=1,
+        beat_draft=beat_draft,
+        segments=source,
+        payload={},
+        target_video_model="hiagent",
+        bible=None,
+    )
+    assert list(result) == [1, 2, 3, 4]
+    assert [call["write_nos"] for call in calls] == [[1, 2], [3, 4]]
+    assert "already_written_segments" not in calls[0]["payload"]
+    written = calls[1]["payload"]["already_written_segments"]
+    assert [item["segment_no"] for item in written] == [1, 2]
+    assert written[0]["prompt_text"] == result[1].prompt_text
+    assert calls[0]["max_tokens"] == _segment_prompt_answer_budget(2)
+    # 整集视野仍在每一次调用里：不是退回互不可见的逐段并行。
+    assert [unit["segment_no"] for unit in calls[0]["payload"]["segments"]] == [1, 2, 3, 4]
+    assert [unit["segment_no"] for unit in calls[1]["payload"]["segments"]] == [1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_generate_keeps_single_call_when_the_episode_fits(monkeypatch):
+    import app.production.storyboard_pack as storyboard_pack_module
+
+    monkeypatch.setattr(
+        storyboard_pack_module, "_segment_prompt_batch_capacity", lambda total: total,
+    )
+    calls: list[dict] = []
+
+    async def fake_chat_structured(messages, **kwargs):
+        payload = json.loads(messages[1]["content"])
+        calls.append(payload)
+        write_nos = list(kwargs["call_meta"]["write_segment_nos"])
+        return _AiAllSegmentsDraft(
+            segments=[_segment_draft(no) for no in write_nos]
+        )
+
+    monkeypatch.setattr(
+        storyboard_pack_module.model_gateway, "chat_structured", fake_chat_structured,
+    )
+    beat_draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1])],
+        segments=[
+            _AiSegmentPlan(segment_no=1, synopsis="a", source_segment_indexes=[1], beat_ids=["B1"]),
+            _AiSegmentPlan(segment_no=2, synopsis="b", source_segment_indexes=[1], beat_ids=["B1"]),
+        ],
+    )
+    source = [
+        SourceSegment(segment_id="s1", text="少年站在山顶。", start_offset=0, end_offset=7),
+    ]
+    result = await _generate_all_segment_prompts(
+        episode_id="ep-small",
+        episode_no=1,
+        beat_draft=beat_draft,
+        segments=source,
+        payload={},
+        target_video_model="hiagent",
+        bible=None,
+    )
+    assert set(result) == {1, 2}
+    assert len(calls) == 1
+    assert "already_written_segments" not in calls[0]
+    assert "一次性联合产出" in calls[0]["task"]
