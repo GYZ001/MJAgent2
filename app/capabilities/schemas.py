@@ -4,7 +4,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RiskLevel(str, Enum):
@@ -46,7 +46,19 @@ class ApprovalDecision(str, Enum):
 
 
 class StandardCommandInput(BaseModel):
-    """所有写命令共用的标准字段（PRD §6.2）。"""
+    """所有写命令共用的标准字段（PRD §6.2）。
+
+    ``extra="forbid"``：REST/Agent/MCP 任一调用方发来命令总线的输入模型未声明
+    的字段，一律在这里直接报错（经 ``app.capabilities.dispatch.dispatch`` 的
+    ``ValueError -> 422`` 映射），而不是被 pydantic 默认的 ``extra="ignore"``
+    静默吞掉。REST 包装层此前曾把 ``only_incomplete``/``qualification_version``
+    等有意义的参数在 handler 重建请求体时悄悄弄丢，界面弹窗承诺的语义在总线层
+    完全失效却无人报错；这道全局保险丝把「模型没声明的字段」从「静默丢弃」
+    改成「显式 422」。翻转前已对全部 62 个命令的输入模型与其 REST 包装层
+    实际转发的字段做过逐一比对，确认现有转发字段都已在各自模型中声明。
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     request_id: str | None = None
     idempotency_key: str | None = None

@@ -67,6 +67,11 @@ async def generate_episode(args: I.VideoGenerateEpisodeInput) -> CommandResult:
             "operation_claim_token": operation_owner,
             "only_incomplete": args.only_incomplete,
             "qualification_version": args.qualification_version,
+            # 显式绑定：非空时 _generate_episode_core 会用当时最新的 plan 状态
+            # 重新核验 plan_id 仍是当前有效 revision（见该函数里的
+            # requested_plan_id 分支），而不是只信任 REST 层入口处那次早已过时
+            # 的检查。
+            "plan_id": args.plan_id,
         },
     )
     if isinstance(outcome, CommandResult):

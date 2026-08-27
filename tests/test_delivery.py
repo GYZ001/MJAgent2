@@ -511,8 +511,35 @@ def test_delivery_route_forwards_idempotency_metadata(monkeypatch) -> None:
             "episode_id": "e",
             "idempotency_key": "delivery-once",
             "request_id": "request-1",
+            "package_id": None,
         },
     }
+
+
+def test_delivery_route_forwards_client_supplied_package_id(monkeypatch) -> None:
+    """客户端重放「已校验过的交付包 id」续跑时，package_id 必须真的进 dispatch
+    参数——此前 REST 包装层只读它做本地校验分支，从不转发给命令总线，handler
+    重建 body 时又把它丢一次，两次丢包合起来让这个字段在命令总线路径上完全
+    不可达（同幂等键的重试因此总落 sha256 确定性重算分支，而不是复用已验证 id）。
+    """
+    captured: dict = {}
+
+    async def fake_ui_route(name: str, args: dict):
+        captured.update({"name": name, "args": args})
+        return {"status": "accepted"}
+
+    monkeypatch.setattr("app.capabilities.dispatch.ui_route", fake_ui_route)
+    result = asyncio.run(orchestration_api.create_delivery_package(
+        "e",
+        {
+            "idempotency_key": "delivery-once",
+            "request_id": "request-1",
+            "package_id": "delivery_alreadyvalidated",
+        },
+    ))
+
+    assert result == {"status": "accepted"}
+    assert captured["args"]["package_id"] == "delivery_alreadyvalidated"
 
 
 def test_delivery_restart_fences_lease_only_for_recovery_owner(

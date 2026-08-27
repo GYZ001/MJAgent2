@@ -106,21 +106,29 @@ class VideoGenerateEpisodeInput(EpisodeScopedInput):
 
     ``EpisodeScopedInput`` 被 storyboard.cancel / video.stop_episode /
     video.clear_episode / video.clear_episode_videos / video.resume_episode /
-    delivery.concatenate / delivery.check / delivery.create_package 共 8 个命令
-    复用，其 Schema 会原样生成那些命令的 REST/Agent Tool/MCP inputSchema——直接
-    往 ``EpisodeScopedInput`` 上加 ``only_incomplete``/``qualification_version``
-    会把这两个只对本命令有意义的字段污染进那 8 个不相关命令的对外契约，所以在
-    这里新建一个专用子类，只挂在 ``video.generate_episode`` 一个命令上。
+    delivery.concatenate / delivery.check 共 6 个命令复用（``delivery.create_package``
+    另有 ``DeliveryCreatePackageInput`` 专用子类），其 Schema 会原样生成那些命令的
+    REST/Agent Tool/MCP inputSchema——直接往 ``EpisodeScopedInput`` 上加
+    ``only_incomplete``/``qualification_version``/``plan_id`` 会把这些只对本命令
+    有意义的字段污染进那 6 个不相关命令的对外契约，所以在这里新建一个专用子类，
+    只挂在 ``video.generate_episode`` 一个命令上。
 
     ``extra="forbid"``：REST 包装层与 handler 都必须显式声明要转发的字段，
     命令总线看不到的参数在这里会直接报错而不是被 pydantic 默认的
     ``extra="ignore"`` 静默吞掉——这正是本次要修的“丢参数”问题的同类保险丝。
+    （``StandardCommandInput`` 现已全局 ``extra="forbid"``，这里保留显式声明
+    只是历史沿革，不再是唯一保险丝。）
     """
 
     model_config = ConfigDict(extra="forbid")
 
     only_incomplete: bool = False
     qualification_version: str | None = None
+    # 仅 POST /episodes/{id}/video-generation-plan/{plan_id}/execute 这条路由填充；
+    # 直接命中 /generate 的请求不带这个字段。非空时 handler 会把它转交给
+    # api._generate_episode_core 做「请求执行的计划就是当前有效 revision」的
+    # 权威复核（而不是只在 REST 层做一次事后 TOCTOU 检查）。
+    plan_id: str | None = None
 
 
 class ScreenplayGenerateInput(StandardCommandInput):
@@ -254,6 +262,21 @@ class ReferenceReviewInput(StandardCommandInput):
     ref_id: str
     action: Literal["discard", "restore"]
     override_reason: str | None = None
+
+
+class DeliveryCreatePackageInput(EpisodeScopedInput):
+    """生成交付候选（``delivery.create_package``）专用输入。
+
+    ``package_id`` 只在客户端重放「已校验过的交付包 id」时才有意义（对应
+    ``app.orchestration.api.create_delivery_package`` 里 payload.get("package_id")
+    的续跑分支）；省略时按 sha256(episode_id + idempotency_key) 确定性重算。
+    ``EpisodeScopedInput`` 还被 storyboard.cancel / video.stop_episode /
+    video.clear_episode / video.clear_episode_videos / video.resume_episode /
+    delivery.concatenate / delivery.check 共 6 个命令复用，往共享基类加这个字段
+    会把它污染进那些不相关命令的对外契约，所以单独建子类。
+    """
+
+    package_id: str | None = None
 
 
 class DeliveryReviewInput(StandardCommandInput):

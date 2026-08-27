@@ -1081,7 +1081,7 @@ def _register_commands(registry) -> None:
             "delivery.create_package",
             title="生成交付候选",
             description="在 readiness 通过后创建待审交付包",
-            input_model=I.EpisodeScopedInput,
+            input_model=I.DeliveryCreatePackageInput,
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.ALWAYS,
             idempotency=IdempotencyPolicy.REQUIRED,

@@ -1975,6 +1975,12 @@ async def execute_episode_video_generation_plan(
 ):
     from app.video_plan import load_latest_plan
 
+    # 快速失败：给出即时 404/409 反馈，避免用户走完一整轮审批往返才发现计划已过期。
+    # 这只是 UX 优化，不是权威校验——权威校验在 plan_id 显式进入 dispatch 参数、
+    # 传到 h_video.generate_episode 之后，由 api._generate_episode_core 在真正
+    # 入队前用当时最新的 plan 状态重新核验（见 I.VideoGenerateEpisodeInput.plan_id
+    # 与该函数里的 requested_plan_id 分支），这样才能收紧「预检和执行之间计划被
+    # 替换」的 TOCTOU 窗口，而不是只在 REST 层做一次事后检查就再也不认这个 id。
     plan = load_latest_plan(episode_id)
     if not plan or plan.episode_video_plan_id != plan_id or plan.status != "valid":
         raise HTTPException(409, "只能执行当前有效的视频模式计划")
@@ -1984,6 +1990,7 @@ async def execute_episode_video_generation_plan(
         "video.generate_episode",
         {
             "episode_id": episode_id,
+            "plan_id": plan_id,
             "idempotency_key": payload.get("idempotency_key"),
             "request_id": payload.get("request_id"),
             "approval_token": payload.get("approval_token"),

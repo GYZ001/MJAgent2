@@ -1093,6 +1093,12 @@ async def create_delivery_package(episode_id: str, body: dict | None = Body(None
         "episode_id": episode_id,
         "idempotency_key": payload.get("idempotency_key"),
         "request_id": payload.get("request_id"),
+        # 客户端重放「已校验过的交付包 id」的续跑分支：命令总线此前不认识这个
+        # 字段，handler 重建 body 时会把它默默丢弃，导致同一请求总落到
+        # sha256(episode_id+idempotency_key) 重算分支（低危但形状与
+        # video.generate_episode 的 only_incomplete 丢参一致）。见
+        # I.DeliveryCreatePackageInput。
+        "package_id": payload.get("package_id"),
     })
     if routed is not None:
         return routed

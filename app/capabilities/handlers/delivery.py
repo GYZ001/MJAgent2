@@ -83,7 +83,7 @@ async def check(args: I.EpisodeScopedInput) -> CommandResult:
     return succeeded(summary, data=outcome, resource_uris=[f"manju://episodes/{args.episode_id}/delivery"])
 
 
-async def create_package(args: I.EpisodeScopedInput) -> CommandResult:
+async def create_package(args: I.DeliveryCreatePackageInput) -> CommandResult:
     from app.orchestration import api as orch_api
 
     outcome = await call_guarded(
@@ -92,6 +92,7 @@ async def create_package(args: I.EpisodeScopedInput) -> CommandResult:
         body={
             "idempotency_key": args.idempotency_key,
             "request_id": args.request_id,
+            "package_id": args.package_id,
         },
     )
     if isinstance(outcome, CommandResult):
