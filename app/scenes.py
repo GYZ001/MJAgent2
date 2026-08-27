@@ -19,7 +19,7 @@ import json
 import re
 from pathlib import Path
 
-from app import config, hiagent
+from app import config, generation_concurrency, hiagent
 from app.atomic_io import atomic_write_bytes
 from app.errors import ContentGenerationError, code_ref
 from app.db import get_conn, new_id, now
@@ -1210,308 +1210,36 @@ async def generate_scene_refs(
         if not targets:
             return  # 当前场景库里的场景图都已就绪，无需重出
 
+    # 各场景互相独立（互不引用彼此的定场图作为参考图），故按场景分批并发；
+    # 并发池上限见 generation_concurrency.scene_reference_batch_semaphore
+    # ——与人物定妆照各自独立，互不挤占彼此的槽位。场景内部（主图→各视角）
+    # 的先后依赖完全保留在 ensure_scene_multiview_pack 内部，未受影响。
+    bible_merge_lock = asyncio.Lock()
+    semaphore = generation_concurrency.scene_reference_batch_semaphore()
+
+    async def _bounded(sc) -> None:
+        async with semaphore:
+            await _generate_one_scene_reference(
+                project_id, sc, style, project, bible_version, only_scene,
+                operation_started_at, bible_merge_lock,
+            )
+
+    results = await asyncio.gather(
+        *(_bounded(sc) for sc in targets), return_exceptions=True,
+    )
     errors: list[str] = []
     failures: list[Exception] = []
-    for sc in targets:
-        try:
-            pending_state = (sc.pending_state_canonical or "").strip()
-            pending_ep_start = sc.pending_state_ep_start
-            if pending_state and pending_ep_start:
-                current_state_row = _open_scene_ref(conn, project_id, sc.name)
-                if current_state_row and int(current_state_row["ep_start"] or 1) < int(pending_ep_start):
-                    evolved = await _refresh_scene_on_state_change(
-                        project_id, sc.name, int(pending_ep_start), pending_state, style, bible_version,
-                        change_meta={
-                            "change_type": "approved_scene_state_change",
-                            "reason": "待审场景状态变化批准后付费重绘",
-                            "persistence": "persistent",
-                        },
-                    )
-                    if not evolved:
-                        raise SceneAssetQualityError(f"场景状态变化版本未能创建：{sc.name}")
-                    sc.scene_canonical = pending_state
-                    sc.pending_state_canonical = None
-                    sc.pending_state_ep_start = None
-                    sc.ref_image_path = evolved["image_path"]
-                    _merge_generated_scene_refs(conn, project_id, [sc])
-                    latest_project = conn.execute(
-                        "SELECT bible_json FROM projects WHERE id=?", (project_id,),
-                    ).fetchone()
-                    latest_bible = json.loads(latest_project["bible_json"] or "{}")
-                    for item in latest_bible.get("scenes", []):
-                        if item.get("name") == sc.name:
-                            item["scene_canonical"] = pending_state
-                            item["pending_state_canonical"] = None
-                            item["pending_state_ep_start"] = None
-                            break
-                    conn.execute(
-                        "UPDATE projects SET bible_json=? WHERE id=?",
-                        (json.dumps(latest_bible, ensure_ascii=False), project_id),
-                    )
-                    conn.commit()
-                    continue
-            # 批量补齐：候选堆积超过阈值时，采纳最高分而不再继续烧图。
-            if only_scene is None or isinstance(only_scene, list):
-                piled = list_scene_reference_candidates(conn, project_id, sc.name)
-                if len(piled) > SCENE_CANDIDATE_AUTO_ADOPT_THRESHOLD:
-                    pre_review_best = max(
-                        piled,
-                        key=lambda item: (item["qa_score"], item["created_at"]),
-                    )
-                    from app.multiview import scene_multiview_enabled
-                    require_policy = scene_multiview_enabled()
-                    # Old candidates often have good scores but incomplete
-                    # policy facts.  Re-QA a bounded number before spending on
-                    # more images or forcing the user through every card.
-                    existing_gates = {
-                        item["artifact_id"]: scene_candidate_gate(
-                            item["artifact_id"], require_current_policy=require_policy,
-                        )
-                        for item in piled
-                    }
-                    # 仍对最优旧候选做一次有界复评以改善排序证据；复评结果无论
-                    # 通过与否都不会改变其文件采用资格。
-                    already_eligible = any(
-                        gate["verified"] for gate in existing_gates.values()
-                    )
-                    unverified = [
-                        item for item in piled
-                        if existing_gates[item["artifact_id"]]["state"] == "unverified"
-                    ]
-                    reviewed_winner_id: str | None = None
-                    if not already_eligible:
-                        for item in sorted(
-                            unverified,
-                            key=lambda candidate: (candidate["qa_score"], candidate["created_at"]),
-                            reverse=True,
-                        )[:SCENE_CANDIDATE_AUTO_REVIEW_LIMIT]:
-                            reviewed = await review_scene_candidate(
-                                project_id, sc.name, item["artifact_id"],
-                            )
-                            if (reviewed.get("gate") or {}).get("verified"):
-                                reviewed_winner_id = item["artifact_id"]
-                                break
-                    if unverified and not already_eligible:
-                        piled = list_scene_reference_candidates(conn, project_id, sc.name)
-                    # 候选列表已保证文件存在；QA 只用于排序，不能把整批候选判为不可采用。
-                    eligible = list(piled)
-                    preferred_id = reviewed_winner_id or pre_review_best["artifact_id"]
-                    best = next(
-                        (item for item in eligible if item["artifact_id"] == preferred_id),
-                        max(eligible, key=lambda item: (item["qa_score"], item["created_at"])),
-                    )
-                    adopted = await adopt_scene_candidate(
-                        project_id,
-                        sc.name,
-                        best["artifact_id"],
-                        reason=(
-                            f"检查并补齐：候选已达 {len(piled)} 张（阈值 "
-                            f"{SCENE_CANDIDATE_AUTO_ADOPT_THRESHOLD}），自动采纳最高分 "
-                            f"{best['qa_score']:.2f}"
-                        ),
-                        decided_by="scene_refs_auto_adopt",
-                        ensure_pack=True,
-                    )
-                    sc.ref_image_path = adopted["image_path"]
-                    continue
-            sc.ref_image_path = None
-            base_prompt = (
-                (sc.scene_prompt_override or "").strip()
-                or scene_ref_prompt(style, sc.scene_canonical, scene_name=sc.name)
-            )
-            last_error: Exception | None = None
-            retry_prompt: str | None = None
-            retry_seed: str | None = None
-            # 分数和审美提示仍只评分；仅确定性硬门禁失败时允许一次有界纠偏重生。
-            for attempt in range(1, 3):
-                scene_id: str | None = None
-                path = str(Path(scene_ref_path(project_id, sc.name)).with_name(
-                    f"{_safe_name(sc.name)}__{new_id('candidate')}.jpg"
-                ))
-                prompt = retry_prompt or base_prompt
-                try:
-                    call_meta = {
-                        "asset_kind": "scene_reference",
-                        "scene_name": sc.name,
-                        "episode_no": 1,
-                        "scene_ref_mode": "initial",
-                        "attempt": attempt,
-                    }
-                    if operation_started_at is not None:
-                        operation_material = (
-                            f"{project_id}:{operation_started_at}:{sc.name}:"
-                            f"scene_reference:{attempt}"
-                        )
-                        call_meta.update({
-                            "operation_id": "op_scene_reference_" + hashlib.sha256(
-                                operation_material.encode("utf-8")
-                            ).hexdigest()[:32],
-                            "reuse_successful_operation": True,
-                        })
-                    item = await _generate_scene_image(
-                        prompt,
-                        retry_seed,
-                        call_meta=call_meta,
-                    )
-                    await _save_image_item(item, path)
-                    # ``record_reference_asset`` 会物理删除硬失败候选。先在
-                    # 内存中保留一次纠偏编辑所需的输入，不让失败文件落盘滞留。
-                    candidate_seed = hiagent.data_url_from_file(path)
-                    qa = await _review_scene_ref(
-                        path, sc, expected_description=prompt,
-                    )
-                    artifact = record_reference_asset(
-                        asset_type="scene_reference",
-                        scope_id=f"{project_id}:{sc.name}:1",
-                        file_path=path,
-                        content={
-                            "scene_name": sc.name,
-                            "canonical": sc.scene_canonical,
-                            "prompt": prompt,
-                            "attempt": attempt,
-                        },
-                        parent_artifact_ids=(
-                            [project["bible_artifact_id"]] if project["bible_artifact_id"] else []
-                        ),
-                        qa=qa,
-                    )
-                    if artifact["status"] not in {"approved", "validated"}:
-                        last_error = SceneAssetQualityError(
-                            f"场景图技术校验未通过：{sc.name}"
-                        )
-                        retry_prompt = scene_hard_gate_retry_prompt(
-                            base_prompt,
-                            qa,
-                            scene_name=sc.name,
-                            scene_canonical=sc.scene_canonical,
-                            visual_style=style,
-                        )
-                        if attempt >= 2 or not retry_prompt:
-                            break
-                        retry_seed = candidate_seed
-                        continue
-                    from app.multiview import scene_multiview_enabled
-                    old_current = _open_scene_ref(conn, project_id, sc.name)
-                    is_atomic_replacement = bool(scene_multiview_enabled() and old_current)
-                    if is_atomic_replacement:
-                        # 新包先占用负数候选槽，完整 QA 期间不改变当前版本及下游引用。
-                        minimum = conn.execute(
-                            "SELECT MIN(ep_start) AS value FROM scene_references "
-                            "WHERE project_id=? AND scene_name=? AND ep_start<=0",
-                            (project_id, sc.name),
-                        ).fetchone()
-                        candidate_start = int(
-                            minimum["value"] if minimum and minimum["value"] is not None else 0
-                        ) - 1
-                        scene_id = new_id("scene")
-                        cols = {row[1] for row in conn.execute(
-                            "PRAGMA table_info(scene_references)"
-                        ).fetchall()}
-                        if "pack_status" in cols:
-                            conn.execute(
-                                "INSERT INTO scene_references(id,project_id,scene_name,ep_start,ep_end,"
-                                "scene_canonical,prompt,image_path,qa_json,base_scene_id,bible_version,artifact_id,"
-                                "pack_status,change_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                                (scene_id, project_id, sc.name, candidate_start, 0, sc.scene_canonical,
-                                 prompt, path, json.dumps(qa, ensure_ascii=False), old_current["id"],
-                                 bible_version, artifact["id"], "generating",
-                                 json.dumps({"change_type": "pack_regeneration_candidate",
-                                             "candidate_created_at": now()}, ensure_ascii=False), now()),
-                            )
-                        else:
-                            conn.execute(
-                                "INSERT INTO scene_references(id,project_id,scene_name,ep_start,ep_end,"
-                                "scene_canonical,prompt,image_path,qa_json,base_scene_id,bible_version,artifact_id,"
-                                "created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                                (scene_id, project_id, sc.name, candidate_start, 0, sc.scene_canonical,
-                                 prompt, path, json.dumps(qa, ensure_ascii=False), old_current["id"],
-                                 bible_version, artifact["id"], now()),
-                            )
-                        conn.commit()
-                    else:
-                        scene_id = register_initial_scene_ref(
-                            conn, project_id, sc.name, path, sc.scene_canonical,
-                            prompt, qa, bible_version, artifact_id=artifact["id"],
-                        )
-                    # The candidate is publishable only after its required views exist.
-                    from app.multiview import (
-                        ensure_scene_multiview_pack, scene_multiview_enabled, pack_result_ok,
-                    )
-                    if scene_multiview_enabled():
-                        pack = await ensure_scene_multiview_pack(
-                            project_id=project_id,
-                            scene_reference_id=scene_id,
-                            scene_name=sc.name,
-                            scene_canonical=sc.scene_canonical,
-                            visual_style=style,
-                            ep_start=1,
-                            primary_qa=qa,
-                            optional_views=[role for role in (sc.required_views or []) if role == "action_zone"],
-                        )
-                        if not pack_result_ok(pack):
-                            raise SceneAssetQualityError(
-                                f"场景多视角资产包结构不完整：{sc.name}"
-                            )
-                    if is_atomic_replacement and old_current:
-                        # 完整包已通过：先把旧当前版本移入新的历史槽，再把候选切为当前。
-                        minimum = conn.execute(
-                            "SELECT MIN(ep_start) AS value FROM scene_references "
-                            "WHERE project_id=? AND scene_name=? AND ep_start<=0 AND id<>?",
-                            (project_id, sc.name, scene_id),
-                        ).fetchone()
-                        history_start = int(
-                            minimum["value"] if minimum and minimum["value"] is not None else 0
-                        ) - 1
-                        adopted_start = int(old_current["ep_start"] or 1)
-                        conn.execute(
-                            "UPDATE scene_references SET ep_start=?,ep_end=0 WHERE id=?",
-                            (history_start, old_current["id"]),
-                        )
-                        adoption_change = {
-                            "change_type": "pack_regeneration", "previous_version_id": old_current["id"],
-                            "adoption_reason": "付费整包重生完成",
-                            "adopted_at": now(), "gate_retry_exhausted": False,
-                        }
-                        if "change_json" in cols:
-                            conn.execute(
-                                "UPDATE scene_references SET ep_start=?,ep_end=NULL,pack_status=?,"
-                                "change_json=? WHERE id=?",
-                                (adopted_start, "ready",
-                                 json.dumps(adoption_change, ensure_ascii=False), scene_id),
-                            )
-                        else:
-                            conn.execute(
-                                "UPDATE scene_references SET ep_start=?,ep_end=NULL WHERE id=?",
-                                (adopted_start, scene_id),
-                            )
-                        conn.commit()
-                    sc.ref_image_path = path
-                    break
-                except asyncio.CancelledError:
-                    if scene_id:
-                        from app.rejected_media import purge_scene_reference
-                        purge_scene_reference(conn, scene_id)
-                    sc.ref_image_path = None
-                    raise
-                except hiagent.ProviderError as exc:
-                    if scene_id:
-                        from app.rejected_media import purge_scene_reference
-                        purge_scene_reference(conn, scene_id)
-                        scene_id = None
-                    sc.ref_image_path = None
-                    last_error = exc
-                except Exception as exc:  # noqa: BLE001 候选失败后在有界循环内修复
-                    if scene_id:
-                        from app.rejected_media import purge_scene_reference
-                        purge_scene_reference(conn, scene_id)
-                        scene_id = None
-                    sc.ref_image_path = None
-                    last_error = exc
-            if not sc.ref_image_path:
-                raise last_error or hiagent.ProviderError(f"场景图生成失败：{sc.name}")
-        except Exception as exc:  # noqa: BLE001 失败要响：逐场景记录，最后汇总抛出
-            errors.append(f"{sc.name}：{exc}")
-            failures.append(exc)
+    for sc, result in zip(targets, results):
+        if result is None:
+            continue
+        if isinstance(result, Exception):
+            errors.append(f"{sc.name}：{result}")
+            failures.append(result)
+        elif isinstance(result, BaseException):
+            # CancelledError (or any other non-Exception BaseException): the
+            # whole batch is being torn down, not "this scene failed" --
+            # propagate instead of quietly recording it as a content failure.
+            raise result
 
     # Portrait generation and reactive scene discovery can update the Bible in
     # parallel.  Only merge paths owned by this batch.
@@ -1524,6 +1252,327 @@ async def generate_scene_refs(
         "gate_retry_exhausted": bool(errors),
         "warnings": errors,
     }
+
+
+async def _generate_one_scene_reference(
+    project_id: str,
+    sc,
+    style: str,
+    project,
+    bible_version: int,
+    only_scene,
+    operation_started_at: float | None,
+    bible_merge_lock: asyncio.Lock,
+) -> None:
+    """Run one scene's full reference-image pipeline; raises on failure.
+
+    Spawned as its own ``asyncio.Task`` by ``asyncio.gather`` in
+    ``generate_scene_refs``.  ``get_conn()`` keys connections by
+    ``asyncio.current_task()`` (see ``app.db``), so calling it fresh here --
+    never inheriting the caller's ``conn`` via closure -- gives this scene
+    its own isolated SQLite connection, isolated from concurrent siblings.
+    """
+    conn = get_conn()
+    pending_state = (sc.pending_state_canonical or "").strip()
+    pending_ep_start = sc.pending_state_ep_start
+    if pending_state and pending_ep_start:
+        current_state_row = _open_scene_ref(conn, project_id, sc.name)
+        if current_state_row and int(current_state_row["ep_start"] or 1) < int(pending_ep_start):
+            evolved = await _refresh_scene_on_state_change(
+                project_id, sc.name, int(pending_ep_start), pending_state, style, bible_version,
+                change_meta={
+                    "change_type": "approved_scene_state_change",
+                    "reason": "待审场景状态变化批准后付费重绘",
+                    "persistence": "persistent",
+                },
+            )
+            if not evolved:
+                raise SceneAssetQualityError(f"场景状态变化版本未能创建：{sc.name}")
+            sc.scene_canonical = pending_state
+            sc.pending_state_canonical = None
+            sc.pending_state_ep_start = None
+            sc.ref_image_path = evolved["image_path"]
+            # ``bible_merge_lock`` serializes this read-modify-write of the
+            # whole bible_json blob against concurrent sibling scenes in the
+            # same batch -- two unlocked writers here would silently lose one
+            # another's merge (last write wins on the whole blob).
+            async with bible_merge_lock:
+                _merge_generated_scene_refs(conn, project_id, [sc])
+                latest_project = conn.execute(
+                    "SELECT bible_json FROM projects WHERE id=?", (project_id,),
+                ).fetchone()
+                latest_bible = json.loads(latest_project["bible_json"] or "{}")
+                for item in latest_bible.get("scenes", []):
+                    if item.get("name") == sc.name:
+                        item["scene_canonical"] = pending_state
+                        item["pending_state_canonical"] = None
+                        item["pending_state_ep_start"] = None
+                        break
+                conn.execute(
+                    "UPDATE projects SET bible_json=? WHERE id=?",
+                    (json.dumps(latest_bible, ensure_ascii=False), project_id),
+                )
+                conn.commit()
+            return
+    # 批量补齐：候选堆积超过阈值时，采纳最高分而不再继续烧图。
+    if only_scene is None or isinstance(only_scene, list):
+        piled = list_scene_reference_candidates(conn, project_id, sc.name)
+        if len(piled) > SCENE_CANDIDATE_AUTO_ADOPT_THRESHOLD:
+            pre_review_best = max(
+                piled,
+                key=lambda item: (item["qa_score"], item["created_at"]),
+            )
+            from app.multiview import scene_multiview_enabled
+            require_policy = scene_multiview_enabled()
+            # Old candidates often have good scores but incomplete
+            # policy facts.  Re-QA a bounded number before spending on
+            # more images or forcing the user through every card.
+            existing_gates = {
+                item["artifact_id"]: scene_candidate_gate(
+                    item["artifact_id"], require_current_policy=require_policy,
+                )
+                for item in piled
+            }
+            # 仍对最优旧候选做一次有界复评以改善排序证据；复评结果无论
+            # 通过与否都不会改变其文件采用资格。
+            already_eligible = any(
+                gate["verified"] for gate in existing_gates.values()
+            )
+            unverified = [
+                item for item in piled
+                if existing_gates[item["artifact_id"]]["state"] == "unverified"
+            ]
+            reviewed_winner_id: str | None = None
+            if not already_eligible:
+                for item in sorted(
+                    unverified,
+                    key=lambda candidate: (candidate["qa_score"], candidate["created_at"]),
+                    reverse=True,
+                )[:SCENE_CANDIDATE_AUTO_REVIEW_LIMIT]:
+                    reviewed = await review_scene_candidate(
+                        project_id, sc.name, item["artifact_id"],
+                    )
+                    if (reviewed.get("gate") or {}).get("verified"):
+                        reviewed_winner_id = item["artifact_id"]
+                        break
+            if unverified and not already_eligible:
+                piled = list_scene_reference_candidates(conn, project_id, sc.name)
+            # 候选列表已保证文件存在；QA 只用于排序，不能把整批候选判为不可采用。
+            eligible = list(piled)
+            preferred_id = reviewed_winner_id or pre_review_best["artifact_id"]
+            best = next(
+                (item for item in eligible if item["artifact_id"] == preferred_id),
+                max(eligible, key=lambda item: (item["qa_score"], item["created_at"])),
+            )
+            adopted = await adopt_scene_candidate(
+                project_id,
+                sc.name,
+                best["artifact_id"],
+                reason=(
+                    f"检查并补齐：候选已达 {len(piled)} 张（阈值 "
+                    f"{SCENE_CANDIDATE_AUTO_ADOPT_THRESHOLD}），自动采纳最高分 "
+                    f"{best['qa_score']:.2f}"
+                ),
+                decided_by="scene_refs_auto_adopt",
+                ensure_pack=True,
+            )
+            sc.ref_image_path = adopted["image_path"]
+            return
+    sc.ref_image_path = None
+    base_prompt = (
+        (sc.scene_prompt_override or "").strip()
+        or scene_ref_prompt(style, sc.scene_canonical, scene_name=sc.name)
+    )
+    last_error: Exception | None = None
+    retry_prompt: str | None = None
+    retry_seed: str | None = None
+    # 分数和审美提示仍只评分；仅确定性硬门禁失败时允许一次有界纠偏重生。
+    for attempt in range(1, 3):
+        scene_id: str | None = None
+        path = str(Path(scene_ref_path(project_id, sc.name)).with_name(
+            f"{_safe_name(sc.name)}__{new_id('candidate')}.jpg"
+        ))
+        prompt = retry_prompt or base_prompt
+        try:
+            call_meta = {
+                "asset_kind": "scene_reference",
+                "scene_name": sc.name,
+                "episode_no": 1,
+                "scene_ref_mode": "initial",
+                "attempt": attempt,
+            }
+            if operation_started_at is not None:
+                operation_material = (
+                    f"{project_id}:{operation_started_at}:{sc.name}:"
+                    f"scene_reference:{attempt}"
+                )
+                call_meta.update({
+                    "operation_id": "op_scene_reference_" + hashlib.sha256(
+                        operation_material.encode("utf-8")
+                    ).hexdigest()[:32],
+                    "reuse_successful_operation": True,
+                })
+            item = await _generate_scene_image(
+                prompt,
+                retry_seed,
+                call_meta=call_meta,
+            )
+            await _save_image_item(item, path)
+            # ``record_reference_asset`` 会物理删除硬失败候选。先在
+            # 内存中保留一次纠偏编辑所需的输入，不让失败文件落盘滞留。
+            candidate_seed = hiagent.data_url_from_file(path)
+            qa = await _review_scene_ref(
+                path, sc, expected_description=prompt,
+            )
+            artifact = record_reference_asset(
+                asset_type="scene_reference",
+                scope_id=f"{project_id}:{sc.name}:1",
+                file_path=path,
+                content={
+                    "scene_name": sc.name,
+                    "canonical": sc.scene_canonical,
+                    "prompt": prompt,
+                    "attempt": attempt,
+                },
+                parent_artifact_ids=(
+                    [project["bible_artifact_id"]] if project["bible_artifact_id"] else []
+                ),
+                qa=qa,
+            )
+            if artifact["status"] not in {"approved", "validated"}:
+                last_error = SceneAssetQualityError(
+                    f"场景图技术校验未通过：{sc.name}"
+                )
+                retry_prompt = scene_hard_gate_retry_prompt(
+                    base_prompt,
+                    qa,
+                    scene_name=sc.name,
+                    scene_canonical=sc.scene_canonical,
+                    visual_style=style,
+                )
+                if attempt >= 2 or not retry_prompt:
+                    break
+                retry_seed = candidate_seed
+                continue
+            from app.multiview import scene_multiview_enabled
+            old_current = _open_scene_ref(conn, project_id, sc.name)
+            is_atomic_replacement = bool(scene_multiview_enabled() and old_current)
+            if is_atomic_replacement:
+                # 新包先占用负数候选槽，完整 QA 期间不改变当前版本及下游引用。
+                minimum = conn.execute(
+                    "SELECT MIN(ep_start) AS value FROM scene_references "
+                    "WHERE project_id=? AND scene_name=? AND ep_start<=0",
+                    (project_id, sc.name),
+                ).fetchone()
+                candidate_start = int(
+                    minimum["value"] if minimum and minimum["value"] is not None else 0
+                ) - 1
+                scene_id = new_id("scene")
+                cols = {row[1] for row in conn.execute(
+                    "PRAGMA table_info(scene_references)"
+                ).fetchall()}
+                if "pack_status" in cols:
+                    conn.execute(
+                        "INSERT INTO scene_references(id,project_id,scene_name,ep_start,ep_end,"
+                        "scene_canonical,prompt,image_path,qa_json,base_scene_id,bible_version,artifact_id,"
+                        "pack_status,change_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (scene_id, project_id, sc.name, candidate_start, 0, sc.scene_canonical,
+                         prompt, path, json.dumps(qa, ensure_ascii=False), old_current["id"],
+                         bible_version, artifact["id"], "generating",
+                         json.dumps({"change_type": "pack_regeneration_candidate",
+                                     "candidate_created_at": now()}, ensure_ascii=False), now()),
+                    )
+                else:
+                    conn.execute(
+                        "INSERT INTO scene_references(id,project_id,scene_name,ep_start,ep_end,"
+                        "scene_canonical,prompt,image_path,qa_json,base_scene_id,bible_version,artifact_id,"
+                        "created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (scene_id, project_id, sc.name, candidate_start, 0, sc.scene_canonical,
+                         prompt, path, json.dumps(qa, ensure_ascii=False), old_current["id"],
+                         bible_version, artifact["id"], now()),
+                    )
+                conn.commit()
+            else:
+                scene_id = register_initial_scene_ref(
+                    conn, project_id, sc.name, path, sc.scene_canonical,
+                    prompt, qa, bible_version, artifact_id=artifact["id"],
+                )
+            # The candidate is publishable only after its required views exist.
+            from app.multiview import (
+                ensure_scene_multiview_pack, scene_multiview_enabled, pack_result_ok,
+            )
+            if scene_multiview_enabled():
+                pack = await ensure_scene_multiview_pack(
+                    project_id=project_id,
+                    scene_reference_id=scene_id,
+                    scene_name=sc.name,
+                    scene_canonical=sc.scene_canonical,
+                    visual_style=style,
+                    ep_start=1,
+                    primary_qa=qa,
+                    optional_views=[role for role in (sc.required_views or []) if role == "action_zone"],
+                )
+                if not pack_result_ok(pack):
+                    raise SceneAssetQualityError(
+                        f"场景多视角资产包结构不完整：{sc.name}"
+                    )
+            if is_atomic_replacement and old_current:
+                # 完整包已通过：先把旧当前版本移入新的历史槽，再把候选切为当前。
+                minimum = conn.execute(
+                    "SELECT MIN(ep_start) AS value FROM scene_references "
+                    "WHERE project_id=? AND scene_name=? AND ep_start<=0 AND id<>?",
+                    (project_id, sc.name, scene_id),
+                ).fetchone()
+                history_start = int(
+                    minimum["value"] if minimum and minimum["value"] is not None else 0
+                ) - 1
+                adopted_start = int(old_current["ep_start"] or 1)
+                conn.execute(
+                    "UPDATE scene_references SET ep_start=?,ep_end=0 WHERE id=?",
+                    (history_start, old_current["id"]),
+                )
+                adoption_change = {
+                    "change_type": "pack_regeneration", "previous_version_id": old_current["id"],
+                    "adoption_reason": "付费整包重生完成",
+                    "adopted_at": now(), "gate_retry_exhausted": False,
+                }
+                if "change_json" in cols:
+                    conn.execute(
+                        "UPDATE scene_references SET ep_start=?,ep_end=NULL,pack_status=?,"
+                        "change_json=? WHERE id=?",
+                        (adopted_start, "ready",
+                         json.dumps(adoption_change, ensure_ascii=False), scene_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE scene_references SET ep_start=?,ep_end=NULL WHERE id=?",
+                        (adopted_start, scene_id),
+                    )
+                conn.commit()
+            sc.ref_image_path = path
+            break
+        except asyncio.CancelledError:
+            if scene_id:
+                from app.rejected_media import purge_scene_reference
+                purge_scene_reference(conn, scene_id)
+            sc.ref_image_path = None
+            raise
+        except hiagent.ProviderError as exc:
+            if scene_id:
+                from app.rejected_media import purge_scene_reference
+                purge_scene_reference(conn, scene_id)
+                scene_id = None
+            sc.ref_image_path = None
+            last_error = exc
+        except Exception as exc:  # noqa: BLE001 候选失败后在有界循环内修复
+            if scene_id:
+                from app.rejected_media import purge_scene_reference
+                purge_scene_reference(conn, scene_id)
+                scene_id = None
+            sc.ref_image_path = None
+            last_error = exc
+    if not sc.ref_image_path:
+        raise last_error or hiagent.ProviderError(f"场景图生成失败：{sc.name}")
 
 
 # ---------- 分镜阶段反应式发现新场景（对照 portraits.ensure_character_card 的新角色路径） ----------

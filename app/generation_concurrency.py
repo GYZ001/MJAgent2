@@ -185,6 +185,53 @@ def current_generation_priority() -> int:
     return int(_generation_priority.get())
 
 
+#: 人物定妆照 / 场景定场图批量出图：各自独立的有界并发池，互不挤占彼此的槽位。
+#: 与上面的文本生成优先级闸门是两套独立机制——图片批量出图没有优先级抢占需求，
+#: 只需要"这一批最多同时跑几个"，故用最简单的按 event loop 缓存的 Semaphore。
+CHARACTER_PORTRAIT_BATCH_CONCURRENCY = 5
+SCENE_REFERENCE_BATCH_CONCURRENCY = 5
+
+_image_batch_semaphores: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[str, asyncio.Semaphore]
+] = weakref.WeakKeyDictionary()
+
+
+def _image_batch_semaphore(resource: str, limit: int) -> asyncio.Semaphore:
+    """One bounded-concurrency gate per (event loop, resource).
+
+    Mirrors ``gate_for``'s per-loop caching: a module-level ``asyncio.Semaphore``
+    singleton would bind to whichever loop happened to be running at import
+    time, which breaks under pytest's per-test event loops.  Keying by the
+    currently running loop keeps each test (and each real process loop)
+    isolated.
+    """
+    loop = asyncio.get_running_loop()
+    by_resource = _image_batch_semaphores.setdefault(loop, {})
+    semaphore = by_resource.get(resource)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(limit)
+        by_resource[resource] = semaphore
+    return semaphore
+
+
+def character_portrait_batch_semaphore() -> asyncio.Semaphore:
+    """Independent pool: at most ``CHARACTER_PORTRAIT_BATCH_CONCURRENCY``
+    character-portrait pipelines (image request + QA + multiview pack) run
+    concurrently.  Scene reference generation has its own separate pool below
+    so neither workflow can starve the other of concurrency."""
+    return _image_batch_semaphore(
+        "character_portrait_batch", CHARACTER_PORTRAIT_BATCH_CONCURRENCY,
+    )
+
+
+def scene_reference_batch_semaphore() -> asyncio.Semaphore:
+    """Independent pool: at most ``SCENE_REFERENCE_BATCH_CONCURRENCY`` scene-
+    reference pipelines run concurrently, isolated from the portrait pool."""
+    return _image_batch_semaphore(
+        "scene_reference_batch", SCENE_REFERENCE_BATCH_CONCURRENCY,
+    )
+
+
 async def run_with_provider_call_slot(
     operation: Callable[[], Awaitable[T]],
     *,

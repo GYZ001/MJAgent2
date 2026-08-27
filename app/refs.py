@@ -13,7 +13,7 @@ import json
 import re
 from pathlib import Path
 
-from app import config, hiagent
+from app import config, generation_concurrency, hiagent
 from app.atomic_io import atomic_write_bytes
 from app.db import get_conn, new_id
 from app.evidence.media import record_reference_asset
@@ -245,7 +245,6 @@ async def generate_refs(
         raise ValueError(f"角色不存在：{only_character or sorted(selected)}")
 
     # 初始定妆照登记到 character_portraits（适用集 1~ 至今），供按集分段刷新与生成台按集选图。
-    from app import portraits as _portraits
     bible_version = project["bible_version"] or 0
 
     if resume:
@@ -304,137 +303,34 @@ async def generate_refs(
         if not targets:
             return
 
+    # 各角色互相独立（互不引用彼此的定妆照作为参考图），故按角色分批并发；
+    # 并发池上限见 generation_concurrency.character_portrait_batch_semaphore
+    # ——与场景定场图各自独立，互不挤占彼此的槽位。角色内部（正面→侧面视角）
+    # 的先后依赖完全保留在 ensure_character_multiview_pack 内部，未受影响。
+    bible_merge_lock = asyncio.Lock()
+    semaphore = generation_concurrency.character_portrait_batch_semaphore()
+
+    async def _bounded(c) -> None:
+        async with semaphore:
+            await _generate_one_character_portrait(
+                project_id, c, style, project, bible_version,
+                operation_started_at, bible_merge_lock,
+            )
+
+    results = await asyncio.gather(
+        *(_bounded(c) for c in targets), return_exceptions=True,
+    )
     failures: list[tuple[str, Exception]] = []
-    for c in targets:
-        try:
-            c.ref_image_path = None
-            from app.stages import review_portrait_image
-            override = (c.portrait_prompt_override or "").strip()
-            base_prompt = effective_portrait_prompt(
-                style, c.appearance_canonical, override,
-            )
-            effective_appearance = portrait_override_appearance_anchor(
-                c.appearance_canonical, override,
-            )
-            last_error: Exception | None = None
-            # Score-only：只生成一次；QA 低分不带 critique 重生（PRD QA-SO #14）。
-            for attempt in range(1, 2):
-                portrait_id: str | None = None
-                path = str(Path(ref_path(project_id, c.name)).with_name(
-                    f"{_safe_name(c.name)}__{new_id('candidate')}.jpg"
-                ))
-                prompt = base_prompt
-                try:
-                    call_meta = {
-                        "asset_kind": "portrait",
-                        "character_name": c.name,
-                        "episode_no": 1,
-                        "portrait_mode": "initial",
-                        "attempt": attempt,
-                    }
-                    if operation_started_at is not None:
-                        operation_material = (
-                            f"{project_id}:{operation_started_at}:{c.name}:initial_portrait"
-                        )
-                        call_meta.update({
-                            "operation_id": "op_portrait_" + hashlib.sha256(
-                                operation_material.encode("utf-8")
-                            ).hexdigest()[:32],
-                            "reuse_successful_operation": True,
-                        })
-                    item = await hiagent.generate_image(
-                        prompt,
-                        size=config.REF_IMAGE_SIZE,
-                        call_meta=call_meta,
-                    )
-                    if item.get("url"):
-                        await hiagent.download(item["url"], path)
-                    elif item.get("b64_json"):
-                        import base64
-                        atomic_write_bytes(path, base64.b64decode(item["b64_json"]))
-                    else:
-                        raise hiagent.ProviderError(f"图像响应缺少 url/b64_json：{list(item.keys())}")
-                    qa = await review_portrait_image(
-                        hiagent.encode_image_file(path), base_prompt,
-                    )
-                    artifact = record_reference_asset(
-                        asset_type="character_portrait",
-                        scope_id=f"{project_id}:{c.name}:1",
-                        file_path=path,
-                        content={
-                            "character_name": c.name,
-                            "appearance": effective_appearance,
-                            "prompt": prompt,
-                            "attempt": attempt,
-                        },
-                        parent_artifact_ids=(
-                            [project["bible_artifact_id"]] if project["bible_artifact_id"] else []
-                        ),
-                        qa=qa,
-                    )
-                    if artifact["status"] not in {"approved", "validated"}:
-                        last_error = ContentGenerationError(
-                            f"定妆照技术校验未通过：{c.name}"
-                        )
-                        continue
-                    portrait_id = _portraits.stage_initial_portrait(
-                        conn, project_id, c.name, path, effective_appearance, prompt,
-                        bible_version, artifact_id=artifact["id"])
-                    # 初始多视角资产包会有界补齐；耗尽后仍发布已落盘的正面主图。
-                    from app.multiview import (
-                        ensure_character_multiview_pack, character_multiview_enabled, pack_result_ok,
-                    )
-                    if character_multiview_enabled():
-                        pack = await ensure_character_multiview_pack(
-                            project_id=project_id,
-                            portrait_id=portrait_id,
-                            character_name=c.name,
-                            appearance=effective_appearance,
-                            visual_style=style,
-                            portrait_prompt=base_prompt,
-                            ep_start=1,
-                            primary_qa=qa,
-                        )
-                        if not pack_result_ok(pack):
-                            raise ContentGenerationError(
-                                f"定妆多视角包结构不完整：{c.name}"
-                            )
-                    _portraits.promote_staged_initial_portrait(
-                        conn, project_id, c.name, portrait_id,
-                    )
-                    c.appearance_canonical = effective_appearance
-                    c.ref_image_path = path
-                    break
-                except asyncio.CancelledError:
-                    if portrait_id:
-                        from app.rejected_media import purge_character_portrait
-                        purge_character_portrait(conn, portrait_id)
-                    c.ref_image_path = None
-                    raise
-                except hiagent.ProviderError as exc:
-                    if portrait_id:
-                        from app.rejected_media import purge_character_portrait
-                        purge_character_portrait(conn, portrait_id)
-                        portrait_id = None
-                    c.ref_image_path = None
-                    last_error = exc
-                except Exception as exc:  # noqa: BLE001 候选失败后在有界循环内修复
-                    if portrait_id:
-                        from app.rejected_media import purge_character_portrait
-                        purge_character_portrait(conn, portrait_id)
-                        portrait_id = None
-                    c.ref_image_path = None
-                    last_error = exc
-            if not c.ref_image_path:
-                raise last_error or hiagent.ProviderError(f"定妆照生成失败：{c.name}")
-            # Publish each accepted character as its own durable checkpoint.
-            # The remaining characters may take many minutes or be interrupted
-            # by a process restart; already-ready packs must be visible and
-            # resumable without waiting for the entire batch to finish.
-            _merge_generated_portraits(conn, project_id, [c])
-            conn.commit()
-        except Exception as exc:  # noqa: BLE001 失败要响：逐角色记录，最后汇总抛出
-            failures.append((c.name, exc))
+    for c, result in zip(targets, results):
+        if result is None:
+            continue
+        if isinstance(result, Exception):
+            failures.append((c.name, result))
+        elif isinstance(result, BaseException):
+            # CancelledError (or any other non-Exception BaseException): the
+            # whole batch is being torn down, not "this character failed" --
+            # propagate instead of quietly recording it as a content failure.
+            raise result
 
     # Scene Bible generation runs in parallel with portraits.  Merge only the
     # fields owned by this task so its old snapshot cannot erase newly added scenes.
@@ -448,6 +344,162 @@ async def generate_refs(
         "gate_retry_exhausted": False,
         "warnings": [],
     }
+
+
+async def _generate_one_character_portrait(
+    project_id: str,
+    c,
+    style: str,
+    project,
+    bible_version: int,
+    operation_started_at: float | None,
+    bible_merge_lock: asyncio.Lock,
+) -> None:
+    """Run one character's full definitive-portrait pipeline; raises on failure.
+
+    Spawned as its own ``asyncio.Task`` by ``asyncio.gather`` in
+    ``generate_refs``.  ``get_conn()`` keys connections by
+    ``asyncio.current_task()`` (see ``app.db``), so calling it fresh here --
+    never inheriting the caller's ``conn`` via closure -- gives this
+    character its own isolated SQLite connection.  Concurrent siblings
+    therefore never share a connection or its implicit transaction state,
+    which matters because most writes below commit immediately but a few
+    (staged portrait -> multiview pack -> promote) span several statements.
+    """
+    conn = get_conn()
+    from app import portraits as _portraits
+
+    c.ref_image_path = None
+    from app.stages import review_portrait_image
+    override = (c.portrait_prompt_override or "").strip()
+    base_prompt = effective_portrait_prompt(
+        style, c.appearance_canonical, override,
+    )
+    effective_appearance = portrait_override_appearance_anchor(
+        c.appearance_canonical, override,
+    )
+    last_error: Exception | None = None
+    # Score-only：只生成一次；QA 低分不带 critique 重生（PRD QA-SO #14）。
+    for attempt in range(1, 2):
+        portrait_id: str | None = None
+        path = str(Path(ref_path(project_id, c.name)).with_name(
+            f"{_safe_name(c.name)}__{new_id('candidate')}.jpg"
+        ))
+        prompt = base_prompt
+        try:
+            call_meta = {
+                "asset_kind": "portrait",
+                "character_name": c.name,
+                "episode_no": 1,
+                "portrait_mode": "initial",
+                "attempt": attempt,
+            }
+            if operation_started_at is not None:
+                operation_material = (
+                    f"{project_id}:{operation_started_at}:{c.name}:initial_portrait"
+                )
+                call_meta.update({
+                    "operation_id": "op_portrait_" + hashlib.sha256(
+                        operation_material.encode("utf-8")
+                    ).hexdigest()[:32],
+                    "reuse_successful_operation": True,
+                })
+            item = await hiagent.generate_image(
+                prompt,
+                size=config.REF_IMAGE_SIZE,
+                call_meta=call_meta,
+            )
+            if item.get("url"):
+                await hiagent.download(item["url"], path)
+            elif item.get("b64_json"):
+                import base64
+                atomic_write_bytes(path, base64.b64decode(item["b64_json"]))
+            else:
+                raise hiagent.ProviderError(f"图像响应缺少 url/b64_json：{list(item.keys())}")
+            qa = await review_portrait_image(
+                hiagent.encode_image_file(path), base_prompt,
+            )
+            artifact = record_reference_asset(
+                asset_type="character_portrait",
+                scope_id=f"{project_id}:{c.name}:1",
+                file_path=path,
+                content={
+                    "character_name": c.name,
+                    "appearance": effective_appearance,
+                    "prompt": prompt,
+                    "attempt": attempt,
+                },
+                parent_artifact_ids=(
+                    [project["bible_artifact_id"]] if project["bible_artifact_id"] else []
+                ),
+                qa=qa,
+            )
+            if artifact["status"] not in {"approved", "validated"}:
+                last_error = ContentGenerationError(
+                    f"定妆照技术校验未通过：{c.name}"
+                )
+                continue
+            portrait_id = _portraits.stage_initial_portrait(
+                conn, project_id, c.name, path, effective_appearance, prompt,
+                bible_version, artifact_id=artifact["id"])
+            # 初始多视角资产包会有界补齐；耗尽后仍发布已落盘的正面主图。
+            from app.multiview import (
+                ensure_character_multiview_pack, character_multiview_enabled, pack_result_ok,
+            )
+            if character_multiview_enabled():
+                pack = await ensure_character_multiview_pack(
+                    project_id=project_id,
+                    portrait_id=portrait_id,
+                    character_name=c.name,
+                    appearance=effective_appearance,
+                    visual_style=style,
+                    portrait_prompt=base_prompt,
+                    ep_start=1,
+                    primary_qa=qa,
+                )
+                if not pack_result_ok(pack):
+                    raise ContentGenerationError(
+                        f"定妆多视角包结构不完整：{c.name}"
+                    )
+            _portraits.promote_staged_initial_portrait(
+                conn, project_id, c.name, portrait_id,
+            )
+            c.appearance_canonical = effective_appearance
+            c.ref_image_path = path
+            break
+        except asyncio.CancelledError:
+            if portrait_id:
+                from app.rejected_media import purge_character_portrait
+                purge_character_portrait(conn, portrait_id)
+            c.ref_image_path = None
+            raise
+        except hiagent.ProviderError as exc:
+            if portrait_id:
+                from app.rejected_media import purge_character_portrait
+                purge_character_portrait(conn, portrait_id)
+                portrait_id = None
+            c.ref_image_path = None
+            last_error = exc
+        except Exception as exc:  # noqa: BLE001 候选失败后在有界循环内修复
+            if portrait_id:
+                from app.rejected_media import purge_character_portrait
+                purge_character_portrait(conn, portrait_id)
+                portrait_id = None
+            c.ref_image_path = None
+            last_error = exc
+    if not c.ref_image_path:
+        raise last_error or hiagent.ProviderError(f"定妆照生成失败：{c.name}")
+    # Publish each accepted character as its own durable checkpoint.  The
+    # remaining characters may take many minutes or be interrupted by a
+    # process restart; already-ready packs must be visible and resumable
+    # without waiting for the entire batch to finish.  ``bible_merge_lock``
+    # serializes this read-modify-write of the whole bible_json blob against
+    # concurrent siblings in the same batch -- two unlocked writers here
+    # would silently lose one another's merge (last write wins on the whole
+    # blob, not just this character's fields).
+    async with bible_merge_lock:
+        _merge_generated_portraits(conn, project_id, [c])
+        conn.commit()
 
 
 def refs_as_image_inputs(bible: Bible, character_names: list[str], limit: int,
