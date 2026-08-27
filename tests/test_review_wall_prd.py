@@ -315,10 +315,10 @@ async def test_video_completion_shutdown_pauses_run_for_recovery(monkeypatch) ->
         def start(self):
             return None
 
-        def pause_external(self, _message):
+        def pause_external(self, _message, conn=None):
             self.paused = True
 
-        def cancel(self):
+        def cancel(self, conn=None):
             self.cancelled = True
 
     async def interrupted(*_args, **_kwargs):
@@ -350,10 +350,10 @@ async def test_deadline_fallback_completion_records_success(monkeypatch) -> None
         def start(self):
             return None
 
-        def succeed(self, outcome):
+        def succeed(self, outcome, conn=None):
             self.succeeded_with = outcome
 
-        def partial(self, outcome):
+        def partial(self, outcome, conn=None):
             self.partial_with = outcome
 
     async def completed(*_args, **_kwargs):
@@ -394,10 +394,10 @@ async def test_video_completion_terminal_status_uses_completed_shot_count(
         def start(self):
             return None
 
-        def partial(self, outcome):
+        def partial(self, outcome, conn=None):
             self.recorded = ("partial", outcome, None)
 
-        def fail_result(self, outcome, *, failure_code):
+        def fail_result(self, outcome, *, failure_code, conn=None):
             self.recorded = ("failed", outcome, failure_code)
 
     async def completed(*_args, **_kwargs):

@@ -67,7 +67,7 @@ def test_not_sent_text_failure_waits_and_replays_same_harness_step(tmp_path, mon
         recorder.step("storyboard", operation, contract_key="storyboard", agent_name="storyboard")
     )
     resumed_started_at = repository.get_run(recorder.run_id)["started_at"]
-    recorder.succeed()
+    recorder.succeed(conn=None)
 
     assert result == '{"ok":true}'
     assert attempts == [messages, messages, messages]
@@ -151,7 +151,7 @@ def test_ambiguous_text_result_is_not_replayed_and_requires_page_retry(
 
     with pytest.raises(hiagent.ProviderError) as caught:
         asyncio.run(recorder.step("storyboard", operation))
-    recorder.fail(caught.value)
+    recorder.fail(caught.value, conn=None)
 
     assert attempts == 1
     assert sleeps == 0
@@ -237,7 +237,7 @@ def test_shared_auto_run_records_retry_without_pausing_siblings(tmp_path, monkey
         )
 
     _, result = asyncio.run(recorder.step("episode_pipelines", operation))
-    recorder.succeed()
+    recorder.succeed(conn=None)
 
     assert result == "ok"
     assert states_while_waiting == ["RUNNING"]
@@ -291,7 +291,7 @@ def test_zero_byte_stream_read_timeout_does_not_schedule_retry(tmp_path, monkeyp
 
     with pytest.raises(hiagent.ProviderError) as caught:
         asyncio.run(recorder.step("storyboard", operation))
-    recorder.fail(caught.value)
+    recorder.fail(caught.value, conn=None)
 
     assert attempts == 1
     assert sleeps == 0
@@ -346,7 +346,7 @@ def test_partial_byte_stream_read_timeout_does_not_schedule_retry(tmp_path, monk
 
     with pytest.raises(hiagent.ProviderError) as caught:
         asyncio.run(recorder.step("storyboard", operation))
-    recorder.fail(caught.value)
+    recorder.fail(caught.value, conn=None)
 
     assert attempts == 1
     assert sleeps == 0

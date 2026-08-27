@@ -2990,9 +2990,9 @@ async def _recorded_video_completion_task(
                 allow_storyboard_edit=allow_storyboard_edit,
             )
         if result.phase in {"SUCCEEDED_COVERED", "COMPLETED_DEADLINE_FALLBACK"}:
-            recorder.succeed(result.outcome or "SUCCEEDED_COVERED")
+            recorder.succeed(result.outcome or "SUCCEEDED_COVERED", conn=None)
         elif result.phase == "CANCELLED":
-            recorder.cancel()
+            recorder.cancel(conn=None)
         else:
             coverage = result.coverage or {}
             completed_shots = int(coverage.get("adopted") or 0)
@@ -3000,10 +3000,10 @@ async def _recorded_video_completion_task(
             if result.finished_at is not None and total_shots > 0 and completed_shots == 0:
                 recorder.fail_result(
                     result.outcome or result.phase,
-                    failure_code="NO_COMPLETED_OUTPUT",
+                    failure_code="NO_COMPLETED_OUTPUT", conn=None,
                 )
             else:
-                recorder.partial(result.outcome or result.phase)
+                recorder.partial(result.outcome or result.phase, conn=None)
         if result.phase in {
             "SUCCEEDED_COVERED", "COMPLETED_DEADLINE_FALLBACK",
             "PARTIAL_NO_USABLE_CANDIDATE", "FAILED_CLOSED", "CANCELLED",
@@ -3027,9 +3027,9 @@ async def _recorded_video_completion_task(
         if conn.in_transaction:
             conn.rollback()
         if task_registry.shutdown_in_progress():
-            recorder.pause_external("服务重启，全片视频补齐等待自动恢复")
+            recorder.pause_external("服务重启，全片视频补齐等待自动恢复", conn=None)
         else:
-            recorder.cancel()
+            recorder.cancel(conn=None)
         raise
     except Exception as exc:
         # 同上，必须先回滚再记录。注意：多数常规异常已经在
@@ -3039,7 +3039,7 @@ async def _recorded_video_completion_task(
         conn = get_conn()
         if conn.in_transaction:
             conn.rollback()
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
         raise
 
 
@@ -3360,7 +3360,7 @@ async def _complete_episode_core(
     )
     if installed.rowcount != 1:
         conn.rollback()
-        recorder.cancel("补齐启动权已变化，当前运行未启动")
+        recorder.cancel("补齐启动权已变化，当前运行未启动", conn=None)
         if issued_new_grant and grant_id:
             revoke_grant(grant_id)
         raise HTTPException(409, {
@@ -3431,7 +3431,7 @@ async def _complete_episode_core(
         completion_coro.close()
         try:
             recorder.start()
-            recorder.fail(exc)
+            recorder.fail(exc, conn=None)
         except Exception as record_exc:  # noqa: BLE001
             errors.log_error(
                 record_exc,
@@ -3875,7 +3875,7 @@ def repair_video_completion_route(episode_id: str, body: dict | None = None):
             run_id=recorder.run_id,
             reason="CONFIRMED_LEGACY_INCIDENT_CLOSEOUT",
         )
-        recorder.partial(result.outcome or result.phase)
+        recorder.partial(result.outcome or result.phase, conn=None)
     except Exception as exc:  # noqa: BLE001
         # 必须在 _mark_failed_closed / recorder.fail 之前回滚，且回滚要放在这
         # 个 except 块的第一条语句：_deadline_closeout 内部与本函数共用同一
@@ -3900,7 +3900,7 @@ def repair_video_completion_route(episode_id: str, body: dict | None = None):
             run_id=recorder.run_id,
             reason=f"CONFIRMED_REPAIR_FAILED: {type(exc).__name__}: {exc}",
         )
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
         raise HTTPException(500, f"遗留 run 收口失败：{exc}") from exc
     return {
         "status": "closed",
@@ -4044,7 +4044,7 @@ def _finish_project_video_completion_queue(plan: list[dict], recorder) -> None:
             "RUNNING",
             target,
             message,
-            failure_code=source.get("child_failure_code"),
+            failure_code=source.get("child_failure_code"), conn=None,
         )
         evidence_repository.append_event(
             recorder.run_id,
@@ -4060,21 +4060,21 @@ def _finish_project_video_completion_queue(plan: list[dict], recorder) -> None:
         if status not in _PROJECT_VIDEO_ITEM_SUCCESS_STATUSES
     ]
     if not unsuccessful:
-        recorder.succeed("项目补齐队列已全部处理")
+        recorder.succeed("项目补齐队列已全部处理", conn=None)
         return
     if all(status == "cancelled" for status in unsuccessful) and all(
         status == "cancelled" for status in statuses
     ):
-        recorder.cancel("项目补齐队列中的单集任务均已取消")
+        recorder.cancel("项目补齐队列中的单集任务均已取消", conn=None)
         return
     if statuses and all(status == "failed" for status in statuses):
         recorder.fail_result(
             f"项目补齐队列失败，{len(statuses)} 集均未完成",
-            failure_code="PROJECT_VIDEO_CHILD_FAILED",
+            failure_code="PROJECT_VIDEO_CHILD_FAILED", conn=None,
         )
         return
     recorder.partial(
-        f"项目补齐队列已结束，{len(unsuccessful)} 集未成功完成"
+        f"项目补齐队列已结束，{len(unsuccessful)} 集未成功完成", conn=None
     )
 
 
@@ -4167,7 +4167,7 @@ async def _run_project_video_completion_queue(
         if task_registry.shutdown_in_progress() or pause_requested:
             recorder.pause_external(
                 "用户暂停，项目补齐剩余队列已保留"
-                if pause_requested else "服务重启，项目补齐剩余队列等待自动恢复"
+                if pause_requested else "服务重启，项目补齐剩余队列等待自动恢复", conn=None
             )
             if pause_requested:
                 conn = get_conn()
@@ -4177,11 +4177,11 @@ async def _run_project_video_completion_queue(
                 )
                 conn.commit()
         else:
-            recorder.cancel("项目补齐队列已取消")
+            recorder.cancel("项目补齐队列已取消", conn=None)
         raise
     except Exception as exc:
         _persist_project_video_queue(recorder.run_id, state)
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
         raise
 
 
@@ -4232,7 +4232,7 @@ def recover_project_video_completion_queues() -> int:
                 coro.close()
             if recorder is not None:
                 try:
-                    recorder.cancel("项目补齐队列恢复任务未能启动")
+                    recorder.cancel("项目补齐队列恢复任务未能启动", conn=None)
                 except Exception:  # noqa: BLE001
                     pass
             errors.record_and_format(
@@ -4693,7 +4693,7 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
                     chain_coro.close()
                 if recorder is not None:
                     try:
-                        recorder.cancel("项目补齐队列未能启动")
+                        recorder.cancel("项目补齐队列未能启动", conn=None)
                     except Exception:  # noqa: BLE001
                         pass
                 for item in rest:

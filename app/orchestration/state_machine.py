@@ -82,6 +82,23 @@ def _cas_status(
         raise StateConflict(entity, entity_id, expected, row["status"] if row else None)
 
 
+# ``conn`` has no default on either transition function below (was
+# ``sqlite3.Connection | None = None`` -- callers that omitted it silently
+# got ``get_conn()``'s ambient task-cached connection *and* an implicit
+# commit on it, see the ``if conn is None: db.commit()`` branches). That
+# silent fallback is exactly the "隐式提交家族" bug pattern that already
+# corrupted real data three times (see app.db.insert_error_log's docstring
+# and app.video_supervisor.save_checkpoint's history) -- a caller holding
+# an uncommitted multi-statement transaction on that same connection would
+# have it flushed the moment anything called ``transition_run``/
+# ``transition_step`` without thinking about it. Making ``conn`` a required
+# keyword (still accepts an explicit ``None`` to opt into the ambient-
+# connection-and-commit-now behavior, or a specific connection to share the
+# caller's already-open transaction and defer the commit to them) forces
+# every call site to make that choice visibly, and turns a forgotten
+# argument into a ``TypeError`` at the call site instead of a silently
+# wrong commit boundary three frames down. Same precedent as
+# ``app/multiview.py``'s ``conn`` becoming a hard dependency.
 def transition_run(
     run_id: str,
     expected_from: str | Iterable[str],
@@ -89,7 +106,7 @@ def transition_run(
     reason: str,
     *,
     failure_code: str | None = None,
-    conn: sqlite3.Connection | None = None,
+    conn: sqlite3.Connection | None,
 ) -> None:
     expected = _expected_set(expected_from)
     _validate_transition(RUN_TRANSITIONS, expected, to)
@@ -131,7 +148,7 @@ def transition_step(
     decision: str | None = None,
     output_artifact_id: str | None = None,
     error_code: str | None = None,
-    conn: sqlite3.Connection | None = None,
+    conn: sqlite3.Connection | None,
 ) -> None:
     expected = _expected_set(expected_from)
     _validate_transition(STEP_TRANSITIONS, expected, to)

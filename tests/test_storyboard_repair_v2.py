@@ -66,7 +66,7 @@ def test_cancelled_run_cannot_overwrite_storyboard_checkpoint(repair_db) -> None
         checkpoint,
         run_id=recorder.run_id,
     )
-    recorder.cancel("superseded")
+    recorder.cancel("superseded", conn=None)
     checkpoint.phase = "WAITING_HUMAN"
     checkpoint.outcome = "STALE_RESULT"
 

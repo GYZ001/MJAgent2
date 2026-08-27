@@ -164,14 +164,14 @@ class AgentLoop(Generic[T]):
                 if iteration_step_id:
                     transition_step(
                         iteration_step_id, "RUNNING", "CANCELLED", "cancelled",
-                        decision="cancel",
+                        decision="cancel", conn=None,
                     )
                 raise
             except Exception as exc:
                 if iteration_step_id:
                     transition_step(
                         iteration_step_id, "RUNNING", "FAILED", str(exc)[:1000],
-                        decision="escalate", error_code=type(exc).__name__.upper(),
+                        decision="escalate", error_code=type(exc).__name__.upper(), conn=None,
                     )
                 raise
 
@@ -228,7 +228,7 @@ class AgentLoop(Generic[T]):
                 if iteration_step_id:
                     transition_step(
                         iteration_step_id, "RUNNING", "SUCCEEDED", exit_reason,
-                        decision="accept", output_artifact_id=artifact_id,
+                        decision="accept", output_artifact_id=artifact_id, conn=None,
                     )
                 return AgentLoopResult(
                     value=value,
@@ -248,7 +248,7 @@ class AgentLoop(Generic[T]):
                         "FAILED",
                         exit_reason,
                         decision="escalate",
-                        output_artifact_id=artifact_id,
+                        output_artifact_id=artifact_id, conn=None,
                     )
                 break
 
@@ -262,7 +262,7 @@ class AgentLoop(Generic[T]):
                 if iteration_step_id:
                     transition_step(
                         iteration_step_id, "RUNNING", "WARNING", "baseline_handoff",
-                        decision="repair", output_artifact_id=artifact_id,
+                        decision="repair", output_artifact_id=artifact_id, conn=None,
                     )
                 return AgentLoopResult(
                     value=value,
@@ -301,7 +301,7 @@ class AgentLoop(Generic[T]):
                     "WARNING",
                     exit_reason,
                     decision="escalate" if exit_reason != "repair_requested" else "repair",
-                    output_artifact_id=artifact_id,
+                    output_artifact_id=artifact_id, conn=None,
                 )
             if stalled or no_gain or exhausted:
                 break
@@ -412,8 +412,8 @@ class AgentLoop(Generic[T]):
             input_artifact_ids=input_artifact_ids,
             context_manifest={"goal": self.goal},
         )
-        transition_step(step_id, "PENDING", "READY", "context_ready")
-        transition_step(step_id, "READY", "RUNNING", "iteration_started")
+        transition_step(step_id, "PENDING", "READY", "context_ready", conn=None)
+        transition_step(step_id, "READY", "RUNNING", "iteration_started", conn=None)
         repository.append_event(
             trace.run_id,
             "AGENT_ITERATION_STARTED",

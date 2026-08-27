@@ -46,7 +46,7 @@ def test_resume_storyboard_keeps_checkpoint_and_links_parent_run(tmp_path, monke
         input_fingerprint="previous-partial",
     )
     parent.start()
-    parent.partial("provider retry exhausted")
+    parent.partial("provider retry exhausted", conn=None)
 
     spawned: list[tuple[str, str]] = []
 

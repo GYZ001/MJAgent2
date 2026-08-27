@@ -1080,7 +1080,7 @@ async def test_run_cancel_converges_storyboard_episode_and_checkpoint(storyboard
 
 def test_board_read_repairs_legacy_cancelled_run_without_losing_shots(storyboard_db):
     recorder = _cancel_test_run(storyboard_db)
-    recorder.cancel("模拟旧版本仅取消 Run")
+    recorder.cancel("模拟旧版本仅取消 Run", conn=None)
 
     detail = api.episode_detail("e1", view="board")
 
@@ -1109,7 +1109,7 @@ def test_failed_run_never_projects_running_from_stale_generating_checkpoint(
         next_shot_no=1,
         expected_total=8,
     ), run_id=recorder.run_id)
-    recorder.fail(RuntimeError("当前分镜生成失败"))
+    recorder.fail(RuntimeError("当前分镜生成失败"), conn=None)
     storyboard_db.execute(
         "UPDATE episodes SET status='scripting',script_error=?,active_storyboard_run_id=NULL "
         "WHERE id='e1'",
@@ -1208,7 +1208,7 @@ async def test_resume_does_not_deduplicate_terminal_run_behind_scripting_project
         input_fingerprint="terminal-partial",
     )
     terminal.start()
-    terminal.partial("activation budget yielded")
+    terminal.partial("activation budget yielded", conn=None)
     storyboard_db.execute(
         "UPDATE episodes SET status='scripting',active_storyboard_run_id=? WHERE id='e1'",
         (terminal.run_id,),
@@ -1317,7 +1317,7 @@ def test_storyboard_recovery_resumes_service_restart_and_persists_pointer(
         input_fingerprint="restart",
     )
     parent.start()
-    parent.pause_external("服务重启")
+    parent.pause_external("服务重启", conn=None)
     storyboard_db.execute(
         "UPDATE episodes SET status='scripting',active_storyboard_run_id=? WHERE id='e1'",
         (parent.run_id,),
@@ -1356,7 +1356,7 @@ def test_storyboard_recovery_does_not_take_over_user_pause(
         input_fingerprint="user-pause",
     )
     paused.start()
-    transition_run(paused.run_id, "RUNNING", "PAUSED_EXTERNAL", "user_pause")
+    transition_run(paused.run_id, "RUNNING", "PAUSED_EXTERNAL", "user_pause", conn=None)
     storyboard_db.execute(
         "UPDATE episodes SET status='scripting',active_storyboard_run_id=? WHERE id='e1'",
         (paused.run_id,),
@@ -2241,7 +2241,7 @@ def test_idempotent_confirmation_converges_terminal_runtime_state(storyboard_db)
         input_fingerprint="orphan-paused-run",
     )
     orphan.start()
-    orphan.pause_external("服务重启后遗留")
+    orphan.pause_external("服务重启后遗留", conn=None)
     storyboard_db.execute("UPDATE episodes SET status='confirmed' WHERE id='e1'")
     storyboard_db.commit()
 
@@ -2397,7 +2397,7 @@ def test_active_video_run_blocks_edit_and_structure(storyboard_db):
     assert edit_error.value.status_code == 409
     assert structure_error.value.status_code == 409
     assert "视频任务" in str(edit_error.value.detail)
-    recorder.cancel("test cleanup")
+    recorder.cancel("test cleanup", conn=None)
 
 
 def test_shot_edit_rolls_back_projection_and_preview_when_evidence_fails(

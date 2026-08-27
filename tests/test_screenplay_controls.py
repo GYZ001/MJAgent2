@@ -1227,7 +1227,7 @@ async def test_resume_rebases_stale_working_once_and_deduplicates(
     class Recorder:
         run_id = "run-baseline-rebuild"
 
-        def cancel(self, _message: str) -> None:
+        def cancel(self, _message: str, conn=None) -> None:
             raise AssertionError("successful resume must not cancel its run")
 
     def new_recorder(*_args, **_kwargs):
@@ -1287,7 +1287,7 @@ def test_rebase_transition_rolls_back_when_task_registration_fails(
         run_id = "run-registration-failed"
         cancelled = False
 
-        def cancel(self, _message: str) -> None:
+        def cancel(self, _message: str, conn=None) -> None:
             self.cancelled = True
 
     recorder = Recorder()
@@ -2618,7 +2618,7 @@ async def test_start_screenplay_replaces_terminal_run_owner(monkeypatch) -> None
     class Recorder:
         run_id = "run_replacement"
 
-        def cancel(self, _message: str) -> None:
+        def cancel(self, _message: str, conn=None) -> None:
             raise AssertionError("successful takeover must not cancel the new run")
 
     spawned: list[tuple[str, str]] = []
@@ -2911,7 +2911,7 @@ def test_atomic_claim_does_not_clear_current_owner_ir() -> None:
         run_id = "late-run"
         cancelled = False
 
-        def cancel(self, _message: str) -> None:
+        def cancel(self, _message: str, conn=None) -> None:
             self.cancelled = True
 
     recorder = Recorder()
@@ -2943,7 +2943,7 @@ def test_atomic_claim_rejects_manual_publish_fence() -> None:
         run_id = "run-blocked-by-publish"
         cancelled = False
 
-        def cancel(self, _message: str) -> None:
+        def cancel(self, _message: str, conn=None) -> None:
             self.cancelled = True
 
     recorder = Recorder()
@@ -3000,7 +3000,7 @@ async def test_first_screenplay_spawn_failure_restores_state_and_legacy_columns(
         run_id = "run_not_started"
         cancelled = False
 
-        def cancel(self, _message: str) -> None:
+        def cancel(self, _message: str, conn=None) -> None:
             self.cancelled = True
 
     recorder = Recorder()
@@ -3414,7 +3414,7 @@ async def test_batch_start_reports_partial_failure_without_stranding_episode(
             self.run_id = run_id
             self.cancelled = False
 
-        def cancel(self, _message: str) -> None:
+        def cancel(self, _message: str, conn=None) -> None:
             self.cancelled = True
 
     recorders: dict[str, Recorder] = {}

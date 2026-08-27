@@ -21,13 +21,13 @@ class _FakeRecorder:
     def start(self) -> None:
         pass
 
-    def partial(self, outcome) -> None:
+    def partial(self, outcome, conn=None) -> None:
         self.partial_calls.append(outcome)
 
-    def fail(self, exc) -> None:
+    def fail(self, exc, conn=None) -> None:
         self.fail_calls.append(exc)
 
-    def cancel(self, reason: str = "") -> None:
+    def cancel(self, reason: str = "", conn=None) -> None:
         self.cancel_calls.append(reason)
 
 

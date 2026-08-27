@@ -546,7 +546,7 @@ def test_chat_structured_records_discarded_json_candidate_event(monkeypatch) -> 
             "storyboard", operation, contract_key="storyboard", agent_name="storyboard"
         )
     )
-    recorder.succeed()
+    recorder.succeed(conn=None)
 
     assert result.characters
     events = repository.get_events(recorder.run_id, limit=100)

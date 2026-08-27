@@ -36,7 +36,7 @@ def test_storyboard_metrics_counts_episode_scoped_runs(tmp_path, monkeypatch):
         scope_id="e1",
         input_fingerprint="fp",
     )
-    transition_run(run_id, "CREATED", "RUNNING", "test")
+    transition_run(run_id, "CREATED", "RUNNING", "test", conn=None)
     conn.execute(
         "UPDATE episodes SET active_storyboard_run_id=? WHERE id='e1'", (run_id,)
     )

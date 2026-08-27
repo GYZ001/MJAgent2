@@ -4005,7 +4005,7 @@ async def reconcile_stale_video_supervisors() -> int:
         )
         if claimed.rowcount != 1:
             conn.rollback()
-            recorder.cancel("检测到更新的补齐运行，watchdog 放弃接管")
+            recorder.cancel("检测到更新的补齐运行，watchdog 放弃接管", conn=None)
             return False
         conn.commit()
         cp.run_id = recorder.run_id
@@ -4017,7 +4017,7 @@ async def reconcile_stale_video_supervisors() -> int:
                 run_id=recorder.run_id,
                 reason="SUPERVISOR_HEARTBEAT_STALE",
             )
-            recorder.partial(result.outcome or result.phase)
+            recorder.partial(result.outcome or result.phase, conn=None)
         except Exception as exc:  # noqa: BLE001
             # 必须在 _mark_failed_closed / recorder.fail 之前回滚，且回滚要放在这
             # 个 except 块的第一条语句：_deadline_closeout 内部与本函数共用同一
@@ -4042,7 +4042,7 @@ async def reconcile_stale_video_supervisors() -> int:
                 run_id=recorder.run_id,
                 reason=f"WATCHDOG_CLOSEOUT_FAILED: {type(exc).__name__}: {exc}",
             )
-            recorder.fail(exc)
+            recorder.fail(exc, conn=None)
         inc("video_supervisor_watchdog_takeover_total", episode_id=episode_id)
         return True
 
@@ -4279,21 +4279,21 @@ def recover_video_completion_runs() -> int:
                     eid, resume=True, grant_id=gid, run_id=rid,
                 )
                 if result.phase == "SUCCEEDED_COVERED":
-                    rec.succeed(result.outcome or "SUCCEEDED_COVERED")
+                    rec.succeed(result.outcome or "SUCCEEDED_COVERED", conn=None)
                 elif result.phase in {"WAITING_AUTHORIZATION", "WAITING_HUMAN", "PAUSED_EXTERNAL", "PAUSED_BUDGET"}:
-                    rec.partial(result.outcome or result.phase)
+                    rec.partial(result.outcome or result.phase, conn=None)
                 elif result.phase == "CANCELLED":
-                    rec.cancel()
+                    rec.cancel(conn=None)
                 else:
-                    rec.partial(result.phase)
+                    rec.partial(result.phase, conn=None)
             except asyncio.CancelledError:
                 if task_registry.shutdown_in_progress():
-                    rec.pause_external("服务重启，全片视频补齐等待自动恢复")
+                    rec.pause_external("服务重启，全片视频补齐等待自动恢复", conn=None)
                 else:
-                    rec.cancel()
+                    rec.cancel(conn=None)
                 raise
             except Exception as exc:
-                rec.fail(exc)
+                rec.fail(exc, conn=None)
                 raise
 
         claimed = conn.execute(
@@ -4303,7 +4303,7 @@ def recover_video_completion_runs() -> int:
         )
         if claimed.rowcount != 1:
             conn.rollback()
-            recorder.cancel("恢复启动权已变化，当前运行未启动")
+            recorder.cancel("恢复启动权已变化，当前运行未启动", conn=None)
             return False
         conn.commit()
         coro = _task()
@@ -4315,7 +4315,7 @@ def recover_video_completion_runs() -> int:
             coro.close()
             try:
                 recorder.start()
-                recorder.fail(exc)
+                recorder.fail(exc, conn=None)
             except Exception:  # noqa: BLE001
                 pass
             conn.execute(

@@ -122,7 +122,7 @@ async def test_legacy_published_revalidation_rebuilds_current_contract(
     class Recorder:
         run_id = "run-revalidation"
 
-        def cancel(self, _message: str) -> None:
+        def cancel(self, _message: str, conn=None) -> None:
             raise AssertionError("successful revalidation must not cancel")
 
     monkeypatch.setattr(

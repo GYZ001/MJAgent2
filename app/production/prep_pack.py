@@ -4165,8 +4165,8 @@ def _begin_step(run_id: str | None, step_key: str, *, iteration_no: int = 1) -> 
         agent_name="episode_prep_pack",
         contract_version=get_contract("screenplay").version,
     )
-    transition_step(step_id, "PENDING", "READY", "输入已就绪")
-    transition_step(step_id, "READY", "RUNNING", "步骤开始")
+    transition_step(step_id, "PENDING", "READY", "输入已就绪", conn=None)
+    transition_step(step_id, "READY", "RUNNING", "步骤开始", conn=None)
     return step_id
 
 
@@ -4176,10 +4176,10 @@ def _finish_step(step_id: str | None, exc: BaseException | None) -> None:
     if exc is not None:
         transition_step(
             step_id, "RUNNING", "FAILED", str(exc)[:1000],
-            decision="escalate", error_code=type(exc).__name__.upper(),
+            decision="escalate", error_code=type(exc).__name__.upper(), conn=None,
         )
         return
-    transition_step(step_id, "RUNNING", "SUCCEEDED", "步骤完成", decision="accept")
+    transition_step(step_id, "RUNNING", "SUCCEEDED", "步骤完成", decision="accept", conn=None)
 
 
 def _run_sync_step(run_id: str | None, step_key: str, fn):
@@ -4716,8 +4716,8 @@ def _publish_prep_pack(
         if run_id else None
     )
     if step_id:
-        transition_step(step_id, "PENDING", "READY", "输入已就绪")
-        transition_step(step_id, "READY", "RUNNING", "步骤开始")
+        transition_step(step_id, "PENDING", "READY", "输入已就绪", conn=None)
+        transition_step(step_id, "READY", "RUNNING", "步骤开始", conn=None)
     artifact_row = evidence_repository.create_artifact(
         EvidenceArtifact(
             type="episode_prep_pack",
@@ -4870,11 +4870,11 @@ def _publish_prep_pack(
         if step_id:
             transition_step(
                 step_id, "RUNNING", "FAILED", str(exc)[:1000],
-                decision="escalate", error_code=type(exc).__name__.upper(),
+                decision="escalate", error_code=type(exc).__name__.upper(), conn=None,
             )
         raise
     if step_id:
-        transition_step(step_id, "RUNNING", "SUCCEEDED", "步骤完成", decision="accept")
+        transition_step(step_id, "RUNNING", "SUCCEEDED", "步骤完成", decision="accept", conn=None)
     return {
         "episode_id": episode_id,
         "artifact_id": artifact_id,

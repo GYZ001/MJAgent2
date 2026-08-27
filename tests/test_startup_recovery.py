@@ -80,7 +80,7 @@ def test_screenplay_resume_spawn_failure_restores_previous_state(tmp_path, monke
         run_id = "run_not_started"
         cancel_message: str | None = None
 
-        def cancel(self, message: str) -> None:
+        def cancel(self, message: str, conn=None) -> None:
             self.cancel_message = message
 
     recorder = Recorder()

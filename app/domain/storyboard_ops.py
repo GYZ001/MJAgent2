@@ -1795,7 +1795,7 @@ def recover_storyboard_tasks() -> int:
             )
             if installed.rowcount != 1:
                 conn.rollback()
-                recorder.cancel("分镜恢复启动权已变化，当前运行未启动")
+                recorder.cancel("分镜恢复启动权已变化，当前运行未启动", conn=None)
                 continue
             conn.commit()
             task_registry.spawn(
@@ -1837,7 +1837,7 @@ def recover_storyboard_tasks() -> int:
             conn.commit()
             if recorder is not None:
                 try:
-                    recorder.cancel("分镜恢复任务未能启动，已回滚到可重试状态")
+                    recorder.cancel("分镜恢复任务未能启动，已回滚到可重试状态", conn=None)
                 except Exception:  # noqa: BLE001
                     pass
     return resumed
@@ -2107,9 +2107,9 @@ async def _recorded_storyboard_task(
         phase = str(getattr(supervisor_result, "phase", "") or "")
         outcome = str(getattr(supervisor_result, "outcome", "") or "")
         if result and result["status"] == "confirmed":
-            recorder.succeed("分镜已确认（尚未产生视频费用）")
+            recorder.succeed("分镜已确认（尚未产生视频费用）", conn=None)
         elif phase == "SUCCEEDED" and outcome == "SUCCEEDED_READY_FOR_CONFIRM":
-            recorder.succeed("分镜已完成，等待人工确认")
+            recorder.succeed("分镜已完成，等待人工确认", conn=None)
         elif phase == "PAUSED_EXTERNAL":
             from app.orchestration.state_machine import transition_run
             transition_run(
@@ -2119,14 +2119,14 @@ async def _recorded_storyboard_task(
                     "PROVIDER_UNAVAILABLE"
                     if outcome == "PAUSED_PROVIDER_UNAVAILABLE"
                     else "USER_PAUSE"
-                ),
+                ), conn=None,
             )
         elif phase == "WAITING_AUTHORIZATION":
             from app.orchestration.state_machine import transition_run
             transition_run(
                 recorder.run_id, "RUNNING", "WAITING_AUTHORIZATION",
                 (result["script_error"] if result else None) or outcome,
-                failure_code="WAITING_AUTHORIZATION",
+                failure_code="WAITING_AUTHORIZATION", conn=None,
             )
         elif phase == "WAITING_HUMAN":
             from app.orchestration.state_machine import transition_run
@@ -2143,7 +2143,7 @@ async def _recorded_storyboard_task(
             transition_run(
                 recorder.run_id, "RUNNING", wait_state,
                 (result["script_error"] if result else None) or outcome or "Supervisor 等待处理",
-                failure_code=outcome or wait_state,
+                failure_code=outcome or wait_state, conn=None,
             )
         elif (
             supervisor_result is None
@@ -2152,7 +2152,7 @@ async def _recorded_storyboard_task(
             and result["storyboard_artifact_id"]
             and not result["script_error"]
         ):
-            recorder.succeed("分镜已完成，等待人工确认")
+            recorder.succeed("分镜已完成，等待人工确认", conn=None)
         else:
             message = (
                 str(result["script_error"] or "分镜 Supervisor 未进入可恢复终态")
@@ -2166,15 +2166,15 @@ async def _recorded_storyboard_task(
                 (message[:800], episode_id, recorder.run_id),
             )
             conn.commit()
-            recorder.fail(RuntimeError(message))
+            recorder.fail(RuntimeError(message), conn=None)
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
-            recorder.pause_external("服务重启，分镜运行等待自动续做")
+            recorder.pause_external("服务重启，分镜运行等待自动续做", conn=None)
         else:
-            recorder.cancel()
+            recorder.cancel(conn=None)
         raise
     except Exception as exc:
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
         raise
     finally:
         # The workflow run remains available for audit/resume lineage, but it must
@@ -2360,7 +2360,7 @@ async def start_storyboard(episode_id: str, body: dict | None = Body(None)):
         conn.commit()
         if recorder is not None:
             try:
-                recorder.cancel("分镜任务未能启动，剧集状态已回滚")
+                recorder.cancel("分镜任务未能启动，剧集状态已回滚", conn=None)
             except Exception:  # noqa: BLE001
                 pass
         raise HTTPException(503, {
@@ -2510,7 +2510,7 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
         conn.commit()
         if recorder is not None:
             try:
-                recorder.cancel("分镜继续任务未能启动，状态已回滚")
+                recorder.cancel("分镜继续任务未能启动，状态已回滚", conn=None)
             except Exception:  # noqa: BLE001
                 pass
         raise HTTPException(503, {
@@ -2596,7 +2596,7 @@ async def start_storyboard_all(project_id: str):
         )
         if installed.rowcount != 1:
             conn.rollback()
-            recorder.cancel("批量分镜启动权已变化，当前运行未启动")
+            recorder.cancel("批量分镜启动权已变化，当前运行未启动", conn=None)
             failed_to_start.append({
                 "episode_id": eid,
                 "error": "剧集状态刚刚发生变化，本次未接管",
@@ -2632,7 +2632,7 @@ async def start_storyboard_all(project_id: str):
                 (rollback_status, rollback_error, eid, recorder.run_id),
             )
             conn.commit()
-            recorder.cancel("批量分镜任务未能启动，状态已回滚")
+            recorder.cancel("批量分镜任务未能启动，状态已回滚", conn=None)
             public = errors.record_and_format(
                 exc, action="storyboard_batch_spawn",
                 context={"project_id": project_id, "episode_id": eid},

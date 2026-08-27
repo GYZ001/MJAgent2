@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -244,7 +245,17 @@ class WorkflowRecorder:
         return cls(run_id)
 
     def start(self) -> None:
-        transition_run(self.run_id, {"CREATED", "PAUSED_EXTERNAL", "WAITING_RETRY"}, "RUNNING", "运行开始")
+        # Always the first transition of a fresh (or resumed) run, before any
+        # business writes have happened on this task's connection -- ambient
+        # get_conn()-and-commit-now is unconditionally correct here, so this
+        # method's own public signature stays argument-free (see the module-
+        # level rationale on transition_run/transition_step for why passing
+        # conn explicitly at all matters for the terminal methods below,
+        # which run from exception handlers where that assumption does not
+        # hold for free).
+        transition_run(
+            self.run_id, {"CREATED", "PAUSED_EXTERNAL", "WAITING_RETRY"}, "RUNNING", "运行开始", conn=None,
+        )
         repository.append_event(self.run_id, "RUN_STARTED", "info", "运行开始")
 
     async def step(
@@ -352,17 +363,34 @@ class WorkflowRecorder:
         """Project the currently attributable media spend onto the persisted run."""
         return refresh_run_cost(self.run_id)
 
-    def succeed(self, message: str = "运行完成") -> None:
+    # succeed/partial/fail_result/fail/cancel/pause_external below are the
+    # terminal (or interrupting) transitions -- the ones most often called
+    # from exception handlers, frequently right after a caller has been
+    # doing multi-statement writes on its own connection. ``conn`` has no
+    # default (see app.orchestration.state_machine's module-level comment):
+    # every call site must say whether it wants the ambient task connection
+    # committed now (``conn=None``) or wants this transition folded into a
+    # transaction it already holds open and will commit itself
+    # (``conn=<that connection>``). This file does not decide which is
+    # correct for any given caller -- that judgment call, including the
+    # "roll back before calling this" discipline the ambient-connection
+    # case still requires, lives at the call site.
+
+    def succeed(self, message: str = "运行完成", *, conn: sqlite3.Connection | None) -> None:
         self.refresh_cost()
-        transition_run(self.run_id, "RUNNING", "SUCCEEDED", message)
+        transition_run(self.run_id, "RUNNING", "SUCCEEDED", message, conn=conn)
         repository.append_event(self.run_id, "RUN_SUCCEEDED", "info", message)
 
-    def partial(self, message: str) -> None:
+    def partial(self, message: str, *, conn: sqlite3.Connection | None) -> None:
         self.refresh_cost()
-        transition_run(self.run_id, "RUNNING", "PARTIAL", message, failure_code="PARTIAL_RESULT")
+        transition_run(
+            self.run_id, "RUNNING", "PARTIAL", message, failure_code="PARTIAL_RESULT", conn=conn,
+        )
         repository.append_event(self.run_id, "RUN_PARTIAL", "warning", message)
 
-    def fail_result(self, message: str, *, failure_code: str) -> None:
+    def fail_result(
+        self, message: str, *, failure_code: str, conn: sqlite3.Connection | None,
+    ) -> None:
         """Persist a deterministic unsuccessful result without inventing an exception."""
         self.refresh_cost()
         transition_run(
@@ -371,6 +399,7 @@ class WorkflowRecorder:
             "FAILED",
             message[:1000],
             failure_code=failure_code,
+            conn=conn,
         )
         repository.append_event(
             self.run_id,
@@ -380,17 +409,18 @@ class WorkflowRecorder:
             payload={"failure_code": failure_code, "message": message[:1000]},
         )
 
-    def fail(self, exc: BaseException) -> None:
+    def fail(self, exc: BaseException, *, conn: sqlite3.Connection | None) -> None:
         self.refresh_cost()
         transition_run(
-            self.run_id, "RUNNING", "FAILED", str(exc)[:1000], failure_code=type(exc).__name__.upper()
+            self.run_id, "RUNNING", "FAILED", str(exc)[:1000],
+            failure_code=type(exc).__name__.upper(), conn=conn,
         )
         repository.append_event(
             self.run_id, "RUN_FAILED", "error", "运行失败",
             payload={"error_type": type(exc).__name__, "message": str(exc)[:1000]},
         )
 
-    def cancel(self, message: str = "运行已取消") -> None:
+    def cancel(self, message: str = "运行已取消", *, conn: sqlite3.Connection | None) -> None:
         self.refresh_cost()
         transition_run(
             self.run_id,
@@ -400,10 +430,13 @@ class WorkflowRecorder:
             },
             "CANCELLED",
             message,
+            conn=conn,
         )
         repository.append_event(self.run_id, "RUN_CANCELLED", "warning", message)
 
-    def pause_external(self, message: str = "服务停机，等待自动恢复") -> None:
+    def pause_external(
+        self, message: str = "服务停机，等待自动恢复", *, conn: sqlite3.Connection | None,
+    ) -> None:
         """Persist a recoverable process interruption without pretending the user cancelled."""
         self.refresh_cost()
         transition_run(
@@ -412,6 +445,7 @@ class WorkflowRecorder:
             "PAUSED_EXTERNAL",
             message,
             failure_code="SERVICE_RESTART",
+            conn=conn,
         )
         repository.append_event(
             self.run_id, "RUN_PAUSED_EXTERNAL", "warning", message,

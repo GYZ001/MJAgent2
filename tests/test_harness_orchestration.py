@@ -80,7 +80,7 @@ def test_workflow_recorder_persists_trace_evidence_and_commit(tmp_path, monkeypa
             )
         ],
     )
-    recorder.succeed()
+    recorder.succeed(conn=None)
 
     assert committed["status"] == "approved"
     assert committed["trust_level"] == "T2"
@@ -170,7 +170,7 @@ def test_workflow_recorder_process_shutdown_remains_recoverable(tmp_path, monkey
     )
     recorder.start()
 
-    recorder.pause_external("服务重启，等待续跑")
+    recorder.pause_external("服务重启，等待续跑", conn=None)
 
     run = repository.get_run(recorder.run_id)
     assert run["status"] == "PAUSED_EXTERNAL"
@@ -193,7 +193,7 @@ def test_workflow_recorder_persists_deterministic_failed_result(tmp_path, monkey
 
     recorder.fail_result(
         "PARTIAL_NO_USABLE_CANDIDATE",
-        failure_code="NO_COMPLETED_OUTPUT",
+        failure_code="NO_COMPLETED_OUTPUT", conn=None,
     )
 
     run = repository.get_run(recorder.run_id)
@@ -331,7 +331,7 @@ def test_state_machine_uses_compare_and_set_and_restart_is_explicit(tmp_path, mo
     )
     recorder.start()
     with pytest.raises(StateConflict):
-        transition_run(recorder.run_id, "CREATED", "CANCELLED", "stale writer")
+        transition_run(recorder.run_id, "CREATED", "CANCELLED", "stale writer", conn=None)
 
     db.init_db(reconcile_interrupted=True)
     run = conn.execute(
@@ -356,7 +356,7 @@ def _spawn_placeholder_task(kind: str, key: str, run_id: str) -> asyncio.Event:
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
-            WorkflowRecorder(run_id).cancel("占位任务收到取消")
+            WorkflowRecorder(run_id).cancel("占位任务收到取消", conn=None)
             raise
         finally:
             finished.set()

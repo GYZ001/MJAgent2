@@ -298,7 +298,7 @@ def _start_refs_generation(
             conn.commit()
         if recorder is not None:
             try:
-                recorder.cancel("定妆任务未能启动，项目状态已回滚")
+                recorder.cancel("定妆任务未能启动，项目状态已回滚", conn=None)
             except Exception:  # noqa: BLE001
                 pass
         raise ValueError("定妆任务未能启动，原状态和费用凭证已保留，请重试") from exc
@@ -488,15 +488,15 @@ async def _scene_bible_task(
             (json.dumps(data, ensure_ascii=False), project_id),
         )
         conn.commit()
-        recorder.succeed("场景设定已准备，场景图等待费用确认")
+        recorder.succeed("场景设定已准备，场景图等待费用确认", conn=None)
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
-            recorder.pause_external("服务重启，场景设定任务等待自动恢复")
+            recorder.pause_external("服务重启，场景设定任务等待自动恢复", conn=None)
         else:
-            recorder.cancel()
+            recorder.cancel(conn=None)
         raise
     except Exception as exc:  # noqa: BLE001 场景设定失败不阻断人物谱主流程
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
         public = errors.record_and_format(exc, action="scene_bible_generate", context={"project_id": project_id})
         conn.execute("UPDATE projects SET scene_refs_status='failed', scene_refs_error=? WHERE id=?",
                      (public, project_id))
@@ -554,7 +554,7 @@ def recover_bible_tasks() -> int:
             conn.commit()
             if recorder is not None:
                 try:
-                    recorder.cancel("人物谱恢复任务未能启动")
+                    recorder.cancel("人物谱恢复任务未能启动", conn=None)
                 except Exception:  # noqa: BLE001
                     pass
     return resumed
@@ -907,19 +907,19 @@ async def _recorded_bible_task(
         )
         row = conn.execute("SELECT bible_status, bible_error FROM projects WHERE id=?", (project_id,)).fetchone()
         if row and row["bible_status"] == "ready":
-            recorder.succeed("人物谱已通过确定性门禁")
+            recorder.succeed("人物谱已通过确定性门禁", conn=None)
         elif row and row["bible_status"] == "warning":
-            recorder.partial(row["bible_error"] or "人物谱需要人工修订")
+            recorder.partial(row["bible_error"] or "人物谱需要人工修订", conn=None)
         else:
-            recorder.fail(RuntimeError(row["bible_error"] if row else "人物谱生成失败"))
+            recorder.fail(RuntimeError(row["bible_error"] if row else "人物谱生成失败"), conn=None)
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
-            recorder.pause_external("服务重启，人物谱任务等待自动恢复")
+            recorder.pause_external("服务重启，人物谱任务等待自动恢复", conn=None)
         else:
-            recorder.cancel()
+            recorder.cancel(conn=None)
         raise
     except Exception as exc:
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
         raise
 
 
@@ -1004,7 +1004,7 @@ async def _start_bible_core(
         conn.commit()
         if recorder is not None:
             try:
-                recorder.cancel("人物谱任务未能启动，项目状态已回滚")
+                recorder.cancel("人物谱任务未能启动，项目状态已回滚", conn=None)
             except Exception:  # noqa: BLE001
                 pass
         raise HTTPException(503, {
@@ -2718,12 +2718,12 @@ async def _refs_task(
             (project_id,),
         )
         conn.commit()
-        recorder.succeed("人物参考资产已生成且结构完整")
+        recorder.succeed("人物参考资产已生成且结构完整", conn=None)
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
-            recorder.pause_external("服务重启，定妆任务等待自动恢复")
+            recorder.pause_external("服务重启，定妆任务等待自动恢复", conn=None)
         else:
-            recorder.cancel()
+            recorder.cancel(conn=None)
         raise
     except Exception as exc:  # noqa: BLE001
         # 回滚必须在本 except 块的第一条语句做——不止要早于 errors.record_and_format()，
@@ -2740,7 +2740,7 @@ async def _refs_task(
         # 失败尝试自己产生的未提交写入，不影响更早已经各自 commit 过的检查点。
         if conn.in_transaction:
             conn.rollback()
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
         public = errors.record_and_format(exc, action="refs_generate", context={"project_id": project_id})
         conn.execute("UPDATE projects SET refs_status='failed', refs_error=? WHERE id=?",
                      (public, project_id))
@@ -3502,23 +3502,23 @@ async def _scene_refs_task(
             (project_id,),
         )
         conn.commit()
-        recorder.succeed("场景参考资产已生成并通过证据门禁")
+        recorder.succeed("场景参考资产已生成并通过证据门禁", conn=None)
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
-            recorder.pause_external("服务重启，人物单视角重做等待自动恢复")
+            recorder.pause_external("服务重启，人物单视角重做等待自动恢复", conn=None)
         else:
-            recorder.cancel()
+            recorder.cancel(conn=None)
         raise
     except SceneCandidateReviewRequired as exc:
         message = str(exc)[:1200]
-        recorder.partial(message)
+        recorder.partial(message, conn=None)
         conn.execute(
             "UPDATE projects SET scene_refs_status='warning', scene_refs_error=? WHERE id=?",
             (message, project_id),
         )
         conn.commit()
     except Exception as exc:  # noqa: BLE001
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
         public = errors.record_and_format(exc, action="scene_refs_generate", context={"project_id": project_id})
         conn.execute("UPDATE projects SET scene_refs_status='failed', scene_refs_error=? WHERE id=?",
                      (public, project_id))
@@ -3808,14 +3808,14 @@ async def _run_portrait_view_redo(
         if not pack_result_ok(result):
             recorder.fail(RuntimeError(
                 f"视角重做未通过：{view_role}（status={(result or {}).get('status')}）"
-            ))
+            ), conn=None)
             return
-        recorder.succeed(f"{character_name}/{view_role} 视角已重做并通过整包 QA")
+        recorder.succeed(f"{character_name}/{view_role} 视角已重做并通过整包 QA", conn=None)
     except asyncio.CancelledError:
-        recorder.cancel()
+        recorder.cancel(conn=None)
         raise
     except Exception as exc:  # noqa: BLE001
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
 
 
 def _start_portrait_view_redo(
@@ -3858,7 +3858,7 @@ def _start_portrait_view_redo(
     except Exception as exc:
         coro.close()
         try:
-            recorder.cancel("人物单视角重做未能启动")
+            recorder.cancel("人物单视角重做未能启动", conn=None)
         except Exception:  # noqa: BLE001
             pass
         raise RuntimeError("人物单视角重做任务未能启动，旧定妆包和费用凭证均已保留") from exc
@@ -4011,17 +4011,17 @@ async def _run_scene_view_redo(
         if not pack_result_ok(result):
             recorder.fail(RuntimeError(
                 f"视角重做未通过：{view_role}（status={(result or {}).get('status')}）"
-            ))
+            ), conn=None)
             return
-        recorder.succeed(f"{scene_name}/{view_role} 已通过单图及整包 QA 并原子替换")
+        recorder.succeed(f"{scene_name}/{view_role} 已通过单图及整包 QA 并原子替换", conn=None)
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
-            recorder.pause_external("服务重启，场景单视角重做等待自动恢复")
+            recorder.pause_external("服务重启，场景单视角重做等待自动恢复", conn=None)
         else:
-            recorder.cancel()
+            recorder.cancel(conn=None)
         raise
     except Exception as exc:  # noqa: BLE001
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
 
 
 def _start_scene_view_redo(
@@ -4061,7 +4061,7 @@ def _start_scene_view_redo(
     except Exception as exc:
         coro.close()
         try:
-            recorder.cancel("场景单视角重做未能启动")
+            recorder.cancel("场景单视角重做未能启动", conn=None)
         except Exception:  # noqa: BLE001
             pass
         raise RuntimeError("场景单视角重做任务未能启动，旧场景包和费用凭证均已保留") from exc

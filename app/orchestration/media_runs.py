@@ -39,8 +39,8 @@ def ensure_media_trace(
             agent_name=workflow_type,
             context_manifest={"scope_id": scope_id},
         )
-        transition_step(step_id, "PENDING", "READY", "媒体任务已持久化")
-        transition_step(step_id, "READY", "RUNNING", "媒体任务已入队")
+        transition_step(step_id, "PENDING", "READY", "媒体任务已持久化", conn=None)
+        transition_step(step_id, "READY", "RUNNING", "媒体任务已入队", conn=None)
         repository.append_event(
             recorder.run_id, "MEDIA_QUEUED", "info", "媒体任务已入队", step_run_id=step_id
         )
@@ -68,21 +68,21 @@ def mark_media_job_state(run_id: str | None, step_id: str | None, status: str, m
         reason = (message or status)[:1000]
         if status == "running":
             if run["status"] in {"WAITING_RETRY", "PAUSED_BUDGET", "PAUSED_EXTERNAL"}:
-                transition_run(run_id, run["status"], "RUNNING", "媒体任务继续执行")
+                transition_run(run_id, run["status"], "RUNNING", "媒体任务继续执行", conn=None)
             if step["status"] == "READY":
-                transition_step(step_id, "READY", "RUNNING", "恢复后的媒体任务开始执行")
+                transition_step(step_id, "READY", "RUNNING", "恢复后的媒体任务开始执行", conn=None)
             return
         if status == "queued":
             if run["status"] == "RUNNING":
-                transition_run(run_id, "RUNNING", "WAITING_RETRY", reason)
+                transition_run(run_id, "RUNNING", "WAITING_RETRY", reason, conn=None)
             return
         if status == "paused_budget":
             if run["status"] == "RUNNING":
-                transition_run(run_id, "RUNNING", "PAUSED_BUDGET", reason)
+                transition_run(run_id, "RUNNING", "PAUSED_BUDGET", reason, conn=None)
             return
         if status == "paused":
             if run["status"] in {"RUNNING", "WAITING_RETRY"}:
-                transition_run(run_id, run["status"], "PAUSED_EXTERNAL", reason)
+                transition_run(run_id, run["status"], "PAUSED_EXTERNAL", reason, conn=None)
             repository.append_event(
                 run_id, "MEDIA_PAUSED", "info", reason, step_run_id=step_id,
             )
@@ -95,7 +95,7 @@ def mark_media_job_state(run_id: str | None, step_id: str | None, status: str, m
                     run_id,
                     run["status"],
                     "WAITING_HUMAN",
-                    reason,
+                    reason, conn=None,
                 )
             repository.append_event(
                 run_id,
@@ -107,22 +107,22 @@ def mark_media_job_state(run_id: str | None, step_id: str | None, status: str, m
             return
         if status == "succeeded":
             if step["status"] == "RUNNING":
-                transition_step(step_id, "RUNNING", "SUCCEEDED", reason, decision="accept")
+                transition_step(step_id, "RUNNING", "SUCCEEDED", reason, decision="accept", conn=None)
             current = conn.execute("SELECT status FROM workflow_runs WHERE id=?", (run_id,)).fetchone()["status"]
             if current == "RUNNING":
-                transition_run(run_id, "RUNNING", "SUCCEEDED", reason)
+                transition_run(run_id, "RUNNING", "SUCCEEDED", reason, conn=None)
         elif status in {"cancelled", "abandoned"}:
             if step["status"] == "RUNNING":
-                transition_step(step_id, "RUNNING", "CANCELLED", reason, decision="cancel")
+                transition_step(step_id, "RUNNING", "CANCELLED", reason, decision="cancel", conn=None)
             current = conn.execute("SELECT status FROM workflow_runs WHERE id=?", (run_id,)).fetchone()["status"]
             if current in {"RUNNING", "WAITING_RETRY", "PAUSED_BUDGET", "PAUSED_EXTERNAL"}:
-                transition_run(run_id, current, "CANCELLED", reason)
+                transition_run(run_id, current, "CANCELLED", reason, conn=None)
         elif status == "failed":
             if step["status"] == "RUNNING":
-                transition_step(step_id, "RUNNING", "FAILED", reason, decision="escalate", error_code="MEDIA_FAILED")
+                transition_step(step_id, "RUNNING", "FAILED", reason, decision="escalate", error_code="MEDIA_FAILED", conn=None)
             current = conn.execute("SELECT status FROM workflow_runs WHERE id=?", (run_id,)).fetchone()["status"]
             if current in {"RUNNING", "WAITING_RETRY", "PAUSED_BUDGET", "PAUSED_EXTERNAL"}:
-                transition_run(run_id, current, "FAILED", reason, failure_code="MEDIA_FAILED")
+                transition_run(run_id, current, "FAILED", reason, failure_code="MEDIA_FAILED", conn=None)
         if status in {"succeeded", "cancelled", "abandoned", "failed"}:
             # 这条运行的整个生命周期都走这个函数而不是 WorkflowRecorder 实例方法，
             # 所以 refresh_cost 必须在这里手动补一次，否则 shot_versions.cost_cny

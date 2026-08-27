@@ -181,7 +181,7 @@ async def cancel_run(run_id: str):
         if run["status"] in repository.ACTIVE_RUN_STATUSES:
             cancelled = await task_registry.cancel_and_wait("storyboard", run["scope_id"])
             if not cancelled:
-                WorkflowRecorder(run_id).cancel("已取消分镜运行")
+                WorkflowRecorder(run_id).cancel("已取消分镜运行", conn=None)
                 cancelled = True
         elif not cancelled:
             raise HTTPException(409, "运行已结束，不能取消")
@@ -198,7 +198,7 @@ async def cancel_run(run_id: str):
         if run["status"] in repository.ACTIVE_RUN_STATUSES:
             cancelled = await task_registry.cancel_and_wait("video_completion", run["scope_id"])
             if not cancelled:
-                WorkflowRecorder(run_id).cancel("已取消视频补齐")
+                WorkflowRecorder(run_id).cancel("已取消视频补齐", conn=None)
                 cancelled = True
         else:
             cancelled = True
@@ -235,7 +235,7 @@ async def cancel_run(run_id: str):
         )
         current = repository.get_run(run_id)
         if not cancelled and current and current["status"] in repository.ACTIVE_RUN_STATUSES:
-            WorkflowRecorder(run_id).cancel("项目补齐剩余队列已取消")
+            WorkflowRecorder(run_id).cancel("项目补齐剩余队列已取消", conn=None)
             cancelled = True
         return {
             "cancelled": cancelled,
@@ -260,12 +260,12 @@ async def cancel_run(run_id: str):
         if not episode or active_run_id == run_id:
             cancelled = await task_registry.cancel_and_wait("screenplay", run["scope_id"])
             if not cancelled:
-                WorkflowRecorder(run_id).cancel("已取消暂停中的剧本运行")
+                WorkflowRecorder(run_id).cancel("已取消暂停中的剧本运行", conn=None)
                 cancelled = True
             return {"cancelled": cancelled, "run": repository.get_run(run_id)}
         # 该 run_id 已被后续续跑取代，进程内已经没有与它对应的 asyncio 任务；
         # 只终结这条历史记录自身，绝不能按 scope_id 调 cancel_and_wait 去误伤当前 owner。
-        WorkflowRecorder(run_id).cancel("该运行已被后续续跑取代，仅标记历史记录为已取消")
+        WorkflowRecorder(run_id).cancel("该运行已被后续续跑取代，仅标记历史记录为已取消", conn=None)
         return {
             "cancelled": True,
             "superseded": True,
@@ -282,10 +282,10 @@ async def cancel_run(run_id: str):
         if not run.get("recovered_by_run_id"):
             cancelled = await task_registry.cancel_and_wait("bible", run["scope_id"])
             if not cancelled:
-                WorkflowRecorder(run_id).cancel("已取消暂停中的运行")
+                WorkflowRecorder(run_id).cancel("已取消暂停中的运行", conn=None)
                 cancelled = True
             return {"cancelled": cancelled, "run": repository.get_run(run_id)}
-        WorkflowRecorder(run_id).cancel("该运行已被后续续跑取代，仅标记历史记录为已取消")
+        WorkflowRecorder(run_id).cancel("该运行已被后续续跑取代，仅标记历史记录为已取消", conn=None)
         return {
             "cancelled": True,
             "superseded": True,
@@ -411,7 +411,7 @@ def _restart_storyboard_run(run_id: str, trigger_type: str):
         get_conn().commit()
         if recorder is not None:
             try:
-                recorder.cancel("恢复任务启动失败，资源状态已回滚")
+                recorder.cancel("恢复任务启动失败，资源状态已回滚", conn=None)
             except Exception:  # noqa: BLE001
                 pass
         raise HTTPException(503, {
@@ -459,7 +459,7 @@ def _restart_bible_run(run_id: str, trigger_type: str):
         get_conn().commit()
         if recorder is not None:
             try:
-                recorder.cancel("恢复任务启动失败，资源状态已回滚")
+                recorder.cancel("恢复任务启动失败，资源状态已回滚", conn=None)
             except Exception:  # noqa: BLE001
                 pass
         raise HTTPException(503, {
@@ -647,7 +647,7 @@ def _restart_project_video_queue_run(run_id: str, trigger_type: str):
     except Exception as exc:
         coro.close()
         try:
-            recorder.cancel("项目补齐队列恢复任务未能启动")
+            recorder.cancel("项目补齐队列恢复任务未能启动", conn=None)
         except Exception:  # noqa: BLE001
             pass
         raise HTTPException(503, {
@@ -759,7 +759,7 @@ async def pause_run(run_id: str):
             "video_completion_project", run["scope_id"],
         )
         if not stopped and run["status"] == "RUNNING":
-            WorkflowRecorder(run_id).pause_external("用户暂停，项目补齐剩余队列已保留")
+            WorkflowRecorder(run_id).pause_external("用户暂停，项目补齐剩余队列已保留", conn=None)
             get_conn().execute(
                 "UPDATE workflow_runs SET failure_code='USER_PAUSED' WHERE id=?",
                 (run_id,),
@@ -805,9 +805,9 @@ async def handoff_run(run_id: str):
                 save_checkpoint(cp, run_id=run_id)
             try:
                 if run["status"] == "RUNNING":
-                    transition_run(run_id, "RUNNING", "WAITING_HUMAN", "user_handoff")
+                    transition_run(run_id, "RUNNING", "WAITING_HUMAN", "user_handoff", conn=None)
                 elif run["status"] in {"PAUSED_EXTERNAL", "WAITING_RETRY"}:
-                    transition_run(run_id, run["status"], "WAITING_HUMAN", "user_handoff")
+                    transition_run(run_id, run["status"], "WAITING_HUMAN", "user_handoff", conn=None)
             except Exception:  # noqa: BLE001
                 pass
         return {"handoff_requested": True, "run": repository.get_run(run_id)}
@@ -833,9 +833,9 @@ async def handoff_run(run_id: str):
             save_checkpoint(cp, run_id=run_id)
         try:
             if run["status"] == "RUNNING":
-                transition_run(run_id, "RUNNING", "WAITING_HUMAN", "user_handoff")
+                transition_run(run_id, "RUNNING", "WAITING_HUMAN", "user_handoff", conn=None)
             elif run["status"] in {"PAUSED_EXTERNAL", "WAITING_RETRY"}:
-                transition_run(run_id, run["status"], "WAITING_HUMAN", "user_handoff")
+                transition_run(run_id, run["status"], "WAITING_HUMAN", "user_handoff", conn=None)
         except Exception:  # noqa: BLE001
             pass
         get_conn().execute(
@@ -1183,7 +1183,7 @@ async def create_delivery_package(episode_id: str, body: dict | None = Body(None
             agent_name="delivery_loop",
             context_manifest={"immutable_snapshot": True},
         )
-        recorder.succeed("交付快照已生成")
+        recorder.succeed("交付快照已生成", conn=None)
         response = {**result, "run_id": recorder.run_id}
         finish_delivery_package_operation(
             package_id=payload["package_id"],
@@ -1194,15 +1194,15 @@ async def create_delivery_package(episode_id: str, body: dict | None = Body(None
         )
         return response
     except KeyError as exc:
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
         mark_operation_failed(exc)
         raise HTTPException(404, "剧集不存在") from exc
     except ValueError as exc:
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
         mark_operation_failed(exc)
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
         mark_operation_failed(exc)
         raise
 
@@ -1412,13 +1412,13 @@ async def decide_delivery(episode_id: str, body: dict = Body(...)):
             agent_name="delivery_loop",
             context_manifest={"decision": payload.get("decision"), "immutable_snapshot": True},
         )
-        recorder.succeed("交付门禁已处理")
+        recorder.succeed("交付门禁已处理", conn=None)
         return {**result, "run_id": recorder.run_id}
     except ValueError as exc:
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
         raise
 
 
@@ -1447,7 +1447,7 @@ async def _resume_delivery_package(
     )
     if recovered_result is not None:
         recorder.start()
-        recorder.succeed("交付快照已按 durable receipt 恢复")
+        recorder.succeed("交付快照已按 durable receipt 恢复", conn=None)
         return
     assert operation_owner is not None
 
@@ -1472,7 +1472,7 @@ async def _resume_delivery_package(
             agent_name="delivery_loop",
             context_manifest={"immutable_snapshot": True, "recovered": True},
         )
-        recorder.succeed("交付快照已从服务重启中恢复")
+        recorder.succeed("交付快照已从服务重启中恢复", conn=None)
         finish_delivery_package_operation(
             package_id=payload["package_id"],
             request_fingerprint=operation_request_fingerprint,
@@ -1482,12 +1482,12 @@ async def _resume_delivery_package(
         )
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
-            recorder.pause_external("服务重启，交付快照等待自动恢复")
+            recorder.pause_external("服务重启，交付快照等待自动恢复", conn=None)
         else:
-            recorder.cancel("交付快照恢复已取消")
+            recorder.cancel("交付快照恢复已取消", conn=None)
         raise
     except Exception as exc:  # noqa: BLE001 recovery failure must remain visible
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
         try:
             finish_delivery_package_operation(
                 package_id=payload["package_id"],
@@ -1530,15 +1530,15 @@ async def _resume_delivery_approval(
                 "recovered": True,
             },
         )
-        recorder.succeed("交付门禁已从服务重启中恢复")
+        recorder.succeed("交付门禁已从服务重启中恢复", conn=None)
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
-            recorder.pause_external("服务重启，交付门禁等待自动恢复")
+            recorder.pause_external("服务重启，交付门禁等待自动恢复", conn=None)
         else:
-            recorder.cancel("交付门禁恢复已取消")
+            recorder.cancel("交付门禁恢复已取消", conn=None)
         raise
     except Exception as exc:  # noqa: BLE001 recovery failure must remain visible
-        recorder.fail(exc)
+        recorder.fail(exc, conn=None)
 
 
 def recover_delivery_tasks() -> int:
@@ -1594,7 +1594,7 @@ def recover_delivery_tasks() -> int:
                 operation.close()
             if recorder is not None:
                 try:
-                    recorder.cancel("交付恢复任务未能启动")
+                    recorder.cancel("交付恢复任务未能启动", conn=None)
                 except Exception:  # noqa: BLE001
                     pass
             get_conn().execute(

@@ -219,7 +219,7 @@ def finalize_storyboard_cancellation(
         # ownership fence.
         save_checkpoint(checkpoint)
     if run and run.get("status") in repository.ACTIVE_RUN_STATUSES:
-        WorkflowRecorder(effective_run_id).cancel(message)
+        WorkflowRecorder(effective_run_id).cancel(message, conn=None)
 
     target_status = "scripting" if paused else ("script_failed" if shot_count else "planned")
     if paused:

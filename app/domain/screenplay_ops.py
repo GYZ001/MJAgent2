@@ -676,7 +676,7 @@ def _cancel_persisted_screenplay_run(
     if not run:
         return False
     try:
-        WorkflowRecorder(str(run["id"])).cancel(message)
+        WorkflowRecorder(str(run["id"])).cancel(message, conn=None)
         return True
     except StateConflict:
         latest = evidence_repository.get_run(str(run["id"]))
@@ -1044,7 +1044,7 @@ def recover_screenplay_tasks() -> int:
         if orphan_run and orphan_run["status"] == "CREATED":
             try:
                 WorkflowRecorder(row["active_screenplay_run_id"]).cancel(
-                    "服务重启前尚在排队，已由恢复运行接管"
+                    "服务重启前尚在排队，已由恢复运行接管", conn=None
                 )
             except StateConflict:
                 pass
@@ -1924,7 +1924,7 @@ def _spawn_screenplay_activation(
         if conn.in_transaction:
             conn.rollback()
         try:
-            recorder.cancel("任务未能启动，剧集状态已回滚")
+            recorder.cancel("任务未能启动，剧集状态已回滚", conn=None)
         except Exception:  # noqa: BLE001 - rollback must not be hidden by run bookkeeping
             pass
         raise
@@ -2064,17 +2064,17 @@ async def _recorded_screenplay_task(
         if not row:
             raise RuntimeError("剧本任务完成后剧集记录不存在")
         if row["screenplay_status"] == "ready":
-            recorder.succeed("剧本已通过完成凭证并发布")
+            recorder.succeed("剧本已通过完成凭证并发布", conn=None)
         elif row["screenplay_status"] == "repairing":
-            recorder.partial(row["screenplay_error"] or "剧本自动修复中/等待续跑")
+            recorder.partial(row["screenplay_error"] or "剧本自动修复中/等待续跑", conn=None)
         else:
-            recorder.succeed("剧本任务结束")
+            recorder.succeed("剧本任务结束", conn=None)
         return script
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
-            recorder.pause_external("服务重启，剧本运行等待自动续跑")
+            recorder.pause_external("服务重启，剧本运行等待自动续跑", conn=None)
         else:
-            recorder.cancel("剧本生成已取消")
+            recorder.cancel("剧本生成已取消", conn=None)
         raise
     except StateConflict:
         # 旧运行已被新的恢复运行围栏；不再回写剧集，也不把这种协调竞态报成内容失败。
@@ -2089,7 +2089,7 @@ async def _recorded_screenplay_task(
                 context={"episode_id": episode_id, "phase": "narrative_gate"},
             )
             try:
-                recorder.fail(exc)
+                recorder.fail(exc, conn=None)
             except StateConflict:
                 pass
             return None
@@ -2115,7 +2115,7 @@ async def _recorded_screenplay_task(
         elif row and row["screenplay_status"] == "repairing":
             if str(row["screenplay_error"] or "").startswith("WAITING_INPUT"):
                 try:
-                    recorder.partial(row["screenplay_error"])
+                    recorder.partial(row["screenplay_error"], conn=None)
                 except StateConflict:
                     pass
                 return None
@@ -2134,7 +2134,7 @@ async def _recorded_screenplay_task(
             )
             get_conn().commit()
         try:
-            recorder.fail(exc)
+            recorder.fail(exc, conn=None)
         except StateConflict:
             return None
         return None
@@ -2988,7 +2988,7 @@ def _refresh_screenplay_batch_run(batch_run_id: str) -> None:
             "RUNNING",
             target,
             reason,
-            failure_code="PARTIAL_RESULT" if failures else None,
+            failure_code="PARTIAL_RESULT" if failures else None, conn=None,
         )
     except StateConflict:
         return
@@ -3043,7 +3043,7 @@ async def _screenplay_guarded(
         ).fetchone()
         if row and row["status"] == "CREATED":
             try:
-                recorder.cancel("排队中的剧本任务已取消")
+                recorder.cancel("排队中的剧本任务已取消", conn=None)
             except StateConflict:
                 pass
         raise
@@ -3163,7 +3163,7 @@ async def start_screenplay_all(project_id: str):
                 "retryable": True,
             })
     if not run_ids:
-        batch_recorder.fail(RuntimeError("批量剧本任务均未能进入持久化队列"))
+        batch_recorder.fail(RuntimeError("批量剧本任务均未能进入持久化队列"), conn=None)
         raise HTTPException(503, {
             "code": "SCREENPLAY_BATCH_START_FAILED",
             "message": "批量剧本任务均未能启动，各集原状态已保留，可直接重试",
@@ -3200,7 +3200,7 @@ async def cancel_screenplay_all(project_id: str):
     cancelled_batches = 0
     for batch in batch_rows:
         try:
-            WorkflowRecorder(batch["id"]).cancel("用户停止批量剧本")
+            WorkflowRecorder(batch["id"]).cancel("用户停止批量剧本", conn=None)
             cancelled_batches += 1
         except StateConflict:
             continue

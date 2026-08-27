@@ -26,16 +26,16 @@ class RecordingRecorder:
         self.context_manifest = kwargs["context_manifest"]
         return "step_test", await operation()
 
-    def succeed(self, _message: str) -> None:
+    def succeed(self, _message: str, conn=None) -> None:
         self.outcome = "succeeded"
 
-    def partial(self, _message: str) -> None:
+    def partial(self, _message: str, conn=None) -> None:
         self.outcome = "partial"
 
-    def fail(self, _exc: BaseException) -> None:
+    def fail(self, _exc: BaseException, conn=None) -> None:
         self.outcome = "failed"
 
-    def cancel(self) -> None:
+    def cancel(self, conn=None) -> None:
         self.outcome = "cancelled"
 
 

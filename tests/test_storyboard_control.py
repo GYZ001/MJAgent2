@@ -70,7 +70,7 @@ def test_pause_run_writes_control_and_event(monkeypatch):
         scope_id="e1",
         input_fingerprint="fp",
     )
-    transition_run(run_id, "CREATED", "RUNNING", "test")
+    transition_run(run_id, "CREATED", "RUNNING", "test", conn=None)
     monkeypatch.setattr(
         "app.orchestration.api.task_registry.active", lambda *_a, **_k: True
     )
@@ -89,8 +89,8 @@ def test_handoff_run_marks_waiting_human_when_idle(monkeypatch):
         scope_id="e1",
         input_fingerprint="fp",
     )
-    transition_run(run_id, "CREATED", "RUNNING", "test")
-    transition_run(run_id, "RUNNING", "PAUSED_EXTERNAL", "test_pause")
+    transition_run(run_id, "CREATED", "RUNNING", "test", conn=None)
+    transition_run(run_id, "RUNNING", "PAUSED_EXTERNAL", "test_pause", conn=None)
     cp = SupervisorCheckpoint(
         episode_id="e1",
         phase="PAUSED_EXTERNAL",

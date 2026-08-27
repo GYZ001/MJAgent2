@@ -500,7 +500,7 @@ def test_agent_loop_persists_iterations_candidates_and_evaluations(tmp_path, mon
             input_artifact_ids=[source_artifact["id"]],
         )
     )
-    recorder.succeed()
+    recorder.succeed(conn=None)
 
     steps = repository.get_steps(recorder.run_id)
     iteration_steps = [step for step in steps if step["step_key"] == "screenplay.iteration"]

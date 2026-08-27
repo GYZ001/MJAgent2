@@ -566,7 +566,7 @@ async def chat(
                 and _retry_can_pause_run(trace.run_id, trace.step_run_id, stage_key)
             )
             if paused:
-                transition_run(trace.run_id, "RUNNING", "WAITING_RETRY", message)
+                transition_run(trace.run_id, "RUNNING", "WAITING_RETRY", message, conn=None)
             _append_retry_event(
                 "PROVIDER_RETRY_SCHEDULED",
                 message,
@@ -582,7 +582,7 @@ async def chat(
                 # from WAITING_RETRY. Do not move it back to RUNNING here.
                 raise
             if paused:
-                transition_run(trace.run_id, "WAITING_RETRY", "RUNNING", "重试冷却结束，恢复执行")
+                transition_run(trace.run_id, "WAITING_RETRY", "RUNNING", "重试冷却结束，恢复执行", conn=None)
             _append_retry_event(
                 "PROVIDER_RETRY_RESUMED",
                 "重试冷却结束，已恢复同一文本模型请求",

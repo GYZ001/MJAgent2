@@ -131,13 +131,13 @@ def test_scene_bible_preparation_persists_list_without_starting_images(monkeypat
                 Scene(name="青山脚下", scene_canonical="青山脚下的山路，晨雾弥漫，古树与石阶环绕", location_kind="室外"),
             ]
 
-        def succeed(self, _message: str) -> None:
+        def succeed(self, _message: str, conn=None) -> None:
             pass
 
-        def cancel(self) -> None:
+        def cancel(self, conn=None) -> None:
             pass
 
-        def fail(self, _exc: Exception) -> None:
+        def fail(self, _exc: Exception, conn=None) -> None:
             raise AssertionError("scene bible should not fail")
 
     monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
