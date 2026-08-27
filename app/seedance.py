@@ -58,6 +58,9 @@ class SeedanceAdapter:
             self.provider, model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY,
         )
         payload = {"model": model, "content": content}
+        # 服务端默认值本来就是 False（视频无水印），这里仍显式传递：不依赖供应商
+        # 默认值——供应商改了默认值我们不会知道，显式传参把这件事钉死在我们自己手里。
+        payload["watermark"] = False
         if return_last_frame:
             payload["return_last_frame"] = True
         if call_meta and call_meta.get("operation_id"):

@@ -159,6 +159,42 @@ def test_portrait_qa_keeps_occluding_watermark_as_hard_failure(monkeypatch) -> N
     assert any("遮挡" in item for item in qa["hard_failures"])
 
 
+def test_portrait_qa_rejects_non_occluding_watermark_under_default_mode(monkeypatch) -> None:
+    """默认 watermark_qa_mode=='reject'：定妆照路径必须与场景图/关键帧一致，
+    非遮挡水印同样硬失败，不能因为是定妆照就单独放行。"""
+    async def fake_vlm_check(images, expectation, *, call_meta=None):
+        return (
+            '{"identity_match": 0.95, "presentation_match": 1, "clean_frame": 0.9, '
+            '"overall": 0.95, "watermark_detected": true, "watermark_occluding": false, '
+            '"hard_failures": [], "issues": ["画面右下角存在AI生成水印"]}'
+        )
+
+    monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
+    qa = asyncio.run(review_portrait_image("frame", "黑发少年，玄色劲装"))
+
+    assert qa["hard_gate_passed"] is False
+    assert qa["status"] == "failed"
+    assert "检测到水印或 Logo" in qa["hard_failures"]
+
+
+def test_portrait_qa_ignores_non_occluding_watermark_in_practical_quality_mode(monkeypatch) -> None:
+    async def fake_vlm_check(images, expectation, *, call_meta=None):
+        return (
+            '{"identity_match": 0.95, "presentation_match": 1, "clean_frame": 0.9, '
+            '"overall": 0.95, "watermark_detected": true, "watermark_occluding": false, '
+            '"hard_failures": [], "issues": ["画面右下角存在AI生成水印"]}'
+        )
+
+    monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
+    monkeypatch.setattr("app.multiview.watermark_qa_mode", lambda: "ignore_unless_occluding")
+    qa = asyncio.run(review_portrait_image("frame", "黑发少年，玄色劲装"))
+
+    assert qa["hard_gate_passed"] is True
+    assert qa["status"] == "warning"
+    assert qa["hard_failures"] == []
+    assert qa["non_occluding_provider_watermark"] is True
+
+
 def test_scene_reference_qa_treats_empty_environment_as_required(monkeypatch) -> None:
     async def fake_vlm_check(images, expectation, *, call_meta=None):
         assert "画面必须无人" in expectation

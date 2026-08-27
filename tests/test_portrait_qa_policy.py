@@ -244,6 +244,36 @@ def test_seed_qa_allows_subjective_anchor_differences_with_warning() -> None:
 
 
 def test_seed_qa_respects_explicit_non_occluding_watermark_result() -> None:
+    # non_occluding_provider_watermark is the caller-granted permission flag
+    # (set by review_portrait_image/review_character_pack_consistency only when
+    # watermark_qa_mode == "ignore_unless_occluding"); without it a detected,
+    # non-occluding watermark is now a hard failure — see
+    # test_seed_qa_rejects_non_occluding_watermark_without_explicit_permission.
+    result = normalize_portrait_seed_qa({
+        "identity_match": 0.9,
+        "presentation_match": 0.45,
+        "clean_frame": 0.95,
+        "person_count": 1,
+        "watermark_detected": True,
+        "watermark_occluding": False,
+        "non_occluding_provider_watermark": True,
+        "forbidden_text_detected": False,
+        "full_body_visible": True,
+        "crop_severity": "none",
+        "anatomy_valid": True,
+        "issues": ["画面存在轻微角落水印，未遮挡人物主体"],
+        "hard_failures": [],
+    })
+
+    assert result["status"] == "warning"
+    assert result["hard_gate_passed"] is True
+    assert result["hard_failures"] == []
+    assert any("角落水印" in item for item in result["issues"])
+
+
+def test_seed_qa_rejects_non_occluding_watermark_without_explicit_permission() -> None:
+    """默认 watermark_qa_mode=='reject'：调用方不会设置 non_occluding_provider_watermark，
+    非遮挡水印必须硬失败，与场景图/关键帧路径的默认行为一致。"""
     result = normalize_portrait_seed_qa({
         "identity_match": 0.9,
         "presentation_match": 0.45,
@@ -259,10 +289,9 @@ def test_seed_qa_respects_explicit_non_occluding_watermark_result() -> None:
         "hard_failures": [],
     })
 
-    assert result["status"] == "warning"
-    assert result["hard_gate_passed"] is True
-    assert result["hard_failures"] == []
-    assert any("角落水印" in item for item in result["issues"])
+    assert result["status"] == "failed"
+    assert result["hard_gate_passed"] is False
+    assert "检测到水印或 Logo" in result["hard_failures"]
 
 
 def test_seed_qa_structured_non_occlusion_overrides_summary_wording() -> None:
@@ -273,6 +302,7 @@ def test_seed_qa_structured_non_occlusion_overrides_summary_wording() -> None:
         "person_count": 1,
         "watermark_detected": True,
         "watermark_occluding": False,
+        "non_occluding_provider_watermark": True,
         "forbidden_text_detected": False,
         "full_body_visible": True,
         "crop_severity": "none",
@@ -299,6 +329,7 @@ def test_seed_qa_does_not_double_count_corner_watermark_as_forbidden_text() -> N
         "person_count": 1,
         "watermark_detected": True,
         "watermark_occluding": False,
+        "non_occluding_provider_watermark": True,
         "forbidden_text_detected": True,
         "forbidden_text_is_provider_mark": True,
         "full_body_visible": True,
@@ -392,3 +423,68 @@ def test_character_pack_qa_demotes_non_occluding_provider_watermark(
     assert result["hard_failures"] == []
     assert result["views"][2]["status"] == "warning"
     assert "存在页面文字水印" in result["views"][2]["issues"]
+
+
+def _fake_pack_qa_with_structured_watermark(views_path_by_role: dict[str, str]):
+    async def fake_vlm_check(images, expectation, *, call_meta=None):
+        return json.dumps({
+            "overall": 0.94,
+            "face_consistency": 0.99,
+            "outfit_consistency": 0.97,
+            "hair_consistency": 0.99,
+            "body_consistency": 0.99,
+            "views": [
+                {"view_role": "front_full", "identity_match": 1, "clean_frame": 1,
+                 "overall": 1, "issues": [], "hard_failures": []},
+                {"view_role": "three_quarter", "identity_match": 1, "clean_frame": 1,
+                 "overall": 1, "issues": [], "hard_failures": []},
+                {"view_role": "profile", "identity_match": 1, "clean_frame": 0.9,
+                 "overall": 0.95, "watermark_detected": True, "watermark_occluding": False,
+                 "issues": [], "hard_failures": []},
+            ],
+            "issues": [],
+            "hard_failures": [],
+        }, ensure_ascii=False)
+    return fake_vlm_check
+
+
+def test_character_pack_qa_rejects_structured_non_occluding_watermark_under_default_mode(
+    tmp_path, monkeypatch,
+) -> None:
+    """默认 watermark_qa_mode=='reject'：整包一致性 QA 逐视角门禁也必须硬失败，
+    与单张定妆照、场景图/关键帧路径的默认行为一致。"""
+    paths = []
+    for role in ("front_full", "three_quarter", "profile"):
+        path = tmp_path / f"{role}.jpg"
+        path.write_bytes(role.encode())
+        paths.append({"view_role": role, "image_path": str(path)})
+
+    monkeypatch.setattr(hiagent, "encode_image_file", lambda path: str(path))
+    monkeypatch.setattr(hiagent, "vlm_check", _fake_pack_qa_with_structured_watermark(paths))
+
+    result = asyncio.run(multiview.review_character_pack_consistency(paths, "华贵衣衫"))
+
+    assert result["status"] == "failed"
+    assert result["views"][2]["status"] == "failed"
+    assert "检测到水印或 Logo" in result["views"][2]["hard_failures"]
+
+
+def test_character_pack_qa_ignores_structured_non_occluding_watermark_in_practical_quality_mode(
+    tmp_path, monkeypatch,
+) -> None:
+    paths = []
+    for role in ("front_full", "three_quarter", "profile"):
+        path = tmp_path / f"{role}.jpg"
+        path.write_bytes(role.encode())
+        paths.append({"view_role": role, "image_path": str(path)})
+
+    monkeypatch.setattr(hiagent, "encode_image_file", lambda path: str(path))
+    monkeypatch.setattr(hiagent, "vlm_check", _fake_pack_qa_with_structured_watermark(paths))
+    monkeypatch.setattr(multiview, "watermark_qa_mode", lambda: "ignore_unless_occluding")
+
+    result = asyncio.run(multiview.review_character_pack_consistency(paths, "华贵衣衫"))
+
+    assert result["status"] == "warning"
+    assert result["views"][2]["status"] == "warning"
+    assert result["views"][2]["hard_failures"] == []
+    assert result["views"][2]["non_occluding_provider_watermark"] is True

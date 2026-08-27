@@ -1303,10 +1303,20 @@ async def review_character_pack_consistency(views: list[dict[str, Any]], appeara
             str(item.get("view_role") or ""): item
             for item in (data.get("views") or []) if isinstance(item, dict)
         }
+        ignore_non_occluding_watermark = watermark_qa_mode() == "ignore_unless_occluding"
         normalized_views = []
         for role in roles:
             item = dict(reported.get(role) or {})
             item["view_role"] = role
+            if (
+                ignore_non_occluding_watermark
+                and item.get("watermark_detected") is True
+                and item.get("watermark_occluding") is False
+            ):
+                # Same contract as review_scene_image / review_portrait_image: the
+                # per-item deterministic policy only learns this provider mark is
+                # allowed when the configured practical-quality mode says so.
+                item["non_occluding_provider_watermark"] = True
             normalized_views.append(normalize_portrait_seed_qa(item))
         data["views"] = normalized_views
         data["issues"] = unique_messages([

@@ -10900,6 +10900,15 @@ async def review_portrait_image(image_b64: str, appearance_anchor: str) -> dict:
     ):
         if key in raw_result:
             result[key] = raw_result[key]
+    from app.multiview import watermark_qa_mode
+    if watermark_qa_mode() == "ignore_unless_occluding":
+        watermark_reported = result.get("watermark_detected") is True
+        watermark_occluding = result.get("watermark_occluding")
+        if watermark_reported and watermark_occluding is False:
+            # Same contract as review_scene_image: only tell the deterministic
+            # policy this provider mark is allowed when the configured
+            # practical-quality mode says so, never unconditionally.
+            result["non_occluding_provider_watermark"] = True
     from app.portrait_policy import normalize_portrait_seed_qa
     return normalize_portrait_seed_qa(result)
 

@@ -77,10 +77,16 @@ def normalize_portrait_seed_qa(qa: dict[str, Any] | None) -> dict[str, Any]:
         hard.append("结构化身份观察确认角色稳定特征不一致")
     if result.get("watermark_detected") is True:
         watermark_occluding = result.get("watermark_occluding")
+        # 不遮挡主体的供应商角落水印是否放行由调用方按 watermark_qa_mode 决定，
+        # 通过这面显式旗标传入——本模块不读取设置，与 scene_policy 的门禁契约一致。
+        allowed_provider_watermark = result.get("non_occluding_provider_watermark") is True
         if watermark_occluding is True:
             hard.append("水印或 Logo 遮挡人物主体")
         elif watermark_occluding is False:
-            warnings.append("画面存在未遮挡主体的角落水印或 Logo")
+            if allowed_provider_watermark:
+                warnings.append("画面存在未遮挡主体的角落水印或 Logo")
+            else:
+                hard.append("检测到水印或 Logo")
         else:
             recovered = True
             hard.append("无法确认水印是否遮挡人物主体")
@@ -121,5 +127,6 @@ def normalize_portrait_seed_qa(qa: dict[str, Any] | None) -> dict[str, Any]:
         "hard_gate_passed": not recovered and not hard,
         "qa_recovered": recovered,
         "status": "failed" if hard or recovered else ("warning" if warnings else "ready"),
+        "non_occluding_provider_watermark": result.get("non_occluding_provider_watermark") is True,
     })
     return result

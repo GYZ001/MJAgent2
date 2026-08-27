@@ -2914,7 +2914,9 @@ async def generate_image(prompt: str, *, size: str = "1024x1024",
     base_url, model_headers = _model_connection(
         provider, model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY,
     )
-    payload: dict[str, Any] = {"model": model, "prompt": prompt, "n": 1, "size": size}
+    payload: dict[str, Any] = {
+        "model": model, "prompt": prompt, "n": 1, "size": size, "watermark": False,
+    }
     media_meta: dict[str, Any] = {}
     if image_inputs:
         prepared_inputs, media_meta = await _prepare_image_data_urls(image_inputs)
