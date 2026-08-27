@@ -2126,16 +2126,39 @@ def _candidate_appellations(candidate: _RosterCandidate) -> set[str]:
     }
 
 
+def _coerce_roster_chapter_index(value: Any) -> int:
+    """程序拥有章号：模型常写「第1章」、[1]、['1']，不能因此把已判定的 person 打成 uncertain。"""
+    if isinstance(value, bool):
+        return -1
+    if isinstance(value, int):
+        return value if value > 0 else -1
+    if isinstance(value, float) and value.is_integer():
+        return int(value) if value > 0 else -1
+    if isinstance(value, list) and value:
+        return _coerce_roster_chapter_index(value[0])
+    if isinstance(value, str):
+        match = re.search(r"(\d+)", value.strip())
+        if match:
+            number = int(match.group(1))
+            return number if number > 0 else -1
+    return -1
+
+
 def _normalize_roster_verdict_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """模型常把 verdict 写成 judge_result/判断结果；缺字段时不能默成 uncertain 再淘汰。"""
     if not isinstance(payload, dict):
         return payload
-    if "verdict" in payload:
-        return payload
-    for key in ("judge_result", "result", "判断结果", "reveal_status"):
-        if key in payload:
-            return {**payload, "verdict": payload[key]}
-    return payload
+    normalized = dict(payload)
+    if "verdict" not in normalized:
+        for key in ("judge_result", "result", "判断结果", "reveal_status"):
+            if key in normalized:
+                normalized["verdict"] = normalized[key]
+                break
+    if "supporting_chapter_index" in normalized:
+        normalized["supporting_chapter_index"] = _coerce_roster_chapter_index(
+            normalized["supporting_chapter_index"],
+        )
+    return normalized
 
 
 def _require_explicit_verdict(payload: Any) -> Any:
@@ -2267,12 +2290,20 @@ def _merge_roll_call_candidates(
         deduped_identity = list({
             (item.chapter_index, item.quote): item for item in identity_evidence
         }.values())
+        personhoods = {item.personhood for item in group}
+        if "person" in personhoods:
+            personhood = "person"
+        elif personhoods == {"non_person"}:
+            personhood = "non_person"
+        else:
+            personhood = "uncertain"
         merged.append(_RosterCandidate(
             primary_appellation=primary,
             formal_name=formal,
             aliases=aliases,
             identity_evidence=deduped_identity[:BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE],
             onstage_evidence=deduped[:BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE],
+            personhood=personhood,
         ))
     return merged
 
@@ -2432,34 +2463,38 @@ class _RosterTrueNameResolution(BaseModel):
 def _roster_personhood_dossier(
     candidate: _RosterCandidate, chapters_by_idx: dict[int, str],
 ) -> list[dict[str, Any]]:
+    """资格卷宗必须含候选称呼本身。真实故障：孟浩的在场引句扩成「孟兄」段，
+    模型据此判 uncertain，主角从人物谱消失。"""
     blocks: list[dict[str, Any]] = []
     names = [value for value in _candidate_appellations(candidate) if value]
-    for evidence in candidate.onstage_evidence[:3]:
-        chapter_text = chapters_by_idx.get(evidence.chapter_index, "")
-        dossier = _roster_presence_dossier(
-            evidence.chapter_index, chapter_text, evidence.quote,
-        )
-        for item in dossier:
-            if item not in blocks:
-                blocks.append(item)
-        if len(blocks) >= 6:
-            return blocks
     if not names:
         return blocks
+
+    def _add(item: dict[str, Any]) -> bool:
+        text = item.get("text") or ""
+        if not any(name in text for name in names):
+            return False
+        if item not in blocks:
+            blocks.append(item)
+        return len(blocks) >= 6
+
+    for evidence in candidate.onstage_evidence[:3]:
+        chapter_text = chapters_by_idx.get(evidence.chapter_index, "")
+        for item in _roster_presence_dossier(
+            evidence.chapter_index, chapter_text, evidence.quote,
+        ):
+            if _add(item):
+                return blocks
     for name in names:
-        for chapter_idx, chapter_text in chapters_by_idx.items():
-            if name not in (chapter_text or ""):
+        for chapter_idx in sorted(chapters_by_idx):
+            chapter_text = chapters_by_idx.get(chapter_idx) or ""
+            if name not in chapter_text:
                 continue
             for index, segment in enumerate(index_source_segments(chapter_text, max_chars=240)):
                 if name not in segment.text:
                     continue
-                item = {"chapter_idx": chapter_idx, "segment_index": index + 1, "text": segment.text}
-                if item not in blocks:
-                    blocks.append(item)
-                if len(blocks) >= 6:
+                if _add({"chapter_idx": chapter_idx, "segment_index": index + 1, "text": segment.text}):
                     return blocks
-            if blocks:
-                return blocks
     return blocks
 
 
@@ -2494,11 +2529,11 @@ async def _filter_non_person_roster_candidates(
 {catalog}
 
 只根据卷宗原文判断，JSON 字段必须用 verdict：
-- person：这个称呼指一个能说话或行动的人物，有稳定身份，可以作为人物谱角色。
+- person：卷宗里这个称呼指一个能说话或行动的人物，有稳定身份，可以作为人物谱角色。
 - non_person：这个称呼指器物、法宝、地点、组织、没有自己姓名的野兽，或无法对应到具体人名的一次性描述。
 - uncertain：卷宗不够，还不能决定。证据不足时选 uncertain，不要猜。
 
-supporting_chapter_index 必须是卷宗里出现过的章号。不得根据常识或作品知识补充。
+supporting_chapter_index 必须是卷宗里出现过的数字章号，例如 1，不要写「第1章」或数组。不得根据常识或作品知识补充。
 """
         try:
             resolution = await asyncio.wait_for(
@@ -2525,15 +2560,15 @@ supporting_chapter_index 必须是卷宗里出现过的章号。不得根据常�
             )
         except Exception:  # noqa: BLE001 - 不确定就延迟绑定，不从名单抹掉
             return candidate.model_copy(update={"personhood": "uncertain"})
-        if (
-            resolution.verdict == "non_person"
-            and resolution.supporting_chapter_index in valid_chapters
-        ):
+        chapter_ok = resolution.supporting_chapter_index in valid_chapters
+        name_in_dossier = any(
+            any(name in (item.get("text") or "") for name in names)
+            for item in dossier
+        )
+        evidence_ok = chapter_ok or name_in_dossier
+        if resolution.verdict == "non_person" and evidence_ok:
             return None
-        if (
-            resolution.verdict == "person"
-            and resolution.supporting_chapter_index in valid_chapters
-        ):
+        if resolution.verdict == "person" and evidence_ok:
             return candidate.model_copy(update={"personhood": "person"})
         return candidate.model_copy(update={"personhood": "uncertain"})
 
@@ -2643,10 +2678,17 @@ supporting_chapter_index 必须是卷宗里出现过的章号；supporting_quote
         true_name = (resolution.true_name or "").strip()
         chapter_text = chapters_by_idx.get(resolution.supporting_chapter_index, "")
         quote = (resolution.supporting_quote or "").strip()
+        occupied_elsewhere = {
+            (item.primary_appellation or "").strip()
+            for item in candidates
+            if (item.primary_appellation or "").strip()
+            and (item.primary_appellation or "").strip() != appellation
+        }
         if (
             resolution.verdict != "revealed"
             or not true_name
             or true_name == appellation
+            or true_name in occupied_elsewhere
             or resolution.supporting_chapter_index not in valid_chapters
             or true_name not in chapter_text
             or appellation not in chapter_text
@@ -2666,15 +2708,37 @@ supporting_chapter_index 必须是卷宗里出现过的章号；supporting_quote
     return list(await asyncio.gather(*(_discover(item) for item in candidates)))
 
 
+_TRUE_NAME_SELF_ID_RE = re.compile(r"我([\u4e00-\u9fff]{2,3})这一辈子")
 _TRUE_NAME_REVEAL_PATTERNS = (
-    re.compile(r"正是([\u4e00-\u9fff]{2,4})"),
-    re.compile(r"便是([\u4e00-\u9fff]{2,4})"),
-    re.compile(r"名叫([\u4e00-\u9fff]{2,4})"),
-    re.compile(r"名为([\u4e00-\u9fff]{2,4})"),
-    re.compile(r"自称([\u4e00-\u9fff]{2,4})"),
-    re.compile(r"我是([\u4e00-\u9fff]{2,4})"),
-    re.compile(r"我([\u4e00-\u9fff]{2,4})这一辈子"),
+    re.compile(r"正是([\u4e00-\u9fff]{2,3})[，。！？]"),
+    re.compile(r"便是([\u4e00-\u9fff]{2,3})[，。！？]"),
+    re.compile(r"名叫([\u4e00-\u9fff]{2,3})[，。！？]"),
+    re.compile(r"名为([\u4e00-\u9fff]{2,3})[，。！？]"),
+    re.compile(r"自称([\u4e00-\u9fff]{2,3})[，。！？]"),
+    re.compile(r"我是([\u4e00-\u9fff]{2,3})[，。！？]"),
+    _TRUE_NAME_SELF_ID_RE,
 )
+_TRUE_NAME_REJECT_RE = re.compile(r"[宗门内外此人是的在与和了着如当上下前后]")
+_APPELLATION_AGENT_RE = re.compile(
+    r"(?:说道|问道|喝道|笑道|怒道|道[：「”\"]|说[：「”\"]|问[：「”\"]|"
+    r"冷冷|走上|点了点头|摇了摇头|一愣|身子|冷哼|开口)"
+)
+
+
+def _appellation_used_as_agent(name: str, chapters: list[dict]) -> bool:
+    """不确定身份时，统计通道只收「像施事者」的称呼：孟浩道 / 许师姐冷冷。
+
+    程序硬约束，不枚举器物名单。铜镜、裂缝这类高频名词通常接「中/里/拿起」，
+    不会命中施事后缀；主角即使资格闸判 uncertain，只要原文里在行动就能进谱。
+    """
+    text_name = (name or "").strip()
+    if not text_name or _is_generic_character_appellation(text_name):
+        return False
+    pattern = re.compile(re.escape(text_name) + _APPELLATION_AGENT_RE.pattern)
+    for chapter in chapters:
+        if pattern.search(chapter.get("content") or ""):
+            return True
+    return False
 
 
 def _bind_true_name_from_source(
@@ -2683,7 +2747,14 @@ def _bind_true_name_from_source(
     """LLM 没钉上真名时，用原文身份句做延迟绑定：正是/名叫/我X这一辈子。
 
     程序拥有名称匹配。证据不足或同一称呼对上多个真名时不绑，避免错并。
+    「正是王有材」出现在王伯场景里时，不得把已有另一候选的主名当成这个人的真名；
+    「我李富贵这一辈子」是自称，即使李富贵也在候选名单里也允许绑定。
     """
+    occupied_primaries = {
+        (item.primary_appellation or "").strip()
+        for item in candidates
+        if (item.primary_appellation or "").strip()
+    }
     bound: list[_RosterCandidate] = []
     for candidate in candidates:
         if (candidate.formal_name or "").strip():
@@ -2702,7 +2773,17 @@ def _bind_true_name_from_source(
             for pattern in _TRUE_NAME_REVEAL_PATTERNS:
                 for match in pattern.finditer(text):
                     name = match.group(1)
-                    if name == appellation or name in appellation or appellation in name:
+                    if (
+                        name == appellation
+                        or name in appellation
+                        or appellation in name
+                        or _TRUE_NAME_REJECT_RE.search(name)
+                    ):
+                        continue
+                    if (
+                        name in occupied_primaries
+                        and pattern is not _TRUE_NAME_SELF_ID_RE
+                    ):
                         continue
                     if not any(abs(match.start() - pos) <= 240 for pos in positions):
                         continue
@@ -3090,11 +3171,15 @@ async def _recurring_character_names(
     statistical_retain = {
         appellation
         for appellation in verified_counts
-        if personhood_by_appellation.get(appellation) == "person"
+        if personhood_by_appellation.get(appellation) != "non_person"
         and not _is_generic_character_appellation(appellation)
         and mention_counts.get(appellation, 0) >= BIBLE_STATISTICAL_MIN_MENTIONS
         and chapter_counts.get(appellation, 0)
         >= max(2, round(window_size * BIBLE_STATISTICAL_MIN_CHAPTER_RATIO))
+        and (
+            personhood_by_appellation.get(appellation) == "person"
+            or _appellation_used_as_agent(appellation, head)
+        )
     }
     ranked = [
         (

@@ -23,6 +23,11 @@ def test_merge_roll_call_candidates_merges_formal_name_and_caps_evidence() -> No
     assert len(merged) == 1
     assert merged[0].formal_name == "李富贵"
     assert len(merged[0].onstage_evidence) == stages.BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE
+    person_kept = stages._merge_roll_call_candidates([
+        [candidate(primary_appellation="许师姐", personhood="person")],
+        [candidate(primary_appellation="许师姐", personhood="uncertain")],
+    ])
+    assert person_kept[0].personhood == "person"
 
 
 def test_character_detail_evidence_pack_is_bounded_and_relevant() -> None:
@@ -502,6 +507,25 @@ async def test_personhood_uncertain_keeps_named_character(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_personhood_person_without_chapter_pin_still_keeps(monkeypatch) -> None:
+    async def fake_structured(*_args, **_kwargs):
+        return stages._RosterPersonhoodResolution(
+            verdict="person", supporting_chapter_index=-1,
+        )
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
+    ev = stages._RosterOnstageEvidence
+    kept = await stages._filter_non_person_roster_candidates(
+        [stages._RosterCandidate(primary_appellation="许师姐", onstage_evidence=[
+            ev(chapter_index=1, quote="许师姐冷冷看了他一眼。"),
+        ])],
+        {1: "许师姐冷冷看了他一眼。"},
+        project_id="p1",
+    )
+    assert kept[0].personhood == "person"
+
+
+@pytest.mark.asyncio
 async def test_true_name_discovery_pins_later_chapter_reveal(monkeypatch) -> None:
     chapter_37 = "「许师姐。」孟浩抱拳一拜。这女子正是许清，如她的名字一样，冷冷清清。"
 
@@ -554,11 +578,77 @@ def test_bind_true_name_from_source_uses_identity_sentence() -> None:
         [{"idx": 10, "content": "孟浩，你是我李富贵这一辈子的好朋友。”小胖子感慨连连。"}],
     )
     assert fatty[0].formal_name == "李富贵"
+    self_id = stages._bind_true_name_from_source(
+        [
+            stages._RosterCandidate(primary_appellation="小胖子"),
+            stages._RosterCandidate(primary_appellation="李富贵"),
+        ],
+        [{"idx": 10, "content": "孟浩，你是我李富贵这一辈子的好朋友。”小胖子感慨连连。"}],
+    )
+    assert self_id[0].formal_name == "李富贵"
     unbound = stages._bind_true_name_from_source(
         [stages._RosterCandidate(primary_appellation="铜镜")],
-        [{"idx": 4, "content": "孟浩伸手拿起铜镜。"}],
+        [{"idx": 4, "content": "孟浩伸手拿起铜镜。便是靠山宗外那件宝物。"}],
     )
     assert unbound[0].formal_name == ""
+    # 贪婪「正是+2~4字」会把「靠山宗外」「上官修身」当成真名；收紧后不得误绑。
+    false_reveal = stages._bind_true_name_from_source(
+        [stages._RosterCandidate(primary_appellation="许师姐")],
+        [{"idx": 2, "content": "「许师姐。」这人正是靠山宗外门弟子。此人正是上官修身侧的随从。"}],
+    )
+    assert false_reveal[0].formal_name == ""
+    # 「雕刻的正是王有材」出现在王伯场景：不得把已有另一候选的主名错绑过来。
+    father_and_son = stages._bind_true_name_from_source(
+        [
+            stages._RosterCandidate(primary_appellation="王伯"),
+            stages._RosterCandidate(primary_appellation="王有材"),
+        ],
+        [{"idx": 45, "content": "王伯坐在那里发呆，他的面前有一个木雕，雕刻的正是王有材，神色悲伤。"}],
+    )
+    assert father_and_son[0].formal_name == ""
+    assert father_and_son[1].formal_name == ""
+
+
+def test_roster_personhood_dossier_keeps_segments_with_candidate_name() -> None:
+    ev = stages._RosterOnstageEvidence
+    dossier = stages._roster_personhood_dossier(
+        stages._RosterCandidate(
+            primary_appellation="孟浩",
+            onstage_evidence=[ev(chapter_index=1, quote="孟兄，你也来了。")],
+        ),
+        {
+            1: "孟兄，你也来了。孟浩走上前，冷冷看了一眼。",
+        },
+    )
+    assert dossier
+    assert all("孟浩" in item["text"] for item in dossier)
+
+
+def test_roster_chapter_index_coerces_model_spellings() -> None:
+    parsed = stages._RosterPersonhoodResolution.model_validate({
+        "verdict": "person",
+        "supporting_chapter_index": "第17章",
+    })
+    assert parsed.supporting_chapter_index == 17
+    listed = stages._RosterPersonhoodResolution.model_validate({
+        "verdict": "person",
+        "supporting_chapter_index": [1, 5],
+    })
+    assert listed.supporting_chapter_index == 1
+
+
+def test_uncertain_statistical_requires_agent_evidence() -> None:
+    assert stages._appellation_used_as_agent("孟浩", [{"content": "孟浩走上前。"}])
+    assert stages._appellation_used_as_agent("许师姐", [{"content": "许师姐冷冷看了他一眼。"}])
+    assert not stages._appellation_used_as_agent(
+        "铜镜", [{"content": "孟浩伸手拿起铜镜。铜镜中映出人影。"}],
+    )
+    # 贪婪「正是+2~4字」会把「靠山宗外」「上官修身」当成真名；收紧后不得误绑。
+    false_reveal = stages._bind_true_name_from_source(
+        [stages._RosterCandidate(primary_appellation="许师姐")],
+        [{"idx": 2, "content": "「许师姐。」这人正是靠山宗外门弟子。此人正是上官修身侧的随从。"}],
+    )
+    assert false_reveal[0].formal_name == ""
 
 
 @pytest.mark.asyncio
