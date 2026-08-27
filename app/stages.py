@@ -5201,7 +5201,7 @@ async def _generate_character_detail(
     roster_names: list[str],
     evidence_pack: str,
     style: str,
-    era: str,
+    era: str = "",
     chapters_by_idx: dict[int, str],
     project_id: str | None,
 ) -> Character | None:

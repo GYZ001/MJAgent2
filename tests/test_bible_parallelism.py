@@ -111,43 +111,44 @@ def test_normalize_roster_prefers_real_name_and_marks_mentioned_only() -> None:
     assert normalized.characters[1].portrait_eligible is False
 
 
-    async def fake_chat(messages, **kwargs):
-        if (kwargs.get("call_meta") or {}).get("stage_key") == "mentioned_character_importance":
-            model_type = kwargs["model_type"]
-            return model_type(
-                verdict="retain", supporting_chapter_index=1,
-                reason="建立持续生效的宗门规则",
-            )
-        return json.dumps({
-            "candidates": [
-                {
-                    "primary_appellation": "靠山老祖",
-                    "formal_name": "",
-                    "onstage_evidence": [
-                        {"chapter_index": 1, "quote": "靠山老祖定下门规。"},
-                        {"chapter_index": 2, "quote": "靠山老祖留下规矩。"},
-                    ],
-                }
-            ]
-        }, ensure_ascii=False)
+def test_high_frequency_nickname_stays_primary_name_and_real_name_is_searchable() -> None:
+    """真名罕见时保留高频绰号作主名，真名仍作为检索键映射到同一角色。"""
+    chapters = [{"idx": i, "content": "小胖子说道。" * 20} for i in range(1, 11)]
+    chapters[0]["content"] += "他本名李富贵。"
+    canonical, demoted = stages._pick_canonical_display_name("小胖子", "李富贵", chapters)
+    assert canonical == "小胖子"
+    assert demoted == ["李富贵"]
 
-    async def fake_chat_structured(messages, **kwargs):
-        stage_key = (kwargs.get("call_meta") or {}).get("stage_key")
-        model_type = kwargs["model_type"]
-        if stage_key == "mentioned_character_importance":
-            return model_type(
-                verdict="retain", supporting_chapter_index=1,
-                reason="建立持续生效的宗门规则",
-            )
-        return model_type(verdict="mentioned_only", supporting_segment_index=1)
+    draft = stages._BibleRosterDraft(
+        characters=[stages._BibleRosterEntry(name="李富贵", role="重要配角")],
+        world={"visual_style_canonical": "国漫三维动画电影质感，统一自然光影与细腻材质"},
+    )
+    normalized = stages._normalize_roster_against_candidates(
+        draft, [("小胖子", "李富贵", 2, 200, 10, [])], chapters,
+    )
+    entry = normalized.characters[0]
+    assert entry.name == "小胖子"
+    assert "李富贵" in entry.source_appellations
 
-    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_chat_structured)
-    ranked = await stages._recurring_character_names([
-        {"idx": 1, "title": "一", "content": "靠山老祖定下门规。"},
-        {"idx": 2, "title": "二", "content": "靠山老祖留下规矩。"},
-    ])
-    assert ranked == [("靠山老祖", "", 0, 2, 2, [])]
+
+def test_protagonist_is_assigned_by_fulltext_signals_not_model() -> None:
+    """覆盖最广的角色必须成为主角，即使在场裁决一条都没通过。"""
+    chapters = [{"idx": i, "content": "孟浩走上前。" * 30} for i in range(1, 21)]
+    draft = stages._BibleRosterDraft(
+        characters=[stages._BibleRosterEntry(name="李富贵", role="主角")],
+        world={"visual_style_canonical": "国漫三维动画电影质感，统一自然光影与细腻材质"},
+    )
+    normalized = stages._normalize_roster_against_candidates(draft, [
+        ("孟浩", "", 0, 991, 20, []),
+        ("李富贵", "", 3, 30, 4, []),
+    ], chapters)
+    roles = {entry.name: entry.role for entry in normalized.characters}
+    assert roles["孟浩"] == "主角"
+    assert roles["李富贵"] == "重要配角"
+    protagonist = normalized.characters[0]
+    assert protagonist.presence_status == "onstage"
+    assert protagonist.portrait_eligible is True
+    assert "presence_by_fulltext_coverage" in protagonist.importance_signals
 
 
 @pytest.mark.asyncio
