@@ -723,7 +723,13 @@ def test_paratext_scope_does_not_scale_with_book_length() -> None:
 
 
 def test_paratext_cleaning_is_capped_and_fails_open(monkeypatch) -> None:
-    """净化是净化步骤不是闸门：超时未完成的章原样进入下游，不拖死人物谱。"""
+    """净化是净化步骤不是闸门：超时未完成的章原样进入下游，不拖死人物谱。
+
+    改造后（chapters.paratext_json 持久化，见
+    logs/paratext_single_source_plan.md）净化的入口函数换成
+    `chapter_paratext_offsets`（取/算/落库），这里改为挂起它本身，验证
+    同一条"budget 到点就砍、未完成的章原样保留"的路径依然成立。
+    """
     import asyncio
 
     from app import source_paratext, stages
@@ -733,11 +739,11 @@ def test_paratext_cleaning_is_capped_and_fails_open(monkeypatch) -> None:
         for i in range(1, 40)
     ]
 
-    async def _never_returns(text: str, *, operation_id: str) -> str:
+    async def _never_returns(conn, chapter_row, *, operation_id: str):
         await asyncio.sleep(3600)
-        return ""
+        return [], False
 
-    monkeypatch.setattr(source_paratext, "strip_paratext", _never_returns)
+    monkeypatch.setattr(source_paratext, "chapter_paratext_offsets", _never_returns)
     monkeypatch.setattr(stages, "BIBLE_PARATEXT_BUDGET_S", 0.2)
 
     started = asyncio.get_event_loop_policy().new_event_loop()

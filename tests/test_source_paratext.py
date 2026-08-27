@@ -22,11 +22,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
-from app import source_paratext
+from app import db, source_paratext
 from app.harness import model_gateway
+from app.source_excerpt import index_source_segments
 from app.source_paratext import (
     MAX_REGION_FRACTION,
     MAX_REMOVED_FRACTION,
@@ -34,7 +36,10 @@ from app.source_paratext import (
     ParatextAnchor,
     ParatextSpans,
     PARATEXT_RULE,
+    chapter_paratext_offsets,
+    paratext_segment_indexes,
     paratext_spans,
+    remove_offsets,
     remove_spans,
 )
 
@@ -184,3 +189,186 @@ def test_rule_text_forbids_keyword_classification() -> None:
     """
     assert "不得按段落位置、长度或是否出现某个词来判断" in PARATEXT_RULE
     assert "故事叙述本身" in PARATEXT_RULE
+
+
+# ---------------------------------------------------------------------------
+# chapters.paratext_json 持久化入口（logs/paratext_single_source_plan.md）：
+# 按章取/算/落库，命中缓存零模型调用，未命中调用一次并原子写回。
+# ---------------------------------------------------------------------------
+
+
+def _seed_chapter(conn, *, project_id: str, content: str, paratext_json: str | None = None) -> dict:
+    conn.execute(
+        "INSERT OR IGNORE INTO projects(id, name, status, created_at) "
+        "VALUES(?,?,?,0)", (project_id, "P", "ingested"),
+    )
+    cur = conn.execute(
+        "INSERT INTO chapters(project_id, idx, title, content, paratext_json) "
+        "VALUES(?,1,'第一章',?,?)",
+        (project_id, content, paratext_json),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM chapters WHERE id=?", (cur.lastrowid,),
+    ).fetchone()
+    return dict(row)
+
+
+def test_chapter_paratext_offsets_cache_miss_computes_and_persists(monkeypatch) -> None:
+    """未命中缓存（`paratext_json` 为 NULL）：调用模型算一次，原子写回，
+    `cache_hit=False`。"""
+    conn = db.get_conn()
+    # >= 200 字，避免撞上 paratext_spans 的短文本早退（见
+    # test_paratext_spans_tags_its_own_stage_key 同一处理）。
+    content = STORY * 3 + NOTE
+    chapter = _seed_chapter(conn, project_id="p_paratext_1", content=content)
+
+    calls = 0
+
+    async def fake_chat_structured(_messages, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return ParatextSpans(spans=[_anchor(NOTE)])
+
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+    source_paratext.paratext_cache_clear()
+
+    regions, cache_hit = asyncio.run(
+        chapter_paratext_offsets(conn, chapter, operation_id="op_test_cache_miss")
+    )
+
+    assert calls == 1, "未命中缓存必须真的发起一次模型调用"
+    assert cache_hit is False
+    assert regions, "锚点能在原文里定位到，必须产出至少一个区间"
+    assert remove_offsets(content, regions) == remove_spans(content, [_anchor(NOTE)])
+
+    persisted = conn.execute(
+        "SELECT paratext_json FROM chapters WHERE id=?", (chapter["id"],),
+    ).fetchone()["paratext_json"]
+    payload = json.loads(persisted)
+    assert payload["content_hash"] == source_paratext._cache_key(content)
+    assert payload["spans"] == [{"start": s, "end": e} for s, e in regions]
+
+
+def test_chapter_paratext_offsets_cache_hit_skips_model_call(monkeypatch) -> None:
+    """命中缓存（`content_hash` 与当前 `content` 匹配）：零模型调用，直接
+    返回持久化的区间，`cache_hit=True`。"""
+    conn = db.get_conn()
+    content = STORY + NOTE
+    region = source_paratext._anchor_region(content, NOTE[:12], NOTE[-12:])
+    assert region is not None
+    cached_payload = json.dumps({
+        "content_hash": source_paratext._cache_key(content),
+        "spans": [{"start": region[0], "end": region[1]}],
+        "computed_at": 0.0,
+    })
+    chapter = _seed_chapter(
+        conn, project_id="p_paratext_2", content=content, paratext_json=cached_payload,
+    )
+
+    async def fail_chat_structured(*_args, **_kwargs):
+        raise AssertionError("命中缓存不应该发起任何模型调用")
+
+    monkeypatch.setattr(model_gateway, "chat_structured", fail_chat_structured)
+
+    regions, cache_hit = asyncio.run(
+        chapter_paratext_offsets(conn, chapter, operation_id="op_test_cache_hit")
+    )
+
+    assert cache_hit is True
+    assert regions == [region]
+
+
+def test_chapter_paratext_offsets_hash_mismatch_recomputes(monkeypatch) -> None:
+    """`content_hash` 对不上当前 `content`（陈旧缓存）：视为未命中，重新
+    发起模型调用，不信一份读不懂来源的缓存。"""
+    conn = db.get_conn()
+    content = STORY * 3 + NOTE  # >= 200 字，见上一条测试同样的处理
+    stale_payload = json.dumps({
+        "content_hash": "stale-hash-does-not-match",
+        "spans": [{"start": 0, "end": 5}],
+        "computed_at": 0.0,
+    })
+    chapter = _seed_chapter(
+        conn, project_id="p_paratext_3", content=content, paratext_json=stale_payload,
+    )
+
+    calls = 0
+
+    async def fake_chat_structured(_messages, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return ParatextSpans(spans=[])
+
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+    source_paratext.paratext_cache_clear()
+
+    regions, cache_hit = asyncio.run(
+        chapter_paratext_offsets(conn, chapter, operation_id="op_test_hash_mismatch")
+    )
+
+    assert calls == 1, "哈希不匹配必须重新发起模型调用，不能信旧缓存"
+    assert cache_hit is False
+    assert regions == []
+
+
+def test_chapter_paratext_offsets_no_id_computes_but_does_not_persist(monkeypatch) -> None:
+    """合成 chapter（无 `id`，单测常见形态）：照常计算，但不落库——没有主键
+    无法定位 UPDATE 目标，静默跳过写入而不是报错，行为退化成"每次都重算"，
+    与改造前的调用方完全一致。"""
+    conn = db.get_conn()
+    content = STORY * 3 + NOTE  # >= 200 字，见上面同样的处理
+
+    async def fake_chat_structured(_messages, **_kwargs):
+        return ParatextSpans(spans=[_anchor(NOTE)])
+
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+    source_paratext.paratext_cache_clear()
+
+    regions, cache_hit = asyncio.run(
+        chapter_paratext_offsets(
+            conn, {"content": content}, operation_id="op_test_no_id",
+        )
+    )
+
+    assert cache_hit is False
+    assert regions
+
+
+def test_remove_offsets_matches_remove_spans_on_the_same_region() -> None:
+    """偏移版删除是纯算术切割：给它 `remove_spans` 内部算出的同一个区间，
+    产出必须逐字节相同——不是另起一套判据。"""
+    raw = STORY + NOTE
+    region = source_paratext._anchor_region(raw, NOTE[:12], NOTE[-12:])
+    assert region is not None
+
+    assert remove_offsets(raw, [region]) == remove_spans(raw, [_anchor(NOTE)])
+
+
+def test_remove_offsets_no_regions_returns_text_unchanged() -> None:
+    raw = STORY + NOTE
+    assert remove_offsets(raw, []) == raw
+
+
+def test_paratext_segment_indexes_tags_overlapping_segments_only() -> None:
+    """区间重叠判断：只有与 paratext 区间有重叠的段号才应该入账，1-based，
+    口径与 `enumerate(segments, start=1)` 一致。"""
+    text = STORY + "\n\n" + NOTE
+    segments = index_source_segments(text)
+    note_start = text.index(NOTE)
+    note_end = note_start + len(NOTE)
+
+    indexes = paratext_segment_indexes(segments, [(note_start, note_end)])
+
+    covered = {
+        index for index, segment in enumerate(segments, start=1)
+        if segment.start_offset < note_end and note_start < segment.end_offset
+    }
+    assert indexes == covered
+    assert indexes, "夹具必须至少覆盖一个段，否则这条测试没有断言到任何东西"
+
+
+def test_paratext_segment_indexes_empty_regions_returns_empty_set() -> None:
+    text = STORY + NOTE
+    segments = index_source_segments(text)
+    assert paratext_segment_indexes(segments, []) == set()

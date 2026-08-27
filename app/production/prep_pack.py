@@ -236,7 +236,7 @@ from app.validators import (
 # stay defined in app/validators.py, unused-but-not-deleted (same "dormant,
 # not deleted" precedent as app/production/screenplay_repair.py), still
 # exercised directly by tests/test_prep_pack_coverage.py.
-PREP_PACK_VERSION = "2.0.3"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "2.0.4"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
 # gained functional_extras; 1.4.0: coverage_ledger gained paratext (deterministic
 # keyword/position classifier, since replaced); 1.4.1: paratext classification
@@ -1097,6 +1097,26 @@ PREP_PACK_VERSION = "2.0.3"  # 1.1.0: event_chain entries carry source_span (P1 
 #      等分镜台的三态告警才第一次被看见。scene_uncovered 非空是合法状态
 #      （例如确实没有场景描写的纯心理/纯对白段），这里只记账、不拦截、
 #      不用上一段落的场景往后续段落填充——那是伪造归属，比空着更危险。
+# 2.0.4（paratext 判定机制归一，logs/paratext_single_source_plan.md，
+# prompt-contract 变更，版本推进）：本文件在 1.4.1 之外，独立发明了第三套
+# paratext 判据——_extract_chunk 每个 chunk 无条件自报 paratext_segments
+# 字段（自己的措辞、默认 temperature=0.2），与世界书 _chapters_without_
+# paratext 用的 app.source_paratext.PARATEXT_RULE（temperature=0.0）完全
+# 不同源，且从未互相对照。这两套机制对同一份原文（世界书 scope 覆盖的
+# 31/1616 章）各判一次，互不知道对方存在；其余 1585 章只有这一套机制
+# 判过。改造后：paratext 判定统一为"按章一次、持久化"（chapters.
+# paratext_json，PARATEXT_RULE，见 app.source_paratext.chapter_paratext_
+# offsets）——世界书和映射台谁先问到某一章，谁就替后来者把这一章算好；
+# 本文件不再让模型自报，_ChunkResponse 删除 paratext_segments 字段，
+# _extract_chunk 提示词删除对应段落；_generate_prep_pack_once 改为把
+# 该集涉及章节持久化的偏移平移到本集 source_text 坐标（与
+# app.domain.common._episode_source_blocks 共用同一份拼接口径），投影
+# 成确定性的 paratext 段号集合，取代原来的模型自报收集。coverage_ledger.
+# paratext 的形状不变（仍是 flat [int] list），下游 storyboard_pack.
+# _paratext_segment_indexes 只读这个账、不重新判定，不受影响。同一批
+# 持久化偏移也替换了 _discover_new_characters 内部原来独立发起的一次
+# strip_paratext 模型调用（世界书覆盖到的章现在零模型调用，命中持久化
+# 缓存）。
 QA_PROFILE_VERSION = "prep-pack-qa-gate-1"
 _QA_EVALUATOR_NAME = "screenplay_production_qa"
 _CHUNK_MAX_CHARS = 6000
@@ -1197,18 +1217,17 @@ class _ChunkResponse(BaseModel):
     characters: list[_ModelCharacterMention]
     scenes: list[_ModelSceneMention]
     props: list[_ModelPropMention]
-    # 1.4.1 (kept in 2.0.0): the model's own paratext claim for this chunk
-    # (chapter title / author's note segments) -- untrusted like every other
-    # model claim in this module; see _prep_pack_build_coverage_ledger for
-    # how this gets reconciled against the DB-anchored deterministic chapter
-    # -title segments and against segments that DO carry verified asset
-    # evidence (an asset-bearing segment cannot also be paratext -- the
-    # asset evidence wins, the paratext claim is rejected and logged
-    # observably, see rejected_paratext_claims). Required (not defaulted),
-    # matching every other field's strict-schema convention in this module
-    # -- an empty list is a legal, explicit "none in this chunk", not an
-    # omission.
-    paratext_segments: list[int]
+    # 1.4.1 introduced a model-self-reported `paratext_segments` field here
+    # (chapter title / author's note segments, own wording+temperature,
+    # independent of app.source_paratext.PARATEXT_RULE). Retired 2026-08-27
+    # (logs/paratext_single_source_plan.md): paratext is now a deterministic
+    # projection of chapters.paratext_json (persisted per-chapter offsets,
+    # same PARATEXT_RULE the world bible uses) onto this episode's segments
+    # -- see _generate_prep_pack_once's paratext_regions/deterministic_
+    # paratext_segments. The model is no longer asked to judge this at all;
+    # asking it twice (once here, once for the world bible) with two
+    # different wordings/temperatures for the same underlying question was
+    # the exact duplication the retirement plan targeted.
 
 
 def _response_format(model_type: type[BaseModel], name: str) -> dict[str, Any]:
@@ -2512,7 +2531,7 @@ def _discovery_errored_names(
 
 async def _discover_new_characters(
     conn, *, project_id: str, episode_id: str, episode_no: int,
-    source_text: str, run_id: str | None,
+    source_text: str, discovery_text: str, run_id: str | None,
 ) -> dict[str, Any]:
     """谱外新角色 → 发现 → 补录人物谱 → 生成定妆照。
 
@@ -2526,25 +2545,23 @@ async def _discover_new_characters(
     called when pass 1 of ``_resolve_assets`` below leaves a real,
     non-background-extra character mention unresolved -- see the zero-call
     regression assertion in tests/test_prep_pack_asset_discovery.py.
+
+    ``discovery_text`` (2.0.4, paratext 归一，见 PREP_PACK_VERSION 上方
+    2.0.4 大注释): precomputed by the caller from persisted
+    ``chapters.paratext_json`` -- this function no longer calls
+    ``strip_paratext`` itself (that was a second, independent model
+    judgment of the exact same question the world bible already answers
+    for any chapter it has scoped). Only the discovery-facing copy is
+    stripped; ``source_text`` itself (event-chain evidence elsewhere, and
+    this call's own identity-scope fingerprint below) is untouched.
     """
     from app.portraits import (
         ensure_cards_for_text,
         persist_screenplay_character_resolutions,
         screenplay_identity_scope_fingerprint,
     )
-    from app.source_paratext import strip_paratext
 
     bible = _load_project_bible(conn, project_id)
-    # Same purification prep_pack's dead-code predecessor
-    # (app.domain.screenplay_ops._screenplay_character_discovery) applied
-    # before discovery: stage 0 runs before any paratext judgment exists, so
-    # without this an author's pen name in chapter-end commentary gets
-    # mistaken for a character. Only the discovery-facing copy is stripped;
-    # source_text itself (used for event-chain evidence) is untouched.
-    discovery_text = await strip_paratext(
-        source_text,
-        operation_id=f"episode_prep_pack.character_discovery.paratext:{episode_id}",
-    )
     result = await ensure_cards_for_text(
         project_id, episode_no, discovery_text, bible, generate_portraits=True,
     )
@@ -3258,6 +3275,7 @@ async def _resolve_assets(
     prop_mentions: list[dict[str, Any]],
     run_id: str | None,
     appellation_resolutions: list[dict[str, Any]] | None = None,
+    discovery_text: str | None = None,
 ) -> tuple[
     list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]],
     list[str], dict[str, int],
@@ -3342,8 +3360,23 @@ async def _resolve_assets(
     existing caller's contract untouched. Defaults to ``None`` (no
     recording), which is what every call site except
     ``_generate_prep_pack_once`` uses.
+
+    ``discovery_text`` (2.0.4, paratext 归一，见 PREP_PACK_VERSION 上方
+    2.0.4 大注释): the paratext-stripped copy of ``source_text`` fed to
+    ``_discover_new_characters`` -- only the discovery-facing copy is
+    stripped, ``source_text`` itself (event-chain evidence, segment
+    offsets) is never touched. The sole production caller
+    (``_generate_prep_pack_once``) always computes this from persisted
+    ``chapters.paratext_json`` and passes it explicitly. Defaults to
+    ``None``, in which case this function falls back to ``source_text``
+    unchanged (equivalent to "nothing to strip" -- the same fail-closed
+    behavior ``strip_paratext`` itself has always had when it can't
+    determine any paratext spans) so that direct unit-test callers of this
+    function, which never exercise real paratext content, do not need to
+    thread this parameter through.
     """
     stats = {"character_discovery_calls": 0, "scene_discovery_calls": 0}
+    discovery_text = discovery_text if discovery_text is not None else source_text
     # 场景别名锚定（1.5.1，task①）：一次性加载，供 _pass 内的场景解析复用。
     bible = _load_project_bible(conn, project_id)
     segments = index_source_segments(source_text)
@@ -4016,7 +4049,8 @@ async def _resolve_assets(
                 run_id, "episode_prep_pack_character_discovery",
                 lambda: _discover_new_characters(
                     conn, project_id=project_id, episode_id=episode_id,
-                    episode_no=episode_no, source_text=source_text, run_id=run_id,
+                    episode_no=episode_no, source_text=source_text,
+                    discovery_text=discovery_text, run_id=run_id,
                 ),
             )
             skip_character_names, character_rename, non_person_names = (
@@ -4363,8 +4397,7 @@ async def _extract_chunk(
         shown = "、".join(str(index) for index in chunk_title_indexes)
         confirmed_title_section = (
             f"编号 {shown} 已由系统确定性判定为本集所属章节的标题（排版元素，不是"
-            "故事内容），已计入副文本账：不要为它们申报人物/场景/道具，也不要在"
-            "paratext_segments 里重复申报。\n\n"
+            "故事内容），已计入副文本账：不要为它们申报人物/场景/道具。\n\n"
         )
     prompt = f"""你在为一部网络小说改编的短剧做素材映射准备（不改编台词、不生成分镜、不写剧情摘要）。
 
@@ -4424,11 +4457,6 @@ segment_indexes 判据（硬性，对 characters/scenes/props 都适用）：只
 - 场景地点的 display_name 一律使用原文自己的描述词，不得替换成你认为等价的其他
   地名（哪怕原文的地点和你知道的某个地名指的是同一个地方，也只能照抄原文怎么说，
   真名假设同样走 suspected_true_name）。
-
-另外给出 paratext_segments：本段编号中，属于"非故事内容"的编号列表——章节标题、
-作者对读者说的话（求收藏/求推荐/月票/上架/加更/催更等）、网站公告，这些不是故事
-叙述本身（人物动作/对白/心理/场景描写都不算，哪怕它们提到类似字眼也不算）。你自己
-就能判断哪些是——按内容本身判断，不用管它们在本段的位置。没有就给空列表。
 {confirmed_title_section}{hint}
 原文（本段共 {len(chunk)} 个编号片段）：
 {rendered}
@@ -4600,14 +4628,47 @@ async def _generate_prep_pack_once(
     chapter_titles = _prep_pack_chapter_titles(conn, project_id, chapter_indexes)
     deterministic_title_indexes = chapter_title_segment_indexes(segments, chapter_titles)
 
+    # paratext（2.0.4，见 PREP_PACK_VERSION 上方大注释 +
+    # logs/paratext_single_source_plan.md）：按章持久化偏移，翻译到本集
+    # source_text 坐标——不再让模型每个 chunk 自报一遍。fail-closed：
+    # 重建的拼接结果对不上传入的 source_text 时（理论上不该发生，
+    # _episode_chapters/_episode_source_blocks 与 app.domain.common.
+    # _episode_source_text 是同一份实现）放弃这次投影，退回"没有 paratext
+    # 信号"，不猜、不强行平移出可能错位的偏移。
+    from app.domain.common import _episode_chapters, _episode_source_blocks
+    from app.source_paratext import (
+        chapter_paratext_offsets,
+        paratext_segment_indexes,
+        remove_offsets,
+    )
+
+    paratext_regions: list[tuple[int, int]] = []
+    paratext_chapter_rows = _episode_chapters(
+        conn, {"source_chapters": chapter_indexes, "project_id": project_id},
+    )
+    rebuilt_text, content_offsets = _episode_source_blocks(paratext_chapter_rows)
+    if rebuilt_text == source_text:
+        paratext_results = await _prep_pack_gather_concurrent([
+            chapter_paratext_offsets(
+                conn, chapter_row,
+                operation_id=f"episode_prep_pack.paratext:{chapter_row['id']}",
+            )
+            for chapter_row in paratext_chapter_rows
+        ])
+        for (regions, _cache_hit), content_start in zip(
+            paratext_results, content_offsets, strict=True,
+        ):
+            paratext_regions.extend(
+                (content_start + start, content_start + end) for start, end in regions
+            )
+    deterministic_paratext_segments = paratext_segment_indexes(segments, paratext_regions)
+    # _discover_new_characters 用来构造发现输入的"净化后全文"——跟世界书
+    # 消费的是同一份持久化偏移，谁先算过这一章，谁就替对方省下一次模型调用。
+    discovery_text = remove_offsets(source_text, paratext_regions)
+
     character_mentions: list[dict[str, Any]] = []
     scene_mentions: list[dict[str, Any]] = []
     prop_mentions: list[dict[str, Any]] = []
-    # 1.4.1 (kept in 2.0.0): the model's own paratext claim, aggregated
-    # across all chunks and scoped to each chunk's own global segment
-    # indexes (an index outside a chunk's own range is structurally
-    # untrustworthy -- that chunk's model call never saw that segment).
-    declared_paratext_segments: set[int] = set()
 
     for chunk_index, chunk in enumerate(chunks, start=1):
         chunk_global_indexes = {index for index, _segment in chunk}
@@ -4622,9 +4683,6 @@ async def _generate_prep_pack_once(
             attempt_hint=attempt_hint,
             run_id=run_id,
             confirmed_title_indexes=deterministic_title_indexes,
-        )
-        declared_paratext_segments.update(
-            index for index in response.paratext_segments if index in chunk_global_indexes
         )
         for mention in response.characters:
             valid_indexes = _prep_pack_gate_segment_indexes(
@@ -4705,7 +4763,7 @@ async def _generate_prep_pack_once(
     delivered_indexes: set[int] = set()
     for mention in (*character_mentions, *scene_mentions, *prop_mentions):
         delivered_indexes.update(mention["segment_indexes"])
-    paratext_indexes = set(deterministic_title_indexes) | declared_paratext_segments
+    paratext_indexes = set(deterministic_title_indexes) | deterministic_paratext_segments
     ledger, rejected_paratext_claims = _prep_pack_build_coverage_ledger(
         len(segments), delivered_indexes, paratext_indexes,
     )
@@ -4742,7 +4800,7 @@ async def _generate_prep_pack_once(
         run_id, "episode_prep_pack_asset_mapping",
         lambda: _resolve_assets(
             conn, project_id=project_id, episode_id=episode_id, episode_no=episode_no,
-            source_text=source_text,
+            source_text=source_text, discovery_text=discovery_text,
             character_mentions=character_mentions, scene_mentions=scene_mentions,
             prop_mentions=prop_mentions, run_id=run_id,
             appellation_resolutions=character_appellation_resolutions,

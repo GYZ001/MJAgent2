@@ -4809,8 +4809,21 @@ def test_prep_pack_version_is_1_8_0():
     （scene_delivered/scene_uncovered），不影响既有五账或 assert_prep_
     pack_coverage_complete 门禁，是新增可见性账目而非新的拦截。两者合计
     比照 1.4.1/1.6.1/1.8.1-1.8.5/1.9.0/1.10.0/1.11.1/2.0.1/2.0.2 的先例
-    推进版本号第三位，不动 schema 位。"""
-    assert prep_pack.PREP_PACK_VERSION == "2.0.3"
+    推进版本号第三位，不动 schema 位。
+
+    2.0.4（paratext 判定机制归一，logs/paratext_single_source_plan.md，
+    见 PREP_PACK_VERSION 上方 2.0.4 大注释）：本文件此前独立发明的第三套
+    paratext 判据（_extract_chunk 每个 chunk 无条件自报 paratext_segments，
+    自己的措辞+温度，与世界书用的 app.source_paratext.PARATEXT_RULE 完全
+    不同源）退休——coverage_ledger.paratext 改为对 chapters.paratext_json
+    持久化偏移（PARATEXT_RULE，惰性计算，谁先问谁替所有人算好）做确定性
+    投影，模型不再被问这件事。_ChunkResponse 删除 paratext_segments 字段
+    （schema 变小），_discover_new_characters 也改用这份持久化结果，不再
+    自己独立发起一次 strip_paratext 模型调用。是 prompt-contract 变更
+    （删字段）+ ledger 判定语义变更（判据来源从模型自报换成确定性投影），
+    比照 1.4.1/1.9.0 的先例推进版本号第三位，不动 schema 位（coverage_
+    ledger.paratext 自身仍是 flat [int] list）。"""
+    assert prep_pack.PREP_PACK_VERSION == "2.0.4"
 
 
 # ---------------------------------------------------------------------------
@@ -4873,7 +4886,6 @@ def test_empty_character_mentions_with_nonempty_scene_mentions_is_flagged_visibl
                 )
             ],
             props=[],
-            paratext_segments=[],
         )
 
     monkeypatch.setattr(prep_pack, "_extract_chunk", fake_extract_chunk)
@@ -4926,7 +4938,6 @@ def test_empty_character_mentions_without_known_roster_is_not_flagged(monkeypatc
                 )
             ],
             props=[],
-            paratext_segments=[],
         )
 
     monkeypatch.setattr(prep_pack, "_extract_chunk", fake_extract_chunk)

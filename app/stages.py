@@ -1925,6 +1925,12 @@ BIBLE_HEAD_CHAPTERS = 10         # 首版人物谱必须完整通读的章节数
 BIBLE_LOOKAHEAD_CHAPTERS = 10    # 判定「这个角色重不重要」时再往后看的章节数
 BIBLE_RECURRING_MIN_ONSTAGE_QUOTES = 2  # 至少两条经裁决闸核验的「本人在场」证据才算重要角色
 BIBLE_MUST_COVER_MAX = 12        # 必收名单上限，避免把生成预算耗在龙套身上
+# 点名调用每个候选最多申报几条在场证据。判据只需要 BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
+# （=2）条核验通过的证据；这里留 1 条余量应付结构闸/裁决闸刷掉个别证据，不留更多——
+# 多留的每一条对戏份多的主角都是纯浪费：一个出场上千次的主角，旧提示词「尽量都列出来」
+# 会让模型老实列出十几条，既拉长点名调用本身的输出（更容易撞 max_tokens 截断，撞了就要
+# 整次重试），又线性拉长下游裁决闸的调用条数。见 `_recurring_character_names` docstring。
+BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE = 3
 
 # 旁文本净化的三个闸（见 `_chapters_without_paratext` docstring 里的事故口径）：
 BIBLE_PARATEXT_MARGIN_CHAPTERS = 3   # 净化只会让正文变短，头部因此可能多吃进几章
@@ -2086,8 +2092,11 @@ async def _recurring_character_names(
    不得改写、简称或补全。
 2. formal_name：这个人物在原文中已经明确揭示过的正式姓名；原文尚未揭示正式姓名（只有外号/代称），
    就填空字符串，不要猜测或编造。
-3. onstage_evidence：列出若干条能证明这个人物本人真正出现在画面中的原文证据（本人说话、本人动作、
-   或被旁白直接叙述为身处此地），每条给 {{"chapter_index": int, "quote": str}}：
+3. onstage_evidence：最多列 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条最有代表性、最容易验证
+   的原文证据，能证明这个人物本人真正出现在画面中（本人说话、本人动作、或被旁白直接叙述为身处此地），
+   每条给 {{"chapter_index": int, "quote": str}}：
+   - 戏份再多的人物也只需要挑 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条最清楚、最没有歧义的
+     证据，不需要穷举这个人物在原文里的全部出场；证据数量不影响这个人物是否重要，够用即可；
    - chapter_index 取原文分块【】块头里的数字；
    - quote 必须是该章原文的逐字引句（不超过约 80 字），且这句引文里必须能看到 primary_appellation
      或 formal_name 中的至少一个——原文怎么写就怎么抄，不要自己添加或删除引号；
@@ -2095,8 +2104,7 @@ async def _recurring_character_names(
      被旁白直接叙述为置身其中的人，才算在场；如果这句话里正在行动、说话、被叙述置身其中的是别人，
      这个称呼只是作为被谈论、被指涉、被交代来历或状态的对象出现在别人的叙述或话语里，即使字面提到
      了这个称呼，这个人物本人也没有置身在这句话所写的场景中，不算在场，不要拿这种句子当证据；
-   - 尽量把你能找到的在场证据都列出来，不要只列一条；确实找不到任何在场证据的人物，onstage_evidence
-     给空列表，不要为了凑数编造。
+   - 确实找不到任何在场证据的人物，onstage_evidence 给空列表，不要为了凑数编造。
 4. 不要输出"少年""女子""老者""两人"这类无法从人群中单独指认出具体是谁的泛称，也不要输出宗门名、
    地名、法宝名。
 5. 同一个人只输出一个条目；戏份很少的人也可以列出来，后端会按核验通过的在场证据条数再筛一遍。
@@ -2111,7 +2119,17 @@ async def _recurring_character_names(
             [{"role": "system", "content": SYSTEM_PREFIX},
              {"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=4096,
+            # 故意不按"预期答案有多长"估算这个数字——两次真实故障（run_8ebe1225aa69，
+            # 以及本次改造实测的 run_ec9f4e97ad4e）都证明这份 JSON 答案本身很短
+            # （实测仅约 5KB），真正吃预算的是这个任务本身的思考耗费：`max_tokens=4096`
+            # 加上 `reasoning_token_reserve()`（默认 16384）合计 20480，两次都在这个
+            # 上限截断、内容作废，要等到 `hiagent.chat` 的截断自动重试把预算顶到模型
+            # 真实产出上限（本环境实测 32768）才成功——白等一次原地重试通常又是
+            # 300~400 秒。这里直接请求一个刻意超大的数字，交给 `text_request_token_limits`
+            # 的 `min(requested+reserve, max_output_tokens)` clamp 成模型的真实上限，
+            # 一次到位；不影响正常小答案的调用——供应商按实际生成量返回，不会因为
+            # 上限设大就多等。
+            max_tokens=131072,
             call_meta={
                 "stage": "人物点名",
                 "stage_key": "character_roll_call",
@@ -2138,7 +2156,9 @@ async def _recurring_character_names(
     formal_names: dict[str, str] = {}
     evidence_total = 0
     structural_pass = 0
-    verdict_pass = 0
+    # 结构闸（G1-G3）零模型调用、纯同步核对，先把候选证据筛成「值得送裁决闸」的
+    # 卷宗清单；裁决闸才是本函数唯一的模型调用，放到下面统一并发发起。
+    verdict_jobs: list[tuple[str, list[dict[str, Any]]]] = []
     for candidate in candidates:
         appellation = (candidate.primary_appellation or "").strip()
         formal = (candidate.formal_name or "").strip()
@@ -2146,8 +2166,11 @@ async def _recurring_character_names(
             continue
         seen.add(appellation)
         formal_names[appellation] = formal
-        count = 0
-        for evidence in candidate.onstage_evidence:
+        verified_counts[appellation] = 0
+        # 防御性兜底：即便模型没听提示词的话报多了，这里也只取前 N 条送进结构闸/
+        # 裁决闸，保证下游裁决调用数量有上界，不随模型的自由发挥线性增长。
+        evidence_list = candidate.onstage_evidence[:BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE]
+        for evidence in evidence_list:
             evidence_total += 1
             quote = (evidence.quote or "").strip()
             if not quote:
@@ -2168,24 +2191,45 @@ async def _recurring_character_names(
             dossier = _roster_presence_dossier(evidence.chapter_index, chapter_text, quote)
             if not dossier:
                 continue  # no_presence_dossier：不确定不登记，不是跳过检查
-            try:
-                verdict = await _roster_presence_verdict_call(
-                    appellation=appellation, dossier=dossier, project_id=project_id,
-                )
-            except Exception as exc:  # noqa: BLE001 - 裁决失败按不确定处理：不确定不登记
-                log_provider_call(
-                    "character_roster_presence_verdict", config.MODEL_TEXT,
-                    "FAILED", None, 0,
-                    meta={"appellation": appellation, "error": str(exc)[:300]},
-                )
-                continue
-            if verdict.verdict != "onstage":
-                continue
-            if _alias_verdict_pin_segment(dossier, verdict.supporting_segment_index) is None:
-                continue
-            verdict_pass += 1
-            count += 1
-        verified_counts[appellation] = count
+            verdict_jobs.append((appellation, dossier))
+
+    # 裁决闸并发发起：每条证据一次独立模型调用，此前是嵌套 for/await 全程串行——
+    # 一个出场上千次的主角单独就能把这里拖成几十次排队调用（真实故障：
+    # run_8ebe1225aa69，18 条证据串行裁决耗时 91.6s，仍被 900s 总超时拦腰截断）。
+    # 这里只是把发起方式从"一条条 await"改成"一起 gather"，真正的并发上限由
+    # `model_gateway.chat`→`run_with_provider_call_slot` 那道进程级 `text_provider_calls`
+    # 优先级闸门统一节流（见 app/generation_concurrency.py），不额外起一套并发框架。
+    # 失败隔离：单条证据裁决失败/不通过只让这一个 job 判 0 票，不影响其它 job，
+    # 语义与原来的 continue 完全一致（不确定不登记）；裁决闸本身的提示词/温度/
+    # 候选集算法（`_roster_presence_verdict_call`）原样未动。
+    verdict_pass = 0
+
+    async def _judge_evidence(appellation: str, dossier: list[dict[str, Any]]) -> bool:
+        try:
+            verdict = await _roster_presence_verdict_call(
+                appellation=appellation, dossier=dossier, project_id=project_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - 裁决失败按不确定处理：不确定不登记
+            log_provider_call(
+                "character_roster_presence_verdict", config.MODEL_TEXT,
+                "FAILED", None, 0,
+                meta={"appellation": appellation, "error": str(exc)[:300]},
+            )
+            return False
+        if verdict.verdict != "onstage":
+            return False
+        if _alias_verdict_pin_segment(dossier, verdict.supporting_segment_index) is None:
+            return False
+        return True
+
+    judged = await asyncio.gather(
+        *(_judge_evidence(appellation, dossier) for appellation, dossier in verdict_jobs)
+    )
+    for (appellation, _dossier), passed in zip(verdict_jobs, judged, strict=True):
+        if not passed:
+            continue
+        verdict_pass += 1
+        verified_counts[appellation] += 1
 
     ranked = [
         (appellation, formal_names.get(appellation, ""), count)
@@ -4496,25 +4540,37 @@ async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
     只净化 `_bible_paratext_scope` 圈出的章、并发跑、整段封顶
     `BIBLE_PARATEXT_BUDGET_S`。净化本来就是「判不出就退回原文」的净化步骤而不是
     闸门，超时未完成的章原样进入下游，绝不能再把人物谱拖死。
+
+    **2026-08-27（paratext 按章一次、持久化，见
+    logs/paratext_single_source_plan.md）**：净化结果现在读/写
+    `chapters.paratext_json`，不再每次都直接问模型——首次跑某个项目仍要
+    为 scope 内每章各发一次模型调用（跟改造前一样受
+    `BIBLE_PARATEXT_BUDGET_S` 封顶），但算完就永久落库；同一项目重新谱写
+    人物谱（打回重生、脚本重试）时，这些章大概率命中缓存，`chat 调用数`
+    应趋近于零，这一步的墙钟耗时应趋近于"读库"而不是"等模型"。缺
+    `id` 的章节（测试用的合成 dict）无法持久化，退化为每次都重算，行为
+    与改造前完全一致，不影响正确性。
     """
-    from app.source_paratext import strip_paratext
+    from app.source_paratext import chapter_paratext_offsets, remove_offsets
 
     positions = [i for i, ch in enumerate(chapters) if (ch.get("content") or "").strip()]
     valid = [chapters[i] for i in positions]
     if not valid:
         return chapters
     scope = _bible_paratext_scope(valid)
+    conn = get_conn()
     limiter = asyncio.Semaphore(BIBLE_PARATEXT_CONCURRENCY)
     started = time.time()
 
-    async def _clean(slot: int) -> tuple[int, str]:
+    async def _clean(slot: int) -> tuple[int, str, bool]:
         chapter = valid[slot]
         async with limiter:
-            stripped = await strip_paratext(
-                chapter["content"],
+            regions, cache_hit = await chapter_paratext_offsets(
+                conn, chapter,
                 operation_id=f"bible.paratext:{chapter.get('id') or positions[slot]}",
             )
-        return slot, stripped
+        stripped = remove_offsets(chapter.get("content") or "", regions)
+        return slot, stripped, cache_hit
 
     tasks = [asyncio.create_task(_clean(slot)) for slot in scope]
     try:
@@ -4530,10 +4586,13 @@ async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
 
     cleaned = list(chapters)
     changed = 0
+    cache_hits = 0
     for task in done:
         if task.cancelled() or task.exception() is not None:
             continue
-        slot, stripped = task.result()
+        slot, stripped, cache_hit = task.result()
+        if cache_hit:
+            cache_hits += 1
         original = valid[slot]
         if stripped != (original.get("content") or ""):
             cleaned[positions[slot]] = {**original, "content": stripped}
@@ -4547,6 +4606,12 @@ async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
             "chapters_stripped": changed,
             "unfinished": len(pending),
             "budget_s": BIBLE_PARATEXT_BUDGET_S,
+            # 命中持久化缓存 vs 真正发起模型调用的两类计数（见方案文档
+            # "改动清单"一节）：重跑同一项目时前者应趋近 chapters_in_scope，
+            # 后者应趋近 0——这两个数字是判断"120s 预算有没有真的降下来"
+            # 的直接依据，不用再去 provider_calls 表里数。
+            "cache_hits": cache_hits,
+            "model_calls": len(done) - cache_hits,
         },
     )
     return cleaned

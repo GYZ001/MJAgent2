@@ -211,7 +211,13 @@ def _apply_compact_target(conn, episode_id: str, ep_data: dict, compact_target: 
     ep_data.update(compact_columns)
 
 
-def _episode_source_text(conn, ep) -> str:
+def _episode_chapters(conn, ep) -> list[dict]:
+    """本集源章节行（stub 修复后），供 `_episode_source_text` 和 paratext
+    偏移换算（`app.production.prep_pack`）共用——"读哪些章、按什么顺序"
+    只能有一份实现，两处各写一份会产生漂移风险（见
+    logs/paratext_single_source_plan.md）。返回的每行是 `SELECT *`，含
+    `id`/`title`/`content`/`paratext_json` 等全部列。
+    """
     raw_source_chapters = ep["source_chapters"] or []
     source_chapters = (
         json.loads(raw_source_chapters)
@@ -219,7 +225,7 @@ def _episode_source_text(conn, ep) -> str:
         else list(raw_source_chapters)
     )
     if not source_chapters:
-        return ""
+        return []
     placeholders = ",".join("?" for _ in source_chapters)
     chapters = rows_to_dicts(conn.execute(
         f"SELECT * FROM chapters WHERE project_id=? AND idx IN ({placeholders}) ORDER BY idx",
@@ -239,7 +245,38 @@ def _episode_source_text(conn, ep) -> str:
                 and chapter_titles_match(chapters[0], following_dict)
             ):
                 chapters = [following_dict]
-    return "\n\n".join(f"【{ch['title']}】\n{ch['content']}" for ch in chapters)
+    return chapters
+
+
+def _episode_source_blocks(chapters: list[dict]) -> tuple[str, list[int]]:
+    """章节行 -> 集源文本 + 每章 `content` 在这段文本里的绝对起点。
+
+    唯一的拼接实现——集源文本本身和"把 chapters.paratext_json 里以章为
+    单位的偏移平移到集级坐标"（`app.production.prep_pack`）都调用这一份，
+    禁止另起一份公式，否则又是"两处判据各自实现导致漂移"（见
+    logs/paratext_single_source_plan.md）。`offsets[i]` = `chapters[i]`
+    的 `content` 在返回文本里的起始下标（紧跟在 `【title】\\n` 前缀之后）。
+    """
+    parts: list[str] = []
+    offsets: list[int] = []
+    cursor = 0
+    for index, ch in enumerate(chapters):
+        if index > 0:
+            parts.append("\n\n")
+            cursor += 2
+        prefix = f"【{ch['title']}】\n"
+        parts.append(prefix)
+        cursor += len(prefix)
+        offsets.append(cursor)
+        content = ch["content"]
+        parts.append(content)
+        cursor += len(content)
+    return "".join(parts), offsets
+
+
+def _episode_source_text(conn, ep) -> str:
+    text, _content_offsets = _episode_source_blocks(_episode_chapters(conn, ep))
+    return text
 
 
 def _load_screenplay(ep) -> EpisodeScreenplay | None:

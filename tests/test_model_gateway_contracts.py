@@ -412,7 +412,6 @@ _EP7_CHUNK1_REPAIR_SECOND_RESPONSE = json.dumps(
         ],
         "scenes": [],
         "props": [],
-        "paratext_segments": [],
     },
     ensure_ascii=False,
 )

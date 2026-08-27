@@ -29,7 +29,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import time
 from collections import OrderedDict
 from threading import RLock
 from typing import Any
@@ -118,11 +120,12 @@ def _anchor_region(text: str, start: str, end: str) -> tuple[int, int] | None:
     return begin, tail_at + len(tail)
 
 
-def remove_spans(text: str, spans: list[ParatextAnchor]) -> str:
-    """按锚点区间删除旁文本。
+def _resolved_regions(text: str, spans: list[ParatextAnchor]) -> list[tuple[int, int]]:
+    """锚点 -> 已合并、已按比例封顶的绝对偏移区间。
 
-    程序负责定位与切割，并对总删除比例设上限——模型指错一次也不会
-    把正文删掉大半。区间重叠时合并，从后往前删以免下标漂移。
+    `remove_spans`（一次性删除）和 `chapter_paratext_offsets`（持久化偏移，
+    见下）共用这一份判据——"什么算可信的删除区间"只能有一处定义，两个
+    调用方不能各自重新判断一遍上限/合并逻辑。
     """
     regions: list[tuple[int, int]] = []
     for span in spans:
@@ -130,12 +133,12 @@ def remove_spans(text: str, spans: list[ParatextAnchor]) -> str:
         if region is not None:
             regions.append(region)
     if not regions:
-        return text
+        return []
     # 先按段丢弃明显定歪的区间：一个坏锚点不该让其它有效删除一起作废。
     region_cap = len(text) * MAX_REGION_FRACTION
     regions = [r for r in regions if (r[1] - r[0]) <= region_cap]
     if not regions:
-        return text
+        return []
     regions.sort()
     merged: list[list[int]] = []
     for begin, finish in regions:
@@ -146,7 +149,30 @@ def remove_spans(text: str, spans: list[ParatextAnchor]) -> str:
     removed = sum(finish - begin for begin, finish in merged)
     if removed > len(text) * MAX_REMOVED_FRACTION:
         # 逐段都不算离谱，合起来仍占掉一半以上：整次判定不可信，放弃。
+        return []
+    return [(begin, finish) for begin, finish in merged]
+
+
+def remove_spans(text: str, spans: list[ParatextAnchor]) -> str:
+    """按锚点区间删除旁文本。
+
+    程序负责定位与切割，并对总删除比例设上限——模型指错一次也不会
+    把正文删掉大半。区间重叠时合并，从后往前删以免下标漂移。
+    """
+    regions = _resolved_regions(text, spans)
+    return remove_offsets(text, regions) if regions else text
+
+
+def remove_offsets(text: str, regions: list[tuple[int, int]]) -> str:
+    """偏移版删除：输入已经是绝对字符区间（不是锚点字符串），不需要再
+    `text.find()` 重新查找——供 `chapters.paratext_json` 持久化后的消费方
+    使用。合并/裁剪判据已经在写入前由 `_resolved_regions` 做过一次，这里
+    只做纯切割 + 折叠多余空行，收尾逻辑与 `remove_spans` 一致。区间之间
+    允许重叠（会被一起吃掉），调用方不需要自己先去重。
+    """
+    if not regions:
         return text
+    merged = sorted({(min(a, b), max(a, b)) for a, b in regions})
     out = text
     for begin, finish in reversed(merged):
         out = out[:begin] + out[finish:]
@@ -206,6 +232,103 @@ async def strip_paratext(text: str, *, operation_id: str) -> str:
     if not spans:
         return body
     return remove_spans(body, list(spans))
+
+
+def _row_value(row: Any, key: str) -> Any:
+    """兼容 `sqlite3.Row` 与普通 dict 的按键取值：两者缺键时抛的异常类型
+    不同（dict 抛 KeyError，`sqlite3.Row` 抛 IndexError），统一收成 None。
+    """
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _load_chapter_paratext_cache(row: Any) -> dict[str, Any] | None:
+    """解析 `chapters.paratext_json` 里已持久化的记录；缺列/未算过/格式
+    不对一律返回 None（视为"尚未计算"）——fail-closed：宁可重算，不可信
+    一条读不懂的缓存。"""
+    raw = _row_value(row, "paratext_json")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if "content_hash" not in data or not isinstance(data.get("spans"), list):
+        return None
+    return data
+
+
+async def chapter_paratext_offsets(
+    conn, chapter_row: Any, *, operation_id: str,
+) -> tuple[list[tuple[int, int]], bool]:
+    """取/算/落库一章的 paratext 字符偏移（相对该章 `content` 本身，不含
+    任何跨章拼接前缀）。返回 ``(regions, cache_hit)``。
+
+    命中缓存（`content_hash` 匹配）直接返回，零模型调用；未命中调用
+    `paratext_spans` 算一次、原子写回 `chapters.paratext_json`。惰性：
+    谁先问谁先算，算完落库，后来者白捡（见
+    logs/paratext_single_source_plan.md Q3——世界书按 scope 抽样问到的
+    31/1616 章会被它第一次问到时算掉，其余 1585 章会在各自集第一次进
+    映射台时算掉）。
+
+    fail-closed：判不出来（模型失败/结构闸拒绝）落一条"算过但没找到任何
+    paratext"（`spans=[]`）——语义等价于 `strip_paratext` 原有的保守行为
+    （净化失败退回原文），不是"不确定"，不会因为这次没找到就每次重问。
+
+    并发写回幂等：两次算出的结果即便字面不同也都是对同一份 PARATEXT_RULE
+    的合法回答，后写者覆盖先写者不影响正确性——`chapters.content` 在本
+    仓库确认写入后不再原地修改（导入一次性 INSERT，重新导入走整项目
+    删除重建），不需要额外加锁。
+    """
+    content = _row_value(chapter_row, "content") or ""
+    content_hash = _cache_key(content)
+    cached = _load_chapter_paratext_cache(chapter_row)
+    if cached is not None and cached.get("content_hash") == content_hash:
+        spans = [
+            (int(item["start"]), int(item["end"]))
+            for item in cached.get("spans", [])
+            if isinstance(item, dict) and "start" in item and "end" in item
+        ]
+        return spans, True
+
+    anchors = await paratext_spans(content, operation_id=operation_id)
+    regions = _resolved_regions(content, list(anchors)) if anchors else []
+    chapter_id = _row_value(chapter_row, "id")
+    if chapter_id is not None:
+        payload = json.dumps({
+            "content_hash": content_hash,
+            "spans": [{"start": s, "end": e} for s, e in regions],
+            "computed_at": time.time(),
+        })
+        conn.execute("UPDATE chapters SET paratext_json=? WHERE id=?", (payload, chapter_id))
+        conn.commit()
+    return regions, False
+
+
+def paratext_segment_indexes(
+    segments: list[Any], regions: list[tuple[int, int]],
+) -> set[int]:
+    """给定 `index_source_segments` 产出的段列表和一组绝对偏移区间（同一份
+    文本坐标系），返回被区间覆盖到的 1-based 段序号集合——纯算术区间重叠
+    判断，不发起任何模型调用。序号口径与
+    `app.source_excerpt.chapter_title_segment_indexes` /
+    `app.production.prep_pack._chunk_segments` 的
+    `enumerate(segments, start=1)` 完全一致，三处共用同一份编号约定。
+    """
+    if not regions:
+        return set()
+    result: set[int] = set()
+    for index, segment in enumerate(segments, start=1):
+        seg_start, seg_end = segment.start_offset, segment.end_offset
+        for start, end in regions:
+            if seg_start < end and start < seg_end:
+                result.add(index)
+                break
+    return result
 
 
 def paratext_cache_clear() -> None:

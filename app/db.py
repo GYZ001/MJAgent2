@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS chapters (
     summary TEXT,
     char_count INTEGER DEFAULT 0,
     cleaned_lines INTEGER DEFAULT 0,
+    paratext_json TEXT,
     UNIQUE(project_id, idx),
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
@@ -1750,6 +1751,12 @@ MIGRATIONS = (
     "ALTER TABLE projects ADD COLUMN bible_text_provider TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE projects ADD COLUMN script_text_provider TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE projects ADD COLUMN board_text_provider TEXT NOT NULL DEFAULT ''",
+    # paratext 按章一次、持久化（logs/paratext_single_source_plan.md）：解析后的
+    # 字符偏移区间（不是锚点字符串），惰性计算——谁先需要谁算、算完落库，后来者
+    # 白捡。NULL＝尚未计算，区别于"算过但没找到任何 paratext"（spans 为空数组），
+    # 调用方必须查 IS NULL 而不是查 spans 是否为空（CLAUDE.md：空集合不等于无需
+    # 检查）。见 app.source_paratext.chapter_paratext_offsets。
+    "ALTER TABLE chapters ADD COLUMN paratext_json TEXT",
 )
 
 
