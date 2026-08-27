@@ -159,38 +159,41 @@ def test_bible_generate_precheck_binds_style_name(monkeypatch) -> None:
 
 def test_generate_bible_forces_backend_visual_style_prompt(monkeypatch) -> None:
     from app import stages
-    from app.schemas import Bible, Character, World
     import asyncio
 
     seen = {}
 
+    async def fake_roll_call(*_args, **_kwargs):
+        return []
+
     async def fake_loop(*_args, **_kwargs):
         seen["allow_warning_candidate"] = _kwargs["loop"].policy.allow_warning_candidate
         seen["repair_all_blockers"] = _kwargs["loop"].policy.repair_all_blockers
-        candidate = Bible(
+        candidate = stages._BibleRosterDraft(
             world=World(visual_style_canonical="模型自行写的画风"),
-            characters=[
-                Character(
-                    name="孟浩",
-                    role="主角",
-                    appearance_canonical="黑发少年，青色长衫，目光沉稳，身形清瘦，腰间系旧布袋",
-                ),
-            ],
+            characters=[stages._BibleRosterEntry(name="孟浩", role="主角")],
         )
         assert _args[4](candidate) == []
         seen["style_during_validation"] = candidate.world.visual_style_canonical
         return candidate
 
+    async def fake_details(entries, *_args, **_kwargs):
+        return [Character(
+            name=entries[0].name, role=entries[0].role,
+            appearance_canonical="黑发少年，青色长衫，目光沉稳，身形清瘦，腰间系旧布袋",
+        )]
+
+    monkeypatch.setattr(stages, "_recurring_character_names", fake_roll_call)
     monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
+    monkeypatch.setattr(stages, "_generate_character_detail_batch", fake_details)
+    monkeypatch.setattr(stages, "_verify_character_aliases_in_place", lambda *_args, **_kwargs: asyncio.sleep(0))
 
     result = asyncio.run(stages.generate_bible(
         [{"idx": 1, "title": "第一章", "content": "孟浩走入山中。"}],
         visual_style_prompt="电影级真实质感，现实人物建模，自然光影，细节丰富，东方仙侠风。",
     ))
 
-    assert result.world.visual_style_canonical == (
-        "电影级真实质感，现实人物建模，自然光影，细节丰富，东方仙侠风。"
-    )
+    assert result.world.visual_style_canonical == "电影级真实质感，现实人物建模，自然光影，细节丰富，东方仙侠风。"
     assert seen["style_during_validation"] == result.world.visual_style_canonical
     assert seen["allow_warning_candidate"] is False
     assert seen["repair_all_blockers"] is True
@@ -564,129 +567,45 @@ def test_roster_presence_dossier_empty_when_quote_not_locatable() -> None:
     assert stages._roster_presence_dossier(1, "毫不相关的原文。", "根本没有的引句") == []
 
 
-def test_generate_bible_keeps_source_in_repair_rounds_and_supplements(monkeypatch) -> None:
-    """修复轮不得截掉原文；必收名单缺人时用一次补录补齐，而不是把项目卡成 warning。"""
+def test_generate_bible_uses_small_roster_contract_and_single_character_details(monkeypatch) -> None:
     import asyncio
-    import json
-
     from app import stages
-    from app.harness import model_gateway
 
-    chapters = [
-        {"idx": i, "title": f"第{i}章", "content": f"第{i}章：孟浩与王有材同行，许师姐在旁。"}
-        for i in range(1, 21)
-    ]
     seen: dict[str, object] = {}
 
-    def _roll_call_evidence() -> list[dict]:
-        return [
-            {"chapter_index": 1, "quote": "第1章：孟浩与王有材同行，许师姐在旁。"},
-            {"chapter_index": 2, "quote": "第2章：孟浩与王有材同行，许师姐在旁。"},
-        ]
-
-    async def fake_chat_structured(_messages, **kwargs):
-        model_type = kwargs["model_type"]
-        return model_type(verdict="onstage", supporting_segment_index=1)
-
-    async def fake_chat(messages, **kwargs):
-        stage_key = str((kwargs.get("call_meta") or {}).get("stage_key") or "")
-        if stage_key == "character_roll_call":
-            return json.dumps({"candidates": [
-                {"primary_appellation": "孟浩", "formal_name": "",
-                 "onstage_evidence": _roll_call_evidence()},
-                {"primary_appellation": "王有材", "formal_name": "",
-                 "onstage_evidence": _roll_call_evidence()},
-                {"primary_appellation": "许师姐", "formal_name": "",
-                 "onstage_evidence": _roll_call_evidence()},
-            ]}, ensure_ascii=False)
-        seen["supplement_prompt"] = messages[-1]["content"]
-        return json.dumps({"characters": [
-            {
-                "name": "许师姐",
-                "role": "重要配角",
-                "appearance_canonical": "二十岁女子，墨发高马尾，银色素面长袍，身形清瘦，背后一柄银色长剑",
-                "personality": "外冷内热",
-                "speech_style": "话少句短，语气平淡，极少多余修饰",
-                "relationships": [{"to": "无名氏", "relation": "同门"}],
-            },
-            {
-                "name": "王有材",
-                "role": "重要配角",
-                "appearance_canonical": "十六七岁少年，黑色短发梳整齐，深棕短打木匠服，身形敦实，腰间挂木尺",
-                "personality": "略带莽撞",
-                "speech_style": "说话直白无修饰，情急下语速快，常用口语",
-                "relationships": [{"to": "孟浩", "relation": "同乡"}],
-            },
-            {
-                "name": "无名氏",
-                "role": "反派",
-                "appearance_canonical": "三十岁男子，黑色长发束冠，玄色长袍绣暗纹，身形高瘦，左颊一道旧疤",
-                "personality": "阴沉",
-                "speech_style": "语调平缓，句子极短，从不多说一个字",
-                "relationships": [],
-            },
-        ]}, ensure_ascii=False)
+    async def fake_roll_call(*_args, **_kwargs):
+        return [("小胖子", "李富贵", 2)]
 
     async def fake_loop(*args, **kwargs):
         seen["prompt"] = args[2]
         seen["repair_user_prompt_limit"] = kwargs["repair_user_prompt_limit"]
-        return Bible(
+        return stages._BibleRosterDraft(
             world=World(visual_style_canonical="国漫3D动画电影质感，精致光影，统一电影画面"),
-            characters=[Character(
-                name="孟浩",
-                role="主角",
-                appearance_canonical="十六七岁少年，黑色短发额前碎发，蓝色文士长衫，身形瘦弱，腰间挂布袋",
+            characters=[stages._BibleRosterEntry(
+                name="李富贵", role="重要配角", source_appellations=["小胖子"],
             )],
         )
 
-    monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+    async def fake_details(entries, *_args, **_kwargs):
+        seen["entries"] = entries
+        return [Character(
+            name="李富贵", role="重要配角",
+            appearance_canonical="十六七岁少年，黑色短发，深棕短打，身形敦实，腰间挂木尺",
+        )]
+
+    monkeypatch.setattr(stages, "_recurring_character_names", fake_roll_call)
     monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
+    monkeypatch.setattr(stages, "_generate_character_detail_batch", fake_details)
+    monkeypatch.setattr(stages, "_verify_character_aliases_in_place", lambda *_args, **_kwargs: asyncio.sleep(0))
 
-    bible = asyncio.run(stages.generate_bible(chapters))
+    bible = asyncio.run(stages.generate_bible([
+        {"idx": 1, "title": "第一章", "content": "小胖子与孟浩同行。"}
+    ]))
 
-    assert seen["repair_user_prompt_limit"] is None
-    assert "【必收角色名单】" in seen["prompt"]
-    assert "许师姐" in seen["prompt"]
-    # 必收名单里缺的人补齐；名单之外的人不得借补录混进人物谱。
-    assert [c.name for c in bible.characters] == ["孟浩", "许师姐", "王有材"]
-    assert "许师姐" in str(seen["supplement_prompt"])
-    # 补录进来的关系不得指向名单外的人，否则 validate_bible 会退回重写。
-    assert validate_bible(bible) == []
-
-
-def test_generate_bible_prompt_explains_bridging_chapter_for_aliases(monkeypatch) -> None:
-    """修复 B：规则 5 必须讲清楚 evidence_chapter_index 要选别名与正式姓名（或已确认别名）
-    共现的桥接章，不是别名第一次出现的章节；也要讲清楚不要自己给引句加引号包裹。这两点
-    对应全书别名回填 dry-run 12 条只过 0 条的诊断——generate_bible 内联申报别名走的是
-    同一套核验（`_verify_character_aliases_in_place`），提示词讲不清同样会全军覆没。"""
-    import asyncio
-
-    from app import stages
-    from app.schemas import Bible, Character, World
-
-    seen: dict[str, object] = {}
-
-    async def fake_loop(*args, **_kwargs):
-        seen["prompt"] = args[2]
-        return Bible(
-            world=World(visual_style_canonical="国漫3D动画电影质感，精致光影"),
-            characters=[Character(
-                name="孟浩", role="主角",
-                appearance_canonical="十六七岁少年，黑色短发额前碎发，蓝色文士长衫，身形瘦弱，腰间挂布袋",
-            )],
-        )
-
-    monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
-
-    asyncio.run(stages.generate_bible(
-        [{"idx": 1, "title": "第一章", "content": "孟浩走入山中。"}],
-    ))
-
-    prompt = str(seen["prompt"])
-    assert "不是该别名第一次出现的章节" in prompt
-    assert "同时出现" in prompt
-    assert "不要自己在引句前后加引号包裹" in prompt
+    assert [item.name for item in bible.characters] == ["李富贵"]
+    assert "不要生成外观" in str(seen["prompt"])
+    assert seen["repair_user_prompt_limit"] == 16000
+    assert seen["entries"][0].source_appellations == ["小胖子"]
 
 
 def test_paratext_scope_does_not_scale_with_book_length() -> None:

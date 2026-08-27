@@ -4659,6 +4659,7 @@ async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
 
 BIBLE_DETAIL_EVIDENCE_MAX_CHARS = 12000
 BIBLE_DETAIL_EVIDENCE_MAX_SEGMENTS = 12
+BIBLE_ROSTER_INPUT_MAX_CHARS = 16000
 BIBLE_DETAIL_TIMEOUT_S = 90.0
 BIBLE_DETAIL_MAX_ATTEMPTS = 2
 BIBLE_DETAIL_MAX_TOKENS = 4096
@@ -4859,7 +4860,10 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
                          visual_style_prompt: str | None = None) -> Bible:
     """Generate a small roster first, then fan out bounded per-character requests."""
     chapters = await _chapters_without_paratext(chapters)
-    chapters_text = _render_bible_source(chapters, head_chapters=BIBLE_HEAD_CHAPTERS)
+    chapters_text = _render_bible_source(
+        chapters, budget=BIBLE_ROSTER_INPUT_MAX_CHARS,
+        head_chapters=BIBLE_HEAD_CHAPTERS,
+    )
     chapters_by_idx = _chapters_by_idx(chapters)
     must_cover = await _recurring_character_names(chapters, project_id=project_id)
 

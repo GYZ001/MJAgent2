@@ -149,33 +149,29 @@ def test_validate_appearance_evidence_rejects_unverified_entry() -> None:
     assert "王有材" in errors[0]
 
 
-def test_bible_prompt_no_longer_requires_mandatory_signature_trait(monkeypatch) -> None:
-    """静态回归：改写后的 generate_bible prompt 不再含"必须包含...1 个标志性特征"这类
-    强制表述，且已经把 source_evidence/通用形态分层说清楚——防止未来有人无意中把配额
-    加回去。"""
-    seen: dict[str, object] = {}
+def test_character_detail_prompt_does_not_require_signature_trait(monkeypatch) -> None:
+    captured: dict[str, object] = {}
 
-    async def fake_loop(*args, **_kwargs):
-        seen["prompt"] = args[2]
-        return Bible(
-            world=World(visual_style_canonical="国漫3D动画电影质感，精致光影"),
-            characters=[Character(
-                name="孟浩", role="主角",
-                appearance_canonical="十六七岁少年，黑色短发额前碎发，蓝色文士长衫，身形瘦弱，腰间挂布袋",
-            )],
-        )
+    async def fake_chat(messages, **_kwargs):
+        captured["prompt"] = messages[-1]["content"]
+        return json.dumps({
+            "appearance_canonical": "十六七岁少年，黑色短发额前碎发，蓝色文士长衫，身形瘦弱，腰间挂布袋",
+            "personality": "", "speech_style": "句式简短，语气平稳，少用修饰",
+            "relationships": [], "aliases": [], "source_evidence": [],
+        }, ensure_ascii=False)
 
-    monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
-
-    asyncio.run(stages.generate_bible(
-        [{"idx": 1, "title": "第一章", "content": "孟浩走入山中。"}],
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    asyncio.run(stages._generate_character_detail(
+        stages._BibleRosterEntry(name="孟浩", role="主角"),
+        roster_names=["孟浩"], evidence_pack="【第1章·证据】\n孟浩走入山中。",
+        style="国漫3D动画电影质感，精致光影", chapters_by_idx={1: "孟浩走入山中。"},
+        project_id="p1",
     ))
 
-    prompt = str(seen["prompt"])
+    prompt = str(captured["prompt"])
     assert "必须包含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征" not in prompt
     assert "source_evidence" in prompt
-    assert "通用形态" in prompt
-    assert "标志性特征" in prompt
+    assert "不确定的关系、别名、标志性特征证据留空" in prompt
 
 
 def test_supplement_bible_characters_prompt_no_longer_requires_mandatory_signature_trait(
