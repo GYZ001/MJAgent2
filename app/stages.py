@@ -1938,7 +1938,10 @@ BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS = 8192
 # 旁文本净化的三个闸（见 `_chapters_without_paratext` docstring 里的事故口径）：
 BIBLE_PARATEXT_MARGIN_CHAPTERS = 3   # 净化只会让正文变短，头部因此可能多吃进几章
 BIBLE_PARATEXT_CONCURRENCY = 8       # 净化各章互不依赖，chat 路径也没有全局信号量
-BIBLE_PARATEXT_BUDGET_S = 120.0      # 净化阶段总时限，超时的章原样进入下游
+# 旁文本只是可选净化，绝不能占据人物谱主链路两分钟。真实调用一般 2~5 秒；
+# 首批并发在短预算内能完成多少就采用多少，其余原文直通并留给后续按章缓存。
+BIBLE_PARATEXT_BUDGET_S = 15.0
+BIBLE_PARATEXT_CHAPTER_TIMEOUT_S = 8.0
 
 
 def _bible_source_plan(
@@ -4605,10 +4608,16 @@ async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
     async def _clean(slot: int) -> tuple[int, str, bool]:
         chapter = valid[slot]
         async with limiter:
-            regions, cache_hit = await chapter_paratext_offsets(
-                conn, chapter,
-                operation_id=f"bible.paratext:{chapter.get('id') or positions[slot]}",
-            )
+            try:
+                regions, cache_hit = await asyncio.wait_for(
+                    chapter_paratext_offsets(
+                        conn, chapter,
+                        operation_id=f"bible.paratext:{chapter.get('id') or positions[slot]}",
+                    ),
+                    timeout=BIBLE_PARATEXT_CHAPTER_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                return slot, chapter.get("content") or "", False
         stripped = remove_offsets(chapter.get("content") or "", regions)
         return slot, stripped, cache_hit
 
