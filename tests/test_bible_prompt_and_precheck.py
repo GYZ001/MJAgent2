@@ -213,8 +213,10 @@ def test_bible_source_keeps_first_ten_chapters_complete() -> None:
         assert f"第{i}章结尾。" in guaranteed
 
 
-def test_recurring_character_names_ranks_by_lookahead_occurrences(monkeypatch) -> None:
-    """点名之后由后端逐字统计：出现多次才算重要，改写出来的名字不算数。"""
+def test_recurring_character_names_ranks_by_verified_onstage_evidence(monkeypatch) -> None:
+    """点名之后由结构闸 + 独立裁决闸核验：只有真的证明本人在场、且核验通过的证据
+    才计数（verified_onstage_count），不再是名字字符串出现次数。编造的引句（结构闸
+    挡下）、只出现一次的候选（低于阈值）都不该进必收名单。"""
     import asyncio
     import json
 
@@ -222,7 +224,7 @@ def test_recurring_character_names_ranks_by_lookahead_occurrences(monkeypatch) -
     from app.harness import model_gateway
 
     chapters = [
-        {"idx": 1, "title": "第一章", "content": "孟浩与王有材同行，孟浩开口。"},
+        {"idx": 1, "title": "第一章", "content": "孟浩与王有材同行，孟浩开口说话。"},
         {"idx": 2, "title": "第二章", "content": "孟浩再遇王有材，路人甲一闪而过。"},
     ] + [
         {"idx": i, "title": f"第{i}章", "content": f"第{i}章：孟浩独行，王有材追来。"}
@@ -231,14 +233,334 @@ def test_recurring_character_names_ranks_by_lookahead_occurrences(monkeypatch) -
 
     async def fake_chat(_messages, **_kwargs):
         return json.dumps({
-            "names": ["孟浩", "王有材", "路人甲", "孟浩然"],
+            "candidates": [
+                {
+                    "primary_appellation": "孟浩", "formal_name": "",
+                    "onstage_evidence": [
+                        {"chapter_index": 1, "quote": "孟浩与王有材同行，孟浩开口说话。"},
+                        {"chapter_index": 2, "quote": "孟浩再遇王有材，路人甲一闪而过。"},
+                    ],
+                },
+                {
+                    # 只有一条通过结构闸+裁决闸的证据：低于阈值 2，不该进名单。
+                    "primary_appellation": "王有材", "formal_name": "",
+                    "onstage_evidence": [
+                        {"chapter_index": 1, "quote": "孟浩与王有材同行，孟浩开口说话。"},
+                    ],
+                },
+                {
+                    # 编造出来的引句：结构闸 G2（逐字命中原文）会挡下，0 条通过。
+                    "primary_appellation": "孟浩然", "formal_name": "",
+                    "onstage_evidence": [
+                        {"chapter_index": 1, "quote": "孟浩然从天而降大喝一声。"},
+                    ],
+                },
+                {
+                    "primary_appellation": "路人甲", "formal_name": "",
+                    "onstage_evidence": [
+                        {"chapter_index": 2, "quote": "孟浩再遇王有材，路人甲一闪而过。"},
+                    ],
+                },
+            ],
         }, ensure_ascii=False)
 
+    async def fake_chat_structured(_messages, **kwargs):
+        model_type = kwargs["model_type"]
+        return model_type(verdict="onstage", supporting_segment_index=1)
+
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
     ranked = asyncio.run(stages._recurring_character_names(chapters))
 
-    assert [name for name, _ in ranked] == ["孟浩", "王有材"]
-    assert dict(ranked)["孟浩"] >= dict(ranked)["王有材"]
+    assert ranked == [("孟浩", "", 2)]
+
+
+def test_recurring_character_names_structural_gate_rejects_each_failure_mode(monkeypatch) -> None:
+    """结构闸 G1-G3 逐条独立核验：引句不是原文逐字子串（G2）、称呼不在引句里（G3）、
+    章节号落在统计窗口之外（G1）——任一不满足直接丢弃该条证据，不发起裁决调用
+    （省模型调用，也是"不确定不登记"的第一道闸）。"""
+    import asyncio
+    import json
+
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters = [
+        {"idx": i, "title": f"第{i}章", "content": f"第{i}章：真实原文占位。"}
+        for i in range(1, 21)
+    ]
+
+    async def fake_chat(_messages, **_kwargs):
+        return json.dumps({
+            "candidates": [
+                {
+                    # G2：quote 不是该章原文的逐字子串（编造的引句）。
+                    "primary_appellation": "甲", "formal_name": "",
+                    "onstage_evidence": [{"chapter_index": 1, "quote": "甲从天而降。"}],
+                },
+                {
+                    # G3：appellation 既不在 quote 里也不是其子串。
+                    "primary_appellation": "乙", "formal_name": "",
+                    "onstage_evidence": [{"chapter_index": 2, "quote": "第2章：真实原文占位。"}],
+                },
+                {
+                    # G1：chapter_index 落在统计窗口（1~20）之外。
+                    "primary_appellation": "丙", "formal_name": "",
+                    "onstage_evidence": [{"chapter_index": 99, "quote": "丙的引句。"}],
+                },
+            ],
+        }, ensure_ascii=False)
+
+    verdict_calls: list[str] = []
+
+    async def fake_chat_structured(_messages, **kwargs):
+        verdict_calls.append((kwargs.get("call_meta") or {}).get("appellation", ""))
+        model_type = kwargs["model_type"]
+        return model_type(verdict="onstage", supporting_segment_index=1)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+    ranked = asyncio.run(stages._recurring_character_names(chapters))
+
+    assert ranked == []
+    assert verdict_calls == []
+
+
+def test_recurring_character_names_presence_verdict_gate(monkeypatch) -> None:
+    """结构闸通过后仍要过独立低温裁决闸：verdict=="mentioned_only" 不计入；
+    verdict=="onstage" 但段号钉证失败（模型编造卷宗外的段号）不计入；
+    verdict=="onstage" 且钉证通过才计入 verified_onstage_count。"""
+    import asyncio
+    import json
+
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters = [
+        {"idx": i, "title": f"第{i}章", "content": f"第{i}章：甲现身，乙现身，丙现身。"}
+        for i in range(1, 21)
+    ]
+
+    def _evidence() -> list[dict]:
+        return [
+            {"chapter_index": 1, "quote": "第1章：甲现身，乙现身，丙现身。"},
+            {"chapter_index": 2, "quote": "第2章：甲现身，乙现身，丙现身。"},
+        ]
+
+    async def fake_chat(_messages, **_kwargs):
+        return json.dumps({
+            "candidates": [
+                {"primary_appellation": "甲", "formal_name": "", "onstage_evidence": _evidence()},
+                {"primary_appellation": "乙", "formal_name": "", "onstage_evidence": _evidence()},
+                {"primary_appellation": "丙", "formal_name": "", "onstage_evidence": _evidence()},
+            ],
+        }, ensure_ascii=False)
+
+    async def fake_chat_structured(_messages, **kwargs):
+        appellation = (kwargs.get("call_meta") or {}).get("appellation", "")
+        model_type = kwargs["model_type"]
+        if appellation == "甲":
+            return model_type(verdict="mentioned_only", supporting_segment_index=1)
+        if appellation == "乙":
+            # 钉证失败：段号伪造成卷宗里不存在的编号。
+            return model_type(verdict="onstage", supporting_segment_index=99)
+        return model_type(verdict="onstage", supporting_segment_index=1)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+    ranked = asyncio.run(stages._recurring_character_names(chapters))
+
+    assert ranked == [("丙", "", 2)]
+
+
+def test_recurring_character_names_matches_real_project_evidence_shapes(monkeypatch) -> None:
+    """本项目真实数据验收（proj_3ac0b627fa46 前 20 章逐字核实过的引句）：王伯/周员外/
+    靠山老祖三个假阳性角色在前 20 章窗口内的命中全部是身份/背景交代（旁白转述、
+    他人台词提及），没有一条是本人在场；小胖子（=李富贵）则有本人真实的动作/情绪
+    细节描写。字符串用 \\uXXXX 转义逐字录入，保证与原文数据库取值字节一致，不依赖
+    人工誊抄中文标点的准确性。
+
+    裁决闸本身用 mock 固定为人工研判结论（结构闸+聚合逻辑是本测试真正要验证的
+    东西，不是"真的调用模型会不会判对"——那需要不 mock 的真实集成 dry run，
+    不适合放进自动化单元测试套件）。"""
+    import asyncio
+    import json
+
+    from app import stages
+    from app.harness import model_gateway
+
+    # 王伯：孟浩自陈家境时顺带比较（"甚至不如王伯的木匠铺子赚钱"），本人未出场。
+    wang_bo_a = (
+        "“哪怕是县城里的教习先生，"
+        "每月也只有几钱银子，甚至不"
+        "如王伯的木匠铺子赚钱，早知"
+        "如此头些年不去读书，和王老"
+        "伯去学木匠手艺，想来日后总"
+        "算能解决温饱，好过如今一无"
+        "所有。"
+    )
+    # 王伯：孟浩感慨木匠铺的王伯只剩这一个儿子，仍是背景交代，本人未出场。
+    wang_bo_b = (
+        "小胖子神色露出悲伤，孟浩叹"
+        "了口气，当年一同上山的四人"
+        "，这还不到一年就听闻死去一"
+        "个，他内心也很不好受，尤其"
+        "想到木匠铺的王伯只有这一子"
+        "，心里更为难受起来。"
+    )
+    # 周员外：孟浩的内心独白提及欠债对象，周员外本人未出场。
+    zhou_a = (
+        "“家里已经没有多少粮食了，"
+        "银两也都花的所剩无几，还欠"
+        "了周员外三两银子，以后……"
+        "怎么办。"
+    )
+    zhou_b = (
+        "孟浩神色有些古怪，暗道这小"
+        "胖子人不大，居然都说了亲，"
+        "自己这么大年纪，如今连女人"
+        "手都没摸过，不由的感慨还是"
+        "有钱好啊，这小胖子家里家财"
+        "万贯，衣食无忧，而自己一穷"
+        "二白，祖屋去年都卖掉，如今"
+        "还欠下周员外一屁股债。"
+    )
+    # 靠山老祖：宗门历史沿革交代，"失踪四百余年"，本人显然不可能出场。
+    kao_a = (
+        "实际上靠山宗原本也不是叫这"
+        "个名字，只不过在千年前出了"
+        "一位轰动整个南域的修士，此"
+        "人自号靠山老祖，更是强行将"
+        "宗门之名改为靠山宗，横行霸"
+        "道，几乎搜刮了赵国所有宗门"
+        "之宝，风光一时无两。"
+    )
+    kao_b = (
+        "靠山宗与其他宗门有些不同，"
+        "外宗在下，反倒是杂役可以居"
+        "住半山腰，这一点是当年靠山"
+        "老祖不知什么原因定下的门规。"
+    )
+    # 小胖子（=李富贵）：本人的动作/情绪描写，真正在场。
+    fatty_a = (
+        "小胖子身子猛地哆嗦了一下，"
+        "双眼露出强烈的恐惧，连忙把"
+        "自己的嘴捂住，身子颤抖的越"
+        "加剧烈。"
+    )
+    fatty_b = (
+        "“我爹是财主，我应该也是财"
+        "主，我不做杂役……”小胖子"
+        "哭的极为伤心，身子哆嗦时肥"
+        "肉也随着颤抖。"
+    )
+
+    chapters = [
+        {"idx": 1, "title": "第一章", "content": wang_bo_a},
+        {"idx": 2, "title": "第二章", "content": wang_bo_b},
+        {"idx": 3, "title": "第三章", "content": zhou_a},
+        {"idx": 4, "title": "第四章", "content": zhou_b},
+        {"idx": 5, "title": "第五章", "content": kao_a},
+        {"idx": 6, "title": "第六章", "content": kao_b},
+        {"idx": 7, "title": "第七章", "content": fatty_a},
+        {"idx": 8, "title": "第八章", "content": fatty_b},
+    ]
+
+    async def fake_chat(_messages, **_kwargs):
+        return json.dumps({
+            "candidates": [
+                {
+                    "primary_appellation": "王伯", "formal_name": "",
+                    "onstage_evidence": [
+                        {"chapter_index": 1, "quote": wang_bo_a},
+                        {"chapter_index": 2, "quote": wang_bo_b},
+                    ],
+                },
+                {
+                    "primary_appellation": "周员外", "formal_name": "",
+                    "onstage_evidence": [
+                        {"chapter_index": 3, "quote": zhou_a},
+                        {"chapter_index": 4, "quote": zhou_b},
+                    ],
+                },
+                {
+                    "primary_appellation": "靠山老祖", "formal_name": "",
+                    "onstage_evidence": [
+                        {"chapter_index": 5, "quote": kao_a},
+                        {"chapter_index": 6, "quote": kao_b},
+                    ],
+                },
+                {
+                    "primary_appellation": "小胖子", "formal_name": "李富贵",
+                    "onstage_evidence": [
+                        {"chapter_index": 7, "quote": fatty_a},
+                        {"chapter_index": 8, "quote": fatty_b},
+                    ],
+                },
+            ],
+        }, ensure_ascii=False)
+
+    mentioned_only = {"王伯", "周员外", "靠山老祖"}
+
+    async def fake_chat_structured(_messages, **kwargs):
+        appellation = (kwargs.get("call_meta") or {}).get("appellation", "")
+        model_type = kwargs["model_type"]
+        verdict = "mentioned_only" if appellation in mentioned_only else "onstage"
+        return model_type(verdict=verdict, supporting_segment_index=1)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+    ranked = asyncio.run(stages._recurring_character_names(chapters))
+
+    assert ranked == [("小胖子", "李富贵", 2)]
+
+
+def test_bible_covers_name_matches_verified_alias_not_only_canonical_name() -> None:
+    """难点 C 直接验收：must_cover 条目是绰号"小胖子"，人物谱里角色是 name="李富贵" +
+    aliases 含 text="小胖子" → 判定为已覆盖，不触发补录。别名命中要求精确相等
+    （不用子串）：单字"胖"不该因为是"小胖子"的子串就被判定命中一堆无关别名。
+    空集合天然未覆盖，不是被短路跳过检查。"""
+    from app.schemas import Bible, Character, CharacterAlias, World
+
+    from app import stages
+
+    bible = Bible(
+        characters=[Character(
+            name="李富贵", role="重要配角",
+            appearance_canonical="二十岁男子，圆脸微胖，粗麻布衣，腰系布带，笑容憨厚",
+            aliases=[CharacterAlias(
+                text="小胖子", name_kind="referential",
+                evidence_chapter_index=2, evidence_quote="占位证据引句",
+            )],
+        )],
+        world=World(visual_style_canonical="国漫3D动画电影质感，精致光影"),
+    )
+
+    assert stages._bible_covers_name(bible, {"小胖子", ""}) is True
+    assert stages._bible_covers_name(bible, {"李富贵"}) is True
+    assert stages._bible_covers_name(bible, {"胖"}) is False
+    assert stages._bible_covers_name(bible, {"张三"}) is False
+    assert stages._bible_covers_name(bible, set()) is False
+
+
+def test_roster_presence_dossier_locates_quote_with_surrounding_context() -> None:
+    """在场裁决卷宗检索：定位 quote 所在自然段，连同前后各 1 段一并收录。"""
+    from app import stages
+
+    chapter_text = "段一内容在这里。\n\n段二含有关键引句在此。\n\n段三收尾内容。"
+    dossier = stages._roster_presence_dossier(5, chapter_text, "段二含有关键引句在此。")
+
+    assert [item["segment_index"] for item in dossier] == [1, 2, 3]
+    assert dossier[1]["text"] == "段二含有关键引句在此。"
+    assert all(item["chapter_idx"] == 5 for item in dossier)
+
+
+def test_roster_presence_dossier_empty_when_quote_not_locatable() -> None:
+    """quote 在分段结果里定位不到（极端情况）时返回空列表，交由调用方按
+    no_presence_dossier 拒绝——不确定不登记，不是跳过检查。"""
+    from app import stages
+
+    assert stages._roster_presence_dossier(1, "毫不相关的原文。", "根本没有的引句") == []
 
 
 def test_generate_bible_keeps_source_in_repair_rounds_and_supplements(monkeypatch) -> None:
@@ -255,10 +577,27 @@ def test_generate_bible_keeps_source_in_repair_rounds_and_supplements(monkeypatc
     ]
     seen: dict[str, object] = {}
 
+    def _roll_call_evidence() -> list[dict]:
+        return [
+            {"chapter_index": 1, "quote": "第1章：孟浩与王有材同行，许师姐在旁。"},
+            {"chapter_index": 2, "quote": "第2章：孟浩与王有材同行，许师姐在旁。"},
+        ]
+
+    async def fake_chat_structured(_messages, **kwargs):
+        model_type = kwargs["model_type"]
+        return model_type(verdict="onstage", supporting_segment_index=1)
+
     async def fake_chat(messages, **kwargs):
         stage_key = str((kwargs.get("call_meta") or {}).get("stage_key") or "")
         if stage_key == "character_roll_call":
-            return json.dumps({"names": ["孟浩", "王有材", "许师姐"]}, ensure_ascii=False)
+            return json.dumps({"candidates": [
+                {"primary_appellation": "孟浩", "formal_name": "",
+                 "onstage_evidence": _roll_call_evidence()},
+                {"primary_appellation": "王有材", "formal_name": "",
+                 "onstage_evidence": _roll_call_evidence()},
+                {"primary_appellation": "许师姐", "formal_name": "",
+                 "onstage_evidence": _roll_call_evidence()},
+            ]}, ensure_ascii=False)
         seen["supplement_prompt"] = messages[-1]["content"]
         return json.dumps({"characters": [
             {
@@ -300,6 +639,7 @@ def test_generate_bible_keeps_source_in_repair_rounds_and_supplements(monkeypatc
         )
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
     monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
 
     bible = asyncio.run(stages.generate_bible(chapters))

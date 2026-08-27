@@ -1923,7 +1923,7 @@ _BIBLE_TAIL_SLICE_CHARS = 1500   # 每个抽样章节注入的开头字数
 
 BIBLE_HEAD_CHAPTERS = 10         # 首版人物谱必须完整通读的章节数
 BIBLE_LOOKAHEAD_CHAPTERS = 10    # 判定「这个角色重不重要」时再往后看的章节数
-BIBLE_RECURRING_MIN_HITS = 3     # 在通读窗口内逐字出现多少次才算重要角色
+BIBLE_RECURRING_MIN_ONSTAGE_QUOTES = 2  # 至少两条经裁决闸核验的「本人在场」证据才算重要角色
 BIBLE_MUST_COVER_MAX = 12        # 必收名单上限，避免把生成预算耗在龙套身上
 
 # 旁文本净化的三个闸（见 `_chapters_without_paratext` docstring 里的事故口径）：
@@ -2007,10 +2007,26 @@ def _render_bible_source(chapters: list[dict], budget: int = BIBLE_SOURCE_BUDGET
     return "\n\n".join(blocks)
 
 
-class _CharacterRollCall(BaseModel):
-    """人物点名合同：只要名字，不要描写（描写留给正式的人物谱调用）。"""
+class _RosterOnstageEvidence(BaseModel):
+    """一条「本人在场」证据申报：模型只负责申报，是否真的成立由后端结构闸 +
+    独立裁决闸核验（见 `_recurring_character_names` docstring）。"""
 
-    names: list[str] = Field(default_factory=list)
+    chapter_index: int = -1
+    quote: str = ""
+
+
+class _RosterCandidate(BaseModel):
+    """人物点名候选：只要能证明本人在场的证据，不要泛泛的名字统计。"""
+
+    primary_appellation: str = ""      # 原文最常用称呼，允许绰号/外号/代称
+    formal_name: str = ""              # 原文已揭示的正式姓名；未揭示则空串，不得编造
+    onstage_evidence: list[_RosterOnstageEvidence] = Field(default_factory=list)
+
+
+class _CharacterRollCall(BaseModel):
+    """人物点名合同：候选 + 在场证据，不再只是名字字符串。"""
+
+    candidates: list[_RosterCandidate] = Field(default_factory=list)
 
 
 class _BibleSupplement(BaseModel):
@@ -2019,15 +2035,41 @@ class _BibleSupplement(BaseModel):
     characters: list[Character] = Field(default_factory=list)
 
 
-async def _recurring_character_names(chapters: list[dict]) -> list[tuple[str, int]]:
-    """产出「必收角色名单」：先点名，再按原文逐字出现次数判定谁重要。
+async def _recurring_character_names(
+    chapters: list[dict], *, project_id: str | None = None,
+) -> list[tuple[str, str, int]]:
+    """产出「必收角色名单」：先点名+自报在场证据，再用结构闸+独立裁决闸核验每条
+    证据是不是真的证明本人在场，核验通过的证据条数（`verified_onstage_count`）
+    才是判据——不再是"名字字符串在原文窗口里出现的次数"。
 
-    只靠一次生成调用时，模型往往只写开头几段里的人：它既没有全局出现次数，
-    也没有动力把后面才反复登场的角色补上。这里把判断拆成两步——
-    模型只负责在前 BIBLE_HEAD_CHAPTERS 章里点出候选名字（它擅长这件事），
-    后端再在「前 N 章 + 往后 BIBLE_LOOKAHEAD_CHAPTERS 章」里逐字统计出现次数
-    （这件事必须精确，不能交给模型），出现多次的才进必收名单。
-    统计窗口失败时返回空名单，绝不阻断人物谱本身。
+    根因：旧判据把字符串出现次数当"重不重要"的代理信号，两个方向都会失效。
+    假阳性方向——王伯/周员外/靠山老祖的命中全部来自旁白交代身份或他人台词提及，
+    本人从未真正在场，却因为次数够多进了必收名单。假阴性方向——这个信号只统计
+    模型报出的候选名字本身的出现次数，原文如果通篇用绰号称呼一个人（本人几乎
+    只以"小胖子"出现，正式姓名仅出现一两次）而此刻圣经正文还没生成、没有别名表
+    能把绰号翻译回正式姓名，这个人就会被判定为不重要。
+
+    新流程：
+    1. 模型只在前 BIBLE_HEAD_CHAPTERS 章里点名，每个候选申报 primary_appellation
+       （原文最常用写法，允许绰号）+ formal_name（原文已揭示的正式姓名，未揭示则
+       空）+ onstage_evidence（能证明本人在场的原文引句列表）——绰号本身就能直接
+       充当"必收货币"，不需要一张此刻还不存在的别名表做转译。
+    2. 代码结构闸，逐条证据：G1 引句所在章节必须落在统计窗口（前 HEAD+LOOKAHEAD
+       章）内；G2 引句必须逐字命中该章原文（允许模型自行加/脱一层引号的噪音）；
+       G3 称呼（primary_appellation 或 formal_name 中非空的那个）必须是引句子串。
+       任一不满足直接丢弃该条证据，不发起裁决调用。
+    3. 结构闸通过的证据才发起独立低温模型裁决（`_roster_presence_verdict_call`，
+       与别名裁决闸同一分工范式：代码检索卷宗 → 模型独立裁决 → 代码结构性钉证）：
+       只问这段原文里称呼所指的人物本人是不是真的在场（本人说话/动作/被叙述在场，
+       而不是被谈论、被指涉、被交代来历的对象）；裁决通过（verdict=="onstage" 且
+       段号钉证通过）才计入该候选的 `verified_onstage_count`。
+    4. 按 `verified_onstage_count` 降序（同分按 primary_appellation 字典序打破
+       平局）排序，取 >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES 的候选，最多保留
+       BIBLE_MUST_COVER_MAX 个。
+
+    点名调用失败时返回空名单，绝不阻断人物谱本身；结构闸/裁决闸任一步不通过，
+    该条证据直接丢弃，不确定不登记（不会因为某一条证据没通过就拒绝整个候选，
+    只是那一条不计数）。
     """
     valid = [ch for ch in chapters if (ch.get("content") or "").strip()]
     if not valid:
@@ -2036,26 +2078,40 @@ async def _recurring_character_names(chapters: list[dict]) -> list[tuple[str, in
     head_text = _render_bible_source(head, head_chapters=BIBLE_HEAD_CHAPTERS)
     if not head_text.strip():
         return []
-    prompt = f"""任务：从下面的小说正文里点出【出场人物的名字】，只点名，不要写任何描写。
+    prompt = f"""任务：从下面的小说正文里找出【出场人物】，为每个人物申报能证明他本人真的出现在画面中的证据，不要只给名字。
 
 要求：
-1. 只输出原文中稳定出现的人名或固定称谓（如"孟浩""王有材""许师姐"）。
-2. 不要输出"少年""女子""老者""两人"这类泛称，也不要输出宗门名、地名、法宝名。
-3. 同一个人只输出一次，用原文里最常见的那个写法，不要把同一人的多个称呼都列出来。
-4. 名字必须逐字出现在正文中，不得改写、简称或补全。
-5. 宁多勿漏：戏份很少的人也可以点出来，后端会按出现次数再筛一遍。
+1. primary_appellation：原文里称呼这个人物最常用、最稳定的一种写法——可以是正式姓名，也可以是外号、
+   绰号、尊称或代称（如"小胖子""许师姐""靠山老祖"），取原文实际出现频率最高的那一种写法，逐字照抄，
+   不得改写、简称或补全。
+2. formal_name：这个人物在原文中已经明确揭示过的正式姓名；原文尚未揭示正式姓名（只有外号/代称），
+   就填空字符串，不要猜测或编造。
+3. onstage_evidence：列出若干条能证明这个人物本人真正出现在画面中的原文证据（本人说话、本人动作、
+   或被旁白直接叙述为身处此地），每条给 {{"chapter_index": int, "quote": str}}：
+   - chapter_index 取原文分块【】块头里的数字；
+   - quote 必须是该章原文的逐字引句（不超过约 80 字），且这句引文里必须能看到 primary_appellation
+     或 formal_name 中的至少一个——原文怎么写就怎么抄，不要自己添加或删除引号；
+   - 判断依据是这句话本身的叙述位置：这个人物是不是这句话所描述的那个时空里正在行动、正在说话、或
+     被旁白直接叙述为置身其中的人，才算在场；如果这句话里正在行动、说话、被叙述置身其中的是别人，
+     这个称呼只是作为被谈论、被指涉、被交代来历或状态的对象出现在别人的叙述或话语里，即使字面提到
+     了这个称呼，这个人物本人也没有置身在这句话所写的场景中，不算在场，不要拿这种句子当证据；
+   - 尽量把你能找到的在场证据都列出来，不要只列一条；确实找不到任何在场证据的人物，onstage_evidence
+     给空列表，不要为了凑数编造。
+4. 不要输出"少年""女子""老者""两人"这类无法从人群中单独指认出具体是谁的泛称，也不要输出宗门名、
+   地名、法宝名。
+5. 同一个人只输出一个条目；戏份很少的人也可以列出来，后端会按核验通过的在场证据条数再筛一遍。
 
 小说正文：
 {head_text}
 
 输出 JSON Schema：
-{{"names": [str]}}"""
+{{"candidates": [{{"primary_appellation": str, "formal_name": str, "onstage_evidence": [{{"chapter_index": int, "quote": str}}]}}]}}"""
     try:
         raw = await model_gateway.chat(
             [{"role": "system", "content": SYSTEM_PREFIX},
              {"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=2048,
+            max_tokens=4096,
             call_meta={
                 "stage": "人物点名",
                 "stage_key": "character_roll_call",
@@ -2064,60 +2120,169 @@ async def _recurring_character_names(chapters: list[dict]) -> list[tuple[str, in
                 "expected_json": True,
             },
         )
-        names = _CharacterRollCall.model_validate(extract_json(raw)).names
+        candidates = _CharacterRollCall.model_validate(extract_json(raw)).candidates
     except Exception as exc:  # noqa: BLE001 - 点名只是覆盖度提示，失败不阻断人物谱
         log_provider_call(
             "character_roll_call", config.MODEL_TEXT, "FAILED", None, 0,
             meta={"error": str(exc)[:300]},
         )
         return []
-    head_raw = "\n".join(ch["content"] for ch in head)
-    window_raw = "\n".join(
-        ch["content"]
-        for ch in valid[:BIBLE_HEAD_CHAPTERS + BIBLE_LOOKAHEAD_CHAPTERS]
+
+    # 结构闸 G1 用的窗口原文：前 HEAD 章 + 往后 LOOKAHEAD 章，按章节序号建索引
+    # （复用 `_chapters_by_idx`，与别名核验同一个查找表构造方式）。
+    window_chapters_by_idx = _chapters_by_idx(
+        valid[:BIBLE_HEAD_CHAPTERS + BIBLE_LOOKAHEAD_CHAPTERS]
     )
-    ranked: list[tuple[str, int]] = []
     seen: set[str] = set()
-    for value in names:
-        name = str(value or "").strip()
-        # 必须逐字出现在通读章节里：模型改写或补全出来的名字不进必收名单。
-        if not 2 <= len(name) <= 8 or name in seen or name not in head_raw:
+    verified_counts: dict[str, int] = {}
+    formal_names: dict[str, str] = {}
+    evidence_total = 0
+    structural_pass = 0
+    verdict_pass = 0
+    for candidate in candidates:
+        appellation = (candidate.primary_appellation or "").strip()
+        formal = (candidate.formal_name or "").strip()
+        if not appellation or appellation in seen:
             continue
-        seen.add(name)
-        hits = window_raw.count(name)
-        if hits >= BIBLE_RECURRING_MIN_HITS:
-            ranked.append((name, hits))
-    ranked.sort(key=lambda item: (-item[1], item[0]))
-    return ranked[:BIBLE_MUST_COVER_MAX]
+        seen.add(appellation)
+        formal_names[appellation] = formal
+        count = 0
+        for evidence in candidate.onstage_evidence:
+            evidence_total += 1
+            quote = (evidence.quote or "").strip()
+            if not quote:
+                continue
+            # G1：chapter_index 必须落在本轮统计窗口内，防止模型编造窗口外的章号。
+            chapter_text = window_chapters_by_idx.get(evidence.chapter_index, "")
+            if not chapter_text:
+                continue
+            # G2：quote 必须是该章原文的逐字子串（允许脱一层配对引号的噪音）。
+            if not any(v in chapter_text for v in _quote_comparison_variants(quote)):
+                continue
+            # G3：称呼（primary_appellation 或 formal_name 中非空的那个）必须是
+            # quote 的子串。
+            appellations = [value for value in (appellation, formal) if value]
+            if not any(value in quote for value in appellations):
+                continue
+            structural_pass += 1
+            dossier = _roster_presence_dossier(evidence.chapter_index, chapter_text, quote)
+            if not dossier:
+                continue  # no_presence_dossier：不确定不登记，不是跳过检查
+            try:
+                verdict = await _roster_presence_verdict_call(
+                    appellation=appellation, dossier=dossier, project_id=project_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - 裁决失败按不确定处理：不确定不登记
+                log_provider_call(
+                    "character_roster_presence_verdict", config.MODEL_TEXT,
+                    "FAILED", None, 0,
+                    meta={"appellation": appellation, "error": str(exc)[:300]},
+                )
+                continue
+            if verdict.verdict != "onstage":
+                continue
+            if _alias_verdict_pin_segment(dossier, verdict.supporting_segment_index) is None:
+                continue
+            verdict_pass += 1
+            count += 1
+        verified_counts[appellation] = count
 
-
-def _bible_covers_name(bible: Bible, name: str) -> bool:
-    """必收名字是否已经在人物谱里（允许模型用更完整的正式姓名收录同一人）。"""
-    return any(
-        character.name == name
-        or (name and character.name and (name in character.name or character.name in name))
-        for character in bible.characters
+    ranked = [
+        (appellation, formal_names.get(appellation, ""), count)
+        for appellation, count in verified_counts.items()
+        if count >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
+    ]
+    ranked.sort(key=lambda item: (-item[2], item[0]))
+    result = ranked[:BIBLE_MUST_COVER_MAX]
+    # 记账：供人工从数字上判断「这次点名是不是明显偏少/裁决通过率是不是异常低」，
+    # 不是核验闸门本身。
+    log_provider_call(
+        "character_roll_call_coverage", config.MODEL_TEXT, "OK", None, 0,
+        meta={
+            "candidates": len(candidates),
+            "evidence_total": evidence_total,
+            "structural_gate_passed": structural_pass,
+            "presence_verdict_passed": verdict_pass,
+            "must_cover": len(result),
+        },
     )
+    return result
 
 
-async def _supplement_bible_characters(bible: Bible, missing: list[tuple[str, int]],
+def _bible_covers_name(bible: Bible, appellations: set[str]) -> bool:
+    """必收名单条目是否已经在人物谱里覆盖。`appellations` 是调用方传入的待匹配称呼
+    集合（如 `{primary_appellation, formal_name}`，已过滤空值）——传集合而不是单个
+    字符串，是因为一个必收条目现在可能同时有原文常用称呼（可以是绰号）和正式姓名
+    两种写法，任一种在人物谱里出现都算已覆盖。
+
+    命中条件二选一：
+    1. 待匹配称呼中任一项与角色 `character.name` 存在子串关系（原有行为不变，
+       允许模型用更完整的正式姓名收录同一人）；
+    2. 待匹配称呼中任一项与角色 `character.aliases[].text` **精确相等**（不用
+       子串——别名本身已经是核验过的精确称谓，用子串关系反而可能对上不相关的短
+       别名，比如单字"老"作为子串命中一堆无关别名；相等判断更安全，且 aliases.text
+       本身就是逐字原文称谓，绰号能否被人物谱覆盖就看这一条）。
+
+    `appellations` 为空集合时内层循环天然不执行、直接返回 False（未覆盖）——不是
+    因为显式判断"集合为空就跳过检查"而短路，是 `any()`/for 循环对空可迭代对象的
+    自然行为，不会误判为已覆盖。
+    """
+    for character in bible.characters:
+        for appellation in appellations:
+            if not appellation:
+                continue
+            if (
+                appellation == character.name
+                or appellation in character.name
+                or character.name in appellation
+            ):
+                return True
+            if any(appellation == alias.text for alias in character.aliases):
+                return True
+    return False
+
+
+async def _supplement_bible_characters(bible: Bible, missing: list[tuple[str, str, int]],
                                        chapters_text: str, *,
-                                       visual_style_prompt: str | None = None) -> list[str]:
+                                       chapters_by_idx: dict[int, str],
+                                       visual_style_prompt: str | None = None,
+                                       project_id: str | None = None) -> list[str]:
     """为必收名单里仍然缺席的角色补一次条目；失败或不合格就放弃该角色。
 
     这一步刻意放在 AgentLoop 之外：人物谱缺角色是质量问题，不该把整个项目
     卡在 bible_status=warning 上（那会连带停掉定妆照与场景库）。
+
+    `missing` 是 `_recurring_character_names` 产出的 (primary_appellation,
+    formal_name, verified_onstage_count) 三元组：formal_name 非空时指示模型把它
+    用作 character.name、并把 primary_appellation 登记为一条别名（绰号做正式姓名
+    的补充记录，而不是丢弃）；formal_name 为空时直接用 primary_appellation 作
+    character.name。补录角色新增的 aliases 同样只是模型申报，append 成功后必须
+    过与主生成同一套核验（`_verify_character_aliases_for_subset`，只核验本次新增
+    的角色，不对已核验过的角色重复发起模型调用）才会真正登记。
+
+    chapters_by_idx：全书原文查找表（`_chapters_by_idx(chapters)`），用于核验模型
+    随 name 一并申报的 aliases（核验失败的别名条目直接剔除，不影响角色本身的
+    补录）。
     """
     from app.refs import (
         PRODUCTION_APPEARANCE_MAX_CHARS,
         PRODUCTION_APPEARANCE_MIN_CHARS,
     )
 
-    wanted = "、".join(f"{name}（原文出现 {hits} 次）" for name, hits in missing)
+    expected_names = {(formal_name or appellation) for appellation, formal_name, _ in missing}
+    wanted_lines = [
+        (
+            f'{formal_name}（原文常用称呼"{appellation}"，已核验在场证据 {count} 条）'
+            if formal_name else
+            f"{appellation}（已核验在场证据 {count} 条）"
+        )
+        for appellation, formal_name, count in missing
+    ]
+    wanted = "、".join(wanted_lines)
     style = visual_style_prompt or bible.world.visual_style_canonical
     prompt = f"""任务：为下列【已确认重要但人物谱漏收】的角色补出角色条目，用于 AI 视频生成的一致性控制。
 
-必须补录的角色（name 必须逐字照抄，不得改写或合并）：
+必须补录的角色（name 取值规则见要求 6；不得改写或合并）：
 {wanted}
 
 已收录角色（不要重复输出）：{'、'.join(c.name for c in bible.characters) or '无'}
@@ -2129,12 +2294,18 @@ async def _supplement_bible_characters(bible: Bible, missing: list[tuple[str, in
 3. role 取"主角|重要配角|反派"之一。
 4. speech_style 15~30 字，描述句长习惯/口头禅/敬语习惯。
 5. relationships.to 只能指向【已收录角色或本次补录角色】的 name；无法确定就留空数组。
+6. name 取值：上面的写法括号里标了"原文常用称呼『XX』"的条目，character.name 用括号外给出的
+   正式姓名，并把括号里那个原文常用称呼登记为一条 aliases（text=该称呼，name_kind 按语境判断
+   取 personal_name/honorific/referential，evidence_chapter_index + evidence_quote 给一条
+   能同时看到这个称呼与这个正式姓名的原文逐字引句，原样照抄不得改写；找不到这种共现就不要
+   申报这条别名，不影响角色本身的补录）；没有标注原文常用称呼的条目，character.name 直接用
+   给出的那个写法，不需要另外申报别名。
 
 小说文本：
 {chapters_text}
 
 输出 JSON Schema：
-{{"characters": [{{"name": str, "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}]}}]}}"""
+{{"characters": [{{"name": str, "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "aliases": [{{"text": str, "name_kind": "personal_name|honorific|referential", "evidence_chapter_index": int, "evidence_quote": str}}]}}]}}"""
     try:
         raw = await model_gateway.chat(
             [{"role": "system", "content": SYSTEM_PREFIX},
@@ -2156,13 +2327,13 @@ async def _supplement_bible_characters(bible: Bible, missing: list[tuple[str, in
             meta={"error": str(exc)[:300]},
         )
         return []
-    wanted_names = {name for name, _ in missing}
     added: list[str] = []
+    added_characters: list[Character] = []
     for character in drafted:
         name = (character.name or "").strip()
         if (
-            name not in wanted_names
-            or _bible_covers_name(bible, name)
+            name not in expected_names
+            or _bible_covers_name(bible, {name})
             or not PRODUCTION_APPEARANCE_MIN_CHARS
             <= len(character.appearance_canonical)
             <= PRODUCTION_APPEARANCE_MAX_CHARS
@@ -2173,12 +2344,19 @@ async def _supplement_bible_characters(bible: Bible, missing: list[tuple[str, in
         character.portrait_prompt_override = None
         bible.characters.append(character)
         added.append(name)
+        added_characters.append(character)
     # 关系只能指向最终名单里的人，否则 validate_bible 会因「关系指向未知角色」退回。
     names = {c.name for c in bible.characters}
     for character in bible.characters:
         character.relationships = [
             relation for relation in character.relationships if relation.to in names
         ]
+    # 补录角色声明的 aliases 同样只是申报，必须过与主生成同一套核验才能真正登记——
+    # 只对本次新增的角色调用，避免对已核验过的角色重复发起模型调用（难点 C 第 4 点）。
+    if added_characters:
+        await _verify_character_aliases_for_subset(
+            bible, added_characters, chapters_by_idx, project_id=project_id,
+        )
     return added
 
 
@@ -3019,6 +3197,125 @@ def _alias_verdict_pin_segment(
     return None
 
 
+# ---------- A0a. 人物点名在场裁决闸（见 §3 步骤 3，与别名裁决闸同一分工范式：
+# 代码检索卷宗 → 低温模型独立裁决 → 代码结构性钉证）----------
+#
+# 根因回顾（见 `_recurring_character_names` docstring）：旧判据把"名字在原文窗口里
+# 出现的次数"当成"这个人是不是重要角色"的代理信号，王伯/周员外/靠山老祖三个反例
+# 证明这个信号会整体失效——命中全部来自旁白交代身份或他人台词提及，本人从未
+# 真正出现在画面里。结构闸（G1-G3，见 `_recurring_character_names`）只能核验
+# "引句确实是原文逐字内容、称呼确实在引句里出现"，核验不了"这句话描述的是不是
+# 这个人本人在场"——这是一道开放语义判断，必须像别名裁决闸一样交给独立的低温
+# 模型调用，代码只做结构性钉证。
+
+
+def _roster_presence_dossier(
+    chapter_idx: int, chapter_text: str, quote: str,
+) -> list[dict[str, Any]]:
+    """在场裁决卷宗检索：quote 已经过结构闸核验为该章原文的逐字子串（含
+    `_quote_comparison_variants` 允许的脱引号变体），这里用 `index_source_segments`
+    定位 quote 落在哪个自然段，连同前后各 1 段一并收录，供裁决闸判断"在场 vs 仅被
+    提及"时看到足够上下文——不像别名裁决闸那样需要覆盖全部候选人的按层保底配额
+    （这里没有候选竞争，只有一条证据本身要不要被采信），一段 + 前后各 1 段的小卷宗
+    足够。quote 跨越自然段边界、或分段规则下找不到任何包含 quote 的自然段（极端
+    情况）时返回空列表，交由调用方按 `reason="no_presence_dossier"` 拒绝——不确定
+    不登记的安全默认在这里同样成立，不是跳过检查。"""
+    segments = index_source_segments(chapter_text)
+    variants = _quote_comparison_variants(quote)
+    hit_index = next(
+        (i for i, seg in enumerate(segments) if any(v in seg.text for v in variants)),
+        None,
+    )
+    if hit_index is None:
+        return []
+    lo = max(0, hit_index - 1)
+    hi = min(len(segments) - 1, hit_index + 1)
+    return [
+        {"chapter_idx": chapter_idx, "segment_index": i + 1, "text": segments[i].text}
+        for i in range(lo, hi + 1)
+    ]
+
+
+_ROSTER_PRESENCE_VERDICT_LABELS = ("onstage", "mentioned_only", "uncertain")
+
+
+class _RosterPresenceVerdictResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # 三态是非题结构本身决定的封闭集合（在场/仅被提及/无法确定），不是从业务数据里
+    # 枚举出的名单，schema 层面同样用 enum 收紧（见 `_roster_presence_verdict_call`）。
+    verdict: str
+    # 钉证判据与别名裁决闸同一范式：模型只需引用卷宗目录里某一条的段号，不要求逐字
+    # 复述原文；schema 层面用 enum 收紧到本次卷宗实际收录的段号集合，代码层面复用
+    # `_alias_verdict_pin_segment` 再做一次结构性核验。
+    supporting_segment_index: int
+
+
+async def _roster_presence_verdict_call(
+    *, appellation: str, dossier: list[dict[str, Any]], project_id: str | None,
+) -> _RosterPresenceVerdictResponse:
+    """在场裁决：唯一一次独立模型调用，只给卷宗原文，问一道结构相同、措辞不同的
+    是非题——不是"称谓 X 指代候选中的谁"（别名裁决闸的候选判别），而是"这段文字里，
+    这个称呼指代的人物本人是不是真的置身其中"。这段"在场"语义（本人说话/动作/被
+    叙述在场 vs 被提及/回忆/转述/背景交代）与 `app/production/prep_pack.py`
+    `_extract_chunk` 的 `segment_indexes` 判据是同一条语义边界，此处只是移植到
+    一个新的调用点。"""
+    catalog = "\n\n".join(
+        f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
+        for item in dossier
+    )
+    segment_indexes = [item["segment_index"] for item in dossier]
+    prompt = f"""下面是原著第 {dossier[0]['chapter_idx']} 章中包含称呼"{appellation}"的原文段落
+（含前后语境，出现顺序不代表任何推断结论），每段前面标了段号：
+{catalog}
+
+任务：仅依据以上原文段落本身，判断称呼"{appellation}"所指代的人物本人，是不是真的出现
+在画面中——本人在说话、在行动，或被旁白直接叙述为置身其中，才算在场；如果这段文字里
+正在说话、正在行动、被叙述置身其中的是别人，"{appellation}"只是作为被谈论、被指涉、被
+交代来历或状态的对象出现在别人的叙述或话语里，即使字面提到了这个称呼，也不算在场。
+- verdict 三选一："onstage"（本人确实在场）/ "mentioned_only"（只是被提及、回忆、转述
+  或背景交代，本人未真正置身其中）/ "uncertain"（原文本身不足以判断）；证据不够就选
+  uncertain，不要为了给出结论而猜测。
+- supporting_segment_index 必须填上面某一段落标注的段号（取值只能是 {segment_indexes}
+  之一），选你得出这个结论最主要依据的那一段，不要凭空填一个没在目录里出现的段号。
+只输出符合 Schema 的 JSON。"""
+    operation_id = "character_roster_presence_verdict:" + hashlib.sha256(
+        json.dumps(
+            {
+                "appellation": appellation,
+                "dossier": [
+                    (item["chapter_idx"], item["segment_index"]) for item in dossier
+                ],
+            },
+            ensure_ascii=False, sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    schema = _RosterPresenceVerdictResponse.model_json_schema()
+    schema["properties"]["supporting_segment_index"]["enum"] = segment_indexes
+    schema["properties"]["verdict"]["enum"] = list(_ROSTER_PRESENCE_VERDICT_LABELS)
+    return await model_gateway.chat_structured(
+        [{"role": "user", "content": prompt}],
+        model_type=_RosterPresenceVerdictResponse,
+        validate=None,
+        operation_id=operation_id,
+        max_tokens=300,
+        # 低温：与 `_alias_verdict_call` 同一理由——这道闸的语义判断要稳定复现，
+        # 同一份卷宗重跑不该一次判在场一次判不确定。
+        temperature=0.0,
+        format_retry_limit=1,
+        semantic_retry_limit=1,
+        output_schema=schema,
+        call_meta={
+            "stage": "人物在场裁决",
+            "stage_key": "character_roster_presence_verdict",
+            "call_role": "stage_generate",
+            "call_role_label": "人物在场裁决",
+            "expected_json": True,
+            "project_id": project_id,
+            "appellation": appellation,
+        },
+    )
+
+
 def _alias_verdict_roster(bible: Bible) -> dict[str, list[str]]:
     """裁决候选面快照：规范名 -> [规范名, 已登记别名...]，取 `bible.characters` 当前
     状态的一次性快照。调用方（`_verify_character_aliases_in_place` /
@@ -3137,18 +3434,23 @@ async def _alias_evidence_resolution(
     }
 
 
-async def _verify_character_aliases_in_place(
-    bible: Bible, chapters: list[dict], *, project_id: str | None = None,
+async def _verify_character_aliases_for_subset(
+    bible: Bible, characters: list[Character], chapters_by_idx: dict[int, str], *,
+    project_id: str | None = None,
 ) -> dict[str, list[str]]:
-    """`generate_bible` 主链路核验：模型随人物谱正文一并申报的 aliases 同样只是申报，
-    落库前必须过同一套代码核验（`_alias_evidence_resolution`，与回填函数共用；模型
-    申报章节没通过共现闸时，退一步做全书桥接章检索，通过共现闸后还要再过一道桥接章
-    原文独立裁决，见该函数 docstring）。只处理 aliases 字段，绝不触碰角色的任何其它
-    既有字段。"""
-    chapters_by_idx = _chapters_by_idx(chapters)
+    """`_verify_character_aliases_in_place` 的内层循环，抽成可传入显式 `characters`
+    子集的辅助函数——供 `_verify_character_aliases_in_place`（传入 `bible.characters`
+    全量，行为与抽取前完全一致）与 `_supplement_bible_characters`（补录 append 成功
+    后只对本次新增角色调用，不对已核验过的角色重复发起模型调用）共用。
+
+    候选面快照（`roster`，供裁决闸判别"这个称呼指代候选中的谁"）永远取自完整
+    `bible.characters`，不受 `characters` 子集影响：核验范围可以只挑几个角色，
+    但候选集必须是整本人物谱——否则会重演"真实误登记事故 2"同一形状的问题
+    （裁决模型看不到正确候选，只能矮子里拔将军）。只处理 aliases 字段，绝不触碰
+    角色的任何其它既有字段。"""
     roster = _alias_verdict_roster(bible)
     added: dict[str, list[str]] = {}
-    for character in bible.characters:
+    for character in characters:
         anchor_texts = {character.name}
         verified: list[CharacterAlias] = []
         added_texts: list[str] = []
@@ -3173,6 +3475,21 @@ async def _verify_character_aliases_in_place(
         if added_texts:
             added[character.name] = added_texts
     return added
+
+
+async def _verify_character_aliases_in_place(
+    bible: Bible, chapters: list[dict], *, project_id: str | None = None,
+) -> dict[str, list[str]]:
+    """`generate_bible` 主链路核验：模型随人物谱正文一并申报的 aliases 同样只是申报，
+    落库前必须过同一套代码核验（`_alias_evidence_resolution`，与回填函数共用；模型
+    申报章节没通过共现闸时，退一步做全书桥接章检索，通过共现闸后还要再过一道桥接章
+    原文独立裁决，见该函数 docstring）。只处理 aliases 字段，绝不触碰角色的任何其它
+    既有字段。核验范围是 `bible.characters` 全量（内层循环见
+    `_verify_character_aliases_for_subset`）。"""
+    chapters_by_idx = _chapters_by_idx(chapters)
+    return await _verify_character_aliases_for_subset(
+        bible, bible.characters, chapters_by_idx, project_id=project_id,
+    )
 
 
 def _render_alias_backfill_source(
@@ -4150,15 +4467,26 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
     # 必须在渲染源文本**和**统计必收名单之前净化，两者都以正文为准。
     chapters = await _chapters_without_paratext(chapters)
     chapters_text = _render_bible_source(chapters, head_chapters=BIBLE_HEAD_CHAPTERS)
-    must_cover = await _recurring_character_names(chapters)
+    # 全书原文查找表（未经预算截断），供下方 _supplement_bible_characters 核验
+    # 补录角色新增别名的原文举证使用。
+    chapters_by_idx = _chapters_by_idx(chapters)
+    must_cover = await _recurring_character_names(chapters, project_id=project_id)
     must_cover_part = ""
     if must_cover:
+        must_cover_lines = [
+            (
+                f'{formal_name}（原文常用称呼"{appellation}"，已核验在场证据 {count} 条）'
+                if formal_name else
+                f"{appellation}（已核验在场证据 {count} 条）"
+            )
+            for appellation, formal_name, count in must_cover
+        ]
         must_cover_part = f"""
-【必收角色名单】（后端已在前 {BIBLE_HEAD_CHAPTERS} 章及其后 {BIBLE_LOOKAHEAD_CHAPTERS} 章原文里逐字统计出现次数；次数多＝戏份重，必须全部收录）：
-{'、'.join(f'{name}（{hits} 次）' for name, hits in must_cover)}
+【必收角色名单】（后端已对每个候选人物的在场证据逐条核验：结构闸核对引句是否逐字命中原文，独立模型裁决闸核对这句话是不是本人真的在场而不是被提及/回忆/背景交代；核验通过的在场证据条数达到 {BIBLE_RECURRING_MIN_ONSTAGE_QUOTES} 条以上才会出现在这份名单里，必须全部收录）：
+{'、'.join(must_cover_lines)}
 
 执行方式：
-- 名单里的每个名字都要单独输出一个角色条目，name 逐字照抄名单写法，不得改写、合并或省略。
+- 名单里标了"原文常用称呼『XX』"的条目，character.name 用括号外给出的正式姓名，并按规则 5 把括号里那个原文常用称呼登记为一条 aliases；没有标注的条目，character.name 直接用给出的写法，不需要另外申报别名。
 - 名单之外的重要角色仍然可以补充；总数以覆盖名单为准，不要为了写得短就删掉名单里的人。
 - 唯一例外：名单里某个名字如果其实不是人物（是宗门、地名或法宝名），跳过它，不要硬编成角色。
 """
@@ -4256,17 +4584,22 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
     # 同一套代码核验（逐字命中 + 章节内共现 + 桥接章原文独立裁决），不满足就丢弃，
     # 不阻断人物谱本身。
     await _verify_character_aliases_in_place(bible, chapters, project_id=project_id)
-    missing = [item for item in must_cover if not _bible_covers_name(bible, item[0])]
+    missing = [
+        item for item in must_cover
+        if not _bible_covers_name(bible, {value for value in (item[0], item[1]) if value})
+    ]
     if missing:
         added = await _supplement_bible_characters(
-            bible, missing, chapters_text, visual_style_prompt=visual_style_prompt,
+            bible, missing, chapters_text,
+            chapters_by_idx=chapters_by_idx, visual_style_prompt=visual_style_prompt,
+            project_id=project_id,
         )
         log_provider_call(
             "character_bible_coverage", config.MODEL_TEXT,
             "OK" if len(added) == len(missing) else "PARTIAL", None, 0,
             meta={
-                "must_cover": [name for name, _ in must_cover],
-                "missing": [name for name, _ in missing],
+                "must_cover": [appellation for appellation, _, _ in must_cover],
+                "missing": [appellation for appellation, _, _ in missing],
                 "supplemented": added,
             },
         )
