@@ -1933,10 +1933,10 @@ BIBLE_MUST_COVER_MAX = 20        # 前 60 章重要角色容量；详情仍逐�
 BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE = 3
 BIBLE_ROLL_CALL_CHUNK_CHAPTERS = 1
 BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS = 8000
-BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS = 4096
+BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS = 12000
 BIBLE_ROLL_CALL_CONCURRENCY = 6
 BIBLE_ROLL_CALL_MAX_ATTEMPTS = 3
-BIBLE_ROLL_CALL_TIMEOUT_S = 120.0
+BIBLE_ROLL_CALL_TIMEOUT_S = 300.0
 BIBLE_SMALL_VERDICT_TIMEOUT_S = 120.0
 
 # 旁文本净化的三个闸（见 `_chapters_without_paratext` docstring 里的事故口径）：
@@ -2316,6 +2316,7 @@ async def _recurring_character_names(
 6. 只有本人说话、行动或被直接叙述为在场才算 onstage_evidence；被谈论、回忆或背景介绍不算。
 7. 但具名人物即使当前仅被提及，只要原文明示其建立宗门/制度、造成持续冲突、留下关键规则或后续行动目标，也可输出候选；onstage_evidence 填包含该剧情作用的逐字引句，后续程序会把它判为 mentioned_only，不得伪装成已出场。
 8. 不输出无法单独指认的泛称、宗门、地名、法宝；同一个人在本块只输出一次。
+9. 本块最多输出 12 个候选，优先输出戏份最重的人物；引句只保留能证明在场的最小片段，不要复述剧情。
 
 小说正文：
 {chunk_text}
