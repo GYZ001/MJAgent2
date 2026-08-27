@@ -1,0 +1,191 @@
+2020: 
+2021: 
+2022: class _RosterOnstageEvidence(BaseModel):
+2023:     """一条「本人在场」证据申报：模型只负责申报，是否真的成立由后端结构闸 +
+2024:     独立裁决闸核验（见 `_recurring_character_names` docstring）。"""
+2025: 
+2026:     chapter_index: int = -1
+2027:     quote: str = ""
+2028: 
+2029: 
+2030: class _RosterCandidate(BaseModel):
+2031:     """人物点名候选：只要能证明本人在场的证据，不要泛泛的名字统计。"""
+2032: 
+2033:     primary_appellation: str = ""      # 原文最常用称呼，允许绰号/外号/代称
+2034:     formal_name: str = ""              # 原文已揭示的正式姓名；未揭示则空串，不得编造
+2035:     onstage_evidence: list[_RosterOnstageEvidence] = Field(default_factory=list)
+2036: 
+2037: 
+2038: class _CharacterRollCall(BaseModel):
+2039:     """人物点名合同：候选 + 在场证据，不再只是名字字符串。"""
+2040: 
+2041:     candidates: list[_RosterCandidate] = Field(default_factory=list)
+2042: 
+2043: 
+2044: def _merge_roll_call_candidates(
+2045:     chunk_results: list[list[_RosterCandidate]],
+2046: ) -> list[_RosterCandidate]:
+2047:     """按正式姓名优先、常用称呼补充的保守规则归并分块结果。"""
+2048:     merged: list[_RosterCandidate] = []
+2049:     for candidates in chunk_results:
+2050:         for candidate in candidates:
+2051:             primary = (candidate.primary_appellation or "").strip()
+2052:             formal = (candidate.formal_name or "").strip()
+2053:             if not primary:
+2054:                 continue
+2055:             target = next((
+2056:                 item for item in merged
+2057:                 if (
+2058:                     formal and (item.formal_name or "").strip() == formal
+2059:                 ) or (item.primary_appellation or "").strip() == primary
+2060:             ), None)
+2061:             if target is None:
+2062:                 merged.append(_RosterCandidate(
+2063:                     primary_appellation=primary,
+2064:                     formal_name=formal,
+2065:                     onstage_evidence=list(candidate.onstage_evidence)[
+2066:                         :BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE
+2067:                     ],
+2068:                 ))
+2069:                 continue
+2070:             if not target.formal_name and formal:
+2071:                 target.formal_name = formal
+2072:             seen_evidence = {
+2073:                 (item.chapter_index, (item.quote or "").strip())
+2074:                 for item in target.onstage_evidence
+2075:             }
+2076:             for evidence in candidate.onstage_evidence:
+2077:                 key = (evidence.chapter_index, (evidence.quote or "").strip())
+2078:                 if key in seen_evidence:
+2079:                     continue
+2080:                 target.onstage_evidence.append(evidence)
+2081:                 seen_evidence.add(key)
+2082:             target.onstage_evidence = target.onstage_evidence[
+2083:                 :BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE
+2084:             ]
+2085:     return merged
+2086: 
+2087: 
+2088: class _BibleSupplement(BaseModel):
+2089:     """补录合同：只为「必收名单里还缺的人」补出完整角色条目。"""
+2090: 
+2091:     characters: list[Character] = Field(default_factory=list)
+2092: 
+2093: 
+2094: async def _recurring_character_names(
+2095:     chapters: list[dict], *, project_id: str | None = None,
+2096: ) -> list[tuple[str, str, int]]:
+2097:     """产出「必收角色名单」：先点名+自报在场证据，再用结构闸+独立裁决闸核验每条
+2098:     证据是不是真的证明本人在场，核验通过的证据条数（`verified_onstage_count`）
+2099:     才是判据——不再是"名字字符串在原文窗口里出现的次数"。
+2100: 
+2101:     根因：旧判据把字符串出现次数当"重不重要"的代理信号，两个方向都会失效。
+2102:     假阳性方向——王伯/周员外/靠山老祖的命中全部来自旁白交代身份或他人台词提及，
+2103:     本人从未真正在场，却因为次数够多进了必收名单。假阴性方向——这个信号只统计
+2104:     模型报出的候选名字本身的出现次数，原文如果通篇用绰号称呼一个人（本人几乎
+2105:     只以"小胖子"出现，正式姓名仅出现一两次）而此刻圣经正文还没生成、没有别名表
+2106:     能把绰号翻译回正式姓名，这个人就会被判定为不重要。
+2107: 
+2108:     新流程：
+2109:     1. 模型只在前 BIBLE_HEAD_CHAPTERS 章里点名，每个候选申报 primary_appellation
+2110:        （原文最常用写法，允许绰号）+ formal_name（原文已揭示的正式姓名，未揭示则
+2111:        空）+ onstage_evidence（能证明本人在场的原文引句列表）——绰号本身就能直接
+2112:        充当"必收货币"，不需要一张此刻还不存在的别名表做转译。
+2113:     2. 代码结构闸，逐条证据：G1 引句所在章节必须落在统计窗口（前 HEAD+LOOKAHEAD
+2114:        章）内；G2 引句必须逐字命中该章原文（允许模型自行加/脱一层引号的噪音）；
+2115:        G3 称呼（primary_appellation 或 formal_name 中非空的那个）必须是引句子串。
+2116:        任一不满足直接丢弃该条证据，不发起裁决调用。
+2117:     3. 结构闸通过的证据才发起独立低温模型裁决（`_roster_presence_verdict_call`，
+2118:        与别名裁决闸同一分工范式：代码检索卷宗 → 模型独立裁决 → 代码结构性钉证）：
+2119:        只问这段原文里称呼所指的人物本人是不是真的在场（本人说话/动作/被叙述在场，
+2120:        而不是被谈论、被指涉、被交代来历的对象）；裁决通过（verdict=="onstage" 且
+2121:        段号钉证通过）才计入该候选的 `verified_onstage_count`。
+2122:     4. 按 `verified_onstage_count` 降序（同分按 primary_appellation 字典序打破
+2123:        平局）排序，取 >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES 的候选，最多保留
+2124:        BIBLE_MUST_COVER_MAX 个。
+2125: 
+2126:     点名调用失败时返回空名单，绝不阻断人物谱本身；结构闸/裁决闸任一步不通过，
+2127:     该条证据直接丢弃，不确定不登记（不会因为某一条证据没通过就拒绝整个候选，
+2128:     只是那一条不计数）。
+2129:     """
+2130:     valid = [ch for ch in chapters if (ch.get("content") or "").strip()]
+2131:     if not valid:
+2132:         return []
+2133:     head = valid[:BIBLE_HEAD_CHAPTERS]
+2134:     chunks = [
+2135:         head[index:index + BIBLE_ROLL_CALL_CHUNK_CHAPTERS]
+2136:         for index in range(0, len(head), BIBLE_ROLL_CALL_CHUNK_CHAPTERS)
+2137:     ]
+2138: 
+2139:     async def _call_chunk(chunk: list[dict], chunk_index: int) -> list[_RosterCandidate]:
+2140:         chunk_text = _render_bible_source(
+2141:             chunk, budget=BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS,
+2142:             head_chapters=len(chunk),
+2143:         )
+2144:         if not chunk_text.strip():
+2145:             return []
+2146:         if len(chunk_text) > BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS:
+2147:             raise ValueError("人物点名分块输入超过硬上限")
+2148:         prompt = f"""任务：从下面的小说正文里找出【出场人物】，为每个人物申报能证明他本人真的出现在画面中的证据，不要只给名字。
+2149: 
+2150: 要求：
+2151: 1. primary_appellation：原文里称呼这个人物最常用、最稳定的一种写法，可以是正式姓名、外号、绰号、尊称或代称，必须逐字照抄。
+2152: 2. formal_name：原文已经明确揭示的正式姓名；未揭示就填空字符串，禁止猜测。
+2153: 3. onstage_evidence：每人最多 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条，格式为 chapter_index + quote；quote 必须是本块原文不超过约 80 字的逐字引句，并包含 primary_appellation 或 formal_name。
+2154: 4. 只有本人说话、行动或被直接叙述为在场才算；被谈论、回忆或背景介绍不算。
+2155: 5. 不输出无法单独指认的泛称、宗门、地名、法宝；同一个人在本块只输出一次。
+2156: 
+2157: 小说正文：
+2158: {chunk_text}
+2159: 
+2160: 输出 JSON Schema：
+2161: {{"candidates": [{{"primary_appellation": str, "formal_name": str, "onstage_evidence": [{{"chapter_index": int, "quote": str}}]}}]}}"""
+2162:         try:
+2163:             raw = await model_gateway.chat(
+2164:                 [{"role": "system", "content": SYSTEM_PREFIX},
+2165:                  {"role": "user", "content": prompt}],
+2166:                 temperature=0.2,
+2167:                 max_tokens=BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS,
+2168:                 call_meta={
+2169:                     "stage": "人物点名",
+2170:                     "stage_key": "character_roll_call",
+2171:                     "call_role": "stage_generate",
+2172:                     "call_role_label": "人物点名分块",
+2173:                     "expected_json": True,
+2174:                     "chunk_index": chunk_index,
+2175:                     "chunk_count": len(chunks),
+2176:                     "input_chars": len(chunk_text),
+2177:                 },
+2178:             )
+2179:             return _CharacterRollCall.model_validate(extract_json(raw)).candidates
+2180:         except Exception as exc:  # noqa: BLE001 - 单块失败不阻断其它块和人物谱
+2181:             log_provider_call(
+2182:                 "character_roll_call", config.MODEL_TEXT, "OK", None, 0,
+2183:                 meta={
+2184:                     "chunk_index": chunk_index,
+2185:                     "outcome": "best_effort_bypass",
+2186:                     "error": str(exc)[:300],
+2187:                 },
+2188:             )
+2189:             return []
+2190: 
+2191:     chunk_results = await asyncio.gather(*(
+2192:         _call_chunk(chunk, index) for index, chunk in enumerate(chunks)
+2193:     ))
+2194:     candidates = _merge_roll_call_candidates(chunk_results)
+2195: 
+2196:     # 结构闸 G1 用的窗口原文：前 HEAD 章 + 往后 LOOKAHEAD 章，按章节序号建索引
+2197:     # （复用 `_chapters_by_idx`，与别名核验同一个查找表构造方式）。
+2198:     window_chapters_by_idx = _chapters_by_idx(
+2199:         valid[:BIBLE_HEAD_CHAPTERS + BIBLE_LOOKAHEAD_CHAPTERS]
+2200:     )
+2201:     seen: set[str] = set()
+2202:     verified_counts: dict[str, int] = {}
+2203:     formal_names: dict[str, str] = {}
+2204:     evidence_total = 0
+2205:     structural_pass = 0
+2206:     # 结构闸（G1-G3）零模型调用、纯同步核对，先把候选证据筛成「值得送裁决闸」的
+2207:     # 卷宗清单；裁决闸才是本函数唯一的模型调用，放到下面统一并发发起。
+2208:     verdict_jobs: list[tuple[str, list[dict[str, Any]]]] = []
+2209:     for candidate in candidates:
+2210:         appellation = (candidate.primary_appellation or "").strip()

@@ -1,0 +1,221 @@
+4680: BIBLE_DETAIL_MAX_TOKENS = 4096
+4681: 
+4682: 
+4683: class _BibleRosterEntry(BaseModel):
+4684:     name: str
+4685:     role: str
+4686:     source_appellations: list[str] = Field(default_factory=list)
+4687: 
+4688: 
+4689: class _BibleRosterDraft(BaseModel):
+4690:     characters: list[_BibleRosterEntry] = Field(default_factory=list)
+4691:     world: World
+4692: 
+4693: 
+4694: class _CharacterDetail(BaseModel):
+4695:     appearance_canonical: str
+4696:     personality: str = ""
+4697:     speech_style: str = ""
+4698:     relationships: list[Relationship] = Field(default_factory=list)
+4699:     aliases: list[CharacterAlias] = Field(default_factory=list)
+4700:     source_evidence: list[AppearanceEvidence] = Field(default_factory=list)
+4701: 
+4702: 
+4703: def _character_detail_evidence_pack(
+4704:     chapters: list[dict], appellations: list[str], *, max_chars: int = BIBLE_DETAIL_EVIDENCE_MAX_CHARS,
+4705: ) -> str:
+4706:     """Deterministically retrieve a bounded source dossier for one character."""
+4707:     anchors = [value.strip() for value in appellations if value and value.strip()]
+4708:     selected: list[str] = []
+4709:     seen: set[tuple[int, str]] = set()
+4710:     for chapter in chapters:
+4711:         content = (chapter.get("content") or "").strip()
+4712:         if not content:
+4713:             continue
+4714:         try:
+4715:             chapter_idx = int(chapter.get("idx"))
+4716:         except (TypeError, ValueError):
+4717:             continue
+4718:         for segment in index_source_segments(content, max_chars=800):
+4719:             text = segment.text.strip()
+4720:             if not text or not any(anchor in text for anchor in anchors):
+4721:                 continue
+4722:             key = (chapter_idx, text)
+4723:             if key in seen:
+4724:                 continue
+4725:             block = f"【第{chapter_idx}章·证据】\n{text}"
+4726:             if sum(len(item) for item in selected) + len(block) > max_chars:
+4727:                 return "\n\n".join(selected)
+4728:             selected.append(block)
+4729:             seen.add(key)
+4730:             if len(selected) >= BIBLE_DETAIL_EVIDENCE_MAX_SEGMENTS:
+4731:                 return "\n\n".join(selected)
+4732:     if selected:
+4733:         return "\n\n".join(selected)
+4734:     # No lexical hit: bounded fallback only, never the 60K source corpus.
+4735:     for chapter in chapters[:3]:
+4736:         content = (chapter.get("content") or "").strip()
+4737:         if not content:
+4738:             continue
+4739:         block = f"【第{chapter.get('idx', '?')}章·有限背景】\n{content[:1200]}"
+4740:         if sum(len(item) for item in selected) + len(block) > max_chars:
+4741:             break
+4742:         selected.append(block)
+4743:     return "\n\n".join(selected)
+4744: 
+4745: 
+4746: def _validate_bible_roster(draft: _BibleRosterDraft) -> list[str]:
+4747:     names = [(item.name or "").strip() for item in draft.characters]
+4748:     errors: list[str] = []
+4749:     if not 1 <= len(names) <= 20:
+4750:         errors.append(f"characters 数量 {len(names)}，要求 1~20 个")
+4751:     if any(not name for name in names):
+4752:         errors.append("characters.name 不能为空")
+4753:     if len(names) != len(set(names)):
+4754:         errors.append("characters.name 存在重复")
+4755:     if getattr(draft.world, "visual_style_canonical", None) is None:
+4756:         errors.append("world.visual_style_canonical 缺失")
+4757:     return errors
+4758: 
+4759: 
+4760: async def _generate_character_detail(
+4761:     entry: _BibleRosterEntry,
+4762:     *,
+4763:     roster_names: list[str],
+4764:     evidence_pack: str,
+4765:     style: str,
+4766:     chapters_by_idx: dict[int, str],
+4767:     project_id: str | None,
+4768: ) -> Character | None:
+4769:     from app.refs import PRODUCTION_APPEARANCE_MAX_CHARS, PRODUCTION_APPEARANCE_MIN_CHARS
+4770: 
+4771:     base_pack = evidence_pack[:BIBLE_DETAIL_EVIDENCE_MAX_CHARS]
+4772:     last_error = ""
+4773:     for attempt in range(1, BIBLE_DETAIL_MAX_ATTEMPTS + 1):
+4774:         pack = base_pack if attempt == 1 else base_pack[: max(2000, len(base_pack) // 2)]
+4775:         prompt = f"""任务：只为一个已确认角色生成角色详情。角色名字与角色类型已经由上游锁定，不得更改。
+4776: 目标角色：{entry.name}
+4777: 角色类型：{entry.role}
+4778: 原文称呼：{'、'.join(entry.source_appellations) or entry.name}
+4779: 完整角色名单（relationships.to 只能从这里选择）：{'、'.join(roster_names)}
+4780: 统一画风：{style}
+4781: 
+4782: 要求：appearance_canonical {PRODUCTION_APPEARANCE_MIN_CHARS}~{PRODUCTION_APPEARANCE_MAX_CHARS} 字；speech_style 15~30 字；只写该角色；不确定的关系、别名、标志性特征证据留空。source_evidence 引句必须不超过 40 字且逐字来自证据包。
+4783: 
+4784: 该角色的小证据包（不是全书）：
+4785: {pack}
+4786: 
+4787: 输出 JSON Schema：
+4788: {{"appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "aliases": [{{"text": str, "name_kind": str, "evidence_chapter_index": int, "evidence_quote": str}}], "source_evidence": [{{"evidence_chapter_index": int, "evidence_quote": str}}]}}"""
+4789:         started = time.time()
+4790:         try:
+4791:             raw = await asyncio.wait_for(
+4792:                 model_gateway.chat(
+4793:                     [{"role": "system", "content": SYSTEM_PREFIX}, {"role": "user", "content": prompt}],
+4794:                     temperature=0.35 if attempt == 1 else 0.15,
+4795:                     max_tokens=BIBLE_DETAIL_MAX_TOKENS,
+4796:                     call_meta={
+4797:                         "stage": "角色详情生成",
+4798:                         "stage_key": "character_bible_detail",
+4799:                         "call_role": "stage_generate" if attempt == 1 else "stage_repair",
+4800:                         "call_role_label": "单角色详情",
+4801:                         "expected_json": True,
+4802:                         "character_name": entry.name,
+4803:                         "attempt": attempt,
+4804:                         "input_chars": len(pack),
+4805:                         "project_id": project_id,
+4806:                     },
+4807:                 ),
+4808:                 timeout=BIBLE_DETAIL_TIMEOUT_S,
+4809:             )
+4810:             detail = _CharacterDetail.model_validate(extract_json(raw))
+4811:             character = Character(
+4812:                 name=entry.name,
+4813:                 role=entry.role,
+4814:                 appearance_canonical=detail.appearance_canonical,
+4815:                 personality=detail.personality,
+4816:                 speech_style=detail.speech_style,
+4817:                 relationships=detail.relationships,
+4818:                 aliases=detail.aliases,
+4819:                 source_evidence=detail.source_evidence,
+4820:             )
+4821:             if not PRODUCTION_APPEARANCE_MIN_CHARS <= len(character.appearance_canonical) <= PRODUCTION_APPEARANCE_MAX_CHARS:
+4822:                 raise ValueError("appearance_canonical 长度越界")
+4823:             character.relationships = [item for item in character.relationships if item.to in roster_names]
+4824:             character.source_evidence = [
+4825:                 item for item in character.source_evidence
+4826:                 if _appearance_evidence_verified(
+4827:                     chapters_by_idx, {entry.name}, item.evidence_chapter_index, item.evidence_quote,
+4828:                 )
+4829:             ]
+4830:             log_provider_call(
+4831:                 "character_bible_detail", config.MODEL_TEXT, "OK", None,
+4832:                 int((time.time() - started) * 1000),
+4833:                 meta={"character_name": entry.name, "attempt": attempt, "input_chars": len(pack)},
+4834:             )
+4835:             return character
+4836:         except asyncio.CancelledError:
+4837:             raise
+4838:         except Exception as exc:  # noqa: BLE001 - only this character retries
+4839:             last_error = str(exc)
+4840:             log_provider_call(
+4841:                 "character_bible_detail", config.MODEL_TEXT,
+4842:                 "TIMEOUT" if isinstance(exc, TimeoutError) else "FAILED", None,
+4843:                 int((time.time() - started) * 1000),
+4844:                 meta={"character_name": entry.name, "attempt": attempt, "input_chars": len(pack), "error": last_error[:300]},
+4845:             )
+4846:     return None
+4847: 
+4848: 
+4849: async def _generate_character_detail_batch(
+4850:     entries: list[_BibleRosterEntry], chapters: list[dict], *, style: str,
+4851:     chapters_by_idx: dict[int, str], project_id: str | None,
+4852: ) -> list[Character]:
+4853:     roster_names = [entry.name for entry in entries]
+4854:     tasks = [asyncio.create_task(_generate_character_detail(
+4855:         entry,
+4856:         roster_names=roster_names,
+4857:         evidence_pack=_character_detail_evidence_pack(
+4858:             chapters, [entry.name, *entry.source_appellations]
+4859:         ),
+4860:         style=style,
+4861:         chapters_by_idx=chapters_by_idx,
+4862:         project_id=project_id,
+4863:     )) for entry in entries]
+4864:     results = await asyncio.gather(*tasks, return_exceptions=True)
+4865:     characters: list[Character] = []
+4866:     for entry, result in zip(entries, results, strict=True):
+4867:         if isinstance(result, BaseException) or result is None:
+4868:             continue
+4869:         characters.append(result)
+4870:     return characters
+4871: 
+4872: 
+4873: async def generate_bible(chapters: list[dict], feedback: str = "", previous_bible: dict | None = None,
+4874:                          project_id: str | None = None,
+4875:                          visual_style_prompt: str | None = None) -> Bible:
+4876:     """Generate a small roster first, then fan out bounded per-character requests."""
+4877:     chapters = await _chapters_without_paratext(chapters)
+4878:     chapters_by_idx = _chapters_by_idx(chapters)
+4879:     must_cover = await _recurring_character_names(chapters, project_id=project_id)
+4880: 
+4881:     must_cover_lines = [
+4882:         f"{formal or appellation}（原文常用称呼：{appellation}；核验在场 {count} 次）"
+4883:         for appellation, formal, count in must_cover
+4884:     ]
+4885:     previous_names = [
+4886:         item.get("name", "") for item in (previous_bible or {}).get("characters", [])
+4887:         if item.get("name")
+4888:     ]
+4889:     forced_style = visual_style_prompt or ""
+4890:     roster_context = "\n".join(f"- {line}" for line in must_cover_lines) or "- 暂无已核验候选"
+4891:     roster_prompt = f"""任务：根据已经完成代码归并和在场核验的候选摘要，只确定人物谱最终角色名单、角色类型和世界观；不要生成外观、性格、台词风格、关系或证据。
+4892: 
+4893: 已核验候选摘要：
+4894: {roster_context}
+4895: 
+4896: 规则：
+4897: 1. 候选摘要是唯一人物事实来源；不得新增摘要中没有的人物，总数不超过 20。
+4898: 2. name 优先使用摘要中的正式姓名；source_appellations 收录括号内原文常用称呼。
+4899: 3. 同一人物的正式姓名与原文称呼不得拆成多人。
+4900: 4. 用户反馈：{feedback.strip() or '无'}。

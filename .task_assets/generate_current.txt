@@ -1,0 +1,136 @@
+4870:     return characters
+4871: 
+4872: 
+4873: async def generate_bible(chapters: list[dict], feedback: str = "", previous_bible: dict | None = None,
+4874:                          project_id: str | None = None,
+4875:                          visual_style_prompt: str | None = None) -> Bible:
+4876:     """Generate a small roster first, then fan out bounded per-character requests."""
+4877:     chapters = await _chapters_without_paratext(chapters)
+4878:     chapters_by_idx = _chapters_by_idx(chapters)
+4879:     must_cover = await _recurring_character_names(chapters, project_id=project_id)
+4880: 
+4881:     must_cover_lines = [
+4882:         f"{formal or appellation}（原文常用称呼：{appellation}；核验在场 {count} 次）"
+4883:         for appellation, formal, count in must_cover
+4884:     ]
+4885:     previous_names = [
+4886:         item.get("name", "") for item in (previous_bible or {}).get("characters", [])
+4887:         if item.get("name")
+4888:     ]
+4889:     forced_style = visual_style_prompt or ""
+4890:     roster_context = "\n".join(f"- {line}" for line in must_cover_lines) or "- 暂无已核验候选"
+4891:     roster_prompt = f"""任务：根据已经完成代码归并和在场核验的候选摘要，只确定人物谱最终角色名单、角色类型和世界观；不要生成外观、性格、台词风格、关系或证据。
+4892: 
+4893: 已核验候选摘要：
+4894: {roster_context}
+4895: 
+4896: 规则：
+4897: 1. 候选摘要是唯一人物事实来源；不得新增摘要中没有的人物，总数不超过 20。
+4898: 2. name 优先使用摘要中的正式姓名；source_appellations 收录括号内原文常用称呼。
+4899: 3. 同一人物的正式姓名与原文称呼不得拆成多人。
+4900: 4. 用户反馈：{feedback.strip() or '无'}。
+4901: 5. 历史人物谱角色仅供返工对照，不得绕过候选摘要新增人物：{'、'.join(previous_names) or '无'}。
+4902: 6. visual_style_canonical：{forced_style or '按古典修仙题材生成 25~40 字的统一 CG/动画/漫画/插画画风'}。
+4903: 7. era 与 genre 只写简短题材标签；不得复述小说内容。
+4904: 
+4905: 输出 JSON Schema：
+4906: {{"characters": [{{"name": str, "role": "主角|重要配角|反派", "source_appellations": [str]}}], "world": {{"era": str, "genre": str, "visual_style_canonical": str}}}}"""
+4907:     roster_loop = AgentLoop(
+4908:         stage_key="character_bible_roster",
+4909:         contract_key="character_bible_roster",
+4910:         goal="确定人物谱角色名单与统一世界观",
+4911:         scope_type="project",
+4912:         scope_id=project_id or hashlib.sha256(roster_context.encode("utf-8")).hexdigest()[:16],
+4913:         artifact_type="character_bible_roster",
+4914:         policy=AgentLoopPolicy(
+4915:             max_iterations=2,
+4916:             stall_rounds=2,
+4917:             min_quality_gain=0.03,
+4918:             no_gain_rounds=1,
+4919:             allow_warning_candidate=False,
+4920:             repair_all_blockers=True,
+4921:         ),
+4922:     )
+4923: 
+4924:     def validate_roster(candidate: _BibleRosterDraft) -> list[str]:
+4925:         if visual_style_prompt:
+4926:             candidate.world.visual_style_canonical = visual_style_prompt
+4927:         return _validate_bible_roster(candidate)
+4928: 
+4929:     roster = await _run_with_agent_loop(
+4930:         "人物名单", "character_bible_roster", roster_prompt, _BibleRosterDraft,
+4931:         validate_roster, loop=roster_loop, temperature=0.3, max_tokens=4096,
+4932:         repair_user_prompt_limit=16000, repair_candidate_limit=5000,
+4933:     )
+4934:     if visual_style_prompt:
+4935:         roster.world.visual_style_canonical = visual_style_prompt
+4936:     style = roster.world.visual_style_canonical
+4937:     characters = await _generate_character_detail_batch(
+4938:         roster.characters,
+4939:         chapters,
+4940:         style=style,
+4941:         chapters_by_idx=chapters_by_idx,
+4942:         project_id=project_id,
+4943:     )
+4944:     bible = Bible(world=roster.world, characters=characters)
+4945:     await _verify_character_aliases_in_place(bible, chapters, project_id=project_id)
+4946: 
+4947:     missing = [
+4948:         item for item in must_cover
+4949:         if not _bible_covers_name(bible, {value for value in (item[0], item[1]) if value})
+4950:     ]
+4951:     if missing:
+4952:         # Reuse the same single-character primitive; no batch/full-source supplement request.
+4953:         existing_names = {character.name for character in bible.characters}
+4954:         entries = [
+4955:             _BibleRosterEntry(
+4956:                 name=formal or appellation,
+4957:                 role="重要配角",
+4958:                 source_appellations=[appellation],
+4959:             )
+4960:             for appellation, formal, _count in missing
+4961:             if (formal or appellation) not in existing_names
+4962:         ]
+4963:         supplemented = await _generate_character_detail_batch(
+4964:             entries,
+4965:             chapters,
+4966:             style=style,
+4967:             chapters_by_idx=chapters_by_idx,
+4968:             project_id=project_id,
+4969:         )
+4970:         bible.characters.extend(supplemented)
+4971:         if supplemented:
+4972:             await _verify_character_aliases_for_subset(
+4973:                 bible, supplemented, chapters_by_idx, project_id=project_id,
+4974:             )
+4975: 
+4976:     valid_names = {character.name for character in bible.characters}
+4977:     for character in bible.characters:
+4978:         character.relationships = [
+4979:             relation for relation in character.relationships if relation.to in valid_names
+4980:         ]
+4981:     errors = validate_bible(bible) + _validate_appearance_evidence(bible, chapters_by_idx)
+4982:     if errors:
+4983:         raise StageError("角色圣经", errors, exit_reason="local_detail_blockers")
+4984:     return bible
+4985: 
+4986: 
+4987: # ---------- A2. 场景圣经（场景图素材库的规范场景，跨集场景一致性核心） ----------
+4988: 
+4989: class _SceneBibleDraft(BaseModel):
+4990:     """场景圣经输出合同（仅生成期使用）：一组规范场景。"""
+4991: 
+4992:     scenes: list[Scene]
+4993: 
+4994: 
+4995: async def generate_scene_bible(chapters: list[dict], bible: Bible,
+4996:                                feedback: str = "", project_id: str | None = None) -> list[Scene]:
+4997:     """从原文提取「规范场景」清单，作为场景图素材库的底稿（与 generate_bible 同构）。
+4998:     每个场景给 name（稳定短标签）+ scene_canonical（固定场景锚点串，画风约束与人物锚点一致，
+4999:     按 bible.world.visual_style_canonical 是否为照片级真人摄影预设二选一：非摄影风格必须
+5000:     CG/动画/漫画类非真人风格，否则后续 Seedance/Seedream 易因疑似真人报错；摄影风格则相反，
+5001:     要求真实材质与摄影级细节）。"""
+5002:     from app.visual_styles import is_photographic_style_prompt
+5003:     chapters_text = _render_bible_source(chapters)
+5004:     style = bible.world.visual_style_canonical
+5005:     genre = bible.world.genre or ""

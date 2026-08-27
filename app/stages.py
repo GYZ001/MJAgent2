@@ -2028,10 +2028,12 @@ class _RosterOnstageEvidence(BaseModel):
 
 
 class _RosterCandidate(BaseModel):
-    """人物点名候选：只要能证明本人在场的证据，不要泛泛的名字统计。"""
+    """人物点名候选；aliases/identity_evidence 让跨章归一可以晚于首次点名完成。"""
 
-    primary_appellation: str = ""      # 原文最常用称呼，允许绰号/外号/代称
-    formal_name: str = ""              # 原文已揭示的正式姓名；未揭示则空串，不得编造
+    primary_appellation: str = ""
+    formal_name: str = ""
+    aliases: list[str] = Field(default_factory=list)
+    identity_evidence: list[_RosterOnstageEvidence] = Field(default_factory=list)
     onstage_evidence: list[_RosterOnstageEvidence] = Field(default_factory=list)
 
 
@@ -2041,47 +2043,70 @@ class _CharacterRollCall(BaseModel):
     candidates: list[_RosterCandidate] = Field(default_factory=list)
 
 
+def _candidate_appellations(candidate: _RosterCandidate) -> set[str]:
+    return {
+        value.strip() for value in [
+            candidate.primary_appellation, candidate.formal_name, *candidate.aliases,
+        ] if value and value.strip()
+    }
+
+
 def _merge_roll_call_candidates(
     chunk_results: list[list[_RosterCandidate]],
 ) -> list[_RosterCandidate]:
-    """按正式姓名优先、常用称呼补充的保守规则归并分块结果。"""
+    """按同章明确身份链接做连通分量归并；规范名始终优先使用正式姓名。"""
+    flattened = [candidate for group in chunk_results for candidate in group
+                 if (candidate.primary_appellation or "").strip()]
+    parent = list(range(len(flattened)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for left in range(len(flattened)):
+        left_names = _candidate_appellations(flattened[left])
+        for right in range(left + 1, len(flattened)):
+            if left_names & _candidate_appellations(flattened[right]):
+                union(left, right)
+
+    groups: dict[int, list[_RosterCandidate]] = {}
+    for index, candidate in enumerate(flattened):
+        groups.setdefault(find(index), []).append(candidate)
+
     merged: list[_RosterCandidate] = []
-    for candidates in chunk_results:
-        for candidate in candidates:
-            primary = (candidate.primary_appellation or "").strip()
-            formal = (candidate.formal_name or "").strip()
-            if not primary:
-                continue
-            target = next((
-                item for item in merged
-                if (
-                    formal and (item.formal_name or "").strip() == formal
-                ) or (item.primary_appellation or "").strip() == primary
-            ), None)
-            if target is None:
-                merged.append(_RosterCandidate(
-                    primary_appellation=primary,
-                    formal_name=formal,
-                    onstage_evidence=list(candidate.onstage_evidence)[
-                        :BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE
-                    ],
-                ))
-                continue
-            if not target.formal_name and formal:
-                target.formal_name = formal
-            seen_evidence = {
-                (item.chapter_index, (item.quote or "").strip())
-                for item in target.onstage_evidence
-            }
-            for evidence in candidate.onstage_evidence:
-                key = (evidence.chapter_index, (evidence.quote or "").strip())
-                if key in seen_evidence:
-                    continue
-                target.onstage_evidence.append(evidence)
-                seen_evidence.add(key)
-            target.onstage_evidence = target.onstage_evidence[
-                :BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE
-            ]
+    for group in groups.values():
+        formal_names = [item.formal_name.strip() for item in group if item.formal_name.strip()]
+        primary = group[0].primary_appellation.strip()
+        formal = formal_names[0] if formal_names else ""
+        aliases = list(dict.fromkeys(
+            value for item in group for value in _candidate_appellations(item)
+            if value and value not in {formal, primary}
+        ))
+        if formal and primary != formal and primary not in aliases:
+            aliases.insert(0, primary)
+        evidence: list[_RosterOnstageEvidence] = []
+        identity_evidence: list[_RosterOnstageEvidence] = []
+        for item in group:
+            evidence.extend(item.onstage_evidence)
+            identity_evidence.extend(item.identity_evidence)
+        deduped = list({(item.chapter_index, item.quote): item for item in evidence}.values())
+        deduped_identity = list({
+            (item.chapter_index, item.quote): item for item in identity_evidence
+        }.values())
+        merged.append(_RosterCandidate(
+            primary_appellation=primary,
+            formal_name=formal,
+            aliases=aliases,
+            identity_evidence=deduped_identity[:BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE],
+            onstage_evidence=deduped[:BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE],
+        ))
     return merged
 
 
@@ -2093,7 +2118,7 @@ class _BibleSupplement(BaseModel):
 
 async def _recurring_character_names(
     chapters: list[dict], *, project_id: str | None = None,
-) -> list[tuple[str, str, int]]:
+) -> list[tuple[str, str, int, int, int, list[str]]]:
     """产出「必收角色名单」：先点名+自报在场证据，再用结构闸+独立裁决闸核验每条
     证据是不是真的证明本人在场，核验通过的证据条数（`verified_onstage_count`）
     才是判据——不再是"名字字符串在原文窗口里出现的次数"。
@@ -2148,17 +2173,19 @@ async def _recurring_character_names(
         prompt = f"""任务：从下面的小说正文里找出【出场人物】，为每个人物申报能证明他本人真的出现在画面中的证据，不要只给名字。
 
 要求：
-1. primary_appellation：原文里称呼这个人物最常用、最稳定的一种写法，可以是正式姓名、外号、绰号、尊称或代称，必须逐字照抄。
-2. formal_name：原文已经明确揭示的正式姓名；未揭示就填空字符串，禁止猜测。
-3. onstage_evidence：每人最多 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条，格式为 chapter_index + quote；quote 必须是本块原文不超过约 80 字的逐字引句，并包含 primary_appellation 或 formal_name。
-4. 只有本人说话、行动或被直接叙述为在场才算；被谈论、回忆或背景介绍不算。
-5. 不输出无法单独指认的泛称、宗门、地名、法宝；同一个人在本块只输出一次。
+1. primary_appellation：本章里称呼这个人物最常用、最稳定的一种写法，可以是正式姓名、外号、绰号、尊称或代称，必须逐字照抄。
+2. formal_name：本章已经明确揭示的正式姓名；未揭示就填空字符串，禁止猜测。若“孙天地自称……”或“众人称小胖子李富贵”这种同一人物身份链接出现，必须填 formal_name。
+3. aliases：本章明确指向同一人物的其它称呼；只有本章有明确身份链接才填，不能凭外貌相似猜。
+4. identity_evidence：证明 formal_name/aliases 与 primary_appellation 是同一人的逐字引句，最多 2 条；引句需同时包含两种称呼或明确自称结构。
+5. onstage_evidence：每人最多 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条，格式为 chapter_index + quote；quote 必须是本块原文不超过约 80 字的逐字引句，并包含 primary_appellation、formal_name 或 alias。
+6. 只有本人说话、行动或被直接叙述为在场才算；被谈论、回忆或背景介绍不算。
+7. 不输出无法单独指认的泛称、宗门、地名、法宝；同一个人在本块只输出一次。
 
 小说正文：
 {chunk_text}
 
 输出 JSON Schema：
-{{"candidates": [{{"primary_appellation": str, "formal_name": str, "onstage_evidence": [{{"chapter_index": int, "quote": str}}]}}]}}"""
+{{"candidates": [{{"primary_appellation": str, "formal_name": str, "aliases": [str], "identity_evidence": [{{"chapter_index": int, "quote": str}}], "onstage_evidence": [{{"chapter_index": int, "quote": str}}]}}]}}"""
         try:
             raw = await model_gateway.chat(
                 [{"role": "system", "content": SYSTEM_PREFIX},
@@ -2201,6 +2228,9 @@ async def _recurring_character_names(
     seen: set[str] = set()
     verified_counts: dict[str, int] = {}
     formal_names: dict[str, str] = {}
+    aliases_by_appellation: dict[str, list[str]] = {}
+    mention_counts: dict[str, int] = {}
+    chapter_counts: dict[str, int] = {}
     evidence_total = 0
     structural_pass = 0
     # 结构闸（G1-G3）零模型调用、纯同步核对，先把候选证据筛成「值得送裁决闸」的
@@ -2213,6 +2243,22 @@ async def _recurring_character_names(
             continue
         seen.add(appellation)
         formal_names[appellation] = formal
+        aliases = list(dict.fromkeys(
+            value for value in candidate.aliases
+            if value and value not in {appellation, formal}
+        ))
+        if formal and formal != appellation and appellation not in aliases:
+            aliases.insert(0, appellation)
+        aliases_by_appellation[appellation] = aliases
+        search_terms = {value for value in [appellation, formal, *aliases] if value}
+        mention_counts[appellation] = sum(
+            (chapter.get("content") or "").count(term)
+            for chapter in valid for term in search_terms
+        )
+        chapter_counts[appellation] = sum(
+            1 for chapter in valid
+            if any(term in (chapter.get("content") or "") for term in search_terms)
+        )
         verified_counts[appellation] = 0
         # 防御性兜底：即便模型没听提示词的话报多了，这里也只取前 N 条送进结构闸/
         # 裁决闸，保证下游裁决调用数量有上界，不随模型的自由发挥线性增长。
@@ -2279,11 +2325,18 @@ async def _recurring_character_names(
         verified_counts[appellation] += 1
 
     ranked = [
-        (appellation, formal_names.get(appellation, ""), count)
+        (
+            appellation,
+            formal_names.get(appellation, ""),
+            count,
+            mention_counts.get(appellation, 0),
+            chapter_counts.get(appellation, 0),
+            aliases_by_appellation.get(appellation, []),
+        )
         for appellation, count in verified_counts.items()
         if count >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
     ]
-    ranked.sort(key=lambda item: (-item[2], item[0]))
+    ranked.sort(key=lambda item: (-item[2], -item[4], -item[3], item[1] or item[0]))
     result = ranked[:BIBLE_MUST_COVER_MAX]
     # 记账：供人工从数字上判断「这次点名是不是明显偏少/裁决通过率是不是异常低」，
     # 不是核验闸门本身。
@@ -2295,6 +2348,7 @@ async def _recurring_character_names(
             "structural_gate_passed": structural_pass,
             "presence_verdict_passed": verdict_pass,
             "must_cover": len(result),
+            "fulltext_mentions": sum(item[3] for item in result),
         },
     )
     return result
@@ -4879,8 +4933,11 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
     must_cover = await _recurring_character_names(chapters, project_id=project_id)
 
     must_cover_lines = [
-        f"{formal or appellation}（原文常用称呼：{appellation}；核验在场 {count} 次）"
-        for appellation, formal, count in must_cover
+        (
+            f"{formal or appellation}（原文称呼：{'、'.join(dict.fromkeys([appellation, *aliases]))}；"
+            f"核验在场 {onstage_count} 次；全文命中 {mention_count} 次；覆盖 {chapter_count} 章）"
+        )
+        for appellation, formal, onstage_count, mention_count, chapter_count, aliases in must_cover
     ]
     previous_names = [
         item.get("name", "") for item in (previous_bible or {}).get("characters", [])
@@ -4894,13 +4951,14 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
 {roster_context}
 
 规则：
-1. 候选摘要是唯一人物事实来源；不得新增摘要中没有的人物，总数不超过 20。
-2. name 优先使用摘要中的正式姓名；source_appellations 收录括号内原文常用称呼。
-3. 同一人物的正式姓名与原文称呼不得拆成多人。
-4. 用户反馈：{feedback.strip() or '无'}。
-5. 历史人物谱角色仅供返工对照，不得绕过候选摘要新增人物：{'、'.join(previous_names) or '无'}。
-6. visual_style_canonical：{forced_style or '按古典修仙题材生成 25~40 字的统一 CG/动画/漫画/插画画风'}。
-7. era 与 genre 只写简短题材标签；不得复述小说内容。
+1. 候选摘要来自单章点名、身份归一、在场核验与全文检索；不得新增摘要中没有的人物，总数不超过 20。
+2. 所有候选都必须收录；role 只负责区分主次，不得删除低频但已核验在场的候选。全文命中/覆盖章节用于判断重要程度，在场证据用于判断是否真实出场，二者不能互相替代。
+3. name 必须使用括号外的正式姓名；若括号外仍是描述性称呼，说明全文尚未揭示真名，才可暂用该称呼。source_appellations 必须完整收录括号内原文称呼。
+4. 同一候选行内的正式姓名、绰号、描述性称呼属于同一人物，严禁拆成多个角色。
+5. 用户反馈：{feedback.strip() or '无'}。
+6. 历史人物谱角色仅供返工对照，不得绕过候选摘要新增人物：{'、'.join(previous_names) or '无'}。
+7. visual_style_canonical：{forced_style or '按古典修仙题材生成 25~40 字的统一 CG/动画/漫画/插画画风'}。
+8. era 与 genre 只写简短题材标签；不得复述小说内容。
 
 输出 JSON Schema：
 {{"characters": [{{"name": str, "role": "主角|重要配角|反派", "source_appellations": [str]}}], "world": {{"era": str, "genre": str, "visual_style_canonical": str}}}}"""
@@ -4946,7 +5004,9 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
 
     missing = [
         item for item in must_cover
-        if not _bible_covers_name(bible, {value for value in (item[0], item[1]) if value})
+        if not _bible_covers_name(
+            bible, {value for value in (item[0], item[1], *item[5]) if value}
+        )
     ]
     if missing:
         # Reuse the same single-character primitive; no batch/full-source supplement request.
@@ -4955,9 +5015,9 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
             _BibleRosterEntry(
                 name=formal or appellation,
                 role="重要配角",
-                source_appellations=[appellation],
+                source_appellations=list(dict.fromkeys([appellation, *aliases])),
             )
-            for appellation, formal, _count in missing
+            for appellation, formal, _onstage, _mentions, _chapters, aliases in missing
             if (formal or appellation) not in existing_names
         ]
         supplemented = await _generate_character_detail_batch(
