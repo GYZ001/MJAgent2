@@ -2151,6 +2151,12 @@ async def generate_episode(episode_id: str, body: dict | None = None):
         "episode_id": episode_id,
         "idempotency_key": payload.get("idempotency_key"),
         "request_id": payload.get("request_id"),
+        # 这两个字段决定「只补齐待办」还是「全量重跑」、以及资格陈旧性校验；
+        # 命令总线走 ConfirmationPolicy.ALWAYS 是真实用户路径的必经之路，漏转发
+        # 会让「生成所有视频」弹窗承诺的 only_incomplete 语义在总线层失效
+        # （见 I.VideoGenerateEpisodeInput 与 h_video.generate_episode）。
+        "only_incomplete": bool(payload.get("only_incomplete") or False),
+        "qualification_version": payload.get("qualification_version"),
     })
     if routed is not None:
         return routed
