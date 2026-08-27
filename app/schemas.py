@@ -126,6 +126,18 @@ class CharacterAlias(BaseModel):
     evidence_quote: str
 
 
+class AppearanceEvidence(BaseModel):
+    """appearance_canonical 里"标志性特征"部分的证据锚点：模型申报 + 代码核验后才允许保留
+    对应文字（不确定不登记，登记失败时该特征需要从 appearance_canonical 里退回通用形态，
+    不是拒绝整条角色——结构与 CharacterAlias 完全同构，见 app/schemas.py 的 CharacterAlias）。
+    王有材事故修复新增，见 logs/appearance_provenance_plan.md。"""
+
+    evidence_chapter_index: int   # 原著章节序号（对应源章节的 idx 字段）
+    # 原文逐字短句：必须原样连续照抄、不得跨句拼接或用省略号连接多处；核验规则见
+    # app/stages._appearance_evidence_verified（长度上限 APPEARANCE_EVIDENCE_QUOTE_MAX_CHARS）。
+    evidence_quote: str
+
+
 class CharacterAffiliation(BaseModel):
     """一条阵营/宗门归属证据：模型申报 + 代码核验后才允许落库（不确定不登记）。
     与 CharacterAlias 的区别：这是状态事实（有效区间），不是恒真事实——需要
@@ -193,6 +205,12 @@ class Character(BaseModel):
     # 存储于此——存冗余早晚不一致，查询时现算。
     affiliations: list[CharacterAffiliation] = Field(default_factory=list)
     relations: list[CharacterRelation] = Field(default_factory=list)
+    # 外观标志性特征的证据锚点（王有材事故修复新增，见
+    # logs/appearance_provenance_plan.md）。只对 appearance_canonical 里"通用形态之外的
+    # 标志性特征"部分需要；通用形态允许合理设定，不需要证据。旧 bible_json 没有这个键时
+    # default_factory 给空列表，反序列化不受影响；空列表是诚实默认值（"这个角色没有可验证
+    # 的标志性特征"），不是缺陷信号，不应触发任何拦截。
+    source_evidence: list[AppearanceEvidence] = Field(default_factory=list)
 
 
 class World(BaseModel):

@@ -2261,8 +2261,9 @@ async def _supplement_bible_characters(bible: Bible, missing: list[tuple[str, st
     的角色，不对已核验过的角色重复发起模型调用）才会真正登记。
 
     chapters_by_idx：全书原文查找表（`_chapters_by_idx(chapters)`），用于核验模型
-    随 name 一并申报的 aliases（核验失败的别名条目直接剔除，不影响角色本身的
-    补录）。
+    随外观一并申报的 source_evidence（本函数没有 AgentLoop 重试，核验失败的证据
+    条目直接从列表里剔除，不拒绝整个角色）与随 name 一并申报的 aliases（核验失败
+    的别名条目同样直接剔除，不影响角色本身的补录）。
     """
     from app.refs import (
         PRODUCTION_APPEARANCE_MAX_CHARS,
@@ -2290,7 +2291,12 @@ async def _supplement_bible_characters(bible: Bible, missing: list[tuple[str, st
 
 要求：
 1. 只输出上面「必须补录」的角色，也不要多输出别人。唯一例外：其中某个名字如果其实不是人物（是宗门、地名或法宝名），跳过它，不要硬编成角色。
-2. appearance_canonical 是固定外观锚点串：{PRODUCTION_APPEARANCE_MIN_CHARS}~{PRODUCTION_APPEARANCE_MAX_CHARS} 字，必须包含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征。只写常规完整着装、中性站姿下可直接看见并能跨镜稳定复现的静态形态；不写性格、情绪、眼神行为，不得写裸体或私密身体部位。原著未描写处按题材合理补全并保持内部一致。
+2. appearance_canonical 是固定外观锚点串：{PRODUCTION_APPEARANCE_MIN_CHARS}~{PRODUCTION_APPEARANCE_MAX_CHARS} 字，只写常规完整着装、中性站姿下
+   可直接看见并能跨镜稳定复现的静态形态；不写性格、情绪、眼神行为，不得写裸体或私密身体
+   部位。通用形态（性别年龄感/发型发色/服装款式颜色）原文没写时可按题材合理设定，不需要
+   举证；是否再写 1 个标志性特征取决于原文对这个角色本人是否确有描写——有就写且逐字取用
+   并在 source_evidence 里举证（evidence_chapter_index + 40 字以内的原文逐字短句，短句里
+   要能直接读出是在写这个角色本人，不是同段落里的其他人），没有就不写，不必凑数。
 3. role 取"主角|重要配角|反派"之一。
 4. speech_style 15~30 字，描述句长习惯/口头禅/敬语习惯。
 5. relationships.to 只能指向【已收录角色或本次补录角色】的 name；无法确定就留空数组。
@@ -2305,7 +2311,7 @@ async def _supplement_bible_characters(bible: Bible, missing: list[tuple[str, st
 {chapters_text}
 
 输出 JSON Schema：
-{{"characters": [{{"name": str, "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "aliases": [{{"text": str, "name_kind": "personal_name|honorific|referential", "evidence_chapter_index": int, "evidence_quote": str}}]}}]}}"""
+{{"characters": [{{"name": str, "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "source_evidence": [{{"evidence_chapter_index": int, "evidence_quote": str}}], "aliases": [{{"text": str, "name_kind": "personal_name|honorific|referential", "evidence_chapter_index": int, "evidence_quote": str}}]}}]}}"""
     try:
         raw = await model_gateway.chat(
             [{"role": "system", "content": SYSTEM_PREFIX},
@@ -2342,6 +2348,15 @@ async def _supplement_bible_characters(bible: Bible, missing: list[tuple[str, st
         character.name = name
         character.ref_image_path = None
         character.portrait_prompt_override = None
+        # 没有 AgentLoop 重试可用：核验失败的证据条目直接剔除（角色照常补录，只是
+        # 这条特征失去了申报的举证），不因为一条证据不实就放弃整个角色补录。
+        character.source_evidence = [
+            evidence for evidence in character.source_evidence
+            if _appearance_evidence_verified(
+                chapters_by_idx, {character.name},
+                evidence.evidence_chapter_index, evidence.evidence_quote,
+            )
+        ]
         bible.characters.append(character)
         added.append(name)
         added_characters.append(character)
@@ -2435,6 +2450,82 @@ def _alias_declaration_verified(
         text in candidate and candidate in chapter_text
         for candidate in _quote_comparison_variants(quote)
     )
+
+
+# ---------- 外观标志性特征证据核验（王有材事故修复，见 logs/appearance_provenance_plan.md）----------
+#
+# 根因：`appearance_canonical` 生成 prompt 曾同时放"必须包含 1 个标志性特征"的正向配额和
+# "原著未描写处按题材合理补全"的兜底授权——对一个原文毫无外貌描写的角色，这个组合逼模型
+# 编造，模型选择的解法是"就近取材"，把同场另一个角色的特征安到了这个角色头上（王有材↔
+# 小胖子）。修复分两半：prompt 删掉配额（见 generate_bible/_supplement_bible_characters/
+# assess_new_character 的规则 2 文案），并新增本节的结构性核验，逐字核对模型申报的证据。
+#
+# 40 字上限是关键判据：用真实回归数据实测，王有材事故里"把同场角色特征安到王有材头上"
+# 唯一可用的原文句子，从"王有材"三字开头到能覆盖那条借来的特征（"较胖"）为止，最短连续
+# 引句需要 44 字——40 字上限让"把别人的描写和这个人的名字圈进同一条引文"在物理上不可能。
+
+APPEARANCE_EVIDENCE_QUOTE_MAX_CHARS = 40
+
+
+def _appearance_evidence_verified(
+    chapters_by_idx: dict[int, str],
+    anchor_texts: set[str],
+    evidence_chapter_index: int,
+    evidence_quote: str,
+) -> bool:
+    """标志性特征证据核验：结构性判据，不做任何语义分类（禁止黑白名单式修复）。
+
+    两个条件必须同时成立：
+    1. evidence_quote 长度 <= APPEARANCE_EVIDENCE_QUOTE_MAX_CHARS，且是
+       evidence_chapter_index 对应章节原文的逐字连续子串（按 `_quote_comparison_variants`
+       产出的候选引句形式判断，与别名核验同一套脱引号容错）；
+    2. 角色规范名（或调用方传入的其它已确认锚点）出现在这条引句本身内部——不是出现在
+       整章的其它位置。这是与 `_alias_declaration_verified` 条件 3（整章共现）的关键
+       区别：外观证据要求"名字和描写在同一条不超过 40 字的短引句里"，因为整章共现挡不住
+       "同一句里名字属于A、描写属于B"这种跨人借用（王有材事故的实际触发路径）。
+    """
+    quote = (evidence_quote or "").strip()
+    if not quote or len(quote) > APPEARANCE_EVIDENCE_QUOTE_MAX_CHARS:
+        return False
+    chapter_text = chapters_by_idx.get(evidence_chapter_index, "")
+    if not chapter_text:
+        return False
+    for candidate in _quote_comparison_variants(quote):
+        if candidate in chapter_text and any(
+            anchor and anchor in candidate for anchor in anchor_texts
+        ):
+            return True
+    return False
+
+
+def _validate_appearance_evidence(bible: Bible, chapters_by_idx: dict[int, str]) -> list[str]:
+    """遍历每个角色的 source_evidence，只对非空条目核验；核验失败才产生 error（驱动
+    AgentLoop 的修复重试）。空 source_evidence 数组永远不产生 error——诚实的"这个角色
+    没有可举证的标志性特征"是安全默认值，不是缺陷信号，不能让"老实说没有"比"编一个能蒙混
+    过关的"更差（那会复刻本次事故的激励结构）。
+
+    锚点只用角色规范名，不用 aliases：本函数在 AgentLoop 校验闭包里对候选 Bible 逐轮调用，
+    此时 aliases 只是模型本轮申报、尚未经过 `_verify_character_aliases_in_place` 代码核验，
+    用未核验的申报去解锁另一项核验会开一个"自证"漏洞——与 `_verify_character_aliases_in_place`
+    自身"只用已验证别名扩大锚点集合"的既有规则一致（不确定不采信）。
+    """
+    errors: list[str] = []
+    for i, character in enumerate(bible.characters):
+        anchor_texts = {character.name}
+        for j, evidence in enumerate(character.source_evidence):
+            if _appearance_evidence_verified(
+                chapters_by_idx, anchor_texts,
+                evidence.evidence_chapter_index, evidence.evidence_quote,
+            ):
+                continue
+            errors.append(
+                f"characters[{i}]({character.name}).source_evidence[{j}] 未通过核验：第 "
+                f"{evidence.evidence_chapter_index} 章原文里找不到一条不超过 "
+                f"{APPEARANCE_EVIDENCE_QUOTE_MAX_CHARS} 字、且与「{character.name}」同句"
+                "出现的逐字引句；请换一条真实可查的原文短引句，或直接去掉这个特征，"
+                "appearance_canonical 只写通用形态即可，不必凑数。"
+            )
+    return errors
 
 
 # ---------- A1a. 桥接章确定性检索（分工修复：模型申报语义，代码检索证据所在地） ----------
@@ -4467,8 +4558,8 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
     # 必须在渲染源文本**和**统计必收名单之前净化，两者都以正文为准。
     chapters = await _chapters_without_paratext(chapters)
     chapters_text = _render_bible_source(chapters, head_chapters=BIBLE_HEAD_CHAPTERS)
-    # 全书原文查找表（未经预算截断），供下方 _supplement_bible_characters 核验
-    # 补录角色新增别名的原文举证使用。
+    # 外观标志性特征证据核验用的全书原文查找表（未经预算截断），下方
+    # validate_authoritative_bible 与 _supplement_bible_characters 共用同一份。
     chapters_by_idx = _chapters_by_idx(chapters)
     must_cover = await _recurring_character_names(chapters, project_id=project_id)
     must_cover_part = ""
@@ -4522,7 +4613,26 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
 
 要求：
 1. 收录所有出场 2 次以上或明显重要的角色；【必收角色名单】里的人一个都不能少，其余按重要性补足，总数不超过 20 个。
-2. appearance_canonical 是该角色的"固定外观锚点串"：40~60 字，必须包含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征。只写常规完整着装、中性站姿下可直接看见并能跨镜稳定复现的静态形态：五官、发型、体型、外层服装、可见配饰或面部标记。不写性格、欲望、气质、眼神行为、对他人的注视方式，不得写裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。原著未描写的部分，按题材合理补全并保持内部一致。
+2. appearance_canonical 是该角色的"固定外观锚点串"：40~60 字，只写常规完整着装、中性
+   站姿下可直接看见并能跨镜稳定复现的静态形态：五官、发型、体型、外层服装、可见配饰或
+   面部标记。不写性格、欲望、气质、眼神行为、对他人的注视方式，不得写裸体、内衣、私密
+   身体部位或必须暴露身体才能看见的特征。
+   写作分两层：
+   - 通用形态（性别年龄感/发型发色/服装款式与颜色）：原文没有直接描写时，允许你按题材、
+     身份、场景合理设定一个具体、可跨镜复现的写法（例如"十五六岁""粗麻杂役衫"），这是
+     具体化不是编造事实，不需要举证。
+   - 标志性特征（伤疤、体型极端值、面部标记、习惯动作留下的可见痕迹等）：只有原文对**这个
+     角色本人**确实写过这样的描写，才写这一条，且必须逐字取用原文说法；原文没有这类描写
+     时，appearance_canonical 到通用形态为止，把剩余字数用于把通用形态写得更具体（例如
+     补充材质、颜色细节），不要为了凑一个"标志性"而编造。判断"是不是这个角色本人"时要
+     小心：同一段落里描写"另一个人""其余几人""身边的人"这类指代对象的内容，不属于这个
+     角色本人，不能借用到他身上。
+   - source_evidence：数组，只用来给"标志性特征"这一层举证（通用形态不需要）。每条给
+     evidence_chapter_index（原文分块【】块头里的章节序号）与 evidence_quote（支撑该
+     特征的原文逐字短句，控制在 40 字以内、必须原样连续照抄、不得跨句拼接或用省略号
+     连接多处），且这句引文里必须能直接读出是在描写这个角色本人（角色的正式姓名或已
+     确认别名要出现在这同一句短引文里，不是出现在原文的其他地方）。原文没有可举证的
+     标志性特征时，source_evidence 就是空数组——这是诚实的默认值，不会因此被拒绝。
 3. visual_style_canonical：25~40 字的全局画风串，包含 美术风格/光线/色调，适配竖屏漫剧，必须依据本书题材定制。【硬性约束】必须是 CG/动画/漫画/插画类的非真人风格（如 3D 渲染、3D 写实 CG、2D 动画、动态漫画、厚涂插画、国漫风等，写实质感/照片级/胶片颗粒等氛围词可以保留），但严禁"真人实拍/真人出镜/实拍摄影"这类真人风格描述（否则后续 Seedance 视频接口会因疑似真人而报错 InputImageSensitiveContentDetected）。核心是画面为 CG/动画渲染而非真人拍摄。
 4. speech_style 用于后续台词写作：句长习惯/口头禅/敬语习惯等，15~30 字。
 5. name 必须互不重复且取原文最稳定的正式姓名；同一人物在原文中出现的其它别名/外号/尊称/
@@ -4568,7 +4678,9 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
         # override. Apply it before AgentLoop records the accepted Artifact.
         if visual_style_prompt:
             candidate.world.visual_style_canonical = visual_style_prompt
-        return validate_bible(candidate)
+        errors = validate_bible(candidate)
+        errors += _validate_appearance_evidence(candidate, chapters_by_idx)
+        return errors
 
     bible = await _run_with_agent_loop(
         "角色圣经", "character_bible", prompt, Bible, validate_authoritative_bible,

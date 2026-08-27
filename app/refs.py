@@ -77,12 +77,6 @@ def production_appearance_anchor(anchor: str) -> str:
     return normalize_prompt_text(anchor or "").strip()
 
 
-def missing_production_appearance_dimensions(anchor: str) -> list[str]:
-    """Completeness is established by the typed generation contract, not words."""
-    _ = anchor
-    return []
-
-
 def ensure_portrait_clothing_contract(prompt: str) -> str:
     safe = production_appearance_anchor(prompt)
     if _PORTRAIT_CLOTHING_CONTRACT not in safe:

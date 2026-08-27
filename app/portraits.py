@@ -48,7 +48,6 @@ from app.refs import (
     PRODUCTION_APPEARANCE_MAX_CHARS,
     PRODUCTION_APPEARANCE_MIN_CHARS,
     _safe_name,
-    missing_production_appearance_dimensions,
     portrait_prompt,
     production_appearance_anchor,
 )
@@ -525,20 +524,46 @@ def _name_in_bible(conn, project_id: str, name: str) -> bool:
     return any((c.get("name") or "") == name for c in json.loads(row["bible_json"]).get("characters", []))
 
 
-def _forward_fragments(conn, project_id: str, name: str, from_episode_no: int) -> tuple[str, str]:
-    """保留原有人物重要性评估窗口，不与“未来 10 章找真名”耦合。"""
+def _forward_fragments(
+    conn, project_id: str, name: str, from_episode_no: int,
+) -> tuple[str, str, dict[int, str]]:
+    """保留原有人物重要性评估窗口，不与"未来 10 章找真名"耦合。
+
+    王有材事故修复新增第三个返回值 chapters_by_idx（idx -> 完整章节原文，未经窗口化/
+    预算截断）：供 assess_new_character 核验 source_evidence 使用——evidence_chapter_index
+    要能对应到完整原文，不能只对应下面 fragments 里的窗口化片段。fragments 本身改为
+    【第 N 章】分块标记格式（仿照同文件 _future_chapter_context 已用的方式），原格式是
+    多章直接拼接成一整块文本，模型看不出章节边界，没法准确申报 evidence_chapter_index。
+    """
     ep = conn.execute(
         "SELECT source_chapters FROM episodes WHERE project_id=? AND episode_no=?",
         (project_id, from_episode_no)).fetchone()
     src = json.loads(ep["source_chapters"] or "[]") if ep and ep["source_chapters"] else []
     lo, hi = (min(src), max(src)) if src else (0, 0)
     rows = conn.execute(
-        "SELECT content FROM chapters WHERE project_id=? AND idx>=? AND idx<=? ORDER BY idx",
+        "SELECT idx, content FROM chapters WHERE project_id=? AND idx>=? AND idx<=? ORDER BY idx",
         (project_id, lo, hi + CHARACTER_IMPORTANCE_FORWARD_CHAPTERS)).fetchall()
-    text = "\n".join((r["content"] or "") for r in rows)
+    chapters_by_idx: dict[int, str] = {}
+    blocks: list[str] = []
+    used = 0
+    for row in rows:
+        content = row["content"] or ""
+        try:
+            idx = int(row["idx"])
+        except (TypeError, ValueError):
+            continue
+        if content.strip():
+            chapters_by_idx[idx] = content
+        piece = extract_character_fragments(content, name)
+        if not piece or used >= FRAGMENT_BUDGET:
+            continue
+        block = f"【第 {idx} 章】\n{piece}"
+        blocks.append(block)
+        used += len(block)
     return (
-        extract_character_fragments(text, name),
+        "\n\n".join(blocks),
         f"第 {from_episode_no} 集相关章节 +{CHARACTER_IMPORTANCE_FORWARD_CHAPTERS} 章",
+        chapters_by_idx,
     )
 
 
@@ -8984,14 +9009,27 @@ def _candidate_requires_identity_card(item: dict, known_names: set[str]) -> bool
 
 async def assess_new_character(name: str, fragments: str, *, style: str,
                                known_names: list[str], ep_label: str,
-                               require_identity_card: bool = False) -> dict:
+                               require_identity_card: bool = False,
+                               chapters_by_idx: dict[int, str] | None = None) -> dict:
     """针对一个【具体名字】判断是否值得单独建卡（戏份够 / 画面多），并产出角色卡字段。
-    返回 {important, reason, role, appearance_canonical, personality, speech_style, relationships}。"""
+    返回 {important, reason, role, appearance_canonical, personality, speech_style,
+    relationships, source_evidence}。
+
+    chapters_by_idx：`_forward_fragments` 一并返回的全书原文查找表（未截断），用于核验
+    模型申报的 source_evidence（王有材事故修复新增，见
+    logs/appearance_provenance_plan.md）。生产路径（`ensure_character_card`）总是显式
+    传入；测试直连本函数且不传时按 None 处理，此时无法核验任何证据，安全默认是"全部
+    拒绝"（不确定不采信），不是静默放行。
+    """
+    from app.stages import _appearance_evidence_verified
+
     known = "、".join(known_names) or "（无）"
     identity_contract = (
         "身份消歧模型已用上下文确认这是稳定真名；本次任务不是重新判断戏份重要度，"
         "而是生成完整的最小人物卡。无论戏份多少都输出 important=true；"
-        "原文未给出的可视字段按项目画风作保守补全。"
+        "原文对这个角色本人确有可视描写的字段，逐字取用；原文没写的可视字段，通用形态"
+        "（年龄段/发型发色/服装款式颜色）按项目画风与身份合理设定，不写需要举证的"
+        "标志性特征。"
         if require_identity_card else
         "请判断该称谓是否值得单独建人物卡并定妆。"
     )
@@ -9016,7 +9054,12 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
 
 判定口径：
 {decision_contract}
-- appearance_canonical 是"固定外观锚点串"：40~60 字，须含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征；只写视觉可见信息，不写性格。原著未写处按画风（{style}）合理补全并保持内部一致。
+- appearance_canonical 是"固定外观锚点串"：40~60 字，只写视觉可见信息，不写性格。通用
+  形态（性别年龄感/发型发色/服装款式与颜色）原文没写处按画风（{style}）合理设定，不需要
+  举证；标志性特征只有原文对这个角色本人确有描写才写，且要在 source_evidence 里给出
+  evidence_chapter_index（取原文片段【第 N 章】块头里的数字）与 evidence_quote（支撑该
+  特征的原文逐字短句，40 字以内、必须原样连续照抄，短句本身要能读出是在写这个角色
+  本人，不是同段落里的其他人）；原文没有就不写，source_evidence 留空数组即可，不是缺陷。
 - appearance_canonical 只允许常规完整着装、中性站姿下可直接看见、可跨镜稳定复现的静态形态；不得写性格、欲望、气质、眼神行为、对他人的注视方式、裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。
 
 先判断「{name}」指的是什么：
@@ -9029,7 +9072,7 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
 也一律 important=false——它们属于场景库，不属于人物谱。
 
 只输出一个 JSON 对象：
-{{"subject_kind": "person|organization|place|object|other", "important": true/false, "reason": "一句话依据", "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}]}}"""
+{{"subject_kind": "person|organization|place|object|other", "important": true/false, "reason": "一句话依据", "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "source_evidence": [{{"evidence_chapter_index": int, "evidence_quote": str}}]}}"""
 
     async def _assess_once(extra_instruction: str) -> dict:
         messages = [{"role": "user", "content": prompt + extra_instruction}]
@@ -9059,9 +9102,10 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
         if len(appearance) > APPEARANCE_MAX:
             appearance = appearance[:APPEARANCE_MAX]
         role = (obj.get("role") or "重要配角").strip() or "重要配角"
+        # 完整度只看长度 + role 是否合法：新契约下"标志性特征齐全"不再是必要条件——
+        # 通用形态本来就允许没有标志性特征，见 assess_new_character docstring。
         card_complete = (
             APPEARANCE_MIN <= len(appearance) <= APPEARANCE_MAX
-            and not missing_production_appearance_dimensions(appearance)
             # role 是闭合枚举，不是自由文本。
             and role in CHARACTER_CARD_ROLES
         )
@@ -9079,6 +9123,39 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
             for r in (obj.get("relationships") or [])
             if isinstance(r, dict) and r.get("to") in known_set and str(r.get("relation") or "").strip()
         ]
+        # 标志性特征证据：只有非空、逐字核验通过的条目才登记；核验失败的条目单独
+        # 记下失败原因，供 require_identity_card 路径的重试逻辑使用（未通过核验时
+        # 不做文本手术裁剪 appearance_canonical 本身——那是子句边界识别问题，做不到
+        # 可靠的自动化字符串处理，交给模型下一轮自己重写，见
+        # logs/appearance_provenance_plan.md 第 8 节风险 7）。
+        verified_evidence: list[dict] = []
+        rejected_evidence: list[dict] = []
+        for item in (obj.get("source_evidence") or []):
+            if not isinstance(item, dict):
+                continue
+            quote = str(item.get("evidence_quote") or "").strip()
+            if not quote:
+                continue
+            try:
+                chapter_index = int(item.get("evidence_chapter_index"))
+            except (TypeError, ValueError):
+                rejected_evidence.append({
+                    "evidence_chapter_index": item.get("evidence_chapter_index"),
+                    "evidence_quote": quote,
+                })
+                continue
+            if _appearance_evidence_verified(
+                chapters_by_idx or {}, {name}, chapter_index, quote,
+            ):
+                verified_evidence.append({
+                    "evidence_chapter_index": chapter_index,
+                    "evidence_quote": quote,
+                })
+            else:
+                rejected_evidence.append({
+                    "evidence_chapter_index": chapter_index,
+                    "evidence_quote": quote,
+                })
         return {
             "important": important,
             "card_complete": card_complete,
@@ -9090,21 +9167,41 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
             "personality": (obj.get("personality") or "").strip(),
             "speech_style": (obj.get("speech_style") or "").strip(),
             "relationships": rels,
+            "source_evidence": verified_evidence,
+            "rejected_evidence": rejected_evidence,
         }
 
     verdict = _build_verdict(await _assess_once(""))
-    # 已确认真名却拿到过薄的人物卡时，做一次有界重试并明确要求补全可视维度，
-    # 而不是首轮不完整就让整条剧本硬失败（这是与结构化输出同源的单点脆弱性）。
-    if require_identity_card and not verdict["card_complete"]:
-        missing = missing_production_appearance_dimensions(
-            verdict["appearance_canonical"]
-        )
+    # 已确认真名却拿到过薄的人物卡、或标志性特征证据核验不通过时，做一次有界重试，
+    # 而不是首轮不完整/不实就让整条剧本硬失败（这是与结构化输出同源的单点脆弱性）。
+    # 重试提示按实际失败原因动态拼接，不是静态模板：证据核验不通过时明确给出"换一条
+    # 真实证据"或"去掉这个特征只写通用形态"两条合法出路，不再逼模型必须保留一个
+    # 标志性特征（那正是王有材事故的激励结构）。
+    if require_identity_card and (not verdict["card_complete"] or verdict["rejected_evidence"]):
+        reasons: list[str] = []
+        if not verdict["card_complete"]:
+            reasons.append(
+                f"appearance_canonical 不完整（当前 {len(verdict['appearance_canonical'])} 字，"
+                f"要求 {APPEARANCE_MIN}~{APPEARANCE_MAX} 字；或 role 不是 主角/重要配角/反派 "
+                "之一）。请重写为完整外观锚点，只写通用形态（性别年龄感/发型发色/服装款式与"
+                "颜色）即可满足长度要求，不必强行加标志性特征。"
+            )
+        if verdict["rejected_evidence"]:
+            detail = "；".join(
+                f"第 {item.get('evidence_chapter_index')} 章引句「{item.get('evidence_quote')}」"
+                for item in verdict["rejected_evidence"]
+            )
+            reasons.append(
+                "以下标志性特征引用的证据未通过核验（可能不是该章逐字原文、超过 40 字、或角色"
+                f"本人姓名没有出现在这句引文本身里）：{detail}。请换一条真实、40 字以内、且角色"
+                "本人姓名与所写特征同句出现的原文逐字短句作为新证据；找不到就直接去掉这个"
+                "标志性特征，appearance_canonical 只保留通用形态，这同样是合法结果，不要为了"
+                "保住这个特征而勉强凑一条证据。"
+            )
         retry_instruction = (
-            "\n\n上一轮 appearance_canonical 不完整，缺少可视维度："
-            + ("、".join(missing) if missing else "长度或标志性特征不足")
-            + f"。请重写为 {APPEARANCE_MIN}~{APPEARANCE_MAX} 字、"
-            "含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征 的完整外观锚点，"
-            "并固定 important=true。原著未写处按画风保守补全，只写视觉可见信息。"
+            "\n\n上一轮 appearance_canonical 不完整，需要修正：\n"
+            + "\n".join(reasons)
+            + "\n并固定 important=true。"
         )
         verdict = _build_verdict(await _assess_once(retry_instruction))
     return verdict
@@ -9177,7 +9274,9 @@ async def ensure_character_card(
         bible = Bible.model_validate(json.loads(project["bible_json"]))
         style = bible.world.visual_style_canonical
         known = [c.name for c in bible.characters]
-        fragments, ep_label = _forward_fragments(conn, project_id, name, from_episode_no)
+        fragments, ep_label, forward_chapters_by_idx = _forward_fragments(
+            conn, project_id, name, from_episode_no
+        )
         if existing_change is not None:
             change_payload = (
                 existing_change.get("payload")
@@ -9205,6 +9304,7 @@ async def ensure_character_card(
                     "style": style,
                     "known_names": known,
                     "ep_label": ep_label,
+                    "chapters_by_idx": forward_chapters_by_idx,
                 }
                 if require_identity_card:
                     assessment_options["require_identity_card"] = True
@@ -9222,9 +9322,6 @@ async def ensure_character_card(
                 and APPEARANCE_MIN
                 <= len(str(verdict.get("appearance_canonical") or "").strip())
                 <= APPEARANCE_MAX
-                and not missing_production_appearance_dimensions(
-                    str(verdict.get("appearance_canonical") or "").strip()
-                )
             )
             # 以 subject_kind 为准（_build_verdict 一定会给出它），缺失同样拦截：
             # 无法断言"这是一个人"时，保守的方向就是不进人物谱。
@@ -9259,7 +9356,8 @@ async def ensure_character_card(
                     "name": name, "role": verdict["role"],
                     "appearance_canonical": verdict["appearance_canonical"],
                     "personality": verdict["personality"], "speech_style": verdict["speech_style"],
-                    "relationships": verdict["relationships"], "portrait_prompt_override": None})
+                    "relationships": verdict["relationships"], "portrait_prompt_override": None,
+                    "source_evidence": verdict.get("source_evidence") or []})
             except ValidationError as exc:
                 return {"status": "error", "name": name, "reason": f"card invalid {exc}"[:240]}
 

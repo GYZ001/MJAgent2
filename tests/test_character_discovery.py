@@ -2178,7 +2178,7 @@ def test_ensure_character_card_auto_adds_prominent_character_and_portrait(monkey
     _seed_project(conn, "美杜莎现身，紫色长发，妖娆冷艳。美杜莎再次出手。美杜莎统领蛇人一族。" * 3)
     _patch_settings(monkeypatch, conn)
 
-    async def fake_assess(name, fragments, *, style, known_names, ep_label):
+    async def fake_assess(name, fragments, *, style, known_names, ep_label, **_kwargs):
         assert name == "美杜莎" and "美杜莎" in fragments  # 检索到的是该角色片段
         return {"subject_kind": "person", "important": True, "reason": "反复出场", "role": "重要配角",
                 "appearance_canonical": "紫发妖娆女子，紫色长发，金瞳蛇眸，蛇纹长裙，气场冷艳标志性蛇瞳",
@@ -6409,10 +6409,11 @@ def test_character_importance_window_remains_twenty_chapters() -> None:
         "INSERT INTO chapters(project_id,idx,content) VALUES('p1',50,?)",
         ("美杜莎在二十章窗口边界再次登场。",),
     )
-    fragments, label = portraits._forward_fragments(conn, "p1", "美杜莎", 21)
+    fragments, label, chapters_by_idx = portraits._forward_fragments(conn, "p1", "美杜莎", 21)
 
     assert "二十章窗口边界" in fragments
     assert "+20 章" in label
+    assert chapters_by_idx.get(50) == "美杜莎在二十章窗口边界再次登场。"
 
 
 def test_unresolved_descriptive_people_keep_source_labels(monkeypatch) -> None:
