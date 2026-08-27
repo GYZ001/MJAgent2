@@ -11,6 +11,9 @@ export type WaitingApprovalPayload = {
     summary?: string
     risk?: string
     estimated_cost_cny?: number | null
+    /** 含重试余量的授权上限（单集硬顶 ¥500）；与 estimated_cost_cny（首轮
+     * 预估）是两个不同的数，两者都要展示，不能只显示预估让人误以为是上限。 */
+    authorized_cap_cny?: number | null
     warnings?: string[]
     affected?: {
       shot_count?: number
@@ -83,7 +86,10 @@ export function describeImpact(payload: WaitingApprovalPayload): string[] {
   lines.push(pf?.summary || payload.summary || '需要确认后才能执行')
   if (pf?.risk) lines.push(`风险等级：${pf.risk}`)
   if (typeof pf?.estimated_cost_cny === 'number') {
-    lines.push(`预计费用：¥${pf.estimated_cost_cny.toFixed(2)}`)
+    lines.push(`首轮预估费用：¥${pf.estimated_cost_cny.toFixed(2)}`)
+  }
+  if (typeof pf?.authorized_cap_cny === 'number') {
+    lines.push(`授权上限（含重试余量，单集硬顶 ¥500）：¥${pf.authorized_cap_cny.toFixed(2)}`)
   }
   const affected = pf?.affected
   if (affected?.shot_count) lines.push(`影响镜头数：${affected.shot_count}`)

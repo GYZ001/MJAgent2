@@ -418,14 +418,32 @@ def video_generate_shot(args) -> PreflightResult:
     ep = conn.execute(
         "SELECT id, status, episode_no FROM episodes WHERE id=?", (shot["episode_id"],)
     ).fetchone()
-    confirmed = bool(ep and ep["status"] in {"confirmed", "generating", "done", "mixed"})
+    # status 白名单只覆盖老版逐镜叙事契约的人工确认仪式；分镜台 2.0.0
+    # （app.production.storyboard_pack）生成完成后只落 'scripted'，靠这份产物
+    # 信号一起判，否则这张批准卡会显示"分镜尚未确认"这类已经不成立的提示
+    # （见 app.domain.review_wall._review_upstream_snapshot 同一处改动）。
+    from app.domain.common import storyboard_pack_prompts_complete
+
+    confirmed = bool(ep) and (
+        ep["status"] in {"confirmed", "generating", "done", "mixed"}
+        or storyboard_pack_prompts_complete(conn, str(shot["episode_id"]))
+    )
     estimated = initial_shot_generation_cost(float(shot["duration_s"] or 0))
+    from app.completion_grant import preview_episode_video_budget_authorization_cap
+
+    authorized_cap = preview_episode_video_budget_authorization_cap(
+        str(shot["episode_id"]), estimated, conn=conn,
+    )
     return PreflightResult(
         command="video.generate_shot",
         allowed=True,
         risk=RiskLevel.R2_MATERIAL,
-        summary=f"将为第 {ep['episode_no'] if ep else '?'} 集第 {shot['shot_no']} 镜生成视频（预计约 ¥{estimated:.1f}）",
+        summary=(
+            f"将为第 {ep['episode_no'] if ep else '?'} 集第 {shot['shot_no']} 镜生成视频"
+            f"（首轮预估约 ¥{estimated:.1f}；含重试余量的授权上限 ¥{authorized_cap:.0f}）"
+        ),
         estimated_cost_cny=estimated,
+        authorized_cap_cny=authorized_cap,
         affected=AffectedScope(episodes=[shot["episode_id"]], shots=[args.shot_id], shot_count=1),
         preconditions=[
             PreconditionCheck(
@@ -504,13 +522,28 @@ def video_generate_episode(args) -> PreflightResult:
         initial_shot_generation_cost(float(row["duration_s"] or 0))
         for row in payable_rows
     ), 2)
-    confirmed = ep["status"] in {"confirmed", "generating", "done", "mixed"}
+    # 见 video_generate_shot 同一处注释：加上分镜台 2.0.0 的产物信号，避免
+    # 批准卡对已经产物齐全的分集显示"分镜未确认"。
+    from app.domain.common import storyboard_pack_prompts_complete
+
+    confirmed = ep["status"] in {"confirmed", "generating", "done", "mixed"} or (
+        storyboard_pack_prompts_complete(conn, args.episode_id)
+    )
+    from app.completion_grant import preview_episode_video_budget_authorization_cap
+
+    authorized_cap = preview_episode_video_budget_authorization_cap(
+        args.episode_id, estimated, conn=conn,
+    )
     return PreflightResult(
         command="video.generate_episode",
         allowed=True,
         risk=RiskLevel.R2_MATERIAL,
-        summary=f"将生成第 {ep['episode_no']} 集约 {pending} 个待办镜头（预计约 ¥{estimated:.1f}）",
+        summary=(
+            f"将生成第 {ep['episode_no']} 集约 {pending} 个待办镜头"
+            f"（首轮预估约 ¥{estimated:.1f}；含重试余量的授权上限 ¥{authorized_cap:.0f}）"
+        ),
         estimated_cost_cny=estimated,
+        authorized_cap_cny=authorized_cap,
         affected=AffectedScope(episodes=[args.episode_id], shot_count=int(pending or 0)),
         preconditions=[
             PreconditionCheck(key="storyboard_confirmed", passed=confirmed, message="分镜已确认" if confirmed else "分镜未确认"),
@@ -575,7 +608,12 @@ def video_complete_episode(args) -> PreflightResult:
             estimated = float(pred["expected_cny"])
     except Exception:  # noqa: BLE001
         pass
-    confirmed = ep["status"] in {"confirmed", "generating", "done", "mixed"}
+    # 见 video_generate_shot 同一处注释：加上分镜台 2.0.0 的产物信号。
+    from app.domain.common import storyboard_pack_prompts_complete
+
+    confirmed = ep["status"] in {"confirmed", "generating", "done", "mixed"} or (
+        storyboard_pack_prompts_complete(conn, args.episode_id)
+    )
     allow_edit = bool(getattr(args, "allow_storyboard_edit", False))
     risk = RiskLevel.R3_DESTRUCTIVE if allow_edit else RiskLevel.R2_MATERIAL
     cap_arg = getattr(args, "budget_cap_cny", None)
@@ -653,7 +691,16 @@ def video_complete_project(args) -> PreflightResult:
     if episode_ids:
         wanted = set(episode_ids)
         rows = [r for r in rows if r["id"] in wanted]
-    eligible = [r for r in rows if r["status"] in {"confirmed", "generating", "done", "mixed"}]
+    # 见 video_generate_shot 同一处注释：加上分镜台 2.0.0 的产物信号，否则一个
+    # 分集全在新管线（status 永远到不了 confirmed）的项目会被判成"没有可补齐
+    # 的已确认剧集"，整条跨集补齐入口直接打不开。
+    from app.domain.common import storyboard_pack_prompts_complete
+
+    eligible = [
+        r for r in rows
+        if r["status"] in {"confirmed", "generating", "done", "mixed"}
+        or storyboard_pack_prompts_complete(conn, r["id"])
+    ]
     global_arg = getattr(args, "global_budget_cap_cny", None)
     per_arg = getattr(args, "per_episode_cap_cny", None)
     global_cap = float(500 if global_arg is None else global_arg)

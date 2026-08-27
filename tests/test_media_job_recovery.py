@@ -1815,3 +1815,184 @@ def test_media_run_resume_adapter_requeues_exact_paused_job(monkeypatch) -> None
     assert conn.execute(
         "SELECT status FROM jobs WHERE id='j1'"
     ).fetchone()["status"] == "queued"
+
+
+def _seed_submission_ready_video_job(
+    conn: sqlite3.Connection,
+    *,
+    job_id: str = "j-submit",
+    version_id: str = "v-submit",
+    shot_id: str = "s-submit",
+    episode_id: str = "e-submit",
+) -> None:
+    """一个还没拿到 provider_task_id、正要走到 claim_video_submit_slot 的
+    视频 job——复现 EP2 那种"认领没通过"落到 _run_job 的
+    ``VideoBudgetAuthorizationError`` 分支的真实入口，而不是从半路的
+    'accepted' 状态直接切入轮询。"""
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('p-submit','P',1)")
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
+           VALUES(?,'p-submit',1,'generating',1)""",
+        (episode_id,),
+    )
+    conn.execute(
+        """INSERT INTO shots(
+               id,episode_id,shot_no,duration_s,shot_size,camera_move,
+               scene_setting,characters,action_desc,dialogues,transition
+           ) VALUES(?,?,1,5,'中景','固定','室内','[]','人物站定','[]','硬切')""",
+        (shot_id, episode_id),
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,
+               provider_task_id,image_inputs,created_at
+           ) VALUES(?,?,1,'prompt','idem-submit','running',NULL,?,1)""",
+        (version_id, shot_id, json.dumps({"mode": "REFERENCE_VIDEO_MODE"})),
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               lease_owner,lease_expires_at,provider_create_state,
+               provider_non_cancellable,created_at,updated_at
+           ) VALUES(?,'video',?,?,?,'p-submit','running','worker-1',
+               9999999999,'not_started',0,1,1)""",
+        (job_id, shot_id, version_id, episode_id),
+    )
+    conn.commit()
+
+
+def _patch_run_job_submission_scaffolding(monkeypatch) -> None:
+    """把 claim_video_submit_slot 之前那些跟本次测试无关的前置门禁/装配全
+    部短路成 no-op——聚焦在 VideoBudgetAuthorizationError 分支本身的行为，
+    不重新验证参考图装配、审查依赖闸门这些别处已经覆盖的逻辑。"""
+    from app.media_pipeline import concurrency, stage_state
+
+    class Permit:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    async def no_fence(*_args, **_kwargs) -> None:
+        return None
+
+    async def passthrough_planned_inputs(
+        _conn, _job, _version, _shot, _ep, meta, prompt_text, *, lease_owner,
+    ):
+        return meta, prompt_text
+
+    monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(worker, "_assert_review_dependency_fence_async", no_fence)
+    monkeypatch.setattr(
+        worker, "_assert_video_provider_submission_authority_async", no_fence,
+    )
+    # 不能只走"未知视频生成模式"报错的最短路径去够 claim_video_submit_
+    # slot——那条路径本身要靠 _prepare_planned_mode_inputs 按 mode 分支到
+    # 一个真正的参考图/首尾帧装配函数，装配细节别处已经覆盖，这里整个短路。
+    monkeypatch.setattr(worker, "_prepare_planned_mode_inputs", passthrough_planned_inputs)
+    monkeypatch.setattr(worker, "_assert_job_lease", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "_video_image_inputs_from_meta", lambda _meta: [])
+    monkeypatch.setattr(worker.video_modes, "build_seedance_video_inputs", lambda _meta: [])
+    # AI 提示词/装配之间那段用心跳影子任务保活 lease；心跳循环真的调用
+    # media_scheduler.renew_lease，不给它一个总是成功的桩，心跳会判定 lease
+    # 丢失，提前把整条路径拐去 LeaseLost，claim_video_submit_slot 根本不会
+    # 被调用到。
+    monkeypatch.setattr(worker.media_scheduler, "renew_lease", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(concurrency, "semaphore_for", lambda _resource: Permit())
+    monkeypatch.setattr(concurrency, "report_congestion", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(concurrency, "report_healthy", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(stage_state, "set_pipeline_stage", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "mark_media_job_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,
+    )
+
+
+def test_budget_pause_auto_retries_within_already_approved_cap_before_requiring_human(
+    monkeypatch,
+) -> None:
+    """核心缺陷二修复的直接回归：claim_video_submit_slot 认领没通过时，
+    _run_job 以前会立刻把 job 钉死在 paused_budget，必须人工再点一次
+    /generate 才能续上。现在它应该在人已经批准过的同一个 cap 内，先按
+    VIDEO_JOB_MAX_RETRIES 有限退避重试几次——重试期间既不新申请预算，也
+    不改变认领函数本身；只有重试耗尽仍未通过，才落回需要人工处理的
+    paused_budget 终态。"""
+    from app import config
+
+    conn = _conn()
+    _seed_submission_ready_video_job(conn)
+    _authorize_video_retry(conn, "e-submit", cap_cny=100.0)
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    _patch_run_job_submission_scaffolding(monkeypatch)
+
+    requeued: list[str] = []
+    monkeypatch.setattr(
+        worker, "_requeue_after",
+        lambda job_id, _delay: requeued.append(job_id) or _noop_coro(),
+    )
+
+    from app.media_pipeline import scheduler as media_scheduler_module
+
+    monkeypatch.setattr(
+        media_scheduler_module, "claim_video_submit_slot",
+        lambda **_kwargs: (False, "VIDEO_BUDGET_NOT_AUTHORIZED"),
+    )
+
+    asyncio.run(worker._run_job("j-submit", lease_owner="worker-1"))
+
+    job = conn.execute(
+        "SELECT status,reason_code FROM jobs WHERE id='j-submit'"
+    ).fetchone()
+    assert job["status"] == "queued"
+    assert job["reason_code"] == "VIDEO_BUDGET_NOT_AUTHORIZED"
+    assert requeued == ["j-submit"]
+    meta = json.loads(
+        conn.execute(
+            "SELECT image_inputs FROM shot_versions WHERE id='v-submit'"
+        ).fetchone()["image_inputs"]
+    )
+    assert meta["budget_pause_auto_retry_count"] == 1
+    # shot_versions 状态没有被拖去 paused_budget——这仍是活跃的重试，不是终态。
+    assert conn.execute(
+        "SELECT status FROM shot_versions WHERE id='v-submit'"
+    ).fetchone()["status"] == "running"
+
+    # 把 job 重新置回 running（下一轮 worker 会做的事），驱动到重试耗尽为止。
+    for _ in range(config.VIDEO_JOB_MAX_RETRIES - 1):
+        conn.execute(
+            "UPDATE jobs SET status='running',lease_owner='worker-1' WHERE id='j-submit'"
+        )
+        conn.commit()
+        asyncio.run(worker._run_job("j-submit", lease_owner="worker-1"))
+
+    job = conn.execute("SELECT status FROM jobs WHERE id='j-submit'").fetchone()
+    assert job["status"] == "queued"
+    assert len(requeued) == config.VIDEO_JOB_MAX_RETRIES
+
+    # 最后一次：重试预算耗尽，落回需要人工处理的 paused_budget 终态。
+    conn.execute(
+        "UPDATE jobs SET status='running',lease_owner='worker-1' WHERE id='j-submit'"
+    )
+    conn.commit()
+    asyncio.run(worker._run_job("j-submit", lease_owner="worker-1"))
+
+    job = conn.execute(
+        "SELECT status,reason_code FROM jobs WHERE id='j-submit'"
+    ).fetchone()
+    assert job["status"] == "paused_budget"
+    assert job["reason_code"] == "VIDEO_BUDGET_NOT_AUTHORIZED"
+    assert conn.execute(
+        "SELECT status FROM shot_versions WHERE id='v-submit'"
+    ).fetchone()["status"] == "paused_budget"
+    # 重试没有申请过新预算——authority 的 cap 全程没变。
+    assert conn.execute(
+        "SELECT cap_cny FROM episode_video_budget_authorities WHERE episode_id='e-submit'"
+    ).fetchone()["cap_cny"] == 100.0
+
+
+async def _noop_coro() -> None:
+    return None

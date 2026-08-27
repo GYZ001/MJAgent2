@@ -4136,6 +4136,50 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         return
     except VideoBudgetAuthorizationError as exc:
         message = str(exc)
+        # 预算认领在"cap 与已认领总额零余量"附近可能被瞬时挤掉（同集其它镜
+        # 头的认领/释放时序），不代表这一集真的超支——claim_video_submit_
+        # slot 用的仍是人已经批准过的同一个 cap，没有申请新额度。像"槽位已
+        # 满"（见上面 VideoInflightAdmissionDeferred 分支）一样先给几次有限
+        # 退避重试的机会，比一次没挤上就直接卡死等人手再点一次 /generate 更
+        # 合理；重试耗尽仍未通过，才落回下面真正需要人工处理的 paused_budget
+        # 终态——预算保护本身没有放宽，只是不再让一次瞬时失败必须靠人手恢复。
+        retry_count = int(meta.get("budget_pause_auto_retry_count") or 0)
+        if retry_count < config.VIDEO_JOB_MAX_RETRIES:
+            retry_count += 1
+            delay = config.VIDEO_JOB_RETRY_BASE_DELAY * (2 ** (retry_count - 1))
+            meta["budget_pause_auto_retry_count"] = retry_count
+            note = (
+                f"本集视频预算认领未通过，已在人工已批准的额度内自动重试第 "
+                f"{retry_count}/{config.VIDEO_JOB_MAX_RETRIES} 次（约 {int(delay)} 秒后），"
+                f"不会申请新的预算；若重试耗尽仍未通过才会暂停等待人工处理。原因：{message}"
+            )
+            retried = conn.execute(
+                """UPDATE jobs
+                      SET status='queued',error=?,reason_code='VIDEO_BUDGET_NOT_AUTHORIZED',
+                          reason_text=?,provider_non_cancellable=0,
+                          provider_create_state='not_started',
+                          lease_owner=NULL,lease_expires_at=NULL,next_retry_at=?,
+                          updated_at=?
+                    WHERE id=? AND status='running' AND lease_owner=?""",
+                (note, note, now() + delay, now(), job_id, owner),
+            )
+            if retried.rowcount == 1:
+                conn.execute(
+                    """UPDATE budget_reservations SET status='reserved'
+                        WHERE job_id=? AND status='running'""",
+                    (job_id,),
+                )
+                conn.commit()
+                _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False))
+                mark_media_job_state(
+                    _row_value(job, "run_id"), _row_value(job, "step_run_id"), "queued", note,
+                )
+                task = asyncio.get_running_loop().create_task(_requeue_after(job_id, delay))
+                _retry_tasks.add(task)
+                task.add_done_callback(_retry_tasks.discard)
+                return
+            conn.rollback()
+            return
         changed = conn.execute(
             """UPDATE jobs
                   SET status='paused_budget',error=?,reason_code='VIDEO_BUDGET_NOT_AUTHORIZED',
