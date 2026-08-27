@@ -611,6 +611,24 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
     published_screenplay = ep.get("published_screenplay_artifact_id") or ep.get("screenplay_artifact_id")
     published_storyboard = ep.get("published_storyboard_artifact_id") or ep.get("storyboard_artifact_id")
     screenplay_qualified = _screenplay_ready(ep)
+    # 分镜是否"完整"不能只读 episodes.status：分镜台 2.0.0
+    # （app.production.storyboard_pack）路径生成完成后只落 status='scripted'，
+    # 从不自动推进到 'confirmed'——那是旧版逐镜叙事管线的人工确认仪式，这条
+    # 新管线里发布证据在生成完成时已自动落盘，没有等价的"确认"步骤。挂
+    # status 白名单会把这类已经产出完整产物的分集永久判不过（用户实测复现：
+    # EP5/ep_0a7130b7b402 六段视频提示词齐全、发布证据齐全，仍卡在
+    # "分镜尚未完整确认"，唯一诉求是产物完整就该放行）。
+    # 用 OR 而不是整体替换：老版逐镜叙事契约（叙事权威分集、历史 plan-null
+    # 兼容分集）没有存量 prompt_text 字段可判——它们的提示词是生成请求时才
+    # 从多个结构化字段现场编译的，'confirmed' 状态仍是那条管线唯一有意义的
+    # 完整信号，这里继续认。计算前移到 durable_runs 扫描之前，因为下面的
+    # PAUSED_EXTERNAL 孤儿豁免判据也需要这份完整信号——它此前只挂
+    # episodes.status 白名单，会在 2.0.0 管线下把"已被证明取代的孤儿"永久
+    # 误判为仍在运行，同一族缺陷。
+    confirmed = (
+        ep.get("status") in {"confirmed", "generating", "done", "mixed"}
+        or storyboard_pack_prompts_complete(conn, episode_id)
+    )
     active: list[dict[str, Any]] = []
     seen_run_ids: set[str] = set()
     for kind, run_id in (
@@ -648,10 +666,14 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
         # 历史兼容：旧版重启恢复竞态会留下 PAUSED_EXTERNAL 孤儿。
         # 若它已有更新的同类成功运行，当前剧集也已发布确认，
         # 这条旧运行已被可证明地取代，不应永久锁死生成资格。
+        # "已发布确认"用 confirmed（见上方定义），不能只挂 episodes.status
+        # 白名单：分镜台 2.0.0 管线成功收尾也只落 status='scripted'，会让
+        # 这条豁免在新管线下永远打不开，孤儿因此永久占着 active，反而把
+        # "编剧或分镜任务仍在运行"锁死在已经证明被取代的旧运行上。
         superseded_restart_orphan = False
         if (
             run["status"] == "PAUSED_EXTERNAL"
-            and ep.get("status") in {"confirmed", "generating", "done", "mixed"}
+            and confirmed
             and published_storyboard
         ):
             successor = conn.execute(
@@ -691,7 +713,8 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
             "kind": "upstream", "run_id": None, "status": ep.get("status"),
             "stage": None, "updated_at": None, "source": "episode_status",
         })
-    confirmed = ep.get("status") in {"confirmed", "generating", "done", "mixed"}
+    # confirmed 已在函数上方（durable_runs 扫描之前）算好，供 PAUSED_EXTERNAL
+    # 孤儿豁免判据复用；这里直接沿用，不重复计算。
     has_artifacts = bool(screenplay_qualified and published_screenplay and published_storyboard)
     assets = _review_asset_qualification(conn, episode_id)
     narrative_authority = _review_narrative_authority_snapshot(conn, ep)
@@ -705,7 +728,7 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
     if not screenplay_qualified:
         blockers.append("剧本尚未取得与当前版本一致的完成凭证")
     if not published_storyboard or not confirmed:
-        blockers.append("分镜尚未完整确认")
+        blockers.append("分镜提示词尚未生成完整")
     if active:
         blockers.append("编剧或分镜任务仍在运行")
     if narrative_authority["required"] and not narrative_authority["verified"]:

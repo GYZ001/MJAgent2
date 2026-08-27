@@ -3621,6 +3621,19 @@ def _storyboard_status_snapshot(
             else "当前分镜已确认"
         )
         action = "go_review_wall"
+    elif full_terminal and published_release_bound and storyboard_pack_prompts_complete(
+        get_conn(), ep["id"],
+    ):
+        # 分镜台 2.0.0（app.production.storyboard_pack）路径：发布证据在生成
+        # 完成时已自动落盘（published_release_bound），本集视频提示词也已
+        # 全部生成（storyboard_pack_prompts_complete）。旧版需要用户额外点一
+        # 次"完成发布证据/确认视频提示词"才能把 episodes.status 推到
+        # confirmed 的仪式，在这条管线上不做任何这里还没做过的额外校验
+        # （见 app.domain.review_wall._review_upstream_snapshot 同一处改动的
+        # 注释）——产物齐了就直接可进生成台，不再停下来等一次点击。
+        state = "confirmed"
+        headline = f"{shot_count}/{planned} 段视频提示词已全部生成，可进入生成台"
+        action = "go_review_wall"
     elif paused and not terminal_structure:
         state, headline, action = (
             "paused",

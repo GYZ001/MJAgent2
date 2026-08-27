@@ -192,6 +192,45 @@ def test_upstream_snapshot_ignores_restart_orphan_superseded_by_success(monkeypa
     assert snapshot["active_upstream_runs"] == []
 
 
+def test_upstream_snapshot_ignores_restart_orphan_superseded_by_success_on_storyboard_pack_pipeline(
+    monkeypatch,
+) -> None:
+    """分镜台 2.0.0（storyboard_pack）路径生成完成后只落 status='scripted'，
+    从不推进到 'confirmed'。PAUSED_EXTERNAL 孤儿豁免判据若只挂
+    episodes.status 白名单，会在这条管线下永远打不开——孤儿因此永久占着
+    active，把"编剧或分镜任务仍在运行"锁死在一个已经证明被取代的旧运行
+    上，即便产物本身（storyboard_pack_prompts_complete）已经完整。"""
+    conn = _conn()
+    conn.execute("UPDATE episodes SET status='scripted' WHERE id='e'")
+    conn.execute(
+        """UPDATE shots SET shot_contract_json=? WHERE id='s1'""",
+        (json.dumps({
+            "is_final": True,
+            "storyboard_pack_segment": {"prompt_text": "一段完整的视频提示词。"},
+        }),),
+    )
+    conn.execute(
+        """INSERT INTO workflow_runs(
+               id,workflow_type,scope_type,scope_id,status,input_fingerprint,
+               updated_at,failure_code
+           ) VALUES('run-orphan','storyboard','episode','e','PAUSED_EXTERNAL','old',1,'SERVICE_RESTART')"""
+    )
+    conn.execute(
+        """INSERT INTO workflow_runs(
+               id,workflow_type,scope_type,scope_id,status,input_fingerprint,
+               updated_at,finished_at
+           ) VALUES('run-success','storyboard','episode','e','SUCCEEDED','new',2,2)"""
+    )
+    conn.commit()
+    monkeypatch.setattr(api, "get_conn", lambda: conn)
+
+    snapshot = api._review_upstream_snapshot("e")
+
+    assert snapshot["eligible_for_production"] is True
+    assert snapshot["active_upstream_runs"] == []
+    assert "编剧或分镜任务仍在运行" not in snapshot["blockers"]
+
+
 def test_upstream_snapshot_finds_live_task_without_durable_pointer(monkeypatch) -> None:
     conn = _conn()
     monkeypatch.setattr(api, "get_conn", lambda: conn)

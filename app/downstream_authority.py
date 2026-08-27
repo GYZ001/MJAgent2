@@ -125,7 +125,23 @@ def verify_current_storyboard_release_authority(
     if episode is None:
         raise ValueError(f"分集不存在：{episode_id}")
     if str(episode["status"] or "") not in _CONFIRMED_EPISODE_STATUSES:
-        raise ValueError("分镜尚未确认，禁止生成下游发布产物")
+        # status 白名单是给老版逐镜叙事契约（人工点「确认」才推进 status）用的
+        # 完整信号。分镜台 2.0.0（app.production.storyboard_pack）路径生成完成
+        # 后只落 status='scripted'，从不推进到这个白名单——用户拍板拆掉分镜台
+        # 到生成台之间的人工确认仪式后，新分集永远到不了 confirmed，这里若
+        # 只认 status 白名单会把已经产物齐全、真实发布证据俱全的分集永久拦在
+        # 成片台入口（EP6/ep_94adca9b9942 实测复现：9 段视频、发布 artifact、
+        # revision、完成凭证全部齐备，只差这一个布尔判断）。改用产物信号
+        # （storyboard_pack_prompts_complete，同 app.media_exec.enqueue.
+        # _assert_enqueue_storyboard_authority 等处一致口径）作为 OR 分支；
+        # 老管线没有存量 prompt_text，仍然合法地需要先人工确认到 status 白名单。
+        # 下面这些发布 artifact 存在性/未偏离、revision、完成凭证、release
+        # qualification 的实质校验一个都不动——它们防的是"拿一个未发布/已
+        # 漂移的分镜去出成片"，与这里拆掉的状态白名单是两件事。
+        from app.domain.common import storyboard_pack_prompts_complete
+
+        if not storyboard_pack_prompts_complete(db, episode_id):
+            raise ValueError("分镜尚未确认，禁止生成下游发布产物")
 
     projected_id = str(episode["storyboard_artifact_id"] or "")
     published_id = str(episode["published_storyboard_artifact_id"] or "")

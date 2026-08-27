@@ -795,6 +795,13 @@ CREATE INDEX IF NOT EXISTS idx_run_events_step ON run_events(step_run_id);
 CREATE INDEX IF NOT EXISTS idx_budget_scope ON budget_reservations(scope_type, scope_id, status);
 CREATE INDEX IF NOT EXISTS idx_gate_pending ON gate_decisions(gate_key, decision, created_at);
 CREATE INDEX IF NOT EXISTS idx_gate_decisions_run ON gate_decisions(run_id);
+-- storyboard_pack_release 是系统自动放行留痕（app.domain.common.
+-- ensure_storyboard_pack_release_gate_decision），按 artifact_id 唯一：
+-- 同一份分镜产物只留一行，挡并发重复写；重新生成产出新 artifact_id 后
+-- 允许再写一行。其余 gate_key（如 delivery）允许同一 artifact_id 多行
+-- （审批/拒绝反复流转），因此不能做成表级唯一索引，只能按 gate_key 分区。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gate_decisions_storyboard_pack_release
+    ON gate_decisions(artifact_id) WHERE gate_key='storyboard_pack_release';
 CREATE INDEX IF NOT EXISTS idx_delivery_episode ON delivery_packages(episode_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_feedback_episode ON customer_feedback(episode_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_feedback_revision_run ON customer_feedback(revision_run_id);

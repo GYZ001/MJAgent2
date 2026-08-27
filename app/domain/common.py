@@ -8,7 +8,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
+import sqlite3
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -48,6 +50,7 @@ from app.validators import (relieve_spoken_overflow,
                             validate_storyboard_soundtrack)
 
 router = APIRouter(prefix="/api")
+_LOGGER = logging.getLogger(__name__)
 
 BIBLE_TASK_TIMEOUT_S = 15 * 60
 BIBLE_INTERRUPTED_ERROR = "人物谱任务已中断（服务重载或后台任务丢失），请重新谱写。"
@@ -506,6 +509,137 @@ def screenplay_ready_identity(data: dict) -> str:
         [dict(row) for row in revisions],
         [dict(row) for row in evaluations],
     )
+
+
+def storyboard_pack_prompts_complete(conn, episode_id: str) -> bool:
+    """产物信号：本集分镜台 2.0.0（storyboard_pack）的视频提示词是否已全部生成。
+
+    判据只看产物本身，不看 ``episodes.status``：
+    ``app.production.storyboard_pack.run_storyboard_pack_generation`` 在派发
+    生成前会先把 status 改成中间态用于去重/串行化，生成完成后也只落
+    ``scripted``——它从不把 status 推到 ``confirmed``（那是给旧版逐镜叙事
+    管线用的人工确认仪式，本函数覆盖的这条新管线里没有等价步骤）。挂
+    status 白名单会把这类已经产出完整产物的分集永久判不过（同类事故见
+    ``run_storyboard_pack_generation`` 内的记录：``resume_storyboard()`` 派发
+    任务前自己先把 status 写成 'scripting' 并提交，随后 Supervisor 重新读到
+    的快照必然不在白名单里）。
+
+    每一镜必须都带 ``storyboard_pack_segment.prompt_text``，且尾镜自带
+    ``is_final=True``——``persist_storyboard_pack`` 是单事务一次性全写，
+    只有整批 segments 都写完才会带上这个标记，看到它就等价于这是一整套
+    完整产物、不是半途残留。
+
+    只对全体 shots 都是 storyboard_pack_segment 格式的分集有意义；只要有
+    一镜不是这个格式（老版逐镜叙事契约、或历史 plan-null 兼容分集，那类
+    行没有存量 prompt_text——提示词是生成请求时才从多个结构化字段现场编译
+    的），一律返回 False。调用方必须自己判断这个 False 是"真没做完"还是
+    "这集根本不是这条管线"，不能反过来拿这个函数当那些格式的完整性判据。
+    """
+    rows = conn.execute(
+        "SELECT shot_contract_json FROM shots WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,),
+    ).fetchall()
+    if not rows:
+        return False
+    last_is_final = False
+    for row in rows:
+        try:
+            contract = json.loads(row["shot_contract_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        segment = contract.get("storyboard_pack_segment")
+        if not isinstance(segment, dict):
+            return False
+        if not str(segment.get("prompt_text") or "").strip():
+            return False
+        last_is_final = bool(contract.get("is_final"))
+    return last_is_final
+
+
+def ensure_storyboard_pack_release_gate_decision(conn, episode_id: str) -> None:
+    """给"分镜提示词齐全 → 可进生成台"这个转换点补一条审计留痕。
+
+    分镜台 2.0.0（storyboard_pack）管线放行付费生成不再要求人工点一次
+    "确认视频提示词"——``storyboard_pack_prompts_complete`` 本身就是唯一
+    判据（见该函数docstring）。但这个转换点仍需要一条可审计记录回答
+    "这一集是凭什么被放行的"：调用方必须先自行确认
+    ``storyboard_pack_prompts_complete(conn, episode_id)`` 为真，本函数不
+    重复这个判断，只把已经成立的判据落成账。
+
+    ``decided_by`` 如实标注为系统自动判定，不写 'user'：这不是人工点击。
+    ``gate_key`` 用独立的 'storyboard_pack_release'，不复用
+    app.domain.video_ops 里人工确认写入的 gate_key='storyboard'——那条的
+    ``decided_by`` 是真实操作者、且 _confirm_storyboard_impl 会用
+    ``decision IN ('approve','approve_with_risk')`` 查同一 gate_key 做幂等
+    短路；共用 gate_key 会让这条自动记录被误当成一次真人工确认，短路掉
+    真正的人工确认路径。
+
+    幂等：按 (artifact_id, gate_key='storyboard_pack_release') 判重，schema
+    里 idx_gate_decisions_storyboard_pack_release 是这个组合上的唯一索引，
+    并发重复写会在 INSERT 层被挡住，不只靠前置 SELECT。同一份分镜产物
+    （同一 episodes.storyboard_artifact_id）只留一行；分镜被重新生成产出
+    新 artifact_id 后允许再写一行——这是新一轮产物、新一轮放行凭证，不是
+    重复。
+
+    只记账，不拦截：写失败只记日志、吞掉异常，绝不向上抛出挡住生成——
+    审计是记账，不是闸门。
+    """
+    try:
+        episode = conn.execute(
+            "SELECT storyboard_artifact_id FROM episodes WHERE id=?",
+            (episode_id,),
+        ).fetchone()
+        artifact_id = episode["storyboard_artifact_id"] if episode else None
+        if not artifact_id:
+            _LOGGER.error(
+                "storyboard_pack_release 审计：episode %s 产物信号已通过但缺少 "
+                "storyboard_artifact_id，无法挂账", episode_id,
+            )
+            return
+        existing = conn.execute(
+            "SELECT id FROM gate_decisions WHERE artifact_id=? "
+            "AND gate_key='storyboard_pack_release'",
+            (artifact_id,),
+        ).fetchone()
+        if existing:
+            return
+        shot_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,),
+        ).fetchone()["c"]
+        reason = (
+            "系统判定自动放行（storyboard_pack_prompts_complete 产物信号通过）："
+            f"共 {shot_count} 段，逐段 shot_contract_json.storyboard_pack_segment."
+            "prompt_text 均非空，尾镜 is_final=True。"
+        )
+        already_in_transaction = conn.in_transaction
+        try:
+            conn.execute(
+                """INSERT INTO gate_decisions(
+                       id, artifact_id, gate_key, decision, decided_by, reason, created_at
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    new_id("gate"), artifact_id, "storyboard_pack_release",
+                    "approve", "system:storyboard_pack_prompts_complete",
+                    reason, now(),
+                ),
+            )
+        except sqlite3.IntegrityError:
+            # 唯一索引挡下的并发重复写：另一路径已经记过账，符合预期，
+            # 只需把这次自己开的空事务收掉，不算失败。
+            if not already_in_transaction and conn.in_transaction:
+                conn.rollback()
+            return
+        if not already_in_transaction:
+            conn.commit()
+    except Exception:  # noqa: BLE001 - 记账失败绝不能挡生成
+        _LOGGER.exception(
+            "storyboard_pack_release 审计写入失败：episode_id=%s", episode_id,
+        )
+        try:
+            if conn.in_transaction:
+                conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _screenplay_ready(ep) -> bool:

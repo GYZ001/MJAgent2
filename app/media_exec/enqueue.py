@@ -1237,13 +1237,32 @@ def _assert_enqueue_storyboard_authority(shot_id: str):
     episode = conn.execute(
         "SELECT * FROM episodes WHERE id=?", (episode_id,),
     ).fetchone()
-    if episode is None or episode["status"] not in {
-        "confirmed", "generating", "done", "mixed",
-    }:
+    if episode is None:
         raise ValueError(
             "[STORYBOARD_CONFIRMATION_REQUIRED] 分镜尚未人工确认，"
             "不能创建视频预检或付费任务"
         )
+    if episode["status"] not in {"confirmed", "generating", "done", "mixed"}:
+        # status 白名单是给老版逐镜叙事契约（含历史 plan-null 兼容分集）用的
+        # 完整信号——那类行没有存量 prompt_text，只能靠人工确认把 status 推
+        # 过去。分镜台 2.0.0（app.production.storyboard_pack）路径生成完成
+        # 后只落 'scripted'，从不推进到这个白名单；这类分集改用产物本身
+        # 判：本集是否已生成完整一套 prompt_text（storyboard_pack_prompts_
+        # complete），不再要求先经过人工确认这道已经不做任何额外校验的仪式。
+        from app.domain.common import (
+            ensure_storyboard_pack_release_gate_decision,
+            storyboard_pack_prompts_complete,
+        )
+
+        if not storyboard_pack_prompts_complete(conn, episode_id):
+            raise ValueError(
+                "[STORYBOARD_CONFIRMATION_REQUIRED] 分镜尚未人工确认，"
+                "不能创建视频预检或付费任务"
+            )
+        # 这条管线里不再有人工点击的"确认视频提示词"仪式，产物信号一放行
+        # 就在这个转换点补一条系统判定的 gate_decisions 审计行，回答"这一
+        # 集是凭什么被放行的"。只记账不拦截：失败只记日志，不影响本次放行。
+        ensure_storyboard_pack_release_gate_decision(conn, episode_id)
     if not context.narrative_authority_required:
         return context
 
@@ -1416,8 +1435,11 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     if not bool(_row_value(project, "harness_engine_enabled", 1)):
         raise ValueError("该项目的 Harness Engine 已由灰度开关隔离")
-    if ep["status"] not in ("confirmed", "generating", "done"):
-        raise ValueError("分镜脚本未确认，不能生成视频（PRD 原则 P3：贵的环节前人工把关）")
+    # 分镜是否已具备生产权威（含 status 白名单 / 分镜台 2.0.0 产物完整性）
+    # 在函数开头 _assert_enqueue_storyboard_authority(shot_id) 已经判过一次；
+    # 这里原来还有一份独立的 `ep["status"] not in (...)` 复查，是同一件事的
+    # 第二份拷贝，且只认 status 白名单、不认产物信号，会把上面已经放行的
+    # 分镜台 2.0.0 分集重新拦一次。
     episode_bound_provider = str(_row_value(ep, "target_video_model") or "").strip() or "hiagent"
     # 按适配器族比较，不按 provider key 原始字符串比：自建实例（custom:xxx）
     # 复用内置协议实现，字符串比较会把"同协议、不同连接"误判成绑定不一致

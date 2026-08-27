@@ -787,6 +787,29 @@ def _copy_if_present(source: str | None, destination: Path) -> Path | None:
     return atomic_copy(source, destination)
 
 
+def _episode_release_status_cas_clause(conn, episode_id: str) -> tuple[str, tuple[str, ...]]:
+    """交付包写入 CAS 用的 status 判据：分镜台 2.0.0 产物齐全时额外放行 'scripted'。
+
+    老版逐镜叙事契约要人工点「确认」才把 episodes.status 推到
+    confirmed/generating/done/mixed。分镜台 2.0.0（app.production.
+    storyboard_pack）生成完成后只落 'scripted'，从不推进到这个白名单——
+    用户已拆掉两台之间的人工确认仪式，新分集永远到不了 confirmed。
+    上面 build_delivery_package 已经用 app.downstream_authority.
+    verify_current_storyboard_release_authority（storyboard_artifact_id/
+    published_storyboard_artifact_id/revision/certificate 四件套 + 未偏离 +
+    release qualification）证明了发布权威链未漂移；这里只是把同一个产物
+    信号（storyboard_pack_prompts_complete）补进 CAS 的 status 判据，
+    不放宽、不跳过上面那些实质校验。
+    """
+    from app.domain.common import storyboard_pack_prompts_complete
+
+    statuses: tuple[str, ...] = ("confirmed", "generating", "done", "mixed")
+    if storyboard_pack_prompts_complete(conn, episode_id):
+        statuses = (*statuses, "scripted")
+    placeholders = ",".join("?" for _ in statuses)
+    return f"status IN ({placeholders})", statuses
+
+
 def build_delivery_package(
     episode_id: str,
     *,
@@ -1043,15 +1066,18 @@ def build_delivery_package(
                     operation_started_at,
                 ),
             )
+            status_clause, status_params = _episode_release_status_cas_clause(
+                conn, episode_id,
+            )
             cursor = conn.execute(
-                """UPDATE episodes
+                f"""UPDATE episodes
                       SET delivery_artifact_id=?,delivery_status='waiting_human'
                     WHERE id=?
                       AND storyboard_artifact_id=?
                       AND published_storyboard_artifact_id=?
                       AND storyboard_production_revision_id=?
                       AND storyboard_completion_certificate_id=?
-                      AND status IN ('confirmed','generating','done','mixed')""",
+                      AND {status_clause}""",
                 (
                     orphan_artifact_id,
                     episode_id,
@@ -1059,6 +1085,7 @@ def build_delivery_package(
                     release_authority["published_storyboard_artifact_id"],
                     release_authority["storyboard_production_revision_id"],
                     release_authority["storyboard_completion_certificate_id"],
+                    *status_params,
                 ),
             )
             if cursor.rowcount != 1:
@@ -1467,15 +1494,18 @@ def build_delivery_package(
                 "\n".join(known_lines), operation_started_at,
             ),
         )
+        status_clause, status_params = _episode_release_status_cas_clause(
+            conn, episode_id,
+        )
         cursor = conn.execute(
-            """UPDATE episodes
+            f"""UPDATE episodes
                   SET delivery_artifact_id=?,delivery_status='waiting_human'
                 WHERE id=?
                   AND storyboard_artifact_id=?
                   AND published_storyboard_artifact_id=?
                   AND storyboard_production_revision_id=?
                   AND storyboard_completion_certificate_id=?
-                  AND status IN ('confirmed','generating','done','mixed')""",
+                  AND {status_clause}""",
             (
                 artifact_id,
                 episode_id,
@@ -1483,6 +1513,7 @@ def build_delivery_package(
                 release_authority["published_storyboard_artifact_id"],
                 release_authority["storyboard_production_revision_id"],
                 release_authority["storyboard_completion_certificate_id"],
+                *status_params,
             ),
         )
         if cursor.rowcount != 1:
