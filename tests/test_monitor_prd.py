@@ -40,7 +40,7 @@ def test_settings_schema_rejects_illegal_values_and_dependency_conflicts(monkeyp
         {"video_submit_concurrency": "Infinity"},
         {"video_submit_concurrency": 0},
         {"text_generation_concurrency": 17},
-        {"auto_qa": "yes"},
+        {"use_character_refs": "yes"},
         {"media_scheduler_policy": "random"},
         {"video_ready_low_watermark": 9, "video_ready_high_watermark": 3},
         {"episode_video_inflight_limit": 20, "project_video_inflight_limit": 10},
