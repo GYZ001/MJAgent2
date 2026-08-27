@@ -4220,6 +4220,17 @@ async def review_scene_candidate_route(
     project_id: str, scene_name: str, artifact_id: str,
 ):
     """只重验已落盘候选的 QA，不重新生图、不扣图片生成费。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "scene.review_candidate",
+        {
+            "project_id": project_id,
+            "scene_name": scene_name,
+            "artifact_id": artifact_id,
+        },
+    )
+    if routed is not None:
+        return routed
     _project_or_404(project_id)
     from app.scenes import review_scene_candidate
     try:

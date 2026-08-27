@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -176,3 +177,96 @@ def test_scene_adopt_route_is_registered() -> None:
     }
     path = "/api/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/adopt"
     assert "POST" in methods_by_path[path]
+
+
+# ---------------------------------------------------------------------------
+# scene.review_candidate 的 REST 路由必须真的走命令总线：不是「能返回 200」，
+# 而是「鉴权/校验真的生效」。此前这条路由绕过 dispatch，任何角色都能裸奔执行。
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _as_principal(*, role: str | None, is_system_admin: bool = False, workspace_id: str = "ws_test"):
+    """临时切换当前 Principal，退出时还原成进入前的身份（同 test_rbac_command_bus.py）。"""
+    from app.auth.principal import Principal, get_current_principal, set_current_principal
+
+    previous = get_current_principal()
+    workspace_roles = {} if role is None else {workspace_id: role}
+    set_current_principal(
+        Principal(
+            user_id=f"test-{role or 'sysadmin'}",
+            username=f"test-{role or 'sysadmin'}",
+            is_system_admin=is_system_admin,
+            workspace_roles=workspace_roles,
+        )
+    )
+    try:
+        yield
+    finally:
+        set_current_principal(previous)
+
+
+def _ready_command_bus() -> None:
+    from app.capabilities import ensure_catalog_loaded
+    from app.capabilities.bus import reset_command_bus_for_tests
+    from app.capabilities.policy import reset_approvals_for_tests
+
+    ensure_catalog_loaded()
+    reset_approvals_for_tests()
+    reset_command_bus_for_tests()
+
+
+def test_review_candidate_route_rejects_role_without_project_write_scope(tmp_path, monkeypatch) -> None:
+    """审校角色（无 manju:project-write）直接打这条 REST 路由必须被真挡住，
+    而不是像修复前那样绕过命令总线、裸奔执行到底。"""
+    conn = _fresh_db(tmp_path, monkeypatch)
+    _seed_project(conn, "p1")
+    artifact_id = _make_candidate(tmp_path, "p1", "宗门广场", attempt=1, qa_overall=0.42)
+    _ready_command_bus()
+
+    async def must_not_review(*_a, **_k):
+        raise AssertionError("鉴权必须在跑到领域逻辑之前就拒绝")
+
+    monkeypatch.setattr("app.scenes._review_scene_ref", must_not_review)
+
+    from app.domain.bible_ops import review_scene_candidate_route
+    from fastapi import HTTPException
+
+    with _as_principal(role="review"):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(review_scene_candidate_route("p1", "宗门广场", artifact_id))
+    assert exc_info.value.status_code == 403
+
+
+def test_review_candidate_route_allows_production_role_and_runs_real_qa(tmp_path, monkeypatch) -> None:
+    """持有 manju:project-write 的角色应正常放行，且真的跑到领域逻辑（不是被误挡）。"""
+    conn = _fresh_db(tmp_path, monkeypatch)
+    _seed_project(conn, "p1")
+    artifact_id = _make_candidate(tmp_path, "p1", "宗门广场", attempt=1, qa_overall=0.42)
+    _ready_command_bus()
+
+    from app.scene_policy import normalize_scene_image_qa
+    qa = normalize_scene_image_qa({
+        "overall": 0.9,
+        "person_count": 0,
+        "watermark_detected": False,
+        "forbidden_text_detected": False,
+        "space_type_matches": True,
+    })
+
+    async def reviewed(*_a, **_k):
+        return qa
+
+    async def must_not_generate(*_a, **_k):
+        raise AssertionError("重验 QA 不得重新生图")
+
+    monkeypatch.setattr("app.scenes._review_scene_ref", reviewed)
+    monkeypatch.setattr("app.scenes._generate_scene_image", must_not_generate)
+
+    from app.domain.bible_ops import review_scene_candidate_route
+
+    with _as_principal(role="production"):
+        result = asyncio.run(review_scene_candidate_route("p1", "宗门广场", artifact_id))
+    assert result["reviewed"] is True
+    assert result["image_regenerated"] is False
+    assert result["artifact_id"] == artifact_id
