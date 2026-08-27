@@ -2203,8 +2203,14 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
     qualification = _review_assert_positive_action(
         episode_id, body.get("qualification_version"),
     )
-    if ep["status"] not in ("confirmed", "generating", "done"):
-        raise HTTPException(409, "分镜脚本未确认（先在工作台点击确认分镜）")
+    # 曾经这里还有一次独立的 `ep["status"] not in (...)` 白名单复查，要求
+    # episodes.status 已推进到 confirmed/generating/done 才放行——这条检查
+    # 与上面 `_review_assert_positive_action` 判的是同一件事，但判据不同源：
+    # 分镜台 2.0.0（app.production.storyboard_pack）生成完成后只落
+    # status='scripted'，从不自动推进到那个白名单，会把刚才已经判定
+    # eligible_for_production=True 的分集在这里重新拦一次。真正的资格判断
+    # 已经交给上面这次调用（产物是否完整 + 上游是否仍在跑 + 资产是否合格），
+    # 不需要再挂一份 status 白名单。
     _assert_storyboard_generation_gate(episode_id)
     # Supervisor 运行期间拒绝快速模式，避免重复付费
     try:
@@ -3055,8 +3061,10 @@ async def _complete_episode_core(
 
     ep = _episode_or_404(episode_id)
     _review_assert_positive_action(episode_id, body.get("qualification_version"))
-    if ep["status"] not in ("confirmed", "generating", "done"):
-        raise HTTPException(409, "分镜脚本未确认（先在工作台点击确认分镜）")
+    # 见 _generate_episode_core 同一处注释：这里删掉的独立
+    # `ep["status"] not in (...)` 复查与上面这次调用判的是同一件事，但挂的
+    # 是分镜台 2.0.0 生成完成后从不会推进到的 status 白名单，会把刚判定
+    # 合格的分集重新拦一次。
     _assert_storyboard_generation_gate(episode_id)
     _ensure_video_episode_columns()
     mode = body.get("mode") or "fresh"
