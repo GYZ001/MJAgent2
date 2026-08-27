@@ -1,0 +1,311 @@
+  1900	            f"{stage}_loop", config.MODEL_TEXT, "NEEDS_REPLAN", None, 0,
+  1901	            meta={
+  1902	                "stage": stage,
+  1903	                "iterations": result.iterations,
+  1904	                "exit_reason": result.exit_reason,
+  1905	                "artifact_id": result.artifact_id,
+  1906	                "issue_codes": [issue.code for issue in result.issues[:10]],
+  1907	            },
+  1908	        )
+  1909	    else:
+  1910	        object.__setattr__(result.value, "disposition", "PASS")
+  1911	    object.__setattr__(result.value, "loop_exit_reason", result.exit_reason)
+  1912	    object.__setattr__(result.value, "evidence_artifact_id", result.artifact_id)
+  1913	    return result.value
+  1914	
+  1915	
+  1916	# ---------- A. 角色圣经 ----------
+  1917	
+  1918	BIBLE_SOURCE_BUDGET_CHARS = 60000
+  1919	
+  1920	
+  1921	_BIBLE_TAIL_SAMPLE_MAX = 12      # 后段最多抽样多少章（取其开头，角色多在章首登场）
+  1922	_BIBLE_TAIL_SLICE_CHARS = 1500   # 每个抽样章节注入的开头字数
+  1923	
+  1924	BIBLE_HEAD_CHAPTERS = 10         # 首版人物谱必须完整通读的章节数
+  1925	BIBLE_LOOKAHEAD_CHAPTERS = 10    # 判定「这个角色重不重要」时再往后看的章节数
+  1926	BIBLE_RECURRING_MIN_ONSTAGE_QUOTES = 2  # 至少两条经裁决闸核验的「本人在场」证据才算重要角色
+  1927	BIBLE_MUST_COVER_MAX = 12        # 必收名单上限，避免把生成预算耗在龙套身上
+  1928	# 点名调用每个候选最多申报几条在场证据。判据只需要 BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
+  1929	# （=2）条核验通过的证据；这里留 1 条余量应付结构闸/裁决闸刷掉个别证据，不留更多——
+  1930	# 多留的每一条对戏份多的主角都是纯浪费：一个出场上千次的主角，旧提示词「尽量都列出来」
+  1931	# 会让模型老实列出十几条，既拉长点名调用本身的输出（更容易撞 max_tokens 截断，撞了就要
+  1932	# 整次重试），又线性拉长下游裁决闸的调用条数。见 `_recurring_character_names` docstring。
+  1933	BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE = 3
+  1934	
+  1935	# 旁文本净化的三个闸（见 `_chapters_without_paratext` docstring 里的事故口径）：
+  1936	BIBLE_PARATEXT_MARGIN_CHAPTERS = 3   # 净化只会让正文变短，头部因此可能多吃进几章
+  1937	BIBLE_PARATEXT_CONCURRENCY = 8       # 净化各章互不依赖，chat 路径也没有全局信号量
+  1938	BIBLE_PARATEXT_BUDGET_S = 120.0      # 净化阶段总时限，超时的章原样进入下游
+  1939	
+  1940	
+  1941	def _bible_source_plan(
+  1942	    valid: list[dict], budget: int, head_chapters: int | None,
+  1943	) -> list[tuple[int, int, bool]]:
+  1944	    """规划人物谱源文本读哪几章、每章读多少字：`(章在 valid 里的下标, 截取字数, 是否节选)`。
+  1945	
+  1946	    渲染（`_render_bible_source`）和「哪几章需要先净化旁文本」
+  1947	    （`_bible_paratext_scope`）共用这一份规划：口径只有一处，不会漂移出
+  1948	    「净化了 643 章、真正读的只有 33 章」那种落差。
+  1949	    """
+  1950	    plan: list[tuple[int, int, bool]] = []
+  1951	    # 头部顺序铺设：用至多 70% 预算（其余留给后段抽样）。
+  1952	    head_budget = int(budget * 0.7)
+  1953	    if head_chapters:
+  1954	        # 首版人物谱要求「完整读完前 N 章」。按比例切的头部会随章节长度漂移：
+  1955	        # 长章小说可能读到第三、四章就把头部预算用光，主要配角整体缺席。
+  1956	        head_budget = min(budget, max(head_budget, sum(
+  1957	            len(ch["content"].strip()) for ch in valid[:head_chapters]
+  1958	        )))
+  1959	    used = 0
+  1960	    head_count = 0
+  1961	    for index, ch in enumerate(valid):
+  1962	        remain = head_budget - used
+  1963	        if remain <= 200:
+  1964	            break
+  1965	        take = min(len(ch["content"].strip()), remain)
+  1966	        plan.append((index, take, False))
+  1967	        used += take
+  1968	        head_count += 1
+  1969	
+  1970	    # 后段抽样：在头部未覆盖的章节里均匀取样，注入每章开头若干字，覆盖后期登场人物。
+  1971	    later = valid[head_count:]
+  1972	    remain_budget = budget - used
+  1973	    if later and remain_budget > 200:
+  1974	        sample_n = min(len(later), _BIBLE_TAIL_SAMPLE_MAX, max(1, remain_budget // _BIBLE_TAIL_SLICE_CHARS))
+  1975	        if sample_n > 0:
+  1976	            step = len(later) / sample_n
+  1977	            picked_idx = sorted({min(len(later) - 1, int(i * step)) for i in range(sample_n)})
+  1978	            for li in picked_idx:
+  1979	                if remain_budget <= 200:
+  1980	                    break
+  1981	                content = later[li]["content"].strip()
+  1982	                take = min(len(content), _BIBLE_TAIL_SLICE_CHARS, remain_budget)
+  1983	                plan.append((head_count + li, take, True))
+  1984	                remain_budget -= take
+  1985	    return plan
+  1986	
+  1987	
+  1988	def _render_bible_source(chapters: list[dict], budget: int = BIBLE_SOURCE_BUDGET_CHARS,
+  1989	                         *, head_chapters: int | None = None) -> str:
+  1990	    """为角色圣经渲染源文本：先顺序铺头部（主角通常在前期出场），再在剩余预算里
+  1991	    跨越全书【抽样后段章节的开头】，让后期才登场的重要角色（如中后段反派）也能进圣经——
+  1992	    否则分镜阶段引用这些角色会因"不在圣经"而反复返工或被迫漏掉。
+  1993	    """
+  1994	    valid = [ch for ch in chapters if (ch.get("content") or "").strip()]
+  1995	    if not valid:
+  1996	        return ""
+  1997	
+  1998	    def _title(ch: dict) -> str:
+  1999	        return ch.get("title") or f"第{ch.get('idx', '?')}章"
+  2000	
+  2001	    blocks: list[str] = []
+  2002	    for index, take, excerpt in _bible_source_plan(valid, budget, head_chapters):
+  2003	        ch = valid[index]
+  2004	        content = ch["content"].strip()
+  2005	        clipped = content[:take]
+  2006	        if excerpt:
+  2007	            suffix = "……（节选开头，仅供识别后期登场角色）" if len(content) > take else ""
+  2008	            blocks.append(f"【{_title(ch)}·节选】\n{clipped}{suffix}")
+  2009	        else:
+  2010	            suffix = "……（原文过长已截断）" if len(content) > take else ""
+  2011	            blocks.append(f"【{_title(ch)}】\n{clipped}{suffix}")
+  2012	
+  2013	    return "\n\n".join(blocks)
+  2014	
+  2015	
+  2016	class _RosterOnstageEvidence(BaseModel):
+  2017	    """一条「本人在场」证据申报：模型只负责申报，是否真的成立由后端结构闸 +
+  2018	    独立裁决闸核验（见 `_recurring_character_names` docstring）。"""
+  2019	
+  2020	    chapter_index: int = -1
+  2021	    quote: str = ""
+  2022	
+  2023	
+  2024	class _RosterCandidate(BaseModel):
+  2025	    """人物点名候选：只要能证明本人在场的证据，不要泛泛的名字统计。"""
+  2026	
+  2027	    primary_appellation: str = ""      # 原文最常用称呼，允许绰号/外号/代称
+  2028	    formal_name: str = ""              # 原文已揭示的正式姓名；未揭示则空串，不得编造
+  2029	    onstage_evidence: list[_RosterOnstageEvidence] = Field(default_factory=list)
+  2030	
+  2031	
+  2032	class _CharacterRollCall(BaseModel):
+  2033	    """人物点名合同：候选 + 在场证据，不再只是名字字符串。"""
+  2034	
+  2035	    candidates: list[_RosterCandidate] = Field(default_factory=list)
+  2036	
+  2037	
+  2038	class _BibleSupplement(BaseModel):
+  2039	    """补录合同：只为「必收名单里还缺的人」补出完整角色条目。"""
+  2040	
+  2041	    characters: list[Character] = Field(default_factory=list)
+  2042	
+  2043	
+  2044	async def _recurring_character_names(
+  2045	    chapters: list[dict], *, project_id: str | None = None,
+  2046	) -> list[tuple[str, str, int]]:
+  2047	    """产出「必收角色名单」：先点名+自报在场证据，再用结构闸+独立裁决闸核验每条
+  2048	    证据是不是真的证明本人在场，核验通过的证据条数（`verified_onstage_count`）
+  2049	    才是判据——不再是"名字字符串在原文窗口里出现的次数"。
+  2050	
+  2051	    根因：旧判据把字符串出现次数当"重不重要"的代理信号，两个方向都会失效。
+  2052	    假阳性方向——王伯/周员外/靠山老祖的命中全部来自旁白交代身份或他人台词提及，
+  2053	    本人从未真正在场，却因为次数够多进了必收名单。假阴性方向——这个信号只统计
+  2054	    模型报出的候选名字本身的出现次数，原文如果通篇用绰号称呼一个人（本人几乎
+  2055	    只以"小胖子"出现，正式姓名仅出现一两次）而此刻圣经正文还没生成、没有别名表
+  2056	    能把绰号翻译回正式姓名，这个人就会被判定为不重要。
+  2057	
+  2058	    新流程：
+  2059	    1. 模型只在前 BIBLE_HEAD_CHAPTERS 章里点名，每个候选申报 primary_appellation
+  2060	       （原文最常用写法，允许绰号）+ formal_name（原文已揭示的正式姓名，未揭示则
+  2061	       空）+ onstage_evidence（能证明本人在场的原文引句列表）——绰号本身就能直接
+  2062	       充当"必收货币"，不需要一张此刻还不存在的别名表做转译。
+  2063	    2. 代码结构闸，逐条证据：G1 引句所在章节必须落在统计窗口（前 HEAD+LOOKAHEAD
+  2064	       章）内；G2 引句必须逐字命中该章原文（允许模型自行加/脱一层引号的噪音）；
+  2065	       G3 称呼（primary_appellation 或 formal_name 中非空的那个）必须是引句子串。
+  2066	       任一不满足直接丢弃该条证据，不发起裁决调用。
+  2067	    3. 结构闸通过的证据才发起独立低温模型裁决（`_roster_presence_verdict_call`，
+  2068	       与别名裁决闸同一分工范式：代码检索卷宗 → 模型独立裁决 → 代码结构性钉证）：
+  2069	       只问这段原文里称呼所指的人物本人是不是真的在场（本人说话/动作/被叙述在场，
+  2070	       而不是被谈论、被指涉、被交代来历的对象）；裁决通过（verdict=="onstage" 且
+  2071	       段号钉证通过）才计入该候选的 `verified_onstage_count`。
+  2072	    4. 按 `verified_onstage_count` 降序（同分按 primary_appellation 字典序打破
+  2073	       平局）排序，取 >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES 的候选，最多保留
+  2074	       BIBLE_MUST_COVER_MAX 个。
+  2075	
+  2076	    点名调用失败时返回空名单，绝不阻断人物谱本身；结构闸/裁决闸任一步不通过，
+  2077	    该条证据直接丢弃，不确定不登记（不会因为某一条证据没通过就拒绝整个候选，
+  2078	    只是那一条不计数）。
+  2079	    """
+  2080	    valid = [ch for ch in chapters if (ch.get("content") or "").strip()]
+  2081	    if not valid:
+  2082	        return []
+  2083	    head = valid[:BIBLE_HEAD_CHAPTERS]
+  2084	    head_text = _render_bible_source(head, head_chapters=BIBLE_HEAD_CHAPTERS)
+  2085	    if not head_text.strip():
+  2086	        return []
+  2087	    prompt = f"""任务：从下面的小说正文里找出【出场人物】，为每个人物申报能证明他本人真的出现在画面中的证据，不要只给名字。
+  2088	
+  2089	要求：
+  2090	1. primary_appellation：原文里称呼这个人物最常用、最稳定的一种写法——可以是正式姓名，也可以是外号、
+  2091	   绰号、尊称或代称（如"小胖子""许师姐""靠山老祖"），取原文实际出现频率最高的那一种写法，逐字照抄，
+  2092	   不得改写、简称或补全。
+  2093	2. formal_name：这个人物在原文中已经明确揭示过的正式姓名；原文尚未揭示正式姓名（只有外号/代称），
+  2094	   就填空字符串，不要猜测或编造。
+  2095	3. onstage_evidence：最多列 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条最有代表性、最容易验证
+  2096	   的原文证据，能证明这个人物本人真正出现在画面中（本人说话、本人动作、或被旁白直接叙述为身处此地），
+  2097	   每条给 {{"chapter_index": int, "quote": str}}：
+  2098	   - 戏份再多的人物也只需要挑 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条最清楚、最没有歧义的
+  2099	     证据，不需要穷举这个人物在原文里的全部出场；证据数量不影响这个人物是否重要，够用即可；
+  2100	   - chapter_index 取原文分块【】块头里的数字；
+  2101	   - quote 必须是该章原文的逐字引句（不超过约 80 字），且这句引文里必须能看到 primary_appellation
+  2102	     或 formal_name 中的至少一个——原文怎么写就怎么抄，不要自己添加或删除引号；
+  2103	   - 判断依据是这句话本身的叙述位置：这个人物是不是这句话所描述的那个时空里正在行动、正在说话、或
+  2104	     被旁白直接叙述为置身其中的人，才算在场；如果这句话里正在行动、说话、被叙述置身其中的是别人，
+  2105	     这个称呼只是作为被谈论、被指涉、被交代来历或状态的对象出现在别人的叙述或话语里，即使字面提到
+  2106	     了这个称呼，这个人物本人也没有置身在这句话所写的场景中，不算在场，不要拿这种句子当证据；
+  2107	   - 确实找不到任何在场证据的人物，onstage_evidence 给空列表，不要为了凑数编造。
+  2108	4. 不要输出"少年""女子""老者""两人"这类无法从人群中单独指认出具体是谁的泛称，也不要输出宗门名、
+  2109	   地名、法宝名。
+  2110	5. 同一个人只输出一个条目；戏份很少的人也可以列出来，后端会按核验通过的在场证据条数再筛一遍。
+  2111	
+  2112	小说正文：
+  2113	{head_text}
+  2114	
+  2115	输出 JSON Schema：
+  2116	{{"candidates": [{{"primary_appellation": str, "formal_name": str, "onstage_evidence": [{{"chapter_index": int, "quote": str}}]}}]}}"""
+  2117	    try:
+  2118	        raw = await model_gateway.chat(
+  2119	            [{"role": "system", "content": SYSTEM_PREFIX},
+  2120	             {"role": "user", "content": prompt}],
+  2121	            temperature=0.2,
+  2122	            # 故意不按"预期答案有多长"估算这个数字——两次真实故障（run_8ebe1225aa69，
+  2123	            # 以及本次改造实测的 run_ec9f4e97ad4e）都证明这份 JSON 答案本身很短
+  2124	            # （实测仅约 5KB），真正吃预算的是这个任务本身的思考耗费：`max_tokens=4096`
+  2125	            # 加上 `reasoning_token_reserve()`（默认 16384）合计 20480，两次都在这个
+  2126	            # 上限截断、内容作废，要等到 `hiagent.chat` 的截断自动重试把预算顶到模型
+  2127	            # 真实产出上限（本环境实测 32768）才成功——白等一次原地重试通常又是
+  2128	            # 300~400 秒。这里直接请求一个刻意超大的数字，交给 `text_request_token_limits`
+  2129	            # 的 `min(requested+reserve, max_output_tokens)` clamp 成模型的真实上限，
+  2130	            # 一次到位；不影响正常小答案的调用——供应商按实际生成量返回，不会因为
+  2131	            # 上限设大就多等。
+  2132	            max_tokens=131072,
+  2133	            call_meta={
+  2134	                "stage": "人物点名",
+  2135	                "stage_key": "character_roll_call",
+  2136	                "call_role": "stage_generate",
+  2137	                "call_role_label": "人物点名",
+  2138	                "expected_json": True,
+  2139	            },
+  2140	        )
+  2141	        candidates = _CharacterRollCall.model_validate(extract_json(raw)).candidates
+  2142	    except Exception as exc:  # noqa: BLE001 - 点名只是覆盖度提示，失败不阻断人物谱
+  2143	        log_provider_call(
+  2144	            "character_roll_call", config.MODEL_TEXT, "FAILED", None, 0,
+  2145	            meta={"error": str(exc)[:300]},
+  2146	        )
+  2147	        return []
+  2148	
+  2149	    # 结构闸 G1 用的窗口原文：前 HEAD 章 + 往后 LOOKAHEAD 章，按章节序号建索引
+  2150	    # （复用 `_chapters_by_idx`，与别名核验同一个查找表构造方式）。
+  2151	    window_chapters_by_idx = _chapters_by_idx(
+  2152	        valid[:BIBLE_HEAD_CHAPTERS + BIBLE_LOOKAHEAD_CHAPTERS]
+  2153	    )
+  2154	    seen: set[str] = set()
+  2155	    verified_counts: dict[str, int] = {}
+  2156	    formal_names: dict[str, str] = {}
+  2157	    evidence_total = 0
+  2158	    structural_pass = 0
+  2159	    # 结构闸（G1-G3）零模型调用、纯同步核对，先把候选证据筛成「值得送裁决闸」的
+  2160	    # 卷宗清单；裁决闸才是本函数唯一的模型调用，放到下面统一并发发起。
+  2161	    verdict_jobs: list[tuple[str, list[dict[str, Any]]]] = []
+  2162	    for candidate in candidates:
+  2163	        appellation = (candidate.primary_appellation or "").strip()
+  2164	        formal = (candidate.formal_name or "").strip()
+  2165	        if not appellation or appellation in seen:
+  2166	            continue
+  2167	        seen.add(appellation)
+  2168	        formal_names[appellation] = formal
+  2169	        verified_counts[appellation] = 0
+  2170	        # 防御性兜底：即便模型没听提示词的话报多了，这里也只取前 N 条送进结构闸/
+  2171	        # 裁决闸，保证下游裁决调用数量有上界，不随模型的自由发挥线性增长。
+  2172	        evidence_list = candidate.onstage_evidence[:BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE]
+  2173	        for evidence in evidence_list:
+  2174	            evidence_total += 1
+  2175	            quote = (evidence.quote or "").strip()
+  2176	            if not quote:
+  2177	                continue
+  2178	            # G1：chapter_index 必须落在本轮统计窗口内，防止模型编造窗口外的章号。
+  2179	            chapter_text = window_chapters_by_idx.get(evidence.chapter_index, "")
+  2180	            if not chapter_text:
+  2181	                continue
+  2182	            # G2：quote 必须是该章原文的逐字子串（允许脱一层配对引号的噪音）。
+  2183	            if not any(v in chapter_text for v in _quote_comparison_variants(quote)):
+  2184	                continue
+  2185	            # G3：称呼（primary_appellation 或 formal_name 中非空的那个）必须是
+  2186	            # quote 的子串。
+  2187	            appellations = [value for value in (appellation, formal) if value]
+  2188	            if not any(value in quote for value in appellations):
+  2189	                continue
+  2190	            structural_pass += 1
+  2191	            dossier = _roster_presence_dossier(evidence.chapter_index, chapter_text, quote)
+  2192	            if not dossier:
+  2193	                continue  # no_presence_dossier：不确定不登记，不是跳过检查
+  2194	            verdict_jobs.append((appellation, dossier))
+  2195	
+  2196	    # 裁决闸并发发起：每条证据一次独立模型调用，此前是嵌套 for/await 全程串行——
+  2197	    # 一个出场上千次的主角单独就能把这里拖成几十次排队调用（真实故障：
+  2198	    # run_8ebe1225aa69，18 条证据串行裁决耗时 91.6s，仍被 900s 总超时拦腰截断）。
+  2199	    # 这里只是把发起方式从"一条条 await"改成"一起 gather"，真正的并发上限由
+  2200	    # `model_gateway.chat`→`run_with_provider_call_slot` 那道进程级 `text_provider_calls`
+  2201	    # 优先级闸门统一节流（见 app/generation_concurrency.py），不额外起一套并发框架。
+  2202	    # 失败隔离：单条证据裁决失败/不通过只让这一个 job 判 0 票，不影响其它 job，
+  2203	    # 语义与原来的 continue 完全一致（不确定不登记）；裁决闸本身的提示词/温度/
+  2204	    # 候选集算法（`_roster_presence_verdict_call`）原样未动。
+  2205	    verdict_pass = 0
+  2206	
+  2207	    async def _judge_evidence(appellation: str, dossier: list[dict[str, Any]]) -> bool:
+  2208	        try:
+  2209	            verdict = await _roster_presence_verdict_call(
+  2210	                appellation=appellation, dossier=dossier, project_id=project_id,

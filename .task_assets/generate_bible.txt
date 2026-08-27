@@ -1,0 +1,246 @@
+  4580	            task.cancel()
+  4581	        raise
+  4582	    for task in pending:
+  4583	        task.cancel()
+  4584	    if pending:
+  4585	        await asyncio.gather(*pending, return_exceptions=True)
+  4586	
+  4587	    cleaned = list(chapters)
+  4588	    changed = 0
+  4589	    cache_hits = 0
+  4590	    for task in done:
+  4591	        if task.cancelled() or task.exception() is not None:
+  4592	            continue
+  4593	        slot, stripped, cache_hit = task.result()
+  4594	        if cache_hit:
+  4595	            cache_hits += 1
+  4596	        original = valid[slot]
+  4597	        if stripped != (original.get("content") or ""):
+  4598	            cleaned[positions[slot]] = {**original, "content": stripped}
+  4599	            changed += 1
+  4600	    log_provider_call(
+  4601	        "character_bible_paratext", config.MODEL_TEXT,
+  4602	        "OK" if not pending else "PARTIAL", None, int((time.time() - started) * 1000),
+  4603	        meta={
+  4604	            "chapters_total": len(valid),
+  4605	            "chapters_in_scope": len(scope),
+  4606	            "chapters_stripped": changed,
+  4607	            "unfinished": len(pending),
+  4608	            "budget_s": BIBLE_PARATEXT_BUDGET_S,
+  4609	            # 命中持久化缓存 vs 真正发起模型调用的两类计数（见方案文档
+  4610	            # "改动清单"一节）：重跑同一项目时前者应趋近 chapters_in_scope，
+  4611	            # 后者应趋近 0——这两个数字是判断"120s 预算有没有真的降下来"
+  4612	            # 的直接依据，不用再去 provider_calls 表里数。
+  4613	            "cache_hits": cache_hits,
+  4614	            "model_calls": len(done) - cache_hits,
+  4615	        },
+  4616	    )
+  4617	    return cleaned
+  4618	
+  4619	
+  4620	async def generate_bible(chapters: list[dict], feedback: str = "", previous_bible: dict | None = None,
+  4621	                         project_id: str | None = None,
+  4622	                         visual_style_prompt: str | None = None) -> Bible:
+  4623	    # 必须在渲染源文本**和**统计必收名单之前净化，两者都以正文为准。
+  4624	    chapters = await _chapters_without_paratext(chapters)
+  4625	    chapters_text = _render_bible_source(chapters, head_chapters=BIBLE_HEAD_CHAPTERS)
+  4626	    # 外观标志性特征证据核验用的全书原文查找表（未经预算截断），下方
+  4627	    # validate_authoritative_bible 与 _supplement_bible_characters 共用同一份。
+  4628	    chapters_by_idx = _chapters_by_idx(chapters)
+  4629	    must_cover = await _recurring_character_names(chapters, project_id=project_id)
+  4630	    must_cover_part = ""
+  4631	    if must_cover:
+  4632	        must_cover_lines = [
+  4633	            (
+  4634	                f'{formal_name}（原文常用称呼"{appellation}"，已核验在场证据 {count} 条）'
+  4635	                if formal_name else
+  4636	                f"{appellation}（已核验在场证据 {count} 条）"
+  4637	            )
+  4638	            for appellation, formal_name, count in must_cover
+  4639	        ]
+  4640	        must_cover_part = f"""
+  4641	【必收角色名单】（后端已对每个候选人物的在场证据逐条核验：结构闸核对引句是否逐字命中原文，独立模型裁决闸核对这句话是不是本人真的在场而不是被提及/回忆/背景交代；核验通过的在场证据条数达到 {BIBLE_RECURRING_MIN_ONSTAGE_QUOTES} 条以上才会出现在这份名单里，必须全部收录）：
+  4642	{'、'.join(must_cover_lines)}
+  4643	
+  4644	执行方式：
+  4645	- 名单里标了"原文常用称呼『XX』"的条目，character.name 用括号外给出的正式姓名，并按规则 5 把括号里那个原文常用称呼登记为一条 aliases；没有标注的条目，character.name 直接用给出的写法，不需要另外申报别名。
+  4646	- 名单之外的重要角色仍然可以补充；总数以覆盖名单为准，不要为了写得短就删掉名单里的人。
+  4647	- 唯一例外：名单里某个名字如果其实不是人物（是宗门、地名或法宝名），跳过它，不要硬编成角色。
+  4648	"""
+  4649	    previous_part = ""
+  4650	    if previous_bible:
+  4651	        names = "、".join(
+  4652	            c.get("name", "") for c in previous_bible.get("characters", []) if c.get("name")
+  4653	        )
+  4654	        style = (previous_bible.get("world") or {}).get("visual_style_canonical", "")
+  4655	        previous_part = f"\n当前人物谱摘要（用于对照返工，不可直接照抄错误）：\n已收录角色：{names or '无'}\n当前画风：{style or '无'}\n"
+  4656	    feedback_part = ""
+  4657	    if feedback.strip():
+  4658	        feedback_part = f"""
+  4659	人工打回重生要求（最高优先级）：
+  4660	{feedback.strip()}
+  4661	
+  4662	执行方式：
+  4663	- 如果用户点名遗漏人物，必须回到原文中查找并收录；受角色总数上限影响时，删除更边缘的角色也要保留用户点名人物。
+  4664	- 如果用户指出身份、关系、外观或称谓错误，必须按要求修正，并保持后续 relationships 一致。
+  4665	- 不要把同一人物的外号、尊称、简称拆成多个角色；统一为原文最稳定的正式姓名。
+  4666	"""
+  4667	    visual_style_part = ""
+  4668	    if visual_style_prompt:
+  4669	        visual_style_part = f"""
+  4670	统一画风（最高优先级，必须逐字写入 world.visual_style_canonical）：
+  4671	{visual_style_prompt}
+  4672	
+  4673	执行方式：
+  4674	- 不得改写、扩写、缩写或替换该统一画风提示词。
+  4675	- 角色外观、场景、定妆照和后续视频提示词都必须服从该统一画风。
+  4676	"""
+  4677	    if visual_style_prompt:
+  4678	        # 本次已提供统一画风提示词：下方 world.visual_style_canonical 最终必然逐字
+  4679	        # 等于 visual_style_prompt（后端强制覆盖，见 validate_authoritative_bible），
+  4680	        # 模型这里自己构思的版本不会被采用。此时不能再要求模型"必须是非真人风格"——
+  4681	        # 用户可能选中的正是真人摄影风预设，同一份提示词里同时说"必须逐字保留统一画风"
+  4682	        # 又说"严禁真人风格描述"是自相矛盾指令，会污染模型对其它字段（如
+  4683	        # appearance_canonical）的语气判断。
+  4684	        visual_style_rule = (
+  4685	            "3. visual_style_canonical：本次已提供统一画风提示词（见下文最高优先级指令），"
+  4686	            "直接原样理解即可，不需要自己另行构思风格描述——这个字段最终由后端逐字写入该"
+  4687	            "提示词，你在这里的输出不会被采用。"
+  4688	        )
+  4689	    else:
+  4690	        visual_style_rule = (
+  4691	            "3. visual_style_canonical：25~40 字的全局画风串，包含 美术风格/光线/色调，"
+  4692	            "适配竖屏漫剧，必须依据本书题材定制。【硬性约束】必须是 CG/动画/漫画/插画类的"
+  4693	            "非真人风格（如 3D 渲染、3D 写实 CG、2D 动画、动态漫画、厚涂插画、国漫风等，"
+  4694	            "写实质感/照片级/胶片颗粒等氛围词可以保留），但严禁\"真人实拍/真人出镜/实拍摄影\""
+  4695	            "这类真人风格描述（否则后续 Seedance 视频接口会因疑似真人而报错 "
+  4696	            "InputImageSensitiveContentDetected）。核心是画面为 CG/动画渲染而非真人拍摄。"
+  4697	        )
+  4698	    prompt = f"""任务：从小说文本中提取角色圣经与世界观，用于后续 AI 视频生成的一致性控制。
+  4699	
+  4700	要求：
+  4701	1. 收录所有出场 2 次以上或明显重要的角色；【必收角色名单】里的人一个都不能少，其余按重要性补足，总数不超过 20 个。
+  4702	2. appearance_canonical 是该角色的"固定外观锚点串"：40~60 字，只写常规完整着装、中性
+  4703	   站姿下可直接看见并能跨镜稳定复现的静态形态：五官、发型、体型、外层服装、可见配饰或
+  4704	   面部标记。不写性格、欲望、气质、眼神行为、对他人的注视方式，不得写裸体、内衣、私密
+  4705	   身体部位或必须暴露身体才能看见的特征。
+  4706	   写作分两层：
+  4707	   - 通用形态（性别年龄感/发型发色/服装款式与颜色）：原文没有直接描写时，允许你按题材、
+  4708	     身份、场景合理设定一个具体、可跨镜复现的写法（例如"十五六岁""粗麻杂役衫"），这是
+  4709	     具体化不是编造事实，不需要举证。
+  4710	   - 标志性特征（伤疤、体型极端值、面部标记、习惯动作留下的可见痕迹等）：只有原文对**这个
+  4711	     角色本人**确实写过这样的描写，才写这一条，且必须逐字取用原文说法；原文没有这类描写
+  4712	     时，appearance_canonical 到通用形态为止，把剩余字数用于把通用形态写得更具体（例如
+  4713	     补充材质、颜色细节），不要为了凑一个"标志性"而编造。判断"是不是这个角色本人"时要
+  4714	     小心：同一段落里描写"另一个人""其余几人""身边的人"这类指代对象的内容，不属于这个
+  4715	     角色本人，不能借用到他身上。
+  4716	   - source_evidence：数组，只用来给"标志性特征"这一层举证（通用形态不需要）。每条给
+  4717	     evidence_chapter_index（原文分块【】块头里的章节序号）与 evidence_quote（支撑该
+  4718	     特征的原文逐字短句，控制在 40 字以内、必须原样连续照抄、不得跨句拼接或用省略号
+  4719	     连接多处），且这句引文里必须能直接读出是在描写这个角色本人（角色的正式姓名或已
+  4720	     确认别名要出现在这同一句短引文里，不是出现在原文的其他地方）。原文没有可举证的
+  4721	     标志性特征时，source_evidence 就是空数组——这是诚实的默认值，不会因此被拒绝。
+  4722	{visual_style_rule}
+  4723	4. speech_style 用于后续台词写作：句长习惯/口头禅/敬语习惯等，15~30 字。
+  4724	5. name 必须互不重复且取原文最稳定的正式姓名；同一人物在原文中出现的其它别名/外号/尊称/
+  4725	   代称（包括真名揭晓前的描述性代称，如"银色长袍女子"）不要拆成多个角色，而是逐条列入
+  4726	   该角色的 aliases：每条给 text（原文逐字写法）、name_kind（personal_name=真名/
+  4727	   honorific=尊称/referential=代称，按语境判断）、evidence_chapter_index（该别名出现的
+  4728	   证据所在章节序号，取原文分块【】块头里的数字；如果看到的分块标题不是数字、无法确定
+  4729	   准确章节序号，就不要申报这条别名——注意这个序号不是该别名第一次出现的章节，而是该
+  4730	   别名与角色正式姓名（或本角色另一条已确认别名）同时出现的那一章；很多描述性代称最早
+  4731	   出现时全书还没交代真名，那一章通不过共现核验，要在全书范围内找到两者共现的章节再
+  4732	   申报，一旦登记成功该别名会覆盖它在全书的所有出现）、evidence_quote（该共现章节原文中
+  4733	   的逐字引句，必须原样照抄，一个字都不能改，也不要自己在引句前后加引号包裹——原文本来
+  4734	   有没有引号就照抄有没有，不要额外添加；且这句引文所在章节里必须能同时找到该角色的
+  4735	   正式姓名或本角色的另一条别名——找不到这种共现就不要申报，后端会逐字核对，不满足条件
+  4736	   的申报一律不会登记）。
+  4737	   不确定就不要申报别名——宁可漏报，绝不能编造或近似改写引句。
+  4738	6. relationships 只描述【已收录角色之间】的关系：relationships.to 必须逐字等于本次 characters 里某个角色的 name，不要指向未收录的人物（否则代码校验会因「关系指向未知角色」退回重写）。与圈外人物的关系请省略，或并入 personality 文字描述。
+  4739	
+  4740	小说文本：
+  4741	{chapters_text}{previous_part}{feedback_part}{visual_style_part}{must_cover_part}
+  4742	
+  4743	输出 JSON Schema：
+  4744	{{"characters": [{{"name": str, "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "aliases": [{{"text": str, "name_kind": "personal_name|honorific|referential", "evidence_chapter_index": int, "evidence_quote": str}}]}}], "world": {{"era": str, "genre": str, "visual_style_canonical": str}}}}"""
+  4745	    loop = AgentLoop(
+  4746	        stage_key="character_bible",
+  4747	        contract_key="character_bible",
+  4748	        goal="从原文章节生成来源可追溯、视觉锚点完整的人物圣经",
+  4749	        scope_type="project",
+  4750	        scope_id=project_id or hashlib.sha256(chapters_text.encode("utf-8")).hexdigest()[:16],
+  4751	        artifact_type="character_bible",
+  4752	        policy=AgentLoopPolicy(
+  4753	            max_iterations=min(max(int(get_setting("max_repair_attempts") or 4), 1), 4),
+  4754	            stall_rounds=2,
+  4755	            min_quality_gain=0.03,
+  4756	            no_gain_rounds=2,
+  4757	            allow_warning_candidate=False,
+  4758	            repair_all_blockers=True,
+  4759	        ),
+  4760	    )
+  4761	
+  4762	    def validate_authoritative_bible(candidate: Bible) -> list[str]:
+  4763	        # The forced project style is authority, not a post-processing display
+  4764	        # override. Apply it before AgentLoop records the accepted Artifact.
+  4765	        if visual_style_prompt:
+  4766	            candidate.world.visual_style_canonical = visual_style_prompt
+  4767	        errors = validate_bible(candidate)
+  4768	        errors += _validate_appearance_evidence(candidate, chapters_by_idx)
+  4769	        return errors
+  4770	
+  4771	    bible = await _run_with_agent_loop(
+  4772	        "角色圣经", "character_bible", prompt, Bible, validate_authoritative_bible,
+  4773	        loop=loop, temperature=0.5, max_tokens=16384,
+  4774	        # 默认的 3000 字任务摘要会把小说正文整段截掉：一旦首轮候选未过校验，
+  4775	        # 后续每一轮"定向修复"都只看得到规则和上一版候选，模型只能照抄开头
+  4776	        # 那几段里的人，人物谱越修越少。人物谱的任务本体就是原文，不能截。
+  4777	        repair_user_prompt_limit=None,
+  4778	    )
+  4779	    if visual_style_prompt:
+  4780	        bible.world.visual_style_canonical = visual_style_prompt
+  4781	    # 规则 5 要求模型随人物谱一并申报别名，但那只是申报——落库前必须过与回填函数
+  4782	    # 同一套代码核验（逐字命中 + 章节内共现 + 桥接章原文独立裁决），不满足就丢弃，
+  4783	    # 不阻断人物谱本身。
+  4784	    await _verify_character_aliases_in_place(bible, chapters, project_id=project_id)
+  4785	    missing = [
+  4786	        item for item in must_cover
+  4787	        if not _bible_covers_name(bible, {value for value in (item[0], item[1]) if value})
+  4788	    ]
+  4789	    if missing:
+  4790	        added = await _supplement_bible_characters(
+  4791	            bible, missing, chapters_text,
+  4792	            chapters_by_idx=chapters_by_idx, visual_style_prompt=visual_style_prompt,
+  4793	            project_id=project_id,
+  4794	        )
+  4795	        log_provider_call(
+  4796	            "character_bible_coverage", config.MODEL_TEXT,
+  4797	            "OK" if len(added) == len(missing) else "PARTIAL", None, 0,
+  4798	            meta={
+  4799	                "must_cover": [appellation for appellation, _, _ in must_cover],
+  4800	                "missing": [appellation for appellation, _, _ in missing],
+  4801	                "supplemented": added,
+  4802	            },
+  4803	        )
+  4804	    return bible
+  4805	
+  4806	
+  4807	# ---------- A2. 场景圣经（场景图素材库的规范场景，跨集场景一致性核心） ----------
+  4808	
+  4809	class _SceneBibleDraft(BaseModel):
+  4810	    """场景圣经输出合同（仅生成期使用）：一组规范场景。"""
+  4811	
+  4812	    scenes: list[Scene]
+  4813	
+  4814	
+  4815	async def generate_scene_bible(chapters: list[dict], bible: Bible,
+  4816	                               feedback: str = "", project_id: str | None = None) -> list[Scene]:
+  4817	    """从原文提取「规范场景」清单，作为场景图素材库的底稿（与 generate_bible 同构）。
+  4818	    每个场景给 name（稳定短标签）+ scene_canonical（固定场景锚点串，画风约束与人物锚点一致，
+  4819	    按 bible.world.visual_style_canonical 是否为照片级真人摄影预设二选一：非摄影风格必须
+  4820	    CG/动画/漫画类非真人风格，否则后续 Seedance/Seedream 易因疑似真人报错；摄影风格则相反，
+  4821	    要求真实材质与摄影级细节）。"""
+  4822	    from app.visual_styles import is_photographic_style_prompt
+  4823	    chapters_text = _render_bible_source(chapters)
+  4824	    style = bible.world.visual_style_canonical
+  4825	    genre = bible.world.genre or ""
