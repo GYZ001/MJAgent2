@@ -403,10 +403,14 @@ def test_validate_all_segments_draft_prefixes_per_item_format_errors_with_segmen
 
 def test_segment_content_advisories_empty_for_well_formed_draft():
     advisories = _segment_content_advisories(
-        _draft(resources=_AiSegmentResources(characters=[{"identity_id": "id_a", "description": "x"}])),
+        _draft(resources=_AiSegmentResources(
+            characters=[{"identity_id": "id_a", "description": "x"}],
+            scenes=[{"scene_id": "scene_a", "description": "y"}],
+        )),
         known_character_ids={"id_a"},
-        known_scene_ids=set(),
+        known_scene_ids={"scene_a"},
         source_segment_indexes=[1, 2],
+        segment_relevant_scene_ids={"scene_a"},
     )
     assert advisories == []
 
@@ -476,6 +480,54 @@ def test_segment_content_advisories_flags_invented_identity_id_even_when_manifes
     ]
     assert len(unknown_character_advisories) == 3
     assert len(unknown_scene_advisories) == 1
+
+
+def test_segment_content_advisories_flags_manifest_gap_when_no_relevant_scenes_exist():
+    """真实 EP4 回归：asset_manifest.scenes 只覆盖原文段号 [2..20]，本集共
+    54 段，段号落在 [24..51] 的那几段 relevant_assets.scenes 天生是空列表——
+    模型没有任何合法 scene_id 可用，resources.scenes 留空是诚实的选择，不是
+    这次分镜生成的遗漏，必须标记成映射台侧的缺口，不能和"模型偷懒"混为一谈。
+    """
+    draft = _draft(resources=_AiSegmentResources(
+        characters=[{"identity_id": "id_a", "description": "x"}],
+    ))
+    advisories = _segment_content_advisories(
+        draft, known_character_ids={"id_a"}, known_scene_ids=set(),
+        source_segment_indexes=[24, 25], segment_relevant_scene_ids=set(),
+    )
+    assert any("STORYBOARD_PACK_RESOURCE_SCENE_MANIFEST_GAP" in a for a in advisories)
+    assert not any("STORYBOARD_PACK_RESOURCE_SCENE_MISSING" in a for a in advisories)
+
+
+def test_segment_content_advisories_flags_missing_when_relevant_scenes_available_but_unused():
+    """区分于上一条：这次映射台确实给了候选场景（relevant_assets.scenes 非
+    空），但模型的 resources.scenes 仍然是空——不能排除"这段确实没有独立
+    场景"（例如纯特写/纯对话），所以只标记为需要人工核对，不是确定性错误，
+    也不阻断生成。"""
+    draft = _draft(resources=_AiSegmentResources(
+        characters=[{"identity_id": "id_a", "description": "x"}],
+    ))
+    advisories = _segment_content_advisories(
+        draft, known_character_ids={"id_a"}, known_scene_ids={"scene_a"},
+        source_segment_indexes=[1, 2], segment_relevant_scene_ids={"scene_a"},
+    )
+    assert any("STORYBOARD_PACK_RESOURCE_SCENE_MISSING" in a for a in advisories)
+    assert not any("STORYBOARD_PACK_RESOURCE_SCENE_MANIFEST_GAP" in a for a in advisories)
+
+
+def test_segment_content_advisories_no_scene_advisory_when_scenes_declared():
+    """场景确实被声明了（不管是否用满 relevant_assets 里的全部候选），两条
+    新标记都不应该出现——它们只在 resources.scenes 为空时才有意义。"""
+    draft = _draft(resources=_AiSegmentResources(
+        characters=[{"identity_id": "id_a", "description": "x"}],
+        scenes=[{"scene_id": "scene_a", "description": "y"}],
+    ))
+    advisories = _segment_content_advisories(
+        draft, known_character_ids={"id_a"}, known_scene_ids={"scene_a"},
+        source_segment_indexes=[1, 2], segment_relevant_scene_ids={"scene_a", "scene_b"},
+    )
+    assert not any("STORYBOARD_PACK_RESOURCE_SCENE_MISSING" in a for a in advisories)
+    assert not any("STORYBOARD_PACK_RESOURCE_SCENE_MANIFEST_GAP" in a for a in advisories)
 
 
 # ---------------------------------------------------------------------------

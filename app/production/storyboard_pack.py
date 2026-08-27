@@ -169,14 +169,51 @@ from app.video_prompt_profiles import VideoPromptProfile
 #: 退化为"每个段号都不是 paratext"——即改造前的全量路径，不崩、不会把不存在
 #: 的账目误读成"全部段落都是 paratext"（那会让模型看到的原文变成清一色
 #: 占位符）。
-STORYBOARD_PACK_VERSION = "2.0.4"
+#:
+#: 2.0.5（协调方从 EP4/EP5/EP6 横向统计发现批量产出的 resources.scenes 明显
+#: 变稀：EP4（新架构整集批量）9 段里 5 段是 0 个场景，EP5/EP6（旧架构逐段
+#: 独立调用）分别只有 0/9 段是 0——2026-08-26）：核对 EP4 真实数据后，根因
+#: 不是"批量输出稀释了模型对 resources.scenes 的注意力"这个最初的怀疑，而是
+#: 两处都有问题，程度不同：
+#: ① 真正的主因是上游数据缺口，不是本文件的提示词——EP4 的
+#: asset_manifest.scenes 只有 1 个场景条目，segment_indexes 覆盖范围是
+#: [2..20]，但本集原文共 54 段；产出 0 场景的 5 段（shot 5-9）source_segment_
+#: indexes 全部落在 [24..51]，完全在这个覆盖范围之外——_segment_relevant_
+#: assets 按段号交集筛出的 relevant_assets.scenes 对这 5 段来说本来就是空
+#: 列表，模型没有任何合法 scene_id 可用，留空是唯一诚实的选择，换成 EP8 用
+#: 同一套（未改动）提示词重新生成一次可验证：EP8 的 asset_manifest.scenes
+#: 覆盖了全部段号，8 段全部至少有 1 个场景。这一半根因在
+#: app.production.prep_pack 的场景发现，不在本文件，本次不动 prep_pack.py
+#: （范围外、真出问题需要单独一次映射台改造，不是分镜台能补的）。
+#: ② 但确实还有本文件自己的、次要的一个提示词失衡：task_payload.rules[] 里
+#: resources.characters 的取值来源、边界情形（未收录角色怎么写）都有完整
+#: 正面陈述，resources.scenes 却完全没有对应的规则条目——唯一提到它的地方
+#: 是 output_contract.segments[].resources 里一句话带过。批量调用要一次
+#: 满足的约束本来就多，被动省略的字段更容易被跳过；即使 relevant_assets.
+#: scenes 非空，也不能保证模型会主动把画面里的场景填进去。补一条与
+#: characters 同结构的正面陈述规则（取值来源=该段 relevant_assets.scenes[]
+#: 的 scene_id 字段本身，边界情形=relevant_assets.scenes 为空时留空是唯一
+#: 诚实选择），同一族"正面陈述取值域，不是简单禁令"的教训（2.0.2
+#: changelog 的 identity_id 那次已经验证过这个方向有效）。
+#:
+#: 可见信号，不做兜底填充（用户/协调方拍板：空着比编一个假场景更诚实）：
+#: _segment_content_advisories 新增两条互斥的 degraded_capabilities 标记，
+#: 只在 resources.scenes 为空时才判断——
+#: [STORYBOARD_PACK_RESOURCE_SCENE_MANIFEST_GAP]：这段的 relevant_assets.
+#: scenes 本身是空列表（① 的情形，根子在映射台，不是这次生成的遗漏）；
+#: [STORYBOARD_PACK_RESOURCE_SCENE_MISSING]：relevant_assets.scenes 非空但
+#: 模型仍未声明任何场景（② 的情形，可能是真的没有独立场景——例如纯特写/
+#: 纯对话，也可能是遗漏，代码分不清这两种，只能标记出来交给人核对，不代为
+#: 判断）。两条标记名字互斥、依据都是确定性的集合运算（relevant_assets.
+#: scenes 是否为空），不是新的模型语义判断，也不是黑名单。
+STORYBOARD_PACK_VERSION = "2.0.5"
 
 #: Written to Shot.prompt_contract_version for every row this module writes.
 #: This is the single, principled marker every downstream consumer keys off
 #: of to know "this row's shot_size/camera_move/first_frame_desc/... are not
 #: authoritative -- read storyboard_pack_segment.prompt_text instead". It is
 #: a data-derived version tag, not a per-episode/per-shot allowlist.
-STORYBOARD_PACK_CONTRACT_MARKER = "storyboard_pack/2.0.4"
+STORYBOARD_PACK_CONTRACT_MARKER = "storyboard_pack/2.0.5"
 
 SEGMENT_DURATION_S = 15
 MIN_SHOTS_PER_SEGMENT = 3
@@ -812,6 +849,7 @@ def _segment_content_advisories(
     known_character_ids: set[str],
     known_scene_ids: set[str],
     source_segment_indexes: list[int],
+    segment_relevant_scene_ids: set[str] = frozenset(),
 ) -> list[str]:
     """Non-blocking content checks: computed every time, never gate generation.
 
@@ -872,6 +910,33 @@ def _segment_content_advisories(
                 f"[STORYBOARD_PACK_RESOURCE_SCENE_UNKNOWN][未拦截] "
                 f"resources.scenes[{index}].scene_id=「{scene.scene_id}」"
                 "不是映射台已知场景，已按纯文字描述处理"
+            )
+    # 场景资源漏填 vs 本来就没有可引用场景（2.0.5，真实 EP4 回归：9 段里 5 段
+    # resources.scenes 是空，起初怀疑是"整集批量产出稀释了注意力"，但核对
+    # 这 5 段各自的 relevant_assets.scenes 后发现它们本身就是空列表——映射台
+    # 的 asset_manifest.scenes 只覆盖了 EP4 全部 54 段原文里的前 20 段，后
+    # 34 段（含这 5 段）从未被登记进任何场景条目，模型没有任何合法 scene_id
+    # 可用，留空是唯一诚实的选择，不是模型的错。两种情况必须分开报告，不能
+    # 用同一个判断掩盖：relevant_assets.scenes 非空却仍留空，是"可能漏填"，
+    # 需要人核对（也可能是这段确实没有独立场景，比如纯特写/纯对话，代码不
+    # 替模型做这个判断）；relevant_assets.scenes 本身为空，是"映射台没有为
+    # 这段原文范围登记场景资源"，根子在上游，不是这次分镜生成能补的。
+    if not draft.resources.scenes:
+        if segment_relevant_scene_ids:
+            advisories.append(
+                "[STORYBOARD_PACK_RESOURCE_SCENE_MISSING][未拦截] 本段 "
+                f"relevant_assets.scenes 提供了可引用场景"
+                f"（{sorted(segment_relevant_scene_ids)}），但 resources.scenes 为空："
+                "可能是本段确实没有独立场景（例如纯特写/纯对话），也可能是遗漏，"
+                "需要人工核对"
+            )
+        else:
+            advisories.append(
+                "[STORYBOARD_PACK_RESOURCE_SCENE_MANIFEST_GAP][未拦截] 本段原文段号"
+                f"{sorted(source_segment_indexes)} 在映射台 asset_manifest.scenes 里"
+                "没有任何登记条目覆盖，relevant_assets.scenes 为空，resources.scenes "
+                "留空是诚实的选择，不是这次分镜生成的遗漏；如需为本段挂场景参考图，"
+                "需要先补齐映射台对这段原文范围的场景发现"
             )
     return advisories
 
@@ -937,6 +1002,16 @@ async def _generate_all_segment_prompts(
         }
         for plan in beat_draft.segments
     ]
+    # 场景漏填 vs 本来无场景的判据（见 _segment_content_advisories 下方
+    # 2.0.5 changelog 注释）：复用刚构建的同一份 relevant_assets，不重新算
+    # 一遍 _segment_relevant_assets——每个 segment_no 对应它自己在
+    # segment_units 里已经算好的候选 scene_id 集合。
+    relevant_scene_ids_by_segment_no: dict[int, set[str]] = {
+        unit["segment_no"]: {
+            str(s.get("scene_id") or "") for s in unit["relevant_assets"]["scenes"]
+        }
+        for unit in segment_units
+    }
     task_payload = {
         "task": (
             "为下面这一整集的每一段原文和节拍各写一整段可直接投喂视频生成模型的"
@@ -992,6 +1067,18 @@ async def _generate_all_segment_prompts(
             "尤其不要模仿已收录角色的 id 写法（那种带前缀的写法是「素材库已"
             "收录」这个事实本身的标记，没有收录记录时自己套用等于冒充一个不"
             "存在的收录状态）。",
+            "每一段 prompt_text 里画面实际发生的场景都必须同时列进该段自己的 "
+            "resources.scenes——这一条和上面 resources.characters 的要求同等"
+            "重要，一次性产出全部段落时不得因为已经填好角色清单就略过场景"
+            "清单，每一段都要单独核对。resources.scenes[].scene_id 的合法取值"
+            "只有一处、必须逐字整串复制：该段 relevant_assets.scenes[] 每一项"
+            "自带的 scene_id 字段本身，不允许自己新造、简化或从其他段的场景"
+            "挪用。如果该段 relevant_assets.scenes 本身是空列表——映射台没有"
+            "为这段原文范围登记任何场景——resources.scenes 留空是唯一诚实的"
+            "选择，不必也不应该勉强套用一个不属于这段的场景 id；但只要 "
+            "relevant_assets.scenes 非空且本段画面确实发生在其中某个场景，"
+            "就必须把对应 scene_id 列进 resources.scenes，不得因为篇幅或注意力"
+            "被其他字段占用而省略。",
             *([_paratext_exclusion_rule(paratext_indexes)] if paratext_indexes else []),
         ],
         "shot_count_range": [MIN_SHOTS_PER_SEGMENT, MAX_SHOTS_PER_SEGMENT],
@@ -1088,6 +1175,7 @@ async def _generate_all_segment_prompts(
             known_character_ids=known_character_ids,
             known_scene_ids=known_scene_ids,
             source_segment_indexes=plan.source_segment_indexes,
+            segment_relevant_scene_ids=relevant_scene_ids_by_segment_no.get(plan.segment_no, set()),
         )
         if advisories:
             draft.degraded_capabilities = [*draft.degraded_capabilities, *advisories]
