@@ -1620,6 +1620,8 @@ async def _run_with_agent_loop(
             else {}
         ),
     }
+    if stage_key.startswith("character_bible"):
+        base_call_meta = _bible_short_json_call_meta(base_call_meta)
     iteration_state = {"number": 0}
 
     async def producer(
@@ -1944,6 +1946,16 @@ BIBLE_ROLL_CALL_CONCURRENCY = 6
 BIBLE_ROLL_CALL_MAX_ATTEMPTS = 3
 BIBLE_ROLL_CALL_TIMEOUT_S = 300.0
 BIBLE_SMALL_VERDICT_TIMEOUT_S = 120.0
+BIBLE_FIRST_TOKEN_TIMEOUT_S = 20.0
+
+
+def _bible_short_json_call_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    """人物谱短 JSON 调用：关掉 thinking，并给 0 字节流式空等一个 20s 首字上限。"""
+    return {
+        **meta,
+        "disable_thinking": True,
+        "first_token_timeout_s": BIBLE_FIRST_TOKEN_TIMEOUT_S,
+    }
 
 # 旁文本净化的三个闸（见 `_chapters_without_paratext` docstring 里的事故口径）：
 BIBLE_PARATEXT_MARGIN_CHAPTERS = 3   # 净化只会让正文变短，头部因此可能多吃进几章
@@ -2159,6 +2171,14 @@ async def _resolve_generic_character_candidates(
     if not specific:
         return candidates
     kept: list[_RosterCandidate] = []
+    jobs: list[tuple[_RosterCandidate, str, list[str]]] = []
+    candidate_names = [
+        {
+            "canonical": item.formal_name or item.primary_appellation,
+            "appellations": sorted(_candidate_appellations(item)),
+        }
+        for item in specific
+    ]
     for candidate in candidates:
         label = (candidate.formal_name or candidate.primary_appellation).strip()
         if not _is_generic_character_appellation(label):
@@ -2172,13 +2192,6 @@ async def _resolve_generic_character_candidates(
             )
             if dossier:
                 evidence_blocks.append(json.dumps(dossier, ensure_ascii=False))
-        candidate_names = [
-            {
-                "canonical": item.formal_name or item.primary_appellation,
-                "appellations": sorted(_candidate_appellations(item)),
-            }
-            for item in specific
-        ]
         if not evidence_blocks:
             continue
         prompt = f"""任务：判断描述性称呼「{label}」是否是候选实体名单中的同一个人物。
@@ -2195,6 +2208,12 @@ async def _resolve_generic_character_candidates(
 3. canonical_appellation 只能逐字选择候选实体的 canonical 值。
 4. 无法充分证明时 verdict=uncertain；描述性称呼不能因此创建独立人物谱角色。
 """
+        jobs.append((candidate, prompt, evidence_blocks))
+
+    async def _resolve_one(
+        candidate: _RosterCandidate, prompt: str, evidence_blocks: list[str],
+    ) -> tuple[_RosterCandidate, _RosterIdentityResolution] | None:
+        label = (candidate.formal_name or candidate.primary_appellation).strip()
         try:
             resolution = await asyncio.wait_for(
                 model_gateway.chat_structured(
@@ -2207,23 +2226,34 @@ async def _resolve_generic_character_candidates(
                     ).hexdigest(),
                     temperature=0.0,
                     max_tokens=512,
-                    call_meta={
+                    call_meta=_bible_short_json_call_meta({
                         "stage": "人物身份归一",
                         "stage_key": "character_identity_resolution",
                         "call_role": "stage_validate",
                         "character_name": label,
                         "project_id": project_id,
-                    },
+                    }),
                 ),
                 timeout=BIBLE_SMALL_VERDICT_TIMEOUT_S,
             )
         except Exception:  # noqa: BLE001 - 不确定时宁可不新建泛称角色
-            continue
+            return None
         if resolution.verdict != "same":
+            return None
+        return candidate, resolution
+
+    resolved = await asyncio.gather(*(
+        _resolve_one(candidate, prompt, evidence_blocks)
+        for candidate, prompt, evidence_blocks in jobs
+    ))
+    # 合并回 specific 必须串行：两个泛称可能指向同一实体，并行写 aliases 会丢条目。
+    for item in resolved:
+        if item is None:
             continue
+        candidate, resolution = item
         target = next((
-            item for item in specific
-            if (item.formal_name or item.primary_appellation) == resolution.canonical_appellation
+            entry for entry in specific
+            if (entry.formal_name or entry.primary_appellation) == resolution.canonical_appellation
         ), None)
         if target is None:
             continue
@@ -2236,12 +2266,12 @@ async def _resolve_generic_character_candidates(
             if value and value not in {target.primary_appellation, target.formal_name}
         ]
         target.onstage_evidence = list({
-            (item.chapter_index, item.quote): item
-            for item in [*target.onstage_evidence, *candidate.onstage_evidence]
+            (entry.chapter_index, entry.quote): entry
+            for entry in [*target.onstage_evidence, *candidate.onstage_evidence]
         }.values())[:BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE]
         target.identity_evidence = list({
-            (item.chapter_index, item.quote): item
-            for item in [*target.identity_evidence, *candidate.onstage_evidence]
+            (entry.chapter_index, entry.quote): entry
+            for entry in [*target.identity_evidence, *candidate.onstage_evidence]
         }.values())[:BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE]
     return kept
 
@@ -2362,7 +2392,7 @@ async def _recurring_character_names(
                              {"role": "user", "content": prompt}],
                             temperature=0.2,
                             max_tokens=BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS,
-                            call_meta={
+                            call_meta=_bible_short_json_call_meta({
                                 "stage": "人物点名",
                                 "stage_key": "character_roll_call",
                                 "call_role": "stage_generate",
@@ -2372,7 +2402,7 @@ async def _recurring_character_names(
                                 "chunk_count": len(chunks),
                                 "input_chars": len(chunk_text),
                                 "attempt": attempt,
-                            },
+                            }),
                         ),
                         timeout=BIBLE_ROLL_CALL_TIMEOUT_S,
                     )
@@ -2522,7 +2552,6 @@ async def _recurring_character_names(
             mentioned_dossiers[appellation].extend(dossier)
 
     mentioned_retain: set[str] = set()
-    mentioned_sem = asyncio.Semaphore(4)
 
     async def _judge_mentioned_importance(appellation: str) -> tuple[str, bool]:
         dossier = mentioned_dossiers.get(appellation, [])[:6]
@@ -2553,13 +2582,13 @@ async def _recurring_character_names(
                     ).hexdigest(),
                     temperature=0.0,
                     max_tokens=384,
-                    call_meta={
+                    call_meta=_bible_short_json_call_meta({
                         "stage": "未出场角色重要性裁决",
                         "stage_key": "mentioned_character_importance",
                         "call_role": "stage_validate",
                         "character_name": appellation,
                         "project_id": project_id,
-                    },
+                    }),
                 ),
                 timeout=BIBLE_SMALL_VERDICT_TIMEOUT_S,
             )
@@ -2744,13 +2773,13 @@ async def _supplement_bible_characters(bible: Bible, missing: list[tuple[str, st
              {"role": "user", "content": prompt}],
             temperature=0.4,
             max_tokens=8192,
-            call_meta={
+            call_meta=_bible_short_json_call_meta({
                 "stage": "人物谱补录",
                 "stage_key": "character_bible_supplement",
                 "call_role": "stage_generate",
                 "call_role_label": "人物谱补录",
                 "expected_json": True,
-            },
+            }),
         )
         drafted = _BibleSupplement.model_validate(extract_json(raw)).characters
     except Exception as exc:  # noqa: BLE001 - 补录失败保留已有人物谱，不阻断下游
@@ -3679,7 +3708,7 @@ async def _alias_verdict_call(
         format_retry_limit=1,
         semantic_retry_limit=1,
         output_schema=schema,
-        call_meta={
+        call_meta=_bible_short_json_call_meta({
             "stage": "别名回填桥接章裁决",
             "stage_key": "character_alias_backfill_verdict",
             "call_role": "stage_generate",
@@ -3689,7 +3718,7 @@ async def _alias_verdict_call(
             "alias": alias,
             "true_name": true_name,
             "candidates": candidates,
-        },
+        }),
     )
 
 
@@ -3821,7 +3850,7 @@ async def _roster_presence_verdict_call(
         format_retry_limit=1,
         semantic_retry_limit=1,
         output_schema=schema,
-        call_meta={
+        call_meta=_bible_short_json_call_meta({
             "stage": "人物在场裁决",
             "stage_key": "character_roster_presence_verdict",
             "call_role": "stage_generate",
@@ -3829,7 +3858,7 @@ async def _roster_presence_verdict_call(
             "expected_json": True,
             "project_id": project_id,
             "appellation": appellation,
-        },
+        }),
     )
 
 
@@ -3967,7 +3996,10 @@ async def _verify_character_aliases_for_subset(
     角色的任何其它既有字段。"""
     roster = _alias_verdict_roster(bible)
     added: dict[str, list[str]] = {}
-    for character in characters:
+
+    async def _verify_one(character: Character) -> tuple[str, list[str]]:
+        # 同一角色的别名必须串行：后一条要用前面已确认的 anchor_texts。
+        # 不同角色互相独立，下面 gather 只并行角色，不并行同一角色内部。
         anchor_texts = {character.name}
         verified: list[CharacterAlias] = []
         added_texts: list[str] = []
@@ -3989,8 +4021,11 @@ async def _verify_character_aliases_for_subset(
                 anchor_texts.add(text)
                 added_texts.append(text)
         character.aliases = verified
+        return character.name, added_texts
+
+    for name, added_texts in await asyncio.gather(*(_verify_one(character) for character in characters)):
         if added_texts:
-            added[character.name] = added_texts
+            added[name] = added_texts
     return added
 
 
@@ -4116,14 +4151,14 @@ async def backfill_character_aliases(
              {"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=8192,
-            call_meta={
+            call_meta=_bible_short_json_call_meta({
                 "stage": "人物别名回填",
                 "stage_key": "character_alias_backfill",
                 "call_role": "stage_generate",
                 "call_role_label": "别名回填",
                 "expected_json": True,
                 "project_id": project_id,
-            },
+            }),
         )
         declared = _AliasBackfillDraft.model_validate(extract_json(raw)).aliases
     except Exception as exc:  # noqa: BLE001 - 回填失败保留已有人物谱，不阻断调用方
@@ -4791,14 +4826,14 @@ async def backfill_character_status_facts(
              {"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=8192,
-            call_meta={
+            call_meta=_bible_short_json_call_meta({
                 "stage": "人物状态事实回填",
                 "stage_key": "character_status_fact_backfill",
                 "call_role": "stage_generate",
                 "call_role_label": "归属关系回填",
                 "expected_json": True,
                 "project_id": project_id,
-            },
+            }),
         )
         declared = _StatusFactBackfillDraft.model_validate(extract_json(raw))
     except Exception as exc:  # noqa: BLE001 - 回填失败保留已有人物谱，不阻断调用方
@@ -5251,7 +5286,7 @@ async def _generate_character_detail(
                     [{"role": "system", "content": SYSTEM_PREFIX}, {"role": "user", "content": prompt}],
                     temperature=0.35 if attempt == 1 else 0.15,
                     max_tokens=BIBLE_DETAIL_MAX_TOKENS,
-                    call_meta={
+                    call_meta=_bible_short_json_call_meta({
                         "stage": "角色详情生成",
                         "stage_key": "character_bible_detail",
                         "call_role": "stage_generate" if attempt == 1 else "stage_repair",
@@ -5261,7 +5296,7 @@ async def _generate_character_detail(
                         "attempt": attempt,
                         "input_chars": len(pack),
                         "project_id": project_id,
-                    },
+                    }),
                 ),
                 timeout=BIBLE_DETAIL_TIMEOUT_S,
             )

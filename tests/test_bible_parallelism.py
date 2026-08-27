@@ -47,6 +47,7 @@ async def test_generate_character_detail_batch_retries_only_failed_character(mon
             return "{}"
         return json.dumps({
             "appearance_canonical": "黑色短发，青色长衫，身形修长，腰系深色布带，脚穿布靴",
+            "period_costume_canonical": "青布长衫布靴，束发挽髻，禁用现代面料拉链",
             "personality": "沉稳",
             "speech_style": "句式简短，语气平稳，少用修饰",
             "relationships": [], "aliases": [], "source_evidence": [],
@@ -175,3 +176,110 @@ async def test_roll_call_sends_small_parallel_chunks(monkeypatch) -> None:
     assert len(inputs) == 10
     assert peak > 1
     assert all(len(item) < stages.BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS + 2000 for item in inputs)
+
+
+@pytest.mark.asyncio
+async def test_roll_call_disables_thinking(monkeypatch) -> None:
+    metas: list[dict] = []
+
+    async def fake_chat(messages, **kwargs):
+        if (kwargs.get("call_meta") or {}).get("stage_key") != "character_roll_call":
+            return kwargs["model_type"](verdict="onstage", supporting_segment_index=1)
+        metas.append(kwargs.get("call_meta") or {})
+        return json.dumps({"candidates": []})
+
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    await stages._recurring_character_names(
+        [{"idx": 1, "title": "第1章", "content": "正文" * 100}]
+    )
+    assert metas
+    assert all(item.get("disable_thinking") is True for item in metas)
+    assert all(item.get("first_token_timeout_s") == stages.BIBLE_FIRST_TOKEN_TIMEOUT_S for item in metas)
+
+
+@pytest.mark.asyncio
+async def test_identity_resolution_runs_in_parallel_and_merges(monkeypatch) -> None:
+    active = 0
+    peak = 0
+    metas: list[dict] = []
+
+    async def fake_structured(_messages, **kwargs):
+        nonlocal active, peak
+        metas.append(kwargs.get("call_meta") or {})
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.05)
+        active -= 1
+        return stages._RosterIdentityResolution(
+            verdict="same",
+            canonical_appellation="孟浩",
+            supporting_chapter_index=1,
+        )
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
+    chapter = "精明中年男子对孟浩点头。虎头虎脑少年跟着走。"
+    ev = stages._RosterOnstageEvidence
+    candidate = stages._RosterCandidate
+    result = await stages._resolve_generic_character_candidates(
+        [
+            candidate(primary_appellation="孟浩", formal_name="孟浩", onstage_evidence=[
+                ev(chapter_index=1, quote="精明中年男子对孟浩点头。"),
+            ]),
+            candidate(primary_appellation="精明中年男子", onstage_evidence=[
+                ev(chapter_index=1, quote="精明中年男子对孟浩点头。"),
+            ]),
+            candidate(primary_appellation="虎头虎脑少年", onstage_evidence=[
+                ev(chapter_index=1, quote="虎头虎脑少年跟着走。"),
+            ]),
+        ],
+        {1: chapter},
+        project_id="p1",
+    )
+    assert [item.primary_appellation for item in result] == ["孟浩"]
+    assert peak > 1
+    assert all(item.get("disable_thinking") is True for item in metas)
+    aliases = set(result[0].aliases)
+    assert "精明中年男子" in aliases
+    assert "虎头虎脑少年" in aliases
+
+
+@pytest.mark.asyncio
+async def test_alias_verification_runs_per_character_in_parallel(monkeypatch) -> None:
+    from app.schemas import Bible, Character, CharacterAlias, World
+
+    active = 0
+    peak = 0
+
+    async def fake_resolution(*_args, **_kwargs):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.05)
+        active -= 1
+        return {"accepted": False, "chapter_idx": None, "quote": "", "reason": "no"}
+
+    monkeypatch.setattr(stages, "_alias_evidence_resolution", fake_resolution)
+    appearance = "黑色短发，青色长衫，身形修长，腰系深色布带，脚穿布靴"
+    bible = Bible(
+        world=World(visual_style_canonical="国漫三维动画电影质感，统一自然光影与细腻材质"),
+        characters=[
+            Character(
+                name="甲", role="主角", appearance_canonical=appearance,
+                aliases=[CharacterAlias(
+                    text="甲兄", name_kind="honorific",
+                    evidence_chapter_index=1, evidence_quote="甲兄来了",
+                )],
+            ),
+            Character(
+                name="乙", role="重要配角", appearance_canonical=appearance,
+                aliases=[CharacterAlias(
+                    text="乙兄", name_kind="honorific",
+                    evidence_chapter_index=1, evidence_quote="乙兄来了",
+                )],
+            ),
+        ],
+    )
+    await stages._verify_character_aliases_for_subset(
+        bible, bible.characters, {1: "甲兄来了。乙兄来了。"}, project_id="p1",
+    )
+    assert peak > 1

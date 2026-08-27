@@ -1253,6 +1253,8 @@ async def _chat_with_reasoning_fallback(client: httpx.AsyncClient, url: str, pay
         fallback_payload = {**payload, "temperature": temperature}
         # 移除 OpenRouter 风格的 reasoning 参数
         fallback_payload.pop("reasoning", None)
+        if thinking_disabled(call_meta):
+            fallback_payload["thinking"] = {"type": "disabled"}
         # DeepSeek/智谱等路径原请求可能根本没有 reasoning 字段。此时所谓降级请求
         # 与首轮逐字相同，重复发送只会再次耗尽预算并产生费用，必须直接结束。
         if fallback_payload == payload:
@@ -1420,11 +1422,39 @@ def reasoning_token_reserve() -> int:
     return max(0, int(config.TEXT_REASONING_TOKEN_RESERVE))
 
 
+def thinking_disabled(call_meta: dict | None) -> bool:
+    """Whether this call must not spend a thinking/reasoning budget.
+
+    Short JSON gates (人物点名、身份归一、在场裁决) empirically waste 6k–8k
+    reasoning tokens to emit 1–2KB of JSON. The flag is opt-in per call.
+    """
+    return bool((call_meta or {}).get("disable_thinking"))
+
+
+def _first_token_timeout_s(call_meta: dict | None) -> float | None:
+    """Deadline for the first streamed content/reasoning character.
+
+    Explicit ``first_token_timeout_s`` wins; ``disable_thinking`` implies the
+    shared short-JSON default. ``0`` or a non-numeric value turns the cap off.
+    """
+    meta = call_meta or {}
+    if "first_token_timeout_s" in meta:
+        try:
+            value = float(meta["first_token_timeout_s"])
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+    if thinking_disabled(meta):
+        return float(config.TIMEOUT_CHAT_FIRST_TOKEN_S)
+    return None
+
+
 def text_request_token_limits(
     *,
     requested_max_tokens: int,
     provider: str | None = None,
     model: str | None = None,
+    disable_thinking: bool = False,
 ) -> tuple[str, str, int]:
     selected_provider = provider or active_provider("text")
     selected_model = model or active_model("text", selected_provider)
@@ -1433,13 +1463,17 @@ def text_request_token_limits(
         selected_model,
         get_setting,
     )
-    # ``requested_max_tokens`` is an *answer* budget.  Add the model's thinking
-    # reserve so a correctly-sized answer budget cannot be truncated by the
-    # reasoning that precedes it, then clamp to what the model can emit at all.
-    effective = min(
-        max(1, int(requested_max_tokens)) + reasoning_token_reserve(),
-        int(limits["max_output_tokens"]),
-    )
+    answer_budget = max(1, int(requested_max_tokens))
+    model_cap = int(limits["max_output_tokens"])
+    if disable_thinking:
+        # The thinking reserve is an invitation to think. Short JSON calls that
+        # already opted out must not send a 16k-token thinking budget.
+        effective = min(answer_budget, model_cap)
+    else:
+        # ``requested_max_tokens`` is an *answer* budget.  Add the model's thinking
+        # reserve so a correctly-sized answer budget cannot be truncated by the
+        # reasoning that precedes it, then clamp to what the model can emit at all.
+        effective = min(answer_budget + reasoning_token_reserve(), model_cap)
     return selected_provider, selected_model, effective
 
 
@@ -1517,10 +1551,12 @@ async def chat(messages: list[dict], *, model: str | None = None, provider: str 
     的分环节模型选择用它连带换对连接，而不是只换模型 ID——同一 provider 下的
     base_url/api_key/协议才是一致的；不传时行为与此前完全一致。"""
     timeout = httpx.Timeout(connect=10, read=_chat_read_timeout_s(call_meta), write=30, pool=10)
+    disable_thinking = thinking_disabled(call_meta)
     provider, selected_model, effective_max_tokens = text_request_token_limits(
         requested_max_tokens=max_tokens,
         provider=provider,
         model=model,
+        disable_thinking=disable_thinking,
     )
     token_limits = active_model_token_limits(provider, selected_model, get_setting)
     requested_max_tokens = max(1, int(max_tokens))
@@ -1556,10 +1592,10 @@ async def chat(messages: list[dict], *, model: str | None = None, provider: str 
                 base_url, model_headers = _model_connection(provider, or_model, config.OPENROUTER_BASE_URL, config.OPENROUTER_API_KEY)
                 payload: dict[str, Any] = {"model": or_model, "messages": messages, "max_tokens": max_tokens}
                 effort = (config.OPENROUTER_TEXT_REASONING_EFFORT or "").strip().lower()
-                if effort and effort != "none":
-                    payload["reasoning"] = {"effort": effort}
-                else:
+                if disable_thinking or not effort or effort == "none":
                     payload["temperature"] = temperature
+                else:
+                    payload["reasoning"] = {"effort": effort}
                 _with_rf(payload)
                 content = await _chat_with_reasoning_fallback(
                     client, f"{base_url}/chat/completions", payload,
@@ -1583,6 +1619,8 @@ async def chat(messages: list[dict], *, model: str | None = None, provider: str 
                 except ProviderError:
                     base_url, model_headers = config.DEEPSEEK_BASE_URL, _deepseek_headers()
                 payload = _with_rf({"model": deepseek_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens})
+                if disable_thinking:
+                    payload["thinking"] = {"type": "disabled"}
                 content = await _chat_with_reasoning_fallback(
                     client, f"{base_url}/chat/completions", payload,
                     kind="chat", model=deepseek_model, headers=model_headers,
@@ -1596,6 +1634,8 @@ async def chat(messages: list[dict], *, model: str | None = None, provider: str 
                 except ProviderError:
                     base_url, model_headers = config.ZHIPU_BASE_URL, _zhipu_headers()
                 payload = _with_rf({"model": zhipu_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens})
+                if disable_thinking:
+                    payload["thinking"] = {"type": "disabled"}
                 content = await _chat_with_reasoning_fallback(
                     client, f"{base_url}/chat/completions", payload,
                     kind="chat", model=zhipu_model, headers=model_headers,
@@ -2379,6 +2419,10 @@ def _interrupted_stream_evidence(
     }
 
 
+class _FirstTokenTimeout(TimeoutError):
+    """Stream produced no content/reasoning token before the first-token deadline."""
+
+
 async def _stream_chat_completion(
     client: httpx.AsyncClient, url: str, payload: dict, *,
     kind: str, model: str, headers: dict | None = None, key_name: str = "HIAGENT_API_KEY",
@@ -2410,6 +2454,7 @@ async def _stream_chat_completion(
     last_progress_chars = 0
     last_progress_at = start
     saw_done = False
+    first_token_timeout_s = _first_token_timeout_s(merged_meta)
     try:
         total_timeout_s = max(
             60.0,
@@ -2429,7 +2474,23 @@ async def _stream_chat_completion(
                         call_id, "FAILED", resp.status_code, int((time.time() - start) * 1000),
                         error=str(err), response_json={"status_code": resp.status_code, "body": text})
                     raise err
-                async for line in resp.aiter_lines():
+                line_iter = resp.aiter_lines()
+                while True:
+                    if received_chars == 0 and first_token_timeout_s is not None:
+                        remaining = first_token_timeout_s - (time.time() - start)
+                        if remaining <= 0:
+                            raise _FirstTokenTimeout("first streamed token did not arrive")
+                        try:
+                            line = await asyncio.wait_for(anext(line_iter), timeout=remaining)
+                        except StopAsyncIteration:
+                            break
+                        except TimeoutError as exc:
+                            raise _FirstTokenTimeout("first streamed token did not arrive") from exc
+                    else:
+                        try:
+                            line = await anext(line_iter)
+                        except StopAsyncIteration:
+                            break
                     if not line or not line.startswith("data:"):
                         # An SSE ``event: error`` frame, or any non-data line,
                         # used to vanish here and the stream simply ended
@@ -2537,15 +2598,23 @@ async def _stream_chat_completion(
         raise
     except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
         latency = int((time.time() - start) * 1000)
-        phase = (
-            "总时长"
-            if isinstance(exc, asyncio.TimeoutError)
-            else _timeout_phase(exc)
-        )
-        diag = _timeout_diagnostic_label(
-            client, merged_meta, kind,
-            override_threshold_s=total_timeout_s if isinstance(exc, asyncio.TimeoutError) else None,
-        )
+        first_token_timeout = _first_token_timeout_s(merged_meta)
+        if isinstance(exc, _FirstTokenTimeout):
+            phase = "首字"
+            diag = _timeout_diagnostic_label(
+                client, merged_meta, kind,
+                override_threshold_s=first_token_timeout,
+            )
+        else:
+            phase = (
+                "总时长"
+                if isinstance(exc, asyncio.TimeoutError)
+                else _timeout_phase(exc)
+            )
+            diag = _timeout_diagnostic_label(
+                client, merged_meta, kind,
+                override_threshold_s=total_timeout_s if isinstance(exc, asyncio.TimeoutError) else None,
+            )
         detail = f"{type(exc).__name__}(phase={phase}, latency_ms={latency}, {diag}): {exc!r}"
         http_exc = exc if isinstance(exc, httpx.HTTPError) else None
         delivery_state, replay_safe = _stream_timeout_replay_state(http_exc, received_chars)
@@ -2652,7 +2721,9 @@ async def _stream_plain_chat(
             }
             if text_providers.protocol_for_provider(provider) == "openrouter":
                 effort = (config.OPENROUTER_TEXT_REASONING_EFFORT or "").strip().lower()
-                if effort and effort != "none":
+                if thinking_disabled(call_meta) or not effort or effort == "none":
+                    payload["temperature"] = temperature
+                elif effort and effort != "none":
                     payload["reasoning"] = {"effort": effort}
             data = await _stream_or_fallback(
                 client, url, payload, kind="chat_tools_json_fallback", model=resolved_model,

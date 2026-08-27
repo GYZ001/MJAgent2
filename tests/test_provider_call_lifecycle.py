@@ -460,6 +460,66 @@ def test_stream_total_timeout_covers_keepalive_and_blank_lines(
     assert events[0][4] is None
 
 
+def test_first_token_timeout_cuts_zero_byte_keepalive_stream(monkeypatch) -> None:
+    events: list[tuple] = []
+
+    class KeepaliveForever(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            while True:
+                yield b": keepalive\n\n"
+                await asyncio.sleep(0.05)
+
+        async def aclose(self):
+            return None
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=KeepaliveForever(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    monkeypatch.setattr(hiagent, "get_setting", lambda _key: "60")
+    monkeypatch.setattr(hiagent, "start_provider_call", lambda *_args, **_kwargs: 21)
+    monkeypatch.setattr(
+        hiagent,
+        "finish_provider_call",
+        lambda call_id, status, http_status, latency_ms, *, error=None, response_json=None:
+        events.append((call_id, status, http_status, error, response_json)),
+    )
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await hiagent._stream_chat_completion(
+                client,
+                "https://provider.test/chat/completions",
+                {"model": "m", "messages": []},
+                kind="chat",
+                model="m",
+                headers={},
+                meta={"disable_thinking": True, "first_token_timeout_s": 0.2},
+            )
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(run())
+
+    assert caught.value.timeout_phase == "首字"
+    assert caught.value.received_chars == 0
+    assert caught.value.retryable is True
+    assert caught.value.replay_safe is False
+    assert events[0][0:3] == (21, "INTERRUPTED", None)
+
+
+def test_thinking_disabled_implies_default_first_token_timeout() -> None:
+    assert hiagent.thinking_disabled({"disable_thinking": True}) is True
+    assert hiagent._first_token_timeout_s({"disable_thinking": True}) == 20.0
+    assert hiagent._first_token_timeout_s({"first_token_timeout_s": 0}) is None
+    assert hiagent._first_token_timeout_s({
+        "disable_thinking": True, "first_token_timeout_s": 7,
+    }) == 7.0
+    assert hiagent._first_token_timeout_s(None) is None
+
+
 def test_stream_cancellation_finishes_interrupted_and_reraises(
     tmp_path, monkeypatch,
 ) -> None:

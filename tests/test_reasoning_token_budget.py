@@ -82,6 +82,15 @@ def test_reasoning_reserve_is_operator_tunable(monkeypatch) -> None:
     assert effective == 2048
 
 
+def test_disable_thinking_skips_reasoning_reserve(monkeypatch) -> None:
+    _patch_model(monkeypatch)
+    _provider, _model, effective = hiagent.text_request_token_limits(
+        requested_max_tokens=2048,
+        disable_thinking=True,
+    )
+    assert effective == 2048
+
+
 def test_default_reserve_covers_the_observed_reasoning_distribution() -> None:
     assert config.TEXT_REASONING_TOKEN_RESERVE >= OBSERVED_REASONING_P99
 

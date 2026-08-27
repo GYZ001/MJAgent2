@@ -160,6 +160,13 @@ ZHIPU_MODEL_TEXT = os.environ.get("ZHIPU_MODEL_TEXT", "glm-5.2")
 
 # 超时（秒）——依据 1.0 实测延迟：LLM ~22s、VLM ~57-66s（见 docs/HIAGENT_INTEGRATION.md §2）
 TIMEOUT_CHAT_READ = float(os.environ.get("TIMEOUT_CHAT_READ", "300"))
+# 流式请求在收到第一个 content/reasoning token 之前的空等上限。
+# 实测 run_9b1a6872f2d5：人物点名第 12 章 300s、身份归一 120s，received_chars=0
+# 且没有 first_chunk；重试分别 23s / 数秒就成功。通用 read 超时和 keepalive
+# 都会把这种卡死空等拉满外层预算。20s 覆盖同 run 里所有成功首字（最慢 14.5s），
+# 卡死则少空等数分钟。只在调用方显式要求（disable_thinking / first_token_timeout_s）
+# 时生效，不改其它长推理阶段。
+TIMEOUT_CHAT_FIRST_TOKEN_S = float(os.environ.get("TIMEOUT_CHAT_FIRST_TOKEN_S", "20"))
 # 场次分片写作的线上 P99 约 160s；按 P99×3 单独放宽到 480s，
 # 避免与更长的语义审稿共用 baseline 上限。
 TIMEOUT_CHAT_SCENE_SHARD_READ = float(
