@@ -2272,8 +2272,16 @@ def _merge_roll_call_candidates(
         left_names = _identity_merge_keys(flattened[left])
         if not left_names:
             continue
+        left_primary = (flattened[left].primary_appellation or "").strip()
         for right in range(left + 1, len(flattened)):
-            if left_names & _identity_merge_keys(flattened[right]):
+            right_names = _identity_merge_keys(flattened[right])
+            shared = left_names & right_names
+            if not shared:
+                continue
+            right_primary = (flattened[right].primary_appellation or "").strip()
+            # 两人碰巧被写成同一个 formal_name（王有材/小胖子都「揭示」成李富贵）
+            # 时，共享的只能是那个真名，不是任何一方的主称呼，不得合并。
+            if shared & {left_primary, right_primary}:
                 union(left, right)
 
     groups: dict[int, list[_RosterCandidate]] = {}

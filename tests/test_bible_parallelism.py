@@ -33,6 +33,11 @@ def test_merge_roll_call_candidates_merges_formal_name_and_caps_evidence() -> No
         [candidate(primary_appellation="王有材", aliases=["胖子", "有材大哥"])],
     ])
     assert {item.primary_appellation for item in split} == {"小胖子", "王有材"}
+    same_formal = stages._merge_roll_call_candidates([
+        [candidate(primary_appellation="小胖子", formal_name="李富贵")],
+        [candidate(primary_appellation="王有材", formal_name="李富贵")],
+    ])
+    assert {item.primary_appellation for item in same_formal} == {"小胖子", "王有材"}
 
 
 def test_character_detail_evidence_pack_is_bounded_and_relevant() -> None:
