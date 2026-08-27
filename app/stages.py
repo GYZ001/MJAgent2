@@ -2627,7 +2627,7 @@ supporting_chapter_index 必须是卷宗里出现过的章号；supporting_quote
                         f"{appellation}:{catalog}".encode("utf-8")
                     ).hexdigest(),
                     temperature=0.0,
-                    max_tokens=384,
+                    max_tokens=512,
                     call_meta=_bible_short_json_call_meta({
                         "stage": "人物真名揭示",
                         "stage_key": "character_true_name",
@@ -2664,6 +2664,61 @@ supporting_chapter_index 必须是卷宗里出现过的章号；supporting_quote
         })
 
     return list(await asyncio.gather(*(_discover(item) for item in candidates)))
+
+
+_TRUE_NAME_REVEAL_PATTERNS = (
+    re.compile(r"正是([\u4e00-\u9fff]{2,4})"),
+    re.compile(r"便是([\u4e00-\u9fff]{2,4})"),
+    re.compile(r"名叫([\u4e00-\u9fff]{2,4})"),
+    re.compile(r"名为([\u4e00-\u9fff]{2,4})"),
+    re.compile(r"自称([\u4e00-\u9fff]{2,4})"),
+    re.compile(r"我是([\u4e00-\u9fff]{2,4})"),
+    re.compile(r"我([\u4e00-\u9fff]{2,4})这一辈子"),
+)
+
+
+def _bind_true_name_from_source(
+    candidates: list[_RosterCandidate], chapters: list[dict],
+) -> list[_RosterCandidate]:
+    """LLM 没钉上真名时，用原文身份句做延迟绑定：正是/名叫/我X这一辈子。
+
+    程序拥有名称匹配。证据不足或同一称呼对上多个真名时不绑，避免错并。
+    """
+    bound: list[_RosterCandidate] = []
+    for candidate in candidates:
+        if (candidate.formal_name or "").strip():
+            bound.append(candidate)
+            continue
+        appellation = (candidate.primary_appellation or "").strip()
+        if not appellation:
+            bound.append(candidate)
+            continue
+        found: list[str] = []
+        for chapter in chapters:
+            text = chapter.get("content") or ""
+            if appellation not in text:
+                continue
+            positions = [match.start() for match in re.finditer(re.escape(appellation), text)]
+            for pattern in _TRUE_NAME_REVEAL_PATTERNS:
+                for match in pattern.finditer(text):
+                    name = match.group(1)
+                    if name == appellation or name in appellation or appellation in name:
+                        continue
+                    if not any(abs(match.start() - pos) <= 240 for pos in positions):
+                        continue
+                    found.append(name)
+        unique = list(dict.fromkeys(found))
+        if len(unique) != 1:
+            bound.append(candidate)
+            continue
+        true_name = unique[0]
+        aliases = list(dict.fromkeys([*candidate.aliases, appellation]))
+        bound.append(candidate.model_copy(update={
+            "formal_name": true_name,
+            "aliases": [value for value in aliases if value and value != true_name],
+            "personhood": "person" if candidate.personhood != "non_person" else candidate.personhood,
+        }))
+    return bound
 
 
 class _BibleRollCallChunkFailed(StageError):
@@ -2849,6 +2904,8 @@ async def _recurring_character_names(
     candidates = await _discover_roster_true_names(
         candidates, valid, project_id=project_id,
     )
+    candidates = _bind_true_name_from_source(candidates, valid)
+    candidates = _merge_roll_call_candidates([[item] for item in candidates])
     candidates = [
         item.model_copy(update={"personhood": "person"})
         if item.personhood != "non_person" and (item.formal_name or "").strip()

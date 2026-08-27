@@ -542,6 +542,25 @@ async def test_true_name_discovery_pins_later_chapter_reveal(monkeypatch) -> Non
     assert rejected[0].formal_name == ""
 
 
+def test_bind_true_name_from_source_uses_identity_sentence() -> None:
+    xu = stages._bind_true_name_from_source(
+        [stages._RosterCandidate(primary_appellation="许师姐")],
+        [{"idx": 37, "content": "「许师姐。」孟浩抱拳一拜。这女子正是许清，如她的名字一样，冷冷清清。"}],
+    )
+    assert xu[0].formal_name == "许清"
+    assert "许师姐" in xu[0].aliases
+    fatty = stages._bind_true_name_from_source(
+        [stages._RosterCandidate(primary_appellation="小胖子")],
+        [{"idx": 10, "content": "孟浩，你是我李富贵这一辈子的好朋友。”小胖子感慨连连。"}],
+    )
+    assert fatty[0].formal_name == "李富贵"
+    unbound = stages._bind_true_name_from_source(
+        [stages._RosterCandidate(primary_appellation="铜镜")],
+        [{"idx": 4, "content": "孟浩伸手拿起铜镜。"}],
+    )
+    assert unbound[0].formal_name == ""
+
+
 @pytest.mark.asyncio
 async def test_alias_verification_runs_per_character_in_parallel(monkeypatch) -> None:
     from app.schemas import Bible, Character, CharacterAlias, World
