@@ -1935,8 +1935,9 @@ BIBLE_ROLL_CALL_CHUNK_CHAPTERS = 1
 BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS = 8000
 BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS = 4096
 BIBLE_ROLL_CALL_CONCURRENCY = 6
-BIBLE_ROLL_CALL_TIMEOUT_S = 30.0
-BIBLE_SMALL_VERDICT_TIMEOUT_S = 15.0
+BIBLE_ROLL_CALL_MAX_ATTEMPTS = 3
+BIBLE_ROLL_CALL_TIMEOUT_S = 120.0
+BIBLE_SMALL_VERDICT_TIMEOUT_S = 120.0
 
 # 旁文本净化的三个闸（见 `_chapters_without_paratext` docstring 里的事故口径）：
 BIBLE_PARATEXT_MARGIN_CHAPTERS = 3   # 净化只会让正文变短，头部因此可能多吃进几章
@@ -2239,6 +2240,10 @@ async def _resolve_generic_character_candidates(
     return kept
 
 
+class _BibleRollCallChunkFailed(RuntimeError):
+    """点名分块在退避重试后仍失败：宁可整体失败，也不允许无证据兜底生成人物谱。"""
+
+
 class _BibleSupplement(BaseModel):
     """补录合同：只为「必收名单里还缺的人」补出完整角色条目。"""
 
@@ -2300,8 +2305,6 @@ async def _recurring_character_names(
         )
         if not chunk_text.strip():
             return []
-        if len(chunk_text) > BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS:
-            raise ValueError("人物点名分块输入超过硬上限")
         prompt = f"""任务：从下面的小说正文里找出【出场人物】，为每个人物申报能证明他本人真的出现在画面中的证据，不要只给名字。
 
 要求：
@@ -2319,43 +2322,67 @@ async def _recurring_character_names(
 
 输出 JSON Schema：
 {{"candidates": [{{"primary_appellation": str, "formal_name": str, "aliases": [str], "identity_evidence": [{{"chapter_index": int, "quote": str}}], "onstage_evidence": [{{"chapter_index": int, "quote": str}}]}}]}}"""
-        try:
-            async with roll_call_sem:
-                raw = await asyncio.wait_for(
-                    model_gateway.chat(
-                        [{"role": "system", "content": SYSTEM_PREFIX},
-                         {"role": "user", "content": prompt}],
-                        temperature=0.2,
-                        max_tokens=BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS,
-                        call_meta={
-                            "stage": "人物点名",
-                            "stage_key": "character_roll_call",
-                            "call_role": "stage_generate",
-                            "call_role_label": "人物点名分块",
-                            "expected_json": True,
-                            "chunk_index": chunk_index,
-                            "chunk_count": len(chunks),
-                            "input_chars": len(chunk_text),
-                        },
-                    ),
-                    timeout=BIBLE_ROLL_CALL_TIMEOUT_S,
-                )
-            return _CharacterRollCall.model_validate(extract_json(raw)).candidates
-        except Exception as exc:  # noqa: BLE001 - 单块失败不阻断其它块和人物谱
-            log_provider_call(
-                "character_roll_call", config.MODEL_TEXT, "OK", None, 0,
-                meta={
-                    "chunk_index": chunk_index,
-                    "outcome": "best_effort_bypass",
-                    "error": str(exc)[:300],
-                },
-            )
-            return []
+        if len(chunk_text) > BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS:
+            raise ValueError("人物点名分块输入超过硬上限")
+        last_error: Exception | None = None
+        for attempt in range(1, BIBLE_ROLL_CALL_MAX_ATTEMPTS + 1):
+            try:
+                async with roll_call_sem:
+                    raw = await asyncio.wait_for(
+                        model_gateway.chat(
+                            [{"role": "system", "content": SYSTEM_PREFIX},
+                             {"role": "user", "content": prompt}],
+                            temperature=0.2,
+                            max_tokens=BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS,
+                            call_meta={
+                                "stage": "人物点名",
+                                "stage_key": "character_roll_call",
+                                "call_role": "stage_generate",
+                                "call_role_label": "人物点名分块",
+                                "expected_json": True,
+                                "chunk_index": chunk_index,
+                                "chunk_count": len(chunks),
+                                "input_chars": len(chunk_text),
+                                "attempt": attempt,
+                            },
+                        ),
+                        timeout=BIBLE_ROLL_CALL_TIMEOUT_S,
+                    )
+                return _CharacterRollCall.model_validate(extract_json(raw)).candidates
+            except Exception as exc:  # noqa: BLE001 - 限流/超时退避重试，仍不阻断其它块
+                last_error = exc
+                if attempt < BIBLE_ROLL_CALL_MAX_ATTEMPTS:
+                    await asyncio.sleep(min(20.0, 2.0 * (2 ** (attempt - 1))))
+        log_provider_call(
+            "character_roll_call", config.MODEL_TEXT, "FAILED", None, 0,
+            meta={
+                "chunk_index": chunk_index,
+                "outcome": "roll_call_chunk_exhausted",
+                "attempts": BIBLE_ROLL_CALL_MAX_ATTEMPTS,
+                "error": str(last_error)[:300],
+            },
+        )
+        raise _BibleRollCallChunkFailed(
+            f"人物点名分块 {chunk_index} 连续 {BIBLE_ROLL_CALL_MAX_ATTEMPTS} 次失败：{last_error}"
+        )
 
     chunk_results = await asyncio.gather(*(
         _call_chunk(chunk, index) for index, chunk in enumerate(chunks)
-    ))
-    candidates = _merge_roll_call_candidates(chunk_results)
+    ), return_exceptions=True)
+    failed_chunks = [item for item in chunk_results if isinstance(item, BaseException)]
+    if failed_chunks and len(failed_chunks) == len(chunk_results):
+        raise _BibleRollCallChunkFailed(
+            f"人物点名全部 {len(chunk_results)} 个分块均失败，拒绝在无原文证据下生成人物谱："
+            f"{failed_chunks[0]}"
+        )
+    if len(failed_chunks) > max(1, len(chunk_results) // 3):
+        raise _BibleRollCallChunkFailed(
+            f"人物点名失败分块过多（{len(failed_chunks)}/{len(chunk_results)}），"
+            f"名单不可信，拒绝继续生成：{failed_chunks[0]}"
+        )
+    candidates = _merge_roll_call_candidates([
+        item for item in chunk_results if not isinstance(item, BaseException)
+    ])
     candidates = await _resolve_generic_character_candidates(
         candidates, chapters_by_idx, project_id=project_id,
     )

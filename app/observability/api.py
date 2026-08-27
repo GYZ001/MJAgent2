@@ -315,6 +315,7 @@ def _trace_step_label(step_key: str | None, iteration_no: int | None = None) -> 
     patterns = (
         (r"screenplay\.iteration", "执行第{iteration}轮剧本生成"),
         (r"character_bible\.iteration", "执行第{iteration}轮人物设定生成"),
+        (r"character_bible_roster\.iteration", "执行第{iteration}轮人物名单生成"),
         (r"scene_bible\.iteration", "执行第{iteration}轮场景设定生成"),
         (r"storyboard_outline\.iteration", "执行第{iteration}轮分镜大纲生成"),
         (r"storyboard_scene_(\d+)\.iteration", "生成第{number}个场景分镜"),
@@ -336,6 +337,8 @@ def _trace_step_description(step_key: str | None) -> str:
         return "生成或修复一版完整剧本候选"
     if re.fullmatch(r"character_bible\.iteration", key):
         return "生成或修复一版人物设定候选"
+    if re.fullmatch(r"character_bible_roster\.iteration", key):
+        return "生成或修复一版人物名单与世界观候选"
     if re.fullmatch(r"scene_bible\.iteration", key):
         return "生成或修复一版场景设定候选"
     if re.fullmatch(r"storyboard_outline\.iteration", key):

@@ -103,6 +103,8 @@ const LEGACY_NODE_LABELS: Record<string, string> = {
   scene_references: "生成场景参考图",
   character_references: "生成人物参考图",
   character_bible: "生成人物设定",
+  "character_bible.iteration": "执行人物设定生成",
+  "character_bible_roster.iteration": "执行人物名单生成",
   scene_bible: "生成场景设定",
   val422_metric: "记录结构校验指标",
 };
