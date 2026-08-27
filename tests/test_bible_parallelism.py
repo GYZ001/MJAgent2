@@ -401,6 +401,19 @@ async def test_identity_resolution_runs_in_parallel_and_merges(monkeypatch) -> N
     assert "虎头虎脑少年" in aliases
 
 
+def test_stable_nickname_is_not_a_generic_category() -> None:
+    assert stages._is_generic_character_appellation("小胖子") is False
+    assert stages._is_generic_character_appellation("胖子") is True
+    assert stages._is_generic_character_appellation("精明中年男子") is True
+    assert stages._is_generic_character_appellation("虎头虎脑少年") is True
+
+
+def test_pin_roster_name_accepts_unique_one_char_source_variant() -> None:
+    assert stages._pin_roster_name_to_source("王有材", ["王有材走过来。"]) == "王有材"
+    assert stages._pin_roster_name_to_source("陆煊", ["陆烘冷冷看了他一眼。"]) == "陆烘"
+    assert stages._pin_roster_name_to_source("铜镜灵", ["孟浩伸手拿起铜镜。"]) == ""
+
+
 def test_dependent_descriptive_appellation_is_not_a_stable_identity() -> None:
     assert stages._is_dependent_descriptive_appellation("昨日孟浩的第一位客人", {"孟浩"}) is True
     assert stages._is_dependent_descriptive_appellation("赵武刚师兄", {"赵武刚"}) is False
@@ -457,6 +470,35 @@ async def test_personhood_gate_drops_treasure_and_keeps_person(monkeypatch) -> N
         project_id="p1",
     )
     assert [item.primary_appellation for item in kept] == ["孟浩"]
+
+
+@pytest.mark.asyncio
+async def test_personhood_uncertain_keeps_named_character(monkeypatch) -> None:
+    async def fake_structured(*_args, **_kwargs):
+        return stages._RosterPersonhoodResolution(
+            verdict="uncertain", supporting_chapter_index=-1,
+        )
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
+    ev = stages._RosterOnstageEvidence
+    kept = await stages._filter_non_person_roster_candidates(
+        [
+            stages._RosterCandidate(primary_appellation="许师姐", onstage_evidence=[
+                ev(chapter_index=1, quote="许师姐冷冷看了他一眼。"),
+            ]),
+            stages._RosterCandidate(
+                primary_appellation="小胖子", formal_name="李富贵",
+                onstage_evidence=[ev(chapter_index=2, quote="小胖子身子猛地哆嗦了一下。")],
+            ),
+        ],
+        {
+            1: "许师姐冷冷看了他一眼。",
+            2: "小胖子身子猛地哆嗦了一下。",
+        },
+        project_id="p1",
+    )
+    assert [item.primary_appellation for item in kept] == ["许师姐", "小胖子"]
+    assert {item.personhood for item in kept} == {"uncertain"}
 
 
 @pytest.mark.asyncio

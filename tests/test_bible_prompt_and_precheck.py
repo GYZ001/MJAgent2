@@ -105,9 +105,9 @@ def test_generate_precheck_estimates_without_bible(monkeypatch) -> None:
     ).fetchone()))
 
     result = asyncio.run(bible_ops.bible_generate_precheck("p1"))
-    assert result["character_count"] == 12
-    assert result["image_count"] == 36
-    assert result["estimated_cost_cny"] == 7.2
+    assert result["character_count"] == 20
+    assert result["image_count"] == 60
+    assert result["estimated_cost_cny"] == 12.0
     assert result["style_name"] == "国漫电影风"
 
 
@@ -149,8 +149,8 @@ def test_bible_generate_precheck_binds_style_name(monkeypatch) -> None:
     assert quote["quote_id"] == fingerprint({
         "project_id": "p1",
         "action": "generate_bible_and_refs",
-        "character_count": 12,
-        "image_count": 36,
+        "character_count": 20,
+        "image_count": 60,
         "unit": 0.2,
         "bible_version": 0,
         "style_name": "真人摄影风",
@@ -453,10 +453,10 @@ def test_recurring_character_names_matches_real_project_evidence_shapes(monkeypa
         "加剧烈。"
     )
     fatty_b = (
-        "“我爹是财主，我应该也是财"
-        "主，我不做杂役……”小胖子"
-        "哭的极为伤心，身子哆嗦时肥"
-        "肉也随着颤抖。"
+            "“我爹是财主，我应该也是财"
+            "主，我不做杂役……”小胖子"
+            "哭的极为伤心，身子哆嗦时肥"
+            "肉也随着颤抖。众人称小胖子李富贵。"
     )
 
     chapters = [
@@ -516,7 +516,7 @@ def test_recurring_character_names_matches_real_project_evidence_shapes(monkeypa
     monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
     ranked = asyncio.run(stages._recurring_character_names(chapters))
 
-    assert ranked == [("小胖子", "李富贵", 2, 5, 4, ["小胖子"])]
+    assert ranked == [("小胖子", "李富贵", 2, 7, 4, ["小胖子"])]
 
 
 def test_bible_covers_name_matches_verified_alias_not_only_canonical_name() -> None:

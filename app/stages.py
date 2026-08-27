@@ -16,7 +16,7 @@ import re
 import time
 from typing import Any, Callable, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app import config, hiagent, textmatch
 from app.character_policy import (
@@ -2052,13 +2052,18 @@ class _RosterOnstageEvidence(BaseModel):
 
 
 class _RosterCandidate(BaseModel):
-    """人物点名候选；aliases/identity_evidence 让跨章归一可以晚于首次点名完成。"""
+    """人物点名候选；aliases/identity_evidence 让跨章归一可以晚于首次点名完成。
+
+    personhood 是建卡资格，不是最终身份：person 可建卡，non_person 明确不建卡，
+    uncertain 延迟绑定——先留着称呼，等真名/在场证据，而不是直接从名单抹掉。
+    """
 
     primary_appellation: str = ""
     formal_name: str = ""
     aliases: list[str] = Field(default_factory=list)
     identity_evidence: list[_RosterOnstageEvidence] = Field(default_factory=list)
     onstage_evidence: list[_RosterOnstageEvidence] = Field(default_factory=list)
+    personhood: Literal["person", "non_person", "uncertain"] = "uncertain"
 
 
 class _CharacterRollCall(BaseModel):
@@ -2086,11 +2091,16 @@ class _MentionedCharacterImportanceResolution(BaseModel):
 _GENERIC_CHARACTER_APPELLATION_RE = re.compile(
     r"(?:少年|少女|男子|女子|汉子|大汉|老者|老人|妇人|青年|中年|胖子|瘦子|孩童|弟子|修士|掌柜|伙计)$"
 )
+# 「小胖子」「阿瘦子」是稳定绰号，不是「胖子/少年」这类类别词。后缀正则会把它们
+# 误判成泛称，送进身份归一；合不上或后续资格闸一丢，整个人就从人物谱消失。
+_STABLE_NICKNAME_RE = re.compile(r"^[小阿](?:胖子|瘦子|少年|少女|孩童)$")
 
 
 def _is_generic_character_appellation(value: str) -> bool:
     text = (value or "").strip()
-    return bool(text and _GENERIC_CHARACTER_APPELLATION_RE.search(text))
+    if not text or _STABLE_NICKNAME_RE.fullmatch(text):
+        return False
+    return bool(_GENERIC_CHARACTER_APPELLATION_RE.search(text))
 
 
 def _is_dependent_descriptive_appellation(value: str, known_names: set[str]) -> bool:
@@ -2114,6 +2124,98 @@ def _candidate_appellations(candidate: _RosterCandidate) -> set[str]:
             candidate.primary_appellation, candidate.formal_name, *candidate.aliases,
         ] if value and value.strip()
     }
+
+
+def _normalize_roster_verdict_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """模型常把 verdict 写成 judge_result/判断结果；缺字段时不能默成 uncertain 再淘汰。"""
+    if not isinstance(payload, dict):
+        return payload
+    if "verdict" in payload:
+        return payload
+    for key in ("judge_result", "result", "判断结果", "reveal_status"):
+        if key in payload:
+            return {**payload, "verdict": payload[key]}
+    return payload
+
+
+def _require_explicit_verdict(payload: Any) -> Any:
+    if isinstance(payload, dict) and "verdict" not in payload:
+        raise ValueError("verdict is required")
+    return payload
+
+
+def _pin_roster_name_to_source(
+    name: str, texts: list[str], *, fallback_texts: list[str] | None = None,
+) -> str:
+    """名称必须钉在原文上：逐字命中优先；仅当证据文本没有该写法时，才允许唯一的一字之差。"""
+    text_name = (name or "").strip()
+    if not text_name:
+        return ""
+    if any(text_name in (text or "") for text in texts):
+        return text_name
+    length = len(text_name)
+    if length >= 2:
+        found: list[str] = []
+        for text in texts:
+            body = text or ""
+            for index in range(0, max(0, len(body) - length + 1)):
+                span = body[index:index + length]
+                if not all("\u4e00" <= char <= "\u9fff" for char in span):
+                    continue
+                if sum(left != right for left, right in zip(text_name, span, strict=True)) == 1:
+                    found.append(span)
+        unique = list(dict.fromkeys(found))
+        if len(unique) == 1:
+            return unique[0]
+    if fallback_texts and any(text_name in (text or "") for text in fallback_texts):
+        return text_name
+    return ""
+
+
+def _candidate_source_texts(
+    candidate: _RosterCandidate, chapters_by_idx: dict[int, str],
+) -> list[str]:
+    texts: list[str] = []
+    for evidence in [*candidate.onstage_evidence, *candidate.identity_evidence]:
+        quote = (evidence.quote or "").strip()
+        if quote:
+            texts.append(quote)
+        chapter_text = chapters_by_idx.get(evidence.chapter_index, "")
+        if chapter_text:
+            texts.append(chapter_text)
+    return texts
+
+
+def _pin_roster_candidates_to_source(
+    candidates: list[_RosterCandidate],
+    chapters_by_idx: dict[int, str],
+) -> list[_RosterCandidate]:
+    """程序拥有名称匹配：模型申报的称呼若钉不进原文，就不能建卡。"""
+    pinned: list[_RosterCandidate] = []
+    for candidate in candidates:
+        texts = _candidate_source_texts(candidate, chapters_by_idx)
+        chapter_texts = list(chapters_by_idx.values())
+        primary = _pin_roster_name_to_source(
+            candidate.primary_appellation, texts, fallback_texts=chapter_texts,
+        )
+        if not primary:
+            continue
+        formal = _pin_roster_name_to_source(
+            candidate.formal_name, texts, fallback_texts=chapter_texts,
+        )
+        aliases = []
+        for alias in candidate.aliases:
+            pinned_alias = _pin_roster_name_to_source(
+                alias, texts, fallback_texts=chapter_texts,
+            )
+            if pinned_alias and pinned_alias not in {primary, formal, *aliases}:
+                aliases.append(pinned_alias)
+        pinned.append(candidate.model_copy(update={
+            "primary_appellation": primary,
+            "formal_name": "" if not formal or formal == primary else formal,
+            "aliases": aliases,
+        }))
+    return pinned
 
 
 def _merge_roll_call_candidates(
@@ -2303,6 +2405,13 @@ class _RosterPersonhoodResolution(BaseModel):
     verdict: Literal["person", "non_person", "uncertain"] = "uncertain"
     supporting_chapter_index: int = -1
 
+    @model_validator(mode="before")
+    @classmethod
+    def _require_verdict(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            value = _normalize_roster_verdict_payload(value)
+        return _require_explicit_verdict(value)
+
 
 class _RosterTrueNameResolution(BaseModel):
     """发现窗口之后原文是否揭示了这个称呼对应的正式姓名。"""
@@ -2312,11 +2421,19 @@ class _RosterTrueNameResolution(BaseModel):
     supporting_chapter_index: int = -1
     supporting_quote: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _require_verdict(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            value = _normalize_roster_verdict_payload(value)
+        return _require_explicit_verdict(value)
+
 
 def _roster_personhood_dossier(
     candidate: _RosterCandidate, chapters_by_idx: dict[int, str],
 ) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
+    names = [value for value in _candidate_appellations(candidate) if value]
     for evidence in candidate.onstage_evidence[:3]:
         chapter_text = chapters_by_idx.get(evidence.chapter_index, "")
         dossier = _roster_presence_dossier(
@@ -2327,22 +2444,22 @@ def _roster_personhood_dossier(
                 blocks.append(item)
         if len(blocks) >= 6:
             return blocks
-    appellation = (candidate.primary_appellation or "").strip()
-    if not appellation:
+    if not names:
         return blocks
-    for chapter_idx, chapter_text in chapters_by_idx.items():
-        if appellation not in (chapter_text or ""):
-            continue
-        for index, segment in enumerate(index_source_segments(chapter_text, max_chars=240)):
-            if appellation not in segment.text:
+    for name in names:
+        for chapter_idx, chapter_text in chapters_by_idx.items():
+            if name not in (chapter_text or ""):
                 continue
-            item = {"chapter_idx": chapter_idx, "segment_index": index + 1, "text": segment.text}
-            if item not in blocks:
-                blocks.append(item)
-            if len(blocks) >= 6:
+            for index, segment in enumerate(index_source_segments(chapter_text, max_chars=240)):
+                if name not in segment.text:
+                    continue
+                item = {"chapter_idx": chapter_idx, "segment_index": index + 1, "text": segment.text}
+                if item not in blocks:
+                    blocks.append(item)
+                if len(blocks) >= 6:
+                    return blocks
+            if blocks:
                 return blocks
-        if blocks:
-            return blocks
     return blocks
 
 
@@ -2352,27 +2469,34 @@ async def _filter_non_person_roster_candidates(
     *,
     project_id: str | None = None,
 ) -> list[_RosterCandidate]:
-    """铜镜、没有自己姓名的野兽、一次性描述不是人物谱角色；不确定不登记。"""
+    """铜镜、没有自己姓名的野兽、一次性描述不是人物谱角色。
+
+    建卡用延迟绑定：只有明确 non_person 才丢掉；uncertain 先留着，交给真名/在场闸。
+    """
 
     async def _judge(candidate: _RosterCandidate) -> _RosterCandidate | None:
         label = (candidate.formal_name or candidate.primary_appellation).strip()
         dossier = _roster_personhood_dossier(candidate, chapters_by_idx)
-        if not dossier or not label:
+        if not label:
             return None
+        if not dossier:
+            return candidate.model_copy(update={"personhood": "uncertain"})
         catalog = "\n\n".join(
             f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
             for item in dossier
         )
         valid_chapters = {int(item["chapter_idx"]) for item in dossier}
+        names = sorted(_candidate_appellations(candidate))
         prompt = f"""任务：判断「{label}」是不是可单独指认、能画定妆照的人物。
+同一人物的其它称呼：{json.dumps(names, ensure_ascii=False)}。这些称呼指向同一个人时，按一个人判断。
 
 原文卷宗：
 {catalog}
 
-只根据卷宗原文判断：
+只根据卷宗原文判断，JSON 字段必须用 verdict：
 - person：这个称呼指一个能说话或行动的人物，有稳定身份，可以作为人物谱角色。
 - non_person：这个称呼指器物、法宝、地点、组织、没有自己姓名的野兽，或无法对应到具体人名的一次性描述。
-- uncertain：卷宗不够。
+- uncertain：卷宗不够，还不能决定。证据不足时选 uncertain，不要猜。
 
 supporting_chapter_index 必须是卷宗里出现过的章号。不得根据常识或作品知识补充。
 """
@@ -2383,6 +2507,7 @@ supporting_chapter_index 必须是卷宗里出现过的章号。不得根据常�
                      {"role": "user", "content": prompt}],
                     model_type=_RosterPersonhoodResolution,
                     validate=None,
+                    normalize_payload=_normalize_roster_verdict_payload,
                     operation_id="character_personhood:" + hashlib.sha256(
                         f"{label}:{catalog}".encode("utf-8")
                     ).hexdigest(),
@@ -2398,11 +2523,19 @@ supporting_chapter_index 必须是卷宗里出现过的章号。不得根据常�
                 ),
                 timeout=BIBLE_SMALL_VERDICT_TIMEOUT_S,
             )
-        except Exception:  # noqa: BLE001 - 不确定不登记
+        except Exception:  # noqa: BLE001 - 不确定就延迟绑定，不从名单抹掉
+            return candidate.model_copy(update={"personhood": "uncertain"})
+        if (
+            resolution.verdict == "non_person"
+            and resolution.supporting_chapter_index in valid_chapters
+        ):
             return None
-        if resolution.verdict != "person" or resolution.supporting_chapter_index not in valid_chapters:
-            return None
-        return candidate
+        if (
+            resolution.verdict == "person"
+            and resolution.supporting_chapter_index in valid_chapters
+        ):
+            return candidate.model_copy(update={"personhood": "person"})
+        return candidate.model_copy(update={"personhood": "uncertain"})
 
     judged = await asyncio.gather(*(_judge(item) for item in candidates))
     return [item for item in judged if item is not None]
@@ -2474,10 +2607,10 @@ async def _discover_roster_true_names(
 原文卷宗：
 {catalog}
 
-只根据卷宗原文判断：
+只根据卷宗原文判断，JSON 字段必须用 verdict：
 - revealed：卷宗里出现了这个人的正式姓名，true_name 必须逐字抄自卷宗连续原文。
 - unrevealed：卷宗没有揭示正式姓名。
-- uncertain：证据不够。
+- uncertain：证据不够，不要猜一个名字。
 
 supporting_chapter_index 必须是卷宗里出现过的章号；supporting_quote 必须是该章原文逐字引句。
 不得根据常识或作品知识补一个名字。
@@ -2489,6 +2622,7 @@ supporting_chapter_index 必须是卷宗里出现过的章号；supporting_quote
                      {"role": "user", "content": prompt}],
                     model_type=_RosterTrueNameResolution,
                     validate=None,
+                    normalize_payload=_normalize_roster_verdict_payload,
                     operation_id="character_true_name:" + hashlib.sha256(
                         f"{appellation}:{catalog}".encode("utf-8")
                     ).hexdigest(),
@@ -2526,6 +2660,7 @@ supporting_chapter_index 必须是卷宗里出现过的章号；supporting_quote
         return candidate.model_copy(update={
             "formal_name": true_name,
             "aliases": [value for value in aliases if value and value != true_name],
+            "personhood": "person",
         })
 
     return list(await asyncio.gather(*(_discover(item) for item in candidates)))
@@ -2704,6 +2839,7 @@ async def _recurring_character_names(
     candidates = _merge_roll_call_candidates([
         item for item in chunk_results if not isinstance(item, BaseException)
     ])
+    candidates = _pin_roster_candidates_to_source(candidates, chapters_by_idx)
     candidates = await _resolve_generic_character_candidates(
         candidates, chapters_by_idx, project_id=project_id,
     )
@@ -2713,6 +2849,12 @@ async def _recurring_character_names(
     candidates = await _discover_roster_true_names(
         candidates, valid, project_id=project_id,
     )
+    candidates = [
+        item.model_copy(update={"personhood": "person"})
+        if item.personhood != "non_person" and (item.formal_name or "").strip()
+        else item
+        for item in candidates
+    ]
 
     # 结构闸 G1 用的窗口原文：前 HEAD 章 + 往后 LOOKAHEAD 章，按章节序号建索引
     # （复用 `_chapters_by_idx`，与别名核验同一个查找表构造方式）。
@@ -2725,6 +2867,7 @@ async def _recurring_character_names(
     aliases_by_appellation: dict[str, list[str]] = {}
     mention_counts: dict[str, int] = {}
     chapter_counts: dict[str, int] = {}
+    personhood_by_appellation: dict[str, str] = {}
     evidence_total = 0
     structural_pass = 0
     # 结构闸（G1-G3）零模型调用、纯同步核对，先把候选证据筛成「值得送裁决闸」的
@@ -2744,6 +2887,7 @@ async def _recurring_character_names(
         if formal and formal != appellation and appellation not in aliases:
             aliases.insert(0, appellation)
         aliases_by_appellation[appellation] = aliases
+        personhood_by_appellation[appellation] = candidate.personhood
         search_terms = {value for value in [appellation, formal, *aliases] if value}
         mention_counts[appellation] = sum(
             (chapter.get("content") or "").count(term)
@@ -2769,9 +2913,8 @@ async def _recurring_character_names(
             # G2：quote 必须是该章原文的逐字子串（允许脱一层配对引号的噪音）。
             if not any(v in chapter_text for v in _quote_comparison_variants(quote)):
                 continue
-            # G3：称呼（primary_appellation 或 formal_name 中非空的那个）必须是
-            # quote 的子串。
-            appellations = [value for value in (appellation, formal) if value]
+            # G3：任一已绑定称呼都必须能在引句里逐字找到——绰号和真名是同一人的 Mention。
+            appellations = [value for value in (appellation, formal, *aliases) if value]
             if not any(value in quote for value in appellations):
                 continue
             structural_pass += 1
@@ -2890,7 +3033,8 @@ async def _recurring_character_names(
     statistical_retain = {
         appellation
         for appellation in verified_counts
-        if not _is_generic_character_appellation(appellation)
+        if personhood_by_appellation.get(appellation) == "person"
+        and not _is_generic_character_appellation(appellation)
         and mention_counts.get(appellation, 0) >= BIBLE_STATISTICAL_MIN_MENTIONS
         and chapter_counts.get(appellation, 0)
         >= max(2, round(window_size * BIBLE_STATISTICAL_MIN_CHAPTER_RATIO))
@@ -2928,6 +3072,16 @@ async def _recurring_character_names(
             "presence_verdict_passed": verdict_pass,
             "must_cover": len(result),
             "fulltext_mentions": sum(item[3] for item in result),
+            "personhood_person": sum(
+                1 for value in personhood_by_appellation.values() if value == "person"
+            ),
+            "personhood_deferred": sum(
+                1 for value in personhood_by_appellation.values() if value == "uncertain"
+            ),
+            "true_names_bound": sum(
+                1 for appellation, formal in formal_names.items()
+                if formal and formal != appellation
+            ),
         },
     )
     return result
