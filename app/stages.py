@@ -2093,6 +2093,21 @@ def _is_generic_character_appellation(value: str) -> bool:
     return bool(text and _GENERIC_CHARACTER_APPELLATION_RE.search(text))
 
 
+def _is_dependent_descriptive_appellation(value: str, known_names: set[str]) -> bool:
+    """「孟浩的第一位客人」这类依附别人姓名的描述，不是稳定人物身份。"""
+    text = (value or "").strip()
+    if not text or "的" not in text:
+        return False
+    return any(name and name != text and name in text for name in known_names)
+
+
+def _roster_label_needs_identity_resolution(label: str, known_names: set[str]) -> bool:
+    text = (label or "").strip()
+    return _is_generic_character_appellation(text) or _is_dependent_descriptive_appellation(
+        text, known_names,
+    )
+
+
 def _candidate_appellations(candidate: _RosterCandidate) -> set[str]:
     return {
         value.strip() for value in [
@@ -2167,9 +2182,13 @@ async def _resolve_generic_character_candidates(
     project_id: str | None = None,
 ) -> list[_RosterCandidate]:
     """把描述性称呼裁决到已有实体；不确定时不再凭空创建新角色。"""
-    specific = [candidate for candidate in candidates if not _is_generic_character_appellation(
-        candidate.formal_name or candidate.primary_appellation
-    )]
+    known_names = {value for item in candidates for value in _candidate_appellations(item)}
+    specific = [
+        candidate for candidate in candidates
+        if not _roster_label_needs_identity_resolution(
+            (candidate.formal_name or candidate.primary_appellation).strip(), known_names,
+        )
+    ]
     if not specific:
         return candidates
     kept: list[_RosterCandidate] = []
@@ -2183,7 +2202,7 @@ async def _resolve_generic_character_candidates(
     ]
     for candidate in candidates:
         label = (candidate.formal_name or candidate.primary_appellation).strip()
-        if not _is_generic_character_appellation(label):
+        if not _roster_label_needs_identity_resolution(label, known_names):
             kept.append(candidate)
             continue
         evidence_blocks: list[str] = []
@@ -2276,6 +2295,240 @@ async def _resolve_generic_character_candidates(
             for entry in [*target.identity_evidence, *candidate.onstage_evidence]
         }.values())[:BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE]
     return kept
+
+
+class _RosterPersonhoodResolution(BaseModel):
+    """点名候选是不是可定妆的人物。三态由问题结构决定，不枚举器物/野兽名单。"""
+
+    verdict: Literal["person", "non_person", "uncertain"] = "uncertain"
+    supporting_chapter_index: int = -1
+
+
+class _RosterTrueNameResolution(BaseModel):
+    """发现窗口之后原文是否揭示了这个称呼对应的正式姓名。"""
+
+    verdict: Literal["revealed", "unrevealed", "uncertain"] = "uncertain"
+    true_name: str = ""
+    supporting_chapter_index: int = -1
+    supporting_quote: str = ""
+
+
+def _roster_personhood_dossier(
+    candidate: _RosterCandidate, chapters_by_idx: dict[int, str],
+) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    for evidence in candidate.onstage_evidence[:3]:
+        chapter_text = chapters_by_idx.get(evidence.chapter_index, "")
+        dossier = _roster_presence_dossier(
+            evidence.chapter_index, chapter_text, evidence.quote,
+        )
+        for item in dossier:
+            if item not in blocks:
+                blocks.append(item)
+        if len(blocks) >= 6:
+            return blocks
+    appellation = (candidate.primary_appellation or "").strip()
+    if not appellation:
+        return blocks
+    for chapter_idx, chapter_text in chapters_by_idx.items():
+        if appellation not in (chapter_text or ""):
+            continue
+        for index, segment in enumerate(index_source_segments(chapter_text, max_chars=240)):
+            if appellation not in segment.text:
+                continue
+            item = {"chapter_idx": chapter_idx, "segment_index": index + 1, "text": segment.text}
+            if item not in blocks:
+                blocks.append(item)
+            if len(blocks) >= 6:
+                return blocks
+        if blocks:
+            return blocks
+    return blocks
+
+
+async def _filter_non_person_roster_candidates(
+    candidates: list[_RosterCandidate],
+    chapters_by_idx: dict[int, str],
+    *,
+    project_id: str | None = None,
+) -> list[_RosterCandidate]:
+    """铜镜、没有自己姓名的野兽、一次性描述不是人物谱角色；不确定不登记。"""
+
+    async def _judge(candidate: _RosterCandidate) -> _RosterCandidate | None:
+        label = (candidate.formal_name or candidate.primary_appellation).strip()
+        dossier = _roster_personhood_dossier(candidate, chapters_by_idx)
+        if not dossier or not label:
+            return None
+        catalog = "\n\n".join(
+            f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
+            for item in dossier
+        )
+        valid_chapters = {int(item["chapter_idx"]) for item in dossier}
+        prompt = f"""任务：判断「{label}」是不是可单独指认、能画定妆照的人物。
+
+原文卷宗：
+{catalog}
+
+只根据卷宗原文判断：
+- person：这个称呼指一个能说话或行动的人物，有稳定身份，可以作为人物谱角色。
+- non_person：这个称呼指器物、法宝、地点、组织、没有自己姓名的野兽，或无法对应到具体人名的一次性描述。
+- uncertain：卷宗不够。
+
+supporting_chapter_index 必须是卷宗里出现过的章号。不得根据常识或作品知识补充。
+"""
+        try:
+            resolution = await asyncio.wait_for(
+                model_gateway.chat_structured(
+                    [{"role": "system", "content": SYSTEM_PREFIX},
+                     {"role": "user", "content": prompt}],
+                    model_type=_RosterPersonhoodResolution,
+                    validate=None,
+                    operation_id="character_personhood:" + hashlib.sha256(
+                        f"{label}:{catalog}".encode("utf-8")
+                    ).hexdigest(),
+                    temperature=0.0,
+                    max_tokens=256,
+                    call_meta=_bible_short_json_call_meta({
+                        "stage": "人物候选资格",
+                        "stage_key": "character_personhood",
+                        "call_role": "stage_validate",
+                        "character_name": label,
+                        "project_id": project_id,
+                    }),
+                ),
+                timeout=BIBLE_SMALL_VERDICT_TIMEOUT_S,
+            )
+        except Exception:  # noqa: BLE001 - 不确定不登记
+            return None
+        if resolution.verdict != "person" or resolution.supporting_chapter_index not in valid_chapters:
+            return None
+        return candidate
+
+    judged = await asyncio.gather(*(_judge(item) for item in candidates))
+    return [item for item in judged if item is not None]
+
+
+def _roster_true_name_dossier(
+    appellation: str, chapters: list[dict], *, after_chapter: int,
+) -> list[dict[str, Any]]:
+    """优先取发现窗口之后、含该称呼的原文段，供真名揭示裁决。"""
+    later: list[dict] = []
+    earlier: list[dict] = []
+    for chapter in chapters:
+        try:
+            idx = int(chapter.get("idx"))
+        except (TypeError, ValueError):
+            continue
+        text = chapter.get("content") or ""
+        if appellation not in text:
+            continue
+        (later if idx > after_chapter else earlier).append(chapter)
+
+    items: list[dict[str, Any]] = []
+    for pool in (later, earlier):
+        for chapter in pool:
+            idx = int(chapter["idx"])
+            text = chapter.get("content") or ""
+            for index, segment in enumerate(index_source_segments(text, max_chars=240)):
+                if appellation not in segment.text:
+                    continue
+                items.append({
+                    "chapter_idx": idx, "segment_index": index + 1, "text": segment.text,
+                })
+                if len(items) >= 8:
+                    return items
+        if items:
+            return items
+    return items
+
+
+async def _discover_roster_true_names(
+    candidates: list[_RosterCandidate],
+    chapters: list[dict],
+    *,
+    project_id: str | None = None,
+) -> list[_RosterCandidate]:
+    """点名窗口没见到真名时，用后文共现把尊称接到正式姓名。
+
+    真实事故：许清在第 34 章才以真名出现，前 20 章点名只收到「许师姐」，全文检索
+    因此只数到两百次尊称，女主角被标成低频配角。
+    """
+    chapters_by_idx = _chapters_by_idx(chapters)
+
+    async def _discover(candidate: _RosterCandidate) -> _RosterCandidate:
+        appellation = (candidate.primary_appellation or "").strip()
+        if not appellation or (candidate.formal_name or "").strip():
+            return candidate
+        dossier = _roster_true_name_dossier(
+            appellation, chapters, after_chapter=BIBLE_HEAD_CHAPTERS,
+        )
+        if not dossier:
+            return candidate
+        catalog = "\n\n".join(
+            f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
+            for item in dossier
+        )
+        valid_chapters = {int(item["chapter_idx"]) for item in dossier}
+        prompt = f"""任务：判断后文是否揭示了「{appellation}」的正式姓名。
+
+原文卷宗：
+{catalog}
+
+只根据卷宗原文判断：
+- revealed：卷宗里出现了这个人的正式姓名，true_name 必须逐字抄自卷宗连续原文。
+- unrevealed：卷宗没有揭示正式姓名。
+- uncertain：证据不够。
+
+supporting_chapter_index 必须是卷宗里出现过的章号；supporting_quote 必须是该章原文逐字引句。
+不得根据常识或作品知识补一个名字。
+"""
+        try:
+            resolution = await asyncio.wait_for(
+                model_gateway.chat_structured(
+                    [{"role": "system", "content": SYSTEM_PREFIX},
+                     {"role": "user", "content": prompt}],
+                    model_type=_RosterTrueNameResolution,
+                    validate=None,
+                    operation_id="character_true_name:" + hashlib.sha256(
+                        f"{appellation}:{catalog}".encode("utf-8")
+                    ).hexdigest(),
+                    temperature=0.0,
+                    max_tokens=384,
+                    call_meta=_bible_short_json_call_meta({
+                        "stage": "人物真名揭示",
+                        "stage_key": "character_true_name",
+                        "call_role": "stage_validate",
+                        "character_name": appellation,
+                        "project_id": project_id,
+                    }),
+                ),
+                timeout=BIBLE_SMALL_VERDICT_TIMEOUT_S,
+            )
+        except Exception:  # noqa: BLE001 - 没有揭示就保持尊称
+            return candidate
+        true_name = (resolution.true_name or "").strip()
+        chapter_text = chapters_by_idx.get(resolution.supporting_chapter_index, "")
+        quote = (resolution.supporting_quote or "").strip()
+        if (
+            resolution.verdict != "revealed"
+            or not true_name
+            or true_name == appellation
+            or resolution.supporting_chapter_index not in valid_chapters
+            or true_name not in chapter_text
+            or appellation not in chapter_text
+            or (quote and quote not in chapter_text)
+            or (quote and true_name not in quote)
+        ):
+            return candidate
+        aliases = list(dict.fromkeys([
+            *candidate.aliases, appellation,
+        ]))
+        return candidate.model_copy(update={
+            "formal_name": true_name,
+            "aliases": [value for value in aliases if value and value != true_name],
+        })
+
+    return list(await asyncio.gather(*(_discover(item) for item in candidates)))
 
 
 class _BibleRollCallChunkFailed(StageError):
@@ -2382,7 +2635,7 @@ async def _recurring_character_names(
 5. onstage_evidence：每人最多 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条，格式为 chapter_index + quote；quote 必须是本块原文不超过约 80 字的逐字引句，并包含 primary_appellation、formal_name 或 alias。
 6. 只有本人说话、行动或被直接叙述为在场才算 onstage_evidence；被谈论、回忆或背景介绍不算。
 7. 但具名人物即使当前仅被提及，只要原文明示其建立宗门/制度、造成持续冲突、留下关键规则或后续行动目标，也可输出候选；onstage_evidence 填包含该剧情作用的逐字引句，后续程序会把它判为 mentioned_only，不得伪装成已出场。
-8. 不输出无法单独指认的泛称、宗门、地名、法宝；同一个人在本块只输出一次。
+8. 只申报可单独指认、能作为定妆对象的人物；同一个人在本块只输出一次。器物与法宝、没有自己姓名的野兽、用「某人的客人」这类描述指代且无法对应到具体人名的路人，都不是人物候选。
 9. 本块最多输出 12 个候选，优先输出戏份最重的人物；引句只保留能证明在场的最小片段，不要复述剧情。
 
 小说正文：
@@ -2453,6 +2706,12 @@ async def _recurring_character_names(
     ])
     candidates = await _resolve_generic_character_candidates(
         candidates, chapters_by_idx, project_id=project_id,
+    )
+    candidates = await _filter_non_person_roster_candidates(
+        candidates, chapters_by_idx, project_id=project_id,
+    )
+    candidates = await _discover_roster_true_names(
+        candidates, valid, project_id=project_id,
     )
 
     # 结构闸 G1 用的窗口原文：前 HEAD 章 + 往后 LOOKAHEAD 章，按章节序号建索引

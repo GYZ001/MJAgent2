@@ -401,6 +401,105 @@ async def test_identity_resolution_runs_in_parallel_and_merges(monkeypatch) -> N
     assert "虎头虎脑少年" in aliases
 
 
+def test_dependent_descriptive_appellation_is_not_a_stable_identity() -> None:
+    assert stages._is_dependent_descriptive_appellation("昨日孟浩的第一位客人", {"孟浩"}) is True
+    assert stages._is_dependent_descriptive_appellation("赵武刚师兄", {"赵武刚"}) is False
+    assert stages._is_dependent_descriptive_appellation("铜镜", {"孟浩"}) is False
+
+
+@pytest.mark.asyncio
+async def test_dependent_guest_description_is_not_kept_as_character(monkeypatch) -> None:
+    async def fake_structured(*_args, **_kwargs):
+        return stages._RosterIdentityResolution(
+            verdict="uncertain", canonical_appellation="", supporting_chapter_index=-1,
+        )
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
+    ev = stages._RosterOnstageEvidence
+    result = await stages._resolve_generic_character_candidates(
+        [
+            stages._RosterCandidate(primary_appellation="孟浩", formal_name="孟浩", onstage_evidence=[
+                ev(chapter_index=13, quote="孟浩走进客栈。"),
+            ]),
+            stages._RosterCandidate(
+                primary_appellation="昨日孟浩的第一位客人",
+                onstage_evidence=[ev(chapter_index=13, quote="昨日孟浩的第一位客人坐在角落。")],
+            ),
+        ],
+        {13: "孟浩走进客栈。昨日孟浩的第一位客人坐在角落。"},
+        project_id="p1",
+    )
+    assert [item.primary_appellation for item in result] == ["孟浩"]
+
+
+@pytest.mark.asyncio
+async def test_personhood_gate_drops_treasure_and_keeps_person(monkeypatch) -> None:
+    async def fake_structured(_messages, **kwargs):
+        label = (kwargs.get("call_meta") or {}).get("character_name")
+        if label == "铜镜":
+            return stages._RosterPersonhoodResolution(
+                verdict="non_person", supporting_chapter_index=4,
+            )
+        return stages._RosterPersonhoodResolution(verdict="person", supporting_chapter_index=1)
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
+    ev = stages._RosterOnstageEvidence
+    kept = await stages._filter_non_person_roster_candidates(
+        [
+            stages._RosterCandidate(primary_appellation="孟浩", onstage_evidence=[
+                ev(chapter_index=1, quote="孟浩走上前。"),
+            ]),
+            stages._RosterCandidate(primary_appellation="铜镜", onstage_evidence=[
+                ev(chapter_index=4, quote="孟浩伸手拿起铜镜。"),
+            ]),
+        ],
+        {1: "孟浩走上前。", 4: "孟浩伸手拿起铜镜。"},
+        project_id="p1",
+    )
+    assert [item.primary_appellation for item in kept] == ["孟浩"]
+
+
+@pytest.mark.asyncio
+async def test_true_name_discovery_pins_later_chapter_reveal(monkeypatch) -> None:
+    chapter_37 = "「许师姐。」孟浩抱拳一拜。这女子正是许清，如她的名字一样，冷冷清清。"
+
+    async def fake_structured(*_args, **_kwargs):
+        return stages._RosterTrueNameResolution(
+            verdict="revealed",
+            true_name="许清",
+            supporting_chapter_index=37,
+            supporting_quote="这女子正是许清，如她的名字一样，冷冷清清。",
+        )
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
+    result = await stages._discover_roster_true_names(
+        [stages._RosterCandidate(primary_appellation="许师姐")],
+        [
+            {"idx": 1, "content": "许师姐冷冷看了他一眼。"},
+            {"idx": 37, "content": chapter_37},
+        ],
+        project_id="p1",
+    )
+    assert result[0].formal_name == "许清"
+    assert "许师姐" in result[0].aliases
+
+    async def fake_invented(*_args, **_kwargs):
+        return stages._RosterTrueNameResolution(
+            verdict="revealed",
+            true_name="王腾飞",
+            supporting_chapter_index=37,
+            supporting_quote="这女子正是许清，如她的名字一样，冷冷清清。",
+        )
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_invented)
+    rejected = await stages._discover_roster_true_names(
+        [stages._RosterCandidate(primary_appellation="许师姐")],
+        [{"idx": 37, "content": chapter_37}],
+        project_id="p1",
+    )
+    assert rejected[0].formal_name == ""
+
+
 @pytest.mark.asyncio
 async def test_alias_verification_runs_per_character_in_parallel(monkeypatch) -> None:
     from app.schemas import Bible, Character, CharacterAlias, World
