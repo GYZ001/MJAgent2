@@ -517,10 +517,115 @@ def test_project_delete_reconcile_settles_remote_terminal_without_download(
         "status": "quarantined",
         "video_path": None,
         "error": (
-            "项目删除前已核对供应商任务成功终态；费用已结算，"
+            "已核对供应商任务成功终态；费用已结算，"
             "结果保持隔离且不可采用；核对证据=sha256:test-snapshot"
         ),
     }
+
+
+def test_episode_scoped_reconcile_settles_remote_terminal_without_download(
+    monkeypatch,
+) -> None:
+    """分镜台「清空视频提示词」撞上 409 后新接的恢复入口用的就是这条路径：
+    只按 episode_id 缩小范围（不是整项目删除），同样只在供应商自己确认终态
+    时才结算，不下载、不采用、不新建任务。"""
+    from app import hiagent
+
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="accepted",
+        claim_status="accepted",
+        provider_task_id="provider-task-1",
+    )
+
+    async def unexpected_poll(*_args, **_kwargs) -> dict:
+        raise AssertionError("durable terminal observation must avoid provider polling")
+
+    monkeypatch.setattr(hiagent, "poll_video_task", unexpected_poll)
+
+    result = asyncio.run(
+        completion_grant.reconcile_provider_tasks_for_clear(
+            episode_id="e",
+            conn=conn,
+            terminal_observations={
+                "provider-task-1": {"status": "failed"},
+            },
+            evidence_source="sha256:episode-scoped-test",
+        )
+    )
+
+    assert result["reconciled_job_ids"] == ["j-provider"]
+    assert result["clearance"]["safe_to_clear"] is True
+    assert conn.execute(
+        "SELECT status FROM provider_video_budget_claims WHERE operation_id='op-provider'"
+    ).fetchone()["status"] == "settled"
+    assert conn.execute(
+        "SELECT status,error FROM jobs WHERE id='j-provider'"
+    ).fetchone()["status"] == "failed"
+
+
+def test_close_superseded_unclaimed_video_jobs_closes_only_provably_uncharged_orphans() -> None:
+    """paused_budget/waiting_human 等孤儿任务只有在本地证据已经证明「不可能
+    产生费用」（从未提交给供应商、没有在途 claim）且所属镜头已经换到别的
+    成功版本时才收口；任何还有供应商footprint 或在途 claim 的任务原样保留，
+    不能被这条路径误伤——这是 EP2 那条 paused_budget 孤儿任务的真实形状。"""
+    conn = _database()
+    completion_grant.ensure_video_budget_authority_tables(conn)
+    # 镜头已采用的成功版本（_database() 里 shots.adopted_version_id='v1'，
+    # 但没有对应的 shot_versions 行，这里补上）。
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at
+           ) VALUES('v1','s',3,'prompt','key-v1','succeeded',1)"""
+    )
+    # 孤儿任务：预算门禁挡下，从未提交给供应商，且所属镜头早已换到 v1。
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at
+           ) VALUES('v-orphan','s',4,'prompt','key-orphan','paused_budget',2)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               provider_non_cancellable,provider_operation_id,
+               provider_create_state,cancellation_requested,abandoned,
+               created_at,updated_at
+           ) VALUES(
+               'j-orphan','video','s','v-orphan','e','p','paused_budget',
+               0,'op-orphan','not_started',0,0,2,2
+           )"""
+    )
+    # 对照组：仍带供应商 footprint 与在途 claim 的任务，即便镜头也已换版，
+    # 也绝不能被这条路径关闭——它复用既有 fixture，job/claim 都挂在 op-provider。
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="accepted",
+        claim_status="accepted",
+        provider_task_id="provider-task-1",
+    )
+    conn.commit()
+
+    closed = completion_grant.close_superseded_unclaimed_video_jobs("e", conn=conn)
+
+    assert closed == ["j-orphan"]
+    orphan_job = conn.execute(
+        "SELECT status,cancellation_requested,abandoned,reserved_cost_cny FROM jobs WHERE id='j-orphan'"
+    ).fetchone()
+    assert dict(orphan_job) == {
+        "status": "stale", "cancellation_requested": 1, "abandoned": 1,
+        "reserved_cost_cny": 0.0,
+    }
+    assert conn.execute(
+        "SELECT status FROM shot_versions WHERE id='v-orphan'"
+    ).fetchone()["status"] == "stale"
+    # 对照组任务与其 claim 原样保留。
+    assert conn.execute(
+        "SELECT status FROM jobs WHERE id='j-provider'"
+    ).fetchone()["status"] == "waiting_provider"
+    assert conn.execute(
+        "SELECT status FROM provider_video_budget_claims WHERE operation_id='op-provider'"
+    ).fetchone()["status"] == "accepted"
 
 
 def test_video_only_clear_preserves_unsettled_provider_handle_and_claim(

@@ -15,6 +15,8 @@ import {
   storyboardShotCheckpointLabel,
   storyboardStartPreviewCopy,
   storyboardToolbarActions,
+  providerRecoveryActionLabel,
+  type ProviderTaskBlocker,
 } from './BoardPage'
 
 // 分镜台只剩段视图一条渲染路径（2026-08-26 用户拍板：旧逐镜编辑连同它绑定的经典
@@ -97,7 +99,25 @@ describe('分镜台状态文案与问题筛选', () => {
     expect(copy.summary).toBe('目标 17 段 · 工作副本 9 段 · 已校验 2 段')
     expect(copy.detail).toContain('第 3–9 段仍待校验')
     expect(copy.detail).toContain('从第 3 段继续修复')
-    expect(copy.detail).toContain('人工确认前')
+    expect(copy.detail).toContain('全部段落通过校验前')
+  })
+
+  it('分镜台 2.0.3：整集调用尚无任何段落产出时不假装存在逐段续跑进度', () => {
+    // 后端一次调用产出全部段落，落库单事务、要么整份写完要么什么都不写；
+    // working===0 时不能再说"从第 N 段继续""逐段校验"，那是不存在的能力。
+    const zeroWorking = {
+      produced_shots: 0, validated_shots: 0, draft_shots: 0,
+      safe_checkpoint_shots: 0, pending_revalidation_shots: 0, resume_from_shot: 1,
+    }
+    const running = storyboardProgressCopy(storyboardStatus({ state: 'running', ...zeroWorking }))
+    expect(running.detail).not.toContain('从第')
+    expect(running.detail).not.toContain('逐段校验')
+    expect(running.detail).toContain('整集一次调用联合产出')
+
+    const failed = storyboardProgressCopy(storyboardStatus({ state: 'failed', ...zeroWorking }))
+    expect(failed.detail).not.toContain('从第')
+    expect(failed.detail).not.toContain('逐段校验')
+    expect(failed.detail).toContain('整集一次调用联合产出')
   })
 
   it('完整收束但门禁失败时明确重开修复而不是追加段落', () => {
@@ -134,7 +154,12 @@ describe('分镜台状态文案与问题筛选', () => {
     expect(preview.detail).toContain('不是从第 15 段续写')
   })
 
-  it('完整段落只缺发布证据时明确继续审读发布且不改写段落', () => {
+  it('产物齐全但发布证据仍待更新时不再单独提示"发布证据"仪式，落回通用继续文案', () => {
+    // 2026-08-26 用户拍板：分镜提示词全部生成完就直接可进生成台，分镜台不
+    // 再有一个独立的"完成发布证据"人工确认步骤。resume_mode==='finalize_
+    // evidence' 落回和其余"已全部校验"状态相同的通用文案，不再单独提冷
+    // 观众审读/校准校验/发布证据签发——那套流程此前对多数分集本来就不
+    // 存在，继续单独提示会让界面在说一件已经不成立的事。
     const status = storyboardStatus({
       planned_shots: 14,
       produced_shots: 14,
@@ -147,7 +172,10 @@ describe('分镜台状态文案与问题筛选', () => {
       hard_gates_passed: true,
     })
 
-    expect(storyboardProgressCopy(status).detail).toContain('不会改写现有段落')
+    const progress = storyboardProgressCopy(status)
+    expect(progress.detail).toContain('即可进入生成台')
+    expect(progress.detail).not.toContain('发布证据')
+    expect(progress.detail).not.toContain('人工确认')
 
     const preview = storyboardStartPreviewCopy({
       preview_token: 'preview-2',
@@ -158,54 +186,12 @@ describe('分镜台状态文案与问题筛选', () => {
       remaining_shots: 0,
       checkpoint: { available: true, phase: 'WAITING_HUMAN', resume_from_shot: 15 },
     })
-    expect(preview.title).toBe('完成视频提示词发布证据')
-    expect(preview.confirmLabel).toBe('继续审读发布')
-    expect(preview.detail).toContain('仅继续冷观众审读')
+    expect(preview.title).toBe('继续生成视频提示词')
+    expect(preview.confirmLabel).toBe('继续任务')
+    expect(preview.detail).not.toContain('发布证据')
   })
 
-  it('把一次观看权威提升为发布证据阶段的主操作', () => {
-    const status = storyboardStatus({
-      planned_shots: 14,
-      produced_shots: 14,
-      validated_shots: 14,
-      resume_mode: 'finalize_evidence',
-      final_shot_valid: true,
-      hard_gates_passed: true,
-    })
-
-    expect(storyboardPrimaryAction(
-      status,
-      { ready: false, status: 'needs_review', blockers: [] },
-      {
-        artifact_id: 'review-1',
-        version: 1,
-        status: 'validated',
-        decision: 'pass',
-        low_percentile: {},
-        inference_variance: 0,
-        reason: '',
-      },
-    )).toEqual({
-      intent: 'activate_ai_one_watch',
-      label: '运行 AI 一次观看模拟',
-    })
-
-    expect(storyboardPrimaryAction(
-      status,
-      {
-        ready: false,
-        status: 'awaiting_republish',
-        authority_mode: 'ai_simulation',
-        blockers: [],
-      },
-      null,
-    )).toEqual({
-      intent: 'resume_storyboard',
-      label: '完成发布证据',
-    })
-  })
-
-  it('真实门禁失败时仍要求继续修复，不能进入一次观看或确认', () => {
+  it('真实门禁失败时仍要求继续修复，不能进入确认', () => {
     const action = storyboardPrimaryAction(
       storyboardStatus({
         state: 'failed',
@@ -213,16 +199,6 @@ describe('分镜台状态文案与问题筛选', () => {
         hard_gates_passed: false,
         hard_gate_issue_count: 1,
       }),
-      { ready: false, status: 'needs_review', blockers: [] },
-      {
-        artifact_id: 'review-1',
-        version: 1,
-        status: 'validated',
-        decision: 'pass',
-        low_percentile: {},
-        inference_variance: 0,
-        reason: '',
-      },
     )
 
     expect(action).toEqual({
@@ -241,7 +217,10 @@ describe('分镜台状态文案与问题筛选', () => {
     expect(storyboardHeadlineLabel('10/10 镜已通过，待完成发布证据')).toBe('10/10 段已通过，待完成发布证据')
     expect(storyboardHeadlineLabel('9/17 镜已通过，待更新发布证据')).toBe('9/17 段已通过，待更新发布证据')
     expect(storyboardHeadlineLabel('9/17 镜已通过，等待确认')).toBe('9/17 段已通过，等待确认')
-    expect(storyboardHeadlineLabel('分镜任务进行中，当前处理第 3 镜')).toBe('分镜任务进行中，当前处理第 3 段')
+    // 分镜台 2.0.3：全部段落由一次整集模型调用联合产出，"当前处理第 N 镜"
+    // 这句话对这条管线永远不是真进度（resume_from 在生成完成前恒为 1），
+    // 必须整句替换，不能只做"镜"->"段"的措辞替换。
+    expect(storyboardHeadlineLabel('分镜任务进行中，当前处理第 3 镜')).toBe('分镜任务进行中，整集视频提示词正在联合生成')
     expect(storyboardHeadlineLabel('局部修复已暂停，将从第 3 镜继续')).toBe('局部修复已暂停，将从第 3 段继续')
     expect(storyboardHeadlineLabel('整集修复已暂停，可继续修复现有问题镜')).toBe('整集修复已暂停，可继续修复现有问题段')
     expect(storyboardHeadlineLabel('生成停在第 5 镜，可继续处理')).toBe('生成停在第 5 段，可继续处理')
@@ -249,6 +228,37 @@ describe('分镜台状态文案与问题筛选', () => {
     expect(storyboardHeadlineLabel('当前分镜已确认')).toBe('当前分镜已确认')
     expect(storyboardHeadlineLabel('分镜台处于安全只读模式，可继续审阅')).toBe('分镜台处于安全只读模式，可继续审阅')
     expect(storyboardHeadlineLabel('剧本已就绪，尚未生成分镜')).toBe('剧本已就绪，尚未生成分镜')
+  })
+})
+
+// 「清空视频提示词」撞上供应商付费任务尚未终态（PROVIDER_TASKS_NOT_TERMINAL）时的
+// 恢复面板：后端给出 recovery_action，前端只做人话翻译，不能编出后端没说过的含义，
+// 未知取值要有可读兜底而不是空白或崩溃。
+function providerBlocker(overrides: Partial<ProviderTaskBlocker> = {}): ProviderTaskBlocker {
+  return {
+    job_id: 'job_1', shot_id: 's1', version_id: 'ver_1', job_status: 'waiting_human',
+    provider_operation_id: 'op_1', provider_task_id: 'task_1', provider_create_state: 'accepted',
+    claim_status: 'accepted', amount_cny: 12, recovery_status: 'waiting_human',
+    recovery_action: 'review_provider_failure',
+    ...overrides,
+  }
+}
+
+describe('供应商任务恢复面板文案（PROVIDER_TASKS_NOT_TERMINAL）', () => {
+  it('四种已知 recovery_action 都翻译成用户能懂的下一步', () => {
+    for (const action of [
+      'review_provider_failure', 'continue_provider_poll',
+      'restore_provider_poll', 'reconcile_provider_create',
+    ] as const) {
+      const label = providerRecoveryActionLabel(providerBlocker({ recovery_action: action }))
+      expect(label.length).toBeGreaterThan(0)
+      expect(label).toContain('供应商')
+    }
+  })
+
+  it('未知 recovery_action 有可读兜底，不是空白', () => {
+    const label = providerRecoveryActionLabel(providerBlocker({ recovery_action: 'something_new' }))
+    expect(label).toContain('something_new')
   })
 })
 

@@ -1532,7 +1532,10 @@ def _assert_no_other_episode_work(project_id: str, deleting_episode_id: str) -> 
 
 async def _delete_episode_core(episode_id: str) -> dict:
     """Permanently remove one episode and every downstream production asset."""
-    from app.completion_grant import ProviderTasksNotTerminalError
+    from app.completion_grant import (
+        ProviderTasksNotTerminalError,
+        reconcile_provider_tasks_for_clear,
+    )
 
     ep = dict(_episode_or_404(episode_id))
     project = get_conn().execute(
@@ -1543,6 +1546,15 @@ async def _delete_episode_core(episode_id: str) -> dict:
     ):
         raise HTTPException(409, "分集规划正在运行，请等待完成后再删除单集")
     _assert_no_other_episode_work(ep["project_id"], episode_id)
+    # 与 _delete_project_core 同一个理由：删除前先做一次只读式核对，把供应商
+    # 自己已经确认终态、只是本地还没结算的任务先落定，减少用户被
+    # PROVIDER_TASKS_NOT_TERMINAL 挡住却无法自愈的情况（真正仍在途的任务
+    # 依旧原样挡下，不受影响）。
+    await reconcile_provider_tasks_for_clear(
+        episode_id=episode_id,
+        conn=get_conn(),
+        evidence_source="episode_delete_terminal_reconcile",
+    )
 
     cancelled_tasks = 0
     for kind in ("screenplay", "storyboard", "video_completion"):
@@ -1615,6 +1627,7 @@ async def _delete_project_core(project_id: str) -> dict:
     provider_reconciliation = await reconcile_project_provider_tasks_for_clear(
         project_id,
         conn=get_conn(),
+        evidence_source="project_delete_terminal_reconcile",
     )
     # Fast preflight before cancelling any producer. The authoritative check is
     # repeated inside the deletion transaction after all local writers stop.

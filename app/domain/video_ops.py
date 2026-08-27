@@ -12,6 +12,7 @@ except NameError:  # pragma: no cover - direct module import
     from app.domain.storyboard_ops import (
         _board_from_shot_rows,
         _finalize_storyboard_evidence,
+        _require_video_clear_write_scope,
     )
 
 def _shot_contract_json(shot: Shot) -> str:
@@ -1402,6 +1403,55 @@ def _require_provider_clearance(
         )
     except ProviderTasksNotTerminalError as exc:
         raise HTTPException(409, exc.detail) from exc
+
+
+@router.post("/episodes/{episode_id}/provider-tasks/reconcile")
+async def reconcile_episode_provider_tasks(episode_id: str):
+    """给「清空视频提示词」等操作撞上 409 PROVIDER_TASKS_NOT_TERMINAL 的用户一个
+    真实可用的恢复入口：核对本集每一个未终态供应商任务的真实状态，而不是让用户
+    对着一句「请核对供应商创建结果」却无处可核对。
+
+    做且只做两件诚实的事，都不新建供应商任务、不下载或采用任何结果、不放宽
+    任何闸门：
+
+    1. 对每个仍有付费任务嫌疑的阻塞项，实际去查一次供应商——只有供应商自己
+       回答「已成功」或「已失败」才结算对应的费用责任并把任务落定；供应商仍
+       在跑或查不到，原样保留为阻塞项。
+    2. 对本地证据已经证明「从未提交给供应商、因而不可能产生费用」且所属镜头
+       已经采用了别的成功版本的孤儿任务，按既有的「过时任务」收口惯例
+       （``app/video_plan.py::reconcile_adopted_revision``）关闭，不产生任何
+       新费用。
+
+    返回核对后的最新阻塞快照；调用方（前端）据此判断清空操作现在能不能重试。
+    """
+    from app.completion_grant import (
+        close_superseded_unclaimed_video_jobs,
+        provider_task_clearance_snapshot,
+        reconcile_provider_tasks_for_clear,
+    )
+
+    ep = _episode_or_404(episode_id)
+    _require_video_clear_write_scope(ep["project_id"])
+    conn = get_conn()
+    before = provider_task_clearance_snapshot(episode_id=episode_id, conn=conn)
+    provider_reconciliation = await reconcile_provider_tasks_for_clear(
+        episode_id=episode_id,
+        conn=conn,
+        evidence_source="episode_provider_tasks_reconcile",
+    )
+    superseded_closed = close_superseded_unclaimed_video_jobs(episode_id, conn=conn)
+    clearance = provider_task_clearance_snapshot(episode_id=episode_id, conn=conn)
+    result = {
+        "episode_id": episode_id,
+        "blockers_before": len(before["blockers"]),
+        "provider_confirmed_terminal_job_ids": provider_reconciliation["reconciled_job_ids"],
+        "superseded_jobs_closed_job_ids": superseded_closed,
+        "clearance": clearance,
+    }
+    _review_write_audit(
+        "video.provider_tasks_reconcile", "episode", episode_id, new_state=result,
+    )
+    return result
 
 
 @router.post("/episodes/{episode_id}/clear-artifacts")

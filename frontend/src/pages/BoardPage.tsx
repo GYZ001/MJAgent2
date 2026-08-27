@@ -9,6 +9,7 @@ import { useFocusTrap } from '../hooks/useFocusTrap'
 import { storyboardTaskNotice } from '../lib/productionNotices'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
 import { findPortraitImage, findSceneReferenceImage } from '../lib/bibleAssets'
+import StageTextModelPicker from '../components/StageTextModelPicker'
 import "../styles/BoardPage.css";
 
 // 视频生成模型选择：与生成台强绑定（app/video_providers.py 的 provider key）。
@@ -189,6 +190,49 @@ type VideoModelSwitchConfirm = {
   prompt_artifact_count: number
 }
 
+// 供应商付费任务尚未终态时的清空阻塞（app/completion_grant.py
+// ProviderTasksNotTerminalError.detail）；recovery_action 是后端给出的下一步
+// 建议，前端只做文案翻译，不臆造新含义。
+export type ProviderTaskBlocker = {
+  job_id: string
+  shot_id: string | null
+  version_id: string | null
+  job_status: string
+  provider_operation_id: string | null
+  provider_task_id: string | null
+  provider_create_state: string
+  claim_status: string | null
+  amount_cny: number
+  recovery_status: 'waiting_provider' | 'waiting_human' | string
+  recovery_action: 'review_provider_failure' | 'continue_provider_poll' | 'restore_provider_poll' | 'reconcile_provider_create' | string
+}
+
+type ProviderTaskClearance = {
+  safe_to_clear: boolean
+  resume_supported: boolean
+  blockers: ProviderTaskBlocker[]
+}
+
+type ProviderTaskReconcileResult = {
+  episode_id: string
+  blockers_before: number
+  provider_confirmed_terminal_job_ids: string[]
+  superseded_jobs_closed_job_ids: string[]
+  clearance: ProviderTaskClearance
+}
+
+const PROVIDER_RECOVERY_ACTION_LABEL: Record<string, string> = {
+  review_provider_failure: '供应商任务发生技术失败，系统正在等待人工核对；点击下方按钮会去问供应商这个任务现在到底是什么状态',
+  continue_provider_poll: '供应商任务仍可能在处理中；点击下方按钮会继续查询它的最新状态',
+  restore_provider_poll: '本地曾记录到供应商任务号，但轮询中断了；点击下方按钮会用这个任务号重新查询',
+  reconcile_provider_create: '不确定这次创建请求供应商是否收到；点击下方按钮会去核对供应商那边有没有对应任务',
+}
+
+export function providerRecoveryActionLabel(blocker: ProviderTaskBlocker): string {
+  return PROVIDER_RECOVERY_ACTION_LABEL[blocker.recovery_action]
+    ?? `建议：${blocker.recovery_action}`
+}
+
 // 分镜台只剩段视图一条渲染路径（旧的逐镜编辑连同它绑定的经典字段形状已整块拆除，
 // 2026-08-26 用户拍板：测试期没有需要兼容的重要数据）。一个 15 秒段 = shots 表
 // 一行，段内 3-4 镜写进 prompt_text 文本、不拆成独立数据行；storyboard_pack_segment
@@ -240,6 +284,15 @@ export function storyboardGateIssueLabel(message: string): string {
  */
 export function storyboardHeadlineLabel(headline: string): string {
   return headline
+    // 分镜台 2.0.3（后端 app/production/storyboard_pack.py）：全部段落的视频
+    // 提示词现在由一次整集模型调用联合产出，不再是逐段并行发起、也没有任何
+    // 逐段落库的中间态（persist_storyboard_pack 单事务、要么整份写完、要么
+    // 什么都不写）。"当前处理第 N 镜"这句话只可能来自 app.domain.storyboard_
+    // ops._storyboard_status_snapshot 的 running 分支，而该分支在这条管线下
+    // resume_from 永远算出 1（生成完成前 shots 表没有任何行）——这个数字从不
+    // 是真进度，必须整体替换掉，不能只做"镜"->"段"的措辞替换（旧的逐镜叙事
+    // 权威管线已下线，这句话不会再来自任何其它路径）。
+    .replace(/当前处理第\s*\d+\s*镜/, '整集视频提示词正在联合生成')
     .replace(/(\d+\/\d+)\s*镜已通过/g, '$1 段已通过')
     .replace(/第\s*(\d+)\s*镜/g, '第 $1 段')
     .replaceAll('问题镜', '问题段')
@@ -251,32 +304,24 @@ type StoryboardProgressCopy = {
 }
 
 export type StoryboardPrimaryAction = {
-  intent: StoryboardStatus['recommended_action'] | 'activate_ai_one_watch'
+  intent: StoryboardStatus['recommended_action']
   label: string
 }
 
 export function storyboardPrimaryAction(
   status: StoryboardStatus,
-  calibration: Episode['narrative_calibration_summary'],
-  review: Episode['narrative_review_summary'],
 ): StoryboardPrimaryAction {
-  const finalizingEvidence = status.recommended_action === 'resume_storyboard'
-    && status.resume_mode === 'finalize_evidence'
-  if (
-    finalizingEvidence
-    && calibration?.status === 'needs_review'
-    && review?.decision === 'pass'
-  ) {
-    return {
-      intent: 'activate_ai_one_watch',
-      label: '运行 AI 一次观看模拟',
-    }
-  }
+  // 2026-08-26 用户拍板：分镜提示词全部生成完就直接可进生成台，不再有一个
+  // 独立的"完成发布证据"人工仪式挡在中间（该仪式此前对应的产物签发已经在
+  // 生成完成时自动落盘，见 app.domain.review_wall._review_upstream_snapshot /
+  // app.domain.storyboard_ops._storyboard_status_snapshot 同一处改动）。
+  // 冷观众审读/一次观看校准（AI 一次观看模拟分支）功能已整体下线（用户
+  // 拍板），原本挂在 finalizingEvidence 上的那个分支一并删除。
   const labels: Record<StoryboardStatus['recommended_action'], string> = {
     go_screenplay: '先去映射台',
     generate_storyboard: '生成视频提示词',
     view_progress: '查看任务详情',
-    resume_storyboard: finalizingEvidence ? '完成发布证据' : '继续生成视频提示词',
+    resume_storyboard: '继续生成视频提示词',
     confirm_storyboard: '确认视频提示词',
     go_review_wall: '进入生成台',
     refresh_status: '状态同步中',
@@ -310,30 +355,43 @@ export function storyboardProgressCopy(status: StoryboardStatus): StoryboardProg
       detail: `当前 ${working} 段已完成逐段校验，但整集仍有 ${gateIssueCount} 个确认门禁问题。继续任务会重开整集修复，不是从第 ${resumeFrom} 段续写；修复候选通过前不会覆盖现有段落。`,
     }
   }
-  if (status.resume_mode === 'finalize_evidence') {
+  // 分镜台 2.0.3：全部段落由一次整集模型调用联合产出，落库单事务、要么整份
+  // 写完、要么什么都不写（app.production.storyboard_pack.persist_storyboard_
+  // pack）。working===0 意味着这一轮还没有任何段落成功产出——"从第 N 段
+  // 继续""逐段校验"这类措辞会暗示一种其实不存在的、可从任意中间段续跑的
+  // 能力，必须换成如实描述"整集一次生成、要么全有要么全无"的文案。
+  if (working === 0) {
     return {
       summary,
-      detail: '段落内容与整集硬门禁已通过；继续任务只会完成冷观众审读、校准校验和发布证据签发，不会改写现有段落。',
+      detail: status.state === 'running'
+        ? '这一集的视频提示词正在生成——按整集一次调用联合产出，不是逐段推进；完成前不会有段落先出现，完成后会一次性全部展示。'
+        : '这一集的视频提示词按整集一次调用联合产出；这一轮还没有成功产出任何段落，重新发起会整集重新生成，不是从某一段续写。',
     }
   }
+  // 2026-08-26 用户拍板：分镜台不再有一个独立的"完成发布证据"确认步骤——
+  // 产物（含叙事权威分集的冷观众审读/校准）在生成完成时已自动签发；这里不
+  // 再单独描述那一步，落到下面的通用文案，不留一句只对小部分分集成立、
+  // 对大多数分集已经不成立的"还差一步"话术。
   const finalDraftNote = status.final_shot_valid
-    ? '工作副本中的收尾标记不代表整集已通过。'
+    ? '工作副本中的收尾标记不代表整集已通过校验。'
     : ''
   if (pending > 0) {
     return {
       summary,
-      detail: `第 ${validated + 1}–${working} 段仍待校验；任务将从第 ${resumeFrom} 段继续修复。人工确认前，轨道中的内容都只是工作副本。${finalDraftNote}`,
+      detail: `第 ${validated + 1}–${working} 段仍待校验；任务将从第 ${resumeFrom} 段继续修复。全部段落通过校验前，轨道中的内容都只是工作副本。${finalDraftNote}`,
     }
   }
   return {
     summary,
-    detail: `当前 ${validated} 段已通过逐段校验；任务将从第 ${resumeFrom} 段继续。整集门禁通过并经人工确认后才会交给生成台。${finalDraftNote}`,
+    detail: `当前 ${validated} 段已通过逐段校验；任务将从第 ${resumeFrom} 段继续。全部段落生成并通过校验后即可进入生成台。${finalDraftNote}`,
   }
 }
 
 export function storyboardEmptyCopy(status: StoryboardStatus): string {
   if (status.state === 'no_screenplay') return '尚无可用于生成视频提示词的映射结果，请先去映射台。'
-  if (status.state === 'running') return '首批视频提示词正在生成与逐段校验，通过后会自动展示。'
+  // 分镜台 2.0.3：全部段落由一次整集模型调用联合产出，不是逐段生成/逐段
+  // 校验——不会有"首批"先出现，完成前也不存在中间态。
+  if (status.state === 'running') return '这一集的视频提示词正在生成，按整集一次调用联合产出全部段落，完成后会一次性展示。'
   if (status.state === 'failed') return '视频提示词任务未完成，尚无通过校验的工作段落；请查看原因后继续处理。'
   if (status.state === 'paused') return '视频提示词任务已暂停，尚无通过校验的工作段落。'
   return '映射已就绪，尚未生成视频提示词。'
@@ -367,14 +425,8 @@ export function storyboardStartPreviewCopy(preview: StartPreview): {
       detail: `这是重开整集修复，不是从第 ${preview.checkpoint.resume_from_shot} 段续写；候选通过前不会覆盖现有段落。`,
     }
   }
-  if (preview.resume_mode === 'finalize_evidence') {
-    return {
-      title: '完成视频提示词发布证据',
-      confirmLabel: '继续审读发布',
-      summary: `现有 ${preview.kept_validated_shots} 段已完成结构与逐段校验。`,
-      detail: '将保留全部段落，仅继续冷观众审读、校准校验与发布证据签发。',
-    }
-  }
+  // 2026-08-26 用户拍板：不再单独展示"完成发布证据"这一步——产物齐了就
+  // 直接可进生成台，resume_mode==='finalize_evidence' 落回下面的通用文案。
   return {
     title: '继续生成视频提示词',
     confirmLabel: '继续任务',
@@ -393,7 +445,7 @@ export function storyboardShotCheckpointLabel(
   const draft = status.draft_shots ?? status.produced_shots
   const safe = Math.min(draft, status.safe_checkpoint_shots ?? status.validated_shots)
   if (shotNo <= safe) {
-    return { label: '已校验', className: 'checkpoint-safe', title: '本轮已通过逐段校验；整集仍需通过门禁并由人工确认' }
+    return { label: '已校验', className: 'checkpoint-safe', title: '本轮已通过逐段校验；整集全部生成完成后才算产物齐全' }
   }
   return { label: '待校验', className: 'checkpoint-pending', title: '仍在工作副本中，继续任务时可能更新' }
 }
@@ -449,312 +501,6 @@ function StoryboardLaunchPanel({ episode, status, busy, onPrimary }: {
   )
 }
 
-type CalibrationProtocol = {
-  narrative_review_artifact_id: string
-  audience_priors: Array<{
-    audience_prior_id: string
-    audience_description: string
-    existing_observation_count: number
-  }>
-}
-
-type FrozenHumanWatch = {
-  freeze_artifact_id: string
-  observation_id: string
-  audience_prior_id: string
-  target_contract: Array<{
-    target_delta_id: string
-    dimension: string
-    description: string
-  }>
-}
-
-async function participantHash(value: string) {
-  const bytes = new TextEncoder().encode(value.trim())
-  const digest = await crypto.subtle.digest('SHA-256', bytes)
-  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
-}
-
-type AiOneWatchSimulationResult = {
-  message?: string
-}
-
-async function activateAiOneWatchSimulation(
-  episodeId: string,
-): Promise<AiOneWatchSimulationResult> {
-  return api.post(
-    `/episodes/${episodeId}/narrative-calibration/ai-simulate`,
-  ) as Promise<AiOneWatchSimulationResult>
-}
-
-function HumanCalibrationControls({
-  episode,
-  notify,
-  onChanged,
-}: {
-  episode: Episode
-  notify: (message: string, error?: boolean) => void
-  onChanged: () => Promise<unknown> | unknown
-}) {
-  const [protocol, setProtocol] = useState<CalibrationProtocol | null>(null)
-  const [participant, setParticipant] = useState('')
-  const [priorId, setPriorId] = useState('')
-  const [genre, setGenre] = useState('')
-  const [form, setForm] = useState('')
-  const [recall, setRecall] = useState('')
-  const [protocolConfirmed, setProtocolConfirmed] = useState(false)
-  const [frozen, setFrozen] = useState<FrozenHumanWatch | null>(null)
-  const [scores, setScores] = useState<Record<string, number>>({})
-  const [interpretations, setInterpretations] = useState<Record<string, string>>({})
-  const [calibrationPreview, setCalibrationPreview] = useState<Record<string, any> | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  async function loadProtocol() {
-    setBusy(true)
-    try {
-      const next = await api.get(`/episodes/${episode.id}/narrative-calibration/protocol`) as CalibrationProtocol
-      setProtocol(next)
-      setPriorId(current => current || next.audience_priors[0]?.audience_prior_id || '')
-    } catch (caught) {
-      notify((caught as Error).message, true)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function runAiOneWatchSimulation() {
-    setBusy(true)
-    try {
-      const result = await activateAiOneWatchSimulation(episode.id)
-      await onChanged()
-      notify(String(result.message || 'AI 一次观看模拟权威已激活'))
-    } catch (caught) {
-      notify((caught as Error).message, true)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const freezeBlockedReason = !protocolConfirmed
-    ? '请先确认一次观看协议'
-    : !participant.trim()
-      ? '请填写匿名参与者编号'
-      : !priorId
-        ? '请选择目标观众前提'
-        : !genre.trim() || !form.trim()
-          ? '请填写题材与叙事形式标签'
-          : !recall.trim()
-            ? '请填写首次自由复述'
-            : null
-
-  async function freezeRecall() {
-    if (freezeBlockedReason) return
-    setBusy(true)
-    try {
-      const result = await api.post(
-        `/episodes/${episode.id}/narrative-calibration/freeze`,
-        {
-          participant_id_hash: await participantHash(participant),
-          audience_prior_id: priorId,
-          watched_once: true,
-          watch_count: 1,
-          replay_or_seek_used: false,
-          source_material_seen: false,
-          target_answers_seen: false,
-          director_intent_seen: false,
-          spontaneous_recall_frozen: true,
-          spontaneous_recall: { free_text: recall.trim() },
-          content_dimensions: { genre: genre.trim(), form: form.trim() },
-          collection_context: { source: 'board_calibration_ui' },
-        },
-      ) as FrozenHumanWatch
-      setFrozen(result)
-      setScores(Object.fromEntries(result.target_contract.map(item => [item.target_delta_id, 50])))
-      notify('首次复述已冻结，现在可以记录中性追问后的观察')
-    } catch (caught) {
-      notify((caught as Error).message, true)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function submitObservation() {
-    if (!frozen) return
-    setBusy(true)
-    try {
-      await api.post(`/episodes/${episode.id}/narrative-calibration/observations`, {
-        freeze_artifact_id: frozen.freeze_artifact_id,
-        neutral_followup_observations: [],
-        target_delta_observations: frozen.target_contract.map(item => ({
-          audience_prior_id: frozen.audience_prior_id,
-          target_delta_id: item.target_delta_id,
-          observed_score: (scores[item.target_delta_id] ?? 0) / 100,
-          observed_interpretation: {
-            free_text: interpretations[item.target_delta_id]?.trim() || '未补充文字说明',
-          },
-        })),
-      })
-      setFrozen(null)
-      setRecall('')
-      setProtocolConfirmed(false)
-      setScores({})
-      setInterpretations({})
-      await onChanged()
-      await loadProtocol()
-      notify('真人一次观看观察已纳入校准样本')
-    } catch (caught) {
-      notify((caught as Error).message, true)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function rebuildCalibration(activate: boolean) {
-    setBusy(true)
-    try {
-      const result = await api.post('/narrative-calibration/rebuild', {
-        activate,
-        expected_report_fingerprint: activate
-          ? calibrationPreview?.activation_fingerprint
-          : undefined,
-      }) as Record<string, any>
-      setCalibrationPreview(result)
-      if (activate) {
-        await onChanged()
-        notify(result.activated ? '真人校准权威已激活' : '样本仍未达到激活条件', !result.activated)
-      }
-    } catch (caught) {
-      notify((caught as Error).message, true)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return <details className="narrative-calibration-controls">
-    <summary>一次观看权威与真人一次观看校准</summary>
-    <div className="narrative-calibration-rebuild">
-      <button type="button" className="btn primary" disabled={busy}
-        onClick={() => void runAiOneWatchSimulation()}>
-        {busy ? '模拟运行中…' : '运行 AI 一次观看模拟'}
-      </button>
-      <small>由你显式启动独立 AI 多先验模拟；不会伪造真人参与者或观察记录。</small>
-    </div>
-    {!protocol ? <button type="button" className="btn" disabled={busy} onClick={() => void loadProtocol()}>
-      {busy ? '正在读取…' : '开始记录真人样本'}
-    </button> : <>
-      {!frozen ? <div className="narrative-calibration-form">
-        <label>匿名参与者编号<input value={participant} onChange={event => setParticipant(event.target.value)} /></label>
-        <label>观看前提<select value={priorId} onChange={event => setPriorId(event.target.value)}>
-          {protocol.audience_priors.map(item => <option key={item.audience_prior_id} value={item.audience_prior_id}>
-            {item.audience_description}（已有 {item.existing_observation_count} 份）
-          </option>)}
-        </select></label>
-        <label>题材标签<input value={genre} onChange={event => setGenre(event.target.value)} placeholder="例如：都市悬疑" /></label>
-        <label>叙事形式<input value={form} onChange={event => setForm(event.target.value)} placeholder="例如：纯对白或追逐" /></label>
-        <label className="wide">首次自由复述<textarea value={recall} onChange={event => setRecall(event.target.value)}
-          placeholder="只记录第一次看完后自然记住的人物、因果、问题和下一步预期" /></label>
-        <label className="wide calibration-confirm"><input type="checkbox" checked={protocolConfirmed}
-          onChange={event => setProtocolConfirmed(event.target.checked)} />
-          我确认参与者只连续观看一次，未回放、未看原文、目标答案或导演意图
-        </label>
-        <button type="button" className="btn primary" disabled={busy || Boolean(freezeBlockedReason)}
-          title={freezeBlockedReason || undefined} onClick={() => void freezeRecall()}>
-          冻结首次复述
-        </button>
-        {freezeBlockedReason && <small>{freezeBlockedReason}</small>}
-      </div> : <div className="narrative-calibration-targets">
-        <p>首次复述已冻结。以下评分不会反写首次理解率。</p>
-        {frozen.target_contract.map(item => <fieldset key={item.target_delta_id}>
-          <legend>{item.description}</legend>
-          <label>实际达成度 {scores[item.target_delta_id] ?? 50}%
-            <input type="range" min="0" max="100" step="5" value={scores[item.target_delta_id] ?? 50}
-              onChange={event => setScores(current => ({ ...current, [item.target_delta_id]: Number(event.target.value) }))} />
-          </label>
-          <label>观察说明<textarea value={interpretations[item.target_delta_id] || ''}
-            onChange={event => setInterpretations(current => ({ ...current, [item.target_delta_id]: event.target.value }))} /></label>
-        </fieldset>)}
-        <button type="button" className="btn primary" disabled={busy} onClick={() => void submitObservation()}>
-          提交真人观察
-        </button>
-      </div>}
-      <div className="narrative-calibration-rebuild">
-        <button type="button" className="btn" disabled={busy} onClick={() => void rebuildCalibration(false)}>预览全局校准</button>
-        {calibrationPreview?.report && <p>
-          样本 {calibrationPreview.report.sample_summary?.observation_count ?? 0} 份 ·
-          结论 {calibrationPreview.report.decision === 'calibrated' ? '可激活' : '仍需补样本'}
-        </p>}
-        {calibrationPreview?.report?.decision === 'calibrated' && !calibrationPreview.activated &&
-          <button type="button" className="btn primary" disabled={busy} onClick={() => void rebuildCalibration(true)}>
-            激活校准权威
-          </button>}
-      </div>
-    </>}
-  </details>
-}
-
-function NarrativeReadinessPanel({
-  episode,
-  notify,
-  onChanged,
-}: {
-  episode: Episode
-  notify: (message: string, error?: boolean) => void
-  onChanged: () => Promise<unknown> | unknown
-}) {
-  const summary = episode.narrative_contract_summary
-  if (!summary) return null
-  const metrics = episode.narrative_metrics || {}
-  const review = episode.narrative_review_summary
-  const calibration = episode.narrative_calibration_summary
-  const numberMetric = (key: string) => {
-    const value = metrics[key]
-    return typeof value === 'number' && Number.isFinite(value) ? value : null
-  }
-  const percentMetric = (key: string) => {
-    const value = numberMetric(key)
-    return value === null ? '待计算' : `${Math.round(value * 100)}%`
-  }
-  const duplicateActions = numberMetric('duplicate_primary_action_count')
-  const stateRegressions = numberMetric('state_regression_count')
-  const processingDebt = numberMetric('audience_processing_debt')
-  const ready = metrics.narrative_ready === true && calibration?.ready === true
-  const reviewCopy = review?.decision === 'pass'
-    ? calibration?.ready
-      ? '冷观众与一次观看权威通过'
-      : '等待一次观看权威'
-    : review?.decision === 'revise'
-      ? '冷观众要求修订'
-      : review?.decision === 'needs_human_review'
-        ? '等待人工复核'
-        : '等待冷观众审读'
-
-  return <section className="card narrative-readiness" aria-label="全链路叙事一致性">
-    <header>
-      <div><b>全链路叙事一致性</b><span>同一事件、动作、人物认知与观众理解合同贯穿映射和分镜</span></div>
-      <span className={`stamp ${ready ? 'green' : 'gold'}`}>{ready ? '叙事就绪' : reviewCopy}</span>
-    </header>
-    <dl>
-      <div><dt>命题 / 事件</dt><dd>{summary.proposition_count} / {summary.event_count}</dd></div>
-      <div><dt>目标观众路径</dt><dd>{summary.audience_prior_count}</dd></div>
-      <div><dt>事件交付覆盖</dt><dd>{percentMetric('event_coverage_rate')}</dd></div>
-      <div><dt>重复主动作</dt><dd>{duplicateActions ?? '待计算'}</dd></div>
-      <div><dt>状态回退</dt><dd>{stateRegressions ?? '待计算'}</dd></div>
-      <div><dt>观众处理欠债</dt><dd>{processingDebt === null ? '待计算' : `${processingDebt.toFixed(1)}s`}</dd></div>
-      <div><dt>一次观看权威</dt><dd>{
-        calibration?.ready
-          ? '当前版本已绑定'
-          : calibration?.status === 'awaiting_republish'
-            ? '已就绪，待发布绑定'
-            : '待激活'
-      }</dd></div>
-    </dl>
-    {review?.reason && <p>{review.reason}</p>}
-    {calibration?.blockers?.length ? <p className="narrative-calibration-blocker">{calibration.blockers[0]}</p> : null}
-    <details><summary>查看理解与结构指标</summary><p>体验意图覆盖 {percentMetric('experience_intent_coverage_rate')} · 认知任务截止通过 {percentMetric('assimilation_deadline_pass_rate')} · 镜头功能贡献 {percentMetric('shot_contribution_coverage')}</p><p>系统逐个观众先验验收，不以平均高分替代低分位失败。</p></details>
-    <HumanCalibrationControls episode={episode} notify={notify} onChanged={onChanged} />
-  </section>
-}
-
 function statusFallback(ep: Episode): StoryboardStatus {
   return {
     contract_version: 'storyboard-workspace.v1', snapshot_version: 0, state_fingerprint: '',
@@ -772,7 +518,7 @@ export default function BoardPage() {
   // 分镜台 2.0.0 段落资源清单里的 portrait_id/scene_reference_id 指向项目人物谱/
   // 场景库，需要同一份 bible 才能查缩略图；口径与用法都照抄 ScriptPage.tsx（同一个
   // 项目、一次性拉取、不轮询）。
-  const { data: project } = useProject(projectId!, 0, 'bible')
+  const { data: project, refresh: refreshProject } = useProject(projectId!, 0, 'bible')
   const [busy, setBusy] = useState(false)
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null)
   const [onlyProblems, setOnlyProblems] = useState(false)
@@ -781,6 +527,13 @@ export default function BoardPage() {
   const [confirmPreview, setConfirmPreview] = useState<ConfirmPreview | null>(null)
   const [clearPreview, setClearPreview] = useState<StoryboardClearPreview | null>(null)
   const [videoModelConfirm, setVideoModelConfirm] = useState<VideoModelSwitchConfirm | null>(null)
+  const [providerClearance, setProviderClearance] = useState<ProviderTaskClearance | null>(null)
+  const [providerReconcileBusy, setProviderReconcileBusy] = useState(false)
+  const [providerReconcileResult, setProviderReconcileResult] = useState<ProviderTaskReconcileResult | null>(null)
+  // 两个不同按钮（清空视频提示词 / 切换视频模型）撞上同一个 409
+  // PROVIDER_TASKS_NOT_TERMINAL 时复用同一块恢复面板；这个状态只决定解除
+  // 阻塞后该指引用户回去点哪个按钮，不影响核对逻辑本身。
+  const [providerClearanceOrigin, setProviderClearanceOrigin] = useState<'clear' | 'video_model' | null>(null)
   const [videoModelBusy, setVideoModelBusy] = useState(false)
   const timelineRef = useRef<HTMLDivElement>(null)
   const startPreviewTriggerRef = useRef<HTMLElement | null>(null)
@@ -892,11 +645,7 @@ export default function BoardPage() {
     )
   }
   const currentEpisodeId = ep.id
-  const primaryAction = storyboardPrimaryAction(
-    status,
-    ep.narrative_calibration_summary,
-    ep.narrative_review_summary,
-  )
+  const primaryAction = storyboardPrimaryAction(status)
 
   const run = async <T,>(fn: () => Promise<T>, message?: string): Promise<T | undefined> => {
     setBusy(true)
@@ -955,11 +704,6 @@ export default function BoardPage() {
   }
 
   const runPrimary = async () => {
-    if (primaryAction.intent === 'activate_ai_one_watch') {
-      const result = await run(() => activateAiOneWatchSimulation(ep.id))
-      if (result) toast(result.message || 'AI 一次观看模拟权威已激活')
-      return
-    }
     switch (primaryAction.intent) {
       case 'go_screenplay': go('script', projectId, ep.id); break
       case 'generate_storyboard': await loadStartPreview(); break
@@ -1022,13 +766,60 @@ export default function BoardPage() {
     const previewToken = clearPreview.preview_token
     const deletedShots = clearPreview.shot_count
     setClearPreview(null)
-    const result = await run(
-      () => api.post(`/episodes/${ep.id}/storyboard/clear`, { preview_token: previewToken }),
-      `已清空 ${deletedShots} 个视频提示词段落及其下游资源，映射结果已保留`,
-    )
-    if (!result) return
-    setSelectedShotId(null)
-    clearShotFilters()
+    setBusy(true)
+    try {
+      await api.post(`/episodes/${ep.id}/storyboard/clear`, { preview_token: previewToken })
+      toast(`已清空 ${deletedShots} 个视频提示词段落及其下游资源，映射结果已保留`)
+      await refresh({ force: true })
+      setSelectedShotId(null)
+      clearShotFilters()
+    } catch (caught) {
+      const apiError = caught as ApiError
+      if (apiError.code === 'PROVIDER_TASKS_NOT_TERMINAL') {
+        // 供应商付费任务尚未确认终态时闸门本身是对的：不核实就清空会丢账。
+        // 但不能只把用户挡在这里——detail.blockers 是每一条具体卡住了什么、
+        // 后端建议怎么核对，接到面板上让用户能真正采取行动，而不是对着一句
+        // 「请核对供应商创建结果」却无处可核对。
+        const detail = apiError.detail as Partial<ProviderTaskClearance> | undefined
+        setProviderReconcileResult(null)
+        setProviderClearanceOrigin('clear')
+        setProviderClearance({
+          safe_to_clear: false,
+          resume_supported: detail?.resume_supported ?? true,
+          blockers: detail?.blockers ?? [],
+        })
+      } else {
+        toast(apiError.message, true)
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const reconcileProviderTasks = async () => {
+    setProviderReconcileBusy(true)
+    try {
+      const result = await api.post(
+        `/episodes/${currentEpisodeId}/provider-tasks/reconcile`,
+        {},
+      ) as ProviderTaskReconcileResult
+      setProviderReconcileResult(result)
+      setProviderClearance(result.clearance)
+      if (result.clearance.safe_to_clear) {
+        const retryLabel = providerClearanceOrigin === 'video_model' ? '切换视频模型' : '清空视频提示词'
+        toast(`供应商任务已核对完毕，阻塞已解除，可以重新点击「${retryLabel}」`)
+      }
+    } catch (caught) {
+      toast((caught as Error).message, true)
+    } finally {
+      setProviderReconcileBusy(false)
+    }
+  }
+
+  const closeProviderClearancePanel = () => {
+    setProviderClearance(null)
+    setProviderReconcileResult(null)
+    setProviderClearanceOrigin(null)
   }
 
   const pauseStoryboard = async () => {
@@ -1067,6 +858,18 @@ export default function BoardPage() {
           current_target_video_model: detail?.current_target_video_model ?? currentVideoModel,
           prompt_artifact_count: detail?.prompt_artifact_count ?? 0,
         })
+      } else if (apiError.code === 'PROVIDER_TASKS_NOT_TERMINAL') {
+        // 切换视频模型在本集已有视频产物时会走与「清空视频提示词」相同的
+        // _require_provider_clearance 闸门；撞上同一种阻塞，复用同一块
+        // 恢复面板，不能又让这条路径回到无处下手的裸错误提示。
+        const detail = apiError.detail as Partial<ProviderTaskClearance> | undefined
+        setProviderReconcileResult(null)
+        setProviderClearanceOrigin('video_model')
+        setProviderClearance({
+          safe_to_clear: false,
+          resume_supported: detail?.resume_supported ?? true,
+          blockers: detail?.blockers ?? [],
+        })
       } else {
         toast(apiError.message, true)
       }
@@ -1095,8 +898,6 @@ export default function BoardPage() {
         <hr className="rule" />
       </header>
 
-      <NarrativeReadinessPanel episode={ep} notify={toast} onChanged={refresh} />
-
       {showLaunchPanel ? (
         <StoryboardLaunchPanel episode={ep} status={status} busy={busy} onPrimary={() => { void runPrimary() }} />
       ) : <><section className={`card board-toolbar state-${status.state}`} aria-labelledby="storyboard-state-title">
@@ -1104,13 +905,21 @@ export default function BoardPage() {
           <div className="board-state-copy">
             <span className={`storyboard-state-dot state-${status.state}`} aria-hidden="true" />
             <div>
-              <strong id="storyboard-state-title">{storyboardHeadlineLabel(status.headline)}</strong>
+              {/* .board-state-copy strong 是单行省略号截断（工具栏窄时常见，
+                  尤其分集标题较长或视口较窄时）；曾经真实发生过用户看到的
+                  报错文案被截断在句子中间、看不出后半句在说什么（真实回归
+                  ep_3d523ff4d0a4）。title 把完整文案原样暴露给悬浮/屏幕阅读
+                  器，不改变视觉截断本身——截断是空间限制下的合理取舍，但
+                  不能让用户在文案被截断时无处可查完整内容。 */}
+              <strong id="storyboard-state-title" title={storyboardHeadlineLabel(status.headline)}>
+                {storyboardHeadlineLabel(status.headline)}
+              </strong>
               <small>{progressCopy.summary}{terminalFinalShot ? ' · 收尾段有效' : ''}</small>
             </div>
           </div>
           <div className="board-action-group">
-            <label title="切换本集绑定的视频生成模型；两个供应商提示词方言不兼容，与生成台强绑定">
-              <span>视频模型</span>
+            <label title="切换本集绑定的视频生成模型；两个供应商提示词方言不兼容，与生成台强绑定。作用域：仅本集">
+              <span>视频模型（本集）</span>
               <select
                 aria-label="切换本集视频生成模型"
                 disabled={busy || videoModelBusy}
@@ -1122,6 +931,17 @@ export default function BoardPage() {
                 ))}
               </select>
             </label>
+            <StageTextModelPicker
+              projectId={projectId!}
+              field="board_text_provider"
+              label="文本模型（项目）"
+              title="分镜台生成分镜内容使用的文本模型（与左边的视频模型是两回事：视频模型控制提交视频生成用哪个供应商，且只对本集生效）。作用域：整个项目，对该项目所有分集的分镜台生效，不是只对本集；不选则使用系统默认文本模型，只影响之后新发起的分镜生成，不影响已生成内容"
+              value={project?.board_text_provider}
+              choices={project?.text_model_choices ?? []}
+              disabled={busy}
+              toast={toast}
+              onSaved={() => void refreshProject({ force: true })}
+            />
             {toolbarActions.pause ? <>
               <button id="storyboard-primary-action" type="button" className="btn board-primary-action danger"
                 disabled={busy} aria-label={busy ? '暂停任务，正在处理' : '暂停视频提示词任务'}
@@ -1322,6 +1142,58 @@ export default function BoardPage() {
         onClose={() => setVideoModelConfirm(null)}
         onConfirm={() => void submitVideoModel(videoModelConfirm.requested_target_video_model, true)}
       />}
+
+      <Modal open={!!providerClearance} title="供应商付费任务尚未终态，未清空任何资源"
+        onClose={closeProviderClearancePanel}
+        actions={<>
+          <button type="button" className="btn" onClick={closeProviderClearancePanel}>关闭</button>
+          <button type="button" className="btn primary" disabled={providerReconcileBusy}
+            onClick={() => void reconcileProviderTasks()}>
+            {providerReconcileBusy ? '正在核对…' : '核对供应商任务状态'}
+          </button>
+        </>}>
+        {providerClearance && <div className="storyboard-preview-card">
+          <p>
+            以下任务可能已被供应商接单，直接清空会让这笔费用查无对应产物；不核实清楚就清空可能丢账，所以先挡在这里。
+            点击「核对供应商任务状态」会去问供应商每个任务的真实状态——只有确认结果（成功/失败）或确认从未真正提交给供应商，才会解除阻塞；
+            供应商仍在处理中的任务会原样保留，不提供绕过闸门的选项。
+          </p>
+          <ul className="provider-blocker-list">
+            {providerClearance.blockers.map(blocker => {
+              const shotNo = shots.find(shot => shot.id === blocker.shot_id)?.shot_no
+              return (
+                <li key={blocker.job_id}>
+                  <b>{shotNo != null ? `第 ${shotNo} 段` : '未知段落'} · 任务 {blocker.job_id}</b>
+                  <span>费用 ¥{blocker.amount_cny.toFixed(2)} · 状态 {blocker.job_status}</span>
+                  <span>{providerRecoveryActionLabel(blocker)}</span>
+                </li>
+              )
+            })}
+          </ul>
+          {!providerClearance.blockers.length && (
+            <p role="status">
+              没有更多阻塞任务了；可以关闭本面板，
+              重新点击「{providerClearanceOrigin === 'video_model' ? '切换视频模型' : '清空视频提示词'}」。
+            </p>
+          )}
+          {providerReconcileResult && (
+            <div className="board-progress-explanation" role="status">
+              <b>核对结果</b>
+              <span>
+                {providerReconcileResult.provider_confirmed_terminal_job_ids.length
+                  ? `${providerReconcileResult.provider_confirmed_terminal_job_ids.length} 个任务确认供应商终态并已结算费用责任；`
+                  : ''}
+                {providerReconcileResult.superseded_jobs_closed_job_ids.length
+                  ? `${providerReconcileResult.superseded_jobs_closed_job_ids.length} 个任务确认从未提交给供应商（所属段落已有其他成功版本），已作为过时任务收口；`
+                  : ''}
+                {providerReconcileResult.clearance.blockers.length
+                  ? `仍有 ${providerReconcileResult.clearance.blockers.length} 个任务在供应商侧处理中，请稍后再核对一次`
+                  : `全部解除，可以重新点击「${providerClearanceOrigin === 'video_model' ? '切换视频模型' : '清空视频提示词'}」`}
+              </span>
+            </div>
+          )}
+        </div>}
+      </Modal>
 
       <Modal open={!!startPreview} title={startPreviewCopy?.title ?? '视频提示词任务'} onClose={closeStartPreview}
         actions={<><button className="btn" onClick={closeStartPreview}>取消</button><button className="btn primary" disabled={startPreview?.can_start === false} onClick={() => void submitStart()}>

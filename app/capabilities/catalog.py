@@ -1437,6 +1437,7 @@ def _register_exemptions(registry) -> None:
         "POST /api/episodes/{episode_id}/storyboard/clear-preview": "整集分镜清空前的影响预览与短时凭证签发；不删除制作数据",
         "POST /api/episodes/{episode_id}/storyboard/clear": "分镜台本机人工清空入口；必须消费当前影响预览凭证，不向 Agent/MCP 开放",
         "POST /api/episodes/{episode_id}/video-model": "分镜台人工切换本集绑定视频模型入口；已有生成产物时必须显式 confirm_clear_prompts 二次确认，且该清空分支要求 manju:project-write（与 video.clear_episode_videos 同档，review/readonly 会被 403 挡下）；无产物的普通切换不受此限，不向 Agent/MCP 开放",
+        "POST /api/episodes/{episode_id}/provider-tasks/reconcile": "分镜台清空/切换视频模型撞上 409 PROVIDER_TASKS_NOT_TERMINAL 的人工恢复入口；只做两件事——核对仍疑似在途的供应商任务真实终态（供应商自己确认成功/失败才结算），以及关闭本地证据已证明「从未提交给供应商、所属镜头已有其他成功版本」的孤儿任务；不下载或采用任何结果、不提交新任务、不放宽闸门，要求 manju:project-write（与 video-model 清空分支同档），不向 Agent/MCP 开放",
         "PUT /api/projects/{project_id}/text-models": "世界书/映射台/分镜台分环节专属文本模型的人工切换入口（bible_text_provider/script_text_provider/board_text_provider）；项目级设置，与分镜台「视频模型」的分集级强绑定是两回事——这里只影响之后新发起的该环节生成调用选哪个 provider，不清空已有产出、不需要二次确认。全端点收在 manju:project-write（与 video-model 的清空分支同档，review/readonly 会被 403 挡下），不向 Agent/MCP 开放",
         "POST /api/episodes/{episode_id}/storyboard/structure-preview": "分镜结构变更前只读预览",
         "POST /api/episodes/{episode_id}/storyboard/structure": "分镜台人工结构编辑入口；必须消费页面预览凭证",
