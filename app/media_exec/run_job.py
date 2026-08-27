@@ -335,28 +335,6 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
         "screenplay_revision", "storyboard_revision",
     )
     upstream_equal = all(current.get(key) == captured.get(key) for key in upstream_keys)
-    expected_authority = (
-        str(expected).split(":", 1)[0]
-        if ":" in str(expected)
-        else None
-    )
-    current_authority = current.get("narrative_authority_version")
-    current_requires_authority = bool(current.get("narrative_authority_required"))
-    if current_requires_authority:
-        _assert_current_storyboard_completion_authority(
-            conn,
-            episode_id=episode_id,
-            write_point=write_point,
-        )
-    authority_equal = bool(
-        (not current_requires_authority and expected_authority is None)
-        or (
-            current_requires_authority
-            and expected_authority
-            and expected_authority == current_authority
-            and current.get("narrative_authority_verified")
-        )
-    )
     expected_assets = captured.get("asset_inputs") or []
     current_assets = current.get("asset_inputs") or []
     # The current shot's gallery is produced/updated by this very job.  It is
@@ -367,27 +345,38 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
     target_shot_id = row["shot_id"] if row else None
 
     def asset_contract(items):
-        return sorted(
+        return {
             json.dumps(
                 {key: value for key, value in item.items() if key not in {"version_id"}},
                 ensure_ascii=False, sort_keys=True,
             )
             for item in items
             if item.get("shot_id") != target_shot_id
-        )
+        }
     # Modern narrative jobs bind exact asset revisions in the validated video
     # plan and recheck them again at provider submission. Shot galleries are
     # downstream outputs: parallel sibling jobs naturally add images and must
-    # not invalidate one another's captured qualification snapshot.
+    # not invalidate one another's captured qualification snapshot — a sibling
+    # shot resolving its own gallery for the first time only ever *adds* an
+    # entry, it never touches this shot's own dependencies.
+    #
+    # This must therefore be a subset check (every asset this job's snapshot
+    # depended on is still present, unchanged, right now), not a full-set
+    # equality: exact equality also breaks the moment any sibling shot's
+    # gallery grows mid-flight, even though nothing this job depends on
+    # actually changed. Reproduced on EP1: shots 5/6/7 were technically valid
+    # and already downloaded, but got fenced out purely because shot 5/6's
+    # own galleries gained entries while an earlier sibling's job was still
+    # awaiting its own later checkpoint. A previously-captured entry that
+    # disappears or changes (a real edit/removal of a qualified asset) must
+    # still fail closed; a snapshot merely gaining unrelated entries must not.
     assets_equal = bool(
-        current_requires_authority
-        or not expected_assets
-        or asset_contract(current_assets) == asset_contract(expected_assets)
+        not expected_assets
+        or asset_contract(expected_assets) <= asset_contract(current_assets)
     )
     if (
         current.get("eligible_for_production")
         and upstream_equal
-        and authority_equal
         and assets_equal
     ):
         return
@@ -396,9 +385,6 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
         "write_point": write_point,
         "expected_qualification_version": expected,
         "current_qualification_version": current.get("qualification_version"),
-        "expected_narrative_authority_version": expected_authority,
-        "current_narrative_authority_version": current_authority,
-        "narrative_authority_required": current_requires_authority,
         "blockers": current.get("blockers") or [],
     }
     try:

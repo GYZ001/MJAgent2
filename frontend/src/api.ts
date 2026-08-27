@@ -1749,6 +1749,9 @@ export interface ReviewUpstreamSnapshot {
     stage?: string | null;
   }>;
   qualification_version: string;
+  /** 按镜作用域的资格版本：本镜生成/采纳只应比对自己这一份——兄弟镜新增
+   * 素材不会改变它，真正的本镜素材漂移或上游变化仍会改变它。 */
+  shot_qualification_versions?: Record<string, string>;
   eligible_for_production: boolean;
   blockers: string[];
   assets: {

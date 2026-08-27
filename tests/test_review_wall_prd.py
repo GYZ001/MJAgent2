@@ -1164,3 +1164,65 @@ def test_worker_still_fences_gallery_change_on_another_shot(monkeypatch) -> None
         worker._assert_review_dependency_fence(
             {"episode_id": "e", "shot_id": "s1"}, "v-current", "candidate",
         )
+
+
+def test_worker_ignores_sibling_gallery_growth_on_another_shot(monkeypatch) -> None:
+    """复现 EP1 段5/6/7 假失败：兄弟镜并发解析出新素材条目，不得让在途镜误判过期。
+
+    与 ``test_worker_still_fences_gallery_change_on_another_shot`` 对照：那个
+    测试里兄弟镜是把已存在的条目改了内容（rule_version 变化），仍必须拦住；
+    这里兄弟镜只是新增了一条之前不存在的条目（自己的资格解析第一次落库），
+    不得让别的在途镜的资格快照被判定过期——两者都不要求 narrative authority，
+    直接命中 ``assets_equal`` 的非豁免分支。
+    """
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO shots(
+               id,episode_id,shot_no,duration_s,shot_size,camera_move,
+               scene_setting,action_desc,characters,dialogues,storyboard_artifact_id
+           ) VALUES('s2','e',2,5,'中景','固定','日，测试室内场景',
+                    'other','[]','[]','board-1')"""
+    )
+    original_reference = {
+        "id": "other-ref", "selectedForSeedance": True,
+        "gate_status": "passed", "rule_version": "r1",
+    }
+    conn.execute(
+        """INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at)
+           VALUES('v-other','s2',1,'p','other-key','succeeded',?,0)""",
+        (json.dumps({"reference_images": [original_reference]}),),
+    )
+    conn.commit()
+    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    snapshot = api._review_upstream_snapshot("e")
+    captured = {
+        key: snapshot.get(key) for key in (
+            "qualification_version", "published_screenplay_artifact_id",
+            "confirmed_storyboard_artifact_id", "screenplay_revision",
+            "storyboard_revision", "asset_inputs", "asset_soft_warnings",
+        )
+    }
+    conn.execute(
+        """INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at)
+           VALUES('v-current','s1',1,'p','current-key','running',?,1)""",
+        (json.dumps({"review_dependency_snapshot": captured}),),
+    )
+    # 兄弟镜 s2 的画廊只是新增了一条条目（自己首次落库的解析结果），原有的
+    # other-ref 原样保留、内容未变。
+    new_sibling_reference = {
+        "id": "brand-new-sibling-ref", "selectedForSeedance": True,
+        "gate_status": "passed", "rule_version": "r1",
+    }
+    conn.execute(
+        "UPDATE shot_versions SET image_inputs=? WHERE id='v-other'",
+        (json.dumps({"reference_images": [original_reference, new_sibling_reference]}),),
+    )
+    conn.commit()
+
+    # 修复前：assets_equal 用整集精确列表相等比较，这里会误炸
+    # REVIEW_DEPENDENCY_STALE；修复后：只要求 expected 是 current 的子集，
+    # 新增条目不影响已被别的在途镜依赖的既有条目，不应报错。
+    worker._assert_review_dependency_fence(
+        {"episode_id": "e", "shot_id": "s1"}, "v-current", "candidate",
+    )

@@ -749,36 +749,72 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
         "asset_blockers": assets["blockers"],
         "asset_soft_warnings": assets["soft_warnings"],
         "active_storyboard_shot_ids": active_storyboard_shot_ids,
+    }
+    # qualification_version 判据必须分两半：episode 级"稳定事实"（剧本/分镜是否
+    # 重新发布、上游任务是否在跑、叙事权威判定）用严格相等——这些漂移是真实
+    # 陈旧提交，必须 409。资产解析结果（asset_inputs/asset_soft_warnings）是
+    # 整集范围聚合、但按镜归属：正常操作下"点段1生成 -> 段1素材进清单"必然会
+    # 让另一段（如段2）此前拿到手的整集哈希失配，同一次真实操作把自己顶掉
+    # （CON-409 · ERR-20260826-3de956 现场复现）。修法：把资产部分按 shot_id
+    # 拆开各自求摘要，episode 级 qualification_version 仍是"稳定摘要+整集资产
+    # 摘要"给整集范围操作（补齐全片/陈旧资产批量修复）用；额外给每个镜头一份
+    # "稳定摘要+本镜资产摘要"的 shot_qualification_versions，单镜生成/采纳只
+    # 认自己这一份——兄弟镜新增素材不出现在这份材料里，不会误顶；本镜素材被
+    # 替换/删除、或稳定部分漂移，仍然改变这份摘要，继续 fail-closed。
+    stable_material = {
+        "episode_id": episode_id,
+        "episode_status": ep.get("status"),
+        "confirmed": confirmed,
+        "published_screenplay_artifact_id": published_screenplay,
+        "confirmed_storyboard_artifact_id": published_storyboard,
+        "screenplay_revision": ep.get("screenplay_production_revision_id"),
+        "storyboard_revision": ep.get("storyboard_production_revision_id"),
+        "active_upstream_runs": active,
+        "active_storyboard_shot_ids": active_storyboard_shot_ids,
         "narrative_authority_required": bool(narrative_authority["required"]),
         "narrative_authority_verified": bool(narrative_authority["verified"]),
         "narrative_authority_version": narrative_authority.get("authority_version"),
-        "narrative_authority": narrative_authority,
     }
-    qualification_material = {
-        **raw,
-        "narrative_authority": {
-            key: value
-            for key, value in narrative_authority.items()
-            if not key.startswith("narrative_review")
-            and not key.startswith("narrative_calibration")
-        },
-        # The gallery may be copied into a newly queued version. The version
-        # row is lineage, not an upstream dependency; hashing it would make a
-        # run invalidate itself even when every asset/rule verdict is equal.
-        "asset_inputs": [
-            {key: value for key, value in item.items() if key != "version_id"}
-            for item in assets["inputs"]
-        ],
+    stable_digest = _review_sha(stable_material)[:32]
+
+    def _asset_material(items: list[dict[str, Any]], warnings: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            # version_id 是画廊落点，不是上游依赖；纳入哈希会让一次生成让自己
+            # 的采纳/复制动作使自己捕获的资格失效（同源注释见旧版实现）。
+            "asset_inputs": [
+                {key: value for key, value in item.items() if key != "version_id"}
+                for item in items
+            ],
+            "asset_soft_warnings": warnings,
+        }
+
+    episode_assets_digest = _review_sha(
+        _asset_material(assets["inputs"], assets["soft_warnings"]),
+    )[:32]
+    qualification_version = f"{stable_digest}:{episode_assets_digest}"
+
+    assets_by_shot: dict[str, list[dict[str, Any]]] = {}
+    for item in assets["inputs"]:
+        assets_by_shot.setdefault(str(item.get("shot_id") or ""), []).append(item)
+    warnings_by_shot: dict[str, list[dict[str, Any]]] = {}
+    for item in assets["soft_warnings"]:
+        shot_key = str(item.get("shot_id") or "")
+        if shot_key:
+            warnings_by_shot.setdefault(shot_key, []).append(item)
+    shot_qualification_versions = {
+        str(shot_id): (
+            f"{stable_digest}:"
+            + _review_sha(_asset_material(
+                assets_by_shot.get(str(shot_id), []),
+                warnings_by_shot.get(str(shot_id), []),
+            ))[:32]
+        )
+        for shot_id in active_storyboard_shot_ids
     }
-    qualification_digest = _review_sha(qualification_material)[:32]
-    qualification_version = (
-        f"{narrative_authority['authority_version']}:{qualification_digest}"
-        if narrative_authority["required"]
-        else qualification_digest
-    )
     return {
         **raw,
         "qualification_version": qualification_version,
+        "shot_qualification_versions": shot_qualification_versions,
         "eligible_for_production": bool(
             confirmed
             and has_artifacts
@@ -792,9 +828,26 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
     }
 
 
-def _review_assert_positive_action(episode_id: str, expected_qualification_version: str | None = None) -> dict[str, Any]:
+def _review_assert_positive_action(
+    episode_id: str,
+    expected_qualification_version: str | None = None,
+    *,
+    shot_id: str | None = None,
+) -> dict[str, Any]:
+    """按行动作用域校验资格快照没有漂移。
+
+    ``shot_id`` 给出时按该镜自己的 ``shot_qualification_versions`` 判——资产
+    部分只看这一镜自己的解析结果，兄弟镜新增资产不计入（见
+    ``_review_upstream_snapshot`` 同一处改动的注释）。整集范围的调用方
+    （补齐全片、批量陈旧资产修复）不传 ``shot_id``，继续用整集范围的
+    ``qualification_version``，语义不变。
+    """
     snapshot = _review_upstream_snapshot(episode_id)
-    if expected_qualification_version and expected_qualification_version != snapshot["qualification_version"]:
+    current_version = (
+        snapshot.get("shot_qualification_versions", {}).get(shot_id)
+        if shot_id else snapshot["qualification_version"]
+    )
+    if expected_qualification_version and expected_qualification_version != current_version:
         raise HTTPException(409, {
             "code": "REVIEW_QUALIFICATION_CHANGED",
             "message": "上游或资产资格已变化，请重新预演",
@@ -815,7 +868,9 @@ def _review_assert_shot_positive(shot_id: str, expected_qualification_version: s
     ).fetchone()
     if not row:
         raise HTTPException(404, "镜头不存在")
-    return _review_assert_positive_action(row["episode_id"], expected_qualification_version)
+    return _review_assert_positive_action(
+        row["episode_id"], expected_qualification_version, shot_id=shot_id,
+    )
 
 
 def _review_assert_reference_restore(version_id: str, ref_id: str) -> dict[str, Any]:
