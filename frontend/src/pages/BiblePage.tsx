@@ -45,7 +45,7 @@ type PaymentQuote = RefsCostPrecheck & {
 }
 
 type PaymentSelection = { characters: string[] }
-type VisualStyleOption = { name: string; description: string }
+type VisualStyleOption = { name: string; description: string; sample_image: string }
 
 export function currentPortrait(character: Character): Portrait | null {
   const portraits = [...(character.portraits ?? [])]
@@ -1988,7 +1988,7 @@ function VisualStyleDialog({
     }}>
       <section ref={trapRef} className="impact-dialog" role="dialog" aria-modal="true" aria-label="选择统一画面风格">
         <h3>选择统一画面风格</h3>
-        <p>该风格会写入后端任务合同，后续人物、场景、分镜和视频都会沿用。页面只展示风格名称和用途说明。</p>
+        <p>该风格会写入后端任务合同，后续人物、场景、分镜和视频都会沿用。示例图供参考，实际生成效果以最终成片为准。</p>
         {loading && <div className="query-inline">正在读取风格列表…</div>}
         {error && <div className="error-banner" role="alert">{error}</div>}
         {!loading && !error && (
@@ -2001,6 +2001,14 @@ function VisualStyleDialog({
                 aria-pressed={selected === option.name}
                 onClick={() => onSelect(option.name)}
               >
+                {option.sample_image && (
+                  <img
+                    className="visual-style-thumb"
+                    src={option.sample_image}
+                    alt={`${option.name}示例图`}
+                    loading="lazy"
+                  />
+                )}
                 <span>
                   <b>{option.name}</b>
                   <small>{option.description}</small>

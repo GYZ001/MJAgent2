@@ -260,7 +260,17 @@
   outline: 2px solid rgba(181, 68, 52, 0.38);
   outline-offset: 2px;
 }
+.visual-style-thumb {
+  flex: 0 0 auto;
+  width: 52px;
+  height: 52px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: rgba(108, 113, 121, 0.12);
+}
 .visual-style-option span {
+  flex: 1 1 auto;
+  min-width: 0;
   display: grid;
   gap: 4px;
 }

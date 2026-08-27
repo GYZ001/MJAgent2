@@ -4609,6 +4609,27 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
 - 不得改写、扩写、缩写或替换该统一画风提示词。
 - 角色外观、场景、定妆照和后续视频提示词都必须服从该统一画风。
 """
+    if visual_style_prompt:
+        # 本次已提供统一画风提示词：下方 world.visual_style_canonical 最终必然逐字
+        # 等于 visual_style_prompt（后端强制覆盖，见 validate_authoritative_bible），
+        # 模型这里自己构思的版本不会被采用。此时不能再要求模型"必须是非真人风格"——
+        # 用户可能选中的正是真人摄影风预设，同一份提示词里同时说"必须逐字保留统一画风"
+        # 又说"严禁真人风格描述"是自相矛盾指令，会污染模型对其它字段（如
+        # appearance_canonical）的语气判断。
+        visual_style_rule = (
+            "3. visual_style_canonical：本次已提供统一画风提示词（见下文最高优先级指令），"
+            "直接原样理解即可，不需要自己另行构思风格描述——这个字段最终由后端逐字写入该"
+            "提示词，你在这里的输出不会被采用。"
+        )
+    else:
+        visual_style_rule = (
+            "3. visual_style_canonical：25~40 字的全局画风串，包含 美术风格/光线/色调，"
+            "适配竖屏漫剧，必须依据本书题材定制。【硬性约束】必须是 CG/动画/漫画/插画类的"
+            "非真人风格（如 3D 渲染、3D 写实 CG、2D 动画、动态漫画、厚涂插画、国漫风等，"
+            "写实质感/照片级/胶片颗粒等氛围词可以保留），但严禁\"真人实拍/真人出镜/实拍摄影\""
+            "这类真人风格描述（否则后续 Seedance 视频接口会因疑似真人而报错 "
+            "InputImageSensitiveContentDetected）。核心是画面为 CG/动画渲染而非真人拍摄。"
+        )
     prompt = f"""任务：从小说文本中提取角色圣经与世界观，用于后续 AI 视频生成的一致性控制。
 
 要求：
@@ -4633,7 +4654,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
      连接多处），且这句引文里必须能直接读出是在描写这个角色本人（角色的正式姓名或已
      确认别名要出现在这同一句短引文里，不是出现在原文的其他地方）。原文没有可举证的
      标志性特征时，source_evidence 就是空数组——这是诚实的默认值，不会因此被拒绝。
-3. visual_style_canonical：25~40 字的全局画风串，包含 美术风格/光线/色调，适配竖屏漫剧，必须依据本书题材定制。【硬性约束】必须是 CG/动画/漫画/插画类的非真人风格（如 3D 渲染、3D 写实 CG、2D 动画、动态漫画、厚涂插画、国漫风等，写实质感/照片级/胶片颗粒等氛围词可以保留），但严禁"真人实拍/真人出镜/实拍摄影"这类真人风格描述（否则后续 Seedance 视频接口会因疑似真人而报错 InputImageSensitiveContentDetected）。核心是画面为 CG/动画渲染而非真人拍摄。
+{visual_style_rule}
 4. speech_style 用于后续台词写作：句长习惯/口头禅/敬语习惯等，15~30 字。
 5. name 必须互不重复且取原文最稳定的正式姓名；同一人物在原文中出现的其它别名/外号/尊称/
    代称（包括真名揭晓前的描述性代称，如"银色长袍女子"）不要拆成多个角色，而是逐条列入
@@ -4729,14 +4750,29 @@ class _SceneBibleDraft(BaseModel):
 async def generate_scene_bible(chapters: list[dict], bible: Bible,
                                feedback: str = "", project_id: str | None = None) -> list[Scene]:
     """从原文提取「规范场景」清单，作为场景图素材库的底稿（与 generate_bible 同构）。
-    每个场景给 name（稳定短标签）+ scene_canonical（固定场景锚点串，画风约束与人物锚点一致：
-    必须 CG/动画/漫画类非真人风格，否则后续 Seedance/Seedream 易因疑似真人报错）。"""
+    每个场景给 name（稳定短标签）+ scene_canonical（固定场景锚点串，画风约束与人物锚点一致，
+    按 bible.world.visual_style_canonical 是否为照片级真人摄影预设二选一：非摄影风格必须
+    CG/动画/漫画类非真人风格，否则后续 Seedance/Seedream 易因疑似真人报错；摄影风格则相反，
+    要求真实材质与摄影级细节）。"""
+    from app.visual_styles import is_photographic_style_prompt
     chapters_text = _render_bible_source(chapters)
     style = bible.world.visual_style_canonical
     genre = bible.world.genre or ""
     feedback_part = ""
     if feedback.strip():
         feedback_part = f"\n人工打回重生要求（最高优先级）：\n{feedback.strip()}\n"
+    if is_photographic_style_prompt(style):
+        scene_style_rule = (
+            f'4. 【硬性约束】scene_canonical 必须贴合全片画风「{style}」，是照片级摄影质感的'
+            "实景环境描述，允许并鼓励真实材质、自然光影与摄影级细节；场景本身仍是虚构地点，"
+            "不指向可识别的真实地标、真实机构或真实商业品牌名称。"
+        )
+    else:
+        scene_style_rule = (
+            f'4. 【硬性约束】scene_canonical 必须贴合全片画风「{style}」，是 CG/动画/漫画/插画类的'
+            '非真人渲染场景（写实质感氛围词可保留），严禁"真人实拍/实景照片/摄影棚实拍"这类描述'
+            "（否则后续图像/视频接口会因疑似真人实景报错）。"
+        )
     prompt = f"""任务：从小说文本中提取【规范场景清单】，用于后续 AI 视频生成的场景一致性控制（场景图素材库）。
 
 全片画风（场景锚点必须与之一致）：{style}
@@ -4746,7 +4782,7 @@ async def generate_scene_bible(chapters: list[dict], bible: Bible,
 1. 只收录【反复出现 / 有戏份 / 画面感强】的关键场景（如主角居所、宗门广场、夜晚密林、朝堂等），最多 12 个；一次性出现的过场地点不要收录。
 2. name：稳定的场景短标签（4~10 字，如"宗门广场""破败客栈内"），后续所有分镜的场景都收敛到这些名字，便于跨集复用同一张场景图。name 之间不要语义重复。
 3. scene_canonical 是该场景的"固定场景锚点串"：30~60 字，必须包含 地点/室内外/典型光线时段/标志性陈设或建筑/整体氛围色调。只写视觉可见的环境信息，不写人物、不写剧情动作。原著未描写处按题材与画风合理补全并保持内部一致。
-4. 【硬性约束】scene_canonical 必须贴合全片画风「{style}」，是 CG/动画/漫画/插画类的非真人渲染场景（写实质感氛围词可保留），严禁"真人实拍/实景照片/摄影棚实拍"这类描述（否则后续图像/视频接口会因疑似真人实景报错）。
+{scene_style_rule}
 5. location_kind 取"室内/室外/其他"之一。
 
 小说文本：

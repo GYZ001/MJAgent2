@@ -3,14 +3,17 @@ import sqlite3
 
 from app.refs import (
     _merge_generated_portraits,
+    character_visual_style_lock,
     effective_portrait_prompt,
     portrait_appearance_anchor,
     portrait_prompt,
     production_appearance_anchor,
+    scene_visual_style_lock,
 )
 from app.multiview import character_view_prompt
 from app.portraits import bible_for_episode
 from app.schemas import Bible, Character, World
+from app.visual_styles import visual_style_prompt
 
 
 def test_portrait_prompt_preserves_nonstandard_form_without_word_routing() -> None:
@@ -34,6 +37,35 @@ def test_portrait_prompt_uses_open_conditional_model_sheet_pose() -> None:
     assert "明显动画化比例和非照片级卡通渲染材质" in prompt
     assert "不得生成可误认成真人照片的写实人脸" in prompt
     assert "不得添加外观合同未声明的主体或视觉元素" in prompt
+
+
+def test_portrait_prompt_does_not_fight_photographic_style_preset() -> None:
+    """根因回归：真人摄影风预设不应再被硬编码的"必须是卡通/CG"文案顶掉。
+
+    改动前 character_visual_style_lock/portrait_prompt 对所有画风一律追加
+    "人物面部与皮肤必须采用明显动画化比例和非照片级卡通渲染材质"，与刚刚在同一
+    句话里声明的"必须严格保持「照片级人像摄影质感」"直接自相矛盾，这是"新增的
+    真人风格对定妆照不生效"的根因。"""
+    real_photo_style = visual_style_prompt("真人摄影风")
+    prompt = portrait_prompt(real_photo_style, "十五六岁少年，黑发束成马尾")
+
+    assert "照片级人像摄影质感" in prompt
+    assert "摄影级写实质感和自然人体比例" in prompt
+    assert "非照片级卡通" not in prompt
+    assert "动画化比例" not in prompt
+    assert "不得擅自切换成卡通" in prompt
+
+
+def test_character_and_scene_style_lock_stay_non_photographic_for_cg_presets() -> None:
+    """未选中照片级预设时，原有"必须保持 CG/非真人渲染"防线保持不变（不回归）。"""
+    guoman_style = visual_style_prompt("国漫电影风")
+
+    char_lock = character_visual_style_lock(guoman_style)
+    scene_lock = scene_visual_style_lock(guoman_style)
+
+    assert "CG/动画/漫画/插画类非真人渲染" in char_lock
+    assert "明显动画化比例和非照片级卡通/CG 渲染材质" in char_lock
+    assert "动画/插画/CG 场景渲染" in scene_lock
 
 
 def test_portrait_prompt_preserves_approved_identity_contract_verbatim() -> None:

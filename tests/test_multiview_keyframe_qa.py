@@ -733,6 +733,71 @@ def test_keyframe_qa_receives_library_visual_anchors(monkeypatch, tmp_path) -> N
     assert qa.get("status") == "scored" or qa.get("overall") >= 0.8
 
 
+def test_keyframe_qa_does_not_block_photoreal_for_photographic_style_preset(monkeypatch, tmp_path) -> None:
+    """根因回归（下游）：真人摄影风预设生成的照片级关键帧不该被"检测到真人/实拍"硬门禁拦回去。
+
+    改动前 photoreal_detected/live_action_detected 一旦为 True 无条件进 blocking_facts，
+    即便项目选中的正是照片级真人摄影预设——那会让"定妆照已经修好"在关键帧这一步前功尽弃。"""
+    import asyncio
+    from app.multiview import review_keyframe_with_evidence
+    from app.schemas import Bible, Character, Shot, World
+    from app.visual_styles import visual_style_prompt
+
+    async def fake_vlm(frames, expectation, call_meta=None):
+        return json.dumps({
+            "overall": 0.9, "action_match": 0.9, "body_proportion": 0.9,
+            "style_match": 0.9,
+            "face_identity": 0.9, "outfit_match": 0.9, "hair_match": 0.9, "scene_match": 0.9,
+            "photoreal_detected": True, "live_action_detected": True,
+            "identity_contract": {
+                "characters": [{
+                    "name": "A", "present": True, "gender_match": True,
+                    "identity_match": True, "outfit_match": True, "instance_count": 1,
+                }],
+                "unexpected_recognizable_people": 0,
+            },
+            "hard_failures": [], "issues": [],
+        })
+
+    monkeypatch.setattr("app.hiagent.vlm_check", fake_vlm)
+    monkeypatch.setattr("app.multiview.visual_evidence_qa_enabled", lambda: True)
+    monkeypatch.setattr("app.hiagent.encode_image_file", lambda path: f"b64:{path}")
+
+    front = tmp_path / "front.jpg"
+    front.write_bytes(b"front")
+    shot = Shot(
+        shot_no=1, duration_s=5, shot_size="中景", camera_move="固定", scene_setting="室内",
+        characters=["A"], action_desc="A坐着", first_frame_desc="A坐着", last_frame_desc="A站起",
+        source_excerpt="A坐着", dialogues=[], transition="硬切", continuity_from_prev=False,
+    )
+    anchors = [{"image_path": str(front), "entity_type": "character", "entity_name": "A",
+                "view_role": "front_full"}]
+
+    photographic_bible = Bible(
+        characters=[Character(name="A", role="lead", appearance_canonical="黑发")],
+        world=World(visual_style_canonical=visual_style_prompt("真人摄影风")),
+    )
+    cg_bible = Bible(
+        characters=[Character(name="A", role="lead", appearance_canonical="黑发")],
+        world=World(visual_style_canonical=visual_style_prompt("国漫电影风")),
+    )
+
+    photographic_qa = asyncio.run(review_keyframe_with_evidence(
+        "candidate_b64", shot=shot, bible=photographic_bible, visual_anchors=anchors,
+    ))
+    cg_qa = asyncio.run(review_keyframe_with_evidence(
+        "candidate_b64", shot=shot, bible=cg_bible, visual_anchors=anchors,
+    ))
+
+    assert "photoreal_medium_detected" not in photographic_qa.get("hard_failures", [])
+    assert "live_action_medium_detected" not in photographic_qa.get("hard_failures", [])
+    assert photographic_qa.get("runtime_blocking") is not True
+
+    assert "photoreal_medium_detected" in cg_qa.get("hard_failures", [])
+    assert "live_action_medium_detected" in cg_qa.get("hard_failures", [])
+    assert cg_qa.get("runtime_blocking") is True
+
+
 def test_contextual_identity_passes_text_contract_without_portrait_anchor(
     monkeypatch,
 ) -> None:

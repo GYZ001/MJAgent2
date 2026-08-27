@@ -121,10 +121,11 @@ def test_visual_style_options_expose_names_and_descriptions_only(monkeypatch) ->
 
     assert result["default"] == "国漫电影风"
     assert any(
-        item["name"] == "现实电影风" and "写实" in item["description"]
+        item["name"] == "真人摄影风" and "真人" in item["description"]
         for item in result["items"]
     )
-    assert all(set(item) == {"name", "description"} for item in result["items"])
+    assert all(set(item) == {"name", "description", "sample_image"} for item in result["items"])
+    assert all(item["sample_image"] for item in result["items"])
 
 
 def test_bible_generate_precheck_binds_style_name(monkeypatch) -> None:
@@ -142,9 +143,9 @@ def test_bible_generate_precheck_binds_style_name(monkeypatch) -> None:
         "SELECT * FROM projects WHERE id='p1'"
     ).fetchone()))
 
-    quote = bible_ops._compute_bible_generate_precheck("p1", style_name="现实电影风")
+    quote = bible_ops._compute_bible_generate_precheck("p1", style_name="真人摄影风")
 
-    assert quote["style_name"] == "现实电影风"
+    assert quote["style_name"] == "真人摄影风"
     assert quote["quote_id"] == fingerprint({
         "project_id": "p1",
         "action": "generate_bible_and_refs",
@@ -152,7 +153,7 @@ def test_bible_generate_precheck_binds_style_name(monkeypatch) -> None:
         "image_count": 36,
         "unit": 0.2,
         "bible_version": 0,
-        "style_name": "现实电影风",
+        "style_name": "真人摄影风",
     })
 
 

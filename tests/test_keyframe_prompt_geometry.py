@@ -110,10 +110,48 @@ def test_seeded_keyframe_omits_redundant_textual_character_appearance() -> None:
     assert "Visible named identities, each exactly once: subject 1" in seeded
     assert "subject 2留在画外" in seeded
     assert "Reference images are authoritative for identity, outfit" in seeded
-    assert "clearly stylized anime facial proportions" in seeded
-    assert "cel-shaded CG skin and clothing materials" in seeded
+    # 非摄影画风（此处的 marker 不命中任何照片级预设）仍要求非真人渲染介质；
+    # 该分支文案由 app.video_modes._photographic_medium_instruction 统一产出，
+    # 与照片级预设选中时的相反措辞（要求摄影写实）二选一，不再是硬编码单一措辞。
+    assert "non-live-action and non-photorealistic" in seeded
     assert "photograph or live-action" not in seeded
     assert "MULTI-KEYFRAME IDENTITY LOCK" not in seeded
+
+
+def test_seeded_keyframe_requests_photographic_medium_for_photographic_style_preset() -> None:
+    """根因回归（下游）：项目选中真人摄影风预设时，种子关键帧合同不能再硬塞"必须是二次元/CG"。
+
+    自建中性占位人物/场景，不依赖共享夹具 `_bible()`/`_contact_shot()` 里的具体小说人名默认值。
+    """
+    from app.visual_styles import visual_style_prompt
+
+    bible = Bible(
+        characters=[
+            Character(name="角色甲", role="主角", appearance_canonical="十五岁少年，黑发，灰黑劲装"),
+            Character(name="角色乙", role="配角", appearance_canonical="十五岁少年，短发，青色劲装"),
+        ],
+        world=World(visual_style_canonical=visual_style_prompt("真人摄影风")),
+    )
+    shot = _contact_shot(
+        characters=["角色甲", "角色乙"],
+        characters_visible=["角色甲", "角色乙"],
+        scene_setting="日，测验广场",
+        action_desc="角色甲走到石碑前，抬起右手按住石碑，角色乙在侧方观察。",
+        first_frame_desc="角色甲从人群中走出，右手尚未碰到石碑。",
+        last_frame_desc="角色甲右掌已贴住石碑，角色乙留在画外。",
+        state_in="角色甲靠近石碑。",
+        primary_action="角色甲抬手按住石碑。",
+        state_out="角色甲右掌仍贴住石碑。",
+        source_excerpt="他走到石碑之前，缓缓把手掌贴在冰冷的石面上。",
+    )
+
+    seeded = video_modes.reference_generation_prompt(
+        shot, bible, "plot_key_frame", 1, identity_seeded=True,
+    )
+
+    assert "Keep the image fully photographic and photorealistic" in seeded
+    assert "anime facial proportions" not in seeded
+    assert "cel-shaded CG" not in seeded
 
 
 def test_seeded_terminal_keyframe_compiles_typed_endpoint_without_free_prose() -> None:

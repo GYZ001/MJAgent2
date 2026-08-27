@@ -1531,7 +1531,14 @@ async def generate_scene_refs(
 async def assess_new_scene(label: str, spatial_context: str, *, style: str,
                            known_names: list[str], ep_label: str) -> dict:
     """把已确认剧本场次解析为新场景或已有场景别名，并产出自动建库字段。"""
+    from app.visual_styles import is_photographic_style_prompt
     known = "、".join(known_names) or "（无）"
+    scene_canonical_style_rule = (
+        f"必须贴合画风「{style}」，是照片级摄影质感的实景环境描述，允许并鼓励真实材质、"
+        "自然光影与摄影级细节。"
+        if is_photographic_style_prompt(style)
+        else f"必须贴合画风「{style}」，是 CG/动画/漫画类非真人渲染场景，严禁真人实拍/实景照片描述。"
+    )
     prompt = f"""任务：把已确认剧本场次地点「{label}」解析成可用于分镜的规范场景。
 
 全片画风（场景锚点必须与之一致）：{style}
@@ -1546,7 +1553,7 @@ async def assess_new_scene(label: str, spatial_context: str, *, style: str,
 - important=true：它是已有列表之外的真正新地点，必须自动加入场景库并生成场景图。
 - important=false：仅当它确实是已有场景的别名/简称；existing_scene_name 必须返回已有列表中的完整名称。
 - name：稳定的场景短标签（4~10 字），不要与已有场景重名。
-- scene_canonical 是"固定场景锚点串"：30~60 字，须含 地点/室内外/光线时段/标志陈设/氛围色调；只写视觉可见的环境信息，不写人物、不写剧情动作。必须贴合画风「{style}」，是 CG/动画/漫画类非真人渲染场景，严禁真人实拍/实景照片描述。
+- scene_canonical 是"固定场景锚点串"：30~60 字，须含 地点/室内外/光线时段/标志陈设/氛围色调；只写视觉可见的环境信息，不写人物、不写剧情动作。{scene_canonical_style_rule}
 
 只输出一个 JSON 对象：
 {{"important": true/false, "existing_scene_name": "已有规范场景完整名称或空字符串", "reason": "一句话依据", "name": str, "scene_canonical": str, "location_kind": "室内|室外|其他"}}"""

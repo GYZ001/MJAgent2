@@ -688,7 +688,7 @@ export const api = {
   bibleVisualStyles: (projectId: string) =>
     request("GET", `/projects/${projectId}/bible/visual-styles`) as Promise<{
       default: string;
-      items: Array<{ name: string; description: string }>;
+      items: Array<{ name: string; description: string; sample_image: string }>;
     }>,
   bibleGeneratePrecheck: (projectId: string, body?: { style_name?: string }) =>
     request(

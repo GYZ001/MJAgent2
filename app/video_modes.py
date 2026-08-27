@@ -1410,6 +1410,29 @@ def _seeded_structured_endpoint(
     )
 
 
+def _photographic_medium_instruction(visual_style_canonical: str) -> str:
+    """English-language rendering-medium clause for Seedance reference/keyframe prompts.
+
+    Historically this was a blanket "stay non-photorealistic / anime proportions"
+    instruction, written back when every visual style preset was CG-only. That
+    directly contradicts the photo-realistic presets (真人摄影风/精修真人风) added
+    later: it would silently repaint an already-photographic seeded reference back
+    into a cartoon look. Branch on the resolved style instead of hardcoding one
+    medium for every project.
+    """
+    from app.visual_styles import is_photographic_style_prompt
+    if is_photographic_style_prompt(visual_style_canonical):
+        return (
+            "Keep the image fully photographic and photorealistic, matching the "
+            "reference images' real-camera look; never switch to a cartoon, anime, "
+            "or CG-rendered medium."
+        )
+    return (
+        "Keep the image fully non-live-action and non-photorealistic; never "
+        "switch to a real-person photo look."
+    )
+
+
 def reference_generation_prompt(
     shot: Shot,
     bible: Bible,
@@ -1544,9 +1567,7 @@ def reference_generation_prompt(
                 "proportions, environment, and visual style."
             ),
             (
-                "Use clearly stylized anime facial proportions, cel-shaded CG "
-                "skin and clothing materials, and visibly illustrated surface "
-                "detail for every person."
+                _photographic_medium_instruction(bible.world.visual_style_canonical)
             ),
             (
                 "Render the target as one physically continuous progression "
@@ -1569,7 +1590,7 @@ def reference_generation_prompt(
     if ref_type != "plot_key_frame":
         return (
             common
-            + "Keep the image fully non-live-action and non-photorealistic; never switch to a real-person photo look. "
+            + _photographic_medium_instruction(bible.world.visual_style_canonical) + " "
             + "No text, no subtitles, no watermark, no logo, no extra limbs, no motion blur. 9:16 portrait. "
             "The image must be suitable as a Seedance 2.0 reference image."
         )
@@ -1670,10 +1691,12 @@ async def review_reference_image(
         id="qa", url="", type=ref_type, source="review", qa=data,
     )
     data["hard_failures"] = _hard_failures_of(typed_asset)
+    from app.visual_styles import is_photographic_style_prompt
+    style_is_photographic = is_photographic_style_prompt(bible.world.visual_style_canonical)
     data["runtime_blocking"] = any((
         data.get("style_contract_matches") is False,
-        data.get("photoreal_detected") is True,
-        data.get("live_action_detected") is True,
+        (not style_is_photographic) and data.get("photoreal_detected") is True,
+        (not style_is_photographic) and data.get("live_action_detected") is True,
     ))
     return data
 

@@ -58,12 +58,17 @@ def normalize_prompt_text(text: str) -> str:
 
 
 _PORTRAIT_CLOTHING_CONTRACT = (
-    "常规角色设定图着装，服装面料不透明并完整覆盖身体，"
+    "常规角色定妆照着装，服装面料不透明并完整覆盖身体，"
     "重点呈现面部、发型、外层服装和可见配饰"
 )
 _PORTRAIT_PRIVACY_SAFE_STYLE = (
     "人物面部与皮肤必须采用明显动画化比例和非照片级卡通渲染材质，"
     "保持虚构角色辨识度但不得生成可误认成真人照片的写实人脸"
+)
+_PORTRAIT_PHOTOGRAPHIC_STYLE_NOTE = (
+    "人物面部与皮肤必须采用摄影级写实质感和自然人体比例，保留清晰可见的肌理、"
+    "毛孔与光影层次；角色身份仍是虚构数字角色、并非真实世界中存在的真人照片，"
+    "但渲染手法必须是照片级摄影写实，不得改画成卡通或插画质感"
 )
 _PORTRAIT_OVERRIDE_APPEARANCE_ONLY_NOTE = (
     "最近一次用户编辑文案作为完整外观补充；全局画风合同仍独立生效"
@@ -86,7 +91,15 @@ def ensure_portrait_clothing_contract(prompt: str) -> str:
 
 def visual_style_lock(visual_style: str) -> str:
     style = normalize_prompt_text(visual_style or "").strip()
+    from app.visual_styles import is_photographic_style_prompt
     prefix = f"画风最高优先级：必须严格保持「{style}」，" if style else "画风最高优先级："
+    if is_photographic_style_prompt(style):
+        return normalize_prompt_text(
+            prefix
+            + "整体必须保持统一的照片级人像摄影渲染，要求真实的人体比例、自然肌理、"
+              "摄影质感的光影和景深；不得擅自切换成卡通、二次元、插画、CG 渲染或其他"
+              "与该画风冲突的非写实风格"
+        )
     return normalize_prompt_text(
         prefix
         + "不得擅自切换成与该画风冲突的真人摄影、照片写实、live-action、"
@@ -95,6 +108,15 @@ def visual_style_lock(visual_style: str) -> str:
 
 
 def character_visual_style_lock(visual_style: str) -> str:
+    from app.visual_styles import is_photographic_style_prompt
+    style = normalize_prompt_text(visual_style or "").strip()
+    if is_photographic_style_prompt(style):
+        return normalize_prompt_text(
+            f"{visual_style_lock(visual_style)}。"
+            "人物面部与皮肤必须采用照片级摄影写实质感和自然人体比例，保留清晰可见的"
+            "肌理、毛孔与光影层次；角色身份仍是虚构数字角色，但渲染手法不得画成卡通、"
+            "二次元或 CG 材质"
+        )
     return normalize_prompt_text(
         f"{visual_style_lock(visual_style)}。"
         "人物面部与皮肤必须采用明显动画化比例和非照片级卡通/CG 渲染材质，"
@@ -103,6 +125,14 @@ def character_visual_style_lock(visual_style: str) -> str:
 
 
 def scene_visual_style_lock(visual_style: str) -> str:
+    from app.visual_styles import is_photographic_style_prompt
+    style = normalize_prompt_text(visual_style or "").strip()
+    if is_photographic_style_prompt(style):
+        return normalize_prompt_text(
+            f"{visual_style_lock(visual_style)}。"
+            "环境必须保持统一的实景摄影质感渲染，要求真实材质、自然光影和摄影级细节，"
+            "不得切换成卡通、插画或 CG 渲染背景"
+        )
     return normalize_prompt_text(
         f"{visual_style_lock(visual_style)}。"
         "环境必须保持统一的动画/插画/CG 场景渲染，不得切换成真人实景、"
@@ -132,14 +162,20 @@ def effective_portrait_prompt(
 
 
 def portrait_prompt(visual_style: str, anchor: str) -> str:
+    from app.visual_styles import is_photographic_style_prompt
     style = character_visual_style_lock(visual_style)
     body = production_appearance_anchor(anchor)
+    privacy_note = (
+        _PORTRAIT_PHOTOGRAPHIC_STYLE_NOTE
+        if is_photographic_style_prompt(normalize_prompt_text(visual_style or "").strip())
+        else _PORTRAIT_PRIVACY_SAFE_STYLE
+    )
     return normalize_prompt_text(
-        f"{style}。单角色全身概念定妆设定图：{body}。"
+        f"{style}。单角色全身定妆照：{body}。"
         "完整遵循锚点声明的实体形态、空间关系、姿态和关联道具；"
         "若锚点未声明特殊姿态，则采用正面中性展示姿态。纯浅米色背景，全身完整可见。"
         "头顶、肩臂和鞋底均不得贴边或出画，主体四周保留至少 8% 安全边距。"
-        f"{_PORTRAIT_CLOTHING_CONTRACT}。{_PORTRAIT_PRIVACY_SAFE_STYLE}。"
+        f"{_PORTRAIT_CLOTHING_CONTRACT}。{privacy_note}。"
         "不得添加外观合同未声明的主体或视觉元素"
     )
 

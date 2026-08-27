@@ -208,7 +208,7 @@ def character_view_prompt(
         f"角色外观真值锚点：{source}。"
         "外观补充与全局画风是两个独立合同；冲突时全局画风优先，"
         "不得按外观文案关键词删除或重写内容。"
-        f"生成同一角色多视角设定图（{VIEW_ROLE_LABELS.get(view_role, view_role)}）。"
+        f"生成同一角色多视角定妆照（{VIEW_ROLE_LABELS.get(view_role, view_role)}）。"
         f"{framing}。纯浅米色背景，单角色。"
         "本条视角与构图要求覆盖源提示词中的视角、姿态和景别要求，但不得覆盖全局画风。"
         "同一角色、只改变观察角度，不改变稳定身份合同；结果必须满足结构化资产 QA。"
@@ -2433,6 +2433,14 @@ async def review_keyframe_with_evidence(
         if wm_mode == "ignore_unless_occluding"
         else "检查画面干净度，水印可计入问题。"
     )
+    from app.visual_styles import is_photographic_style_prompt
+    project_style = getattr(getattr(bible, "world", None), "visual_style_canonical", "")
+    style_is_photographic = is_photographic_style_prompt(project_style)
+    style_match_desc = (
+        "是否严格保持项目选定的照片级真人摄影画风，未切换成卡通、二次元或 CG 渲染质感"
+        if style_is_photographic
+        else "是否严格保持统一非真人 CG/动画/漫画画风，未切换成真人实拍、照片写实或 live-action 质感"
+    )
     expectation = {
         "task": "Evidence-based narrative keyframe QA for Seedance.",
         "image_manifest": image_manifest,
@@ -2467,7 +2475,7 @@ async def review_keyframe_with_evidence(
             "relative_height_match": "是否符合 geometry_requirements 中的同高或明示身高差，且没有强透视夸大",
             "collective_presence_match": "有叙事群体时，是否按目标数量/主次/动作以群体出现，而非缩成单人；无群体返回 N/A",
             "required_text_match": "required_text_expected=true 时检查字面、承载面与样式；false 时目标帧禁字并返回 N/A",
-            "style_match": "是否严格保持统一非真人 CG/动画/漫画画风，未切换成真人实拍、照片写实或 live-action 质感",
+            "style_match": style_match_desc,
             "face_identity": "与人物锚点脸部特征一致；脸不可见时返回 null 或 N/A",
             "outfit_match": "款式颜色层次配饰与本集造型一致",
             "hair_match": "发型长度发色刘海轮廓一致",
@@ -2762,9 +2770,11 @@ async def review_keyframe_with_evidence(
         blocking_facts.append("anatomy_contract_failed")
     if data.get("watermark_occluding") is True:
         blocking_facts.append("watermark_occludes_subject")
-    if data.get("photoreal_detected") is True:
+    # 项目选定照片级真人摄影画风时，"看起来像真人摄影"是预期结果而非缺陷；
+    # 只有非摄影画风下检测到真人/实拍质感才是画风漂移，才应该拦。
+    if not style_is_photographic and data.get("photoreal_detected") is True:
         blocking_facts.append("photoreal_medium_detected")
-    if data.get("live_action_detected") is True:
+    if not style_is_photographic and data.get("live_action_detected") is True:
         blocking_facts.append("live_action_medium_detected")
     geometry_guard = data.get("geometry_guard")
     if isinstance(geometry_guard, dict):
