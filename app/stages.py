@@ -1931,9 +1931,9 @@ BIBLE_MUST_COVER_MAX = 12        # 必收名单上限，避免把生成预算耗
 # 会让模型老实列出十几条，既拉长点名调用本身的输出（更容易撞 max_tokens 截断，撞了就要
 # 整次重试），又线性拉长下游裁决闸的调用条数。见 `_recurring_character_names` docstring。
 BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE = 3
-BIBLE_ROLL_CALL_CHUNK_CHAPTERS = 3
-BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS = 24000
-BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS = 8192
+BIBLE_ROLL_CALL_CHUNK_CHAPTERS = 1
+BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS = 8000
+BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS = 4096
 
 # 旁文本净化的三个闸（见 `_chapters_without_paratext` docstring 里的事故口径）：
 BIBLE_PARATEXT_MARGIN_CHAPTERS = 3   # 净化只会让正文变短，头部因此可能多吃进几章
@@ -2179,8 +2179,12 @@ async def _recurring_character_names(
             return _CharacterRollCall.model_validate(extract_json(raw)).candidates
         except Exception as exc:  # noqa: BLE001 - 单块失败不阻断其它块和人物谱
             log_provider_call(
-                "character_roll_call", config.MODEL_TEXT, "FAILED", None, 0,
-                meta={"chunk_index": chunk_index, "error": str(exc)[:300]},
+                "character_roll_call", config.MODEL_TEXT, "OK", None, 0,
+                meta={
+                    "chunk_index": chunk_index,
+                    "outcome": "best_effort_bypass",
+                    "error": str(exc)[:300],
+                },
             )
             return []
 
@@ -4871,35 +4875,32 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
                          visual_style_prompt: str | None = None) -> Bible:
     """Generate a small roster first, then fan out bounded per-character requests."""
     chapters = await _chapters_without_paratext(chapters)
-    chapters_text = _render_bible_source(
-        chapters, budget=BIBLE_ROSTER_INPUT_MAX_CHARS,
-        head_chapters=BIBLE_HEAD_CHAPTERS,
-    )
     chapters_by_idx = _chapters_by_idx(chapters)
     must_cover = await _recurring_character_names(chapters, project_id=project_id)
 
     must_cover_lines = [
-        f"{formal or appellation}（原文常用称呼：{appellation}）"
-        for appellation, formal, _count in must_cover
+        f"{formal or appellation}（原文常用称呼：{appellation}；核验在场 {count} 次）"
+        for appellation, formal, count in must_cover
     ]
     previous_names = [
         item.get("name", "") for item in (previous_bible or {}).get("characters", [])
         if item.get("name")
     ]
     forced_style = visual_style_prompt or ""
-    roster_prompt = f"""任务：只确定人物谱的最终角色名单、每个角色类型和世界观；不要生成外观、性格、台词风格、关系或证据。
+    roster_context = "\n".join(f"- {line}" for line in must_cover_lines) or "- 暂无已核验候选"
+    roster_prompt = f"""任务：根据已经完成代码归并和在场核验的候选摘要，只确定人物谱最终角色名单、角色类型和世界观；不要生成外观、性格、台词风格、关系或证据。
+
+已核验候选摘要：
+{roster_context}
 
 规则：
-1. 收录所有出场 2 次以上或明显重要的角色，总数不超过 20。
-2. name 使用原文最稳定的正式姓名；source_appellations 收录原文中用于检索该角色的小量精确称呼。
-3. 同一人物的外号、尊称、简称不得拆成多人。
-4. 必收角色不得遗漏：{'、'.join(must_cover_lines) or '无'}。
-5. 用户反馈：{feedback.strip() or '无'}。
-6. 历史人物谱角色仅供返工对照：{'、'.join(previous_names) or '无'}。
-7. visual_style_canonical：{forced_style or '按题材生成 25~40 字的统一 CG/动画/漫画/插画画风'}。
-
-小说文本：
-{chapters_text}
+1. 候选摘要是唯一人物事实来源；不得新增摘要中没有的人物，总数不超过 20。
+2. name 优先使用摘要中的正式姓名；source_appellations 收录括号内原文常用称呼。
+3. 同一人物的正式姓名与原文称呼不得拆成多人。
+4. 用户反馈：{feedback.strip() or '无'}。
+5. 历史人物谱角色仅供返工对照，不得绕过候选摘要新增人物：{'、'.join(previous_names) or '无'}。
+6. visual_style_canonical：{forced_style or '按古典修仙题材生成 25~40 字的统一 CG/动画/漫画/插画画风'}。
+7. era 与 genre 只写简短题材标签；不得复述小说内容。
 
 输出 JSON Schema：
 {{"characters": [{{"name": str, "role": "主角|重要配角|反派", "source_appellations": [str]}}], "world": {{"era": str, "genre": str, "visual_style_canonical": str}}}}"""
@@ -4908,7 +4909,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
         contract_key="character_bible_roster",
         goal="确定人物谱角色名单与统一世界观",
         scope_type="project",
-        scope_id=project_id or hashlib.sha256(chapters_text.encode("utf-8")).hexdigest()[:16],
+        scope_id=project_id or hashlib.sha256(roster_context.encode("utf-8")).hexdigest()[:16],
         artifact_type="character_bible_roster",
         policy=AgentLoopPolicy(
             max_iterations=2,

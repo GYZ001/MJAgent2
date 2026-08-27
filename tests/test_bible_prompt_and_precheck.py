@@ -604,6 +604,8 @@ def test_generate_bible_uses_small_roster_contract_and_single_character_details(
 
     assert [item.name for item in bible.characters] == ["李富贵"]
     assert "不要生成外观" in str(seen["prompt"])
+    assert "已核验候选摘要" in str(seen["prompt"])
+    assert "小胖子与孟浩同行" not in str(seen["prompt"])
     assert seen["repair_user_prompt_limit"] == 16000
     assert seen["entries"][0].source_appellations == ["小胖子"]
 

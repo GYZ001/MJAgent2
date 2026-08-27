@@ -89,6 +89,6 @@ async def test_roll_call_sends_small_parallel_chunks(monkeypatch) -> None:
     monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
     chapters = [{"idx": i, "title": f"第{i}章", "content": "正文" * 100} for i in range(1, 11)]
     await stages._recurring_character_names(chapters)
-    assert len(inputs) == 4
+    assert len(inputs) == 10
     assert peak > 1
     assert all(len(item) < stages.BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS + 2000 for item in inputs)

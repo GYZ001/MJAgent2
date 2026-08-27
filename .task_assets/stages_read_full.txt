@@ -1,0 +1,2102 @@
+Read "/Users/bytedance/Desktop/漫剧Agent2.0/app/stages.py":
+
+  3601	            else "candidate_mismatch"
+  3602	        )
+  3603	        return {**empty, "reason": reason}
+  3604	    if _alias_verdict_pin_segment(dossier, response.supporting_segment_index) is None:
+  3605	        return {**empty, "reason": "segment_not_pinned"}
+  3606	    return {
+  3607	        "accepted": True, "chapter_idx": resolved_chapter_index,
+  3608	        "quote": resolved_quote, "reason": "",
+  3609	    }
+  3610	
+  3611	
+  3612	async def _verify_character_aliases_for_subset(
+  3613	    bible: Bible, characters: list[Character], chapters_by_idx: dict[int, str], *,
+  3614	    project_id: str | None = None,
+  3615	) -> dict[str, list[str]]:
+  3616	    """`_verify_character_aliases_in_place` 的内层循环，抽成可传入显式 `characters`
+  3617	    子集的辅助函数——供 `_verify_character_aliases_in_place`（传入 `bible.characters`
+  3618	    全量，行为与抽取前完全一致）与 `_supplement_bible_characters`（补录 append 成功
+  3619	    后只对本次新增角色调用，不对已核验过的角色重复发起模型调用）共用。
+  3620	
+  3621	    候选面快照（`roster`，供裁决闸判别"这个称呼指代候选中的谁"）永远取自完整
+  3622	    `bible.characters`，不受 `characters` 子集影响：核验范围可以只挑几个角色，
+  3623	    但候选集必须是整本人物谱——否则会重演"真实误登记事故 2"同一形状的问题
+  3624	    （裁决模型看不到正确候选，只能矮子里拔将军）。只处理 aliases 字段，绝不触碰
+  3625	    角色的任何其它既有字段。"""
+  3626	    roster = _alias_verdict_roster(bible)
+  3627	    added: dict[str, list[str]] = {}
+  3628	    for character in characters:
+  3629	        anchor_texts = {character.name}
+  3630	        verified: list[CharacterAlias] = []
+  3631	        added_texts: list[str] = []
+  3632	        for item in character.aliases:
+  3633	            text = (item.text or "").strip()
+  3634	            if not text or text == character.name or text in anchor_texts:
+  3635	                continue
+  3636	            resolved = await _alias_evidence_resolution(
+  3637	                chapters_by_idx, anchor_texts, text, character.name,
+  3638	                item.evidence_chapter_index, item.evidence_quote,
+  3639	                roster=roster, project_id=project_id, bible=bible,
+  3640	            )
+  3641	            if resolved["accepted"]:
+  3642	                verified.append(CharacterAlias(
+  3643	                    text=text, name_kind=item.name_kind,
+  3644	                    evidence_chapter_index=resolved["chapter_idx"],
+  3645	                    evidence_quote=resolved["quote"],
+  3646	                ))
+  3647	                anchor_texts.add(text)
+  3648	                added_texts.append(text)
+  3649	        character.aliases = verified
+  3650	        if added_texts:
+  3651	            added[character.name] = added_texts
+  3652	    return added
+  3653	
+  3654	
+  3655	async def _verify_character_aliases_in_place(
+  3656	    bible: Bible, chapters: list[dict], *, project_id: str | None = None,
+  3657	) -> dict[str, list[str]]:
+  3658	    """`generate_bible` 主链路核验：模型随人物谱正文一并申报的 aliases 同样只是申报，
+  3659	    落库前必须过同一套代码核验（`_alias_evidence_resolution`，与回填函数共用；模型
+  3660	    申报章节没通过共现闸时，退一步做全书桥接章检索，通过共现闸后还要再过一道桥接章
+  3661	    原文独立裁决，见该函数 docstring）。只处理 aliases 字段，绝不触碰角色的任何其它
+  3662	    既有字段。核验范围是 `bible.characters` 全量（内层循环见
+  3663	    `_verify_character_aliases_for_subset`）。"""
+  3664	    chapters_by_idx = _chapters_by_idx(chapters)
+  3665	    return await _verify_character_aliases_for_subset(
+  3666	        bible, bible.characters, chapters_by_idx, project_id=project_id,
+  3667	    )
+  3668	
+  3669	
+  3670	def _render_alias_backfill_source(
+  3671	    chapters: list[dict], budget: int = ALIAS_BACKFILL_SOURCE_BUDGET_CHARS,
+  3672	) -> str:
+  3673	    """为别名回填渲染全书原文：块头强制显示原文章节序号（idx），不像 `_render_bible_source`
+  3674	    那样优先用章节标题——回填要求模型精确报出 `evidence_chapter_index`，标题文本
+  3675	    （可能是任意小说章节名）无法保证与 idx 对应，块头必须显式给出数字。"""
+  3676	    valid = [ch for ch in chapters if (ch.get("content") or "").strip()]
+  3677	    blocks: list[str] = []
+  3678	    used = 0
+  3679	    for chapter in valid:
+  3680	        remain = budget - used
+  3681	        if remain <= 200:
+  3682	            break
+  3683	        content = chapter["content"].strip()
+  3684	        clipped = content[:remain]
+  3685	        suffix = "……（原文过长已截断）" if len(content) > remain else ""
+  3686	        blocks.append(f"【第 {chapter.get('idx', '?')} 章】\n{clipped}{suffix}")
+  3687	        used += len(clipped)
+  3688	    return "\n\n".join(blocks)
+  3689	
+  3690	
+  3691	class _AliasBackfillDeclaration(BaseModel):
+  3692	    """别名回填申报合同：模型只申报，是否登记由后端核验决定。"""
+  3693	
+  3694	    character_name: str = ""
+  3695	    text: str = ""
+  3696	    name_kind: str = ""
+  3697	    evidence_chapter_index: int = -1
+  3698	    evidence_quote: str = ""
+  3699	
+  3700	
+  3701	class _AliasBackfillDraft(BaseModel):
+  3702	    aliases: list[_AliasBackfillDeclaration] = Field(default_factory=list)
+  3703	
+  3704	
+  3705	async def backfill_character_aliases(
+  3706	    bible: Bible, chapters: list[dict], *, project_id: str | None = None,
+  3707	) -> dict[str, list[str]]:
+  3708	    """窄口径别名回填（层一，用于当前项目一次性回填历史人物谱）：全书上下文，只产出并
+  3709	    核验 `Character.aliases`，绝不改写人物谱任何其它既有字段（name/role/appearance_canonical/
+  3710	    personality/speech_style/relationships/ref_image_path/portrait_prompt_override 全部
+  3711	    原样保留，本函数不读写它们）。
+  3712	
+  3713	    调用方式：协调层在部署窗口拿到已定稿的 `bible`（`Bible` 实例）与该项目全书 `chapters`
+  3714	    （`list[dict]`，需含 `idx`/`content` 字段，与 `generate_bible` 输入同构）后直接：
+  3715	
+  3716	        added = await backfill_character_aliases(bible, chapters, project_id=project_id)
+  3717	
+  3718	    函数原地把核验通过的别名追加进对应 `Character.aliases`（幂等：已存在的别名文本、或与
+  3719	    `character.name` 相同的文本不会重复追加，可安全重跑）；调用方随后自行把更新后的
+  3720	    `bible` 序列化落库（本函数不做任何数据库读写——app/db.py 由其它 agent 并行改动，
+  3721	    不在本函数职责范围内）。
+  3722	
+  3723	    返回值 `{character_name: [本次新增别名文本, ...]}`，供调用方记账/日志展示；返回空 dict
+  3724	    不代表失败（可能全书确实没有可核验的别名，也可能模型调用失败——两者都已通过
+  3725	    `log_provider_call` 记录，失败时 status="FAILED"，全书无可核验别名时 status="EMPTY"）。
+  3726	
+  3727	    核验规则见 `_alias_evidence_resolution`：模型只负责申报语义假设（character_name+text），
+  3728	    代码逐字核验证据；模型申报的章节没通过共现闸时，代码在全书范围内确定性检索桥接章
+  3729	    （`_find_alias_bridge_chapter`）作为兜底，找不到才真正拒绝——不确定不登记。
+  3730	    禁止任何具体称谓的硬编码——判据只看结构（逐字子串命中 + 章节内共现），不针对
+  3731	    "许师姐""小胖子"等具体词做特判分支。
+  3732	    """
+  3733	    chapters_by_idx = _chapters_by_idx(chapters)
+  3734	    source = _render_alias_backfill_source(chapters)
+  3735	    if not source.strip() or not bible.characters:
+  3736	        return {}
+  3737	    verdict_roster = _alias_verdict_roster(bible)
+  3738	    roster_text = "、".join(
+  3739	        c.name + (f"（已登记别名：{'、'.join(a.text for a in c.aliases)}）" if c.aliases else "")
+  3740	        for c in bible.characters
+  3741	    )
+  3742	    prompt = f"""任务：通读下面的全书正文，为【已收录角色】找出他们在原文中出现过的其它称谓
+  3743	（外号、尊称、代称、未揭晓真名前的描述性代称等），逐条给出可核验的证据。
+  3744	
+  3745	已收录角色（只为这些人申报别名，不要发明角色列表之外的人）：
+  3746	{roster_text}
+  3747	
+  3748	要求：
+  3749	1. 每条别名给五个字段：character_name（必须逐字等于上面角色列表中的某个名字）、
+  3750	   text（该别名在原文中的逐字写法）、name_kind（personal_name=真名/honorific=尊称/
+  3751	   referential=代称，按原文语境判断该称谓的性质）、evidence_chapter_index（该别名出现的
+  3752	   证据所在章节序号，取该章节【第 N 章】块头里的数字 N——注意这不是该别名第一次出现的
+  3753	   章节，而是该别名与角色正式姓名（或本角色另一条已确认别名）同时出现的那一章；很多别名
+  3754	   （尤其是真名揭晓前的描述性代称）最早出现时全书还没交代过角色真名，那一章通不过共现
+  3755	   核验，要在全书范围内找到两者共现的章节再申报——一旦登记成功，该别名会覆盖它在全书的
+  3756	   所有出现，不局限于你引用的这一章）、evidence_quote（该共现章节原文中的逐字引句，必须
+  3757	   原样照抄，一个字都不能改，也不要自己在引句前后加引号包裹——原文本来有没有引号就照抄
+  3758	   有没有，不要额外添加；且这句引文所在章节里必须能同时找到该角色的正式姓名或本角色的
+  3759	   另一条别名——如果找不到这种共现，说明这条证据站不住，不要申报）。
+  3760	2. 不确定就不要申报：证据不足、记不清原文原句、全书都找不到别名与正式姓名共现、或章节
+  3761	   序号可能有误的情况，宁可漏报，绝不能编造或近似改写引句——后端会逐字核对，改写过的
+  3762	   引句或自行添加的引号包裹都无法通过、白白浪费申报。
+  3763	3. 同一个别名同一个角色只申报一次；角色的正式姓名本身不算别名，不要重复申报。
+  3764	4. 只申报别名本身，不要输出角色的外观、性格、关系等其它信息——这些字段本次不会被采用。
+  3765	
+  3766	全书正文（部分较长章节可能已截断，仅代表你能看到的范围，不代表原文实际只有这些）：
+  3767	{source}
+  3768	
+  3769	输出 JSON Schema：
+  3770	{{"aliases": [{{"character_name": str, "text": str, "name_kind": "personal_name|honorific|referential", "evidence_chapter_index": int, "evidence_quote": str}}]}}"""
+  3771	    try:
+  3772	        raw = await model_gateway.chat(
+  3773	            [{"role": "system", "content": SYSTEM_PREFIX},
+  3774	             {"role": "user", "content": prompt}],
+  3775	            temperature=0.2,
+  3776	            max_tokens=8192,
+  3777	            call_meta={
+  3778	                "stage": "人物别名回填",
+  3779	                "stage_key": "character_alias_backfill",
+  3780	                "call_role": "stage_generate",
+  3781	                "call_role_label": "别名回填",
+  3782	                "expected_json": True,
+  3783	                "project_id": project_id,
+  3784	            },
+  3785	        )
+  3786	        declared = _AliasBackfillDraft.model_validate(extract_json(raw)).aliases
+  3787	    except Exception as exc:  # noqa: BLE001 - 回填失败保留已有人物谱，不阻断调用方
+  3788	        log_provider_call(
+  3789	            "character_alias_backfill", config.MODEL_TEXT, "FAILED", None, 0,
+  3790	            meta={"error": str(exc)[:300]},
+  3791	        )
+  3792	        return {}
+  3793	
+  3794	    by_name = {c.name: c for c in bible.characters}
+  3795	    grouped: dict[str, list[_AliasBackfillDeclaration]] = defaultdict(list)
+  3796	    for item in declared:
+  3797	        name = (item.character_name or "").strip()
+  3798	        if name in by_name:
+  3799	            grouped[name].append(item)
+  3800	
+  3801	    added: dict[str, list[str]] = {}
+  3802	    for name, items in grouped.items():
+  3803	        character = by_name[name]
+  3804	        anchor_texts = {character.name, *(a.text for a in character.aliases)}
+  3805	        added_texts: list[str] = []
+  3806	        for item in items:
+  3807	            text = (item.text or "").strip()
+  3808	            if not text or text in anchor_texts:
+  3809	                continue
+  3810	            resolved = await _alias_evidence_resolution(
+  3811	                chapters_by_idx, anchor_texts, text, character.name,
+  3812	                item.evidence_chapter_index, item.evidence_quote,
+  3813	                roster=verdict_roster, project_id=project_id, bible=bible,
+  3814	            )
+  3815	            if resolved["accepted"]:
+  3816	                character.aliases.append(CharacterAlias(
+  3817	                    text=text, name_kind=item.name_kind,
+  3818	                    evidence_chapter_index=resolved["chapter_idx"],
+  3819	                    evidence_quote=resolved["quote"],
+  3820	                ))
+  3821	                anchor_texts.add(text)
+  3822	                added_texts.append(text)
+  3823	        if added_texts:
+  3824	            added[name] = added_texts
+  3825	
+  3826	    log_provider_call(
+  3827	        "character_alias_backfill", config.MODEL_TEXT,
+  3828	        "OK" if added else "EMPTY", None, 0,
+  3829	        meta={
+  3830	            "declared": len(declared),
+  3831	            "verified": sum(len(v) for v in added.values()),
+  3832	            "characters_touched": list(added.keys()),
+  3833	        },
+  3834	    )
+  3835	    return added
+  3836	
+  3837	
+  3838	async def reverify_character_aliases(
+  3839	    bible: Bible, chapters: list[dict], *, project_id: str | None = None,
+  3840	) -> dict[str, list[dict[str, Any]]]:
+  3841	    """层一别名复核：对 bible 中已登记的全部 `Character.aliases` 逐条重跑
+  3842	    `_alias_evidence_resolution`（含裁决闸，见该函数与上方"A1b. 裁决闸"注释），不通过
+  3843	    的从该角色的 aliases 中移除。用于清理裁决闸补上之前落库的历史别名，也可作为未来
+  3844	    任何别名批次的通用复核工具重复调用（幂等：已经通过新闸的别名重跑仍然通过，不会
+  3845	    被误删）。
+  3846	
+  3847	    背景（真实事故）：裁决闸补上之前落库的别名只过了"同章共现"这一道更弱的核验，
+  3848	    证明不了"指代同一人"——已发生的误登记是模型在没看到桥接章原文的情况下凭全书
+  3849	    记忆断言的语义假设，实际那一章里该称谓明确是另一个人；共现闸对几乎每章都出场的
+  3850	    角色近乎零过滤力。本函数让所有既有别名重新过一遍现在的完整核验链，是清理这类
+  3851	    历史误登记的通用工具，不针对任何具体人名做特判。
+  3852	
+  3853	    调用方式：
+  3854	
+  3855	        report = await reverify_character_aliases(bible, chapters, project_id=project_id)
+  3856	
+  3857	    与 `backfill_character_aliases` 共享同一套核验入口、同一个"不确定不登记"默认——
+  3858	    唯一区别是候选来源：这里不发起新的模型申报，直接把 `character.aliases` 里已有的
+  3859	    (text, evidence_chapter_index, evidence_quote) 当作待复核的申报重新核验一遍。每个
+  3860	    角色内部按既有别名的列表顺序增量建立 anchor_texts（与 backfill 的建表方式一致）：
+  3861	    前面的别名先通过复核才会被后面同角色的别名当作共现锚点，避免"用一条本身尚未证实
+  3862	    的别名去证明另一条别名"的循环依赖。
+  3863	
+  3864	    返回 `{character_name: [{"text":, "kept": bool, "reason": str}, ...]}`，逐条给出
+  3865	    复核结论与拒绝原因（`kept=True` 时 `reason==""`），供调用方生成复核报告；只原地
+  3866	    改写 `Character.aliases`，不触碰角色的任何其它既有字段。角色本来就没有别名的
+  3867	    不出现在返回结果里。"""
+  3868	    chapters_by_idx = _chapters_by_idx(chapters)
+  3869	    roster = _alias_verdict_roster(bible)
+  3870	    report: dict[str, list[dict[str, Any]]] = {}
+  3871	    for character in bible.characters:
+  3872	        if not character.aliases:
+  3873	            continue
+  3874	        anchor_texts = {character.name}
+  3875	        kept: list[CharacterAlias] = []
+  3876	        entries: list[dict[str, Any]] = []
+  3877	        for item in character.aliases:
+  3878	            text = (item.text or "").strip()
+  3879	            resolved = await _alias_evidence_resolution(
+  3880	                chapters_by_idx, anchor_texts, text, character.name,
+  3881	                item.evidence_chapter_index, item.evidence_quote,
+  3882	                roster=roster, project_id=project_id, bible=bible,
+  3883	            )
+  3884	            if resolved["accepted"]:
+  3885	                kept.append(CharacterAlias(
+  3886	                    text=text, name_kind=item.name_kind,
+  3887	                    evidence_chapter_index=resolved["chapter_idx"],
+  3888	                    evidence_quote=resolved["quote"],
+  3889	                ))
+  3890	                anchor_texts.add(text)
+  3891	                entries.append({"text": text, "kept": True, "reason": ""})
+  3892	            else:
+  3893	                entries.append({
+  3894	                    "text": text, "kept": False, "reason": resolved["reason"],
+  3895	                })
+  3896	        character.aliases = kept
+  3897	        report[character.name] = entries
+  3898	    return report
+  3899	
+  3900	
+  3901	# ---------- A2. 状态事实回填（认知层，见 docs/CHARACTER_COGNITION_LAYER_DESIGN.md §4.1） ----------
+  3902	#
+  3903	# 状态事实（Character.affiliations 阵营归属 / Character.relations 对人关系）与层一别名的
+  3904	# 核心区别：别名恒真（一次核验永久生效），状态事实带"有效区间"，需要"截至第 N 章"的区间
+  3905	# 语义（设计文档 §3.2）。核验管线完全复用层一已经用三条真实事故验证过的机制——不重新
+  3906	# 实现语义判断（禁止黑白名单式修复，任何具体人名/势力名/称谓都不得硬编码特判）：
+  3907	# - 核心证据（申报角色与归属/关系对象是否真的在该章共现、引句是否逐字命中）复用
+  3908	#   `_alias_declaration_verified`（判据模式不变：把"申报的别名文本"换成"归属组织名/
+  3909	#   关系对象人名"，把"角色规范名或已确认别名"作为共现锚点，两者结构完全一致）；
+  3910	# - 模型申报章节没通过共现闸时，复用 `_find_alias_bridge_chapter` 在全书范围内确定性
+  3911	#   检索桥接章（不受 ALIAS_BACKFILL_SOURCE_BUDGET_CHARS 预算限制，见该函数 docstring）；
+  3912	# - "同章共现≠指代同一人"的裁决闸同样成立：主角在一章出现几十次，跟任何词都共现，
+  3913	#   共现只是必要条件——复用 `_alias_verdict_candidates`（该章出场的全部人物谱角色，
+  3914	#   零语义结构扫描）与 `_alias_verdict_dossier`（卷宗覆盖全部候选证据，不止被测对象
+  3915	#   周围，见该函数 docstring 对"孟兄/孟浩"真实回归的说明）、`_alias_verdict_pin_segment`
+  3916	#   （段号钉证，不比对模型转录引句）。唯一新增的是 `_status_fact_verdict_call`：
+  3917	#   `_alias_verdict_call` 的提示词是"称谓 X 指代候选中的谁"这句话术专用于别名场景
+  3918	#   （term-to-person），归属/关系要问的是"这段证据里，与某势力/某人存在这层关系的其实
+  3919	#   是候选中的谁"（fact-to-person）——语义不同不能共用同一句提示词，但候选判别机制
+  3920	#   本身（枚举收紧候选/段号、"都不是/无法确定"选项、拒绝是非题式确认偏误）完全照搬，
+  3921	#   不是另起炉灶。
+  3922	#
+  3923	# 额外新增的核验环节：有效区间起止章（valid_from_chapter/valid_to_chapter）本身也应该
+  3924	# 有证据支撑，不能让模型随口给一个区间——见 `_status_fact_interval_resolution`。但区间
+  3925	# 边界与核心事实（角色+归属/关系对象+证据章+引句，已过声明核验/桥接检索+候选判别裁决）
+  3926	# 是两个独立核验的东西：边界外推没有独立支撑时只回落该边界本身（标注为回落值），不
+  3927	# 拒绝已核验的核心事实；边界与核心证据矛盾（如终点早于证据章）才整条拒绝。
+  3928	#
+  3929	# 另一处事故修复（引句双锚定，见 `_status_fact_quote_dual_anchor_verified`）：首批真实
+  3930	# 回填产出 6 条，人工复核发现 3 条的 evidence_quote 里没有主体——章级共现闸（判据 3）
+  3931	# 按整章判断，被登记引用的却只是章内一句，章级通过不等于这一句里真锚定了主体，其中
+  3932	# 一条（关系事实"王腾飞→韩宗"，引句是韩宗对孟浩说话）是彻头彻尾的假事实，另两条结论
+  3933	# 为真但引句不合格——不可核验的正确答案与错误答案是同一等级的东西，一律拒绝。这道闸
+  3934	# 加在核心证据核验之后、候选判别裁决之前，不替换、不削弱既有三闸与候选判别，独立生效。
+  3935	
+  3936	_STATUS_FACT_VERDICT_STAGE_KEY = "character_status_fact_backfill_verdict"
+  3937	
+  3938	
+  3939	async def _status_fact_verdict_call(
+  3940	    *, fact_noun: str, claim_text: str, dossier: list[dict[str, Any]],
+  3941	    candidates: list[str], project_id: str | None,
+  3942	) -> _AliasVerdictResponse:
+  3943	    """状态事实（归属/关系）候选判别裁决：与 `_alias_verdict_call` 同一范式（代码检索
+  3944	    卷宗 → 模型在候选集中独立判别 → 段号钉证），复用其响应结构（`_AliasVerdictResponse`，
+  3945	    字段本身零语义，候选/段号/引句三项对别名与状态事实同样适用，不需要另造一个响应类）、
+  3946	    候选与卷宗来源（`_alias_verdict_candidates`/`_alias_verdict_dossier`，调用方负责传入）
+  3947	    与钉证核验（`_alias_verdict_pin_segment`，调用方负责调用）——本函数只负责提问措辞与
+  3948	    发起这一次独立模型调用，不重复实现候选判别的机制本身。
+  3949	
+  3950	    `fact_noun` 是自然语言里的关系性质描述（"势力归属"/"人物关系"），`claim_text` 是被
+  3951	    判别的归属对象（org）或关系对象（to）文本。返回值语义与 `_alias_verdict_call` 完全
+  3952	    一致：`selected_candidate` 命中候选集之外（含"都不是/无法确定"）一律视为没有确认
+  3953	    申报的假设，调用方据此拒绝登记。
+  3954	
+  3955	    真实事故（proj_3ac0b627fa46 全量回填 22 条申报 0 条通过，误诊为"区间核验过严"，
+  3956	    追查后发现区间核验从未被触及——全部卡在这一步）：提问措辞早先写成"这段证据所描述
+  3957	    的{{fact_noun}}（对象：'{{claim_text}}'）实际说的是候选中的哪一位本人"，对关系事实
+  3958	    （`fact_noun`="人物关系"）是道错题——`claim_text` 此时是 `to`（关系对象，本身就是
+  3959	    候选集里一个现成的、无歧义的人名），模型据此老老实实回答"'{{claim_text}}'这个名字
+  3960	    指的就是候选里的{{claim_text}}本人"（如 claim_text="韩宗" → selected_candidate="韩宗"，
+  3961	    provider_calls 10692/10693/10695 等历史记录可查），但调用方 `_status_fact_evidence_
+  3962	    resolution` 比对的是 `selected_candidate != subject_name`（subject_name 是关系的
+  3963	    发起方，如"孟浩"，结构上恒不等于 `to`）——问的是"claim_text 这个词指代谁"，答案
+  3964	    自然是 claim_text 自己，比对目标却是 subject_name，二者结构性错位，导致人物关系
+  3965	    100% 必然 candidate_mismatch，与证据是否真实成立无关。现改为明确要求模型回答"谁
+  3966	    拥有/构成这层{{fact_noun}}"（fact-to-person，与本模块顶部设计注释"归属/关系要问的
+  3967	    是'与某势力/某人存在这层关系的其实是候选中的谁'"一致），并把 `claim_text` 从候选
+  3968	    列表里剔除（调用方负责，见 `_status_fact_evidence_resolution`）——它结构上不可能是
+  3969	    正确答案，留在候选里只会引诱模型选择那个"显而易见"但错误的选项。"""
+  3970	    catalog = "\n\n".join(
+  3971	        f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
+  3972	        for item in dossier
+  3973	    )
+  3974	    segment_indexes = [item["segment_index"] for item in dossier]
+  3975	    candidate_options = [*candidates, _ALIAS_VERDICT_NO_MATCH_LABEL]
+  3976	    candidate_list = "、".join(candidates)
+  3977	    prompt = f"""下面是原著第 {dossier[0]['chapter_idx']} 章中与"{claim_text}"相关的原文段落
+  3978	（含前后语境，出现顺序不代表任何推断结论），每段前面标了段号：
+  3979	{catalog}
+  3980	
+  3981	该章出场的人物谱角色候选（判别范围仅限这些人，不要引入候选之外的人）：
+  3982	{candidate_list}
+  3983	
+  3984	以上段落是"候选中某人与"{claim_text}"存在这层{fact_noun}"这一申报的证据来源。任务：仅
+  3985	依据原文段落本身，判断真正与"{claim_text}"存在这层{fact_noun}的，实际上是候选中的哪一位
+  3986	本人。
+  3987	- selected_candidate 回答的是"拥有/构成这层{fact_noun}的那个人是谁"，不是"'{claim_text}'
+  3988	  这个名字本身指代候选中的谁"——即使"{claim_text}"恰好也是一个现成的人名，也不能因为
+  3989	  这一点就直接选它，必须依据原文证据确认候选中"与它存在这层{fact_noun}"的是谁；
+  3990	- selected_candidate 必须从候选列表中选一个精确姓名，或者在证据不足以确定具体是谁时
+  3991	  选"{_ALIAS_VERDICT_NO_MATCH_LABEL}"；不要因为某个候选在段落里出现次数多就倾向选他，
+  3992	  只依据原文是否真的能确定这段{fact_noun}说的就是他本人；
+  3993	- supporting_segment_index 必须填上面某一段落标注的段号（取值只能是 {segment_indexes}
+  3994	  之一），选你得出这个结论最主要依据的那一段，不要凭空填一个没在目录里出现的段号；
+  3995	- supporting_quote 可选，若填写请给该段里的一句原文摘录供人工复核参考，不要求逐字
+  3996	  精确，留空也可以。
+  3997	只输出符合 Schema 的 JSON。"""
+  3998	    operation_id = _STATUS_FACT_VERDICT_STAGE_KEY + ":" + hashlib.sha256(
+  3999	        json.dumps(
+  4000	            {
+  4001	                "fact_noun": fact_noun, "claim_text": claim_text, "candidates": candidates,
+  4002	                "dossier": [
+  4003	                    (item["chapter_idx"], item["segment_index"]) for item in dossier
+  4004	                ],
+  4005	            },
+  4006	            ensure_ascii=False, sort_keys=True,
+  4007	        ).encode("utf-8")
+  4008	    ).hexdigest()
+  4009	    schema = _AliasVerdictResponse.model_json_schema()
+  4010	    schema["properties"]["supporting_segment_index"]["enum"] = segment_indexes
+  4011	    schema["properties"]["selected_candidate"]["enum"] = candidate_options
+  4012	    return await model_gateway.chat_structured(
+  4013	        [{"role": "user", "content": prompt}],
+  4014	        model_type=_AliasVerdictResponse,
+  4015	        validate=None,
+  4016	        operation_id=operation_id,
+  4017	        max_tokens=500,
+  4018	        temperature=0.0,  # 与 _alias_verdict_call 同一理由：判别结论要稳定复现
+  4019	        format_retry_limit=1,
+  4020	        semantic_retry_limit=1,
+  4021	        output_schema=schema,
+  4022	        call_meta={
+  4023	            "stage": "状态事实回填裁决",
+  4024	            "stage_key": _STATUS_FACT_VERDICT_STAGE_KEY,
+  4025	            "call_role": "stage_generate",
+  4026	            "call_role_label": "状态事实裁决",
+  4027	            "expected_json": True,
+  4028	            "project_id": project_id,
+  4029	            "fact_noun": fact_noun,
+  4030	            "claim_text": claim_text,
+  4031	            "candidates": candidates,
+  4032	        },
+  4033	    )
+  4034	
+  4035	
+  4036	def _status_fact_interval_resolution(
+  4037	    chapters_by_idx: dict[int, str],
+  4038	    anchor_texts: set[str],
+  4039	    object_anchor_texts: set[str],
+  4040	    resolved_chapter_index: int,
+  4041	    declared_valid_from_chapter: int | None,
+  4042	    declared_valid_to_chapter: int | None,
+  4043	) -> tuple[int, bool, int | None, bool] | None:
+  4044	    """有效区间起止章核验：不能让模型随口给一个区间（不确定不登记，安全默认同核心
+  4045	    证据），但"区间边界没独立证据"与"核心事实没证据"是两件不同的事，不能绑在一起
+  4046	    处理——见下方"拆分处置"说明（事故修复：状态事实回填 100% 拒绝）。
+  4047	
+  4048	    - 起点/终点若未申报（None）：起点回退为核心证据所在的 `resolved_chapter_index`
+  4049	      （它已经过声明核验或桥接检索，本身就是有证据支撑的章节）；终点回退为 None，
+  4050	      代表"尚无证据表明已失效"，与 `character_portraits` 表 `ep_end IS NULL` 的既有
+  4051	      查询惯例同构（设计文档 §3.2）。
+  4052	    - 起点/终点若申报了与 `resolved_chapter_index` 不同的章节：该章节必须独立通过
+  4053	      与核心证据完全同一条闸——`_status_fact_boundary_dual_anchor_verified`（复用
+  4054	      `_status_fact_quote_dual_anchor_verified` 这条双锚定原语，按自然段而非整章
+  4055	      判断）。
+  4056	
+  4057	      缺陷修复：此前这里仍是"claim_text 与 anchor_texts 之一同时出现在章节任意
+  4058	      位置"的章级共现判据，与十几行外的 `_status_fact_quote_dual_anchor_verified`
+  4059	      自相矛盾——那条闸就是专门为了堵住章级共现"对主角近乎零过滤力"这一漏洞才加的
+  4060	      （见其 docstring 引用的真实事故：王腾飞在第27章章级共现 5 次、共现闸判定
+  4061	      通过，但被登记的引句其实是韩宗对孟浩说话，那句话里根本没有王腾飞）。边界
+  4062	      判定如果继续用章级共现，同一个漏洞原样留在这里：主体若是主角（几乎每章
+  4063	      无处不在），边界章又恰好在别处提到了归属对象/关系对象，`valid_from_is_
+  4064	      fallback=False`（含义是"该边界经过独立核验"）就会被错误地记成 False——而
+  4065	      该章其实从未在同一段文字里把这条边界与主体真正连接起来。现在边界判定与
+  4066	      核心证据共用同一条双锚定原语，不再有这个不一致。
+  4067	    - 边界与核心证据点矛盾（起点晚于 `resolved_chapter_index`、终点早于它）：这是
+  4068	      自相矛盾——核心证据本身已经证明该事实在 `resolved_chapter_index` 这一章成立，
+  4069	      不是"外推不足"，返回 None 交由调用方整体拒绝（§4 反例，不可放松）。
+  4070	
+  4071	    拆分处置（不是放宽标准）：申报的边界与核心证据不矛盾、但也找不到独立双锚定
+  4072	    支撑（既不等于 `resolved_chapter_index`，边界章又没有任何一段同时锚定主体
+  4073	    与对象）——这种"未核验的外推"只丢弃该边界本身，不牵连已经过声明核验/候选
+  4074	    判别的核心事实：对应边界回落为默认值（起点回落为 `resolved_chapter_index`、
+  4075	    终点回落为 None），并把返回的第 2/4 位标记为 True，供调用方在
+  4076	    `CharacterAffiliation.valid_from_is_fallback`/`valid_to_is_fallback` 如实标注——
+  4077	    这是代码回落的默认值，不代表这就是模型申报并核验通过的原始边界。旧实现把这种
+  4078	    "外推不成立"与"核心矛盾"一视同仁地整条拒绝，等于让未核验的边界外推否决了已核验
+  4079	    的核心事实，用错了地方（真实项目 proj_3ac0b627fa46 dry-run 复现：22 条申报里这条
+  4080	    规则从未被实际触发过——回填 100% 拒绝的真正原因在候选判别裁决环节，见
+  4081	    `_status_fact_verdict_call` docstring；但这条规则本身仍是一处真实的过严设计，
+  4082	    一旦上游问题修复、更多事实进入这一步，就会开始误杀，因此一并修正）。
+  4083	
+  4084	    `object_anchor_texts` 与调用方 `_status_fact_evidence_resolution` 核验核心
+  4085	    证据引句双锚定时用的是同一个集合（归属对象/关系对象的规范名∪已确认别名），
+  4086	    不是把 `claim_text` 原样传入——边界章里对象出现的具体措辞未必与核心证据章
+  4087	    完全一致（例如对象本身是某个已确认别名的角色，见该函数关于 `object_anchor_
+  4088	    texts` 构造方式的说明），双锚定既然要求"同一条原语"，就应当连锚点集合本身
+  4089	    也保持一致，不能只搬运判据形状、锚点集合却各用各的。
+  4090	    """
+  4091	    valid_from_chapter = resolved_chapter_index
+  4092	    valid_from_is_fallback = False
+  4093	    if declared_valid_from_chapter is not None and declared_valid_from_chapter != resolved_chapter_index:
+  4094	        if declared_valid_from_chapter > resolved_chapter_index:
+  4095	            return None  # 矛盾：起点不能晚于核心证据章，整条拒绝
+  4096	        boundary_text = chapters_by_idx.get(declared_valid_from_chapter, "")
+  4097	        if boundary_text and _status_fact_boundary_dual_anchor_verified(
+  4098	            boundary_text, anchor_texts, object_anchor_texts,
+  4099	        ):
+  4100	            valid_from_chapter = declared_valid_from_chapter
+  4101	        else:
+  4102	            valid_from_is_fallback = True  # 外推无独立支撑：不采信，回落为核心证据章
+  4103	
+  4104	    valid_to_chapter: int | None = None
+  4105	    valid_to_is_fallback = False
+  4106	    if declared_valid_to_chapter is not None:
+  4107	        if declared_valid_to_chapter == resolved_chapter_index:
+  4108	            valid_to_chapter = resolved_chapter_index
+  4109	        elif declared_valid_to_chapter < resolved_chapter_index:
+  4110	            return None  # 矛盾：终点不能早于核心证据章，整条拒绝
+  4111	        else:
+  4112	            boundary_text = chapters_by_idx.get(declared_valid_to_chapter, "")
+  4113	            if boundary_text and _status_fact_boundary_dual_anchor_verified(
+  4114	                boundary_text, anchor_texts, object_anchor_texts,
+  4115	            ):
+  4116	                valid_to_chapter = declared_valid_to_chapter
+  4117	            else:
+  4118	                valid_to_is_fallback = True  # 外推无独立支撑：不采信，回落为开放终点
+  4119	
+  4120	    return valid_from_chapter, valid_from_is_fallback, valid_to_chapter, valid_to_is_fallback
+  4121	
+  4122	
+  4123	def _status_fact_quote_dual_anchor_verified(
+  4124	    quote: str,
+  4125	    subject_anchor_texts: set[str],
+  4126	    object_anchor_texts: set[str],
+  4127	) -> bool:
+  4128	    """状态事实引句双锚定核验（事故修复：真实人物谱回填出现的假事实——"王腾飞 同党/
+  4129	    同门→韩宗"，引用的是"韩宗看都不看其他人一眼，望着孟浩，冷淡开口"这句，句中根本
+  4130	    没有王腾飞，是韩宗对孟浩说话，与王腾飞无关；另两条"孟浩→靠山宗""许清→靠山宗"引句
+  4131	    也分别缺主体、只剩三个字的组织名，同一漏洞的三种呈现）。
+  4132	
+  4133	    根因：`_alias_declaration_verified`/`_find_alias_bridge_chapter` 的"共现"判据是
+  4134	    按章节整体判断的（claim_text 与 anchor_texts 之一同时出现在该章原文任意位置即算
+  4135	    通过），但被实际登记、供人工复核的 evidence_quote 只是章节内的一句/一段——章级
+  4136	    共现通过不代表这一句里真的锚定了主体。没有主体锚点就无法区分"真但证据差"与"假"，
+  4137	    两者外观完全一致（都是"claim_text 在引句里，主体不在"），所以一律拒绝，不区分
+  4138	    对待——不可核验的正确答案与错误答案是同一等级的东西。
+  4139	
+  4140	    条件（归属/关系两类结构相同，调用方按语义传入对应的 subject/object 锚点集合）：
+  4141	    引句必须同时包含 subject_anchor_texts（主体角色的规范名或已确认别名）中至少一项，
+  4142	    与 object_anchor_texts（归属对象 org 本身；或关系对象 to 的规范名/已确认别名）中
+  4143	    至少一项——且必须在同一种引号候选形式（`_quote_comparison_variants`，处理全角/
+  4144	    半角引号导致的假阴性）下同时命中，不能分别用不同形式各自命中一侧再拼凑。任一侧
+  4145	    缺失整条拒绝，不尝试放宽或"修补"引句去凑双锚定（不确定不登记，安全默认）。
+  4146	
+  4147	    这道闸加在核心证据核验（声明核验/桥接检索）之后、候选判别裁决之前——不满足直接
+  4148	    拒绝，省一次候选判别模型调用；不替换、不削弱既有三闸（章级共现、逐字引句在原文、
+  4149	    候选判别）与后续段号钉证，只是额外补上"引句本身双锚定"这一层，四闸独立生效。
+  4150	    """
+  4151	    quote = (quote or "").strip()
+  4152	    if not quote:
+  4153	        return False
+  4154	    subject_forms = [s for s in subject_anchor_texts if s]
+  4155	    object_forms = [o for o in object_anchor_texts if o]
+  4156	    if not subject_forms or not object_forms:
+  4157	        return False
+  4158	    for candidate in _quote_comparison_variants(quote):
+  4159	        if (
+  4160	            any(s in candidate for s in subject_forms)
+  4161	            and any(o in candidate for o in object_forms)
+  4162	        ):
+  4163	            return True
+  4164	    return False
+  4165	
+  4166	
+  4167	def _status_fact_boundary_dual_anchor_verified(
+  4168	    chapter_text: str,
+  4169	    subject_anchor_texts: set[str],
+  4170	    object_anchor_texts: set[str],
+  4171	) -> bool:
+  4172	    """区间边界章的双锚定核验（缺陷修复，见 `_status_fact_interval_resolution`
+  4173	    docstring"边界章级共现"一节）：与核心证据共用同一条原语
+  4174	    `_status_fact_quote_dual_anchor_verified`，只是这里没有一句现成的
+  4175	    evidence_quote 可以直接判断，需要先在边界章内部确定性检索出候选"quote"。
+  4176	
+  4177	    做法：把边界章按 `index_source_segments`（与 `_alias_verdict_dossier` 同一
+  4178	    分段工具、同一默认粒度，不另起一套分段规则）切成自然段，只要存在至少一段
+  4179	    本身就同时双锚定通过（引号候选形式下同一形式内同时含主体锚点与对象锚点
+  4180	    各至少一项），就认为这条边界有独立支撑，返回 True。
+  4181	
+  4182	    这不是把"整章共现"换成"整章双锚定"（那仍然不够——主体在第一段、对象在
+  4183	    最后一段，整章拼起来一样能双双命中，跟章级共现是同一个漏洞的另一种写法）：
+  4184	    双锚定必须发生在同一自然段内，与核心证据的 evidence_quote 是"原文里的
+  4185	    一句/一段"这一颗粒度完全对齐，不接受跨段拼凑。全书任何一段都不满足时
+  4186	    返回 False，交由调用方按"拆分处置"回落为 fallback，不牵连核心事实。"""
+  4187	    for segment in index_source_segments(chapter_text):
+  4188	        if _status_fact_quote_dual_anchor_verified(
+  4189	            segment.text, subject_anchor_texts, object_anchor_texts,
+  4190	        ):
+  4191	            return True
+  4192	    return False
+  4193	
+  4194	
+  4195	async def _status_fact_evidence_resolution(
+  4196	    chapters_by_idx: dict[int, str],
+  4197	    anchor_texts: set[str],
+  4198	    claim_text: str,
+  4199	    subject_name: str,
+  4200	    evidence_chapter_index: int,
+  4201	    evidence_quote: str,
+  4202	    declared_valid_from_chapter: int | None,
+  4203	    declared_valid_to_chapter: int | None,
+  4204	    *,
+  4205	    fact_noun: str,
+  4206	    roster: dict[str, list[str]],
+  4207	    project_id: str | None = None,
+  4208	) -> dict[str, Any]:
+  4209	    """状态事实证据判定的统一入口，与 `_alias_evidence_resolution` 同一流程骨架（该函数
+  4210	    docstring 有完整的两段式说明，这里不重复）：核心证据核验（声明核验 → 桥接检索兜底）
+  4211	    → 候选判别裁决（候选覆盖该章全部人物谱角色，卷宗证据覆盖全部候选而不止被测对象）
+  4212	    → 有效区间核验（`_status_fact_interval_resolution`，别名机制没有这一步，因为别名
+  4213	    恒真、不需要区间）。`claim_text` 是归属对象（org）或关系对象（to）的逐字文本，
+  4214	    `subject_name` 是被测角色的规范名（裁决闸要求 `selected_candidate` 恰好等于它）。
+  4215	
+  4216	    返回结构 `{"accepted": bool, "chapter_idx": int|None, "quote": str, "reason": str,
+  4217	    "valid_from_chapter": int|None, "valid_from_is_fallback": bool, "valid_to_chapter":
+  4218	    int|None, "valid_to_is_fallback": bool}`：`accepted=True` 时后面这些字段是应当登记
+  4219	    的证据与区间——`valid_from_is_fallback`/`valid_to_is_fallback` 为 True 表示对应边界
+  4220	    是代码回落的默认值（模型申报的边界未能独立核验、不予采信），不是模型申报并核验
+  4221	    通过的原始边界（见 `_status_fact_interval_resolution` docstring"拆分处置"一节）；
+  4222	    `accepted=False` 时 `reason` 是机器可读拒绝原因（`no_bridge_chapter`/
+  4223	    `quote_missing_dual_anchor`/`no_verdict_candidates`/`no_verdict_dossier`/
+  4224	    `verdict_call_failed`/`candidate_mismatch`/`candidate_uncertain`/
+  4225	    `segment_not_pinned`/`interval_contradiction`——最后一项特指申报区间与核心证据点
+  4226	    逻辑矛盾，不包含"边界外推缺乏独立支撑"这种情况，后者现在走拆分处置、不再整条
+  4227	    拒绝；`quote_missing_dual_anchor` 见 `_status_fact_quote_dual_anchor_verified`
+  4228	    docstring——章级共现通过不代表被登记的这一句引句里真的锚定了主体）。
+  4229	    """
+  4230	    empty = {
+  4231	        "accepted": False, "chapter_idx": None, "quote": "", "reason": "",
+  4232	        "valid_from_chapter": None, "valid_from_is_fallback": False,
+  4233	        "valid_to_chapter": None, "valid_to_is_fallback": False,
+  4234	    }
+  4235	    if _alias_declaration_verified(
+  4236	        chapters_by_idx, anchor_texts, claim_text, evidence_chapter_index, evidence_quote,
+  4237	    ):
+  4238	        resolved_chapter_index, resolved_quote = evidence_chapter_index, evidence_quote
+  4239	    else:
+  4240	        bridge = _find_alias_bridge_chapter(chapters_by_idx, anchor_texts, claim_text)
+  4241	        if bridge is None:
+  4242	            return {**empty, "reason": "no_bridge_chapter"}
+  4243	        resolved_chapter_index, resolved_quote = bridge
+  4244	
+  4245	    # 引句双锚定闸（事故修复，见 `_status_fact_quote_dual_anchor_verified` docstring）：
+  4246	    # object 锚点复用 `roster`——claim_text 若恰好是某角色的规范名（关系事实的 to 必然
+  4247	    # 是，因为调用方已核验 `to in known_names`），取其规范名+已确认别名全集；claim_text
+  4248	    # 不是任何角色规范名时（归属事实的 org，自由文本，没有别名概念），`roster.get` 落空，
+  4249	    # 回退为 {claim_text} 本身——两种情况用同一行代码表达，不需要按归属/关系分支特判。
+  4250	    object_anchor_texts = set(roster.get(claim_text, [claim_text]) or [claim_text])
+  4251	    if not _status_fact_quote_dual_anchor_verified(
+  4252	        resolved_quote, set(anchor_texts), object_anchor_texts,
+  4253	    ):
+  4254	        return {**empty, "reason": "quote_missing_dual_anchor"}
+  4255	
+  4256	    chapter_text = chapters_by_idx.get(resolved_chapter_index, "")
+  4257	    candidates = _alias_verdict_candidates(chapter_text, roster)
+  4258	    if subject_name not in candidates:
+  4259	        # 防御性分支：subject_name 对应的 anchor_texts 已经通过声明核验/桥接检索命中
+  4260	        # 该章，理论上必然被 `_alias_verdict_candidates` 收进候选集（正常不应触发）。
+  4261	        return {**empty, "reason": "no_verdict_candidates"}
+  4262	    # 卷宗证据锚点必须覆盖全部候选人，不能只锚定被测对象一方（与 `_alias_evidence_resolution`
+  4263	    # 同一理由，见该函数关于"真实误登记事故 2"的说明——只给卷宗看被测对象周围的证据，
+  4264	    # 候选判别题就会名存实亡）。
+  4265	    dossier_anchor_texts = set(anchor_texts) | {
+  4266	        form for name in candidates for form in roster.get(name, [])
+  4267	    }
+  4268	    dossier = _alias_verdict_dossier(
+  4269	        resolved_chapter_index, chapter_text, claim_text, dossier_anchor_texts,
+  4270	    )
+  4271	    if not dossier:
+  4272	        return {**empty, "reason": "no_verdict_dossier"}
+  4273	    # claim_text 本身若恰好也在候选集里（关系事实的 to 就是这种情况——它本就是候选中
+  4274	    # 已收录的另一个人），结构上永远不可能是"拥有这层事实的那个人"（`to == name` 早在
+  4275	    # 调用方过滤掉了自关系）。留在候选列表里会诱导裁决模型把"claim_text 这个名字指代
+  4276	    # 候选中的谁"（trivial，答案就是它自己）误当成本次要判别的问题，见
+  4277	    # `_status_fact_verdict_call` docstring 对真实事故的说明。此处剔除，双重保险：
+  4278	    # 提示词已经明确说明，这里再从 Schema enum 层面彻底堵死这个选项。
+  4279	    verdict_candidates = [c for c in candidates if c != claim_text]
+  4280	    try:
+  4281	        response = await _status_fact_verdict_call(
+  4282	            fact_noun=fact_noun, claim_text=claim_text, dossier=dossier,
+  4283	            candidates=verdict_candidates, project_id=project_id,
+  4284	        )
+  4285	    except Exception as exc:  # noqa: BLE001 - 裁决调用失败按不确定处理：不确定不登记
+  4286	        log_provider_call(
+  4287	            _STATUS_FACT_VERDICT_STAGE_KEY, config.MODEL_TEXT, "FAILED", None, 0,
+  4288	            meta={
+  4289	                "claim_text": claim_text, "subject_name": subject_name,
+  4290	                "error": str(exc)[:300],
+  4291	            },
+  4292	        )
+  4293	        return {**empty, "reason": "verdict_call_failed"}
+  4294	    if response.selected_candidate != subject_name:
+  4295	        reason = (
+  4296	            "candidate_uncertain"
+  4297	            if response.selected_candidate == _ALIAS_VERDICT_NO_MATCH_LABEL
+  4298	            else "candidate_mismatch"
+  4299	        )
+  4300	        return {**empty, "reason": reason}
+  4301	    if _alias_verdict_pin_segment(dossier, response.supporting_segment_index) is None:
+  4302	        return {**empty, "reason": "segment_not_pinned"}
+  4303	
+  4304	    interval = _status_fact_interval_resolution(
+  4305	        chapters_by_idx, anchor_texts, object_anchor_texts, resolved_chapter_index,
+  4306	        declared_valid_from_chapter, declared_valid_to_chapter,
+  4307	    )
+  4308	    if interval is None:
+  4309	        return {**empty, "reason": "interval_contradiction"}
+  4310	    valid_from_chapter, valid_from_is_fallback, valid_to_chapter, valid_to_is_fallback = interval
+  4311	
+  4312	    return {
+  4313	        "accepted": True, "chapter_idx": resolved_chapter_index, "quote": resolved_quote,
+  4314	        "reason": "", "valid_from_chapter": valid_from_chapter,
+  4315	        "valid_from_is_fallback": valid_from_is_fallback,
+  4316	        "valid_to_chapter": valid_to_chapter,
+  4317	        "valid_to_is_fallback": valid_to_is_fallback,
+  4318	    }
+  4319	
+  4320	
+  4321	class _StatusFactAffiliationDeclaration(BaseModel):
+  4322	    """归属回填申报合同：模型只申报，是否登记由后端核验决定（与
+  4323	    `_AliasBackfillDeclaration` 同一纪律）。"""
+  4324	
+  4325	    character_name: str = ""
+  4326	    org: str = ""
+  4327	    relation_kind: str = ""
+  4328	    evidence_chapter_index: int = -1
+  4329	    evidence_quote: str = ""
+  4330	    valid_from_chapter: int | None = None    # 不申报=交给代码回退为证据所在章
+  4331	    valid_to_chapter: int | None = None      # 不申报=尚无证据表明已失效
+  4332	
+  4333	
+  4334	class _StatusFactRelationDeclaration(BaseModel):
+  4335	    """关系回填申报合同：结构与 `_StatusFactAffiliationDeclaration` 同构，唯一差别是
+  4336	    `org`（归属对象，自由文本）换成 `to`（关系对象，必须是人物谱里已有的另一个人）。"""
+  4337	
+  4338	    character_name: str = ""
+  4339	    to: str = ""
+  4340	    relation_kind: str = ""
+  4341	    evidence_chapter_index: int = -1
+  4342	    evidence_quote: str = ""
+  4343	    valid_from_chapter: int | None = None
+  4344	    valid_to_chapter: int | None = None
+  4345	
+  4346	
+  4347	class _StatusFactBackfillDraft(BaseModel):
+  4348	    affiliations: list[_StatusFactAffiliationDeclaration] = Field(default_factory=list)
+  4349	    relations: list[_StatusFactRelationDeclaration] = Field(default_factory=list)
+  4350	
+  4351	
+  4352	def _status_fact_roster_hint(character: Character) -> str:
+  4353	    """为回填提示词的已收录角色清单附上该角色已登记的归属/关系摘要（帮助模型不重复
+  4354	    申报、也不与已知事实矛盾），纯字符串拼装、无模型调用。"""
+  4355	    parts: list[str] = []
+  4356	    if character.affiliations:
+  4357	        parts.append("归属：" + "、".join(a.org for a in character.affiliations))
+  4358	    if character.relations:
+  4359	        parts.append("关系：" + "、".join(
+  4360	            f"{r.to}({r.relation_kind})" for r in character.relations
+  4361	        ))
+  4362	    return "；".join(parts)
+  4363	
+  4364	
+  4365	async def backfill_character_status_facts(
+  4366	    bible: Bible, chapters: list[dict], *, project_id: str | None = None,
+  4367	) -> dict[str, dict[str, list[str]]]:
+  4368	    """窄口径状态事实回填（认知层，用于当前项目一次性回填历史人物谱）：全书上下文，
+  4369	    只产出并核验 `Character.affiliations`/`Character.relations`，绝不改写人物谱任何
+  4370	    其它既有字段（包括层一的 `aliases`——与 `backfill_character_aliases` 互不干扰，
+  4371	    两个函数各自只读写自己负责的字段）。
+  4372	
+  4373	    调用方式：协调层在部署窗口拿到已定稿的 `bible`（`Bible` 实例，建议已经跑过
+  4374	    `backfill_character_aliases` 回填过别名——状态事实的共现锚点会用到角色已确认的
+  4375	    别名，先跑别名回填能提高召回率，但不是强制前置条件，`bible` 只有规范名也能跑）与
+  4376	    该项目全书 `chapters`（`list[dict]`，需含 `idx`/`content` 字段，与
+  4377	    `backfill_character_aliases`/`generate_bible` 输入同构）后直接：
+  4378	
+  4379	        added = await backfill_character_status_facts(bible, chapters, project_id=project_id)
+  4380	
+  4381	    函数原地把核验通过的归属/关系追加进对应 `Character.affiliations`/`Character.relations`
+  4382	    （幂等：同一角色已登记过的 org / (to, relation_kind) 组合不会重复追加，可安全重跑）；
+  4383	    调用方随后自行把更新后的 `bible` 序列化落库（本函数不做任何数据库读写）。
+  4384	
+  4385	    返回值 `{"affiliations": {character_name: [本次新增归属org, ...]}, "relations":
+  4386	    {character_name: [本次新增关系对象to, ...]}}`，供调用方记账/日志展示；两个子 dict
+  4387	    都为空不代表失败（可能全书确实没有可核验的状态事实，也可能模型调用失败——两者都已
+  4388	    通过 `log_provider_call` 记录，失败时 status="FAILED"，全书无可核验状态事实时
+  4389	    status="EMPTY"）。
+  4390	
+  4391	    核验规则见 `_status_fact_evidence_resolution`：模型只负责申报语义假设
+  4392	    （character_name + org/to + 可选的有效区间），代码逐字核验证据、候选判别裁决、
+  4393	    区间是否有证据支撑；任一环节不过 → 不登记（不确定不登记，安全默认，绝不放松）。
+  4394	    禁止任何具体人名/势力名/称谓的硬编码——判据只看结构（逐字子串命中 + 章节内共现 +
+  4395	    候选判别 + 区间证据），不针对具体词做特判分支。
+  4396	    """
+  4397	    chapters_by_idx = _chapters_by_idx(chapters)
+  4398	    source = _render_alias_backfill_source(chapters)
+  4399	    empty_result: dict[str, dict[str, list[str]]] = {"affiliations": {}, "relations": {}}
+  4400	    if not source.strip() or not bible.characters:
+  4401	        return empty_result
+  4402	    roster = _alias_verdict_roster(bible)
+  4403	    roster_text = "、".join(
+  4404	        c.name + (f"（已登记{hint}）" if (hint := _status_fact_roster_hint(c)) else "")
+  4405	        for c in bible.characters
+  4406	    )
+  4407	    prompt = f"""任务：通读下面的全书正文，为【已收录角色】找出他们在原文中有明确证据支撑的
+  4408	势力/宗门归属，以及与其它已收录角色之间有明确证据支撑的人物关系（如同门、师徒、敌对、
+  4409	盟友等），逐条给出可核验的证据。
+  4410	
+  4411	已收录角色（只为这些人申报归属/关系，不要发明角色列表之外的人；关系的对象也必须是下面
+  4412	列表里的另一个人，不能是角色本人，也不能是列表外的人）：
+  4413	{roster_text}
+  4414	
+  4415	归属（affiliations）每条给七个字段：
+  4416	1. character_name（必须逐字等于上面角色列表中的某个名字）；
+  4417	2. org（该角色所属的宗门/阵营/势力名，逐字照抄原文写法）；
+  4418	3. relation_kind（该角色与该势力的关系性质，自由描述，如"成员""效忠""敌对"等，不强制
+  4419	   使用固定词表）；
+  4420	4. evidence_chapter_index（该角色姓名或已确认别名与该势力名同时出现、且原文明确交代
+  4421	   归属关系的那一章的章节序号，取该章节【第 N 章】块头里的数字 N——只是同章出现不算，
+  4422	   原文必须真的能看出这层归属关系）；
+  4423	5. evidence_quote（该章节原文中的逐字引句，必须原样照抄，一个字都不能改，也不要自己
+  4424	   在引句前后加引号包裹）；
+  4425	6. valid_from_chapter（可选）：该归属从哪一章开始生效——不确定就不要填这个字段，后端
+  4426	   会用 evidence_chapter_index 作为默认起点；只有原文明确交代了这层归属并非从头就有
+  4427	   （比如后来才拜入门下）时才需要申报，且必须是能找到相应原文依据的章节，编造的起点
+  4428	   会导致整条归属都不被采信；
+  4429	7. valid_to_chapter（可选）：该归属到哪一章为止——不确定/仍在持续就不要填这个字段，
+  4430	   后端默认视为尚未失效；只有原文明确交代了归属结束（叛出师门、转投他派等）时才需要
+  4431	   申报，同样必须有原文依据支撑。
+  4432	
+  4433	关系（relations）每条给七个字段，结构与归属完全相同，唯一差别：把 org 换成 to（关系
+  4434	对象，必须是【已收录角色】列表中的另一个名字）。
+  4435	
+  4436	不确定就不要申报：证据不足、记不清原文原句、原文没有明确交代归属/关系（只是同章出现
+  4437	不算），宁可漏报，绝不能编造或近似改写引句——后端会逐字核对，改写过的引句或自行添加
+  4438	的引号包裹都无法通过、白白浪费申报。只申报归属/关系，不要输出角色的外观、性格等其它
+  4439	信息——这些字段本次不会被采用。
+  4440	
+  4441	全书正文（部分较长章节可能已截断，仅代表你能看到的范围，不代表原文实际只有这些）：
+  4442	{source}
+  4443	
+  4444	输出 JSON Schema：
+  4445	{{"affiliations": [{{"character_name": str, "org": str, "relation_kind": str, "evidence_chapter_index": int, "evidence_quote": str, "valid_from_chapter": int, "valid_to_chapter": int}}], "relations": [{{"character_name": str, "to": str, "relation_kind": str, "evidence_chapter_index": int, "evidence_quote": str, "valid_from_chapter": int, "valid_to_chapter": int}}]}}"""
+  4446	    try:
+  4447	        raw = await model_gateway.chat(
+  4448	            [{"role": "system", "content": SYSTEM_PREFIX},
+  4449	             {"role": "user", "content": prompt}],
+  4450	            temperature=0.2,
+  4451	            max_tokens=8192,
+  4452	            call_meta={
+  4453	                "stage": "人物状态事实回填",
+  4454	                "stage_key": "character_status_fact_backfill",
+  4455	                "call_role": "stage_generate",
+  4456	                "call_role_label": "归属关系回填",
+  4457	                "expected_json": True,
+  4458	                "project_id": project_id,
+  4459	            },
+  4460	        )
+  4461	        declared = _StatusFactBackfillDraft.model_validate(extract_json(raw))
+  4462	    except Exception as exc:  # noqa: BLE001 - 回填失败保留已有人物谱，不阻断调用方
+  4463	        log_provider_call(
+  4464	            "character_status_fact_backfill", config.MODEL_TEXT, "FAILED", None, 0,
+  4465	            meta={"error": str(exc)[:300]},
+  4466	        )
+  4467	        return empty_result
+  4468	
+  4469	    by_name = {c.name: c for c in bible.characters}
+  4470	    known_names = set(by_name.keys())
+  4471	
+  4472	    added_affiliations: dict[str, list[str]] = {}
+  4473	    for item in declared.affiliations:
+  4474	        name = (item.character_name or "").strip()
+  4475	        character = by_name.get(name)
+  4476	        org = (item.org or "").strip()
+  4477	        if character is None or not org:
+  4478	            continue
+  4479	        if org in {a.org for a in character.affiliations}:
+  4480	            continue  # 幂等：已登记过的归属不重复追加，可安全重跑
+  4481	        anchor_texts = {character.name, *(a.text for a in character.aliases)}
+  4482	        resolved = await _status_fact_evidence_resolution(
+  4483	            chapters_by_idx, anchor_texts, org, character.name,
+  4484	            item.evidence_chapter_index, item.evidence_quote,
+  4485	            item.valid_from_chapter, item.valid_to_chapter,
+  4486	            fact_noun="势力归属", roster=roster, project_id=project_id,
+  4487	        )
+  4488	        if resolved["accepted"]:
+  4489	            character.affiliations.append(CharacterAffiliation(
+  4490	                org=org, relation_kind=item.relation_kind,
+  4491	                evidence_chapter_index=resolved["chapter_idx"],
+  4492	                evidence_quote=resolved["quote"],
+  4493	                valid_from_chapter=resolved["valid_from_chapter"],
+  4494	                valid_from_is_fallback=resolved["valid_from_is_fallback"],
+  4495	                valid_to_chapter=resolved["valid_to_chapter"],
+  4496	                valid_to_is_fallback=resolved["valid_to_is_fallback"],
+  4497	            ))
+  4498	            added_affiliations.setdefault(name, []).append(org)
+  4499	
+  4500	    added_relations: dict[str, list[str]] = {}
+  4501	    for item in declared.relations:
+  4502	        name = (item.character_name or "").strip()
+  4503	        character = by_name.get(name)
+  4504	        to = (item.to or "").strip()
+  4505	        if character is None or not to or to == name or to not in known_names:
+  4506	            continue  # 关系对象必须是人物谱里已有的另一个人（不能是角色本人或未知的人）
+  4507	        if (to, item.relation_kind) in {(r.to, r.relation_kind) for r in character.relations}:
+  4508	            continue  # 幂等：同一对象+同一关系性质已登记过的不重复追加
+  4509	        anchor_texts = {character.name, *(a.text for a in character.aliases)}
+  4510	        resolved = await _status_fact_evidence_resolution(
+  4511	            chapters_by_idx, anchor_texts, to, character.name,
+  4512	            item.evidence_chapter_index, item.evidence_quote,
+  4513	            item.valid_from_chapter, item.valid_to_chapter,
+  4514	            fact_noun="人物关系", roster=roster, project_id=project_id,
+  4515	        )
+  4516	        if resolved["accepted"]:
+  4517	            character.relations.append(CharacterRelation(
+  4518	                to=to, relation_kind=item.relation_kind,
+  4519	                evidence_chapter_index=resolved["chapter_idx"],
+  4520	                evidence_quote=resolved["quote"],
+  4521	                valid_from_chapter=resolved["valid_from_chapter"],
+  4522	                valid_from_is_fallback=resolved["valid_from_is_fallback"],
+  4523	                valid_to_chapter=resolved["valid_to_chapter"],
+  4524	                valid_to_is_fallback=resolved["valid_to_is_fallback"],
+  4525	            ))
+  4526	            added_relations.setdefault(name, []).append(to)
+  4527	
+  4528	    log_provider_call(
+  4529	        "character_status_fact_backfill", config.MODEL_TEXT,
+  4530	        "OK" if (added_affiliations or added_relations) else "EMPTY", None, 0,
+  4531	        meta={
+  4532	            "declared_affiliations": len(declared.affiliations),
+  4533	            "declared_relations": len(declared.relations),
+  4534	            "verified_affiliations": sum(len(v) for v in added_affiliations.values()),
+  4535	            "verified_relations": sum(len(v) for v in added_relations.values()),
+  4536	        },
+  4537	    )
+  4538	    return {"affiliations": added_affiliations, "relations": added_relations}
+  4539	
+  4540	
+  4541	def _bible_paratext_scope(valid: list[dict]) -> list[int]:
+  4542	    """人物谱真正会读到的章（下标落在 `valid` 上）：头部 + 后段抽样 + 必收统计窗口。
+  4543	
+  4544	    净化按章一次模型调用，范围必须跟「读了什么」对齐，否则代价随书长线性增长
+  4545	    而收益为零。
+  4546	    """
+  4547	    plan = _bible_source_plan(valid, BIBLE_SOURCE_BUDGET_CHARS, BIBLE_HEAD_CHAPTERS)
+  4548	    scope = {index for index, _, _ in plan}
+  4549	    head_end = max((index for index, _, excerpt in plan if not excerpt), default=-1) + 1
+  4550	    # 净化只会让正文变短，头部因此可能比按原文规划时多吃进几章；同时
+  4551	    # `_recurring_character_names` 的逐字统计窗口是前 HEAD+LOOKAHEAD 章，
+  4552	    # 必收名单正是被旁文本污染的那一环，这段必须整段净化。
+  4553	    window = max(
+  4554	        head_end + BIBLE_PARATEXT_MARGIN_CHAPTERS,
+  4555	        BIBLE_HEAD_CHAPTERS + BIBLE_LOOKAHEAD_CHAPTERS,
+  4556	    )
+  4557	    scope |= set(range(min(window, len(valid))))
+  4558	    return sorted(index for index in scope if 0 <= index < len(valid))
+  4559	
+  4560	
+  4561	async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
+  4562	    """把作者的话等旁文本从章节正文里剔掉，再交给人物谱这条链路。
+  4563	
+  4564	    生产缺陷 R9：网文章节正文里直接粘着作者的话（求票、感谢读者、活动公告）。
+  4565	    `_recurring_character_names` 按**原文逐字出现次数**产出「必收名单」，
+  4566	    而提示词明令「名单里的每个名字…不得改写、合并或省略」——于是作者笔名
+  4567	    在统计窗口里出现 27 次排第 4（高于真配角王有材 17 次），进入必收名单，
+  4568	    **模型是被程序命令**建出那张人物卡的。它照办的同时把关系写成
+  4569	    「创作者，在故事外注视并推动主角命运」，等于自己标注了疑虑。
+  4570	
+  4571	    所以这不是模型幻觉，是程序把旁文本当成了正文来统计。判据与叙事蓝图
+  4572	    共用一份（`app/source_paratext.PARATEXT_RULE`）。
+  4573	
+  4574	    净化失败一律退回原文：人物谱不能因为这一步判不出来就产不出来。
+  4575	
+  4576	    **2026-08-25 事故（run_8388b4e31301）**：这里原本 `for ch in chapters` 串行
+  4577	    净化**全书**，一章一次模型调用。643 章的项目在 15 分钟闸门内只跑完 126 次
+  4578	    （其中 3 次读超时各 152s），人物谱本体一次调用都没轮上，整轮超时作废；
+  4579	    而这本书人物谱真正读到的只有 33 章，610 次调用是纯浪费。因此这里定死三条：
+  4580	    只净化 `_bible_paratext_scope` 圈出的章、并发跑、整段封顶
+  4581	    `BIBLE_PARATEXT_BUDGET_S`。净化本来就是「判不出就退回原文」的净化步骤而不是
+  4582	    闸门，超时未完成的章原样进入下游，绝不能再把人物谱拖死。
+  4583	
+  4584	    **2026-08-27（paratext 按章一次、持久化，见
+  4585	    logs/paratext_single_source_plan.md）**：净化结果现在读/写
+  4586	    `chapters.paratext_json`，不再每次都直接问模型——首次跑某个项目仍要
+  4587	    为 scope 内每章各发一次模型调用（跟改造前一样受
+  4588	    `BIBLE_PARATEXT_BUDGET_S` 封顶），但算完就永久落库；同一项目重新谱写
+  4589	    人物谱（打回重生、脚本重试）时，这些章大概率命中缓存，`chat 调用数`
+  4590	    应趋近于零，这一步的墙钟耗时应趋近于"读库"而不是"等模型"。缺
+  4591	    `id` 的章节（测试用的合成 dict）无法持久化，退化为每次都重算，行为
+  4592	    与改造前完全一致，不影响正确性。
+  4593	    """
+  4594	    from app.source_paratext import chapter_paratext_offsets, remove_offsets
+  4595	
+  4596	    positions = [i for i, ch in enumerate(chapters) if (ch.get("content") or "").strip()]
+  4597	    valid = [chapters[i] for i in positions]
+  4598	    if not valid:
+  4599	        return chapters
+  4600	    scope = _bible_paratext_scope(valid)
+  4601	    conn = get_conn()
+  4602	    limiter = asyncio.Semaphore(BIBLE_PARATEXT_CONCURRENCY)
+  4603	    started = time.time()
+  4604	
+  4605	    async def _clean(slot: int) -> tuple[int, str, bool]:
+  4606	        chapter = valid[slot]
+  4607	        async with limiter:
+  4608	            regions, cache_hit = await chapter_paratext_offsets(
+  4609	                conn, chapter,
+  4610	                operation_id=f"bible.paratext:{chapter.get('id') or positions[slot]}",
+  4611	            )
+  4612	        stripped = remove_offsets(chapter.get("content") or "", regions)
+  4613	        return slot, stripped, cache_hit
+  4614	
+  4615	    tasks = [asyncio.create_task(_clean(slot)) for slot in scope]
+  4616	    try:
+  4617	        done, pending = await asyncio.wait(tasks, timeout=BIBLE_PARATEXT_BUDGET_S)
+  4618	    except BaseException:  # 外层取消/关服：不留悬挂任务
+  4619	        for task in tasks:
+  4620	            task.cancel()
+  4621	        raise
+  4622	    for task in pending:
+  4623	        task.cancel()
+  4624	    if pending:
+  4625	        await asyncio.gather(*pending, return_exceptions=True)
+  4626	
+  4627	    cleaned = list(chapters)
+  4628	    changed = 0
+  4629	    cache_hits = 0
+  4630	    for task in done:
+  4631	        if task.cancelled() or task.exception() is not None:
+  4632	            continue
+  4633	        slot, stripped, cache_hit = task.result()
+  4634	        if cache_hit:
+  4635	            cache_hits += 1
+  4636	        original = valid[slot]
+  4637	        if stripped != (original.get("content") or ""):
+  4638	            cleaned[positions[slot]] = {**original, "content": stripped}
+  4639	            changed += 1
+  4640	    log_provider_call(
+  4641	        "character_bible_paratext", config.MODEL_TEXT,
+  4642	        "OK" if not pending else "PARTIAL", None, int((time.time() - started) * 1000),
+  4643	        meta={
+  4644	            "chapters_total": len(valid),
+  4645	            "chapters_in_scope": len(scope),
+  4646	            "chapters_stripped": changed,
+  4647	            "unfinished": len(pending),
+  4648	            "budget_s": BIBLE_PARATEXT_BUDGET_S,
+  4649	            # 命中持久化缓存 vs 真正发起模型调用的两类计数（见方案文档
+  4650	            # "改动清单"一节）：重跑同一项目时前者应趋近 chapters_in_scope，
+  4651	            # 后者应趋近 0——这两个数字是判断"120s 预算有没有真的降下来"
+  4652	            # 的直接依据，不用再去 provider_calls 表里数。
+  4653	            "cache_hits": cache_hits,
+  4654	            "model_calls": len(done) - cache_hits,
+  4655	        },
+  4656	    )
+  4657	    return cleaned
+  4658	
+  4659	
+  4660	BIBLE_DETAIL_EVIDENCE_MAX_CHARS = 12000
+  4661	BIBLE_DETAIL_EVIDENCE_MAX_SEGMENTS = 12
+  4662	BIBLE_ROSTER_INPUT_MAX_CHARS = 16000
+  4663	BIBLE_DETAIL_TIMEOUT_S = 90.0
+  4664	BIBLE_DETAIL_MAX_ATTEMPTS = 2
+  4665	BIBLE_DETAIL_MAX_TOKENS = 4096
+  4666	
+  4667	
+  4668	class _BibleRosterEntry(BaseModel):
+  4669	    name: str
+  4670	    role: str
+  4671	    source_appellations: list[str] = Field(default_factory=list)
+  4672	
+  4673	
+  4674	class _BibleRosterDraft(BaseModel):
+  4675	    characters: list[_BibleRosterEntry] = Field(default_factory=list)
+  4676	    world: World
+  4677	
+  4678	
+  4679	class _CharacterDetail(BaseModel):
+  4680	    appearance_canonical: str
+  4681	    personality: str = ""
+  4682	    speech_style: str = ""
+  4683	    relationships: list[Relationship] = Field(default_factory=list)
+  4684	    aliases: list[CharacterAlias] = Field(default_factory=list)
+  4685	    source_evidence: list[AppearanceEvidence] = Field(default_factory=list)
+  4686	
+  4687	
+  4688	def _character_detail_evidence_pack(
+  4689	    chapters: list[dict], appellations: list[str], *, max_chars: int = BIBLE_DETAIL_EVIDENCE_MAX_CHARS,
+  4690	) -> str:
+  4691	    """Deterministically retrieve a bounded source dossier for one character."""
+  4692	    anchors = [value.strip() for value in appellations if value and value.strip()]
+  4693	    selected: list[str] = []
+  4694	    seen: set[tuple[int, str]] = set()
+  4695	    for chapter in chapters:
+  4696	        content = (chapter.get("content") or "").strip()
+  4697	        if not content:
+  4698	            continue
+  4699	        try:
+  4700	            chapter_idx = int(chapter.get("idx"))
+  4701	        except (TypeError, ValueError):
+  4702	            continue
+  4703	        for segment in index_source_segments(content, max_chars=800):
+  4704	            text = segment.text.strip()
+  4705	            if not text or not any(anchor in text for anchor in anchors):
+  4706	                continue
+  4707	            key = (chapter_idx, text)
+  4708	            if key in seen:
+  4709	                continue
+  4710	            block = f"【第{chapter_idx}章·证据】\n{text}"
+  4711	            if sum(len(item) for item in selected) + len(block) > max_chars:
+  4712	                return "\n\n".join(selected)
+  4713	            selected.append(block)
+  4714	            seen.add(key)
+  4715	            if len(selected) >= BIBLE_DETAIL_EVIDENCE_MAX_SEGMENTS:
+  4716	                return "\n\n".join(selected)
+  4717	    if selected:
+  4718	        return "\n\n".join(selected)
+  4719	    # No lexical hit: bounded fallback only, never the 60K source corpus.
+  4720	    for chapter in chapters[:3]:
+  4721	        content = (chapter.get("content") or "").strip()
+  4722	        if not content:
+  4723	            continue
+  4724	        block = f"【第{chapter.get('idx', '?')}章·有限背景】\n{content[:1200]}"
+  4725	        if sum(len(item) for item in selected) + len(block) > max_chars:
+  4726	            break
+  4727	        selected.append(block)
+  4728	    return "\n\n".join(selected)
+  4729	
+  4730	
+  4731	def _validate_bible_roster(draft: _BibleRosterDraft) -> list[str]:
+  4732	    names = [(item.name or "").strip() for item in draft.characters]
+  4733	    errors: list[str] = []
+  4734	    if not 1 <= len(names) <= 20:
+  4735	        errors.append(f"characters 数量 {len(names)}，要求 1~20 个")
+  4736	    if any(not name for name in names):
+  4737	        errors.append("characters.name 不能为空")
+  4738	    if len(names) != len(set(names)):
+  4739	        errors.append("characters.name 存在重复")
+  4740	    if getattr(draft.world, "visual_style_canonical", None) is None:
+  4741	        errors.append("world.visual_style_canonical 缺失")
+  4742	    return errors
+  4743	
+  4744	
+  4745	async def _generate_character_detail(
+  4746	    entry: _BibleRosterEntry,
+  4747	    *,
+  4748	    roster_names: list[str],
+  4749	    evidence_pack: str,
+  4750	    style: str,
+  4751	    chapters_by_idx: dict[int, str],
+  4752	    project_id: str | None,
+  4753	) -> Character | None:
+  4754	    from app.refs import PRODUCTION_APPEARANCE_MAX_CHARS, PRODUCTION_APPEARANCE_MIN_CHARS
+  4755	
+  4756	    base_pack = evidence_pack[:BIBLE_DETAIL_EVIDENCE_MAX_CHARS]
+  4757	    last_error = ""
+  4758	    for attempt in range(1, BIBLE_DETAIL_MAX_ATTEMPTS + 1):
+  4759	        pack = base_pack if attempt == 1 else base_pack[: max(2000, len(base_pack) // 2)]
+  4760	        prompt = f"""任务：只为一个已确认角色生成角色详情。角色名字与角色类型已经由上游锁定，不得更改。
+  4761	目标角色：{entry.name}
+  4762	角色类型：{entry.role}
+  4763	原文称呼：{'、'.join(entry.source_appellations) or entry.name}
+  4764	完整角色名单（relationships.to 只能从这里选择）：{'、'.join(roster_names)}
+  4765	统一画风：{style}
+  4766	
+  4767	要求：appearance_canonical {PRODUCTION_APPEARANCE_MIN_CHARS}~{PRODUCTION_APPEARANCE_MAX_CHARS} 字；speech_style 15~30 字；只写该角色；不确定的关系、别名、标志性特征证据留空。source_evidence 引句必须不超过 40 字且逐字来自证据包。
+  4768	
+  4769	该角色的小证据包（不是全书）：
+  4770	{pack}
+  4771	
+  4772	输出 JSON Schema：
+  4773	{{"appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "aliases": [{{"text": str, "name_kind": str, "evidence_chapter_index": int, "evidence_quote": str}}], "source_evidence": [{{"evidence_chapter_index": int, "evidence_quote": str}}]}}"""
+  4774	        started = time.time()
+  4775	        try:
+  4776	            raw = await asyncio.wait_for(
+  4777	                model_gateway.chat(
+  4778	                    [{"role": "system", "content": SYSTEM_PREFIX}, {"role": "user", "content": prompt}],
+  4779	                    temperature=0.35 if attempt == 1 else 0.15,
+  4780	                    max_tokens=BIBLE_DETAIL_MAX_TOKENS,
+  4781	                    call_meta={
+  4782	                        "stage": "角色详情生成",
+  4783	                        "stage_key": "character_bible_detail",
+  4784	                        "call_role": "stage_generate" if attempt == 1 else "stage_repair",
+  4785	                        "call_role_label": "单角色详情",
+  4786	                        "expected_json": True,
+  4787	                        "character_name": entry.name,
+  4788	                        "attempt": attempt,
+  4789	                        "input_chars": len(pack),
+  4790	                        "project_id": project_id,
+  4791	                    },
+  4792	                ),
+  4793	                timeout=BIBLE_DETAIL_TIMEOUT_S,
+  4794	            )
+  4795	            detail = _CharacterDetail.model_validate(extract_json(raw))
+  4796	            character = Character(
+  4797	                name=entry.name,
+  4798	                role=entry.role,
+  4799	                appearance_canonical=detail.appearance_canonical,
+  4800	                personality=detail.personality,
+  4801	                speech_style=detail.speech_style,
+  4802	                relationships=detail.relationships,
+  4803	                aliases=detail.aliases,
+  4804	                source_evidence=detail.source_evidence,
+  4805	            )
+  4806	            if not PRODUCTION_APPEARANCE_MIN_CHARS <= len(character.appearance_canonical) <= PRODUCTION_APPEARANCE_MAX_CHARS:
+  4807	                raise ValueError("appearance_canonical 长度越界")
+  4808	            character.relationships = [item for item in character.relationships if item.to in roster_names]
+  4809	            character.source_evidence = [
+  4810	                item for item in character.source_evidence
+  4811	                if _appearance_evidence_verified(
+  4812	                    chapters_by_idx, {entry.name}, item.evidence_chapter_index, item.evidence_quote,
+  4813	                )
+  4814	            ]
+  4815	            log_provider_call(
+  4816	                "character_bible_detail", config.MODEL_TEXT, "OK", None,
+  4817	                int((time.time() - started) * 1000),
+  4818	                meta={"character_name": entry.name, "attempt": attempt, "input_chars": len(pack)},
+  4819	            )
+  4820	            return character
+  4821	        except asyncio.CancelledError:
+  4822	            raise
+  4823	        except Exception as exc:  # noqa: BLE001 - only this character retries
+  4824	            last_error = str(exc)
+  4825	            log_provider_call(
+  4826	                "character_bible_detail", config.MODEL_TEXT,
+  4827	                "TIMEOUT" if isinstance(exc, TimeoutError) else "FAILED", None,
+  4828	                int((time.time() - started) * 1000),
+  4829	                meta={"character_name": entry.name, "attempt": attempt, "input_chars": len(pack), "error": last_error[:300]},
+  4830	            )
+  4831	    return None
+  4832	
+  4833	
+  4834	async def _generate_character_detail_batch(
+  4835	    entries: list[_BibleRosterEntry], chapters: list[dict], *, style: str,
+  4836	    chapters_by_idx: dict[int, str], project_id: str | None,
+  4837	) -> list[Character]:
+  4838	    roster_names = [entry.name for entry in entries]
+  4839	    tasks = [asyncio.create_task(_generate_character_detail(
+  4840	        entry,
+  4841	        roster_names=roster_names,
+  4842	        evidence_pack=_character_detail_evidence_pack(
+  4843	            chapters, [entry.name, *entry.source_appellations]
+  4844	        ),
+  4845	        style=style,
+  4846	        chapters_by_idx=chapters_by_idx,
+  4847	        project_id=project_id,
+  4848	    )) for entry in entries]
+  4849	    results = await asyncio.gather(*tasks, return_exceptions=True)
+  4850	    characters: list[Character] = []
+  4851	    for entry, result in zip(entries, results, strict=True):
+  4852	        if isinstance(result, BaseException) or result is None:
+  4853	            continue
+  4854	        characters.append(result)
+  4855	    return characters
+  4856	
+  4857	
+  4858	async def generate_bible(chapters: list[dict], feedback: str = "", previous_bible: dict | None = None,
+  4859	                         project_id: str | None = None,
+  4860	                         visual_style_prompt: str | None = None) -> Bible:
+  4861	    """Generate a small roster first, then fan out bounded per-character requests."""
+  4862	    chapters = await _chapters_without_paratext(chapters)
+  4863	    chapters_text = _render_bible_source(
+  4864	        chapters, budget=BIBLE_ROSTER_INPUT_MAX_CHARS,
+  4865	        head_chapters=BIBLE_HEAD_CHAPTERS,
+  4866	    )
+  4867	    chapters_by_idx = _chapters_by_idx(chapters)
+  4868	    must_cover = await _recurring_character_names(chapters, project_id=project_id)
+  4869	
+  4870	    must_cover_lines = [
+  4871	        f"{formal or appellation}（原文常用称呼：{appellation}）"
+  4872	        for appellation, formal, _count in must_cover
+  4873	    ]
+  4874	    previous_names = [
+  4875	        item.get("name", "") for item in (previous_bible or {}).get("characters", [])
+  4876	        if item.get("name")
+  4877	    ]
+  4878	    forced_style = visual_style_prompt or ""
+  4879	    roster_prompt = f"""任务：只确定人物谱的最终角色名单、每个角色类型和世界观；不要生成外观、性格、台词风格、关系或证据。
+  4880	
+  4881	规则：
+  4882	1. 收录所有出场 2 次以上或明显重要的角色，总数不超过 20。
+  4883	2. name 使用原文最稳定的正式姓名；source_appellations 收录原文中用于检索该角色的小量精确称呼。
+  4884	3. 同一人物的外号、尊称、简称不得拆成多人。
+  4885	4. 必收角色不得遗漏：{'、'.join(must_cover_lines) or '无'}。
+  4886	5. 用户反馈：{feedback.strip() or '无'}。
+  4887	6. 历史人物谱角色仅供返工对照：{'、'.join(previous_names) or '无'}。
+  4888	7. visual_style_canonical：{forced_style or '按题材生成 25~40 字的统一 CG/动画/漫画/插画画风'}。
+  4889	
+  4890	小说文本：
+  4891	{chapters_text}
+  4892	
+  4893	输出 JSON Schema：
+  4894	{{"characters": [{{"name": str, "role": "主角|重要配角|反派", "source_appellations": [str]}}], "world": {{"era": str, "genre": str, "visual_style_canonical": str}}}}"""
+  4895	    roster_loop = AgentLoop(
+  4896	        stage_key="character_bible_roster",
+  4897	        contract_key="character_bible_roster",
+  4898	        goal="确定人物谱角色名单与统一世界观",
+  4899	        scope_type="project",
+  4900	        scope_id=project_id or hashlib.sha256(chapters_text.encode("utf-8")).hexdigest()[:16],
+  4901	        artifact_type="character_bible_roster",
+  4902	        policy=AgentLoopPolicy(
+  4903	            max_iterations=2,
+  4904	            stall_rounds=2,
+  4905	            min_quality_gain=0.03,
+  4906	            no_gain_rounds=1,
+  4907	            allow_warning_candidate=False,
+  4908	            repair_all_blockers=True,
+  4909	        ),
+  4910	    )
+  4911	
+  4912	    def validate_roster(candidate: _BibleRosterDraft) -> list[str]:
+  4913	        if visual_style_prompt:
+  4914	            candidate.world.visual_style_canonical = visual_style_prompt
+  4915	        return _validate_bible_roster(candidate)
+  4916	
+  4917	    roster = await _run_with_agent_loop(
+  4918	        "人物名单", "character_bible_roster", roster_prompt, _BibleRosterDraft,
+  4919	        validate_roster, loop=roster_loop, temperature=0.3, max_tokens=4096,
+  4920	        repair_user_prompt_limit=16000, repair_candidate_limit=5000,
+  4921	    )
+  4922	    if visual_style_prompt:
+  4923	        roster.world.visual_style_canonical = visual_style_prompt
+  4924	    style = roster.world.visual_style_canonical
+  4925	    characters = await _generate_character_detail_batch(
+  4926	        roster.characters,
+  4927	        chapters,
+  4928	        style=style,
+  4929	        chapters_by_idx=chapters_by_idx,
+  4930	        project_id=project_id,
+  4931	    )
+  4932	    bible = Bible(world=roster.world, characters=characters)
+  4933	    await _verify_character_aliases_in_place(bible, chapters, project_id=project_id)
+  4934	
+  4935	    missing = [
+  4936	        item for item in must_cover
+  4937	        if not _bible_covers_name(bible, {value for value in (item[0], item[1]) if value})
+  4938	    ]
+  4939	    if missing:
+  4940	        # Reuse the same single-character primitive; no batch/full-source supplement request.
+  4941	        existing_names = {character.name for character in bible.characters}
+  4942	        entries = [
+  4943	            _BibleRosterEntry(
+  4944	                name=formal or appellation,
+  4945	                role="重要配角",
+  4946	                source_appellations=[appellation],
+  4947	            )
+  4948	            for appellation, formal, _count in missing
+  4949	            if (formal or appellation) not in existing_names
+  4950	        ]
+  4951	        supplemented = await _generate_character_detail_batch(
+  4952	            entries,
+  4953	            chapters,
+  4954	            style=style,
+  4955	            chapters_by_idx=chapters_by_idx,
+  4956	            project_id=project_id,
+  4957	        )
+  4958	        bible.characters.extend(supplemented)
+  4959	        if supplemented:
+  4960	            await _verify_character_aliases_for_subset(
+  4961	                bible, supplemented, chapters_by_idx, project_id=project_id,
+  4962	            )
+  4963	
+  4964	    valid_names = {character.name for character in bible.characters}
+  4965	    for character in bible.characters:
+  4966	        character.relationships = [
+  4967	            relation for relation in character.relationships if relation.to in valid_names
+  4968	        ]
+  4969	    errors = validate_bible(bible) + _validate_appearance_evidence(bible, chapters_by_idx)
+  4970	    if errors:
+  4971	        raise StageError("角色圣经", errors, exit_reason="local_detail_blockers")
+  4972	    return bible
+  4973	
+  4974	
+  4975	# ---------- A2. 场景圣经（场景图素材库的规范场景，跨集场景一致性核心） ----------
+  4976	
+  4977	class _SceneBibleDraft(BaseModel):
+  4978	    """场景圣经输出合同（仅生成期使用）：一组规范场景。"""
+  4979	
+  4980	    scenes: list[Scene]
+  4981	
+  4982	
+  4983	async def generate_scene_bible(chapters: list[dict], bible: Bible,
+  4984	                               feedback: str = "", project_id: str | None = None) -> list[Scene]:
+  4985	    """从原文提取「规范场景」清单，作为场景图素材库的底稿（与 generate_bible 同构）。
+  4986	    每个场景给 name（稳定短标签）+ scene_canonical（固定场景锚点串，画风约束与人物锚点一致，
+  4987	    按 bible.world.visual_style_canonical 是否为照片级真人摄影预设二选一：非摄影风格必须
+  4988	    CG/动画/漫画类非真人风格，否则后续 Seedance/Seedream 易因疑似真人报错；摄影风格则相反，
+  4989	    要求真实材质与摄影级细节）。"""
+  4990	    from app.visual_styles import is_photographic_style_prompt
+  4991	    chapters_text = _render_bible_source(chapters)
+  4992	    style = bible.world.visual_style_canonical
+  4993	    genre = bible.world.genre or ""
+  4994	    feedback_part = ""
+  4995	    if feedback.strip():
+  4996	        feedback_part = f"\n人工打回重生要求（最高优先级）：\n{feedback.strip()}\n"
+  4997	    if is_photographic_style_prompt(style):
+  4998	        scene_style_rule = (
+  4999	            f'4. 【硬性约束】scene_canonical 必须贴合全片画风「{style}」，是照片级摄影质感的'
+  5000	            "实景环境描述，允许并鼓励真实材质、自然光影与摄影级细节；场景本身仍是虚构地点，"
+  5001	            "不指向可识别的真实地标、真实机构或真实商业品牌名称。"
+  5002	        )
+  5003	    else:
+  5004	        scene_style_rule = (
+  5005	            f'4. 【硬性约束】scene_canonical 必须贴合全片画风「{style}」，是 CG/动画/漫画/插画类的'
+  5006	            '非真人渲染场景（写实质感氛围词可保留），严禁"真人实拍/实景照片/摄影棚实拍"这类描述'
+  5007	            "（否则后续图像/视频接口会因疑似真人实景报错）。"
+  5008	        )
+  5009	    prompt = f"""任务：从小说文本中提取【规范场景清单】，用于后续 AI 视频生成的场景一致性控制（场景图素材库）。
+  5010	
+  5011	全片画风（场景锚点必须与之一致）：{style}
+  5012	题材：{genre or '（未标注）'}
+  5013	
+  5014	要求：
+  5015	1. 只收录【反复出现 / 有戏份 / 画面感强】的关键场景（如主角居所、宗门广场、夜晚密林、朝堂等），最多 12 个；一次性出现的过场地点不要收录。
+  5016	2. name：稳定的场景短标签（4~10 字，如"宗门广场""破败客栈内"），后续所有分镜的场景都收敛到这些名字，便于跨集复用同一张场景图。name 之间不要语义重复。
+  5017	3. scene_canonical 是该场景的"固定场景锚点串"：30~60 字，必须包含 地点/室内外/典型光线时段/标志性陈设或建筑/整体氛围色调。只写视觉可见的环境信息，不写人物、不写剧情动作。原著未描写处按题材与画风合理补全并保持内部一致。
+  5018	{scene_style_rule}
+  5019	5. location_kind 取"室内/室外/其他"之一。
+  5020	
+  5021	小说文本：
+  5022	{chapters_text}{feedback_part}
+  5023	
+  5024	输出 JSON Schema：
+  5025	{{"scenes": [{{"name": str, "scene_canonical": str, "location_kind": "室内|室外|其他"}}]}}"""
+  5026	    loop = AgentLoop(
+  5027	        stage_key="scene_bible",
+  5028	        contract_key="scene_bible",
+  5029	        goal="从原文章节提取跨集复用、来源可追溯的规范场景",
+  5030	        scope_type="project",
+  5031	        scope_id=project_id or hashlib.sha256((chapters_text + style).encode("utf-8")).hexdigest()[:16],
+  5032	        artifact_type="scene_bible",
+  5033	        policy=AgentLoopPolicy(
+  5034	            max_iterations=min(max(int(get_setting("max_repair_attempts") or 4), 1), 4),
+  5035	            stall_rounds=2,
+  5036	            min_quality_gain=0.03,
+  5037	            no_gain_rounds=2,
+  5038	            allow_warning_candidate=False,
+  5039	        ),
+  5040	    )
+  5041	    draft = await _run_with_agent_loop(
+  5042	        "场景圣经", "scene_bible", prompt, _SceneBibleDraft,
+  5043	        lambda d: validate_scene_bible(d.scenes), loop=loop, temperature=0.5,
+  5044	        # 与人物谱同因：修复轮不能把小说正文截掉，否则只会反复重排开头几个场景。
+  5045	        repair_user_prompt_limit=None,
+  5046	    )
+  5047	    return list(draft.scenes)
+  5048	
+  5049	
+  5050	# 模型以为看到了全部，把后半章静默丢掉。改为命名常量 + 截断标记，让模型知道"后文还有，按依据补全"。
+  5051	SCREENPLAY_SOURCE_BUDGET_CHARS = 120000
+  5052	
+  5053	
+  5054	_SOURCE_QUOTED_DIALOGUE_RE = re.compile(r"[“「『][^”」』\n]{2,240}[”」』]")
+  5055	_SOURCE_SPEAKER_DIALOGUE_RE = re.compile(
+  5056	    r"(?m)^[^\n：:]{1,20}[：:][^\n]{2,300}$"
+  5057	)
+  5058	
+  5059	
+  5060	def _source_dialogue_evidence(text: str, limit: int) -> str:
+  5061	    """Select exact dialogue evidence from a source section without inventing prose.
+  5062	
+  5063	    Long chapters used to be truncated at the head, which made dialogue in the
+  5064	    middle or climax literally unavailable to generation and repair.  Preserve
+  5065	    dialogue-shaped source fragments in addition to stable head/tail context.
+  5066	    """
+  5067	    if limit <= 0 or not text:
+  5068	        return ""
+  5069	    fragments: list[str] = []
+  5070	    seen: set[str] = set()
+  5071	    for pattern in (_SOURCE_SPEAKER_DIALOGUE_RE, _SOURCE_QUOTED_DIALOGUE_RE):
+  5072	        for match in pattern.finditer(text):
+  5073	            fragment = match.group(0).strip()
+  5074	            condensed = re.sub(r"\s+", "", fragment)
+  5075	            if not condensed or condensed in seen:
+  5076	                continue
+  5077	            seen.add(condensed)
+  5078	            fragments.append(fragment)
+  5079	    selected: list[str] = []
+  5080	    used = 0
+  5081	    for fragment in fragments:
+  5082	        cost = len(fragment) + (1 if selected else 0)
+  5083	        if used + cost > limit:
+  5084	            continue
+  5085	        selected.append(fragment)
+  5086	        used += cost
+  5087	    return "\n".join(selected)
+  5088	
+  5089	
+  5090	def _render_screenplay_source(source_text: str, budget: int = SCREENPLAY_SOURCE_BUDGET_CHARS) -> str:
+  5091	    text = source_text or ""
+  5092	    if len(text) <= budget:
+  5093	        return text
+  5094	    marker_a = "\n\n……（中段叙事已按上下文预算压缩；以下保留中段原文对白证据）……\n"
+  5095	    marker_b = "\n\n……（继续保留本章结尾原文，结尾事件与台词不得遗漏）……\n"
+  5096	    payload_budget = max(0, budget - len(marker_a) - len(marker_b))
+  5097	    head_budget = int(payload_budget * 0.35)
+  5098	    tail_budget = int(payload_budget * 0.35)
+  5099	    dialogue_budget = payload_budget - head_budget - tail_budget
+  5100	    middle_end = max(head_budget, len(text) - tail_budget)
+  5101	    middle = text[head_budget:middle_end]
+  5102	    dialogue_evidence = _source_dialogue_evidence(middle, dialogue_budget)
+  5103	    # If the middle contains little dialogue, use the remaining allowance for
+  5104	    # contiguous context immediately after the head instead of wasting budget.
+  5105	    unused = max(0, dialogue_budget - len(dialogue_evidence))
+  5106	    head = text[:head_budget + unused]
+  5107	    tail = text[-tail_budget:] if tail_budget else ""
+  5108	    return head + marker_a + dialogue_evidence + marker_b + tail
+  5109	
+  5110	
+  5111	def _character_resolution_prompt_block(episode: dict) -> str:
+  5112	    """把剧本预检的姓名消歧结果转成生产硬合同。"""
+  5113	    from app.identity_authority import normalize_character_resolutions
+  5114	
+  5115	    rows = [
+  5116	        item
+  5117	        for item in normalize_character_resolutions(
+  5118	            episode.get("character_resolutions") or [],
+  5119	        )
+  5120	        if identity_resolution_is_authoritative(item)
+  5121	    ]
+  5122	    if not rows:
+  5123	        return (
+  5124	            "【角色身份预解析】本集没有额外称谓决议；人物谱角色的 "
+  5125	            "authority_id 使用 bible:<人物谱准确姓名>。"
+  5126	            + model_identity_authority_prompt_rule()
+  5127	        )
+  5128	    return (
+  5129	        "【角色身份预解析·剧本发布硬门禁】\n"
+  5130	        + json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+  5131	        + "\n人物谱准确姓名使用 bible:<姓名>。"
+  5132	        + model_identity_authority_prompt_rule()
+  5133	        + "除 source_text 等逐字原文证据外，所有展示姓名必须使用对应 canonical_name。"
+  5134	        + "后续章节只用于确认身份，严禁在本集泄露其剧情。"
+  5135	    )
+  5136	
+  5137	
+  5138	async def _repair_narrative_blueprint(
+  5139	    blueprint: NarrativeBlueprint,
+  5140	    *,
+  5141	    episode: dict[str, Any],
+  5142	    source_text: str,
+  5143	    additional_errors: list[str] | None = None,
+  5144	    generation_budget: _BlueprintGenerationBudget | None = None,
+  5145	) -> NarrativeBlueprint:
+  5146	    from app.evidence import repository as evidence_repository
+  5147	    from app.harness.types import EvidenceArtifact
+  5148	    from app.observability.tracing import current_trace
+  5149	
+  5150	    parent_artifact_ids: list[str] = []
+  5151	    pending_external_errors = list(additional_errors or [])
+  5152	    undelivered_patch_errors: list[str] = []
+  5153	
+  5154	    def normalize_and_validate() -> list[str]:
+  5155	        normalize_blueprint_state_subject_perception(blueprint)
+  5156	        normalize_blueprint_requirement_state_keys(blueprint)
+  5157	        return validate_narrative_blueprint(blueprint, source_text)
+  5158	
+  5159	    for round_no in range(1, 7):
+  5160	        normalize_blueprint_agency_continuity(blueprint)
+  5161	        errors = normalize_and_validate() + pending_external_errors
+  5162	        if not errors:
+  5163	            trace = current_trace()
+  5164	            evidence_repository.create_artifact(
+  5165	                EvidenceArtifact(
+  5166	                    type="screenplay_narrative_blueprint",
+  5167	                    scope_type="episode",
+  5168	                    scope_id=str(episode.get("id") or ""),
+  5169	                    status="validated",
+  5170	                    trust_level="T1",
+  5171	                    content=blueprint.model_dump(mode="json"),
+  5172	                    parent_artifact_ids=parent_artifact_ids,
+  5173	                    contract_version=BLUEPRINT_VERSION,
+  5174	                    prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+  5175	                    model_snapshot=_current_blueprint_authority_snapshot(
+  5176	                        source_text,
+  5177	                        generation_mode="semantic_repair",
+  5178	                        generation_budget=generation_budget,
+  5179	                    ),
+  5180	                ),
+  5181	                step_run_id=trace.step_run_id,
+  5182	            )
+  5183	            return blueprint
+  5184	        error_text = "\n".join(errors)
+  5185	        mentioned_keys = {
+  5186	            node.key
+  5187	            for node in blueprint.nodes
+  5188	            if node.key and node.key in error_text
+  5189	        }
+  5190	        selected_indexes = {
+  5191	            neighbor
+  5192	            for index, node in enumerate(blueprint.nodes)
+  5193	            if node.key in mentioned_keys
+  5194	            for neighbor in range(
+  5195	                max(0, index - 2),
+  5196	                min(len(blueprint.nodes), index + 3),
+  5197	            )
+  5198	        }
+  5199	        mentioned_source_ids = set(re.findall(
+  5200	            r"\bSRC\d+\b",
+  5201	            "\n".join(errors),
+  5202	        ))
+  5203	        source_segments = index_source_segments(source_text)
+  5204	        source_order = {
+  5205	            segment.segment_id: index
+  5206	            for index, segment in enumerate(source_segments)
+  5207	        }
+  5208	        for source_id in mentioned_source_ids:
+  5209	            target_position = source_order.get(source_id)
+  5210	            if target_position is None:
+  5211	                continue
+  5212	            nearest_index = min(
+  5213	                range(len(blueprint.nodes)),
+  5214	                key=lambda index: min(
+  5215	                    (
+  5216	                        abs(
+  5217	                            source_order[owned_source_id]
+  5218	                            - target_position
+  5219	                        )
+  5220	                        for owned_source_id
+  5221	                        in blueprint.nodes[index].source_segment_ids
+  5222	                        if owned_source_id in source_order
+  5223	                    ),
+  5224	                    default=len(source_segments),
+  5225	                ),
+  5226	            )
+  5227	            selected_indexes.update(range(
+  5228	                max(0, nearest_index - 2),
+  5229	                min(len(blueprint.nodes), nearest_index + 3),
+  5230	            ))
+  5231	        open_flashback_depth = 0
+  5232	        for node in blueprint.nodes:
+  5233	            if node.time_relation == "flashback_enter":
+  5234	                open_flashback_depth += 1
+  5235	            elif node.time_relation == "flashback_exit":
+  5236	                open_flashback_depth = max(0, open_flashback_depth - 1)
+  5237	        if not selected_indexes and open_flashback_depth and blueprint.nodes:
+  5238	            flashback_enter_indexes = [
+  5239	                index
+  5240	                for index, node in enumerate(blueprint.nodes)
+  5241	                if node.time_relation == "flashback_enter"
+  5242	            ]
+  5243	            if flashback_enter_indexes:
+  5244	                enter_index = flashback_enter_indexes[-1]
+  5245	                selected_indexes.update(range(
+  5246	                    max(0, enter_index - 1),
+  5247	                    min(len(blueprint.nodes), enter_index + 2),
+  5248	                ))
+  5249	            selected_indexes.update(range(
+  5250	                max(0, len(blueprint.nodes) - 3),
+  5251	                len(blueprint.nodes),
+  5252	            ))
+  5253	        if not selected_indexes:
+  5254	            raise ValueError(
+  5255	                "蓝图错误无法映射到可局部替换的时间线节点："
+  5256	                + "；".join(errors[:10])
+  5257	            )
+  5258	        selected_nodes = [
+  5259	            blueprint.nodes[index].model_dump(mode="json")
+  5260	            for index in sorted(selected_indexes)
+  5261	        ]
+  5262	        selected_node_keys = [
+  5263	            str(node["key"]) for node in selected_nodes
+  5264	        ]
+  5265	        selected_source_ids = {
+  5266	            str(source_id)
+  5267	            for node in selected_nodes
+  5268	            for source_id in node["source_segment_ids"]
+  5269	        }
+  5270	        selected_source_facts = [
+  5271	            fact.model_dump(mode="json")
+  5272	            for fact in source_facts(source_text)
+  5273	            if fact.source_segment_id in selected_source_ids
+  5274	        ]
+  5275	        projection_contract = {
+  5276	            node.key: node.source_semantics().projection_policy
+  5277	            for node in blueprint.nodes
+  5278	            if node.key in set(selected_node_keys)
+  5279	        }
+  5280	        patch_schema = blueprint_patch_schema(
+  5281	            blueprint,
+  5282	            selected_node_keys,
+  5283	        )
+  5284	        node_index = [
+  5285	            {
+  5286	                "key": node.key,
+  5287	                "summary": node.summary,
+  5288	                "time": node.time_label,
+  5289	                "location": node.location_label,
+  5290	            }
+  5291	            for node in blueprint.nodes
+  5292	        ]
+  5293	        repair_prompt = (
+  5294	            "只局部修复叙事蓝图的硬门禁问题，禁止重写整份蓝图。"
+  5295	            "replacements 中只输出需要修改的完整 node，并使用 node 字段。"
+  5296	            "每个 replacement 必须与原节点一对一，完整保持 canonical key、"
+  5297	            "source_segment_ids 的集合与顺序，以及"
+  5298	            "narrative_layer/event_priority/render_policy 语义三元。"
+  5299	            "禁止拆分、合并、新增、删除或重排 timeline node；"
+  5300	            "delete_node_keys 必须为空。"
+  5301	            "允许修正时间关系、转场、状态事实引用、决定、行为自主性和"
+  5302	            " released_constraints_for、participant_evidence。每个 replacement node "
+  5303	            "必须显式保留或修正"
+  5304	            "除上述 canonical authority 字段外的创作与分场字段。"
+  5305	            "每个 replacement 必须保持修复前 projection_policy；audit_only "
+  5306	            "节点与来源只能保留在来源审计，不得改成 story 或放入 scene。"
+  5307	            "paratext/audit_only replacement 必须把 participants、"
+  5308	            "participant_evidence、state_subject_assignments、"
+  5309	            "environment_source_unit_keys、"
+  5310	            "source_unit_deliveries、state_requirements、state_changes、"
+  5311	            "released_constraints_for 全部保持为空列表，decision=null，"
+  5312	            "exit_state=空字符串；标题卡可见文字只写入 summary/"
+  5313	            "action_logic/opening_image，不得伪造 written_text delivery。"
+  5314	            "不得修改未列出的节点。原文没有的同谋、"
+  5315	            "关系、满房、行程或人物动机默认禁止；若为修复原文自身的明确逻辑矛盾"
+  5316	            "确有必要，必须设 adaptation_kind=logic_bridge，并用 bridge_rationale"
+  5317	            "说明为何不改变核心事件与结果。已有住宿、车辆、关系等持久事实必须"
+  5318	            "继续有效，禁止用锁门、系统错误、被占用等新理由让它失效；若剧情需要"
+  5319	            "临时空间，应在更早的相关节点建立属于其他人物的独立资源，再说明角色"
+  5320	            "为何临时使用该资源。被迫决定必须建立"
+  5321	            " constraint_fact_key；只有后续节点用 supersedes_fact_keys 终止"
+  5322	            "该约束事实后，才能写 released_constraints_for。快感或停止反抗"
+  5323	            "不能解除威胁。若 setup_missing 涉及原文明确写出的既有关系或人物，"
+  5324	            "禁止删除、弱化该来源事实；必须在当前节点或更早节点增加可见/可听的"
+  5325	            "身份与关系建立内容，同节点先建立再引用也有效。\n\n"
+  5326	            "若硬门禁是 source_delivery 或 voice_identity 问题，只能在保持完整"
+  5327	            "node、source_segment_ids 顺序和来源语义的前提下，修正"
+  5328	            "source_unit_deliveries 与 participant_evidence：仅story/picture节点的"
+  5329	            " projection=quoted "
+  5330	            "单元必须先根据来源语义明确选择 spoken_dialogue、offscreen_voice、"
+  5331	            "written_text、sound_effect 或 unspoken_reference。只有声音交付才允许"
+  5332	            "恰有一个 usage=voice，并用 source_unit_keys 精确引用且与 performer_key "
+  5333	            "一致；引号只是句法边界，不得自动视为对白。story/picture的"
+  5334	            " projection=action 正文以及节点的"
+  5335	            "summary/action_logic 即使写有‘旁白’或‘介绍’，也不得被提升为 dialogue "
+  5336	            "或伪造 voice evidence；不得删除、拆分、合并或重排节点来规避。\n\n"
+  5337	            "每个story/picture节点中 projection=action 的 prose source unit 必须三选一："
+  5338	            "人物思考、反应、发问或动作使用一条 usage=state_subject "
+  5339	            "participant_evidence，并用 source_unit_keys 精确绑定该 unit；"
+  5340	            "结构标点切分后仍不可拆的共同动作使用一条 mode=joint 的"
+  5341	            "state_subject_assignments，identity_keys列出全部共同主体；"
+  5342	            "真正无人物状态所有者的环境变化才把该 unit 写入 "
+  5343	            "environment_source_unit_keys。visible 、场次 roster、文本姓名和"
+  5344	            "content_owner 均不能推断状态主体。repair 只允许补此证据，"
+  5345	            "不得改 timeline/node/source ownership/audit_only 语义。"
+  5346	            "paratext/audit_only的quoted/action unit均不适用这两条规则。\n\n"
+  5347	            "硬门禁：\n"
+  5348	            + "\n".join(f"- {error}" for error in errors)
+  5349	            + "\n\n相关节点及前后文：\n"
+  5350	            + json.dumps(
+  5351	                selected_nodes,
+  5352	                ensure_ascii=False,
+  5353	                separators=(",", ":"),
+  5354	            )
+  5355	            + "\n\n门禁提到的缺失来源原文：\n"
+  5356	            + json.dumps(
+  5357	                [
+  5358	                    {
+  5359	                        "source_segment_id": segment.segment_id,
+  5360	                        "text": segment.text,
+  5361	                    }
+  5362	                    for segment in source_segments
+  5363	                    if segment.segment_id in mentioned_source_ids
+  5364	                ],
+  5365	                ensure_ascii=False,
+  5366	                separators=(",", ":"),
+  5367	            )
+  5368	            + "\n\n相关来源的机器结构化 units（唯一 voice 判定权威）：\n"
+  5369	            + json.dumps(
+  5370	                selected_source_facts,
+  5371	                ensure_ascii=False,
+  5372	                separators=(",", ":"),
+  5373	            )
+  5374	            + "\n\n全篇节点索引（仅用于引用）：\n"
+  5375	            + json.dumps(
+  5376	                node_index,
+  5377	                ensure_ascii=False,
+  5378	                separators=(",", ":"),
+  5379	            )
+  5380	            + "\n\n输出 Schema：\n"
+  5381	            + json.dumps(
+  5382	                patch_schema,
+  5383	                ensure_ascii=False,
+  5384	            )
+  5385	        )
+  5386	        trace = current_trace()
+  5387	        raw_artifact_ids: list[str] = []
+  5388	
+  5389	        def record_patch_attempt(attempt: dict[str, Any]) -> None:
+  5390	            raw_artifact = evidence_repository.create_artifact(
+  5391	                EvidenceArtifact(
+  5392	                    type="screenplay_narrative_blueprint_patch_raw",
+  5393	                    scope_type="episode",
+  5394	                    scope_id=str(episode.get("id") or ""),
+  5395	                    status="candidate",
+  5396	                    trust_level="T0",
+  5397	                    content={
+  5398	                        "raw_output": str(attempt.get("raw_response") or ""),
+  5399	                        "round": round_no,
+  5400	                        "outcome": str(attempt.get("outcome") or ""),
+  5401	                        "format_attempt": int(attempt.get("format_attempt") or 0),
+  5402	                        "semantic_attempt": int(
+  5403	                            attempt.get("semantic_attempt") or 0
+  5404	                        ),
+  5405	                    },
+  5406	                    contract_version=BLUEPRINT_VERSION,
+  5407	                    prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+  5408	                ),
+  5409	                step_run_id=trace.step_run_id,
+  5410	            )
+  5411	            raw_artifact_ids.append(str(raw_artifact["id"]))
+  5412	
+  5413	        repair_input_hash = hashlib.sha256(
+  5414	            json.dumps(
+  5415	                {
+  5416	                    "blueprint_hash": _narrative_blueprint_content_hash(blueprint),
+  5417	                    "errors": errors,
+  5418	                    "selected_node_keys": [
+  5419	                        node.get("key") for node in selected_nodes
+  5420	                    ],
+  5421	                },
+  5422	                ensure_ascii=False,
+  5423	                sort_keys=True,
+  5424	                separators=(",", ":"),
+  5425	            ).encode("utf-8")
+  5426	        ).hexdigest()
+  5427	        requested_max_tokens = 16384
+  5428	        patch_messages = [
+  5429	            {"role": "system", "content": SYSTEM_PREFIX},
+  5430	            {"role": "user", "content": repair_prompt},
+  5431	        ]
+  5432	        operation_id, effective_max_tokens = (
+  5433	            _blueprint_structured_operation_id(
+  5434	                operation_kind="patch",
+  5435	                episode_id=str(episode.get("id") or ""),
+  5436	                semantic_input_hash=repair_input_hash,
+  5437	                ordinal=str(round_no),
+  5438	                messages=patch_messages,
+  5439	                output_schema=patch_schema,
+  5440	                requested_max_tokens=requested_max_tokens,
+  5441	                temperature=0.1,
+  5442	            )
+  5443	        )
+  5444	        reservation_id: int | None = None
+  5445	        remaining_seconds: float | None = None
+  5446	        legacy_retry_call_id: int | None = None
+  5447	        if generation_budget is not None:
+  5448	            legacy_retry_call_id = generation_budget.explicit_retry_call_id(
+  5449	                "screenplay_blueprint_patch"
+  5450	            )
+  5451	            reservation_id = generation_budget.claim(
+  5452	                max_tokens=effective_max_tokens,
+  5453	                requested_max_tokens=requested_max_tokens,
+  5454	                operation_id=operation_id,
+  5455	            )
+  5456	            remaining_seconds = generation_budget.remaining_seconds()
+  5457	        structured_call = model_gateway.chat_structured(
+  5458	            patch_messages,
+  5459	            model_type=NarrativeBlueprintPatch,
+  5460	            validate=lambda value: (
+  5461	                validate_narrative_blueprint_patch_projection(
+  5462	                    value,
+  5463	                    blueprint,
+  5464	                )
+  5465	            ),
+  5466	            operation_id=operation_id,
+  5467	            temperature=0.1,
+  5468	            max_tokens=requested_max_tokens,
+  5469	            # A Blueprint patch participates in the same global call/token
+  5470	            # budget as its leaves.  An implicit format retry would be a
+  5471	            # second paid request without a second reservation.
+  5472	            format_retry_limit=(
+  5473	                0
+  5474	                if generation_budget is not None
+  5475	                else int(get_setting("screenplay_format_retry_limit") or 1)
+  5476	            ),
+  5477	            semantic_retry_limit=0,
+  5478	            call_meta={
+  5479	                "stage": "剧本蓝图局部语义修复",
+  5480	                "stage_key": "screenplay_blueprint_patch",
+  5481	                "call_role": "stage_repair",
+  5482	                "call_role_label": "蓝图局部语义修复",
+  5483	                "repair_round": round_no,
+  5484	                "supersedes_provider_call_id": legacy_retry_call_id,
+  5485	                "episode_id": str(episode.get("id") or ""),
+  5486	                "production_grant_id": (
+  5487	                    generation_budget.retry_grant_id
+  5488	                    if generation_budget is not None else ""
+  5489	                ),
+  5490	                "contract_version": BLUEPRINT_VERSION,
+  5491	                "expected_json": True,
+  5492	                "reuse_successful_operation": True,
+  5493	                "require_cached_successful_operation": bool(
+  5494	                    generation_budget is not None
+  5495	                    and operation_id
+  5496	                    in generation_budget._durable_successful_operations
+  5497	                ),
+  5498	                "disable_reasoning_fallback": True,
+  5499	                "disable_provider_retries": True,
+  5500	                "disable_provider_candidate_fallback": True,
+  5501	            },
+  5502	            repair_context=json.dumps(
+  5503	                {
+  5504	                    "replaceable_node_keys": selected_node_keys,
+  5505	                    "projection_contract": projection_contract,
+  5506	                },
+  5507	                ensure_ascii=False,
+  5508	                separators=(",", ":"),
+  5509	            ),
+  5510	            output_schema=patch_schema,
+  5511	            on_attempt=record_patch_attempt,
+  5512	            usage_callback=(
+  5513	                None
+  5514	                if reservation_id is None
+  5515	                else lambda usage_event: generation_budget.record_usage(
+  5516	                    reservation_id,
+  5517	                    usage_event,
+  5518	                )
+  5519	            ),
+  5520	        )
+  5521	        try:
+  5522	            patch = (
+  5523	                await structured_call
+  5524	                if remaining_seconds is None
+  5525	                else await asyncio.wait_for(
+  5526	                    structured_call,
+  5527	                    timeout=max(0.001, remaining_seconds),
+  5528	                )
+  5529	            )
+  5530	        except hiagent.ProviderError as exc:
+  5531	            if reservation_id is not None:
+  5532	                generation_budget.settle(
+  5533	                    reservation_id,
+  5534	                    unreported_outcome=(
+  5535	                        "not_sent"
+  5536	                        if exc.delivery_state == "not_sent"
+  5537	                        and exc.replay_safe
+  5538	                        else "unknown"
+  5539	                    ),
+  5540	                )
+  5541	            raise
+  5542	        except model_gateway.StructuredFormatError as exc:
+  5543	            if reservation_id is not None:
+  5544	                generation_budget.settle(reservation_id)
+  5545	            # A patch that decoded but failed the schema is an answer the
+  5546	            # provider actually authored: it keeps the strict one-call rule and
+  5547	            # must never be re-rolled until it happens to pass.  A response that
+  5548	            # never decoded into a JSON object at all -- in production the keys
+  5549	            # degenerated into runs of tabs and spaces -- carries no repair to
+  5550	            # preserve and is simply a round that was never delivered.  This
+  5551	            # loop already owns a bounded budget of rounds, each with its own
+  5552	            # reservation and operation id, so spending the next one is the
+  5553	            # in-contract answer; aborting the episode on round 1 threw the
+  5554	            # remaining budgeted rounds away.
+  5555	            if not getattr(exc, "unparseable", False):
+  5556	                raise
+  5557	            undelivered_patch_errors.append(str(exc))
+  5558	            continue
+  5559	        except BaseException:
+  5560	            if reservation_id is not None:
+  5561	                generation_budget.settle(reservation_id)
+  5562	            raise
+  5563	        else:
+  5564	            if reservation_id is not None:
+  5565	                generation_budget.settle(reservation_id)
+  5566	        changed = apply_narrative_blueprint_patch(
+  5567	            blueprint,
+  5568	            patch,
+  5569	            allow_source_expansion=False,
+  5570	            source_text=source_text,
+  5571	        )
+  5572	        if not changed:
+  5573	            raise ValueError("蓝图局部修复没有替换任何节点")
+  5574	        pending_external_errors = []
+  5575	        normalized_artifact = evidence_repository.create_artifact(
+  5576	            EvidenceArtifact(
+  5577	                type="screenplay_narrative_blueprint_patch",
+  5578	                scope_type="episode",
+  5579	                scope_id=str(episode.get("id") or ""),
+  5580	                status="validated",
+  5581	                trust_level="T1",
+  5582	                content=patch.model_dump(mode="json"),
+  5583	                parent_artifact_ids=raw_artifact_ids[-1:],
+  5584	                contract_version=BLUEPRINT_VERSION,
+  5585	                prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+  5586	                model_snapshot={"replaced_nodes": changed},
+  5587	            ),
+  5588	            step_run_id=trace.step_run_id,
+  5589	        )
+  5590	        parent_artifact_ids = [normalized_artifact["id"]]
+  5591	        evidence_repository.create_artifact(
+  5592	            EvidenceArtifact(
+  5593	                type="screenplay_narrative_blueprint",
+  5594	                scope_type="episode",
+  5595	                scope_id=str(episode.get("id") or ""),
+  5596	                status="candidate",
+  5597	                trust_level="T1",
+  5598	                content=blueprint.model_dump(mode="json"),
+  5599	                parent_artifact_ids=parent_artifact_ids,
+  5600	                contract_version=BLUEPRINT_VERSION,
+  5601	                prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+  5602	                model_snapshot={
+  5603	                    "semantic_patch_round": round_no,
+  5604	                    "remaining_issue_count": len(normalize_and_validate()),
+  5605	                },
+  5606	            ),
+  5607	            step_run_id=trace.step_run_id,
+  5608	        )
+  5609	
+  5610	    normalize_blueprint_agency_continuity(blueprint)
+  5611	    errors = normalize_and_validate()
+  5612	    if errors:
+  5613	        raise ContentGenerationError(
+  5614	            "蓝图局部语义修复六轮后仍未通过："
+  5615	            + "；".join(errors[:10])
+  5616	            + (
+  5617	                f"；其中 {len(undelivered_patch_errors)} 轮未收到可解析的修复响应，"
+  5618	                f"最近一次：{undelivered_patch_errors[-1]}"
+  5619	                if undelivered_patch_errors
+  5620	                else ""
+  5621	            )
+  5622	        )
+  5623	    trace = current_trace()
+  5624	    evidence_repository.create_artifact(
+  5625	        EvidenceArtifact(
+  5626	            type="screenplay_narrative_blueprint",
+  5627	            scope_type="episode",
+  5628	            scope_id=str(episode.get("id") or ""),
+  5629	            status="validated",
+  5630	            trust_level="T1",
+  5631	            content=blueprint.model_dump(mode="json"),
+  5632	            parent_artifact_ids=parent_artifact_ids,
+  5633	            contract_version=BLUEPRINT_VERSION,
+  5634	            prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+  5635	            model_snapshot=_current_blueprint_authority_snapshot(
+  5636	                source_text,
+  5637	                generation_mode="semantic_repair",
+  5638	                generation_budget=generation_budget,
+  5639	            ),
+  5640	        ),
+  5641	        step_run_id=trace.step_run_id,
+  5642	    )
+  5643	    return blueprint
+  5644	
+  5645	
+  5646	def _blueprint_exact_ownership_claims(
+  5647	    blueprint: NarrativeBlueprint,
+  5648	    target_unit_keys: list[str],
+  5649	) -> dict[str, dict[str, Any]]:
+  5650	    """Project only the ownership fields protected by exact-unit repair."""
+  5651	    return {
+  5652	        unit_key: {
+  5653	            "single": [
+  5654	                {
+  5655	                    "node_key": node.key,
+  5656	                    "identity_key": evidence.identity_key,
+  5657	                }
+  5658	                for node in blueprint.nodes
+  5659	                for evidence in node.participant_evidence
+  5660	                if (
+  5661	                    evidence.usage == "state_subject"
+  5662	                    and unit_key in evidence.source_unit_keys
+  5663	                )
+  5664	            ],
+  5665	            "joint": [
+  5666	                {
+  5667	                    "node_key": node.key,
+  5668	                    "identity_keys": list(assignment.identity_keys),
+  5669	                }
+  5670	                for node in blueprint.nodes
+  5671	                for assignment in node.state_subject_assignments
+  5672	                if assignment.source_unit_key == unit_key
+  5673	            ],
+  5674	            "environment_node_keys": [
+  5675	                node.key
+  5676	                for node in blueprint.nodes
+  5677	                if unit_key in node.environment_source_unit_keys
+  5678	            ],
+  5679	            "adjudicated_node_keys": [
+  5680	                node.key
+  5681	                for node in blueprint.nodes
+  5682	                if unit_key in node.state_subject_adjudicated_unit_keys
+  5683	            ],
+  5684	        }
+  5685	        for unit_key in target_unit_keys
+  5686	    }
+  5687	
+  5688	
+  5689	async def _repair_reviewed_blueprint_state_subject_ownership(
+  5690	    blueprint: NarrativeBlueprint,
+  5691	    *,
+  5692	    issues: list[Any],
+  5693	    episode: dict[str, Any],
+  5694	    source_text: str,
+  5695	    generation_budget: _BlueprintGenerationBudget | None = None,
+  5696	) -> tuple[NarrativeBlueprint, str]:
+  5697	    """Adjudicate consensus environment findings through one exact-only call."""
+  5698	    from app.evidence import repository as evidence_repository
+  5699	    from app.harness.types import EvidenceArtifact
+  5700	    from app.observability.tracing import current_trace
