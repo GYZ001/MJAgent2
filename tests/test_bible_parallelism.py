@@ -6,7 +6,6 @@ import json
 import pytest
 
 from app import stages
-from app.schemas import World
 
 
 def test_merge_roll_call_candidates_merges_formal_name_and_caps_evidence() -> None:

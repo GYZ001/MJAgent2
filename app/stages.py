@@ -4648,7 +4648,7 @@ async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
             changed += 1
     log_provider_call(
         "character_bible_paratext", config.MODEL_TEXT,
-        "OK" if not pending else "PARTIAL", None, int((time.time() - started) * 1000),
+        "OK", None, int((time.time() - started) * 1000),
         meta={
             "chapters_total": len(valid),
             "chapters_in_scope": len(scope),
@@ -4661,6 +4661,8 @@ async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
             # 的直接依据，不用再去 provider_calls 表里数。
             "cache_hits": cache_hits,
             "model_calls": len(done) - cache_hits,
+            "degraded_to_original": len(pending),
+            "outcome": "best_effort_bypass" if pending else "complete",
         },
     )
     return cleaned

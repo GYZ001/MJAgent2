@@ -664,6 +664,7 @@ def test_paratext_cleaning_is_capped_and_fails_open(monkeypatch) -> None:
 
     monkeypatch.setattr(source_paratext, "chapter_paratext_offsets", _never_returns)
     monkeypatch.setattr(stages, "BIBLE_PARATEXT_BUDGET_S", 0.2)
+    monkeypatch.setattr(stages, "BIBLE_PARATEXT_CHAPTER_TIMEOUT_S", 0.05)
 
     started = asyncio.get_event_loop_policy().new_event_loop()
     try:
