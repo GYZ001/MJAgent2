@@ -1375,6 +1375,112 @@ def _quarantine_static_delivery_fallbacks(conn: sqlite3.Connection) -> int:
     return int(cursor.rowcount)
 
 
+def _clear_orphan_storyboard_pack_placeholder_versions(conn: sqlite3.Connection) -> int:
+    """历史数据修复：清掉分镜台 2.0.0 曾经落库的「占位已采纳」行。
+
+    2026-08 之前的 ``app.production.storyboard_pack.persist_storyboard_pack``
+    在落库每个分镜段时会插入一条 ``version_no=1``/``status='queued'``/
+    ``video_path=NULL`` 的占位 ``shot_versions`` 行（只是当时 prompt_text 的
+    存放处），并立刻把它设成 ``shots.adopted_version_id``。后果两条：分镜台
+    一落库、前端就显示「已采纳」——其实压根没有视频；这条占位行还占掉了
+    version_no=1，导致第一次真实生成变成 v2。``persist_storyboard_pack`` 已
+    改为不再插这一行、也不再设采用指针（prompt_text 改从
+    ``shots.shot_contract_json.storyboard_pack_segment.prompt_text`` 读取，
+    见该函数与 ``app.media_exec.enqueue`` 的改动）；这里只清理它修复前就已
+    经写入库里的旧行。
+
+    判据是从数据推导的，不是认已知 ID 名单：一条 ``status='queued'`` 的
+    ``shot_versions`` 行，如果从来没有任何 ``jobs`` 行引用过它
+    （``jobs.version_id`` 或 ``jobs.after_version_id``），它就不可能是一次
+    真实提交过的生成尝试——``app.media_exec.enqueue`` 创建生成任务时，总是
+    在同一个 ``BEGIN IMMEDIATE`` 事务里同时插入 ``shot_versions`` 行和
+    ``jobs`` 行，不存在「先插 shot_versions、后补 jobs」的路径，因此这条
+    判据同样覆盖任何未来可能出现的同形态遗留数据。
+
+    ``shots.adopted_version_id`` 没有 FK，删除前手动清空指向它的指针；
+    ``video_plan_dependencies.upstream_adopted_version_id`` /
+    ``video_boundary_assets.source_adopted_version_id`` 都是
+    ``ON DELETE SET NULL``，交给 SQLite 外键级联处理。幂等：清理后不再有
+    匹配行，重复调用是空操作。
+    """
+    orphan_rows = conn.execute(
+        """SELECT v.id FROM shot_versions v
+            WHERE v.status='queued'
+              AND NOT EXISTS (
+                  SELECT 1 FROM jobs j
+                   WHERE j.version_id=v.id OR j.after_version_id=v.id
+              )"""
+    ).fetchall()
+    if not orphan_rows:
+        return 0
+    ids = [str(row["id"]) for row in orphan_rows]
+    placeholders = ",".join("?" for _ in ids)
+    conn.execute(
+        f"UPDATE shots SET adopted_version_id=NULL WHERE adopted_version_id IN ({placeholders})",
+        ids,
+    )
+    cursor = conn.execute(f"DELETE FROM shot_versions WHERE id IN ({placeholders})", ids)
+    return int(cursor.rowcount)
+
+
+def _repair_dangling_video_adoption(conn: sqlite3.Connection) -> int:
+    """一次性修复：清掉指向"不可用视频"的采用指针。
+
+    ``select_best_video_candidate``／人工采用（``/shots/{id}/adopt``）／幂等
+    复用（``_adopt_reused_completed_version``）等多条写入路径，在写
+    ``shots.adopted_version_id`` 时都只检查了写入那一刻 ``status='succeeded'``。
+    但一次生成任务在采用发生之后仍有尾段动作——例如自动 QA 对自身
+    ``review_dependency_snapshot`` 的新鲜度复核（``qa_result`` 闸门）——这些
+    动作独立判定失败时会把同一条 ``shot_versions`` 行的 ``status`` 改写为
+    ``failed``/``quarantined``/``stale`` 等终态，但当时已经落库、且已经
+    ``conn.commit()`` 的采用指针不会被自动撤销，留下"已采纳但没有可用
+    视频"的假态（复现实例：EP1 段5/6/7，视频已落盘、``status='succeeded'``
+    的窗口期内被并发路径采纳，随后 ``qa_result`` 依赖新鲜度复核晚一步判定
+    失败，版本被打成 ``failed``，采用指针未跟着回滚）。
+
+    ``guard_adopted_version_terminal_status`` 触发器（见 INTEGRITY_SCHEMA）
+    从这次修复落地之后，在同一事务内堵住了新增的假态；这里只清理触发器
+    生效前就已经写入库里的历史脏指针。判据从数据推导、且和触发器保持
+    同一把尺子：只要采用指针指向的版本不是 ``status='succeeded'``（或指针
+    指向一条根本不存在的版本），指针本身就不满足"已采纳 ⟺ 有可用视频"的
+    不变量，一律清空——不认已知 ID 名单。
+
+    刻意不在这里核对 ``video_path`` 是否真的在磁盘上存在：这是无人值守的
+    启动路径，视频文件可能在慢速/可卸载存储上，启动早期的一次性 stat()
+    误判比它要防的问题更危险；且 ``video_provider_recovery_slots`` 一类
+    测试固定会在 ``status='succeeded'`` 的历史行上放一个不存在的占位路径
+    （只测任务状态机，不落真实文件），把文件存在性也算进判据会把这类合法
+    场景当脏数据清空。真实的"succeeded 但文件已丢"是运维层面的外部删除，
+    应由单独的巡检工具处理，不属于这条启动路径的职责。幂等：清理后不再
+    有匹配行，重复调用是空操作。
+    """
+    rows = conn.execute(
+        """SELECT s.id AS shot_id, s.episode_id, v.status AS version_status
+             FROM shots s
+             LEFT JOIN shot_versions v ON v.id = s.adopted_version_id
+            WHERE s.adopted_version_id IS NOT NULL AND s.adopted_version_id != ''"""
+    ).fetchall()
+    bad_shot_ids: list[str] = []
+    bad_episode_ids: set[str] = set()
+    for row in rows:
+        if row["version_status"] != "succeeded":
+            bad_shot_ids.append(str(row["shot_id"]))
+            if row["episode_id"]:
+                bad_episode_ids.add(str(row["episode_id"]))
+    if not bad_shot_ids:
+        return 0
+    placeholders = ",".join("?" for _ in bad_shot_ids)
+    conn.execute(
+        f"UPDATE shots SET adopted_version_id=NULL WHERE id IN ({placeholders})",
+        bad_shot_ids,
+    )
+    from app.artifacts import invalidate_episode_delivery_authority
+
+    for episode_id in sorted(bad_episode_ids):
+        invalidate_episode_delivery_authority(conn, episode_id)
+    return len(bad_shot_ids)
+
+
 # 增量迁移：已有库上加列（首次建表时 SCHEMA 已含则忽略报错）
 MIGRATIONS = (
     """CREATE TABLE IF NOT EXISTS media_cleanup_outbox (
@@ -1716,6 +1822,21 @@ BEGIN
 END;
 CREATE TRIGGER IF NOT EXISTS cascade_version AFTER DELETE ON shot_versions
 BEGIN DELETE FROM jobs WHERE version_id=OLD.id; END;
+
+-- 采用不变量：shots.adopted_version_id 非空 ⟺ 它指向的版本 status='succeeded'。
+-- 采用写入路径（select_best_video_candidate／人工采用／幂等复用）只在写入
+-- 那一刻检查 succeeded；同一版本之后被别的并发路径（例如 QA 对
+-- review_dependency_snapshot 的新鲜度复核）判定失败、状态改写为非
+-- succeeded 时，若它当时正是某镜的采用指针，必须在同一事务内一并释放，
+-- 否则就会出现"已采纳但没有可用视频"的假态。历史脏数据由
+-- _repair_dangling_video_adoption 一次性修复，这个触发器只堵新增。
+CREATE TRIGGER IF NOT EXISTS guard_adopted_version_terminal_status
+AFTER UPDATE OF status ON shot_versions
+WHEN NEW.status != 'succeeded'
+BEGIN
+  UPDATE shots SET adopted_version_id = NULL
+   WHERE id = NEW.shot_id AND adopted_version_id = NEW.id;
+END;
 """
 
 
@@ -2461,6 +2582,8 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
             WHERE project_id IS NULL"""
     )
     _quarantine_static_delivery_fallbacks(conn)
+    _clear_orphan_storyboard_pack_placeholder_versions(conn)
+    _repair_dangling_video_adoption(conn)
     _drop_obsolete_storyboard_columns(conn)
     # 视频补齐授权表；历史分镜自动确认授权会在表初始化时清理。
     try:
