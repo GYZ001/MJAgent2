@@ -1934,6 +1934,9 @@ BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE = 3
 BIBLE_ROLL_CALL_CHUNK_CHAPTERS = 1
 BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS = 8000
 BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS = 4096
+BIBLE_ROLL_CALL_CONCURRENCY = 12
+BIBLE_ROLL_CALL_TIMEOUT_S = 30.0
+BIBLE_SMALL_VERDICT_TIMEOUT_S = 15.0
 
 # 旁文本净化的三个闸（见 `_chapters_without_paratext` docstring 里的事故口径）：
 BIBLE_PARATEXT_MARGIN_CHAPTERS = 3   # 净化只会让正文变短，头部因此可能多吃进几章
@@ -2186,23 +2189,26 @@ async def _resolve_generic_character_candidates(
 4. 无法充分证明时 verdict=uncertain；描述性称呼不能因此创建独立人物谱角色。
 """
         try:
-            resolution = await model_gateway.chat_structured(
-                [{"role": "system", "content": SYSTEM_PREFIX},
-                 {"role": "user", "content": prompt}],
-                model_type=_RosterIdentityResolution,
-                validate=None,
-                operation_id="character_identity_resolution:" + hashlib.sha256(
-                    f"{label}:{chr(10).join(evidence_blocks)}".encode("utf-8")
-                ).hexdigest(),
-                temperature=0.0,
-                max_tokens=512,
-                call_meta={
-                    "stage": "人物身份归一",
-                    "stage_key": "character_identity_resolution",
-                    "call_role": "stage_validate",
-                    "character_name": label,
-                    "project_id": project_id,
-                },
+            resolution = await asyncio.wait_for(
+                model_gateway.chat_structured(
+                    [{"role": "system", "content": SYSTEM_PREFIX},
+                     {"role": "user", "content": prompt}],
+                    model_type=_RosterIdentityResolution,
+                    validate=None,
+                    operation_id="character_identity_resolution:" + hashlib.sha256(
+                        f"{label}:{chr(10).join(evidence_blocks)}".encode("utf-8")
+                    ).hexdigest(),
+                    temperature=0.0,
+                    max_tokens=512,
+                    call_meta={
+                        "stage": "人物身份归一",
+                        "stage_key": "character_identity_resolution",
+                        "call_role": "stage_validate",
+                        "character_name": label,
+                        "project_id": project_id,
+                    },
+                ),
+                timeout=BIBLE_SMALL_VERDICT_TIMEOUT_S,
             )
         except Exception:  # noqa: BLE001 - 不确定时宁可不新建泛称角色
             continue
@@ -2285,6 +2291,7 @@ async def _recurring_character_names(
         for index in range(0, len(head), BIBLE_ROLL_CALL_CHUNK_CHAPTERS)
     ]
     chapters_by_idx = _chapters_by_idx(valid)
+    roll_call_sem = asyncio.Semaphore(BIBLE_ROLL_CALL_CONCURRENCY)
 
     async def _call_chunk(chunk: list[dict], chunk_index: int) -> list[_RosterCandidate]:
         chunk_text = _render_bible_source(
@@ -2313,22 +2320,26 @@ async def _recurring_character_names(
 输出 JSON Schema：
 {{"candidates": [{{"primary_appellation": str, "formal_name": str, "aliases": [str], "identity_evidence": [{{"chapter_index": int, "quote": str}}], "onstage_evidence": [{{"chapter_index": int, "quote": str}}]}}]}}"""
         try:
-            raw = await model_gateway.chat(
-                [{"role": "system", "content": SYSTEM_PREFIX},
-                 {"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS,
-                call_meta={
-                    "stage": "人物点名",
-                    "stage_key": "character_roll_call",
-                    "call_role": "stage_generate",
-                    "call_role_label": "人物点名分块",
-                    "expected_json": True,
-                    "chunk_index": chunk_index,
-                    "chunk_count": len(chunks),
-                    "input_chars": len(chunk_text),
-                },
-            )
+            async with roll_call_sem:
+                raw = await asyncio.wait_for(
+                    model_gateway.chat(
+                        [{"role": "system", "content": SYSTEM_PREFIX},
+                         {"role": "user", "content": prompt}],
+                        temperature=0.2,
+                        max_tokens=BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS,
+                        call_meta={
+                            "stage": "人物点名",
+                            "stage_key": "character_roll_call",
+                            "call_role": "stage_generate",
+                            "call_role_label": "人物点名分块",
+                            "expected_json": True,
+                            "chunk_index": chunk_index,
+                            "chunk_count": len(chunks),
+                            "input_chars": len(chunk_text),
+                        },
+                    ),
+                    timeout=BIBLE_ROLL_CALL_TIMEOUT_S,
+                )
             return _CharacterRollCall.model_validate(extract_json(raw)).candidates
         except Exception as exc:  # noqa: BLE001 - 单块失败不阻断其它块和人物谱
             log_provider_call(
@@ -2475,23 +2486,26 @@ async def _recurring_character_names(
 只有原文明确显示其具备持续剧情作用时才 retain，例如：创建宗门或制度、造成当前核心冲突、留下仍在生效的规则/遗产、被明确设为后续行动目标。仅有家世介绍、欠债对象、路人背景、一次性比较或传闻，一律 drop；证据不足选 uncertain。不得根据常识或作品知识补充。
 """
         try:
-            resolution = await model_gateway.chat_structured(
-                [{"role": "system", "content": SYSTEM_PREFIX},
-                 {"role": "user", "content": prompt}],
-                model_type=_MentionedCharacterImportanceResolution,
-                validate=None,
-                operation_id="mentioned_character_importance:" + hashlib.sha256(
-                    f"{appellation}:{catalog}".encode("utf-8")
-                ).hexdigest(),
-                temperature=0.0,
-                max_tokens=384,
-                call_meta={
-                    "stage": "未出场角色重要性裁决",
-                    "stage_key": "mentioned_character_importance",
-                    "call_role": "stage_validate",
-                    "character_name": appellation,
-                    "project_id": project_id,
-                },
+            resolution = await asyncio.wait_for(
+                model_gateway.chat_structured(
+                    [{"role": "system", "content": SYSTEM_PREFIX},
+                     {"role": "user", "content": prompt}],
+                    model_type=_MentionedCharacterImportanceResolution,
+                    validate=None,
+                    operation_id="mentioned_character_importance:" + hashlib.sha256(
+                        f"{appellation}:{catalog}".encode("utf-8")
+                    ).hexdigest(),
+                    temperature=0.0,
+                    max_tokens=384,
+                    call_meta={
+                        "stage": "未出场角色重要性裁决",
+                        "stage_key": "mentioned_character_importance",
+                        "call_role": "stage_validate",
+                        "character_name": appellation,
+                        "project_id": project_id,
+                    },
+                ),
+                timeout=BIBLE_SMALL_VERDICT_TIMEOUT_S,
             )
         except Exception:  # noqa: BLE001 - 不确定不登记
             return appellation, False
@@ -5196,7 +5210,7 @@ async def _generate_character_detail_batch(
             chapters, [entry.name, *entry.source_appellations]
         ),
         style=style,
-        era=roster.world.era,
+        era=era,
         chapters_by_idx=chapters_by_idx,
         project_id=project_id,
     )) for entry in entries]
@@ -5314,6 +5328,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
             entries,
             chapters,
             style=style,
+            era=roster.world.era,
             chapters_by_idx=chapters_by_idx,
             project_id=project_id,
         )
