@@ -1921,7 +1921,7 @@ BIBLE_SOURCE_BUDGET_CHARS = 60000
 _BIBLE_TAIL_SAMPLE_MAX = 12      # 后段最多抽样多少章（取其开头，角色多在章首登场）
 _BIBLE_TAIL_SLICE_CHARS = 1500   # 每个抽样章节注入的开头字数
 
-BIBLE_HEAD_CHAPTERS = 60         # 首版人物谱发现窗口：覆盖前几十集；仍按一章一小请求并发
+BIBLE_HEAD_CHAPTERS = 20         # 首版人物谱发现窗口：只看前二十章；按一章一小请求并发
 BIBLE_LOOKAHEAD_CHAPTERS = 0     # 发现窗口已扩到 60 章，不再额外扩大裁决卷宗范围
 BIBLE_RECURRING_MIN_ONSTAGE_QUOTES = 2  # 至少两条经裁决闸核验的「本人在场」证据才算重要角色
 BIBLE_MUST_COVER_MAX = 20        # 前 60 章重要角色容量；详情仍逐角色小请求生成
@@ -1934,7 +1934,7 @@ BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE = 3
 BIBLE_ROLL_CALL_CHUNK_CHAPTERS = 1
 BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS = 8000
 BIBLE_ROLL_CALL_CHUNK_MAX_TOKENS = 4096
-BIBLE_ROLL_CALL_CONCURRENCY = 12
+BIBLE_ROLL_CALL_CONCURRENCY = 6
 BIBLE_ROLL_CALL_TIMEOUT_S = 30.0
 BIBLE_SMALL_VERDICT_TIMEOUT_S = 15.0
 
@@ -2467,6 +2467,7 @@ async def _recurring_character_names(
             mentioned_dossiers[appellation].extend(dossier)
 
     mentioned_retain: set[str] = set()
+    mentioned_sem = asyncio.Semaphore(4)
 
     async def _judge_mentioned_importance(appellation: str) -> tuple[str, bool]:
         dossier = mentioned_dossiers.get(appellation, [])[:6]
@@ -5252,7 +5253,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
 {roster_context}
 
 规则：
-1. 候选摘要来自前 60 章单章点名、身份归一、在场核验与全文检索；不得新增摘要中没有的人物，总数不超过 20。
+1. 候选摘要来自前 20 章单章点名、身份归一、在场核验与全文检索；不得新增摘要中没有的人物，总数不超过 20。
 2. 所有候选都必须收录；role 只负责区分主次，不得删除低频但已核验在场的候选。全文命中/覆盖章节用于判断重要程度，在场证据用于判断是否真实出场，二者不能互相替代。
 3. name 必须使用括号外的正式姓名；若括号外仍是描述性称呼，说明全文尚未揭示真名，才可暂用该称呼。source_appellations 必须完整收录括号内原文称呼。
 4. 同一候选行内的正式姓名、绰号、描述性称呼属于同一人物，严禁拆成多个角色。
