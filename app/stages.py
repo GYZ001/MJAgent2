@@ -1924,6 +1924,12 @@ _BIBLE_TAIL_SLICE_CHARS = 1500   # 每个抽样章节注入的开头字数
 BIBLE_HEAD_CHAPTERS = 20         # 首版人物谱发现窗口：只看前二十章；按一章一小请求并发
 BIBLE_LOOKAHEAD_CHAPTERS = 0     # 发现窗口已扩到 60 章，不再额外扩大裁决卷宗范围
 BIBLE_RECURRING_MIN_ONSTAGE_QUOTES = 2  # 至少两条经裁决闸核验的「本人在场」证据才算重要角色
+# 全文统计通道门槛：命中量 + 章节覆盖率同时达标即可独立进入名单，不依赖模型裁决。
+BIBLE_STATISTICAL_MIN_MENTIONS = 25
+BIBLE_STATISTICAL_MIN_CHAPTER_RATIO = 0.15
+# 真名替换门槛：真名在全文出现次数达不到常用称呼的这一比例时，保留高频称呼作为
+# 人物谱主名，真名仍作为别名进入检索键——两者都能映射回同一张定妆图。
+BIBLE_FORMAL_NAME_MIN_RATIO = 0.2
 BIBLE_MUST_COVER_MAX = 20        # 前 60 章重要角色容量；详情仍逐角色小请求生成
 # 点名调用每个候选最多申报几条在场证据。判据只需要 BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
 # （=2）条核验通过的证据；这里留 1 条余量应付结构闸/裁决闸刷掉个别证据，不留更多——
@@ -2250,6 +2256,27 @@ class _BibleSupplement(BaseModel):
     characters: list[Character] = Field(default_factory=list)
 
 
+def _pick_canonical_display_name(
+    appellation: str, formal: str, chapters: list[dict],
+) -> tuple[str, list[str]]:
+    """选主名：真名与绰号都是同一角色的检索键，只决定「人物谱里显示哪个」。
+
+    真名优先只在真名确实被原文常用时成立。真实故障：「小胖子」全书出现 152 次、
+    「李富贵」只出现 1 次，机械套用真名优先会把人物谱主名改成一个正文里几乎不存在
+    的名字，下游按原文称呼检索时反而对不上。这里改为按全文实际使用频次决定主名，
+    落选的那个仍然作为别名保留，两者都能映射回同一张定妆图。
+    """
+    appellation = (appellation or "").strip()
+    formal = (formal or "").strip()
+    if not formal or formal == appellation:
+        return appellation, []
+    appellation_hits = sum((ch.get("content") or "").count(appellation) for ch in chapters)
+    formal_hits = sum((ch.get("content") or "").count(formal) for ch in chapters)
+    if formal_hits >= max(1, appellation_hits * BIBLE_FORMAL_NAME_MIN_RATIO):
+        return formal, [appellation]
+    return appellation, [formal]
+
+
 async def _recurring_character_names(
     chapters: list[dict], *, project_id: str | None = None,
 ) -> list[tuple[str, str, int, int, int, list[str]]]:
@@ -2554,6 +2581,22 @@ async def _recurring_character_names(
             if retain:
                 mentioned_retain.add(appellation)
 
+    # 准入分三条独立通道，任一命中即可进入名单：
+    # A. 在场证据通道：裁决闸核验通过 >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES 条；
+    # B. 剧情权威通道：仅被提及，但原文赋予其持续剧情作用（mentioned_retain）；
+    # C. 全文统计通道：全文命中与章节覆盖同时达标——主角/核心配角在原文里持续出现，
+    #    这本身就是比"某一条引句能否通过单次模型裁决"更稳的重要性证据。
+    #    真实故障：孟浩前 20 章提及 991 次、覆盖 20/20 章，却因 3 条引句裁决全判
+    #    other 被整个淘汰，而只出现 1 次的「李富贵」反被当成主角，人物谱不可用。
+    window_size = max(1, len(head))
+    statistical_retain = {
+        appellation
+        for appellation in verified_counts
+        if not _is_generic_character_appellation(appellation)
+        and mention_counts.get(appellation, 0) >= BIBLE_STATISTICAL_MIN_MENTIONS
+        and chapter_counts.get(appellation, 0)
+        >= max(2, round(window_size * BIBLE_STATISTICAL_MIN_CHAPTER_RATIO))
+    }
     ranked = [
         (
             appellation,
@@ -2564,11 +2607,16 @@ async def _recurring_character_names(
             aliases_by_appellation.get(appellation, []),
         )
         for appellation, count in verified_counts.items()
-        if count >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES or appellation in mentioned_retain
+        if count >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
+        or appellation in mentioned_retain
+        or appellation in statistical_retain
     ]
+    # 排序主键换成"全文覆盖广度 + 命中量"，在场证据数退为次级信号：裁决闸对出场
+    # 密集的主角反而更容易判 other（引句里叙述多、纯对话少），用它当主键会系统性
+    # 地把主角排到配角后面。
     ranked.sort(key=lambda item: (
         0 if item[0] in mentioned_retain and item[2] == 0 else -1,
-        -item[2], -item[4], -item[3], item[1] or item[0],
+        -item[4], -item[3], -item[2], item[1] or item[0],
     ))
     result = ranked[:BIBLE_MUST_COVER_MAX]
     # 记账：供人工从数字上判断「这次点名是不是明显偏少/裁决通过率是不是异常低」，
@@ -5066,26 +5114,43 @@ def _character_importance_metadata(
 def _normalize_roster_against_candidates(
     draft: _BibleRosterDraft,
     must_cover: list[tuple[str, str, int, int, int, list[str]]],
+    chapters: list[dict] | None = None,
 ) -> _BibleRosterDraft:
     """代码拥有名单最终权：模型只分配 role，不得拆人、改名或漏人。"""
     if not must_cover:
         return draft
     model_entries = list(draft.characters)
     normalized: list[_BibleRosterEntry] = []
-    for appellation, formal, onstage, mentions, chapters, aliases in must_cover:
-        canonical = formal or appellation
-        source_names = list(dict.fromkeys([appellation, *aliases]))
-        all_names = {canonical, *source_names}
+    for appellation, formal, onstage, mentions, chapters_hit, aliases in must_cover:
+        if chapters:
+            canonical, demoted = _pick_canonical_display_name(appellation, formal, chapters)
+        else:
+            canonical, demoted = (formal or appellation), ([appellation] if formal and formal != appellation else [])
+        # 真名与绰号都留在检索键里：下游遇到任一称呼都要能映射回这一个角色的定妆图。
+        source_names = [
+            name for name in dict.fromkeys([appellation, formal, *demoted, *aliases])
+            if name and name != canonical
+        ]
+        all_names = {canonical, appellation, formal, *aliases} - {""}
         matched = next((
             item for item in model_entries
             if item.name in all_names or bool(set(item.source_appellations) & all_names)
         ), None)
-        score, signals = _character_importance_metadata(onstage, mentions, chapters)
-        mentioned_only = onstage == 0
+        score, signals = _character_importance_metadata(onstage, mentions, chapters_hit)
+        # onstage=0 只说明"没有一条引句通过单次模型裁决"，不等于这个人没出场。
+        # 全文命中量与章节覆盖同时达标时，按已出场处理：主角引句叙述密集，裁决闸
+        # 判 other 的概率反而更高，若据此判成 mentioned_only，主角会被踢出定妆流程。
+        statistically_present = (
+            mentions >= BIBLE_STATISTICAL_MIN_MENTIONS
+            and chapters_hit >= max(2, round(len(chapters or []) * BIBLE_STATISTICAL_MIN_CHAPTER_RATIO))
+        ) if chapters else False
+        mentioned_only = onstage == 0 and not statistically_present
+        if onstage == 0 and statistically_present:
+            signals = signals + ["presence_by_fulltext_coverage"]
         normalized.append(_BibleRosterEntry(
             name=canonical,
             role=(matched.role if matched else ("关键伏笔角色" if mentioned_only else "重要配角")),
-            source_appellations=[name for name in source_names if name != canonical],
+            source_appellations=source_names,
             presence_status="mentioned_only" if mentioned_only else "onstage",
             importance_score=score,
             importance_signals=signals + (["retained_by_plot_authority"] if mentioned_only else []),
@@ -5093,7 +5158,27 @@ def _normalize_roster_against_candidates(
             appearance_status="deferred" if mentioned_only else "grounded",
         ))
     draft.characters = normalized
+    _assign_protagonist_by_signals(draft)
     return draft
+
+
+def _assign_protagonist_by_signals(draft: _BibleRosterDraft) -> None:
+    """主角由统计信号确定性指派，不交给模型自由发挥。
+
+    must_cover 已按「章节覆盖 → 全文命中」降序排好，排在最前且真实出场的角色就是
+    全书出现最广、最密的人物。真实故障：模型把只出现 1 次的「李富贵」标成主角，
+    而覆盖 20/20 章、提及 991 次的孟浩连名单都没进。这里在名单定稿后统一改写 role，
+    保证有且只有一个主角，且主角必然是统计上最核心的那个已出场角色。
+    """
+    onstage = [item for item in draft.characters if item.presence_status == "onstage"]
+    if not onstage:
+        return
+    protagonist = onstage[0]
+    for item in draft.characters:
+        if item is protagonist:
+            item.role = "主角"
+        elif item.role == "主角":
+            item.role = "重要配角"
 
 
 def _validate_bible_roster(draft: _BibleRosterDraft) -> list[str]:
@@ -5316,7 +5401,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
     )
 
     def validate_roster(candidate: _BibleRosterDraft) -> list[str]:
-        _normalize_roster_against_candidates(candidate, must_cover)
+        _normalize_roster_against_candidates(candidate, must_cover, chapters)
         if visual_style_prompt:
             candidate.world.visual_style_canonical = visual_style_prompt
         return _validate_bible_roster(candidate)
@@ -5326,7 +5411,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
         validate_roster, loop=roster_loop, temperature=0.3, max_tokens=4096,
         repair_user_prompt_limit=16000, repair_candidate_limit=5000,
     )
-    _normalize_roster_against_candidates(roster, must_cover)
+    _normalize_roster_against_candidates(roster, must_cover, chapters)
     if visual_style_prompt:
         roster.world.visual_style_canonical = visual_style_prompt
     style = roster.world.visual_style_canonical
