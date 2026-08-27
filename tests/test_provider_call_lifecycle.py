@@ -9,7 +9,7 @@ import sys
 import httpx
 import pytest
 
-from app import db, hiagent, system_api, video_modes, worker
+from app import config, db, hiagent, system_api, video_modes, worker
 
 
 def test_provider_cache_request_identity_ignores_only_stream_transport_fields() -> None:
@@ -512,7 +512,7 @@ def test_first_token_timeout_cuts_zero_byte_keepalive_stream(monkeypatch) -> Non
 
 def test_thinking_disabled_implies_default_first_token_timeout() -> None:
     assert hiagent.thinking_disabled({"disable_thinking": True}) is True
-    assert hiagent._first_token_timeout_s({"disable_thinking": True}) == 20.0
+    assert hiagent._first_token_timeout_s({"disable_thinking": True}) == config.TIMEOUT_CHAT_FIRST_TOKEN_S
     assert hiagent._first_token_timeout_s({"first_token_timeout_s": 0}) is None
     assert hiagent._first_token_timeout_s({
         "disable_thinking": True, "first_token_timeout_s": 7,

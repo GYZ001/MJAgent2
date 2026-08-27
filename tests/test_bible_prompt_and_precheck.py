@@ -164,7 +164,7 @@ def test_generate_bible_forces_backend_visual_style_prompt(monkeypatch) -> None:
     seen = {}
 
     async def fake_roll_call(*_args, **_kwargs):
-        return []
+        return [("孟浩", "", 2, 10, 1, [])]
 
     async def fake_loop(*_args, **_kwargs):
         seen["allow_warning_candidate"] = _kwargs["loop"].policy.allow_warning_candidate
@@ -574,7 +574,7 @@ def test_generate_bible_uses_small_roster_contract_and_single_character_details(
     seen: dict[str, object] = {}
 
     async def fake_roll_call(*_args, **_kwargs):
-        return [("小胖子", "李富贵", 2)]
+        return [("小胖子", "李富贵", 2, 16, 6, [])]
 
     async def fake_loop(*args, **kwargs):
         seen["prompt"] = args[2]
@@ -589,7 +589,7 @@ def test_generate_bible_uses_small_roster_contract_and_single_character_details(
     async def fake_details(entries, *_args, **_kwargs):
         seen["entries"] = entries
         return [Character(
-            name="李富贵", role="重要配角",
+            name=entries[0].name, role=entries[0].role,
             appearance_canonical="十六七岁少年，黑色短发，深棕短打，身形敦实，腰间挂木尺",
         )]
 
@@ -602,12 +602,14 @@ def test_generate_bible_uses_small_roster_contract_and_single_character_details(
         {"idx": 1, "title": "第一章", "content": "小胖子与孟浩同行。"}
     ]))
 
-    assert [item.name for item in bible.characters] == ["李富贵"]
+    # 本章「小胖子」出现、真名「李富贵」未出现，主名按原文频次保留绰号。
+    assert [item.name for item in bible.characters] == ["小胖子"]
     assert "不要生成外观" in str(seen["prompt"])
     assert "已核验候选摘要" in str(seen["prompt"])
     assert "小胖子与孟浩同行" not in str(seen["prompt"])
     assert seen["repair_user_prompt_limit"] == 16000
-    assert seen["entries"][0].source_appellations == ["小胖子"]
+    assert seen["entries"][0].name == "小胖子"
+    assert seen["entries"][0].source_appellations == ["李富贵"]
 
 
 def test_paratext_scope_does_not_scale_with_book_length() -> None:

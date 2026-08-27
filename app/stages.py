@@ -1946,7 +1946,7 @@ BIBLE_ROLL_CALL_CONCURRENCY = 6
 BIBLE_ROLL_CALL_MAX_ATTEMPTS = 3
 BIBLE_ROLL_CALL_TIMEOUT_S = 300.0
 BIBLE_SMALL_VERDICT_TIMEOUT_S = 120.0
-BIBLE_FIRST_TOKEN_TIMEOUT_S = 20.0
+BIBLE_FIRST_TOKEN_TIMEOUT_S = float(config.TIMEOUT_CHAT_FIRST_TOKEN_S)
 
 
 def _bible_short_json_call_meta(meta: dict[str, Any]) -> dict[str, Any]:
@@ -2278,8 +2278,16 @@ async def _resolve_generic_character_candidates(
     return kept
 
 
-class _BibleRollCallChunkFailed(RuntimeError):
-    """点名分块在退避重试后仍失败：宁可整体失败，也不允许无证据兜底生成人物谱。"""
+class _BibleRollCallChunkFailed(StageError):
+    """点名分块在退避重试后仍失败：宁可整体失败，也不允许无证据兜底生成人物谱。
+
+    继承 StageError，让 classify() 走内容生成（GEN），而不是 RuntimeError 落到
+    系统内部（SYS）。真实故障 ERR-20260827-a2f706：8/20 分块耗尽后界面写成
+    「服务器内部错误」。
+    """
+
+    def __init__(self, message: str):
+        super().__init__("人物点名", [message])
 
 
 class _BibleSupplement(BaseModel):

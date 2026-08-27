@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from app import stages
+from app import config, errors, stages
 
 
 def test_merge_roll_call_candidates_merges_formal_name_and_caps_evidence() -> None:
@@ -188,6 +188,16 @@ def test_bible_short_json_call_meta_keeps_explicit_first_token_timeout() -> None
     assert meta["first_token_timeout_s"] == stages.BIBLE_DETAIL_FIRST_TOKEN_TIMEOUT_S
     defaulted = stages._bible_short_json_call_meta({"stage_key": "character_roll_call"})
     assert defaulted["first_token_timeout_s"] == stages.BIBLE_FIRST_TOKEN_TIMEOUT_S
+    # run_59d372954c0e：成功点名首字最慢 19.4s，20s 上限把仍在排队的流误杀。
+    assert stages.BIBLE_FIRST_TOKEN_TIMEOUT_S == float(config.TIMEOUT_CHAT_FIRST_TOKEN_S)
+    assert stages.BIBLE_FIRST_TOKEN_TIMEOUT_S >= 60.0
+
+
+def test_bible_roll_call_chunk_failed_is_generation_not_sys() -> None:
+    """ERR-20260827-a2f706：点名分块过多曾落到 SYS「服务器内部错误」。"""
+    exc = stages._BibleRollCallChunkFailed("人物点名失败分块过多（8/20），名单不可信")
+    assert errors.classify(exc) == ("generation", "GEN")
+    assert "8/20" in str(exc)
 
 
 def test_normalize_roster_prefers_real_name_and_marks_mentioned_only() -> None:
