@@ -191,6 +191,14 @@ class Character(BaseModel):
     personality: str = ""
     speech_style: str = ""
     relationships: list[Relationship] = Field(default_factory=list)
+    # 角色准入与视觉生产状态。旧人物谱缺字段时保持原行为；新人物谱由 Harness 明确写入。
+    # onstage=已核验真实出场；mentioned_only=仅被提及但因剧情权威/全文信号保留；
+    # unresolved=身份或出场证据不足。只有 portrait_eligible=True 才允许自动定妆。
+    presence_status: Literal["onstage", "mentioned_only", "unresolved"] = "onstage"
+    importance_score: float = 0.0
+    importance_signals: list[str] = Field(default_factory=list)
+    portrait_eligible: bool = True
+    appearance_status: Literal["grounded", "insufficient_evidence", "deferred"] = "grounded"
     # 定妆照（圣经定稿后由 Seedream 生成，跨集一致性的视觉锚点；LLM 输出中不含以下字段）
     ref_image_path: str | None = None
     # 画像描述覆盖：人工编辑的定妆照生成词；为空时用 锚点串+画风 合成的默认描述（refs.portrait_prompt）

@@ -237,12 +237,17 @@ async def generate_refs(
     style = bible.world.visual_style_canonical
 
     selected = {str(name).strip() for name in (only_characters or []) if str(name).strip()}
+    if only_characters is not None and not selected and only_character is None:
+        return {"generated": [], "gate_retry_exhausted": False, "warnings": ["暂无具备定妆资格的角色"]}
     targets = [
         c for c in bible.characters
-        if ((not selected or c.name in selected) and (only_character is None or c.name == only_character))
+        if c.portrait_eligible
+        and c.appearance_status == "grounded"
+        and ((not selected or c.name in selected) and (only_character is None or c.name == only_character))
     ]
     if not targets:
-        raise ValueError(f"角色不存在：{only_character or sorted(selected)}")
+        requested = only_character or sorted(selected)
+        raise ValueError(f"角色不存在或暂不具备定妆资格：{requested}")
 
     # 初始定妆照登记到 character_portraits（适用集 1~ 至今），供按集分段刷新与生成台按集选图。
     bible_version = project["bible_version"] or 0

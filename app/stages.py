@@ -2051,6 +2051,14 @@ class _RosterIdentityResolution(BaseModel):
     supporting_chapter_index: int = -1
 
 
+class _MentionedCharacterImportanceResolution(BaseModel):
+    """仅被提及角色是否值得进入人物谱的证据裁决。"""
+
+    verdict: Literal["retain", "drop", "uncertain"] = "uncertain"
+    supporting_chapter_index: int = -1
+    reason: str = ""
+
+
 _GENERIC_CHARACTER_APPELLATION_RE = re.compile(
     r"(?:少年|少女|男子|女子|汉子|大汉|老者|老人|妇人|青年|中年|胖子|瘦子|孩童|弟子|修士|掌柜|伙计)$"
 )
@@ -2249,7 +2257,8 @@ async def _recurring_character_names(
     2. 代码结构闸，逐条证据：G1 引句所在章节必须落在统计窗口（前 HEAD+LOOKAHEAD
        章）内；G2 引句必须逐字命中该章原文（允许模型自行加/脱一层引号的噪音）；
        G3 称呼（primary_appellation 或 formal_name 中非空的那个）必须是引句子串。
-       任一不满足直接丢弃该条证据，不发起裁决调用。
+       任一不满足直接丢弃该条证据，不发起裁决调用。点名也允许申报虽未出场、但原文
+       已明确赋予持续剧情作用的具名人物，后续由 mentioned_only 通道独立判断。
     3. 结构闸通过的证据才发起独立低温模型裁决（`_roster_presence_verdict_call`，
        与别名裁决闸同一分工范式：代码检索卷宗 → 模型独立裁决 → 代码结构性钉证）：
        只问这段原文里称呼所指的人物本人是不是真的在场（本人说话/动作/被叙述在场，
@@ -2290,8 +2299,9 @@ async def _recurring_character_names(
 3. aliases：本章明确指向同一人物的其它称呼；只有本章有明确身份链接才填，不能凭外貌相似猜。
 4. identity_evidence：证明 formal_name/aliases 与 primary_appellation 是同一人的逐字引句，最多 2 条；引句需同时包含两种称呼或明确自称结构。
 5. onstage_evidence：每人最多 {BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE} 条，格式为 chapter_index + quote；quote 必须是本块原文不超过约 80 字的逐字引句，并包含 primary_appellation、formal_name 或 alias。
-6. 只有本人说话、行动或被直接叙述为在场才算；被谈论、回忆或背景介绍不算。
-7. 不输出无法单独指认的泛称、宗门、地名、法宝；同一个人在本块只输出一次。
+6. 只有本人说话、行动或被直接叙述为在场才算 onstage_evidence；被谈论、回忆或背景介绍不算。
+7. 但具名人物即使当前仅被提及，只要原文明示其建立宗门/制度、造成持续冲突、留下关键规则或后续行动目标，也可输出候选；onstage_evidence 填包含该剧情作用的逐字引句，后续程序会把它判为 mentioned_only，不得伪装成已出场。
+8. 不输出无法单独指认的泛称、宗门、地名、法宝；同一个人在本块只输出一次。
 
 小说正文：
 {chunk_text}
@@ -2411,8 +2421,10 @@ async def _recurring_character_names(
     # 语义与原来的 continue 完全一致（不确定不登记）；裁决闸本身的提示词/温度/
     # 候选集算法（`_roster_presence_verdict_call`）原样未动。
     verdict_pass = 0
+    mentioned_counts: dict[str, int] = defaultdict(int)
+    mentioned_dossiers: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
-    async def _judge_evidence(appellation: str, dossier: list[dict[str, Any]]) -> bool:
+    async def _judge_evidence(appellation: str, dossier: list[dict[str, Any]]) -> str:
         try:
             verdict = await _roster_presence_verdict_call(
                 appellation=appellation, dossier=dossier, project_id=project_id,
@@ -2423,21 +2435,73 @@ async def _recurring_character_names(
                 "FAILED", None, 0,
                 meta={"appellation": appellation, "error": str(exc)[:300]},
             )
-            return False
-        if verdict.verdict != "onstage":
-            return False
+            return "uncertain"
         if _alias_verdict_pin_segment(dossier, verdict.supporting_segment_index) is None:
-            return False
-        return True
+            return "uncertain"
+        return verdict.verdict
 
     judged = await asyncio.gather(
         *(_judge_evidence(appellation, dossier) for appellation, dossier in verdict_jobs)
     )
-    for (appellation, _dossier), passed in zip(verdict_jobs, judged, strict=True):
-        if not passed:
-            continue
-        verdict_pass += 1
-        verified_counts[appellation] += 1
+    for (appellation, dossier), verdict in zip(verdict_jobs, judged, strict=True):
+        if verdict == "onstage":
+            verdict_pass += 1
+            verified_counts[appellation] += 1
+        elif verdict == "mentioned_only":
+            mentioned_counts[appellation] += 1
+            mentioned_dossiers[appellation].extend(dossier)
+
+    mentioned_retain: set[str] = set()
+
+    async def _judge_mentioned_importance(appellation: str) -> tuple[str, bool]:
+        dossier = mentioned_dossiers.get(appellation, [])[:6]
+        if not dossier or _is_generic_character_appellation(appellation):
+            return appellation, False
+        catalog = "\n\n".join(
+            f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
+            for item in dossier
+        )
+        prompt = f"""任务：判断仅被提及、尚未真实出场的具名人物「{appellation}」是否应作为未来重要角色保留在人物谱。
+
+原文卷宗：
+{catalog}
+
+全文机械信号：称呼/别名命中 {mention_counts.get(appellation, 0)} 次，覆盖 {chapter_counts.get(appellation, 0)} 章。
+
+只有原文明确显示其具备持续剧情作用时才 retain，例如：创建宗门或制度、造成当前核心冲突、留下仍在生效的规则/遗产、被明确设为后续行动目标。仅有家世介绍、欠债对象、路人背景、一次性比较或传闻，一律 drop；证据不足选 uncertain。不得根据常识或作品知识补充。
+"""
+        try:
+            resolution = await model_gateway.chat_structured(
+                [{"role": "system", "content": SYSTEM_PREFIX},
+                 {"role": "user", "content": prompt}],
+                model_type=_MentionedCharacterImportanceResolution,
+                temperature=0.0,
+                max_tokens=384,
+                call_meta={
+                    "stage": "未出场角色重要性裁决",
+                    "stage_key": "mentioned_character_importance",
+                    "call_role": "stage_validate",
+                    "character_name": appellation,
+                    "project_id": project_id,
+                },
+            )
+        except Exception:  # noqa: BLE001 - 不确定不登记
+            return appellation, False
+        valid_chapters = {int(item["chapter_idx"]) for item in dossier}
+        return appellation, (
+            resolution.verdict == "retain"
+            and resolution.supporting_chapter_index in valid_chapters
+        )
+
+    mentioned_jobs = [
+        _judge_mentioned_importance(appellation)
+        for appellation, count in mentioned_counts.items()
+        if count >= 1 and mention_counts.get(appellation, 0) >= 2
+    ]
+    if mentioned_jobs:
+        for appellation, retain in await asyncio.gather(*mentioned_jobs):
+            if retain:
+                mentioned_retain.add(appellation)
 
     ranked = [
         (
@@ -2449,9 +2513,12 @@ async def _recurring_character_names(
             aliases_by_appellation.get(appellation, []),
         )
         for appellation, count in verified_counts.items()
-        if count >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
+        if count >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES or appellation in mentioned_retain
     ]
-    ranked.sort(key=lambda item: (-item[2], -item[4], -item[3], item[1] or item[0]))
+    ranked.sort(key=lambda item: (
+        0 if item[0] in mentioned_retain and item[2] == 0 else -1,
+        -item[2], -item[4], -item[3], item[1] or item[0],
+    ))
     result = ranked[:BIBLE_MUST_COVER_MAX]
     # 记账：供人工从数字上判断「这次点名是不是明显偏少/裁决通过率是不是异常低」，
     # 不是核验闸门本身。
@@ -4853,6 +4920,11 @@ class _BibleRosterEntry(BaseModel):
     name: str
     role: str
     source_appellations: list[str] = Field(default_factory=list)
+    presence_status: Literal["onstage", "mentioned_only"] = "onstage"
+    importance_score: float = 0.0
+    importance_signals: list[str] = Field(default_factory=list)
+    portrait_eligible: bool = True
+    appearance_status: Literal["grounded", "insufficient_evidence", "deferred"] = "grounded"
 
 
 class _BibleRosterDraft(BaseModel):
@@ -4930,6 +5002,15 @@ def _normalize_must_cover_rows(
     return normalized
 
 
+def _character_importance_metadata(
+    onstage: int, mentions: int, chapters: int,
+) -> tuple[float, list[str]]:
+    """把独立 Harness 信号压成可解释分数；准入仍由证据门禁决定，不由分数单独决定。"""
+    score = min(100.0, onstage * 22.0 + min(chapters, 12) * 4.0 + min(mentions, 30) * 0.8)
+    signals = [f"verified_onstage:{onstage}", f"fulltext_mentions:{mentions}", f"chapter_coverage:{chapters}"]
+    return round(score, 1), signals
+
+
 def _normalize_roster_against_candidates(
     draft: _BibleRosterDraft,
     must_cover: list[tuple[str, str, int, int, int, list[str]]],
@@ -4939,7 +5020,7 @@ def _normalize_roster_against_candidates(
         return draft
     model_entries = list(draft.characters)
     normalized: list[_BibleRosterEntry] = []
-    for appellation, formal, _onstage, _mentions, _chapters, aliases in must_cover:
+    for appellation, formal, onstage, mentions, chapters, aliases in must_cover:
         canonical = formal or appellation
         source_names = list(dict.fromkeys([appellation, *aliases]))
         all_names = {canonical, *source_names}
@@ -4947,10 +5028,17 @@ def _normalize_roster_against_candidates(
             item for item in model_entries
             if item.name in all_names or bool(set(item.source_appellations) & all_names)
         ), None)
+        score, signals = _character_importance_metadata(onstage, mentions, chapters)
+        mentioned_only = onstage == 0
         normalized.append(_BibleRosterEntry(
             name=canonical,
-            role=(matched.role if matched else "重要配角"),
+            role=(matched.role if matched else ("关键伏笔角色" if mentioned_only else "重要配角")),
             source_appellations=[name for name in source_names if name != canonical],
+            presence_status="mentioned_only" if mentioned_only else "onstage",
+            importance_score=score,
+            importance_signals=signals + (["retained_by_plot_authority"] if mentioned_only else []),
+            portrait_eligible=not mentioned_only,
+            appearance_status="deferred" if mentioned_only else "grounded",
         ))
     draft.characters = normalized
     return draft
@@ -4980,6 +5068,23 @@ async def _generate_character_detail(
     project_id: str | None,
 ) -> Character | None:
     from app.refs import PRODUCTION_APPEARANCE_MAX_CHARS, PRODUCTION_APPEARANCE_MIN_CHARS
+
+    if entry.presence_status == "mentioned_only":
+        return Character(
+            name=entry.name,
+            role=entry.role,
+            appearance_canonical="外观待原文真实出场后补全，当前不自动定妆",
+            personality="",
+            speech_style="",
+            relationships=[],
+            aliases=[],
+            source_evidence=[],
+            presence_status="mentioned_only",
+            importance_score=entry.importance_score,
+            importance_signals=entry.importance_signals,
+            portrait_eligible=False,
+            appearance_status="deferred",
+        )
 
     base_pack = evidence_pack[:BIBLE_DETAIL_EVIDENCE_MAX_CHARS]
     last_error = ""
@@ -5030,6 +5135,11 @@ async def _generate_character_detail(
                 relationships=detail.relationships,
                 aliases=detail.aliases,
                 source_evidence=detail.source_evidence,
+                presence_status=entry.presence_status,
+                importance_score=entry.importance_score,
+                importance_signals=entry.importance_signals,
+                portrait_eligible=entry.portrait_eligible,
+                appearance_status=entry.appearance_status,
             )
             if not PRODUCTION_APPEARANCE_MIN_CHARS <= len(character.appearance_canonical) <= PRODUCTION_APPEARANCE_MAX_CHARS:
                 raise ValueError("appearance_canonical 长度越界")

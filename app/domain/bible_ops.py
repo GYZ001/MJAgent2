@@ -1317,7 +1317,10 @@ def compute_refs_cost_precheck(
     if not p.get("bible_json"):
         raise HTTPException(409, "请先生成角色圣经")
     bible = json.loads(p["bible_json"])
-    bible_characters = bible.get("characters") or []
+    bible_characters = [
+        c for c in (bible.get("characters") or [])
+        if c.get("portrait_eligible", True) and c.get("appearance_status", "grounded") == "grounded"
+    ]
     selected_names = _normalize_character_selection(characters)
     if character and selected_names and character not in selected_names:
         raise HTTPException(422, "character 与 characters 范围不一致")
@@ -2698,7 +2701,12 @@ async def _refs_task(
         elif only_character:
             names = [only_character]
         elif p and p["bible_json"]:
-            names = [c["name"] for c in json.loads(p["bible_json"]).get("characters", [])]
+            names = [
+                c["name"] for c in json.loads(p["bible_json"]).get("characters", [])
+                if c.get("name") and c.get("portrait_eligible", True)
+                and c.get("appearance_status", "grounded") == "grounded"
+            ]
+            only_characters = names
         else:
             names = []
         await recorder.step(
