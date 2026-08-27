@@ -2043,6 +2043,24 @@ class _CharacterRollCall(BaseModel):
     candidates: list[_RosterCandidate] = Field(default_factory=list)
 
 
+class _RosterIdentityResolution(BaseModel):
+    """描述性称呼与候选实体的局部消歧结果。"""
+
+    verdict: Literal["same", "different", "uncertain"] = "uncertain"
+    canonical_appellation: str = ""
+    supporting_chapter_index: int = -1
+
+
+_GENERIC_CHARACTER_APPELLATION_RE = re.compile(
+    r"(?:少年|少女|男子|女子|汉子|大汉|老者|老人|妇人|青年|中年|胖子|瘦子|孩童|弟子|修士|掌柜|伙计)$"
+)
+
+
+def _is_generic_character_appellation(value: str) -> bool:
+    text = (value or "").strip()
+    return bool(text and _GENERIC_CHARACTER_APPELLATION_RE.search(text))
+
+
 def _candidate_appellations(candidate: _RosterCandidate) -> set[str]:
     return {
         value.strip() for value in [
@@ -4797,6 +4815,30 @@ def _character_detail_evidence_pack(
     return "\n\n".join(selected)
 
 
+def _normalize_roster_against_candidates(
+    draft: _BibleRosterDraft,
+    must_cover: list[tuple[str, str, int, int, int, list[str]]],
+) -> _BibleRosterDraft:
+    """代码拥有名单最终权：模型只分配 role，不得拆人、改名或漏人。"""
+    model_entries = list(draft.characters)
+    normalized: list[_BibleRosterEntry] = []
+    for appellation, formal, _onstage, _mentions, _chapters, aliases in must_cover:
+        canonical = formal or appellation
+        source_names = list(dict.fromkeys([appellation, *aliases]))
+        all_names = {canonical, *source_names}
+        matched = next((
+            item for item in model_entries
+            if item.name in all_names or bool(set(item.source_appellations) & all_names)
+        ), None)
+        normalized.append(_BibleRosterEntry(
+            name=canonical,
+            role=(matched.role if matched else "重要配角"),
+            source_appellations=[name for name in source_names if name != canonical],
+        ))
+    draft.characters = normalized
+    return draft
+
+
 def _validate_bible_roster(draft: _BibleRosterDraft) -> list[str]:
     names = [(item.name or "").strip() for item in draft.characters]
     errors: list[str] = []
@@ -4980,6 +5022,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
     )
 
     def validate_roster(candidate: _BibleRosterDraft) -> list[str]:
+        _normalize_roster_against_candidates(candidate, must_cover)
         if visual_style_prompt:
             candidate.world.visual_style_canonical = visual_style_prompt
         return _validate_bible_roster(candidate)
@@ -4989,6 +5032,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
         validate_roster, loop=roster_loop, temperature=0.3, max_tokens=4096,
         repair_user_prompt_limit=16000, repair_candidate_limit=5000,
     )
+    _normalize_roster_against_candidates(roster, must_cover)
     if visual_style_prompt:
         roster.world.visual_style_canonical = visual_style_prompt
     style = roster.world.visual_style_canonical
