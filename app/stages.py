@@ -5260,6 +5260,12 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
     must_cover = _normalize_must_cover_rows(
         await _recurring_character_names(chapters, project_id=project_id)
     )
+    if not must_cover:
+        raise StageError(
+            "角色圣经",
+            ["人物点名未产出任何经原文核验的角色候选，拒绝在无证据情况下编造人物谱"],
+            exit_reason="empty_verified_roster",
+        )
 
     must_cover_lines = [
         (

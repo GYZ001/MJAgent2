@@ -6236,6 +6236,16 @@ def validate_bible(bible: Bible) -> list[str]:
     names = [c.name for c in bible.characters]
     if len(names) != len(set(names)):
         errors.append("characters.name 存在重复")
+    # 无证据兜底防线：模型在候选缺失时会编出「待定主角」「未知角色」这类占位人物，
+    # 这类名字既没有原文依据，又会被下游当成真人拿去定妆，必须在产物层直接拒收。
+    placeholder_pattern = re.compile(r"(待定|待补|未知|未命名|占位|暂定|TBD|unknown|placeholder)", re.I)
+    for i, c in enumerate(bible.characters):
+        if placeholder_pattern.search(c.name or ""):
+            errors.append(f"characters[{i}] 名称「{c.name}」是占位名，人物谱不接受无原文依据的角色")
+    if placeholder_pattern.search(bible.world.era or ""):
+        errors.append(f"world.era「{bible.world.era}」是占位值，必须依据原文判定年代")
+    if placeholder_pattern.search(bible.world.genre or ""):
+        errors.append(f"world.genre「{bible.world.genre}」是占位值，必须依据原文判定题材")
     for i, c in enumerate(bible.characters):
         if c.appearance_status == "deferred":
             if c.portrait_eligible:
