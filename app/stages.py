@@ -2869,6 +2869,71 @@ def _bind_true_name_from_source(
     return bound
 
 
+def _self_id_speaker_matches(
+    appellation: str, formal: str, chapters: list[dict], speaker_names: set[str],
+) -> bool:
+    if not appellation or not formal:
+        return False
+    for chapter in chapters:
+        text = chapter.get("content") or ""
+        if appellation not in text:
+            continue
+        for match in _TRUE_NAME_SELF_ID_RE.finditer(text):
+            if match.group(1) != formal:
+                continue
+            suffix = text[match.end():match.end() + 80]
+            hits = [
+                (suffix.find(label), label)
+                for label in speaker_names
+                if label and label in suffix
+            ]
+            hits = [(pos, label) for pos, label in hits if pos >= 0]
+            if hits and min(hits)[1] == appellation:
+                return True
+    return False
+
+
+def _resolve_conflicting_formal_names(
+    candidates: list[_RosterCandidate], chapters: list[dict],
+) -> list[_RosterCandidate]:
+    """同一真名只能留给主名就是它的人，或自称句能对上的人。
+
+    真实故障：王有材被 LLM 写成李富贵，人物谱出现两个李富贵。
+    """
+    speaker_names = {
+        (item.primary_appellation or "").strip()
+        for item in candidates
+        if (item.primary_appellation or "").strip()
+    }
+    by_formal: dict[str, list[int]] = {}
+    for index, candidate in enumerate(candidates):
+        formal = (candidate.formal_name or "").strip()
+        if formal:
+            by_formal.setdefault(formal, []).append(index)
+    drop: set[int] = set()
+    for formal, indices in by_formal.items():
+        if len(indices) < 2:
+            continue
+        keep = {
+            index for index in indices
+            if (candidates[index].primary_appellation or "").strip() == formal
+        }
+        for index in indices:
+            primary = (candidates[index].primary_appellation or "").strip()
+            if _self_id_speaker_matches(primary, formal, chapters, speaker_names):
+                keep.add(index)
+        if not keep:
+            continue
+        drop.update(index for index in indices if index not in keep)
+    resolved: list[_RosterCandidate] = []
+    for index, candidate in enumerate(candidates):
+        if index not in drop:
+            resolved.append(candidate)
+            continue
+        resolved.append(candidate.model_copy(update={"formal_name": ""}))
+    return resolved
+
+
 class _BibleRollCallChunkFailed(StageError):
     """点名分块在退避重试后仍失败：宁可整体失败，也不允许无证据兜底生成人物谱。
 
@@ -3102,6 +3167,7 @@ async def _recurring_character_names(
         candidates, valid, project_id=project_id,
     )
     candidates = _bind_true_name_from_source(candidates, valid)
+    candidates = _resolve_conflicting_formal_names(candidates, valid)
     candidates = _merge_roll_call_candidates([[item] for item in candidates])
     candidates = [
         item.model_copy(update={"personhood": "person"})

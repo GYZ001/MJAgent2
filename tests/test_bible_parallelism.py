@@ -640,6 +640,20 @@ def test_bind_true_name_from_source_uses_identity_sentence() -> None:
     assert by_name["许师姐"] == "许清"
 
 
+def test_conflicting_formal_names_keep_self_id_owner() -> None:
+    chapters = [{"idx": 10, "content": "孟浩，你是我李富贵这一辈子的好朋友。”小胖子感慨连连。"}]
+    resolved = stages._resolve_conflicting_formal_names(
+        [
+            stages._RosterCandidate(primary_appellation="小胖子", formal_name="李富贵"),
+            stages._RosterCandidate(primary_appellation="王有材", formal_name="李富贵"),
+        ],
+        chapters,
+    )
+    by_name = {item.primary_appellation: item.formal_name for item in resolved}
+    assert by_name["小胖子"] == "李富贵"
+    assert by_name["王有材"] == ""
+
+
 def test_attach_roster_source_appellations_keeps_true_name_searchable() -> None:
     from app.schemas import Character
 
