@@ -1929,9 +1929,10 @@ BIBLE_RECURRING_MIN_ONSTAGE_QUOTES = 2  # 至少两条经裁决闸核验的「�
 # 全文统计通道门槛：命中量 + 章节覆盖率同时达标即可独立进入名单，不依赖模型裁决。
 BIBLE_STATISTICAL_MIN_MENTIONS = 25
 BIBLE_STATISTICAL_MIN_CHAPTER_RATIO = 0.15
-# 真名替换门槛：真名在全文出现次数达不到常用称呼的这一比例时，保留高频称呼作为
-# 人物谱主名，真名仍作为别名进入检索键——两者都能映射回同一张定妆图。
-BIBLE_FORMAL_NAME_MIN_RATIO = 0.2
+# 真名替换门槛：真名必须至少和名单称呼一样常见，才有资格当人物谱主名。
+# 旧值 0.2 会把「靠山老祖 1072 次 / 白主 344 次」改成主名「白主」，
+# 更常用的原文称呼连 aliases 都进不去，检索直接落空。
+BIBLE_FORMAL_NAME_MIN_RATIO = 1.0
 BIBLE_MUST_COVER_MAX = 20        # 前 60 章重要角色容量；详情仍逐角色小请求生成
 # 点名调用每个候选最多申报几条在场证据。判据只需要 BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
 # （=2）条核验通过的证据；这里留 1 条余量应付结构闸/裁决闸刷掉个别证据，不留更多——
@@ -2104,11 +2105,13 @@ def _is_generic_character_appellation(value: str) -> bool:
 
 
 def _is_dependent_descriptive_appellation(value: str, known_names: set[str]) -> bool:
-    """「孟浩的第一位客人」这类依附别人姓名的描述，不是稳定人物身份。"""
+    """「孟浩的第一位客人」「此人的对手」这类描述，不是稳定人物身份。"""
     text = (value or "").strip()
     if not text or "的" not in text:
         return False
-    return any(name and name != text and name in text for name in known_names)
+    if any(name and name != text and name in text for name in known_names):
+        return True
+    return bool(re.match(r"^[此该那某]", text))
 
 
 def _roster_label_needs_identity_resolution(label: str, known_names: set[str]) -> bool:
@@ -2233,6 +2236,8 @@ def _pin_roster_candidates_to_source(
             )
             if pinned_alias and pinned_alias not in {primary, formal, *aliases}:
                 aliases.append(pinned_alias)
+        if formal and not _usable_true_name(formal):
+            formal = ""
         pinned.append(candidate.model_copy(update={
             "primary_appellation": primary,
             "formal_name": "" if not formal or formal == primary else formal,
@@ -2736,7 +2741,19 @@ _TRUE_NAME_REVEAL_PATTERNS = (
     re.compile(r"名叫([\u4e00-\u9fff]{2,3})[，。！？]"),
     re.compile(r"名为([\u4e00-\u9fff]{2,3})[，。！？]"),
 )
-_TRUE_NAME_REJECT_RE = re.compile(r"[宗门内外此人是的在与和了着如当上下前后己]")
+_TRUE_NAME_REJECT_RE = re.compile(r"[宗门内外此这那该某人是的在与和了着如当上下前后己]")
+
+
+def _usable_true_name(value: str) -> bool:
+    """真名必须能当人物身份标签：不是结构噪声，也不是「少年/弟子」这类类别词。"""
+    text = (value or "").strip()
+    if not text:
+        return False
+    if _TRUE_NAME_REJECT_RE.search(text) or _is_generic_character_appellation(text):
+        return False
+    return True
+
+
 _APPELLATION_AGENT_RE = re.compile(
     r"(?:说道|问道|喝道|笑道|怒道|道[：「”\"]|说[：「”\"]|问[：「”\"]|"
     r"冷冷|走上|点了点头|摇了摇头|一愣|身子|冷哼|开口)"
@@ -2957,14 +2974,18 @@ def _pick_canonical_display_name(
 ) -> tuple[str, list[str]]:
     """选主名：真名与绰号都是同一角色的检索键，只决定「人物谱里显示哪个」。
 
-    真名优先只在真名确实被原文常用时成立。真实故障：「小胖子」全书出现 152 次、
-    「李富贵」只出现 1 次，机械套用真名优先会把人物谱主名改成一个正文里几乎不存在
-    的名字，下游按原文称呼检索时反而对不上。这里改为按全文实际使用频次决定主名，
-    落选的那个仍然作为别名保留，两者都能映射回同一张定妆图。
+    真名优先只在真名确实被原文常用、且能和名单称呼同窗共现时成立。真实故障：
+    「小胖子」全书出现 152 次、「李富贵」只出现 1 次，机械套用真名优先会把主名
+    改成正文里几乎不存在的写法；「靠山老祖 / 白主」则是反过来，0.2 比例把更常用
+    的原文称呼挤出 aliases。错绑的「这阵法」这类结构串不得当主名，也不得当别名。
     """
     appellation = (appellation or "").strip()
     formal = (formal or "").strip()
     if not formal or formal == appellation:
+        return appellation, []
+    if not _usable_true_name(formal):
+        return appellation, []
+    if _cooccurrence_quote(chapters, appellation, formal) is None:
         return appellation, []
     appellation_hits = sum((ch.get("content") or "").count(appellation) for ch in chapters)
     formal_hits = sum((ch.get("content") or "").count(formal) for ch in chapters)
@@ -3009,7 +3030,13 @@ def _attach_roster_source_appellations(
         text = (raw or "").strip()
         if not text or text in known:
             continue
-        found = _cooccurrence_quote(chapters, character.name, text)
+        found = None
+        for anchor in list(known):
+            if not anchor:
+                continue
+            found = _cooccurrence_quote(chapters, anchor, text)
+            if found is not None:
+                break
         if found is None:
             continue
         chapter_idx, quote = found

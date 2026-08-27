@@ -305,6 +305,43 @@ def test_high_frequency_nickname_stays_primary_name_and_real_name_is_searchable(
     assert "李富贵" in entry.source_appellations
 
 
+def test_formal_name_cannot_replace_more_common_appellation() -> None:
+    chapters = [{
+        "idx": 1,
+        "content": (
+            "靠山老祖即白主，负手而立。"
+            + "靠山老祖负手而立。" * 20
+            + "白主冷冷开口。" * 5
+            + "「许师姐。」这女子正是许清。" * 8
+        ),
+    }]
+    kaoshan, demoted = stages._pick_canonical_display_name("靠山老祖", "白主", chapters)
+    assert kaoshan == "靠山老祖"
+    assert demoted == ["白主"]
+
+    xu, xu_demoted = stages._pick_canonical_display_name("许师姐", "许清", chapters)
+    assert xu == "许清"
+    assert xu_demoted == ["许师姐"]
+
+
+def test_unusable_formal_name_cannot_become_display_or_alias() -> None:
+    chapters = [{
+        "idx": 1,
+        "content": "王腾飞踏入阵法。这阵法忽然发光。王腾飞看了看这阵法。",
+    }]
+    canonical, demoted = stages._pick_canonical_display_name("王腾飞", "这阵法", chapters)
+    assert canonical == "王腾飞"
+    assert demoted == []
+    assert stages._usable_true_name("这阵法") is False
+    assert stages._usable_true_name("许清") is True
+    pinned = stages._pin_roster_candidates_to_source(
+        [stages._RosterCandidate(primary_appellation="王腾飞", formal_name="这阵法")],
+        {1: chapters[0]["content"]},
+    )
+    assert pinned[0].primary_appellation == "王腾飞"
+    assert pinned[0].formal_name == ""
+
+
 def test_protagonist_is_assigned_by_fulltext_signals_not_model() -> None:
     """覆盖最广的角色必须成为主角，即使在场裁决一条都没通过。"""
     chapters = [{"idx": i, "content": "孟浩走上前。" * 30} for i in range(1, 21)]
@@ -433,6 +470,9 @@ def test_dependent_descriptive_appellation_is_not_a_stable_identity() -> None:
     assert stages._is_dependent_descriptive_appellation("昨日孟浩的第一位客人", {"孟浩"}) is True
     assert stages._is_dependent_descriptive_appellation("赵武刚师兄", {"赵武刚"}) is False
     assert stages._is_dependent_descriptive_appellation("铜镜", {"孟浩"}) is False
+    assert stages._is_dependent_descriptive_appellation("此人的对手", set()) is True
+    assert stages._is_dependent_descriptive_appellation("某人的客人", set()) is True
+    assert stages._is_dependent_descriptive_appellation("靠山老祖", set()) is False
 
 
 @pytest.mark.asyncio
@@ -455,6 +495,31 @@ async def test_dependent_guest_description_is_not_kept_as_character(monkeypatch)
             ),
         ],
         {13: "孟浩走进客栈。昨日孟浩的第一位客人坐在角落。"},
+        project_id="p1",
+    )
+    assert [item.primary_appellation for item in result] == ["孟浩"]
+
+
+@pytest.mark.asyncio
+async def test_demonstrative_description_is_not_kept_as_character(monkeypatch) -> None:
+    async def fake_structured(*_args, **_kwargs):
+        return stages._RosterIdentityResolution(
+            verdict="uncertain", canonical_appellation="", supporting_chapter_index=-1,
+        )
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
+    ev = stages._RosterOnstageEvidence
+    result = await stages._resolve_generic_character_candidates(
+        [
+            stages._RosterCandidate(primary_appellation="孟浩", formal_name="孟浩", onstage_evidence=[
+                ev(chapter_index=13, quote="孟浩走进客栈。"),
+            ]),
+            stages._RosterCandidate(
+                primary_appellation="此人的对手",
+                onstage_evidence=[ev(chapter_index=13, quote="此人的对手站在角落。")],
+            ),
+        ],
+        {13: "孟浩走进客栈。此人的对手站在角落。"},
         project_id="p1",
     )
     assert [item.primary_appellation for item in result] == ["孟浩"]
@@ -666,6 +731,30 @@ def test_attach_roster_source_appellations_keeps_true_name_searchable() -> None:
         [{"idx": 10, "content": "孟浩，你是我李富贵这一辈子的好朋友。”小胖子感慨连连。"}],
     )
     assert "李富贵" in {item.text for item in character.aliases}
+
+
+def test_attach_roster_source_appellations_uses_existing_aliases_as_anchors() -> None:
+    from app.schemas import Character, CharacterAlias
+
+    character = Character(
+        name="白主",
+        role="重要配角",
+        appearance_canonical="待测",
+        aliases=[CharacterAlias(
+            text="师尊",
+            name_kind="honorific",
+            evidence_chapter_index=1,
+            evidence_quote="靠山老祖被弟子称为师尊。",
+        )],
+    )
+    entry = stages._BibleRosterEntry(
+        name="白主", role="重要配角", source_appellations=["靠山老祖"],
+    )
+    stages._attach_roster_source_appellations(
+        character, entry,
+        [{"idx": 1, "content": "靠山老祖被弟子称为师尊。" + ("无关。" * 40) + "白主冷冷开口。"}],
+    )
+    assert "靠山老祖" in {item.text for item in character.aliases}
 
 
 def test_roster_personhood_dossier_keeps_segments_with_candidate_name() -> None:
