@@ -881,6 +881,25 @@ def _storyboard_publication_evidence_state(
     if not projection_matches:
         return True, False
     try:
+        # 叙事权威凭证校验（verify_current_storyboard_completion_authority）只
+        # 对「当前仍要求叙事权威」的分集有意义——它自己会在
+        # narrative_authority_required=False 时主动抛错（"当前剧集不使用叙事
+        # 权威凭证"），这不是证据变质，是分类判据本身已经变了（典型场景：
+        # 该集分镜/剧本已迁移到 prep_pack 6.0.0+ 合同，contract 设计上就不产出
+        # narrative_plan，见 108e2c1 对 resolve_downstream_screenplay 的说明）。
+        # 上面的 projection_matches 已经证明正文投影逐字一致；如果这里不预先
+        # 判断分类，就会把"这项校验天然不适用"误判成"证据异常，禁止原地
+        # 续跑"——一个内容完全没问题的已确认分集会被卡在一句用户既看不懂、
+        # 也无处可核实的报错前，真实回归 ep_3d523ff4d0a4（EP1）复现。
+        from app.production.screenplay_authority import (
+            resolve_downstream_screenplay,
+        )
+
+        screenplay_context = resolve_downstream_screenplay(
+            str(episode.get("id") or ""),
+        )
+        if not screenplay_context.narrative_authority_required:
+            return True, False
         from app.production.certificate import (
             verify_current_storyboard_completion_authority,
         )

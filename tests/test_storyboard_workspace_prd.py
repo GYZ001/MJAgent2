@@ -26,8 +26,10 @@ from app.domain.storyboard_ops import (
     _assert_storyboard_write_authorized,
     _recorded_storyboard_task,
     _storyboard_has_persisted_work,
+    _storyboard_publication_evidence_state,
     _storyboard_task,
 )
+from app.schemas import Storyboard
 
 
 def test_legacy_unbound_storyboard_checkpoint_is_not_resumable(storyboard_db):
@@ -548,6 +550,108 @@ def test_complete_board_without_publication_evidence_can_finalize(
     assert preview["resume_mode"] == "finalize_evidence"
     assert preview["remaining_shots"] == 0
     assert "仅续做冷观众审读" in preview["impact"]
+
+
+def _patch_storyboard_artifact_and_projection_match(monkeypatch) -> None:
+    """两条前置条件在这组测试里恒定成立：证据 Artifact 存在且归属正确，
+    且正文投影逐字一致（projection_matches=True）——只留叙事权威凭证校验
+    这一步的分支需要各测试自己控制。"""
+    from app.evidence import repository as evidence_repository
+    from app import narrative
+
+    monkeypatch.setattr(
+        evidence_repository,
+        "get_artifact",
+        lambda _artifact_id: {
+            "scope_type": "episode", "scope_id": "e1", "content": {},
+        },
+    )
+    monkeypatch.setattr(
+        narrative, "storyboard_authority_projection", lambda _payload: "same",
+    )
+
+
+def _publication_evidence_episode() -> dict:
+    return {
+        "id": "e1",
+        "storyboard_artifact_id": "a1",
+        "storyboard_completion_certificate_id": "c1",
+        "storyboard_production_revision_id": "r1",
+    }
+
+
+def test_publication_evidence_not_stale_when_narrative_authority_no_longer_required(
+    monkeypatch,
+) -> None:
+    """真实回归 ep_3d523ff4d0a4（EP1）：分集已迁移到不产出 narrative_plan 的
+    prep_pack 合同，resolve_downstream_screenplay 因此正确返回
+    narrative_authority_required=False（108e2c1 的既有设计，见该函数说明）。
+    旧代码不看这个分类，直接去跑叙事权威凭证校验，那个校验自己会在不适用
+    时抛 ValueError（"当前剧集不使用叙事权威凭证"），被外层一律吞成"证据
+    异常，需要重新定档"，于是已确认、正文完全没变的分集在分镜台顶部被挂上
+    一句「已确认正式版存在证据异常，禁止原地续跑」——用户看不懂也无从核实。
+    修复后：分类一旦确认当前不需要叙事权威，这项校验天然不适用，直接判定
+    证据仍然current，且不得再去调用凭证校验函数（用抛异常的假实现验证这一
+    点，调用了就说明分支判断没生效）。"""
+    from app.production import screenplay_authority, certificate
+
+    _patch_storyboard_artifact_and_projection_match(monkeypatch)
+    monkeypatch.setattr(
+        screenplay_authority,
+        "resolve_downstream_screenplay",
+        lambda _episode_id, conn=None: type(
+            "Ctx", (), {"narrative_authority_required": False},
+        )(),
+    )
+
+    def _must_not_be_called(**_kwargs):
+        raise AssertionError(
+            "narrative_authority_required=False 时不应再调用凭证校验"
+        )
+
+    monkeypatch.setattr(
+        certificate,
+        "verify_current_storyboard_completion_authority",
+        _must_not_be_called,
+    )
+
+    board = Storyboard(episode_no=1, shots=[])
+    current, refinalize_only = _storyboard_publication_evidence_state(
+        _publication_evidence_episode(), board,
+    )
+
+    assert (current, refinalize_only) == (True, False)
+
+
+def test_publication_evidence_still_flags_genuine_certificate_drift(
+    monkeypatch,
+) -> None:
+    """对照组：narrative_authority_required 仍为 True 时，凭证校验失败必须
+    继续按既有行为落到 refinalize_only，不能被上面那条修复放宽。"""
+    from app.production import screenplay_authority, certificate
+
+    _patch_storyboard_artifact_and_projection_match(monkeypatch)
+    monkeypatch.setattr(
+        screenplay_authority,
+        "resolve_downstream_screenplay",
+        lambda _episode_id, conn=None: type(
+            "Ctx", (), {"narrative_authority_required": True},
+        )(),
+    )
+    monkeypatch.setattr(
+        certificate,
+        "verify_current_storyboard_completion_authority",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            ValueError("当前 shots 投影与完成凭证绑定的 Storyboard Artifact 不一致")
+        ),
+    )
+
+    board = Storyboard(episode_no=1, shots=[])
+    current, refinalize_only = _storyboard_publication_evidence_state(
+        _publication_evidence_episode(), board,
+    )
+
+    assert (current, refinalize_only) == (False, True)
 
 
 def _leave_stale_checkpoint_after_screenplay_republish(storyboard_db) -> None:
