@@ -6237,7 +6237,12 @@ def validate_bible(bible: Bible) -> list[str]:
     if len(names) != len(set(names)):
         errors.append("characters.name 存在重复")
     for i, c in enumerate(bible.characters):
-        if not PRODUCTION_APPEARANCE_MIN_CHARS <= len(c.appearance_canonical) <= PRODUCTION_APPEARANCE_MAX_CHARS:
+        if c.appearance_status == "deferred":
+            if c.portrait_eligible:
+                errors.append(
+                    f"characters[{i}]({c.name}) 外观为 deferred 时不得自动定妆"
+                )
+        elif not PRODUCTION_APPEARANCE_MIN_CHARS <= len(c.appearance_canonical) <= PRODUCTION_APPEARANCE_MAX_CHARS:
             errors.append(
                 f"characters[{i}]({c.name}).appearance_canonical 长度 "
                 f"{len(c.appearance_canonical)} 字，要求 "

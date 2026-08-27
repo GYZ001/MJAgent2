@@ -1317,23 +1317,31 @@ def compute_refs_cost_precheck(
     if not p.get("bible_json"):
         raise HTTPException(409, "请先生成角色圣经")
     bible = json.loads(p["bible_json"])
-    bible_characters = [
-        c for c in (bible.get("characters") or [])
-        if c.get("portrait_eligible", True) and c.get("appearance_status", "grounded") == "grounded"
-    ]
+    all_bible_characters = bible.get("characters") or []
+    eligible_by_name = {
+        c.get("name"): c for c in all_bible_characters
+        if c.get("name") and c.get("portrait_eligible", True)
+        and c.get("appearance_status", "grounded") == "grounded"
+    }
+    bible_characters = list(eligible_by_name.values())
     selected_names = _normalize_character_selection(characters)
     if character and selected_names and character not in selected_names:
         raise HTTPException(422, "character 与 characters 范围不一致")
     if character:
-        bible_characters = [c for c in bible_characters if c.get("name") == character]
-        if not bible_characters:
+        if character not in {c.get("name") for c in all_bible_characters}:
             raise HTTPException(404, f"角色不存在：{character}")
+        if character not in eligible_by_name:
+            raise HTTPException(409, f"角色尚无可靠外观依据，暂不具备定妆资格：{character}")
+        bible_characters = [eligible_by_name[character]]
     elif selected_names:
-        by_name = {c.get("name"): c for c in bible_characters if c.get("name")}
-        missing = [name for name in selected_names if name not in by_name]
+        all_names = {c.get("name") for c in all_bible_characters if c.get("name")}
+        missing = [name for name in selected_names if name not in all_names]
         if missing:
             raise HTTPException(404, f"角色不存在：{missing[0]}")
-        bible_characters = [by_name[name] for name in selected_names]
+        ineligible = [name for name in selected_names if name not in eligible_by_name]
+        if ineligible:
+            raise HTTPException(409, f"角色尚无可靠外观依据，暂不具备定妆资格：{ineligible[0]}")
+        bible_characters = [eligible_by_name[name] for name in selected_names]
     views_per = 1 if view_role else len(CHARACTER_REQUIRED_VIEWS)
     conn = get_conn()
     missing_roles: list[dict] = []

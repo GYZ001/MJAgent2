@@ -250,3 +250,43 @@ AgentLoop 之外的 artifact/evaluation 记录字段填法待与 harness 负责�
 6. **两部分都假设「推理耗时与输入体量正相关」**（依据 `OPENROUTER_TEXT_REASONING_EFFORT=high` 默认生效）。
    若真实数据显示耗时主要由任务复杂度决定，收益会明显小于估算；
    届时是否调整 `reasoning_effort` 等全局参数属跨环节系统性设置，需负责人单独拍板。
+
+---
+
+## 七、实体归一、重要性 Harness 与视觉门禁（2026-08 落地补充）
+
+### 7.1 实体归一
+
+- 名单规范名优先级固定为 `formal_name > primary_appellation`；绰号、尊称、描述性称呼只进入 `source_appellations/aliases`。
+- 单章点名只能申报本章可证明的身份链接；跨章遇到“少年/男子/胖子/老者/掌柜”等描述性称呼时，单独发起小卷宗身份裁决。
+- 身份裁决只允许映射到已经存在的候选实体；必须有同场连续指代、动作/对话连续或明确命名句。外貌、年龄、宗门等弱相似不能合并。
+- 泛称无法证明映射时不再独立建角，避免“精明中年男子”一类无依据实体污染人物谱。
+
+### 7.2 重要性不再是一维分数
+
+准入由证据门禁决定，分数只用于排序和可观测解释：
+
+1. `verified_onstage`：独立裁决确认的真实出场证据数；
+2. `fulltext_mentions`：规范名与已确认别名的全文逐字命中数；
+3. `chapter_coverage`：覆盖章节数，防止单章重复刷高；
+4. `plot_authority`：仅被提及时，是否明确建立宗门/制度、造成当前核心冲突、留下持续生效规则/遗产或成为后续行动目标。
+
+普通角色需满足真实出场门槛；仅被提及但具备 `plot_authority` 的具名角色允许以 `mentioned_only` 保留。欠债对象、一次性比较、家世背景、泛称路人不能仅靠频次进入人物谱。
+
+### 7.3 未出场角色的视觉生产隔离
+
+新增角色状态：
+
+- `presence_status`: `onstage | mentioned_only | unresolved`
+- `appearance_status`: `grounded | insufficient_evidence | deferred`
+- `portrait_eligible`: 是否允许进入自动定妆
+- `importance_score/importance_signals`: 可解释的排序与观测信号
+
+`mentioned_only` 角色不调用详情模型补造外观，`appearance_canonical` 只保留“待真实出场后补全”的占位说明，`appearance_status=deferred`、`portrait_eligible=false`。定妆生成与费用预检都只统计具备可靠外观依据的角色，避免早期背景描述锁死未来造型。
+
+### 7.4 新增验收红线
+
+- “小胖子 / 虎头虎脑少年 / 李富贵”只能落为一个规范实体，名称优先为李富贵。
+- “精明中年男子”等泛称没有强身份链接时不得独立出现。
+- “靠山老祖”可因持续剧情作用作为 `mentioned_only` 保留，但不得自动生成定妆图。
+- 任何单次请求仍须遵守：点名 ≤8,000 字、详情 ≤12,000 字、名单不携带正文；身份与重要性裁决均使用小卷宗并发执行。

@@ -69,6 +69,49 @@ async def test_generate_character_detail_batch_retries_only_failed_character(mon
 
 
 @pytest.mark.asyncio
+async def test_mentioned_only_character_skips_detail_model_and_portrait() -> None:
+    entry = stages._BibleRosterEntry(
+        name="靠山老祖",
+        role="关键伏笔角色",
+        presence_status="mentioned_only",
+        importance_score=18.4,
+        importance_signals=["fulltext_mentions:3", "retained_by_plot_authority"],
+        portrait_eligible=False,
+        appearance_status="deferred",
+    )
+    result = await stages._generate_character_detail_batch(
+        [entry],
+        [{"idx": 1, "content": "靠山老祖定下门规。"}],
+        style="国漫三维动画电影质感，统一自然光影与细腻材质",
+        chapters_by_idx={1: "靠山老祖定下门规。"},
+        project_id="p1",
+    )
+    assert len(result) == 1
+    character = result[0]
+    assert character.presence_status == "mentioned_only"
+    assert character.appearance_status == "deferred"
+    assert character.portrait_eligible is False
+    assert character.source_evidence == []
+
+
+def test_normalize_roster_prefers_real_name_and_marks_mentioned_only() -> None:
+    draft = stages._BibleRosterDraft(
+        characters=[stages._BibleRosterEntry(name="小胖子", role="重要配角")],
+        world={"visual_style_canonical": "国漫三维动画电影质感，统一自然光影与细腻材质"},
+    )
+    normalized = stages._normalize_roster_against_candidates(draft, [
+        ("小胖子", "李富贵", 2, 16, 6, ["虎头虎脑少年"]),
+        ("靠山老祖", "", 0, 4, 3, []),
+    ])
+    assert [entry.name for entry in normalized.characters] == ["李富贵", "靠山老祖"]
+    assert normalized.characters[0].source_appellations == ["小胖子", "虎头虎脑少年"]
+    assert normalized.characters[0].portrait_eligible is True
+    assert normalized.characters[1].presence_status == "mentioned_only"
+    assert normalized.characters[1].appearance_status == "deferred"
+    assert normalized.characters[1].portrait_eligible is False
+
+
+@pytest.mark.asyncio
 async def test_roll_call_sends_small_parallel_chunks(monkeypatch) -> None:
     active = 0
     peak = 0
