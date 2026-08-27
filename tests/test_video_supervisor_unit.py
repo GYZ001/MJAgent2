@@ -125,35 +125,20 @@ def test_no_charge_requeue_preserves_budget_pause_gate() -> None:
 
 
 def test_grade_shot_video_a_b_c():
+    """VLM 质检已下线：分级只看技术校验与连续性降级，qa 形参不再被读取。"""
     a = grade_shot_video(
         technical={"passed": True},
-        qa={"overall": 0.9, "contract_facts": []},
+        qa={"overall": 0.4, "contract_facts": ["identity_contract_below_contract"], "whole_clip_usable": False},
     )
     assert a["grade"] == "A"
-
-    b = grade_shot_video(
-        technical={"passed": True},
-        qa={"overall": 0.4, "contract_facts": ["end_state_match_below_contract"]},
-    )
-    assert b["grade"] == "B"
-    assert b["fallback_reason"]
+    assert "qa_overall" not in a or a["qa_overall"] is None
 
     c = grade_shot_video(
         technical={"passed": False},
         qa={"overall": 0.9},
     )
     assert c["grade"] == "C"
-
-    fatal = grade_shot_video(
-        technical={"passed": True},
-        qa={
-            "overall": 0.95,
-            "contract_facts": ["identity_contract_below_contract"],
-            "whole_clip_usable": False,
-        },
-    )
-    assert fatal["grade"] == "C"
-    assert fatal["whole_clip_usable"] is False
+    assert c["fallback_reason"]
 
     degraded = grade_shot_video(
         technical={"passed": True},
@@ -161,6 +146,7 @@ def test_grade_shot_video_a_b_c():
         continuity_degraded=True,
     )
     assert degraded["grade"] == "B"
+    assert degraded["fallback_reason"]
 
 
 def test_fatality_comes_from_typed_runtime_gate():

@@ -978,13 +978,13 @@ def test_fresh_manual_run_ignores_cancelled_prior_run_preflight_state(memdb):
 
 
 def test_integration_adopted_b_over_quota_is_still_complete(memdb):
+    """VLM 质检已下线：grade 只看技术校验与连续性降级，不再看 qa 分数。"""
     eid, _ = _seed_episode(memdb, 5)
     for i in range(1, 4):
-        _add_succeeded_version(memdb, f"{eid}_shot_{i}", qa={"overall": 0.9, "contract_facts": []})
+        _add_succeeded_version(memdb, f"{eid}_shot_{i}", qa={})
     for i in range(4, 6):
         _add_succeeded_version(
-            memdb, f"{eid}_shot_{i}",
-            qa={"overall": 0.4, "contract_facts": ["end_state_match_below_contract"]},
+            memdb, f"{eid}_shot_{i}", qa={}, continuity_degraded=True,
         )
     ledger = rebuild_coverage_ledger(eid, fallback_quota=1)
     assert ledger.grades["B"] >= 2
@@ -1073,11 +1073,11 @@ def test_per_shot_artifact_inside_current_episode_aggregate_is_not_stale(memdb):
 
 
 def test_integration_fallback_b_with_reason(memdb):
+    """VLM 质检已下线：B 级现在只由连续性降级触发。"""
     eid, _ = _seed_episode(memdb, 2)
-    _add_succeeded_version(memdb, f"{eid}_shot_1", qa={"overall": 0.92, "contract_facts": []})
+    _add_succeeded_version(memdb, f"{eid}_shot_1", qa={})
     _add_succeeded_version(
-        memdb, f"{eid}_shot_2",
-        qa={"overall": 0.45, "contract_facts": ["end_state_match_below_contract"]},
+        memdb, f"{eid}_shot_2", qa={}, continuity_degraded=True,
     )
     ledger = rebuild_coverage_ledger(eid, fallback_quota=1)
     b = next(e for e in ledger.entries if e.shot_no == 2)
@@ -1227,6 +1227,8 @@ def test_deadline_closeout_adopts_best_candidate_without_image_fallback(memdb, t
 
 
 def test_deadline_closeout_finishes_when_every_shot_has_technical_candidate(memdb):
+    """VLM 质检已下线：quality_target_missed 现在只由连续性降级（或技术失败/
+    缺失）触发，不再由 qa 分数触发。"""
     eid, _ = _seed_episode(memdb, 2)
     memdb.execute(
         "UPDATE episodes SET status='generating', video_completion_mode='complete' WHERE id=?",
@@ -1234,7 +1236,7 @@ def test_deadline_closeout_finishes_when_every_shot_has_technical_candidate(memd
     )
     for i in (1, 2):
         _add_succeeded_version(
-            memdb, f"{eid}_shot_{i}", qa={"overall": 0.2, "contract_facts": ["end_state_match_below_contract"]},
+            memdb, f"{eid}_shot_{i}", qa={}, continuity_degraded=True,
         )
         memdb.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=?", (f"{eid}_shot_{i}",))
     memdb.commit()
