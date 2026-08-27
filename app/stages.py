@@ -2709,16 +2709,14 @@ supporting_chapter_index 必须是卷宗里出现过的章号；supporting_quote
 
 
 _TRUE_NAME_SELF_ID_RE = re.compile(r"我([\u4e00-\u9fff]{2,3})这一辈子")
+# 正是/便是不能吃进「也正是」「即便是」；自称/我是噪声太大，只保留命名句。
 _TRUE_NAME_REVEAL_PATTERNS = (
-    re.compile(r"正是([\u4e00-\u9fff]{2,3})[，。！？]"),
-    re.compile(r"便是([\u4e00-\u9fff]{2,3})[，。！？]"),
+    re.compile(r"(?<![也即])正是([\u4e00-\u9fff]{2,3})[，。！？]"),
+    re.compile(r"(?<![即])便是([\u4e00-\u9fff]{2,3})[，。！？]"),
     re.compile(r"名叫([\u4e00-\u9fff]{2,3})[，。！？]"),
     re.compile(r"名为([\u4e00-\u9fff]{2,3})[，。！？]"),
-    re.compile(r"自称([\u4e00-\u9fff]{2,3})[，。！？]"),
-    re.compile(r"我是([\u4e00-\u9fff]{2,3})[，。！？]"),
-    _TRUE_NAME_SELF_ID_RE,
 )
-_TRUE_NAME_REJECT_RE = re.compile(r"[宗门内外此人是的在与和了着如当上下前后]")
+_TRUE_NAME_REJECT_RE = re.compile(r"[宗门内外此人是的在与和了着如当上下前后己]")
 _APPELLATION_AGENT_RE = re.compile(
     r"(?:说道|问道|喝道|笑道|怒道|道[：「”\"]|说[：「”\"]|问[：「”\"]|"
     r"冷冷|走上|点了点头|摇了摇头|一愣|身子|冷哼|开口)"
@@ -2747,30 +2745,30 @@ def _bind_true_name_from_source(
     """LLM 没钉上真名时，用原文身份句做延迟绑定：正是/名叫/我X这一辈子。
 
     程序拥有名称匹配。证据不足或同一称呼对上多个真名时不绑，避免错并。
-    「正是王有材」出现在王伯场景里时，不得把已有另一候选的主名当成这个人的真名；
-    「我李富贵这一辈子」是自称，即使李富贵也在候选名单里也允许绑定。
+    自称句优先且允许指向已有候选（小胖子→李富贵）；正是/名叫不得把已有
+    另一候选的主名当成真名（王伯不得并到王有材）。
     """
     occupied_primaries = {
         (item.primary_appellation or "").strip()
         for item in candidates
         if (item.primary_appellation or "").strip()
     }
-    bound: list[_RosterCandidate] = []
-    for candidate in candidates:
-        if (candidate.formal_name or "").strip():
-            bound.append(candidate)
-            continue
-        appellation = (candidate.primary_appellation or "").strip()
-        if not appellation:
-            bound.append(candidate)
-            continue
+
+    def _hits(
+        appellation: str,
+        patterns: tuple[re.Pattern[str], ...],
+        *,
+        window: int,
+        allow_occupied: bool,
+        require_before: bool,
+        speaker_names: set[str] | None = None,
+    ) -> list[str]:
         found: list[str] = []
         for chapter in chapters:
             text = chapter.get("content") or ""
             if appellation not in text:
                 continue
-            positions = [match.start() for match in re.finditer(re.escape(appellation), text)]
-            for pattern in _TRUE_NAME_REVEAL_PATTERNS:
+            for pattern in patterns:
                 for match in pattern.finditer(text):
                     name = match.group(1)
                     if (
@@ -2780,15 +2778,64 @@ def _bind_true_name_from_source(
                         or _TRUE_NAME_REJECT_RE.search(name)
                     ):
                         continue
-                    if (
-                        name in occupied_primaries
-                        and pattern is not _TRUE_NAME_SELF_ID_RE
-                    ):
+                    if name in occupied_primaries and not allow_occupied:
                         continue
-                    if not any(abs(match.start() - pos) <= 240 for pos in positions):
-                        continue
+                    prefix = text[max(0, match.start() - window):match.start()]
+                    suffix = text[match.end():match.end() + window]
+                    if require_before:
+                        if appellation not in prefix:
+                            continue
+                        quoted = [
+                            value.strip("。！？，、 ")
+                            for value in re.findall(r"[「“\"]([^」”\"]{1,12})[」”\"]", prefix)
+                        ]
+                        quoted_names = [
+                            value for value in quoted
+                            if value and value in occupied_primaries | {appellation}
+                        ]
+                        if quoted_names:
+                            if appellation != quoted_names[-1]:
+                                continue
+                        else:
+                            last_pos = -1
+                            last_name = ""
+                            for label in occupied_primaries | {appellation}:
+                                pos = prefix.rfind(label)
+                                if pos > last_pos:
+                                    last_pos = pos
+                                    last_name = label
+                            if last_name != appellation:
+                                continue
+                    if speaker_names:
+                        tail_hits = [
+                            (suffix.find(label), label)
+                            for label in speaker_names
+                            if label and label in suffix
+                        ]
+                        tail_hits = [(pos, label) for pos, label in tail_hits if pos >= 0]
+                        if not tail_hits or min(tail_hits)[1] != appellation:
+                            continue
                     found.append(name)
-        unique = list(dict.fromkeys(found))
+        return list(dict.fromkeys(found))
+
+    bound: list[_RosterCandidate] = []
+    for candidate in candidates:
+        if (candidate.formal_name or "").strip():
+            bound.append(candidate)
+            continue
+        appellation = (candidate.primary_appellation or "").strip()
+        if not appellation:
+            bound.append(candidate)
+            continue
+        unique = _hits(
+            appellation, (_TRUE_NAME_SELF_ID_RE,), window=80, allow_occupied=True,
+            require_before=False, speaker_names=occupied_primaries | {appellation},
+        )
+        if len(unique) != 1:
+            unique = _hits(
+                appellation, _TRUE_NAME_REVEAL_PATTERNS, window=80, allow_occupied=False,
+                require_before=True,
+            )
         if len(unique) != 1:
             bound.append(candidate)
             continue
@@ -2839,6 +2886,55 @@ def _pick_canonical_display_name(
     if formal_hits >= max(1, appellation_hits * BIBLE_FORMAL_NAME_MIN_RATIO):
         return formal, [appellation]
     return appellation, [formal]
+
+
+def _cooccurrence_quote(
+    chapters: list[dict], left: str, right: str,
+) -> tuple[int, str] | None:
+    """找一条同时含两个称呼、不超过 80 字的原文引句。"""
+    if not left or not right or left == right:
+        return None
+    for chapter in chapters:
+        text = chapter.get("content") or ""
+        if left not in text or right not in text:
+            continue
+        try:
+            idx = int(chapter.get("idx"))
+        except (TypeError, ValueError):
+            continue
+        right_positions = [match.start() for match in re.finditer(re.escape(right), text)]
+        for start in right_positions:
+            window_start = max(0, start - 40)
+            quote = text[window_start:window_start + 80]
+            if left in quote and right in quote:
+                return idx, quote.replace("\n", "")
+    return None
+
+
+def _attach_roster_source_appellations(
+    character: Character, entry: _BibleRosterEntry, chapters: list[dict],
+) -> None:
+    """名单里已经程序绑定的称呼必须能检索到同一张卡，不能等详情模型再报一遍别名。
+
+    真实故障：必收名单已是「李富贵（小胖子）」/ 绑定后的「许师姐→许清」，详情模型
+    没把真名写进 aliases，核验闸再一丢，人物谱只剩绰号。
+    """
+    known = {character.name, *(item.text for item in character.aliases if item.text)}
+    for raw in entry.source_appellations:
+        text = (raw or "").strip()
+        if not text or text in known:
+            continue
+        found = _cooccurrence_quote(chapters, character.name, text)
+        if found is None:
+            continue
+        chapter_idx, quote = found
+        character.aliases.append(CharacterAlias(
+            text=text,
+            name_kind="honorific" if "师" in text else "personal_name",
+            evidence_chapter_index=chapter_idx,
+            evidence_quote=quote,
+        ))
+        known.add(text)
 
 
 async def _recurring_character_names(
@@ -6118,6 +6214,10 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
     )
     bible = Bible(world=roster.world, characters=characters)
     await _verify_character_aliases_in_place(bible, chapters, project_id=project_id)
+    for character in bible.characters:
+        entry = next((item for item in roster.characters if item.name == character.name), None)
+        if entry is not None:
+            _attach_roster_source_appellations(character, entry, chapters)
 
     missing = [
         item for item in must_cover
@@ -6150,6 +6250,8 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
             await _verify_character_aliases_for_subset(
                 bible, supplemented, chapters_by_idx, project_id=project_id,
             )
+            for character, entry in zip(supplemented, entries, strict=False):
+                _attach_roster_source_appellations(character, entry, chapters)
 
     valid_names = {character.name for character in bible.characters}
     for character in bible.characters:

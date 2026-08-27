@@ -607,6 +607,41 @@ def test_bind_true_name_from_source_uses_identity_sentence() -> None:
     )
     assert father_and_son[0].formal_name == ""
     assert father_and_son[1].formal_name == ""
+    # 「即便是」不得当成「便是」；台词里的「我李富贵」不得绑到旁边的孟浩。
+    even_if = stages._bind_true_name_from_source(
+        [stages._RosterCandidate(primary_appellation="小胖子")],
+        [{"idx": 194, "content": "小胖子深吸口气，可即便是再谨慎，随着不断地前行。"}],
+    )
+    assert even_if[0].formal_name == ""
+    trio = stages._bind_true_name_from_source(
+        [
+            stages._RosterCandidate(primary_appellation="孟浩"),
+            stages._RosterCandidate(primary_appellation="小胖子"),
+            stages._RosterCandidate(primary_appellation="许师姐"),
+        ],
+        [
+            {"idx": 10, "content": "孟浩，你是我李富贵这一辈子的好朋友。”小胖子感慨连连。孟浩在不远处愣住。"},
+            {"idx": 37, "content": "「许师姐。」孟浩抱拳一拜。这女子正是许清，如她的名字一样，冷冷清清。"},
+        ],
+    )
+    by_name = {item.primary_appellation: item.formal_name for item in trio}
+    assert by_name["孟浩"] == ""
+    assert by_name["小胖子"] == "李富贵"
+    assert by_name["许师姐"] == "许清"
+
+
+def test_attach_roster_source_appellations_keeps_true_name_searchable() -> None:
+    from app.schemas import Character
+
+    character = Character(name="小胖子", role="重要配角", appearance_canonical="待测")
+    entry = stages._BibleRosterEntry(
+        name="小胖子", role="重要配角", source_appellations=["李富贵"],
+    )
+    stages._attach_roster_source_appellations(
+        character, entry,
+        [{"idx": 10, "content": "孟浩，你是我李富贵这一辈子的好朋友。”小胖子感慨连连。"}],
+    )
+    assert "李富贵" in {item.text for item in character.aliases}
 
 
 def test_roster_personhood_dossier_keeps_segments_with_candidate_name() -> None:
