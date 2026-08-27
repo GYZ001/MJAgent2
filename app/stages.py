@@ -78,9 +78,9 @@ from app.narrative_blueprint import (
     validate_narrative_blueprint_patch_projection,
     validate_narrative_blueprint_shard,
 )
-from app.schemas import (Bible, Character, CharacterAffiliation, CharacterAlias,
+from app.schemas import (AppearanceEvidence, Bible, Character, CharacterAffiliation, CharacterAlias,
                          CharacterRelation, Dialogue, EMOTIONS, EpisodeScreenplay,
-                         Scene, StoryboardOutline,
+                         Relationship, Scene, StoryboardOutline, World,
                          StoryboardOutlineShot, extract_json, normalize_screenplay_json_shape,
                          schema_errors)
 from app.validators import (ending_hook_is_grounded,
@@ -4657,190 +4657,314 @@ async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
     return cleaned
 
 
+BIBLE_DETAIL_EVIDENCE_MAX_CHARS = 12000
+BIBLE_DETAIL_EVIDENCE_MAX_SEGMENTS = 12
+BIBLE_DETAIL_TIMEOUT_S = 90.0
+BIBLE_DETAIL_MAX_ATTEMPTS = 2
+BIBLE_DETAIL_MAX_TOKENS = 4096
+
+
+class _BibleRosterEntry(BaseModel):
+    name: str
+    role: str
+    source_appellations: list[str] = Field(default_factory=list)
+
+
+class _BibleRosterDraft(BaseModel):
+    characters: list[_BibleRosterEntry] = Field(default_factory=list)
+    world: World
+
+
+class _CharacterDetail(BaseModel):
+    appearance_canonical: str
+    personality: str = ""
+    speech_style: str = ""
+    relationships: list[Relationship] = Field(default_factory=list)
+    aliases: list[CharacterAlias] = Field(default_factory=list)
+    source_evidence: list[AppearanceEvidence] = Field(default_factory=list)
+
+
+def _character_detail_evidence_pack(
+    chapters: list[dict], appellations: list[str], *, max_chars: int = BIBLE_DETAIL_EVIDENCE_MAX_CHARS,
+) -> str:
+    """Deterministically retrieve a bounded source dossier for one character."""
+    anchors = [value.strip() for value in appellations if value and value.strip()]
+    selected: list[str] = []
+    seen: set[tuple[int, str]] = set()
+    for chapter in chapters:
+        content = (chapter.get("content") or "").strip()
+        if not content:
+            continue
+        try:
+            chapter_idx = int(chapter.get("idx"))
+        except (TypeError, ValueError):
+            continue
+        for segment in index_source_segments(content, max_chars=800):
+            text = segment.text.strip()
+            if not text or not any(anchor in text for anchor in anchors):
+                continue
+            key = (chapter_idx, text)
+            if key in seen:
+                continue
+            block = f"【第{chapter_idx}章·证据】\n{text}"
+            if sum(len(item) for item in selected) + len(block) > max_chars:
+                return "\n\n".join(selected)
+            selected.append(block)
+            seen.add(key)
+            if len(selected) >= BIBLE_DETAIL_EVIDENCE_MAX_SEGMENTS:
+                return "\n\n".join(selected)
+    if selected:
+        return "\n\n".join(selected)
+    # No lexical hit: bounded fallback only, never the 60K source corpus.
+    for chapter in chapters[:3]:
+        content = (chapter.get("content") or "").strip()
+        if not content:
+            continue
+        block = f"【第{chapter.get('idx', '?')}章·有限背景】\n{content[:1200]}"
+        if sum(len(item) for item in selected) + len(block) > max_chars:
+            break
+        selected.append(block)
+    return "\n\n".join(selected)
+
+
+def _validate_bible_roster(draft: _BibleRosterDraft) -> list[str]:
+    names = [(item.name or "").strip() for item in draft.characters]
+    errors: list[str] = []
+    if not 1 <= len(names) <= 20:
+        errors.append(f"characters 数量 {len(names)}，要求 1~20 个")
+    if any(not name for name in names):
+        errors.append("characters.name 不能为空")
+    if len(names) != len(set(names)):
+        errors.append("characters.name 存在重复")
+    if getattr(draft.world, "visual_style_canonical", None) is None:
+        errors.append("world.visual_style_canonical 缺失")
+    return errors
+
+
+async def _generate_character_detail(
+    entry: _BibleRosterEntry,
+    *,
+    roster_names: list[str],
+    evidence_pack: str,
+    style: str,
+    chapters_by_idx: dict[int, str],
+    project_id: str | None,
+) -> Character | None:
+    from app.refs import PRODUCTION_APPEARANCE_MAX_CHARS, PRODUCTION_APPEARANCE_MIN_CHARS
+
+    base_pack = evidence_pack[:BIBLE_DETAIL_EVIDENCE_MAX_CHARS]
+    last_error = ""
+    for attempt in range(1, BIBLE_DETAIL_MAX_ATTEMPTS + 1):
+        pack = base_pack if attempt == 1 else base_pack[: max(2000, len(base_pack) // 2)]
+        prompt = f"""任务：只为一个已确认角色生成角色详情。角色名字与角色类型已经由上游锁定，不得更改。
+目标角色：{entry.name}
+角色类型：{entry.role}
+原文称呼：{'、'.join(entry.source_appellations) or entry.name}
+完整角色名单（relationships.to 只能从这里选择）：{'、'.join(roster_names)}
+统一画风：{style}
+
+要求：appearance_canonical {PRODUCTION_APPEARANCE_MIN_CHARS}~{PRODUCTION_APPEARANCE_MAX_CHARS} 字；speech_style 15~30 字；只写该角色；不确定的关系、别名、标志性特征证据留空。source_evidence 引句必须不超过 40 字且逐字来自证据包。
+
+该角色的小证据包（不是全书）：
+{pack}
+
+输出 JSON Schema：
+{{"appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "aliases": [{{"text": str, "name_kind": str, "evidence_chapter_index": int, "evidence_quote": str}}], "source_evidence": [{{"evidence_chapter_index": int, "evidence_quote": str}}]}}"""
+        started = time.time()
+        try:
+            raw = await asyncio.wait_for(
+                model_gateway.chat(
+                    [{"role": "system", "content": SYSTEM_PREFIX}, {"role": "user", "content": prompt}],
+                    temperature=0.35 if attempt == 1 else 0.15,
+                    max_tokens=BIBLE_DETAIL_MAX_TOKENS,
+                    call_meta={
+                        "stage": "角色详情生成",
+                        "stage_key": "character_bible_detail",
+                        "call_role": "stage_generate" if attempt == 1 else "stage_repair",
+                        "call_role_label": "单角色详情",
+                        "expected_json": True,
+                        "character_name": entry.name,
+                        "attempt": attempt,
+                        "input_chars": len(pack),
+                        "project_id": project_id,
+                    },
+                ),
+                timeout=BIBLE_DETAIL_TIMEOUT_S,
+            )
+            detail = _CharacterDetail.model_validate(extract_json(raw))
+            character = Character(
+                name=entry.name,
+                role=entry.role,
+                appearance_canonical=detail.appearance_canonical,
+                personality=detail.personality,
+                speech_style=detail.speech_style,
+                relationships=detail.relationships,
+                aliases=detail.aliases,
+                source_evidence=detail.source_evidence,
+            )
+            if not PRODUCTION_APPEARANCE_MIN_CHARS <= len(character.appearance_canonical) <= PRODUCTION_APPEARANCE_MAX_CHARS:
+                raise ValueError("appearance_canonical 长度越界")
+            character.relationships = [item for item in character.relationships if item.to in roster_names]
+            character.source_evidence = [
+                item for item in character.source_evidence
+                if _appearance_evidence_verified(
+                    chapters_by_idx, {entry.name}, item.evidence_chapter_index, item.evidence_quote,
+                )
+            ]
+            log_provider_call(
+                "character_bible_detail", config.MODEL_TEXT, "OK", None,
+                int((time.time() - started) * 1000),
+                meta={"character_name": entry.name, "attempt": attempt, "input_chars": len(pack)},
+            )
+            return character
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - only this character retries
+            last_error = str(exc)
+            log_provider_call(
+                "character_bible_detail", config.MODEL_TEXT,
+                "TIMEOUT" if isinstance(exc, TimeoutError) else "FAILED", None,
+                int((time.time() - started) * 1000),
+                meta={"character_name": entry.name, "attempt": attempt, "input_chars": len(pack), "error": last_error[:300]},
+            )
+    return None
+
+
+async def _generate_character_detail_batch(
+    entries: list[_BibleRosterEntry], chapters: list[dict], *, style: str,
+    chapters_by_idx: dict[int, str], project_id: str | None,
+) -> list[Character]:
+    roster_names = [entry.name for entry in entries]
+    tasks = [asyncio.create_task(_generate_character_detail(
+        entry,
+        roster_names=roster_names,
+        evidence_pack=_character_detail_evidence_pack(
+            chapters, [entry.name, *entry.source_appellations]
+        ),
+        style=style,
+        chapters_by_idx=chapters_by_idx,
+        project_id=project_id,
+    )) for entry in entries]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    characters: list[Character] = []
+    for entry, result in zip(entries, results, strict=True):
+        if isinstance(result, BaseException) or result is None:
+            continue
+        characters.append(result)
+    return characters
+
+
 async def generate_bible(chapters: list[dict], feedback: str = "", previous_bible: dict | None = None,
                          project_id: str | None = None,
                          visual_style_prompt: str | None = None) -> Bible:
-    # 必须在渲染源文本**和**统计必收名单之前净化，两者都以正文为准。
+    """Generate a small roster first, then fan out bounded per-character requests."""
     chapters = await _chapters_without_paratext(chapters)
     chapters_text = _render_bible_source(chapters, head_chapters=BIBLE_HEAD_CHAPTERS)
-    # 外观标志性特征证据核验用的全书原文查找表（未经预算截断），下方
-    # validate_authoritative_bible 与 _supplement_bible_characters 共用同一份。
     chapters_by_idx = _chapters_by_idx(chapters)
     must_cover = await _recurring_character_names(chapters, project_id=project_id)
-    must_cover_part = ""
-    if must_cover:
-        must_cover_lines = [
-            (
-                f'{formal_name}（原文常用称呼"{appellation}"，已核验在场证据 {count} 条）'
-                if formal_name else
-                f"{appellation}（已核验在场证据 {count} 条）"
-            )
-            for appellation, formal_name, count in must_cover
-        ]
-        must_cover_part = f"""
-【必收角色名单】（后端已对每个候选人物的在场证据逐条核验：结构闸核对引句是否逐字命中原文，独立模型裁决闸核对这句话是不是本人真的在场而不是被提及/回忆/背景交代；核验通过的在场证据条数达到 {BIBLE_RECURRING_MIN_ONSTAGE_QUOTES} 条以上才会出现在这份名单里，必须全部收录）：
-{'、'.join(must_cover_lines)}
 
-执行方式：
-- 名单里标了"原文常用称呼『XX』"的条目，character.name 用括号外给出的正式姓名，并按规则 5 把括号里那个原文常用称呼登记为一条 aliases；没有标注的条目，character.name 直接用给出的写法，不需要另外申报别名。
-- 名单之外的重要角色仍然可以补充；总数以覆盖名单为准，不要为了写得短就删掉名单里的人。
-- 唯一例外：名单里某个名字如果其实不是人物（是宗门、地名或法宝名），跳过它，不要硬编成角色。
-"""
-    previous_part = ""
-    if previous_bible:
-        names = "、".join(
-            c.get("name", "") for c in previous_bible.get("characters", []) if c.get("name")
-        )
-        style = (previous_bible.get("world") or {}).get("visual_style_canonical", "")
-        previous_part = f"\n当前人物谱摘要（用于对照返工，不可直接照抄错误）：\n已收录角色：{names or '无'}\n当前画风：{style or '无'}\n"
-    feedback_part = ""
-    if feedback.strip():
-        feedback_part = f"""
-人工打回重生要求（最高优先级）：
-{feedback.strip()}
+    must_cover_lines = [
+        f"{formal or appellation}（原文常用称呼：{appellation}）"
+        for appellation, formal, _count in must_cover
+    ]
+    previous_names = [
+        item.get("name", "") for item in (previous_bible or {}).get("characters", [])
+        if item.get("name")
+    ]
+    forced_style = visual_style_prompt or ""
+    roster_prompt = f"""任务：只确定人物谱的最终角色名单、每个角色类型和世界观；不要生成外观、性格、台词风格、关系或证据。
 
-执行方式：
-- 如果用户点名遗漏人物，必须回到原文中查找并收录；受角色总数上限影响时，删除更边缘的角色也要保留用户点名人物。
-- 如果用户指出身份、关系、外观或称谓错误，必须按要求修正，并保持后续 relationships 一致。
-- 不要把同一人物的外号、尊称、简称拆成多个角色；统一为原文最稳定的正式姓名。
-"""
-    visual_style_part = ""
-    if visual_style_prompt:
-        visual_style_part = f"""
-统一画风（最高优先级，必须逐字写入 world.visual_style_canonical）：
-{visual_style_prompt}
-
-执行方式：
-- 不得改写、扩写、缩写或替换该统一画风提示词。
-- 角色外观、场景、定妆照和后续视频提示词都必须服从该统一画风。
-"""
-    if visual_style_prompt:
-        # 本次已提供统一画风提示词：下方 world.visual_style_canonical 最终必然逐字
-        # 等于 visual_style_prompt（后端强制覆盖，见 validate_authoritative_bible），
-        # 模型这里自己构思的版本不会被采用。此时不能再要求模型"必须是非真人风格"——
-        # 用户可能选中的正是真人摄影风预设，同一份提示词里同时说"必须逐字保留统一画风"
-        # 又说"严禁真人风格描述"是自相矛盾指令，会污染模型对其它字段（如
-        # appearance_canonical）的语气判断。
-        visual_style_rule = (
-            "3. visual_style_canonical：本次已提供统一画风提示词（见下文最高优先级指令），"
-            "直接原样理解即可，不需要自己另行构思风格描述——这个字段最终由后端逐字写入该"
-            "提示词，你在这里的输出不会被采用。"
-        )
-    else:
-        visual_style_rule = (
-            "3. visual_style_canonical：25~40 字的全局画风串，包含 美术风格/光线/色调，"
-            "适配竖屏漫剧，必须依据本书题材定制。【硬性约束】必须是 CG/动画/漫画/插画类的"
-            "非真人风格（如 3D 渲染、3D 写实 CG、2D 动画、动态漫画、厚涂插画、国漫风等，"
-            "写实质感/照片级/胶片颗粒等氛围词可以保留），但严禁\"真人实拍/真人出镜/实拍摄影\""
-            "这类真人风格描述（否则后续 Seedance 视频接口会因疑似真人而报错 "
-            "InputImageSensitiveContentDetected）。核心是画面为 CG/动画渲染而非真人拍摄。"
-        )
-    prompt = f"""任务：从小说文本中提取角色圣经与世界观，用于后续 AI 视频生成的一致性控制。
-
-要求：
-1. 收录所有出场 2 次以上或明显重要的角色；【必收角色名单】里的人一个都不能少，其余按重要性补足，总数不超过 20 个。
-2. appearance_canonical 是该角色的"固定外观锚点串"：40~60 字，只写常规完整着装、中性
-   站姿下可直接看见并能跨镜稳定复现的静态形态：五官、发型、体型、外层服装、可见配饰或
-   面部标记。不写性格、欲望、气质、眼神行为、对他人的注视方式，不得写裸体、内衣、私密
-   身体部位或必须暴露身体才能看见的特征。
-   写作分两层：
-   - 通用形态（性别年龄感/发型发色/服装款式与颜色）：原文没有直接描写时，允许你按题材、
-     身份、场景合理设定一个具体、可跨镜复现的写法（例如"十五六岁""粗麻杂役衫"），这是
-     具体化不是编造事实，不需要举证。
-   - 标志性特征（伤疤、体型极端值、面部标记、习惯动作留下的可见痕迹等）：只有原文对**这个
-     角色本人**确实写过这样的描写，才写这一条，且必须逐字取用原文说法；原文没有这类描写
-     时，appearance_canonical 到通用形态为止，把剩余字数用于把通用形态写得更具体（例如
-     补充材质、颜色细节），不要为了凑一个"标志性"而编造。判断"是不是这个角色本人"时要
-     小心：同一段落里描写"另一个人""其余几人""身边的人"这类指代对象的内容，不属于这个
-     角色本人，不能借用到他身上。
-   - source_evidence：数组，只用来给"标志性特征"这一层举证（通用形态不需要）。每条给
-     evidence_chapter_index（原文分块【】块头里的章节序号）与 evidence_quote（支撑该
-     特征的原文逐字短句，控制在 40 字以内、必须原样连续照抄、不得跨句拼接或用省略号
-     连接多处），且这句引文里必须能直接读出是在描写这个角色本人（角色的正式姓名或已
-     确认别名要出现在这同一句短引文里，不是出现在原文的其他地方）。原文没有可举证的
-     标志性特征时，source_evidence 就是空数组——这是诚实的默认值，不会因此被拒绝。
-{visual_style_rule}
-4. speech_style 用于后续台词写作：句长习惯/口头禅/敬语习惯等，15~30 字。
-5. name 必须互不重复且取原文最稳定的正式姓名；同一人物在原文中出现的其它别名/外号/尊称/
-   代称（包括真名揭晓前的描述性代称，如"银色长袍女子"）不要拆成多个角色，而是逐条列入
-   该角色的 aliases：每条给 text（原文逐字写法）、name_kind（personal_name=真名/
-   honorific=尊称/referential=代称，按语境判断）、evidence_chapter_index（该别名出现的
-   证据所在章节序号，取原文分块【】块头里的数字；如果看到的分块标题不是数字、无法确定
-   准确章节序号，就不要申报这条别名——注意这个序号不是该别名第一次出现的章节，而是该
-   别名与角色正式姓名（或本角色另一条已确认别名）同时出现的那一章；很多描述性代称最早
-   出现时全书还没交代真名，那一章通不过共现核验，要在全书范围内找到两者共现的章节再
-   申报，一旦登记成功该别名会覆盖它在全书的所有出现）、evidence_quote（该共现章节原文中
-   的逐字引句，必须原样照抄，一个字都不能改，也不要自己在引句前后加引号包裹——原文本来
-   有没有引号就照抄有没有，不要额外添加；且这句引文所在章节里必须能同时找到该角色的
-   正式姓名或本角色的另一条别名——找不到这种共现就不要申报，后端会逐字核对，不满足条件
-   的申报一律不会登记）。
-   不确定就不要申报别名——宁可漏报，绝不能编造或近似改写引句。
-6. relationships 只描述【已收录角色之间】的关系：relationships.to 必须逐字等于本次 characters 里某个角色的 name，不要指向未收录的人物（否则代码校验会因「关系指向未知角色」退回重写）。与圈外人物的关系请省略，或并入 personality 文字描述。
+规则：
+1. 收录所有出场 2 次以上或明显重要的角色，总数不超过 20。
+2. name 使用原文最稳定的正式姓名；source_appellations 收录原文中用于检索该角色的小量精确称呼。
+3. 同一人物的外号、尊称、简称不得拆成多人。
+4. 必收角色不得遗漏：{'、'.join(must_cover_lines) or '无'}。
+5. 用户反馈：{feedback.strip() or '无'}。
+6. 历史人物谱角色仅供返工对照：{'、'.join(previous_names) or '无'}。
+7. visual_style_canonical：{forced_style or '按题材生成 25~40 字的统一 CG/动画/漫画/插画画风'}。
 
 小说文本：
-{chapters_text}{previous_part}{feedback_part}{visual_style_part}{must_cover_part}
+{chapters_text}
 
 输出 JSON Schema：
-{{"characters": [{{"name": str, "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "aliases": [{{"text": str, "name_kind": "personal_name|honorific|referential", "evidence_chapter_index": int, "evidence_quote": str}}]}}], "world": {{"era": str, "genre": str, "visual_style_canonical": str}}}}"""
-    loop = AgentLoop(
-        stage_key="character_bible",
-        contract_key="character_bible",
-        goal="从原文章节生成来源可追溯、视觉锚点完整的人物圣经",
+{{"characters": [{{"name": str, "role": "主角|重要配角|反派", "source_appellations": [str]}}], "world": {{"era": str, "genre": str, "visual_style_canonical": str}}}}"""
+    roster_loop = AgentLoop(
+        stage_key="character_bible_roster",
+        contract_key="character_bible_roster",
+        goal="确定人物谱角色名单与统一世界观",
         scope_type="project",
         scope_id=project_id or hashlib.sha256(chapters_text.encode("utf-8")).hexdigest()[:16],
-        artifact_type="character_bible",
+        artifact_type="character_bible_roster",
         policy=AgentLoopPolicy(
-            max_iterations=min(max(int(get_setting("max_repair_attempts") or 4), 1), 4),
+            max_iterations=2,
             stall_rounds=2,
             min_quality_gain=0.03,
-            no_gain_rounds=2,
+            no_gain_rounds=1,
             allow_warning_candidate=False,
             repair_all_blockers=True,
         ),
     )
 
-    def validate_authoritative_bible(candidate: Bible) -> list[str]:
-        # The forced project style is authority, not a post-processing display
-        # override. Apply it before AgentLoop records the accepted Artifact.
+    def validate_roster(candidate: _BibleRosterDraft) -> list[str]:
         if visual_style_prompt:
             candidate.world.visual_style_canonical = visual_style_prompt
-        errors = validate_bible(candidate)
-        errors += _validate_appearance_evidence(candidate, chapters_by_idx)
-        return errors
+        return _validate_bible_roster(candidate)
 
-    bible = await _run_with_agent_loop(
-        "角色圣经", "character_bible", prompt, Bible, validate_authoritative_bible,
-        loop=loop, temperature=0.5, max_tokens=16384,
-        # 默认的 3000 字任务摘要会把小说正文整段截掉：一旦首轮候选未过校验，
-        # 后续每一轮"定向修复"都只看得到规则和上一版候选，模型只能照抄开头
-        # 那几段里的人，人物谱越修越少。人物谱的任务本体就是原文，不能截。
-        repair_user_prompt_limit=None,
+    roster = await _run_with_agent_loop(
+        "人物名单", "character_bible_roster", roster_prompt, _BibleRosterDraft,
+        validate_roster, loop=roster_loop, temperature=0.3, max_tokens=4096,
+        repair_user_prompt_limit=16000, repair_candidate_limit=5000,
     )
     if visual_style_prompt:
-        bible.world.visual_style_canonical = visual_style_prompt
-    # 规则 5 要求模型随人物谱一并申报别名，但那只是申报——落库前必须过与回填函数
-    # 同一套代码核验（逐字命中 + 章节内共现 + 桥接章原文独立裁决），不满足就丢弃，
-    # 不阻断人物谱本身。
+        roster.world.visual_style_canonical = visual_style_prompt
+    style = roster.world.visual_style_canonical
+    characters = await _generate_character_detail_batch(
+        roster.characters,
+        chapters,
+        style=style,
+        chapters_by_idx=chapters_by_idx,
+        project_id=project_id,
+    )
+    bible = Bible(world=roster.world, characters=characters)
     await _verify_character_aliases_in_place(bible, chapters, project_id=project_id)
+
     missing = [
         item for item in must_cover
         if not _bible_covers_name(bible, {value for value in (item[0], item[1]) if value})
     ]
     if missing:
-        added = await _supplement_bible_characters(
-            bible, missing, chapters_text,
-            chapters_by_idx=chapters_by_idx, visual_style_prompt=visual_style_prompt,
+        # Reuse the same single-character primitive; no batch/full-source supplement request.
+        existing_names = {character.name for character in bible.characters}
+        entries = [
+            _BibleRosterEntry(
+                name=formal or appellation,
+                role="重要配角",
+                source_appellations=[appellation],
+            )
+            for appellation, formal, _count in missing
+            if (formal or appellation) not in existing_names
+        ]
+        supplemented = await _generate_character_detail_batch(
+            entries,
+            chapters,
+            style=style,
+            chapters_by_idx=chapters_by_idx,
             project_id=project_id,
         )
-        log_provider_call(
-            "character_bible_coverage", config.MODEL_TEXT,
-            "OK" if len(added) == len(missing) else "PARTIAL", None, 0,
-            meta={
-                "must_cover": [appellation for appellation, _, _ in must_cover],
-                "missing": [appellation for appellation, _, _ in missing],
-                "supplemented": added,
-            },
-        )
+        bible.characters.extend(supplemented)
+        if supplemented:
+            await _verify_character_aliases_for_subset(
+                bible, supplemented, chapters_by_idx, project_id=project_id,
+            )
+
+    valid_names = {character.name for character in bible.characters}
+    for character in bible.characters:
+        character.relationships = [
+            relation for relation in character.relationships if relation.to in valid_names
+        ]
+    errors = validate_bible(bible) + _validate_appearance_evidence(bible, chapters_by_idx)
+    if errors:
+        raise StageError("角色圣经", errors, exit_reason="local_detail_blockers")
     return bible
 
 

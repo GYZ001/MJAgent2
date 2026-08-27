@@ -4,6 +4,15 @@ from app.harness.types import StageContract
 
 
 _CONTRACTS: dict[str, StageContract] = {
+    "character_bible_roster": StageContract(
+        key="character_bible_roster",
+        version="1.0.0",
+        input_types=["chapter_set"],
+        output_type="character_bible_roster",
+        invariants=["character names are unique", "world style is non-empty"],
+        max_iterations=2,
+        requires_human_gate=False,
+    ),
     "character_bible": StageContract(
         key="character_bible",
         version="1.0.0",
