@@ -82,7 +82,7 @@ from app.schemas import (AppearanceEvidence, Bible, Character, CharacterAffiliat
                          CharacterRelation, Dialogue, EMOTIONS, EpisodeScreenplay,
                          Relationship, Scene, StoryboardOutline, World,
                          StoryboardOutlineShot, extract_json, normalize_screenplay_json_shape,
-                         schema_errors)
+                         schema_errors, _repair_json_key_after_colon)
 from app.validators import (ending_hook_is_grounded,
                             ending_hook_grounding_report,
                             key_line_catalog,
@@ -5056,7 +5056,7 @@ BIBLE_DETAIL_EVIDENCE_MAX_CHARS = 12000
 BIBLE_DETAIL_EVIDENCE_MAX_SEGMENTS = 12
 BIBLE_ROSTER_INPUT_MAX_CHARS = 16000
 BIBLE_DETAIL_TIMEOUT_S = 90.0
-BIBLE_DETAIL_MAX_ATTEMPTS = 2
+BIBLE_DETAIL_MAX_ATTEMPTS = 3
 BIBLE_DETAIL_MAX_TOKENS = 4096
 # 单角色详情比点名/裁决长，20s 首字会把已发出的成功流误杀；60s 仍切断 0 字节空等。
 BIBLE_DETAIL_FIRST_TOKEN_TIMEOUT_S = 60.0
@@ -5114,6 +5114,42 @@ def _sanitize_character_detail_payload(payload: dict) -> dict:
             and str(item.get("evidence_quote") or "").strip()
         ]
     return data
+
+
+_CHARACTER_DETAIL_STRING_FIELDS = (
+    "appearance_canonical",
+    "period_costume_canonical",
+    "personality",
+    "speech_style",
+)
+
+
+def _repair_character_detail_json(text: str) -> str:
+    """Restore a dropped or split key after a completed string field.
+
+    Production (provider_calls 14363 / 孟浩 attempt 2): appearance_canonical closed,
+    next key opened, then the model wrote `: "身着...` with the field name missing.
+    Insert the next `_CharacterDetail` string field. Key-after-colon splits are
+    repaired first so a surviving identifier is not rewritten as a missing key.
+    """
+    repaired = _repair_json_key_after_colon(text)
+    for index, field in enumerate(_CHARACTER_DETAIL_STRING_FIELDS[:-1]):
+        nxt = _CHARACTER_DETAIL_STRING_FIELDS[index + 1]
+        pattern = rf'("{re.escape(field)}"\s*:\s*"(?:\\.|[^"\\])*")\s*,\s*"\s*:\s*"'
+        repaired = re.sub(pattern, rf'\1,\n    "{nxt}": "', repaired, count=1)
+    return repaired
+
+
+def _parse_character_detail_payload(raw: str) -> dict:
+    """Extract and sanitize one character-detail object; repair known JSON splits."""
+    try:
+        payload = extract_json(raw)
+    except ValueError:
+        repaired = _repair_character_detail_json(raw)
+        if repaired == raw:
+            raise
+        payload = extract_json(repaired)
+    return _sanitize_character_detail_payload(payload)
 
 
 def _character_stub_from_roster(entry: _BibleRosterEntry) -> Character:
@@ -5362,7 +5398,7 @@ async def _generate_character_detail(
                 timeout=BIBLE_DETAIL_TIMEOUT_S,
             )
             detail = _CharacterDetail.model_validate(
-                _sanitize_character_detail_payload(extract_json(raw))
+                _parse_character_detail_payload(raw)
             )
             character = Character(
                 name=entry.name,

@@ -37,7 +37,8 @@ from app.novel_formats import (
 from app.orchestration.engine import WorkflowRecorder, fingerprint
 from app.planning import chapter_preview
 from app.schemas import (Bible, EpisodeScreenplay, Shot, Storyboard,
-                         StoryboardOutline, StoryboardOutlineShot, schema_errors)
+                         StoryboardOutline, StoryboardOutlineShot, schema_errors,
+                         character_is_portrait_eligible)
 from app.stages import (SCREENPLAY_SOURCE_BUDGET_CHARS, StageError, generate_bible,
                         generate_screenplay)
 from app.validators import (relieve_spoken_overflow,

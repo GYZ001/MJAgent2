@@ -223,6 +223,19 @@ class Character(BaseModel):
     source_evidence: list[AppearanceEvidence] = Field(default_factory=list)
 
 
+def character_is_portrait_eligible(character: Character | dict) -> bool:
+    """自动定妆资格：有名字、明确够格、外观已落地。缺字段时保持旧人物谱原行为。"""
+    if isinstance(character, dict):
+        name = character.get("name")
+        eligible = character.get("portrait_eligible", True)
+        status = character.get("appearance_status", "grounded")
+    else:
+        name = character.name
+        eligible = character.portrait_eligible
+        status = character.appearance_status
+    return bool(str(name or "").strip()) and bool(eligible) and status == "grounded"
+
+
 class World(BaseModel):
     era: str = ""
     genre: str = ""
@@ -2159,6 +2172,21 @@ def _remove_unmatched_root_level_closer(
     return text
 
 
+_JSON_KEY_AFTER_COLON_RE = re.compile(
+    r',(\s*)"((?:\\[nrt]|\s)*):((?:\\[nrt]|\s)*)"([A-Za-z_][A-Za-z0-9_]*)"(\s*),(\s*)"',
+)
+
+
+def _repair_json_key_after_colon(text: str) -> str:
+    """Repair `, "\\n    :"field_name", "value"` where the key was split around the colon.
+
+    Production (provider_calls 14348 / character_bible_detail 孟浩 attempt 1): the
+    model closed appearance_canonical, opened the next key, then wrote
+    `:"period_costume_canonical",` instead of `period_costume_canonical":`.
+    """
+    return _JSON_KEY_AFTER_COLON_RE.sub(r',\n    "\4": "', text)
+
+
 def _escape_json_control_chars_in_strings(text: str) -> str:
     """Escape raw control characters only while inside JSON strings."""
     replacements = {
@@ -2410,6 +2438,7 @@ def extract_json(
             cleaned[start:],
             repair_singleton_string_object_fields,
         )
+        candidate = _repair_json_key_after_colon(candidate)
         if repair_unescaped_inner_quotes:
             candidate = _repair_fullwidth_closing_quote(candidate)
         candidate = _escape_json_control_chars_in_strings(candidate)
@@ -2444,6 +2473,16 @@ def extract_json(
                     first_error = candidate_error
                     break
             repaired = _repair_structural_json_delimiters(candidate)
+            if repaired != candidate:
+                try:
+                    obj, _ = json.JSONDecoder().raw_decode(repaired)
+                except json.JSONDecodeError as repaired_exc:
+                    candidate_error = repaired_exc
+                else:
+                    if isinstance(obj, dict):
+                        return obj
+                candidate = repaired
+            repaired = _repair_json_key_after_colon(candidate)
             if repaired != candidate:
                 try:
                     obj, _ = json.JSONDecoder().raw_decode(repaired)

@@ -396,3 +396,37 @@ def test_classify_dispatch_follows_inheritance_not_just_exact_class_name() -> No
 
     exc = SceneAssetQualityError("场景状态变化版本未能创建：卧室")
     assert errors.classify(exc) == ("quality_gate", "QA")
+
+
+# provider_calls 14348 / character_bible_detail 孟浩 attempt 1：键名被拆到冒号后面。
+_MENGHAO_DETAIL_KEY_AFTER_COLON = '''{
+    "appearance_canonical": "眉眼清秀，气质坚韧，面有清苦感，眼底藏着对前路的思索，皮肤是常年读书的偏白质感，身形偏瘦", "
+    :"period_costume_canonical", "身着青布书生直裰，棉麻面料，穿黑布皂靴，束发用木簪，禁用现代元素、绫罗绸缎等贵价面料",
+    "personality": "聪颖坚韧，早年双亲失踪后独自谋生，行事踏实，偶尔会自我自嘲，面对困境总能很快振作寻出路",
+    "speech_style": "谈吐直白坦诚，偶尔带自嘲，语气平实，没有文人的酸腐气",
+    "relationships": [],
+    "aliases": [],
+    "source_evidence": []
+}'''
+
+# provider_calls 14363 / 孟浩 attempt 2：键名整段丢失，只剩冒号和服饰值。
+_MENGHAO_DETAIL_MISSING_KEY = '''{
+    "appearance_canonical": "面容清俊，眉眼带着少年人的朝气，眼底藏着历经贫寒的沉静，肤色偏白净，身形挺拔，气质坚韧聪慧", "
+    \t: "身着宗门制式青灰色交领短褐，粗棉面料，脚蹬黑布短靴，束发用木质发簪，禁用现代布料、金属拉链等元素",
+    "personality": "聪颖坚韧，早年双亲失踪仍独自生活，遇事乐观坚定，偶有迷茫但能快速调整心态，性格务实",
+    "speech_style": "语气平实，偶尔带自嘲，言辞恳切，遇事冷静果决",
+    "relationships": [],
+    "aliases": [],
+    "source_evidence": []
+}'''
+
+
+def test_extract_json_repairs_key_split_after_colon() -> None:
+    obj = extract_json(_MENGHAO_DETAIL_KEY_AFTER_COLON)
+    assert obj["period_costume_canonical"].startswith("身着青布书生直裰")
+    assert "身形偏瘦" in obj["appearance_canonical"]
+
+
+def test_extract_json_does_not_guess_a_dropped_field_name() -> None:
+    with pytest.raises(ValueError, match="JSON 解析失败"):
+        extract_json(_MENGHAO_DETAIL_MISSING_KEY)

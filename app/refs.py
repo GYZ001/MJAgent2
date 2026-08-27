@@ -18,7 +18,7 @@ from app.atomic_io import atomic_write_bytes
 from app.db import get_conn, new_id
 from app.evidence.media import record_reference_asset
 from app.errors import ContentGenerationError
-from app.schemas import Bible
+from app.schemas import Bible, character_is_portrait_eligible
 
 
 def _safe_name(name: str) -> str:
@@ -248,8 +248,7 @@ async def generate_refs(
         return {"generated": [], "gate_retry_exhausted": False, "warnings": ["暂无具备定妆资格的角色"]}
     targets = [
         c for c in bible.characters
-        if c.portrait_eligible
-        and c.appearance_status == "grounded"
+        if character_is_portrait_eligible(c)
         and ((not selected or c.name in selected) and (only_character is None or c.name == only_character))
     ]
     if not targets:

@@ -62,8 +62,9 @@ export function matchCharacterFilters(
   if (filters.portrait === 'yes' && !meta.hasPortrait) return false
   if (filters.portrait === 'no' && meta.hasPortrait) return false
   if (filters.qa && meta.availability !== filters.qa) return false
-  if (filters.missing === 'yes' && meta.availability !== 'missing' && meta.availability !== 'failed') return false
-  if (filters.missing === 'no' && (meta.availability === 'missing' || meta.availability === 'failed')) return false
+  const gapStates = new Set(['missing', 'failed', 'blocked'])
+  if (filters.missing === 'yes' && !gapStates.has(meta.availability)) return false
+  if (filters.missing === 'no' && gapStates.has(meta.availability)) return false
   if (filters.firstAppearance === 'initial' && (meta.firstAppearance ?? 1) > 1) return false
   if (filters.firstAppearance === 'later' && (meta.firstAppearance ?? 1) <= 1) return false
   if (filters.version === 'current' && meta.hasHistory) return false
@@ -158,6 +159,8 @@ export default function CharacterFilters({
               <option value="failed">暂不可用</option>
               <option value="unverified">待质检</option>
               <option value="missing">未出图</option>
+              <option value="deferred">暂缓定妆</option>
+              <option value="blocked">外观未通过</option>
               <option value="generating">生成或质检中</option>
             </select>
           </label>

@@ -730,6 +730,8 @@ export const api = {
       ready: number;
       failed: number;
       missing: number;
+      deferred?: number;
+      blocked?: number;
       refs_status?: string;
       refs_target?: string | null;
       items: Array<{
@@ -738,6 +740,7 @@ export const api = {
         missing_views?: string[];
         current?: boolean;
         pack_status?: string;
+        reason?: string;
       }>;
       updated_at?: number;
     }>,
@@ -2524,6 +2527,9 @@ export interface Character {
   portrait_prompt_override?: string | null;
   portrait_prompt_effective?: string;
   portraits?: Portrait[];
+  presence_status?: "onstage" | "mentioned_only" | "unresolved";
+  portrait_eligible?: boolean;
+  appearance_status?: "grounded" | "insufficient_evidence" | "deferred";
 }
 
 export interface ChapterContent {

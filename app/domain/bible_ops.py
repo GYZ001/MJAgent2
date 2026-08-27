@@ -1318,12 +1318,11 @@ def compute_refs_cost_precheck(
         raise HTTPException(409, "请先生成角色圣经")
     bible = json.loads(p["bible_json"])
     all_bible_characters = bible.get("characters") or []
-    eligible_by_name = {
-        c.get("name"): c for c in all_bible_characters
-        if c.get("name") and c.get("portrait_eligible", True)
-        and c.get("appearance_status", "grounded") == "grounded"
-    }
-    bible_characters = list(eligible_by_name.values())
+    bible_characters = [
+        c for c in all_bible_characters
+        if character_is_portrait_eligible(c)
+    ]
+    eligible_by_name = {c.get("name"): c for c in bible_characters}
     selected_names = _normalize_character_selection(characters)
     if character and selected_names and character not in selected_names:
         raise HTTPException(422, "character 与 characters 范围不一致")
@@ -1566,14 +1565,36 @@ async def refs_progress(project_id: str):
             "ready": 0,
             "failed": 0,
             "missing": 0,
+            "deferred": 0,
+            "blocked": 0,
             "items": [],
         }
     bible = json.loads(p["bible_json"])
     conn = get_conn()
     items = []
-    ready = failed = missing = 0
+    ready = failed = missing = deferred = blocked = 0
     for c in bible.get("characters") or []:
-        name = c.get("name")
+        name = (c.get("name") or "").strip()
+        if not name:
+            continue
+        if not character_is_portrait_eligible(c):
+            presence = c.get("presence_status") or "onstage"
+            appearance = c.get("appearance_status") or "grounded"
+            if presence == "mentioned_only" or appearance == "deferred":
+                deferred += 1
+                status = "deferred"
+                reason = "仅提及，待真实出场后定妆"
+            else:
+                blocked += 1
+                status = "blocked"
+                reason = "外观依据未通过，当前不自动定妆"
+            items.append({
+                "character": name,
+                "status": status,
+                "reason": reason,
+                "missing_views": [],
+            })
+            continue
         row = conn.execute(
             """SELECT id, pack_status FROM character_portraits
                WHERE project_id=? AND character_name=? AND ep_end IS NULL
@@ -1616,10 +1637,12 @@ async def refs_progress(project_id: str):
         "project_id": project_id,
         "refs_status": effective_refs_status,
         "refs_target": p.get("refs_target"),
-        "total": len(items),
+        "total": ready + failed + missing,
         "ready": ready,
         "failed": failed,
         "missing": missing,
+        "deferred": deferred,
+        "blocked": blocked,
         "items": items,
         "updated_at": now(),
     }
@@ -2711,8 +2734,7 @@ async def _refs_task(
         elif p and p["bible_json"]:
             names = [
                 c["name"] for c in json.loads(p["bible_json"]).get("characters", [])
-                if c.get("name") and c.get("portrait_eligible", True)
-                and c.get("appearance_status", "grounded") == "grounded"
+                if character_is_portrait_eligible(c)
             ]
             only_characters = names
         else:

@@ -423,3 +423,93 @@ def test_adopt_portrait_candidate_accepts_missing_views_as_warning(monkeypatch, 
         assert "missing_required_view=three_quarter" in result["soft_warnings"]
 
     asyncio.run(_run())
+
+
+def _ready_pack(conn: sqlite3.Connection, portrait_id: str, name: str) -> None:
+    conn.execute(
+        "INSERT INTO character_portraits("
+        "id, project_id, character_name, ep_start, ep_end, appearance, prompt, image_path, "
+        "base_portrait_id, bible_version, artifact_id, pack_status, group_qa_json, change_json, created_at"
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            portrait_id, "proj_test", name, 1, None, "黑发少年", "prompt", "/tmp/front.jpg",
+            None, 1, None, "ready", None, None, 1.0,
+        ),
+    )
+    for role in ("front_full", "three_quarter", "profile"):
+        conn.execute(
+            "INSERT INTO character_portrait_views(id,portrait_id,view_role,image_path,status,created_at) "
+            "VALUES(?,?,?,?,'ready',1)",
+            (f"{portrait_id}-{role}", portrait_id, role, "/tmp/front.jpg"),
+        )
+
+
+def test_refs_progress_excludes_ineligible_from_missing(monkeypatch) -> None:
+    conn = _memory_conn()
+    bible = {
+        "world": {"visual_style_canonical": "国风", "era": "古代", "genre": "玄幻"},
+        "characters": [
+            {
+                "name": "甲一",
+                "role": "主角",
+                "appearance_canonical": "黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩，英气逼人",
+                "personality": "坚韧",
+                "speech_style": "沉稳",
+                "relationships": [],
+                "portrait_eligible": True,
+                "appearance_status": "grounded",
+                "presence_status": "onstage",
+            },
+            {
+                "name": "孟浩",
+                "role": "主角",
+                "appearance_canonical": "外观待补全，详情生成未通过校验，当前不自动定妆",
+                "personality": "",
+                "speech_style": "",
+                "relationships": [],
+                "portrait_eligible": False,
+                "appearance_status": "insufficient_evidence",
+                "presence_status": "onstage",
+            },
+            {
+                "name": "王腾飞",
+                "role": "关键伏笔角色",
+                "appearance_canonical": "外观待原文真实出场后补全，当前不自动定妆",
+                "personality": "",
+                "speech_style": "",
+                "relationships": [],
+                "portrait_eligible": False,
+                "appearance_status": "deferred",
+                "presence_status": "mentioned_only",
+            },
+        ],
+        "scenes": [],
+    }
+    conn.execute(
+        "INSERT INTO projects(id, bible_json, bible_version, bible_artifact_id, bible_status, refs_status) "
+        "VALUES('proj_test', ?, 1, 'art_bible_1', 'ready', 'ready')",
+        (json.dumps(bible, ensure_ascii=False),),
+    )
+    _ready_pack(conn, "pack_jia", "甲一")
+    conn.commit()
+    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
+    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+        "SELECT * FROM projects WHERE id='proj_test'"
+    ).fetchone()))
+    monkeypatch.setattr(bible_ops, "_refs_generation_busy", lambda _pid: False)
+
+    import asyncio
+    progress = asyncio.run(bible_ops.refs_progress("proj_test"))
+    assert progress["total"] == 1
+    assert progress["ready"] == 1
+    assert progress["missing"] == 0
+    assert progress["failed"] == 0
+    assert progress["blocked"] == 1
+    assert progress["deferred"] == 1
+    by_status = {item["character"]: item["status"] for item in progress["items"]}
+    assert by_status == {"甲一": "ready", "孟浩": "blocked", "王腾飞": "deferred"}
+
+    quote = bible_ops.compute_refs_cost_precheck("proj_test", resume=True)
+    assert quote["character_count"] == 1
+    assert quote["image_count"] == 0
+    assert quote["scope"] == []

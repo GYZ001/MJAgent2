@@ -61,11 +61,26 @@ type PortraitAvailability =
   | 'failed'
   | 'unverified'
   | 'missing'
+  | 'deferred'
+  | 'blocked'
+
+export function characterIsPortraitEligible(character: Character): boolean {
+  if (!character.name?.trim()) return false
+  if (character.portrait_eligible === false) return false
+  if (character.appearance_status && character.appearance_status !== 'grounded') return false
+  return true
+}
 
 export function portraitAvailability(character: Character, fitting: boolean): PortraitAvailability {
   if (fitting) return 'generating'
   const portrait = currentPortrait(character)
   if (!portrait || (!portrait.image_url && !(portrait.views ?? []).some(v => v.image_url))) {
+    if (!characterIsPortraitEligible(character)) {
+      if (character.presence_status === 'mentioned_only' || character.appearance_status === 'deferred') {
+        return 'deferred'
+      }
+      return 'blocked'
+    }
     return character.ref_image_url ? 'unverified' : 'missing'
   }
   const status = portrait.pack_status
@@ -98,6 +113,8 @@ function availabilityStamp(state: PortraitAvailability): { label: string; color:
     case 'warning': return { label: '已采用 · 质量需复核', color: 'gold' }
     case 'failed': return { label: '暂不可用', color: 'red' }
     case 'missing': return { label: '未出图', color: 'grey' }
+    case 'deferred': return { label: '暂缓定妆', color: 'grey' }
+    case 'blocked': return { label: '外观未通过', color: 'gold' }
     default: return { label: '待质检', color: 'grey' }
   }
 }
@@ -217,8 +234,8 @@ export function bibleStepStatus(project: {
   const isRunning = project.bible_status === 'running' || project.refs_status === 'running'
   if (hasTaskProblem) return 'problem'
   if (isRunning) return 'running'
-  if (states.some(state => state === 'failed' || state === 'missing')) return 'problem'
-  if (states.length > 0 && states.every(state => state === 'passed' || state === 'warning')) return 'done'
+  if (states.some(state => state === 'failed' || state === 'missing' || state === 'blocked')) return 'problem'
+  if (states.length > 0 && states.every(state => state === 'passed' || state === 'warning' || state === 'deferred')) return 'done'
   if (project.bible_status === 'ready' && project.refs_status === 'ready') return 'done'
   return 'idle'
 }
@@ -272,9 +289,16 @@ export function characterCompareImages(character: Character): { src: string; lab
   return images.sort((a, b) => b.ep - a.ep).map(({ src, label }) => ({ src, label }))
 }
 
-function summarizeProgress(progress: RefsProgress | null): string {
+export function summarizeProgress(progress: RefsProgress | null): string {
   if (!progress) return ''
-  return `定妆进度：已完成 ${progress.ready} / ${progress.total}，失败 ${progress.failed}，缺失 ${progress.missing}`
+  const parts = [
+    `定妆进度：已完成 ${progress.ready} / ${progress.total}`,
+    `失败 ${progress.failed}`,
+    `缺失 ${progress.missing}`,
+  ]
+  if (progress.deferred) parts.push(`暂缓 ${progress.deferred}`)
+  if (progress.blocked) parts.push(`外观未通过 ${progress.blocked}`)
+  return parts.join('，')
 }
 
 function progressProblemNames(progress: RefsProgress | null): string[] {
@@ -1162,10 +1186,14 @@ export default function BiblePage() {
             </div>
             {!generating && !!refsProgress.items?.length && (
               <div className="refs-stop-checklist" aria-label="停止后的定妆清单">
-                {(['ready', 'failed', 'missing'] as const).map(status => {
+                {(['ready', 'failed', 'missing', 'deferred', 'blocked'] as const).map(status => {
                   const items = refsProgress.items.filter(item => item.status === status)
                   if (!items.length) return null
-                  const label = status === 'ready' ? '已完成' : status === 'failed' ? '失败' : '缺失'
+                  const label = status === 'ready' ? '已完成'
+                    : status === 'failed' ? '失败'
+                    : status === 'missing' ? '缺失'
+                    : status === 'deferred' ? '暂缓'
+                    : '外观未通过'
                   return (
                     <div key={status}>
                       <b>{label} {items.length}</b>

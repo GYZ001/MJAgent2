@@ -6,6 +6,7 @@ import json
 import pytest
 
 from app import config, errors, stages
+from app.schemas import Character, character_is_portrait_eligible
 
 
 def test_merge_roll_call_candidates_merges_formal_name_and_caps_evidence() -> None:
@@ -93,6 +94,58 @@ async def test_mentioned_only_character_skips_detail_model_and_portrait() -> Non
     assert character.appearance_status == "deferred"
     assert character.portrait_eligible is False
     assert character.source_evidence == []
+
+
+def test_character_is_portrait_eligible_defaults_and_gates() -> None:
+    old = Character(
+        name="甲一",
+        role="主角",
+        appearance_canonical="黑发少年，青色长衫，身形修长，目光坚定，腰系布带",
+    )
+    assert character_is_portrait_eligible(old) is True
+    assert character_is_portrait_eligible({
+        "name": "甲一",
+        "appearance_canonical": "黑发少年",
+    }) is True
+    assert character_is_portrait_eligible({
+        "name": "孟浩",
+        "portrait_eligible": False,
+        "appearance_status": "insufficient_evidence",
+    }) is False
+    assert character_is_portrait_eligible({
+        "name": "王腾飞",
+        "portrait_eligible": False,
+        "appearance_status": "deferred",
+    }) is False
+
+
+def test_parse_character_detail_repairs_production_key_split_and_missing_key() -> None:
+    split_raw = '''{
+    "appearance_canonical": "眉眼清秀，气质坚韧，面有清苦感，眼底藏着对前路的思索，皮肤是常年读书的偏白质感，身形偏瘦", "
+    :"period_costume_canonical", "身着青布书生直裰，棉麻面料，穿黑布皂靴，束发用木簪，禁用现代元素、绫罗绸缎等贵价面料",
+    "personality": "聪颖坚韧",
+    "speech_style": "谈吐直白坦诚，偶尔带自嘲，语气平实",
+    "relationships": [],
+    "aliases": [{"text": "孟才子", "name_kind": "美称", "evidence_chapter_index": null, "evidence_quote": ""}],
+    "source_evidence": []
+}'''
+    missing_raw = '''{
+    "appearance_canonical": "面容清俊，眉眼带着少年人的朝气，眼底藏着历经贫寒的沉静，肤色偏白净，身形挺拔，气质坚韧聪慧", "
+    \t: "身着宗门制式青灰色交领短褐，粗棉面料，脚蹬黑布短靴，束发用木质发簪，禁用现代布料、金属拉链等元素",
+    "personality": "聪颖坚韧",
+    "speech_style": "语气平实，偶尔带自嘲，言辞恳切",
+    "relationships": [],
+    "aliases": [],
+    "source_evidence": []
+}'''
+    split = stages._parse_character_detail_payload(split_raw)
+    assert split["period_costume_canonical"].startswith("身着青布书生直裰")
+    assert split["aliases"] == []
+    stages._CharacterDetail.model_validate(split)
+
+    missing = stages._parse_character_detail_payload(missing_raw)
+    assert missing["period_costume_canonical"].startswith("身着宗门制式青灰色交领短褐")
+    stages._CharacterDetail.model_validate(missing)
 
 
 def test_sanitize_character_detail_drops_aliases_without_chapter_index() -> None:

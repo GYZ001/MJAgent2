@@ -9,6 +9,7 @@ import {
   currentPortraitViews,
   mergeBibleThreeWay,
   portraitAvailability,
+  summarizeProgress,
 } from './BiblePage'
 
 const character = (name: string) => ({ name } as Character)
@@ -83,6 +84,66 @@ describe('人物谱步骤状态', () => {
       bible_status: 'ready',
       refs_status: 'ready',
     })).toBe('done')
+  })
+
+  it('仅提及角色不定妆，不把人物谱步骤标成有问题', () => {
+    const mentioned = {
+      name: '王腾飞',
+      presence_status: 'mentioned_only',
+      portrait_eligible: false,
+      appearance_status: 'deferred',
+    } as Character
+    const passed = {
+      name: '甲一',
+      portraits: [{
+        id: 'current',
+        ep_start: 1,
+        ep_end: null,
+        pack_status: 'ready',
+        image_url: '/front.jpg',
+        views: [
+          { view_role: 'front_full', status: 'ready', image_url: '/front.jpg' },
+          { view_role: 'three_quarter', status: 'ready', image_url: '/three-quarter.jpg' },
+          { view_role: 'profile', status: 'ready', image_url: '/profile.jpg' },
+        ],
+        group_qa: { overall: 0.9, status: 'passed', issues: [], hard_failures: [] },
+      }],
+    } as Character
+    expect(portraitAvailability(mentioned, false)).toBe('deferred')
+    expect(bibleStepStatus({
+      bible: bible([passed, mentioned]),
+      bible_status: 'ready',
+      refs_status: 'ready',
+    })).toBe('done')
+  })
+
+  it('出场角色外观未通过时标成有问题，而不是定妆缺失', () => {
+    const blocked = {
+      name: '孟浩',
+      presence_status: 'onstage',
+      portrait_eligible: false,
+      appearance_status: 'insufficient_evidence',
+    } as Character
+    expect(portraitAvailability(blocked, false)).toBe('blocked')
+    expect(bibleStepStatus({
+      bible: bible([blocked]),
+      bible_status: 'ready',
+      refs_status: 'ready',
+    })).toBe('problem')
+  })
+})
+
+describe('summarizeProgress', () => {
+  it('把暂缓和外观未通过与定妆缺失分开写', () => {
+    expect(summarizeProgress({
+      total: 9,
+      ready: 9,
+      failed: 0,
+      missing: 0,
+      deferred: 5,
+      blocked: 1,
+      items: [],
+    })).toBe('定妆进度：已完成 9 / 9，失败 0，缺失 0，暂缓 5，外观未通过 1')
   })
 })
 
