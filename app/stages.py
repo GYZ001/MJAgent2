@@ -1921,10 +1921,10 @@ BIBLE_SOURCE_BUDGET_CHARS = 60000
 _BIBLE_TAIL_SAMPLE_MAX = 12      # 后段最多抽样多少章（取其开头，角色多在章首登场）
 _BIBLE_TAIL_SLICE_CHARS = 1500   # 每个抽样章节注入的开头字数
 
-BIBLE_HEAD_CHAPTERS = 10         # 首版人物谱必须完整通读的章节数
-BIBLE_LOOKAHEAD_CHAPTERS = 10    # 判定「这个角色重不重要」时再往后看的章节数
+BIBLE_HEAD_CHAPTERS = 60         # 首版人物谱发现窗口：覆盖前几十集；仍按一章一小请求并发
+BIBLE_LOOKAHEAD_CHAPTERS = 0     # 发现窗口已扩到 60 章，不再额外扩大裁决卷宗范围
 BIBLE_RECURRING_MIN_ONSTAGE_QUOTES = 2  # 至少两条经裁决闸核验的「本人在场」证据才算重要角色
-BIBLE_MUST_COVER_MAX = 12        # 必收名单上限，避免把生成预算耗在龙套身上
+BIBLE_MUST_COVER_MAX = 20        # 前 60 章重要角色容量；详情仍逐角色小请求生成
 # 点名调用每个候选最多申报几条在场证据。判据只需要 BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
 # （=2）条核验通过的证据；这里留 1 条余量应付结构闸/裁决闸刷掉个别证据，不留更多——
 # 多留的每一条对戏份多的主角都是纯浪费：一个出场上千次的主角，旧提示词「尽量都列出来」
@@ -4942,6 +4942,7 @@ class _BibleRosterDraft(BaseModel):
 
 class _CharacterDetail(BaseModel):
     appearance_canonical: str
+    period_costume_canonical: str = ""
     personality: str = ""
     speech_style: str = ""
     relationships: list[Relationship] = Field(default_factory=list)
@@ -5072,6 +5073,7 @@ async def _generate_character_detail(
     roster_names: list[str],
     evidence_pack: str,
     style: str,
+    era: str,
     chapters_by_idx: dict[int, str],
     project_id: str | None,
 ) -> Character | None:
@@ -5092,6 +5094,7 @@ async def _generate_character_detail(
             importance_signals=entry.importance_signals,
             portrait_eligible=False,
             appearance_status="deferred",
+            period_costume_canonical="待真实出场后依据年代与身份补全",
         )
 
     base_pack = evidence_pack[:BIBLE_DETAIL_EVIDENCE_MAX_CHARS]
@@ -5104,14 +5107,15 @@ async def _generate_character_detail(
 原文称呼：{'、'.join(entry.source_appellations) or entry.name}
 完整角色名单（relationships.to 只能从这里选择）：{'、'.join(roster_names)}
 统一画风：{style}
+世界年代/社会形态：{era or '原文未明确，必须从证据包的社会制度、材质和服装称谓保守判断'}
 
-要求：appearance_canonical {PRODUCTION_APPEARANCE_MIN_CHARS}~{PRODUCTION_APPEARANCE_MAX_CHARS} 字；speech_style 15~30 字；只写该角色；不确定的关系、别名、标志性特征证据留空。source_evidence 引句必须不超过 40 字且逐字来自证据包。
+要求：appearance_canonical {PRODUCTION_APPEARANCE_MIN_CHARS}~{PRODUCTION_APPEARANCE_MAX_CHARS} 字；period_costume_canonical 20~60 字，明确该年代、地域/宗门、身份层级下可用的服装形制、面料、鞋履、束发与禁用的现代/错代元素，并与原文直接服装描写一致；speech_style 15~30 字；只写该角色；不确定的关系、别名、标志性特征证据留空。source_evidence 引句必须不超过 40 字且逐字来自证据包。
 
 该角色的小证据包（不是全书）：
 {pack}
 
 输出 JSON Schema：
-{{"appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "aliases": [{{"text": str, "name_kind": str, "evidence_chapter_index": int, "evidence_quote": str}}], "source_evidence": [{{"evidence_chapter_index": int, "evidence_quote": str}}]}}"""
+{{"appearance_canonical": str, "period_costume_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "aliases": [{{"text": str, "name_kind": str, "evidence_chapter_index": int, "evidence_quote": str}}], "source_evidence": [{{"evidence_chapter_index": int, "evidence_quote": str}}]}}"""
         started = time.time()
         try:
             raw = await asyncio.wait_for(
@@ -5148,9 +5152,12 @@ async def _generate_character_detail(
                 importance_signals=entry.importance_signals,
                 portrait_eligible=entry.portrait_eligible,
                 appearance_status=entry.appearance_status,
+                period_costume_canonical=detail.period_costume_canonical,
             )
             if not PRODUCTION_APPEARANCE_MIN_CHARS <= len(character.appearance_canonical) <= PRODUCTION_APPEARANCE_MAX_CHARS:
                 raise ValueError("appearance_canonical 长度越界")
+            if not 20 <= len(character.period_costume_canonical) <= 60:
+                raise ValueError("period_costume_canonical 长度越界")
             character.relationships = [item for item in character.relationships if item.to in roster_names]
             character.source_evidence = [
                 item for item in character.source_evidence
@@ -5178,7 +5185,7 @@ async def _generate_character_detail(
 
 
 async def _generate_character_detail_batch(
-    entries: list[_BibleRosterEntry], chapters: list[dict], *, style: str,
+    entries: list[_BibleRosterEntry], chapters: list[dict], *, style: str, era: str,
     chapters_by_idx: dict[int, str], project_id: str | None,
 ) -> list[Character]:
     roster_names = [entry.name for entry in entries]
@@ -5230,7 +5237,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
 {roster_context}
 
 规则：
-1. 候选摘要来自单章点名、身份归一、在场核验与全文检索；不得新增摘要中没有的人物，总数不超过 20。
+1. 候选摘要来自前 60 章单章点名、身份归一、在场核验与全文检索；不得新增摘要中没有的人物，总数不超过 20。
 2. 所有候选都必须收录；role 只负责区分主次，不得删除低频但已核验在场的候选。全文命中/覆盖章节用于判断重要程度，在场证据用于判断是否真实出场，二者不能互相替代。
 3. name 必须使用括号外的正式姓名；若括号外仍是描述性称呼，说明全文尚未揭示真名，才可暂用该称呼。source_appellations 必须完整收录括号内原文称呼。
 4. 同一候选行内的正式姓名、绰号、描述性称呼属于同一人物，严禁拆成多个角色。
