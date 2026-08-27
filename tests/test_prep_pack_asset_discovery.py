@@ -4795,8 +4795,22 @@ def test_prep_pack_version_is_1_8_0():
     申报的字段）且实际改变部分场景绑定的 anchor_phrase 取值，比照
     1.4.1/1.6.1/1.8.1-1.8.5/1.9.0/1.10.0/1.11.1/2.0.1 的先例推进版本号
     第三位，不动 schema 位（asset_manifest.scenes[] 自身字段集合不变，
-    quote 只是 _ModelSceneMention 这一模型响应内部字段，不进入发布产物）。"""
-    assert prep_pack.PREP_PACK_VERSION == "2.0.2"
+    quote 只是 _ModelSceneMention 这一模型响应内部字段，不进入发布产物）。
+
+    2.0.3（真实回归，EP4 离线复现：54 段章节只报出 1 个场景、segment_
+    indexes 停在 20 段，21~54 段的另外两个已登记场景（"外宗边缘单人居所"
+    "外宗放丹广场"）整段缺席，见 PREP_PACK_VERSION 上方 2.0.3 大注释的完整
+    根因排查——分块合并只留第一个 chunk、场景去重吃掉新场景两个怀疑方向
+    均已用真实章节文本 + 代码路径核验排除，真正成立的是模型在单次长 chunk
+    调用里只完整报出了最先出现的那个场景）：两处改动。a) _extract_chunk
+    提示词新增"场景的持续性"一段，明确同一地点的后续编号默认延续、不需要
+    每个编号重新出现地点描写——prompt-contract 变更，会实际改变模型对
+    scenes 的申报范围；b) coverage_ledger 新增并列账目 scene_coverage
+    （scene_delivered/scene_uncovered），不影响既有五账或 assert_prep_
+    pack_coverage_complete 门禁，是新增可见性账目而非新的拦截。两者合计
+    比照 1.4.1/1.6.1/1.8.1-1.8.5/1.9.0/1.10.0/1.11.1/2.0.1/2.0.2 的先例
+    推进版本号第三位，不动 schema 位。"""
+    assert prep_pack.PREP_PACK_VERSION == "2.0.3"
 
 
 # ---------------------------------------------------------------------------

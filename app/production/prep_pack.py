@@ -236,7 +236,7 @@ from app.validators import (
 # stay defined in app/validators.py, unused-but-not-deleted (same "dormant,
 # not deleted" precedent as app/production/screenplay_repair.py), still
 # exercised directly by tests/test_prep_pack_coverage.py.
-PREP_PACK_VERSION = "2.0.2"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
+PREP_PACK_VERSION = "2.0.3"  # 1.1.0: event_chain entries carry source_span (P1 storyboard needs it).
 # 1.2.0: asset_manifest.characters entries carry aliases; 1.3.0: asset_manifest
 # gained functional_extras; 1.4.0: coverage_ledger gained paratext (deterministic
 # keyword/position classifier, since replaced); 1.4.1: paratext classification
@@ -1046,6 +1046,57 @@ PREP_PACK_VERSION = "2.0.2"  # 1.1.0: event_chain entries carry source_span (P1 
 # 不适用于 characters[]。这本身是一个更宽松的既有判据（跟本次事故的
 # 因果链无关，48e01ff 没有改动它），不在这次回归修复范围内收紧——收紧
 # 门禁判据是范围外的产品决策，不是"修一个当晚引入的回归"应该顺带做的事。
+#
+# 2.0.3（真实回归，EP4 离线复现：54 段章节 chapters.idx=4，"我欲封天"
+# proj_3ac0b627fa46——只用 index_source_segments/_chunk_segments 跑通
+# 分块逻辑，未触发任何模型调用/发布）：asset_manifest.scenes 只出了 1 条
+# （"外宗宝阁一层"，segment_indexes 2~20），但原文在 21 段之后明确切了
+# 至少两个新地点（24 段起"外宗边缘单人居所"、45 段起"外宗放丹广场"，两个
+# 名字都已经在这个项目的 bible.scenes 里登记过，不是需要新发现的生词）。
+#
+# 根因排查（三个怀疑方向逐一核验，结论都写在这里，不是猜测）：
+#   1) 分块合并只保留第一个 chunk？排除——离线用真实章节文本跑
+#      _chunk_segments 证明这四章（idx 4/8/9/10，含用户对照的 EP8/9/10）
+#      全部落在 _CHUNK_MAX_CHARS=6000 的单个 chunk 里，压根不存在"跨
+#      chunk 合并"这一步，_generate_prep_pack_once 的 chunk 循环也早已
+#      验证过是对每个 chunk 的 mention 做累加（append/update），不是
+#      "只留最后一次"。
+#   2) 场景去重/合并把新场景吃掉？排除——ensure_scenes_for_labels
+#      （app/scenes.py）对传入的每个未匹配 label 逐个跑 assess_new_scene，
+#      不存在"每次调用最多发现 N 个新场景"的配额或提前 return；
+#      visual_entity_merges 表（db.py 建表处、portraits.py 写入处）只服务
+#      角色侧的 functional→具名身份折叠，不涉及场景。且 scenes[entry]
+#      的合并本身是并集（entry["segment_indexes"] = 现有 | 新增，见
+#      _resolve_assets scenes 分支），会漏字段只可能是"这条 mention
+#      从未被模型报出来"，不可能是"报出来了又被合并丢掉"——2-20 到 21
+#      这个干净的截断本身就是证据：如果是合并丢失，丢的应该是散点，不会
+#      恰好在"宝阁大门关闭"（21 段）这个真实的场景边界上戛然而止。
+#   3) 真正成立的：模型在单次调用里只完整报出了本段最先出现的那个场景，
+#      对同一次调用后半段（24 段起，接近本段末尾）的场景转换未申报——
+#      characters/props 两类在同一次调用里没有这个问题（下游故事线仍能
+#      跟住主角），只有 scenes 这一类在长 chunk 里出现"报了开头、漏了
+#      结尾"的退化，与既有 2.0.0 大注释里角色侧记录过的
+#      character_manifest_anomaly（第31轮 EP7 回归）是同一种"单一维度
+#      在长输出里提前收尾"的模式，只是这次出现在 scenes 而不是
+#      characters。这是模型行为层面的证据链（章节内容、bible 已登记场景名
+#      核对、代码路径排除），不是靠重新触发一次真实模型调用验证的——按
+#      边界要求没有发起那次调用，如果需要更强的"prompt 改了之后模型真的
+#      按新指令报全"这一层验证，要靠真实运行确认，不在这次改动范围内。
+#
+# 修复两处，都不改变现有字段的形状、不新增门禁、不做兜底填充：
+#   a) _extract_chunk 提示词新增"场景的持续性"一段（segment_indexes 判据
+#      段落之后）：明确告诉模型场景在同一地点的后续编号里默认延续，不需要
+#      每个编号都重新出现地点描写才能计入，只有情节明确换地点/原文写明
+#      离开才停止延续——针对性回应上面第 3 点证据，不是通用的"别漏报"
+#      重复表述（那句已经存在，没能挡住这次退化）。
+#   b) coverage_ledger 新增一个并列账目 scene_coverage（scene_delivered/
+#      scene_uncovered，语义见 _prep_pack_scene_coverage_account 的
+#      docstring）：不影响、不参与既有五账或 assert_prep_pack_coverage_
+#      complete 门禁（该门禁只读 ledger["uncovered"]），单纯让"这一章
+#      有多少段落完全没有任何场景归属"在映射台自己的产出里就可见，不用
+#      等分镜台的三态告警才第一次被看见。scene_uncovered 非空是合法状态
+#      （例如确实没有场景描写的纯心理/纯对白段），这里只记账、不拦截、
+#      不用上一段落的场景往后续段落填充——那是伪造归属，比空着更危险。
 QA_PROFILE_VERSION = "prep-pack-qa-gate-1"
 _QA_EVALUATOR_NAME = "screenplay_production_qa"
 _CHUNK_MAX_CHARS = 6000
@@ -4340,6 +4391,13 @@ segment_indexes 判据（硬性，对 characters/scenes/props 都适用）：只
 背景知识提及，都不算"出场"，不要申报那个编号；反之，只要真的在画面中出场，哪怕只是一句带过，
 也要如实申报，不要漏报。
 
+场景的持续性（仅适用于 scenes，硬性）：一个场景一旦在某个编号成立，只要后续编号里情节仍在
+同一地点发生——哪怕那些编号没有再次提到地点名称或做任何环境描写，只是人物的对话/动作/
+心理，这些编号依然属于这个场景，要一并计入它的 segment_indexes，不能因为某个编号本身没有
+复述地点就漏报；只有当情节明确转移到另一个地点、或原文本身已经写明离开/切换（例如出门、
+关门、赶路前往别处），才停止把新的编号计入这个场景、改记到新地点名下。一段原文里，人物
+所在的地点几乎总是连续的，不要把 scenes 的申报窄化成"只在地点被提到的那一句"。
+
 命名纪律（关于 characters/scenes 的 display_name，硬性）：
 - display_name 必须逐字使用本段原文中出现的称谓——原文写"灰袍老者"就填"灰袍老者"，
   禁止填任何本段原文没有出现过的名字，哪怕你认为自己知道这个人物/地点的"真名"；
@@ -4435,6 +4493,39 @@ def _prep_pack_build_coverage_ledger(
         "uncovered": sorted(uncovered),
     }
     return ledger, rejected_paratext_claims
+
+
+# 2.0.3 新增（见 PREP_PACK_VERSION 上方 2.0.3 大注释的完整案情）：场景专项
+# 覆盖账，跟上面五账并列、互不干扰的独立视角——五账的 delivered 只要角色/
+# 场景/道具任一维度覆盖到某段就算 delivered，天然看不见"场景这一个维度
+# 单独漏覆盖、角色/道具仍覆盖"的情形，这正是 EP4 真实回归暴露的缺陷：54
+# 段章节里 scenes 只覆盖到 20 段，21~54 段因为角色提及（主角孟浩本人）
+# 仍然贯穿在场，五账的 delivered/uncovered 完全看不出场景那部分已经断供，
+# 这个缺口一路悄悄传导到分镜台三态告警才第一次现形。本账目让它在映射台
+# 自己的产出里就可见。
+#
+# 不做的事（刻意）：不拦截、不重新定义"delivered"的既有语义、不往
+# assert_prep_pack_coverage_complete 那道门禁塞新的阻断条件（该门禁签名
+# 只读 ledger["uncovered"]，本账目是全新键，结构上不可能触发它）、不对
+# scene_uncovered 做任何解释性判断——scene_uncovered 非空可能是真的漏报，
+# 也可能是这些段落本来就没有场景描写（纯心理活动、纯对白），两种情况在
+# 数据层面无法区分，交付判据仍然是逐条对原文，这里只负责让分母/分子可见，
+# 不越权下结论。也不做"没覆盖就借用上一个场景的 segment_indexes 顺延"这
+# 类兜底——那是编造场景归属，比空着更危险，比空着更难被发现是假的。
+def _prep_pack_scene_coverage_account(
+    total_segments: int,
+    scene_delivered_indexes: set[int],
+    paratext_indexes: set[int],
+) -> dict[str, Any]:
+    all_indexes = set(range(1, total_segments + 1))
+    scene_delivered = scene_delivered_indexes & all_indexes
+    paratext = paratext_indexes & all_indexes
+    scene_uncovered = all_indexes - scene_delivered - paratext
+    return {
+        "total_segments": total_segments,
+        "scene_delivered": sorted(scene_delivered),
+        "scene_uncovered": sorted(scene_uncovered),
+    }
 
 
 # 2.0.0 新增，2.0.1 重做真源（协调方复核确认的 bug，见下段"2.0.1 根因"）：
@@ -4617,6 +4708,20 @@ async def _generate_prep_pack_once(
     paratext_indexes = set(deterministic_title_indexes) | declared_paratext_segments
     ledger, rejected_paratext_claims = _prep_pack_build_coverage_ledger(
         len(segments), delivered_indexes, paratext_indexes,
+    )
+    # 2.0.3（见 PREP_PACK_VERSION 上方 2.0.3 大注释）：跟上面五账并列的
+    # 场景专项覆盖账，读的是 scene_mentions 自己的 segment_indexes 并集
+    # ——跟 delivered_indexes 同一个数据源（模型申报、已过结构闸），不是
+    # 发布后的 asset_manifest.scenes 重新算一遍；两者在一次成功发布里
+    # 恒等（_resolve_assets 只会把已声明的 mention 解析进 manifest 或
+    # 让整个生成因 asset_errors 失败重试，不会把已声明的 mention 悄悄
+    # 丢弃却仍然发布成功），用前者可以在 _resolve_assets 调用之前就算好，
+    # 不需要为了这一个账目改动下面的调用顺序。
+    scene_delivered_indexes: set[int] = set()
+    for mention in scene_mentions:
+        scene_delivered_indexes.update(mention["segment_indexes"])
+    ledger["scene_coverage"] = _prep_pack_scene_coverage_account(
+        len(segments), scene_delivered_indexes, paratext_indexes,
     )
     try:
         assert_prep_pack_coverage_complete(ledger)
