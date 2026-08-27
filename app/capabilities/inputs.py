@@ -274,6 +274,18 @@ class DeliveryCreatePackageInput(EpisodeScopedInput):
     video.clear_episode / video.clear_episode_videos / video.resume_episode /
     delivery.concatenate / delivery.check 共 6 个命令复用，往共享基类加这个字段
     会把它污染进那些不相关命令的对外契约，所以单独建子类。
+
+    ``reason``（写入交付包 quality-report 的说明性文本）继承自
+    ``StandardCommandInput``，不需要在这里重复声明；REST 包装层与本命令的
+    handler 都必须显式转发它——历史上两层都手写 dict 重建请求体，各自漏了
+    一次，效果等同完全丢弃。
+
+    故意没有 ``decided_by`` 字段：build_delivery_package 阶段 decision 恒为
+    None（这不是审批动作），但 decided_by 仍写入 WorkflowRecorder.requested_by
+    与 quality-report 的 human_decision，属于审计相邻字段。这类字段一律不接受
+    客户端自报——``app.orchestration.api.create_delivery_package`` 改为用
+    ``app.auth.principal.current_actor_name()`` 从已鉴权身份派生，与
+    ``approve_delivery`` 的真正审批 decided_by 已经在用的机制一致。
     """
 
     package_id: str | None = None

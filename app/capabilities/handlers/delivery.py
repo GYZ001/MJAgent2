@@ -93,6 +93,10 @@ async def create_package(args: I.DeliveryCreatePackageInput) -> CommandResult:
             "idempotency_key": args.idempotency_key,
             "request_id": args.request_id,
             "package_id": args.package_id,
+            # reason 继承自 StandardCommandInput，转发给 REST 层写入交付包的
+            # quality-report；decided_by 不在这里转发——REST 层改用
+            # current_actor_name() 从已鉴权身份派生，不接受命令总线参数。
+            "reason": args.reason,
         },
     )
     if isinstance(outcome, CommandResult):

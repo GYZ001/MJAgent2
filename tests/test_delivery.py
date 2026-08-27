@@ -512,6 +512,7 @@ def test_delivery_route_forwards_idempotency_metadata(monkeypatch) -> None:
             "idempotency_key": "delivery-once",
             "request_id": "request-1",
             "package_id": None,
+            "reason": None,
         },
     }
 
@@ -540,6 +541,84 @@ def test_delivery_route_forwards_client_supplied_package_id(monkeypatch) -> None
 
     assert result == {"status": "accepted"}
     assert captured["args"]["package_id"] == "delivery_alreadyvalidated"
+
+
+def test_delivery_route_forwards_reason(monkeypatch) -> None:
+    """reason 是交付包 quality-report 里的说明性文本，继承自
+    StandardCommandInput；REST 包装层此前手写 dict 重建 ui_route 参数时漏了
+    这个字段（与 package_id 同一形状），任务侧 yyft_pipeline10.py 发的
+    reason 因此在命令总线路径上完全不可达。
+    """
+    captured: dict = {}
+
+    async def fake_ui_route(name: str, args: dict):
+        captured.update({"name": name, "args": args})
+        return {"status": "accepted"}
+
+    monkeypatch.setattr("app.capabilities.dispatch.ui_route", fake_ui_route)
+    result = asyncio.run(orchestration_api.create_delivery_package(
+        "e",
+        {
+            "idempotency_key": "delivery-once",
+            "reason": "readiness 门禁已全部通过，生成交付候选包",
+        },
+    ))
+
+    assert result == {"status": "accepted"}
+    assert captured["args"]["reason"] == "readiness 门禁已全部通过，生成交付候选包"
+
+
+def test_delivery_package_decided_by_ignores_client_payload(monkeypatch) -> None:
+    """decided_by 是审计相邻字段（写入 WorkflowRecorder.requested_by 与
+    quality-report 的 human_decision），不接受客户端自报——即便客户端在
+    body 里塞了 decided_by，实际记录的必须是已鉴权身份（这里用
+    current_actor_name() 的 fallback 值验证，因为测试没有真实登录会话）。
+    """
+    from app.auth.principal import current_actor_name
+    from app.db import get_conn
+
+    # 不额外造隔离连接：recorder.step() 经 run_write_transaction 走的是
+    # app.db 的真实按线程连接，不会看见另一份手动 monkeypatch 的内存连接
+    # （试过，FOREIGN KEY 撞车）。conftest 的 autouse fixture 已经给每个
+    # 测试准备好一份隔离的真实 sqlite 文件库，直接在这份库里插入夹具即可。
+    conn = get_conn()
+    conn.execute("INSERT INTO projects(id,name,status,created_at) VALUES('p2','P2','planned',0)")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,title,source_chapters,status,created_at) "
+        "VALUES('e2','p2',1,'E2','[]','done',0)"
+    )
+    conn.commit()
+
+    async def fake_ui_route(name: str, args: dict):
+        return None  # 模拟 in_handler()：走真实的 legacy 落地逻辑
+
+    monkeypatch.setattr("app.capabilities.dispatch.ui_route", fake_ui_route)
+
+    captured_kwargs: dict = {}
+
+    def fake_build_delivery_package(episode_id, **kwargs):
+        captured_kwargs.update(kwargs)
+        return {"package_id": kwargs["package_id"], "manifest": {}, "artifact_id": "art"}
+
+    monkeypatch.setattr(delivery, "build_delivery_package", fake_build_delivery_package)
+
+    # 测试全局 autouse fixture（conftest._reset_capability_runtime）已经注入了一个
+    # 系统管理员 Principal；直接读它此刻会解析成的值，不假设具体用户名，只断言
+    # 它不等于客户端在 body 里塞的伪造值。
+    expected_actor = current_actor_name()
+    assert expected_actor != "spoofed-reviewer"
+    result = asyncio.run(orchestration_api.create_delivery_package(
+        "e2",
+        {
+            "idempotency_key": "spoof-check",
+            "decided_by": "spoofed-reviewer",
+            "reason": "真实原因",
+        },
+    ))
+
+    assert result["package_id"]
+    assert captured_kwargs["decided_by"] == expected_actor
+    assert captured_kwargs["reason"] == "真实原因"
 
 
 def test_delivery_restart_fences_lease_only_for_recovery_owner(

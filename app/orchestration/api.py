@@ -1099,6 +1099,15 @@ async def create_delivery_package(episode_id: str, body: dict | None = Body(None
         # video.generate_episode 的 only_incomplete 丢参一致）。见
         # I.DeliveryCreatePackageInput。
         "package_id": payload.get("package_id"),
+        # reason 是纯说明性文本（写入 quality-report 的 human_decision 与
+        # known-issues），继承自 StandardCommandInput，无需新增字段；此前
+        # 同样被这里的手写 dict 悄悄漏掉，与 package_id 是同一类丢参。
+        # decided_by 故意不出现在这份 dict 里：build_delivery_package 阶段
+        # decision 恒为 None，不是审批事实，但仍是审计相邻字段（写入
+        # WorkflowRecorder.requested_by 与 quality-report），不接受客户端
+        # 自报——下方改为 current_actor_name() 从已鉴权身份派生，见
+        # app.auth.principal.current_actor_name 的方法说明。
+        "reason": payload.get("reason"),
     })
     if routed is not None:
         return routed
@@ -1124,7 +1133,9 @@ async def create_delivery_package(episode_id: str, body: dict | None = Body(None
         {
             key: payload[key]
             for key in sorted(payload)
-            if key not in {"request_id", "operation_started_at", "package_id"}
+            # reason/decided_by 是说明性文本/操作者身份，不是构建内容；排除
+            # 在外保持幂等 CAS 语义不因这两个字段被修复转发而改变。
+            if key not in {"request_id", "operation_started_at", "package_id", "reason", "decided_by"}
         },
     )
     from app.delivery import (
@@ -1159,7 +1170,13 @@ async def create_delivery_package(episode_id: str, body: dict | None = Body(None
         scope_type="episode",
         scope_id=episode_id,
         input_fingerprint=fingerprint(episode_id, payload),
-        requested_by=str(payload.get("decided_by") or "user"),
+        # decided_by 不取客户端自报的 payload："谁在构建这个交付候选"是审计
+        # 相邻字段，一律取已认证身份（current_actor_name 的方法说明点名了
+        # decided_by 属于历史上可伪造署名的字段之一）。这里不影响真正的批准
+        # 审计链——approve_delivery 的 decided_by 早已同样使用
+        # current_actor_name()（本文件 decide_delivery），此处只是把
+        # create_package 的等价字段补齐到相同规则。
+        requested_by=current_actor_name(),
         trigger_type="manual",
         policy_snapshot={
             "shot_duration_range_s": [config.VIDEO_DURATION_MIN_S, config.VIDEO_DURATION_MAX_S],
@@ -1175,7 +1192,7 @@ async def create_delivery_package(episode_id: str, body: dict | None = Body(None
                 build_delivery_package,
                 episode_id,
                 package_id=payload["package_id"],
-                decided_by=payload.get("decided_by"),
+                decided_by=current_actor_name(),
                 decision=payload.get("decision"),
                 reason=str(payload.get("reason") or ""),
                 accepted_risk=payload.get("accepted_risk"),
