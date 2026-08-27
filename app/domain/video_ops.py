@@ -3012,12 +3012,33 @@ async def _recorded_video_completion_task(
             reconcile_episode_generation_status(episode_id)
         return result
     except asyncio.CancelledError:
+        # 必须在调用 recorder 之前回滚：run_video_completion_resilient 内部
+        # 与本函数共用同一个 task 缓存连接（app.db.get_conn() 按 asyncio.
+        # current_task() 缓存），Supervisor 主循环里的候选采用写入（例如
+        # app.evidence.media.select_best_video_candidate 先 UPDATE
+        # shots.adopted_version_id 与 shot_versions.adoption_reason，再调用
+        # invalidate_episode_delivery_authority 写 delivery_packages，最后才
+        # 一次性 conn.commit()）在这几条语句之间没有中间提交点。取消信号可能
+        # 恰好落在这段还没提交的窗口里；此时 recorder.pause_external()/
+        # recorder.cancel() 会经 refresh_cost()→get_conn().commit() 把这份半
+        # 途的采用写入一并提交下去。回滚只丢弃这次未提交的挂起写入，不影响
+        # Supervisor 自己在检查点写入时已经落盘的状态。
+        conn = get_conn()
+        if conn.in_transaction:
+            conn.rollback()
         if task_registry.shutdown_in_progress():
             recorder.pause_external("服务重启，全片视频补齐等待自动恢复")
         else:
             recorder.cancel()
         raise
     except Exception as exc:
+        # 同上，必须先回滚再记录。注意：多数常规异常已经在
+        # run_video_completion_resilient 内部的控制面恢复循环里被捕获并转换
+        # 成检查点保存，这里能看到的往往是恢复循环自身也失败之后的异常；即
+        # 便如此，回滚仍是免费的安全网，不能省略。
+        conn = get_conn()
+        if conn.in_transaction:
+            conn.rollback()
         recorder.fail(exc)
         raise
 
@@ -3856,6 +3877,24 @@ def repair_video_completion_route(episode_id: str, body: dict | None = None):
         )
         recorder.partial(result.outcome or result.phase)
     except Exception as exc:  # noqa: BLE001
+        # 必须在 _mark_failed_closed / recorder.fail 之前回滚，且回滚要放在这
+        # 个 except 块的第一条语句：_deadline_closeout 内部与本函数共用同一
+        # 个 task 缓存连接，它对每个镜头调用
+        # app.evidence.media.select_best_video_candidate 采用最佳候选——那
+        # 个函数先 UPDATE shots.adopted_version_id 与
+        # shot_versions.adoption_reason，再调用
+        # invalidate_episode_delivery_authority 写 delivery_packages，最后才
+        # 一次性 conn.commit()；这几条语句之间没有中间提交点。如果
+        # _deadline_closeout 在这个窗口内抛出异常，这份半途的采用写入就会挂
+        # 在 conn 上。_mark_failed_closed 内部会调用 save_checkpoint，
+        # 它的写入逻辑是「如果 conn 已经在事务中就不再开新事务，直接复用」
+        # （见 app/video_supervisor.py::save_checkpoint），所以它的
+        # conn.commit() 会把上面挂起的半途采用一并提交下去；recorder.fail()
+        # 的 refresh_cost()/transition_run() 同理。回滚只丢弃这次失败尝试自
+        # 己产生的未提交写入，不影响 _deadline_closeout 已经在别处提交过的
+        # 状态（例如它自己那次 conn.commit() 已经落盘的镜头）。
+        if conn.in_transaction:
+            conn.rollback()
         _mark_failed_closed(
             cp,
             run_id=recorder.run_id,
