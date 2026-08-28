@@ -4246,6 +4246,11 @@ async def resolve_future_identity_candidates(
         # 因为一旦选项出现在 schema 枚举里，模型就可能选中它，且后续任何
         # 环节都无法再用"这是不是兜底窗口"这条信息去否决一个已经铸造出的
         # decision_id。
+        group_label_texts = [
+            str(value).strip()
+            for value in group.get("labels") or []
+            if str(value).strip()
+        ]
         if group_key not in fallback_evidence_group_keys:
             for authority_id, authority in authority_by_id.items():
                 canonical_name = str(
@@ -4294,18 +4299,39 @@ async def resolve_future_identity_candidates(
                     )
                 if not proof_anchors:
                     continue
-                anchored_evidence_ids = [
-                    evidence_id
-                    for evidence_id in evidence_ids_by_group[group_key]
-                    if any(
-                        anchor
-                        and anchor in str(
-                            evidence_by_id.get(evidence_id, {}).get("text")
-                            or ""
-                        )
-                        for anchor in proof_anchors
+                # 锚定窗口必须同时含有本组自己的标签。这个组的证据目录并不只
+                # 装"提到本组标签"的窗口：上面选窗时还把"提到任一已登记真名"
+                # 的窗口一并收了进来（供 N: 分支看新名字）。那些窗口跟本组标签
+                # 毫无逐字关联，窗口里出现的权威名字只是巧合共现。
+                #
+                # 真实故障 ERR-20260828-e65955（《罗刹海市》EP1）：G001 的标签是
+                # 「父亲」，铸出 K:G001:bible:马骥 的那扇窗口是"三天之内，马骥
+                # 遍游各处海国。从此，「龙媒」的名声传遍四海"——整扇窗口没有
+                # 「父亲」二字，只因含有马骥的本集别名「龙媒」就成了锚点。模型
+                # 选中它，「父亲」就此成为马骥的已登记称谓；同一次运行的后一批
+                # current 识别正确地把「父亲」判成 functional，撞上「不得冒用已
+                # 登记身份称谓」，整集失败且重试必然复现。
+                #
+                # fallback_evidence_group_keys 拦的是同一件事，但它的判据挂在
+                # 「整个未来文本里出没出现过这个标签」这个组级信号上：标签只要
+                # 在别处出现过一次，全组的窗口就都成了合法锚点。判据下沉到每扇
+                # 窗口自己。same_group_authority 分支的 proof_anchors 本来就是
+                # 这批标签，这条要求对它恒真。
+                anchored_evidence_ids = []
+                for evidence_id in evidence_ids_by_group[group_key]:
+                    window_text = str(
+                        evidence_by_id.get(evidence_id, {}).get("text") or ""
                     )
-                ]
+                    if not any(
+                        anchor and anchor in window_text
+                        for anchor in proof_anchors
+                    ):
+                        continue
+                    if not any(
+                        label in window_text for label in group_label_texts
+                    ):
+                        continue
+                    anchored_evidence_ids.append(evidence_id)
                 if not anchored_evidence_ids:
                     continue
                 known_hash = evidence_repository.content_hash({

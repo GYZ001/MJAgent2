@@ -9393,6 +9393,112 @@ def test_future_identity_forbids_known_decision_from_fallback_window(
     assert resolved_target["identity_kind"] == "functional"
 
 
+def test_future_identity_known_decision_needs_the_label_in_its_own_window(
+    monkeypatch,
+) -> None:
+    """真实故障 ERR-20260828-e65955（《罗刹海市》EP1）：整集映射包卡死的形状。
+
+    第 1 章的「父亲」是马骥的父亲——"父亲年老体衰……对马骥说：我儿还是继承
+    父业"。未来文本里「父亲」确实又出现过（马骥的坟茔那段），所以这一组不走
+    兜底分支；可为它铸出 K:bible:马骥 的那扇窗口是"三天之内，马骥遍游各处海
+    国。从此，「龙媒」的名声传遍四海"，整扇窗口没有「父亲」二字，只因含有马
+    骥的本集别名「龙媒」就成了锚点。模型选中它，「父亲」成了马骥的已登记称
+    谓，进了 reserved_authority_labels；同一次运行的后一批 current 识别正确地
+    把「父亲」判成 functional，撞上「不得冒用已登记身份称谓：父亲」，整集失败
+    且重试必然复现。
+
+    fallback_evidence_group_keys 拦的是同一件事，判据却挂在「整个未来文本里
+    出没出现过这个标签」这个组级信号上：标签只要在别处出现过一次，全组窗口
+    就都成了合法锚点。判据必须挂在每扇窗口自己身上。
+    """
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[
+            Character(
+                name="马骥",
+                role="主角",
+                appearance_canonical="俊美青年，锦帕缠头，素色长衫",
+            ),
+            Character(
+                name="龙女",
+                role="重要配角",
+                appearance_canonical="盛装女子，珠翠满头，广袖长裙",
+            ),
+        ],
+    )
+    candidates = [
+        {
+            "name": "马骥",
+            "source_label": "龙媒",
+            "identity_kind": "named",
+            "identity_group": "bible:马骥",
+            "authority_id": "bible:马骥",
+            "kind": "onscreen",
+        },
+        {
+            "name": "父亲",
+            "source_label": "父亲",
+            "identity_kind": "functional",
+            "identity_group": "current-1:F1",
+            "kind": "onscreen",
+        },
+    ]
+    # 「父亲」在未来文本里出现过（所以不是兜底组），但和「龙媒」/「龙女」隔着
+    # 几百字，任何一扇 120 字的窗口都装不下两者。
+    future_text = (
+        "父亲的坟茔前草木已深，村人年年培土。"
+        + "填充" * 200
+        + "三天之内，马骥遍游各处海国。从此，「龙媒」的名声传遍四海。"
+        "马骥常同龙女在玉树下长啸。"
+    )
+    assert "父亲" in future_text, "这一组必须不是兜底组，否则测的是另一条规则"
+
+    seen: dict[str, list] = {}
+
+    async def fake_chat(messages, **kwargs):
+        prompt = str(messages[0]["content"])
+        seen["decisions"] = _future_identity_catalog(prompt, "可选决议目录")
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        group_key = next(iter(
+            schema["properties"]["decisions"]["properties"]
+        ))
+        enum = schema["properties"]["decisions"]["properties"][
+            group_key
+        ]["enum"]
+        seen["enum"] = list(enum)
+        return json.dumps({
+            "decisions": {
+                group_key: next(v for v in enum if v.startswith("F:")),
+            },
+            "revealed_names": {group_key: ""},
+            "revealed_name_kinds": {group_key: ""},
+            "reveal_evidence_ids": {group_key: ""},
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
+        candidates,
+        source_text="父亲年老体衰，对马骥说：我儿还是继承父业，去做买卖吧。",
+        future_text=future_text,
+        bible=bible,
+        episode_no=1,
+        future_label="第 2-3 章",
+    ))
+
+    known = [
+        decision for decision in seen["decisions"]
+        if decision["resolution_kind"] == "known_named"
+    ]
+    assert known == [], (
+        "锚定窗口里没有「父亲」，不得为任何已登记权威铸出 K 决议"
+    )
+    assert not any(value.startswith("K:") for value in seen["enum"])
+    resolved_target = next(
+        item for item in resolved if item["source_label"] == "父亲"
+    )
+    assert resolved_target["identity_kind"] == "functional"
+
+
 def test_future_identity_fallback_window_still_allows_new_name_reveal(
     monkeypatch,
 ) -> None:
