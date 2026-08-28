@@ -10328,6 +10328,48 @@ def test_unknown_fields_on_n_and_f_still_fail_closed() -> None:
         portraits.CurrentIdentityCandidateResponse.model_validate(normalized)
 
 
+def test_unknown_fields_on_k_fail_closed_naming_what_the_model_sent() -> None:
+    """K 分支的未知字段同样留着 fail closed，报错要指出模型真正写了什么。
+
+    真实故障（run_690cebdd45a7 / ep_bf9051d167a7《我欲封天》EP1）：模型把整个
+    K/N/F 结构多套了一层，把 f/k/n 写进了 k[0] 里面。旧实现按 K 的 schema 做
+    白名单裁剪，三个分支连同里面那条已经判好的 N 决议一起被扫掉，只剩
+    decision_id，失败信息成了「k.0.kind Field required」——一个字段缺失，看不出
+    真正的毛病是结构错位。删掉的还是模型自己的产出，不是后端的回声。
+
+    只有 evidence_ref 是后端拥有的回声（见
+    _CURRENT_KNOWN_BACKEND_OWNED_ECHO_KEYS），其余一律留给严格 schema 去拒，
+    拒绝时才会逐个点名模型实际发来的字段。
+    """
+    payload = {
+        "k": [{
+            "decision_id": "K:E001:76d7d9e3d0d4e4cd93b91388",
+            "f": [],
+            "k": [],
+            "n": [{
+                "evidence_ref": "E001",
+                "identity_label": "孟浩",
+                "kind": "onscreen",
+                "name_kind": "personal_name",
+            }],
+        }],
+        "n": [],
+        "f": [],
+    }
+
+    normalized = portraits._normalize_current_identity_payload(payload)
+
+    assert normalized["k"][0]["n"][0]["identity_label"] == "孟浩", (
+        "模型判出来的 N 决议不能被当成回声字段悄悄删掉"
+    )
+    with pytest.raises(ValidationError) as rejected:
+        portraits.CurrentIdentityCandidateResponse.model_validate(normalized)
+    message = str(rejected.value)
+    assert "Extra inputs are not permitted" in message
+    for misplaced in ("k.0.f", "k.0.k", "k.0.n"):
+        assert misplaced in message, f"报错必须点名错位的 {misplaced}"
+
+
 def test_identity_discovery_failure_gets_dedicated_no_retry_budget_hint() -> None:
     """身份判定 format_retry_limit=semantic_retry_limit=0（fail-closed，见
     app/portraits.py 身份判定调用点与 _current_identity_projection_errors 附近

@@ -1512,30 +1512,45 @@ def _current_identity_reconcile_as_single(options: list[dict]) -> dict | None:
     return None
 
 
+# The one field a K decision may echo without adding anything: its token
+# already binds the evidence, so ``evidence_ref`` alongside it restates a
+# receipt the backend owns outright (production EP4: ``k.0.evidence_ref Extra
+# inputs are not permitted`` failed a whole episode over that echo).  Naming it
+# is the point -- "drop whatever the K schema does not declare" reads like the
+# same rule but is a different, much wider one, and it deletes model-authored
+# content too.  Real incident run_690cebdd45a7 (ep_bf9051d167a7 EP1): the model
+# nested the whole K/N/F wire one level too deep, writing ``f``/``k``/``n``
+# inside ``k[0]``; the wider rule swept all three away, leaving ``{"decision_id":
+# ...}``, and the failure surfaced as "k.0.kind Field required" -- a missing
+# field, with no trace of the misplaced N branch that was the actual fault.
+_CURRENT_KNOWN_BACKEND_OWNED_ECHO_KEYS = frozenset({"evidence_ref"})
+
+
 def _normalize_current_identity_payload(payload: dict) -> dict:
     """Drop fields the K/N/F wire declares redundant before strict validation.
 
-    A K decision's token already binds its evidence, so an ``evidence_ref``
-    echoed alongside it carries nothing the backend does not own -- yet the
-    strict ``extra="forbid"`` shape turns that echo into a whole-episode
-    format failure (production EP4: ``k.0.evidence_ref Extra inputs are not
-    permitted``).  Only keys the model has no authority over are removed;
-    anything unknown on N/F stays and still fails closed, because those
-    branches carry model-authored content the backend cannot second-guess.
+    Only keys the model has no authority over are removed (see
+    ``_CURRENT_KNOWN_BACKEND_OWNED_ECHO_KEYS``); anything else it wrote stays
+    and still fails closed, on K exactly as on N/F, because those bytes are
+    model-authored content the backend cannot second-guess -- and because a
+    strict-schema rejection that names what the model actually sent is the
+    only thing that makes the next failure diagnosable.
     """
     if not isinstance(payload, dict):
         return payload
     known = payload.get("k")
     if not isinstance(known, list):
         return payload
-    allowed = set(CurrentKnownIdentityDecision.model_fields)
     cleaned: list[dict] = []
     changed = False
     for item in known:
         if not isinstance(item, dict):
             cleaned.append(item)
             continue
-        trimmed = {key: value for key, value in item.items() if key in allowed}
+        trimmed = {
+            key: value for key, value in item.items()
+            if key not in _CURRENT_KNOWN_BACKEND_OWNED_ECHO_KEYS
+        }
         changed = changed or trimmed != item
         cleaned.append(trimmed)
     if not changed:
