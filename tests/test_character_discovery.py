@@ -3874,6 +3874,65 @@ def test_attempt14_call_63221_current_rf9_preserves_all_distinct_identities(
     )
 
 
+def test_label_the_model_split_across_individuals_is_not_impersonation(
+    monkeypatch,
+) -> None:
+    """一个称谓在本集指向多个个体时，「冒用已登记身份」不成立。
+
+    生产 EP1：人物谱里存着一张主名为「绿袍男子」的卡，而第 1 章原文写的是
+    「两个穿着绿色长袍的男子」。模型判得完全正确——两条 functional、两个不同
+    的 functional_identity_key、scope_qualifier 分别标着之一/之二——却被按冒用
+    硬失败，整集映射包卡死，且因为输入不变，重试必然再失败。
+
+    「称谓字面相同即身份相同」这个前提只对真名成立。判据改为看模型在这批证据
+    里把该称谓分给了几个个体，取自本次输入本身，不含词表。
+    """
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps(_identity_wire_for_call(
+            kwargs,
+            [
+                {
+                    "source_label": "绿袍男子",
+                    "identity_kind": "functional",
+                    "functional_identity_key": "F4",
+                    "kind": "onscreen",
+                    "evidence": "绿袍男子",
+                    "scope_qualifier": "两个绿袍男子之一",
+                },
+                {
+                    "source_label": "绿袍男子",
+                    "identity_kind": "functional",
+                    "functional_identity_key": "F5",
+                    "kind": "onscreen",
+                    "evidence": "绿袍男子",
+                    "scope_qualifier": "两个绿袍男子之二",
+                },
+            ],
+            messages=messages,
+        ), ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    asyncio.run(portraits.discover_character_candidates(
+        "两个绿袍男子在前领路，孟浩跟在身后。",
+        Bible(
+            world=World(visual_style_canonical="国风"),
+            characters=[Character(
+                name="绿袍男子",
+                role="反派",
+                appearance_canonical="身着绿色袍服的男子",
+            )],
+        ),
+        1,
+    ))
+
+    assert calls == 1
+
+
 def test_attempt14_call_63221_old_functional_bible_name_fails_once(
     monkeypatch,
 ) -> None:

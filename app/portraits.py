@@ -1733,6 +1733,29 @@ def _project_current_identity_response(
         if count > 1 and label and key
     }
 
+    # 反过来，同一个 source_label 被分给**不同**的 functional_identity_key，是
+    # 模型在说「本集有好几个人都这么称呼」。这样的称谓在本集就不指向唯一身份，
+    # 下面的「冒用已登记身份」判据对它不成立——那条判据默认了「称谓字面相同即
+    # 身份相同」，这对真名成立，对外貌类描述不成立。
+    #
+    # 生产 EP1：人物谱里存着一张主名为「绿袍男子」的卡（描述性称呼建卡，本身
+    # 就是上游的问题），而第 1 章原文写的是「两个穿着绿色长袍的男子」。模型判
+    # 得完全正确——两条 functional，F4/F5，scope_qualifier 分别是「两个绿袍男子
+    # 之一/之二」——却被按「冒用」硬失败，整集映射包卡死且重试必然再失败。
+    #
+    # 判据取自本次输入里模型自己的产出，不含任何词表：一个称谓是不是通称，由
+    # 它在这批证据里指向几个个体决定。王有材那类真正的降级误判仍然被拦：那种
+    # 情形下模型只会报一条，label 不会跨 key 复用。
+    functional_keys_by_label: dict[str, set[str]] = {}
+    for item in value.f:
+        label = str(item.source_label or "").strip()
+        key = str(item.functional_identity_key or "").strip()
+        if label and key:
+            functional_keys_by_label.setdefault(label, set()).add(key)
+    labels_shared_across_individuals = {
+        label for label, keys in functional_keys_by_label.items() if len(keys) > 1
+    }
+
     # 同批折叠通道（absorbed_functional_keys，见设计文档 §4.2 "同批折叠
     # 通道"）需要反查每个可吸收 token 背后的 (source_label, scope_qualifier)，
     # 用于纯函数式计算该 functional 组当时会被分配到的 visual_entity_id。
@@ -1851,6 +1874,7 @@ def _project_current_identity_response(
         if (
             identity_kind == "functional"
             and source_label in (reserved_authority_labels or set())
+            and source_label not in labels_shared_across_individuals
         ):
             errors.append(
                 "current functional 不得冒用已登记身份称谓："
