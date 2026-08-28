@@ -205,7 +205,7 @@ export default function EpisodesPage() {
         status={status}
         hasData={false}
         objectName="分集规划"
-        loadingText="正在加载分集、剧本与分镜制作状态…"
+        loadingText="正在加载分集、映射包与分镜制作状态…"
         emptyText="未找到可展示的分集规划，请刷新后重试。"
         onRetry={() => void refresh()}
       >
@@ -272,7 +272,7 @@ export default function EpisodesPage() {
     } else if (batchConfirm === 'screenplay') {
       await act(async () => {
         const result = await api.post(`/projects/${p.id}/screenplay-all`) as { started: number }
-        toast(`已为 ${result.started} 集发起剧本生成`)
+        toast(`已为 ${result.started} 集发起映射包生成`)
       })
     } else {
       await act(async () => {
@@ -293,7 +293,7 @@ export default function EpisodesPage() {
         toast(
           result.renumbered
             ? `第${target.episode_no}集已删除；后续 ${result.renumbered} 集已自动补齐序号`
-            : `第${target.episode_no}集已删除；剧本、分镜、生成和成片台将不再显示该集`,
+            : `第${target.episode_no}集已删除；映射包、分镜、生成和成片台将不再显示该集`,
         )
         if (episodeId === target.id) go('episodes', p.id, null)
       },
@@ -305,7 +305,7 @@ export default function EpisodesPage() {
       <header className="desk-head">
         <div className="crumb">书房 / {formatBookTitle(p.name)}</div>
         <PrepSubnav current="episodes" />
-        <h1>分集规划 <span className="sub">{p.chapter_count ?? 0} 章 · {totalEpisodes} 集 · 追踪每集从剧本到成片的制作状态</span></h1>
+        <h1>分集规划 <span className="sub">{p.chapter_count ?? 0} 章 · {totalEpisodes} 集 · 追踪每集从映射包到成片的制作状态</span></h1>
         <hr className="rule" />
       </header>
 
@@ -329,8 +329,8 @@ export default function EpisodesPage() {
 
       <section className="episode-overview">
         <div><span>全部分集</span><b>{totalEpisodes}</b><small>每章一集</small></div>
-        <div><span>待写剧本</span><b>{screenplayTodoCount}</b><small>可批量生成</small></div>
-        <div><span>制作进行中</span><b>{screenplayActiveCount + scriptingCount}</b><small>剧本 / 分镜</small></div>
+        <div><span>待写映射包</span><b>{screenplayTodoCount}</b><small>可批量生成</small></div>
+        <div><span>制作进行中</span><b>{screenplayActiveCount + scriptingCount}</b><small>映射包 / 分镜</small></div>
         <div><span>已成片</span><b>{counts?.done ?? eps.filter(ep => ep.status === 'done').length}</b><small>可进入交付</small></div>
       </section>
 
@@ -360,14 +360,14 @@ export default function EpisodesPage() {
                 title={p.plan_status === 'running' ? '分集规划正在运行，请等待完成' : busy ? '正在处理上一项操作' : ''}
                 onClick={() => setBatchConfirm('replan')}>{totalEpisodes ? '重新分集' : '开始分集'}</button>
               <button type="button" className="btn" aria-label={busy || p.plan_status === 'running' || screenplayTodoCount === 0
-                ? `生成待办剧本，暂不可用：${p.plan_status === 'running' ? '需等待分集规划完成' : screenplayTodoCount === 0 ? '当前没有待生成剧本的分集' : '正在处理上一项操作'}`
-                : `生成待办剧本，共 ${screenplayTodoCount} 集`} disabled={busy || p.plan_status === 'running' || screenplayTodoCount === 0}
-                title={p.plan_status === 'running' ? '需等待分集规划完成' : screenplayTodoCount === 0 ? '当前没有待生成剧本的分集' : busy ? '正在处理上一项操作' : ''}
-                onClick={() => setBatchConfirm('screenplay')}>生成待办剧本（{screenplayTodoCount} 集）</button>
+                ? `生成待办映射包，暂不可用：${p.plan_status === 'running' ? '需等待分集规划完成' : screenplayTodoCount === 0 ? '当前没有待生成映射包的分集' : '正在处理上一项操作'}`
+                : `生成待办映射包，共 ${screenplayTodoCount} 集`} disabled={busy || p.plan_status === 'running' || screenplayTodoCount === 0}
+                title={p.plan_status === 'running' ? '需等待分集规划完成' : screenplayTodoCount === 0 ? '当前没有待生成映射包的分集' : busy ? '正在处理上一项操作' : ''}
+                onClick={() => setBatchConfirm('screenplay')}>生成待办映射包（{screenplayTodoCount} 集）</button>
               <button type="button" className="btn" aria-label={busy || p.plan_status === 'running' || pendingCount === 0
-                ? `生成待办分镜，暂不可用：${p.plan_status === 'running' ? '需等待分集规划完成' : pendingCount === 0 ? '当前没有剧本已就绪的待生成分镜' : '正在处理上一项操作'}`
+                ? `生成待办分镜，暂不可用：${p.plan_status === 'running' ? '需等待分集规划完成' : pendingCount === 0 ? '当前没有映射包已就绪的待生成分镜' : '正在处理上一项操作'}`
                 : `生成待办分镜，共 ${pendingCount} 集`} disabled={busy || p.plan_status === 'running' || pendingCount === 0}
-                title={p.plan_status === 'running' ? '需等待分集规划完成' : pendingCount === 0 ? '当前没有剧本已就绪的待生成分镜' : busy ? '正在处理上一项操作' : ''}
+                title={p.plan_status === 'running' ? '需等待分集规划完成' : pendingCount === 0 ? '当前没有映射包已就绪的待生成分镜' : busy ? '正在处理上一项操作' : ''}
                 onClick={() => setBatchConfirm('storyboard')}>生成待办分镜（{pendingCount} 集）</button>
               <button
                 type="button"
@@ -381,9 +381,9 @@ export default function EpisodesPage() {
               </button>
               {screenplayActiveCount > 0 && (
                 <button className="btn ghost danger" disabled={busy}
-                  aria-label={busy ? '停止批量剧本，暂不可用：正在处理上一项操作' : `停止批量剧本，共 ${screenplayActiveCount} 集在运行或排队`}
+                  aria-label={busy ? '停止批量映射包，暂不可用：正在处理上一项操作' : `停止批量映射包，共 ${screenplayActiveCount} 集在运行或排队`}
                   onClick={() => setBatchStopConfirm(true)}>
-                  停止批量剧本
+                  停止批量映射包
                 </button>
               )}
             </div>
@@ -391,8 +391,8 @@ export default function EpisodesPage() {
         </div>
         <div className="episode-active-tasks">
           {p.plan_status === 'running' && <span className="stamp gold">分集中（依据原文规划，篇幅长时需数分钟）</span>}
-          {screenplayRunningCount > 0 && <span className="stamp gold">剧本中（{screenplayRunningCount} 集）</span>}
-          {screenplayQueuedCount > 0 && <span className="stamp blue">剧本排队（{screenplayQueuedCount} 集）</span>}
+          {screenplayRunningCount > 0 && <span className="stamp gold">映射包中（{screenplayRunningCount} 集）</span>}
+          {screenplayQueuedCount > 0 && <span className="stamp blue">映射包排队（{screenplayQueuedCount} 集）</span>}
           {scriptingCount > 0 && <span className="stamp gold">分镜中（{scriptingCount} 集）</span>}
           {sbMetrics && (sbMetrics.active_storyboard_runs > 0 || sbMetrics.waiting_human > 0 || sbMetrics.paused > 0 || sbMetrics.repairing > 0) && (
             <span className="stamp grey">
@@ -405,7 +405,7 @@ export default function EpisodesPage() {
           )}
           {/* 分集规划是确定性正则切分（run_regex_plan，不走模型），毫秒级完成，不需要计时。 */}
           <ServerTaskTimer
-            label="批量剧本"
+            label="批量映射包"
             startedAt={p.task_timings?.screenplay_batch?.started_at}
             finishedAt={p.task_timings?.screenplay_batch?.finished_at}
             running={screenplayActiveCount > 0}
@@ -450,7 +450,7 @@ export default function EpisodesPage() {
           const destination = ep.status === 'done' ? 'cinema'
             : ['confirmed', 'generating', 'paused_budget'].includes(ep.status) ? 'wall'
               : ep.screenplay_status === 'ready' ? 'board' : 'script'
-          const destinationLabel = destination === 'cinema' ? '查看成片' : destination === 'wall' ? '进入生成台' : destination === 'board' ? '继续分镜' : '继续剧本'
+          const destinationLabel = destination === 'cinema' ? '查看成片' : destination === 'wall' ? '进入生成台' : destination === 'board' ? '继续分镜' : '继续映射包'
           const targetDurationEditable = ['pending', 'failed'].includes(ep.screenplay_status)
             && ['planned', 'drafting'].includes(ep.status)
             && !ep.screenplay_artifact_id
@@ -458,7 +458,7 @@ export default function EpisodesPage() {
           const targetDurationReason = busy
             ? '正在处理上一项操作'
             : !targetDurationEditable
-              ? '已有剧本或下游产物，为避免版本不一致暂不可修改'
+              ? '已有映射包或下游产物，为避免版本不一致暂不可修改'
               : ''
           return (
           <div key={ep.id} className={`episode-row${focusEpisodeNo === ep.episode_no ? ' focus-highlight' : ''}`} data-episode-no={ep.episode_no}>
@@ -499,7 +499,7 @@ export default function EpisodesPage() {
                 <EpisodeStatusStamp status={ep.status} issue={storyboardNotice?.message} />
               </div>
               <div className="episode-pipeline" aria-label="制作进度">
-                <span className={ep.screenplay_status === 'ready' ? 'done' : ['queued', 'running'].includes(ep.screenplay_status) ? 'active' : ''}>剧本</span>
+                <span className={ep.screenplay_status === 'ready' ? 'done' : ['queued', 'running'].includes(ep.screenplay_status) ? 'active' : ''}>映射包</span>
                 <i /><span className={['scripted','confirmed','generating','done'].includes(ep.status) ? 'done' : ep.status === 'scripting' ? 'active' : ''}>分镜</span>
                 <i /><span className={['confirmed','generating','done'].includes(ep.status) ? 'done' : ''}>视频</span>
                 <i /><span className={ep.status === 'done' ? 'done' : ''}>成片</span>
@@ -533,7 +533,7 @@ export default function EpisodesPage() {
             <p>
               {query || statusFilter !== 'all'
                 ? '可清除搜索词和制作状态筛选，重新查看全部分集。'
-                : '先根据原文章节生成分集规划，再继续批量制作剧本和分镜。'}
+                : '先根据原文章节生成分集规划，再继续批量制作映射包和分镜。'}
             </p>
             {query || statusFilter !== 'all' ? (
               <button
@@ -628,14 +628,14 @@ export default function EpisodesPage() {
       )}
       {batchStopConfirm && (
         <DecisionDialog
-          title="停止批量剧本生成？"
+          title="停止批量映射包生成？"
           summary={`当前有 ${screenplayRunningCount} 集正在生成，${screenplayQueuedCount} 集排队`}
-          message="系统会逐集取消仍在运行的任务，并把每集恢复到可重新生成或继续修复的状态；已完成剧本不会删除。"
+          message="系统会逐集取消仍在运行的任务，并把每集恢复到可重新生成或继续修复的状态；已完成映射包不会删除。"
           details={[
-            '已写入的工作副本和已发布剧本会保留',
+            '已写入的工作副本和已发布映射包会保留',
             '正在执行的模型请求可能已产生费用，停止不会退回已发生费用',
           ]}
-          confirmLabel="确认停止这些剧本任务"
+          confirmLabel="确认停止这些映射包任务"
           cancelLabel="继续批量生成"
           danger
           onClose={() => setBatchStopConfirm(false)}
@@ -643,7 +643,7 @@ export default function EpisodesPage() {
             setBatchStopConfirm(false)
             void act(async () => {
               const result = await api.post(`/projects/${p.id}/screenplay-all/cancel`) as { stopped: number }
-              toast(`已停止 ${result.stopped} 集剧本生成；已完成剧本和工作副本保留`)
+              toast(`已停止 ${result.stopped} 集映射包生成；已完成映射包和工作副本保留`)
             })
           }}
         />
@@ -652,12 +652,12 @@ export default function EpisodesPage() {
         <DecisionDialog
           title={`删除第${deleteTarget.episode_no}集？`}
           summary={`《${deleteTarget.title || `第${deleteTarget.episode_no}集`}》将从项目中永久移除`}
-          message="该集的剧本、分镜、生成素材、成片和制作记录都会删除；删除后，后续分集会自动前移补齐序号，四个制作台会同步更新。"
+          message="该集的映射包、分镜、生成素材、成片和制作记录都会删除；删除后，后续分集会自动前移补齐序号，四个制作台会同步更新。"
           details={[
             `原文章节 ${deleteTarget.source_chapters.join('–')} 会保留，仍可在阅读原著中查看`,
             deleteTarget.shot_count
               ? `将同时删除 ${deleteTarget.shot_count} 个分镜及其视频、图片和成片文件`
-              : '当前没有分镜，但已有剧本或制作记录也会一并删除',
+              : '当前没有分镜，但已有映射包或制作记录也会一并删除',
             `已发生费用 ¥${deleteTarget.cost_cny.toFixed(1)} 不会退回；以后重新规划全部分集时，本章可能被重新建立`,
           ]}
           confirmLabel="确认永久删除本集"
@@ -696,8 +696,8 @@ function EpisodeBatchConfirmDialog({
       title: totalEpisodes ? '重新规划全部分集？' : '开始规划分集？',
       count: `${totalEpisodes || '全部'} 集`,
       impact: totalEpisodes
-        ? '将清空当前全部分集及其剧本、分镜、视频和交付记录，再按原著重新建立分集。'
-        : '将依据原著章节创建分集，不会启动剧本、分镜或视频生成。',
+        ? '将清空当前全部分集及其映射包、分镜、视频和交付记录，再按原著重新建立分集。'
+        : '将依据原著章节创建分集，不会启动映射包、分镜或视频生成。',
       cost: totalEpisodes
         ? '重新规划可能调用文本模型并产生费用；已发生的旧任务费用不会退回。'
         : '分集规划可能调用文本模型并产生费用，实际金额以调用日志为准。',
@@ -706,17 +706,17 @@ function EpisodeBatchConfirmDialog({
     }
     : action === 'screenplay'
       ? {
-        title: '批量生成待办剧本？',
+        title: '批量生成待办映射包？',
         count: `${screenplayTodoCount} 集`,
-        impact: '只处理待生成、失败或需要修订的剧本；已完成且无需重建的剧本不会重复生成。',
-        cost: '每集会调用文本模型，可能产生模型费用；实际金额以调用日志为准，失败不会覆盖已完成剧本。',
-        confirm: '确认生成待办剧本',
+        impact: '只处理待生成、失败或需要修订的映射包；已完成且无需重建的映射包不会重复生成。',
+        cost: '每集会调用文本模型，可能产生模型费用；实际金额以调用日志为准，失败不会覆盖已完成映射包。',
+        confirm: '确认生成待办映射包',
         danger: false,
       }
       : {
         title: '批量生成待办分镜？',
         count: `${storyboardTodoCount} 集`,
-        impact: '只处理剧本已就绪或可从恢复点继续的分集；不会自动确认分镜，也不会启动付费视频。',
+        impact: '只处理映射包已就绪或可从恢复点继续的分集；不会自动确认分镜，也不会启动付费视频。',
         cost: '逐集调用文本模型，可能产生模型费用；实际金额以调用日志为准。',
         confirm: '确认生成待办分镜',
         danger: false,
