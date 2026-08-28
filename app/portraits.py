@@ -4407,6 +4407,10 @@ async def resolve_future_identity_candidates(
 3. 证据显示该组就是「已有人物权威目录」中的人时，只能选对应那名 authority 的 K: 决议；
    该 token 已绑定 authority 与原文证据，两个侧载字段都必须为空；
    若目录里没有为该组与该 authority 列出 K: 决议，则只能选 F: 决议。
+   K: 成立的判据是证据原文把这个称谓和那个人写成同一个人：同一个动作或同一段
+   经历换着两种称呼来写、有人点破「原来他就是某某」、或此人自述。称谓与那个
+   人的名字同时出现在一段话里不算数——两人对答、一方提起另一方、并列出场、
+   一方是另一方的亲属或下属，都是两个人同时在场，这种情况选 F: 决议。
 4. 只有证据目录首次逐字揭示了不在已有权威目录中的稳定真名，才能选 N: 决议；
    revealed_names 写真名，reveal_evidence_ids 选包含该真名的 evidence_id，
    revealed_name_kinds 写 personal_name。
