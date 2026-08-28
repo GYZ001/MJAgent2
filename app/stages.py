@@ -2929,6 +2929,12 @@ def _attach_roster_source_appellations(
         text = (raw or "").strip()
         if not text or text in known:
             continue
+        # 这条路径为了不丢名单已绑定的称呼，绕开了 _alias_declaration_verified
+        # 的证据闸，判据弱到只剩「80 字窗口内与角色名共现」。词形闸不属于证据
+        # 强弱问题：一个切碎的短语残片无论共现多少次都不指代任何人，登记它只会
+        # 让下游的子串匹配到处误命中。
+        if not _alias_text_is_independent_appellation(text):
+            continue
         found = None
         for anchor in list(known):
             if not anchor:
@@ -3546,6 +3552,23 @@ def _quote_comparison_variants(quote: str) -> list[str]:
     return variants
 
 
+def _alias_text_is_independent_appellation(text: str) -> bool:
+    """别名是否是能独立指代一个人的称呼，而不是从更长短语里切出来的残片。
+
+    结构性判据，不对任何具体称谓做特判：现代汉语里「的」只作结构助词，永远
+    后接于修饰语，所以一个以「的」起头的字符串必然是从更长名词短语的中间切
+    开的，它自己不指代任何人。判据只认这一个字——「地」「得」虽然也常作助词，
+    却能合法起头（「地煞老祖」「得道真人」），纳进来会误伤真称呼。
+
+    真实事故：模型从原文「杂役处的师兄」里截出「的师兄」登记成主角孟浩的别名，
+    而那句话说的根本不是他。这类残片进人物谱之后，下游是按子串匹配用它的：
+    app/production/prep_pack.py 的群演候选集（``form in source_text``）、认知卡
+    的在场判定都会在任何含「……的师兄」字样的章节里命中，把无关角色拉进候选。
+    """
+    stripped = (text or "").strip()
+    return bool(stripped) and stripped[0] != "的"
+
+
 def _alias_declaration_verified(
     chapters_by_idx: dict[int, str],
     anchor_texts: set[str],
@@ -3555,11 +3578,13 @@ def _alias_declaration_verified(
 ) -> bool:
     """别名申报的代码核验：结构性判据，不对任何具体称谓做特判（禁止黑白名单式修复）。
 
-    三个条件必须同时成立，任一不满足就不登记（不确定不登记是安全默认）：
-    1. evidence_quote 是 evidence_chapter_index 对应章节原文的逐字子串；
-    2. text（申报的别名本身）是 evidence_quote 的子串——证据必须真的提到这个别名，
+    四个条件必须同时成立，任一不满足就不登记（不确定不登记是安全默认）：
+    1. text 本身是个能独立指代人的称呼，不是从更长短语里切出来的残片——见
+       `_alias_text_is_independent_appellation`；
+    2. evidence_quote 是 evidence_chapter_index 对应章节原文的逐字子串；
+    3. text（申报的别名本身）是 evidence_quote 的子串——证据必须真的提到这个别名，
        不能是一句不相干的话；
-    3. 该章节原文里还能找到 anchor_texts（角色规范名或已确认的其它别名）中的至少一项——
+    4. 该章节原文里还能找到 anchor_texts（角色规范名或已确认的其它别名）中的至少一项——
        证明这条别名与该角色存在共现依据，不是张冠李戴。
 
     条件 1、2 都按 `_quote_comparison_variants` 产出的候选引句形式判断（原始引句 /
@@ -3569,6 +3594,8 @@ def _alias_declaration_verified(
     text = (text or "").strip()
     quote = (evidence_quote or "").strip()
     if not text or not quote:
+        return False
+    if not _alias_text_is_independent_appellation(text):
         return False
     chapter_text = chapters_by_idx.get(evidence_chapter_index, "")
     if not chapter_text:

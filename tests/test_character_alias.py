@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import types
 
 import pytest
 
@@ -181,6 +182,85 @@ def test_alias_rejected_when_alias_text_not_in_quote() -> None:
     assert stages._alias_declaration_verified(
         chapters_by_idx, {"许清"}, "不存在的别名", 13, QUOTE_13,
     ) is False
+
+
+# ---------- 2a. 词形闸：切碎的短语残片不是称呼 ----------
+#
+# 真实事故（proj_195be7df1fd6，主角孟浩）：模型从原文「杂役处的师兄只让我们每天
+# 每人十木」里截出「的师兄」登记成孟浩的别名——那句话是孟浩自己说的，说的是别人。
+# 三条既有证据闸对它全都无能为力：引句逐字在原文里、「的师兄」确实是引句的子串、
+# 该章也确实出现过「孟浩」。残片登记之后，下游按子串匹配用它（prep_pack 群演候选
+# 集、认知卡在场判定），任何含「……的师兄」字样的章节都会把孟浩误拉进候选。
+
+CHAPTERS_FRAGMENT = [
+    {"idx": 3, "title": "第三章", "content": (
+        "孟浩迟疑开口：可杂役处的师兄只让我们每天每人十木。"
+    )},
+]
+
+QUOTE_FRAGMENT = "孟浩迟疑开口：可杂役处的师兄只让我们每天每人十木"
+
+
+def test_alias_rejected_when_text_is_leading_particle_fragment() -> None:
+    """以结构助词「的」起头的字符串是更长短语的残片，不指代任何人 → 拒绝登记。
+
+    这条单独把词形闸隔离出来验证：三条证据闸在这份数据上全部满足（引句逐字在
+    原文、别名是引句子串、本章出现过锚点「孟浩」），拒绝只能来自词形闸本身。
+    """
+    from app import stages
+
+    chapters_by_idx = stages._chapters_by_idx(CHAPTERS_FRAGMENT)
+    assert QUOTE_FRAGMENT in CHAPTERS_FRAGMENT[0]["content"]
+    assert "的师兄" in QUOTE_FRAGMENT
+    assert "孟浩" in CHAPTERS_FRAGMENT[0]["content"]
+    assert stages._alias_declaration_verified(
+        chapters_by_idx, {"孟浩"}, "的师兄", 3, QUOTE_FRAGMENT,
+    ) is False
+
+
+def test_alias_accepted_when_text_merely_contains_particle() -> None:
+    """词形闸只认起头那一个字：称呼内部含「的」不受影响。"""
+    from app import stages
+
+    chapters = [{"idx": 3, "title": "第三章", "content": (
+        "众人都唤他做孟浩，背地里却叫他穷酸的书生。"
+    )}]
+    chapters_by_idx = stages._chapters_by_idx(chapters)
+    assert stages._alias_declaration_verified(
+        chapters_by_idx, {"孟浩"}, "穷酸的书生", 3,
+        "众人都唤他做孟浩，背地里却叫他穷酸的书生",
+    ) is True
+
+
+def test_alias_independence_gate_keeps_legitimate_particle_initial_names() -> None:
+    """「地」「得」能合法起头（地煞老祖／得道真人），不得纳入词形闸误伤真称呼。"""
+    from app import stages
+
+    assert stages._alias_text_is_independent_appellation("地煞老祖") is True
+    assert stages._alias_text_is_independent_appellation("得道真人") is True
+    assert stages._alias_text_is_independent_appellation("的师兄") is False
+    assert stages._alias_text_is_independent_appellation("  的胖子 ") is False
+    assert stages._alias_text_is_independent_appellation("") is False
+
+
+def test_roster_appellation_backfill_skips_phrase_fragment() -> None:
+    """名单补录这条路径绕开了证据闸，词形闸必须在这里也拦住残片。
+
+    真实事故里「的师兄」正是从这条路进的库：它只要求 80 字窗口内与角色名共现，
+    拿 _alias_declaration_verified 回测该条目会得到 False，证明它从未过闸。
+    """
+    from app import stages
+    from app.schemas import Character
+
+    character = Character(name="孟浩", role="主角", appearance_canonical="书生模样")
+    entry = types.SimpleNamespace(source_appellations=["的师兄", "孟才子"])
+    chapters = [{"idx": 3, "title": "第三章", "content": (
+        "孟浩迟疑开口：可杂役处的师兄只让我们每天每人十木。孟才子救我，那少年喊道。"
+    )}]
+
+    stages._attach_roster_source_appellations(character, entry, chapters)
+
+    assert [alias.text for alias in character.aliases] == ["孟才子"]
 
 
 # ---------- 2b. 引号规范化：修复 A（回填 dry-run 12 条只过 0 条的真因） ----------
