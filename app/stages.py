@@ -2153,6 +2153,34 @@ def _roster_label_needs_identity_resolution(
     )
 
 
+def _roster_candidate_stands_alone(
+    candidate: "_RosterCandidate", chapters_by_idx: dict[int, str],
+) -> bool:
+    """归并不成立时，这个称呼在全书是否已有独立存在规模。
+
+    身份归一裁决回答的只是「这个称呼能不能并到名单里另一个实体身上」。它答不出来
+    说明并不过去，不说明称呼背后没有人——把这两件事当成一件，会让「没有正式姓名、
+    全书只以代称出现」的角色结构上必然出局：它因 name_form=referential 被送去归一，
+    而归一的候选实体名单里恰恰没有它自己，于是必判 uncertain，随即被当泛称删除。
+
+    真实故障（《王六郎》proj_177d147e16c7）：主角「许某」全篇提及 34 次、自报 3 条
+    在场证据全部通过结构闸，被归一裁决拿去和「王六郎/异史氏」比对判 uncertain 后
+    整个丢弃，必收名单只剩 1 人；人物谱里那张「许」卡是主生成模型事后自造的单字名，
+    拿它做子串检索会命中「也许」「许多」「许姓」。
+
+    判据取全书提及规模，与统计准入通道同一门槛（`BIBLE_STATISTICAL_MIN_MENTIONS`）：
+    达标只是把它放回普通候选，能不能进必收名单仍由三条准入通道各自判。同一篇里
+    「妇人」6 次、「店主人」3 次照旧删除；《我欲封天》「绿袍男子」6 次也仍在门外。
+    """
+    terms = _candidate_appellations(candidate)
+    if not terms:
+        return False
+    mentions = sum(
+        text.count(term) for text in chapters_by_idx.values() for term in terms
+    )
+    return mentions >= BIBLE_STATISTICAL_MIN_MENTIONS
+
+
 def _candidate_appellations(candidate: _RosterCandidate) -> set[str]:
     return {
         value.strip() for value in [
@@ -2403,6 +2431,10 @@ async def _resolve_generic_character_candidates(
             if dossier:
                 evidence_blocks.append(json.dumps(dossier, ensure_ascii=False))
         if not evidence_blocks:
+            # 卷宗都建不出来就没法问归一，但「问不成」同样不是「这个人不存在」，
+            # 判据与归一失败那条路径共用（见 `_roster_candidate_stands_alone`）。
+            if _roster_candidate_stands_alone(candidate, chapters_by_idx):
+                kept.append(candidate)
             continue
         prompt = f"""任务：判断描述性称呼「{label}」是否是候选实体名单中的同一个人物。
 
@@ -2457,8 +2489,12 @@ async def _resolve_generic_character_candidates(
         for candidate, prompt, evidence_blocks in jobs
     ))
     # 合并回 specific 必须串行：两个泛称可能指向同一实体，并行写 aliases 会丢条目。
-    for item in resolved:
+    for (asked, _prompt, _blocks), item in zip(jobs, resolved, strict=True):
         if item is None:
+            # 归并不成立：并不到别人身上的称呼，只有在全书没有独立存在规模时才是
+            # 泛称；够规模的放回普通候选，由三条准入通道决定去留。
+            if _roster_candidate_stands_alone(asked, chapters_by_idx):
+                kept.append(asked)
             continue
         candidate, resolution = item
         target = next((

@@ -655,6 +655,98 @@ async def test_demonstrative_description_is_not_kept_as_character(monkeypatch) -
     assert [item.primary_appellation for item in result] == ["孟浩"]
 
 
+def _wang_liulang_chapter() -> str:
+    """《王六郎》骨架：主角全篇只以代称「许某」出现，另有两个真正的路人称呼。"""
+    lines = ["有个姓许的人，家住淄川城北郊，以捕鱼为业。"]
+    lines += [f"许某在河边撒网第{i}回，独自饮酒。" for i in range(1, 31)]
+    lines += [
+        "一天夜里，有个年轻人走来，在他身旁徘徊。",
+        "年轻人回答：‘我姓王，没有表字，叫我王六郎就好。’",
+        "果然，有个妇人抱着婴儿走来；来到河边，她失足掉进水中。",
+        "那妇人浑身淋漓地攀上河岸，抱起孩子径直离开了。",
+        "店主人吃惊地问：‘客人莫非姓许？’",
+    ]
+    return "".join(lines)
+
+
+@pytest.mark.asyncio
+async def test_lead_who_only_ever_has_a_referential_name_survives_resolution(
+    monkeypatch,
+) -> None:
+    """归并不到别人身上 ≠ 这个人不存在：全书只以代称出现的主角必须留在候选里。
+
+    真实故障（《王六郎》proj_177d147e16c7）：主角「许某」被资格裁决判 referential
+    送去身份归一，而归一的候选实体名单里只有「王六郎」，模型据实判 uncertain，
+    随后整个候选被当泛称删除，必收名单只剩 1 人。
+    """
+    async def fake_structured(*_args, **_kwargs):
+        return stages._RosterIdentityResolution(
+            verdict="uncertain", canonical_appellation="", supporting_chapter_index=-1,
+        )
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
+    ev = stages._RosterOnstageEvidence
+    chapter = _wang_liulang_chapter()
+    result = await stages._resolve_generic_character_candidates(
+        [
+            stages._RosterCandidate(
+                primary_appellation="许某", aliases=["姓许的人"],
+                name_form="referential",
+                onstage_evidence=[
+                    ev(chapter_index=1, quote="许某在河边撒网第1回，独自饮酒。"),
+                    ev(chapter_index=1, quote="有个姓许的人，家住淄川城北郊，以捕鱼为业。"),
+                ],
+            ),
+            stages._RosterCandidate(
+                primary_appellation="王六郎", name_form="personal_name",
+                onstage_evidence=[
+                    ev(chapter_index=1, quote="年轻人回答：‘我姓王，没有表字，叫我王六郎就好。’"),
+                ],
+            ),
+            stages._RosterCandidate(
+                primary_appellation="妇人", aliases=["女子"], name_form="referential",
+                onstage_evidence=[
+                    ev(chapter_index=1, quote="那妇人浑身淋漓地攀上河岸，抱起孩子径直离开了。"),
+                ],
+            ),
+            stages._RosterCandidate(
+                primary_appellation="店主人", name_form="referential",
+                onstage_evidence=[
+                    ev(chapter_index=1, quote="店主人吃惊地问：‘客人莫非姓许？’"),
+                ],
+            ),
+        ],
+        {1: chapter},
+        project_id="p1",
+    )
+    kept = {item.primary_appellation for item in result}
+    assert "许某" in kept, "全书 30+ 次出场的主角不能因为归并不成立而消失"
+    assert "王六郎" in kept
+    # 同一把刀下的真路人照旧删除：判据是全书存在规模，不是「代称一律留」。
+    assert "妇人" not in kept
+    assert "店主人" not in kept
+
+
+def test_standalone_presence_threshold_separates_lead_from_walk_ons() -> None:
+    """保留判据只看全书提及规模，与统计准入通道同一门槛。"""
+    chapter = _wang_liulang_chapter()
+    lead = stages._RosterCandidate(
+        primary_appellation="许某", aliases=["姓许的人"], name_form="referential",
+    )
+    walk_on = stages._RosterCandidate(
+        primary_appellation="妇人", aliases=["女子"], name_form="referential",
+    )
+    assert stages._roster_candidate_stands_alone(lead, {1: chapter}) is True
+    assert stages._roster_candidate_stands_alone(walk_on, {1: chapter}) is False
+    # 《我欲封天》的反例：类别称谓出现 6 次，仍在门外。
+    green = stages._RosterCandidate(
+        primary_appellation="绿袍男子", name_form="referential",
+    )
+    assert stages._roster_candidate_stands_alone(
+        green, {1: "绿袍男子" * 6},
+    ) is False
+
+
 @pytest.mark.asyncio
 async def test_personhood_gate_drops_treasure_and_keeps_person(monkeypatch) -> None:
     async def fake_structured(_messages, **kwargs):
