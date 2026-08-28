@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import types
 
 import pytest
 
@@ -253,7 +252,9 @@ def test_roster_appellation_backfill_skips_phrase_fragment() -> None:
     from app.schemas import Character
 
     character = Character(name="孟浩", role="主角", appearance_canonical="书生模样")
-    entry = types.SimpleNamespace(source_appellations=["的师兄", "孟才子"])
+    entry = stages._BibleRosterEntry(
+        name="孟浩", role="主角", source_appellations=["的师兄", "孟才子"],
+    )
     chapters = [{"idx": 3, "title": "第三章", "content": (
         "孟浩迟疑开口：可杂役处的师兄只让我们每天每人十木。孟才子救我，那少年喊道。"
     )}]

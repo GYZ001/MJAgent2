@@ -2941,14 +2941,26 @@ def _attach_roster_source_appellations(
     from app.portraits import IDENTITY_NAME_FORM_REFERENTIAL
 
     known = {character.name, *(item.text for item in character.aliases if item.text)}
+    unverified = set(entry.unverified_appellations)
     for raw in entry.source_appellations:
         text = (raw or "").strip()
         if not text or text in known:
             continue
-        # 这条路径为了不丢名单已绑定的称呼，绕开了 _alias_declaration_verified
-        # 的证据闸，判据弱到只剩「80 字窗口内与角色名共现」。词形闸不属于证据
-        # 强弱问题：一个切碎的短语残片无论共现多少次都不指代任何人，登记它只会
-        # 让下游的子串匹配到处误命中。
+        # 这条免检通道成立的前提是「这个称呼是名单赖以成立的身份标识」：候选能
+        # 进必收名单，靠的就是它，在场证据已经逐条过了结构闸、裁决闸和段号钉证。
+        # 点名模型顺手申报的 aliases 没有这层保证，走到这里等于零核验入谱——它们
+        # 只能走详情侧那条正规闸（_alias_declaration_verified + 别名裁决）。
+        #
+        # 真实故障 ERR-20260828-9fcabe（《罗刹海市》EP1）：点名把「大夫」报成主角
+        # 马骥的别名，共现闸在「那些士绅大夫争着想开开眼界，便叫村民邀请马骥前去」
+        # 这句里同时看到两个词就放行了——可这句话里大夫是发出邀请的人，马骥是被
+        # 邀请的人，恰恰是两拨人。「大夫」就此成为马骥的登记称谓，进了
+        # reserved_authority_labels；映射台随后正确地把本集朝堂上的众大夫判成
+        # functional，撞上「不得冒用已登记身份称谓」，整集失败且重试必然复现。
+        if text in unverified:
+            continue
+        # 词形闸不属于证据强弱问题：一个切碎的短语残片无论共现多少次都不指代任何
+        # 人，登记它只会让下游的子串匹配到处误命中。
         if not _alias_text_is_independent_appellation(text):
             continue
         found = None
@@ -5835,6 +5847,15 @@ class _BibleRosterEntry(BaseModel):
     name: str
     role: str
     source_appellations: list[str] = Field(default_factory=list)
+    # source_appellations 里哪几项只是点名模型顺口报的别名，没有经过任何核验。
+    # 其余各项（primary_appellation / formal_name / 被降级的那个显示名）是这个
+    # 候选赖以进入必收名单的身份标识本身——在场证据逐条过了结构闸、独立裁决闸和
+    # 段号钉证，名单成立就意味着它们成立。candidate.aliases 没有这层保证：点名
+    # 提示词允许模型随手申报，代码一路没有核对过它们指的是不是同一个人。
+    # 检索用途（证据包召回、详情提示词的"原文称呼"）照旧吃全集，宽一点无害；
+    # 只有"登记进人物谱 aliases"这一步必须把两者分开，见
+    # _attach_roster_source_appellations。
+    unverified_appellations: list[str] = Field(default_factory=list)
     presence_status: Literal["onstage", "mentioned_only"] = "onstage"
     importance_score: float = 0.0
     importance_signals: list[str] = Field(default_factory=list)
@@ -6050,6 +6071,10 @@ def _normalize_roster_against_candidates(
             name=canonical,
             role=(matched.role if matched else ("关键伏笔角色" if mentioned_only else "重要配角")),
             source_appellations=source_names,
+            unverified_appellations=[
+                name for name in source_names
+                if name in set(aliases) and name not in {appellation, formal, *demoted}
+            ],
             presence_status="mentioned_only" if mentioned_only else "onstage",
             importance_score=score,
             importance_signals=signals + (["retained_by_plot_authority"] if mentioned_only else []),
@@ -6334,6 +6359,11 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
                 name=formal or appellation,
                 role="重要配角",
                 source_appellations=list(dict.fromkeys([appellation, *aliases])),
+                # 跟主路径同一条线：appellation 是这个候选进名单的身份标识，
+                # 点名申报的 aliases 没核验过，不能走免检通道入谱。
+                unverified_appellations=[
+                    name for name in dict.fromkeys(aliases) if name != appellation
+                ],
             )
             for appellation, formal, _onstage, _mentions, _chapters, aliases in missing
             if (formal or appellation) not in existing_names

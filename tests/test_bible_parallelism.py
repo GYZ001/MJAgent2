@@ -826,6 +826,81 @@ def test_attach_roster_source_appellations_uses_existing_aliases_as_anchors() ->
     assert "靠山老祖" in {item.text for item in character.aliases}
 
 
+def test_model_declared_alias_does_not_get_the_roster_free_pass() -> None:
+    """点名模型顺口报的别名不走免检通道——共现闸挡不住"两拨人出现在同一句"。
+
+    真实故障 ERR-20260828-9fcabe（《罗刹海市》EP1）：点名把「大夫」报成主角马骥的
+    别名。共现闸在「那些士绅大夫争着想开开眼界，便叫村民邀请马骥前去」这一句里
+    同时看到两个词就放行了——可这句话里大夫是发出邀请的那拨人，马骥是被邀请的那
+    一个，恰恰不是同一个人。「大夫」就此成为马骥的登记称谓，进了
+    reserved_authority_labels；映射台随后正确地把本集朝堂上的众大夫判成
+    functional，撞上「current functional 不得冒用已登记身份称谓：大夫」，整集失败
+    且重试必然复现。
+
+    这条免检通道本身是对的，前提是「这个称呼是名单赖以成立的身份标识」——候选能
+    进必收名单靠的就是它，在场证据已经逐条过了结构闸、裁决闸和段号钉证。模型
+    随手申报的 aliases 没有这层保证，只能走详情侧那条正规闸。
+    """
+    from app.schemas import Character
+
+    chapters = [{
+        "idx": 1,
+        "content": "那些士绅大夫争着想开开眼界，便叫村民邀请马骥前去。",
+    }]
+
+    character = Character(name="马骥", role="主角", appearance_canonical="待测")
+    stages._attach_roster_source_appellations(
+        character,
+        stages._BibleRosterEntry(
+            name="马骥", role="主角",
+            source_appellations=["大夫"], unverified_appellations=["大夫"],
+        ),
+        chapters,
+    )
+    assert "大夫" not in {item.text for item in character.aliases}, (
+        "未经核验的申报别名不该零核验入谱"
+    )
+
+    # 同一句原文、同一个词，只是这次它被标成「名单赖以成立的身份标识」：免检通道
+    # 照旧放行。这既是修复前行为的独立观察点，也守住这条通道没被整个关掉。
+    identified = Character(name="马骥", role="主角", appearance_canonical="待测")
+    stages._attach_roster_source_appellations(
+        identified,
+        stages._BibleRosterEntry(
+            name="马骥", role="主角", source_appellations=["大夫"],
+        ),
+        chapters,
+    )
+    assert "大夫" in {item.text for item in identified.aliases}
+
+
+def test_roster_marks_model_aliases_unverified_but_not_identity_names() -> None:
+    """名单归一化要分清哪些称呼是名单的身份标识，哪些只是模型申报的别名。
+
+    身份标识（primary_appellation / formal_name / 被降级的那个显示名）是这个候选
+    进必收名单所依据的东西，名单成立就意味着它们成立；candidate.aliases 一路没被
+    核对过指的是不是同一个人。检索用途照旧吃全集，只有「登记进人物谱 aliases」
+    这一步必须把两者分开。
+    """
+    draft = stages._normalize_roster_against_candidates(
+        stages._BibleRosterDraft(
+            characters=[],
+            world={"visual_style_canonical": "国漫三维动画电影质感，统一自然光影与细腻材质"},
+        ),
+        [("马骥", "马龙媒", 3, 20, 4, ["大夫", "俊人"])],
+    )
+
+    entry = draft.characters[0]
+    assert entry.name == "马龙媒"
+    assert set(entry.source_appellations) == {"马骥", "大夫", "俊人"}, (
+        "检索键照旧收全，别名的检索用途没有被这次改动收窄"
+    )
+    assert set(entry.unverified_appellations) == {"大夫", "俊人"}
+    assert "马骥" not in entry.unverified_appellations, (
+        "primary_appellation 是这个候选进名单的身份标识，不是待核验的申报"
+    )
+
+
 def test_roster_personhood_dossier_keeps_segments_with_candidate_name() -> None:
     ev = stages._RosterOnstageEvidence
     dossier = stages._roster_personhood_dossier(
