@@ -507,37 +507,94 @@ def _best_adopt_candidate(conn: sqlite3.Connection, shot_id: str) -> str | None:
     return None
 
 
+VIDEO_AUTHORIZATION_TOPUPS = 2   # 追加授权的次数上限
+
+
+def _authorize_and_resume(name: str, eid: str, proj: dict) -> bool:
+    """按产品自己给出的 authorize_continue 出路补授权。
+
+    Supervisor 在算完计划后发现授权额度不够会停在 WAITING_AUTHORIZATION、
+    outcome=VIDEO_PLAN_INVALID——12 镜的默认额度 144 元，而含重试系数的成本预测
+    高值 198.72 元。这是设计好的两阶段闸门，不是缺陷，正确做法是补授权而不是
+    把闸门拆掉。
+
+    补多少从系统自己算的 cost_forecast 推导，不写死数字：目标额度取预测高值的
+    1.2 倍，差额即本次追加。预测里已经含了各镜的历史重试系数。"""
+    action = next(
+        (a for a in (proj.get("next_actions") or [])
+         if isinstance(a, dict) and a.get("id") == "authorize_continue"),
+        None,
+    )
+    grant_id = (action or {}).get("request_body", {}).get("completion_grant_id") \
+        or proj.get("grant_id")
+    if not grant_id:
+        log(name, "生成台 :: 停在等待授权，但响应里没有可续的授权号")
+        return False
+
+    forecast = proj.get("cost_forecast") or {}
+    cap = float((proj.get("budget") or {}).get("cap_cny") or 0)
+    high = float(forecast.get("high_cny") or forecast.get("expected_cny") or 0)
+    add_budget = max(1.0, round(high * 1.2 - cap, 2)) if high else max(1.0, round(cap, 2))
+    code, resp = approved("POST", f"/api/episodes/{eid}/video-completion", {
+        "mode": "resume",
+        "completion_grant_id": grant_id,
+        "add_budget_cny": add_budget,
+        "add_wall_clock_s": 7200,
+        "idempotency_key": f"ep1all-authz-{grant_id}-{int(cap)}",
+    })
+    log(name, f"生成台追加授权 +{add_budget} 元（原上限 {cap}，预测高值 {high}）"
+              f" -> HTTP{code} {json.dumps(resp, ensure_ascii=False)[:200]}")
+    return code in (200, 202)
+
+
+def _poll_video(name: str, eid: str) -> dict:
+    waited, last, timeout_s, poll_s = 0, "", 6 * 3600, 30
+    while waited <= timeout_s:
+        proj = video_status(eid)
+        coverage = proj.get("coverage") or {}
+        line = (f"running={proj.get('running')} user_state={proj.get('user_state')} "
+                f"adopted={coverage.get('adopted')}/{coverage.get('total')} "
+                f"phase={proj.get('phase')}")
+        if line != last:
+            log(name, f"生成台 :: {line}")
+            last = line
+        if not proj.get("running") and proj.get("user_state") != "recovering":
+            return proj
+        time.sleep(poll_s)
+        waited += poll_s
+    log(name, f"生成台轮询超时 {timeout_s}s")
+    return video_status(eid)
+
+
 def stage_video(name: str, pid: str, eid: str) -> tuple[bool, str]:
     """生成台：集级补齐 Supervisor + 逐镜采纳。"""
     proj = video_status(eid)
     if proj.get("user_state") != "completed":
         if not (proj.get("running") or proj.get("user_state") == "recovering"):
-            code, resp = approved("POST", f"/api/episodes/{eid}/video-completion",
-                                  {"mode": "fresh", "idempotency_key": f"ep1all-video-{eid}"})
-            log(name, f"生成台启动 HTTP{code} {json.dumps(resp, ensure_ascii=False)[:220]}")
-            started = code in (200, 202) or (code == 409 and "运行中" in str(resp))
-            if not started:
-                return False, f"生成台未能启动 HTTP{code} {json.dumps(resp, ensure_ascii=False)[:300]}"
+            if proj.get("phase") == "WAITING_AUTHORIZATION":
+                _authorize_and_resume(name, eid, proj)
+            else:
+                code, resp = approved("POST", f"/api/episodes/{eid}/video-completion",
+                                      {"mode": "fresh", "idempotency_key": f"ep1all-video-{eid}"})
+                log(name, f"生成台启动 HTTP{code} {json.dumps(resp, ensure_ascii=False)[:220]}")
+                started = code in (200, 202) or (code == 409 and "运行中" in str(resp))
+                if not started:
+                    return False, f"生成台未能启动 HTTP{code} {json.dumps(resp, ensure_ascii=False)[:300]}"
 
-        waited, last, timeout_s, poll_s = 0, "", 6 * 3600, 30
-        while waited <= timeout_s:
-            proj = video_status(eid)
-            coverage = proj.get("coverage") or {}
-            line = (f"running={proj.get('running')} user_state={proj.get('user_state')} "
-                    f"adopted={coverage.get('adopted')}/{coverage.get('total')} "
-                    f"phase={proj.get('phase')}")
-            if line != last:
-                log(name, f"生成台 :: {line}")
-                last = line
-            if not proj.get("running") and proj.get("user_state") != "recovering":
+        proj = _poll_video(name, eid)
+        topups = 0
+        while (proj.get("phase") == "WAITING_AUTHORIZATION"
+               and topups < VIDEO_AUTHORIZATION_TOPUPS):
+            topups += 1
+            if not _authorize_and_resume(name, eid, proj):
                 break
-            time.sleep(poll_s)
-            waited += poll_s
+            proj = _poll_video(name, eid)
 
         phase = proj.get("phase")
         if phase not in ("SUCCEEDED_COVERED", "COMPLETED_DEADLINE_FALLBACK"):
             return False, (f"生成台未达成功终态 phase={phase} "
-                           f"user_state={proj.get('user_state')}")
+                           f"user_state={proj.get('user_state')} "
+                           f"outcome={proj.get('outcome')} 追加授权 {topups} 次")
 
     conn = _readonly_conn()
     try:
