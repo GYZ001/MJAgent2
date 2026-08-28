@@ -96,12 +96,37 @@ def test_screenplay_baseline_uses_dedicated_long_read_timeout(monkeypatch) -> No
     assert hiagent._chat_read_timeout_s({"stage_key": "storyboard_outline"}) == 720.0
     assert hiagent._chat_read_timeout_s({"stage_key": "storyboard"}) == 600.0
     assert hiagent._chat_read_timeout_s({"stage_key": "storyboard_shot_6"}) == 600.0
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_STORYBOARD_PACK_READ", 960.0)
+    assert hiagent._chat_read_timeout_s({"stage_key": "storyboard_pack_segment"}) == 960.0
+    assert hiagent._chat_read_timeout_s({"stage_key": "storyboard_pack_beat_sheet"}) == 960.0
     monkeypatch.setattr(
         hiagent.config, "TIMEOUT_CHAT_BLUEPRINT_REVIEW_READ", 735.0,
     )
     assert hiagent._chat_read_timeout_s(
         {"stage_key": "screenplay_blueprint_review"}
     ) == 735.0
+
+
+def test_every_storyboard_pack_stage_key_clears_the_generic_ceiling() -> None:
+    """判据从源码里实际存在的 stage_key 推导，不靠这里手抄一份清单。
+
+    真实故障：分派表只列了 `storyboard` 与 `storyboard_shot_`，而分镜包发出的是
+    `storyboard_pack_segment` / `storyboard_pack_beat_sheet`，两条分支从未命中，
+    整条分镜台跑在通用 300s 上。《罗刹海市》run_4080130af25a 与《王六郎》各有一次
+    在 305s/304s 以 received_chars=0 被砍断——而实测健康调用最长 936s。
+    """
+    import pathlib
+    import re
+
+    source = pathlib.Path(
+        hiagent.__file__
+    ).with_name("production") / "storyboard_pack.py"
+    declared = set(re.findall(r'"stage_key":\s*"(storyboard_[^"]+)"', source.read_text()))
+    assert declared, "分镜包必须自报 stage_key，否则读超时只能落回通用兜底"
+    for stage_key in sorted(declared):
+        assert hiagent._chat_read_timeout_s({"stage_key": stage_key}) > (
+            hiagent.config.TIMEOUT_CHAT_READ
+        ), f"{stage_key} 落回了通用读超时"
 
 
 def test_paratext_read_timeout_is_a_dedicated_ceiling_not_the_generic_one(

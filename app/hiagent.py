@@ -1350,6 +1350,13 @@ def _chat_read_timeout_s(call_meta: dict | None) -> float:
             config.TIMEOUT_CHAT_READ,
             config.TIMEOUT_CHAT_STORYBOARD_OUTLINE_READ,
         )
+    if stage_key.startswith("storyboard_pack_"):
+        # 整个分镜包一族共用一个上限：按前缀匹配而不是逐个列 key，新增分段阶段
+        # 时不会再像 storyboard_pack_segment 那样静默掉回通用 300s。
+        return max(
+            config.TIMEOUT_CHAT_READ,
+            config.TIMEOUT_CHAT_STORYBOARD_PACK_READ,
+        )
     if stage_key == "storyboard" or stage_key.startswith("storyboard_shot_"):
         return max(config.TIMEOUT_CHAT_READ, config.TIMEOUT_CHAT_BASELINE_READ)
     if stage_key == "screenplay_character_discovery":

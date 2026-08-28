@@ -187,6 +187,18 @@ TIMEOUT_CHAT_VIDEO_PLAN_READ = float(
 TIMEOUT_CHAT_STORYBOARD_OUTLINE_READ = float(
     os.environ.get("TIMEOUT_CHAT_STORYBOARD_OUTLINE_READ", "600")
 )
+# 分镜包（storyboard_pack_*）是本流水线最重的一类文本生成：一次调用要铺完整集
+# 的分段提示词，实测成功样本单次输出 8.9K~121K 字符、耗时 77s~936s（p90 894s），
+# beat_sheet 一路最慢 254s。它此前没有专属读超时，落在通用 300s 上——分派表只认
+# `storyboard` 与 `storyboard_shot_` 两个 key，而真实 stage_key 是
+# `storyboard_pack_segment` / `storyboard_pack_beat_sheet`，两条分支从未命中过
+# （`storyboard_shot_%` 是 AgentLoop 的 step_key 命名，不是 provider 调用的
+# stage_key）。真实故障：《罗刹海市》run_4080130af25a、《王六郎》各一次，均在
+# 305s/304s 以 received_chars=0 被通用上限砍断，供应商侧那次生成照旧计费。
+# 取 960s：覆盖实测最大 936s 并留余量。
+TIMEOUT_CHAT_STORYBOARD_PACK_READ = float(
+    os.environ.get("TIMEOUT_CHAT_STORYBOARD_PACK_READ", "960")
+)
 # 蓝图语义审稿是长结构化生成：完整复审要把整份蓝图 + 来源投影一起送审。
 # 曾因一次 312s ReadTimeout 放宽到 600s，但那次同样是 0 字节卡死而不是慢审稿：
 # ep_3d523ff4d0a4 的三次成功审稿是 35.3s/37.1s/45.9s（1202/1875/2138 tokens），
