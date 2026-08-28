@@ -486,6 +486,51 @@ def test_dialect_instructions_carry_the_real_spoken_capacity_number():
         assert limit in text, f"{name} 没把口播上限 {limit} 写给模型"
 
 
+def test_dialect_tells_the_model_what_to_do_with_a_character_that_has_no_reference():
+    """@名字 的长相由参考图负责，所以没有参考图的角色必须有另一条明确写法。
+
+    真实故障（《黄英》EP1 镜6）：吕氏是映射台的 functional_extras，
+    relevant_assets.characters 里查不到她。模型在镜头2 写足了她的外观，
+    镜头3 按「此后只 @点名」的规则改成「固定 @吕氏 把一小袋粮食递到黄英
+    手里」——而 @吕氏 绑不到任何参考图，图没有、文字又不再描述长相，这一镜
+    她的长相彻底没有来源。
+    """
+    from app.production.storyboard_pack import SEEDANCE_DIALECT_INSTRUCTIONS
+
+    text = SEEDANCE_DIALECT_INSTRUCTIONS
+    assert "relevant_assets.characters" in text, (
+        "必须告诉模型判据从哪来：能不能用 @ 简写，取决于这个人在不在 "
+        "relevant_assets.characters 里"
+    )
+    # 只说「有图的可以 @」不够，还要正面交代没图的那类人怎么写。
+    head = text.index("relevant_assets.characters 里收录的")
+    rule = text[head:head + 400]
+    assert "没有任何" in rule and "参考图" in rule, "没有说明未收录角色缺的是参考图"
+    assert "不要用 @" in rule or "不用 @" in rule, "没有正面说清未收录角色不加 @ 前缀"
+    assert "每一个出现他的镜头" in rule, "没有要求未收录角色每镜自带外观特征"
+
+
+def test_unknown_character_advisory_says_what_actually_happened() -> None:
+    """降级信号不能声称做了它没做的事。
+
+    这条 advisory 原文写「已按纯文字描述处理」，可代码只是记了一句话，
+    prompt_text 里的 @吕氏 原样保留——承诺与行为不一致。
+    """
+    draft = _draft(
+        resources=_AiSegmentResources(
+            characters=[{"identity_id": "吕氏", "description": "做针线的妇人"}],
+        ),
+    )
+    advisories = _segment_content_advisories(
+        draft, known_character_ids={"bible:马子才"}, known_scene_ids=set(),
+        source_segment_indexes=[1],
+    )
+    unknown = [a for a in advisories if "RESOURCE_CHARACTER_UNKNOWN" in a]
+    assert unknown, "未知身份必须报出来"
+    assert "已按纯文字描述处理" not in unknown[0], "不得声称做了未做的处理"
+    assert "参考图" in unknown[0], "要说清缺的是什么：没有可绑定的人物参考图"
+
+
 def test_segment_content_advisories_flags_misattributed_speaker_but_does_not_raise():
     # 用户判据的原始场景：台词安给了当时不在场的人。必须能算出来、必须不抛异常。
     draft = _draft(
@@ -1405,9 +1450,15 @@ def _patch_thinking_model(
 
 
 def test_contract_marker_stays_on_2_0_5_so_existing_packs_resume():
-    """2.0.6 只改生成切分，不改落库形状；resume 仍认 2.0.5 marker。"""
+    """marker 跟落库形状走，不跟提示词措辞走。
+
+    2.0.6 起的约定：只改生成切分或提示词措辞时不动 marker，已成功的集不该被
+    强迫重跑一次付费生成；需要用上新提示词的集走「删除 + 重新生成」。所以
+    STORYBOARD_PACK_VERSION 会随每次修订往前走，marker 只在落库形状真变了
+    的那次才动——断言版本号具体等于几，守的是前者而不是这条规则本身。
+    """
     assert STORYBOARD_PACK_CONTRACT_MARKER == "storyboard_pack/2.0.5"
-    assert STORYBOARD_PACK_VERSION == "2.0.6"
+    assert STORYBOARD_PACK_VERSION > "2.0.6"
 
 
 def test_twelve_segment_answer_budget_saturates_32k_with_reasoning(monkeypatch):

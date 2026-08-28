@@ -225,7 +225,18 @@ from app.video_prompt_profiles import VideoPromptProfile
 #: 感的结构性根因，不能为了预算再拆回去。持久化契约字段名/形状不变，
 #: STORYBOARD_PACK_CONTRACT_MARKER 故意留在 2.0.5：resume 短路只看 marker，
 #: 这次没有改产物形状，已成功的集不该被强迫重跑一次付费生成。
-STORYBOARD_PACK_VERSION = "2.0.6"
+#:
+#: 2.0.7（《黄英》EP1 镜6 实测）：「@点名即可、长相交给参考图」这条规则默认
+#: 每个被 @ 的角色都有图，但本段还会出现只在原文里有称谓、relevant_assets
+#: 查不到的人。吕氏就是这样进来的——她是映射台的 functional_extras，模型在
+#: 镜头2 写了她的外观、镜头3 改成「固定 @吕氏 把一小袋粮食递到黄英手里」，
+#: 而 @吕氏 绑不到任何参考图：图没有、文字又按规则不再描述长相，她这一镜的
+#: 长相彻底没有来源。本段 CHARACTER_UNKNOWN 降级信号当时声称「已按纯文字
+#: 描述处理」，实际什么都没做，只记了一条 advisory。
+#: 修复：方言指令补上未收录角色的正面写法（不用 @ 前缀、每镜自带三项以上
+#: 可视觉验证特征），判据是 relevant_assets.characters 里查不查得到；降级
+#: 信号措辞改成如实陈述。只改提示词与措辞，落库形状不变，marker 仍在 2.0.5。
+STORYBOARD_PACK_VERSION = "2.0.7"
 
 #: Written to Shot.prompt_contract_version for every row this module writes.
 #: This is the single, principled marker every downstream consumer keys off
@@ -400,6 +411,14 @@ JSON 字段或分点罗列）。
   绑定到 @名字 上，身份和长相由图负责，文字只负责这一镜他在做什么。实测把
   整段外观每镜重抄一遍的后果：同一段里同一套外观出现 22 次，段落被撑到 1600
   字，动作和对白反而被挤到模型注意力之外。
+- 上面这条「@点名即可、长相交给图」只对 relevant_assets.characters 里收录的
+  角色成立——有参考图的正是这些人。本段还会出现只在原文里有个称谓、
+  relevant_assets.characters 查不到的人（路人、家眷、随从这类）：他们没有任何
+  参考图，@名字 绑不到东西，长相就此没有来源。这类人不要用 @ 前缀，直接写
+  称谓本身，并且在每一个出现他的镜头里都带上同一套三项以上可视觉验证的特征
+  （年龄区间、体型脸型、发型头饰、服装颜色材质、随身物里挑），靠文字自己把
+  长相钉住。判据只看 relevant_assets.characters 里查不查得到这个人，不看他
+  戏份多少。
 - 情绪一律写成面部肌肉动作和肢体动作（例如「眉毛拧起、嘴大张、眼睛瞪圆」），
   不写抽象情绪词（「惊恐」「释然」这类词模型没有稳定映射）。每个镜头挑一个
   核心表演加一个关键动作就够——「喉结滚动＋眉头越皱越紧＋眼眶泛红＋下颌绷紧」
@@ -1085,7 +1104,8 @@ def _segment_content_advisories(
             advisories.append(
                 f"[STORYBOARD_PACK_RESOURCE_CHARACTER_UNKNOWN][未拦截] "
                 f"resources.characters[{index}].identity_id=「{character.identity_id}」"
-                "不是映射台已知的人物身份，已按纯文字描述处理"
+                "不是映射台已知的人物身份，没有可绑定的人物参考图；"
+                "该角色的长相只能由 prompt_text 里的文字负责"
             )
     for index, scene in enumerate(draft.resources.scenes):
         if scene.scene_id not in known_scene_ids:
