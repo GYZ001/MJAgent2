@@ -372,6 +372,44 @@ def test_fresh_provider_metadata_still_wins_over_saved_configuration() -> None:
     assert limits["token_limits_source"] == "provider_metadata"
 
 
+def test_settings_page_reports_the_same_limits_the_run_actually_uses(monkeypatch) -> None:
+    """设置页显示的能力必须与运行时取到的是同一个数。
+
+    这条判据挂在「两处读数一致」上，而不是各自等于某个字面量：修复前
+    active_model_token_limits 已经按证据强度合并、拿到 131072，而 /api/models
+    走的是 system_api 里另一份同样形状的合并、仍无条件让探测缓存覆盖，于是
+    界面稳定显示 32768。同一个模型两个说法，人照着界面查不出任何问题——上一轮
+    排查正是被这一点带偏的。
+    """
+    from app import hiagent
+    from app.model_capabilities import active_model_token_limits
+
+    custom = [{
+        "id": "model_glm", "provider": "custom:model_glm", "model": "glm-5.3-flash",
+        "label": "GLM", "kinds": ["text"], "protocol": "zhipu",
+        "context_window_tokens": 1048576, "max_output_tokens": 131072,
+        "token_limits_source": "configured",
+    }]
+    capabilities = {"model_glm": {
+        "context_window_tokens": 131072, "max_output_tokens": 32768,
+        "token_limits_source": "default_128k_32k",
+    }}
+    get_setting = _capability_settings(custom, capabilities)
+    monkeypatch.setattr(api, "get_setting", get_setting)
+    monkeypatch.setattr(hiagent, "get_setting", get_setting)
+
+    shown = next(
+        item for item in api.get_models()["items"] if item["id"] == "model_glm"
+    )
+    used = active_model_token_limits(
+        "custom:model_glm", "glm-5.3-flash", get_setting
+    )
+
+    for field in ("context_window_tokens", "max_output_tokens", "token_limits_source"):
+        assert shown[field] == used[field], field
+    assert shown["max_output_tokens"] == 131072
+
+
 def test_default_probe_cache_still_applies_when_nothing_else_is_evidenced() -> None:
     """两边都没实据时保持原有行为，别把「挡兜底」升级成「丢掉兜底」。"""
     from app.model_capabilities import active_model_token_limits

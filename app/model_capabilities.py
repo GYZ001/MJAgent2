@@ -127,12 +127,38 @@ def apply_token_limit_defaults(item: dict[str, Any]) -> dict[str, Any]:
 #: ``default_128k_32k`` 不在其列——它的语义就是「没探到，先按产品策略兜底」。
 _EVIDENCED_LIMIT_SOURCES = frozenset({"provider_metadata", "configured"})
 
+#: 受证据强度规则约束的字段。规则只管这三个，不扩大成「整条记录谁覆盖谁」。
+_LIMIT_FIELDS = ("context_window_tokens", "max_output_tokens", "token_limits_source")
+
 
 def _limits_are_evidenced(entry: Any) -> bool:
     """这份能力记录是真凭据，还是探测不到时写下的兜底猜测。"""
     if not isinstance(entry, dict):
         return False
     return str(entry.get("token_limits_source") or "") in _EVIDENCED_LIMIT_SOURCES
+
+
+def merge_token_capability_override(
+    item: dict[str, Any], override: Any
+) -> dict[str, Any]:
+    """把 ``model_token_capabilities`` 的探测缓存合进模型记录。
+
+    能力字段按**证据强度**决定谁说了算，而不是按谁在哪张表：一条标着
+    ``default_128k_32k``（探测失败时写下的兜底猜测）的陈旧缓存，不得盖掉运维
+    在模型编辑里显式填写的真实能力。
+
+    这份判据必须只有一处实现。它原本在 ``active_model_token_limits`` 里就地
+    写着，于是运行时读到了正确的 131072，而设置页走的是 ``system_api``
+    另一条同样形状的合并、仍然拿到 32768——同一个模型，界面和实际行为对不上，
+    人照着界面根本查不出问题。
+    """
+    if not isinstance(override, dict):
+        override = {}
+    if _limits_are_evidenced(item) and not _limits_are_evidenced(override):
+        override = {
+            key: value for key, value in override.items() if key not in _LIMIT_FIELDS
+        }
+    return {**item, **override}
 
 
 def active_model_token_limits(
@@ -142,16 +168,11 @@ def active_model_token_limits(
 ) -> dict[str, Any]:
     """读取当前模型能力；兼容尚未写入能力字段的既有模型。
 
-    两个数据源合并时按**证据强度**决定谁说了算，而不是按谁在哪张表：
     ``model_token_capabilities`` 是添加模型时的探测缓存，``custom_models``
-    里的则是模型编辑里保存下来的值。原先无条件让前者覆盖后者，于是一条标着
-    ``default_128k_32k``（探测失败的兜底猜测）的陈旧缓存会把运维刚填进去的
-    真实能力静默盖掉——真实事故：glm-5.3-flash 的真实输出上限 131072 被按
-    32768 用，分镜台阶段二的思考预留因此永远挤不进预算，整集截断失败；而
-    PUT 接口回显的是 131072，界面上看不出任何异常，人根本无从下手。
-
-    判据从数据本身推导（``token_limits_source`` 是这两条记录各自对自己成色
-    的声明），不是给哪个模型或哪张表开白名单。
+    里的则是模型编辑里保存下来的值。两者的合并规则见
+    ``merge_token_capability_override``：按证据强度定胜负，判据从数据本身推导
+    （``token_limits_source`` 是这两条记录各自对自己成色的声明），不给哪个
+    模型或哪张表开白名单。
     """
     selected: dict[str, Any] = {}
     try:
@@ -174,14 +195,6 @@ def active_model_token_limits(
     except (TypeError, json.JSONDecodeError):
         saved = {}
     override = saved.get(item_id, {}) if isinstance(saved, dict) else {}
-    if not isinstance(override, dict):
-        override = {}
-    if _limits_are_evidenced(selected) and not _limits_are_evidenced(override):
-        # 有实据的一方胜出。仅让位这三个能力字段，其余字段仍按原样合并，
-        # 避免把这条规则扩大成「整条记录谁覆盖谁」。
-        override = {
-            key: value for key, value in override.items()
-            if key not in ("context_window_tokens", "max_output_tokens", "token_limits_source")
-        }
-    merged = {**selected, **override}
-    return normalize_token_limits(merged)
+    return normalize_token_limits(
+        merge_token_capability_override(selected, override)
+    )

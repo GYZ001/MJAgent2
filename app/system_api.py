@@ -24,6 +24,7 @@ from app.local_session import require_local_session
 from app.model_capabilities import (
     apply_token_limit_defaults,
     extract_provider_token_limits,
+    merge_token_capability_override,
     normalize_token_limits,
 )
 
@@ -329,7 +330,11 @@ def _token_capability_overrides() -> dict[str, dict]:
 def _model_catalog() -> list[dict]:
     overrides = _token_capability_overrides()
     return [
-        apply_token_limit_defaults({**item, **overrides.get(str(item.get("id") or ""), {})})
+        apply_token_limit_defaults(
+            merge_token_capability_override(
+                item, overrides.get(str(item.get("id") or ""), {})
+            )
+        )
         for item in _custom_models() if isinstance(item, dict)
     ]
 
