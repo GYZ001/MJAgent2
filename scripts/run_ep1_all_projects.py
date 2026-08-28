@@ -240,13 +240,49 @@ def _wait_project_field(name: str, project_id: str, field: str, label: str,
 # 各阶段
 # ---------------------------------------------------------------------------
 
+def _eligible_characters(proj: dict) -> list[dict]:
+    """本次真正该有定妆照的角色，从人物谱当场推导。
+
+    详情生成失败的角色会以 stub 落库（appearance_status=insufficient_evidence、
+    portrait_eligible=false），这是设计好的诚实产出，不是缺陷；但它也意味着
+    「该有几张定妆照」只能问人物谱要，不能写死一个数字。"""
+    return [
+        c for c in ((proj.get("bible") or {}).get("characters") or [])
+        if c.get("portrait_eligible")
+    ]
+
+
+def _assert_bible_usable(proj: dict) -> tuple[bool, str]:
+    """人物谱的产物信号：有角色，且至少一个角色的详情真的生成出来了。
+
+    只看 bible_status='ready' 会放行「整份都是 stub」——2026-08-28 那次
+    Idempotency-Key 编码缺陷让每个角色的详情三次尝试全挂，人物谱照样 ready，
+    下游定妆 0 张图也照样 ready，一路绿到分镜台才看得出不对。"""
+    chars = (proj.get("bible") or {}).get("characters") or []
+    if not chars:
+        return False, "人物谱为空，一个角色都没有"
+    eligible = _eligible_characters(proj)
+    if not eligible:
+        reasons = {str(c.get("appearance_status") or "unknown") for c in chars}
+        return False, (
+            f"{len(chars)} 个角色全部是 stub（无一可定妆），"
+            f"appearance_status={sorted(reasons)}——详情生成阶段整体失败"
+        )
+    stub = len(chars) - len(eligible)
+    note = f"，其中 {stub} 个仅 stub" if stub else ""
+    return True, f"{len(chars)} 个角色，{len(eligible)} 个可定妆{note}"
+
+
 def stage_bible(name: str, pid: str, eid: str) -> tuple[bool, str]:
     """人物谱。报价 action=generate_bible_and_refs，一次确认同时覆盖定妆扣费。
     成功后服务端自动级联启动定妆与场景清单（bible_ops._start_refs_generation /
     _start_scene_bible_preparation），所以这里不再单独触发那两步。"""
     proj = project_status(pid)
     if proj.get("bible_status") == "ready" and (proj.get("bible") or {}).get("characters"):
-        return True, f"已就绪（{len((proj.get('bible') or {}).get('characters'))} 角色），跳过"
+        ok, detail = _assert_bible_usable(proj)
+        if ok:
+            return True, f"{detail}（已就绪，跳过）"
+        return False, detail
 
     code, quote = call("POST", f"/api/projects/{pid}/bible/generate-precheck", {}, timeout=120)
     if code != 200 or not quote.get("quote_id"):
@@ -266,9 +302,7 @@ def stage_bible(name: str, pid: str, eid: str) -> tuple[bool, str]:
     if state != "ready":
         proj = project_status(pid)
         return False, f"人物谱终态={state} err={(proj.get('bible_error') or '')[:400]}"
-    proj = project_status(pid)
-    chars = (proj.get("bible") or {}).get("characters") or []
-    return True, f"{len(chars)} 个角色"
+    return _assert_bible_usable(project_status(pid))
 
 
 def stage_refs(name: str, pid: str, eid: str) -> tuple[bool, str]:
@@ -291,15 +325,17 @@ def stage_refs(name: str, pid: str, eid: str) -> tuple[bool, str]:
 
     state = _wait_project_field(name, pid, "refs_status", "定妆", timeout_s=10800, poll_s=30)
     proj = project_status(pid)
-    chars = (proj.get("bible") or {}).get("characters") or []
-    done = [c for c in chars if c.get("ref_image_path")]
-    detail = f"{len(done)}/{len(chars)} 角色有定妆照"
-    if state == "ready":
-        return True, detail
-    if state == "warning":
-        # warning 是部分成品：有图就放行，把警告原文带进报告。
-        return bool(done), f"{detail}（warning: {(proj.get('refs_error') or '')[:300]}）"
-    return False, f"定妆终态={state} {detail} err={(proj.get('refs_error') or '')[:400]}"
+    eligible = _eligible_characters(proj)
+    done = [c for c in eligible if c.get("ref_image_path")]
+    detail = f"{len(done)}/{len(eligible)} 个可定妆角色有定妆照"
+    err = (proj.get("refs_error") or "")[:300]
+    if not done:
+        # 一张都没有就是没成，不管 refs_status 写的是什么。
+        return False, f"{detail}（状态={state}）err={err}"
+    if len(done) < len(eligible):
+        missing = [c.get("name") for c in eligible if not c.get("ref_image_path")]
+        return True, f"{detail}，缺图：{'、'.join(str(m) for m in missing[:8])}（状态={state}）"
+    return True, detail
 
 
 def stage_scene_bible(name: str, pid: str, eid: str) -> tuple[bool, str]:
