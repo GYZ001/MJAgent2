@@ -3,7 +3,9 @@
 判据全部从这次库里实际存在的数据推导，不维护任何角色名白名单——名单会随语料变，
 而这个脚本要能对着任意新项目直接跑。
 
-用法：py scripts/audit_bible_portraits.py [--project proj_xxx]
+用法：py scripts/audit_bible_portraits.py [--project proj_xxx] [--db 路径]
+
+``--db`` 指向库的副本，用来在不碰生产数据的前提下验证判据真的会红。
 """
 from __future__ import annotations
 
@@ -131,6 +133,18 @@ def audit_project(conn: sqlite3.Connection, project: sqlite3.Row) -> list[str]:
         if portrait["pack_status"] not in ("ready", "approved", "selected"):
             issues.append(f"{tag} 定妆状态为 {portrait['pack_status']}，未就绪")
 
+        # 「人物谱重生 → 定妆没跟着重画」是这条工作流本身会造出来的漂移：定妆
+        # 留在盘上、状态照旧 ready，一切看起来都对，画的却是上一版的长相。挂的
+        # 是两段外观文本本身，不是 bible_version 号——版本号会被改名、加场景这
+        # 类与长相无关的操作推高，拿它比对只会一片假红。
+        drawn_from = (portrait["appearance"] or "").strip()
+        if appearance and drawn_from != appearance:
+            issues.append(
+                f"{tag} 定妆画的是旧长相，与人物谱当前 appearance_canonical 不符"
+                f"\n      人物谱：{appearance[:70]}"
+                f"\n      定妆依据：{drawn_from[:70] or '（空）'}"
+            )
+
         views = list(
             conn.execute(
                 "SELECT * FROM character_portrait_views WHERE portrait_id=?",
@@ -143,6 +157,7 @@ def audit_project(conn: sqlite3.Connection, project: sqlite3.Row) -> list[str]:
         selected = [v for v in views if v["selected"]]
         if not selected:
             issues.append(f"{tag} 定妆 {len(views)} 张视图无一被选中")
+        pack_prompt = portrait["prompt"] or ""
         for view in selected or views:
             path = view["image_path"]
             if not path:
@@ -153,6 +168,15 @@ def audit_project(conn: sqlite3.Connection, project: sqlite3.Row) -> list[str]:
                 full = ROOT / path
             if not full.exists():
                 issues.append(f"{tag} 视图 {view['view_role']} 的图片不在盘上：{path}")
+            # 上面那条比的是定妆记录自己抄的一份外观，它和真正送进画图模型的
+            # 提示词是两回事——抄对了不等于送对了。独立观察点：当前外观必须逐字
+            # 出现在这张图实际用的提示词里。
+            if appearance and appearance not in (view["prompt"] or "") \
+                    and appearance not in pack_prompt:
+                issues.append(
+                    f"{tag} 视图 {view['view_role']} 的画图提示词里没有当前外观描述，"
+                    f"这张图不是照人物谱画的"
+                )
 
     return issues
 
@@ -160,9 +184,10 @@ def audit_project(conn: sqlite3.Connection, project: sqlite3.Row) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", default=None)
+    parser.add_argument("--db", default=None)
     args = parser.parse_args()
 
-    conn = sqlite3.connect(DB)
+    conn = sqlite3.connect(args.db or DB)
     conn.row_factory = sqlite3.Row
     sql = "SELECT * FROM projects"
     params: tuple = ()
