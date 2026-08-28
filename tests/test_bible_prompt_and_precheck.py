@@ -279,6 +279,72 @@ def test_recurring_character_names_ranks_by_verified_onstage_evidence(monkeypatc
     assert ranked == [("孟浩", "", 2, 21, 20, [])]
 
 
+def test_onstage_evidence_stuck_in_one_chapter_is_not_a_recurring_character(monkeypatch) -> None:
+    """在场证据全挤在同一章的候选不进名单——本函数选的是「复现」人物。
+
+    真实故障：「绿袍男子」是靠山宗那批绿袍修士的类别称谓（靠衣着指人，换个场合就
+    指别人），不是谁的专名。它在第 2 章里连出三条在场证据，条数够了通道 A，就建了
+    正式角色卡；随后被映射器裸命中，把整集映射卡死在「称谓未逐字出现在本集原文」
+    的反幻觉闸上。光数条数分不出「跨章反复登场」和「在某一章里连说三句话」。
+    """
+    import asyncio
+    import json
+
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters = [
+        {"idx": 1, "title": "第一章", "content": "孟浩独自上山。"},
+        {
+            "idx": 2, "title": "第二章",
+            "content": (
+                "绿袍男子一脸不耐，说完转身离去。"
+                "走在前方的绿袍男子传来冷漠的声音。"
+                "他站起身恭恭敬敬的向着绿袍男子抱拳一拜。"
+                "孟浩跟在后面，孟浩低头不语。"
+            ),
+        },
+    ] + [
+        {"idx": i, "title": f"第{i}章", "content": f"第{i}章：孟浩继续赶路。"}
+        for i in range(3, 21)
+    ]
+
+    async def fake_chat(_messages, **_kwargs):
+        return json.dumps({
+            "candidates": [
+                {
+                    # 三条在场证据，但全部落在第 2 章：不是复现人物。
+                    "primary_appellation": "绿袍男子", "formal_name": "",
+                    "onstage_evidence": [
+                        {"chapter_index": 2, "quote": "绿袍男子一脸不耐，说完转身离去。"},
+                        {"chapter_index": 2, "quote": "走在前方的绿袍男子传来冷漠的声音。"},
+                        {"chapter_index": 2, "quote": "他站起身恭恭敬敬的向着绿袍男子抱拳一拜。"},
+                    ],
+                },
+                {
+                    # 两条证据跨到两章：这才是复现人物。
+                    "primary_appellation": "孟浩", "formal_name": "",
+                    "onstage_evidence": [
+                        {"chapter_index": 1, "quote": "孟浩独自上山。"},
+                        {"chapter_index": 2, "quote": "孟浩跟在后面，孟浩低头不语。"},
+                    ],
+                },
+            ],
+        }, ensure_ascii=False)
+
+    async def fake_chat_structured(_messages, **kwargs):
+        model_type = kwargs["model_type"]
+        return model_type(verdict="onstage", supporting_segment_index=1)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+    ranked = asyncio.run(stages._recurring_character_names(chapters))
+
+    admitted = [item[0] for item in ranked]
+    assert "绿袍男子" not in admitted, "在场证据不跨章的候选不该建卡"
+    assert "孟浩" in admitted, "跨章复现的角色必须留下"
+
+
 def test_recurring_character_names_structural_gate_rejects_each_failure_mode(monkeypatch) -> None:
     """结构闸 G1-G3 逐条独立核验：引句不是原文逐字子串（G2）、称呼不在引句里（G3）、
     章节号落在统计窗口之外（G1）——任一不满足直接丢弃该条证据，不发起裁决调用

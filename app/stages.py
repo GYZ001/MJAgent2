@@ -1926,6 +1926,10 @@ _BIBLE_TAIL_SLICE_CHARS = 1500   # 每个抽样章节注入的开头字数
 BIBLE_HEAD_CHAPTERS = 20         # 首版人物谱发现窗口：只看前二十章；按一章一小请求并发
 BIBLE_LOOKAHEAD_CHAPTERS = 0     # 发现窗口已扩到 60 章，不再额外扩大裁决卷宗范围
 BIBLE_RECURRING_MIN_ONSTAGE_QUOTES = 2  # 至少两条经裁决闸核验的「本人在场」证据才算重要角色
+# 且这些证据至少跨两个章节。只数条数分不出「跨章反复登场的人物」和「在某一章里连说
+# 三句话的路人」：类别称谓（「绿袍男子」这种靠衣着指人、换个场合就指别人的说法）往往
+# 在单章里就能凑满条数。人物谱的作用域是全书，进这份名单的判据也该是全书级的复现。
+BIBLE_RECURRING_MIN_ONSTAGE_CHAPTERS = 2
 # 全文统计通道门槛：命中量 + 章节覆盖率同时达标即可独立进入名单，不依赖模型裁决。
 BIBLE_STATISTICAL_MIN_MENTIONS = 25
 BIBLE_STATISTICAL_MIN_CHAPTER_RATIO = 0.15
@@ -3191,7 +3195,14 @@ async def _recurring_character_names(
     mentioned_counts: dict[str, int] = defaultdict(int)
     mentioned_dossiers: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
-    async def _judge_evidence(appellation: str, dossier: list[dict[str, Any]]) -> str:
+    # 每条通过裁决的在场证据落在哪一章：通道 A 判「复现」要用它，光数条数分不出
+    # 「跨章反复登场的人物」和「在某一章里连说三句话的路人」。章号取被裁决钉住的
+    # 那一段，不取整份卷宗——卷宗可能跨章检索，钉证段才是模型真正认定在场的那条。
+    verified_chapters: dict[str, set[int]] = defaultdict(set)
+
+    async def _judge_evidence(
+        appellation: str, dossier: list[dict[str, Any]],
+    ) -> tuple[str, int]:
         try:
             verdict = await _roster_presence_verdict_call(
                 appellation=appellation, dossier=dossier, project_id=project_id,
@@ -3202,18 +3213,23 @@ async def _recurring_character_names(
                 "FAILED", None, 0,
                 meta={"appellation": appellation, "error": str(exc)[:300]},
             )
-            return "uncertain"
-        if _alias_verdict_pin_segment(dossier, verdict.supporting_segment_index) is None:
-            return "uncertain"
-        return verdict.verdict
+            return "uncertain", -1
+        pinned = _alias_verdict_pin_segment(dossier, verdict.supporting_segment_index)
+        if pinned is None:
+            return "uncertain", -1
+        return verdict.verdict, _coerce_roster_chapter_index(pinned.get("chapter_idx"))
 
     judged = await asyncio.gather(
         *(_judge_evidence(appellation, dossier) for appellation, dossier in verdict_jobs)
     )
-    for (appellation, dossier), verdict in zip(verdict_jobs, judged, strict=True):
+    for (appellation, dossier), (verdict, chapter_idx) in zip(
+        verdict_jobs, judged, strict=True,
+    ):
         if verdict == "onstage":
             verdict_pass += 1
             verified_counts[appellation] += 1
+            if chapter_idx > 0:
+                verified_chapters[appellation].add(chapter_idx)
         elif verdict == "mentioned_only":
             mentioned_counts[appellation] += 1
             mentioned_dossiers[appellation].extend(dossier)
@@ -3278,7 +3294,8 @@ async def _recurring_character_names(
                 mentioned_retain.add(appellation)
 
     # 准入分三条独立通道，任一命中即可进入名单：
-    # A. 在场证据通道：裁决闸核验通过 >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES 条；
+    # A. 在场证据通道：裁决闸核验通过 >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES 条，
+    #    且这些证据跨到 >= BIBLE_RECURRING_MIN_ONSTAGE_CHAPTERS 个章节；
     # B. 剧情权威通道：仅被提及，但原文赋予其持续剧情作用（mentioned_retain）；
     # C. 全文统计通道：全文命中与章节覆盖同时达标——主角/核心配角在原文里持续出现，
     #    这本身就是比"某一条引句能否通过单次模型裁决"更稳的重要性证据。
@@ -3296,6 +3313,19 @@ async def _recurring_character_names(
         and chapter_counts.get(appellation, 0)
         >= max(2, round(window_size * BIBLE_STATISTICAL_MIN_CHAPTER_RATIO))
     }
+    # 通道 A 要的是「复现人物」（本函数名即 recurring），所以在场证据必须跨章：
+    # 全部挤在同一章说明这个人在那一章之外没有存在感，而人物谱的作用域是全书。
+    # 真实故障：「绿袍男子」——靠山宗那批绿袍修士的类别称谓，不是谁的专名——三条
+    # 在场证据全在第 2 章，靠通道 A 建了正式角色卡；它随后被映射器裸命中，把整集
+    # 映射卡死在「称谓未逐字出现在本集原文」的反幻觉闸上，且重试必然复现。
+    # 漏判不是永久损失：真在某一章挑大梁的角色由分镜阶段的按集新角色发现补建卡。
+    onstage_recurring = {
+        appellation
+        for appellation, count in verified_counts.items()
+        if count >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
+        and len(verified_chapters.get(appellation, ()))
+        >= BIBLE_RECURRING_MIN_ONSTAGE_CHAPTERS
+    }
     ranked = [
         (
             appellation,
@@ -3306,7 +3336,7 @@ async def _recurring_character_names(
             aliases_by_appellation.get(appellation, []),
         )
         for appellation, count in verified_counts.items()
-        if count >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
+        if appellation in onstage_recurring
         or appellation in mentioned_retain
         or appellation in statistical_retain
     ]
