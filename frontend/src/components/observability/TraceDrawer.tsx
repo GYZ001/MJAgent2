@@ -96,8 +96,8 @@ const ROLE_LABELS: Record<TraceNodeRole, string> = {
   program_processing: "程序处理",
 };
 const LEGACY_NODE_LABELS: Record<string, string> = {
-  character_discovery: "识别剧本角色",
-  screenplay: "生成剧本",
+  character_discovery: "识别本集角色",
+  screenplay: "生成映射包",
   storyboard: "生成分镜",
   video_generation: "生成镜头视频",
   scene_references: "生成场景参考图",

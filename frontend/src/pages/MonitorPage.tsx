@@ -307,7 +307,9 @@ const WORKFLOW_LABELS: Record<string, string> = {
   scene_bible: "场景设定",
   scene_references: "场景参考图",
   episode_mapping: "分集规划",
-  screenplay: "剧本",
+  // workflow_type 仍叫 screenplay（改 key 会让历史 workflow_runs 认不出来），
+  // 但这条链路产出的是映射包，不再产出剧本。这里报它现在实际在做的事。
+  screenplay: "映射包",
   storyboard: "分镜",
   scene_generation: "关键帧生成",
   video_generation: "视频生成",
@@ -337,7 +339,7 @@ const CALL_KIND_LABELS: Record<string, string> = {
   image_generate: "生成图片",
   image_edit: "图生图",
   scene_image: "关键帧生成",
-  screenplay_prompt: "剧本生成",
+  screenplay_prompt: "映射包生成",
   plan_prompt: "分集规划",
   bible_prompt: "人物谱生成",
   references_prompt: "参考图规划",
@@ -1187,9 +1189,9 @@ interface SettingGroupDefinition {
 const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
   {
     id: "text-generation",
-    title: "剧本与分镜生成",
+    title: "映射包与分镜生成",
     description: "控制文本模型可同时推进的剧集数量，以及输出校验失败后的修复重试次数。",
-    affects: ["剧本批量生成", "分镜批量生成", "文本模型"],
+    affects: ["映射包批量生成", "分镜批量生成", "文本模型"],
     keys: ["text_generation_concurrency", "max_repair_attempts"],
   },
   {
@@ -1266,7 +1268,7 @@ const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
 ];
 
 const SETTING_FIELD_IMPACTS: Record<string, string> = {
-  text_generation_concurrency: "同时生成剧本或分镜的剧集数量",
+  text_generation_concurrency: "同时生成映射包或分镜的剧集数量",
   video_submit_concurrency: "每次可同时提交多少个视频生成任务",
   video_inflight_limit: "供应商侧允许同时处理的视频任务总量",
   video_poll_concurrency: "同时查询多少个视频任务的完成状态",

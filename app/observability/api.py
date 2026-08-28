@@ -212,7 +212,7 @@ _TRACE_CALL_LABELS = {
     "image_generate": "生成图片",
     "image_edit": "编辑图片",
     "scene_image": "生成关键帧",
-    "screenplay_prompt": "生成剧本内容",
+    "screenplay_prompt": "生成映射包内容",
     "plan_prompt": "规划分集内容",
     "bible_prompt": "生成人物设定",
     "references_prompt": "规划参考图",
