@@ -199,6 +199,19 @@ TIMEOUT_CHAT_STORYBOARD_OUTLINE_READ = float(
 TIMEOUT_CHAT_STORYBOARD_PACK_READ = float(
     os.environ.get("TIMEOUT_CHAT_STORYBOARD_PACK_READ", "960")
 )
+# 场景圣经是整份场景库的一次性生成。它此前没有专属读超时，落在通用 300s 上。
+# 39 次实测：p50 28s、p90 160s、p95 306s、最慢一次 364.2s（73779 字）。
+# 关键不是总耗时而是首字延迟——读超时是空闲超时，这里等价于卡在「首字迟迟不来」
+# 上：那次 364.2s 的成功调用足足 241s 没吐一个字，之后才一口气交出 73779 字。
+# 于是 300s 根本分不清「卡死」和「还在想」，唯一那次 INTERRUPTED 就是这么来的：
+# received_chars=0，305.8s 被自己的上限砍断，供应商侧照旧计费，《我欲封天》的
+# 场景库随之失败且合同不允许自动重试。
+# 这与上面蓝图语义审稿那次「同样 0 字节卡死、但健康调用只要 35~46s，放宽只是把
+# 空等拉长」的情形正相反：这里健康调用的首字延迟本身就顶到上限的 80%。
+# 取 480s：覆盖实测最长 364.2s 并留余量，对实测最大首字延迟 241s 是 2×。
+TIMEOUT_CHAT_SCENE_BIBLE_READ = float(
+    os.environ.get("TIMEOUT_CHAT_SCENE_BIBLE_READ", "480")
+)
 # 蓝图语义审稿是长结构化生成：完整复审要把整份蓝图 + 来源投影一起送审。
 # 曾因一次 312s ReadTimeout 放宽到 600s，但那次同样是 0 字节卡死而不是慢审稿：
 # ep_3d523ff4d0a4 的三次成功审稿是 35.3s/37.1s/45.9s（1202/1875/2138 tokens），

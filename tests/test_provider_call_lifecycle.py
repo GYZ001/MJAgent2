@@ -193,6 +193,48 @@ def test_event_chain_read_timeout_is_a_floor_above_the_generic_one(
     ) == 700.0
 
 
+def test_scene_bible_read_timeout_is_a_dedicated_floor(monkeypatch) -> None:
+    """场景圣经的读超时是空闲超时，实际卡的是首字延迟。
+
+    39 次实测里最慢的一次成功调用整整 241s 没吐一个字，之后一口气交出 73779 字；
+    通用 300s 因此分不清「卡死」和「还在想」。唯一那次 INTERRUPTED 就是这么来的：
+    received_chars=0，305.8s 被上限砍断，供应商侧照旧计费，《我欲封天》的场景库
+    随之失败——而这个阶段的合同不允许自动重试。
+    """
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_READ", 300.0)
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_SCENE_BIBLE_READ", 480.0)
+
+    assert hiagent._chat_read_timeout_s({"stage_key": "scene_bible"}) == 480.0
+    # 将来拆分片也得跟着走，不能像 storyboard_pack_segment 那样静默掉回兜底。
+    assert hiagent._chat_read_timeout_s({"stage_key": "scene_bible_shard"}) == 480.0
+    # 上限必须盖住实测最大首字延迟 241s，否则等于没修。
+    assert hiagent._chat_read_timeout_s({"stage_key": "scene_bible"}) > 241.0
+
+    # 与其它专属超时同一约定：是下限，operator 调大通用兜底时跟着变大。
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_READ", 700.0)
+    assert hiagent._chat_read_timeout_s({"stage_key": "scene_bible"}) == 700.0
+
+
+def test_scene_bible_stage_key_in_source_clears_the_generic_ceiling() -> None:
+    """判据从 stages.py 里实际声明的 stage_key 推导，不在这里手抄一份。
+
+    分镜包那次的教训：分派表列的 key 与真实发出的 key 对不上，分支从未命中过，
+    而两边都写着 storyboard，看代码看不出来。改名同样会造成这种静默掉回。
+    """
+    import inspect
+    import re
+
+    from app import stages
+
+    source = inspect.getsource(stages.generate_scene_bible)
+    declared = re.findall(r'stage_key\s*=\s*"([^"]+)"', source)
+    assert declared, "生成场景圣经必须自报 stage_key，否则读超时只能落回通用兜底"
+    for stage_key in declared:
+        assert hiagent._chat_read_timeout_s({"stage_key": stage_key}) > (
+            hiagent.config.TIMEOUT_CHAT_READ
+        ), f"{stage_key} 落回了通用读超时"
+
+
 def test_scene_shard_read_timeout_selector_is_stage_specific(monkeypatch) -> None:
     monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_READ", 300.0)
     monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_SCENE_SHARD_READ", 480.0)

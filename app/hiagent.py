@@ -1359,6 +1359,12 @@ def _chat_read_timeout_s(call_meta: dict | None) -> float:
         )
     if stage_key == "storyboard" or stage_key.startswith("storyboard_shot_"):
         return max(config.TIMEOUT_CHAT_READ, config.TIMEOUT_CHAT_BASELINE_READ)
+    if stage_key == "scene_bible" or stage_key.startswith("scene_bible_"):
+        # 同样按前缀收整族，将来拆分片时不会静默掉回通用 300s。
+        return max(
+            config.TIMEOUT_CHAT_READ,
+            config.TIMEOUT_CHAT_SCENE_BIBLE_READ,
+        )
     if stage_key == "screenplay_character_discovery":
         # Same reasoning as the blueprint shard below, and sharper: the identity
         # contracts forbid an automatic retry, so a stalled call does not just
