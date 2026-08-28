@@ -148,7 +148,14 @@ def test_character_is_portrait_eligible_defaults_and_gates() -> None:
     }) is True
 
 
-def test_parse_character_detail_repairs_production_key_split_and_missing_key() -> None:
+@pytest.mark.asyncio
+async def test_character_detail_recovers_key_split_but_fails_closed_on_missing_key(
+    monkeypatch,
+) -> None:
+    """裂键（key 被断行）是纯语法损坏，走通用 extract_json 的 _repair_json_key_after_colon
+    照样能恢复，产出 grounded 角色；而整段 key 名丢失只剩冒号，通用解析器按 fail-closed
+    判据拒绝猜字段名（见 CLAUDE.md test_extract_json_does_not_guess_a_dropped_field_name），
+    这一集应重采样——两次都失败后按名单锁定留 stub，绝不拿猜出来的字段顶替模型答案。"""
     split_raw = '''{
     "appearance_canonical": "眉眼清秀，气质坚韧，面有清苦感，眼底藏着对前路的思索，皮肤是常年读书的偏白质感，身形偏瘦", "
     :"period_costume_canonical", "身着青布书生直裰，棉麻面料，穿黑布皂靴，束发用木簪，禁用现代元素、绫罗绸缎等贵价面料",
@@ -167,14 +174,36 @@ def test_parse_character_detail_repairs_production_key_split_and_missing_key() -
     "aliases": [],
     "source_evidence": []
 }'''
-    split = stages._parse_character_detail_payload(split_raw)
-    assert split["period_costume_canonical"].startswith("身着青布书生直裰")
-    assert split["aliases"] == []
-    stages._CharacterDetail.model_validate(split)
 
-    missing = stages._parse_character_detail_payload(missing_raw)
-    assert missing["period_costume_canonical"].startswith("身着宗门制式青灰色交领短褐")
-    stages._CharacterDetail.model_validate(missing)
+    async def fake_chat(messages, **_kwargs):
+        return split_raw
+
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    split_result = await stages._generate_character_detail_batch(
+        [stages._BibleRosterEntry(name="孟浩", role="主角")],
+        [{"idx": 1, "content": "孟浩拔剑。"}],
+        style="国漫三维动画电影质感，统一自然光影与细腻材质",
+        chapters_by_idx={1: "孟浩拔剑。"},
+        project_id="p1",
+    )
+    assert split_result[0].appearance_status == "grounded"
+    assert split_result[0].period_costume_canonical.startswith("身着青布书生直裰")
+
+    async def fake_chat_missing(messages, **_kwargs):
+        return missing_raw
+
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat_missing)
+    missing_result = await stages._generate_character_detail_batch(
+        [stages._BibleRosterEntry(name="孟浩", role="主角")],
+        [{"idx": 1, "content": "孟浩拔剑。"}],
+        style="国漫三维动画电影质感，统一自然光影与细腻材质",
+        chapters_by_idx={1: "孟浩拔剑。"},
+        project_id="p1",
+    )
+    # 名单已锁定：详情连续两次都无法解析出模型自己的完整答案，留 stub 占位，
+    # 不猜字段、不静默删人。
+    assert [item.name for item in missing_result] == ["孟浩"]
+    assert missing_result[0].appearance_status == "insufficient_evidence"
 
 
 def test_sanitize_character_detail_drops_aliases_without_chapter_index() -> None:

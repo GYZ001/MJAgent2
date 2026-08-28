@@ -33,7 +33,7 @@ from app.evidence.media import (
 )
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.media_pipeline.stages import ACTIVE_JOB_STATUSES
-from app.schemas import Shot, Storyboard, extract_json
+from app.schemas import Shot, Storyboard
 from app.video_control import consume_control
 from app.video_issues import (
     is_fatal,
@@ -2367,33 +2367,49 @@ async def _semantic_storyboard_repair_proposal(
                 + "\nPrevious proposal:\n"
                 + prior[:16000]
             )
-        prior = await model_gateway.chat(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a senior film director repairing a storyboard from semantic "
-                        "intent, narrative relations and audience comprehension. Output JSON only."
-                    ),
-                },
-                {"role": "user", "content": request},
-            ],
-            temperature=0.2,
-            max_tokens=16384,
-            call_meta={
-                "stage": "video_supervisor_storyboard_repair",
-                "stage_key": "semantic_storyboard_repair_proposal",
-                "call_role": "continuity_director",
-                "episode_id": episode_id,
-                "repair_round": attempt - 1,
-                "contract_version": "storyboard-semantic-repair-proposal.v1",
-            },
-        )
+        # 每轮外层迭代都先重校验付费授权，再发出恰好一次模型调用：网关内部重试
+        # 关掉（format/semantic 都为 0），让"付费边界前必校验"这条不变量原样保持，
+        # 同时用 chat_structured 的受约束解析取代裸 extract_json。语义校验仍留在
+        # 外层做——它要产出 candidate_board，并把确定性校验错误回喂下一轮。
         try:
-            proposal = StoryboardRepairProposal.model_validate(extract_json(prior))
-        except Exception as exc:  # noqa: BLE001 - untrusted model boundary
+            proposal = await model_gateway.chat_structured(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a senior film director repairing a storyboard from semantic "
+                            "intent, narrative relations and audience comprehension. Output JSON only."
+                        ),
+                    },
+                    {"role": "user", "content": request},
+                ],
+                model_type=StoryboardRepairProposal,
+                validate=None,
+                operation_id=(
+                    f"semantic_storyboard_repair:{episode_id}:{database_shot_id}:{attempt}"
+                ),
+                temperature=0.2,
+                max_tokens=16384,
+                format_retry_limit=0,
+                semantic_retry_limit=0,
+                call_meta={
+                    "stage": "video_supervisor_storyboard_repair",
+                    "stage_key": "semantic_storyboard_repair_proposal",
+                    "call_role": "continuity_director",
+                    "episode_id": episode_id,
+                    "repair_round": attempt - 1,
+                    "contract_version": "storyboard-semantic-repair-proposal.v1",
+                    "expected_json": True,
+                },
+            )
+        except (
+            model_gateway.StructuredFormatError,
+            model_gateway.StructuredSemanticError,
+            model_gateway.StructuredProviderRejection,
+        ) as exc:  # untrusted model boundary: surface the real parse/schema failure
             errors = [f"JSON/Schema invalid: {exc}"]
             continue
+        prior = json.dumps(proposal.model_dump(mode="json"), ensure_ascii=False)
         candidate, errors = _validate_storyboard_repair_proposal(
             proposal,
             board=board,

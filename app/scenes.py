@@ -19,6 +19,8 @@ import json
 import re
 from pathlib import Path
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from app import config, generation_concurrency, hiagent
 from app.atomic_io import atomic_write_bytes
 from app.errors import ContentGenerationError, code_ref
@@ -2468,6 +2470,25 @@ def _known_scene_change_entries(conn, project_id, episode_no, screenplay, scenes
     return entries
 
 
+class _SceneStateChangeItem(BaseModel):
+    """一个已入库场景在本集是否发生需整包演进的永久状态变化。字段可留空/空列表，
+    但结构由 schema 在生成层约束，不再事后从自由文本里抠。"""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    changed: bool
+    persistence: str = ""
+    change_dimensions: list[str] = Field(default_factory=list)
+    new_scene_canonical: str = ""
+    reason: str = ""
+    evidence_excerpt: str = ""
+
+
+class _SceneStateChangeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    items: list[_SceneStateChangeItem] = Field(default_factory=list)
+
+
 async def screen_scene_state_changes(entries: list[dict], ep_label: str) -> dict[str, dict]:
     """判断已有场景是否发生永久损毁/重建等需整包演进的状态变化。"""
     if not entries:
@@ -2498,30 +2519,35 @@ async def screen_scene_state_changes(entries: list[dict], ep_label: str) -> dict
  "change_dimensions":["damage"|"rebuild"|"layout"|"decor"],
  "new_scene_canonical":str,"reason":str,"evidence_excerpt":str}}]}}
 shot_only / 未永久变化请 changed=false。new_scene_canonical 须 30~80 字，只写视觉环境。"""
-    raw = await model_gateway.chat(
-        [{"role": "user", "content": prompt}], temperature=0.2, max_tokens=1600,
-        call_meta={"stage": "screen_scene_state_changes"},
+    response = await model_gateway.chat_structured(
+        [{"role": "user", "content": prompt}],
+        model_type=_SceneStateChangeResponse,
+        validate=None,
+        operation_id="screen_scene_state_changes:" + hashlib.sha256(
+            f"{ep_label}:{json.dumps(payload, ensure_ascii=False)}".encode("utf-8")
+        ).hexdigest(),
+        temperature=0.2,
+        max_tokens=1600,
+        call_meta={
+            "stage": "screen_scene_state_changes",
+            "stage_key": "screen_scene_state_changes",
+            "expected_json": True,
+        },
     )
-    data = _extract_scene_change_items(raw)
-    if not isinstance(data, list):
-        return {}
     out: dict[str, dict] = {}
-    for item in data:
-        if not isinstance(item, dict) or not item.get("changed"):
+    for item in response.items:
+        if not item.changed:
             continue
-        name = (item.get("name") or "").strip()
+        name = item.name.strip()
         if not name:
             continue
-        persistence = str(item.get("persistence") or "persistent").strip().lower()
+        persistence = (item.persistence or "persistent").strip().lower()
         if persistence == "shot_only":
             continue
         if persistence not in {"persistent", "episode"}:
             persistence = "persistent"
-        dims = item.get("change_dimensions") or []
-        if isinstance(dims, str):
-            dims = [dims]
-        dims = [str(d).strip() for d in dims if str(d).strip()]
-        canonical = (item.get("new_scene_canonical") or "").strip()
+        dims = [str(d).strip() for d in item.change_dimensions if str(d).strip()]
+        canonical = item.new_scene_canonical.strip()
         if len(canonical) < SCENE_CANONICAL_MIN:
             continue
         if len(canonical) > SCENE_CANONICAL_MAX:
@@ -2532,40 +2558,10 @@ shot_only / 未永久变化请 changed=false。new_scene_canonical 须 30~80 字
             "persistence": persistence,
             "change_dimensions": dims or ["layout"],
             "new_scene_canonical": canonical,
-            "reason": (item.get("reason") or "").strip(),
-            "evidence_excerpt": (item.get("evidence_excerpt") or "").strip(),
+            "reason": item.reason.strip(),
+            "evidence_excerpt": item.evidence_excerpt.strip(),
         }
     return out
-
-
-def _extract_scene_change_items(raw: str) -> list[dict]:
-    """同时解析规范对象和旧版根数组，避免多场景决策被静默截断。"""
-    text = (raw or "").strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines and lines[0].lstrip().startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-    starts = [pos for pos in (text.find("["), text.find("{")) if pos >= 0]
-    data = None
-    if starts:
-        try:
-            data, _ = json.JSONDecoder().raw_decode(text[min(starts):])
-        except (TypeError, ValueError, json.JSONDecodeError):
-            data = None
-    if data is None:
-        data = extract_json(raw)
-    if isinstance(data, list):
-        return [item for item in data if isinstance(item, dict)]
-    if isinstance(data, dict):
-        items = data.get("items") or data.get("scenes")
-        if isinstance(items, list):
-            return [item for item in items if isinstance(item, dict)]
-        if "name" in data and "changed" in data:
-            return [data]
-    return []
 
 
 def _update_bible_scene_canonical(conn, project_id: str, name: str, canonical: str,

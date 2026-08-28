@@ -82,7 +82,7 @@ from app.schemas import (AppearanceEvidence, Bible, Character, CharacterAffiliat
                          CharacterRelation, Dialogue, EMOTIONS, EpisodeScreenplay,
                          Relationship, Scene, StoryboardOutline, World,
                          StoryboardOutlineShot, extract_json, normalize_screenplay_json_shape,
-                         schema_errors, _repair_json_key_after_colon)
+                         schema_errors)
 from app.validators import (ending_hook_is_grounded,
                             ending_hook_grounding_report,
                             key_line_catalog,
@@ -6068,42 +6068,6 @@ def _sanitize_character_detail_payload(payload: dict) -> dict:
     return data
 
 
-_CHARACTER_DETAIL_STRING_FIELDS = (
-    "appearance_canonical",
-    "period_costume_canonical",
-    "personality",
-    "speech_style",
-)
-
-
-def _repair_character_detail_json(text: str) -> str:
-    """Restore a dropped or split key after a completed string field.
-
-    Production (provider_calls 14363 / 孟浩 attempt 2): appearance_canonical closed,
-    next key opened, then the model wrote `: "身着...` with the field name missing.
-    Insert the next `_CharacterDetail` string field. Key-after-colon splits are
-    repaired first so a surviving identifier is not rewritten as a missing key.
-    """
-    repaired = _repair_json_key_after_colon(text)
-    for index, field in enumerate(_CHARACTER_DETAIL_STRING_FIELDS[:-1]):
-        nxt = _CHARACTER_DETAIL_STRING_FIELDS[index + 1]
-        pattern = rf'("{re.escape(field)}"\s*:\s*"(?:\\.|[^"\\])*")\s*,\s*"\s*:\s*"'
-        repaired = re.sub(pattern, rf'\1,\n    "{nxt}": "', repaired, count=1)
-    return repaired
-
-
-def _parse_character_detail_payload(raw: str) -> dict:
-    """Extract and sanitize one character-detail object; repair known JSON splits."""
-    try:
-        payload = extract_json(raw)
-    except ValueError:
-        repaired = _repair_character_detail_json(raw)
-        if repaired == raw:
-            raise
-        payload = extract_json(repaired)
-    return _sanitize_character_detail_payload(payload)
-
-
 def _character_stub_from_roster(entry: _BibleRosterEntry) -> Character:
     """名单已锁定时，详情失败也要留下这个人，外观留空待补，不编造长相。"""
     return Character(
@@ -6316,17 +6280,27 @@ async def _generate_character_detail(
 {{"appearance_canonical": str, "period_costume_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "aliases": [{{"text": str, "name_kind": str, "evidence_chapter_index": int, "evidence_quote": str}}], "source_evidence": [{{"evidence_chapter_index": int, "evidence_quote": str}}]}}"""
         started = time.time()
         try:
-            raw = await asyncio.wait_for(
-                model_gateway.chat(
+            detail = await asyncio.wait_for(
+                model_gateway.chat_structured(
                     [{"role": "system", "content": SYSTEM_PREFIX}, {"role": "user", "content": prompt}],
+                    model_type=_CharacterDetail,
+                    validate=None,
+                    normalize_payload=_sanitize_character_detail_payload,
+                    operation_id=(
+                        f"character_bible_detail:{project_id or ''}:{entry.name}:{attempt}"
+                    ),
                     temperature=0.35 if attempt == 1 else 0.15,
                     max_tokens=BIBLE_DETAIL_MAX_TOKENS,
+                    # 外层 attempt 循环是本函数唯一的重试预算：内层结构化重试关掉，
+                    # 让格式/语义失败原样抛出，由外层换温度重跑（保持"每个角色各自
+                    # 重试、互不影响"的语义），不再让网关吞掉一轮。
+                    format_retry_limit=0,
+                    semantic_retry_limit=0,
                     call_meta=_bible_short_json_call_meta({
                         "stage": "角色详情生成",
                         "stage_key": "character_bible_detail",
                         "call_role": "stage_generate" if attempt == 1 else "stage_repair",
                         "call_role_label": "单角色详情",
-                        "expected_json": True,
                         "character_name": entry.name,
                         "attempt": attempt,
                         "input_chars": len(pack),
@@ -6335,9 +6309,6 @@ async def _generate_character_detail(
                     }),
                 ),
                 timeout=BIBLE_DETAIL_TIMEOUT_S,
-            )
-            detail = _CharacterDetail.model_validate(
-                _parse_character_detail_payload(raw)
             )
             character = Character(
                 name=entry.name,
