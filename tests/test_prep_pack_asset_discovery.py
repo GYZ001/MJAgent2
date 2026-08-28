@@ -2163,6 +2163,137 @@ def test_provenance_resolution_forward_half_certificate_blocks_publish():
     assert errors_c == [], "两个字段齐全的完整证书必须放行"
 
 
+# 《黄英》EP1 原文的真实形状：一句被段落分隔切成两截的叙述。
+_PARAGRAPH_BREAK_SOURCE = (
+    "那客人多方替他寻求，终于弄到两株嫩芽。马子才像珍宝一样把它们包裹收藏好，踏上归途。"
+    "\n\n"
+    "走到半路，他遇见一位少年。少年骑着一头小毛驴，跟随在一辆青碧色的车子旁边。"
+)
+# 模型申报的引文：逐字抄自原文，只是没抄那个段落分隔。
+_CROSS_PARAGRAPH_QUOTE = "马子才像珍宝一样把它们包裹收藏好，踏上归途。走到半路，他遇见一位少年"
+
+
+def test_quote_spanning_a_paragraph_break_still_anchors():
+    """引文横跨自然段时，段间那个换行不该让整条绑定失去本集依据。
+
+    真实故障 ERR-20260828-16ce45（run_1a3721d1a9c2 / ep_cae1ede1c62f，《黄英》
+    EP1）：场景「郊野归途路径」是模型综合出的合成名，原文里不会有这四个字，
+    三路候选（canonical_scene_name / name / quote）里唯一能落地的就是它自己
+    申报的 quote。那条 quote 每个字都抄自原文，只是跨过了一个段落分隔——两句
+    话在原文里分属相邻两段，模型抄下来时连着写，于是它既不在第一段里也不在
+    第二段里。锚点落空，整集映射被"resolution 绑定必须有本集文本依据"拦停，
+    重试必然复现。
+    """
+    segments = prep_pack.index_source_segments(_PARAGRAPH_BREAK_SOURCE)
+    assert len(segments) == 2, "夹具必须真的被切成两段才有意义"
+    assert not any(
+        _CROSS_PARAGRAPH_QUOTE in segment.text for segment in segments
+    ), "夹具必须真的跨段：任何单段都不完整包含这条引文"
+
+    located = prep_pack._prep_pack_locate_phrase(segments, _CROSS_PARAGRAPH_QUOTE)
+
+    assert located == [1, 2], "跨段引文要定位到它真正覆盖的那几段"
+    anchor_segments, anchor_phrase = prep_pack._prep_pack_local_text_anchor(
+        segments, ["郊野归途路径", "郊野归途路径", _CROSS_PARAGRAPH_QUOTE],
+    )
+    assert anchor_segments == [1, 2]
+    assert anchor_phrase == _CROSS_PARAGRAPH_QUOTE
+
+
+def test_paragraph_break_tolerance_still_rejects_invented_quotes():
+    """抹掉的只有空白：改写过、编造的、张冠李戴的引文照样定位不到。
+
+    这条守的是上一条修复的边界——如果为了让跨段引文过关而放宽到"差不多就行"，
+    这道闸就不再拦幻觉了。段落分隔是排版，字和标点都还是逐字要求。
+    """
+    segments = prep_pack.index_source_segments(_PARAGRAPH_BREAK_SOURCE)
+
+    invented = [
+        # 完全编造。
+        "马子才骑着毛驴独自返回了顺天府",
+        # 改写：原文是"他遇见一位少年"，这里换了词。
+        "马子才像珍宝一样把它们包裹收藏好，踏上归途。走到半路，他碰上一位少年",
+        # 标点被改：原文两句之间是句号。
+        "马子才像珍宝一样把它们包裹收藏好，踏上归途，走到半路，他遇见一位少年",
+        # 顺序颠倒：两句都在原文里，但不是这个次序。
+        "走到半路，他遇见一位少年。马子才像珍宝一样把它们包裹收藏好，踏上归途。",
+    ]
+    for quote in invented:
+        assert prep_pack._prep_pack_locate_phrase(segments, quote) == [], (
+            f"这条引文不该被定位到：{quote}"
+        )
+        assert prep_pack._prep_pack_local_text_anchor(segments, [quote]) == ([], "")
+
+
+def test_self_verify_matches_the_audit_scripts_anchor_rule():
+    """自校验与外部审计必须用同一条锚点判据，且照旧核对声明的段号。
+
+    scripts/episode_source_audit.py::_verify_provenance_anchor 一直是"把声明
+    的那几段按序拼起来再查"（anchor_segments 本就是复数）；自校验却停在"任一
+    单段内命中"。跨段引文因此在两边得出相反结论——生成侧放行、审计侧判红，
+    同一份数据两个真源打架。这条测试把两边钉在一起。
+    """
+    segments = prep_pack.index_source_segments(_PARAGRAPH_BREAK_SOURCE)
+
+    def _verify(anchor_segments):
+        return prep_pack._prep_pack_verify_manifest_provenance(
+            segments,
+            {
+                "characters": [], "functional_extras": [],
+                "scenes": [{
+                    "display_name": "郊野归途路径",
+                    "provenance": {
+                        "method": "resolution",
+                        "anchor_segments": anchor_segments,
+                        "anchor_phrase": _CROSS_PARAGRAPH_QUOTE,
+                    },
+                }],
+            },
+        )
+
+    assert _verify([1, 2]) == [], "两段都声明上的跨段锚点要放行"
+    for incomplete in ([1], [2], [9]):
+        blocked = _verify(incomplete)
+        assert blocked, f"声明 {incomplete} 装不下这条引文，必须照旧拦截"
+        assert any("郊野归途路径" in message for message in blocked)
+
+    # 生成侧算出来的段号本身就是完整覆盖的，所以这条路走不到上面的拦截。
+    anchor_segments, anchor_phrase = prep_pack._prep_pack_local_text_anchor(
+        segments, [_CROSS_PARAGRAPH_QUOTE],
+    )
+    assert _verify(anchor_segments) == []
+    assert anchor_phrase == _CROSS_PARAGRAPH_QUOTE
+
+
+def test_self_verify_agrees_with_the_audit_script_on_the_same_anchor():
+    """同一条 provenance 送进两套核验，结论必须一致。
+
+    这里直接引入审计脚本自己的函数比对，不是复述它的规则——转述会失真，
+    而这两套判据一旦漂移，就会出现"发布时通过、审计时判红"的死结。
+    """
+    from scripts.episode_source_audit import _verify_provenance_anchor
+
+    segments = prep_pack.index_source_segments(_PARAGRAPH_BREAK_SOURCE)
+    for anchor_segments in ([1, 2], [1], [2], [9]):
+        provenance = {
+            "method": "resolution",
+            "anchor_segments": anchor_segments,
+            "anchor_phrase": _CROSS_PARAGRAPH_QUOTE,
+        }
+        audit_ok, _reason = _verify_provenance_anchor(segments, provenance)
+        self_verify_errors = prep_pack._prep_pack_verify_manifest_provenance(
+            segments,
+            {
+                "characters": [], "functional_extras": [],
+                "scenes": [{"display_name": "郊野归途路径", "provenance": provenance}],
+            },
+        )
+        assert audit_ok == (self_verify_errors == []), (
+            f"anchor_segments={anchor_segments} 上两套核验结论不一致："
+            f"审计 ok={audit_ok}，自校验 errors={self_verify_errors}"
+        )
+
+
 def test_provenance_missing_field_on_legacy_manifest_does_not_crash():
     """红灯 c（前端兼容/旧包兼容）：provenance 是新增可选字段——完全没有这
     个字段的旧 manifest（1.5.x 之前发布的包）传进自校验，必须优雅跳过，不

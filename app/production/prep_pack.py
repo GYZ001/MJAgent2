@@ -1461,6 +1461,51 @@ def _prep_pack_first_evidence_segment(segments: list[SourceSegment], text: str) 
 # 窗口核验通过，证据在下一集原文里，不在本集）；空 anchor_phrase 在自校验
 # 里视为"这条绑定没有可本地核验的锚点"，直接跳过验证，不阻断——已经比
 # 1.5.x 之前"完全没有这个字段"更诚实，不需要为了填满字段而编造一个假锚点。
+_PREP_PACK_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _prep_pack_locate_phrase(
+    segments: list[SourceSegment], phrase: str,
+) -> list[int]:
+    """`phrase` 逐字落在哪几个 segment 上（1-based，升序）；定位不到返回 []。
+
+    先按单段严格匹配——绝大多数锚点走这条，与最初实现逐字节等价。都不命中
+    时才退一步：把各段按原文顺序接起来、只抹掉空白字符，再做一次逐字定位。
+
+    模型引用原文时经常横跨自然段，而它抄下来的引文里没有段间那个换行。真实
+    故障 ERR-20260828-16ce45（《黄英》EP1「郊野归途路径」）：原文「……踏上
+    归途。」与「走到半路，他遇见一位少年。」分属相邻两段，模型申报的
+    quote 把两句连着写，于是它既不在第一段里、也不在第二段里，三路候选
+    全部落空，整集映射被「缺少 anchor_phrase」拦停——而这条引文的每一个字
+    都真的在原文里，差的只是一个换行。
+
+    段落分隔是排版，不是内容。抹掉空白之后仍然要求每个字、每个标点逐字
+    连续命中，所以编造的引文、改写过的引文、张冠李戴的引文照样定位不到：
+    这是把「逐字」定义在文字上，不是放宽逐字。
+    """
+    phrase = str(phrase or "").strip()
+    if not phrase:
+        return []
+    for index, segment in enumerate(segments, start=1):
+        if phrase in segment.text:
+            return [index]
+    needle = _PREP_PACK_WHITESPACE_RE.sub("", phrase)
+    if not needle:
+        return []
+    haystack: list[str] = []
+    owner: list[int] = []
+    for index, segment in enumerate(segments, start=1):
+        for char in segment.text:
+            if char.isspace():
+                continue
+            haystack.append(char)
+            owner.append(index)
+    start = "".join(haystack).find(needle)
+    if start < 0:
+        return []
+    return sorted(set(owner[start:start + len(needle)]))
+
+
 def _prep_pack_local_text_anchor(
     segments: list[SourceSegment], candidates: list[str],
 ) -> tuple[list[int], str]:
@@ -1468,9 +1513,9 @@ def _prep_pack_local_text_anchor(
         candidate = str(candidate or "").strip()
         if not candidate:
             continue
-        segment_index = _prep_pack_first_evidence_segment(segments, candidate)
-        if segment_index is not None:
-            return [segment_index], candidate
+        anchor_segments = _prep_pack_locate_phrase(segments, candidate)
+        if anchor_segments:
+            return anchor_segments, candidate
     return [], ""
 
 
@@ -1689,9 +1734,13 @@ def _prep_pack_verify_manifest_provenance(
         in_range = [
             index for index in segment_indexes if 1 <= index <= total_segments
         ]
-        if not in_range or not any(
-            phrase in segments[index - 1].text for index in in_range
-        ):
+        # 判据与 scripts/episode_source_audit.py::_verify_provenance_anchor
+        # 逐字同构：把声明的那几段按序拼起来，短语必须落在拼接结果里。审计
+        # 侧一直是这么核验的（anchor_segments 本就是复数），只有这里还停在
+        # "任一单段内命中"——横跨自然段的引文因此生成侧算命中、这里算不命中。
+        # 同一份数据两个真源互相打架时，这道闸拦下的不是幻觉，是我们自己。
+        joined = "".join(segments[index - 1].text for index in in_range)
+        if not in_range or phrase not in joined:
             errors.append(
                 f"{kind}「{label}」的 provenance.anchor_phrase「{phrase}」未在"
                 f"anchor_segments={segment_indexes} 所指原文中逐字命中，来源"
