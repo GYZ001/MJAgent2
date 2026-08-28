@@ -23,7 +23,6 @@
 """
 from __future__ import annotations
 
-import json
 import threading
 import time
 from typing import Any
