@@ -191,9 +191,7 @@ class Character(BaseModel):
     personality: str = ""
     speech_style: str = ""
     relationships: list[Relationship] = Field(default_factory=list)
-    # 角色准入与视觉生产状态。旧人物谱缺字段时保持原行为；新人物谱由 Harness 明确写入。
-    # onstage=已核验真实出场；mentioned_only=仅被提及但因剧情权威/全文信号保留；
-    # unresolved=身份或出场证据不足。只有 portrait_eligible=True 才允许自动定妆。
+    # 是否核验到本人在场，只记录事实，不决定出不出定妆图。人物谱有卡就应定妆。
     presence_status: Literal["onstage", "mentioned_only", "unresolved"] = "onstage"
     importance_score: float = 0.0
     importance_signals: list[str] = Field(default_factory=list)
@@ -224,7 +222,7 @@ class Character(BaseModel):
 
 
 def character_is_portrait_eligible(character: Character | dict) -> bool:
-    """自动定妆资格：有名字、明确够格、外观已落地。缺字段时保持旧人物谱原行为。"""
+    """人物谱有卡且外观已落地就定妆。在不在场不参与这个判断。"""
     if isinstance(character, dict):
         name = character.get("name")
         eligible = character.get("portrait_eligible", True)

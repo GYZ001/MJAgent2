@@ -507,8 +507,18 @@ def test_recurring_character_names_matches_real_project_evidence_shapes(monkeypa
     mentioned_only = {"王伯", "周员外", "靠山老祖"}
 
     async def fake_chat_structured(_messages, **kwargs):
-        appellation = (kwargs.get("call_meta") or {}).get("appellation", "")
+        meta = kwargs.get("call_meta") or {}
         model_type = kwargs["model_type"]
+        # 真名复核对点名申报的 formal_name 也要跑一遍；这里照原文回答，
+        # 让「小胖子→李富贵」通过，其余候选保持未揭示。
+        if model_type is stages._RosterTrueNameResolution:
+            if meta.get("character_name") == "小胖子":
+                return model_type(
+                    verdict="revealed", true_name="李富贵",
+                    supporting_chapter_index=8, supporting_quote="众人称小胖子李富贵。",
+                )
+            return model_type(verdict="unrevealed")
+        appellation = meta.get("appellation", "")
         verdict = "mentioned_only" if appellation in mentioned_only else "onstage"
         return model_type(verdict=verdict, supporting_segment_index=1)
 

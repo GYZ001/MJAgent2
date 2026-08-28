@@ -2065,6 +2065,11 @@ class _RosterCandidate(BaseModel):
     identity_evidence: list[_RosterOnstageEvidence] = Field(default_factory=list)
     onstage_evidence: list[_RosterOnstageEvidence] = Field(default_factory=list)
     personhood: Literal["person", "non_person", "uncertain"] = "uncertain"
+    # 称呼形态由资格裁决里的模型判定，程序不查词表。referential 这类只描述外形或
+    # 身份的代称不能自己建卡，要先由身份归一裁决认领到某个人身上。
+    name_form: Literal[
+        "personal_name", "honorific", "referential", "uncertain",
+    ] = "uncertain"
 
 
 class _CharacterRollCall(BaseModel):
@@ -2089,35 +2094,46 @@ class _MentionedCharacterImportanceResolution(BaseModel):
     reason: str = ""
 
 
-_GENERIC_CHARACTER_APPELLATION_RE = re.compile(
-    r"(?:少年|少女|男子|女子|汉子|大汉|老者|老人|妇人|青年|中年|胖子|瘦子|孩童|弟子|修士|掌柜|伙计)$"
-)
-# 「小胖子」「阿瘦子」是稳定绰号，不是「胖子/少年」这类类别词。后缀正则会把它们
-# 误判成泛称，送进身份归一；合不上或后续资格闸一丢，整个人就从人物谱消失。
-_STABLE_NICKNAME_RE = re.compile(r"^[小阿](?:胖子|瘦子|少年|少女|孩童)$")
+def _shared_appellations(candidates: list["_RosterCandidate"]) -> set[str]:
+    """本次点名里被多个不同候选共用的称呼，不能当个体标识。
+
+    判据从输入推导，不枚举「少年/胖子/弟子」这类词表——类别词是开放集合，
+    穷举不完，而且同一个词在别的作品里可能就是某个人的固定绰号。一个称呼
+    只要被两个以上候选各自申报，它在这本书里就分不出人，只能送模型消歧。
+    """
+    owners: dict[str, set[str]] = defaultdict(set)
+    for candidate in candidates:
+        owner = (candidate.primary_appellation or "").strip()
+        if not owner:
+            continue
+        for name in _candidate_appellations(candidate):
+            owners[name].add(owner)
+    return {name for name, group in owners.items() if len(group) > 1}
 
 
-def _is_generic_character_appellation(value: str) -> bool:
-    text = (value or "").strip()
-    if not text or _STABLE_NICKNAME_RE.fullmatch(text):
-        return False
-    return bool(_GENERIC_CHARACTER_APPELLATION_RE.search(text))
+def _is_composite_appellation(value: str, known_names: set[str]) -> bool:
+    """带属格的组合指称（「X 的 Y」）指向的是关系，不是稳定人物身份。
 
-
-def _is_dependent_descriptive_appellation(value: str, known_names: set[str]) -> bool:
-    """「孟浩的第一位客人」「此人的对手」这类描述，不是稳定人物身份。"""
+    「的」是汉语属格标记，属于语法结构而不是某本书的词表；这里只判结构，
+    是不是同一个人交给身份归一裁决。
+    """
     text = (value or "").strip()
     if not text or "的" not in text:
         return False
     if any(name and name != text and name in text for name in known_names):
         return True
-    return bool(re.match(r"^[此该那某]", text))
+    return text.index("的") > 0 and text.index("的") < len(text) - 1
 
 
-def _roster_label_needs_identity_resolution(label: str, known_names: set[str]) -> bool:
-    text = (label or "").strip()
-    return _is_generic_character_appellation(text) or _is_dependent_descriptive_appellation(
-        text, known_names,
+def _roster_label_needs_identity_resolution(
+    candidate: "_RosterCandidate", known_names: set[str], ambiguous: set[str],
+) -> bool:
+    """要不要送身份归一：形态由模型裁决，剩下两条判据从本次点名数据推导。"""
+    text = (candidate.formal_name or candidate.primary_appellation or "").strip()
+    return (
+        candidate.name_form == "referential"
+        or text in ambiguous
+        or _is_composite_appellation(text, known_names)
     )
 
 
@@ -2236,8 +2252,6 @@ def _pin_roster_candidates_to_source(
             )
             if pinned_alias and pinned_alias not in {primary, formal, *aliases}:
                 aliases.append(pinned_alias)
-        if formal and not _usable_true_name(formal):
-            formal = ""
         pinned.append(candidate.model_copy(update={
             "primary_appellation": primary,
             "formal_name": "" if not formal or formal == primary else formal,
@@ -2247,11 +2261,13 @@ def _pin_roster_candidates_to_source(
 
 
 def _identity_merge_keys(candidate: _RosterCandidate) -> set[str]:
-    """连通分量只用可指认称呼。胖子/少年这种类别词会把李富贵和王有材并成一个人。"""
-    return {
-        value for value in _candidate_appellations(candidate)
-        if value and not _is_generic_character_appellation(value)
-    }
+    """连通分量的候选键就是这个候选自己申报的全部称呼。
+
+    这里不做「哪些词算类别词」的过滤——那需要词表，而词表是开放集合。
+    合并的真正约束在下面：共享称呼必须是某一方的主称呼，且两人要在原文里
+    共现得上；分不出人的称呼由后面的身份归一裁决交给模型判。
+    """
+    return {value for value in _candidate_appellations(candidate) if value}
 
 
 def _merge_roll_call_candidates(
@@ -2339,11 +2355,12 @@ async def _resolve_generic_character_candidates(
 ) -> list[_RosterCandidate]:
     """把描述性称呼裁决到已有实体；不确定时不再凭空创建新角色。"""
     known_names = {value for item in candidates for value in _candidate_appellations(item)}
+    # 归并已经跑完，同一个人的多份点名结果已经合成一条。此刻还被多个候选共用的
+    # 称呼，在这本书里就分不出人，必须交给模型消歧，不能各自建卡。
+    ambiguous = _shared_appellations(candidates)
     specific = [
         candidate for candidate in candidates
-        if not _roster_label_needs_identity_resolution(
-            (candidate.formal_name or candidate.primary_appellation).strip(), known_names,
-        )
+        if not _roster_label_needs_identity_resolution(candidate, known_names, ambiguous)
     ]
     if not specific:
         return candidates
@@ -2358,7 +2375,7 @@ async def _resolve_generic_character_candidates(
     ]
     for candidate in candidates:
         label = (candidate.formal_name or candidate.primary_appellation).strip()
-        if not _roster_label_needs_identity_resolution(label, known_names):
+        if not _roster_label_needs_identity_resolution(candidate, known_names, ambiguous):
             kept.append(candidate)
             continue
         evidence_blocks: list[str] = []
@@ -2458,6 +2475,9 @@ class _RosterPersonhoodResolution(BaseModel):
 
     verdict: Literal["person", "non_person", "uncertain"] = "uncertain"
     supporting_chapter_index: int = -1
+    name_form: Literal[
+        "personal_name", "honorific", "referential", "uncertain",
+    ] = "uncertain"
 
     @model_validator(mode="before")
     @classmethod
@@ -2483,11 +2503,18 @@ class _RosterTrueNameResolution(BaseModel):
         return _require_explicit_verdict(value)
 
 
+BIBLE_PERSONHOOD_DOSSIER_SEGMENTS = 12
+
+
 def _roster_personhood_dossier(
     candidate: _RosterCandidate, chapters_by_idx: dict[int, str],
 ) -> list[dict[str, Any]]:
     """资格卷宗必须含候选称呼本身。真实故障：孟浩的在场引句扩成「孟兄」段，
-    模型据此判 uncertain，主角从人物谱消失。"""
+    模型据此判 uncertain，主角从人物谱消失。
+
+    段落跨整个窗口取样而不是取最靠前的几段：判「这是人还是器物」要看它在不同
+    场合怎么被使用，只给开头连着的几段，模型看到的可能全是同一个场景。
+    """
     blocks: list[dict[str, Any]] = []
     names = [value for value in _candidate_appellations(candidate) if value]
     if not names:
@@ -2499,7 +2526,7 @@ def _roster_personhood_dossier(
             return False
         if item not in blocks:
             blocks.append(item)
-        return len(blocks) >= 6
+        return len(blocks) >= BIBLE_PERSONHOOD_DOSSIER_SEGMENTS
 
     for evidence in candidate.onstage_evidence[:3]:
         chapter_text = chapters_by_idx.get(evidence.chapter_index, "")
@@ -2508,16 +2535,52 @@ def _roster_personhood_dossier(
         ):
             if _add(item):
                 return blocks
-    for name in names:
-        for chapter_idx in sorted(chapters_by_idx):
-            chapter_text = chapters_by_idx.get(chapter_idx) or ""
-            if name not in chapter_text:
+    for item in _spread_named_segments(
+        names, chapters_by_idx, limit=BIBLE_PERSONHOOD_DOSSIER_SEGMENTS,
+    ):
+        if _add(item):
+            return blocks
+    return blocks
+
+
+def _spread_named_segments(
+    names: list[str], chapters_by_idx: dict[int, str], *, limit: int,
+    segment_max_chars: int = 240,
+) -> list[dict[str, Any]]:
+    """检索含这些称呼的原文段，跨全部章节均匀取样，首次出现的章节必定入选。
+
+    程序只负责把上下文找齐给模型，不在这里做任何关于这个人的判断。首次出现的
+    章节通常带身份交代，均匀取样保证后文的不同场合也进得来。
+    """
+    anchors = [value.strip() for value in names if value and value.strip()]
+    if not anchors or limit <= 0:
+        return []
+    hit_chapters = [
+        chapter_idx for chapter_idx in sorted(chapters_by_idx)
+        if any(anchor in (chapters_by_idx.get(chapter_idx) or "") for anchor in anchors)
+    ]
+    if not hit_chapters:
+        return []
+    if len(hit_chapters) > limit:
+        step = len(hit_chapters) / limit
+        picked = [hit_chapters[min(len(hit_chapters) - 1, int(i * step))] for i in range(limit)]
+        hit_chapters = list(dict.fromkeys(picked))
+    blocks: list[dict[str, Any]] = []
+    for chapter_idx in hit_chapters:
+        chapter_text = chapters_by_idx.get(chapter_idx) or ""
+        for index, segment in enumerate(
+            index_source_segments(chapter_text, max_chars=segment_max_chars)
+        ):
+            if not any(anchor in segment.text for anchor in anchors):
                 continue
-            for index, segment in enumerate(index_source_segments(chapter_text, max_chars=240)):
-                if name not in segment.text:
-                    continue
-                if _add({"chapter_idx": chapter_idx, "segment_index": index + 1, "text": segment.text}):
-                    return blocks
+            blocks.append({
+                "chapter_idx": chapter_idx,
+                "segment_index": index + 1,
+                "text": segment.text,
+            })
+            break
+        if len(blocks) >= limit:
+            break
     return blocks
 
 
@@ -2556,6 +2619,12 @@ async def _filter_non_person_roster_candidates(
 - non_person：这个称呼指器物、法宝、地点、组织、没有自己姓名的野兽，或无法对应到具体人名的一次性描述。
 - uncertain：卷宗不够，还不能决定。证据不足时选 uncertain，不要猜。
 
+同时用 name_form 说明「{label}」这个写法本身是哪一种称呼形态：
+- personal_name：人物的姓名，包括姓名、单名、以及被当作固定名字使用的绰号。
+- honorific：姓氏或关系加上称呼，例如某某师姐、某某爷，指人但不是姓名。
+- referential：靠外形、衣着、年龄、身份或方位来指人的说法，换个场合就可能指别人。
+- uncertain：卷宗不足以判断这个写法属于哪一种。
+
 supporting_chapter_index 必须是卷宗里出现过的数字章号，例如 1，不要写「第1章」或数组。不得根据常识或作品知识补充。
 """
         try:
@@ -2591,46 +2660,37 @@ supporting_chapter_index 必须是卷宗里出现过的数字章号，例如 1�
         evidence_ok = chapter_ok or name_in_dossier
         if resolution.verdict == "non_person" and evidence_ok:
             return None
+        name_form = resolution.name_form if evidence_ok else "uncertain"
         if resolution.verdict == "person" and evidence_ok:
-            return candidate.model_copy(update={"personhood": "person"})
-        return candidate.model_copy(update={"personhood": "uncertain"})
+            return candidate.model_copy(update={
+                "personhood": "person", "name_form": name_form,
+            })
+        return candidate.model_copy(update={
+            "personhood": "uncertain", "name_form": name_form,
+        })
 
     judged = await asyncio.gather(*(_judge(item) for item in candidates))
     return [item for item in judged if item is not None]
 
 
 def _roster_true_name_dossier(
-    appellation: str, chapters: list[dict], *, after_chapter: int,
+    names: list[str], chapters: list[dict], *, limit: int = 8,
 ) -> list[dict[str, Any]]:
-    """优先取发现窗口之后、含该称呼的原文段，供真名揭示裁决。"""
-    later: list[dict] = []
-    earlier: list[dict] = []
+    """真名裁决的卷宗：含这些称呼的原文段，跨全书取样。
+
+    姓名可能在首次登场时就交代，也可能拖到很后面才揭示，所以既要首个命中章
+    也要后文跨度，不能只给窗口之后的段。
+    """
+    chapters_by_idx: dict[int, str] = {}
     for chapter in chapters:
+        text = chapter.get("content") or ""
+        if not text:
+            continue
         try:
-            idx = int(chapter.get("idx"))
+            chapters_by_idx[int(chapter.get("idx"))] = text
         except (TypeError, ValueError):
             continue
-        text = chapter.get("content") or ""
-        if appellation not in text:
-            continue
-        (later if idx > after_chapter else earlier).append(chapter)
-
-    items: list[dict[str, Any]] = []
-    for pool in (later, earlier):
-        for chapter in pool:
-            idx = int(chapter["idx"])
-            text = chapter.get("content") or ""
-            for index, segment in enumerate(index_source_segments(text, max_chars=240)):
-                if appellation not in segment.text:
-                    continue
-                items.append({
-                    "chapter_idx": idx, "segment_index": index + 1, "text": segment.text,
-                })
-                if len(items) >= 8:
-                    return items
-        if items:
-            return items
-    return items
+    return _spread_named_segments(names, chapters_by_idx, limit=limit)
 
 
 async def _discover_roster_true_names(
@@ -2639,7 +2699,11 @@ async def _discover_roster_true_names(
     *,
     project_id: str | None = None,
 ) -> list[_RosterCandidate]:
-    """点名窗口没见到真名时，用后文共现把尊称接到正式姓名。
+    """由模型读原文卷宗决定每个称呼的正式姓名，程序只做检索与钉证。
+
+    点名模型顺手填的 formal_name 也要在这里复核：它可能把身边的物件或半句话
+    当成姓名（真实故障：「王腾飞」的真名被写成「这阵法」）。复核对不上就退回
+    称呼，宁可没有真名，也不让一个不是名字的串当主名。
 
     真实事故：许清在第 34 章才以真名出现，前 20 章点名只收到「许师姐」，全文检索
     因此只数到两百次尊称，女主角被标成低频配角。
@@ -2648,13 +2712,14 @@ async def _discover_roster_true_names(
 
     async def _discover(candidate: _RosterCandidate) -> _RosterCandidate:
         appellation = (candidate.primary_appellation or "").strip()
-        if not appellation or (candidate.formal_name or "").strip():
+        if not appellation:
             return candidate
+        claimed = (candidate.formal_name or "").strip()
         dossier = _roster_true_name_dossier(
-            appellation, chapters, after_chapter=BIBLE_HEAD_CHAPTERS,
+            [appellation, claimed] if claimed else [appellation], chapters,
         )
         if not dossier:
-            return candidate
+            return candidate.model_copy(update={"formal_name": ""}) if claimed else candidate
         catalog = "\n\n".join(
             f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
             for item in dossier
@@ -2696,8 +2761,8 @@ supporting_chapter_index 必须是卷宗里出现过的章号；supporting_quote
                 ),
                 timeout=BIBLE_SMALL_VERDICT_TIMEOUT_S,
             )
-        except Exception:  # noqa: BLE001 - 没有揭示就保持尊称
-            return candidate
+        except Exception:  # noqa: BLE001 - 裁决没跑成就退回称呼，不留未复核的真名
+            return candidate.model_copy(update={"formal_name": ""}) if claimed else candidate
         true_name = (resolution.true_name or "").strip()
         chapter_text = chapters_by_idx.get(resolution.supporting_chapter_index, "")
         quote = (resolution.supporting_quote or "").strip()
@@ -2711,8 +2776,6 @@ supporting_chapter_index 必须是卷宗里出现过的章号；supporting_quote
             resolution.verdict != "revealed"
             or not true_name
             or true_name == appellation
-            or _TRUE_NAME_REJECT_RE.search(true_name)
-            or _is_generic_character_appellation(true_name)
             or true_name in occupied_elsewhere
             or resolution.supporting_chapter_index not in valid_chapters
             or true_name not in chapter_text
@@ -2720,7 +2783,8 @@ supporting_chapter_index 必须是卷宗里出现过的章号；supporting_quote
             or (quote and quote not in chapter_text)
             or (quote and true_name not in quote)
         ):
-            return candidate
+            # 点名申报过真名却复核不过，说明那个串没被原文证明是这个人的姓名。
+            return candidate.model_copy(update={"formal_name": ""}) if claimed else candidate
         aliases = list(dict.fromkeys([
             *candidate.aliases, appellation,
         ]))
@@ -2733,195 +2797,14 @@ supporting_chapter_index 必须是卷宗里出现过的章号；supporting_quote
     return list(await asyncio.gather(*(_discover(item) for item in candidates)))
 
 
-_TRUE_NAME_SELF_ID_RE = re.compile(r"我([\u4e00-\u9fff]{2,3})这一辈子")
-# 正是/便是不能吃进「也正是」「即便是」；自称/我是噪声太大，只保留命名句。
-_TRUE_NAME_REVEAL_PATTERNS = (
-    re.compile(r"(?<![也即])正是([\u4e00-\u9fff]{2,3})[，。！？]"),
-    re.compile(r"(?<![即])便是([\u4e00-\u9fff]{2,3})[，。！？]"),
-    re.compile(r"名叫([\u4e00-\u9fff]{2,3})[，。！？]"),
-    re.compile(r"名为([\u4e00-\u9fff]{2,3})[，。！？]"),
-)
-_TRUE_NAME_REJECT_RE = re.compile(r"[宗门内外此这那该某人是的在与和了着如当上下前后己]")
-
-
-def _usable_true_name(value: str) -> bool:
-    """真名必须能当人物身份标签：不是结构噪声，也不是「少年/弟子」这类类别词。"""
-    text = (value or "").strip()
-    if not text:
-        return False
-    if _TRUE_NAME_REJECT_RE.search(text) or _is_generic_character_appellation(text):
-        return False
-    return True
-
-
-_APPELLATION_AGENT_RE = re.compile(
-    r"(?:说道|问道|喝道|笑道|怒道|道[：「”\"]|说[：「”\"]|问[：「”\"]|"
-    r"冷冷|走上|点了点头|摇了摇头|一愣|身子|冷哼|开口)"
-)
-
-
-def _appellation_used_as_agent(name: str, chapters: list[dict]) -> bool:
-    """不确定身份时，统计通道只收「像施事者」的称呼：孟浩道 / 许师姐冷冷。
-
-    程序硬约束，不枚举器物名单。铜镜、裂缝这类高频名词通常接「中/里/拿起」，
-    不会命中施事后缀；主角即使资格闸判 uncertain，只要原文里在行动就能进谱。
-    """
-    text_name = (name or "").strip()
-    if not text_name or _is_generic_character_appellation(text_name):
-        return False
-    pattern = re.compile(re.escape(text_name) + _APPELLATION_AGENT_RE.pattern)
-    for chapter in chapters:
-        if pattern.search(chapter.get("content") or ""):
-            return True
-    return False
-
-
-def _bind_true_name_from_source(
-    candidates: list[_RosterCandidate], chapters: list[dict],
-) -> list[_RosterCandidate]:
-    """LLM 没钉上真名时，用原文身份句做延迟绑定：正是/名叫/我X这一辈子。
-
-    程序拥有名称匹配。证据不足或同一称呼对上多个真名时不绑，避免错并。
-    自称句优先且允许指向已有候选（小胖子→李富贵）；正是/名叫不得把已有
-    另一候选的主名当成真名（王伯不得并到王有材）。
-    """
-    occupied_primaries = {
-        (item.primary_appellation or "").strip()
-        for item in candidates
-        if (item.primary_appellation or "").strip()
-    }
-
-    def _hits(
-        appellation: str,
-        patterns: tuple[re.Pattern[str], ...],
-        *,
-        window: int,
-        allow_occupied: bool,
-        require_before: bool,
-        speaker_names: set[str] | None = None,
-    ) -> list[str]:
-        found: list[str] = []
-        for chapter in chapters:
-            text = chapter.get("content") or ""
-            if appellation not in text:
-                continue
-            for pattern in patterns:
-                for match in pattern.finditer(text):
-                    name = match.group(1)
-                    if (
-                        name == appellation
-                        or name in appellation
-                        or appellation in name
-                        or _TRUE_NAME_REJECT_RE.search(name)
-                    ):
-                        continue
-                    if name in occupied_primaries and not allow_occupied:
-                        continue
-                    prefix = text[max(0, match.start() - window):match.start()]
-                    suffix = text[match.end():match.end() + window]
-                    if require_before:
-                        if appellation not in prefix:
-                            continue
-                        quoted = [
-                            value.strip("。！？，、 ")
-                            for value in re.findall(r"[「“\"]([^」”\"]{1,12})[」”\"]", prefix)
-                        ]
-                        quoted_names = [
-                            value for value in quoted
-                            if value and value in occupied_primaries | {appellation}
-                        ]
-                        if quoted_names:
-                            if appellation != quoted_names[-1]:
-                                continue
-                        else:
-                            last_pos = -1
-                            last_name = ""
-                            for label in occupied_primaries | {appellation}:
-                                pos = prefix.rfind(label)
-                                if pos > last_pos:
-                                    last_pos = pos
-                                    last_name = label
-                            if last_name != appellation:
-                                continue
-                    if speaker_names:
-                        tail_hits = [
-                            (suffix.find(label), label)
-                            for label in speaker_names
-                            if label and label in suffix
-                        ]
-                        tail_hits = [(pos, label) for pos, label in tail_hits if pos >= 0]
-                        if not tail_hits or min(tail_hits)[1] != appellation:
-                            continue
-                    found.append(name)
-        return list(dict.fromkeys(found))
-
-    bound: list[_RosterCandidate] = []
-    for candidate in candidates:
-        if (candidate.formal_name or "").strip():
-            bound.append(candidate)
-            continue
-        appellation = (candidate.primary_appellation or "").strip()
-        if not appellation:
-            bound.append(candidate)
-            continue
-        unique = _hits(
-            appellation, (_TRUE_NAME_SELF_ID_RE,), window=80, allow_occupied=True,
-            require_before=False, speaker_names=occupied_primaries | {appellation},
-        )
-        if len(unique) != 1:
-            unique = _hits(
-                appellation, _TRUE_NAME_REVEAL_PATTERNS, window=80, allow_occupied=False,
-                require_before=True,
-            )
-        if len(unique) != 1:
-            bound.append(candidate)
-            continue
-        true_name = unique[0]
-        aliases = list(dict.fromkeys([*candidate.aliases, appellation]))
-        bound.append(candidate.model_copy(update={
-            "formal_name": true_name,
-            "aliases": [value for value in aliases if value and value != true_name],
-            "personhood": "person" if candidate.personhood != "non_person" else candidate.personhood,
-        }))
-    return bound
-
-
-def _self_id_speaker_matches(
-    appellation: str, formal: str, chapters: list[dict], speaker_names: set[str],
-) -> bool:
-    if not appellation or not formal:
-        return False
-    for chapter in chapters:
-        text = chapter.get("content") or ""
-        if appellation not in text:
-            continue
-        for match in _TRUE_NAME_SELF_ID_RE.finditer(text):
-            if match.group(1) != formal:
-                continue
-            suffix = text[match.end():match.end() + 80]
-            hits = [
-                (suffix.find(label), label)
-                for label in speaker_names
-                if label and label in suffix
-            ]
-            hits = [(pos, label) for pos, label in hits if pos >= 0]
-            if hits and min(hits)[1] == appellation:
-                return True
-    return False
-
-
 def _resolve_conflicting_formal_names(
-    candidates: list[_RosterCandidate], chapters: list[dict],
+    candidates: list[_RosterCandidate],
 ) -> list[_RosterCandidate]:
-    """同一真名只能留给主名就是它的人，或自称句能对上的人。
+    """同一个真名被两个候选同时申报时，至少有一个是错的。
 
-    真实故障：王有材被 LLM 写成李富贵，人物谱出现两个李富贵。
+    只有主名本身就是这个真名的候选能留住它；一个都没有就两边都清空，
+    宁可退回称呼，也不要把两个人并成同一张卡。
     """
-    speaker_names = {
-        (item.primary_appellation or "").strip()
-        for item in candidates
-        if (item.primary_appellation or "").strip()
-    }
     by_formal: dict[str, list[int]] = {}
     for index, candidate in enumerate(candidates):
         formal = (candidate.formal_name or "").strip()
@@ -2935,12 +2818,6 @@ def _resolve_conflicting_formal_names(
             index for index in indices
             if (candidates[index].primary_appellation or "").strip() == formal
         }
-        for index in indices:
-            primary = (candidates[index].primary_appellation or "").strip()
-            if _self_id_speaker_matches(primary, formal, chapters, speaker_names):
-                keep.add(index)
-        if not keep:
-            continue
         drop.update(index for index in indices if index not in keep)
     resolved: list[_RosterCandidate] = []
     for index, candidate in enumerate(candidates):
@@ -2977,13 +2854,11 @@ def _pick_canonical_display_name(
     真名优先只在真名确实被原文常用、且能和名单称呼同窗共现时成立。真实故障：
     「小胖子」全书出现 152 次、「李富贵」只出现 1 次，机械套用真名优先会把主名
     改成正文里几乎不存在的写法；「靠山老祖 / 白主」则是反过来，0.2 比例把更常用
-    的原文称呼挤出 aliases。错绑的「这阵法」这类结构串不得当主名，也不得当别名。
+    的原文称呼挤出 aliases。
     """
     appellation = (appellation or "").strip()
     formal = (formal or "").strip()
     if not formal or formal == appellation:
-        return appellation, []
-    if not _usable_true_name(formal):
         return appellation, []
     if _cooccurrence_quote(chapters, appellation, formal) is None:
         return appellation, []
@@ -3025,6 +2900,8 @@ def _attach_roster_source_appellations(
     真实故障：必收名单已是「李富贵（小胖子）」/ 绑定后的「许师姐→许清」，详情模型
     没把真名写进 aliases，核验闸再一丢，人物谱只剩绰号。
     """
+    from app.portraits import IDENTITY_NAME_FORM_REFERENTIAL
+
     known = {character.name, *(item.text for item in character.aliases if item.text)}
     for raw in entry.source_appellations:
         text = (raw or "").strip()
@@ -3042,7 +2919,8 @@ def _attach_roster_source_appellations(
         chapter_idx, quote = found
         character.aliases.append(CharacterAlias(
             text=text,
-            name_kind="honorific" if "师" in text else "personal_name",
+            # 这条别名是程序按共现补回来的，没有模型标注过形态，就不替它下结论。
+            name_kind=IDENTITY_NAME_FORM_REFERENTIAL,
             evidence_chapter_index=chapter_idx,
             evidence_quote=quote,
         ))
@@ -3184,17 +3062,18 @@ async def _recurring_character_names(
         item for item in chunk_results if not isinstance(item, BaseException)
     ])
     candidates = _pin_roster_candidates_to_source(candidates, chapters_by_idx)
-    candidates = await _resolve_generic_character_candidates(
+    # 资格裁决先跑：它顺带判出每个称呼是姓名、尊称还是代称，身份归一要靠这个
+    # 结论决定谁该被消歧，程序不再用词表预判。
+    candidates = await _filter_non_person_roster_candidates(
         candidates, chapters_by_idx, project_id=project_id,
     )
-    candidates = await _filter_non_person_roster_candidates(
+    candidates = await _resolve_generic_character_candidates(
         candidates, chapters_by_idx, project_id=project_id,
     )
     candidates = await _discover_roster_true_names(
         candidates, valid, project_id=project_id,
     )
-    candidates = _bind_true_name_from_source(candidates, valid)
-    candidates = _resolve_conflicting_formal_names(candidates, valid)
+    candidates = _resolve_conflicting_formal_names(candidates)
     candidates = _merge_roll_call_candidates([[item] for item in candidates])
     candidates = [
         item.model_copy(update={"personhood": "person"})
@@ -3209,6 +3088,7 @@ async def _recurring_character_names(
         valid[:BIBLE_HEAD_CHAPTERS + BIBLE_LOOKAHEAD_CHAPTERS]
     )
     seen: set[str] = set()
+    ambiguous_appellations = _shared_appellations(candidates)
     verified_counts: dict[str, int] = {}
     formal_names: dict[str, str] = {}
     aliases_by_appellation: dict[str, list[str]] = {}
@@ -3314,7 +3194,7 @@ async def _recurring_character_names(
 
     async def _judge_mentioned_importance(appellation: str) -> tuple[str, bool]:
         dossier = mentioned_dossiers.get(appellation, [])[:6]
-        if not dossier or _is_generic_character_appellation(appellation):
+        if not dossier or appellation in ambiguous_appellations:
             return appellation, False
         catalog = "\n\n".join(
             f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
@@ -3380,15 +3260,13 @@ async def _recurring_character_names(
     statistical_retain = {
         appellation
         for appellation in verified_counts
-        if personhood_by_appellation.get(appellation) != "non_person"
-        and not _is_generic_character_appellation(appellation)
+        # 是不是人由资格裁决说了算，程序不再拿施事动词表去猜。判不出来的候选
+        # 走不了统计通道，正确做法是把卷宗做厚让模型判得出，不是绕过它。
+        if personhood_by_appellation.get(appellation) == "person"
+        and appellation not in ambiguous_appellations
         and mention_counts.get(appellation, 0) >= BIBLE_STATISTICAL_MIN_MENTIONS
         and chapter_counts.get(appellation, 0)
         >= max(2, round(window_size * BIBLE_STATISTICAL_MIN_CHAPTER_RATIO))
-        and (
-            personhood_by_appellation.get(appellation) == "person"
-            or _appellation_used_as_agent(appellation, head)
-        )
     }
     ranked = [
         (
@@ -5939,32 +5817,32 @@ def _character_stub_from_roster(entry: _BibleRosterEntry) -> Character:
 def _character_detail_evidence_pack(
     chapters: list[dict], appellations: list[str], *, max_chars: int = BIBLE_DETAIL_EVIDENCE_MAX_CHARS,
 ) -> str:
-    """Deterministically retrieve a bounded source dossier for one character."""
+    """给一个角色检索有界的原文卷宗：命中章跨全书取样，不是只取最靠前的几段。
+
+    只取最前面的命中段，模型看到的会全是这个人早期的固定称呼；真名揭示、性别
+    交代、外貌描写往往在后文，取不到就只能靠猜。这里只负责把上下文找齐，
+    外貌和性别怎么写全部由模型依据这些原文决定。
+    """
     anchors = [value.strip() for value in appellations if value and value.strip()]
     selected: list[str] = []
-    seen: set[tuple[int, str]] = set()
-    for chapter in chapters:
-        content = (chapter.get("content") or "").strip()
-        if not content:
-            continue
-        try:
-            chapter_idx = int(chapter.get("idx"))
-        except (TypeError, ValueError):
-            continue
-        for segment in index_source_segments(content, max_chars=800):
-            text = segment.text.strip()
-            if not text or not any(anchor in text for anchor in anchors):
+    if anchors:
+        chapters_by_idx: dict[int, str] = {}
+        for chapter in chapters:
+            content = (chapter.get("content") or "").strip()
+            if not content:
                 continue
-            key = (chapter_idx, text)
-            if key in seen:
+            try:
+                chapters_by_idx[int(chapter.get("idx"))] = content
+            except (TypeError, ValueError):
                 continue
-            block = f"【第{chapter_idx}章·证据】\n{text}"
-            if sum(len(item) for item in selected) + len(block) > max_chars:
-                return "\n\n".join(selected)
+        for item in _spread_named_segments(
+            anchors, chapters_by_idx,
+            limit=BIBLE_DETAIL_EVIDENCE_MAX_SEGMENTS, segment_max_chars=800,
+        ):
+            block = f"【第{item['chapter_idx']}章·证据】\n{item['text'].strip()}"
+            if sum(len(value) for value in selected) + len(block) > max_chars:
+                break
             selected.append(block)
-            seen.add(key)
-            if len(selected) >= BIBLE_DETAIL_EVIDENCE_MAX_SEGMENTS:
-                return "\n\n".join(selected)
     if selected:
         return "\n\n".join(selected)
     # No lexical hit: bounded fallback only, never the 60K source corpus.
@@ -6033,12 +5911,11 @@ def _normalize_roster_against_candidates(
         ), None)
         score, signals = _character_importance_metadata(onstage, mentions, chapters_hit)
         # onstage=0 只说明"没有一条引句通过单次模型裁决"，不等于这个人没出场。
-        # 全文命中量与章节覆盖同时达标时，按已出场处理：主角引句叙述密集，裁决闸
-        # 判 other 的概率反而更高，若据此判成 mentioned_only，主角会被踢出定妆流程。
-        statistically_present = (
-            mentions >= BIBLE_STATISTICAL_MIN_MENTIONS
-            and chapters_hit >= max(2, round(len(chapters or []) * BIBLE_STATISTICAL_MIN_CHAPTER_RATIO))
-        ) if chapters else False
+        # 全文命中量达标时按已出场处理：主角引句叙述密集，裁决闸判 other 的概率
+        # 反而更高，若据此判成 mentioned_only，主角和高频配角会被踢出定妆。
+        # 章节覆盖率只用于点名窗口准入，不得拿全书章数做分母——1616 章小说的
+        # 0.15 会要求覆盖 242 章，王腾飞这种反派会被标成仅提及、不给定妆。
+        statistically_present = mentions >= BIBLE_STATISTICAL_MIN_MENTIONS
         mentioned_only = onstage == 0 and not statistically_present
         if onstage == 0 and statistically_present:
             signals = signals + ["presence_by_fulltext_coverage"]
@@ -6049,8 +5926,8 @@ def _normalize_roster_against_candidates(
             presence_status="mentioned_only" if mentioned_only else "onstage",
             importance_score=score,
             importance_signals=signals + (["retained_by_plot_authority"] if mentioned_only else []),
-            portrait_eligible=not mentioned_only,
-            appearance_status="deferred" if mentioned_only else "grounded",
+            portrait_eligible=True,
+            appearance_status="grounded",
         ))
     draft.characters = normalized
     _assign_protagonist_by_signals(draft)
@@ -6102,24 +5979,6 @@ async def _generate_character_detail(
 ) -> Character | None:
     from app.refs import PRODUCTION_APPEARANCE_MAX_CHARS, PRODUCTION_APPEARANCE_MIN_CHARS
 
-    if entry.presence_status == "mentioned_only":
-        return Character(
-            name=entry.name,
-            role=entry.role,
-            appearance_canonical="外观待原文真实出场后补全，当前不自动定妆",
-            personality="",
-            speech_style="",
-            relationships=[],
-            aliases=[],
-            source_evidence=[],
-            presence_status="mentioned_only",
-            importance_score=entry.importance_score,
-            importance_signals=entry.importance_signals,
-            portrait_eligible=False,
-            appearance_status="deferred",
-            period_costume_canonical="待真实出场后依据年代与身份补全",
-        )
-
     base_pack = evidence_pack[:BIBLE_DETAIL_EVIDENCE_MAX_CHARS]
     last_error = ""
     for attempt in range(1, BIBLE_DETAIL_MAX_ATTEMPTS + 1):
@@ -6131,6 +5990,8 @@ async def _generate_character_detail(
 完整角色名单（relationships.to 只能从这里选择）：{'、'.join(roster_names)}
 统一画风：{style}
 世界年代/社会形态：{era or '原文未明确，必须从证据包的社会制度、材质和服装称谓保守判断'}
+
+appearance_canonical 必须写清这个人的性别，依据只能是证据包原文：代词、身份称谓、他人对话、外貌描写里凡是点明性别的地方都要按原文来。证据包里确实看不出性别时，写“原文未点明性别”，不要按名字或常识猜。
 
 要求：appearance_canonical {PRODUCTION_APPEARANCE_MIN_CHARS}~{PRODUCTION_APPEARANCE_MAX_CHARS} 字；period_costume_canonical 20~60 字，明确该年代、地域/宗门、身份层级下可用的服装形制、面料、鞋履、束发与禁用的现代/错代元素，并与原文直接服装描写一致；speech_style 15~30 字；只写该角色；不确定的关系、别名、标志性特征证据留空。source_evidence 引句必须不超过 40 字且逐字来自证据包。
 
@@ -6176,8 +6037,8 @@ async def _generate_character_detail(
                 presence_status=entry.presence_status,
                 importance_score=entry.importance_score,
                 importance_signals=entry.importance_signals,
-                portrait_eligible=entry.portrait_eligible,
-                appearance_status=entry.appearance_status,
+                portrait_eligible=True,
+                appearance_status="grounded",
                 period_costume_canonical=detail.period_costume_canonical,
             )
             if not PRODUCTION_APPEARANCE_MIN_CHARS <= len(character.appearance_canonical) <= PRODUCTION_APPEARANCE_MAX_CHARS:

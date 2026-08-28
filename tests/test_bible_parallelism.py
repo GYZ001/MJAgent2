@@ -86,15 +86,25 @@ async def test_generate_character_detail_batch_retries_only_failed_character(mon
 
 
 @pytest.mark.asyncio
-async def test_mentioned_only_character_skips_detail_model_and_portrait() -> None:
+async def test_mentioned_only_character_still_gets_detail_and_portrait(monkeypatch) -> None:
+    async def fake_chat(*_args, **_kwargs):
+        return json.dumps({
+            "appearance_canonical": "白发苍颜，面容威严，身形高瘦，目光如炬，气场强横",
+            "period_costume_canonical": "着玄色绣金广袖道袍，云纹玉冠束发，脚踏云纹道靴，禁用现代元素",
+            "personality": "霸道",
+            "speech_style": "语气专断，少有商量余地",
+            "relationships": [], "aliases": [], "source_evidence": [],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
     entry = stages._BibleRosterEntry(
         name="靠山老祖",
         role="关键伏笔角色",
         presence_status="mentioned_only",
         importance_score=18.4,
         importance_signals=["fulltext_mentions:3", "retained_by_plot_authority"],
-        portrait_eligible=False,
-        appearance_status="deferred",
+        portrait_eligible=True,
+        appearance_status="grounded",
     )
     result = await stages._generate_character_detail_batch(
         [entry],
@@ -106,9 +116,11 @@ async def test_mentioned_only_character_skips_detail_model_and_portrait() -> Non
     assert len(result) == 1
     character = result[0]
     assert character.presence_status == "mentioned_only"
-    assert character.appearance_status == "deferred"
-    assert character.portrait_eligible is False
-    assert character.source_evidence == []
+    assert character.appearance_status == "grounded"
+    assert character.portrait_eligible is True
+    assert "白发苍颜" in character.appearance_canonical
+    assert not character.appearance_canonical.startswith("女性")
+    assert not character.appearance_canonical.startswith("男性")
 
 
 def test_character_is_portrait_eligible_defaults_and_gates() -> None:
@@ -129,9 +141,10 @@ def test_character_is_portrait_eligible_defaults_and_gates() -> None:
     }) is False
     assert character_is_portrait_eligible({
         "name": "王腾飞",
-        "portrait_eligible": False,
-        "appearance_status": "deferred",
-    }) is False
+        "portrait_eligible": True,
+        "appearance_status": "grounded",
+        "presence_status": "mentioned_only",
+    }) is True
 
 
 def test_parse_character_detail_repairs_production_key_split_and_missing_key() -> None:
@@ -281,8 +294,8 @@ def test_normalize_roster_prefers_real_name_and_marks_mentioned_only() -> None:
     assert normalized.characters[0].source_appellations == ["小胖子", "虎头虎脑少年"]
     assert normalized.characters[0].portrait_eligible is True
     assert normalized.characters[1].presence_status == "mentioned_only"
-    assert normalized.characters[1].appearance_status == "deferred"
-    assert normalized.characters[1].portrait_eligible is False
+    assert normalized.characters[1].appearance_status == "grounded"
+    assert normalized.characters[1].portrait_eligible is True
 
 
 def test_high_frequency_nickname_stays_primary_name_and_real_name_is_searchable() -> None:
@@ -324,22 +337,27 @@ def test_formal_name_cannot_replace_more_common_appellation() -> None:
     assert xu_demoted == ["许师姐"]
 
 
-def test_unusable_formal_name_cannot_become_display_or_alias() -> None:
+@pytest.mark.asyncio
+async def test_claimed_formal_name_is_dropped_when_model_cannot_confirm(monkeypatch) -> None:
+    """点名顺手填的真名也要复核；复核不过就退回称呼，程序不靠字符黑名单。"""
     chapters = [{
         "idx": 1,
         "content": "王腾飞踏入阵法。这阵法忽然发光。王腾飞看了看这阵法。",
     }]
-    canonical, demoted = stages._pick_canonical_display_name("王腾飞", "这阵法", chapters)
-    assert canonical == "王腾飞"
-    assert demoted == []
-    assert stages._usable_true_name("这阵法") is False
-    assert stages._usable_true_name("许清") is True
-    pinned = stages._pin_roster_candidates_to_source(
+
+    async def fake_unrevealed(*_args, **_kwargs):
+        return stages._RosterTrueNameResolution(
+            verdict="unrevealed", true_name="", supporting_chapter_index=-1,
+        )
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_unrevealed)
+    resolved = await stages._discover_roster_true_names(
         [stages._RosterCandidate(primary_appellation="王腾飞", formal_name="这阵法")],
-        {1: chapters[0]["content"]},
+        chapters,
+        project_id="p1",
     )
-    assert pinned[0].primary_appellation == "王腾飞"
-    assert pinned[0].formal_name == ""
+    assert resolved[0].primary_appellation == "王腾飞"
+    assert resolved[0].formal_name == ""
 
 
 def test_protagonist_is_assigned_by_fulltext_signals_not_model() -> None:
@@ -430,17 +448,22 @@ async def test_identity_resolution_runs_in_parallel_and_merges(monkeypatch) -> N
     chapter = "精明中年男子对孟浩点头。虎头虎脑少年跟着走。"
     ev = stages._RosterOnstageEvidence
     candidate = stages._RosterCandidate
+    # name_form 由上游资格裁决里的模型给出，这里模拟它已经判完的状态。
     result = await stages._resolve_generic_character_candidates(
         [
-            candidate(primary_appellation="孟浩", formal_name="孟浩", onstage_evidence=[
-                ev(chapter_index=1, quote="精明中年男子对孟浩点头。"),
-            ]),
-            candidate(primary_appellation="精明中年男子", onstage_evidence=[
-                ev(chapter_index=1, quote="精明中年男子对孟浩点头。"),
-            ]),
-            candidate(primary_appellation="虎头虎脑少年", onstage_evidence=[
-                ev(chapter_index=1, quote="虎头虎脑少年跟着走。"),
-            ]),
+            candidate(
+                primary_appellation="孟浩", formal_name="孟浩",
+                name_form="personal_name",
+                onstage_evidence=[ev(chapter_index=1, quote="精明中年男子对孟浩点头。")],
+            ),
+            candidate(
+                primary_appellation="精明中年男子", name_form="referential",
+                onstage_evidence=[ev(chapter_index=1, quote="精明中年男子对孟浩点头。")],
+            ),
+            candidate(
+                primary_appellation="虎头虎脑少年", name_form="referential",
+                onstage_evidence=[ev(chapter_index=1, quote="虎头虎脑少年跟着走。")],
+            ),
         ],
         {1: chapter},
         project_id="p1",
@@ -453,11 +476,51 @@ async def test_identity_resolution_runs_in_parallel_and_merges(monkeypatch) -> N
     assert "虎头虎脑少年" in aliases
 
 
-def test_stable_nickname_is_not_a_generic_category() -> None:
-    assert stages._is_generic_character_appellation("小胖子") is False
-    assert stages._is_generic_character_appellation("胖子") is True
-    assert stages._is_generic_character_appellation("精明中年男子") is True
-    assert stages._is_generic_character_appellation("虎头虎脑少年") is True
+def test_ambiguous_appellations_come_from_the_data_not_a_word_list() -> None:
+    """分不出人的称呼由本次点名结果推导：被多个候选共用才算，不查词表。"""
+    candidates = [
+        stages._RosterCandidate(primary_appellation="李富贵", aliases=["胖子", "小胖子"]),
+        stages._RosterCandidate(primary_appellation="王有材", aliases=["胖子"]),
+        stages._RosterCandidate(primary_appellation="孟浩"),
+    ]
+    ambiguous = stages._shared_appellations(candidates)
+    assert "胖子" in ambiguous
+    assert "小胖子" not in ambiguous
+    assert "孟浩" not in ambiguous
+    # 同一个绰号只属于一个人时不算歧义，哪怕它长得像类别词。
+    solo = stages._shared_appellations([
+        stages._RosterCandidate(primary_appellation="少年", aliases=["那少年"]),
+    ])
+    assert solo == set()
+
+
+def test_identity_resolution_routing_follows_model_name_form() -> None:
+    """送不送身份归一由模型判的称呼形态决定，程序不认识任何具体词。"""
+    candidate = stages._RosterCandidate
+
+    referential = candidate(primary_appellation="青衫少年", name_form="referential")
+    assert stages._roster_label_needs_identity_resolution(referential, set(), set())
+
+    named = candidate(primary_appellation="青衫少年", name_form="personal_name")
+    assert not stages._roster_label_needs_identity_resolution(named, set(), set())
+
+    honorific = candidate(primary_appellation="许师姐", name_form="honorific")
+    assert not stages._roster_label_needs_identity_resolution(honorific, set(), set())
+
+    shared = candidate(primary_appellation="胖子", name_form="personal_name")
+    assert stages._roster_label_needs_identity_resolution(shared, set(), {"胖子"})
+
+
+def test_spread_named_segments_covers_first_hit_and_later_chapters() -> None:
+    """证据检索跨全书取样：首次出现的章一定在，后文揭示身份的章也进得来。"""
+    chapters = {index: "无关内容。" for index in range(1, 60)}
+    chapters[34] = "许清第一次出现在这里。"
+    chapters[37] = "这女子正是许清，如她的名字一样，冷冷清清。"
+    chapters[50] = "许清收剑而立。"
+    blocks = stages._spread_named_segments(["许清"], chapters, limit=3)
+    picked = {item["chapter_idx"] for item in blocks}
+    assert 34 in picked
+    assert picked == {34, 37, 50}
 
 
 def test_pin_roster_name_accepts_unique_one_char_source_variant() -> None:
@@ -466,13 +529,14 @@ def test_pin_roster_name_accepts_unique_one_char_source_variant() -> None:
     assert stages._pin_roster_name_to_source("铜镜灵", ["孟浩伸手拿起铜镜。"]) == ""
 
 
-def test_dependent_descriptive_appellation_is_not_a_stable_identity() -> None:
-    assert stages._is_dependent_descriptive_appellation("昨日孟浩的第一位客人", {"孟浩"}) is True
-    assert stages._is_dependent_descriptive_appellation("赵武刚师兄", {"赵武刚"}) is False
-    assert stages._is_dependent_descriptive_appellation("铜镜", {"孟浩"}) is False
-    assert stages._is_dependent_descriptive_appellation("此人的对手", set()) is True
-    assert stages._is_dependent_descriptive_appellation("某人的客人", set()) is True
-    assert stages._is_dependent_descriptive_appellation("靠山老祖", set()) is False
+def test_composite_appellation_is_detected_by_grammar_not_by_word_list() -> None:
+    """带属格的组合指称说的是关系，不是身份；判据是「的」这个结构，不是词表。"""
+    assert stages._is_composite_appellation("昨日孟浩的第一位客人", {"孟浩"}) is True
+    assert stages._is_composite_appellation("赵武刚师兄", {"赵武刚"}) is False
+    assert stages._is_composite_appellation("铜镜", {"孟浩"}) is False
+    assert stages._is_composite_appellation("此人的对手", set()) is True
+    assert stages._is_composite_appellation("某人的客人", set()) is True
+    assert stages._is_composite_appellation("靠山老祖", set()) is False
 
 
 @pytest.mark.asyncio
@@ -641,81 +705,20 @@ async def test_true_name_discovery_pins_later_chapter_reveal(monkeypatch) -> Non
     assert rejected[0].formal_name == ""
 
 
-def test_bind_true_name_from_source_uses_identity_sentence() -> None:
-    xu = stages._bind_true_name_from_source(
-        [stages._RosterCandidate(primary_appellation="许师姐")],
-        [{"idx": 37, "content": "「许师姐。」孟浩抱拳一拜。这女子正是许清，如她的名字一样，冷冷清清。"}],
-    )
-    assert xu[0].formal_name == "许清"
-    assert "许师姐" in xu[0].aliases
-    fatty = stages._bind_true_name_from_source(
-        [stages._RosterCandidate(primary_appellation="小胖子")],
-        [{"idx": 10, "content": "孟浩，你是我李富贵这一辈子的好朋友。”小胖子感慨连连。"}],
-    )
-    assert fatty[0].formal_name == "李富贵"
-    self_id = stages._bind_true_name_from_source(
-        [
-            stages._RosterCandidate(primary_appellation="小胖子"),
-            stages._RosterCandidate(primary_appellation="李富贵"),
-        ],
-        [{"idx": 10, "content": "孟浩，你是我李富贵这一辈子的好朋友。”小胖子感慨连连。"}],
-    )
-    assert self_id[0].formal_name == "李富贵"
-    unbound = stages._bind_true_name_from_source(
-        [stages._RosterCandidate(primary_appellation="铜镜")],
-        [{"idx": 4, "content": "孟浩伸手拿起铜镜。便是靠山宗外那件宝物。"}],
-    )
-    assert unbound[0].formal_name == ""
-    # 贪婪「正是+2~4字」会把「靠山宗外」「上官修身」当成真名；收紧后不得误绑。
-    false_reveal = stages._bind_true_name_from_source(
-        [stages._RosterCandidate(primary_appellation="许师姐")],
-        [{"idx": 2, "content": "「许师姐。」这人正是靠山宗外门弟子。此人正是上官修身侧的随从。"}],
-    )
-    assert false_reveal[0].formal_name == ""
-    # 「雕刻的正是王有材」出现在王伯场景：不得把已有另一候选的主名错绑过来。
-    father_and_son = stages._bind_true_name_from_source(
-        [
-            stages._RosterCandidate(primary_appellation="王伯"),
-            stages._RosterCandidate(primary_appellation="王有材"),
-        ],
-        [{"idx": 45, "content": "王伯坐在那里发呆，他的面前有一个木雕，雕刻的正是王有材，神色悲伤。"}],
-    )
-    assert father_and_son[0].formal_name == ""
-    assert father_and_son[1].formal_name == ""
-    # 「即便是」不得当成「便是」；台词里的「我李富贵」不得绑到旁边的孟浩。
-    even_if = stages._bind_true_name_from_source(
-        [stages._RosterCandidate(primary_appellation="小胖子")],
-        [{"idx": 194, "content": "小胖子深吸口气，可即便是再谨慎，随着不断地前行。"}],
-    )
-    assert even_if[0].formal_name == ""
-    trio = stages._bind_true_name_from_source(
-        [
-            stages._RosterCandidate(primary_appellation="孟浩"),
-            stages._RosterCandidate(primary_appellation="小胖子"),
-            stages._RosterCandidate(primary_appellation="许师姐"),
-        ],
-        [
-            {"idx": 10, "content": "孟浩，你是我李富贵这一辈子的好朋友。”小胖子感慨连连。孟浩在不远处愣住。"},
-            {"idx": 37, "content": "「许师姐。」孟浩抱拳一拜。这女子正是许清，如她的名字一样，冷冷清清。"},
-        ],
-    )
-    by_name = {item.primary_appellation: item.formal_name for item in trio}
-    assert by_name["孟浩"] == ""
-    assert by_name["小胖子"] == "李富贵"
-    assert by_name["许师姐"] == "许清"
+def test_conflicting_formal_names_fail_closed_unless_owner_is_present() -> None:
+    """同一真名撞车时只有主名就是它的候选能留住；都不是就两边都退回称呼。"""
+    resolved = stages._resolve_conflicting_formal_names([
+        stages._RosterCandidate(primary_appellation="小胖子", formal_name="李富贵"),
+        stages._RosterCandidate(primary_appellation="王有材", formal_name="李富贵"),
+    ])
+    assert [item.formal_name for item in resolved] == ["", ""]
 
-
-def test_conflicting_formal_names_keep_self_id_owner() -> None:
-    chapters = [{"idx": 10, "content": "孟浩，你是我李富贵这一辈子的好朋友。”小胖子感慨连连。"}]
-    resolved = stages._resolve_conflicting_formal_names(
-        [
-            stages._RosterCandidate(primary_appellation="小胖子", formal_name="李富贵"),
-            stages._RosterCandidate(primary_appellation="王有材", formal_name="李富贵"),
-        ],
-        chapters,
-    )
-    by_name = {item.primary_appellation: item.formal_name for item in resolved}
-    assert by_name["小胖子"] == "李富贵"
+    with_owner = stages._resolve_conflicting_formal_names([
+        stages._RosterCandidate(primary_appellation="李富贵", formal_name="李富贵"),
+        stages._RosterCandidate(primary_appellation="王有材", formal_name="李富贵"),
+    ])
+    by_name = {item.primary_appellation: item.formal_name for item in with_owner}
+    assert by_name["李富贵"] == "李富贵"
     assert by_name["王有材"] == ""
 
 
@@ -785,20 +788,6 @@ def test_roster_chapter_index_coerces_model_spellings() -> None:
     assert listed.supporting_chapter_index == 1
 
 
-def test_uncertain_statistical_requires_agent_evidence() -> None:
-    assert stages._appellation_used_as_agent("孟浩", [{"content": "孟浩走上前。"}])
-    assert stages._appellation_used_as_agent("许师姐", [{"content": "许师姐冷冷看了他一眼。"}])
-    assert not stages._appellation_used_as_agent(
-        "铜镜", [{"content": "孟浩伸手拿起铜镜。铜镜中映出人影。"}],
-    )
-    # 贪婪「正是+2~4字」会把「靠山宗外」「上官修身」当成真名；收紧后不得误绑。
-    false_reveal = stages._bind_true_name_from_source(
-        [stages._RosterCandidate(primary_appellation="许师姐")],
-        [{"idx": 2, "content": "「许师姐。」这人正是靠山宗外门弟子。此人正是上官修身侧的随从。"}],
-    )
-    assert false_reveal[0].formal_name == ""
-
-
 @pytest.mark.asyncio
 async def test_alias_verification_runs_per_character_in_parallel(monkeypatch) -> None:
     from app.schemas import Bible, Character, CharacterAlias, World
@@ -839,3 +828,21 @@ async def test_alias_verification_runs_per_character_in_parallel(monkeypatch) ->
         bible, bible.characters, {1: "甲兄来了。乙兄来了。"}, project_id="p1",
     )
     assert peak > 1
+
+
+def test_roster_card_is_portrait_eligible_even_when_only_mentioned() -> None:
+    draft = stages._BibleRosterDraft(
+        characters=[],
+        world={"visual_style_canonical": "国漫三维动画电影质感，统一自然光影与细腻材质"},
+    )
+    chapters = [{"idx": i, "content": "王腾飞未出场，只被弟子提起。"} for i in range(1, 1617)]
+    normalized = stages._normalize_roster_against_candidates(draft, [
+        ("王腾飞", "", 0, 65, 30, []),
+        ("靠山老祖", "", 0, 4, 3, []),
+    ], chapters)
+    by_name = {entry.name: entry for entry in normalized.characters}
+    assert by_name["王腾飞"].portrait_eligible is True
+    assert by_name["王腾飞"].appearance_status == "grounded"
+    assert by_name["靠山老祖"].portrait_eligible is True
+    assert by_name["靠山老祖"].appearance_status == "grounded"
+

@@ -504,10 +504,10 @@ def test_refs_progress_excludes_ineligible_from_missing(monkeypatch) -> None:
     assert progress["ready"] == 1
     assert progress["missing"] == 0
     assert progress["failed"] == 0
-    assert progress["blocked"] == 1
-    assert progress["deferred"] == 1
+    assert progress["blocked"] == 2
+    assert progress["deferred"] == 0
     by_status = {item["character"]: item["status"] for item in progress["items"]}
-    assert by_status == {"甲一": "ready", "孟浩": "blocked", "王腾飞": "deferred"}
+    assert by_status == {"甲一": "ready", "孟浩": "blocked", "王腾飞": "blocked"}
 
     quote = bible_ops.compute_refs_cost_precheck("proj_test", resume=True)
     assert quote["character_count"] == 1

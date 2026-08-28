@@ -1578,20 +1578,11 @@ async def refs_progress(project_id: str):
         if not name:
             continue
         if not character_is_portrait_eligible(c):
-            presence = c.get("presence_status") or "onstage"
-            appearance = c.get("appearance_status") or "grounded"
-            if presence == "mentioned_only" or appearance == "deferred":
-                deferred += 1
-                status = "deferred"
-                reason = "仅提及，待真实出场后定妆"
-            else:
-                blocked += 1
-                status = "blocked"
-                reason = "外观依据未通过，当前不自动定妆"
+            blocked += 1
             items.append({
                 "character": name,
-                "status": status,
-                "reason": reason,
+                "status": "blocked",
+                "reason": "外观依据未通过，当前不自动定妆",
                 "missing_views": [],
             })
             continue
