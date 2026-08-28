@@ -2190,9 +2190,12 @@ def test_quote_spanning_a_paragraph_break_still_anchors():
         _CROSS_PARAGRAPH_QUOTE in segment.text for segment in segments
     ), "夹具必须真的跨段：任何单段都不完整包含这条引文"
 
-    located = prep_pack._prep_pack_locate_phrase(segments, _CROSS_PARAGRAPH_QUOTE)
+    located, matched = prep_pack._prep_pack_locate_phrase(
+        segments, _CROSS_PARAGRAPH_QUOTE,
+    )
 
     assert located == [1, 2], "跨段引文要定位到它真正覆盖的那几段"
+    assert matched == _CROSS_PARAGRAPH_QUOTE, "这条引文本身就落在原文里，不该被改写"
     anchor_segments, anchor_phrase = prep_pack._prep_pack_local_text_anchor(
         segments, ["郊野归途路径", "郊野归途路径", _CROSS_PARAGRAPH_QUOTE],
     )
@@ -2219,7 +2222,91 @@ def test_paragraph_break_tolerance_still_rejects_invented_quotes():
         "走到半路，他遇见一位少年。马子才像珍宝一样把它们包裹收藏好，踏上归途。",
     ]
     for quote in invented:
-        assert prep_pack._prep_pack_locate_phrase(segments, quote) == [], (
+        assert prep_pack._prep_pack_locate_phrase(segments, quote) == ([], ""), (
+            f"这条引文不该被定位到：{quote}"
+        )
+        assert prep_pack._prep_pack_local_text_anchor(segments, [quote]) == ([], "")
+
+
+# 《王六郎》EP1 原文的真实形状：一段长对白，第一个句号之后还有四十多字，
+# 收尾引号在整段的最末尾。
+_TRUNCATED_QUOTATION_SOURCE = (
+    "许某回家后，立即想收拾行装，向东出发。妻子笑他说：“这一去有几百里。"
+    "即使真有那个地方，只怕泥塑的神像也不能同你说话。”许某不听，终于来到招远县。"
+)
+# 模型申报的引文：抄到句号就停笔，然后自己补了一个收尾引号。
+_MODEL_CLOSED_THE_QUOTE = "许某回家后，立即想收拾行装，向东出发。妻子笑他说：“这一去有几百里。”"
+
+
+def test_quote_the_model_closed_early_still_anchors():
+    """模型引到半句就补上收尾引号时，那一个引号不该让整条绑定失去本集依据。
+
+    真实故障 ERR-20260828-91bc95（run_4ef5e3935554 / ep_17fb1391f17f，《王六郎》
+    EP1）：「许姓人家居所」「邬镇土地祠内」两个场景都是合成名，原文里没有这几个
+    字，三路候选里唯一能落地的就是模型申报的 quote。它抄到句号停笔，补了一个原文
+    那个位置没有的 ”——原文里那个 ” 在四十多字之后。两个场景同时落空，整集映射被
+    「缺少 anchor_phrase」拦停；两次调用都补了引号，重试必然复现。
+
+    返回的 anchor_phrase 必须是剥掉引号之后、真正落在原文里的那个串：它会被自校验
+    和审计脚本拿回原文逐字复核，存原串等于把这道闸留给下一次运行去撞。
+    """
+    segments = prep_pack.index_source_segments(_TRUNCATED_QUOTATION_SOURCE)
+    assert _MODEL_CLOSED_THE_QUOTE not in _TRUNCATED_QUOTATION_SOURCE, (
+        "夹具必须真的对不上：模型补的那个引号在原文这个位置不存在"
+    )
+    # 修复前整个定位就只有这一层（严格逐字 + 跨段去空白），它照旧不命中——
+    # 事故当时落空的正是这里，剥引号是加在它后面的一次退让，不是替换它。
+    assert prep_pack._prep_pack_locate_verbatim(segments, _MODEL_CLOSED_THE_QUOTE) == []
+
+    located, matched = prep_pack._prep_pack_locate_phrase(
+        segments, _MODEL_CLOSED_THE_QUOTE,
+    )
+
+    assert located == [1]
+    assert matched == _MODEL_CLOSED_THE_QUOTE.rstrip("”")
+    assert matched in _TRUNCATED_QUOTATION_SOURCE, (
+        "落库的 anchor_phrase 必须逐字存在于原文，否则自校验与审计都会判红"
+    )
+    anchor_segments, anchor_phrase = prep_pack._prep_pack_local_text_anchor(
+        segments, ["许姓人家居所", "许姓人家居所", _MODEL_CLOSED_THE_QUOTE],
+    )
+    assert (anchor_segments, anchor_phrase) == (located, matched)
+    assert prep_pack._prep_pack_verify_manifest_provenance(
+        segments,
+        {
+            "characters": [], "functional_extras": [],
+            "scenes": [{
+                "display_name": "许姓人家居所",
+                "provenance": {
+                    "method": "resolution",
+                    "anchor_segments": anchor_segments,
+                    "anchor_phrase": anchor_phrase,
+                },
+            }],
+        },
+    ) == [], "生成侧算出来的锚点必须能过自己那道自校验"
+
+
+def test_stripping_quotation_marks_still_rejects_invented_quotes():
+    """剥掉的只有两端引号：中间少一个字、改一个词，照样定位不到。
+
+    这条守的是上一条修复的边界。补全引号是引用这个动作的一部分，放宽的只有
+    引文两端那对符号；被引用的内容仍然逐字要求，否则这道闸就不再拦幻觉了。
+    """
+    segments = prep_pack.index_source_segments(_TRUNCATED_QUOTATION_SOURCE)
+
+    invented = [
+        # 剥掉引号后仍是编造：原文是"向东出发"。
+        "“许某回家后，立即想收拾行装，向西出发。”",
+        # 引文内部的引号不剥：这里把原文中间那个 “ 抹掉了。
+        "许某回家后，立即想收拾行装，向东出发。妻子笑他说：这一去有几百里。",
+        # 两端都是引号，但中间的话根本不在原文里。
+        "“泥塑的神像也不能同你说话，何况几百里。”",
+        # 退化输入：剥完什么都不剩，不能命中任何东西。
+        "“”",
+    ]
+    for quote in invented:
+        assert prep_pack._prep_pack_locate_phrase(segments, quote) == ([], ""), (
             f"这条引文不该被定位到：{quote}"
         )
         assert prep_pack._prep_pack_local_text_anchor(segments, [quote]) == ([], "")

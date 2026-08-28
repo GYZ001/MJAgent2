@@ -1462,9 +1462,12 @@ def _prep_pack_first_evidence_segment(segments: list[SourceSegment], text: str) 
 # 里视为"这条绑定没有可本地核验的锚点"，直接跳过验证，不阻断——已经比
 # 1.5.x 之前"完全没有这个字段"更诚实，不需要为了填满字段而编造一个假锚点。
 _PREP_PACK_WHITESPACE_RE = re.compile(r"\s+")
+# 引文两端的成对引号属于引用格式，不属于被引用的那句话。中英文各种成对
+# 引号都列进来：模型抄哪一种取决于原文用哪一种。
+_PREP_PACK_QUOTATION_MARKS = "“”‘’「」『』\"'"
 
 
-def _prep_pack_locate_phrase(
+def _prep_pack_locate_verbatim(
     segments: list[SourceSegment], phrase: str,
 ) -> list[int]:
     """`phrase` 逐字落在哪几个 segment 上（1-based，升序）；定位不到返回 []。
@@ -1483,7 +1486,6 @@ def _prep_pack_locate_phrase(
     连续命中，所以编造的引文、改写过的引文、张冠李戴的引文照样定位不到：
     这是把「逐字」定义在文字上，不是放宽逐字。
     """
-    phrase = str(phrase or "").strip()
     if not phrase:
         return []
     for index, segment in enumerate(segments, start=1):
@@ -1506,6 +1508,41 @@ def _prep_pack_locate_phrase(
     return sorted(set(owner[start:start + len(needle)]))
 
 
+def _prep_pack_locate_phrase(
+    segments: list[SourceSegment], phrase: str,
+) -> tuple[list[int], str]:
+    """定位 `phrase`，返回 (anchor_segments, 真正落在原文里的那个短语)。
+
+    返回的短语可能比传入的短——引文两端的引号会被剥掉重试。调用方必须把
+    返回值当作 anchor_phrase 落库，不能沿用传入的原串：自校验
+    （_prep_pack_verify_manifest_provenance）和外部审计
+    （scripts/episode_source_audit.py）都会拿 anchor_phrase 回原文逐字复核，
+    存一个原文里不存在的串等于把这道闸留给下一次运行去撞。
+
+    真实故障 ERR-20260828-91bc95（《王六郎》EP1，「许姓人家居所」与
+    「邬镇土地祠内」两个场景同时中招）：模型引用一段长对白时抄到句号就停笔，
+    然后自己补了一个收尾引号——写「妻子笑他说：“这一去有几百里。”」，而原文
+    是「“这一去有几百里。即使真有那个地方，只怕泥塑的神像也不能同你说话。”」，
+    那个 ” 在原文里出现在四十多字之后。差的就是这一个字符，整集映射被
+    「缺少 anchor_phrase」拦停，重试必然复现（两次调用都补了引号）。
+
+    把引文补完整是引用这个动作的一部分，不是对内容的改写。剥掉两端引号之后
+    仍然要求剩下每一个字逐字连续命中，所以编造和改写照样定位不到。
+    """
+    phrase = str(phrase or "").strip()
+    if not phrase:
+        return [], ""
+    located = _prep_pack_locate_verbatim(segments, phrase)
+    if located:
+        return located, phrase
+    unquoted = phrase.strip(_PREP_PACK_QUOTATION_MARKS)
+    if unquoted and unquoted != phrase:
+        located = _prep_pack_locate_verbatim(segments, unquoted)
+        if located:
+            return located, unquoted
+    return [], ""
+
+
 def _prep_pack_local_text_anchor(
     segments: list[SourceSegment], candidates: list[str],
 ) -> tuple[list[int], str]:
@@ -1513,9 +1550,9 @@ def _prep_pack_local_text_anchor(
         candidate = str(candidate or "").strip()
         if not candidate:
             continue
-        anchor_segments = _prep_pack_locate_phrase(segments, candidate)
+        anchor_segments, anchor_phrase = _prep_pack_locate_phrase(segments, candidate)
         if anchor_segments:
-            return anchor_segments, candidate
+            return anchor_segments, anchor_phrase
     return [], ""
 
 
