@@ -13116,14 +13116,28 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
     return result
 
 
-async def review_portrait_image(image_b64: str, appearance_anchor: str) -> dict:
+async def review_portrait_image(
+    image_b64: str,
+    appearance_anchor: str,
+    *,
+    requires_full_body: bool = True,
+) -> dict:
     """Review a character identity sheet without hard-gating acting direction.
 
     Portrait anchors can describe spirits, creatures, floating bodies, props, or
     acting direction. Only unmistakable identity/technical defects are hard
     gates; subjective styling differences remain review notes.
+
+    ``requires_full_body`` 来自调用方那条视角的构图合同（见
+    ``multiview.CHARACTER_VIEW_FRAMING``）。侧面与特写视角本来就按半身构图生成，
+    拿全身标准判它必然挂。缺省 True 对应主定妆图，行为与从前一致。
     """
-    expectation = f"""你是漫剧角色定妆照评审 agent。请对照角色锚点检查这张单角色全身设定图，输出 JSON。
+    framing_note = (
+        "这张单角色全身设定图"
+        if requires_full_body
+        else "这张单角色设定图（本条视角按半身或特写构图生成，下半身不入画属于正常，不得据此判缺陷）"
+    )
+    expectation = f"""你是漫剧角色定妆照评审 agent。请对照角色锚点检查{framing_note}，输出 JSON。
 
 角色锚点：{appearance_anchor}
 
@@ -13180,6 +13194,7 @@ async def review_portrait_image(image_b64: str, appearance_anchor: str) -> dict:
             # policy this provider mark is allowed when the configured
             # practical-quality mode says so, never unconditionally.
             result["non_occluding_provider_watermark"] = True
+    result["framing_requires_full_body"] = requires_full_body
     from app.portrait_policy import normalize_portrait_seed_qa
     return normalize_portrait_seed_qa(result)
 

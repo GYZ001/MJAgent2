@@ -220,6 +220,72 @@ def test_seed_qa_keeps_major_crop_as_hard_failure() -> None:
     assert "主体全身未完整可见" in result["hard_failures"]
 
 
+def test_seed_qa_does_not_demand_full_body_from_a_half_body_view() -> None:
+    """真实故障：按半身要求生成、再按全身标准判失败。
+
+    ``character_view_prompt`` 对 profile 要的是「标准左侧面半身」，而这里曾无条件
+    把 full_body_visible=False 判成硬失败。四个项目 21 个角色实测 9 条硬失败全部
+    落在 profile 上，front_full 一条没有——只有模型没听话多画了全身的那几张才侥幸
+    通过。判据必须读那条视角自己的构图合同。
+    """
+    result = normalize_portrait_seed_qa({
+        "identity_match": 0.95,
+        "presentation_match": 0.9,
+        "clean_frame": 0.95,
+        "person_count": 1,
+        "full_body_visible": False,
+        "crop_severity": "none",
+        "anatomy_valid": True,
+        "framing_requires_full_body": False,
+        "issues": [],
+        "hard_failures": [],
+    })
+
+    assert result["hard_gate_passed"] is True
+    assert "主体全身未完整可见" not in result["hard_failures"]
+
+
+def test_seed_qa_still_demands_full_body_when_the_contract_asks_for_it() -> None:
+    """旗标只放行合同本来就不要全身的视角；缺省与显式 True 都照旧硬失败，
+    免得这条放行变成「谁都可以不画全身」。"""
+    payload = {
+        "identity_match": 0.95,
+        "presentation_match": 0.9,
+        "clean_frame": 0.95,
+        "person_count": 1,
+        "full_body_visible": False,
+        "crop_severity": "major",
+        "anatomy_valid": True,
+        "issues": [],
+        "hard_failures": [],
+    }
+
+    absent = normalize_portrait_seed_qa(dict(payload))
+    explicit = normalize_portrait_seed_qa({**payload, "framing_requires_full_body": True})
+
+    for result in (absent, explicit):
+        assert result["hard_gate_passed"] is False
+        assert "主体全身未完整可见" in result["hard_failures"]
+
+
+def test_required_views_all_have_a_declared_framing_contract() -> None:
+    """判据从 multiview 实际声明的视角常量推导，不在这里手抄一份。
+
+    新增必需视角却忘了登记构图合同时，它会掉进「按要求全身」的兜底，而提示词那边
+    多半写的是别的——这正是 profile 那次的形状。
+    """
+    from app import multiview
+
+    for role in multiview.CHARACTER_REQUIRED_VIEWS + multiview.CHARACTER_OPTIONAL_VIEWS:
+        assert role in multiview.CHARACTER_VIEW_FRAMING, f"{role} 没有登记构图合同"
+    # 提示词与判据必须同源：合同里说不要求全身的，提示词就不能写「全身完整可见」。
+    for role, (needs_full, prose) in multiview.CHARACTER_VIEW_FRAMING.items():
+        assert multiview.character_view_requires_full_body(role) is needs_full
+        if not needs_full:
+            assert "全身完整可见" not in prose, f"{role} 的提示词与构图合同自相矛盾"
+    assert multiview.character_view_requires_full_body("brand_new_role") is True
+
+
 def test_seed_qa_allows_subjective_anchor_differences_with_warning() -> None:
     result = normalize_portrait_seed_qa({
         "identity_match": 0.1,

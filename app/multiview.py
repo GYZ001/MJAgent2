@@ -31,6 +31,29 @@ CHARACTER_OPTIONAL_VIEWS = ("back_full", "face_closeup")
 SCENE_REQUIRED_VIEWS = ("establishing", "reverse_angle")
 SCENE_OPTIONAL_VIEWS = ("action_zone",)
 
+# 每条视角的构图合同：是否要求全身入画，以及写进提示词的构图要求。
+# 生成提示词和 QA 判据必须读同一份。真实故障：profile 的提示词要「标准左侧面
+# 半身」，而 portrait_policy 无条件把 full_body_visible=False 判成硬失败——按半身
+# 要求画出来的图因此必然挂。四个项目 21 个角色实测 9 条硬失败全部落在 profile 上，
+# front_full 一条没有；只有模型没听话、多画了全身的那几张才侥幸通过。
+CHARACTER_VIEW_FRAMING: dict[str, tuple[bool, str]] = {
+    "front_full": (True, "正面全身立绘，中性姿态，双臂自然，全身完整可见"),
+    "three_quarter": (False, "3/4 侧面半身或全身，清晰展示五官深度与发型轮廓"),
+    "profile": (False, "标准左侧面半身，清晰展示鼻梁、下颌、耳部与侧面发型"),
+    "back_full": (True, "背面全身，展示服装背面与发型背部轮廓"),
+    "face_closeup": (False, "面部近景特写，五官清晰，发型完整入画"),
+}
+_DEFAULT_VIEW_FRAMING = (True, "全身立绘")
+
+
+def character_view_requires_full_body(view_role: str | None) -> bool:
+    """这条视角的生成合同要不要求全身入画。
+
+    未知视角按「要求全身」处理：新视角没登记时宁可误报一次，也好过悄悄放行一张
+    真的被腰斩的图。
+    """
+    return CHARACTER_VIEW_FRAMING.get(str(view_role or ""), _DEFAULT_VIEW_FRAMING)[0]
+
 VIEW_ROLE_LABELS = {
     "front_full": "正面全身",
     "three_quarter": "3/4 面",
@@ -192,13 +215,7 @@ def character_view_prompt(
     view_role: str,
     portrait_prompt: str | None = None,
 ) -> str:
-    framing = {
-        "front_full": "正面全身立绘，中性姿态，双臂自然，全身完整可见",
-        "three_quarter": "3/4 侧面半身或全身，清晰展示五官深度与发型轮廓",
-        "profile": "标准左侧面半身，清晰展示鼻梁、下颌、耳部与侧面发型",
-        "back_full": "背面全身，展示服装背面与发型背部轮廓",
-        "face_closeup": "面部近景特写，五官清晰，发型完整入画",
-    }.get(view_role, "全身立绘")
+    framing = CHARACTER_VIEW_FRAMING.get(view_role, _DEFAULT_VIEW_FRAMING)[1]
     source = ensure_portrait_clothing_contract(
         portrait_override_appearance_anchor(appearance, portrait_prompt)
         or production_appearance_anchor(appearance)
@@ -1196,7 +1213,10 @@ def _set_scene_pack_fields(conn, scene_id: str, **fields: Any) -> None:
 async def review_character_view(image_path: str, appearance: str, view_role: str) -> dict[str, Any]:
     from app.stages import review_portrait_image
     try:
-        qa = await review_portrait_image(hiagent.encode_image_file(image_path), appearance)
+        qa = await review_portrait_image(
+            hiagent.encode_image_file(image_path), appearance,
+            requires_full_body=character_view_requires_full_body(view_role),
+        )
         qa["view_role"] = view_role
         return qa
     except Exception as exc:  # noqa: BLE001
@@ -1261,7 +1281,15 @@ async def review_character_pack_consistency(views: list[dict[str, Any]], appeara
         "你是角色多视角一致性评审。以下图片是同一角色不同观察角度的设定图，顺序："
         + ", ".join(f"{i+1}:{r}" for i, r in enumerate(roles))
         + f"。外观锚点：{appearance}。"
-        "先逐张检查对应观察角度、稳定身份特征、主体完整性与技术缺陷；"
+        + (
+            "各视角的构图合同："
+            + "；".join(
+                f"{r} 要求{'全身入画' if character_view_requires_full_body(r) else '半身或特写构图，下半身不入画属于正常，不得据此判缺陷'}"
+                for r in dict.fromkeys(roles)
+            )
+            + "。"
+        )
+        + "先逐张检查对应观察角度、稳定身份特征、主体完整性与技术缺陷；"
         "再检查同一角色脸部特征、发型、服装、体型在各视角一致，只允许观察角度不同。"
         "各视角之间发生性别、核心身份、脸/发型/服装/体型漂移，或缺失视角、多余人物、畸形、"
         "遮挡人物主体的文字/水印属于 hard_failures。供应商角落水印若不遮挡人物，"
@@ -1308,6 +1336,7 @@ async def review_character_pack_consistency(views: list[dict[str, Any]], appeara
         for role in roles:
             item = dict(reported.get(role) or {})
             item["view_role"] = role
+            item["framing_requires_full_body"] = character_view_requires_full_body(role)
             if (
                 ignore_non_occluding_watermark
                 and item.get("watermark_detected") is True

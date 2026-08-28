@@ -66,7 +66,12 @@ def normalize_portrait_seed_qa(qa: dict[str, Any] | None) -> dict[str, Any]:
     person_count = result.get("person_count")
     if isinstance(person_count, (int, float)) and int(person_count) != 1:
         hard.append(f"画面人物数量为 {int(person_count)}，要求单人物")
-    if result.get("full_body_visible") is False:
+    # 这条视角的生成合同要不要求全身入画，由调用方按与提示词同一份构图合同显式
+    # 传入（与下面水印那面旗标同一约定：本模块不读设置、不枚举 view_role）。
+    # 侧面/特写视角本来就是按半身构图生成的，拿全身标准判它必然挂。
+    # 缺省按「要求全身」处理，没传旗标的老调用方行为不变。
+    requires_full_body = result.get("framing_requires_full_body") is not False
+    if result.get("full_body_visible") is False and requires_full_body:
         if minor_crop and not major_crop:
             warnings.append("主体边缘有轻微裁切，已按带警告可用处理")
         else:
