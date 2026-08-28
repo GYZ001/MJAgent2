@@ -444,6 +444,156 @@ def _ready_pack(conn: sqlite3.Connection, portrait_id: str, name: str) -> None:
         )
 
 
+def _portrait_with_files(
+    conn: sqlite3.Connection, portrait_id: str, name: str, tmp_path,
+) -> tuple[object, object]:
+    """一套落盘的定妆照：主图 + 一张视角图，返回两个文件路径供断言。"""
+    main_image = tmp_path / f"{portrait_id}-main.jpg"
+    main_image.write_bytes(b"main")
+    view_image = tmp_path / f"{portrait_id}-view.jpg"
+    view_image.write_bytes(b"view")
+    conn.execute(
+        "INSERT INTO character_portraits("
+        "id, project_id, character_name, ep_start, ep_end, appearance, prompt, image_path, "
+        "base_portrait_id, bible_version, artifact_id, pack_status, group_qa_json, change_json, created_at"
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            portrait_id, "proj_test", name, 1, None, "黑发少年", "prompt", str(main_image),
+            None, 1, None, "ready", None, None, 1.0,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO character_portrait_views(id,portrait_id,view_role,image_path,status,created_at) "
+        "VALUES(?,?,'profile',?,'ready',1)",
+        (f"{portrait_id}-profile", portrait_id, str(view_image)),
+    )
+    return main_image, view_image
+
+
+def _bible_with(names: list[str]) -> object:
+    """按名单造一份合法 Bible 实例，只有角色名不同。"""
+    from app.schemas import Bible
+
+    return Bible(**{
+        "world": {
+            "visual_style_canonical": "国风水墨清透光影，细腻线条与柔和晕染",
+            "era": "古代",
+            "genre": "玄幻",
+        },
+        "characters": [
+            {
+                "name": name,
+                "role": "主角",
+                "appearance_canonical": "黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩，英气逼人",
+                "personality": "坚韧",
+                "speech_style": "沉稳",
+                "relationships": [],
+            }
+            for name in names
+        ],
+        "scenes": [],
+    })
+
+
+def test_removing_a_character_takes_its_portrait_with_it(tmp_path) -> None:
+    """把角色移出人物谱，它的定妆照必须一起消失。
+
+    _resolve_portrait_id 只按 project_id + character_name 查表，不看这个名字还在
+    不在谱里。孤儿行会被映射器当成合法角色绑上去，实测把整集映射卡死在反幻觉闸
+    上——删了谱里的卡也修不好，因为闸拦的是 portrait 命中。
+    """
+    conn = _memory_conn()
+    _seed_bible(conn)
+    kept_main, kept_view = _portrait_with_files(conn, "portrait_kept", "甲一", tmp_path)
+    gone_main, gone_view = _portrait_with_files(conn, "portrait_gone", "乙二", tmp_path)
+    conn.commit()
+    old_bible_json = json.dumps(
+        {"characters": [{"name": "甲一"}, {"name": "乙二"}]}, ensure_ascii=False,
+    )
+
+    purged = bible_ops._purge_removed_character_portraits(
+        conn, "proj_test", old_bible_json, _bible_with(["甲一"]),
+    )
+
+    assert purged["characters"] == ["乙二"]
+    assert purged["records"] == 1
+    assert purged["files"] == 2
+    surviving = [
+        row["character_name"] for row in conn.execute(
+            "SELECT character_name FROM character_portraits WHERE project_id='proj_test'"
+        )
+    ]
+    assert surviving == ["甲一"], "只有被移出人物谱的角色该失去定妆照"
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM character_portrait_views WHERE portrait_id='portrait_gone'"
+    ).fetchone()["c"] == 0
+    assert not gone_main.exists() and not gone_view.exists()
+    assert kept_main.exists() and kept_view.exists(), "留在谱里的角色，图一张都不能少"
+
+
+def test_editing_a_character_never_touches_its_portrait(tmp_path) -> None:
+    """名单没变时一张图都不能动——清理只认「移出名单」这一件事，不认字段改动。"""
+    conn = _memory_conn()
+    _seed_bible(conn)
+    main_image, view_image = _portrait_with_files(conn, "portrait_kept", "甲一", tmp_path)
+    conn.commit()
+    old_bible_json = json.dumps(
+        {"characters": [{"name": "甲一", "personality": "坚韧"}]}, ensure_ascii=False,
+    )
+
+    purged = bible_ops._purge_removed_character_portraits(
+        conn, "proj_test", old_bible_json, _bible_with(["甲一"]),
+    )
+
+    assert purged["records"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM character_portraits WHERE project_id='proj_test'"
+    ).fetchone()["c"] == 1
+    assert main_image.exists() and view_image.exists()
+
+
+def test_added_character_without_portrait_purges_nothing(tmp_path) -> None:
+    """新增角色时旧谱名字是新谱的子集，差集为空，不能误删任何东西。"""
+    conn = _memory_conn()
+    _seed_bible(conn)
+    main_image, _ = _portrait_with_files(conn, "portrait_kept", "甲一", tmp_path)
+    conn.commit()
+    old_bible_json = json.dumps({"characters": [{"name": "甲一"}]}, ensure_ascii=False)
+
+    purged = bible_ops._purge_removed_character_portraits(
+        conn, "proj_test", old_bible_json, _bible_with(["甲一", "乙二"]),
+    )
+
+    assert purged == {"characters": [], "records": 0, "files": 0}
+    assert main_image.exists()
+
+
+def test_purge_scopes_to_the_project_being_edited(tmp_path) -> None:
+    """同名角色分属两个项目时，只有正在编辑的那个项目的定妆照该退场。"""
+    conn = _memory_conn()
+    _seed_bible(conn)
+    mine_main, _ = _portrait_with_files(conn, "portrait_mine", "乙二", tmp_path)
+    other_main, other_view = _portrait_with_files(conn, "portrait_other", "乙二", tmp_path)
+    conn.execute(
+        "UPDATE character_portraits SET project_id='proj_other' WHERE id='portrait_other'",
+    )
+    conn.commit()
+    old_bible_json = json.dumps(
+        {"characters": [{"name": "甲一"}, {"name": "乙二"}]}, ensure_ascii=False,
+    )
+
+    purged = bible_ops._purge_removed_character_portraits(
+        conn, "proj_test", old_bible_json, _bible_with(["甲一"]),
+    )
+
+    assert purged["records"] == 1
+    assert not mine_main.exists()
+    assert other_main.exists() and other_view.exists(), "别的项目的同名角色不受影响"
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM character_portraits WHERE id='portrait_other'"
+    ).fetchone()["c"] == 1
+
+
 def test_refs_progress_excludes_ineligible_from_missing(monkeypatch) -> None:
     conn = _memory_conn()
     bible = {

@@ -1095,6 +1095,49 @@ def _purge_for_style_change(project_id: str, instance: "Bible") -> dict:
     return {**purged, "refs_cleared": refs_cleared, "scene_refs_cleared": scene_refs_cleared}
 
 
+def _purge_removed_character_portraits(
+    conn, project_id: str, old_bible_json: object, instance: "Bible",
+) -> dict:
+    """角色被移出人物谱时，它的定妆照必须一起退场。
+
+    _resolve_portrait_id（app/production/prep_pack.py）只按 project_id +
+    character_name 查 character_portraits，不校验这个名字是否还在谱里。留下的
+    孤儿行会被映射器当成合法角色绑定上去，实测让整集映射停在「称谓未逐字出现在
+    本集原文」这道反幻觉闸上，而且删了谱里的卡也修不好——因为闸拦的是 portrait
+    命中，不是谱命中。
+
+    调用方必须已经提交主事务：这里删磁盘文件，unlink 不可回滚，主事务失败时
+    一个文件都不能动。
+    """
+    from app.rejected_media import purge_character_portrait
+
+    if not old_bible_json:
+        return {"characters": [], "records": 0, "files": 0}
+    try:
+        old_characters = json.loads(old_bible_json).get("characters") or []
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {"characters": [], "records": 0, "files": 0}
+    old_names = {
+        str(item.get("name") or "").strip()
+        for item in old_characters
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    }
+    removed = sorted(old_names - {c.name for c in instance.characters})
+    if not removed:
+        return {"characters": [], "records": 0, "files": 0}
+    placeholders = ",".join("?" * len(removed))
+    rows = conn.execute(
+        f"SELECT id FROM character_portraits WHERE project_id=? AND character_name IN ({placeholders})",
+        (project_id, *removed),
+    ).fetchall()
+    records = files = 0
+    for row in rows:
+        purged = purge_character_portrait(conn, str(row["id"]), commit=True)
+        records += int(purged.get("records") or 0)
+        files += int(purged.get("files") or 0)
+    return {"characters": removed, "records": records, "files": files}
+
+
 def _parse_bible_write_body(body: dict) -> tuple[dict, object, bool, str | None]:
     """拆出 bible 正文、expected_version、confirm 标志与影响预检指纹。"""
     expected_version = body.get("expected_version")
@@ -2126,10 +2169,15 @@ async def edit_bible(project_id: str, body: dict):
         (new_id("gate"), artifact["id"], "character_bible", "approve", "bible_editor", "人工修订并定稿", now()),
     )
     conn.commit()
+    # 主事务落定之后才动被删角色的定妆照：删文件不可回滚，写库失败时必须一个文件都没碰。
+    purged_portraits = _purge_removed_character_portraits(
+        conn, project_id, p["bible_json"], instance,
+    )
     return {
         "bible_version_bumped": True,
         "style_changed": style_changed,
         "purged": purge_info,
+        "purged_removed_character_portraits": purged_portraits,
         "artifact_id": artifact["id"],
         "bible_version": int(p.get("bible_version") or 0) + 1,
         "impact": {
