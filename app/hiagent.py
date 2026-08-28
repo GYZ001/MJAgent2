@@ -1445,6 +1445,30 @@ def thinking_disabled(call_meta: dict | None) -> bool:
     return bool((call_meta or {}).get("disable_thinking"))
 
 
+def text_reasoning_effort(call_meta: dict | None) -> str:
+    """本次调用希望模型思考到什么程度；空串表示不表态，沿用模型自身默认。
+
+    智谱 GLM-5.2 起提供 ``reasoning_effort``（low/high/max，默认 max），是这类
+    「强制思考、关不掉」的模型上唯一能压住思考开销的旋钮——GLM-5.3 的
+    ``thinking.type`` 只接受 ``enabled``，官方迁移指引给出的 disabled 替代方案
+    正是 ``enabled`` 配 ``reasoning_effort="low"``。
+
+    取值原样透传，不做白名单校验：档位是供应商定义的开放集合（GLM-5.2 时期有
+    7 档，5.3 收成 3 档），穷举一份枚举只会在它下次改档位时误伤合法值；真填错
+    了供应商会自己拒绝，或按它文档写的回落到默认档。
+
+    优先级：调用点声明 > 运维设置 > 环境默认。调用点优先是因为「这一步要想多
+    深」是任务的性质，不是全局口味——短 JSON 判定和整集分镜创作不该共用一档。
+    """
+    meta_value = (call_meta or {}).get("reasoning_effort")
+    if meta_value is not None:
+        return str(meta_value).strip()
+    override = (get_setting("text_reasoning_effort") or "").strip()
+    if override:
+        return override
+    return config.TEXT_REASONING_EFFORT
+
+
 def _first_token_timeout_s(call_meta: dict | None) -> float | None:
     """Deadline for the first streamed content/reasoning character.
 
@@ -1652,6 +1676,9 @@ async def chat(messages: list[dict], *, model: str | None = None, provider: str 
                 payload = _with_rf({"model": zhipu_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens})
                 if disable_thinking:
                     payload["thinking"] = {"type": "disabled"}
+                effort = text_reasoning_effort(call_meta)
+                if effort:
+                    payload["reasoning_effort"] = effort
                 content = await _chat_with_reasoning_fallback(
                     client, f"{base_url}/chat/completions", payload,
                     kind="chat", model=zhipu_model, headers=model_headers,

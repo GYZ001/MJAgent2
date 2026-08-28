@@ -321,6 +321,12 @@ TEXT_REASONING_TOKEN_RESERVE = max(
     0, int(os.environ.get("TEXT_REASONING_TOKEN_RESERVE", "16384"))
 )
 
+# 思考型模型的思考深度档位（智谱 GLM-5.2 起支持 reasoning_effort，取值由供应商
+# 定义且是开放集合——目前 low/high/max，默认 max）。这里刻意不校验取值：合法值
+# 属于供应商，穷举一份白名单只会在它加档位时误伤。空串表示不表态，由模型自己的
+# 默认决定，也就是本常量落地前的既有行为。
+TEXT_REASONING_EFFORT = (os.environ.get("TEXT_REASONING_EFFORT", "") or "").strip()
+
 # 逐镜生成一次只输出一个 Shot JSON。沿用整集剧本的 65535 输出预算会把短请求
 # 计入过高的 TPM 配额并触发 429；8192 足够容纳单镜候选及定向修复，同时保留余量。
 STORYBOARD_SHOT_MAX_TOKENS = max(
