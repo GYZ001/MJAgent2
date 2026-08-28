@@ -2102,6 +2102,20 @@ class _RosterIdentityResolution(BaseModel):
     supporting_chapter_index: int = -1
 
 
+class _RosterAppellationScope(BaseModel):
+    """一个代称在全书里指的是一个人，还是不同场合指不同的人。"""
+
+    verdict: Literal["one_person", "many_people", "uncertain"] = "uncertain"
+    supporting_chapter_index: int = -1
+
+    @model_validator(mode="before")
+    @classmethod
+    def _require_verdict(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            value = _normalize_roster_verdict_payload(value)
+        return _require_explicit_verdict(value)
+
+
 class _MentionedCharacterImportanceResolution(BaseModel):
     """仅被提及角色是否值得进入人物谱的证据裁决。"""
 
@@ -2168,29 +2182,25 @@ def _roster_candidate_stands_alone(
     specific: list["_RosterCandidate"],
     chapters_by_idx: dict[int, str],
 ) -> bool:
-    """归并不成立时，这个称呼是不是「比名单里最常见的那个还常见」。
-
-    身份归一裁决回答的只是「这个称呼能不能并到名单里另一个实体身上」。它答不出来
-    说明并不过去，不说明称呼背后没有人——把这两件事当成一件，会让「没有正式姓名、
-    全书只以代称出现」的角色结构上必然出局：它因 name_form=referential 被送去归一，
-    而归一的候选实体名单里恰恰没有它自己，于是必判 uncertain，随即被当泛称删除。
+    """`_roster_appellation_scope` 也答不出来时的兜底：这个称呼是不是「比名单里
+    最常见的那个还常见」。
 
     真实故障（《王六郎》proj_177d147e16c7）：主角「许某」全篇提及 34 次、自报 3 条
     在场证据全部通过结构闸，被归一裁决拿去和「王六郎/异史氏」比对判 uncertain 后
     整个丢弃，必收名单只剩 1 人；人物谱里那张「许」卡是主生成模型事后自造的单字名，
     拿它做子串检索会命中「也许」「许多」「许姓」。
 
-    判据取「不低于 specific 里的最大提及数」，而不是任何绝对次数门槛。绝对门槛在
+    判据取「高于 specific 里的最大提及数」，而不是任何绝对次数门槛。绝对门槛在
     这里必然失效：类别称谓在长篇里比真配角出现得更多——《我欲封天》1616 章语料中
     「绿袍男子」498 次 / 覆盖 138 章、「精明男子」503 次，都远高于真角色「王有材」
     的 58 次，任何够低到能救《王六郎》许某（34 次）的门槛都会把它们一并放回来。
     相对位置才分得开：许某比名单里最常见的「王六郎」（25 次）还常见，只可能是被
     误删的主角；绿袍男子相对孟浩的 55137 次差三个数量级，仍是类别称谓。
 
-    这条通道刻意保守——它只救「比主角还常见却被整个删掉」这一种极端情形。规模不
-    及主角的第二主角救不回来，那是漏救；放错方向会让类别称谓涌进人物谱，代价大得多。
-    比较取严格大于：平局在小样本里太廉价（两个各出现一次的称呼谁也不比谁常见），
-    放行平局等于把这道闸开成常开。
+    这条通道刻意保守，只救「比主角还常见却被整个删掉」这一种极端情形——规模不及
+    主角的第二主角（《罗刹海市》龙女 20 次 vs 马骥 95 次）救不回来，那种情形归
+    `_roster_appellation_scope` 管，靠读原文而不是数次数。比较取严格大于：平局在
+    小样本里太廉价（两个各出现一次的称呼谁也不比谁常见），放行平局等于把闸常开。
     """
     if not specific:
         return False
@@ -2413,13 +2423,97 @@ def _merge_roll_call_candidates(
     return merged
 
 
+BIBLE_APPELLATION_SCOPE_SEGMENTS = 8
+
+
+async def _roster_appellation_scope(
+    candidate: "_RosterCandidate",
+    chapters_by_idx: dict[int, str],
+    *,
+    project_id: str | None = None,
+) -> str:
+    """归并不成立之后该问的问题：这个说法在全书里指一个人，还是指一类人。
+
+    身份归一问的是「能不能并到名单里另一个实体身上」，它答不出来只说明并不过去。
+    真正决定该不该建卡的是另一件事——这个称呼背后是不是一个稳定的个体。把这两件
+    事当成一件，「全书只以代称出现」的角色就结构上必然出局：它因 name_form=
+    referential 被送去归一，而归一的候选名单里恰恰没有它自己，必判 uncertain。
+
+    真实故障（《罗刹海市》proj_1a3a92a9b248）：女主角「龙女」在资格裁决里已被
+    模型读着卷宗判为 person（同一批里「村民」「龙宫」被正确判为 non_person），
+    第 2、3 章各有在场证据；随后归一裁决被问「龙女是不是马骥/福海/异史氏里的
+    某一个」，如实答 uncertain，她就此整个消失，三章语料最终只收下 1 张卡。
+
+    卷宗跨全书相隔较远的几处取样，这正是两类称呼分得开的地方：真角色在相隔很远
+    的两处仍是同一个人，身份、关系、经历连得成一条线；类别称谓换一处就换个人。
+    少于两处用法时没有可比对的两端，返回 uncertain 让上层退回保守判据，不猜。
+    """
+    label = (candidate.formal_name or candidate.primary_appellation).strip()
+    names = sorted(_candidate_appellations(candidate))
+    if not label or not names:
+        return "uncertain"
+    dossier = _spread_named_segments(
+        names, chapters_by_idx, limit=BIBLE_APPELLATION_SCOPE_SEGMENTS,
+    )
+    if len(dossier) < 2:
+        return "uncertain"
+    catalog = "\n\n".join(
+        f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
+        for item in dossier
+    )
+    valid_chapters = {int(item["chapter_idx"]) for item in dossier}
+    prompt = f"""任务：判断「{label}」这个说法在本书里指的是同一个人，还是不同场合指不同的人。
+同一人物的其它称呼：{json.dumps(names, ensure_ascii=False)}。
+
+原文卷宗（取自全书相隔较远的几处）：
+{catalog}
+
+只根据卷宗原文判断，JSON 字段必须用 verdict：
+- one_person：卷宗各处的「{label}」是同一个人，身份、关系、经历或所处情节能连成一条线。
+- many_people：卷宗各处的「{label}」是不同的人，这个说法靠外形、衣着、职务或身份指人，换一处场合指的就是另一个人。
+- uncertain：卷宗不足以判断，证据不够时选这个。
+
+supporting_chapter_index 必须是卷宗里出现过的数字章号，例如 1。只看卷宗原文，不用作品常识补充。
+"""
+    try:
+        resolution = await asyncio.wait_for(
+            model_gateway.chat_structured(
+                [{"role": "system", "content": SYSTEM_PREFIX},
+                 {"role": "user", "content": prompt}],
+                model_type=_RosterAppellationScope,
+                validate=None,
+                normalize_payload=_normalize_roster_verdict_payload,
+                operation_id="character_appellation_scope:" + hashlib.sha256(
+                    f"{label}:{catalog}".encode("utf-8")
+                ).hexdigest(),
+                temperature=0.0,
+                max_tokens=256,
+                call_meta=_bible_short_json_call_meta({
+                    "stage": "代称指称范围",
+                    "stage_key": "character_appellation_scope",
+                    "call_role": "stage_validate",
+                    "character_name": label,
+                    "project_id": project_id,
+                }),
+            ),
+            timeout=BIBLE_SMALL_VERDICT_TIMEOUT_S,
+        )
+    except Exception:  # noqa: BLE001 - 问不成就退回保守判据，不在这里定生死
+        return "uncertain"
+    # 只认「报得出卷宗里某一章」的答案。这里不再顺带查称呼在不在卷宗文本里——
+    # 卷宗本来就是按称呼检索出来的，那个条件恒真，写上去等于把闸开成常开。
+    if resolution.supporting_chapter_index not in valid_chapters:
+        return "uncertain"
+    return resolution.verdict
+
+
 async def _resolve_generic_character_candidates(
     candidates: list[_RosterCandidate],
     chapters_by_idx: dict[int, str],
     *,
     project_id: str | None = None,
 ) -> list[_RosterCandidate]:
-    """把描述性称呼裁决到已有实体；不确定时不再凭空创建新角色。"""
+    """把描述性称呼裁决到已有实体；并不过去的再问它自己是不是一个人。"""
     known_names = {value for item in candidates for value in _candidate_appellations(item)}
     # 归并已经跑完，同一个人的多份点名结果已经合成一条。此刻还被多个候选共用的
     # 称呼，在这本书里就分不出人，必须交给模型消歧，不能各自建卡。
@@ -2431,6 +2525,7 @@ async def _resolve_generic_character_candidates(
     if not specific:
         return candidates
     kept: list[_RosterCandidate] = []
+    unmerged: list[_RosterCandidate] = []
     jobs: list[tuple[_RosterCandidate, str, list[str]]] = []
     candidate_names = [
         {
@@ -2454,9 +2549,8 @@ async def _resolve_generic_character_candidates(
                 evidence_blocks.append(json.dumps(dossier, ensure_ascii=False))
         if not evidence_blocks:
             # 卷宗都建不出来就没法问归一，但「问不成」同样不是「这个人不存在」，
-            # 判据与归一失败那条路径共用（见 `_roster_candidate_stands_alone`）。
-            if _roster_candidate_stands_alone(candidate, specific, chapters_by_idx):
-                kept.append(candidate)
+            # 判据与归一失败那条路径共用（见下方 unmerged 的处置）。
+            unmerged.append(candidate)
             continue
         prompt = f"""任务：判断描述性称呼「{label}」是否是候选实体名单中的同一个人物。
 
@@ -2513,10 +2607,7 @@ async def _resolve_generic_character_candidates(
     # 合并回 specific 必须串行：两个泛称可能指向同一实体，并行写 aliases 会丢条目。
     for (asked, _prompt, _blocks), item in zip(jobs, resolved, strict=True):
         if item is None:
-            # 归并不成立：并不到别人身上的称呼，只有在全书没有独立存在规模时才是
-            # 泛称；够规模的放回普通候选，由三条准入通道决定去留。
-            if _roster_candidate_stands_alone(asked, specific, chapters_by_idx):
-                kept.append(asked)
+            unmerged.append(asked)
             continue
         candidate, resolution = item
         target = next((
@@ -2541,6 +2632,19 @@ async def _resolve_generic_character_candidates(
             (entry.chapter_index, entry.quote): entry
             for entry in [*target.identity_evidence, *candidate.onstage_evidence]
         }.values())[:BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE]
+    # 并不到别人身上的称呼，改问它自己：全书里它指一个人还是一类人。答不出来才
+    # 退回保守判据（比名单里最常见的还常见才留），三档都不放行时按泛称丢弃。
+    scopes = await asyncio.gather(*(
+        _roster_appellation_scope(item, chapters_by_idx, project_id=project_id)
+        for item in unmerged
+    ))
+    for candidate, scope in zip(unmerged, scopes, strict=True):
+        if scope == "one_person":
+            kept.append(candidate)
+        elif scope == "many_people":
+            continue
+        elif _roster_candidate_stands_alone(candidate, specific, chapters_by_idx):
+            kept.append(candidate)
     return kept
 
 

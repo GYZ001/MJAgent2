@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 import pytest
 
@@ -730,6 +731,186 @@ async def test_lead_who_only_ever_has_a_referential_name_survives_resolution(
     # 同一把刀下的真路人照旧删除：判据是全书存在规模，不是「代称一律留」。
     assert "妇人" not in kept
     assert "店主人" not in kept
+
+
+def _luocha_chapters() -> dict[int, str]:
+    """《罗刹海市》骨架：女主角「龙女」只有代称，规模远不及主角马骥。
+
+    次数贴着真实语料（马骥 95、龙女 20），且龙女横跨第 2、3 两章——这道闸靠读
+    原文而不是数次数，比例失真会让测试测不到真实判据。
+    """
+    ch1 = "".join(
+        [f"马骥在罗刹国第{i}次遭人围观，众人皆掩面。" for i in range(1, 50)]
+    )
+    ch2 = "".join(
+        [f"马骥在龙宫第{i}次赴宴，龙君赐座。" for i in range(1, 43)]
+        + [f"马骥常同龙女在树下长啸吟诗第{i}回。" for i in range(1, 17)]
+    )
+    ch3 = "".join(
+        ["马骥听说龙女来了，突然闯进屋中，握住她的手抽泣起来。"] * 4
+        + ["龙女如云的鬓影早已渺不可见，烟波浩荡，也没有一条路可以通向她。"] * 3
+    )
+    return {1: ch1, 2: ch2, 3: ch3}
+
+
+def _scope_aware_chat(scope_verdict: str, supporting_chapter_index: int):
+    """归一一律答 uncertain，指称范围裁决按参数答——分开两个问题各自的回答。"""
+
+    async def fake_structured(*_args, **kwargs):
+        if kwargs.get("model_type") is stages._RosterAppellationScope:
+            return stages._RosterAppellationScope(
+                verdict=scope_verdict,
+                supporting_chapter_index=supporting_chapter_index,
+            )
+        return stages._RosterIdentityResolution(
+            verdict="uncertain", canonical_appellation="", supporting_chapter_index=-1,
+        )
+
+    return fake_structured
+
+
+def _luocha_candidates() -> list["stages._RosterCandidate"]:
+    ev = stages._RosterOnstageEvidence
+    return [
+        stages._RosterCandidate(
+            primary_appellation="马骥", formal_name="马骥", name_form="personal_name",
+            onstage_evidence=[ev(chapter_index=1, quote="马骥在罗刹国第1次遭人围观，众人皆掩面。")],
+        ),
+        stages._RosterCandidate(
+            primary_appellation="龙女", name_form="referential",
+            onstage_evidence=[
+                ev(chapter_index=2, quote="马骥常同龙女在树下长啸吟诗第1回。"),
+                ev(chapter_index=3, quote="龙女如云的鬓影早已渺不可见，烟波浩荡，也没有一条路可以通向她。"),
+            ],
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_second_lead_smaller_than_the_protagonist_still_survives(monkeypatch) -> None:
+    """归并答不出来之后要问的是「它自己是不是一个人」，不是「它够不够常见」。
+
+    真实故障（《罗刹海市》proj_1a3a92a9b248）：女主角「龙女」在资格裁决里已被
+    模型读着卷宗判为 person，第 2、3 章各有在场证据；归一裁决被问「龙女是不是
+    马骥/福海/异史氏里的某一个」如实答 uncertain 后，她整个消失，三章语料最终
+    只收下 1 张卡。她 20 次的规模不及马骥 95 次，数次数那条兜底救不了她。
+    """
+    monkeypatch.setattr(
+        stages.model_gateway, "chat_structured", _scope_aware_chat("one_person", 2),
+    )
+    chapters = _luocha_chapters()
+    result = await stages._resolve_generic_character_candidates(
+        _luocha_candidates(), chapters, project_id="p1",
+    )
+    kept = {item.primary_appellation for item in result}
+    assert "龙女" in kept, "读原文判定为同一个人的代称不能因为规模不及主角被删"
+    assert "马骥" in kept
+    # 数次数那条兜底在这里确实救不了她——证明放行来自新判据，不是旧通道顺手过的。
+    specific = [item for item in _luocha_candidates() if item.name_form != "referential"]
+    dragon = next(
+        item for item in _luocha_candidates() if item.primary_appellation == "龙女"
+    )
+    assert stages._roster_candidate_stands_alone(dragon, specific, chapters) is False
+
+
+@pytest.mark.asyncio
+async def test_category_appellation_is_dropped_even_when_it_outnumbers_the_lead(
+    monkeypatch,
+) -> None:
+    """读出来「换个场合就换个人」时，比主角还常见也不放行。
+
+    数次数那条兜底会把「比名单里最常见的还常见」的称呼放回来；当模型读着相隔
+    很远的几处原文明说这是不同的人时，以原文为准。
+    """
+    monkeypatch.setattr(
+        stages.model_gateway, "chat_structured", _scope_aware_chat("many_people", 1),
+    )
+    ev = stages._RosterOnstageEvidence
+    chapters = {
+        1: "绿袍男子冷哼一声，拂袖而去。" * 6 + "孟浩皱眉。",
+        2: "绿袍男子在拍卖场举牌，出价极高。" * 6 + "孟浩摇头。",
+    }
+    candidates = [
+        stages._RosterCandidate(
+            primary_appellation="孟浩", formal_name="孟浩", name_form="personal_name",
+            onstage_evidence=[ev(chapter_index=1, quote="孟浩皱眉。")],
+        ),
+        stages._RosterCandidate(
+            primary_appellation="绿袍男子", name_form="referential",
+            onstage_evidence=[
+                ev(chapter_index=1, quote="绿袍男子冷哼一声，拂袖而去。"),
+                ev(chapter_index=2, quote="绿袍男子在拍卖场举牌，出价极高。"),
+            ],
+        ),
+    ]
+    specific = [item for item in candidates if item.name_form != "referential"]
+    green = next(item for item in candidates if item.primary_appellation == "绿袍男子")
+    assert stages._roster_candidate_stands_alone(green, specific, chapters) is True, (
+        "先确认数次数那条兜底本会放行，否则这个用例测不到 many_people 的优先级"
+    )
+    result = await stages._resolve_generic_character_candidates(
+        candidates, chapters, project_id="p1",
+    )
+    assert {item.primary_appellation for item in result} == {"孟浩"}
+
+
+@pytest.mark.asyncio
+async def test_scope_verdict_needs_a_chapter_from_the_dossier(monkeypatch) -> None:
+    """报不出卷宗里任何一章的答案不算数，退回保守判据。"""
+    monkeypatch.setattr(
+        stages.model_gateway, "chat_structured", _scope_aware_chat("one_person", 99),
+    )
+    result = await stages._resolve_generic_character_candidates(
+        _luocha_candidates(), _luocha_chapters(), project_id="p1",
+    )
+    assert {item.primary_appellation for item in result} == {"马骥"}
+
+
+@pytest.mark.asyncio
+async def test_single_chapter_appellation_never_asks_the_scope_question(
+    monkeypatch,
+) -> None:
+    """只找得到一处用法就没有可比对的两端，不问模型，直接退回保守判据。
+
+    《王六郎》全书一章，主角「许某」正是这种情形——他的存活必须还是靠数次数
+    那条兜底，而不是靠一个没有对照组的模型回答。
+    """
+    asked: list[Any] = []
+
+    async def fake_structured(*_args, **kwargs):
+        if kwargs.get("model_type") is stages._RosterAppellationScope:
+            asked.append(kwargs.get("call_meta"))
+            return stages._RosterAppellationScope(
+                verdict="many_people", supporting_chapter_index=1,
+            )
+        return stages._RosterIdentityResolution(
+            verdict="uncertain", canonical_appellation="", supporting_chapter_index=-1,
+        )
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
+    ev = stages._RosterOnstageEvidence
+    chapter = _wang_liulang_chapter()
+    result = await stages._resolve_generic_character_candidates(
+        [
+            stages._RosterCandidate(
+                primary_appellation="许某", aliases=["姓许的人"],
+                name_form="referential",
+                onstage_evidence=[
+                    ev(chapter_index=1, quote="许某在河边撒网第1回，独自饮酒。"),
+                ],
+            ),
+            stages._RosterCandidate(
+                primary_appellation="王六郎", name_form="personal_name",
+                onstage_evidence=[
+                    ev(chapter_index=1, quote="年轻人回答：‘我姓王，没有表字，叫我王六郎就好。’"),
+                ],
+            ),
+        ],
+        {1: chapter},
+        project_id="p1",
+    )
+    assert asked == [], "单章语料没有相隔较远的两处，问了也只是让模型猜"
+    assert "许某" in {item.primary_appellation for item in result}
 
 
 def test_standalone_gate_measures_against_the_roster_not_a_fixed_number() -> None:
