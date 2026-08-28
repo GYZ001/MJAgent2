@@ -16,6 +16,41 @@ def test_normalize_prompt_collapses_duplicate_punctuation() -> None:
     assert normalize_prompt_text("戒指。。正面站立") == "戒指。正面站立"
 
 
+def test_whatever_lands_in_appearance_becomes_a_literal_drawing_instruction() -> None:
+    """appearance_canonical 的内容会原样变成图像模型的作画指令。
+
+    这条锁的是契约本身，不是措辞：portrait_prompt 不做任何语义过滤，谱里写
+    什么就画什么。所以往这个字段里写「关于原文的说明」等于让图像模型去画那
+    句说明——真实事故里三个角色（靠山老祖/陈凡/何洛华）的定妆照 prompt 变成
+    「单角色全身定妆照：原文未点明性别，是靠山宗掌门……」。
+
+    BIBLE_APPEARANCE_FIELD_RULE 之所以要求整段都是可画内容，根据就在这里。
+    """
+    leaked = portrait_prompt("国风水墨", "原文未点明性别，是靠山宗掌门，神态威严")
+    assert "原文未点明性别" in leaked, (
+        "拼接层不过滤也不该过滤——它无从判断哪句是说明、哪句是描述。"
+        "唯一能守住的地方是写入这个字段的时候。"
+    )
+
+
+def test_appearance_field_rule_never_asks_for_meta_commentary() -> None:
+    """人物谱详情提示词不得再指示模型把「原文未点明性别」写进外观字段。
+
+    旧版规则明写「证据包里确实看不出性别时，写"原文未点明性别"」。不许按名字
+    或常识猜性别这个内核是对的，猜出来的是编造；错的是产出位置——那句话是写给
+    人看的元话语，却被逐字拼进图像 prompt。
+
+    这条测试守两件事：元话语的指示没有回来，以及"不许猜性别"这个内核还在
+    （不能靠让模型瞎猜来消灭元话语）。
+    """
+    from app.stages import BIBLE_APPEARANCE_FIELD_RULE as rule
+
+    assert "原文未点明" not in rule
+    assert "证据不足" not in rule
+    assert "猜" in rule, "不许按名字或常识猜性别，这个内核不能连同元话语一起被删掉"
+    assert "图像" in rule, "要让模型知道这个字段的读者是图像模型，规则才立得住"
+
+
 def test_portrait_prompt_uses_normalization() -> None:
     text = portrait_prompt("国风水墨清透光影细腻晕染", "黑发少年。。玄色劲装，目光坚定，身形修长腰佩玉佩")
     assert "。。" not in text
