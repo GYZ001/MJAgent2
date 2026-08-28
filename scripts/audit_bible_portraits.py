@@ -72,16 +72,33 @@ def audit_project(conn: sqlite3.Connection, project: sqlite3.Row) -> list[str]:
         issues.append(f"[{name}] 人物谱为空")
         return issues
 
+    # 定妆按 ep_start/ep_end 区间做版本化，同一个角色会同时存在历史段（ep_end 已
+    # 关闭或 ep_start 为负）。取生效段用的是产品自己那条区间判据，不是「按名字取
+    # 最后一行」——后者能不能取对全看行序，同一份数据换个顺序结论就变。
     portraits = {
         row["character_name"]: row
         for row in conn.execute(
-            "SELECT * FROM character_portraits WHERE project_id=?", (pid,),
+            "SELECT * FROM character_portraits WHERE project_id=? "
+            "AND ep_start<=1 AND (ep_end IS NULL OR ep_end>=1) "
+            "ORDER BY ep_start DESC, created_at DESC",
+            (pid,),
+        )
+    }
+    retired = {
+        row["character_name"]
+        for row in conn.execute(
+            "SELECT DISTINCT character_name FROM character_portraits WHERE project_id=? "
+            "AND NOT (ep_start<=1 AND (ep_end IS NULL OR ep_end>=1))",
+            (pid,),
         )
     }
 
     bible_names = {c.get("name") for c in characters if c.get("name")}
     for orphan in sorted(set(portraits) - bible_names):
         issues.append(f"[{name}] 定妆 {orphan} 在人物谱里查不到，是孤儿记录")
+    # 历史段留着是版本化的一部分；只有「人物谱里还有这个人、生效段却没了」才是缺口。
+    for stranded in sorted((retired & bible_names) - set(portraits)):
+        issues.append(f"[{name}] {stranded} 只剩历史定妆段，本集没有生效的定妆")
 
     for character in characters:
         cname = character.get("name") or "<无名>"
