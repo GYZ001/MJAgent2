@@ -149,6 +149,55 @@ def test_light_recent_traffic_never_tightens_the_reserve(monkeypatch):
     )
 
 
+def test_model_that_never_thinks_gets_no_reserve(monkeypatch):
+    """次次观测到 0 是「它不思考」的证据，预留必须真的降到 0。
+
+    与上一条的区别不在数值高低而在证据性质：``reasoning=12`` 说明模型会思考、
+    只是近期任务轻，收紧预留是拿下一次重任务冒险；而火山 seed 的 2799 次调用
+    里供应商**逐次**回报思考了 0 token，此时仍留 16384，等于把它 32768 输出
+    上限的一半直接扔掉——这是每次调用都在发生的确定损失。
+
+    注意字段缺失走的是另一条路：那时 json_extract 给 NULL，样本压根进不了
+    统计，观测数不足自然回落全局默认（见 sparse 用例）。
+    """
+    import time
+
+    now = time.time()
+    rows = [
+        _call(model="d71l5c8nfdb167kligqg", reasoning=0, ts=now - 10)
+        for _ in range(MIN_OBSERVATIONS + 5)
+    ]
+    _install(monkeypatch, rows)
+    monkeypatch.setattr(hiagent, "get_setting", lambda _key: "")
+
+    assert load_profile("d71l5c8nfdb167kligqg").reasoning_ceiling == 0
+    assert hiagent.reasoning_token_reserve(model="d71l5c8nfdb167kligqg") == 0
+
+
+def test_one_thinking_call_is_enough_to_restore_the_reserve(monkeypatch):
+    """只要有一次真的思考过，就不算「不思考的模型」，预留回到全局默认兜底。
+
+    这条守的是上一条的边界：把预留降到 0 的依据必须是「无一例外」，而不是
+    「大多数时候是 0」。思考模型被大量关思考调用刷屏时，任何一次未关思考的
+    观测都会让判据翻回保守侧。
+    """
+    import time
+
+    now = time.time()
+    rows = [
+        _call(model="mostly-quiet", reasoning=0, ts=now - 10)
+        for _ in range(MIN_OBSERVATIONS + 5)
+    ]
+    rows.append(_call(model="mostly-quiet", reasoning=7, ts=now - 5))
+    _install(monkeypatch, rows)
+    monkeypatch.setattr(hiagent, "get_setting", lambda _key: "")
+
+    assert load_profile("mostly-quiet").reasoning_ceiling == 7
+    assert hiagent.reasoning_token_reserve(model="mostly-quiet") == (
+        config.TEXT_REASONING_TOKEN_RESERVE
+    )
+
+
 def test_operator_override_still_wins_over_observations(monkeypatch):
     """运维显式设定的预留优先级高于画像，否则就没法临时压制异常观测。"""
     import time

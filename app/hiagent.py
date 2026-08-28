@@ -1417,7 +1417,8 @@ def reasoning_token_reserve(*, model: str | None) -> int:
 
     优先级：运维显式覆盖 > 该模型的观测画像 > 全局默认。观测画像见
     ``app.model_runtime_profile``；样本不足时它返回 ``None``，此处回落到全局
-    默认，绝不把「没观测到」当成「不需要预留」。模型自身的
+    默认，绝不把「没观测到」当成「不需要预留」——但反过来，「足量样本里次次
+    观测到 0」是确凿的否定证据，那时预留就是 0。模型自身的
     ``max_output_tokens`` 始终夹紧结果。
     """
     override = (get_setting("text_reasoning_token_reserve") or "").strip()
@@ -1430,9 +1431,15 @@ def reasoning_token_reserve(*, model: str | None) -> int:
 
     observed = model_runtime_profile(model).reasoning_ceiling
     if observed is not None:
-        # 全局默认在这里是下限而不是替代品：某个模型近期恰好只跑了轻任务时，
-        # 观测上界会低于默认值，此时按默认值给，避免画像把预留越收越紧。
-        return max(0, int(observed), int(config.TEXT_REASONING_TOKEN_RESERVE))
+        if observed == 0:
+            # 供应商在足量样本里**逐次**回报「本次思考了 0 个 token」，这是对
+            # 「它会思考」的否定证据，不是字段缺失（缺失时 json_extract 给
+            # NULL，样本根本进不了统计）。火山 seed 2799 次调用无一例外，再给
+            # 它留 16384 就是把它 32768 输出上限的一半直接扔掉。
+            return 0
+        # 观测到它确实会思考、只是近期任务偏轻时，全局默认转为下限：样本没覆盖
+        # 到重任务不等于重任务不会来，此时收紧预留会把风险留给下一次重任务。
+        return max(int(observed), int(config.TEXT_REASONING_TOKEN_RESERVE))
     return max(0, int(config.TEXT_REASONING_TOKEN_RESERVE))
 
 
