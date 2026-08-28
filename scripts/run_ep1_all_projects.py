@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -36,8 +37,10 @@ ROOT = Path(__file__).resolve().parent.parent
 BASE = "http://127.0.0.1:8230"
 SESSION = (ROOT / "data" / "regression_session_token.txt").read_text(encoding="utf-8").strip()
 DB_PATH = ROOT / "data" / "manju.db"
-LOG = ROOT / "logs" / "ep1_all.log"
-STATE = ROOT / "logs" / "ep1_all_state.json"
+LOG = ROOT / "logs" / os.environ.get("EP1_LOG_NAME", "ep1_all.log")
+# 补跑某个项目时要开第二个进程，与主进程并存。状态文件是读-改-写，两个进程共用
+# 同一份会丢更新，所以补跑走独立文件，report 时再合并。
+STATE = ROOT / "logs" / os.environ.get("EP1_STATE_NAME", "ep1_all_state.json")
 
 # (项目名, project_id, EP1 的 episode_id)。清库后 ID 不变，写死避免每次去查。
 PROJECTS = [
@@ -694,8 +697,29 @@ def cmd_status(_args) -> int:
     return 0
 
 
+def load_merged_state() -> dict:
+    """合并主进程与各补跑进程的记账。同一项目以更晚写入的那份为准——补跑总是
+    发生在主进程判失败之后，晚的那份就是最新事实。"""
+    merged: dict = {}
+    for path in sorted((ROOT / "logs").glob("ep1_all_state*.json")):
+        try:
+            chunk = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for project, entry in chunk.items():
+            current = merged.get(project)
+            if current is None:
+                merged[project] = entry
+                continue
+            latest = max((s.get("at") or "") for s in (entry.get("stages") or {}).values() or [{}])
+            kept = max((s.get("at") or "") for s in (current.get("stages") or {}).values() or [{}])
+            if latest >= kept:
+                merged[project] = entry
+    return merged
+
+
 def cmd_report(_args) -> int:
-    state = load_state()
+    state = load_merged_state()
     print("\n" + "=" * 78)
     print("四个项目第一集全链路结果")
     print("=" * 78)
