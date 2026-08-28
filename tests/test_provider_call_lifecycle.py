@@ -2242,6 +2242,39 @@ def test_image_generation_sends_stable_idempotency_key(monkeypatch) -> None:
     assert seen_headers[0]["Idempotency-Key"].startswith("op_")
 
 
+def test_idempotency_header_survives_a_chinese_operation_id() -> None:
+    """operation_id 允许含中文，投影到 HTTP 头必须仍是可编码的 ASCII。
+
+    2026-08-28 四个项目的人物谱全线塌成 stub，就是这一行漏了净化：
+    `character_bible_detail:{项目}:{角色名}:{attempt}` 直接进头，httpx 在送出
+    请求前抛 UnicodeEncodeError，被外层当成一次普通调用失败记下，每个角色三次
+    尝试全挂。判据挂在「这个头值能不能真的编码出去」，不挂具体哈希文本。
+    """
+    key = hiagent._header_idempotency_key(
+        "character_bible_detail:proj_177d147e16c7:许某:1"
+    )
+
+    key.encode("ascii")  # 编不出去就是回归，异常即失败
+    # 幂等语义不能被净化破坏：同一 operation_id 恒定映射到同一个键。
+    assert key == hiagent._header_idempotency_key(
+        "character_bible_detail:proj_177d147e16c7:许某:1"
+    )
+    # 不同角色必须落到不同键，否则供应商侧会把两个角色的请求当成重复。
+    assert key != hiagent._header_idempotency_key(
+        "character_bible_detail:proj_177d147e16c7:王六郎:1"
+    )
+
+
+def test_ascii_operation_id_reaches_the_header_byte_identical() -> None:
+    """已经能进头的 id 必须逐字不变，否则会打断供应商侧已建立的去重。"""
+    for operation_id in (
+        "video-create-ver_1-safety-1",
+        "screen_scene_state_changes:9f8e7d",
+        "semantic_storyboard_repair:ep_1:shot_2:3",
+    ):
+        assert hiagent._header_idempotency_key(operation_id) == operation_id
+
+
 def test_video_poll_network_error_is_retryable(monkeypatch) -> None:
     calls: list[tuple] = []
 

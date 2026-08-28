@@ -10,8 +10,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import inspect
 import json
+import re
 import sqlite3
 import shutil
 import subprocess
@@ -719,6 +721,30 @@ def _classify_http_error(status: int, body: str, key_name: str = "HIAGENT_API_KE
     )
 
 
+def _header_idempotency_key(operation_id: str) -> str:
+    """把 operation_id 投影成能进 HTTP 头的值。
+
+    operation_id 是给人看的业务标识，允许含中文（`character_bible_detail:{项目}:
+    {角色名}:{attempt}`）；HTTP 头只能承载可打印 ASCII。直接赋值会在 httpx 编码
+    请求头时抛 UnicodeEncodeError，而那发生在请求送出之前、被外层当成一次普通的
+    调用失败记下来——2026-08-28 四个项目的人物谱就是这么全线塌掉的：点名照常拿到
+    名单，逐个补详情时每个角色的三次尝试全挂在这一行，最后整份人物谱只剩 stub。
+
+    净化只发生在头这一层：库里 provider_calls.operation_id 仍存原值，去重查询也仍
+    按原值匹配，可读性与既有记录都不受影响。
+
+    判据取自传输约束本身而非字符集黑名单：能原样进头的（可打印 ASCII 且长度合规）
+    逐字返回，保证既有 id 的头值一个字节都不变、不打断供应商侧已建立的去重；其余
+    取 sha256，同一 operation_id 恒定映射到同一个键，重试仍然幂等。
+
+    与 `app/minimax_h3.py::_idempotency_key` 是同一口径，前缀不同以便区分来源。
+    """
+    value = str(operation_id or "").strip()
+    if re.fullmatch(r"[!-~]{1,200}", value):
+        return value
+    return f"oid_{hashlib.sha256(value.encode('utf-8', 'replace')).hexdigest()}"
+
+
 def _headers() -> dict[str, str]:
     if not config.HIAGENT_API_KEY:
         raise ProviderError("未配置 HIAGENT_API_KEY，请在项目根目录 .env 中填写")
@@ -1017,7 +1043,7 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
         # Providers that implement the conventional header deduplicate the
         # accept-before-local-commit crash window; providers that ignore it still
         # receive the same durable operation identifier in observability metadata.
-        req_headers["Idempotency-Key"] = idempotency_key
+        req_headers["Idempotency-Key"] = _header_idempotency_key(idempotency_key)
     request_bytes = _request_size_bytes(payload)
     harness_text_request = bool(
         kind == "chat"
@@ -2499,7 +2525,7 @@ async def _stream_chat_completion(
     req_headers = dict(headers if headers is not None else _headers())
     operation_id = str((merged_meta or {}).get("operation_id") or "").strip()
     if operation_id:
-        req_headers["Idempotency-Key"] = operation_id
+        req_headers["Idempotency-Key"] = _header_idempotency_key(operation_id)
     stream_payload = {**payload, "stream": True, "stream_options": {"include_usage": True}}
     request_bytes = _request_size_bytes(stream_payload)
     start = time.time()
