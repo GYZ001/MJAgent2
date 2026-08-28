@@ -1954,6 +1954,18 @@ BIBLE_SMALL_VERDICT_TIMEOUT_S = 120.0
 BIBLE_FIRST_TOKEN_TIMEOUT_S = float(config.TIMEOUT_CHAT_FIRST_TOKEN_S)
 
 
+def _corpus_scoped_chapter_threshold(threshold: int, available_chapters: int) -> int:
+    """把「至少覆盖 N 章」的门槛压回语料实际有的章数之内。
+
+    「跨 N 章复现」在只有 M < N 章的语料里不是更严格的标准，而是结构上永远
+    判不过的判据——它挂在了语料被切成几章上，不挂在「这个人是不是反复登场」上。
+    真实故障：《王六郎》全文 2944 字只切出 1 章，3 个候选、4 条在场证据全部通过
+    结构闸与裁决闸，必收名单仍是空的，人物谱以「未产出任何经原文核验的角色候选」
+    整体失败。章数够的语料上封顶不生效，跨章判据原样保留。
+    """
+    return max(1, min(int(threshold), max(1, int(available_chapters))))
+
+
 def _bible_short_json_call_meta(meta: dict[str, Any]) -> dict[str, Any]:
     """人物谱短 JSON 调用：关掉 thinking，并给 0 字节流式空等一个首字上限。
 
@@ -3295,13 +3307,20 @@ async def _recurring_character_names(
 
     # 准入分三条独立通道，任一命中即可进入名单：
     # A. 在场证据通道：裁决闸核验通过 >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES 条，
-    #    且这些证据跨到 >= BIBLE_RECURRING_MIN_ONSTAGE_CHAPTERS 个章节；
+    #    且这些证据跨到 >= BIBLE_RECURRING_MIN_ONSTAGE_CHAPTERS 个章节
+    #    （章数不足的短篇按语料实际章数封顶，见 `_corpus_scoped_chapter_threshold`）；
     # B. 剧情权威通道：仅被提及，但原文赋予其持续剧情作用（mentioned_retain）；
     # C. 全文统计通道：全文命中与章节覆盖同时达标——主角/核心配角在原文里持续出现，
     #    这本身就是比"某一条引句能否通过单次模型裁决"更稳的重要性证据。
     #    真实故障：孟浩前 20 章提及 991 次、覆盖 20/20 章，却因 3 条引句裁决全判
     #    other 被整个淘汰，而只出现 1 次的「李富贵」反被当成主角，人物谱不可用。
     window_size = max(1, len(head))
+    # 两条通道的章节门槛都按语料实际章数封顶（见 `_corpus_scoped_chapter_threshold`）：
+    # 统计通道数的是全书命中章，用全书章数封顶；在场通道数的是窗口内被钉证的章，
+    # 用窗口章数封顶。
+    min_statistical_chapters = _corpus_scoped_chapter_threshold(
+        max(2, round(window_size * BIBLE_STATISTICAL_MIN_CHAPTER_RATIO)), len(valid),
+    )
     statistical_retain = {
         appellation
         for appellation in verified_counts
@@ -3310,8 +3329,7 @@ async def _recurring_character_names(
         if personhood_by_appellation.get(appellation) == "person"
         and appellation not in ambiguous_appellations
         and mention_counts.get(appellation, 0) >= BIBLE_STATISTICAL_MIN_MENTIONS
-        and chapter_counts.get(appellation, 0)
-        >= max(2, round(window_size * BIBLE_STATISTICAL_MIN_CHAPTER_RATIO))
+        and chapter_counts.get(appellation, 0) >= min_statistical_chapters
     }
     # 通道 A 要的是「复现人物」（本函数名即 recurring），所以在场证据必须跨章：
     # 全部挤在同一章说明这个人在那一章之外没有存在感，而人物谱的作用域是全书。
@@ -3319,12 +3337,17 @@ async def _recurring_character_names(
     # 在场证据全在第 2 章，靠通道 A 建了正式角色卡；它随后被映射器裸命中，把整集
     # 映射卡死在「称谓未逐字出现在本集原文」的反幻觉闸上，且重试必然复现。
     # 漏判不是永久损失：真在某一章挑大梁的角色由分镜阶段的按集新角色发现补建卡。
+    # 语料本身只有一章时「跨章」这个维度不存在，门槛退到 1 章，把关交给条数门槛
+    # （BIBLE_RECURRING_MIN_ONSTAGE_QUOTES）和资格裁决；此时仍要求至少有一章被
+    # 钉证，钉不住章号的证据照旧不计。
+    min_onstage_chapters = _corpus_scoped_chapter_threshold(
+        BIBLE_RECURRING_MIN_ONSTAGE_CHAPTERS, len(window_chapters_by_idx),
+    )
     onstage_recurring = {
         appellation
         for appellation, count in verified_counts.items()
         if count >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
-        and len(verified_chapters.get(appellation, ()))
-        >= BIBLE_RECURRING_MIN_ONSTAGE_CHAPTERS
+        and len(verified_chapters.get(appellation, ())) >= min_onstage_chapters
     }
     ranked = [
         (

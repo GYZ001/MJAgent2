@@ -380,6 +380,85 @@ def test_onstage_evidence_stuck_in_one_chapter_is_not_a_recurring_character(monk
     assert "孟浩" in admitted, "跨章复现的角色必须留下"
 
 
+def test_single_chapter_corpus_still_produces_a_verified_roster(monkeypatch) -> None:
+    """短篇被切成一章时，跨章门槛必须按语料实际章数封顶，否则名单结构上必空。
+
+    真实故障（proj_177d147e16c7《王六郎》，2944 字自动切分成 1 章）：3 个候选、
+    7 条申报证据里有 4 条同时通过结构闸与在场裁决闸，必收名单仍是 0 条，人物谱
+    以「人物点名未产出任何经原文核验的角色候选」整体失败。通道 A 要证据跨 2 章、
+    通道 C 要命中覆盖 2 章，而全书只有 1 章——判据挂在了语料被切成几章上，不挂在
+    「这个人是不是反复登场」上，重试多少次都必然复现。
+    """
+    import asyncio
+    import json
+
+    from app import stages
+    from app.harness import model_gateway
+
+    chapters = [{
+        "idx": 1,
+        "title": "第1段（自动切分）",
+        "content": (
+            "有个姓许的人，家住淄川城北郊，以捕鱼为业。一天夜里，许某正在独自饮酒。"
+            "王六郎走来，在他身旁徘徊。\n\n"
+            "许某让他来喝，慷慨地与他一同对饮。许某举网一捞，捕到了好几条鱼。"
+            "王六郎替许某把鱼赶来。"
+        ),
+    }]
+
+    async def fake_chat(_messages, **_kwargs):
+        return json.dumps({
+            "candidates": [
+                {
+                    "primary_appellation": "许某", "formal_name": "",
+                    "onstage_evidence": [
+                        {"chapter_index": 1, "quote": "一天夜里，许某正在独自饮酒。"},
+                        {"chapter_index": 1, "quote": "许某让他来喝，慷慨地与他一同对饮。"},
+                    ],
+                },
+                {
+                    "primary_appellation": "王六郎", "formal_name": "",
+                    "onstage_evidence": [
+                        {"chapter_index": 1, "quote": "王六郎走来，在他身旁徘徊"},
+                        {"chapter_index": 1, "quote": "王六郎替许某把鱼赶来。"},
+                    ],
+                },
+            ],
+        }, ensure_ascii=False)
+
+    async def fake_chat_structured(_messages, **kwargs):
+        model_type = kwargs["model_type"]
+        return model_type(verdict="onstage", supporting_segment_index=1)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+
+    # 修复前的判据：门槛不按语料封顶，写死要跨 2 章。用独立副本跑红，不回退线上代码。
+    with monkeypatch.context() as legacy:
+        legacy.setattr(
+            stages, "_corpus_scoped_chapter_threshold",
+            lambda threshold, available_chapters: threshold,
+        )
+        assert asyncio.run(stages._recurring_character_names(chapters)) == [], (
+            "这条断言描述的是修复前的行为：单章语料必然产出空名单"
+        )
+
+    admitted = [item[0] for item in asyncio.run(stages._recurring_character_names(chapters))]
+    assert admitted == ["王六郎", "许某"] or admitted == ["许某", "王六郎"], admitted
+
+
+def test_corpus_scoped_chapter_threshold_only_relaxes_short_corpora() -> None:
+    """封顶只在语料章数不够时生效；章数够的语料上原门槛一字不改。"""
+    from app import stages
+
+    assert stages._corpus_scoped_chapter_threshold(2, 1) == 1
+    assert stages._corpus_scoped_chapter_threshold(2, 2) == 2
+    assert stages._corpus_scoped_chapter_threshold(2, 20) == 2
+    assert stages._corpus_scoped_chapter_threshold(3, 1616) == 3
+    # 章数为 0（语料为空）不该退化成 0 门槛：至少要有一章被钉证。
+    assert stages._corpus_scoped_chapter_threshold(2, 0) == 1
+
+
 def test_recurring_character_names_structural_gate_rejects_each_failure_mode(monkeypatch) -> None:
     """结构闸 G1-G3 逐条独立核验：引句不是原文逐字子串（G2）、称呼不在引句里（G3）、
     章节号落在统计窗口之外（G1）——任一不满足直接丢弃该条证据，不发起裁决调用
