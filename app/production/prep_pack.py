@@ -4056,6 +4056,15 @@ async def _resolve_assets(
             skip_character_names, character_rename, non_person_names = (
                 _character_discovery_dispositions(discovery_result)
             )
+            # discovery 就地补录人物谱（_discover_new_characters ->
+            # ensure_cards_for_text 用同一个 conn 建卡建图），而函数开头那份
+            # bible 是本次 _resolve_assets 开跑时读的，看不到刚补进去的人。
+            # 下面的候选判别拿它构造候选集、pass2 拿它查别名，用陈旧快照会把
+            # 刚补录的角色排除在候选之外：真实事故里王有材 17:59:30 建卡完成，
+            # 18:00:30 的候选判别候选集仍是「孟浩、小虎、许清」，系统于是拿
+            # 「王有材」这个标签去问模型"他是这三个里的哪一个"，模型只能答
+            # "都不是"，本人反倒落进群演。
+            bible = _load_project_bible(conn, project_id)
             newly_added_character_names = frozenset(
                 str(item.get("name") or "").strip()
                 for item in (discovery_result.get("added") or [])
@@ -4077,8 +4086,24 @@ async def _resolve_assets(
             # may have just committed a portrait under this exact raw name,
             # e.g. a genuinely new character discovery carded this call; that
             # must resolve normally, not get swept into the fallback).
+            bible_character_names = {character.name for character in bible.characters}
             for name in unresolved_chars:
-                if name in skip_character_names or name in character_rename or name in errored_names:
+                if name in character_rename or name in errored_names:
+                    continue
+                if name in skip_character_names:
+                    # discovery 判了「无需卡」（群演/仅被引用）。这条判据不看
+                    # 它的结论字段，只看产物信号：人物谱在册 + 本集有可绑定的
+                    # 定妆照。两条同时成立就说明这是有名有姓的具名角色，
+                    # discovery 判错了，必须走具名解析而不是落群演——真实事故：
+                    # 王有材人物谱在册、定妆照已生成，仍被判 functional_identity
+                    # 扫进 functional_extras。discovery 明确判定的非人物
+                    # （宗门/法器/笔名）不在此列，它们本就不该绑定到任何真人。
+                    if (
+                        name not in non_person_names
+                        and name in bible_character_names
+                        and _resolve_portrait_id(conn, project_id, name, episode_no)
+                    ):
+                        skip_character_names.discard(name)
                     continue
                 if _resolve_portrait_id(conn, project_id, name, episode_no):
                     continue

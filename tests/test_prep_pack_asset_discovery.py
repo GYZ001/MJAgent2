@@ -611,6 +611,80 @@ def test_skipped_not_person_after_discovery_needs_no_portrait(monkeypatch):
     assert functional_extras == []
 
 
+def test_discovery_functional_verdict_yields_to_carded_bible_character(monkeypatch):
+    """discovery 判 functional_identity，但同一次调用里它自己已经把这个人补录
+    进人物谱并生成了定妆照——产物信号（谱内具名 + 本集有可绑定定妆照）压过那
+    句判词，该提及必须走具名解析，不得落群演。
+
+    真实事故（proj_195be7df1fd6 EP1「王有材」）：人物谱重生成后王有材一度不在
+    谱内，映射台 pass1 解析不到他，discovery 判 functional_identity 的同时补录
+    建卡（17:59:30 建卡完成）。旧代码里 `if name in skip_character_names:
+    continue` 排在"已建卡就正常解析"这道救援之前，救援永远执行不到；一分钟后
+    的候选判别又拿开跑时的旧 bible 快照构造候选集（「孟浩、小虎、许清」），把
+    「王有材」这个标签拿去问模型"他是这三个里的哪一个"，模型只能答"都不是"，
+    本人反倒落进 functional_extras。
+    """
+    conn = _make_conn()
+
+    async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        # 真实 ensure_cards_for_text 用同一个 conn 就地补录人物谱并建定妆照。
+        conn.execute(
+            "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+            "VALUES ('cp_wyc','p1','王有材',1,NULL)"
+        )
+        _seed_bible_characters(conn, "p1", [_bible_character("王有材")])
+        return {
+            "added": [], "skipped": [],
+            "resolutions": [{
+                "source_label": "王有材", "canonical_name": "王有材",
+                "resolution": "functional_identity",
+            }],
+            "errors": [], "warnings": [],
+        }
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    events = [_event("ev_001", characters=[{"display_name": "王有材", "is_background_extra": False}])]
+    characters, _scene_list, _props, functional_extras, errors, _stats, *_rest = _resolve(
+        conn, events=events, source_text="王有材站在半山腰那里。",
+    )
+
+    assert errors == []
+    assert functional_extras == []
+    assert [c["display_name"] for c in characters] == ["王有材"]
+    assert characters[0]["portrait_id"] == "cp_wyc"
+    assert characters[0]["identity_id"] == "bible:王有材"
+
+
+def test_discovery_non_person_skip_survives_carded_namesake(monkeypatch):
+    """上一条的边界：discovery 明确判「非人」的标签，即使人物谱里恰好有同名
+    具名角色且有定妆照，也不得被救回具名路线——宗门/器物不该绑定到任何真人。"""
+    conn = _make_conn()
+
+    async def fake_not_person(project_id, episode_no, source_text, bible, *, generate_portraits=True):
+        conn.execute(
+            "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+            "VALUES ('cp_ns','p1','天启宗',1,NULL)"
+        )
+        _seed_bible_characters(conn, "p1", [_bible_character("天启宗")])
+        return {
+            "added": [], "resolutions": [],
+            "skipped": [{"status": "skipped_not_person", "name": "天启宗", "reason": "宗门非人"}],
+            "errors": [], "warnings": [],
+        }
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_not_person)
+    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    events = [_event("ev_001", characters=[{"display_name": "天启宗", "is_background_extra": False}])]
+    characters, _scene_list, _props, functional_extras, errors, _stats, *_rest = _resolve(
+        conn, events=events, source_text="天启宗坐落在山中。",
+    )
+
+    assert errors == []
+    assert characters == []
+    assert functional_extras == []
+
+
 def test_alias_rename_after_discovery_resolves_to_real_name(monkeypatch):
     """事件链原始提及是称谓，发现机制确认了背后的真名后，manifest 必须落到
     真名已有的 portrait 上（不能因为字面量不同继续报未解析）。"""
