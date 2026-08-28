@@ -656,12 +656,17 @@ async def test_demonstrative_description_is_not_kept_as_character(monkeypatch) -
 
 
 def _wang_liulang_chapter() -> str:
-    """《王六郎》骨架：主角全篇只以代称「许某」出现，另有两个真正的路人称呼。"""
+    """《王六郎》骨架：主角全篇只以代称「许某」出现，另有两个真正的路人称呼。
+
+    各称呼的出现次数贴着真实语料来（许某 34、王六郎 25、妇人 2、店主人 1），
+    这道闸比的是相对规模，骨架里的比例失真会让测试测不到真实判据。
+    """
     lines = ["有个姓许的人，家住淄川城北郊，以捕鱼为业。"]
     lines += [f"许某在河边撒网第{i}回，独自饮酒。" for i in range(1, 31)]
+    lines += ["许某让他来喝，慷慨地与他一同对饮。", "许某回家以后，家境稍稍富裕。"]
+    lines += ["年轻人回答：‘我姓王，没有表字，叫我王六郎就好。’"]
+    lines += [f"王六郎与他对饮第{i}回，谈笑甚欢。" for i in range(1, 25)]
     lines += [
-        "一天夜里，有个年轻人走来，在他身旁徘徊。",
-        "年轻人回答：‘我姓王，没有表字，叫我王六郎就好。’",
         "果然，有个妇人抱着婴儿走来；来到河边，她失足掉进水中。",
         "那妇人浑身淋漓地攀上河岸，抱起孩子径直离开了。",
         "店主人吃惊地问：‘客人莫非姓许？’",
@@ -727,8 +732,13 @@ async def test_lead_who_only_ever_has_a_referential_name_survives_resolution(
     assert "店主人" not in kept
 
 
-def test_standalone_presence_threshold_separates_lead_from_walk_ons() -> None:
-    """保留判据只看全书提及规模，与统计准入通道同一门槛。"""
+def test_standalone_gate_measures_against_the_roster_not_a_fixed_number() -> None:
+    """保留判据是「不低于 specific 里最常见的那个」，不是任何绝对次数。
+
+    绝对门槛在长篇必然失效：《我欲封天》1616 章里「绿袍男子」498 次、覆盖 138 章，
+    比真配角「王有材」的 58 次还多，任何低到能救《王六郎》许某（34 次）的门槛都会
+    把类别称谓一并放回来。
+    """
     chapter = _wang_liulang_chapter()
     lead = stages._RosterCandidate(
         primary_appellation="许某", aliases=["姓许的人"], name_form="referential",
@@ -736,15 +746,33 @@ def test_standalone_presence_threshold_separates_lead_from_walk_ons() -> None:
     walk_on = stages._RosterCandidate(
         primary_appellation="妇人", aliases=["女子"], name_form="referential",
     )
-    assert stages._roster_candidate_stands_alone(lead, {1: chapter}) is True
-    assert stages._roster_candidate_stands_alone(walk_on, {1: chapter}) is False
-    # 《我欲封天》的反例：类别称谓出现 6 次，仍在门外。
+    specific = [stages._RosterCandidate(
+        primary_appellation="王六郎", name_form="personal_name",
+    )]
+    assert stages._roster_candidate_stands_alone(lead, specific, {1: chapter}) is True
+    assert stages._roster_candidate_stands_alone(walk_on, specific, {1: chapter}) is False
+
+    # 长篇反例：类别称谓的绝对次数远超短篇主角，但相对主角差几个数量级。
+    long_form = {1: "绿袍男子" * 498 + "孟浩" * 55137 + "王有材" * 58}
     green = stages._RosterCandidate(
         primary_appellation="绿袍男子", name_form="referential",
     )
+    lead_of_long_form = [stages._RosterCandidate(
+        primary_appellation="孟浩", name_form="personal_name",
+    )]
     assert stages._roster_candidate_stands_alone(
-        green, {1: "绿袍男子" * 6},
+        green, lead_of_long_form, long_form,
+    ) is False, "498 次的类别称谓不能因为绝对次数够多就回到候选里"
+    # 同一把尺下，真配角同样进不来——这条通道只救「比主角还常见」的极端情形。
+    minor = stages._RosterCandidate(
+        primary_appellation="王有材", name_form="referential",
+    )
+    assert stages._roster_candidate_stands_alone(
+        minor, lead_of_long_form, long_form,
     ) is False
+
+    # specific 为空时没有比较基准，不能凭空放行。
+    assert stages._roster_candidate_stands_alone(lead, [], {1: chapter}) is False
 
 
 @pytest.mark.asyncio

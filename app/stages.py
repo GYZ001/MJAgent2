@@ -2153,10 +2153,22 @@ def _roster_label_needs_identity_resolution(
     )
 
 
-def _roster_candidate_stands_alone(
+def _roster_appellation_mentions(
     candidate: "_RosterCandidate", chapters_by_idx: dict[int, str],
+) -> int:
+    """这个候选的全部称呼在原文里的合计命中数。"""
+    terms = _candidate_appellations(candidate)
+    if not terms:
+        return 0
+    return sum(text.count(term) for text in chapters_by_idx.values() for term in terms)
+
+
+def _roster_candidate_stands_alone(
+    candidate: "_RosterCandidate",
+    specific: list["_RosterCandidate"],
+    chapters_by_idx: dict[int, str],
 ) -> bool:
-    """归并不成立时，这个称呼在全书是否已有独立存在规模。
+    """归并不成立时，这个称呼是不是「比名单里最常见的那个还常见」。
 
     身份归一裁决回答的只是「这个称呼能不能并到名单里另一个实体身上」。它答不出来
     说明并不过去，不说明称呼背后没有人——把这两件事当成一件，会让「没有正式姓名、
@@ -2168,17 +2180,27 @@ def _roster_candidate_stands_alone(
     整个丢弃，必收名单只剩 1 人；人物谱里那张「许」卡是主生成模型事后自造的单字名，
     拿它做子串检索会命中「也许」「许多」「许姓」。
 
-    判据取全书提及规模，与统计准入通道同一门槛（`BIBLE_STATISTICAL_MIN_MENTIONS`）：
-    达标只是把它放回普通候选，能不能进必收名单仍由三条准入通道各自判。同一篇里
-    「妇人」6 次、「店主人」3 次照旧删除；《我欲封天》「绿袍男子」6 次也仍在门外。
+    判据取「不低于 specific 里的最大提及数」，而不是任何绝对次数门槛。绝对门槛在
+    这里必然失效：类别称谓在长篇里比真配角出现得更多——《我欲封天》1616 章语料中
+    「绿袍男子」498 次 / 覆盖 138 章、「精明男子」503 次，都远高于真角色「王有材」
+    的 58 次，任何够低到能救《王六郎》许某（34 次）的门槛都会把它们一并放回来。
+    相对位置才分得开：许某比名单里最常见的「王六郎」（25 次）还常见，只可能是被
+    误删的主角；绿袍男子相对孟浩的 55137 次差三个数量级，仍是类别称谓。
+
+    这条通道刻意保守——它只救「比主角还常见却被整个删掉」这一种极端情形。规模不
+    及主角的第二主角救不回来，那是漏救；放错方向会让类别称谓涌进人物谱，代价大得多。
+    比较取严格大于：平局在小样本里太廉价（两个各出现一次的称呼谁也不比谁常见），
+    放行平局等于把这道闸开成常开。
     """
-    terms = _candidate_appellations(candidate)
-    if not terms:
+    if not specific:
         return False
-    mentions = sum(
-        text.count(term) for text in chapters_by_idx.values() for term in terms
+    mentions = _roster_appellation_mentions(candidate, chapters_by_idx)
+    if mentions <= 0:
+        return False
+    strongest = max(
+        _roster_appellation_mentions(item, chapters_by_idx) for item in specific
     )
-    return mentions >= BIBLE_STATISTICAL_MIN_MENTIONS
+    return mentions > strongest
 
 
 def _candidate_appellations(candidate: _RosterCandidate) -> set[str]:
@@ -2433,7 +2455,7 @@ async def _resolve_generic_character_candidates(
         if not evidence_blocks:
             # 卷宗都建不出来就没法问归一，但「问不成」同样不是「这个人不存在」，
             # 判据与归一失败那条路径共用（见 `_roster_candidate_stands_alone`）。
-            if _roster_candidate_stands_alone(candidate, chapters_by_idx):
+            if _roster_candidate_stands_alone(candidate, specific, chapters_by_idx):
                 kept.append(candidate)
             continue
         prompt = f"""任务：判断描述性称呼「{label}」是否是候选实体名单中的同一个人物。
@@ -2493,7 +2515,7 @@ async def _resolve_generic_character_candidates(
         if item is None:
             # 归并不成立：并不到别人身上的称呼，只有在全书没有独立存在规模时才是
             # 泛称；够规模的放回普通候选，由三条准入通道决定去留。
-            if _roster_candidate_stands_alone(asked, chapters_by_idx):
+            if _roster_candidate_stands_alone(asked, specific, chapters_by_idx):
                 kept.append(asked)
             continue
         candidate, resolution = item
