@@ -523,6 +523,72 @@ def test_spread_named_segments_covers_first_hit_and_later_chapters() -> None:
     assert picked == {34, 37, 50}
 
 
+def test_true_name_dossier_batches_cover_a_chapter_single_sampling_skips() -> None:
+    """揭示只在一章时，单批均匀取样会跳过它；分批交错必须把它铺进来。"""
+    chapters = {index: f"许师姐第{index}次出现。" for index in range(1, 69)}
+    chapters[38] = "「许师姐。」孟浩抱拳一拜。这女子正是许清，如她的名字一样。"
+    single = stages._spread_named_segments(["许师姐"], chapters, limit=12)
+    assert 38 not in {item["chapter_idx"] for item in single}
+
+    batches = stages._roster_true_name_dossier_batches(["许师姐"], chapters)
+    covered = {item["chapter_idx"] for batch in batches for item in batch}
+    assert 38 in covered
+    # 各批互不重叠，合起来才是更大的跨度覆盖。
+    seen: set[int] = set()
+    for batch in batches:
+        current = {item["chapter_idx"] for item in batch}
+        assert not (current & seen)
+        seen |= current
+
+
+@pytest.mark.asyncio
+async def test_true_name_pins_against_any_confirmed_appellation(monkeypatch) -> None:
+    """揭示章原文只写了别名时，钉证要认这个别名，不能硬要求主名逐字出现。"""
+    reveal = "他有个师弟叫李富贵，你放心。胖子当时就在旁边。"
+
+    async def fake_structured(*_args, **_kwargs):
+        return stages._RosterTrueNameResolution(
+            verdict="revealed", true_name="李富贵",
+            supporting_chapter_index=1070, supporting_quote="他有个师弟叫李富贵",
+        )
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
+    resolved = await stages._discover_roster_true_names(
+        [stages._RosterCandidate(primary_appellation="小胖子", aliases=["胖子"])],
+        [{"idx": 1070, "content": reveal}],
+        project_id="p1",
+    )
+    assert resolved[0].formal_name == "李富贵"
+    assert "小胖子" in resolved[0].aliases
+
+
+@pytest.mark.asyncio
+async def test_true_name_tries_next_batch_when_one_batch_fails(monkeypatch) -> None:
+    """一批卷宗答不出不能判死这个人，还有别的批要读。"""
+    chapters = [{"idx": index, "content": f"许师姐第{index}次出现。"} for index in range(1, 69)]
+    chapters[37] = {"idx": 38, "content": "「许师姐。」这女子正是许清，如她的名字一样。"}
+    calls = 0
+
+    async def fake_structured(messages, **_kwargs):
+        nonlocal calls
+        calls += 1
+        prompt = messages[-1]["content"]
+        if "许清" not in prompt:
+            raise ValueError("坏 JSON")
+        return stages._RosterTrueNameResolution(
+            verdict="revealed", true_name="许清",
+            supporting_chapter_index=38, supporting_quote="这女子正是许清",
+        )
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
+    resolved = await stages._discover_roster_true_names(
+        [stages._RosterCandidate(primary_appellation="许师姐")], chapters, project_id="p1",
+    )
+    assert resolved[0].formal_name == "许清"
+    assert "许师姐" in resolved[0].aliases
+    assert calls > 1
+
+
 def test_pin_roster_name_accepts_unique_one_char_source_variant() -> None:
     assert stages._pin_roster_name_to_source("王有材", ["王有材走过来。"]) == "王有材"
     assert stages._pin_roster_name_to_source("陆煊", ["陆烘冷冷看了他一眼。"]) == "陆烘"

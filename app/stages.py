@@ -2543,28 +2543,37 @@ def _roster_personhood_dossier(
     return blocks
 
 
+def _named_hit_chapters(names: list[str], chapters_by_idx: dict[int, str]) -> list[int]:
+    anchors = [value.strip() for value in names if value and value.strip()]
+    if not anchors:
+        return []
+    return [
+        chapter_idx for chapter_idx in sorted(chapters_by_idx)
+        if any(anchor in (chapters_by_idx.get(chapter_idx) or "") for anchor in anchors)
+    ]
+
+
 def _spread_named_segments(
     names: list[str], chapters_by_idx: dict[int, str], *, limit: int,
-    segment_max_chars: int = 240,
+    segment_max_chars: int = 240, offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """检索含这些称呼的原文段，跨全部章节均匀取样，首次出现的章节必定入选。
+    """检索含这些称呼的原文段，跨全部章节交错取样。
 
-    程序只负责把上下文找齐给模型，不在这里做任何关于这个人的判断。首次出现的
-    章节通常带身份交代，均匀取样保证后文的不同场合也进得来。
+    程序只负责把上下文找齐给模型，不在这里做任何关于这个人的判断。命中章按
+    固定步长挑选，offset 让相邻的几批取到互不重叠的章，多批合起来就能把
+    跨度铺满——一个只在某一章交代的身份，靠单批均匀取样很容易正好被跳过。
     """
     anchors = [value.strip() for value in names if value and value.strip()]
     if not anchors or limit <= 0:
         return []
-    hit_chapters = [
-        chapter_idx for chapter_idx in sorted(chapters_by_idx)
-        if any(anchor in (chapters_by_idx.get(chapter_idx) or "") for anchor in anchors)
-    ]
+    hit_chapters = _named_hit_chapters(anchors, chapters_by_idx)
     if not hit_chapters:
         return []
     if len(hit_chapters) > limit:
-        step = len(hit_chapters) / limit
-        picked = [hit_chapters[min(len(hit_chapters) - 1, int(i * step))] for i in range(limit)]
-        hit_chapters = list(dict.fromkeys(picked))
+        stride = max(1, math.ceil(len(hit_chapters) / limit))
+        hit_chapters = hit_chapters[offset % stride::stride][:limit]
+    elif offset:
+        return []
     blocks: list[dict[str, Any]] = []
     for chapter_idx in hit_chapters:
         chapter_text = chapters_by_idx.get(chapter_idx) or ""
@@ -2673,24 +2682,27 @@ supporting_chapter_index 必须是卷宗里出现过的数字章号，例如 1�
     return [item for item in judged if item is not None]
 
 
-def _roster_true_name_dossier(
-    names: list[str], chapters: list[dict], *, limit: int = 8,
-) -> list[dict[str, Any]]:
-    """真名裁决的卷宗：含这些称呼的原文段，跨全书取样。
+BIBLE_TRUE_NAME_DOSSIER_SEGMENTS = 12
+BIBLE_TRUE_NAME_DOSSIER_BATCHES = 4
 
-    姓名可能在首次登场时就交代，也可能拖到很后面才揭示，所以既要首个命中章
-    也要后文跨度，不能只给窗口之后的段。
+
+def _roster_true_name_dossier_batches(
+    names: list[str], chapters_by_idx: dict[int, str],
+    *, limit: int = BIBLE_TRUE_NAME_DOSSIER_SEGMENTS,
+    batches: int = BIBLE_TRUE_NAME_DOSSIER_BATCHES,
+) -> list[list[dict[str, Any]]]:
+    """真名裁决的卷宗，切成几批互不重叠的取样。
+
+    姓名往往只在一两章里交代过，一本上千章的书按单批均匀取样几乎必然跳过
+    那一章（真实故障：「许师姐→许清」的揭示在第 37 章，八段取样落在 29 和 70
+    之间）。分批交错让模型有机会读到跨度里的其它章，读到就停，不必跑满。
     """
-    chapters_by_idx: dict[int, str] = {}
-    for chapter in chapters:
-        text = chapter.get("content") or ""
-        if not text:
-            continue
-        try:
-            chapters_by_idx[int(chapter.get("idx"))] = text
-        except (TypeError, ValueError):
-            continue
-    return _spread_named_segments(names, chapters_by_idx, limit=limit)
+    return [
+        batch for offset in range(max(1, batches))
+        if (batch := _spread_named_segments(
+            names, chapters_by_idx, limit=limit, offset=offset,
+        ))
+    ]
 
 
 async def _discover_roster_true_names(
@@ -2710,16 +2722,11 @@ async def _discover_roster_true_names(
     """
     chapters_by_idx = _chapters_by_idx(chapters)
 
-    async def _discover(candidate: _RosterCandidate) -> _RosterCandidate:
+    async def _judge_batch(
+        candidate: _RosterCandidate, anchors: list[str], dossier: list[dict[str, Any]],
+    ) -> _RosterCandidate | None:
+        """一批卷宗的裁决：钉证过了就返回带真名的候选，否则 None 让上层换下一批。"""
         appellation = (candidate.primary_appellation or "").strip()
-        if not appellation:
-            return candidate
-        claimed = (candidate.formal_name or "").strip()
-        dossier = _roster_true_name_dossier(
-            [appellation, claimed] if claimed else [appellation], chapters,
-        )
-        if not dossier:
-            return candidate.model_copy(update={"formal_name": ""}) if claimed else candidate
         catalog = "\n\n".join(
             f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
             for item in dossier
@@ -2761,8 +2768,8 @@ supporting_chapter_index 必须是卷宗里出现过的章号；supporting_quote
                 ),
                 timeout=BIBLE_SMALL_VERDICT_TIMEOUT_S,
             )
-        except Exception:  # noqa: BLE001 - 裁决没跑成就退回称呼，不留未复核的真名
-            return candidate.model_copy(update={"formal_name": ""}) if claimed else candidate
+        except Exception:  # noqa: BLE001 - 这批没跑成就换下一批，别把整个候选判死
+            return None
         true_name = (resolution.true_name or "").strip()
         chapter_text = chapters_by_idx.get(resolution.supporting_chapter_index, "")
         quote = (resolution.supporting_quote or "").strip()
@@ -2772,27 +2779,42 @@ supporting_chapter_index 必须是卷宗里出现过的章号；supporting_quote
             if (item.primary_appellation or "").strip()
             and (item.primary_appellation or "").strip() != appellation
         }
+        # 钉证的锚点是这个候选的任一已确认称呼，与检索卷宗时用的口径一致：
+        # 卷宗段可能来自只写了绰号的那一章，硬要求主名逐字出现会把模型答对的
+        # 真名判死（真实故障：「小胖子」的揭示章原文只写「胖子」）。
         if (
             resolution.verdict != "revealed"
             or not true_name
-            or true_name == appellation
+            or true_name in {*anchors, appellation}
             or true_name in occupied_elsewhere
             or resolution.supporting_chapter_index not in valid_chapters
             or true_name not in chapter_text
-            or appellation not in chapter_text
+            or not any(anchor in chapter_text for anchor in anchors)
             or (quote and quote not in chapter_text)
             or (quote and true_name not in quote)
         ):
-            # 点名申报过真名却复核不过，说明那个串没被原文证明是这个人的姓名。
-            return candidate.model_copy(update={"formal_name": ""}) if claimed else candidate
-        aliases = list(dict.fromkeys([
-            *candidate.aliases, appellation,
-        ]))
+            return None
+        aliases = list(dict.fromkeys([*candidate.aliases, appellation]))
         return candidate.model_copy(update={
             "formal_name": true_name,
             "aliases": [value for value in aliases if value and value != true_name],
             "personhood": "person",
         })
+
+    async def _discover(candidate: _RosterCandidate) -> _RosterCandidate:
+        appellation = (candidate.primary_appellation or "").strip()
+        if not appellation:
+            return candidate
+        claimed = (candidate.formal_name or "").strip()
+        # 点名申报过真名却一批都没复核过，说明那个串没被原文证明是这个人的姓名。
+        unconfirmed = candidate.model_copy(update={"formal_name": ""}) if claimed else candidate
+        anchors = [value for value in dict.fromkeys([appellation, *candidate.aliases]) if value]
+        batches = _roster_true_name_dossier_batches(anchors, chapters_by_idx)
+        for dossier in batches:
+            resolved = await _judge_batch(candidate, anchors, dossier)
+            if resolved is not None:
+                return resolved
+        return unconfirmed
 
     return list(await asyncio.gather(*(_discover(item) for item in candidates)))
 
