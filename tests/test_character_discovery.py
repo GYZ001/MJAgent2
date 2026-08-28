@@ -9084,6 +9084,47 @@ def test_gateway_tags_corrupt_and_schema_invalid_responses_differently(
     assert shape_error.value.unparseable is False
 
 
+def test_container_left_open_by_the_model_counts_as_undelivered(monkeypatch) -> None:
+    """模型没闭合容器就停笔时，本地补出来的对象不算它交付过的答案。
+
+    真实故障（run_690cebdd45a7 / ep_bf9051d167a7《我欲封天》EP1，provider_calls
+    19133）：模型 finish_reason=stop、写了 118 token 就停笔，末尾三层容器全部
+    悬空。extract_json 把缺的 ] } 补齐，payload 于是非 None、unparseable=False，
+    专为这个形态写的重采样反而永远不触发（IDENTITY_RESAMPLE_FORMAT_REMINDER
+    的注释逐字写着它针对 "stopped ... before closing every open container"），
+    整集映射当场失败，一次重试都没发起。
+
+    判据挂在"模型交付了什么"上：语法残缺就是没交付完整答案。能不能从残骸里
+    拼出一个 dict 是我们这边的补救能力，不构成它交付质量的证明。
+    """
+    class _Shape(BaseModel):
+        name: str
+        kind: str
+
+    async def stopped_mid_object(*_args, **_kwargs):
+        # 与事故同形：写完一个字段就停笔，两层容器悬空，补齐后仍缺必填字段。
+        return '{"decisions": [{"name": "孟浩"'
+
+    class _Wire(BaseModel):
+        decisions: list[_Shape]
+
+    monkeypatch.setattr(model_gateway, "chat", stopped_mid_object)
+    with pytest.raises(model_gateway.StructuredFormatError) as truncated:
+        asyncio.run(model_gateway.chat_structured(
+            [{"role": "user", "content": "p"}],
+            model_type=_Wire,
+            validate=lambda _value: [],
+            operation_id="op-truncated",
+            max_tokens=256,
+            format_retry_limit=0,
+            semantic_retry_limit=0,
+        ))
+    assert truncated.value.unparseable is True, (
+        "容器悬空的响应必须走重采样通道，不能因为本地补齐成功就当成"
+        "「模型给了个错答案」而一次机会都不给"
+    )
+
+
 def _future_identity_catalog(prompt: str, marker: str) -> list[dict]:
     """Return one backend-owned catalog exactly as the provider receives it."""
     body = prompt.split(marker, 1)[1]

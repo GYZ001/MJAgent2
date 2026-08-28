@@ -25,12 +25,13 @@ class StructuredFormatError(StructuredOutputError):
     """The response could not be turned into the contracted object.
 
     ``unparseable`` separates the two very different causes this covers: True
-    means no JSON object was ever decoded (the provider emitted corrupt or
-    truncated bytes and never delivered an authored answer), False means a JSON
-    object was decoded but disagrees with the schema (the provider *did* author
-    an answer, it is just the wrong one).  Callers under a no-retry contract use
-    that distinction: an undelivered answer may be resampled, a wrong answer
-    must not be.
+    means the provider never delivered a syntactically complete answer of its
+    own -- either nothing decoded at all, or the bytes were corrupt/truncated
+    and only became an object after local repair closed containers the model
+    left open.  False means a well-formed JSON object arrived and simply
+    disagrees with the schema (the provider *did* author an answer, it is just
+    the wrong one).  Callers under a no-retry contract use that distinction: an
+    undelivered answer may be resampled, a wrong answer must not be.
     """
 
     unparseable: bool = False
@@ -877,9 +878,16 @@ async def chat_structured(
                 error = StructuredFormatError(
                     f"{operation_id} 结构化输出失败：{detail}"
                 )
-                # ``payload`` is set only once a JSON object actually decoded,
-                # so its absence is exactly "no authored answer was delivered".
-                error.unparseable = payload is None
+                # "Did the provider deliver an authored answer?" is answered by
+                # what it actually emitted, not by what we could salvage from
+                # it.  ``payload is None`` covers the case where nothing decoded
+                # at all; ``repaired_locally`` covers the case where the bytes
+                # were syntactically broken and ``extract_json`` had to close
+                # containers the model never closed.  Both mean the same thing:
+                # there is no complete answer of the model's own authorship to
+                # preserve, so a resample is a real second chance rather than
+                # re-rolling a wrong answer until it passes.
+                error.unparseable = payload is None or repaired_locally
                 raise error from parse_error
             format_attempt += 1
             candidate_text = (
