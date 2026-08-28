@@ -29,7 +29,9 @@ _STAGE_KEY_LABELS: dict[str, str] = {
     "scene_bible": "场景设定",
     "scene_references": "场景参考图",
     "episode_mapping": "分集规划",
-    "screenplay": "剧本",
+    # stage_key 仍叫 screenplay，这条链路产出的是映射包；前端 ScriptPage 曾为此
+    # 加过 prepPackStatusMessage 全词替换兜底，这里报对了那层兜底就不再需要。
+    "screenplay": "映射包",
     "storyboard": "分镜",
     "storyboard_outline": "分镜大纲",
     "storyboard_shot": "分镜镜头",

@@ -267,8 +267,8 @@ const SYSTEM_SECTION_DESCRIPTIONS: Partial<Record<MonitorSection, string>> = {
 };
 const VALID_SECTIONS = new Set(SECTIONS.map((item) => item.key));
 const MODEL_ROWS: Array<{ key: ModelKind; label: string; note: string }> = [
-  { key: "text", label: "文本模型", note: "分集、剧本、分镜与文本修复" },
-  { key: "vlm", label: "视觉理解模型", note: "参考图评审与视频质检" },
+  { key: "text", label: "文本模型", note: "分集、映射包、分镜与文本修复" },
+  { key: "vlm", label: "视觉理解模型", note: "定妆照、场景图与关键帧质检" },
   { key: "video", label: "视频模型", note: "首尾帧、参考图与视频输入生成" },
   { key: "image", label: "图像模型", note: "Seedream 参考图 / 定妆照" },
 ];
@@ -331,7 +331,7 @@ const CALL_STATUS_LABELS: Record<string, string> = {
 const CALL_KIND_LABELS: Record<string, string> = {
   chat: "文本模型调用",
   vlm: "视觉模型调用",
-  vlm_qa: "视频质检",
+  vlm_qa: "画面质检",
   video_create: "创建视频任务",
   video_poll: "轮询视频结果",
   image_generate: "生成图片",

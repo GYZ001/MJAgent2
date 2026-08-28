@@ -188,7 +188,10 @@ _TRACE_WORKFLOW_LABELS = {
     "scene_bible": "场景设定",
     "scene_references": "场景参考图",
     "episode_mapping": "分集规划",
-    "screenplay": "剧本生成",
+    # workflow_type 仍叫 screenplay（app/domain/screenplay_ops.py 写入，改 key 会
+    # 让历史 workflow_runs 认不出来），但这条链路 48e01ff 之后产出的是映射包
+    # （episode_prep_pack），不再产出剧本。观测里必须报它现在实际在做的事。
+    "screenplay": "映射包生成",
     "storyboard": "分镜生成",
     "scene_generation": "关键帧生成",
     "video_generation": "视频生成",
@@ -199,7 +202,10 @@ _TRACE_WORKFLOW_LABELS = {
 }
 _TRACE_CALL_LABELS = {
     "vlm": "理解画面内容",
-    "vlm_qa": "检查视频画面质量",
+    # 同一个 kind 覆盖定妆照质检、场景参考图质检、人物/场景多视角整包质检、关键帧
+    # 几何质检和视频抽帧质检（都走 app/hiagent.py 的 vlm_check）。写成"视频"会让
+    # 人物谱、定妆这些根本没有视频的阶段显示一个不存在的功能。
+    "vlm_qa": "检查画面质量",
     "video_create": "提交视频生成",
     "video_poll": "查询视频生成进度",
     "image": "生成图片",
@@ -313,7 +319,7 @@ def _trace_label(value: str | None, labels: dict[str, str], fallback: str) -> st
 def _trace_step_label(step_key: str | None, iteration_no: int | None = None) -> str:
     key = str(step_key or "")
     patterns = (
-        (r"screenplay\.iteration", "执行第{iteration}轮剧本生成"),
+        (r"screenplay\.iteration", "执行第{iteration}轮映射包生成"),
         (r"character_bible\.iteration", "执行第{iteration}轮人物设定生成"),
         (r"character_bible_roster\.iteration", "执行第{iteration}轮人物名单生成"),
         (r"scene_bible\.iteration", "执行第{iteration}轮场景设定生成"),
@@ -334,7 +340,7 @@ def _trace_step_label(step_key: str | None, iteration_no: int | None = None) -> 
 def _trace_step_description(step_key: str | None) -> str:
     key = str(step_key or "")
     if re.fullmatch(r"screenplay\.iteration", key):
-        return "生成或修复一版完整剧本候选"
+        return "生成或修复一版完整映射包候选"
     if re.fullmatch(r"character_bible\.iteration", key):
         return "生成或修复一版人物设定候选"
     if re.fullmatch(r"character_bible_roster\.iteration", key):

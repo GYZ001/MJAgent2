@@ -219,6 +219,11 @@ confirmation`）用的是同一套 `[STORYBOARD_PACK_*]` 标签、同一套判�
   定妆照/场景参考图质检请求"。前端个别旧标签（如模型分配表里"视觉理解模型"
   一行的 note、调用日志 `vlm_qa` 的显示名仍写着"视频质检"）是未清理的历史
   文案残留，不代表功能还在——本轮未触碰这些字符串。
+  **后续已清理（用户在观测里发现"检查视频画面质量"出现在根本没有视频的
+  人物谱/映射台阶段）**：`vlm_qa` 的显示名改为"检查画面质量"
+  （`app/observability/api.py`）、"画面质检"（`MonitorPage.tsx`），模型分配表
+  该行 note 改为"定妆照、场景图与关键帧质检"。kind 本身仍活着且未改名——它
+  覆盖定妆照、场景参考图、多视角整包与关键帧几何质检，只有视频那一路下线了。
 - **冷观众审读与一次观看校准（叙事权威链路的下游验证子系统）整体删除**：
   `app/narrative_review.py`、`app/narrative_calibration.py`、
   `app/domain/narrative_calibration_ops.py` 三个模块连同对应测试文件一并

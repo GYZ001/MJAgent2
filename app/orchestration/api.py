@@ -1003,7 +1003,9 @@ def decide_gate(artifact_id: str, body: dict = Body(...)):
             "current_decision": existing_dict["decision"],
         })
     domain_publish_labels = {
-        "episode_screenplay": "剧本台",
+        # 这条消息要把人指回能真正处理的页面，导航里现在只有「映射台」，
+        # 写「剧本台」等于把人晾在原地。
+        "episode_screenplay": "映射台",
         "storyboard": "分镜台",
     }
     domain_publish_label = domain_publish_labels.get(str(artifact["type"]))

@@ -126,7 +126,7 @@ function legacyNodeName(node: TraceNode, parentName?: string) {
   if (scene) return `生成第${scene[1]}个场景分镜`;
   const shot = node.name.match(/^storyboard_shot_(\d+)\.iteration$/);
   if (shot) return `生成第${shot[1]}镜分镜`;
-  if (node.name === "screenplay.iteration") return "执行剧本生成";
+  if (node.name === "screenplay.iteration") return "执行映射包生成";
   if (["文本模型调用", "模型调用"].includes(node.name))
     return parentName ? `为“${parentName}”生成业务内容` : "生成业务内容";
   if (/^[A-Za-z0-9_.:-]+$/.test(node.name)) {
