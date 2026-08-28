@@ -314,3 +314,78 @@ def test_relative_media_url_is_resolved_against_provider_origin() -> None:
         "/api/proxy/down?key=abc", "https://hia.example.com/api/aigw/v1")
     assert resolved == "https://hia.example.com/api/proxy/down?key=abc"
     assert hiagent._absolute_provider_url("https://cdn.example.com/image.png", "https://hia.example.com/v1") == "https://cdn.example.com/image.png"
+
+
+def _capability_settings(custom_models: list[dict], capabilities: dict[str, dict]):
+    store = {
+        "custom_models": json.dumps(custom_models),
+        "model_token_capabilities": json.dumps(capabilities),
+    }
+    return lambda key: store.get(key, "")
+
+
+def test_stale_default_probe_cache_cannot_override_configured_capability() -> None:
+    """兜底猜测不得盖掉运维显式填写的真实能力。
+
+    生产事故：glm-5.3-flash 的真实输出上限 131072 已在模型编辑里保存下来，
+    却被一条标着 default_128k_32k 的旧探测缓存按 32768 用。分镜台阶段二的思
+    考预留因此永远挤不进预算、整集截断失败，而 PUT 接口回显的是 131072，
+    界面上完全看不出异常。
+    """
+    from app.model_capabilities import active_model_token_limits
+
+    get_setting = _capability_settings(
+        [{
+            "id": "model_glm", "provider": "custom:model_glm", "model": "glm-5.3-flash",
+            "context_window_tokens": 1048576, "max_output_tokens": 131072,
+            "token_limits_source": "configured",
+        }],
+        {"model_glm": {
+            "context_window_tokens": 131072, "max_output_tokens": 32768,
+            "token_limits_source": "default_128k_32k",
+        }},
+    )
+
+    limits = active_model_token_limits("custom:model_glm", "glm-5.3-flash", get_setting)
+    assert limits["max_output_tokens"] == 131072
+    assert limits["token_limits_source"] == "configured"
+
+
+def test_fresh_provider_metadata_still_wins_over_saved_configuration() -> None:
+    """探测缓存本身有实据时仍然优先——这条规则只挡兜底猜测，不挡真凭据。"""
+    from app.model_capabilities import active_model_token_limits
+
+    get_setting = _capability_settings(
+        [{
+            "id": "model_x", "provider": "custom:model_x", "model": "some-model",
+            "context_window_tokens": 131072, "max_output_tokens": 65536,
+            "token_limits_source": "configured",
+        }],
+        {"model_x": {
+            "context_window_tokens": 200000, "max_output_tokens": 100000,
+            "token_limits_source": "provider_metadata",
+        }},
+    )
+
+    limits = active_model_token_limits("custom:model_x", "some-model", get_setting)
+    assert limits["max_output_tokens"] == 100000
+    assert limits["token_limits_source"] == "provider_metadata"
+
+
+def test_default_probe_cache_still_applies_when_nothing_else_is_evidenced() -> None:
+    """两边都没实据时保持原有行为，别把「挡兜底」升级成「丢掉兜底」。"""
+    from app.model_capabilities import active_model_token_limits
+
+    get_setting = _capability_settings(
+        [{
+            "id": "model_y", "provider": "custom:model_y", "model": "plain-model",
+        }],
+        {"model_y": {
+            "context_window_tokens": 131072, "max_output_tokens": 32768,
+            "token_limits_source": "default_128k_32k",
+        }},
+    )
+
+    limits = active_model_token_limits("custom:model_y", "plain-model", get_setting)
+    assert limits["max_output_tokens"] == 32768
+    assert limits["token_limits_source"] == "default_128k_32k"

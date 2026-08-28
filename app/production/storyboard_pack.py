@@ -252,6 +252,60 @@ SEGMENT_BATCH_TOKENS_PER_SEGMENT = 2400
 SEGMENT_BATCH_TOKENS_FLOOR = 8000
 
 
+class StoryboardPackBudgetError(RuntimeError):
+    """当前文本模型的输出预算装不下阶段二最小一批，发请求前就拦下。
+
+    拦是为了不白烧钱（实测那两次撞满的调用，供应商侧确实计了费），但拦住人
+    就必须给出路，所以消息里要说清三件事：谁不够、差多少、去动哪个旋钮。
+    最常见的成因不是模型真的弱，而是它的 ``max_output_tokens`` 还是系统在
+    探测不到能力时写下的兜底默认值（``token_limits_source=default_128k_32k``，
+    见 app/model_capabilities.py）——glm-5.3-flash 真实上限 131072，被兜底值
+    按 32768 用了。这种情况下把能力填对就能跑，所以要专门点出来，不能让人
+    以为只能换模型。
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        model_cap: int,
+        reserve: int,
+        needed: int,
+        provider: str | None,
+    ) -> None:
+        from app.db import get_setting
+        from app.model_capabilities import active_model_token_limits
+
+        source = ""
+        try:
+            source = str(
+                active_model_token_limits(
+                    provider or "", model, get_setting,
+                ).get("token_limits_source") or ""
+            )
+        except Exception:  # noqa: BLE001 取不到来源不该盖掉真正的预算错误
+            source = ""
+        remedy = (
+            "该模型的输出上限当前是系统探测不到能力时的兜底默认值，多半低于它的"
+            "真实能力，请到「系统设置 - 模型」里把这个模型的最大输出 token 填成"
+            "供应商文档给的真实值；"
+            if source == "default_128k_32k"
+            else "请为分镜台改配一个输出预算更大、或思考开销更小的文本模型；"
+        )
+        super().__init__(
+            f"文本模型 {model} 的输出预算装不下分镜台阶段二的最小一批："
+            f"输出上限 {model_cap} tokens，其中该模型实测思考要占 {reserve} tokens，"
+            f"留给答案只剩 {model_cap - reserve} tokens，而写一批段落至少需要 {needed} tokens。"
+            f"{remedy}"
+            "继续发出去只会撞 finish_reason=length 截断，整集失败且照常计费，因此在发请求前停住。"
+        )
+        self.model = model
+        self.model_cap = model_cap
+        self.reserve = reserve
+        self.needed = needed
+        self.token_limits_source = source
+
+
 def _segment_prompt_answer_budget(segment_count: int) -> int:
     """阶段二一次调用的答案预算，不含思考预留。"""
     return max(
@@ -267,10 +321,36 @@ def _segment_prompt_batch_capacity(total_segments: int) -> int:
     大 12 段、当时模型不思考」得出「整集一次调用装得下」，模型一换成思考
     型，7 段就会把 32768 硬顶打满。思考预留和模型上限都来自网关同一换算
     入口，这里不另写一份常量。
+
+    2.0.7：必须按**本环节实际要打给谁**来算。分镜台可以在项目上配专属文本
+    模型（``projects.board_text_provider``，经 text_provider_scope 生效），
+    而这里原先不传 provider，拿到的是全局默认文本模型的上限——真实事故里
+    全局默认是火山 seed、分镜台实际打给 glm-5.3-flash，两者的
+    ``max_output_tokens`` 恰好都是 32768 兜底默认值才没露馅；一旦有人把某
+    一边的能力填成真实值，这份算术就会拿 A 的上限去切 B 的批次。
     """
     total = max(1, int(total_segments))
-    _, _, model_cap = hiagent.text_request_token_limits(requested_max_tokens=10**9)
-    room = int(model_cap) - hiagent.reasoning_token_reserve()
+    from app.harness.text_provider_scope import current_stage_text_provider
+
+    provider = current_stage_text_provider()
+    _, selected_model, model_cap = hiagent.text_request_token_limits(
+        requested_max_tokens=10**9, provider=provider,
+    )
+    reserve = hiagent.reasoning_token_reserve(model=selected_model)
+    room = int(model_cap) - reserve
+    if room <= SEGMENT_BATCH_TOKENS_FLOOR:
+        # 连最小一批都装不下。再切下去也没用——批次大小只影响答案预算，思考
+        # 预留是模型的固有开销，不会因为少写一段就变小（实测：批次从 10 段
+        # 收到 6 段，reasoning 只从 30839 降到 30417）。此时把请求发出去必然
+        # 撞 finish_reason=length，钱照付、整集照失败，所以在这里就停，并且
+        # 把「该去动哪个旋钮」直说。
+        raise StoryboardPackBudgetError(
+            model=selected_model,
+            model_cap=int(model_cap),
+            reserve=reserve,
+            needed=SEGMENT_BATCH_TOKENS_FLOOR,
+            provider=provider,
+        )
     capacity = 1
     for count in range(1, total + 1):
         if _segment_prompt_answer_budget(count) >= room:

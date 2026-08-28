@@ -312,6 +312,11 @@ TEXT_PROVIDER_RETRY_BASE_DELAY = max(
 # 8192→16384、IR_FIDELITY_PATCH_MAX_TOKENS=16384 都是同一根因的局部补丁）。
 # 该预留只抬高上限、不改变实际计费（按真实 token 计费），并始终被模型自身的
 # max_output_tokens 夹紧。
+# 这个常量现在是**兜底下限**而不是唯一依据：app/model_runtime_profile.py 会从
+# provider_calls 的历史观测算出每个模型自己的思考上界，样本够时取两者较大值。
+# 上面那组分位数来自当时的默认文本模型，换一个模型就完全不适用——火山 seed 的
+# 2787 次调用 reasoning 全是 0（给它预留纯属浪费），而 glm-5.3-flash 能思考到
+# 30839（16384 的预留直接导致分镜台整集截断失败）。一个常量喂不饱两类模型。
 TEXT_REASONING_TOKEN_RESERVE = max(
     0, int(os.environ.get("TEXT_REASONING_TOKEN_RESERVE", "16384"))
 )

@@ -1400,7 +1400,7 @@ def _plain_chat_streaming_enabled(call_meta: dict | None) -> bool:
     return bool((call_meta or {}).get("gateway") == "execution_harness")
 
 
-def reasoning_token_reserve() -> int:
+def reasoning_token_reserve(*, model: str | None) -> int:
     """How much of one completion budget a thinking model spends before answering.
 
     Every business stage sizes ``max_tokens`` from the answer it expects.  The
@@ -1410,8 +1410,15 @@ def reasoning_token_reserve() -> int:
     to the provider/model, not to any single call site, and is applied once at
     the only place that turns a business budget into a provider ``max_tokens``.
 
-    Operators can retune it without a code change; the model's own
-    ``max_output_tokens`` still clamps the result.
+    ``model`` 必传（可以显式传 ``None`` 表示这条路径确实不知道打给谁）。这个
+    预留的正确值完全取决于是哪个模型在跑——火山 seed 从不思考、``glm-5.3-
+    flash`` 能思考 30839 token——所以让调用方「不写就默认」等于把最容易判错的
+    参数悄悄糊过去。漏传现在是 ``TypeError``，在测试里就拦住。
+
+    优先级：运维显式覆盖 > 该模型的观测画像 > 全局默认。观测画像见
+    ``app.model_runtime_profile``；样本不足时它返回 ``None``，此处回落到全局
+    默认，绝不把「没观测到」当成「不需要预留」。模型自身的
+    ``max_output_tokens`` 始终夹紧结果。
     """
     override = (get_setting("text_reasoning_token_reserve") or "").strip()
     if override:
@@ -1419,6 +1426,13 @@ def reasoning_token_reserve() -> int:
             return max(0, int(override))
         except ValueError:
             pass
+    from app.model_runtime_profile import model_runtime_profile
+
+    observed = model_runtime_profile(model).reasoning_ceiling
+    if observed is not None:
+        # 全局默认在这里是下限而不是替代品：某个模型近期恰好只跑了轻任务时，
+        # 观测上界会低于默认值，此时按默认值给，避免画像把预留越收越紧。
+        return max(0, int(observed), int(config.TEXT_REASONING_TOKEN_RESERVE))
     return max(0, int(config.TEXT_REASONING_TOKEN_RESERVE))
 
 
@@ -1473,7 +1487,9 @@ def text_request_token_limits(
         # ``requested_max_tokens`` is an *answer* budget.  Add the model's thinking
         # reserve so a correctly-sized answer budget cannot be truncated by the
         # reasoning that precedes it, then clamp to what the model can emit at all.
-        effective = min(answer_budget + reasoning_token_reserve(), model_cap)
+        effective = min(
+            answer_budget + reasoning_token_reserve(model=selected_model), model_cap
+        )
     return selected_provider, selected_model, effective
 
 

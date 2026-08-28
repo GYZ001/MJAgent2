@@ -40,6 +40,7 @@ from app.production.storyboard_pack import (
     _paratext_segment_indexes,
     _segment_content_advisories,
     _segment_prompt_answer_budget,
+    StoryboardPackBudgetError,
     _segment_prompt_batch_capacity,
     _segment_prompt_task_text,
     _source_block_for_prompt,
@@ -1298,8 +1299,14 @@ _LIMITS_32K = {
 }
 
 
-def _patch_thinking_model(monkeypatch, *, max_output: int = 32768, reserve: int | None = None) -> None:
-    from app import hiagent
+def _patch_thinking_model(
+    monkeypatch,
+    *,
+    max_output: int = 32768,
+    reserve: int | None = None,
+    observed_reasoning: int | None = None,
+) -> None:
+    from app import hiagent, model_runtime_profile
 
     monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "hiagent")
     monkeypatch.setattr(hiagent, "active_model", lambda *_args, **_kwargs: "thinking-model")
@@ -1315,6 +1322,19 @@ def _patch_thinking_model(monkeypatch, *, max_output: int = 32768, reserve: int 
             str(reserve)
             if reserve is not None and key == "text_reasoning_token_reserve"
             else ""
+        ),
+    )
+    # 思考预留现在会先问模型的观测画像（app/model_runtime_profile.py）。测试
+    # 必须钉死这个输入，否则断言会随开发机 provider_calls 里的真实历史漂移。
+    # 默认钉成「没有观测」，也就是回落全局默认——正是这些用例原本的语义。
+    monkeypatch.setattr(
+        model_runtime_profile,
+        "model_runtime_profile",
+        lambda model: model_runtime_profile.ModelRuntimeProfile(
+            model=str(model or ""),
+            sample_count=0 if observed_reasoning is None else model_runtime_profile.MIN_OBSERVATIONS,
+            reasoning_ceiling=observed_reasoning,
+            first_token_ceiling_s=None,
         ),
     )
 
@@ -1334,7 +1354,7 @@ def test_twelve_segment_answer_budget_saturates_32k_with_reasoning(monkeypatch):
 
     _, _, effective = hiagent.text_request_token_limits(requested_max_tokens=answer)
     assert effective == 32768
-    assert answer + hiagent.reasoning_token_reserve() > 32768
+    assert answer + hiagent.reasoning_token_reserve(model="thinking-model") > 32768
 
 
 def test_batch_capacity_leaves_room_for_reasoning_under_32k_cap(monkeypatch):
@@ -1344,11 +1364,11 @@ def test_batch_capacity_leaves_room_for_reasoning_under_32k_cap(monkeypatch):
     capacity = _segment_prompt_batch_capacity(12)
     assert 1 <= capacity < 12
     assert (
-        _segment_prompt_answer_budget(capacity) + hiagent.reasoning_token_reserve()
+        _segment_prompt_answer_budget(capacity) + hiagent.reasoning_token_reserve(model="thinking-model")
         < 32768
     )
     assert (
-        _segment_prompt_answer_budget(capacity + 1) + hiagent.reasoning_token_reserve()
+        _segment_prompt_answer_budget(capacity + 1) + hiagent.reasoning_token_reserve(model="thinking-model")
         >= 32768
     )
 
@@ -1367,7 +1387,7 @@ def test_twelve_segments_split_into_batches_that_fit(monkeypatch):
 
     for batch in batches:
         assert (
-            _segment_prompt_answer_budget(len(batch)) + hiagent.reasoning_token_reserve()
+            _segment_prompt_answer_budget(len(batch)) + hiagent.reasoning_token_reserve(model="thinking-model")
             < 32768
         )
 
@@ -1380,6 +1400,110 @@ def test_empty_segment_list_does_not_skip_the_split_check():
 def test_non_thinking_model_keeps_twelve_segments_in_one_batch(monkeypatch):
     _patch_thinking_model(monkeypatch, reserve=0)
     assert _split_segment_prompt_batches(list(range(1, 13))) == [list(range(1, 13))]
+
+
+def test_capacity_follows_the_model_this_stage_actually_calls(monkeypatch):
+    """容量算术必须按分镜台自己配的模型算，不能拿全局默认模型的上限。
+
+    分镜台可在项目上配专属文本模型（board_text_provider）。这里原先不传
+    provider，拿到的是全局默认文本模型的能力——生产里两者的 max_output_tokens
+    恰好都是 32768 兜底默认值才没露馅，一旦有一边填成真实值就会拿 A 的上限
+    去切 B 的批次。
+    """
+    from app import hiagent
+    from app.harness.text_provider_scope import stage_text_provider
+
+    _patch_thinking_model(monkeypatch)
+    seen: list[str | None] = []
+    real = hiagent.text_request_token_limits
+
+    def _recording(*args, **kwargs):
+        seen.append(kwargs.get("provider"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(hiagent, "text_request_token_limits", _recording)
+
+    with stage_text_provider("custom:board-only-model"):
+        _segment_prompt_batch_capacity(12)
+
+    assert seen == ["custom:board-only-model"]
+
+
+def test_observed_thinking_shrinks_the_batch_capacity(monkeypatch):
+    """画像观测到这个模型思考得更多时，一批就得写得更少。"""
+    _patch_thinking_model(monkeypatch, max_output=131072)
+    roomy = _segment_prompt_batch_capacity(60)
+
+    _patch_thinking_model(monkeypatch, max_output=131072, observed_reasoning=30839)
+    cramped = _segment_prompt_batch_capacity(60)
+
+    assert cramped < roomy
+
+
+def test_budget_that_cannot_fit_one_batch_fails_before_spending_money(monkeypatch):
+    """装不下就在发请求前停，并且说清该去动哪个旋钮。
+
+    实测：批次从 10 段收到 6 段，reasoning 只从 30839 降到 30417——思考开销
+    不随批次变小，再切下去只是换个姿势撞 finish_reason=length，钱照付、整集
+    照失败。
+    """
+    _patch_thinking_model(monkeypatch, max_output=32768, observed_reasoning=30839)
+
+    with pytest.raises(StoryboardPackBudgetError) as excinfo:
+        _segment_prompt_batch_capacity(10)
+
+    message = str(excinfo.value)
+    assert "32768" in message and "30839" in message
+    # 拦住人就得给出路，不能只说"不行"。
+    assert "模型" in message
+
+
+def test_budget_error_names_the_default_probe_cache_as_the_fixable_cause(monkeypatch):
+    """上限还是兜底默认值时，要直说「去把真实能力填上」而不是让人换模型。
+
+    这是同一条产品规矩的第二半：闸门可以拦，但不能把人晾在原地。真实成因
+    多半是这个模型的能力还挂着系统探测不到时写下的兜底值，填对就能跑。
+    """
+    from app import model_capabilities
+
+    _patch_thinking_model(monkeypatch, max_output=32768, observed_reasoning=30839)
+    monkeypatch.setattr(
+        model_capabilities,
+        "active_model_token_limits",
+        lambda *_a, **_k: {
+            "context_window_tokens": 131072,
+            "max_output_tokens": 32768,
+            "token_limits_source": "default_128k_32k",
+        },
+    )
+
+    with pytest.raises(StoryboardPackBudgetError) as excinfo:
+        _segment_prompt_batch_capacity(10)
+
+    assert "真实值" in str(excinfo.value)
+
+
+def test_budget_error_points_elsewhere_when_capability_is_already_evidenced(monkeypatch):
+    """能力已是实测值时就别再让人去改配置——那条路已经走过了。"""
+    from app import model_capabilities
+
+    _patch_thinking_model(monkeypatch, max_output=32768, observed_reasoning=30839)
+    monkeypatch.setattr(
+        model_capabilities,
+        "active_model_token_limits",
+        lambda *_a, **_k: {
+            "context_window_tokens": 131072,
+            "max_output_tokens": 32768,
+            "token_limits_source": "configured",
+        },
+    )
+
+    with pytest.raises(StoryboardPackBudgetError) as excinfo:
+        _segment_prompt_batch_capacity(10)
+
+    message = str(excinfo.value)
+    assert "真实值" not in message
+    assert "改配" in message
 
 
 def test_single_batch_task_text_keeps_whole_episode_wording():
