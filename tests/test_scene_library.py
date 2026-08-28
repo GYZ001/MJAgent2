@@ -43,6 +43,50 @@ def test_validate_scene_bible_rejects_empty_name() -> None:
     assert any("不能为空" in e for e in errors)
 
 
+def test_scene_prompt_states_the_same_length_the_gate_enforces(monkeypatch) -> None:
+    """写进提示词的字数区间，必须就是闸放行的那个区间。
+
+    真实故障 ERR-20260828-4f4f19（《罗刹海市》场景库）：提示词写「30~60 字」，闸卡
+    在 30~80，模型照着 60 盲打，12 个场景里 3 个写到 81 字。preview 端点把这份清单
+    原样返回，用户点确认时才被自己的提交端点以 422 拒收，而界面从头到尾没提示过是
+    哪几条超标——预览承诺的东西提交不进去。
+
+    模型数不准字数是常态，所以判据不能挂在「模型会不会超」上；能挂住的是「它至少
+    被告知了真实红线」。这条测试断言提示词里出现的就是闸的两个端点值，任何一边改
+    了数字而另一边没跟上，这里立刻红。
+    """
+    import asyncio
+    import json
+
+    from app.harness import model_gateway
+    from app.refs import SCENE_CANONICAL_MAX_CHARS, SCENE_CANONICAL_MIN_CHARS
+    from app.stages import generate_scene_bible
+
+    seen: dict[str, str] = {}
+
+    async def capture(messages, **_kwargs):
+        seen["prompt"] = messages[-1]["content"]
+        # 恰好卡在上限：闸放行、模型也照着提示词的数字写，两边一致才不报错。
+        return json.dumps({"scenes": [{
+            "name": "宗门广场",
+            "scene_canonical": "青" * SCENE_CANONICAL_MAX_CHARS,
+            "location_kind": "室外",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", capture)
+    scenes = asyncio.run(generate_scene_bible(
+        [{"idx": 1, "title": "第一章", "content": "宗门广场上人潮涌动。"}],
+        _bible_with_scenes(),
+    ))
+
+    assert validate_scene_bible(scenes) == [], (
+        "写到上限整数的锚点必须被放行——闸要是比提示词严，模型永远踩不准"
+    )
+    prompt = seen["prompt"]
+    assert f"{SCENE_CANONICAL_MIN_CHARS}~{SCENE_CANONICAL_MAX_CHARS} 字" in prompt
+    assert "30~60 字" not in prompt, "提示词不得再写一个闸不认的字数区间"
+
+
 # ---------- match_scene_name ----------
 
 def test_match_scene_name_substring_and_normalized() -> None:

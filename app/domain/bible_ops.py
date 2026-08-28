@@ -6,11 +6,24 @@ try:
 except NameError:  # pragma: no cover - used when importing this module directly
     from app.domain.common import *
 
+from app.refs import SCENE_CANONICAL_MAX_CHARS, SCENE_CANONICAL_MIN_CHARS
+from app.validators import validate_scene_bible
 from app.visual_styles import (
     DEFAULT_VISUAL_STYLE_NAME,
     default_visual_style_prompt,
     visual_style_options,
     visual_style_prompt,
+)
+
+
+def _scene_canonical_length_ok(canonical: str) -> bool:
+    """场景锚点长度闸。三个入口和 validate_scene_bible 必须读同一个数字——它们
+    各写一遍字面量时，生成侧提示词又写着另一个数字，模型是照着提示词盲打的。"""
+    return SCENE_CANONICAL_MIN_CHARS <= len(canonical) <= SCENE_CANONICAL_MAX_CHARS
+
+
+_SCENE_CANONICAL_LENGTH_MESSAGE = (
+    f"每个场景锚点必须为 {SCENE_CANONICAL_MIN_CHARS}~{SCENE_CANONICAL_MAX_CHARS} 字"
 )
 
 
@@ -3624,7 +3637,19 @@ async def preview_scene_bible(project_id: str):
         action="generate_bible_and_refs",
         scene_payloads=scene_payloads,
     ))
-    return {"project_id": project_id, "scenes": scene_payloads, "precheck": quote, "generates_images": False}
+    # 生成侧的 AgentLoop 修不好时会带着残留问题把草稿交回来（warning/baseline
+    # 分支，见 app/stages.py:_run_with_agent_loop），generate_scene_bible 只返回
+    # scenes，残留问题就此消失。这里不拦——清单是可编辑的，拦死了用户反而没路走；
+    # 但必须把这份清单当前过不了哪几道门原样说出来，否则用户点确认时才被自己的
+    # 提交端点以 422 拒收，而界面从头到尾没提示过哪一条超标。
+    # 真实故障 ERR-20260828-4f4f19（《罗刹海市》）：12 个场景里 3 个锚点 81 字。
+    return {
+        "project_id": project_id,
+        "scenes": scene_payloads,
+        "precheck": quote,
+        "generates_images": False,
+        "blocking_errors": validate_scene_bible(scenes),
+    }
 
 
 @router.post("/projects/{project_id}/scene-bible/precheck")
@@ -3636,8 +3661,11 @@ async def scene_bible_precheck(project_id: str, body: dict | None = None):
     names = [str(item.get("name") or "").strip() for item in scenes if isinstance(item, dict)]
     if len(names) != len(scenes) or not all(names) or len(names) != len(set(names)):
         raise HTTPException(422, "场景名称不能为空或重复")
-    if any(not 30 <= len(str(item.get("scene_canonical") or "").strip()) <= 80 for item in scenes):
-        raise HTTPException(422, "每个场景锚点必须为 30~80 字")
+    if any(
+        not _scene_canonical_length_ok(str(item.get("scene_canonical") or "").strip())
+        for item in scenes
+    ):
+        raise HTTPException(422, _SCENE_CANONICAL_LENGTH_MESSAGE)
     project = _project_or_404(project_id)
     candidate_bible = json.loads(project["bible_json"] or '{}')
     candidate_bible["scenes"] = scenes
@@ -3678,8 +3706,11 @@ async def start_scene_bible(project_id: str, body: dict | None = None):
     names = [str(item.get("name") or "").strip() for item in confirmed_scenes if isinstance(item, dict)]
     if not names or len(names) != len(set(names)):
         raise HTTPException(422, "场景清单名称不能为空或重复")
-    if any(not 30 <= len(str(item.get("scene_canonical") or "").strip()) <= 80 for item in confirmed_scenes):
-        raise HTTPException(422, "每个场景锚点必须为 30~80 字")
+    if any(
+        not _scene_canonical_length_ok(str(item.get("scene_canonical") or "").strip())
+        for item in confirmed_scenes
+    ):
+        raise HTTPException(422, _SCENE_CANONICAL_LENGTH_MESSAGE)
     candidate_bible = json.loads(p["bible_json"] or '{}')
     candidate_bible["scenes"] = confirmed_scenes
     bible_instance, validation_errors = schema_errors(Bible, candidate_bible)
@@ -3831,8 +3862,11 @@ async def edit_scene_anchor(project_id: str, scene_name: str, body: dict):
     if target is None:
         raise HTTPException(404, f"场景不存在：{scene_name}")
     canonical = str(body.get("scene_canonical") or "").strip()
-    if not 30 <= len(canonical) <= 80:
-        raise HTTPException(422, "完整场景锚点要求 30~80 字")
+    if not _scene_canonical_length_ok(canonical):
+        raise HTTPException(
+            422,
+            f"完整场景锚点要求 {SCENE_CANONICAL_MIN_CHARS}~{SCENE_CANONICAL_MAX_CHARS} 字",
+        )
     location = str(body.get("location_kind") or target.get("location_kind") or "").strip()
     if location and location not in {"室内", "室外", "其他"}:
         raise HTTPException(422, "location_kind 须为室内/室外/其他")

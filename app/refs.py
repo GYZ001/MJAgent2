@@ -75,6 +75,12 @@ _PORTRAIT_OVERRIDE_APPEARANCE_ONLY_NOTE = (
 )
 PRODUCTION_APPEARANCE_MIN_CHARS = 20
 PRODUCTION_APPEARANCE_MAX_CHARS = 80
+# 场景锚点的长度闸，与人物外观锚点同构：闸的数字和写进提示词的数字必须是同一个。
+# 真实故障 ERR-20260828-4f4f19（《罗刹海市》场景库）：提示词写「30~60 字」，闸卡
+# 在 80 字，模型照着 60 盲打，12 个场景里 3 个写到 81。preview 端点把这份清单原样
+# 返回，用户点确认时被自己的提交端点以 422 拒收——预览承诺的东西提交不进去。
+SCENE_CANONICAL_MIN_CHARS = 30
+SCENE_CANONICAL_MAX_CHARS = 80
 
 
 def production_appearance_anchor(anchor: str) -> str:

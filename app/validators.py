@@ -6268,7 +6268,9 @@ def validate_bible(bible: Bible) -> list[str]:
 
 def validate_scene_bible(scenes: list) -> list[str]:
     """场景圣经业务校验（与 validate_bible 同构）：数量 1~40、name 唯一非空、
-    scene_canonical 长度 30~80 字（足以稳定定场又不冗长）。"""
+    scene_canonical 长度取自 SCENE_CANONICAL_MIN/MAX_CHARS（足以稳定定场又不冗长）。"""
+    from app.refs import SCENE_CANONICAL_MAX_CHARS, SCENE_CANONICAL_MIN_CHARS
+
     errors: list[str] = []
     if not 1 <= len(scenes) <= 40:
         errors.append(f"scenes 数量 {len(scenes)}，要求 1~40 个")
@@ -6279,6 +6281,9 @@ def validate_scene_bible(scenes: list) -> list[str]:
         errors.append("scenes.name 存在重复")
     for i, s in enumerate(scenes):
         canonical = getattr(s, "scene_canonical", "") or ""
-        if not 30 <= len(canonical) <= 80:
-            errors.append(f"scenes[{i}]({names[i] or '?'}).scene_canonical 长度 {len(canonical)} 字，要求 30~80 字")
+        if not SCENE_CANONICAL_MIN_CHARS <= len(canonical) <= SCENE_CANONICAL_MAX_CHARS:
+            errors.append(
+                f"scenes[{i}]({names[i] or '?'}).scene_canonical 长度 {len(canonical)} 字，"
+                f"要求 {SCENE_CANONICAL_MIN_CHARS}~{SCENE_CANONICAL_MAX_CHARS} 字"
+            )
     return errors
