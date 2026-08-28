@@ -43,7 +43,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app import config, hiagent
+from app import config, hiagent, spoken_contract
 from app.db import new_id
 from app.domain.common import _episode_source_text
 from app.evidence import repository as evidence_repository
@@ -377,7 +377,7 @@ def _split_segment_prompt_batches(segment_nos: list[int]) -> list[list[int]]:
 # 精神收窄成可执行规则，不是逐字抄 skill 原文。
 # ---------------------------------------------------------------------------
 
-SEEDANCE_DIALECT_INSTRUCTIONS = """\
+SEEDANCE_DIALECT_INSTRUCTIONS = f"""\
 目标模型：Seedance 2.0（中文自由散文，一整块可直接复制的提示词，不要拆成
 JSON 字段或分点罗列）。
 
@@ -412,13 +412,19 @@ JSON 字段或分点罗列）。
   逐句出现，不能只写「XX说话声」这类概括；反过来，音频描述里用引号写出的
   台词原话也必须逐句同时登记进 dialogue[]——两处台词是同一份清单的两种
   呈现，不是各自独立的两份内容。
+- 本段所有台词加起来不超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 个字（只数
+  汉字与字母数字，不数标点和说话人名）。这是 15 秒能说完的物理容量
+  （约 {config.SPOKEN_CHARS_PER_5_SECONDS / 5:.1f} 字/秒），不是风格偏好：
+  超出的部分模型只能抢读、糊读或整句吞掉，而它吞哪一句你无法预测。原文这一
+  段的对话装不下时，挑最要紧的一到两句进 dialogue[]，其余内容改用画面交代
+  （张嘴又闭上、摇头、把东西递过去、转身就走），剩下的留给后面的段落。
 - 画面中任何需要出现的文字（牌匾、书信、标题）一律写「无字」/「空白」，交给
   后期合成——Seedance 对汉字字形的还原极不稳定，这是能力缺失，不是可选项。
   凡是写了「无字」的地方，必须在 degraded_capabilities 里对应记一条后期文字
   合成清单条目（写清载体是什么、原文应该是什么字）。
 """
 
-MINIMAX_H3_DIALECT_INSTRUCTIONS = """\
+MINIMAX_H3_DIALECT_INSTRUCTIONS = f"""\
 Target model: MiniMax H3. The prompt is exactly three fields, field names
 copied character-for-character, each separated by a blank line (T2VA mode --
 no image-alignment instruction line, since this project uses reference-image
@@ -448,6 +454,17 @@ Rules:
   dialogue text goes verbatim inside: (S1) says: <d>[Chinese] 原话</d>.
   Off-screen voice uses "says in an off-screen voiceover" and must state the
   on-screen character's lips remain closed.
+- All dialogue in this segment adds up to at most
+  {config.MAX_SPOKEN_CHARS_PER_SHOT} characters (count CJK characters and
+  alphanumerics only, not punctuation or speaker names). That is how much
+  speech physically fits in 15 seconds (about
+  {config.SPOKEN_CHARS_PER_5_SECONDS / 5:.1f} characters per second), not a
+  style preference: anything beyond it gets rushed, slurred, or silently
+  dropped, and you cannot predict which line the model drops. When the source
+  passage has more talking than that, pick the one or two lines that carry the
+  scene and let the picture do the rest (a mouth that opens and closes again,
+  a shaken head, an object pushed across); leave the remainder to later
+  segments.
 - overall_soundscape must never be left empty -- H3 is audio-visual joint
   generation and an empty field means the model invents uncontrolled sound.
   Only write "N/A" if the user explicitly wants total silence.
@@ -1012,6 +1029,23 @@ def _segment_content_advisories(
     # confirmation time against the persisted row), so a search for one code
     # finds both occurrences instead of two unrelated-looking strings.
     advisories: list[str] = []
+    # 15 秒能说完多少字是物理量，不是偏好。config.MAX_SPOKEN_CHARS_PER_SHOT
+    # 是全仓库唯一口径（大纲分组 app/narrative_outline.py、话轮切分
+    # app/renderability.py 都读它），这里用 spoken_contract.content_char_count
+    # 数字数，与 app/spoken_contract.py 的口播统计同口径，不另起一套算法。
+    # 实测（EP1，改提示词之前）：段 6 写了 172 字、段 11 写了 175 字，都是上限
+    # 的三倍多。超出的部分模型只能抢读或整句吞掉，而吞哪句不可预测。
+    spoken_chars = sum(
+        spoken_contract.content_char_count(line.line) for line in draft.dialogue
+    )
+    if spoken_chars > config.MAX_SPOKEN_CHARS_PER_SHOT:
+        advisories.append(
+            f"[STORYBOARD_PACK_DIALOGUE_OVER_CAPACITY][未拦截] 本段台词共 "
+            f"{spoken_chars} 字，超过 15 秒的口播容量 "
+            f"{config.MAX_SPOKEN_CHARS_PER_SHOT} 字"
+            f"（约 {config.SPOKEN_CHARS_PER_5_SECONDS / 5:.1f} 字/秒），"
+            "视频模型会抢读或漏读其中一部分"
+        )
     allowed_segments = set(source_segment_indexes)
     segment_character_ids = {c.identity_id for c in draft.resources.characters}
     for index, line in enumerate(draft.dialogue):

@@ -421,6 +421,71 @@ def test_segment_content_advisories_empty_for_well_formed_draft():
     assert advisories == []
 
 
+def test_segment_content_advisories_flags_dialogue_that_cannot_fit_in_fifteen_seconds():
+    """台词写超 15 秒的口播容量要留下可见信号。
+
+    真实产出（EP1，提示词收窄之前）：段 6 写了 172 字、段 11 写了 175 字，
+    都是 config.MAX_SPOKEN_CHARS_PER_SHOT(=54) 的三倍多。视频模型只能抢读或
+    整句吞掉超出的部分，而它吞哪一句无法预测——静默通过等于把这个损失藏起来。
+
+    容量口径不在这里另发明：字数用 spoken_contract.content_char_count，上限用
+    config.MAX_SPOKEN_CHARS_PER_SHOT，两者都是全仓库既有的唯一口径。
+    """
+    over = _draft(dialogue=[
+        _AiDialogueLine(
+            speaker_identity_id="id_a",
+            line="你还没说，你们到底怎么下去的？飞！扯淡，飞什么飞，你能飞下去，现在怎么不飞上来。",
+            source_segment_index=1,
+        ),
+        _AiDialogueLine(
+            speaker_identity_id="id_a",
+            line="我们是被一个会飞的女人抓过来的，说是要带我们去什么宗做杂役。会飞？那是传说中的仙人，谁信啊。",
+            source_segment_index=1,
+        ),
+    ])
+    advisories = _segment_content_advisories(
+        over, known_character_ids={"id_a"}, known_scene_ids=set(),
+        source_segment_indexes=[1, 2],
+    )
+    flagged = [a for a in advisories if "STORYBOARD_PACK_DIALOGUE_OVER_CAPACITY" in a]
+    assert len(flagged) == 1, "超容量必须留下且只留下一条信号"
+    assert "[未拦截]" in flagged[0], "用户拍板第一版分镜提示词不设门禁，这条只能是信息"
+    assert str(config.MAX_SPOKEN_CHARS_PER_SHOT) in flagged[0], "要告诉人上限是多少"
+
+
+def test_segment_content_advisories_silent_when_dialogue_fits_the_shot():
+    """容量之内不出声——只有真超了才提示，否则这条信号会被当成噪音忽略掉。"""
+    fits = _draft(dialogue=[
+        _AiDialogueLine(speaker_identity_id="id_a", line="靠山宗。", source_segment_index=1),
+        _AiDialogueLine(
+            speaker_identity_id="id_a", line="这……这里是什么地方？", source_segment_index=1,
+        ),
+    ])
+    advisories = _segment_content_advisories(
+        fits, known_character_ids={"id_a"}, known_scene_ids=set(),
+        source_segment_indexes=[1, 2],
+    )
+    assert not any("OVER_CAPACITY" in a for a in advisories)
+
+
+def test_dialect_instructions_carry_the_real_spoken_capacity_number():
+    """两种方言都要把真实上限数字写给模型，而不是留下未插值的模板占位。
+
+    这两段指令是 f-string；漏掉 f 前缀会让「{config.MAX_SPOKEN_CHARS_PER_SHOT}」
+    原样发给模型，模型只会照抄一个花括号表达式。这条测试同时守住插值发生了、
+    并且插的是全仓库那个唯一口径的值。
+    """
+    from app.production.storyboard_pack import SEEDANCE_DIALECT_INSTRUCTIONS
+
+    limit = str(config.MAX_SPOKEN_CHARS_PER_SHOT)
+    for name, text in (
+        ("seedance", SEEDANCE_DIALECT_INSTRUCTIONS),
+        ("minimax_h3", MINIMAX_H3_DIALECT_INSTRUCTIONS),
+    ):
+        assert "{" not in text and "}" not in text, f"{name} 有未插值的占位符"
+        assert limit in text, f"{name} 没把口播上限 {limit} 写给模型"
+
+
 def test_segment_content_advisories_flags_misattributed_speaker_but_does_not_raise():
     # 用户判据的原始场景：台词安给了当时不在场的人。必须能算出来、必须不抛异常。
     draft = _draft(
