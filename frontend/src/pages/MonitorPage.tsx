@@ -26,7 +26,7 @@ type MonitorSection =
   | "models"
   | "calls"
   | "settings";
-export type MonitorMode = "project" | "system" | "legacy";
+export type MonitorMode = "project" | "system";
 export type ModelKind = "text" | "vlm" | "video" | "image";
 type BlockStatus = "loading" | "ready-empty" | "ready-data" | "error" | "stale";
 type ProviderKey = string;
@@ -2979,11 +2979,11 @@ function ModelCenter({
 }
 
 export default function MonitorPage({
-  mode = "legacy",
+  mode,
   projectId,
   projectName,
 }: {
-  mode?: MonitorMode;
+  mode: MonitorMode;
   projectId?: string;
   projectName?: string;
 }) {
@@ -2995,11 +2995,9 @@ export default function MonitorPage({
   // 真正的授权仍由后端 403/404 兜底。
   const allowedSections = useMemo(() => mode === "project"
     ? SECTIONS.filter((item) => ["jobs", "calls"].includes(item.key))
-    : mode === "system"
-      ? SECTIONS.filter((item) =>
-          ["overview", "models", "settings"].includes(item.key)
-          && (item.key !== "settings" || isSystemAdmin))
-      : SECTIONS, [mode, isSystemAdmin]);
+    : SECTIONS.filter((item) =>
+        ["overview", "models", "settings"].includes(item.key)
+        && (item.key !== "settings" || isSystemAdmin)), [mode, isSystemAdmin]);
   const defaultSection: MonitorSection = mode === "project" ? "jobs" : "overview";
   const initialSection = querySection();
   const [activeSection, setActiveSection] =

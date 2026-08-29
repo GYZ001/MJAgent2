@@ -919,55 +919,6 @@ def test_resubmit_budget_extension_is_atomic_and_capped() -> None:
     ).fetchone()["amount_cny"] == 10
 
 
-def test_video_resubmit_checkpoint_is_persisted_atomically() -> None:
-    conn = _conn()
-    conn.execute(
-        """INSERT INTO shot_versions(
-               id, shot_id, version_no, prompt_text, idem_key, status,
-               provider_task_id, image_inputs, created_at
-           ) VALUES('v1','s1',1,'old','idem','failed','old-task','{}',1)"""
-    )
-    conn.execute(
-        """INSERT INTO jobs(
-               id, kind, status, version_id, provider_operation_id,
-               provider_create_state, provider_non_cancellable,
-               provider_submitted_at, created_at, updated_at
-           ) VALUES(
-               'j1','video','running','v1','video-create-v1','accepted',1,50,1,1
-           )"""
-    )
-    conn.commit()
-
-    worker._persist_video_resubmit(
-        conn,
-        job_id="j1",
-        version_id="v1",
-        prompt_text="sanitized",
-        meta={"seedance_safety_retry": True},
-        operation_id="video-create-v1-safety-1",
-    )
-
-    version = conn.execute(
-        "SELECT prompt_text, provider_task_id, image_inputs FROM shot_versions WHERE id='v1'"
-    ).fetchone()
-    job = conn.execute(
-        """SELECT provider_operation_id, provider_create_state,
-                  provider_non_cancellable, provider_submitted_at
-             FROM jobs WHERE id='j1'"""
-    ).fetchone()
-    assert dict(version) == {
-        "prompt_text": "sanitized",
-        "provider_task_id": None,
-        "image_inputs": '{"seedance_safety_retry": true}',
-    }
-    assert dict(job) == {
-        "provider_operation_id": "video-create-v1-safety-1",
-        "provider_create_state": "not_started",
-        "provider_non_cancellable": 0,
-        "provider_submitted_at": None,
-    }
-
-
 def test_reference_mode_submission_authority_failure_precedes_paid_marker(
     monkeypatch,
 ) -> None:

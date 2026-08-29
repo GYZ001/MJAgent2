@@ -20,11 +20,6 @@ def _shot_contract_json(shot: Shot) -> str:
     return json.dumps(shot_contract_dict(shot), ensure_ascii=False)
 
 
-def _uses_previous_tail_frame_for_model(shot: Shot, prev: Shot | None = None) -> bool:
-    from app.continuity import derive_continuity_mode, uses_previous_tail_frame
-    return uses_previous_tail_frame(derive_continuity_mode(shot, prev))
-
-
 class ConfirmationEvaluation:
     """只读确认评估结果；不写数据库。"""
 

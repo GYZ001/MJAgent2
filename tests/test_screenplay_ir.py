@@ -3044,141 +3044,6 @@ def test_legacy_full_screenplay_candidate_remains_compatible() -> None:
     assert compiled.id == "ep-legacy"
 
 
-def test_generation_entry_uses_compact_ir_model_and_bounded_output(
-    monkeypatch,
-) -> None:
-    captured: dict = {}
-    compiled = _compile()
-
-    async def fake_blueprint(
-        _episode,
-        _source_text,
-        _bible_context,
-        **_kwargs,
-    ):
-        return stages.NarrativeBlueprint.model_validate({
-            "episode_no": 1,
-            "nodes": [
-                {
-                    "key": f"n{index}",
-                    "source_segment_ids": [f"SRC{index:04d}"],
-                    "summary": text,
-                    "narrative_layer": "story",
-                    "event_priority": "causal",
-                    "render_policy": "standalone",
-                    "temporal_domain_key": "present",
-                    "time_label": "夜",
-                    "time_relation": (
-                        "episode_start" if index == 1 else "continuous"
-                    ),
-                    "location_key": "cafe",
-                    "location_label": "咖啡厅",
-                    "participants": ["谷言"],
-                    "action_logic": text,
-                }
-                for index, text in enumerate(
-                    ["等待", "旧友到达", "危险逼近"],
-                    start=1,
-                )
-            ],
-        })
-
-    async def fake_loop(stage, stage_key, prompt, model_cls, _validate, **kwargs):
-        captured.update({
-            "stage": stage,
-            "stage_key": stage_key,
-            "prompt": prompt,
-            "model_cls": model_cls,
-            "max_tokens": kwargs["max_tokens"],
-            "prefill": kwargs["prefill"],
-        })
-        return compiled
-
-    async def fake_review(blueprint, **_kwargs):
-        return blueprint
-
-    monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
-    monkeypatch.setattr(
-        stages,
-        "_generate_sharded_narrative_blueprint",
-        fake_blueprint,
-    )
-    monkeypatch.setattr(
-        stages,
-        "_semantic_review_narrative_blueprint",
-        fake_review,
-    )
-    original_get_setting = stages.get_setting
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: (
-            "false" if key == "screenplay_scene_shards_enabled"
-            else original_get_setting(key)
-        ),
-    )
-    asyncio.run(stages.generate_screenplay(
-        {
-            "id": "ep-ir-1",
-            "episode_no": 1,
-            "title": "雨夜敲门",
-            "target_duration_s": 50,
-            "hook": "",
-            "cliffhanger": "",
-            "synopsis": "谷言等来旧友并接过危险线索",
-            "authorized_source_chapters": {"chapter-1": SOURCE},
-        },
-        SOURCE,
-        _bible(),
-    ))
-
-    assert captured["model_cls"] is ScreenplayGenerationIR
-    assert captured["max_tokens"] == stages.SCREENPLAY_IR_MIN_TOKENS == 20480
-    assert captured["prefill"]["format_version"] == stages.IR_VERSION
-    assert f'"format_version":"{stages.IR_VERSION}"' in captured["prompt"]
-    assert '"source_names":["该身份在本集原文中的逐字称谓"]' in captured["prompt"]
-    assert '"resulting_state":"该动作完成后新成立的局势' in captured["prompt"]
-    assert "所有 SRC 必须至少被一个正文 unit 消费" in captured["prompt"]
-    assert "coverage 留空" in captured["prompt"]
-    assert "禁止输出 events 或 beats" in captured["prompt"]
-    assert "禁止输出 events" in captured["prompt"]
-    assert "不要输出 audience_priors" in captured["prompt"]
-    assert '"initial_state_fact_ids"' not in captured["prompt"]
-    assert "未出场人物" not in captured["prompt"]
-
-
-def test_baseline_recompiles_durable_ir_without_second_model_call(
-    monkeypatch,
-) -> None:
-    candidate = ScreenplayGenerationIR.model_validate(_ir_payload())
-    monkeypatch.setattr(
-        stages,
-        "_recover_screenplay_ir_candidate",
-        lambda _episode_id, **_kwargs: (candidate, "art-ir-recovered"),
-    )
-
-    async def forbidden_model_call(*_args, **_kwargs):
-        raise AssertionError("durable IR recovery must not call the model")
-
-    monkeypatch.setattr(stages, "_run_with_agent_loop", forbidden_model_call)
-    script = asyncio.run(stages.generate_screenplay_baseline(
-        {
-            "id": "ep-ir-recover",
-            "episode_no": 1,
-            "title": "雨夜敲门",
-            "target_duration_s": 50,
-            "authorized_source_chapters": {"chapter-1": SOURCE},
-        },
-        SOURCE,
-        _bible(),
-        _prompt="unused because durable IR exists",
-    ))
-
-    assert script.id == "ep-ir-recover"
-    assert script._source_ir_artifact_id == "art-ir-recovered"
-    assert script.narrative_plan is not None
-
-
 def _participant_delivery_complete_ir_payload(version: str) -> dict:
     payload = _ir_payload()
     payload["format_version"] = version
@@ -3287,6 +3152,8 @@ def _persist_recoverable_ir(
         step_run_id=step_id,
     )
     return run_id, step_id, artifact
+
+
 
 
 def test_current_ir_serialization_declares_participant_delivery_contract() -> None:

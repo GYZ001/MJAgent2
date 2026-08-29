@@ -1330,29 +1330,6 @@ def test_rebase_transition_rolls_back_when_task_registration_fails(
     assert recorder.cancelled is True
 
 
-@pytest.mark.asyncio
-async def test_worker_refuses_stale_working_without_rebase(monkeypatch) -> None:
-    _revision, _artifact = _incompatible_working_revision()
-    conn = db.get_conn()
-    project = conn.execute("SELECT * FROM projects WHERE id='p1'").fetchone()
-    bible = api._project_bible_or_placeholder(project)
-    episode = dict(conn.execute("SELECT * FROM episodes WHERE id='e1'").fetchone())
-    monkeypatch.setattr(
-        "app.production.screenplay_authority.screenplay_authority_fingerprint",
-        lambda *_args, **_kwargs: "current-input",
-    )
-    from app.production.screenplay_repair import run_screenplay_production
-
-    with pytest.raises(RuntimeError, match="未执行 rebase"):
-        await run_screenplay_production(
-            episode_id="e1",
-            episode=episode,
-            source_text="原文",
-            bible=bible,
-            resume=True,
-        )
-
-
 def test_screenplay_generation_preflight_sizes_source_without_side_effects() -> None:
     conn = db.get_conn()
     conn.execute(

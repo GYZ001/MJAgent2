@@ -519,11 +519,6 @@ def _channel_semaphore(
     return semaphore
 
 
-def _media_semaphore() -> asyncio.Semaphore:
-    """兼容旧调用：回退到 image 通道。"""
-    return _image_semaphore()
-
-
 def _image_semaphore() -> asyncio.Semaphore:
     try:
         from app.media_pipeline.concurrency import channel_limit
@@ -787,10 +782,6 @@ def _zhipu_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {config.ZHIPU_API_KEY}", "Content-Type": "application/json"}
 
 
-def _model_route() -> str:
-    return (get_setting("model_route") or "hiagent").strip()
-
-
 def active_provider(kind: str) -> str:
     """当前职责选中的模型库条目（provider 就是条目的唯一标识）。
 
@@ -805,10 +796,6 @@ def active_provider(kind: str) -> str:
         return configured
     candidates = model_registry.items_for_kind(kind)
     return str(candidates[0].get("provider") or "").strip() if candidates else ""
-
-
-def _model_setting(key: str, fallback: str) -> str:
-    return (get_setting(key) or fallback or "").strip()
 
 
 def _model_connection(provider: str, model: str, fallback_url: str = "", fallback_key: str = "") -> tuple[str, dict[str, str]]:

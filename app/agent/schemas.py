@@ -1,8 +1,6 @@
 """对话 Agent 的 Pydantic 合同（PRD §7.2 / §10.2）。"""
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel, Field
 
 
@@ -23,16 +21,6 @@ class CreateConversationRequest(BaseModel):
     title: str | None = None
     project_id: str | None = None
     created_by: str | None = None
-
-
-class MessageOut(BaseModel):
-    id: str
-    conversation_id: str
-    turn_id: str | None = None
-    role: str
-    content: Any
-    model_visible: bool
-    created_at: float
 
 
 class SendMessageRequest(BaseModel):

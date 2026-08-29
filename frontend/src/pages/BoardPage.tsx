@@ -233,14 +233,6 @@ export function providerRecoveryActionLabel(blocker: ProviderTaskBlocker): strin
     ?? `建议：${blocker.recovery_action}`
 }
 
-// 分镜台只剩段视图一条渲染路径（旧的逐镜编辑连同它绑定的经典字段形状已整块拆除，
-// 2026-08-26 用户拍板：测试期没有需要兼容的重要数据）。一个 15 秒段 = shots 表
-// 一行，段内 3-4 镜写进 prompt_text 文本、不拆成独立数据行；storyboard_pack_segment
-// 非 null 是这一行有内容可展示的唯一标记，见 api.ts 的 StoryboardPackSegment 注释。
-export function isStoryboardPackSegmentShot(shot: Shot): boolean {
-  return shot.storyboard_pack_segment != null
-}
-
 export function isStoryboardProblemShot(shot: Shot): boolean {
   const status = shot.storyboard_evidence?.status || ''
   return shot.spoken_contract_status === 'conflict'
@@ -273,9 +265,8 @@ export function storyboardGateIssueLabel(message: string): string {
 
 /**
  * status.headline 是后端整集状态文案（app/domain/storyboard_ops.py），那边把 shots
- * 表的每一行统称"镜"；但分镜台的段落视图早就只剩"段"一种展示单位（见本文件
- * isStoryboardPackSegmentShot 的注释：一个 15 秒段 = shots 表一行，段内 3-4 镜写进
- * prompt_text 文本、不拆成独立数据行）。顶部状态条一句"10/10 镜已通过"和下方
+ * 表的每一行统称"镜"；但分镜台的段落视图早就只剩"段"一种展示单位（一个 15 秒段
+ * = shots 表一行，段内 3-4 镜写进 prompt_text 文本、不拆成独立数据行）。顶部状态条一句"10/10 镜已通过"和下方
  * "段落轨道""段 01""3 镜切换"同屏出现，会让人误以为 10 个 15 秒段还要再拆成
  * 10 个镜头。这里只在展示层收窄，不改后端措辞：只替换"数字/数字 镜已通过""第 N
  * 镜""问题镜"这几个明确指"shots 表一行"的模式，不动"分镜"这个词本身（下面两条

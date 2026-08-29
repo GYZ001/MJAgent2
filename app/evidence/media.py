@@ -197,15 +197,6 @@ def persist_candidate_observed_state_out(
     )
 
 
-def merge_observed_state_out_into_shot_contract(
-    shot_id: str,
-    observed_state_out: str,
-) -> None:
-    """Removed unsafe API kept as an explicit fail-closed compatibility seam."""
-    del shot_id, observed_state_out
-    raise ValueError("运行观测不能反写已发布分镜合同")
-
-
 def record_video_candidate(version_id: str, *, step_run_id: str | None = None) -> dict[str, Any]:
     conn = get_conn()
     row = conn.execute(

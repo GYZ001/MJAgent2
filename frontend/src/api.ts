@@ -318,65 +318,6 @@ export const api = {
       only_incomplete: options?.onlyIncomplete,
       qualification_version: options?.qualificationVersion,
     }),
-  createVideoGenerationPlan: (
-    episodeId: string,
-    force = false,
-  ): Promise<EpisodeVideoGenerationPlan> =>
-    request("POST", `/episodes/${episodeId}/video-generation-plan`, { force }),
-  getVideoGenerationPlan: (
-    episodeId: string,
-  ): Promise<EpisodeVideoGenerationPlan | null> =>
-    request("GET", `/episodes/${episodeId}/video-generation-plan`),
-  validateVideoGenerationPlan: (episodeId: string) =>
-    request("POST", `/episodes/${episodeId}/video-generation-plan/validate`),
-  reconcileVideoGenerationPlan: (
-    episodeId: string,
-    body?: { shot_id?: string; adopted_version_id?: string },
-  ) =>
-    request("POST", `/episodes/${episodeId}/video-generation-plan/reconcile`, body || {}),
-  overrideVideoGenerationPlan: (
-    episodeId: string,
-    body: {
-      shot_id: string;
-      mode: VideoGenerationMode;
-      video_input_intent?: VideoInputIntent | null;
-      depends_on_shot_id?: string | null;
-      required_assets: VideoPlanAssetRequirement[];
-      reason: string;
-    },
-  ): Promise<EpisodeVideoGenerationPlan> =>
-    request("POST", `/episodes/${episodeId}/video-generation-plan/override`, body),
-  executeVideoGenerationPlan: (
-    episodeId: string,
-    planId: string,
-    body?: Record<string, unknown>,
-  ) =>
-    request(
-      "POST",
-      `/episodes/${episodeId}/video-generation-plan/${planId}/execute`,
-      body || {},
-    ),
-  stopEpisodeVideo: (episodeId: string) =>
-    request("POST", `/episodes/${episodeId}/video/stop`) as Promise<{
-      episode_id: string;
-      paused_jobs: number;
-      provider_may_continue: boolean;
-      resume_supported: true;
-      job_ids: string[];
-    }>,
-  resumeEpisodeVideo: (episodeId: string) =>
-    request("POST", `/episodes/${episodeId}/resume`) as Promise<{
-      resumed_jobs: number;
-      budget_resumed_jobs: number;
-      skipped_completed: number;
-      enqueued: Array<{ job_id?: string; reused?: boolean; error?: unknown }>;
-    }>,
-  episodeVideoCompletion: (episodeId: string, body?: Record<string, unknown>) =>
-    request("POST", `/episodes/${episodeId}/video-completion`, body || {}),
-  getVideoCompletion: (episodeId: string) =>
-    request("GET", `/episodes/${episodeId}/video-completion`),
-  resetVideoCompletion: (episodeId: string) =>
-    request("POST", `/episodes/${episodeId}/video-completion/reset`),
   projectVideoCompletion: (projectId: string, body?: Record<string, unknown>) =>
     request("POST", `/projects/${projectId}/video-completion`, body || {}),
   shotGenerate: (
@@ -394,60 +335,11 @@ export const api = {
       qualification_version: qualificationVersion,
       idempotency_key: idempotencyKey,
     }),
-  stopShotVideo: (shotId: string): Promise<StopShotVideoResult> =>
-    request("POST", `/shots/${shotId}/video/stop`),
-  adoptVersion: (
-    shotId: string,
-    versionId: string,
-    reason?: string,
-    playbackRate?: number,
-    qualificationVersion?: string,
-    idempotencyKey?: string,
-  ) =>
-    request("POST", `/shots/${shotId}/adopt`, {
-      version_id: versionId,
-      reason,
-      playback_rate: playbackRate ?? 1,
-      qualification_version: qualificationVersion,
-      idempotency_key: idempotencyKey,
-    }),
-  cancelShotAdoption: (shotId: string) =>
-    request("POST", `/shots/${shotId}/adoption/cancel`),
-  deleteVersion: (versionId: string) =>
-    request("DELETE", `/versions/${versionId}`),
-  discardReferenceImage: (versionId: string, refId: string) =>
-    request("DELETE", `/versions/${versionId}/reference-images/${refId}`),
-  restoreReferenceImage: (
-    versionId: string,
-    refId: string,
-    overrideReason?: string,
-  ) =>
-    request(
-      "POST",
-      `/versions/${versionId}/reference-images/${refId}/restore`,
-      {
-        override_reason: overrideReason,
-      },
-    ),
-  clearEpisodeArtifacts: (episodeId: string) =>
-    request("POST", `/episodes/${episodeId}/clear-artifacts`),
-  clearShotArtifacts: (shotId: string) =>
-    request("POST", `/shots/${shotId}/clear-artifacts`),
-  clearEpisodeVideos: (episodeId: string) =>
-    request("POST", `/episodes/${episodeId}/videos/clear`),
-  clearShotReferences: (shotId: string) =>
-    request("POST", `/shots/${shotId}/references/clear`),
-  clearShotVideos: (shotId: string) =>
-    request("POST", `/shots/${shotId}/videos/clear`),
   getReviewContext: (episodeId: string) =>
     request(
       "GET",
       `/episodes/${episodeId}/review-context`,
     ) as Promise<ReviewWallContext>,
-  archiveVersion: (versionId: string, reason?: string) =>
-    request("POST", `/versions/${versionId}/archive`, { reason }),
-  unarchiveVersion: (versionId: string) =>
-    request("DELETE", `/versions/${versionId}/archive`),
   /* 场景图素材库 */
   sceneBiblePreview: (projectId: string) =>
     request("POST", `/projects/${projectId}/scene-bible/preview`) as Promise<{
@@ -565,54 +457,6 @@ export const api = {
       `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/refs/${sceneRefId}/views/${encodeURIComponent(viewRole)}/regenerate`,
       body,
     ),
-  cancelSceneViewRegeneration: (
-    projectId: string,
-    sceneName: string,
-    sceneRefId: string,
-    viewRole: string,
-  ) =>
-    request(
-      "POST",
-      `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/refs/${sceneRefId}/views/${encodeURIComponent(viewRole)}/regenerate/cancel`,
-    ),
-  startSceneReview: (
-    projectId: string,
-    body?: { shadow_mode?: boolean; block_new_references?: boolean },
-  ) =>
-    request(
-      "POST",
-      `/projects/${projectId}/scene-reviews`,
-      body || {},
-    ) as Promise<SceneReviewBatch>,
-  listSceneReviews: (projectId: string) =>
-    request("GET", `/projects/${projectId}/scene-reviews`) as Promise<{
-      project_id: string;
-      items: SceneReviewBatch[];
-    }>,
-  getSceneReview: (projectId: string, batchId: string) =>
-    request(
-      "GET",
-      `/projects/${projectId}/scene-reviews/${batchId}`,
-    ) as Promise<SceneReviewBatch>,
-  disposeSceneReviewItem: (
-    projectId: string,
-    batchId: string,
-    itemId: string,
-    body: {
-      action:
-        | "accepted_risk"
-        | "repair_planned"
-        | "repaired"
-        | "false_positive"
-        | "deferred";
-      reason: string;
-    },
-  ) =>
-    request(
-      "POST",
-      `/projects/${projectId}/scene-reviews/${batchId}/items/${itemId}/disposition`,
-      body,
-    ),
   adoptSceneCandidate: (
     projectId: string,
     sceneName: string,
@@ -661,7 +505,8 @@ export const api = {
    * 两段式：不带 confirm 时，画风未变化直接返回 changed=false；画风有变化则
    * 后端抛 409（ApiError.code === 'PAYMENT_CONFIRM_REQUIRED'），detail.precheck
    * 是人物+场景合并报价。带 confirm+quote_id 确认后，后端在同一次请求内发起
-   * 人物定妆照与场景图两条生成线（见 useStyleRegenConfirm）。
+   * 人物定妆照与场景图两条生成线（见 lib/styleRegen.ts::applyStyleRegen，
+   * 前端拿到报价后立即用 quote_id 自动确认，不再弹窗等用户手动点确认）。
    */
   setBibleStyle: (
     projectId: string,
@@ -803,104 +648,7 @@ export const api = {
       "POST",
       `/projects/${projectId}/characters/${encodeURIComponent(name)}/portraits/${encodeURIComponent(portraitId)}/rollback`,
     ),
-  listAutoChanges: (projectId: string) =>
-    request("GET", `/projects/${projectId}/auto-changes`) as Promise<{
-      items: AutoChangeItem[];
-    }>,
-  decideAutoChange: (
-    projectId: string,
-    changeId: string,
-    decision: string,
-    options?: {
-      reason?: string;
-      merge_into_character?: string;
-      merge_into_scene?: string;
-      ep_start?: number;
-    },
-  ) =>
-    request(
-      "POST",
-      `/projects/${projectId}/auto-changes/${encodeURIComponent(changeId)}/decide`,
-      {
-        decision,
-        ...(options || {}),
-      },
-    ),
-  staleAssetsPreview: (episodeId: string) =>
-    request("GET", `/episodes/${episodeId}/stale-assets-preview`) as Promise<{
-      episode_id: string;
-      stale_count: number;
-      preview_version: string;
-      estimated_cost_cny: number;
-      qualification: ReviewUpstreamSnapshot;
-      shots: Array<{
-        shot_id: string;
-        shot_no: number;
-        adopted_version_id?: string | null;
-        reasons: string[];
-        reason_labels: string[];
-        hint?: string;
-        estimated_cost_cny: number;
-        storyboard_artifact_id?: string | null;
-        current_storyboard_artifact_id?: string | null;
-        asset_qualification?: Array<{
-          ref_id?: string;
-          entity_type?: string;
-          entity_name?: string;
-          asset_version?: string;
-          rule_version?: string;
-          gate_status?: string;
-          hard_failures?: string[];
-        }>;
-        asset_soft_warnings?: Array<{ ref_id?: string; warning?: string }>;
-        rule_versions?: string[];
-      }>;
-    }>,
-  repairStaleAssets: (
-    episodeId: string,
-    shotIds?: string[],
-    previewVersion?: string,
-    qualificationVersion?: string,
-  ) =>
-    request("POST", `/episodes/${episodeId}/repair-stale-assets`, {
-      confirm: true,
-      shot_ids: shotIds,
-      preview_version: previewVersion,
-      qualification_version: qualificationVersion,
-      idempotency_key: previewVersion
-        ? `repair-stale:${episodeId}:${previewVersion}`
-        : undefined,
-    }) as Promise<{
-      queued: number;
-      shot_ids: string[];
-      errors: Array<{ shot_id: string; shot_no: number; error: string }>;
-      message: string;
-      preview_version: string;
-    }>,
 };
-
-export interface AutoChangeItem {
-  id: string;
-  kind?: string;
-  status?: string;
-  character?: string;
-  scene?: string;
-  ep_start?: number;
-  reason?: string | null;
-  change_dimensions?: string[];
-  persistence?: string;
-  pack_status?: string;
-  created_at?: number;
-  source?: string;
-  decision_reason?: string;
-  payload?: {
-    source_episode?: number;
-    source_episode_label?: string;
-    evidence_fragments?: string[] | string;
-    scene?: Scene;
-    duplicate_candidates?: string[];
-  };
-}
 
 export interface BibleImpactPreview {
   project_id: string;
@@ -1004,79 +752,6 @@ export interface SceneRefsProgress {
   attempt?: number;
   spent_cny?: number;
   items: Array<{ scene: string; status: string; detail?: SceneGapItem }>;
-}
-
-export interface SceneReviewBatch {
-  id: string;
-  project_id: string;
-  status: string;
-  denominator: number;
-  evaluated: number;
-  passed: number;
-  warning: number;
-  hard_failed: number;
-  unverified: number;
-  coverage?: number;
-  cutoff_at?: number | null;
-  shadow_mode?: number | boolean;
-  task_id?: string;
-  disposition_count?: number;
-  items?: Array<{
-    id: string;
-    scene_name: string;
-    result_status: string;
-    old_status?: string;
-    disposition?: string | Record<string, unknown>;
-    evidence?: {
-      hard_failures?: string[];
-      warnings?: string[];
-      uncertainties?: string[];
-      [key: string]: unknown;
-    };
-  }>;
-}
-
-export interface RunSummary {
-  id: string;
-  workflow_type: string;
-  scope_type: string;
-  scope_id: string;
-  status: string;
-  current_step_key?: string | null;
-  cost_cny: number;
-  budget_limit_cny?: number | null;
-  started_at?: number | null;
-  updated_at: number;
-  finished_at?: number | null;
-  failure_code?: string | null;
-  failure_message?: string | null;
-  resume_from_step?: string | null;
-}
-
-export interface StepRun {
-  id: string;
-  run_id: string;
-  step_key: string;
-  iteration_no: number;
-  status: string;
-  decision?: string | null;
-  exit_reason?: string | null;
-  started_at?: number | null;
-  finished_at?: number | null;
-  latency_ms: number;
-  output_artifact_id?: string | null;
-  error_message?: string | null;
-}
-
-export interface RunEvent {
-  id: string;
-  run_id: string;
-  step_run_id?: string | null;
-  ts: number;
-  event_type: string;
-  severity: string;
-  message: string;
-  payload?: Record<string, unknown>;
 }
 
 export interface EvidenceIssue {
@@ -1314,9 +989,6 @@ export interface PrepPackProvenance {
   dual_anchor?: boolean;
   candidate_verdict_attempted?: boolean;
 }
-
-/** @deprecated 2.0.0 起改名 PrepPackProvenance（不再是 characters 独有），保留别名兼容旧引用。 */
-export type PrepPackCharacterProvenance = PrepPackProvenance;
 
 export interface PrepPackCharacterAsset {
   identity_id: string;
@@ -1593,30 +1265,6 @@ export interface ShotVideoGenerationPlan {
   degraded_from_mode: VideoGenerationMode | null;
   degraded_to_mode: VideoGenerationMode | null;
   degraded_reason: string | null;
-}
-
-export interface EpisodeVideoGenerationPlan {
-  episode_video_plan_id: string;
-  episode_id: string;
-  plan_revision: number;
-  source_storyboard_revision_id: string;
-  published_storyboard_artifact_id: string;
-  published_storyboard_artifact_hash: string;
-  completion_certificate_id: string;
-  narrative_review_artifact_id: string;
-  release_qualification_hash: string;
-  capability_snapshot_id: string;
-  status: "draft" | "valid" | "blocked" | "superseded" | "stale";
-  planner_provider: string;
-  planner_model: string;
-  planner_prompt_fingerprint: string;
-  shots: ShotVideoGenerationPlan[];
-  blockers: Array<Record<string, unknown>>;
-  estimated_latency_ms: number;
-  estimated_cost: number;
-  critical_path_latency_ms: number;
-  safe_parallelism_ratio: number;
-  created_at: number;
 }
 
 /** POST /episodes/{id}/generate 单条镜头入队结果——成功态在 job_id/reused/active
@@ -1907,19 +1555,6 @@ export interface EpisodePipelineSummary {
     adopted: number;
     generation_failed: number;
   };
-}
-
-export interface StopShotVideoResult {
-  shot_id: string;
-  stopped_count: number;
-  provider_may_continue: boolean;
-  resume_supported: false;
-  jobs: {
-    job_id: string;
-    status: string;
-    provider_may_continue: boolean;
-    cancelled: boolean;
-  }[];
 }
 
 /**
@@ -2382,17 +2017,6 @@ export interface DeliveryReadiness {
   checks: DeliveryCheck[];
   blockers: DeliveryCheck[];
   warnings: { code?: string; message?: string; shot_no?: number }[];
-}
-
-export interface DeliveryPackage {
-  package_id: string;
-  artifact_id: string;
-  trust_level: string;
-  status: string;
-  package_path: string;
-  archive_path?: string;
-  manifest: Record<string, unknown>;
-  quality_report: Record<string, unknown>;
 }
 
 export interface DeliveryPackageRecord {

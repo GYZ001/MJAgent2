@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Shot, StoryboardPackSegment, StoryboardStatus } from '../api'
 import {
-  isStoryboardPackSegmentShot,
   isStoryboardProblemShot,
   storyboardGateIssueLabel,
   storyboardEmptyCopy,
@@ -263,11 +262,6 @@ describe('供应商任务恢复面板文案（PROVIDER_TASKS_NOT_TERMINAL）', (
 })
 
 describe('分镜台段落展示（docs/STORYBOARD_PROMPT_IR_DESIGN.md 冻结契约）', () => {
-  it('storyboard_pack_segment 非 null 是这一行有内容可展示的标记', () => {
-    expect(isStoryboardPackSegmentShot(shot())).toBe(false)
-    expect(isStoryboardPackSegmentShot(packShot())).toBe(true)
-  })
-
   it('契约自己的模型词表与视频模型选择器的供应商 key 不是同一套', () => {
     expect(storyboardPackTargetModelLabel('seedance_2')).toBe('Seedance 2.0')
     expect(storyboardPackTargetModelLabel('minimax_h3')).toBe('MiniMax H3')

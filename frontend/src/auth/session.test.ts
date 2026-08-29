@@ -1,11 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  ALL_SCOPES,
   ROLE_SCOPES,
   canSeeSystemSettings,
-  isSystemAdmin,
   roleLabel,
-  scopesFor,
   type AuthState,
 } from "./session";
 
@@ -47,34 +44,12 @@ describe("ROLE_SCOPES", () => {
   });
 });
 
-describe("scopesFor", () => {
-  it("系统管理员在任意团队都拿到全部 scope", () => {
-    const state = stateWith({ isSystemAdmin: true, workspaces: [] });
-    expect(scopesFor(state, "ws-not-a-member")).toEqual(new Set(ALL_SCOPES));
-  });
-
-  it("普通用户按所属团队的角色换算 scope", () => {
-    const state = stateWith({
-      workspaces: [{ id: "ws1", name: "团队一", role: "production" }],
-    });
-    expect(scopesFor(state, "ws1")).toEqual(new Set(ROLE_SCOPES.production));
-  });
-
-  it("不在该团队时返回空集", () => {
-    const state = stateWith({
-      workspaces: [{ id: "ws1", name: "团队一", role: "workspace_admin" }],
-    });
-    expect(scopesFor(state, "ws2").size).toBe(0);
-  });
-});
-
-describe("isSystemAdmin / canSeeSystemSettings", () => {
-  it("非系统管理员两者都为 false", () => {
+describe("canSeeSystemSettings", () => {
+  it("非系统管理员看不到系统设置", () => {
     const state = stateWith({
       isSystemAdmin: false,
       workspaces: [{ id: "ws1", name: "团队一", role: "workspace_admin" }],
     });
-    expect(isSystemAdmin(state)).toBe(false);
     expect(canSeeSystemSettings(state)).toBe(false);
   });
 
@@ -86,9 +61,8 @@ describe("isSystemAdmin / canSeeSystemSettings", () => {
     expect(canSeeSystemSettings(state)).toBe(false);
   });
 
-  it("系统管理员两者都为 true", () => {
+  it("系统管理员能看到系统设置", () => {
     const state = stateWith({ isSystemAdmin: true });
-    expect(isSystemAdmin(state)).toBe(true);
     expect(canSeeSystemSettings(state)).toBe(true);
   });
 });

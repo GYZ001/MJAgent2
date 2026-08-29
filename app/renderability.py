@@ -7,13 +7,7 @@ from __future__ import annotations
 
 import math
 
-# 镜头数量由剧情交付和场景上下文决定，不设产品软/硬上限。
-# ``None`` is retained as an explicit compatibility marker for older callers.
-SHOT_HARD_MAX: int | None = None
-
 SPINE_BEATS_MIN = 1
-SPINE_BEATS_MAX: int | None = None
-DROP_LIST_MIN = 0
 
 KEY_LINES_MIN = 3
 # 对白数量不设固定上限；整集预算由口播时长和单链技术熔断共同约束。
@@ -80,7 +74,6 @@ def chunk_dialogue_turns(
         chunks.append(current)
     return chunks
 KEY_PLOT_POINTS_MIN = 1
-KEY_PLOT_POINTS_MAX: int | None = None
 
 # action_desc：单主动作、可读大形体，禁止写细堆砌
 ACTION_DESC_HARD_MIN = 18
@@ -88,7 +81,6 @@ ACTION_DESC_TARGET_MIN = 25
 ACTION_DESC_TARGET_MAX = 55
 
 SCENE_OUTLINE_MIN = 1
-SCENE_OUTLINE_MAX: int | None = None
 SCENE_STORY_FUNCTION_MIN_CHARS = 6
 
 _RENDERABILITY_PROMPT_BLOCK = """【Renderability First·视频模型能力边界】

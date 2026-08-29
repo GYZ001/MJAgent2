@@ -1729,56 +1729,6 @@ def reserve_provider_video_budget(
         raise
 
 
-def mark_provider_video_budget_claim(
-    operation_id: str,
-    status: Literal["accepted", "settled", "released"],
-    *,
-    job_id: str | None = None,
-    lease_owner: str | None = None,
-    conn=None,
-) -> bool:
-    if (job_id is None) != (lease_owner is None):
-        raise ValueError("job_id and lease_owner must be provided together")
-    db = conn or get_conn()
-    ensure_video_budget_authority_tables(db)
-    stamp = now()
-    cursor = db.execute(
-        """UPDATE provider_video_budget_claims
-              SET status=?,updated_at=?,
-                  accepted_at=CASE
-                      WHEN ?='accepted' THEN COALESCE(accepted_at,?)
-                      ELSE accepted_at
-                  END,
-                  settled_at=CASE WHEN ?='settled' THEN ? ELSE settled_at END,
-                  released_at=CASE WHEN ?='released' THEN ? ELSE released_at END
-            WHERE operation_id=?
-              AND (
-                  ? IS NULL OR EXISTS (
-                      SELECT 1 FROM jobs
-                       WHERE id=? AND status='running' AND lease_owner=?
-                         AND cancellation_requested=0
-                  )
-              )""",
-        (
-            status,
-            stamp,
-            status,
-            stamp,
-            status,
-            stamp,
-            status,
-            stamp,
-            operation_id,
-            job_id,
-            job_id,
-            lease_owner,
-        ),
-    )
-    if conn is None:
-        db.commit()
-    return cursor.rowcount == 1
-
-
 def close_provider_video_budget_claim_liability(
     operation_id: str,
     *,
@@ -2761,15 +2711,6 @@ def bind_video_grant_generation_plan(
         grant_id,
         episode_id=episode_id,
         storyboard_artifact_id=storyboard_artifact_id,
-    )
-
-
-def refresh_video_grant_storyboard_artifact(grant_id: str, storyboard_artifact_id: str) -> None:
-    """Published story changes always require a newly content-addressed grant."""
-    del grant_id, storyboard_artifact_id
-    raise GrantValidationError(
-        "GRANT_RENEWAL_REQUIRED",
-        "分镜发布版变更后必须重新授权，不得就地刷新旧授权",
     )
 
 

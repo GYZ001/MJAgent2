@@ -43,12 +43,6 @@ class VideoRepairPlan(BaseModel):
     amend_fields: dict[str, Any] = Field(default_factory=dict)
 
 
-def preferred_level_for_code(code: str) -> RepairLevel:
-    """Compatibility shim: display codes never prescribe a repair level."""
-    _ = code
-    return "L1"
-
-
 def upgrade_level(level: RepairLevel) -> RepairLevel:
     idx = LEVEL_ORDER.index(level)
     return LEVEL_ORDER[min(idx + 1, len(LEVEL_ORDER) - 1)]

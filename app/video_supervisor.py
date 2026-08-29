@@ -204,9 +204,6 @@ class ShotCoverageEntry(BaseModel):
     fallback_reason: str | None = None
     video_stale: bool = False
 
-    def is_stalled(self) -> bool:
-        return any(v >= 2 for v in self.issue_fingerprint_counts.values())
-
 
 class CoverageLedger(BaseModel):
     episode_id: str
@@ -2673,15 +2670,6 @@ async def _amend_storyboard(
         return False
 
 
-# 兼容旧名
-async def _amend_storyboard_duration(
-    entry: ShotCoverageEntry,
-    *,
-    grant: VideoCompletionGrant,
-) -> bool:
-    return await _amend_storyboard(entry, grant=grant)
-
-
 def _try_auto_crop(entry: ShotCoverageEntry, *, run_id: str | None) -> bool:
     if not entry.best_version_id:
         return False
@@ -3109,17 +3097,6 @@ async def _finalize_covered_async(
         ledger,
         run_id=run_id,
     )
-
-
-def _assert_storyboard_version(cp: VideoSupervisorCheckpoint) -> bool:
-    if not cp.grant_id or not cp.storyboard_artifact_id:
-        return True
-    conn = get_conn()
-    ep = conn.execute(
-        "SELECT storyboard_artifact_id FROM episodes WHERE id=?", (cp.episode_id,)
-    ).fetchone()
-    current = (ep["storyboard_artifact_id"] if ep else None) or ""
-    return current == (cp.storyboard_artifact_id or "")
 
 
 def _reference_asset_scan(episode_id: str) -> tuple[dict[str, Any], dict[str, Any]]:

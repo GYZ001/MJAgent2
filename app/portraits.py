@@ -922,40 +922,6 @@ def _future_identity_context(
     return "\n\n".join(blocks)
 
 
-def _source_identity_contexts(source_text: str, *, budget: int) -> list[str]:
-    """Split the complete current source into bounded paragraph-preserving batches."""
-    text = str(source_text or "").strip()
-    if not text:
-        return ["（本集原文为空）"]
-    paragraphs = [part.strip() for part in re.split(r"\n+", text) if part.strip()]
-    chunks: list[str] = []
-    current: list[str] = []
-    current_chars = 0
-    for paragraph in paragraphs:
-        if len(paragraph) > budget:
-            if current:
-                chunks.append("\n".join(current))
-                current = []
-                current_chars = 0
-            start = 0
-            while start < len(paragraph):
-                end = min(len(paragraph), start + budget)
-                chunks.append(paragraph[start:end])
-                start = end
-            continue
-        added = len(paragraph) + (1 if current else 0)
-        if current and current_chars + added > budget:
-            chunks.append("\n".join(current))
-            current = [paragraph]
-            current_chars = len(paragraph)
-        else:
-            current.append(paragraph)
-            current_chars += added
-    if current:
-        chunks.append("\n".join(current))
-    return chunks or [text]
-
-
 def _current_identity_evidence_payload(record: dict) -> dict:
     """Canonical payload sealed into one backend-owned current evidence ID."""
     return {
@@ -3527,31 +3493,6 @@ _IDENTITY_COVERAGE_STRICT_PROVIDER_SCHEMA_KEYWORDS = frozenset({
     "required",
     "type",
 })
-
-
-def _identity_source_label_schema(
-    model_type: type[BaseModel],
-    source_labels: list[str],
-    *,
-    candidate_defs: tuple[str, ...],
-    branches: tuple[str, ...] = ("named", "functional"),
-) -> dict:
-    """Bind both branches of a split identity wire to one allowed label set."""
-    known_labels = list(dict.fromkeys(
-        str(value or "").strip() for value in source_labels
-        if str(value or "").strip()
-    ))
-    if not known_labels:
-        raise ValueError(
-            "identity schema requires source labels"
-        )
-    schema = model_type.model_json_schema()
-    for definition_name in candidate_defs:
-        candidate_schema = schema["$defs"][definition_name]
-        candidate_schema["properties"]["source_label"]["enum"] = known_labels
-    for branch in branches:
-        schema["properties"][branch]["maxItems"] = len(known_labels)
-    return schema
 
 
 def _current_identity_schema(
@@ -9189,13 +9130,6 @@ async def ensure_structural_identity_coverage(
 # 保证漫剧场景一致性」，给「凝气卷」的理由是「靠山宗发放的修行典籍」——两次都
 # 如实说明了这不是人，却照样入了人物谱。原因是建卡判定问的一直是"值不值得做
 # 一致性锚点"，从来没有人问过"这是不是一个人"。
-CHARACTER_SUBJECT_KINDS = (
-    "person",
-    "organization",
-    "place",
-    "object",
-    "other",
-)
 CHARACTER_SUBJECT_PERSON = "person"
 
 # role 是合同枚举，不是自由文本。「靠山宗」当初写进来的 role 是"重要场景载体"，

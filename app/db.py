@@ -1658,7 +1658,8 @@ MIGRATIONS = (
     "ON character_portraits(project_id, visual_entity_id, ep_start)",
     # 实体合并审计表（设计文档 §4.2「实体合并」+「同批折叠通道」）：真名揭晓时
     # （跨集或同批）把一个 functional 视觉实体并入具名实体，记一条可回溯记录。
-    # P0 范围只是建表 + 写入路径（见下方 record_visual_entity_merge）；查询/
+    # P0 范围只是建表 + 写入路径（见 app/portraits.py 的
+    # _record_visual_entity_merge）；查询/
     # 展示留到 P1（设计文档 §6 P1 第10项）。project_id 声明真实 FK（本表是全新
     # 表，不是历史 ALTER 上来的，可以直接声明，不需要 guard 触发器兜底）。
     """CREATE TABLE IF NOT EXISTS visual_entity_merges (
@@ -2462,8 +2463,8 @@ def _backfill_visual_entity_ids(conn: sqlite3.Connection) -> None:
     ``'bible:' || character_name`` 机械推导，不需要模型调用。
 
     幂等性：只回填 ``visual_entity_id IS NULL`` 的行。重复执行 init_db() 时，
-    已经回填过的行（或后续被 record_visual_entity_merge 等写入路径显式设置过
-    非空值的行）不会被本函数覆盖——这与 §4.2「实体合并」允许后续把某些
+    已经回填过的行（或后续被 ``_record_visual_entity_merge`` 等写入路径显式
+    设置过非空值的行）不会被本函数覆盖——这与 §4.2「实体合并」允许后续把某些
     functional 记录的 visual_entity_id 改指到合并后的规范实体是一致的，
     回填只负责补齐"从未被设置过"的空白，不重新裁决已有值。
     """
@@ -2776,52 +2777,6 @@ def now() -> float:
 
 def rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
-
-
-def record_visual_entity_merge(
-    conn: sqlite3.Connection,
-    *,
-    project_id: str,
-    from_visual_entity_id: str,
-    to_visual_entity_id: str,
-    canonical_name: str,
-    merge_rule: str,
-    evidence_episode_no: int,
-    selected_portrait_id: str | None = None,
-) -> str:
-    """写入一条 visual_entity_merges 审计记录，返回新记录 id。
-
-    P0 范围（docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.2「实体合并」/
-    「同批折叠通道」，§6 P0 第5项）：这里只提供写入路径这一个机械动作——把
-    "决定要把 from 实体并入 to 实体"这件事落一条不可篡改的审计行；"要不要
-    合并"（例如 from 实体从未出镜、没有分配过 visual_entity_id 时应当跳过）
-    是调用方（真名揭晓时的 K 决议折叠逻辑，属于 app/portraits.py，不在本次
-    改动范围）的语义判断职责，本函数不重新做这层判断，也不校验 from/to 在
-    别处是否已生效。
-
-    审计表本身是追加语义（append-only），不设 UNIQUE 约束、不做去重：重复
-    调用会产生多条记录，这是刻意的——每一次真实的合并事件都应有自己可回溯
-    的一行；调用方如需避免重复记账，应在"是否需要发起一次新合并"这一步自行
-    判断，而不是依赖本函数悄悄吞掉重复写入。
-
-    不在函数内部提交事务：与 ``_backfill_multiview_assets`` 等既有写入辅助
-    函数一致，由调用方按自己的事务边界决定何时 commit，便于把这条审计写入
-    与同一批次的其它写操作合并成一次原子提交。
-    """
-    merge_id = new_id("vmerge")
-    conn.execute(
-        """INSERT INTO visual_entity_merges(
-               id, project_id, from_visual_entity_id, to_visual_entity_id,
-               canonical_name, merge_rule, selected_portrait_id,
-               evidence_episode_no, created_at
-           ) VALUES(?,?,?,?,?,?,?,?,?)""",
-        (
-            merge_id, project_id, from_visual_entity_id, to_visual_entity_id,
-            canonical_name, merge_rule, selected_portrait_id,
-            evidence_episode_no, now(),
-        ),
-    )
-    return merge_id
 
 
 def get_setting(key: str) -> str:

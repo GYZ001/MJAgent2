@@ -63,29 +63,3 @@ export function resolveWindowedEpisodeId(
   return picker.episode_current?.id ?? picker.episodes?.[0]?.id ?? null
 }
 
-/** 地址栏显式指定的分集保持权威；无显式目标时才从项目分集中恢复选择。 */
-export function resolveRoutedEpisodeId(
-  episodes: EpisodeOption[],
-  currentEpisodeId: string | null,
-  requestedEpisodeId: string | null,
-): string | null {
-  return requestedEpisodeId ?? resolveEpisodeId(episodes, currentEpisodeId)
-}
-
-export function filterEpisodeOptions(
-  episodes: EpisodeOption[],
-  query: string,
-  limit = 60,
-  filters?: { production?: EpisodeProductionFilter },
-): EpisodeOption[] {
-  const keyword = query.trim().toLowerCase()
-  let filtered = keyword
-    ? episodes.filter(episode => `${episode.episode_no} ${episode.title}`.toLowerCase().includes(keyword))
-    : episodes
-  const production = filters?.production || 'all'
-  if (production === 'with_video') filtered = filtered.filter(episode => (episode.video_count || 0) > 0)
-  if (production === 'pending_adoption') filtered = filtered.filter(episode => (episode.pending_adoption_count || 0) > 0)
-  if (production === 'failed') filtered = filtered.filter(episode => (episode.failed_count || 0) > 0)
-  if (production === 'unproduced') filtered = filtered.filter(episode => (episode.shot_count || 0) === 0 || (episode.video_count || 0) === 0)
-  return filtered.slice(0, limit)
-}

@@ -1898,14 +1898,6 @@ def pack_references_by_purpose(
     return eligible[:limit]
 
 
-def enrich_ref_dict_metadata(ref: dict[str, Any], **extra: Any) -> dict[str, Any]:
-    out = dict(ref)
-    out.update({k: v for k, v in extra.items() if v is not None})
-    if "purposes" in out and isinstance(out["purposes"], list):
-        out["purposes_json"] = json.dumps(out["purposes"], ensure_ascii=False)
-    return out
-
-
 def gallery_fingerprint_material(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     material = []
     for ref in refs:
@@ -1972,18 +1964,6 @@ def gallery_fingerprint_material(refs: list[dict[str, Any]]) -> list[dict[str, A
             "qa_overall": (ref.get("qa") or {}).get("overall"),
         })
     return material
-
-
-def is_plot_key_frame(ref: dict[str, Any] | Any) -> bool:
-    if isinstance(ref, dict):
-        return (
-            str(ref.get("type") or "") == ASSET_TYPE_PLOT_KEY_FRAME
-            or _is_narrative_keyframe_slot(str(ref.get("slot_key") or ""))
-        )
-    return (
-        getattr(ref, "type", None) == ASSET_TYPE_PLOT_KEY_FRAME
-        or _is_narrative_keyframe_slot(str(getattr(ref, "slot_key", None) or ""))
-    )
 
 
 # ---------- 零付费整包绑定 / 单视角重做 ----------
@@ -2280,10 +2260,3 @@ def shot_needs_high_risk_frame_sample(shot: Any) -> bool:
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
     return False
-
-
-def video_qa_sample_positions(*, high_risk: bool = False) -> tuple[float, ...]:
-    """返回 0~1 相对时间点。普通三帧；高风险五帧（0/25/50/75/95%）。"""
-    if high_risk:
-        return (0.0, 0.25, 0.50, 0.75, 0.95)
-    return (0.0, 0.50, 0.97)

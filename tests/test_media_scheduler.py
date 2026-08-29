@@ -108,20 +108,6 @@ def test_stale_worker_cannot_accept_provider_budget_after_lease_takeover(
     clock["now"] = 106.0
     assert media_scheduler.claim_job("j1", "worker-b", lease_seconds=5)
 
-    accepted = completion_grant.mark_provider_video_budget_claim(
-        "op1",
-        "accepted",
-        job_id="j1",
-        lease_owner="worker-a",
-        conn=conn,
-    )
-    conn.commit()
-
-    assert accepted is False
-    assert conn.execute(
-        """SELECT status FROM provider_video_budget_claims
-           WHERE operation_id='op1'"""
-    ).fetchone()["status"] == "reserved"
     with pytest.raises(worker.LeaseLost):
         asyncio.run(
             worker._commit_provider_acceptance(

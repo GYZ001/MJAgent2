@@ -16,8 +16,6 @@
 """
 from __future__ import annotations
 
-import pytest
-
 from app import stages
 from app.screenplay_scene_shards import ScreenplaySceneShardError
 
@@ -135,107 +133,6 @@ def test_rebuild_budget_is_bounded_and_explicit() -> None:
     assert stages.SCREENPLAY_BLUEPRINT_SEMANTIC_REBUILD_LIMIT >= 1
     # 真正无解的输入不会因为多试几次而变得有解：预算必须很小。
     assert stages.SCREENPLAY_BLUEPRINT_SEMANTIC_REBUILD_LIMIT <= 2
-
-
-@pytest.mark.asyncio
-async def test_gate_dead_end_rebuilds_the_blueprint_once_then_succeeds(
-    monkeypatch,
-) -> None:
-    """死结 → 带证据重建蓝图 → 第二次成功；重建必须真的带上证据。"""
-    calls: list[dict[str, list[str]] | None] = []
-    shard_attempts = {"n": 0}
-
-    async def fake_workflow_step(_key, operation, **_kwargs):
-        return None, await operation()
-
-    async def fake_blueprint(_episode, _source, _bible, *, semantic_feedback=None):
-        calls.append(semantic_feedback)
-        return object()
-
-    async def fake_shards(_episode, _source, _bible, *, narrative_blueprint):
-        shard_attempts["n"] += 1
-        if shard_attempts["n"] == 1:
-            raise ScreenplaySceneShardError(
-                "SS002", ["未收口"],
-                unresolved_semantic_units={"SRC0012:unit:003": ["与源文矛盾"]},
-            )
-        return "screenplay"
-
-    monkeypatch.setattr(stages, "_run_screenplay_workflow_step", fake_workflow_step)
-    monkeypatch.setattr(
-        stages, "_generate_screenplay_narrative_blueprint", fake_blueprint
-    )
-    monkeypatch.setattr(
-        stages, "_generate_screenplay_scene_sharded_baseline", fake_shards
-    )
-
-    result = await stages.generate_screenplay({"id": "e1", "episode_no": 2}, "源文", None)
-
-    assert result == "screenplay"
-    assert shard_attempts["n"] == 2
-    # 第一次无反馈，第二次必须带着下游死结证据。
-    assert calls[0] == {}
-    assert calls[1] == {"SRC0012:unit:003": ["与源文矛盾"]}
-
-
-@pytest.mark.asyncio
-async def test_dead_end_that_survives_the_rebuild_still_fails(monkeypatch) -> None:
-    """用尽重建预算后照常失败——不得无限重建，也不得吞掉失败。"""
-    attempts = {"n": 0}
-
-    async def fake_workflow_step(_key, operation, **_kwargs):
-        return None, await operation()
-
-    async def fake_blueprint(_episode, _source, _bible, *, semantic_feedback=None):
-        return object()
-
-    async def fake_shards(_episode, _source, _bible, *, narrative_blueprint):
-        attempts["n"] += 1
-        raise ScreenplaySceneShardError(
-            "SS002", ["未收口"],
-            unresolved_semantic_units={"SRC0012:unit:003": ["与源文矛盾"]},
-        )
-
-    monkeypatch.setattr(stages, "_run_screenplay_workflow_step", fake_workflow_step)
-    monkeypatch.setattr(
-        stages, "_generate_screenplay_narrative_blueprint", fake_blueprint
-    )
-    monkeypatch.setattr(
-        stages, "_generate_screenplay_scene_sharded_baseline", fake_shards
-    )
-
-    with pytest.raises(ScreenplaySceneShardError):
-        await stages.generate_screenplay({"id": "e1", "episode_no": 2}, "源文", None)
-
-    assert attempts["n"] == stages.SCREENPLAY_BLUEPRINT_SEMANTIC_REBUILD_LIMIT + 1
-
-
-@pytest.mark.asyncio
-async def test_non_dead_end_shard_failure_never_rebuilds(monkeypatch) -> None:
-    attempts = {"n": 0}
-
-    async def fake_workflow_step(_key, operation, **_kwargs):
-        return None, await operation()
-
-    async def fake_blueprint(_episode, _source, _bible, *, semantic_feedback=None):
-        return object()
-
-    async def fake_shards(_episode, _source, _bible, *, narrative_blueprint):
-        attempts["n"] += 1
-        raise ScreenplaySceneShardError("SS001", ["slot 缺失"])
-
-    monkeypatch.setattr(stages, "_run_screenplay_workflow_step", fake_workflow_step)
-    monkeypatch.setattr(
-        stages, "_generate_screenplay_narrative_blueprint", fake_blueprint
-    )
-    monkeypatch.setattr(
-        stages, "_generate_screenplay_scene_sharded_baseline", fake_shards
-    )
-
-    with pytest.raises(ScreenplaySceneShardError):
-        await stages.generate_screenplay({"id": "e1", "episode_no": 2}, "源文", None)
-
-    assert attempts["n"] == 1
 
 
 def test_cached_leaf_is_a_miss_only_when_this_activation_changed_its_input() -> None:

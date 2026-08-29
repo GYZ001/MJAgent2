@@ -5,7 +5,6 @@ from app.harness.types import Issue, IssueSeverity
 from app.repair_router import (
     bump_fingerprint_count,
     compute_invalidation_frontier,
-    preferred_level_for_code,
     route_issues,
     upgrade_level,
 )
@@ -20,21 +19,6 @@ def _issue(code: str, message: str, shot_no: int = 9) -> Issue:
         evidence={"shot_no": shot_no, "path": f"shot_no={shot_no}", "rule_id": code},
         repairable=True,
     )
-
-
-def test_issue_code_does_not_prescribe_a_repair_level():
-    levels = {
-        preferred_level_for_code(code)
-        for code in (
-            "SCHEMA_INVALID",
-            "STATE_CHAIN_INVALID",
-            "SPINE_MISSING",
-            "PLAN_EXHAUSTED_NOT_FINAL",
-            "SEMANTIC_GAP_OTHER",
-        )
-    }
-
-    assert levels == {"L1"}
 
 
 def test_route_spoken_capacity_never_replans_outline():

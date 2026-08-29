@@ -6,8 +6,9 @@
 - 迁移幂等：重复执行 ``init_db()`` 不炸、结果不变。
 - 既有行回填确定性：``visual_entity_id = 'bible:' || character_name``。
 - 回填只补 NULL，不覆盖已经显式设置过的值（含合并后改写的情形）。
-- ``visual_entity_merges`` 建表成功 + 写入路径 ``record_visual_entity_merge``
-  可用、可回溯、随项目级联删除。
+- ``visual_entity_merges`` 建表成功。写入路径的可用性/可回溯/级联删除
+  覆盖见 ``tests/test_character_discovery.py`` 对
+  ``app.portraits._record_visual_entity_merge``（生产实际写入路径）的测试。
 """
 from __future__ import annotations
 
@@ -174,82 +175,26 @@ def test_backfill_does_not_clobber_explicitly_set_value(tmp_path, monkeypatch) -
     ).fetchone()[0] == "bible:乙(合并后规范名)"
 
 
-def test_record_visual_entity_merge_writes_recoverable_audit_row(tmp_path, monkeypatch) -> None:
-    database = tmp_path / "visual-entity-merge-write.db"
-    _bootstrap_legacy_db(database)
-    _patch_db(monkeypatch, tmp_path, database)
-    db.init_db()
-
-    conn = db.get_conn()
-    merge_id = db.record_visual_entity_merge(
-        conn,
-        project_id="p1",
-        from_visual_entity_id="entity:abc123",
-        to_visual_entity_id="bible:李富贵",
-        canonical_name="李富贵",
-        merge_rule="same_batch_k_absorption",
-        evidence_episode_no=10,
-        selected_portrait_id="portrait_9e2209df3692",
-    )
-    conn.commit()
-
-    row = conn.execute(
-        "SELECT * FROM visual_entity_merges WHERE id=?", (merge_id,)
-    ).fetchone()
-    assert row is not None
-    assert dict(row) == {
-        "id": merge_id,
-        "project_id": "p1",
-        "from_visual_entity_id": "entity:abc123",
-        "to_visual_entity_id": "bible:李富贵",
-        "canonical_name": "李富贵",
-        "merge_rule": "same_batch_k_absorption",
-        "selected_portrait_id": "portrait_9e2209df3692",
-        "evidence_episode_no": 10,
-        "created_at": row["created_at"],
-    }
-    assert isinstance(row["created_at"], float)
-
-
-def test_visual_entity_merges_row_is_append_only_on_repeated_calls(tmp_path, monkeypatch) -> None:
-    database = tmp_path / "visual-entity-merge-append.db"
-    _bootstrap_legacy_db(database)
-    _patch_db(monkeypatch, tmp_path, database)
-    db.init_db()
-
-    conn = db.get_conn()
-    for _ in range(2):
-        db.record_visual_entity_merge(
-            conn,
-            project_id="p1",
-            from_visual_entity_id="entity:same",
-            to_visual_entity_id="bible:许清",
-            canonical_name="许清",
-            merge_rule="same_batch_k_absorption",
-            evidence_episode_no=6,
-        )
-    conn.commit()
-    count = conn.execute(
-        "SELECT COUNT(*) FROM visual_entity_merges WHERE from_visual_entity_id='entity:same'"
-    ).fetchone()[0]
-    assert count == 2
-
-
 def test_visual_entity_merges_cascades_on_project_delete(tmp_path, monkeypatch) -> None:
+    """FK 级联删除是表本身的属性；生产写入路径是
+    ``app.portraits._record_visual_entity_merge``（见
+    ``tests/test_character_discovery.py``），这里直接用原始 SQL 造行，只验证
+    ``visual_entity_merges`` 的 ``ON DELETE CASCADE`` 约束。
+    """
     database = tmp_path / "visual-entity-merge-cascade.db"
     _bootstrap_legacy_db(database)
     _patch_db(monkeypatch, tmp_path, database)
     db.init_db()
 
     conn = db.get_conn()
-    db.record_visual_entity_merge(
-        conn,
-        project_id="p1",
-        from_visual_entity_id="entity:cascade",
-        to_visual_entity_id="bible:待删除",
-        canonical_name="待删除",
-        merge_rule="same_batch_k_absorption",
-        evidence_episode_no=1,
+    conn.execute(
+        "INSERT INTO visual_entity_merges(id, project_id, from_visual_entity_id, "
+        "to_visual_entity_id, canonical_name, merge_rule, selected_portrait_id, "
+        "evidence_episode_no, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            "vmerge_test_cascade", "p1", "entity:cascade", "bible:待删除",
+            "待删除", "same_batch_k_absorption", None, 1, db.now(),
+        ),
     )
     conn.commit()
     assert conn.execute(

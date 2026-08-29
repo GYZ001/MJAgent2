@@ -644,28 +644,6 @@ def _load_reference_gallery(conn, shot_row) -> dict | None:
     return None
 
 
-def _append_reference_notes_from_dicts(prompt_text: str, refs: list[dict]) -> str:
-    # Reused galleries must describe the exact provider pack, not every image
-    # retained for keyframe generation/QA.
-    packed_refs = video_modes.pack_reference_images_for_seedance(
-        _usable_reference_dicts({"reference_images": refs}),
-    )
-    return video_modes.append_reference_prompt_notes_from_dicts(
-        prompt_text,
-        packed_refs,
-    )
-
-
-def scene_generation_kinds(shot_row, requested: list[str] | None = None) -> list[str]:
-    """旧关键帧 API 保留名；任何调用方都应改走参考图视频入口。"""
-    raise ValueError("关键帧功能已下线；请从参考图视频入口直接生成本镜视频")
-
-
-def shot_keyframes_ready(shot_row) -> bool:
-    """兼容旧工具脚本；关键帧链路已下线，恒为 False。"""
-    return False
-
-
 def _transition_value(shot_row) -> str:
     transition = (_row_value(shot_row, "transition") or "硬切").strip()
     return transition or "硬切"

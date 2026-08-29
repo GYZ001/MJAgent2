@@ -400,11 +400,6 @@ def _asset_from_path(*, path: str, ref_type: str, source: str, shot_id: str | No
     )
 
 
-def reusable_previous_assets(conn: Any, *, prev_shot: Any | None, limit: int, threshold: float) -> list[ReferenceImageAsset]:
-    """旧关键帧候选不再进入参考图集合。连续性只复用上一镜实际采用视频的尾帧。"""
-    return []
-
-
 def character_reference_assets(bible: Bible, character_names: list[str], *, limit: int,
                                project_id: str | None = None,
                                episode_no: int | None = None) -> list[ReferenceImageAsset]:
@@ -614,21 +609,6 @@ def is_narrative_keyframe_slot(slot_key: str | None) -> bool:
 
     value = str(slot_key or "")
     return value == NARRATIVE_KEYFRAME_SLOT or value.startswith(f"{NARRATIVE_KEYFRAME_SLOT}_")
-
-
-def narrative_keyframe_slot_index(slot_key: str | None) -> int | None:
-    from app.multiview import NARRATIVE_KEYFRAME_SLOT
-
-    value = str(slot_key or "")
-    if value == NARRATIVE_KEYFRAME_SLOT:
-        return None  # master beat 的时序位置由冻结 beat metadata 决定
-    prefix = f"{NARRATIVE_KEYFRAME_SLOT}_"
-    if not value.startswith(prefix):
-        return None
-    try:
-        return int(value[len(prefix):])
-    except ValueError:
-        return None
 
 
 def timeline_keyframe_plan(shot: Shot) -> dict[str, Any]:
@@ -3544,16 +3524,6 @@ async def assemble_continuity_tail(
     return selected
 
 
-def _is_character_bearing(asset: ReferenceImageAsset) -> bool:
-    """该参考图里是否含人物（会参与构图、可能被模型当成额外主体复制）。纯场景/环境图返回 False。"""
-    return asset.type in {"character", "plot_key_frame", "previous_shot_frame"} or bool(asset.relatedCharacterIds)
-
-
-def _is_character_bearing_ref(ref: dict[str, Any]) -> bool:
-    return (ref.get("type") in {"character", "plot_key_frame", "previous_shot_frame"}
-            or bool(ref.get("relatedCharacterIds")))
-
-
 def _apply_redundancy_penalties(assets: list[ReferenceImageAsset]) -> None:
     """对超额含人物图按类型优先级降低排序位置；不直接踢出，只影响装箱时的先后顺序。
 
@@ -3624,48 +3594,6 @@ def _reference_identity_names(ref: dict[str, Any]) -> set[str]:
         if entity_name:
             names.add(entity_name)
     return names
-
-
-def _keyframe_identity_names(refs: list[dict[str, Any]]) -> set[str]:
-    names: set[str] = set()
-    for ref in refs:
-        if ref.get("deleted") or not ref.get("selectedForSeedance"):
-            continue
-        is_keyframe = (
-            ref.get("type") == "plot_key_frame"
-            or is_narrative_keyframe_slot(ref.get("slot_key"))
-        )
-        if is_keyframe:
-            names.update(_reference_identity_names(ref))
-    return names
-
-
-def _suppress_character_anchors_covered_by_keyframes(refs: list[dict[str, Any]]) -> None:
-    """关键帧已承载某人物时，不再把该人物定妆照作为第二张主体图发送。
-
-    Seedance 的多图接口在供应商边界只接收通用 ``reference_image``，没有实体 ID
-    可声明两张图是同一个人。同时发送定妆照和含该人物的剧情关键帧会诱发分身。
-    定妆照仍保留为关键帧生成/QA 证据，只从本次视频实际输入中移除。
-    """
-    carried_identities = _keyframe_identity_names(refs)
-    if not carried_identities:
-        return
-    for ref in refs:
-        if (
-            ref.get("deleted")
-            or not ref.get("selectedForSeedance")
-            or ref.get("type") != "character"
-            or not (_reference_identity_names(ref) & carried_identities)
-        ):
-            continue
-        ref["selectedForSeedance"] = False
-        ref["purposes"] = [
-            purpose for purpose in (ref.get("purposes") or [])
-            if purpose != "video_input"
-        ]
-        ref["required"] = False
-        ref["rejectReason"] = None
-        ref["selection_reason"] = "身份已由剧情关键帧承载，避免同一人物双重注入"
 
 
 def pack_reference_images_for_seedance(

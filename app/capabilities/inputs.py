@@ -176,16 +176,6 @@ class StoryboardGenerateInput(StandardCommandInput):
     preflight_token: str | None = None
 
 
-class StoryboardPatchShotInput(StandardCommandInput):
-    episode_id: str
-    shot_uid: str | None = None
-    shot_no: int | None = None
-    patch: dict[str, Any]
-    expected_hash: str = ""
-    production_revision_id: str = ""
-    idempotency_key: str = ""
-
-
 class ShotUpdateInput(StandardCommandInput):
     shot_id: str
     patch: dict[str, Any]

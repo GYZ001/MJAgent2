@@ -13,7 +13,6 @@ from app.completion_grant import (
     episode_video_completion_budget_requirement,
     episode_video_budget_snapshot,
     issue_video_completion_grant,
-    mark_provider_video_budget_claim,
     reserve_provider_video_budget,
     validate_video_grant,
 )
@@ -95,7 +94,6 @@ def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
             operation_id=f"video-create-budget-v{index}",
             amount_cny=4.0,
         ) is True
-        mark_provider_video_budget_claim(f"video-create-budget-v{index}", "accepted")
     # 第 4 次尝试超出含余量的 cap（12.0）——余量覆盖真实重投需求，但仍是
     # 有限的，超出仍必须被拦，不能靠它把预算保护整个放宽。
     assert reserve_provider_video_budget(
@@ -261,7 +259,6 @@ def test_completion_budget_requirement_includes_sunk_duplicate_claims() -> None:
             operation_id=operation_id,
             amount_cny=4,
         ) is True
-        mark_provider_video_budget_claim(operation_id, "accepted")
 
     assert episode_video_completion_budget_requirement("required-e") == {
         "used_cny": 8.0,

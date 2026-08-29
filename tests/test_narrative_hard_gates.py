@@ -11,7 +11,6 @@ import json
 import pytest
 
 from app.narrative import (
-    validate_blind_review,
     validate_screenplay_narrative,
     validate_storyboard_narrative,
     validate_storyboard_screenplay_authority,
@@ -41,11 +40,9 @@ from app.schemas import (
     Storyboard,
 )
 from test_narrative_continuity import (
-    _blind_observations,
     _boundary,
     _codes,
     _paths,
-    _review_dimension_results,
     _screenplay,
     _episode_6_relationship_golden,
     _settled_followup_shot,
@@ -690,56 +687,6 @@ def test_sufficient_setup_memory_forbids_an_unnecessary_recall_decision() -> Non
     screenplay.narrative_plan.setup_payoff_contracts[0].recall_needed = True
     assert "SETUP_RECALL_DECISION_MISMATCH" in _codes(
         validate_screenplay_narrative(screenplay, require=True)
-    )
-
-
-def _passing_blind_report() -> NarrativeReviewReport:
-    return NarrativeReviewReport.model_validate(
-        {
-            "narrative_review_report_id": "NRR-hard-gate",
-            "scope_id": "episode-generic",
-            "experience_intent_ids": ["XI-1"],
-            "observation_ids": ["BAO-cold", "BAO-context"],
-            "target_delta_results": [
-                {
-                    "audience_prior_id": "AP-cold",
-                    "target_delta_id": "XD-cold",
-                    "result": "satisfied",
-                    "predicted_score": 0.95,
-                    "supporting_observation_ids": ["BAO-cold"],
-                    "supporting_evidence_ids": ["EV-1"],
-                    "reason": "The frozen cold recall contains the evidence.",
-                },
-                {
-                    "audience_prior_id": "AP-context",
-                    "target_delta_id": "XD-context",
-                    "result": "satisfied",
-                    "predicted_score": 0.95,
-                    "supporting_observation_ids": ["BAO-context"],
-                    "supporting_evidence_ids": ["EV-1"],
-                    "reason": "The frozen contextual recall contains the evidence.",
-                },
-            ],
-            **_review_dimension_results(),
-            "decision": "pass",
-        }
-    )
-
-
-def test_followup_evidence_cannot_retroactively_satisfy_spontaneous_recall() -> None:
-    screenplay = _screenplay()
-    observations = _blind_observations()
-    report = _passing_blind_report()
-    assert validate_blind_review(screenplay, observations, report) == []
-
-    observations[0].spontaneous_supporting_evidence_ids = []
-    observations[0].neutral_followup_observations = [
-        {"supporting_evidence_ids": ["EV-1"], "answer": "Recovered after prompting."}
-    ]
-    assert observations[0].supporting_evidence_ids == ["EV-1"]
-
-    assert "REVIEW_EVIDENCE_NOT_SPONTANEOUS" in _codes(
-        validate_blind_review(screenplay, observations, report)
     )
 
 

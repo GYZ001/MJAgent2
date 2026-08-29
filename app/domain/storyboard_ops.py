@@ -193,22 +193,6 @@ def _insert_storyboard_shot(
     return shot_id
 
 
-def _sync_storyboard_shot_timing(
-    conn,
-    episode_id: str,
-    board: Storyboard,
-    expected_screenplay_artifact_id: str | None = None,
-) -> None:
-    _assert_storyboard_write_authorized(conn, episode_id, expected_screenplay_artifact_id)
-    for shot in board.shots:
-        conn.execute(
-            "UPDATE shots SET duration_s=?, transition=?, continuity_from_prev=?, last_frame_desc=?, shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE episode_id=? AND shot_no=?",
-            (shot.duration_s, shot.transition, int(shot.continuity_from_prev), shot.last_frame_desc,
-             _shot_contract_json(shot), shot.continuity_mode, shot.observed_state_out,
-             episode_id, shot.shot_no),
-        )
-
-
 def _sync_storyboard_scene_bindings(conn, episode_id: str, board: Storyboard) -> int:
     """回写分离后的时间、规范场景图身份及兼容显示文案。
 
@@ -4225,32 +4209,6 @@ def _apply_storyboard_structure_transaction(episode_id: str, body: dict):
     }
 
 
-async def _plan_one_shot(shot_row, *, conn=None, force: bool = False) -> dict:
-    """Compatibility entry: resolve one shot from the authoritative episode plan."""
-    from app.video_plan import generate_episode_plan
-
-    try:
-        episode_id = shot_row["episode_id"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise ValueError("单镜模式计划缺少 episode_id，不能绕过整集规划") from exc
-    plan = await generate_episode_plan(episode_id, force=force, conn=conn)
-    item = next((candidate for candidate in plan.shots if candidate.shot_id == shot_row["id"]), None)
-    if item is None:
-        raise ValueError("整集视频模式计划未覆盖当前镜头")
-    return item.model_dump(mode="json")
-
-
-async def _ensure_shot_mode_plan(conn, shot_id: str, *, force: bool = False) -> None:
-    """Ensure the shot is projected from a valid versioned episode plan."""
-    shot_row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
-    if not shot_row:
-        return
-    plan_dict = await _plan_one_shot(shot_row, conn=conn, force=force)
-    conn.execute("UPDATE shots SET mode_plan=? WHERE id=?",
-                 (json.dumps(plan_dict, ensure_ascii=False), shot_id))
-    conn.commit()
-
-
 _MAX_PUBLIC_IMAGE_INPUT_CHARS = 1_000_000
 
 
@@ -5424,30 +5382,6 @@ def preview_spoken_conflict(shot_id: str, body: dict):
         # 即使其中一侧结构相同，也需要明确变更来源来完成冲突状态同步。
         raise HTTPException(409, "所选口播基准没有可重建内容，请选择另一侧或继续编辑")
     return {**impact, **session, "choice": choice}
-
-
-def _storyboard_residual_hint(residual: list[str]) -> str:
-    """Return an actionable repair hint for the current validation failures."""
-    text = "；".join(residual)
-    hints: list[str] = []
-    if "口播上限" in text or "念不完" in text:
-        hints.append("请在本镜台词区精简文案，或使用“在当前镜后新增”分担台词")
-    if "角色圣经中不存在" in text or "既不在角色圣经" in text or "圣经角色为" in text:
-        hints.append("请在本镜“画面角色”选择器中改选人物谱已有角色")
-    if "未落实本镜大纲 covers" in text or "只停留在大纲" in text:
-        hints.append("请在本镜“画面与动作”或“台词”中写出该剧情事实")
-    if not hints:
-        hints.append("请定位问题镜继续修改；如需自动处理，可在任务详情中选择继续生成或转人工")
-    return "；".join(hints)
-
-
-def _storyboard_loop_exit_text(exit_reason: str) -> str:
-    """Translate the actual AgentLoop exit reason without misreporting exhaustion."""
-    return {
-        "max_iterations": "已达到重试上限",
-        "no_quality_gain": "连续修复无质量提升，修复循环已停止",
-        "stalled": "连续输出相同问题，修复循环已停止",
-    }.get(exit_reason, "修复循环未通过")
 
 
 def _board_from_shot_rows(rows, episode_no: int) -> Storyboard:

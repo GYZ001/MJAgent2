@@ -39,8 +39,7 @@ from app.planning import chapter_preview
 from app.schemas import (Bible, EpisodeScreenplay, Shot, Storyboard,
                          StoryboardOutline, StoryboardOutlineShot, schema_errors,
                          character_is_portrait_eligible)
-from app.stages import (SCREENPLAY_SOURCE_BUDGET_CHARS, StageError, generate_bible,
-                        generate_screenplay)
+from app.stages import (SCREENPLAY_SOURCE_BUDGET_CHARS, StageError, generate_bible)
 from app.validators import (relieve_spoken_overflow,
                             normalize_action_desc, normalize_continuity,
                             normalize_offbible_characters,
@@ -108,10 +107,6 @@ def _recover_orphan_bible_dicts(conn, rows: list[dict]) -> None:
             changed = True
     if changed:
         conn.commit()
-
-
-def _track_bible_task(project_id: str, task: asyncio.Task) -> None:
-    task_registry.register("bible", project_id, task, project_id=project_id)
 
 
 def _refs_task_active(project_id: str) -> bool:
@@ -192,8 +187,9 @@ def _compact_target_columns(compact_target: int) -> dict[str, object]:
 def _apply_compact_target(conn, episode_id: str, ep_data: dict, compact_target: int) -> None:
     """Persist the compact target and mirror every written column into ``ep_data``.
 
-    ``ep_data`` is the in-memory snapshot handed to ``run_screenplay_production``
-    and read downstream as ``episode.get("planning_target_duration_s")`` for the
+    ``ep_data`` is the in-memory episode snapshot passed through the
+    screenplay-generation pipeline and read downstream as
+    ``episode.get("planning_target_duration_s")`` for the
     duration-expansion CAS.  Writing the DB and the snapshot from one
     ``_compact_target_columns`` dict guarantees "whatever was written is synced",
     so the CAS can never see a stale non-rounded planning value.

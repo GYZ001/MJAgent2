@@ -635,7 +635,6 @@ def test_select_best_video_candidate_adopts_first_technical_version(monkeypatch)
     conn.commit()
     monkeypatch.setattr(media, "get_conn", lambda: conn)
     monkeypatch.setattr(media, "grade_shot_video", lambda *a, **k: {"grade": "B"})
-    monkeypatch.setattr(media, "merge_observed_state_out_into_shot_contract", lambda *a, **k: None)
 
     selected = media.select_best_video_candidate("s")
 

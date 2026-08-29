@@ -81,19 +81,6 @@ export function roleLabel(role: string): string {
   return ROLE_LABELS[role as WorkspaceRole] ?? role;
 }
 
-/** 某个团队（workspace）下当前用户拥有的 scope 集合；不在该团队则为空集。 */
-export function scopesFor(state: AuthState, workspaceId: string): ReadonlySet<Scope> {
-  if (state.isSystemAdmin) return new Set(ALL_SCOPES);
-  const membership = state.workspaces.find((item) => item.id === workspaceId);
-  if (!membership) return new Set();
-  return new Set(ROLE_SCOPES[membership.role as WorkspaceRole] ?? []);
-}
-
-/** 是否系统管理员——顶层布尔位，不是某个团队里的角色。 */
-export function isSystemAdmin(state: AuthState): boolean {
-  return state.isSystemAdmin;
-}
-
 /** 能否看到「系统设置」入口：只看 is_system_admin，与团队内角色无关。 */
 export function canSeeSystemSettings(state: AuthState): boolean {
   return state.isSystemAdmin;

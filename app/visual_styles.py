@@ -54,10 +54,6 @@ VISUAL_STYLE_PRESETS: tuple[VisualStylePreset, ...] = (
 DEFAULT_VISUAL_STYLE_NAME = "国漫电影风"
 
 
-def visual_style_names() -> list[str]:
-    return [preset.name for preset in VISUAL_STYLE_PRESETS]
-
-
 def visual_style_options() -> list[dict[str, str]]:
     return [
         {

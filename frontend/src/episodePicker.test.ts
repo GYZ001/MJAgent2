@@ -1,11 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   episodeProductionStatus,
-  filterEpisodeOptions,
   pickerWindowParams,
   resolveWindowedEpisodeId,
   resolveEpisodeId,
-  resolveRoutedEpisodeId,
   type EpisodeOption,
 } from './episodePicker'
 
@@ -23,35 +21,11 @@ describe('episode picker', () => {
     expect(resolveEpisodeId([], 'e2')).toBeNull()
   })
 
-  it('keeps an explicit routed episode authoritative, including a missing deep link', () => {
-    expect(resolveRoutedEpisodeId(episodes, 'e1', 'e2')).toBe('e2')
-    expect(resolveRoutedEpisodeId(episodes, 'e1', 'missing')).toBe('missing')
-    expect(resolveRoutedEpisodeId([], null, 'missing')).toBe('missing')
-    expect(resolveRoutedEpisodeId(episodes, 'e2', null)).toBe('e2')
-    expect(resolveRoutedEpisodeId(episodes, null, null)).toBe('e1')
-  })
-
   it('presents failed screenplay work as needing attention', () => {
     expect(episodeProductionStatus({ screenplay_status: 'failed', status: 'pending' })).toBe('需处理')
     expect(episodeProductionStatus({ screenplay_status: 'ready', status: 'script_failed' })).toBe('需处理')
     expect(episodeProductionStatus({ screenplay_status: 'running', status: 'pending' })).toBe('剧本中')
     expect(episodeProductionStatus({ screenplay_status: 'ready', status: 'scripted' })).toBe('待确认')
-  })
-
-  it('searches episode numbers and titles before applying the result limit', () => {
-    expect(filterEpisodeOptions(episodes, '2')).toEqual([episodes[1]])
-    expect(filterEpisodeOptions(episodes, '终局')).toEqual([episodes[2]])
-    expect(filterEpisodeOptions(episodes, '', 2)).toEqual(episodes.slice(0, 2))
-  })
-
-  it('finds the last item in a 1646-episode project and keeps the 60-result cap', () => {
-    const longProject: EpisodeOption[] = Array.from({ length: 1646 }, (_, index) => ({
-      id: `e${index + 1}`,
-      episode_no: index + 1,
-      title: `分集 ${index + 1}`,
-    }))
-    expect(filterEpisodeOptions(longProject, '1646')).toEqual([longProject[1645]])
-    expect(filterEpisodeOptions(longProject, '')).toHaveLength(60)
   })
 })
 

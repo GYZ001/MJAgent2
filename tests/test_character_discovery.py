@@ -7176,15 +7176,6 @@ def test_voice_normalization_projects_non_voice_delivery_out_of_speaker_fields()
     }]
 
 
-def test_source_identity_contexts_cover_complete_long_source() -> None:
-    source = "甲" * 19 + "\n\n" + "乙" * 17
-
-    chunks = portraits._source_identity_contexts(source, budget=10)
-
-    assert len(chunks) == 4
-    assert "".join(chunks) == source.replace("\n", "")
-
-
 def test_future_identity_keeps_current_display_label() -> None:
     script = EpisodeScreenplay(
         episode_no=1,
@@ -7219,134 +7210,6 @@ def test_future_identity_keeps_current_display_label() -> None:
     assert "青衣人挡在门前" in script.full_script_text
     assert "丁力：止步" in script.full_script_text
     assert "丁力" not in script.scene_outline[0].summary
-
-
-@pytest.mark.skip(
-    reason="休眠待 P1 清理：断言重型剧本流水线内的全章人物发现自动建人物谱行为；"
-    "screenplay 契约 6.0.0 起 _screenplay_task 改为轻量 episode_prep_pack 流程"
-    "（app/production/prep_pack.py），角色/场景改为对 character_portraits/"
-    "scene_references 的确定性解析，不再跑全章人物发现模型调用。"
-)
-def test_late_episode_screenplay_auto_adds_character_and_defers_portrait_generation(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "late-episode-character.db")
-    monkeypatch.setattr(db._local, "conn", None, raising=False)
-    db.init_db()
-    conn = db.get_conn()
-    bible = Bible(
-        world=World(visual_style_canonical="国风"),
-        characters=[Character(
-            name="甲一",
-            role="主角",
-            appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩",
-        )],
-    )
-    conn.execute(
-        "INSERT INTO projects(id,name,status,bible_json,bible_version,bible_status,created_at) "
-        "VALUES('p1','斗破苍穹','planned',?,1,'ready',1)",
-        (bible.model_dump_json(),),
-    )
-    conn.execute(
-        "INSERT INTO chapters(project_id,idx,title,content,char_count) VALUES(?,?,?,?,?)",
-        ("p1", 1926, "第一千六百二十二章 对决之战",
-         "角色丙踏着血云现身。角色丙与甲一在中域上空连续交锋。" * 8, 240),
-    )
-    conn.execute(
-        """INSERT INTO episodes(
-            id,project_id,episode_no,title,hook,cliffhanger,synopsis,source_chapters,
-            target_duration_s,screenplay_status,status,created_at
-        ) VALUES('e1926','p1',1926,'对决之战','','','角色丙现身','[1926]',50,'running','planned',1)"""
-    )
-    conn.commit()
-
-    async def fake_candidates(source_text, current_bible, episode_no, *, draft_text="", **_kwargs):
-        assert episode_no == 1926
-        assert "角色丙" in source_text
-        return [{"name": "角色丙", "kind": "onscreen", "evidence": "角色丙踏着血云现身"}]
-
-    async def fake_assess(*_args, **_kwargs):
-        return {
-            "subject_kind": "person",
-            "important": True,
-            "reason": "本章核心反派并反复出场",
-            "role": "反派",
-            "appearance_canonical": "中年男性，黑色长发披肩，暗红帝袍覆身，血色双瞳冷漠，周身缠绕血云",
-            "personality": "冷酷",
-            "speech_style": "低沉威压",
-            "relationships": [{"to": "甲一", "relation": "决战对手"}],
-        }
-
-    async def portrait_failure(*_args, **_kwargs):
-        raise AssertionError("剧本阶段不应调用定妆图 Provider")
-
-    generated_with: list[set[str]] = []
-
-    async def fake_generate(ep_data, source_text, current_bible, prev_ending=""):
-        names = {character.name for character in current_bible.characters}
-        generated_with.append(names)
-        assert "角色丙" in names
-        scenes = [
-            ScriptScene(
-                scene_no=index,
-                scene_heading=f"【场{index}】日 / 中域天际",
-                story_function="推进双帝决战并交接下一场冲突",
-                characters=["甲一", "角色丙"],
-                summary="甲一与角色丙在中域天际正面交锋，强者力量持续碰撞。",
-                conflict="双方争夺天地存亡的最终胜负",
-                turn="强者交锋进一步升级",
-                source_basis="保留角色丙现身并与甲一连续交锋的原文事件",
-            )
-            for index in range(1, 4)
-        ]
-        return EpisodeScreenplay(
-            episode_no=ep_data["episode_no"],
-            title="对决之战",
-            scene_outline=scenes,
-            full_script_text="【场1】角色丙：今日便结束一切。\n甲一：那就一战。",
-        )
-
-    async def fake_production(*, episode_id, episode, source_text, bible, **_kwargs):
-        # 生产链仍应看到 preflight 已追加的 source-backed 角色
-        script = await fake_generate(episode, source_text, bible)
-        conn.execute(
-            "UPDATE episodes SET screenplay_json=?, screenplay_status='ready', "
-            "screenplay_error=NULL, screenplay_updated_at=? WHERE id=?",
-            (script.model_dump_json(), db.now(), episode_id),
-        )
-        conn.commit()
-        return script
-
-    monkeypatch.setattr(portraits, "discover_character_candidates", fake_candidates)
-    monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
-    monkeypatch.setattr(portraits, "_generate_fresh_portrait", portrait_failure)
-    monkeypatch.setattr(
-        "app.production.screenplay_repair.run_screenplay_production",
-        fake_production,
-    )
-
-    result = asyncio.run(api._screenplay_task("e1926"))
-
-    project = conn.execute(
-        "SELECT bible_json,bible_version FROM projects WHERE id='p1'"
-    ).fetchone()
-    names = {
-        item["name"] for item in json.loads(project["bible_json"])["characters"]
-    }
-    episode = conn.execute(
-        "SELECT screenplay_status,screenplay_json,screenplay_error FROM episodes WHERE id='e1926'"
-    ).fetchone()
-    assert result is not None
-    assert result.title == "对决之战"
-    assert names == {"甲一", "角色丙"}
-    assert project["bible_version"] == 2
-    assert generated_with == [{"甲一", "角色丙"}]
-    assert episode["screenplay_status"] == "ready"
-    assert episode["screenplay_json"] is not None
-    assert episode["screenplay_error"] is None
-    queue = json.loads(conn.execute(
-        "SELECT bible_auto_changes_json FROM projects WHERE id='p1'"
-    ).fetchone()["bible_auto_changes_json"])
-    assert queue[0]["character"] == "角色丙"
-    assert queue[0]["status"] == "auto_applied_asset_pending"
 
 
 def test_future_identity_accepts_new_name_with_owned_verbatim_evidence(
@@ -10448,7 +10311,6 @@ def test_card_role_must_come_from_the_declared_enum() -> None:
     """
     assert portraits.CHARACTER_CARD_ROLES == ("主角", "重要配角", "反派")
     assert "重要场景载体" not in portraits.CHARACTER_CARD_ROLES
-    assert portraits.CHARACTER_SUBJECT_PERSON in portraits.CHARACTER_SUBJECT_KINDS
 
 
 def test_author_pen_name_is_recorded_as_not_a_character(monkeypatch) -> None:

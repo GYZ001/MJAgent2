@@ -321,8 +321,6 @@ MEDIA_INPUT_MAX_EDGE = max(512, int(os.environ.get("MEDIA_INPUT_MAX_EDGE", "1280
 MEDIA_INPUT_JPEG_QUALITY = min(31, max(2, int(os.environ.get("MEDIA_INPUT_JPEG_QUALITY", "5"))))
 VIDEO_POLL_INTERVAL = 10.0
 # Phase 1：提交后单次查询即释放 worker；不再用 15 分钟连续占槽窗口。
-# 保留 VIDEO_POLL_BUDGET 仅作兼容旧测试/文档，实际轮询路径不再占用该预算。
-VIDEO_POLL_BUDGET = 0
 VIDEO_POLL_RESUME_DELAY = float(os.environ.get("VIDEO_POLL_RESUME_DELAY", "10"))
 # 供应商任务允许的总墙钟时间。用于防止上游永远停在 running；正常长任务跨越
 # 多次 waiting_provider 轮询继续等待。
@@ -413,11 +411,8 @@ VIDEO_DURATION_MAX_S = 15
 DEFAULT_VIDEO_DURATION_S = VIDEO_DURATION_MIN_S
 ALLOWED_DURATIONS = frozenset(range(VIDEO_DURATION_MIN_S, VIDEO_DURATION_MAX_S + 1))
 EPISODE_TARGET_MIN_S = 40
-EPISODE_TARGET_MAX_S = None  # 整集时长不设产品上限；完整剧情与容量估算决定最终值
 EPISODE_TARGET_DEFAULT_S = 50
 EPISODE_TARGET_STEP_S = 10  # 用户输入是最低节奏参考；生成后只允许按实际容量向上扩展
-# 仅用于防止异常模型无限循环的技术熔断，不是产品镜头数上限。
-STORYBOARD_MAX_SHOTS = 1_000_000
 # 常用建议值仅供 UI 快捷输入，不构成合法值上限。
 EPISODE_TARGET_CHOICES = tuple(range(EPISODE_TARGET_MIN_S, 181, EPISODE_TARGET_STEP_S))
 # 口播预算（纯文字、不计标点）：5 秒 18 字，按每 5 秒 18 字线性换算到 VIDEO_DURATION_MAX_S

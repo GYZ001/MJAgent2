@@ -995,10 +995,6 @@ async def test_generate_episode_reused_active_version_is_not_adopted(
         lambda **_kwargs: {"blockers": [], "characters": [], "scenes": []},
     )
 
-    async def ensure_mode_plan(_conn, _shot_id):
-        return None
-
-    monkeypatch.setattr(api, "_ensure_shot_mode_plan", ensure_mode_plan)
     monkeypatch.setattr(
         api.worker,
         "enqueue_shot",

@@ -77,17 +77,6 @@ def _extract_shot_nos(issues: list[Issue]) -> list[int]:
     return found
 
 
-def preferred_level_for_code(code: str) -> RepairLevel:
-    """Deprecated compatibility shim: content issue codes carry no repair level.
-
-    Operational pauses are handled by explicit issue evidence in
-    :func:`route_issues`; every content code deliberately returns the same
-    neutral local scope.
-    """
-    _ = code
-    return "L1"
-
-
 def strategy_for_level(level: RepairLevel) -> RepairStrategy:
     return {
         "L0": "normalize",

@@ -474,8 +474,3 @@ def shot_pipeline_status(shot_id: str, *, conn=None) -> dict[str, Any]:
         return {}
     statuses, _ = episode_pipeline_statuses(row["episode_id"], conn=db)
     return statuses.get(shot_id, {})
-
-
-def episode_pipeline_summary(episode_id: str, *, conn=None) -> dict[str, Any]:
-    _, summary = episode_pipeline_statuses(episode_id, conn=conn)
-    return summary

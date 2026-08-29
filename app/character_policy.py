@@ -51,12 +51,6 @@ def typed_functional_identity_names(screenplay: object | None) -> set[str]:
     }
 
 
-def generic_functional_extra_role(name: str) -> str | None:
-    """Return an existing synthetic ID; never infer identity from a role name."""
-    value = (name or "").strip()
-    return value if is_functional_extra(value) else None
-
-
 def is_collective_role(name: str) -> bool:
     """只识别上游已签发的 ``collective:`` 稳定身份 ID。"""
     value = (name or "").strip()
@@ -112,15 +106,4 @@ def functional_extra_anchor(
     return (
         f"功能性路人「{name}」，穿着符合当前时代与职业身份的普通服饰，外貌自然克制、"
         "不使用任何主角标志性特征；同一镜头内脸型、发型和服装保持一致，不抢主角视觉中心"
-    )
-
-
-def functional_extra_policy_text() -> str:
-    """Shared prompt wording for the deterministic storyboard contract."""
-    return (
-        "功能身份只能引用剧本 identity_contracts 中已声明为 "
-        "role_type=functional_character 的稳定 identity_id；"
-        "不得根据姓名、职业、年龄、服饰、称号或固定词表自行判断谁是路人。"
-        "该身份仍须在 action_desc 或首尾帧中明确可见；"
-        "具名或跨镜持续角色必须使用 identity_contracts/角色圣经中的 canonical identity"
     )

@@ -603,12 +603,6 @@ def test_repair_loop_can_retain_complete_task_and_candidate(monkeypatch) -> None
     assert candidate_sentinel in prompts[1]
 
 
-def test_storyboard_loop_exit_message_reflects_actual_reason() -> None:
-    assert api._storyboard_loop_exit_text("max_iterations") == "已达到重试上限"
-    assert "无质量提升" in api._storyboard_loop_exit_text("no_quality_gain")
-    assert "相同问题" in api._storyboard_loop_exit_text("stalled")
-
-
 def test_context_pack_records_hash_and_truncation_without_hiding_it() -> None:
     pack = ContextPack(goal="screenplay")
     selected = pack.add_text(
@@ -628,72 +622,3 @@ def test_context_pack_records_hash_and_truncation_without_hiding_it() -> None:
     assert manifest["items"][0]["truncated"] is True
     assert len(manifest["items"][0]["content_hash"]) == 64
 
-
-@pytest.mark.skip(
-    reason="休眠待 P1 清理：断言重型剧本流水线（run_screenplay_production/QA "
-    "blocker/repairing 工作副本）的行为；screenplay 契约 6.0.0 起 _screenplay_task "
-    "改为轻量 episode_prep_pack 流程（app/production/prep_pack.py），不再有该状态机。"
-)
-def test_screenplay_task_keeps_repairing_without_publishing_warning(
-    tmp_path, monkeypatch
-) -> None:
-    """普通 QA blocker 不得以 warning 可交付终态落库；应保持 repairing / 工作副本。"""
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "screenplay-warning.db")
-    monkeypatch.setattr(db._local, "conn", None, raising=False)
-    db.init_db()
-    conn = db.get_conn()
-    conn.execute(
-        "INSERT INTO projects(id, name, status, bible_json, created_at) "
-        "VALUES('p1','P','planned',NULL,1)"
-    )
-    conn.execute(
-        "INSERT INTO chapters(project_id, idx, title, content) "
-        "VALUES('p1',1,'Chapter','source text')"
-    )
-    conn.execute(
-        """INSERT INTO episodes(
-            id, project_id, episode_no, title, hook, cliffhanger, synopsis,
-            source_chapters, target_duration_s, screenplay_status, status, created_at
-        ) VALUES('e1','p1',1,'Episode','','','', '[1]', 50, 'running', 'planned', 1)"""
-    )
-    conn.commit()
-    candidate = EpisodeScreenplay(
-        episode_no=1,
-        full_script_text="working repair candidate",
-        stakes="失败失去资格",
-        dramatic_question="能否赢？",
-        protagonist_goal="赢",
-        obstacle="阻力",
-    )
-
-    async def fake_production(**_kwargs):
-        conn.execute(
-            "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, "
-            "screenplay_updated_at=? WHERE id=?",
-            ("自动修复中：剩余 blocker", db.now(), "e1"),
-        )
-        conn.commit()
-        return candidate
-
-    monkeypatch.setattr(
-        "app.production.screenplay_repair.run_screenplay_production",
-        fake_production,
-    )
-
-    result = asyncio.run(
-        api._screenplay_task(
-            "e1",
-            preflight_result={"resolutions": [], "added": []},
-        )
-    )
-
-    row = conn.execute(
-        "SELECT screenplay_status, screenplay_error, screenplay_json "
-        "FROM episodes WHERE id='e1'"
-    ).fetchone()
-    assert result is candidate
-    assert row["screenplay_status"] == "repairing"
-    assert row["screenplay_status"] != "warning"
-    assert row["screenplay_status"] != "ready"
-    # 未发布：页面交付位不应被未认证候选覆盖为 ready 文本
-    assert "自动修复" in (row["screenplay_error"] or "")

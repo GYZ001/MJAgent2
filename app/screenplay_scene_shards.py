@@ -966,52 +966,6 @@ def _scene_shard_canonicalize_review_unit_references(
     return changes
 
 
-_SCENE_SHARD_UNIT_ORDINAL_RE = re.compile(r":(?P<ordinal>\d+):unit$")
-
-
-def _scene_shard_canonicalize_review_unit_references(
-    review: ScreenplaySceneShardSemanticReview,
-    known_unit_keys: set[str],
-) -> int:
-    """Repair only uniquely identifiable structured unit-key references."""
-    canonical_by_ordinal: dict[str, list[str]] = {}
-    for unit_key in known_unit_keys:
-        match = _SCENE_SHARD_UNIT_ORDINAL_RE.search(unit_key)
-        if match is None:
-            continue
-        canonical_by_ordinal.setdefault(
-            match.group("ordinal"),
-            [],
-        ).append(unit_key)
-
-    def canonicalize(unit_key: str) -> str:
-        if unit_key in known_unit_keys:
-            return unit_key
-        match = _SCENE_SHARD_UNIT_ORDINAL_RE.search(unit_key)
-        if match is None:
-            return unit_key
-        candidates = canonical_by_ordinal.get(
-            match.group("ordinal"),
-            [],
-        )
-        return candidates[0] if len(candidates) == 1 else unit_key
-
-    changes = 0
-    for finding in review.findings:
-        canonical_unit_key = canonicalize(finding.unit_key)
-        canonical_related_keys = [
-            canonicalize(unit_key)
-            for unit_key in finding.related_unit_keys
-        ]
-        if canonical_unit_key != finding.unit_key:
-            finding.unit_key = canonical_unit_key
-            changes += 1
-        if canonical_related_keys != finding.related_unit_keys:
-            finding.related_unit_keys = canonical_related_keys
-            changes += 1
-    return changes
-
-
 def _screenplay_scene_semantic_consensus_message(
     code: str,
     canonical_kinds: list[str],

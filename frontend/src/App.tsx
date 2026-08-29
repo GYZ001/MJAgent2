@@ -63,7 +63,6 @@ export type View =
   | "cinema"
   | "observability"
   | "system"
-  | "monitor"
   | "reader";
 
 const PAGE_LOADERS: Partial<Record<View, () => Promise<unknown>>> = {
@@ -76,7 +75,6 @@ const PAGE_LOADERS: Partial<Record<View, () => Promise<unknown>>> = {
   cinema: loadCinemaPage,
   observability: loadMonitorPage,
   system: loadMonitorPage,
-  monitor: loadMonitorPage,
   reader: loadReaderPage,
 };
 
@@ -234,13 +232,6 @@ export function routeFromPath(pathname: string): Pick<
     return { view: "system", projectId: null, episodeId: null, chapterIdx: null };
   if (parts[0] === "workspaces")
     return { view: "studio", projectId: null, episodeId: null, chapterIdx: null };
-  if (parts[0] === "monitor")
-    return {
-      view: "monitor",
-      projectId: null,
-      episodeId: null,
-      chapterIdx: null,
-    };
   if (parts[0] !== "projects" || !parts[1]) {
     return {
       view: "studio",
@@ -302,7 +293,6 @@ export function locationFor(
 ) {
   if (view === "studio") return "/workspaces";
   if (view === "system") return "/system/overview";
-  if (view === "monitor") return "/monitor";
   if (!projectId) return "/workspaces";
   const project = `/projects/${encodeURIComponent(projectId)}`;
   if (view === "observability") return `${project}/observability/jobs`;
@@ -367,7 +357,6 @@ function AppShell() {
   const [projectSearch, setProjectSearch] = useState("");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [routeRevision, setRouteRevision] = useState(0);
-  const [unsavedDraft, setUnsavedDraft] = useState(false);
   const [pendingNavigation, setPendingNavigation] =
     useState<PendingNavigation | null>(null);
   const navigationGuardRef = useRef<NavigationGuardPrompt | null>(null);
@@ -519,9 +508,8 @@ function AppShell() {
   }, []);
 
   const registerNavigationGuard = useCallback(
-    (guard: NavigationGuardPrompt | null, unsaved = false) => {
+    (guard: NavigationGuardPrompt | null) => {
       navigationGuardRef.current = guard;
-      setUnsavedDraft(unsaved);
     },
     [],
   );
@@ -534,7 +522,7 @@ function AppShell() {
       cidx?: number | null,
       historyAction: "push" | "replace" = "push",
     ) => {
-      const globalView = v === "studio" || v === "monitor" || v === "system";
+      const globalView = v === "studio" || v === "system";
       const nextProjectId = globalView
         ? null
         : pid === undefined
@@ -629,7 +617,6 @@ function AppShell() {
     const next = pendingNavigation;
     next.prompt.onConfirm?.();
     navigationGuardRef.current = null;
-    setUnsavedDraft(false);
     if (next.commit) {
       setPendingNavigation(null);
       next.commit();
@@ -771,7 +758,7 @@ function AppShell() {
     return groups;
   }, {});
   const currentProject = projects.find((project) => project.id === projectId);
-  const currentPathname = routeRevision >= 0 ? window.location.pathname : "";
+  const currentPathname = window.location.pathname;
   const filteredProjects = projects.filter((project) =>
     project.name.toLowerCase().includes(projectSearch.trim().toLowerCase()),
   );
@@ -800,7 +787,7 @@ function AppShell() {
       });
       return;
     }
-    const targetView: View = view === "studio" || view === "system" || view === "monitor"
+    const targetView: View = view === "studio" || view === "system"
       ? "bible"
       : view;
     go(targetView, nextProjectId, null, null);
@@ -1079,7 +1066,6 @@ function AppShell() {
             ? <TeamAdminPage />
             : <MonitorPage mode="system" />
         )}
-        {view === "monitor" && <LegacyMonitorRedirect loaded={projectsLoaded} toast={toast} />}
         </Suspense>
         </ErrorBoundary>
       </main>
@@ -1262,59 +1248,6 @@ function ChangePasswordDialog({
       </section>
     </div>
   );
-}
-
-function LegacyMonitorRedirect({
-  loaded,
-  toast,
-}: {
-  loaded: boolean;
-  toast: (message: string, isErr?: boolean) => void;
-}) {
-  useEffect(() => {
-    if (!loaded) return;
-    const params = new URLSearchParams(window.location.search);
-    const section = params.get("section") || "overview";
-    const move = (target: string) => {
-      window.history.replaceState({}, "", target);
-      window.dispatchEvent(new PopStateEvent("popstate"));
-    };
-    if (["overview", "models", "settings"].includes(section)) {
-      params.delete("section");
-      move(`/system/${section}${params.toString() ? `?${params}` : ""}`);
-      return;
-    }
-    const objectQuery = params.get("run_id")
-      ? `run_id=${encodeURIComponent(params.get("run_id")!)}`
-      : params.get("job_id")
-        ? `job_id=${encodeURIComponent(params.get("job_id")!)}&source=auto`
-        : params.get("call_id")
-          ? `call_id=${encodeURIComponent(params.get("call_id")!)}`
-          : "";
-    if (objectQuery) {
-      void api.get(`/observability/resolve?${objectQuery}`).then((result: {
-        project_id: string;
-        section: "runs" | "jobs" | "calls";
-        object_id: string;
-      }) => {
-        params.delete("section");
-        const section = result.section === "runs" ? "jobs" : result.section;
-        if (result.section === "runs") {
-          params.delete("run_id");
-          params.set("job_id", result.object_id);
-          params.set("source", "run");
-        }
-        move(`/projects/${encodeURIComponent(result.project_id)}/observability/${section}${params.toString() ? `?${params}` : ""}`);
-      }).catch((error) => {
-        toast(`旧观测链接无法迁移：${(error as Error).message}`, true);
-        move("/workspaces");
-      });
-      return;
-    }
-    const nextSection = ["jobs", "calls"].includes(section) ? section : "jobs";
-    move(`/workspaces?intent=observability&tab=${nextSection}`);
-  }, [loaded, toast]);
-  return <div className="empty route-loading" role="status">正在迁移旧观测链接…</div>;
 }
 
 function WorkspaceEmpty({ label, view }: { label: string; view: View }) {

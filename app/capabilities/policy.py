@@ -157,21 +157,6 @@ def consume_approval(
     return payload
 
 
-def decide_approval(approval_id: str, decision: ApprovalDecision, reason: str | None = None) -> ApprovalTokenPayload:
-    with _APPROVALS_LOCK:
-        payload = _APPROVALS.get(approval_id)
-        if payload is None:
-            raise KeyError(f"unknown approval: {approval_id}")
-        if payload.used_at is not None:
-            raise PermissionError("approval already finalized")
-        payload.decision = decision
-        payload.reason = reason
-        if decision == ApprovalDecision.REJECT:
-            payload.used_at = time.time()
-        _APPROVALS[approval_id] = payload
-        return payload
-
-
 def reset_approvals_for_tests() -> None:
     with _APPROVALS_LOCK:
         _APPROVALS.clear()
