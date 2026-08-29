@@ -33,6 +33,7 @@ def _fake_verdict_chat_structured(
     selected_candidate: str,
     supporting_segment_index: int = 1,
     supporting_quote: str = "",
+    is_exclusive_reference: bool = True,
 ):
     """构造 model_gateway.chat_structured 的假实现，固定返回给定的裁决结论——测试里
     把"裁决闸"这一步钉死成确定性结果，不依赖真实模型调用。`model_type` 由调用方
@@ -42,7 +43,11 @@ def _fake_verdict_chat_structured(
     `supporting_segment_index` 默认 1：本文件里绝大多数测试用的章节原文都是单一
     自然段（不含空行），`_alias_verdict_dossier` 对这种章节只会产出 segment_index=1
     这一条记录，默认值省得每个调用点都要重复写；需要构造"段号非法"场景的测试自己
-    显式传一个卷宗里不存在的段号。"""
+    显式传一个卷宗里不存在的段号。
+
+    `is_exclusive_reference` 默认 True：本文件里绝大多数既有测试用的称谓（"许师姐"
+    "银色长袍女子"等）本身确实带排他性限定，默认值省得每个既有调用点都要改写；
+    需要构造"泛指别名"场景（如"大汉"）的测试自己显式传 False。"""
 
     async def fake(_messages, **kwargs):
         model_type = kwargs["model_type"]
@@ -50,6 +55,7 @@ def _fake_verdict_chat_structured(
             selected_candidate=selected_candidate,
             supporting_segment_index=supporting_segment_index,
             supporting_quote=supporting_quote,
+            is_exclusive_reference=is_exclusive_reference,
         )
 
     return fake
@@ -1080,11 +1086,15 @@ def test_alias_verdict_roster_snapshots_names_and_confirmed_aliases() -> None:
 
 # ---------- 6. reverify_character_aliases：历史别名批次复核 ----------
 
-def test_reverify_removes_alias_rejected_by_verdict_gate(monkeypatch) -> None:
+def test_reverify_demotes_alias_rejected_by_verdict_gate_instead_of_deleting(
+    monkeypatch,
+) -> None:
     """复现"补闸前已落库"的真实场景：孟浩的 aliases 里混进了一条已通过旧三闸、
-    但过不了新裁决闸的"虎爷爷"——reverify 必须把它从 bible 中移除并原地写回。这个
-    bible 里只登记了"孟浩"一个角色，候选集里只有他自己，模型选"都不是/无法确定"
-    即可复现"确实不是这个人"的拒绝结论（reason=candidate_uncertain）。"""
+    但过不了新裁决闸的"虎爷爷"——语义变更后 reverify 不再删除该条目（别名不删，
+    见 CharacterAlias.is_exclusive），而是原样保留证据锚点、把 is_exclusive 降级为
+    False，条目仍留在 aliases 里供其它通道（如 _prep_pack_bible_alias_owner）解析。
+    这个 bible 里只登记了"孟浩"一个角色，候选集里只有他自己，模型选"都不是/无法
+    确定"即可复现"确实不是这个人"的拒绝结论（reason=candidate_uncertain）。"""
     from app import stages
     from app.harness import model_gateway
 
@@ -1111,11 +1121,16 @@ def test_reverify_removes_alias_rejected_by_verdict_gate(monkeypatch) -> None:
     assert report == {
         "孟浩": [{"text": "虎爷爷", "kept": False, "reason": "candidate_uncertain"}],
     }
-    assert bible.characters[0].aliases == []
+    kept = bible.characters[0].aliases
+    assert [a.text for a in kept] == ["虎爷爷"]  # 条目保留，不删除
+    assert kept[0].is_exclusive is False  # 只是不再充当排他凭证
+    assert kept[0].evidence_chapter_index == 3  # 原有证据锚点原样保留
+    assert kept[0].evidence_quote == "都给你虎爷爷起来"
 
 
-def test_reverify_keeps_alias_that_passes_verdict_gate(monkeypatch) -> None:
-    """正确登记的别名重新过闸应当保留（幂等），reason 为空字符串。"""
+def test_reverify_keeps_alias_exclusive_when_it_passes_verdict_gate(monkeypatch) -> None:
+    """正确登记的别名重新过闸应当保留（幂等），reason 为空字符串，且排他性沿用裁决
+    闸这次给出的结论（is_exclusive_reference=True，与 fake 默认值一致）。"""
     from app import stages
     from app.harness import model_gateway
 
@@ -1137,7 +1152,9 @@ def test_reverify_keeps_alias_that_passes_verdict_gate(monkeypatch) -> None:
     assert report == {
         "许清": [{"text": "许师姐", "kept": True, "reason": ""}],
     }
-    assert [a.text for a in bible.characters[0].aliases] == ["许师姐"]
+    kept = bible.characters[0].aliases
+    assert [a.text for a in kept] == ["许师姐"]
+    assert kept[0].is_exclusive is True
 
 
 def test_reverify_skips_characters_without_any_alias() -> None:

@@ -38,7 +38,13 @@ def _fake_verdict_chat_structured(
 ):
     """与 tests/test_character_alias.py 同名 helper 同一实现：构造
     model_gateway.chat_structured 的假实现，固定返回给定裁决结论。裁决响应类
-    （`app.stages._AliasVerdictResponse`）在状态事实回填里被直接复用，不需要另造。"""
+    （`app.stages._AliasVerdictResponse`）在状态事实回填里被直接复用，不需要另造。
+
+    不带 `is_exclusive_reference`：那是别名场景专用的排他性判据字段，只属于
+    `app.stages._AliasExclusivityVerdictResponse`（`_alias_verdict_call` 专用子类）；
+    状态事实这条路径（`_status_fact_verdict_call`）继续用不含这个字段的基类
+    `_AliasVerdictResponse`，两条路径各自的 schema 只包含各自 prompt 真正问过的
+    字段，这里不需要也不应该补这个字段。"""
 
     async def fake(_messages, **kwargs):
         model_type = kwargs["model_type"]

@@ -92,9 +92,15 @@ class TestAliasOwnershipIsIsolated:
         assert "师姐" in xu_qing["source_labels"]
         assert "师姐" not in shen_wan["source_labels"]
 
-    def test_same_literal_alias_text_stays_scoped_per_owner(self) -> None:
-        # 两个角色各自拥有字面相同的别名文本（如都被称"师姐"），各自只影响
-        # 自己的 authority，不得合并或互相污染。
+    def test_same_literal_alias_text_across_owners_excluded_from_both(self) -> None:
+        """跨角色排重（真实事故「大汉」，EP3/EP10 回归失败的根因）：同一 alias 文本
+        被两个不同角色各自登记（即便各自的裁决闸都判定为排他），结构上已经证明这个
+        文本对任一角色都不排他——不猜哪个是"真正的"主人，两边都不折进
+        source_labels。这与"两个角色各自拥有不同的别名互不污染"（见
+        TestAliasOwnershipIsIsolated 其它用例）是两回事：这里两个角色申报的是完全
+        相同的字面文本"师姐"，而不是"许师姐"/"沈师姐"这类各自独有的写法。别名本身
+        仍然保留在 Character.aliases 里（不删），供其它通道（如
+        app.production.prep_pack._prep_pack_bible_alias_owner）解析。"""
         bible = _bible(
             Character(
                 name="许清", role="重要配角", appearance_canonical="青衣长剑",
@@ -114,8 +120,11 @@ class TestAliasOwnershipIsIsolated:
         registry = identity_authority_registry(bible, [])
         xu_qing = _entry(registry, "bible:许清")
         shen_wan = _entry(registry, "bible:沈婉")
-        assert xu_qing["source_labels"] == ["许清", "师姐"]
-        assert shen_wan["source_labels"] == ["沈婉", "师姐"]
+        assert xu_qing["source_labels"] == ["许清"]
+        assert shen_wan["source_labels"] == ["沈婉"]
+        # 别名不删：两边各自的 aliases 列表原样保留，只是不折进身份决议。
+        assert [a.text for a in bible.characters[0].aliases] == ["师姐"]
+        assert [a.text for a in bible.characters[1].aliases] == ["师姐"]
 
 
 class TestAliasDefensiveHandling:

@@ -124,6 +124,16 @@ class CharacterAlias(BaseModel):
     # 证据锚点：逐字引句；必须能在该章节原文中作为子串命中，且该章节内需能找到角色
     # 规范名或该角色其它已确认别名（共现依据）——两者有一处不满足就不登记。
     evidence_quote: str
+    # 能否作为全局身份凭证（折入 identity_authority_registry 的 source_labels，
+    # 参与身份决议的排他判断），与"能否作为可检索的称呼线索"（app/production/
+    # prep_pack.py 的 _prep_pack_bible_alias_owner 等通道，直接读本字段所在列表，
+    # 不看 is_exclusive）是两件不同的事——别名本身永不因排他性判定失败被删除。
+    # 默认 True 是刻意的：存量数据在迁移前行为与今天完全一致，不产生安全倒退，
+    # 也不破坏现有直接构造 CharacterAlias(...) 的测试。真正决定这个值的是
+    # app.stages._alias_verdict_call 新增的排他性裁决（见该函数），或
+    # app.stages._attach_roster_source_appellations 这条免检通道（显式写 False，
+    # 见该函数——它从未为排他性做过任何核验，不该假装做过）。
+    is_exclusive: bool = True
 
 
 class AppearanceEvidence(BaseModel):

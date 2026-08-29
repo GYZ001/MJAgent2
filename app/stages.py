@@ -3141,6 +3141,11 @@ def _attach_roster_source_appellations(
             name_kind=IDENTITY_NAME_FORM_REFERENTIAL,
             evidence_chapter_index=chapter_idx,
             evidence_quote=quote,
+            # 显式写 False，不依赖 schema 默认值：这条免检通道（本函数顶部大注释、
+            # ERR-20260828-9fcabe）只做共现检查，从来没有为"排他性"做过任何核验，
+            # 不该假装做过。别名仍然登记（供 _prep_pack_bible_alias_owner 等通道
+            # 解析），只是不参与 identity_authority_registry 的 source_labels 折叠。
+            is_exclusive=False,
         ))
         known.add(text)
 
@@ -4546,11 +4551,36 @@ class _AliasVerdictResponse(BaseModel):
     supporting_quote: str = ""
 
 
+class _AliasExclusivityVerdictResponse(_AliasVerdictResponse):
+    """别名裁决专用响应：`_AliasVerdictResponse` 加一个排他性判据字段，只给
+    `_alias_verdict_call`（别名场景）用——`_status_fact_verdict_call`（状态事实
+    场景，见该函数）继续用不含这个字段的基类 `_AliasVerdictResponse`，两条路径各自
+    的 schema 只包含各自 prompt 真正问过的字段。
+
+    背景（子类拆分的直接原因）：这个字段最初直接加在 `_AliasVerdictResponse` 上，
+    但该类被 `_status_fact_verdict_call` 共用同一份 `model_json_schema()` 下发——
+    状态事实那条路径的 prompt 从未解释过这个字段是什么，模型却被结构性要求为一个
+    没人问过的问题编一个布尔值，这正是 CLAUDE.md 记录过的根因类型（"模型答不出来
+    时，先查它有没有收到标准答案"）：白烧 token、在无关字段上分散模型注意力、给
+    未来埋"读到就是掷硬币"的陷阱。拆分后 `_AliasVerdictResponse` 恢复原样，
+    `_status_fact_verdict_call` 零改动。
+
+    排他性判据本身（真实事故：EP2「少年」、EP3/EP10「大汉」误登记为身份凭证；跨
+    项目复现见 ERR-20260828-9fcabe，「大夫」被登记成主角马骥的别名）：与
+    selected_candidate 结构上不同的问题——selected_candidate 判的是"这句话里的
+    称谓具体指谁"（本段语境内的指代对象），is_exclusive_reference 判的是"这个
+    称谓字面本身"脱离这句话、脱离这一段语境，能不能单独把这个人和任何符合同一类
+    特征的陌生人区分开。必填（无默认值）：漏答即 Pydantic ValidationError，不允许
+    模型对这道判据保持沉默。"""
+
+    is_exclusive_reference: bool
+
+
 async def _alias_verdict_call(
     *, alias: str, true_name: str, dossier: list[dict[str, Any]],
     candidates: list[str], project_id: str | None,
     cognition_card: ChapterCognitionCard | None = None,
-) -> _AliasVerdictResponse:
+) -> _AliasExclusivityVerdictResponse:
     """裁决：唯一一次独立模型调用，只给卷宗原文与候选人名单，不点名"你猜是不是
     true_name"——把"这称谓到底指代候选里的哪一位"这个判别完全交给模型自己独立
     做出，答案落在候选集之外（含"都不是/无法确定"）一律视为没有确认申报的假设，
@@ -4593,7 +4623,8 @@ async def _alias_verdict_call(
 该章出场的人物谱角色候选（判别范围仅限这些人，不要引入候选之外的人）：
 {candidate_list}
 
-任务：仅依据以上原文段落本身，判断称谓"{alias}"最可能指代上面候选中的哪一位本人。
+任务一（选人）：仅依据以上原文段落本身，判断称谓"{alias}"最可能指代上面候选中的哪一位
+本人。
 - selected_candidate 必须从候选列表中选一个精确姓名，或者在证据不足以确定具体是谁时
   选"{_ALIAS_VERDICT_NO_MATCH_LABEL}"；不要因为某个候选在段落里出现次数多就倾向选他，
   只依据原文是否真的能确定"{alias}"说的就是他本人；
@@ -4601,6 +4632,25 @@ async def _alias_verdict_call(
   之一），选你得出这个结论最主要依据的那一段，不要凭空填一个没在目录里出现的段号；
 - supporting_quote 可选，若填写请给该段里的一句原文摘录供人工复核参考，不要求逐字
   精确，留空也可以。
+
+任务二（判排他性，与任务一是两个不同的问题）：脱离本段语境单独考虑"{alias}"这个称谓
+本身，判断它是由"类别词"单独构成，还是"类别词+修饰成分"、或者称谓本身就是专名/绰号。
+类别词本身是对一类人共有特征的泛称（年龄段、性别、体型、身份、职业等），换成候选人
+名单之外任何符合这些特征的人都能这样称呼，没有把任何具体的人从这一类里单独挑出来；
+修饰成分是附加在类别词前后、把这个人从这一类人里单独标出来的额外信息：姓氏、本名、
+本人绰号、这一处描述给出的穿戴/外貌/佩饰等具体细节（不要求这项细节是这个人一贯反复
+出现的标志性特征——哪怕只在这一处描述里出现过一次，只要它不是这一类人人人都有的
+泛泛描述，就算修饰成分）、排他性头衔或排行。只要能从"{alias}"里拆出至少一个这样的
+修饰成分，整个称谓就是排他的，哪怕拆出之后仍剩下类别词本身；"{alias}"整体就是一个
+专名/绰号（找不出类别词残留）也算排他。只有当"{alias}"整体就是一个不带任何修饰成分的
+类别词本身时，才是非排他；如果一时无法判断某一部分算类别词还是修饰成分，就问它单独
+拿出来是不是可以用来称呼很多不同的人——可以就是类别词，不太可能（这部分明显是针对
+这一个人才会这样写）就是修饰成分。任务一问的是"这句话里的称谓具体指谁"（本段语境内
+的指代对象——即使称谓本身是泛指，也可能在这句话的语境里确实指这个人）；任务二问的是
+"这个称谓字面本身"的构成方式，选中了正确的人不代表这个称谓本身就是排他的，两个判断
+互不预设对方的答案。
+- is_exclusive_reference 填 true 表示能从"{alias}"里拆出至少一个修饰成分、或"{alias}"
+  本身就是专名/绰号；填 false 表示"{alias}"整体就是一个不带修饰成分的类别词。
 只输出符合 Schema 的 JSON。"""
     operation_id = "character_alias_backfill_verdict:" + hashlib.sha256(
         json.dumps(
@@ -4614,7 +4664,11 @@ async def _alias_verdict_call(
             ensure_ascii=False, sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
-    schema = _AliasVerdictResponse.model_json_schema()
+    # 用子类 `_AliasExclusivityVerdictResponse`（见其 docstring），不是基类
+    # `_AliasVerdictResponse`——排他性字段只属于别名场景这条 prompt，状态事实那条
+    # 路径（`_status_fact_verdict_call`）共用的是没有这个字段的基类，两条路径各自
+    # 的 schema 只包含各自 prompt 真正问过的字段。
+    schema = _AliasExclusivityVerdictResponse.model_json_schema()
     # 参照 app/portraits.py `_current_identity_schema()` 给 evidence_ref 注入 enum
     # 的写法：把候选段号、候选人名单都收紧到本次实际可用的集合，模型在协议层面就
     # 选不出卷宗外的段号或候选集之外的人；真正生效的核验仍在
@@ -4624,7 +4678,7 @@ async def _alias_verdict_call(
     schema["properties"]["selected_candidate"]["enum"] = candidate_options
     return await model_gateway.chat_structured(
         [{"role": "user", "content": prompt}],
-        model_type=_AliasVerdictResponse,
+        model_type=_AliasExclusivityVerdictResponse,
         validate=None,
         operation_id=operation_id,
         max_tokens=500,
@@ -4836,7 +4890,10 @@ async def _alias_evidence_resolution(
     返回统一结构 {"accepted": bool, "chapter_idx": int|None, "quote": str,
     "reason": str}：accepted=True 时 chapter_idx/quote 是应当登记的证据（来自第一段，
     与裁决闸引用的卷宗原文无关——裁决闸只是额外必须通过的门槛，不改写已核验证据的
-    内容）；accepted=False 时 reason 是机器可读的拒绝原因，供调用方记账与复核报告。
+    内容），另带一个 "is_exclusive" 键（`response.is_exclusive_reference`，见裁决闸
+    提示词"任务二"）供调用方构造 `CharacterAlias(..., is_exclusive=...)`；
+    accepted=False 时 reason 是机器可读的拒绝原因，供调用方记账与复核报告，字典里
+    不含 "is_exclusive"（不确定不登记的分支不产生任何应当登记的字段）。
 
     `bible`（可选，见 docs/CHARACTER_COGNITION_LAYER_DESIGN.md §4.3）：调用方若提供
     完整 `Bible`，会额外组装一张章级认知卡（`build_chapter_cognition_card`，候选范围
@@ -4905,6 +4962,12 @@ async def _alias_evidence_resolution(
     return {
         "accepted": True, "chapter_idx": resolved_chapter_index,
         "quote": resolved_quote, "reason": "",
+        # 排他性判据（见 _AliasExclusivityVerdictResponse.is_exclusive_reference 与
+        # _alias_verdict_call 提示词"任务二"）：透传给三处调用方构造
+        # CharacterAlias(..., is_exclusive=...)，不新增拒绝分支——三闸通过就照常
+        # accepted=True，排他性只影响这条别名是否折进身份决议的 source_labels
+        # （app.identity_authority.identity_authority_registry），不影响是否登记。
+        "is_exclusive": response.is_exclusive_reference,
     }
 
 
@@ -4945,6 +5008,7 @@ async def _verify_character_aliases_for_subset(
                     text=text, name_kind=item.name_kind,
                     evidence_chapter_index=resolved["chapter_idx"],
                     evidence_quote=resolved["quote"],
+                    is_exclusive=resolved["is_exclusive"],
                 ))
                 anchor_texts.add(text)
                 added_texts.append(text)
@@ -5122,6 +5186,7 @@ async def backfill_character_aliases(
                     text=text, name_kind=item.name_kind,
                     evidence_chapter_index=resolved["chapter_idx"],
                     evidence_quote=resolved["quote"],
+                    is_exclusive=resolved["is_exclusive"],
                 ))
                 anchor_texts.add(text)
                 added_texts.append(text)
@@ -5144,10 +5209,14 @@ async def reverify_character_aliases(
     bible: Bible, chapters: list[dict], *, project_id: str | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """层一别名复核：对 bible 中已登记的全部 `Character.aliases` 逐条重跑
-    `_alias_evidence_resolution`（含裁决闸，见该函数与上方"A1b. 裁决闸"注释），不通过
-    的从该角色的 aliases 中移除。用于清理裁决闸补上之前落库的历史别名，也可作为未来
-    任何别名批次的通用复核工具重复调用（幂等：已经通过新闸的别名重跑仍然通过，不会
-    被误删）。
+    `_alias_evidence_resolution`（含裁决闸，见该函数与上方"A1b. 裁决闸"注释）。判不过
+    不再删除条目——别名不删（见 CharacterAlias.is_exclusive 与
+    app.production.prep_pack._prep_pack_bible_alias_owner 对"可检索的称呼线索"这条
+    通道的依赖）：判不过就把该条目的 `is_exclusive` 标为 False、原样保留证据锚点，
+    只是不再充当身份决议的排他凭证（不会折进
+    `app.identity_authority.identity_authority_registry` 的 source_labels）。用于
+    清理裁决闸补上之前落库的历史别名对排他性的误判，也可作为未来任何别名批次的通用
+    复核工具重复调用（幂等：已经通过新闸的别名重跑仍然通过，不会被误降级）。
 
     背景（真实事故）：裁决闸补上之前落库的别名只过了"同章共现"这一道更弱的核验，
     证明不了"指代同一人"——已发生的误登记是模型在没看到桥接章原文的情况下凭全书
@@ -5164,12 +5233,14 @@ async def reverify_character_aliases(
     (text, evidence_chapter_index, evidence_quote) 当作待复核的申报重新核验一遍。每个
     角色内部按既有别名的列表顺序增量建立 anchor_texts（与 backfill 的建表方式一致）：
     前面的别名先通过复核才会被后面同角色的别名当作共现锚点，避免"用一条本身尚未证实
-    的别名去证明另一条别名"的循环依赖。
+    的别名去证明另一条别名"的循环依赖——判不过而被降级 is_exclusive=False 的别名同
+    旧行为一样不加入 anchor_texts（它没有重新被核验为可靠共现锚点）。
 
     返回 `{character_name: [{"text":, "kept": bool, "reason": str}, ...]}`，逐条给出
-    复核结论与拒绝原因（`kept=True` 时 `reason==""`），供调用方生成复核报告；只原地
-    改写 `Character.aliases`，不触碰角色的任何其它既有字段。角色本来就没有别名的
-    不出现在返回结果里。"""
+    复核结论与拒绝原因（`kept=True` 时 `reason==""`）——`kept` 字段语义随本次改动调整
+    为"是否仍保有排他凭证资格"，不再是"是否仍留在 aliases 里"（条目现在恒定保留），
+    供调用方生成复核报告；只原地改写 `Character.aliases`，不触碰角色的任何其它既有
+    字段。角色本来就没有别名的不出现在返回结果里。"""
     chapters_by_idx = _chapters_by_idx(chapters)
     roster = _alias_verdict_roster(bible)
     report: dict[str, list[dict[str, Any]]] = {}
@@ -5191,10 +5262,21 @@ async def reverify_character_aliases(
                     text=text, name_kind=item.name_kind,
                     evidence_chapter_index=resolved["chapter_idx"],
                     evidence_quote=resolved["quote"],
+                    is_exclusive=resolved["is_exclusive"],
                 ))
                 anchor_texts.add(text)
                 entries.append({"text": text, "kept": True, "reason": ""})
             else:
+                # 判不过就删的旧语义在这里退役：条目原样保留（证据锚点不改写，
+                # 复核本身没有产出可信的替代证据），只把排他性降级为 False——
+                # 该别名仍可用于共现/身份解析等"可检索的称呼线索"通道，只是不再
+                # 充当身份决议的排他凭证。
+                kept.append(CharacterAlias(
+                    text=text, name_kind=item.name_kind,
+                    evidence_chapter_index=item.evidence_chapter_index,
+                    evidence_quote=item.evidence_quote,
+                    is_exclusive=False,
+                ))
                 entries.append({
                     "text": text, "kept": False, "reason": resolved["reason"],
                 })
@@ -12885,399 +12967,3 @@ def _canonical_scene_pack_names(
     return resolved
 
 
-# ---------- C2. 单集分镜脚本（基于完整剧本拆分） ----------
-
-
-def _score_or_none(value) -> float | None:
-    try:
-        score = float(value)
-    except (TypeError, ValueError):
-        return None
-    if math.isnan(score) or math.isinf(score):
-        return None
-    if 1 < score <= 100:
-        score /= 100
-    return max(0.0, min(1.0, score))
-
-
-def _extract_score_from_text(raw: str, key: str) -> float | None:
-    key_pat = re.escape(key)
-    number = r"([+-]?(?:\d+(?:\.\d+)?|\.\d+))"
-    patterns = (
-        rf'["`]?{key_pat}["`]?\s*[:：]\s*{number}',
-        rf'\b{key_pat}\b[\s\S]{{0,240}}?(?:score|评分|分数)\s*[:：]?\s*{number}',
-    )
-    for pattern in patterns:
-        match = re.search(pattern, raw, flags=re.IGNORECASE)
-        if match:
-            score = _score_or_none(match.group(1))
-            if score is not None:
-                return score
-    return None
-
-
-def _normalize_issues(value, fallback: list[str] | None = None) -> list[str]:
-    if isinstance(value, list):
-        items = [str(v).strip() for v in value if str(v).strip()]
-    elif isinstance(value, str) and value.strip():
-        items = [value.strip()]
-    else:
-        items = []
-    if not items and fallback:
-        items = fallback
-    return items[:8]
-
-
-def _bool_or_default(value, default: bool = True) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return default
-
-
-def _normalize_qa_object(obj: dict, score_keys: list[str], *, raw: str = "",
-                         defaults: dict[str, float] | None = None,
-                         recovered: bool = False) -> dict:
-    defaults = defaults or {}
-    # Keep the evaluator's observation fields in addition to the normalized
-    # scores.  Scene/portrait policies rely on facts such as person_count and
-    # watermark_detected; dropping them here turns a complete response into an
-    # artificial "unverified" result.
-    out: dict[str, object] = dict(obj)
-    known_scores: list[float] = []
-    incomplete = False
-    for key in score_keys:
-        score = _score_or_none(obj.get(key))
-        if score is None:
-            score = defaults.get(key)
-        if score is None and raw:
-            score = _extract_score_from_text(raw, key)
-        if score is None:
-            incomplete = True
-            score = 0.0
-        out[key] = score
-        known_scores.append(score)
-    overall = _score_or_none(obj.get("overall"))
-    if overall is None:
-        overall = defaults.get("overall")
-    if overall is None:
-        overall = round(sum(known_scores) / len(known_scores), 3) if known_scores else 0.0
-    out["overall"] = max(0.0, min(1.0, overall))
-    fallback_issues = (
-        ["VLM返回非标准结构，未获得可验证的结构化诊断"]
-        if recovered or incomplete else []
-    )
-    out["issues"] = _normalize_issues(obj.get("issues"), fallback_issues)
-    out["observed_state_out"] = str(obj.get("observed_state_out") or "").strip()
-    for key in ("no_story_repeat", "no_future_leak", "no_character_duplicate", "whole_clip_usable"):
-        out[key] = _bool_or_default(obj.get(key), True)
-    contract_facts = [
-        f"{key}_below_contract"
-        for key in score_keys
-        if float(out.get(key) or 0.0) < 0.45
-    ]
-    contract_facts.extend(
-        f"{key}_failed"
-        for key in (
-            "no_story_repeat",
-            "no_future_leak",
-            "no_character_duplicate",
-        )
-        if out.get(key) is False
-    )
-    out["contract_facts"] = list(dict.fromkeys(contract_facts))
-    out["runtime_blocking"] = out.get("whole_clip_usable") is False
-    out["blocking_facts"] = (
-        ["whole_clip_contract_failed"] if out["runtime_blocking"] else []
-    )
-    # 供自动重抽判断“这是资产质量失败，还是 QA 响应格式失败”。
-    # 非标准输出可以展示恢复分，但不应据此花钱重生视频。
-    out["qa_recovered"] = recovered or incomplete
-    return out
-
-
-def _parse_qa_result(raw: str, score_keys: list[str], *,
-                     defaults: dict[str, float] | None = None) -> dict:
-    try:
-        obj = extract_json(raw)
-        return _normalize_qa_object(obj, score_keys, raw=raw, defaults=defaults)
-    except ValueError:
-        recovered = {key: _extract_score_from_text(raw, key) for key in score_keys}
-        recovered = {key: value for key, value in recovered.items() if value is not None}
-        return _normalize_qa_object(recovered, score_keys, raw=raw, defaults=defaults, recovered=True)
-
-
-# ---------- E. VLM 质检 ----------
-
-async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str,
-                             character_anchors: list[str], prev_image_b64: str | None = None,
-                             kind: str = "tail", initiator_label: str = "关键帧评审",
-                             environment_only: bool = False) -> dict:
-    """场景关键帧评审 agent：只对照【本帧自己的画面描述】（首图描述 / 尾图描述）检查该单张静止帧，
-    不要拿整段动作或后续画面来要求它。返回 {expectation_match, continuity, clean_frame, overall, issues}。"""
-    if environment_only:
-        anchors = "（纯环境定场图：明确要求画面中无人；没有人物是正确结果，不得因此扣分）"
-        subject_note = (
-            "\n本次审核对象是跨镜头复用的纯环境定场图，不是剧情关键帧。"
-            "画面必须无人；不要要求角色、人物动作、姿态、表情或互动。"
-        )
-        expectation_focus = "场景名称、空间类型、建筑结构、陈设、光照、画风与构图是否对得上"
-        main_rule = (
-            "- 这是纯环境图：画面无人是合格要求，绝不能因没有人物、角色锚点、动作或互动而扣分。\n"
-            "- expectation_match 的主项是场景语义与环境细节；场景名称和预期描述中的明确要求都要核对。\n"
-            "- space_type_matches 只判断室内外和地点大类；layout_detail_matches 单独判断布局、陈设与结构细节。\n"
-            "- material_contract_matches 单独判断画面材质是否满足预期描述。三个字段必须根据各自语义独立填写。"
-        )
-    else:
-        anchors = "\n".join(character_anchors) or "（缺少角色锚点）"
-        subject_note = ""
-        expectation_focus = (
-            "人物姿态/表情/手部与道具的接触状态、人物的身体与视线朝向、"
-            "人物与对象（道具或另一人）之间的空间互动关系，以及角色外观、场景是否对得上"
-        )
-        main_rule = (
-            "- expectation_match 是本次评审的【主项】。若预期画面里人物在与某对象/另一人互动"
-            "（触碰/按压/拿取/递出/挥击/指向/注视/搀扶等），而画面中人物只是正面端站、"
-            "主体姿态、朝向或 actor/target 作用关系与当前 AtomicAction 的"
-            "起止条件不符时，expectation_match 必须 ≤0.4。"
-        )
-    from app.multiview import watermark_qa_mode
-    ignore_non_occluding_watermark = watermark_qa_mode() == "ignore_unless_occluding"
-    watermark_note = (
-        "供应商自动添加且位于角落、不遮挡场景主体的水印/Logo 不扣分，也不要写入 issues；"
-        "只有遮挡关键场景结构时才扣分并说明遮挡位置。"
-        if ignore_non_occluding_watermark
-        else "画面不得包含任何位置、透明度的文字、水印或 Logo；检出即为入库硬失败。"
-    )
-    frame_name = "首图（本镜动作开始前的静止画面）" if kind == "head" else "尾图（本镜动作完成后的静止画面）"
-    cont = ("\n本关键帧需与第2张参考图在画风、人物形象、光影上自然连贯（第2张可能是本镜首图或上一镜尾图）。"
-            if prev_image_b64 else "\n本关键帧是新场景起点，无需对比上一镜。")
-    expectation = f"""你是漫剧场景关键帧评审 agent。下面给出本镜{frame_name}{('（第1张）以及参考图（第2张，仅作连贯性对比）' if prev_image_b64 else '')}，对照下面这【单张静止帧】的预期检查，输出 JSON。
-
-重要：只审这一张静止帧是否符合它自己的画面描述；不要因为它没有表现整段动作的过程或后续/结尾画面而扣分（动作的展开由视频负责，关键帧只是这一刻的定格）。但【这一刻的人物姿态、朝向与互动】必须与描述一致——定格不等于可以摆拍。{subject_note}
-
-本帧预期画面：{frame_desc}
-预期场景：{scene_setting}
-预期角色外观：
-{anchors}{cont}
-
-检查项（各 0~1 评分）：
-1. expectation_match  画面是否符合【本帧预期画面】，重点核对：{expectation_focus}
-2. continuity         与参考图的画风、人物形象、光影是否连贯（无参考图则给 1）
-3. clean_frame        无多余文字/多余人物/肢体畸形/五官崩坏。{watermark_note}
-
-纯环境资产还必须输出可机器判断的观察事实；不能确认时使用 null，禁止猜测：
-- person_count: 识别到的人物数量（int 或 null）
-- watermark_detected: 是否检出任意水印/Logo（bool 或 null）
-- watermark_occluding: 水印/Logo 是否遮挡主体或关键场景结构（bool 或 null）
-- forbidden_text_detected: 是否检出不属于场景合理陈设的字幕、角标、随机字形或叠字（bool 或 null）
-- forbidden_text_is_provider_mark: 检出的多余文字是否全部来自同一供应商标识（bool 或 null）
-- space_type_matches: 室内外及空间类型是否符合预期（bool 或 null）
-- layout_detail_matches: 布局、陈设与结构细节是否符合预期（bool 或 null）
-- material_contract_matches: 材质是否符合预期描述（bool 或 null）
-
-评分硬规则（务必遵守）：
-{main_rule}
-- overall 不得高于 expectation_match：动作/朝向/互动不对就是不合格，画面再干净、画风再连贯也不能给高 overall。
-- issues 里必须逐条点明当前主体、作用对象、空间关系、起止条件或完成条件的具体不符之处，供下一版定向改正。
-
-只输出 JSON：{{"expectation_match": float, "continuity": float, "clean_frame": float, "overall": float, "person_count": int|null, "watermark_detected": bool|null, "watermark_occluding": bool|null, "forbidden_text_detected": bool|null, "forbidden_text_is_provider_mark": bool|null, "space_type_matches": bool|null, "layout_detail_matches": bool|null, "material_contract_matches": bool|null, "issues": [str], "uncertainties": [str]}}"""
-    frames = [image_b64] + ([prev_image_b64] if prev_image_b64 else [])
-    raw = await hiagent.vlm_check(
-        frames, expectation,
-        call_meta={
-            "initiator_label": initiator_label,
-            "frame_kind": kind,
-            "scene_setting": scene_setting,
-            "has_prev_frame": bool(prev_image_b64),
-        })
-    defaults = {"continuity": 1.0} if not prev_image_b64 else None
-    result = _parse_qa_result(raw, ["expectation_match", "continuity", "clean_frame"], defaults=defaults)
-    if ignore_non_occluding_watermark:
-        watermark_reported = result.get("watermark_detected") is True
-        watermark_occluding = result.get("watermark_occluding")
-        if watermark_reported and watermark_occluding is False:
-            # Preserve the observed fact for audit, while explicitly telling
-            # the deterministic policy that this provider mark is allowed by
-            # the configured practical-quality mode.
-            result["non_occluding_provider_watermark"] = True
-            warnings = [str(item) for item in (result.get("warnings") or []) if str(item).strip()]
-            warnings.append("检测到不遮挡主体的供应商角落标识，按实用质量模式不阻断采用")
-            result["warnings"] = list(dict.fromkeys(warnings))
-    # 动作/朝向/互动是关键帧的主项：把 overall 夹到不超过 expectation_match，避免"画面干净但动作不对"
-    # 被 continuity/clean_frame 拉高均值而蒙混过审（VLM 即便没遵守上面的硬规则，这里也强制生效）。
-    em = _score_or_none(result.get("expectation_match"))
-    if em is not None:
-        result["overall"] = round(min(float(result["overall"]), em), 3)
-    if environment_only:
-        from app.scene_policy import normalize_scene_image_qa
-        result = normalize_scene_image_qa(result, environment_only=True)
-    return result
-
-
-async def review_portrait_image(
-    image_b64: str,
-    appearance_anchor: str,
-    *,
-    requires_full_body: bool = True,
-) -> dict:
-    """Review a character identity sheet without hard-gating acting direction.
-
-    Portrait anchors can describe spirits, creatures, floating bodies, props, or
-    acting direction. Only unmistakable identity/technical defects are hard
-    gates; subjective styling differences remain review notes.
-
-    ``requires_full_body`` 来自调用方那条视角的构图合同（见
-    ``multiview.CHARACTER_VIEW_FRAMING``）。侧面与特写视角本来就按半身构图生成，
-    拿全身标准判它必然挂。缺省 True 对应主定妆图，行为与从前一致。
-    """
-    framing_note = (
-        "这张单角色全身设定图"
-        if requires_full_body
-        else "这张单角色设定图（本条视角按半身或特写构图生成，下半身不入画属于正常，不得据此判缺陷）"
-    )
-    expectation = f"""你是漫剧角色定妆照评审 agent。请对照角色锚点检查{framing_note}，输出 JSON。
-
-角色锚点：{appearance_anchor}
-
-检查项（各 0~1 评分）：
-1. identity_match      评估整体角色辨识度：性别、核心五官、主体形态与关键身份特征；年龄观感、服装款式、发型细节和装饰差异只作为参考
-2. presentation_match  只评表演呈现：表情、眼神、笑容、气质、普通站姿/身姿是否符合锚点
-3. clean_frame         单人物、主体完整、无遮挡主体的文字/水印/Logo、无肢体畸形/五官崩坏
-
-评分硬规则（务必遵守）：
-- 只有明确生成成其他角色、性别错误、核心身份/物种错误、非实体形态完全丢失、关键身份道具完全缺失、多人、明显畸形、严重裁切、遮挡主体的文字/水印属于硬门禁；不符时写入 hard_failures。
-- 视觉年龄偏成熟或偏年轻、服装颜色/款式不同、发型细节或发饰不同、增加花瓣/莲花/普通光效等审美装饰，只写入 soft_warnings；不得写入 hard_failures，也不得因此把 identity_match 压到 0.60 以下。
-- 角色锚点是创作方向，不是逐字验收清单。画面整体好看、人物清晰且核心身份成立时，应优先判为可用，不要因未逐项复刻文字细节而拒绝。
-- 仅截掉脚尖、鞋尖、衣摆或发梢属于轻微裁切；供应商自动添加且位于角落、不遮挡人物的水印/Logo 属于轻微瑕疵。两者只写入 soft_warnings，不得写入 hard_failures。
-- 表情、眼神、爱慕/妩媚/虚荣/戏谑等气质以及普通展示站姿只写入 soft_warnings，绝不能写入 hard_failures，也不能降低 identity_match。
-- 定妆图允许中性表情和中性展示姿态；presentation_match 低可以有警告，但不能阻止后续生成 3/4 面和侧面。
-- overall 只按 identity_match 与 clean_frame 的较低值给分，不计 presentation_match。
-- 锚点没有要求的火焰、斗气光环或其他主体属于硬失败。
-
-还要输出观察事实：person_count（人物数或 null）、watermark_detected、watermark_occluding（水印是否遮挡人物主体）、forbidden_text_detected、forbidden_text_is_provider_mark（禁止文字是否仅来自该非遮挡供应商角标）、full_body_visible、crop_severity（none/minor/major）、anatomy_valid（不能确认用 null）、stable_identity_matches（稳定身份特征是否匹配；不能确认用 null）、presentation_only_difference（差异是否仅为表情/姿态展示；不能确认用 null）。
-
-只输出 JSON：{{"identity_match": float, "presentation_match": float, "clean_frame": float, "overall": float, "person_count": int|null, "watermark_detected": bool|null, "watermark_occluding": bool|null, "forbidden_text_detected": bool|null, "forbidden_text_is_provider_mark": bool|null, "full_body_visible": bool|null, "crop_severity": "none|minor|major", "anatomy_valid": bool|null, "stable_identity_matches": bool|null, "presentation_only_difference": bool|null, "soft_warnings": [str], "hard_failures": [str], "issues": [str]}}"""
-    raw = await hiagent.vlm_check(
-        [image_b64],
-        expectation,
-        call_meta={
-            "initiator_label": "角色定妆照评审",
-            "asset_kind": "portrait",
-            "has_prev_frame": False,
-        },
-    )
-    result = _parse_qa_result(
-        raw,
-        ["identity_match", "presentation_match", "clean_frame"],
-    )
-    try:
-        raw_result = extract_json(raw)
-    except Exception:  # noqa: BLE001 - _parse_qa_result already records recovery
-        raw_result = {}
-    for key in (
-        "person_count", "watermark_detected", "watermark_occluding",
-        "forbidden_text_detected", "forbidden_text_is_provider_mark",
-        "full_body_visible", "crop_severity", "anatomy_valid",
-        "stable_identity_matches", "presentation_only_difference",
-        "soft_warnings", "hard_failures",
-    ):
-        if key in raw_result:
-            result[key] = raw_result[key]
-    from app.multiview import watermark_qa_mode
-    if watermark_qa_mode() == "ignore_unless_occluding":
-        watermark_reported = result.get("watermark_detected") is True
-        watermark_occluding = result.get("watermark_occluding")
-        if watermark_reported and watermark_occluding is False:
-            # Same contract as review_scene_image: only tell the deterministic
-            # policy this provider mark is allowed when the configured
-            # practical-quality mode says so, never unconditionally.
-            result["non_occluding_provider_watermark"] = True
-    result["framing_requires_full_body"] = requires_full_body
-    from app.portrait_policy import normalize_portrait_seed_qa
-    return normalize_portrait_seed_qa(result)
-
-
-def evaluate_video_mode_qa(
-    *,
-    meta: dict,
-    qa: dict,
-    technical: dict,
-) -> dict:
-    """Build mode-specific evidence without conflating technical and semantic success."""
-    from app.video_plan import VideoInputIntent
-
-    mode = str(meta.get("actual_mode") or meta.get("mode") or "")
-    technical_success = bool(technical.get("passed"))
-    result: dict = {
-        "planned_mode": meta.get("planned_mode") or mode,
-        "actual_mode": mode,
-        "technical_success": technical_success,
-        "semantic_success": None,
-        "input_roles_valid": False,
-        "issues": [],
-    }
-    if mode == "REFERENCE_IMAGE_MODE":
-        result["input_roles_valid"] = bool(
-            not meta.get("first_frame_used")
-            and not meta.get("last_frame_used")
-            and not meta.get("reference_video_used")
-        )
-        result["semantic_success"] = (
-            bool(qa.get("overall") is not None and float(qa["overall"]) >= 0.6)
-            if qa.get("status") != "unverified" else None
-        )
-    elif mode == "FIRST_LAST_FRAME_MODE":
-        result["input_roles_valid"] = bool(
-            meta.get("first_frame_used")
-            and meta.get("last_frame_used")
-            and not meta.get("reference_image_used")
-            and not meta.get("reference_video_used")
-        )
-        result["boundary_start_match"] = qa.get("start_state_match")
-        result["boundary_end_match"] = qa.get("end_state_match")
-        if qa.get("status") != "unverified":
-            try:
-                result["semantic_success"] = bool(
-                    float(qa.get("start_state_match")) >= 0.6
-                    and float(qa.get("end_state_match")) >= 0.6
-                )
-            except (TypeError, ValueError):
-                result["semantic_success"] = None
-    elif mode == "FIRST_FRAME_MODE":
-        result["input_roles_valid"] = bool(
-            meta.get("first_frame_used")
-            and not meta.get("last_frame_used")
-            and not meta.get("reference_image_used")
-            and not meta.get("reference_video_used")
-        )
-        result["boundary_start_match"] = qa.get("start_state_match")
-        if qa.get("status") != "unverified" and qa.get("start_state_match") is not None:
-            try:
-                result["semantic_success"] = bool(
-                    float(qa.get("start_state_match")) >= 0.6
-                )
-            except (TypeError, ValueError):
-                result["semantic_success"] = None
-    elif mode == "VIDEO_INPUT_MODE":
-        result["input_roles_valid"] = bool(
-            meta.get("reference_video_used")
-            and not meta.get("reference_image_used")
-            and not meta.get("first_frame_used")
-            and not meta.get("last_frame_used")
-        )
-        intent = str(meta.get("video_input_intent") or "")
-        result["video_input_intent"] = intent
-        result["provider_read_video"] = technical_success
-        if intent == VideoInputIntent.CONTINUE_PREVIOUS_TAKE.value:
-            # A normal VLM content score cannot certify trajectory continuation.
-            result["semantic_success"] = None
-            result["issues"].append("真续写需通过独立多样本边界语义回归")
-        elif qa.get("status") != "unverified" and qa.get("overall") is not None:
-            result["semantic_success"] = bool(float(qa["overall"]) >= 0.6)
-    else:
-        result["issues"].append("未知 actual_mode")
-    if not result["input_roles_valid"]:
-        result["issues"].append("供应商输入角色与计划模式不一致")
-    return result

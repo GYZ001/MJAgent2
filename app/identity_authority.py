@@ -309,6 +309,36 @@ def identity_authority_registry(
             semantic_group or raw_scoped_group
         )
 
+    # 排他性折叠 + 跨角色排重（纯数据、零模型调用，见 CLAUDE.md「判据从数据推导」）：
+    # is_exclusive=False 的别名（结构上可能被任何符合同一类特征的陌生人共享，如
+    # "少年""大汉"）不折进 source_labels——它仍完整保留在 Character.aliases 里，
+    # 供 app/production/prep_pack.py 的 _prep_pack_bible_alias_owner 等别名解析
+    # 通道使用，只是不再充当身份决议的排他凭证。跨角色排重：同一 alias 文本被
+    # ≥2 个角色各自登记（哪怕各自的裁决闸都判定为排他），结构上已经证明它对任一
+    # 角色都不排他——不猜哪个角色是"真正的"主人，两边都不折进 source_labels（真实
+    # 事故：「大汉」在同一集里被两个不同角色分别登记为别名，EP3/EP10 回归失败）。
+    alias_owners: dict[str, set[str]] = {}
+    for character in getattr(bible, "characters", None) or []:
+        char_name = str(getattr(character, "name", "") or "").strip()
+        if not char_name:
+            continue
+        seen_for_character: set[str] = set()
+        for alias in getattr(character, "aliases", None) or []:
+            alias_text = str(getattr(alias, "text", "") or "").strip()
+            if (
+                not alias_text
+                or alias_text == char_name
+                or alias_text in seen_for_character
+            ):
+                continue
+            seen_for_character.add(alias_text)
+            if not getattr(alias, "is_exclusive", True):
+                continue
+            alias_owners.setdefault(alias_text, set()).add(char_name)
+    colliding_alias_texts = {
+        text for text, owners in alias_owners.items() if len(owners) > 1
+    }
+
     for character in getattr(bible, "characters", None) or []:
         name = str(getattr(character, "name", "") or "").strip()
         if not name:
@@ -322,7 +352,9 @@ def identity_authority_registry(
         # 不再是模型的临时猜测——必须并入该角色的 source_labels，否则身份决议
         # 层永远看不到"许师姐"这类只以别名出现的角色，K 决议目录与
         # reserved_authority_labels 都不会收录它，别名在这条链路上就完全无效。
-        # 防御：aliases 可能缺字段/为空串/与真名或彼此重复，一律去重后再收录。
+        # 防御：aliases 可能缺字段/为空串/与真名或彼此重复，一律去重后再收录；
+        # is_exclusive=False 或跨角色碰撞的别名跳过（见上方 colliding_alias_texts
+        # 与本段大注释），但仍留在 seen_labels 里保证同一角色内部去重语义不变。
         seen_labels: set[str] = {name}
         alias_labels: list[str] = []
         for alias in getattr(character, "aliases", None) or []:
@@ -330,6 +362,10 @@ def identity_authority_registry(
             if not alias_text or alias_text in seen_labels:
                 continue
             seen_labels.add(alias_text)
+            if not getattr(alias, "is_exclusive", True):
+                continue
+            if alias_text in colliding_alias_texts:
+                continue
             alias_labels.append(alias_text)
         entries[f"bible:{name}"] = {
             "authority_id": f"bible:{name}",

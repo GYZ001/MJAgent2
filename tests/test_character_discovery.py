@@ -8553,6 +8553,25 @@ def test_current_identity_declared_duplicate_with_literal_anchor_normalizes() ->
         if item.get("_current_identity_normalized_duplicate")
     )
     assert normalized_duplicate_declarations == 1
+    # 端到端缺口收口（Bug B，ERR-20260828-2fa501 同族）：既有测试到此为止，
+    # 从未把归一后的产物继续喂进 _attach_candidate_source_evidence 走一遍
+    # receipt v2 校验——这条正是 bug 溜过去的地方。E001（本条被引用，非
+    # 逐字，判 synthetic）与 E002（本条被引用，逐字含"马脸青年"，判
+    # literal）被合并进同一条身份后，旧实现把两条 provenance 不同的
+    # receipt 无条件并入同一个 bundle，无论 strongest 落在哪一边都必定
+    # 校验失败（synthetic 分支要求 receipts 恰好一条，literal 分支要求
+    # 每条都逐字含标签）。修复后：strongest 优先取 literal 一侧，receipt
+    # 列表按最终 provenance 过滤，只保留真正逐字见证过"马脸青年"的那条。
+    attached = portraits._attach_candidate_source_evidence(list(projected), text)
+    merged = next(
+        item for item in attached if item["source_label"] == "马脸青年"
+    )
+    assert merged["source_label_provenance"] == (
+        portraits.CURRENT_IDENTITY_LITERAL_PROVENANCE
+    )
+    assert len(merged["source_evidence_receipts"]) == 1
+    assert "马脸青年" in merged["source_evidence_receipts"][0]["text"]
+    assert merged["source_evidence_receipt"] == merged["source_evidence_receipts"][0]
 
 
 def test_current_identity_declared_conflict_stays_fatal_with_side_by_side_diff() -> None:
@@ -8615,6 +8634,91 @@ def test_current_identity_declared_conflict_stays_fatal_with_side_by_side_diff()
     assert '"kind":"mentioned"' in diff_message
     assert "scope_qualifier" in diff_message
     assert "合并为一条" in diff_message
+
+
+# ---------------------------------------------------------------------------
+# 真实 EP4 回归 ERR-20260829-1e3f2e（proj_195be7df1fd6/ep_41784d17e45b，
+# provider_calls.id=22718，第 4 章）：n 分支报了两次"同宗"（E016 mentioned/
+# E046 onscreen，均 name_kind=referential），因非 personal_name 且"同宗"不在
+# reserved_authority_labels，两者都被降级为 functional。_identity_form_
+# functional_key 是对标签文本的纯哈希、不随出现次数变化，两条因此拿到完全
+# 相同的 functional_identity_key（NF234ffde0cfaa）——这不是模型的申报分组
+# 信号，只是标签文字恰好相同的副产品，旧实现却把它当成"模型已经用结构性
+# 字段区分了这是哪个人"的强信号，导致两者被锁进同一个消歧子组，甲/乙自动
+# 补足机制因此拿不到第二个子组，只能致命失败（source_label 重复：同宗）。
+# 取证用 provider_calls.id=22718 的真实 E016/E046 原文与真实 n 分支 payload
+# （identity_label/kind/name_kind 逐字段照抄）。
+# ---------------------------------------------------------------------------
+
+def test_current_identity_ep4_referential_label_two_referents_backfills_qualifier() -> None:
+    """红灯（真实 EP4 最小复现，ERR-20260829-1e3f2e）：两条 n 分支"同宗"
+    （referential，一 mentioned 一 onscreen）被降级为 functional 后共用同一
+    个后端合成哈希键——这个键不是模型的申报分组信号，不能当作"已区分"的
+    强信号。修复后退回按申报签名聚类：两条的 kind 不同，申报签名不同，各自
+    落进不同的消歧子组，用既有甲/乙机制确定性补足 scope_qualifier，不再
+    致命；且必须端到端喂进 _attach_candidate_source_evidence，证明两条各自
+    的 receipt bundle 都独立合法（这正是"测试停在合并前"这个缺口要堵的
+    地方——受影响的两条都会各自触发一次单条 merge，必须验证 receipt v2
+    校验也通得过，不能只停在 errors==[] 这一步）。"""
+    text = (
+        "“万一……你就是那与此镜有缘之人呢？而且你拿走此镜可以放心，在你之前的那些"
+        "同宗，有不少是都不到三两个月就都退了回来，师兄这人以后我们接触时间长了你"
+        "就知道，我很好说话，不愿为难同门，于是都给重新换了个宝贝。”\n\n"
+        "“钟鸣一响，这是到了发放灵石丹药之时。”"
+    )
+    records = portraits._current_identity_evidence_records(text)
+    evidence_by_ref = {
+        f"E{index:03d}": record for index, record in enumerate(records, start=1)
+    }
+    payload = {"k": [], "f": [], "n": [
+        {
+            "evidence_ref": "E001", "identity_label": "同宗",
+            "kind": "mentioned", "name_kind": "referential",
+        },
+        {
+            "evidence_ref": "E002", "identity_label": "同宗",
+            "kind": "onscreen", "name_kind": "referential",
+        },
+    ]}
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        reserved_authority_labels=set(),
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert errors == []
+    matches = sorted(
+        (item for item in projected if item["source_label"] == "同宗"),
+        key=lambda item: item["kind"],
+    )
+    assert len(matches) == 2
+    assert {item["kind"] for item in matches} == {"mentioned", "onscreen"}
+    assert sorted(item["scope_qualifier"] for item in matches) == ["乙", "甲"]
+    assert all(
+        item["_current_identity_synthesized_qualifier"] is True for item in matches
+    )
+    # 两条各自独立成组（各自的 identity_group 允许不同——两个不同指称对象
+    # 本来就该有两个 identity_group，不受"同一 source_label 对应多个
+    # identity_group"这条既有护栏约束，见 _current_identity_disambiguation_
+    # key 与 _current_identity_reconcile_as_single 的分工）。
+    assert len({item["identity_group"] for item in matches}) == 2
+
+    # 缺口收口：继续走 receipt v2 校验，不能只停在投影这一步。
+    attached = portraits._attach_candidate_source_evidence(list(projected), text)
+    attached_matches = [item for item in attached if item["source_label"] == "同宗"]
+    assert len(attached_matches) == 2
+    for item in attached_matches:
+        assert len(item["source_evidence_receipts"]) == 1
+        receipt = item["source_evidence_receipts"][0]
+        if item["source_label_provenance"] == portraits.CURRENT_IDENTITY_LITERAL_PROVENANCE:
+            assert "同宗" in receipt["text"]
+        else:
+            assert item["source_label_provenance"] == (
+                portraits.CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+            )
 
 
 def test_current_identity_conflict_diff_survives_generic_semantic_repair_prompt(
@@ -10557,6 +10661,115 @@ def test_ep5_two_elders_same_label_different_functional_key_backfills_qualifiers
         item["_current_identity_synthesized_qualifier"] is True for item in matches
     )
     assert len({item["identity_group"] for item in matches}) == 2
+
+
+# ---------------------------------------------------------------------------
+# 真实 EP5 回归 ERR-20260828-2fa501（proj_195be7df1fd6/ep_40fa133679a3，
+# provider_calls.id=22707，第 5 章）：真实响应里"老者"出现 3 次——E028
+# （F3，逐字含"老者"）、E029（F3，对话段，不含"老者"字面）、E030（F4，
+# 对话段，不含"老者"字面）。E029/E030 都满足"同 label 声明过重复 F key"
+# 的改绑资格（(老者,F3) 出现两次），但全批"老者"逐字出现 4 处（E009/E019/
+# E028/E053），改绑要求全批唯一命中，4 处不算唯一，两条都不触发改绑，
+# 判成 synthetic。F3 子组内部 [E028(literal), E029(synthetic)] 申报签名
+# 相同（同 F3、同 kind=onscreen）+ 有逐字锚定，触发既有归一合并——这正是
+# Bug B 的复现路径：合并后的 bundle 曾经无条件并入两条 provenance 不同的
+# receipt，无论 strongest 落在哪一边，receipt v2 校验都必定失败（真实报错
+# "逐字 source_label 与 receipt 不匹配"）。F4 子组只有 E030 一条，单独
+# 成组，保持 synthetic，不受影响。
+# ---------------------------------------------------------------------------
+
+def test_current_identity_ep5_literal_synthetic_merge_receipt_bundle_end_to_end() -> None:
+    """红灯（真实 EP5 最小复现，ERR-20260828-2fa501）：F3 子组内部把一条
+    literal occurrence（E028，逐字含"老者"）与一条 synthetic occurrence
+    （E029，改绑因全批多义而未触发）合并成一条身份——旧实现合并后的
+    receipt bundle 同时携带两条 provenance 不同的 receipt，破坏 receipt v2
+    的同质不变量，在 _attach_candidate_source_evidence 里必定校验失败。
+    修复后：merge 优先以 literal occurrence 为准，receipt 列表过滤到只保留
+    真正逐字见证过"老者"的那条，F3 子组归一为单一 literal receipt；F4
+    子组（仅 E030 一条）保持原样 synthetic、单一 receipt。这条测试把既有
+    "老者"F3/F4 系列测试往下多走一步，端到端喂进 receipt v2 校验，而不是
+    停在 _project_current_identity_response 的 errors==[] 这一步。"""
+    text = (
+        "“安静！”平台上金袍老者淡淡开口，他声音不大，可传出时却如滚滚雷霆轰隆隆的"
+        "降临天地，震的下方所有修士一个个心神震动，双耳嗡鸣，孟浩这里更是如此，"
+        "好半晌才恢复过来。\n\n"
+        "孟浩内心咯噔一声，他听到老者前半句话就觉得不妙，可还没等他反应过来，"
+        "上官修右手一挥，顿时其手中的紫色丹药刹那出现在了孟浩的面前，由不得他"
+        "拒绝般，直接落在了他的手中。\n\n"
+        "与此同时，在这靠山宗四周的山峰上，有两个老者盘膝坐在山顶，正笑眯眯的"
+        "看着山下外宗广场的一幕幕。\n\n"
+        "“上官师侄太不讲究了，把这丹药给了这刚入门的小娃，完了，估计我们靠山宗"
+        "又要少了一个弟子。”\n\n"
+        "“这一次的争夺没意思，我赌这小娃一会广场禁制消散后会将立刻扔丹。”\n\n"
+        "与此同时，在这外宗旁的山峰上，那之前打赌的两个老者中穿着灰色长袍的高大"
+        "老者，双眼猛地明亮，带着强烈的赞赏，哈哈大笑起来。"
+    )
+    records = portraits._current_identity_evidence_records(text)
+    evidence_by_ref = {
+        f"E{index:03d}": record for index, record in enumerate(records, start=1)
+    }
+    # E003=靠山宗山峰两老者（literal），E004=对话段（synthetic），E005=另一
+    # 段对话（synthetic，F4，独立成组）——evidence_ref 编号照抄真实 payload
+    # 相对位置（真实 call 里是 E028/E029/E030）。
+    payload = {"k": [], "n": [], "f": [
+        {
+            "evidence_ref": "E003", "source_label": "老者",
+            "functional_identity_key": "F3", "kind": "onscreen",
+        },
+        {
+            "evidence_ref": "E004", "source_label": "老者",
+            "functional_identity_key": "F3", "kind": "onscreen",
+        },
+        {
+            "evidence_ref": "E005", "source_label": "老者",
+            "functional_identity_key": "F4", "kind": "onscreen",
+        },
+    ]}
+    response = portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    projected, errors = portraits._project_current_identity_response(
+        response,
+        evidence_by_ref=evidence_by_ref,
+        known_decisions={},
+        reserved_authority_labels=set(),
+        group_scope="current-1",
+        existing_functional_routes=set(),
+    )
+    assert errors == []
+    matches = [item for item in projected if item["source_label"] == "老者"]
+    assert len(matches) == 2
+    # F3 子组已经在投影阶段归一合并（申报签名相同 + 有逐字锚定）。
+    normalized = [
+        item for item in matches if item.get("_current_identity_normalized_duplicate")
+    ]
+    assert len(normalized) == 1
+
+    # 缺口收口：继续走 receipt v2 校验，不能只停在投影这一步——这正是
+    # 生产事故实际崩溃的地方。
+    attached = portraits._attach_candidate_source_evidence(list(projected), text)
+    attached_matches = [item for item in attached if item["source_label"] == "老者"]
+    assert len(attached_matches) == 2
+    literal_matches = [
+        item for item in attached_matches
+        if item["source_label_provenance"] == portraits.CURRENT_IDENTITY_LITERAL_PROVENANCE
+    ]
+    synthetic_matches = [
+        item for item in attached_matches
+        if item["source_label_provenance"] == portraits.CURRENT_IDENTITY_SYNTHETIC_PROVENANCE
+    ]
+    assert len(literal_matches) == 1
+    assert len(synthetic_matches) == 1
+    # 归一后的 literal bundle 只保留真正逐字见证过"老者"的那条 receipt，
+    # 混进来的 synthetic receipt（对话段，不含"老者"字面）必须被过滤掉。
+    literal_item = literal_matches[0]
+    assert len(literal_item["source_evidence_receipts"]) == 1
+    assert "老者" in literal_item["source_evidence_receipts"][0]["text"]
+    assert literal_item["source_evidence_receipt"] == (
+        literal_item["source_evidence_receipts"][0]
+    )
+    # F4 子组（仅一条）保持原样：恰好一条 receipt，且不逐字含"老者"。
+    synthetic_item = synthetic_matches[0]
+    assert len(synthetic_item["source_evidence_receipts"]) == 1
+    assert "老者" not in synthetic_item["source_evidence_receipts"][0]["text"]
 
 
 def test_ep5_disambiguation_key_falls_back_to_authority_id_for_named_branch() -> None:

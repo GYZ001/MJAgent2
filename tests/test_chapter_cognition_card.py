@@ -53,6 +53,7 @@ def _capturing_chat_structured(
             selected_candidate=selected_candidate,
             supporting_segment_index=supporting_segment_index,
             supporting_quote=supporting_quote,
+            is_exclusive_reference=True,
         )
 
     return fake, captured
@@ -456,7 +457,14 @@ def test_prompt_with_cognition_card_has_clear_sections_and_hard_requirement(monk
     # 既有卷宗/候选/任务指令段落原样保留，不被认知卡注入改写。
     assert "孟浩说了句话" in prompt
     assert "该章出场的人物谱角色候选" in prompt
-    assert '任务：仅依据以上原文段落本身，判断称谓"王师弟"最可能指代上面候选中的哪一位本人。' in prompt
+    assert (
+        '任务一（选人）：仅依据以上原文段落本身，判断称谓"王师弟"最可能指代上面候选中的'
+        '哪一位\n本人。'
+    ) in prompt
+    # 排他性判据（任务二）是本次新增内容，与任务一结构上不同的问题，认知卡分区
+    # 与任务指令段落变化互不干扰。
+    assert "任务二（判排他性，与任务一是两个不同的问题）" in prompt
+    assert "is_exclusive_reference" in prompt
 
 
 # ---------- 8. 端到端回归：真实误登记事故 2 接入认知卡后不倒退 ----------

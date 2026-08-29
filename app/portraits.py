@@ -1397,7 +1397,35 @@ def _current_identity_receipt_sort_key(value: dict) -> tuple[object, ...]:
 
 
 def _merge_current_identity_occurrences(options: list[dict]) -> dict:
-    """Merge one exact semantic identity while retaining every typed receipt."""
+    """Merge one exact semantic identity while retaining every typed receipt.
+
+    真实 EP5 回归（ERR-20260828-2fa501，"老者"F3 子组）：declared-signature
+    + has_literal_anchor 这条合并路径（马脸青年案①，见
+    _current_identity_reconcile_as_single）可以把一个 source_label_
+    provenance=literal 的 occurrence 和一个 provenance=synthetic 的
+    occurrence 合到同一条身份——declared signature 本就不比较 provenance/
+    identity_group（见 _current_identity_declared_signature 的说明），两条
+    只要模型申报的字段本身相同就会被判定"同一人"，不要求 provenance 也
+    一致。旧实现只按 kind=="onscreen" 挑 strongest 当合并基底，receipt
+    列表却无条件并入全部 options 的 receipt——最终 provenance 继承自
+    strongest，receipt 列表却可能来自另一条 provenance 不同的 occurrence，
+    破坏了 receipt v2 自己的不变量（owned_current_literal.v1 要求
+    source_label 逐字出现在每一条 receipt 文本里；provider_synthetic_
+    functional.v1 要求恰好一条且不逐字出现），无论 strongest 落在哪一边
+    都必定校验失败（_validate_current_identity_receipt_bundle）。
+
+    _current_identity_reconcile_as_single 的两条合并路径已经保证：一旦
+    len(options) > 1 真正触发合并，要么全体 provenance 一致（durable
+    signature 完全相等的直接合并路径——synthetic_repeat 检查已经挡掉了
+    "全体一致但等于 synthetic" 的情形，只剩全体 literal 一种可能），要么
+    至少有一条是 literal（declared-signature 路径要求 has_literal_
+    anchor）。不存在"全体 synthetic 却被合并"的情形。于是只要合并组里
+    出现任何一条 literal，最终结果就必须以 literal 为准：strongest 优先
+    从 literal occurrence 里选，receipt 列表过滤掉不逐字含 source_label
+    的 receipt——这些 receipt 从未真正见证过这个逐字身份，保留它们只会让
+    receipt v2 校验永远无法通过，不是"该保留的证据"（source_labels 折叠
+    逻辑本身不动，这里只收窄了同一条身份最终携带的 receipt 集合）。
+    """
     if not options:
         raise ValueError("current identity occurrence merge requires candidates")
     ordered = sorted(
@@ -1406,10 +1434,17 @@ def _merge_current_identity_occurrences(options: list[dict]) -> dict:
             item.get("source_evidence_receipt") or {}
         ),
     )
+    literal_ordered = [
+        item for item in ordered
+        if item.get("source_label_provenance") == CURRENT_IDENTITY_LITERAL_PROVENANCE
+    ]
+    strongest_pool = literal_ordered or ordered
     strongest = next(
-        (item for item in ordered if item.get("kind") == "onscreen"),
-        ordered[0],
+        (item for item in strongest_pool if item.get("kind") == "onscreen"),
+        strongest_pool[0],
     )
+    final_provenance = strongest.get("source_label_provenance")
+    source_label = str(strongest.get("source_label") or "").strip()
     receipt_by_id: dict[str, dict] = {}
     for item in ordered:
         raw_receipts = item.get("source_evidence_receipts")
@@ -1424,7 +1459,16 @@ def _merge_current_identity_occurrences(options: list[dict]) -> dict:
             evidence_id = str(raw.get("evidence_id") or "").strip()
             if evidence_id:
                 receipt_by_id.setdefault(evidence_id, dict(raw))
-    receipts = sorted(receipt_by_id.values(), key=_current_identity_receipt_sort_key)
+    pooled_receipts = sorted(
+        receipt_by_id.values(), key=_current_identity_receipt_sort_key
+    )
+    if final_provenance == CURRENT_IDENTITY_LITERAL_PROVENANCE:
+        receipts = [
+            receipt for receipt in pooled_receipts
+            if source_label and source_label in str(receipt.get("text") or "")
+        ]
+    else:
+        receipts = pooled_receipts
     # The singular receipt is compatibility-only in RF11.  Keep it derivable
     # from the durable v2 list: the canonical first receipt is the primary,
     # while the candidate kind is still the strongest occurrence across all
@@ -1443,7 +1487,6 @@ def _merge_current_identity_occurrences(options: list[dict]) -> dict:
     }
     if primary_receipt is not None:
         primary_text = str(primary_receipt.get("text") or "")
-        source_label = str(merged.get("source_label") or "").strip()
         primary_evidence = _bounded_owned_identity_evidence(
             primary_text,
             anchors=[source_label] if source_label in primary_text else [],
@@ -1473,13 +1516,35 @@ def _current_identity_disambiguation_key(item: dict) -> str:
     _project_current_identity_response 里已经被消费掉、没有原样保留到
     这一层，authority_id 是它解析后的等价代理。两者都拿不到时返回空串
     ——空串一律各自成组（没有任何区分信号，不能假装它们是被区分开的）。
+
+    真实 EP4 回归（"同宗"，两个 n 分支 referential 称谓被降级为 functional，
+    见 append_candidate 的 N 分支调用点）：_current_response_group_key 在
+    这条降级路径上来自 _identity_form_functional_key，是对标签文本本身的
+    纯哈希，跟"模型自己申报的分组信号"不是一回事——它只随标签文字变化，
+    完全不随"这次和上次是不是同一个人"变化。两个不同的指称对象共用同一
+    个泛指标签（"同宗"）时会拿到完全相同的哈希，如果仍当作强区分信号，
+    会把它们错误地锁进同一个消歧子组，导致下面的甲/乙自动区分机制拿不到
+    第二个子组、无法补足限定语，只能致命失败——而它们本该和"老者"F3/F4
+    案一样，退回按申报签名聚类（签名相同的仍归一/合并，签名不同的各自
+    成组，交由甲/乙机制处理）。用 _current_identity_group_key_synthetic
+    标记区分这两类 key 来源：只有这条降级路径置位，真正 F 分支模型主动
+    声明的 functional_identity_key 不受影响，继续原样当强信号使用——
+    "马脸青年案②分支"（同一个真 F key 但 kind 自相矛盾时必须维持致命）
+    不受本次改动影响。
     """
     group_key = str(item.get("_current_response_group_key") or "").strip()
-    if group_key:
+    if group_key and not item.get("_current_identity_group_key_synthetic"):
         return group_key
     authority_id = str(item.get("authority_id") or "").strip()
     if authority_id:
         return authority_id
+    if group_key:
+        # 后端合成的哈希键本身不携带"是不是同一个人"的信号，但模型自己
+        # 申报的其它字段（declared signature）仍然是真实信号：签名相同的
+        # 继续聚在一起，交给 _current_identity_reconcile_as_single 的既有
+        # ①②判据决定合并/归一；签名不同（如本例的 kind 不一致）的各自
+        # 落进不同的 key，从而被拆成不同子组。
+        return "declared:" + "\x1f".join(_current_identity_declared_signature(item))
     return f"__no_key__:{id(item)}"
 
 
@@ -1805,6 +1870,7 @@ def _project_current_identity_response(
         materialization_compatible: bool = False,
         fixed_identity_group: str = "",
         scope_qualifier: str = "",
+        functional_key_synthetic: bool = False,
     ) -> None:
         source_label = str(source_label or "")
         canonical_name = str(canonical_name or "")
@@ -2005,6 +2071,18 @@ def _project_current_identity_response(
             "_current_response_group_key": (
                 functional_key if identity_kind == "functional" else ""
             ),
+            # EP4 真实回归（"同宗"，见 _current_identity_disambiguation_key
+            # 完整说明）：N 分支被降级为 functional 的称谓，functional_key
+            # 来自 _identity_form_functional_key 对标签文本的纯哈希，跟
+            # 真正的 F 分支 functional_identity_key 不是同一类信号——前者
+            # 不随"这是不是同一个人"变化，只随标签文本变化；两个不同的
+            # 指称对象共用同一泛指标签时会拿到完全相同的哈希，不能当作
+            # 模型已经用结构性字段区分了"这是哪个人"。仅 N 分支降级路径
+            # 置位 True；真正 F 分支的 functional_key 继续保留原有强信号
+            # 语义（马脸青年案②分支：同一真 F key 内部自相矛盾仍须致命）。
+            "_current_identity_group_key_synthetic": bool(
+                functional_key_synthetic and identity_kind == "functional"
+            ),
             "scope_qualifier": scope_qualifier,
             "_typed_source_evidence_owned": True,
         })
@@ -2196,6 +2274,7 @@ def _project_current_identity_response(
                 functional_key=_identity_form_functional_key(identity_label),
                 kind=item.kind,
                 record=record,
+                functional_key_synthetic=True,
             )
             continue
         if identity_label in (reserved_authority_labels or set()) and not any(
@@ -3844,6 +3923,7 @@ def _attach_candidate_source_evidence(
         typed_owned = bool(candidate.pop("_typed_source_evidence_owned", False))
         candidate.pop("_current_materialization_compatible", None)
         candidate.pop("_current_response_group_key", None)
+        candidate.pop("_current_identity_group_key_synthetic", None)
         current_receipt = candidate.get("source_evidence_receipt")
         current_receipts = candidate.get("source_evidence_receipts")
         label = str(candidate.get("source_label") or "").strip()
@@ -10226,17 +10306,12 @@ def _new_portrait_path(project_id: str, name: str, ep_start: int) -> str:
 
 
 async def _review_portrait_asset(image_path: str, appearance: str) -> dict:
-    """对反应式人物锚点执行与初始定妆照相同的保守一致性门禁。"""
-    from app.stages import review_portrait_image
+    """VLM 图片质检已下线：反应式定妆照是否可用只看文件是否存在（技术校验）。
 
-    try:
-        return await review_portrait_image(hiagent.encode_image_file(image_path), appearance)
-    except Exception as exc:  # noqa: BLE001 评估失败不能伪装成通过
-        return {
-            "overall": 0.0,
-            "issues": [f"角色一致性评估未完成：{type(exc).__name__}"],
-            "qa_recovered": True,
-        }
+    保留函数签名和空字典返回值，使既有调用方（按集反应式重绘）无需改动即可继续运行。
+    """
+    del image_path, appearance
+    return {}
 
 
 def register_initial_portrait(conn, project_id: str, name: str, image_path: str,
