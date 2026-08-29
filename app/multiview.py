@@ -102,18 +102,6 @@ def narrative_keyframe_required() -> bool:
     return bool_setting("narrative_keyframe_required", True)
 
 
-def visual_evidence_qa_enabled() -> bool:
-    return bool_setting("visual_evidence_qa_enabled", True)
-
-
-def video_visual_anchor_qa_enabled() -> bool:
-    return bool_setting("video_visual_anchor_qa_enabled", True)
-
-
-def watermark_qa_mode() -> str:
-    return (get_setting("watermark_qa_mode") or "reject").strip()
-
-
 def fingerprint_payload(payload: dict[str, Any]) -> str:
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
@@ -1210,316 +1198,6 @@ def _set_scene_pack_fields(conn, scene_id: str, **fields: Any) -> None:
         pass
 
 
-async def review_character_view(image_path: str, appearance: str, view_role: str) -> dict[str, Any]:
-    from app.stages import review_portrait_image
-    try:
-        qa = await review_portrait_image(
-            hiagent.encode_image_file(image_path), appearance,
-            requires_full_body=character_view_requires_full_body(view_role),
-        )
-        qa["view_role"] = view_role
-        return qa
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "overall": None,
-            "status": "unverified",
-            "issues": [f"视角 QA 未完成：{type(exc).__name__}"],
-            "qa_recovered": True,
-            "view_role": view_role,
-        }
-
-
-async def review_scene_view(image_path: str, scene_canonical: str, view_role: str) -> dict[str, Any]:
-    from app.stages import review_scene_image
-    try:
-        qa = await review_scene_image(
-            hiagent.encode_image_file(image_path), scene_canonical, "场景定场", [], kind="head",
-            initiator_label="场景多视角主图QA",
-            environment_only=True,
-        )
-        from app.scene_policy import normalize_scene_image_qa
-        qa["view_role"] = view_role
-        return normalize_scene_image_qa(qa, environment_only=True)
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "overall": None,
-            "status": "unverified",
-            "issues": [f"场景视角 QA 未完成：{type(exc).__name__}"],
-            "qa_recovered": True,
-            "view_role": view_role,
-        }
-
-
-def _qa_string_list(value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [str(item) for item in value if item is not None]
-    if value is None or value == "":
-        return []
-    return [str(value)]
-
-
-async def review_character_pack_consistency(views: list[dict[str, Any]], appearance: str) -> dict[str, Any]:
-    """一次完成逐视角质量与整包一致性 QA。"""
-    frames: list[str] = []
-    roles: list[str] = []
-    for v in views:
-        path = v.get("image_path")
-        if not path or not Path(path).exists():
-            continue
-        try:
-            frames.append(hiagent.encode_image_file(path))
-            roles.append(str(v.get("view_role") or ""))
-        except OSError:
-            continue
-    if len(frames) != len(views) or len(frames) < 2:
-        return {
-            "overall": None,
-            "status": "unverified",
-            "issues": ["多视角素材不完整，无法完成整包 QA"],
-        }
-    expectation = (
-        "你是角色多视角一致性评审。以下图片是同一角色不同观察角度的设定图，顺序："
-        + ", ".join(f"{i+1}:{r}" for i, r in enumerate(roles))
-        + f"。外观锚点：{appearance}。"
-        + (
-            "各视角的构图合同："
-            + "；".join(
-                f"{r} 要求{'全身入画' if character_view_requires_full_body(r) else '半身或特写构图，下半身不入画属于正常，不得据此判缺陷'}"
-                for r in dict.fromkeys(roles)
-            )
-            + "。"
-        )
-        + "先逐张检查对应观察角度、稳定身份特征、主体完整性与技术缺陷；"
-        "再检查同一角色脸部特征、发型、服装、体型在各视角一致，只允许观察角度不同。"
-        "各视角之间发生性别、核心身份、脸/发型/服装/体型漂移，或缺失视角、多余人物、畸形、"
-        "遮挡人物主体的文字/水印属于 hard_failures。供应商角落水印若不遮挡人物，"
-        "只属于 issues 软警告，不得写入 hard_failures。表情、眼神、笑容、爱慕/妩媚/虚荣/戏谑等气质，"
-        "以及普通展示站姿只属于 issues 软警告，不得写入 hard_failures，也不得拉低 overall；"
-        "定妆多视角允许使用统一的中性表情。三张图若彼此一致，仅与文字锚点在视觉年龄、"
-        "服装款式、发饰或审美装饰上有差异，也只属于 issues，不得判为 hard_failures。"
-        '输出 JSON：{"overall":0~1,"face_consistency":0~1,"outfit_consistency":0~1,'
-        '"hair_consistency":0~1,"body_consistency":0~1,'
-        '"identity_consistent":bool|null,'
-        '"views":[{"view_role":str,"identity_match":0~1,"presentation_match":0~1,'
-        '"clean_frame":0~1,"overall":0~1,"person_count":int|null,'
-        '"stable_identity_matches":bool|null,"full_body_visible":bool|null,'
-        '"crop_severity":"none|minor|major","anatomy_valid":bool|null,'
-        '"watermark_detected":bool|null,"watermark_occluding":bool|null,'
-        '"forbidden_text_detected":bool|null,"forbidden_text_is_provider_mark":bool|null,'
-        '"issues":[str],"hard_failures":[str]}],"issues":[str],"hard_failures":[str]}'
-    )
-    try:
-        raw = await hiagent.vlm_check(frames, expectation, call_meta={"initiator_label": "人物多视角整包QA"})
-        from app.schemas import extract_json
-        from app.portrait_policy import normalize_portrait_seed_qa, unique_messages
-        data = extract_json(raw)
-        reported_group_hard = _qa_string_list(data.get("hard_failures"))
-        for key in ("overall", "face_consistency", "outfit_consistency", "hair_consistency", "body_consistency"):
-            try:
-                data[key] = max(0.0, min(1.0, float(data.get(key, 0))))
-            except (TypeError, ValueError):
-                data[key] = 0.0
-        group_hard: list[str] = []
-        if data.get("identity_consistent") is False:
-            group_hard.append("结构化整包观察确认角色身份跨视角不一致")
-        data["hard_failures"] = group_hard
-        data["issues"] = unique_messages([
-            *_qa_string_list(data.get("issues")),
-            *reported_group_hard,
-        ])
-        reported = {
-            str(item.get("view_role") or ""): item
-            for item in (data.get("views") or []) if isinstance(item, dict)
-        }
-        ignore_non_occluding_watermark = watermark_qa_mode() == "ignore_unless_occluding"
-        normalized_views = []
-        for role in roles:
-            item = dict(reported.get(role) or {})
-            item["view_role"] = role
-            item["framing_requires_full_body"] = character_view_requires_full_body(role)
-            if (
-                ignore_non_occluding_watermark
-                and item.get("watermark_detected") is True
-                and item.get("watermark_occluding") is False
-            ):
-                # Same contract as review_scene_image / review_portrait_image: the
-                # per-item deterministic policy only learns this provider mark is
-                # allowed when the configured practical-quality mode says so.
-                item["non_occluding_provider_watermark"] = True
-            normalized_views.append(normalize_portrait_seed_qa(item))
-        data["views"] = normalized_views
-        data["issues"] = unique_messages([
-            *data["issues"],
-            *(
-                f"{item['view_role']}：{message}"
-                for item in normalized_views
-                for message in item.get("issues", [])
-            ),
-        ])
-        passed = (
-            float(data.get("overall") or 0) >= 0.75
-            and not data["hard_failures"]
-            and all(item["status"] in {"ready", "warning"} for item in normalized_views)
-        )
-        data["status"] = "warning" if passed and data["issues"] else ("ready" if passed else "failed")
-        return data
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "overall": None,
-            "status": "unverified",
-            "issues": [f"整包 QA 未完成：{type(exc).__name__}"],
-            "qa_recovered": True,
-        }
-
-
-async def review_scene_pack_consistency(views: list[dict[str, Any]], scene_canonical: str) -> dict[str, Any]:
-    frames: list[str] = []
-    roles: list[str] = []
-    for v in views:
-        path = v.get("image_path")
-        if not path or not Path(path).exists():
-            continue
-        try:
-            frames.append(hiagent.encode_image_file(path))
-            roles.append(str(v.get("view_role") or ""))
-        except OSError:
-            continue
-    if len(frames) != len(views) or len(frames) < 2:
-        return {
-            "overall": None,
-            "status": "unverified",
-            "issues": ["场景多视角素材不完整，无法完成整包 QA"],
-        }
-    expectation = (
-        "你是场景多视角一致性评审。以下是同一场景不同机位的无人定场图，顺序："
-        + ", ".join(f"{i+1}:{r}" for i, r in enumerate(roles))
-        + f"。场景锚点：{scene_canonical}。"
-        "先逐张识别实际视角角色并检查场景锚点和画面结构；"
-        "再检查相机轴线是否真正变化、门窗/主陈设/标志物的左右前后关系及空间覆盖。"
-        "相似度/SSIM 只能作为证据，不能单独决定通过；对称空间也必须给出轴线和标志物依据。"
-        "views 必须与输入顺序一一对应，view_role 只能原样输出上述英文枚举，"
-        "不得加 shot、机位描述或其他后缀。"
-        '输出 JSON：{"overall":0~1,"geometry_consistency":0~1,"landmark_consistency":0~1,'
-        '"lighting_consistency":0~1,"views":[{"view_role":str,"overall":0~1,'
-        '"view_role_matches":bool,"camera_axis_valid":bool,"landmark_relation_valid":bool,'
-        '"space_coverage_valid":bool,"issues":[str],"hard_failures":[str]}],'
-        '"issues":[str],"hard_failures":[str],"uncertainties":[str]}'
-    )
-    try:
-        raw = await hiagent.vlm_check(frames, expectation, call_meta={"initiator_label": "场景多视角整包QA"})
-        from app.schemas import extract_json
-        data = extract_json(raw)
-        for key in ("overall", "geometry_consistency", "landmark_consistency", "lighting_consistency"):
-            try:
-                data[key] = max(0.0, min(1.0, float(data.get(key, 0))))
-            except (TypeError, ValueError):
-                data[key] = 0.0
-        raw_views = [dict(item) for item in (data.get("views") or []) if isinstance(item, dict)]
-        unused = set(range(len(raw_views)))
-        normalized_views = []
-        for role_index, role in enumerate(roles):
-            matched_index = next(
-                (index for index in unused if str(raw_views[index].get("view_role") or "").strip() == role),
-                None,
-            )
-            if matched_index is None:
-                role_token = role.replace("_", " ").lower()
-                matched_index = next(
-                    (
-                        index for index in unused
-                        if role_token in str(raw_views[index].get("view_role") or "")
-                        .replace("_", " ").lower()
-                    ),
-                    None,
-                )
-            # The contract also defines positional correspondence.  This
-            # recovers otherwise valid VLM output such as
-            # "establishing shot (left viewpoint)" without fabricating facts.
-            if matched_index is None and role_index in unused:
-                matched_index = role_index
-            item = dict(raw_views[matched_index]) if matched_index is not None else {}
-            if matched_index is not None:
-                unused.discard(matched_index)
-            item["view_role"] = role
-            try:
-                item["overall"] = max(0.0, min(1.0, float(item.get("overall"))))
-            except (TypeError, ValueError):
-                item["overall"] = None
-            item["issues"] = _qa_string_list(item.get("issues"))
-            item["hard_failures"] = _qa_string_list(item.get("hard_failures"))
-            item["status"] = (
-                "ready" if item["overall"] is not None and item["overall"] >= 0.6
-                and not item["hard_failures"] else "failed"
-            )
-            normalized_views.append(item)
-        data["views"] = normalized_views
-        data["issues"] = _qa_string_list(data.get("issues"))
-        data["hard_failures"] = _qa_string_list(data.get("hard_failures"))
-        from app.scene_policy import normalize_scene_pack_qa
-        return normalize_scene_pack_qa(
-            data,
-            required_roles=[*SCENE_REQUIRED_VIEWS, *(["action_zone"] if "action_zone" in roles else [])],
-            actual_roles=roles,
-        )
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "overall": None,
-            "status": "unverified",
-            "issues": [f"场景整包 QA 未完成：{type(exc).__name__}"],
-            "qa_recovered": True,
-        }
-
-
-def _view_passed(qa: dict[str, Any] | None) -> bool:
-    """Score-only：单视图 QA 永不因低分判失败（PRD QA-SO）。缺少 QA 视为 unscored 但仍通过结构路径。"""
-    del qa
-    return True
-
-
-def _apply_pack_view_qa(
-    conn,
-    *,
-    table: str,
-    parent_column: str,
-    parent_id: str,
-    views: list[dict[str, Any]],
-    group_qa: dict[str, Any],
-) -> list[str]:
-    """落回整包 QA 评分；视角 ready 只看文件是否存在（PRD QA-SO #16/#20）。"""
-    reported = {
-        str(item.get("view_role") or ""): dict(item)
-        for item in (group_qa.get("views") or []) if isinstance(item, dict)
-    }
-    failed: list[str] = []
-    for view in views:
-        role = str(view.get("view_role") or "")
-        qa = reported.get(role)
-        if qa is None:
-            qa = {
-                "view_role": role,
-                "overall": group_qa.get("overall"),
-                "issues": _qa_string_list(group_qa.get("issues")),
-                "hard_failures": _qa_string_list(group_qa.get("hard_failures")),
-                "status": group_qa.get("status"),
-            }
-        qa = {
-            **qa,
-            "evaluation_role": "score_only",
-            "runtime_blocking": False,
-            "retry_eligible": False,
-        }
-        path = view.get("image_path")
-        has_file = bool(path and Path(str(path)).exists())
-        status = "ready" if has_file else "failed"
-        if status != "ready":
-            failed.append(role)
-        conn.execute(
-            f"UPDATE {table} SET qa_json=?, status=? WHERE {parent_column}=? AND view_role=?",
-            (json.dumps(qa, ensure_ascii=False), status, parent_id, role),
-        )
-    return failed
-
-
 async def ensure_character_multiview_pack(
     *,
     project_id: str,
@@ -1533,7 +1211,13 @@ async def ensure_character_multiview_pack(
     optional_views: list[str] | None = None,
     primary_qa: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """生成/补齐人物必需多视角包；失败时 pack_status=failed，不半包生效。"""
+    """生成/补齐人物必需多视角包；技术产物（文件）存在即 ready，不半包生效。
+
+    VLM 图片质检已下线：本函数不再对生成结果做一致性/身份评分，只要每个必需视角的
+    图片文件成功落盘（技术产物存在）即视为该视角就绪。``primary_qa`` 形参不再承载
+    评分数据（调用方现在恒传 ``{}``），只用其"是否为 None"标记"父图是本次流水线刚
+    生成的候选，可直接复用为 front_full"（见下方 ``use_parent_primary``）。
+    """
     if not character_multiview_enabled():
         return {"status": "disabled", "portrait_id": portrait_id}
     conn = get_conn()
@@ -1561,6 +1245,9 @@ async def ensure_character_multiview_pack(
         and (parent["prompt"] or "").strip()
         and (parent["prompt"] or "").strip() == effective_prompt
     )
+    # ``primary_qa is not None``（而非真值判断）刻意保留：调用方（refs.py/portraits.py）
+    # 传入空字典 ``{}`` 表示"这就是本次流水线里刚生成的候选，直接复用为 front_full"，
+    # 与 prompt 字节级是否相同无关——后者在初始定妆流程里因锚点重排版几乎必然不匹配。
     use_parent_primary = bool(
         parent
         and parent["image_path"]
@@ -1587,24 +1274,15 @@ async def ensure_character_multiview_pack(
         or front_is_authoritative
     ):
         if use_parent_primary:
-            qa = dict(primary_qa) if primary_qa else await review_character_view(
-                parent["image_path"], effective_prompt, "front_full",
-            )
-            qa.setdefault("view_role", "front_full")
-            status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
+            # 技术产物存在即 ready：父图（parent["image_path"]）已经落盘，不再跑 VLM 评分。
             _upsert_character_view(
                 conn, portrait_id=portrait_id, view_role="front_full", framing="full_body",
                 image_path=parent["image_path"], prompt=parent["prompt"] or front_prompt,
-                qa=qa, artifact_id=parent["artifact_id"] if "artifact_id" in parent.keys() else None,
+                qa=None, artifact_id=parent["artifact_id"] if "artifact_id" in parent.keys() else None,
                 base_view_id=base_front.get("id"),
-                status=status, fingerprint=front_fp,
+                status="ready", fingerprint=front_fp,
             )
             conn.commit()
-            if status != "ready":
-                _set_portrait_pack_fields(conn, portrait_id, pack_status=PACK_STATUS_FAILED,
-                                         group_qa_json=json.dumps(qa, ensure_ascii=False))
-                conn.commit()
-                return {"status": "failed", "portrait_id": portrait_id, "failed_view": "front_full", "qa": qa}
         else:
             seed = None
             if base_front.get("image_path") and Path(base_front["image_path"]).exists():
@@ -1623,8 +1301,7 @@ async def ensure_character_multiview_pack(
                 },
             )
             await _save_image_item(item, path)
-            qa = await review_character_view(path, effective_prompt, "front_full")
-            status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
+            # 技术产物存在即 ready：图片已成功落盘（否则 _save_image_item 早已抛出），不再跑 VLM 评分。
             gen_fp = view_input_fingerprint(
                 view_role="front_full", prompt=front_prompt, anchor_text=effective_prompt,
                 parent_revision_id=portrait_id, base_view_id=base_front.get("id"),
@@ -1632,17 +1309,12 @@ async def ensure_character_multiview_pack(
             )
             _upsert_character_view(
                 conn, portrait_id=portrait_id, view_role="front_full", framing="full_body",
-                image_path=path, prompt=front_prompt, qa=qa, artifact_id=None,
-                base_view_id=base_front.get("id"), status=status, fingerprint=gen_fp,
+                image_path=path, prompt=front_prompt, qa=None, artifact_id=None,
+                base_view_id=base_front.get("id"), status="ready", fingerprint=gen_fp,
             )
             # 镜像到父表 image_path
             conn.execute("UPDATE character_portraits SET image_path=? WHERE id=?", (path, portrait_id))
             conn.commit()
-            if status != "ready":
-                _set_portrait_pack_fields(conn, portrait_id, pack_status=PACK_STATUS_FAILED,
-                                         group_qa_json=json.dumps(qa, ensure_ascii=False))
-                conn.commit()
-                return {"status": "failed", "portrait_id": portrait_id, "failed_view": "front_full", "qa": qa}
     elif front and not front.get("input_fingerprint"):
         _backfill_view_fingerprint(
             conn, table="character_portrait_views", view_id=front["id"], fingerprint=front_fp,
@@ -1651,12 +1323,10 @@ async def ensure_character_multiview_pack(
 
     existing_views = {v["view_role"]: v for v in list_portrait_views(portrait_id, conn=conn)}
     front = existing_views.get("front_full") or {}
-    if not _view_passed(json.loads(front["qa_json"]) if front.get("qa_json") else front.get("qa") or {"overall": 1.0}):
-        # 若已有 ready 状态则放行
-        if front.get("status") != "ready":
-            _set_portrait_pack_fields(conn, portrait_id, pack_status=PACK_STATUS_FAILED)
-            conn.commit()
-            return {"status": "failed", "portrait_id": portrait_id, "failed_view": "front_full"}
+    if front.get("status") != "ready" or not front.get("image_path"):
+        _set_portrait_pack_fields(conn, portrait_id, pack_status=PACK_STATUS_FAILED)
+        conn.commit()
+        return {"status": "failed", "portrait_id": portrait_id, "failed_view": "front_full"}
 
     front_seed = []
     if front.get("image_path") and Path(front["image_path"]).exists():
@@ -1684,17 +1354,15 @@ async def ensure_character_multiview_pack(
                 conn.commit()
             return {"view_role": view_role, "status": "ready", "id": cur["id"], "reused": True}
         if _pending_view_can_be_reviewed(cur, fp):
-            if cur and not cur.get("input_fingerprint"):
-                _backfill_view_fingerprint(
-                    conn, table="character_portrait_views", view_id=cur["id"], fingerprint=fp,
+            # 历史遗留的 qa_pending/unverified 行：技术产物（文件）已存在且指纹匹配，
+            # VLM 质检已下线，直接晋升为 ready，不再重新生成。
+            if cur:
+                conn.execute(
+                    "UPDATE character_portrait_views SET status='ready', input_fingerprint=? WHERE id=?",
+                    (fp, cur["id"]),
                 )
                 conn.commit()
-            return {
-                "view_role": view_role,
-                "status": PACK_STATUS_QA_PENDING,
-                "id": cur["id"],
-                "reused": True,
-            }
+            return {"view_role": view_role, "status": "ready", "id": cur["id"], "reused": True}
         seeds = list(front_seed)
         if base.get("image_path") and Path(base["image_path"]).exists():
             seeds.append(hiagent.data_url_from_file(base["image_path"]))
@@ -1716,67 +1384,44 @@ async def ensure_character_multiview_pack(
             },
         )
         await _save_image_item(item, path)
+        # 技术产物存在即 ready：图片已成功落盘，不再等待 VLM 评审。
         view_id = _upsert_character_view(
             conn, portrait_id=portrait_id, view_role=view_role,
             framing="half_or_full" if view_role != "face_closeup" else "closeup",
             image_path=path, prompt=prompt, qa=None, artifact_id=None,
-            base_view_id=base.get("id"), status=PACK_STATUS_QA_PENDING, fingerprint=fp,
+            base_view_id=base.get("id"), status="ready", fingerprint=fp,
         )
         conn.commit()
-        return {"view_role": view_role, "status": PACK_STATUS_QA_PENDING, "id": view_id}
+        return {"view_role": view_role, "status": "ready", "id": view_id}
 
     side_roles = [r for r in roles if r != "front_full"]
     side_results = await asyncio.gather(*[_gen_side(r) for r in side_roles])
-    failed = [r for r in side_results if r.get("status") not in {"ready", PACK_STATUS_QA_PENDING}]
+    failed = [r for r in side_results if r.get("status") != "ready"]
     if failed:
-        _set_portrait_pack_fields(
-            conn, portrait_id, pack_status=PACK_STATUS_FAILED,
-            group_qa_json=json.dumps({"failed_views": failed}, ensure_ascii=False),
-        )
+        _set_portrait_pack_fields(conn, portrait_id, pack_status=PACK_STATUS_FAILED)
         conn.commit()
         return {"status": "failed", "portrait_id": portrait_id, "failed_views": failed}
 
+    # 仅结构缺失（必需视角文件不存在）可判失败；VLM 一致性质检已下线，不再据此拦截整包。
     views = list_portrait_views(portrait_id, conn=conn)
-    required_views = [v for v in views if v.get("view_role") in CHARACTER_REQUIRED_VIEWS]
-    group_qa = await review_character_pack_consistency(required_views, effective_prompt)
-    group_qa = {
-        **group_qa,
-        "evaluation_role": "score_only",
-        "runtime_blocking": False,
-        "retry_eligible": False,
+    present_roles = {
+        v.get("view_role") for v in views
+        if v.get("image_path") and Path(v["image_path"]).exists()
     }
-    failed_roles = _apply_pack_view_qa(
-        conn,
-        table="character_portrait_views",
-        parent_column="portrait_id",
-        parent_id=portrait_id,
-        views=required_views,
-        group_qa=group_qa,
-    )
-    # 仅结构缺失可失败；QA 低分/hard_failures 不阻断整包生效。
-    if failed_roles:
-        _set_portrait_pack_fields(
-            conn, portrait_id, pack_status=PACK_STATUS_FAILED,
-            group_qa_json=json.dumps(group_qa, ensure_ascii=False),
-        )
+    missing_roles = [role for role in CHARACTER_REQUIRED_VIEWS if role not in present_roles]
+    if missing_roles:
+        _set_portrait_pack_fields(conn, portrait_id, pack_status=PACK_STATUS_FAILED)
         conn.commit()
-        return {
-            "status": "failed", "portrait_id": portrait_id,
-            "group_qa": group_qa, "failed_views": failed_roles,
-        }
+        return {"status": "failed", "portrait_id": portrait_id, "failed_views": missing_roles}
 
-    views = list_portrait_views(portrait_id, conn=conn)
     # 镜像 front_full 到父表
     front_ready = next((v for v in views if v.get("view_role") == "front_full"), None)
-    fields = {
-        "pack_status": PACK_STATUS_READY,
-        "group_qa_json": json.dumps(group_qa, ensure_ascii=False),
-    }
+    fields: dict[str, Any] = {"pack_status": PACK_STATUS_READY}
     if front_ready and front_ready.get("image_path"):
         fields["image_path"] = front_ready["image_path"]
     _set_portrait_pack_fields(conn, portrait_id, **fields)
     conn.commit()
-    return {"status": "ready", "portrait_id": portrait_id, "group_qa": group_qa, "views": views}
+    return {"status": "ready", "portrait_id": portrait_id, "views": views}
 
 
 async def ensure_scene_multiview_pack(
@@ -1791,6 +1436,12 @@ async def ensure_scene_multiview_pack(
     primary_qa: dict[str, Any] | None = None,
     optional_views: list[str] | None = None,
 ) -> dict[str, Any]:
+    """生成/补齐场景必需多视角包；技术产物（文件）存在即 ready，不半包生效。
+
+    VLM 图片质检已下线：本函数不再对生成结果做环境一致性评分，只要每个必需视角的
+    图片文件成功落盘即视为该视角就绪。``primary_qa`` 形参不再承载评分数据（调用方
+    现在恒传 ``{}``），只用其"是否为 None"标记父图可直接复用为 establishing。
+    """
     if not scene_multiview_enabled():
         return {"status": "disabled", "scene_reference_id": scene_reference_id}
     conn = get_conn()
@@ -1820,25 +1471,16 @@ async def ensure_scene_multiview_pack(
     )
     if not _ready_view_matches_fingerprint(est, est_fp):
         if parent and parent["image_path"] and Path(parent["image_path"]).exists():
-            qa = dict(primary_qa) if primary_qa else await review_scene_view(
-                parent["image_path"], scene_canonical, "establishing",
-            )
-            qa.setdefault("view_role", "establishing")
-            status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
+            # 技术产物存在即 ready：父图已经落盘，不再跑 VLM 评分。
             _upsert_scene_view(
                 conn, scene_reference_id=scene_reference_id, view_role="establishing",
                 camera_axis="establishing", image_path=parent["image_path"],
-                prompt=parent["prompt"] or est_prompt, qa=qa,
+                prompt=parent["prompt"] or est_prompt, qa=None,
                 artifact_id=parent["artifact_id"] if "artifact_id" in parent.keys() else None,
                 base_view_id=base_est.get("id"),
-                status=status, fingerprint=est_fp,
+                status="ready", fingerprint=est_fp,
             )
             conn.commit()
-            if status != "ready":
-                _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
-                                      group_qa_json=json.dumps(qa, ensure_ascii=False))
-                conn.commit()
-                return {"status": "failed", "scene_reference_id": scene_reference_id, "failed_view": "establishing"}
         else:
             path = _view_path(project_id, "scene", scene_name, "establishing", ep_start)
             item = await _generate_image(
@@ -1854,8 +1496,7 @@ async def ensure_scene_multiview_pack(
                 },
             )
             await _save_image_item(item, path)
-            qa = await review_scene_view(path, scene_canonical, "establishing")
-            status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
+            # 技术产物存在即 ready：图片已成功落盘，不再跑 VLM 评分。
             gen_fp = view_input_fingerprint(
                 view_role="establishing", prompt=est_prompt, anchor_text=scene_canonical,
                 parent_revision_id=scene_reference_id, base_view_id=base_est.get("id"),
@@ -1863,17 +1504,12 @@ async def ensure_scene_multiview_pack(
             )
             _upsert_scene_view(
                 conn, scene_reference_id=scene_reference_id, view_role="establishing",
-                camera_axis="establishing", image_path=path, prompt=est_prompt, qa=qa, artifact_id=None,
+                camera_axis="establishing", image_path=path, prompt=est_prompt, qa=None, artifact_id=None,
                 base_view_id=base_est.get("id"),
-                status=status, fingerprint=gen_fp,
+                status="ready", fingerprint=gen_fp,
             )
             conn.execute("UPDATE scene_references SET image_path=? WHERE id=?", (path, scene_reference_id))
             conn.commit()
-            if status != "ready":
-                _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
-                                      group_qa_json=json.dumps(qa, ensure_ascii=False))
-                conn.commit()
-                return {"status": "failed", "scene_reference_id": scene_reference_id, "failed_view": "establishing"}
     elif est and not est.get("input_fingerprint"):
         _backfill_view_fingerprint(
             conn, table="scene_reference_views", view_id=est["id"], fingerprint=est_fp,
@@ -1899,7 +1535,14 @@ async def ensure_scene_multiview_pack(
         base_view_id=base_rev.get("id"),
         seed_hint=est.get("image_path"),
     )
-    if not _ready_view_matches_fingerprint(rev, rev_fp) and not _pending_view_can_be_reviewed(rev, rev_fp):
+    if _pending_view_can_be_reviewed(rev, rev_fp):
+        # 历史遗留的 qa_pending/unverified 行：文件已存在且指纹匹配，直接晋升为 ready。
+        conn.execute(
+            "UPDATE scene_reference_views SET status='ready', input_fingerprint=? WHERE id=?",
+            (rev_fp, rev["id"]),
+        )
+        conn.commit()
+    elif not _ready_view_matches_fingerprint(rev, rev_fp):
         seeds = []
         if est.get("image_path") and Path(est["image_path"]).exists():
             seeds.append(hiagent.data_url_from_file(est["image_path"]))
@@ -1921,11 +1564,12 @@ async def ensure_scene_multiview_pack(
             },
         )
         await _save_image_item(item, path)
+        # 技术产物存在即 ready：图片已成功落盘，不再等待 VLM 评审。
         _upsert_scene_view(
             conn, scene_reference_id=scene_reference_id, view_role="reverse_angle",
             camera_axis="reverse", image_path=path, prompt=rev_prompt, qa=None, artifact_id=None,
             base_view_id=base_rev.get("id"),
-            status=PACK_STATUS_QA_PENDING, fingerprint=rev_fp,
+            status="ready", fingerprint=rev_fp,
         )
         conn.commit()
     elif rev and not rev.get("input_fingerprint"):
@@ -1944,7 +1588,14 @@ async def ensure_scene_multiview_pack(
             parent_revision_id=scene_reference_id,
             seed_hint=(existing_views.get("establishing") or {}).get("image_path"),
         )
-        if not _ready_view_matches_fingerprint(action, action_fp) and not _pending_view_can_be_reviewed(action, action_fp):
+        if _pending_view_can_be_reviewed(action, action_fp):
+            # 历史遗留的 qa_pending/unverified 行：文件已存在且指纹匹配，直接晋升为 ready。
+            conn.execute(
+                "UPDATE scene_reference_views SET status='ready', input_fingerprint=? WHERE id=?",
+                (action_fp, action["id"]),
+            )
+            conn.commit()
+        elif not _ready_view_matches_fingerprint(action, action_fp):
             seeds = []
             anchor = existing_views.get("establishing") or {}
             if anchor.get("image_path") and Path(anchor["image_path"]).exists():
@@ -1967,10 +1618,11 @@ async def ensure_scene_multiview_pack(
                 },
             )
             await _save_image_item(item, path)
+            # 技术产物存在即 ready：图片已成功落盘，不再等待 VLM 评审。
             _upsert_scene_view(
                 conn, scene_reference_id=scene_reference_id, view_role="action_zone",
                 camera_axis="action", image_path=path, prompt=action_prompt, qa=None, artifact_id=None,
-                base_view_id=None, status=PACK_STATUS_QA_PENDING, fingerprint=action_fp,
+                base_view_id=None, status="ready", fingerprint=action_fp,
             )
             conn.commit()
 
@@ -1995,75 +1647,26 @@ async def ensure_scene_multiview_pack(
                                group_qa_json=json.dumps(group_qa, ensure_ascii=False))
         conn.commit()
         return {"status": "failed", "scene_reference_id": scene_reference_id, "group_qa": group_qa, "failed_views": missing}
-    single_failed: list[str] = []
+    # VLM 图片质检已下线：不再逐视角评审、也不再做整包一致性评审。技术产物（文件）
+    # 存在即视为该视角就绪；把仍停留在旧状态（qa_pending/unverified/failed）但文件
+    # 已实际落盘的历史行统一晋升为 ready，避免残留状态把已完成的包挡在"未就绪"上。
     for view in required_views:
-        try:
-            existing_qa = json.loads(view.get("qa_json") or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            existing_qa = {}
-        if existing_qa.get("policy_version") and existing_qa.get("hard_gate_passed") is True:
-            continue
-        qa = await review_scene_view(view["image_path"], scene_canonical, view["view_role"])
-        view_status = "ready" if _view_passed(qa) else (
-            "unverified" if qa.get("status") == "unverified" else "failed"
-        )
-        conn.execute(
-            "UPDATE scene_reference_views SET qa_json=?,status=? WHERE id=?",
-            (json.dumps(qa, ensure_ascii=False), view_status, view["id"]),
-        )
-        view["qa_json"] = json.dumps(qa, ensure_ascii=False)
-        view["status"] = view_status
-        if view_status != "ready":
-            single_failed.append(view["view_role"])
-    if single_failed:
-        group_qa = {
-            "status": "failed", "hard_failures": [f"{role} 文件不可用" for role in single_failed],
-            "failed_views": single_failed, "required_views": list(required_roles),
-            "evaluation_role": "score_only", "runtime_blocking": False,
-        }
-        _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
-                               group_qa_json=json.dumps(group_qa, ensure_ascii=False))
-        conn.commit()
-        return {"status": "failed", "scene_reference_id": scene_reference_id, "group_qa": group_qa, "failed_views": single_failed}
+        if view.get("status") != "ready":
+            conn.execute(
+                "UPDATE scene_reference_views SET status='ready' WHERE id=?",
+                (view["id"],),
+            )
+            view["status"] = "ready"
     conn.commit()
-    group_qa = await review_scene_pack_consistency(required_views, scene_canonical)
-    group_qa = {
-        **group_qa,
-        "evaluation_role": "score_only",
-        "runtime_blocking": False,
-        "retry_eligible": False,
-    }
-    failed_roles = _apply_pack_view_qa(
-        conn,
-        table="scene_reference_views",
-        parent_column="scene_reference_id",
-        parent_id=scene_reference_id,
-        views=required_views,
-        group_qa=group_qa,
-    )
-    # 仅结构缺失可失败；QA 分数不阻断场景整包。
-    if failed_roles:
-        _set_scene_pack_fields(
-            conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
-            group_qa_json=json.dumps(group_qa, ensure_ascii=False),
-        )
-        conn.commit()
-        return {
-            "status": "failed", "scene_reference_id": scene_reference_id,
-            "group_qa": group_qa, "failed_views": failed_roles,
-        }
 
     views = list_scene_views(scene_reference_id, conn=conn)
     est_ready = next((v for v in views if v.get("view_role") == "establishing"), None)
-    fields = {
-        "pack_status": PACK_STATUS_READY,
-        "group_qa_json": json.dumps(group_qa, ensure_ascii=False),
-    }
+    fields: dict[str, Any] = {"pack_status": PACK_STATUS_READY}
     if est_ready and est_ready.get("image_path"):
         fields["image_path"] = est_ready["image_path"]
     _set_scene_pack_fields(conn, scene_reference_id, **fields)
     conn.commit()
-    return {"status": "ready", "scene_reference_id": scene_reference_id, "group_qa": group_qa, "views": views}
+    return {"status": "ready", "scene_reference_id": scene_reference_id, "views": views}
 
 
 async def complete_legacy_character_pack(
@@ -2109,718 +1712,6 @@ async def complete_legacy_scene_pack(
         ep_start=row["ep_start"],
         base_scene_id=row["base_scene_id"],
     )
-
-
-# ---------- 证据化关键帧 QA ----------
-
-KEYFRAME_SCORE_WEIGHTS = {
-    "action_match": 0.25,
-    "body_proportion": 0.20,
-    "face_identity": 0.20,
-    "outfit_match": 0.15,
-    "hair_match": 0.10,
-    "scene_match": 0.10,
-}
-
-def compute_weighted_overall(scores: dict[str, Any], weights: dict[str, float]) -> float | None:
-    """只对适用维度（非 None / 非 N/A）归一化。"""
-    usable: list[tuple[float, float]] = []
-    for key, weight in weights.items():
-        val = scores.get(key)
-        if val is None:
-            continue
-        if isinstance(val, str) and val.upper() in {"N/A", "NA", "NONE"}:
-            continue
-        try:
-            usable.append((float(val), float(weight)))
-        except (TypeError, ValueError):
-            continue
-    if not usable:
-        return None
-    total_w = sum(w for _, w in usable)
-    if total_w <= 0:
-        return None
-    return round(sum(score * (w / total_w) for score, w in usable), 3)
-
-
-def keyframe_runtime_blocking_failures(qa: dict[str, Any]) -> set[str]:
-    if qa.get("runtime_blocking") is not True:
-        return set()
-    facts = {
-        str(item).strip()
-        for item in (qa.get("blocking_facts") or [])
-        if str(item).strip()
-    }
-    return facts or {"typed_runtime_gate_failed"}
-
-
-def keyframe_gate_passed(qa: dict[str, Any]) -> bool:
-    """Use typed identity and runtime contracts, never failure-code lists."""
-    if qa.get("runtime_blocking") is True:
-        return False
-    if "identity_contract_passed" in qa:
-        return qa.get("identity_contract_passed") is True
-    # Compatibility for test fixtures and historical scored rows. New v17
-    # keyframes always carry ``identity_contract_passed``.
-    return bool(
-        qa.get("status") == "scored"
-        and not qa.get("qa_recovered")
-        and qa.get("face_identity") is not None
-    )
-
-
-async def review_keyframe_geometry_guard(
-    candidate_b64: str,
-    *,
-    contract: dict[str, Any],
-    visible_characters: list[str],
-) -> dict[str, Any]:
-    """独立复核多人关键帧的身高、体型与强透视，避免通用 QA 自证通过。"""
-    policy = str(contract.get("relative_height_policy") or "single_subject")
-    expectation = {
-        "task": "Strict independent human-scale geometry audit. Inspect only visible facts in this candidate image.",
-        "characters": visible_characters,
-        "relative_height_policy": policy,
-        "explicit_height_evidence": list(contract.get("height_difference_evidence") or []),
-        "instructions": [
-            "First identify each named person's posture: standing, sitting, kneeling, leaning, or unclear.",
-            "Estimate apparent full-body height for each person from head top to supporting foot/ground point; "
-            "report max_height_div_min_height even if a foot is cropped, using a conservative lower bound.",
-            "Judge whether the people occupy the same interaction/depth plane and whether forced perspective is "
-            "making one a giant or miniature.",
-            "A teenager rendered with child/toddler body scale, oversized head, narrow child shoulders, or a head "
-            "below the other standing teenager/adult's shoulder is a childlike_body_scale_mismatch.",
-            "For equal_scale, two upright co-present teens/adults must use approximately the same canonical skeleton "
-            "scale. If apparent standing-height ratio exceeds 1.25 without an explicit seated/kneeling/depth reason, FAIL.",
-            "Do not infer that a large height gap is acceptable merely because the text calls one character a boy "
-            "and the other a girl. Do not repeat another QA score; make an independent visual measurement.",
-        ],
-        "output_schema": {
-            "postures": [{"character": "name", "posture": "standing|sitting|kneeling|leaning|unclear"}],
-            "same_depth_plane": True,
-            "max_height_div_min_height": 1.0,
-            "childlike_body_scale_mismatch": False,
-            "forced_perspective_scale_mismatch": False,
-            "scripted_height_relation_match": True,
-            "confidence": 1.0,
-            "verdict": "pass|fail",
-            "issues": [],
-        },
-        "rule_version": "keyframe_geometry_guard_v1",
-    }
-    try:
-        raw = await hiagent.vlm_check(
-            [candidate_b64],
-            json.dumps(expectation, ensure_ascii=False),
-            call_meta={
-                "initiator_label": "关键帧身高体型硬复核",
-                "character_count": len(visible_characters),
-                "relative_height_policy": policy,
-            },
-        )
-        from app.schemas import extract_json
-        data = extract_json(raw)
-        ratio = float(data.get("max_height_div_min_height"))
-        confidence = float(data.get("confidence"))
-        postures = data.get("postures")
-        childlike = data.get("childlike_body_scale_mismatch")
-        forced = data.get("forced_perspective_scale_mismatch")
-        relation = data.get("scripted_height_relation_match")
-        verdict = str(data.get("verdict") or "").strip().lower()
-        if not (0.0 < ratio < 10.0) or not (0.0 <= confidence <= 1.0):
-            raise ValueError("invalid geometry measurements")
-        if not isinstance(postures, list) or len(postures) < min(2, len(visible_characters)):
-            raise ValueError("missing posture observations")
-        if not isinstance(childlike, bool) or not isinstance(forced, bool) or not isinstance(relation, bool):
-            raise ValueError("missing geometry booleans")
-        if verdict not in {"pass", "fail"}:
-            raise ValueError("missing geometry verdict")
-        same_depth = data.get("same_depth_plane")
-        ratio_failure = (
-            policy == "equal_scale"
-            and ratio > 1.25
-            and same_depth is not False
-        )
-        passed = (
-            verdict == "pass"
-            and confidence >= 0.75
-            and not childlike
-            and not forced
-            and relation
-            and not ratio_failure
-        )
-        return {
-            "status": "verified",
-            "passed": passed,
-            "postures": postures,
-            "same_depth_plane": same_depth,
-            "max_height_div_min_height": ratio,
-            "childlike_body_scale_mismatch": childlike,
-            "forced_perspective_scale_mismatch": forced,
-            "scripted_height_relation_match": relation,
-            "confidence": confidence,
-            "verdict": verdict,
-            "issues": [str(item) for item in (data.get("issues") or []) if str(item).strip()],
-            "rule_version": "keyframe_geometry_guard_v1",
-        }
-    except Exception as exc:  # noqa: BLE001 独立硬复核失败时不得伪装成通过
-        return {
-            "status": "unverified",
-            "passed": False,
-            "issues": [f"身高体型硬复核未完成：{type(exc).__name__}"],
-            "rule_version": "keyframe_geometry_guard_v1",
-        }
-
-
-def build_image_manifest(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out = []
-    for i, entry in enumerate(entries, 1):
-        item = {"index": i, "role": entry.get("role")}
-        if entry.get("entity"):
-            item["entity"] = entry["entity"]
-        if entry.get("view"):
-            item["view"] = entry["view"]
-        out.append(item)
-    return out
-
-
-async def review_keyframe_with_evidence(
-    candidate_b64: str,
-    *,
-    shot: Any,
-    bible: Any,
-    visual_anchors: list[dict[str, Any]],
-    ref_type: str = ASSET_TYPE_PLOT_KEY_FRAME,
-    screenplay=None,
-) -> dict[str, Any]:
-    """关键帧证据化 QA：候选图 + 人物/场景真值图对照。"""
-    if not visual_evidence_qa_enabled():
-        # 回退：无证据时仍打分，但不伪装满分
-        from app.video_modes import review_reference_image
-        qa = await review_reference_image(
-            candidate_b64,
-            shot=shot,
-            bible=bible,
-            ref_type=ref_type,
-            screenplay=screenplay,
-        )
-        qa.setdefault("status", "scored")
-        qa["identity_contract_passed"] = False
-        qa["identity_contract_unverified_reason"] = "visual_evidence_qa_disabled"
-        return qa
-
-    frames = [candidate_b64]
-    manifest_entries = [{"role": "candidate_keyframe"}]
-    for anchor in visual_anchors:
-        path = anchor.get("image_path") or anchor.get("path")
-        if not path or not Path(path).exists():
-            continue
-        try:
-            frames.append(hiagent.encode_image_file(path))
-        except OSError:
-            continue
-        role = "character_anchor" if anchor.get("entity_type") == "character" or anchor.get("type") == "character" else "scene_anchor"
-        if anchor.get("type") == "previous_shot_frame":
-            role = "continuity_anchor"
-        manifest_entries.append({
-            "role": role,
-            "entity": anchor.get("entity_name") or anchor.get("name"),
-            "view": anchor.get("view_role"),
-        })
-
-    image_manifest = build_image_manifest(manifest_entries)
-    from app.compiler import keyframe_visual_contract
-
-    contract = keyframe_visual_contract(shot, bible, screenplay=screenplay)
-    target_contact_phase = str(contract.get("target_contact_phase") or "none")
-    contact_phase_required = target_contact_phase in {"approach", "established", "separated"}
-    by_name = {c.name: c for c in getattr(bible, "characters", []) or []}
-    anchors_txt = []
-    if screenplay is not None and getattr(screenplay, "narrative_plan", None) is not None:
-        from app.identity_contracts import narrative_identity_resolver
-
-        resolver = narrative_identity_resolver(bible, screenplay)
-        anchors_txt.extend(
-            f"{name}: {resolver.visual_anchor(str(name))}"
-            for name in contract.get("visible_characters") or []
-        )
-    else:
-        from app.character_policy import (
-            collective_role_anchor,
-            functional_extra_anchor,
-            is_collective_role,
-            is_functional_extra,
-            typed_functional_identity_names,
-        )
-
-        declared_functional_names = typed_functional_identity_names(
-            screenplay,
-        )
-        for name in contract.get("visible_characters") or []:
-            if name in by_name:
-                anchors_txt.append(f"{name}: {by_name[name].appearance_canonical}")
-            elif is_collective_role(str(name)):
-                anchors_txt.append(f"{name}: {collective_role_anchor(str(name))}")
-            elif (
-                is_functional_extra(str(name))
-                or str(name) in declared_functional_names
-            ):
-                functional_anchor = functional_extra_anchor(
-                    str(name),
-                    declared_functional_names=declared_functional_names,
-                )
-                anchors_txt.append(f"{name}: {functional_anchor}")
-
-    geometry_requirements = [
-        f"唯一目标定格：{contract.get('target_keyframe_desc') or getattr(shot, 'action_desc', '')}",
-        f"计划机位：{contract.get('camera_angle') or '平视'}",
-    ]
-    required_text = getattr(shot, "required_text", None)
-    required_text_expected = bool(contract.get("required_text_expected"))
-    required_text_payload = (
-        required_text.model_dump()
-        if required_text_expected and required_text is not None and hasattr(required_text, "model_dump")
-        else None
-    )
-    if contract.get("collective_presence_forbidden"):
-        geometry_requirements.append("目标定格明示人群已离场/在画外/仅属回忆：画面中不得出现人群，不得把画外声变成可见人物")
-    elif contract.get("collective_visible_roles"):
-        geometry_requirements.append(
-            "可见名单含叙事群体："
-            + "、".join(str(name) for name in contract.get("collective_visible_roles") or [])
-            + "；必须按目标的人数和主次表现为群体，不得缩成一人，不得复制具名角色长相"
-        )
-    elif contract.get("collective_presence_required"):
-        geometry_requirements.append("目标定格明示需要人群/众人：必须按目标主次与数量画出匿名群体，不得缺失、也不得替代或复制焦点角色")
-    elif contract.get("anonymous_background_allowed"):
-        geometry_requirements.append("环境语义允许匿名背景人群，但本定格不强制入画；若出现，不得抢占焦点或复制具名角色")
-    else:
-        geometry_requirements.append("不得添加名单外的可辨识焦点人物")
-    if required_text_expected:
-        geometry_requirements.append(
-            "唯一允许的画面文字为「"
-            + str(required_text_payload.get("exact_text") or "").strip()
-            + "」，位于"
-            + str(required_text_payload.get("surface") or "指定表面")
-            + "；其他文字/乱码均不允许"
-        )
-    else:
-        geometry_requirements.append("该目标定格时刻不应出现画面文字、字幕或乱码")
-    if contract.get("contact_camera_required"):
-        geometry_requirements.append(
-            "本镜必须从互动轴侧面拍摄，互动区清晰无遮挡，禁止正面站桩；"
-            "人物身体/脸可为身份辨识自然转成 3/4 角度"
-        )
-    if contract.get("established_contact_required"):
-        geometry_requirements.append(
-            "目标定格中接触已成立：接触点必须真实连接、清晰可见，禁止手部悬空或留缝"
-        )
-    elif contract.get("target_contact_phase") == "separated":
-        geometry_requirements.append("目标是松开/分离后的状态：必须保留已分开的空隙与收回动作，不得重新连接")
-    elif target_contact_phase == "approach":
-        geometry_requirements.append("目标尚未建立接触：保留接近/未命中的距离，不得凭空改成已碰触")
-    elif contract.get("contact_axis_inherited"):
-        geometry_requirements.append(
-            "该时序帧继承接触镜的侧面轴线，但当前目标未规定接触阶段；"
-            "只评侧面机位，不得凭空添加或删除肢体接触"
-        )
-    if contract.get("relative_height_policy") == "equal_scale":
-        geometry_requirements.append(
-            "本镜无剧情身高差：同框青少年/成人的站直基准身高、头身比和骨架尺度必须一致。"
-            "若当前两人均站立且剧情未写弯腰/跪/坐，双脚必须位于同一地面与景深平面，"
-            "头顶、肩线、髋线与眼线应在自然小误差内齐平；“抬头/仰望/低头”只是头颈与视线动作，"
-            "不是身高差证据。禁止儿童化、前景巨人、后景小人或强透视尺度差"
-        )
-    elif contract.get("relative_height_policy") == "preserve_explicit_difference":
-        height_evidence = "；".join(
-            str(item).strip() for item in (contract.get("height_difference_evidence") or []) if str(item).strip()
-        )
-        geometry_requirements.append(
-            "仅保留剧情/人物锚点明示的身高差"
-            + (f"（原文证据：{height_evidence}）" if height_evidence else "")
-            + "，不得用强透视夸大"
-        )
-    scene_canonical = str(contract.get("scene_canonical") or "").strip()
-    scene_landmarks = [
-        str(item).strip() for item in (contract.get("scene_landmarks") or []) if str(item).strip()
-    ]
-    if scene_canonical or scene_landmarks:
-        geometry_requirements.append(
-            "固定场景几何必须匹配场景圣经；石碑、门、桌台、屏幕等永久地标不得缺失、复制、变形或换位。"
-            + (f"场景锚点：{scene_canonical}" if scene_canonical else "")
-            + (f"；显式地标：{'、'.join(scene_landmarks)}" if scene_landmarks else "")
-        )
-    geometry_requirements.append(
-        "人物保持角色参考中的自然头身比；参考图裁切大小不代表真实头部大小，禁止大头化、幼态化或身体缩小"
-    )
-
-    wm_mode = watermark_qa_mode()
-    wm_note = (
-        "水印/Logo 本身不作为评分主项，也不单独构成 hard failure；"
-        "仅当遮挡脸、发型、衣服、手部动作接触区或关键场景标志物时，"
-        "在对应主维度扣分，并标记 hard_failures 含 subject_occlusion。"
-        if wm_mode == "ignore_unless_occluding"
-        else "检查画面干净度，水印可计入问题。"
-    )
-    from app.visual_styles import is_photographic_style_prompt
-    project_style = getattr(getattr(bible, "world", None), "visual_style_canonical", "")
-    style_is_photographic = is_photographic_style_prompt(project_style)
-    style_match_desc = (
-        "是否严格保持项目选定的照片级真人摄影画风，未切换成卡通、二次元或 CG 渲染质感"
-        if style_is_photographic
-        else "是否严格保持统一非真人 CG/动画/漫画画风，未切换成真人实拍、照片写实或 live-action 质感"
-    )
-    expectation = {
-        "task": "Evidence-based narrative keyframe QA for Seedance.",
-        "image_manifest": image_manifest,
-        "shot": {
-            "scene": getattr(shot, "scene_setting", ""),
-            "scene_canonical": contract.get("scene_canonical"),
-            "scene_landmarks": contract.get("scene_landmarks"),
-            "action": getattr(shot, "action_desc", ""),
-            "target_keyframe_desc": contract.get("target_keyframe_desc"),
-            "target_source": contract.get("target_source"),
-            "target_contact_phase": contract.get("target_contact_phase"),
-            "camera_angle": contract.get("camera_angle"),
-            "visible_characters": list(contract.get("visible_characters") or []),
-            "individual_visible_characters": list(contract.get("individual_visible_characters") or []),
-            "identity_verification": dict(contract.get("identity_verification") or {}),
-            "collective_visible_roles": list(contract.get("collective_visible_roles") or []),
-            "anonymous_background_allowed": bool(contract.get("anonymous_background_allowed")),
-            "collective_presence_required": bool(contract.get("collective_presence_required")),
-            "collective_presence_forbidden": bool(contract.get("collective_presence_forbidden")),
-            "required_text_expected": required_text_expected,
-            "required_text": required_text_payload,
-            "characters": anchors_txt,
-            "style": getattr(getattr(bible, "world", None), "visual_style_canonical", ""),
-        },
-        "geometry_requirements": geometry_requirements,
-        "dimensions": {
-            "action_match": "唯一目标定格的姿态、朝向、手部/道具接触、人物间空间互动；不得改画首帧或中性摆拍",
-            "body_proportion": "头身比、肢体长度、身体完整性，以及同框人物相对身高、眼线、体型尺度和透视深度",
-            "side_view_match": "互动轴侧面机位是否清楚展示互动区且非正面站桩；非接触/趋近镜可返回 N/A",
-            "contact_visibility": "已建立接触时，接触点是否真实连接、清晰可见且未遮挡；否则返回 N/A",
-            "contact_phase_match": "是否严格匹配 target_contact_phase：established 必须连接，approach 必须留缝，separated 必须显示松开后的空隙",
-            "relative_height_match": "是否符合 geometry_requirements 中的同高或明示身高差，且没有强透视夸大",
-            "collective_presence_match": "有叙事群体时，是否按目标数量/主次/动作以群体出现，而非缩成单人；无群体返回 N/A",
-            "required_text_match": "required_text_expected=true 时检查字面、承载面与样式；false 时目标帧禁字并返回 N/A",
-            "style_match": style_match_desc,
-            "face_identity": "与人物锚点脸部特征一致；脸不可见时返回 null 或 N/A",
-            "outfit_match": "款式颜色层次配饰与本集造型一致",
-            "hair_match": "发型长度发色刘海轮廓一致",
-            "scene_match": "几何标志物机位方向状态光线合理",
-        },
-        "watermark_policy": wm_note,
-        "output_schema": {
-            "action_match": 0.0,
-            "body_proportion": 0.0,
-            "side_view_match": 0.0 if contract.get("contact_camera_required") else "N/A",
-            "contact_visibility": 0.0 if contract.get("established_contact_required") else "N/A",
-            "contact_phase_match": 0.0 if contact_phase_required else "N/A",
-            "relative_height_match": (
-                0.0 if contract.get("relative_height_policy") != "single_subject" else "N/A"
-            ),
-            "required_text_match": 0.0 if required_text_expected else "N/A",
-            "collective_presence_match": (
-                0.0 if contract.get("collective_presence_required") or contract.get("collective_presence_forbidden")
-                else "N/A"
-            ),
-            "style_match": 0.0,
-            "face_identity": 0.0,
-            "outfit_match": 0.0,
-            "hair_match": 0.0,
-            "scene_match": 0.0,
-            "identity_contract": {
-                "characters": [
-                    {
-                        "name": str(name),
-                        "present": True,
-                        "gender_match": True,
-                        "identity_match": (
-                            True
-                            if (
-                                (contract.get("identity_verification") or {})
-                                .get(str(name), {})
-                                .get("mode")
-                                == "visual_anchor"
-                            )
-                            else "N/A"
-                        ),
-                        "text_contract_match": (
-                            True
-                            if (
-                                (contract.get("identity_verification") or {})
-                                .get(str(name), {})
-                                .get("mode")
-                                == "text_contract"
-                            )
-                            else "N/A"
-                        ),
-                        "outfit_match": True,
-                        "instance_count": 1,
-                    }
-                    for name in (
-                        contract.get("individual_visible_characters") or []
-                    )
-                ],
-                "unexpected_recognizable_people": 0,
-            },
-            "anatomy_valid": None,
-            "watermark_occluding": None,
-            "photoreal_detected": None,
-            "live_action_detected": None,
-            "overall": 0.0,
-            "hard_failures": [],
-            "issues": [],
-            "status": "scored",
-        },
-        "rule_version": "keyframe_geometry_qa_v3",
-    }
-    try:
-        raw = await hiagent.vlm_check(
-            frames, json.dumps(expectation, ensure_ascii=False),
-            call_meta={
-                "initiator_label": "关键帧证据化质检",
-                "shot_no": getattr(shot, "shot_no", None),
-                "anchor_count": len(frames) - 1,
-            },
-        )
-        from app.schemas import extract_json
-        data = extract_json(raw)
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "status": "unverified",
-            "overall": None,
-            "action_match": None,
-            "body_proportion": None,
-            "side_view_match": None,
-            "contact_visibility": None,
-            "contact_phase_match": None,
-            "relative_height_match": None,
-            "required_text_match": None,
-            "collective_presence_match": None,
-            "style_match": None,
-            "face_identity": None,
-            "outfit_match": None,
-            "hair_match": None,
-            "scene_match": None,
-            "identity_contract_passed": False,
-            "runtime_blocking": True,
-            "blocking_facts": ["qa_unverified"],
-            "hard_failures": [],
-            "issues": [f"关键帧 QA 未完成：{type(exc).__name__}"],
-            "qa_recovered": True,
-            "image_manifest": image_manifest,
-            "rule_version": "keyframe_geometry_qa_v3",
-        }
-
-    expected_identities = [
-        str(name).strip()
-        for name in (contract.get("individual_visible_characters") or [])
-        if str(name).strip()
-    ]
-    identity_verification = dict(contract.get("identity_verification") or {})
-    visual_anchor_identities = {
-        name
-        for name in expected_identities
-        if (
-            (identity_verification.get(name) or {}).get("mode")
-            == "visual_anchor"
-        )
-    }
-    available_identity_anchors = {
-        str(item.get("entity") or "").strip()
-        for item in manifest_entries
-        if item.get("role") == "character_anchor"
-        and str(item.get("entity") or "").strip()
-    }
-    identity_anchors_complete = visual_anchor_identities.issubset(
-        available_identity_anchors
-    )
-    identity_payload = data.get("identity_contract")
-    identity_rows = (
-        identity_payload.get("characters")
-        if isinstance(identity_payload, dict)
-        and isinstance(identity_payload.get("characters"), list)
-        else []
-    )
-    identity_by_name = {
-        str(item.get("name") or "").strip(): item
-        for item in identity_rows
-        if isinstance(item, dict) and str(item.get("name") or "").strip()
-    }
-    try:
-        unexpected_people = int(
-            identity_payload.get("unexpected_recognizable_people", -1)
-        ) if isinstance(identity_payload, dict) else -1
-    except (TypeError, ValueError):
-        unexpected_people = -1
-    identity_contract_complete = (
-        isinstance(identity_payload, dict)
-        and identity_anchors_complete
-        and set(identity_by_name) == set(expected_identities)
-        and unexpected_people == 0
-    )
-    identity_contract_passed = identity_contract_complete and all(
-        item.get("present") is True
-        and item.get("gender_match") is True
-        and item.get("outfit_match") is True
-        and item.get("instance_count") == 1
-        and (
-            item.get("identity_match") is True
-            if name in visual_anchor_identities
-            else item.get("text_contract_match") is True
-        )
-        for name, item in identity_by_name.items()
-    )
-    data["identity_contract_passed"] = identity_contract_passed
-    if not identity_contract_complete:
-        identity_issue = "身份合同或人物真值锚点不完整"
-        data["issues"] = [
-            *list(data.get("issues") or []),
-            identity_issue,
-        ]
-
-    score_keys = list(KEYFRAME_SCORE_WEIGHTS.keys())
-    missing_required = False
-    for key in score_keys:
-        val = data.get(key)
-        if val is None or (isinstance(val, str) and val.upper() in {"N/A", "NA"}):
-            # face 等允许 N/A
-            if key == "face_identity":
-                data[key] = None
-                continue
-            # 其它缺失 → unverified
-            if key in {"action_match", "body_proportion"}:
-                missing_required = True
-            data[key] = None
-            continue
-        try:
-            data[key] = max(0.0, min(1.0, float(val)))
-        except (TypeError, ValueError):
-            data[key] = None
-            if key in {"action_match", "body_proportion"}:
-                missing_required = True
-
-    for key in (
-        "side_view_match", "contact_visibility", "contact_phase_match", "relative_height_match",
-        "required_text_match", "collective_presence_match", "style_match",
-    ):
-        val = data.get(key)
-        if val is None or (isinstance(val, str) and val.upper() in {"N/A", "NA", "NONE"}):
-            data[key] = None
-            continue
-        try:
-            data[key] = max(0.0, min(1.0, float(val)))
-        except (TypeError, ValueError):
-            data[key] = None
-
-    required_diagnostics: list[str] = []
-    if contract.get("contact_camera_required"):
-        required_diagnostics.append("side_view_match")
-    if contract.get("established_contact_required"):
-        required_diagnostics.append("contact_visibility")
-    if contact_phase_required:
-        required_diagnostics.append("contact_phase_match")
-    if contract.get("relative_height_policy") != "single_subject":
-        required_diagnostics.append("relative_height_match")
-    if required_text_expected:
-        required_diagnostics.append("required_text_match")
-    if contract.get("collective_presence_required") or contract.get("collective_presence_forbidden"):
-        required_diagnostics.append("collective_presence_match")
-    missing_diagnostics = [key for key in required_diagnostics if data.get(key) is None]
-
-    if missing_required or missing_diagnostics:
-        data["status"] = "unverified"
-        data["overall"] = None
-        data["qa_recovered"] = True
-        issue = "缺少必需评分数"
-        if missing_diagnostics:
-            issue += "：" + ",".join(missing_diagnostics)
-        data["issues"] = list(data.get("issues") or []) + [issue]
-        data["hard_failures"] = list(data.get("hard_failures") or [])
-        data["runtime_blocking"] = True
-        data["blocking_facts"] = [
-            *(f"{key}_missing" for key in missing_diagnostics),
-            *(("required_score_missing",) if missing_required else ()),
-        ]
-        data["image_manifest"] = image_manifest
-        data["rule_version"] = "keyframe_geometry_qa_v3"
-        data["geometry_requirements"] = geometry_requirements
-        data["target_keyframe_desc"] = contract.get("target_keyframe_desc")
-        return data
-
-    # 通用 QA 若声称多人身高通过，再交给一个只看骨架尺度/体型/强透视的
-    # 独立审计。它不读取通用 QA 分数，专门拦截“少年被画成儿童、另一人像巨人”。
-    if (
-        contract.get("relative_height_policy") != "single_subject"
-        and data.get("relative_height_match") is not None
-        and float(data["relative_height_match"]) >= 0.7
-    ):
-        guard = await review_keyframe_geometry_guard(
-            candidate_b64,
-            contract=contract,
-            visible_characters=[str(name) for name in (contract.get("visible_characters") or [])],
-        )
-        data["geometry_guard"] = guard
-        hard_failures = [str(item) for item in (data.get("hard_failures") or [])]
-        issues = [str(item) for item in (data.get("issues") or [])]
-        if guard.get("status") != "verified":
-            if "geometry_guard_unverified" not in hard_failures:
-                hard_failures.append("geometry_guard_unverified")
-            issues.extend(str(item) for item in (guard.get("issues") or []) if str(item) not in issues)
-        elif not guard.get("passed"):
-            data["relative_height_match"] = min(float(data["relative_height_match"]), 0.2)
-            if "relative_scale_mismatch" not in hard_failures:
-                hard_failures.append("relative_scale_mismatch")
-            guard_issue = "独立身高体型复核失败：人物儿童化、身高比例异常或存在强透视"
-            if guard_issue not in issues:
-                issues.append(guard_issue)
-            issues.extend(str(item) for item in (guard.get("issues") or []) if str(item) not in issues)
-        data["hard_failures"] = hard_failures
-        data["issues"] = issues
-
-    overall = compute_weighted_overall(data, KEYFRAME_SCORE_WEIGHTS)
-    data["overall"] = overall
-    if not isinstance(data.get("issues"), list):
-        data["issues"] = [str(data.get("issues"))] if data.get("issues") else []
-    if not isinstance(data.get("hard_failures"), list):
-        data["hard_failures"] = []
-    reported_hard = [str(item) for item in data.get("hard_failures") or []]
-    data["issues"] = list(dict.fromkeys([*data["issues"], *reported_hard]))
-    blocking_facts: list[str] = []
-    if not identity_contract_passed:
-        blocking_facts.append("identity_contract_failed")
-    for score_key in ["action_match", "body_proportion", *required_diagnostics, "style_match"]:
-        score = data.get(score_key)
-        if score is not None and float(score) < 0.7:
-            blocking_facts.append(f"{score_key}_below_contract")
-    if data.get("anatomy_valid") is False:
-        blocking_facts.append("anatomy_contract_failed")
-    if data.get("watermark_occluding") is True:
-        blocking_facts.append("watermark_occludes_subject")
-    # 项目选定照片级真人摄影画风时，"看起来像真人摄影"是预期结果而非缺陷；
-    # 只有非摄影画风下检测到真人/实拍质感才是画风漂移，才应该拦。
-    if not style_is_photographic and data.get("photoreal_detected") is True:
-        blocking_facts.append("photoreal_medium_detected")
-    if not style_is_photographic and data.get("live_action_detected") is True:
-        blocking_facts.append("live_action_medium_detected")
-    geometry_guard = data.get("geometry_guard")
-    if isinstance(geometry_guard, dict):
-        if geometry_guard.get("status") != "verified":
-            blocking_facts.append("geometry_guard_unverified")
-        elif geometry_guard.get("passed") is not True:
-            blocking_facts.append("geometry_guard_failed")
-    data["blocking_facts"] = list(dict.fromkeys(blocking_facts))
-    data["runtime_blocking"] = bool(data["blocking_facts"])
-    data["hard_failures"] = list(data["blocking_facts"])
-    data["status"] = "scored"
-    data["image_manifest"] = image_manifest
-    data["rule_version"] = "keyframe_geometry_qa_v3"
-    data["geometry_requirements"] = geometry_requirements
-    data["target_keyframe_desc"] = contract.get("target_keyframe_desc")
-    data["passed"] = keyframe_gate_passed(data)
-    return data
 
 
 # ---------- Seedance 确定性装箱 ----------
@@ -3233,27 +2124,18 @@ async def regenerate_character_view(
                    "character_name": row["character_name"]},
     )
     await _save_image_item(item, path)
-    qa = await review_character_view(path, latest_prompt, view_role)
-    qa = {
-        **qa,
-        "evaluation_role": "score_only",
-        "runtime_blocking": False,
-        "retry_eligible": False,
-    }
-    # Score-only：技术有效图即可替换；QA 低分不丢弃候选（PRD QA-SO #17）。
+    # 技术产物存在即可用：VLM 图片质检已下线，图片成功落盘即可替换旧视角。
     if not Path(path).exists():
-        return {"status": "failed", "view_role": view_role, "qa": qa, "preserved_previous": True}
+        return {"status": "failed", "view_role": view_role, "preserved_previous": True}
 
     candidate = dict(existing.get(view_role) or {})
     candidate.update({
         "view_role": view_role, "image_path": path, "prompt": prompt,
-        "qa_json": json.dumps(qa, ensure_ascii=False), "status": "ready",
-        "input_fingerprint": fp,
+        "status": "ready", "input_fingerprint": fp,
     })
     candidate_views = [candidate if v.get("view_role") == view_role else v for v in existing.values()]
     if view_role not in existing:
         candidate_views.append(candidate)
-    required = [v for v in candidate_views if v.get("view_role") in CHARACTER_REQUIRED_VIEWS]
     missing = missing_required_views(candidate_views, CHARACTER_REQUIRED_VIEWS)
     if missing:
         _discard_rejected_candidate(path)
@@ -3262,29 +2144,18 @@ async def regenerate_character_view(
             "preserved_previous": True,
         }
 
-    group_qa = await review_character_pack_consistency(required, latest_prompt)
-    group_qa = {
-        **group_qa,
-        "evaluation_role": "score_only",
-        "runtime_blocking": False,
-        "retry_eligible": False,
-    }
-
     view_id = _upsert_character_view(
         conn, portrait_id=portrait_id, view_role=view_role,
         framing="closeup" if view_role == "face_closeup" else ("full_body" if view_role.endswith("full") else "half_or_full"),
-        image_path=path, prompt=prompt, qa=qa, artifact_id=None,
+        image_path=path, prompt=prompt, qa=None, artifact_id=None,
         base_view_id=(existing.get(view_role) or {}).get("id"),
         status="ready", fingerprint=fp,
     )
     if view_role == "front_full":
         conn.execute("UPDATE character_portraits SET image_path=? WHERE id=?", (path, portrait_id))
-    _set_portrait_pack_fields(
-        conn, portrait_id, pack_status=PACK_STATUS_READY,
-        group_qa_json=json.dumps(group_qa, ensure_ascii=False),
-    )
+    _set_portrait_pack_fields(conn, portrait_id, pack_status=PACK_STATUS_READY)
     conn.commit()
-    return {"status": "ready", "view_role": view_role, "view_id": view_id, "group_qa": group_qa}
+    return {"status": "ready", "view_role": view_role, "view_id": view_id}
 
 
 async def regenerate_scene_view(
@@ -3328,22 +2199,14 @@ async def regenerate_scene_view(
         call_meta={"asset_kind": "scene_view_redo", "view_role": view_role, "scene_name": row["scene_name"]},
     )
     await _save_image_item(item, path)
-    qa = await review_scene_view(path, canonical, view_role)
-    qa = {
-        **qa,
-        "evaluation_role": "score_only",
-        "runtime_blocking": False,
-        "retry_eligible": False,
-    }
-    # Score-only：技术有效图即可替换；QA 低分不丢弃候选（PRD QA-SO #17/#21）。
+    # 技术产物存在即可用：VLM 图片质检已下线，图片成功落盘即可替换旧视角。
     if not Path(path).exists():
-        return {"status": "failed", "view_role": view_role, "qa": qa, "preserved_previous": True}
+        return {"status": "failed", "view_role": view_role, "preserved_previous": True}
 
     candidate = dict(existing.get(view_role) or {})
     candidate.update({
         "view_role": view_role, "image_path": path, "prompt": prompt,
-        "qa_json": json.dumps(qa, ensure_ascii=False), "status": "ready",
-        "input_fingerprint": fp,
+        "status": "ready", "input_fingerprint": fp,
     })
     candidate_views = [candidate if v.get("view_role") == view_role else v for v in existing.values()]
     if view_role not in existing:
@@ -3356,7 +2219,6 @@ async def regenerate_scene_view(
     required_roles = list(previous_group.get("required_views") or SCENE_REQUIRED_VIEWS)
     if view_role == "action_zone" and "action_zone" not in required_roles:
         required_roles.append("action_zone")
-    required = [v for v in candidate_views if v.get("view_role") in required_roles]
     missing = missing_required_views(candidate_views, tuple(required_roles))
     if missing:
         _discard_rejected_candidate(path)
@@ -3365,30 +2227,19 @@ async def regenerate_scene_view(
             "preserved_previous": True,
         }
 
-    group_qa = await review_scene_pack_consistency(required, canonical)
-    group_qa = {
-        **group_qa,
-        "evaluation_role": "score_only",
-        "runtime_blocking": False,
-        "retry_eligible": False,
-    }
-
     view_id = _upsert_scene_view(
         conn, scene_reference_id=scene_reference_id, view_role=view_role,
         camera_axis="establishing" if view_role == "establishing" else (
             "reverse" if view_role == "reverse_angle" else "action"),
-        image_path=path, prompt=prompt, qa=qa, artifact_id=None,
+        image_path=path, prompt=prompt, qa=None, artifact_id=None,
         base_view_id=(existing.get(view_role) or {}).get("id"),
         status="ready", fingerprint=fp,
     )
     if view_role == "establishing":
         conn.execute("UPDATE scene_references SET image_path=? WHERE id=?", (path, scene_reference_id))
-    _set_scene_pack_fields(
-        conn, scene_reference_id, pack_status=PACK_STATUS_READY,
-        group_qa_json=json.dumps(group_qa, ensure_ascii=False),
-    )
+    _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_READY)
     conn.commit()
-    return {"status": "ready", "view_role": view_role, "view_id": view_id, "group_qa": group_qa}
+    return {"status": "ready", "view_role": view_role, "view_id": view_id}
 
 
 # ---------- 高风险视频抽帧 ----------

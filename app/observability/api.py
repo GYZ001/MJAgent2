@@ -201,11 +201,6 @@ _TRACE_WORKFLOW_LABELS = {
     "delivery_package": "交付候选生成",
 }
 _TRACE_CALL_LABELS = {
-    "vlm": "理解画面内容",
-    # 同一个 kind 覆盖定妆照质检、场景参考图质检、人物/场景多视角整包质检、关键帧
-    # 几何质检和视频抽帧质检（都走 app/hiagent.py 的 vlm_check）。写成"视频"会让
-    # 人物谱、定妆这些根本没有视频的阶段显示一个不存在的功能。
-    "vlm_qa": "检查画面质量",
     "video_create": "提交视频生成",
     "video_poll": "查询视频生成进度",
     "image": "生成图片",
@@ -248,15 +243,13 @@ _TRACE_CALL_LABELS = {
     "角色圣经_loop": "执行人物设定自动修复",
 }
 _TRACE_MODEL_CALL_KINDS = {
-    "chat", "vlm", "vlm_qa", "video_create", "image", "image_generate",
+    "chat", "video_create", "image", "image_generate",
     "image_edit", "scene_image", "screenplay_prompt", "plan_prompt",
     "bible_prompt", "references_prompt", "storyboard_shot_prompt",
     "storyboard_outline_prompt",
 }
 _TRACE_CALL_METHODS = {
     "chat": "通过文本生成模型",
-    "vlm": "通过视觉理解模型",
-    "vlm_qa": "通过视觉理解模型",
     "video_create": "通过视频生成模型",
     "image": "通过图像生成模型",
     "image_generate": "通过图像生成模型",
@@ -579,17 +572,11 @@ def _video_completion_trace_context(
             (plan_id,),
         ).fetchall()
     ] if plan_id else []
-    qa_results = [
-        dict(row)
-        for row in conn.execute(
-            """SELECT qa.*,sp.shot_no,sp.shot_id
-               FROM video_mode_qa_results qa
-               JOIN shot_video_generation_plans sp ON sp.id=qa.shot_plan_id
-               WHERE sp.episode_video_plan_id=?
-               ORDER BY qa.created_at,qa.id""",
-            (plan_id,),
-        ).fetchall()
-    ] if plan_id else []
+    # VLM 图片/视频质检已下线，video_mode_qa_results 表随之整表删除（该表的语义
+    # 字段此前恒假，从未产生过可信数据）。这里恒为空列表：下游全部消费点
+    # （_video_stage_statuses/_video_stage_subtitles/quality_checks 抽屉等）已经
+    # 是"空则不展示该统计项"的写法，不需要连带改动。
+    qa_results: list[dict[str, Any]] = []
     events = [
         {
             **dict(row),
@@ -1431,7 +1418,6 @@ def _video_completion_stage_detail(
             "video_supervisor_checkpoint",
             "jobs",
             "video_generation_attempts",
-            "video_mode_qa_results",
         ],
         "run_id": run_id,
         "episode_id": run.get("scope_id"),

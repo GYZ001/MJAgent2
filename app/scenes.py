@@ -42,7 +42,6 @@ SCENE_BIBLE_CHAPTER_WINDOW = 20
 
 # 「检查并补齐」时：某场景候选图数量超过该阈值，自动采纳最高分候选，不再继续出图。
 SCENE_CANDIDATE_AUTO_ADOPT_THRESHOLD = 4
-SCENE_CANDIDATE_AUTO_REVIEW_LIMIT = 2
 
 _reactive_scene_locks: dict[tuple[str, str], asyncio.Lock] = {}
 _reactive_scene_locks_guard = asyncio.Lock()
@@ -108,6 +107,25 @@ def _scene_failures_are_quality_only(failures: list[Exception]) -> bool:
 
 # ---------- 落盘 / 提示词 ----------
 
+def normalize_scene_prompt(*segments: str) -> str:
+    """规范标点并仅移除完全重复片段，保留语义性强调。
+
+    原属 app.scene_policy（已随 VLM 图片质检整体下线）；这是纯文本提示词拼接工具，
+    与质检无关，随其唯一调用方 app.scenes 一起保留。
+    """
+    seen: set[str] = set()
+    parts: list[str] = []
+    for segment in segments:
+        for raw in re.split(r"[。；;\n]+", str(segment or "")):
+            part = re.sub(r"[，,]{2,}", "，", raw.strip(" ，,。；;"))
+            key = re.sub(r"\s+", "", part).lower()
+            if not part or key in seen:
+                continue
+            seen.add(key)
+            parts.append(part)
+    return "。".join(parts) + ("。" if parts else "")
+
+
 def _scene_dir(project_id: str) -> Path:
     d = config.PROJECTS_DIR / project_id / "scene_refs"
     d.mkdir(parents=True, exist_ok=True)
@@ -153,7 +171,6 @@ def scene_hard_gate_retry_prompt(
     details = list(dict.fromkeys([*hard, *issues]))[:6]
     if not details:
         return None
-    from app.scene_policy import normalize_scene_prompt
     if scene_name or scene_canonical or visual_style:
         issue_text = "；".join(details)
         return normalize_scene_prompt(
@@ -179,7 +196,6 @@ def scene_ref_prompt(
     scene_name: str = "",
 ) -> str:
     """场景定场图生成词：纯环境、无人物，作为跨集复用的场景锚点。"""
-    from app.scene_policy import normalize_scene_prompt
     location_identity = (
         f"规范地点名称：{scene_name.strip()}。"
         "地点名是独立且最高优先级的场景语义输入：必须逐项识别名称中的建筑功能、"
@@ -245,7 +261,6 @@ async def _provider_visual_scene_retry_prompt(
     ).strip()
     if len(visual_environment) < SCENE_CANONICAL_MIN:
         raise hiagent.ProviderError("场景视觉改写结果过短，无法用于技术重试")
-    from app.scene_policy import normalize_scene_prompt
     return normalize_scene_prompt(
         scene_visual_style_lock(visual_style) if visual_style.strip() else "",
         "场景定场图（纯环境、画面中不出现任何人物）："
@@ -354,26 +369,14 @@ async def _review_scene_ref(
     *,
     expected_description: str | None = None,
 ) -> dict:
-    """复用 stages.review_scene_image 对场景图做 QA（无人物，锚点传空）。"""
-    from app.stages import review_scene_image
-    name = scene["name"] if isinstance(scene, dict) else scene.name
-    canonical = scene["scene_canonical"] if isinstance(scene, dict) else scene.scene_canonical
-    expected = (expected_description or canonical).strip()
-    try:
-        qa = await review_scene_image(
-            hiagent.encode_image_file(image_path), expected, name, [], kind="head",
-            initiator_label="场景资产主图QA",
-            environment_only=True,
-        )
-        from app.scene_policy import normalize_scene_image_qa
-        return normalize_scene_image_qa(qa, environment_only=True)
-    except Exception as exc:  # noqa: BLE001 评估器失败不能伪装成通过
-        from app.scene_policy import normalize_scene_image_qa
-        return normalize_scene_image_qa({
-            "overall": 0.0,
-            "issues": [f"场景一致性评估未完成：{type(exc).__name__}"],
-            "qa_recovered": True,
-        }, environment_only=True)
+    """VLM 图片质检已下线：场景图是否可用只看文件是否存在（技术校验），产品决定人自己看。
+
+    保留空字典返回值和函数签名，使全部既有调用方（生图流程/候选复验）无需改动即可继续运行；
+    调用方把 ``{}`` 传给 ``record_reference_asset(qa=...)`` 时 ``qa`` 为假值，不会再产生任何
+    model_evaluation 记录。
+    """
+    del image_path, scene, expected_description
+    return {}
 
 
 # ---------- scene_references 分段表读写（对照 app.portraits） ----------
@@ -597,120 +600,6 @@ def _scene_candidate_context(project_id: str, scene_name: str, artifact_id: str)
     return project, scene, artifact
 
 
-async def review_scene_candidate(project_id: str, scene_name: str, artifact_id: str) -> dict:
-    """对已落盘候选重新执行新版 QA；不重新生图，也不改变当前采用包。"""
-    from app.evidence import repository as evidence_repository
-    from app.evidence.media import _model_evaluation
-
-    project, scene, artifact = _scene_candidate_context(project_id, scene_name, artifact_id)
-    bible_data = json.loads(project["bible_json"])
-    style = str((bible_data.get("world") or {}).get("visual_style_canonical") or "")
-    # 候选可能绑定过去含“人流/护卫”的矛盾生成词；复验始终使用当前纯环境策略。
-    expected = scene_ref_prompt(
-        style,
-        str(scene.get("scene_canonical") or ""),
-        scene_name=scene_name,
-    )
-    qa = await _review_scene_ref(
-        str(artifact["file_path"]), scene, expected_description=expected,
-    )
-    evaluation = _model_evaluation(
-        qa, subject=artifact_id, evaluator_name="scene_reference_consistency_qa",
-    )
-    evaluation.evaluator_version = str(qa.get("policy_version") or "2.0.0")
-    created = evidence_repository.create_evaluation(artifact_id, evaluation)
-    return {
-        "reviewed": True,
-        "image_regenerated": False,
-        "artifact_id": artifact_id,
-        "qa": qa,
-        "evaluation": created,
-        "gate": scene_candidate_gate(artifact_id),
-    }
-
-
-def _historical_explicit_scene_hard_failures(artifact_id: str) -> list[str]:
-    failures: list[str] = []
-    for row in _scene_gate_evaluations(artifact_id):
-        evidence = row.get("evidence") or {}
-        qa = evidence.get("qa") if isinstance(evidence, dict) else None
-        if isinstance(qa, dict):
-            failures.extend(str(item) for item in (qa.get("hard_failures") or []) if str(item).strip())
-    return list(dict.fromkeys(failures))
-
-
-async def manually_review_and_adopt_scene_candidate(
-    project_id: str,
-    scene_name: str,
-    artifact_id: str,
-    *,
-    confirmations: dict,
-    reason: str,
-) -> dict:
-    """对“无结论/未验证”候选进行带责任人和理由的人工复核后采纳。
-
-    人工复核只是缺证据的恢复路径，不能覆盖任何历史上已明确识别的硬失败。
-    """
-    from app.evidence import repository as evidence_repository
-    from app.harness.types import Evaluation
-    from app.scene_policy import SCENE_QA_POLICY_VERSION, SCENE_QA_RULE_VERSION, normalize_scene_image_qa
-
-    _scene_candidate_context(project_id, scene_name, artifact_id)
-    current = scene_candidate_gate(artifact_id)
-    historical_hard = _historical_explicit_scene_hard_failures(artifact_id)
-    required = ("person_free", "watermark_free", "forbidden_text_free", "space_type_matches")
-    missing = [key for key in required if confirmations.get(key) is not True]
-    if missing:
-        raise ValueError("人工复核必须逐项确认：无人物、无水印/Logo、无禁止文字、空间类型匹配")
-    review_reason = str(reason or "").strip()
-    if len(review_reason) < 4:
-        raise ValueError("请填写至少 4 个字的人工复核理由")
-    score = _scene_candidate_qa_score(artifact_id)
-    qa = normalize_scene_image_qa({
-        "overall": score if score >= 0 else 0.0,
-        "issues": [],
-        "person_count": 0,
-        "person_detected": False,
-        "watermark_detected": False,
-        "forbidden_text_detected": False,
-        "space_type_matches": True,
-    }, environment_only=True)
-    qa.update({
-        "manual_review": True,
-        "manual_review_reason": review_reason,
-        "preexisting_quality_warnings": list(dict.fromkeys([
-            *current.get("hard_failures", []), *historical_hard,
-        ])),
-        "policy_version": SCENE_QA_POLICY_VERSION,
-        "rule_version": SCENE_QA_RULE_VERSION,
-    })
-    evidence_repository.create_evaluation(artifact_id, Evaluation(
-        evaluator_type="human",
-        evaluator_name="scene_candidate_human_hard_gate_review",
-        evaluator_version=SCENE_QA_POLICY_VERSION,
-        status="passed",
-        hard_gate_passed=True,
-        score=max(0.0, score * 100) if score >= 0 else None,
-        evidence={
-            "qa": qa,
-            "confirmations": {key: True for key in required},
-            "reason": review_reason,
-            "reviewed_at": now(),
-            "review_scope": "missing_or_unverified_evidence_only",
-        },
-        confidence=1.0,
-    ))
-    result = await adopt_scene_candidate(
-        project_id,
-        scene_name,
-        artifact_id,
-        reason=review_reason,
-        decided_by="human_scene_candidate_review",
-    )
-    result["manual_reviewed"] = True
-    return result
-
-
 async def adopt_scene_candidate(
     project_id: str,
     scene_name: str,
@@ -750,6 +639,9 @@ async def adopt_scene_candidate(
         raise ValueError("不是场景参考图候选")
     if artifact.get("status") == "stale":
         raise ValueError("候选已过期，不能采纳")
+    # VLM 图片质检已下线：候选是否可采纳只看文件是否存在（技术校验），不再由 QA 打分或拦截。
+    # scene_candidate_gate 对没有历史 QA 证据的候选返回空 hard_failures/warnings，这里原样透传，
+    # 不再用 normalize_scene_image_qa 重新归一化（该函数已随 app.scene_policy 一并下线）。
     current_gate = scene_candidate_gate(artifact_id, require_current_policy=False)
     latest_qa = dict(current_gate.get("qa") or {})
     warnings = list(dict.fromkeys([
@@ -759,18 +651,6 @@ async def adopt_scene_candidate(
     ]))
     from app.multiview import scene_multiview_enabled
     multiview_enabled = scene_multiview_enabled()
-    if multiview_enabled:
-        from app.scene_policy import normalize_scene_image_qa
-        latest_qa = normalize_scene_image_qa(latest_qa, environment_only=True)
-        for item in (latest_qa.get("hard_failures") or []):
-            text = str(item).strip()
-            if text and text not in warnings:
-                warnings.append(text)
-        if latest_qa.get("hard_gate_passed") is not True:
-            detail = "、".join(str(item) for item in (latest_qa.get("uncertainties") or [])[:4])
-            note = "候选 QA 未达展示阈值（仅评分，不拦截采纳）" + (f"：{detail}" if detail else "")
-            if note not in warnings:
-                warnings.append(note)
     try:
         content = artifact.get("content")
         if content is None and artifact.get("content_json"):
@@ -888,7 +768,6 @@ async def adopt_scene_candidate(
             clone_scene_views,
             list_scene_views,
             missing_required_views,
-            review_scene_pack_consistency,
         )
 
         current_views = list_scene_views(current["id"], conn=conn)
@@ -916,29 +795,11 @@ async def adopt_scene_candidate(
             warnings.append(
                 "当前整包缺少必需视角，已采用现有视图并记录风险：" + "、".join(missing)
             )
-        required_views = [view for view in candidate_views if view.get("view_role") in required_roles]
-        group_qa = (
-            await review_scene_pack_consistency(
-                required_views, scene.get("scene_canonical") or "",
-            )
-            if required_views
-            else {"status": "unverified", "issues": ["没有可复验视图"]}
-        )
-        # Score-only：整包 QA 仅写入评分；结构齐全即可采纳（PRD QA-SO #19/#21）。
+        # VLM 图片质检已下线：整包一致性不再评分，采纳只看必需视角文件是否齐全。
         group_qa = {
-            **group_qa,
-            "evaluation_role": "score_only",
-            "runtime_blocking": False,
-            "retry_eligible": False,
+            "status": "partial_fallback" if missing else "ready",
+            "required_views": list(required_roles),
         }
-        if group_qa.get("status") not in {"ready", "warning"} or group_qa.get("hard_failures"):
-            for item in (group_qa.get("hard_failures") or group_qa.get("issues") or []):
-                text = str(item).strip()
-                if text and text not in warnings:
-                    warnings.append(text)
-            note = "候选整包 QA 存在质量风险（仅评分，不拦截采纳）"
-            if note not in warnings:
-                warnings.append(note)
 
         # 先克隆当前包到负数历史槽，再原子更新当前包。这样既不改变下游引用 ID，
         # 也保留了可回滚的完整旧版本（含全部视角与证据）。
@@ -1320,52 +1181,11 @@ async def _generate_one_scene_reference(
     if only_scene is None or isinstance(only_scene, list):
         piled = list_scene_reference_candidates(conn, project_id, sc.name)
         if len(piled) > SCENE_CANDIDATE_AUTO_ADOPT_THRESHOLD:
-            pre_review_best = max(
-                piled,
-                key=lambda item: (item["qa_score"], item["created_at"]),
-            )
-            from app.multiview import scene_multiview_enabled
-            require_policy = scene_multiview_enabled()
-            # Old candidates often have good scores but incomplete
-            # policy facts.  Re-QA a bounded number before spending on
-            # more images or forcing the user through every card.
-            existing_gates = {
-                item["artifact_id"]: scene_candidate_gate(
-                    item["artifact_id"], require_current_policy=require_policy,
-                )
-                for item in piled
-            }
-            # 仍对最优旧候选做一次有界复评以改善排序证据；复评结果无论
-            # 通过与否都不会改变其文件采用资格。
-            already_eligible = any(
-                gate["verified"] for gate in existing_gates.values()
-            )
-            unverified = [
-                item for item in piled
-                if existing_gates[item["artifact_id"]]["state"] == "unverified"
-            ]
-            reviewed_winner_id: str | None = None
-            if not already_eligible:
-                for item in sorted(
-                    unverified,
-                    key=lambda candidate: (candidate["qa_score"], candidate["created_at"]),
-                    reverse=True,
-                )[:SCENE_CANDIDATE_AUTO_REVIEW_LIMIT]:
-                    reviewed = await review_scene_candidate(
-                        project_id, sc.name, item["artifact_id"],
-                    )
-                    if (reviewed.get("gate") or {}).get("verified"):
-                        reviewed_winner_id = item["artifact_id"]
-                        break
-            if unverified and not already_eligible:
-                piled = list_scene_reference_candidates(conn, project_id, sc.name)
-            # 候选列表已保证文件存在；QA 只用于排序，不能把整批候选判为不可采用。
-            eligible = list(piled)
-            preferred_id = reviewed_winner_id or pre_review_best["artifact_id"]
-            best = next(
-                (item for item in eligible if item["artifact_id"] == preferred_id),
-                max(eligible, key=lambda item: (item["qa_score"], item["created_at"])),
-            )
+            # VLM 图片质检已下线：候选列表已保证文件存在，不再有"重新质检以改善
+            # 排序"这一步——qa_score 现在恒为占位值，直接按其排序即退化为按最新
+            # 创建时间挑选，这是符合直觉的确定性兜底（较新的候选通常是较新一次
+            # 补图尝试的结果）。
+            best = max(piled, key=lambda item: (item["qa_score"], item["created_at"]))
             adopted = await adopt_scene_candidate(
                 project_id,
                 sc.name,

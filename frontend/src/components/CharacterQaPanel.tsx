@@ -6,21 +6,6 @@ import { statusLabel } from '../lib/statusLabels'
 import DecisionDialog from './DecisionDialog'
 import OperationError from './OperationError'
 
-const VIEW_LABELS: Record<string, string> = {
-  front_full: '正面全身',
-  three_quarter: '3/4 面',
-  profile: '侧面',
-  back_full: '背面全身',
-  face_closeup: '面部特写',
-}
-
-export function characterQaMessage(value: string): string {
-  return Object.entries(VIEW_LABELS).reduce(
-    (text, [key, label]) => text.replaceAll(key, label),
-    value,
-  ).replaceAll('警告', '质检提示')
-}
-
 export default function CharacterQaPanel({
   projectId,
   characterName,
@@ -35,15 +20,11 @@ export default function CharacterQaPanel({
   onClose: () => void
 }) {
   const { toast } = useNav()
-  const qa = portrait?.group_qa
-  const hard = qa?.hard_failures ?? []
-  const soft = qa?.issues ?? []
   const [candidates, setCandidates] = useState<CharacterPortraitCandidate[]>([])
   const [loadingCandidates, setLoadingCandidates] = useState(true)
   const [candidateError, setCandidateError] = useState<string | null>(null)
   const [candidateBusy, setCandidateBusy] = useState<string | null>(null)
   const [reasons, setReasons] = useState<Record<string, string>>({})
-  const [bypassSoft, setBypassSoft] = useState<Record<string, boolean>>({})
   const [pendingDecision, setPendingDecision] = useState<{
     candidate: CharacterPortraitCandidate
     action: 'adopt' | 'rollback'
@@ -64,7 +45,7 @@ export default function CharacterQaPanel({
 
   useEffect(() => {
     void api.post('/system/monitor/events', {
-      name: 'portrait_qa_review', object_id: projectId,
+      name: 'portrait_candidate_review', object_id: projectId,
       dimensions: { action: 'open', result: portrait?.pack_status || 'candidate_only' },
     }).catch(() => undefined)
     loadCandidates()
@@ -72,11 +53,6 @@ export default function CharacterQaPanel({
   }, [projectId, characterName, portrait?.pack_status])
 
   const candidateId = (candidate: CharacterPortraitCandidate) => candidate.portrait_id || candidate.id || ''
-  const candidateQa = (candidate: CharacterPortraitCandidate) => candidate.group_qa || candidate.qa || null
-  const candidateSoftWarnings = (candidate: CharacterPortraitCandidate) => {
-    const qa = candidateQa(candidate)
-    return [...(candidate.soft_warnings ?? []), ...(qa?.issues ?? [])]
-  }
   const mutateCandidate = async (candidate: CharacterPortraitCandidate, action: 'adopt' | 'rollback') => {
     const id = candidateId(candidate)
     if (!id) return
@@ -88,10 +64,7 @@ export default function CharacterQaPanel({
           toast('请先填写采纳原因', true)
           return
         }
-        await api.adoptPortraitCandidate(projectId, characterName, id, {
-          reason,
-          bypass_soft: !!bypassSoft[id],
-        })
+        await api.adoptPortraitCandidate(projectId, characterName, id, { reason })
         toast(`已采纳「${characterName}」候选定妆`)
       } else {
         await api.rollbackPortraitCandidate(projectId, characterName, id)
@@ -110,47 +83,12 @@ export default function CharacterQaPanel({
     <div className="evidence-backdrop" role="presentation" onMouseDown={e => {
       if (e.currentTarget === e.target) onClose()
     }}>
-      <section ref={trapRef} className="impact-dialog character-qa-panel" role="dialog" aria-modal="true" aria-label="人物质检详情">
-        <h3>{characterName} · 定妆质检</h3>
+      <section ref={trapRef} className="impact-dialog character-qa-panel" role="dialog" aria-modal="true" aria-label="人物定妆候选">
+        <h3>{characterName} · 定妆候选</h3>
         <ul>
           <li>定妆包状态：{portrait
             ? <span>{statusLabel(portrait.pack_status)}</span>
             : '暂无已采用定妆包'}</li>
-          <li>整体验收：{qa?.status ? <span>{statusLabel(qa.status)}</span> : '待质检'}
-            {typeof qa?.overall === 'number' ? ` · ${qa.overall.toFixed(2)}` : ''}</li>
-          <li>脸一致性：{qa?.face_consistency ?? '—'}</li>
-          <li>发型一致性：{qa?.hair_consistency ?? '—'}</li>
-          <li>服装一致性：{qa?.outfit_consistency ?? '—'}</li>
-          <li>体型一致性：{qa?.body_consistency ?? '—'}</li>
-        </ul>
-        {!!hard.length && (
-          <>
-            <h4>未通过的必检项</h4>
-            <ul>{hard.map(item => <li key={item}>{characterQaMessage(item)}</li>)}</ul>
-          </>
-        )}
-        {!!soft.length && (
-          <>
-            <h4>质量需复核</h4>
-            <ul>{soft.map(item => <li key={item}>{characterQaMessage(item)}</li>)}</ul>
-          </>
-        )}
-        <h4>视角级结果</h4>
-        <ul>
-          {(qa?.views ?? portrait?.views ?? []).map((view, index) => {
-            const role = ('view_role' in view ? view.view_role : undefined) || `view-${index}`
-            const overall = 'overall' in view ? view.overall : ('qa_overall' in view ? view.qa_overall : null)
-            const issues = ('issues' in view ? view.issues : undefined) || []
-            const fails = ('hard_failures' in view ? view.hard_failures : undefined) || []
-            return (
-              <li key={role}>
-                {VIEW_LABELS[role || ''] || role}
-                {typeof overall === 'number' ? ` · ${overall.toFixed(2)}` : ''}
-                {fails?.length ? ` · 必检项未通过：${fails.map(characterQaMessage).join('；')}` : ''}
-                {issues?.length ? ` · ${issues.slice(0, 2).map(characterQaMessage).join('；')}` : ''}
-              </li>
-            )
-          })}
         </ul>
         <h4>候选定妆包</h4>
         {loadingCandidates && <p>正在读取候选包…</p>}
@@ -168,8 +106,6 @@ export default function CharacterQaPanel({
           <div className="portrait-candidate-list">
             {candidates.map((candidate, index) => {
               const id = candidateId(candidate) || `candidate-${index}`
-              const qa = candidateQa(candidate)
-              const warnings = candidateSoftWarnings(candidate)
               const isCurrent = candidate.current || candidate.is_current || candidate.adopted
               const isSingleImage = candidate.candidate_kind === 'single_image'
               const adoptable = candidate.adoptable !== false
@@ -178,26 +114,16 @@ export default function CharacterQaPanel({
                 ? '正在处理上一项候选操作'
                 : (reasons[id] || '').trim().length < 4
                   ? '请填写至少 4 个字的采纳原因'
-                  : warnings.length && !bypassSoft[id]
-                    ? '请先确认已阅读质检提示'
-                    : ''
+                  : ''
               return (
                 <article key={id} className="portrait-candidate-item">
                   {candidate.image_url && <img src={candidate.image_url} alt={`${characterName} 候选定妆`} loading="lazy" decoding="async" />}
                   <div>
                     <div className="portrait-candidate-head">
-                      <b>{isCurrent ? '当前采用' : candidate.historical ? '历史候选' : isSingleImage ? '失败单图候选' : '候选包'}</b>
+                      <b>{isCurrent ? '当前采用' : candidate.historical ? '历史候选' : isSingleImage ? '单图候选' : '候选包'}</b>
                       <span>{statusLabel(candidate.pack_status || candidate.status)}</span>
-                      {typeof qa?.overall === 'number' && <span>质检分 {qa.overall.toFixed(2)}</span>}
                       {candidate.attempt != null && <span>第 {candidate.attempt} 次</span>}
                     </div>
-                    <p>
-                      {(qa?.hard_failures ?? []).length
-                        ? `必检项未通过：${(qa?.hard_failures ?? []).map(characterQaMessage).join('；')}`
-                        : warnings.length
-                          ? `质检提示：${warnings.slice(0, 3).map(characterQaMessage).join('；')}`
-                          : '质检未报告明显问题'}
-                    </p>
                     <p className="hint">
                       {isSingleImage
                         ? '阶段：正面单图候选，尚未进入三视角整包'
@@ -207,7 +133,7 @@ export default function CharacterQaPanel({
                       {candidate.change?.adoption_reason ? ` · 采纳原因：${candidate.change.adoption_reason}` : ''}
                     </p>
                     {candidate.artifact_id && <details className="portrait-candidate-technical"><summary>技术证据</summary><code>{candidate.artifact_id}</code></details>}
-                    {!adoptable && <p className="error-banner">{candidate.blocked_reason || '该候选未通过生产必检项，不能直接采纳。'}</p>}
+                    {!adoptable && <p className="error-banner">{candidate.blocked_reason || '该候选尚不具备可用于生产的完整素材。'}</p>}
                     {canAdopt && <><label className="f">采纳原因</label>
                     <input
                       aria-label={`${characterName}候选 ${index + 1} 的采纳原因`}
@@ -215,16 +141,6 @@ export default function CharacterQaPanel({
                       onChange={event => setReasons(current => ({ ...current, [id]: event.target.value }))}
                       placeholder="说明为什么采纳此候选包"
                     /></>}
-                    {canAdopt && !!warnings.length && (
-                      <label className="portrait-candidate-bypass">
-                        <input
-                          type="checkbox"
-                          checked={!!bypassSoft[id]}
-                          onChange={event => setBypassSoft(current => ({ ...current, [id]: event.target.checked }))}
-                        />
-                        已阅读这些质检提示，仍采用此候选
-                      </label>
-                    )}
                     {(canAdopt || isCurrent) && <div className="dialog-actions">
                       {canAdopt && (
                       <button
@@ -255,7 +171,7 @@ export default function CharacterQaPanel({
             })}
           </div>
         )}
-        <p className="hint">采用规则：三视角文件齐全并可读取后即可采用；质量分数与问题仅供评审，不阻止采用。技术失败不会替换下游正在使用的版本。</p>
+        <p className="hint">采用规则：三视角文件齐全并可读取后即可采用，由人工挑选决定；技术失败不会替换下游正在使用的版本。</p>
         <div className="dialog-actions">
           <button type="button" className="btn primary" onClick={onClose}>关闭</button>
         </div>

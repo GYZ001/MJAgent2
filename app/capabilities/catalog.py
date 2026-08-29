@@ -321,16 +321,6 @@ def _register_human_only(registry) -> None:
             tags=("human", "filesystem"),
         ),
         HumanOnlySpec(
-            "human.review_scene_candidate_hard_gates",
-            "人工复核场景候选硬门禁",
-            "用户放大查看候选图，逐项确认无人、无水印、无禁止文字和空间匹配",
-            reason="这是对视觉硬门禁的责任人签署，Agent 不得代替用户勾选或承担风险",
-            rest_routes=(
-                "POST /api/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/manual-review",
-            ),
-            tags=("human", "scene", "qa"),
-        ),
-        HumanOnlySpec(
             "human.choose_episode_target_duration",
             "选择单集目标时长",
             "用户在首版剧本生成前确认单集节奏预算",
@@ -573,22 +563,6 @@ def _register_commands(registry) -> None:
                 "POST /api/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/adopt",
             ),
             tags=("scene",),
-        ),
-        _cmd(
-            "scene.review_candidate",
-            title="重验场景候选 QA",
-            description="对已落盘场景候选执行最新硬门禁 QA；不重新生图、不切换当前资产",
-            input_model=I.SceneAdoptCandidateInput,
-            risk=RiskLevel.R1_REVERSIBLE,
-            confirmation=ConfirmationPolicy.OPTIONAL,
-            idempotency=IdempotencyPolicy.RECOMMENDED,
-            scopes={"manju:project-write"},
-            side_effect="appends_scene_candidate_qa_evidence",
-            handler=h_scene.review_candidate,
-            rest_routes=(
-                "POST /api/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/review",
-            ),
-            tags=("scene", "qa"),
         ),
         # —— 分集 / 剧本 / 分镜 ——
         _cmd(
@@ -1448,9 +1422,6 @@ def _register_exemptions(registry) -> None:
         "POST /api/projects/{project_id}/scene-bible/precheck": "场景清单生成前只读付费预检",
         "POST /api/projects/{project_id}/scene-bible/preview": "场景清单与付费范围只读预览",
         "POST /api/projects/{project_id}/scene-refs/precheck": "场景图付费生成前只读预检",
-        "POST /api/projects/{project_id}/scene-reviews": "历史场景包本机管理复验；不启动付费出图",
-        "POST /api/projects/{project_id}/scene-reviews/{batch_id}/cancel": "取消本机场景历史复验任务",
-        "POST /api/projects/{project_id}/scene-reviews/{batch_id}/items/{item_id}/disposition": "场景历史复验的人工处置记录；不删除历史资产且不向 Agent/MCP 开放",
         "POST /api/projects/{project_id}/scenes/{scene_name}/refs/{scene_reference_id}/views/{view_role}/regenerate/cancel": "页面定向取消单场景视角任务，不创建新付费作业",
         "POST /api/projects/{project_id}/scenes/{scene_name}/refs/{scene_reference_id}/rollback": "场景库历史版本人工回滚；页面评审入口，不向 Agent/MCP 开放",
         "PUT /api/projects/{project_id}/scenes/{scene_name}": "场景库人工元数据修订；页面编辑入口，不自动触发付费出图",

@@ -102,7 +102,6 @@ async def recover_all() -> dict[str, Any]:
         recover_character_ref_tasks,
         recover_portrait_view_redo_tasks,
         recover_project_video_completion_queues,
-        recover_scene_review_tasks,
         recover_scene_ref_tasks,
         recover_scene_view_redo_tasks,
         recover_screenplay_tasks,
@@ -157,11 +156,6 @@ async def recover_all() -> dict[str, Any]:
     )
     if scene_view_redo_resumed:
         report["scene_view_redo"] = scene_view_redo_resumed
-    scene_review_resumed = run_step(
-        "scene_history_review", recover_scene_review_tasks, record_empty=False,
-    )
-    if scene_review_resumed:
-        report["scene_history_review"] = scene_review_resumed
     run_step("episode_mapping", recover_plan_tasks)
     run_step("screenplay", recover_screenplay_tasks)
     run_step("storyboard", recover_storyboard_tasks)

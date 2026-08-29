@@ -387,7 +387,6 @@ async def _generate_one_character_portrait(
     from app import portraits as _portraits
 
     c.ref_image_path = None
-    from app.stages import review_portrait_image
     override = (c.portrait_prompt_override or "").strip()
     base_prompt = effective_portrait_prompt(
         style, c.appearance_canonical, override, c.period_costume_canonical,
@@ -433,9 +432,9 @@ async def _generate_one_character_portrait(
                 atomic_write_bytes(path, base64.b64decode(item["b64_json"]))
             else:
                 raise hiagent.ProviderError(f"图像响应缺少 url/b64_json：{list(item.keys())}")
-            qa = await review_portrait_image(
-                hiagent.encode_image_file(path), base_prompt,
-            )
+            # VLM 图片质检已下线：定妆照是否可用只看文件是否存在（技术校验），
+            # 由 record_reference_asset 内部的 validate_image_file 判定；不再产生分数。
+            qa: dict = {}
             artifact = record_reference_asset(
                 asset_type="character_portrait",
                 scope_id=f"{project_id}:{c.name}:1",

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from app import api, config, db, hiagent, multiview, portraits, refs, scenes, stages
+from app import api, config, db, hiagent, multiview, portraits, refs, scenes
 from app.domain import bible_ops
 from app.schemas import Bible, Character, Scene, World
 
@@ -54,17 +54,8 @@ def _patch_successful_character_generation(monkeypatch) -> None:
     async def fake_image(*_args, **_kwargs):
         return {"b64_json": encoded}
 
-    async def fake_qa(*_args, **_kwargs):
-        return {"overall": 0.95, "status": "ready", "issues": []}
-
-    async def duplicate_view_qa(*_args, **_kwargs):
-        raise AssertionError("初始主图与侧视角应由已存主图 QA + 一次整包 QA 覆盖")
-
     monkeypatch.setattr(refs.hiagent, "generate_image", fake_image)
     monkeypatch.setattr(multiview, "_generate_image", fake_image)
-    monkeypatch.setattr(stages, "review_portrait_image", fake_qa)
-    monkeypatch.setattr(multiview, "review_character_view", duplicate_view_qa)
-    monkeypatch.setattr(multiview, "review_character_pack_consistency", fake_qa)
     monkeypatch.setattr(multiview, "character_multiview_enabled", lambda: True)
     monkeypatch.setattr(
         refs,
@@ -528,78 +519,6 @@ def test_failed_single_image_qa_is_visible_as_non_adoptable_candidate(
     assert item["image_url"]
 
 
-def test_failed_single_image_qa_fails_batch_without_publishing(
-    asset_db, monkeypatch,
-) -> None:
-    _seed_bible_project(asset_db[0])
-    encoded = base64.b64encode(b"test-image").decode("ascii")
-
-    async def fake_image(*_args, **_kwargs):
-        return {"b64_json": encoded}
-
-    async def failed_qa(*_args, **_kwargs):
-        return {"overall": 0.3, "status": "failed", "issues": ["视觉年龄不符"]}
-
-    monkeypatch.setattr(refs.hiagent, "generate_image", fake_image)
-    monkeypatch.setattr(stages, "review_portrait_image", failed_qa)
-    monkeypatch.setattr(
-        refs,
-        "record_reference_asset",
-        lambda **_kwargs: {"id": "artifact_failed", "status": "candidate"},
-    )
-
-    with pytest.raises(Exception, match="技术校验未通过"):
-        asyncio.run(refs.generate_refs("proj_bootstrap"))
-
-
-def test_expression_warning_seed_continues_into_multiview_pack(
-    asset_db, monkeypatch,
-) -> None:
-    conn, _ = asset_db
-    _seed_bible_project(conn)
-    encoded = base64.b64encode(b"\xff\xd8\xff\xe0valid-test-image").decode("ascii")
-    pack_calls: list[str] = []
-
-    async def fake_image(*_args, **_kwargs):
-        return {"b64_json": encoded}
-
-    async def expression_warning_qa(*_args, **_kwargs):
-        return {
-            "identity_match": 0.92,
-            "presentation_match": 0.3,
-            "clean_frame": 1.0,
-            "overall": 0.92,
-            "issues": ["眼神未体现炽热爱慕"],
-            "soft_warnings": ["眼神未体现炽热爱慕"],
-            "hard_failures": [],
-            "hard_gate_passed": True,
-            "status": "warning",
-        }
-
-    async def fake_pack(**kwargs):
-        pack_calls.append(kwargs["portrait_id"])
-        conn.execute(
-            "UPDATE character_portraits SET pack_status='ready', group_qa_json=? WHERE id=?",
-            (json.dumps({"status": "warning", "overall": 0.9, "issues": ["神态软警告"]}), kwargs["portrait_id"]),
-        )
-        conn.commit()
-        return {"status": "ready", "portrait_id": kwargs["portrait_id"]}
-
-    monkeypatch.setattr(refs.hiagent, "generate_image", fake_image)
-    monkeypatch.setattr(stages, "review_portrait_image", expression_warning_qa)
-    monkeypatch.setattr(multiview, "character_multiview_enabled", lambda: True)
-    monkeypatch.setattr(multiview, "ensure_character_multiview_pack", fake_pack)
-
-    asyncio.run(refs.generate_refs("proj_bootstrap"))
-
-    assert len(pack_calls) == 1
-    portrait = conn.execute(
-        "SELECT ep_start, pack_status FROM character_portraits WHERE project_id='proj_bootstrap'"
-    ).fetchone()
-    assert portrait["ep_start"] == 1
-    assert portrait["pack_status"] == "ready"
-
-
 def test_cancelled_initial_pack_removes_staged_front_only_portrait(
     asset_db, monkeypatch,
 ) -> None:
@@ -724,21 +643,7 @@ def test_scene_multiview_generation_uses_candidate_scoped_recovery_operations(
         captured.append(kwargs["call_meta"])
         return {"b64_json": encoded}
 
-    async def fake_review(*_args, **_kwargs):
-        return dict(qa)
-
-    async def fake_pack(views, _canonical):
-        return {
-            **qa,
-            "views": [
-                {**qa, "view_role": view["view_role"]}
-                for view in views
-            ],
-        }
-
     monkeypatch.setattr(multiview, "_generate_image", fake_generate)
-    monkeypatch.setattr(multiview, "review_scene_view", fake_review)
-    monkeypatch.setattr(multiview, "review_scene_pack_consistency", fake_pack)
 
     result = asyncio.run(multiview.ensure_scene_multiview_pack(
         project_id="proj_bootstrap",
@@ -796,7 +701,7 @@ def test_failed_extra_view_pack_does_not_expose_primary_to_video(
     assert scenes.scene_ref_for_episode("proj_bootstrap", "Courtyard", 1) is None
 
 
-def test_pending_reverse_view_is_reviewed_without_regeneration(asset_db, monkeypatch) -> None:
+def test_pending_reverse_view_is_promoted_without_regeneration(asset_db, monkeypatch) -> None:
     conn, tmp_path = asset_db
     _seed_bible_project(conn, with_scene=True)
     primary = tmp_path / "primary.jpg"
@@ -826,31 +731,11 @@ def test_pending_reverse_view_is_reviewed_without_regeneration(asset_db, monkeyp
              json.dumps(view_qa) if view_qa else None, status),
         )
     conn.commit()
-    reviewed = []
 
     async def must_not_generate(*_args, **_kwargs):
         raise AssertionError("qa_pending 反打图已存在，不得重复付费生成")
 
-    async def review_view(path, canonical, role):
-        reviewed.append(role)
-        return {**qa, "view_role": role}
-
-    async def review_pack(views, canonical):
-        return {
-            "overall": 0.9,
-            "status": "ready",
-            "hard_gate_passed": True,
-            "hard_failures": [],
-            "policy_version": "scene-practical-quality-1.1.0",
-            "views": [
-                {**qa, "view_role": view["view_role"], "status": "ready"}
-                for view in views
-            ],
-        }
-
     monkeypatch.setattr(multiview, "_generate_image", must_not_generate)
-    monkeypatch.setattr(multiview, "review_scene_view", review_view)
-    monkeypatch.setattr(multiview, "review_scene_pack_consistency", review_pack)
 
     result = asyncio.run(multiview.ensure_scene_multiview_pack(
         project_id="proj_bootstrap",
@@ -863,7 +748,8 @@ def test_pending_reverse_view_is_reviewed_without_regeneration(asset_db, monkeyp
     ))
 
     assert result["status"] == "ready"
-    assert reviewed == ["reverse_angle"]
+    # VLM 质检已下线：历史 qa_pending 行技术产物（文件）已存在即直接晋升为 ready，
+    # 不再调用任何评审函数，也不会触发重新生成（must_not_generate 断言已覆盖后者）。
     assert conn.execute(
         "SELECT status FROM scene_reference_views WHERE id='view-reverse_angle'",
     ).fetchone()["status"] == "ready"

@@ -2,11 +2,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass, field
 
 from app.db import get_setting, set_setting
 from app.media_pipeline import stages as S
+
+_LOGGER = logging.getLogger(__name__)
+
+# 文本 provider 调用槽位不是 QPSP 视频媒体阶段（app/media_pipeline/stages.py 只
+# 覆盖视频 job 生命周期），但复用同一套"拥塞减半 + 健康爬升"自适应状态机，资源键
+# 直接定义在本模块，不去污染 stages.py 的视频阶段枚举。
+RESOURCE_TEXT_PROVIDER = "text_provider_calls"
 
 # settings 键 → 默认硬上限（均衡档）
 CHANNEL_DEFAULTS: dict[str, int] = {
@@ -18,6 +26,7 @@ CHANNEL_DEFAULTS: dict[str, int] = {
     S.RESOURCE_VIDEO_POLL: 15,
     S.RESOURCE_DOWNLOAD: 3,
     S.RESOURCE_FINALIZE: 4,
+    RESOURCE_TEXT_PROVIDER: 6,
 }
 
 SETTING_KEYS = {
@@ -29,6 +38,7 @@ SETTING_KEYS = {
     S.RESOURCE_VIDEO_POLL: "video_poll_concurrency",
     S.RESOURCE_DOWNLOAD: "download_concurrency",
     S.RESOURCE_FINALIZE: "finalize_concurrency",
+    RESOURCE_TEXT_PROVIDER: "text_generation_concurrency",
 }
 
 # 兼容旧键：读时回填到新键
@@ -125,16 +135,26 @@ def _resize_semaphore(resource: str) -> None:
 
 
 def report_congestion(resource: str, *, reason: str = "429") -> None:
-    """连续拥塞：通道并发减半，冷却 60 秒。视频提交与轮询分通道，互不误伤。"""
+    """连续拥塞：通道并发减半，冷却 60 秒。视频提交与轮询分通道，互不误伤。
+
+    降档必须可见（不许静默限流让人以为系统很闲）：真正触发减半时打一条 WARNING，
+    带上通道名、旧/新并发值和触发原因，落进后端运行日志。
+    """
     state = ensure_channel(resource)
     state.congestion_hits += 1
     if state.congestion_hits < 2:
         return
     state.congestion_hits = 0
+    previous = state.current
     state.current = max(1, state.current // 2)
     state.cooldown_until = time.time() + 60.0
     state.healthy_since = None
     _resize_semaphore(resource)
+    if state.current != previous:
+        _LOGGER.warning(
+            "concurrency-downgrade resource=%s reason=%s %d->%d cooldown_s=60",
+            resource, reason, previous, state.current,
+        )
 
 
 def report_healthy(resource: str) -> None:
@@ -150,9 +170,54 @@ def report_healthy(resource: str) -> None:
     if now - state.healthy_since < 600.0:
         return
     if state.current < state.hard_limit:
+        previous = state.current
         state.current += 1
         _resize_semaphore(resource)
+        _LOGGER.info(
+            "concurrency-upgrade resource=%s %d->%d hard_limit=%d",
+            resource, previous, state.current, state.hard_limit,
+        )
     state.healthy_since = now
+
+
+# 阈值推导（2026-08-29 实测，本机 2 核 / MemTotal≈3747732 kB，见 /proc/meminfo）：
+# - 单个已在跑的后端进程 RSS ≈ 453MB（`ps -o rss` 实测，uvicorn 单进程常驻）；
+# - 前一晚十集并发回归已把约 640MB 推入 swap（SwapTotal-SwapFree 实测），说明峰值
+#   负载下物理内存缺口至少是这个量级——这台机器已经真实触过底。
+# 可用内存（MemAvailable，内核自己算的"还能分配多少而不用换页"，比 MemFree 准，
+# 后者不含可回收页缓存）跌破"一个后端进程的常驻体量"时，再挤入任何新的并发工作
+# 都会把缺口继续推大、重演那次 swap 挤占；取整到 512MB，在测得的 453MB 之上留一点
+# 余量，不卡在测得值上。
+MEMORY_AVAILABLE_FLOOR_KB = 512 * 1024
+
+
+def _available_memory_kb() -> int | None:
+    """读 /proc/meminfo 的 MemAvailable；非 Linux 或读取失败时返回 None。
+
+    调用方必须把 None 当"这次不检查"，不得当成"内存充足"——静默假设健康和静默
+    限流一样不诚实。
+    """
+    try:
+        with open("/proc/meminfo", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def memory_pressure_reason() -> str | None:
+    """可用内存低于本机实测水位时返回可读原因；充足或无法判断时返回 None。"""
+    available_kb = _available_memory_kb()
+    if available_kb is None:
+        return None
+    if available_kb < MEMORY_AVAILABLE_FLOOR_KB:
+        return (
+            f"available_memory={available_kb // 1024}MB "
+            f"< floor={MEMORY_AVAILABLE_FLOOR_KB // 1024}MB"
+        )
+    return None
 
 
 def snapshot() -> dict[str, dict]:

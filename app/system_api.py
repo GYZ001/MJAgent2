@@ -897,7 +897,7 @@ def recent_calls(limit: int = 30):
 
 
 _BUSINESS_CALL_KINDS = {
-    "chat", "vlm", "vlm_qa", "video_create", "video_poll", "image", "image_generate",
+    "chat", "video_create", "video_poll", "image", "image_generate",
     "image_edit", "scene_image", "screenplay_prompt", "plan_prompt", "bible_prompt",
     "references_prompt", "storyboard_prompt", "storyboard_shot_prompt", "storyboard_outline_prompt",
 }

@@ -205,7 +205,6 @@ class StoryboardConfirmInput(StandardCommandInput):
 class VideoGenerateShotInput(StandardCommandInput):
     shot_id: str
     prompt_override: str | None = None
-    with_critique: bool = False
     reroll: bool = False
     qualification_version: str | None = None
 

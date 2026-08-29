@@ -13,7 +13,7 @@ import threading
 
 import pytest
 
-from app import config, db, multiview, refs, scenes, stages
+from app import config, db, multiview, refs, scenes
 from app.generation_concurrency import (
     CHARACTER_PORTRAIT_BATCH_CONCURRENCY,
     SCENE_REFERENCE_BATCH_CONCURRENCY,
@@ -77,11 +77,7 @@ def test_character_portrait_batch_caps_concurrency_at_pool_size(
         await probe()
         return {"b64_json": encoded}
 
-    async def fake_qa(*_args, **_kwargs):
-        return {"overall": 0.95, "status": "ready", "issues": []}
-
     monkeypatch.setattr(refs.hiagent, "generate_image", fake_image)
-    monkeypatch.setattr(stages, "review_portrait_image", fake_qa)
     # 多视角包内部还有正面→侧面的有序/并发生成，与本测试要验证的"跨角色并发池"
     # 是两回事；关掉它让每个角色恰好对应一次 generate_image 调用，峰值可干净归因。
     monkeypatch.setattr(multiview, "character_multiview_enabled", lambda: False)
@@ -143,11 +139,7 @@ def test_scene_reference_batch_caps_concurrency_at_pool_size(
         await probe()
         return {"b64_json": encoded}
 
-    async def fake_qa(*_args, **_kwargs):
-        return {"overall": 0.95, "status": "ready", "hard_gate_passed": True, "issues": []}
-
     monkeypatch.setattr(scenes, "_generate_scene_image", fake_generate)
-    monkeypatch.setattr(stages, "review_scene_image", fake_qa)
     # 场景多视角包同理关闭，让每个场景恰好对应一次 _generate_scene_image 调用。
     monkeypatch.setattr(multiview, "scene_multiview_enabled", lambda: False)
     monkeypatch.setattr(
@@ -219,18 +211,13 @@ def test_character_and_scene_batches_use_independent_pools(asset_db, monkeypatch
         await scene_probe()
         return {"b64_json": encoded}
 
-    async def fake_qa(*_args, **_kwargs):
-        return {"overall": 0.95, "status": "ready", "hard_gate_passed": True, "issues": []}
-
     monkeypatch.setattr(refs.hiagent, "generate_image", fake_image)
-    monkeypatch.setattr(stages, "review_portrait_image", fake_qa)
     monkeypatch.setattr(multiview, "character_multiview_enabled", lambda: False)
     monkeypatch.setattr(
         refs, "record_reference_asset",
         lambda **_kwargs: {"id": "artifact_portrait", "status": "approved"},
     )
     monkeypatch.setattr(scenes, "_generate_scene_image", fake_generate)
-    monkeypatch.setattr(stages, "review_scene_image", fake_qa)
     monkeypatch.setattr(multiview, "scene_multiview_enabled", lambda: False)
     monkeypatch.setattr(
         scenes, "record_reference_asset",

@@ -70,16 +70,3 @@ async def adopt_candidate(args: I.SceneAdoptCandidateInput) -> CommandResult:
     return succeeded(f"已采纳场景「{args.scene_name}」的候选图", data=outcome)
 
 
-async def review_candidate(args: I.SceneAdoptCandidateInput) -> CommandResult:
-    from app import api
-
-    outcome = await call_guarded(
-        api.review_scene_candidate_route,
-        args.project_id, args.scene_name, args.artifact_id,
-    )
-    if isinstance(outcome, CommandResult):
-        return outcome
-    return succeeded(
-        f"已对场景「{args.scene_name}」的现有候选重新执行 QA（未重新生图）",
-        data=outcome,
-    )
