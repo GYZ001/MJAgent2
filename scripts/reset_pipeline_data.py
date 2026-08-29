@@ -37,8 +37,6 @@ PURGE_TABLES = {
     "reference_sets",
     "scene_reference_views",
     "scene_references",
-    "scene_review_batches",
-    "scene_review_items",
     "visual_entity_merges",
     # 映射包与分镜
     "screenplay_drafts",
@@ -67,7 +65,6 @@ PURGE_TABLES = {
     "video_budget_authorization_receipts",
     "video_command_operation_receipts",
     "video_generation_attempts",
-    "video_mode_qa_results",
     "video_plan_dependencies",
     "video_version_archives",
     # 编排、闸门与凭据

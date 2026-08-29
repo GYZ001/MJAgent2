@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import {
-  api, Scene, SceneCostPrecheck, SceneGapScan, SceneRefSegment, SceneReferenceCandidate,
-  SceneRefsProgress,
+  api, Scene, SceneCostPrecheck, SceneGapScan, SceneRefSegment,
+  SceneReferenceCandidate, SceneRefsProgress,
 } from '../api'
 import { useNav, usePoll, useProject } from '../App'
 import { ServerTaskTimer } from '../components/TaskTimer'
@@ -14,9 +14,13 @@ import PrepSubnav from '../components/PrepSubnav'
 import QueryState from '../components/QueryState'
 import DecisionDialog from '../components/DecisionDialog'
 import OperationError from '../components/OperationError'
+import StyleRegenConfirmDialog from '../components/StyleRegenConfirmDialog'
+import VisualStyleDialog from '../components/VisualStyleDialog'
 import { SINGLE_ROW_ASSET_PAGE, useFillPageSize } from '../hooks/useFillPageSize'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { usePrepListState } from '../hooks/usePrepListState'
+import { useStyleRegenConfirm } from '../hooks/useStyleRegenConfirm'
+import { useVisualStyleDialog } from '../hooks/useVisualStyleDialog'
 import { formatBookTitle } from '../lib/bookTitle'
 import { sceneUsability } from '../lib/sceneUsability'
 import { statusLabel, statusTitle, type PrepStepStatus } from '../lib/statusLabels'
@@ -104,6 +108,8 @@ export default function ScenesPage() {
   const [gapScan, setGapScan] = useState<SceneGapScan | null>(null)
   const [scenePreview, setScenePreview] = useState<Scene[] | null>(null)
   const [compareDetail, setCompareDetail] = useState<{ title: string; images: { src: string; label: string }[] } | null>(null)
+  const styleDialog = useVisualStyleDialog(projectId!)
+  const styleRegen = useStyleRegenConfirm(projectId!)
 
   const scenes = p?.bible?.scenes ?? []
   const generating = p?.scene_refs_status === 'running'
@@ -238,6 +244,44 @@ export default function ScenesPage() {
     finally { setPayLoading(false) }
   }
 
+  /**
+   * 场景库页的风格确认：只切换项目统一画风（不重新生成人物谱角色内容）。
+   * 提交选择、把（人物+场景）合并报价交给 StyleRegenConfirmDialog；确认后由
+   * **后端**在同一次请求里发起人物定妆照与场景图两条生成线，不是本页自己
+   * 链两个前端弹窗——那样任一步失败或页面被关掉，另一条线就发不出去了。
+   */
+  const submitStyleForScenes = async (styleName: string) => {
+    const outcome = await styleRegen.requestStyleChange(styleName, p.bible_version ?? 0)
+    if (outcome?.kind === 'unchanged') {
+      toast(`统一画风仍为「${styleName}」，无需变更`)
+    } else if (outcome === null && styleRegen.quoteError) {
+      toast(styleRegen.quoteError, true)
+    }
+  }
+
+  const confirmStyleForScenes = async () => {
+    try {
+      const outcome = await styleRegen.confirmStyleChange()
+      if (outcome.kind === 'idempotent_replay') {
+        toast('该次风格切换已经处理过，未重复触发生成')
+        refresh()
+        return
+      }
+      if (outcome.kind !== 'started') return
+      const parts: string[] = []
+      if (outcome.sceneBibleReady) {
+        parts.push(outcome.sceneRefsStarted ? '场景图已开始按新画风重新生成' : `场景图未能启动：${outcome.sceneRefsError || '请重试'}`)
+      } else {
+        parts.push('场景清单尚未生成，请先点击上方"准备场景清单并预览费用"；完成后可单独按新画风生成场景图')
+      }
+      parts.push(outcome.refsStarted ? '定妆照已开始按新画风重新生成' : `定妆照未能启动：${outcome.refsError || '请到人物谱重试'}`)
+      toast(parts.join('；'), !outcome.sceneRefsStarted && outcome.sceneBibleReady)
+      refresh()
+    } catch (e: unknown) {
+      toast(e instanceof Error ? e.message : String(e), true)
+    }
+  }
+
   const quoteViewRedo = async (sceneName: string, sceneRefId: string, viewRole: string) => {
     const title = `重做「${sceneName}」${sceneViewPresentation(viewRole).label}`
     setPayLoading(true); setPayError(null); setPayTitle(title); setPayOpen(true)
@@ -304,6 +348,14 @@ export default function ScenesPage() {
                 停止场景图生成
               </button>
             )}
+            <button className="btn ghost" disabled={busy || generating}
+              title="风格是项目级设置：确认后会依次带你确认场景图与定妆照两部分的重新生成费用，已生成的都会按新画风重做"
+              aria-label={busy || generating
+                ? '配置统一画风，暂不可用：正在处理上一项操作'
+                : '配置统一画风；确认后依次触发场景图与定妆照重新生成'}
+              onClick={() => void styleDialog.openStyleDialog(p.bible_style_name)}>
+              配置统一画风
+            </button>
             {generating && <span className="stamp gold">生成中</span>}
             {scenes.length > 0 && <span className="stamp green">{scenes.length} 个场景</span>}
             <ServerTaskTimer
@@ -519,6 +571,34 @@ export default function ScenesPage() {
           }}
         />
       )}
+      <VisualStyleDialog
+        open={styleDialog.styleOpen}
+        loading={styleDialog.styleLoading}
+        error={styleDialog.styleError}
+        options={styleDialog.styleOptions}
+        selected={styleDialog.selectedStyle}
+        scopeNote="确认后会带你确认「场景图 + 定妆照」的合并重新生成费用；人物设定本身不会重新生成。"
+        onSelect={styleDialog.setSelectedStyle}
+        onClose={styleDialog.closeStyleDialog}
+        onConfirm={() => {
+          if (!styleDialog.selectedStyle) {
+            styleDialog.setStyleError('请先选择统一画面风格')
+            return
+          }
+          const chosen = styleDialog.selectedStyle
+          styleDialog.closeStyleDialog()
+          void submitStyleForScenes(chosen)
+        }}
+      />
+      <StyleRegenConfirmDialog
+        open={styleRegen.dialogOpen}
+        styleName={styleRegen.pendingStyleName}
+        quote={styleRegen.quote}
+        loading={styleRegen.quoteLoading}
+        error={styleRegen.quoteError}
+        onClose={styleRegen.closeDialog}
+        onConfirm={() => void confirmStyleForScenes()}
+      />
       <PaymentConfirmDialog
         open={payOpen}
         title={payTitle || '确认场景图片费用'}
@@ -533,7 +613,7 @@ export default function ScenesPage() {
           setPayLoading(true)
           try {
             await payActionRef.current(selection.scenes ?? [])
-            toast('付费任务已受理；新包通过完整质检前保留旧资产')
+            toast('付费任务已受理；新包生成完成前保留旧资产')
             setPayOpen(false); setGapScan(null); refresh()
           } catch (e: unknown) { setPayError(e instanceof Error ? e.message : String(e)) }
           finally { setPayLoading(false) }
@@ -632,20 +712,6 @@ function scenePhaseLabel(value: string): string {
   return '处理中'
 }
 
-function candidateGateEvaluation(candidate: SceneReferenceCandidate) {
-  return [...(candidate.evidence?.evaluations ?? [])].reverse().find(item => {
-    const qa = item.evidence?.qa
-    return item.evaluator_name.includes('consistency_qa')
-      || item.evaluator_name === 'scene_candidate_human_hard_gate_review'
-      || (!!qa && typeof qa === 'object' && 'policy_version' in qa)
-  })
-}
-
-function candidateQaScore(candidate: SceneReferenceCandidate): number | null {
-  const evaluation = candidateGateEvaluation(candidate)
-  return typeof evaluation?.score === 'number' ? evaluation.score / 100 : null
-}
-
 const SCENE_VIEW_PRESENTATION: Record<string, { label: string; description: string }> = {
   establishing: {
     label: '全景视角',
@@ -665,58 +731,6 @@ function sceneViewPresentation(viewRole?: string | null) {
   return SCENE_VIEW_PRESENTATION[viewRole || ''] || {
     label: '待识别视角',
     description: viewRole ? '该视角角色尚未映射，不能按已知机位说明或判定为通过。' : '视角角色尚未识别。',
-  }
-}
-
-function candidateGate(candidate: SceneReferenceCandidate) {
-  const evaluations = candidate.evidence?.evaluations ?? []
-  const evaluation = candidateGateEvaluation(candidate)
-  const hard: string[] = []
-  const warnings: string[] = []
-  const uncertainties: string[] = []
-  const historicalHard: string[] = []
-  for (const previous of evaluations) {
-    const previousQa = previous.evidence?.qa
-    if (previousQa && typeof previousQa === 'object') {
-      const value = previousQa as { hard_failures?: unknown[] }
-      historicalHard.push(...(value.hard_failures ?? []).map(String))
-    }
-  }
-  if (evaluation) {
-    const qa = evaluation.evidence?.qa
-    if (qa && typeof qa === 'object') {
-      const value = qa as {
-        hard_failures?: unknown[]; warnings?: unknown[]; issues?: unknown[];
-        uncertainties?: unknown[]; status?: string; policy_version?: string; qa_recovered?: boolean
-      }
-      hard.push(...(value.hard_failures ?? []).map(String))
-      warnings.push(...((value.warnings ?? value.issues) ?? []).map(String))
-      uncertainties.push(...(value.uncertainties ?? []).map(String))
-    }
-    hard.push(...(evaluation.issues ?? [])
-      .filter(issue => issue.severity === 'blocker' && issue.code === 'SCENE_HARD_GATE')
-      .map(issue => issue.message))
-  }
-  const qa = evaluation?.evidence?.qa as { status?: string; policy_version?: string; qa_recovered?: boolean } | undefined
-  const verified = !!evaluation
-    && !!qa?.policy_version
-    && (evaluation.hard_gate_passed === true || evaluation.hard_gate_passed === 1)
-    && !evaluation.recovered
-    && !qa.qa_recovered
-    && !['unverified', 'pending', 'failed'].includes(qa.status || '')
-    && hard.length === 0
-  const reviewState = hard.length ? 'hard_failed'
-    : verified ? 'passed'
-      : evaluation && (evaluation.status === 'error' || qa?.qa_recovered) ? 'qa_incomplete'
-        : 'not_reviewed'
-  return {
-    hard: [...new Set(hard)],
-    historicalHard: [...new Set(historicalHard)],
-    warnings: [...new Set(warnings)],
-    uncertainties: [...new Set(uncertainties)],
-    verified,
-    reviewState,
-    manualReviewAllowed: !verified && hard.length === 0 && historicalHard.length === 0,
   }
 }
 
@@ -842,15 +856,8 @@ function SceneCandidateModal({
   const [evidenceOpen, setEvidenceOpen] = useState(false)
   const [adoptingId, setAdoptingId] = useState<string | null>(null)
   const [adoptRequest, setAdoptRequest] = useState<{ artifactId: string; warnings: string[] } | null>(null)
-  const [reviewingId, setReviewingId] = useState<string | null>(null)
-  const [manualCandidateId, setManualCandidateId] = useState<string | null>(null)
-  const [manualBusy, setManualBusy] = useState(false)
-  const trapRef = useFocusTrap(focusActive && !evidenceOpen && !manualCandidateId && !adoptRequest, onClose)
-  const summary = candidates.reduce((result, candidate) => {
-    const state = candidateGate(candidate).reviewState as keyof typeof result
-    result[state] += 1
-    return result
-  }, { passed: 0, hard_failed: 0, qa_incomplete: 0, not_reviewed: 0 })
+  const trapRef = useFocusTrap(focusActive && !evidenceOpen && !adoptRequest, onClose)
+  const availableCount = candidates.filter(item => !!item.image_url).length
 
   const applyAdoptedState = (artifactId: string) => candidates.map(item =>
     item.artifact_id === artifactId
@@ -871,47 +878,6 @@ function SceneCandidateModal({
     }
   }
 
-  const review = async (candidate: SceneReferenceCandidate) => {
-    setReviewingId(candidate.artifact_id)
-    try {
-      const result = await api.reviewSceneCandidate(projectId, sceneName, candidate.artifact_id)
-      const nextCandidates = candidates.map(item => item.artifact_id === candidate.artifact_id && item.evidence
-        ? { ...item, evidence: { ...item.evidence, evaluations: [...item.evidence.evaluations, result.evaluation] } }
-        : item)
-      onCandidatesChanged(sceneName, nextCandidates)
-      const qa = result.qa as { status?: string; hard_failures?: string[]; uncertainties?: string[] }
-      if (qa.status === 'passed' || qa.status === 'warning') {
-        toast('新版质检已完成；有图候选可由人工直接采纳')
-      } else if (qa.status === 'failed') {
-        toast(`质检已完成，记录提示：${(qa.hard_failures ?? []).join('；') || '请查看证据'}`, true)
-      } else {
-        toast(`质检未能给出完整结论：${(qa.uncertainties ?? []).join('；') || '可稍后重试或人工复核'}`, true)
-      }
-    } catch (e: unknown) {
-      toast(e instanceof Error ? e.message : String(e), true)
-    } finally {
-      setReviewingId(null)
-    }
-  }
-
-  const manualReviewAndAdopt = async (
-    artifactId: string,
-    confirmations: { person_free: boolean; watermark_free: boolean; forbidden_text_free: boolean; space_type_matches: boolean },
-    reason: string,
-  ) => {
-    setManualBusy(true)
-    try {
-      await api.manualReviewSceneCandidate(projectId, sceneName, artifactId, { confirmations, reason })
-      setManualCandidateId(null)
-      toast(`已记录人工复核并采纳「${sceneName}」候选`)
-      onAdopted(sceneName, applyAdoptedState(artifactId), artifactId)
-    } catch (e: unknown) {
-      toast(e instanceof Error ? e.message : String(e), true)
-    } finally {
-      setManualBusy(false)
-    }
-  }
-
   return (
     <div className="scene-candidate-backdrop" role="presentation" onMouseDown={event => {
       if (event.currentTarget === event.target) onClose()
@@ -922,14 +888,8 @@ function SceneCandidateModal({
           <div>
             <span className="eyebrow">场景候选</span>
             <h2 id="scene-candidate-title">{sceneName}</h2>
-            <p>候选图是否可人工采纳只看图片文件是否存在；质检结果仅作评分和风险提示，可重验现有图且不重新出图。</p>
-            <div className="scene-candidate-summary" aria-label="候选质检汇总">
-              <span className="passed">质检无提示 {summary.passed}</span>
-              <span>待质检 {summary.not_reviewed}</span>
-              <span>质检未完成 {summary.qa_incomplete}</span>
-              <span className="failed">质检有提示 {summary.hard_failed}</span>
-            </div>
-            {candidates.filter(item => !!item.image_url).length > 1 && (
+            <p>候选图是否可人工采纳只看图片文件是否存在，由人工挑选决定。</p>
+            {availableCount > 1 && (
               <button className="btn small" type="button" onClick={() => onCompare(
                 candidates.filter(item => !!item.image_url).map(item => ({
                   src: item.image_url!, label: `尝试 ${item.attempt ?? '—'} · ${statusLabel(item.status)}`,
@@ -942,12 +902,9 @@ function SceneCandidateModal({
         <div className="scene-candidate-modal-body">
           {candidates.map(candidate => {
             const isCurrent = candidate.artifact_id === adoptedArtifactId
-            const gate = candidateGate(candidate)
-            const passed = gate.verified && gate.hard.length === 0
-            const score = candidateQaScore(candidate)
             const canOfferAdopt = !isCurrent && !!candidate.image_url
             return (
-              <article className={`scene-candidate-preview${isCurrent ? ' current' : passed ? ' passed' : ' rejected'}`}
+              <article className={`scene-candidate-preview${isCurrent ? ' current' : candidate.image_url ? ' passed' : ' rejected'}`}
                 key={candidate.artifact_id}>
                 <div className="scene-candidate-image">
                   {candidate.image_url
@@ -956,7 +913,7 @@ function SceneCandidateModal({
                           src: candidate.image_url!, label: `${sceneName} · 尝试 ${candidate.attempt ?? '—'}`,
                         }])} />
                     : <div className="scene-candidate-empty">图片不可用</div>}
-                  <span>{isCurrent ? '当前采用' : gate.hard.length ? '质检有提示' : passed ? '质检无提示' : '待质检'}</span>
+                  <span>{isCurrent ? '当前采用' : candidate.image_url ? '可采纳' : '不可用'}</span>
                 </div>
                 <div className="scene-candidate-meta">
                   <div>
@@ -965,37 +922,16 @@ function SceneCandidateModal({
                       {statusLabel(candidate.trust_level)} · {statusLabel(candidate.status)}
                     </small>
                   </div>
-                  <strong className={gate.hard.length ? 'failed' : passed ? 'passed' : ''}>
-                    质检分 {score == null ? '—' : score.toFixed(2)}
-                  </strong>
                 </div>
-                {!!gate.hard.length && <div className="error-banner">{gate.hard.slice(0, 3).join('；')} · 质检只评分，不自动拦截人工采纳</div>}
-                {!gate.hard.length && !gate.verified && <div className="hint">
-                  {gate.reviewState === 'qa_incomplete'
-                    ? `上次质检未能完整判定${gate.uncertainties.length ? `：${gate.uncertainties.slice(0, 2).join('；')}` : ''}`
-                    : '该候选尚未执行新版质检'}
-                </div>}
-                {!!gate.warnings.length && <div className="hint">提示：{gate.warnings.slice(0, 3).join('；')}</div>}
-                {candidate.evidence && <EvidenceDrawer evidence={candidate.evidence} label="查看质检证据"
+                {candidate.evidence && <EvidenceDrawer evidence={candidate.evidence} label="查看技术证据"
                   onOpenChange={setEvidenceOpen} />}
                 {canOfferAdopt && <button className="btn small primary" type="button" disabled={!!adoptingId || disabled}
                   aria-label={adoptingId || disabled
                     ? `采纳此图，暂不可用：${adoptingId ? '正在处理上一项采纳操作' : '当前有其他场景任务运行'}`
                     : '采纳此图；下一步填写采纳理由并确认影响'}
-                  onClick={() => setAdoptRequest({ artifactId: candidate.artifact_id, warnings: [...gate.hard, ...gate.warnings] })}>
+                  onClick={() => setAdoptRequest({ artifactId: candidate.artifact_id, warnings: [] })}>
                   {adoptingId === candidate.artifact_id ? '采纳中…' : '采纳此图'}
                 </button>}
-                {!isCurrent && !passed && !!candidate.image_url && <div className="scene-candidate-actions">
-                  <button className="btn small primary" type="button"
-                    disabled={!!reviewingId || !!adoptingId || disabled}
-                    aria-label={reviewingId || adoptingId || disabled
-                      ? `重新质检，暂不可用：${reviewingId ? '正在质检上一项候选' : adoptingId ? '正在采纳候选' : '当前有其他场景任务运行'}`
-                      : '重新质检；不会重新生成图片'}
-                    onClick={() => void review(candidate)}>
-                    {reviewingId === candidate.artifact_id ? '质检中…' : '重新质检'}
-                  </button>
-                  <span className="hint">可直接人工采纳；重新质检不会重新出图</span>
-                </div>}
               </article>
             )
           })}
@@ -1004,10 +940,6 @@ function SceneCandidateModal({
           <span>共 {candidates.length} 个候选</span>
           <button className="btn" type="button" onClick={onClose}>完成</button>
         </footer>
-        {manualCandidateId && <SceneCandidateManualReviewDialog
-          sceneName={sceneName} busy={manualBusy} onClose={() => setManualCandidateId(null)}
-          onConfirm={(confirmations, reason) => void manualReviewAndAdopt(manualCandidateId, confirmations, reason)}
-        />}
         {adoptRequest && <SceneCandidateAdoptDialog
           sceneName={sceneName}
           warnings={adoptRequest.warnings}
@@ -1063,62 +995,6 @@ function SceneCandidateAdoptDialog({
               : '确认采纳此图'}
             onClick={() => onConfirm(reason.trim())}>
             {busy ? '采纳中…' : '确认采纳此图'}
-          </button>
-        </footer>
-      </section>
-    </div>
-  )
-}
-
-function SceneCandidateManualReviewDialog({ sceneName, busy, onClose, onConfirm }: {
-  sceneName: string
-  busy: boolean
-  onClose: () => void
-  onConfirm: (
-    confirmations: { person_free: boolean; watermark_free: boolean; forbidden_text_free: boolean; space_type_matches: boolean },
-    reason: string,
-  ) => void
-}) {
-  const [confirmations, setConfirmations] = useState({
-    person_free: false, watermark_free: false, forbidden_text_free: false, space_type_matches: false,
-  })
-  const [reason, setReason] = useState('')
-  const trapRef = useFocusTrap(true, onClose)
-  const allChecked = Object.values(confirmations).every(Boolean)
-  return (
-    <div className="scene-manual-review-backdrop" role="presentation" onMouseDown={event => {
-      if (event.currentTarget === event.target && !busy) onClose()
-    }}>
-      <section ref={trapRef} className="scene-manual-review-dialog" role="dialog" aria-modal="true"
-        aria-labelledby="scene-manual-review-title">
-        <h3 id="scene-manual-review-title">人工复核「{sceneName}」</h3>
-        <p>仅用于“未质检或质检未完成”的恢复。系统已识别的必检项失败无法通过此流程覆盖；复核结果会记入审计证据。</p>
-        <div className="scene-manual-review-checks">
-          {([
-            ['person_free', '画面是纯环境，没有人物或人影'],
-            ['watermark_free', '画面没有水印、Logo 或生成工具标记'],
-            ['forbidden_text_free', '画面没有字幕、角标或禁止的多余文字'],
-            ['space_type_matches', '室内/室外与场景定义一致，空间类型匹配'],
-          ] as const).map(([key, label]) => <label key={key}>
-            <input type="checkbox" checked={confirmations[key]} disabled={busy}
-              onChange={event => setConfirmations(current => ({ ...current, [key]: event.target.checked }))} />
-            <span>{label}</span>
-          </label>)}
-        </div>
-        <label className="scene-manual-review-reason">
-          <span>复核理由（必填）</span>
-          <textarea value={reason} disabled={busy} rows={3} maxLength={300}
-            placeholder="例：已按原尺寸放大查看，四项必检项均人工确认通过"
-            onChange={event => setReason(event.target.value)} />
-        </label>
-        <footer>
-          <button className="btn" type="button" disabled={busy} onClick={onClose}>取消</button>
-          <button className="btn primary" type="button" disabled={busy || !allChecked || reason.trim().length < 4}
-            aria-label={busy || !allChecked || reason.trim().length < 4
-              ? `记录复核并采纳，暂不可用：${busy ? '正在处理复核' : !allChecked ? '请确认全部必检项' : '请填写至少 4 个字的复核理由'}`
-              : '记录复核并采纳'}
-            onClick={() => onConfirm(confirmations, reason.trim())}>
-            {busy ? '复核采纳中…' : '记录复核并采纳'}
           </button>
         </footer>
       </section>
@@ -1193,15 +1069,6 @@ function SceneRefStrip({ projectId, sceneName, segments, disabled, onChanged, on
                 ))}
                 {!seg.reference_summary.shot_count && ' · 暂无分镜引用'}
               </div>
-            )}
-            {!!seg.group_qa?.hard_failures?.length && sceneSegmentPrimaryFailed(seg) && (
-              <div className="error-banner">主图质检提示：{seg.group_qa.hard_failures.join('；')} · 质检只评分，不自动拦截生产引用</div>
-            )}
-            {!!seg.group_qa?.hard_failures?.length && !sceneSegmentPrimaryFailed(seg) && (
-              <div className="hint">附加视角质检提示：{seg.group_qa.hard_failures.join('；')} · 主图仍可用于视频</div>
-            )}
-            {!!seg.group_qa?.warnings?.length && !seg.group_qa?.hard_failures?.length && (
-              <div className="hint">提示：{seg.group_qa.warnings.join('；')}</div>
             )}
             {(seg.views && seg.views.length > 0) ? (
               <div className="scene-view-grid">
@@ -1454,7 +1321,7 @@ function ScenePromptBlock({ projectId, scene: s, disabled, onChanged, regenerate
           <div className="f-misc" style={{ background: 'rgba(91,114,83,0.06)', borderLeft: '3px solid var(--moss)', padding: '6px 10px', borderRadius: '0 6px 6px 0', fontSize: 12.5 }}>
             {promptSections.map(section => <p key={section.label}><b>{section.label}：</b>{section.value}</p>)}
           </div>
-          <div className="hint">生成结果按结构化质检事实入库；文案不会触发关键字拦截或自动改写。</div>
+          <div className="hint">生成结果是否可用只看文件是否存在；文案不会触发关键字拦截或自动改写。</div>
           <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
             <button className="btn small" disabled={disabled || saving}
               aria-label={baseDisabledReason ? `修改场景图描述，暂不可用：${baseDisabledReason}` : '修改场景图描述'}

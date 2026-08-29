@@ -626,40 +626,6 @@ export const api = {
         reason: reason || "人工采纳候选",
       },
     ),
-  reviewSceneCandidate: (
-    projectId: string,
-    sceneName: string,
-    artifactId: string,
-  ) =>
-    request(
-      "POST",
-      `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/candidates/${encodeURIComponent(artifactId)}/review`,
-    ) as Promise<{
-      reviewed: boolean;
-      image_regenerated: false;
-      artifact_id: string;
-      evaluation: ArtifactEvidence["evaluations"][number];
-      qa: Record<string, unknown>;
-    }>,
-  manualReviewSceneCandidate: (
-    projectId: string,
-    sceneName: string,
-    artifactId: string,
-    body: {
-      confirmations: {
-        person_free: boolean;
-        watermark_free: boolean;
-        forbidden_text_free: boolean;
-        space_type_matches: boolean;
-      };
-      reason: string;
-    },
-  ) =>
-    request(
-      "POST",
-      `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/candidates/${encodeURIComponent(artifactId)}/manual-review`,
-      body,
-    ),
   rollbackSceneReference: (
     projectId: string,
     sceneName: string,
@@ -689,6 +655,37 @@ export const api = {
     request("GET", `/projects/${projectId}/bible/visual-styles`) as Promise<{
       default: string;
       items: Array<{ name: string; description: string; sample_image: string }>;
+    }>,
+  /**
+   * 人物谱与场景库共用：只切换项目统一画风，不重新生成人物谱角色内容。
+   * 两段式：不带 confirm 时，画风未变化直接返回 changed=false；画风有变化则
+   * 后端抛 409（ApiError.code === 'PAYMENT_CONFIRM_REQUIRED'），detail.precheck
+   * 是人物+场景合并报价。带 confirm+quote_id 确认后，后端在同一次请求内发起
+   * 人物定妆照与场景图两条生成线（见 useStyleRegenConfirm）。
+   */
+  setBibleStyle: (
+    projectId: string,
+    body: {
+      style_name: string;
+      expected_version: number;
+      confirm?: boolean;
+      quote_id?: string;
+    },
+  ) =>
+    request("POST", `/projects/${projectId}/bible/style`, body) as Promise<{
+      project_id: string;
+      style_name: string;
+      changed: boolean;
+      bible_version?: number;
+      scene_bible_ready?: boolean;
+      scenes_total?: number;
+      idempotent_replay?: boolean;
+      quote_id?: string;
+      task_id?: string;
+      refs_started?: boolean;
+      refs_error?: string | null;
+      scene_refs_started?: boolean;
+      scene_refs_error?: string | null;
     }>,
   bibleGeneratePrecheck: (projectId: string, body?: { style_name?: string }) =>
     request(
@@ -790,7 +787,6 @@ export const api = {
     portraitId: string,
     body: {
       reason: string;
-      bypass_soft?: boolean;
     },
   ) =>
     request(
@@ -1627,9 +1623,19 @@ export interface EpisodeVideoGenerationPlan {
  *  之外还可能带 version_id（幂等复用了一条已交付版本）；失败态只有 error/issue_codes，
  *  整批请求仍返回 200，不会因为其中一段失败让其余段落一起回滚（见
  *  app/domain/video_ops.py::_generate_episode_core）。 */
+/** reused=true 时说明"为什么没有新建"——不是猜的，是服务端按命中的那条
+ *  记录的真实状态直接翻译过来的（见 app/media_exec/enqueue.py
+ *  ``_reused_reason_for_status``）：
+ *  - "succeeded"：已有交付版本，无需重新生成；
+ *  - "in_flight"：仍在排队/生成/等待供应商轮询，重复提交只会双花；
+ *  - "stuck_needs_human"：命中的记录卡在需要人工处理，没有新任务被提交
+ *    ——这种情况不应该被算进"已提交"。 */
+export type ReusedReason = 'succeeded' | 'in_flight' | 'stuck_needs_human';
+
 export interface EpisodeGenerateEnqueueResult {
   shot_id: string;
   reused?: boolean;
+  reused_reason?: ReusedReason;
   job_id?: string;
   task_accepted?: boolean;
   active?: boolean;
@@ -2437,6 +2443,8 @@ export interface MixResult {
   shots_total?: number;
   shots_skipped?: number;
   skipped_shot_nos?: number[];
+  missing_model_shot_nos?: number[];
+  skip_reasons?: Record<string, string>;
   included_shot_nos?: number[];
   partial?: boolean;
   final_video_stale?: boolean;

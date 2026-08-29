@@ -14,10 +14,12 @@
 合成成片。任一步失败该集即判失败。状态变更一律走 API；数据库只读取证据。
 
 用法：
-    py scripts/run_first10_videos.py            # 跑 EP1→EP10
+    py scripts/run_first10_videos.py                    # 跑「我欲封天」EP1→EP10
+    py scripts/run_first10_videos.py --project 王六郎   # 换项目
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sqlite3
 import time
@@ -28,7 +30,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BASE = "http://127.0.0.1:8230"
 DB_PATH = ROOT / "data" / "manju.db"
-PROJECT_ID = "proj_4c21fc3ce76a"
+# 项目按**名字**解析，不写死 id。历史上写死的 proj_3ac0b627fa46、proj_4c21fc3ce76a
+# 都已随项目重建失效，写死一次就要再踩一次。名字来自小说导入，重建项目不会变。
+PROJECT_NAME = "我欲封天"
 LOG = ROOT / "logs" / "first10_videos.log"
 
 # 认证：优先回归专用凭证，缺失时回退本机进程级共享秘密（后端 MJ_LEGACY_SHARED_SESSION
@@ -52,6 +56,13 @@ def _load_session() -> str:
 
 
 SESSION = _load_session()
+
+# 每次启动一个新的尝试标识。幂等键的用途是「同一个请求重发不要重复扣费」，
+# 不是「这一集永远只许尝试一次」——固定成 first10-video-{eid} 之后，重跑
+# 时后端会把请求判为重复，直接回上一轮那个已终结的 run，驱动于是拿旧终态
+# 当本轮结论，这一集再也无法真正重试。真实故障：2026-08-28 18:41:02 EP1
+# 的 POST 回的 run_id 与 18:30 那轮完全相同。一次启动 = 一次尝试。
+ATTEMPT = time.strftime("%m%d%H%M%S")
 
 
 def log(msg: str) -> None:
@@ -111,14 +122,36 @@ def _readonly_conn() -> sqlite3.Connection:
     return conn
 
 
-def resolve_first10() -> list[tuple[str, str]]:
+def resolve_project_id(selector: str) -> str:
+    """按名字（或直接给 id）解析项目，绝不硬编码历史 ID。
+
+    命中 0 个或多个都直接退出：猜一个跑下去，要么跑空、要么把别的项目当成
+    目标跑掉几小时，两个方向都比停下来贵。
+    """
+    conn = _readonly_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, name FROM projects WHERE id=? OR name=? ORDER BY id",
+            (selector, selector),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        raise SystemExit(f"库里找不到项目：{selector!r}")
+    if len(rows) > 1:
+        matched = "、".join(f"{r['id']}({r['name']})" for r in rows)
+        raise SystemExit(f"项目 {selector!r} 命中多个，请改用 id：{matched}")
+    return rows[0]["id"]
+
+
+def resolve_first10(project_id: str) -> list[tuple[str, str]]:
     """运行时解析前 10 集真实 ID，绝不硬编码历史 ID。"""
     conn = _readonly_conn()
     try:
         rows = conn.execute(
             "SELECT id, episode_no FROM episodes WHERE project_id=? "
             "AND episode_no<=10 ORDER BY episode_no",
-            (PROJECT_ID,),
+            (project_id,),
         ).fetchall()
     finally:
         conn.close()
@@ -195,12 +228,20 @@ def stage_screenplay(name: str, eid: str) -> None:
     if state == "ready":
         log(f"{name} 剧本已 ready，跳过")
         return
-    if payload.get("active"):
+    # 本轮身份基线。`screenplay_status` 会一直保留**上一轮**的终态与错误，
+    # 而刚 POST 完的新一轮要过一会儿才把 active 翻成 True——中间这段窗口里
+    # 读到的 failed 是上一轮的结论，不是本轮的。真实故障：2026-08-28 18:38:21
+    # 一秒之内把 EP2/EP3 判死，报的是 16:55/16:56 的错误码。判据必须挂在
+    # 「本轮跑没跑出结果」上，所以拿服务端自己的更新时刻做基线，它没往前走
+    # 就说明本轮还没有任何结论。
+    baseline_updated_at = payload.get("screenplay_updated_at")
+    already_active = bool(payload.get("active"))
+    if already_active:
         log(f"{name} 剧本已在运行，直接等待其终态")
     else:
         code, resp = approved(
             "POST", f"/api/episodes/{eid}/screenplay",
-            {"idempotency_key": f"first10-screenplay-{eid}"},
+            {"idempotency_key": f"first10-screenplay-{eid}-{ATTEMPT}"},
         )
         log(f"{name} 剧本 start -> HTTP{code} {json.dumps(resp, ensure_ascii=False)[:200]}")
         if code not in (200, 202) or resp.get("status") not in {"queued", "running", "repairing"}:
@@ -220,7 +261,10 @@ def stage_screenplay(name: str, eid: str) -> None:
             last = line
         if state == "ready":
             return
-        if not payload.get("active") and state in {"failed", "pending"}:
+        fresh = already_active or (
+            payload.get("screenplay_updated_at") != baseline_updated_at
+        )
+        if fresh and not payload.get("active") and state in {"failed", "pending"}:
             raise StageFailure(
                 f"剧本未达 ready：state={state} err="
                 f"{str(payload.get('screenplay_error') or '')[:300]}"
@@ -245,7 +289,11 @@ def stage_storyboard(name: str, eid: str) -> None:
     if state == "confirmed":
         log(f"{name} 分镜已确认，跳过")
         return
-    if state not in {"running", "ready_to_confirm"}:
+    # 与剧本阶段同一个竞态：POST 之后 state 要过一会儿才变成 running，
+    # 期间读到的仍是上一轮的终态。用服务端自己的任务起始时刻做本轮基线。
+    baseline_task_started_at = status.get("task_started_at")
+    already_running = state in {"running", "ready_to_confirm"}
+    if not already_running:
         code, resp = approved("POST", f"/api/episodes/{eid}/storyboard", None)
         log(f"{name} 分镜 start -> HTTP{code} {json.dumps(resp, ensure_ascii=False)[:200]}")
         started = (code in (200, 202) and resp.get("status") == "scripting") or (
@@ -264,7 +312,10 @@ def stage_storyboard(name: str, eid: str) -> None:
         if line != last:
             log(f"{name} 分镜 :: {line}")
             last = line
-        if state != "running":
+        fresh = already_running or (
+            status.get("task_started_at") != baseline_task_started_at
+        )
+        if fresh and state != "running":
             break
         time.sleep(STORYBOARD_POLL_S)
         waited += STORYBOARD_POLL_S
@@ -309,10 +360,17 @@ VIDEO_POLL_S = 30
 def stage_video(name: str, eid: str) -> None:
     proj = video_status(eid)
     if proj.get("user_state") != "completed":
-        if not (proj.get("running") or proj.get("user_state") == "recovering"):
+        # 视频阶段有比时间戳更硬的本轮身份：POST 回的 run_id 与状态里的
+        # run_id 可以精确比对。只有状态回显的就是我们发起的那一轮，它的终态
+        # 才是本轮的结论；否则读到的是上一轮遗留。
+        expected_run_id = proj.get("run_id") if proj.get("running") else None
+        already_running = bool(
+            proj.get("running") or proj.get("user_state") == "recovering"
+        )
+        if not already_running:
             code, resp = approved(
                 "POST", f"/api/episodes/{eid}/video-completion",
-                {"mode": "fresh", "idempotency_key": f"first10-video-{eid}"},
+                {"mode": "fresh", "idempotency_key": f"first10-video-{eid}-{ATTEMPT}"},
             )
             log(f"{name} 视频补齐 start -> HTTP{code} {json.dumps(resp, ensure_ascii=False)[:200]}")
             running = code in (200, 202) or (code == 409 and "运行中" in str(resp))
@@ -320,6 +378,7 @@ def stage_video(name: str, eid: str) -> None:
                 raise StageFailure(
                     f"视频补齐未能启动：HTTP{code} {json.dumps(resp, ensure_ascii=False)[:200]}"
                 )
+            expected_run_id = resp.get("run_id") if isinstance(resp, dict) else None
         waited = 0
         last = ""
         while waited <= VIDEO_TIMEOUT_S:
@@ -330,7 +389,10 @@ def stage_video(name: str, eid: str) -> None:
             if line != last:
                 log(f"{name} 视频 :: {line}")
                 last = line
-            if not proj.get("running") and proj.get("user_state") != "recovering":
+            fresh = already_running or not expected_run_id or (
+                proj.get("run_id") == expected_run_id
+            )
+            if fresh and not proj.get("running") and proj.get("user_state") != "recovering":
                 break
             time.sleep(VIDEO_POLL_S)
             waited += VIDEO_POLL_S
@@ -397,7 +459,7 @@ def _adopt_shots(name: str, eid: str) -> None:
         code, resp = approved(
             "POST", f"/api/shots/{shot_id}/adopt",
             {"version_id": version_id, "reason": reason,
-             "idempotency_key": f"first10-adopt-{shot_id}"},
+             "idempotency_key": f"first10-adopt-{shot_id}-{ATTEMPT}"},
         )
         if not (code == 200 and resp.get("adopted") == version_id):
             raise StageFailure(
@@ -417,7 +479,7 @@ def stage_concat(name: str, eid: str) -> None:
         return
     code, resp = approved(
         "POST", f"/api/episodes/{eid}/concatenate",
-        {"idempotency_key": f"first10-concat-{eid}"}, timeout=600,
+        {"idempotency_key": f"first10-concat-{eid}-{ATTEMPT}"}, timeout=600,
     )
     log(f"{name} 合成 -> HTTP{code} {json.dumps(resp, ensure_ascii=False)[:200]}")
     if code not in (200, 202):
@@ -459,10 +521,19 @@ def run_episode(name: str, eid: str) -> tuple[bool, str]:
 
 
 def main() -> int:
-    episodes = resolve_first10()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--project", default=PROJECT_NAME,
+        help=f"项目名或项目 id，默认 {PROJECT_NAME}",
+    )
+    args = parser.parse_args()
+
+    project_id = resolve_project_id(args.project)
+    episodes = resolve_first10(project_id)
     if len(episodes) < 10:
-        log(f"[警告] 只解析到 {len(episodes)} 集（预期 10 集），project_id={PROJECT_ID}")
-    log(f"=== RUN FIRST-10 VIDEOS START（project={PROJECT_ID}，共 {len(episodes)} 集）===")
+        log(f"[警告] 只解析到 {len(episodes)} 集（预期 10 集），project_id={project_id}")
+    log(f"=== RUN FIRST-10 VIDEOS START（project={args.project}/{project_id}，"
+        f"共 {len(episodes)} 集）===")
     results: dict[str, tuple[bool, str]] = {}
     for name, eid in episodes:
         log(f"--- {name}（{eid}）开始 ---")

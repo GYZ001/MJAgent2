@@ -454,6 +454,43 @@ def _decode_scene_target(value: str | list[str] | None) -> str | list[str] | Non
     return value.strip() or None
 
 
+def _consume_pending_scene_regen_if_ready(project_id: str, scenes_ready: bool) -> None:
+    """消费「风格确认后场景图自动续跑」这张票据（见 db.py 里 pending_scene_regen
+    列的注释）：人物谱谱写/重谱成功时 _bible_task 写下这张票据，场景清单一旦真的
+    就绪（这里，_scene_bible_task 成功落盘之后）就自动继续生成场景图——不必等
+    用户之后碰巧访问场景库页面。
+
+    用一次原子 UPDATE ... WHERE pending_scene_regen=1 消费：rowcount=0 说明没有
+    待消费的票据（普通场景清单刷新、或已被消费过），直接跳过，不会重复触发。
+    """
+    conn = get_conn()
+    project_columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
+    if "pending_scene_regen" not in project_columns or not scenes_ready:
+        return
+    cursor = conn.execute(
+        "UPDATE projects SET pending_scene_regen=0 WHERE id=? AND pending_scene_regen=1",
+        (project_id,),
+    )
+    conn.commit()
+    if cursor.rowcount < 1:
+        return
+    try:
+        started = _start_scene_refs_generation(project_id, None, resume=False)
+    except Exception as exc:  # noqa: BLE001 场景清单仍然算成功，只是场景图续跑失败
+        public = errors.record_and_format(
+            exc, action="scene_refs_spawn_after_style_regen", context={"project_id": project_id},
+        )
+        conn.execute(
+            "UPDATE projects SET scene_refs_status='failed',scene_refs_error=? WHERE id=?",
+            (f"场景清单已就绪，但按新画风继续生成场景图未能启动，可在场景库重试。{public}", project_id),
+        )
+        conn.commit()
+        return
+    if not started:
+        # 场景图任务已在跑（比如用户自己手动触发过）：票据的目的已经达成，不是失败。
+        return
+
+
 async def _scene_bible_task(
     project_id: str,
     *,
@@ -502,6 +539,7 @@ async def _scene_bible_task(
         )
         conn.commit()
         recorder.succeed("场景设定已准备，场景图等待费用确认", conn=None)
+        _consume_pending_scene_regen_if_ready(project_id, bool(scenes))
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
             recorder.pause_external("服务重启，场景设定任务等待自动恢复", conn=None)
@@ -807,6 +845,14 @@ async def _bible_task(
                 )
                 conn.commit()
             if "scene_refs_status" in project_columns:
+                # 场景清单还不存在（首次谱写）或即将被这次 free 重生成覆盖（重谱换
+                # 风格）：两种情况场景图都要在清单就绪后自动继续，不能停下来等用户
+                # 之后碰巧访问场景库页。票据写在这里、由 _scene_bible_task 消费。
+                if "pending_scene_regen" in project_columns:
+                    conn.execute(
+                        "UPDATE projects SET pending_scene_regen=1 WHERE id=?", (project_id,),
+                    )
+                    conn.commit()
                 try:
                     _start_scene_bible_preparation(project_id)
                 except Exception as exc:  # noqa: BLE001 bible remains deliverable
@@ -1590,6 +1636,216 @@ async def bible_visual_styles(project_id: str):
     return {
         "default": DEFAULT_VISUAL_STYLE_NAME,
         "items": visual_style_options(),
+    }
+
+
+def _compute_style_regen_quote(project_id: str) -> dict:
+    """风格切换后「人物定妆照 + 场景图」两条腿一并全量重生成的合并报价。
+
+    两条腿的费用都必须在用户确认前一次性摆出来——只报其中一条腿的价、让另一
+    条腿在确认后悄悄免费启动，等于变相绕过费用确认。场景清单未就绪时
+    ``scenes`` 为 None，合并报价里只有人物这一条腿（金额诚实反映范围，不假装
+    有场景费用）。
+    """
+    p = _project_or_404(project_id)
+    if not p.get("bible_json"):
+        raise HTTPException(409, "请先生成角色圣经")
+    bible = json.loads(p["bible_json"])
+    scene_bible_ready = bool(bible.get("scenes"))
+    refs_quote = compute_refs_cost_precheck(project_id, resume=False)
+    scenes_quote = (
+        compute_scene_cost_precheck(project_id, scenes=None, resume=False)
+        if scene_bible_ready else None
+    )
+    total_cost = float(refs_quote["estimated_cost_cny"]) + (
+        float(scenes_quote["estimated_cost_cny"]) if scenes_quote else 0.0
+    )
+    total_images = int(refs_quote["image_count"]) + (
+        int(scenes_quote["image_count"]) if scenes_quote else 0
+    )
+    total_max_retry = float(refs_quote["max_retry_budget_cny"]) + (
+        float(scenes_quote["max_retry_budget_cny"]) if scenes_quote else 0.0
+    )
+    computed_at = now()
+    scope_fingerprint = fingerprint({
+        "project_id": project_id,
+        "action": "style_regen_all",
+        "refs_scope_fingerprint": refs_quote["scope_fingerprint"],
+        "scenes_scope_fingerprint": scenes_quote["scope_fingerprint"] if scenes_quote else None,
+        "bible_version": p.get("bible_version"),
+    })
+    return {
+        "quote_id": scope_fingerprint,
+        "scope_fingerprint": scope_fingerprint,
+        "action": "style_regen_all",
+        "project_id": project_id,
+        "computed_at": computed_at,
+        "quote_expires_at": computed_at + 300,
+        "characters": refs_quote,
+        "scenes": scenes_quote,
+        "scene_bible_ready": scene_bible_ready,
+        "total_image_count": total_images,
+        "total_estimated_cost_cny": round(total_cost, 2),
+        "total_max_retry_budget_cny": round(total_max_retry, 2),
+        "idempotency_hint": "同一报价重复确认只受理一次，人物与场景两条线都不会重复启动",
+        "stop_policy": "确认后人物与场景两条生成线独立运行，可分别在人物谱/场景库停止；已完成的图片保留",
+    }
+
+
+@router.post("/projects/{project_id}/bible/style")
+async def set_bible_visual_style(project_id: str, body: dict | None = Body(None)):
+    """人物谱与场景库共用的统一画风配置入口，不重新生成角色内容——场景库触发
+    这次配置时不应被迫连带整份人物谱（角色外观/性格/关系）重新生成，那是
+    「重新生成人物谱并更换画风」按钮的既有职责，这里不动它。
+
+    画风未实际变化（重复确认同一风格）时直接返回 changed=False、不写库、不
+    进入报价/确认流程，保证反复点击的幂等性、不产生任何费用。
+
+    画风确有变化时走标准的「预检 → 显式确认 → 消费报价」两段式（与本文件
+    其它付费端点同构）：第一次调用（无 confirm/quote_id）返回 409 + 合并报价
+    （见 _compute_style_regen_quote，人物 + 场景两条腿的费用一次性摆出来）；
+    带着 confirm=true 与 quote_id 的确认调用里，落定风格字段之后，在**同一次
+    请求内**依次发起人物定妆照与场景图两条全量重生成——不是把「要不要触发
+    场景图」这件事丢给前端等用户以后访问场景库页面才做，那样『两条线都要
+    发起』就变成了『取决于用户接下来去了哪个页面』，不满足要求。
+
+    场景清单未就绪（bible.scenes 为空）时，人物这条腿仍然正常发起；场景这条
+    腿因为没有可生成的场景，本来就发起不了，响应里 scene_bible_ready=False，
+    调用方据此给出明确的「先去准备场景清单」提示，不是静默跳过。
+
+    不新造删除逻辑：两条腿都是 resume=false 全量重生成，复用既有的「新包完整
+    后原子切换、旧包留存供下游服务」生成路径，旧素材始终留到新素材真正生成
+    完成才被取代。
+    """
+    payload = _as_body_dict(body)
+    style_name = _normalize_visual_style_name(payload.get("style_name"))
+    p = _project_or_404(project_id)
+    if not p.get("bible_json"):
+        raise HTTPException(409, "请先在人物谱生成人物谱后再配置统一画风")
+    quote_id = payload.get("quote_id")
+    if payload.get("confirm") is True and quote_id:
+        # 幂等重放必须先于版本冲突检查：确认成功后 bible_version 已经前进，若
+        # 网络重试/重复点击带着同一个已消费的 quote_id 重新进来，此时拿它去比
+        # 对「客户端仍以为的旧版本号」必然冲突——但这本是已经办成的同一件事，
+        # 不该因为版本号往前走了就报错，应直接原样回放结果，不再触发生成。
+        conn_probe = get_conn()
+        _ensure_character_payment_quotes(conn_probe)
+        existing_quote = conn_probe.execute(
+            "SELECT * FROM character_payment_quotes WHERE quote_id=? AND project_id=?",
+            (quote_id, project_id),
+        ).fetchone()
+        if existing_quote is not None and existing_quote["consumed_at"] is not None:
+            return {
+                "project_id": project_id,
+                "style_name": style_name,
+                "changed": True,
+                "idempotent_replay": True,
+                "quote_id": quote_id,
+                "task_id": existing_quote["consumed_task_id"],
+            }
+    current_version = int(p.get("bible_version") or 0)
+    expected_version = payload.get("expected_version")
+    if expected_version is None or int(expected_version) != current_version:
+        raise HTTPException(409, detail=_bible_conflict_detail(p, expected_version))
+    bible_data = json.loads(p["bible_json"])
+    world = bible_data.setdefault("world", {})
+    old_style_prompt = world.get("visual_style_canonical")
+    new_style_prompt = _visual_style_prompt_or_default(style_name)
+    changed = old_style_prompt != new_style_prompt
+    if not changed:
+        scenes = bible_data.get("scenes") or []
+        return {
+            "project_id": project_id,
+            "style_name": style_name,
+            "changed": False,
+            "bible_version": current_version,
+            "scene_bible_ready": bool(scenes),
+            "scenes_total": len(scenes),
+        }
+
+    quote = _compute_style_regen_quote(project_id)
+    if payload.get("confirm") is not True:
+        # 精确/确认合一在同一个路由里：未带 confirm 的调用必须先把报价持久化
+        # （_issue_payment_quote 签发服务端 quote_id 并写入 character_payment_quotes），
+        # 否则随后带着这个 quote_id 来确认时 _validate_payment_quote 查不到行，
+        # 会被误判为过期报价——两次调用用的必须是同一份已签发凭证。
+        raise _payment_confirm_required(_issue_payment_quote(quote))
+    quote_id = payload.get("quote_id")
+    quote_row = _validate_payment_quote(project_id, quote_id, quote)
+    if quote_row["consumed_at"] is not None:
+        return {
+            "project_id": project_id,
+            "style_name": style_name,
+            "changed": True,
+            "idempotent_replay": True,
+            "quote_id": quote_id,
+            "task_id": quote_row["consumed_task_id"],
+        }
+
+    world["visual_style_canonical"] = new_style_prompt
+    instance, validation_errors = schema_errors(Bible, bible_data)
+    if validation_errors:
+        raise HTTPException(422, "；".join(validation_errors))
+    conn = get_conn()
+    next_version = current_version + 1
+    if _supports_bible_style_name(conn):
+        conn.execute(
+            "UPDATE projects SET bible_json=?, bible_version=?, bible_style_name=? WHERE id=?",
+            (instance.model_dump_json(), next_version, style_name, project_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE projects SET bible_json=?, bible_version=? WHERE id=?",
+            (instance.model_dump_json(), next_version, project_id),
+        )
+    conn.commit()
+
+    scene_bible_ready = bool(instance.scenes)
+    refs_started = False
+    refs_error: str | None = None
+    try:
+        refs_started = bool(_start_refs_generation(project_id, None, resume=False))
+    except Exception as exc:  # noqa: BLE001 风格切换已落库；这条腿独立失败，不回滚风格
+        refs_error = errors.record_and_format(
+            exc, action="refs_spawn_after_style_change", context={"project_id": project_id},
+        )
+        conn.execute(
+            "UPDATE projects SET refs_status='failed',refs_error=? WHERE id=?",
+            (f"画风已切换，但定妆照未能启动重新生成，可在人物谱重试。{refs_error}", project_id),
+        )
+        conn.commit()
+
+    scene_refs_started = False
+    scene_refs_error: str | None = None
+    if scene_bible_ready:
+        scene_names = [scene.name for scene in instance.scenes]
+        try:
+            scene_refs_started = bool(
+                _start_scene_refs_generation(project_id, scene_names, resume=False)
+            )
+        except Exception as exc:  # noqa: BLE001 风格切换已落库；这条腿独立失败，不回滚风格
+            scene_refs_error = errors.record_and_format(
+                exc, action="scene_refs_spawn_after_style_change", context={"project_id": project_id},
+            )
+            conn.execute(
+                "UPDATE projects SET scene_refs_status='failed',scene_refs_error=? WHERE id=?",
+                (f"画风已切换，但场景图未能启动重新生成，可在场景库重试。{scene_refs_error}", project_id),
+            )
+            conn.commit()
+
+    _consume_payment_quote(str(quote_id), task_id=f"style_regen:{project_id}", run_id=None)
+    return {
+        "project_id": project_id,
+        "style_name": style_name,
+        "changed": True,
+        "bible_version": next_version,
+        "scene_bible_ready": scene_bible_ready,
+        "scenes_total": len(instance.scenes),
+        "refs_started": refs_started,
+        "refs_error": refs_error,
+        "scene_refs_started": scene_refs_started,
+        "scene_refs_error": scene_refs_error,
+        "quote_id": quote_id,
     }
 
 
@@ -2949,22 +3205,30 @@ def _scene_current_row(conn, project_id: str, scene_name: str):
     ).fetchone()
 
 
-def _scene_row_gate(row) -> dict:
-    if not row:
-        return {}
-    for column in ("group_qa_json", "qa_json"):
-        if column not in row.keys() or not row[column]:
-            continue
-        parsed = _parse_json_value(row[column], {})
-        if isinstance(parsed, dict):
-            return parsed
-    return {}
+
+
+def _scene_asset_state(pack_status: str | None, *, has_image: bool) -> str:
+    """场景素材技术状态：missing/generating/passed/warning/failed/unverified。
+
+    VLM 图片质检已下线（原 app.scene_policy.scene_asset_state 已随之删除）；这里只挂
+    pack_status 这一产物信号，不再读取 QA gate。调用方只在 ``primary_usable`` 为假
+    （主图技术上不可用）时才会走到这里，所以这个函数不需要处理"主图可用但整包 QA
+    有警告"的降级分支——那种情况在调用侧已经被直接跳过。
+    """
+    if not has_image:
+        return "missing"
+    if pack_status in {"generating", "qa_pending", "running"}:
+        return "generating"
+    if pack_status == "failed":
+        return "failed"
+    if pack_status in {None, "legacy_partial"}:
+        return "unverified"
+    return "passed" if pack_status == "ready" else "unverified"
 
 
 def scan_scene_asset_gaps(project_id: str) -> dict:
     """只读扫描；不会创建任务、调用供应商或写账单。"""
     from app.multiview import scene_primary_is_usable
-    from app.scene_policy import scene_asset_state
 
     p = _project_or_404(project_id)
     if not p.get("bible_json"):
@@ -2988,41 +3252,21 @@ def scan_scene_asset_gaps(project_id: str) -> dict:
         ).fetchall())
         ready_roles = {v["view_role"] for v in views if v.get("status") == "ready" and v.get("image_path")}
         missing_roles = [role for role in required if role not in ready_roles]
-        gate = _scene_row_gate(row)
         has_image = bool(row["image_path"])
         primary_usable = scene_primary_is_usable(row, views)
         # The gap scanner serves the video-production path, not the internal
         # multi-view QA dashboard.  Once the establishing image is usable,
-        # optional reverse/action views and soft QA warnings are not a user
-        # blocking gap.
+        # optional reverse/action views are not a user blocking gap.
         if primary_usable:
             continue
-        state = scene_asset_state(
-            row["pack_status"] if "pack_status" in row.keys() else None,
-            gate,
-            has_image=has_image,
-            primary_usable=primary_usable,
-        )
-        hard = [str(x) for x in (gate.get("hard_failures") or []) if str(x).strip()]
-        failed_views = [
-            str(v.get("view_role")) for v in (gate.get("views") or [])
-            if isinstance(v, dict) and v.get("status") in {"failed", "unverified"}
-        ]
+        pack_status = row["pack_status"] if "pack_status" in row.keys() else None
+        state = _scene_asset_state(pack_status, has_image=has_image)
         if missing_roles:
             category, reason, repair = "missing", "缺少必需视角", missing_roles
         elif state == "failed":
-            category, reason = "hard_failure", "；".join(hard[:4]) or "整包硬门禁未通过"
-            repair = failed_views or required
-        elif state == "warning":
-            category = "warning"
-            reason = (
-                "主图尚未确认可用；多视角包待补齐或待验证"
-                if row["pack_status"] == "failed"
-                else "；".join((gate.get("warnings") or gate.get("issues") or [])[:4])
-            )
-            repair = missing_roles or failed_views
+            category, reason, repair = "hard_failure", "整包生成未通过技术校验", required
         elif state == "unverified":
-            category, reason, repair = "unverified", "未按新版硬门禁完成验证", required
+            category, reason, repair = "unverified", "尚未完成生成", required
         elif p.get("scene_refs_status") == "failed":
             category, reason, repair = "interrupted", "最近一次场景任务中断或失败", []
         else:
@@ -3034,9 +3278,9 @@ def scan_scene_asset_gaps(project_id: str) -> dict:
             "category": category,
             "reason": reason,
             "views": list(dict.fromkeys(repair)),
-            "hard_failures": hard,
-            "warnings": gate.get("warnings") or gate.get("issues") or [],
-            "pack_status": row["pack_status"] if "pack_status" in row.keys() else None,
+            "hard_failures": [],
+            "warnings": [],
+            "pack_status": pack_status,
         })
     return {"project_id": project_id, "total": len(items), "items": items, "counts": counts, "read_only": True}
 
@@ -3222,334 +3466,6 @@ def _scene_refs_progress_payload(project_id: str) -> dict:
 @router.get("/projects/{project_id}/scene-refs/progress")
 async def scene_refs_progress(project_id: str):
     return _scene_refs_progress_payload(project_id)
-
-
-def _scene_review_snapshot(conn, project_id: str) -> list[dict]:
-    rows = rows_to_dicts(conn.execute(
-        "SELECT id,scene_name,artifact_id,input_fingerprint,pack_status,created_at "
-        "FROM scene_references WHERE project_id=? AND ep_end IS NULL ORDER BY scene_name,id",
-        (project_id,),
-    ).fetchall())
-    snapshot: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    for row in rows:
-        version = str(row.get("artifact_id") or row.get("input_fingerprint") or row["id"])
-        key = (row["id"], version)
-        if key in seen:
-            continue
-        seen.add(key)
-        snapshot.append({
-            "scene_reference_id": row["id"], "adopted_version": version,
-            "scene_name": row["scene_name"], "old_status": row.get("pack_status"),
-        })
-    return snapshot
-
-
-def _insert_scene_review_items(conn, batch_id: str, snapshot: list[dict]) -> int:
-    added = 0
-    for item in snapshot:
-        cursor = conn.execute(
-            "INSERT OR IGNORE INTO scene_review_items(id,batch_id,scene_reference_id,adopted_version,"
-            "scene_name,old_status,result_status,disposition) VALUES(?,?,?,?,?,?,?,?)",
-            (new_id("scene_review_item"), batch_id, item["scene_reference_id"], item["adopted_version"],
-             item["scene_name"], item.get("old_status"), "queued", "pending"),
-        )
-        added += max(0, cursor.rowcount)
-    return added
-
-
-async def _evaluate_scene_review_item(conn, row, *, enforce: bool) -> tuple[str, dict]:
-    from app.multiview import (
-        SCENE_REQUIRED_VIEWS, list_scene_views, review_scene_pack_consistency, review_scene_view,
-    )
-    from app.scene_policy import normalize_scene_pack_qa
-
-    scene = conn.execute("SELECT * FROM scene_references WHERE id=?", (row["scene_reference_id"],)).fetchone()
-    if not scene:
-        return "unverified", {"uncertainties": ["复验期间资产已不存在"], "status": "unverified"}
-    views = list_scene_views(scene["id"], conn=conn)
-    old_group = _parse_json_value(scene["group_qa_json"] if "group_qa_json" in scene.keys() else None, {})
-    required = list((old_group or {}).get("required_views") or SCENE_REQUIRED_VIEWS)
-    actual = [str(view.get("view_role") or "") for view in views if view.get("image_path")]
-    single_results: list[dict] = []
-    for view in views:
-        if view.get("view_role") not in required or not view.get("image_path"):
-            continue
-        single_results.append(await review_scene_view(
-            view["image_path"], scene["state_canonical"] if "state_canonical" in scene.keys()
-            and scene["state_canonical"] else (scene["scene_canonical"] or ""), view["view_role"],
-        ))
-    required_views = [view for view in views if view.get("view_role") in required and view.get("image_path")]
-    if len(required_views) >= 2:
-        group = await review_scene_pack_consistency(required_views, scene["scene_canonical"] or "")
-    else:
-        group = normalize_scene_pack_qa({}, required_roles=required, actual_roles=actual)
-    hard = list(group.get("hard_failures") or [])
-    uncertain = list(group.get("uncertainties") or [])
-    warnings = list(group.get("warnings") or group.get("issues") or [])
-    for item in single_results:
-        hard.extend(item.get("hard_failures") or [])
-        uncertain.extend(item.get("uncertainties") or [])
-        warnings.extend(item.get("warnings") or [])
-    hard = list(dict.fromkeys(str(item) for item in hard if str(item).strip()))
-    uncertain = list(dict.fromkeys(str(item) for item in uncertain if str(item).strip()))
-    warnings = list(dict.fromkeys(str(item) for item in warnings if str(item).strip()))
-    status = "hard_failed" if hard else ("unverified" if uncertain else ("warning" if warnings else "passed"))
-    evidence = {
-        **group, "hard_failures": hard, "uncertainties": uncertain, "warnings": warnings,
-        "single_view_results": single_results, "result_status": status,
-    }
-    if enforce:
-        change = _parse_json_value(scene["change_json"] if "change_json" in scene.keys() else None, {}) or {}
-        change.update({
-            "new_references_blocked": False, "reviewed_by_batch": row["batch_id"],
-            "reviewed_at": now(), "review_result": status,
-            "runtime_blocking": False,
-            "gate_retry_exhausted": status in {"hard_failed", "unverified"},
-        })
-        conn.execute(
-            "UPDATE scene_references SET group_qa_json=?,change_json=? WHERE id=?",
-            (json.dumps(evidence, ensure_ascii=False), json.dumps(change, ensure_ascii=False), scene["id"]),
-        )
-    return status, evidence
-
-
-async def _run_scene_review_batch(batch_id: str) -> None:
-    from app.scene_policy import SCENE_QA_POLICY_VERSION, SCENE_QA_RULE_VERSION
-
-    conn = get_conn()
-    batch = conn.execute("SELECT * FROM scene_review_batches WHERE id=?", (batch_id,)).fetchone()
-    if not batch:
-        return
-    conn.execute("UPDATE scene_review_batches SET status='running',started_at=COALESCE(started_at,?) WHERE id=?",
-                 (now(), batch_id))
-    conn.commit()
-    try:
-        while True:
-            pending = conn.execute(
-                "SELECT * FROM scene_review_items WHERE batch_id=? AND result_status='queued' ORDER BY scene_name,id",
-                (batch_id,),
-            ).fetchall()
-            for item in pending:
-                try:
-                    status, evidence = await _evaluate_scene_review_item(
-                        conn, item,
-                        enforce=(not bool(batch["shadow_mode"]) and bool(batch["block_new_references"])),
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    status, evidence = "unverified", {
-                        "status": "unverified", "uncertainties": [f"复验未完成：{type(exc).__name__}"],
-                        "policy_version": SCENE_QA_POLICY_VERSION, "rule_version": SCENE_QA_RULE_VERSION,
-                    }
-                conn.execute(
-                    "UPDATE scene_review_items SET result_status=?,evidence_json=?,evaluated_at=? WHERE id=?",
-                    (status, json.dumps(evidence, ensure_ascii=False), now(), item["id"]),
-                )
-                conn.commit()
-            # 把签收截止前的新采用/切换包加入增量快照，按包版本去重。
-            current = _scene_review_snapshot(conn, batch["project_id"])
-            before = conn.execute("SELECT COUNT(*) n FROM scene_review_items WHERE batch_id=?", (batch_id,)).fetchone()["n"]
-            added = _insert_scene_review_items(conn, batch_id, current)
-            if added:
-                existing_incremental = _parse_json_value(batch["incremental_snapshot_json"], []) or []
-                known = {(item.get("scene_reference_id"), item.get("adopted_version")) for item in existing_incremental}
-                delta = [item for item in current if (item["scene_reference_id"], item["adopted_version"]) not in known]
-                conn.execute(
-                    "UPDATE scene_review_batches SET incremental_snapshot_json=? WHERE id=?",
-                    (json.dumps([*existing_incremental, *delta], ensure_ascii=False), batch_id),
-                )
-                conn.commit()
-                batch = conn.execute("SELECT * FROM scene_review_batches WHERE id=?", (batch_id,)).fetchone()
-                continue
-            if before == conn.execute("SELECT COUNT(*) n FROM scene_review_items WHERE batch_id=?", (batch_id,)).fetchone()["n"]:
-                break
-        counts = {row["result_status"]: row["n"] for row in conn.execute(
-            "SELECT result_status,COUNT(*) n FROM scene_review_items WHERE batch_id=? GROUP BY result_status",
-            (batch_id,),
-        ).fetchall()}
-        denominator = sum(counts.values())
-        evaluated = denominator - counts.get("queued", 0)
-        conn.execute(
-            "UPDATE scene_review_batches SET status='succeeded',cutoff_at=?,denominator=?,evaluated=?,"
-            "passed=?,warning=?,hard_failed=?,unverified=?,finished_at=? WHERE id=?",
-            (now(), denominator, evaluated, counts.get("passed", 0), counts.get("warning", 0),
-             counts.get("hard_failed", 0), counts.get("unverified", 0), now(), batch_id),
-        )
-        conn.commit()
-    except asyncio.CancelledError:
-        if task_registry.shutdown_in_progress():
-            conn.execute(
-                "UPDATE scene_review_batches SET status='queued',finished_at=NULL WHERE id=?",
-                (batch_id,),
-            )
-        else:
-            conn.execute(
-                "UPDATE scene_review_batches SET status='stopped',finished_at=? WHERE id=?",
-                (now(), batch_id),
-            )
-        conn.commit()
-        raise
-    except Exception as exc:  # noqa: BLE001
-        conn.execute("UPDATE scene_review_batches SET status='failed',finished_at=? WHERE id=?", (now(), batch_id))
-        conn.commit()
-        errors.record_and_format(exc, action="scene_history_review", context={"batch_id": batch_id})
-
-
-def _scene_review_payload(conn, batch_id: str, *, include_items: bool = True) -> dict:
-    row = conn.execute("SELECT * FROM scene_review_batches WHERE id=?", (batch_id,)).fetchone()
-    if not row:
-        raise HTTPException(404, "历史复验批次不存在")
-    out = dict(row)
-    out["baseline_snapshot"] = _parse_json_value(out.pop("baseline_snapshot_json"), [])
-    out["incremental_snapshot"] = _parse_json_value(out.pop("incremental_snapshot_json"), [])
-    out["coverage"] = (out["evaluated"] / out["denominator"]) if out["denominator"] else 1.0
-    if include_items:
-        out["items"] = []
-        for item in rows_to_dicts(conn.execute(
-            "SELECT * FROM scene_review_items WHERE batch_id=? ORDER BY scene_name,id", (batch_id,),
-        ).fetchall()):
-            item["evidence"] = _parse_json_value(item.pop("evidence_json"), {})
-            out["items"].append(item)
-    return out
-
-
-@router.post("/projects/{project_id}/scene-reviews", status_code=202)
-async def start_scene_history_review(project_id: str, body: dict | None = None):
-    from app.scene_policy import SCENE_QA_POLICY_VERSION, SCENE_QA_RULE_VERSION
-
-    payload = _as_body_dict(body)
-    _project_or_404(project_id)
-    conn = get_conn()
-    active = conn.execute(
-        "SELECT id FROM scene_review_batches WHERE project_id=? AND status IN ('queued','running') "
-        "ORDER BY created_at DESC LIMIT 1", (project_id,),
-    ).fetchone()
-    if active:
-        return {**_scene_review_payload(conn, active["id"], include_items=False), "idempotent_replay": True}
-    baseline = _scene_review_snapshot(conn, project_id)
-    batch_id = new_id("scene_review")
-    conn.execute(
-        "INSERT INTO scene_review_batches(id,project_id,status,policy_version,rule_version,"
-        "baseline_snapshot_json,incremental_snapshot_json,denominator,shadow_mode,block_new_references,created_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        (batch_id, project_id, "queued", SCENE_QA_POLICY_VERSION, SCENE_QA_RULE_VERSION,
-         json.dumps(baseline, ensure_ascii=False), "[]", len(baseline),
-         int(payload.get("shadow_mode", True)), int(payload.get("block_new_references", False)), now()),
-    )
-    _insert_scene_review_items(conn, batch_id, baseline)
-    conn.commit()
-    coro = _run_scene_review_batch(batch_id)
-    try:
-        task_registry.spawn(
-            "scene_history_review", batch_id, coro, project_id=project_id,
-        )
-    except Exception as exc:
-        coro.close()
-        conn.execute(
-            "UPDATE scene_review_batches SET status='failed',finished_at=? WHERE id=?",
-            (now(), batch_id),
-        )
-        conn.commit()
-        raise HTTPException(503, detail={
-            "code": "SCENE_REVIEW_START_FAILED",
-            "message": "场景复验任务未能启动，批次快照已保留，可重新发起",
-            "batch_id": batch_id,
-            "retryable": True,
-        }) from exc
-    return {**_scene_review_payload(conn, batch_id, include_items=False), "status": "accepted", "task_id": f"scene_history_review:{batch_id}"}
-
-
-@router.get("/projects/{project_id}/scene-reviews")
-async def list_scene_history_reviews(project_id: str):
-    _project_or_404(project_id)
-    conn = get_conn()
-    rows = conn.execute(
-        "SELECT id FROM scene_review_batches WHERE project_id=? ORDER BY created_at DESC", (project_id,),
-    ).fetchall()
-    return {"project_id": project_id, "items": [_scene_review_payload(conn, row["id"], include_items=False) for row in rows]}
-
-
-@router.get("/projects/{project_id}/scene-reviews/{batch_id}")
-async def get_scene_history_review(project_id: str, batch_id: str):
-    _project_or_404(project_id)
-    payload = _scene_review_payload(get_conn(), batch_id)
-    if payload["project_id"] != project_id:
-        raise HTTPException(404, "历史复验批次不存在")
-    return payload
-
-
-@router.post("/projects/{project_id}/scene-reviews/{batch_id}/cancel")
-async def cancel_scene_history_review(project_id: str, batch_id: str):
-    _project_or_404(project_id)
-    payload = _scene_review_payload(get_conn(), batch_id, include_items=False)
-    if payload["project_id"] != project_id:
-        raise HTTPException(404, "历史复验批次不存在")
-    stopped = await task_registry.cancel_and_wait("scene_history_review", batch_id)
-    return {"stopped": stopped, "batch_id": batch_id}
-
-
-@router.post("/projects/{project_id}/scene-reviews/{batch_id}/items/{item_id}/disposition")
-async def dispose_scene_history_review_item(
-    project_id: str, batch_id: str, item_id: str, body: dict | None = None,
-):
-    """记录复验处置；不删除历史图片、证据或账单。"""
-    _project_or_404(project_id)
-    payload = _as_body_dict(body)
-    action = str(payload.get("action") or "").strip()
-    if action not in {"accepted_risk", "repair_planned", "repaired", "false_positive", "deferred"}:
-        raise HTTPException(422, "未知复验处置动作")
-    reason = str(payload.get("reason") or "").strip()
-    if not reason:
-        raise HTTPException(422, "复验处置必须填写原因")
-    conn = get_conn()
-    batch = conn.execute(
-        "SELECT * FROM scene_review_batches WHERE id=? AND project_id=?", (batch_id, project_id),
-    ).fetchone()
-    item = conn.execute(
-        "SELECT * FROM scene_review_items WHERE id=? AND batch_id=?", (item_id, batch_id),
-    ).fetchone()
-    if not batch or not item:
-        raise HTTPException(404, "复验批次或条目不存在")
-    disposition = json.dumps({
-        "action": action, "reason": reason,
-        "decided_by": str(payload.get("decided_by") or "user"), "decided_at": now(),
-    }, ensure_ascii=False)
-    conn.execute("UPDATE scene_review_items SET disposition=? WHERE id=?", (disposition, item_id))
-    count = conn.execute(
-        "SELECT COUNT(*) AS n FROM scene_review_items WHERE batch_id=? AND disposition!='pending'",
-        (batch_id,),
-    ).fetchone()["n"]
-    conn.execute(
-        "UPDATE scene_review_batches SET disposition_count=? WHERE id=?", (count, batch_id),
-    )
-    conn.commit()
-    return {"disposed": True, "item_id": item_id, "disposition": _parse_json_value(disposition, {})}
-
-
-def recover_scene_review_tasks() -> int:
-    """服务重启后以同一稳定批次 ID 继续未完成复验。"""
-    conn = get_conn()
-    rows = conn.execute("SELECT id,project_id FROM scene_review_batches WHERE status IN ('queued','running')").fetchall()
-    resumed = 0
-    for row in rows:
-        if task_registry.active("scene_history_review", row["id"]):
-            continue
-        coro = _run_scene_review_batch(row["id"])
-        try:
-            task_registry.spawn(
-                "scene_history_review", row["id"], coro, project_id=row["project_id"],
-            )
-            resumed += 1
-        except Exception:
-            coro.close()
-            conn.execute(
-                "UPDATE scene_review_batches SET status='failed',finished_at=? WHERE id=?",
-                (now(), row["id"]),
-            )
-            conn.commit()
-    return resumed
 
 
 async def _scene_refs_task(
@@ -4319,54 +4235,6 @@ async def adopt_scene_candidate_route(
             artifact_id,
             reason=str((body or {}).get("reason") or ""),
             decided_by=current_actor_name(),
-        )
-    except KeyError as exc:
-        raise HTTPException(404, str(exc) or "候选不存在") from exc
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
-
-
-@router.post("/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/review")
-async def review_scene_candidate_route(
-    project_id: str, scene_name: str, artifact_id: str,
-):
-    """只重验已落盘候选的 QA，不重新生图、不扣图片生成费。"""
-    from app.capabilities.dispatch import ui_route
-    routed = await ui_route(
-        "scene.review_candidate",
-        {
-            "project_id": project_id,
-            "scene_name": scene_name,
-            "artifact_id": artifact_id,
-        },
-    )
-    if routed is not None:
-        return routed
-    _project_or_404(project_id)
-    from app.scenes import review_scene_candidate
-    try:
-        return await review_scene_candidate(project_id, scene_name, artifact_id)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc) or "候选不存在") from exc
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
-
-
-@router.post("/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/manual-review")
-async def manual_review_scene_candidate_route(
-    project_id: str, scene_name: str, artifact_id: str, body: dict | None = None,
-):
-    """只允许对缺失/未验证证据做带审计的人工复核；明确硬失败不可覆盖。"""
-    _project_or_404(project_id)
-    payload = body or {}
-    from app.scenes import manually_review_and_adopt_scene_candidate
-    try:
-        return await manually_review_and_adopt_scene_candidate(
-            project_id,
-            scene_name,
-            artifact_id,
-            confirmations=payload.get("confirmations") if isinstance(payload.get("confirmations"), dict) else {},
-            reason=str(payload.get("reason") or ""),
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc) or "候选不存在") from exc

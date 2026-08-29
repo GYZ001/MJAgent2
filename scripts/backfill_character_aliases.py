@@ -20,9 +20,11 @@
 
 --reverify 切换到复核模式：不发起新的模型申报回填，而是对 bible 中**已经登记**
 的全部别名重跑一遍当前完整核验闸门（含裁决闸——见 `app/stages.py` "A1b. 裁决闸"
-一节），过不了闸的别名从 bible 中移除。用于清理裁决闸补上之前已经落库、但实际
-未必真的"指同一人"的历史误登记（真实事故：孟浩←虎爷爷）。不加 --reverify 时是
-原有的回填模式，行为不变。
+一节）；过不了闸的条目不再从 bible 中移除，而是原样保留、把 `is_exclusive` 降级
+为 False（见 `CharacterAlias.is_exclusive` 与 `reverify_character_aliases`
+docstring）。用于清理裁决闸补上之前已经落库、但实际未必真的"指同一人"的历史
+误登记对排他性的误判（真实事故：孟浩←虎爷爷）。不加 --reverify 时是原有的回填
+模式，行为不变。
 
 日志写 logs/backfill_character_aliases.log（同时打印到终端）。
 """
@@ -145,22 +147,53 @@ def _print_result(added: dict[str, list[str]], bible: Bible, logger: logging.Log
             )
 
 
+def _alias_exclusivity_snapshot(bible: Bible) -> dict[str, dict[str, bool]]:
+    """按 (角色, 别名文本) 快照当前每条别名的 `is_exclusive`，供复核前后比较。
+    `reverify_character_aliases` 判不过不再删除条目，只把 `is_exclusive` 降级为
+    False（见该函数 docstring）——"这次复核有没有产生需要持久化的变化"必须从这份
+    快照的前后差异推导（条目消失 或 is_exclusive 变化），不能再挂在别名总数上：
+    新语义下总数恒定不变，挂总数的判据会让写库闸口永远打不开。"""
+    return {c.name: {a.text: a.is_exclusive for a in c.aliases} for c in bible.characters}
+
+
 def _print_reverify_result(
-    report: dict[str, list[dict[str, Any]]], logger: logging.Logger,
+    report: dict[str, list[dict[str, Any]]],
+    before: dict[str, dict[str, bool]],
+    after: dict[str, dict[str, bool]],
+    logger: logging.Logger,
 ) -> None:
     if not report:
         logger.info("没有带别名的角色，复核范围为空。")
         return
     for name, entries in report.items():
-        kept = [e for e in entries if e["kept"]]
-        dropped = [e for e in entries if not e["kept"]]
+        before_map = before.get(name, {})
+        after_map = after.get(name, {})
+        removed = [e for e in entries if e["text"] not in after_map]
+        downgraded = [
+            e for e in entries
+            if before_map.get(e["text"]) is True and after_map.get(e["text"]) is False
+        ]
+        upgraded = [
+            e for e in entries
+            if before_map.get(e["text"]) is False and after_map.get(e["text"]) is True
+        ]
         logger.info(
-            f"\n■ {name}：{len(entries)} 条别名，保留 {len(kept)} 条，移除 {len(dropped)} 条"
+            f"\n■ {name}：{len(entries)} 条别名，移除 {len(removed)} 条，"
+            f"降级为非排他 {len(downgraded)} 条，升级为排他 {len(upgraded)} 条"
         )
         for entry in entries:
-            mark = "保留" if entry["kept"] else "移除"
+            text = entry["text"]
             reason = f"（拒绝原因：{entry['reason']}）" if entry["reason"] else ""
-            logger.info(f"  - 「{entry['text']}」{mark}{reason}")
+            if text not in after_map:
+                mark = "移除"
+            else:
+                before_v, after_v = before_map.get(text), after_map[text]
+                mark = (
+                    f"排他性变化：{before_v} -> {after_v}"
+                    if before_v != after_v
+                    else f"保留（is_exclusive={after_v}）"
+                )
+            logger.info(f"  - 「{text}」{mark}{reason}")
 
 
 async def _guarded_cas_write(
@@ -247,8 +280,10 @@ async def _run(project_id: str, dry_run: bool, logger: logging.Logger) -> int:
 
 async def _run_reverify(project_id: str, dry_run: bool, logger: logging.Logger) -> int:
     """复核模式：对 bible 中已登记的全部别名重跑 `reverify_character_aliases`
-    （核验入口与回填共用，见 `app/stages.py`），不通过的移除并写库。用于清理裁决闸
-    补上之前已经落库的历史误登记别名（真实事故：孟浩←虎爷爷）。"""
+    （核验入口与回填共用，见 `app/stages.py`）。判不过不再删除条目，只把该条目的
+    `is_exclusive` 降级为 False（见该函数 docstring）；写库闸口挂在"别名集合或
+    is_exclusive 是否有变化"上，不再是"是否有别名被移除"。用于清理裁决闸补上之前
+    已经落库的历史误登记别名对排他性的误判（真实事故：孟浩←虎爷爷）。"""
     proj, chapters = _load_project_and_chapters(project_id)
     logger.info(
         f"项目: {proj['name']} ({project_id})，章节数: {len(chapters)}，"
@@ -261,25 +296,45 @@ async def _run_reverify(project_id: str, dry_run: bool, logger: logging.Logger) 
     )
     before_count = sum(len(c.aliases) for c in bible.characters)
     logger.info(f"复核前已登记别名总数: {before_count}")
+    before_snapshot = _alias_exclusivity_snapshot(bible)
 
     report = await reverify_character_aliases(bible, chapters, project_id=project_id)
 
+    after_snapshot = _alias_exclusivity_snapshot(bible)
     logger.info("\n===== 复核结果（对已登记别名重跑完整核验闸门，含裁决闸）=====")
-    _print_reverify_result(report, logger)
+    _print_reverify_result(report, before_snapshot, after_snapshot, logger)
 
     after_count = sum(len(c.aliases) for c in bible.characters)
     removed_count = before_count - after_count
+    downgraded_count = sum(
+        1
+        for name, after_map in after_snapshot.items()
+        for text, after_v in after_map.items()
+        if before_snapshot.get(name, {}).get(text) is True and after_v is False
+    )
+    upgraded_count = sum(
+        1
+        for name, after_map in after_snapshot.items()
+        for text, after_v in after_map.items()
+        if before_snapshot.get(name, {}).get(text) is False and after_v is True
+    )
     logger.info(
         f"\n别名总数变化（内存中，尚未写库）: {before_count} -> {after_count}"
-        f"（移除 {removed_count} 条）"
+        f"（移除 {removed_count} 条，降级为非排他 {downgraded_count} 条，"
+        f"升级为排他 {upgraded_count} 条）"
     )
+
+    # 写库闸口挂在"这次复核有没有产生需要持久化的变化"上——从数据推导：比较复核
+    # 前后的别名集合与各自的 is_exclusive，而不是只看总数（新语义下判不过不再删除
+    # 条目，总数恒定不变，挂总数会让这条写库路径永远打不开，见本脚本改动背景）。
+    changed = before_snapshot != after_snapshot
 
     if dry_run:
         logger.info("\n[dry-run] 未写库，未持久化任何改动。")
         return 0
 
-    if removed_count == 0:
-        logger.info("\n没有需要移除的别名，无需写库。")
+    if not changed:
+        logger.info("\n复核结果与库中现状完全一致（无别名被移除，is_exclusive 均未变化），无需写库。")
         return 0
 
     expected_version = int(proj["bible_version"] or 0)

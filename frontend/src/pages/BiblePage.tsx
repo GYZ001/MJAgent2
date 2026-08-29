@@ -28,9 +28,12 @@ import DecisionDialog from '../components/DecisionDialog'
 import ImageCompareModal from '../components/ImageCompareModal'
 import OperationError from '../components/OperationError'
 import StageTextModelPicker from '../components/StageTextModelPicker'
+import StyleRegenConfirmDialog from '../components/StyleRegenConfirmDialog'
+import VisualStyleDialog from '../components/VisualStyleDialog'
+import { useStyleRegenConfirm } from '../hooks/useStyleRegenConfirm'
+import { useVisualStyleDialog } from '../hooks/useVisualStyleDialog'
 import "../styles/BiblePage.css";
 
-const CHAR_QA_PASS = 0.6
 const REQUIRED_CHARACTER_VIEWS = ['front_full', 'three_quarter', 'profile'] as const
 
 function trackBible(name: string, projectId: string, dimensions: Record<string, string | number | boolean> = {}) {
@@ -45,7 +48,6 @@ type PaymentQuote = RefsCostPrecheck & {
 }
 
 type PaymentSelection = { characters: string[] }
-type VisualStyleOption = { name: string; description: string; sample_image: string }
 
 export function currentPortrait(character: Character): Portrait | null {
   const portraits = [...(character.portraits ?? [])]
@@ -92,18 +94,8 @@ export function portraitAvailability(character: Character, fitting: boolean): Po
       .map(view => view.view_role),
   )
   if (REQUIRED_CHARACTER_VIEWS.some(role => !readyViewRoles.has(role))) return 'failed'
-  const qa = portrait.group_qa
-  if (status === 'ready' || !status) {
-    if (typeof qa?.overall === 'number') {
-      const hasQualityRisk = qa.overall < CHAR_QA_PASS
-        || (qa.issues ?? []).length > 0
-        || (qa.hard_failures ?? []).length > 0
-        || ['failed', 'warning'].includes(qa.status || '')
-      return hasQualityRisk ? 'warning' : 'passed'
-    }
-    return status === 'ready' ? 'unverified' : 'unverified'
-  }
-  return 'unverified'
+  // VLM 图片质检已下线：三视角文件齐全（技术产物存在）即视为通过，不再依赖质检分数。
+  return status === 'ready' ? 'passed' : 'unverified'
 }
 
 function availabilityStamp(state: PortraitAvailability): { label: string; color: string } {
@@ -450,11 +442,9 @@ export default function BiblePage() {
   const [paySelectable, setPaySelectable] = useState(false)
   const [payScopeTitle, setPayScopeTitle] = useState<string | undefined>(undefined)
   const payActionRef = useRef<null | ((selection: PaymentSelection) => Promise<void>)>(null)
-  const [styleOpen, setStyleOpen] = useState(false)
-  const [styleLoading, setStyleLoading] = useState(false)
-  const [styleError, setStyleError] = useState<string | null>(null)
-  const [styleOptions, setStyleOptions] = useState<VisualStyleOption[]>([])
-  const [selectedStyle, setSelectedStyle] = useState('')
+  const styleDialog = useVisualStyleDialog(projectId!)
+  const styleActionRef = useRef<'full_regen' | 'style_only'>('full_regen')
+  const styleRegen = useStyleRegenConfirm(projectId!)
   const editingRef = useRef<Bible | null>(null)
 
   const biblePreview = editing ?? p?.bible
@@ -755,24 +745,53 @@ export default function BiblePage() {
   }
 
   const startBible = async () => {
-    setStyleOpen(true)
-    setStyleLoading(true)
-    setStyleError(null)
+    styleActionRef.current = 'full_regen'
+    await styleDialog.openStyleDialog(p.bible_style_name)
+  }
+
+  const startStyleOnly = async () => {
+    styleActionRef.current = 'style_only'
+    await styleDialog.openStyleDialog(p.bible_style_name)
+  }
+
+  /**
+   * 「更换统一画风（不改人物设定）」的轻量路径：只切换项目风格字段
+   * （POST /bible/style，不重生成人物谱内容、不调模型），确认一次后由**后端**
+   * 在同一次请求里发起人物定妆照与场景图两条生成线——不是本页链两个前端
+   * 弹窗，那样任一步失败或页面被关掉，另一条线就发不出去了。这里只负责
+   * 提交选择、把合并报价交给 StyleRegenConfirmDialog 展示、以及在确认后
+   * 按结果给出反馈。
+   */
+  const submitStyleOnly = async (styleName: string) => {
+    const outcome = await styleRegen.requestStyleChange(styleName, p.bible_version ?? 0)
+    if (outcome?.kind === 'unchanged') {
+      toast(`统一画风仍为「${styleName}」，无需变更`)
+    } else if (outcome === null && styleRegen.quoteError) {
+      toast(styleRegen.quoteError, true)
+    }
+    // outcome === null 且无 quoteError：合并报价弹窗已打开，等待用户确认。
+  }
+
+  const confirmStyleOnly = async () => {
     try {
-      const result = await api.bibleVisualStyles(p.id)
-      const names = result.items.map(item => item.name).filter(Boolean)
-      setStyleOptions(result.items)
-      setSelectedStyle(
-        p.bible_style_name && names.includes(p.bible_style_name)
-          ? p.bible_style_name
-          : result.default || names[0] || '',
-      )
+      const outcome = await styleRegen.confirmStyleChange()
+      if (outcome.kind === 'idempotent_replay') {
+        toast('该次风格切换已经处理过，未重复触发生成')
+        refresh()
+        return
+      }
+      if (outcome.kind !== 'started') return
+      const parts: string[] = []
+      parts.push(outcome.refsStarted ? '定妆照已开始按新画风重新生成' : `定妆照未能启动：${outcome.refsError || '请到人物谱重试'}`)
+      if (outcome.sceneBibleReady) {
+        parts.push(outcome.sceneRefsStarted ? '场景图已开始按新画风重新生成' : `场景图未能启动：${outcome.sceneRefsError || '请到场景库重试'}`)
+      } else {
+        parts.push('场景清单尚未生成，请先在「场景库」准备场景清单，完成后可单独按新画风生成场景图')
+      }
+      toast(parts.join('；'), !outcome.refsStarted)
+      refresh()
     } catch (e: unknown) {
-      setStyleError((e as Error).message)
-      setStyleOptions([])
-      setSelectedStyle('')
-    } finally {
-      setStyleLoading(false)
+      toast((e as Error).message, true)
     }
   }
 
@@ -1125,10 +1144,21 @@ export default function BiblePage() {
               <button
                 className="btn"
                 disabled={busy || dirty}
-                title={dirty ? '请先定稿当前人物谱修订' : '重新选择统一画风，并预览人物谱与定妆照费用'}
+                title={dirty ? '请先定稿当前人物谱修订' : '重新选择统一画风，并预览人物谱与定妆照费用（会重新生成人物设定本身）'}
                 onClick={() => void startBible()}
               >
                 重新生成人物谱并更换画风
+              </button>
+              <button
+                className="btn ghost"
+                disabled={busy || dirty}
+                title={dirty ? '请先定稿当前人物谱修订' : '项目级设置：只切换统一画风，不改动人物设定；确认后会依次带你确认定妆照与场景图的重新生成费用'}
+                aria-label={busy || dirty
+                  ? `更换统一画风，暂不可用：${busy ? '正在处理上一项操作' : '请先定稿当前人物谱修订'}`
+                  : '更换统一画风（保留人物设定，重新生成定妆照与场景图）'}
+                onClick={() => void startStyleOnly()}
+              >
+                更换统一画风（不改人物设定）
               </button>
             </>
           )}
@@ -1307,13 +1337,10 @@ export default function BiblePage() {
                     onPayRequest={openPayment}
                   />
                 )}
-                {active?.group_qa && (
-                  <CharacterQaLine qa={active.group_qa} availability={availability} />
-                )}
                 <div className="asset-card-actions">
                   <button className="btn small" type="button"
                     onClick={() => setQaDetail({ characterName: c.name, portrait: active })}>
-                    质检详情
+                    定妆候选
                   </button>
                   <button className="btn small" type="button" disabled={!characterCompareImages(c).length}
                     aria-label={!characterCompareImages(c).length ? `放大对比${c.name}定妆照，暂不可用：当前没有可对比图片` : `放大对比${c.name}定妆照`}
@@ -1462,24 +1489,38 @@ export default function BiblePage() {
         }}
       />
       <VisualStyleDialog
-        open={styleOpen}
-        loading={styleLoading}
-        error={styleError}
-        options={styleOptions}
-        selected={selectedStyle}
-        onSelect={setSelectedStyle}
-        onClose={() => {
-          setStyleOpen(false)
-          setStyleError(null)
-        }}
+        open={styleDialog.styleOpen}
+        loading={styleDialog.styleLoading}
+        error={styleDialog.styleError}
+        options={styleDialog.styleOptions}
+        selected={styleDialog.selectedStyle}
+        scopeNote={styleActionRef.current === 'style_only'
+          ? '确认后会带你确认「定妆照 + 场景图」的合并重新生成费用；人物设定本身不会重新生成。'
+          : '确认后将在本页重新生成人物谱与定妆照；风格确定后场景库的场景图也会一并重新生成。'}
+        onSelect={styleDialog.setSelectedStyle}
+        onClose={styleDialog.closeStyleDialog}
         onConfirm={() => {
-          if (!selectedStyle) {
-            setStyleError('请先选择统一画面风格')
+          if (!styleDialog.selectedStyle) {
+            styleDialog.setStyleError('请先选择统一画面风格')
             return
           }
-          setStyleOpen(false)
-          void startBibleAfterStyle(selectedStyle)
+          const chosen = styleDialog.selectedStyle
+          styleDialog.closeStyleDialog()
+          if (styleActionRef.current === 'style_only') {
+            void submitStyleOnly(chosen)
+          } else {
+            void startBibleAfterStyle(chosen)
+          }
         }}
+      />
+      <StyleRegenConfirmDialog
+        open={styleRegen.dialogOpen}
+        styleName={styleRegen.pendingStyleName}
+        quote={styleRegen.quote}
+        loading={styleRegen.quoteLoading}
+        error={styleRegen.quoteError}
+        onClose={styleRegen.closeDialog}
+        onConfirm={() => void confirmStyleOnly()}
       />
       {skipConfirm && (
         <SkipConfirmDialog
@@ -1594,28 +1635,6 @@ export default function BiblePage() {
         </GenerationParamsDialog>
       )}
     </>
-  )
-}
-
-function CharacterQaLine({
-  qa, availability,
-}: {
-  qa: NonNullable<Portrait['group_qa']>
-  availability: PortraitAvailability
-}) {
-  const overall = qa.overall
-  const issues = [...(qa.hard_failures ?? []), ...(qa.issues ?? [])]
-  const color = availability === 'passed' ? 'var(--moss)'
-    : availability === 'warning' ? 'var(--gold, #b8860b)'
-      : availability === 'failed' ? 'var(--cinnabar)' : 'var(--ink-faint)'
-  return (
-    <div className="scene-qa-line" style={{ marginBottom: 8 }}>
-      <span>整包质检：{typeof overall === 'number'
-        ? <b style={{ color }}>{overall.toFixed(2)}</b>
-        : <b style={{ color }}>待质检</b>}
-      </span>
-      {issues.length ? <span style={{ color: 'var(--ink-faint)' }}>　{issues.slice(0, 2).join('；')}</span> : null}
-    </div>
   )
 }
 
@@ -1983,79 +2002,6 @@ function SkipConfirmDialog({
         <div className="dialog-actions">
           <button type="button" className="btn" onClick={onClose}>返回补齐</button>
           <button type="button" className="btn primary" onClick={onConfirm}>确认跳过，继续分集</button>
-        </div>
-      </section>
-    </div>
-  )
-}
-
-function VisualStyleDialog({
-  open,
-  loading,
-  error,
-  options,
-  selected,
-  onSelect,
-  onClose,
-  onConfirm,
-}: {
-  open: boolean
-  loading: boolean
-  error: string | null
-  options: VisualStyleOption[]
-  selected: string
-  onSelect: (name: string) => void
-  onClose: () => void
-  onConfirm: () => void
-}) {
-  const trapRef = useFocusTrap(open, onClose)
-  if (!open) return null
-  return (
-    <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
-      if (event.currentTarget === event.target) onClose()
-    }}>
-      <section ref={trapRef} className="impact-dialog" role="dialog" aria-modal="true" aria-label="选择统一画面风格">
-        <h3>选择统一画面风格</h3>
-        <p>该风格会写入后端任务合同，后续人物、场景、分镜和视频都会沿用。示例图供参考，实际生成效果以最终成片为准。</p>
-        {loading && <div className="query-inline">正在读取风格列表…</div>}
-        {error && <div className="error-banner" role="alert">{error}</div>}
-        {!loading && !error && (
-          <div className="visual-style-list" role="listbox" aria-label="统一画面风格列表">
-            {options.map(option => (
-              <button
-                key={option.name}
-                type="button"
-                className={`visual-style-option${selected === option.name ? ' selected' : ''}`}
-                aria-pressed={selected === option.name}
-                onClick={() => onSelect(option.name)}
-              >
-                {option.sample_image && (
-                  <img
-                    className="visual-style-thumb"
-                    src={option.sample_image}
-                    alt={`${option.name}示例图`}
-                    loading="lazy"
-                  />
-                )}
-                <span>
-                  <b>{option.name}</b>
-                  <small>{option.description}</small>
-                </span>
-                {selected === option.name && <em>已选</em>}
-              </button>
-            ))}
-          </div>
-        )}
-        <div className="dialog-actions">
-          <button type="button" className="btn" onClick={onClose}>取消</button>
-          <button
-            type="button"
-            className="btn primary"
-            disabled={loading || !!error || !selected}
-            onClick={onConfirm}
-          >
-            确认风格并预览费用
-          </button>
         </div>
       </section>
     </div>

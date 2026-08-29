@@ -55,8 +55,8 @@ describe('人物谱步骤状态', () => {
     })).toBe('problem')
   })
 
-  it('结构完整的低分定妆只提示质量风险，不标记为不可用', () => {
-    const lowScoreCharacter = {
+  it('结构完整的定妆包直接判为通过，不再依赖质检分数', () => {
+    const structurallyCompleteCharacter = {
       name: '甲一',
       portraits: [{
         id: 'current',
@@ -69,18 +69,12 @@ describe('人物谱步骤状态', () => {
           { view_role: 'three_quarter', status: 'ready', image_url: '/three-quarter.jpg' },
           { view_role: 'profile', status: 'ready', image_url: '/profile.jpg' },
         ],
-        group_qa: {
-          overall: 0.1,
-          status: 'failed',
-          issues: ['人物一致性偏低'],
-          hard_failures: ['watermark'],
-        },
       }],
     } as Character
 
-    expect(portraitAvailability(lowScoreCharacter, false)).toBe('warning')
+    expect(portraitAvailability(structurallyCompleteCharacter, false)).toBe('passed')
     expect(bibleStepStatus({
-      bible: bible([lowScoreCharacter]),
+      bible: bible([structurallyCompleteCharacter]),
       bible_status: 'ready',
       refs_status: 'ready',
     })).toBe('done')
