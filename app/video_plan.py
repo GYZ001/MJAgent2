@@ -1318,14 +1318,6 @@ def validate_episode_plan(
                 "confidence": item.confidence,
                 "threshold": confidence_floor,
             })
-        if item.unknown_dimensions and (
-            get_setting("video_plan_allow_unknown_dimensions") or "false"
-        ).strip().lower() not in {"1", "true", "yes", "on"}:
-            issues.append({
-                "code": "MODE_PLAN_RELATION_UNKNOWN",
-                "shot_id": item.shot_id,
-                "unknown_dimensions": item.unknown_dimensions,
-            })
         if item.depends_on_shot_id:
             dep_row = by_id.get(item.depends_on_shot_id)
             if not dep_row or int(dep_row["shot_no"]) >= int(row["shot_no"]):
@@ -1609,6 +1601,7 @@ async def generate_episode_plan(
     should continue to surface as a real, visible error.
     """
     from app import hiagent
+    from app.harness import model_gateway
     from app.schemas import extract_json
 
     db = conn or get_conn()
@@ -2057,7 +2050,7 @@ async def generate_episode_plan(
             cached_call_id = int(cached["id"])
             break
         if response is None:
-            response = await hiagent.chat(
+            response = await model_gateway.chat(
                 messages,
                 temperature=0.1,
                 max_tokens=max(4096, min(20000, len(window_shots) * 900)),

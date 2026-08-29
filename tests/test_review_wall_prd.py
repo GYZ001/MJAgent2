@@ -828,6 +828,141 @@ def test_persisted_new_run_overrides_old_terminal_checkpoint_after_restart() -> 
     assert result["next_actions"][0]["endpoint"] == "/api/runs/run-current"
 
 
+# ---------------------------------------------------------------------------
+# P0 fix #4：WAITING_HUMAN / PAUSED_EXTERNAL 不得对已被供应商明确拒绝的镜头
+# 展示"继续补齐"这个假出路——resume 对这类镜头不会重试它。同一 phase 也
+# 用于用户手动暂停/资产待补齐等真正可以 resume 的场景，必须只在
+# cp.last_plan 明确记录了不可修复的供应商终态判决时才换文案，其余维持原样。
+# ---------------------------------------------------------------------------
+
+
+def test_waiting_human_provider_rejected_shot_does_not_offer_blind_resume() -> None:
+    checkpoint = SimpleNamespace(
+        phase="WAITING_HUMAN",
+        run_id="run-1",
+        grant_id=None,
+        last_plan={
+            "shot_no": 7,
+            "strategy": "handoff_human",
+            "issue_codes": ["VIDEO_PROVIDER_TECHNICAL_FAILURE"],
+        },
+    )
+    result = api._video_completion_user_contract(
+        "e", checkpoint, {"phase": "WAITING_HUMAN", "run_id": "run-1"}, running=False,
+    )
+
+    assert not any(a["id"] == "resume" for a in result["next_actions"])
+    assert "已被供应商明确拒绝" in result["message"]
+    assert "继续补齐不会重试此镜" in result["message"]
+
+
+def test_waiting_human_generic_wait_still_offers_resume() -> None:
+    """反例：真正可恢复的等待（例如 QA 低分待复核）不能被误伤，必须继续
+    给出 resume——不能矫枉过正把所有 WAITING_HUMAN 都当成拒绝。"""
+    checkpoint = SimpleNamespace(
+        phase="WAITING_HUMAN",
+        run_id="run-1",
+        grant_id=None,
+        last_plan={
+            "shot_no": 3,
+            "strategy": "retake_directed",
+            "issue_codes": ["VIDEO_QA_LOW_SCORE"],
+        },
+    )
+    result = api._video_completion_user_contract(
+        "e", checkpoint, {"phase": "WAITING_HUMAN", "run_id": "run-1"}, running=False,
+    )
+
+    resume = next(a for a in result["next_actions"] if a["id"] == "resume")
+    assert resume["endpoint"] == "/api/runs/run-1/resume"
+    assert result["message"] == "任务已暂停，检查评审意见或恢复条件后可继续"
+
+
+def test_paused_external_manual_pause_still_offers_resume() -> None:
+    """PAUSED_EXTERNAL 同时也是用户手动点"暂停"落地的 phase：没有
+    last_plan（或 last_plan 不是拒绝判决）时不能被误判为"供应商拒绝"，
+    否则就是对着手动暂停撒谎。"""
+    checkpoint = SimpleNamespace(
+        phase="PAUSED_EXTERNAL",
+        run_id="run-1",
+        grant_id=None,
+        last_plan=None,
+    )
+    result = api._video_completion_user_contract(
+        "e", checkpoint, {"phase": "PAUSED_EXTERNAL", "run_id": "run-1"}, running=False,
+    )
+
+    resume = next(a for a in result["next_actions"] if a["id"] == "resume")
+    assert resume["endpoint"] == "/api/runs/run-1/resume"
+    assert "已被供应商明确拒绝" not in result["message"]
+
+
+def test_paused_external_provider_rejected_shot_points_to_prompt_edit_or_switch() -> None:
+    checkpoint = SimpleNamespace(
+        phase="PAUSED_EXTERNAL",
+        run_id="run-1",
+        grant_id=None,
+        last_plan={
+            "shot_no": 5,
+            "strategy": "handoff_human",
+            "issue_codes": ["VIDEO_PROVIDER_MODEL_REJECTED"],
+        },
+    )
+    result = api._video_completion_user_contract(
+        "e", checkpoint, {"phase": "PAUSED_EXTERNAL", "run_id": "run-1"}, running=False,
+    )
+
+    assert not any(a["id"] == "resume" for a in result["next_actions"])
+    assert "已被供应商明确拒绝" in result["message"]
+    assert "编辑该镜提示词" in result["message"] or "切换视频供应商" in result["message"]
+
+
+def test_waiting_retry_without_rejection_signal_still_resumes() -> None:
+    checkpoint = SimpleNamespace(
+        phase="WAITING_RETRY", run_id="run-1", grant_id=None, last_plan=None,
+    )
+    result = api._video_completion_user_contract(
+        "e", checkpoint, {"phase": "WAITING_RETRY", "run_id": "run-1"}, running=False,
+    )
+
+    assert any(a["id"] == "resume" for a in result["next_actions"])
+
+
+def test_waiting_human_provider_rejected_shot_offers_prompt_edit_action() -> None:
+    """有真实镜头可查时，出路要指向具体可操作的端点，不能只是一句空话。"""
+    conn = db.get_conn()
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('p_rej','P',0)")
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
+           VALUES('ep_rej','p_rej',1,'generating',0)"""
+    )
+    conn.execute(
+        """INSERT INTO shots(
+               id,episode_id,shot_no,duration_s,shot_size,camera_move,
+               scene_setting,characters,action_desc,dialogues,transition
+           ) VALUES('shot_rej','ep_rej',7,5,'中景','固定','室内','[]','人物站定','[]','硬切')"""
+    )
+    conn.commit()
+
+    checkpoint = SimpleNamespace(
+        phase="WAITING_HUMAN",
+        run_id="run-1",
+        grant_id=None,
+        last_plan={
+            "shot_no": 7,
+            "strategy": "handoff_human",
+            "issue_codes": ["VIDEO_PROVIDER_TECHNICAL_FAILURE"],
+        },
+    )
+    result = api._video_completion_user_contract(
+        "ep_rej", checkpoint, {"phase": "WAITING_HUMAN", "run_id": "run-1"}, running=False,
+    )
+
+    edit_action = next(a for a in result["next_actions"] if a["id"] == "edit_shot_prompt")
+    assert edit_action["endpoint"] == "/api/shots/shot_rej/generate"
+    assert edit_action["method"] == "POST"
+
+
 @pytest.mark.asyncio
 async def test_generate_episode_reused_active_version_is_not_adopted(
     monkeypatch,

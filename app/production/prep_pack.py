@@ -1465,6 +1465,9 @@ _PREP_PACK_WHITESPACE_RE = re.compile(r"\s+")
 # 引文两端的成对引号属于引用格式，不属于被引用的那句话。中英文各种成对
 # 引号都列进来：模型抄哪一种取决于原文用哪一种。
 _PREP_PACK_QUOTATION_MARKS = "“”‘’「」『』\"'"
+# 句末终止标点。模型引用长句时经常抄到语义完整处停笔，并把原文那个逗号换成
+# 句号收尾——见 _prep_pack_locate_phrase 里 ERR-20260828-f819b0 的完整说明。
+_PREP_PACK_TERMINAL_MARKS = "。！？…．.!?"
 
 
 def _prep_pack_locate_verbatim(
@@ -1508,6 +1511,40 @@ def _prep_pack_locate_verbatim(
     return sorted(set(owner[start:start + len(needle)]))
 
 
+def _prep_pack_citation_forms(phrase: str) -> list[str]:
+    """一条引文的各种「引用格式」形态，按从原样到最省的顺序返回。
+
+    只剥两类纯格式字符，且每一种形态仍要求剩下的每个字逐字连续命中原文：
+
+    * 两端成对引号——引文两端的引号属于引用格式，不属于被引用的那句话；
+    * 句末终止标点——模型抄一段长句时会在语义完整处停笔，并把原文那里的
+      逗号替换成句号（或问号/叹号/省略号）收尾。
+
+    真实故障 ERR-20260828-f819b0（《我欲封天》EP1「靠山宗山腰青石坪」）：
+    原文是「……云雾缭绕绝非凡尘，能看到一些精美的阁楼环绕山峦八方，满眼
+    陌生。」，模型申报的 quote 是「……云雾缭绕绝非凡尘。」——从第一个字到
+    「绝非凡尘」逐字全对，差的只是把原文的「，」写成了「。」并就此收尾。
+    三路候选（canonical_scene_name / name / quote）于是全部落空，整集映射
+    被「缺少 anchor_phrase」拦停。这与已修复的 ERR-20260828-91bc95（模型
+    自补收尾引号）是同一族：**引文的收尾符号是引用这个动作留下的痕迹，
+    不是被引用内容本身**。
+
+    剥的是符号不是文字：编造的、改写的、张冠李戴的引文，剥完照样定位不到
+    （见 tests/test_prep_pack_citation_forms.py 的反例）。所以这不是放宽
+    逐字，是把「逐字」定义在文字上。
+    """
+    forms: list[str] = []
+    for base in (phrase, phrase.strip(_PREP_PACK_QUOTATION_MARKS)):
+        base = base.strip()
+        if not base:
+            continue
+        forms.append(base)
+        trimmed = base.rstrip(_PREP_PACK_TERMINAL_MARKS).strip()
+        if trimmed and trimmed != base:
+            forms.append(trimmed)
+    return forms
+
+
 def _prep_pack_locate_phrase(
     segments: list[SourceSegment], phrase: str,
 ) -> tuple[list[int], str]:
@@ -1532,14 +1569,14 @@ def _prep_pack_locate_phrase(
     phrase = str(phrase or "").strip()
     if not phrase:
         return [], ""
-    located = _prep_pack_locate_verbatim(segments, phrase)
-    if located:
-        return located, phrase
-    unquoted = phrase.strip(_PREP_PACK_QUOTATION_MARKS)
-    if unquoted and unquoted != phrase:
-        located = _prep_pack_locate_verbatim(segments, unquoted)
+    seen: set[str] = set()
+    for candidate in _prep_pack_citation_forms(phrase):
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        located = _prep_pack_locate_verbatim(segments, candidate)
         if located:
-            return located, unquoted
+            return located, candidate
     return [], ""
 
 

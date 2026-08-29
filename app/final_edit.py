@@ -106,7 +106,7 @@ def _probe_media(path: str) -> dict[str, Any]:
     raw = subprocess.run(
         [
             "ffprobe", "-v", "error", "-show_entries",
-            "format=duration:stream=codec_type", "-of", "json", path,
+            "format=duration:stream=codec_type,duration", "-of", "json", path,
         ],
         check=True,
         capture_output=True,
@@ -114,14 +114,48 @@ def _probe_media(path: str) -> dict[str, Any]:
         timeout=30,
     ).stdout
     payload = json.loads(raw or "{}")
+    streams = payload.get("streams") or []
     try:
         duration = float((payload.get("format") or {}).get("duration") or 0)
     except (TypeError, ValueError):
         duration = 0.0
+    # 容器 duration 取音视频流较长者，源片段音轨往往比视频轨长几十毫秒；
+    # 一旦拿它当作画面基准去裁剪音频，就会把这段多出来的时间重新灌回音频，
+    # 音画错位原样复现。视频流自身的 duration 才是画面真正的权威时长。
+    video_duration = 0.0
+    for stream in streams:
+        if isinstance(stream, dict) and stream.get("codec_type") == "video":
+            try:
+                video_duration = float(stream.get("duration") or 0)
+            except (TypeError, ValueError):
+                video_duration = 0.0
+            break
     return {
         "duration_s": duration,
-        "has_audio": any(stream.get("codec_type") == "audio" for stream in payload.get("streams") or []),
+        "video_duration_s": video_duration or duration,
+        "has_audio": any(
+            isinstance(stream, dict) and stream.get("codec_type") == "audio"
+            for stream in streams
+        ),
     }
+
+
+def audio_normalize_filter(*, atempo_rate: float | None, duration_s: float) -> str:
+    """ffmpeg 音频滤镜链，draft_concat 与 render_episode_final_edit 共用。
+
+    统一重采样到 FINAL_AUDIO_RATE、清零 PTS，再用 apad+atrim 把音轨精确对齐到
+    `duration_s`（调用方传入的权威时长——通常是该镜视频流的实测时长，必要时
+    已按倍速折算）。两条路径共用同一份逻辑，不允许只有一条做对，另一条假设
+    「模型视频没有音轨」而放任音频原样直粘。
+    """
+    parts: list[str] = []
+    if atempo_rate is not None and abs(atempo_rate - 1.0) > 1e-6:
+        parts.append(f"atempo={atempo_rate:.6f}")
+    parts.append(f"aresample={FINAL_AUDIO_RATE}")
+    parts.append("asetpts=PTS-STARTPTS")
+    parts.append(f"apad=whole_dur={duration_s:.6f}")
+    parts.append(f"atrim=duration={duration_s:.6f}")
+    return ",".join(parts)
 
 
 def _font_path() -> Path:
@@ -239,7 +273,7 @@ def _prepare_clip(
     work_dir: Path,
 ) -> dict[str, Any]:
     probe = _probe_media(source_path)
-    source_duration = probe["duration_s"] or float(shot.duration_s or 5)
+    source_duration = probe["video_duration_s"] or float(shot.duration_s or 5)
     rate = max(0.5, min(2.0, float(playback_rate or 1.0)))
     effective_duration = max(0.1, source_duration / rate)
     inputs = ["-i", source_path]
@@ -291,12 +325,12 @@ def _prepare_clip(
         ]
     if probe["has_audio"]:
         filters.append(
-            f"[0:a]atempo={rate:.6f},aresample={FINAL_AUDIO_RATE},asetpts=PTS-STARTPTS[aout]"
+            f"[0:a]{audio_normalize_filter(atempo_rate=rate, duration_s=effective_duration)}[aout]"
         )
     else:
         filters.append(
-            f"[{audio_input_index}:a]atrim=duration={effective_duration:.3f},"
-            f"aresample={FINAL_AUDIO_RATE},asetpts=PTS-STARTPTS[aout]"
+            f"[{audio_input_index}:a]"
+            f"{audio_normalize_filter(atempo_rate=None, duration_s=effective_duration)}[aout]"
         )
 
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -320,7 +354,7 @@ def _prepare_clip(
     return {
         "shot_no": shot.shot_no,
         "path": str(destination),
-        "duration_s": prepared_probe["duration_s"] or effective_duration,
+        "duration_s": prepared_probe["video_duration_s"] or effective_duration,
         "text_insert": text_report,
     }
 

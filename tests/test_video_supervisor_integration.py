@@ -1734,6 +1734,196 @@ def test_dispatch_fences_model_rejection_and_unsettled_provider_handle(
     assert calls["n"] == 0
 
 
+def _seed_terminal_rejected_job(
+    memdb,
+    *,
+    shot_id: str,
+    episode_id: str,
+    owner_run_id: str,
+    provider_create_state: str = "model_rejected",
+    provider_failure_disposition: str = "external_terminal",
+    status: str = "waiting_human",
+    version_id: str = "v_terminal_rejected",
+    job_id: str = "j_terminal_rejected",
+    error_message: str = (
+        "视频模型 任务失败：The request failed because the output video may be "
+        "related to copyright restrictions. Request id: 021787964"
+    ),
+) -> None:
+    """按真实 Seedance 版权拒绝案例（ERR-20260828-ca89d8）的字段形状落一条
+    终态失败 job：旧 run 判定过、供应商已明确拒绝，job 仍是 owner_run_id 归
+    属旧 run 的历史记录。"""
+    memdb.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at,image_inputs
+           ) VALUES(?,?,1,'p','idem-terminal','failed',1,?)""",
+        (version_id, shot_id, json.dumps({"supervisor_run_id": owner_run_id})),
+    )
+    memdb.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,error,
+               reason_code,provider_create_state,provider_failure_category,
+               provider_failure_kind,provider_failure_disposition,
+               provider_failure_retryable,owner_run_id,run_id,created_at,updated_at
+           ) VALUES(
+               ?,'video',?,?,?,'proj_int',?,?,
+               'VIDEO_PROVIDER_MODEL_REJECTED',?,'model_rejection',
+               'provider_rejected',?,
+               0,?,?,1,1
+           )""",
+        (
+            job_id, shot_id, version_id, episode_id, status, error_message,
+            provider_create_state, provider_failure_disposition,
+            owner_run_id, owner_run_id,
+        ),
+    )
+    memdb.commit()
+
+
+def _pre_fix_dispatch_would_block(memdb, *, shot_id: str, episode_id: str, run_id: str) -> bool:
+    """独立观察点：修复前 ``_dispatch`` 每行判据的冻结快照（按 app/video_supervisor.py
+    修复前的真实顺序抄写，不回退 app/video_supervisor.py 本体）——
+    ``model_rejected`` 检查排在按 run_id 过滤的 ``continue`` 之后，因此旧 run
+    判定的终态在新 run 里必然被跳过，永远轮不到。返回 True 代表这套旧判据会
+    拒绝派发（不会盲目重投），False 代表它会放行（盲目重投）。"""
+    rows = memdb.execute(
+        """SELECT j.status,j.provider_create_state,v.provider_task_id,v.image_inputs
+             FROM jobs j LEFT JOIN shot_versions v ON v.id=j.version_id
+            WHERE j.shot_id=? AND j.episode_id=? AND j.kind='video'
+              AND (v.status IS NULL OR v.status!='cleared')
+            ORDER BY j.created_at DESC""",
+        (shot_id, episode_id),
+    ).fetchall()
+    for execution in rows:
+        try:
+            execution_meta = json.loads(execution["image_inputs"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            execution_meta = {}
+        if run_id and execution_meta.get("supervisor_run_id") != run_id:
+            continue  # pre-fix: run_id 过滤先于终态检查，直接跳过这条记录
+        if execution["provider_create_state"] == "model_rejected":
+            return True
+    return False
+
+
+def test_dispatch_model_rejected_terminal_survives_run_restart(memdb, monkeypatch):
+    """P0 回归：旧 run 判定的 model_rejected 终态必须挡住新 run 的派发。
+
+    红：手写的修复前判据快照（``_pre_fix_dispatch_would_block``）在旧 run 的
+    终态记录被 run_id 过滤挡住后，直接放行——盲目重投。
+    绿：修复后的 ``_dispatch``（本体，未被回退）在任何 run_id 下都拒绝派发。
+    """
+    from app import worker
+    from app.video_supervisor import ShotCoverageEntry, _dispatch
+
+    eid, _ = _seed_episode(memdb, 1)
+    shot_id = f"{eid}_shot_1"
+    _seed_terminal_rejected_job(
+        memdb, shot_id=shot_id, episode_id=eid, owner_run_id="run-old",
+    )
+
+    # 红：独立观察点证明修复前的判据顺序会盲目重投。
+    assert _pre_fix_dispatch_would_block(
+        memdb, shot_id=shot_id, episode_id=eid, run_id="run-new",
+    ) is False
+
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        worker, "enqueue_shot",
+        lambda *_a, **_kw: calls.update(n=calls["n"] + 1) or {"version_id": "v_new"},
+    )
+
+    # 绿：真正的 _dispatch（本体）在新 run 下仍然挡住这个终态镜头。
+    dispatched = _dispatch(
+        ShotCoverageEntry(shot_no=1, shot_id=shot_id, grade="C"),
+        episode_id=eid,
+        run_id="run-new",
+        first=False,
+    )
+    assert dispatched is False
+    assert calls["n"] == 0, "终态失败的镜头不得在新 run 下被重新付费派发"
+
+
+def _pre_fix_collect_issues_failed_job(memdb, *, shot_id: str, run_id: str):
+    """独立观察点：修复前 ``_collect_issues`` 查失败 job 那条 SQL 的冻结快照
+    （``AND (? IS NULL OR owner_run_id=?)`` 无条件套用到全部失败状态，不区分
+    终态）。返回查到的行，``None`` 代表在新 run 下什么都看不到。"""
+    return memdb.execute(
+        """SELECT * FROM jobs
+           WHERE shot_id=? AND kind='video'
+             AND status IN ('failed','paused_budget','waiting_human')
+             AND (? IS NULL OR owner_run_id=?)
+           ORDER BY created_at DESC LIMIT 1""",
+        (shot_id, run_id, run_id),
+    ).fetchone()
+
+
+def test_collect_issues_terminal_failure_survives_run_restart(memdb):
+    """P0 回归：_collect_issues 对终态失败要跨 run 可见，路由器才不会对着
+    空 issue 盲目重抽。
+
+    红：手写的修复前 SQL 快照在新 run 下查不到旧 run 判定的终态 job（owner_run_id
+    过滤挡住），issues 为空，route() 对空 issue 的默认行为是"无结构化 Issue，
+    默认同输入重抽"—— is_paid=True，正是盲目重投的直接成因。
+    绿：修复后的 ``_collect_issues``（本体）跨 run 仍能看到这条终态 job，
+    产出 repairable=False + pause_state=PAUSED_EXTERNAL 的 Issue，
+    route() 据此判 is_paid=False、strategy=handoff_human。
+    """
+    from app.video_supervisor import ShotCoverageEntry, _collect_issues
+
+    eid, _ = _seed_episode(memdb, 1)
+    shot_id = f"{eid}_shot_1"
+    _seed_terminal_rejected_job(
+        memdb, shot_id=shot_id, episode_id=eid, owner_run_id="run-old",
+    )
+    entry = ShotCoverageEntry(shot_no=1, shot_id=shot_id, grade="C")
+
+    # 红：独立观察点证明修复前的查询在新 run 下看不到这条终态记录。
+    pre_fix_row = _pre_fix_collect_issues_failed_job(
+        memdb, shot_id=shot_id, run_id="run-new",
+    )
+    assert pre_fix_row is None
+    blind_plan = route([], entry=entry)
+    assert blind_plan.is_paid is True
+    assert blind_plan.strategy != "handoff_human"
+
+    # 绿：真正的 _collect_issues（本体）在新 run 下仍能看到终态失败。
+    issues = _collect_issues(entry, run_id="run-new")
+    assert len(issues) == 1
+    assert issues[0].code == "VIDEO_PROVIDER_MODEL_REJECTED"
+    assert issues[0].repairable is False
+    assert issues[0].evidence["pause_state"] == "PAUSED_EXTERNAL"
+
+    fixed_plan = route(issues, entry=entry)
+    assert fixed_plan.is_paid is False
+    assert fixed_plan.strategy == "handoff_human"
+    assert fixed_plan.pause_state == "PAUSED_EXTERNAL"
+
+
+def test_collect_issues_still_lets_manual_review_be_retried_by_new_run(memdb):
+    """维持现状：未升级为终态的 manual_review 瞬时错误继续按 run_id 过滤——
+    手动重开一个新 run 仍然可以甩掉旧 run 留下的瞬时错误（
+    load_persisted_shot_issues 文档写明的原设计意图，不在本次改动范围内）。
+    """
+    from app.video_supervisor import ShotCoverageEntry, _collect_issues
+
+    eid, _ = _seed_episode(memdb, 1)
+    shot_id = f"{eid}_shot_1"
+    _seed_terminal_rejected_job(
+        memdb,
+        shot_id=shot_id,
+        episode_id=eid,
+        owner_run_id="run-old",
+        provider_create_state="accepted",
+        provider_failure_disposition="manual_review",
+        status="waiting_human",
+    )
+    entry = ShotCoverageEntry(shot_no=1, shot_id=shot_id, grade="C")
+
+    issues = _collect_issues(entry, run_id="run-new")
+    assert issues == []
+
+
 def test_fake_enqueue_paid_attempts_bounded(memdb, monkeypatch):
     """假 provider：每镜成功计费，总账不超 cap（模拟全失败前采纳预算墙）。"""
     from app import worker

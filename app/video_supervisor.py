@@ -569,6 +569,92 @@ async def _ensure_supervisor_video_plan(
     )
 
 
+def _record_grant_validation_failure(
+    cp: VideoSupervisorCheckpoint,
+    exc: GrantValidationError,
+    *,
+    run_id: str | None,
+    stage: str,
+) -> None:
+    """Persist the full detail behind a ``GrantValidationError`` before it is
+    reduced to a bare ``cp.outcome = exc.code``.
+
+    Every Supervisor boundary that catches ``GrantValidationError`` used to
+    throw away ``str(exc)`` entirely -- for ``VIDEO_PLAN_INVALID`` that string
+    is ``VideoPlanValidationError.issues`` (the full per-shot rejection
+    reasons from ``app.video_plan``), wrapped via ``raise
+    GrantValidationError(...) from exc``. The result was exactly the EP8
+    incident in docs/delivery_pipeline_rca_2026-08-29.md 问题二: one orphaned
+    ``RUN_PARTIAL :: VIDEO_PLAN_INVALID`` event with an empty payload and
+    nothing in ``error_logs`` -- a legitimate rejection with no way to RCA it
+    after the fact. All catch sites route through this one function so none
+    of them can regress back to silently dropping the detail.
+
+    Ordering follows the project rule that a rollback must be an exception
+    handler's first statement, ahead of any logging/recorder call: the nested
+    call that raised ``exc`` shares the ambient task connection with this
+    caller and may have left it mid-transaction, so that connection is rolled
+    back before anything here can commit on it.
+
+    ``error_logs`` goes through ``app.errors.log_error`` ->
+    ``app.db.insert_error_log``, which opens its own independent connection
+    and commits there (see that function's docstring) -- it never touches the
+    ambient connection. The ``run_events`` append below intentionally *does*
+    use the ambient connection via ``evidence_repository.append_event`` --
+    the same pattern every other event append in this function already uses
+    (e.g. ``VIDEO_SUPERVISOR_STARTED``), safe now that any stale state on it
+    has been rolled back above. Both writes swallow their own failures: a
+    diagnostics write must never mask or interrupt the original authorization
+    failure it is trying to explain.
+    """
+    conn = get_conn()
+    if conn.in_transaction:
+        conn.rollback()
+
+    issues: list[dict[str, Any]] | None = None
+    cause = exc.__cause__
+    if cause is not None and type(cause).__name__ == "VideoPlanValidationError":
+        issues = getattr(cause, "issues", None) or None
+
+    message = str(exc)
+    rid = run_id or cp.run_id
+    detail: dict[str, Any] = {"stage": stage, "code": exc.code, "message": message[:4000]}
+    if issues:
+        detail["issues"] = issues
+
+    error_id: str | None = None
+    try:
+        from app.errors import log_error
+
+        record = log_error(
+            exc,
+            action=f"video_supervisor.{stage}",
+            context={
+                "episode_id": cp.episode_id,
+                "run_id": rid,
+                "grant_id": cp.grant_id,
+                "stage": stage,
+            },
+            message=message,
+            meta={"issues": issues} if issues else None,
+        )
+        error_id = record.error_id
+    except Exception:  # noqa: BLE001 - 诊断落库失败绝不能掩盖原始授权失败
+        pass
+    if error_id:
+        detail["error_id"] = error_id
+
+    if rid:
+        try:
+            evidence_repository.append_event(
+                rid, "RUN_PARTIAL", "warning",
+                f"{exc.code}: {message[:500]}",
+                payload=detail,
+            )
+        except Exception:  # noqa: BLE001 - 同上，事件落库失败不得掩盖原始失败
+            pass
+
+
 def load_latest_checkpoint(episode_id: str) -> VideoSupervisorCheckpoint | None:
     conn = get_conn()
     row = conn.execute(
@@ -1659,14 +1745,18 @@ def _dispatch(
         (entry.shot_id, episode_id),
     ).fetchall()
     for execution in execution_rows:
+        # model_rejected 是跨轮次长期有效的终态标记：一旦供应商明确拒绝过这个
+        # 镜头，任何 run（包括之后新开的 run）都不得再对它派发付费任务。这条
+        # 判断必须挂在“这件事本身成没成”上，不能被下面按 run_id 过滤的
+        # continue 挡住——否则新 run 会看不到旧 run 判定的终态，盲目重投。
+        if execution["provider_create_state"] == "model_rejected":
+            return False
         try:
             execution_meta = json.loads(execution["image_inputs"] or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
             execution_meta = {}
         if run_id and execution_meta.get("supervisor_run_id") != run_id:
             continue
-        if execution["provider_create_state"] == "model_rejected":
-            return False
         if (
             execution["status"] in ACTIVE_JOB_STATUSES
             and (
@@ -2027,12 +2117,30 @@ def _collect_issues(
                 version_id=row["id"], shot_no=entry.shot_no,
             ))
     if not issues:
+        # 终态失败（供应商已明确拒绝：provider_create_state='model_rejected'
+        # 或 disposition='external_terminal'）不受 owner_run_id 过滤——这件事
+        # 本身已经成了定论，不因为哪个 run 发现的而失效。其余失败（例如尚未
+        # 升级的 manual_review 瞬时错误）继续按 run_id 过滤：手动重开一个新
+        # run 仍然可以甩掉旧 run 留下的瞬时错误，这是 load_persisted_shot_issues
+        # docstring 里写明的原设计意图，不在本次改动范围内。
+        # ORDER BY 里让终态失败优先于时间新旧：终态一旦成立就必须是权威结论，
+        # 不能被同一镜头之后又出现的非终态记录（理论上不该发生，但不能靠“不
+        # 会发生”兜底）用时间戳顺序悄悄盖过。
         failed = conn.execute(
             """SELECT * FROM jobs
                WHERE shot_id=? AND kind='video'
                  AND status IN ('failed','paused_budget','waiting_human')
-                 AND (? IS NULL OR owner_run_id=?)
-               ORDER BY created_at DESC LIMIT 1""",
+                 AND (
+                     provider_create_state='model_rejected'
+                     OR provider_failure_disposition='external_terminal'
+                     OR (? IS NULL OR owner_run_id=?)
+                 )
+               ORDER BY
+                 CASE WHEN provider_create_state='model_rejected'
+                           OR provider_failure_disposition='external_terminal'
+                      THEN 0 ELSE 1 END,
+                 created_at DESC
+               LIMIT 1""",
             (entry.shot_id, run_id, run_id),
         ).fetchone()
         if failed:
@@ -3296,6 +3404,9 @@ async def run_video_completion_supervisor(
             cp.phase = "WAITING_AUTHORIZATION"
             cp.outcome = exc.code
             await _save_checkpoint_async(cp, run_id=run_id)
+            _record_grant_validation_failure(
+                cp, exc, run_id=run_id, stage="grant_validate_preflight",
+            )
             return cp
 
     try:
@@ -3305,6 +3416,9 @@ async def run_video_completion_supervisor(
         cp.phase = "WAITING_AUTHORIZATION"
         cp.outcome = exc.code
         await _save_checkpoint_async(cp, run_id=run_id)
+        _record_grant_validation_failure(
+            cp, exc, run_id=run_id, stage="ensure_video_plan",
+        )
         return cp
 
     if run_id:
@@ -3324,6 +3438,9 @@ async def run_video_completion_supervisor(
         cp.phase = "WAITING_AUTHORIZATION"
         cp.outcome = exc.code
         await _save_checkpoint_async(cp, run_id=run_id)
+        _record_grant_validation_failure(
+            cp, exc, run_id=run_id, stage="reference_asset_prep",
+        )
         return cp
     except Exception as exc:  # noqa: BLE001 - 资产失败降级，不得中断整集覆盖
         cp.quality_target_missed = True
@@ -3383,6 +3500,9 @@ async def run_video_completion_supervisor(
             )
             cp.outcome = exc.code
             await _save_checkpoint_async(cp, run_id=run_id)
+            _record_grant_validation_failure(
+                cp, exc, run_id=run_id, stage="supervisor_tick",
+            )
             return cp
         if g:
             cp.budget["cap_cny"] = float(g.budget_cap_cny)
@@ -3503,6 +3623,9 @@ async def run_video_completion_supervisor(
                     cp.phase = "WAITING_AUTHORIZATION"
                     cp.outcome = exc.code
                     await _save_checkpoint_async(cp, run_id=run_id)
+                    _record_grant_validation_failure(
+                        cp, exc, run_id=run_id, stage="dispatch_first_pass",
+                    )
                     return cp
                 if dispatched:
                     progressed = True
@@ -3590,6 +3713,9 @@ async def run_video_completion_supervisor(
                     cp.outcome = exc.code
                     _merge_shot_state(cp, ledger)
                     await _save_checkpoint_async(cp, run_id=run_id)
+                    _record_grant_validation_failure(
+                        cp, exc, run_id=run_id, stage="amend_storyboard",
+                    )
                     return cp
                 if amended:
                     cp.phase = "WAITING_HUMAN"
@@ -3670,6 +3796,9 @@ async def run_video_completion_supervisor(
                 cp.phase = "WAITING_AUTHORIZATION"
                 cp.outcome = exc.code
                 await _save_checkpoint_async(cp, run_id=run_id)
+                _record_grant_validation_failure(
+                    cp, exc, run_id=run_id, stage="dispatch_repair",
+                )
                 return cp
             if dispatched:
                 progressed = True
@@ -3973,6 +4102,9 @@ async def reconcile_stale_video_supervisors() -> int:
             cp.phase = "WAITING_AUTHORIZATION"
             cp.outcome = exc.code
             save_checkpoint(cp, run_id=cp.run_id)
+            _record_grant_validation_failure(
+                cp, exc, run_id=cp.run_id, stage="watchdog_takeover",
+            )
             return False
         current = conn.execute(
             """SELECT e.active_video_run_id, e.video_completion_mode,
@@ -4270,6 +4402,9 @@ def recover_video_completion_runs() -> int:
                 cp.phase = "WAITING_AUTHORIZATION"
                 cp.outcome = exc.code
                 save_checkpoint(cp)
+                _record_grant_validation_failure(
+                    cp, exc, run_id=cp.run_id, stage="service_restart_resume",
+                )
                 return False
 
         recorder = WorkflowRecorder.create(

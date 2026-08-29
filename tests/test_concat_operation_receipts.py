@@ -53,6 +53,15 @@ def test_concat_publish_receipt_replays_after_handler_crash_without_rewrite(
         "current_adopted_video_delivery_manifest",
         lambda episode_id, conn=None: current["manifest"],
     )
+    # app.capabilities.handlers.delivery.concatenate() 与 concatenate_episode()
+    # 现在都用容错版本冻结/复核 video_delivery_manifest（单镜权威失效只跳过
+    # 那一镜，不让整份清单计算失败），这里的 receipt/CAS 机制测试不关心真实
+    # 的逐镜权威校验，接上同一个直通 mock 即可。
+    monkeypatch.setattr(
+        downstream_authority,
+        "current_partial_adopted_video_delivery_manifest",
+        lambda episode_id, conn=None: current["manifest"],
+    )
 
     calls = 0
     exact_result: dict = {}
@@ -213,6 +222,11 @@ def test_concat_promotion_crash_resumes_exact_stage_without_rendering_again(
     monkeypatch.setattr(
         downstream_authority,
         "current_adopted_video_delivery_manifest",
+        lambda episode_id, conn=None: manifest,
+    )
+    monkeypatch.setattr(
+        downstream_authority,
+        "current_partial_adopted_video_delivery_manifest",
         lambda episode_id, conn=None: manifest,
     )
     renders = 0

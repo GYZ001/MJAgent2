@@ -258,7 +258,7 @@ def _assert_concat_sources_current(
     video_delivery_manifest: dict[str, Any],
 ) -> None:
     from app.downstream_authority import (
-        current_adopted_video_delivery_manifest,
+        current_partial_adopted_video_delivery_manifest,
         verify_current_storyboard_release_authority,
     )
 
@@ -266,7 +266,10 @@ def _assert_concat_sources_current(
         episode_id, conn=conn,
     ) != release_authority:
         raise ConcatOperationConflict("合片发布前分镜权威发生漂移")
-    if current_adopted_video_delivery_manifest(
+    # 合片冻结的是部分交付清单（跳过缺镜/失效镜，不整体失败），发布前的漂移
+    # 复核必须用同一口径重新计算，否则一个此前就被合法跳过的镜头在这里会被
+    # 严格版本判成"缺少已采纳权威"，把已经跳过一次的镜头再次错误地当成漂移。
+    if current_partial_adopted_video_delivery_manifest(
         episode_id, conn=conn,
     ) != video_delivery_manifest:
         raise ConcatOperationConflict("合片发布前已采纳视频发生漂移")
@@ -533,7 +536,7 @@ def _publish_concat_output(
         ) or result
 
     from app.downstream_authority import (
-        current_adopted_video_delivery_manifest,
+        current_partial_adopted_video_delivery_manifest,
         verify_current_storyboard_release_authority,
     )
     if conn.in_transaction:
@@ -560,7 +563,9 @@ def _publish_concat_output(
             episode_id, conn=conn,
         ) != release_authority:
             raise ValueError("合片发布前分镜权威发生漂移")
-        if current_adopted_video_delivery_manifest(
+        # 合片冻结的是部分交付清单（跳过缺镜/失效镜），发布前漂移复核要用同一
+        # 口径重算，否则本来就合法跳过的镜头会被严格版本误判成漂移。
+        if current_partial_adopted_video_delivery_manifest(
             episode_id, conn=conn,
         ) != video_delivery_manifest:
             raise ValueError("合片发布前已采纳视频发生漂移")
@@ -600,7 +605,7 @@ def _probe_concat_media(path: str | Path) -> dict[str, Any]:
         completed = subprocess.run(
             [
                 "ffprobe", "-v", "error",
-                "-show_entries", "format=format_name,duration:stream=codec_type",
+                "-show_entries", "format=format_name,duration:stream=codec_type,duration",
                 "-of", "json", str(media_path),
             ],
             check=True,
@@ -627,14 +632,34 @@ def _probe_concat_media(path: str | Path) -> dict[str, Any]:
         raise ValueError("ffprobe 返回了无效的容器元数据") from exc
     if "mp4" not in format_name.split(","):
         raise ValueError(f"容器不是 MP4（format_name={format_name or 'unknown'}）")
-    if not any(
-        isinstance(stream, dict) and stream.get("codec_type") == "video"
-        for stream in streams
-    ):
+    video_streams = [
+        stream for stream in streams
+        if isinstance(stream, dict) and stream.get("codec_type") == "video"
+    ]
+    if not video_streams:
         raise ValueError("容器中没有视频流")
+    # 容器 duration 取音视频流较长者：源片段音轨普遍比视频轨长几十毫秒，一旦
+    # 采样率还混用，concat demuxer 用首段音频 timebase 解释后续包会把这个
+    # 差值放大到秒级（EP3 即是如此）。视频流自身的 duration 不受音频影响，
+    # 是拼接时长门唯一可信的权威基准。
+    try:
+        video_duration_s = float(video_streams[0].get("duration"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ffprobe 未返回视频流时长") from exc
+    if not math.isfinite(video_duration_s) or video_duration_s <= 0:
+        raise ValueError(f"视频流时长无效（duration={video_duration_s!r}）")
     if not math.isfinite(duration_s) or duration_s <= 0:
         raise ValueError(f"容器时长无效（duration={duration_s!r}）")
-    return {"duration_s": duration_s, "format_name": format_name}
+    has_audio = any(
+        isinstance(stream, dict) and stream.get("codec_type") == "audio"
+        for stream in streams
+    )
+    return {
+        "duration_s": duration_s,
+        "video_duration_s": video_duration_s,
+        "format_name": format_name,
+        "has_audio": has_audio,
+    }
 
 
 def _validate_concat_output(
@@ -651,7 +676,9 @@ def _validate_concat_output(
         ) from exc
     if not math.isfinite(expected_duration_s) or expected_duration_s <= 0:
         raise ValueError("无法确定合片预期时长，上一版成片仍保留")
-    actual_duration_s = float(probe["duration_s"])
+    # 用视频流时长做实测基准：容器 duration 取音视频流较长者，一旦音频未被
+    # 完全对齐（残留亚帧级 apad/atrim 舍入）就会把音频的漂移重新记回时长门。
+    actual_duration_s = float(probe["video_duration_s"])
     tolerance_s = max(
         _CONCAT_DURATION_TOLERANCE_MIN_S,
         expected_duration_s * _CONCAT_DURATION_TOLERANCE_RATIO,
@@ -727,6 +754,79 @@ def _playable_model_candidate(conn, shot_id: str):
     )
 
 
+def _shot_has_valid_adopted_video(conn, adopted_version_id: str | None) -> bool:
+    if not adopted_version_id:
+        return False
+    row = conn.execute(
+        "SELECT * FROM shot_versions WHERE id=? AND status='succeeded'",
+        (adopted_version_id,),
+    ).fetchone()
+    return bool(
+        row and not _is_delivery_fallback(row)
+        and row["video_path"] and Path(row["video_path"]).is_file()
+    )
+
+
+def _auto_adopt_playable_candidates_before_mix(episode_id: str) -> dict[str, Any]:
+    """合成前把"有真实成功候选但未采纳"的镜头自动采纳为当前最新候选。
+
+    用户原话："只要它读到视频生成完了就可以合成啊"——方案 B：合成时自动采纳
+    每镜最新的成功版本。选版口径与 ``_playable_model_candidate`` 完全一致
+    （status='succeeded' + video_path 落盘 + 非 delivery_fallback，按
+    version_no 取最新），不另立标准。采纳动作本身必须走真实的人工采纳同一条
+    核心逻辑（``app.api._adopt_version_core``，即 POST /shots/{id}/adopt 背后
+    的实现）——技术门禁校验、evidence Artifact、gate_decisions 与
+    review_action_audit 审计记录都照常落地，只是 reason 里写明这是成片合成时
+    自动代采，不是直接 UPDATE shots 绕过既有校验与回执。
+
+    每一镜的采纳是 ``_adopt_version_core`` 自己提交的独立事务；某一镜失败
+    （技术门禁不过、review wall 拦截等）只把该镜记入跳过，不影响其余镜头
+    已经成功提交的采纳，也不让整份合成失败——跳过路径见调用方后续的
+    ``missing_model_shot_nos``/``skip_reasons`` 计算，口径不变。
+    """
+    from app import api
+    from fastapi import HTTPException
+
+    conn = get_conn()
+    shot_rows = conn.execute(
+        "SELECT id,shot_no,adopted_version_id FROM shots WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,),
+    ).fetchall()
+    adopted_shot_nos: list[int] = []
+    auto_adopt_failures: dict[str, str] = {}
+    for shot in shot_rows:
+        shot_id = str(shot["id"])
+        shot_no = int(shot["shot_no"])
+        if _shot_has_valid_adopted_video(conn, shot["adopted_version_id"]):
+            continue
+        candidate = _playable_model_candidate(conn, shot_id)
+        if candidate is None:
+            continue
+        try:
+            api._adopt_version_core(
+                shot_id,
+                {
+                    "version_id": candidate["id"],
+                    "reason": "成片合成时自动采纳该镜最新的成功技术校验候选（此前未人工采纳）",
+                    "idempotency_key": f"auto-adopt-mix:{episode_id}:{shot_id}:{candidate['id']}",
+                },
+            )
+        except (HTTPException, ValueError) as exc:
+            # 回滚必须排在任何日志/记录之前：_adopt_version_core 中途失败时
+            # conn 上可能还留着这一镜未提交的部分写入（例如 shots/shot_versions
+            # 已 UPDATE 但 reconcile_adopted_revision 才抛错），不清掉会连累
+            # 下一镜的采纳事务。
+            if conn.in_transaction:
+                conn.rollback()
+            auto_adopt_failures[str(shot_no)] = f"自动采纳失败：{exc}"
+            continue
+        adopted_shot_nos.append(shot_no)
+    return {
+        "auto_adopted_shot_nos": adopted_shot_nos,
+        "auto_adopt_failures": auto_adopt_failures,
+    }
+
+
 def episode_mix_status(episode_id: str) -> dict:
     """返回当前已有真实视频的可合成状态。"""
     conn = get_conn()
@@ -750,12 +850,26 @@ def episode_mix_status(episode_id: str) -> dict:
                 vid = build_media_url(v["video_path"])
         playback_rate = float(v["playback_rate"] or 1.0) if vid and v else 1.0
         model_candidate = _playable_model_candidate(conn, s["id"])
+        # 已采纳真实视频时用实测视频流时长而非分镜合约的名义 duration_s，
+        # 使这里展示的预估口径与合成后 total_duration_s/edit_report.timeline
+        # 的权威来源（视频流实测时长）保持一致，不再各算各的。探测失败（尚未
+        # 真正落盘可读的视频）时退回名义估算，这里只是预览，不是交付门禁。
+        effective_duration_s = round(float(s["duration_s"] or 0) / playback_rate, 2)
+        if vid and v and v["video_path"]:
+            try:
+                measured_probe = _probe_concat_media(v["video_path"])
+            except ValueError:
+                pass
+            else:
+                effective_duration_s = round(
+                    float(measured_probe["video_duration_s"]) / playback_rate, 2
+                )
         out.append({"shot_id": s["id"], "shot_no": s["shot_no"],
                     "duration_s": s["duration_s"], "video_url": vid,
                     "has_adopted": bool(vid),
                     "has_model_candidate": bool(model_candidate),
                     "playback_rate": playback_rate,
-                    "effective_duration_s": round(float(s["duration_s"] or 0) / playback_rate, 2)})
+                    "effective_duration_s": effective_duration_s})
     available = sum(1 for item in out if item["has_model_candidate"])
     skipped_shot_nos = [item["shot_no"] for item in out if not item["has_model_candidate"]]
     active_shot_nos = _active_generation_shot_nos(conn, episode_id)
@@ -904,6 +1018,14 @@ def concatenate_episode(
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     if not ep:
         raise ValueError("剧集不存在")
+    if operation_idempotency_key is None:
+        # 直接调用路径（测试/无幂等操作的兼容入口）：release_authority 与
+        # video_delivery_manifest 都在下面就地现算，自动采纳必须先做，样本
+        # 才会把这一轮新采纳的镜头算进去。命令总线路径
+        # （capabilities/handlers/delivery.py::concatenate）在冻结这两份快照
+        # 之前已经调用过同一个函数——这里不重复调用，避免采纳发生在冻结之后
+        # 造成合片自己制造的"发布前已采纳视频发生漂移"。
+        _auto_adopt_playable_candidates_before_mix(episode_id)
     from app.downstream_authority import verify_current_storyboard_release_authority
 
     release_authority = (
@@ -924,36 +1046,22 @@ def concatenate_episode(
             "本次未生成成片"
         )
 
-    missing_model_shot_nos: list[int] = []
     shot_rows = conn.execute(
-        "SELECT id,shot_no,adopted_version_id FROM shots WHERE episode_id=? ORDER BY shot_no",
+        "SELECT id,shot_no FROM shots WHERE episode_id=? ORDER BY shot_no",
         (episode_id,),
     ).fetchall()
-    for shot in shot_rows:
-        adopted = (
-            conn.execute(
-                "SELECT * FROM shot_versions WHERE id=? AND status='succeeded'",
-                (shot["adopted_version_id"],),
-            ).fetchone()
-            if shot["adopted_version_id"] else None
-        )
-        if (
-            adopted and not _is_delivery_fallback(adopted)
-            and adopted["video_path"] and Path(adopted["video_path"]).is_file()
-        ):
-            continue
-        missing_model_shot_nos.append(int(shot["shot_no"]))
-    if missing_model_shot_nos:
-        raise ValueError(
-            "当前分镜仍有镜头未采纳通过技术校验的真实视频，禁止生成部分成片："
-            + ", ".join(str(no) for no in missing_model_shot_nos)
-        )
-    from app.downstream_authority import current_adopted_video_delivery_manifest
+    shot_id_by_no = {int(row["shot_no"]): row["id"] for row in shot_rows}
 
+    from app.downstream_authority import current_partial_adopted_video_delivery_manifest
+
+    # video_delivery_manifest 只服务于合片操作的幂等/CAS 漂移检测（"发布时
+    # 用的还是不是取样时那批已采纳视频"），不是入选候选的判据——入选判据见
+    # 下面 pieces 的注释。用容错版本（single-shot 失效只跳过那一镜、不让整
+    # 份清单计算失败），否则同样的悬空采纳会在这里再次把整次合成打死。
     video_delivery_manifest = (
         operation_video_delivery_manifest
         if operation_idempotency_key is not None
-        else current_adopted_video_delivery_manifest(episode_id, conn=conn)
+        else current_partial_adopted_video_delivery_manifest(episode_id, conn=conn)
     )
     if not isinstance(video_delivery_manifest, dict):
         raise ConcatOperationConflict("合片操作缺少冻结的已采纳视频清单")
@@ -963,11 +1071,22 @@ def concatenate_episode(
         release_authority=release_authority,
         video_delivery_manifest=video_delivery_manifest,
     )
+    skip_reasons: dict[str, str] = dict(video_delivery_manifest.get("skip_reasons") or {})
+    # missing_model_shot_nos：这些镜头连一个成功产出、真实落盘的模型视频候选
+    # 都没有（从没生成、生成中、或生成失败）。这是"部分合成是主流程"的判据
+    # 本体——任意一镜真实视频已落盘即可合成，其余透明跳过，不拖垮整份成片；
+    # 与 episode_mix_status() 的 `ready = available > 0` 同一条判据，不是
+    # 另立标准。
+    missing_model_shot_nos = sorted(
+        shot_no for shot_no, shot_id in shot_id_by_no.items()
+        if _playable_model_candidate(conn, shot_id) is None
+    )
     pieces = _adopted_video_paths(episode_id)
     if not pieces:
         raise ValueError(
-            "本集当前还没有任何可播放的真实模型视频；"
-            "不会使用静态图片或静音片段冒充成片"
+            "本集当前还没有任何可播放的真实模型视频，上一版成片仍保留；"
+            "不会使用静态图片或静音片段冒充成片。请先在生成台完成至少一镜的"
+            "视频生成并等待其落盘后重试"
         )
 
     from app.video_playback import normalize_playback_rate
@@ -982,10 +1101,23 @@ def concatenate_episode(
         int(row["shot_no"]): normalize_playback_rate(row["playback_rate"])
         for row in rate_rows
     }
-    piece_specs = [
+    piece_specs_candidates = [
         (int(shot_no), path, rate_by_shot.get(int(shot_no), 1.0))
         for shot_no, path in pieces
     ]
+    # 逐候选做容器/时长可探测性预检：技术校验的正确作用是决定哪些镜头够格
+    # 入选候选集，不是让整份合成失败——探测失败的候选被排除出候选集并记入
+    # 跳过原因，其余合法候选继续参与拼接。这里探测一次后把结果传给下游的
+    # 归一化/拼接阶段复用，不重复调用 ffprobe。
+    piece_specs: list[tuple[int, str, float]] = []
+    probe_by_shot: dict[int, dict[str, Any]] = {}
+    for shot_no, vpath, rate in piece_specs_candidates:
+        try:
+            probe_by_shot[shot_no] = _probe_concat_media(vpath)
+        except ValueError as exc:
+            skip_reasons[str(shot_no)] = f"源片段容器/时长校验失败：{exc}"
+            continue
+        piece_specs.append((shot_no, vpath, rate))
     piece_shot_nos = [shot_no for shot_no, _path, _rate in piece_specs]
     all_shot_nos = [
         int(row["shot_no"])
@@ -994,6 +1126,19 @@ def concatenate_episode(
         ).fetchall()
     ]
     skipped_shot_nos = [shot_no for shot_no in all_shot_nos if shot_no not in set(piece_shot_nos)]
+    # skip_reasons 只保留这次真正被跳过的镜头，并给没有更具体原因（既没有
+    # manifest 权威校验失败、也没有容器探测失败——单纯是从没生成/仍在生成中）
+    # 的镜头补一条默认说明，不让前端拿到一个对不上号或缺失原因的字典。
+    skip_reasons = {
+        str(shot_no): skip_reasons.get(str(shot_no), "尚无已采纳且落盘可播放的真实视频")
+        for shot_no in skipped_shot_nos
+    }
+    if not piece_specs:
+        raise ValueError(
+            "本集当前没有任何镜头的源片段能通过容器/时长校验，上一版成片仍保留；"
+            "不会使用静态图片或静音片段冒充成片。可稍后重试，或在生成台重新生成"
+            "对应镜头"
+        )
     # 拿不到实测时长时，只累加本次真正参与拼接的镜头时长。
     duration_by_shot = {
         int(row["shot_no"]): float(row["duration_s"] or 0)
@@ -1010,11 +1155,13 @@ def concatenate_episode(
     final_path = _final_video_path(ep["project_id"], ep["episode_no"])
     started_at = time.perf_counter()
     common_result = {
-        "shots": len(pieces),
+        "shots": len(piece_specs),
         "ffmpeg_missing": False,
         "shots_total": len(all_shot_nos),
         "shots_skipped": len(skipped_shot_nos),
         "skipped_shot_nos": skipped_shot_nos,
+        "missing_model_shot_nos": missing_model_shot_nos,
+        "skip_reasons": skip_reasons,
         "included_shot_nos": piece_shot_nos,
         "partial": bool(skipped_shot_nos),
         "final_video_stale": False,
@@ -1056,6 +1203,7 @@ def concatenate_episode(
                     "included_shot_nos": piece_shot_nos,
                     "skipped_shot_nos": skipped_shot_nos,
                     "missing_model_shot_nos": missing_model_shot_nos,
+                    "skip_reasons": skip_reasons,
                 }
                 edit_report["mode"] = "final_edit"
                 edit_report["video_delivery_manifest"] = video_delivery_manifest
@@ -1093,72 +1241,102 @@ def concatenate_episode(
             final_edit_elapsed_s = time.perf_counter() - final_edit_started_at
             final_edit_failure = f"{type(exc).__name__}: {exc}"[:1000]
 
+    # probe_by_shot 已在候选预检阶段对每个入选片段探测过一次（未通过的候选
+    # 已被排除并记入 skip_reasons，不会走到这里）；这里直接复用，不重复调用
+    # ffprobe，也不会再因为单个片段的问题让整份合成失败。
     measured_total_dur = 0.0
     for shot_no, vpath, rate in piece_specs:
-        try:
-            source_probe = _probe_concat_media(vpath)
-        except ValueError as exc:
-            raise ValueError(
-                f"镜 {shot_no} 的源片段无法完成容器/时长校验，上一版成片仍保留：{exc}"
-            ) from exc
-        measured_total_dur += float(source_probe["duration_s"]) / rate
+        source_probe = probe_by_shot[shot_no]
+        # 预期时长以视频流为准：容器 duration 取音视频流较长者，源片段音轨普遍
+        # 比视频轨长几十毫秒，拿它当预期基准会把音频的漂移错记成时长膨胀。
+        measured_total_dur += float(source_probe["video_duration_s"]) / rate
+
+    from app.final_edit import FINAL_AUDIO_RATE, audio_normalize_filter
 
     # 用 concat demuxer 优先无重编码直粘（画质无损）；但 -c copy 要求各片段编码参数
     # （像素格式/timebase/SAR/profile）完全一致，否则会失败或花屏。一旦失败，回退重编码兜底。
+    #
+    # 拼接前逐镜先把音频归一：模型产出的源片段音轨是真实录音（不是无声占位），
+    # 采样率并不保证一致，逐镜时长也和视频流有几十毫秒的量级偏差。不归一直接
+    # -c copy 直粘，concat demuxer 会用首段音频的 timebase 解释后续所有音频包，
+    # 采样率一旦混用即把时长拉伸到秒级（超出时长门容差）；即使采样率一致，
+    # 逐镜偏差也会累积成音画不同步。draft 与 final_edit 共用同一套音频归一
+    # 逻辑（app.final_edit.audio_normalize_filter），不允许只有一条路径正确。
     with tempfile.TemporaryDirectory() as td:
         listfile = _P(td) / "list.txt"
         lines = []
         prepared_specs: list[tuple[int, str, float]] = []
         for shot_no, vpath, rate in piece_specs:
-            prepared_path = vpath
-            if abs(rate - 1.0) > 0.0001:
-                sped_path = _P(td) / f"shot-{shot_no}-x{rate:.2f}.mp4"
-                speed_cmd = [
-                    "ffmpeg", "-y", "-loglevel", "error", "-i", vpath,
-                    "-map", "0:v:0", "-map", "0:a?",
-                    "-vf", f"setpts=PTS/{rate:.6f}",
-                    "-af", f"atempo={rate:.6f}",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart",
-                    str(sped_path),
+            source_probe = probe_by_shot[shot_no]
+            video_duration_s = float(source_probe["video_duration_s"])
+            has_audio = bool(source_probe["has_audio"])
+            effective_duration = max(0.05, video_duration_s / rate)
+            speed_change = abs(rate - 1.0) > 0.0001
+            prepared_path = _P(td) / f"shot-{shot_no}-norm.mp4"
+            inputs = ["-i", vpath]
+            audio_label = "0:a"
+            if not has_audio:
+                inputs += [
+                    "-f", "lavfi", "-t", f"{effective_duration:.6f}",
+                    "-i", f"anullsrc=channel_layout=stereo:sample_rate={FINAL_AUDIO_RATE}",
                 ]
-                try:
-                    subprocess.run(
-                        speed_cmd, check=True, capture_output=True, timeout=concat_timeout_s,
-                    )
-                except subprocess.TimeoutExpired as exc:
-                    raise ValueError(
-                        f"镜 {shot_no} 的 {rate:g} 倍速定稿处理超时；上一版成片仍保留，可稍后重试"
-                    ) from exc
-                except subprocess.CalledProcessError as exc:
-                    detail = (exc.stderr or b"").decode("utf-8", "replace")[-500:]
-                    raise ValueError(
-                        f"镜 {shot_no} 的 {rate:g} 倍速定稿处理失败；上一版成片仍保留"
-                        + (f"：{detail}" if detail else "")
-                    ) from exc
-                if not sped_path.is_file() or sped_path.stat().st_size <= 0:
-                    raise ValueError(
-                        f"镜 {shot_no} 的 {rate:g} 倍速定稿未产出有效片段；上一版成片仍保留"
-                    )
-                prepared_path = str(sped_path)
-            prepared_specs.append((shot_no, prepared_path, rate))
+                audio_label = "1:a"
+            video_args = (
+                ["-vf", f"setpts=PTS/{rate:.6f}", "-c:v", "libx264", "-preset", "veryfast",
+                 "-crf", "18", "-pix_fmt", "yuv420p"]
+                if speed_change else ["-c:v", "copy"]
+            )
+            audio_filter = audio_normalize_filter(
+                atempo_rate=rate if (speed_change and has_audio) else None,
+                duration_s=effective_duration,
+            )
+            prepare_cmd = [
+                "ffmpeg", "-y", "-loglevel", "error", *inputs,
+                "-map", "0:v:0", "-map", audio_label,
+                *video_args,
+                "-af", audio_filter,
+                "-c:a", "aac", "-ar", str(FINAL_AUDIO_RATE),
+                "-movflags", "+faststart", str(prepared_path),
+            ]
+            try:
+                subprocess.run(
+                    prepare_cmd, check=True, capture_output=True, timeout=concat_timeout_s,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ValueError(
+                    f"镜 {shot_no} 的音视频归一处理超时；上一版成片仍保留，可稍后重试"
+                ) from exc
+            except subprocess.CalledProcessError as exc:
+                detail = (exc.stderr or b"").decode("utf-8", "replace")[-500:]
+                raise ValueError(
+                    f"镜 {shot_no} 的音视频归一处理失败；上一版成片仍保留"
+                    + (f"：{detail}" if detail else "")
+                ) from exc
+            if not prepared_path.is_file() or prepared_path.stat().st_size <= 0:
+                raise ValueError(
+                    f"镜 {shot_no} 的音视频归一处理未产出有效片段；上一版成片仍保留"
+                )
+            prepared_specs.append((shot_no, str(prepared_path), rate))
             # concat demuxer 要求绝对路径并转义单引号
-            safe = prepared_path.replace("'", "'\\''")
+            safe = str(prepared_path).replace("'", "'\\''")
             lines.append(f"file '{safe}'")
         listfile.write_text("\n".join(lines), encoding="utf-8")
-        silent_video = _P(td) / "concat.mp4"
+        concat_output = _P(td) / "concat.mp4"
         concat_in = ["ffmpeg", "-y", "-loglevel", "error",
                      "-f", "concat", "-safe", "0", "-i", str(listfile)]
         try:
             subprocess.run(
-                concat_in + ["-c", "copy", "-movflags", "+faststart", str(silent_video)],
+                concat_in + ["-c", "copy", "-movflags", "+faststart", str(concat_output)],
                 check=True, capture_output=True, timeout=concat_timeout_s)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            # 片段编码参数不一致导致 -c copy 失败 → 重编码兜底（画质损失极小，但保证能拼成整集）
+            # 片段编码参数不一致导致 -c copy 失败 → 重编码兜底（画质损失极小，但保证能拼成整集）。
+            # 拼接输入已经是上面逐镜归一过的片段，这里显式声明相同的音频目标规格，
+            # 重编码回退与 -c copy 快速路径共享同一套音频归一结果，不会走了兜底就漏归一。
             try:
                 subprocess.run(
                     concat_in + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(silent_video)],
+                                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", str(FINAL_AUDIO_RATE),
+                                 "-movflags", "+faststart", str(concat_output)],
                     check=True, capture_output=True, timeout=concat_timeout_s)
             except subprocess.TimeoutExpired as exc:
                 raise ValueError(
@@ -1170,17 +1348,17 @@ def concatenate_episode(
                     "整集合成失败，上一版成片仍保留，可检查片段后重试"
                     + (f"：{detail}" if detail else "")
                 ) from exc
-        if not silent_video.is_file() or silent_video.stat().st_size <= 0:
+        if not concat_output.is_file() or concat_output.stat().st_size <= 0:
             raise ValueError("ffmpeg 未产出有效成片，上一版成片仍保留，可检查片段后重试")
         total_dur = _validate_concat_output(
-            silent_video,
+            concat_output,
             expected_duration_s=measured_total_dur,
             decode_timeout_s=concat_timeout_s,
         )
         publish_candidate = final_path.with_name(
             f".{final_path.name}.{new_id('candidate')}.tmp"
         )
-        atomic_copy(silent_video, publish_candidate)
+        atomic_copy(concat_output, publish_candidate)
 
     fallback_edit_report = {
         "ok": False,
@@ -1198,6 +1376,7 @@ def concatenate_episode(
             "included_shot_nos": piece_shot_nos,
             "skipped_shot_nos": skipped_shot_nos,
             "missing_model_shot_nos": missing_model_shot_nos,
+            "skip_reasons": skip_reasons,
         },
         "video_delivery_manifest": video_delivery_manifest,
         "video_delivery_manifest_hash": video_delivery_manifest["manifest_hash"],
