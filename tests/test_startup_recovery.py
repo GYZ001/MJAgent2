@@ -282,30 +282,6 @@ def test_single_view_redo_spawn_failure_cancels_created_runs(tmp_path, monkeypat
     assert statuses == ["CANCELLED", "CANCELLED"]
 
 
-@pytest.mark.asyncio
-async def test_scene_review_spawn_failure_does_not_leave_false_queued_batch(
-    tmp_path, monkeypatch,
-) -> None:
-    conn = _fresh_database(tmp_path, monkeypatch)
-
-    def fail_spawn(_kind, _key, coro, *, project_id=None):
-        coro.close()
-        raise RuntimeError("event loop unavailable")
-
-    monkeypatch.setattr(task_registry, "spawn", fail_spawn)
-
-    with pytest.raises(HTTPException) as exc_info:
-        await api.start_scene_history_review("p1")
-
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.detail["code"] == "SCENE_REVIEW_START_FAILED"
-    batch = conn.execute(
-        "SELECT status,finished_at FROM scene_review_batches ORDER BY created_at DESC LIMIT 1"
-    ).fetchone()
-    assert batch["status"] == "failed"
-    assert batch["finished_at"] is not None
-
-
 def test_character_reference_restart_preserves_target_and_parent(tmp_path, monkeypatch) -> None:
     conn = _fresh_database(tmp_path, monkeypatch)
     conn.execute(
@@ -832,7 +808,6 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
     monkeypatch.setattr(api, "recover_character_ref_tasks", recover("character_references"))
     monkeypatch.setattr(api, "recover_portrait_view_redo_tasks", recover("portrait_view_redo"))
     monkeypatch.setattr(api, "recover_scene_ref_tasks", recover("scene_references"))
-    monkeypatch.setattr(api, "recover_scene_review_tasks", recover("scene_history_review"))
     monkeypatch.setattr(planning, "recover_plan_tasks", recover("episode_mapping"))
     monkeypatch.setattr(api, "recover_screenplay_tasks", recover("screenplay"))
     monkeypatch.setattr(api, "recover_storyboard_tasks", recover("storyboard"))
@@ -853,7 +828,7 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
         "media", "media_cleanup_outbox",
         "partial_cleanup", "rejected_media", "worker_start", "lease_sweeper",
         "character_bible", "character_references", "portrait_view_redo",
-        "scene_references", "scene_history_review", "episode_mapping",
+        "scene_references", "episode_mapping",
         "screenplay", "storyboard", "video_completion", "project_video_completion", "delivery",
     ]
     assert {
@@ -864,7 +839,6 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
         "abandoned_partial_files_removed": 2, "character_bible": 1,
         "rejected_media_purged": {"artifacts": 2, "records": 3, "files": 2},
         "character_references": 1, "portrait_view_redo": 1, "scene_references": 1,
-        "scene_history_review": 1,
         "episode_mapping": 1, "screenplay": 1, "storyboard": 1,
         "video_completion": 1, "project_video_completion": 1, "delivery": 1,
     }
@@ -930,7 +904,6 @@ def test_startup_recovery_isolates_failed_step_and_continues(monkeypatch) -> Non
     monkeypatch.setattr(api, "recover_portrait_view_redo_tasks", ok("portrait_view_redo"))
     monkeypatch.setattr(api, "recover_scene_ref_tasks", ok("scene_references"))
     monkeypatch.setattr(api, "recover_scene_view_redo_tasks", ok("scene_view_redo"))
-    monkeypatch.setattr(api, "recover_scene_review_tasks", ok("scene_history_review"))
     monkeypatch.setattr(planning, "recover_plan_tasks", ok("episode_mapping"))
     monkeypatch.setattr(api, "recover_screenplay_tasks", fail_screenplay)
     monkeypatch.setattr(api, "recover_storyboard_tasks", ok("storyboard"))

@@ -11,14 +11,8 @@ from app.db import get_conn
 _CONFIRMED_EPISODE_STATUSES = frozenset({"confirmed", "generating", "done", "mixed"})
 
 
-def current_adopted_video_delivery_manifest(
-    episode_id: str,
-    *,
-    conn=None,
-) -> dict[str, Any]:
-    """Return a content-addressed snapshot of every adopted video."""
-    db = conn or get_conn()
-    rows = db.execute(
+def _adopted_video_authority_row_query(episode_id: str, db) -> list[Any]:
+    return db.execute(
         """SELECT s.id AS shot_id,s.shot_no,s.adopted_version_id,
                   v.status AS version_status,v.video_path,v.artifact_id,v.playback_rate,
                   v.technical_validation_json
@@ -27,82 +21,154 @@ def current_adopted_video_delivery_manifest(
             WHERE s.episode_id=? ORDER BY s.shot_no""",
         (episode_id,),
     ).fetchall()
+
+
+def _adopted_video_authority_for_row(row, *, conn) -> dict[str, Any]:
+    """Validate one shot's adopted-video authority; raises ValueError if invalid.
+
+    Shared by the strict (all-shots) and partial (skip-tolerant) manifest
+    builders below so both apply the exact same per-shot technical/authority
+    gate — only what happens with a failing row differs between the two.
+    """
+    path = Path(str(row["video_path"] or ""))
+    if (
+        not row["adopted_version_id"]
+        or row["version_status"] != "succeeded"
+        or not path.is_file()
+        or not row["artifact_id"]
+    ):
+        raise ValueError(f"镜 {row['shot_no']} 缺少已采纳的有效视频权威")
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    from app.evidence import repository as evidence_repository
+
+    artifact = evidence_repository.get_artifact(str(row["artifact_id"]), conn=conn)
+    if (
+        artifact is None
+        or artifact.get("type") != "shot_video"
+        or artifact.get("scope_type") != "shot"
+        or artifact.get("scope_id") != str(row["shot_id"])
+        # Automatic best-candidate adoption retains a validated T3
+        # Artifact; human adoption promotes it to approved. Both are
+        # authoritative only with the exact technical gate below.
+        or artifact.get("status") not in {"validated", "approved"}
+        or artifact.get("contract_version") != "video-2.0.0"
+        or Path(str(artifact.get("file_path") or "")).resolve() != path.resolve()
+        or not isinstance(artifact.get("content"), dict)
+        or str(artifact["content"].get("version_id") or "")
+        != str(row["adopted_version_id"])
+    ):
+        raise ValueError(f"镜 {row['shot_no']} 的视频 Artifact 已失效")
+    try:
+        technical = json.loads(row["technical_validation_json"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"镜 {row['shot_no']} 的视频技术门禁证据损坏") from exc
+    technical_evaluation = conn.execute(
+        """SELECT status,hard_gate_passed FROM evaluations
+             WHERE artifact_id=? AND evaluator_type='file'
+               AND evaluator_name='video_technical_validator'
+             ORDER BY created_at DESC LIMIT 1""",
+        (row["artifact_id"],),
+    ).fetchone()
+    if (
+        technical.get("passed") is not True
+        or technical_evaluation is None
+        or technical_evaluation["status"] != "passed"
+        or int(technical_evaluation["hard_gate_passed"] or 0) != 1
+    ):
+        raise ValueError(f"镜 {row['shot_no']} 的视频技术门禁未通过")
+    try:
+        actual_artifact_hash = evidence_repository.content_hash(
+            artifact.get("content"),
+            artifact.get("file_path"),
+        )
+    except OSError as exc:
+        raise ValueError(f"镜 {row['shot_no']} 的视频 Artifact 文件证据缺失") from exc
+    if actual_artifact_hash != str(artifact.get("content_hash") or ""):
+        raise ValueError(f"镜 {row['shot_no']} 的视频 Artifact 实际内容已漂移")
+    return {
+        "shot_id": str(row["shot_id"]),
+        "shot_no": int(row["shot_no"]),
+        "adopted_version_id": str(row["adopted_version_id"]),
+        "artifact_id": str(row["artifact_id"]),
+        "artifact_hash": actual_artifact_hash,
+        "file_sha256": digest.hexdigest(),
+        "playback_rate": float(row["playback_rate"] or 1.0),
+    }
+
+
+def current_adopted_video_delivery_manifest(
+    episode_id: str,
+    *,
+    conn=None,
+) -> dict[str, Any]:
+    """Return a content-addressed snapshot of every adopted video.
+
+    All-or-nothing: used by the final client-facing delivery package (build/
+    publish/download revalidation in app.delivery and the download route in
+    app.orchestration.api), which must not ship a package missing any shot.
+    Concatenation at the 成片台 has different semantics (partial concat is
+    the mainline case) and must use
+    `current_partial_adopted_video_delivery_manifest` below instead — do not
+    loosen this function to accommodate it.
+    """
+    db = conn or get_conn()
+    rows = _adopted_video_authority_row_query(episode_id, db)
     if not rows:
         raise ValueError("本集没有可交付镜头")
-    items: list[dict[str, Any]] = []
-    for row in rows:
-        path = Path(str(row["video_path"] or ""))
-        if (
-            not row["adopted_version_id"]
-            or row["version_status"] != "succeeded"
-            or not path.is_file()
-            or not row["artifact_id"]
-        ):
-            raise ValueError(f"镜 {row['shot_no']} 缺少已采纳的有效视频权威")
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        from app.evidence import repository as evidence_repository
-
-        artifact = evidence_repository.get_artifact(str(row["artifact_id"]), conn=db)
-        if (
-            artifact is None
-            or artifact.get("type") != "shot_video"
-            or artifact.get("scope_type") != "shot"
-            or artifact.get("scope_id") != str(row["shot_id"])
-            # Automatic best-candidate adoption retains a validated T3
-            # Artifact; human adoption promotes it to approved. Both are
-            # authoritative only with the exact technical gate below.
-            or artifact.get("status") not in {"validated", "approved"}
-            or artifact.get("contract_version") != "video-2.0.0"
-            or Path(str(artifact.get("file_path") or "")).resolve() != path.resolve()
-            or not isinstance(artifact.get("content"), dict)
-            or str(artifact["content"].get("version_id") or "")
-            != str(row["adopted_version_id"])
-        ):
-            raise ValueError(f"镜 {row['shot_no']} 的视频 Artifact 已失效")
-        try:
-            technical = json.loads(row["technical_validation_json"] or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ValueError(f"镜 {row['shot_no']} 的视频技术门禁证据损坏") from exc
-        technical_evaluation = db.execute(
-            """SELECT status,hard_gate_passed FROM evaluations
-                 WHERE artifact_id=? AND evaluator_type='file'
-                   AND evaluator_name='video_technical_validator'
-                 ORDER BY created_at DESC LIMIT 1""",
-            (row["artifact_id"],),
-        ).fetchone()
-        if (
-            technical.get("passed") is not True
-            or technical_evaluation is None
-            or technical_evaluation["status"] != "passed"
-            or int(technical_evaluation["hard_gate_passed"] or 0) != 1
-        ):
-            raise ValueError(f"镜 {row['shot_no']} 的视频技术门禁未通过")
-        try:
-            actual_artifact_hash = evidence_repository.content_hash(
-                artifact.get("content"),
-                artifact.get("file_path"),
-            )
-        except OSError as exc:
-            raise ValueError(f"镜 {row['shot_no']} 的视频 Artifact 文件证据缺失") from exc
-        if actual_artifact_hash != str(artifact.get("content_hash") or ""):
-            raise ValueError(f"镜 {row['shot_no']} 的视频 Artifact 实际内容已漂移")
-        items.append({
-            "shot_id": str(row["shot_id"]),
-            "shot_no": int(row["shot_no"]),
-            "adopted_version_id": str(row["adopted_version_id"]),
-            "artifact_id": str(row["artifact_id"]),
-            "artifact_hash": actual_artifact_hash,
-            "file_sha256": digest.hexdigest(),
-            "playback_rate": float(row["playback_rate"] or 1.0),
-        })
+    items = [_adopted_video_authority_for_row(row, conn=db) for row in rows]
     canonical = json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return {
         "manifest_version": "adopted-video-delivery.v1",
         "episode_id": episode_id,
         "items": items,
+        "manifest_hash": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+    }
+
+
+def current_partial_adopted_video_delivery_manifest(
+    episode_id: str,
+    *,
+    conn=None,
+) -> dict[str, Any]:
+    """Snapshot every adopted video that is currently valid, skipping the rest.
+
+    合成（成片台）是部分交付操作：任意一镜没有可用的已采纳视频权威（从没生成、
+    生成中、生成失败、还是采纳指向已失效/未过技术校验的版本），只把该镜透明
+    跳过，不让整份合成失败。至少一镜通过才允许合成——语义与
+    app.media_exec.concat.episode_mix_status 的 `ready = available > 0` 对齐。
+    每一镜仍然要跑与 current_adopted_video_delivery_manifest 完全相同的技术/
+    权威校验（_adopted_video_authority_for_row）；不同的只是校验失败时"跳过
+    这一镜"而不是"整次失败"。
+    """
+    db = conn or get_conn()
+    rows = _adopted_video_authority_row_query(episode_id, db)
+    if not rows:
+        raise ValueError("本集没有可交付镜头")
+    items: list[dict[str, Any]] = []
+    skipped_shot_nos: list[int] = []
+    skip_reasons: dict[str, str] = {}
+    for row in rows:
+        try:
+            items.append(_adopted_video_authority_for_row(row, conn=db))
+        except ValueError as exc:
+            shot_no = int(row["shot_no"])
+            skipped_shot_nos.append(shot_no)
+            skip_reasons[str(shot_no)] = str(exc)
+    if not items:
+        raise ValueError(
+            "本集当前没有任何镜头具备已采纳且通过技术校验的有效视频，无法合成；"
+            "请先在生成台完成至少一镜的视频生成，等待其通过技术校验并被采纳后重试"
+        )
+    canonical = json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return {
+        "manifest_version": "adopted-video-delivery-partial.v1",
+        "episode_id": episode_id,
+        "items": items,
+        "skipped_shot_nos": sorted(skipped_shot_nos),
+        "skip_reasons": skip_reasons,
         "manifest_hash": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
     }
 

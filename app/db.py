@@ -422,47 +422,6 @@ CREATE TABLE IF NOT EXISTS scene_reference_views (
     FOREIGN KEY(base_view_id) REFERENCES scene_reference_views(id)
 );
 CREATE INDEX IF NOT EXISTS idx_scene_ref_views_scene ON scene_reference_views(scene_reference_id, view_role);
-CREATE TABLE IF NOT EXISTS scene_review_batches (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'queued',
-    policy_version TEXT NOT NULL,
-    rule_version TEXT NOT NULL,
-    baseline_snapshot_json TEXT NOT NULL DEFAULT '[]',
-    incremental_snapshot_json TEXT NOT NULL DEFAULT '[]',
-    cutoff_at REAL,
-    denominator INTEGER NOT NULL DEFAULT 0,
-    evaluated INTEGER NOT NULL DEFAULT 0,
-    passed INTEGER NOT NULL DEFAULT 0,
-    warning INTEGER NOT NULL DEFAULT 0,
-    hard_failed INTEGER NOT NULL DEFAULT 0,
-    unverified INTEGER NOT NULL DEFAULT 0,
-    disposition_count INTEGER NOT NULL DEFAULT 0,
-    shadow_mode INTEGER NOT NULL DEFAULT 1,
-    block_new_references INTEGER NOT NULL DEFAULT 0,
-    run_id TEXT,
-    started_at REAL,
-    finished_at REAL,
-    created_at REAL NOT NULL,
-    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
-);
-CREATE TABLE IF NOT EXISTS scene_review_items (
-    id TEXT PRIMARY KEY,
-    batch_id TEXT NOT NULL,
-    scene_reference_id TEXT NOT NULL,
-    adopted_version TEXT NOT NULL,
-    scene_name TEXT NOT NULL,
-    old_status TEXT,
-    result_status TEXT NOT NULL DEFAULT 'queued',
-    evidence_json TEXT,
-    disposition TEXT NOT NULL DEFAULT 'pending',
-    evaluated_at REAL,
-    UNIQUE(batch_id, scene_reference_id, adopted_version),
-    FOREIGN KEY(batch_id) REFERENCES scene_review_batches(id) ON DELETE CASCADE,
-    FOREIGN KEY(scene_reference_id) REFERENCES scene_references(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_scene_review_batches_project ON scene_review_batches(project_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_scene_review_items_batch ON scene_review_items(batch_id, result_status);
 CREATE INDEX IF NOT EXISTS idx_chapters_project ON chapters(project_id, idx);
 CREATE INDEX IF NOT EXISTS idx_episodes_project ON episodes(project_id, episode_no);
 CREATE INDEX IF NOT EXISTS idx_shots_episode ON shots(episode_id, shot_no);
@@ -1186,26 +1145,6 @@ CREATE TABLE IF NOT EXISTS video_generation_attempts (
 );
 CREATE INDEX IF NOT EXISTS idx_video_attempts_plan
     ON video_generation_attempts(shot_plan_id, attempt_no);
-
-CREATE TABLE IF NOT EXISTS video_mode_qa_results (
-    id TEXT PRIMARY KEY,
-    shot_plan_id TEXT NOT NULL,
-    version_id TEXT NOT NULL,
-    planned_mode TEXT NOT NULL,
-    actual_mode TEXT NOT NULL,
-    technical_success INTEGER NOT NULL DEFAULT 0,
-    semantic_success INTEGER,
-    boundary_start_match REAL,
-    boundary_end_match REAL,
-    result_json TEXT NOT NULL DEFAULT '{}',
-    created_at REAL NOT NULL,
-    UNIQUE(version_id, actual_mode),
-    FOREIGN KEY(shot_plan_id)
-        REFERENCES shot_video_generation_plans(id) ON DELETE CASCADE,
-    FOREIGN KEY(version_id) REFERENCES shot_versions(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_video_mode_qa_plan
-    ON video_mode_qa_results(shot_plan_id, created_at DESC);
 """
 
 
@@ -1757,6 +1696,12 @@ MIGRATIONS = (
     # 调用方必须查 IS NULL 而不是查 spans 是否为空（CLAUDE.md：空集合不等于无需
     # 检查）。见 app.source_paratext.chapter_paratext_offsets。
     "ALTER TABLE chapters ADD COLUMN paratext_json TEXT",
+    # 风格配置后「场景图跟人物定妆照一起自动出图」这条链路的待办票据：人物谱
+    # 生成/重生成成功时置 1（app.domain.bible_ops._bible_task），场景清单
+    # （bible.scenes）就绪后由 _scene_bible_task 消费——自动触发场景图批量生成，
+    # 不必等用户之后碰巧访问场景库页面才启动（判据挂在这张票据本身，不挂在
+    # 用户会不会访问某个页面上）。消费后立即清零，保证同一次确认只触发一次。
+    "ALTER TABLE projects ADD COLUMN pending_scene_regen INTEGER NOT NULL DEFAULT 0",
 )
 
 
@@ -1946,7 +1891,19 @@ def _backup_before_integrity_repair(conn: sqlite3.Connection, stamp: str) -> str
 
 
 def _reconcile_video_slot_activity(conn: sqlite3.Connection) -> int:
-    """Separate one local generation slot from every accepted provider task."""
+    """Separate one local generation slot from every accepted provider task.
+
+    ``waiting_human`` 的状态列表口径必须和 ``_set_job`` 的 terminal 集合保持
+    一致（两处都排除 waiting_human，把它当死路对待），否则这个在每次
+    ``init_db()``/后端重启时都会跑一遍的修复例程会在下一次重启时把刚释放的
+    ``video_slot_active`` 重新置回 1，悄悄撤销 ``_set_job``/三处手写 SQL 站点
+    对镜头级独占锁的修复——那正是「点重新生成永远没反应」这个死锁被发现的
+    方式。waiting_human 且仍有未结清供应商欠款（``provider_create_state=
+    'accepted'`` 且未在 ``provider_video_budget_claims`` 里关闭）的任务不会
+    被这条口径遗漏：它们仍会命中下面 WHERE 的第二个 OR 分支，被当作
+    "not owner" 的历史任务转回 waiting_provider 继续轮询直到欠款结清，而不
+    是无限期占着本已释放的槽位。
+    """
     if (
         "video_slot_active" not in _column_names(conn, "jobs")
         or "video_slot_active" not in _column_names(conn, "shot_versions")
@@ -1985,7 +1942,7 @@ def _reconcile_video_slot_activity(conn: sqlite3.Connection) -> int:
                          AND (
                            j.status IN (
                              'queued','running','waiting_provider','waiting_retry',
-                             'waiting_human','waiting','paused'
+                             'waiting','paused'
                            )
                            OR (j.status='stale' AND j.provider_non_cancellable=1)
                          )
@@ -2000,7 +1957,7 @@ def _reconcile_video_slot_activity(conn: sqlite3.Connection) -> int:
                     AND (
                       j.status IN (
                         'queued','running','waiting_provider','waiting_retry',
-                        'waiting_human','waiting','paused'
+                        'waiting','paused'
                       )
                       OR (j.status='stale' AND j.provider_non_cancellable=1)
                     )
@@ -2416,6 +2373,22 @@ def _drop_obsolete_storyboard_columns(conn: sqlite3.Connection) -> None:
             pass
 
 
+def _drop_obsolete_qa_tables(conn: sqlite3.Connection) -> None:
+    """VLM 图片/视频质检整体下线：删除三张只服务于该功能的表。
+
+    scene_review_batches/scene_review_items 是场景历史包批量复验队列，
+    video_mode_qa_results 是视频模式语义评分落库——两者的写入方（app.domain.
+    bible_ops._run_scene_review_batch / app.media_exec.run_job._persist_video_mode_qa）
+    已随质检调用一并删除，留着空表没有任何读者。用 DROP TABLE IF EXISTS 而非
+    ALTER ... DROP COLUMN，因为这是整表退场，不涉及同表其它字段的位置对齐风险。
+    """
+    for table in ("scene_review_items", "scene_review_batches", "video_mode_qa_results"):
+        try:
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+        except sqlite3.OperationalError:
+            pass
+
+
 def _backfill_multiview_assets(conn: sqlite3.Connection) -> None:
     """旧单图资产回填为多视角子记录；幂等可重复执行。"""
     stamp = now()
@@ -2599,6 +2572,7 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
     _clear_orphan_storyboard_pack_placeholder_versions(conn)
     _repair_dangling_video_adoption(conn)
     _drop_obsolete_storyboard_columns(conn)
+    _drop_obsolete_qa_tables(conn)
     # 视频补齐授权表；历史分镜自动确认授权会在表初始化时清理。
     try:
         from app.completion_grant import ensure_completion_grants_table
@@ -2866,6 +2840,15 @@ def set_setting(key: str, value: str) -> None:
 
 
 def _trim_for_call_log(value: Any, *, max_string: int = 120_000) -> Any:
+    """按 120,000 字符裁单个字符串，超限追加 ``"...[truncated N chars]"``。
+
+    只作用于落库前的 ``response_json``/``request_json`` 快照，不影响
+    ``provider_calls.received_chars``——后者在 ``app/hiagent.py``
+    ``_stream_chat_completion`` 里逐帧累加、不经这里裁剪。核对两者时若忽略
+    这条裁剪，会把「存储裁剪」误读成「received_chars 计数多算」（已核实：
+    2026-08-29 抽查全部 status=OK 的 chat 记录，把裁剪标记还原成真实长度后
+    两者严格相等）。
+    """
     if isinstance(value, dict):
         return {k: _trim_for_call_log(v, max_string=max_string) for k, v in value.items()}
     if isinstance(value, list):

@@ -6,6 +6,7 @@ import {
   deliveryStatusLabel,
   deliveryWarningLabel,
   finalEditStatusLabel,
+  finalSkipSummary,
   formatDeliveryTime,
   nextCinemaTab,
   reconcileMixStatus,
@@ -92,6 +93,25 @@ describe('成片台交付文案', () => {
     })).toContain('快速阶段拼接')
     expect(finalEditStatusLabel({ ok: false, fallback: 'draft_concat', error: 'ffmpeg failed' }))
       .toContain('基础合成降级')
+  })
+
+  it('部分合成必须把跳过的镜号和原因明确展示给用户，不能静默少几镜', () => {
+    expect(finalSkipSummary(null)).toBeNull()
+    expect(finalSkipSummary(undefined)).toBeNull()
+    expect(finalSkipSummary({ ok: true, timeline: { partial: false, skipped_shot_nos: [] } }))
+      .toBeNull()
+    const summary = finalSkipSummary({
+      ok: false,
+      timeline: {
+        partial: true,
+        skipped_shot_nos: [3, 5],
+        skip_reasons: { '3': '镜 3 缺少已采纳的有效视频权威', '5': '尚无已采纳且落盘可播放的真实视频' },
+      },
+    })
+    expect(summary).toContain('第 3 镜')
+    expect(summary).toContain('镜 3 缺少已采纳的有效视频权威')
+    expect(summary).toContain('第 5 镜')
+    expect(summary).toContain('尚无已采纳且落盘可播放的真实视频')
   })
 })
 

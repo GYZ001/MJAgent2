@@ -704,6 +704,21 @@ def _outgoing_transition_context(conn, shot_row) -> dict | None:
     }
 
 
+def _reused_reason_for_status(status: str | None) -> str:
+    """把复用命中时挂着的实际状态翻成前端能诚实转述的原因。
+
+    不写"输入未变化"这类猜测性文案——调用方从未真正比较过输入；这里只
+    如实转述"为什么这次没有新建"：已交付、仍在自动处理中、或已经卡死转
+    人工（正常情况下 waiting_human 不会再落到这里，因为它已从两层复用判据
+    里都拿掉了；留着这个分支是防御性的，万一将来又出现别的持锁路径）。
+    """
+    if status == "succeeded":
+        return "succeeded"
+    if status == "waiting_human":
+        return "stuck_needs_human"
+    return "in_flight"
+
+
 def _begin_video_preflight_job(
     shot_id: str,
     *,
@@ -1314,6 +1329,7 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
             "job_id": preflight_claim["job_id"],
             "task_accepted": True,
             "active": True,
+            "reused_reason": _reused_reason_for_status(preflight_claim.get("status")),
         }
         if preflight_claim.get("version_id"):
             result["version_id"] = preflight_claim["version_id"]
@@ -1844,9 +1860,12 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     # must recover the exact version/job instead of relying on the outer bus.
     if not reroll or operation_idempotency_key:
         # 复用成功版；同时挡住仍在排队/运行中的同键任务，避免双击重复付费。
+        # waiting_human 不在这里：它是死路（既不是"进行中"也不是"已交付"），
+        # 把它当可复用会让同指纹的重新生成永远指回同一个卡死版本（见
+        # CLAUDE.md「Gates and Criteria」）。
         reusable_statuses = [
             "succeeded", "queued", "running", "waiting_provider",
-            "waiting_retry", "waiting_human", "paused_budget", "paused",
+            "waiting_retry", "paused_budget", "paused",
         ]
         if supervisor_run_id:
             reusable_statuses.append("abandoned")
@@ -1858,7 +1877,11 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
             "LIMIT 1",
             (shot_id, key, *reusable_statuses)).fetchone()
         if existing:
-            result = {"reused": True, "version_id": existing["id"]}
+            result = {
+                "reused": True,
+                "version_id": existing["id"],
+                "reused_reason": _reused_reason_for_status(existing["status"]),
+            }
             if existing["status"] in {"paused", "abandoned"}:
                 resumed = _resume_reused_paused_job(
                     existing["id"],

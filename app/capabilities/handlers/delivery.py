@@ -16,15 +16,28 @@ async def concatenate(args: I.EpisodeScopedInput) -> CommandResult:
     )
     try:
         from app.downstream_authority import (
-            current_adopted_video_delivery_manifest,
+            current_partial_adopted_video_delivery_manifest,
             verify_current_storyboard_release_authority,
         )
+
+        # 方案 B：合成前自动采纳每镜未采纳但有可用真实候选的最新成功版本
+        # （用户原话："只要它读到视频生成完了就可以合成啊"）。必须排在下面
+        # release_authority/video_delivery_manifest 取样之前——这两份快照会
+        # 被冻结进 claim_concat_operation 的幂等/CAS 记录，若采纳发生在冻结
+        # 之后，_assert_concat_sources_current 会把这次自己造成的新采纳误判
+        # 成"发布前已采纳视频发生漂移"，合成会打自己的脸失败。
+        worker._auto_adopt_playable_candidates_before_mix(args.episode_id)
 
         conn = worker.get_conn()
         release_authority = verify_current_storyboard_release_authority(
             args.episode_id, conn=conn,
         )
-        video_delivery_manifest = current_adopted_video_delivery_manifest(
+        # 部分合成是主流程：任意一镜没有可用的已采纳视频权威（从没生成、生成
+        # 中、生成失败、或采纳指向已失效/未过技术校验的版本）只把该镜透明
+        # 跳过，不让整份合成失败。只有本集当前一镜可用视频都没有时，这里才
+        # 会抛出 ValueError（见 current_partial_adopted_video_delivery_manifest
+        # 的空 items 分支），从而被下面的 except ValueError 转成明确拦截。
+        video_delivery_manifest = current_partial_adopted_video_delivery_manifest(
             args.episode_id, conn=conn,
         )
         claim_token, replay = worker.claim_concat_operation(

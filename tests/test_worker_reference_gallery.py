@@ -274,7 +274,11 @@ def test_generated_reference_gallery_cannot_change_enqueue_idempotency(monkeypat
     conn.commit()
 
     unchanged = worker.enqueue_shot("s1")
-    assert unchanged == {"reused": True, "version_id": first["version_id"]}
+    assert unchanged == {
+        "reused": True,
+        "version_id": first["version_id"],
+        "reused_reason": "succeeded",
+    }
 
     refs[1]["selectedForSeedance"] = True
     refs[1]["deleted"] = False
@@ -292,7 +296,11 @@ def test_generated_reference_gallery_cannot_change_enqueue_idempotency(monkeypat
     conn.commit()
 
     changed = worker.enqueue_shot("s1")
-    assert changed == {"reused": True, "version_id": first["version_id"]}
+    assert changed == {
+        "reused": True,
+        "version_id": first["version_id"],
+        "reused_reason": "succeeded",
+    }
 
     new_meta = json.loads(conn.execute(
         "SELECT image_inputs FROM shot_versions WHERE id=?", (changed["version_id"],)

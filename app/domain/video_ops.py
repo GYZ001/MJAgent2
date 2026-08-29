@@ -2580,28 +2580,6 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
     qualification = _review_assert_shot_positive(
         shot_id, body.get("qualification_version"),
     )
-    # 按视频质检问题重生：取「当前采用版 / 最新成功版」的问题清单（必要时现场跑质检），
-    # 作为本次必须改正项写入 prompt，避免模型再犯同样的错。
-    critique: list[str] | None = None
-    critique_sources: list[dict] = []
-    if body.get("with_critique"):
-        ref = None
-        if shot_row["adopted_version_id"]:
-            ref = conn.execute("SELECT id FROM shot_versions WHERE id=? AND status='succeeded'",
-                               (shot_row["adopted_version_id"],)).fetchone()
-        if not ref:
-            ref = conn.execute(
-                """SELECT id FROM shot_versions
-                   WHERE shot_id=? AND status='succeeded'
-                     AND NOT (
-                       json_valid(image_inputs)
-                       AND COALESCE(json_extract(image_inputs,'$.delivery_fallback'),0)=1
-                     )
-                   ORDER BY version_no DESC LIMIT 1""",
-                (shot_id,)).fetchone()
-        if ref:
-            critique = await worker.critique_version(ref["id"])
-            critique_sources.append({"source": "video_qa", "version_id": ref["id"]})
     from app.video_plan import (
         VideoPlanValidationError,
         create_local_replan_revision,
@@ -2618,17 +2596,12 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
         )
         if (
             body.get("reroll")
-            or body.get("with_critique")
             or body.get("prompt_override")
         ):
             replan_reason = (
-                "critique_guided_redo"
-                if body.get("with_critique")
-                else (
-                    "prompt_override_redo"
-                    if body.get("prompt_override")
-                    else "single_shot_reroll"
-                )
+                "prompt_override_redo"
+                if body.get("prompt_override")
+                else "single_shot_reroll"
             )
             plan = create_local_replan_revision(
                 shot_id,
@@ -2653,10 +2626,9 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
             shot_id,
             prompt_override=body.get("prompt_override"),
             extra_negative=body.get("extra_negative"),
-            reroll=bool(body.get("reroll")) or bool(body.get("with_critique")),
-            critique=critique, after_shot_id=after,
+            reroll=bool(body.get("reroll")),
+            after_shot_id=after,
             dependency_snapshot=qualification,
-            critique_sources=critique_sources,
             operation_idempotency_key=body.get("idempotency_key"),
             operation_request_fingerprint=body.get("operation_request_fingerprint"),
             operation_claim_token=body.get("operation_claim_token"))
@@ -2675,7 +2647,6 @@ async def generate_shot(shot_id: str, body: dict | None = None):
             "shot_id": shot_id,
             "prompt_override": body.get("prompt_override"),
             "reroll": bool(body.get("reroll")),
-            "with_critique": bool(body.get("with_critique")),
             "qualification_version": body.get("qualification_version"),
             "idempotency_key": body.get("idempotency_key"),
             "request_id": body.get("request_id"),
@@ -3727,6 +3698,40 @@ def _video_completion_user_contract(
             }, action("start_completion", "重新授权并开始", "POST", base, True)],
         }
     if phase in {"WAITING_HUMAN", "PAUSED_EXTERNAL", "WAITING_RETRY"}:
+        # WAITING_HUMAN/PAUSED_EXTERNAL 不总是"供应商拒绝"——同样的 phase 也
+        # 用于用户手动暂停、资产待补齐等可以直接"继续补齐"恢复的场景。只有
+        # cp.last_plan 明确记录了这次暂停由不可修复的供应商终态判决触发时，
+        # 才需要换文案：对已经被供应商拒绝的镜头，"继续补齐"不会重试它，
+        # 展示这个按钮就是给假出路（CLAUDE.md「User-Facing Behavior」）。
+        provider_rejection_codes = {
+            "VIDEO_PROVIDER_MODEL_REJECTED",
+            "VIDEO_PROMPT_PROVIDER_REJECTED",
+            "VIDEO_PROVIDER_TECHNICAL_FAILURE",
+        }
+        last_plan = cp.last_plan if isinstance(getattr(cp, "last_plan", None), dict) else {}
+        rejected_codes = set(last_plan.get("issue_codes") or []) & provider_rejection_codes
+        provider_rejected = (
+            last_plan.get("strategy") == "handoff_human" and bool(rejected_codes)
+        )
+        if provider_rejected:
+            shot_no = last_plan.get("shot_no")
+            shot_row = _shot_by_no(episode_id, shot_no) if shot_no is not None else None
+            shot_id = shot_row["id"] if shot_row else None
+            shot_label = f"第 {shot_no} 镜" if shot_no is not None else "该镜"
+            actions = [action("repair_preview", "查看恢复预演", "GET", f"{base}/repair-preview")]
+            if shot_id:
+                actions.insert(0, action(
+                    "edit_shot_prompt", "编辑本镜提示词重抽", "POST",
+                    f"/api/shots/{shot_id}/generate",
+                ))
+            return {
+                "user_state": "waiting_human",
+                "message": (
+                    f"{shot_label}已被供应商明确拒绝，继续补齐不会重试此镜；"
+                    "请编辑该镜提示词后重抽，或切换视频供应商。"
+                ),
+                "next_actions": actions,
+            }
         actions = [action("repair_preview", "查看恢复预演", "GET", f"{base}/repair-preview")]
         if run_id:
             actions.insert(0, action("resume", "继续补齐", "POST", f"/api/runs/{run_id}/resume"))

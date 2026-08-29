@@ -7,6 +7,7 @@ import {
   type Bible,
   type EpisodeGenerateResult,
   type ReferenceImage,
+  type ReusedReason,
   type ReviewWallContext,
   type Shot,
   type ShotVersion,
@@ -276,6 +277,20 @@ function newIdemKey(prefix: string): string {
   return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`
 }
 
+/** reused=true 时的诚实文案——不再说"输入未变化"，那句话从未真正比较过输入。
+ *  按服务端回传的 reused_reason 如实转述命中记录的真实状态。 */
+function reusedReasonLabel(reason?: ReusedReason): string {
+  switch (reason) {
+    case 'succeeded':
+      return '已有交付版本，未重新生成'
+    case 'stuck_needs_human':
+      return '现有任务卡在需要人工处理，未提交新任务；请核对供应商任务状态'
+    case 'in_flight':
+    default:
+      return '已有任务在处理中，未重复提交'
+  }
+}
+
 type DetailState =
   | { status: 'idle' }
   | { status: 'loading'; shotId: string }
@@ -383,13 +398,25 @@ export default function WallPage() {
         })
       }
       const failed = result.enqueued.filter(item => item.error)
-      const okCount = result.enqueued.length - failed.length
-      if (failed.length) {
-        toast(
-          `已提交 ${okCount} 段生成请求；${failed.length} 段提交失败：${failed[0].error}` +
-          (failed.length > 1 ? `（另有 ${failed.length - 1} 段失败，详见各段状态）` : ''),
-          true,
-        )
+      // reused 不等于"已提交"：命中记录卡在需要人工处理时，这里其实什么
+      // 新任务都没有提交，不能并进"已提交"的计数里（否则按钮会一直谎报
+      // 「已提交 N 段」，而里面有的镜头其实永远没被处理）。
+      const stuck = result.enqueued.filter(
+        item => !item.error && item.reused && item.reused_reason === 'stuck_needs_human',
+      )
+      const okCount = result.enqueued.length - failed.length - stuck.length
+      if (failed.length || stuck.length) {
+        const segments = [`已提交 ${okCount} 段生成请求`]
+        if (stuck.length) {
+          segments.push(`${stuck.length} 段卡在需要人工处理，未提交（请在对应镜头核对供应商任务状态）`)
+        }
+        if (failed.length) {
+          segments.push(
+            `${failed.length} 段提交失败：${failed[0].error}` +
+            (failed.length > 1 ? `（另有 ${failed.length - 1} 段失败，详见各段状态）` : ''),
+          )
+        }
+        toast(segments.join('；'), true)
       } else {
         toast(
           `已提交 ${result.selected_shots} 段生成请求` +
@@ -796,10 +823,11 @@ function GenerationPanel({ shot, context, referenceImages, detailLoading, detail
         shot.id, undefined, true, false,
         shotQualificationVersion,
         newIdemKey(`wall-generate:${shot.id}`),
-      ) as { reused?: boolean; job_id?: string }
+      ) as { reused?: boolean; reused_reason?: ReusedReason; job_id?: string }
       onToast(result.reused
-        ? '输入未变化，已复用既有任务'
-        : `已提交生成请求${result.job_id ? `，任务 ${result.job_id}` : ''}`)
+        ? reusedReasonLabel(result.reused_reason)
+        : `已提交生成请求${result.job_id ? `，任务 ${result.job_id}` : ''}`,
+        result.reused_reason === 'stuck_needs_human')
       await onRefresh()
     } catch (error) {
       onToast(error instanceof Error ? error.message : String(error), true)

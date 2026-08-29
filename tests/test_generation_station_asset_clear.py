@@ -238,15 +238,6 @@ def test_episode_resource_clear_supersedes_active_video_plan(
            )"""
     )
     conn.execute(
-        """INSERT INTO video_mode_qa_results(
-               id,shot_plan_id,version_id,planned_mode,actual_mode,
-               technical_success,result_json,created_at
-           ) VALUES(
-               'qa-audit','shot-plan','version-audit',
-               'FIRST_LAST_FRAME_MODE','FIRST_LAST_FRAME_MODE',0,'{}',0
-           )"""
-    )
-    conn.execute(
         """INSERT INTO artifacts(
                id,type,scope_type,scope_id,version,status,trust_level,
                content_json,content_hash,created_at
@@ -282,9 +273,6 @@ def test_episode_resource_clear_supersedes_active_video_plan(
     assert _public_shot_versions(conn, "s", include_inputs=True) == []
     assert conn.execute(
         "SELECT COUNT(*) FROM video_generation_attempts WHERE id='attempt-audit'"
-    ).fetchone()[0] == 1
-    assert conn.execute(
-        "SELECT COUNT(*) FROM video_mode_qa_results WHERE id='qa-audit'"
     ).fetchone()[0] == 1
     checkpoint = conn.execute(
         "SELECT status,stale_reason FROM artifacts WHERE id='old-checkpoint'"

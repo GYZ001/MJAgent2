@@ -190,6 +190,53 @@ def test_active_shot_reuses_one_job_and_version_across_request_origins(
     ).fetchone()[0] == 1
 
 
+@pytest.mark.parametrize(
+    "active_status",
+    ["queued", "waiting_provider", "waiting_retry"],
+)
+def test_genuinely_active_statuses_still_dedupe_and_never_double_charge(
+    monkeypatch: pytest.MonkeyPatch,
+    active_status: str,
+) -> None:
+    """防回归：waiting_human 从复用判据里拿掉，不能连带拆掉双击防重复扣费。
+
+    queued/waiting_provider/waiting_retry 仍然代表"系统仍在自动处理"，
+    video_slot_active 必须继续持有，重新生成必须继续复用同一个 job/version，
+    不能新建付费版本——这条和本次修复的目标（waiting_human 死锁）是两回事，
+    必须分开验证以免顾此失彼。
+    """
+    conn = _conn()
+    _seed_shot(conn)
+    _patch_enqueue_runtime(monkeypatch, conn)
+
+    first = worker.enqueue_shot("s1")
+    conn.execute(
+        "UPDATE jobs SET status=? WHERE id=?",
+        (active_status, first["job_id"]),
+    )
+    conn.execute(
+        "UPDATE shot_versions SET status=? WHERE id=?",
+        (active_status, first["version_id"]),
+    )
+    conn.commit()
+    assert conn.execute(
+        "SELECT video_slot_active FROM jobs WHERE id=?", (first["job_id"],)
+    ).fetchone()[0] == 1
+
+    second = worker.enqueue_shot("s1", reroll=True)
+
+    assert second["reused"] is True
+    assert second.get("reused_reason") == "in_flight"
+    assert second["job_id"] == first["job_id"]
+    assert second["version_id"] == first["version_id"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE shot_id='s1' AND kind='video'"
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM shot_versions WHERE shot_id='s1'"
+    ).fetchone()[0] == 1
+
+
 def test_trace_failure_cannot_commit_orphan_active_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -283,6 +330,87 @@ def test_external_terminal_failure_releases_shot_for_new_version(
         """SELECT COUNT(*) FROM jobs
            WHERE shot_id='s1' AND status IN ('queued','running','waiting_provider')"""
     ).fetchone()[0] == 1
+
+
+def test_waiting_human_releases_shot_lock_for_reroll_with_fresh_idempotency_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """点「重新生成」永远没反应的死锁：转人工后 video_slot_active 必须清零。
+
+    复刻真实卡死记录（reason_code=VIDEO_PROVIDER_EXECUTION_FAILED，jobs 与
+    shot_versions 均 waiting_human + video_slot_active=1）：_set_job 转
+    waiting_human 时必须像 failed/cancelled 一样释放镜头级独占锁，否则
+    _begin_video_preflight_job 会在任何指纹/幂等键比较之前就短路成
+    reused:True——即便调用方每次都换新的幂等键（见
+    tests/../CLAUDE.md「Gates and Criteria」）。用文件数据库 + 第二条独立
+    连接核验，不依赖同一个连接对象的内存视图。
+    """
+    database = tmp_path / "video-shot-mutex-waiting-human.db"
+    _create_file_database(database)
+    conn = sqlite3.connect(database, timeout=5, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    _patch_enqueue_runtime(monkeypatch, conn)
+
+    first = worker.enqueue_shot("s1")
+    conn.execute(
+        """UPDATE jobs SET status='running',lease_owner='worker-a',
+                  lease_expires_at=9999999999,provider_create_state='accepted',
+                  provider_operation_id='op-1'
+           WHERE id=?""",
+        (first["job_id"],),
+    )
+    conn.execute(
+        "UPDATE shot_versions SET status='running' WHERE id=?",
+        (first["version_id"],),
+    )
+    conn.commit()
+
+    # 真实两条卡死记录走的正是 _set_job 这条路径（EXECUTION_FAILED ->
+    # final_status='waiting_human'），不是三处手写 SQL 站点之一。
+    assert worker._set_job(
+        first["job_id"],
+        "waiting_human",
+        "视频供应商执行失败，供应商原文：涉嫌版权问题。系统已停止对本镜的自动"
+        "付费重试，转人工处理。请在页面核对供应商任务状态，或编辑本镜提示词后"
+        "重抽、或切换视频供应商。",
+    ) is True
+    assert worker._set_version(
+        first["version_id"], status="waiting_human", error="同上"
+    ) is True
+
+    verify = sqlite3.connect(database)
+    locked = verify.execute(
+        "SELECT status,video_slot_active FROM jobs WHERE id=?", (first["job_id"],)
+    ).fetchone()
+    assert locked == ("waiting_human", 0)
+    locked_version = verify.execute(
+        "SELECT status,video_slot_active FROM shot_versions WHERE id=?",
+        (first["version_id"],),
+    ).fetchone()
+    assert locked_version == ("waiting_human", 0)
+    verify.close()
+
+    second = worker.enqueue_shot(
+        "s1", reroll=True, operation_idempotency_key="fresh-key-AAAA",
+    )
+    assert second["reused"] is False
+    assert second["job_id"] != first["job_id"]
+    assert second["version_id"] != first["version_id"]
+
+    # 双击防重复扣费必须仍然有效：紧跟着换第二把新鲜幂等键，命中的是刚刚
+    # 新建、真正在途的任务，必须复用，不能再建第三份付费版本。
+    third = worker.enqueue_shot(
+        "s1", reroll=True, operation_idempotency_key="fresh-key-BBBB",
+    )
+    assert third["reused"] is True
+    assert third.get("reused_reason") == "in_flight"
+
+    verify2 = sqlite3.connect(database)
+    assert verify2.execute(
+        "SELECT COUNT(*) FROM shot_versions WHERE shot_id='s1'"
+    ).fetchone()[0] == 2
+    verify2.close()
 
 
 def test_database_rejects_second_active_job_and_version() -> None:

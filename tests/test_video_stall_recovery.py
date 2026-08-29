@@ -480,8 +480,9 @@ def test_orphaned_continuity_wait_requires_repair_without_mode_change(
 
     conn.execute(
         """INSERT INTO shot_versions(
-               id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at
-           ) VALUES('v2','s2',1,'旧连续提示词','idem-v2','queued',?,1)""",
+               id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,
+               video_slot_active,created_at
+           ) VALUES('v2','s2',1,'旧连续提示词','idem-v2','queued',?,1,1)""",
         (json.dumps({
             "mode": "REFERENCE_IMAGE_MODE",
             "after_shot_id": "s1",
@@ -492,10 +493,11 @@ def test_orphaned_continuity_wait_requires_repair_without_mode_change(
     conn.execute(
         """INSERT INTO jobs(
                id,kind,shot_id,version_id,episode_id,project_id,status,
-               after_shot_id,pipeline_stage,stage_started_at,created_at,updated_at
+               after_shot_id,pipeline_stage,stage_started_at,video_slot_active,
+               created_at,updated_at
            ) VALUES(
                'j2','video','s2','v2','e1','p1','waiting_human',
-               's1','waiting_continuity_anchor',1,1,1
+               's1','waiting_continuity_anchor',1,1,1,1
            )"""
     )
     conn.commit()
@@ -505,19 +507,24 @@ def test_orphaned_continuity_wait_requires_repair_without_mode_change(
     assert report["continuity_degraded"] == 0
     assert report["dependency_repair_required"] == 1
     job = conn.execute(
-        "SELECT status,after_shot_id,reason_code,pipeline_stage FROM jobs WHERE id='j2'"
+        "SELECT status,after_shot_id,reason_code,pipeline_stage,video_slot_active"
+        " FROM jobs WHERE id='j2'"
     ).fetchone()
     assert dict(job) == {
         "status": "waiting_human",
         "after_shot_id": "s1",
         "reason_code": "VIDEO_DEPENDENCY_REPAIR_REQUIRED",
         "pipeline_stage": "waiting_human",
+        "video_slot_active": 0,
     }
     version = conn.execute(
-        "SELECT prompt_text,image_inputs,status FROM shot_versions WHERE id='v2'"
+        "SELECT prompt_text,image_inputs,status,video_slot_active FROM shot_versions WHERE id='v2'"
     ).fetchone()
     assert version["prompt_text"] == "旧连续提示词"
     assert version["status"] == "waiting_human"
+    # 死锁根因：_block_orphaned_continuity_job 手写 SQL 转 waiting_human 时
+    # 若不清 video_slot_active，镜头级独占锁永远不会释放。
+    assert version["video_slot_active"] == 0
     meta = json.loads(version["image_inputs"])
     assert "continuity_degraded" not in meta
     assert meta["continuity_mode"] == "action_continuation"
@@ -533,8 +540,9 @@ def test_planned_orphan_keeps_mode_and_requires_dependency_repair(
     monkeypatch.setattr(config, "VIDEO_CONTINUITY_ORPHAN_TIMEOUT", 30.0)
     conn.execute(
         """INSERT INTO shot_versions(
-               id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at
-           ) VALUES('v2','s2',1,'已冻结的计划提示词','idem-v2','queued',?,1)""",
+               id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,
+               video_slot_active,created_at
+           ) VALUES('v2','s2',1,'已冻结的计划提示词','idem-v2','queued',?,1,1)""",
         (json.dumps({
             "mode": "VIDEO_INPUT_MODE",
             "shot_plan_id": "svp-old",
@@ -545,10 +553,11 @@ def test_planned_orphan_keeps_mode_and_requires_dependency_repair(
     conn.execute(
         """INSERT INTO jobs(
                id,kind,shot_id,version_id,episode_id,project_id,status,
-               after_shot_id,pipeline_stage,stage_started_at,created_at,updated_at
+               after_shot_id,pipeline_stage,stage_started_at,video_slot_active,
+               created_at,updated_at
            ) VALUES(
                'j2','video','s2','v2','e1','p1','waiting_human',
-               's1','waiting_dependency',1,1,1
+               's1','waiting_dependency',1,1,1,1
            )"""
     )
     conn.commit()
@@ -564,18 +573,20 @@ def test_planned_orphan_keeps_mode_and_requires_dependency_repair(
     assert report["continuity_degraded"] == 0
     assert report["dependency_repair_required"] == 1
     job = conn.execute(
-        "SELECT status,reason_code FROM jobs WHERE id='j2'"
+        "SELECT status,reason_code,video_slot_active FROM jobs WHERE id='j2'"
     ).fetchone()
     assert dict(job) == {
         "status": "waiting_human",
         "reason_code": "VIDEO_PLAN_DEPENDENCY_REPAIR_REQUIRED",
+        "video_slot_active": 0,
     }
     version = conn.execute(
-        "SELECT prompt_text,status FROM shot_versions WHERE id='v2'"
+        "SELECT prompt_text,status,video_slot_active FROM shot_versions WHERE id='v2'"
     ).fetchone()
     assert dict(version) == {
         "prompt_text": "已冻结的计划提示词",
         "status": "waiting_human",
+        "video_slot_active": 0,
     }
     assert enqueued == []
 

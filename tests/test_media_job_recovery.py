@@ -101,14 +101,15 @@ def _seed_retryable_video_job(
 def _seed_unresolved_provider_create(conn: sqlite3.Connection) -> None:
     conn.execute(
         """INSERT INTO shot_versions(
-               id,shot_id,version_no,prompt_text,idem_key,status,created_at
-           ) VALUES('v1','s1',1,'prompt','idem','running',1)"""
+               id,shot_id,version_no,prompt_text,idem_key,status,
+               video_slot_active,created_at
+           ) VALUES('v1','s1',1,'prompt','idem','running',1,1)"""
     )
     conn.execute(
         """INSERT INTO jobs(
                id,kind,version_id,status,lease_owner,lease_expires_at,
-               created_at,updated_at
-           ) VALUES('j1','video','v1','running','worker-1',9999999999,1,1)"""
+               video_slot_active,created_at,updated_at
+           ) VALUES('j1','video','v1','running','worker-1',9999999999,1,1,1)"""
     )
     conn.execute(
         """INSERT INTO budget_reservations(
@@ -404,17 +405,22 @@ def test_unresolved_provider_create_transition_is_atomic() -> None:
     )
 
     job = conn.execute(
-        """SELECT status,reason_code,lease_owner
+        """SELECT status,reason_code,lease_owner,video_slot_active
              FROM jobs WHERE id='j1'"""
     ).fetchone()
     assert dict(job) == {
         "status": "waiting_human",
         "reason_code": "VIDEO_PROVIDER_CREATE_UNRESOLVED",
         "lease_owner": None,
+        "video_slot_active": 0,
     }
-    assert conn.execute(
-        "SELECT status FROM shot_versions WHERE id='v1'"
-    ).fetchone()["status"] == "waiting_human"
+    version = conn.execute(
+        "SELECT status,video_slot_active FROM shot_versions WHERE id='v1'"
+    ).fetchone()
+    assert version["status"] == "waiting_human"
+    # 死锁根因：转人工后若不清 video_slot_active，_begin_video_preflight_job
+    # 的镜头级独占锁永远不会释放，重新生成会被永久短路成假的 reused:True。
+    assert version["video_slot_active"] == 0
     assert conn.execute(
         "SELECT status FROM budget_reservations WHERE job_id='j1'"
     ).fetchone()["status"] == "reserved"

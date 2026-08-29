@@ -447,7 +447,7 @@ def _commit_provider_create_unresolved(
                   SET status='waiting_human',error=?,
                       reason_code='VIDEO_PROVIDER_CREATE_UNRESOLVED',
                       reason_text=?,lease_owner=NULL,lease_expires_at=NULL,
-                      next_retry_at=NULL,updated_at=?
+                      next_retry_at=NULL,video_slot_active=0,updated_at=?
                 WHERE id=? AND status='running' AND lease_owner=?
                   AND cancellation_requested=0""",
             (message, message, now(), job_id, owner),
@@ -457,7 +457,7 @@ def _commit_provider_create_unresolved(
             return False
         changed = conn.execute(
             """UPDATE shot_versions
-                  SET status='waiting_human',error=?
+                  SET status='waiting_human',error=?,video_slot_active=0
                 WHERE id=?""",
             (message, version_id),
         )
@@ -1518,14 +1518,6 @@ def _defer_provider_poll(
     return True
 
 
-async def critique_version(version_id: str) -> list[str]:
-    """VLM 视觉质检已整体下线：不再产生评语，也不再现场调用模型评审。
-    保留函数签名与调用点（「带评语重生」入口），避免上游报错——现在等价于
-    普通重生，返回空评语列表。"""
-    del version_id
-    return []
-
-
 # ---------- 执行 ----------
 
 def _set_job(
@@ -1536,7 +1528,14 @@ def _set_job(
     lease_owner: str | None = None,
 ) -> bool:
     conn = get_conn()
-    terminal = status in {"succeeded", "failed", "cancelled", "abandoned", "paused_budget"}
+    # waiting_human 是死路：既不是「进行中」也不是「已交付」，必须释放
+    # video_slot_active，否则 _begin_video_preflight_job 的镜头级独占锁永远
+    # 不会被清空，重新生成会在指纹比对之前就被短路成假的"reused"（见
+    # CLAUDE.md「Gates and Criteria」）。
+    terminal = status in {
+        "succeeded", "failed", "cancelled", "abandoned", "paused_budget",
+        "waiting_human",
+    }
     if terminal:
         cursor = conn.execute(
             "UPDATE jobs SET status=?, error=?, updated_at=?, video_slot_active=0, "
@@ -1591,21 +1590,66 @@ def _video_model_rejection_guidance(
     meta: dict[str, Any],
     exc: ProviderError,
 ) -> tuple[str, str] | None:
-    """Build guidance from a typed provider outcome, never from error prose."""
-    if exc.failure.category is not hiagent.ProviderFailureCategory.MODEL_REJECTION:
-        return None
-    if exc.failure.kind == hiagent.ProviderFailureKind.PROMPT_PROVIDER_REJECTED.value:
+    """把结构化供应商结论转成落地文案，绝不从错误正文猜测分类。
+
+    以下两类失败在结构化层面已经确定"本镜不会再自动付费重试"（模型/提示词
+    服务明确拒绝；或供应商执行失败且分类结论要求转人工），若不在这里接管，
+    会落到 app/errors.py 的 provider 分类兜底提示——那句"可稍后重试"对这类
+    镜头是假话（CLAUDE.md「User-Facing Behavior」：界面承诺必须与实际行为
+    一致）。因此这里必须：
+    (a) 逐字转述供应商原文（不改写、不替它重新分类）；
+    (b) 明确告知系统已停止对本镜的自动付费重试；
+    (c) 给出具体出路，不能把用户晾在原地。
+    """
+    provider_text = (exc.raw or "").strip()
+    if exc.failure.category is hiagent.ProviderFailureCategory.MODEL_REJECTION:
+        if exc.failure.kind == hiagent.ProviderFailureKind.PROMPT_PROVIDER_REJECTED.value:
+            return (
+                "VIDEO_PROMPT_PROVIDER_REJECTED",
+                "AI 视频提示词服务明确拒绝了当前内容；系统未改写内容、未切换生成方式，"
+                "也未向视频服务提交本镜。请更换获准的提示词模型或人工调整内容后再继续。",
+            )
+        mode = str(meta.get("mode") or meta.get("planned_mode") or "")
+        quote = f"供应商原文：{provider_text}。" if provider_text else ""
         return (
-            "VIDEO_PROMPT_PROVIDER_REJECTED",
-            "AI 视频提示词服务明确拒绝了当前内容；系统未改写内容、未切换生成方式，"
-            "也未向视频服务提交本镜。请更换获准的提示词模型或人工调整内容后再继续。",
+            "VIDEO_PROVIDER_MODEL_REJECTED",
+            f"当前视频模型明确拒绝了本次输入，系统已保持 {mode or '原计划模式'} "
+            f"失败且没有改写内容或切换生成方式。{quote}"
+            "系统已停止对本镜的自动付费重试，转人工处理。"
+            "请编辑本镜提示词后重抽，或切换视频供应商。",
         )
-    mode = str(meta.get("mode") or meta.get("planned_mode") or "")
-    return (
-        "VIDEO_PROVIDER_MODEL_REJECTED",
-        f"当前视频模型明确拒绝了本次输入，系统已保持 {mode or '原计划模式'} "
-        "失败且没有改写内容或切换生成方式。请检查供应商原始证据或更换视频模型后重试。",
-    )
+    if (
+        exc.failure.category is hiagent.ProviderFailureCategory.TECHNICAL
+        and exc.failure.kind == hiagent.ProviderFailureKind.EXECUTION_FAILED.value
+        and provider_text
+    ):
+        return (
+            exc.failure.reason_code,
+            f"视频供应商执行失败，供应商原文：{provider_text}。"
+            "系统已停止对本镜的自动付费重试，转人工处理。"
+            "请在页面核对供应商任务状态，或编辑本镜提示词后重抽、或切换视频供应商。",
+        )
+    return None
+
+
+def _prior_task_poll_failure_messages(conn, task_id: str) -> list[str]:
+    """按时间顺序返回同一供应商任务此前全部 TASK_FAILED 轮询的 error 原文。
+
+    ``log_provider_call`` 在 ``poll_video_task`` 内部同步提交（见
+    app/db.py ``_log_provider_call_inner``），本次失败对应的那条
+    ``video_poll``/``TASK_FAILED`` 记录在这里被调用前已经落库，因此结果里
+    天然包含"本次"，调用方不需要再单独拼接当前消息。
+
+    只用于给 ``hiagent.has_repeated_terminal_poll_failure`` 提供历史序列；
+    本函数是这里唯一做数据库 I/O 的部分，纯判断逻辑留在 hiagent 那边。
+    """
+    rows = conn.execute(
+        """SELECT error FROM provider_calls
+           WHERE kind='video_poll' AND status='TASK_FAILED' AND meta LIKE ?
+           ORDER BY ts""",
+        (f"%{task_id}%",),
+    ).fetchall()
+    return [str(row["error"] or "") for row in rows]
 
 
 def _provider_submitted_at(
@@ -3898,6 +3942,16 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 failure = hiagent.ProviderFailure.from_provider_payload(
                     result.get("failure")
                 )
+                if failure.category is hiagent.ProviderFailureCategory.TECHNICAL:
+                    # 供应商没有给出任何结构化分类信号时（真实案例：Seedance
+                    # 版权拒绝，error.code 为空、无 failure 子对象），唯一可用
+                    # 的是行为判据——同一 task_id 连续轮询给出字节级相同的
+                    # 终态失败，判定为确定性拒绝而不是瞬时故障，升级分类。
+                    # 判断的是结构（同一任务、同一结果、重复出现），不是内容
+                    # （不看 message 里写了什么词），因此不构成关键词黑名单。
+                    history = _prior_task_poll_failure_messages(conn, task_id)
+                    if hiagent.has_repeated_terminal_poll_failure(history):
+                        failure = hiagent.ProviderFailure.model_rejection(failure.kind)
                 raise ProviderError(
                     f"{provider_label} 任务失败：{error_text}",
                     raw=error_text,
@@ -4037,13 +4091,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         technical = json.loads(conn.execute(
             "SELECT technical_validation_json FROM shot_versions WHERE id=?", (version["id"],)
         ).fetchone()["technical_validation_json"] or "{}")
-        mode_qa = _persist_video_mode_qa(
-            conn,
-            version_id=version["id"],
-            meta=meta,
-            technical=technical,
-        )
-        if mode_qa and not mode_qa.get("input_roles_valid"):
+        if meta.get("shot_plan_id") and not _video_mode_input_roles_valid(meta):
             raise ProviderError("视频供应商输入角色与已发布模式计划不一致")
         if not technical.get("passed"):
             # 技术校验失败：在 technical_resubmit_limit 内自动新建版本重提
@@ -4270,14 +4318,14 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                   SET status='waiting_human',error=?,
                       reason_code=?,
                       reason_text=?,lease_owner=NULL,lease_expires_at=NULL,
-                      next_retry_at=NULL,updated_at=?
+                      next_retry_at=NULL,video_slot_active=0,updated_at=?
                 WHERE id=? AND status='running' AND lease_owner=?""",
             (message, repair_code, message, now(), job_id, owner),
         )
         if changed.rowcount != 1:
             conn.rollback()
             return
-        _set_version(version["id"], status="waiting_human", error=message)
+        _set_version(version["id"], status="waiting_human", error=message, video_slot_active=0)
         conn.execute(
             """UPDATE shot_video_generation_plans
                   SET status='waiting_asset',updated_at=?
@@ -4475,51 +4523,46 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             reconcile_episode_generation_status(job["episode_id"])
 
 
-def _persist_video_mode_qa(
-    conn,
-    *,
-    version_id: str,
-    meta: dict[str, Any],
-    technical: dict[str, Any],
-) -> dict[str, Any] | None:
-    shot_plan_id = str(meta.get("shot_plan_id") or "")
-    if not shot_plan_id:
-        return None
-    row = conn.execute(
-        "SELECT qa_json FROM shot_versions WHERE id=?",
-        (version_id,),
-    ).fetchone()
-    try:
-        qa = json.loads(row["qa_json"] or "{}") if row else {}
-    except (TypeError, ValueError, json.JSONDecodeError):
-        qa = {}
-    from app.stages import evaluate_video_mode_qa
+def _video_mode_input_roles_valid(meta: dict[str, Any]) -> bool:
+    """供应商本次调用实际消费的输入角色是否与已发布的视频模式在结构上吻合。
 
-    result = evaluate_video_mode_qa(meta=meta, qa=qa, technical=technical)
-    qa["video_mode_qa"] = result
-    _set_version(version_id, qa_json=json.dumps(qa, ensure_ascii=False))
-    conn.execute(
-        """INSERT OR REPLACE INTO video_mode_qa_results(
-               id,shot_plan_id,version_id,planned_mode,actual_mode,
-               technical_success,semantic_success,boundary_start_match,
-               boundary_end_match,result_json,created_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-        (
-            new_id("vmqa"), shot_plan_id, version_id,
-            str(result.get("planned_mode") or ""),
-            str(result.get("actual_mode") or ""),
-            int(bool(result.get("technical_success"))),
-            (
-                None if result.get("semantic_success") is None
-                else int(bool(result.get("semantic_success")))
-            ),
-            result.get("boundary_start_match"),
-            result.get("boundary_end_match"),
-            json.dumps(result, ensure_ascii=False), now(),
-        ),
-    )
-    conn.commit()
-    return result
+    这不是内容质检——不判断画面像不像、动作对不对，只核对
+    first_frame_used/last_frame_used/reference_image_used/reference_video_used
+    这几个"调用发起时就记录下来的事实标记"是否符合 actual_mode 声明的输入合同。
+    原属已下线的 ``evaluate_video_mode_qa``（该函数还混了一份基于 VLM 打分的
+    ``semantic_success``/``boundary_*_match``，随 VLM 质检一并下线且从未真正
+    产生过可信数据——`video_mode_qa_results` 表因此整表删除，见 db 迁移）；
+    这里只保留其中这一条纯结构判据，因为下面的调用方确实拿它当硬门禁用。
+    """
+    mode = str(meta.get("actual_mode") or meta.get("mode") or "")
+    if mode == "REFERENCE_IMAGE_MODE":
+        return bool(
+            not meta.get("first_frame_used")
+            and not meta.get("last_frame_used")
+            and not meta.get("reference_video_used")
+        )
+    if mode == "FIRST_LAST_FRAME_MODE":
+        return bool(
+            meta.get("first_frame_used")
+            and meta.get("last_frame_used")
+            and not meta.get("reference_image_used")
+            and not meta.get("reference_video_used")
+        )
+    if mode == "FIRST_FRAME_MODE":
+        return bool(
+            meta.get("first_frame_used")
+            and not meta.get("last_frame_used")
+            and not meta.get("reference_image_used")
+            and not meta.get("reference_video_used")
+        )
+    if mode == "VIDEO_INPUT_MODE":
+        return bool(
+            meta.get("reference_video_used")
+            and not meta.get("reference_image_used")
+            and not meta.get("first_frame_used")
+            and not meta.get("last_frame_used")
+        )
+    return False
 
 
 async def _maybe_auto_qa(
@@ -4890,12 +4933,12 @@ def _block_orphaned_continuity_job(conn, row) -> bool:
             """UPDATE jobs
                   SET status='waiting_human',error=?,
                       reason_code='VIDEO_PLAN_DEPENDENCY_REPAIR_REQUIRED',
-                      reason_text=?,next_retry_at=NULL,updated_at=?
+                      reason_text=?,next_retry_at=NULL,video_slot_active=0,updated_at=?
                 WHERE id=?""",
             (message, message, now(), row["id"]),
         )
         conn.execute(
-            "UPDATE shot_versions SET status='waiting_human',error=? WHERE id=?",
+            "UPDATE shot_versions SET status='waiting_human',error=?,video_slot_active=0 WHERE id=?",
             (message, row["version_id"]),
         )
         set_pipeline_stage(
@@ -4916,12 +4959,12 @@ def _block_orphaned_continuity_job(conn, row) -> bool:
         """UPDATE jobs
               SET status='waiting_human',error=?,
                   reason_code='VIDEO_DEPENDENCY_REPAIR_REQUIRED',
-                  reason_text=?,next_retry_at=NULL,updated_at=?
+                  reason_text=?,next_retry_at=NULL,video_slot_active=0,updated_at=?
             WHERE id=?""",
         (message, message, now(), row["id"]),
     )
     conn.execute(
-        "UPDATE shot_versions SET status='waiting_human',error=? WHERE id=?",
+        "UPDATE shot_versions SET status='waiting_human',error=?,video_slot_active=0 WHERE id=?",
         (message, row["version_id"]),
     )
     set_pipeline_stage(

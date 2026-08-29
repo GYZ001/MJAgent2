@@ -151,6 +151,84 @@ def test_integrity_repair_reconciles_video_slots_without_provider_ledger() -> No
     conn.close()
 
 
+def test_integrity_repair_does_not_resurrect_waiting_human_slot_lock() -> None:
+    """死锁根因的第三处：修复例程在每次后端重启（init_db）时都会跑一遍。
+
+    复刻真实两条卡死记录（reason_code=VIDEO_PROVIDER_EXECUTION_FAILED，
+    waiting_human + video_slot_active=1，且供应商 claim 仍处于 'accepted'
+    未结清）：如果这里的 locally_active 口径仍把 waiting_human 当"进行中"，
+    下一次后端重启就会把 _set_job/三处手写 SQL 站点刚释放的
+    video_slot_active 重新置回 1，悄悄撤销那部分修复。正确行为是：不复活
+    这把锁，同时把仍未结清的供应商欠款转回 waiting_provider 继续轮询，直到
+    真正结清（而不是无限期占着已释放的槽位，也不是被静默丢弃/取消）。
+    """
+    from app.completion_grant import ensure_video_budget_authority_tables
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) "
+        "VALUES('project-1','Legacy','ready',1)"
+    )
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
+           VALUES('episode-1','project-1',1,'planned',1)"""
+    )
+    conn.execute(
+        """INSERT INTO shots(id,episode_id,shot_no,duration_s)
+           VALUES('shot-1','episode-1',1,5)"""
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,provider_task_id,
+               status,video_slot_active,error,created_at
+           ) VALUES('v-stuck','shot-1',1,'p','stuck-key','provider-task-x',
+                     'waiting_human',1,'供应商执行失败：疑似版权问题',1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               video_slot_active,created_at,updated_at,provider_operation_id,
+               provider_create_state,provider_non_cancellable,
+               provider_poll_required,provider_result_adoptable,reason_code
+           ) VALUES('job-stuck','video','shot-1','v-stuck','episode-1',
+                     'project-1','waiting_human',1,1,1,'video-create-v-stuck',
+                     'accepted',1,1,1,'VIDEO_PROVIDER_EXECUTION_FAILED')"""
+    )
+    ensure_video_budget_authority_tables(conn)
+    conn.execute(
+        """INSERT INTO provider_video_budget_claims(
+               operation_id,project_id,episode_id,shot_id,job_id,version_id,
+               origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
+               amount_cny,status,created_at,updated_at,accepted_at
+           ) VALUES('video-create-v-stuck','project-1','episode-1','shot-1',
+                     'job-stuck','v-stuck','episode-1','shot-1','job-stuck',
+                     'v-stuck',12.0,'accepted',1,1,1)"""
+    )
+    conn.commit()
+
+    report = db._repair_integrity(conn)
+
+    job = conn.execute(
+        "SELECT status,video_slot_active,provider_poll_required,"
+        "provider_result_adoptable FROM jobs WHERE id='job-stuck'"
+    ).fetchone()
+    # 关键断言：video_slot_active 绝不能被复活成 1——那正是本次要修的死锁。
+    assert job["video_slot_active"] == 0
+    # 仍未结清的供应商欠款被转回 waiting_provider 继续轮询直到结清，
+    # 而不是停留在人工也够不着自动恢复的 waiting_human。
+    assert job["status"] == "waiting_provider"
+    assert job["provider_poll_required"] == 1
+    version = conn.execute(
+        "SELECT status,video_slot_active FROM shot_versions WHERE id='v-stuck'"
+    ).fetchone()
+    assert version["video_slot_active"] == 0
+    assert version["status"] == "waiting_provider"
+    assert report["video_slot_repairs"] >= 1
+    conn.close()
+
+
 def _seed_shot_with_adoption(conn: sqlite3.Connection, *, version_status: str, video_path: str | None) -> None:
     conn.execute(
         "INSERT INTO projects(id,name,status,created_at) VALUES('project-1','P','ready',0)"
