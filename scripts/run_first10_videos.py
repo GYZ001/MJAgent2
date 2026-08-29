@@ -144,14 +144,16 @@ def resolve_project_id(selector: str) -> str:
     return rows[0]["id"]
 
 
-def resolve_first10(project_id: str) -> list[tuple[str, str]]:
-    """运行时解析前 10 集真实 ID，绝不硬编码历史 ID。"""
+def resolve_first10(
+    project_id: str, ep_from: int = 1, ep_to: int = 10
+) -> list[tuple[str, str]]:
+    """运行时解析 [ep_from, ep_to] 区间的真实分集 ID，绝不硬编码历史 ID。"""
     conn = _readonly_conn()
     try:
         rows = conn.execute(
             "SELECT id, episode_no FROM episodes WHERE project_id=? "
-            "AND episode_no<=10 ORDER BY episode_no",
-            (project_id,),
+            "AND episode_no>=? AND episode_no<=? ORDER BY episode_no",
+            (project_id, ep_from, ep_to),
         ).fetchall()
     finally:
         conn.close()
@@ -526,14 +528,20 @@ def main() -> int:
         "--project", default=PROJECT_NAME,
         help=f"项目名或项目 id，默认 {PROJECT_NAME}",
     )
+    parser.add_argument("--from", dest="ep_from", type=int, default=1,
+                        help="起始集号（含），默认 1")
+    parser.add_argument("--to", dest="ep_to", type=int, default=10,
+                        help="结束集号（含），默认 10")
     args = parser.parse_args()
 
     project_id = resolve_project_id(args.project)
-    episodes = resolve_first10(project_id)
-    if len(episodes) < 10:
-        log(f"[警告] 只解析到 {len(episodes)} 集（预期 10 集），project_id={project_id}")
-    log(f"=== RUN FIRST-10 VIDEOS START（project={args.project}/{project_id}，"
-        f"共 {len(episodes)} 集）===")
+    episodes = resolve_first10(project_id, args.ep_from, args.ep_to)
+    expected = args.ep_to - args.ep_from + 1
+    if len(episodes) < expected:
+        log(f"[警告] 只解析到 {len(episodes)} 集（预期 {expected} 集），"
+            f"project_id={project_id}")
+    log(f"=== RUN VIDEOS START（project={args.project}/{project_id}，"
+        f"EP{args.ep_from}-EP{args.ep_to}，共 {len(episodes)} 集）===")
     results: dict[str, tuple[bool, str]] = {}
     for name, eid in episodes:
         log(f"--- {name}（{eid}）开始 ---")
@@ -541,7 +549,7 @@ def main() -> int:
         results[name] = (ok, detail)
     success = [n for n, (ok, _d) in results.items() if ok]
     failed = [(n, d) for n, (ok, d) in results.items() if not ok]
-    log("=== RUN FIRST-10 VIDEOS DONE ===")
+    log("=== RUN VIDEOS DONE ===")
     log(f"成功 {len(success)}/{len(episodes)}，成功率 "
         f"{(len(success) / len(episodes) * 100 if episodes else 0):.0f}%")
     if success:

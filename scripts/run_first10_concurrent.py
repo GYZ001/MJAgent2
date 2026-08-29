@@ -80,13 +80,18 @@ def main() -> int:
     parser.add_argument("--project", default=serial.PROJECT_NAME)
     parser.add_argument("--workers", type=int, default=10,
                         help="并发集数，默认 10（即全部并发）")
+    parser.add_argument("--from", dest="ep_from", type=int, default=1,
+                        help="起始集号（含），默认 1")
+    parser.add_argument("--to", dest="ep_to", type=int, default=10,
+                        help="结束集号（含），默认 10")
     args = parser.parse_args()
 
     project_id = serial.resolve_project_id(args.project)
-    episodes = serial.resolve_first10(project_id)
+    episodes = serial.resolve_first10(project_id, args.ep_from, args.ep_to)
     started_at = time.time()
-    log(f"=== CONCURRENT FIRST-10 START（project={args.project}/{project_id}，"
-        f"{len(episodes)} 集，并发度 {args.workers}，attempt={serial.ATTEMPT}）===")
+    log(f"=== CONCURRENT START（project={args.project}/{project_id}，"
+        f"EP{args.ep_from}-EP{args.ep_to}，{len(episodes)} 集，"
+        f"并发度 {args.workers}，attempt={serial.ATTEMPT}）===")
 
     results: dict[str, tuple[bool, str]] = {}
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
@@ -103,7 +108,7 @@ def main() -> int:
 
     wall = time.time() - started_at
     success = [n for n, (ok, _d) in results.items() if ok]
-    log("=== CONCURRENT FIRST-10 DONE ===")
+    log("=== CONCURRENT DONE ===")
     log(f"总墙钟 {wall / 60:.1f} 分钟；成功 {len(success)}/{len(episodes)}")
     if success:
         log("成功集：" + "、".join(sorted(success, key=lambda x: int(x[2:]))))
