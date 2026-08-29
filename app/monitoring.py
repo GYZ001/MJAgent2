@@ -112,7 +112,6 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "video_poll_concurrency": _number("视频轮询并发", "15", 1, 128, unit="任务"),
     "reference_pipeline_concurrency": _number("参考图流水线并发", "15", 1, 64, unit="任务"),
     "image_request_concurrency": _number("图片请求并发", "4", 1, 64, unit="请求"),
-    "vlm_request_concurrency": _number("VLM 质检并发", "6", 1, 64, unit="请求"),
     "download_concurrency": _number("下载并发", "3", 1, 64, unit="任务"),
     "finalize_concurrency": _number("落盘/校验并发", "4", 1, 64, unit="任务"),
     "episode_video_inflight_limit": _number("单集上游在途上限", "15", 1, 128, unit="任务"),
@@ -136,9 +135,6 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "video_reference_role_adaptive": _boolean("质量角色自适应", "false", experimental=True),
     "video_plan_confidence_floor": _number(
         "视频计划最低置信度", "0.55", 0, 1, step=.05, integer=False,
-    ),
-    "video_plan_allow_unknown_dimensions": _boolean(
-        "允许未知关系进入计划", "false", experimental=True,
     ),
     "provider_media_max_download_bytes": _number(
         "视频参考素材大小上限", str(512 * 1024 * 1024),

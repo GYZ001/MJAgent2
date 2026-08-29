@@ -199,6 +199,39 @@ TIMEOUT_CHAT_STORYBOARD_OUTLINE_READ = float(
 TIMEOUT_CHAT_STORYBOARD_PACK_READ = float(
     os.environ.get("TIMEOUT_CHAT_STORYBOARD_PACK_READ", "960")
 )
+# 分镜包阶段二 2.0.8 改回逐段独立调用（见 app/production/storyboard_pack.py
+# 的 STORYBOARD_PACK_VERSION 2.0.8 changelog）后，单次调用不再携带全集原文/
+# 全量素材清单，体量与上面那条 960s 所覆盖的整集批量调用不是同一个量级，
+# 继续共用 960s 只是把「快速暴露卡死」的收益让给了「反正总能兜住」——直接
+# 复用会让本该更快失败重试的场景继续空等 16 分钟，因此单独标定一条更紧的
+# 上限，而不是沿用上面这条批量时代的常量（本文件里每个 stage_key 一贯各自
+# 独立标定，即使数值巧合相同也不共用一个符号，见场景圣经/蓝图分片等条目的
+# 同一惯例）。
+# 本仓库暂时没有「新设计下逐段调用」的真实历史样本（此前唯一跑过的单段调用
+# 数据早于 2.0.3、当前库里已不存在），因此按同一模型（'d71l5c8nfdb167kligqg'，
+# 分镜台阶段二当前实际在用的模型）在**排除整集批量类重任务**
+# （storyboard_pack_segment/beat_sheet、scene_bible、episode_prep_pack_
+# event_chain）之后的首字延迟分布做代理：5671 次同规模调用 p99 37.7s、
+# p99.9 92.9s、最大 376.9s；与之最接近的同类任务
+# screenplay_character_discovery（读一整章原文、产出结构化 JSON，n=107）
+# 单独看 p90 80.2s、最大同为 376.9s，二者共享同一条最坏观测，说明这不是
+# 单个任务类型的孤立尖峰。按本文件场景圣经那条已经验证过的边际（max 364.2s
+# ×~1.32 → 480s）同一比例套在这里的最坏观测上：376.9×1.32≈497s，取整
+# 500s——比批量时代的 960s 收紧约一半，卡死能更快暴露、更快重试，同时仍对
+# 目前能找到的最坏同量级观测留出约 1.3 倍余量。这是代理数据，不是「新设计
+# 逐段调用」本身的实测——真实生产跑起来之后应重新用 storyboard_pack_segment
+# 自己的样本标定一次，不能一直借用代理值。
+#
+# 未接线（2026-08-29）：真正让这条常量生效需要在 app/hiagent.py::
+# _chat_read_timeout_s 里给 stage_key == "storyboard_pack_segment" 加一条
+# 独立分支（当前它仍落在 TIMEOUT_CHAT_STORYBOARD_PACK_READ 的
+# `storyboard_pack_` 前缀分支上，见该函数）——这次改造期间 app/hiagent.py
+# 由另一个 agent 并发修改 received_chars 计数，按协调方要求本次不碰这个
+# 文件，因此常量先落地、接线留给下一次改动 app/hiagent.py 时一并做。在此
+# 之前逐段调用仍安全地使用 960s 上限，只是没拿到收紧的收益，不影响正确性。
+TIMEOUT_CHAT_STORYBOARD_PACK_SEGMENT_READ = float(
+    os.environ.get("TIMEOUT_CHAT_STORYBOARD_PACK_SEGMENT_READ", "500")
+)
 # 场景圣经是整份场景库的一次性生成。它此前没有专属读超时，落在通用 300s 上。
 # 39 次实测：p50 28s、p90 160s、p95 306s、最慢一次 364.2s（73779 字）。
 # 关键不是总耗时而是首字延迟——读超时是空闲超时，这里等价于卡在「首字迟迟不来」
@@ -277,11 +310,11 @@ TIMEOUT_DOWNLOAD = 180.0
 TIMEOUT_IMAGE_READ = float(os.environ.get("TIMEOUT_IMAGE_READ", "180"))
 TIMEOUT_IMAGE_WRITE = float(os.environ.get("TIMEOUT_IMAGE_WRITE", "120"))
 TIMEOUT_VLM_READ = float(os.environ.get("TIMEOUT_VLM_READ", "300"))
-TIMEOUT_VLM_WRITE = float(os.environ.get("TIMEOUT_VLM_WRITE", "120"))
+# app/media_exec/run_job.py 仍用 TIMEOUT_VLM_READ 折算自动 QA 步骤的 lease 时长，VLM
+# 一致性质检本身已下线，TIMEOUT_VLM_WRITE 与 VLM_REQUEST_CONCURRENCY 已无读者随之移除。
 # 兼容旧环境变量；媒体流水线 V2 已拆成 image / vlm 独立通道（见 DEFAULT_SETTINGS）。
 MEDIA_REQUEST_CONCURRENCY = max(1, int(os.environ.get("MEDIA_REQUEST_CONCURRENCY", "2")))
 IMAGE_REQUEST_CONCURRENCY = max(1, int(os.environ.get("IMAGE_REQUEST_CONCURRENCY", "4")))
-VLM_REQUEST_CONCURRENCY = max(1, int(os.environ.get("VLM_REQUEST_CONCURRENCY", "6")))
 # 仅压缩上传给图生图/VLM 的输入，不改变 Seedream 输出分辨率。
 MEDIA_INPUT_MAX_EDGE = max(512, int(os.environ.get("MEDIA_INPUT_MAX_EDGE", "1280")))
 # ffmpeg JPEG qscale：2 最高质量，31 最低质量。
@@ -416,7 +449,6 @@ DEFAULT_SETTINGS = {
     "auto_concurrency": "15",
     "reference_pipeline_concurrency": "15",
     "image_request_concurrency": "4",
-    "vlm_request_concurrency": "6",
     "video_submit_concurrency": "15",
     "video_inflight_limit": "15",
     "video_poll_concurrency": "15",
@@ -430,12 +462,9 @@ DEFAULT_SETTINGS = {
     "video_ready_low_watermark": "2",
     "video_ready_high_watermark": "6",
     "reference_shot_cohort_limit": "15",
-    "video_qa_reserved_concurrency": "2",
-    "video_control_reserved_concurrency": "2",
     "video_reference_batch_prompt": "true",   # P1：一镜一次提示词合同
     "video_reference_role_adaptive": "false", # P2：质量角色自适应（实验，默认关）
     "video_plan_confidence_floor": "0.55",
-    "video_plan_allow_unknown_dimensions": "false",
     # 本地项目媒体映射到自有对象存储/CDN 的公开基址；为空时视频输入明确阻断。
     "provider_media_public_base_url": "",
     "provider_media_max_download_bytes": str(512 * 1024 * 1024),
@@ -471,38 +500,23 @@ DEFAULT_SETTINGS = {
     "screenplay_semantic_retry_limit": "2",
     "screenplay_fidelity_max_rounds": "8",
     "text_stream_total_timeout_s": "1200", # 流式文本调用总墙钟熔断；空闲超时仍由 httpx 负责
-    "storyboard_concurrency": "2",      # 旧设置兼容读取，不再作为新资源池名称
     # PRD-03 分镜台独立灰度/回滚开关；P0 服务端防线不受 UI 开关影响。
     "storyboard_workspace_safe_readonly": "false",
     "storyboard_structure_edit_enabled": "true",
     "storyboard_source_rebind_enabled": "true",
     "video_reference_max_images": "9",
-    "video_reference_quality_threshold": "0.8",  # 综合 QA 分门禁：≥此分必须留在「使用中」
-    "video_reference_quality_floor": "0.4", # 兜底图质量地板：生成图全不达标时，最佳一版仍低于此分则不喂模型，只靠定妆照/场景锚点（脏图反而拖累成片）
     "video_reference_min_generated": "1",   # 参考图模式每镜至少新生成几张关键帧参考图（防止只剩定妆照）
     "video_supporting_keyframe_candidates": "3", # 每张辅助时序关键帧同样固定生成 3 张，并独立择优保留 1 张
-    "video_reference_gen_retries": "2",     # 单张生成参考图 QA 不达标时的额外重试次数；仍不达标保留最佳一版而非丢弃
     "video_reference_prompt_async": "true", # 每张新参考图的提示词用独立 LLM 调用并发生成（防止一次性写多张时偷懒）
-    "video_reference_consistency_check": "true",       # Phase 2：整组参考图相对一致性检查（扣分 + 可选 i2i 重生提分）
-    "video_reference_consistency_threshold": "0.7",    # 仅触发 i2i 重生尝试的内部线，不再单独决定废弃
-    "video_reference_consistency_retries": "1",        # 漂移图从锚点 i2i 重生的最大次数；仍漂移则只靠综合分门禁
     "provider_call_retention_days": "30",
     "error_log_retention_days": "30",
     "agent_enabled": "true",            # 内嵌对话 Agent 总开关（API 入口会检查）
     "agent_max_tool_calls_per_turn": "8",
     "agent_max_consecutive_same_error": "2",
-    # 人物多视角资产与关键帧一致性 QA
+    # 人物多视角资产与关键帧生成总开关（VLM 一致性质检已下线，见 docs 中相关说明）
     "character_multiview_enabled": "true",
     "scene_multiview_enabled": "true",
     "narrative_keyframe_required": "true",
-    "visual_evidence_qa_enabled": "true",
-    "video_visual_anchor_qa_enabled": "true",
-    # 水印门禁可配置；reject 严格拒绝，ignore_unless_occluding 只放行不遮挡主体的供应商角落标识。
-    "watermark_qa_mode": "reject",
-    "keyframe_qa_overall_threshold": "0.80",
-    "keyframe_qa_action_threshold": "0.70",
-    "keyframe_qa_body_threshold": "0.72",
-    "keyframe_qa_identity_threshold": "0.75",
 }
 
 PROJECTS_DIR.mkdir(exist_ok=True)

@@ -1190,9 +1190,14 @@ const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
   {
     id: "text-generation",
     title: "映射包与分镜生成",
-    description: "控制文本模型可同时推进的剧集数量，以及输出校验失败后的修复重试次数。",
+    description:
+      "控制同时运行多少集的剧本/分镜工作流，工作流内部实际发起多少个并发文本模型请求，以及输出校验失败后的修复重试次数。",
     affects: ["映射包批量生成", "分镜批量生成", "文本模型"],
-    keys: ["text_generation_concurrency", "max_repair_attempts"],
+    keys: [
+      "text_generation_workflow_concurrency",
+      "text_generation_concurrency",
+      "max_repair_attempts",
+    ],
   },
   {
     id: "video-flow",
@@ -1210,7 +1215,6 @@ const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
       "video_ready_high_watermark",
       "media_scheduler_policy",
       "video_plan_confidence_floor",
-      "video_plan_allow_unknown_dimensions",
       "video_concurrency",
       "auto_concurrency",
     ],
@@ -1218,12 +1222,11 @@ const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
   {
     id: "reference-images",
     title: "参考图与视觉生成",
-    description: "控制人物、场景和镜头参考图的生成速度、批次、输入方式与质检并发。",
+    description: "控制人物、场景和镜头参考图的生成速度、批次与输入方式。",
     affects: ["人物定妆照", "场景参考图", "关键帧与视频输入"],
     keys: [
       "reference_pipeline_concurrency",
       "image_request_concurrency",
-      "vlm_request_concurrency",
       "reference_shot_cohort_limit",
       "max_ref_images",
       "use_character_refs",
@@ -1268,7 +1271,9 @@ const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
 ];
 
 const SETTING_FIELD_IMPACTS: Record<string, string> = {
-  text_generation_concurrency: "同时生成映射包或分镜的剧集数量",
+  text_generation_workflow_concurrency: "同一时间最多运行多少集的剧本或分镜工作流",
+  text_generation_concurrency:
+    "同一时间最多发起多少个真实文本模型请求（剧本、分镜等工作流共用同一个请求池）",
   video_submit_concurrency: "每次可同时提交多少个视频生成任务",
   video_inflight_limit: "供应商侧允许同时处理的视频任务总量",
   video_poll_concurrency: "同时查询多少个视频任务的完成状态",
@@ -1279,7 +1284,6 @@ const SETTING_FIELD_IMPACTS: Record<string, string> = {
   video_ready_high_watermark: "就绪任务达到此数量后放缓准备",
   media_scheduler_policy: "任务队列选择下一项媒体工作的方式",
   video_plan_confidence_floor: "AI 模式计划低于此置信度时阻止付费提交",
-  video_plan_allow_unknown_dimensions: "是否允许时空、剪辑或动作关系仍未知的计划继续",
   video_concurrency: "仍使用旧链路时的视频并发兼容值",
   auto_concurrency: "旧版自动生成流程的并发兼容值",
   reference_pipeline_concurrency: "同时推进多少条参考图准备流水线",
@@ -1289,7 +1293,6 @@ const SETTING_FIELD_IMPACTS: Record<string, string> = {
   use_character_refs: "视频生成时是否携带人物定妆照",
   video_reference_batch_prompt: "是否批量生成视频参考图提示词",
   video_reference_role_adaptive: "是否根据镜头角色自动调整参考图策略",
-  vlm_request_concurrency: "同时执行多少个人物定妆照/场景参考图质检请求",
   auto_retake_threshold: "兼容历史配置；质检分数不再触发自动重做",
   max_repair_attempts: "同一问题允许自动修复的最大次数",
   download_concurrency: "同时下载多少个模型生成结果",

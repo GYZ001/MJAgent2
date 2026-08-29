@@ -19,34 +19,34 @@ from app.continuity import dialogue_framing_errors
 from app.domain.video_ops import _storyboard_structural_errors
 from app.production.screenplay_authority import project_prep_pack_to_screenplay
 from app.production.storyboard_pack import (
+    CAMERA_DIGEST_WINDOW,
     STORYBOARD_PACK_CONTRACT_MARKER,
     STORYBOARD_PACK_VERSION,
     MINIMAX_H3_DIALECT_INSTRUCTIONS,
-    SEGMENT_BATCH_TOKENS_PER_SEGMENT,
+    SEGMENT_PROMPT_ANSWER_TOKENS,
     StoryboardPack,
     StoryboardPackBeat,
     StoryboardPackSegment,
-    _AiAllSegmentsDraft,
     _AiBeat,
     _AiBeatSheetDraft,
+    _AiCameraDigest,
     _AiDialogueLine,
     _AiSegmentPlan,
     _AiSegmentResources,
     _AiStoryboardSegmentDraft,
+    _camera_digest_window_payload,
     _dialect_for_target_video_model,
     _enrich_asset_manifest_canonical_visuals,
+    _ensure_segment_prompt_budget,
     _generate_all_segment_prompts,
     _paratext_exclusion_rule,
     _paratext_segment_indexes,
     _segment_content_advisories,
-    _segment_prompt_answer_budget,
+    _segment_continuity_rules,
+    _segment_source_block,
     StoryboardPackBudgetError,
-    _segment_prompt_batch_capacity,
-    _segment_prompt_task_text,
     _source_block_for_prompt,
-    _split_segment_prompt_batches,
     _strip_paratext_from_beat_draft,
-    _validate_all_segments_draft,
     _validate_beat_sheet_draft,
     _validate_segment_draft,
     persist_storyboard_pack,
@@ -296,7 +296,6 @@ def test_validate_beat_sheet_draft_rejects_unknown_beat_id_reference():
 
 def _draft(**overrides) -> _AiStoryboardSegmentDraft:
     base = dict(
-        segment_no=1,
         prompt_text="电影级预告片质感，多镜头叙事，镜头之间硬切。……",
         shot_count=3,
         dialogue=[_AiDialogueLine(speaker_identity_id="id_a", line="走吧", source_segment_index=1)],
@@ -354,52 +353,6 @@ def test_validate_segment_draft_does_not_block_on_unknown_character_resource():
         dialect_render_format="seedance_compact_director_brief",
     )
     assert errors == []
-
-
-# ---------------------------------------------------------------------------
-# _validate_all_segments_draft：2.0.3 整集批量调用的顶层校验——segment_no
-# 完整性（新增，单段版本不需要）+ 逐项复用 _validate_segment_draft（不重复
-# 发明格式检查）。
-# ---------------------------------------------------------------------------
-
-def test_validate_all_segments_draft_accepts_well_formed_batch():
-    draft = _AiAllSegmentsDraft(segments=[_draft(segment_no=1), _draft(segment_no=2)])
-    errors = _validate_all_segments_draft(
-        draft, expected_segment_nos=[1, 2], dialect_render_format="seedance_compact_director_brief",
-    )
-    assert errors == []
-
-
-def test_validate_all_segments_draft_rejects_missing_segment_no():
-    draft = _AiAllSegmentsDraft(segments=[_draft(segment_no=1)])
-    errors = _validate_all_segments_draft(
-        draft, expected_segment_nos=[1, 2], dialect_render_format="seedance_compact_director_brief",
-    )
-    assert any("缺失 [2]" in e for e in errors)
-
-
-def test_validate_all_segments_draft_rejects_extra_segment_no():
-    draft = _AiAllSegmentsDraft(segments=[_draft(segment_no=1), _draft(segment_no=2), _draft(segment_no=3)])
-    errors = _validate_all_segments_draft(
-        draft, expected_segment_nos=[1, 2], dialect_render_format="seedance_compact_director_brief",
-    )
-    assert any("包含不存在的 [3]" in e for e in errors)
-
-
-def test_validate_all_segments_draft_rejects_duplicate_segment_no():
-    draft = _AiAllSegmentsDraft(segments=[_draft(segment_no=1), _draft(segment_no=1)])
-    errors = _validate_all_segments_draft(
-        draft, expected_segment_nos=[1, 2], dialect_render_format="seedance_compact_director_brief",
-    )
-    assert any("重复 [1]" in e for e in errors)
-
-
-def test_validate_all_segments_draft_prefixes_per_item_format_errors_with_segment_no():
-    draft = _AiAllSegmentsDraft(segments=[_draft(segment_no=1, prompt_text=" "), _draft(segment_no=2)])
-    errors = _validate_all_segments_draft(
-        draft, expected_segment_nos=[1, 2], dialect_render_format="seedance_compact_director_brief",
-    )
-    assert any(e.startswith("segment_no=1：") and "为空" in e for e in errors)
 
 
 # ---------------------------------------------------------------------------
@@ -1398,8 +1351,13 @@ def test_storyboard_pack_asset_dependencies_second_scene_unresolvable_is_visible
     assert any("失踪场景" in b for b in blockers)
 
 
+
+
 # ---------------------------------------------------------------------------
-# 2.0.6：阶段二答案预算必须给思考预留留位置，装不下就顺序分批
+# 2.0.8：阶段二改回逐段独立调用。答案预算的安全网从「一批装不装得下」简化
+# 成「这一段装不装得下」，但 2.0.6 记录的生产事故本身（答案预算不够会撞
+# finish_reason=length、这一段照失败且照常计费）与批不批无关，不能跟着
+# 批量机制一起退场。
 # ---------------------------------------------------------------------------
 
 _LIMITS_32K = {
@@ -1461,112 +1419,23 @@ def test_contract_marker_stays_on_2_0_5_so_existing_packs_resume():
     assert STORYBOARD_PACK_VERSION > "2.0.6"
 
 
-def test_twelve_segment_answer_budget_saturates_32k_with_reasoning(monkeypatch):
-    """生产事故指纹：12 段一次调用的答案+思考预留会把 32768 打满。"""
-    _patch_thinking_model(monkeypatch)
-    answer = _segment_prompt_answer_budget(12)
-    assert answer == 12 * SEGMENT_BATCH_TOKENS_PER_SEGMENT
-    from app import hiagent
-
-    _, _, effective = hiagent.text_request_token_limits(requested_max_tokens=answer)
-    assert effective == 32768
-    assert answer + hiagent.reasoning_token_reserve(model="thinking-model") > 32768
-
-
-def test_batch_capacity_leaves_room_for_reasoning_under_32k_cap(monkeypatch):
-    _patch_thinking_model(monkeypatch)
-    from app import hiagent
-
-    capacity = _segment_prompt_batch_capacity(12)
-    assert 1 <= capacity < 12
-    assert (
-        _segment_prompt_answer_budget(capacity) + hiagent.reasoning_token_reserve(model="thinking-model")
-        < 32768
-    )
-    assert (
-        _segment_prompt_answer_budget(capacity + 1) + hiagent.reasoning_token_reserve(model="thinking-model")
-        >= 32768
-    )
-
-
-def test_small_episode_stays_a_single_batch(monkeypatch):
-    _patch_thinking_model(monkeypatch)
-    assert _split_segment_prompt_batches([1, 2, 3, 4]) == [[1, 2, 3, 4]]
-
-
-def test_twelve_segments_split_into_batches_that_fit(monkeypatch):
-    _patch_thinking_model(monkeypatch)
-    batches = _split_segment_prompt_batches(list(range(1, 13)))
-    assert len(batches) >= 2
-    assert [no for batch in batches for no in batch] == list(range(1, 13))
-    from app import hiagent
-
-    for batch in batches:
-        assert (
-            _segment_prompt_answer_budget(len(batch)) + hiagent.reasoning_token_reserve(model="thinking-model")
-            < 32768
-        )
-
-
-def test_empty_segment_list_does_not_skip_the_split_check():
-    """空集合不是『无需检查』：没有段落就不该假装切出一批。"""
-    assert _split_segment_prompt_batches([]) == []
-
-
-def test_non_thinking_model_keeps_twelve_segments_in_one_batch(monkeypatch):
-    _patch_thinking_model(monkeypatch, reserve=0)
-    assert _split_segment_prompt_batches(list(range(1, 13))) == [list(range(1, 13))]
-
-
-def test_capacity_follows_the_model_this_stage_actually_calls(monkeypatch):
-    """容量算术必须按分镜台自己配的模型算，不能拿全局默认模型的上限。
-
-    分镜台可在项目上配专属文本模型（board_text_provider）。这里原先不传
-    provider，拿到的是全局默认文本模型的能力——生产里两者的 max_output_tokens
-    恰好都是 32768 兜底默认值才没露馅，一旦有一边填成真实值就会拿 A 的上限
-    去切 B 的批次。
-    """
-    from app import hiagent
-    from app.harness.text_provider_scope import stage_text_provider
-
-    _patch_thinking_model(monkeypatch)
-    seen: list[str | None] = []
-    real = hiagent.text_request_token_limits
-
-    def _recording(*args, **kwargs):
-        seen.append(kwargs.get("provider"))
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(hiagent, "text_request_token_limits", _recording)
-
-    with stage_text_provider("custom:board-only-model"):
-        _segment_prompt_batch_capacity(12)
-
-    assert seen == ["custom:board-only-model"]
-
-
-def test_observed_thinking_shrinks_the_batch_capacity(monkeypatch):
-    """画像观测到这个模型思考得更多时，一批就得写得更少。"""
+def test_ensure_segment_prompt_budget_passes_when_room_is_ample(monkeypatch):
     _patch_thinking_model(monkeypatch, max_output=131072)
-    roomy = _segment_prompt_batch_capacity(60)
-
-    _patch_thinking_model(monkeypatch, max_output=131072, observed_reasoning=30839)
-    cramped = _segment_prompt_batch_capacity(60)
-
-    assert cramped < roomy
+    _ensure_segment_prompt_budget()  # 不应抛出
 
 
-def test_budget_that_cannot_fit_one_batch_fails_before_spending_money(monkeypatch):
+def test_ensure_segment_prompt_budget_raises_when_single_segment_does_not_fit(monkeypatch):
     """装不下就在发请求前停，并且说清该去动哪个旋钮。
 
-    实测：批次从 10 段收到 6 段，reasoning 只从 30839 降到 30417——思考开销
-    不随批次变小，再切下去只是换个姿势撞 finish_reason=length，钱照付、整集
-    照失败。
+    复用 2.0.6 记录的同一次真实生产事故指纹（reasoning_tokens=30839，
+    max_output_tokens=32768）：批量退场后不再有"批次"概念，但同一个模型
+    观测同样能把单段的答案预算（SEGMENT_PROMPT_ANSWER_TOKENS=2400）挤不
+    下——30768 剩余空间 < 2400，说明这道安全网没有跟着批量机制一起失效。
     """
     _patch_thinking_model(monkeypatch, max_output=32768, observed_reasoning=30839)
 
     with pytest.raises(StoryboardPackBudgetError) as excinfo:
-        _segment_prompt_batch_capacity(10)
+        _ensure_segment_prompt_budget()
 
     message = str(excinfo.value)
     assert "32768" in message and "30839" in message
@@ -1594,7 +1463,7 @@ def test_budget_error_names_the_default_probe_cache_as_the_fixable_cause(monkeyp
     )
 
     with pytest.raises(StoryboardPackBudgetError) as excinfo:
-        _segment_prompt_batch_capacity(10)
+        _ensure_segment_prompt_budget()
 
     assert "真实值" in str(excinfo.value)
 
@@ -1615,83 +1484,160 @@ def test_budget_error_points_elsewhere_when_capability_is_already_evidenced(monk
     )
 
     with pytest.raises(StoryboardPackBudgetError) as excinfo:
-        _segment_prompt_batch_capacity(10)
+        _ensure_segment_prompt_budget()
 
     message = str(excinfo.value)
     assert "真实值" not in message
     assert "改配" in message
 
 
-def test_single_batch_task_text_keeps_whole_episode_wording():
-    text = _segment_prompt_task_text(
-        write_nos=[1, 2, 3], all_nos=[1, 2, 3], has_already_written=False,
+def test_ensure_segment_prompt_budget_follows_the_model_this_stage_actually_calls(monkeypatch):
+    """预算核验必须按分镜台自己配的模型算，不能拿全局默认模型的上限。
+
+    分镜台可在项目上配专属文本模型（board_text_provider）。这里原先不传
+    provider，拿到的是全局默认文本模型的能力——生产里两者的 max_output_tokens
+    恰好都是 32768 兜底默认值才没露馅，一旦有一边填成真实值就会拿 A 的上限
+    去判 B 该不该发。
+    """
+    from app import hiagent
+    from app.harness.text_provider_scope import stage_text_provider
+
+    _patch_thinking_model(monkeypatch)
+    seen: list[str | None] = []
+    real = hiagent.text_request_token_limits
+
+    def _recording(*args, **kwargs):
+        seen.append(kwargs.get("provider"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(hiagent, "text_request_token_limits", _recording)
+
+    with stage_text_provider("custom:board-only-model"):
+        _ensure_segment_prompt_budget()
+
+    assert seen == ["custom:board-only-model"]
+
+
+# ---------------------------------------------------------------------------
+# 2.0.8：一镜参考的三层载荷——本段自己的原文切片、镜头语言窗口、续接规则
+# ---------------------------------------------------------------------------
+
+def test_segment_source_block_uses_only_this_segments_indexes():
+    """逐段调用只带这一段自己的原文，不是全集原文（承袭 2.0.3 之前的设计，
+    全集原文对本段来说是白白抬高单次调用体量的多余上下文）。"""
+    segments = [
+        SourceSegment(segment_id="s1", text="第一段原文", start_offset=0, end_offset=5),
+        SourceSegment(segment_id="s2", text="第二段原文", start_offset=5, end_offset=10),
+        SourceSegment(segment_id="s3", text="第三段原文", start_offset=10, end_offset=15),
+    ]
+    block = _segment_source_block(segments, [2], paratext_indexes=set())
+    assert block == "[段2] 第二段原文"
+    assert "第一段" not in block and "第三段" not in block
+
+
+def test_segment_source_block_swaps_paratext_placeholder():
+    """paratext 段落即使落在本段引用范围内，也绝不能把原文本身发给模型——
+    这条 2.0.4 的底线在逐段调用里同样成立。"""
+    segments = [SourceSegment(segment_id="s1", text="求票求收藏", start_offset=0, end_offset=5)]
+    block = _segment_source_block(segments, [1], paratext_indexes={1})
+    assert "求票求收藏" not in block
+    assert "[段1]" in block
+
+
+def test_camera_digest_window_only_includes_recent_segments_within_window():
+    """只给上一段（窗口=1）发现不了「第 1、3、5 段用同一机位」这种隔段
+    重复，这正是 CAMERA_DIGEST_WINDOW > 1 要解决的问题。"""
+    history = {
+        1: _AiCameraDigest(opening_shot_size="远景", opening_camera_move="推近"),
+        2: _AiCameraDigest(opening_shot_size="中景", opening_camera_move="横摇"),
+        3: _AiCameraDigest(opening_shot_size="近景", opening_camera_move="固定"),
+    }
+    window = _camera_digest_window_payload(history, segment_no=4, window=2)
+    assert [item["segment_no"] for item in window] == [2, 3]
+    assert window[0]["opening_shot_size"] == "中景"
+
+
+def test_camera_digest_window_empty_for_first_segment():
+    """空列表是诚实的「还没有历史」，不是需要兜底填充的缺口。"""
+    assert _camera_digest_window_payload({}, segment_no=1, window=CAMERA_DIGEST_WINDOW) == []
+
+
+def test_continuity_rules_first_segment_has_no_previous_and_no_history():
+    """本集第一段没有上一段、没有镜头语言历史，两种情况都要如实说清楚，
+    不能假装存在一个不存在的参照（CLAUDE.md「Prompts」：确实没有时该怎么写）。"""
+    rules = _segment_continuity_rules(previous_segment_no=None, camera_history=[])
+    assert "没有上一段可参考" in rules[0]
+    assert "没有可参考的镜头语言历史" in rules[1]
+
+
+def test_continuity_rules_names_the_previous_segment_number():
+    rules = _segment_continuity_rules(previous_segment_no=3, camera_history=[])
+    assert "第 3 段" in rules[0]
+    assert "previous_segment_prompt" in rules[0]
+
+
+def test_continuity_rules_camera_history_gives_a_legitimate_repetition_escape_hatch():
+    """允许重复，但要求说明理由——不是简单禁令（对应「给重复留合法出路」）。"""
+    rules = _segment_continuity_rules(
+        previous_segment_no=4,
+        camera_history=[{"segment_no": 2, "opening_shot_size": "远景", "opening_camera_move": "推近"}],
     )
-    assert "一次性联合产出" in text
-    assert "already_written_segments" not in text
+    assert "[2]" in rules[1]
+    assert "camera_repetition_rationale" in rules[1]
+    assert "留空即可" in rules[1]
 
 
-def test_followup_batch_task_text_points_at_already_written():
-    text = _segment_prompt_task_text(
-        write_nos=[7, 8],
-        all_nos=list(range(1, 13)),
-        has_already_written=True,
-    )
-    assert "already_written_segments" in text
-    assert "[7, 8]" in text
-    assert "一次性联合产出" not in text
+# ---------------------------------------------------------------------------
+# 2.0.8：_generate_all_segment_prompts 端到端——逐段独立调用、严格串行、
+# 一镜参考三层载荷都出现在真正发给模型的 task_payload 里
+# ---------------------------------------------------------------------------
 
-
-def _segment_draft(segment_no: int) -> _AiStoryboardSegmentDraft:
+def _segment_draft(
+    prompt_text: str, *, camera_digest: _AiCameraDigest | None = None,
+) -> _AiStoryboardSegmentDraft:
     return _AiStoryboardSegmentDraft(
-        segment_no=segment_no,
-        prompt_text=f"电影级预告片质感，多镜头叙事。镜头1 段{segment_no}。",
+        prompt_text=prompt_text,
         shot_count=3,
+        camera_digest=camera_digest or _AiCameraDigest(),
     )
 
 
 @pytest.mark.asyncio
-async def test_generate_splits_and_passes_already_written_to_later_batches(monkeypatch):
+async def test_generate_calls_model_once_per_segment_strictly_sequential(monkeypatch):
+    """逐段独立调用——不是一次批量：调用次数必须恰好等于段数，且第 N 段的
+    调用必须能看到第 N-1 段刚生成、定稿的 prompt_text（用户方案要求的
+    "一镜参考"）。"""
     import app.production.storyboard_pack as storyboard_pack_module
 
-    monkeypatch.setattr(
-        storyboard_pack_module, "_segment_prompt_batch_capacity", lambda _total: 2,
-    )
     calls: list[dict] = []
 
     async def fake_chat_structured(messages, **kwargs):
         payload = json.loads(messages[1]["content"])
-        write_nos = list(kwargs["call_meta"]["write_segment_nos"])
         calls.append(
-            {
-                "payload": payload,
-                "max_tokens": kwargs["max_tokens"],
-                "write_nos": write_nos,
-            }
+            {"payload": payload, "max_tokens": kwargs["max_tokens"], "call_meta": kwargs["call_meta"]}
         )
-        return _AiAllSegmentsDraft(
-            segments=[_segment_draft(no) for no in write_nos]
+        segment_no = payload["segment_no"]
+        return _segment_draft(
+            f"提示词-段{segment_no}",
+            camera_digest=_AiCameraDigest(
+                opening_shot_size=f"景别{segment_no}", opening_camera_move=f"运镜{segment_no}",
+            ),
         )
 
-    monkeypatch.setattr(
-        storyboard_pack_module.model_gateway, "chat_structured", fake_chat_structured,
-    )
+    monkeypatch.setattr(storyboard_pack_module.model_gateway, "chat_structured", fake_chat_structured)
+    monkeypatch.setattr(storyboard_pack_module, "_ensure_segment_prompt_budget", lambda: None)
+
     beat_draft = _AiBeatSheetDraft(
         beat_sheet=[_AiBeat(beat_id="B1", summary="他扔掉了理想", segment_indexes=[1])],
         segments=[
-            _AiSegmentPlan(
-                segment_no=index,
-                synopsis=f"段{index}",
-                source_segment_indexes=[1],
-                beat_ids=["B1"],
-            )
-            for index in range(1, 5)
+            _AiSegmentPlan(segment_no=index, synopsis=f"段{index}", source_segment_indexes=[1], beat_ids=["B1"])
+            for index in range(1, 6)
         ],
     )
-    source = [
-        SourceSegment(segment_id="s1", text="少年站在山顶。", start_offset=0, end_offset=7),
-    ]
+    source = [SourceSegment(segment_id="s1", text="少年站在山顶。", start_offset=0, end_offset=7)]
+
     result = await _generate_all_segment_prompts(
-        episode_id="ep-truncation",
+        episode_id="ep-sequential",
         episode_no=1,
         beat_draft=beat_draft,
         segments=source,
@@ -1699,38 +1645,80 @@ async def test_generate_splits_and_passes_already_written_to_later_batches(monke
         target_video_model="hiagent",
         bible=None,
     )
-    assert list(result) == [1, 2, 3, 4]
-    assert [call["write_nos"] for call in calls] == [[1, 2], [3, 4]]
-    assert "already_written_segments" not in calls[0]["payload"]
-    written = calls[1]["payload"]["already_written_segments"]
-    assert [item["segment_no"] for item in written] == [1, 2]
-    assert written[0]["prompt_text"] == result[1].prompt_text
-    assert calls[0]["max_tokens"] == _segment_prompt_answer_budget(2)
-    # 整集视野仍在每一次调用里：不是退回互不可见的逐段并行。
-    assert [unit["segment_no"] for unit in calls[0]["payload"]["segments"]] == [1, 2, 3, 4]
-    assert [unit["segment_no"] for unit in calls[1]["payload"]["segments"]] == [1, 2, 3, 4]
+
+    assert list(result) == [1, 2, 3, 4, 5]
+    assert len(calls) == 5, "每段各一次独立调用，不是一次整集批量"
+    assert calls[0]["payload"]["previous_segment_prompt"] is None
+    for n in range(2, 6):
+        assert calls[n - 1]["payload"]["previous_segment_prompt"] == f"提示词-段{n - 1}"
+    for call in calls:
+        assert call["max_tokens"] == SEGMENT_PROMPT_ANSWER_TOKENS
+        assert call["call_meta"]["stage_key"] == "storyboard_pack_segment"
+        assert call["call_meta"]["call_role"] == "storyboard_pack_segment_single"
 
 
 @pytest.mark.asyncio
-async def test_generate_keeps_single_call_when_the_episode_fits(monkeypatch):
+async def test_generate_camera_digest_window_excludes_segments_outside_window(monkeypatch):
+    """镜头语言清单只带最近 CAMERA_DIGEST_WINDOW 段，不是全集累积清单。"""
     import app.production.storyboard_pack as storyboard_pack_module
 
-    monkeypatch.setattr(
-        storyboard_pack_module, "_segment_prompt_batch_capacity", lambda total: total,
-    )
     calls: list[dict] = []
 
     async def fake_chat_structured(messages, **kwargs):
         payload = json.loads(messages[1]["content"])
         calls.append(payload)
-        write_nos = list(kwargs["call_meta"]["write_segment_nos"])
-        return _AiAllSegmentsDraft(
-            segments=[_segment_draft(no) for no in write_nos]
+        segment_no = payload["segment_no"]
+        return _segment_draft(
+            f"提示词-段{segment_no}",
+            camera_digest=_AiCameraDigest(opening_shot_size="远景", opening_camera_move="推近"),
         )
 
-    monkeypatch.setattr(
-        storyboard_pack_module.model_gateway, "chat_structured", fake_chat_structured,
+    monkeypatch.setattr(storyboard_pack_module.model_gateway, "chat_structured", fake_chat_structured)
+    monkeypatch.setattr(storyboard_pack_module, "_ensure_segment_prompt_budget", lambda: None)
+    monkeypatch.setattr(storyboard_pack_module, "CAMERA_DIGEST_WINDOW", 2)
+
+    beat_draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1])],
+        segments=[
+            _AiSegmentPlan(segment_no=index, synopsis=f"段{index}", source_segment_indexes=[1], beat_ids=["B1"])
+            for index in range(1, 5)
+        ],
     )
+    source = [SourceSegment(segment_id="s1", text="少年站在山顶。", start_offset=0, end_offset=7)]
+
+    await _generate_all_segment_prompts(
+        episode_id="ep-window",
+        episode_no=1,
+        beat_draft=beat_draft,
+        segments=source,
+        payload={},
+        target_video_model="hiagent",
+        bible=None,
+    )
+
+    assert calls[0]["recent_camera_language"] == []
+    assert [item["segment_no"] for item in calls[1]["recent_camera_language"]] == [1]
+    assert [item["segment_no"] for item in calls[2]["recent_camera_language"]] == [1, 2]
+    assert [item["segment_no"] for item in calls[3]["recent_camera_language"]] == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_generate_appearance_rule_tells_model_to_copy_fresh_not_from_memory(monkeypatch):
+    """专治角色换装的第三层：每次独立调用都要求逐字重抄世界书原文，不允许
+    凭记忆复述——这是比"整集一次看见全部段落"更不容易漂移的机制（对应
+    CLAUDE.md「接上世界书的 appearance 后逐字一致」的既有先例）。"""
+    import app.production.storyboard_pack as storyboard_pack_module
+
+    calls: list[dict] = []
+
+    async def fake_chat_structured(messages, **kwargs):
+        payload = json.loads(messages[1]["content"])
+        calls.append(payload)
+        return _segment_draft(f"提示词-段{payload['segment_no']}")
+
+    monkeypatch.setattr(storyboard_pack_module.model_gateway, "chat_structured", fake_chat_structured)
+    monkeypatch.setattr(storyboard_pack_module, "_ensure_segment_prompt_budget", lambda: None)
+
     beat_draft = _AiBeatSheetDraft(
         beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1])],
         segments=[
@@ -1738,11 +1726,10 @@ async def test_generate_keeps_single_call_when_the_episode_fits(monkeypatch):
             _AiSegmentPlan(segment_no=2, synopsis="b", source_segment_indexes=[1], beat_ids=["B1"]),
         ],
     )
-    source = [
-        SourceSegment(segment_id="s1", text="少年站在山顶。", start_offset=0, end_offset=7),
-    ]
-    result = await _generate_all_segment_prompts(
-        episode_id="ep-small",
+    source = [SourceSegment(segment_id="s1", text="少年站在山顶。", start_offset=0, end_offset=7)]
+
+    await _generate_all_segment_prompts(
+        episode_id="ep-appearance",
         episode_no=1,
         beat_draft=beat_draft,
         segments=source,
@@ -1750,7 +1737,52 @@ async def test_generate_keeps_single_call_when_the_episode_fits(monkeypatch):
         target_video_model="hiagent",
         bible=None,
     )
-    assert set(result) == {1, 2}
-    assert len(calls) == 1
-    assert "already_written_segments" not in calls[0]
-    assert "一次性联合产出" in calls[0]["task"]
+
+    assert len(calls) == 2
+    for payload in calls:
+        appearance_rule = next(
+            r for r in payload["rules"] if "appearance" in r or "scene_canonical" in r
+        )
+        assert "不要凭记忆复述" in appearance_rule
+        assert "每次都" in appearance_rule and "重新逐字抄一遍" in appearance_rule
+
+
+@pytest.mark.asyncio
+async def test_generate_raises_before_any_call_when_budget_cannot_fit_first_segment(monkeypatch):
+    """预算核验必须在真正发出第一次请求之前就拦下——不能烧钱之后才发现。"""
+    import app.production.storyboard_pack as storyboard_pack_module
+
+    called = False
+
+    async def fake_chat_structured(messages, **kwargs):
+        nonlocal called
+        called = True
+        return _segment_draft("不应该被生成")
+
+    monkeypatch.setattr(storyboard_pack_module.model_gateway, "chat_structured", fake_chat_structured)
+
+    def _raise():
+        raise StoryboardPackBudgetError(
+            model="thinking-model", model_cap=32768, reserve=30839, needed=2400, provider=None,
+        )
+
+    monkeypatch.setattr(storyboard_pack_module, "_ensure_segment_prompt_budget", _raise)
+
+    beat_draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1])],
+        segments=[_AiSegmentPlan(segment_no=1, synopsis="a", source_segment_indexes=[1], beat_ids=["B1"])],
+    )
+    source = [SourceSegment(segment_id="s1", text="少年站在山顶。", start_offset=0, end_offset=7)]
+
+    with pytest.raises(StoryboardPackBudgetError):
+        await _generate_all_segment_prompts(
+            episode_id="ep-budget-block",
+            episode_no=1,
+            beat_draft=beat_draft,
+            segments=source,
+            payload={},
+            target_video_model="hiagent",
+            bible=None,
+        )
+
+    assert called is False, "预算不够就不该真的发出请求"

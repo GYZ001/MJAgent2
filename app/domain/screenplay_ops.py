@@ -1409,7 +1409,6 @@ def _new_screenplay_recorder(
             "model": active_text_model,
             "text_generation_concurrency": (
                 get_setting("text_generation_concurrency")
-                or get_setting("storyboard_concurrency")
                 or "10"
             ),
             "duration_policy": "content_derived_unbounded",

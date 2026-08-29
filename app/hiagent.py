@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -49,7 +49,6 @@ BAILIAN_VLM_BASE_MODELS = ("qwen3.7-plus",)
 _BAILIAN_FAILED_MODELS: dict[str, set[str]] = {"text": set(), "vlm": set()}
 _MEDIA_SEMAPHORES: weakref.WeakKeyDictionary[Any, asyncio.Semaphore] = weakref.WeakKeyDictionary()
 _IMAGE_SEMAPHORES: weakref.WeakKeyDictionary[Any, asyncio.Semaphore] = weakref.WeakKeyDictionary()
-_VLM_SEMAPHORES: weakref.WeakKeyDictionary[Any, asyncio.Semaphore] = weakref.WeakKeyDictionary()
 
 
 def _provider_request_matches(
@@ -425,6 +424,41 @@ class ProviderFailure:
         return f"VIDEO_{suffix or 'PROVIDER_FAILURE'}"
 
 
+def has_repeated_terminal_poll_failure(
+    messages: Sequence[str],
+    *,
+    min_repeats: int = 2,
+) -> bool:
+    """纯行为判据：同一供应商任务标识连续 ``min_repeats`` 次返回终态失败，且
+    ``error.message`` 字节级相同，判定为供应商对这次请求的确定性拒绝。
+
+    这里判断的是结构——同一任务、同一结果、连续重复出现——不是内容：不得
+    改成按关键词（例如 "copyright"）匹配 message 里写了什么词。真实供应商
+    失败往往连 ``error.code``、``failure`` 结构化字段都没有（见
+    ``ProviderFailure.from_provider_payload`` 对非结构化 payload 的兜底），
+    行为重复本身就是这里唯一可用、也足够强的信号：同一请求签名对同一输入
+    连续给出完全相同的结果，说明这不是瞬时抖动。
+
+    ``messages`` 必须按时间顺序（旧到新）排列，且约定调用方已经把"本次"也
+    纳入这个序列（例如直接查询已落库的调用账本，本次失败在写入判据前就已
+    经提交），所以这里只看序列尾部的连续相同游程，不单独接收"当前值"参数。
+
+    职责边界：本函数不做任何 I/O、不触碰数据库，只接受调用方已经取好的历史
+    消息列表——跨调用行为比对（查询 provider_calls）是调用方的事，不属于
+    ``ProviderFailure.from_provider_payload`` 解析供应商结构化字段的职责，
+    也不属于这个纯判断函数本身。
+    """
+    if min_repeats < 2:
+        min_repeats = 2
+    if len(messages) < min_repeats:
+        return False
+    tail = list(messages[-min_repeats:])
+    anchor = tail[0]
+    if not anchor:
+        return False
+    return all(message == anchor for message in tail)
+
+
 def provider_failure_from_http_payload(payload: Any) -> ProviderFailure | None:
     """Extract the typed provider failure shared by HTTP adapters."""
     if not isinstance(payload, dict):
@@ -498,16 +532,6 @@ def _image_semaphore() -> asyncio.Semaphore:
     except Exception:  # noqa: BLE001
         limit = getattr(config, "IMAGE_REQUEST_CONCURRENCY", config.MEDIA_REQUEST_CONCURRENCY)
     return _channel_semaphore(_IMAGE_SEMAPHORES, limit)
-
-
-def _vlm_semaphore() -> asyncio.Semaphore:
-    try:
-        from app.media_pipeline.concurrency import channel_limit
-        from app.media_pipeline import stages as media_stages
-        limit = channel_limit(media_stages.RESOURCE_VLM)
-    except Exception:  # noqa: BLE001
-        limit = getattr(config, "VLM_REQUEST_CONCURRENCY", config.MEDIA_REQUEST_CONCURRENCY)
-    return _channel_semaphore(_VLM_SEMAPHORES, limit)
 
 
 def _timeout_phase(exc: httpx.TimeoutException) -> str:
@@ -2520,6 +2544,17 @@ async def _stream_chat_completion(
     """SSE 流式消费 chat/completions，逐 token 回调 on_token，最终重组为非流式等价 `data`。
 
     不做重试：请求一旦送达，是否已收到 token 都不能证明上游没有开始生成。
+
+    ``received_chars`` 是逐帧累加的真实收字数（content delta + reasoning
+    delta，每帧只加这一帧新增的长度，见下方循环），落库时不经任何裁剪。
+    它与 ``finish_provider_call`` 落的 ``response_json`` 不是同一条链路：
+    后者要经 ``app/db.py:_trim_for_call_log`` 按 120,000 字符裁剪单个字符串
+    （超限会截断并附加 ``"...[truncated N chars]"``）。核对二者时如果直接
+    比较 ``received_chars`` 和 ``len(response_json...content)``，在内容超过
+    120,000 字符时会得出「received_chars 多算」的假结论——2026-08-29 抽查
+    过全部 6335 条 status=OK 的 chat 记录（含全部 60 条 finish_reason=length），
+    把裁剪标记还原回真实长度后 received_chars 与真实内容 0 处不符，此前报出
+    的 5 处「多算」全部是这个裁剪导致的比对假象，不是累加逻辑本身的 bug。
     """
     merged_meta = _merge_call_meta(meta)
     req_headers = dict(headers if headers is not None else _headers())
@@ -3115,70 +3150,6 @@ async def generate_image(prompt: str, *, size: str = "1024x1024",
     if item.get("url"):
         item["url"] = _absolute_provider_url(item["url"], base_url)
     return item
-
-
-async def vlm_check(frames_b64: list[str], expectation_text: str,
-                    *, call_meta: dict | None = None) -> str:
-    """VLM 质检：传入抽帧（base64 jpeg）与预期描述，返回模型原文（上层解析 JSON）。
-    按设置在火山 HiAgent、OpenRouter、阿里云百炼之间路由。"""
-    content: list[dict[str, Any]] = [{"type": "text", "text": expectation_text}]
-    for b64 in frames_b64:
-        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-    messages = [
-        {"role": "system", "content": "Return exactly one valid JSON object. No Markdown, no prose."},
-        {"role": "user", "content": content},
-    ]
-    timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_VLM_READ,
-                            write=config.TIMEOUT_VLM_WRITE, pool=10)
-    from app import text_providers
-
-    provider = active_provider("vlm")
-    protocol = text_providers.protocol_for_provider(provider)
-    model = active_model("vlm", provider)
-    if protocol == "bailian":
-        # 百炼走自己的模型回退链，连接在下面的调用里解析。
-        pass
-    else:
-        fallback_url, fallback_key = (
-            (config.OPENROUTER_BASE_URL, config.OPENROUTER_API_KEY)
-            if protocol == "openrouter"
-            else (config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
-        )
-        base_url, headers = _model_connection(
-            provider, model, fallback_url, fallback_key,
-        )
-        url = f"{base_url}/chat/completions"
-        key_name = f"model:{model}"
-    prepared_urls, media_meta = await _prepare_image_data_urls(
-        [f"data:image/jpeg;base64,{b64}" for b64 in frames_b64])
-    content[:] = [content[0], *[
-        {"type": "image_url", "image_url": {"url": url}} for url in prepared_urls
-    ]]
-    payload = {"model": model, "messages": messages, "temperature": 0, "max_tokens": 2048}
-    if protocol == "openrouter":
-        payload["response_format"] = {"type": "json_object"}
-    merged_call_meta = {**(call_meta or {}), **media_meta}
-    async with _vlm_semaphore():
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                if protocol == "bailian":
-                    bailian_payload = {"messages": messages, "temperature": 0, "max_tokens": 2048}
-                    data, _, _ = await _post_bailian_chat_with_fallback(
-                        client, bailian_payload, fallback_kind="vlm", log_kind="vlm_qa",
-                        preferred_model=model, meta=merged_call_meta)
-                else:
-                    data = await _post_json(client, url, payload, kind="vlm_qa", model=model,
-                                            headers=headers, key_name=key_name, meta=merged_call_meta)
-            except ProviderError as exc:
-                raw = (exc.raw or str(exc)).lower()
-                if protocol == "openrouter" and "response_format" in payload and (
-                        "response_format" in raw or "json" in raw or "schema" in raw):
-                    payload.pop("response_format", None)
-                    data = await _post_json(client, url, payload, kind="vlm_qa", model=model,
-                                            headers=headers, key_name=key_name, meta=merged_call_meta)
-                else:
-                    raise
-    return _chat_content(data, label="VLM")
 
 
 def encode_image_file(path: str) -> str:

@@ -97,14 +97,19 @@ def _resource_key(workflow_type: str) -> str:
 
 def _configured_limit(workflow_type: str) -> int:
     resource = _resource_key(workflow_type)
+    if resource == "text_provider_calls":
+        # 真实供应商请求槽位接入媒体流水线那套"拥塞减半 + 健康爬升"自适应状态
+        # 机（app/media_pipeline/concurrency.py），取代对 text_generation_concurrency
+        # 的静态直读：上限仍然来自这个设置，但生效值会随 429/5xx/超时/内存水位
+        # 等真实信号自动升降，而不是永远钉在配置里的那个数字。
+        from app.media_pipeline.concurrency import RESOURCE_TEXT_PROVIDER, channel_limit
+
+        return max(1, min(MAX_TEXT_GENERATION_CONCURRENCY, channel_limit(RESOURCE_TEXT_PROVIDER)))
     if resource == "text_generation_workflows":
         raw = (
             get_setting("text_generation_workflow_concurrency")
             or get_setting("text_generation_concurrency")
-            or get_setting("storyboard_concurrency")
         )
-    elif resource == "text_provider_calls":
-        raw = get_setting("text_generation_concurrency")
     else:
         raw = get_setting(f"{resource}_concurrency")
     try:
@@ -232,6 +237,71 @@ def scene_reference_batch_semaphore() -> asyncio.Semaphore:
     )
 
 
+# 认定为"供应商侧拥塞"的 ProviderError.failure_kind 取值：429（rate_limited）、
+# 5xx 含 504（upstream_unavailable）、传输层超时的两种归类（connection_failed /
+# request_outcome_unknown，覆盖 ReadTimeout 与 hiagent._FirstTokenTimeout）。协议或
+# 数据完整性问题（如 stream_interrupted）不算——重试解决不了拥塞，误记会让自适应
+# 状态失真。
+_CONGESTION_FAILURE_KINDS = frozenset({
+    "rate_limited",
+    "upstream_unavailable",
+    "connection_failed",
+    "request_outcome_unknown",
+})
+
+
+def _congestion_reason(exc: BaseException) -> str | None:
+    """从一次失败的真实供应商调用里识别拥塞证据；不是拥塞信号则返回 None。
+
+    优先读 `hiagent.ProviderError` 已经做好的 retryable + failure_kind 分类
+    （duck-typed via getattr，不 import hiagent，避免引入模块间耦合）；再退到
+    stdlib/httpx 的超时类型与显式状态码兜底，覆盖任何尚未走到该分类的异常。
+    """
+    failure_kind = getattr(exc, "failure_kind", None)
+    if getattr(exc, "retryable", False) and failure_kind in _CONGESTION_FAILURE_KINDS:
+        return str(failure_kind)
+    if isinstance(exc, TimeoutError):  # 含 asyncio.TimeoutError 与 _FirstTokenTimeout
+        return "timeout"
+    try:
+        import httpx
+    except ImportError:
+        httpx = None  # type: ignore[assignment]
+    if httpx is not None and isinstance(exc, httpx.ReadTimeout):
+        return "read_timeout"
+    status_code = getattr(exc, "status_code", None)
+    if status_code in (429, 504):
+        return f"http_{status_code}"
+    return None
+
+
+def _report_text_provider_outcome(exc: BaseException | None) -> None:
+    """把一次真实文本 provider 调用的结果接进媒体流水线那套"拥塞减半 + 健康爬升"
+    自适应状态机（复用 app/media_pipeline/concurrency.py，不另写一套）。
+
+    内存水位优先于调用结果判断：即使这次调用本身成功，可用内存跌破本机实测水位
+    也要降档——那不是供应商的问题，是本机快扛不住了；成功与拥塞不能在同一次上报
+    里并存，否则状态自相矛盾。调用失败但不属于拥塞证据（如业务校验失败）时，既
+    不算拥塞也不算健康，不上报——同 L3 对不可重试失败的既有处理方式一致。
+    """
+    from app.media_pipeline.concurrency import (
+        RESOURCE_TEXT_PROVIDER,
+        memory_pressure_reason,
+        report_congestion,
+        report_healthy,
+    )
+
+    memory_reason = memory_pressure_reason()
+    if memory_reason is not None:
+        report_congestion(RESOURCE_TEXT_PROVIDER, reason=f"memory:{memory_reason}")
+        return
+    if exc is not None:
+        reason = _congestion_reason(exc)
+        if reason is not None:
+            report_congestion(RESOURCE_TEXT_PROVIDER, reason=reason)
+        return
+    report_healthy(RESOURCE_TEXT_PROVIDER)
+
+
 async def run_with_provider_call_slot(
     operation: Callable[[], Awaitable[T]],
     *,
@@ -250,6 +320,10 @@ async def run_with_provider_call_slot(
     the outer lease can therefore publish a batch-abort fence before releasing
     the real process-wide slot.  Runtime guards are intentionally callbacks,
     not durable provider metadata.
+
+    Every attempt (outer or re-entrant) reports its outcome into the shared
+    congestion/health state machine so the gate's effective limit can grow or
+    shrink with real signal instead of staying pinned to a static setting.
     """
     current_task = asyncio.current_task()
     inherited_lease = _provider_call_slot_lease.get()
@@ -264,7 +338,13 @@ async def run_with_provider_call_slot(
             for predicate in predicates
         ):
             raise asyncio.CancelledError
-        return await operation()
+        try:
+            result = await operation()
+        except BaseException as exc:
+            _report_text_provider_outcome(exc)
+            raise
+        _report_text_provider_outcome(None)
+        return result
 
     gate = gate_for("text_provider_calls")
     await gate.acquire(
@@ -277,7 +357,7 @@ async def run_with_provider_call_slot(
         if abort_predicate is not None and abort_predicate():
             raise asyncio.CancelledError
         try:
-            return await operation()
+            result = await operation()
         except BaseException as exc:
             if on_failure is not None:
                 try:
@@ -287,7 +367,10 @@ async def run_with_provider_call_slot(
                         "provider-slot failure callback failed: "
                         f"{callback_exc!r}"
                     )
+            _report_text_provider_outcome(exc)
             raise
+        _report_text_provider_outcome(None)
+        return result
     finally:
         _provider_call_slot_lease.reset(owner_token)
         gate.release()

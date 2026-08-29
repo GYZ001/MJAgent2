@@ -1,18 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
 from app import generation_concurrency, hiagent, task_registry
+from app.media_pipeline import concurrency as media_concurrency
 
 
 def _single_provider_slot(monkeypatch) -> None:
+    # "text_provider_calls" 的生效上限现在来自 media_pipeline 那套自适应通道
+    # （见 generation_concurrency._configured_limit），不再直读 get_setting；直接
+    # 钉死 channel_limit 的返回值，同时把该模块自己的 get_setting 也短路掉，避免
+    # report_healthy/report_congestion 在首次初始化通道时打到真实数据库。
     monkeypatch.setattr(
         generation_concurrency,
         "get_setting",
         lambda key: "1" if key == "text_generation_concurrency" else None,
     )
+    monkeypatch.setattr(media_concurrency, "get_setting", lambda key: None)
+    monkeypatch.setattr(media_concurrency, "channel_limit", lambda resource: 1)
+    monkeypatch.setattr(media_concurrency, "memory_pressure_reason", lambda: None)
 
 
 def test_screenplay_and_storyboard_share_one_process_wide_limit(
@@ -21,7 +30,7 @@ def test_screenplay_and_storyboard_share_one_process_wide_limit(
     monkeypatch.setattr(
         generation_concurrency,
         "get_setting",
-        lambda key: "2" if key == "storyboard_concurrency" else None,
+        lambda key: "2" if key == "text_generation_workflow_concurrency" else None,
     )
 
     async def scenario() -> int:
@@ -123,7 +132,7 @@ def test_interactive_generation_jumps_ahead_of_queued_batch_work(
     monkeypatch.setattr(
         generation_concurrency,
         "get_setting",
-        lambda key: "1" if key == "storyboard_concurrency" else None,
+        lambda key: "1" if key == "text_generation_workflow_concurrency" else None,
     )
 
     async def scenario() -> list[str]:
@@ -185,7 +194,7 @@ def test_two_phase_batch_cancel_does_not_start_waiters(monkeypatch) -> None:
     monkeypatch.setattr(
         generation_concurrency,
         "get_setting",
-        lambda key: "1" if key == "storyboard_concurrency" else None,
+        lambda key: "1" if key == "text_generation_workflow_concurrency" else None,
     )
 
     async def scenario() -> list[str]:
@@ -399,3 +408,179 @@ def test_provider_slot_preserves_user_cancellation_and_fences_peer(
     assert isinstance(owner_result, asyncio.CancelledError)
     assert isinstance(peer_result, asyncio.CancelledError)
     assert calls == ["owner-ledger"]
+
+
+# ---------------------------------------------------------------------------
+# L2 自适应拥塞反馈环：复用 app/media_pipeline/concurrency.py 的通道状态机，
+# 而不是钉死 text_generation_concurrency 静态值。
+# ---------------------------------------------------------------------------
+
+
+def _reset_text_provider_channel(monkeypatch, *, hard_limit: str = "8") -> None:
+    media_concurrency._channels.pop(media_concurrency.RESOURCE_TEXT_PROVIDER, None)
+    monkeypatch.setattr(
+        media_concurrency,
+        "get_setting",
+        lambda key: hard_limit if key == "text_generation_concurrency" else None,
+    )
+    monkeypatch.setattr(media_concurrency, "memory_pressure_reason", lambda: None)
+
+
+def test_congestion_reason_classifies_429_5xx_timeout_and_ignores_other_failures() -> None:
+    rate_limited = hiagent.ProviderError(
+        "网关限流（HTTP 429）", retryable=True, failure_kind="rate_limited",
+    )
+    upstream_5xx = hiagent.ProviderError(
+        "网关/上游故障（HTTP 504）", retryable=True, failure_kind="upstream_unavailable",
+    )
+    outcome_unknown_timeout = hiagent.ProviderError(
+        "流式调用读超时", retryable=True, failure_kind="request_outcome_unknown",
+    )
+    # _FirstTokenTimeout(TimeoutError) 与 asyncio.TimeoutError 都是内建 TimeoutError
+    # 的子类；直接用 TimeoutError 覆盖同一条 isinstance 分支，不用伸进 hiagent 私有类。
+    first_token_timeout = TimeoutError("首字超时")
+    # 不是拥塞证据：业务校验失败、以及协议/数据完整性问题（重试也解决不了拥塞）。
+    business_failure = ValueError("结构化输出校验失败")
+    stream_interrupted = hiagent.ProviderError(
+        "流式响应在 [DONE] 前中断", retryable=True, failure_kind="stream_interrupted",
+    )
+
+    assert generation_concurrency._congestion_reason(rate_limited) == "rate_limited"
+    assert generation_concurrency._congestion_reason(upstream_5xx) == "upstream_unavailable"
+    assert (
+        generation_concurrency._congestion_reason(outcome_unknown_timeout)
+        == "request_outcome_unknown"
+    )
+    assert generation_concurrency._congestion_reason(first_token_timeout) == "timeout"
+    assert generation_concurrency._congestion_reason(business_failure) is None
+    assert generation_concurrency._congestion_reason(stream_interrupted) is None
+
+
+def test_provider_call_slot_halves_channel_limit_after_two_congestion_failures(
+    monkeypatch,
+) -> None:
+    _reset_text_provider_channel(monkeypatch)
+
+    async def scenario() -> tuple[int, int]:
+        before = media_concurrency.channel_limit(media_concurrency.RESOURCE_TEXT_PROVIDER)
+
+        async def failing() -> None:
+            raise hiagent.ProviderError(
+                "网关限流（HTTP 429）", retryable=True, failure_kind="rate_limited",
+            )
+
+        for _ in range(2):
+            with pytest.raises(hiagent.ProviderError):
+                await generation_concurrency.run_with_provider_call_slot(failing)
+        after = media_concurrency.channel_limit(media_concurrency.RESOURCE_TEXT_PROVIDER)
+        return before, after
+
+    before, after = asyncio.run(scenario())
+    assert before == 8
+    assert after == 4  # 连续两次 429 触发减半
+
+
+def test_provider_call_slot_does_not_downgrade_on_non_congestion_failure(
+    monkeypatch,
+) -> None:
+    _reset_text_provider_channel(monkeypatch)
+
+    async def scenario() -> int:
+        async def failing() -> None:
+            raise ValueError("结构化输出校验失败")
+
+        for _ in range(5):
+            with pytest.raises(ValueError):
+                await generation_concurrency.run_with_provider_call_slot(failing)
+        return media_concurrency.channel_limit(media_concurrency.RESOURCE_TEXT_PROVIDER)
+
+    limit = asyncio.run(scenario())
+    assert limit == 8  # 业务失败不是拥塞证据，不触发降档
+
+
+def test_memory_pressure_downgrades_even_on_successful_call(monkeypatch) -> None:
+    _reset_text_provider_channel(monkeypatch)
+    monkeypatch.setattr(
+        media_concurrency,
+        "memory_pressure_reason",
+        lambda: "available_memory=100MB < floor=512MB",
+    )
+
+    async def scenario() -> int:
+        async def ok() -> str:
+            return "ok"
+
+        for _ in range(2):
+            result = await generation_concurrency.run_with_provider_call_slot(ok)
+            assert result == "ok"
+        return media_concurrency.channel_limit(media_concurrency.RESOURCE_TEXT_PROVIDER)
+
+    after = asyncio.run(scenario())
+    assert after == 4  # 调用本身成功也挡不住内存拥塞信号触发降档
+
+
+def test_congestion_downgrade_and_memory_pressure_log_a_visible_warning(
+    monkeypatch, caplog,
+) -> None:
+    _reset_text_provider_channel(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="app.media_pipeline.concurrency"):
+        media_concurrency.report_congestion(
+            media_concurrency.RESOURCE_TEXT_PROVIDER, reason="rate_limited",
+        )
+        media_concurrency.report_congestion(
+            media_concurrency.RESOURCE_TEXT_PROVIDER, reason="rate_limited",
+        )
+
+    assert "concurrency-downgrade" in caplog.text
+    assert media_concurrency.RESOURCE_TEXT_PROVIDER in caplog.text
+    assert "rate_limited" in caplog.text
+
+
+def test_memory_pressure_reason_uses_measured_floor(monkeypatch) -> None:
+    floor = media_concurrency.MEMORY_AVAILABLE_FLOOR_KB
+    monkeypatch.setattr(media_concurrency, "_available_memory_kb", lambda: floor - 1)
+    reason = media_concurrency.memory_pressure_reason()
+    assert reason is not None
+    assert "available_memory" in reason
+
+    monkeypatch.setattr(media_concurrency, "_available_memory_kb", lambda: floor + 1)
+    assert media_concurrency.memory_pressure_reason() is None
+
+    # 读取失败（非 Linux/权限问题）必须是"这次不检查"，不能被当成"内存充足"
+    # 而静默放行——但也不能因此假装拥塞；两种情形都用同一个 None 表达。
+    monkeypatch.setattr(media_concurrency, "_available_memory_kb", lambda: None)
+    assert media_concurrency.memory_pressure_reason() is None
+
+
+def test_report_healthy_grows_channel_after_ten_minutes_without_congestion(
+    monkeypatch,
+) -> None:
+    _reset_text_provider_channel(monkeypatch)
+    state = media_concurrency.ensure_channel(media_concurrency.RESOURCE_TEXT_PROVIDER)
+    state.current = 4  # 模拟此前已经降档过
+
+    clock = {"now": 1_000_000.0}
+    monkeypatch.setattr(media_concurrency.time, "time", lambda: clock["now"])
+
+    media_concurrency.report_healthy(media_concurrency.RESOURCE_TEXT_PROVIDER)
+    assert state.current == 4  # 第一次健康只记起点，不涨
+
+    clock["now"] += 601.0
+    media_concurrency.report_healthy(media_concurrency.RESOURCE_TEXT_PROVIDER)
+    assert state.current == 5  # 连续 10 分钟健康后 +1，直到 hard_limit
+
+
+def test_configured_limit_for_text_provider_calls_delegates_to_adaptive_channel(
+    monkeypatch,
+) -> None:
+    _reset_text_provider_channel(monkeypatch)
+    monkeypatch.setattr(media_concurrency, "channel_limit", lambda resource: 3)
+    assert generation_concurrency._configured_limit("text_provider_calls") == 3
+
+    # 硬顶（MAX_TEXT_GENERATION_CONCURRENCY）仍然生效，不因为改走自适应通道被绕过。
+    monkeypatch.setattr(media_concurrency, "channel_limit", lambda resource: 999)
+    assert (
+        generation_concurrency._configured_limit("text_provider_calls")
+        == generation_concurrency.MAX_TEXT_GENERATION_CONCURRENCY
+    )

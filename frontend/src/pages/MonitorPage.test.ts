@@ -210,7 +210,7 @@ describe("系统设置功能分类", () => {
     const keys = [
       "text_generation_concurrency",
       "video_submit_concurrency",
-      "vlm_request_concurrency",
+      "image_request_concurrency",
       "episode_cost_limit_cny",
       "storyboard_workspace_safe_readonly",
       "future_setting",
@@ -223,7 +223,7 @@ describe("系统设置功能分类", () => {
     ]);
     expect(
       groups.find((group) => group.id === "reference-images")?.keys,
-    ).toContain("vlm_request_concurrency");
+    ).toContain("image_request_concurrency");
     expect(groups.find((group) => group.id === "other")?.keys).toEqual([
       "future_setting",
     ]);
