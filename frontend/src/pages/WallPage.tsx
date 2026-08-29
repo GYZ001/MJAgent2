@@ -14,7 +14,6 @@ import {
   type StoryboardPackResources,
 } from '../api'
 import { ItemTaskTimer } from '../components/TaskTimer'
-import DecisionDialog from '../components/DecisionDialog'
 import QueryState from '../components/QueryState'
 import { compactShotStage } from '../shotStatus'
 import { findPortraitImage, findSceneReferenceImage } from '../lib/bibleAssets'
@@ -311,10 +310,15 @@ export default function WallPage() {
   const [detail, setDetail] = useState<DetailState>({ status: 'idle' })
   const [context, setContext] = useState<ReviewWallContext | null>(null)
   const [contextError, setContextError] = useState<string | null>(null)
-  const [bulkOpen, setBulkOpen] = useState(false)
   const [bulkPreparing, setBulkPreparing] = useState(false)
   const [bulkSubmitting, setBulkSubmitting] = useState(false)
   const detailRequest = useRef(0)
+  // 生成前的费用确认弹窗已删除（2026-08-29 用户拍板：模型与视频生成走公司自
+  // 有服务，不计费）。bulkLockRef 是同步锁：refreshAll() 与 runBulkGenerate()
+  // 之间有一段 await 间隙，bulkPreparing/bulkSubmitting 两个 state 各自的
+  // disabled 判据在这段间隙里都还没生效，连点两次可能在这个窗口里都通过——
+  // ref 在同一个事件循环内立即生效，堵住这个窗口，保证点两次只跑一遍。
+  const bulkLockRef = useRef(false)
 
   useEffect(() => {
     setSelectedShotId(current => resolveSelectedShotId(shots, current))
@@ -361,20 +365,6 @@ export default function WallPage() {
     await loadContext()
     if (selectedShotId) await loadDetail(selectedShotId)
   }, [loadContext, loadDetail, refresh, selectedShotId])
-
-  // 点「生成所有视频」之前先刷新一遍片段状态与资格快照：整集批量发起最容易在
-  // 「页面停留了一阵子、期间兄弟片段生成或素材清单增长」之后撞上 CON-409（详见
-  // qualificationChangedRetryVersion 的注释）；这一步降低撞上的概率，命中时下面
-  // runBulkGenerate 里的自动重试兜底，不代表可以省掉其中一个。
-  const openBulkConfirm = useCallback(async () => {
-    setBulkPreparing(true)
-    try {
-      await refreshAll()
-    } finally {
-      setBulkPreparing(false)
-    }
-    setBulkOpen(true)
-  }, [refreshAll])
 
   const runBulkGenerate = useCallback(async () => {
     if (!episodeId || !context) return
@@ -431,6 +421,29 @@ export default function WallPage() {
     }
   }, [context, episodeId, refreshAll, toast])
 
+  // 点「生成所有视频」直接发起，不再弹窗等用户二次确认（2026-08-29 用户拍板：
+  // 删除生成前的费用确认弹窗）。刷新一遍片段状态与资格快照的动作保留——
+  // 整集批量发起最容易在「页面停留了一阵子、期间兄弟片段生成或素材清单
+  // 增长」之后撞上 CON-409（详见 qualificationChangedRetryVersion 的注释），
+  // 这一步降低撞上的概率，命中时下面 runBulkGenerate 里的自动重试兜底，
+  // 不代表可以省掉其中一个。runBulkGenerate 自带的「已提交 N 段生成请求」
+  // toast 就是发起后的明确反馈，不需要另外再报一遍。
+  const generateAll = useCallback(async () => {
+    if (bulkLockRef.current) return
+    bulkLockRef.current = true
+    try {
+      setBulkPreparing(true)
+      try {
+        await refreshAll()
+      } finally {
+        setBulkPreparing(false)
+      }
+      await runBulkGenerate()
+    } finally {
+      bulkLockRef.current = false
+    }
+  }, [refreshAll, runBulkGenerate])
+
   const bulkEstimate = useMemo(() => bulkGenerateEstimate(shots), [shots])
 
   if (error && !ep) {
@@ -454,7 +467,6 @@ export default function WallPage() {
     blockers,
     submitCount: bulkEstimate.submitCount,
   })
-  const bulkCopy = bulkGenerateDialogCopy(bulkEstimate)
 
   return (
     <>
@@ -479,8 +491,8 @@ export default function WallPage() {
             className="btn primary small wall-summary-generate-all"
             disabled={Boolean(bulkDisabledReason) || bulkPreparing}
             title={bulkDisabledReason || undefined}
-            aria-label={bulkDisabledReason ? `生成所有视频，暂不可用：${bulkDisabledReason}` : '生成所有视频'}
-            onClick={() => { void openBulkConfirm() }}
+            aria-label={bulkDisabledReason ? `生成所有视频，暂不可用：${bulkDisabledReason}` : '生成所有视频；点击后立即提交'}
+            onClick={() => { void generateAll() }}
           >
             {bulkPreparing ? '核对生成资格…' : '生成所有视频'}
           </button>
@@ -501,18 +513,6 @@ export default function WallPage() {
               去{ep.status === 'scripting' || ep.status === 'planned' ? '映射台' : '分镜台'}处理
             </button>
           </div>
-        )}
-        {bulkOpen && context && (
-          <DecisionDialog
-            title="生成所有视频？"
-            summary={bulkCopy.summary}
-            message="系统会按段落分别提交冻结的整段提示词，不会在提交前修改文字内容；每段完成后自动采用技术有效的最佳候选。"
-            details={bulkCopy.details}
-            confirmLabel="确认提交"
-            cancelLabel="取消"
-            onClose={() => setBulkOpen(false)}
-            onConfirm={() => { setBulkOpen(false); void runBulkGenerate() }}
-          />
         )}
       </section>
 
@@ -794,8 +794,11 @@ function GenerationPanel({ shot, context, referenceImages, detailLoading, detail
   const selected = versions.find(version => version.id === previewId) ?? current ?? null
 
   const [submitting, setSubmitting] = useState(false)
-  const [confirmOpen, setConfirmOpen] = useState(false)
   const [resolutions, setResolutions] = useState<Record<string, { width: number; height: number }>>({})
+  // 生成前的费用确认弹窗已删除（2026-08-29 用户拍板）。submittingRef 是同步锁：
+  // submitting state 的更新在下一次渲染才会让按钮 disabled 生效，连点两次
+  // 可能在这个窗口里都通过；ref 在同一个事件循环内立即生效，堵住这个窗口。
+  const submittingRef = useRef(false)
 
   const eligible = context ? context.upstream.eligible_for_production : null
   const blockers = context?.upstream.blockers ?? []
@@ -809,7 +812,8 @@ function GenerationPanel({ shot, context, referenceImages, detailLoading, detail
   const runningSince = current?.running_since ?? null
 
   const runGenerate = async () => {
-    if (!context) return
+    if (!context || submittingRef.current) return
+    submittingRef.current = true
     setSubmitting(true)
     try {
       // 按本镜作用域的资格版本提交：兄弟镜新增素材会改变整集范围的
@@ -832,6 +836,7 @@ function GenerationPanel({ shot, context, referenceImages, detailLoading, detail
     } catch (error) {
       onToast(error instanceof Error ? error.message : String(error), true)
     } finally {
+      submittingRef.current = false
       setSubmitting(false)
     }
   }
@@ -850,9 +855,11 @@ function GenerationPanel({ shot, context, referenceImages, detailLoading, detail
         </div>
         <button type="button" className="btn primary small"
           disabled={Boolean(disabledReason)}
-          aria-label={disabledReason ? `${hasAttempt ? '重新生成' : '生成'}，暂不可用：${disabledReason}` : hasAttempt ? '重新生成本段视频' : '生成本段视频'}
+          aria-label={disabledReason
+            ? `${hasAttempt ? '重新生成' : '生成'}，暂不可用：${disabledReason}`
+            : `${hasAttempt ? '重新生成本段视频' : '生成本段视频'}；点击后立即提交`}
           title={disabledReason || undefined}
-          onClick={() => setConfirmOpen(true)}>
+          onClick={() => void runGenerate()}>
           {submitting ? '提交中…' : hasAttempt ? '重新生成' : '生成'}
         </button>
       </div>
@@ -936,21 +943,6 @@ function GenerationPanel({ shot, context, referenceImages, detailLoading, detail
           </div>
         )}
       </div>
-
-      {confirmOpen && (
-        <DecisionDialog
-          title={hasAttempt ? '重新生成本段视频？' : '生成本段视频？'}
-          summary={`预计费用 ￥${(shot.est_cost_cny ?? 0).toFixed(2)}；实际以供应商返回为准`}
-          message="系统会直接提交冻结的整段提示词，不会在提交前修改文字内容；生成完成后会自动采用技术有效的最佳候选。"
-          details={hasAttempt
-            ? ['已有的成功候选会保留，新的尝试不会覆盖旧结果', '此操作会产生新的模型调用费用']
-            : ['首次生成，实际费用以供应商返回为准']}
-          confirmLabel="确认提交"
-          cancelLabel="取消"
-          onClose={() => setConfirmOpen(false)}
-          onConfirm={() => { setConfirmOpen(false); void runGenerate() }}
-        />
-      )}
     </section>
   )
 }

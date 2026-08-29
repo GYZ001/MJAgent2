@@ -1,32 +1,46 @@
 import { describe, expect, it } from 'vitest'
-import type { Scene } from '../api'
+import type { Bible, Scene } from '../api'
+import { sceneStepStatus } from '../lib/prepSteps'
 import { sceneUsability } from '../lib/sceneUsability'
 import {
-  handoffGapSelectionToPayment,
+  handoffGapSelectionToGenerate,
   readScenePreviewDraft,
-  scenePrepStatus,
   scenePreviewStorageKey,
   writeScenePreviewDraft,
 } from './ScenesPage'
 
+const bibleWithScenes = (scenes: Scene[]) => ({
+  world: { era: '', genre: '', visual_style_canonical: '国风' },
+  characters: [],
+  scenes,
+} as Bible)
+
 describe('场景库步骤状态', () => {
   it('生成期间优先显示进行中，不把待生成缺口误报为有问题', () => {
-    expect(scenePrepStatus(true, true, 11)).toBe('running')
-    expect(scenePrepStatus(true, false, 11)).toBe('problem')
+    expect(sceneStepStatus({ scene_refs_status: 'running', bible: bibleWithScenes([]) })).toBe('running')
+    expect(sceneStepStatus({
+      scene_refs_status: 'ready',
+      bible: bibleWithScenes([{ name: '甲家广场', scene_canonical: '', ref_image_url: null } as Scene]),
+    })).toBe('problem')
+  })
+
+  it('人物谱或定妆照仍在跑时，场景库这一步不能显示未开始——管线已经在为它排队', () => {
+    expect(sceneStepStatus({ bible_status: 'running', scene_refs_status: undefined })).toBe('running')
+    expect(sceneStepStatus({ bible_status: 'ready', refs_status: 'running' })).toBe('running')
   })
 })
 
 describe('场景缺口扫描弹窗交接', () => {
-  it('先关闭扫描结果，再打开费用确认，避免确认窗被挡在背后', async () => {
+  it('先关闭扫描结果，再触发生成，避免弹窗被挡在背后', async () => {
     const events: string[] = []
 
-    await handoffGapSelectionToPayment(
+    await handoffGapSelectionToGenerate(
       ['甲家广场'],
       () => { events.push('close-gap') },
-      async scenes => { events.push(`open-payment:${scenes.join(',')}`) },
+      async scenes => { events.push(`generate:${scenes.join(',')}`) },
     )
 
-    expect(events).toEqual(['close-gap', 'open-payment:甲家广场'])
+    expect(events).toEqual(['close-gap', 'generate:甲家广场'])
   })
 })
 

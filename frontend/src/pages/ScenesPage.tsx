@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import {
-  api, Scene, SceneCostPrecheck, SceneGapScan, SceneRefSegment,
+  api, Scene, SceneGapScan, SceneRefSegment,
   SceneReferenceCandidate, SceneRefsProgress,
 } from '../api'
 import { useNav, usePoll, useProject } from '../App'
@@ -9,32 +9,22 @@ import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import GenerationParamsDialog from '../components/GenerationParamsDialog'
 import ImageCompareModal from '../components/ImageCompareModal'
-import PaymentConfirmDialog from '../components/PaymentConfirmDialog'
 import PrepSubnav from '../components/PrepSubnav'
 import QueryState from '../components/QueryState'
 import DecisionDialog from '../components/DecisionDialog'
 import OperationError from '../components/OperationError'
-import StyleRegenConfirmDialog from '../components/StyleRegenConfirmDialog'
 import VisualStyleDialog from '../components/VisualStyleDialog'
+import WorldbuildingStatus, { worldbuildingRunning } from '../components/WorldbuildingStatus'
 import { SINGLE_ROW_ASSET_PAGE, useFillPageSize } from '../hooks/useFillPageSize'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { usePrepListState } from '../hooks/usePrepListState'
-import { useStyleRegenConfirm } from '../hooks/useStyleRegenConfirm'
 import { useVisualStyleDialog } from '../hooks/useVisualStyleDialog'
 import { formatBookTitle } from '../lib/bookTitle'
+import { sceneStepStatus } from '../lib/prepSteps'
 import { sceneUsability } from '../lib/sceneUsability'
-import { statusLabel, statusTitle, type PrepStepStatus } from '../lib/statusLabels'
+import { applyStyleRegen } from '../lib/styleRegen'
+import { statusLabel, statusTitle } from '../lib/statusLabels'
 import "../styles/ScenesPage.css";
-
-export function scenePrepStatus(
-  hasUnavailable: boolean,
-  generating: boolean,
-  sceneCount: number,
-): PrepStepStatus {
-  if (generating) return 'running'
-  if (hasUnavailable) return 'problem'
-  return sceneCount > 0 ? 'done' : 'idle'
-}
 
 type ScenePreviewDraft = {
   bibleVersion: number
@@ -99,17 +89,14 @@ export default function ScenesPage() {
     candidates: SceneReferenceCandidate[]
     adoptedArtifactId?: string | null
   } | null>(null)
-  const [payOpen, setPayOpen] = useState(false)
-  const [payLoading, setPayLoading] = useState(false)
-  const [payError, setPayError] = useState<string | null>(null)
-  const [payPrecheck, setPayPrecheck] = useState<SceneCostPrecheck | null>(null)
-  const [payTitle, setPayTitle] = useState('')
-  const payActionRef = useRef<null | ((scenes: string[]) => Promise<void>)>(null)
   const [gapScan, setGapScan] = useState<SceneGapScan | null>(null)
   const [scenePreview, setScenePreview] = useState<Scene[] | null>(null)
   const [compareDetail, setCompareDetail] = useState<{ title: string; images: { src: string; label: string }[] } | null>(null)
   const styleDialog = useVisualStyleDialog(projectId!)
-  const styleRegen = useStyleRegenConfirm(projectId!)
+  // 生成前的费用确认弹窗已删除（2026-08-29 用户拍板）。busyRef 是同步锁，
+  // 防止连点两次把「预检 -> 立即确认」这条自动化路径跑两遍——参见
+  // BiblePage.tsx 同名注释，两页判据一致。
+  const busyRef = useRef(false)
 
   const scenes = p?.bible?.scenes ?? []
   const generating = p?.scene_refs_status === 'running'
@@ -176,33 +163,37 @@ export default function ScenesPage() {
   }, [generating, refreshProgress])
 
   useEffect(() => {
-    if (!p || payOpen || scenePreview || scenes.length > 0) return
+    if (!p || busy || scenePreview || scenes.length > 0) return
     const restored = readScenePreviewDraft(
       window.localStorage,
       p.id,
       p.bible_version ?? 0,
     )
     if (restored) setScenePreview(restored)
-  }, [p, payOpen, scenePreview, scenes.length])
+  }, [p, busy, scenePreview, scenes.length])
 
   if (error && !p) return <QueryState loading={false} error={error} status={status} hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
   if (loading && !p) return <QueryState loading hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
   if (!p) return <QueryState loading hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
 
-  const act = async (fn: () => Promise<unknown>, doneMsg?: string) => {
+  // 同步锁：连点两次时第二次直接报错，而不是静默吞掉——静默吞掉会让用户以为
+  // 第二次点击也生效了，实际什么都没发生。act() 自己吃掉这个错误转成 toast；
+  // withLock 的调用方（如 SceneRefStrip.redoView）已经自带 try/catch + toast，
+  // 让错误原样往上抛，不在这里重复提示。
+  const withLock = async <T,>(fn: () => Promise<T>): Promise<T> => {
+    if (busyRef.current) throw new Error('正在处理上一项操作，请稍候')
+    busyRef.current = true
     setBusy(true)
-    try { await fn(); if (doneMsg) toast(doneMsg); refresh() }
-    catch (e: unknown) { toast((e as Error).message, true) }
-    finally { setBusy(false) }
+    try { return await fn() }
+    finally { busyRef.current = false; setBusy(false) }
   }
 
-  const showPayment = (
-    title: string,
-    precheck: SceneCostPrecheck,
-    action: (selectedScenes: string[]) => Promise<void>,
-  ) => {
-    setPayTitle(title); setPayPrecheck(precheck); setPayError(null); setPayLoading(false)
-    payActionRef.current = action; setPayOpen(true)
+  const act = async (fn: () => Promise<unknown>, doneMsg?: string) => {
+    try {
+      await withLock(fn)
+      if (doneMsg) toast(doneMsg)
+      refresh()
+    } catch (e: unknown) { toast(e instanceof Error ? e.message : String(e), true) }
   }
 
   const previewInitialScenes = async () => {
@@ -231,81 +222,91 @@ export default function ScenesPage() {
   }
 
   const quoteSceneGeneration = async (selectedScenes: string[], resume: boolean, title: string) => {
-    setPayLoading(true); setPayError(null); setPayTitle(title); setPayOpen(true)
-    try {
+    await act(async () => {
       const quote = await api.sceneRefsPrecheck(p.id, { scenes: selectedScenes, resume })
-      showPayment(title, quote, async selected => {
-        await api.genSceneRefs(p.id, {
-          scenes: selected.length ? selected : selectedScenes,
-          resume, confirm: true, quote_id: quote.quote_id,
-        })
+      await api.genSceneRefs(p.id, {
+        scenes: selectedScenes, resume, confirm: true, quote_id: quote.quote_id,
       })
-    } catch (e: unknown) { setPayError(e instanceof Error ? e.message : String(e)) }
-    finally { setPayLoading(false) }
+      toast(`${title}：已提交 ${quote.image_count} 张场景图生成`)
+    })
+  }
+
+  /**
+   * 场景库页在项目尚无人物谱时的风格确认：与人物谱页「开始生成人物谱与场景库」
+   * 走同一条后端路径（POST /projects/{id}/bible，重路径，含 LLM），不是
+   * POST /bible/style——那条轻路径要求 bible_json 已存在，空项目调用会被
+   * 后端 409 拒绝（见 app/domain/bible_ops.py set_bible_visual_style）。
+   * 判据用产物信号 `hasBible = !!p.bible`，不是某个状态字段：人物谱一旦生成成
+   * 功（即使后面失败重试）都会落 bible_json，只有真正从未成功过时才为空。
+   *
+   * 后端 _bible_task 在人物谱生成成功后会无条件依次触发定妆照、场景清单
+   * （pending_scene_regen 票据）、场景图——本页确认一次即可拿到全部四类产物，
+   * 不需要用户之后再去人物谱页点第二次。
+   */
+  const startBibleAndSceneLibrary = async (styleName: string) => {
+    await act(async () => {
+      const quote = await api.bibleGeneratePrecheck(p.id, { style_name: styleName })
+      await api.post(`/projects/${p.id}/bible`, {
+        confirm: true,
+        quote_id: quote.quote_id,
+        idempotency_key: quote.quote_id,
+        style_name: styleName,
+      })
+      toast('人物谱生成已开始；完成后会自动接续生成定妆照、场景清单与场景图')
+    })
   }
 
   /**
    * 场景库页的风格确认：只切换项目统一画风（不重新生成人物谱角色内容）。
-   * 提交选择、把（人物+场景）合并报价交给 StyleRegenConfirmDialog；确认后由
-   * **后端**在同一次请求里发起人物定妆照与场景图两条生成线，不是本页自己
-   * 链两个前端弹窗——那样任一步失败或页面被关掉，另一条线就发不出去了。
+   * 预检拿到（人物+场景）合并报价后立即用 quote_id 自动确认，不再弹窗等
+   * 用户手动点「确认并开始」——后端在同一次请求里发起人物定妆照与场景图
+   * 两条生成线，不是本页自己排队调用两个端点，那样任一步失败或页面被
+   * 关掉，另一条线就发不出去了。
    */
   const submitStyleForScenes = async (styleName: string) => {
-    const outcome = await styleRegen.requestStyleChange(styleName, p.bible_version ?? 0)
-    if (outcome?.kind === 'unchanged') {
-      toast(`统一画风仍为「${styleName}」，无需变更`)
-    } else if (outcome === null && styleRegen.quoteError) {
-      toast(styleRegen.quoteError, true)
-    }
-  }
-
-  const confirmStyleForScenes = async () => {
-    try {
-      const outcome = await styleRegen.confirmStyleChange()
-      if (outcome.kind === 'idempotent_replay') {
-        toast('该次风格切换已经处理过，未重复触发生成')
-        refresh()
+    await act(async () => {
+      const outcome = await applyStyleRegen(p.id, styleName, p.bible_version ?? 0)
+      if (outcome.kind === 'unchanged') {
+        toast(`统一画风仍为「${styleName}」，无需变更`)
         return
       }
-      if (outcome.kind !== 'started') return
+      if (outcome.kind === 'idempotent_replay') {
+        toast('该次风格切换已经处理过，未重复触发生成')
+        return
+      }
       const parts: string[] = []
       if (outcome.sceneBibleReady) {
         parts.push(outcome.sceneRefsStarted ? '场景图已开始按新画风重新生成' : `场景图未能启动：${outcome.sceneRefsError || '请重试'}`)
       } else {
-        parts.push('场景清单尚未生成，请先点击上方"准备场景清单并预览费用"；完成后可单独按新画风生成场景图')
+        parts.push('场景清单尚未生成，请先点击上方“准备场景清单”；完成后可单独按新画风生成场景图')
       }
       parts.push(outcome.refsStarted ? '定妆照已开始按新画风重新生成' : `定妆照未能启动：${outcome.refsError || '请到人物谱重试'}`)
       toast(parts.join('；'), !outcome.sceneRefsStarted && outcome.sceneBibleReady)
-      refresh()
-    } catch (e: unknown) {
-      toast(e instanceof Error ? e.message : String(e), true)
-    }
+    })
   }
 
-  const quoteViewRedo = async (sceneName: string, sceneRefId: string, viewRole: string) => {
-    const title = `重做「${sceneName}」${sceneViewPresentation(viewRole).label}`
-    setPayLoading(true); setPayError(null); setPayTitle(title); setPayOpen(true)
-    try {
+  const quoteViewRedo = (sceneName: string, sceneRefId: string, viewRole: string) =>
+    withLock(async () => {
       const quote = await api.sceneRefsPrecheck(p.id, {
         scenes: [sceneName], view_role: viewRole, scene_reference_id: sceneRefId, action: 'regenerate_view',
       })
-      showPayment(title, quote, async () => {
-        await api.regenerateSceneView(p.id, sceneName, sceneRefId, viewRole, {
-          confirm: true, quote_id: quote.quote_id,
-        })
+      await api.regenerateSceneView(p.id, sceneName, sceneRefId, viewRole, {
+        confirm: true, quote_id: quote.quote_id,
       })
-    } catch (e: unknown) { setPayError(e instanceof Error ? e.message : String(e)) }
-    finally { setPayLoading(false) }
-  }
+    })
 
   const paged = pageSize > 0
     ? filtered.slice(curPage * pageSize, curPage * pageSize + pageSize)
     : []
   const hasBible = !!p.bible
+  // 「出图之前」阶段是否仍在跑：人物谱、定妆照两段都算——只要有一段在跑，
+  // 场景库这一步已经在管线里排队等着接续，不能显示「未开始」（2026-08-29
+  // 用户实测反馈：以人物谱页为准统一两页在这个窗口内的界面）。
+  const pipelineRunning = worldbuildingRunning(p)
   const detailScene = detailSceneName ? scenes.find(scene => scene.name === detailSceneName) ?? null : null
   const paramsScene = paramsSceneName ? scenes.find(scene => scene.name === paramsSceneName) ?? null : null
   const hasUnavailable = scenes.some(scene => sceneUsability(scene, false) === 'unavailable')
-  const sceneStatus = scenePrepStatus(hasUnavailable, generating, scenes.length)
+  const sceneStatus = sceneStepStatus(p)
 
   return (
     <>
@@ -318,20 +319,45 @@ export default function ScenesPage() {
 
       <section className="card">
         <h3>场景图素材库
-          <span className="hint">人物谱完成后自动准备场景设定；图片生成前会单独确认费用</span>
+          <span className="hint">人物谱完成后自动准备场景设定</span>
         </h3>
         {!hasBible && (
-          <div className="hint">请先到「人物谱」生成角色圣经；场景圣经会在人物谱定稿后自动生成。</div>
+          <div className="library-action-row">
+            {!pipelineRunning && (
+              <button className="btn primary" disabled={busy}
+                title="确认画风后会依次自动生成人物谱、角色定妆照、场景清单与场景图；无需再到人物谱页操作。"
+                aria-label={busy
+                  ? '选择画风并生成人物谱与场景库，暂不可用：正在处理上一项操作'
+                  : p.bible_status === 'failed' ? '重新选择画风并生成人物谱与场景库' : '选择画风并生成人物谱与场景库'}
+                onClick={() => void styleDialog.openStyleDialog(p.bible_style_name)}>
+                {p.bible_status === 'failed' ? '重新选择画风并生成人物谱与场景库' : '选择画风并生成人物谱与场景库'}
+              </button>
+            )}
+            <WorldbuildingStatus project={p} running={pipelineRunning}
+              busy={busy} setBusy={setBusy} toast={toast} refresh={refresh} />
+          </div>
+        )}
+        {!hasBible && !pipelineRunning && (
+          <div className="hint">
+            选择统一画风后将依次自动生成人物谱、角色定妆照、场景清单与场景图。
+          </div>
+        )}
+        {!hasBible && p.bible_status === 'failed' && (
+          <OperationError
+            title="人物谱生成未完成"
+            message={p.bible_error}
+            guidance="失败结果没有发布；原著和已生成资产保持不变。可重新选择画风并生成。"
+          />
         )}
         {hasBible && (
           <div className="library-action-row">
-            {!scenes.length && !generating && (
+            {!scenes.length && !generating && !pipelineRunning && (
               <button className="btn primary" disabled={busy}
                 aria-label={busy
-                  ? '准备场景清单并预览费用，暂不可用：正在分析原文'
-                  : '准备场景清单并预览费用'}
+                  ? '准备场景清单，暂不可用：正在分析原文'
+                  : '准备场景清单'}
                 onClick={previewInitialScenes}>
-                {busy ? '正在分析原文并准备场景清单…' : '准备场景清单并预览费用'}
+                {busy ? '正在分析原文并准备场景清单…' : '准备场景清单'}
               </button>
             )}
             {scenes.length > 0 && !generating && (
@@ -348,9 +374,11 @@ export default function ScenesPage() {
                 停止场景图生成
               </button>
             )}
-            <button className="btn ghost" disabled={busy || generating}
-              title="风格是项目级设置：确认后会依次带你确认场景图与定妆照两部分的重新生成费用，已生成的都会按新画风重做"
-              aria-label={busy || generating
+            <WorldbuildingStatus project={p} running={pipelineRunning}
+              busy={busy} setBusy={setBusy} toast={toast} refresh={refresh} />
+            <button className="btn ghost" disabled={busy || generating || pipelineRunning}
+              title="风格是项目级设置：确认后将直接依次重新生成场景图与定妆照两部分，已生成的都会按新画风重做"
+              aria-label={busy || generating || pipelineRunning
                 ? '配置统一画风，暂不可用：正在处理上一项操作'
                 : '配置统一画风；确认后依次触发场景图与定妆照重新生成'}
               onClick={() => void styleDialog.openStyleDialog(p.bible_style_name)}>
@@ -366,9 +394,16 @@ export default function ScenesPage() {
             />
           </div>
         )}
+        {pipelineRunning && (
+          <div className="hint task-progress-copy" role="status">
+            {p.bible_status === 'running'
+              ? '人物谱正在生成；完成后会自动接续生成定妆照、场景清单与场景图，无需在本页手动触发。'
+              : '定妆照正在生成；完成后会自动接续准备场景设定并生成场景图，无需在本页手动触发。'}
+          </div>
+        )}
         {generating && !scenes.length && (
           <div className="hint task-progress-copy" role="status">
-            正在根据人物谱画风和原文准备场景设定；完成后会展示场景清单，图片出图仍需费用确认。
+            正在根据人物谱画风和原文准备场景设定；完成后会展示场景清单并自动开始生成场景图。
           </div>
         )}
         {generating && progress && (
@@ -462,7 +497,7 @@ export default function ScenesPage() {
               <b>{hasSceneCriteria ? '没有符合当前条件的场景' : '场景库暂无场景'}</b>
               <p>{hasSceneCriteria
                 ? `${query ? `搜索“${query}”` : '当前可用状态筛选'}未命中；清除条件后可恢复全部 ${scenes.length} 个场景。`
-                : '可先生成场景设定，系统会在确认清单后再展示出图费用。'}</p>
+                : '可先生成场景设定，确认清单后将直接开始生成场景图。'}</p>
               {hasSceneCriteria && <button type="button" className="btn small" onClick={resetSceneList}>清除搜索与筛选</button>}
             </div>
           )}
@@ -519,7 +554,7 @@ export default function ScenesPage() {
         <GenerationParamsDialog
           title={`${paramsScene.name} · 场景设定与重绘`}
           subtitle="查看或调整场景图生成描述，修改后可保存并重新出图。"
-          focusActive={!payOpen && !compareDetail && !paramsCloseConfirm}
+          focusActive={!compareDetail && !paramsCloseConfirm}
           onClose={() => {
             if (paramsDirty.anchor || paramsDirty.prompt) {
               setParamsCloseConfirm(true)
@@ -577,7 +612,9 @@ export default function ScenesPage() {
         error={styleDialog.styleError}
         options={styleDialog.styleOptions}
         selected={styleDialog.selectedStyle}
-        scopeNote="确认后会带你确认「场景图 + 定妆照」的合并重新生成费用；人物设定本身不会重新生成。"
+        scopeNote={hasBible
+          ? '确认后将直接重新生成「场景图 + 定妆照」；人物设定本身不会重新生成。'
+          : '确认后将生成人物谱与角色定妆照；完成后场景清单与场景图会自动接续生成，无需再到人物谱页操作。'}
         onSelect={styleDialog.setSelectedStyle}
         onClose={styleDialog.closeStyleDialog}
         onConfirm={() => {
@@ -587,44 +624,19 @@ export default function ScenesPage() {
           }
           const chosen = styleDialog.selectedStyle
           styleDialog.closeStyleDialog()
-          void submitStyleForScenes(chosen)
-        }}
-      />
-      <StyleRegenConfirmDialog
-        open={styleRegen.dialogOpen}
-        styleName={styleRegen.pendingStyleName}
-        quote={styleRegen.quote}
-        loading={styleRegen.quoteLoading}
-        error={styleRegen.quoteError}
-        onClose={styleRegen.closeDialog}
-        onConfirm={() => void confirmStyleForScenes()}
-      />
-      <PaymentConfirmDialog
-        open={payOpen}
-        title={payTitle || '确认场景图片费用'}
-        precheck={payPrecheck}
-        loading={payLoading}
-        error={payError}
-        enableScopeSelection={false}
-        scopeSelectionTitle="选择本次处理的场景/视角"
-        onClose={() => { setPayOpen(false); setPayPrecheck(null); setPayError(null); payActionRef.current = null }}
-        onConfirm={async selection => {
-          if (!payActionRef.current) return
-          setPayLoading(true)
-          try {
-            await payActionRef.current(selection.scenes ?? [])
-            toast('付费任务已受理；新包生成完成前保留旧资产')
-            setPayOpen(false); setGapScan(null); refresh()
-          } catch (e: unknown) { setPayError(e instanceof Error ? e.message : String(e)) }
-          finally { setPayLoading(false) }
+          if (hasBible) {
+            void submitStyleForScenes(chosen)
+          } else {
+            void startBibleAndSceneLibrary(chosen)
+          }
         }}
       />
       {gapScan && (
         <SceneGapDialog scan={gapScan} onClose={() => setGapScan(null)} onGenerate={selected => {
-          void handoffGapSelectionToPayment(
+          void handoffGapSelectionToGenerate(
             selected,
             () => setGapScan(null),
-            scenes => quoteSceneGeneration(scenes, true, '付费补齐/重试场景图'),
+            scenes => quoteSceneGeneration(scenes, true, '补齐/重试场景图'),
           )
         }} />
       )}
@@ -638,20 +650,11 @@ export default function ScenesPage() {
           onConfirm={async confirmed => {
             window.localStorage.removeItem(scenePreviewStorageKey(p.id))
             setScenePreview(null)
-            setPayLoading(true); setPayError(null); setPayTitle('确认场景清单与首次出图费用'); setPayOpen(true)
-            try {
+            await act(async () => {
               const quote = await api.sceneBiblePrecheck(p.id, confirmed)
-              showPayment('确认场景清单与首次出图费用', quote, async selected => {
-                const selectedSet = new Set(selected.length ? selected : confirmed.map(scene => scene.name))
-                const finalScenes = confirmed.filter(scene => selectedSet.has(scene.name))
-                if (finalScenes.length !== confirmed.length) {
-                  throw new Error('付费范围已改变，请返回场景清单重新预检')
-                }
-                await api.genSceneBible(p.id, { scenes: finalScenes, confirm: true, quote_id: quote.quote_id })
-                window.localStorage.removeItem(scenePreviewStorageKey(p.id))
-              })
-            } catch (e: unknown) { setPayError(e instanceof Error ? e.message : String(e)) }
-            finally { setPayLoading(false) }
+              await api.genSceneBible(p.id, { scenes: confirmed, confirm: true, quote_id: quote.quote_id })
+              toast(`场景清单已确认；已提交 ${quote.actual_view_count} 张场景图生成`)
+            })
           }}
         />
       )}
@@ -687,14 +690,14 @@ function SceneParamsCloseDialog({
   )
 }
 
-/** 二级扫描弹窗向费用确认弹窗交接时，必须先卸载前者，避免同层遮罩挡住确认卡。 */
-export async function handoffGapSelectionToPayment(
+/** 二级扫描弹窗向生成动作交接时，必须先卸载前者，避免同层遮罩挡住后续状态提示。 */
+export async function handoffGapSelectionToGenerate(
   selectedScenes: string[],
   closeGapDialog: () => void,
-  openPayment: (scenes: string[]) => Promise<void>,
+  generate: (scenes: string[]) => Promise<void>,
 ) {
   closeGapDialog()
-  await openPayment(selectedScenes)
+  await generate(selectedScenes)
 }
 
 function sceneSegmentPrimaryFailed(segment: SceneRefSegment): boolean {
@@ -1090,13 +1093,13 @@ function SceneRefStrip({ projectId, sceneName, segments, disabled, onChanged, on
                         disabled={disabled || !!redoing}
                         aria-label={disabled || !!redoing
                           ? `重做${sceneViewPresentation(view.view_role).label}，暂不可用：${disabled ? '当前有其他场景任务运行' : '正在提交上一项重做任务'}`
-                          : `重做${sceneViewPresentation(view.view_role).label}；下一步预览费用`}
+                          : `重做${sceneViewPresentation(view.view_role).label}；点击后立即提交生成`}
                         title={
                           disabled
                             ? '当前有其他场景任务运行，请等待完成'
                             : redoing
                               ? '正在提交重做任务'
-                              : `重新生成${sceneViewPresentation(view.view_role).label}，提交前会进入费用确认`
+                              : `点击后立即重新生成${sceneViewPresentation(view.view_role).label}，无需再次确认`
                         }
                         onClick={() => redoView(seg.id!, view.view_role!)}
                       >
@@ -1329,7 +1332,7 @@ function ScenePromptBlock({ projectId, scene: s, disabled, onChanged, regenerate
             <button className="btn small" disabled={disabled || saving}
               aria-label={baseDisabledReason
                 ? `${s.ref_image_url ? '重新生成场景视角图' : '单独生成场景视角图'}，暂不可用：${baseDisabledReason}`
-                : s.ref_image_url ? '重新生成场景视角图；下一步预览费用' : '单独生成场景视角图；下一步预览费用'}
+                : s.ref_image_url ? '重新生成场景视角图；点击后立即提交生成' : '单独生成场景视角图；点击后立即提交生成'}
               onClick={regenerate}>
               {s.ref_image_url ? '重新生成场景视角包' : '单独生成场景视角包'}
             </button>
@@ -1405,7 +1408,7 @@ function SceneGapDialog({ scan, onClose, onGenerate }: {
     }}>
       <section ref={trapRef} className="impact-dialog scene-gap-dialog" role="dialog" aria-modal="true" aria-label="场景图缺口扫描结果">
         <h3>场景图缺口扫描结果</h3>
-        <p>扫描本身免费。系统会优先复用已有图片并补做验证；只有确需生成新图片时，下一步才会显示费用。</p>
+        <p>扫描本身免费。系统会优先复用已有图片并补做验证；只有确需生成新图片的项才会真正提交生成。</p>
         <div className="pay-scope-actions">
           <button className="btn small" type="button" disabled={!defaults.length}
             aria-label={!defaults.length ? '选择建议项，暂不可用：当前没有场景图缺口' : '选择全部建议项'}
@@ -1431,7 +1434,7 @@ function SceneGapDialog({ scan, onClose, onGenerate }: {
         <div className="dialog-actions">
           <button className="btn" type="button" onClick={onClose}>关闭</button>
           <button className="btn primary" type="button" disabled={!selected.length}
-            aria-label={!selected.length ? '处理已选缺口，暂不可用：请至少选择一个场景' : '处理已选缺口；下一步仅在需要出图时展示费用'}
+            aria-label={!selected.length ? '处理已选缺口，暂不可用：请至少选择一个场景' : '处理已选缺口；点击后立即提交生成'}
             onClick={() => onGenerate(selected)}>处理已选缺口</button>
         </div>
       </section>
@@ -1485,7 +1488,7 @@ function ScenePreviewDialog({ scenes, onClose, onConfirm }: {
     }}>
       <section ref={trapRef} className="impact-dialog scene-preview-dialog" role="dialog" aria-modal="true" aria-label="确认场景提取清单">
         <h3>确认场景提取清单</h3>
-        <p>先取消不需要项、合并同义场景或修订名称与固定场景描述；下一步才显示实际费用。</p>
+        <p>先取消不需要项、合并同义场景或修订名称与固定场景描述；确认后将直接开始生成场景清单与首批场景图。</p>
         <div className="pay-scope-actions">
           <button className="btn small" type="button" aria-expanded={mergeOpen} disabled={selectedItems.length < 2}
             aria-label={selectedItems.length < 2 ? '合并勾选项，暂不可用：请至少选择两个场景' : '合并勾选的同义场景'}
@@ -1530,15 +1533,15 @@ function ScenePreviewDialog({ scenes, onClose, onConfirm }: {
         {duplicate && <div className="error-banner">场景名称不能重复；同义场景请合并</div>}
         <div className="dialog-actions">
           <button className="btn" type="button" disabled={busy}
-            aria-label={busy ? '取消场景清单，暂不可用：正在准备费用预览' : '取消场景清单'}
+            aria-label={busy ? '取消场景清单，暂不可用：正在提交生成请求' : '取消场景清单'}
             onClick={onClose}>取消</button>
           <button className="btn primary" type="button" disabled={busy || invalid}
             aria-label={busy || invalid
-              ? `下一步预览费用，暂不可用：${busy ? '正在准备费用预览' : !selectedItems.length ? '请至少选择一个场景' : duplicate ? '场景名称不能重复，请先合并' : '场景名称不能为空，且固定描述需为 30 至 80 字'}`
-              : '下一步预览场景图费用'}
+              ? `确认场景清单并开始出图，暂不可用：${busy ? '正在提交生成请求' : !selectedItems.length ? '请至少选择一个场景' : duplicate ? '场景名称不能重复，请先合并' : '场景名称不能为空，且固定描述需为 30 至 80 字'}`
+              : '确认场景清单，点击后立即开始生成场景图'}
             onClick={async () => {
             setBusy(true); try { await onConfirm(selectedItems) } finally { setBusy(false) }
-          }}>下一步：预览费用</button>
+          }}>{busy ? '正在提交…' : '确认场景清单并开始出图'}</button>
         </div>
       </section>
     </div>

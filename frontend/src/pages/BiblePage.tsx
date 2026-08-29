@@ -3,11 +3,9 @@ import {
   api, ApiError, Bible, BibleImpactPreview, Character, Portrait, PortraitView, RefsCostPrecheck,
 } from '../api'
 import { useNav, usePoll, useProject } from '../App'
-import { ServerTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import type { ImpactSummary } from '../components/harness/ImpactDialog'
-import PaymentConfirmDialog from '../components/PaymentConfirmDialog'
 import GenerationParamsDialog from '../components/GenerationParamsDialog'
 import QueryState from '../components/QueryState'
 import PrepSubnav from '../components/PrepSubnav'
@@ -15,7 +13,8 @@ import { SINGLE_ROW_ASSET_PAGE, useFillPageSize } from '../hooks/useFillPageSize
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { usePrepListState } from '../hooks/usePrepListState'
 import { formatBookTitle } from '../lib/bookTitle'
-import { sceneUsability } from '../lib/sceneUsability'
+import { sceneStepStatus } from '../lib/prepSteps'
+import { applyStyleRegen } from '../lib/styleRegen'
 import type { PrepStepStatus } from '../lib/statusLabels'
 import CharacterFilters, {
   characterFilterActiveCount,
@@ -24,13 +23,11 @@ import CharacterFilters, {
   type CharacterFilterState,
 } from '../components/CharacterFilters'
 import CharacterQaPanel from '../components/CharacterQaPanel'
-import DecisionDialog from '../components/DecisionDialog'
 import ImageCompareModal from '../components/ImageCompareModal'
 import OperationError from '../components/OperationError'
 import StageTextModelPicker from '../components/StageTextModelPicker'
-import StyleRegenConfirmDialog from '../components/StyleRegenConfirmDialog'
 import VisualStyleDialog from '../components/VisualStyleDialog'
-import { useStyleRegenConfirm } from '../hooks/useStyleRegenConfirm'
+import WorldbuildingStatus from '../components/WorldbuildingStatus'
 import { useVisualStyleDialog } from '../hooks/useVisualStyleDialog'
 import "../styles/BiblePage.css";
 
@@ -46,8 +43,6 @@ type PaymentQuote = RefsCostPrecheck & {
   estimate_note?: string
   character_names?: string[]
 }
-
-type PaymentSelection = { characters: string[] }
 
 export function currentPortrait(character: Character): Portrait | null {
   const portraits = [...(character.portraits ?? [])]
@@ -232,20 +227,6 @@ export function bibleStepStatus(project: {
   return 'idle'
 }
 
-function sceneStepStatus(project: { bible?: Bible | null; scene_refs_status?: string }): PrepStepStatus {
-  const status = project.scene_refs_status
-  const scenes = project.bible?.scenes ?? []
-  if (status === 'running') return 'running'
-  const hasUnavailable = scenes.some(scene => (scene.scene_refs ?? []).length > 0
-    ? sceneUsability(scene, false) === 'unavailable'
-    : !scene.ref_image_url)
-  if (hasUnavailable) return 'problem'
-  if (scenes.length > 0) return 'done'
-  if (status === 'failed' || status === 'warning') return 'problem'
-  if (status && ['ready', 'done', 'succeeded'].includes(status)) return 'done'
-  return 'idle'
-}
-
 function episodeStepStatus(project: { episodes?: unknown[]; episodes_total?: number; episode_count?: number }): PrepStepStatus {
   if (Array.isArray(project.episodes)) return project.episodes.length > 0 ? 'done' : 'idle'
   if (typeof project.episodes_total === 'number') return project.episodes_total > 0 ? 'done' : 'idle'
@@ -427,25 +408,21 @@ export default function BiblePage() {
   const [compareDetail, setCompareDetail] = useState<{ title: string; images: { src: string; label: string }[] } | null>(null)
   const [timelineCharacter, setTimelineCharacter] = useState('')
   const [skipConfirm, setSkipConfirm] = useState<{ count: number; names: string[] } | null>(null)
-  const [stopConfirm, setStopConfirm] = useState(false)
   const [conflict, setConflict] = useState<{
     message: string
     current_version?: number
     character_names?: string[]
     server_bible?: Bible | null
   } | null>(null)
-  const [payOpen, setPayOpen] = useState(false)
-  const [payTitle, setPayTitle] = useState('')
-  const [payLoading, setPayLoading] = useState(false)
-  const [payError, setPayError] = useState<string | null>(null)
-  const [payPrecheck, setPayPrecheck] = useState<RefsCostPrecheck | null>(null)
-  const [paySelectable, setPaySelectable] = useState(false)
-  const [payScopeTitle, setPayScopeTitle] = useState<string | undefined>(undefined)
-  const payActionRef = useRef<null | ((selection: PaymentSelection) => Promise<void>)>(null)
   const styleDialog = useVisualStyleDialog(projectId!)
   const styleActionRef = useRef<'full_regen' | 'style_only'>('full_regen')
-  const styleRegen = useStyleRegenConfirm(projectId!)
   const editingRef = useRef<Bible | null>(null)
+  // 生成前的费用确认弹窗已删除（2026-08-29 用户拍板：模型与视频生成走公司自
+  // 有服务，不计费，这层确认对他是纯摩擦）。busyRef 是同步锁，防止连点两次
+  // 直接把「预检 -> 立即确认」这条自动化路径跑两遍——React 的 busy 状态更新
+  // 是异步的，两次物理点击之间不保证已经重渲染出 disabled，ref 在同一个事件
+  // 循环内立即生效，堵住这个窗口。
+  const busyRef = useRef(false)
 
   const biblePreview = editing ?? p?.bible
   const charQuery = charSearch.trim()
@@ -615,10 +592,12 @@ export default function BiblePage() {
   if (!p) return <QueryState loading={loading !== false} error={null} hasData={false} objectName="人物谱" onRetry={refresh}>{null}</QueryState>
 
   const act = async (fn: () => Promise<unknown>, doneMsg?: string) => {
+    if (busyRef.current) return
+    busyRef.current = true
     setBusy(true)
     try { await fn(); if (doneMsg) toast(doneMsg); refresh() }
     catch (e: unknown) { toast((e as Error).message, true) }
-    finally { setBusy(false) }
+    finally { busyRef.current = false; setBusy(false) }
   }
 
   const bible = editing ?? p.bible
@@ -650,44 +629,23 @@ export default function BiblePage() {
       || timelineNames.some(name => name.includes(timelineQuery) && item.includes(name))
   })
 
+  /**
+   * 预检后立即用返回的 quote_id 自动确认，不再弹窗等用户手动点「确认并开始」
+   * （2026-08-29 用户拍板：删除生成前的费用确认弹窗；后端 confirm+quote_id 契约
+   * 不变，_issue_payment_quote/_validate_payment_quote 仍在，quote 的幂等重放
+   * 能力原样保留，只是前端不再让用户手动点一次确认）。
+   */
   const openPayment = async (
-    title: string,
     precheckBody: { character?: string; characters?: string[]; resume?: boolean; view_role?: string },
-    action: (quote: RefsCostPrecheck, selection: PaymentSelection) => Promise<void>,
+    action: (quote: RefsCostPrecheck) => Promise<void>,
     precheckLoader?: () => Promise<PaymentQuote>,
-    options?: { enableScopeSelection?: boolean; scopeSelectionTitle?: string },
   ) => {
-    setPayTitle(title)
-    setPayOpen(true)
-    setPayLoading(true)
-    setPayError(null)
-    setPayPrecheck(null)
-    setPaySelectable(!!options?.enableScopeSelection)
-    setPayScopeTitle(options?.scopeSelectionTitle)
-    try {
+    await act(async () => {
       const quote = precheckLoader
         ? await precheckLoader()
         : await api.refsPrecheck(p.id, precheckBody)
-      trackBible('bible_payment_precheck', p.id, { action: quote.action, result: 'shown' })
-      setPayPrecheck(quote)
-      payActionRef.current = async (selection: PaymentSelection) => {
-        await action(quote, selection)
-      }
-    } catch (e: unknown) {
-      setPayError((e as Error).message)
-      payActionRef.current = null
-    } finally {
-      setPayLoading(false)
-    }
-  }
-
-  const updateEditing = (updater: (current: Bible) => Bible) => {
-    setEditing(current => {
-      if (!current) return current
-      const snapshot = cloneBible(current)
-      const next = updater(cloneBible(current))
-      setUndoStack(stack => [snapshot, ...stack].slice(0, 20))
-      return next
+      trackBible('bible_payment_precheck', p.id, { action: quote.action, result: 'auto_confirmed' })
+      await action(quote)
     })
   }
 
@@ -726,9 +684,14 @@ export default function BiblePage() {
     } catch { /* ignore invalid local backup */ }
   }
 
+  /**
+   * 人物谱页与场景库页共用的「首次/全量重生成」路径：POST /projects/{id}/bible
+   * （重路径，含 LLM）。人物谱生成成功后，后端 _bible_task 会无条件依次触发
+   * 定妆照、场景清单（pending_scene_regen 票据）、场景图——本页确认一次即
+   * 拿到全部四类产物，不需要用户再去场景库页点第二次。
+   */
   const startBibleAfterStyle = async (styleName: string) => {
     await openPayment(
-      p.bible ? '重新生成人物谱和定妆照' : '开始生成人物谱和定妆照',
       {},
       async (quote) => {
         await api.post(`/projects/${p.id}/bible`, {
@@ -737,8 +700,7 @@ export default function BiblePage() {
           idempotency_key: quote.quote_id,
           style_name: styleName,
         })
-        toast('人物谱与定妆照生成已开始')
-        refresh()
+        toast('人物谱生成已开始；完成后会自动接续生成定妆照、场景清单与场景图')
       },
       () => api.bibleGeneratePrecheck(p.id, { style_name: styleName }),
     )
@@ -756,94 +718,49 @@ export default function BiblePage() {
 
   /**
    * 「更换统一画风（不改人物设定）」的轻量路径：只切换项目风格字段
-   * （POST /bible/style，不重生成人物谱内容、不调模型），确认一次后由**后端**
-   * 在同一次请求里发起人物定妆照与场景图两条生成线——不是本页链两个前端
-   * 弹窗，那样任一步失败或页面被关掉，另一条线就发不出去了。这里只负责
-   * 提交选择、把合并报价交给 StyleRegenConfirmDialog 展示、以及在确认后
-   * 按结果给出反馈。
+   * （POST /bible/style，不重生成人物谱内容、不调模型）。预检拿到合并报价后
+   * 立即用 quote_id 自动确认，不再弹窗等用户手动点「确认并开始」——后端在
+   * 同一次请求里发起人物定妆照与场景图两条生成线，不是本页自己排队调用两个
+   * 端点，那样任一步失败或页面被关掉，另一条线就发不出去了。
    */
   const submitStyleOnly = async (styleName: string) => {
-    const outcome = await styleRegen.requestStyleChange(styleName, p.bible_version ?? 0)
-    if (outcome?.kind === 'unchanged') {
-      toast(`统一画风仍为「${styleName}」，无需变更`)
-    } else if (outcome === null && styleRegen.quoteError) {
-      toast(styleRegen.quoteError, true)
-    }
-    // outcome === null 且无 quoteError：合并报价弹窗已打开，等待用户确认。
-  }
-
-  const confirmStyleOnly = async () => {
-    try {
-      const outcome = await styleRegen.confirmStyleChange()
-      if (outcome.kind === 'idempotent_replay') {
-        toast('该次风格切换已经处理过，未重复触发生成')
-        refresh()
+    await act(async () => {
+      const outcome = await applyStyleRegen(p.id, styleName, p.bible_version ?? 0)
+      if (outcome.kind === 'unchanged') {
+        toast(`统一画风仍为「${styleName}」，无需变更`)
         return
       }
-      if (outcome.kind !== 'started') return
+      if (outcome.kind === 'idempotent_replay') {
+        toast('该次风格切换已经处理过，未重复触发生成')
+        return
+      }
       const parts: string[] = []
-      parts.push(outcome.refsStarted ? '定妆照已开始按新画风重新生成' : `定妆照未能启动：${outcome.refsError || '请到人物谱重试'}`)
+      parts.push(outcome.refsStarted ? '定妆照已开始按新画风重新生成' : `定妆照未能启动：${outcome.refsError || '请重试'}`)
       if (outcome.sceneBibleReady) {
         parts.push(outcome.sceneRefsStarted ? '场景图已开始按新画风重新生成' : `场景图未能启动：${outcome.sceneRefsError || '请到场景库重试'}`)
       } else {
         parts.push('场景清单尚未生成，请先在「场景库」准备场景清单，完成后可单独按新画风生成场景图')
       }
       toast(parts.join('；'), !outcome.refsStarted)
-      refresh()
-    } catch (e: unknown) {
-      toast((e as Error).message, true)
-    }
-  }
-
-  const stopGeneration = async () => {
-    setBusy(true)
-    let stopped = ''
-    try {
-      if (p.bible_status === 'running') {
-        await api.post(`/projects/${p.id}/bible/cancel`)
-        stopped = '已停止谱写；已落盘资产保留'
-      } else {
-        await api.post(`/projects/${p.id}/refs/cancel`)
-        stopped = '已停止定妆；已落盘资产保留'
-      }
-      let summary = ''
-      try {
-        const progress = await refreshRefsProgress()
-        if (progress) summary = summarizeProgress(progress)
-      } catch { /* keep original stop toast */ }
-      toast(summary ? `${stopped}；${summary}` : stopped)
-      refresh()
-    } catch (e: unknown) {
-      toast((e as Error).message, true)
-    } finally {
-      setBusy(false)
-    }
+    })
   }
 
   const retryRefs = async () => {
     await openPayment(
-      '补齐缺失的定妆照',
       { resume: true },
-      async (quote, selection) => {
-        const selectedCharacters = selection.characters.filter(Boolean)
-        const effectiveQuote = selectedCharacters.length
-          ? await api.refsPrecheck(p.id, { resume: true, characters: selectedCharacters })
-          : quote
+      async (quote) => {
         await api.post(`/projects/${p.id}/refs`, {
           resume: true,
-          characters: selectedCharacters.length ? selectedCharacters : undefined,
           confirm: true,
-          quote_id: effectiveQuote.quote_id,
-          idempotency_key: effectiveQuote.quote_id,
+          quote_id: quote.quote_id,
+          idempotency_key: quote.quote_id,
         })
-        toast('已开始补齐缺失的定妆照，已有成品会保留')
-        refresh()
+        toast(`已开始补齐缺失的定妆照（共 ${quote.character_count} 个角色），已有成品会保留`)
       },
       async () => {
         const gaps = await api.refsGaps(p.id)
         return gaps.precheck
       },
-      { enableScopeSelection: true },
     )
   }
 
@@ -853,27 +770,15 @@ export default function BiblePage() {
       return
     }
     await openPayment(
-      '按最新人物设定与画风批量重新生成',
       { resume: false },
-      async (quote, selection) => {
-        const selectedCharacters = selection.characters.filter(Boolean)
-        const effectiveQuote = selectedCharacters.length
-          ? await api.refsPrecheck(p.id, { resume: false, characters: selectedCharacters })
-          : quote
+      async (quote) => {
         await api.post(`/projects/${p.id}/refs`, {
           resume: false,
-          characters: selectedCharacters.length ? selectedCharacters : undefined,
           confirm: true,
-          quote_id: effectiveQuote.quote_id,
-          idempotency_key: effectiveQuote.quote_id,
+          quote_id: quote.quote_id,
+          idempotency_key: quote.quote_id,
         })
-        toast('已按最新人物设定与画风开始批量重新生成；新包结构完整前保留旧成品')
-        refresh()
-      },
-      undefined,
-      {
-        enableScopeSelection: true,
-        scopeSelectionTitle: '选择本次重新生成角色（默认全选）',
+        toast(`已按最新人物设定与画风开始批量重新生成全部 ${quote.character_count} 个角色的定妆照；新包结构完整前保留旧成品`)
       },
     )
   }
@@ -1076,7 +981,6 @@ export default function BiblePage() {
     if (keptAsDraft) toast('未定稿修订已保留，可稍后恢复继续编辑')
   }
 
-  const stopLabel = p.bible_status === 'running' ? '停止谱写' : '停止定妆'
   const hasRefGaps = !!refsProgress && (refsProgress.failed > 0 || refsProgress.missing > 0)
   const conflictServerNames = new Set((conflict?.server_bible?.characters ?? []).map(character => character.name))
   const conflictLocalNames = new Set((editing?.characters ?? []).map(character => character.name))
@@ -1123,9 +1027,12 @@ export default function BiblePage() {
         <div className="library-action-row">
           {!p.bible && !generating && (
             <button className="btn primary" disabled={busy}
-              aria-label={busy ? '生成人物谱和定妆照，暂不可用：正在处理上一项操作' : p.bible_status === 'failed' ? '重新生成人物谱和定妆照' : '开始生成人物谱和定妆照'}
+              title="确认画风后会依次自动生成人物谱、角色定妆照、场景清单与场景图；无需再到场景库页操作。"
+              aria-label={busy
+                ? '选择画风并生成人物谱与场景库，暂不可用：正在处理上一项操作'
+                : p.bible_status === 'failed' ? '重新选择画风并生成人物谱与场景库' : '选择画风并生成人物谱与场景库'}
               onClick={() => void startBible()}>
-              {p.bible_status === 'failed' ? '重新生成人物谱和定妆照' : '开始生成人物谱和定妆照'}
+              {p.bible_status === 'failed' ? '重新选择画风并生成人物谱与场景库' : '选择画风并生成人物谱与场景库'}
             </button>
           )}
           {p.bible && !generating && (
@@ -1133,18 +1040,18 @@ export default function BiblePage() {
               <button
                 className="btn primary"
                 disabled={busy || dirty}
-                title={dirty ? '请先定稿当前人物谱修订' : '先选择角色范围，再预览定妆照费用'}
+                title={dirty ? '请先定稿当前人物谱修订' : '按当前人物设定与统一画风批量重新生成全部角色定妆照'}
                 aria-label={busy || dirty
-                  ? `选择角色并重新生成定妆照，暂不可用：${busy ? '正在处理上一项操作' : '请先定稿当前人物谱修订'}`
-                  : '选择角色并重新生成定妆照；下一步选择范围并预览费用'}
+                  ? `按最新设定批量重新生成定妆照，暂不可用：${busy ? '正在处理上一项操作' : '请先定稿当前人物谱修订'}`
+                  : '按最新设定批量重新生成定妆照；点击后立即提交'}
                 onClick={() => void restartRefsWithLatestSettings()}
               >
-                选择角色并重新生成定妆照
+                按最新设定批量重新生成定妆照
               </button>
               <button
                 className="btn"
                 disabled={busy || dirty}
-                title={dirty ? '请先定稿当前人物谱修订' : '重新选择统一画风，并预览人物谱与定妆照费用（会重新生成人物设定本身）'}
+                title={dirty ? '请先定稿当前人物谱修订' : '重新选择统一画风，将重新生成人物谱与定妆照（会重新生成人物设定本身）'}
                 onClick={() => void startBible()}
               >
                 重新生成人物谱并更换画风
@@ -1152,7 +1059,7 @@ export default function BiblePage() {
               <button
                 className="btn ghost"
                 disabled={busy || dirty}
-                title={dirty ? '请先定稿当前人物谱修订' : '项目级设置：只切换统一画风，不改动人物设定；确认后会依次带你确认定妆照与场景图的重新生成费用'}
+                title={dirty ? '请先定稿当前人物谱修订' : '项目级设置：只切换统一画风，不改动人物设定；确认后将直接重新生成定妆照与场景图'}
                 aria-label={busy || dirty
                   ? `更换统一画风，暂不可用：${busy ? '正在处理上一项操作' : '请先定稿当前人物谱修订'}`
                   : '更换统一画风（保留人物设定，重新生成定妆照与场景图）'}
@@ -1176,33 +1083,21 @@ export default function BiblePage() {
               </button>
             </>
           )}
-          {generating && (
-            <button className="btn ghost danger" disabled={busy}
-              aria-label={busy ? `${stopLabel}，暂不可用：正在处理上一项操作` : stopLabel}
-              onClick={() => setStopConfirm(true)}>
-              {stopLabel}
-            </button>
-          )}
-          {p.bible_status === 'running' && <span className="stamp gold">谱写中（约 1~3 分钟）</span>}
-          {refsRunning && <span className="stamp gold">定妆中</span>}
+          <WorldbuildingStatus
+            project={p}
+            running={generating}
+            busy={busy}
+            setBusy={setBusy}
+            toast={toast}
+            refresh={refresh}
+            refreshRefsProgress={refreshRefsProgress}
+          />
           {p.bible && <span className="stamp green">第 {p.bible_version ?? 1} 稿</span>}
           {dirty && <span className="stamp gold">未保存修订 · {dirtyCount} 项</span>}
           {editing && draftState === 'saving' && <span className="stamp grey">草稿保存中</span>}
           {editing && draftState === 'saved' && <span className="stamp green">草稿已自动保存</span>}
           {editing && draftState === 'error' && <span className="stamp red">草稿保存失败，已保留本地备份</span>}
           {p.bible_evidence && <EvidenceDrawer evidence={p.bible_evidence} label="查看人物谱质检依据" />}
-          <ServerTaskTimer
-            label="人物谱"
-            startedAt={p.task_timings?.bible?.started_at}
-            finishedAt={p.task_timings?.bible?.finished_at}
-            running={p.bible_status === 'running'}
-          />
-          <ServerTaskTimer
-            label="定妆照"
-            startedAt={p.task_timings?.refs?.started_at}
-            finishedAt={p.task_timings?.refs?.finished_at}
-            running={p.refs_status === 'running'}
-          />
         </div>
         {refsProgress && (
           <div className="refs-progress-strip" role="status" aria-label="定妆进度">
@@ -1468,26 +1363,6 @@ export default function BiblePage() {
           )}
         </section>
       )}
-      <PaymentConfirmDialog
-        open={payOpen}
-        title={payTitle}
-        precheck={payPrecheck}
-        loading={payLoading}
-        error={payError}
-        enableScopeSelection={paySelectable}
-        scopeSelectionTitle={payScopeTitle}
-        onClose={() => {
-          trackBible('bible_payment_confirm', p.id, { action: payPrecheck?.action || 'unknown', result: 'cancelled' })
-          setPayOpen(false); payActionRef.current = null
-        }}
-        onConfirm={(selection) => {
-          const run = payActionRef.current
-          setPayOpen(false)
-          if (!run) return
-          trackBible('bible_payment_confirm', p.id, { action: payPrecheck?.action || 'unknown', result: 'confirmed' })
-          void act(() => run(selection))
-        }}
-      />
       <VisualStyleDialog
         open={styleDialog.styleOpen}
         loading={styleDialog.styleLoading}
@@ -1495,7 +1370,7 @@ export default function BiblePage() {
         options={styleDialog.styleOptions}
         selected={styleDialog.selectedStyle}
         scopeNote={styleActionRef.current === 'style_only'
-          ? '确认后会带你确认「定妆照 + 场景图」的合并重新生成费用；人物设定本身不会重新生成。'
+          ? '确认后将直接重新生成「定妆照 + 场景图」；人物设定本身不会重新生成。'
           : '确认后将在本页重新生成人物谱与定妆照；风格确定后场景库的场景图也会一并重新生成。'}
         onSelect={styleDialog.setSelectedStyle}
         onClose={styleDialog.closeStyleDialog}
@@ -1513,15 +1388,6 @@ export default function BiblePage() {
           }
         }}
       />
-      <StyleRegenConfirmDialog
-        open={styleRegen.dialogOpen}
-        styleName={styleRegen.pendingStyleName}
-        quote={styleRegen.quote}
-        loading={styleRegen.quoteLoading}
-        error={styleRegen.quoteError}
-        onClose={styleRegen.closeDialog}
-        onConfirm={() => void confirmStyleOnly()}
-      />
       {skipConfirm && (
         <SkipConfirmDialog
           data={skipConfirm}
@@ -1529,33 +1395,6 @@ export default function BiblePage() {
           onConfirm={() => {
             setSkipConfirm(null)
             go('episodes', p.id)
-          }}
-        />
-      )}
-      {stopConfirm && (
-        <DecisionDialog
-          title={`${stopLabel}？`}
-          summary={p.bible_status === 'running'
-            ? '人物谱尚未完成'
-            : refsProgress
-              ? summarizeProgress(refsProgress)
-              : '定妆照仍在生成'}
-          message={p.bible_status === 'running'
-            ? '系统会停止当前谱写任务；尚未完成的人物谱不会发布，已有原著和旧版本保持不变。'
-            : '系统会停止后续定妆队列并保留已落盘素材；已提交给图片服务的当前请求可能仍会完成并产生费用。'}
-          details={[
-            p.bible_status === 'running'
-              ? '稍后可重新发起人物谱生成'
-              : '已完成定妆照不会删除，可稍后补齐缺失项',
-            '停止请求不代表供应商会退回已经发生的费用',
-          ]}
-          confirmLabel={`确认${stopLabel}`}
-          cancelLabel="继续生成"
-          danger
-          onClose={() => setStopConfirm(false)}
-          onConfirm={() => {
-            setStopConfirm(false)
-            void stopGeneration()
           }}
         />
       )}
@@ -1619,7 +1458,6 @@ export default function BiblePage() {
           <PortraitBlock projectId={p.id} character={paramsCharacter}
             disabled={busy || refsRunning} onChanged={refresh}
             regenerate={() => openPayment(
-              `重新生成「${paramsCharacter.name}」定妆照`,
               { character: paramsCharacter.name },
               async (quote) => {
                 await api.post(`/projects/${p.id}/refs`, {
@@ -1629,7 +1467,6 @@ export default function BiblePage() {
                   idempotency_key: quote.quote_id,
                 })
                 toast(`正在为「${paramsCharacter.name}」重新定妆`)
-                refresh()
               },
             )} />
         </GenerationParamsDialog>
@@ -1809,7 +1646,6 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
   disabled?: boolean
   onChanged?: () => void
   onPayRequest: (
-    title: string,
     precheckBody: { character?: string; characters?: string[]; resume?: boolean; view_role?: string },
     action: (quote: RefsCostPrecheck) => Promise<void>,
   ) => Promise<void>
@@ -1879,7 +1715,6 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
   const redoView = async (portraitId: string, viewRole: string) => {
     const label = VIEW_ROLE_LABELS[viewRole] || viewRole
     await onPayRequest(
-      `重做「${character.name}」的${label}视角`,
       { character: character.name, view_role: viewRole },
       async (quote) => {
         setRedoing(`${portraitId}:${viewRole}`)
@@ -1926,13 +1761,13 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
                 disabled={disabled || !!redoing}
                 aria-label={disabled || !!redoing
                   ? `重做${character.name}的${VIEW_ROLE_LABELS[view.view_role] || view.view_role}视角，暂不可用：${disabled ? '当前有其他人物资产任务运行，请等待完成' : '正在提交上一项视角重做任务'}`
-                  : `重做${character.name}的${VIEW_ROLE_LABELS[view.view_role] || view.view_role}视角；下一步预览费用`}
+                  : `重做${character.name}的${VIEW_ROLE_LABELS[view.view_role] || view.view_role}视角；点击后立即提交生成`}
                 title={
                   disabled
                     ? '当前有其他人物资产任务运行，请等待完成'
                     : redoing
                       ? '正在提交视角重做任务'
-                      : '提交前会先展示本次生成费用'
+                      : '点击后立即提交重做，无需再次确认'
                 }
                 onClick={() => void redoView(portrait.id!, view.view_role!)}
               >
