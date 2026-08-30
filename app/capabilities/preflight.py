@@ -16,6 +16,17 @@ from app.capabilities.schemas import (
     RiskLevel,
 )
 from app.db import get_conn
+# P0-1：这些函数是 Command Bus 的 spec.preflight 构造器（见文件底部
+# PREFLIGHT_MAP），在 CommandBus.preflight()/preflight_async() 里先于任何
+# 归属校验执行——Agent/MCP 工具调用把 project_id/episode_id/shot_id 放在命令
+# 参数体而非 URL 路径参数，app.authz.resolve.require_project_owner_access
+# 只看路径参数，结构上看不到它们。裸 SQL 查 projects/episodes/shots 只验证
+# "存在"不验证"是不是你的"，等于让任何登录账号都能预览到别人项目的名称/
+# 集数/费用等信息。owned_project_row/owned_episode_row/owned_shot_row
+# 复用 app.domain.common 的同一条归属判据（_project_or_404/_episode_or_404
+# 的姊妹函数，区别只是返回 None 而不是抛 HTTPException，方便这里沿用既有的
+# "不存在" PreflightResult 分支），不在这个文件里另起一份判据。
+from app.domain.common import owned_episode_row, owned_project_row, owned_shot_row
 
 
 def _fp(parts: dict[str, Any]) -> str:
@@ -29,10 +40,7 @@ def project_delete(args) -> PreflightResult:
     # 东西；deleted_at IS NULL 把已经在回收站里的项目也当"不存在"，同一语义
     # 见 app.domain.common._project_or_404。真正的物理删除是 project.purge。
     conn = get_conn()
-    row = conn.execute(
-        "SELECT id, name, status FROM projects WHERE id=? AND deleted_at IS NULL",
-        (args.project_id,),
-    ).fetchone()
+    row = owned_project_row(args.project_id)
     if not row:
         return PreflightResult(
             command="project.delete",
@@ -103,10 +111,7 @@ def episode_plan(args) -> PreflightResult:
     from app import planning
 
     conn = get_conn()
-    project = conn.execute(
-        "SELECT id, name, plan_status FROM projects WHERE id=?",
-        (args.project_id,),
-    ).fetchone()
+    project = owned_project_row(args.project_id)
     if not project:
         return PreflightResult(
             command="episode.plan",
@@ -253,7 +258,7 @@ def video_clear_episode(args) -> PreflightResult:
     from app.completion_grant import provider_task_clearance_snapshot
 
     conn = get_conn()
-    ep = conn.execute("SELECT id, episode_no, project_id, status FROM episodes WHERE id=?", (args.episode_id,)).fetchone()
+    ep = owned_episode_row(args.episode_id)
     if not ep:
         return PreflightResult(
             command="video.clear_episode",
@@ -332,10 +337,7 @@ def video_clear_shot(args) -> PreflightResult:
     from app.completion_grant import provider_task_clearance_snapshot
 
     conn = get_conn()
-    shot = conn.execute(
-        "SELECT id, shot_no, episode_id, storyboard_artifact_id FROM shots WHERE id=?",
-        (args.shot_id,),
-    ).fetchone()
+    shot = owned_shot_row(args.shot_id)
     if not shot:
         return PreflightResult(
             command="video.clear_shot",
@@ -407,9 +409,7 @@ def video_generate_shot(args) -> PreflightResult:
     from app.video_cost_model import initial_shot_generation_cost
 
     conn = get_conn()
-    shot = conn.execute(
-        "SELECT id, shot_no, episode_id, duration_s FROM shots WHERE id=?", (args.shot_id,)
-    ).fetchone()
+    shot = owned_shot_row(args.shot_id)
     if not shot:
         return PreflightResult(
             command="video.generate_shot",
@@ -474,9 +474,7 @@ def video_generate_episode(args) -> PreflightResult:
     from app.video_cost_model import initial_shot_generation_cost
 
     conn = get_conn()
-    ep = conn.execute(
-        "SELECT id, episode_no, status FROM episodes WHERE id=?", (args.episode_id,)
-    ).fetchone()
+    ep = owned_episode_row(args.episode_id)
     if not ep:
         return PreflightResult(
             command="video.generate_episode",
@@ -570,10 +568,7 @@ def video_generate_episode(args) -> PreflightResult:
 def video_complete_episode(args) -> PreflightResult:
     import math
     conn = get_conn()
-    ep = conn.execute(
-        "SELECT id, episode_no, status, storyboard_artifact_id FROM episodes WHERE id=?",
-        (args.episode_id,),
-    ).fetchone()
+    ep = owned_episode_row(args.episode_id)
     if not ep:
         return PreflightResult(
             command="video.complete_episode",
@@ -674,9 +669,7 @@ def video_complete_episode(args) -> PreflightResult:
 
 def video_complete_project(args) -> PreflightResult:
     conn = get_conn()
-    project = conn.execute(
-        "SELECT id, name FROM projects WHERE id=?", (args.project_id,)
-    ).fetchone()
+    project = owned_project_row(args.project_id)
     if not project:
         return PreflightResult(
             command="video.complete_project",
@@ -772,9 +765,7 @@ def video_complete_project(args) -> PreflightResult:
 
 def storyboard_confirm(args) -> PreflightResult:
     conn = get_conn()
-    ep = conn.execute(
-        "SELECT id, episode_no, status FROM episodes WHERE id=?", (args.episode_id,)
-    ).fetchone()
+    ep = owned_episode_row(args.episode_id)
     if not ep:
         return PreflightResult(
             command="storyboard.confirm",
@@ -812,10 +803,7 @@ def storyboard_confirm(args) -> PreflightResult:
 
 def shot_update(args) -> PreflightResult:
     conn = get_conn()
-    shot = conn.execute(
-        "SELECT id, shot_no, episode_id, storyboard_artifact_id FROM shots WHERE id=?",
-        (args.shot_id,),
-    ).fetchone()
+    shot = owned_shot_row(args.shot_id)
     if not shot:
         return PreflightResult(
             command="shot.update",
@@ -865,13 +853,7 @@ def screenplay_update(args) -> PreflightResult:
     from app.evidence import repository as evidence_repository
 
     conn = get_conn()
-    ep = conn.execute(
-        "SELECT id, episode_no, status, screenplay_json, screenplay_artifact_id, "
-        "screenplay_updated_at, active_screenplay_run_id, active_storyboard_run_id, "
-        "screenplay_publish_fence "
-        "FROM episodes WHERE id=?",
-        (args.episode_id,),
-    ).fetchone()
+    ep = owned_episode_row(args.episode_id)
     if not ep:
         return PreflightResult(
             command="screenplay.update",
@@ -1060,13 +1042,7 @@ def screenplay_generate(args) -> PreflightResult:
     from app.evidence import repository as evidence_repository
 
     conn = get_conn()
-    ep = conn.execute(
-        """SELECT id,episode_no,project_id,screenplay_status,
-                  screenplay_artifact_id,storyboard_artifact_id,
-                  active_screenplay_run_id,source_chapters
-             FROM episodes WHERE id=?""",
-        (args.episode_id,),
-    ).fetchone()
+    ep = owned_episode_row(args.episode_id)
     if not ep:
         return PreflightResult(
             command="screenplay.generate",
@@ -1160,13 +1136,7 @@ def screenplay_generate(args) -> PreflightResult:
 
 def screenplay_resume(args) -> PreflightResult:
     """Read-only distinction between pre-document and document resume modes."""
-    conn = get_conn()
-    ep = conn.execute(
-        """SELECT id,episode_no,project_id,screenplay_status,
-                  active_screenplay_run_id,working_screenplay_artifact_id
-             FROM episodes WHERE id=?""",
-        (args.episode_id,),
-    ).fetchone()
+    ep = owned_episode_row(args.episode_id)
     if not ep:
         return PreflightResult(
             command="screenplay.resume",
@@ -1221,15 +1191,7 @@ def screenplay_resume(args) -> PreflightResult:
 
 def screenplay_delete(args) -> PreflightResult:
     conn = get_conn()
-    ep = conn.execute(
-        "SELECT id, episode_no, status, screenplay_json, screenplay_status, "
-        "screenplay_artifact_id, working_screenplay_artifact_id, "
-        "published_screenplay_artifact_id, screenplay_production_revision_id, "
-        "screenplay_completion_certificate_id, active_screenplay_run_id, "
-        "screenplay_updated_at "
-        "FROM episodes WHERE id=?",
-        (args.episode_id,),
-    ).fetchone()
+    ep = owned_episode_row(args.episode_id)
     if not ep:
         return PreflightResult(
             command="screenplay.delete",
@@ -1323,10 +1285,7 @@ def screenplay_delete(args) -> PreflightResult:
 
 def bible_update(args) -> PreflightResult:
     conn = get_conn()
-    row = conn.execute(
-        "SELECT id, bible_version, bible_artifact_id, bible_status FROM projects WHERE id=?",
-        (args.project_id,),
-    ).fetchone()
+    row = owned_project_row(args.project_id)
     if not row:
         return PreflightResult(
             command="bible.update",
@@ -1370,9 +1329,7 @@ def bible_update(args) -> PreflightResult:
 
 def delivery_review(args) -> PreflightResult:
     conn = get_conn()
-    ep = conn.execute(
-        "SELECT id, episode_no, delivery_status FROM episodes WHERE id=?", (args.episode_id,)
-    ).fetchone()
+    ep = owned_episode_row(args.episode_id)
     if not ep:
         return PreflightResult(
             command="delivery.review",

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from app import artifacts, db, delivery, downstream_authority, task_registry
+from app.domain import common as domain_common
 from app.evidence import repository
 from app.evidence import media as media_evidence
 from app.harness.types import Evaluation, EvidenceArtifact
@@ -50,6 +51,12 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
     conn = _conn()
     monkeypatch.setattr(repository, "get_conn", lambda: conn)
     monkeypatch.setattr(delivery, "get_conn", lambda: conn)
+    # delivery.delivery_readiness now resolves its episode through
+    # app.domain.common.owned_episode_row (P0-1 ownership fold) -- that
+    # helper calls app.domain.common's own get_conn binding, a separate name
+    # from delivery.get_conn even though both originally point at the same
+    # function, so it needs its own patch onto this test's isolated conn too.
+    monkeypatch.setattr(domain_common, "get_conn", lambda: conn)
     monkeypatch.setattr(orchestration_api, "get_conn", lambda: conn)
     monkeypatch.setattr(delivery.config, "PROJECTS_DIR", tmp_path)
     monkeypatch.setattr(delivery, "validate_video_file", lambda path, expected_duration_s=5: {

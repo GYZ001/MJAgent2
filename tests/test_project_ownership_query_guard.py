@@ -87,6 +87,7 @@ ever changes, instead of staying silently exempt.
 from __future__ import annotations
 
 import ast
+import inspect
 import re
 from pathlib import Path
 
@@ -231,4 +232,90 @@ def test_no_opaque_sql_variables_hide_projects_queries() -> None:
         "of inlined at the .execute(...) call site -- test_project_ownership_"
         "query_guard.py's main scan cannot verify these; inline them or "
         "extend the guard to resolve the variable:\n" + "\n".join(offenders)
+    )
+
+
+def test_preflight_entry_points_route_through_ownership_helpers() -> None:
+    """P0-1 blind spot this guard used to have (found by manual audit, not by
+    this scan): app/capabilities/preflight.py's functions are the Command
+    Bus's ``spec.preflight`` callables (see ``PREFLIGHT_MAP`` at the bottom of
+    that module) -- ``CommandBus.preflight()``/``preflight_async()`` calls
+    them *before* any ownership check runs. ``CommandBus._authorize()`` only
+    checks "system-admin-only" at the bus level; its own docstring says
+    "is this project yours" is deliberately left to the HTTP-boundary
+    ``app.authz.resolve.require_project_owner_access`` -- which only inspects
+    *path* params. An Agent/MCP tool call embeds project_id/episode_id/
+    shot_id in the command's JSON args, not a URL path segment, so that gate
+    never runs for them.
+
+    ``test_no_unfiltered_multi_row_projects_queries`` above could not catch
+    this: its id-anchor exemption assumes any ``WHERE id=?`` lookup is safe
+    because the id "already passed through a gate upstream" (true for HTTP
+    path params, or for an id read off an already-fetched row) -- false here,
+    since every ``PREFLIGHT_MAP`` function receives its id straight off
+    ``args`` with zero upstream gate. This is exactly how
+    app/capabilities/preflight.py ended up with real cross-account
+    information leaks in ``project_delete`` and every sibling function
+    (project name, episode/shot counts, cost estimates -- all readable by any
+    logged-in account for any other account's project/episode/shot id).
+
+    Fix pattern: every ``PREFLIGHT_MAP`` function must resolve its primary
+    object through one of ``app.domain.common.owned_project_row``/
+    ``owned_episode_row``/``owned_shot_row`` (the non-raising siblings of
+    ``_project_or_404``/``_episode_or_404`` -- same ownership judgement,
+    returns ``None`` instead of raising so preflight construction can fold
+    "missing" and "not yours" into the existing not-found ``PreflightResult``
+    branch), or delegate to another ``PREFLIGHT_MAP`` function that already
+    does (e.g. ``screenplay_repair_draft`` calls ``screenplay_update(args)``).
+    This test does not hardcode which function needs which helper -- it
+    walks the real ``PREFLIGHT_MAP`` dict (so a newly registered command is
+    covered automatically) and requires each function's own source to
+    reference an ownership helper or another registered preflight function.
+    """
+    from app.capabilities import preflight as preflight_module
+
+    helper_names = ("owned_project_row", "owned_episode_row", "owned_shot_row")
+    offenders = []
+    for command, fn in preflight_module.PREFLIGHT_MAP.items():
+        source = inspect.getsource(fn)
+        references_helper = any(name in source for name in helper_names)
+        delegates = any(
+            f"{other.__name__}(args)" in source
+            for other in preflight_module.PREFLIGHT_MAP.values()
+            if other is not fn
+        )
+        if not references_helper and not delegates:
+            offenders.append(f"{command} ({fn.__name__})")
+    assert not offenders, (
+        "These Command Bus preflight constructors resolve project_id/"
+        "episode_id/shot_id straight off command args against projects/"
+        "episodes/shots without going through app.domain.common."
+        "owned_project_row/owned_episode_row/owned_shot_row -- see this "
+        "test's docstring for why the general query guard above cannot see "
+        "this class of bug:\n" + "\n".join(offenders)
+    )
+
+
+def test_delivery_readiness_routes_through_ownership_helper() -> None:
+    """Same P0-1 blind spot as the preflight test above, for
+    ``app.delivery.delivery_readiness``: it is reachable from
+    ``app/capabilities/handlers/delivery.py::check()`` (a Command Bus
+    handler -- episode_id from command args, not an HTTP path param) and
+    from the ``delivery`` MCP Resource in ``app/mcp/resources.py`` (MCP has
+    no session gate at all -- see ``app/main.py``: "MCP 使用 Bearer
+    Token，不叠本机会话闸门"). Its own ``SELECT * FROM episodes WHERE id=?``
+    used to be a bare existence check with no ownership filter, on a
+    function keyed only by table name (``episodes``, not ``projects``) --
+    outside even the general scan's ``_PROJECTS_TABLE_RE`` coverage, on top
+    of the same id-anchor blind spot the preflight test documents.
+    """
+    from app import delivery as delivery_module
+
+    source = inspect.getsource(delivery_module.delivery_readiness)
+    assert "owned_episode_row" in source, (
+        "app.delivery.delivery_readiness no longer resolves its episode_id "
+        "through app.domain.common.owned_episode_row -- a raw "
+        "'SELECT * FROM episodes WHERE id=?' here is a cross-account "
+        "information leak for the Command Bus / MCP callers documented in "
+        "this test's docstring, not a false alarm."
     )

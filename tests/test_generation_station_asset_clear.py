@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from app import artifacts, completion_grant, db
+from app.domain import common as domain_common
 from tests.conftest import patch_worker_everywhere, patch_api_everywhere
 from app.capabilities.direct import enter_handler
 
@@ -1019,6 +1020,12 @@ def test_clear_preflight_returns_recoverable_provider_state(monkeypatch) -> None
         provider_task_id=None,
     )
     monkeypatch.setattr(preflight, "get_conn", lambda: conn)
+    # video_clear_shot now resolves its shot through
+    # app.domain.common.owned_shot_row (P0-1 ownership fold) -- that helper
+    # calls app.domain.common's own get_conn binding, a separate name from
+    # preflight.get_conn even though both originally point at the same
+    # function, so it needs its own patch onto this test's isolated conn too.
+    monkeypatch.setattr(domain_common, "get_conn", lambda: conn)
 
     result = preflight.video_clear_shot(SimpleNamespace(shot_id="s"))
 

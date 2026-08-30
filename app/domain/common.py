@@ -121,7 +121,55 @@ def _scene_assets_task_active(project_id: str) -> bool:
     """Whether either phase of the scene-asset pipeline is active."""
     return _scene_refs_task_active(project_id) or task_registry.active("scene_bible", project_id)
 
-def _assert_principal_owns(owner_user_id: str | None, *, not_found_detail: str) -> None:
+def _principal_access_check(
+    owner_user_id: str | None, *, object_type: str, object_id: str | None,
+) -> bool:
+    """账号级隔离的唯一判据——``_assert_principal_owns``（抛 404）与
+    ``owned_project_row``/``owned_episode_row``/``owned_shot_row``（返回
+    ``None``）共用同一份判断，不允许两边各自维护一份（会漂移）。
+
+    ``principal is None`` 视为未挂会话闸门的内部调用，与全仓既有约定一致，
+    直接放行（后台任务、CLI、尚未注入 Principal 的既有测试）。
+
+    系统管理员访问非本人账号的对象是被允许的设计（``Principal.owns`` 对管理员
+    恒真），但跨账号访问必须留痕（P0-2）：判据只挂在「principal 是管理员 且
+    目标 owner 不是他本人」这一个事实上，不挂路由白名单——任何新端点只要经过
+    ``_project_or_404``/``_episode_or_404``/``owned_*_row`` 就自动被审计，
+    不需要单独接线。同账号访问（绝大多数请求）在下面第一个分支就短路返回，
+    不做任何 DB 读写，热路径零额外开销；只有「是管理员」与「owner 不是自己」
+    同时成立时才会打一次独立连接的审计写入（见 ``app.db.insert_monitor_audit``
+    的 docstring：诊断类写入不得提交调用方尚未提交的事务）。
+    """
+    from app.auth.principal import get_current_principal
+
+    principal = get_current_principal()
+    if principal is None:
+        return True
+    if not principal.owns(owner_user_id):
+        return False
+    if principal.is_system_admin and owner_user_id != principal.user_id:
+        from app.db import insert_monitor_audit
+
+        insert_monitor_audit(
+            action="admin_cross_account_access",
+            object_type=object_type,
+            object_id=object_id or owner_user_id or "unknown",
+            outcome="ok",
+            detail={
+                "admin_user_id": principal.user_id,
+                "target_owner_user_id": owner_user_id,
+            },
+        )
+    return True
+
+
+def _assert_principal_owns(
+    owner_user_id: str | None,
+    *,
+    not_found_detail: str,
+    object_type: str = "project",
+    object_id: str | None = None,
+) -> None:
     """账号级项目隔离的第二道闸门（domain 层，独立于 HTTP 边界）。
 
     ``app.authz.resolve.require_project_owner_access`` 只在请求经 ASGI 路由、
@@ -132,34 +180,56 @@ def _assert_principal_owns(owner_user_id: str | None, *, not_found_detail: str) 
     它（几乎必然）调用这两个函数之一，归属校验依然会执行——结构上拿不到，
     不依赖每个端点作者记得挂鉴权。
 
-    ``principal is None`` 视为未挂会话闸门的内部调用，与全仓既有约定一致，
-    直接放行（后台任务、CLI、尚未注入 Principal 的既有测试）。统一 404 而非
-    403：不让外部区分"对象不存在"与"对象存在但你无权"，与 HTTP 边界的既有
-    口径一致。
+    统一 404 而非 403：不让外部区分"对象不存在"与"对象存在但你无权"，与
+    HTTP 边界的既有口径一致。判据本体（含管理员跨账号访问审计）见
+    ``_principal_access_check``；``object_type``/``object_id`` 只影响审计行
+    怎么标注被访问的对象，不影响放行/拒绝结果，默认值保证既有调用方
+    （未传这两个新参数）行为不变。
     """
-    from app.auth.principal import get_current_principal
-
-    principal = get_current_principal()
-    if principal is not None and not principal.owns(owner_user_id):
+    if not _principal_access_check(
+        owner_user_id, object_type=object_type, object_id=object_id,
+    ):
         raise HTTPException(404, not_found_detail)
 
 
-def _project_or_404(project_id: str) -> dict:
+def owned_project_row(project_id: str) -> dict | None:
+    """裸 SQL 查 ``projects`` 的统一入口（P0-1）。
+
+    ``existence`` 与 ``ownership`` 折叠进同一个 ``None`` 分支，供不便直接抛
+    ``HTTPException`` 的调用方（Command Bus 的 ``preflight`` 构造器等域内读
+    函数）复用同一条判据，而不是各自重新实现一份「只查 not found、漏查
+    owner」的裸 SQL——那类调用方（``app/capabilities/preflight.py`` 的
+    ``PREFLIGHT_MAP`` 全部 17 个函数）是 Command Bus 在 HTTP 边界的
+    ``require_project_owner_access`` 之前就会执行的入口：Agent/MCP 工具调用
+    把 project_id 放在命令参数体里而不是 URL 路径参数，结构上没有任何上游
+    校验过它。语义与 ``_project_or_404`` 完全一致（软删除项目同样视为不
+    存在），区别只是返回 ``None`` 而不是抛异常。
+    """
     conn = get_conn()
     # deleted_at IS NULL：软删除的项目已进回收站，对全部常规读写路径一律
-    # 404——这是整个 domain 包唯一的项目存在性入口，几乎每个 bible/screenplay/
-    # storyboard/video 端点都先过这一道，回收站里的项目因此天然拿不到任何新
-    # 操作（恢复/彻底清理走各自专用查询，不经过这里）。
+    # 视为不存在——这是整个 domain 包唯一的项目存在性入口，几乎每个
+    # bible/screenplay/storyboard/video 端点都先过这一道，回收站里的项目
+    # 因此天然拿不到任何新操作（恢复/彻底清理走各自专用查询，不经过这里）。
     row = conn.execute(
         "SELECT * FROM projects WHERE id=? AND deleted_at IS NULL", (project_id,)
     ).fetchone()
     if not row:
-        raise HTTPException(404, f"项目不存在：{project_id}")
-    _assert_principal_owns(row["owner_user_id"], not_found_detail=f"项目不存在：{project_id}")
+        return None
+    if not _principal_access_check(
+        row["owner_user_id"], object_type="project", object_id=project_id,
+    ):
+        return None
     # sqlite3.Row supports item access but not Mapping.get().  Project callers
     # use both styles, so normalize once at the shared boundary instead of
     # leaving individual endpoints vulnerable to AttributeError -> HTTP 500.
     return dict(_recover_orphan_bible_row(conn, row))
+
+
+def _project_or_404(project_id: str) -> dict:
+    row = owned_project_row(project_id)
+    if row is None:
+        raise HTTPException(404, f"项目不存在：{project_id}")
+    return row
 
 
 def _require_harness_engine(project_id: str) -> None:
@@ -170,18 +240,48 @@ def _require_harness_engine(project_id: str) -> None:
         raise HTTPException(409, "该项目的 Harness Engine 已由灰度开关隔离；请重新开启后再启动新任务")
 
 
-def _episode_or_404(episode_id: str):
+def owned_episode_row(episode_id: str):
+    """同 ``owned_project_row``，剧集版本；owner 取其所属项目。"""
     conn = get_conn()
     row = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     if not row:
-        raise HTTPException(404, f"剧集不存在：{episode_id}")
+        return None
     owner_row = conn.execute(
         "SELECT owner_user_id FROM projects WHERE id=?", (row["project_id"],)
     ).fetchone()
-    _assert_principal_owns(
+    if not _principal_access_check(
         owner_row["owner_user_id"] if owner_row else None,
-        not_found_detail=f"剧集不存在：{episode_id}",
-    )
+        object_type="episode", object_id=episode_id,
+    ):
+        return None
+    return row
+
+
+def owned_shot_row(shot_id: str):
+    """同 ``owned_project_row``，镜头版本；owner 沿 shot -> episode -> project 取。"""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+    if not row:
+        return None
+    ep_row = conn.execute(
+        "SELECT project_id FROM episodes WHERE id=?", (row["episode_id"],)
+    ).fetchone()
+    owner_row = conn.execute(
+        "SELECT owner_user_id FROM projects WHERE id=?",
+        (ep_row["project_id"] if ep_row else None,),
+    ).fetchone()
+    if not _principal_access_check(
+        owner_row["owner_user_id"] if owner_row else None,
+        object_type="shot", object_id=shot_id,
+    ):
+        return None
+    return row
+
+
+def _episode_or_404(episode_id: str):
+    row = owned_episode_row(episode_id)
+    if row is None:
+        raise HTTPException(404, f"剧集不存在：{episode_id}")
     return row
 
 

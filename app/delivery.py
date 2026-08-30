@@ -516,8 +516,21 @@ def _authorized_source_chapters(conn: Any, episode: Any) -> tuple[list[dict[str,
 
 
 def delivery_readiness(episode_id: str) -> dict[str, Any]:
+    # P0-1：owned_episode_row 折叠 existence+ownership 判据（同一份判据用在
+    # app.domain.common._episode_or_404）。这个函数除了走
+    # GET /episodes/{episode_id}/delivery/readiness（episode_id 是路径参数，
+    # 已被 require_project_owner_access 拦过一轮）之外，还被
+    # app/capabilities/handlers/delivery.py::check()（Command Bus 的
+    # delivery.check handler，episode_id 来自命令参数体）与
+    # app/mcp/resources.py 的 delivery 只读 Resource（MCP 完全不挂本机会话
+    # 闸门）直接调用——两条路径都没有任何上游校验过 episode_id 属于谁，裸 SQL
+    # 只验证"存在"会把交付就绪细节泄露给任何登录账号。保持抛 KeyError（不是
+    # HTTPException）：三个调用方都已经把 KeyError 当"不存在"处理，existence
+    # 与 ownership 折叠进同一个异常分支，不额外泄露"存在但无权"。
+    from app.domain.common import owned_episode_row
+
     conn = get_conn()
-    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    ep = owned_episode_row(episode_id)
     if not ep:
         raise KeyError(episode_id)
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
