@@ -323,7 +323,7 @@ def patch_video_modes_everywhere(monkeypatch, name, value, **kwargs):
     ``monkeypatch.setattr(video_modes, name, value)`` only reaches the
     package's own re-export attribute now, not the independent copy each
     submodule bound for itself at import time -- including a submodule that
-    calls a sibling submodule's function, e.g. ``reference_generate_legacy.py``
+    calls a sibling submodule's function, e.g. ``reference_assemble.py``
     calling ``character_reference_assets`` via its own ``from .asset_lookup
     import character_reference_assets``. This walks every submodule and
     patches ``name`` wherever it is bound, reproducing the pre-split

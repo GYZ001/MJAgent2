@@ -57,10 +57,31 @@ direct tuple/list-literal form is covered (see
 ``_for_loop_worker_setattr_violations`` below for the known residual blind
 spot: a loop over a *variable* that was assigned a worker-containing tuple
 earlier, rather than a literal at the ``for`` site).
+
+It also descends into string literals that are themselves substantial,
+parseable Python source (see ``_embedded_source_trees``). This closes a
+blind spot found 2026-08-30 in ``tests/test_process_restart_recovery.py``:
+that file exercises process-restart recovery via
+``subprocess.run([sys.executable, "-c", source], ...)`` -- a genuinely fresh
+interpreter is the only way to test recovery from a hard process exit, so
+the "code" being checked lives inside a Python string, not as real syntax in
+this file. ``ast.parse`` on the outer file only ever sees that string as a
+``Constant`` node -- a hand-rolled ``for target in (worker, media_run_job):
+target.x = stub`` written *inside* the string was completely invisible to
+every check above, even though it is exactly the same silent-no-op pattern.
+Any string constant that parses as 3+ top-level statements is treated as
+embedded source and scanned with the same checks (one level deep only: this
+repo has no case of a subprocess script that itself spawns a further nested
+``-c`` script, so recursing into an embedded tree's *own* string constants
+is not implemented -- if that ever appears, extend
+``_embedded_source_trees`` to recurse rather than assuming the blind spot is
+still closed).
 """
 from __future__ import annotations
 
 import ast
+import textwrap
+import warnings
 from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -114,30 +135,39 @@ def _worker_aliases(tree: ast.Module) -> set[str]:
 
 
 def _for_loop_worker_setattr_violations(
-    tree: ast.Module, path: Path
+    tree: ast.Module, location: str
 ) -> list[tuple[int, str]]:
     """Catch the loop-variable form of the same bug: ``for module in (a, b,
-    worker): monkeypatch.setattr(module, "name", value)``.
+    worker): monkeypatch.setattr(module, "name", value)`` *or* ``for module
+    in (a, b, worker): module.name = value``.
 
     This is the same silent no-op as the literal ``monkeypatch.setattr(worker,
-    ...)`` form the rest of this file catches -- ``module`` walks through
-    ``worker`` on one iteration and calls ``setattr`` on it exactly as if it
-    had been written literally -- but the AST shape is different: the first
-    argument to ``setattr`` is the loop variable (an ``ast.Name`` whose id is
-    *not* ``"worker"``), not ``worker`` itself, so the direct check above
-    can't see it. A real instance of this exact pattern (with a different
-    package that went through the same exec()-facade removal) reached
-    production: ``for module in (..., video_supervisor, ...):
-    monkeypatch.setattr(module, "get_conn", ...)`` left video_supervisor's own
-    submodule copy of ``get_conn`` unpatched, the test got a real on-disk
-    connection instead of the in-memory one, and a cross-thread
-    ``sqlite3.ProgrammingError`` only surfaced because something downstream
-    happened to use ``asyncio.to_thread``. Only the direct tuple/list-literal
-    form (``for x in (a, worker, b):``) is checked here -- ``for x in
-    some_var:`` where ``some_var`` was assigned a tuple containing ``worker``
-    earlier is a known residual blind spot (no occurrences found in this repo
-    as of the 2026-08-29 media_exec package split; grep ``for [a-zA-Z_]+ in
-    \\(`` tests/*.py by hand if you add one).
+    ...)`` / ``worker.name = ...`` forms the rest of this file catches --
+    ``module`` walks through ``worker`` on one iteration and patches it
+    exactly as if it had been written literally -- but the AST shape is
+    different: the target is the loop variable (an ``ast.Name`` whose id is
+    *not* ``"worker"``), not ``worker`` itself, so the direct checks above
+    can't see it. A real instance of the ``setattr(module, ...)`` spelling
+    (with a different package that went through the same exec()-facade
+    removal) reached production: ``for module in (..., video_supervisor,
+    ...): monkeypatch.setattr(module, "get_conn", ...)`` left
+    video_supervisor's own submodule copy of ``get_conn`` unpatched, the test
+    got a real on-disk connection instead of the in-memory one, and a
+    cross-thread ``sqlite3.ProgrammingError`` only surfaced because something
+    downstream happened to use ``asyncio.to_thread``. The ``module.name =
+    value`` spelling was a second, independent instance of this same blind
+    spot found 2026-08-30 in the *original* (pre-fix) version of
+    ``tests/test_process_restart_recovery.py``: ``for target in (worker,
+    media_run_job): target._assert_review_dependency_fence_async = no_fence``
+    -- direct attribute assignment through the loop variable, not a
+    ``setattr()`` call, so the original version of this function (which only
+    inspected ``ast.Call`` nodes) walked right past it despite already
+    covering the literal ``worker.x = ...`` form above. Only the direct
+    tuple/list-literal form (``for x in (a, worker, b):``) is checked here --
+    ``for x in some_var:`` where ``some_var`` was assigned a tuple containing
+    ``worker`` earlier is a known residual blind spot (no occurrences found
+    in this repo as of the 2026-08-29 media_exec package split; grep ``for
+    [a-zA-Z_]+ in \\(`` tests/*.py by hand if you add one).
     """
     aliases = _worker_aliases(tree)
     violations: list[tuple[int, str]] = []
@@ -154,33 +184,48 @@ def _for_loop_worker_setattr_violations(
         loopvar = target.id if isinstance(target, ast.Name) else None
         if loopvar is None:
             continue
+        matched_names = [n for n in elts_names if n in aliases]
         for sub in ast.walk(ast.Module(body=node.body, type_ignores=[])):
-            if not isinstance(sub, ast.Call):
+            is_setattr_call = False
+            if isinstance(sub, ast.Call):
+                func = sub.func
+                is_setattr = (
+                    isinstance(func, ast.Attribute) and func.attr == "setattr"
+                ) or (isinstance(func, ast.Name) and func.id == "setattr")
+                is_setattr_call = (
+                    is_setattr
+                    and bool(sub.args)
+                    and isinstance(sub.args[0], ast.Name)
+                    and sub.args[0].id == loopvar
+                )
+            is_attr_assign = False
+            if isinstance(sub, ast.Assign):
+                is_attr_assign = any(
+                    isinstance(t, ast.Attribute)
+                    and isinstance(t.value, ast.Name)
+                    and t.value.id == loopvar
+                    for t in sub.targets
+                )
+            if not (is_setattr_call or is_attr_assign):
                 continue
-            func = sub.func
-            is_setattr = (
-                isinstance(func, ast.Attribute) and func.attr == "setattr"
-            ) or (isinstance(func, ast.Name) and func.id == "setattr")
-            if (
-                is_setattr
-                and sub.args
-                and isinstance(sub.args[0], ast.Name)
-                and sub.args[0].id == loopvar
-            ):
-                violations.append((
-                    node.lineno,
-                    f"{path}:{node.lineno}: for-loop over a tuple/list "
-                    f"containing {[n for n in elts_names if n in aliases]!r} "
-                    f"calls monkeypatch.setattr({loopvar}, ...) on the loop "
-                    "variable -- on the worker iteration this is the exact "
-                    "same silent no-op as a literal "
-                    "monkeypatch.setattr(worker, ...) (see module docstring), "
-                    "just spelled through a loop variable instead of the bare "
-                    "name. Pull worker out of the tuple and use "
-                    "tests.conftest.patch_worker_everywhere(monkeypatch, "
-                    "name, value) for it separately.",
-                ))
-                break
+            spelling = (
+                f"monkeypatch.setattr({loopvar}, ...)"
+                if is_setattr_call
+                else f"{loopvar}.<attr> = ..."
+            )
+            violations.append((
+                node.lineno,
+                f"{location}:{node.lineno}: for-loop over a tuple/list "
+                f"containing {matched_names!r} calls {spelling} on the loop "
+                "variable -- on the worker iteration this is the exact "
+                "same silent no-op as a literal "
+                "monkeypatch.setattr(worker, ...) / worker.<attr> = ... "
+                "(see module docstring), just spelled through a loop "
+                "variable instead of the bare name. Pull worker out of the "
+                "tuple and use tests.conftest.patch_worker_everywhere("
+                "monkeypatch, name, value) for it separately.",
+            ))
+            break
     return violations
 
 
@@ -204,14 +249,20 @@ def _is_bare_worker_attr_string(node: ast.expr) -> bool:
     )
 
 
-def _violations_in_file(path: Path) -> list[str]:
-    source = path.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(path))
-
-    exempt_start, exempt_end = (-1, -1)
-    if path == CONFTEST_PATH:
-        exempt_start, exempt_end = _helper_exempt_span(tree)
-
+def _violations_in_tree(
+    tree: ast.Module,
+    location: str,
+    exempt_start: int = -1,
+    exempt_end: int = -1,
+) -> list[str]:
+    """Core AST scan, shared by the top-level file scan and the embedded
+    subprocess-source scan (``_embedded_source_trees`` below). ``location``
+    is used verbatim as the ``path:lineno`` prefix in reported violations --
+    for the real file it is just the file path; for a tree parsed out of a
+    string literal it also names the outer line the string starts on, since
+    the embedded tree's own line numbers restart at 1 and would otherwise
+    point at the wrong place in the real file.
+    """
     violations: list[str] = []
     for node in ast.walk(tree):
         lineno = getattr(node, "lineno", None)
@@ -234,7 +285,7 @@ def _violations_in_file(path: Path) -> list[str]:
                 target = node.args[0]
                 if _is_bare_worker_name(target):
                     violations.append(
-                        f"{path}:{node.lineno}: bare worker-module attribute "
+                        f"{location}:{node.lineno}: bare worker-module attribute "
                         "patch (monkeypatch.setattr(worker, ...) / "
                         "patch.object(worker, ...)) only reaches app.worker's "
                         "own re-export -- app.media_exec is a real package now "
@@ -253,7 +304,7 @@ def _violations_in_file(path: Path) -> list[str]:
                 target = node.args[0]
                 if _is_bare_worker_attr_string(target):
                     violations.append(
-                        f"{path}:{node.lineno}: string-form patch on "
+                        f"{location}:{node.lineno}: string-form patch on "
                         f"{ast.literal_eval(target)!r} only reaches "
                         "app.worker's own re-export, not the app.media_exec "
                         "submodule that actually binds the name -- same "
@@ -270,7 +321,7 @@ def _violations_in_file(path: Path) -> list[str]:
                     and assign_target.value.id == "worker"
                 ):
                     violations.append(
-                        f"{path}:{node.lineno}: direct assignment "
+                        f"{location}:{node.lineno}: direct assignment "
                         f"worker.{assign_target.attr} = ... only rebinds the "
                         "app.worker re-export attribute, not the "
                         "app.media_exec submodule-owned copy of the name -- "
@@ -280,11 +331,77 @@ def _violations_in_file(path: Path) -> list[str]:
                     )
 
     for loop_violation_line, loop_violation in _for_loop_worker_setattr_violations(
-        tree, path
+        tree, location
     ):
         if exempt_start <= loop_violation_line <= exempt_end:
             continue
         violations.append(loop_violation)
+
+    return violations
+
+
+def _embedded_source_trees(tree: ast.Module) -> list[tuple[int, ast.Module]]:
+    """Find string literals in ``tree`` that are themselves substantial,
+    parseable Python source -- the
+    ``subprocess.run([sys.executable, "-c", textwrap.dedent(source)], ...)``
+    pattern ``tests/test_process_restart_recovery.py`` uses to exercise
+    process-restart recovery in a genuinely fresh interpreter (a real crash
+    can only be simulated by actually exiting a process, so that test can't
+    use the monkeypatch fixture or run in-process like every other test
+    here). Code inside a string literal is invisible to ``ast.parse`` on the
+    outer file -- it is just an ``ast.Constant`` string node -- so a
+    hardcoded-module-list monkeypatch trap written *inside* one of these
+    strings used to be a blind spot no check above could see (found
+    2026-08-30). Any string constant that parses as 3+ top-level statements
+    (filters out short strings, e.g. SQL or prompt fixtures, that
+    coincidentally parse as a single expression) is treated as embedded
+    source and returned for scanning with the exact same checks as real
+    files. One level deep only -- see module docstring.
+    """
+    found: list[tuple[int, ast.Module]] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            continue
+        try:
+            # This is a speculative probe -- most string constants in the
+            # suite are not Python source (docstrings, SQL, regexes, prompt
+            # fixtures) and are expected to fail here. The tokenizer can
+            # still emit a real SyntaxWarning (e.g. "invalid escape
+            # sequence") as a side effect *before* it gives up and raises
+            # SyntaxError -- found 2026-08-30 via a regex literal elsewhere
+            # in tests/ containing ``\[``/``\{``. That warning is genuine
+            # (the regex file's own raw string is fine either way) but
+            # attributing it to whatever test happens to call this function
+            # is misleading noise, not a real finding, so it's suppressed
+            # rather than left to leak into the suite's warnings summary.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                inner = ast.parse(textwrap.dedent(node.value))
+        except SyntaxError:
+            continue
+        if len(inner.body) < 3:
+            continue
+        found.append((node.lineno, inner))
+    return found
+
+
+def _violations_in_file(path: Path) -> list[str]:
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+
+    exempt_start, exempt_end = (-1, -1)
+    if path == CONFTEST_PATH:
+        exempt_start, exempt_end = _helper_exempt_span(tree)
+
+    violations = _violations_in_tree(tree, str(path), exempt_start, exempt_end)
+
+    for outer_lineno, inner_tree in _embedded_source_trees(tree):
+        violations.extend(
+            _violations_in_tree(
+                inner_tree,
+                f"{path} (embedded source at line {outer_lineno})",
+            )
+        )
 
     return violations
 

@@ -221,8 +221,6 @@ def test_waiting_provider_restart_polls_existing_task_with_new_step(tmp_path) ->
         from app import db, worker
         from app.orchestration.media_runs import mark_media_job_state
         import app.media_pipeline.concurrency as concurrency
-        import app.media_exec.enqueue as media_enqueue
-        import app.media_exec.run_job as media_run_job
 
         db.DB_PATH = Path(sys.argv[1])
         db._local.conn = None
@@ -275,17 +273,34 @@ def test_waiting_provider_restart_polls_existing_task_with_new_step(tmp_path) ->
             async def __aexit__(self, *_args):
                 return False
 
-        # This is a bare subprocess script (fresh interpreter, no pytest
-        # monkeypatch fixture available), so there is no
-        # patch_worker_everywhere() to call -- but the same package-split
-        # reasoning applies: app.media_exec is a real package now, and
-        # app.media_exec.run_job (which defines _run_job/_assert_review_
-        # dependency_fence_async/_provider_wait_policy) and app.media_exec.
-        # enqueue (which defines _load_shot_model) each hold their own bound
-        # copy of these names, independent from app.worker's re-export
-        # attribute. Setting only worker.X here would leave _run_job calling
-        # the real (unstubbed) functions. ensure_source_excerpt_in_prompt is
-        # imported into run_job.py too, same story.
+        # This is a bare subprocess script (fresh interpreter, no pytest test
+        # session), so the monkeypatch fixture is not injected -- but
+        # pytest.MonkeyPatch is the same class the fixture hands out,
+        # constructible directly (public API since pytest 6.2). That lets
+        # this call the exact tests.conftest.patch_worker_everywhere() every
+        # other test in the suite uses instead of hand-listing which
+        # app.media_exec submodules to patch. A hand-rolled list (this test
+        # used to patch only "worker and app.media_exec.run_job", plus
+        # "app.media_exec.enqueue" for _load_shot_model) silently stops
+        # covering a name the moment its call site moves to a different
+        # app.media_exec submodule -- app.media_exec is a real package, each
+        # submodule binds its own copy of anything it imports with `from .x
+        # import y`, and there is no error when a stale target list misses
+        # one: the real, unstubbed function just runs against the fake
+        # provider client instead of the test's stub (verified 2026-08-30 by
+        # relocating _provider_wait_policy's call site into a scratch
+        # submodule: the old hand-rolled list left it unpatched and the real
+        # policy raised a provider timeout error the test doesn't expect;
+        # patch_worker_everywhere still found and patched it because it
+        # walks every app.media_exec submodule already in sys.modules rather
+        # than a fixed list -- see its docstring in tests/conftest.py).
+        # Importing `worker` above already imports every app.media_exec
+        # submodule transitively (app/media_exec/__init__.py re-exports from
+        # all of them and app/worker.py imports from that package __init__),
+        # so they are all already in sys.modules by the time this runs.
+        import pytest
+        from tests.conftest import patch_worker_everywhere
+
         no_fence_provider_wait_policy = lambda *_args, **_kwargs: {
             "meta_changed": False,
             "stage_progress": None,
@@ -296,12 +311,11 @@ def test_waiting_provider_restart_polls_existing_task_with_new_step(tmp_path) ->
         }
         no_source_excerpt = lambda prompt, _shot: prompt
         no_shot_model = lambda _shot: object()
-        for target in (worker, media_run_job):
-            target._assert_review_dependency_fence_async = no_fence
-            target.ensure_source_excerpt_in_prompt = no_source_excerpt
-            target._provider_wait_policy = no_fence_provider_wait_policy
-        for target in (worker, media_enqueue, media_run_job):
-            target._load_shot_model = no_shot_model
+        _mp = pytest.MonkeyPatch()
+        patch_worker_everywhere(_mp, "_assert_review_dependency_fence_async", no_fence)
+        patch_worker_everywhere(_mp, "ensure_source_excerpt_in_prompt", no_source_excerpt)
+        patch_worker_everywhere(_mp, "_provider_wait_policy", no_fence_provider_wait_policy)
+        patch_worker_everywhere(_mp, "_load_shot_model", no_shot_model)
         worker.asyncio.sleep = no_sleep
         worker.hiagent.create_video_task = create_task
         worker.hiagent.poll_video_task = poll_task
