@@ -1741,6 +1741,17 @@ MIGRATIONS = (
        )""",
     "CREATE INDEX IF NOT EXISTS idx_quota_ledger_user_period "
     "ON quota_ledger(user_id, resource, period_index)",
+    # 账号软删除 + 30 天保留（见 app.domain.account_deletion）：NULL=正常账号；
+    # 非空=已软删除的时间戳，判据风格与 projects.deleted_at 一致（挂时间戳，不
+    # 挂内存计时器）。到期由 app.recovery.account_recycle_bin_sweep_loop 彻底
+    # 清理（含级联清空仍归属该账号的项目）。
+    "ALTER TABLE users ADD COLUMN deleted_at REAL",
+    "CREATE INDEX IF NOT EXISTS idx_users_deleted_at ON users(deleted_at)",
+    # 单次软删除事件的保留期（秒）：NULL=沿用默认 24 小时（普通项目回收站，见
+    # app.domain.projects.PROJECT_RECYCLE_BIN_RETENTION_S）；账号级联软删除写
+    # 30 天（app.domain.projects.ACCOUNT_DELETE_RETENTION_S），与账号自身的
+    # 保留期绑定一致，见 sweep_expired_deleted_projects()。
+    "ALTER TABLE projects ADD COLUMN recycle_bin_retention_s INTEGER",
 )
 
 

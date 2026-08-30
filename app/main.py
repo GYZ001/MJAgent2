@@ -96,6 +96,12 @@ async def lifespan(_: FastAPI):
         task_registry.spawn(
             "system", "project_recycle_bin_sweep", project_recycle_bin_sweep_loop(),
         )
+        # 软删除账号（管理员删账号）的回收站 30 天自动彻底清理；同一份恢复
+        # 协调者独占逻辑，理由与上面的 project_recycle_bin_sweep 一致。
+        from app.recovery import account_recycle_bin_sweep_loop
+        task_registry.spawn(
+            "system", "account_recycle_bin_sweep", account_recycle_bin_sweep_loop(),
+        )
     else:
         record_passive_instance()
     try:

@@ -146,6 +146,39 @@ def me(_: str = Depends(require_local_session)):
     return _profile_payload(principal)
 
 
+@router.delete("/me")
+async def delete_my_account(confirm: bool = False, token: str = Depends(require_local_session)):
+    """自删账号：确认后立即级联删除名下全部项目（数据库行 + 磁盘产物）与账号
+    本身，不可恢复。
+
+    两步确认协议，不经 Command Bus（见 ``app.domain.account_deletion`` 模块
+    docstring 说明为什么这里直接调领域函数而不走 ``dispatch()``）：不带
+    ``?confirm=true`` 的调用只返回将被删除的项目数，不执行任何破坏性操作；
+    带 ``confirm=true`` 才真正执行——这是本操作唯一的"确认"入口，删除的是
+    用户自己名下的全部作品，且无人可代为恢复。
+    """
+    principal = get_current_principal()
+    if principal is None:  # pragma: no cover - require_local_session 失败会先 401
+        raise HTTPException(401, "缺少或无效的本机会话凭证")
+    if not confirm:
+        conn = get_conn()
+        project_count = conn.execute(
+            "SELECT COUNT(*) c FROM projects WHERE owner_user_id=?", (principal.user_id,)
+        ).fetchone()["c"]
+        raise HTTPException(422, {
+            "code": "confirmation_required",
+            "message": (
+                f"此操作将立即彻底删除你的账号与其下 {project_count} 个项目的全部数据"
+                "（数据库与磁盘产物），不可恢复。请带 confirm=true 重试。"
+            ),
+            "project_count": project_count,
+        })
+    from app.domain.account_deletion import self_delete_account_core
+
+    outcome = await self_delete_account_core()
+    return {"ok": True, **outcome}
+
+
 @router.post("/change-password")
 def change_password(body: dict, request: Request, token: str = Depends(require_local_session)):
     principal = get_current_principal()

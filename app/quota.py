@@ -1,7 +1,7 @@
-"""三档会员配额引擎：项目数 / 每模块并发 / 30 天 token 额度 / 30 天视频时长额度
-/ 30 天定妆照与场景图（图像）额度。
+"""五档会员配额引擎：项目数 / 每模块并发 / 30 天 token 额度 / 30 天视频时长额度
+/ 30 天定妆照与场景图（图像）额度，外加不随周期重置的「视频加量包」。
 
-五类配额语义互不混同，各自独立判据（CLAUDE.md「Gates and Criteria」）：
+五类订阅配额语义互不混同，各自独立判据（CLAUDE.md「Gates and Criteria」）：
 - ``projects``：账号名下未软删除项目数上限，判据挂在 ``projects`` 表的实时计数
   （回收站已软删除的不计入）。
 - ``concurrency``：同一账号同一模块同时在跑的任务数上限，判据挂在
@@ -16,15 +16,29 @@
   （``charge_image_cost`` 一次决定两笔分账，同一调用方事务提交或回滚，不会
   出现"扣了图像额度没扣 token"的半途态）。
 
-三档图像额度数值来自实测：建一个项目的定妆照/场景图成本 2.22M–3.97M（三个只
-做筹备的真实项目）。free 300 万约等于每月能建 1 个项目——与 free 的项目数上限
-1 自洽；pro 900 万约 2-3 个（上限 3）；max 3000 万约 8-10 个（上限 10）。三档
-的图像额度与各自被允许持有的项目数是对齐的。
+五档图像额度数值来自实测：建一个项目的定妆照/场景图成本 2.22M–3.97M（三个只
+做筹备的真实项目），且与各档项目数上限对齐（image ≈ projects × 300 万）。
+free 档是有意的不对称设计：只砍视频（5 分钟→1 分钟），不砍图像——300 万图像
+仍够完整建 1 个项目，免费用户能看到世界书/定妆照/场景图和前几个镜头的成片，
+只是视频产量被卡住，体验上"该看的都看到、就是不够产"。
+
+视频加量包（``video_addon_seconds`` 资源）是订阅之外的第六类配额，与前五类
+的关键差异：**不随 30 天周期重置**——买了就是买了，直到被消耗完。``TIER_TABLE``
+只承载会随周期重置的订阅上限，加量包故意不进这张表，而是单独用 ``quota_ledger``
+的 ``reason='grant'``（入账）/``reason='charge'``（消耗）/``reason='refund'``
+（退还）三态记账，``addon_video_seconds_balance()`` 用 grant-charge+refund 现
+算余额，不缓存总数——每一笔购买都是独立可溯源的 ledger 行（谁、何时、多少），
+不是"加一个总数字"。``reserve_video_seconds`` 消耗顺序固定为先订阅、后加量包：
+订阅额度本来就会随周期作废，先花掉它才不浪费；加量包不会过期，晚花不吃亏。
+定价 ``ADDON_PACKAGE_PRICE_CNY``（¥199/10 分钟，19.9 元/分钟）故意高于所有订阅
+档的分钟单价（19.8→14.0 元/分钟递减），让"买包"永远不如"升档"划算——这是产品
+决策，不是本模块要校验的东西，本模块只管额度记账与消耗顺序。
 
 幂等：``quota_ledger`` 对 ``(resource, attempt_key, reason)`` 加 UNIQUE 约束——
-同一次尝试（attempt）的同一个动作（charge/refund）只落一行；重放交给 SQLite
-的 UNIQUE 冲突短路（``_record_ledger`` 捕获 ``IntegrityError``），不依赖调用方
-自己去重。
+同一次尝试（attempt）的同一个动作（charge/refund/grant）只落一行；重放交给
+SQLite 的 UNIQUE 冲突短路（``_record_ledger`` 捕获 ``IntegrityError``），不依赖
+调用方自己去重。加量包入账复用同一条机制：``attempt_key`` 是这笔购买的稳定标
+识（未来接真实支付时应传订单号），重复入账只生效一次。
 
 所有函数都要求调用方显式传入 ``conn``（同一事务）与 ``user_id``——没有默认值、
 没有隐式从 ContextVar 读取身份（CLAUDE.md「Ownership Must Be Explicit」）。
@@ -37,6 +51,19 @@ from dataclasses import dataclass
 from fastapi import HTTPException
 
 from app.db import now
+from app.quota_addon import (
+    ADDON_PACKAGE_PRICE_CNY,
+    ADDON_PACKAGE_SECONDS,
+    ADDON_RESOURCE,
+    addon_video_seconds_balance,
+)
+from app.quota_scope import (
+    ACTIVE_JOB_STATUSES as ACTIVE_JOB_STATUSES,
+    count_active_video_jobs as count_active_video_jobs,
+    count_active_workflow_runs as count_active_workflow_runs,
+    owner_of_episode as owner_of_episode,
+    owner_of_project as owner_of_project,
+)
 
 PERIOD_SECONDS = 30 * 86400.0
 SECONDS_PER_SHOT = 15.0
@@ -57,8 +84,10 @@ class TierLimits:
 
 
 TIER_TABLE: dict[str, TierLimits] = {
-    "free": TierLimits("free", 1, 1, 300_000.0, 5 * 60.0, 3_000_000.0),
-    "pro": TierLimits("pro", 3, 3, 900_000.0, 15 * 60.0, 9_000_000.0),
+    "free": TierLimits("free", 1, 1, 300_000.0, 1 * 60.0, 3_000_000.0),
+    "starter": TierLimits("starter", 2, 2, 600_000.0, 5 * 60.0, 6_000_000.0),
+    "standard": TierLimits("standard", 3, 3, 900_000.0, 15 * 60.0, 9_000_000.0),
+    "pro": TierLimits("pro", 6, 6, 1_800_000.0, 30 * 60.0, 18_000_000.0),
     "max": TierLimits("max", 10, 10, 3_000_000.0, 50 * 60.0, 30_000_000.0),
 }
 VALID_TIERS = frozenset(TIER_TABLE)
@@ -66,14 +95,26 @@ _UNLIMITED = TierLimits("unlimited", None, None, None, None, None)
 
 _UPGRADE_PATH = {
     "free": (
-        "升级到 Pro 档位（3 个项目 / 每模块 3 并发 / 90 万 token / 15 分钟视频 "
+        "升级到入门档位（2 个项目 / 每模块 2 并发 / 60 万 token / 5 分钟视频 "
+        "/ 600 万定妆照与场景图额度）"
+    ),
+    "starter": (
+        "升级到标准档位（3 个项目 / 每模块 3 并发 / 90 万 token / 15 分钟视频 "
         "/ 900 万定妆照与场景图额度）"
     ),
+    "standard": (
+        "升级到专业档位（6 个项目 / 每模块 6 并发 / 180 万 token / 30 分钟视频 "
+        "/ 1800 万定妆照与场景图额度）"
+    ),
     "pro": (
-        "升级到 Max 档位（10 个项目 / 每模块 10 并发 / 300 万 token / 50 分钟视频 "
+        "升级到旗舰档位（10 个项目 / 每模块 10 并发 / 300 万 token / 50 分钟视频 "
         "/ 3000 万定妆照与场景图额度）"
     ),
-    "max": "已是最高付费档位；如需更高配额请联系管理员开通不限量账号",
+    "max": (
+        "已是最高付费档位；如需更多视频时长可购买加量包"
+        f"（¥{ADDON_PACKAGE_PRICE_CNY:.0f}/{int(ADDON_PACKAGE_SECONDS // 60)} 分钟，"
+        "不随 30 天周期重置），或联系管理员开通不限量账号"
+    ),
 }
 
 
@@ -158,30 +199,9 @@ def period_anchor(conn: sqlite3.Connection, user_id: str) -> float:
     return float(started) if started else float(row["created_at"] or now())
 
 
-# ---------------------------------------------------------------------------
-# 归属解析（供并发/退还的调用点复用，避免各处重复写 JOIN）
-# ---------------------------------------------------------------------------
-
-def owner_of_project(conn: sqlite3.Connection, project_id: str | None) -> str | None:
-    if not project_id:
-        return None
-    row = conn.execute(
-        "SELECT owner_user_id FROM projects WHERE id=?", (project_id,)
-    ).fetchone()
-    if not row or not row["owner_user_id"]:
-        return None
-    return str(row["owner_user_id"])
-
-
-def owner_of_episode(conn: sqlite3.Connection, episode_id: str | None) -> str | None:
-    if not episode_id:
-        return None
-    row = conn.execute(
-        "SELECT project_id FROM episodes WHERE id=?", (episode_id,)
-    ).fetchone()
-    return owner_of_project(conn, row["project_id"]) if row else None
-
-
+# 归属解析（owner_of_project/owner_of_episode）实现见 app/quota_scope.py，已
+# import 进本模块命名空间，外部调用方一律仍走 quota.owner_of_project 等既有
+# 路径，不用改调用点。
 # ---------------------------------------------------------------------------
 # Ledger 原语
 # ---------------------------------------------------------------------------
@@ -255,7 +275,11 @@ def check_project_slot(conn: sqlite3.Connection, user_id: str, *, active_count: 
 def check_module_concurrency(
     conn: sqlite3.Connection, user_id: str, module: str, *, active_count: int
 ) -> None:
-    """``active_count`` 是调用方查到的、不含本次即将新建的这一个的当前活跃数。"""
+    """判断该账号在此模块是否还有并发余量。纯判断：不取数、不占位。
+
+    ⚠️ 契约：``active_count`` 的计数与占位（新建那行 ``workflow_runs``）必须在
+    **同一个 ``BEGIN IMMEDIATE`` 事务**里——本函数拿不到调用方的事务边界。占位先于
+    判断，故 ``active_count`` = 除刚插入那行外还在跑的数量。照抄 ``_reserve_*``。"""
     limits = effective_limits(conn, user_id)
     if limits.concurrency is None:
         return
@@ -270,51 +294,8 @@ def check_module_concurrency(
         )
 
 
-def count_active_workflow_runs(
-    conn: sqlite3.Connection, owner_user_id: str, workflow_type: str,
-    *, exclude_run_id: str | None = None,
-) -> int:
-    """统计某账号名下、某 workflow_type 当前处于 CREATED/RUNNING 的 run 数。
-    scope_type='episode' 是 screenplay/storyboard 两类 run 的既有约定，归属
-    通过 episode -> project -> owner_user_id 解析。"""
-    # SQL 整条内联在 execute 调用点上（可选条件用 ``? IS NULL OR`` 并进常量，
-    # 不再拼变量）：tests/test_project_ownership_query_guard.py 的静态扫描只能
-    # 分析调用点上的字面量，SQL 一旦先存进变量就成了它的盲区——而这条查询正是
-    # 靠 ``p.owner_user_id=?`` 做账号隔离的，必须留在它看得见的地方。
-    return int(
-        conn.execute(
-            "SELECT COUNT(*) AS c FROM workflow_runs wr "
-            "JOIN episodes e ON e.id = wr.scope_id "
-            "JOIN projects p ON p.id = e.project_id "
-            "WHERE wr.workflow_type=? AND wr.scope_type='episode' "
-            "AND p.owner_user_id=? AND wr.status IN ('CREATED','RUNNING') "
-            "AND (? IS NULL OR wr.id != ?)",
-            (workflow_type, owner_user_id, exclude_run_id, exclude_run_id),
-        ).fetchone()["c"]
-        or 0
-    )
-
-
-#: jobs 表里代表"这个视频任务还在推进、没有走到头"的状态集合，与既有
-#: ``reconcile_episode_generation_status`` 用的口径完全一致（不新造一套判断）。
-ACTIVE_JOB_STATUSES = ("queued", "running", "waiting_provider", "waiting_retry")
-
-
-def count_active_video_jobs(
-    conn: sqlite3.Connection, owner_user_id: str, *, exclude_job_id: str | None = None
-) -> int:
-    # 同上：整条内联在调用点，可选条件并进常量。f-string 里只插入由本模块常量
-    # ACTIVE_JOB_STATUSES 派生的占位符，不插入任何外部输入。
-    placeholders = ",".join("?" for _ in ACTIVE_JOB_STATUSES)
-    return int(
-        conn.execute(
-            f"SELECT COUNT(*) AS c FROM jobs WHERE kind='video' AND project_id IN "
-            f"(SELECT id FROM projects WHERE owner_user_id=?) "
-            f"AND status IN ({placeholders}) AND (? IS NULL OR id != ?)",
-            (owner_user_id, *ACTIVE_JOB_STATUSES, exclude_job_id, exclude_job_id),
-        ).fetchone()["c"]
-        or 0
-    )
+# count_active_workflow_runs / count_active_video_jobs / ACTIVE_JOB_STATUSES
+# 实现见 app/quota_scope.py，已 import 进本模块命名空间，见上。
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +461,8 @@ def charge_for_finished_provider_call(
 
 
 # ---------------------------------------------------------------------------
-# 视频时长额度（按镜固定 15 秒）
+# 视频时长额度（按镜固定 15 秒；订阅额度用尽后自动溢出到加量包）
+# 加量包余额计算/入账实现见 app/quota_addon.py，已 import 进本模块命名空间。
 # ---------------------------------------------------------------------------
 
 def reserve_video_seconds(
@@ -488,49 +470,95 @@ def reserve_video_seconds(
 ) -> dict:
     """在视频任务（这一镜的这一次尝试）创建的同一事务里调用；``attempt_key``
     用 jobs.id（一个 job_id 即一次完整的"占位 -> 提交 -> 轮询 -> 完成"生命周
-    期，重试释放槽位并开新 job_id，天然对应"这一次尝试"）。"""
-    if _charge_exists(conn, "video_seconds", attempt_key) is not None:
+    期，重试释放槽位并开新 job_id，天然对应"这一次尝试"）。
+
+    消耗顺序：先扣本周期订阅额度，订阅额度不够再扣加量包余额——订阅额度会随
+    30 天周期作废，加量包不会过期，先花订阅额度不浪费。两笔（或一笔）charge
+    在同一次调用里一起记账，对上层是原子的一次"扣费"。
+    """
+    if (
+        _charge_exists(conn, "video_seconds", attempt_key) is not None
+        or _charge_exists(conn, ADDON_RESOURCE, attempt_key) is not None
+    ):
         return {"charged_s": 0.0, "idempotent_replay": True}
     limits = effective_limits(conn, user_id)
     anchor = period_anchor(conn, user_id)
     pidx = period_index(anchor)
+    from_sub = float(seconds)
+    from_addon = 0.0
     if limits.video_seconds is not None:
         used = usage_for(conn, user_id, "video_seconds", pidx)
-        if used + seconds > limits.video_seconds:
-            raise QuotaExceeded(
-                gate="video_seconds", tier=limits.tier, limit=limits.video_seconds,
-                used=used, remaining=max(0.0, limits.video_seconds - used),
-                reset_at=period_reset_at(anchor),
-                message=(
-                    f"30 天视频时长额度已用尽（{limits.tier} 档上限 "
-                    f"{int(limits.video_seconds)} 秒）"
-                ),
-            )
-    applied = _record_ledger(
-        conn, user_id=user_id, resource="video_seconds", pidx=pidx,
-        attempt_key=attempt_key, reason="charge", delta=float(seconds),
-    )
-    return {"charged_s": float(seconds) if applied else 0.0, "idempotent_replay": not applied}
+        sub_remaining = max(0.0, limits.video_seconds - used)
+        from_sub = min(seconds, sub_remaining)
+        overflow = seconds - from_sub
+        if overflow > 0:
+            addon_balance = addon_video_seconds_balance(conn, user_id)
+            if overflow > addon_balance:
+                raise QuotaExceeded(
+                    gate="video_seconds", tier=limits.tier, limit=limits.video_seconds,
+                    used=used, remaining=max(0.0, sub_remaining + addon_balance),
+                    reset_at=period_reset_at(anchor),
+                    message=(
+                        f"30 天视频时长额度已用尽（{limits.tier} 档上限 "
+                        f"{int(limits.video_seconds)} 秒），加量包余额 "
+                        f"{int(addon_balance)} 秒也不足以覆盖本次所需的 "
+                        f"{int(seconds)} 秒"
+                    ),
+                )
+            from_addon = overflow
+    charged = 0.0
+    if from_sub > 0:
+        applied_sub = _record_ledger(
+            conn, user_id=user_id, resource="video_seconds", pidx=pidx,
+            attempt_key=attempt_key, reason="charge", delta=from_sub,
+        )
+        if applied_sub:
+            charged += from_sub
+    if from_addon > 0:
+        applied_addon = _record_ledger(
+            conn, user_id=user_id, resource=ADDON_RESOURCE, pidx=pidx,
+            attempt_key=attempt_key, reason="charge", delta=from_addon,
+        )
+        if applied_addon:
+            charged += from_addon
+    return {"charged_s": charged, "idempotent_replay": False}
 
 
 def refund_video_seconds(conn: sqlite3.Connection, user_id: str, *, attempt_key: str) -> dict:
     """按产物信号退还：调用方只需判断"这一次尝试有没有产出可用视频"，不问原
     因（超时/门禁拦截/畸形 JSON 等任何失败原因都走同一条路径）。幂等：没有对
-    应 charge 记录、或已经退过款，都安全返回 no-op。"""
-    charge = _charge_exists(conn, "video_seconds", attempt_key)
-    if charge is None:
+    应 charge 记录、或已经退过款，都安全返回 no-op。
+
+    一次 ``reserve_video_seconds`` 可能同时在订阅（``video_seconds``）和加量包
+    （``ADDON_RESOURCE``）两个资源上各留一笔 charge（订阅额度不够、溢出到加量
+    包的那一次尝试）；退还时两笔一起找、一起退，不会漏掉加量包那一半。
+    """
+    sub_charge = _charge_exists(conn, "video_seconds", attempt_key)
+    addon_charge = _charge_exists(conn, ADDON_RESOURCE, attempt_key)
+    if sub_charge is None and addon_charge is None:
         return {"refunded_s": 0.0, "idempotent_replay": False, "no_charge_found": True}
-    if _refund_exists(conn, "video_seconds", attempt_key):
+    if _refund_exists(conn, "video_seconds", attempt_key) or _refund_exists(
+        conn, ADDON_RESOURCE, attempt_key
+    ):
         return {"refunded_s": 0.0, "idempotent_replay": True, "no_charge_found": False}
-    amount = float(charge["delta"])
-    applied = _record_ledger(
-        conn, user_id=user_id, resource="video_seconds", pidx=int(charge["period_index"]),
-        attempt_key=attempt_key, reason="refund", delta=-amount,
-    )
-    return {
-        "refunded_s": amount if applied else 0.0, "idempotent_replay": not applied,
-        "no_charge_found": False,
-    }
+    refunded = 0.0
+    if sub_charge is not None:
+        amount = float(sub_charge["delta"])
+        if _record_ledger(
+            conn, user_id=user_id, resource="video_seconds",
+            pidx=int(sub_charge["period_index"]), attempt_key=attempt_key,
+            reason="refund", delta=-amount,
+        ):
+            refunded += amount
+    if addon_charge is not None:
+        amount = float(addon_charge["delta"])
+        if _record_ledger(
+            conn, user_id=user_id, resource=ADDON_RESOURCE,
+            pidx=int(addon_charge["period_index"]), attempt_key=attempt_key,
+            reason="refund", delta=-amount,
+        ):
+            refunded += amount
+    return {"refunded_s": refunded, "idempotent_replay": False, "no_charge_found": False}
 
 
 def reconcile_video_seconds_refunds(conn: sqlite3.Connection, episode_id: str) -> int:

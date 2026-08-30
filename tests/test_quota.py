@@ -15,9 +15,10 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app import quota
+from app import quota, quota_addon
 from app.auth.passwords import hash_password
 from app.auth.principal import Principal, set_current_principal
 from app.auth.sessions import create_session
@@ -103,10 +104,14 @@ def test_effective_limits_admin_and_unknown_user_are_unlimited():
 
 
 def test_effective_limits_match_tier_table():
+    """五档，用户拍板的数值（app/quota.py::TIER_TABLE）——逐档核对四类订阅
+    配额，不漏任何一档。"""
     conn = get_conn()
     for tier, expected in (
-        ("free", (1, 1, 300_000.0, 300.0, 3_000_000.0)),
-        ("pro", (3, 3, 900_000.0, 900.0, 9_000_000.0)),
+        ("free", (1, 1, 300_000.0, 60.0, 3_000_000.0)),
+        ("starter", (2, 2, 600_000.0, 300.0, 6_000_000.0)),
+        ("standard", (3, 3, 900_000.0, 900.0, 9_000_000.0)),
+        ("pro", (6, 6, 1_800_000.0, 1800.0, 18_000_000.0)),
         ("max", (10, 10, 3_000_000.0, 3000.0, 30_000_000.0)),
     ):
         uid = _make_user(tier)
@@ -177,10 +182,11 @@ def test_charge_image_cost_idempotent_across_pool_and_token_split():
 
 
 def test_charge_image_cost_boundary_per_tier():
-    """三档图像额度各自独立：满档后立刻溢出到 token，不会互相污染彼此的上限。"""
+    """五档图像额度各自独立：满档后立刻溢出到 token，不会互相污染彼此的上限。"""
     conn = get_conn()
     for tier, cap in (
-        ("free", 3_000_000.0), ("pro", 9_000_000.0), ("max", 30_000_000.0),
+        ("free", 3_000_000.0), ("starter", 6_000_000.0), ("standard", 9_000_000.0),
+        ("pro", 18_000_000.0), ("max", 30_000_000.0),
     ):
         uid = _make_user(tier)
         r1 = quota.charge_image_cost(conn, uid, cap, attempt_key=f"img-{tier}-full")
@@ -428,21 +434,58 @@ def test_check_project_slot_blocks_at_tier_limit_with_full_detail():
     assert detail["limit"] == 1
     assert detail["remaining"] == 0
     assert detail["reset_at"] is None
-    assert "Pro" in detail["upgrade_path"]
+    assert "入门" in detail["upgrade_path"]
     assert exc_info.value.status_code == 429
 
     # 没到上限不拦截。
     quota.check_project_slot(conn, uid, active_count=0)
 
 
-def test_check_module_concurrency_blocks_at_tier_limit():
+def test_check_project_slot_blocks_at_tier_limit_for_all_tiers():
+    """五档项目数上限各自独立：free=1/starter=2/standard=3/pro=6/max=10。"""
     conn = get_conn()
-    uid = _make_user("pro")
-    quota.check_module_concurrency(conn, uid, quota.MODULE_STORYBOARD, active_count=2)
-    with pytest.raises(quota.QuotaExceeded) as exc_info:
-        quota.check_module_concurrency(conn, uid, quota.MODULE_STORYBOARD, active_count=3)
-    assert exc_info.value.detail["gate"] == "concurrency"
-    assert exc_info.value.detail["limit"] == 3
+    for tier, limit in (
+        ("free", 1), ("starter", 2), ("standard", 3), ("pro", 6), ("max", 10),
+    ):
+        uid = _make_user(tier)
+        quota.check_project_slot(conn, uid, active_count=limit - 1)
+        with pytest.raises(quota.QuotaExceeded) as exc_info:
+            quota.check_project_slot(conn, uid, active_count=limit)
+        assert exc_info.value.detail["limit"] == limit
+
+
+def test_assert_token_capacity_blocks_at_tier_limit_for_all_tiers():
+    """五档 token 上限各自独立：30/60/90/180/300 万。"""
+    conn = get_conn()
+    for tier, limit in (
+        ("free", 300_000.0), ("starter", 600_000.0), ("standard", 900_000.0),
+        ("pro", 1_800_000.0), ("max", 3_000_000.0),
+    ):
+        uid = _make_user(tier)
+        quota.charge_tokens(conn, uid, limit, attempt_key=f"call:cap:{tier}")
+        conn.commit()
+        with pytest.raises(quota.QuotaExceeded) as exc_info:
+            quota.assert_token_capacity(conn, uid)
+        assert exc_info.value.detail["limit"] == limit
+        assert exc_info.value.detail["remaining"] == 0.0
+
+
+def test_check_module_concurrency_blocks_at_tier_limit():
+    """五档并发上限各自独立：free=1/starter=2/standard=3/pro=6/max=10。"""
+    conn = get_conn()
+    for tier, limit in (
+        ("free", 1), ("starter", 2), ("standard", 3), ("pro", 6), ("max", 10),
+    ):
+        uid = _make_user(tier)
+        quota.check_module_concurrency(
+            conn, uid, quota.MODULE_STORYBOARD, active_count=limit - 1
+        )
+        with pytest.raises(quota.QuotaExceeded) as exc_info:
+            quota.check_module_concurrency(
+                conn, uid, quota.MODULE_STORYBOARD, active_count=limit
+            )
+        assert exc_info.value.detail["gate"] == "concurrency"
+        assert exc_info.value.detail["limit"] == limit
 
 
 def test_assert_token_capacity_blocks_once_used_reaches_limit():
@@ -460,19 +503,27 @@ def test_assert_token_capacity_blocks_once_used_reaches_limit():
 
 
 def test_reserve_video_seconds_blocks_when_it_would_exceed_limit():
+    """五档视频时长上限各自独立：free=60s(4 镜)/starter=300s(20 镜)/
+    standard=900s(60 镜)/pro=1800s(120 镜)/max=3000s(200 镜)。没有加量包时，
+    卡到上限就该被拦（remaining 里加量包余额贡献为 0）。"""
     conn = get_conn()
-    uid = _make_user("free")  # 300 秒上限 = 20 镜
-    for i in range(20):
-        result = quota.reserve_video_seconds(conn, uid, attempt_key=f"job:{i}")
-        assert result["charged_s"] == 15.0
-    conn.commit()
-    with pytest.raises(quota.QuotaExceeded) as exc_info:
-        quota.reserve_video_seconds(conn, uid, attempt_key="job:21")
-    detail = exc_info.value.detail
-    assert detail["gate"] == "video_seconds"
-    assert detail["limit"] == 300.0
-    assert detail["used"] == 300.0
-    assert detail["remaining"] == 0.0
+    for tier, limit_s in (
+        ("free", 60.0), ("starter", 300.0), ("standard", 900.0),
+        ("pro", 1800.0), ("max", 3000.0),
+    ):
+        uid = _make_user(tier)
+        n_shots = int(limit_s // 15.0)
+        for i in range(n_shots):
+            result = quota.reserve_video_seconds(conn, uid, attempt_key=f"job:{tier}:{i}")
+            assert result["charged_s"] == 15.0
+        conn.commit()
+        with pytest.raises(quota.QuotaExceeded) as exc_info:
+            quota.reserve_video_seconds(conn, uid, attempt_key=f"job:{tier}:overflow")
+        detail = exc_info.value.detail
+        assert detail["gate"] == "video_seconds"
+        assert detail["limit"] == limit_s
+        assert detail["used"] == limit_s
+        assert detail["remaining"] == 0.0
 
 
 def test_admin_user_is_never_blocked_by_any_gate():
@@ -565,4 +616,205 @@ def test_video_preflight_job_creation_charges_15_seconds_and_respects_concurrenc
         "SELECT COUNT(*) c FROM jobs WHERE shot_id='shot-b'"
     ).fetchone()["c"]
     assert leftover == 0
-    assert quota.usage_for(conn, uid, "video_seconds", pidx) == 15.0
+
+
+# ---------------------------------------------------------------------------
+# 加量包：不随周期重置、消耗顺序（先订阅后加量包）、幂等
+# ---------------------------------------------------------------------------
+
+def test_grant_video_addon_seconds_increases_balance_and_is_idempotent():
+    conn = get_conn()
+    uid = _make_user("free")
+    assert quota.addon_video_seconds_balance(conn, uid) == 0.0
+
+    r1 = quota_addon.grant_video_addon_seconds(conn, uid, packages=2, attempt_key="order:1")
+    conn.commit()
+    assert r1["granted_s"] == 1200.0  # 2 包 * 600 秒/包
+    assert r1["idempotent_replay"] is False
+    assert quota.addon_video_seconds_balance(conn, uid) == 1200.0
+
+    # 同一笔购买（同一个 attempt_key）重复入账只生效一次。
+    r2 = quota_addon.grant_video_addon_seconds(conn, uid, packages=2, attempt_key="order:1")
+    conn.commit()
+    assert r2["idempotent_replay"] is True
+    assert quota.addon_video_seconds_balance(conn, uid) == 1200.0  # 没有翻倍
+
+
+def test_grant_video_addon_seconds_rejects_non_positive_packages():
+    conn = get_conn()
+    uid = _make_user("free")
+    with pytest.raises(HTTPException) as exc_info:
+        quota_addon.grant_video_addon_seconds(conn, uid, packages=0, attempt_key="order:bad")
+    assert exc_info.value.status_code == 422
+
+
+def test_addon_balance_survives_period_rollover_unlike_subscription_usage():
+    """加量包买了就是买了：周期滚动后订阅视频用量清零，加量包余额纹丝不动。"""
+    conn = get_conn()
+    uid = _make_user("free")
+    quota_addon.grant_video_addon_seconds(conn, uid, packages=1, attempt_key="order:period")
+    conn.commit()
+    balance_before = quota.addon_video_seconds_balance(conn, uid)
+    assert balance_before == 600.0
+
+    old_anchor = quota.period_anchor(conn, uid)
+    conn.execute(
+        "UPDATE users SET quota_period_started_at=? WHERE id=?",
+        (old_anchor - 31 * 86400.0, uid),
+    )
+    conn.commit()
+
+    assert quota.period_index(quota.period_anchor(conn, uid)) != quota.period_index(old_anchor)
+    assert quota.addon_video_seconds_balance(conn, uid) == balance_before
+
+
+def test_reserve_video_seconds_consumes_subscription_before_addon():
+    """消耗顺序：订阅额度没用尽之前，一分钱加量包都不动——订阅额度会随周期作
+    废，先花订阅、后花不会过期的加量包才不浪费。"""
+    conn = get_conn()
+    uid = _make_user("free")  # 60 秒上限 = 4 镜
+    quota_addon.grant_video_addon_seconds(conn, uid, packages=1, attempt_key="order:seq")
+    conn.commit()
+    addon_before = quota.addon_video_seconds_balance(conn, uid)
+
+    for i in range(4):
+        result = quota.reserve_video_seconds(conn, uid, attempt_key=f"job:seq:{i}")
+        assert result["charged_s"] == 15.0
+    conn.commit()
+
+    pidx = quota.period_index(quota.period_anchor(conn, uid))
+    assert quota.usage_for(conn, uid, "video_seconds", pidx) == 60.0
+    assert quota.addon_video_seconds_balance(conn, uid) == addon_before  # 加量包分毫未动
+
+
+def test_reserve_video_seconds_spills_into_addon_once_subscription_exhausted():
+    """订阅用尽后，原本会被拦的一镜靠加量包放行；订阅用量不再增长，加量包按
+    实际溢出部分扣减——买加量包真的能让人多产。"""
+    conn = get_conn()
+    uid = _make_user("free")  # 60 秒上限 = 4 镜
+    for i in range(4):
+        quota.reserve_video_seconds(conn, uid, attempt_key=f"job:spill:{i}")
+    conn.commit()
+
+    # 没有加量包时，第 5 镜应该被拦（且不留任何半途账）。
+    with pytest.raises(quota.QuotaExceeded):
+        quota.reserve_video_seconds(conn, uid, attempt_key="job:spill:blocked-probe")
+
+    quota_addon.grant_video_addon_seconds(conn, uid, packages=1, attempt_key="order:spill")
+    conn.commit()
+
+    result = quota.reserve_video_seconds(conn, uid, attempt_key="job:spill:4")
+    conn.commit()
+    assert result["charged_s"] == 15.0  # 买包之后同一镜放行了
+
+    pidx = quota.period_index(quota.period_anchor(conn, uid))
+    assert quota.usage_for(conn, uid, "video_seconds", pidx) == 60.0  # 订阅用量没再涨
+    assert quota.addon_video_seconds_balance(conn, uid) == 600.0 - 15.0  # 加量包扣了这 15 秒
+
+
+def test_reserve_video_seconds_blocks_when_addon_balance_also_insufficient():
+    """加量包余额也不够覆盖溢出部分时，整笔仍然被拦，且订阅/加量包都不留半笔
+    账（拒绝发生在任何 ledger 写入之前）。"""
+    conn = get_conn()
+    uid = _make_user("free")  # 60 秒订阅上限
+    for i in range(4):
+        quota.reserve_video_seconds(conn, uid, attempt_key=f"job:insuf:{i}")
+    conn.commit()
+
+    quota_addon.grant_video_addon_seconds(conn, uid, packages=1, attempt_key="order:insuf")
+    conn.commit()
+    # 先把加量包用到只剩 10 秒——不够覆盖下一镜默认的 15 秒。
+    drain = quota.reserve_video_seconds(
+        conn, uid, attempt_key="job:insuf:drain", seconds=590.0,
+    )
+    conn.commit()
+    assert drain["charged_s"] == 590.0
+    assert quota.addon_video_seconds_balance(conn, uid) == 10.0
+
+    pidx = quota.period_index(quota.period_anchor(conn, uid))
+    video_used_before = quota.usage_for(conn, uid, "video_seconds", pidx)
+
+    with pytest.raises(quota.QuotaExceeded) as exc_info:
+        quota.reserve_video_seconds(conn, uid, attempt_key="job:insuf:final")
+    detail = exc_info.value.detail
+    assert detail["gate"] == "video_seconds"
+    assert "加量包" in detail["message"]
+
+    # 拒绝时订阅、加量包都没有留下任何新账。
+    assert quota.usage_for(conn, uid, "video_seconds", pidx) == video_used_before
+    assert quota.addon_video_seconds_balance(conn, uid) == 10.0
+
+
+def test_refund_video_seconds_returns_addon_portion_when_charge_spans_both():
+    """一次预扣如果拆到了订阅+加量包两边，退还要两边一起退，不能漏掉加量包
+    那一半。"""
+    conn = get_conn()
+    uid = _make_user("free")  # 60 秒上限
+    for i in range(3):
+        quota.reserve_video_seconds(conn, uid, attempt_key=f"job:refund:{i}")
+    conn.commit()  # 用掉 45 秒，订阅还剩 15 秒
+
+    quota_addon.grant_video_addon_seconds(conn, uid, packages=1, attempt_key="order:refund")
+    conn.commit()
+
+    # 这一镜 20 秒：15 秒吃掉订阅剩余额度，5 秒溢出到加量包。
+    result = quota.reserve_video_seconds(conn, uid, attempt_key="job:refund:spill", seconds=20.0)
+    conn.commit()
+    assert result["charged_s"] == 20.0
+    pidx = quota.period_index(quota.period_anchor(conn, uid))
+    assert quota.usage_for(conn, uid, "video_seconds", pidx) == 60.0
+    assert quota.addon_video_seconds_balance(conn, uid) == 600.0 - 5.0
+
+    refund = quota.refund_video_seconds(conn, uid, attempt_key="job:refund:spill")
+    conn.commit()
+    assert refund["refunded_s"] == 20.0
+    assert quota.usage_for(conn, uid, "video_seconds", pidx) == 45.0
+    assert quota.addon_video_seconds_balance(conn, uid) == 600.0  # 加量包那 5 秒也退回来了
+
+    # 幂等：再退一次是 no-op。
+    refund2 = quota.refund_video_seconds(conn, uid, attempt_key="job:refund:spill")
+    assert refund2 == {"refunded_s": 0.0, "idempotent_replay": True, "no_charge_found": False}
+
+
+def test_http_admin_grant_video_addon_lets_a_previously_blocked_shot_through():
+    """端到端接线：走真实 HTTP 管理端点发放加量包，证明产品入口真的接上了
+    ``quota_addon.grant_video_addon_seconds``，而不是只有单元函数本身正确。
+    额外验证同一个 idempotency_key 重复调用只生效一次。"""
+    client = TestClient(app)
+    admin_id = _make_user("free", is_admin=True)
+    admin_headers = {**_HEADERS, "X-Manju-Session": create_session(admin_id)}
+
+    uid = _make_user("free")  # 60 秒上限 = 4 镜
+    conn = get_conn()
+    for i in range(4):
+        quota.reserve_video_seconds(conn, uid, attempt_key=f"job:http:{i}")
+    conn.commit()
+    with pytest.raises(quota.QuotaExceeded):
+        quota.reserve_video_seconds(conn, uid, attempt_key="job:http:probe")
+
+    resp = client.post(
+        f"/api/system/users/{uid}/video-addons",
+        headers=admin_headers,
+        json={"packages": 1, "idempotency_key": "order:http-1"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["seconds_granted"] == 600.0
+    assert body["addon_balance_s"] == 600.0
+    assert body["idempotent_replay"] is False
+
+    resp2 = client.post(
+        f"/api/system/users/{uid}/video-addons",
+        headers=admin_headers,
+        json={"packages": 1, "idempotency_key": "order:http-1"},
+    )
+    assert resp2.status_code == 200, resp2.text
+    assert resp2.json()["idempotent_replay"] is True
+    assert resp2.json()["addon_balance_s"] == 600.0  # 没有翻倍
+
+    result = quota.reserve_video_seconds(conn, uid, attempt_key="job:http:after-grant")
+    conn.commit()
+    assert result["charged_s"] == 15.0  # 加量包放行了原本会被拦的这一镜
+    pidx = quota.period_index(quota.period_anchor(conn, uid))
+    assert quota.usage_for(conn, uid, "video_seconds", pidx) == 60.0  # 订阅用量没再涨
+    assert quota.addon_video_seconds_balance(conn, uid) == 600.0 - 15.0  # 加量包扣了这 15 秒

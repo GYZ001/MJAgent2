@@ -88,3 +88,26 @@ async def run_benchmark(args: I.BenchmarkRunInput) -> CommandResult:
     if isinstance(outcome, CommandResult):
         return outcome
     return succeeded("Benchmark 已记录", data=outcome)
+
+
+async def quota_grant_video_addon(args: I.QuotaGrantVideoAddonInput) -> CommandResult:
+    """发放视频加量包。复用路由函数本体（同层 app.auth.admin_api，L5），而不是
+    绕过它直接调 app.quota_addon——路由里那几步（用户存在性、packages 取值域、
+    monitor_audit 落账）是这条命令正确性的一部分，两条入口必须共用同一份。"""
+    from app.auth import admin_api
+    from app.auth.principal import get_current_principal
+
+    body: dict = {"packages": args.packages}
+    if args.idempotency_key:
+        body["idempotency_key"] = args.idempotency_key
+    # actor 必须显式传：路由签名里它是 ``Depends(require_system_admin)``，只有走
+    # FastAPI 才会被解析：直接调用会把 Depends 对象原样当成 actor，落审计那行
+    # ``actor.user_id`` 当场 AttributeError（CLAUDE.md「所有权必须显式」）。
+    outcome = await call_guarded(
+        admin_api.grant_video_addon, args.user_id, body, actor=get_current_principal(),
+    )
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded(
+        f"已为账号 {args.user_id} 发放 {args.packages} 个视频加量包", data=outcome,
+    )

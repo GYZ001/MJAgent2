@@ -309,3 +309,29 @@ async def project_recycle_bin_sweep_loop(interval_s: float = 300.0) -> None:
                 meta={"stage": "recycle_bin_sweep", "isolation": "loop"},
             )
         await asyncio.sleep(max(60.0, min(float(interval_s), 900.0)))
+
+
+async def account_recycle_bin_sweep_loop(interval_s: float = 300.0) -> None:
+    """周期性彻底清理已过 30 天保留期的软删除账号（管理员删账号路径）。
+
+    与 ``project_recycle_bin_sweep_loop`` 同一种调度形态与同一条判据风格——挂
+    ``users.deleted_at`` 时间戳，不挂内存计时器；见
+    ``app.domain.account_deletion.sweep_expired_deleted_accounts``。单个账号
+    清理失败（例如级联项目里有供应商任务未到终态）不影响其余到期账号，也不会
+    让循环本身退出。
+    """
+    from app.domain.account_deletion import sweep_expired_deleted_accounts
+    while True:
+        try:
+            await sweep_expired_deleted_accounts()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — 巡检循环自身不得因单个账号坏数据退出
+            from app.errors import log_error
+            log_error(
+                exc,
+                action="account_recycle_bin_sweep_loop",
+                context={"interval_s": interval_s},
+                meta={"stage": "account_recycle_bin_sweep", "isolation": "loop"},
+            )
+        await asyncio.sleep(max(60.0, min(float(interval_s), 900.0)))

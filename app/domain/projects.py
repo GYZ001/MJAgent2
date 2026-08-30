@@ -54,6 +54,10 @@ _SQLITE_IN_CHUNK_SIZE = 400
 # 算「到期时间」，不是驱动清理的计时器本身。
 PROJECT_RECYCLE_BIN_RETENTION_S = 24 * 3600
 
+# 账号级联软删除（管理员删账号）带出的项目改用这个更长的保留期，见
+# sweep_expired_deleted_projects() 与 app.domain.account_deletion。
+ACCOUNT_DELETE_RETENTION_S = 30 * 24 * 3600
+
 
 def _project_task_timings(conn, project: dict) -> dict[str, dict[str, float | None]]:
     """项目级任务计时的服务端起止时间。
@@ -430,9 +434,9 @@ def list_deleted_projects():
     owner = _listing_owner_scope()
     if owner is not None:
         rows = rows_to_dicts(conn.execute(
-            "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at, deleted_at "
-            "FROM projects WHERE deleted_at IS NOT NULL AND owner_user_id=? "
-            "ORDER BY deleted_at DESC",
+            "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at, "
+            "deleted_at, recycle_bin_retention_s FROM projects "
+            "WHERE deleted_at IS NOT NULL AND owner_user_id=? ORDER BY deleted_at DESC",
             (owner,),
         ).fetchall())
     else:
@@ -440,14 +444,18 @@ def list_deleted_projects():
         # above; the marker inside the SQL text is what
         # tests/test_project_ownership_query_guard.py actually looks for.
         rows = rows_to_dicts(conn.execute(
-            "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at, deleted_at "
+            "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at, "
+            "deleted_at, recycle_bin_retention_s "
             "FROM projects -- ALL_OWNERS: system admin / internal caller\n"
             "WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC").fetchall())
     stamp = now()
     for p in rows:
         p["chapter_count"] = conn.execute("SELECT COUNT(*) c FROM chapters WHERE project_id=?", (p["id"],)).fetchone()["c"]
         p["episode_count"] = conn.execute("SELECT COUNT(*) c FROM episodes WHERE project_id=?", (p["id"],)).fetchone()["c"]
-        purge_at = float(p["deleted_at"]) + PROJECT_RECYCLE_BIN_RETENTION_S
+        # 每行自己的保留期（账号级联软删除写 30 天，见 ACCOUNT_DELETE_RETENTION_S），
+        # NULL 时回退默认 24 小时——与 sweep_expired_deleted_projects() 同一口径。
+        retention_s = p["recycle_bin_retention_s"] or PROJECT_RECYCLE_BIN_RETENTION_S
+        purge_at = float(p["deleted_at"]) + retention_s
         p["purge_at"] = purge_at
         p["retention_seconds_remaining"] = max(0.0, purge_at - stamp)
     return rows
@@ -1917,21 +1925,23 @@ async def _purge_all_deleted_projects_core() -> dict:
 
 
 async def sweep_expired_deleted_projects() -> dict:
-    """24 小时保留期到期的项目自动彻底清理；由周期性系统任务调用（见
-    ``app.recovery``）。判据是 ``deleted_at`` 时间戳与当前时间的差值，不依赖
-    任何内存计时器——后端不管重启多少次，只要时间戳过期就会在下一轮巡检
-    被清理；供应商任务未到终态的项目会在这一轮失败并保留，下一轮重试。
+    """保留期到期的项目自动彻底清理；由周期性系统任务调用（见 ``app.recovery``）。
+    判据是 ``deleted_at`` + 每行 ``recycle_bin_retention_s``（NULL 时默认 24 小时；
+    账号级联软删除写 30 天，见 ``ACCOUNT_DELETE_RETENTION_S``）与当前时间的差值，
+    不依赖任何内存计时器；供应商任务未到终态的项目会在这一轮失败并保留，下一
+    轮重试。
     """
     conn = get_conn()
-    cutoff = now() - PROJECT_RECYCLE_BIN_RETENTION_S
+    stamp = now()
     project_ids = [
         row["id"] for row in conn.execute(
             "SELECT id FROM projects -- ALL_OWNERS: periodic background sweep "
             "loop (app.recovery.project_recycle_bin_sweep_loop), no request "
-            "context; retention is enforced globally by deleted_at, not per "
-            "caller\n"
-            "WHERE deleted_at IS NOT NULL AND deleted_at < ?",
-            (cutoff,),
+            "context; retention is enforced globally by deleted_at + "
+            "recycle_bin_retention_s, not per caller\n"
+            "WHERE deleted_at IS NOT NULL "
+            "AND deleted_at + COALESCE(recycle_bin_retention_s, ?) < ?",
+            (PROJECT_RECYCLE_BIN_RETENTION_S, stamp),
         ).fetchall()
     ]
     purged: list[str] = []

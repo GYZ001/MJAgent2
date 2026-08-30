@@ -29,6 +29,31 @@ class ProjectPurgeAllInput(StandardCommandInput):
     pass
 
 
+class AccountSelfDeleteInput(StandardCommandInput):
+    """自删不带参数：目标账号取自当前会话 Principal，不接受调用方指定别的账号。"""
+
+
+class AccountAdminDeleteInput(StandardCommandInput):
+    user_id: str
+
+
+class AccountAdminRestoreInput(StandardCommandInput):
+    user_id: str
+
+
+class QuotaGrantVideoAddonInput(StandardCommandInput):
+    """管理员手工发放视频加量包。
+
+    ``packages`` 是包数（每包 ``ADDON_PACKAGE_SECONDS`` 秒），不是秒数——单位
+    写在名字里，避免调用方把 600 当成"600 包"传进来。``idempotency_key`` 未来
+    接真实支付时应传订单号；留空时路由层生成一次性 key，重复调用会重复发放。
+    """
+
+    user_id: str
+    packages: int
+    idempotency_key: str = ""
+
+
 class ProjectScopedInput(StandardCommandInput):
     project_id: str
     feedback: str = ""
