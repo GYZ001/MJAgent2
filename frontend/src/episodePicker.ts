@@ -19,16 +19,6 @@ export function episodeProductionStatus(
   return '待分镜'
 }
 
-export function resolveEpisodeId(
-  episodes: EpisodeOption[],
-  currentEpisodeId: string | null,
-): string | null {
-  if (currentEpisodeId && episodes.some(episode => episode.id === currentEpisodeId)) {
-    return currentEpisodeId
-  }
-  return episodes[0]?.id ?? null
-}
-
 /** 构造窗口化 picker 的查询串；空值一律不写入，URL 才稳定、可缓存。 */
 export function pickerWindowParams(
   limit: number,

@@ -667,7 +667,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 ).fetchone()["provider_submitted_at"]
 
             # Phase 1：单次查询后立即释放 worker；供应商仍在跑则写入 waiting_provider。
-            # 不再用 15 分钟连续占槽窗口（VIDEO_POLL_BUDGET 已置 0）。
+            # 不再用 15 分钟连续占槽窗口（该预算常量已随功能下线一并删除）。
             state = conn.execute(
                 "SELECT cancellation_requested FROM jobs WHERE id=?", (job_id,)
             ).fetchone()

@@ -52,6 +52,3 @@ def run(conn: sqlite3.Connection, name: str) -> Any:
     """Sugar for ``get(name)(conn)`` — the common single-connection-arg case."""
     return get(name)(conn)
 
-
-def registered_names() -> list[str]:
-    return list(_REGISTRY.keys())

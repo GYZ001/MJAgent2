@@ -214,7 +214,6 @@ max_function_lines_python = 200
 "frontend/src/pages/ScriptPage.test.ts" = 1300
 "frontend/src/pages/ScriptPage.tsx" = 1100
 "frontend/src/pages/Studio.tsx" = 500
-"frontend/src/pages/TeamAdminPage.tsx" = 850
 "frontend/src/pages/WallPage.tsx" = 1100
 [baseline.function_lines]
 "app/capabilities/catalog.py" = 1075

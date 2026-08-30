@@ -13,9 +13,10 @@ Artifact 的 type/scope/status 全部正确（``episode_prep_pack`` /
 ``app.domain.screenplay_ops.edit_screenplay``（手工编辑草稿发布）；
 ``app.production.screenplay_repair.run_screenplay_production`` 及其专属子树
 （``_complete_screenplay_from_working_artifact`` /
-``_reusable_recovery_document`` / ``_revalidate_or_rebuild_resume_working``，
-里面另外那几处 ``type="screenplay_document"``）在 app/ 内已无任何生产调用者，
-只被测试直接调用——也可能是映射台当前发布的 ``episode_prep_pack``——见
+``_reusable_recovery_document`` / ``_revalidate_or_rebuild_resume_working``）
+当时在 app/ 内已无任何生产调用者、只被测试直接调用，**已于 2026-08-30 的死
+代码清理（commit 52eba2b）整体删除**，连同它们内部那几处
+``type="screenplay_document"``——也可能是映射台当前发布的 ``episode_prep_pack``——见
 ``app.production.prep_pack._publish_prep_pack``；两者是同一个「screenplay」
 生产阶段在不同合同版本下的产物，见
 ``app.production.certificate.issue_completion_certificate`` 里完全相同的

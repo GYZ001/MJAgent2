@@ -3,7 +3,6 @@ import {
   episodeProductionStatus,
   pickerWindowParams,
   resolveWindowedEpisodeId,
-  resolveEpisodeId,
   type EpisodeOption,
 } from './episodePicker'
 
@@ -14,13 +13,6 @@ const episodes: EpisodeOption[] = [
 ]
 
 describe('episode picker', () => {
-  it('keeps a valid selection and recovers a stale or empty selection', () => {
-    expect(resolveEpisodeId(episodes, 'e2')).toBe('e2')
-    expect(resolveEpisodeId(episodes, 'missing')).toBe('e1')
-    expect(resolveEpisodeId(episodes, null)).toBe('e1')
-    expect(resolveEpisodeId([], 'e2')).toBeNull()
-  })
-
   it('presents failed screenplay work as needing attention', () => {
     expect(episodeProductionStatus({ screenplay_status: 'failed', status: 'pending' })).toBe('需处理')
     expect(episodeProductionStatus({ screenplay_status: 'ready', status: 'script_failed' })).toBe('需处理')
