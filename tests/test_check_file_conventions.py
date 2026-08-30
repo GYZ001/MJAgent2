@@ -114,7 +114,53 @@ def test_measure_python_file_computes_longest_function(tmp_path: Path) -> None:
     metrics = measure_python_file(path)
 
     assert metrics is not None
-    assert metrics.longest_function_lines >= 16  # def line + 15 body lines
+    # 15 条 body 语句。度量的是函数体里的代码行，不含 def 那一行——这个维度回答
+    # 的是「这个函数塞了多少逻辑」，签名行不是逻辑。
+    assert metrics.longest_function_lines == 15
+
+
+def test_longest_function_excludes_docstrings_blank_lines_and_comments(tmp_path: Path) -> None:
+    """函数行数只数代码，不数文档与排版。
+
+    否则同一份逻辑，写了事故复盘 docstring 的版本反而更容易撞线——**惩罚写
+    文档**。本仓库已经因为同一类反向激励删掉过整个 max_toplevel_defs_python
+    维度（它奖励焊大函数、惩罚拆分），这个维度不能重蹈覆辙。
+    """
+    source = (
+        '"""module"""\n'
+        "def documented():\n"
+        '    """一段很长的 docstring。\n'
+        "\n"
+        "    这里记着事故复盘，占很多行，\n"
+        "    但它一行逻辑都没有。\n"
+        "\n"
+        "    第二段说明。\n"
+        '    """\n'
+        "    # 一条纯注释，不是逻辑\n"
+        "\n"
+        "    a = 1\n"
+        "\n"
+        "    # 又一条注释\n"
+        "    b = 2\n"
+        "    return a + b\n"
+    )
+    path = _write(tmp_path, "m.py", source)
+
+    metrics = measure_python_file(path)
+
+    assert metrics is not None
+    # 只有 a = 1 / b = 2 / return 三行是代码。
+    assert metrics.longest_function_lines == 3
+
+
+def test_longest_function_counts_a_docstring_only_function_as_zero(tmp_path: Path) -> None:
+    """只有 docstring、没有语句的函数（协议桩、抽象方法）计 0，不是「很大」。"""
+    path = _write(tmp_path, "m.py", '"""module"""\ndef stub():\n    """只有文档。\n\n    第二段。\n    """\n')
+
+    metrics = measure_python_file(path)
+
+    assert metrics is not None
+    assert metrics.longest_function_lines == 0
 
 
 def test_measure_python_file_returns_none_on_syntax_error(tmp_path: Path) -> None:

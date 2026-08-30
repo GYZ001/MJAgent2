@@ -92,16 +92,21 @@ allowed_exceptions = []
 
 # ---- L2 持久化：可依赖 L0-L1 ----
 "app.db" = 2
-"app.quota" = 2  # 2026-08-30 新增：三档会员配额引擎，只 import app.db；
-                 # app.db(finish_provider_call) 反过来按需记账用延迟 import
+"app.quota" = 2  # 2026-08-30 新增：五档会员配额引擎，只 import app.db、
+                 # app.quota_addon、app.quota_scope（同层）；app.db
+                 # (finish_provider_call) 反过来按需记账用延迟 import
                  # 避免真实循环导入，二者同层，延迟/模块级两种边都合法
+"app.quota_addon" = 2  # 2026-08-30 新增：视频加量包记账，只 import app.db，
+                       # 零反向依赖——app.quota import 它（同层），它不 import
+                       # app.quota，避免环
+"app.quota_scope" = 2  # 2026-08-30 新增：配额闸门的归属解析/并发计数只读查
+                       # 询，零依赖（连 app.db 都不 import，只用 sqlite3 类型
+                       # 标注）——app.quota import 它做 re-export，同层
 "app.artifacts" = 2
 "app.evidence" = 2
 "app.errors" = 2  # 2026-08-30：原 L0，只 import app.db，见文件末尾变更说明
 "app.authz" = 2  # 2026-08-30：原 L1，包内 resolve.py 碰 app.db，见变更说明
 "app.auth.sessions" = 2  # 2026-08-30：覆盖 app.auth=1 前缀，碰 app.db
-"app.auth.api" = 2       # 同上
-"app.auth.admin_api" = 2 # 同上
 "app.orchestration.state_machine" = 2  # 2026-08-30：覆盖 app.orchestration=5
                                         # 前缀，只 import app.db，见变更说明
 
@@ -288,5 +293,12 @@ allowed_exceptions = []
 "app.planning" = 5
 "app.recovery" = 5
 "app.system_api" = 5
+"app.auth.api" = 5       # 2026-08-30：原 2。它和 app.api/app.system_api 一样
+                         # 是 HTTP 路由模块（挂 APIRouter，只被 app.main 引
+                         # 用），职责是把请求翻译成域调用。原来按「碰 app.db」
+                         # 判成 L2，但 app.api 同样碰 db 也是 L5——判据挂错了
+                         # 层，导致正常的「路由→域」调用被算成上行边。
+"app.auth.admin_api" = 5 # 同上
+
 "app.video_supervisor" = 5
 "app.video_supervisor_pkg" = 5  # 前缀：video_supervisor 拆包中的半成品，见说明 6

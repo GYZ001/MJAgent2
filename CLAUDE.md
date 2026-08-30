@@ -18,6 +18,18 @@
 - 遇到报错先定位根因，不得通过删除核心功能掩盖问题。
 - 每完成一个模块就运行或测试，不要等到最后统一验证。
 
+## Architecture and File Conventions
+分层与文件规范由三道**可执行闸门**守着（都在 `py scripts/verify.py --full` 里）。动代码前先跑一遍看自己站在哪，不要凭印象。
+
+- **先确认自己在哪一层。** `app/LAYERS.toml` 声明六层（L0 契约内核 → L5 编排入口），合法依赖只能指向层号更小或同层，`py scripts/arch_graph.py --check-layers` 报出全部上行边。**新模块必须声明层号**——未声明按 fail-safe 当 L5，会制造幻影违规把真问题淹掉：曾有 115 个未声明模块让 44 条真实倒置埋在 1,310 条报告里，补完声明后 96.6% 是幻影。
+- **红线只降不升。** 两个闸门的阈值（`LAYERS.toml` 的 `max_violations`、`FILE_CONVENTIONS.toml` 的各项基线）是棘轮：拆小了就把数字调小，**不许为了让自己的改动过关而调大**。曾有人为了让一次正确的巨型函数分解通过而上调 `toplevel_defs` 基线——那说明维度本身错了（它在惩罚拆解），后来整个删掉，而不是继续放宽。
+- **不得再造巨型文件。** Python ≤500 行、前端 ≤300 行、**单函数 ≤50 代码行**，`py scripts/check_file_conventions.py` 守着。这三个数取自业界通行默认值（ESLint `max-lines` 300 / SonarQube 750 之间取 500；前端 300 即 ESLint 默认值；单函数 50 是 ESLint `max-lines-per-function` 默认值，Linux CodingStyle 的「一屏」约 24-48 行），**不是从本仓库现状反推的分位数**——那种取法会让仓库越烂标准越松。单函数只数**代码行**，剔除 docstring、空行、纯注释：把文档算进复杂度就是在惩罚写文档，本仓库已因同类反向激励删过整个 `toplevel_defs` 维度。现存超标文件走 `[baseline.*]` 棘轮收敛（line_count 136 条、function_lines 319 条），**每一条基线都是欠账，不是许可**。本仓曾有 12,142 行的 `stages.py`、10,821 行的 `portraits.py`、以及 3,585 行的单函数 `compile_screenplay_ir`（比同文件第二大函数大 13.7 倍）——它们既是循环依赖的宿主，也是并行开发的冲突集中点。**装不下时先想怎么拆，不要先想加基线。**
+- **拆包用真包，禁止 `exec()` 外观。** `app/api.py` / `app/worker.py` / `app/domain/` / `app/media_exec/` 曾用 `exec(compile(...), globals())` 把子文件注入自身命名空间：同一份源码两种加载方式产生两套对象，`except worker.LeaseLost` 抓不住 `run_job` 抛的同名异常，而测试全走 `worker.` 前缀所以**结构上看不见**。四个外观已全部退场，不要复活。同理禁止 `from .x import *`。
+- **拆包必然让 `monkeypatch.setattr(pkg, name, stub)` 静默失效**——每个子模块持有自己的绑定，改包属性不影响它们，**测试照常变绿但验证的代码路径从未被替换**，比测试直接红危险得多。拆包时必须同步加 `tests/conftest.py` 的 `patch_<pkg>_everywhere()` 与 AST 守卫测试（仓库已有 13 个可照抄），让「漏改」从静默变成 CI 立刻报错。守卫已知盲区：循环变量形态（`for m in (a, b, pkg): setattr(m, ...)`）、以及藏在 `subprocess.run([sys.executable, "-c", ...])` 字符串字面量里的打桩。
+- **助手遍历子模块要用 `sys.modules` 按全限定名解析，不要用 `getattr`。** 子模块若再导出一个与自身文件同名的符号（`from .x import x as x`），包属性会被那个符号覆盖，`getattr` 静默返回错的对象——实测曾让 `get_conn` 打桩打空、连到生产库。
+- **`global` 重绑定的名字必须与它的写入者同模块。** Python 的 `global` 只重绑定**定义它的那个模块**的命名空间；分开会让写入落进私有副本、读取方永远看不到，**且不报错**。
+- **拆文件后全仓 grep 硬编码路径。** `scripts/check_contract_surface.py` 的 `REQUIRED` 字典硬编码路径会让任何人跑它都 `SystemExit`；同文件 `FORBIDDEN` 字典对已删路径是 `if not path.exists(): continue`——**静默跳过，检查悄悄失效而所有人以为它在保护自己**。`tests/test_scripts_hardcoded_paths_exist.py` 现在守着这一类。
+
 ## Verification
 完成后必须：
 - 日常改动优先运行 `py scripts/verify.py`，只验证 Git 改动直接影响的范围；提交或发布前才运行 `py scripts/verify.py --full`；

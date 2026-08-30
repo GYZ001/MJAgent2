@@ -244,6 +244,48 @@ class PythonMetrics:
     has_star_import: bool
 
 
+def _function_code_lines(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, source_lines: list[str]
+) -> int:
+    """函数体里**实打实的代码行数**——剔除 docstring、空行、纯注释行。
+
+    这个维度要衡量的是「一个函数塞了多少逻辑」，不是「它占了多少行」。用原始
+    跨度（``end_lineno - lineno + 1``）会把文档算成复杂度，于是同一份逻辑，写了
+    事故复盘 docstring 的版本反而更容易撞线——**惩罚写文档**。本仓库已经因为
+    同一类反向激励删掉过整个 ``max_toplevel_defs_python`` 维度（它奖励焊大函数、
+    惩罚拆分），不能再犯第二次。
+
+    这也让阈值与业界工具可比：ESLint ``max-lines-per-function`` 的常用配置就是
+    ``skipBlankLines`` + ``skipComments``，数的同样是代码行。
+
+    多行表达式（跨行的函数调用、字典字面量）按其实际占用的行数计入——它们确实
+    是代码；被剔除的只有文档与排版。
+    """
+    body = node.body
+    if not body:
+        return 0
+    start = body[0].lineno
+    # 首条语句是 docstring 时整体跳过：它是文档，不是逻辑。
+    if (
+        isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        if len(body) == 1:
+            return 0
+        start = body[1].lineno
+    end = getattr(node, "end_lineno", None) or start
+    count = 0
+    for raw in source_lines[start - 1:end]:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        count += 1
+    return count
+
+
+
+
 def measure_python_file(path: Path) -> PythonMetrics | None:
     """返回 None 表示语法错误——不可解析的文件交给别的闸门（ruff/compileall）报，
     这里不重复报错也不假装它合格（不计入任何维度，报告里单列可见）。
@@ -260,12 +302,11 @@ def measure_python_file(path: Path) -> PythonMetrics | None:
         for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
     )
+    source_lines = src.splitlines()
     longest = 0
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            end = getattr(node, "end_lineno", None)
-            if end is not None:
-                longest = max(longest, end - node.lineno + 1)
+            longest = max(longest, _function_code_lines(node, source_lines))
     has_docstring = ast.get_docstring(tree) is not None
     has_star_import = any(
         isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names)

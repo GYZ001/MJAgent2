@@ -3,18 +3,36 @@
 # 谁」）是同类机制、不同维度，二者不重叠，参见该工具的模块 docstring。
 
 # ---------------------------------------------------------------------------
-# 取数状态（棘轮基线只在这一刻的工作区快照上有意义，之后会随代码变化而需要重取）
+# 阈值来源（2026-08-30 改版）：不再取本仓库自己的分位数，改用业界工具的通行默认值。
 #
-#   commit: 5265572
-#   git status: 59 条改动（app/ 23 个已修改 + 3 个新增，tests/ 26 个已修改 + 1 个
-#     新增，scripts/arch_graph.py、scripts/verify.py 已修改）——3 个 agent 正在并行
-#     改后端，此刻的行数/定义数是移动靶。
+# 上一版把 max_lines_python 定成 600、frontend 400、单函数 200，依据是「本仓库
+# 当时的中位数与 p75 之间」。那种取法有个根本问题：**仓库越烂，标准越松**——它
+# 把现状当成了应然。行数本身也没有硬性的行业依据（各家默认值跨度极大：ESLint
+# max-lines 300、SonarQube 750、Pylint max-module-lines 1000、Checkstyle
+# FileLength 2000；学术上 Basili/Hatton/El Emam 三方结论互相打架，El Emam 更直接
+# 论证「最优规模」多半是拿缺陷数除以规模造成的数学假象）。所以这里不追求「科学
+# 正确的数字」，只取一个**业界共识区间内、能长期指向正确方向**的值：
 #
-# 因此下面每个 baseline 数值 = 实测值 * 1.15（向上取整到 50/5/25 的整数倍），
-# 不是精确实测值本身，目的是给并行编辑留出空间、避免他们收尾提交前的正常改动
-# 把这道闸门误判为红。等这批并行改动落地、数字稳定后，应该用
-# `--report-actuals` 重新核对，并把明显宽松的基线调紧——红线只降不升，缓冲区
-# 本身不是长期免检额度。
+#   max_lines_python   = 500   ESLint(300) 与 SonarQube(750) 之间；「一个模块做一件事」
+#   max_lines_frontend = 300   ESLint max-lines 的默认值，前端工具链里最通行的单值
+#   max_function_lines = 50    ESLint max-lines-per-function 默认值；Linux
+#                              CodingStyle 的「一屏」约 24-48 行，多数风格指南 20-60
+#
+# 单函数维度同时改了**度量方式**：从原始跨度（end_lineno - lineno + 1）改成
+# 只数代码行，剔除 docstring、空行、纯注释（见 _function_code_lines）。原来的
+# 度量把文档算成复杂度，同一份逻辑写了事故复盘 docstring 的版本反而更容易撞线，
+# 是在惩罚写文档——本仓库已经因为同一类反向激励删掉过整个 max_toplevel_defs_python
+# 维度（它奖励焊大函数、惩罚拆分），不能再犯第二次。改成代码行后，50 这个阈值
+# 也才与 ESLint（常配 skipBlankLines + skipComments）真正可比。
+#
+# 下面每条 baseline = **该文件当前的精确实测值**，不带任何缓冲。上一版基线是
+# 并行开发期按「实测 × 1.15」取的，等并行改动落地后一直没收紧，累积出 19,256 行
+# 闲置余量（极端例子：frontend MonitorPage.tsx 实测 874、基线 5250，那道闸门对它
+# 形同虚设）。本次全部按实测重发，闲置余量归零。
+#
+# **每一条 baseline 都是欠账，不是许可。** 棘轮只降不升：拆小了就把数字调小，
+# 不许为了让自己的改动过关而调大。line_count 136 条、function_lines
+# 319 条，就是这个仓库距离业界通行标准还差多远的完整清单。
 # ---------------------------------------------------------------------------
 
 # 豁免：整体豁免某个文件的某个维度检查（例如确认要长期保留的生成代码）。
@@ -33,420 +51,472 @@
 exemptions = []
 
 [defaults]
-# 对没有 baseline 记录的文件生效的紧阈值——新文件应该达到的标准，不是现状。
-# 取值依据（当前 200 个 app/*.py 的行数分布：中位数 225，p75 965，p90 2914；
-# 95 个 frontend/src/**/*.{ts,tsx} 中位数 95，p75 210，p90 931）：定在中位数与
-# p75 之间，既不放行「新建的文件也是一坨」，也不会因为过严而误伤正常大小的新模块。
-max_lines_python = 600
-max_lines_frontend = 400
-# 单函数最长行数分布（app/*.py 每文件最长函数）：中位数 63，p75 203，p90 493。
-# `app/screenplay_ir.py::compile_screenplay_ir` 曾经 3,585 行——单文件行数本身不会
-# 拦住「一个文件里只焊了一个巨型函数」（行数照样能落在合理区间），这个维度专门补
-# 这个缺口。
-#
-# 曾有第三个维度 `max_toplevel_defs_python`（顶层定义数上限，2026-08-29 移除）：
-# 对全仓库 258 个 app/*.py 实测，行数与顶层定义数相关系数 0.895，二者几乎总是
-# 同涨同跌，line_count 已经在管「文件整体过大」；唯一一个只撞这道维度、不撞
-# line_count/function_lines 的文件是 app/capabilities/inputs.py（47 个几行长的
-# Pydantic 模型，340 行）——良好代码而非 god-module。更严重的反例：
-# compile_screenplay_ir 从 3,585 行单函数拆成编排器 + ~45 个具名 helper 后，
-# function_lines 大幅改善（3,585→322），但顶层定义数从 55 涨到 82 撞穿了这道
-# 维度，逼着基线从 55 上调到 95——奖励焊大函数、惩罚拆分。真正的 god-module
-# 信号已被 line_count（文件整体过大）与 function_lines（单个函数/方法过大，
-# 用 ast.walk 遍历全树含类方法）完整覆盖，故删除整个维度而非调参。详见
-# scripts/check_file_conventions.py 模块 docstring。
-max_function_lines_python = 200
+max_lines_python = 500
+max_lines_frontend = 300
+max_function_lines_python = 50
 
 [baseline.line_count]
-"app/agent/orchestrator.py" = 750
-# app/api.py stopped being an exec()/sys.modules facade over app.domain
-# (P0-1, 2026-08-29): it is now a real Python module that explicitly
-# re-exports, by name, every symbol app.domain exposes -- the same 512-name
-# surface app/domain/__init__.py below re-exports, generated the same way
-# (import the finished package, diff dir() against a pre-refactor snapshot,
-# write the literal list -- not hand-typed). A plain module doing one
-# `from app.domain import (...)` with ~512 names is inherently long; there is
-# no function or class body here to shrink, only the flat import + __all__
-# lists, so this is a case where the file's *shape* (two lists) matters more
-# than raw line count for the "is this a god-module" question the line-count
-# gate is a proxy for -- see the file's own docstring.
-"app/api.py" = 1250
-"app/artifacts.py" = 1600
-"app/capabilities/catalog.py" = 1700
-"app/capabilities/preflight.py" = 1650
-"app/compiler.py" = 2100
-"app/completion_grant.py" = 3400
-"app/config.py" = 750
-"app/continuity.py" = 2100
-"app/db.py" = 3900
-"app/delivery.py" = 2250
-# app/domain/__init__.py stopped being an exec() aggregator (P0-1,
-# 2026-08-29): it now explicitly re-exports, by name, every symbol each of
-# the seven chunk modules exposes (the same reasoning as app/api.py above
-# applies here -- see this file's own docstring for how the ~512-name list
-# was generated and verified, not hand-typed).
-"app/domain/__init__.py" = 1250
-"app/domain/common.py" = 1150
-# 2026-08-30 新增项目软删除 + 回收站（deleted_at 判据、恢复、彻底清理、24 小时
-# 自动清理入口）：真实新增功能，不是膨胀，按本文件顶部的棘轮公式小幅上调。
-"app/domain/projects.py" = 2000
-"app/domain/review_wall.py" = 1250
-# app/domain/bible_ops.py（4,386 行 / 123 个顶层定义）、app/domain/screenplay_ops.py
-# （3,885 行 / 69 个顶层定义）、app/domain/storyboard_ops.py（5,487 行 / 98 个顶层定义，
-# 拆分前本仓最大单文件）、app/domain/video_ops.py（4,984 行 / 100 个顶层定义）
-# 2026-08-30 各自拆成同名真包（``__init__.py`` 用 `name as name` 显式再导出，非 exec
-# 共享命名空间，与 app/validators/__init__.py 同一先例；四个包各自的包内依赖图都是
-# DAG，用 Tarjan 算法核验过，不存在非平凡强连通分量，故不需要包内延迟导入）：所有子
-# 文件正文本身都在 line_count 默认阈值（600）以内，此处不留 line_count 基线条目；仍焊
-# 着单个大函数的子文件在下方 function_lines 表登记（同一次改动新增）。
-"app/evidence/repository.py" = 1450
-"app/harness/model_gateway.py" = 1150
-"app/hiagent.py" = 3650
-"app/identity_adjudication.py" = 900
-"app/identity_contracts.py" = 950
-"app/media_exec/concat.py" = 1650
-"app/media_exec/enqueue.py" = 2550
-# app/media_exec/run_job.py（5,333 行）2026-08-30 进一步拆成 14 个同级子模块
-# （授权判定/结果落库/四种输入模式准备/job-version 状态/参考图进度/调度分派+
-# worker 生命周期/worker 主循环/恢复对账/延迟重排/五个围栏异常，见该文件模块
-# docstring）。本文件收缩为 _run_job 编排协程本体（1,157 行单函数，移动未重写，
-# 见 baseline.function_lines 里的同名条目）+ 85 个既有名字的显式再导入（供
-# __init__.py 与 app/worker.py 的既有 from .run_job import (...) 不用改一行）；
-# 基线 = 实测 * 1.15 向上取整到 50。
-"app/media_exec/run_job.py" = 1650
-"app/minimax_h3.py" = 1850
-"app/multiview.py" = 2650
-# app/narrative.py（3,435 行 / 24 个顶层定义）2026-08-30 拆成 app/narrative/ 真包
-# （__init__.py 用 `name as name` 显式再导出，非 exec 共享命名空间；按关注点分文件：
-# 独立的 storyboard 权威投影、两个校验器共用的 id/引用/片段匹配原语、叙事计划索引
-# +参与者交付校验、剧本叙事硬闸门、分镜叙事硬闸门+其调用的权威对齐检查、复核通过判
-# 定+受众载荷哈希）。多数子文件正文远低于默认阈值，以下两个仍焊着原文件里就已经
-# 存在的单一大函数（validate_screenplay_narrative/validate_storyboard_narrative，
-# 移动未重写）；基线 = 实测 * 1.15 向上取整到 50 的整数倍，棘轮只降不升。
-"app/narrative/screenplay_validate.py" = 1900
-"app/narrative/storyboard_validate.py" = 1600
-"app/narrative_outline.py" = 2300
-"app/narrative_priority.py" = 1250
-"app/narrative_repair.py" = 1350
-"app/observability/api.py" = 2800
-"app/orchestration/api.py" = 2050
-"app/portraits/discovery_legacy.py" = 1000
-"app/portraits/future_identity_resolution.py" = 1100
-"app/portraits/identity_response_projection.py" = 750
-"app/portraits/portrait_io.py" = 650
-"app/portraits/structural_coverage_audit.py" = 850
-"app/production/certificate.py" = 900
-"app/production/patch.py" = 1250
-"app/production/prep_pack/contracts.py" = 1130
-"app/production/prep_pack/resolve_assets.py" = 1050
-"app/production/publish.py" = 950
-"app/production/revision.py" = 2300
-"app/production/screenplay_authority.py" = 2950
-"app/production/screenplay_document.py" = 2000
-"app/production/screenplay_repair/narrative_graph_normalize.py" = 1650
-"app/production/storyboard_pack.py" = 2450
-"app/scenes.py" = 2900
-"app/schemas.py" = 3000
-# app/narrative_blueprint.py（5,128 行 / 81 个顶层定义）与 app/screenplay_ir.py
-# （6,916 行 / 100 个顶层定义）2026-08-29 拆成对应真包（__init__.py 用
-# `name as name` PEP 484 显式再导出，非 exec 共享命名空间），所有子文件正文本身
-# 都在 line_count 默认阈值以内，此处不留 line_count 基线条目；仍焊着单个大函数
-# 的子文件在下方 function_lines 表登记（同一次改动新增）。
-# app/screenplay_scene_shards.py（6,472 行 / 108 个顶层定义）拆成
-# app/screenplay_scene_shards/ 真包（__init__.py 显式再导出，非 exec 共享命名
-# 空间）。17 个新文件里 15 个在默认阈值内，以下两个的正文本身就超 600 行
-# （generate_shards.py 是唯一的顶层编排函数，semantic_review.py 是唯一的双审
-# 校对+修复循环函数，拆分会改逻辑，不做）；基线 = 实测 * 1.15 向上取整到 50
-# 的整数倍，同一次改动同时收紧了 function_lines（见下表同名条目）。
-"app/screenplay_scene_shards/generate_shards.py" = 700
-"app/screenplay_scene_shards/semantic_review.py" = 750
-"app/spoken_contract.py" = 750
+"app/agent/orchestrator.py" = 616
+"app/api.py" = 1091
+"app/artifacts.py" = 1375
+"app/capabilities/bus.py" = 560
+"app/capabilities/catalog.py" = 1565
+"app/capabilities/preflight.py" = 1388
+"app/compiler.py" = 1790
+"app/completion_grant.py" = 2914
+"app/config.py" = 613
+"app/continuity.py" = 1795
+"app/db.py" = 3511
+"app/delivery.py" = 1954
+"app/domain/__init__.py" = 1096
+"app/domain/bible_ops/precheck.py" = 543
+"app/domain/bible_ops/view_redo.py" = 568
+"app/domain/common.py" = 1103
+"app/domain/projects.py" = 1999
+"app/domain/review_wall.py" = 1080
+"app/domain/screenplay_ops/activation.py" = 529
+"app/domain/screenplay_ops/edit.py" = 527
+"app/domain/screenplay_ops/status_snapshot.py" = 501
+"app/domain/screenplay_ops/task_body.py" = 562
+"app/domain/storyboard_ops/clear_apply.py" = 507
+"app/domain/storyboard_ops/evidence.py" = 504
+"app/domain/storyboard_ops/task_body.py" = 560
+"app/domain/video_ops/completion_core.py" = 576
+"app/domain/video_ops/confirm_episode.py" = 561
+"app/domain/video_ops/confirmation_eval.py" = 550
+"app/domain/video_ops/generate.py" = 547
+"app/domain/video_ops/project_queue_complete.py" = 526
+"app/evidence/media.py" = 563
+"app/evidence/repository.py" = 1242
+"app/final_edit.py" = 574
+"app/harness/model_gateway.py" = 980
+"app/hiagent.py" = 3150
+"app/identity_adjudication.py" = 758
+"app/identity_contracts.py" = 806
+"app/loops/base.py" = 547
+"app/media_exec/__init__.py" = 509
+"app/media_exec/checkpoints.py" = 520
+"app/media_exec/concat.py" = 1416
+"app/media_exec/enqueue.py" = 2255
+"app/media_exec/input_first_frame_last.py" = 565
+"app/media_exec/input_reference.py" = 533
+"app/media_exec/run_job.py" = 1422
+"app/minimax_h3.py" = 1581
+"app/multiview.py" = 2262
+"app/narrative/screenplay_validate.py" = 1611
+"app/narrative/storyboard_validate.py" = 1356
+"app/narrative_blueprint/models_core.py" = 552
+"app/narrative_outline.py" = 1991
+"app/narrative_priority.py" = 1078
+"app/narrative_repair.py" = 1136
+"app/observability/api.py" = 2418
+"app/orchestration/api.py" = 1762
+"app/orchestration/media_scheduler.py" = 527
+"app/portraits/__init__.py" = 537
+"app/portraits/cards.py" = 595
+"app/portraits/discovery_legacy.py" = 975
+"app/portraits/future_identity_resolution.py" = 1092
+"app/portraits/identity_response_projection.py" = 722
+"app/portraits/portrait_drift.py" = 548
+"app/portraits/portrait_io.py" = 640
+"app/portraits/resolution_apply_screenplay.py" = 591
+"app/portraits/structural_coverage.py" = 575
+"app/portraits/structural_coverage_audit.py" = 838
+"app/portraits/structural_coverage_ensure.py" = 556
+"app/production/certificate.py" = 780
+"app/production/patch.py" = 1072
+"app/production/prep_pack/contracts.py" = 1128
+"app/production/prep_pack/resolve_assets.py" = 1049
+"app/production/publish.py" = 820
+"app/production/revision.py" = 1987
+"app/production/screenplay_authority.py" = 2529
+"app/production/screenplay_document.py" = 1704
+"app/production/screenplay_repair/llm_field_patch.py" = 593
+"app/production/screenplay_repair/narrative_graph_normalize.py" = 1649
+"app/production/storyboard_pack.py" = 2087
+"app/quota.py" = 600
+"app/refs.py" = 548
+"app/scenes.py" = 2508
+"app/schemas.py" = 2571
+"app/screenplay_ir/prompt_context.py" = 517
+"app/screenplay_scene_shards/generate_shards.py" = 603
+"app/screenplay_scene_shards/input_contracts.py" = 599
+"app/screenplay_scene_shards/semantic_review.py" = 619
+"app/spoken_contract.py" = 619
+"app/stages/alias_backfill.py" = 599
+"app/stages/alias_verdict.py" = 508
+"app/stages/blueprint_budget.py" = 545
 "app/stages/blueprint_generate_sharded.py" = 652
+"app/stages/blueprint_repair.py" = 545
 "app/stages/blueprint_semantic_review.py" = 1139
 "app/stages/roster_recurring.py" = 650
 "app/stages/screenplay_generate.py" = 612
-"app/storyboard_supervisor.py" = 1900
-"app/storyboard_workspace.py" = 1150
-"app/system_api.py" = 2800
-# app/validators.py（6,289 行）2026-08-29 拆成 app/validators/**（按 V1~V8 校验族
-# 分文件，见 docs/coupling_review_2026-08-29.md C5）：多数子文件已降到 defaults
-# 以内，只有下面三个仍焊着一个巨型函数（validate_screenplay/validate_storyboard/
-# build_prep_pack_span_ledger，移动未重写），基线按实测 * 1.15 向上取整到 50。
-"app/validators/prep_pack_ledger.py" = 750
-"app/validators/screenplay_validate.py" = 900
-"app/validators/storyboard_core.py" = 800
-# app/video_modes.py（4,081 行）2026-08-29 拆成 app/video_modes/**（按模式判定/图库
-# 查找/关键帧契约/prompt 组装/生成调用/装配/连续性尾帧/Seedance 打包分文件）：8 个
-# 子文件已降到 defaults（600）以内，只有 reference_generate_legacy.py 焊着旧版逐镜
-# 生成参考资产的单一巨型编排函数（移动未拆分，拆分会改变其内部提前返回/进度回调
-# 的控制流耦合），基线按实测 * 1.15 向上取整到 50。
-"app/video_modes/reference_generate_legacy.py" = 1600
-# app/video_plan.py（3,406 行 / 52 个顶层定义）2026-08-30 拆成 app/video_plan/ 真包
-# （__init__.py 用 `name as name` 显式再导出，非 exec 共享命名空间；按关注点分文件：
-# 模型/枚举、共用 json+hash+row 原语、AI 计划归一化、DB row->typed shot 构建、发布
-# 清单指纹、供应商能力探测快照、计划校验、AI 辅助生成、发布+加载、陈旧性复核、供应
-# 商提交权威、逐镜 mode-attempt 台账、本地重规划+采用版本对账、供应商媒体发布）。
-# 多数子文件正文远低于默认阈值，只有 generate.py 仍焊着原文件里就已经存在的单一
-# 大函数 generate_episode_plan（移动未重写）；基线 = 实测 * 1.15 向上取整到 50 的
-# 整数倍，棘轮只降不升。
-"app/video_plan/generate.py" = 800
-"app/video_prompt_ai.py" = 700
-# app/video_supervisor.py（4,487 行）2026-08-29 拆成 app/video_supervisor/**（按
-# 授权/checkpoint/覆盖台账/预算/任务冻结/派发/Issue/分镜修复/自动采用/收口/素材
-# 预热/主 tick 循环/韧性/看门狗/运维入口分文件，一行逻辑未改，见拆分说明）：15 个
-# 子文件已降到 defaults 以内，只有 run_loop.py 焊着 Supervisor 主 tick 循环
-# run_video_completion_supervisor 这一个巨型编排函数（移动未拆分——它是状态机
-# 判据与超时回收逻辑的唯一权威顺序，拆分会打散终态判决的执行顺序），基线按实测 *
-# 1.15 向上取整到 50。
-"app/video_supervisor/run_loop.py" = 700
-"frontend/src/App.tsx" = 1800
-# 2026-08-30 新增项目回收站客户端（listDeletedProjects/restoreProject/
-# purgeProject/purgeAllDeletedProjects + DeletedProject 类型）：真实新增功能。
-"frontend/src/api/projects.ts" = 500
-"frontend/src/components/observability/TraceDrawer.tsx" = 950
-"frontend/src/pages/BiblePage.tsx" = 2250
-"frontend/src/pages/BoardPage.tsx" = 1700
-"frontend/src/pages/CinemaPage.tsx" = 1100
-"frontend/src/pages/EpisodesPage.tsx" = 900
-"frontend/src/pages/MonitorPage.tsx" = 5250
-"frontend/src/pages/ScenesPage.tsx" = 1850
-"frontend/src/pages/ScriptPage.render.test.ts" = 650
-"frontend/src/pages/ScriptPage.test.ts" = 1300
-"frontend/src/pages/ScriptPage.tsx" = 1100
-"frontend/src/pages/Studio.tsx" = 500
-"frontend/src/pages/WallPage.tsx" = 1100
-[baseline.function_lines]
-"app/capabilities/catalog.py" = 1075
-"app/compiler.py" = 625
-"app/completion_grant.py" = 400
-"app/db.py" = 325
-"app/delivery.py" = 850
-# app/domain/bible_ops.py 拆包同上（见 baseline.line_count 里的注释）：单函数行数没有
-# 因为拆分而改变（移动未重写），decide_auto_change 焊在 auto_change.py 里，基线按
-# 实测 * 1.15 向上取整到 25；其余子文件已落在 defaults（200）以内，不需要 baseline
-# 条目。
-"app/domain/bible_ops/auto_change.py" = 250
-"app/domain/projects.py" = 275
-"app/domain/review_wall.py" = 275
-# app/domain/screenplay_ops.py 拆包同上：单函数行数没有因为拆分而改变，
-# _spawn_screenplay_activation 焊在 activation.py 里，edit_screenplay 焊在 edit.py
-# 里，repair_screenplay_draft 焊在 repair.py 里，recover_screenplay_tasks 焊在
-# task_recovery.py 里，基线均按实测 * 1.15 向上取整到 25；其余子文件已落在 defaults
-# 以内，不需要 baseline 条目。
-"app/domain/screenplay_ops/activation.py" = 425
-"app/domain/screenplay_ops/edit.py" = 400
-"app/domain/screenplay_ops/repair.py" = 300
-"app/domain/screenplay_ops/task_recovery.py" = 300
-# app/domain/storyboard_ops.py 拆包同上：单函数行数没有因为拆分而改变，
-# clear_storyboard 焊在 clear_apply.py 里，edit_shot 焊在 edit_shot.py 里，
-# _episode_detail_projection 焊在 episode_detail.py 里，_finalize_storyboard_evidence
-# 焊在 evidence.py 里，_storyboard_status_snapshot 焊在 status_snapshot.py 里，
-# _storyboard_task 焊在 task_body.py 里，基线均按实测 * 1.15 向上取整到 25；其余子
-# 文件已落在 defaults 以内，不需要 baseline 条目。
-"app/domain/storyboard_ops/clear_apply.py" = 325
-"app/domain/storyboard_ops/edit_shot.py" = 500
-"app/domain/storyboard_ops/episode_detail.py" = 375
-"app/domain/storyboard_ops/evidence.py" = 250
-"app/domain/storyboard_ops/status_snapshot.py" = 400
-"app/domain/storyboard_ops/task_body.py" = 500
-# app/domain/video_ops.py 拆包同上：单函数行数没有因为拆分而改变，
-# _complete_episode_core 焊在 completion_core.py 里，_confirm_episode_core_impl 焊在
-# confirm_episode.py 里，evaluate_storyboard_for_confirmation 焊在
-# confirmation_eval.py 里，_generate_episode_core 焊在 generate.py 里，
-# _complete_project_videos_core 焊在 project_queue_complete.py 里，基线均按实测 *
-# 1.15 向上取整到 25；其余子文件已落在 defaults 以内，不需要 baseline 条目。
-"app/domain/video_ops/completion_core.py" = 525
-"app/domain/video_ops/confirm_episode.py" = 425
-"app/domain/video_ops/confirmation_eval.py" = 325
-"app/domain/video_ops/generate.py" = 425
-"app/domain/video_ops/project_queue_complete.py" = 575
-"app/harness/model_gateway.py" = 450
-"app/hiagent.py" = 350
-"app/identity_adjudication.py" = 375
-"app/identity_authority.py" = 275
-"app/loops/base.py" = 300
-"app/media_exec/concat.py" = 475
-"app/media_exec/enqueue.py" = 975
-# app/media_exec/run_job.py 进一步拆包同上（见 baseline.line_count 里的注释）：
-# _run_job 单函数行数没有因为拆分而改变（移动未重写，1,157 行）；两个新子文件
-# 各自焊着原文件里就已经存在的单一大函数（同理移动未重写）：
-# _prepare_reference_mode_inputs（505 行）落在 input_reference.py，
-# _prepare_first_last_mode_inputs（427 行）落在 input_first_frame_last.py；
-# 基线均按实测 * 1.15 向上取整到 25。其余 11 个新子文件已落在 defaults（200）
-# 以内，不需要 baseline 条目。
-"app/media_exec/run_job.py" = 1350
-"app/media_exec/input_reference.py" = 600
-"app/media_exec/input_first_frame_last.py" = 500
-"app/media_pipeline/status.py" = 275
-"app/minimax_h3.py" = 275
-"app/multiview.py" = 300
-# app/narrative.py（3,435 行）2026-08-30 拆成 app/narrative/**（见 baseline.line_count
-# 里的注释）：单函数行数没有因为拆分而改变（移动未重写），validate_screenplay_
-# narrative 焊在 screenplay_validate.py 里，validate_storyboard_narrative 焊在
-# storyboard_validate.py 里，基线均按实测 * 1.15 向上取整到 25。其余子文件已落在
-# defaults（200）以内，不需要 baseline 条目。
-"app/narrative/screenplay_validate.py" = 1825
-"app/narrative/storyboard_validate.py" = 1450
-# app/narrative_blueprint.py（5,128 行）2026-08-29 拆成 app/narrative_blueprint/**
-# 真包（按关注点分文件：provider 归一化、shard schema、核心模型、shard 结构校验、
-# 语义复核 schema/校验、voice/身份问题、state_subject 问题/感知/归属/误判补丁、
-# patch 应用、场景计划推导、顶层结构校验、场景契约校验、prompt 契约）。多数子
-# 文件正文远低于默认阈值，以下 8 个仍焊着原文件里就已经存在的单一大函数（移动
-# 未重写）；基线 = 实测 * 1.15 向上取整到 25 的整数倍，棘轮只降不升。
-"app/narrative_blueprint/patch_apply.py" = 300
-"app/narrative_blueprint/scene_contract.py" = 300
-"app/narrative_blueprint/scene_plans.py" = 350
-"app/narrative_blueprint/shard_schema.py" = 275
-"app/narrative_blueprint/shard_validate.py" = 275
-"app/narrative_blueprint/state_subject_issues.py" = 300
-"app/narrative_blueprint/validate.py" = 550
-"app/narrative_blueprint/voice_identity_issues.py" = 300
-"app/narrative_outline.py" = 1525
-"app/narrative_priority.py" = 450
-"app/narrative_repair.py" = 300
-"app/observability/api.py" = 500
-"app/orchestration/media_scheduler.py" = 250
-"app/portraits/cards.py" = 275
-"app/portraits/cards_ensure.py" = 275
-"app/portraits/discovery.py" = 250
-"app/portraits/discovery_legacy.py" = 800
-"app/portraits/future_identity_resolution.py" = 1075
-"app/portraits/identity_response_projection.py" = 700
-"app/portraits/portrait_drift.py" = 250
-"app/portraits/resolution_apply_screenplay.py" = 275
-"app/portraits/resolution_store.py" = 225
-"app/portraits/structural_coverage_audit.py" = 800
-"app/portraits/structural_coverage_ensure.py" = 525
-"app/production/patch.py" = 250
-"app/production/prep_pack/generate_once.py" = 250
-"app/production/prep_pack/resolve_assets.py" = 960
-"app/production/publish.py" = 475
-"app/production/revision.py" = 400
-"app/production/screenplay_authority.py" = 350
-"app/production/screenplay_document.py" = 325
-"app/production/screenplay_repair/checkpoint_recovery.py" = 225
-"app/production/screenplay_repair/llm_field_patch.py" = 480
-"app/production/screenplay_repair/narrative_graph_normalize.py" = 1625
-"app/production/screenplay_repair/qa.py" = 235
-"app/production/screenplay_repair/revalidate_resume.py" = 355
-"app/production/storyboard_pack.py" = 275
-"app/repair_router.py" = 300
-"app/scenes.py" = 400
-"app/schemas.py" = 325
-# app/screenplay_ir.py（6,916 行；4125 -> 375 后 compile_screenplay_ir 已经从
-# 3,585 行单函数拆成编排者 + 约 45 个 helper）2026-08-29 进一步拆成
-# app/screenplay_ir/** 真包（按编译流水线阶段分文件：解析/校验 -> 事件推导 ->
-# 索引 -> 证据编译 -> 契约组装，与拆分前 helper 命名已经体现的阶段划分一致）。
-# 多数子文件正文远低于默认阈值，以下 8 个仍焊着原文件里就已经存在的单一大函数
-# （移动未重写，其中 state_facts.py::_ir_compile_state_facts_and_actions 就是
-# 旧基线里那个 322 行函数本身）；基线 = 实测 * 1.15 向上取整到 25 的整数倍，
-# 棘轮只降不升。
-"app/screenplay_ir/compiler.py" = 275
-"app/screenplay_ir/dialogue_outline.py" = 275
-"app/screenplay_ir/event_derivation.py" = 325
-"app/screenplay_ir/evidence_compile.py" = 325
-"app/screenplay_ir/experience_contracts.py" = 275
-"app/screenplay_ir/identity_authorities.py" = 300
-"app/screenplay_ir/plot_audience.py" = 275
-"app/screenplay_ir/state_facts.py" = 375
-# app/screenplay_scene_shards.py 拆包后，6 个子模块各自只装了一个原文件里就
-# 已经存在的单一大函数/方法（未新增、未合并）：compile_draft.py::
-# compile_screenplay_scene_shard_draft、generate_shards.py::
-# generate_screenplay_scene_shards、identity_scaffold.py::
-# _compile_unit_identity_scaffold、input_contracts.py::
-# build_screenplay_scene_input_contracts、semantic_review.py::
-# _semantic_review_scene_shard_draft、shard_validate.py::
-# validate_screenplay_scene_shard。基线 = 实测 * 1.15 向上取整到 25 的整数倍；
-# semantic_review.py 650 与拆分前 app/screenplay_scene_shards.py 的原基线相同
-# （该函数本身未被这次拆分触碰）。
-"app/screenplay_scene_shards/compile_draft.py" = 275
-"app/screenplay_scene_shards/generate_shards.py" = 625
-"app/screenplay_scene_shards/identity_scaffold.py" = 350
-"app/screenplay_scene_shards/input_contracts.py" = 300
-"app/screenplay_scene_shards/semantic_review.py" = 650
-"app/screenplay_scene_shards/shard_validate.py" = 325
-"app/stages/blueprint_budget.py" = 212
-"app/stages/blueprint_checkpoint.py" = 347
-"app/stages/blueprint_generate_entry.py" = 272
-"app/stages/blueprint_generate_sharded.py" = 576
-"app/stages/blueprint_ownership_repair.py" = 260
-"app/stages/blueprint_repair.py" = 506
-"app/stages/blueprint_semantic_review.py" = 1009
-"app/stages/common.py" = 330
-"app/stages/ir_complete.py" = 415
-"app/stages/roster_recurring.py" = 424
-"app/stages/screenplay_generate.py" = 476
-"app/storyboard_supervisor.py" = 650
-"app/system_api.py" = 600
-# app/validators.py 拆包同上（见 baseline.line_count 里的注释）：单函数行数没有
-# 因为拆分而改变（移动未重写），焊着巨型函数的子文件基线按实测 * 1.15 向上取整
-# 到 25；其余子文件已落在 defaults（200）以内，不需要 baseline 条目。
-"app/validators/dialogue_chains.py" = 375
-"app/validators/offbible_characters.py" = 275
-"app/validators/outline_dialogue.py" = 275
-"app/validators/prep_pack_ledger.py" = 500
-"app/validators/screenplay_validate.py" = 650
-"app/validators/storyboard_core.py" = 625
-"app/validators/storyboard_delivery.py" = 250
-# app/video_modes.py 拆包同上（见 baseline.line_count 里的注释）：单函数行数没有
-# 因为拆分而改变，_build_generated_reference_assets_legacy 焊在
-# reference_generate_legacy.py 里，基线按实测 * 1.15 向上取整到 25（与拆分前
-# app/video_modes.py 的原基线数值相同，纯属四舍五入巧合，该函数本身未被这次拆分
-# 触碰）；其余子文件已落在 defaults（200）以内，不需要 baseline 条目。
-"app/video_modes/reference_generate_legacy.py" = 1525
-# app/video_plan.py（3,406 行）2026-08-30 拆成 app/video_plan/**（见 baseline.line_
-# count 里的注释）：单函数行数没有因为拆分而改变（移动未重写），generate_episode_
-# plan 焊在 generate.py 里，validate_episode_plan 焊在 validate.py 里，基线均按
-# 实测 * 1.15 向上取整到 25。其余子文件已落在 defaults（200）以内，不需要
-# baseline 条目。
-"app/video_plan/generate.py" = 750
-"app/video_plan/validate.py" = 425
-# app/video_supervisor.py 拆包同上（见 baseline.line_count 里的注释）：单函数行数
-# 没有因为拆分而改变。run_video_completion_supervisor 焊在 run_loop.py 里，基线
-# 按实测 * 1.15 向上取整到 25。rebuild_coverage_ledger（逐镜分级重建，284 行）
-# 移动进 coverage.py 后所在文件整体仍在 line_count defaults（600）以内，但函数
-# 本身超过 max_function_lines_python，单独记一条基线。
-"app/video_supervisor/coverage.py" = 350
-"app/video_supervisor/run_loop.py" = 650
+"app/storyboard_authority.py" = 583
+"app/storyboard_supervisor.py" = 1622
+"app/storyboard_workspace.py" = 973
+"app/system_api.py" = 2420
+"app/validators/dialogue_chains.py" = 553
+"app/validators/outline_dialogue.py" = 566
+"app/validators/prep_pack_ledger.py" = 647
+"app/validators/screenplay_validate.py" = 746
+"app/validators/storyboard_core.py" = 676
+"app/validators/storyboard_delivery.py" = 526
+"app/video_modes/keyframe_contract.py" = 509
+"app/video_modes/reference_generate_legacy.py" = 1368
+"app/video_modes/seedance_pack.py" = 523
+"app/video_plan/generate.py" = 689
+"app/video_prompt_ai.py" = 603
+"app/video_supervisor/run_loop.py" = 606
+"frontend/src/App.tsx" = 1525
+"frontend/src/api/projects.ts" = 410
+"frontend/src/api/screenplay.ts" = 330
+"frontend/src/components/EpisodeCrumb.tsx" = 301
+"frontend/src/components/observability/TraceDrawer.tsx" = 834
+"frontend/src/pages/BiblePage.tsx" = 1934
+"frontend/src/pages/BoardPage.test.ts" = 360
+"frontend/src/pages/BoardPage.tsx" = 1358
+"frontend/src/pages/CinemaPage.tsx" = 931
+"frontend/src/pages/EpisodesPage.tsx" = 741
+"frontend/src/pages/MonitorPage.test.ts" = 313
+"frontend/src/pages/MonitorPage.tsx" = 874
+"frontend/src/pages/ScenesPage.tsx" = 1586
+"frontend/src/pages/ScriptPage.render.test.ts" = 523
+"frontend/src/pages/ScriptPage.test.ts" = 1112
+"frontend/src/pages/ScriptPage.tsx" = 945
+"frontend/src/pages/Studio.tsx" = 497
+"frontend/src/pages/WallPage.test.ts" = 343
+"frontend/src/pages/WallPage.tsx" = 948
+"frontend/src/pages/monitor/CallsSection.tsx" = 397
+"frontend/src/pages/monitor/JobDrawer.tsx" = 320
+"frontend/src/pages/monitor/JobsSection.tsx" = 384
+"frontend/src/pages/monitor/SettingsSection.tsx" = 376
+"frontend/src/pages/monitor/models/useModelCenterState.ts" = 333
+"frontend/src/pages/monitor/shared.tsx" = 381
 
-# 二元维度棘轮：以下两张表各是「引入本闸门那一刻已存在的既有情况」快照，不是
-# 业务判据白名单。新文件、新出现的星号导入/新增的无 docstring 文件不受此豁免——
-# 只豁免捕获时刻已经存在的那批。
+[baseline.function_lines]
+"app/agent/orchestrator.py" = 67
+"app/agent_api.py" = 61
+"app/artifacts.py" = 125
+"app/auth/admin_api.py" = 67
+"app/benchmarks.py" = 100
+"app/capabilities/bus.py" = 96
+"app/capabilities/catalog.py" = 1028
+"app/capabilities/handlers/delivery.py" = 60
+"app/capabilities/handlers/project.py" = 100
+"app/capabilities/handlers/screenplay.py" = 56
+"app/capabilities/handlers/video.py" = 86
+"app/capabilities/idempotency.py" = 65
+"app/capabilities/preflight.py" = 172
+"app/compiler.py" = 461
+"app/completion_grant.py" = 324
+"app/continuity.py" = 138
+"app/db.py" = 266
+"app/delivery.py" = 689
+"app/domain/bible_ops/auto_change.py" = 213
+"app/domain/bible_ops/edit.py" = 125
+"app/domain/bible_ops/portrait_candidates.py" = 68
+"app/domain/bible_ops/precheck.py" = 120
+"app/domain/bible_ops/refs_generation.py" = 85
+"app/domain/bible_ops/scene_assets.py" = 79
+"app/domain/bible_ops/scene_bible_prep.py" = 70
+"app/domain/bible_ops/scene_refs.py" = 62
+"app/domain/bible_ops/style_and_drafts.py" = 117
+"app/domain/bible_ops/task_recovery.py" = 73
+"app/domain/bible_ops/task_run.py" = 130
+"app/domain/bible_ops/view_redo.py" = 82
+"app/domain/common.py" = 134
+"app/domain/projects.py" = 201
+"app/domain/review_wall.py" = 208
+"app/domain/screenplay_ops/activation.py" = 324
+"app/domain/screenplay_ops/batch.py" = 121
+"app/domain/screenplay_ops/delete.py" = 120
+"app/domain/screenplay_ops/edit.py" = 334
+"app/domain/screenplay_ops/guarded.py" = 52
+"app/domain/screenplay_ops/preflight.py" = 91
+"app/domain/screenplay_ops/repair.py" = 238
+"app/domain/screenplay_ops/run_control.py" = 101
+"app/domain/screenplay_ops/start_resume.py" = 99
+"app/domain/screenplay_ops/status_snapshot.py" = 107
+"app/domain/screenplay_ops/task_body.py" = 132
+"app/domain/screenplay_ops/task_recovery.py" = 245
+"app/domain/storyboard_ops/character_policy_repair.py" = 90
+"app/domain/storyboard_ops/clear_apply.py" = 253
+"app/domain/storyboard_ops/clear_preview.py" = 55
+"app/domain/storyboard_ops/edit_shot.py" = 395
+"app/domain/storyboard_ops/episode_detail.py" = 286
+"app/domain/storyboard_ops/evidence.py" = 186
+"app/domain/storyboard_ops/public_shot_versions.py" = 124
+"app/domain/storyboard_ops/resume_state.py" = 113
+"app/domain/storyboard_ops/scene_projection.py" = 72
+"app/domain/storyboard_ops/shot_edit_session.py" = 81
+"app/domain/storyboard_ops/spoken_contract.py" = 54
+"app/domain/storyboard_ops/staleness.py" = 69
+"app/domain/storyboard_ops/start_resume.py" = 149
+"app/domain/storyboard_ops/status_snapshot.py" = 295
+"app/domain/storyboard_ops/structure.py" = 183
+"app/domain/storyboard_ops/task_body.py" = 360
+"app/domain/storyboard_ops/task_recovery.py" = 109
+"app/domain/storyboard_ops/task_run.py" = 129
+"app/domain/storyboard_ops/video_model.py" = 71
+"app/domain/video_ops/adopt.py" = 93
+"app/domain/video_ops/capability.py" = 98
+"app/domain/video_ops/completion_contract.py" = 163
+"app/domain/video_ops/completion_core.py" = 415
+"app/domain/video_ops/confirm_episode.py" = 320
+"app/domain/video_ops/confirmation_eval.py" = 237
+"app/domain/video_ops/confirmation_gate.py" = 87
+"app/domain/video_ops/generate.py" = 310
+"app/domain/video_ops/misc.py" = 76
+"app/domain/video_ops/plan.py" = 89
+"app/domain/video_ops/project_queue_complete.py" = 477
+"app/domain/video_ops/project_queue_core.py" = 61
+"app/domain/video_ops/project_queue_run.py" = 97
+"app/domain/video_ops/resume_episode.py" = 68
+"app/downstream_authority.py" = 98
+"app/errors.py" = 64
+"app/evidence/media.py" = 89
+"app/evidence/repository.py" = 120
+"app/final_edit.py" = 82
+"app/harness/model_gateway.py" = 326
+"app/hiagent.py" = 224
+"app/identity_adjudication.py" = 293
+"app/identity_authority.py" = 189
+"app/identity_contracts.py" = 159
+"app/ingest.py" = 60
+"app/loops/base.py" = 235
+"app/mcp/server.py" = 72
+"app/media_exec/authority.py" = 95
+"app/media_exec/checkpoints.py" = 78
+"app/media_exec/concat.py" = 335
+"app/media_exec/dispatch.py" = 179
+"app/media_exec/enqueue.py" = 743
+"app/media_exec/input_boundary.py" = 57
+"app/media_exec/input_first_frame_last.py" = 409
+"app/media_exec/input_reference.py" = 451
+"app/media_exec/input_video_mode.py" = 98
+"app/media_exec/job_recovery.py" = 147
+"app/media_exec/reference_progress.py" = 56
+"app/media_exec/retry_scheduling.py" = 51
+"app/media_exec/run_job.py" = 1088
+"app/media_exec/worker_loop.py" = 54
+"app/media_pipeline/reference_store.py" = 169
+"app/media_pipeline/scheduler.py" = 74
+"app/media_pipeline/stage_state.py" = 68
+"app/media_pipeline/status.py" = 195
+"app/minimax_h3.py" = 225
+"app/model_migration.py" = 80
+"app/monitoring.py" = 63
+"app/multiview.py" = 203
+"app/narrative/plan_index.py" = 121
+"app/narrative/screenplay_validate.py" = 1528
+"app/narrative/storyboard_validate.py" = 1192
+"app/narrative_blueprint/patch_apply.py" = 240
+"app/narrative_blueprint/prompt_contract.py" = 110
+"app/narrative_blueprint/provider_normalize.py" = 66
+"app/narrative_blueprint/scene_contract.py" = 245
+"app/narrative_blueprint/scene_plans.py" = 270
+"app/narrative_blueprint/semantic_review_schema.py" = 122
+"app/narrative_blueprint/semantic_review_validate.py" = 88
+"app/narrative_blueprint/shard_schema.py" = 228
+"app/narrative_blueprint/shard_validate.py" = 222
+"app/narrative_blueprint/state_subject_issues.py" = 234
+"app/narrative_blueprint/state_subject_misclassification_patch.py" = 114
+"app/narrative_blueprint/state_subject_ownership_patch.py" = 153
+"app/narrative_blueprint/state_subject_perception.py" = 94
+"app/narrative_blueprint/validate.py" = 446
+"app/narrative_blueprint/voice_identity_issues.py" = 248
+"app/narrative_outline.py" = 1243
+"app/narrative_priority.py" = 363
+"app/narrative_repair.py" = 235
+"app/novel_formats.py" = 52
+"app/observability/api.py" = 404
+"app/orchestration/api.py" = 116
+"app/orchestration/engine.py" = 77
+"app/orchestration/media_runs.py" = 80
+"app/orchestration/media_scheduler.py" = 195
+"app/planning.py" = 75
+"app/portraits/cards.py" = 238
+"app/portraits/cards_ensure.py" = 229
+"app/portraits/discovery.py" = 217
+"app/portraits/discovery_fragments.py" = 89
+"app/portraits/discovery_legacy.py" = 696
+"app/portraits/evidence_catalog.py" = 90
+"app/portraits/evidence_merge.py" = 70
+"app/portraits/evidence_receipt.py" = 96
+"app/portraits/future_identity_resolution.py" = 876
+"app/portraits/identity_response_projection.py" = 502
+"app/portraits/identity_schemas.py" = 53
+"app/portraits/portrait_drift.py" = 211
+"app/portraits/portrait_io.py" = 154
+"app/portraits/resolution_apply_labels.py" = 162
+"app/portraits/resolution_apply_screenplay.py" = 243
+"app/portraits/resolution_errors.py" = 101
+"app/portraits/resolution_store.py" = 178
+"app/portraits/structural_coverage.py" = 70
+"app/portraits/structural_coverage_audit.py" = 771
+"app/portraits/structural_coverage_ensure.py" = 475
+"app/production/certificate.py" = 140
+"app/production/grant.py" = 57
+"app/production/patch.py" = 186
+"app/production/prep_pack/chunk_extraction.py" = 85
+"app/production/prep_pack/entry.py" = 57
+"app/production/prep_pack/functional_candidate_verdict.py" = 52
+"app/production/prep_pack/functional_candidates.py" = 71
+"app/production/prep_pack/generate_once.py" = 164
+"app/production/prep_pack/provenance.py" = 66
+"app/production/prep_pack/publish.py" = 137
+"app/production/prep_pack/resolve_assets.py" = 512
+"app/production/prep_pack/true_name.py" = 57
+"app/production/publish.py" = 337
+"app/production/revision.py" = 322
+"app/production/screenplay_authority.py" = 225
+"app/production/screenplay_document.py" = 231
+"app/production/screenplay_repair/checkpoint_recovery.py" = 198
+"app/production/screenplay_repair/dialogue_chain_repair.py" = 178
+"app/production/screenplay_repair/dialogue_source_alignment.py" = 104
+"app/production/screenplay_repair/gates.py" = 63
+"app/production/screenplay_repair/llm_field_patch.py" = 453
+"app/production/screenplay_repair/llm_patch_prompt.py" = 146
+"app/production/screenplay_repair/narrative_graph_normalize.py" = 1584
+"app/production/screenplay_repair/narrative_patch_ops.py" = 71
+"app/production/screenplay_repair/patch_planning.py" = 52
+"app/production/screenplay_repair/preflight.py" = 154
+"app/production/screenplay_repair/qa.py" = 217
+"app/production/screenplay_repair/revalidate_resume.py" = 328
+"app/production/storyboard_pack.py" = 182
+"app/recovery.py" = 85
+"app/refs.py" = 120
+"app/rejected_media.py" = 73
+"app/renderability_score.py" = 69
+"app/repair_router.py" = 219
+"app/scenes.py" = 295
+"app/schemas.py" = 251
+"app/screenplay_ir/assemble.py" = 79
+"app/screenplay_ir/compile_setup.py" = 120
+"app/screenplay_ir/compiler.py" = 195
+"app/screenplay_ir/contract_validation.py" = 66
+"app/screenplay_ir/coverage_rows.py" = 80
+"app/screenplay_ir/dialogue_outline.py" = 205
+"app/screenplay_ir/event_derivation.py" = 261
+"app/screenplay_ir/event_indexing.py" = 160
+"app/screenplay_ir/event_relations.py" = 134
+"app/screenplay_ir/evidence_compile.py" = 226
+"app/screenplay_ir/experience_contracts.py" = 197
+"app/screenplay_ir/identity_authorities.py" = 245
+"app/screenplay_ir/identity_normalize.py" = 130
+"app/screenplay_ir/plot_audience.py" = 182
+"app/screenplay_ir/prompt_context.py" = 89
+"app/screenplay_ir/source_audit.py" = 166
+"app/screenplay_ir/state_facts.py" = 288
+"app/screenplay_ir/unit_ownership.py" = 181
+"app/screenplay_ir/unit_typed_validation.py" = 169
+"app/screenplay_scene_shards/artifact_compat.py" = 158
+"app/screenplay_scene_shards/common.py" = 57
+"app/screenplay_scene_shards/compile_draft.py" = 217
+"app/screenplay_scene_shards/duplication_filter.py" = 98
+"app/screenplay_scene_shards/envelope_generate.py" = 142
+"app/screenplay_scene_shards/generate_shards.py" = 469
+"app/screenplay_scene_shards/identity_registry.py" = 102
+"app/screenplay_scene_shards/identity_scaffold.py" = 286
+"app/screenplay_scene_shards/input_contracts.py" = 242
+"app/screenplay_scene_shards/provider_schema.py" = 112
+"app/screenplay_scene_shards/review_consensus.py" = 75
+"app/screenplay_scene_shards/review_prompt.py" = 67
+"app/screenplay_scene_shards/scene_prompt.py" = 110
+"app/screenplay_scene_shards/semantic_review.py" = 521
+"app/screenplay_scene_shards/shard_merge.py" = 168
+"app/screenplay_scene_shards/shard_plan.py" = 140
+"app/screenplay_scene_shards/shard_validate.py" = 244
+"app/seedance.py" = 117
+"app/source_excerpt.py" = 60
+"app/source_facts.py" = 93
+"app/spoken_contract.py" = 71
+"app/stages/alias_backfill.py" = 97
+"app/stages/alias_verdict.py" = 87
+"app/stages/bible_generate.py" = 126
+"app/stages/bible_paratext.py" = 64
+"app/stages/bible_supplement.py" = 97
+"app/stages/blueprint_budget.py" = 186
+"app/stages/blueprint_budget_trace.py" = 103
+"app/stages/blueprint_checkpoint.py" = 331
+"app/stages/blueprint_freeze.py" = 128
+"app/stages/blueprint_generate_entry.py" = 255
+"app/stages/blueprint_generate_sharded.py" = 539
+"app/stages/blueprint_ownership_repair.py" = 244
+"app/stages/blueprint_prompt.py" = 97
+"app/stages/blueprint_repair.py" = 479
+"app/stages/blueprint_semantic_review.py" = 958
+"app/stages/blueprint_shard_structure.py" = 100
+"app/stages/common.py" = 306
+"app/stages/ir_complete.py" = 388
+"app/stages/ir_patch.py" = 142
+"app/stages/ir_snapshot.py" = 156
+"app/stages/roster_merge.py" = 120
+"app/stages/roster_personhood.py" = 71
+"app/stages/roster_recurring.py" = 319
+"app/stages/roster_truename.py" = 87
+"app/stages/screenplay_generate.py" = 445
+"app/stages/status_facts_backfill.py" = 132
+"app/stages/status_facts_verdict.py" = 62
+"app/storyboard_authority.py" = 157
+"app/storyboard_supervisor.py" = 501
+"app/storyboard_workspace.py" = 117
+"app/system_api.py" = 505
+"app/validators/continuity_gate.py" = 66
+"app/validators/dialogue_chains.py" = 299
+"app/validators/ending_hook.py" = 55
+"app/validators/offbible_characters.py" = 190
+"app/validators/outline_capacity.py" = 103
+"app/validators/outline_dialogue.py" = 207
+"app/validators/outline_validate.py" = 134
+"app/validators/prep_pack_ledger.py" = 172
+"app/validators/scene_match.py" = 67
+"app/validators/screenplay_ledger.py" = 177
+"app/validators/screenplay_validate.py" = 529
+"app/validators/storyboard_core.py" = 485
+"app/validators/storyboard_delivery.py" = 182
+"app/video_command_operations.py" = 115
+"app/video_cost_model.py" = 55
+"app/video_crop.py" = 81
+"app/video_issues.py" = 151
+"app/video_modes/asset_lookup.py" = 72
+"app/video_modes/continuity_tail.py" = 96
+"app/video_modes/keyframe_contract.py" = 120
+"app/video_modes/mode_selection.py" = 65
+"app/video_modes/reference_assemble.py" = 155
+"app/video_modes/reference_generate.py" = 101
+"app/video_modes/reference_generate_legacy.py" = 1188
+"app/video_modes/reference_prompt.py" = 151
+"app/video_modes/seedance_pack.py" = 139
+"app/video_plan/capability_snapshot.py" = 88
+"app/video_plan/generate.py" = 591
+"app/video_plan/normalize.py" = 112
+"app/video_plan/publication_service.py" = 62
+"app/video_plan/publish.py" = 104
+"app/video_plan/release_manifest.py" = 155
+"app/video_plan/replan.py" = 166
+"app/video_plan/submission_authority.py" = 140
+"app/video_plan/validate.py" = 311
+"app/video_prompt_ai.py" = 127
+"app/video_repair_router.py" = 135
+"app/video_supervisor/adoption.py" = 73
+"app/video_supervisor/assets.py" = 108
+"app/video_supervisor/authority.py" = 102
+"app/video_supervisor/checkpoint.py" = 131
+"app/video_supervisor/closeout.py" = 132
+"app/video_supervisor/coverage.py" = 259
+"app/video_supervisor/dispatch.py" = 167
+"app/video_supervisor/issues_cascade.py" = 56
+"app/video_supervisor/job_control.py" = 81
+"app/video_supervisor/ops.py" = 168
+"app/video_supervisor/resilience.py" = 58
+"app/video_supervisor/run_loop.py" = 499
+"app/video_supervisor/storyboard_repair.py" = 123
+"app/video_supervisor/watchdog.py" = 134
 
 [baseline.docstring_exempt]
-files = [
-  "app/__init__.py",
-  "app/benchmarks.py",
-  "app/delivery.py",
-  "app/domain/projects.py",
-  "app/downstream_authority.py",
-  "app/evaluations/issues.py",
-  "app/evidence/media.py",
-  "app/evidence/repository.py",
-  "app/harness/context.py",
-  "app/harness/contracts.py",
-  "app/harness/model_gateway.py",
-  "app/harness/types.py",
-  "app/loops/base.py",
-  "app/media_exec/concat.py",
-  "app/media_exec/enqueue.py",
-  "app/media_exec/legacy_keyframes.py",
-  "app/observability/tracing.py",
-  "app/orchestration/api.py",
-  "app/orchestration/engine.py",
-  "app/orchestration/media_runs.py",
-  "app/orchestration/media_scheduler.py",
-  "app/orchestration/state_machine.py",
-]
+"files" = ['app/__init__.py', 'app/benchmarks.py', 'app/delivery.py', 'app/domain/projects.py', 'app/downstream_authority.py', 'app/evaluations/issues.py', 'app/evidence/media.py', 'app/evidence/repository.py', 'app/harness/context.py', 'app/harness/contracts.py', 'app/harness/model_gateway.py', 'app/harness/types.py', 'app/loops/base.py', 'app/media_exec/concat.py', 'app/media_exec/enqueue.py', 'app/media_exec/legacy_keyframes.py', 'app/observability/tracing.py', 'app/orchestration/api.py', 'app/orchestration/engine.py', 'app/orchestration/media_runs.py', 'app/orchestration/media_scheduler.py', 'app/orchestration/state_machine.py']
 
-# `from ...common import *` 曾是 app/media_exec 与 app/domain 里 exec() 外观遗留的
-# 写法（CLAUDE.md「Retiring Features」）：`app/worker.py` 曾把 media_exec/*.py、
-# `app/api.py` 曾把 domain/*.py exec() 进自身命名空间，那些文件曾靠 `import *`
-# 从共享的 common.py 拿到切片间共用的名字。两侧都已随架构分层方案 P0-1（拆掉
-# exec 外观）退场：app/media_exec 五个切片、app/domain 七个切片先后拆成真包，
-# 互相需要的名字改成显式 `from .sibling import name` / `from app.domain.sibling
-# import name`（分别见 app/media_exec/__init__.py 与 app/domain/__init__.py 模块
-# docstring）。这张表按设计应保持清空——不是继续往里加，新拆包如需要临时豁免应
-# 走顶部 `exemptions`（带 reason/expires）而不是复用这张表。
 [baseline.star_import_exempt]
-files = []
+"files" = []
+
