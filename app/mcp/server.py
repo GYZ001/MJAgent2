@@ -14,6 +14,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from app.auth.principal import Principal, set_current_principal
 from app.capabilities.loader import ensure_catalog_loaded
 from app.mcp import auth, prompts, resources, tools
 from app.mcp.errors import ForbiddenError, McpError
@@ -58,6 +59,41 @@ def _rpc_result(request_id: Any, result: Any) -> dict[str, Any]:
 def _require_scope(claims: auth.TokenClaims, required: set[str]) -> None:
     if not (required & claims.scopes):
         raise ForbiddenError(f"token 缺少所需 scope：{sorted(required)}")
+
+
+def _principal_from_claims(claims: auth.TokenClaims) -> Principal:
+    """把 Bearer token 的 claims 转成账号级隔离咽喉点认识的 Principal。
+
+    ``app.domain.common._project_or_404``/``_episode_or_404``（几乎所有
+    bible/screenplay/storyboard/video 领域函数的项目存在性入口）与
+    ``app.domain.projects.list_projects`` 只认 ``app.auth.principal.
+    get_current_principal()``；HTTP 路径由中间件（``app.main::
+    _inject_session_and_approval`` -> ``bind_request_principal``）在异步请求
+    上下文里注入。MCP 走独立的 Bearer token 鉴权，不经那条中间件，此前
+    ``get_current_principal()`` 在 MCP 请求里恒为 None——domain 层把它当成
+    「未挂鉴权闸门的内部调用」直接放行（``_assert_principal_owns`` 的既有
+    约定），等于任何 token 都能触达任意账号的项目。这里复用同一个
+    ContextVar（在 ``mcp_endpoint`` 这个 async 函数体内直接写，不经
+    ``run_in_threadpool``/``Depends``，不会重蹈「同步依赖写 ContextVar
+    静默失效」的坑），不新造第二套判据。
+
+    token 未绑定账号（``claims.owner_user_id`` 为空——bootstrap token、或
+    脚本/测试在无 HTTP 会话上下文时直接调用 ``create_token()``）时，合成一个
+    不会匹配任何真实 ``owner_user_id`` 的身份：``Principal.owns()`` 对它恒为
+    False，结构上拒绝一切项目级资源，而不是放行。「空集合不等于无需检查」——
+    未知归属必须解释成「什么都不合法」，不能解释成「不受限制」。
+    """
+    if claims.owner_user_id:
+        return Principal(
+            user_id=claims.owner_user_id,
+            username=claims.owner_username or claims.owner_user_id,
+            is_system_admin=claims.is_system_admin,
+        )
+    return Principal(
+        user_id=f"mcp-unbound:{claims.token_id}",
+        username="mcp-unbound",
+        is_system_admin=False,
+    )
 
 
 async def _dispatch(method: str, params: dict[str, Any], claims: auth.TokenClaims) -> Any:
@@ -148,6 +184,18 @@ async def mcp_endpoint(request: Request) -> JSONResponse:
     except auth.AuthError as exc:
         return JSONResponse({"error": exc.code, "message": exc.message}, status_code=exc.status)
 
+    # Principal 必须在这里（本函数的 async 上下文里）直接写 ContextVar，不能
+    # 经 Depends（FastAPI 用 run_in_threadpool 跑同步依赖，线程内的写入不会
+    # 传回请求上下文）——与 app.main::_inject_session_and_approval 中间件对
+    # HTTP 会话的处理是同一条纪律，见 _principal_from_claims 的文档字符串。
+    set_current_principal(_principal_from_claims(claims))
+    try:
+        return await _handle_rpc_request(request, claims)
+    finally:
+        set_current_principal(None)
+
+
+async def _handle_rpc_request(request: Request, claims: auth.TokenClaims) -> JSONResponse:
     try:
         get_rate_limiter().check(claims.token_id)
     except RateLimitExceeded as exc:

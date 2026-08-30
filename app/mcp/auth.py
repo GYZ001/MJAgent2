@@ -2,6 +2,17 @@
 
 本地单用户部署也必须认证：token 明文只在创建时返回一次，落盘只存 hash；
 可随时撤销；scope 与 Capability Registry 的 `manju:*` 完全对齐。
+
+账号即项目空间落地后，token 还必须携带**归属账号**：``app.domain.common.
+_project_or_404``/``_episode_or_404``（domain 层唯一的项目/剧集存在性入口，
+账号级隔离的咽喉点）只看 ``app.auth.principal.get_current_principal()``，
+MCP 请求此前从不注入 Principal，等价于「未挂鉴权闸门的内部调用」，任何
+token 都能触达任意账号的项目——见 ``app/mcp/server.py::_principal_from_claims``
+如何把这里签发的 claims 转成一个真实 ``Principal`` 并注入同一个 ContextVar。
+token 创建时若上下文里没有 Principal（bootstrap token、脚本/测试直接调用
+``create_token()``），归属留空，落到「未绑定账号」这一档——``_principal_from_
+claims`` 会把它合成一个不匹配任何真实账号的身份，结构上拒绝一切项目级资源，
+而不是放行（CLAUDE 记录的「空集合不等于无需检查」）。
 """
 from __future__ import annotations
 
@@ -15,6 +26,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.atomic_io import atomic_write_text
+from app.auth.principal import get_current_principal
 from app.config import DATA_DIR
 
 TOKENS_PATH = DATA_DIR / "mcp_tokens.json"
@@ -52,6 +64,13 @@ class TokenClaims:
     scopes: frozenset[str]
     name: str | None = None
     expires_at: float | None = None
+    # 归属账号：token 创建时从 get_current_principal() 捕获，None 表示「未绑定
+    # 账号」（bootstrap token / 脚本或测试在无 HTTP 会话上下文时直接调用
+    # create_token()）。见 app/mcp/server.py::_principal_from_claims 的 fail
+    # closed 处理——未绑定不等于放行，而是不匹配任何真实账号。
+    owner_user_id: str | None = None
+    owner_username: str | None = None
+    is_system_admin: bool = False
 
 
 def _hash_secret(secret: str) -> str:
@@ -105,6 +124,11 @@ def _public_record(record: dict[str, Any]) -> dict[str, Any]:
         "revoked_at": record.get("revoked_at"),
         "last_used_at": record.get("last_used_at"),
         "active": record.get("revoked_at") is None and not _is_expired(record),
+        # 界面承诺必须与实际行为一致：token 能碰到哪个账号的项目，列表就必须
+        # 如实显示，不能只显示 scope 让人误以为「有 scope 就能碰所有项目」。
+        "owner_user_id": record.get("owner_user_id"),
+        "owner_username": record.get("owner_username") or "",
+        "is_system_admin": bool(record.get("is_system_admin")),
     }
 
 
@@ -123,6 +147,11 @@ def create_token(
     # token_id 本身含下划线，明文用 "." 分隔 id/secret，避免解析时被 "_" 切错段。
     plaintext = f"{TOKEN_PREFIX}_{token_id}.{secret}"
     created_at = time.time()
+    # 归属账号从签发时的请求身份捕获，与 app/auth/principal.py::current_actor_name
+    # 记审计字段同一个口径——不接受调用方自报 user_id，只信 get_current_principal()。
+    # 没有 Principal（bootstrap/脚本/测试）时留空，落到「未绑定账号」一档，见
+    # 本文件顶部模块 docstring 与 app/mcp/server.py::_principal_from_claims。
+    principal = get_current_principal()
     record = {
         "id": token_id,
         "name": (name or "").strip()[:80],
@@ -132,6 +161,9 @@ def create_token(
         "expires_at": (created_at + ttl_s) if ttl_s else None,
         "revoked_at": None,
         "last_used_at": None,
+        "owner_user_id": principal.user_id if principal is not None else None,
+        "owner_username": principal.username if principal is not None else None,
+        "is_system_admin": bool(principal.is_system_admin) if principal is not None else False,
     }
     with _lock:
         data = _load()
@@ -188,6 +220,9 @@ def validate_bearer(header: str | None) -> TokenClaims:
         scopes=frozenset(record.get("scopes") or []),
         name=record.get("name") or None,
         expires_at=record.get("expires_at"),
+        owner_user_id=record.get("owner_user_id"),
+        owner_username=record.get("owner_username"),
+        is_system_admin=bool(record.get("is_system_admin")),
     )
 
 

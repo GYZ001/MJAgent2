@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.auth.principal import Principal, set_current_principal
 from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.bus import reset_command_bus_for_tests
 from app.capabilities.policy import reset_approvals_for_tests
@@ -17,6 +18,13 @@ from app.mcp import rate_limit
 from app.mcp.server import router as mcp_router
 
 ORIGIN = "http://localhost:5230"
+
+# 两个账号，各自拥有一个项目——用于证明 MCP token 归属校验真的按账号隔离
+# （不是只挂了个样子）。proj_x/ep_x 是既有测试大量复用的夹具数据，保留原名不
+# 动；owner_x 是它的账号，_token() 默认绑定到它，历史用例因此不需要改动。
+OWNER_X = "user_owner_x"
+OWNER_Y = "user_owner_y"
+ADMIN_ID = "user_sys_admin"
 
 
 @pytest.fixture(autouse=True)
@@ -32,17 +40,32 @@ def _isolated_mcp_state(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp_auth, "TOKENS_PATH", tmp_path / "mcp_tokens.json")
     rate_limit.reset_rate_limiter_for_tests()
     conn = db.get_conn()
+    for user_id, username, is_admin in (
+        (OWNER_X, "owner-x", 0),
+        (OWNER_Y, "owner-y", 0),
+        (ADMIN_ID, "sys-admin", 1),
+    ):
+        conn.execute(
+            "INSERT INTO users(id, username, display_name, auth_provider, status, "
+            "is_system_admin, created_at) VALUES(?,?,?,'local','active',?,?)",
+            (user_id, username, username, is_admin, db.now()),
+        )
     conn.execute(
-        "INSERT INTO projects(id, name, status, created_at) VALUES(?,?,?,?)",
-        ("proj_x", "测试项目", "created", db.now()),
+        "INSERT INTO projects(id, name, status, owner_user_id, created_at) VALUES(?,?,?,?,?)",
+        ("proj_x", "测试项目", "created", OWNER_X, db.now()),
     )
     conn.execute(
         "INSERT INTO episodes(id, project_id, episode_no, title, status, created_at) VALUES(?,?,?,?,?,?)",
         ("ep_x", "proj_x", 1, "第一集", "scripted", db.now()),
     )
+    conn.execute(
+        "INSERT INTO projects(id, name, status, owner_user_id, created_at) VALUES(?,?,?,?,?)",
+        ("proj_y", "另一个账号的项目", "created", OWNER_Y, db.now()),
+    )
     conn.commit()
     yield
     rate_limit.reset_rate_limiter_for_tests()
+    set_current_principal(None)
 
 
 @pytest.fixture
@@ -52,9 +75,33 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-def _token(scopes: list[str] | None = None) -> str:
-    plaintext, _ = mcp_auth.create_token(scopes=scopes, ttl_s=None, name="test")
+def _token_for(
+    user_id: str | None,
+    scopes: list[str] | None = None,
+    *,
+    is_system_admin: bool = False,
+) -> str:
+    """按账号签发 token：模拟真实 HTTP 流程——``POST /api/system/mcp-tokens``
+    挂在 ``require_local_session`` 之后，调用 ``mcp_auth.create_token()`` 时
+    ``get_current_principal()`` 已经由中间件注入了签发者的账号；token 因此
+    绑定这个账号（见 ``app/mcp/auth.py::create_token``）。``user_id=None``
+    模拟没有会话上下文时创建的 token（bootstrap token / 脚本直接调用），
+    应当落到「未绑定账号」一档。"""
+    principal = (
+        Principal(user_id=user_id, username=user_id, is_system_admin=is_system_admin)
+        if user_id is not None
+        else None
+    )
+    set_current_principal(principal)
+    try:
+        plaintext, _ = mcp_auth.create_token(scopes=scopes, ttl_s=None, name="test")
+    finally:
+        set_current_principal(None)
     return plaintext
+
+
+def _token(scopes: list[str] | None = None) -> str:
+    return _token_for(OWNER_X, scopes)
 
 
 def _rpc(
@@ -259,3 +306,108 @@ def test_prompts_get_missing_required_argument_is_rejected(client: TestClient) -
     resp = _rpc(client, "prompts/get", {"name": "diagnose_run", "arguments": {}}, token=_token())
     assert resp.status_code == 200
     assert "error" in resp.json()
+
+
+# ---------------------------------------------------------------------------
+# 账号级项目隔离：MCP token 必须能解析出 principal，并复用
+# app.domain.common._project_or_404 这条已有的归属校验咽喉点——不是只挂了
+# Bearer/scope 就完事。这里同时证明两半：跨账号必须 404（不是 403，不能让
+# 调用方分辨出"对象存在但你无权"和"对象不存在"），本账号自己的项目必须照常
+# 可用。见 app/mcp/server.py::_principal_from_claims。
+# ---------------------------------------------------------------------------
+
+
+def test_tools_call_cross_account_project_is_denied_as_not_found(client: TestClient) -> None:
+    """token 绑定 owner-y，对 owner-x 的 proj_x 发起 bible.cancel：
+    ``_cancel_bible_core`` 内部第一步就是 ``_project_or_404(project_id)``，
+    没有自定义 preflight 短路（confirmation=NEVER 直接执行 handler），是验证
+    这条咽喉点最干净的写路径。"""
+    resp = _rpc(
+        client,
+        "tools/call",
+        {"name": "bible.cancel", "arguments": {"project_id": "proj_x"}},
+        token=_token_for(OWNER_Y, ["manju:generation-text"]),
+    )
+    assert resp.status_code == 200
+    structured = resp.json()["result"]["structuredContent"]
+    assert structured["status"] == "failed"
+    assert structured["error_code"] == "http_404"
+    assert resp.json()["result"]["isError"] is True
+
+
+def test_tools_call_own_account_project_still_works(client: TestClient) -> None:
+    resp = _rpc(
+        client,
+        "tools/call",
+        {"name": "bible.cancel", "arguments": {"project_id": "proj_x"}},
+        token=_token_for(OWNER_X, ["manju:generation-text"]),
+    )
+    assert resp.status_code == 200
+    structured = resp.json()["result"]["structuredContent"]
+    assert structured["status"] == "succeeded", structured
+    assert resp.json()["result"]["isError"] is False
+
+
+def test_resources_read_cross_account_project_is_not_found(client: TestClient) -> None:
+    resp = _rpc(
+        client,
+        "resources/read",
+        {"uri": "manju://projects/proj_x"},
+        token=_token_for(OWNER_Y),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "error" in body
+    assert body["error"]["code"] == -32001
+    assert body["error"]["data"]["code"] == "not_found"
+
+
+def test_resources_read_own_account_project_still_works(client: TestClient) -> None:
+    resp = _rpc(
+        client,
+        "resources/read",
+        {"uri": "manju://projects/proj_x"},
+        token=_token_for(OWNER_X),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "error" not in body
+    assert body["result"]["contents"][0]["uri"] == "manju://projects/proj_x"
+
+
+def test_resources_read_projects_list_scoped_to_token_owner(client: TestClient) -> None:
+    resp_x = _rpc(client, "resources/read", {"uri": "manju://projects"}, token=_token_for(OWNER_X))
+    text_x = resp_x.json()["result"]["contents"][0]["text"]
+    assert "proj_x" in text_x
+    assert "proj_y" not in text_x
+
+    resp_y = _rpc(client, "resources/read", {"uri": "manju://projects"}, token=_token_for(OWNER_Y))
+    text_y = resp_y.json()["result"]["contents"][0]["text"]
+    assert "proj_y" in text_y
+    assert "proj_x" not in text_y
+
+
+def test_system_admin_token_reaches_both_accounts(client: TestClient) -> None:
+    token = _token_for(ADMIN_ID, is_system_admin=True)
+    own = _rpc(client, "resources/read", {"uri": "manju://projects/proj_x"}, token=token)
+    other = _rpc(client, "resources/read", {"uri": "manju://projects/proj_y"}, token=token)
+    assert "error" not in own.json()
+    assert "error" not in other.json()
+
+
+def test_unbound_token_has_no_project_access(client: TestClient) -> None:
+    """没有登录上下文时创建的 token（bootstrap token、脚本/测试直接调用
+    ``create_token()``）拿不到任何账号的项目——"空集合不等于无需检查"：未知
+    归属必须解释成"什么都不合法"，不能解释成"不受限制"（这条正是本次要关的
+    缺口：修复前任何 token 在 MCP 路径上都能触达任意账号的项目）。"""
+    token = _token_for(None, ["manju:read"])
+    resp = _rpc(client, "resources/read", {"uri": "manju://projects/proj_x"}, token=token)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "error" in body
+    assert body["error"]["data"]["code"] == "not_found"
+
+    listing = _rpc(client, "resources/read", {"uri": "manju://projects"}, token=token)
+    text = listing.json()["result"]["contents"][0]["text"]
+    assert "proj_x" not in text
+    assert "proj_y" not in text
