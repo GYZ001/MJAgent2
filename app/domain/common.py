@@ -54,30 +54,27 @@ _LOGGER = logging.getLogger(__name__)
 
 BIBLE_TASK_TIMEOUT_S = 15 * 60
 BIBLE_INTERRUPTED_ERROR = "人物谱任务已中断（服务重载或后台任务丢失），请重新谱写。"
-FALLBACK_VISUAL_STYLE = "国漫风格，非真人CG渲染，统一电影感光影，暖灰色调"
+# FALLBACK_VISUAL_STYLE/_placeholder_bible/_project_bible_or_placeholder 搬到
+# app.visual_styles，_compact_episode_target 搬到 app.episode_target，
+# _episode_chapters/_episode_source_blocks/_episode_source_text 搬到
+# app.source_chapters（2026-08-30，层号治理，见各模块自己的 docstring）；这里
+# 重新导入并保持原名可从 app.domain.common/app.domain 原样导入，不影响既有调用点。
+from app.episode_target import _compact_episode_target  # noqa: E402
+from app.source_chapters import (  # noqa: E402
+    _episode_chapters,
+    _episode_source_blocks,
+    _episode_source_text,
+)
+from app.visual_styles import (  # noqa: E402
+    FALLBACK_VISUAL_STYLE,
+    _placeholder_bible,
+    _project_bible_or_placeholder,
+)
 
 
 def _as_body_dict(body) -> dict:
     """FastAPI ``Body(None)`` 在直接调用时会把默认值变成 Body 对象，不能当 dict 展开。"""
     return body if isinstance(body, dict) else {}
-
-def _placeholder_bible() -> Bible:
-    """剧本/分镜可在人物谱未完成时先独立跑；此处提供最小占位圣经供文本阶段使用。"""
-    return Bible.model_validate({
-        "characters": [],
-        "world": {
-            "era": "",
-            "genre": "",
-            "visual_style_canonical": FALLBACK_VISUAL_STYLE,
-        },
-    })
-
-
-def _project_bible_or_placeholder(project_row) -> Bible:
-    raw = (project_row["bible_json"] or "").strip() if project_row else ""
-    if raw:
-        return Bible.model_validate(json.loads(raw))
-    return _placeholder_bible()
 
 
 def _bible_task_active(project_id: str) -> bool:
@@ -285,15 +282,6 @@ def _episode_or_404(episode_id: str):
     return row
 
 
-def _compact_episode_target(target_duration_s: int | None) -> int:
-    if target_duration_s is None:
-        return config.EPISODE_TARGET_DEFAULT_S
-    target = max(int(target_duration_s), config.EPISODE_TARGET_MIN_S)
-    step = config.EPISODE_TARGET_STEP_S
-    rounded = ((target + step // 2) // step) * step
-    return max(config.EPISODE_TARGET_MIN_S, rounded)
-
-
 def _storyboard_target_for_source(target_duration_s: int | None, source_chars: int,
                                   *, spine_beat_count: int | None = None) -> int:
     """Return a lower-bound duration without imposing a product maximum."""
@@ -344,74 +332,6 @@ def _apply_compact_target(conn, episode_id: str, ep_data: dict, compact_target: 
     )
     conn.commit()
     ep_data.update(compact_columns)
-
-
-def _episode_chapters(conn, ep) -> list[dict]:
-    """本集源章节行（stub 修复后），供 `_episode_source_text` 和 paratext
-    偏移换算（`app.production.prep_pack`）共用——"读哪些章、按什么顺序"
-    只能有一份实现，两处各写一份会产生漂移风险（见
-    logs/paratext_single_source_plan.md）。返回的每行是 `SELECT *`，含
-    `id`/`title`/`content`/`paratext_json` 等全部列。
-    """
-    raw_source_chapters = ep["source_chapters"] or []
-    source_chapters = (
-        json.loads(raw_source_chapters)
-        if isinstance(raw_source_chapters, str)
-        else list(raw_source_chapters)
-    )
-    if not source_chapters:
-        return []
-    placeholders = ",".join("?" for _ in source_chapters)
-    chapters = rows_to_dicts(conn.execute(
-        f"SELECT * FROM chapters WHERE project_id=? AND idx IN ({placeholders}) ORDER BY idx",
-        (ep["project_id"], *source_chapters)).fetchall())
-    # Backward-compatible repair for already imported projects: if an episode points
-    # at a title-only duplicate, use the adjacent rich copy with the same normalized
-    # heading. New uploads are deduplicated in app.ingest before reaching the DB.
-    if len(chapters) == 1 and chapter_is_stub(chapters[0]):
-        following = conn.execute(
-            "SELECT * FROM chapters WHERE project_id=? AND idx>? ORDER BY idx LIMIT 1",
-            (ep["project_id"], chapters[0]["idx"]),
-        ).fetchone()
-        if following:
-            following_dict = dict(following)
-            if (
-                not chapter_is_stub(following_dict)
-                and chapter_titles_match(chapters[0], following_dict)
-            ):
-                chapters = [following_dict]
-    return chapters
-
-
-def _episode_source_blocks(chapters: list[dict]) -> tuple[str, list[int]]:
-    """章节行 -> 集源文本 + 每章 `content` 在这段文本里的绝对起点。
-
-    唯一的拼接实现——集源文本本身和"把 chapters.paratext_json 里以章为
-    单位的偏移平移到集级坐标"（`app.production.prep_pack`）都调用这一份，
-    禁止另起一份公式，否则又是"两处判据各自实现导致漂移"（见
-    logs/paratext_single_source_plan.md）。`offsets[i]` = `chapters[i]`
-    的 `content` 在返回文本里的起始下标（紧跟在 `【title】\\n` 前缀之后）。
-    """
-    parts: list[str] = []
-    offsets: list[int] = []
-    cursor = 0
-    for index, ch in enumerate(chapters):
-        if index > 0:
-            parts.append("\n\n")
-            cursor += 2
-        prefix = f"【{ch['title']}】\n"
-        parts.append(prefix)
-        cursor += len(prefix)
-        offsets.append(cursor)
-        content = ch["content"]
-        parts.append(content)
-        cursor += len(content)
-    return "".join(parts), offsets
-
-
-def _episode_source_text(conn, ep) -> str:
-    text, _content_offsets = _episode_source_blocks(_episode_chapters(conn, ep))
-    return text
 
 
 def _load_screenplay(ep) -> EpisodeScreenplay | None:

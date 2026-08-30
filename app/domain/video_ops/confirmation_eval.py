@@ -11,8 +11,8 @@ from app.compiler import (
     compile_prompt,
     shot_cost_cny,
 )
-from app.domain.common import _compact_episode_target
-from app.domain.storyboard_ops import _board_from_shot_rows
+from app.domain.storyboard_ops.mutation_primitives import _board_from_shot_rows
+from app.episode_target import _compact_episode_target
 from app.schemas import (
     Bible,
     EpisodeScreenplay,

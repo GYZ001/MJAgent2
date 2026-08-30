@@ -48,7 +48,18 @@ async def ensure_source_characters_incremental(
     source_text: str,
     draft_text: str = "",
 ) -> dict[str, Any]:
-    """增量追加 source-backed 角色，不触发完整 regenerate。"""
+    """增量追加 source-backed 角色，不触发完整 regenerate。
+
+    未做层号治理（2026-08-30，app/LAYERS.toml 组 12 遗留的最后一条上行边）：
+    ``_screenplay_character_discovery``（domain/screenplay_ops/task_body.py）
+    是剧本生成任务体里一整段业务流程（task_registry/evidence/harness.context/
+    orchestration.engine/state_machine/stages/portraits/source_paratext + 运行
+    所有权断言），不是可以安全抽取的纯函数——它已经深度嵌入 L5 的剧本编排任务
+    生命周期。真正的问题是「剧本修复流程（L4）复用了剧本生成任务体（L5）的一
+    整段逻辑」，机械抽符号会掩盖这个耦合；是否把 checkpoint_recovery 这类
+    「从检查点恢复」的操作本身归类为编排层，还是把「增量角色发现」重构成双方
+    都能调用的独立服务，需要下一轮架构决策，不在本轮范围内。
+    """
     from app.domain import screenplay_ops
     return await screenplay_ops._screenplay_character_discovery(
         episode_id, source_text, draft_text=draft_text,

@@ -48,11 +48,11 @@ from pydantic import BaseModel, Field
 
 from app import config, hiagent, spoken_contract
 from app.db import new_id
-from app.domain.common import _episode_source_text
 from app.evidence import repository as evidence_repository
 from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
 from app.schemas import Bible, Dialogue
+from app.source_chapters import _episode_source_text
 from app.source_excerpt import SourceSegment, index_source_segments
 from app.video_prompt_profiles import VideoPromptProfile
 
@@ -1777,7 +1777,9 @@ def persist_storyboard_pack(
     stop treating those columns as authoritative for this row instead of
     silently failing or silently passing on empty values.
     """
-    from app.domain.storyboard_ops import _assert_storyboard_write_authorized
+    from app.domain.storyboard_ops.mutation_primitives import (
+        _assert_storyboard_write_authorized,
+    )
     from app.storyboard_workspace import chapter_sources, persist_source_binding
 
     _assert_storyboard_write_authorized(conn, episode_id, None)
@@ -1979,10 +1981,8 @@ async def run_storyboard_pack_generation(
     handle.
     """
     from app.storyboard_supervisor import SupervisorCheckpoint, save_checkpoint
-    from app.domain.storyboard_ops import (
-        _board_from_shot_rows,
-        _finalize_storyboard_evidence,
-    )
+    from app.domain.storyboard_ops.evidence import _finalize_storyboard_evidence
+    from app.domain.storyboard_ops.mutation_primitives import _board_from_shot_rows
 
     if resume:
         existing = conn.execute(

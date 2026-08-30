@@ -245,7 +245,7 @@ class SeedanceAdapter:
     def capability_snapshot(self, *, provider: str, model: str):
         from app import hiagent
         from app.db import new_id, now
-        from app.video_plan import ProviderVideoCapabilitySnapshot
+        from app.video_plan.models import ProviderVideoCapabilitySnapshot
 
         active_provider = hiagent.active_provider("video")
         active_model = hiagent.active_model("video", active_provider)

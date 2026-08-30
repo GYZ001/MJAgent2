@@ -59,7 +59,18 @@
 # 上面「44 上浮 ~9%」的既有口径不一致（文档里「与现有口径一致」这句话本身有算错，
 # 4/20=20% 不是 9%），改用同一个 ~9% 口径对 20 取整，得 22（20+2）。红线只降不升
 # ——48 已经不成立，22 是新地板；以后每解掉一条真实上行边就把这个数字继续调小。
-max_violations = 22
+#
+# 2026-08-30 第二轮：消掉 20 条里 19 条（见本文件下方「消剩余上行边」大段注释，
+# 组 5-11 逐条列了手法与依据）。实测 `--check-layers --max-violations 100000`
+# 从 20 降到 1——只剩 checkpoint_recovery -> screenplay_ops.
+# _screenplay_character_discovery 这一条真实设计张力（不是层号定错、不是可机械
+# 抽取的纯函数，见该调用点 app/production/screenplay_repair/
+# checkpoint_recovery.py 的函数级注释），不做机械修复、不加豁免掩盖。阈值不再
+# 加缓冲——1 是本轮改动触及的所有模块的真实实测值，且待修复的那一条本身不会因
+# 为其他 agent 的并行改动而变化（它是本文件之前就存在、与本轮无关的独立业务
+# 耦合，不像上一轮「20→22」时还要预留未声明模块的余量）；如果后续架构决策解决
+# 了它，把这里改成 0。
+max_violations = 1
 
 # 豁免：每条必须带 reason 与 expires（YYYY-MM-DD），过期的豁免按违规计入总数。
 # 目前没有需要豁免的边——所有现存上行边都走 max_violations 阈值收敛，不在这里
@@ -317,3 +328,81 @@ allowed_exceptions = []
 
 "app.video_supervisor" = 5
 "app.video_supervisor_pkg" = 5  # 前缀：video_supervisor 拆包中的半成品，见说明 6
+
+# ============================================================================
+# 2026-08-30：消剩余上行边（44→20 之后的第二批，docs/layer_violations_
+# plan_2026-08-30.md 独立验证过每一条，未盲从该文档——组 9/组 11 的手法与该
+# 文档建议不同，见下方各自注释）。全部是「新开小模块 / 精确声明子模块层号 +
+# 把消费方的包级 import 改成指向具体子模块」，不挪动任何函数体的业务逻辑本身
+# （group 5/9/11 除外，见下）。实测：--max-violations 100000 从 20 降到 1
+# （只剩 checkpoint_recovery -> screenplay_ops._screenplay_character_discovery
+# 这一条真实设计张力，见该函数调用点的注释，不用机械抽符号掩盖）。
+# ============================================================================
+
+# ---- 组 5：artifacts -> completion_grant（真搬移，新文件） ----
+"app.provider_task_clearance" = 2  # 新文件，从 completion_grant.py 抽出
+                                    # prepare_provider_tasks_for_clear 及其
+                                    # 调用链（只用 app.db），completion_grant.py
+                                    # 转发保持原名可用，artifacts.py 改直接导入
+
+# ---- 组 6：video_providers/seedance/minimax_h3 -> video_plan（子模块精确声明） ----
+"app.video_plan.models" = 1        # 零 app 内部依赖的纯 pydantic 模型
+"app.video_plan.primitives" = 1    # 零 app 内部依赖的纯函数（_json/_hash/...）
+"app.video_plan.capability_snapshot" = 3  # 不是 L2：除了 app.db + 同包
+    # .models/.primitives，文件里另外几个函数（current_capability_snapshot/
+    # video_plan_provider_selection_is_current/failed_minimax_h3_snapshot/
+    # minimax_h3_snapshot_matches_runtime）延迟 import app.hiagent/
+    # app.video_providers/app.minimax_h3 三个 L3 供应商适配模块——与
+    # app.minimax_h3 是真实互相依赖（它调用 capability_snapshot 的三个函数，
+    # 那三个函数又延迟 import 回 app.minimax_h3 取 default_connection()），
+    # 必须同层，不是 app.video_prompt_profiles<->app.video_providers 之外
+    # 本文件第二例「两者互相依赖必须同层」（见本文件上方「补齐 115 个」大注释
+    # 第 5 条同一原则）。最初按只看模块级 import 的结论声明成 2，被
+    # --check-layers 实测揭穿（新增 5 条 capability_snapshot(2)->hiagent/
+    # video_providers/minimax_h3(3) 上行边），改成 3 后这些边全部变成同层，
+    # 不再违规——这是本轮唯一一次「先声明错了，被实测打回」的案例，如实记录。
+
+# ---- 组 8：storyboard_ops.mutation_primitives（子模块精确声明） ----
+"app.domain.storyboard_ops.mutation_primitives" = 4  # 只 import app.db/
+    # app.schemas/app.validators；文件自己的 docstring 早就写着「是本包唯一
+    # 没有反向依赖的基础层之一」，只是被塞进 app.domain=5 前缀
+
+# ---- 组 9：storyboard_ops.evidence（子模块精确声明，未采用该文档建议的真
+# 搬移——声明 + 改消费方 import 路径就能解决，成本更低，见下方验证） ----
+"app.domain.storyboard_ops.scene_projection" = 4  # 只 import app.schemas +
+    # 延迟 app.validators；evidence.py 依赖它，必须同层
+"app.domain.storyboard_ops.evidence" = 4  # 模块级只 import app.db/app.evidence/
+    # app.harness.contracts/app.harness.types/app.schemas + 同包
+    # .scene_projection；延迟 import 的 app.narrative/app.production.*/
+    # app.storyboard_workspace/app.storyboard_authority 全部是 L4，4->4 同层
+    # 合法。production/storyboard_pack.py 原来把它和 mutation_primitives 的
+    # _board_from_shot_rows 塞进同一条包级 import 语句才越级，拆成两条各自
+    # 指向具体子模块的 import 后自然解开，不需要挪动 _finalize_storyboard_
+    # evidence 的函数体（docs/layer_violations_plan_2026-08-30.md 组 9 判定
+    # 「需要真搬移」——已验证不成立，见 evidence.py 自身 import 清单）
+
+# ---- 组 7a/7b：domain.common 里的纯函数下沉（真搬移） ----
+"app.episode_target" = 1  # 新文件：_compact_episode_target，只依赖 app.config
+"app.source_chapters" = 2  # 新文件：_episode_chapters/_episode_source_blocks/
+    # _episode_source_text，只依赖 app.db.rows_to_dicts + app.ingest
+# app.visual_styles（已声明 L1）新增 FALLBACK_VISUAL_STYLE/_placeholder_bible/
+# _project_bible_or_placeholder：只依赖 app.schemas.Bible，与既有画风预设同档
+
+# ---- 组 10：video_ops.confirmation_eval（子模块精确声明，依赖组 7a/8 先落地） ----
+"app.domain.video_ops.confirmation_eval" = 4  # 改完 _compact_episode_target
+    # （app.episode_target）与 _board_from_shot_rows（mutation_primitives）的
+    # import 路径后，自身只剩 app.compiler/app.schemas/app.validators，均 <=4
+
+# ---- 组 11：screenplay_ops.prep_pack_stage_snapshot（真搬移，新文件，未采用
+# 该文档建议的「塞进 app.production.revision」——revision.py 已在 1987 行的
+# baseline 上限，塞进去会被迫抬高棘轮基线；新开小文件放在 screenplay_ops 包内
+# 零风险） ----
+"app.domain.screenplay_ops.prep_pack_stage_snapshot" = 4  # 从 lightweight_
+    # status.py 抽出，只依赖 app.db + 延迟 app.orchestration.engine；
+    # lightweight_status.py 自身留在默认 L5（它 import app.domain.common.router
+    # 真实 FastAPI 路由对象，不能整体降级）
+
+# ---- 组 12：checkpoint_recovery -> screenplay_ops._screenplay_character_
+# discovery（未修，设计张力，不做机械修复——见该调用点注释与
+# docs/layer_violations_plan_2026-08-30.md 组 12） ----
+# 不在此加豁免：CLAUDE.md 禁止黑白名单式豁免，这条边计入 max_violations。

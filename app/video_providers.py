@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from app.video_plan import ProviderVideoCapabilitySnapshot
+    from app.video_plan.models import ProviderVideoCapabilitySnapshot
     from app.video_prompt_profiles import VideoPromptProfile
 
 

@@ -33,7 +33,7 @@ def _assert_provider_clear_scope(
     shot_ids: list[str] | tuple[str, ...] = (),
     version_ids: list[str] | tuple[str, ...] = (),
 ) -> None:
-    from app.completion_grant import prepare_provider_tasks_for_clear
+    from app.provider_task_clearance import prepare_provider_tasks_for_clear
 
     prepare_provider_tasks_for_clear(
         episode_id=episode_id,
@@ -225,7 +225,7 @@ def delete_project_episodes(
     conn = conn or get_conn()
     eps = conn.execute("SELECT id, episode_no FROM episodes WHERE project_id=?", (project_id,)).fetchall()
     if check_provider:
-        from app.completion_grant import prepare_provider_tasks_for_clear
+        from app.provider_task_clearance import prepare_provider_tasks_for_clear
 
         prepare_provider_tasks_for_clear(project_id=project_id, conn=conn)
     shots = rows_to_dicts(conn.execute(

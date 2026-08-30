@@ -1409,7 +1409,7 @@ class MiniMaxH3Adapter:
 
     def capability_snapshot(self, *, provider: str, model: str):
         from app.hiagent import ProviderError
-        from app.video_plan import (
+        from app.video_plan.capability_snapshot import (
             failed_minimax_h3_snapshot,
             minimax_h3_snapshot_from_probe,
         )
@@ -1430,7 +1430,7 @@ class MiniMaxH3Adapter:
         )
 
     def capability_snapshot_is_current(self, snapshot) -> bool:
-        from app.video_plan import minimax_h3_snapshot_matches_runtime
+        from app.video_plan.capability_snapshot import minimax_h3_snapshot_matches_runtime
 
         return minimax_h3_snapshot_matches_runtime(snapshot, self.connection)
 

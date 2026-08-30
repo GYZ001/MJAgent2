@@ -7,10 +7,21 @@
 （见 ``app.refs.visual_style_lock`` 及其派生函数）据此在“必须保持 CG/动画渲染”与
 “必须保持摄影级写实渲染”之间二选一，避免对真人摄影风预设仍然发出“不得像真人照片”
 的自相矛盾指令。
+
+``FALLBACK_VISUAL_STYLE``/``_placeholder_bible``/``_project_bible_or_placeholder`` 从
+``app/domain/common.py`` 按原样搬移到这里（2026-08-30，见
+``docs/layer_violations_plan_2026-08-30.md`` 组 7a）：三者只依赖 ``app.schemas.Bible``
+（L0）+ ``json``，但原来待在 L5 的 ``app.domain.common`` 里，逼着 ``app.video_plan.generate``
+（L4）和 ``app.storyboard_supervisor``（L4）为了这一个占位圣经构造函数越级延迟 import
+整个 domain 包。``app.domain.common`` 继续从本模块重新导入并保持这三个名字可从
+``app.domain.common``/``app.domain`` 原样导入，不影响任何既有调用点。
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+
+from app.schemas import Bible
 
 
 @dataclass(frozen=True)
@@ -78,6 +89,28 @@ def default_visual_style_prompt() -> str:
     if prompt is None:  # pragma: no cover - protects accidental catalog edits
         raise RuntimeError("默认统一画风不存在")
     return prompt
+
+
+FALLBACK_VISUAL_STYLE = "国漫风格，非真人CG渲染，统一电影感光影，暖灰色调"
+
+
+def _placeholder_bible() -> Bible:
+    """剧本/分镜可在人物谱未完成时先独立跑；此处提供最小占位圣经供文本阶段使用。"""
+    return Bible.model_validate({
+        "characters": [],
+        "world": {
+            "era": "",
+            "genre": "",
+            "visual_style_canonical": FALLBACK_VISUAL_STYLE,
+        },
+    })
+
+
+def _project_bible_or_placeholder(project_row) -> Bible:
+    raw = (project_row["bible_json"] or "").strip() if project_row else ""
+    if raw:
+        return Bible.model_validate(json.loads(raw))
+    return _placeholder_bible()
 
 
 def is_photographic_style_prompt(prompt: str | None) -> bool:

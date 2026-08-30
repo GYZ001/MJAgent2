@@ -1165,7 +1165,7 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
     跟着一起被"清理"掉。
     """
     from app import task_registry
-    from app.domain.screenplay_ops import _prep_pack_stage_snapshot
+    from app.domain.screenplay_ops.prep_pack_stage_snapshot import _prep_pack_stage_snapshot
 
     prep_pack_stages = _prep_pack_stage_snapshot(episode_id)
     stage_order = [

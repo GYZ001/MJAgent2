@@ -186,7 +186,7 @@ def prepare_published_storyboard_repair(
     ).fetchall()
     if not rows:
         raise StageError("分镜修复", ["当前没有可建立修订候选的正式分镜"])
-    from app.domain.storyboard_ops import _board_from_shot_rows
+    from app.domain.storyboard_ops.mutation_primitives import _board_from_shot_rows
 
     board = _board_from_shot_rows(rows, int(episode["episode_no"] or 1))
     checkpoint = load_latest_checkpoint(episode_id) or SupervisorCheckpoint(
@@ -219,8 +219,8 @@ def prepare_published_storyboard_repair(
     repair_bible = None
     narrative_repair_active = None
     if outline is not None:
-        from app.domain.common import _project_bible_or_placeholder
-        from app.domain.video_ops import (
+        from app.visual_styles import _project_bible_or_placeholder
+        from app.domain.video_ops.confirmation_eval import (
             evaluate_storyboard_for_confirmation,
         )
         from app.production.screenplay_authority import (
@@ -969,7 +969,7 @@ def _shot_checkpoint_payload(
 
 def _board_from_rows(rows, episode_no: int) -> Storyboard:
     # Local import avoids the domain module's shared-namespace import cycle.
-    from app.domain.storyboard_ops import _board_from_shot_rows
+    from app.domain.storyboard_ops.mutation_primitives import _board_from_shot_rows
 
     return _board_from_shot_rows(rows, episode_no)
 

@@ -170,7 +170,7 @@ async def _generate_prep_pack_once(
     # _episode_chapters/_episode_source_blocks 与 app.domain.common.
     # _episode_source_text 是同一份实现）放弃这次投影，退回"没有 paratext
     # 信号"，不猜、不强行平移出可能错位的偏移。
-    from app.domain.common import _episode_chapters, _episode_source_blocks
+    from app.source_chapters import _episode_chapters, _episode_source_blocks
     from app.source_paratext import (
         chapter_paratext_offsets,
         paratext_segment_indexes,

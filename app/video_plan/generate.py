@@ -85,7 +85,7 @@ async def generate_episode_plan(
     project = db.execute(
         "SELECT * FROM projects WHERE id=?", (episode["project_id"],),
     ).fetchone()
-    from app.domain.common import _project_bible_or_placeholder
+    from app.visual_styles import _project_bible_or_placeholder
 
     bible = _project_bible_or_placeholder(project)
     rows = db.execute(
