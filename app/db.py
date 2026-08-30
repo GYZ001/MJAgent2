@@ -3478,28 +3478,25 @@ def insert_monitor_audit(
 ) -> None:
     """落一条 ``monitor_audit`` 行（P0-2：系统管理员跨账号访问审计）。
 
-    在独立连接上写入并自行 commit——理由与 ``insert_error_log`` 完全相同：
-    本函数的调用方（``app.domain.common._principal_access_check``）挂在
-    ``_project_or_404``/``_episode_or_404``/``owned_*_row`` 这个几乎全仓
-    唯一的项目/剧集存在性入口上，被每个业务请求在事务中途调用，此刻调用方
-    的 ``get_conn()`` 上可能正持有未提交的业务写入；如果在那条连接上
-    ``commit()``，会把半途的业务中间态一起提交进库（CLAUDE.md 已记录三次
-    真实事故）。
+    独立连接写入并自行 commit——调用方（``app.domain.common._principal_access_check``
+    经 ``_project_or_404``/``_episode_or_404``/``owned_*_row``）在业务事务中途调用，
+    ``get_conn()`` 上可能正持有未提交写入；在那条连接上 commit 会把半途状态一起
+    提交进库（CLAUDE.md 已记录三次真实事故）。
 
-    与 ``insert_error_log`` 同样的取舍：调用方仍持有未提交写事务时，这个
-    独立连接抢不到 ``BEGIN IMMEDIATE`` 写锁会直接失败（``timeout=0``，不
-    阻塞调用方等锁）——这种情况下这条审计行会丢失，但绝不能因此让正常的
-    （哪怕是管理员的）访问请求跟着失败，所以写失败一律吞掉，只在进程日志
-    留一行 WARNING，不能完全无痕。
+    调用方仍持有未提交写事务时抢不到 ``BEGIN IMMEDIATE`` 写锁会直接失败
+    （``timeout=0``，不阻塞调用方等锁）——失败落进本地缓冲待补写，机制见
+    ``app.monitor_audit_buffer`` 模块文档；绝不能让业务请求跟着失败。
     """
+    row = (
+        new_id("audit"), now(), action, object_type, object_id, outcome,
+        json.dumps(detail or {}, ensure_ascii=False),
+    )
+
     def operation(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT INTO monitor_audit(id,ts,action,object_type,object_id,outcome,"
             "detail_json) VALUES(?,?,?,?,?,?,?)",
-            (
-                new_id("audit"), now(), action, object_type, object_id, outcome,
-                json.dumps(detail or {}, ensure_ascii=False),
-            ),
+            row,
         )
 
     try:
@@ -3509,3 +3506,5 @@ def insert_monitor_audit(
             "insert_monitor_audit failed for action=%s object_type=%s object_id=%s: %r",
             action, object_type, object_id, exc,
         )
+        from app.monitor_audit_buffer import append as buffer_append
+        buffer_append(*row)

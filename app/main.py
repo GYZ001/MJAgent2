@@ -102,6 +102,12 @@ async def lifespan(_: FastAPI):
         task_registry.spawn(
             "system", "account_recycle_bin_sweep", account_recycle_bin_sweep_loop(),
         )
+        # monitor_audit 独立连接抢不到写锁时的本地缓冲补写；同一份恢复协调者
+        # 独占逻辑，避免两个实例同时截断同一份缓冲文件。
+        from app.recovery import monitor_audit_flush_loop
+        task_registry.spawn(
+            "system", "monitor_audit_flush", monitor_audit_flush_loop(),
+        )
     else:
         record_passive_instance()
     try:

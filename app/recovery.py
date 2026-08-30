@@ -335,3 +335,28 @@ async def account_recycle_bin_sweep_loop(interval_s: float = 300.0) -> None:
                 meta={"stage": "account_recycle_bin_sweep", "isolation": "loop"},
             )
         await asyncio.sleep(max(60.0, min(float(interval_s), 900.0)))
+
+
+async def monitor_audit_flush_loop(interval_s: float = 60.0) -> None:
+    """定期把 ``monitor_audit`` 本地缓冲（写锁竞争导致的失败兜底）补写回库。
+
+    与其余巡检循环同一种调度形态。``app.monitor_audit_buffer.flush()`` 是同步
+    的文件锁 + SQLite 写，丢进线程池执行，避免阻塞事件循环；单轮失败（例如
+    这一刻写锁仍被别的事务占着）不影响下一轮，也不会让循环本身退出——见
+    ``app.monitor_audit_buffer`` 模块文档。
+    """
+    from app.monitor_audit_buffer import flush as flush_pending_audit
+    while True:
+        try:
+            await asyncio.to_thread(flush_pending_audit)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — 巡检循环自身不得因单轮补写失败退出
+            from app.errors import log_error
+            log_error(
+                exc,
+                action="monitor_audit_flush_loop",
+                context={"interval_s": interval_s},
+                meta={"stage": "monitor_audit_flush", "isolation": "loop"},
+            )
+        await asyncio.sleep(max(60.0, min(float(interval_s), 900.0)))

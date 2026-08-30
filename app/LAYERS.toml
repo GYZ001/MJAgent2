@@ -115,10 +115,19 @@ allowed_exceptions = []
 "app.auth.sessions" = 2  # 2026-08-30：覆盖 app.auth=1 前缀，碰 app.db
 "app.orchestration.state_machine" = 2  # 2026-08-30：覆盖 app.orchestration=5
                                         # 前缀，只 import app.db，见变更说明
+"app.monitor_audit_buffer" = 2  # 2026-08-30 新增：monitor_audit 本地可靠投递
+                                 # 缓冲，只 import app.config（L1）+ stdlib，
+                                 # 不依赖 app.db（避免与 app.db 互相 import 成
+                                 # 环——app.db.insert_monitor_audit 反过来
+                                 # import 本模块做失败兜底，同层允许）
 
 # ---- L3 供应商适配：可依赖 L0-L2 ----
 "app.harness.model_gateway" = 3
 "app.hiagent" = 3
+"app.system_health" = 3  # 2026-08-30 新增：health() 的凭据/模型状态计算，只
+                          # import app.config（L1），其余靠调用方注入回调
+                          # （item_key_configured/active_provider），不直接
+                          # 依赖 app.hiagent/app.model_registry
 "app.seedance" = 3
 "app.minimax_h3" = 3
 "app.video_providers" = 3

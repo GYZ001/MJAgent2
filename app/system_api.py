@@ -804,7 +804,7 @@ def put_model_credentials(model_id: str, body: dict, _admin: None = Depends(requ
 
 @public_router.get("/system/health")
 def health():
-    from app import config, hiagent
+    from app import config, hiagent, system_health
 
     def option(provider: str, model: str, available: bool = True) -> dict:
         return {"provider": provider, "model": model, "available": available}
@@ -846,26 +846,16 @@ def health():
             ("image", "图像模型"),
         )
     }
+    credentials = system_health.credential_report(
+        _model_catalog(),
+        item_key_configured=lambda item: bool(_public_model(item).get("key_configured")),
+        active_provider=hiagent.active_provider,
+    )
     return {
         "ok": True,
         "gateway": config.HIAGENT_BASE_URL,
-        "key_configured": bool(config.HIAGENT_API_KEY),
         "model_route": get_setting("model_route") or "hiagent",
-        "openrouter_key_configured": bool(config.OPENROUTER_API_KEY),
-        "bailian_key_configured": bool(config.BAILIAN_API_KEY),
-        "deepseek_key_configured": bool(config.DEEPSEEK_API_KEY),
-        "zhipu_key_configured": bool(config.ZHIPU_API_KEY),
-        "hiagent_model_text": hiagent.active_model("text", "hiagent"),
-        "hiagent_model_vlm": hiagent.active_model("vlm", "hiagent"),
-        "hiagent_model_video": hiagent.active_model("video", "hiagent"),
-        "minimax_h3_model_video": hiagent.active_model("video", "minimax_h3"),
-        "hiagent_model_image": hiagent.active_model("image", "hiagent"),
-        "openrouter_model_text": hiagent.active_model("text", "openrouter"),
-        "openrouter_model_vlm": hiagent.active_model("vlm", "openrouter"),
-        "bailian_model_text": hiagent.active_model("text", "bailian"),
-        "bailian_model_vlm": hiagent.active_model("vlm", "bailian"),
-        "deepseek_model_text": hiagent.active_model("text", "deepseek"),
-        "zhipu_model_text": hiagent.active_model("text", "zhipu"),
+        **credentials,
         "models": models,
     }
 
