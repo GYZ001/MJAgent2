@@ -38,6 +38,7 @@ const loadWallPage = () => import("./pages/WallPage");
 const loadCinemaPage = () => import("./pages/CinemaPage");
 const loadMonitorPage = () => import("./pages/MonitorPage");
 const loadReaderPage = () => import("./pages/ReaderPage");
+const loadAccountAdminPage = () => import("./pages/AccountAdminPage");
 
 const BiblePage = lazy(loadBiblePage);
 const ScenesPage = lazy(loadScenesPage);
@@ -48,6 +49,7 @@ const WallPage = lazy(loadWallPage);
 const CinemaPage = lazy(loadCinemaPage);
 const MonitorPage = lazy(loadMonitorPage);
 const ReaderPage = lazy(loadReaderPage);
+const AccountAdminPage = lazy(loadAccountAdminPage);
 
 export type View =
   | "studio"
@@ -210,9 +212,10 @@ const SECTIONS: {
   { key: "observability", label: "观测台", icon: "观", group: "项目观测", needProject: true },
 ];
 
-const SYSTEM_SECTIONS: Array<{ key: "overview" | "models" | "settings"; label: string; icon: string }> = [
+const SYSTEM_SECTIONS: Array<{ key: "overview" | "models" | "accounts" | "settings"; label: string; icon: string }> = [
   { key: "overview", label: "总览", icon: "总" },
   { key: "models", label: "模型中心", icon: "模" },
+  { key: "accounts", label: "账号管理", icon: "户" },
   { key: "settings", label: "系统设置", icon: "设" },
 ];
 
@@ -1057,7 +1060,11 @@ function AppShell() {
         {view === "observability" && projectId && (
           <MonitorPage mode="project" projectId={projectId} projectName={currentProject?.name} />
         )}
-        {view === "system" && isSystemAdminUser && <MonitorPage mode="system" />}
+        {view === "system" && isSystemAdminUser && (
+          currentPathname.endsWith("/accounts")
+            ? <AccountAdminPage />
+            : <MonitorPage mode="system" />
+        )}
         </Suspense>
         </ErrorBoundary>
       </main>

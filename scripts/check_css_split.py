@@ -20,7 +20,7 @@ PAGES = {
     'WallPage': ['pages/WallPage.tsx'], 'ScriptPage': ['pages/ScriptPage.tsx'],
     'ScenesPage': ['pages/ScenesPage.tsx'], 'MonitorPage': ['pages/MonitorPage.tsx'],
     'CinemaPage': ['pages/CinemaPage.tsx'], 'ReaderPage': ['pages/ReaderPage.tsx'],
-    'TeamAdminPage': ['pages/TeamAdminPage.tsx'],
+    'AccountAdminPage': ['pages/AccountAdminPage.tsx', 'components/AccountAdminDialogs.tsx'],
 }
 CLS_RE = re.compile(r'className=(?:"([^"]*)"|\{`([^`]*)`\}|\{([^}]*)\})', re.S)
 
