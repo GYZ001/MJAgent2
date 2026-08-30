@@ -93,8 +93,8 @@ allowed_exceptions = []
 # ---- L2 持久化：可依赖 L0-L1 ----
 "app.db" = 2
 "app.quota" = 2  # 2026-08-30 新增：五档会员配额引擎，只 import app.db、
-                 # app.quota_addon、app.quota_scope（同层）；app.db
-                 # (finish_provider_call) 反过来按需记账用延迟 import
+                 # app.quota_addon、app.quota_scope、app.quota_tiers（均同层）；
+                 # app.db (finish_provider_call) 反过来按需记账用延迟 import
                  # 避免真实循环导入，二者同层，延迟/模块级两种边都合法
 "app.quota_addon" = 2  # 2026-08-30 新增：视频加量包记账，只 import app.db，
                        # 零反向依赖——app.quota import 它（同层），它不 import
@@ -102,6 +102,12 @@ allowed_exceptions = []
 "app.quota_scope" = 2  # 2026-08-30 新增：配额闸门的归属解析/并发计数只读查
                        # 询，零依赖（连 app.db 都不 import，只用 sqlite3 类型
                        # 标注）——app.quota import 它做 re-export，同层
+"app.quota_tiers" = 2  # 2026-08-30 从 app.quota 拆出（文件行数棘轮逼的，
+                       # app/quota.py 拆分前卡在 600/600 基线零余量）：档位表
+                       # 纯数据（TierLimits/TIER_TABLE/VALID_TIERS/_UNLIMITED/
+                       # _UPGRADE_PATH），只 import app.quota_addon（同层，取
+                       # 加量包定价文案）；不 import app.quota，避免环——
+                       # app.quota 反过来 import 本模块做 re-export
 "app.artifacts" = 2
 "app.evidence" = 2
 "app.errors" = 2  # 2026-08-30：原 L0，只 import app.db，见文件末尾变更说明

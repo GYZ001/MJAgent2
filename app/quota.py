@@ -46,14 +46,11 @@ SQLite 的 UNIQUE 冲突短路（``_record_ledger`` 捕获 ``IntegrityError``）
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
 
 from fastapi import HTTPException
 
 from app.db import now
 from app.quota_addon import (
-    ADDON_PACKAGE_PRICE_CNY,
-    ADDON_PACKAGE_SECONDS,
     ADDON_RESOURCE,
     addon_video_seconds_balance,
 )
@@ -64,6 +61,13 @@ from app.quota_scope import (
     owner_of_episode as owner_of_episode,
     owner_of_project as owner_of_project,
 )
+from app.quota_tiers import (
+    TIER_TABLE as TIER_TABLE,
+    TierLimits as TierLimits,
+    VALID_TIERS as VALID_TIERS,
+    _UNLIMITED as _UNLIMITED,
+    _UPGRADE_PATH as _UPGRADE_PATH,
+)
 
 PERIOD_SECONDS = 30 * 86400.0
 SECONDS_PER_SHOT = 15.0
@@ -71,51 +75,6 @@ SECONDS_PER_SHOT = 15.0
 MODULE_SCREENPLAY = "screenplay"
 MODULE_STORYBOARD = "storyboard"
 MODULE_VIDEO = "video"
-
-
-@dataclass(frozen=True)
-class TierLimits:
-    tier: str
-    projects: int | None       # None = 无限（仅系统管理员）
-    concurrency: int | None
-    token: float | None
-    video_seconds: float | None
-    image: float | None        # 定妆照/场景图成本上限，与 token 同周期滚动重置
-
-
-TIER_TABLE: dict[str, TierLimits] = {
-    "free": TierLimits("free", 1, 1, 300_000.0, 1 * 60.0, 3_000_000.0),
-    "starter": TierLimits("starter", 2, 2, 600_000.0, 5 * 60.0, 6_000_000.0),
-    "standard": TierLimits("standard", 3, 3, 900_000.0, 15 * 60.0, 9_000_000.0),
-    "pro": TierLimits("pro", 6, 6, 1_800_000.0, 30 * 60.0, 18_000_000.0),
-    "max": TierLimits("max", 10, 10, 3_000_000.0, 50 * 60.0, 30_000_000.0),
-}
-VALID_TIERS = frozenset(TIER_TABLE)
-_UNLIMITED = TierLimits("unlimited", None, None, None, None, None)
-
-_UPGRADE_PATH = {
-    "free": (
-        "升级到入门档位（2 个项目 / 每模块 2 并发 / 60 万 token / 5 分钟视频 "
-        "/ 600 万定妆照与场景图额度）"
-    ),
-    "starter": (
-        "升级到标准档位（3 个项目 / 每模块 3 并发 / 90 万 token / 15 分钟视频 "
-        "/ 900 万定妆照与场景图额度）"
-    ),
-    "standard": (
-        "升级到专业档位（6 个项目 / 每模块 6 并发 / 180 万 token / 30 分钟视频 "
-        "/ 1800 万定妆照与场景图额度）"
-    ),
-    "pro": (
-        "升级到旗舰档位（10 个项目 / 每模块 10 并发 / 300 万 token / 50 分钟视频 "
-        "/ 3000 万定妆照与场景图额度）"
-    ),
-    "max": (
-        "已是最高付费档位；如需更多视频时长可购买加量包"
-        f"（¥{ADDON_PACKAGE_PRICE_CNY:.0f}/{int(ADDON_PACKAGE_SECONDS // 60)} 分钟，"
-        "不随 30 天周期重置），或联系管理员开通不限量账号"
-    ),
-}
 
 
 class QuotaExceeded(HTTPException):

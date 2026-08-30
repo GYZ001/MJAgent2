@@ -299,27 +299,31 @@ def test_project_creation_rolls_back_ledger_and_row_together_on_failure(monkeypa
     """
     from app import config as app_config
     from app.domain import projects as projects_mod
+    from tests.conftest import patch_projects_everywhere
 
     uid = _make_user("free")
     set_current_principal(Principal(user_id=uid, username="u", is_system_admin=False))
     try:
-        monkeypatch.setattr(
-            projects_mod, "_creation_owner_user_id", lambda: uid,
-        )
+        # patch_projects_everywhere, not a bare monkeypatch.setattr(projects_mod,
+        # ...): app.domain.projects is a real package (拆分后), and
+        # _create_project_core (called below) resolves ingest_novel/
+        # prepare_novel_bytes/validate_novel_filename/_creation_owner_user_id
+        # through app/domain/projects/create.py's own module globals, not
+        # through the package-level re-export this bare form would rebind --
+        # see tests/test_projects_monkeypatch_guard.py.
+        patch_projects_everywhere(monkeypatch, "_creation_owner_user_id", lambda: uid)
 
         def _boom(*_a, **_k):
             raise RuntimeError("模拟章节写入失败")
 
-        monkeypatch.setattr(projects_mod, "ingest_novel", lambda *_a, **_k: {
+        patch_projects_everywhere(monkeypatch, "ingest_novel", lambda *_a, **_k: {
             "chapters": [{"idx": 0, "title": "t", "content": "c"}],
             "total_chars": 1,
         })
         # executemany for chapters is what we corrupt: patch conn.executemany via
         # a wrapper is fragile; simplest is to break report["chapters"] shape.
-        monkeypatch.setattr(projects_mod, "prepare_novel_bytes", lambda *_a, **_k: b"x")
-        monkeypatch.setattr(
-            projects_mod, "validate_novel_filename", lambda name: name,
-        )
+        patch_projects_everywhere(monkeypatch, "prepare_novel_bytes", lambda *_a, **_k: b"x")
+        patch_projects_everywhere(monkeypatch, "validate_novel_filename", lambda name: name)
 
         conn = get_conn()
         before = conn.execute(
@@ -328,7 +332,7 @@ def test_project_creation_rolls_back_ledger_and_row_together_on_failure(monkeypa
         assert before == 0
 
         # 强行让 chapters 的 executemany 失败：塞一个不是 4 元组的畸形章节。
-        monkeypatch.setattr(projects_mod, "ingest_novel", lambda *_a, **_k: {
+        patch_projects_everywhere(monkeypatch, "ingest_novel", lambda *_a, **_k: {
             "chapters": [{"idx": "not-an-int", "title": None, "content": None}],
             "total_chars": 1,
         })
@@ -486,6 +490,44 @@ def test_check_module_concurrency_blocks_at_tier_limit():
             )
         assert exc_info.value.detail["gate"] == "concurrency"
         assert exc_info.value.detail["limit"] == limit
+
+
+def test_patch_quota_everywhere_makes_fake_tier_table_reach_real_call_path(monkeypatch):
+    """桩生效证明（app/quota.py 拆出 app/quota_tiers.py 之后的硬约束）：用
+    ``tests.conftest.patch_quota_everywhere`` 把 ``TIER_TABLE`` 换成一张 free 档
+    并发上限=99 的假表，真实调用路径 ``effective_limits``/
+    ``check_module_concurrency`` 必须看到假表，不是只改了某一侧的绑定。
+
+    ``app/quota.py`` 现在写 ``from app.quota_tiers import TIER_TABLE``——
+    ``quota.TIER_TABLE`` 与 ``quota_tiers.TIER_TABLE`` 是两个独立绑定。实测过
+    两个方向都不完整：只打 ``quota.TIER_TABLE`` 这一侧，``effective_limits``
+    （定义在 ``app.quota`` 里，读的是它自己模块命名空间里的全局名）确实能看到，
+    但 ``app.quota_tiers.TIER_TABLE`` 仍是真表；只打 ``quota_tiers.TIER_TABLE``
+    这一侧（数据现在的「所在地」，直觉上最容易被打桩的地方），
+    ``effective_limits`` 反而看不到——它读的是 ``app.quota`` 自己那份绑定，不会
+    因为 ``quota_tiers`` 被重新绑定而跟着变。``patch_quota_everywhere`` 两侧一起
+    打，两个方向都不留死角。
+    """
+    conn = get_conn()
+    uid = _make_user("free")
+
+    fake_free = quota.TierLimits("free", 1, 99, 300_000.0, 60.0, 3_000_000.0)
+    fake_table = dict(quota.TIER_TABLE)
+    fake_table["free"] = fake_free
+    from tests.conftest import patch_quota_everywhere
+    patch_quota_everywhere(monkeypatch, "TIER_TABLE", fake_table)
+
+    limits = quota.effective_limits(conn, uid)
+    assert limits.concurrency == 99, (
+        "effective_limits 应该看到假表的并发上限 99（真表是 1）——如果这里失败，"
+        "说明打桩没有真的命中 effective_limits 实际读取的那个绑定"
+    )
+
+    # 真实调用路径：走到假表的 99 才该被拦，98 不该拦（真表上限是 1，98 早该炸）。
+    quota.check_module_concurrency(conn, uid, quota.MODULE_STORYBOARD, active_count=98)
+    with pytest.raises(quota.QuotaExceeded) as exc_info:
+        quota.check_module_concurrency(conn, uid, quota.MODULE_STORYBOARD, active_count=99)
+    assert exc_info.value.detail["limit"] == 99
 
 
 def test_assert_token_capacity_blocks_once_used_reaches_limit():

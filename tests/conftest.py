@@ -531,6 +531,53 @@ def patch_worker_everywhere(monkeypatch, name, value, **kwargs):
             monkeypatch.setattr(submodule, name, value, raising=False)
 
 
+def patch_quota_everywhere(monkeypatch, name, value, **kwargs):
+    """Patch a symbol shared by ``app.quota`` / ``app.quota_tiers`` /
+    ``app.quota_addon`` / ``app.quota_scope`` in every one of those modules
+    that actually binds it.
+
+    Not a package split (no ``exec()`` facade, no ``pkgutil`` subpackage) --
+    these are four flat sibling modules under ``app/``, but the same trap
+    applies to any name copied across a module boundary by ``from .x import
+    y``. ``app/quota.py`` used to define ``TierLimits``/``TIER_TABLE``/
+    ``VALID_TIERS``/``_UNLIMITED``/``_UPGRADE_PATH`` itself; they moved to
+    ``app/quota_tiers.py`` (file-length ratchet -- ``app/quota.py`` was sitting
+    at 600/600 with zero slack) and ``app/quota.py`` now does
+    ``from app.quota_tiers import TIER_TABLE`` (among others) to keep every
+    existing ``quota.TIER_TABLE`` call site working unchanged. That import
+    creates a *second, independent* binding: ``app.quota.TIER_TABLE`` and
+    ``app.quota_tiers.TIER_TABLE`` are two separate names that happen to point
+    at the same dict object at import time. ``monkeypatch.setattr(quota,
+    "TIER_TABLE", fake)`` only rebinds the first -- ``effective_limits`` is
+    defined in ``app.quota`` and reads the global name in *that* module's own
+    namespace, so it does see the patch, but anything reading
+    ``app.quota_tiers.TIER_TABLE`` directly (or a future caller that imports
+    straight from ``app.quota_tiers`` instead of via ``app.quota``) would
+    still see the real table. The reverse is just as broken: patching
+    ``quota_tiers.TIER_TABLE`` alone never reaches ``app.quota``'s own copy,
+    so ``effective_limits``/``check_module_concurrency`` -- the actual call
+    path every production gate goes through -- would silently keep using the
+    real numbers while the test believes it swapped in a fake tier table. This
+    walks both ``app.quota`` and ``app.quota_tiers`` (plus ``app.quota_addon``/
+    ``app.quota_scope`` for completeness, in case a future name is shared
+    across all four) and patches ``name`` wherever it is actually bound.
+    """
+    import importlib
+    import sys
+
+    kwargs.setdefault("raising", False)
+    for mod_name in ("app.quota", "app.quota_tiers", "app.quota_addon", "app.quota_scope"):
+        # 用 sys.modules 按全限定名解析，不要用 getattr：子模块若再导出一个与
+        # 自身文件同名的符号，包属性会被那个符号覆盖掉引用，getattr 于是静默
+        # 返回错的对象，hasattr 判 False、打桩打空且不报错（同一坑 2026-08-30
+        # 在 app.media_exec 拆包时实测过一次：get_conn 静默连到生产库）。
+        # importlib.import_module 保证四个模块都已加载进 sys.modules（不依赖
+        # 调用方是否已经 import 过），且不引入本函数用不到的局部别名。
+        module = sys.modules.get(mod_name) or importlib.import_module(mod_name)
+        if hasattr(module, name):
+            monkeypatch.setattr(module, name, value, **kwargs)
+
+
 def patch_api_everywhere(monkeypatch, name, value, **kwargs):
     """Patch a symbol on ``app.api`` / ``app.domain`` in every submodule that
     actually binds it.
