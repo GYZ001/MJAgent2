@@ -8,6 +8,7 @@ import asyncio
 import sqlite3
 
 from app import config, db, worker
+from tests.conftest import patch_worker_everywhere
 from app.hiagent import ProviderError
 
 
@@ -34,7 +35,7 @@ def _seed_job(conn: sqlite3.Connection, job_id: str = "j1", status: str = "runni
 def test_retryable_error_requeues_job(monkeypatch) -> None:
     conn = _conn()
     _seed_job(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     requeued: list[str] = []
     monkeypatch.setattr(worker._queue, "put_nowait", lambda jid: requeued.append(jid))
@@ -76,7 +77,7 @@ def test_retryable_error_requeues_job(monkeypatch) -> None:
 def test_non_retryable_error_not_requeued(monkeypatch) -> None:
     conn = _conn()
     _seed_job(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     async def run() -> bool:
         return worker._schedule_job_retry("j1", ProviderError("Seedance 任务失败：版权受限"))
@@ -93,7 +94,7 @@ def test_running_provider_task_is_deferred_without_consuming_retry_budget(monkey
         "WHERE id='j1'"
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     main_requeued: list[str] = []
     poll_requeued: list[str] = []
     monkeypatch.setattr(worker._queue, "put_nowait", main_requeued.append)
@@ -125,7 +126,7 @@ def test_running_provider_task_is_deferred_without_consuming_retry_budget(monkey
 def test_retry_budget_exhausts(monkeypatch) -> None:
     conn = _conn()
     _seed_job(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(config, "VIDEO_JOB_RETRY_BASE_DELAY", 0.0)
     monkeypatch.setattr(config, "VIDEO_JOB_MAX_RETRIES", 3)
     monkeypatch.setattr(worker._queue, "put_nowait", lambda jid: None)
@@ -153,7 +154,7 @@ def test_fenced_worker_cannot_finish_or_requeue_new_owner_job(monkeypatch) -> No
         "UPDATE jobs SET lease_owner='new-worker', lease_expires_at=9999999999 WHERE id='j1'"
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     assert worker._set_job("j1", "succeeded", lease_owner="old-worker") is False
     assert worker._schedule_job_retry(

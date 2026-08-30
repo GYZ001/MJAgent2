@@ -14,6 +14,7 @@ from app.multiview import character_view_prompt
 from app.portraits import bible_for_episode
 from app.schemas import Bible, Character, World
 from app.visual_styles import visual_style_prompt
+from tests.conftest import patch_portraits_everywhere
 
 
 def test_portrait_prompt_preserves_nonstandard_form_without_word_routing() -> None:
@@ -172,7 +173,7 @@ def test_episode_bible_uses_persisted_appearance_not_prompt_word_extraction(monk
             None,
         ),
     )
-    monkeypatch.setattr("app.portraits.get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
     bible = Bible(
         characters=[Character(
             name="甲二儿", role="主角", appearance_canonical="淡绿色上衣搭配紧腿长裤",

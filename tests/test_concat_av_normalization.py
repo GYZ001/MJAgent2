@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from app import db, worker, artifacts
+from tests.conftest import patch_worker_everywhere
 from app.evidence import media as media_evidence
 from app.final_edit import FINAL_AUDIO_RATE, audio_normalize_filter
 
@@ -267,7 +268,7 @@ def test_concatenate_episode_normalizes_mixed_sample_rate_audio_and_passes_gate(
     _make_clip(shot_paths[2], color="blue", video_duration_s=2.0, sample_rate=44100)
     _database_with_shots(conn, shot_paths)
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(media_evidence, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
@@ -317,7 +318,7 @@ def test_concatenate_episode_order_independent_of_which_sample_rate_leads(
     _make_clip(shot_paths[2], color="blue", video_duration_s=2.0, sample_rate=44100)
     _database_with_shots(conn, shot_paths)
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(media_evidence, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)

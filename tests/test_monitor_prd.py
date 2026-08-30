@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app import db, monitoring, system_api
+from tests.conftest import patch_worker_everywhere
 from app.evidence import repository
 from app.orchestration import api as orchestration_api
 from app.local_session import public_session_payload
@@ -98,11 +99,10 @@ def test_nonempty_provider_media_public_base_url_uses_public_url_validator(
 def test_settings_save_is_versioned_authoritative_and_atomic(monkeypatch) -> None:
     conn = _conn()
     _patch_conn(monkeypatch, conn)
-    from app import worker
     from app.media_pipeline import concurrency
 
     monkeypatch.setattr(concurrency, "reload_limits_from_settings", lambda: None)
-    monkeypatch.setattr(worker, "ensure_workers", lambda: None)
+    patch_worker_everywhere(monkeypatch, "ensure_workers", lambda: None)
     result = system_api.put_settings({
         "version": 0,
         "patch": {"video_submit_concurrency": "020", "provider_call_retention_days": 60},
@@ -138,12 +138,12 @@ def test_text_generation_concurrency_hot_resizes_existing_queue(monkeypatch) -> 
         "UPDATE settings SET value='2' WHERE key='text_generation_concurrency'"
     )
     conn.commit()
-    from app import generation_concurrency, worker
+    from app import generation_concurrency
     from app.media_pipeline import concurrency
 
     reloads: list[str] = []
     monkeypatch.setattr(concurrency, "reload_limits_from_settings", lambda: None)
-    monkeypatch.setattr(worker, "ensure_workers", lambda: None)
+    patch_worker_everywhere(monkeypatch, "ensure_workers", lambda: None)
     monkeypatch.setattr(
         generation_concurrency,
         "reload_generation_limits",

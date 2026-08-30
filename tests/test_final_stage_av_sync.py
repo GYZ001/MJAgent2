@@ -43,6 +43,7 @@ from pathlib import Path
 import pytest
 
 from app import artifacts, db, worker
+from tests.conftest import patch_worker_everywhere
 from scripts.verify_av_sync import (
     EpisodeReport,
     SyncVerdict,
@@ -224,7 +225,7 @@ def test_draft_concat_produces_av_synced_final(
     _adopt_version(conn, shot_no=2, path=shot2)
     conn.commit()
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
     # 不 mock worker.shutil.which / worker.subprocess：worker.shutil 与本文件

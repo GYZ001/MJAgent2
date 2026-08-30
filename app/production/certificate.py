@@ -770,3 +770,11 @@ def assert_publish_has_certificate(
     if not certificate_id:
         record_publish_without_certificate(kind=kind, episode_id=episode_id)
         raise ValueError("禁止无完成凭证发布")
+
+
+# app.db.init_db() no longer imports this module directly (P0-3 dependency
+# inversion, docs/coupling_review_2026-08-29.md 第2步) — it looks this up by
+# name through app.db_schema instead.
+from app.db_schema import register_table as _register_table  # noqa: E402
+
+_register_table("completion_certificates_table", ensure_completion_certificates_table)

@@ -26,6 +26,7 @@ import pytest
 
 from app import db as db_mod
 from app import hiagent, worker
+from tests.conftest import patch_worker_everywhere
 from app.errors import CATEGORIES
 from app.hiagent import ProviderError, ProviderFailure, ProviderFailureKind
 
@@ -237,10 +238,10 @@ def _wire_run_job_common_mocks(monkeypatch, conn: sqlite3.Connection, poll_fn) -
     async def no_fence(*_args, **_kwargs) -> None:
         return None
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
-    monkeypatch.setattr(worker, "_assert_review_dependency_fence_async", no_fence)
-    monkeypatch.setattr(worker, "_assert_job_lease", lambda *_args, **_kwargs: None)
+    patch_worker_everywhere(monkeypatch, "_assert_review_dependency_fence_async", no_fence)
+    patch_worker_everywhere(monkeypatch, "_assert_job_lease", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(worker.hiagent, "poll_video_task", poll_fn)
     monkeypatch.setattr(concurrency, "semaphore_for", lambda _resource: Permit())
     monkeypatch.setattr(concurrency, "report_congestion", lambda *_args, **_kwargs: None)
@@ -248,9 +249,8 @@ def _wire_run_job_common_mocks(monkeypatch, conn: sqlite3.Connection, poll_fn) -
     monkeypatch.setattr(stage_state, "set_pipeline_stage", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(worker.media_scheduler, "renew_lease", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(worker.media_scheduler, "settle_budget", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(worker, "mark_media_job_state", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        worker, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,
+    patch_worker_everywhere(monkeypatch, "mark_media_job_state", lambda *_args, **_kwargs: None)
+    patch_worker_everywhere(monkeypatch, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,
     )
 
 
@@ -274,8 +274,8 @@ def _wire_run_job_common_mocks_real_db(monkeypatch, poll_fn) -> None:
         return None
 
     monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
-    monkeypatch.setattr(worker, "_assert_review_dependency_fence_async", no_fence)
-    monkeypatch.setattr(worker, "_assert_job_lease", lambda *_args, **_kwargs: None)
+    patch_worker_everywhere(monkeypatch, "_assert_review_dependency_fence_async", no_fence)
+    patch_worker_everywhere(monkeypatch, "_assert_job_lease", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(worker.hiagent, "poll_video_task", poll_fn)
     monkeypatch.setattr(concurrency, "semaphore_for", lambda _resource: Permit())
     monkeypatch.setattr(concurrency, "report_congestion", lambda *_args, **_kwargs: None)
@@ -283,9 +283,8 @@ def _wire_run_job_common_mocks_real_db(monkeypatch, poll_fn) -> None:
     monkeypatch.setattr(stage_state, "set_pipeline_stage", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(worker.media_scheduler, "renew_lease", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(worker.media_scheduler, "settle_budget", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(worker, "mark_media_job_state", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        worker, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,
+    patch_worker_everywhere(monkeypatch, "mark_media_job_state", lambda *_args, **_kwargs: None)
+    patch_worker_everywhere(monkeypatch, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,
     )
 
 

@@ -18,6 +18,7 @@ from tests.test_narrative_continuity import (
     _settled_followup_shot,
     _shot as _narrative_shot,
 )
+from tests.conftest import patch_api_everywhere
 
 
 def _outline(*shot_ids: str) -> StoryboardOutline:
@@ -325,8 +326,7 @@ def test_open_strategy_applies_its_typed_semantic_operations(
         "app.storyboard_supervisor._board_from_rows",
         lambda _rows, _episode_no: current.model_copy(deep=True),
     )
-    monkeypatch.setattr(
-        "app.domain.common._load_screenplay",
+    patch_api_everywhere(monkeypatch, "_load_screenplay",
         lambda _row: screenplay,
     )
     from app.production.screenplay_authority import DownstreamScreenplayContext

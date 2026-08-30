@@ -6,6 +6,7 @@ import pytest
 
 from app import api, db
 from app import video_command_operations as operations
+from tests.conftest import patch_video_supervisor_everywhere, patch_api_everywhere
 
 
 class _ProcessCrash(BaseException):
@@ -37,14 +38,13 @@ def project_db(tmp_path, monkeypatch):
             ),
         )
     conn.commit()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(operations, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "_project_video_spent", lambda *_args, **_kwargs: 0.0)
+    patch_api_everywhere(monkeypatch, "_project_video_spent", lambda *_args, **_kwargs: 0.0)
 
-    import app.video_supervisor as video_supervisor
 
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "rebuild_coverage_ledger",
         lambda _episode_id: type(
             "Ledger", (), {"covered_within_quota": lambda self: False}
@@ -119,7 +119,7 @@ async def test_project_receipt_recovers_exact_first_episode_after_process_loss(
         project_db.commit()
         raise _ProcessCrash()
 
-    monkeypatch.setattr(api, "_complete_episode_core", crash_after_child_commit)
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", crash_after_child_commit)
     monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
 
     with pytest.raises(_ProcessCrash):
@@ -206,7 +206,7 @@ async def test_project_receipt_resumes_prepared_first_episode_before_success(
         project_db.commit()
         raise _ProcessCrash()
 
-    monkeypatch.setattr(api, "_complete_episode_core", crash_before_child_spawn)
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", crash_before_child_spawn)
     monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
     with pytest.raises(_ProcessCrash):
         await api._complete_project_videos_core("p", body)
@@ -224,8 +224,7 @@ async def test_project_receipt_resumes_prepared_first_episode_before_success(
         resumed.append(prepared)
         return dict(prepared["result"])
 
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch,
         "_resume_prepared_complete_episode_operation",
         resume_prepared,
     )
@@ -259,7 +258,7 @@ async def test_project_receipt_reuses_exact_queue_run_after_spawn_process_loss(
             "completion_grant_id": f"grant-{episode_id}-exact",
         }
 
-    monkeypatch.setattr(api, "_complete_episode_core", complete_child)
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", complete_child)
     monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
     spawn_run_ids: list[str] = []
 

@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 
 from app import completion_grant, db, worker
+from tests.conftest import patch_worker_everywhere
 from app.orchestration import media_scheduler
 
 
@@ -333,7 +334,7 @@ def test_cancelled_job_cannot_be_written_back_to_running_version(monkeypatch) ->
 
     conn = _conn()
     monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(media_scheduler, "now", lambda: 100.0)
     conn.execute(
         "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('s','e',1,5)"
@@ -392,7 +393,7 @@ def test_provider_checkpoint_uses_async_write_transaction_for_file_db(
         calls.append(operation)
 
     file_conn = sqlite3.connect(tmp_path / "worker.db")
-    monkeypatch.setattr(worker, "run_write_transaction", capture)
+    patch_worker_everywhere(monkeypatch, "run_write_transaction", capture)
     try:
         asyncio.run(
             worker._commit_provider_acceptance(

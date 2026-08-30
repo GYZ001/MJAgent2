@@ -2901,3 +2901,14 @@ def active_video_grant_budget_cap(episode_id: str) -> float | None:
         return float(row["budget_cap_cny"]) if row["budget_cap_cny"] is not None else None
     except (TypeError, ValueError, KeyError):
         return None
+
+
+# app.db.init_db() no longer imports this module directly (P0-3 dependency
+# inversion, docs/coupling_review_2026-08-29.md 第2步) — it looks these up by
+# name through app.db_schema instead. Registered at import time so the name
+# is resolvable as soon as something has imported this module once.
+from app.db_schema import register_table as _register_table  # noqa: E402
+
+_register_table("video_budget_authority_tables", ensure_video_budget_authority_tables)
+_register_table("completion_grants_table", ensure_completion_grants_table)
+_register_table("legacy_video_liabilities_migration", migrate_legacy_video_liabilities)

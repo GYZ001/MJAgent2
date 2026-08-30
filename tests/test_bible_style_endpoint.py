@@ -21,6 +21,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.domain import bible_ops
+from tests.conftest import patch_api_everywhere
 
 
 def _make_conn(bible_json: str | None, *, bible_version: int = 0, bible_style_name: str | None = None) -> sqlite3.Connection:
@@ -52,9 +53,9 @@ def _bible_json(style: str, *, scenes: list[dict] | None = None, ref_image_path:
 
 
 def _patch_project(monkeypatch, conn: sqlite3.Connection) -> None:
-    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
-    monkeypatch.setattr(
-        bible_ops, "_project_or_404",
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(
+        monkeypatch, "_project_or_404",
         lambda _pid: dict(conn.execute("SELECT * FROM projects WHERE id='p1'").fetchone()),
     )
 
@@ -71,8 +72,8 @@ def _patch_spawns(monkeypatch) -> dict:
         calls["scene_refs"].append((project_id, only_scene, kwargs))
         return True
 
-    monkeypatch.setattr(bible_ops, "_start_refs_generation", fake_start_refs)
-    monkeypatch.setattr(bible_ops, "_start_scene_refs_generation", fake_start_scene_refs)
+    patch_api_everywhere(monkeypatch, "_start_refs_generation", fake_start_refs)
+    patch_api_everywhere(monkeypatch, "_start_scene_refs_generation", fake_start_scene_refs)
     return calls
 
 

@@ -1311,7 +1311,13 @@ def _quarantine_static_delivery_fallbacks(conn: sqlite3.Connection) -> int:
     # delivery package.  Quarantine the media row and retire that package in
     # the same startup transaction so a restart cannot leave the stale package
     # downloadable through an unchanged episode pointer.
-    from app.artifacts import invalidate_episode_delivery_authority
+    # app.artifacts registers this with app.db_schema at import time instead
+    # of being imported here directly (P0-3 dependency inversion, see
+    # docs/coupling_review_2026-08-29.md 第2步).
+    from app.db_schema import get as _get_registered
+    invalidate_episode_delivery_authority = _get_registered(
+        "invalidate_episode_delivery_authority"
+    )
 
     for episode_id in sorted({
         str(row["episode_id"])
@@ -1421,7 +1427,12 @@ def _repair_dangling_video_adoption(conn: sqlite3.Connection) -> int:
         f"UPDATE shots SET adopted_version_id=NULL WHERE id IN ({placeholders})",
         bad_shot_ids,
     )
-    from app.artifacts import invalidate_episode_delivery_authority
+    # See _quarantine_static_delivery_fallbacks above for why this is a
+    # registry lookup rather than a direct import.
+    from app.db_schema import get as _get_registered
+    invalidate_episode_delivery_authority = _get_registered(
+        "invalidate_episode_delivery_authority"
+    )
 
     for episode_id in sorted(bad_episode_ids):
         invalidate_episode_delivery_authority(conn, episode_id)
@@ -1626,7 +1637,7 @@ MIGRATIONS = (
     "ALTER TABLE episodes ADD COLUMN narrative_status TEXT NOT NULL DEFAULT 'needs_review'",
     "ALTER TABLE episodes ADD COLUMN narrative_review_artifact_id TEXT",
     "ALTER TABLE episodes ADD COLUMN narrative_calibration_artifact_id TEXT",
-    # 剧本台安全发布、occurrence 约束与轻量状态快照。
+    # 映射台安全发布、occurrence 约束与轻量状态快照。
     "ALTER TABLE episodes ADD COLUMN screenplay_required_dialogue_occurrences TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE episodes ADD COLUMN screenplay_publish_fence INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE episodes ADD COLUMN screenplay_snapshot_version INTEGER NOT NULL DEFAULT 0",
@@ -1703,6 +1714,13 @@ MIGRATIONS = (
     # 不必等用户之后碰巧访问场景库页面才启动（判据挂在这张票据本身，不挂在
     # 用户会不会访问某个页面上）。消费后立即清零，保证同一次确认只触发一次。
     "ALTER TABLE projects ADD COLUMN pending_scene_regen INTEGER NOT NULL DEFAULT 0",
+    # 软删除 + 回收站：NULL＝正常项目（现存项目一律回填 NULL，行为不变）；
+    # 非空＝已进回收站的时间戳，24 小时后由周期性清理任务彻底删除（见
+    # app.domain.projects.sweep_expired_deleted_projects / app.recovery）。
+    # 判据挂在这个时间戳本身，不挂在任何内存计时器上——无论后端重启多少次，
+    # 到期即清理。
+    "ALTER TABLE projects ADD COLUMN deleted_at REAL",
+    "CREATE INDEX IF NOT EXISTS idx_projects_deleted_at ON projects(deleted_at)",
 )
 
 
@@ -2521,16 +2539,14 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
     _bootstrap_identity(conn)
     # Provider claims are a project-owned accounting ledger. Migrate their
     # ownership before any integrity repair can delete disposable jobs/assets.
-    from app.completion_grant import (
-        ensure_video_budget_authority_tables,
-        migrate_legacy_video_liabilities,
-    )
-    ensure_video_budget_authority_tables(conn)
+    # app.completion_grant / app.model_migration register these with
+    # app.db_schema at import time instead of being imported here directly
+    # (P0-3 dependency inversion, see docs/coupling_review_2026-08-29.md 第2步).
+    from app.db_schema import run as _run_registered
+    _run_registered(conn, "video_budget_authority_tables")
     # 历史内嵌模型一次性搬进模型库。放在这里而不是应用启动钩子里：CLI 与测试
     # 也会 init_db，模型解析对它们同样是前提。迁移自身幂等，标记位落库。
-    from app.model_migration import migrate_builtin_models
-
-    migrate_builtin_models()
+    _run_registered(conn, "builtin_models_migration")
     conn.execute(
         """UPDATE provider_calls
               SET project_id=COALESCE(
@@ -2576,71 +2592,29 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
     _drop_obsolete_qa_tables(conn)
     # 视频补齐授权表；历史分镜自动确认授权会在表初始化时清理。
     try:
-        from app.completion_grant import ensure_completion_grants_table
-        ensure_completion_grants_table(conn)
+        _run_registered(conn, "completion_grants_table")
     except Exception:  # noqa: BLE001
         pass
     # Production Repair：revision / certificate / grant
     try:
-        from app.production.revision import ensure_production_revisions_table
-        from app.production.certificate import ensure_completion_certificates_table
-        from app.production.grant import ensure_production_grants_table
-        from app.production.shot_uid import backfill_shot_uids
-        ensure_production_revisions_table(conn)
-        ensure_completion_certificates_table(conn)
-        ensure_production_grants_table(conn)
-        backfill_shot_uids(conn)
+        _run_registered(conn, "production_revisions_table")
+        _run_registered(conn, "completion_certificates_table")
+        _run_registered(conn, "production_grants_table")
+        _run_registered(conn, "shot_uid_backfill")
     except Exception:  # noqa: BLE001
         pass
-    # 剧本 warning 终态已移除：有工作副本的继续 Repair，其余旧候选明确标为失败。
-    conn.execute(
-        """UPDATE episodes
-              SET screenplay_status=CASE
-                    WHEN COALESCE(working_screenplay_artifact_id, '') != '' THEN 'repairing'
-                    ELSE 'failed'
-                  END,
-                  screenplay_error=COALESCE(
-                    screenplay_error,
-                    '旧版 warning 候选未取得 QA 通过凭证，请继续修复或重新生成'
-                  ),
-                  screenplay_snapshot_version=screenplay_snapshot_version+1
-            WHERE screenplay_status='warning'"""
-    )
+    # 剧本 warning 终态重写 / scene_refs_status 误归类修正已搬去
+    # app.recovery._repair_legacy_screenplay_warning_status /
+    # _repair_misclassified_scene_refs_status（P0-3，见
+    # docs/coupling_review_2026-08-29.md 第2步）：这两条 UPDATE 改写的是业务
+    # 状态而非 schema，init_db() 不应该在纯粹的 schema/表结构初始化路径上
+    # 顺带把它们改写掉——纯 schema 初始化（CLI、测试）不应该有这个副作用，
+    # 只有真正的启动恢复（app.recovery.recover_all()，recovery_owner 独占）
+    # 才该碰业务状态。
     _backfill_multiview_assets(conn)
     _backfill_visual_entity_ids(conn)
     _repair_integrity(conn)
-    migrate_legacy_video_liabilities(conn)
-    # 旧版把“候选已生成但缺新版 QA 证据”误归类为 ProviderError，并在项目页显示为
-    # 大模型故障。保留历史 run 原貌供审计，只修正项目当前态与面向用户的恢复指引。
-    conn.execute(
-        """UPDATE projects
-           SET scene_refs_status='warning',
-               scene_refs_error=(
-                 SELECT '历史任务已更正分类：图片候选已生成，但缺少新版 QA 证据。'
-                        || '请进入候选页重新验 QA，或对未验证候选执行人工复核；系统不会继续重复出图。原始诊断：'
-                        || substr(r.failure_message, 1, 700)
-                   FROM workflow_runs r
-                  WHERE r.workflow_type='scene_references'
-                    AND r.scope_type='project'
-                    AND r.scope_id=projects.id
-                  ORDER BY r.updated_at DESC LIMIT 1
-               )
-         WHERE scene_refs_status='failed'
-           AND EXISTS (
-             SELECT 1 FROM workflow_runs r
-              WHERE r.workflow_type='scene_references'
-                AND r.scope_type='project'
-                AND r.scope_id=projects.id
-                AND r.id=(
-                  SELECT latest.id FROM workflow_runs latest
-                   WHERE latest.workflow_type='scene_references'
-                     AND latest.scope_type='project'
-                     AND latest.scope_id=projects.id
-                   ORDER BY latest.updated_at DESC LIMIT 1
-                )
-                AND r.failure_message LIKE '%候选缺少可用的新版%'
-           )"""
-    )
+    _run_registered(conn, "legacy_video_liabilities_migration")
     for key, value in DEFAULT_SETTINGS.items():
         conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (key, value))
     # Seedance 2.0 参考图容量已从旧默认 8 升级到 9。INSERT OR IGNORE 不会更新
@@ -2751,9 +2725,10 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
             # previous process's delivery leases.  Preserve workspace/phase;
             # the subsequent owner records them as abandoned evidence and
             # rebuilds in a distinct owner directory.
-            from app.delivery import _ensure_delivery_operation_receipts
-
-            _ensure_delivery_operation_receipts(conn)
+            # app.delivery registers this with app.db_schema at import time
+            # instead of being imported here directly (P0-3 dependency
+            # inversion, see docs/coupling_review_2026-08-29.md 第2步).
+            _run_registered(conn, "delivery_operation_receipts_table")
             conn.execute(
                 """UPDATE delivery_operation_receipts
                       SET lease_expires_at=0,interrupted_at=?,updated_at=?

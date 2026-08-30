@@ -20,6 +20,7 @@ from app.schemas import (
     Shot,
     World,
 )
+from tests.conftest import patch_video_modes_everywhere
 def _bible() -> Bible:
     return Bible(
         characters=[
@@ -360,7 +361,7 @@ def test_required_contact_identities_take_reference_slots_first() -> None:
 def test_missing_required_contact_identity_blocks_provider_input(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(video_modes, "max_reference_images", lambda: 1)
+    patch_video_modes_everywhere(monkeypatch, "max_reference_images", lambda: 1)
     meta = {
         "mode": video_modes.REFERENCE_IMAGE_MODE,
         "reference_input_policy_version": (

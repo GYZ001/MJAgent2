@@ -1,11 +1,13 @@
 import asyncio
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
 from app import artifacts, db, planning, task_registry, worker
-from app.capabilities import ensure_catalog_loaded, get_command_bus
+from app.capabilities import get_command_bus
+from app.capabilities.loader import ensure_catalog_loaded
 from app.compiler import clip_duration_value
 
 
@@ -44,7 +46,88 @@ def test_fresh_database_enforces_parent_links_and_cascades(tmp_path, monkeypatch
     conn.close()
 
 
-def test_project_delete_removes_harness_evidence_and_files(tmp_path, monkeypatch) -> None:
+def _insert_project_with_harness_evidence(conn, project_root, project_id: str) -> Path:
+    """回收站测试共用的夹具：一个带完整 Harness 证据链的项目，外加一份磁盘产物。
+
+    所有子表 id 都按 project_id 加前缀，保证同一个 conn 里插入多个项目不会撞
+    主键（回收站到期清理测试需要同时存在一个"未到期"和一个"已到期"项目）。
+    """
+    ep_id, shot_id, run_id, step_id, art_id = (
+        f"{project_id}-e1", f"{project_id}-s1", f"{project_id}-r1",
+        f"{project_id}-st1", f"{project_id}-a1",
+    )
+    media = project_root / project_id / "scene_refs" / "scene.jpg"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"image")
+
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES(?,?,?,?)",
+        (project_id, "P", "planned", 1),
+    )
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) "
+        "VALUES(?,?,1,'planned',1)",
+        (ep_id, project_id),
+    )
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES(?,?,1,5)",
+        (shot_id, ep_id),
+    )
+    conn.execute(
+        """INSERT INTO workflow_runs(
+               id,workflow_type,scope_type,scope_id,status,input_fingerprint,updated_at
+           ) VALUES(?,'scene_references','project',?,'SUCCEEDED','fp',1)""",
+        (run_id, project_id),
+    )
+    conn.execute(
+        "INSERT INTO step_runs(id,run_id,step_key,status,started_at) "
+        "VALUES(?,?,'scene_references','SUCCEEDED',1)",
+        (step_id, run_id),
+    )
+    conn.execute(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,file_path,
+               content_hash,created_by_step_run_id,created_at
+           ) VALUES(?,'scene_reference',?,?,1,
+                    'approved','T3',?,?,?,1)""",
+        (art_id, "reference_asset", f"{project_id}:scene:1", str(media), f"hash-{project_id}", step_id),
+    )
+    conn.execute(
+        """INSERT INTO evaluations(
+               id,artifact_id,step_run_id,evaluator_type,evaluator_name,evaluator_version,
+               status,hard_gate_passed,created_at
+           ) VALUES(?,?,?,'model','qa','1','passed',1,1)""",
+        (f"{project_id}-ev1", art_id, step_id),
+    )
+    conn.execute(
+        """INSERT INTO gate_decisions(
+               id,artifact_id,run_id,gate_key,decision,decided_by,reason,created_at
+           ) VALUES(?,?,?,'quality','approve','test','ok',1)""",
+        (f"{project_id}-g1", art_id, run_id),
+    )
+    conn.execute(
+        """INSERT INTO run_events(
+               id,run_id,step_run_id,ts,event_type,severity,message
+           ) VALUES(?,?,?,1,'STEP_FINISHED','info','done')""",
+        (f"{project_id}-re1", run_id, step_id),
+    )
+    conn.execute(
+        """INSERT INTO review_action_audit(
+               id,action,scope_type,scope_id,decided_by,created_at
+           ) VALUES(?,'adopt','reference_asset',?,'test',1)""",
+        (f"{project_id}-ra1", f"{project_id}:scene:1"),
+    )
+    conn.commit()
+    return media
+
+
+def test_project_soft_delete_keeps_rows_and_files_then_purge_removes_them(
+    tmp_path, monkeypatch,
+) -> None:
+    """project.delete 现在是软删除：移入回收站后数据库行与磁盘产物原样保留；
+    只有随后彻底清理（``_purge_project_core``，回收站到期或用户手动触发）才会
+    真正删库删文件——这是 CLAUDE.md 要求的「界面承诺与实际行为一致」在测试
+    层面的落地：按钮叫「删除」，回收站里项目却必须完好无损。"""
     from app import config
     from app.domain import projects as projects_api
 
@@ -54,63 +137,33 @@ def test_project_delete_removes_harness_evidence_and_files(tmp_path, monkeypatch
     conn = db.get_conn()
     project_root = tmp_path / "projects"
     monkeypatch.setattr(config, "PROJECTS_DIR", project_root)
-    media = project_root / "p1" / "scene_refs" / "scene.jpg"
-    media.parent.mkdir(parents=True)
-    media.write_bytes(b"image")
-
-    conn.execute(
-        "INSERT INTO projects(id,name,status,created_at) VALUES('p1','P','planned',1)"
-    )
-    conn.execute(
-        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) "
-        "VALUES('e1','p1',1,'planned',1)"
-    )
-    conn.execute(
-        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('s1','e1',1,5)"
-    )
-    conn.execute(
-        """INSERT INTO workflow_runs(
-               id,workflow_type,scope_type,scope_id,status,input_fingerprint,updated_at
-           ) VALUES('r1','scene_references','project','p1','SUCCEEDED','fp',1)"""
-    )
-    conn.execute(
-        "INSERT INTO step_runs(id,run_id,step_key,status,started_at) "
-        "VALUES('st1','r1','scene_references','SUCCEEDED',1)"
-    )
-    conn.execute(
-        """INSERT INTO artifacts(
-               id,type,scope_type,scope_id,version,status,trust_level,file_path,
-               content_hash,created_by_step_run_id,created_at
-           ) VALUES('a1','scene_reference','reference_asset','p1:scene:1',1,
-                    'approved','T3',?,'hash','st1',1)""",
-        (str(media),),
-    )
-    conn.execute(
-        """INSERT INTO evaluations(
-               id,artifact_id,step_run_id,evaluator_type,evaluator_name,evaluator_version,
-               status,hard_gate_passed,created_at
-           ) VALUES('ev1','a1','st1','model','qa','1','passed',1,1)"""
-    )
-    conn.execute(
-        """INSERT INTO gate_decisions(
-               id,artifact_id,run_id,gate_key,decision,decided_by,reason,created_at
-           ) VALUES('g1','a1','r1','quality','approve','test','ok',1)"""
-    )
-    conn.execute(
-        """INSERT INTO run_events(
-               id,run_id,step_run_id,ts,event_type,severity,message
-           ) VALUES('re1','r1','st1',1,'STEP_FINISHED','info','done')"""
-    )
-    conn.execute(
-        """INSERT INTO review_action_audit(
-               id,action,scope_type,scope_id,decided_by,created_at
-           ) VALUES('ra1','adopt','reference_asset','p1:scene:1','test',1)"""
-    )
-    conn.commit()
+    media = _insert_project_with_harness_evidence(conn, project_root, "p1")
 
     result = asyncio.run(projects_api._delete_project_core("p1"))
+    assert result["deleted"] == "p1"
+    assert result["deleted_at"] is not None
 
-    assert result["evidence_removed"] == {"artifacts": 1, "runs": 1, "steps": 1}
+    # 软删除阶段：数据库行与磁盘产物一个都不能少——用独立连接验证，不是同一
+    # 连接读自己刚写的东西。
+    verify_conn = sqlite3.connect(db.DB_PATH)
+    verify_conn.row_factory = sqlite3.Row
+    row = verify_conn.execute("SELECT deleted_at FROM projects WHERE id='p1'").fetchone()
+    assert row is not None and row["deleted_at"] is not None
+    for table in ("episodes", "shots", "workflow_runs", "step_runs", "artifacts"):
+        assert verify_conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] > 0
+    assert media.exists()
+    assert (project_root / "p1").exists()
+    verify_conn.close()
+
+    # 正常列表与项目详情入口必须挡住：deleted_at 非空即视为不存在
+    # （app.domain.common._project_or_404 是 domain 包共用的项目存在性入口）。
+    from app.domain.common import _project_or_404
+    with pytest.raises(Exception):
+        _project_or_404("p1")
+
+    # 彻底清理：数据库行与磁盘产物才真正消失。
+    purge_result = asyncio.run(projects_api._purge_project_core("p1"))
+    assert purge_result["evidence_removed"] == {"artifacts": 1, "runs": 1, "steps": 1}
     for table in (
         "projects",
         "episodes",
@@ -125,6 +178,68 @@ def test_project_delete_removes_harness_evidence_and_files(tmp_path, monkeypatch
     ):
         assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
     assert not (project_root / "p1").exists()
+
+
+def test_project_restore_clears_deleted_at_without_touching_data(tmp_path, monkeypatch) -> None:
+    from app import config
+    from app.domain import projects as projects_api
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "restore-project.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    project_root = tmp_path / "projects"
+    monkeypatch.setattr(config, "PROJECTS_DIR", project_root)
+    _insert_project_with_harness_evidence(conn, project_root, "p1")
+
+    asyncio.run(projects_api._delete_project_core("p1"))
+    restore_result = asyncio.run(projects_api._restore_project_core("p1"))
+    assert restore_result == {"restored": "p1"}
+
+    row = conn.execute("SELECT deleted_at FROM projects WHERE id='p1'").fetchone()
+    assert row["deleted_at"] is None
+    # 恢复之后跟一个从未删除过的项目没有区别：常规入口重新放行。
+    from app.domain.common import _project_or_404
+    assert _project_or_404("p1")["id"] == "p1"
+    for table in ("episodes", "shots", "workflow_runs", "artifacts"):
+        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] > 0
+
+
+def test_purge_expired_deleted_projects_only_after_24h(tmp_path, monkeypatch) -> None:
+    """自动清理的判据是 deleted_at 时间戳，不是内存计时器：23 小时前删除的
+    项目原样保留，25 小时前删除的项目被彻底清理——且这条判据必须在后端
+    "重启"（这里用新连接模拟）后依然成立。"""
+    from app import config
+    from app.domain import projects as projects_api
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "sweep-project.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    project_root = tmp_path / "projects"
+    monkeypatch.setattr(config, "PROJECTS_DIR", project_root)
+    _insert_project_with_harness_evidence(conn, project_root, "p-fresh")
+    _insert_project_with_harness_evidence(conn, project_root, "p-stale")
+
+    now = db.now()
+    conn.execute("UPDATE projects SET deleted_at=? WHERE id='p-fresh'", (now - 23 * 3600,))
+    conn.execute("UPDATE projects SET deleted_at=? WHERE id='p-stale'", (now - 25 * 3600,))
+    conn.commit()
+
+    # 模拟"重启后"：清空进程内连接缓存，sweep 只能靠 deleted_at 时间戳工作。
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    sweep_result = asyncio.run(projects_api.sweep_expired_deleted_projects())
+
+    assert sweep_result["purged"] == ["p-stale"]
+    assert sweep_result["failed"] == []
+
+    verify_conn = sqlite3.connect(db.DB_PATH)
+    verify_conn.row_factory = sqlite3.Row
+    assert verify_conn.execute("SELECT COUNT(*) FROM projects WHERE id='p-fresh'").fetchone()[0] == 1
+    assert verify_conn.execute("SELECT COUNT(*) FROM projects WHERE id='p-stale'").fetchone()[0] == 0
+    verify_conn.close()
+    assert (project_root / "p-fresh").exists()
+    assert not (project_root / "p-stale").exists()
 
 
 def test_project_evidence_delete_chunks_large_workflow_frontier(tmp_path, monkeypatch) -> None:

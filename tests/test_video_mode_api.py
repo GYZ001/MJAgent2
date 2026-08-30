@@ -4,6 +4,7 @@ from fastapi import HTTPException
 from app import api
 from app.main import app
 from app.video_plan import ProviderVideoCapabilitySnapshot
+from tests.conftest import patch_api_everywhere, patch_video_plan_everywhere
 
 
 def test_video_mode_api_surface_is_registered() -> None:
@@ -28,11 +29,8 @@ def test_video_mode_api_surface_is_registered() -> None:
 
 
 def test_missing_video_plan_is_a_normal_empty_state(monkeypatch) -> None:
-    monkeypatch.setattr(api, "_episode_or_404", lambda _episode_id: {"id": "e"})
-    monkeypatch.setattr(
-        "app.video_plan.load_latest_plan",
-        lambda _episode_id: None,
-    )
+    patch_api_everywhere(monkeypatch, "_episode_or_404", lambda _episode_id: {"id": "e"})
+    patch_video_plan_everywhere(monkeypatch, "load_latest_plan", lambda _episode_id: None)
 
     assert api.get_episode_video_generation_plan("e") is None
 
@@ -77,13 +75,9 @@ async def test_async_probe_failure_does_not_register_capability(
 
     monkeypatch.setattr("app.hiagent.create_video_task", create_task)
     monkeypatch.setattr("app.hiagent.poll_video_task", poll_task)
-    monkeypatch.setattr(
-        "app.video_plan.current_capability_snapshot",
-        lambda **_kwargs: base,
-    )
-    monkeypatch.setattr(
-        "app.video_plan.save_capability_snapshot",
-        lambda snapshot: saved.append(snapshot),
+    patch_video_plan_everywhere(monkeypatch, "current_capability_snapshot", lambda **_kwargs: base)
+    patch_video_plan_everywhere(
+        monkeypatch, "save_capability_snapshot", lambda snapshot: saved.append(snapshot)
     )
 
     result = await api.probe_video_capability(

@@ -32,7 +32,6 @@ from app.schemas import (
     NarrativeEvent,
     NarrativeEvidence,
     NarrativeProposition,
-    NarrativeReviewReport,
     RequiredOnScreenText,
     SetupPayoffContract,
     ShotCapacityBudget,

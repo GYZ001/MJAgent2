@@ -3680,7 +3680,7 @@ def test_gap_search_walks_every_remaining_batch(monkeypatch) -> None:
     because only the first six remaining plans were inspected, and its missing
     source sat further along the plan list.
     """
-    import app.stages as stages_module
+    from app.stages import ir_complete as stages_module
 
     source = pathlib.Path(stages_module.__file__).read_text(encoding="utf-8")
     body = source[source.index("selected_windows = project_windows("):]

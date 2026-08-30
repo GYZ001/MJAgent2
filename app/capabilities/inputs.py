@@ -17,6 +17,18 @@ class ProjectDeleteInput(StandardCommandInput):
     project_id: str
 
 
+class ProjectRestoreInput(StandardCommandInput):
+    project_id: str
+
+
+class ProjectPurgeInput(StandardCommandInput):
+    project_id: str
+
+
+class ProjectPurgeAllInput(StandardCommandInput):
+    pass
+
+
 class ProjectScopedInput(StandardCommandInput):
     project_id: str
     feedback: str = ""

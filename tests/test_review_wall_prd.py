@@ -9,6 +9,7 @@ import pytest
 from fastapi import HTTPException
 
 from app import api, db, worker
+from tests.conftest import patch_video_supervisor_everywhere, patch_worker_everywhere, patch_api_everywhere
 
 
 def _published_screenplay_json() -> str:
@@ -49,7 +50,7 @@ def _conn() -> sqlite3.Connection:
 
 def test_generation_context_excludes_manual_review_records(monkeypatch) -> None:
     conn = _conn()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     context = api.review_wall_context("e")
     assert context["upstream"]["eligible_for_production"] is True
@@ -75,7 +76,7 @@ def test_version_archive_is_idempotent_and_audited_once(monkeypatch) -> None:
            ) VALUES('v1','s1',1,'p','k','succeeded',1)"""
     )
     conn.commit()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     first = api.archive_video_version("v1", {"reason": "保留候选区整洁"})
     repeated = api.archive_video_version("v1", {"reason": "网络重试"})
@@ -109,7 +110,7 @@ def test_positive_actions_fail_closed_for_hard_failed_asset(monkeypatch) -> None
         }),),
     )
     conn.commit()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     snapshot = api._review_upstream_snapshot("e")
     assert snapshot["eligible_for_production"] is True
@@ -133,7 +134,7 @@ def test_authorization_numbers_reject_invalid_values(value) -> None:
 
 def test_qualification_version_detects_upstream_change(monkeypatch) -> None:
     conn = _conn()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     before = api._review_upstream_snapshot("e")
     conn.execute("UPDATE episodes SET storyboard_artifact_id='board-2', published_storyboard_artifact_id='board-2' WHERE id='e'")
     conn.commit()
@@ -153,7 +154,7 @@ def test_upstream_snapshot_finds_recoverable_run_without_episode_pointer(monkeyp
            ) VALUES('run-screenplay','screenplay','episode','e','PAUSED_EXTERNAL','fp',1)"""
     )
     conn.commit()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     snapshot = api._review_upstream_snapshot("e")
 
@@ -184,7 +185,7 @@ def test_upstream_snapshot_ignores_restart_orphan_superseded_by_success(monkeypa
            ) VALUES('run-success','storyboard','episode','e','SUCCEEDED','new',2,2)"""
     )
     conn.commit()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     snapshot = api._review_upstream_snapshot("e")
 
@@ -222,7 +223,7 @@ def test_upstream_snapshot_ignores_restart_orphan_superseded_by_success_on_story
            ) VALUES('run-success','storyboard','episode','e','SUCCEEDED','new',2,2)"""
     )
     conn.commit()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     snapshot = api._review_upstream_snapshot("e")
 
@@ -233,7 +234,7 @@ def test_upstream_snapshot_ignores_restart_orphan_superseded_by_success_on_story
 
 def test_upstream_snapshot_finds_live_task_without_durable_pointer(monkeypatch) -> None:
     conn = _conn()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(
         api.task_registry,
         "active",
@@ -262,20 +263,20 @@ async def test_video_completion_spawn_failure_is_retryable_and_rolls_back(monkey
 
     conn = _conn()
     for module in (
-        api,
         completion_grant,
         evidence_repository,
         orchestration_engine,
         state_machine,
     ):
         monkeypatch.setattr(module, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     def fail_spawn(*_args, **_kwargs):
         raise RuntimeError("event loop rejected task")
 
     monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
     monkeypatch.setattr(api.task_registry, "spawn", fail_spawn)
-    monkeypatch.setattr(api, "_assert_storyboard_generation_gate", lambda *_args: None)
+    patch_api_everywhere(monkeypatch, "_assert_storyboard_generation_gate", lambda *_args: None)
 
     with pytest.raises(HTTPException) as failed:
         await api._complete_episode_core("e", {"mode": "fresh"})
@@ -305,7 +306,6 @@ async def test_video_completion_spawn_failure_is_retryable_and_rolls_back(monkey
 
 @pytest.mark.asyncio
 async def test_video_completion_shutdown_pauses_run_for_recovery(monkeypatch) -> None:
-    import app.video_supervisor as video_supervisor
 
     class Recorder:
         run_id = "run-shutdown"
@@ -325,7 +325,7 @@ async def test_video_completion_shutdown_pauses_run_for_recovery(monkeypatch) ->
         raise asyncio.CancelledError
 
     recorder = Recorder()
-    monkeypatch.setattr(video_supervisor, "run_video_completion_resilient", interrupted)
+    patch_video_supervisor_everywhere(monkeypatch, "run_video_completion_resilient", interrupted)
     monkeypatch.setattr(api.task_registry, "shutdown_in_progress", lambda: True)
 
     with pytest.raises(asyncio.CancelledError):
@@ -339,7 +339,6 @@ async def test_video_completion_shutdown_pauses_run_for_recovery(monkeypatch) ->
 
 @pytest.mark.asyncio
 async def test_deadline_fallback_completion_records_success(monkeypatch) -> None:
-    import app.video_supervisor as video_supervisor
     from app.media_exec import enqueue as media_enqueue
 
     class Recorder:
@@ -363,7 +362,7 @@ async def test_deadline_fallback_completion_records_success(monkeypatch) -> None
         )
 
     recorder = Recorder()
-    monkeypatch.setattr(video_supervisor, "run_video_completion_resilient", completed)
+    patch_video_supervisor_everywhere(monkeypatch, "run_video_completion_resilient", completed)
     monkeypatch.setattr(media_enqueue, "reconcile_episode_generation_status", lambda _eid: None)
 
     await api._recorded_video_completion_task(
@@ -384,7 +383,6 @@ async def test_video_completion_terminal_status_uses_completed_shot_count(
     adopted: int,
     expected: str,
 ) -> None:
-    import app.video_supervisor as video_supervisor
     from app.media_exec import enqueue as media_enqueue
 
     class Recorder:
@@ -409,7 +407,7 @@ async def test_video_completion_terminal_status_uses_completed_shot_count(
         )
 
     recorder = Recorder()
-    monkeypatch.setattr(video_supervisor, "run_video_completion_resilient", completed)
+    patch_video_supervisor_everywhere(monkeypatch, "run_video_completion_resilient", completed)
     monkeypatch.setattr(media_enqueue, "reconcile_episode_generation_status", lambda _eid: None)
 
     await api._recorded_video_completion_task(
@@ -436,7 +434,7 @@ async def test_project_video_queue_spawn_failure_keeps_started_episode_and_repor
         "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('s2','e2',1,5)"
     )
     conn.commit()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
 
     async def fake_complete(episode_id, _body):
@@ -447,7 +445,7 @@ async def test_project_video_queue_spawn_failure_keeps_started_episode_and_repor
         coro.close()
         raise RuntimeError("event loop unavailable")
 
-    monkeypatch.setattr(api, "_complete_episode_core", fake_complete)
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", fake_complete)
     monkeypatch.setattr(api.task_registry, "spawn", fail_project_chain)
     monkeypatch.setattr(
         api.errors,
@@ -481,9 +479,10 @@ async def test_project_video_queue_is_persisted_and_recoverable(monkeypatch) -> 
     import app.orchestration.state_machine as state_machine
 
     for module in (
-        api, evidence_repository, orchestration_api, orchestration_engine, state_machine,
+        evidence_repository, orchestration_api, orchestration_engine, state_machine,
     ):
         monkeypatch.setattr(module, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
 
     async def fake_complete(episode_id, _body):
@@ -496,7 +495,7 @@ async def test_project_video_queue_is_persisted_and_recoverable(monkeypatch) -> 
         coro.close()
         return None
 
-    monkeypatch.setattr(api, "_complete_episode_core", fake_complete)
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", fake_complete)
     monkeypatch.setattr(api.task_registry, "spawn", capture_spawn)
 
     result = await api._complete_project_videos_core("p", {
@@ -566,15 +565,15 @@ async def test_video_completion_rejects_existing_durable_active_run(monkeypatch)
     )
     conn.commit()
     for module in (
-        api,
         completion_grant,
         evidence_repository,
         orchestration_engine,
         state_machine,
     ):
         monkeypatch.setattr(module, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
-    monkeypatch.setattr(api, "_assert_storyboard_generation_gate", lambda *_args: None)
+    patch_api_everywhere(monkeypatch, "_assert_storyboard_generation_gate", lambda *_args: None)
 
     with pytest.raises(HTTPException) as rejected:
         await api._complete_episode_core("e", {"mode": "fresh"})
@@ -598,7 +597,6 @@ async def test_video_completion_rejects_existing_durable_active_run(monkeypatch)
 async def test_run_resume_reuses_video_checkpoint_and_records_parent(monkeypatch) -> None:
     import app.completion_grant as completion_grant
     import app.orchestration.api as orchestration_api
-    import app.video_supervisor as video_supervisor
 
     conn = _conn()
     old_run = {
@@ -625,8 +623,8 @@ async def test_run_resume_reuses_video_checkpoint_and_records_parent(monkeypatch
         "active",
         lambda *_args: False,
     )
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "load_latest_checkpoint",
         lambda _episode_id: SimpleNamespace(grant_id="grant-1"),
     )
@@ -641,7 +639,7 @@ async def test_run_resume_reuses_video_checkpoint_and_records_parent(monkeypatch
         captured.update({"episode_id": episode_id, "body": body, **kwargs})
         return {"run_id": "run-new"}
 
-    monkeypatch.setattr(api, "_complete_episode_core", fake_complete)
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", fake_complete)
 
     result = await orchestration_api._restart_run("run-old", "resume")
 
@@ -657,9 +655,9 @@ async def test_run_resume_reuses_video_checkpoint_and_records_parent(monkeypatch
 @pytest.mark.asyncio
 async def test_video_resume_without_grant_has_no_state_side_effect(monkeypatch) -> None:
     conn = _conn()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
-    monkeypatch.setattr(api, "_assert_storyboard_generation_gate", lambda *_args: None)
+    patch_api_everywhere(monkeypatch, "_assert_storyboard_generation_gate", lambda *_args: None)
 
     with pytest.raises(HTTPException) as rejected:
         await api._complete_episode_core("e", {"mode": "resume"})
@@ -982,13 +980,12 @@ async def test_generate_episode_reused_active_version_is_not_adopted(
            ) VALUES('v-reused','s1',1,'p','k','running',0)"""
     )
     conn.commit()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch,
         "_review_assert_positive_action",
         lambda *_args, **_kwargs: {"qualification_version": "q1"},
     )
-    monkeypatch.setattr(api, "_assert_storyboard_generation_gate", lambda _episode_id: None)
+    patch_api_everywhere(monkeypatch, "_assert_storyboard_generation_gate", lambda _episode_id: None)
     monkeypatch.setattr(
         multiview,
         "scan_episode_reference_asset_gaps",
@@ -1026,7 +1023,7 @@ async def test_generate_episode_reused_active_version_is_not_adopted(
 @pytest.mark.asyncio
 async def test_resume_episode_reports_when_nothing_can_resume(monkeypatch) -> None:
     conn = _conn()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(
         api.worker,
         "resume_episode_video_tasks",
@@ -1037,7 +1034,7 @@ async def test_resume_episode_reports_when_nothing_can_resume(monkeypatch) -> No
     async def empty_generation(_episode_id, _body):
         return {"enqueued": [], "skipped_completed": 1, "selected_shots": 0}
 
-    monkeypatch.setattr(api, "_generate_episode_core", empty_generation)
+    patch_api_everywhere(monkeypatch, "_generate_episode_core", empty_generation)
 
     with pytest.raises(HTTPException) as rejected:
         await api.resume_episode("e")
@@ -1055,7 +1052,7 @@ async def test_resume_episode_reports_complete_mode_reset_as_success(monkeypatch
         "UPDATE episodes SET video_completion_mode='complete' WHERE id='e'",
     )
     conn.commit()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(
         api.worker,
         "resume_episode_video_tasks",
@@ -1070,8 +1067,8 @@ async def test_resume_episode_reports_complete_mode_reset_as_success(monkeypatch
     async def empty_generation(_episode_id, _body):
         return {"enqueued": [], "skipped_completed": 1, "selected_shots": 0}
 
-    monkeypatch.setattr(api, "reset_video_completion_state", reset_completion)
-    monkeypatch.setattr(api, "_generate_episode_core", empty_generation)
+    patch_api_everywhere(monkeypatch, "reset_video_completion_state", reset_completion)
+    patch_api_everywhere(monkeypatch, "_generate_episode_core", empty_generation)
 
     result = await api.resume_episode("e")
 
@@ -1084,8 +1081,8 @@ async def test_resume_episode_reports_complete_mode_reset_as_success(monkeypatch
 
 def test_worker_fences_stale_run_before_candidate_write(monkeypatch) -> None:
     conn = _conn()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     snapshot = api._review_upstream_snapshot("e")
     conn.execute(
         """INSERT INTO shot_versions(
@@ -1130,7 +1127,7 @@ def test_asset_gate_uses_adopted_gallery_and_missing_verdict_is_unverified(monke
     )
     conn.execute("UPDATE shots SET adopted_version_id='v-adopted' WHERE id='s1'")
     conn.commit()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     snapshot = api._review_upstream_snapshot("e")
     assert snapshot["eligible_for_production"] is True
@@ -1154,7 +1151,7 @@ def test_asset_rule_version_participates_in_qualification_token(monkeypatch) -> 
         }]}),),
     )
     conn.commit()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     before = api._review_upstream_snapshot("e")
     meta = {"reference_images": [{
         "id": "ref", "selectedForSeedance": True,
@@ -1179,8 +1176,8 @@ def test_worker_does_not_self_fence_when_gallery_is_copied_to_new_version(monkey
         (json.dumps({"reference_images": [reference]}),),
     )
     conn.commit()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     snapshot = api._review_upstream_snapshot("e")
     captured = {
         key: snapshot.get(key) for key in (
@@ -1221,8 +1218,8 @@ def test_worker_does_not_self_fence_on_gallery_generated_by_current_job(monkeypa
         (json.dumps({"reference_images": [stable_reference]}),),
     )
     conn.commit()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     snapshot = api._review_upstream_snapshot("e")
     captured = {
         key: snapshot.get(key) for key in (
@@ -1269,8 +1266,8 @@ def test_worker_still_fences_gallery_change_on_another_shot(monkeypatch) -> None
         (json.dumps({"reference_images": [original_reference]}),),
     )
     conn.commit()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     snapshot = api._review_upstream_snapshot("e")
     captured = {
         key: snapshot.get(key) for key in (
@@ -1324,8 +1321,8 @@ def test_worker_ignores_sibling_gallery_growth_on_another_shot(monkeypatch) -> N
         (json.dumps({"reference_images": [original_reference]}),),
     )
     conn.commit()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     snapshot = api._review_upstream_snapshot("e")
     captured = {
         key: snapshot.get(key) for key in (

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""逐集对照审计：episode_prep_pack（剧本台产物）vs 小说原文。
+"""逐集对照审计：episode_prep_pack（映射台产物）vs 小说原文。
 
 背景（见 docs/TRANSFORM_FREEZE_PLAN.md §3、app/production/prep_pack.py 模块
-docstring）：剧本台为每一集产出 episode_prep_pack（artifacts.content_json，
+docstring）：映射台为每一集产出 episode_prep_pack（artifacts.content_json，
 type='episode_prep_pack'），其中 asset_manifest.characters/scenes 把本集事件
 绑定到人物谱（character_portraits）/场景库（scene_references）的既有条目。
 生成器内部已有若干确定性门禁（1.4.2 的称谓证据闸、1.5.0 的说话人名册核验），

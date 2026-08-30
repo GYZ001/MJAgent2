@@ -1,0 +1,196 @@
+"""延迟重排、供应商轮询退避与预算暂停恢复（拆分自 ``run_job.py``）。
+
+``_requeue_after``/``_schedule_job_retry``/``_defer_provider_poll`` 是三种延迟
+重新入队场景（内存队列延迟、job 失败退避重试、供应商轮询节流），全部经
+``_retry_tasks``（``.common``）持有强引用防止被 GC 回收。``retry_paused`` 是预
+算暂停任务在用户提升额度后的批量恢复入口，与前三者共用
+``.worker_lifecycle._enqueue_for_current_status`` 把 job 重新路由回正确的调度
+通道。
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+from app import config, errors, video_modes
+from app.compiler import shot_cost_cny
+from app.db import get_conn, now
+from app.hiagent import ProviderError
+from app.orchestration import media_scheduler
+from app.orchestration.media_runs import mark_media_job_state
+
+from .common import _retry_tasks, episode_video_budget_limit
+from .worker_lifecycle import _enqueue_for_current_status
+
+
+async def _requeue_after(job_id: str, delay: float) -> None:
+    """冷却 delay 秒后把 job 重新投入队列。状态已先置回 queued，故进程重启时
+    recover_and_start 也能兜底重排，不依赖本协程存活。"""
+    try:
+        await asyncio.sleep(delay)
+        _enqueue_for_current_status(job_id)
+    except asyncio.CancelledError:
+        pass
+
+
+def _schedule_job_retry(
+    job_id: str, exc: ProviderError, *, lease_owner: str | None = None
+) -> bool:
+    """瞬时（可重试）上游故障时把 job 延迟重排，返回是否已安排重试。
+    超过 VIDEO_JOB_MAX_RETRIES 后返回 False，交由调用方走永久失败逻辑。"""
+    if not getattr(exc, "retryable", False):
+        return False
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT retry_count, max_retries, lease_owner FROM jobs WHERE id=?", (job_id,)
+    ).fetchone()
+    if lease_owner and (not row or row["lease_owner"] != lease_owner):
+        return False
+    attempt = int(row["retry_count"] or 0) + 1 if row else 1
+    max_retries = int(row["max_retries"] or config.VIDEO_JOB_MAX_RETRIES) if row else config.VIDEO_JOB_MAX_RETRIES
+    if attempt > max_retries:
+        return False
+    delay = config.VIDEO_JOB_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+    note = (f"大模型/外部服务瞬时故障，已自动排队第 {attempt}/{max_retries} 次重试"
+            f"（约 {int(delay)} 秒后）。无需处理；若多次重试后仍失败才需关注错误码。")
+    failure = exc.failure
+    updated = conn.execute(
+        """UPDATE jobs SET status='queued', error=?, retry_count=?, next_retry_at=?,
+                  provider_failure_category=?,provider_failure_kind=?,
+                  provider_failure_disposition=?,provider_failure_retryable=?,
+                  lease_owner=NULL, lease_expires_at=NULL, updated_at=? WHERE id=?"""
+        + (" AND lease_owner=?" if lease_owner else ""),
+        (
+            note,
+            attempt,
+            now() + delay,
+            failure.category.value,
+            failure.kind,
+            failure.disposition.value,
+            int(failure.retryable),
+            now(),
+            job_id,
+            *([lease_owner] if lease_owner else []),
+        ),
+    )
+    if updated.rowcount != 1:
+        conn.rollback()
+        return False
+    conn.execute(
+        "UPDATE budget_reservations SET status='reserved' WHERE job_id=? AND status='running'",
+        (job_id,),
+    )
+    conn.commit()
+    job = conn.execute("SELECT run_id, step_run_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if job:
+        mark_media_job_state(job["run_id"], job["step_run_id"], "queued", note)
+    task = asyncio.get_running_loop().create_task(_requeue_after(job_id, delay))
+    _retry_tasks.add(task)
+    task.add_done_callback(_retry_tasks.discard)
+    return True
+
+
+def _defer_provider_poll(
+    job_id: str,
+    task_id: str,
+    *,
+    lease_owner: str,
+    delay: float | None = None,
+) -> bool:
+    """供应商仍在生成时释放 worker，并持久化安排下一次状态查询。
+
+    Phase 1：状态写入 waiting_provider（不再占 worker 槽）；单次 poll 后即调用本函数。
+    这不是一次 provider retry：不会新建付费任务，也不消耗 retry_count。
+    provider_task_id 已持久化，下一次只会继续轮询同一个任务。
+    """
+    conn = get_conn()
+    wait = max(0.0, float(
+        config.VIDEO_POLL_INTERVAL if delay is None else delay
+    ))
+    due = now() + wait
+    note = (
+        f"供应商任务 {task_id} 仍在生成，已释放本地 worker；"
+        f"约 {int(wait)} 秒后自动继续查询，不会重复提交或产生新任务。"
+    )
+    updated = conn.execute(
+        """UPDATE jobs SET status='waiting_provider', error=?, next_retry_at=?,
+                  lease_owner=NULL, lease_expires_at=NULL, updated_at=?
+           WHERE id=? AND status='running' AND lease_owner=?
+             AND cancellation_requested=0 AND abandoned=0""",
+        (note, due, now(), job_id, lease_owner),
+    )
+    if updated.rowcount != 1:
+        conn.rollback()
+        return False
+    conn.execute(
+        "UPDATE budget_reservations SET status='reserved' "
+        "WHERE job_id=? AND status='running'",
+        (job_id,),
+    )
+    conn.commit()
+    job = conn.execute(
+        "SELECT run_id, step_run_id FROM jobs WHERE id=?", (job_id,)
+    ).fetchone()
+    if job:
+        mark_media_job_state(job["run_id"], job["step_run_id"], "queued", note)
+    task = asyncio.get_running_loop().create_task(_requeue_after(job_id, wait))
+    _retry_tasks.add(task)
+    task.add_done_callback(_retry_tasks.discard)
+    return True
+
+
+def retry_paused(episode_id: str, *, job_id: str | None = None) -> int:
+    """Resume budget-paused work against the current user-approved cap."""
+    conn = get_conn()
+    budget_limit = episode_video_budget_limit(episode_id)
+    if job_id:
+        rows = conn.execute(
+            """SELECT j.id,j.reserved_cost_cny,j.kind,s.duration_s
+                 FROM jobs j LEFT JOIN shots s ON s.id=j.shot_id
+                WHERE j.episode_id=? AND j.id=? AND j.status='paused_budget'""",
+            (episode_id, job_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT j.id,j.reserved_cost_cny,j.kind,s.duration_s
+                 FROM jobs j LEFT JOIN shots s ON s.id=j.shot_id
+                WHERE j.episode_id=? AND j.status='paused_budget'""",
+            (episode_id,),
+        ).fetchall()
+    resumed = 0
+    for r in rows:
+        estimate = float(r["reserved_cost_cny"] or 0)
+        if estimate <= 0:
+            estimate = (
+                config.IMAGE_PRICE_PER_UNIT
+                if r["kind"] == "scene"
+                else (
+                    shot_cost_cny(int(r["duration_s"] or 5))
+                    + config.IMAGE_PRICE_PER_UNIT
+                    * video_modes.estimated_keyframe_generation_count()
+                )
+            )
+        if media_scheduler.reserve_budget(
+            r["id"], episode_id, estimate,
+            budget_limit, conn=conn,
+        ):
+            changed = conn.execute(
+                """UPDATE jobs SET status='queued', error=NULL, next_retry_at=NULL, updated_at=?
+                   WHERE id=? AND status='paused_budget'""",
+                (now(), r["id"]),
+            )
+            conn.commit()
+            if changed.rowcount != 1:
+                continue
+            try:
+                _enqueue_for_current_status(r["id"])
+            except Exception as exc:
+                errors.record_and_format(
+                    exc,
+                    action="budget_resume_dispatch",
+                    context={"episode_id": episode_id, "job_id": r["id"]},
+                )
+            resumed += 1
+    return resumed
+
+__all__ = [name for name in globals() if not name.startswith("__")]

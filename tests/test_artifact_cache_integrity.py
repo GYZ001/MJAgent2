@@ -19,7 +19,7 @@
    污染同一请求内所有其它读者。改动前的代码是每次 `model_copy(deep=True)`，
    这是我引入的回归。
 
-3. **中等**：只读作用域会掩盖发生在它内部的写。剧本台首屏会走到
+3. **中等**：只读作用域会掩盖发生在它内部的写。映射台首屏会走到
    `assert_screenplay_matches_validated_v7_source`，那里 fail-closed 地把
    artifact 标成 stale 并 commit；作用域缓存却继续供应写前的 status。
    「Writers must never open this scope」是一句注释，注释保证不了这件事。

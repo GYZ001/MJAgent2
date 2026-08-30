@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from app.capabilities import ensure_catalog_loaded
+from app.capabilities.loader import ensure_catalog_loaded
 from app.mcp import auth, prompts, resources, tools
 from app.mcp.errors import ForbiddenError, McpError
 from app.mcp.rate_limit import RateLimitExceeded, get_rate_limiter

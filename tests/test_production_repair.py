@@ -30,7 +30,6 @@ from app.production.revision import (
     mark_first_evaluation,
     rebind_input_fingerprint,
 )
-from app.production.screenplay_authority import SCREENPLAY_QA_PROFILE_VERSION
 from app.production.screenplay_document import (
     document_to_screenplay,
     screenplay_to_document,
@@ -50,7 +49,6 @@ from app.schemas import (
     PlotSpineBeat,
     ScriptScene,
     SourceCoverageDecision,
-    VoiceCanonical,
     World,
 )
 from app.screenplay_ir import (
@@ -68,6 +66,7 @@ from app.screenplay_scene_shards import (
     ScreenplayEnvelopeMetadata,
     blueprint_content_hash,
 )
+from tests.conftest import patch_api_everywhere, patch_screenplay_repair_everywhere
 
 
 @pytest.fixture(autouse=True)
@@ -1519,7 +1518,7 @@ async def test_screenplay_repair_delegates_every_issue_to_semantic_planner(
         calls.append((args, kwargs))
         return expected
 
-    monkeypatch.setattr(screenplay_repair, "_llm_field_patch", semantic_planner)
+    patch_screenplay_repair_everywhere(monkeypatch, "_llm_field_patch", semantic_planner)
     operations = await screenplay_repair._plan_screenplay_repair_operations(
         issue,
         _minimal_script(),
@@ -1581,12 +1580,12 @@ async def test_recorded_repair_resume_skips_character_discovery_model_call(monke
         captured_preflight.append(preflight_result)
         return _minimal_script(stakes="失败将失去资格")
 
-    monkeypatch.setattr(
-        screenplay_ops,
+    patch_api_everywhere(
+        monkeypatch,
         "_screenplay_character_discovery",
         forbidden_discovery,
     )
-    monkeypatch.setattr(screenplay_ops, "_screenplay_task", fake_screenplay_task)
+    patch_api_everywhere(monkeypatch, "_screenplay_task", fake_screenplay_task)
     recorder = screenplay_ops._new_screenplay_recorder(
         "ep_p",
         trigger_type="resume",
@@ -2858,7 +2857,7 @@ async def test_semantic_patch_retries_rejected_and_duplicate_candidates(monkeypa
             return [rejected]
         return [fresh]
 
-    monkeypatch.setattr(screenplay_repair, "_llm_field_patch_once", fake_once)
+    patch_screenplay_repair_everywhere(monkeypatch, "_llm_field_patch_once", fake_once)
 
     operations = await screenplay_repair._llm_field_patch(
         issue,
@@ -3230,12 +3229,12 @@ async def test_active_recovery_run_reuses_prebaseline_identity_checkpoint(
         conn.commit()
         return script
 
-    monkeypatch.setattr(
-        screenplay_ops,
+    patch_api_everywhere(
+        monkeypatch,
         "_screenplay_character_discovery",
         forbidden_discovery,
     )
-    monkeypatch.setattr(screenplay_ops, "_screenplay_task", fake_task)
+    patch_api_everywhere(monkeypatch, "_screenplay_task", fake_task)
 
     result = await screenplay_ops._recorded_screenplay_task("ep_p", recorder)
 

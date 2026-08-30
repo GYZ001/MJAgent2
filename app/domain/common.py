@@ -123,7 +123,13 @@ def _scene_assets_task_active(project_id: str) -> bool:
 
 def _project_or_404(project_id: str) -> dict:
     conn = get_conn()
-    row = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+    # deleted_at IS NULL：软删除的项目已进回收站，对全部常规读写路径一律
+    # 404——这是整个 domain 包唯一的项目存在性入口，几乎每个 bible/screenplay/
+    # storyboard/video 端点都先过这一道，回收站里的项目因此天然拿不到任何新
+    # 操作（恢复/彻底清理走各自专用查询，不经过这里）。
+    row = conn.execute(
+        "SELECT * FROM projects WHERE id=? AND deleted_at IS NULL", (project_id,)
+    ).fetchone()
     if not row:
         raise HTTPException(404, f"项目不存在：{project_id}")
     # sqlite3.Row supports item access but not Mapping.get().  Project callers
@@ -315,7 +321,7 @@ def episode_prep_pack_payload(ep) -> dict | None:
     return None
 
 
-# 剧本台工作区既不展示也不编辑这些字段：它们由生成管线撰写，是叙事权威的一部分。
+# 映射台工作区既不展示也不编辑这些字段：它们由生成管线撰写，是叙事权威的一部分。
 # 让页面下载 1.6 MB 的叙事蓝图再原样传回来，一是纯浪费（实测占 view=script 响应体
 # 的 85%，并让草稿自动保存每次都要 JSON.stringify 一份接近 localStorage 配额的对象），
 # 二是把「客户端回声」变成权威内容的一条写路径 —— 前端任何一次裁剪或序列化差异
@@ -428,7 +434,7 @@ def purge_legacy_screenplays() -> int:
 
 
 # ``_screenplay_ready`` 是一个对不可变已发布权威链的完整重验证：重解析 2 MB
-# Artifact、重编译 IR、重验完成凭证、逐字段比对投影。实测一次 ~1.9 s，而剧本台
+# Artifact、重编译 IR、重验完成凭证、逐字段比对投影。实测一次 ~1.9 s，而映射台
 # 每 15 s 轮询一次、每次打开页面还要再跑两遍（详情 + 轻量状态）。
 #
 # 它同时是一个**纯函数**：结论只由本集的 episodes/projects 行、原文章节、

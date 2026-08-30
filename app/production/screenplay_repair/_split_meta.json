@@ -1,0 +1,423 @@
+{
+  "chunk_order": [
+    "gates",
+    "patch_planning",
+    "qa",
+    "repair_loop",
+    "dialogue_source_alignment",
+    "narrative_graph_normalize",
+    "checkpoint_recovery",
+    "revalidate_resume",
+    "issue_selection",
+    "dialogue_chain_repair",
+    "narrative_patch_ops",
+    "preflight",
+    "llm_patch_prompt",
+    "llm_field_patch"
+  ],
+  "def_owner": {
+    "MAX_REPAIR_ACTIVATION_PATCHES": "gates",
+    "MAX_REPAIR_ACTIVATION_PASSES": "gates",
+    "MAX_STRATEGY_ATTEMPTS_PER_ISSUE": "gates",
+    "NARRATIVE_PATCH_PLANNER_MAX_OUTPUT_TOKENS": "gates",
+    "SCREENPLAY_REPAIR_PLANNER_VERSION": "gates",
+    "_persist_screenplay_duration_expansion": "gates",
+    "ScreenplayIdentityGateError": "gates",
+    "ScreenplayNarrativeGateError": "gates",
+    "_SCENE_NUMBER_RE": "gates",
+    "_DIALOGUE_SOURCE_MISMATCH_RE": "gates",
+    "_SOURCE_SPAN_EXACT_MISMATCH_RE": "gates",
+    "_SOURCE_SENTENCE_RE": "gates",
+    "_SOURCE_EVIDENCE_STOP_CHARS": "gates",
+    "_eval_id_from_create": "gates",
+    "non_waivable_screenplay_issues": "gates",
+    "screenplay_identity_gate_issues": "gates",
+    "_gate_failure_message": "gates",
+    "_strategy_was_tried": "patch_planning",
+    "_patch_strategy_key": "patch_planning",
+    "_source_evidence_contexts": "patch_planning",
+    "_source_span_issue_evidence_id": "patch_planning",
+    "_plan_source_span_patch": "patch_planning",
+    "_best_scene_for_spine_beat": "patch_planning",
+    "run_screenplay_qa": "qa",
+    "plan_screenplay_patch": "repair_loop",
+    "_plan_screenplay_repair_operations": "repair_loop",
+    "_heuristic_fill_dramatic_field": "repair_loop",
+    "_scene_from_issue": "repair_loop",
+    "_derive_scene_story_function": "repair_loop",
+    "_opening_anchor_from_issue": "repair_loop",
+    "_dialogue_turn_at": "dialogue_source_alignment",
+    "_source_sentence_candidates": "dialogue_source_alignment",
+    "_source_evidence_score": "dialogue_source_alignment",
+    "_best_source_evidence_for_turn": "dialogue_source_alignment",
+    "_source_evidence_span": "dialogue_source_alignment",
+    "_normalize_dialogue_lines_to_source": "dialogue_source_alignment",
+    "_normalize_screenplay_narrative_graph": "narrative_graph_normalize",
+    "ensure_source_characters_incremental": "checkpoint_recovery",
+    "_complete_screenplay_from_working_artifact": "checkpoint_recovery",
+    "_checkpoint_after_baseline_generation": "checkpoint_recovery",
+    "_artifact_descends_from": "checkpoint_recovery",
+    "_screenplay_recovery_hard_issues": "checkpoint_recovery",
+    "_reusable_recovery_document": "checkpoint_recovery",
+    "_reusable_recovery_evaluation": "checkpoint_recovery",
+    "_activation_retry_grant_id": "checkpoint_recovery",
+    "_revalidate_or_rebuild_resume_working": "revalidate_resume",
+    "_choose_issue": "issue_selection",
+    "_identity_contract_repair_policy": "issue_selection",
+    "_issue_acceptance_test": "issue_selection",
+    "_target_issue_signature_still_open": "issue_selection",
+    "_introduced_issue_messages": "issue_selection",
+    "_dialogue_chain_replacement_is_local": "dialogue_chain_repair",
+    "_source_references_are_grounded": "dialogue_chain_repair",
+    "_normalize_character_decision_basis": "dialogue_chain_repair",
+    "_unique_source_dialogue": "dialogue_chain_repair",
+    "_normalize_dialogue_source_references": "dialogue_chain_repair",
+    "_normalize_dialogue_chain_continuity": "dialogue_chain_repair",
+    "_find_narrative_node": "narrative_patch_ops",
+    "_narrative_collection_for_node": "narrative_patch_ops",
+    "_narrative_collection_for_new_node": "narrative_patch_ops",
+    "_try_document_patch_operation": "narrative_patch_ops",
+    "_candidate_targets_narrative_graph": "narrative_patch_ops",
+    "_normalize_top_level_narrative_parent": "narrative_patch_ops",
+    "_expand_single_action_event_closure": "narrative_patch_ops",
+    "_resolve_narrative_patch_owner": "narrative_patch_ops",
+    "_normalize_patch_operation_payload": "narrative_patch_ops",
+    "_candidate_is_executable": "narrative_patch_ops",
+    "_resolve_dialogue_chain_turn_target": "narrative_patch_ops",
+    "_preflight_document_candidate": "preflight",
+    "_llm_field_patch": "llm_field_patch",
+    "_ISSUE_TARGET_INDEX_RE": "llm_patch_prompt",
+    "_ISSUE_TARGET_CONTAINERS": "llm_patch_prompt",
+    "_ISSUE_TARGET_WINDOW": "llm_patch_prompt",
+    "_issue_target_excerpt": "llm_patch_prompt",
+    "_narrative_patch_prompt_context": "llm_patch_prompt",
+    "_llm_field_patch_once": "llm_field_patch"
+  },
+  "original_imports": {
+    "annotations": [
+      "__future__",
+      "annotations",
+      null
+    ],
+    "Counter": [
+      "collections",
+      "Counter",
+      null
+    ],
+    "deepcopy": [
+      "copy",
+      "deepcopy",
+      null
+    ],
+    "hashlib": [
+      null,
+      "hashlib",
+      null
+    ],
+    "json": [
+      null,
+      "json",
+      null
+    ],
+    "re": [
+      null,
+      "re",
+      null
+    ],
+    "SequenceMatcher": [
+      "difflib",
+      "SequenceMatcher",
+      null
+    ],
+    "Any": [
+      "typing",
+      "Any",
+      null
+    ],
+    "config": [
+      "app",
+      "config",
+      null
+    ],
+    "textmatch": [
+      "app",
+      "textmatch",
+      null
+    ],
+    "resolution_declares_functional_identity": [
+      "app.character_policy",
+      "resolution_declares_functional_identity",
+      null
+    ],
+    "identity_resolution_is_authoritative": [
+      "app.identity_authority",
+      "identity_resolution_is_authoritative",
+      null
+    ],
+    "get_conn": [
+      "app.db",
+      "get_conn",
+      null
+    ],
+    "get_setting": [
+      "app.db",
+      "get_setting",
+      null
+    ],
+    "now": [
+      "app.db",
+      "now",
+      null
+    ],
+    "evidence_repository": [
+      "app.evidence",
+      "repository",
+      "evidence_repository"
+    ],
+    "Evaluation": [
+      "app.harness.types",
+      "Evaluation",
+      null
+    ],
+    "EvidenceArtifact": [
+      "app.harness.types",
+      "EvidenceArtifact",
+      null
+    ],
+    "Issue": [
+      "app.harness.types",
+      "Issue",
+      null
+    ],
+    "StateConflict": [
+      "app.orchestration.state_machine",
+      "StateConflict",
+      null
+    ],
+    "PatchOperation": [
+      "app.production.patch",
+      "PatchOperation",
+      null
+    ],
+    "load_screenplay_from_artifact": [
+      "app.production.patch",
+      "load_screenplay_from_artifact",
+      null
+    ],
+    "screenplay_artifact_payload": [
+      "app.production.patch",
+      "screenplay_artifact_payload",
+      null
+    ],
+    "publish_screenplay": [
+      "app.production.publish",
+      "publish_screenplay",
+      null
+    ],
+    "get_production_revision": [
+      "app.production.revision",
+      "get_production_revision",
+      null
+    ],
+    "mark_first_evaluation": [
+      "app.production.revision",
+      "mark_first_evaluation",
+      null
+    ],
+    "recover_screenplay_working_authority": [
+      "app.production.revision",
+      "recover_screenplay_working_authority",
+      null
+    ],
+    "rebind_input_fingerprint": [
+      "app.production.revision",
+      "rebind_input_fingerprint",
+      null
+    ],
+    "save_checkpoint": [
+      "app.production.revision",
+      "save_checkpoint",
+      null
+    ],
+    "update_working_artifact": [
+      "app.production.revision",
+      "update_working_artifact",
+      null
+    ],
+    "blocker_count": [
+      "app.production.structured_issues",
+      "blocker_count",
+      null
+    ],
+    "enrich_issues": [
+      "app.production.structured_issues",
+      "enrich_issues",
+      null
+    ],
+    "issues_from_validator_messages": [
+      "app.production.structured_issues",
+      "issues_from_validator_messages",
+      null
+    ],
+    "must_fix_count": [
+      "app.production.structured_issues",
+      "must_fix_count",
+      null
+    ],
+    "structured_issue": [
+      "app.production.structured_issues",
+      "structured_issue",
+      null
+    ],
+    "Bible": [
+      "app.schemas",
+      "Bible",
+      null
+    ],
+    "EpisodeScreenplay": [
+      "app.schemas",
+      "EpisodeScreenplay",
+      null
+    ],
+    "NARRATIVE_CONTRACT_VERSION": [
+      "app.schemas",
+      "NARRATIVE_CONTRACT_VERSION",
+      null
+    ],
+    "DIALOGUE_CHAIN_TURNS_HARD_MAX": [
+      "app.renderability",
+      "DIALOGUE_CHAIN_TURNS_HARD_MAX",
+      null
+    ]
+  },
+  "chunk_needed_external": {
+    "gates": [
+      "Any",
+      "Issue",
+      "StateConflict",
+      "json",
+      "re"
+    ],
+    "patch_planning": [
+      "EpisodeScreenplay",
+      "Issue",
+      "PatchOperation",
+      "textmatch"
+    ],
+    "qa": [
+      "Any",
+      "Bible",
+      "EpisodeScreenplay",
+      "Evaluation",
+      "Issue",
+      "blocker_count",
+      "config",
+      "enrich_issues",
+      "get_setting",
+      "hashlib",
+      "identity_resolution_is_authoritative",
+      "issues_from_validator_messages",
+      "json",
+      "must_fix_count",
+      "resolution_declares_functional_identity",
+      "structured_issue"
+    ],
+    "repair_loop": [
+      "Any",
+      "EpisodeScreenplay",
+      "Issue",
+      "PatchOperation",
+      "re"
+    ],
+    "dialogue_source_alignment": [
+      "Any",
+      "EpisodeScreenplay",
+      "SequenceMatcher",
+      "config",
+      "re",
+      "textmatch"
+    ],
+    "narrative_graph_normalize": [
+      "Any",
+      "EpisodeScreenplay",
+      "deepcopy",
+      "re"
+    ],
+    "checkpoint_recovery": [
+      "Any",
+      "Bible",
+      "EpisodeScreenplay",
+      "EvidenceArtifact",
+      "Issue",
+      "evidence_repository",
+      "get_conn",
+      "get_production_revision",
+      "json",
+      "load_screenplay_from_artifact",
+      "mark_first_evaluation",
+      "now",
+      "publish_screenplay",
+      "rebind_input_fingerprint",
+      "save_checkpoint",
+      "screenplay_artifact_payload",
+      "update_working_artifact"
+    ],
+    "revalidate_resume": [
+      "Any",
+      "Bible",
+      "EvidenceArtifact",
+      "evidence_repository",
+      "hashlib",
+      "json",
+      "load_screenplay_from_artifact",
+      "recover_screenplay_working_authority",
+      "screenplay_artifact_payload"
+    ],
+    "issue_selection": [
+      "Any",
+      "Counter",
+      "Issue",
+      "re"
+    ],
+    "dialogue_chain_repair": [
+      "Any",
+      "DIALOGUE_CHAIN_TURNS_HARD_MAX",
+      "EpisodeScreenplay",
+      "config",
+      "textmatch"
+    ],
+    "narrative_patch_ops": [
+      "Any",
+      "Issue",
+      "PatchOperation",
+      "re"
+    ],
+    "preflight": [
+      "Any",
+      "Bible",
+      "Issue",
+      "PatchOperation",
+      "issues_from_validator_messages",
+      "re"
+    ],
+    "llm_patch_prompt": [
+      "Any",
+      "Issue",
+      "json",
+      "re"
+    ],
+    "llm_field_patch": [
+      "Any",
+      "Bible",
+      "DIALOGUE_CHAIN_TURNS_HARD_MAX",
+      "EpisodeScreenplay",
+      "Issue",
+      "NARRATIVE_CONTRACT_VERSION",
+      "PatchOperation",
+      "config",
+      "issues_from_validator_messages",
+      "json",
+      "re"
+    ]
+  }
+}

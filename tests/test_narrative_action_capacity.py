@@ -2,7 +2,6 @@
 
 from app.domain import video_ops
 from app import narrative as narrative_module
-from app import validators as validators_module
 from app.continuity import (
     action_capacity_errors,
     apply_shot_contract,
@@ -38,6 +37,7 @@ from app.validators import (
     validate_storyboard_preserves_key_content,
     validate_storyboard_shot_covers_outline,
 )
+from tests.conftest import patch_api_everywhere
 
 def _plan(*, phase_durations: list[float]) -> NarrativeContinuityPlan:
     return NarrativeContinuityPlan(
@@ -393,10 +393,12 @@ def test_confirmation_gate_forwards_narrative_authority_to_shared_validators(
         captured["validate"] = kwargs
         return []
 
-    monkeypatch.setattr(validators_module, "prefer_default_shot_durations", fake_prefer)
-    monkeypatch.setattr(video_ops, "validate_storyboard", fake_validate)
-    monkeypatch.setattr(
-        validators_module,
+    from tests.conftest import patch_validators_everywhere
+
+    patch_validators_everywhere(monkeypatch, "prefer_default_shot_durations", fake_prefer)
+    patch_api_everywhere(monkeypatch, "validate_storyboard", fake_validate)
+    patch_validators_everywhere(
+        monkeypatch,
         "validate_storyboard_screenplay_scene_alignment",
         lambda *_args, **_kwargs: [],
     )

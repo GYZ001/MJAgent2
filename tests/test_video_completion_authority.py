@@ -25,6 +25,7 @@ from app.video_supervisor import (
     _semantic_storyboard_repair_proposal,
     _ensure_supervisor_video_plan,
 )
+from tests.conftest import patch_video_plan_everywhere, patch_video_supervisor_everywhere
 
 
 @pytest.fixture(autouse=True)
@@ -447,9 +448,8 @@ async def test_asset_preparation_has_zero_calls_after_release_authority_drift(
     import app.multiview as multiview
     import app.refs as refs
     import app.scenes as scenes
-    import app.video_supervisor as supervisor
 
-    monkeypatch.setattr(supervisor, "_reference_asset_scan", forbidden_scan)
+    patch_video_supervisor_everywhere(monkeypatch, "_reference_asset_scan", forbidden_scan)
     monkeypatch.setattr(multiview, "complete_legacy_character_pack", forbidden_external)
     monkeypatch.setattr(multiview, "complete_legacy_scene_pack", forbidden_external)
     monkeypatch.setattr(refs, "generate_refs", forbidden_external)
@@ -486,8 +486,9 @@ def test_grant_recomputes_bound_plan_and_capability_snapshot(monkeypatch) -> Non
         "active_model",
         lambda _kind, _provider=None: "model",
     )
-    for module in (completion_grant, evidence_repository, video_plan):
+    for module in (completion_grant, evidence_repository):
         monkeypatch.setattr(module, "get_conn", lambda: conn)
+    patch_video_plan_everywhere(monkeypatch, "get_conn", lambda: conn)
     grant, _token = issue_video_completion_grant(
         episode_id="e",
         project_id="p",
@@ -526,7 +527,6 @@ def test_grant_leaves_plan_pending_after_provider_selection_changes(
 ) -> None:
     from app.evidence import repository as evidence_repository
     import app.completion_grant as completion_grant
-    import app.video_plan as video_plan
     from tests.test_video_plan_reconcile import _conn
 
     conn = _conn()
@@ -536,8 +536,9 @@ def test_grant_leaves_plan_pending_after_provider_selection_changes(
         "active_model",
         lambda _kind, _provider=None: "model-2",
     )
-    for module in (completion_grant, evidence_repository, video_plan):
+    for module in (completion_grant, evidence_repository):
         monkeypatch.setattr(module, "get_conn", lambda: conn)
+    patch_video_plan_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     grant, _token = issue_video_completion_grant(
         episode_id="e",
@@ -559,8 +560,6 @@ def test_grant_leaves_plan_pending_after_provider_selection_changes(
 async def test_supervisor_checkpoint_acquires_exact_grant_plan_binding(monkeypatch) -> None:
     from app.evidence import repository as evidence_repository
     import app.completion_grant as completion_grant
-    import app.video_plan as video_plan
-    import app.video_supervisor as supervisor
     from tests.test_video_plan_reconcile import _conn
 
     conn = _conn()
@@ -573,10 +572,16 @@ async def test_supervisor_checkpoint_acquires_exact_grant_plan_binding(monkeypat
     for module in (
         completion_grant,
         evidence_repository,
-        video_plan,
-        supervisor,
     ):
         monkeypatch.setattr(module, "get_conn", lambda: conn)
+    # app.video_supervisor and app.video_plan are real packages: a loop-based
+    # setattr on the bare package object would silently miss submodules like
+    # video_supervisor/authority.py or video_plan/release_manifest.py that
+    # hold their own `from app.db import get_conn` copy (see
+    # patch_video_supervisor_everywhere's / patch_video_plan_everywhere's
+    # docstrings in tests/conftest.py).
+    patch_video_supervisor_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_video_plan_everywhere(monkeypatch, "get_conn", lambda: conn)
     grant, _token = issue_video_completion_grant(
         episode_id="e",
         project_id="p",
@@ -635,15 +640,16 @@ async def test_semantic_repair_accepts_unfamiliar_action_without_phrase_rules(
     )
 
     from app.harness import model_gateway
-    import app.validators as validators
+
+    from tests.conftest import patch_validators_everywhere
 
     async def fake_chat(*_args, **_kwargs):
         return json.dumps(proposal.model_dump(mode="json"), ensure_ascii=False)
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(validators, "validate_storyboard", lambda *_a, **_k: [])
-    monkeypatch.setattr(
-        validators,
+    patch_validators_everywhere(monkeypatch, "validate_storyboard", lambda *_a, **_k: [])
+    patch_validators_everywhere(
+        monkeypatch,
         "validate_storyboard_continuity_contract",
         lambda *_a, **_k: [],
     )

@@ -8,24 +8,16 @@ import pytest
 
 from app import db
 from app.harness.contracts import get_contract
-from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
+from app.harness.types import EvidenceArtifact, Issue, IssueSeverity
 from app.narrative_blueprint import BLUEPRINT_VERSION, NarrativeBlueprint
-from app.production.revision import (
-    ensure_production_revision,
-    mark_baseline_generated,
-    mark_first_evaluation,
-    save_checkpoint,
-)
 from app.production.screenplay_document import (
     apply_field_patch,
     document_to_screenplay,
     screenplay_to_document,
 )
-from app.production.screenplay_authority import SCREENPLAY_QA_PROFILE_VERSION
 from app.production.structured_issues import (
     enrich_issues,
     issues_from_validator_messages,
-    structured_issue,
 )
 from app.schemas import (
     ActionAgency,

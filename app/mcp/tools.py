@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from app.capabilities import ensure_catalog_loaded, get_command_bus, get_registry
+from app.capabilities import get_command_bus, get_registry
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.registry import CommandSpec
 from app.capabilities.schemas import CommandStatus, IdempotencyPolicy, RiskLevel
 from app.capabilities.tool_schemas import command_input_schema

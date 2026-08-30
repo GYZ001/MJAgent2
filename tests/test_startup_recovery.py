@@ -9,10 +9,11 @@ from fastapi import HTTPException
 
 from app import (
     api, artifacts, atomic_io, db, planning, recovery, rejected_media, system_api,
-    task_registry, worker,
+    task_registry,
 )
 from app.evidence import repository
 from app.orchestration import api as orchestration_api
+from tests.conftest import patch_video_supervisor_everywhere, patch_worker_everywhere, patch_api_everywhere
 
 
 def _fresh_database(tmp_path, monkeypatch):
@@ -101,9 +102,9 @@ def test_screenplay_resume_spawn_failure_restores_previous_state(tmp_path, monke
 
     monkeypatch.setattr(task_registry, "active", lambda *_args: False)
     monkeypatch.setattr(task_registry, "spawn", fail_spawn)
-    monkeypatch.setattr(api, "_new_screenplay_recorder", lambda *args, **kwargs: recorder)
-    monkeypatch.setattr(api, "_recorded_screenplay_task", lambda *args, **kwargs: pending_task())
-    monkeypatch.setattr(api, "_spawn_screenplay_activation", capture_activation)
+    patch_api_everywhere(monkeypatch, "_new_screenplay_recorder", lambda *args, **kwargs: recorder)
+    patch_api_everywhere(monkeypatch, "_recorded_screenplay_task", lambda *args, **kwargs: pending_task())
+    patch_api_everywhere(monkeypatch, "_spawn_screenplay_activation", capture_activation)
 
     with pytest.raises(HTTPException) as failed:
         orchestration_api._restart_screenplay_run(parent, "resume")
@@ -170,7 +171,7 @@ def test_refs_task_rolls_back_pending_purge_before_logging_failure(tmp_path, mon
         raise RuntimeError("模拟清理旧定妆视频产物时中途失败")
 
     monkeypatch.setattr("app.refs.generate_refs", fake_generate_refs)
-    monkeypatch.setattr(worker, "purge_character_video_artifacts", fake_purge)
+    patch_worker_everywhere(monkeypatch, "purge_character_video_artifacts", fake_purge)
 
     asyncio.run(api._refs_task("p1", None, resume=False))
 
@@ -238,7 +239,7 @@ def test_scene_recovery_prepares_missing_list_for_ready_bible(tmp_path, monkeypa
 def test_scene_reference_batch_persists_operation_boundary(tmp_path, monkeypatch) -> None:
     conn = _fresh_database(tmp_path, monkeypatch)
     spawned = _capture_spawn(monkeypatch)
-    monkeypatch.setattr(api, "_scene_refs_task_active", lambda _pid: False)
+    patch_api_everywhere(monkeypatch, "_scene_refs_task_active", lambda _pid: False)
 
     assert api._start_scene_refs_generation(
         "p1", ["客厅"], resume=True,
@@ -289,9 +290,8 @@ def test_character_reference_restart_preserves_target_and_parent(tmp_path, monke
     )
     parent = _paused_run("character_references", "project", "p1")
     seen: list[dict] = []
-    monkeypatch.setattr(api, "_refs_task_active", lambda _pid: False)
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch, "_refs_task_active", lambda _pid: False)
+    patch_api_everywhere(monkeypatch,
         "_start_refs_generation",
         lambda project_id, target, **kwargs: seen.append({
             "project_id": project_id, "target": target, **kwargs,
@@ -312,9 +312,8 @@ def test_character_reference_restart_preserves_fresh_batch_boundary(tmp_path, mo
         "refs_batch_started_at=123.5 WHERE id='p1'"
     )
     seen: list[dict] = []
-    monkeypatch.setattr(api, "_refs_task_active", lambda _pid: False)
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch, "_refs_task_active", lambda _pid: False)
+    patch_api_everywhere(monkeypatch,
         "_start_refs_generation",
         lambda project_id, target, **kwargs: seen.append({
             "project_id": project_id, "target": target, **kwargs,
@@ -338,9 +337,8 @@ def test_character_reference_restart_recovers_paused_run_when_project_flag_is_id
     )
     parent = _paused_run("character_references", "project", "p1")
     seen: list[dict] = []
-    monkeypatch.setattr(api, "_refs_task_active", lambda _pid: False)
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch, "_refs_task_active", lambda _pid: False)
+    patch_api_everywhere(monkeypatch,
         "_start_refs_generation",
         lambda project_id, target, **kwargs: seen.append({
             "project_id": project_id, "target": target, **kwargs,
@@ -357,7 +355,7 @@ def test_character_reference_restart_recovers_paused_run_when_project_flag_is_id
 def test_fresh_character_reference_batch_persists_restart_mode(tmp_path, monkeypatch) -> None:
     conn = _fresh_database(tmp_path, monkeypatch)
     spawned = _capture_spawn(monkeypatch)
-    monkeypatch.setattr(api, "_refs_task_active", lambda _pid: False)
+    patch_api_everywhere(monkeypatch, "_refs_task_active", lambda _pid: False)
 
     started = api._start_refs_generation(
         "p1", None, only_characters=["甲一", "丙老"], resume=False,
@@ -378,7 +376,7 @@ def test_fresh_character_reference_batch_persists_restart_mode(tmp_path, monkeyp
 def test_gap_character_reference_batch_persists_operation_boundary(tmp_path, monkeypatch) -> None:
     conn = _fresh_database(tmp_path, monkeypatch)
     spawned = _capture_spawn(monkeypatch)
-    monkeypatch.setattr(api, "_refs_task_active", lambda _pid: False)
+    patch_api_everywhere(monkeypatch, "_refs_task_active", lambda _pid: False)
 
     started = api._start_refs_generation(
         "p1", None, only_characters=["丙老"], resume=True,
@@ -420,7 +418,7 @@ def test_running_character_reference_run_keeps_refs_busy_when_project_flag_is_id
     )
     conn.execute("UPDATE workflow_runs SET status='RUNNING' WHERE id=?", (run_id,))
     conn.commit()
-    monkeypatch.setattr(api, "_refs_task_active", lambda _pid: False)
+    patch_api_everywhere(monkeypatch, "_refs_task_active", lambda _pid: False)
 
     assert api._start_refs_generation("p1", None) is None
     progress = asyncio.run(api.refs_progress("p1"))
@@ -790,9 +788,9 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
 
         return operation
 
-    monkeypatch.setattr(worker, "recover_media_jobs", recover("media"))
-    monkeypatch.setattr(worker, "recover_and_start", recover("worker_start", 0))
-    monkeypatch.setattr(worker, "start_stale_lease_sweeper", recover("lease_sweeper", 0))
+    patch_worker_everywhere(monkeypatch, "recover_media_jobs", recover("media"))
+    patch_worker_everywhere(monkeypatch, "recover_and_start", recover("worker_start", 0))
+    patch_worker_everywhere(monkeypatch, "start_stale_lease_sweeper", recover("lease_sweeper", 0))
     monkeypatch.setattr(
         artifacts,
         "flush_pending_media_cleanup",
@@ -804,19 +802,19 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
         "purge_rejected_media",
         recover("rejected_media", {"artifacts": 2, "records": 3, "files": 2}),
     )
-    monkeypatch.setattr(api, "recover_bible_tasks", recover("character_bible"))
-    monkeypatch.setattr(api, "recover_character_ref_tasks", recover("character_references"))
-    monkeypatch.setattr(api, "recover_portrait_view_redo_tasks", recover("portrait_view_redo"))
-    monkeypatch.setattr(api, "recover_scene_ref_tasks", recover("scene_references"))
+    patch_api_everywhere(monkeypatch, "recover_bible_tasks", recover("character_bible"))
+    patch_api_everywhere(monkeypatch, "recover_character_ref_tasks", recover("character_references"))
+    patch_api_everywhere(monkeypatch, "recover_portrait_view_redo_tasks", recover("portrait_view_redo"))
+    patch_api_everywhere(monkeypatch, "recover_scene_ref_tasks", recover("scene_references"))
     monkeypatch.setattr(planning, "recover_plan_tasks", recover("episode_mapping"))
-    monkeypatch.setattr(api, "recover_screenplay_tasks", recover("screenplay"))
-    monkeypatch.setattr(api, "recover_storyboard_tasks", recover("storyboard"))
-    monkeypatch.setattr(
-        "app.video_supervisor.recover_video_completion_runs",
+    patch_api_everywhere(monkeypatch, "recover_screenplay_tasks", recover("screenplay"))
+    patch_api_everywhere(monkeypatch, "recover_storyboard_tasks", recover("storyboard"))
+    patch_video_supervisor_everywhere(
+        monkeypatch,
+        "recover_video_completion_runs",
         recover("video_completion"),
     )
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch,
         "recover_project_video_completion_queues",
         recover("project_video_completion"),
     )
@@ -835,6 +833,10 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
         key: value for key, value in report.items()
         if key not in {"recovery_meta", "media_cleanup_outbox"}
     } == {
+        "startup_business_status_repair": {
+            "screenplay_warning_rewritten": 0,
+            "scene_refs_misclassification_rewritten": 0,
+        },
         "media": 1,
         "abandoned_partial_files_removed": 2, "character_bible": 1,
         "rejected_media_purged": {"artifacts": 2, "records": 3, "files": 2},
@@ -895,24 +897,24 @@ def test_startup_recovery_isolates_failed_step_and_continues(monkeypatch) -> Non
         calls.append("screenplay")
         raise RuntimeError("broken screenplay checkpoint")
 
-    monkeypatch.setattr(worker, "recover_media_jobs", ok("media"))
-    monkeypatch.setattr(worker, "recover_and_start", ok("worker_start"))
-    monkeypatch.setattr(worker, "start_stale_lease_sweeper", ok("lease_sweeper"))
+    patch_worker_everywhere(monkeypatch, "recover_media_jobs", ok("media"))
+    patch_worker_everywhere(monkeypatch, "recover_and_start", ok("worker_start"))
+    patch_worker_everywhere(monkeypatch, "start_stale_lease_sweeper", ok("lease_sweeper"))
     monkeypatch.setattr(atomic_io, "cleanup_abandoned_parts", ok("partial_cleanup"))
-    monkeypatch.setattr(api, "recover_bible_tasks", ok("character_bible"))
-    monkeypatch.setattr(api, "recover_character_ref_tasks", ok("character_references"))
-    monkeypatch.setattr(api, "recover_portrait_view_redo_tasks", ok("portrait_view_redo"))
-    monkeypatch.setattr(api, "recover_scene_ref_tasks", ok("scene_references"))
-    monkeypatch.setattr(api, "recover_scene_view_redo_tasks", ok("scene_view_redo"))
+    patch_api_everywhere(monkeypatch, "recover_bible_tasks", ok("character_bible"))
+    patch_api_everywhere(monkeypatch, "recover_character_ref_tasks", ok("character_references"))
+    patch_api_everywhere(monkeypatch, "recover_portrait_view_redo_tasks", ok("portrait_view_redo"))
+    patch_api_everywhere(monkeypatch, "recover_scene_ref_tasks", ok("scene_references"))
+    patch_api_everywhere(monkeypatch, "recover_scene_view_redo_tasks", ok("scene_view_redo"))
     monkeypatch.setattr(planning, "recover_plan_tasks", ok("episode_mapping"))
-    monkeypatch.setattr(api, "recover_screenplay_tasks", fail_screenplay)
-    monkeypatch.setattr(api, "recover_storyboard_tasks", ok("storyboard"))
-    monkeypatch.setattr(
-        "app.video_supervisor.recover_video_completion_runs",
+    patch_api_everywhere(monkeypatch, "recover_screenplay_tasks", fail_screenplay)
+    patch_api_everywhere(monkeypatch, "recover_storyboard_tasks", ok("storyboard"))
+    patch_video_supervisor_everywhere(
+        monkeypatch,
+        "recover_video_completion_runs",
         ok("video_completion"),
     )
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch,
         "recover_project_video_completion_queues",
         ok("project_video_completion"),
     )

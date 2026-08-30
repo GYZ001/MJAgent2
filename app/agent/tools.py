@@ -12,7 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.capabilities import ensure_catalog_loaded, get_registry
+from app.capabilities import get_registry
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.registry import CapabilityRegistry, CommandSpec
 from app.capabilities.tool_schemas import command_input_schema
 

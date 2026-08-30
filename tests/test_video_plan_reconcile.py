@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 
 from app import db, hiagent, worker
+from tests.conftest import patch_worker_everywhere
 from app.video_plan import (
     AssetSource,
     EpisodeVideoGenerationPlan,
@@ -775,7 +776,7 @@ def test_recover_equivalent_stale_provider_job_without_new_create(monkeypatch) -
                     'VIDEO_INPUT_MODE','provider_running','provider-task',1,1)"""
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     creates_before = conn.execute(
         "SELECT COUNT(*) FROM provider_calls WHERE kind='video_create'"
     ).fetchone()[0]
@@ -847,7 +848,7 @@ def test_recovery_keeps_older_task_stale_when_shot_has_usable_candidate(
                     'plan stale',1,1,'video-create-older-stale','accepted',1)"""
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     result = worker.recover_equivalent_stale_provider_jobs("e")
 

@@ -32,6 +32,7 @@ from app.screenplay_scene_shards import (
     SCREENPLAY_MERGED_IR_VERSION,
     SCREENPLAY_SCENE_SHARD_VERSION,
 )
+from tests.conftest import patch_screenplay_ir_everywhere, patch_api_everywhere
 from tests.test_narrative_continuity import _board, _persist_review_projection, _screenplay
 
 
@@ -90,7 +91,7 @@ def test_invalid_certificate_recommends_resume_only_when_published_revalidation_
 ) -> None:
     _screenplay_value, artifact, _authority = _published_case()
     episode = _published_episode()
-    monkeypatch.setattr(api, "_screenplay_ready", lambda _episode: False)
+    patch_api_everywhere(monkeypatch, "_screenplay_ready", lambda _episode: False)
 
     state = api._screenplay_authority_state(
         episode,
@@ -116,8 +117,8 @@ async def test_legacy_published_revalidation_rebuilds_current_contract(
     monkeypatch,
 ) -> None:
     _screenplay_value, artifact, _authority = _published_case()
-    monkeypatch.setattr(api, "_screenplay_ready", lambda _episode: False)
-    monkeypatch.setattr(api, "_require_harness_engine", lambda _project_id: None)
+    patch_api_everywhere(monkeypatch, "_screenplay_ready", lambda _episode: False)
+    patch_api_everywhere(monkeypatch, "_require_harness_engine", lambda _project_id: None)
 
     class Recorder:
         run_id = "run-revalidation"
@@ -125,8 +126,7 @@ async def test_legacy_published_revalidation_rebuilds_current_contract(
         def cancel(self, _message: str, conn=None) -> None:
             raise AssertionError("successful revalidation must not cancel")
 
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch,
         "_new_screenplay_recorder",
         lambda *_args, **_kwargs: Recorder(),
     )
@@ -186,7 +186,7 @@ def test_invalid_certificate_does_not_recommend_unexecutable_action(
         )
     conn.commit()
     episode = _published_episode()
-    monkeypatch.setattr(api, "_screenplay_ready", lambda _episode: False)
+    patch_api_everywhere(monkeypatch, "_screenplay_ready", lambda _episode: False)
 
     state = api._screenplay_authority_state(
         episode,
@@ -208,7 +208,7 @@ def test_unknown_revalidation_check_fails_closed_without_executable_action(
 ) -> None:
     _published_case()
     episode = _published_episode()
-    monkeypatch.setattr(api, "_screenplay_ready", lambda _episode: False)
+    patch_api_everywhere(monkeypatch, "_screenplay_ready", lambda _episode: False)
 
     def fail_unknown(**_kwargs):
         raise RuntimeError("unknown validation failure")
@@ -238,7 +238,7 @@ def test_typed_source_drift_has_priority_without_marking_artifact_stale(
 ) -> None:
     _screenplay_value, artifact, _authority = _published_case()
     episode = _published_episode()
-    monkeypatch.setattr(api, "_screenplay_ready", lambda _episode: False)
+    patch_api_everywhere(monkeypatch, "_screenplay_ready", lambda _episode: False)
     observed: dict[str, object] = {}
 
     def fail_typed(**kwargs):
@@ -275,7 +275,7 @@ def test_first_episode_baseline_resume_keeps_production_checkpoint_action(
 ) -> None:
     _published_case()
     episode = _published_episode()
-    monkeypatch.setattr(api, "_screenplay_ready", lambda _episode: False)
+    patch_api_everywhere(monkeypatch, "_screenplay_ready", lambda _episode: False)
 
     state = api._screenplay_authority_state(
         episode,
@@ -1364,12 +1364,12 @@ def test_identity_normalization_failure_preserves_published_resolver(
     monkeypatch,
 ) -> None:
     screenplay, artifact, authority = _published_case()
-    from app import portraits
     from app.domain.common import _project_bible_or_placeholder
     from app.domain.screenplay_ops import _prepare_published_screenplay_revalidation
     from app.production.screenplay_repair import (
         _complete_screenplay_from_working_artifact,
     )
+    from tests.conftest import patch_portraits_everywhere
 
     conn = db.get_conn()
     before = conn.execute(
@@ -1388,8 +1388,8 @@ def test_identity_normalization_failure_preserves_published_resolver(
     def fail_identity_normalization(*_args, **_kwargs):
         raise RuntimeError("injected identity normalization failure")
 
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "apply_screenplay_character_resolutions",
         fail_identity_normalization,
     )
@@ -2323,8 +2323,9 @@ def test_recovery_compile_receives_normalized_resolution_projection(
         captured["episode"] = episode
         return case["compiled"].model_copy(deep=True)
 
-    monkeypatch.setattr(
-        "app.screenplay_ir.compile_screenplay_ir",
+    patch_screenplay_ir_everywhere(
+        monkeypatch,
+        "compile_screenplay_ir",
         capture_compile,
     )
 

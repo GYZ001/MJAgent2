@@ -16,11 +16,13 @@ from app.video_modes import (
     decision_to_dict,
     dict_to_decision,
 )
+from tests.conftest import patch_portraits_everywhere, patch_worker_everywhere
+from tests.conftest import patch_video_modes_everywhere
 
 
 def _fake_settings(monkeypatch, **overrides):
     """让 video_modes.get_setting 读自一个内存字典，避免依赖真实 DB 设置。"""
-    monkeypatch.setattr(video_modes, "get_setting", lambda k, *a, **kw: overrides.get(k))
+    patch_video_modes_everywhere(monkeypatch, "get_setting", lambda k, *a, **kw: overrides.get(k))
 
 
 def _bible() -> Bible:
@@ -74,18 +76,18 @@ def _patch_multiview_production_ready(monkeypatch) -> None:
 def _patch_reference_build_unit(monkeypatch) -> None:
     """Keep reference-slot recovery tests local and free of DB/provider dependencies."""
     _patch_multiview_production_ready(monkeypatch)
-    monkeypatch.setattr(video_modes, "character_reference_assets", lambda *a, **k: [])
-    monkeypatch.setattr(video_modes, "scene_reference_assets", lambda *a, **k: [])
-    monkeypatch.setattr(video_modes, "_portrait_seed_inputs", lambda *a, **k: [])
-    monkeypatch.setattr(video_modes, "min_generated_references", lambda: 1)
-    monkeypatch.setattr(video_modes, "reference_gen_retries", lambda: 0)
-    monkeypatch.setattr(video_modes, "reference_prompt_async", lambda: False)
-    monkeypatch.setattr(video_modes, "batch_prompt_enabled", lambda: False)
-    monkeypatch.setattr(video_modes, "consistency_check_enabled", lambda: False)
+    patch_video_modes_everywhere(monkeypatch, "character_reference_assets", lambda *a, **k: [])
+    patch_video_modes_everywhere(monkeypatch, "scene_reference_assets", lambda *a, **k: [])
+    patch_video_modes_everywhere(monkeypatch, "_portrait_seed_inputs", lambda *a, **k: [])
+    patch_video_modes_everywhere(monkeypatch, "min_generated_references", lambda: 1)
+    patch_video_modes_everywhere(monkeypatch, "reference_gen_retries", lambda: 0)
+    patch_video_modes_everywhere(monkeypatch, "reference_prompt_async", lambda: False)
+    patch_video_modes_everywhere(monkeypatch, "batch_prompt_enabled", lambda: False)
+    patch_video_modes_everywhere(monkeypatch, "consistency_check_enabled", lambda: False)
     # These tests exercise the legacy/master slot's best-of-three lifecycle in
     # isolation.  The production default now expands a shot to the free slots
     # in Seedance's nine-image budget, which is a separate contract.
-    monkeypatch.setattr(video_modes, "max_reference_images", lambda: 1)
+    patch_video_modes_everywhere(monkeypatch, "max_reference_images", lambda: 1)
 
 
 def _passing_reference_qa() -> dict:
@@ -166,7 +168,7 @@ def test_selector_returns_default_reference_plan_without_llm(monkeypatch) -> Non
         raise AssertionError("固定参考图模式不应调用 LLM 选择")
 
     monkeypatch.setattr(hiagent, "chat", fail_chat)
-    monkeypatch.setattr(video_modes, "get_setting", lambda *a, **k: None)
+    patch_video_modes_everywhere(monkeypatch, "get_setting", lambda *a, **k: None)
 
     shot = _shot(action_desc="A站在室内与同伴对话。", dialogues=[{"speaker": "A", "line": "你好", "emotion": "平静"}])
     decision = asyncio.run(ShotVideoModeSelector().select(shot, _bible()))
@@ -301,7 +303,7 @@ def test_reference_mode_rejects_historical_timeline_keyframes() -> None:
 
 
 def test_narrative_keyframe_beats_are_chronological_and_have_distinct_targets(monkeypatch) -> None:
-    monkeypatch.setattr(video_modes, "max_reference_images", lambda: 9)
+    patch_video_modes_everywhere(monkeypatch, "max_reference_images", lambda: 9)
     shot = _shot(
         duration_s=10,
         state_in="A站在门口，手里还没有信件。",
@@ -398,7 +400,7 @@ def test_reference_mode_keeps_one_winner_per_timeline_slot() -> None:
 
 
 def test_reference_pack_prioritizes_timeline_and_props_before_scene_and_character(monkeypatch) -> None:
-    monkeypatch.setattr(video_modes, "max_character_reference_images", lambda: 1)
+    patch_video_modes_everywhere(monkeypatch, "max_character_reference_images", lambda: 1)
     timeline = [
         {
             "id": f"beat-{index}",
@@ -464,8 +466,8 @@ def test_reference_pack_prioritizes_timeline_and_props_before_scene_and_characte
 
 
 def test_reference_prompt_numbering_uses_exact_packed_order(monkeypatch) -> None:
-    monkeypatch.setattr(video_modes, "max_reference_images", lambda: 9)
-    monkeypatch.setattr(video_modes, "max_character_reference_images", lambda: 1)
+    patch_video_modes_everywhere(monkeypatch, "max_reference_images", lambda: 9)
+    patch_video_modes_everywhere(monkeypatch, "max_character_reference_images", lambda: 1)
     assets = [
         ReferenceImageAsset(
             id="late", url="data:image/jpeg;base64,bGF0ZQ==", type="plot_key_frame",
@@ -604,8 +606,8 @@ def test_runtime_reference_mode_uses_stored_decision(monkeypatch) -> None:
     # 运行期一旦调用 LLM 选择即视为回归（应已被移除）
     monkeypatch.setattr(ShotVideoModeSelector, "select", fail_select)
     writes: list[dict] = []
-    monkeypatch.setattr(worker, "_set_version", lambda *a, **k: writes.append(k))
-    monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)
+    patch_worker_everywhere(monkeypatch, "_set_version", lambda *a, **k: writes.append(k))
+    patch_video_modes_everywhere(monkeypatch, "build_reference_assets", fake_build_reference_assets)
 
     reference_decision = decision_to_dict(ShotVideoModeDecision(
         mode=REFERENCE_IMAGE_MODE, reason="对白镜，保持角色与场景一致", confidence=0.9,
@@ -659,8 +661,8 @@ def test_runtime_auto_repairs_historical_generated_gallery(monkeypatch) -> None:
         return [_runtime_library_asset("repaired-library-anchor")]
 
     writes: list[dict] = []
-    monkeypatch.setattr(worker, "_set_version", lambda *a, **k: writes.append(k))
-    monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)
+    patch_worker_everywhere(monkeypatch, "_set_version", lambda *a, **k: writes.append(k))
+    patch_video_modes_everywhere(monkeypatch, "build_reference_assets", fake_build_reference_assets)
     monkeypatch.setattr("app.media_pipeline.stage_state.set_pipeline_stage", lambda *a, **k: None)
 
     conn = _FakeConn({"bible_json": _bible().model_dump_json()})
@@ -696,8 +698,8 @@ def test_runtime_requires_repair_when_library_has_no_usable_images(monkeypatch) 
         _mark_runtime_library_policy(kwargs["existing_meta"])
         return []
 
-    monkeypatch.setattr(worker, "_set_version", lambda *a, **k: None)
-    monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)
+    patch_worker_everywhere(monkeypatch, "_set_version", lambda *a, **k: None)
+    patch_video_modes_everywhere(monkeypatch, "build_reference_assets", fake_build_reference_assets)
     monkeypatch.setattr("app.media_pipeline.stage_state.set_pipeline_stage", lambda *a, **k: None)
 
     conn = _FakeConn({"bible_json": _bible().model_dump_json()})
@@ -752,8 +754,8 @@ def test_runtime_submits_existing_character_and_scene_library_assets(monkeypatch
         return assets
 
     writes: list[dict] = []
-    monkeypatch.setattr(worker, "_set_version", lambda *a, **k: writes.append(k))
-    monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)
+    patch_worker_everywhere(monkeypatch, "_set_version", lambda *a, **k: writes.append(k))
+    patch_video_modes_everywhere(monkeypatch, "build_reference_assets", fake_build_reference_assets)
     monkeypatch.setattr("app.media_pipeline.stage_state.set_pipeline_stage", lambda *a, **k: None)
 
     conn = _FakeConn({"bible_json": _bible().model_dump_json()})
@@ -788,9 +790,9 @@ def test_edited_gallery_with_changed_dependencies_is_invalidated_before_rebuild(
         _mark_runtime_library_policy(kwargs["existing_meta"])
         return [_runtime_library_asset("fresh")]
 
-    monkeypatch.setattr(worker, "_set_version", lambda *a, **k: None)
-    monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)
-    monkeypatch.setattr("app.portraits.bible_for_episode", lambda _p, bible, _ep: bible)
+    patch_worker_everywhere(monkeypatch, "_set_version", lambda *a, **k: None)
+    patch_video_modes_everywhere(monkeypatch, "build_reference_assets", fake_build_reference_assets)
+    patch_portraits_everywhere(monkeypatch, "bible_for_episode", lambda _p, bible, _ep: bible)
     monkeypatch.setattr("app.media_pipeline.stage_state.set_pipeline_stage", lambda *a, **k: None)
     monkeypatch.setattr("app.multiview.resolve_shot_asset_dependencies", lambda **_k: {"revision": "new"})
     monkeypatch.setattr("app.multiview.manifest_revisions_match", lambda _old, _new: False)
@@ -841,9 +843,9 @@ def test_complete_historical_generated_gallery_is_invalidated_by_library_policy(
         _mark_runtime_library_policy(kwargs["existing_meta"])
         return [_runtime_library_asset("fresh")]
 
-    monkeypatch.setattr(worker, "_set_version", lambda *a, **k: None)
-    monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)
-    monkeypatch.setattr("app.portraits.bible_for_episode", lambda _p, bible, _ep: bible)
+    patch_worker_everywhere(monkeypatch, "_set_version", lambda *a, **k: None)
+    patch_video_modes_everywhere(monkeypatch, "build_reference_assets", fake_build_reference_assets)
+    patch_portraits_everywhere(monkeypatch, "bible_for_episode", lambda _p, bible, _ep: bible)
     monkeypatch.setattr("app.media_pipeline.stage_state.set_pipeline_stage", lambda *a, **k: None)
 
     conn = _FakeConn({"bible_json": _bible().model_dump_json()})
@@ -885,9 +887,9 @@ def test_static_ready_checkpoint_missing_library_file_cannot_skip_rebuild(monkey
         _mark_runtime_library_policy(kwargs["existing_meta"])
         return [_runtime_library_asset("fresh")]
 
-    monkeypatch.setattr(worker, "_set_version", lambda *a, **k: None)
-    monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)
-    monkeypatch.setattr("app.portraits.bible_for_episode", lambda _p, bible, _ep: bible)
+    patch_worker_everywhere(monkeypatch, "_set_version", lambda *a, **k: None)
+    patch_video_modes_everywhere(monkeypatch, "build_reference_assets", fake_build_reference_assets)
+    patch_portraits_everywhere(monkeypatch, "bible_for_episode", lambda _p, bible, _ep: bible)
     monkeypatch.setattr("app.media_pipeline.stage_state.set_pipeline_stage", lambda *a, **k: None)
 
     conn = _FakeConn({"bible_json": _bible().model_dump_json()})
@@ -929,7 +931,7 @@ def test_previous_tail_path_and_dependency_are_version_specific(monkeypatch, tmp
         dest.write_bytes(b"tail-frame")
         return True
 
-    monkeypatch.setattr(video_modes, "_extract_last_frame", fake_extract)
+    patch_video_modes_everywhere(monkeypatch, "_extract_last_frame", fake_extract)
     first = video_modes.previous_tail_reference_asset(
         TailConn(), {"id": "prev", "adopted_version_id": "ver_1"}, dest_dir=tmp_path / "refs",
     )
@@ -1046,7 +1048,7 @@ def test_seedance_keeps_anchor_for_identity_missing_from_keyframe() -> None:
 
 
 def test_pack_keeps_one_anchor_for_each_distinct_character(monkeypatch) -> None:
-    monkeypatch.setattr(video_modes, "max_character_reference_images", lambda: 1)
+    patch_video_modes_everywhere(monkeypatch, "max_character_reference_images", lambda: 1)
     refs = [
         {
             "id": "character-a", "url": "data:image/jpeg;base64,a", "type": "character",
@@ -1071,8 +1073,8 @@ def test_pack_keeps_one_anchor_for_each_distinct_character(monkeypatch) -> None:
 
 
 def test_pack_seedance_prefers_score_and_keeps_gallery_selection(monkeypatch) -> None:
-    monkeypatch.setattr(video_modes, "max_character_reference_images", lambda: 1)
-    monkeypatch.setattr(video_modes, "max_reference_images", lambda: 2)
+    patch_video_modes_everywhere(monkeypatch, "max_character_reference_images", lambda: 1)
+    patch_video_modes_everywhere(monkeypatch, "max_reference_images", lambda: 2)
     refs = [
         {"id": "a", "url": "data:image/jpeg;base64,aaa", "selectedForSeedance": True,
          "type": "character", "source": "asset_library", "qualityScore": 0.99},

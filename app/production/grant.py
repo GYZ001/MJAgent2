@@ -212,3 +212,11 @@ def assert_grant_allows(
             f"Patch 触及节点数 {touched_nodes} 超过授权上限 {g.max_touched_nodes}"
         )
     return g
+
+
+# app.db.init_db() no longer imports this module directly (P0-3 dependency
+# inversion, docs/coupling_review_2026-08-29.md 第2步) — it looks this up by
+# name through app.db_schema instead.
+from app.db_schema import register_table as _register_table  # noqa: E402
+
+_register_table("production_grants_table", ensure_production_grants_table)

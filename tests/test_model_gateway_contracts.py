@@ -79,6 +79,12 @@ def test_direct_chat_structured_calls_pass_required_keyword_only_arguments() -> 
 
     for relative_path in tracked:
         path = root / relative_path
+        if not path.is_file():
+            # `git ls-files --cached` 报的是**索引**内容：一个已在工作区删除、
+            # 但删除尚未暂存的文件仍会出现在这里（本仓大规模拆包期间会同时有
+            # 十几个这种文件——旧的扁平模块已被拆成同名目录下的包）。它没有源码
+            # 可扫，跳过即可；契约检查的对象是磁盘上真实存在的代码。
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):

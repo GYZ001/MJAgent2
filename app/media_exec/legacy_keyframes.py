@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-try:
-    _queue
-except NameError:  # pragma: no cover - used when importing this module directly
-    from app.media_exec.common import *
+from app.db import get_conn, now
+from app.orchestration import media_scheduler
+
 
 def decommission_legacy_keyframe_jobs() -> int:
     """取消升级前遗留的关键帧任务并清掉镜头的假运行状态。

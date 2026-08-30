@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.capabilities import ensure_catalog_loaded
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.coverage import build_coverage_report
 from app.capabilities.registry import get_registry
 

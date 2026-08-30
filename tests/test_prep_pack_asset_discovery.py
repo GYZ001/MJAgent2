@@ -50,9 +50,10 @@ import sqlite3
 
 import pytest
 
-from app import portraits, scenes
+from app import scenes
 from app.production import prep_pack
 from app.source_excerpt import SourceSegment
+from tests.conftest import patch_portraits_everywhere, patch_prep_pack_everywhere
 
 
 def _make_conn() -> sqlite3.Connection:
@@ -228,7 +229,7 @@ def test_fully_known_cast_triggers_zero_discovery_calls(monkeypatch):
     async def boom_scene(*_a, **_k):
         raise AssertionError("EP1 式全谱内集不应调用场景发现")
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", boom_character)
     monkeypatch.setattr(scenes, "ensure_scenes_for_labels", boom_scene)
 
     events = [_event(
@@ -301,8 +302,8 @@ def test_known_alias_flagged_as_background_extra_still_binds_to_its_portrait(mon
             "errors": [], "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_disambiguate)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_disambiguate)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     events = [
         _event("ev_002", characters=[
@@ -370,8 +371,8 @@ def test_occupation_title_extras_absorbed_into_functional_extras(monkeypatch):
             "errors": [], "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_discovery)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     events = [
         _event("ev_002", characters=[
@@ -436,8 +437,8 @@ def test_default_functional_fallback_still_excludes_non_person_skips(monkeypatch
             "errors": [], "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_not_person)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_not_person)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "天启宗", "is_background_extra": False}])]
     characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
 
@@ -466,8 +467,8 @@ def test_unresolved_new_character_routes_through_discovery_and_resolves(monkeypa
         return {"added": [{"name": "沈青梧"}], "resolutions": [], "errors": [], "skipped": [], "warnings": []}
 
     conn = _make_conn()
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_ensure_cards_for_text)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_ensure_cards_for_text)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     events = [_event(
         "ev_001", characters=[{"display_name": "沈青梧", "is_background_extra": False}],
@@ -568,8 +569,8 @@ def test_functional_identity_after_discovery_needs_no_portrait(monkeypatch):
             "errors": [], "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_functional)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_functional)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "黑衣人", "is_background_extra": False}])]
     characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
 
@@ -601,8 +602,8 @@ def test_skipped_not_person_after_discovery_needs_no_portrait(monkeypatch):
             "errors": [], "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_not_person)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_not_person)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "天启宗", "is_background_extra": False}])]
     characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
 
@@ -642,8 +643,8 @@ def test_discovery_functional_verdict_yields_to_carded_bible_character(monkeypat
             "errors": [], "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_discovery)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "王有材", "is_background_extra": False}])]
     characters, _scene_list, _props, functional_extras, errors, _stats, *_rest = _resolve(
         conn, events=events, source_text="王有材站在半山腰那里。",
@@ -673,8 +674,8 @@ def test_discovery_non_person_skip_survives_carded_namesake(monkeypatch):
             "errors": [], "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_not_person)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_not_person)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "天启宗", "is_background_extra": False}])]
     characters, _scene_list, _props, functional_extras, errors, _stats, *_rest = _resolve(
         conn, events=events, source_text="天启宗坐落在山中。",
@@ -705,8 +706,8 @@ def test_alias_rename_after_discovery_resolves_to_real_name(monkeypatch):
             "errors": [], "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_rename)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_rename)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "神秘老者", "is_background_extra": False}])]
     characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
         conn, events=events,
@@ -750,8 +751,8 @@ def test_discovery_explicit_named_error_still_gate_fails(monkeypatch):
             "errors": ["神秘蒙面人：身份模型已确认真名，但人物卡模型未返回完整稳定卡片"],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", failing_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", failing_discovery)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event(
         "ev_001",
         characters=[{"display_name": "神秘蒙面人", "is_background_extra": True}],
@@ -793,8 +794,8 @@ def test_discovery_error_entries_surface_in_final_gate_message(monkeypatch):
             "errors": ["无名之人：新角色评估失败（诊断标记 ABC123）"],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", failing_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", failing_discovery)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_001", characters=[{"display_name": "无名之人", "is_background_extra": False}])]
     characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(conn, events=events)
 
@@ -830,7 +831,7 @@ def test_ep5_hallucinated_character_bind_with_no_text_evidence_is_gate_blocked(m
     def boom_character(*_a, **_k):
         raise AssertionError("裸命中没有证据应门禁具名拦截，不应该回炉重新发现")
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", boom_character)
 
     events = [_event(
         "ev_008", characters=[{"display_name": "丹鬼", "is_background_extra": False}],
@@ -932,7 +933,7 @@ def test_suspected_true_name_hypothesis_verified_via_forward_window_binds_with_a
     def boom_character(*_a, **_k):
         raise AssertionError("核验通过的假设应走确定性快车道，不应该再触发全量身份发现")
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", boom_character)
 
     verdict_calls = {"n": 0}
 
@@ -1408,7 +1409,7 @@ def test_character_alias_registry_binds_ep2_shape_alias_in_ep3_zero_discovery(
     def boom_character(*_a, **_k):
         raise AssertionError("跨集别名注册表命中唯一目标，不应该回炉重新消歧")
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", boom_character)
 
     events = [_event("ev_010", characters=[
         {"display_name": "小胖子", "is_background_extra": False},
@@ -1476,8 +1477,8 @@ def test_character_alias_registry_ambiguous_across_episodes_falls_back_to_discov
             "skipped": [{"status": "skipped", "name": "小胖子", "reason": "跨集别名矛盾，回炉观察"}],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_disambiguate)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_disambiguate)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     events = [_event("ev_010", characters=[
         {"display_name": "小胖子", "is_background_extra": False},
@@ -1532,7 +1533,7 @@ def test_character_alias_registry_binds_via_bible_aliases_with_zero_other_episod
     def boom_character(*_a, **_k):
         raise AssertionError("人物谱别名命中唯一目标，不应该回炉重新消歧")
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", boom_character)
 
     events = [_event("ev_001", characters=[
         {"display_name": "小胖子", "is_background_extra": False},
@@ -1592,7 +1593,7 @@ def test_bible_alias_conflict_check_is_not_overridden_by_legacy_scan(monkeypatch
     def boom_character(*_a, **_k):
         raise AssertionError("人物谱已给出明确无冲突结论，不应该回炉重新消歧")
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", boom_character)
 
     events = [_event("ev_010", characters=[
         {"display_name": "小胖子", "is_background_extra": False},
@@ -1639,8 +1640,8 @@ def test_bible_alias_ambiguous_across_characters_falls_back_to_discovery(monkeyp
             "skipped": [{"status": "skipped", "name": "小胖子", "reason": "人物谱别名矛盾，回炉观察"}],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_disambiguate)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_disambiguate)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     # 1.8.0：discovery 判定 skip 后，"小胖子"落入未解析角色标签候选判别
     # （_prep_pack_resolve_functional_extra_candidate）——它字面命中了
@@ -1707,7 +1708,7 @@ def test_degraded_empty_retry_after_nonempty_attempt_is_rejected_not_adopted(
             )
         raise prep_pack.PrepPackGateError("本集未抽取到任何事件", had_events=False)
 
-    monkeypatch.setattr(prep_pack, "_generate_prep_pack_once", fake_generate_once)
+    patch_prep_pack_everywhere(monkeypatch, "_generate_prep_pack_once", fake_generate_once)
 
     with pytest.raises(prep_pack.PrepPackGateError) as excinfo:
         asyncio.run(prep_pack.run_episode_prep_pack(
@@ -1735,7 +1736,7 @@ def test_empty_retry_terminal_error_stays_plain_when_every_attempt_was_empty(
         calls.append(1)
         raise prep_pack.PrepPackGateError("本集未抽取到任何事件", had_events=False)
 
-    monkeypatch.setattr(prep_pack, "_generate_prep_pack_once", fake_generate_once)
+    patch_prep_pack_everywhere(monkeypatch, "_generate_prep_pack_once", fake_generate_once)
 
     with pytest.raises(prep_pack.PrepPackGateError) as excinfo:
         asyncio.run(prep_pack.run_episode_prep_pack(
@@ -1784,8 +1785,8 @@ def test_composite_description_resolved_via_discovery_bypasses_literal_gate(
             "errors": [], "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_disambiguate)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_disambiguate)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     events = [_event("ev_001", characters=[
         {"display_name": "穿杂役衫的魁梧大汉", "is_background_extra": False},
@@ -1822,8 +1823,8 @@ def test_composite_description_discovery_failure_still_gate_blocked(monkeypatch)
             "errors": ["穿杂役衫的魁梧大汉：身份模型已确认真名，但人物卡模型未返回完整稳定卡片"],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", failing_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", failing_discovery)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     events = [_event("ev_001", characters=[
         {"display_name": "穿杂役衫的魁梧大汉", "is_background_extra": False},
@@ -1910,7 +1911,7 @@ def test_provenance_alias_method_self_verifies(monkeypatch):
     def boom_character(*_a, **_k):
         raise AssertionError("跨集别名注册表命中唯一目标，不应该回炉重新消歧")
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", boom_character)
 
     source_text = "小胖子憨憨一笑，抓了抓头。"
     events = [_event("ev_010", characters=[
@@ -2039,8 +2040,8 @@ def test_provenance_resolution_method_self_verifies(monkeypatch):
             "errors": [], "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_rename)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_rename)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     source_text = "一名神秘老者悄然现身，气息深不可测。"
     events = [_event("ev_001", characters=[
         {"display_name": "神秘老者", "is_background_extra": False},
@@ -2070,8 +2071,8 @@ def test_provenance_discovery_method_self_verifies(monkeypatch):
         conn.commit()
         return {"added": [{"name": "沈青梧"}], "resolutions": [], "errors": [], "skipped": [], "warnings": []}
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_ensure_cards_for_text)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_ensure_cards_for_text)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     source_text = "沈青梧提剑而立，目光冷冽。"
     events = [_event("ev_001", characters=[
         {"display_name": "沈青梧", "is_background_extra": False},
@@ -2520,8 +2521,8 @@ def test_true_name_dossier_trial_rejects_enumeration_counter_evidence_real_corpu
         conn.commit()
         return {"added": [{"name": "小胖子"}], "resolutions": [], "errors": [], "skipped": [], "warnings": []}
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_ensure_cards_for_text)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_ensure_cards_for_text)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     events = [_event("ev_099", characters=[
         {"display_name": "小胖子", "is_background_extra": False, "suspected_true_name": "王有材"},
@@ -2594,8 +2595,8 @@ def test_true_name_dossier_trial_rejects_containment_false_positive_real_corpus(
             "errors": [], "skipped": [], "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_ensure_cards_for_text)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_ensure_cards_for_text)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     events = [_event("ev_100", characters=[
         {
@@ -2660,7 +2661,7 @@ def test_true_name_dossier_trial_accepts_verified_link_real_corpus(monkeypatch):
     def boom_character(*_a, **_k):
         raise AssertionError("核验通过的假设应走确定性快车道，不应该再触发全量身份发现")
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", boom_character)
 
     events = [_event("ev_101", characters=[
         {"display_name": "小胖子", "is_background_extra": False, "suspected_true_name": "李富贵"},
@@ -2736,8 +2737,8 @@ def test_true_name_dossier_trial_rejects_unpinnable_entry_index_anti_forgery(mon
         conn.commit()
         return {"added": [{"name": "小胖子"}], "resolutions": [], "errors": [], "skipped": [], "warnings": []}
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_ensure_cards_for_text)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_ensure_cards_for_text)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     events = [_event("ev_102", characters=[
         {"display_name": "小胖子", "is_background_extra": False, "suspected_true_name": "李富贵"},
@@ -2817,8 +2818,8 @@ def test_character_rename_coincidentally_matching_suspected_true_name_uses_resol
             "errors": [], "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_ensure_cards_for_text)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_ensure_cards_for_text)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     events = [_event("ev_001", characters=[
         {"display_name": "小胖子", "is_background_extra": False, "suspected_true_name": "李富贵"},
@@ -2960,7 +2961,7 @@ def test_true_name_verdict_cache_isolated_by_subject_kind(monkeypatch):
     async def boom_scene(*_a, **_k):
         raise AssertionError("核验通过的假设应走确定性快车道，不应该再触发场景发现")
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", boom_character)
     monkeypatch.setattr(scenes, "ensure_scenes_for_labels", boom_scene)
 
     events = [_event(
@@ -3025,8 +3026,8 @@ def test_true_name_verdict_rejects_pinned_entry_missing_alias_real_data_shape(mo
         return {"added": [], "resolutions": [], "errors": [], "skipped": [], "warnings": []}
 
     monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_discovery)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     events = [_event("ev_301", characters=[
         {"display_name": "小胖子", "is_background_extra": False, "suspected_true_name": "王有材"},
@@ -3090,8 +3091,8 @@ def test_true_name_verdict_requires_dual_anchor_pin_when_available(monkeypatch):
         return {"added": [], "resolutions": [], "errors": [], "skipped": [], "warnings": []}
 
     monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_discovery)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     events = [_event("ev_302", characters=[
         {"display_name": "小胖子", "is_background_extra": False, "suspected_true_name": "王有材"},
@@ -3150,7 +3151,7 @@ def test_true_name_verdict_accepts_degraded_in_episode_pin_when_no_dual_anchor_e
     def boom_character(*_a, **_k):
         raise AssertionError("核验通过的假设应走确定性快车道，不应该再触发全量身份发现")
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", boom_character)
 
     events = [_event("ev_303", characters=[
         {"display_name": "银发老者", "is_background_extra": False, "suspected_true_name": "沈无极"},
@@ -3255,7 +3256,7 @@ def test_true_name_verification_concurrent_completion_order_does_not_affect_outp
             )
 
         monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
-        monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+        patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", boom_character)
 
         result = await prep_pack._resolve_assets(
             conn, project_id="p1", episode_id="ep-test", episode_no=2,
@@ -3368,8 +3369,8 @@ def test_functional_extra_candidate_concurrent_completion_order_does_not_affect_
             from app.source_paratext import ParatextSpans
             return ParatextSpans(spans=[])
 
-        monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-        monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+        patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_discovery)
+        patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
         monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
 
         result = await prep_pack._resolve_assets(
@@ -3508,7 +3509,7 @@ def test_true_name_verification_task_failure_aborts_pass_without_partial_writeba
     def boom_character(*_a, **_k):
         raise AssertionError("核验通过的假设应走确定性快车道，不应该再触发全量身份发现")
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", boom_character)
 
     with pytest.raises(RuntimeError, match="模拟 provider 调用失败"):
         asyncio.run(prep_pack._resolve_assets(
@@ -3551,8 +3552,8 @@ def test_true_name_verdict_rejects_degraded_pin_from_unrelated_out_of_episode_ch
         return {"added": [], "resolutions": [], "errors": [], "skipped": [], "warnings": []}
 
     monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_discovery)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     events = [_event("ev_304", characters=[
         {"display_name": "银发老者", "is_background_extra": False, "suspected_true_name": "沈无极"},
@@ -3623,8 +3624,8 @@ def test_pass2_discovery_skip_name_collision_does_not_discard_pass1_accepted_tru
         }
 
     monkeypatch.setattr(prep_pack.model_gateway, "chat_structured", fake_chat_structured)
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_discovery)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     events = [_event("ev_401", characters=[
         {"display_name": "许姓女子", "is_background_extra": False, "suspected_true_name": "许清"},
@@ -3686,7 +3687,7 @@ def test_visual_entity_id_stable_across_episodes_despite_different_in_episode_wo
     def boom_character(*_a, **_k):
         raise AssertionError("裸命中/别名注册表命中都不应该回炉重新消歧")
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", boom_character)
 
     events_ep1 = [_event("ev_ep1", characters=[
         {"display_name": "许清", "is_background_extra": False},
@@ -3738,8 +3739,8 @@ def test_functional_extra_visual_entity_id_stable_for_same_raw_label_across_epis
             "errors": [], "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_functional)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_functional)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
     events = [_event("ev_a", characters=[
         {"display_name": "神秘蒙面客", "is_background_extra": False},
     ])]
@@ -3803,8 +3804,8 @@ def test_unresolved_appearance_label_binds_via_candidate_verdict(monkeypatch):
     async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
         return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_discovery)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     seen: dict = {}
 
@@ -3857,8 +3858,8 @@ def test_candidate_verdict_empty_candidate_set_stays_functional_extra(monkeypatc
     async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
         return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_discovery)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     async def boom_chat_structured(messages, **kwargs):
         raise AssertionError("候选集为空时绝不该发起候选判别模型调用")
@@ -3901,8 +3902,8 @@ def test_candidate_verdict_no_match_selected_stays_functional_extra(monkeypatch)
     async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
         return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_discovery)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     async def fake_chat_structured(messages, **kwargs):
         return prep_pack._PrepPackFunctionalCandidateVerdict(
@@ -3946,8 +3947,8 @@ def test_candidate_verdict_out_of_dossier_segment_rejected_stays_functional_extr
     async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
         return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_discovery)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     async def fake_chat_structured(messages, **kwargs):
         return prep_pack._PrepPackFunctionalCandidateVerdict(
@@ -4092,8 +4093,8 @@ def test_unresolved_appearance_label_binds_via_candidate_verdict_using_own_segme
     async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
         return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_discovery)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     seen: dict = {}
 
@@ -4365,7 +4366,7 @@ def test_functional_candidate_dossier_shares_char_budget_across_candidates_when_
         selected.sort()
         return [{"segment_index": i + 1, "text": segments[i].text} for i in selected]
 
-    monkeypatch.setattr(prep_pack, "_prep_pack_functional_candidate_dossier", legacy_side_only_dossier)
+    patch_prep_pack_everywhere(monkeypatch, "_prep_pack_functional_candidate_dossier", legacy_side_only_dossier)
 
     max_chars = prep_pack._PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_CHARS
     reserve_a = prep_pack._PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MIN_SIDE_ENTRIES
@@ -4509,7 +4510,7 @@ def test_functional_candidate_dossier_loses_in_span_candidate_anchor_with_legacy
                 anchor_pool_ordered.append(index)
         return label_text_indexes, anchor_pool_ordered, per_candidate_indexes
 
-    monkeypatch.setattr(prep_pack, "_prep_pack_functional_candidate_anchor_pool", legacy_anchor_pool)
+    patch_prep_pack_everywhere(monkeypatch, "_prep_pack_functional_candidate_anchor_pool", legacy_anchor_pool)
 
     event_paragraphs = [f"殿内烛火摇曳，气氛凝重，此为事发经过第{i}段。" for i in range(1, 21)]
     event_paragraphs[14] = "许师姐默默立于人群之中，一言不发，此为事发经过第15段。"
@@ -4554,8 +4555,8 @@ def test_registered_only_candidate_never_enters_candidate_set_after_1_8_4_revert
     async def fake_discovery(project_id, episode_no, source_text, bible, *, generate_portraits=True):
         return {"added": [], "resolutions": [], "errors": [], "warnings": [], "skipped": []}
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_discovery)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_discovery)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     async def boom_chat_structured(messages, **kwargs):
         raise AssertionError("候选集为空时绝不该发起候选判别模型调用——乙类候选已在1.8.4回退")
@@ -4749,7 +4750,7 @@ def test_character_manifest_segment_indexes_is_union_of_multiple_mentions_not_ov
     def boom_character(*_a, **_k):
         raise AssertionError("别名注册表命中唯一目标，不应该回炉重新消歧")
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", boom_character)
 
     events = [_event("ev_001", characters=[
         {"display_name": "李富贵", "is_background_extra": False},
@@ -4837,7 +4838,7 @@ def test_appellation_map_matches_resolve_assets_alias_registry_conclusion(monkey
     def boom_character(*_a, **_k):
         raise AssertionError("人物谱别名命中唯一目标，不应该回炉重新消歧")
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", boom_character)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", boom_character)
 
     events = [_event("ev_001", characters=[
         {"display_name": "小胖子", "is_background_extra": False},
@@ -4890,8 +4891,8 @@ def test_appellation_map_includes_resolved_composite_description_mention(monkeyp
             "errors": [], "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_disambiguate)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_disambiguate)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     character_mentions = [{
         "display_name": "穿杂役衫的魁梧大汉", "suspected_true_name": None,
@@ -4956,8 +4957,8 @@ def test_appellation_map_identity_id_always_matches_asset_manifest_characters(mo
             "errors": [], "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_disambiguate)
-    monkeypatch.setattr(portraits, "persist_screenplay_character_resolutions", lambda *a, **k: [])
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_disambiguate)
+    patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     character_mentions = [
         {"display_name": "孟浩", "suspected_true_name": None, "segment_indexes": [1]},
@@ -5162,7 +5163,7 @@ def test_empty_character_mentions_with_nonempty_scene_mentions_is_flagged_visibl
     # 不触碰真实数据库（pytest 的 sandbox 隔离本身已经保证 app.db 不会碰到
     # 真实 data/manju.db，这里再加一层是为了让 _generate_prep_pack_once
     # 真正读到本测试插入的 character_portraits/scene_references 行）。
-    monkeypatch.setattr(prep_pack, "get_conn", lambda: conn)
+    patch_prep_pack_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     source_text = "老者站在演武场上说话。"
 
@@ -5180,7 +5181,7 @@ def test_empty_character_mentions_with_nonempty_scene_mentions_is_flagged_visibl
             props=[],
         )
 
-    monkeypatch.setattr(prep_pack, "_extract_chunk", fake_extract_chunk)
+    patch_prep_pack_everywhere(monkeypatch, "_extract_chunk", fake_extract_chunk)
 
     (
         payload, _rejected_paratext_claims, _true_name_hints,
@@ -5214,7 +5215,7 @@ def test_empty_character_mentions_without_known_roster_is_not_flagged(monkeypatc
         "VALUES ('sr1','p1','演武场',1,NULL)"
     )
     conn.commit()
-    monkeypatch.setattr(prep_pack, "get_conn", lambda: conn)
+    patch_prep_pack_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     source_text = "老者站在演武场上说话。"
 
@@ -5232,7 +5233,7 @@ def test_empty_character_mentions_without_known_roster_is_not_flagged(monkeypatc
             props=[],
         )
 
-    monkeypatch.setattr(prep_pack, "_extract_chunk", fake_extract_chunk)
+    patch_prep_pack_everywhere(monkeypatch, "_extract_chunk", fake_extract_chunk)
 
     (
         _payload, _rejected_paratext_claims, _true_name_hints,

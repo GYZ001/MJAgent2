@@ -15,6 +15,7 @@ import pytest
 from fastapi import HTTPException
 
 from app import db, worker
+from tests.conftest import patch_video_plan_everywhere, patch_worker_everywhere
 
 
 def _conn() -> sqlite3.Connection:
@@ -156,7 +157,7 @@ def _seed_restart_interrupted_job(conn: sqlite3.Connection, job_id: str = "j1") 
 def test_restart_interrupted_job_is_resumed(monkeypatch) -> None:
     conn = _conn()
     _seed_restart_interrupted_job(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     enqueued: list[str] = []
     monkeypatch.setattr(worker._queue, "put_nowait", lambda jid: enqueued.append(jid))
@@ -211,7 +212,7 @@ def test_paused_budget_jobs_are_not_resumed(monkeypatch) -> None:
         "VALUES('j_b', 'video', 'paused_budget', 'run_b', NULL, 1.0, 1.0)"
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(worker._queue, "put_nowait", lambda jid: None)
 
     resumed = worker.recover_media_jobs()
@@ -225,7 +226,7 @@ def test_page_approved_budget_overrides_static_safety_default(
 ) -> None:
     import app.completion_grant as completion_grant
 
-    monkeypatch.setattr(worker, "get_setting", lambda *_args: "100")
+    patch_worker_everywhere(monkeypatch, "get_setting", lambda *_args: "100")
     monkeypatch.setattr(
         completion_grant,
         "episode_video_budget_snapshot",
@@ -250,7 +251,7 @@ def test_page_approved_budget_can_be_lower_than_static_default(
 ) -> None:
     import app.completion_grant as completion_grant
 
-    monkeypatch.setattr(worker, "get_setting", lambda *_args: "100")
+    patch_worker_everywhere(monkeypatch, "get_setting", lambda *_args: "100")
     monkeypatch.setattr(
         completion_grant,
         "episode_video_budget_snapshot",
@@ -285,7 +286,7 @@ def test_cancelled_jobs_are_not_resumed(monkeypatch) -> None:
         "VALUES('j_c', 'video', 'running', 'run_c', NULL, 1, 1.0, 1.0)"
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(worker._queue, "put_nowait", lambda jid: None)
 
     resumed = worker.recover_media_jobs()
@@ -304,7 +305,7 @@ def test_legacy_keyframe_jobs_are_cancelled_instead_of_recovered(monkeypatch) ->
         "VALUES('j_scene', 'scene', 'shot_scene', 'ep_x', 'proj_x', 'queued', 1.0, 1.0)"
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.media_scheduler, "get_conn", lambda: conn)
     monkeypatch.setattr(worker._queue, "put_nowait", lambda jid: None)
 
@@ -526,13 +527,12 @@ def test_restarted_submitting_job_never_calls_provider_create(monkeypatch) -> No
         create_calls.append(True)
         return "duplicate-task"
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
-    monkeypatch.setattr(worker, "_assert_review_dependency_fence_async", no_fence)
+    patch_worker_everywhere(monkeypatch, "_assert_review_dependency_fence_async", no_fence)
     monkeypatch.setattr(worker.hiagent, "create_video_task", create_task)
-    monkeypatch.setattr(worker, "mark_media_job_state", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        worker, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,
+    patch_worker_everywhere(monkeypatch, "mark_media_job_state", lambda *_args, **_kwargs: None)
+    patch_worker_everywhere(monkeypatch, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,
     )
 
     asyncio.run(worker._run_job("j1", lease_owner="restart-worker"))
@@ -639,21 +639,19 @@ def test_create_response_without_task_id_waits_for_human_and_never_replays(
         async def __aexit__(self, *_args):
             return False
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
-    monkeypatch.setattr(worker, "_assert_job_lease", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(worker, "_assert_review_dependency_fence_async", no_fence)
-    monkeypatch.setattr(
-        worker, "_assert_video_provider_submission_authority_async", no_fence,
+    patch_worker_everywhere(monkeypatch, "_assert_job_lease", lambda *_args, **_kwargs: None)
+    patch_worker_everywhere(monkeypatch, "_assert_review_dependency_fence_async", no_fence)
+    patch_worker_everywhere(monkeypatch, "_assert_video_provider_submission_authority_async", no_fence,
     )
-    monkeypatch.setattr(worker, "_await_with_job_lease_heartbeat", direct_await)
-    monkeypatch.setattr(worker, "_ensure_ai_video_prompt", prepare_inputs)
-    monkeypatch.setattr(worker, "_prepare_planned_mode_inputs", prepare_inputs)
-    monkeypatch.setattr(
-        worker, "ensure_source_excerpt_in_prompt", lambda prompt, _shot: prompt,
+    patch_worker_everywhere(monkeypatch, "_await_with_job_lease_heartbeat", direct_await)
+    patch_worker_everywhere(monkeypatch, "_ensure_ai_video_prompt", prepare_inputs)
+    patch_worker_everywhere(monkeypatch, "_prepare_planned_mode_inputs", prepare_inputs)
+    patch_worker_everywhere(monkeypatch, "ensure_source_excerpt_in_prompt", lambda prompt, _shot: prompt,
     )
-    monkeypatch.setattr(worker, "_load_shot_model", lambda _shot: object())
-    monkeypatch.setattr(worker, "_video_image_inputs_from_meta", lambda _meta: [])
+    patch_worker_everywhere(monkeypatch, "_load_shot_model", lambda _shot: object())
+    patch_worker_everywhere(monkeypatch, "_video_image_inputs_from_meta", lambda _meta: [])
     monkeypatch.setattr(
         worker.video_modes, "build_seedance_video_inputs", lambda _meta: [],
     )
@@ -670,9 +668,8 @@ def test_create_response_without_task_id_waits_for_human_and_never_replays(
     monkeypatch.setattr(
         completion_grant, "reserve_provider_video_budget", lambda **_kwargs: True,
     )
-    monkeypatch.setattr(worker, "mark_media_job_state", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        worker, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,
+    patch_worker_everywhere(monkeypatch, "mark_media_job_state", lambda *_args, **_kwargs: None)
+    patch_worker_everywhere(monkeypatch, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,
     )
 
     asyncio.run(worker._run_job("j1", lease_owner="worker-1"))
@@ -838,10 +835,10 @@ def test_run_job_persists_structured_provider_failure_outcome(
             "failure": failure_payload,
         }
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
-    monkeypatch.setattr(worker, "_assert_review_dependency_fence_async", no_fence)
-    monkeypatch.setattr(worker, "_assert_job_lease", lambda *_args, **_kwargs: None)
+    patch_worker_everywhere(monkeypatch, "_assert_review_dependency_fence_async", no_fence)
+    patch_worker_everywhere(monkeypatch, "_assert_job_lease", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(worker.hiagent, "poll_video_task", poll_missing_task)
     monkeypatch.setattr(concurrency, "semaphore_for", lambda _resource: Permit())
     monkeypatch.setattr(concurrency, "report_congestion", lambda *_args, **_kwargs: None)
@@ -850,9 +847,8 @@ def test_run_job_persists_structured_provider_failure_outcome(
     monkeypatch.setattr(worker.errors, "log_error", log_error)
     monkeypatch.setattr(worker.media_scheduler, "renew_lease", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(worker.media_scheduler, "settle_budget", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(worker, "mark_media_job_state", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        worker, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,
+    patch_worker_everywhere(monkeypatch, "mark_media_job_state", lambda *_args, **_kwargs: None)
+    patch_worker_everywhere(monkeypatch, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,
     )
 
     asyncio.run(worker._run_job("j1", lease_owner="worker-1"))
@@ -941,8 +937,8 @@ def test_reference_mode_submission_authority_failure_precedes_paid_marker(
             "shot_id": "s-plan",
         }])
 
-    monkeypatch.setattr(
-        video_plan,
+    patch_video_plan_everywhere(
+        monkeypatch,
         "assert_video_provider_submission_authority",
         reject_submission,
     )
@@ -1007,7 +1003,7 @@ def test_manual_retry_distinguishes_poll_from_new_submission(monkeypatch) -> Non
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)
     monkeypatch.setattr(system_api, "get_setting", lambda *_args: "100")
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
     paid = system_api.retry_job("j-paid")
     new = system_api.retry_job("j-new")
@@ -1045,7 +1041,7 @@ def test_new_submission_retry_recalculates_budget_and_double_click_is_idempotent
     conn.commit()
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
     result = system_api.retry_job("j-retry", {"expected_version": 0})
     new_operation_id = result["job"]["provider_operation_id"]
@@ -1092,7 +1088,7 @@ def test_new_submission_retry_fails_closed_without_episode_authority(
     _seed_retryable_video_job(conn)
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
     with pytest.raises(HTTPException) as blocked:
         system_api.retry_job("j-retry")
@@ -1122,7 +1118,7 @@ def test_new_submission_retry_blocks_when_authority_budget_is_insufficient(
     _authorize_video_retry(conn, "e-retry", cap_cny=3.0)
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
     with pytest.raises(HTTPException) as blocked:
         system_api.retry_job("j-retry")
@@ -1170,9 +1166,9 @@ def test_manual_budget_retry_only_resumes_requested_job(monkeypatch) -> None:
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)
     monkeypatch.setattr(system_api, "get_setting", lambda *_args: "100")
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "get_setting", lambda *_args: "100")
-    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_setting", lambda *_args: "100")
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
     result = system_api.retry_job("j-budget-1")
 
@@ -1223,7 +1219,7 @@ def test_manual_retry_recovers_persisted_provider_handle_before_queueing(monkeyp
     _authorize_video_retry(conn, "e1")
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
     result = system_api.retry_job("j-recover")
 
@@ -1273,7 +1269,7 @@ def test_manual_retry_recovers_abandoned_provider_task_as_isolated_poll(
     conn.commit()
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
     result = system_api.retry_job(
         "j-abandoned",
@@ -1338,7 +1334,7 @@ def test_manual_retry_requires_confirmation_for_unresolved_provider_create(monke
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)
     monkeypatch.setattr(system_api, "get_setting", lambda *_args: "100")
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
     with pytest.raises(HTTPException) as rejected:
         system_api.retry_job("j-unknown")
@@ -1405,7 +1401,7 @@ def test_manual_retry_cas_failure_rolls_back_new_epoch_budget(monkeypatch) -> No
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)
     monkeypatch.setattr(system_api, "get_setting", lambda *_args: "100")
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
     reserve_budget = worker.media_scheduler.reserve_budget
 
     def reserve_then_change_job(*args, **kwargs):
@@ -1516,7 +1512,7 @@ def test_manual_retry_requires_confirmation_for_technical_provider_failure(
     _authorize_video_retry(conn, "e1")
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
     with pytest.raises(HTTPException) as confirmation:
         system_api.retry_job("j1")
@@ -1606,10 +1602,10 @@ def test_manual_retry_resumes_video_input_repair_waiting_human(
     _authorize_video_retry(conn, "e1")
     for module in (system_api, monitoring):
         monkeypatch.setattr(module, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.media_scheduler, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "episode_video_budget_limit", lambda _episode_id: 100)
-    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    patch_worker_everywhere(monkeypatch, "episode_video_budget_limit", lambda _episode_id: 100)
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
     result = system_api.retry_job("j1")
 
@@ -1637,7 +1633,7 @@ def test_episode_leaves_generating_when_no_video_job_is_active(monkeypatch) -> N
         "VALUES('j_failed', 'video', 'ep_idle', 'failed', 1.0, 1.0)"
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     assert worker.reconcile_episode_generation_status("ep_idle") is True
     assert conn.execute(
@@ -1657,7 +1653,7 @@ def test_episode_stays_generating_while_a_video_job_is_active(monkeypatch) -> No
         "VALUES('j_running', 'video', 'ep_busy', 'running', 1.0, 1.0)"
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     assert worker.reconcile_episode_generation_status("ep_busy") is False
     assert conn.execute(
@@ -1684,7 +1680,7 @@ def test_stale_lease_sweeper_reclaims_expired_lease(monkeypatch) -> None:
         "VALUES('j_s', 'video', 'running', 'run_s', 'step_s', 'w_dead', 1.0, 1.0, 1.0)"
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     enqueued: list[str] = []
     monkeypatch.setattr(worker._queue, "put_nowait", lambda jid: enqueued.append(jid))
@@ -1756,10 +1752,18 @@ def test_media_run_resume_adapter_requeues_exact_paused_job(monkeypatch) -> None
     conn.commit()
     _authorize_video_retry(conn, "e1")
     for module in (
-        worker, monitoring, system_api, orchestration_api, media_scheduler, repository,
+        monitoring, system_api, orchestration_api, media_scheduler, repository,
     ):
         monkeypatch.setattr(module, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    # ``worker`` can't go in the loop above: app.media_exec is a real package
+    # now, and common.py/enqueue.py/legacy_keyframes.py/run_job.py/concat.py
+    # each independently do ``from app.db import get_conn`` -- patching only
+    # app.worker's re-export attribute leaves every one of those five copies
+    # pointed at the real on-disk connection (see patch_worker_everywhere's
+    # docstring in tests/conftest.py; this is the exact loop-variable-form
+    # blind spot the guard test can't catch statically).
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
     monkeypatch.setattr(system_api, "get_setting", lambda *_args: "100")
 
     result = asyncio.run(
@@ -1843,16 +1847,15 @@ def _patch_run_job_submission_scaffolding(monkeypatch) -> None:
         return meta, prompt_text
 
     monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
-    monkeypatch.setattr(worker, "_assert_review_dependency_fence_async", no_fence)
-    monkeypatch.setattr(
-        worker, "_assert_video_provider_submission_authority_async", no_fence,
+    patch_worker_everywhere(monkeypatch, "_assert_review_dependency_fence_async", no_fence)
+    patch_worker_everywhere(monkeypatch, "_assert_video_provider_submission_authority_async", no_fence,
     )
     # 不能只走"未知视频生成模式"报错的最短路径去够 claim_video_submit_
     # slot——那条路径本身要靠 _prepare_planned_mode_inputs 按 mode 分支到
     # 一个真正的参考图/首尾帧装配函数，装配细节别处已经覆盖，这里整个短路。
-    monkeypatch.setattr(worker, "_prepare_planned_mode_inputs", passthrough_planned_inputs)
-    monkeypatch.setattr(worker, "_assert_job_lease", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(worker, "_video_image_inputs_from_meta", lambda _meta: [])
+    patch_worker_everywhere(monkeypatch, "_prepare_planned_mode_inputs", passthrough_planned_inputs)
+    patch_worker_everywhere(monkeypatch, "_assert_job_lease", lambda *_args, **_kwargs: None)
+    patch_worker_everywhere(monkeypatch, "_video_image_inputs_from_meta", lambda _meta: [])
     monkeypatch.setattr(worker.video_modes, "build_seedance_video_inputs", lambda _meta: [])
     # AI 提示词/装配之间那段用心跳影子任务保活 lease；心跳循环真的调用
     # media_scheduler.renew_lease，不给它一个总是成功的桩，心跳会判定 lease
@@ -1863,9 +1866,8 @@ def _patch_run_job_submission_scaffolding(monkeypatch) -> None:
     monkeypatch.setattr(concurrency, "report_congestion", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(concurrency, "report_healthy", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(stage_state, "set_pipeline_stage", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(worker, "mark_media_job_state", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        worker, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,
+    patch_worker_everywhere(monkeypatch, "mark_media_job_state", lambda *_args, **_kwargs: None)
+    patch_worker_everywhere(monkeypatch, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,
     )
 
 
@@ -1883,12 +1885,11 @@ def test_budget_pause_auto_retries_within_already_approved_cap_before_requiring_
     conn = _conn()
     _seed_submission_ready_video_job(conn)
     _authorize_video_retry(conn, "e-submit", cap_cny=100.0)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     _patch_run_job_submission_scaffolding(monkeypatch)
 
     requeued: list[str] = []
-    monkeypatch.setattr(
-        worker, "_requeue_after",
+    patch_worker_everywhere(monkeypatch, "_requeue_after",
         lambda job_id, _delay: requeued.append(job_id) or _noop_coro(),
     )
 

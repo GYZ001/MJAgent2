@@ -8,6 +8,7 @@ import pytest
 
 from app import config, errors, stages
 from app.schemas import Character, character_is_portrait_eligible
+from tests.conftest import patch_stages_everywhere as _patch_stages
 
 
 def test_merge_roll_call_candidates_merges_formal_name_and_caps_evidence() -> None:
@@ -1274,7 +1275,7 @@ async def test_alias_verification_runs_per_character_in_parallel(monkeypatch) ->
         active -= 1
         return {"accepted": False, "chapter_idx": None, "quote": "", "reason": "no"}
 
-    monkeypatch.setattr(stages, "_alias_evidence_resolution", fake_resolution)
+    _patch_stages(monkeypatch, "_alias_evidence_resolution", fake_resolution)
     appearance = "黑色短发，青色长衫，身形修长，腰系深色布带，脚穿布靴"
     bible = Bible(
         world=World(visual_style_canonical="国漫三维动画电影质感，统一自然光影与细腻材质"),

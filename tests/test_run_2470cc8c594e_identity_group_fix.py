@@ -16,6 +16,7 @@ from app.identity_authority import (
 )
 from app.orchestration.state_machine import StateConflict
 from app.schemas import Bible, Character, World
+from tests.conftest import patch_portraits_everywhere
 
 
 FIXTURE_PATH = (
@@ -685,13 +686,13 @@ def test_structural_coverage_reuses_only_current_contract_cache(
         (json.dumps(materialized, ensure_ascii=False),),
     )
     conn.commit()
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     async def forbidden_audit(*_args, **_kwargs):
         raise AssertionError("当前合同缓存应直接复用")
 
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "audit_identity_coverage_from_structural_evidence",
         forbidden_audit,
     )
@@ -787,9 +788,9 @@ def test_structural_coverage_corrupt_validated_cache_reaudits_once(
         })
         return []
 
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_portraits_everywhere(
+        monkeypatch,
         "audit_identity_coverage_from_structural_evidence",
         fresh_audit,
     )
@@ -867,7 +868,7 @@ def test_structural_coverage_cache_reaudits_when_authority_catalog_changes(
         (json.dumps([cached_resolution], ensure_ascii=False),),
     )
     conn.commit()
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
     audit_calls = 0
 
     async def fresh_audit(candidates, **kwargs):
@@ -905,12 +906,12 @@ def test_structural_coverage_cache_reaudits_when_authority_catalog_changes(
             "warnings": [],
         }
 
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "audit_identity_coverage_from_structural_evidence",
         fresh_audit,
     )
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", no_materialization)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", no_materialization)
     monkeypatch.setattr(
         portraits.evidence_repository,
         "create_artifact",
@@ -1057,7 +1058,7 @@ def test_structural_coverage_receipt_rejects_same_key_wrong_authority(
         (json.dumps([wrong_resolution], ensure_ascii=False),),
     )
     conn.commit()
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
     audit_calls = 0
 
     async def fake_audit(*_args, **_kwargs):
@@ -1075,12 +1076,12 @@ def test_structural_coverage_receipt_rejects_same_key_wrong_authority(
             "warnings": [],
         }
 
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "audit_identity_coverage_from_structural_evidence",
         fake_audit,
     )
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_ensure)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_ensure)
     monkeypatch.setattr(
         portraits.evidence_repository,
         "create_artifact",
@@ -1151,13 +1152,13 @@ def test_structural_coverage_card_failure_never_mints_validated_cache(
             "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_portraits_everywhere(
+        monkeypatch,
         "audit_identity_coverage_from_structural_evidence",
         fake_audit,
     )
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", failed_cards)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", failed_cards)
     monkeypatch.setattr(
         portraits.evidence_repository,
         "create_artifact",
@@ -1255,13 +1256,13 @@ def test_structural_coverage_cache_hit_retires_all_stale_auto_rows(
         ),),
     )
     conn.commit()
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     async def forbidden_audit(*_args, **_kwargs):
         raise AssertionError("exact receipt must reuse without provider audit")
 
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "audit_identity_coverage_from_structural_evidence",
         forbidden_audit,
     )
@@ -1309,7 +1310,7 @@ def test_structural_cache_surviving_resolution_reset_is_rematerialized(
     )
     _insert_coverage_cache_artifact(conn, "art-current", payload, 2.0)
     conn.commit()
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
     calls = 0
 
     async def fake_audit(candidates, **_kwargs):
@@ -1318,8 +1319,8 @@ def test_structural_cache_surviving_resolution_reset_is_rematerialized(
         assert candidates == []
         return []
 
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "audit_identity_coverage_from_structural_evidence",
         fake_audit,
     )
@@ -1410,15 +1411,15 @@ def test_stale_structural_cache_is_neither_reused_nor_used_as_base(
         conn, "art-base", base_payload, 1.0
     )
     conn.commit()
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
     observed_base: list[dict] = []
 
     async def fake_audit(candidates, **_kwargs):
         observed_base.extend(candidates)
         return list(candidates)
 
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "audit_identity_coverage_from_structural_evidence",
         fake_audit,
     )

@@ -1931,3 +1931,11 @@ def add_customer_feedback(
     )
     conn.commit()
     return {"feedback_id": feedback_id, "revision_run_id": revision_run_id}
+
+
+# app.db.init_db() no longer imports this module directly (P0-3 dependency
+# inversion, docs/coupling_review_2026-08-29.md 第2步) — it looks this up by
+# name through app.db_schema instead.
+from app.db_schema import register_table as _register_table  # noqa: E402
+
+_register_table("delivery_operation_receipts_table", _ensure_delivery_operation_receipts)

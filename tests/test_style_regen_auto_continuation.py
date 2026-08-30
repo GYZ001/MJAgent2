@@ -24,6 +24,7 @@ import pytest
 
 from app import api, task_registry
 from app.schemas import Bible, Character, Scene, World
+from tests.conftest import patch_api_everywhere
 
 
 def _projects_schema(conn: sqlite3.Connection) -> None:
@@ -82,10 +83,10 @@ def test_bible_task_marks_pending_scene_regen_on_success(monkeypatch) -> None:
             )],
         )
 
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "generate_bible", fake_generate_bible)
-    monkeypatch.setattr(api, "_start_refs_generation", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(api, "_start_scene_bible_preparation", lambda *_args, **_kwargs: True)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "generate_bible", fake_generate_bible)
+    patch_api_everywhere(monkeypatch, "_start_refs_generation", lambda *_args, **_kwargs: True)
+    patch_api_everywhere(monkeypatch, "_start_scene_bible_preparation", lambda *_args, **_kwargs: True)
 
     asyncio.run(api._bible_task("proj_test", trigger_full_refs=True))
 
@@ -116,10 +117,9 @@ def test_scene_bible_task_without_pending_flag_does_not_start_images(monkeypatch
     conn.commit()
 
     scenes = [Scene(name="青山脚下", scene_canonical="青山脚下的山路，晨雾弥漫，古树与石阶环绕", location_kind="室外")]
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(api.WorkflowRecorder, "create", lambda **_kwargs: _StubRecorder(scenes))
-    monkeypatch.setattr(
-        api, "_start_scene_refs_generation",
+    patch_api_everywhere(monkeypatch, "_start_scene_refs_generation",
         lambda *_args, **_kwargs: pytest.fail("没有待续跑票据时不该启动场景图生成"),
     )
 
@@ -152,10 +152,9 @@ def test_scene_bible_task_consumes_flag_and_starts_scene_refs_exactly_once(monke
 
     scenes = [Scene(name="青山脚下", scene_canonical="青山脚下的山路，晨雾弥漫，古树与石阶环绕", location_kind="室外")]
     started: list[tuple] = []
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(api.WorkflowRecorder, "create", lambda **_kwargs: _StubRecorder(scenes))
-    monkeypatch.setattr(
-        api, "_start_scene_refs_generation",
+    patch_api_everywhere(monkeypatch, "_start_scene_refs_generation",
         lambda project_id, only_scene, **kwargs: started.append((project_id, only_scene, kwargs)) or True,
     )
 
@@ -208,12 +207,11 @@ def test_confirming_style_once_drives_both_legs_without_any_page_visit(monkeypat
             coro.close()
         return None
 
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "generate_bible", fake_generate_bible)
-    monkeypatch.setattr(api, "_start_refs_generation", lambda *_args, **_kwargs: True)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "generate_bible", fake_generate_bible)
+    patch_api_everywhere(monkeypatch, "_start_refs_generation", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(api.WorkflowRecorder, "create", lambda **_kwargs: _StubRecorder(scenes))
-    monkeypatch.setattr(
-        api, "_start_scene_refs_generation",
+    patch_api_everywhere(monkeypatch, "_start_scene_refs_generation",
         lambda project_id, only_scene, **kwargs: scene_refs_started.append(
             (project_id, only_scene, kwargs)
         ) or True,

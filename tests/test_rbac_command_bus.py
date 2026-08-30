@@ -11,7 +11,7 @@ from contextlib import contextmanager
 import pytest
 
 from app.auth.principal import Principal, get_current_principal, set_current_principal
-from app.capabilities import ensure_catalog_loaded
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.bus import get_command_bus, reset_command_bus_for_tests
 from app.capabilities.policy import reset_approvals_for_tests
 from app.capabilities.schemas import CommandStatus

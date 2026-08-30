@@ -42,6 +42,7 @@ from app.screenplay_scene_shards import (
     ScreenplayEnvelopeMetadata,
     blueprint_content_hash,
 )
+from tests.conftest import patch_screenplay_ir_everywhere, patch_screenplay_repair_everywhere
 from tests.test_production_repair import _minimal_script, _recovery_narrative_plan
 
 
@@ -368,8 +369,6 @@ def _seed_recovery(*, polluted_working: bool, shard_count: int = 4) -> dict:
 
 
 def _install_gate3_qa(monkeypatch, *, input_fingerprint: str = "gate3-input"):
-    from app.production import screenplay_repair
-
     issue = structured_issue(
         code="SCENE_CHARACTER_NOT_AUTHORIZED",
         message="SC01 characters 含未授权旁白",
@@ -405,7 +404,7 @@ def _install_gate3_qa(monkeypatch, *, input_fingerprint: str = "gate3-input"):
             },
         )
 
-    monkeypatch.setattr(screenplay_repair, "run_screenplay_qa", fake_qa)
+    patch_screenplay_repair_everywhere(monkeypatch, "run_screenplay_qa", fake_qa)
     return input_fingerprint
 
 
@@ -427,8 +426,9 @@ def test_real_run_polluted_working_rebuilds_from_four_shard_merged_ir(
 
     seeded = _seed_recovery(polluted_working=True, shard_count=4)
     input_fingerprint = _install_gate3_qa(monkeypatch)
-    monkeypatch.setattr(
-        "app.screenplay_ir.compile_screenplay_ir",
+    patch_screenplay_ir_everywhere(
+        monkeypatch,
+        "compile_screenplay_ir",
         lambda *_args, **_kwargs: seeded["clean"].model_copy(deep=True),
     )
     eligibility = resolve_screenplay_resume_eligibility("ep_run_2eb")
@@ -853,8 +853,9 @@ def test_pre_cas_failure_retry_reuses_recovery_document_and_evaluation(
 
     seeded = _seed_recovery(polluted_working=True)
     input_fingerprint = _install_gate3_qa(monkeypatch)
-    monkeypatch.setattr(
-        "app.screenplay_ir.compile_screenplay_ir",
+    patch_screenplay_ir_everywhere(
+        monkeypatch,
+        "compile_screenplay_ir",
         lambda *_args, **_kwargs: seeded["clean"].model_copy(deep=True),
     )
     eligibility = resolve_screenplay_resume_eligibility("ep_run_2eb")
@@ -875,8 +876,8 @@ def test_pre_cas_failure_retry_reuses_recovery_document_and_evaluation(
     def fail_after_durable_evidence(*_args, **_kwargs):
         raise RuntimeError("simulated owner/CAS failure")
 
-    monkeypatch.setattr(
-        screenplay_repair,
+    patch_screenplay_repair_everywhere(
+        monkeypatch,
         "recover_screenplay_working_authority",
         fail_after_durable_evidence,
     )
@@ -912,8 +913,8 @@ def test_pre_cas_failure_retry_reuses_recovery_document_and_evaluation(
     assert len(evaluation_rows) == 1
     assert evaluation_rows[0]["step_run_id"] == step_id
 
-    monkeypatch.setattr(
-        screenplay_repair,
+    patch_screenplay_repair_everywhere(
+        monkeypatch,
         "recover_screenplay_working_authority",
         real_recover,
     )

@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.capabilities import ensure_catalog_loaded
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.bus import reset_command_bus_for_tests
 from app.capabilities.policy import reset_approvals_for_tests
 from app.mcp import auth as mcp_auth
@@ -174,11 +174,13 @@ def test_tools_call_dry_run_does_not_require_approval(client: TestClient) -> Non
 
 
 def test_tools_call_destructive_without_approval_waits_and_includes_preflight(client: TestClient) -> None:
+    # project.delete 现在是软删除（NEVER 确认）；project.purge（彻底清理）才是
+    # 现在的 R3_DESTRUCTIVE + ALWAYS 命令，撑起这条"未批准就必须等待"的用例。
     resp = _rpc(
         client,
         "tools/call",
         {
-            "name": "project.delete",
+            "name": "project.purge",
             "arguments": {"project_id": "proj_x", "idempotency_key": "mcp-appr-1"},
         },
         token=_token(["manju:project-write"]),

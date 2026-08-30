@@ -22,7 +22,12 @@ from app.schemas import (
     NarrativeIdentityContract,
     VoiceCanonical,
 )
-from tests.conftest import SessionTestClient
+from tests.conftest import (
+    SessionTestClient,
+    patch_portraits_everywhere,
+    patch_screenplay_repair_everywhere,
+    patch_api_everywhere,
+)
 from tests.test_narrative_continuity import _screenplay
 from tests.test_screenplay_edit_save import _seed_episode, _valid_script
 
@@ -99,8 +104,9 @@ def _use_passing_manual_publish_qa(monkeypatch) -> None:
             evidence=evidence,
         )
 
-    monkeypatch.setattr(
-        "app.production.screenplay_repair.run_screenplay_qa",
+    patch_screenplay_repair_everywhere(
+        monkeypatch,
+        "run_screenplay_qa",
         passing_qa,
     )
 
@@ -238,7 +244,7 @@ def test_character_discovery_bootstraps_placeholder_bible(monkeypatch) -> None:
             "resolutions": [], "errors": [], "warnings": [],
         }
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_ensure)
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_ensure)
 
     result = asyncio.run(api._screenplay_character_discovery("e1", "孟浩走上山顶。"))
 
@@ -685,8 +691,9 @@ def test_runtime_blocking_manual_draft_routes_to_repair_without_publish(
         score=90,
         issues=[issue],
     )
-    monkeypatch.setattr(
-        "app.production.screenplay_repair.run_screenplay_qa",
+    patch_screenplay_repair_everywhere(
+        monkeypatch,
+        "run_screenplay_qa",
         lambda *_args, **_kwargs: ([issue], evaluation),
     )
 
@@ -811,7 +818,7 @@ def test_invalid_published_certificate_without_resolved_capability_refreshes(
     conn = db.get_conn()
     ep = dict(conn.execute("SELECT * FROM episodes WHERE id='e1'").fetchone())
     ep["screenplay_status"] = "ready"
-    monkeypatch.setattr(api, "_screenplay_ready", lambda _ep: False)
+    patch_api_everywhere(monkeypatch, "_screenplay_ready", lambda _ep: False)
 
     state = api._screenplay_status_snapshot(ep, shot_count=8, production={})
 
@@ -1142,8 +1149,8 @@ def test_script_page_has_pure_navigation_and_no_pipe_parser() -> None:
     # ---- 仍然适用的负向防回归：这些旧问题模式与页面具体形状无关，不该再出现 ----
     assert "split('|')" not in source, "结构化字段不得靠 | 分隔符土解析"
     assert "window.confirm(`确认恢复" not in source, "内容相关弹窗不得用原生 window.confirm"
-    assert "storyboardTaskNotice" not in source, "分镜任务通知是分镜台职责，不属于剧本台"
-    assert "EpisodeStatusStamp" not in source, "剧本台状态用 ScreenplayStatusStamp，非分集级状态章"
+    assert "storyboardTaskNotice" not in source, "分镜任务通知是分镜台职责，不属于映射台"
+    assert "EpisodeStatusStamp" not in source, "映射台状态用 ScreenplayStatusStamp，非分集级状态章"
     assert "分镜生成未完成" not in source
     assert "查看分镜错误详情" not in source
     assert "必保留原文台词" not in source

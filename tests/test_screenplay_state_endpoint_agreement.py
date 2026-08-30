@@ -1,4 +1,4 @@
-"""剧本台读到的权威状态必须只有一个答案。
+"""映射台读到的权威状态必须只有一个答案。
 
 生产缺陷（R4）：``episode_detail`` 先把 ``screenplay_json`` 从返回字典里 pop 掉，
 再用**同一个已被裁剪的字典**去算 ``screenplay_state``；``_screenplay_ready`` 的第一道
@@ -7,7 +7,7 @@
     GET /episodes/{id}/screenplay/status  -> ready_storyboard_empty
     GET /episodes/{id}?view=script        -> qa_certificate_invalid
 
-剧本台把两者合并展示，一旦轻量状态落后或失败就会出现错误提示与错误主操作。
+映射台把两者合并展示，一旦轻量状态落后或失败就会出现错误提示与错误主操作。
 这一类问题的通用形态是「先裁剪返回体、后基于返回体做判定」，所以用例既锁死
 两个端点的一致性，也锁死「响应体不回传投影」这个原始意图。
 """

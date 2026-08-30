@@ -47,11 +47,3 @@ __all__ = [
     "get_command_bus",
     "get_registry",
 ]
-
-
-def ensure_catalog_loaded() -> CapabilityRegistry:
-    """幂等加载能力目录，供 API、CI 扫描与测试使用。"""
-    from app.capabilities import catalog  # noqa: F401 — 触发注册副作用
-
-    catalog.ensure_registered()
-    return get_registry()

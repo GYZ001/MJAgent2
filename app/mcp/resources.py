@@ -14,7 +14,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from app.capabilities import ensure_catalog_loaded
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.registry import get_registry
 
 

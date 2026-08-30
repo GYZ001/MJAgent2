@@ -11,6 +11,8 @@ import pytest
 from app import api, config, db, hiagent, multiview, portraits, refs, scenes
 from app.domain import bible_ops
 from app.schemas import Bible, Character, Scene, World
+from tests.conftest import patch_portraits_everywhere
+from tests.conftest import patch_api_everywhere
 
 
 @pytest.fixture
@@ -167,7 +169,7 @@ def test_interrupted_auto_discovered_portrait_resumes_same_candidate(
         pack_calls.append(kwargs)
         return {"status": "ready", "portrait_id": kwargs["portrait_id"]}
 
-    monkeypatch.setattr(portraits, "_generate_fresh_portrait", forbidden_primary)
+    patch_portraits_everywhere(monkeypatch, "_generate_fresh_portrait", forbidden_primary)
     monkeypatch.setattr(multiview, "ensure_character_multiview_pack", resume_pack)
 
     class _Scene:
@@ -219,7 +221,7 @@ def test_interrupted_auto_discovered_portrait_fails_without_duplicate(
     async def failed_pack(**_kwargs):
         raise hiagent.ProviderError("provider unavailable after restart")
 
-    monkeypatch.setattr(portraits, "_generate_fresh_portrait", forbidden_primary)
+    patch_portraits_everywhere(monkeypatch, "_generate_fresh_portrait", forbidden_primary)
     monkeypatch.setattr(multiview, "ensure_character_multiview_pack", failed_pack)
 
     with pytest.raises(hiagent.ProviderError, match="provider unavailable"):
@@ -507,7 +509,7 @@ def test_failed_single_image_qa_is_visible_as_non_adoptable_candidate(
         ),
     )
     conn.commit()
-    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     result = asyncio.run(bible_ops.list_portrait_candidates("proj_bootstrap", "Hero"))
 
@@ -836,9 +838,7 @@ def test_stale_assets_preview_accepts_sqlite_episode_rows(asset_db, monkeypatch)
     )
     conn.commit()
 
-    from app.domain import storyboard_ops
-
-    monkeypatch.setattr(storyboard_ops, "_shot_video_is_stale", lambda *_args: True)
+    patch_api_everywhere(monkeypatch, "_shot_video_is_stale", lambda *_args: True)
     result = api.stale_assets_preview("ep_wall")
     assert result["stale_count"] == 1
     assert result["shots"][0]["reasons"] == ["storyboard_artifact"]

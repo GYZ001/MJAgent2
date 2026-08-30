@@ -19,6 +19,20 @@ sys.path.insert(0, str(ROOT))
 
 from app.auth.passwords import hash_password
 from app.db import get_conn, init_db, new_id, now
+# init_db() looks up its per-table bootstrap steps by name through
+# app.db_schema instead of importing these business modules directly (P0-3
+# dependency inversion, see docs/coupling_review_2026-08-29.md 第2步). This
+# standalone script never otherwise imports them, so without this its bare
+# init_db() call would raise KeyError on the unconditional
+# "builtin_models_migration" lookup.
+import app.artifacts  # noqa: F401
+import app.completion_grant  # noqa: F401
+import app.delivery  # noqa: F401
+import app.model_migration  # noqa: F401
+import app.production.certificate  # noqa: F401
+import app.production.grant  # noqa: F401
+import app.production.revision  # noqa: F401
+import app.production.shot_uid  # noqa: F401
 
 
 def main() -> int:

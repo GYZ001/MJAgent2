@@ -17,7 +17,8 @@ from app.agent import approvals, events, resources, store
 from app.agent import tools as agent_tools
 from app.agent.redaction import redact_value
 from app.agent.schemas import ContextEnvelope
-from app.capabilities import ensure_catalog_loaded, get_command_bus, get_registry
+from app.capabilities import get_command_bus, get_registry
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.schemas import CommandStatus
 from app.db import get_setting
 

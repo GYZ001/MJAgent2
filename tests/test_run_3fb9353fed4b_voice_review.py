@@ -4,6 +4,7 @@ from pathlib import Path
 import uuid
 
 from app import stages
+from tests.conftest import patch_stages_everywhere as _patch_stages
 from app.narrative_blueprint import (
     BlueprintSemanticReview,
     NarrativeBlueprint,
@@ -206,9 +207,9 @@ def test_unsupported_voice_issue_is_dropped_before_consensus(
         artifacts.append(artifact)
         return {"id": f"art-{uuid.uuid4()}"}
 
-    monkeypatch.setattr(stages, "get_conn", lambda: EmptyConnection())
-    monkeypatch.setattr(
-        stages,
+    _patch_stages(monkeypatch, "get_conn", lambda: EmptyConnection())
+    _patch_stages(
+        monkeypatch,
         "get_setting",
         lambda key: "true"
         if key == "screenplay_targeted_blueprint_review_enabled"
@@ -219,8 +220,8 @@ def test_unsupported_voice_issue_is_dropped_before_consensus(
         "chat_structured",
         fake_structured,
     )
-    monkeypatch.setattr(
-        stages,
+    _patch_stages(
+        monkeypatch,
         "_repair_narrative_blueprint",
         forbidden_repair,
     )

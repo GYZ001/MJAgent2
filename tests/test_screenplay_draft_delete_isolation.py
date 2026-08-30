@@ -1,6 +1,6 @@
 """钉死「三义 draft」边界：DELETE /screenplay/draft 只清会话草稿。
 
-剧本台的 "draft" 一词曾一词三义，容易让使用者与 Agent 混淆：
+映射台的 "draft" 一词曾一词三义，容易让使用者与 Agent 混淆：
 
 - 会话草稿：``screenplay_drafts`` 表，路由 ``/screenplay/draft``（GET/PUT/DELETE），
   只是页面自动保存的未发布编辑内容，不发布、不生成、不进入下游。
@@ -22,7 +22,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app import api, db
-from app.capabilities import ensure_catalog_loaded
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.bus import reset_command_bus_for_tests, set_request_approval_token
 from app.capabilities.policy import reset_approvals_for_tests
 from app.capabilities.registry import get_registry

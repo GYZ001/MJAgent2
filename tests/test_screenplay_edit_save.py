@@ -1,4 +1,4 @@
-"""回归：剧本台「保存剧本」不得因 sqlite3.Row 无 .get 而 500。"""
+"""回归：映射台「保存剧本」不得因 sqlite3.Row 无 .get 而 500。"""
 from __future__ import annotations
 
 import pytest
@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app import api, db
-from app.capabilities import ensure_catalog_loaded
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.bus import reset_command_bus_for_tests, set_request_approval_token
 from app.capabilities.policy import reset_approvals_for_tests
 from app.local_session import APPROVAL_HEADER, ensure_session_secret, set_request_session_id
@@ -18,7 +18,7 @@ from app.schemas import (
     KeyDialogueTurn,
     World,
 )
-from tests.conftest import SessionTestClient
+from tests.conftest import SessionTestClient, patch_api_everywhere
 from tests.test_screenplay_stage import (
     _RAINY_KEY_LINES,
     _RAINY_KEY_POINTS,
@@ -55,7 +55,7 @@ def client(tmp_path, monkeypatch):
 
 
 def _valid_script() -> EpisodeScreenplay:
-    """复用剧本台已验证可通过 validate_screenplay 的雨夜样本。"""
+    """复用映射台已验证可通过 validate_screenplay 的雨夜样本。"""
     full_script_text = "\n\n".join([
         "【场1】夜 / 咖啡厅最里侧",
         "雨水顺着玻璃滑下，谷言独自守在最里面的位置，指尖一直压着已经凉透的纸杯，目光钉在门口。",
@@ -172,8 +172,7 @@ def test_edit_screenplay_unknown_load_error_fails_closed(
     monkeypatch,
 ) -> None:
     _seed_episode(with_artifact=True)
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch,
         "_load_screenplay",
         lambda _episode: (_ for _ in ()).throw(RuntimeError("unknown load failure")),
     )

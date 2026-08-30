@@ -30,6 +30,7 @@ from app.domain.storyboard_ops import (
     _storyboard_task,
 )
 from app.schemas import Storyboard
+from tests.conftest import patch_api_everywhere, patch_narrative_everywhere
 
 
 def test_legacy_unbound_storyboard_checkpoint_is_not_resumable(storyboard_db):
@@ -259,7 +260,7 @@ def test_board_status_gate_receives_outline_hidden_from_public_response(
             estimated_cost_cny=0,
         )
 
-    monkeypatch.setattr(api, "evaluate_storyboard_for_confirmation", current_gate)
+    patch_api_everywhere(monkeypatch, "evaluate_storyboard_for_confirmation", current_gate)
 
     detail = api.episode_detail("e1", view="board")
 
@@ -289,7 +290,7 @@ def test_episode_detail_does_not_run_scene_projection_writes(storyboard_db, monk
     def unexpected_write(*_args, **_kwargs):
         raise AssertionError("GET episode detail must not reconcile persistent scene fields")
 
-    monkeypatch.setattr(api, "_reconcile_storyboard_scene_projection", unexpected_write)
+    patch_api_everywhere(monkeypatch, "_reconcile_storyboard_scene_projection", unexpected_write)
 
     detail = api.episode_detail("e1", view="board")
 
@@ -324,7 +325,7 @@ def test_complete_board_uses_current_gate_instead_of_stale_paused_issue(
             estimated_cost_cny=0,
         )
 
-    monkeypatch.setattr(api, "evaluate_storyboard_for_confirmation", current_gate)
+    patch_api_everywhere(monkeypatch, "evaluate_storyboard_for_confirmation", current_gate)
     save_checkpoint(SupervisorCheckpoint(
         episode_id="e1",
         phase="WAITING_HUMAN",
@@ -365,7 +366,7 @@ def test_legacy_confirmed_board_reopens_when_current_hard_gate_fails(
             estimated_cost_cny=0,
         )
 
-    monkeypatch.setattr(api, "evaluate_storyboard_for_confirmation", failed_gate)
+    patch_api_everywhere(monkeypatch, "evaluate_storyboard_for_confirmation", failed_gate)
     storyboard_db.execute("UPDATE episodes SET status='confirmed' WHERE id='e1'")
     storyboard_db.commit()
 
@@ -420,7 +421,7 @@ async def test_final_tail_with_hard_gates_reopens_existing_repair_instead_of_app
             estimated_cost_cny=0,
         )
 
-    monkeypatch.setattr(api, "evaluate_storyboard_for_confirmation", failed_gate)
+    patch_api_everywhere(monkeypatch, "evaluate_storyboard_for_confirmation", failed_gate)
     save_checkpoint(SupervisorCheckpoint(
         episode_id="e1",
         phase="SUCCEEDED",
@@ -488,7 +489,7 @@ async def test_confirmable_final_tail_still_rejects_blind_resume(storyboard_db, 
             estimated_cost_cny=0,
         )
 
-    monkeypatch.setattr(api, "evaluate_storyboard_for_confirmation", passed_gate)
+    patch_api_everywhere(monkeypatch, "evaluate_storyboard_for_confirmation", passed_gate)
     save_checkpoint(SupervisorCheckpoint(
         episode_id="e1",
         phase="SUCCEEDED",
@@ -530,8 +531,7 @@ def test_complete_board_without_publication_evidence_can_finalize(
             estimated_cost_cny=0,
         )
 
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch,
         "evaluate_storyboard_for_confirmation",
         passed_gate,
     )
@@ -557,7 +557,6 @@ def _patch_storyboard_artifact_and_projection_match(monkeypatch) -> None:
     且正文投影逐字一致（projection_matches=True）——只留叙事权威凭证校验
     这一步的分支需要各测试自己控制。"""
     from app.evidence import repository as evidence_repository
-    from app import narrative
 
     monkeypatch.setattr(
         evidence_repository,
@@ -566,8 +565,8 @@ def _patch_storyboard_artifact_and_projection_match(monkeypatch) -> None:
             "scope_type": "episode", "scope_id": "e1", "content": {},
         },
     )
-    monkeypatch.setattr(
-        narrative, "storyboard_authority_projection", lambda _payload: "same",
+    patch_narrative_everywhere(
+        monkeypatch, "storyboard_authority_projection", lambda _payload: "same",
     )
 
 
@@ -794,7 +793,7 @@ def test_recorded_storyboard_task_releases_terminal_write_pointer(storyboard_db,
     async def completed_task(*args, **kwargs):
         return None
 
-    monkeypatch.setattr("app.domain.storyboard_ops._storyboard_task", completed_task)
+    patch_api_everywhere(monkeypatch, "_storyboard_task", completed_task)
     asyncio.run(_recorded_storyboard_task("e1", recorder, resume=True))
 
     row = storyboard_db.execute(
@@ -835,12 +834,10 @@ def test_recorded_storyboard_task_retries_transient_sqlite_lock(
             "outcome": "SUCCEEDED_READY_FOR_CONFIRM",
         })()
 
-    monkeypatch.setattr(
-        "app.domain.storyboard_ops._storyboard_task",
+    patch_api_everywhere(monkeypatch, "_storyboard_task",
         locked_once,
     )
-    monkeypatch.setattr(
-        "app.domain.storyboard_ops._STORYBOARD_SQLITE_LOCK_RETRY_DELAYS_S",
+    patch_api_everywhere(monkeypatch, "_STORYBOARD_SQLITE_LOCK_RETRY_DELAYS_S",
         (0,),
     )
 
@@ -1393,7 +1390,7 @@ async def test_recorded_storyboard_shutdown_becomes_recoverable_pause(
     async def interrupted(*_args, **_kwargs):
         raise asyncio.CancelledError
 
-    monkeypatch.setattr("app.domain.storyboard_ops._storyboard_task", interrupted)
+    patch_api_everywhere(monkeypatch, "_storyboard_task", interrupted)
     monkeypatch.setattr(task_registry, "shutdown_in_progress", lambda: True)
 
     with pytest.raises(asyncio.CancelledError):
@@ -2461,7 +2458,7 @@ def test_structure_rolls_back_rows_cleanup_and_preview_when_evidence_fails(
     def fail_rebind(*_args, **_kwargs):
         raise RuntimeError("injected structure evidence failure")
 
-    monkeypatch.setattr(api, "_ensure_current_storyboard_shot_artifacts", fail_rebind)
+    patch_api_everywhere(monkeypatch, "_ensure_current_storyboard_shot_artifacts", fail_rebind)
     with pytest.raises(RuntimeError, match="injected structure evidence failure"):
         api.apply_storyboard_structure("e1", {
             "preview_token": preview["preview_token"],
@@ -2494,7 +2491,7 @@ def test_gate_evaluator_exception_is_system_error_not_repair_action(
     def fail_gate(*_args, **_kwargs):
         raise RuntimeError("injected evaluator outage")
 
-    monkeypatch.setattr(api, "evaluate_storyboard_for_confirmation", fail_gate)
+    patch_api_everywhere(monkeypatch, "evaluate_storyboard_for_confirmation", fail_gate)
     status = api.episode_detail("e1", view="board")["storyboard_status"]
 
     assert status["state"] == "syncing"
@@ -2519,7 +2516,7 @@ def test_confirmation_gate_failure_does_not_mutate_projection_or_leave_owner(
     def fail_gate(*_args, **_kwargs):
         raise RuntimeError("injected submit gate failure")
 
-    monkeypatch.setattr(api, "evaluate_storyboard_for_confirmation", fail_gate)
+    patch_api_everywhere(monkeypatch, "evaluate_storyboard_for_confirmation", fail_gate)
     with pytest.raises(RuntimeError, match="injected submit gate failure"):
         api.confirm_episode_core("e1", preview_token=preview["preview_token"])
 
@@ -2551,7 +2548,7 @@ def test_confirmation_evidence_failure_does_not_commit_normalized_projection(
     def fail_evidence(*_args, **_kwargs):
         raise RuntimeError("injected confirmation evidence failure")
 
-    monkeypatch.setattr(api, "_finalize_storyboard_evidence", fail_evidence)
+    patch_api_everywhere(monkeypatch, "_finalize_storyboard_evidence", fail_evidence)
     with pytest.raises(RuntimeError, match="injected confirmation evidence failure"):
         api.confirm_episode_core("e1", preview_token=preview["preview_token"])
 
@@ -2625,7 +2622,7 @@ def test_starting_owner_is_treated_as_live_and_not_replaced(
     def unexpected_recorder(*_args, **_kwargs):
         raise AssertionError("live starting owner must not be replaced")
 
-    monkeypatch.setattr(api, "_new_storyboard_recorder", unexpected_recorder)
+    patch_api_everywhere(monkeypatch, "_new_storyboard_recorder", unexpected_recorder)
     with enter_handler():
         result = asyncio.run(api.start_storyboard("e1"))
 

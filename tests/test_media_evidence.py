@@ -2,6 +2,7 @@ import json
 import sqlite3
 
 from app import db, worker
+from tests.conftest import patch_worker_everywhere
 from app.evidence import media
 
 
@@ -85,7 +86,7 @@ def test_adoption_rolls_back_when_a_later_pipeline_step_fails_after_real_adoptio
     )
     conn.commit()
     monkeypatch.setattr(media, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     import app.artifacts
     monkeypatch.setattr(app.artifacts, "invalidate_episode_final", lambda _episode_id: False)
 

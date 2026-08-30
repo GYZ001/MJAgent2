@@ -30,6 +30,17 @@ def test_hard_process_exit_is_reconciled_and_media_job_is_requeued(tmp_path) -> 
 
         db.DB_PATH = Path(sys.argv[1])
         db._local.conn = None
+        # app.db.init_db() looks up its per-table bootstrap steps by name
+        # through app.db_schema instead of importing these business modules
+        # directly (P0-3 dependency inversion, see
+        # docs/coupling_review_2026-08-29.md 第2步). This subprocess is a
+        # fresh interpreter that never goes through app.main/conftest.py, so
+        # it has to trigger the registration itself or init_db() raises
+        # KeyError on the unconditional "video_budget_authority_tables" lookup.
+        import app.artifacts, app.completion_grant, app.delivery  # noqa: E401
+        import app.model_migration, app.production.certificate  # noqa: E401
+        import app.production.grant, app.production.revision  # noqa: E401
+        import app.production.shot_uid  # noqa: E401
         db.init_db()
         conn = db.get_conn()
         conn.execute(
@@ -76,6 +87,17 @@ def test_hard_process_exit_is_reconciled_and_media_job_is_requeued(tmp_path) -> 
 
         db.DB_PATH = Path(sys.argv[1])
         db._local.conn = None
+        # app.db.init_db() looks up its per-table bootstrap steps by name
+        # through app.db_schema instead of importing these business modules
+        # directly (P0-3 dependency inversion, see
+        # docs/coupling_review_2026-08-29.md 第2步). This subprocess is a
+        # fresh interpreter that never goes through app.main/conftest.py, so
+        # it has to trigger the registration itself or init_db() raises
+        # KeyError on the unconditional "video_budget_authority_tables" lookup.
+        import app.artifacts, app.completion_grant, app.delivery  # noqa: E401
+        import app.model_migration, app.production.certificate  # noqa: E401
+        import app.production.grant, app.production.revision  # noqa: E401
+        import app.production.shot_uid  # noqa: E401
         db.init_db(reconcile_interrupted=True)
         resumed = worker.recover_media_jobs()
         conn = db.get_conn()
@@ -125,6 +147,17 @@ def test_waiting_provider_restart_polls_existing_task_with_new_step(tmp_path) ->
 
         db.DB_PATH = Path(sys.argv[1])
         db._local.conn = None
+        # app.db.init_db() looks up its per-table bootstrap steps by name
+        # through app.db_schema instead of importing these business modules
+        # directly (P0-3 dependency inversion, see
+        # docs/coupling_review_2026-08-29.md 第2步). This subprocess is a
+        # fresh interpreter that never goes through app.main/conftest.py, so
+        # it has to trigger the registration itself or init_db() raises
+        # KeyError on the unconditional "video_budget_authority_tables" lookup.
+        import app.artifacts, app.completion_grant, app.delivery  # noqa: E401
+        import app.model_migration, app.production.certificate  # noqa: E401
+        import app.production.grant, app.production.revision  # noqa: E401
+        import app.production.shot_uid  # noqa: E401
         db.init_db()
         conn = db.get_conn()
         conn.execute(
@@ -188,9 +221,22 @@ def test_waiting_provider_restart_polls_existing_task_with_new_step(tmp_path) ->
         from app import db, worker
         from app.orchestration.media_runs import mark_media_job_state
         import app.media_pipeline.concurrency as concurrency
+        import app.media_exec.enqueue as media_enqueue
+        import app.media_exec.run_job as media_run_job
 
         db.DB_PATH = Path(sys.argv[1])
         db._local.conn = None
+        # app.db.init_db() looks up its per-table bootstrap steps by name
+        # through app.db_schema instead of importing these business modules
+        # directly (P0-3 dependency inversion, see
+        # docs/coupling_review_2026-08-29.md 第2步). This subprocess is a
+        # fresh interpreter that never goes through app.main/conftest.py, so
+        # it has to trigger the registration itself or init_db() raises
+        # KeyError on the unconditional "video_budget_authority_tables" lookup.
+        import app.artifacts, app.completion_grant, app.delivery  # noqa: E401
+        import app.model_migration, app.production.certificate  # noqa: E401
+        import app.production.grant, app.production.revision  # noqa: E401
+        import app.production.shot_uid  # noqa: E401
         db.init_db(reconcile_interrupted=True)
         conn = db.get_conn()
         interrupted_run = conn.execute(
@@ -229,13 +275,18 @@ def test_waiting_provider_restart_polls_existing_task_with_new_step(tmp_path) ->
             async def __aexit__(self, *_args):
                 return False
 
-        worker.asyncio.sleep = no_sleep
-        worker._assert_review_dependency_fence_async = no_fence
-        worker.ensure_source_excerpt_in_prompt = lambda prompt, _shot: prompt
-        worker._load_shot_model = lambda _shot: object()
-        worker.hiagent.create_video_task = create_task
-        worker.hiagent.poll_video_task = poll_task
-        worker._provider_wait_policy = lambda *_args, **_kwargs: {
+        # This is a bare subprocess script (fresh interpreter, no pytest
+        # monkeypatch fixture available), so there is no
+        # patch_worker_everywhere() to call -- but the same package-split
+        # reasoning applies: app.media_exec is a real package now, and
+        # app.media_exec.run_job (which defines _run_job/_assert_review_
+        # dependency_fence_async/_provider_wait_policy) and app.media_exec.
+        # enqueue (which defines _load_shot_model) each hold their own bound
+        # copy of these names, independent from app.worker's re-export
+        # attribute. Setting only worker.X here would leave _run_job calling
+        # the real (unstubbed) functions. ensure_source_excerpt_in_prompt is
+        # imported into run_job.py too, same story.
+        no_fence_provider_wait_policy = lambda *_args, **_kwargs: {
             "meta_changed": False,
             "stage_progress": None,
             "elapsed_s": 1.0,
@@ -243,6 +294,17 @@ def test_waiting_provider_restart_polls_existing_task_with_new_step(tmp_path) ->
             "poll_delay_s": 0.0,
             "scope": "视频任务",
         }
+        no_source_excerpt = lambda prompt, _shot: prompt
+        no_shot_model = lambda _shot: object()
+        for target in (worker, media_run_job):
+            target._assert_review_dependency_fence_async = no_fence
+            target.ensure_source_excerpt_in_prompt = no_source_excerpt
+            target._provider_wait_policy = no_fence_provider_wait_policy
+        for target in (worker, media_enqueue, media_run_job):
+            target._load_shot_model = no_shot_model
+        worker.asyncio.sleep = no_sleep
+        worker.hiagent.create_video_task = create_task
+        worker.hiagent.poll_video_task = poll_task
         concurrency.semaphore_for = lambda _resource: Permit()
         concurrency.report_healthy = lambda *_args, **_kwargs: None
         concurrency.report_congestion = lambda *_args, **_kwargs: None

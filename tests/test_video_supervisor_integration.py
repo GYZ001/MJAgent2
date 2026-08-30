@@ -44,6 +44,11 @@ from app.video_supervisor import (
     run_video_completion_resilient,
     save_checkpoint,
 )
+from tests.conftest import (
+    patch_video_plan_everywhere,
+    patch_video_supervisor_everywhere,
+    patch_worker_everywhere,
+)
 
 _TEST_MEDIA_DIR: Path | None = None
 
@@ -77,7 +82,6 @@ def memdb(monkeypatch, tmp_path):
     import app.orchestration.state_machine as state_machine
     import app.video_cost_model as video_cost_model
     import app.video_crop as video_crop
-    import app.video_supervisor as video_supervisor
 
     for mod in (
         db_mod,
@@ -88,16 +92,23 @@ def memdb(monkeypatch, tmp_path):
         state_machine,
         video_cost_model,
         video_crop,
-        video_supervisor,
     ):
         monkeypatch.setattr(mod, "get_conn", _get)
+    # app.video_supervisor is a real package (see conftest.patch_video_
+    # supervisor_everywhere's docstring): every submodule holds its own
+    # `from app.db import get_conn` copy, so a loop-based setattr on the
+    # bare package object here would silently miss e.g. authority.py's
+    # `_supervisor_checks_can_use_worker_thread`, which would then see the
+    # real (file-backed) ambient connection instead of this in-memory one,
+    # decide it's safe to dispatch to asyncio.to_thread, and cross a
+    # worker-thread boundary with a connection object owned by this thread.
+    patch_video_supervisor_everywhere(monkeypatch, "get_conn", _get)
     yield conn
     _TEST_MEDIA_DIR = None
 
 
 @pytest.mark.asyncio
 async def test_async_checkpoint_write_does_not_block_event_loop(monkeypatch) -> None:
-    import app.video_supervisor as video_supervisor
 
     started = threading.Event()
     release = threading.Event()
@@ -112,12 +123,12 @@ async def test_async_checkpoint_write_does_not_block_event_loop(monkeypatch) -> 
         release.wait(timeout=1)
         return "checkpoint"
 
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "_supervisor_checks_can_use_worker_thread",
         lambda: True,
     )
-    monkeypatch.setattr(video_supervisor, "save_checkpoint", blocking_save)
+    patch_video_supervisor_everywhere(monkeypatch, "save_checkpoint", blocking_save)
 
     task = asyncio.create_task(
         _save_checkpoint_async(VideoSupervisorCheckpoint(episode_id="e")),
@@ -133,7 +144,6 @@ async def test_async_checkpoint_write_does_not_block_event_loop(monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_cancelled_checkpoint_keeps_bounded_writer_slot(monkeypatch) -> None:
-    import app.video_supervisor as video_supervisor
 
     first_started = threading.Event()
     first_release = threading.Event()
@@ -152,12 +162,12 @@ async def test_cancelled_checkpoint_keeps_bounded_writer_slot(monkeypatch) -> No
             first_release.wait(timeout=1)
         return f"checkpoint-{calls}"
 
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "_supervisor_checks_can_use_worker_thread",
         lambda: True,
     )
-    monkeypatch.setattr(video_supervisor, "save_checkpoint", blocking_first_save)
+    patch_video_supervisor_everywhere(monkeypatch, "save_checkpoint", blocking_first_save)
 
     first = asyncio.create_task(
         _save_checkpoint_async(VideoSupervisorCheckpoint(episode_id="first")),
@@ -290,7 +300,6 @@ async def test_dispatch_refreshes_heartbeat_before_watchdog_can_take_over(
     monkeypatch,
 ):
     import app.task_registry as task_registry
-    import app.video_supervisor as video_supervisor
 
     eid, _ = _seed_episode(memdb, 1)
     run_id = evidence_repository.create_run(
@@ -313,7 +322,7 @@ async def test_dispatch_refreshes_heartbeat_before_watchdog_can_take_over(
     )
     memdb.commit()
     clock = {"now": 100.0}
-    monkeypatch.setattr(video_supervisor, "now", lambda: clock["now"])
+    patch_video_supervisor_everywhere(monkeypatch, "now", lambda: clock["now"])
     checkpoint = VideoSupervisorCheckpoint(
         episode_id=eid,
         run_id=run_id,
@@ -329,7 +338,7 @@ async def test_dispatch_refreshes_heartbeat_before_watchdog_can_take_over(
         clock["now"] = 161.0
         return True
 
-    monkeypatch.setattr(video_supervisor, "_dispatch", slow_dispatch)
+    patch_video_supervisor_everywhere(monkeypatch, "_dispatch", slow_dispatch)
     entry = ShotCoverageEntry(shot_no=1, shot_id=f"{eid}_shot_1")
 
     assert _dispatch_with_heartbeat(
@@ -357,7 +366,6 @@ async def test_dispatch_refreshes_heartbeat_before_watchdog_can_take_over(
 @pytest.mark.asyncio
 async def test_watchdog_rechecks_heartbeat_before_takeover(memdb, monkeypatch):
     import app.task_registry as task_registry
-    import app.video_supervisor as video_supervisor
 
     eid, _ = _seed_episode(memdb, 1)
     run_id = evidence_repository.create_run(
@@ -390,7 +398,7 @@ async def test_watchdog_rechecks_heartbeat_before_takeover(memdb, monkeypatch):
         coverage={"total": 1, "adopted": 0},
     )
     save_checkpoint(checkpoint, run_id=run_id)
-    monkeypatch.setattr(video_supervisor, "now", lambda: 200.0)
+    patch_video_supervisor_everywhere(monkeypatch, "now", lambda: 200.0)
     monkeypatch.setattr(task_registry, "active", lambda *_args: True)
 
     def refresh_during_authority_check(*_args, **_kwargs):
@@ -401,8 +409,8 @@ async def test_watchdog_rechecks_heartbeat_before_takeover(memdb, monkeypatch):
         memdb.commit()
         return None
 
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "_verify_supervisor_paid_authority",
         refresh_during_authority_check,
     )
@@ -430,13 +438,13 @@ async def test_async_dispatch_keeps_event_loop_responsive(monkeypatch):
         time.sleep(0.05)
         return True
 
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "_supervisor_checks_can_use_worker_thread",
         lambda: True,
     )
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "_dispatch_with_heartbeat",
         slow_dispatch,
     )
@@ -482,18 +490,18 @@ async def test_async_dispatch_refreshes_heartbeat_while_worker_is_busy(monkeypat
             state["heartbeats_during_dispatch"] += 1
         return True
 
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "_supervisor_checks_can_use_worker_thread",
         lambda: True,
     )
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "_dispatch_with_heartbeat",
         slow_dispatch,
     )
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "_refresh_supervisor_heartbeat",
         refresh,
     )
@@ -530,18 +538,18 @@ async def test_async_dispatch_cancellation_waits_for_worker_thread(monkeypatch):
         finished.set()
         return True
 
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "_supervisor_checks_can_use_worker_thread",
         lambda: True,
     )
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "_dispatch_with_heartbeat",
         slow_dispatch,
     )
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "_refresh_supervisor_heartbeat",
         lambda *_args, **_kwargs: True,
     )
@@ -593,13 +601,13 @@ async def test_lifecycle_heartbeat_runs_during_blocking_supervisor_work(monkeypa
         time.sleep(0.06)
         return VideoSupervisorCheckpoint(episode_id=episode_id, run_id="run-1")
 
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "_refresh_supervisor_heartbeat",
         refresh,
     )
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "_run_video_completion_resilient_loop",
         blocking_loop,
     )
@@ -621,7 +629,6 @@ async def test_lifecycle_heartbeat_runs_during_blocking_supervisor_work(monkeypa
 
 @pytest.mark.asyncio
 async def test_incremental_adoption_publishes_ready_candidate(memdb, monkeypatch):
-    import app.video_plan as video_plan
     import app.video_supervisor as video_supervisor
 
     eid, _ = _seed_episode(memdb, 2)
@@ -636,7 +643,7 @@ async def test_incremental_adoption_publishes_ready_candidate(memdb, monkeypatch
         (shot_id,),
     )
     memdb.commit()
-    monkeypatch.setattr(video_plan, "get_conn", lambda: memdb)
+    patch_video_plan_everywhere(monkeypatch, "get_conn", lambda: memdb)
     checkpoint = VideoSupervisorCheckpoint(
         episode_id=eid,
         run_id="run-1",
@@ -669,8 +676,8 @@ async def test_incremental_adoption_skips_ledger_rebuild_without_candidate(
     async def unexpected_rebuild(*_args, **_kwargs):
         raise AssertionError("no ready candidate must not rebuild the ledger")
 
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "_rebuild_coverage_ledger_async",
         unexpected_rebuild,
     )
@@ -767,14 +774,14 @@ async def test_fresh_control_plane_recovery_never_loads_previous_run_checkpoint(
         assert kwargs["resume"] is True
         return saved[-1]
 
-    monkeypatch.setattr(supervisor, "run_video_completion_supervisor", run_once)
-    monkeypatch.setattr(
-        supervisor,
+    patch_video_supervisor_everywhere(monkeypatch, "run_video_completion_supervisor", run_once)
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "load_latest_checkpoint",
         lambda _episode_id: saved[-1] if saved else old,
     )
-    monkeypatch.setattr(
-        supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "save_checkpoint",
         lambda cp, **_kwargs: saved.append(cp.model_copy(deep=True)) or "checkpoint",
     )
@@ -879,7 +886,6 @@ def test_adopted_video_without_usable_file_is_not_covered(memdb, damage):
 @pytest.mark.asyncio
 async def test_fresh_completion_with_all_adopted_finishes_without_enqueue(memdb, monkeypatch):
     """点击“补齐”时若全部已有采用版，应立即完成且零派发。"""
-    from app import worker
     from app.video_supervisor import run_video_completion_supervisor
 
     eid, _ = _seed_episode(memdb, 3)
@@ -898,7 +904,7 @@ async def test_fresh_completion_with_all_adopted_finishes_without_enqueue(memdb,
     def forbidden_enqueue(*_args, **_kwargs):
         raise AssertionError("已有采用版时不得派发视频任务")
 
-    monkeypatch.setattr(worker, "enqueue_shot", forbidden_enqueue)
+    patch_worker_everywhere(monkeypatch, "enqueue_shot", forbidden_enqueue)
 
     result = await run_video_completion_supervisor(
         eid,
@@ -1330,7 +1336,6 @@ def test_repair_preview_is_strictly_read_only(memdb):
 
 @pytest.mark.asyncio
 async def test_watchdog_closes_stale_run_when_task_record_is_missing(memdb, monkeypatch, tmp_path):
-    import app.video_supervisor as video_supervisor
 
     eid, _ = _seed_episode(memdb, 1)
     candidate = _add_succeeded_version(
@@ -1366,9 +1371,9 @@ async def test_watchdog_closes_stale_run_when_task_record_is_missing(memdb, monk
         budget={"cap_cny": 150},
         coverage={"fallback_quota": 0},
     )
-    monkeypatch.setattr(video_supervisor, "now", lambda: 100.0)
+    patch_video_supervisor_everywhere(monkeypatch, "now", lambda: 100.0)
     save_checkpoint(cp, run_id=run_id)
-    monkeypatch.setattr(video_supervisor, "now", lambda: 1000.0)
+    patch_video_supervisor_everywhere(monkeypatch, "now", lambda: 1000.0)
 
     recovered = await reconcile_stale_video_supervisors()
 
@@ -1386,7 +1391,6 @@ async def test_watchdog_closes_stale_run_when_task_record_is_missing(memdb, monk
 
 def test_startup_recovery_spawn_failure_restores_episode_state(memdb, monkeypatch):
     import app.task_registry as task_registry
-    import app.video_supervisor as video_supervisor
 
     eid, _ = _seed_episode(memdb, 1)
     parent_run_id = evidence_repository.create_run(
@@ -1413,7 +1417,7 @@ def test_startup_recovery_spawn_failure_restores_episode_state(memdb, monkeypatc
         started_at=1,
         deadline_at=500,
     )
-    monkeypatch.setattr(video_supervisor, "now", lambda: 100.0)
+    patch_video_supervisor_everywhere(monkeypatch, "now", lambda: 100.0)
     save_checkpoint(checkpoint, run_id=parent_run_id)
     monkeypatch.setattr(task_registry, "active", lambda *_args: False)
     monkeypatch.setattr(
@@ -1465,7 +1469,7 @@ async def test_asset_preparation_heartbeat_prevents_watchdog_takeover(memdb, mon
         coverage={"fallback_quota": 0},
     )
     clock = {"now": 100.0}
-    monkeypatch.setattr(video_supervisor, "now", lambda: clock["now"])
+    patch_video_supervisor_everywhere(monkeypatch, "now", lambda: clock["now"])
     stop = asyncio.Event()
     task = asyncio.create_task(
         video_supervisor._asset_prep_heartbeat(
@@ -1613,7 +1617,6 @@ def test_cost_regression_cascade_depth():
 
 def test_fake_enqueue_dispatch_reused_and_preflight(memdb, monkeypatch):
     """进程内假 enqueue：reused 不计进展；CompileError 落 Issue。"""
-    from app import worker
     from app.video_supervisor import ShotCoverageEntry, _dispatch
 
     eid, _ = _seed_episode(memdb, 2)
@@ -1630,7 +1633,7 @@ def test_fake_enqueue_dispatch_reused_and_preflight(memdb, monkeypatch):
             }
         raise CompileError("动作容量超限")
 
-    monkeypatch.setattr(worker, "enqueue_shot", fake_enqueue)
+    patch_worker_everywhere(monkeypatch, "enqueue_shot", fake_enqueue)
     protected = ShotCoverageEntry(
         shot_no=1,
         shot_id=f"{eid}_shot_1",
@@ -1666,13 +1669,11 @@ def test_dispatch_fences_model_rejection_and_unsettled_provider_handle(
     memdb,
     monkeypatch,
 ) -> None:
-    from app import worker
     from app.video_supervisor import ShotCoverageEntry, _collect_issues, _dispatch
 
     eid, _ = _seed_episode(memdb, 2)
     calls = {"n": 0}
-    monkeypatch.setattr(
-        worker,
+    patch_worker_everywhere(monkeypatch,
         "enqueue_shot",
         lambda *_args, **_kwargs: calls.update(n=calls["n"] + 1),
     )
@@ -1813,7 +1814,6 @@ def test_dispatch_model_rejected_terminal_survives_run_restart(memdb, monkeypatc
     终态记录被 run_id 过滤挡住后，直接放行——盲目重投。
     绿：修复后的 ``_dispatch``（本体，未被回退）在任何 run_id 下都拒绝派发。
     """
-    from app import worker
     from app.video_supervisor import ShotCoverageEntry, _dispatch
 
     eid, _ = _seed_episode(memdb, 1)
@@ -1828,8 +1828,7 @@ def test_dispatch_model_rejected_terminal_survives_run_restart(memdb, monkeypatc
     ) is False
 
     calls = {"n": 0}
-    monkeypatch.setattr(
-        worker, "enqueue_shot",
+    patch_worker_everywhere(monkeypatch, "enqueue_shot",
         lambda *_a, **_kw: calls.update(n=calls["n"] + 1) or {"version_id": "v_new"},
     )
 
@@ -1926,7 +1925,6 @@ def test_collect_issues_still_lets_manual_review_be_retried_by_new_run(memdb):
 
 def test_fake_enqueue_paid_attempts_bounded(memdb, monkeypatch):
     """假 provider：每镜成功计费，总账不超 cap（模拟全失败前采纳预算墙）。"""
-    from app import worker
     from app.video_supervisor import ShotCoverageEntry, _dispatch
 
     eid, _ = _seed_episode(memdb, 11)
@@ -1952,7 +1950,7 @@ def test_fake_enqueue_paid_attempts_bounded(memdb, monkeypatch):
         memdb.commit()
         return {"version_id": vid, "reused": False}
 
-    monkeypatch.setattr(worker, "enqueue_shot", fake_enqueue)
+    patch_worker_everywhere(monkeypatch, "enqueue_shot", fake_enqueue)
     ledger = rebuild_coverage_ledger(eid, fallback_quota=2)
     spent = 0.0
     for e in ledger.entries:

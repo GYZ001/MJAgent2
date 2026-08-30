@@ -23,6 +23,21 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# app.db.init_db() (called below in resolve_episode()) looks up its per-table
+# bootstrap steps by name through app.db_schema instead of importing these
+# business modules directly (P0-3 dependency inversion, see
+# docs/coupling_review_2026-08-29.md 第2步). Nothing else in this script's
+# import chain runs before resolve_episode()'s init_db() call, so without
+# this the unconditional "builtin_models_migration" lookup raises KeyError.
+import app.artifacts  # noqa: F401
+import app.completion_grant  # noqa: F401
+import app.delivery  # noqa: F401
+import app.model_migration  # noqa: F401
+import app.production.certificate  # noqa: F401
+import app.production.grant  # noqa: F401
+import app.production.revision  # noqa: F401
+import app.production.shot_uid  # noqa: F401
+
 BASELINE_PATH = ROOT / "golden" / "renderability" / "doupocangqiong_ep1_baseline.json"
 DEFAULT_EPISODE_ID = "ep_23517af4b5a8"
 DEFAULT_TITLE = "陨落的天才"

@@ -211,3 +211,15 @@ def migrate_builtin_models(*, force: bool = False) -> dict[str, Any]:
         "backfilled_protocol": backfilled,
         "reassigned": reassigned,
     }
+
+
+# app.db.init_db() no longer imports this module directly (P0-3 dependency
+# inversion, docs/coupling_review_2026-08-29.md 第2步) — it looks this up by
+# name through app.db_schema instead. migrate_builtin_models() takes no conn
+# argument (it resolves its own connection via app.db.get_setting/set_setting,
+# matching how init_db() called it before this change); the registered
+# wrapper discards the conn the registry passes in to keep that behavior
+# identical.
+from app.db_schema import register_table as _register_table  # noqa: E402
+
+_register_table("builtin_models_migration", lambda conn: migrate_builtin_models())

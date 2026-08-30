@@ -1364,3 +1364,12 @@ def _adopted_video_paths(episode_id: str) -> list[tuple[int, str]]:
         for r in rows
         if r["video_path"] and Path(r["video_path"]).is_file()
     ]
+
+
+# app.db.init_db() no longer imports this module directly (P0-3 dependency
+# inversion, docs/coupling_review_2026-08-29.md 第2步) — the two db.py repair
+# helpers that need invalidate_episode_delivery_authority() look it up by
+# name through app.db_schema instead.
+from app.db_schema import register_table as _register_table  # noqa: E402
+
+_register_table("invalidate_episode_delivery_authority", invalidate_episode_delivery_authority)

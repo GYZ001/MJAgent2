@@ -7,6 +7,7 @@ import threading
 import pytest
 
 from app import api, completion_grant, db
+from tests.conftest import patch_video_supervisor_everywhere, patch_api_everywhere
 
 
 @pytest.fixture
@@ -239,20 +240,17 @@ def test_concurrent_same_topup_key_is_applied_once(grant_db) -> None:
 
 
 def _isolate_completion_core(grant_db, monkeypatch) -> None:
-    monkeypatch.setattr(api, "get_conn", lambda: grant_db)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: grant_db)
     monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch,
         "_review_assert_positive_action",
         lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch,
         "_assert_storyboard_generation_gate",
         lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch,
         "_ensure_video_episode_columns",
         lambda: None,
     )
@@ -336,12 +334,11 @@ async def test_project_completion_derives_stable_episode_grant_key(
     grant_db,
     monkeypatch,
 ) -> None:
-    import app.video_supervisor as video_supervisor
 
-    monkeypatch.setattr(api, "get_conn", lambda: grant_db)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: grant_db)
     monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "rebuild_coverage_ledger",
         lambda _episode_id: type(
             "Ledger",
@@ -358,7 +355,7 @@ async def test_project_completion_derives_stable_episode_grant_key(
             "completion_grant_id": "grant-episode",
         }
 
-    monkeypatch.setattr(api, "_complete_episode_core", capture_episode)
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", capture_episode)
 
     await api._complete_project_videos_core(
         "grant-project",

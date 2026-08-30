@@ -12,7 +12,6 @@ from typing import Any
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
-from app.capabilities import ensure_catalog_loaded
 from app.capabilities.bus import get_command_bus
 from app.capabilities.schemas import CommandResult, CommandStatus
 
@@ -59,7 +58,14 @@ async def dispatch(
     Agent/MCP 路径的既有处理。
     """
     del initiator  # 保留参数以兼容旧调用方；策略已统一。
-    ensure_catalog_loaded()
+    # 不在此处调用 ensure_catalog_loaded()：本函数是全仓最高频的调用点（60+
+    # 处 app.domain/system_api/planning/orchestration 路由），若在这里反向 import
+    # catalog，会经 catalog -> handlers.* -> app.orchestration.api -> dispatch 焊成环
+    # （app.capabilities.dispatch 与 app.capabilities 曾是全后端最大强连通分量里
+    # 贡献最大的两条团内边，见 docs/architecture_layering_plan_2026-08-29.md）。
+    # 目录加载改由两处保证：生产由 app.main 的 lifespan 在接受请求前调用；
+    # 测试由 tests/conftest.py 的 autouse fixture 调用。dispatch 只在这两个前提外
+    # 被直接当函数调用时才会看到空目录——当前代码库没有这种调用方（已核实）。
     if session_id is None:
         from app.local_session import get_request_session_id
         session_id = get_request_session_id()

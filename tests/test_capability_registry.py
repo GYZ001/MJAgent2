@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.capabilities import ensure_catalog_loaded
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.bus import get_command_bus, reset_command_bus_for_tests
 from app.capabilities.coverage import assert_full_coverage, discover_mutating_routes, validate_catalog_integrity
 from app.capabilities.policy import consume_approval, issue_approval, reset_approvals_for_tests
@@ -85,12 +85,22 @@ def test_command_input_models_extend_standard_fields() -> None:
 
 
 def test_high_risk_commands_require_confirmation_metadata() -> None:
+    # project.delete 现在是软删除（移入回收站，24 小时内可恢复），不再是
+    # R3_DESTRUCTIVE——真正不可逆的彻底清理是 project.purge / project.purge_all。
     registry = get_registry()
-    for name in ("project.delete", "video.clear_episode", "delivery.review"):
+    for name in ("project.purge", "project.purge_all", "video.clear_episode", "delivery.review"):
         spec = registry.get_command(name)
         assert spec.risk == RiskLevel.R3_DESTRUCTIVE
         assert spec.confirmation == ConfirmationPolicy.ALWAYS
         assert spec.idempotency == IdempotencyPolicy.REQUIRED
+
+
+def test_soft_deleted_project_lifecycle_commands_are_reversible() -> None:
+    registry = get_registry()
+    for name in ("project.delete", "project.restore"):
+        spec = registry.get_command(name)
+        assert spec.risk == RiskLevel.R1_REVERSIBLE
+        assert spec.confirmation == ConfirmationPolicy.NEVER
 
 
 def test_storyboard_confirmation_consumes_domain_preview_without_double_approval() -> None:
@@ -117,8 +127,10 @@ def test_bus_dry_run_does_not_require_handler() -> None:
 
 
 def test_bus_blocks_high_risk_without_approval() -> None:
+    # project.delete 现在是软删除（NEVER 确认），不再演示"高风险需批准"这条
+    # 路径——真正 R3_DESTRUCTIVE + ALWAYS 的是 project.purge（彻底清理）。
     result = get_command_bus().execute(
-        "project.delete",
+        "project.purge",
         {"project_id": "proj_x", "idempotency_key": "del-1"},
     )
     assert result.status == CommandStatus.WAITING_APPROVAL
@@ -135,10 +147,11 @@ def test_bus_rejects_mismatched_approval() -> None:
     )
     conn.commit()
     bus = get_command_bus()
-    first = bus.execute("project.delete", {"project_id": "proj_x", "idempotency_key": "del-2"})
+    # project.purge 是现在的 R3_DESTRUCTIVE + ALWAYS 命令，见上一个测试的注释。
+    first = bus.execute("project.purge", {"project_id": "proj_x", "idempotency_key": "del-2"})
     token = first.data["approval_token"]
     bad = bus.execute(
-        "project.delete",
+        "project.purge",
         {"project_id": "proj_other", "idempotency_key": "del-3", "approval_token": token},
     )
     assert bad.status == CommandStatus.REJECTED
@@ -147,15 +160,19 @@ def test_bus_rejects_mismatched_approval() -> None:
 
 @pytest.mark.asyncio
 async def test_waiting_approval_token_retry_reaches_handler() -> None:
+    # project.purge 是现在的 R3_DESTRUCTIVE + ALWAYS 命令。种子项目
+    # "proj_missing_for_test" 存在但没有被软删除过，所以彻底清理会在
+    # handler 内被 _deleted_project_or_404 拒绝——这本身就是测试要覆盖的
+    # 关键点：批准后确实进入了 handler（而非卡在批准环节），handler 的
+    # 404 被正确转成 FAILED 而不是穿透成裸异常。
     bus = get_command_bus()
     args = {"project_id": "proj_missing_for_test", "idempotency_key": "del-approve"}
-    waiting = await bus.execute_async("project.delete", args)
+    waiting = await bus.execute_async("project.purge", args)
     assert waiting.status == CommandStatus.WAITING_APPROVAL
     approved = await bus.execute_async(
-        "project.delete",
+        "project.purge",
         {**args, "approval_token": waiting.data["approval_token"]},
     )
-    # 种子项目存在时应真正删除成功；关键是批准后进入了 handler 而非卡在批准。
     assert approved.status in {CommandStatus.SUCCEEDED, CommandStatus.FAILED}
     assert approved.error_code != "approval_invalid"
     if approved.status == CommandStatus.FAILED:
@@ -164,16 +181,21 @@ async def test_waiting_approval_token_retry_reaches_handler() -> None:
 
 @pytest.mark.asyncio
 async def test_bus_idempotency_suppresses_duplicate_success() -> None:
-    """显式 idempotency_key 命中持久化缓存；未传 key 时不按参数自动去重。"""
+    """显式 idempotency_key 命中持久化缓存；未传 key 时不按参数自动去重。
+
+    project.purge 是现在的 R3_DESTRUCTIVE + ALWAYS 命令，见前几个测试同样的
+    改动理由——project.delete 软删除后不再需要批准，撑不起这条用例要验的
+    "WAITING_APPROVAL 去重" 场景。
+    """
     bus = get_command_bus()
     args = {"project_id": "proj_x", "idempotency_key": "same-key", "dry_run": True}
-    a = await bus.execute_async("project.delete", args)
-    b = await bus.execute_async("project.delete", args)
+    a = await bus.execute_async("project.purge", args)
+    b = await bus.execute_async("project.purge", args)
     assert a.status == b.status == CommandStatus.SUCCEEDED
 
     # 无显式 key：即使参数相同也不应误去重（避免 resume 复用陈旧结果）
-    waiting1 = await bus.execute_async("project.delete", {"project_id": "proj_x"})
-    waiting2 = await bus.execute_async("project.delete", {"project_id": "proj_x"})
+    waiting1 = await bus.execute_async("project.purge", {"project_id": "proj_x"})
+    waiting2 = await bus.execute_async("project.purge", {"project_id": "proj_x"})
     assert waiting1.status == waiting2.status == CommandStatus.WAITING_APPROVAL
     assert waiting1.data["approval_id"] != waiting2.data["approval_id"]
 
@@ -221,10 +243,11 @@ def test_domain_preflight_reads_project_state() -> None:
     assert result.allowed is True
     assert result.affected.projects == ["proj_pf"]
     assert result.state_fingerprint.startswith("sha256:")
-    # 补跑 Bus 预检应要求确认
+    # project.delete 现在是软删除（移入回收站，24 小时内可恢复），NEVER 确认——
+    # 不再需要用户批准这一步。
     bus_pf = get_command_bus().preflight("project.delete", {"project_id": "proj_pf"})
-    assert bus_pf.requires_confirmation is True
-    assert "删除" in bus_pf.summary or "永久" in bus_pf.summary
+    assert bus_pf.requires_confirmation is False
+    assert "回收站" in bus_pf.summary
 
 
 def test_project_delete_preflight_returns_project_scoped_provider_blocker() -> None:
@@ -279,7 +302,9 @@ def test_project_delete_preflight_returns_project_scoped_provider_blocker() -> N
     result = project_delete(ProjectDeleteInput(project_id="proj-pf-block"))
 
     assert result.allowed is True
-    assert result.requires_confirmation is True
+    # 软删除本身不需要确认，即使存在供应商任务尚未终态——这一步只读核对、
+    # 不创建新任务，blocker 信息仍然要透出供前端/agent 展示。
+    assert result.requires_confirmation is False
     blocker = result.affected.extra["blockers"][0]
     assert blocker["project_id"] == "proj-pf-block"
     assert blocker["episode_id"] == "ep-pf-block"

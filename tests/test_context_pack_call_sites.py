@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from app import api
+from tests.conftest import patch_api_everywhere
 
 
 class RecordingRecorder:
@@ -55,8 +56,8 @@ def test_recorded_bible_task_builds_bounded_context(monkeypatch) -> None:
         conn.commit()
 
     recorder = RecordingRecorder()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "_bible_task", fake_bible_task)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_bible_task", fake_bible_task)
 
     asyncio.run(
         api._recorded_bible_task(
@@ -98,8 +99,8 @@ def test_recorded_storyboard_task_builds_bounded_context(monkeypatch) -> None:
         conn.commit()
 
     recorder = RecordingRecorder()
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "_storyboard_task", fake_storyboard_task)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_storyboard_task", fake_storyboard_task)
 
     asyncio.run(
         api._recorded_storyboard_task(

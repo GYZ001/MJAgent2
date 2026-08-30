@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from app import api, artifacts, db, worker
+from tests.conftest import patch_worker_everywhere, patch_api_everywhere
 from app.video_playback import normalize_playback_rate
 
 
@@ -156,7 +157,7 @@ def test_partial_episode_is_ready_when_any_real_video_exists_but_ffmpeg_is_still
     _version(conn, shot_no=3, path=missing_path, adopted=True)
     conn.commit()
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
     monkeypatch.setattr(worker.shutil, "which", lambda _name: None)
@@ -210,7 +211,7 @@ def test_concat_produces_partial_output_while_other_shots_are_still_generating(
            ) VALUES('j_running','video','s2','v_running','e','p','waiting_provider',0,0)"""
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(media_evidence, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
@@ -278,7 +279,7 @@ def test_full_episode_with_real_transition_still_uses_final_edit(tmp_path, monke
             "transitions": [{"edit_type": "dip_white"}],
         }
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(media_evidence, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
@@ -330,7 +331,6 @@ def test_episode_without_adoption_auto_adopts_playable_candidates_before_mix(tmp
     """
     from app.evidence import media as media_evidence
     from app.evidence import repository
-    from app import api
 
     conn = _database()
     project_root = tmp_path / "projects"
@@ -345,14 +345,14 @@ def test_episode_without_adoption_auto_adopts_playable_candidates_before_mix(tmp
             ('{"passed":true}', '{"overall":0.2,"contract_facts":[]}', f"v{shot_no}"),
         )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(media_evidence, "get_conn", lambda: conn)
     monkeypatch.setattr(repository, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     # 上游剧本/分镜评审墙资格与本用例无关（专注合成时自动采纳的机制），比照
     # 本文件其它用例对 downstream_authority 的直通 mock 原则同样直通。
-    monkeypatch.setattr(api, "_review_assert_shot_positive", lambda *a, **k: {})
+    patch_api_everywhere(monkeypatch, "_review_assert_shot_positive", lambda *a, **k: {})
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
     monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
 
@@ -396,7 +396,7 @@ def test_concat_refuses_only_when_no_real_video_exists_and_never_creates_image_f
     tmp_path, monkeypatch,
 ) -> None:
     conn = _database((1,))
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", tmp_path / "projects")
     monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
@@ -447,7 +447,7 @@ def test_legacy_image_fallback_cannot_outrank_or_grade_over_real_video(
     conn.execute("UPDATE shots SET adopted_version_id='fallback-v2' WHERE id='s1'")
     conn.commit()
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(media_evidence, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
@@ -548,7 +548,7 @@ def test_outdated_final_video_is_preserved_and_remains_visible(tmp_path, monkeyp
     final_path.parent.mkdir(parents=True)
     final_path.write_bytes(b"existing-final")
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
     monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", project_root)
@@ -576,7 +576,7 @@ def test_concat_timeout_preserves_previous_final_video(tmp_path, monkeypatch) ->
     final_path.parent.mkdir(parents=True)
     final_path.write_bytes(b"previous-final")
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
     monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
@@ -612,7 +612,7 @@ def test_concat_nonempty_undecodable_output_preserves_previous_final_video(
     stale_path.write_text("outdated\n", encoding="utf-8")
     calls: list[tuple[list[str], dict]] = []
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
     monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
@@ -659,7 +659,7 @@ def test_concat_abnormal_output_duration_preserves_previous_final_video(
     probed_source = False
     calls: list[tuple[list[str], dict]] = []
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
     monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
@@ -697,13 +697,13 @@ def test_cancel_video_adoption_keeps_candidate_and_marks_shot_pending(tmp_path, 
     conn.commit()
     invalidated: list[str] = []
     audits: list[tuple] = []
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(
         api.worker,
         "invalidate_episode_final",
         lambda episode_id: invalidated.append(episode_id),
     )
-    monkeypatch.setattr(api, "_review_write_audit", lambda *args, **kwargs: audits.append((args, kwargs)))
+    patch_api_everywhere(monkeypatch, "_review_write_audit", lambda *args, **kwargs: audits.append((args, kwargs)))
 
     result = api._cancel_shot_adoption_core("s1")
 
@@ -731,10 +731,10 @@ def test_adopt_version_persists_playback_rate_and_invalidates_previous_mix(
     conn.commit()
     invalidated: list[str] = []
 
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "_review_assert_shot_positive", lambda *_args: None)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_review_assert_shot_positive", lambda *_args: None)
     monkeypatch.setattr(api.evidence_repository, "commit_artifact", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(api, "_review_write_audit", lambda *_args, **_kwargs: None)
+    patch_api_everywhere(monkeypatch, "_review_write_audit", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(api.worker, "invalidate_episode_final", invalidated.append)
     from app.evidence import media as media_evidence
     monkeypatch.setattr(media_evidence, "record_video_candidate", lambda *_args, **_kwargs: {"id": "art-v1"})
@@ -767,7 +767,7 @@ def test_mix_applies_each_adopted_versions_finalized_playback_rate(
     final_path.with_suffix(".stale").write_text("outdated\n", encoding="utf-8")
     commands: list[list[str]] = []
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
     monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
@@ -947,7 +947,7 @@ def test_con409_unadopted_shot_is_skipped_not_fatal_end_to_end(tmp_path, monkeyp
     with pytest.raises(ValueError, match="镜 2 缺少已采纳的有效视频权威"):
         downstream_authority.current_adopted_video_delivery_manifest("e", conn=conn)
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
     monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
@@ -1049,11 +1049,11 @@ def test_concat_auto_adopts_all_playable_candidates_matching_real_episode_state(
         _version(conn, shot_no=shot_no, path=path, adopted=False)
     conn.commit()
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(media_evidence, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "_review_assert_shot_positive", lambda *a, **k: {})
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_review_assert_shot_positive", lambda *a, **k: {})
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
     monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
     monkeypatch.setattr(
@@ -1148,12 +1148,12 @@ def test_auto_adopt_before_mix_skips_delivery_fallback_and_technically_invalid_c
     _version(conn, shot_no=3, path=bad_path, adopted=False)
     conn.commit()
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(media_evidence, "get_conn", lambda: conn)
     monkeypatch.setattr(repository, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "_review_assert_shot_positive", lambda *a, **k: {})
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_review_assert_shot_positive", lambda *a, **k: {})
     # ffprobe 不可用：validate_video_file 只按容器签名判定，镜 3 稳定不通过。
     monkeypatch.setattr(worker.shutil, "which", lambda _name: None)
 
@@ -1178,7 +1178,7 @@ def test_auto_adopt_before_mix_leaves_shots_without_any_candidate_alone(
     """回归：完全没有候选（从未生成、或候选未落盘）的镜头，自动采纳不得
     凭空造出一个采纳；这类镜头仍然只能走既有的"跳过并如实上报"路径。"""
     conn = _database((1,))
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     result = worker._auto_adopt_playable_candidates_before_mix("e")
 

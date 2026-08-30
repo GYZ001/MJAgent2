@@ -4,7 +4,7 @@ import pytest
 
 from app.db import get_conn
 from app.domain import video_ops
-from app import video_supervisor
+from tests.conftest import patch_video_supervisor_everywhere
 
 
 def _seed_episode(episode_id: str, project_id: str) -> None:
@@ -68,12 +68,12 @@ def test_repair_route_rolls_back_pending_adoption_before_marking_failed_closed(
         conn.commit()
         checkpoint_commits.append(True)
 
-    monkeypatch.setattr(
-        video_supervisor, "preview_video_completion_repair", lambda _eid: {"preview": True}
+    patch_video_supervisor_everywhere(
+        monkeypatch, "preview_video_completion_repair", lambda _eid: {"preview": True}
     )
-    monkeypatch.setattr(video_supervisor, "load_latest_checkpoint", lambda _eid: None)
-    monkeypatch.setattr(video_supervisor, "_deadline_closeout", fake_deadline_closeout)
-    monkeypatch.setattr(video_supervisor, "_mark_failed_closed", fake_mark_failed_closed)
+    patch_video_supervisor_everywhere(monkeypatch, "load_latest_checkpoint", lambda _eid: None)
+    patch_video_supervisor_everywhere(monkeypatch, "_deadline_closeout", fake_deadline_closeout)
+    patch_video_supervisor_everywhere(monkeypatch, "_mark_failed_closed", fake_mark_failed_closed)
 
     from fastapi import HTTPException
 

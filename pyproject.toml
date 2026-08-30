@@ -17,3 +17,12 @@ select = ["E9", "F401", "F63", "F7", "F82", "F841"]
 [tool.ruff.lint.per-file-ignores]
 "app/domain/common.py" = ["F401"]
 "app/media_exec/common.py" = ["F401"]
+# app/stages/__init__.py 是拆包后的稳定入口：显式再导出全部原 app/stages.py 公开名字，
+# 供全仓 `from app.stages import X` 继续原样工作，对本文件表现为 F401。
+"app/stages/__init__.py" = ["F401"]
+# 同一模式：screenplay_repair.py / prep_pack.py 拆包后的稳定入口，显式再导出全部原
+# 文件的公开名字（含私有名），供全仓既有 `from app.production.screenplay_repair
+# import X` / `from app.production.prep_pack import X` 继续原样工作，对本文件表现为
+# F401。
+"app/production/screenplay_repair/__init__.py" = ["F401"]
+"app/production/prep_pack/__init__.py" = ["F401"]

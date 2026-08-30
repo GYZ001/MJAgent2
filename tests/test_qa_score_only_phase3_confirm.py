@@ -13,6 +13,7 @@ from app.evidence import repository
 from app.harness.types import EvidenceArtifact, Issue, IssueSeverity
 from app.production.publish import can_issue_certificate
 from app.storyboard_workspace import realign_generated_source_binding
+from tests.conftest import patch_api_everywhere
 
 
 @pytest.fixture()
@@ -83,14 +84,14 @@ def confirm_db(tmp_path, monkeypatch):
 
 
 def test_confirm_preview_passes_with_low_quality_business_warnings(confirm_db, monkeypatch):
-    monkeypatch.setattr(
-        video_ops,
+    patch_api_everywhere(
+        monkeypatch,
         "validate_storyboard",
         lambda *_args, **_kwargs: ["口播容量偏低；节奏覆盖不足；可拍性评分较低"],
     )
-    monkeypatch.setattr(video_ops, "validate_storyboard_soundtrack", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(
-        video_ops,
+    patch_api_everywhere(monkeypatch, "validate_storyboard_soundtrack", lambda *_args, **_kwargs: [])
+    patch_api_everywhere(
+        monkeypatch,
         "validate_storyboard_preserves_key_content",
         lambda *_args, **_kwargs: ["主线覆盖不足，作为 QA 评分警告"],
     )
@@ -109,10 +110,10 @@ def test_must_keep_spine_delivery_finding_remains_score_only(confirm_db, monkeyp
         "主线节拍主体已入画但未完成对应动作/对白交付："
         "S03/少年:在密室修炼一夜并明确修为进展"
     )
-    monkeypatch.setattr(video_ops, "validate_storyboard", lambda *_args, **_kwargs: [issue])
-    monkeypatch.setattr(video_ops, "validate_storyboard_soundtrack", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(
-        video_ops, "validate_storyboard_preserves_key_content", lambda *_args, **_kwargs: [],
+    patch_api_everywhere(monkeypatch, "validate_storyboard", lambda *_args, **_kwargs: [issue])
+    patch_api_everywhere(monkeypatch, "validate_storyboard_soundtrack", lambda *_args, **_kwargs: [])
+    patch_api_everywhere(
+        monkeypatch, "validate_storyboard_preserves_key_content", lambda *_args, **_kwargs: [],
     )
 
     preview = video_ops.create_storyboard_confirmation_preview("e1")
@@ -130,9 +131,9 @@ def test_display_excerpt_drift_is_blocked_by_binding_integrity(confirm_db, monke
     # Editing the display excerpt alone must not rewrite durable evidence, and
     # confirmation must fail instead of publishing the two divergent truths.
     confirm_db.commit()
-    monkeypatch.setattr(video_ops, "validate_storyboard", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(video_ops, "validate_storyboard_soundtrack", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(video_ops, "validate_storyboard_preserves_key_content", lambda *_args, **_kwargs: [])
+    patch_api_everywhere(monkeypatch, "validate_storyboard", lambda *_args, **_kwargs: [])
+    patch_api_everywhere(monkeypatch, "validate_storyboard_soundtrack", lambda *_args, **_kwargs: [])
+    patch_api_everywhere(monkeypatch, "validate_storyboard_preserves_key_content", lambda *_args, **_kwargs: [])
 
     preview = video_ops.create_storyboard_confirmation_preview("e1")
 
@@ -160,7 +161,7 @@ def test_hard_gate_failure_blocks_confirmation_preview(confirm_db, monkeypatch):
             estimated_cost_cny=3.6,
         )
 
-    monkeypatch.setattr(video_ops, "evaluate_storyboard_for_confirmation", repairable_evaluation)
+    patch_api_everywhere(monkeypatch, "evaluate_storyboard_for_confirmation", repairable_evaluation)
 
     with pytest.raises(HTTPException) as caught:
         video_ops.create_storyboard_confirmation_preview("e1")
@@ -200,9 +201,9 @@ def test_confirmation_submit_rechecks_hard_gates_after_preview(confirm_db, monke
             estimated_cost_cny=3.6,
         )
 
-    monkeypatch.setattr(video_ops, "evaluate_storyboard_for_confirmation", passed_evaluation)
+    patch_api_everywhere(monkeypatch, "evaluate_storyboard_for_confirmation", passed_evaluation)
     preview = video_ops.create_storyboard_confirmation_preview("e1")
-    monkeypatch.setattr(video_ops, "evaluate_storyboard_for_confirmation", failed_evaluation)
+    patch_api_everywhere(monkeypatch, "evaluate_storyboard_for_confirmation", failed_evaluation)
 
     with pytest.raises(ValueError, match="主线节拍仍未完成"):
         video_ops.confirm_episode_core("e1", preview_token=preview["preview_token"])
@@ -229,7 +230,7 @@ def test_legacy_confirmed_board_is_blocked_before_paid_generation(confirm_db, mo
 
     confirm_db.execute("UPDATE episodes SET status='confirmed' WHERE id='e1'")
     confirm_db.commit()
-    monkeypatch.setattr(video_ops, "evaluate_storyboard_for_confirmation", failed_evaluation)
+    patch_api_everywhere(monkeypatch, "evaluate_storyboard_for_confirmation", failed_evaluation)
 
     with pytest.raises(HTTPException) as caught:
         video_ops._assert_storyboard_generation_gate("e1")
@@ -275,8 +276,8 @@ def test_current_storyboard_certificate_survives_downstream_observation(
     def unexpected_evaluation(*_args, **_kwargs):
         raise AssertionError("当前完成证书有效时不应被下游视频观测重新打开分镜门禁")
 
-    monkeypatch.setattr(
-        video_ops,
+    patch_api_everywhere(
+        monkeypatch,
         "evaluate_storyboard_for_confirmation",
         unexpected_evaluation,
     )

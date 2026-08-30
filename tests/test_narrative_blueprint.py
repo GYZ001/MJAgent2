@@ -56,6 +56,7 @@ from app.narrative_blueprint import (
     validate_narrative_blueprint_shard,
 )
 from app.source_facts import SOURCE_FACT_VERSION, SourceFact, source_facts
+from tests.conftest import patch_narrative_blueprint_everywhere, patch_stages_everywhere as _patch_stages
 
 
 SOURCE = "\n\n".join([
@@ -123,51 +124,62 @@ def _replay_source_fact(value: dict) -> SourceFact:
 
 
 def test_semantic_issue_producer_codes_are_declared_in_literal() -> None:
-    module_path = Path(__file__).parents[1] / "app" / "narrative_blueprint.py"
-    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    # app/narrative_blueprint.py (5,128 lines / 81 top-level defs) was split
+    # by concern into the app/narrative_blueprint/ package on 2026-08-29;
+    # every BlueprintSemanticIssue(code=...) producer call site moved with
+    # the function that made it, so this now has to scan every submodule
+    # (not just one file) to see every producer code, the same way the
+    # runtime package sees every submodule's definitions.
+    package_dir = Path(__file__).parents[1] / "app" / "narrative_blueprint"
+    module_paths = sorted(package_dir.glob("*.py"))
+    assert module_paths, f"no .py files found under {package_dir} -- scan scope is empty"
+
     producer_codes: set[str] = set()
     unresolved_expressions: list[str] = []
 
-    for scope in (
-        node for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ):
-        local_constants: dict[str, set[str]] = {}
-        for node in ast.walk(scope):
-            if (
-                isinstance(node, ast.Assign)
-                and isinstance(node.value, ast.Constant)
-                and isinstance(node.value.value, str)
-            ):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        local_constants.setdefault(target.id, set()).add(
-                            node.value.value
-                        )
+    for module_path in module_paths:
+        tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
 
-        for node in ast.walk(scope):
-            if not (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "BlueprintSemanticIssue"
-            ):
-                continue
-            code_keyword = next(
-                keyword for keyword in node.keywords
-                if keyword.arg == "code"
-            )
-            if (
-                isinstance(code_keyword.value, ast.Constant)
-                and isinstance(code_keyword.value.value, str)
-            ):
-                producer_codes.add(code_keyword.value.value)
-            elif isinstance(code_keyword.value, ast.Name):
-                values = local_constants.get(code_keyword.value.id, set())
-                producer_codes.update(values)
-                if not values:
-                    unresolved_expressions.append(code_keyword.value.id)
-            else:
-                unresolved_expressions.append(ast.dump(code_keyword.value))
+        for scope in (
+            node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ):
+            local_constants: dict[str, set[str]] = {}
+            for node in ast.walk(scope):
+                if (
+                    isinstance(node, ast.Assign)
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)
+                ):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            local_constants.setdefault(target.id, set()).add(
+                                node.value.value
+                            )
+
+            for node in ast.walk(scope):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "BlueprintSemanticIssue"
+                ):
+                    continue
+                code_keyword = next(
+                    keyword for keyword in node.keywords
+                    if keyword.arg == "code"
+                )
+                if (
+                    isinstance(code_keyword.value, ast.Constant)
+                    and isinstance(code_keyword.value.value, str)
+                ):
+                    producer_codes.add(code_keyword.value.value)
+                elif isinstance(code_keyword.value, ast.Name):
+                    values = local_constants.get(code_keyword.value.id, set())
+                    producer_codes.update(values)
+                    if not values:
+                        unresolved_expressions.append(code_keyword.value.id)
+                else:
+                    unresolved_expressions.append(ast.dump(code_keyword.value))
 
     declared_codes = set(
         BlueprintSemanticIssue.model_json_schema()["properties"]["code"]["enum"]
@@ -1448,11 +1460,7 @@ def test_blueprint_patch_repairs_malformed_provider_json(
         "app.evidence.repository.create_artifact",
         fake_create_artifact,
     )
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: 1 if key == "screenplay_format_retry_limit" else None,
-    )
+    _patch_stages(monkeypatch, "get_setting", lambda key: 1 if key == "screenplay_format_retry_limit" else None)
 
     repaired = asyncio.run(stages._repair_narrative_blueprint(
         blueprint,
@@ -1571,20 +1579,16 @@ def test_blueprint_review_exhaustion_is_quality_gate(
         repair_calls += 1
         return blueprint
 
-    monkeypatch.setattr(stages, "get_conn", lambda: EmptyConnection())
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: "true"
+    _patch_stages(monkeypatch, "get_conn", lambda: EmptyConnection())
+    _patch_stages(monkeypatch, "get_setting", lambda key: "true"
         if key == "screenplay_targeted_blueprint_review_enabled"
-        else 1,
-    )
+        else 1)
     monkeypatch.setattr(
         stages.model_gateway,
         "chat_structured",
         fake_chat_structured,
     )
-    monkeypatch.setattr(stages, "_repair_narrative_blueprint", fake_repair)
+    _patch_stages(monkeypatch, "_repair_narrative_blueprint", fake_repair)
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         lambda *_args, **_kwargs: {"id": str(uuid.uuid4())},
@@ -1634,14 +1638,10 @@ def test_blueprint_review_retries_replay_safe_not_sent_reviewer(
             )
         return clean_review.model_copy(deep=True)
 
-    monkeypatch.setattr(stages, "get_conn", lambda: EmptyConnection())
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: "true"
+    _patch_stages(monkeypatch, "get_conn", lambda: EmptyConnection())
+    _patch_stages(monkeypatch, "get_setting", lambda key: "true"
         if key == "screenplay_targeted_blueprint_review_enabled"
-        else 1,
-    )
+        else 1)
     monkeypatch.setattr(
         stages.model_gateway,
         "chat_structured",
@@ -1689,14 +1689,10 @@ def test_blueprint_review_does_not_retry_unknown_outcome_reviewer(
             replay_safe=False,
         )
 
-    monkeypatch.setattr(stages, "get_conn", lambda: EmptyConnection())
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: "true"
+    _patch_stages(monkeypatch, "get_conn", lambda: EmptyConnection())
+    _patch_stages(monkeypatch, "get_setting", lambda key: "true"
         if key == "screenplay_targeted_blueprint_review_enabled"
-        else 1,
-    )
+        else 1)
     monkeypatch.setattr(
         stages.model_gateway,
         "chat_structured",
@@ -3302,8 +3298,9 @@ def test_call29716_ambiguous_resolution_preserves_joint_source_authority(
         )
         for unit_key, value in fixture["ambiguous_units"].items()
     ]
-    monkeypatch.setattr(
-        "app.narrative_blueprint.source_facts",
+    patch_narrative_blueprint_everywhere(
+        monkeypatch,
+        "source_facts",
         lambda _source_text: facts,
     )
     participants = ["王有材", "虎头少年", "胖少年"]
@@ -3367,8 +3364,9 @@ def test_latest_real_blueprint_failures_replay_typed_authority(
     monkeypatch,
 ) -> None:
     facts = [_replay_source_fact(value) for value in case["source_facts"]]
-    monkeypatch.setattr(
-        "app.narrative_blueprint.source_facts",
+    patch_narrative_blueprint_everywhere(
+        monkeypatch,
+        "source_facts",
         lambda _source_text: facts,
     )
     shard = NarrativeBlueprintShard.model_validate(case["shard"])
@@ -3394,8 +3392,9 @@ def test_real_src0003_unit016_accepts_explicit_spoken_voice_contract(
 ) -> None:
     case = _latest_blueprint_failure_fixtures()[0]
     facts = [_replay_source_fact(value) for value in case["source_facts"]]
-    monkeypatch.setattr(
-        "app.narrative_blueprint.source_facts",
+    patch_narrative_blueprint_everywhere(
+        monkeypatch,
+        "source_facts",
         lambda _source_text: facts,
     )
     payload = json.loads(json.dumps(case["shard"], ensure_ascii=False))
@@ -3603,11 +3602,7 @@ def test_blueprint_patch_durable_success_requires_exact_cached_replay(
         )
 
     monkeypatch.setattr(stages.model_gateway, "chat_structured", cache_miss)
-    monkeypatch.setattr(
-        stages,
-        "_blueprint_structured_operation_id",
-        lambda **_kwargs: ("stable-patch-success", 4096),
-    )
+    _patch_stages(monkeypatch, "_blueprint_structured_operation_id", lambda **_kwargs: ("stable-patch-success", 4096))
     monkeypatch.setattr(
         "app.observability.tracing.current_trace",
         lambda: SimpleNamespace(run_id="run-replay", step_run_id="step-replay"),
@@ -3721,7 +3716,7 @@ def test_semantic_repair_validated_artifact_writes_current_authority_snapshot(
     monkeypatch,
 ) -> None:
     created: list = []
-    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a: [])
+    _patch_stages(monkeypatch, "validate_narrative_blueprint", lambda *_a: [])
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         lambda artifact, **_kwargs: created.append(artifact) or {"id": "art-new"},
@@ -3760,11 +3755,7 @@ def test_targeted_reviewer_conflict_triggers_full_review(monkeypatch) -> None:
         )])
 
     monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: "true" if key == "screenplay_targeted_blueprint_review_enabled" else "1",
-    )
+    _patch_stages(monkeypatch, "get_setting", lambda key: "true" if key == "screenplay_targeted_blueprint_review_enabled" else "1")
     result = asyncio.run(stages._semantic_review_narrative_blueprint(
         blueprint,
         episode={"id": f"ep-blueprint-full-fallback-{uuid.uuid4()}", "episode_no": 8},
@@ -3820,29 +3811,17 @@ def test_targeted_one_sided_falls_back_once_and_full_residual_validates(
         created.append(artifact)
         return {"id": f"artifact-{len(created)}"}
 
-    monkeypatch.setattr(stages, "get_conn", lambda: empty_connection)
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: "true"
+    _patch_stages(monkeypatch, "get_conn", lambda: empty_connection)
+    _patch_stages(monkeypatch, "get_setting", lambda key: "true"
         if key == "screenplay_targeted_blueprint_review_enabled"
-        else "1",
-    )
+        else "1")
     monkeypatch.setattr(
         stages.model_gateway,
         "chat_structured",
         fake_structured,
     )
-    monkeypatch.setattr(
-        stages,
-        "_repair_narrative_blueprint",
-        forbidden_patch,
-    )
-    monkeypatch.setattr(
-        stages,
-        "_repair_reviewed_blueprint_state_subject_ownership",
-        forbidden_patch,
-    )
+    _patch_stages(monkeypatch, "_repair_narrative_blueprint", forbidden_patch)
+    _patch_stages(monkeypatch, "_repair_reviewed_blueprint_state_subject_ownership", forbidden_patch)
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         create_artifact,
@@ -3922,29 +3901,17 @@ def test_full_persistent_one_sided_residual_validates_without_recheck(
         created.append(artifact)
         return {"id": f"artifact-{len(created)}"}
 
-    monkeypatch.setattr(stages, "get_conn", lambda: empty_connection)
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: "false"
+    _patch_stages(monkeypatch, "get_conn", lambda: empty_connection)
+    _patch_stages(monkeypatch, "get_setting", lambda key: "false"
         if key == "screenplay_targeted_blueprint_review_enabled"
-        else "1",
-    )
+        else "1")
     monkeypatch.setattr(
         stages.model_gateway,
         "chat_structured",
         fake_structured,
     )
-    monkeypatch.setattr(
-        stages,
-        "_repair_narrative_blueprint",
-        forbidden_patch,
-    )
-    monkeypatch.setattr(
-        stages,
-        "_repair_reviewed_blueprint_state_subject_ownership",
-        forbidden_patch,
-    )
+    _patch_stages(monkeypatch, "_repair_narrative_blueprint", forbidden_patch)
+    _patch_stages(monkeypatch, "_repair_reviewed_blueprint_state_subject_ownership", forbidden_patch)
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         create_artifact,
@@ -4021,20 +3988,16 @@ def test_deterministic_supported_one_sided_issue_remains_repair_authority(
         created.append(artifact)
         return {"id": f"artifact-{len(created)}"}
 
-    monkeypatch.setattr(stages, "get_conn", lambda: empty_connection)
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: "false"
+    _patch_stages(monkeypatch, "get_conn", lambda: empty_connection)
+    _patch_stages(monkeypatch, "get_setting", lambda key: "false"
         if key == "screenplay_targeted_blueprint_review_enabled"
-        else "1",
-    )
+        else "1")
     monkeypatch.setattr(
         stages.model_gateway,
         "chat_structured",
         fake_structured,
     )
-    monkeypatch.setattr(stages, "_repair_narrative_blueprint", record_repair)
+    _patch_stages(monkeypatch, "_repair_narrative_blueprint", record_repair)
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         create_artifact,
@@ -4146,14 +4109,10 @@ def test_reviewer_quorum_filters_unsupported_guesses_before_validation(
         created.append(artifact)
         return {"id": f"artifact-{len(created)}"}
 
-    monkeypatch.setattr(stages, "get_conn", lambda: empty_connection)
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: "true"
+    _patch_stages(monkeypatch, "get_conn", lambda: empty_connection)
+    _patch_stages(monkeypatch, "get_setting", lambda key: "true"
         if key == "screenplay_targeted_blueprint_review_enabled"
-        else "1",
-    )
+        else "1")
     monkeypatch.setattr(
         stages.model_gateway,
         "chat_structured",
@@ -4247,15 +4206,11 @@ def test_clean_semantic_review_cache_is_bound_to_source_corpus(
         calls += 1
         return BlueprintSemanticReview(issues=[])
 
-    monkeypatch.setattr(stages, "get_conn", lambda: CachedConnection())
+    _patch_stages(monkeypatch, "get_conn", lambda: CachedConnection())
     monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: "false"
+    _patch_stages(monkeypatch, "get_setting", lambda key: "false"
         if key == "screenplay_targeted_blueprint_review_enabled"
-        else "1",
-    )
+        else "1")
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         lambda *_args, **_kwargs: {"id": str(uuid.uuid4())},
@@ -4350,7 +4305,7 @@ def test_v5_validated_no_authority_review_outcomes_are_cacheable(
     async def forbidden_reviewer(*_args, **_kwargs):
         raise AssertionError("validated v5 review outcome was not reused")
 
-    monkeypatch.setattr(stages, "get_conn", lambda: CachedConnection())
+    _patch_stages(monkeypatch, "get_conn", lambda: CachedConnection())
     monkeypatch.setattr(
         stages.model_gateway,
         "chat_structured",
@@ -4428,14 +4383,10 @@ def test_semantic_reviewed_wrapper_does_not_reuse_v4_policy(
         created.append(artifact)
         return {"id": f"artifact-{len(created)}"}
 
-    monkeypatch.setattr(stages, "get_conn", lambda: connection)
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: "false"
+    _patch_stages(monkeypatch, "get_conn", lambda: connection)
+    _patch_stages(monkeypatch, "get_setting", lambda key: "false"
         if key == "screenplay_targeted_blueprint_review_enabled"
-        else "1",
-    )
+        else "1")
     monkeypatch.setattr(
         stages.model_gateway,
         "chat_structured",
@@ -4509,14 +4460,10 @@ def test_reviewer_input_and_retry_share_canonical_contract(
         assert normalized["issues"][0]["node_keys"] == ["n2"]
         return BlueprintSemanticReview(issues=[])
 
-    monkeypatch.setattr(stages, "get_conn", lambda: EmptyConnection())
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: "true"
+    _patch_stages(monkeypatch, "get_conn", lambda: EmptyConnection())
+    _patch_stages(monkeypatch, "get_setting", lambda key: "true"
         if key == "screenplay_targeted_blueprint_review_enabled"
-        else "1",
-    )
+        else "1")
     monkeypatch.setattr(
         stages.model_gateway,
         "chat_structured",
@@ -4611,31 +4558,15 @@ def test_blueprint_generation_reuses_validated_cached_artifact(
     async def fail_generate(*_args, **_kwargs):
         raise AssertionError("validated Blueprint cache was not reused")
 
-    monkeypatch.setattr(stages, "get_conn", lambda: CacheConnection())
+    _patch_stages(monkeypatch, "get_conn", lambda: CacheConnection())
     monkeypatch.setattr(
         "app.observability.tracing.current_trace",
         lambda: SimpleNamespace(run_id="run-cache-replay"),
     )
-    monkeypatch.setattr(
-        stages,
-        "log_provider_call",
-        lambda kind, *_args, **_kwargs: logged_kinds.append(kind),
-    )
-    monkeypatch.setattr(
-        stages,
-        "validate_narrative_blueprint",
-        lambda *_args, **_kwargs: [],
-    )
-    monkeypatch.setattr(
-        stages,
-        "_semantic_review_narrative_blueprint",
-        fake_review,
-    )
-    monkeypatch.setattr(
-        stages,
-        "_generate_sharded_narrative_blueprint",
-        fail_generate,
-    )
+    _patch_stages(monkeypatch, "log_provider_call", lambda kind, *_args, **_kwargs: logged_kinds.append(kind))
+    _patch_stages(monkeypatch, "validate_narrative_blueprint", lambda *_args, **_kwargs: [])
+    _patch_stages(monkeypatch, "_semantic_review_narrative_blueprint", fake_review)
+    _patch_stages(monkeypatch, "_generate_sharded_narrative_blueprint", fail_generate)
 
     result = asyncio.run(stages._generate_screenplay_narrative_blueprint(
         {
@@ -4666,11 +4597,7 @@ def test_blueprint_review_fails_closed_when_one_reviewer_is_unavailable(
         return BlueprintSemanticReview(issues=[])
 
     monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: "true" if key == "screenplay_targeted_blueprint_review_enabled" else "1",
-    )
+    _patch_stages(monkeypatch, "get_setting", lambda key: "true" if key == "screenplay_targeted_blueprint_review_enabled" else "1")
     with pytest.raises(ContentGenerationError, match="不足两份"):
         asyncio.run(stages._semantic_review_narrative_blueprint(
             blueprint,
@@ -4701,14 +4628,10 @@ class _ReviewEmptyConnection:
 
 
 def _install_review_harness(monkeypatch, fake_chat_structured) -> None:
-    monkeypatch.setattr(stages, "get_conn", lambda: _ReviewEmptyConnection())
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: "true"
+    _patch_stages(monkeypatch, "get_conn", lambda: _ReviewEmptyConnection())
+    _patch_stages(monkeypatch, "get_setting", lambda key: "true"
         if key == "screenplay_targeted_blueprint_review_enabled"
-        else 1,
-    )
+        else 1)
     monkeypatch.setattr(
         stages.model_gateway,
         "chat_structured",

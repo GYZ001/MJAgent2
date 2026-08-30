@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from app import db, worker
+from tests.conftest import patch_worker_everywhere
 from app.capabilities import inputs as I
 from app.capabilities.handlers import delivery as delivery_handler
 
@@ -41,7 +42,7 @@ def test_concat_publish_receipt_replays_after_handler_crash_without_rewrite(
     }
     manifest = {"manifest_hash": "video-manifest-1", "items": []}
     current = {"release": release_authority, "manifest": manifest}
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", projects)
     monkeypatch.setattr(
         downstream_authority,
@@ -97,7 +98,7 @@ def test_concat_publish_receipt_replays_after_handler_crash_without_rewrite(
         # CommandBus can store its generic result.
         raise RuntimeError("response lost after publish")
 
-    monkeypatch.setattr(worker, "concatenate_episode", publish_then_lose_response)
+    patch_worker_everywhere(monkeypatch, "concatenate_episode", publish_then_lose_response)
     args = I.EpisodeScopedInput(episode_id="e", idempotency_key="concat-once")
     with pytest.raises(RuntimeError, match="response lost"):
         asyncio.run(delivery_handler.concatenate(args))
@@ -132,7 +133,7 @@ def test_concat_publish_receipt_replays_after_handler_crash_without_rewrite(
 
 def test_concat_operation_live_owner_is_fenced(monkeypatch) -> None:
     conn = _memory_database()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     owner, replay = worker.claim_concat_operation(
         idempotency_key="live-concat",
         request_fingerprint="fp-1",
@@ -161,7 +162,7 @@ def test_concat_operation_live_owner_is_fenced(monkeypatch) -> None:
 
 def test_concat_claim_freezes_authority_and_manifest_across_restart(monkeypatch) -> None:
     conn = _memory_database()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     owner, replay = worker.claim_concat_operation(
         idempotency_key="frozen-concat",
         request_fingerprint="same-request",
@@ -212,7 +213,7 @@ def test_concat_promotion_crash_resumes_exact_stage_without_rendering_again(
     candidate.write_bytes(b"one-render-only")
     release = {"release": "frozen"}
     manifest = {"manifest_hash": "frozen", "items": []}
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", projects)
     monkeypatch.setattr(
         downstream_authority,
@@ -254,8 +255,8 @@ def test_concat_promotion_crash_resumes_exact_stage_without_rendering_again(
         if phase == crash_phase:
             raise RuntimeError(f"crash:{phase}")
 
-    monkeypatch.setattr(worker, "concatenate_episode", render_once)
-    monkeypatch.setattr(worker, "_concat_promotion_checkpoint", crash_at)
+    patch_worker_everywhere(monkeypatch, "concatenate_episode", render_once)
+    patch_worker_everywhere(monkeypatch, "_concat_promotion_checkpoint", crash_at)
     args = I.EpisodeScopedInput(
         episode_id="e", idempotency_key=f"crash-{crash_phase}",
     )
@@ -275,7 +276,7 @@ def test_concat_promotion_crash_resumes_exact_stage_without_rendering_again(
         (f"delivery.concatenate:crash-{crash_phase}",),
     )
     conn.commit()
-    monkeypatch.setattr(worker, "_concat_promotion_checkpoint", lambda _phase: None)
+    patch_worker_everywhere(monkeypatch, "_concat_promotion_checkpoint", lambda _phase: None)
     replay = asyncio.run(delivery_handler.concatenate(args))
 
     assert replay.status.value == "succeeded"

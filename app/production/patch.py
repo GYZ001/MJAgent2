@@ -30,7 +30,7 @@ from app.schemas import EpisodeScreenplay, NARRATIVE_CONTRACT_VERSION
 # 一个 Artifact 的内容不可变，所以「合同断言 + 文档→剧本换算」是
 # (artifact_id, content_hash, contract_version) 的纯函数，重复计算没有信息增益。
 # 实测单次加载 ≈410 ms（合同断言 223 ms + document_to_screenplay 254 ms 二选一，
-# 加指纹校验 37 ms、深拷贝 149 ms），而剧本台每次状态轮询要加载三次
+# 加指纹校验 37 ms、深拷贝 149 ms），而映射台每次状态轮询要加载三次
 # ⇒ 一次轮询就是 1.2 s 的纯重复 CPU。
 #
 # 缓存里存的是**序列化后的 JSON**而不是模型实例：每个调用方都必须拿到自己的可变

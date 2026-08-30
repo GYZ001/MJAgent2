@@ -7,6 +7,7 @@ import pytest
 from app import task_registry
 from app.db import get_conn
 from app import video_supervisor
+from tests.conftest import patch_video_supervisor_everywhere
 
 
 class _FakeRecorder:
@@ -83,9 +84,9 @@ def test_watchdog_takeover_rolls_back_pending_adoption_before_marking_failed_clo
         grant_id="grant-1",
     )
 
-    monkeypatch.setattr(video_supervisor, "load_latest_checkpoint", lambda _eid: fake_cp)
-    monkeypatch.setattr(
-        video_supervisor, "_verify_supervisor_paid_authority", lambda cp, *, stage: None
+    patch_video_supervisor_everywhere(monkeypatch, "load_latest_checkpoint", lambda _eid: fake_cp)
+    patch_video_supervisor_everywhere(
+        monkeypatch, "_verify_supervisor_paid_authority", lambda cp, *, stage: None
     )
     monkeypatch.setattr(task_registry, "active", lambda *_a, **_k: False)
 
@@ -139,8 +140,8 @@ def test_watchdog_takeover_rolls_back_pending_adoption_before_marking_failed_clo
         task_conn.commit()
         checkpoint_commits.append(True)
 
-    monkeypatch.setattr(video_supervisor, "_deadline_closeout", fake_deadline_closeout)
-    monkeypatch.setattr(video_supervisor, "_mark_failed_closed", fake_mark_failed_closed)
+    patch_video_supervisor_everywhere(monkeypatch, "_deadline_closeout", fake_deadline_closeout)
+    patch_video_supervisor_everywhere(monkeypatch, "_mark_failed_closed", fake_mark_failed_closed)
 
     import asyncio
 

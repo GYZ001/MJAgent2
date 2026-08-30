@@ -1,0 +1,361 @@
+{
+  "chunk_order": [
+    "contracts",
+    "schemas",
+    "chunking",
+    "asset_lookup",
+    "provenance",
+    "alias_resolution",
+    "true_name",
+    "discovery",
+    "functional_candidates",
+    "functional_candidate_verdict",
+    "resolve_assets",
+    "chunk_extraction",
+    "generate_once",
+    "publish",
+    "entry"
+  ],
+  "def_owner": {
+    "PREP_PACK_VERSION": "contracts",
+    "QA_PROFILE_VERSION": "contracts",
+    "_QA_EVALUATOR_NAME": "contracts",
+    "_CHUNK_MAX_CHARS": "contracts",
+    "_FALLBACK_VISUAL_STYLE": "contracts",
+    "_FUNCTIONAL_RESOLUTION_KINDS": "contracts",
+    "PrepPackGateError": "contracts",
+    "_ModelCharacterMention": "schemas",
+    "_ModelSceneMention": "schemas",
+    "_ModelPropMention": "schemas",
+    "_ChunkResponse": "schemas",
+    "_response_format": "schemas",
+    "_chunk_segments": "chunking",
+    "_render_chunk": "chunking",
+    "_prep_pack_gate_segment_indexes": "chunking",
+    "_known_character_names": "chunking",
+    "_known_scene_names": "chunking",
+    "_prep_pack_chapter_titles": "chunking",
+    "_resolve_portrait_id": "asset_lookup",
+    "_resolve_scene_reference_id": "asset_lookup",
+    "_prep_pack_scene_reference_origin_episode": "asset_lookup",
+    "_prep_pack_resolve_scene_reference_with_alias": "asset_lookup",
+    "_prep_pack_register_scene_alias_if_new": "asset_lookup",
+    "_prep_pack_first_evidence_segment": "provenance",
+    "_PREP_PACK_WHITESPACE_RE": "provenance",
+    "_PREP_PACK_QUOTATION_MARKS": "provenance",
+    "_PREP_PACK_TERMINAL_MARKS": "provenance",
+    "_prep_pack_locate_verbatim": "provenance",
+    "_prep_pack_citation_forms": "provenance",
+    "_prep_pack_locate_phrase": "provenance",
+    "_prep_pack_local_text_anchor": "provenance",
+    "_prep_pack_scene_alias_provenance": "provenance",
+    "_prep_pack_provenance": "provenance",
+    "_PREP_PACK_SCENE_METHODS_REQUIRING_ANCHOR": "provenance",
+    "_prep_pack_verify_manifest_provenance": "provenance",
+    "_prep_pack_mention_has_text_evidence": "provenance",
+    "_prep_pack_bible_alias_owner": "alias_resolution",
+    "_prep_pack_bible_alias_conflicting_owner": "alias_resolution",
+    "_prep_pack_cross_episode_alias_conflict": "alias_resolution",
+    "_prep_pack_cross_episode_alias_conflict_legacy_scan": "alias_resolution",
+    "_prep_pack_lookup_character_alias_canonical_name": "alias_resolution",
+    "_prep_pack_lookup_character_alias_canonical_name_legacy_scan": "alias_resolution",
+    "_prep_pack_true_name_dossier": "true_name",
+    "_prep_pack_sample_dossier_entries_within_budget": "true_name",
+    "_PrepPackTrueNameVerdictResponse": "true_name",
+    "_PREP_PACK_TRUE_NAME_VERDICT_NO_MATCH_LABEL": "true_name",
+    "_TRUE_NAME_VERDICT_SUBJECT_COPY": "true_name",
+    "_prep_pack_true_name_verdict_roster": "true_name",
+    "_prep_pack_true_name_verdict_candidates": "true_name",
+    "_prep_pack_true_name_verdict": "true_name",
+    "_prep_pack_true_name_pin_dossier_entry": "true_name",
+    "_prep_pack_gather_concurrent": "true_name",
+    "_prep_pack_collect_true_name_verification_requests": "true_name",
+    "_prep_pack_verify_true_name_hypothesis": "true_name",
+    "_load_project_bible": "discovery",
+    "_character_discovery_dispositions": "discovery",
+    "_discovery_errored_names": "discovery",
+    "_discover_new_characters": "discovery",
+    "_discover_new_scenes": "discovery",
+    "_PREP_PACK_FUNCTIONAL_CANDIDATE_NO_MATCH_LABEL": "functional_candidates",
+    "_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_ENTRIES": "functional_candidates",
+    "_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MAX_CHARS": "functional_candidates",
+    "_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_MIN_SIDE_ENTRIES": "functional_candidates",
+    "_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_GUARANTEED_ENTRY_MAX_CHARS": "functional_candidates",
+    "_PREP_PACK_FUNCTIONAL_CANDIDATE_DOSSIER_TRUNCATION_MARK": "functional_candidates",
+    "_prep_pack_functional_candidate_roster": "functional_candidates",
+    "_prep_pack_functional_candidate_names": "functional_candidates",
+    "_prep_pack_functional_candidate_label_segments": "functional_candidates",
+    "_prep_pack_functional_candidate_anchor_pool": "functional_candidates",
+    "_prep_pack_functional_candidate_truncate_segment": "functional_candidates",
+    "_prep_pack_functional_candidate_dossier": "functional_candidates",
+    "_PrepPackFunctionalCandidateVerdict": "functional_candidate_verdict",
+    "_prep_pack_functional_candidate_call": "functional_candidate_verdict",
+    "_prep_pack_functional_candidate_pin_segment": "functional_candidate_verdict",
+    "_prep_pack_resolve_functional_extra_candidate": "functional_candidate_verdict",
+    "_resolve_assets": "resolve_assets",
+    "_prep_pack_build_prop_manifest": "resolve_assets",
+    "_begin_step": "chunk_extraction",
+    "_finish_step": "chunk_extraction",
+    "_run_sync_step": "chunk_extraction",
+    "_run_async_step": "chunk_extraction",
+    "_call_structured": "chunk_extraction",
+    "_extract_chunk": "chunk_extraction",
+    "_prep_pack_build_coverage_ledger": "generate_once",
+    "_prep_pack_scene_coverage_account": "generate_once",
+    "_prep_pack_build_appellation_map": "generate_once",
+    "_generate_prep_pack_once": "generate_once",
+    "_publish_prep_pack": "publish",
+    "run_episode_prep_pack": "entry"
+  },
+  "original_imports": {
+    "annotations": [
+      "__future__",
+      "annotations",
+      null
+    ],
+    "asyncio": [
+      null,
+      "asyncio",
+      null
+    ],
+    "json": [
+      null,
+      "json",
+      null
+    ],
+    "re": [
+      null,
+      "re",
+      null
+    ],
+    "nullcontext": [
+      "contextlib",
+      "nullcontext",
+      null
+    ],
+    "Any": [
+      "typing",
+      "Any",
+      null
+    ],
+    "Literal": [
+      "typing",
+      "Literal",
+      null
+    ],
+    "BaseModel": [
+      "pydantic",
+      "BaseModel",
+      null
+    ],
+    "ConfigDict": [
+      "pydantic",
+      "ConfigDict",
+      null
+    ],
+    "get_conn": [
+      "app.db",
+      "get_conn",
+      null
+    ],
+    "now": [
+      "app.db",
+      "now",
+      null
+    ],
+    "evidence_repository": [
+      "app.evidence",
+      "repository",
+      "evidence_repository"
+    ],
+    "model_gateway": [
+      "app.harness",
+      "model_gateway",
+      null
+    ],
+    "get_contract": [
+      "app.harness.contracts",
+      "get_contract",
+      null
+    ],
+    "Evaluation": [
+      "app.harness.types",
+      "Evaluation",
+      null
+    ],
+    "EvidenceArtifact": [
+      "app.harness.types",
+      "EvidenceArtifact",
+      null
+    ],
+    "visual_entity_id_for_resolution": [
+      "app.identity_authority",
+      "visual_entity_id_for_resolution",
+      null
+    ],
+    "bind_trace": [
+      "app.observability.tracing",
+      "bind_trace",
+      null
+    ],
+    "current_trace": [
+      "app.observability.tracing",
+      "current_trace",
+      null
+    ],
+    "transition_step": [
+      "app.orchestration.state_machine",
+      "transition_step",
+      null
+    ],
+    "assert_publish_has_certificate": [
+      "app.production.certificate",
+      "assert_publish_has_certificate",
+      null
+    ],
+    "consume_completion_certificate": [
+      "app.production.certificate",
+      "consume_completion_certificate",
+      null
+    ],
+    "issue_completion_certificate": [
+      "app.production.certificate",
+      "issue_completion_certificate",
+      null
+    ],
+    "verify_completion_certificate": [
+      "app.production.certificate",
+      "verify_completion_certificate",
+      null
+    ],
+    "Bible": [
+      "app.schemas",
+      "Bible",
+      null
+    ],
+    "SourceSegment": [
+      "app.source_excerpt",
+      "SourceSegment",
+      null
+    ],
+    "chapter_title_segment_indexes": [
+      "app.source_excerpt",
+      "chapter_title_segment_indexes",
+      null
+    ],
+    "index_source_segments": [
+      "app.source_excerpt",
+      "index_source_segments",
+      null
+    ],
+    "assert_prep_pack_coverage_complete": [
+      "app.validators",
+      "assert_prep_pack_coverage_complete",
+      null
+    ],
+    "match_scene_name": [
+      "app.validators",
+      "match_scene_name",
+      null
+    ]
+  },
+  "chunk_needed_external": {
+    "contracts": [],
+    "schemas": [
+      "Any",
+      "BaseModel",
+      "ConfigDict"
+    ],
+    "chunking": [
+      "SourceSegment"
+    ],
+    "asset_lookup": [
+      "Bible",
+      "match_scene_name"
+    ],
+    "provenance": [
+      "Any",
+      "SourceSegment",
+      "re"
+    ],
+    "alias_resolution": [
+      "Bible",
+      "json"
+    ],
+    "true_name": [
+      "Any",
+      "BaseModel",
+      "Bible",
+      "ConfigDict",
+      "Literal",
+      "asyncio",
+      "evidence_repository",
+      "index_source_segments"
+    ],
+    "discovery": [
+      "Any",
+      "Bible",
+      "json"
+    ],
+    "functional_candidates": [
+      "Any",
+      "Bible",
+      "SourceSegment",
+      "re"
+    ],
+    "functional_candidate_verdict": [
+      "Any",
+      "BaseModel",
+      "Bible",
+      "ConfigDict",
+      "SourceSegment",
+      "evidence_repository",
+      "model_gateway"
+    ],
+    "resolve_assets": [
+      "Any",
+      "SourceSegment",
+      "index_source_segments",
+      "visual_entity_id_for_resolution"
+    ],
+    "chunk_extraction": [
+      "Any",
+      "BaseModel",
+      "SourceSegment",
+      "bind_trace",
+      "current_trace",
+      "evidence_repository",
+      "get_contract",
+      "model_gateway",
+      "nullcontext",
+      "transition_step"
+    ],
+    "generate_once": [
+      "Any",
+      "assert_prep_pack_coverage_complete",
+      "chapter_title_segment_indexes",
+      "get_conn",
+      "index_source_segments"
+    ],
+    "publish": [
+      "Any",
+      "Evaluation",
+      "EvidenceArtifact",
+      "assert_publish_has_certificate",
+      "consume_completion_certificate",
+      "evidence_repository",
+      "get_conn",
+      "get_contract",
+      "issue_completion_certificate",
+      "json",
+      "now",
+      "transition_step",
+      "verify_completion_certificate"
+    ],
+    "entry": [
+      "Any",
+      "get_contract",
+      "json"
+    ]
+  }
+}

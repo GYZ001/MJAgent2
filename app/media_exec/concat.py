@@ -1,12 +1,20 @@
 from __future__ import annotations
 
-import math
 import hashlib
+import json
+import math
+import shutil
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
 
-try:
-    _queue
-except NameError:  # pragma: no cover - used when importing this module directly
-    from app.media_exec.common import *
+from app import config
+from app.artifacts import _adopted_video_paths
+from app.atomic_io import atomic_copy
+from app.db import get_conn, new_id, now, rows_to_dicts
+from app.media_urls import build_media_url
 
 
 _ACTIVE_VIDEO_JOB_STATUSES = ("queued", "running", "waiting_provider", "waiting_retry")

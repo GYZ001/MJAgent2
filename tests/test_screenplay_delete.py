@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from app import api, db
-from app.capabilities import ensure_catalog_loaded
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities import inputs as capability_inputs
 from app.capabilities import preflight as capability_preflight
 from app.capabilities.direct import enter_handler
@@ -23,6 +23,7 @@ from app.production.revision import (
     screenplay_production_state,
     set_published_artifact,
 )
+from tests.conftest import patch_api_everywhere
 
 
 @pytest.fixture(autouse=True)
@@ -263,8 +264,7 @@ async def test_deleted_screenplay_cannot_be_revived_from_historical_run(
     with enter_handler():
         await api.delete_screenplay("e1")
 
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch,
         "_new_screenplay_recorder",
         lambda *_args, **_kwargs: pytest.fail("历史 Run 不得创建恢复运行"),
     )
@@ -440,13 +440,13 @@ def test_fresh_baseline_closes_orphaned_liability_instead_of_deadlocking(
         projections.append(value)
         return value
 
-    monkeypatch.setattr(
-        screenplay_ops,
+    patch_api_everywhere(
+        monkeypatch,
         "_screenplay_blueprint_budget_projection",
         recording_projection,
     )
-    monkeypatch.setattr(
-        screenplay_ops,
+    patch_api_everywhere(
+        monkeypatch,
         "_episode_source_text",
         lambda _conn, _ep: "第一章。孟浩走进山门。",
     )

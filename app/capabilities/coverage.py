@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from app.capabilities import ensure_catalog_loaded
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.registry import get_registry
 
 ROOT = Path(__file__).resolve().parents[2]

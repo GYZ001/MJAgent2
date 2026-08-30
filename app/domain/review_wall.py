@@ -1,21 +1,38 @@
 """生成台的稳定对象、上游资格与版本操作契约。
 
-这个模块由 ``app.api`` 兼容门面在其命名空间内执行，因此路由和
-原有领域函数共用同一个 ``router``。安全校验函数也供视频写路径调用，
-保证 UI、Agent 和直接 REST 调用的口径一致。
+``router`` 从 :mod:`app.domain.common` 原样导入（同一个 ``APIRouter`` 实例），
+因此这里注册的路由与其余 domain 切片共用同一张路由表。安全校验函数也供视频写
+路径调用（``app.domain.video_ops`` 从本模块导入），保证 UI、Agent 和直接 REST
+调用的口径一致。
 """
 from __future__ import annotations
-from app.auth.principal import current_actor_name
 
 import hashlib
 import json
 import math
+
+from pathlib import Path
 from typing import Any
 
-try:
-    router
-except NameError:  # pragma: no cover - used when importing this module directly
-    from app.domain.common import *
+from fastapi import (
+    Body,
+    HTTPException,
+)
+
+from app import task_registry
+from app.auth.principal import current_actor_name
+from app.db import (
+    get_conn,
+    new_id,
+    now,
+)
+from app.domain.common import (
+    _screenplay_ready,
+    router,
+    storyboard_pack_prompts_complete,
+)
+from app.domain.storyboard_ops import _board_from_shot_rows
+from app.schemas import EpisodeScreenplay
 
 
 _REVIEW_TERMINAL_RUN_STATES = {
@@ -369,10 +386,7 @@ def _review_narrative_authority_snapshot(conn, ep: dict[str, Any]) -> dict[str, 
     try:
         from app.evidence.repository import content_hash
 
-        try:
-            board_builder = _board_from_shot_rows
-        except NameError:  # pragma: no cover - direct module import compatibility
-            from app.domain.storyboard_ops import _board_from_shot_rows as board_builder
+        board_builder = _board_from_shot_rows
 
         shot_rows = conn.execute(
             "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
@@ -1061,3 +1075,6 @@ def _review_validate_authorization_number(
     if number < minimum or number > maximum:
         raise HTTPException(422, f"{field} 必须在 {minimum:g} 到 {maximum:g} 之间")
     return number
+
+
+__all__ = [name for name in globals() if not name.startswith("__")]

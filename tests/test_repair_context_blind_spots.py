@@ -15,7 +15,7 @@
 而用捏造的消息文本写的测试照样全绿。因此本文件的测试：
 
 * 用**真实校验器**跑出真实错误消息，再喂给真实的 `_issue_target_excerpt`；
-* 扫描 `app/validators.py` 里所有 `name[{i}]` 形态的下标标签，
+* 扫描 `app/validators/` 包内所有子模块里 `name[{i}]` 形态的下标标签，
   要求每个标签要么可路由，要么在带理由的白名单里。
 """
 from __future__ import annotations
@@ -144,7 +144,7 @@ def test_real_event_message_uses_the_tag_the_validator_actually_emits() -> None:
     永远为空。这条测试用校验器真实写出的 `events[i]` 标签反查，专杀该缺陷。
     """
     script = _screenplay_with_duplicate_beat()
-    # 真实门禁写法见 app/validators.py::validate_screenplay 的 tag = f"events[{i}]"
+    # 真实门禁写法见 app/validators/screenplay_validate.py::validate_screenplay 的 tag = f"events[{i}]"
     issues = issues_from_validator_messages(
         ["events[2].state_in 缺失或过短；事件必须写清状态输入、可见变化和状态输出"],
         subject="screenplay", stage="structure_validation",
@@ -155,6 +155,20 @@ def test_real_event_message_uses_the_tag_the_validator_actually_emits() -> None:
     assert "events" in excerpt
     assert excerpt["events"]["path"] == "story_events"
     assert [item["event_id"] for item in excerpt["events"]["items"]] == ["E1", "E2", "E3"]
+
+
+def _validators_source() -> str:
+    """拼接 ``app/validators/`` 包内全部子模块源码。
+
+    校验器曾是单文件 ``app/validators.py``；按关注点拆成包之后（见
+    docs/coupling_review_2026-08-29.md C5），标签扫描必须覆盖每个子模块，
+    不能只看包的稳定入口 ``__init__.py``（那里只有 re-export，没有真实的
+    `f"...[{{i}}]"` 下标写法）。
+    """
+    validators_dir = Path("app/validators")
+    return "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted(validators_dir.glob("*.py"))
+    )
 
 
 _TAG_RE = re.compile(r'f"(?:\[[A-Z_]+\]\s*)?([a-z_][a-z0-9_.]*)\[\{')
@@ -186,7 +200,7 @@ def test_no_validator_tag_silently_falls_through_the_routing_table() -> None:
 
     这是防止「按 payload 字段名建键」那类静默失效再次发生的漂移闸门。
     """
-    source = Path("app/validators.py").read_text(encoding="utf-8")
+    source = _validators_source()
     tags = {m.rsplit(".", 1)[-1] for m in _TAG_RE.findall(source)}
     assert tags, "标签扫描失效（校验器写法变了），这条守卫必须同步更新"
 
@@ -203,7 +217,7 @@ def test_every_routed_key_is_a_tag_some_validator_really_emits() -> None:
     第一版的 `story_events` 与 `drop_list` 就是这样的死键——看着覆盖了字段，
     实际一次也命中不了。
     """
-    source = Path("app/validators.py").read_text(encoding="utf-8")
+    source = _validators_source()
     tags = {m.rsplit(".", 1)[-1] for m in _TAG_RE.findall(source)}
 
     dead = set(_ISSUE_TARGET_CONTAINERS) - tags

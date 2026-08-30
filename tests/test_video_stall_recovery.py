@@ -6,6 +6,7 @@ import sqlite3
 import pytest
 
 from app import compiler, config, db, worker
+from tests.conftest import patch_worker_everywhere
 from app.schemas import Bible, Character, World
 
 
@@ -69,14 +70,14 @@ def _seed(conn: sqlite3.Connection, *, two_shots: bool = False) -> None:
 
 
 def _patch_enqueue_runtime(monkeypatch, conn: sqlite3.Connection) -> None:
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "ensure_media_trace", lambda **_kwargs: (None, None))
     monkeypatch.setattr(
         worker.media_scheduler,
         "reserve_budget",
         lambda *_args, **_kwargs: True,
     )
-    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
 
 def test_noop_stall_reconciliation_releases_write_transaction(
@@ -84,7 +85,7 @@ def test_noop_stall_reconciliation_releases_write_transaction(
 ) -> None:
     conn = _conn()
     _seed(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     report = worker.reconcile_stalled_video_jobs()
 
@@ -107,16 +108,14 @@ def test_stall_reconciliation_never_resumes_budget_pause(
            )"""
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(
-        worker,
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch,
         "retry_paused",
         lambda *_args, **_kwargs: pytest.fail(
             "巡检不得调用显式预算恢复入口"
         ),
     )
-    monkeypatch.setattr(
-        worker,
+    patch_worker_everywhere(monkeypatch,
         "_enqueue_for_current_status",
         lambda *_args, **_kwargs: pytest.fail(
             "预算暂停任务不得由巡检重新入队"
@@ -368,8 +367,7 @@ def test_source_excerpt_failure_gets_bounded_retry_if_scrubber_cannot_repair(
     monkeypatch.setattr(
         compiler, "compile_prompt", lambda shot, *_a, **_k: f"画面动作：{shot.action_desc}"
     )
-    monkeypatch.setattr(
-        worker, "ensure_source_excerpt_in_prompt", lambda prompt, _shot: prompt
+    patch_worker_everywhere(monkeypatch, "ensure_source_excerpt_in_prompt", lambda prompt, _shot: prompt
     )
     monkeypatch.setattr(config, "VIDEO_PREFLIGHT_RETRY_BASE_DELAY", 1.0)
 
@@ -562,8 +560,7 @@ def test_planned_orphan_keeps_mode_and_requires_dependency_repair(
     )
     conn.commit()
     enqueued: list[dict] = []
-    monkeypatch.setattr(
-        worker,
+    patch_worker_everywhere(monkeypatch,
         "enqueue_shot",
         lambda shot_id, **kwargs: enqueued.append({"shot_id": shot_id, **kwargs}),
     )
@@ -684,7 +681,7 @@ def test_reconcile_closes_redundant_preflight_after_successful_adoption(
 ) -> None:
     conn = _conn()
     _seed(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     conn.execute(
         """INSERT INTO shot_versions(
                id,shot_id,version_no,prompt_text,idem_key,status,video_path,created_at

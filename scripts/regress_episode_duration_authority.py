@@ -41,6 +41,20 @@ from app.storyboard_authority import (
 from app.video_plan import authoritative_storyboard_plan_cost
 from scripts.replay_episode_artifact import replay
 
+# app.db.init_db() (called below) looks up its per-table bootstrap steps by
+# name through app.db_schema instead of importing these business modules
+# directly (P0-3 dependency inversion, see
+# docs/coupling_review_2026-08-29.md 第2步). This script already imports
+# app.completion_grant / app.production.revision above (for other reasons),
+# which covers most registrations; these four cover the rest so the
+# unconditional "builtin_models_migration" lookup below doesn't raise KeyError.
+import app.artifacts  # noqa: F401
+import app.delivery  # noqa: F401
+import app.model_migration  # noqa: F401
+import app.production.certificate  # noqa: F401
+import app.production.grant  # noqa: F401
+import app.production.shot_uid  # noqa: F401
+
 
 def _reset_connection(db_path: Path) -> None:
     current = getattr(db._local, "conn", None)

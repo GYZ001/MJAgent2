@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from app.domain import bible_ops
 from app.evidence import repository as evidence_repository
 from app.orchestration.engine import fingerprint
+from tests.conftest import patch_api_everywhere
 
 
 def _memory_conn() -> sqlite3.Connection:
@@ -161,8 +162,8 @@ def test_list_descendants_does_not_mutate(monkeypatch) -> None:
 def test_impact_preview_returns_fingerprint(monkeypatch) -> None:
     conn = _memory_conn()
     bible = _seed_bible(conn)
-    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
-    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_project_or_404", lambda _pid: dict(conn.execute(
         "SELECT * FROM projects WHERE id='proj_test'"
     ).fetchone()))
     monkeypatch.setattr(evidence_repository, "get_conn", lambda: conn)
@@ -186,8 +187,8 @@ def test_impact_preview_returns_fingerprint(monkeypatch) -> None:
 def test_edit_bible_requires_expected_version(monkeypatch) -> None:
     conn = _memory_conn()
     bible = _seed_bible(conn)
-    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
-    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_project_or_404", lambda _pid: dict(conn.execute(
         "SELECT * FROM projects WHERE id='proj_test'"
     ).fetchone()))
 
@@ -222,8 +223,8 @@ def test_edit_bible_conflict_keeps_server_characters(monkeypatch) -> None:
         (json.dumps(server, ensure_ascii=False),),
     )
     conn.commit()
-    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
-    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_project_or_404", lambda _pid: dict(conn.execute(
         "SELECT * FROM projects WHERE id='proj_test'"
     ).fetchone()))
     monkeypatch.setattr(
@@ -252,8 +253,8 @@ def test_edit_bible_conflict_keeps_server_characters(monkeypatch) -> None:
 def test_refs_precheck_counts_images(monkeypatch) -> None:
     conn = _memory_conn()
     _seed_bible(conn)
-    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
-    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_project_or_404", lambda _pid: dict(conn.execute(
         "SELECT * FROM projects WHERE id='proj_test'"
     ).fetchone()))
     quote = bible_ops.compute_refs_cost_precheck("proj_test")
@@ -275,9 +276,9 @@ def test_refs_precheck_counts_images(monkeypatch) -> None:
 def test_bible_generate_requires_confirm(monkeypatch) -> None:
     conn = _memory_conn()
     _seed_bible(conn)
-    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
-    monkeypatch.setattr(bible_ops, "_require_harness_engine", lambda _pid: None)
-    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_require_harness_engine", lambda _pid: None)
+    patch_api_everywhere(monkeypatch, "_project_or_404", lambda _pid: dict(conn.execute(
         "SELECT * FROM projects WHERE id='proj_test'"
     ).fetchone()))
 
@@ -308,8 +309,8 @@ def test_refs_precheck_filters_characters(monkeypatch) -> None:
         (json.dumps(bible, ensure_ascii=False),),
     )
     conn.commit()
-    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
-    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_project_or_404", lambda _pid: dict(conn.execute(
         "SELECT * FROM projects WHERE id='proj_test'"
     ).fetchone()))
 
@@ -326,9 +327,9 @@ def test_payment_quote_expires_and_consumed_quote_replays(monkeypatch) -> None:
     conn = _memory_conn()
     _seed_bible(conn)
     clock = {"value": 100.0}
-    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
-    monkeypatch.setattr(bible_ops, "now", lambda: clock["value"])
-    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "now", lambda: clock["value"])
+    patch_api_everywhere(monkeypatch, "_project_or_404", lambda _pid: dict(conn.execute(
         "SELECT * FROM projects WHERE id='proj_test'"
     ).fetchone()))
 
@@ -366,9 +367,9 @@ def test_adopt_portrait_candidate_accepts_hard_failure_as_warning(monkeypatch, t
         ),
     )
     conn.commit()
-    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
-    monkeypatch.setattr(bible_ops, "_media_url", lambda path: str(path))
-    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_media_url", lambda path: str(path))
+    patch_api_everywhere(monkeypatch, "_project_or_404", lambda _pid: dict(conn.execute(
         "SELECT * FROM projects WHERE id='proj_test'"
     ).fetchone()))
 
@@ -406,9 +407,9 @@ def test_adopt_portrait_candidate_accepts_missing_views_as_warning(monkeypatch, 
         (str(image),),
     )
     conn.commit()
-    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
-    monkeypatch.setattr(bible_ops, "_media_url", lambda path: str(path))
-    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_media_url", lambda path: str(path))
+    patch_api_everywhere(monkeypatch, "_project_or_404", lambda _pid: dict(conn.execute(
         "SELECT * FROM projects WHERE id='proj_test'"
     ).fetchone()))
 
@@ -642,11 +643,11 @@ def test_refs_progress_excludes_ineligible_from_missing(monkeypatch) -> None:
     )
     _ready_pack(conn, "pack_jia", "甲一")
     conn.commit()
-    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
-    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_project_or_404", lambda _pid: dict(conn.execute(
         "SELECT * FROM projects WHERE id='proj_test'"
     ).fetchone()))
-    monkeypatch.setattr(bible_ops, "_refs_generation_busy", lambda _pid: False)
+    patch_api_everywhere(monkeypatch, "_refs_generation_busy", lambda _pid: False)
 
     import asyncio
     progress = asyncio.run(bible_ops.refs_progress("proj_test"))

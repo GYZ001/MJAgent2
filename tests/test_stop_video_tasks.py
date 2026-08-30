@@ -2,6 +2,7 @@ import sqlite3
 import json
 
 from app import db, worker
+from tests.conftest import patch_worker_everywhere
 from app.media_pipeline.status import episode_pipeline_statuses
 from app.orchestration import media_scheduler
 
@@ -49,7 +50,7 @@ def _conn() -> sqlite3.Connection:
 
 def test_stop_shot_cancels_every_active_video_and_reconciles_episode(monkeypatch) -> None:
     conn = _conn()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)
 
     result = worker.stop_shot_video_tasks("s1")
@@ -92,7 +93,7 @@ def test_stop_shot_cancels_every_active_video_and_reconciles_episode(monkeypatch
 
 def test_stop_shot_is_idempotent_and_does_not_overwrite_finished_job(monkeypatch) -> None:
     conn = _conn()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)
 
     first = worker.stop_shot_video_tasks("s1")
@@ -116,8 +117,8 @@ def test_episode_pause_and_resume_is_reversible_and_cyclic(monkeypatch) -> None:
     conn = _conn()
     conn.execute("UPDATE shot_versions SET provider_task_id='provider-2' WHERE id='v2'")
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "mark_media_job_state", lambda *args, **kwargs: None)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "mark_media_job_state", lambda *args, **kwargs: None)
 
     first_pause = worker.pause_episode_video_tasks("e")
     assert first_pause["paused_jobs"] == 2
@@ -152,8 +153,8 @@ def test_episode_pause_does_not_touch_completed_jobs(monkeypatch) -> None:
     conn.execute("UPDATE jobs SET status='succeeded' WHERE id='j1'")
     conn.execute("UPDATE shot_versions SET status='succeeded' WHERE id='v1'")
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "mark_media_job_state", lambda *args, **kwargs: None)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "mark_media_job_state", lambda *args, **kwargs: None)
 
     result = worker.pause_episode_video_tasks("e")
 
@@ -164,8 +165,8 @@ def test_episode_pause_does_not_touch_completed_jobs(monkeypatch) -> None:
 
 def test_paused_episode_status_is_not_reported_as_generating(monkeypatch) -> None:
     conn = _conn()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "mark_media_job_state", lambda *args, **kwargs: None)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "mark_media_job_state", lambda *args, **kwargs: None)
     worker.pause_episode_video_tasks("e")
 
     statuses, summary = episode_pipeline_statuses("e", conn=conn)
@@ -190,9 +191,9 @@ def test_resume_recovers_existing_provider_handle_without_resubmitting(monkeypat
         (json.dumps({"id": "provider-existing-2"}),),
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "mark_media_job_state", lambda *args, **kwargs: None)
-    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "mark_media_job_state", lambda *args, **kwargs: None)
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
     worker.pause_episode_video_tasks("e")
     result = worker.resume_episode_video_tasks("e")
@@ -220,8 +221,8 @@ def test_resume_refuses_duplicate_charge_when_provider_handle_is_unknown(monkeyp
             WHERE id='j2'"""
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "mark_media_job_state", lambda *args, **kwargs: None)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "mark_media_job_state", lambda *args, **kwargs: None)
 
     worker.pause_episode_video_tasks("e")
     result = worker.resume_episode_video_tasks("e")
@@ -284,12 +285,11 @@ def test_fresh_supervisor_takes_over_exact_paused_jobs(monkeypatch) -> None:
         (json.dumps({"id": "provider-existing-2"}),),
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     queued: list[str] = []
-    monkeypatch.setattr(
-        worker, "_enqueue_for_current_status", lambda job_id: queued.append(job_id),
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda job_id: queued.append(job_id),
     )
-    monkeypatch.setattr(worker, "mark_media_job_state", lambda *args, **kwargs: None)
+    patch_worker_everywhere(monkeypatch, "mark_media_job_state", lambda *args, **kwargs: None)
 
     worker.pause_episode_video_tasks("e")
     resumed_local = worker._resume_reused_paused_job(
@@ -348,8 +348,8 @@ def test_fresh_supervisor_refuses_paused_job_with_changed_release(monkeypatch) -
            ) VALUES('budget-j1','j1','episode','e',4,'reserved',0)"""
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "mark_media_job_state", lambda *args, **kwargs: None)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "mark_media_job_state", lambda *args, **kwargs: None)
     worker.pause_episode_video_tasks("e")
 
     try:
@@ -415,11 +415,10 @@ def test_fresh_supervisor_recovers_abandoned_provider_handle(monkeypatch) -> Non
         (json.dumps({"id": "provider-existing-2"}),),
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)
     queued: list[str] = []
-    monkeypatch.setattr(
-        worker, "_enqueue_for_current_status", lambda job_id: queued.append(job_id),
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda job_id: queued.append(job_id),
     )
     current_snapshot = {
         **authority_snapshot,

@@ -16,7 +16,7 @@ from app import db, hiagent
 from app.agent import approvals, events, orchestrator, store
 from app.hiagent import AssistantTurn, ToolCall
 from app.agent.api import router as agent_router
-from app.capabilities import ensure_catalog_loaded
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.bus import reset_command_bus_for_tests
 from app.capabilities.policy import reset_approvals_for_tests
 from app.evidence import repository as evidence_repository
@@ -138,7 +138,7 @@ def test_create_conversation_and_send_message_executes_readonly_tool(client, mon
 def test_high_risk_tool_call_waits_for_approval(client, monkeypatch) -> None:
     _seed_project()
     fake_chat, _ = _canned_chat([
-        _turn("我将删除该项目", ("project.delete", {"project_id": "proj_x"})),
+        _turn("我将删除该项目", ("project.purge", {"project_id": "proj_x"})),
     ])
     monkeypatch.setattr(hiagent, "chat_with_tools", fake_chat)
 
@@ -151,7 +151,7 @@ def test_high_risk_tool_call_waits_for_approval(client, monkeypatch) -> None:
     tool_calls = store.list_tool_calls(body["turn_id"])
     assert len(tool_calls) == 1
     tc = tool_calls[0]
-    assert tc["command_name"] == "project.delete"
+    assert tc["command_name"] == "project.purge"
     assert tc["status"] == "waiting_approval"
     assert tc["risk"] == "R3"
     assert tc["arguments"]["project_id"] == "proj_x"
@@ -167,7 +167,7 @@ def test_high_risk_tool_call_waits_for_approval(client, monkeypatch) -> None:
 def test_approve_resumes_turn_and_reports_real_result(client, monkeypatch) -> None:
     _seed_project()
     fake_chat, _ = _canned_chat([
-        _turn("我将删除该项目", ("project.delete", {"project_id": "proj_x"})),
+        _turn("我将删除该项目", ("project.purge", {"project_id": "proj_x"})),
         _turn("已提交删除，请等待结果。"),
     ])
     monkeypatch.setattr(hiagent, "chat_with_tools", fake_chat)
@@ -195,7 +195,7 @@ def test_approve_resumes_turn_and_reports_real_result(client, monkeypatch) -> No
 def test_reject_tool_call_does_not_execute_command(client, monkeypatch) -> None:
     _seed_project()
     fake_chat, _ = _canned_chat([
-        _turn("我将删除该项目", ("project.delete", {"project_id": "proj_x"})),
+        _turn("我将删除该项目", ("project.purge", {"project_id": "proj_x"})),
         _turn("已放弃删除。"),
     ])
     monkeypatch.setattr(hiagent, "chat_with_tools", fake_chat)
@@ -350,7 +350,7 @@ async def test_spawned_agent_turn_can_be_cancelled(monkeypatch) -> None:
 def test_prompt_injection_in_user_message_still_requires_approval(client, monkeypatch) -> None:
     _seed_project()
     fake_chat, _ = _canned_chat([
-        _turn("已定位到项目", ("project.delete", {"project_id": "proj_x"})),
+        _turn("已定位到项目", ("project.purge", {"project_id": "proj_x"})),
     ])
     monkeypatch.setattr(hiagent, "chat_with_tools", fake_chat)
 
@@ -363,7 +363,7 @@ def test_prompt_injection_in_user_message_still_requires_approval(client, monkey
     tool_calls = store.list_tool_calls(body["turn_id"])
     assert len(tool_calls) == 1
     tc = tool_calls[0]
-    assert tc["command_name"] == "project.delete"
+    assert tc["command_name"] == "project.purge"
     assert tc["status"] == "waiting_approval"
     assert tc["arguments"]["project_id"] == "proj_x"
     assert set(tc["arguments"]) & {"project_ids", "all", "scope"} == set()
@@ -424,7 +424,7 @@ def test_approve_resumes_and_drains_remaining_pending_calls(client, monkeypatch)
     fake_chat, _ = _canned_chat([
         _turn(
             "先删项目，再读列表",
-            ("project.delete", {"project_id": "proj_x"}),
+            ("project.purge", {"project_id": "proj_x"}),
             ("resource.read", {"uri": "manju://projects"}),
         ),
         _turn("删除已提交，列表也读到了。"),
@@ -439,7 +439,7 @@ def test_approve_resumes_and_drains_remaining_pending_calls(client, monkeypatch)
     assert turn["status"] == "waiting_approval"
     pending = store.list_tool_calls(turn_id)
     assert len(pending) == 1
-    assert pending[0]["command_name"] == "project.delete"
+    assert pending[0]["command_name"] == "project.purge"
 
     approve_resp = client.post(f"/api/agent/tool-calls/{pending[0]['id']}/approve", json={"reason": "确认"})
     assert approve_resp.status_code == 200
@@ -447,7 +447,7 @@ def test_approve_resumes_and_drains_remaining_pending_calls(client, monkeypatch)
     assert final_turn["status"] == "completed"
     tool_calls = store.list_tool_calls(turn_id)
     names = [tc["command_name"] for tc in tool_calls]
-    assert names == ["project.delete", "resource.read"]
+    assert names == ["project.purge", "resource.read"]
     # 批准后剩余的只读调用确实被执行并成功。
     read_call = next(tc for tc in tool_calls if tc["command_name"] == "resource.read")
     assert read_call["status"] == "succeeded"

@@ -115,9 +115,43 @@ async def import_novel(args: I.ProjectImportNovelInput) -> CommandResult:
 
 
 async def delete_project(args: I.ProjectDeleteInput) -> CommandResult:
+    """软删除：项目移入回收站，数据与产物原样保留，24 小时后自动彻底清理。"""
     from app import api
 
     outcome = await call_guarded(api._delete_project_core, args.project_id)
     if isinstance(outcome, CommandResult):
         return outcome
-    return succeeded(f"项目 {args.project_id} 已删除", data=outcome)
+    return succeeded(f"项目 {args.project_id} 已移入回收站", data=outcome)
+
+
+async def restore_project(args: I.ProjectRestoreInput) -> CommandResult:
+    from app import api
+
+    outcome = await call_guarded(api._restore_project_core, args.project_id)
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded(f"项目 {args.project_id} 已从回收站恢复", data=outcome)
+
+
+async def purge_project(args: I.ProjectPurgeInput) -> CommandResult:
+    """彻底清理：仅对回收站中的项目生效，物理删除数据库行与磁盘产物，不可撤销。"""
+    from app import api
+
+    outcome = await call_guarded(api._purge_project_core, args.project_id)
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded(f"项目 {args.project_id} 已彻底删除", data=outcome)
+
+
+async def purge_all_deleted_projects(args: I.ProjectPurgeAllInput) -> CommandResult:
+    """清空回收站：逐个彻底清理全部已软删除的项目，不可撤销。"""
+    from app import api
+
+    outcome = await call_guarded(api._purge_all_deleted_projects_core)
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded(
+        f"回收站已清空，彻底删除 {outcome['purged_count']} 个项目"
+        + (f"，{len(outcome['failed'])} 个失败待重试" if outcome["failed"] else ""),
+        data=outcome,
+    )

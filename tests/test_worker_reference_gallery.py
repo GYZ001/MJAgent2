@@ -5,6 +5,7 @@ import sqlite3
 
 from app import compiler, db, video_modes, worker
 from app.schemas import Bible, Character, Shot, World
+from tests.conftest import patch_video_modes_everywhere, patch_worker_everywhere
 
 
 def test_visible_cast_projection_does_not_require_offscreen_listener_reaction() -> None:
@@ -93,10 +94,10 @@ def _seed_project(conn: sqlite3.Connection) -> None:
 def test_enqueue_budget_reserves_full_timeline_keyframe_estimate(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "ensure_media_trace", lambda **_kwargs: (None, None))
     monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 10")
-    monkeypatch.setattr(video_modes, "estimated_keyframe_generation_count", lambda: 9)
+    patch_video_modes_everywhere(monkeypatch, "estimated_keyframe_generation_count", lambda: 9)
     captured: dict[str, float] = {}
 
     def reserve(_job_id, _episode_id, estimate, _limit, *, conn=None):
@@ -151,8 +152,8 @@ def test_enqueue_next_shot_reads_adopted_previous_prompt_and_records_lineage(
         "UPDATE shots SET adopted_version_id='prev-ver' WHERE id='s1'"
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "ensure_media_trace", lambda **_kwargs: (None, None))
     monkeypatch.setattr(
         worker.media_scheduler,
         "reserve_budget",
@@ -186,8 +187,8 @@ def test_enqueue_next_shot_reads_adopted_previous_prompt_and_records_lineage(
 def test_enqueue_budget_reservation_error_keeps_recoverable_preflight(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "ensure_media_trace", lambda **_kwargs: (None, None))
     monkeypatch.setattr(worker.errors, "record_and_format", lambda *_args, **_kwargs: "（测试错误）")
     monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 10")
 
@@ -213,8 +214,8 @@ def test_enqueue_budget_reservation_error_keeps_recoverable_preflight(monkeypatc
 def test_enqueue_dispatch_error_keeps_job_durably_accepted(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "ensure_media_trace", lambda **_kwargs: (None, None))
     monkeypatch.setattr(worker.errors, "record_and_format", lambda *_args, **_kwargs: "（测试错误）")
     monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 10")
     monkeypatch.setattr(
@@ -222,8 +223,7 @@ def test_enqueue_dispatch_error_keeps_job_durably_accepted(monkeypatch) -> None:
         "reserve_budget",
         lambda *_args, **_kwargs: True,
     )
-    monkeypatch.setattr(
-        worker,
+    patch_worker_everywhere(monkeypatch,
         "_enqueue_for_current_status",
         lambda _job_id: (_ for _ in ()).throw(RuntimeError("queue notification failed")),
     )
@@ -240,8 +240,8 @@ def test_enqueue_dispatch_error_keeps_job_durably_accepted(monkeypatch) -> None:
 def test_generated_reference_gallery_cannot_change_enqueue_idempotency(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "ensure_media_trace", lambda **_kwargs: (None, None))
     monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 5")
 
     first = worker.enqueue_shot("s1")
@@ -312,8 +312,8 @@ def test_generated_reference_gallery_cannot_change_enqueue_idempotency(monkeypat
 def test_new_portrait_revision_prevents_old_gallery_and_video_reuse(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "ensure_media_trace", lambda **_kwargs: (None, None))
     monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 5")
 
     current = {"input_fingerprint": "portrait-old"}
@@ -368,8 +368,8 @@ def test_new_portrait_revision_prevents_old_gallery_and_video_reuse(monkeypatch)
 def test_reroll_does_not_reuse_gallery_containing_generated_keyframe(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "ensure_media_trace", lambda **_kwargs: (None, None))
     monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 5")
     monkeypatch.setattr(
         "app.multiview.resolve_shot_asset_dependencies",
@@ -444,8 +444,8 @@ def test_legacy_keyframe_gallery_is_not_reused_after_prompt_contract_upgrade(mon
     """无构图合同版本的老关键帧不得继续污染新视频版本。"""
     conn = _conn()
     _seed_project(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "ensure_media_trace", lambda **_kwargs: (None, None))
     monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 5")
 
     first = worker.enqueue_shot("s1")
@@ -503,8 +503,8 @@ def test_gallery_with_missing_selected_continuity_tail_is_not_technically_reusab
 def test_failed_generated_reference_gallery_is_not_reused_by_next_attempt(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "ensure_media_trace", lambda **_kwargs: (None, None))
     monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 5")
 
     failed = worker.enqueue_shot("s1")
@@ -539,8 +539,8 @@ def test_failed_generated_reference_gallery_is_not_reused_by_next_attempt(monkey
 def test_auto_retake_count_is_persisted_on_child_video_version(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "ensure_media_trace", lambda **_kwargs: (None, None))
     monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 5")
 
     child = worker.enqueue_shot("s1", reroll=True, auto_retake_count=1)
@@ -557,12 +557,11 @@ def test_maybe_auto_qa_is_a_noop_and_never_enqueues_retake(monkeypatch) -> None:
     原样返回 True，且绝不因「低分」触发重抽。qa_shot 本身已删除，不再需要 monkeypatch 佯装低分。"""
     conn = _conn()
     _seed_project(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "log_provider_call", lambda *_args, **_kwargs: None)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "log_provider_call", lambda *_args, **_kwargs: None)
 
     enqueued: list[dict] = []
-    monkeypatch.setattr(
-        worker,
+    patch_worker_everywhere(monkeypatch,
         "enqueue_shot",
         lambda shot_id, **kwargs: enqueued.append({"shot_id": shot_id, **kwargs})
         or {"version_id": "next"},
@@ -596,12 +595,11 @@ def test_complete_mode_maybe_auto_qa_is_also_a_noop(monkeypatch) -> None:
     """Supervisor 完整补齐模式下同样不再调用模型或写 qa_json。"""
     conn = _conn()
     _seed_project(conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "log_provider_call", lambda *_args, **_kwargs: None)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "log_provider_call", lambda *_args, **_kwargs: None)
 
     enqueued: list[dict] = []
-    monkeypatch.setattr(
-        worker,
+    patch_worker_everywhere(monkeypatch,
         "enqueue_shot",
         lambda shot_id, **kwargs: enqueued.append({"shot_id": shot_id, **kwargs}) or {},
     )

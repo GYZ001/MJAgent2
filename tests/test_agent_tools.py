@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from app.agent import tools as agent_tools
-from app.capabilities import ensure_catalog_loaded
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.tool_schemas import INTERNAL_INPUT_FIELDS
 
 

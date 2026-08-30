@@ -3,6 +3,7 @@ import json
 import sqlite3
 
 from app import db, worker
+from tests.conftest import patch_worker_everywhere
 
 
 def _conn() -> sqlite3.Connection:
@@ -83,14 +84,14 @@ def test_dispatch_prioritizes_poll_and_unblocked_first_pass(monkeypatch) -> None
     main: list[str] = []
     video_ready: list[str] = []
     poll: list[str] = []
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(worker._queue, "put_nowait", main.append)
     monkeypatch.setattr(worker._video_ready_queue, "put_nowait", video_ready.append)
     monkeypatch.setattr(worker._poll_queue, "put_nowait", poll.append)
-    monkeypatch.setattr(worker, "_worker_target", 2)
-    monkeypatch.setattr(worker, "_reference_worker_target", 2)
-    monkeypatch.setattr(worker, "_video_ready_worker_target", 2)
-    monkeypatch.setattr(worker, "_poll_worker_target", 1)
+    patch_worker_everywhere(monkeypatch, "_worker_target", 2)
+    patch_worker_everywhere(monkeypatch, "_reference_worker_target", 2)
+    patch_worker_everywhere(monkeypatch, "_video_ready_worker_target", 2)
+    patch_worker_everywhere(monkeypatch, "_poll_worker_target", 1)
     monkeypatch.setattr("app.media_pipeline.retry_policy.scheduler_policy", lambda: "stage_aware")
     monkeypatch.setattr("app.db.get_setting", lambda key: {
         "media_scheduler_policy": "stage_aware",
@@ -147,7 +148,7 @@ def test_stage_aware_dispatcher_finishes_dependency_reads_before_stage_writes(
         transaction_states.append(conn.in_transaction)
         return 1
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(
         "app.media_pipeline.scheduler.continuity_chain_remaining",
         chain_remaining,
@@ -155,10 +156,10 @@ def test_stage_aware_dispatcher_finishes_dependency_reads_before_stage_writes(
     monkeypatch.setattr(worker._queue, "put_nowait", lambda *_: None)
     monkeypatch.setattr(worker._video_ready_queue, "put_nowait", lambda *_: None)
     monkeypatch.setattr(worker._poll_queue, "put_nowait", lambda *_: None)
-    monkeypatch.setattr(worker, "_worker_target", 1)
-    monkeypatch.setattr(worker, "_reference_worker_target", 1)
-    monkeypatch.setattr(worker, "_video_ready_worker_target", 1)
-    monkeypatch.setattr(worker, "_poll_worker_target", 1)
+    patch_worker_everywhere(monkeypatch, "_worker_target", 1)
+    patch_worker_everywhere(monkeypatch, "_reference_worker_target", 1)
+    patch_worker_everywhere(monkeypatch, "_video_ready_worker_target", 1)
+    patch_worker_everywhere(monkeypatch, "_poll_worker_target", 1)
 
     worker._dispatch_due_jobs_stage_aware()
 
@@ -193,10 +194,10 @@ def test_dispatch_legacy_keeps_single_main_queue(monkeypatch) -> None:
     conn.commit()
 
     main: list[str] = []
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(worker._queue, "put_nowait", main.append)
-    monkeypatch.setattr(worker, "_worker_target", 2)
-    monkeypatch.setattr(worker, "_poll_worker_target", 1)
+    patch_worker_everywhere(monkeypatch, "_worker_target", 2)
+    patch_worker_everywhere(monkeypatch, "_poll_worker_target", 1)
     monkeypatch.setattr("app.media_pipeline.retry_policy.scheduler_policy", lambda: "legacy")
 
     result = worker._dispatch_due_jobs_legacy()
@@ -214,14 +215,14 @@ def test_dispatcher_rebuilds_a_lost_in_memory_queue(monkeypatch) -> None:
     main: asyncio.Queue[str] = asyncio.Queue()
     video_ready: asyncio.Queue[str] = asyncio.Queue()
     poll: asyncio.Queue[str] = asyncio.Queue()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "_queue", main)
-    monkeypatch.setattr(worker, "_video_ready_queue", video_ready)
-    monkeypatch.setattr(worker, "_poll_queue", poll)
-    monkeypatch.setattr(worker, "_worker_target", 1)
-    monkeypatch.setattr(worker, "_reference_worker_target", 1)
-    monkeypatch.setattr(worker, "_video_ready_worker_target", 1)
-    monkeypatch.setattr(worker, "_poll_worker_target", 1)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "_queue", main)
+    patch_worker_everywhere(monkeypatch, "_video_ready_queue", video_ready)
+    patch_worker_everywhere(monkeypatch, "_poll_queue", poll)
+    patch_worker_everywhere(monkeypatch, "_worker_target", 1)
+    patch_worker_everywhere(monkeypatch, "_reference_worker_target", 1)
+    patch_worker_everywhere(monkeypatch, "_video_ready_worker_target", 1)
+    patch_worker_everywhere(monkeypatch, "_poll_worker_target", 1)
     monkeypatch.setattr("app.media_pipeline.retry_policy.scheduler_policy", lambda: "stage_aware")
 
     worker._dispatch_due_jobs()
@@ -247,14 +248,14 @@ def test_video_ready_preempts_reference_when_slot_free(monkeypatch) -> None:
 
     ref_q: list[str] = []
     ready_q: list[str] = []
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(worker._queue, "put_nowait", ref_q.append)
     monkeypatch.setattr(worker._video_ready_queue, "put_nowait", ready_q.append)
     monkeypatch.setattr(worker._poll_queue, "put_nowait", lambda *_: None)
-    monkeypatch.setattr(worker, "_worker_target", 2)
-    monkeypatch.setattr(worker, "_reference_worker_target", 2)
-    monkeypatch.setattr(worker, "_video_ready_worker_target", 2)
-    monkeypatch.setattr(worker, "_poll_worker_target", 1)
+    patch_worker_everywhere(monkeypatch, "_worker_target", 2)
+    patch_worker_everywhere(monkeypatch, "_reference_worker_target", 2)
+    patch_worker_everywhere(monkeypatch, "_video_ready_worker_target", 2)
+    patch_worker_everywhere(monkeypatch, "_poll_worker_target", 1)
     monkeypatch.setattr("app.media_pipeline.retry_policy.scheduler_policy", lambda: "stage_aware")
 
     worker._dispatch_due_jobs()

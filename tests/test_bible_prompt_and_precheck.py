@@ -8,6 +8,8 @@ from app.refs import normalize_prompt_text, portrait_prompt
 from app.orchestration.engine import fingerprint
 from app.schemas import Bible, Character, World
 from app.validators import validate_bible
+from tests.conftest import patch_stages_everywhere as _patch_stages
+from tests.conftest import patch_api_everywhere
 
 
 def test_normalize_prompt_collapses_duplicate_punctuation() -> None:
@@ -106,8 +108,12 @@ def test_project_or_404_normalizes_sqlite_row_to_dict(monkeypatch) -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
+        # deleted_at 必须有：`_project_or_404` 自软删除/回收站落地起会查
+        # `AND deleted_at IS NULL`，合成表缺这一列会直接 OperationalError。
+        # 本用例验的是 sqlite Row → dict 的归一化，与删除过滤无关，补列即可。
         "CREATE TABLE projects("
-        "id TEXT PRIMARY KEY, bible_status TEXT, bible_error TEXT, bible_json TEXT, bible_version INTEGER DEFAULT 0"
+        "id TEXT PRIMARY KEY, bible_status TEXT, bible_error TEXT, bible_json TEXT, "
+        "bible_version INTEGER DEFAULT 0, deleted_at REAL"
         ")"
     )
     conn.execute(
@@ -134,8 +140,8 @@ def test_generate_precheck_estimates_without_bible(monkeypatch) -> None:
     )
     conn.execute("INSERT INTO projects(id, bible_json, bible_version) VALUES('p1', NULL, 0)")
     conn.commit()
-    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
-    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_project_or_404", lambda _pid: dict(conn.execute(
         "SELECT * FROM projects WHERE id='p1'"
     ).fetchone()))
 
@@ -150,7 +156,7 @@ def test_visual_style_options_expose_names_and_descriptions_only(monkeypatch) ->
     from app.domain import bible_ops
     import asyncio
 
-    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: {"id": "p1"})
+    patch_api_everywhere(monkeypatch, "_project_or_404", lambda _pid: {"id": "p1"})
 
     result = asyncio.run(bible_ops.bible_visual_styles("p1"))
 
@@ -173,8 +179,8 @@ def test_bible_generate_precheck_binds_style_name(monkeypatch) -> None:
     )
     conn.execute("INSERT INTO projects(id, bible_json, bible_version) VALUES('p1', NULL, 0)")
     conn.commit()
-    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
-    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_project_or_404", lambda _pid: dict(conn.execute(
         "SELECT * FROM projects WHERE id='p1'"
     ).fetchone()))
 
@@ -218,10 +224,10 @@ def test_generate_bible_forces_backend_visual_style_prompt(monkeypatch) -> None:
             appearance_canonical="黑发少年，青色长衫，目光沉稳，身形清瘦，腰间系旧布袋",
         )]
 
-    monkeypatch.setattr(stages, "_recurring_character_names", fake_roll_call)
-    monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
-    monkeypatch.setattr(stages, "_generate_character_detail_batch", fake_details)
-    monkeypatch.setattr(stages, "_verify_character_aliases_in_place", lambda *_args, **_kwargs: asyncio.sleep(0))
+    _patch_stages(monkeypatch, "_recurring_character_names", fake_roll_call)
+    _patch_stages(monkeypatch, "_run_with_agent_loop", fake_loop)
+    _patch_stages(monkeypatch, "_generate_character_detail_batch", fake_details)
+    _patch_stages(monkeypatch, "_verify_character_aliases_in_place", lambda *_args, **_kwargs: asyncio.sleep(0))
 
     result = asyncio.run(stages.generate_bible(
         [{"idx": 1, "title": "第一章", "content": "孟浩走入山中。"}],
@@ -435,8 +441,8 @@ def test_single_chapter_corpus_still_produces_a_verified_roster(monkeypatch) -> 
 
     # 修复前的判据：门槛不按语料封顶，写死要跨 2 章。用独立副本跑红，不回退线上代码。
     with monkeypatch.context() as legacy:
-        legacy.setattr(
-            stages, "_corpus_scoped_chapter_threshold",
+        _patch_stages(
+            legacy, "_corpus_scoped_chapter_threshold",
             lambda threshold, available_chapters: threshold,
         )
         assert asyncio.run(stages._recurring_character_names(chapters)) == [], (
@@ -783,10 +789,10 @@ def test_generate_bible_uses_small_roster_contract_and_single_character_details(
             appearance_canonical="十六七岁少年，黑色短发，深棕短打，身形敦实，腰间挂木尺",
         )]
 
-    monkeypatch.setattr(stages, "_recurring_character_names", fake_roll_call)
-    monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
-    monkeypatch.setattr(stages, "_generate_character_detail_batch", fake_details)
-    monkeypatch.setattr(stages, "_verify_character_aliases_in_place", lambda *_args, **_kwargs: asyncio.sleep(0))
+    _patch_stages(monkeypatch, "_recurring_character_names", fake_roll_call)
+    _patch_stages(monkeypatch, "_run_with_agent_loop", fake_loop)
+    _patch_stages(monkeypatch, "_generate_character_detail_batch", fake_details)
+    _patch_stages(monkeypatch, "_verify_character_aliases_in_place", lambda *_args, **_kwargs: asyncio.sleep(0))
 
     bible = asyncio.run(stages.generate_bible([
         {"idx": 1, "title": "第一章", "content": "小胖子与孟浩同行。"}
@@ -857,8 +863,8 @@ def test_paratext_cleaning_is_capped_and_fails_open(monkeypatch) -> None:
         return [], False
 
     monkeypatch.setattr(source_paratext, "chapter_paratext_offsets", _never_returns)
-    monkeypatch.setattr(stages, "BIBLE_PARATEXT_BUDGET_S", 0.2)
-    monkeypatch.setattr(stages, "BIBLE_PARATEXT_CHAPTER_TIMEOUT_S", 0.05)
+    _patch_stages(monkeypatch, "BIBLE_PARATEXT_BUDGET_S", 0.2)
+    _patch_stages(monkeypatch, "BIBLE_PARATEXT_CHAPTER_TIMEOUT_S", 0.05)
 
     started = asyncio.get_event_loop_policy().new_event_loop()
     try:

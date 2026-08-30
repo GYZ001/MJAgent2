@@ -7,6 +7,7 @@ from app import db, storyboard_workspace
 from app.domain import common, projects, storyboard_ops
 from app.media_pipeline.status import episode_pipeline_statuses
 from app.schemas import EpisodeScreenplay
+from tests.conftest import patch_api_everywhere
 
 
 def _conn() -> sqlite3.Connection:
@@ -58,9 +59,9 @@ def _seed_episode(conn: sqlite3.Connection) -> None:
 
 def _patch_storyboard_db(monkeypatch, conn: sqlite3.Connection) -> None:
     monkeypatch.setattr(common, "get_conn", lambda: conn)
-    monkeypatch.setattr(storyboard_ops, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(storyboard_workspace, "get_conn", lambda: conn)
-    monkeypatch.setattr(storyboard_ops, "get_setting", lambda _key: "100")
+    patch_api_everywhere(monkeypatch, "get_setting", lambda _key: "100")
     monkeypatch.setattr(storyboard_ops.worker, "episode_cost", lambda _episode_id: 0.0)
 
 
@@ -241,8 +242,8 @@ def test_review_detail_projects_mode_specific_input_media(monkeypatch) -> None:
     )
     conn.commit()
     _patch_storyboard_db(monkeypatch, conn)
-    monkeypatch.setattr(
-        storyboard_ops,
+    patch_api_everywhere(
+        monkeypatch,
         "_media_url",
         lambda path: f"/media/{str(path).rsplit('/', 1)[-1]}" if path else None,
     )

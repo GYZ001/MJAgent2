@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from app import api, completion_grant, db
+from tests.conftest import patch_video_supervisor_everywhere, patch_api_everywhere
 
 
 def _conn(child_statuses: dict[str, str]) -> sqlite3.Connection:
@@ -55,18 +56,17 @@ def _patch_queue_dependencies(monkeypatch, conn: sqlite3.Connection) -> None:
     import app.evidence.repository as evidence_repository
     import app.orchestration.engine as orchestration_engine
     import app.orchestration.state_machine as state_machine
-    import app.video_supervisor as video_supervisor
 
     for module in (
-        api,
         evidence_repository,
         orchestration_engine,
         state_machine,
     ):
         monkeypatch.setattr(module, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "rebuild_coverage_ledger",
         lambda _episode_id: SimpleNamespace(covered_within_quota=lambda: False),
     )
@@ -77,7 +77,7 @@ def _patch_queue_dependencies(monkeypatch, conn: sqlite3.Connection) -> None:
             "completion_grant_id": f"grant-{episode_id}",
         }
 
-    monkeypatch.setattr(api, "_complete_episode_core", fake_complete)
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", fake_complete)
 
 
 def _state(episode_ids: list[str]) -> dict:
@@ -225,7 +225,7 @@ def test_project_video_spent_tracks_claim_release_not_job_or_version_status(
         version_status="failed",
         provider_create_state="not_started",
     )
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     assert api._project_video_spent("p") == 16
 
@@ -234,7 +234,6 @@ def test_project_video_spent_tracks_claim_release_not_job_or_version_status(
 async def test_project_video_initial_plan_deducts_prior_episode_claim(
     monkeypatch,
 ) -> None:
-    import app.video_supervisor as video_supervisor
 
     conn = _conn({"e1": "SUCCEEDED", "e2": "SUCCEEDED"})
     conn.execute("DELETE FROM workflow_runs WHERE id='run-project'")
@@ -248,10 +247,10 @@ async def test_project_video_initial_plan_deducts_prior_episode_claim(
         version_status="failed",
         provider_create_state="accepted",
     )
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "rebuild_coverage_ledger",
         lambda episode_id: SimpleNamespace(
             covered_within_quota=lambda: episode_id == "e1"
@@ -263,7 +262,7 @@ async def test_project_video_initial_plan_deducts_prior_episode_claim(
         completions.append(episode_id)
         return {"run_id": f"run-{episode_id}", "completion_grant_id": f"grant-{episode_id}"}
 
-    monkeypatch.setattr(api, "_complete_episode_core", capture_complete)
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", capture_complete)
 
     result = await api._complete_project_videos_core("p", {
         "global_budget_cap_cny": 12,
@@ -303,7 +302,7 @@ async def test_project_video_queue_does_not_reuse_failed_episode_claim(
         completions.append(episode_id)
         return {"run_id": f"run-{episode_id}", "completion_grant_id": f"grant-{episode_id}"}
 
-    monkeypatch.setattr(api, "_complete_episode_core", capture_complete)
+    patch_api_everywhere(monkeypatch, "_complete_episode_core", capture_complete)
     state = _state(["e1", "e2"])
     state["global_budget_cap_cny"] = 12
     state["plan"][0]["status"] = "failed"
@@ -444,13 +443,13 @@ def test_project_video_queue_retry_requeues_non_successful_child(
     )
     conn.commit()
     for module in (
-        api,
         evidence_repository,
         orchestration_api,
         orchestration_engine,
         state_machine,
     ):
         monkeypatch.setattr(module, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(
         orchestration_api.task_registry,
         "active",

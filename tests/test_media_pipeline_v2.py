@@ -5,6 +5,7 @@ import asyncio
 import sqlite3
 
 from app import db, worker
+from tests.conftest import patch_worker_everywhere
 from app.media_pipeline.concurrency import CHANNEL_DEFAULTS, channel_limit, ensure_channel
 from app.media_pipeline import stages as S
 from app.media_pipeline.reference_store import upsert_reference_set_from_meta
@@ -30,7 +31,7 @@ def test_defer_sets_waiting_provider(monkeypatch) -> None:
         "VALUES('j1','video','running',1,1,'w0',9999999999)"
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     main_requeued: list[str] = []
     poll_requeued: list[str] = []
     monkeypatch.setattr(worker._queue, "put_nowait", main_requeued.append)
@@ -107,22 +108,20 @@ def test_recovered_provider_poll_persists_stage_progress(monkeypatch) -> None:
     def expose_worker_error(exc: Exception, **_kwargs):
         raise exc
 
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
-    monkeypatch.setattr(worker, "_assert_job_lease", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(worker, "_assert_review_dependency_fence_async", no_fence)
+    patch_worker_everywhere(monkeypatch, "_assert_job_lease", lambda *_args, **_kwargs: None)
+    patch_worker_everywhere(monkeypatch, "_assert_review_dependency_fence_async", no_fence)
     monkeypatch.setattr(worker.media_scheduler, "renew_lease", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(worker.errors, "log_error", expose_worker_error)
-    monkeypatch.setattr(
-        worker,
+    patch_worker_everywhere(monkeypatch,
         "ensure_source_excerpt_in_prompt",
         lambda prompt, _shot: prompt,
     )
-    monkeypatch.setattr(worker, "_load_shot_model", lambda _shot: object())
-    monkeypatch.setattr(worker, "_set_version", lambda *_args, **_kwargs: True)
+    patch_worker_everywhere(monkeypatch, "_load_shot_model", lambda _shot: object())
+    patch_worker_everywhere(monkeypatch, "_set_version", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(worker.hiagent, "poll_video_task", poll_pending)
-    monkeypatch.setattr(
-        worker,
+    patch_worker_everywhere(monkeypatch,
         "_provider_wait_policy",
         lambda *_args, **_kwargs: {
             "meta_changed": False,
@@ -133,7 +132,7 @@ def test_recovered_provider_poll_persists_stage_progress(monkeypatch) -> None:
             "scope": "视频任务",
         },
     )
-    monkeypatch.setattr(worker, "_defer_provider_poll", lambda *_args, **_kwargs: True)
+    patch_worker_everywhere(monkeypatch, "_defer_provider_poll", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         "app.media_pipeline.concurrency.semaphore_for",
         lambda _resource: Permit(),
@@ -198,16 +197,16 @@ def test_hot_scale_down_drains_claimed_job_without_cancelling(monkeypatch) -> No
             )
             conn.commit()
 
-        monkeypatch.setattr(worker, "get_conn", lambda: conn)
+        patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
         monkeypatch.setattr(worker.media_scheduler, "get_conn", lambda: conn)
-        monkeypatch.setattr(worker, "_run_job", blocked_run_job)
-        monkeypatch.setattr(worker, "_queue", reference_queue)
-        monkeypatch.setattr(worker, "_video_ready_queue", asyncio.Queue())
-        monkeypatch.setattr(worker, "_poll_queue", asyncio.Queue())
-        monkeypatch.setattr(worker, "_workers", workers)
-        monkeypatch.setattr(worker, "_video_ready_workers", [])
-        monkeypatch.setattr(worker, "_poll_workers", [])
-        monkeypatch.setattr(worker, "_worker_retire_events", {})
+        patch_worker_everywhere(monkeypatch, "_run_job", blocked_run_job)
+        patch_worker_everywhere(monkeypatch, "_queue", reference_queue)
+        patch_worker_everywhere(monkeypatch, "_video_ready_queue", asyncio.Queue())
+        patch_worker_everywhere(monkeypatch, "_poll_queue", asyncio.Queue())
+        patch_worker_everywhere(monkeypatch, "_workers", workers)
+        patch_worker_everywhere(monkeypatch, "_video_ready_workers", [])
+        patch_worker_everywhere(monkeypatch, "_poll_workers", [])
+        patch_worker_everywhere(monkeypatch, "_worker_retire_events", {})
         monkeypatch.setattr(
             "app.media_pipeline.concurrency.channel_limit",
             lambda _resource: 0,

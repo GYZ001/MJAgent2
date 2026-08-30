@@ -35,12 +35,13 @@ from app.video_supervisor import (
 )
 from app.evidence.media import grade_shot_video
 from app.compiler import CompileError
+from tests.conftest import patch_video_supervisor_everywhere, patch_worker_everywhere
 
 
 def test_watchdog_stall_reconciliation_does_not_block_event_loop(
     monkeypatch,
 ) -> None:
-    from app import video_supervisor, worker
+    from app import video_supervisor
 
     started = threading.Event()
     release = threading.Event()
@@ -54,9 +55,9 @@ def test_watchdog_stall_reconciliation_does_not_block_event_loop(
         supervisor_reconciled.set()
         return 0
 
-    monkeypatch.setattr(worker, "reconcile_stalled_video_jobs", blocking_reconcile)
-    monkeypatch.setattr(
-        video_supervisor,
+    patch_worker_everywhere(monkeypatch, "reconcile_stalled_video_jobs", blocking_reconcile)
+    patch_video_supervisor_everywhere(
+        monkeypatch,
         "reconcile_stale_video_supervisors",
         reconcile_supervisors,
     )

@@ -1326,7 +1326,7 @@ def _validated_v7_source_artifacts(
 # 重编译已发布剧本的「场次源投影」是纯函数：输入全部是不可变 Artifact
 # （已发布剧本 / merged IR / 各 scene shard，都按 content_hash 封印）加上本集的
 # episodes / projects 行与原文章节。实测一次重编译 437 ms（其中
-# compile_screenplay_ir 339 ms），而剧本台每次打开或轮询都要跑一次。
+# compile_screenplay_ir 339 ms），而映射台每次打开或轮询都要跑一次。
 # 这里按「全部输入的内容指纹」缓存结果：任何一个输入变化都会改变键，
 # 因此缓存命中与重算在语义上完全等价，不存在读到过期权威的可能。
 # 与 patch.py 同理，缓存里存的是序列化 JSON，保证每个调用方拿到独立可变模型。
@@ -1640,7 +1640,7 @@ def assert_screenplay_matches_validated_v7_source(
                 (str(exc), stale_id),
             )
             db.commit()
-            # 这条写入可以发生在只读端点开着读作用域的时候（剧本台首屏 →
+            # 这条写入可以发生在只读端点开着读作用域的时候（映射台首屏 →
             # resolve_current_screenplay_authority → 这里）。不失效的话，
             # 同一次请求里后续对这份 artifact 的读取仍会拿到写前的
             # status='approved'，把刚判定出来的 stale 掩盖掉。

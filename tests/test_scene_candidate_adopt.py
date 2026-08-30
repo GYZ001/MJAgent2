@@ -207,8 +207,8 @@ def _as_principal(*, role: str | None, is_system_admin: bool = False, workspace_
 
 
 def _ready_command_bus() -> None:
-    from app.capabilities import ensure_catalog_loaded
     from app.capabilities.bus import reset_command_bus_for_tests
+    from app.capabilities.loader import ensure_catalog_loaded
     from app.capabilities.policy import reset_approvals_for_tests
 
     ensure_catalog_loaded()

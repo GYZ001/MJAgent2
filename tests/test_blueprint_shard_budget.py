@@ -17,6 +17,8 @@ from app.narrative_blueprint import (
     BlueprintStateSubjectOwnershipPatch,
 )
 from app.source_excerpt import index_source_segments
+from tests.conftest import patch_stages_everywhere as _patch_stages
+
 
 
 ERR_653AC6_FIXTURE = (
@@ -109,11 +111,7 @@ def test_run_be31_shard2_shape_is_split_by_40_fact_output_pressure(
         for index, segment in enumerate(segments)
     }
     assert sum(weights.values()) == 40
-    monkeypatch.setattr(
-        stages,
-        "_blueprint_segment_output_weight",
-        lambda segment: weights[segment.segment_id],
-    )
+    _patch_stages(monkeypatch, "_blueprint_segment_output_weight", lambda segment: weights[segment.segment_id])
 
     shards = stages._partition_blueprint_segments(segments)
 
@@ -1455,11 +1453,11 @@ def test_output_truncated_splits_once_without_accepting_prefix(
             shard_index=int(kwargs["call_meta"]["shard_index"]),
         )
 
-    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    _patch_stages(monkeypatch, "get_conn", lambda: _NoCacheConnection())
     monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(stages, "validate_narrative_blueprint_shard", lambda *_a, **_k: [])
-    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a, **_k: [])
-    monkeypatch.setattr(stages, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "validate_narrative_blueprint_shard", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         lambda artifact, **_kwargs: artifacts.append(artifact),
@@ -1569,7 +1567,7 @@ def test_production_src0001_paratext_root_split_validates_without_retry_exhausti
             "nodes": [node],
         }, ensure_ascii=False)
 
-    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    _patch_stages(monkeypatch, "get_conn", lambda: _NoCacheConnection())
     monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
@@ -1648,18 +1646,14 @@ def test_legacy_cached_shard_without_current_policy_is_not_reused(
             shard_index=int(kwargs["call_meta"]["shard_index"]),
         )
 
-    monkeypatch.setattr(
-        stages,
-        "get_conn",
-        lambda: _StaticCacheConnection([{
+    _patch_stages(monkeypatch, "get_conn", lambda: _StaticCacheConnection([{
             "content_json": json.dumps(cached, ensure_ascii=False),
             "model_snapshot_json": "{}",
-        }]),
-    )
+        }]))
     monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(stages, "validate_narrative_blueprint_shard", lambda *_a, **_k: [])
-    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a, **_k: [])
-    monkeypatch.setattr(stages, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "validate_narrative_blueprint_shard", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         lambda *_args, **_kwargs: None,
@@ -1759,10 +1753,7 @@ def test_current_cached_shard_with_local_authority_errors_fails_closed(
             return ["[BLUEPRINT_SHARD_STATE_SUBJECT_MISSING] cached"]
         return []
 
-    monkeypatch.setattr(
-        stages,
-        "get_conn",
-        lambda: _StaticCacheConnection([{
+    _patch_stages(monkeypatch, "get_conn", lambda: _StaticCacheConnection([{
             "id": "art-polluted-current-leaf",
             "content_json": json.dumps(cached, ensure_ascii=False),
             "content_hash": cached_hash,
@@ -1777,12 +1768,11 @@ def test_current_cached_shard_with_local_authority_errors_fails_closed(
                     _source(1).encode("utf-8")
                 ).hexdigest(),
             }),
-        }]),
-    )
+        }]))
     monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(stages, "validate_narrative_blueprint_shard", fake_validate)
-    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a, **_k: [])
-    monkeypatch.setattr(stages, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "validate_narrative_blueprint_shard", fake_validate)
+    _patch_stages(monkeypatch, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         lambda *_args, **_kwargs: None,
@@ -1903,12 +1893,12 @@ def test_split_manifest_reuses_prefix_and_calls_only_uncovered_gap(
             shard_index=int(kwargs["call_meta"]["shard_index"]),
         )
 
-    monkeypatch.setattr(stages, "get_conn", lambda: _StaticCacheConnection([row]))
+    _patch_stages(monkeypatch, "get_conn", lambda: _StaticCacheConnection([row]))
     monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(stages, "validate_narrative_blueprint_shard", lambda *_a, **_k: [])
-    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a, **_k: [])
-    monkeypatch.setattr(stages, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
-    monkeypatch.setattr(stages, "log_provider_call", lambda *_a, **_k: None)
+    _patch_stages(monkeypatch, "validate_narrative_blueprint_shard", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "log_provider_call", lambda *_a, **_k: None)
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         lambda *_args, **_kwargs: None,
@@ -1978,16 +1968,12 @@ def test_split_manifest_complete_six_leaf_cover_makes_zero_provider_calls(
     async def forbidden_chat(*_args, **_kwargs):
         raise AssertionError("complete exact cover must not call provider")
 
-    monkeypatch.setattr(stages, "get_conn", lambda: _StaticCacheConnection(rows))
+    _patch_stages(monkeypatch, "get_conn", lambda: _StaticCacheConnection(rows))
     monkeypatch.setattr(stages.model_gateway, "chat", forbidden_chat)
-    monkeypatch.setattr(
-        stages,
-        "validate_narrative_blueprint_shard",
-        lambda *_a, **_k: [],
-    )
-    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a, **_k: [])
-    monkeypatch.setattr(stages, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
-    monkeypatch.setattr(stages, "log_provider_call", lambda *_a, **_k: None)
+    _patch_stages(monkeypatch, "validate_narrative_blueprint_shard", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "log_provider_call", lambda *_a, **_k: None)
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         lambda *_args, **_kwargs: None,
@@ -2029,9 +2015,9 @@ def test_split_manifest_boundary_drift_fails_before_provider_call(
         calls += 1
         raise AssertionError("authority drift must fail before provider")
 
-    monkeypatch.setattr(stages, "get_conn", lambda: _StaticCacheConnection([row]))
+    _patch_stages(monkeypatch, "get_conn", lambda: _StaticCacheConnection([row]))
     monkeypatch.setattr(stages.model_gateway, "chat", forbidden_chat)
-    monkeypatch.setattr(stages, "validate_narrative_blueprint_shard", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "validate_narrative_blueprint_shard", lambda *_a, **_k: [])
 
     with pytest.raises(stages.StageError, match="SPLIT_MANIFEST_AUTHORITY"):
         asyncio.run(stages._generate_sharded_narrative_blueprint(
@@ -2056,7 +2042,7 @@ def test_non_truncation_provider_error_is_not_split(
             failure_kind=hiagent.ProviderFailureKind.EXECUTION_FAILED,
         )
 
-    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    _patch_stages(monkeypatch, "get_conn", lambda: _NoCacheConnection())
     monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
 
     with pytest.raises(hiagent.ProviderError, match="stream outcome unknown"):
@@ -2092,17 +2078,11 @@ def test_timeout_with_zero_received_chars_retries_fresh_attempt(
             shard_index=int(kwargs["call_meta"]["shard_index"]),
         )
 
-    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    _patch_stages(monkeypatch, "get_conn", lambda: _NoCacheConnection())
     monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(
-        stages, "validate_narrative_blueprint_shard", lambda *_a, **_k: []
-    )
-    monkeypatch.setattr(
-        stages, "validate_narrative_blueprint", lambda *_a, **_k: []
-    )
-    monkeypatch.setattr(
-        stages, "derive_blueprint_scene_plans", lambda *_a, **_k: []
-    )
+    _patch_stages(monkeypatch, "validate_narrative_blueprint_shard", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         lambda *_args, **_kwargs: None,
@@ -2132,7 +2112,7 @@ def test_invalid_single_segment_stops_at_bounded_attempt_count(
         calls += 1
         return "{}"
 
-    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    _patch_stages(monkeypatch, "get_conn", lambda: _NoCacheConnection())
     monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
@@ -2160,9 +2140,9 @@ def test_provider_call_is_bounded_by_remaining_wall_time(
         await asyncio.sleep(1)
         raise AssertionError("wait_for did not enforce the deadline")
 
-    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    _patch_stages(monkeypatch, "get_conn", lambda: _NoCacheConnection())
     monkeypatch.setattr(stages.model_gateway, "chat", slow_chat)
-    monkeypatch.setattr(stages, "BLUEPRINT_GENERATION_MAX_WALL_SECONDS", 0.01)
+    _patch_stages(monkeypatch, "BLUEPRINT_GENERATION_MAX_WALL_SECONDS", 0.01)
 
     with pytest.raises(stages.StageError, match="TIME_BUDGET"):
         asyncio.run(stages._generate_sharded_narrative_blueprint(
@@ -2250,23 +2230,19 @@ def test_run_bd33_dynamic_split_releases_requested_reservations(
             return ["[BLUEPRINT_TEST_RETRY] shard6 attempt1 invalid"]
         return []
 
-    monkeypatch.setattr(
-        stages,
-        "_partition_blueprint_segments",
-        lambda _segments: [[segment] for segment in segments],
-    )
-    monkeypatch.setattr(stages, "_blueprint_shard_token_budget", lambda _s: 10)
+    _patch_stages(monkeypatch, "_partition_blueprint_segments", lambda _segments: [[segment] for segment in segments])
+    _patch_stages(monkeypatch, "_blueprint_shard_token_budget", lambda _s: 10)
     monkeypatch.setattr(
         stages.hiagent,
         "text_request_token_limits",
         lambda **_kwargs: ("hiagent", "test-model", 10),
     )
-    monkeypatch.setattr(stages, "BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS", 25)
-    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    _patch_stages(monkeypatch, "BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS", 25)
+    _patch_stages(monkeypatch, "get_conn", lambda: _NoCacheConnection())
     monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(stages, "validate_narrative_blueprint_shard", fake_validate)
-    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a, **_k: [])
-    monkeypatch.setattr(stages, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "validate_narrative_blueprint_shard", fake_validate)
+    _patch_stages(monkeypatch, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         lambda artifact, **_kwargs: artifacts.append(artifact),
@@ -2354,11 +2330,7 @@ def test_durable_success_replay_does_not_double_count_claim(
         "status": "OK",
         "recovery_disposition": None,
     }
-    monkeypatch.setattr(
-        stages,
-        "get_conn",
-        lambda: _DurableBudgetConnection([row]),
-    )
+    _patch_stages(monkeypatch, "get_conn", lambda: _DurableBudgetConnection([row]))
 
     for _ in range(3):
         budget = stages._BlueprintGenerationBudget.from_durable_calls(
@@ -2397,11 +2369,7 @@ def test_two_fresh_success_rows_for_same_operation_are_both_charged(
         }
         for completion in (3, 4)
     ]
-    monkeypatch.setattr(
-        stages,
-        "get_conn",
-        lambda: _DurableBudgetConnection(rows),
-    )
+    _patch_stages(monkeypatch, "get_conn", lambda: _DurableBudgetConnection(rows))
 
     budget = stages._BlueprintGenerationBudget.from_durable_calls(
         run_id="run-double-send",
@@ -2416,10 +2384,7 @@ def test_two_fresh_success_rows_for_same_operation_are_both_charged(
 def test_durable_unknown_call_is_charged_at_full_requested_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        stages,
-        "get_conn",
-        lambda: _DurableBudgetConnection([{
+    _patch_stages(monkeypatch, "get_conn", lambda: _DurableBudgetConnection([{
             "response_json": None,
             "meta": json.dumps({
                 "operation_id": "blueprint-op-unknown",
@@ -2427,8 +2392,7 @@ def test_durable_unknown_call_is_charged_at_full_requested_cap(
             }),
             "status": "RUNNING",
             "recovery_disposition": None,
-        }]),
-    )
+        }]))
 
     budget = stages._BlueprintGenerationBudget.from_durable_calls(
         run_id="run-unknown",
@@ -2442,10 +2406,7 @@ def test_durable_unknown_call_is_charged_at_full_requested_cap(
 def test_durable_unknown_blueprint_patch_is_restored_as_budget_liability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        stages,
-        "get_conn",
-        lambda: _DurableBudgetConnection([{
+    _patch_stages(monkeypatch, "get_conn", lambda: _DurableBudgetConnection([{
             "response_json": None,
             "meta": json.dumps({
                 "stage_key": "screenplay_blueprint_patch",
@@ -2455,8 +2416,7 @@ def test_durable_unknown_blueprint_patch_is_restored_as_budget_liability(
             "operation_id": "screenplay.blueprint.patch:v6:run-x:hash:1",
             "status": "INTERRUPTED",
             "recovery_disposition": "REQUIRES_EXPLICIT_RETRY",
-        }]),
-    )
+        }]))
 
     budget = stages._BlueprintGenerationBudget.from_durable_calls(
         run_id="run-x",
@@ -2476,10 +2436,7 @@ def test_later_unknown_attempt_is_not_misclassified_as_durable_success(
         "requested_max_tokens": 100,
         "effective_max_tokens": 100,
     }
-    monkeypatch.setattr(
-        stages,
-        "get_conn",
-        lambda: _DurableBudgetConnection([{
+    _patch_stages(monkeypatch, "get_conn", lambda: _DurableBudgetConnection([{
             "response_json": json.dumps({
                 "usage": {"completion_tokens": 10},
             }),
@@ -2493,8 +2450,7 @@ def test_later_unknown_attempt_is_not_misclassified_as_durable_success(
             "operation_id": "same-operation",
             "status": "INTERRUPTED",
             "recovery_disposition": "REQUIRES_EXPLICIT_RETRY",
-        }]),
-    )
+        }]))
 
     budget = stages._BlueprintGenerationBudget.from_durable_calls(
         run_id="run-latest-unknown",
@@ -2788,7 +2744,7 @@ def test_expired_old_unknown_keeps_liability_but_new_grant_opens_wall_epoch(
 def test_durable_wall_budget_uses_original_run_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(stages, "get_conn", lambda: _DurableBudgetConnection([]))
+    _patch_stages(monkeypatch, "get_conn", lambda: _DurableBudgetConnection([]))
     monkeypatch.setattr(stages.time, "time", lambda: 2000.0)
     monkeypatch.setattr(stages.time, "monotonic", lambda: 500.0)
 
@@ -3320,16 +3276,12 @@ def _install_semantic_review_harness(
     monkeypatch: pytest.MonkeyPatch,
     created: list,
 ) -> None:
-    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: (
+    _patch_stages(monkeypatch, "get_conn", lambda: _NoCacheConnection())
+    _patch_stages(monkeypatch, "get_setting", lambda key: (
             "true"
             if key == "screenplay_targeted_blueprint_review_enabled"
             else "1"
-        ),
-    )
+        ))
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         lambda artifact, **_kwargs: (
@@ -3386,19 +3338,11 @@ def test_reviewer_replay_reserves_only_enabled_format_repair(
         return BlueprintSemanticReview(issues=[])
 
     _install_semantic_review_harness(monkeypatch, created)
-    monkeypatch.setattr(
-        stages,
-        "BLUEPRINT_REVIEW_FORMAT_RETRY_LIMIT",
-        format_retry_limit,
-    )
-    monkeypatch.setattr(
-        stages,
-        "_blueprint_structured_operation_id",
-        lambda **kwargs: (
+    _patch_stages(monkeypatch, "BLUEPRINT_REVIEW_FORMAT_RETRY_LIMIT", format_retry_limit)
+    _patch_stages(monkeypatch, "_blueprint_structured_operation_id", lambda **kwargs: (
             f"review-operation:{kwargs['ordinal']}",
             4096,
-        ),
-    )
+        ))
     monkeypatch.setattr(budget, "claim", record_claim)
     monkeypatch.setattr(
         stages.model_gateway,
@@ -3577,30 +3521,18 @@ def test_full_one_sided_environment_classification_has_no_semantic_authority(
         raise AssertionError("one-sided environment issue reached patch")
 
     _install_semantic_review_harness(monkeypatch, created)
-    monkeypatch.setattr(
-        stages,
-        "get_setting",
-        lambda key: (
+    _patch_stages(monkeypatch, "get_setting", lambda key: (
             "false"
             if key == "screenplay_targeted_blueprint_review_enabled"
             else "1"
-        ),
-    )
+        ))
     monkeypatch.setattr(
         stages.model_gateway,
         "chat_structured",
         one_sided_review,
     )
-    monkeypatch.setattr(
-        stages,
-        "_repair_narrative_blueprint",
-        forbidden_patch,
-    )
-    monkeypatch.setattr(
-        stages,
-        "_repair_reviewed_blueprint_state_subject_ownership",
-        forbidden_patch,
-    )
+    _patch_stages(monkeypatch, "_repair_narrative_blueprint", forbidden_patch)
+    _patch_stages(monkeypatch, "_repair_reviewed_blueprint_state_subject_ownership", forbidden_patch)
 
     result = asyncio.run(stages._semantic_review_narrative_blueprint(
         blueprint,
@@ -3765,11 +3697,7 @@ def test_mixed_consensus_uses_node_repair_then_exact_ownership_patch(
         "chat_structured",
         review_or_patch,
     )
-    monkeypatch.setattr(
-        stages,
-        "_repair_narrative_blueprint",
-        existing_node_repair,
-    )
+    _patch_stages(monkeypatch, "_repair_narrative_blueprint", existing_node_repair)
 
     result = asyncio.run(stages._semantic_review_narrative_blueprint(
         blueprint,
@@ -3904,20 +3832,12 @@ def test_err_dbbf95_twenty_two_leaves_with_repair_rounds_stay_admissible(
         seen_shards.add(candidate.shard_index)
         return ["[BLUEPRINT_TEST_RETRY] attempt1 invalid"]
 
-    monkeypatch.setattr(
-        stages,
-        "_partition_blueprint_segments",
-        lambda _segments: [[segment] for segment in segments],
-    )
-    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    _patch_stages(monkeypatch, "_partition_blueprint_segments", lambda _segments: [[segment] for segment in segments])
+    _patch_stages(monkeypatch, "get_conn", lambda: _NoCacheConnection())
     monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(
-        stages,
-        "validate_narrative_blueprint_shard",
-        fake_validate,
-    )
-    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a, **_k: [])
-    monkeypatch.setattr(stages, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "validate_narrative_blueprint_shard", fake_validate)
+    _patch_stages(monkeypatch, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         lambda *_args, **_kwargs: None,
@@ -3956,10 +3876,10 @@ def test_err_dbbf95_single_owner_perception_needs_no_repair_round(
             shard_index=int(kwargs["call_meta"]["shard_index"]),
         )
 
-    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    _patch_stages(monkeypatch, "get_conn", lambda: _NoCacheConnection())
     monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a, **_k: [])
-    monkeypatch.setattr(stages, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         lambda *_args, **_kwargs: None,
@@ -4053,17 +3973,11 @@ def test_stall_on_last_attempt_does_not_consume_the_semantic_budget(
         validations += 1
         return ["[BLUEPRINT_TEST] 前两次候选无效"] if validations <= 2 else []
 
-    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    _patch_stages(monkeypatch, "get_conn", lambda: _NoCacheConnection())
     monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(
-        stages, "validate_narrative_blueprint_shard", fake_shard_validation
-    )
-    monkeypatch.setattr(
-        stages, "validate_narrative_blueprint", lambda *_a, **_k: []
-    )
-    monkeypatch.setattr(
-        stages, "derive_blueprint_scene_plans", lambda *_a, **_k: []
-    )
+    _patch_stages(monkeypatch, "validate_narrative_blueprint_shard", fake_shard_validation)
+    _patch_stages(monkeypatch, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         lambda *_args, **_kwargs: None,
@@ -4105,7 +4019,7 @@ def test_repeated_stalls_remain_bounded(
             received_chars=0,
         )
 
-    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    _patch_stages(monkeypatch, "get_conn", lambda: _NoCacheConnection())
     monkeypatch.setattr(stages.model_gateway, "chat", always_stalls)
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
@@ -4172,38 +4086,18 @@ def test_ownership_repair_survives_a_lost_first_attempt(
     def fake_repair_prompt(**_kwargs) -> str:
         return "ownership-map contract"
 
-    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    _patch_stages(monkeypatch, "get_conn", lambda: _NoCacheConnection())
     monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(
-        stages, "validate_narrative_blueprint_shard", repairable_once
-    )
-    monkeypatch.setattr(
-        stages, "_blueprint_state_subject_repair_issues", fake_repair_issues
-    )
-    monkeypatch.setattr(
-        stages, "_blueprint_state_subject_repair_prompt", fake_repair_prompt
-    )
-    monkeypatch.setattr(
-        stages, "_blueprint_state_subject_repair_target_keys",
-        lambda _issues: ["SRC0001:unit:001"],
-    )
-    monkeypatch.setattr(
-        stages, "apply_blueprint_state_subject_ownership_patch",
-        lambda previous_candidate, _patch, **_kwargs: (
+    _patch_stages(monkeypatch, "validate_narrative_blueprint_shard", repairable_once)
+    _patch_stages(monkeypatch, "_blueprint_state_subject_repair_issues", fake_repair_issues)
+    _patch_stages(monkeypatch, "_blueprint_state_subject_repair_prompt", fake_repair_prompt)
+    _patch_stages(monkeypatch, "_blueprint_state_subject_repair_target_keys", lambda _issues: ["SRC0001:unit:001"])
+    _patch_stages(monkeypatch, "apply_blueprint_state_subject_ownership_patch", lambda previous_candidate, _patch, **_kwargs: (
             stages.NarrativeBlueprintShard.model_validate(previous_candidate)
-        ),
-    )
-    monkeypatch.setattr(
-        stages, "BlueprintStateSubjectOwnershipPatch",
-        SimpleNamespace(model_validate=lambda payload: payload),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        stages, "validate_narrative_blueprint", lambda *_a, **_k: []
-    )
-    monkeypatch.setattr(
-        stages, "derive_blueprint_scene_plans", lambda *_a, **_k: []
-    )
+        ))
+    _patch_stages(monkeypatch, "BlueprintStateSubjectOwnershipPatch", SimpleNamespace(model_validate=lambda payload: payload), raising=False)
+    _patch_stages(monkeypatch, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    _patch_stages(monkeypatch, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
     monkeypatch.setattr(
         "app.evidence.repository.create_artifact",
         lambda *_args, **_kwargs: None,

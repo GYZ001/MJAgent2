@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.capabilities import ensure_catalog_loaded
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.bus import reset_command_bus_for_tests
 from app.capabilities.dispatch import dispatch, waiting_approval_payload
 from app.capabilities.policy import reset_approvals_for_tests
@@ -32,8 +32,11 @@ def _ready(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_agent_initiator_waits_for_approval_on_delete():
+    # project.delete 现在是软删除（NEVER 确认，可在回收站恢复）；这条用例要验
+    # 的"高风险需批准"改由 project.purge（彻底清理，R3_DESTRUCTIVE + ALWAYS）
+    # 撑起。
     result = await dispatch(
-        "project.delete",
+        "project.purge",
         {"project_id": "proj_x", "idempotency_key": "a1"},
         initiator="agent",
     )
@@ -44,7 +47,7 @@ async def test_agent_initiator_waits_for_approval_on_delete():
 async def test_ui_initiator_does_not_auto_approve_high_risk():
     """P0：页面 initiator 也不能同请求内自动签发并消费批准令牌。"""
     result = await dispatch(
-        "project.delete",
+        "project.purge",
         {"project_id": "proj_x", "idempotency_key": "u1"},
         initiator="ui",
     )
@@ -70,18 +73,18 @@ async def test_ui_can_execute_after_explicit_approval_token(monkeypatch):
     from dataclasses import replace
 
     registry = get_registry()
-    registry.commands["project.delete"] = replace(
-        registry.get_command("project.delete"), handler=fake_handler
+    registry.commands["project.purge"] = replace(
+        registry.get_command("project.purge"), handler=fake_handler
     )
 
     waiting = await dispatch(
-        "project.delete",
+        "project.purge",
         {"project_id": "proj_x", "idempotency_key": "u2"},
         initiator="ui",
     )
     assert waiting.status == CommandStatus.WAITING_APPROVAL
     approved = await dispatch(
-        "project.delete",
+        "project.purge",
         {
             "project_id": "proj_x",
             "idempotency_key": "u2-exec",

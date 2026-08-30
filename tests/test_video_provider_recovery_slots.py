@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from app import db, worker
+from tests.conftest import patch_worker_everywhere
 from app.completion_grant import ensure_video_budget_authority_tables
 from app.orchestration import media_scheduler
 
@@ -379,9 +380,9 @@ def test_restart_polls_both_accepted_tasks_and_quarantines_late_result(
         "UPDATE shots SET adopted_version_id='version-owner' WHERE id='shot'"
     )
     conn.commit()
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "_poll_queue", asyncio.Queue())
+    patch_worker_everywhere(monkeypatch, "_poll_queue", asyncio.Queue())
 
     stopped = media_scheduler.request_cancel(
         "job-history",
@@ -409,8 +410,8 @@ def test_restart_polls_both_accepted_tasks_and_quarantines_late_result(
         if queue is worker._poll_queue:
             dispatched.append(job_id)
 
-    monkeypatch.setattr(worker, "_queue_job", capture_queue)
-    monkeypatch.setattr(worker, "_poll_worker_target", 2)
+    patch_worker_everywhere(monkeypatch, "_queue_job", capture_queue)
+    patch_worker_everywhere(monkeypatch, "_poll_worker_target", 2)
 
     dispatch = worker._dispatch_due_jobs_legacy()
 
@@ -453,21 +454,19 @@ def test_restart_polls_both_accepted_tasks_and_quarantines_late_result(
     from app.media_pipeline import concurrency, stage_state
 
     monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
-    monkeypatch.setattr(
-        worker,
+    patch_worker_everywhere(monkeypatch,
         "_authority_checks_can_use_worker_thread",
         lambda _conn=None: False,
     )
-    monkeypatch.setattr(worker, "_assert_job_lease", lambda *_args, **_kwargs: None)
+    patch_worker_everywhere(monkeypatch, "_assert_job_lease", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(worker.hiagent, "poll_video_task", poll_video_task)
     monkeypatch.setattr(worker.hiagent, "download", download)
     monkeypatch.setattr(worker.hiagent, "create_video_task", reject_create)
     monkeypatch.setattr(concurrency, "semaphore_for", lambda _resource: Permit())
     monkeypatch.setattr(concurrency, "report_healthy", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(stage_state, "set_pipeline_stage", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(worker, "mark_media_job_state", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        worker,
+    patch_worker_everywhere(monkeypatch, "mark_media_job_state", lambda *_args, **_kwargs: None)
+    patch_worker_everywhere(monkeypatch,
         "reconcile_episode_generation_status",
         lambda *_args, **_kwargs: None,
     )

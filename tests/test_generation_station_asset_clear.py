@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from app import artifacts, completion_grant, db
+from tests.conftest import patch_worker_everywhere, patch_api_everywhere
 from app.capabilities.direct import enter_handler
 
 
@@ -765,7 +766,7 @@ def test_confirmed_technical_resubmission_closes_old_liability_and_can_clear(
     tmp_path,
     monkeypatch,
 ) -> None:
-    from app import monitoring, system_api, worker
+    from app import monitoring, system_api
 
     conn = _database()
     _seed_unsettled_provider_task(
@@ -795,7 +796,7 @@ def test_confirmed_technical_resubmission_closes_old_liability_and_can_clear(
     conn.commit()
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", tmp_path / "projects")
 
@@ -1032,7 +1033,7 @@ def test_shot_clear_rejects_provider_risk_before_stopping_recoverable_job(
     tmp_path,
     monkeypatch,
 ) -> None:
-    from app import api, worker
+    from app import api
 
     conn = _database()
     _seed_unsettled_provider_task(
@@ -1041,15 +1042,13 @@ def test_shot_clear_rejects_provider_risk_before_stopping_recoverable_job(
         claim_status="accepted",
         provider_task_id="provider-task-1",
     )
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch,
         "_review_upstream_snapshot",
         lambda _episode_id: {"active_upstream_runs": []},
     )
     stop_calls: list[str] = []
-    monkeypatch.setattr(
-        worker,
+    patch_worker_everywhere(monkeypatch,
         "stop_shot_video_tasks",
         lambda shot_id: stop_calls.append(shot_id),
     )
@@ -1072,7 +1071,7 @@ def test_episode_clear_rejects_provider_risk_before_reset_or_pause(
     tmp_path,
     monkeypatch,
 ) -> None:
-    from app import api, worker
+    from app import api
 
     conn = _database()
     _seed_unsettled_provider_task(
@@ -1081,9 +1080,8 @@ def test_episode_clear_rejects_provider_risk_before_reset_or_pause(
         claim_status="accepted",
         provider_task_id="provider-task-1",
     )
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch,
         "_review_upstream_snapshot",
         lambda _episode_id: {"active_upstream_runs": []},
     )
@@ -1094,9 +1092,8 @@ def test_episode_clear_rejects_provider_risk_before_reset_or_pause(
         reset_calls.append(f"{episode_id}:{reason}")
         return {}
 
-    monkeypatch.setattr(api, "reset_video_completion_state", record_reset)
-    monkeypatch.setattr(
-        worker,
+    patch_api_everywhere(monkeypatch, "reset_video_completion_state", record_reset)
+    patch_worker_everywhere(monkeypatch,
         "pause_episode_video_tasks",
         lambda episode_id: pause_calls.append(episode_id),
     )

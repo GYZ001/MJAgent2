@@ -9,13 +9,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from app import api, db, planning, task_registry
-from app.capabilities import attachments, ensure_catalog_loaded
+from app.capabilities import attachments
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.bus import reset_command_bus_for_tests, set_request_approval_token
 from app.capabilities.handlers import project as project_handler
 from app.capabilities.inputs import ProjectImportNovelInput
 from app.capabilities.policy import reset_approvals_for_tests
 from app.local_session import APPROVAL_HEADER, ensure_session_secret, set_request_session_id
-from tests.conftest import SessionTestClient
+from tests.conftest import SessionTestClient, patch_api_everywhere
 
 
 def _epub_bytes() -> bytes:
@@ -107,7 +108,7 @@ def test_import_reuses_attachment_token_after_approval(
         started["plan_project_id"] = project_id
         return {"status": "running", "planner": "regex", "rule": "one_chapter_one_episode"}
 
-    monkeypatch.setattr(api, "_start_bible_core", fake_start_bible)
+    patch_api_everywhere(monkeypatch, "_start_bible_core", fake_start_bible)
     monkeypatch.setattr(planning, "start_plan", fake_start_plan)
     upload = client.post(
         "/api/attachments/novel",
@@ -164,7 +165,7 @@ def test_legacy_multipart_import_reuses_upload_across_approval(
         return {"status": "running", "task_id": f"bible:{project_id}"}
 
     monkeypatch.setattr(planning, "start_plan", fake_start_plan)
-    monkeypatch.setattr(api, "_start_bible_core", fake_start_bible)
+    patch_api_everywhere(monkeypatch, "_start_bible_core", fake_start_bible)
     file_payload = {
         "file": ("legacy.txt", "第一章 兼容入口\n正文内容。".encode(), "text/plain")
     }
@@ -199,7 +200,7 @@ def test_import_keeps_attachment_available_when_project_creation_fails(
         return {"status": "running", "task_id": f"bible:{project_id}"}
 
     monkeypatch.setattr(planning, "start_plan", fake_start_plan)
-    monkeypatch.setattr(api, "_start_bible_core", fake_start_bible)
+    patch_api_everywhere(monkeypatch, "_start_bible_core", fake_start_bible)
     upload = client.post(
         "/api/attachments/novel",
         files={"file": ("retry.txt", "第一章 重试\n正文仍在。".encode(), "text/plain")},
@@ -210,7 +211,7 @@ def test_import_keeps_attachment_available_when_project_creation_fails(
     def fail_create(*_args, **_kwargs):
         raise HTTPException(503, "数据库暂时不可用")
 
-    monkeypatch.setattr(api, "_create_project_core", fail_create)
+    patch_api_everywhere(monkeypatch, "_create_project_core", fail_create)
     failed = client.post(
         "/api/projects/import",
         json=args,
@@ -219,7 +220,7 @@ def test_import_keeps_attachment_available_when_project_creation_fails(
     assert failed.status_code == 503
     assert db.get_conn().execute("SELECT COUNT(*) AS c FROM projects").fetchone()["c"] == 0
 
-    monkeypatch.setattr(api, "_create_project_core", original_create)
+    patch_api_everywhere(monkeypatch, "_create_project_core", original_create)
     retry_waiting = client.post("/api/projects/import", json=args)
     retried = client.post(
         "/api/projects/import",
@@ -247,7 +248,7 @@ def test_import_reports_paid_asset_bootstrap_as_waiting_confirmation(
         )
 
     monkeypatch.setattr(planning, "start_plan", fake_start_plan)
-    monkeypatch.setattr(api, "_start_bible_core", require_payment)
+    patch_api_everywhere(monkeypatch, "_start_bible_core", require_payment)
     upload = client.post(
         "/api/attachments/novel",
         files={"file": ("paid.txt", "第一章 开始\n这是正文。".encode(), "text/plain")},
@@ -291,7 +292,7 @@ async def test_import_receipt_recovers_project_after_attachment_store_is_lost(
         return {"status": "running", "task_id": f"bible:{project_id}"}
 
     monkeypatch.setattr(planning, "start_plan", fake_start_plan)
-    monkeypatch.setattr(api, "_start_bible_core", fake_start_bible)
+    patch_api_everywhere(monkeypatch, "_start_bible_core", fake_start_bible)
 
     result = await project_handler.import_novel(
         ProjectImportNovelInput(attachment_token=token, name="重启恢复项目")
@@ -386,8 +387,8 @@ def test_create_project_rolls_back_partial_rows(monkeypatch) -> None:
             {"idx": 1, "title": "第二章", "content": "正文二"},
         ],
     }
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "ingest_novel", lambda _raw: duplicate_report)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "ingest_novel", lambda _raw: duplicate_report)
 
     with pytest.raises(sqlite3.IntegrityError):
         api._create_project_core("事务测试", "story.txt", b"valid novel")

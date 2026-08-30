@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import config, db
-from app.capabilities import ensure_catalog_loaded
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.bus import reset_command_bus_for_tests
 from app.capabilities.dispatch import waiting_approval_payload
 from app.capabilities.policy import reset_approvals_for_tests

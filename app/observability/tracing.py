@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
-from app.db import new_id
+
+def _new_trace_id() -> str:
+    """Same shape as ``app.db.new_id("trace")`` without importing app.db.
+
+    app.db imports ``current_trace`` from this module (see ``log_provider_call``);
+    this module used to import ``new_id`` back from app.db, a two-module cycle
+    that pulled both into the 112-module strongly connected component (see
+    docs/coupling_review_2026-08-29.md 第2步 item 4). Trace IDs are opaque
+    identifiers with no uniqueness relationship to any other app.db-minted ID,
+    so inlining the same ``f"{prefix}_{uuid4().hex[:12]}"`` shape here is a
+    like-for-like substitution, not a new format.
+    """
+    return f"trace_{uuid.uuid4().hex[:12]}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +55,7 @@ def bind_trace(
     context = TraceContext(
         run_id=run_id,
         step_run_id=step_run_id,
-        trace_id=trace_id or new_id("trace"),
+        trace_id=trace_id or _new_trace_id(),
     )
     token = _TRACE.set(context)
     try:
@@ -82,7 +95,7 @@ def set_worker_trace(run_id: str | None, step_run_id: str | None) -> TraceContex
     context = TraceContext(
         run_id=str(run_id) if run_id else None,
         step_run_id=str(step_run_id) if step_run_id else None,
-        trace_id=new_id("trace") if run_id else None,
+        trace_id=_new_trace_id() if run_id else None,
     )
     _TRACE.set(context)
     return context

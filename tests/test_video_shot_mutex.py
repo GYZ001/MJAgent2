@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from app import compiler, db, worker
+from tests.conftest import patch_worker_everywhere
 from app.schemas import Bible, Character, World
 
 
@@ -70,9 +71,9 @@ def _patch_enqueue_runtime(
     monkeypatch: pytest.MonkeyPatch,
     conn: sqlite3.Connection,
 ) -> None:
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.media_scheduler, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    patch_worker_everywhere(monkeypatch, "ensure_media_trace", lambda **_kwargs: (None, None))
     monkeypatch.setattr(
         compiler,
         "compile_prompt",
@@ -83,7 +84,7 @@ def _patch_enqueue_runtime(
         "reserve_budget",
         lambda *_args, **_kwargs: True,
     )
-    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
 
 def _create_file_database(path: Path) -> None:
@@ -123,8 +124,8 @@ def test_preflight_claim_is_database_atomic_across_human_and_supervisor(
             barrier.wait(timeout=2)
         return real_new_id(prefix)
 
-    monkeypatch.setattr(worker, "get_conn", thread_conn)
-    monkeypatch.setattr(worker, "new_id", synchronized_new_id)
+    patch_worker_everywhere(monkeypatch, "get_conn", thread_conn)
+    patch_worker_everywhere(monkeypatch, "new_id", synchronized_new_id)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [
@@ -248,7 +249,7 @@ def test_trace_failure_cannot_commit_orphan_active_version(
         conn.commit()
         raise RuntimeError("trace persistence interrupted")
 
-    monkeypatch.setattr(worker, "ensure_media_trace", fail_after_commit)
+    patch_worker_everywhere(monkeypatch, "ensure_media_trace", fail_after_commit)
 
     with pytest.raises(RuntimeError, match="trace persistence interrupted"):
         worker.enqueue_shot("s1")

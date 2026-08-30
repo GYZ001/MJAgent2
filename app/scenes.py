@@ -2076,7 +2076,7 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
     没有 screenplay 场景结构”时的等价复用：调用同一批 assess_new_scene /
     _append_scene_to_bible / _append_scene_alias / _ensure_reactive_scene_image，
     不重复其判定逻辑。不含该函数的②已入库场景状态演进探测（损毁/重建等）——那仍是
-    分镜前维护职责，本函数的调用方（剧本台）不需要，也拿不到②所需的 screenplay/
+    分镜前维护职责，本函数的调用方（映射台）不需要，也拿不到②所需的 screenplay/
     summary_by_heading 输入。
     """
     conn = get_conn()

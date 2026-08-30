@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from app import api, db, hiagent, portraits, screenplay_scene_shards, stages
+from app import db, hiagent, portraits, stages
 from app import errors as app_errors
 from app.harness import model_gateway
 from app.narrative_blueprint import NarrativeBlueprint
@@ -17,6 +17,10 @@ from app.schemas import (Bible, Character, CharacterAlias, EpisodeScreenplay,
                          NarrativeContinuityPlan, NarrativeIdentityContract,
                          PlotSpine, PlotSpineBeat, ScriptScene,
                          VoiceCanonical, World)
+from tests.conftest import (
+    patch_portraits_everywhere,
+    patch_screenplay_scene_shards_everywhere,
+)
 
 
 def _current_identity_wire(
@@ -1444,20 +1448,20 @@ def test_generic_discovery_rejects_legacy_coverage_cache(
         artifacts.append(dict(artifact.content))
         return {"id": f"artifact-{len(artifacts)}"}
 
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
-    monkeypatch.setattr(portraits, "get_setting", lambda *_args: "true")
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_setting", lambda *_args: "true")
+    patch_portraits_everywhere(
+        monkeypatch,
         "extract_current_identity_candidates",
         fake_current,
     )
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "resolve_future_identity_candidates",
         fake_future,
     )
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "audit_identity_coverage_from_structural_evidence",
         fake_coverage,
     )
@@ -1562,10 +1566,10 @@ def test_generic_discovery_keeps_current_contract_cache_compatible(
     async def forbidden_provider(*_args, **_kwargs):
         raise AssertionError("current contract cache should remain compatible")
 
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
-    monkeypatch.setattr(portraits, "get_setting", lambda *_args: "true")
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_setting", lambda *_args: "true")
+    patch_portraits_everywhere(
+        monkeypatch,
         "extract_current_identity_candidates",
         forbidden_provider,
     )
@@ -1638,16 +1642,16 @@ def test_generic_discovery_rejects_tampered_validated_artifact_content(
     async def passthrough(candidates, **_kwargs):
         return candidates
 
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
-    monkeypatch.setattr(portraits, "get_setting", lambda *_args: "true")
-    monkeypatch.setattr(
-        portraits, "extract_current_identity_candidates", fresh_current,
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_setting", lambda *_args: "true")
+    patch_portraits_everywhere(
+        monkeypatch, "extract_current_identity_candidates", fresh_current,
     )
-    monkeypatch.setattr(
-        portraits, "resolve_future_identity_candidates", passthrough,
+    patch_portraits_everywhere(
+        monkeypatch, "resolve_future_identity_candidates", passthrough,
     )
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "audit_identity_coverage_from_structural_evidence",
         passthrough,
     )
@@ -1742,10 +1746,10 @@ def test_generic_discovery_reuses_sealed_structural_applied_artifact(
     async def forbidden(*_args, **_kwargs):
         raise AssertionError("sealed structural-applied cache should be reused")
 
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
-    monkeypatch.setattr(portraits, "get_setting", lambda *_args: "true")
-    monkeypatch.setattr(
-        portraits, "extract_current_identity_candidates", forbidden,
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_setting", lambda *_args: "true")
+    patch_portraits_everywhere(
+        monkeypatch, "extract_current_identity_candidates", forbidden,
     )
 
     result = asyncio.run(portraits.discover_character_candidates(
@@ -1823,16 +1827,16 @@ def test_generic_discovery_rejects_attempt15_previous_contract_cache(
         phases.append("coverage")
         return candidates
 
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
-    monkeypatch.setattr(portraits, "get_setting", lambda *_args: "true")
-    monkeypatch.setattr(
-        portraits, "extract_current_identity_candidates", fresh_current,
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_setting", lambda *_args: "true")
+    patch_portraits_everywhere(
+        monkeypatch, "extract_current_identity_candidates", fresh_current,
     )
-    monkeypatch.setattr(
-        portraits, "resolve_future_identity_candidates", fresh_future,
+    patch_portraits_everywhere(
+        monkeypatch, "resolve_future_identity_candidates", fresh_future,
     )
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "audit_identity_coverage_from_structural_evidence",
         fresh_coverage,
     )
@@ -1905,13 +1909,13 @@ def test_structural_coverage_parse_failure_stops_before_scene_writing(
         raise AssertionError("coverage failure reached scene writing")
 
     monkeypatch.setattr(model_gateway, "chat", malformed_provider)
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "ensure_structural_identity_coverage",
         coverage_without_persistence,
     )
-    monkeypatch.setattr(
-        screenplay_scene_shards,
+    patch_screenplay_scene_shards_everywhere(
+        monkeypatch,
         "generate_screenplay_scene_shards",
         forbidden_scene_writing,
     )
@@ -2014,13 +2018,13 @@ def test_current_synthetic_resolution_cannot_suppress_blueprint_coverage(
         downstream.append("scene-writing")
         raise AssertionError("synthetic participant skipped coverage")
 
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "ensure_structural_identity_coverage",
         assert_coverage,
     )
-    monkeypatch.setattr(
-        screenplay_scene_shards,
+    patch_screenplay_scene_shards_everywhere(
+        monkeypatch,
         "generate_screenplay_scene_shards",
         forbidden_scene,
     )
@@ -2114,13 +2118,13 @@ def test_reference_identity_cannot_hide_visible_blueprint_participant(
         downstream.append("scene")
         raise AssertionError("non-materializable reference reached scene")
 
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "ensure_structural_identity_coverage",
         forbidden_coverage,
     )
-    monkeypatch.setattr(
-        screenplay_scene_shards,
+    patch_screenplay_scene_shards_everywhere(
+        monkeypatch,
         "generate_screenplay_scene_shards",
         forbidden_scene,
     )
@@ -2167,9 +2171,9 @@ def _seed_project(conn: sqlite3.Connection, chapter_content: str) -> None:
 
 def _patch_settings(monkeypatch, conn) -> dict:
     settings: dict[str, str] = {}
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
-    monkeypatch.setattr(portraits, "get_setting", lambda k: settings.get(k))
-    monkeypatch.setattr(portraits, "set_setting", lambda k, v: settings.__setitem__(k, v))
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_setting", lambda k: settings.get(k))
+    patch_portraits_everywhere(monkeypatch, "set_setting", lambda k, v: settings.__setitem__(k, v))
     return settings
 
 
@@ -2188,8 +2192,8 @@ def test_ensure_character_card_auto_adds_prominent_character_and_portrait(monkey
     async def fake_portrait(project_id, name, style, appearance, *, ep_start):
         return (f"/tmp/{name}.jpg", "fake prompt")
 
-    monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
-    monkeypatch.setattr(portraits, "_generate_fresh_portrait", fake_portrait)
+    patch_portraits_everywhere(monkeypatch, "assess_new_character", fake_assess)
+    patch_portraits_everywhere(monkeypatch, "_generate_fresh_portrait", fake_portrait)
 
     res = asyncio.run(portraits.ensure_character_card("p1", "蛇后", 21))
     assert res["status"] == "added"
@@ -2236,7 +2240,7 @@ def test_required_identity_card_accepts_complete_card_despite_importance_vote(
             "relationships": [],
         }
 
-    monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
+    patch_portraits_everywhere(monkeypatch, "assess_new_character", fake_assess)
 
     result = asyncio.run(portraits.ensure_character_card(
         "p1",
@@ -2426,9 +2430,9 @@ def test_ensure_character_card_keeps_auto_added_card_when_portrait_fails(monkeyp
         portrait_calls += 1
         raise RuntimeError("provider unavailable")
 
-    monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
-    monkeypatch.setattr(portraits, "_generate_fresh_portrait", boom)
-    monkeypatch.setattr(portraits, "code_ref", lambda *_args, **_kwargs: "（测试错误）")
+    patch_portraits_everywhere(monkeypatch, "assess_new_character", fake_assess)
+    patch_portraits_everywhere(monkeypatch, "_generate_fresh_portrait", boom)
+    patch_portraits_everywhere(monkeypatch, "code_ref", lambda *_args, **_kwargs: "（测试错误）")
 
     res = asyncio.run(portraits.ensure_character_card("p1", "蛇后", 21))
     assert res["status"] == "added" and res["has_portrait"] is False
@@ -2476,8 +2480,8 @@ def test_existing_pending_character_is_auto_applied_without_reassessment(monkeyp
         assert name == "葛叶" and ep_start == 5
         return ("/tmp/葛叶.jpg", "fake prompt")
 
-    monkeypatch.setattr(portraits, "assess_new_character", forbidden_assess)
-    monkeypatch.setattr(portraits, "_generate_fresh_portrait", fake_portrait)
+    patch_portraits_everywhere(monkeypatch, "assess_new_character", forbidden_assess)
+    patch_portraits_everywhere(monkeypatch, "_generate_fresh_portrait", fake_portrait)
 
     result = asyncio.run(portraits.ensure_character_card("p1", "葛叶", 5))
 
@@ -2544,9 +2548,9 @@ def test_auto_discovered_character_pack_starts_at_first_appearance(tmp_path, mon
         pack_calls.append(kwargs)
         return {"status": "ready", "portrait_id": kwargs["portrait_id"]}
 
-    monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
-    monkeypatch.setattr(portraits, "_generate_fresh_portrait", fake_portrait)
-    monkeypatch.setattr(portraits, "_review_portrait_asset", fake_review)
+    patch_portraits_everywhere(monkeypatch, "assess_new_character", fake_assess)
+    patch_portraits_everywhere(monkeypatch, "_generate_fresh_portrait", fake_portrait)
+    patch_portraits_everywhere(monkeypatch, "_review_portrait_asset", fake_review)
     monkeypatch.setattr("app.multiview.ensure_character_multiview_pack", fake_pack)
 
     result = asyncio.run(portraits.ensure_character_card("p1", "葛叶", 5))
@@ -2572,7 +2576,7 @@ def test_minor_character_is_skipped_and_negatively_cached(monkeypatch) -> None:
         return {"subject_kind": "person", "important": False, "reason": "路人", "role": "重要配角",
                 "appearance_canonical": "", "personality": "", "speech_style": "", "relationships": []}
 
-    monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
+    patch_portraits_everywhere(monkeypatch, "assess_new_character", fake_assess)
 
     res = asyncio.run(portraits.ensure_character_card("p1", "路人甲", 21))
     assert res["status"] == "skipped_minor"
@@ -2594,7 +2598,7 @@ def test_ensure_cards_for_screenplay_blocks_unknown_names_without_building_cards
         seen.append((name, episode_no))
         return {"status": "added", "name": name, "has_portrait": True}
 
-    monkeypatch.setattr(portraits, "ensure_character_card", fake_ensure)
+    patch_portraits_everywhere(monkeypatch, "ensure_character_card", fake_ensure)
 
     class _Scene:
         def __init__(self, chars): self.characters = chars
@@ -2636,8 +2640,8 @@ def test_ensure_cards_for_screenplay_redraws_on_appearance_drift(monkeypatch) ->
         assert base_path == "/tmp/xiao_ep1.jpg" and ep_start == 21  # 以旧图为底、新段从本集起
         return (f"/tmp/{name}_ep{ep_start}.jpg", "redraw prompt")
 
-    monkeypatch.setattr(portraits, "screen_appearance_changes", fake_screen)
-    monkeypatch.setattr(portraits, "_redraw_portrait", fake_redraw)
+    patch_portraits_everywhere(monkeypatch, "screen_appearance_changes", fake_screen)
+    patch_portraits_everywhere(monkeypatch, "_redraw_portrait", fake_redraw)
 
     class _Scene:
         def __init__(self, chars): self.characters = chars
@@ -2676,7 +2680,7 @@ def test_no_drift_redraw_when_portrait_starts_at_or_after_this_episode(monkeypat
         calls["screen"] += 1
         return {}
 
-    monkeypatch.setattr(portraits, "screen_appearance_changes", fake_screen)
+    patch_portraits_everywhere(monkeypatch, "screen_appearance_changes", fake_screen)
 
     class _Scene:
         def __init__(self, chars): self.characters = chars
@@ -2705,7 +2709,7 @@ def test_ensure_cards_backfills_identical_ready_future_portrait(
     async def unexpected_screen(*_args, **_kwargs):
         raise AssertionError("向前扩展相同完整包后不应再判外观漂移")
 
-    monkeypatch.setattr(portraits, "screen_appearance_changes", unexpected_screen)
+    patch_portraits_everywhere(monkeypatch, "screen_appearance_changes", unexpected_screen)
 
     class _Scene:
         characters = ["甲一"]
@@ -3052,7 +3056,7 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
         return {"status": "added", "name": name, "has_portrait": False, "portrait_deferred": True}
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(portraits, "ensure_character_card", fake_ensure)
+    patch_portraits_everywhere(monkeypatch, "ensure_character_card", fake_ensure)
     bible = Bible.model_validate(json.loads(
         conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]
     ))
@@ -3546,12 +3550,12 @@ def test_attempt12_invalid_future_decision_is_one_call_and_zero_downstream(
         downstream.append("coverage")
         raise AssertionError("invalid future identity reached coverage")
 
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
-    monkeypatch.setattr(
-        portraits, "extract_current_identity_candidates", fake_current,
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_portraits_everywhere(
+        monkeypatch, "extract_current_identity_candidates", fake_current,
     )
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "audit_identity_coverage_from_structural_evidence",
         forbidden_coverage,
     )
@@ -3959,8 +3963,8 @@ def test_attempt14_call_63221_old_functional_bible_name_fails_once(
         raise AssertionError("old 63221 classification reached future")
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "resolve_future_identity_candidates",
         forbidden_future,
     )
@@ -4281,15 +4285,15 @@ def test_current_identity_rf11_manual_alias_cannot_reach_card_materialization(
         card_calls += 1
         raise AssertionError("non-Bible K alias reached card materialization")
 
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
-    monkeypatch.setattr(portraits, "get_setting", lambda *_args: "true")
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_setting", lambda *_args: "true")
+    patch_portraits_everywhere(
+        monkeypatch,
         "_future_chapter_context",
         lambda *_args, **_kwargs: ("", ""),
     )
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(portraits, "ensure_character_card", forbidden_card)
+    patch_portraits_everywhere(monkeypatch, "ensure_character_card", forbidden_card)
 
     with pytest.raises(
         model_gateway.StructuredSemanticError,
@@ -4353,15 +4357,15 @@ def test_current_identity_rf11_manual_alias_mentioned_persists_one_authority(
     async def forbidden_card(*_args, **_kwargs):
         raise AssertionError("mentioned K alias must not materialize a card")
 
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
-    monkeypatch.setattr(portraits, "get_setting", lambda *_args: "true")
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_setting", lambda *_args: "true")
+    patch_portraits_everywhere(
+        monkeypatch,
         "_future_chapter_context",
         lambda *_args, **_kwargs: ("", ""),
     )
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(portraits, "ensure_character_card", forbidden_card)
+    patch_portraits_everywhere(monkeypatch, "ensure_character_card", forbidden_card)
 
     result = asyncio.run(portraits.ensure_cards_for_text(
         "p1",
@@ -4446,13 +4450,13 @@ def test_bible_authority_alias_can_materialize_and_freeze_one_authority(
             "portrait_deferred": True,
         }
 
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_portraits_everywhere(
+        monkeypatch,
         "_future_chapter_context",
         lambda *_args, **_kwargs: ("", ""),
     )
-    monkeypatch.setattr(portraits, "ensure_character_card", fake_card)
+    patch_portraits_everywhere(monkeypatch, "ensure_character_card", fake_card)
     result = asyncio.run(portraits.ensure_cards_for_text(
         "p1",
         1,
@@ -4537,9 +4541,9 @@ def test_materialized_bible_alias_k_never_upgrades_manual_authority(
             appearance_canonical="白发老者，道袍简洁，神情威严",
         )],
     )
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_portraits_everywhere(
+        monkeypatch,
         "_future_chapter_context",
         lambda *_args, **_kwargs: ("", ""),
     )
@@ -5341,8 +5345,8 @@ def test_current_identity_rf11_rejects_unbound_provider_output_once(
         raise AssertionError("invalid current wire reached future")
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "resolve_future_identity_candidates",
         forbidden_future,
     )
@@ -5636,8 +5640,8 @@ def test_current_functional_cannot_claim_reserved_authority_label_once(
         raise AssertionError("reserved functional result reached future")
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "resolve_future_identity_candidates",
         forbidden_future,
     )
@@ -5712,8 +5716,8 @@ def test_current_identity_cross_batch_prior_reuse_keeps_onscreen_receipt(
     source_text = "守卫在山门外被提及。\n\n守卫冲上前拦路。"
     records = portraits._current_identity_evidence_records(source_text)
     assert len(records) == 2
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "_current_identity_evidence_batches",
         lambda *_args, **_kwargs: [[records[0]], [records[1]]],
     )
@@ -5768,8 +5772,8 @@ def test_current_identity_cross_batch_alias_explicitly_reuses_prior_group(
     source_text = "王伯在铺子里忙碌。\n\n王老伯后来关上了铺门。"
     records = portraits._current_identity_evidence_records(source_text)
     assert len(records) == 2
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "_current_identity_evidence_batches",
         lambda *_args, **_kwargs: [[records[0]], [records[1]]],
     )
@@ -5812,8 +5816,8 @@ def test_current_identity_cross_batch_same_label_new_group_fails_once(
 ) -> None:
     source_text = "守卫在山门外。\n\n守卫又走到殿前。"
     records = portraits._current_identity_evidence_records(source_text)
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "_current_identity_evidence_batches",
         lambda *_args, **_kwargs: [[records[0]], [records[1]]],
     )
@@ -5852,8 +5856,8 @@ def test_current_identity_cross_batch_registered_alias_uses_only_k(
 ) -> None:
     source_text = "本章提到师尊的戒律。\n\n弟子再次谈到师尊。"
     records = portraits._current_identity_evidence_records(source_text)
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "_current_identity_evidence_batches",
         lambda *_args, **_kwargs: [[records[0]], [records[1]]],
     )
@@ -6496,7 +6500,7 @@ def test_unresolved_descriptive_people_keep_source_labels(monkeypatch) -> None:
         raise AssertionError("过渡称谓不得建人物卡")
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(portraits, "ensure_character_card", forbidden_ensure)
+    patch_portraits_everywhere(monkeypatch, "ensure_character_card", forbidden_ensure)
     bible = Bible.model_validate(json.loads(
         conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]
     ))
@@ -6530,7 +6534,7 @@ def test_mentioned_named_identity_gets_authority_without_character_card(
     async def forbidden_ensure(*_args, **_kwargs):
         raise AssertionError("仅内容归属身份不得创建人物卡")
 
-    monkeypatch.setattr(portraits, "ensure_character_card", forbidden_ensure)
+    patch_portraits_everywhere(monkeypatch, "ensure_character_card", forbidden_ensure)
     bible = Bible.model_validate(json.loads(
         conn.execute(
             "SELECT bible_json FROM projects WHERE id='p1'"
@@ -6583,8 +6587,8 @@ def test_confirmed_real_name_is_not_downgraded_to_route_extra(monkeypatch) -> No
         assert kwargs["require_identity_card"] is True
         return {"status": "skipped_minor", "name": "丁力", "reason": "戏份少"}
 
-    monkeypatch.setattr(portraits, "discover_character_candidates", fake_candidates)
-    monkeypatch.setattr(portraits, "ensure_character_card", incomplete_card)
+    patch_portraits_everywhere(monkeypatch, "discover_character_candidates", fake_candidates)
+    patch_portraits_everywhere(monkeypatch, "ensure_character_card", incomplete_card)
     bible = Bible.model_validate(json.loads(
         conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]
     ))
@@ -7642,8 +7646,8 @@ def test_attempt16_old_rf10_wire_fails_once_before_downstream(monkeypatch) -> No
         raise AssertionError("old RF10 wire reached downstream")
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(
+        monkeypatch,
         "resolve_future_identity_candidates",
         forbidden_future,
     )
@@ -8023,10 +8027,10 @@ def test_legacy_generic_cache_rejects_tampered_typed_v2_bundle(
             "kind": "onscreen",
         }]
 
-    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
-    monkeypatch.setattr(portraits, "get_setting", lambda *_args: "false")
-    monkeypatch.setattr(
-        portraits,
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_setting", lambda *_args: "false")
+    patch_portraits_everywhere(
+        monkeypatch,
         "_discover_character_candidates_legacy",
         fresh_legacy,
     )
@@ -10261,7 +10265,7 @@ def test_non_person_never_enters_the_character_bible(
     async def fake_assess(*_args, **_kwargs):
         return _non_person_verdict(subject_kind, name)
 
-    monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
+    patch_portraits_everywhere(monkeypatch, "assess_new_character", fake_assess)
 
     result = asyncio.run(portraits.ensure_character_card("p1", name, 21))
 
@@ -10288,7 +10292,7 @@ def test_confirmed_real_name_cannot_bypass_the_person_gate(monkeypatch) -> None:
     async def fake_assess(*_args, **_kwargs):
         return _non_person_verdict("organization", "靠山宗")
 
-    monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
+    patch_portraits_everywhere(monkeypatch, "assess_new_character", fake_assess)
 
     result = asyncio.run(portraits.ensure_character_card(
         "p1", "靠山宗", 21, require_identity_card=True,
@@ -10338,7 +10342,7 @@ def test_author_pen_name_is_recorded_as_not_a_character(monkeypatch) -> None:
             "relationships": [],
         }
 
-    monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
+    patch_portraits_everywhere(monkeypatch, "assess_new_character", fake_assess)
 
     result = asyncio.run(portraits.ensure_character_card(
         "p1", "耳根", 21, require_identity_card=True,

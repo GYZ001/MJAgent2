@@ -1,4 +1,4 @@
-"""剧本台按钮必须映射到真实的 Baseline / Patch 后端阶段。"""
+"""映射台按钮必须映射到真实的 Baseline / Patch 后端阶段。"""
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +10,7 @@ import pytest
 from fastapi import HTTPException
 
 from app import api, db, stages, task_registry
-from app.capabilities import ensure_catalog_loaded
+from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.direct import enter_handler
 from app.capabilities.registry import get_registry
 from app.evidence import repository
@@ -59,6 +59,7 @@ from app.screenplay_ir import (
     ScreenplayGenerationIR,
 )
 from tests.test_narrative_continuity import _screenplay
+from tests.conftest import patch_api_everywhere
 
 
 @pytest.fixture(autouse=True)
@@ -1158,7 +1159,7 @@ async def test_baseline_rebuild_resume_requires_same_session_single_use_approval
             "mode": "baseline_rebuild",
         }
 
-    monkeypatch.setattr(api, "resume_screenplay", observe_launch)
+    patch_api_everywhere(monkeypatch, "resume_screenplay", observe_launch)
     bus = get_command_bus()
     args = {
         "episode_id": "e1",
@@ -1221,7 +1222,7 @@ async def test_resume_rebases_stale_working_once_and_deduplicates(
 ) -> None:
     old_revision, old_artifact = _incompatible_working_revision()
     conn = db.get_conn()
-    monkeypatch.setattr(api, "_require_harness_engine", lambda _project_id: None)
+    patch_api_everywhere(monkeypatch, "_require_harness_engine", lambda _project_id: None)
     created_recorders: list[str] = []
 
     class Recorder:
@@ -1237,10 +1238,9 @@ async def test_resume_rebases_stale_working_once_and_deduplicates(
     def fake_spawn(_kind, _key, coro, *, project_id=None):
         coro.close()
 
-    monkeypatch.setattr(api, "_new_screenplay_recorder", new_recorder)
+    patch_api_everywhere(monkeypatch, "_new_screenplay_recorder", new_recorder)
     monkeypatch.setattr(task_registry, "spawn", fake_spawn)
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch,
         "_screenplay_task_active",
         lambda _episode_id: (
             conn.execute(
@@ -1616,7 +1616,7 @@ async def test_confirmed_unknown_retry_crosses_handler_api_facade_and_mints_gran
             project_id=project_id,
         )
 
-    monkeypatch.setattr(api, "_screenplay_guarded", observe_worker_authority)
+    patch_api_everywhere(monkeypatch, "_screenplay_guarded", observe_worker_authority)
     monkeypatch.setattr(task_registry, "spawn", observe_spawn)
     ensure_catalog_loaded()
     bus = get_command_bus()
@@ -2604,7 +2604,7 @@ async def test_start_screenplay_replaces_terminal_run_owner(monkeypatch) -> None
         spawned.append((kind, key))
         coro.close()
 
-    monkeypatch.setattr(api, "_new_screenplay_recorder", lambda *args, **kwargs: Recorder())
+    patch_api_everywhere(monkeypatch, "_new_screenplay_recorder", lambda *args, **kwargs: Recorder())
     monkeypatch.setattr(task_registry, "spawn", capture_spawn)
 
     with enter_handler():
@@ -2986,7 +2986,7 @@ async def test_first_screenplay_spawn_failure_restores_state_and_legacy_columns(
         coro.close()
         raise RuntimeError("event loop unavailable")
 
-    monkeypatch.setattr(api, "_new_screenplay_recorder", lambda *args, **kwargs: recorder)
+    patch_api_everywhere(monkeypatch, "_new_screenplay_recorder", lambda *args, **kwargs: recorder)
     monkeypatch.setattr(task_registry, "spawn", fail_spawn)
 
     with enter_handler(), pytest.raises(HTTPException) as exc_info:
@@ -3064,8 +3064,7 @@ async def test_fresh_screenplay_clears_stale_identity_and_legacy_dialogue_select
         )
         coro.close()
 
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch,
         "_new_screenplay_recorder",
         lambda *_args, **_kwargs: Recorder(),
     )
@@ -3113,7 +3112,7 @@ def test_recovery_resumes_repair_interrupted_by_service_restart(monkeypatch) -> 
         coro.close()
         return None
 
-    monkeypatch.setattr(api, "_new_screenplay_recorder", fake_recorder)
+    patch_api_everywhere(monkeypatch, "_new_screenplay_recorder", fake_recorder)
     monkeypatch.setattr(task_registry, "spawn", fake_spawn)
 
     assert api.recover_screenplay_tasks() == 1
@@ -3165,8 +3164,7 @@ def test_recovery_rebases_obsolete_contract_revision(monkeypatch) -> None:
     def fake_spawn(_kind, _key, coro, *, project_id=None):
         coro.close()
 
-    monkeypatch.setattr(
-        api, "_new_screenplay_recorder", lambda *_args, **_kwargs: Recorder(),
+    patch_api_everywhere(monkeypatch, "_new_screenplay_recorder", lambda *_args, **_kwargs: Recorder(),
     )
     monkeypatch.setattr(task_registry, "spawn", fake_spawn)
 
@@ -3246,8 +3244,7 @@ def test_recovery_rebases_legacy_working_artifact(
     def fake_spawn(_kind, _key, coro, *, project_id=None):
         coro.close()
 
-    monkeypatch.setattr(
-        api, "_new_screenplay_recorder", lambda *_args, **_kwargs: Recorder(),
+    patch_api_everywhere(monkeypatch, "_new_screenplay_recorder", lambda *_args, **_kwargs: Recorder(),
     )
     monkeypatch.setattr(task_registry, "spawn", fake_spawn)
 
@@ -3296,8 +3293,7 @@ def test_recovery_does_not_restart_intentionally_paused_repair(monkeypatch) -> N
         (run_id,),
     )
     conn.commit()
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch,
         "_new_screenplay_recorder",
         lambda *_args, **_kwargs: pytest.fail("不应自动重启主动暂停的修复"),
     )
@@ -3324,8 +3320,7 @@ def test_recovery_does_not_restart_persisted_cancellation(monkeypatch) -> None:
         (run_id,),
     )
     conn.commit()
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch,
         "_new_screenplay_recorder",
         lambda *_args, **_kwargs: pytest.fail("用户取消的任务不应在重启后恢复"),
     )
@@ -3360,7 +3355,7 @@ def test_recovery_failure_does_not_overwrite_concurrent_delete(monkeypatch) -> N
         conn.commit()
         raise RuntimeError("delete won")
 
-    monkeypatch.setattr(api, "_new_screenplay_recorder", delete_then_fail)
+    patch_api_everywhere(monkeypatch, "_new_screenplay_recorder", delete_then_fail)
 
     assert api.recover_screenplay_tasks() == 0
     episode = conn.execute(
@@ -3407,11 +3402,10 @@ async def test_batch_start_reports_partial_failure_without_stranding_episode(
             raise RuntimeError("queue unavailable")
         return None
 
-    monkeypatch.setattr(api, "_new_screenplay_recorder", fake_recorder)
+    patch_api_everywhere(monkeypatch, "_new_screenplay_recorder", fake_recorder)
     monkeypatch.setattr(task_registry, "spawn", fake_spawn)
     cleared: list[str] = []
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch,
         "_clear_unpublished_screenplay_ir",
         lambda episode_id, **_kwargs: cleared.append(episode_id) or 0,
     )

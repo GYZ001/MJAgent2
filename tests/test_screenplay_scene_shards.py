@@ -13,6 +13,9 @@ from pydantic import ValidationError
 
 from app import db, errors as app_errors, generation_concurrency
 from app import screenplay_scene_shards as scene_shards_module
+from tests.conftest import (
+    patch_screenplay_scene_shards_everywhere as _patch_scene_shards,
+)
 from app.harness import model_gateway
 from app.narrative_blueprint import (
     BlueprintScenePlan,
@@ -101,8 +104,9 @@ def _clean_scene_shard_semantic_review(monkeypatch):
             "consensus": [],
         }]
 
-    monkeypatch.setattr(
-        "app.screenplay_scene_shards._semantic_review_scene_shard_draft",
+    _patch_scene_shards(
+        monkeypatch,
+        "_semantic_review_scene_shard_draft",
         clean_review,
     )
 ERR_20260810_REPLAY = (
@@ -982,8 +986,8 @@ def test_semantic_review_reserve_setting_remains_provider_capped(
     )
 
     configured_reserve = "0"
-    monkeypatch.setattr(
-        scene_shards_module,
+    _patch_scene_shards(
+        monkeypatch,
         "get_setting",
         lambda key: (
             configured_reserve
@@ -4400,7 +4404,7 @@ def test_scene_shard_ordinary_failure_does_not_cancel_inflight_sibling(
         sibling_started.set()
         return _creative_shard(plans[1], blueprint)
 
-    monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
+    _patch_scene_shards(monkeypatch, "_setting_int", fixed_settings)
     monkeypatch.setattr(
         scene_shards_module.model_gateway,
         "chat_structured",
@@ -4480,7 +4484,7 @@ def test_scene_shard_ownership_loss_still_cancels_other_shards(
             sibling_cancelled.set()
             raise
 
-    monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
+    _patch_scene_shards(monkeypatch, "_setting_int", fixed_settings)
     monkeypatch.setattr(
         scene_shards_module.model_gateway,
         "chat_structured",
@@ -4551,7 +4555,7 @@ def test_scene_shard_ordinary_failure_lets_queued_semaphore_waiter_proceed(
             raise original_error
         return _creative_shard(plans[1], blueprint)
 
-    monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
+    _patch_scene_shards(monkeypatch, "_setting_int", fixed_settings)
     monkeypatch.setattr(
         scene_shards_module.model_gateway,
         "chat_structured",
@@ -4619,7 +4623,7 @@ def test_scene_shard_ordinary_failure_lets_queued_real_provider_waiter_proceed(
         }
         return max(minimum, min(maximum, values.get(key, default)))
 
-    monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
+    _patch_scene_shards(monkeypatch, "_setting_int", fixed_settings)
     monkeypatch.setattr(
         generation_concurrency,
         "get_setting",
@@ -4808,7 +4812,7 @@ def test_scene_shard_ordinary_failure_does_not_fence_peer_structured_retry(
             return "not valid JSON"
         return _creative_shard(plans[1], blueprint).model_dump_json()
 
-    monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
+    _patch_scene_shards(monkeypatch, "_setting_int", fixed_settings)
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
 
     with pytest.raises(scene_shards_module.hiagent.ProviderError) as caught:
@@ -4897,9 +4901,9 @@ def test_scene_shard_reviewer_failure_does_not_fence_other_shard_structured_retr
             return "not valid JSON"
         return _creative_shard(plans[1], blueprint).model_dump_json()
 
-    monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
-    monkeypatch.setattr(
-        scene_shards_module,
+    _patch_scene_shards(monkeypatch, "_setting_int", fixed_settings)
+    _patch_scene_shards(
+        monkeypatch,
         "_semantic_review_scene_shard_draft",
         _REAL_SEMANTIC_REVIEW,
     )
@@ -4961,7 +4965,7 @@ def test_scene_shard_batch_user_cancellation_does_not_mark_failed(
             cancelled.add(shard_id)
             raise
 
-    monkeypatch.setattr(scene_shards_module, "_setting_int", fixed_settings)
+    _patch_scene_shards(monkeypatch, "_setting_int", fixed_settings)
     monkeypatch.setattr(
         scene_shards_module.model_gateway,
         "chat_structured",
@@ -5128,8 +5132,8 @@ def test_semantic_reviewer_failure_fences_next_chunk(monkeypatch) -> None:
             return ScreenplaySceneShardSemanticReview(findings=[])
         raise AssertionError("reviewer advanced after peer failure")
 
-    monkeypatch.setattr(
-        scene_shards_module,
+    _patch_scene_shards(
+        monkeypatch,
         "_scene_shard_semantic_review_chunks",
         lambda **_kwargs: two_chunks,
     )
@@ -5827,8 +5831,9 @@ def test_merge_requires_front_matter_source_coverage(
     front_matter_id = plans[0].source_segment_ids[0]
     shards[0].scenes[0].units = []
     shards[0].consumed_source_ids = []
-    monkeypatch.setattr(
-        "app.screenplay_scene_shards.structural_front_matter_ids",
+    _patch_scene_shards(
+        monkeypatch,
+        "structural_front_matter_ids",
         lambda _segments: {front_matter_id},
     )
 
@@ -8550,8 +8555,9 @@ def test_owner_change_after_provider_response_prevents_artifact_persist(monkeypa
     async def fake_structured(*_args, **_kwargs):
         return _creative_shard(plan, blueprint)
 
-    monkeypatch.setattr(
-        "app.screenplay_scene_shards._assert_episode_owner",
+    _patch_scene_shards(
+        monkeypatch,
+        "_assert_episode_owner",
         fake_owner_check,
     )
     monkeypatch.setattr(
@@ -9303,8 +9309,8 @@ def test_scene_shard_contract_fingerprint_is_upgraded(
         plan,
         contracts,
     )
-    monkeypatch.setattr(
-        scene_shards_module,
+    _patch_scene_shards(
+        monkeypatch,
         "SCREENPLAY_SCENE_CREATIVE_VERSION",
         "screenplay-scene-creative.v7",
     )
@@ -9312,8 +9318,8 @@ def test_scene_shard_contract_fingerprint_is_upgraded(
         plan,
         contracts,
     )
-    monkeypatch.setattr(
-        scene_shards_module,
+    _patch_scene_shards(
+        monkeypatch,
         "SCREENPLAY_SCENE_CREATIVE_VERSION",
         SCREENPLAY_SCENE_CREATIVE_VERSION,
     )
@@ -10939,8 +10945,8 @@ def _canonicalise_colliding_review(monkeypatch, kinds: list[str]):
         "u2": SimpleNamespace(text="偏离来源的改写"),
         "u3": SimpleNamespace(text="另一段偏离"),
     })
-    monkeypatch.setattr(
-        scene_shards_module,
+    _patch_scene_shards(
+        monkeypatch,
         "_scene_shard_source_facts_by_slot",
         lambda _contracts: {
             "u1": SimpleNamespace(text="忠实照抄来源"),

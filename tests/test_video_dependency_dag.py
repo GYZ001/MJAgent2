@@ -5,6 +5,7 @@ import pytest
 
 from app import db, hiagent
 import app.video_plan as video_plan
+from tests.conftest import patch_video_plan_everywhere
 from app.video_plan import (
     AssetSource,
     EpisodeVideoGenerationPlan,
@@ -314,7 +315,7 @@ async def test_ai_episode_plan_is_single_call_versioned_and_first_shot_is_fixed(
             ],
         })
 
-    monkeypatch.setattr(video_plan, "get_conn", lambda: conn)
+    patch_video_plan_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(hiagent, "chat", fake_chat)
     monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "provider")
     monkeypatch.setattr(hiagent, "active_model", lambda *_args, **_kwargs: "model")
@@ -363,8 +364,8 @@ async def test_ai_episode_plan_is_single_call_versioned_and_first_shot_is_fixed(
         "completion_certificate_id": "cert-rev-2",
         "release_qualification_hash": "qualification-rev-2",
     })
-    monkeypatch.setattr(
-        video_plan,
+    patch_video_plan_everywhere(
+        monkeypatch,
         "current_storyboard_release_manifest",
         lambda *_args, **_kwargs: rebound_manifest,
     )
@@ -457,7 +458,7 @@ async def test_large_episode_plan_is_size_windowed_then_validated_as_one_plan(
             ],
         })
 
-    monkeypatch.setattr(video_plan, "get_conn", lambda: conn)
+    patch_video_plan_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(hiagent, "chat", fake_chat)
     monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "provider")
     monkeypatch.setattr(hiagent, "active_model", lambda *_args, **_kwargs: "model")

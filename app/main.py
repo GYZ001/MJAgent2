@@ -20,11 +20,11 @@ from app.auth.admin_api import router as auth_admin_router
 from app.auth.api import router as auth_router
 from app.auth.principal import set_current_principal
 from app.authz import require_workspace_access
-from app.capabilities import ensure_catalog_loaded
 from app.config import PROJECTS_DIR, ROOT
 from app.db import init_db
 from app.mcp import router as mcp_router
 from app.capabilities.bus import set_request_approval_token
+from app.capabilities.loader import ensure_catalog_loaded
 from app.local_session import (
     APPROVAL_HEADER,
     bind_request_principal,
@@ -48,6 +48,22 @@ from app.orchestration.api import router as orchestration_router
 from app.observability.api import router as observability_router
 from app.system_api import public_router as system_public_router
 from app.system_api import router as system_router
+
+# app.db.init_db() looks up its per-table bootstrap/migration steps by name
+# through app.db_schema instead of importing these business modules directly
+# (P0-3 dependency inversion, see docs/coupling_review_2026-08-29.md 第2步).
+# Each of these registers itself with app.db_schema at import time; something
+# at the entry layer has to import them at least once before init_db() runs
+# below, or the registry lookup raises KeyError. This is that one place for
+# the running service (tests/conftest.py does the same for test isolation).
+import app.artifacts  # noqa: F401
+import app.completion_grant  # noqa: F401
+import app.delivery  # noqa: F401
+import app.model_migration  # noqa: F401
+import app.production.certificate  # noqa: F401
+import app.production.grant  # noqa: F401
+import app.production.revision  # noqa: F401
+import app.production.shot_uid  # noqa: F401
 
 # 除 health / session 领取外，全部 /api/* 强制本机会话（Todolist T1）。
 _SESSION_DEPS = [Depends(require_local_session)]
@@ -73,6 +89,12 @@ async def lifespan(_: FastAPI):
         from app.video_supervisor import video_supervisor_watchdog_loop
         task_registry.spawn(
             "system", "video_supervisor_watchdog", video_supervisor_watchdog_loop(),
+        )
+        # 软删除项目的回收站 24 小时自动彻底清理；只在恢复协调者实例上跑一份，
+        # 避免热重载重叠的第二实例重复巡检同一批到期项目。
+        from app.recovery import project_recycle_bin_sweep_loop
+        task_registry.spawn(
+            "system", "project_recycle_bin_sweep", project_recycle_bin_sweep_loop(),
         )
     else:
         record_passive_instance()

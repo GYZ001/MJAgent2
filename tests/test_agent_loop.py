@@ -6,14 +6,13 @@ import json
 import pytest
 from pydantic import BaseModel
 
-from app import api, db, stages
+from app import db, stages
 from app.evaluations.issues import issues_from_messages
 from app.evidence import repository
 from app.harness.context import ContextPack
 from app.harness.types import EvidenceArtifact, Issue, IssueSeverity
 from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
 from app.orchestration.engine import WorkflowRecorder
-from app.schemas import EpisodeScreenplay
 
 
 class Candidate(BaseModel):

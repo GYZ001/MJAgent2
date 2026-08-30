@@ -18,6 +18,7 @@ from app.capabilities.schemas import (
     RiskLevel,
     StandardCommandInput,
 )
+from tests.conftest import patch_api_everywhere
 
 
 def _conn() -> sqlite3.Connection:
@@ -75,7 +76,7 @@ def test_prepared_episode_completion_restarts_exact_durable_run(monkeypatch) -> 
         """
     )
     monkeypatch.setattr(operations, "get_conn", lambda: conn)
-    monkeypatch.setattr(video_ops, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     owner, _ = operations.claim_video_command_operation(
         command="video.complete_episode",
         idempotency_key="completion-once",
@@ -212,9 +213,9 @@ async def test_completion_reuses_exact_run_across_pre_binding_crash(
 
     conn = _full_conn()
     monkeypatch.setattr(operations, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "_review_assert_positive_action", lambda *_: {})
-    monkeypatch.setattr(api, "_assert_storyboard_generation_gate", lambda *_: None)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_review_assert_positive_action", lambda *_: {})
+    patch_api_everywhere(monkeypatch, "_assert_storyboard_generation_gate", lambda *_: None)
     monkeypatch.setattr(api.task_registry, "active", lambda *_: False)
     spawned: list[str] = []
 
@@ -308,14 +309,14 @@ async def test_caught_spawn_failure_is_exact_terminal_failure(monkeypatch) -> No
     conn = _full_conn()
     for module in (
         operations,
-        api,
         evidence_repository,
         orchestration_engine,
         state_machine,
     ):
         monkeypatch.setattr(module, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "_review_assert_positive_action", lambda *_: {})
-    monkeypatch.setattr(api, "_assert_storyboard_generation_gate", lambda *_: None)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_review_assert_positive_action", lambda *_: {})
+    patch_api_everywhere(monkeypatch, "_assert_storyboard_generation_gate", lambda *_: None)
     monkeypatch.setattr(api.task_registry, "active", lambda *_: False)
     monkeypatch.setattr(
         api.task_registry,
@@ -391,10 +392,11 @@ async def test_hard_crash_reuses_actual_persisted_workflow_without_duplicate(
         pass
 
     conn = _full_conn()
-    for module in (operations, api, evidence_repository, orchestration_engine):
+    for module in (operations, evidence_repository, orchestration_engine):
         monkeypatch.setattr(module, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "_review_assert_positive_action", lambda *_: {})
-    monkeypatch.setattr(api, "_assert_storyboard_generation_gate", lambda *_: None)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_review_assert_positive_action", lambda *_: {})
+    patch_api_everywhere(monkeypatch, "_assert_storyboard_generation_gate", lambda *_: None)
     monkeypatch.setattr(api.task_registry, "active", lambda *_: False)
     monkeypatch.setattr(
         completion_grant,

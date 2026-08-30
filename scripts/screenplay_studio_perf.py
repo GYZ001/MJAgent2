@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""剧本台页面初始化性能测量（基线 / 优化后对比复用同一脚本）。
+"""映射台页面初始化性能测量（基线 / 优化后对比复用同一脚本）。
 
 用法:
     py scripts/screenplay_studio_perf.py <episode_id> [--repeat 5] [--label baseline]
 
 测量内容:
-  * 剧本台首屏实际发起的每个 API：wall clock、HTTP 状态、原始字节、gzip 字节；
+  * 映射台首屏实际发起的每个 API：wall clock、HTTP 状态、原始字节、gzip 字节；
   * 串行 waterfall 总耗时（按前端真实依赖顺序）与并行下界；
   * 每个 API 在后端执行期间的 SQL 条数与最慢 SQL（进程内直调，独立于 HTTP）。
 
@@ -52,7 +52,7 @@ def timed_get(path: str, timeout: int = 120) -> dict:
 
 
 def studio_requests(episode_id: str, project_id: str, *, legacy: bool = False) -> list[str]:
-    """剧本台首屏真实请求集合（与后端访问日志里观察到的一致）。
+    """映射台首屏真实请求集合（与后端访问日志里观察到的一致）。
 
     ``legacy=True`` 复现「案头助手」还在时的取数方式：它的上下文标签为了三个名字
     直接拉整份项目投影（千集项目 4.79 MB / 558 ms）。该功能已在 2026-08-22 被移除，

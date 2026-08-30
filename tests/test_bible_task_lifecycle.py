@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from app import api, db, task_registry
 from app.api import BIBLE_INTERRUPTED_ERROR, _recover_orphan_bible_row
 from app.schemas import Bible, Character, World
+from tests.conftest import patch_api_everywhere
 
 
 def test_orphan_running_bible_status_is_recovered() -> None:
@@ -53,9 +54,9 @@ def test_bible_task_starts_full_refs_after_success(monkeypatch) -> None:
         started["args"] = (project_id, only_character)
         return True
 
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "generate_bible", fake_generate_bible)
-    monkeypatch.setattr(api, "_start_refs_generation", fake_start_refs)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "generate_bible", fake_generate_bible)
+    patch_api_everywhere(monkeypatch, "_start_refs_generation", fake_start_refs)
 
     asyncio.run(api._bible_task("proj_test", trigger_full_refs=True))
 
@@ -94,12 +95,11 @@ def test_bible_task_starts_scene_preparation_without_unquoted_images(monkeypatch
             ],
         )
 
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "generate_bible", fake_generate_bible)
-    monkeypatch.setattr(api, "_start_refs_generation", lambda *_args: True)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "generate_bible", fake_generate_bible)
+    patch_api_everywhere(monkeypatch, "_start_refs_generation", lambda *_args: True)
     prepared: list[str] = []
-    monkeypatch.setattr(
-        api,
+    patch_api_everywhere(monkeypatch,
         "_start_scene_bible_preparation",
         lambda project_id: prepared.append(project_id) or True,
     )
@@ -150,9 +150,9 @@ def test_bible_completion_preserves_planned_project_status(monkeypatch) -> None:
             ],
         )
 
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "generate_bible", fake_generate_bible)
-    monkeypatch.setattr(api, "_start_refs_generation", lambda *_args: True)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "generate_bible", fake_generate_bible)
+    patch_api_everywhere(monkeypatch, "_start_refs_generation", lambda *_args: True)
 
     asyncio.run(api._bible_task("proj_planned", trigger_full_refs=True))
 
@@ -218,9 +218,9 @@ def test_bible_task_rolls_back_pending_purge_before_logging_style_change_failure
         conn.execute("DELETE FROM fake_video_artifact WHERE marker='pre-existing-real-video'")
         raise OSError("模拟清理旧画风视频文件时中途失败")
 
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(api, "generate_bible", fake_generate_bible)
-    monkeypatch.setattr(api, "_purge_for_style_change", fake_purge_for_style_change)
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "generate_bible", fake_generate_bible)
+    patch_api_everywhere(monkeypatch, "_purge_for_style_change", fake_purge_for_style_change)
 
     asyncio.run(api._bible_task("proj_test", trigger_full_refs=False))
 
@@ -259,7 +259,7 @@ async def test_bible_spawn_failure_restores_state_and_keeps_quote(
         "VALUES('p1',1,'第一章','正文',2)"
     )
     conn.commit()
-    monkeypatch.setattr(api, "_require_harness_engine", lambda _project_id: None)
+    patch_api_everywhere(monkeypatch, "_require_harness_engine", lambda _project_id: None)
     precheck = api._compute_bible_generate_precheck("p1")
     quote = api._issue_payment_quote(precheck)
 
@@ -314,7 +314,7 @@ async def test_bible_shutdown_keeps_running_projection_for_recovery(
     async def interrupted(*_args, **_kwargs):
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(api, "generate_bible", interrupted)
+    patch_api_everywhere(monkeypatch, "generate_bible", interrupted)
     monkeypatch.setattr(task_registry, "shutdown_in_progress", lambda: True)
 
     with pytest.raises(asyncio.CancelledError):
