@@ -12,8 +12,15 @@ from tests.isolation import (
     IsolationSession,
     ProviderConfigurationIsolation,
     UNROUTABLE_PROVIDER_BASE_URL,
+    isolate_deployment_overrides,
     isolate_provider_environment,
 )
+
+# 必须在任何 ``app.*`` 导入之前执行：``app/config.py`` 在 import 时用
+# ``os.environ.setdefault`` 加载 ``.env``，把部署侧开关灌进本进程。``.env`` 是
+# gitignored 的，CI 与新克隆都没有它——整套测试是按代码默认值写的，本机有 .env
+# 才会红。这里把那些开关删掉，让测试无论本机有没有 .env 都跑在同一套默认值上。
+_REMOVED_DEPLOYMENT_OVERRIDES = isolate_deployment_overrides(os.environ)
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
