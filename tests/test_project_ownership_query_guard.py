@@ -67,10 +67,10 @@ files" beyond the one categorical exemption explained below):
       _project_or_404`` already relies on exactly this). Every use must
       justify itself right there -- see ``_ALL_OWNERS_MARKER_RE`` below for
       the existing uses (system-admin dashboards/branches in
-      ``app/domain/projects.py`` and ``app/observability/api.py``, and
+      ``app/domain/projects/listing.py`` and ``app/observability/api.py``, and
       startup-recovery/background-sweep scans with no request context in
       ``app/domain/bible_ops/task_recovery.py``, ``app/planning.py`` and
-      ``app/domain/projects.py``).
+      ``app/domain/projects/lifecycle.py``).
 
 ``app/db.py`` is excluded categorically, not because someone reviewed it and
 signed off: schema definition (``SCHEMA``), additive migrations
@@ -112,8 +112,9 @@ _ID_ANCHOR_RE = re.compile(r"\bid\b\s*(=|in\s*\()", re.IGNORECASE)
 # above/beside it are not part of that span) so grepping the SQL a reviewer
 # actually runs is enough to find every use, with no separate list to keep in
 # sync. Every use must justify itself right there -- see the existing uses in
-# app/domain/projects.py, app/observability/api.py,
-# app/domain/bible_ops/task_recovery.py and app/planning.py.
+# app/domain/projects/listing.py, app/domain/projects/lifecycle.py,
+# app/observability/api.py, app/domain/bible_ops/task_recovery.py and
+# app/planning.py.
 _ALL_OWNERS_MARKER_RE = re.compile(r"--\s*ALL_OWNERS:")
 
 

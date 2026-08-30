@@ -14,7 +14,7 @@ from fastapi import HTTPException
 
 from app import db
 from app.auth.principal import Principal, set_current_principal
-from tests.conftest import patch_worker_everywhere
+from tests.conftest import patch_projects_everywhere, patch_worker_everywhere
 
 
 def _init_db(tmp_path, monkeypatch, name: str):
@@ -282,7 +282,7 @@ def test_purge_transaction_rolls_back_before_touching_disk(tmp_path, monkeypatch
 
     # 用 patch_worker_everywhere 而不是裸 monkeypatch.setattr(worker, ...)：
     # app.media_exec 是真包，每个子模块持有自己的绑定，改包属性只命中
-    # app.worker 的再导出。当前调用点 app/domain/projects.py:1842 用的是
+    # app.worker 的再导出。当前调用点 app/domain/projects/lifecycle.py 用的是
     # 限定访问 worker.delete_project_episodes(...)，裸打桩碰巧生效——但哪天
     # 它改成本地绑定，裸打桩就会静默失效、测试照常绿（CLAUDE.md 记录过的
     # 陷阱），tests/test_worker_monkeypatch_guard.py 正是守这一类。
@@ -343,7 +343,7 @@ def test_retention_tag_is_committed_before_the_soft_delete(tmp_path, monkeypatch
         probe.close()
         return await real_delete(project_id, *args, **kwargs)
 
-    monkeypatch.setattr(projects_mod, "_delete_project_core", _observing_delete)
+    patch_projects_everywhere(monkeypatch, "_delete_project_core", _observing_delete)
 
     set_current_principal(Principal(user_id="u-admin", username="u-admin", is_system_admin=True))
     asyncio.run(admin_soft_delete_account_core("u-target"))
@@ -363,7 +363,6 @@ def test_failed_cascade_does_not_leave_a_stray_retention_tag(tmp_path, monkeypat
     否则该项目仍是活跃的、却带着 30 天保留期；用户日后自己把它放进回收站时，
     会拿到 30 天而不是本该的 24 小时——一个用户从没要求过的行为差异。
     """
-    import app.domain.projects as projects_mod
     from app.domain.account_deletion import admin_soft_delete_account_core
 
     conn, project_root = _init_db(tmp_path, monkeypatch, "retention-rollback.db")
@@ -374,7 +373,7 @@ def test_failed_cascade_does_not_leave_a_stray_retention_tag(tmp_path, monkeypat
     async def _always_fails(project_id: str, *args, **kwargs):
         raise RuntimeError("供应商任务未到终态")
 
-    monkeypatch.setattr(projects_mod, "_delete_project_core", _always_fails)
+    patch_projects_everywhere(monkeypatch, "_delete_project_core", _always_fails)
 
     set_current_principal(Principal(user_id="u-admin", username="u-admin", is_system_admin=True))
     result = asyncio.run(admin_soft_delete_account_core("u-target"))

@@ -476,6 +476,58 @@ def patch_video_plan_everywhere(monkeypatch, name, value, **kwargs):
             monkeypatch.setattr(submodule, name, value, raising=False)
 
 
+def patch_projects_everywhere(monkeypatch, name, value, **kwargs):
+    """Patch a symbol on ``app.domain.projects`` in every submodule that
+    actually binds it.
+
+    Same rationale as ``patch_stages_everywhere`` above: ``app/domain/
+    projects.py`` (1,999 lines) was one file until it was split into the
+    ``app.domain.projects`` package (see ``app/domain/projects/__init__.py``),
+    so ``monkeypatch.setattr(projects, name, value)`` only reaches the
+    package's own re-export attribute now, not the independent copy each
+    submodule bound for itself at import time -- including ``get_conn``
+    (``create.py``/``listing.py``/``detail.py``/``episode_delete.py``/
+    ``lifecycle.py`` each do their own ``from app.db import get_conn``) and a
+    submodule that calls a sibling submodule's function, e.g. ``lifecycle.py``
+    calling ``_delete_project_evidence`` via its own ``from app.domain.
+    projects.evidence import _delete_project_evidence``. This walks every
+    submodule and patches ``name`` wherever it is bound, reproducing the
+    pre-split single-namespace patch semantics.
+
+    ``app.domain``'s own generic ``patch_api_everywhere`` (below) already
+    recurses into any domain chunk that has a ``__path__`` -- including this
+    one now -- so a bare ``from app.domain import projects; monkeypatch.
+    setattr(projects, name, value)`` alias *is* caught by ``tests/
+    test_api_monkeypatch_guard.py``'s dynamically-computed ``SPLIT_DOMAIN_
+    CHUNKS``. But that guard's alias detection only recognizes a local name
+    that is exactly ``"projects"`` -- ``import app.domain.projects as
+    projects_mod`` / ``from app.domain import projects as projects_api``
+    (both common in this test suite, e.g. ``tests/test_account_deletion.py``,
+    ``tests/test_core_regressions.py``) are *not* flagged, so a raw
+    monkeypatch through one of those renamed aliases would still silently
+    reach only the package-level re-export. Use this helper directly for any
+    ``app.domain.projects`` symbol regardless of the local alias name --
+    ``tests/test_projects_monkeypatch_guard.py`` is its dedicated, alias-aware
+    AST guard.
+    """
+    import pkgutil
+    import sys
+
+    import app.domain.projects as projects
+
+    kwargs.setdefault("raising", False)
+    monkeypatch.setattr(projects, name, value, **kwargs)
+    for _, mod_name, _ in pkgutil.iter_modules(projects.__path__):
+        # 用 sys.modules 按全限定名解析叶子模块，不要用 getattr：子模块若
+        # 再导出一个与自身文件同名的符号（`from .x import x as x`），包属性
+        # 会被那个符号覆盖掉子模块引用，getattr 于是静默返回错的对象，
+        # hasattr 判 False、打桩打空且不报错（2026-08-30 实测：曾让
+        # get_conn 静默连到生产库，造成 7 个测试假绿/假红）。
+        submodule = sys.modules.get(f"{projects.__name__}.{mod_name}")
+        if submodule is not None and hasattr(submodule, name):
+            monkeypatch.setattr(submodule, name, value, raising=False)
+
+
 def patch_worker_everywhere(monkeypatch, name, value, **kwargs):
     """Patch a symbol on ``app.worker`` / ``app.media_exec`` in every submodule
     that actually binds it.

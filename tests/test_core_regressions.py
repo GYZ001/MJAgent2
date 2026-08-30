@@ -9,6 +9,7 @@ from app import artifacts, db, planning, task_registry, worker
 from app.capabilities import get_command_bus
 from app.capabilities.loader import ensure_catalog_loaded
 from app.compiler import clip_duration_value
+from tests.conftest import patch_projects_everywhere
 
 
 def test_fresh_database_enforces_parent_links_and_cascades(tmp_path, monkeypatch) -> None:
@@ -368,7 +369,7 @@ def test_project_evidence_delete_chunks_large_workflow_frontier(tmp_path, monkey
         def __getattr__(self, name):
             return getattr(self.wrapped, name)
 
-    monkeypatch.setattr(projects_api, "_SQLITE_IN_CHUNK_SIZE", 8)
+    patch_projects_everywhere(monkeypatch, "_SQLITE_IN_CHUNK_SIZE", 8)
     result = projects_api._delete_project_evidence(LimitedConn(conn, 20), "p-big")
 
     assert result == {"artifacts": len(run_ids), "runs": len(run_ids), "steps": len(run_ids)}

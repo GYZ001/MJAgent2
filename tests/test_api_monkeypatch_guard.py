@@ -66,6 +66,19 @@ import app.domain as _domain
 TESTS_DIR = Path(__file__).resolve().parent
 CONFTEST_PATH = TESTS_DIR / "conftest.py"
 HELPER_NAME = "patch_api_everywhere"
+# patch_api_everywhere's generic two-level recursion (see its docstring)
+# already covers every domain chunk, including ones later split into their
+# own sub-package (bible_ops/storyboard_ops/video_ops rely on exactly that --
+# none of them have a bespoke helper). ``projects`` is the one chunk that
+# *also* has a dedicated ``patch_projects_everywhere`` (see its docstring in
+# conftest.py for why: this suite imports it under renamed aliases --
+# ``projects_mod``/``projects_api`` -- that ``_bare_names_bound_to_app_module``
+# below does not resolve, so the alias-aware dedicated helper closes a gap
+# the generic one cannot). Its body legitimately bare-patches ``projects``
+# the same way patch_api_everywhere legitimately bare-patches ``api``/
+# ``domain`` -- both spans must be exempted from this scan, or adding the
+# dedicated helper trips the very guard it exists to satisfy.
+HELPER_NAMES = frozenset({HELPER_NAME, "patch_projects_everywhere"})
 BARE_NAMES = {"api", "domain"}
 DOMAIN_CHUNKS = {
     "common", "projects", "bible_ops", "screenplay_ops",
@@ -94,24 +107,31 @@ SPLIT_DOMAIN_CHUNKS = {
 }
 
 
-def _helper_exempt_span(tree: ast.Module) -> tuple[int, int]:
-    """Line range of patch_api_everywhere's own body in conftest.py.
+def _helper_exempt_spans(tree: ast.Module) -> list[tuple[int, int]]:
+    """Line ranges of every exempt helper's own body in conftest.py (see
+    ``HELPER_NAMES`` above for why there is more than one).
 
-    This is the sole legitimate place a bare ``setattr(api, name, value)`` /
-    ``setattr(domain, name, value)`` / ``api.<x> = ...`` may exist -- it *is*
-    the everywhere-walk. Scoping the exemption to this function's own
-    lineno..end_lineno (not the whole file) means any *other* helper later
-    added to conftest.py is still checked by this guard.
+    These are the sole legitimate places a bare ``setattr(api, name, value)``
+    / ``setattr(domain, name, value)`` / ``setattr(projects, name, value)`` /
+    ``api.<x> = ...`` may exist -- each one *is* an everywhere-walk. Scoping
+    each exemption to its own function's lineno..end_lineno (not the whole
+    file) means any *other* helper later added to conftest.py is still
+    checked by this guard.
     """
+    found: dict[str, tuple[int, int]] = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == HELPER_NAME:
+        if isinstance(node, ast.FunctionDef) and node.name in HELPER_NAMES:
             assert node.end_lineno is not None
-            return node.lineno, node.end_lineno
-    raise AssertionError(
-        f"{HELPER_NAME}() not found in {CONFTEST_PATH} -- this guard's exemption "
-        "span cannot be computed. Did the helper get renamed or removed? Update "
-        "HELPER_NAME here to match, don't just skip the scan."
-    )
+            found[node.name] = (node.lineno, node.end_lineno)
+    missing = HELPER_NAMES - found.keys()
+    if missing:
+        raise AssertionError(
+            f"{sorted(missing)} not found in {CONFTEST_PATH} -- this guard's "
+            "exemption span(s) cannot be computed. Did a helper get renamed "
+            "or removed? Update HELPER_NAMES here to match, don't just skip "
+            "the scan."
+        )
+    return list(found.values())
 
 
 def _bare_names_bound_to_app_module(tree: ast.Module) -> set[str]:
@@ -163,8 +183,12 @@ def _is_bare_api_or_domain_name(node: ast.expr, relevant_names: set[str]) -> boo
     return isinstance(node, ast.Name) and node.id in relevant_names
 
 
+def _in_any_span(lineno: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start <= lineno <= end for start, end in spans)
+
+
 def _loop_variable_setattr_violations(
-    tree: ast.Module, path: Path, exempt_start: int, exempt_end: int
+    tree: ast.Module, path: Path, exempt_spans: list[tuple[int, int]]
 ) -> list[str]:
     """``for module in (api, other, ...): monkeypatch.setattr(module, ...)``.
 
@@ -191,7 +215,7 @@ def _loop_variable_setattr_violations(
         if not isinstance(node, ast.For) or not isinstance(node.target, ast.Name):
             continue
         lineno = node.lineno
-        if exempt_start <= lineno <= exempt_end:
+        if _in_any_span(lineno, exempt_spans):
             continue
         loop_var = node.target.id
         if not isinstance(node.iter, (ast.Tuple, ast.List)):
@@ -201,7 +225,7 @@ def _loop_variable_setattr_violations(
             continue
         for sub in ast.walk(node):
             sub_lineno = getattr(sub, "lineno", None)
-            if sub_lineno is not None and exempt_start <= sub_lineno <= exempt_end:
+            if sub_lineno is not None and _in_any_span(sub_lineno, exempt_spans):
                 continue
             if not isinstance(sub, ast.Call):
                 continue
@@ -265,16 +289,16 @@ def _violations_in_file(path: Path) -> list[str]:
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
 
-    exempt_start, exempt_end = (-1, -1)
+    exempt_spans: list[tuple[int, int]] = []
     if path == CONFTEST_PATH:
-        exempt_start, exempt_end = _helper_exempt_span(tree)
+        exempt_spans = _helper_exempt_spans(tree)
 
     relevant_names = _bare_names_bound_to_app_module(tree)
 
     violations: list[str] = []
     for node in ast.walk(tree):
         lineno = getattr(node, "lineno", None)
-        if lineno is not None and exempt_start <= lineno <= exempt_end:
+        if lineno is not None and _in_any_span(lineno, exempt_spans):
             continue
 
         if isinstance(node, ast.Call):
@@ -353,7 +377,7 @@ def _violations_in_file(path: Path) -> list[str]:
                     )
 
     violations.extend(
-        _loop_variable_setattr_violations(tree, path, exempt_start, exempt_end)
+        _loop_variable_setattr_violations(tree, path, exempt_spans)
     )
     return violations
 

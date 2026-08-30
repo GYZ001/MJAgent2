@@ -6,17 +6,21 @@ __pycache__/
 *.tsbuildinfo
 # Claude Code 本地 IDE 产物（launch.json / settings.local.json 等，均不入库）
 .claude/
-data/
-projects/
+/data/
+# 锚定到仓库根：不加前导 / 会匹配任意深度的同名目录，曾误伤
+# app/domain/projects/（拆分 app/domain/projects.py 产生的真实源码包），
+# 让它对 git add 结构性不可见——这里只应该忽略运行期产物目录
+# app/config.py::PROJECTS_DIR（RUNTIME_ROOT / "projects"，仓库根下）。
+/projects/
 node_modules/
 frontend/dist/
 .DS_Store
 # 运行期产物（绝不入库）：后端/前端日志、巡检与调试日志、临时上传与缓存
 *.log
-logs/
-.uploads/
+/logs/
+/.uploads/
 .pytest_cache/
-.benchmarks/
+/.benchmarks/
 # 本地临时/调试产物（仓库根目录 _ 开头；不影响子目录 __init__.py）
 /_*
 /.playwright-cli/

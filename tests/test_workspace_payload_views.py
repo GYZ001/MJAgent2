@@ -7,7 +7,7 @@ from app import db, storyboard_workspace
 from app.domain import common, projects, storyboard_ops
 from app.media_pipeline.status import episode_pipeline_statuses
 from app.schemas import EpisodeScreenplay
-from tests.conftest import patch_api_everywhere
+from tests.conftest import patch_api_everywhere, patch_projects_everywhere
 
 
 def _conn() -> sqlite3.Connection:
@@ -421,7 +421,7 @@ def test_project_episode_view_is_server_paginated(monkeypatch) -> None:
         )
     conn.commit()
     monkeypatch.setattr(common, "get_conn", lambda: conn)
-    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+    patch_projects_everywhere(monkeypatch, "get_conn", lambda: conn)
     statements: list[str] = []
     conn.set_trace_callback(statements.append)
 
@@ -459,7 +459,7 @@ def test_picker_without_limit_keeps_returning_every_episode(monkeypatch) -> None
     conn = _conn()
     _seed_picker_project(conn)
     monkeypatch.setattr(common, "get_conn", lambda: conn)
-    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+    patch_projects_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     result = projects.project_detail("p1", view="picker")
 
@@ -476,7 +476,7 @@ def test_picker_window_centers_on_cursor_and_reports_neighbors(monkeypatch) -> N
     conn = _conn()
     _seed_picker_project(conn)
     monkeypatch.setattr(common, "get_conn", lambda: conn)
-    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+    patch_projects_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     result = projects.project_detail(
         "p1", view="picker", episode_limit=9, episode_cursor="e20"
@@ -499,7 +499,7 @@ def test_picker_window_search_runs_on_the_server(monkeypatch) -> None:
     conn = _conn()
     _seed_picker_project(conn)
     monkeypatch.setattr(common, "get_conn", lambda: conn)
-    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+    patch_projects_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     result = projects.project_detail(
         "p1", view="picker", episode_limit=60, episode_query="episode 3"
@@ -516,7 +516,7 @@ def test_picker_window_keeps_cursor_even_when_filtered_out(monkeypatch) -> None:
     conn = _conn()
     _seed_picker_project(conn)
     monkeypatch.setattr(common, "get_conn", lambda: conn)
-    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+    patch_projects_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     result = projects.project_detail(
         "p1", view="picker", episode_limit=60,
@@ -533,7 +533,7 @@ def test_picker_window_limits_the_sql_itself(monkeypatch) -> None:
     conn = _conn()
     _seed_picker_project(conn)
     monkeypatch.setattr(common, "get_conn", lambda: conn)
-    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+    patch_projects_everywhere(monkeypatch, "get_conn", lambda: conn)
     statements: list[str] = []
     conn.set_trace_callback(statements.append)
 
@@ -578,7 +578,7 @@ def test_project_task_timings_come_from_server_runs(monkeypatch) -> None:
     conn = _conn()
     _seed_episode(conn)
     monkeypatch.setattr(common, "get_conn", lambda: conn)
-    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+    patch_projects_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     _seed_run(conn, run_id="r_bible", workflow_type="character_bible",
               scope_type="project", scope_id="p1", status="SUCCEEDED",
@@ -600,7 +600,7 @@ def test_project_task_timings_pick_the_latest_attempt(monkeypatch) -> None:
     conn = _conn()
     _seed_episode(conn)
     monkeypatch.setattr(common, "get_conn", lambda: conn)
-    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+    patch_projects_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     _seed_run(conn, run_id="r_old", workflow_type="scene_references",
               scope_type="project", scope_id="p1", status="PAUSED_EXTERNAL",
@@ -618,7 +618,7 @@ def test_storyboard_batch_timing_aggregates_active_runs(monkeypatch) -> None:
     conn = _conn()
     _seed_episode(conn)
     monkeypatch.setattr(common, "get_conn", lambda: conn)
-    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+    patch_projects_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     _seed_run(conn, run_id="r_sb_done", workflow_type="storyboard",
               scope_type="episode", scope_id="e1", status="SUCCEEDED",
@@ -708,7 +708,7 @@ def test_batch_timings_prefer_the_task_level_start_over_the_latest_run(monkeypat
     conn = _conn()
     _seed_episode(conn)
     monkeypatch.setattr(common, "get_conn", lambda: conn)
-    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+    patch_projects_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     batch_started = 1_000.0        # 批次真实起点
     resumed_run_started = 3_400.0  # 续跑后新建的 run
@@ -738,7 +738,7 @@ def test_batch_timings_fall_back_to_run_when_batch_column_is_empty(monkeypatch) 
     conn = _conn()
     _seed_episode(conn)
     monkeypatch.setattr(common, "get_conn", lambda: conn)
-    monkeypatch.setattr(projects, "get_conn", lambda: conn)
+    patch_projects_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     _seed_run(conn, run_id="r_refs", workflow_type="character_references",
               scope_type="project", scope_id="p1", status="SUCCEEDED",
