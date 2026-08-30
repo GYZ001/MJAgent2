@@ -79,7 +79,7 @@ export default function EvidenceDrawer({
     const requestId = ++requestRef.current
     setLineageState('loading')
     setLineageError('')
-    api.get(`/artifacts/${evidence.id}/lineage`).then(value => {
+    api.getArtifactLineage(evidence.id).then(value => {
       if (requestId !== requestRef.current) return
       setLineage(value)
       setLineageState('success')

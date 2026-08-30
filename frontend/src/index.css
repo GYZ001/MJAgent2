@@ -3162,7 +3162,7 @@ table.ledger tr.ledger-detail-row td {
 
 /* 生成台：输入框与卡片统一 */
 
-/* 剧本台：输入框与卡片统一 */
+/* 映射台：输入框与卡片统一 */
 .script-toolbar input:not([type="checkbox"]):not([type="radio"]),
 .script-toolbar select,
 .script-toolbar textarea,
@@ -3193,7 +3193,7 @@ table.ledger tr.ledger-detail-row td {
   box-shadow: 0 0 0 3px rgba(47, 72, 88, 0.08);
 }
 
-/* 剧本台卡片统一 */
+/* 映射台卡片统一 */
 .script-editor > .kv,
 .spine-card {
   border: 1px solid var(--hairline);
@@ -3201,7 +3201,7 @@ table.ledger tr.ledger-detail-row td {
   background: rgba(255, 253, 246, 0.75);
 }
 
-/* 剧本台编辑区 tab 对齐分镜台风格 */
+/* 映射台编辑区 tab 对齐分镜台风格 */
 .screenplay-editor-tabs {
 }
 .screenplay-editor-tabs button {
@@ -4950,7 +4950,7 @@ table.ledger tr.ledger-detail-row td {
   color: var(--ink);
 }
 
-/* 必保留关键台词/剧情点清单（剧本台只读视图） */
+/* 必保留关键台词/剧情点清单（映射台只读视图） */
 
 .spine-beat-list {
   margin: 6px 0 0;
@@ -5958,6 +5958,47 @@ label.f {
 .project-delete:hover {
   color: var(--cinnabar-deep);
 }
+.recycle-bin-panel {
+  margin-top: 14px;
+}
+.recycle-bin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.recycle-bin-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #faf9f5;
+}
+.recycle-bin-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.recycle-bin-info span {
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+.recycle-bin-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+.recycle-bin-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
 @media (max-width: 720px) {
   .page-title-row {
     align-items: flex-start;
@@ -6680,7 +6721,7 @@ label.f {
   
 }
 
-/* 剧本台 */
+/* 映射台 */
 .script-toolbar {
   position: sticky;
   z-index: 45;

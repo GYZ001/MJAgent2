@@ -1,0 +1,61 @@
+// 系统观测/管理域的桶文件：任务队列 / 调用日志 / 系统设置 / 模型中心 / 总览与埋点 /
+// 团队与成员管理 / 链路追踪七块子域各自成文件，这里只做重新导出与
+// `api.<method>` 对象组装，不放业务逻辑。这些类型此前全部本地重声明在
+// MonitorPage.tsx（24 个）与 TeamAdminPage.tsx 里，后端改字段时前端不会编译
+// 报错；收进这里之后调用方一律 `import type { ... } from '../api'`。
+import * as jobs from "./jobs";
+import * as calls from "./calls";
+import * as settings from "./settings";
+import * as models from "./models";
+import * as overview from "./overview";
+import * as admin from "./admin";
+import * as trace from "./trace";
+
+export * from "./jobs";
+export * from "./calls";
+export * from "./settings";
+export * from "./models";
+export * from "./overview";
+export * from "./admin";
+export * from "./trace";
+
+export const api_system = {
+  // jobs
+  getJobsSummary: jobs.getJobsSummary,
+  getJobsPage: jobs.getJobsPage,
+  getJobDetail: jobs.getJobDetail,
+  runProjectObservabilityJobAction: jobs.runProjectObservabilityJobAction,
+  runRunAction: jobs.runRunAction,
+  cancelJob: jobs.cancelJob,
+  retrySystemJob: jobs.retrySystemJob,
+  // calls
+  getCallsPage: calls.getCallsPage,
+  getCallDetail: calls.getCallDetail,
+  // settings
+  getSettings: settings.getSettings,
+  updateSettings: settings.updateSettings,
+  // models
+  getHealth: models.getHealth,
+  getModelCatalog: models.getModelCatalog,
+  testModel: models.testModel,
+  testNewModel: models.testNewModel,
+  saveModelCredentials: models.saveModelCredentials,
+  createModel: models.createModel,
+  updateModel: models.updateModel,
+  deleteModel: models.deleteModel,
+  // overview / telemetry
+  getSystemOverview: overview.getSystemOverview,
+  reportMonitorEvent: overview.reportMonitorEvent,
+  // team admin
+  listUsers: admin.listUsers,
+  listWorkspaces: admin.listWorkspaces,
+  createWorkspace: admin.createWorkspace,
+  createUser: admin.createUser,
+  updateWorkspace: admin.updateWorkspace,
+  updateWorkspaceMember: admin.updateWorkspaceMember,
+  removeWorkspaceMember: admin.removeWorkspaceMember,
+  updateUser: admin.updateUser,
+  // trace
+  getTraceView: trace.getTraceView,
+  getTraceNodeDetail: trace.getTraceNodeDetail,
+};

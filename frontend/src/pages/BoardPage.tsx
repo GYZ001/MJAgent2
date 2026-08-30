@@ -1,5 +1,10 @@
 import { ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { api, ApiError, Bible, Episode, Shot, StoryboardPackResources, StoryboardStatus } from '../api'
+import {
+  api, ApiError, Bible, Episode, Shot, StoryboardPackResources, StoryboardStatus,
+  type ConfirmPreview, type ProviderTaskBlocker, type ProviderTaskClearance,
+  type ProviderTaskReconcileResult, type StartPreview, type StoryboardClearPreview,
+  type VideoModelSwitchConfirm,
+} from '../api'
 import { useEpisode, useNav, useProject } from '../App'
 import EpisodeCrumb from '../components/EpisodeCrumb'
 import { ItemTaskTimer, ServerTaskTimer } from '../components/TaskTimer'
@@ -35,31 +40,6 @@ const STORYBOARD_PACK_TARGET_MODEL_LABELS: Record<string, string> = {
 }
 export function storyboardPackTargetModelLabel(targetModel: string): string {
   return STORYBOARD_PACK_TARGET_MODEL_LABELS[targetModel] ?? targetModel
-}
-
-export type StartPreview = {
-  preview_token: string
-  action: 'create' | 'resume'
-  resume_mode?: 'create' | 'continue_generation' | 'repair_existing' | 'finalize_evidence' | null
-  kept_validated_shots: number
-  planned_shots?: number | null
-  remaining_shots?: number | null
-  checkpoint: { available: boolean; phase?: string | null; resume_from_shot: number }
-  can_start?: boolean
-  blocking_reason?: string | null
-  current_gate_issue_count?: number
-  current_gate_issues?: string[]
-  warning?: string | null
-  repair?: {
-    lifetime_repair_count: number
-    activation_no: number
-    activation_attempt_count: number
-    max_attempts_per_activation: number
-    external_calls: number
-    cache_reuses: number
-    candidate_preserves_official_shots: boolean
-    last_issue_messages: string[]
-  }
 }
 
 export type StoryboardPackBeatOverviewEntry = { beat_id: string; summary: string; segment_nos: number[] }
@@ -158,69 +138,10 @@ export function storyboardPackDegradedCapabilitiesExportText(shots: Shot[]): str
   return lines.join('\n')
 }
 
-type ConfirmPreview = {
-  preview_token?: string
-  storyboard_artifact_id?: string | null
-  shot_count: number
-  planned_shots: number
-  total_duration_s: number
-  final_shot_valid: boolean
-  hard_gates: { passed: boolean; errors: string[] }
-  warnings: string[]
-  estimated_video_cost_cny: { min: number; max: number; note: string }
-  unlocks: string[]
-  recovery_action?: string | null
-}
-
-type StoryboardClearPreview = {
-  preview_token: string
-  shot_count: number
-  video_version_count: number
-  reference_asset_count: number
-  workflow_run_count: number
-  delivery_package_count: number
-  active_task_will_stop: boolean
-  screenplay_preserved: true
-  irreversible: true
-}
-
-type VideoModelSwitchConfirm = {
-  requested_target_video_model: string
-  current_target_video_model: string
-  prompt_artifact_count: number
-}
-
 // 供应商付费任务尚未终态时的清空阻塞（app/completion_grant.py
 // ProviderTasksNotTerminalError.detail）；recovery_action 是后端给出的下一步
-// 建议，前端只做文案翻译，不臆造新含义。
-export type ProviderTaskBlocker = {
-  job_id: string
-  shot_id: string | null
-  version_id: string | null
-  job_status: string
-  provider_operation_id: string | null
-  provider_task_id: string | null
-  provider_create_state: string
-  claim_status: string | null
-  amount_cny: number
-  recovery_status: 'waiting_provider' | 'waiting_human' | string
-  recovery_action: 'review_provider_failure' | 'continue_provider_poll' | 'restore_provider_poll' | 'reconcile_provider_create' | string
-}
-
-type ProviderTaskClearance = {
-  safe_to_clear: boolean
-  resume_supported: boolean
-  blockers: ProviderTaskBlocker[]
-}
-
-type ProviderTaskReconcileResult = {
-  episode_id: string
-  blockers_before: number
-  provider_confirmed_terminal_job_ids: string[]
-  superseded_jobs_closed_job_ids: string[]
-  clearance: ProviderTaskClearance
-}
-
+// 建议，前端只做文案翻译，不臆造新含义。类型定义见 api/storyboard/status.ts
+// 的 ProviderTaskBlocker/ProviderTaskClearance/ProviderTaskReconcileResult。
 const PROVIDER_RECOVERY_ACTION_LABEL: Record<string, string> = {
   review_provider_failure: '供应商任务发生技术失败，系统正在等待人工核对；点击下方按钮会去问供应商这个任务现在到底是什么状态',
   continue_provider_poll: '供应商任务仍可能在处理中；点击下方按钮会继续查询它的最新状态',
@@ -580,8 +501,8 @@ export default function BoardPage() {
       return
     }
     let active = true
-    void api.get(`/episodes/${ep.id}/storyboard/status`)
-      .then(value => { if (active) setRecoveredStatus(value as StoryboardStatus) })
+    void api.getStoryboardStatus(ep.id)
+      .then(value => { if (active) setRecoveredStatus(value) })
       .catch(() => { /* 仍保留安全只读占位态，由手动刷新继续恢复。 */ })
     return () => { active = false }
   }, [ep?.id, Boolean(ep?.storyboard_status)])
@@ -657,7 +578,7 @@ export default function BoardPage() {
     startPreviewTriggerRef.current = document.activeElement as HTMLElement | null
     setBusy(true)
     try {
-      const preview = await api.post(`/episodes/${ep.id}/storyboard/preflight`, {}) as StartPreview
+      const preview = await api.storyboardPreflight(ep.id)
       setStartPreview(preview)
     } catch (caught) {
       toast((caught as Error).message, true)
@@ -685,7 +606,7 @@ export default function BoardPage() {
     const preview = startPreview
     setStartPreview(null)
     const result = await run(
-      () => api.post(`/episodes/${ep.id}/storyboard`, {
+      () => api.startStoryboard(ep.id, {
         preflight_token: preview.preview_token,
       }),
       preview.resume_mode === 'repair_existing'
@@ -706,7 +627,7 @@ export default function BoardPage() {
         // 这类问题继续展示详情，因为用户需要知道具体要修什么，而不是被要求"确认"一个坏结果。
         setBusy(true)
         try {
-          const preview = await api.post(`/episodes/${ep.id}/confirm-preview`) as ConfirmPreview
+          const preview = await api.confirmStoryboardPreview(ep.id)
           await autoConfirmStoryboard(preview)
         } catch (caught) {
           const apiError = caught as ApiError
@@ -730,9 +651,10 @@ export default function BoardPage() {
       setConfirmPreview(preview)
       return
     }
+    const previewToken = preview.preview_token
     await run(
-      () => api.post(`/episodes/${ep.id}/confirm`, {
-        preview_token: preview.preview_token,
+      () => api.confirmStoryboard(ep.id, {
+        preview_token: previewToken,
       }),
       '视频提示词已确认，可以进入生成台',
     )
@@ -741,10 +663,7 @@ export default function BoardPage() {
   async function previewClearStoryboard() {
     setBusy(true)
     try {
-      setClearPreview(await api.post(
-        `/episodes/${currentEpisodeId}/storyboard/clear-preview`,
-        {},
-      ) as StoryboardClearPreview)
+      setClearPreview(await api.previewClearStoryboard(currentEpisodeId))
     } catch (caught) {
       toast((caught as Error).message, true)
     } finally {
@@ -759,7 +678,7 @@ export default function BoardPage() {
     setClearPreview(null)
     setBusy(true)
     try {
-      await api.post(`/episodes/${ep.id}/storyboard/clear`, { preview_token: previewToken })
+      await api.clearStoryboard(ep.id, { preview_token: previewToken })
       toast(`已清空 ${deletedShots} 个视频提示词段落及其下游资源，映射结果已保留`)
       await refresh({ force: true })
       setSelectedShotId(null)
@@ -790,10 +709,7 @@ export default function BoardPage() {
   const reconcileProviderTasks = async () => {
     setProviderReconcileBusy(true)
     try {
-      const result = await api.post(
-        `/episodes/${currentEpisodeId}/provider-tasks/reconcile`,
-        {},
-      ) as ProviderTaskReconcileResult
+      const result = await api.reconcileProviderTasks(currentEpisodeId)
       setProviderReconcileResult(result)
       setProviderClearance(result.clearance)
       if (result.clearance.safe_to_clear) {
@@ -815,7 +731,7 @@ export default function BoardPage() {
 
   const pauseStoryboard = async () => {
     const result = await run(
-      () => api.post(`/episodes/${ep.id}/storyboard/cancel`, {}),
+      () => api.cancelStoryboard(ep.id),
       '视频提示词任务已暂停，工作段落和安全检查点已保留',
     )
   }
@@ -829,10 +745,10 @@ export default function BoardPage() {
     if (target === currentVideoModel) return
     setVideoModelBusy(true)
     try {
-      const result = await api.post(`/episodes/${ep.id}/video-model`, {
+      const result = await api.setVideoModel(ep.id, {
         target_video_model: target,
         ...(confirmClearPrompts ? { confirm_clear_prompts: true } : {}),
-      }) as { changed: boolean; cleared_videos: number; target_video_model: string }
+      })
       setVideoModelConfirm(null)
       if (result.changed) {
         toast(result.cleared_videos

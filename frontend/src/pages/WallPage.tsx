@@ -345,7 +345,7 @@ export default function WallPage() {
         : { status: 'loading', shotId }
     ))
     try {
-      const loaded = await api.get(`/shots/${shotId}/review`) as Shot
+      const loaded = await api.getShotReview(shotId)
       if (request !== detailRequest.current) return
       setDetail({ status: 'ready', shotId, referenceImages: extractReferenceImagesByVersion(loaded) })
     } catch (reason) {

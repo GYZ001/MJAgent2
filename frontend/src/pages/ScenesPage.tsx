@@ -246,7 +246,7 @@ export default function ScenesPage() {
   const startBibleAndSceneLibrary = async (styleName: string) => {
     await act(async () => {
       const quote = await api.bibleGeneratePrecheck(p.id, { style_name: styleName })
-      await api.post(`/projects/${p.id}/bible`, {
+      await api.generateBible(p.id, {
         confirm: true,
         quote_id: quote.quote_id,
         idempotency_key: quote.quote_id,

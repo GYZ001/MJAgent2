@@ -34,7 +34,7 @@ import "../styles/BiblePage.css";
 const REQUIRED_CHARACTER_VIEWS = ['front_full', 'three_quarter', 'profile'] as const
 
 function trackBible(name: string, projectId: string, dimensions: Record<string, string | number | boolean> = {}) {
-  void api.post('/system/monitor/events', { name, object_id: projectId, dimensions }).catch(() => undefined)
+  void api.reportMonitorEvent(name, dimensions, projectId).catch(() => undefined)
 }
 
 type RefsProgress = Awaited<ReturnType<typeof api.refsProgress>>
@@ -694,7 +694,7 @@ export default function BiblePage() {
     await openPayment(
       {},
       async (quote) => {
-        await api.post(`/projects/${p.id}/bible`, {
+        await api.generateBible(p.id, {
           confirm: true,
           quote_id: quote.quote_id,
           idempotency_key: quote.quote_id,
@@ -749,7 +749,7 @@ export default function BiblePage() {
     await openPayment(
       { resume: true },
       async (quote) => {
-        await api.post(`/projects/${p.id}/refs`, {
+        await api.generateRefs(p.id, {
           resume: true,
           confirm: true,
           quote_id: quote.quote_id,
@@ -772,7 +772,7 @@ export default function BiblePage() {
     await openPayment(
       { resume: false },
       async (quote) => {
-        await api.post(`/projects/${p.id}/refs`, {
+        await api.generateRefs(p.id, {
           resume: false,
           confirm: true,
           quote_id: quote.quote_id,
@@ -854,7 +854,7 @@ export default function BiblePage() {
     if (!editing) return
     setBusy(true)
     try {
-      const r = await api.put(`/projects/${p.id}/bible`, {
+      const r = await api.updateBible(p.id, {
         bible: editing,
         expected_version: currentEditVersion,
         confirm: true,
@@ -1460,7 +1460,7 @@ export default function BiblePage() {
             regenerate={() => openPayment(
               { character: paramsCharacter.name },
               async (quote) => {
-                await api.post(`/projects/${p.id}/refs`, {
+                await api.generateRefs(p.id, {
                   character: paramsCharacter.name,
                   confirm: true,
                   quote_id: quote.quote_id,
@@ -1510,8 +1510,7 @@ function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerat
     setSaving(true)
     try {
       const text = value ?? draft ?? ''
-      const r = await api.put(`/projects/${projectId}/characters/${encodeURIComponent(c.name)}/portrait`,
-        { portrait_prompt: text })
+      const r = await api.setCharacterPortraitPrompt(projectId, c.name, { portrait_prompt: text })
       toast(r.reset_to_default ? `「${c.name}」定妆提示词已恢复系统默认值` : `「${c.name}」最新定妆提示词已保存`)
       setRestoreConfirm(false); setDiscardConfirm(false); setDraft(null); onChanged()
       if (thenRegen) regenerate()

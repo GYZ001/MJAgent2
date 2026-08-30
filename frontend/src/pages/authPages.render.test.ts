@@ -22,20 +22,22 @@ vi.mock('../api', () => ({
   login: vi.fn(async () => {}),
   changePassword: vi.fn(async () => {}),
   api: {
-    get: vi.fn(async (path: string) =>
-      path.includes('workspaces')
-        ? { items: [{ id: 'w1', name: '制作一组', status: 'active', member_count: 2, project_count: 1 }] }
-        : {
-            items: [{
-              id: 'u1', username: 'demo2', display_name: '演示账号', status: 'active',
-              is_system_admin: false, must_change_password: false, created_at: 0,
-              last_login_at: null, workspaces: [{ id: 'w1', name: '制作一组', role: 'production' }],
-            }],
-          },
-    ),
-    post: vi.fn(async () => ({})),
-    put: vi.fn(async () => ({})),
-    del: vi.fn(async () => ({})),
+    listWorkspaces: vi.fn(async () => (
+      { items: [{ id: 'w1', name: '制作一组', status: 'active', member_count: 2, project_count: 1 }] }
+    )),
+    listUsers: vi.fn(async () => ({
+      items: [{
+        id: 'u1', username: 'demo2', display_name: '演示账号', status: 'active',
+        is_system_admin: false, must_change_password: false, created_at: 0,
+        last_login_at: null, workspaces: [{ id: 'w1', name: '制作一组', role: 'production' }],
+      }],
+    })),
+    createWorkspace: vi.fn(async () => ({})),
+    createUser: vi.fn(async () => ({})),
+    updateWorkspace: vi.fn(async () => ({})),
+    updateWorkspaceMember: vi.fn(async () => ({})),
+    removeWorkspaceMember: vi.fn(async () => ({})),
+    updateUser: vi.fn(async () => ({})),
   },
 }))
 

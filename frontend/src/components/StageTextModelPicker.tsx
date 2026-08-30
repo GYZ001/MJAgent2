@@ -30,7 +30,7 @@ export default function StageTextModelPicker({
     if (next === current) return
     setBusy(true)
     try {
-      await api.put(`/projects/${projectId}/text-models`, { [field]: next })
+      await api.setStageTextModel(projectId, { [field]: next })
       onSaved()
     } catch (caught) {
       const apiError = caught as ApiError

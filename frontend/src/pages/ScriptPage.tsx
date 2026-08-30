@@ -370,7 +370,7 @@ export default function ScriptPage() {
     if (!ep || canResumeFlow) return
     setBusy(true)
     try {
-      const data = await api.post(`/episodes/${ep.id}/screenplay/preflight`, {})
+      const data = await api.screenplayPreflight(ep.id)
       setPreview({
         title: '首次生成映射包预检',
         data,
@@ -385,15 +385,15 @@ export default function ScriptPage() {
     if (!preview || !ep) return
     const current = preview
     setPreview(null)
-    await run(() => api.post(
-      `/episodes/${ep.id}/screenplay`,
+    await run(() => api.generateScreenplay(
+      ep.id,
       screenplayGeneratePayload(current.idempotencyKey, current.data?.blueprint_budget),
     ), '映射包生成任务已受理').catch(() => undefined)
   }
 
   const resumeRepair = async () => {
     if (!ep) return
-    const result = await run(() => api.post(`/episodes/${ep.id}/screenplay/resume`, {
+    const result = await run(() => api.resumeScreenplay(ep.id, {
       idempotency_key: stableKey(`screenplay-resume:${ep.id}`),
     })).catch(() => null)
     if (!result) return
@@ -402,7 +402,7 @@ export default function ScriptPage() {
 
   const stopScreenplay = async () => {
     if (!ep) return
-    const result = await run(() => api.post(`/episodes/${ep.id}/screenplay/cancel`, {}))
+    const result = await run(() => api.cancelScreenplay(ep.id))
       .catch(() => null)
     if (result?.status === 'cancelling') toast('正在取消，尚未宣称已停止')
     else if (result) toast(`任务已终止；${result.resume_available ? '可从工作副本恢复' : '可重新发起'}`)
@@ -411,7 +411,7 @@ export default function ScriptPage() {
   const deleteCurrentScreenplay = async () => {
     if (!ep) return
     try {
-      const result = await run(() => api.del(`/episodes/${ep.id}/screenplay`))
+      const result = await run(() => api.deleteScreenplay(ep.id))
       if (result) toast('当前映射包及下游已删除')
     } catch { /* run 已呈现结果 */ }
   }

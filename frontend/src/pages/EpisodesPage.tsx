@@ -1,5 +1,5 @@
 import { useDeferredValue, useEffect, useId, useRef, useState } from 'react'
-import { api, numToCn, type Project } from '../api'
+import { api, numToCn, type Project, type StoryboardMetrics } from '../api'
 import { useNav, usePoll } from '../App'
 import { ServerTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
@@ -17,16 +17,10 @@ export const FIRST_THREE_VIDEO_GLOBAL_BUDGET_CAP_CNY = 450
 export const FIRST_THREE_VIDEO_PER_EPISODE_CAP_CNY = 150
 export const FIRST_THREE_VIDEO_WALL_CLOCK_CAP_S = 4 * 60 * 60
 type BatchAction = 'replan' | 'screenplay' | 'storyboard'
-type StoryboardMetrics = {
-  active_storyboard_runs: number
-  scripting_episodes: number
-  waiting_human: number
-  paused: number
-  repairing: number
-  waiting_authorization?: number
-  phase_counts: Record<string, number>
-}
 
+// 不收敛成具名方法：这个泛型 get 是有意留的测试注入点（见下方 generateFirstThreeEpisodeVideos
+// 的 client 形参与 EpisodesPage.test.ts 对 get 调用参数的断言）——把它换成具名方法会同时要求
+// 改测试的 mock 形状与断言，而这里泛型 get 本身就是被测对象的一部分，不是"URL 知识漏回页面"。
 type FirstThreeVideoApi = {
   get: (path: string) => Promise<unknown>
   projectVideoCompletion: (
@@ -109,10 +103,7 @@ export default function EpisodesPage() {
   const deferredSearch = useDeferredValue(search)
   const query = deferredSearch.trim().toLowerCase()
   const { data: p, refresh, error, status, loading } = usePoll<Project>(
-    () => api.get(
-      `/projects/${projectId}?view=episodes&page=${page + 1}&page_size=${PAGE_SIZE}`
-      + `&query=${encodeURIComponent(query)}&status_filter=${encodeURIComponent(statusFilter)}`,
-    ),
+    () => api.listEpisodesPage(projectId, { page: page + 1, pageSize: PAGE_SIZE, query, statusFilter }),
     (project) => project?.episodes_busy ? 3000 : 0,
     [projectId, page, query, statusFilter],
   )
@@ -131,7 +122,7 @@ export default function EpisodesPage() {
   const storyboardReadyCount = counts?.storyboard_ready ?? eps.filter(e => e.screenplay_status === 'ready' && ['planned', 'script_failed'].includes(e.status)).length
   const scriptingCount = counts?.scripting ?? eps.filter(e => e.status === 'scripting').length
   const { data: sbMetrics } = usePoll<StoryboardMetrics>(
-    () => api.get(`/projects/${projectId}/storyboard-metrics`),
+    () => api.getStoryboardMetrics(projectId),
     scriptingCount > 0 ? 4000 : 15000,
     [projectId, scriptingCount],
   )
@@ -268,15 +259,15 @@ export default function EpisodesPage() {
   const executeBatch = async () => {
     if (!batchConfirm) return
     if (batchConfirm === 'replan') {
-      await act(() => api.post(`/projects/${p.id}/plan`))
+      await act(() => api.replanEpisodes(p.id))
     } else if (batchConfirm === 'screenplay') {
       await act(async () => {
-        const result = await api.post(`/projects/${p.id}/screenplay-all`) as { started: number }
+        const result = await api.generateAllScreenplays(p.id)
         toast(`已为 ${result.started} 集发起映射包生成`)
       })
     } else {
       await act(async () => {
-        const result = await api.post(`/projects/${p.id}/storyboard-all`) as { started: number }
+        const result = await api.generateAllStoryboards(p.id)
         toast(`已为 ${result.started} 集发起分镜生成`)
       })
     }
@@ -289,7 +280,7 @@ export default function EpisodesPage() {
     setDeleteTarget(null)
     await act(
       async () => {
-        const result = await api.del(`/episodes/${target.id}`) as { renumbered?: number }
+        const result = await api.deleteEpisode(target.id)
         toast(
           result.renumbered
             ? `第${target.episode_no}集已删除；后续 ${result.renumbered} 集已自动补齐序号`
@@ -486,7 +477,7 @@ export default function EpisodesPage() {
                     onChange={event => {
                       const target = Number(event.target.value)
                       void act(
-                        () => api.put(`/episodes/${ep.id}/target-duration`, { target_duration_s: target }),
+                        () => api.setEpisodeTargetDuration(ep.id, { target_duration_s: target }),
                         `第${ep.episode_no}集目标时长已调整为 ${target} 秒`,
                       )
                     }}
@@ -642,7 +633,7 @@ export default function EpisodesPage() {
           onConfirm={() => {
             setBatchStopConfirm(false)
             void act(async () => {
-              const result = await api.post(`/projects/${p.id}/screenplay-all/cancel`) as { stopped: number }
+              const result = await api.cancelAllScreenplays(p.id)
               toast(`已停止 ${result.stopped} 集映射包生成；已完成映射包和工作副本保留`)
             })
           }}

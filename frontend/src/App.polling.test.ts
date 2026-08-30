@@ -61,14 +61,14 @@ describe('分集轮询终态同步', () => {
   })
 })
 
-describe('剧本台轻量状态轮询', () => {
+describe('映射台轻量状态轮询', () => {
   it('运行中高频、终态低频刷新以修正陈旧的重建按钮', () => {
     expect(screenplayStatusPollInterval({ id: 'e1', active: true })).toBe(2000)
     expect(screenplayStatusPollInterval({ id: 'e1', active: false })).toBe(15000)
   })
 })
 
-describe('剧本台首屏不重复拉同一套权威校验', () => {
+describe('映射台首屏不重复拉同一套权威校验', () => {
   it('详情落地前不启动轻量状态轮询', () => {
     // usePoll 见到 null 依赖不启动；详情响应本身已带 screenplay_state。
     expect(screenplayStatusPollDeps('e1', false)).toEqual([null])

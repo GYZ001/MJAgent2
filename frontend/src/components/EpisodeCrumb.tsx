@@ -47,7 +47,7 @@ export default function EpisodeCrumb({ label, view, episodeNo, showProductionFil
     production: productionFilter,
   })
   const { data: project, error, loading, refresh } = usePoll<Project>(
-    () => api.get(`/projects/${projectId}?view=${pickerView}&${pickerParams}`),
+    () => api.getProject(projectId, `view=${pickerView}&${pickerParams}`),
     0,
     [projectId, pickerView, pickerParams],
   )

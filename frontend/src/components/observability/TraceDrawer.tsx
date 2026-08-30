@@ -508,7 +508,6 @@ export default function TraceDrawer({
   const sourceQuery = target.source
     ? `?source=${encodeURIComponent(target.source)}`
     : "";
-  const basePath = `/projects/${encodeURIComponent(projectId)}/observability/traces/${target.type}/${encodeURIComponent(target.id)}`;
 
   const loadNode = useCallback(
     async (nodeId: string) => {
@@ -517,8 +516,12 @@ export default function TraceDrawer({
       setDetailLoading(true);
       setDetailError("");
       try {
-        const next = (await api.get(
-          `${basePath}/nodes/${encodeURIComponent(nodeId)}${sourceQuery}`,
+        const next = (await api.getTraceNodeDetail(
+          projectId,
+          target.type,
+          target.id,
+          nodeId,
+          sourceQuery,
         )) as TraceNodeDetail;
         if (detailSequence.current === sequence) setDetail(next);
       } catch (reason) {
@@ -530,7 +533,7 @@ export default function TraceDrawer({
         if (detailSequence.current === sequence) setDetailLoading(false);
       }
     },
-    [basePath, sourceQuery],
+    [projectId, target.type, target.id, sourceQuery],
   );
 
   const loadTrace = useCallback(
@@ -539,7 +542,12 @@ export default function TraceDrawer({
       else setLoading(true);
       setError("");
       try {
-        const next = (await api.get(`${basePath}${sourceQuery}`)) as TraceView;
+        const next = (await api.getTraceView(
+          projectId,
+          target.type,
+          target.id,
+          sourceQuery,
+        )) as TraceView;
         if (next.scope.project_id !== projectId) {
           throw new Error("链路响应的项目范围与当前页面不一致");
         }
@@ -564,7 +572,7 @@ export default function TraceDrawer({
         setRefreshing(false);
       }
     },
-    [basePath, loadNode, projectId, selectedId, sourceQuery],
+    [loadNode, projectId, target.type, target.id, selectedId, sourceQuery],
   );
 
   useEffect(() => {
@@ -576,7 +584,7 @@ export default function TraceDrawer({
     void loadTrace();
     // The target path is the lifecycle boundary; selection changes must not reload the tree.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [basePath, sourceQuery]);
+  }, [projectId, target.type, target.id, sourceQuery]);
 
   const childrenByParent = useMemo(() => {
     const groups = new Map<string, TraceNode[]>();

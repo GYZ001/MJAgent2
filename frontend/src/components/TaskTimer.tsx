@@ -50,7 +50,10 @@ function formatDuration(ms: number) {
 }
 
 export function ServerTaskTimer({ label, startedAt, finishedAt, running }: {
-  label: string
+  /** 省略时只显示时间。上下文已经点明是哪个任务时（如世界观状态条：芯片自己
+   *  就写着「谱写中」「定妆中」），再冠一次任务名是纯冗余。同屏有多个计时器
+   *  的页面（分集台/分镜台/成片台）仍要传，否则分不清哪个是哪个。 */
+  label?: string
   startedAt?: number | null
   finishedAt?: number | null
   running: boolean
@@ -68,9 +71,10 @@ export function ServerTaskTimer({ label, startedAt, finishedAt, running }: {
   if (!running && !finishedAt) return null
   const endMs = finishedAt ? finishedAt * 1000 : clock
   const elapsedMs = Math.max(0, endMs - startedAt * 1000)
+  const prefix = label ? <><b>{label}</b>{' '}</> : null
   return running
-    ? <span className="task-timer"><b>{label}</b> 已执行 {formatDuration(elapsedMs)}</span>
-    : <span className="task-timer done"><b>{label}</b> 本次耗时 {formatDuration(elapsedMs)}</span>
+    ? <span className="task-timer">{prefix}已执行 {formatDuration(elapsedMs)}</span>
+    : <span className="task-timer done">{prefix}本次耗时 {formatDuration(elapsedMs)}</span>
 }
 
 /** 单项计时：累计已完成耗时，若仍在跑则叠加实时增量。

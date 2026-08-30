@@ -207,7 +207,7 @@ export default function CinemaPage() {
     status: mixErrorStatus,
     refresh: refreshMix,
   } = usePoll<MixStatus>(
-    () => api.get(`/episodes/${episodeId}/mix-status`),
+    () => api.getMixStatus(episodeId),
     cinemaPollInterval,
     [episodeId, cinemaPollInterval],
   )
@@ -218,8 +218,8 @@ export default function CinemaPage() {
   } = usePoll<{ readiness: DeliveryReadiness; packages: DeliveryPackageRecord[] }>(
     async () => {
       const [nextReadiness, nextPackages] = await Promise.all([
-        api.get(`/episodes/${episodeId}/delivery/readiness`),
-        api.get(`/episodes/${episodeId}/delivery/packages`),
+        api.getDeliveryReadiness(episodeId),
+        api.getDeliveryPackages(episodeId),
       ])
       return { readiness: nextReadiness, packages: nextPackages }
     },
@@ -334,7 +334,7 @@ export default function CinemaPage() {
     }
     setDeliveryBusy(true)
     try {
-      await api.post(`/episodes/${ep.id}/delivery/approve`, {
+      await api.approveDelivery(ep.id, {
         package_id: selectedPackage.id,
         decided_by: reviewer.trim(),
         decision,
@@ -364,9 +364,9 @@ export default function CinemaPage() {
     setMixBusy(true)
     try {
       const concatKey = persistentDeliveryOperationKey(`concat:${ep.id}`)
-      const result = (await api.post(`/episodes/${ep.id}/concatenate`, {
+      const result = await api.concatenateEpisode(ep.id, {
         idempotency_key: concatKey,
-      })) as MixResult
+      })
       localStorage.removeItem(deliveryOperationStorageKey(`concat:${ep.id}`))
       if (result.ffmpeg_missing) {
         mixTimer.clear()
@@ -398,7 +398,7 @@ export default function CinemaPage() {
   const createDeliveryPackage = async () => {
     setDeliveryBusy(true)
     try {
-      await api.post(`/episodes/${ep.id}/delivery/package`, {
+      await api.createDeliveryPackage(ep.id, {
         idempotency_key: persistentDeliveryOperationKey(ep.id),
       })
       localStorage.removeItem(deliveryOperationStorageKey(ep.id))
@@ -417,7 +417,7 @@ export default function CinemaPage() {
     if (!message) return
     setFeedbackBusy(true)
     try {
-      await api.post(`/episodes/${ep.id}/customer-feedback`, {
+      await api.submitCustomerFeedback(ep.id, {
         message,
         created_by: reviewer.trim() || 'customer',
         request_revision: true,
@@ -439,7 +439,7 @@ export default function CinemaPage() {
     const busyKey = `${item.id}:${kind}`
     setDownloadBusy(busyKey)
     try {
-      const blob = await api.download(`/delivery/packages/${item.id}/${kind}`)
+      const blob = await api.downloadDeliveryFile(item.id, kind)
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
       anchor.href = url

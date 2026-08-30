@@ -44,10 +44,11 @@ export default function CharacterQaPanel({
   }
 
   useEffect(() => {
-    void api.post('/system/monitor/events', {
-      name: 'portrait_candidate_review', object_id: projectId,
-      dimensions: { action: 'open', result: portrait?.pack_status || 'candidate_only' },
-    }).catch(() => undefined)
+    void api.reportMonitorEvent(
+      'portrait_candidate_review',
+      { action: 'open', result: portrait?.pack_status || 'candidate_only' },
+      projectId,
+    ).catch(() => undefined)
     loadCandidates()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, characterName, portrait?.pack_status])

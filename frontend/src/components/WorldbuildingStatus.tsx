@@ -66,10 +66,10 @@ export default function WorldbuildingStatus({
     let stopped = ''
     try {
       if (project.bible_status === 'running') {
-        await api.post(`/projects/${project.id}/bible/cancel`)
+        await api.cancelBibleGeneration(project.id)
         stopped = '已停止谱写；已落盘资产保留'
       } else {
-        await api.post(`/projects/${project.id}/refs/cancel`)
+        await api.cancelRefsGeneration(project.id)
         stopped = '已停止定妆；已落盘资产保留'
       }
       let summary = ''
@@ -96,13 +96,11 @@ export default function WorldbuildingStatus({
       {project.bible_status === 'running' && <span className="stamp gold">谱写中（约 1~3 分钟）</span>}
       {project.refs_status === 'running' && <span className="stamp gold">定妆中</span>}
       <ServerTaskTimer
-        label="人物谱"
         startedAt={project.task_timings?.bible?.started_at}
         finishedAt={project.task_timings?.bible?.finished_at}
         running={project.bible_status === 'running'}
       />
       <ServerTaskTimer
-        label="定妆照"
         startedAt={project.task_timings?.refs?.started_at}
         finishedAt={project.task_timings?.refs?.finished_at}
         running={project.refs_status === 'running'}

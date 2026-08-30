@@ -1,5 +1,5 @@
 import { useEffect, useId, useState, type FormEvent } from "react";
-import { api, ApiError } from "../api";
+import { api, ApiError, type UserRow, type WorkspaceRow } from "../api";
 import { roleLabel, type WorkspaceRole } from "../auth/session";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import DecisionDialog from "../components/DecisionDialog";
@@ -15,24 +15,6 @@ import "../styles/TeamAdminPage.css";
 
 const ROLES: WorkspaceRole[] = ["workspace_admin", "production", "review", "readonly"];
 
-interface WorkspaceMembershipRow {
-  id: string;
-  name: string;
-  role: string;
-}
-
-interface UserRow {
-  id: string;
-  username: string;
-  display_name: string;
-  status: "active" | "disabled";
-  is_system_admin: boolean;
-  must_change_password: boolean;
-  created_at: number;
-  last_login_at: number | null;
-  workspaces: WorkspaceMembershipRow[];
-}
-
 /** 一次待确认的破坏性操作：文案与真正要跑的动作绑在一起，避免两处写岔。 */
 interface ConfirmRequest {
   title: string;
@@ -41,14 +23,6 @@ interface ConfirmRequest {
   confirmLabel: string;
   danger?: boolean;
   run: () => void;
-}
-
-interface WorkspaceRow {
-  id: string;
-  name: string;
-  status: "active" | "disabled";
-  member_count: number;
-  project_count: number;
 }
 
 function formatTime(epochSeconds: number | null): string {
@@ -77,8 +51,8 @@ export default function TeamAdminPage() {
     setError(null);
     try {
       const [u, w] = await Promise.all([
-        api.get("/system/users") as Promise<{ items: UserRow[] }>,
-        api.get("/system/workspaces") as Promise<{ items: WorkspaceRow[] }>,
+        api.listUsers(),
+        api.listWorkspaces(),
       ]);
       setUsers(u.items);
       setWorkspaces(w.items);
@@ -112,14 +86,14 @@ export default function TeamAdminPage() {
 
   const createTeam = async (name: string) => {
     // 失败时不关弹窗：重名、后端拒绝都在这条路上，关掉就得让用户重打一遍。
-    if (await runAction(() => api.post("/system/workspaces", { name }), `团队「${name}」已创建`)) {
+    if (await runAction(() => api.createWorkspace(name), `团队「${name}」已创建`)) {
       setTeamDialogOpen(false);
     }
   };
 
   const createUser = async (draft: NewUserDraft) => {
     const ok = await runAction(
-      () => api.post("/system/users", {
+      () => api.createUser({
         username: draft.username,
         password: draft.password,
         display_name: draft.displayName || undefined,
@@ -134,7 +108,7 @@ export default function TeamAdminPage() {
   const toggleTeamStatus = (w: WorkspaceRow) => {
     const next = w.status === "active" ? "disabled" : "active";
     const apply = () => void runAction(
-      () => api.put(`/system/workspaces/${w.id}`, { status: next }),
+      () => api.updateWorkspace(w.id, { status: next }),
       `团队「${w.name}」已${next === "active" ? "启用" : "停用"}`,
     );
     if (next === "active") { apply(); return; }
@@ -152,7 +126,7 @@ export default function TeamAdminPage() {
 
   const changeRole = (workspaceId: string, userId: string, role: string) => {
     void runAction(
-      () => api.put(`/system/workspaces/${workspaceId}/members/${userId}`, { role }),
+      () => api.updateWorkspaceMember(workspaceId, userId, { role }),
       "角色已更新",
     );
   };
@@ -165,7 +139,7 @@ export default function TeamAdminPage() {
       confirmLabel: "移出团队",
       danger: true,
       run: () => void runAction(
-        () => api.del(`/system/workspaces/${workspaceId}/members/${userId}`),
+        () => api.removeWorkspaceMember(workspaceId, userId),
         `已把「${username}」移出团队`,
       ),
     });
@@ -173,7 +147,7 @@ export default function TeamAdminPage() {
 
   const addMember = (userId: string, username: string, workspaceId: string, role: string) => {
     void runAction(
-      () => api.put(`/system/workspaces/${workspaceId}/members/${userId}`, { role }),
+      () => api.updateWorkspaceMember(workspaceId, userId, { role }),
       `已把「${username}」加入团队`,
     );
   };
@@ -181,7 +155,7 @@ export default function TeamAdminPage() {
   const toggleStatus = (u: UserRow) => {
     const next = u.status === "active" ? "disabled" : "active";
     const apply = () => void runAction(
-      () => api.put(`/system/users/${u.id}`, { status: next }),
+      () => api.updateUser(u.id, { status: next }),
       `账号「${u.username}」已${next === "active" ? "启用" : "禁用"}`,
     );
     if (next === "active") { apply(); return; }
@@ -197,7 +171,7 @@ export default function TeamAdminPage() {
 
   const resetPassword = async (user: UserRow, password: string) => {
     const ok = await runAction(
-      () => api.put(`/system/users/${user.id}`, { password }),
+      () => api.updateUser(user.id, { password }),
       `「${user.username}」的密码已重置`,
     );
     if (ok) setResetTarget(null);
@@ -216,7 +190,7 @@ export default function TeamAdminPage() {
       confirmLabel: next ? "设为系统管理员" : "取消管理员",
       danger: !next,
       run: () => void runAction(
-        () => api.put(`/system/users/${u.id}`, { is_system_admin: next }),
+        () => api.updateUser(u.id, { is_system_admin: next }),
         "已更新",
       ),
     });

@@ -16,7 +16,6 @@ import { api, ApiError, changePassword, Episode, Project } from "./api";
 import Studio from "./pages/Studio";
 import LoginPage from "./pages/LoginPage";
 import ForcePasswordChangePage from "./pages/ForcePasswordChangePage";
-import CapabilityApprovalHost from "./components/CapabilityApprovalHost";
 import DecisionDialog from "./components/DecisionDialog";
 import ErrorBoundary from "./components/ErrorBoundary";
 import EpisodeCrumb from "./components/EpisodeCrumb";
@@ -432,7 +431,7 @@ function AppShell() {
       window.clearTimeout(projectsRetryTimerRef.current);
       projectsRetryTimerRef.current = undefined;
     }
-    void api.get("/projects").then((items: Project[]) => {
+    void api.listProjects().then((items: Project[]) => {
       setProjects(items);
       setProjectsLoaded(true);
       projectsRetryDelayRef.current = PROJECTS_RETRY_MIN_MS;
@@ -693,7 +692,7 @@ function AppShell() {
     // 这里只要解析出一个有效分集 id，不需要整份清单：用窗口模式取 1 条即可，
     // 千集项目下 payload 从 250KB 降到不足 1KB。
     api
-      .get(`/projects/${projectId}?view=picker&${pickerWindowParams(1, requestedEpisodeId ?? episodeId)}`)
+      .getProject(projectId, `view=picker&${pickerWindowParams(1, requestedEpisodeId ?? episodeId)}`)
       .then((project: Project) => {
         if (cancelled) return;
         setEpisodeId((current) =>
@@ -733,7 +732,7 @@ function AppShell() {
 
     // 分集可能在项目打开后才生成，仍要重新校验，只是既不阻塞导航、也不拉整份清单。
     api
-      .get(`/projects/${projectId}?view=picker&${pickerWindowParams(1, openedWith)}`)
+      .getProject(projectId, `view=picker&${pickerWindowParams(1, openedWith)}`)
       .then((project: Project) => {
         const nextEpisodeId = resolveWindowedEpisodeId(project, openedWith);
         if (!nextEpisodeId || nextEpisodeId === openedWith) return;
@@ -1082,7 +1081,6 @@ function AppShell() {
           onClose={cancelPendingNavigation}
         />
       )}
-      <CapabilityApprovalHost />
       {changePasswordOpen && (
         <ChangePasswordDialog
           onClose={() => setChangePasswordOpen(false)}
@@ -1391,7 +1389,7 @@ export const useProject = (
   view?: "bible" | "scenes" | "episodes" | "picker" | "picker_generation",
 ) =>
   usePoll<Project>(
-    () => api.get(`/projects/${projectId}${view ? `?view=${view}` : ""}`),
+    () => api.getProject(projectId, view ? `view=${view}` : undefined),
     intervalMs,
     [projectId, view],
   );
@@ -1450,7 +1448,7 @@ export const useEpisode = (
   intervalMs: PollInterval<Episode> = (ep) => (episodeBusy(ep) ? 2000 : 0),
 ) =>
   usePoll<Episode>(
-    () => api.get(`/episodes/${episodeId}${view ? `?view=${view}` : ""}`),
+    () => api.getEpisode(episodeId, view ? `view=${view}` : undefined),
     intervalMs,
     [episodeId, view],
   );
@@ -1485,7 +1483,7 @@ export function screenplayStatusPollDeps(
 export function useScriptEpisode(episodeId: string) {
   const detail = useEpisode(episodeId, "script", 0);
   const status = usePoll<ScreenplayLightStatus>(
-    () => api.get(`/episodes/${episodeId}/screenplay/status`),
+    () => api.getScreenplayStatus(episodeId),
     screenplayStatusPollInterval,
     screenplayStatusPollDeps(episodeId, Boolean(detail.data)),
   );

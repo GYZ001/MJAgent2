@@ -19,7 +19,7 @@ export default function ReaderPage() {
     setError(null)
     setData(null)
     setJumpValue(String(idx))
-    api.get(`/projects/${projectId}/chapters/${idx}`)
+    api.getChapter(projectId, idx)
       .then((d: ChapterContent) => {
         if (cancelled) return
         setData(d)
