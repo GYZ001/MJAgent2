@@ -856,7 +856,7 @@ def _reset_capability_runtime(
     # 这批测试不需要逐个改造。
     set_current_principal(
         Principal(user_id="test-bus-admin", username="test-bus-admin",
-                  is_system_admin=True, workspace_roles={})
+                  is_system_admin=True)
     )
 
     try:
@@ -903,11 +903,6 @@ def ensure_test_admin() -> str:
             ts,
             ts,
         ),
-    )
-    conn.execute(
-        "INSERT OR IGNORE INTO workspace_members(workspace_id, user_id, role, created_at) "
-        "VALUES('ws_default', ?, 'workspace_admin', ?)",
-        (user_id, ts),
     )
     conn.commit()
     return user_id

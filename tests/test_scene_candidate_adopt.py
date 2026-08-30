@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -177,41 +176,4 @@ def test_scene_adopt_route_is_registered() -> None:
     }
     path = "/api/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/adopt"
     assert "POST" in methods_by_path[path]
-
-
-# ---------------------------------------------------------------------------
-# scene.review_candidate 的 REST 路由必须真的走命令总线：不是「能返回 200」，
-# 而是「鉴权/校验真的生效」。此前这条路由绕过 dispatch，任何角色都能裸奔执行。
-# ---------------------------------------------------------------------------
-
-
-@contextmanager
-def _as_principal(*, role: str | None, is_system_admin: bool = False, workspace_id: str = "ws_test"):
-    """临时切换当前 Principal，退出时还原成进入前的身份（同 test_rbac_command_bus.py）。"""
-    from app.auth.principal import Principal, get_current_principal, set_current_principal
-
-    previous = get_current_principal()
-    workspace_roles = {} if role is None else {workspace_id: role}
-    set_current_principal(
-        Principal(
-            user_id=f"test-{role or 'sysadmin'}",
-            username=f"test-{role or 'sysadmin'}",
-            is_system_admin=is_system_admin,
-            workspace_roles=workspace_roles,
-        )
-    )
-    try:
-        yield
-    finally:
-        set_current_principal(previous)
-
-
-def _ready_command_bus() -> None:
-    from app.capabilities.bus import reset_command_bus_for_tests
-    from app.capabilities.loader import ensure_catalog_loaded
-    from app.capabilities.policy import reset_approvals_for_tests
-
-    ensure_catalog_loaded()
-    reset_approvals_for_tests()
-    reset_command_bus_for_tests()
 

@@ -26,7 +26,7 @@ export default function QueryState({
 }: {
   loading?: boolean
   error?: string | null
-  /** ApiError.status：403 渲染「无权访问」，跨团队 404 渲染「资源不存在」。 */
+  /** ApiError.status：403 渲染「无权访问」，跨账号 404 渲染「资源不存在」。 */
   status?: number | null
   hasData: boolean
   kind?: QueryKind
@@ -60,11 +60,11 @@ export default function QueryState({
     const notFound = status === 404
     return (
       <div className="empty query-error" role="alert">
-        <strong>{notFound ? '资源不存在或你不在该团队' : '无权访问'}</strong>
+        <strong>{notFound ? '资源不存在或不属于当前账号' : '无权访问'}</strong>
         <p>
           {notFound
-            ? '请确认链接是否正确；如果你确认应该看到它，请联系团队管理员确认是否已把你加入该团队。'
-            : `当前账号没有权限查看${objectName}，请联系团队管理员分配相应角色。`}
+            ? '请确认链接是否正确，或改用拥有该项目的账号登录；如果你确认应该看到它，请联系系统管理员协助排查。'
+            : `当前账号没有权限查看${objectName}，请联系系统管理员协助处理。`}
         </p>
         {onRetry && <button type="button" className="btn" onClick={onRetry}>重试</button>}
       </div>

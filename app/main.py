@@ -19,7 +19,7 @@ from app.api import purge_legacy_screenplays, router
 from app.auth.admin_api import router as auth_admin_router
 from app.auth.api import router as auth_router
 from app.auth.principal import set_current_principal
-from app.authz import require_workspace_access
+from app.authz import require_project_owner_access
 from app.config import PROJECTS_DIR, ROOT
 from app.db import init_db
 from app.mcp import router as mcp_router
@@ -67,11 +67,11 @@ import app.production.shot_uid  # noqa: F401
 
 # 除 health / session 领取外，全部 /api/* 强制本机会话（Todolist T1）。
 _SESSION_DEPS = [Depends(require_local_session)]
-# RBAC 第四阶段：工作空间隔离。必须排在 require_local_session 之后——
-# require_workspace_access 只读 get_current_principal()，执行到这里时
+# RBAC 第四阶段：账号级项目归属隔离。必须排在 require_local_session 之后——
+# require_project_owner_access 只读 get_current_principal()，执行到这里时
 # Principal 必定已由中间件（bind_request_principal）解析好；session 闸门
 # 自身没通过的请求也不会走到这一步。
-_WORKSPACE_DEPS = _SESSION_DEPS + [Depends(require_workspace_access)]
+_PROJECT_OWNER_DEPS = _SESSION_DEPS + [Depends(require_project_owner_access)]
 
 
 @asynccontextmanager
@@ -253,16 +253,16 @@ async def _on_unhandled(request: Request, exc: Exception):
 
 app.include_router(system_public_router)  # health 等公开探活，不要求会话
 app.include_router(auth_router)  # /api/auth/*：login 本身必须公开，路由自身按需挂 session deps
-app.include_router(auth_admin_router)  # /api/system/users、/api/system/workspaces：路由自身逐条挂 require_system_admin
-app.include_router(router, dependencies=_WORKSPACE_DEPS)
-app.include_router(planning_router, dependencies=_WORKSPACE_DEPS)
-app.include_router(orchestration_router, dependencies=_WORKSPACE_DEPS)
-app.include_router(observability_router, dependencies=_WORKSPACE_DEPS)
-app.include_router(system_router, dependencies=_WORKSPACE_DEPS)
-app.include_router(agent_capabilities_router, prefix="/api", dependencies=_WORKSPACE_DEPS)
+app.include_router(auth_admin_router)  # /api/system/users：路由自身逐条挂 require_system_admin
+app.include_router(router, dependencies=_PROJECT_OWNER_DEPS)
+app.include_router(planning_router, dependencies=_PROJECT_OWNER_DEPS)
+app.include_router(orchestration_router, dependencies=_PROJECT_OWNER_DEPS)
+app.include_router(observability_router, dependencies=_PROJECT_OWNER_DEPS)
+app.include_router(system_router, dependencies=_PROJECT_OWNER_DEPS)
+app.include_router(agent_capabilities_router, prefix="/api", dependencies=_PROJECT_OWNER_DEPS)
 # agent_conversation_router 的 require_local_session 由路由自身声明（见
 # app/agent/api.py 的 APIRouter(dependencies=...)），这里只需再叠一层工作空间隔离。
-app.include_router(agent_conversation_router, prefix="/api", dependencies=[Depends(require_workspace_access)])
+app.include_router(agent_conversation_router, prefix="/api", dependencies=[Depends(require_project_owner_access)])
 # /mcp 必须在 StaticFiles("/") 挂载之前注册，否则会被前端静态资源路由抢先吞掉。
 # MCP 使用 Bearer Token，不叠本机会话闸门。
 app.include_router(mcp_router)

@@ -3,9 +3,9 @@ import React from 'react'
 import TestRenderer, { act } from 'react-test-renderer'
 import { describe, expect, it, vi } from 'vitest'
 
-// 登录页、首次改密页、成员与团队页在 2026-08-25 改过版式（左右分栏 / 两栏+弹窗）。
-// 纯函数测试覆盖不到 JSX 结构，这里用 react-test-renderer 真挂载一遍：
-// hook 顺序、必填 props、事件绑定有问题会直接炸在这。
+// 登录页、首次改密页在 2026-08-25 改过版式（左右分栏）。纯函数测试覆盖不到
+// JSX 结构，这里用 react-test-renderer 真挂载一遍：hook 顺序、必填 props、
+// 事件绑定有问题会直接炸在这。
 
 const mockAuth = {
   user: { id: 'u1', username: 'demo2', display_name: '演示账号' },
@@ -21,24 +21,6 @@ vi.mock('../api', () => ({
   ApiError: class ApiError extends Error { status = 0 },
   login: vi.fn(async () => {}),
   changePassword: vi.fn(async () => {}),
-  api: {
-    listWorkspaces: vi.fn(async () => (
-      { items: [{ id: 'w1', name: '制作一组', status: 'active', member_count: 2, project_count: 1 }] }
-    )),
-    listUsers: vi.fn(async () => ({
-      items: [{
-        id: 'u1', username: 'demo2', display_name: '演示账号', status: 'active',
-        is_system_admin: false, must_change_password: false, created_at: 0,
-        last_login_at: null, workspaces: [{ id: 'w1', name: '制作一组', role: 'production' }],
-      }],
-    })),
-    createWorkspace: vi.fn(async () => ({})),
-    createUser: vi.fn(async () => ({})),
-    updateWorkspace: vi.fn(async () => ({})),
-    updateWorkspaceMember: vi.fn(async () => ({})),
-    removeWorkspaceMember: vi.fn(async () => ({})),
-    updateUser: vi.fn(async () => ({})),
-  },
 }))
 
 /** 把渲染树拍平成一个 class 名集合，用来断言版式骨架在。 */
@@ -93,81 +75,6 @@ describe('首次改密页', () => {
     }
     walk(tree.toJSON() as unknown)
     expect(inputs).toHaveLength(3)
-  })
-})
-
-describe('成员与团队', () => {
-  it('默认停在成员栏，两个新建动作是按钮而不是常驻表单', async () => {
-    const { default: TeamAdminPage } = await import('./TeamAdminPage')
-    const tree = await render(TeamAdminPage)
-    const cls = classNames(tree)
-    expect(cls.has('team-admin-tabs')).toBe(true)
-    expect(cls.has('team-admin-bar-actions')).toBe(true)
-    // 弹窗未打开时不应该有 backdrop
-    expect(cls.has('evidence-backdrop')).toBe(false)
-
-    const labels: string[] = []
-    const walk = (node: unknown) => {
-      if (!node || typeof node !== 'object') return
-      const item = node as { type?: string; children?: unknown[] }
-      if (item.type === 'button') {
-        const text = (item.children ?? []).filter((c) => typeof c === 'string').join('')
-        if (text) labels.push(text)
-      }
-      ;(item.children ?? []).forEach(walk)
-    }
-    walk(tree.toJSON() as unknown)
-    expect(labels).toContain('新建团队')
-    expect(labels).toContain('创建账号')
-  })
-
-  it('成员行不再内嵌下拉框：团队是只读徽章，改角色走弹窗', async () => {
-    const { default: TeamAdminPage } = await import('./TeamAdminPage')
-    const tree = await render(TeamAdminPage)
-
-    // 表格里一个 select 都不该有——原来每行内嵌两个下拉框，正是拥挤的来源
-    const selectsInTable = tree.root.findAllByType('select')
-    expect(selectsInTable).toHaveLength(0)
-    expect(classNames(tree).has('team-chip')).toBe(true)
-
-    // 「管理」把编辑挪进弹窗，那里才铺得开
-    const manage = tree.root
-      .findAllByType('button')
-      .find((node) => node.props.className === 'text-action')
-    expect(manage).toBeDefined()
-    await act(async () => { manage!.props.onClick() })
-    expect(classNames(tree).has('member-team-row')).toBe(true)
-    expect(tree.root.findAllByType('select').length).toBeGreaterThan(0)
-  })
-
-  it('破坏性操作走站内弹窗，不再弹浏览器原生框', async () => {
-    // window.confirm / prompt 在移动端是系统弹窗，跟站内完全两套视觉，
-    // 也写不下「停用会波及多少人」这种上下文。
-    const source = readFileSync(new URL('./TeamAdminPage.tsx', import.meta.url), 'utf-8')
-    const calls = source.match(/window\.(confirm|prompt|alert)\(/g)
-    expect(calls).toBeNull()
-
-    const { default: TeamAdminPage } = await import('./TeamAdminPage')
-    const tree = await render(TeamAdminPage)
-    const disable = tree.root
-      .findAllByType('button')
-      .find((node) => node.children.includes('禁用'))
-    expect(disable).toBeDefined()
-    await act(async () => { disable!.props.onClick() })
-    // DecisionDialog 复用 .impact-dialog，弹出来才算接上了
-    expect(classNames(tree).has('impact-dialog')).toBe(true)
-  })
-
-  it('操作列的 flex 容器挂在 td 里面，不是 td 本身', async () => {
-    // 2026-08-25：给 <td> 设了 display:flex，那一列就被摘出表格布局，
-    // 行高和下边线跟其它列对不齐（横线断在操作列前面）。
-    const { default: TeamAdminPage } = await import('./TeamAdminPage')
-    const tree = await render(TeamAdminPage)
-    const holders = tree.root.findAll(
-      (node) => node.props?.className === 'team-admin-actions',
-    )
-    expect(holders.length).toBeGreaterThan(0)
-    for (const holder of holders) expect(holder.type).toBe('div')
   })
 })
 

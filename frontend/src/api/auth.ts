@@ -1,9 +1,8 @@
-import type { AuthUser, WorkspaceMembership } from "../auth/session";
+import type { AuthUser } from "../auth/session";
 import { request, setSessionToken } from "./client";
 
 export interface AuthMeResponse {
   user: AuthUser;
-  workspaces: WorkspaceMembership[];
   is_system_admin: boolean;
   must_change_password: boolean;
 }

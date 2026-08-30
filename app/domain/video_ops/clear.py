@@ -16,7 +16,6 @@ from app.domain.review_wall import (
     _review_upstream_snapshot,
     _review_write_audit,
 )
-from app.domain.storyboard_ops import _require_video_clear_write_scope
 from fastapi import HTTPException
 
 from .completion_core import _ensure_video_episode_columns
@@ -69,8 +68,7 @@ async def reconcile_episode_provider_tasks(episode_id: str):
         reconcile_provider_tasks_for_clear,
     )
 
-    ep = _episode_or_404(episode_id)
-    _require_video_clear_write_scope(ep["project_id"])
+    _episode_or_404(episode_id)
     conn = get_conn()
     before = provider_task_clearance_snapshot(episode_id=episode_id, conn=conn)
     provider_reconciliation = await reconcile_provider_tasks_for_clear(

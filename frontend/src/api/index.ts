@@ -13,7 +13,7 @@
 //   delivery.ts  — 成片与交付域（MixStatus / DeliveryReadiness / DeliveryPackageRecord）。
 //   projects.ts  — 项目/分集聚合域（Project / Episode / ChapterContent）。
 //   system/      — 观测台与系统管理域（任务队列/调用日志/系统设置/模型中心/
-//                  总览/团队成员/链路追踪）。
+//                  总览/账号管理/链路追踪）。
 //
 // 硬约束：`api` 对象的方法名与对外形状不得因为这次重组而改变——全前端大量
 // `import { api } from '../api'`，这里只是换文件组织，不是换 API。

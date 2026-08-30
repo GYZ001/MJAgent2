@@ -25,7 +25,7 @@ def _require_system_admin() -> None:
 
     这几个端点（``/runs``、``/runs/query``、``/runs/{run_id}`` 及其
     ``/steps``/``/events``、``/gates``）天生没有 project_id 边界——路径参数
-    本身就是全库范围查询，``app.authz.require_workspace_access`` 的按对象
+    本身就是全库范围查询，``app.authz.require_project_owner_access`` 的按对象
     归属放行在这里不适用，必须显式收紧。``principal is None`` 保留给未挂会话
     闸门的内部调用（与 Command Bus 的既有约定一致），不拦。
 

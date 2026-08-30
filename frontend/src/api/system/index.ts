@@ -1,8 +1,8 @@
 // 系统观测/管理域的桶文件：任务队列 / 调用日志 / 系统设置 / 模型中心 / 总览与埋点 /
-// 团队与成员管理 / 链路追踪七块子域各自成文件，这里只做重新导出与
+// 账号管理 / 链路追踪七块子域各自成文件，这里只做重新导出与
 // `api.<method>` 对象组装，不放业务逻辑。这些类型此前全部本地重声明在
-// MonitorPage.tsx（24 个）与 TeamAdminPage.tsx 里，后端改字段时前端不会编译
-// 报错；收进这里之后调用方一律 `import type { ... } from '../api'`。
+// MonitorPage.tsx（24 个）里，后端改字段时前端不会编译报错；收进这里之后
+// 调用方一律 `import type { ... } from '../api'`。
 import * as jobs from "./jobs";
 import * as calls from "./calls";
 import * as settings from "./settings";
@@ -46,14 +46,9 @@ export const api_system = {
   // overview / telemetry
   getSystemOverview: overview.getSystemOverview,
   reportMonitorEvent: overview.reportMonitorEvent,
-  // team admin
+  // account admin
   listUsers: admin.listUsers,
-  listWorkspaces: admin.listWorkspaces,
-  createWorkspace: admin.createWorkspace,
   createUser: admin.createUser,
-  updateWorkspace: admin.updateWorkspace,
-  updateWorkspaceMember: admin.updateWorkspaceMember,
-  removeWorkspaceMember: admin.removeWorkspaceMember,
   updateUser: admin.updateUser,
   // trace
   getTraceView: trace.getTraceView,

@@ -1,8 +1,16 @@
-"""RBAC 第三阶段：Command Bus 对 ``CommandSpec.scopes`` / ``admin_only`` 的强制执行。
+"""Command Bus 对 ``CommandSpec.admin_only`` 的强制执行。
+
+账号即项目空间落地后，团队角色（workspace_admin/production/review/readonly）
+连同它们对 ``CommandSpec.scopes`` 的差异化判定一并退场：任何已登录账号对自己
+名下的项目天然拥有全部操作 scope（``Principal.all_scopes`` 恒为
+``ALL_SCOPES``，见 ``app/auth/principal.py``），Command Bus 层不再需要、也不再
+能够按 scope 区分"这个角色能不能做这类操作"——唯一还有意义的判据是
+``admin_only``（是不是系统管理员专属命令）。「这个具体资源是不是你的项目」
+不在这一层判断，见 ``app/authz/resolve.py``。
 
 ``tests/conftest.py`` 的 autouse fixture 默认给每个测试注入一个系统管理员
-Principal（历史测试不需要逐个改造）。本文件里凡是要验证某个具体角色的行为，
-都通过 ``_as_principal`` 临时换成目标角色，用完立即还原，避免污染后续测试。
+Principal（历史测试不需要逐个改造）。本文件里凡是要验证非管理员的行为，都
+通过 ``_as_principal`` 临时换成普通账号身份，用完立即还原，避免污染后续测试。
 """
 from __future__ import annotations
 
@@ -31,25 +39,19 @@ def _ready(tmp_path, monkeypatch):
     reset_command_bus_for_tests()
     conn = db.get_conn()
     conn.execute(
-        "INSERT INTO projects(id, name, status, created_at) VALUES(?,?,?,?)",
-        ("proj_x", "测试项目", "created", db.now()),
+        "INSERT INTO projects(id, name, status, owner_user_id, created_at) VALUES(?,?,?,?,?)",
+        ("proj_x", "测试项目", "created", "test-plain-user", db.now()),
     )
     conn.commit()
     yield
 
 
 @contextmanager
-def _as_principal(*, role: str | None, is_system_admin: bool = False, workspace_id: str = "ws_test"):
+def _as_principal(*, is_system_admin: bool, user_id: str = "test-plain-user"):
     """临时切换当前 Principal，退出时还原成进入前的身份。"""
     previous = get_current_principal()
-    workspace_roles = {} if role is None else {workspace_id: role}
     set_current_principal(
-        Principal(
-            user_id=f"test-{role or 'sysadmin'}",
-            username=f"test-{role or 'sysadmin'}",
-            is_system_admin=is_system_admin,
-            workspace_roles=workspace_roles,
-        )
+        Principal(user_id=user_id, username=user_id, is_system_admin=is_system_admin)
     )
     try:
         yield
@@ -65,117 +67,37 @@ def _assert_not_authz_rejected(result) -> None:
 
 
 # ---------------------------------------------------------------------------
-# readonly：只读角色不能碰任何写命令
+# 普通账号：对自己名下的项目拥有全部操作 scope（不再有 readonly/review 差异化）
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_readonly_principal_rejected_on_r2_command() -> None:
+async def test_plain_account_allowed_on_generation_and_delivery_commands() -> None:
+    """普通账号不再按角色区分 generation-media / delivery 等 scope——只要不是
+    admin_only 命令，都不会被 Command Bus 这一层拦。"""
     bus = get_command_bus()
-    with _as_principal(role="readonly"):
-        result = await bus.execute_async("video.generate_shot", {"shot_id": "shot_x"})
-    assert result.status == CommandStatus.REJECTED
-    assert result.error_code == "forbidden_scope"
-
-
-@pytest.mark.asyncio
-async def test_readonly_principal_rejected_on_r3_command() -> None:
-    bus = get_command_bus()
-    with _as_principal(role="readonly"):
-        result = await bus.execute_async(
-            "delivery.review",
-            {"episode_id": "ep_missing_for_test", "decision": "approve"},
-        )
-    assert result.status == CommandStatus.REJECTED
-    assert result.error_code == "forbidden_scope"
-
-
-# ---------------------------------------------------------------------------
-# production：生成 / 项目写入可以，交付（delivery）不行
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_production_principal_allowed_on_generation_text_command() -> None:
-    bus = get_command_bus()
-    with _as_principal(role="production"):
-        result = await bus.execute_async("screenplay.generate", {"episode_id": "ep_missing_for_test"})
-    _assert_not_authz_rejected(result)
-
-
-@pytest.mark.asyncio
-async def test_production_principal_rejected_on_delivery_command() -> None:
-    bus = get_command_bus()
-    with _as_principal(role="production"):
-        result = await bus.execute_async(
+    with _as_principal(is_system_admin=False):
+        generation = await bus.execute_async("video.generate_shot", {"shot_id": "shot_x"})
+        delivery = await bus.execute_async(
             "delivery.submit_feedback",
             {"episode_id": "ep_missing_for_test", "feedback": "客户反馈内容"},
         )
-    assert result.status == CommandStatus.REJECTED
-    assert result.error_code == "forbidden_scope"
-
-
-# ---------------------------------------------------------------------------
-# review：只有 {read, delivery}，但人工门禁白名单必须放行审校本职工作
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_review_principal_rejected_on_paid_generation_command() -> None:
-    """审校不能替 production 花钱生成——不能因为白名单的存在被连带放宽。"""
-    bus = get_command_bus()
-    with _as_principal(role="review"):
-        result = await bus.execute_async("video.generate_shot", {"shot_id": "shot_x"})
-    assert result.status == CommandStatus.REJECTED
-    assert result.error_code == "forbidden_scope"
-
-
-@pytest.mark.asyncio
-async def test_review_principal_allowed_on_storyboard_confirm_via_whitelist() -> None:
-    bus = get_command_bus()
-    with _as_principal(role="review"):
-        result = await bus.execute_async(
+        gate = await bus.execute_async(
             "storyboard.confirm", {"episode_id": "ep_missing_for_test"}
         )
-    _assert_not_authz_rejected(result)
-
-
-@pytest.mark.asyncio
-async def test_review_principal_allowed_on_video_adopt_version_via_whitelist() -> None:
-    bus = get_command_bus()
-    with _as_principal(role="review"):
-        result = await bus.execute_async(
-            "video.adopt_version", {"shot_id": "shot_x", "version_id": "v1"}
-        )
-    _assert_not_authz_rejected(result)
-
-
-@pytest.mark.asyncio
-async def test_readonly_principal_cannot_use_human_gate_whitelist() -> None:
-    """白名单的门槛是 manju:delivery，不是所有角色都有的 manju:read：
-    否则只读角色也会被放行去确认分镜 / 采纳定稿，那是提权而不是审校的便利。"""
-    bus = get_command_bus()
-    with _as_principal(role="readonly"):
-        confirm = await bus.execute_async(
-            "storyboard.confirm", {"episode_id": "ep_missing_for_test"}
-        )
-        adopt = await bus.execute_async(
-            "video.adopt_version", {"shot_id": "shot_x", "version_id": "v1"}
-        )
-    for result in (confirm, adopt):
-        assert result.status == CommandStatus.REJECTED
-        assert result.error_code == "forbidden_scope"
+    for result in (generation, delivery, gate):
+        _assert_not_authz_rejected(result)
 
 
 # ---------------------------------------------------------------------------
-# admin_only：即便持有对应 scope，非系统管理员也不能碰
+# admin_only：即便是已登录账号，非系统管理员也不能碰
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_non_system_admin_rejected_on_admin_only_command() -> None:
     bus = get_command_bus()
-    with _as_principal(role="workspace_admin"):
+    with _as_principal(is_system_admin=False):
         result = await bus.execute_async("system.update_settings", {"patch": {}})
     assert result.status == CommandStatus.REJECTED
     assert result.error_code == "forbidden_admin_only"
@@ -189,8 +111,8 @@ async def test_non_system_admin_rejected_on_admin_only_command() -> None:
 @pytest.mark.asyncio
 async def test_system_admin_authorized_for_all_of_the_above() -> None:
     bus = get_command_bus()
-    with _as_principal(role=None, is_system_admin=True):
-        readonly_case = await bus.execute_async("video.generate_shot", {"shot_id": "shot_x"})
+    with _as_principal(is_system_admin=True, user_id="test-sysadmin"):
+        generation_case = await bus.execute_async("video.generate_shot", {"shot_id": "shot_x"})
         delivery_case = await bus.execute_async(
             "delivery.submit_feedback",
             {"episode_id": "ep_missing_for_test", "feedback": "客户反馈内容"},
@@ -199,7 +121,7 @@ async def test_system_admin_authorized_for_all_of_the_above() -> None:
             "storyboard.confirm", {"episode_id": "ep_missing_for_test"}
         )
         admin_only_case = await bus.execute_async("system.update_settings", {"patch": {}})
-    for result in (readonly_case, delivery_case, gate_case, admin_only_case):
+    for result in (generation_case, delivery_case, gate_case, admin_only_case):
         _assert_not_authz_rejected(result)
 
 
@@ -231,19 +153,20 @@ async def test_authorization_precedes_idempotency_cache() -> None:
     未授权调用者用完全相同的参数重放一次已授权请求，就会直接命中缓存、拿到
     别人那次调用的成功结果——读到了本不该看到的数据。
 
-    这里用 production 角色先跑一次带 idempotency_key 的 dry_run（真实获得
-    授权并写入幂等缓存），再用 readonly 角色重放同一份参数：必须被当场拒绝，
-    而不是把缓存里的成功结果吐回来。
+    这里用系统管理员先跑一次带 idempotency_key 的 admin_only 命令（真实获得
+    授权并写入幂等缓存），再用普通账号身份重放同一份参数：必须被当场拒绝，
+    而不是把缓存里的成功结果吐回来。角色差异化退场后，普通账号与系统管理员
+    之间唯一还有意义的鉴权轴就是 admin_only，所以这条回归改用它来复现同一个
+    问题。
     """
     bus = get_command_bus()
-    args = {"project_id": "proj_x", "idempotency_key": "rbac-cache-regression", "dry_run": True}
+    args = {"patch": {}, "idempotency_key": "rbac-cache-regression", "dry_run": True}
 
-    with _as_principal(role="production"):
-        first = await bus.execute_async("project.delete", args)
-    assert first.status == CommandStatus.SUCCEEDED
-    assert first.data.get("dry_run") is True
+    with _as_principal(is_system_admin=True, user_id="test-sysadmin"):
+        first = await bus.execute_async("system.update_settings", args)
+    assert first.status == CommandStatus.SUCCEEDED, (first.status, first.summary)
 
-    with _as_principal(role="readonly"):
-        replay = await bus.execute_async("project.delete", args)
+    with _as_principal(is_system_admin=False):
+        replay = await bus.execute_async("system.update_settings", args)
     assert replay.status == CommandStatus.REJECTED
-    assert replay.error_code == "forbidden_scope"
+    assert replay.error_code == "forbidden_admin_only"

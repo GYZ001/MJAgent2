@@ -59,7 +59,6 @@ from .clear_apply import (
 
 from .video_model import (
     _episode_target_video_model as _episode_target_video_model,
-    _require_video_clear_write_scope as _require_video_clear_write_scope,
     router as router,
     set_episode_video_model as set_episode_video_model,
 )

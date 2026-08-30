@@ -110,10 +110,12 @@ def test_project_or_404_normalizes_sqlite_row_to_dict(monkeypatch) -> None:
     conn.execute(
         # deleted_at 必须有：`_project_or_404` 自软删除/回收站落地起会查
         # `AND deleted_at IS NULL`，合成表缺这一列会直接 OperationalError。
-        # 本用例验的是 sqlite Row → dict 的归一化，与删除过滤无关，补列即可。
+        # owner_user_id 同理：账号即项目空间落地后 `_project_or_404` 会读它做
+        # 归属校验（`_assert_principal_owns`），合成表缺这一列会直接 IndexError。
+        # 本用例验的是 sqlite Row → dict 的归一化，与这两者都无关，补列即可。
         "CREATE TABLE projects("
         "id TEXT PRIMARY KEY, bible_status TEXT, bible_error TEXT, bible_json TEXT, "
-        "bible_version INTEGER DEFAULT 0, deleted_at REAL"
+        "bible_version INTEGER DEFAULT 0, deleted_at REAL, owner_user_id TEXT"
         ")"
     )
     conn.execute(

@@ -113,7 +113,6 @@ def _legacy_shared_principal() -> Principal:
         user_id="legacy-shared",
         username="legacy",
         is_system_admin=True,
-        workspace_roles={},
     )
 
 

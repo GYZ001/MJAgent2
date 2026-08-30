@@ -9066,57 +9066,6 @@ summary:focus-visible,
   font: 500 10.5px/1.5 var(--ui);
 }
 
-/* 成员与团队页：复用现有 .card / .btn / .empty 词汇，不新起设计系统。 */
-
-/* 两栏切换 + 右侧新建动作，常驻在表格上方 */
-
-.team-admin-tabs button.active {
-  background: var(--card);
-  color: var(--ink);
-}
-
-.team-admin-tabs button.active em {
-  background: rgba(181, 72, 56, 0.12);
-  color: var(--cinnabar);
-}
-
-/* 创建账号弹窗里「团队 + 角色」并排，其余字段单列 */
-
-.login-field select {
-  width: 100%;
-  margin-top: 4px;
-}
-
-@media (max-width: 620px) {
-  
-  .team-admin-bar-actions .btn {
-    flex: 1;
-  }
-  
-}
-
-/* 账号列：用户名与显示名叠成两行，省下一整列 */
-
-/* 状态：一个点 + 一个词，不做印章那种装饰 */
-
-.team-admin-state.disabled::before {
-  background: var(--ink-faint);
-}
-
-/* 团队列：只读徽章 + 一个「管理」入口，改角色进弹窗 */
-
-.team-admin-teams .text-action {
-  margin-left: 2px;
-  font-size: 12px;
-}
-
-/* 注意挂在 td 里面的 div 上，不能挂 td 本身：给 td 设 display:flex 会把它
-   从表格布局里摘出去，那一列的行高和下边线就跟其它列对不上了。 */
-
-/* 操作列表头跟着按钮一起靠右 */
-
-/* 「管理团队」弹窗：每个团队一行，横向铺开，不跟表格抢宽度 */
-
 /* ═══════════════════════════════════════════════════════════════
    映射台·映射包视图（转型三轮版式重构，第三轮改成资源清单为主体的单栏版式）
    紧凑步进器 / 全宽门禁细条带 / 资源卡网格（人物/场景/道具）/ 称谓总表（次要、

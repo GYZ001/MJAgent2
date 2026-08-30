@@ -1324,7 +1324,7 @@ def _register_exemptions(registry) -> None:
     )
     registry.exempt_rest(
         "POST /api/auth/login",
-        "账号登录是鉴权入口本身：签发会话先于任何 workspace/scope 判定，不经 Command Bus",
+        "账号登录是鉴权入口本身：签发会话先于任何账号归属/scope 判定，不经 Command Bus",
     )
     registry.exempt_rest(
         "POST /api/auth/logout",
@@ -1341,22 +1341,6 @@ def _register_exemptions(registry) -> None:
     registry.exempt_rest(
         "PUT /api/system/users/{user_id}",
         "编辑账号（改密/启停/管理员标记）同上，仅系统管理员可调用",
-    )
-    registry.exempt_rest(
-        "POST /api/system/workspaces",
-        "建团队是运维身份管理，不是制作领域命令；仅系统管理员可调用",
-    )
-    registry.exempt_rest(
-        "PUT /api/system/workspaces/{workspace_id}",
-        "改团队名/停用启用属运维身份管理，不是制作领域命令；仅系统管理员可调用",
-    )
-    registry.exempt_rest(
-        "PUT /api/system/workspaces/{workspace_id}/members/{user_id}",
-        "团队成员角色分配是运维身份管理，仅系统管理员可调用",
-    )
-    registry.exempt_rest(
-        "DELETE /api/system/workspaces/{workspace_id}/members/{user_id}",
-        "移出团队成员是运维身份管理，仅系统管理员可调用",
     )
     registry.exempt_rest(
         "POST /api/agent/conversations",

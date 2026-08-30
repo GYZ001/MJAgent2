@@ -2,7 +2,7 @@
 
 ``app/domain/video_ops.py``（4,984 行 / 100 个顶层定义）拆成本包，按关注点分 16 个子模块：分镜确认资格评估（confirmation_eval，单函数 evaluate_storyboard_for_confirmation 264 行不拆）、参考图丢弃/恢复（reference_images）、供应商能力探测（capability）、镜头版本采纳（adopt）、整项目补齐队列共享原语（project_queue_core，含 ``_project_video_queue_pause_requests`` 模块级单例）、确认预览与生成闸门（confirmation_gate）、生成计划创建/校验/执行（plan）、整集/单镜头生成发起（generate，单函数 _generate_episode_core 351 行不拆）、成片合成任务体（completion_core，单函数 _complete_episode_core 440 行不拆）、产物清空（clear）、续跑/停止（resume_episode）、分镜确认落地（confirm_episode）、完成态用户契约投影（completion_contract）、补齐队列单次运行与开机恢复（project_queue_run）、整项目批量补齐主入口（project_queue_complete，单函数 _complete_project_videos_core 493 行不拆）、混音/拼接/陈旧素材（misc）。移动未重写，逻辑/签名/格式不变；四个单函数子模块不进一步拆分的原因同上（各自是其状态机判据/资源收口的唯一权威执行顺序）。
 
-``video_ops`` <-> ``storyboard_ops``、``video_ops`` <-> ``review_wall`` 在整个``app.domain`` 包级别是真实双向依赖（见 ``app/domain/__init__.py`` 模块 docstring）：本包对 ``app.domain.storyboard_ops`` 的引用（3 个名字：``_board_from_shot_rows``/``_finalize_storyboard_evidence``/``_require_video_clear_write_scope``）与对 ``app.domain.review_wall`` 的引用（7 个名字）都在 ``generate.py``/``project_queue_complete.py`` 等子模块的模块级 import 中，原样保留（不是本次新增，跨包引用不受本包内部拆分影响）。本包内部的调用图本身是一个 DAG（用 Tarjan 算法核验过，不存在非平凡强连通分量）。
+``video_ops`` <-> ``storyboard_ops``、``video_ops`` <-> ``review_wall`` 在整个``app.domain`` 包级别是真实双向依赖（见 ``app/domain/__init__.py`` 模块 docstring）：本包对 ``app.domain.storyboard_ops`` 的引用（2 个名字：``_board_from_shot_rows``/``_finalize_storyboard_evidence``）与对 ``app.domain.review_wall`` 的引用（7 个名字）都在 ``generate.py``/``project_queue_complete.py`` 等子模块的模块级 import 中，原样保留（不是本次新增，跨包引用不受本包内部拆分影响）。账号即项目空间落地后 ``_require_video_clear_write_scope``（团队角色写权限闸门）已随角色模型一并退场，见 ``app/domain/video_ops/clear.py``。本包内部的调用图本身是一个 DAG（用 Tarjan 算法核验过，不存在非平凡强连通分量）。
 
 本文件是稳定入口：所有既有 ``from app.domain.video_ops import X`` / ``app.domain.video_ops.X`` 调用点必须原样可用——每个符号（含每个子模块自己``import`` 进来的名字，不只是它原生定义的）用 ``name as name`` 显式再导出（PEP 484 显式重导出写法，与 ``app/domain/bible_ops/__init__.py``、``app/domain/storyboard_ops/__init__.py`` 同一先例），而不是 ``from .x import *``（``app/FILE_CONVENTIONS.toml`` 的 ``star_import`` 闸门禁止后者）。新增视频相关逻辑请加进对应关注点的子模块，不要加回本文件。
 """
@@ -128,7 +128,6 @@ from .completion_core import (
 
 from .clear import (
     _require_provider_clearance as _require_provider_clearance,
-    _require_video_clear_write_scope as _require_video_clear_write_scope,
     _review_upstream_snapshot as _review_upstream_snapshot,
     _shot_clear_context as _shot_clear_context,
     clear_episode_artifacts as clear_episode_artifacts,

@@ -106,11 +106,8 @@ KEEP_TABLES = {
     "provider_video_capability_snapshots",
     "settings",
     "sqlite_sequence",
-    "tenants",
     "user_sessions",
     "users",
-    "workspace_members",
-    "workspaces",
 }
 
 # 保留行、逐字段回落到建表默认值。值是「不算产出」的字段，其余全部重置。
@@ -120,7 +117,7 @@ RESET_TABLES: dict[str, set[str]] = {
         "name",
         "novel_chars",
         "created_at",
-        "workspace_id",
+        "owner_user_id",
         "harness_engine_enabled",
         "status",
         # 分集规划不重跑：1616 集的切分与本次要验的四个环节无关。

@@ -93,13 +93,10 @@ def main() -> int:
             ts,
         ),
     )
-    conn.execute(
-        "INSERT OR IGNORE INTO workspace_members(workspace_id, user_id, role, created_at) "
-        "VALUES('ws_default', ?, 'workspace_admin', ?)",
-        (user_id, ts),
-    )
     conn.commit()
-    print(f"已创建系统管理员：{username}（id={user_id}），并加入 ws_default 为 workspace_admin。")
+    # 账号即项目空间：系统管理员不需要加入任何团队/工作空间（该模型已退场），
+    # is_system_admin=1 本身就隐式跨账号可见，见 app/auth/principal.py。
+    print(f"已创建系统管理员：{username}（id={user_id}）。")
     return 0
 
 
