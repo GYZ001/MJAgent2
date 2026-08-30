@@ -207,7 +207,12 @@ async def run_regex_plan(project_id: str) -> None:
 def recover_plan_tasks() -> int:
     conn = get_conn()
     resumed = 0
-    for row in conn.execute("SELECT id FROM projects WHERE plan_status='running'").fetchall():
+    for row in conn.execute(
+        "SELECT id FROM projects -- ALL_OWNERS: startup recovery scans every "
+        "project for orphaned running episode-planning tasks after a process "
+        "reload/restart; runs before traffic is accepted, no request context\n"
+        "WHERE plan_status='running'"
+    ).fetchall():
         project_id = row["id"]
         if task_registry.active("plan", project_id):
             continue

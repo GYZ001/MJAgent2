@@ -41,27 +41,6 @@ _STRICT_IDEMPOTENCY_COMMANDS = frozenset({
     "delivery.review",
 })
 
-# RBAC 第三阶段人工门禁白名单：现有 62 个 command 的 scope 是按“资源种类”
-# （项目写入 / 生成媒体 / 交付）切分的，不是按角色切分的。这几个命令恰好落在
-# 审校（review）角色本职工作范围内，却被划进了 production 才有的
-# manju:generation-media / manju:project-write：
-#   storyboard.confirm  （人工门禁：确认分镜，解锁付费视频）-> manju:generation-media
-#   video.adopt_version （定稿采纳）                          -> manju:project-write
-#   reference.review    （参考图验收）                        -> manju:project-write
-#   video.stop_shot / video.stop_episode（审校叫停在跑的生成）-> manju:generation-media
-# 如果不开这个白名单，只持有 {read, delivery} 的 review 角色将无法确认分镜、
-# 无法采纳定稿、无法验收参考图——干不了审校的本职工作。
-# 不要反过来给 review 角色的 ROLE_SCOPES 加 manju:generation-media：那会
-# 连带放行 video.generate_shot 等花钱生成命令，违背“审校只决策、不花钱”。
-_HUMAN_GATE_COMMANDS = frozenset({
-    "storyboard.confirm",
-    "video.adopt_version",
-    "reference.review",
-    "video.stop_shot",
-    "video.stop_episode",
-})
-
-
 def canonical_command_request_fingerprint(
     name: str,
     payload: dict[str, Any],
@@ -395,14 +374,16 @@ class CommandBus:
                 )
             raise
     def _authorize(self, name: str, spec: CommandSpec) -> CommandResult | None:
-        """RBAC 第三阶段：Command Bus 层的准入闸门。
+        """Command Bus 层的准入闸门：只回答“系统管理员专属命令，你碰不碰得”。
 
-        这里只回答“这个角色到底能不能做这类操作”（按 ``spec.scopes`` /
-        ``spec.admin_only`` 判定），不回答“这个具体资源是不是你的空间”——
-        后者由 Stage 4 在 HTTP 边缘按 workspace 校验。原因是本层看到的是
-        62 种互不相同的 ``input_model``，没有一个统一的“归属资源”字段可供
-        总线可靠地判断目标属于哪个 workspace；而 ``principal.all_scopes``
-        是跨该用户所有 workspace 的并集，天然只能做前一种判断。
+        账号即项目空间落地后不再有团队角色差异化——任何已登录账号对自己名下的
+        项目天然拥有全部操作 scope（``Principal.all_scopes`` 恒为 ``ALL_SCOPES``，
+        见 app/auth/principal.py），因此按 ``spec.scopes`` 做差集比较已经没有
+        意义，只保留 ``admin_only`` 这一档「仅系统管理员」的硬闸门。
+        “这个具体资源是不是你的项目”不在这里判断——本层看到的是 62 种互不相同的
+        ``input_model``，没有一个统一的“归属资源”字段可供总线可靠地判断目标属于
+        谁；那是 Stage 4 在 HTTP 边缘按 ``projects.owner_user_id`` 校验的职责
+        （``app/authz/resolve.py::require_project_owner_access``）。
         """
         principal = get_current_principal()
         if principal is None:
@@ -417,25 +398,6 @@ class CommandBus:
                 summary=f"命令 {name} 仅限系统管理员执行",
                 command=name,
                 error_code="forbidden_admin_only",
-            )
-        if name in _HUMAN_GATE_COMMANDS and "manju:delivery" in principal.all_scopes:
-            # 人工门禁白名单，见模块顶部 _HUMAN_GATE_COMMANDS 的说明：这几个
-            # 命令按资源种类被划进了 generation-media / project-write，但审校
-            # 角色必须能执行它们才算得上审校，因此在 scope 差集比较之前放行。
-            #
-            # 门槛是 manju:delivery 而**不是** manju:read：read 是所有角色都有的，
-            # 用它当门槛会把「只读」也放进来，让只读用户能确认分镜、采纳定稿、
-            # 验收参考图——那是提权，不是便利。delivery 恰好只有审校与空间管理员
-            # 持有；制作角色本就直接持有这些命令的原始 scope，走正常判定即可，
-            # 不依赖这条白名单。
-            return None
-        missing = spec.scopes - principal.all_scopes
-        if missing:
-            return CommandResult(
-                status=CommandStatus.REJECTED,
-                summary=f"当前角色缺少 scope：{', '.join(sorted(missing))}，无法执行 {name}",
-                command=name,
-                error_code="forbidden_scope",
             )
         return None
 

@@ -1,15 +1,20 @@
-"""RBAC 第二阶段：请求身份（Principal）与角色 -> scope 映射。
+"""请求身份（Principal）：账号即项目空间模型下的鉴权基础类型。
 
-``workspace_members.role`` 只有 4 个 ASCII 枚举值；系统管理员不是某个空间的
-成员行，而是 ``users.is_system_admin=1``，隐式拥有全部 scope 且被视为所有
-空间的成员。scope 常量与 ``app/mcp/auth.py`` 的 ``ALL_SCOPES`` 完全一致
-（有意在此处保留一份独立定义而不是互相 import：两个模块的加载时机不同，
-``app.mcp`` 包顶层会拉起整条 MCP 服务链路，不希望作为鉴权基础模块的隐式依赖）。
+账号级隔离落地后角色模型收敛为两档：系统管理员（``is_system_admin=1``，隐式
+跨账号可见，见模块内注释）与普通用户（只能触达自己拥有的项目，``projects.
+owner_user_id`` 是唯一判据）。历史上这里有 ``workspace_admin``/``production``/
+``review``/``readonly`` 四档团队角色（``ROLE_SCOPES``）——1 账号 1 独立空间之后，
+一个账号对自己名下的项目天然拥有全部操作权，角色差异化不再有意义，随团队/
+工作空间模型一并退场。
+
+``ALL_SCOPES`` 保留：它不只是团队角色的产物，还是 MCP Bearer Token
+（``app/mcp/auth.py::TokenClaims.scopes``）的授权契约——服务账号可以只领到
+``{"manju:read"}`` 这样的子集，与 ``Principal`` 无关，不能一并删除。
 """
 from __future__ import annotations
 
 import contextvars
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 ALL_SCOPES: frozenset[str] = frozenset(
     {
@@ -22,29 +27,6 @@ ALL_SCOPES: frozenset[str] = frozenset(
     }
 )
 
-# workspace_members.role -> 该角色在其所属空间内拥有的 scope 集合。
-ROLE_SCOPES: dict[str, frozenset[str]] = {
-    "workspace_admin": frozenset(
-        {
-            "manju:read",
-            "manju:project-write",
-            "manju:generation-text",
-            "manju:generation-media",
-            "manju:delivery",
-        }
-    ),
-    "production": frozenset(
-        {
-            "manju:read",
-            "manju:project-write",
-            "manju:generation-text",
-            "manju:generation-media",
-        }
-    ),
-    "review": frozenset({"manju:read", "manju:delivery"}),
-    "readonly": frozenset({"manju:read"}),
-}
-
 
 @dataclass(frozen=True)
 class Principal:
@@ -53,34 +35,22 @@ class Principal:
     user_id: str
     username: str
     is_system_admin: bool
-    workspace_roles: dict[str, str] = field(default_factory=dict)
 
-    def role_in(self, workspace_id: str) -> str | None:
-        role = self.workspace_roles.get(workspace_id)
-        if role is not None:
-            return role
-        # 系统管理员隐式是每个空间的管理员，即便没有 workspace_members 行。
-        return "workspace_admin" if self.is_system_admin else None
-
-    def can_access(self, workspace_id: str) -> bool:
-        return self.is_system_admin or workspace_id in self.workspace_roles
-
-    def scopes_for(self, workspace_id: str) -> frozenset[str]:
+    def owns(self, owner_user_id: str | None) -> bool:
+        """能否触达归属 ``owner_user_id`` 的项目：本人，或系统管理员（跨账号可见）。"""
         if self.is_system_admin:
-            return ALL_SCOPES
-        role = self.workspace_roles.get(workspace_id)
-        if role is None:
-            return frozenset()
-        return ROLE_SCOPES.get(role, frozenset())
+            return True
+        return bool(owner_user_id) and owner_user_id == self.user_id
 
     @property
     def all_scopes(self) -> frozenset[str]:
-        if self.is_system_admin:
-            return ALL_SCOPES
-        union: set[str] = set()
-        for role in self.workspace_roles.values():
-            union |= ROLE_SCOPES.get(role, frozenset())
-        return frozenset(union)
+        """账号内没有角色差异化：能登录就对自己名下的项目拥有全部操作 scope。
+
+        「碰得到哪个项目」由 ``owns()``/HTTP 边界的归属校验单独判定，与这里的
+        「能做哪类操作」正交——本属性只回答后者，见 ``app/capabilities/bus.py::
+        _authorize`` 的同一条分工说明。
+        """
+        return ALL_SCOPES
 
 
 # 由 require_local_session 在校验通过后注入，供 Command Bus /

@@ -62,48 +62,6 @@ def _clear_login_failures(username: str) -> None:
         _login_failures.pop(key, None)
 
 
-def _workspaces_payload(principal: Principal) -> list[dict[str, str]]:
-    conn = get_conn()
-    if principal.is_system_admin:
-        # 系统管理员隐式是所有空间的成员；真实 workspace_members 行（如有）优先。
-        rows = conn.execute("SELECT id, name FROM workspaces WHERE status='active'").fetchall()
-        return [
-            {
-                "id": str(r["id"]),
-                "name": str(r["name"]),
-                "role": principal.workspace_roles.get(str(r["id"]), "workspace_admin"),
-            }
-            for r in rows
-        ]
-    # 「这个用户属于哪些团队」只有一个真源：``principal.workspace_roles``，由
-    # ``resolve_session`` 计算（且已按 workspaces.status='active' 过滤）。这里**不再**
-    # 自己查一遍成员关系，只拿 id 去补团队名——补名字这件事没法重新做一次成员判定，
-    # 因此「加固了授权口径却漏了展示口径」在结构上不再可能发生。
-    #
-    # 之前这里是一条独立的 members JOIN 查询，与 resolve_session 各算各的。给
-    # resolve_session 加 status 过滤时漏了这一处，于是停用团队后用户界面上那个团队
-    # 还在、点进去全是 404。修掉那次是治症状，这次是把重复的真源消掉。
-    workspace_ids = sorted(principal.workspace_roles)
-    if not workspace_ids:
-        return []
-    marks = ",".join("?" for _ in workspace_ids)
-    names = {
-        str(r["id"]): str(r["name"])
-        for r in conn.execute(
-            f"SELECT id, name FROM workspaces WHERE id IN ({marks})", workspace_ids
-        ).fetchall()
-    }
-    return [
-        {
-            "id": workspace_id,
-            "name": names.get(workspace_id, workspace_id),
-            "role": principal.workspace_roles[workspace_id],
-        }
-        for workspace_id in workspace_ids
-        if workspace_id in names
-    ]
-
-
 def _profile_payload(principal: Principal) -> dict:
     conn = get_conn()
     row = conn.execute(
@@ -127,7 +85,6 @@ def _profile_payload(principal: Principal) -> dict:
         must_change_password = False
     return {
         "user": user,
-        "workspaces": _workspaces_payload(principal),
         "is_system_admin": principal.is_system_admin,
         "must_change_password": must_change_password,
     }

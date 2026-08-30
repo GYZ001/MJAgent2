@@ -40,7 +40,11 @@ def recover_bible_tasks() -> int:
     conn = get_conn()
     style_column = "bible_style_name" if _supports_bible_style_name(conn) else "NULL AS bible_style_name"
     rows = conn.execute(
-        f"SELECT id, bible_feedback, {style_column} FROM projects WHERE bible_status='running'"
+        f"SELECT id, bible_feedback, {style_column} "
+        "FROM projects -- ALL_OWNERS: startup recovery scans every project for "
+        "orphaned running bible tasks after a process reload/restart; runs "
+        "before traffic is accepted, no request/Principal context\n"
+        "WHERE bible_status='running'"
     ).fetchall()
     resumed = 0
     for r in rows:
@@ -94,7 +98,10 @@ def recover_character_ref_tasks() -> int:
     conn = get_conn()
     rows = conn.execute(
         """SELECT id, refs_target, refs_resume, refs_batch_started_at
-           FROM projects p
+           FROM projects p -- ALL_OWNERS: startup recovery scans every project
+           -- for orphaned running portrait-batch tasks after a process
+           -- reload/restart; runs before traffic is accepted, no request
+           -- context
            WHERE refs_status='running'
               OR EXISTS (
                   SELECT 1 FROM workflow_runs wr
@@ -150,7 +157,10 @@ def recover_scene_ref_tasks() -> int:
     conn = get_conn()
     rows = conn.execute(
         "SELECT id,bible_json,bible_status,scene_refs_status,scene_refs_target "
-        "FROM projects WHERE scene_refs_status='running' "
+        "FROM projects -- ALL_OWNERS: startup recovery scans every project for "
+        "orphaned scene-asset tasks after a process reload/restart; runs "
+        "before traffic is accepted, no request context\n"
+        "WHERE scene_refs_status='running' "
         "OR (scene_refs_status='idle' AND bible_status='ready')"
     ).fetchall()
     resumed = 0

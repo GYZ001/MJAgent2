@@ -15,9 +15,10 @@ from collections import Counter
 from typing import Any
 from urllib.parse import unquote_to_bytes
 
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse, Response
 
+from app.auth.deps import require_system_admin
 from app.db import get_conn
 from app.evidence import repository
 from app.orchestration import api as orchestration_api
@@ -2361,12 +2362,23 @@ def resolve_legacy_observability(
     return {"project_id": project_id, "section": section, "object_id": object_id}
 
 
-@router.get("/system/overview")
+@router.get("/system/overview", dependencies=[Depends(require_system_admin)])
 def system_overview():
-    """System-wide aggregate only: no raw run, job, or call records are returned."""
+    """System-wide aggregate only: no raw run, job, or call records are returned.
+
+    账号即项目空间之后，「全部项目」本身就是跨账号信息，只对系统管理员开放
+    ——与 ``app/orchestration/api.py`` 里 ``/runs``/``/gates`` 等全局观测入口
+    同档（发现于加固 ``projects`` 归属查询守卫时：这条路由此前没有任何归属
+    或管理员校验，任何登录用户都能看到全量项目 id/name/created_at，是本次
+    任务之前就存在、与团队/工作空间模型无关的既有缺口，顺带补上）。
+    """
     conn = get_conn()
+    # ALL_OWNERS: route is gated by Depends(require_system_admin) above --
+    # only system admins ever reach this query.
     projects = [dict(row) for row in conn.execute(
-        "SELECT id,name,created_at FROM projects ORDER BY created_at DESC"
+        "SELECT id,name,created_at FROM projects "
+        "-- ALL_OWNERS: route requires require_system_admin\n"
+        "ORDER BY created_at DESC"
     ).fetchall()]
     jobs = system_api.jobs_overview(include_all=True)["recent"]
     by_project: dict[str, Counter[str]] = {item["id"]: Counter() for item in projects}

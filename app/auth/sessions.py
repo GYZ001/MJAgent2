@@ -109,22 +109,11 @@ def resolve_session(token: str | None) -> Principal | None:
             (ts, ts + SESSION_TTL_S, sid),
         )
         conn.commit()
-    member_rows = conn.execute(
-        # 只认 status='active' 的团队。workspaces.status 若不在这里 JOIN 上，它就是个
-        # 「有字段、有默认值、却没人强制」的摆设——停用一个团队之后，它的成员会带着
-        # 全部 scope 继续访问该团队名下的项目，停用等于没停。
-        "SELECT m.workspace_id, m.role FROM workspace_members m "
-        "JOIN workspaces w ON w.id = m.workspace_id "
-        "WHERE m.user_id=? AND w.status='active'",
-        (row["user_id"],),
-    ).fetchall()
-    workspace_roles = {str(m["workspace_id"]): str(m["role"]) for m in member_rows}
     _maybe_purge_expired()
     return Principal(
         user_id=str(user_row["id"]),
         username=str(user_row["username"]),
         is_system_admin=bool(user_row["is_system_admin"]),
-        workspace_roles=workspace_roles,
     )
 
 

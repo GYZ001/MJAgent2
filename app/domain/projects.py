@@ -15,6 +15,7 @@ from fastapi import (
 
 from app import (
     config,
+    quota,
     task_registry,
     worker,
 )
@@ -26,6 +27,7 @@ from app.db import (
 )
 from app.domain.common import (
     _as_body_dict,
+    _assert_principal_owns,
     _episode_or_404,
     _media_url,
     _project_or_404,
@@ -221,33 +223,23 @@ def _novel_import_receipt(token_hash: str) -> dict | None:
     return {**result, "idempotent_replay": True}
 
 
-def _creation_workspace_id() -> str:
-    """新项目归属哪个团队。
+_LEGACY_NO_PRINCIPAL_OWNER = "legacy-shared"
 
-    以前这里什么都不做，靠 ``projects.workspace_id`` 的列默认值 ``'ws_default'``
-    兜底——那是隔离做进来之前的遗留。后果很隐蔽：一个只属于 B 团队的用户上传小说，
-    项目落进 ws_default，而他不是 ws_default 的成员，于是**项目建完立刻从他眼前
-    消失**；他会以为上传失败了。读路径（list_projects）当初加了过滤，写路径没跟上。
 
-    规则：
-    - 恰好属于一个团队 -> 就是它，无歧义。
-    - 属于多个团队 -> 取字典序最小的一个，保证确定性。真要让用户选，得在上传表单
-      加团队选择器，那是独立的一次改动，不在这里悄悄塞一个隐式规则。
-    - 系统管理员且没有任何成员身份 -> ws_default（他看得到所有团队，不会丢件）。
-    - 普通用户且不属于任何团队 -> 拒绝。让他建一个自己看不见的项目毫无意义。
+def _creation_owner_user_id() -> str:
+    """新项目归属哪个账号——就是发起创建的那个人，没有任何间接概念。
+
+    账号即项目空间之后，这条规则不再需要「团队」这层中间概念：项目直接归属
+    ``principal.user_id``，无歧义、无需选择。``principal is None``（兼容期共享
+    会话、内部调用、既有测试）保持原行为，落到与 ``app.local_session.
+    _legacy_shared_principal`` 一致的占位账号，不阻塞这些既有路径。
     """
     from app.auth.principal import get_current_principal
 
     principal = get_current_principal()
     if principal is None:
-        # 无身份上下文：兼容期共享会话、内部调用、既有测试。保持原行为。
-        return "ws_default"
-    workspace_ids = sorted(principal.workspace_roles)
-    if workspace_ids:
-        return workspace_ids[0]
-    if principal.is_system_admin:
-        return "ws_default"
-    raise HTTPException(403, "你还没有加入任何团队，无法创建项目；请联系系统管理员把你加入一个团队")
+        return _LEGACY_NO_PRINCIPAL_OWNER
+    return principal.user_id
 
 
 def _create_project_core(
@@ -268,7 +260,7 @@ def _create_project_core(
     if not report["chapters"]:
         raise HTTPException(422, "未能从文件中切分出任何章节，请检查正文或章节标题")
     conn = get_conn()
-    target_workspace = _creation_workspace_id()
+    owner_user_id = _creation_owner_user_id()
     project_id = new_id("proj")
     fallback_name = Path(filename).stem.strip() or "未命名小说"
     project_name = (name or "").strip() or fallback_name
@@ -292,10 +284,18 @@ def _create_project_core(
         } | {"source_format": novel_file_suffix(filename).lstrip(".").upper()},
     }
     try:
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        active_projects = conn.execute(
+            "SELECT COUNT(*) AS c FROM projects WHERE owner_user_id=? AND deleted_at IS NULL",
+            (owner_user_id,),
+        ).fetchone()["c"]
+        quota.check_project_slot(conn, owner_user_id, active_count=int(active_projects))
         conn.execute(
-            "INSERT INTO projects(id, name, status, novel_chars, created_at, workspace_id) "
+            "INSERT INTO projects(id, name, status, novel_chars, created_at, owner_user_id) "
             "VALUES(?,?,'ingested',?,?,?)",
-            (project_id, project_name, report["total_chars"], now(), target_workspace))
+            (project_id, project_name, report["total_chars"], now(), owner_user_id))
         conn.executemany(
             "INSERT INTO chapters(project_id, idx, title, content, char_count) VALUES(?,?,?,?,?)",
             [
@@ -378,30 +378,40 @@ async def create_project_from_attachment(
     return respond_ui(result)
 
 
-@router.get("/projects")
-def list_projects():
+def _listing_owner_scope() -> str | None:
+    """列表类查询的归属范围：普通账号只能是自己，``None`` 表示不过滤（系统管理员/
+    无身份上下文的内部调用，与既有约定一致）。"""
     from app.auth.principal import get_current_principal
 
-    conn = get_conn()
     principal = get_current_principal()
-    # 系统管理员看全部；普通用户只看自己所属工作空间下的项目——RBAC 第四阶段
-    # 收紧点之一，此前这里没有任何 WHERE，任何登录用户都能看到全量项目列表。
-    # deleted_at IS NULL：软删除的项目进了回收站，不再出现在正常列表——
-    # 回收站专用列表见 list_deleted_projects()。
     if principal is not None and not principal.is_system_admin:
-        workspace_ids = list(principal.workspace_roles.keys())
-        if not workspace_ids:
-            return []
-        marks = ",".join("?" for _ in workspace_ids)
+        return principal.user_id
+    return None
+
+
+@router.get("/projects")
+def list_projects():
+    conn = get_conn()
+    # 系统管理员看全部；普通用户只看自己名下的项目——RBAC 第四阶段收紧点之一，
+    # 此前这里没有任何 WHERE，任何登录用户都能看到全量项目列表。deleted_at IS
+    # NULL：软删除的项目进了回收站，不再出现在正常列表——回收站专用列表见
+    # list_deleted_projects()。
+    owner = _listing_owner_scope()
+    if owner is not None:
         rows = rows_to_dicts(conn.execute(
             "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at "
-            f"FROM projects WHERE deleted_at IS NULL AND workspace_id IN ({marks}) ORDER BY created_at DESC",
-            workspace_ids,
+            "FROM projects WHERE deleted_at IS NULL AND owner_user_id=? ORDER BY created_at DESC",
+            (owner,),
         ).fetchall())
     else:
+        # ALL_OWNERS: caller is a system admin (or an internal call with no
+        # Principal at all, per _listing_owner_scope()) -- both are meant to
+        # see every project; the marker inside the SQL text is what
+        # tests/test_project_ownership_query_guard.py actually looks for.
         rows = rows_to_dicts(conn.execute(
             "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at "
-            "FROM projects WHERE deleted_at IS NULL ORDER BY created_at DESC").fetchall())
+            "FROM projects -- ALL_OWNERS: system admin / internal caller\n"
+            "WHERE deleted_at IS NULL ORDER BY created_at DESC").fetchall())
     _recover_orphan_bible_dicts(conn, rows)
     for p in rows:
         p["chapter_count"] = conn.execute("SELECT COUNT(*) c FROM chapters WHERE project_id=?", (p["id"],)).fetchone()["c"]
@@ -416,25 +426,23 @@ def list_deleted_projects():
     必须注册在 ``GET /projects/{project_id}`` 之前（见本文件靠后处该路由的
     注册位置）——否则 Starlette 会先把 "deleted" 当成 project_id 匹配掉。
     """
-    from app.auth.principal import get_current_principal
-
     conn = get_conn()
-    principal = get_current_principal()
-    if principal is not None and not principal.is_system_admin:
-        workspace_ids = list(principal.workspace_roles.keys())
-        if not workspace_ids:
-            return []
-        marks = ",".join("?" for _ in workspace_ids)
+    owner = _listing_owner_scope()
+    if owner is not None:
         rows = rows_to_dicts(conn.execute(
             "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at, deleted_at "
-            f"FROM projects WHERE deleted_at IS NOT NULL AND workspace_id IN ({marks}) "
+            "FROM projects WHERE deleted_at IS NOT NULL AND owner_user_id=? "
             "ORDER BY deleted_at DESC",
-            workspace_ids,
+            (owner,),
         ).fetchall())
     else:
+        # ALL_OWNERS: same admin/internal-caller rationale as list_projects()
+        # above; the marker inside the SQL text is what
+        # tests/test_project_ownership_query_guard.py actually looks for.
         rows = rows_to_dicts(conn.execute(
             "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at, deleted_at "
-            "FROM projects WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC").fetchall())
+            "FROM projects -- ALL_OWNERS: system admin / internal caller\n"
+            "WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC").fetchall())
     stamp = now()
     for p in rows:
         p["chapter_count"] = conn.execute("SELECT COUNT(*) c FROM chapters WHERE project_id=?", (p["id"],)).fetchone()["c"]
@@ -704,7 +712,7 @@ def _attach_picker_episodes(
 
     窗口之外仍要保证三件事可用，故一并返回：总集数、光标所在序号，以及
     上一集/下一集（按全量顺序算，不受搜索与筛选影响）。光标分集本身始终包含
-    在 ``episodes`` 里，这样前端既有的 resolveEpisodeId 语义不用改。
+    在 ``episodes`` 里，这样前端 ``resolveWindowedEpisodeId`` 的语义不用改。
     """
     base = (
         f"SELECT {_PICKER_GENERATION_COLUMNS} FROM episodes e WHERE e.project_id=?"
@@ -1034,36 +1042,19 @@ _TEXT_MODEL_STAGE_COLUMNS = {
 }
 
 
-def _require_project_write_scope(project_id: str) -> None:
-    """分环节文本模型选择改变的是"之后新发起的生成调用选哪个 provider"，会影响
-    产出一致性与费用；与 app/domain/storyboard_ops.py::_require_video_clear_write_scope
-    同档收在 manju:project-write（workspace_admin/production 持有，review/readonly
-    没有）——review 角色能看审阅但不该悄悄改别人后续任务用的模型。principal is
-    None 视为未挂会话闸门的内部调用，直接放行，约定与该函数一致。
-    """
-    from app.auth.principal import get_current_principal
-    from app.authz.resolve import _workspace_of_project
-
-    principal = get_current_principal()
-    if principal is None:
-        return
-    resolution = _workspace_of_project(get_conn(), project_id)
-    workspace_id = resolution.value if resolution.kind == "workspace" else None
-    if "manju:project-write" not in principal.scopes_for(workspace_id):
-        raise HTTPException(403, "修改分环节文本模型需要 manju:project-write 权限")
-
-
 @router.put("/projects/{project_id}/text-models")
 def set_project_text_models(project_id: str, body: dict):
     """保存世界书/映射台/分镜台各自的专属文本模型（项目级，三个环节共用一个项目
     设置，不按分集单独选）。body 只需带想改的字段；值为空串表示回落到全局默认
     文本 provider。每个非空值都必须出现在当前 text_model_choices() 里——不接受
-    选一个没配凭据或已被删除的 provider，防止保存一个必然失败的选项。
+    选一个没配凭据或已被删除的 provider，防止保存一个必然失败的选项。账号即
+    项目空间之后，能触达这个端点就已经是本项目的所有者或系统管理员（HTTP 边界
+    ``require_project_owner_access`` 已经拦过一轮），不再需要按团队角色二次
+    收紧写权限。
     """
     from app import model_registry
 
     _project_or_404(project_id)
-    _require_project_write_scope(project_id)
     body = _as_body_dict(body)
     valid_providers = {choice["provider"] for choice in model_registry.text_model_choices()}
     updates: dict[str, str] = {}
@@ -1709,6 +1700,16 @@ def _deleted_project_or_404(project_id: str) -> dict:
     ).fetchone()
     if not row:
         raise HTTPException(404, f"回收站中不存在该项目：{project_id}")
+    # 与 ``_project_or_404`` 同一条归属判据，理由也相同：HTTP 边界的
+    # ``require_project_owner_access`` 只在请求经 ASGI 路由时执行，Agent/MCP
+    # 工具调用、内部脚本、测试直接进 domain 函数会完全绕过它。缺了这一行，
+    # 「恢复」与「彻底清理」两个端点在非 HTTP 路径上就能按 id 操作**别人**
+    # 回收站里的项目——而彻底清理是不可逆的（删库行 + rmtree 产物目录）。
+    # 静态 SQL 守卫看不见这个洞：它对 ``WHERE id=?`` 按「主键锚定」放行，
+    # 前提是「这个 id 进系统时已过归属闸门」，而这条路径上没有。
+    _assert_principal_owns(
+        row["owner_user_id"], not_found_detail=f"回收站中不存在该项目：{project_id}"
+    )
     return dict(row)
 
 
@@ -1870,13 +1871,33 @@ async def _purge_all_deleted_projects_core() -> dict:
 
     每个项目的清理各自独立提交；一个项目失败（例如供应商任务未到终态）不
     得阻塞其余项目——收集失败项返回，而不是让调用方一次报错看不到全貌。
+
+    归属范围与 ``list_deleted_projects`` 一致：普通账号只清空自己名下的回收
+    站条目，系统管理员（或无 Principal 的内部调用）才清空全部——这是
+    ``DELETE /projects/deleted``（"一键清空回收站"）背后的真正查询，此前
+    完全没有 owner 过滤，任何登录账号都会把其他账号回收站里的项目一并彻底
+    删除；project_id 不在 ``ProjectPurgeAllInput`` 里，HTTP 边缘的
+    ``require_project_owner_access`` 没有路径参数可挂，全靠这里补上。
     """
     conn = get_conn()
-    project_ids = [
-        row["id"] for row in conn.execute(
-            "SELECT id FROM projects WHERE deleted_at IS NOT NULL"
-        ).fetchall()
-    ]
+    owner = _listing_owner_scope()
+    if owner is not None:
+        project_ids = [
+            row["id"] for row in conn.execute(
+                "SELECT id FROM projects WHERE deleted_at IS NOT NULL AND owner_user_id=?",
+                (owner,),
+            ).fetchall()
+        ]
+    else:
+        # ALL_OWNERS: same admin/internal-caller rationale as
+        # list_deleted_projects() -- the marker inside the SQL text is what
+        # tests/test_project_ownership_query_guard.py actually looks for.
+        project_ids = [
+            row["id"] for row in conn.execute(
+                "SELECT id FROM projects -- ALL_OWNERS: system admin / internal caller\n"
+                "WHERE deleted_at IS NOT NULL"
+            ).fetchall()
+        ]
     purged: list[str] = []
     failed: list[dict] = []
     for pid in project_ids:
@@ -1905,7 +1926,11 @@ async def sweep_expired_deleted_projects() -> dict:
     cutoff = now() - PROJECT_RECYCLE_BIN_RETENTION_S
     project_ids = [
         row["id"] for row in conn.execute(
-            "SELECT id FROM projects WHERE deleted_at IS NOT NULL AND deleted_at < ?",
+            "SELECT id FROM projects -- ALL_OWNERS: periodic background sweep "
+            "loop (app.recovery.project_recycle_bin_sweep_loop), no request "
+            "context; retention is enforced globally by deleted_at, not per "
+            "caller\n"
+            "WHERE deleted_at IS NOT NULL AND deleted_at < ?",
             (cutoff,),
         ).fetchall()
     ]

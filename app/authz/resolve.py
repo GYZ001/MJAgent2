@@ -1,11 +1,12 @@
-"""RBAC 第四阶段：HTTP 边界的工作空间隔离。
+"""RBAC 第四阶段：HTTP 边界的账号级项目隔离。
 
-把一个请求的路径参数解析成它归属的 project，再翻译成 workspace，交给
-``Principal.can_access`` 判断。真源表结构以 ``app/db.py`` 为准，这里不重复
+把一个请求的路径参数解析成它归属的 project，再翻译成 owner_user_id，交给
+``Principal.owns`` 判断。真源表结构以 ``app/db.py`` 为准，这里不重复
 定义、只查询。
 
 解析结果分四种（见 ``ScopeResolution``）：
-- ``workspace``：命中了归属的项目，按常规工作空间成员校验。
+- ``owner``：命中了归属的项目，按 ``projects.owner_user_id`` 校验（本人或
+  系统管理员）。
 - ``admin_only``：对象天生没有项目归属（``error_logs``/``mcp_tokens``），或者
   归属字段是启发式回填、回填不到时为 NULL（``provider_calls.project_id``）——
   两种都只放行系统管理员，绝不 fail open。
@@ -35,7 +36,7 @@ _DENIED_DETAIL = "对象不存在"
 
 @dataclass(frozen=True)
 class ScopeResolution:
-    kind: str  # "workspace" | "admin_only" | "creator" | "none"
+    kind: str  # "owner" | "admin_only" | "creator" | "none"
     value: str | None = None
 
 
@@ -43,13 +44,13 @@ _UNRESOLVED = ScopeResolution("none")
 _ADMIN_ONLY = ScopeResolution("admin_only")
 
 
-def _workspace_of_project(conn, project_id: str | None) -> ScopeResolution:
+def _owner_of_project(conn, project_id: str | None) -> ScopeResolution:
     if not project_id:
         return _UNRESOLVED
-    row = conn.execute("SELECT workspace_id FROM projects WHERE id=?", (project_id,)).fetchone()
+    row = conn.execute("SELECT owner_user_id FROM projects WHERE id=?", (project_id,)).fetchone()
     if not row:
         return _UNRESOLVED
-    return ScopeResolution("workspace", row["workspace_id"])
+    return ScopeResolution("owner", row["owner_user_id"])
 
 
 def _episode_project(conn, episode_id: str) -> str | None:
@@ -146,7 +147,7 @@ def _call_scope(conn, call_id: str) -> ScopeResolution:
         # provider_calls.project_id 是启发式回填的历史列，回填不到就是 NULL；
         # 归属不明的调用记录只能给系统管理员看。
         return _ADMIN_ONLY
-    return _workspace_of_project(conn, project_id)
+    return _owner_of_project(conn, project_id)
 
 
 def _conversation_scope(conn, conversation_id: str) -> ScopeResolution:
@@ -156,7 +157,7 @@ def _conversation_scope(conn, conversation_id: str) -> ScopeResolution:
     if not row:
         return _UNRESOLVED
     if row["project_id"]:
-        return _workspace_of_project(conn, row["project_id"])
+        return _owner_of_project(conn, row["project_id"])
     creator = row["created_by"]
     return ScopeResolution("creator", creator) if creator else _ADMIN_ONLY
 
@@ -191,21 +192,21 @@ _PATH_PARAM_ORDER = (
 
 def _resolve_one(conn, name: str, raw: str) -> ScopeResolution:
     if name == "project_id":
-        return _workspace_of_project(conn, raw)
+        return _owner_of_project(conn, raw)
     if name == "episode_id":
-        return _workspace_of_project(conn, _episode_project(conn, raw))
+        return _owner_of_project(conn, _episode_project(conn, raw))
     if name == "shot_id":
-        return _workspace_of_project(conn, _shot_project(conn, raw))
+        return _owner_of_project(conn, _shot_project(conn, raw))
     if name == "version_id":
-        return _workspace_of_project(conn, _version_project(conn, raw))
+        return _owner_of_project(conn, _version_project(conn, raw))
     if name == "job_id":
-        return _workspace_of_project(conn, _job_project(conn, raw))
+        return _owner_of_project(conn, _job_project(conn, raw))
     if name == "package_id":
-        return _workspace_of_project(conn, _package_project(conn, raw))
+        return _owner_of_project(conn, _package_project(conn, raw))
     if name == "run_id":
-        return _workspace_of_project(conn, _run_project(conn, raw))
+        return _owner_of_project(conn, _run_project(conn, raw))
     if name == "artifact_id":
-        return _workspace_of_project(conn, _artifact_project(conn, raw))
+        return _owner_of_project(conn, _artifact_project(conn, raw))
     if name == "call_id":
         return _call_scope(conn, raw)
     if name == "conversation_id":
@@ -221,7 +222,7 @@ def _resolve_one(conn, name: str, raw: str) -> ScopeResolution:
 
 
 def resolve_request_scope(path_params: dict, cache: dict) -> ScopeResolution:
-    """把请求路径参数解析为它所归属的 workspace（或 admin_only/creator 特例）。
+    """把请求路径参数解析为它所归属的 owner_user_id（或 admin_only/creator 特例）。
 
     ``scene_name``/``character_name`` 永远嵌套在 ``/projects/{project_id}/...``
     下，project_id 命中优先级最高，走到它们之前就已经返回，不需要单独处理。
@@ -249,8 +250,8 @@ def _request_cache(request: Request) -> dict:
     return cache
 
 
-def require_workspace_access(request: Request) -> None:
-    """路由级依赖：非系统管理员只能触达自己所在 workspace 名下的对象。
+def require_project_owner_access(request: Request) -> None:
+    """路由级依赖：非系统管理员只能触达自己拥有（``owner_user_id``）的项目对象。
 
     挂在 ``app.main`` 里跟 ``_SESSION_DEPS`` 同一批 ``include_router`` 上，
     执行顺序在 ``require_local_session`` 之后——真正走到这里时 Principal
@@ -265,7 +266,7 @@ def require_workspace_access(request: Request) -> None:
     resolution = resolve_request_scope(request.path_params, _request_cache(request))
     if resolution.kind == "none":
         return
-    if resolution.kind == "workspace" and principal.can_access(resolution.value):
+    if resolution.kind == "owner" and principal.owns(resolution.value):
         return
     if resolution.kind == "creator" and resolution.value == principal.user_id:
         return

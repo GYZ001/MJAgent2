@@ -121,6 +121,29 @@ def _scene_assets_task_active(project_id: str) -> bool:
     """Whether either phase of the scene-asset pipeline is active."""
     return _scene_refs_task_active(project_id) or task_registry.active("scene_bible", project_id)
 
+def _assert_principal_owns(owner_user_id: str | None, *, not_found_detail: str) -> None:
+    """账号级项目隔离的第二道闸门（domain 层，独立于 HTTP 边界）。
+
+    ``app.authz.resolve.require_project_owner_access`` 只在请求经 ASGI 路由、
+    命中已挂闸门的路由组时才会执行——直接调用 domain 函数（Agent/MCP 工具、
+    内部脚本、测试）完全绕过它。这里在 ``_project_or_404``/``_episode_or_404``
+    这两个"整个 domain 包几乎唯一的项目/剧集存在性入口"上重复同一条判据，
+    使得任何新端点即便忘了在路由上挂 ``require_project_owner_access``，只要
+    它（几乎必然）调用这两个函数之一，归属校验依然会执行——结构上拿不到，
+    不依赖每个端点作者记得挂鉴权。
+
+    ``principal is None`` 视为未挂会话闸门的内部调用，与全仓既有约定一致，
+    直接放行（后台任务、CLI、尚未注入 Principal 的既有测试）。统一 404 而非
+    403：不让外部区分"对象不存在"与"对象存在但你无权"，与 HTTP 边界的既有
+    口径一致。
+    """
+    from app.auth.principal import get_current_principal
+
+    principal = get_current_principal()
+    if principal is not None and not principal.owns(owner_user_id):
+        raise HTTPException(404, not_found_detail)
+
+
 def _project_or_404(project_id: str) -> dict:
     conn = get_conn()
     # deleted_at IS NULL：软删除的项目已进回收站，对全部常规读写路径一律
@@ -132,6 +155,7 @@ def _project_or_404(project_id: str) -> dict:
     ).fetchone()
     if not row:
         raise HTTPException(404, f"项目不存在：{project_id}")
+    _assert_principal_owns(row["owner_user_id"], not_found_detail=f"项目不存在：{project_id}")
     # sqlite3.Row supports item access but not Mapping.get().  Project callers
     # use both styles, so normalize once at the shared boundary instead of
     # leaving individual endpoints vulnerable to AttributeError -> HTTP 500.
@@ -147,9 +171,17 @@ def _require_harness_engine(project_id: str) -> None:
 
 
 def _episode_or_404(episode_id: str):
-    row = get_conn().execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     if not row:
         raise HTTPException(404, f"剧集不存在：{episode_id}")
+    owner_row = conn.execute(
+        "SELECT owner_user_id FROM projects WHERE id=?", (row["project_id"],)
+    ).fetchone()
+    _assert_principal_owns(
+        owner_row["owner_user_id"] if owner_row else None,
+        not_found_detail=f"剧集不存在：{episode_id}",
+    )
     return row
 
 

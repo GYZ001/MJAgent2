@@ -8,20 +8,16 @@ import {
   type ReactNode,
 } from "react";
 import { logout as apiLogout, me as apiMe, onUnauthenticated } from "../api";
-import type { AuthUser, WorkspaceMembership } from "./session";
+import type { AuthUser } from "./session";
 
 export type AuthStatus = "loading" | "authed" | "anonymous";
 
 export interface AuthContextValue {
   status: AuthStatus;
   user: AuthUser | null;
-  workspaces: WorkspaceMembership[];
   isSystemAdmin: boolean;
   /** 管理员开户时置位；为 true 时应用壳不挂载，先强制改密。 */
   mustChangePassword: boolean;
-  /** 当前展示用的团队 id：多数用户只属于一个团队，取第一个即可；
-   *  本阶段没有团队切换器，需要时再扩展。 */
-  currentWorkspaceId: string | null;
   refresh: () => Promise<void>;
   logout: () => Promise<void>;
 }
@@ -34,13 +30,11 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>("loading");
   const [user, setUser] = useState<AuthUser | null>(null);
-  const [workspaces, setWorkspaces] = useState<WorkspaceMembership[]>([]);
   const [isSystemAdmin, setIsSystemAdmin] = useState(false);
   const [mustChangePassword, setMustChangePassword] = useState(false);
 
   const goAnonymous = useCallback(() => {
     setUser(null);
-    setWorkspaces([]);
     setIsSystemAdmin(false);
     setMustChangePassword(false);
     setStatus("anonymous");
@@ -50,7 +44,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const data = await apiMe();
       setUser(data.user);
-      setWorkspaces(data.workspaces);
       setIsSystemAdmin(data.is_system_admin);
       setMustChangePassword(Boolean(data.must_change_password));
       setStatus("authed");
@@ -78,20 +71,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [goAnonymous]);
 
-  const currentWorkspaceId = workspaces[0]?.id ?? null;
-
   const value = useMemo<AuthContextValue>(
     () => ({
       status,
       user,
-      workspaces,
       isSystemAdmin,
       mustChangePassword,
-      currentWorkspaceId,
       refresh,
       logout,
     }),
-    [status, user, workspaces, isSystemAdmin, mustChangePassword, currentWorkspaceId, refresh, logout],
+    [status, user, isSystemAdmin, mustChangePassword, refresh, logout],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

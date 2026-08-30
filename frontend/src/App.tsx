@@ -25,7 +25,7 @@ import { useScrollContainment } from "./useScrollContainment";
 import { AdaptivePoller, type PollInterval } from "./adaptivePoller";
 import { pickerWindowParams, resolveWindowedEpisodeId } from "./episodePicker";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
-import { canSeeSystemSettings, roleLabel } from "./auth/session";
+import { canSeeSystemSettings } from "./auth/session";
 import ThemeSwitch from "./theme/ThemeSwitch";
 
 // 加载器单独具名：lazy() 与 hover 预取共用同一个引用，import() 天然去重。
@@ -38,7 +38,6 @@ const loadWallPage = () => import("./pages/WallPage");
 const loadCinemaPage = () => import("./pages/CinemaPage");
 const loadMonitorPage = () => import("./pages/MonitorPage");
 const loadReaderPage = () => import("./pages/ReaderPage");
-const loadTeamAdminPage = () => import("./pages/TeamAdminPage");
 
 const BiblePage = lazy(loadBiblePage);
 const ScenesPage = lazy(loadScenesPage);
@@ -49,7 +48,6 @@ const WallPage = lazy(loadWallPage);
 const CinemaPage = lazy(loadCinemaPage);
 const MonitorPage = lazy(loadMonitorPage);
 const ReaderPage = lazy(loadReaderPage);
-const TeamAdminPage = lazy(loadTeamAdminPage);
 
 export type View =
   | "studio"
@@ -212,10 +210,9 @@ const SECTIONS: {
   { key: "observability", label: "观测台", icon: "观", group: "项目观测", needProject: true },
 ];
 
-const SYSTEM_SECTIONS: Array<{ key: "overview" | "models" | "settings" | "members"; label: string; icon: string }> = [
+const SYSTEM_SECTIONS: Array<{ key: "overview" | "models" | "settings"; label: string; icon: string }> = [
   { key: "overview", label: "总览", icon: "总" },
   { key: "models", label: "模型中心", icon: "模" },
-  { key: "members", label: "成员与团队", icon: "员" },
   { key: "settings", label: "系统设置", icon: "设" },
 ];
 
@@ -1060,11 +1057,7 @@ function AppShell() {
         {view === "observability" && projectId && (
           <MonitorPage mode="project" projectId={projectId} projectName={currentProject?.name} />
         )}
-        {view === "system" && isSystemAdminUser && (
-          currentPathname.endsWith("/members")
-            ? <TeamAdminPage />
-            : <MonitorPage mode="system" />
-        )}
+        {view === "system" && isSystemAdminUser && <MonitorPage mode="system" />}
         </Suspense>
         </ErrorBoundary>
       </main>
@@ -1096,8 +1089,8 @@ function AppShell() {
   );
 }
 
-/** 侧栏底部的用户菜单：显示当前用户名 + 团队角色，收纳登出/改密。
- *  「团队」是本阶段引入的租户边界措辞，不与既有「项目空间」混用。 */
+/** 侧栏底部的用户菜单：显示当前用户名 + 是否系统管理员，收纳登出/改密。
+ *  账号即项目空间：不再有团队/角色概念，账号本身就是独立空间。 */
 function UserMenu({
   auth,
   open,
@@ -1113,10 +1106,7 @@ function UserMenu({
   onLogout: () => void;
   menuRef: RefObject<HTMLDivElement>;
 }) {
-  const membership = auth.workspaces.find((w) => w.id === auth.currentWorkspaceId) ?? null;
-  const roleText = auth.isSystemAdmin ? "系统管理员" : membership ? roleLabel(membership.role) : "";
-  const teamText = membership?.name ?? (auth.isSystemAdmin ? "全部团队" : "");
-  const subtitle = [teamText, roleText].filter(Boolean).join(" · ") || "未加入任何团队";
+  const subtitle = auth.isSystemAdmin ? "系统管理员" : "";
   return (
     <div className="user-menu" ref={menuRef}>
       <button
@@ -1303,7 +1293,7 @@ export function usePoll<T>(
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   // ApiError 的 status（403/404/…）单独存一份，供 QueryState 判断「无权访问」/
-  // 「跨团队资源不存在」——error 本身只是拼好的展示文案，不该反过来解析它。
+  // 「跨账号资源不存在」——error 本身只是拼好的展示文案，不该反过来解析它。
   const [errorStatus, setErrorStatus] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const pollerRef = useRef<AdaptivePoller<T>>();

@@ -50,26 +50,12 @@ CREATE TABLE IF NOT EXISTS projects (
     harness_engine_enabled INTEGER NOT NULL DEFAULT 1,
     created_at REAL NOT NULL
 );
--- RBAC 第一阶段：纯附加建表 + 引导数据，不改变任何现有行为。
--- workspace_members.role 仅限 4 个 ASCII 枚举值：
---   workspace_admin / production / review / readonly。
--- 系统管理员不是某个空间的成员行，而是 users.is_system_admin=1。
-CREATE TABLE IF NOT EXISTS tenants (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    created_at REAL NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS workspaces (
-    id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL DEFAULT 'tenant_default',
-    name TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at REAL NOT NULL,
-    created_by TEXT,
-    FOREIGN KEY(tenant_id) REFERENCES tenants(id)
-);
-
+-- 账号即项目空间：1 个账号 = 1 个独立项目空间，不同账号之间隔离。系统管理员
+-- 不是某种空间角色，而是 users.is_system_admin=1（隐式跨账号可见，见
+-- app/auth/principal.py）。历史上这里有 tenants/workspaces/workspace_members
+-- 三张表（团队协作模型），账号级隔离落地后已退场——见 app/db.py 的
+-- _migrate_project_ownership_and_drop_team_model，projects.owner_user_id
+-- 取代了 projects.workspace_id。
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL UNIQUE,
@@ -85,17 +71,6 @@ CREATE TABLE IF NOT EXISTS users (
     password_changed_at REAL,
     last_login_at REAL
 );
-
-CREATE TABLE IF NOT EXISTS workspace_members (
-    workspace_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    created_at REAL NOT NULL,
-    PRIMARY KEY(workspace_id, user_id),
-    FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_id);
 
 CREATE TABLE IF NOT EXISTS user_sessions (
     id TEXT PRIMARY KEY,
@@ -1721,6 +1696,43 @@ MIGRATIONS = (
     # 到期即清理。
     "ALTER TABLE projects ADD COLUMN deleted_at REAL",
     "CREATE INDEX IF NOT EXISTS idx_projects_deleted_at ON projects(deleted_at)",
+    # 账号即项目空间：owner_user_id 取代 workspace_id 成为 projects 唯一归属字段
+    # （用户拍板：1 账号 = 1 独立项目空间，团队/工作空间协作模型退场）。空串＝
+    # 尚未回填，_migrate_project_ownership_and_drop_team_model 负责一次性回填
+    # 与后续退场 workspace_id 列 + workspaces/workspace_members/tenants 三张表，
+    # 见该函数的详细说明与调用位置。
+    "ALTER TABLE projects ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''",
+    "CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_user_id)",
+    # 三档会员配额（见 app/quota.py 模块文档）：tier 决定项目数/并发/token/
+    # 视频时长四类上限，quota_period_started_at 是 30 天滚动周期的锚点（从开户
+    # 日起算，不是自然月）。ALTER 加常量 DEFAULT 'free' 会顺带回填所有历史
+    # 账号——现存账号里 is_system_admin=1 的三个（lnuyasha/regression-bot/
+    # cursor-agent）在 app.quota.effective_limits 里直接按管理员放行，tier 列
+    # 的值对它们不生效，无需单独回填成别的值；其余三个普通账号（demo/demo1/
+    # demo2）落在默认 free 档，与用户拍板一致。quota_period_started_at 留空由
+    # _backfill_quota_period_anchor 一次性回填成 created_at（不能用常量
+    # DEFAULT——每行的正确值是该行自己的 created_at，不是一个跨行常量）。
+    "ALTER TABLE users ADD COLUMN tier TEXT NOT NULL DEFAULT 'free'",
+    "ALTER TABLE users ADD COLUMN quota_period_started_at REAL",
+    # 配额用量的唯一事实来源（append-only）：当前用量 = SUM(delta) WHERE
+    # user_id=? AND resource=? AND period_index=?。UNIQUE(resource,
+    # attempt_key, reason) 是幂等的唯一保证——同一次尝试（attempt_key，如
+    # provider_calls.id 或 jobs.id）的同一个动作（charge/refund）只落一行，
+    # 重放交给 SQLite 的 UNIQUE 冲突短路，见 app/quota.py::_record_ledger。
+    # image_pool 资源用哨兵 period_index=-1，代表终身池、不随 30 天周期滚动。
+    """CREATE TABLE IF NOT EXISTS quota_ledger (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           user_id TEXT NOT NULL,
+           resource TEXT NOT NULL,
+           period_index INTEGER NOT NULL,
+           attempt_key TEXT NOT NULL,
+           reason TEXT NOT NULL,
+           delta REAL NOT NULL,
+           created_at REAL NOT NULL,
+           UNIQUE(resource, attempt_key, reason)
+       )""",
+    "CREATE INDEX IF NOT EXISTS idx_quota_ledger_user_period "
+    "ON quota_ledger(user_id, resource, period_index)",
 )
 
 
@@ -2408,6 +2420,49 @@ def _drop_obsolete_qa_tables(conn: sqlite3.Connection) -> None:
             pass
 
 
+def _migrate_project_ownership_and_drop_team_model(conn: sqlite3.Connection) -> None:
+    """账号即项目空间：``owner_user_id`` 取代 ``workspace_id``，团队/工作空间模型退场。
+
+    用户拍板：1 个账号 = 1 个独立项目空间，不同账号之间要有生产级隔离；「团队/
+    工作空间」多人协作模型（``tenants``/``workspaces``/``workspace_members`` 三张
+    表 + ``workspace_admin``/``production``/``review``/``readonly`` 四档角色）不再
+    有承载对象，一次退干净——半退会让判据两头打架（CLAUDE.md「Retiring
+    Features」）。
+
+    一次性历史数据回填：现网只有一份库，4 个既有项目全落在 ``ws_default``，建表
+    时从未记过创建者。核实过 ``workspace_members``：``ws_default`` 的成员是
+    lnuyasha（唯一真人系统管理员）、regression-bot / cursor-agent（自动化机器人
+    账号，``is_system_admin=1``）、demo2（演示账号）；「团队一组」下的 demo/demo1
+    从未拥有任何项目。因此回填目标是唯一真人账号 lnuyasha，按用户名硬编码——这是
+    只服务于本次一次性历史迁移的常量，不是可复用的产品规则（与
+    ``_bootstrap_identity`` 历史上硬编码 ``ws_default``/``tenant_default`` 同类）。
+    找不到 lnuyasha（全新安装、或该用户名不存在的其它环境）时安全跳过，不报错、
+    不误歪回填到别的账号。
+
+    幂等：``owner_user_id`` 只回填空串这一种状态；``workspace_id`` 列与
+    workspaces/workspace_members/tenants 三张表用「先查是否还在」判断，已经
+    退场过的库重复执行 ``init_db()`` 不报错、不重复操作。
+    """
+    project_columns = _column_names(conn, "projects")
+    if "owner_user_id" in project_columns:
+        conn.execute(
+            "UPDATE projects SET owner_user_id=(SELECT id FROM users WHERE username='lnuyasha') "
+            "WHERE (owner_user_id IS NULL OR owner_user_id='') "
+            "AND EXISTS (SELECT 1 FROM users WHERE username='lnuyasha')"
+        )
+    if "workspace_id" in project_columns:
+        try:
+            conn.execute("DROP INDEX IF EXISTS idx_projects_workspace")
+            conn.execute("ALTER TABLE projects DROP COLUMN workspace_id")
+        except sqlite3.OperationalError:
+            pass
+    for table in ("workspace_members", "workspaces", "tenants"):
+        try:
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+        except sqlite3.OperationalError:
+            pass
+
+
 def _backfill_multiview_assets(conn: sqlite3.Connection) -> None:
     """旧单图资产回填为多视角子记录；幂等可重复执行。"""
     stamp = now()
@@ -2496,27 +2551,19 @@ def _backfill_visual_entity_ids(conn: sqlite3.Connection) -> None:
     )
 
 
-def _bootstrap_identity(conn: sqlite3.Connection) -> None:
-    """RBAC 第一阶段引导：只播种唯一的默认租户/空间，绝不创建任何账号。
+def _backfill_quota_period_anchor(conn: sqlite3.Connection) -> None:
+    """既有账号的配额周期锚点回填为 created_at；幂等可重复执行。
 
-    账号必须由运维通过 scripts/create_admin.py 显式创建；init_db 是无人值守的
-    启动路径，创建账号会带来不受控的默认口令。这里只做到“项目有地方挂”为止。
+    只回填 ``quota_period_started_at IS NULL`` 的行——新账号在创建时应显式写入
+    自己的锚点（开户时刻），这里只补历史行的空白，不覆盖任何已经设置过的值。
     """
-    ts = now()
+    if not _table_exists(conn, "users"):
+        return
+    if "quota_period_started_at" not in _column_names(conn, "users"):
+        return
     conn.execute(
-        "INSERT OR IGNORE INTO tenants(id,name,created_at) VALUES('tenant_default','默认租户',?)",
-        (ts,),
-    )
-    conn.execute(
-        "INSERT OR IGNORE INTO workspaces(id,tenant_id,name,status,created_at) "
-        "VALUES('ws_default','tenant_default','默认空间','active',?)",
-        (ts,),
-    )
-    # MIGRATIONS 先跑完 workspace_id 加列才存在，索引建表放在这里而不是 SCHEMA。
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_workspace ON projects(workspace_id)")
-    # 修复历史脏值（理论上 ALTER 的常量 DEFAULT 已回填，这里兜底 NULL/空串）。
-    conn.execute(
-        "UPDATE projects SET workspace_id='ws_default' WHERE workspace_id IS NULL OR workspace_id=''"
+        "UPDATE users SET quota_period_started_at=created_at "
+        "WHERE quota_period_started_at IS NULL"
     )
 
 
@@ -2536,7 +2583,8 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
-    _bootstrap_identity(conn)
+    _migrate_project_ownership_and_drop_team_model(conn)
+    _backfill_quota_period_anchor(conn)
     # Provider claims are a project-owned accounting ledger. Migrate their
     # ownership before any integrity repair can delete disposable jobs/assets.
     # app.completion_grant / app.model_migration register these with
@@ -3304,6 +3352,22 @@ def _finish_provider_call_inner(
     if updated.rowcount != 1:
         conn.commit()
         return
+    # 三档会员配额记账（app/quota.py）：调用已经真实发生、成本已经产生，这里只
+    # 记账不拦截——延迟 import 避开 app.quota<->app.db 的真实循环导入（二者同层，
+    # 见 app/LAYERS.toml 的注释）。row 只在这个分支需要，不提前查。
+    from app.quota import charge_for_finished_provider_call
+
+    call_row = conn.execute(
+        "SELECT kind, project_id FROM provider_calls WHERE id=?", (call_id,)
+    ).fetchone()
+    if call_row is not None:
+        charge_for_finished_provider_call(
+            conn,
+            call_id=call_id,
+            kind=call_row["kind"],
+            project_id=call_row["project_id"],
+            response_json=response_json,
+        )
     if not _provider_recovery_ledger_available(conn):
         conn.commit()
         return
