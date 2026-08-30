@@ -74,6 +74,25 @@ async def _screenplay_guarded(
     batch_run_id: str | None = None,
 ):
     from app.generation_concurrency import run_with_generation_slot
+    from app import quota
+
+    conn = get_conn()
+    owner_user_id = quota.owner_of_episode(conn, episode_id)
+    if owner_user_id is not None:
+        try:
+            active = quota.count_active_workflow_runs(
+                conn, owner_user_id, "screenplay", exclude_run_id=recorder.run_id,
+            )
+            quota.check_module_concurrency(
+                conn, owner_user_id, quota.MODULE_SCREENPLAY, active_count=active,
+            )
+            quota.assert_token_capacity(conn, owner_user_id)
+        except quota.QuotaExceeded:
+            try:
+                recorder.cancel("账号配额已达上限，任务未启动", conn=None)
+            except StateConflict:
+                pass
+            raise
 
     async def activate() -> EpisodeScreenplay | None:
         conn = get_conn()

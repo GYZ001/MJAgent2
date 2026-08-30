@@ -92,6 +92,9 @@ allowed_exceptions = []
 
 # ---- L2 持久化：可依赖 L0-L1 ----
 "app.db" = 2
+"app.quota" = 2  # 2026-08-30 新增：三档会员配额引擎，只 import app.db；
+                 # app.db(finish_provider_call) 反过来按需记账用延迟 import
+                 # 避免真实循环导入，二者同层，延迟/模块级两种边都合法
 "app.artifacts" = 2
 "app.evidence" = 2
 "app.errors" = 2  # 2026-08-30：原 L0，只 import app.db，见文件末尾变更说明

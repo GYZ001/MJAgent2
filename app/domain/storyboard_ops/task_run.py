@@ -330,6 +330,26 @@ async def _storyboard_guarded_recorded(
     priority: int,
 ) -> None:
     from app.generation_concurrency import run_with_generation_slot
+    from app.orchestration.state_machine import StateConflict
+    from app import quota
+
+    conn = get_conn()
+    owner_user_id = quota.owner_of_episode(conn, episode_id)
+    if owner_user_id is not None:
+        try:
+            active = quota.count_active_workflow_runs(
+                conn, owner_user_id, "storyboard", exclude_run_id=recorder.run_id,
+            )
+            quota.check_module_concurrency(
+                conn, owner_user_id, quota.MODULE_STORYBOARD, active_count=active,
+            )
+            quota.assert_token_capacity(conn, owner_user_id)
+        except quota.QuotaExceeded:
+            try:
+                recorder.cancel("账号配额已达上限，任务未启动", conn=None)
+            except StateConflict:
+                pass
+            raise
 
     await run_with_generation_slot(
         "storyboard",

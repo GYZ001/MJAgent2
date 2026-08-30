@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
-from app import config, errors, hiagent, video_modes
+from app import config, errors, hiagent, quota, video_modes
 from app.compiler import ensure_source_excerpt_in_prompt, idem_key as make_idem_key
 from app.db import get_conn, new_id, now
 from app.orchestration import media_scheduler
 from app.orchestration.media_runs import ensure_media_trace, mark_media_job_state
 
 from .common import episode_video_budget_limit
+
+_LOGGER = logging.getLogger(__name__)
 
 # ``_enqueue_for_current_status`` (defined in ``.worker_lifecycle`` since the
 # further ``run_job.py`` split) is intentionally *not* imported here at module
@@ -49,6 +52,14 @@ def reconcile_episode_generation_status(episode_id: str) -> bool:
     全片补齐 Supervisor 仍在协调（含预检/等待授权）时不得降回 confirmed，否则生成台会误判为空闲。
     """
     conn = get_conn()
+    try:
+        # 视频时长额度退还：按产物信号收口（见 app/quota.py 模块文档），不追着
+        # 视频流水线里 30+ 处 video_slot_active=0 的写点分别埋点——这个函数本身
+        # 已经是几乎每次任务状态变化后都会被调用一次的既有收口点，足以覆盖。
+        # 退还失败不能连累这个函数真正负责的"整集是否已无活动任务"判断。
+        quota.reconcile_video_seconds_refunds(conn, episode_id)
+    except Exception:  # noqa: BLE001
+        _LOGGER.warning("reconcile_video_seconds_refunds failed for %s", episode_id, exc_info=True)
     active = conn.execute(
         """SELECT COUNT(*) AS c FROM jobs
            WHERE episode_id=? AND kind='video'
@@ -788,6 +799,19 @@ def _begin_video_preflight_job(
                 )
                 acquired = claimed.rowcount == 1
         else:
+            # 每模块并发 + 视频时长额度：这是"这一镜的这一次尝试"真正诞生的
+            # 时刻（新 job_id，video_slot_active 唯一索引保证同一镜同一时间只
+            # 有一个活跃 job）。两项检查 + 15 秒预扣都在这个 INSERT 之前、同一个
+            # BEGIN IMMEDIATE 事务里完成——超额时直接 raise，job 行不会被插入，
+            # 外层 except 统一 rollback（CLAUDE.md：扣减与任务创建必须在同一
+            # 事务里）。找不到归属账号（legacy-shared 兼容路径）时不拦截。
+            owner_user_id = quota.owner_of_project(conn, shot["project_id"])
+            if owner_user_id is not None:
+                active_jobs = quota.count_active_video_jobs(conn, owner_user_id)
+                quota.check_module_concurrency(
+                    conn, owner_user_id, quota.MODULE_VIDEO, active_count=active_jobs,
+                )
+                quota.reserve_video_seconds(conn, owner_user_id, attempt_key=job_id)
             conn.execute(
                 """INSERT INTO jobs(
                        id,kind,shot_id,episode_id,project_id,status,

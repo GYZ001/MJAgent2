@@ -363,10 +363,14 @@ def test_create_project_rolls_back_partial_rows(monkeypatch) -> None:
         CREATE TABLE projects(
             id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT,
             novel_chars INTEGER, created_at REAL,
-            -- 简化版 schema 要跟真表保持同步：建项目现在会显式写入归属团队
-            -- （见 app/domain/projects.py:_creation_workspace_id），缺这列会让
+            -- 简化版 schema 要跟真表保持同步：建项目现在会显式写入归属账号
+            -- （见 app/domain/projects.py:_creation_owner_user_id），缺这列会让
             -- 本用例以 OperationalError 收场，掩盖它真正要验的回滚行为。
-            workspace_id TEXT NOT NULL DEFAULT 'ws_default'
+            owner_user_id TEXT NOT NULL DEFAULT '',
+            -- 同理：三档会员配额的项目数闸门（app/quota.py::check_project_slot）
+            -- 在建项目事务里查 `deleted_at IS NULL`，缺这列同样会把
+            -- OperationalError 误判成"回滚生效"。
+            deleted_at REAL
         );
         CREATE TABLE chapters(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
