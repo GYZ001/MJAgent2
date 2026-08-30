@@ -79,13 +79,14 @@ async def _screenplay_guarded(
     conn = get_conn()
     owner_user_id = quota.owner_of_episode(conn, episode_id)
     if owner_user_id is not None:
+        # 账号并发准入已经在 recorder 创建时（task_body._new_screenplay_recorder
+        # -> _reserve_screenplay_concurrency_slot）与 workflow_runs 那一行的插入
+        # 绑在同一个 BEGIN IMMEDIATE 事务里做过——这里不重复判并发：重复判据
+        # 必然读到自己刚插入、已经通过准入的这一行，是死代码，且两处各自读一
+        # 次表还制造了本该已经消灭的 TOCTOU 窗口。这里只剩 token 额度：token
+        # 花费只有调用真正结束才知道，没法像并发槽位那样在创建时精确预留，
+        # 所以仍在这里做"账号 30 天 token 额度是否已经见顶"的前置检查。
         try:
-            active = quota.count_active_workflow_runs(
-                conn, owner_user_id, "screenplay", exclude_run_id=recorder.run_id,
-            )
-            quota.check_module_concurrency(
-                conn, owner_user_id, quota.MODULE_SCREENPLAY, active_count=active,
-            )
             quota.assert_token_capacity(conn, owner_user_id)
         except quota.QuotaExceeded:
             try:

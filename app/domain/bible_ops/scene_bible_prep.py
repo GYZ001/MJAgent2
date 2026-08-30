@@ -9,6 +9,7 @@ import json
 
 from app import (
     errors,
+    quota,
     task_registry,
 )
 from app.db import (
@@ -27,7 +28,11 @@ from app.orchestration.engine import (
 )
 from app.schemas import Bible
 
-from .primitives import _parse_json_value
+from .primitives import (
+    QUOTA_MODULE_SCENE_REF,
+    _parse_json_value,
+    count_active_project_scoped_workflow_runs,
+)
 
 
 def _start_scene_refs_generation(
@@ -258,6 +263,46 @@ async def _scene_bible_task(
                      (public, project_id))
         conn.commit()
 
+def _reserve_scene_refs_recorder(
+    conn, project_id: str, only_scene: str | list[str] | None, *,
+    requested_by: str, trigger_type: str, parent_run_id: str | None,
+) -> WorkflowRecorder:
+    """账号维度并发准入与占位（workflow_runs 那一行）在同一个 BEGIN IMMEDIATE
+    事务里完成——消除「先数后建」的 TOCTOU（CLAUDE.md「Gates and Criteria」/
+    「Ownership Must Be Explicit」）。照抄 media_scheduler.reserve_budget 的
+    owns_transaction 惯例：check 通过后才调用 WorkflowRecorder.create()，它内部
+    的 conn.commit() 顺带收口本事务，不新造第二套事务风格。找不到归属账号
+    （legacy-shared 兼容路径）时不拦截，与既有各处 quota 接入点一致。"""
+    owner_user_id = quota.owner_of_project(conn, project_id)
+    owns_transaction = not conn.in_transaction
+    try:
+        if owns_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        if owner_user_id is not None:
+            active = count_active_project_scoped_workflow_runs(
+                conn, owner_user_id, "scene_references", exclude_run_id=None,
+            )
+            quota.check_module_concurrency(
+                conn, owner_user_id, QUOTA_MODULE_SCENE_REF, active_count=active,
+            )
+        recorder = WorkflowRecorder.create(
+            workflow_type="scene_references",
+            scope_type="project",
+            scope_id=project_id,
+            input_fingerprint=fingerprint(project_id, only_scene, "scene_references"),
+            requested_by=requested_by,
+            trigger_type=trigger_type,
+            budget_limit_cny=float(get_setting("episode_cost_limit_cny") or 100),
+            parent_run_id=parent_run_id,
+        )
+        if owns_transaction and conn.in_transaction:
+            conn.commit()
+        return recorder
+    except Exception:
+        if owns_transaction and conn.in_transaction:
+            conn.rollback()
+        raise
+
 async def _scene_refs_task(
     project_id: str,
     only_scene: str | list[str] | None,
@@ -270,16 +315,24 @@ async def _scene_refs_task(
 ):
     from app.scenes import SceneCandidateReviewRequired, generate_scene_refs
     conn = get_conn()
-    recorder = WorkflowRecorder.create(
-        workflow_type="scene_references",
-        scope_type="project",
-        scope_id=project_id,
-        input_fingerprint=fingerprint(project_id, only_scene, "scene_references"),
-        requested_by=requested_by,
-        trigger_type=trigger_type,
-        budget_limit_cny=float(get_setting("episode_cost_limit_cny") or 100),
-        parent_run_id=parent_run_id,
-    )
+    try:
+        recorder = _reserve_scene_refs_recorder(
+            conn, project_id, only_scene,
+            requested_by=requested_by, trigger_type=trigger_type,
+            parent_run_id=parent_run_id,
+        )
+    except quota.QuotaExceeded as exc:
+        # 账号并发准入未通过：没有 workflow_run 行被创建（占位与判定同一个
+        # BEGIN IMMEDIATE 事务，见 _reserve_scene_refs_recorder），因此这里没有
+        # recorder 可以 fail()——直接把配额错误落到项目状态上，与下面
+        # generate_scene_refs 真正失败时的落地字段一致，前端读同一处即可。
+        public = errors.record_and_format(
+            exc, action="scene_refs_generate", context={"project_id": project_id},
+        )
+        conn.execute("UPDATE projects SET scene_refs_status='failed', scene_refs_error=? WHERE id=?",
+                     (public, project_id))
+        conn.commit()
+        return
     try:
         recorder.start()
         await recorder.step(

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 from app.db import (
     get_conn,
@@ -21,6 +22,41 @@ from app.visual_styles import (
     visual_style_prompt,
 )
 from fastapi import HTTPException
+
+#: 定妆照/场景图批量出图任务在 app.quota.check_module_concurrency 里用的
+#: module 标签——与 quota.MODULE_SCREENPLAY/MODULE_STORYBOARD/MODULE_VIDEO
+#: 同一种短英文 token 风格（quota.py 只读，新增模块标签只能在调用方这一侧定义）。
+QUOTA_MODULE_PORTRAIT = "portrait"
+QUOTA_MODULE_SCENE_REF = "scene_ref"
+
+
+def count_active_project_scoped_workflow_runs(
+    conn: sqlite3.Connection, owner_user_id: str, workflow_type: str,
+    *, exclude_run_id: str | None = None,
+) -> int:
+    """统计某账号名下、某 workflow_type 当前处于 CREATED/RUNNING 的 run 数——
+    专给 ``scope_type='project'`` 的 run 用（``character_references``/
+    ``scene_references`` 批量出图任务，``WorkflowRecorder.create(scope_type=
+    "project", scope_id=project_id)``，``wr.scope_id`` 就是 project_id 本身）。
+
+    不能复用 ``app.quota_scope.count_active_workflow_runs``：那条查询的 JOIN
+    写死了 ``wr.scope_type='episode'`` 并经 episodes 表转一手解出 project_id，
+    是 screenplay/storyboard 两类 run 的既有约定，对本类 project 直挂的 run
+    结构不适用（quota.py/quota_scope.py 本轮只读，改不了那条查询）。SQL 整条
+    内联在调用点（同 quota_scope 的既有约定）：账号隔离靠 ``p.owner_user_id=?``，
+    留在静态扫描能看见的地方。
+    """
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) AS c FROM workflow_runs wr "
+            "JOIN projects p ON p.id = wr.scope_id "
+            "WHERE wr.workflow_type=? AND wr.scope_type='project' "
+            "AND p.owner_user_id=? AND wr.status IN ('CREATED','RUNNING') "
+            "AND (? IS NULL OR wr.id != ?)",
+            (workflow_type, owner_user_id, exclude_run_id, exclude_run_id),
+        ).fetchone()["c"]
+        or 0
+    )
 
 
 def _scene_canonical_length_ok(canonical: str) -> bool:

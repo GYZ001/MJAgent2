@@ -1,8 +1,13 @@
-"""人物定妆照与场景定场图批量出图：各自独立的最多 5 并发池。
+"""人物定妆照与场景定场图批量出图：各自独立的并发池，上限按账号档位推导。
 
 不只是"能跑通"——通过让每次伪造的 generate_image 调用短暂 sleep，测出真实的
 同时在飞并发峰值，断言峰值恰好命中池上限（不多不少）。角色/场景数量刻意取
 9（> 5），确保上限真的生效，而不是"凑巧全部并发也不超过 5"。
+
+文件下半部分覆盖账号维度并发准入（app.quota.TIER_TABLE）：项目没挂账号（旧
+测试、legacy-shared 兼容路径）时退回本文件顶部的固定池上限；项目挂了账号后，
+批量出图的实际并发必须跟着账号档位走，不能让 free 档账号靠"批量点一次全部
+生成"绕过账号并发上限。
 """
 from __future__ import annotations
 
@@ -14,6 +19,7 @@ import threading
 import pytest
 
 from app import config, db, multiview, refs, scenes
+from app.errors import ContentGenerationError
 from app.generation_concurrency import (
     CHARACTER_PORTRAIT_BATCH_CONCURRENCY,
     SCENE_REFERENCE_BATCH_CONCURRENCY,
@@ -30,6 +36,20 @@ def asset_db(tmp_path, monkeypatch):
     db.init_db()
     yield db.get_conn(), tmp_path
     db.get_conn().close()
+
+
+def _make_user(conn, tier: str) -> str:
+    user_id = db.new_id("user")
+    conn.execute(
+        """INSERT INTO users(
+               id, username, display_name, auth_provider, status,
+               is_system_admin, must_change_password, created_at, tier,
+               quota_period_started_at
+           ) VALUES(?,?,?,'local','active',0,0,?,?,?)""",
+        (user_id, f"{tier}-{user_id}", "测试账号", db.now(), tier, db.now()),
+    )
+    conn.commit()
+    return user_id
 
 
 def _concurrency_probe(delay: float = 0.05):
@@ -239,3 +259,152 @@ def test_character_and_scene_batches_use_independent_pools(asset_db, monkeypatch
     assert scene_state["peak"] == SCENE_REFERENCE_BATCH_CONCURRENCY
     assert char_result["generated"] == [c.name for c in bible.characters]
     assert scene_result["generated"] == [s.name for s in bible.scenes]
+
+
+def test_free_tier_account_caps_portrait_batch_at_one_concurrent(asset_db, monkeypatch) -> None:
+    """free 账号（app.quota.TIER_TABLE 并发上限 1）批量点「全部生成」：不管批量
+    目标有几个角色，实际同时在飞的定妆照生成都不能超过 1——这是本次要补的
+    缺口本身：此前批量入口完全不看账号档位，固定用进程级池子（5）。
+    """
+    conn, _ = asset_db
+    owner = _make_user(conn, "free")
+    n_characters = 3
+    bible = Bible(
+        world=World(visual_style_canonical="cinematic animation"),
+        characters=[
+            Character(
+                name=f"Char{i}", role="lead",
+                appearance_canonical=f"character number {i}, distinctive look, tall build, blue coat",
+            )
+            for i in range(n_characters)
+        ],
+    )
+    conn.execute(
+        "INSERT INTO projects(id, name, status, bible_json, bible_version, created_at, owner_user_id) "
+        "VALUES('proj_conc_free', 'ConcFree', 'bible_ready', ?, 1, 1, ?)",
+        (bible.model_dump_json(), owner),
+    )
+    conn.commit()
+
+    encoded = base64.b64encode(b"test-image").decode("ascii")
+    probe, state = _concurrency_probe()
+
+    async def fake_image(*_args, **_kwargs):
+        await probe()
+        return {"b64_json": encoded}
+
+    monkeypatch.setattr(refs.hiagent, "generate_image", fake_image)
+    monkeypatch.setattr(multiview, "character_multiview_enabled", lambda: False)
+    monkeypatch.setattr(
+        refs, "record_reference_asset",
+        lambda **_kwargs: {"id": "artifact_portrait", "status": "approved"},
+    )
+
+    result = asyncio.run(refs.generate_refs("proj_conc_free"))
+
+    assert state["peak"] == 1
+    assert result["generated"] == [c.name for c in bible.characters]
+
+
+def test_max_tier_account_reaches_ten_concurrent_portraits(asset_db, monkeypatch) -> None:
+    """max 账号（并发上限 10）批量出图：实际并发能冲到账号上限 10，证明上限
+    真的按档位推导，不是被进程级默认常量（5）顶死——默认常量只在项目没挂账号
+    时才兜底生效（见 test_character_portrait_batch_caps_concurrency_at_pool_size）。
+    """
+    conn, _ = asset_db
+    owner = _make_user(conn, "max")
+    n_characters = 12
+    assert n_characters > CHARACTER_PORTRAIT_BATCH_CONCURRENCY
+    bible = Bible(
+        world=World(visual_style_canonical="cinematic animation"),
+        characters=[
+            Character(
+                name=f"Char{i}", role="lead",
+                appearance_canonical=f"character number {i}, distinctive look, tall build, blue coat",
+            )
+            for i in range(n_characters)
+        ],
+    )
+    conn.execute(
+        "INSERT INTO projects(id, name, status, bible_json, bible_version, created_at, owner_user_id) "
+        "VALUES('proj_conc_max', 'ConcMax', 'bible_ready', ?, 1, 1, ?)",
+        (bible.model_dump_json(), owner),
+    )
+    conn.commit()
+
+    encoded = base64.b64encode(b"test-image").decode("ascii")
+    probe, state = _concurrency_probe()
+
+    async def fake_image(*_args, **_kwargs):
+        await probe()
+        return {"b64_json": encoded}
+
+    monkeypatch.setattr(refs.hiagent, "generate_image", fake_image)
+    monkeypatch.setattr(multiview, "character_multiview_enabled", lambda: False)
+    monkeypatch.setattr(
+        refs, "record_reference_asset",
+        lambda **_kwargs: {"id": "artifact_portrait", "status": "approved"},
+    )
+
+    result = asyncio.run(refs.generate_refs("proj_conc_max"))
+
+    assert state["peak"] == 10
+    assert result["generated"] == [c.name for c in bible.characters]
+
+
+def test_portrait_batch_slot_is_released_after_one_character_fails(asset_db, monkeypatch) -> None:
+    """free 账号（并发上限 1）批量出图，其中一个角色出图失败：失败角色必须
+    释放并发槽位，后续角色不能被卡在等待队列里——否则一次真实的供应商错误
+    会把整个账号的定妆照并发永久锁死在 0（CLAUDE.md「所有权必须显式」隔壁的
+    同一类问题：槽位必须有归还路径，不能只在成功路径上释放）。
+    """
+    conn, _ = asset_db
+    owner = _make_user(conn, "free")
+    n_characters = 3
+    bible = Bible(
+        world=World(visual_style_canonical="cinematic animation"),
+        characters=[
+            Character(
+                name=f"Char{i}", role="lead",
+                appearance_canonical=f"character number {i}, distinctive look, tall build, blue coat",
+            )
+            for i in range(n_characters)
+        ],
+    )
+    conn.execute(
+        "INSERT INTO projects(id, name, status, bible_json, bible_version, created_at, owner_user_id) "
+        "VALUES('proj_conc_release', 'ConcRelease', 'bible_ready', ?, 1, 1, ?)",
+        (bible.model_dump_json(), owner),
+    )
+    conn.commit()
+
+    encoded = base64.b64encode(b"test-image").decode("ascii")
+    attempted: list[str] = []
+    state = {"active": 0, "peak": 0}
+
+    async def fake_image(prompt, *_args, **kwargs):
+        state["active"] += 1
+        state["peak"] = max(state["peak"], state["active"])
+        name = (kwargs.get("call_meta") or {}).get("character_name")
+        attempted.append(name)
+        await asyncio.sleep(0.02)
+        state["active"] -= 1
+        if name == "Char0":
+            raise refs.hiagent.ProviderError("boom")
+        return {"b64_json": encoded}
+
+    monkeypatch.setattr(refs.hiagent, "generate_image", fake_image)
+    monkeypatch.setattr(multiview, "character_multiview_enabled", lambda: False)
+    monkeypatch.setattr(
+        refs, "record_reference_asset",
+        lambda **_kwargs: {"id": "artifact_portrait", "status": "approved"},
+    )
+
+    with pytest.raises(ContentGenerationError):
+        asyncio.run(refs.generate_refs("proj_conc_release"))
+
+    # 全部三个角色都被真正尝试过——如果失败角色没释放槽位，后两个会永远
+    # 排在队列里，attempted 就不可能凑齐三个名字。
+    assert set(attempted) == {"Char0", "Char1", "Char2"}
+    # 全程并发峰值仍然遵守账号上限（1）——释放的是槽位，不是账号并发上限本身。
+    assert state["peak"] == 1

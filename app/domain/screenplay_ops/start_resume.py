@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from app import errors
+from app import errors, quota
 from app.db import (
     get_conn,
     now,
@@ -114,6 +114,11 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
                 else None
             ),
         )
+    except quota.QuotaExceeded:
+        # 配额超限的 429（tier/limit/upgrade_path 详情）必须原样透传给前端
+        # ——不能被下面的通用异常处理糊成一个不带这些信息的 503
+        # （CLAUDE.md「拦住用户时必须给出路」）。
+        raise
     except Exception as exc:
         cause = errors.log_error(
             exc,
@@ -263,6 +268,8 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
             expected_active_run_id=ep["active_screenplay_run_id"],
             resume_eligibility=eligibility,
         )
+    except quota.QuotaExceeded:
+        raise
     except Exception as exc:
         raise HTTPException(503, {
             "code": "SCREENPLAY_RESUME_FAILED",

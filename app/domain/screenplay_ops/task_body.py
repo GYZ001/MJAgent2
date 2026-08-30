@@ -273,7 +273,7 @@ def _new_screenplay_recorder(
     source_text = _episode_source_text(conn, ep)
     active_text_provider = hiagent.active_provider("text")
     active_text_model = hiagent.active_model("text", provider=active_text_provider)
-    return WorkflowRecorder.create(
+    create_kwargs = dict(
         workflow_type="screenplay",
         scope_type="episode",
         scope_id=episode_id,
@@ -316,6 +316,42 @@ def _new_screenplay_recorder(
         },
         parent_run_id=parent_run_id,
     )
+    return _reserve_screenplay_concurrency_slot(conn, episode_id, create_kwargs)
+
+
+def _reserve_screenplay_concurrency_slot(
+    conn, episode_id: str, create_kwargs: dict,
+) -> WorkflowRecorder:
+    """账号维度并发准入与占位（workflow_runs 行本身）在同一个 BEGIN IMMEDIATE
+    事务里完成——消除「先数后建」的 TOCTOU（CLAUDE.md「Gates and Criteria」/
+    「Ownership Must Be Explicit」）。照抄 ``media_scheduler.reserve_budget`` 的
+    ``owns_transaction`` 惯例，不新造第二套事务风格：``WorkflowRecorder.create()``
+    内部的 ``conn.commit()`` 顺带收口本事务，通过后才允许 workflow_runs 出现
+    这一行，因此准入判定读到的 ``active_count`` 永远不含"正在被别的并发请求
+    创建、尚未提交"的幽灵行——同一账号同一模块的两个并发请求不可能都读到
+    "还没到上限"再各自建一行，把上限撑破。"""
+    from app import quota
+
+    owner_user_id = quota.owner_of_episode(conn, episode_id)
+    owns_transaction = not conn.in_transaction
+    try:
+        if owns_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        if owner_user_id is not None:
+            active = quota.count_active_workflow_runs(
+                conn, owner_user_id, "screenplay", exclude_run_id=None,
+            )
+            quota.check_module_concurrency(
+                conn, owner_user_id, quota.MODULE_SCREENPLAY, active_count=active,
+            )
+        recorder = WorkflowRecorder.create(**create_kwargs)
+        if owns_transaction and conn.in_transaction:
+            conn.commit()
+        return recorder
+    except Exception:
+        if owns_transaction and conn.in_transaction:
+            conn.rollback()
+        raise
 
 def _screenplay_context_pack(episode_id: str) -> tuple[list[str], dict]:
     conn = get_conn()

@@ -9,6 +9,7 @@ import json
 
 from app import (
     errors,
+    quota,
     task_registry,
     worker,
 )
@@ -31,11 +32,13 @@ from fastapi import HTTPException
 
 from .precheck import compute_refs_cost_precheck
 from .primitives import (
+    QUOTA_MODULE_PORTRAIT,
     _consume_payment_quote,
     _normalize_character_selection,
     _payment_confirm_required,
     _refs_target_payload,
     _validate_payment_quote,
+    count_active_project_scoped_workflow_runs,
 )
 
 
@@ -69,6 +72,44 @@ def _new_refs_recorder(
         budget_limit_cny=float(get_setting("episode_cost_limit_cny") or 100),
         parent_run_id=parent_run_id,
     )
+
+def _reserve_refs_recorder(
+    conn, project_id: str, only_character: str | None, only_characters: list[str] | None, *,
+    resume: bool, fresh_after: float | None, parent_run_id: str | None,
+    requested_by: str, trigger_type: str,
+) -> WorkflowRecorder:
+    """账号维度并发准入与占位（workflow_runs 那一行）在同一个 BEGIN IMMEDIATE
+    事务里完成——消除「先数后建」的 TOCTOU（CLAUDE.md「Gates and Criteria」/
+    「Ownership Must Be Explicit」）。与
+    scene_bible_prep._reserve_scene_refs_recorder 同一套惯例（照抄
+    media_scheduler.reserve_budget 的 owns_transaction 写法，不新造第二套事务
+    风格）：check 通过后才调用 _new_refs_recorder()，其内部
+    WorkflowRecorder.create() 的 conn.commit() 顺带收口本事务。找不到归属账号
+    （legacy-shared 兼容路径）时不拦截，与既有各处 quota 接入点一致。"""
+    owner_user_id = quota.owner_of_project(conn, project_id)
+    owns_transaction = not conn.in_transaction
+    try:
+        if owns_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        if owner_user_id is not None:
+            active = count_active_project_scoped_workflow_runs(
+                conn, owner_user_id, "character_references", exclude_run_id=None,
+            )
+            quota.check_module_concurrency(
+                conn, owner_user_id, QUOTA_MODULE_PORTRAIT, active_count=active,
+            )
+        recorder = _new_refs_recorder(
+            project_id, only_character, only_characters,
+            resume=resume, fresh_after=fresh_after, parent_run_id=parent_run_id,
+            requested_by=requested_by, trigger_type=trigger_type,
+        )
+        if owns_transaction and conn.in_transaction:
+            conn.commit()
+        return recorder
+    except Exception:
+        if owns_transaction and conn.in_transaction:
+            conn.rollback()
+        raise
 
 def _active_refs_run(project_id: str):
     return get_conn().execute(
@@ -135,8 +176,8 @@ def _start_refs_generation(
     trigger_type = "resume" if resume else "manual"
     recorder = None
     try:
-        recorder = _new_refs_recorder(
-            project_id, only_character, only_characters,
+        recorder = _reserve_refs_recorder(
+            conn, project_id, only_character, only_characters,
             resume=resume, fresh_after=batch_started_at, parent_run_id=parent_run_id,
             requested_by=requested_by, trigger_type=trigger_type,
         )
@@ -151,6 +192,22 @@ def _start_refs_generation(
             ),
             project_id=project_id,
         )
+    except quota.QuotaExceeded:
+        # 配额超限时占位从未落地（_reserve_refs_recorder 的 BEGIN IMMEDIATE 事务
+        # 直接回滚，没有 workflow_run 行，也没有 recorder 可以 cancel）；项目状
+        # 态回滚到之前，429 detail（tier/limit/upgrade_path）原样透传给前端，不
+        # 能被下面的通用处理糊成 ValueError（CLAUDE.md「拦住用户时必须给出路」）。
+        if previous:
+            conn.execute(
+                "UPDATE projects SET refs_status=?,refs_error=?,refs_target=?,"
+                "refs_resume=?,refs_batch_started_at=? WHERE id=?",
+                (
+                    previous["refs_status"], previous["refs_error"], previous["refs_target"],
+                    previous["refs_resume"], previous["refs_batch_started_at"], project_id,
+                ),
+            )
+            conn.commit()
+        raise
     except Exception as exc:
         if previous:
             conn.execute(
@@ -189,13 +246,32 @@ async def _refs_task(
 ):
     from app.refs import generate_refs
     conn = get_conn()
-    recorder = recorder or _new_refs_recorder(
-        project_id, only_character, only_characters,
-        resume=resume, fresh_after=fresh_after, parent_run_id=parent_run_id,
-        requested_by=requested_by, trigger_type=trigger_type,
-    )
+    if recorder is None:
+        # 正常生产路径（_start_refs_generation）已经预先建好 recorder；这个
+        # 分支只服务测试/未来直接调用本函数的调用方。占位与账号并发准入必须
+        # 同一个事务，理由与 _start_refs_generation 里的调用一致，见
+        # _reserve_refs_recorder 的说明。
+        try:
+            recorder = _reserve_refs_recorder(
+                conn, project_id, only_character, only_characters,
+                resume=resume, fresh_after=fresh_after, parent_run_id=parent_run_id,
+                requested_by=requested_by, trigger_type=trigger_type,
+            )
+        except quota.QuotaExceeded as exc:
+            public = errors.record_and_format(
+                exc, action="refs_generate", context={"project_id": project_id},
+            )
+            conn.execute(
+                "UPDATE projects SET refs_status='failed', refs_error=? WHERE id=?",
+                (public, project_id),
+            )
+            conn.commit()
+            return
     try:
         recorder.start()
+        # 账号维度并发准入已经在 recorder 创建时（_reserve_refs_recorder）与
+        # workflow_runs 那一行的插入绑在同一个 BEGIN IMMEDIATE 事务里做过，这
+        # 里不重复判（理由同 screenplay_ops.guarded 的对应注释）。
         # 新包结构完整后才使旧定妆的下游产物失效；质量评分不参与采用资格。
         # 这样技术失败或中止不会破坏当前可用链路。
         p = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()

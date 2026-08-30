@@ -51,7 +51,7 @@ def _new_storyboard_recorder(
         resume=resume,
     )
     contract = get_contract("storyboard")
-    return WorkflowRecorder.create(
+    create_kwargs = dict(
         workflow_type="storyboard",
         scope_type="episode",
         scope_id=episode_id,
@@ -78,6 +78,39 @@ def _new_storyboard_recorder(
         config_snapshot={"storyboard_shot_max_tokens": config.STORYBOARD_SHOT_MAX_TOKENS},
         parent_run_id=parent_run_id,
     )
+    return _reserve_storyboard_concurrency_slot(conn, episode_id, create_kwargs)
+
+
+def _reserve_storyboard_concurrency_slot(
+    conn, episode_id: str, create_kwargs: dict,
+) -> WorkflowRecorder:
+    """账号维度并发准入与占位（workflow_runs 行本身）在同一个 BEGIN IMMEDIATE
+    事务里完成——与 screenplay_ops.task_body._reserve_screenplay_concurrency_slot
+    同一套惯例（照抄 media_scheduler.reserve_budget 的 owns_transaction 写法，
+    不新造第二套事务风格）。通过后才允许 workflow_runs 出现这一行，两个并发
+    请求不可能都读到"还没到上限"再各自建一行。"""
+    from app import quota
+
+    owner_user_id = quota.owner_of_episode(conn, episode_id)
+    owns_transaction = not conn.in_transaction
+    try:
+        if owns_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        if owner_user_id is not None:
+            active = quota.count_active_workflow_runs(
+                conn, owner_user_id, "storyboard", exclude_run_id=None,
+            )
+            quota.check_module_concurrency(
+                conn, owner_user_id, quota.MODULE_STORYBOARD, active_count=active,
+            )
+        recorder = WorkflowRecorder.create(**create_kwargs)
+        if owns_transaction and conn.in_transaction:
+            conn.commit()
+        return recorder
+    except Exception:
+        if owns_transaction and conn.in_transaction:
+            conn.rollback()
+        raise
 
 def _storyboard_bound_bible_artifact_id(
     episode_id: str,
@@ -336,13 +369,12 @@ async def _storyboard_guarded_recorded(
     conn = get_conn()
     owner_user_id = quota.owner_of_episode(conn, episode_id)
     if owner_user_id is not None:
+        # 账号并发准入已经在 recorder 创建时（_new_storyboard_recorder ->
+        # _reserve_storyboard_concurrency_slot）与 workflow_runs 那一行的插入
+        # 绑在同一个 BEGIN IMMEDIATE 事务里做过，这里不重复判并发（理由同
+        # screenplay_ops.guarded._screenplay_guarded 的对应注释）。这里只剩
+        # token 额度检查，理由同上：花费只有调用结束才知道，没法预留。
         try:
-            active = quota.count_active_workflow_runs(
-                conn, owner_user_id, "storyboard", exclude_run_id=recorder.run_id,
-            )
-            quota.check_module_concurrency(
-                conn, owner_user_id, quota.MODULE_STORYBOARD, active_count=active,
-            )
             quota.assert_token_capacity(conn, owner_user_id)
         except quota.QuotaExceeded:
             try:

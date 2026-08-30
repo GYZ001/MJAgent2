@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from app import task_registry
+from app import quota, task_registry
 from app.db import (
     get_conn,
     now,
@@ -267,6 +267,8 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
             message="Repair 正在按 QA 问题局部修复；完成后会重新执行 QA",
             expected_active_run_id=ep["active_screenplay_run_id"],
         )
+    except quota.QuotaExceeded:
+        raise
     except Exception as exc:
         raise HTTPException(503, {
             "code": "SCREENPLAY_REPAIR_START_FAILED",

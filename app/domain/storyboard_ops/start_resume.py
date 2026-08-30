@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from app import (
     errors,
+    quota,
     task_registry,
 )
 from app.db import (
@@ -133,6 +134,11 @@ async def start_storyboard(episode_id: str, body: dict | None = Body(None)):
                 recorder.cancel("分镜任务未能启动，剧集状态已回滚", conn=None)
             except Exception:  # noqa: BLE001
                 pass
+        if isinstance(exc, quota.QuotaExceeded):
+            # 状态已按上面的逻辑回滚，但配额超限的 429（tier/limit/upgrade_path
+            # 详情）必须原样透传，不能被下面的通用 503 糊掉
+            # （CLAUDE.md「拦住用户时必须给出路」）。
+            raise exc
         raise HTTPException(503, {
             "code": "STORYBOARD_START_SPAWN_FAILED",
             "message": "分镜任务未能启动，剧本和原状态已保留，请重试",
@@ -282,6 +288,8 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
                 recorder.cancel("分镜继续任务未能启动，状态已回滚", conn=None)
             except Exception:  # noqa: BLE001
                 pass
+        if isinstance(exc, quota.QuotaExceeded):
+            raise exc
         raise HTTPException(503, {
             "code": "STORYBOARD_RESUME_SPAWN_FAILED",
             "message": "分镜继续任务未能启动，已回滚到可重试状态",

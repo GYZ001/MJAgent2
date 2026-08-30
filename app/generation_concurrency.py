@@ -192,49 +192,60 @@ def current_generation_priority() -> int:
 
 #: 人物定妆照 / 场景定场图批量出图：各自独立的有界并发池，互不挤占彼此的槽位。
 #: 与上面的文本生成优先级闸门是两套独立机制——图片批量出图没有优先级抢占需求，
-#: 只需要"这一批最多同时跑几个"，故用最简单的按 event loop 缓存的 Semaphore。
+#: 只需要"这一批最多同时跑几个"，故用最简单的 asyncio.Semaphore（不是 _PriorityGate）。
+#: 这两个常量是"找不到归属账号"时的旧行为兜底（legacy-shared 兼容路径、测试直接
+#: 调用 generate_refs/generate_scene_refs 且不挂账号时），不是业务上限本身——
+#: 账号维度的真实上限来自 app.quota.TIER_TABLE，见 _account_image_batch_limit。
 CHARACTER_PORTRAIT_BATCH_CONCURRENCY = 5
 SCENE_REFERENCE_BATCH_CONCURRENCY = 5
 
-_image_batch_semaphores: weakref.WeakKeyDictionary[
-    asyncio.AbstractEventLoop, dict[str, asyncio.Semaphore]
-] = weakref.WeakKeyDictionary()
+#: 账号维度并发池的安全上限——防止 TIER_TABLE 未来数值变化把出图并发推得过高、
+#: 压垮供应商侧限流，与上面文本生成闸门的 MAX_TEXT_GENERATION_CONCURRENCY 同一类
+#: 安全带，不是业务上限（业务上限来自 TIER_TABLE，当前最高档 10）。
+IMAGE_BATCH_CONCURRENCY_CEILING = 16
 
 
-def _image_batch_semaphore(resource: str, limit: int) -> asyncio.Semaphore:
-    """One bounded-concurrency gate per (event loop, resource).
+def _account_image_batch_limit(conn, owner_user_id: str | None, *, default: int) -> int:
+    """按账号档位推导本批出图的并发上限。
 
-    Mirrors ``gate_for``'s per-loop caching: a module-level ``asyncio.Semaphore``
-    singleton would bind to whichever loop happened to be running at import
-    time, which breaks under pytest's per-test event loops.  Keying by the
-    currently running loop keeps each test (and each real process loop)
-    isolated.
+    找不到归属账号（``owner_user_id`` 为 ``None``：legacy-shared 兼容路径、测试
+    直接调用且项目没挂账号）或该账号是无限量档位（系统管理员）时，退回调用方
+    给的 ``default``——与此前固定常量对所有调用方一视同仁的行为完全一致，不
+    新增拦截面。上限数值只有 ``app.quota.TIER_TABLE`` 一处权威来源，本函数不
+    重复定义、不按档位名做分支（CLAUDE.md 禁止黑白名单）。
     """
-    loop = asyncio.get_running_loop()
-    by_resource = _image_batch_semaphores.setdefault(loop, {})
-    semaphore = by_resource.get(resource)
-    if semaphore is None:
-        semaphore = asyncio.Semaphore(limit)
-        by_resource[resource] = semaphore
-    return semaphore
+    if owner_user_id is None:
+        return default
+    from app import quota
+
+    limit = quota.effective_limits(conn, owner_user_id).concurrency
+    if limit is None:
+        return default
+    return max(1, min(IMAGE_BATCH_CONCURRENCY_CEILING, int(limit)))
 
 
-def character_portrait_batch_semaphore() -> asyncio.Semaphore:
-    """Independent pool: at most ``CHARACTER_PORTRAIT_BATCH_CONCURRENCY``
-    character-portrait pipelines (image request + QA + multiview pack) run
-    concurrently.  Scene reference generation has its own separate pool below
-    so neither workflow can starve the other of concurrency."""
-    return _image_batch_semaphore(
-        "character_portrait_batch", CHARACTER_PORTRAIT_BATCH_CONCURRENCY,
+def character_portrait_batch_semaphore(conn, owner_user_id: str | None) -> asyncio.Semaphore:
+    """本批定妆照并发池：上限取账号档位并发上限（见 ``_account_image_batch_limit``）。
+
+    每批现取现建，不跨批缓存：账号档位可能在两批之间升级/降级，缓存会让旧
+    上限一直生效到进程重启；一次 ``generate_refs`` 调用内部的 ``asyncio.gather``
+    只用这一个信号量实例一次，不需要跨批共享。``conn``/``owner_user_id`` 必须
+    显式传入（CLAUDE.md「所有权必须显式」），不留默认值。场景定场图有独立的
+    同名池，互不挤占（各自查各自的账号上限，互不干扰）。
+    """
+    limit = _account_image_batch_limit(
+        conn, owner_user_id, default=CHARACTER_PORTRAIT_BATCH_CONCURRENCY,
     )
+    return asyncio.Semaphore(limit)
 
 
-def scene_reference_batch_semaphore() -> asyncio.Semaphore:
-    """Independent pool: at most ``SCENE_REFERENCE_BATCH_CONCURRENCY`` scene-
-    reference pipelines run concurrently, isolated from the portrait pool."""
-    return _image_batch_semaphore(
-        "scene_reference_batch", SCENE_REFERENCE_BATCH_CONCURRENCY,
+def scene_reference_batch_semaphore(conn, owner_user_id: str | None) -> asyncio.Semaphore:
+    """本批场景定场图并发池：语义同 ``character_portrait_batch_semaphore``，
+    与人物定妆照池互不挤占。"""
+    limit = _account_image_batch_limit(
+        conn, owner_user_id, default=SCENE_REFERENCE_BATCH_CONCURRENCY,
     )
+    return asyncio.Semaphore(limit)
 
 
 # 认定为"供应商侧拥塞"的 ProviderError.failure_kind 取值：429（rate_limited）、

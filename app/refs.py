@@ -13,7 +13,7 @@ import json
 import re
 from pathlib import Path
 
-from app import config, generation_concurrency, hiagent
+from app import config, generation_concurrency, hiagent, quota
 from app.atomic_io import atomic_write_bytes
 from app.db import get_conn, new_id
 from app.evidence.media import record_reference_asset
@@ -324,8 +324,11 @@ async def generate_refs(
     # 并发池上限见 generation_concurrency.character_portrait_batch_semaphore
     # ——与场景定场图各自独立，互不挤占彼此的槽位。角色内部（正面→侧面视角）
     # 的先后依赖完全保留在 ensure_character_multiview_pack 内部，未受影响。
+    # 上限按账号档位推导（app.quota.TIER_TABLE），不是固定常量：free 档批量点
+    # 「全部生成」也只会跑到 1 个并发，不会绕过账号并发限制。
     bible_merge_lock = asyncio.Lock()
-    semaphore = generation_concurrency.character_portrait_batch_semaphore()
+    owner_user_id = quota.owner_of_project(conn, project_id)
+    semaphore = generation_concurrency.character_portrait_batch_semaphore(conn, owner_user_id)
 
     async def _bounded(c) -> None:
         async with semaphore:
