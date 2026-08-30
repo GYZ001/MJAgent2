@@ -545,15 +545,6 @@ def _narrative_keyframe_target_with_source(shot: Shot) -> tuple[str, str]:
     return (shot.scene_setting or "").strip(), "scene_setting"
 
 
-def narrative_keyframe_target(shot: Shot) -> str:
-    """返回叙事关键帧必须表现的唯一动作瞬间。
-
-    关键帧不是首帧/尾帧协议。接触镜头优先选“接触已成立”的尾状态；
-    其他镜头选主动作。这样图片模型不会把首尾两个时刻拼成一张图。
-    """
-    return _narrative_keyframe_target_with_source(shot)[0]
-
-
 def _keyframe_required_text_expected(shot: Shot, target: str, target_source: str) -> bool:
     from app.continuity import required_text_strategy
 

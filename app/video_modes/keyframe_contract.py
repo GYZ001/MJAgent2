@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 
 from typing import Any
 
@@ -11,9 +10,7 @@ from app.schemas import Bible, EpisodeScreenplay, Shot
 
 from .mode_selection import (
     KEYFRAME_PROMPT_CONTRACT_VERSION,
-    _MAX_TIMELINE_KEYFRAMES,
     _MULTI_KEYFRAME_INVARIANCE_NOTE,
-    _SHORT_SHOT_MAX_SECONDS,
 )
 
 
@@ -64,16 +61,6 @@ def _keyframe_character_anchors(
     return anchors
 
 
-def required_visual_anchor_names(manifest: dict[str, Any]) -> set[str]:
-    """Return only identities whose typed contract requires a truth image."""
-    return {
-        str(character.get("name") or "").strip()
-        for character in (manifest.get("characters") or [])
-        if character.get("asset_required", True)
-        and str(character.get("name") or "").strip()
-    }
-
-
 def _keyframe_contract(
     shot: Shot,
     bible: Bible | None,
@@ -91,166 +78,6 @@ def is_narrative_keyframe_slot(slot_key: str | None) -> bool:
 
     value = str(slot_key or "")
     return value == NARRATIVE_KEYFRAME_SLOT or value.startswith(f"{NARRATIVE_KEYFRAME_SLOT}_")
-
-
-def timeline_keyframe_plan(shot: Shot) -> dict[str, Any]:
-    """决定本镜最终需要 1 张还是 2 张关键帧。
-
-    0–7 秒是不可绕过的单关键帧硬限制。更长镜头也不会因为“有空余图片
-    名额”自动加图，只有脚本明确包含状态迁移、动作后的独立反应，或清晰的
-    顺序动作语义时才使用第二张时间路标。
-    """
-    try:
-        duration_s = max(0.0, float(shot.duration_s or 0.0))
-    except (TypeError, ValueError):
-        duration_s = 0.0
-    if duration_s <= _SHORT_SHOT_MAX_SECONDS:
-        return {
-            "count": 1,
-            "duration_s": duration_s,
-            "threshold_s": _SHORT_SHOT_MAX_SECONDS,
-            "reason": "duration_at_most_7_seconds",
-            "signals": [],
-        }
-
-    def _normalized(value: str | None) -> str:
-        return re.sub(r"[\W_]+", "", str(value or "").lower(), flags=re.UNICODE)
-
-    def _different(left: str | None, right: str | None) -> bool:
-        a, b = _normalized(left), _normalized(right)
-        return bool(a and b and a != b and a not in b and b not in a)
-
-    signals: list[str] = []
-    if _different(shot.state_in, shot.state_out):
-        signals.append("explicit_state_transition")
-    if shot.primary_action and shot.emotion_beat and _different(shot.primary_action, shot.emotion_beat):
-        signals.append("action_then_reaction")
-    return {
-        "count": 2 if signals else 1,
-        "duration_s": duration_s,
-        "threshold_s": _SHORT_SHOT_MAX_SECONDS,
-        "reason": "two_distinct_visual_stages" if signals else "long_but_single_visual_stage",
-        "signals": list(dict.fromkeys(signals)),
-    }
-
-
-def narrative_keyframe_beats(shot: Shot, count: int) -> list[dict[str, Any]]:
-    """把一镜剧情拆成有序、不同的静止节拍，不发明新事件。
-
-    opening/state_in → 起势 → 动作进展 → 决定性时刻 → 反应 → state_out/closing。
-    ``narrative_keyframe`` 旧槽名专门留给决定性 master beat，兼容恢复链路。
-    """
-    from app.compiler import narrative_keyframe_target, shot_contact_phase
-    from app.multiview import NARRATIVE_KEYFRAME_SLOT
-
-    count = max(1, min(int(count), _MAX_TIMELINE_KEYFRAMES))
-    start = (shot.first_frame_desc or shot.state_in or shot.action_desc or shot.scene_setting).strip()
-    action = (shot.primary_action or shot.action_desc or start).strip()
-    decisive = (narrative_keyframe_target(shot) or action).strip()
-    reaction = (shot.emotion_beat or shot.state_out or shot.last_frame_desc or decisive).strip()
-    ending = (shot.last_frame_desc or shot.state_out or reaction).strip()
-    if count == 1:
-        ratios = [0.64]
-    else:
-        ratios = [i / (count - 1) for i in range(count)]
-
-    # 决定性定格默认放在 64%；但当该定格按镜头合同必须展示剧情文字时，
-    # 时间点必须落在 required_text 的可见窗口内。否则后续会同时生成
-    # “必须画出指定文字”与“当前时刻禁止文字”两份相反合同。
-    decisive_ratio = 0.64
-    decisive_ratio_adjusted = False
-    required_text = getattr(shot, "required_text", None)
-    if required_text is not None and _keyframe_contract(shot, None).get("required_text_expected"):
-        try:
-            duration_s = float(shot.duration_s or 0.0)
-            appear_at = float(required_text.appear_start_s or 0.0)
-            stable_raw = required_text.stable_until_s
-            stable_until = float(stable_raw) if stable_raw is not None else duration_s
-            if duration_s > 0:
-                window_start = max(0.0, min(1.0, appear_at / duration_s))
-                window_end = max(window_start, min(1.0, stable_until / duration_s))
-                decisive_ratio = min(max(decisive_ratio, window_start), window_end)
-                decisive_ratio_adjusted = decisive_ratio != 0.64
-        except (TypeError, ValueError):
-            pass
-
-    beats: list[dict[str, Any]] = []
-    declared_contact_phase = shot_contact_phase(shot)
-    decisive_position = min(range(len(ratios)), key=lambda i: abs(ratios[i] - decisive_ratio))
-    if decisive_ratio_adjusted:
-        ratios[decisive_position] = decisive_ratio
-    for zero_index, ratio in enumerate(ratios):
-        beat_index = zero_index + 1
-        if zero_index == decisive_position:
-            phase = "decisive"
-            target = decisive
-            source = "decisive_action"
-            slot_key = NARRATIVE_KEYFRAME_SLOT
-        elif ratio <= 0.01:
-            phase = "opening"
-            target = start
-            source = "first_frame_desc_or_state_in"
-            slot_key = f"{NARRATIVE_KEYFRAME_SLOT}_{beat_index:02d}"
-        elif ratio < 0.45:
-            phase = "onset"
-            target = (
-                f"时间轴 {round(ratio * 100)}% ：主动作刚刚开始并推进至本时刻，"
-                f"尚未到达决定性结果：{action}"
-            )
-            source = "derived_action_onset"
-            slot_key = f"{NARRATIVE_KEYFRAME_SLOT}_{beat_index:02d}"
-        elif ratio < 0.64:
-            phase = "progress"
-            target = (
-                f"时间轴 {round(ratio * 100)}% ：主动作正在清晰推进至本阶段，"
-                f"接近但不得提前混入决定性时刻：{action}"
-            )
-            source = "derived_action_progress"
-            slot_key = f"{NARRATIVE_KEYFRAME_SLOT}_{beat_index:02d}"
-        elif ratio < 0.9:
-            phase = "reaction"
-            target = (
-                f"时间轴 {round(ratio * 100)}% ：决定性动作之后、推进至本时刻的"
-                f"即时反应与局势变化：{reaction}"
-            )
-            source = "emotion_or_state_out"
-            slot_key = f"{NARRATIVE_KEYFRAME_SLOT}_{beat_index:02d}"
-        else:
-            phase = "closing"
-            target = ending
-            source = "last_frame_desc_or_state_out"
-            slot_key = f"{NARRATIVE_KEYFRAME_SLOT}_{beat_index:02d}"
-        if declared_contact_phase == "established":
-            beat_contact_phase = (
-                "none" if phase == "opening"
-                else "approach" if phase in {"onset", "progress"}
-                else "established"
-            )
-        elif declared_contact_phase == "separated":
-            beat_contact_phase = (
-                "separated" if phase in {"decisive", "reaction", "closing"}
-                else "established"
-            )
-        elif declared_contact_phase == "approach":
-            beat_contact_phase = "none" if phase == "opening" else "approach"
-        else:
-            beat_contact_phase = "none"
-        beats.append({
-            "slot_key": slot_key,
-            "beat_index": beat_index,
-            "beat_total": count,
-            "time_ratio": round(ratio, 4),
-            "time_s": round(float(shot.duration_s or 0) * ratio, 3),
-            "phase": phase,
-            "contact_phase": beat_contact_phase,
-            "target_desc": target,
-            "target_source": source,
-            "prompt_intent": (
-                f"Timeline beat {beat_index}/{count} at {round(ratio * 100)}% ({phase}). "
-                f"Freeze only this instant: {target}. Do not show another timeline beat, montage, or split screen."
-            ),
-        })
-    return beats
 
 
 def keyframe_contract_fingerprint(

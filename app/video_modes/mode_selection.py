@@ -170,11 +170,6 @@ def min_generated_references() -> int:
     return max(0, int_setting("video_reference_min_generated", 1))
 
 
-def reference_gen_retries() -> int:
-    """QA 只评分：禁止因低分额外重生参考图（PRD QA-SO #25）。"""
-    return 0
-
-
 def keyframe_candidate_count() -> int:
     """每个叙事关键帧的固定采样数。
 

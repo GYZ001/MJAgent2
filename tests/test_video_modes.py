@@ -80,7 +80,6 @@ def _patch_reference_build_unit(monkeypatch) -> None:
     patch_video_modes_everywhere(monkeypatch, "scene_reference_assets", lambda *a, **k: [])
     patch_video_modes_everywhere(monkeypatch, "_portrait_seed_inputs", lambda *a, **k: [])
     patch_video_modes_everywhere(monkeypatch, "min_generated_references", lambda: 1)
-    patch_video_modes_everywhere(monkeypatch, "reference_gen_retries", lambda: 0)
     patch_video_modes_everywhere(monkeypatch, "reference_prompt_async", lambda: False)
     patch_video_modes_everywhere(monkeypatch, "batch_prompt_enabled", lambda: False)
     patch_video_modes_everywhere(monkeypatch, "consistency_check_enabled", lambda: False)
@@ -98,19 +97,6 @@ def _passing_reference_qa() -> dict:
         "scene_match": 0.95, "identity_contract_passed": True,
         "hard_failures": [], "issues": [],
     }
-
-
-def test_required_visual_anchors_exclude_contextual_text_identities() -> None:
-    assert video_modes.required_visual_anchor_names({
-        "characters": [
-            {"name": "高义", "asset_required": True},
-            {"name": "王芬", "asset_required": False},
-        ],
-    }) == {"高义"}
-    # Historical manifests have no typed field and remain fail-closed.
-    assert video_modes.required_visual_anchor_names({
-        "characters": [{"name": "历史角色"}],
-    }) == {"历史角色"}
 
 
 def test_selector_always_uses_reference_mode(monkeypatch) -> None:
@@ -300,47 +286,6 @@ def test_reference_mode_rejects_historical_timeline_keyframes() -> None:
             },
         ],
         })
-
-
-def test_narrative_keyframe_beats_are_chronological_and_have_distinct_targets(monkeypatch) -> None:
-    patch_video_modes_everywhere(monkeypatch, "max_reference_images", lambda: 9)
-    shot = _shot(
-        duration_s=10,
-        state_in="A站在门口，手里还没有信件。",
-        first_frame_desc="A在门口停下，双手空着。",
-        primary_action="A走到桌前，拿起封好的信件并拆开。",
-        action_desc="A从门口走向桌边，拿起信件拆开，读到内容后神色一凛。",
-        emotion_beat="A看到信中的名字，震惊转为坚定。",
-        state_out="A已收起信件，决定立刻离开。",
-        last_frame_desc="A将信件收进衣内，转身面向门外。",
-    )
-
-    beats = video_modes.narrative_keyframe_beats(shot, 2)
-
-    assert [beat["beat_index"] for beat in beats] == [1, 2]
-    assert [beat["time_ratio"] for beat in beats] == sorted(beat["time_ratio"] for beat in beats)
-    assert beats[0]["time_ratio"] == 0.0
-    assert beats[-1]["time_ratio"] == 1.0
-    assert len({beat["slot_key"] for beat in beats}) == 2
-    assert sum(beat["slot_key"] == "narrative_keyframe" for beat in beats) == 1
-    assert len({beat["target_desc"] for beat in beats}) == 2
-    assert all(beat["target_desc"] in beat["prompt_intent"] for beat in beats)
-
-
-def test_timeline_keyframe_plan_enforces_duration_cap_and_complexity_judgment() -> None:
-    short_complex = _shot(
-        duration_s=7,
-        state_in="A空手站在门口。",
-        primary_action="A拿起信件并拆开。",
-        emotion_beat="A读完后震惊。",
-        state_out="A收起信件转身离开。",
-    )
-    long_static = _shot(duration_s=10)
-    long_complex = short_complex.model_copy(update={"duration_s": 10})
-
-    assert video_modes.timeline_keyframe_plan(short_complex)["count"] == 1
-    assert video_modes.timeline_keyframe_plan(long_static)["count"] == 1
-    assert video_modes.timeline_keyframe_plan(long_complex)["count"] == 2
 
 
 def test_reference_mode_keeps_one_winner_per_timeline_slot() -> None:
