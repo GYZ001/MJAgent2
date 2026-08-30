@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import socket
 import sqlite3
 import subprocess
@@ -476,3 +477,50 @@ def test_each_test_owns_its_database_and_completed_tasks_release_connections(
     )
 
     assert result.returncode == pytest.ExitCode.OK, result.stdout + result.stderr
+
+
+def test_test_profile_is_set_before_any_app_import():
+    """``MANJU_TEST_PROFILE=isolated`` 必须在 conftest 里早于第一条 ``app.*``
+    导入生效，否则 ``app/config.py`` 会在 import 期把 ``.env`` 灌进 os.environ。
+
+    这条判据是静态的（读 conftest 源码比位置），不依赖本机有没有 ``.env``——
+    CI 上没有 ``.env``，任何"运行时看有没有泄漏"的检查在那里都会空过。
+
+    原先的做法是读进来之后再删掉两个已知的坏键，那是黑名单：实测本机 ``.env``
+    会灌进 4 个键，名单只列了 2 个。
+    """
+    source = (Path(__file__).resolve().parents[1] / "tests" / "conftest.py").read_text(
+        encoding="utf-8"
+    )
+    profile_at = source.index('os.environ["MANJU_TEST_PROFILE"] = "isolated"')
+    app_import = re.search(r"^\s*(?:import app\.|from app[\. ])", source, re.M)
+    assert app_import is not None, "conftest 里应当有 app.* 导入，判据才有意义"
+    assert profile_at < app_import.start(), (
+        "MANJU_TEST_PROFILE 必须在第一条 app.* 导入之前设置；"
+        f"当前 profile 在 {profile_at}，首条 app 导入在 {app_import.start()}"
+    )
+
+
+def test_dotenv_keys_do_not_leak_into_the_test_process():
+    """本机存在 ``.env`` 时，它的键一个都不许出现在测试进程的 os.environ 里。
+
+    没有 ``.env`` 时本用例自然空过——那种情况下确实无可泄漏，与
+    「空集合不等于无需检查」不同：这里的空集合就是真的没有输入。
+    上面那条静态守卫负责在无 ``.env`` 的环境下继续有效。
+    """
+    env_file = Path(__file__).resolve().parents[1] / ".env"
+    if not env_file.exists():
+        pytest.skip("本机没有 .env，无可泄漏")
+    pairs = {}
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        pairs[key.strip()] = value.strip()
+    # 判据挂「值」不挂「键」：``isolate_provider_environment`` 会主动把若干
+    # provider 变量设成测试假值（例如 MINIMAX_H3_API_KEY 指向不可路由地址），
+    # 那是隔离本身在起作用，不是泄漏。真正要防的是 ``.env`` 里的**部署值**原样
+    # 出现在测试进程里。
+    leaked = sorted(k for k, v in pairs.items() if os.environ.get(k) == v)
+    assert not leaked, f".env 的部署值泄漏进测试进程：{leaked}"

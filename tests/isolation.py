@@ -226,32 +226,3 @@ class IsolationSession:
         socket.getaddrinfo = self._getaddrinfo
         sqlite3.connect = self._sqlite_connect
         self._installed = False
-
-
-#: 只在部署环境里出现、会改变被测行为的环境变量。``.env`` 是 gitignored 的，
-#: CI 与新克隆都没有它，所以整套测试原本就是按**代码默认值**写的；本机因为存在
-#: ``.env`` 才会红，那是本地部署配置污染了测试环境，不是测试写错。
-#:
-#: ``app/config.py`` 用 ``os.environ.setdefault`` 加载 ``.env``，读取方
-#: （``legacy_shared_session_enabled`` / ``media_ticket_required``）又都是**调用时**
-#: 读 ``os.environ``，所以在测试进程里把这些键删掉就能让代码默认值重新生效。
-#:
-#: 这里删除而不是「设成 1/0」是有意的：把默认值抄一份到测试配置里，将来代码默认值
-#: 一改就出现两处不一致，而且没有任何东西会提醒。删掉覆盖，默认值只有一个来源。
-DEPLOYMENT_ONLY_OVERRIDES = (
-    "MJ_LEGACY_SHARED_SESSION",
-    "MJ_MEDIA_REQUIRE_TICKET",
-)
-
-
-def isolate_deployment_overrides(environment: MutableMapping[str, str]) -> list[str]:
-    """删除 ``.env`` 带进来的部署侧开关，让测试跑在代码默认值上。
-
-    返回实际删掉的键名，便于调用方在需要时报告「本机 .env 覆盖了哪些开关」。
-    """
-    removed = []
-    for name in DEPLOYMENT_ONLY_OVERRIDES:
-        if name in environment:
-            del environment[name]
-            removed.append(name)
-    return removed

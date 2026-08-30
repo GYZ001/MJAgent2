@@ -12,21 +12,56 @@ from tests.isolation import (
     IsolationSession,
     ProviderConfigurationIsolation,
     UNROUTABLE_PROVIDER_BASE_URL,
-    isolate_deployment_overrides,
     isolate_provider_environment,
 )
-
-# 必须在任何 ``app.*`` 导入之前执行：``app/config.py`` 在 import 时用
-# ``os.environ.setdefault`` 加载 ``.env``，把部署侧开关灌进本进程。``.env`` 是
-# gitignored 的，CI 与新克隆都没有它——整套测试是按代码默认值写的，本机有 .env
-# 才会红。这里把那些开关删掉，让测试无论本机有没有 .env 都跑在同一套默认值上。
-_REMOVED_DEPLOYMENT_OVERRIDES = isolate_deployment_overrides(os.environ)
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.sandbox_lifecycle import mark_sandbox_owner, purge_stale_sandboxes
+
+# ---------------------------------------------------------------------------
+# 必须在任何 ``app.*`` 导入之前执行。
+#
+# ``app/config.py`` 在 **import 期**决定要不要加载 ``.env``：
+#     if TEST_PROFILE == "isolated": return      # 不读 .env
+# 而 ``TEST_PROFILE`` 取自 ``MANJU_TEST_PROFILE``，同样在 import 期读一次。
+# 这个开关原本只有 ``scripts/verify.py`` 会设；直接跑 ``pytest`` 时它是空的，
+# ``.env`` 就被 ``os.environ.setdefault`` 灌进本进程，测试跑在本机部署配置上，
+# 而 CI 与新克隆没有 ``.env``、跑在代码默认值上——同一份代码两种结果。
+#
+# 这里在 import ``app.*`` 之前把沙箱建好并设上两个变量，让 ``_load_env()`` 从
+# 头就不执行。判据是「``.env`` 根本没被读过」，不是「读了之后再逐个删掉已知的
+# 坏键」——后者是黑名单，必然漏：实测本机 ``.env`` 会灌进 4 个键
+# （MINIMAX_H3_API_KEY / MJ_BACKEND_HOST / MJ_LEGACY_SHARED_SESSION /
+# MJ_MEDIA_REQUIRE_TICKET），而那份名单只列了后两个。
+#
+# ``--live-integration`` 要的正是真实部署配置，那条路径保持读 ``.env``。选项在
+# ``pytest_configure`` 才解析完，这里赶在 import 之前，只能看 ``sys.argv``——
+# pytest 自己的早期配置也是这么做的。
+# ---------------------------------------------------------------------------
+_LIVE_INTEGRATION_ARGV = "--live-integration" in sys.argv
+
+if _LIVE_INTEGRATION_ARGV:
+    os.environ["MANJU_TEST_PROFILE"] = "live-integration"
+    _SANDBOX_PRECREATED = None
+    _SANDBOX_PRECREATED_OWNED = False
+else:
+    _configured = os.environ.get("MANJU_TEST_SANDBOX", "").strip()
+    if _configured:
+        _SANDBOX_PRECREATED = Path(_configured).expanduser().resolve()
+        _SANDBOX_PRECREATED.mkdir(parents=True, exist_ok=True)
+        _SANDBOX_PRECREATED_OWNED = False
+    else:
+        purge_stale_sandboxes("manju-pytest-")
+        _SANDBOX_PRECREATED = Path(tempfile.mkdtemp(prefix="manju-pytest-")).resolve()
+        _SANDBOX_PRECREATED_OWNED = True
+        mark_sandbox_owner(_SANDBOX_PRECREATED)
+    os.environ["MANJU_TEST_SANDBOX"] = str(_SANDBOX_PRECREATED)
+    # app/config.py 的守卫要求 isolated 必须配 MANJU_TEST_SANDBOX，所以顺序是
+    # 先设 sandbox 再设 profile。
+    os.environ["MANJU_TEST_PROFILE"] = "isolated"
 
 # app.db.init_db() looks up its per-table bootstrap/migration steps by name
 # through app.db_schema instead of importing these business modules directly
@@ -622,20 +657,14 @@ def pytest_configure(config: pytest.Config) -> None:
         os.environ["MANJU_TEST_PROFILE"] = "live-integration"
         return
 
-    configured_sandbox = os.environ.get("MANJU_TEST_SANDBOX", "").strip()
-    if configured_sandbox:
-        _SANDBOX = Path(configured_sandbox).expanduser().resolve()
-        _SANDBOX.mkdir(parents=True, exist_ok=True)
-        _SANDBOX_OWNED = False
-    else:
-        purge_stale_sandboxes("manju-pytest-")
-        _SANDBOX = Path(tempfile.mkdtemp(prefix="manju-pytest-")).resolve()
-        _SANDBOX_OWNED = True
-        mark_sandbox_owner(_SANDBOX)
-    os.environ["MANJU_TEST_SANDBOX"] = str(_SANDBOX)
+    # 沙箱在本文件 import 期就建好了（见文件顶部：必须早于 app.config 的 import
+    # 才能阻止 .env 被读进来）。这里只接手，不再重建——重建会让 app.config 在
+    # import 期算出的 RUNTIME_ROOT 指向一个已经作废的目录。
+    assert _SANDBOX_PRECREATED is not None, "isolated profile 下沙箱应已在 import 期建好"
+    _SANDBOX = _SANDBOX_PRECREATED
+    _SANDBOX_OWNED = _SANDBOX_PRECREATED_OWNED
     config.option.basetemp = str(_SANDBOX / "pytest-tmp")
 
-    os.environ["MANJU_TEST_PROFILE"] = "isolated"
     isolate_provider_environment(os.environ)
 
     # Configure the process before test module collection imports application code.
