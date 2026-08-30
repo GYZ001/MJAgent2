@@ -3,9 +3,13 @@ import type { UserRow, UserTier } from "../api";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { TIERS, TIER_LABELS } from "../lib/tier";
 
-/** 创建账号 + 重置密码两个表单弹窗，从 AccountAdminPage 拆出来控制单文件行数。
- *  两者都是「填数据再提交」，不是「确认危险动作」——用户已明确要求破坏性操作
- *  不加确认弹窗，这两个不在那个范畴内：没有实际输入内容，后端就没法执行。 */
+/** 账号管理的三个弹窗，从 AccountAdminPage 拆出来控制单文件行数：创建账号、
+ *  重置密码、自删账号确认。前两个是「填数据再提交」——用户已明确要求禁用/
+ *  设管理员/重置配额这类破坏性操作不加确认弹窗，点一下直接执行，这两个不在
+ *  那个范畴内：没有实际输入内容，后端就没法执行。管理员软删他人账号沿用同一
+ *  条既有约定（30 天回收站本身就是保护机制，见 Studio.tsx 对项目删除的同款
+ *  处理），也不在本文件弹窗之列。第三个 SelfDeleteDialog 是例外：自删不可
+ *  恢复且立即级联清空，需要真正的强确认。 */
 
 export interface NewAccountDraft {
   username: string;
@@ -125,8 +129,88 @@ export function CreateAccountDialog({
   );
 }
 
+/** 自删账号确认：不可恢复、立即级联清空全部项目，没有回收站兜底
+ *  （app/domain/account_deletion.py：自删是 fail-closed 全有全无）。比管理员
+ *  软删（30 天可恢复，点一下直接执行）确认强得多——要求打对当前用户名才能
+ *  点亮删除键，是本页里唯一一处「打字确认」的操作。 */
+export function SelfDeleteDialog({
+  username,
+  message,
+  projectCount,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  username: string;
+  message: string;
+  projectCount: number;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const titleId = useId();
+  const confirmId = useId();
+  const trapRef = useFocusTrap(true, onClose);
+  const [typed, setTyped] = useState("");
+  const ready = typed.trim() === username;
+
+  return (
+    <div
+      className="evidence-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target) onClose();
+      }}
+    >
+      <section ref={trapRef} className="impact-dialog decision-dialog account-admin-danger-dialog"
+        role="dialog" aria-modal="true" aria-labelledby={titleId}>
+        <h3 id={titleId}>彻底删除我的账号</h3>
+        <p className="account-admin-danger-text">{message}</p>
+        <p className="account-admin-danger-text">
+          将立即彻底删除 <b>{projectCount}</b> 个项目的全部数据（数据库与磁盘产物），
+          且无人可代为恢复——这与「移入回收站」不是同一件事。
+        </p>
+        <div className="login-field">
+          <label className="f" htmlFor={confirmId}>输入用户名「{username}」以确认</label>
+          <input id={confirmId} value={typed} autoFocus disabled={busy}
+            autoComplete="off" onChange={(event) => setTyped(event.target.value)} />
+        </div>
+        <div className="dialog-actions">
+          <button type="button" className="btn" onClick={onClose} disabled={busy}>取消</button>
+          <button type="button" className="btn danger" disabled={busy || !ready} onClick={onConfirm}>
+            {busy ? "删除中…" : "彻底删除，不可恢复"}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 /** 重置密码：改完对方当前登录会立即失效，需要用新密码重新登录。明文显示以便
  *  当面交接，与创建账号的初始密码同一取舍。 */
+export function SoftDeleteConfirmDialog(
+  { username, busy, onCancel, onConfirm }:
+  { username: string; busy: boolean; onCancel: () => void; onConfirm: () => void },
+) {
+  return (
+    <div className="dialog-backdrop" role="dialog" aria-modal="true" aria-label="确认删除账号">
+      <div className="dialog">
+        <h3>删除账号「{username}」？</h3>
+        <p className="dialog-hint">
+          该账号会被停用，名下<b>全部</b>项目一并移入回收站。30 天内可在「回收站」标签页恢复，
+          到期后自动彻底清理。
+        </p>
+        <div className="dialog-actions">
+          <button type="button" className="btn ghost" disabled={busy} onClick={onCancel}>取消</button>
+          <button type="button" className="btn danger" disabled={busy} onClick={onConfirm}>
+            移入回收站
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function ResetPasswordDialog({
   user,
   busy,

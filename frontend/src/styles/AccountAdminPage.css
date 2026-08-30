@@ -1,6 +1,11 @@
 /* AccountAdminPage 独占样式 —— 沿用 index.css 的拆分口径（见
    TeamAdminPage.css 遗留的注释规范）：只放只被这一页用到的类，随该页的懒加载
-   分包一起下载。跨页复用的东西要留在 index.css。 */
+   分包一起下载。跨页复用的东西要留在 index.css。
+
+   移动端优先：基准规则就是窄屏卡片布局（375px 起操作按钮直接铺开、不横向
+   溢出），`min-width: 720px` 只是在有富余空间时把卡片升级成更密的多列网格，
+   不是切换成另一套结构——同一份 DOM/CSS 类，宽屏窄屏都不会有"按钮被挤出
+   视口"这类问题。 */
 
 .account-admin-bar {
   display: flex;
@@ -10,9 +15,19 @@
   gap: 12px;
   margin-bottom: 14px;
 }
-.account-admin-bar-count {
-  color: var(--ink-faint);
-  font: 600 12.5px var(--ui);
+.account-admin-tabs {
+  display: flex;
+  gap: 8px;
+}
+.account-admin-fail-notice ul {
+  margin: 8px 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+.account-admin-fail-notice li {
+  margin-bottom: 4px;
+  word-break: break-word;
 }
 .account-admin-dialog-row {
   display: grid;
@@ -27,44 +42,47 @@
     grid-template-columns: 1fr;
   }
 }
-.account-admin-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-.account-admin-table th,
-.account-admin-table td {
-  padding: 11px 12px;
-  border-bottom: 1px solid var(--hairline);
-  text-align: left;
-  vertical-align: middle;
-}
-.account-admin-table th {
-  padding-bottom: 9px;
-  color: var(--ink-faint);
-  font: 600 11.5px var(--ui);
-  letter-spacing: 0.08em;
-}
-.account-admin-table tbody tr:last-child td {
-  border-bottom: 0;
-}
-.account-admin-identity {
+
+/* ── 账号卡片：移动端基准是单列堆叠，宽屏见文末的 min-width 升级 ── */
+.account-admin-cards {
   display: grid;
-  gap: 2px;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+.account-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: var(--card);
+}
+.account-card-disabled {
+  opacity: 0.6;
+}
+.account-card-deleted {
+  border-style: dashed;
+  background: var(--paper-deep);
+}
+.account-card-identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
 }
-.account-admin-identity b {
-  font: 600 13.5px var(--ui);
+.account-card-identity b {
+  font: 600 14.5px var(--ui);
   color: var(--ink);
 }
-.account-admin-identity > span {
+.account-card-identity > span {
   color: var(--ink-faint);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 .account-admin-tag {
   display: inline-flex;
   padding: 1px 7px;
-  margin-left: 6px;
   border: 1px solid rgba(181, 72, 56, 0.28);
   border-radius: 999px;
   color: var(--cinnabar);
@@ -72,59 +90,87 @@
   font-style: normal;
   white-space: nowrap;
 }
-.account-admin-state {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--ink-soft);
-  font-size: 12.5px;
-  white-space: nowrap;
+.account-admin-tag-self {
+  border-color: rgba(91, 114, 83, 0.32);
+  color: var(--moss);
 }
-.account-admin-state::before {
-  content: "";
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--moss);
+.account-admin-tag-off {
+  border-color: var(--hairline);
+  color: var(--ink-faint);
 }
-.account-admin-state.disabled::before {
-  background: var(--ink-faint);
+.account-card-field {
+  display: grid;
+  gap: 4px;
 }
-.account-admin-row-disabled {
-  opacity: 0.55;
+.account-card-field label,
+.account-card-field-label {
+  color: var(--ink-faint);
+  font: 600 11px var(--ui);
+  letter-spacing: 0.06em;
 }
-.account-admin-tier {
+.account-card-field-row {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
-.account-admin-tier select {
-  min-height: 30px;
+.account-card-field-row input {
+  flex: 1;
+  min-width: 0;
+}
+.account-card-field select {
+  min-height: 32px;
   font-size: 12.5px;
 }
 .account-admin-tier-unlimited {
   color: var(--ink-faint);
   font-size: 12px;
-  white-space: nowrap;
 }
-.account-admin-time {
+.account-card-meta {
   color: var(--ink-soft);
-  font-size: 12.5px;
-  white-space: nowrap;
-}
-.account-admin-muted {
-  color: var(--ink-faint);
   font-size: 12px;
 }
-.account-admin-actions {
+.account-card-actions {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
   gap: 6px;
 }
-.account-admin-table th:last-child,
-.account-admin-table td:last-child {
-  text-align: right;
+.account-card-addon {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--gold) 8%, var(--card));
+}
+.account-card-addon-hint {
+  color: var(--ink-soft);
+  font-size: 11.5px;
+}
+.account-card-addon input[type="number"] {
+  width: 84px;
+}
+.account-card-danger-zone {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--cinnabar) 35%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--cinnabar) 8%, var(--card));
+}
+.account-card-danger-zone p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+.account-admin-danger-dialog {
+  border-top: 3px solid var(--cinnabar);
+}
+.account-admin-danger-text {
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.account-admin-danger-text b {
+  color: var(--cinnabar);
 }
 .account-admin-checkbox-field {
   display: grid;
@@ -143,4 +189,19 @@
   color: var(--ink-faint);
   font-size: 11.5px;
   line-height: 1.6;
+}
+.account-admin-muted {
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+
+/* ── 宽屏升级：卡片改多列密排，卡内字段横排；结构不变，只是空间富余了 ── */
+@media (min-width: 720px) {
+  .account-admin-cards {
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  }
+  .account-card-field {
+    grid-template-columns: 96px 1fr;
+    align-items: center;
+  }
 }

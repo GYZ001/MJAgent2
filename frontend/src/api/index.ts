@@ -29,7 +29,7 @@ import * as systemApi from "./system";
 import { getArtifactLineage, numToCn } from "./common";
 
 export type { AuthMeResponse, AuthLoginResponse } from "./auth";
-export { login, logout, me, changePassword } from "./auth";
+export { login, logout, me, changePassword, deleteMyAccount } from "./auth";
 export { onUnauthenticated, ApiError };
 export { numToCn };
 export * from "./common";

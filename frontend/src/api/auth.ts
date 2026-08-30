@@ -39,6 +39,13 @@ export function me(): Promise<AuthMeResponse> {
   return request("GET", "/auth/me");
 }
 
+/** 自删账号（不可恢复，立即级联清空全部项目）。不带 confirm 只是预检：返回前
+ *  会以 422 抛出 `{code:"confirmation_required", message, project_count}`，
+ *  调用方拿它填确认弹窗的文案；带 confirm=true 才真正执行。 */
+export function deleteMyAccount(confirm: boolean): Promise<unknown> {
+  return request("DELETE", `/auth/me${confirm ? "?confirm=true" : ""}`);
+}
+
 /** 改密成功后后端会吊销其余会话并签发一枚新 token，同样要更新到内存里。 */
 export async function changePassword(
   oldPassword: string,

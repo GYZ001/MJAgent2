@@ -48,8 +48,12 @@ export const api_system = {
   reportMonitorEvent: overview.reportMonitorEvent,
   // account admin
   listUsers: admin.listUsers,
+  listDeletedUsers: admin.listDeletedUsers,
   createUser: admin.createUser,
   updateUser: admin.updateUser,
+  deleteUser: admin.deleteUser,
+  restoreUser: admin.restoreUser,
+  grantVideoAddon: admin.grantVideoAddon,
   // trace
   getTraceView: trace.getTraceView,
   getTraceNodeDetail: trace.getTraceNodeDetail,
