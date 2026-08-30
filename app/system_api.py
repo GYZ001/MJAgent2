@@ -340,16 +340,16 @@ def _model_catalog() -> list[dict]:
 
 
 def _public_model(item: dict) -> dict:
+    from app.system_health import env_key_for_item
+
     public = {key: value for key, value in item.items() if key != "api_key"}
     try:
         credentials = json.loads(get_setting("model_credentials") or "{}")
     except (TypeError, json.JSONDecodeError):
         credentials = {}
-    provider_key = {
-        "hiagent": config.HIAGENT_API_KEY, "openrouter": config.OPENROUTER_API_KEY,
-        "bailian": config.BAILIAN_API_KEY, "deepseek": config.DEEPSEEK_API_KEY,
-        "zhipu": config.ZHIPU_API_KEY, "minimax_h3": config.MINIMAX_H3_API_KEY,
-    }.get(str(item.get("provider") or ""), "")
+    # 按网关归族兜底查环境变量密钥（app.system_health.env_key_for_item，与
+    # health() 同一份 family 映射），不再用按 provider 字面量的独立字典。
+    provider_key = env_key_for_item(item)
     public["key_configured"] = (
         bool(item.get("base_url"))
         if item.get("requires_api_key") is False

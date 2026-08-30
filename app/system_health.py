@@ -59,6 +59,33 @@ def _family_items(
     ]
 
 
+_FAMILIES = ("hiagent", "minimax_h3", "openrouter", "bailian", "deepseek", "zhipu")
+
+
+def env_key_for_item(item: dict[str, Any]) -> str:
+    """按模型库条目反查历史家族的环境变量密钥，供 ``app.system_api._public_model``
+    的 ``key_configured`` 兜底复用——不按字面量 provider 名另起一套匹配。
+
+    两种条目形态都要接住，不是同一份判据的两个分支互斥：
+    - 条目自带 ``base_url``（custom 条目，含 ``model_migration`` 迁移产物）：按
+      base_url 归族，不依赖 ``provider`` 字符串是否还等于历史字面量——这些条目
+      永远自带 ``api_key``，本分支目前用不上，只是不让"以后哪条 custom 条目没
+      api_key"时静默查空。
+    - 条目没有自己的 ``base_url``（沿用共享网关连接的非 custom 条目，见
+      ``app.system_api.add_model`` 里只有 ``custom_provider`` 分支才写
+      base_url/api_key）：这种条目的 ``provider`` 字符串本身就是历史家族字面量
+      （如 "hiagent"），直接当家族名用，不需要反查——这才是当前真实会打到的
+      路径：非 custom 条目既没有自带 api_key，也没有 base_url 可供归族。
+    """
+    base_url = str(item.get("base_url") or "").rstrip("/")
+    if base_url:
+        family = next((f for f in _FAMILIES if _family_base_url(f) == base_url), "")
+    else:
+        provider = str(item.get("provider") or "")
+        family = provider if provider in _FAMILIES else ""
+    return _family_env_key(family) if family else ""
+
+
 def family_key_configured(
     catalog: list[dict[str, Any]],
     family: str,

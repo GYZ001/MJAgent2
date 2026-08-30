@@ -18,12 +18,25 @@ from app.domain import account_deletion as h_account
 
 def commands() -> list[CommandSpec]:
     return [
-        # —— 账号删除（治理登记：REST 入口在 app/auth/api.py、app/auth/admin_api.py
-        # 直接调用同名领域函数，不经本总线——两条 L2 auth 路由文件到 L5 领域/总线
-        # 模块之间的跨层调用量已经在 app/LAYERS.toml 的 allowed_exceptions 里为
-        # account_deletion 单独登记过，若再叠加 dispatch() 会多开一条 L2->L5 边，
-        # 这里注册纯粹是为了让这三个命令出现在风险清单里，可被 preflight/审计
-        # 工具查询）——
+        # —— 账号删除三个命令（治理登记：REST 入口在 app/auth/api.py、
+        # app/auth/admin_api.py 直接调用同名领域函数，不经本总线）——
+        # account.self_delete 的等价确认在 app/auth/api.py::delete_my_account 的
+        # ``?confirm=true`` 两段式预检里（唯一真实的用户确认入口，理由见该函数
+        # 与 app.domain.account_deletion 模块 docstring）；account.admin_soft_delete/
+        # admin_restore 本就 confirmation=NEVER，无需确认闸门。三者都仍走本总线
+        # 的原因纯粹是让它们出现在风险清单里，可被 preflight/审计工具查询——不经
+        # dispatch() 不是层号限制了（两个模块 2026-08-30 已改声明为 L5，与本总线
+        # 同层，跨层顾虑已不成立），是因为总线的 WAITING_APPROVAL 对 UI 调用方会被
+        # frontend/src/api/client.ts 自动用 approval_token 重放消费掉、不弹出任何
+        # 确认 UI（2026-08-29 产品拍板下线生成前确认弹窗），经总线反而会掩盖这里
+        # 需要的真实人工确认。quota.grant_video_addon 不在此列——它是 R2 但没有
+        # 这种"自己有等价确认"的情况，2026-08-30 查明是 catalog 唯一一个声明
+        # confirm=always 却在真实 REST 路径上零确认/零幂等/零审计的命令，已改接
+        # app.auth.admin_api::grant_video_addon_route 经 ui_route()/dispatch()——
+        # 对这条命令而言，调用方带 idempotency_key 时总线幂等缓存就会生效（不带
+        # 时和此前一样按一次性 key 处理，是 app.auth.admin_api::grant_video_addon
+        # 文档过的既有取舍，未改变）；"确认"这一环对 UI 调用方同样是自动消费，
+        # 真正的人工闸口仍旧是 admin_only 鉴权本身。
         _cmd(
             "account.self_delete",
             title="删除本账号（不可撤销）",

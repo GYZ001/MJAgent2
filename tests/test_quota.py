@@ -821,7 +821,13 @@ def test_refund_video_seconds_returns_addon_portion_when_charge_spans_both():
 def test_http_admin_grant_video_addon_lets_a_previously_blocked_shot_through():
     """端到端接线：走真实 HTTP 管理端点发放加量包，证明产品入口真的接上了
     ``quota_addon.grant_video_addon_seconds``，而不是只有单元函数本身正确。
-    额外验证同一个 idempotency_key 重复调用只生效一次。"""
+    额外验证同一个 idempotency_key 重复调用只生效一次。
+
+    2026-08-30 起该端点经 Command Bus（``quota.grant_video_addon`` 在 catalog
+    里声明 ``confirmation=ALWAYS``）：首次调用不带 ``X-Manju-Approval-Token``
+    只会拿到 202 + approval_token，真正执行要带着这个 token 重放——与
+    ``tests/test_session_security_todolist.py::test_mkdir_requires_directory_grant``
+    同一套协议，不是本端点特有。"""
     client = TestClient(app)
     admin_id = _make_user("free", is_admin=True)
     admin_headers = {**_HEADERS, "X-Manju-Session": create_session(admin_id)}
@@ -834,10 +840,20 @@ def test_http_admin_grant_video_addon_lets_a_previously_blocked_shot_through():
     with pytest.raises(quota.QuotaExceeded):
         quota.reserve_video_seconds(conn, uid, attempt_key="job:http:probe")
 
-    resp = client.post(
+    grant_body = {"packages": 1, "idempotency_key": "order:http-1"}
+    waiting = client.post(
         f"/api/system/users/{uid}/video-addons",
         headers=admin_headers,
-        json={"packages": 1, "idempotency_key": "order:http-1"},
+        json=grant_body,
+    )
+    assert waiting.status_code == 202, waiting.text
+    assert waiting.json()["status"] == "waiting_approval"
+    approval_token = waiting.json()["approval_token"]
+
+    resp = client.post(
+        f"/api/system/users/{uid}/video-addons",
+        headers={**admin_headers, "X-Manju-Approval-Token": approval_token},
+        json=grant_body,
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -845,14 +861,19 @@ def test_http_admin_grant_video_addon_lets_a_previously_blocked_shot_through():
     assert body["addon_balance_s"] == 600.0
     assert body["idempotent_replay"] is False
 
+    # 同一个 idempotency_key 重放（哪怕不带 approval_token）直接命中 Command Bus
+    # 的幂等缓存，原样回放第一次执行的完整响应体（含当时的 idempotent_replay=
+    # False），不再重新调用领域函数——不是"确认闸门也挡幂等重放"，是根本没有
+    # 二次执行可挡。用 addon_balance_s 与下面的余额查询共同证明没有二次发放。
     resp2 = client.post(
         f"/api/system/users/{uid}/video-addons",
         headers=admin_headers,
-        json={"packages": 1, "idempotency_key": "order:http-1"},
+        json=grant_body,
     )
     assert resp2.status_code == 200, resp2.text
-    assert resp2.json()["idempotent_replay"] is True
+    assert resp2.json() == body  # Command Bus 幂等缓存原样回放，不是重新执行
     assert resp2.json()["addon_balance_s"] == 600.0  # 没有翻倍
+    assert quota_addon.addon_video_seconds_balance(conn, uid) == 600.0  # 独立查询同样证明只发了一次
 
     result = quota.reserve_video_seconds(conn, uid, attempt_key="job:http:after-grant")
     conn.commit()

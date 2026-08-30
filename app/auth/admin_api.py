@@ -226,15 +226,44 @@ def update_user(user_id: str, body: dict, actor: Principal = Depends(require_sys
 @router.post(
     "/users/{user_id}/video-addons", dependencies=[Depends(require_system_admin)]
 )
+async def grant_video_addon_route(
+    user_id: str, body: dict, actor: Principal = Depends(require_system_admin)
+):
+    """REST 入口：先过 Command Bus（``quota.grant_video_addon`` 在 catalog 里登
+    记 ``confirmation=ALWAYS``），落回本模块同名领域函数执行。此前这个端点直接
+    调 ``grant_video_addon``、完全绕过总线——是 catalog 里唯一一个声明了
+    "confirm=always" 却在真实 REST 路径上没有任何确认/幂等/审计闸门的能力
+    （2026-08-30 排查修复；``account.self_delete``/``admin_soft_delete`` 之类同样
+    绕过总线的账号操作各自有自己的等价确认闸门或本就 confirm=never，不在此列）。
+    """
+    from app.capabilities.dispatch import ui_route
+
+    routed = await ui_route(
+        "quota.grant_video_addon",
+        {
+            "user_id": user_id,
+            "packages": body.get("packages"),
+            "idempotency_key": str(body.get("idempotency_key") or ""),
+        },
+    )
+    if routed is not None:
+        return routed
+    return grant_video_addon(user_id, body, actor=actor)
+
+
 def grant_video_addon(
     user_id: str, body: dict, actor: Principal = Depends(require_system_admin)
 ):
-    """管理员手工发放视频加量包（本次不接真实支付——见 app/quota.py 模块文
-    档）：每包 ``ADDON_PACKAGE_SECONDS`` 秒，¥``ADDON_PACKAGE_PRICE_CNY``/包，
-    不随该账号的 30 天配额周期重置。``idempotency_key`` 由调用方提供时用它做
-    幂等标识（未来接真实支付应传订单号）；不提供则生成一次性 key——这种情况下
-    重复调用本接口会重复发放，责任在调用方（人工操作，未接支付系统前无法从
-    请求本身识别"这是不是同一笔购买"）。
+    """领域实现：由 ``grant_video_addon_route``（REST）与
+    ``app.capabilities.handlers.system.quota_grant_video_addon``（Command Bus
+    handler）共用同一份逻辑，两条入口不得各自实现一份（用户存在性、packages
+    取值域、审计落账都在这里）。
+
+    本次不接真实支付（见 app/quota.py 模块文档）：每包 ``ADDON_PACKAGE_SECONDS``
+    秒，¥``ADDON_PACKAGE_PRICE_CNY``/包，不随该账号的 30 天配额周期重置。
+    ``idempotency_key`` 由调用方提供时用它做幂等标识（未来接真实支付应传订单
+    号）；不提供则生成一次性 key——这种情况下重复调用本函数会重复发放，责任在
+    调用方（人工操作，未接支付系统前无法从请求本身识别"这是不是同一笔购买"）。
     """
     conn = get_conn()
     row = conn.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()

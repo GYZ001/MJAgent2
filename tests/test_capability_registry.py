@@ -5,7 +5,12 @@ import pytest
 
 from app.capabilities.loader import ensure_catalog_loaded
 from app.capabilities.bus import get_command_bus, reset_command_bus_for_tests
-from app.capabilities.coverage import assert_full_coverage, discover_mutating_routes, validate_catalog_integrity
+from app.capabilities.coverage import (
+    assert_full_coverage,
+    discover_mutating_routes,
+    find_always_confirm_routes_without_gate,
+    validate_catalog_integrity,
+)
 from app.capabilities.policy import consume_approval, issue_approval, reset_approvals_for_tests
 from app.capabilities.registry import get_registry
 from app.capabilities.schemas import (
@@ -62,6 +67,22 @@ def test_screenplay_exposes_draft_repair_instead_of_legacy_revise() -> None:
     ] == "screenplay.repair_draft"
     assert "screenplay.revise" not in registry.commands
     assert "POST /api/episodes/{episode_id}/screenplay/revise" not in registry.rest_bindings
+
+
+def test_always_confirm_capabilities_have_a_rest_confirmation_gate() -> None:
+    """catalog 里 confirmation=ALWAYS 只是风险登记，不是执行闸门——真正拦人的必须
+    在真实 REST 路径上，要么经 Command Bus（``ui_route``/``dispatch``，复用
+    ``app.capabilities.policy.requires_confirmation``），要么有本地二段式确认
+    （``account.self_delete`` 的 ``?confirm=true``、bible_ops 的付费报价流）。
+
+    2026-08-30 曾有 ``quota.grant_video_addon`` 声明 ALWAYS 却直接调领域函数、
+    真实请求路径上零确认——本测试就是为了让这类缺口在 CI 就红，不必等人工审计
+    才发现（见 app/capabilities/coverage.py::find_always_confirm_routes_without_gate
+    的判据说明，尤其是为什么"经 Command Bus"不能覆盖所有场景：它的
+    WAITING_APPROVAL 对 UI 调用方会被前端自动用 approval_token 消费掉，不弹出
+    确认界面）。
+    """
+    assert find_always_confirm_routes_without_gate() == []
 
 
 def test_mutating_endpoints_fully_classified() -> None:

@@ -113,6 +113,47 @@ def test_custom_provider_credentials_are_private_and_model_scoped(monkeypatch) -
     assert stored["api_key"] == "secret-one"
 
 
+def test_public_model_key_configured_falls_back_to_env_by_gateway_family(monkeypatch) -> None:
+    """2026-08-30 与 health() 同一类缺陷：``_public_model`` 此前按 provider 字面量
+    查环境变量兜底密钥，而 model_migration 产物的 provider 是生成的
+    "custom:model_xxx"，字面量永远查不中。此前无害是因为这类条目都自带
+    api_key；这里构造一个（假设的）没有自带 api_key、只能靠环境变量兜底的
+    custom 条目，证明按 base_url 归族之后真的能查到。"""
+    monkeypatch.setattr(config, "HIAGENT_API_KEY", "env-hiagent-key")
+    item = {
+        "id": "model_no_own_key", "provider": "custom:model_no_own_key",
+        "provider_label": "HiAgent 迁移产物", "base_url": config.HIAGENT_BASE_URL,
+        "model": "some-model", "label": "L", "kinds": ["text"], "builtin": False,
+    }
+    monkeypatch.setattr(api, "get_setting", lambda key: "{}")
+    assert api._public_model(item)["key_configured"] is True
+
+
+def test_public_model_key_configured_still_matches_literal_family_without_base_url(monkeypatch) -> None:
+    """非 custom 条目（沿用共享网关连接，provider 仍是历史字面量如 "hiagent"）
+    本来就不存自己的 base_url/api_key——这条必须继续按字面量 provider 命中环境
+    变量，不能被"按 base_url 归族"的新逻辑挤掉（这类条目没有 base_url 可归族，
+    归族分支天然查不到，必须退回字面量分支）。"""
+    monkeypatch.setattr(config, "HIAGENT_API_KEY", "env-hiagent-key")
+    item = {
+        "id": "model_shared_gateway", "provider": "hiagent",
+        "model": "some-other-model", "label": "L", "kinds": ["text"], "builtin": False,
+    }
+    monkeypatch.setattr(api, "get_setting", lambda key: "{}")
+    assert api._public_model(item)["key_configured"] is True
+
+
+def test_public_model_key_configured_false_when_no_key_anywhere(monkeypatch) -> None:
+    monkeypatch.setattr(config, "HIAGENT_API_KEY", "")
+    item = {
+        "id": "model_unconfigured", "provider": "custom:model_unconfigured",
+        "base_url": "https://unrelated-gateway.example.com/v1",
+        "model": "m", "label": "L", "kinds": ["text"], "builtin": False,
+    }
+    monkeypatch.setattr(api, "get_setting", lambda key: "{}")
+    assert api._public_model(item)["key_configured"] is False
+
+
 def test_model_credentials_are_saved_by_model_id(monkeypatch) -> None:
     store = _settings_store(monkeypatch)
     created = api.add_model({
