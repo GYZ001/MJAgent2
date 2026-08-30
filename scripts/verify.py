@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from pathlib import Path
 
 
@@ -245,17 +246,27 @@ def _quick_commands(paths: list[str]) -> list[tuple[list[str], Path]]:
     # of regenerated, so touching them should also run the (warn-only) version-bump
     # discipline check even outside --full.
     reuse_guard_files = {
-        "app/stages.py",
-        "app/screenplay_scene_shards.py",
-        "app/validators.py",
         "app/production/publish.py",
         "app/production/screenplay_document.py",
-        "app/production/screenplay_repair.py",
         "app/production/screenplay_authority.py",
     }
+    # app/validators.py, app/stages.py, app/screenplay_scene_shards.py and
+    # app/production/screenplay_repair.py each became a package on
+    # 2026-08-29 (docs/coupling_review_2026-08-29.md C5); an exact-match set
+    # entry can never match a changed path under a package again, so these
+    # are prefix checks instead (mirrors the app/capabilities/ handling
+    # above -- and check_contract_surface.py's REUSE_GUARD_ANCHORS keys for
+    # these four now name the directory for the same reason).
+    reuse_guard_dir_prefixes = (
+        "app/stages/",
+        "app/screenplay_scene_shards/",
+        "app/validators/",
+        "app/production/screenplay_repair/",
+    )
     if (
         any(path.startswith("app/capabilities/") or path == "app/api.py" for path in paths)
         or any(path in reuse_guard_files for path in paths)
+        or any(path.startswith(reuse_guard_dir_prefixes) for path in paths)
     ):
         commands.append(([sys.executable, "scripts/check_contract_surface.py"], ROOT))
     if any(path.startswith("app/capabilities/") or path == "app/api.py" for path in paths):
@@ -275,6 +286,40 @@ def _quick_commands(paths: list[str]) -> list[tuple[list[str], Path]]:
     return commands
 
 
+def _layers_check_command() -> list[str]:
+    """Build the `--check-layers` invocation, threshold sourced from LAYERS.toml.
+
+    docs/architecture_layering_plan_2026-08-29.md 2.2: this must not fail the
+    build the moment it lands (a lot of upward edges already exist), so it
+    runs in threshold mode against ``max_violations`` from ``app/LAYERS.toml``
+    -- the single source of truth for the current red line -- instead of a
+    number duplicated here that would go stale.
+    """
+    layers_file = APP / "LAYERS.toml"
+    with layers_file.open("rb") as fh:
+        max_violations = tomllib.load(fh)["max_violations"]
+    return [
+        sys.executable,
+        "scripts/arch_graph.py",
+        "--check-layers",
+        "--max-violations",
+        str(max_violations),
+    ]
+
+
+def _file_conventions_check_command() -> list[str]:
+    """Build the file-shape gate invocation.
+
+    Same ratchet shape as `_layers_check_command()` but the threshold lives
+    per-file inside `app/FILE_CONVENTIONS.toml` itself (baseline tables), so
+    -- unlike the layers gate's single `--max-violations` -- no aggregate
+    number needs to be read here and threaded through as a CLI flag; the
+    script reads its own config and exits non-zero only for files that
+    regressed past their own recorded ceiling.
+    """
+    return [sys.executable, "scripts/check_file_conventions.py"]
+
+
 def _full_commands(*, live_integration: bool = False) -> list[tuple[list[str], Path]]:
     commands = [
         ([sys.executable, "-m", "ruff", "check", "app", "tests", "scripts"], ROOT),
@@ -282,6 +327,8 @@ def _full_commands(*, live_integration: bool = False) -> list[tuple[list[str], P
         ([sys.executable, "scripts/check_capability_coverage.py"], ROOT),
         ([sys.executable, "scripts/check_dark_theme.py"], ROOT),
         ([sys.executable, "scripts/check_css_split.py"], ROOT),
+        (_layers_check_command(), ROOT),
+        (_file_conventions_check_command(), ROOT),
         ([sys.executable, "-m", "compileall", "-q", "app"], ROOT),
         ([sys.executable, "-m", "pytest", "-q"], ROOT),
         ([_npm(), "run", "build"], FRONTEND),

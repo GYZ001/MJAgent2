@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 from scripts.verify import (
     ROOT,
     _full_commands,
     _isolated_environment,
+    _layers_check_command,
     _quick_commands,
     _run,
     _runtime_facade_modules,
@@ -141,6 +143,34 @@ def test_run_passes_the_isolated_environment_to_subprocess(monkeypatch) -> None:
         "check": True,
         "env": expected_env,
     }
+
+
+def test_layers_check_command_reads_threshold_from_layers_toml() -> None:
+    """The architecture-layering gate (docs/architecture_layering_plan_2026-08-29.md
+    2.2) must not hardcode its threshold in verify.py -- LAYERS.toml is the
+    single source of truth, so the command line reflects whatever number is
+    currently configured there, not a copy that could go stale.
+    """
+    with (ROOT / "app" / "LAYERS.toml").open("rb") as fh:
+        expected_threshold = tomllib.load(fh)["max_violations"]
+
+    command = _layers_check_command()
+
+    assert command == [
+        sys.executable,
+        "scripts/arch_graph.py",
+        "--check-layers",
+        "--max-violations",
+        str(expected_threshold),
+    ]
+
+
+def test_full_commands_includes_the_layers_gate_exactly_once() -> None:
+    commands = [command for command, _cwd in _full_commands()]
+    layer_commands = [c for c in commands if "scripts/arch_graph.py" in c]
+
+    assert len(layer_commands) == 1
+    assert layer_commands[0] == _layers_check_command()
 
 
 def test_live_integration_requires_full_verification() -> None:

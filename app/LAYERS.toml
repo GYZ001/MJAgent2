@@ -1,0 +1,289 @@
+# 分层声明——把 docs/architecture_layering_plan_2026-08-29.md 「2.1 声明式分层」
+# 的表格变成可被 scripts/arch_graph.py --check-layers 读取的数据。
+#
+# 规则：
+#   - 层号越小越底层。合法依赖只能指向层号更小或同层的模块（同层允许）。
+#   - key 既可以是具体模块（"app.harness.model_gateway"），也可以是包前缀
+#     （"app.production" 覆盖 app.production.* 的所有子模块），除非子模块本身
+#     有更具体的 key 覆盖它（最长前缀匹配优先）。
+#   - 没有在这里出现、也没有被任何前缀覆盖的模块按 fail-safe 规则视为 L5
+#     （--check-layers 会把它们单独列出来提醒补声明，不会静默放过）。
+#   - 标了「待建」的 key 对应的文件目前还不存在（方案里的目标态），提前占位是
+#     为了避免将来建出来时忘记归层；在文件出现之前它们不匹配任何真实模块，无副作用。
+#   - app.domain / app.media_exec / app.portraits 这类用 exec(compile(...)) 把多个
+#     chunk 文件注入同一份 globals() 的聚合外观包（见各自 __init__.py 的文档字符
+#     串）不在此列——运行时 chunk 和外观是同一个模块。scripts/arch_graph.py 会从
+#     AST 里推导出每个外观 exec 了哪些 chunk（不认包名、只认「for 循环 + exec(
+#     compile(...))」这个形状，未来新增的同类外观包会被自动识别），判层时强制按
+#     外观的层号——即使将来有人误给某个具体 chunk（如 "app.portraits.discovery"）
+#     单独声明了不同的层号，那条声明也会被判层逻辑忽略，因为运行时根本没有第二
+#     个命名空间可以让它单独成立。这几个包因此不需要（也不应该）再为包内单个
+#     chunk 文件加更具体的 key，只声明包前缀就够。（app.stages 不是这个模式——它
+#     的子模块是普通的 `from .x import y` 互相引用，各自都是真实的独立模块，
+#     "app.stages" 这条前缀声明只是设计选择，不是运行时强制。）
+
+# 实测：commit 5265572，取数时 `git status --porcelain | wc -l` = 144（工作区多个
+# agent 并行改 app/stages、app/portraits、app/validators、app/production/*、
+# app/screenplay_scene_shards、app/video_modes_pkg、app/video_supervisor_pkg 等，
+# 均未提交）。这次实测是在补齐 115 个此前未声明层号的模块（它们此前按 fail-safe
+# 规则统一判 L5，把大量正常的「L4 领域能力 import L3 供应商适配」「L2 持久化 import
+# L1 平台设施」误判成上行）之后取的：补声明前 --check-layers 报 1310 条上行边
+# （模块级 1156、延迟导入 154，另有 115 个模块未声明层号）；补声明后剩 44 条
+# （模块级 20、延迟导入 24）—— 96.6% 是声明缺口造成的幻影违规，不是真实架构倒置。
+# 剩下的 44 条里，约一半（errors->db、auth.*->db、hiagent->media_pipeline.*、
+# harness.model_gateway->orchestration.state_machine、portraits->orchestration.
+# state_machine 等）发生在两个此前就已声明层号的模块之间，与本次补声明无关，是
+# 本来就存在、只是被噪音淹没的真实上行边；另一半（artifacts->completion_grant、
+# storyboard_workspace/storyboard_supervisor/production.storyboard_pack->domain、
+# video_plan->domain、loops.base->orchestration.state_machine、minimax_h3/
+# seedance/video_providers->video_plan 等）是本次新声明的模块自身对编排层/供应商
+# 层的真实反向依赖——声明时已按「多数消费方所在层」定层，不是为了掩盖违规而调高。
+# 阈值按实测 44 上浮 ~9% 留一点给并行 agent 的中间态，不做更大缓冲。红线只降不升
+# ——以后每解掉一条真实上行边就把这个数字调小，不得因为再冒出新的未声明模块而调大
+# （新模块应该补声明，不是垫高阈值）。
+#
+# 2026-08-30 更新：落地 docs/layer_violations_plan_2026-08-30.md Top 5 的前 3 项
+# （全部纯声明修正，零 app/ 代码改动，逐条依据见文件末尾 [layers] 表里各 key 旁的
+# 行内注释）：
+#   1. app.orchestration.state_machine=2、.engine=3（消 11 条边）
+#   2. app.errors/app.authz/app.auth.{sessions,api,admin_api}/
+#      app.local_session/app.media_urls 提层（消 10 条边）
+#   3. app.media_pipeline.{stages,concurrency}=3、app.generation_concurrency=3
+#      （消 3 条边）
+# 实测：commit 5265572（与上面 44/48 取数时同一个 commit，工作区其它 agent 仍在
+# 并行改 app/**，未提交；取数时 `git status --porcelain | wc -l` = 236，比 144 更
+# 多只是因为并行工作又推进了，不影响本次改动只触达 LAYERS.toml 这一个文件的事实）
+# ——`--check-layers --max-violations 100000` 从 44 降到 20（模块级 2、延迟导入
+# 18），与 docs/layer_violations_plan_2026-08-30.md 用临时副本预测的 44→20 完全
+# 吻合。阈值不采用该文档建议的 24（20+4，占实测值 20%）——那个缓冲比例与本文件
+# 上面「44 上浮 ~9%」的既有口径不一致（文档里「与现有口径一致」这句话本身有算错，
+# 4/20=20% 不是 9%），改用同一个 ~9% 口径对 20 取整，得 22（20+2）。红线只降不升
+# ——48 已经不成立，22 是新地板；以后每解掉一条真实上行边就把这个数字继续调小。
+max_violations = 22
+
+# 豁免：每条必须带 reason 与 expires（YYYY-MM-DD），过期的豁免按违规计入总数。
+# 目前没有需要豁免的边——所有现存上行边都走 max_violations 阈值收敛，不在这里
+# 逐条列白名单（CLAUDE.md 禁止黑白名单式豁免；这里留空，不是漏填）。
+# 需要时用数组表添加，例如：
+#   [[allowed_exceptions]]
+#   from = "app.db"
+#   to = "app.artifacts"
+#   reason = "..."
+#   expires = "2026-12-31"
+allowed_exceptions = []
+
+# [layers] 必须放在最后：TOML 里一个 section 会一直吃到下一个 section header 或
+# 文件结尾，写在它后面的裸 key（如上面的 allowed_exceptions）会被并入这个表。
+
+[layers]
+
+# ---- L0 契约内核：仅标准库 ----
+"app.schemas" = 0
+"app.contracts" = 0  # 待建（docs 方案 2.1）
+
+# ---- L1 平台设施：可依赖 L0 ----
+"app.config" = 1
+"app.atomic_io" = 1
+"app.observability.tracing" = 1
+"app.auth" = 1  # 前缀：principal/passwords/deps 零 db 依赖，真 L1；
+                # sessions/api/admin_api 碰 db，2026-08-30 用更具体的 key
+                # 覆盖到 2（见下方新增 L2 持久化，及本文件末尾变更说明）
+"app.db_schema" = 1  # 待建（docs 方案 2.1）
+
+# ---- L2 持久化：可依赖 L0-L1 ----
+"app.db" = 2
+"app.artifacts" = 2
+"app.evidence" = 2
+"app.errors" = 2  # 2026-08-30：原 L0，只 import app.db，见文件末尾变更说明
+"app.authz" = 2  # 2026-08-30：原 L1，包内 resolve.py 碰 app.db，见变更说明
+"app.auth.sessions" = 2  # 2026-08-30：覆盖 app.auth=1 前缀，碰 app.db
+"app.auth.api" = 2       # 同上
+"app.auth.admin_api" = 2 # 同上
+"app.orchestration.state_machine" = 2  # 2026-08-30：覆盖 app.orchestration=5
+                                        # 前缀，只 import app.db，见变更说明
+
+# ---- L3 供应商适配：可依赖 L0-L2 ----
+"app.harness.model_gateway" = 3
+"app.hiagent" = 3
+"app.seedance" = 3
+"app.minimax_h3" = 3
+"app.video_providers" = 3
+"app.orchestration.engine" = 3  # 2026-08-30：覆盖 app.orchestration=5 前缀，
+                                 # 受 app.harness.contracts 顶住，见变更说明
+"app.media_pipeline.stages" = 3       # 2026-08-30：覆盖 app.media_pipeline=4
+                                       # 前缀，零 app 内部依赖，见变更说明
+"app.media_pipeline.concurrency" = 3  # 2026-08-30：覆盖 app.media_pipeline=4
+                                       # 前缀，同上
+
+# ---- L4 领域能力：可依赖 L0-L3 ----
+"app.stages" = 4
+"app.portraits" = 4
+"app.validators" = 4
+"app.narrative" = 4
+"app.screenplay_ir" = 4
+"app.production" = 4
+"app.media_pipeline" = 4
+
+# ---- L5 编排与入口：可依赖 L0-L4 ----
+"app.domain" = 5
+"app.media_exec" = 5
+"app.capabilities" = 5
+"app.orchestration" = 5
+"app.api" = 5
+"app.worker" = 5
+"app.main" = 5
+
+# ============================================================================
+# 以下是 2026-08-29 补齐的 115 个此前未声明层号的模块（拆包产生的新子模块 +
+# 一批本来就存在、但从未被本文件覆盖的顶层模块）。层号判据：
+#
+#   1. 零 app 内部依赖（AST 解析出的 import 边完全不落在 app.* 里）的纯值对象/
+#      纯函数模块 -> L1（例如 app.scene_contract、app.harness.types、
+#      app.identity_authority、app.character_policy、app.textmatch）。不用 L0，
+#      把 L0「契约内核」保留给 schemas/errors/contracts 那三个已声明的核心文件，
+#      避免这一层的语义被冲淡。
+#   2. 依赖只落在 L0-L2 的模块 -> 按其消费方所在的层就近定档（L2 持久化 / L3
+#      供应商适配 / L4 领域能力），不机械套用某个固定档位——例如
+#      app.model_registry/app.model_runtime_profile 只依赖 db，但被
+#      app.hiagent(L3) 依赖，定 L3；app.model_migration 同样只依赖 db，但角色是
+#      db 迁移脚本，定 L2（持久化家族）。
+#   3. 消费方全部是 L4/L5 的模块 -> 定 L4（领域能力），这是绝大多数拆包子模块的
+#      情况：app.screenplay_scene_shards.*（screenplay_scene_shards 是耦合审查
+#      点名的 6472 行巨模块之一，拆包后与 app.production.screenplay_repair /
+#      app.screenplay_ir 同档）、app.narrative_blueprint/outline/priority/repair
+#      （app.narrative 的同名族但不共享包前缀，dot-boundary 不会误吃）、
+#      app.video_*、app.storyboard_*、app.multiview/refs/scenes/continuity/
+#      compiler/completion_grant 等——它们互相依赖、也依赖 stages/portraits/
+#      validators/production，天然是同一档。
+#   4. 消费方专属于某个已声明 L5 家族、且自身也直接 import 该家族 -> L5：
+#      app.agent.*（AI 操作代理，唯一消费方是 app.main，自身 import
+#      app.capabilities.*）、app.mcp.*（MCP 工具服务器，同样只被 app.main 消费、
+#      直接 import app.capabilities/app.orchestration.api）、
+#      app.system_api/app.monitoring/app.recovery/app.planning（消费方清一色是
+#      L5，自身直接 import app.worker/app.capabilities.dispatch/
+#      app.orchestration.api）。app.delivery/app.downstream_authority 单独判
+#      L5：两者都直接 import app.domain.common 或 app.orchestration.engine，
+#      且消费方全部是 L5（capabilities.handlers.delivery / main /
+#      orchestration.api），没有任何 L4 消费方逼着它们必须 <=4，判 L5 后两个
+#      模块自身的上行边全部消失（对照：app.storyboard_workspace 也 import
+#      app.orchestration.engine，但它有 app.production.publish/
+#      storyboard_pack 两个 L4 消费方逼着必须 <=4，判 L5 只会把上行边转移到那两
+#      个消费方身上，所以判 L4，把这条边如实报成真实违规，见下方 max_violations
+#      注释）。app.video_supervisor 同理判 L5：4487 行，直接 import app.api/
+#      app.worker/app.orchestration.engine/app.orchestration.media_scheduler/
+#      app.domain.storyboard_ops，且消费方清一色是 L5（capabilities.preflight/
+#      domain.*/main/media_exec.*/orchestration.api/recovery），没有任何 L4
+#      消费方——这点与命名相似的 app.storyboard_supervisor（有 L4 消费方，判
+#      L4）不同，不是套模板，是数据决定的。
+#   5. 存在真实双向耦合（互相 import，构成同一个强连通分量）的两个模块必须同层，
+#      否则无论怎么声明都会有一条边被判上行：app.video_providers(已声明 L3) 与
+#      app.video_prompt_profiles 互相 import，判 app.video_prompt_profiles = 3
+#      （而非 fail-safe 的 5），原来「app.video_providers(L3) ->
+#      app.video_prompt_profiles(L5)」这条上行边随之消失——运行时它们本来就是
+#      互相依赖的同一档，不是 L3 单向依赖 L5。
+#   6. app.video_modes_pkg / app.video_supervisor_pkg 是另一个 agent 正在进行的
+#      拆包（app/video_modes.py、app/video_supervisor.py 仍是完整文件，两个
+#      _pkg 目录暂未被任何地方 import，处于半成品状态），按其 AST 实际 import
+#      的目标（multiview/scenes/portraits 等 L4，以及 video_supervisor_pkg 直
+#      接 import app.api/app.worker/app.orchestration.*）分别对齐旧模块的层号
+#      （4 和 5），避免这批半成品在下一次实测时又变成一批新的未声明模块。
+#   7. 裸模块 "app"（app/__init__.py，无任何内容）判 L0——它是包命名空间本身，
+#      不是某一层的业务代码；只声明这一个精确 key，不声明 "app" 前缀，避免它当
+#      catch-all 吃掉未来任何新增但忘记声明的模块（fail-safe L5 的兜底必须继续
+#      对新模块生效）。
+#
+# 补声明后 --check-layers 的「未声明层号的模块」从 115 降到 0；上行边总数从
+# 1310（模块级 1156、延迟导入 154）降到 44（模块级 20、延迟导入 24）——降幅
+# 96.6%，绝大多数是本文件之前没覆盖到这些模块造成的幻影违规，不是代码变差了。
+# 剩下 44 条是否真实上行边、按什么口径分类，见上面 max_violations 的注释。
+# ============================================================================
+
+# ---- 拆包产生的新增 L0/L1 ----
+"app" = 0
+"app.character_policy" = 1
+"app.harness.types" = 1
+"app.identity_authority" = 1
+"app.ingest" = 1
+"app.model_capabilities" = 1
+"app.novel_formats" = 1
+"app.scene_contract" = 1
+"app.screenplay_retry_authority" = 1
+"app.source_excerpt" = 1
+"app.task_registry" = 1
+"app.textmatch" = 1
+"app.visual_styles" = 1
+
+# ---- 新增 L2 持久化 ----
+"app.benchmarks" = 2
+"app.local_session" = 2  # 2026-08-30：原 1，与 app.auth.sessions(2) 互相
+                          # import，必须同层，见文件末尾变更说明
+"app.media_urls" = 2  # 2026-08-30：原 1，依赖 app.local_session(2)，同上
+"app.model_migration" = 2
+"app.observability.metrics" = 2
+"app.rejected_media" = 2
+
+# ---- 新增 L3 供应商适配 ----
+"app.generation_concurrency" = 3  # 2026-08-30：原 4，见文件末尾变更说明
+"app.harness" = 3  # 前缀：覆盖 .context/.contracts/.text_provider_scope（见下）
+"app.image_providers" = 3
+"app.model_registry" = 3
+"app.model_runtime_profile" = 3
+"app.text_providers" = 3
+"app.video_prompt_profiles" = 3  # 与 app.video_providers 互相 import，必须同层
+
+# ---- 新增 L4 领域能力 ----
+"app.compiler" = 4
+"app.completion_grant" = 4
+"app.continuity" = 4
+"app.evaluations" = 4  # 前缀：覆盖 .issues
+"app.final_edit" = 4
+"app.identity_adjudication" = 4
+"app.identity_contracts" = 4
+"app.loops" = 4  # 前缀：覆盖 .base
+"app.multiview" = 4
+"app.narrative_blueprint" = 4
+"app.narrative_outline" = 4
+"app.narrative_priority" = 4
+"app.narrative_repair" = 4
+"app.refs" = 4
+"app.renderability" = 4
+"app.renderability_score" = 4
+"app.repair_router" = 4
+"app.scenes" = 4
+"app.screenplay_scene_shards" = 4  # 前缀：覆盖全部 20 个拆包子模块
+"app.source_facts" = 4
+"app.source_paratext" = 4
+"app.spoken_contract" = 4
+"app.storyboard_authority" = 4
+"app.storyboard_control" = 4
+"app.storyboard_supervisor" = 4
+"app.storyboard_workspace" = 4
+"app.video_command_operations" = 4
+"app.video_control" = 4
+"app.video_cost_model" = 4
+"app.video_crop" = 4
+"app.video_issues" = 4
+"app.video_modes" = 4
+"app.video_modes_pkg" = 4  # 前缀：video_modes 拆包中的半成品，见上方说明 6
+"app.video_plan" = 4
+"app.video_playback" = 4
+"app.video_prompt_ai" = 4
+"app.video_repair_router" = 4
+
+# ---- 新增 L5 编排与入口 ----
+"app.agent" = 5  # 前缀：覆盖 .api/.approvals/.events/.orchestrator/.redaction/
+                 # .resources/.schemas/.store/.tools
+"app.agent_api" = 5  # 与 app.agent 包同名但不是它的子模块（dot-boundary 不会
+                      # 误吃），独立顶层文件，单独声明
+"app.delivery" = 5
+"app.downstream_authority" = 5
+"app.mcp" = 5  # 前缀：覆盖 .auth/.errors/.prompts/.rate_limit/.resources/
+               # .server/.tools
+"app.monitoring" = 5
+"app.observability" = 5  # 前缀：覆盖裸模块与 .api；.tracing/.metrics 已用更
+                          # 具体的 key 覆盖，最长前缀匹配优先于这条
+"app.planning" = 5
+"app.recovery" = 5
+"app.system_api" = 5
+"app.video_supervisor" = 5
+"app.video_supervisor_pkg" = 5  # 前缀：video_supervisor 拆包中的半成品，见说明 6
