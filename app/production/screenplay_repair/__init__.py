@@ -111,10 +111,8 @@ from .llm_patch_prompt import (
     _issue_target_excerpt,
     _narrative_patch_prompt_context,
 )
-from .narrative_graph_normalize import (
-    _normalize_screenplay_narrative_graph,
-    deepcopy,
-)
+from .narrative_graph_audience_context import deepcopy
+from .narrative_graph_normalize import _normalize_screenplay_narrative_graph
 from .narrative_patch_ops import (
     _candidate_is_executable,
     _candidate_targets_narrative_graph,

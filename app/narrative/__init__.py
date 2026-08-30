@@ -64,27 +64,24 @@ from .plan_index import (
 )
 
 from .screenplay_validate import (
-    Any as Any,
     EpisodeScreenplay as EpisodeScreenplay,
     Iterable as Iterable,
-    NARRATIVE_CONTRACT_VERSION as NARRATIVE_CONTRACT_VERSION,
-    _anchor_ref_errors as _anchor_ref_errors,
-    _changed_audience_state_fields as _changed_audience_state_fields,
-    _curve_errors as _curve_errors,
-    _cycle_nodes as _cycle_nodes,
-    _norm as _norm,
-    _require_refs as _require_refs,
-    _state_without_identity as _state_without_identity,
-    _target_state_fragment_matches as _target_state_fragment_matches,
-    action_participant_delivery_errors as action_participant_delivery_errors,
-    config as config,
-    defaultdict as defaultdict,
     index_narrative_plan as index_narrative_plan,
-    is_system_environment_entity_id as is_system_environment_entity_id,
-    normalize_source_evidence_text as normalize_source_evidence_text,
     system_environment_entity_id as system_environment_entity_id,
     validate_screenplay_narrative as validate_screenplay_narrative,
 )
+
+# validate_screenplay_narrative's helper phases now live in sibling
+# screenplay_validate_*.py files (see screenplay_validate.py's module
+# docstring for the split map); a handful of plain stdlib/third-party names
+# that used to be importable as ``app.narrative.<name>`` because the
+# pre-split single file happened to import them at module level moved with
+# their phase. Most (Any/_anchor_ref_errors/_norm/_require_refs/etc.) are
+# already re-exported above from .primitives/.plan_index/.storyboard_validate
+# with the identical object, so only the two not covered anywhere else are
+# re-sourced here.
+from .screenplay_validate_core import is_system_environment_entity_id as is_system_environment_entity_id
+from .screenplay_validate_experience_paths import config as config
 
 from .storyboard_validate import (
     Any as Any,

@@ -277,6 +277,18 @@ allowed_exceptions = []
 "app.multiview" = 4
 "app.narrative_blueprint" = 4
 "app.narrative_outline" = 4
+# 2026-08-30：normalize_narrative_storyboard_outline（原 1,318 行单函数）拆分产生
+# 的 7 个兄弟模块，与 app.narrative_outline 同层——纯函数分解，依赖面不变
+# （app.schemas/app.config/app.identity_contracts/app.narrative，全部 <=4）。
+# 不共享包前缀，dot-boundary 不会被上面那条 "app.narrative_outline" 误吃，需要
+# 单独声明。
+"app.narrative_outline_finalize" = 4
+"app.narrative_outline_identity" = 4
+"app.narrative_outline_index" = 4
+"app.narrative_outline_nodes" = 4
+"app.narrative_outline_prep" = 4
+"app.narrative_outline_project" = 4
+"app.narrative_outline_state" = 4
 "app.narrative_priority" = 4
 "app.narrative_repair" = 4
 "app.refs" = 4
