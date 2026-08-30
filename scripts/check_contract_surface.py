@@ -89,7 +89,6 @@ FORBIDDEN = {
     "app/video_modes/reference_prompt.py": ["hiagent.chat"],
     "app/video_modes/reference_generate.py": ["hiagent.chat"],
     "app/video_modes/reference_assemble.py": ["hiagent.chat"],
-    "app/video_modes/reference_generate_legacy.py": ["hiagent.chat"],
     "app/video_modes/continuity_tail.py": ["hiagent.chat"],
     "app/video_modes/seedance_pack.py": ["hiagent.chat"],
     "docs/PROMPT_SPEC.md": [

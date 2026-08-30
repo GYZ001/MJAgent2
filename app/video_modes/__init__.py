@@ -4,9 +4,14 @@
 （mode_selection.py）、人物/场景图库资产查找（asset_lookup.py）、叙事关键帧契约
 （keyframe_contract.py）、参考图 prompt 组装（reference_prompt.py）、单张参考图生成调用
 （reference_generate.py）、图库素材整体装配与对外入口 build_reference_assets
-（reference_assemble.py）、旧版逐镜生成流程（reference_generate_legacy.py，单一巨型
-编排函数，移动未拆分）、跨镜连续性尾帧装配（continuity_tail.py）、Seedance 供应商输入
+（reference_assemble.py）、跨镜连续性尾帧装配（continuity_tail.py）、Seedance 供应商输入
 打包（seedance_pack.py）。
+
+旧版逐镜生成流程（``_build_generated_reference_assets_legacy``，曾拆成
+reference_generate_legacy*.py 共 9 个文件）已于 2026-08-30 整体删除：2026-08-09
+（commit da02e67）起 `build_reference_assets` 已经不再调用它，唯一的存活入口
+`_build_library_reference_assets` 只读人物谱/场景库现有图片，不再触发新生成；
+它自那之后零测试覆盖、零生产调用方，是纯粹的死代码。
 
 本文件是唯一的稳定入口：全仓所有 `from app.video_modes import X` /
 `import app.video_modes` / `video_modes.X` 使用方式必须不经改动继续可用——下面按来源
@@ -63,12 +68,10 @@ from .keyframe_contract import (
     _MAX_TIMELINE_KEYFRAMES as _MAX_TIMELINE_KEYFRAMES,
     _MULTI_KEYFRAME_INVARIANCE_NOTE as _MULTI_KEYFRAME_INVARIANCE_NOTE,
     _SHORT_SHOT_MAX_SECONDS as _SHORT_SHOT_MAX_SECONDS,
-    _dedupe_str as _dedupe_str,
     _keyframe_character_anchors as _keyframe_character_anchors,
     _keyframe_contract as _keyframe_contract,
     _keyframe_contract_instructions as _keyframe_contract_instructions,
     _keyframe_text_instruction as _keyframe_text_instruction,
-    _shot_for_keyframe_beat as _shot_for_keyframe_beat,
     annotations as annotations,
     hashlib as hashlib,
     is_narrative_keyframe_slot as is_narrative_keyframe_slot,
@@ -146,7 +149,6 @@ from .reference_assemble import (
     _dedupe_assets as _dedupe_assets,
     _dedupe_str as _dedupe_str,
     _enforce_reference_consistency as _enforce_reference_consistency,
-    _enforce_timeline_keyframe_invariance as _enforce_timeline_keyframe_invariance,
     annotations as annotations,
     build_reference_assets as build_reference_assets,
     character_reference_assets as character_reference_assets,
@@ -157,37 +159,25 @@ from .reference_generate import (
     Any as Any,
     Bible as Bible,
     EpisodeScreenplay as EpisodeScreenplay,
-    KEYFRAME_PROMPT_CONTRACT_VERSION as KEYFRAME_PROMPT_CONTRACT_VERSION,
     Path as Path,
     ProviderError as ProviderError,
     ReferenceImageAsset as ReferenceImageAsset,
     Shot as Shot,
-    _KEYFRAME_LLM_PROMPT_MAX_CHARS as _KEYFRAME_LLM_PROMPT_MAX_CHARS,
-    _MULTI_KEYFRAME_INVARIANCE_NOTE as _MULTI_KEYFRAME_INVARIANCE_NOTE,
     _SEED_USAGE_NOTE as _SEED_USAGE_NOTE,
-    _SLOT_ROLE_CYCLE as _SLOT_ROLE_CYCLE,
     _asset_from_path as _asset_from_path,
     _extract_last_frame as _extract_last_frame,
     _generate_image_with_seed_fallback as _generate_image_with_seed_fallback,
     _generate_one_reference as _generate_one_reference,
-    _generate_reference_keep_best as _generate_reference_keep_best,
     _keyframe_character_anchors as _keyframe_character_anchors,
-    _keyframe_contract as _keyframe_contract,
-    _keyframe_text_instruction as _keyframe_text_instruction,
     _portrait_seed_inputs as _portrait_seed_inputs,
     _safe_ref_name as _safe_ref_name,
-    _screenplay_call_kwargs as _screenplay_call_kwargs,
-    _shot_for_keyframe_beat as _shot_for_keyframe_beat,
     annotations as annotations,
     atomic_write_bytes as atomic_write_bytes,
     base64 as base64,
-    code_ref as code_ref,
     config as config,
-    extract_json as extract_json,
     hashlib as hashlib,
     hiagent as hiagent,
     json as json,
-    model_gateway as model_gateway,
     new_id as new_id,
     previous_tail_reference_asset as previous_tail_reference_asset,
     previous_tail_source_contract as previous_tail_source_contract,
@@ -195,25 +185,7 @@ from .reference_generate import (
     reference_image_path as reference_image_path,
     shutil as shutil,
     subprocess as subprocess,
-    write_reference_prompt as write_reference_prompt,
-    write_reference_prompt_batch as write_reference_prompt_batch,
 )
-from .reference_generate_legacy import (
-    _build_generated_reference_assets_legacy as _build_generated_reference_assets_legacy,
-)
-
-# _build_generated_reference_assets_legacy's phases now live in sibling
-# reference_generate_legacy_*.py files (see reference_generate_legacy.py's
-# module docstring for the split map). Every other name that used to be
-# importable as ``app.video_modes.<name>`` because the pre-split single file
-# happened to import it at module level is already re-exported above from
-# whichever other submodule also imports it (asset_lookup/continuity_tail/
-# keyframe_contract/mode_selection/reference_assemble/reference_generate/
-# reference_prompt/seedance_pack) -- verified by diffing the pre-split
-# file's import list against every other block's names. ``asyncio`` is the
-# one exception: no other block imports it, so it is re-sourced here from
-# the sibling that now uses it.
-from .reference_generate_legacy_candidates import asyncio as asyncio
 from .reference_prompt import (
     Any as Any,
     Bible as Bible,

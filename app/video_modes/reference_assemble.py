@@ -34,27 +34,6 @@ async def _enforce_reference_consistency(*, selected: list[ReferenceImageAsset],
     return selected
 
 
-async def _enforce_timeline_keyframe_invariance(
-    *,
-    selected: list[ReferenceImageAsset],
-    shot: Shot,
-    bible: Bible,
-    rejection_details: list[dict[str, Any]] | None = None,
-    rejected_out: list[ReferenceImageAsset] | None = None,
-    screenplay: EpisodeScreenplay | None = None,
-) -> tuple[list[ReferenceImageAsset], set[str]]:
-    """VLM 跨关键帧一致性核查已下线：不再对双关键帧做"无法证明一致就降级为单帧"处理。
-
-    这曾是一条真实的安全阀（识别不到一致性证据时主动砍掉第二张关键帧，避免把
-    可能撞脸/换装的画面喂给视频模型）；VLM 判定本身被判定为不可靠后，这条阀门
-    没有替代判据可用，只能整体让位给人工在成片里复核——多关键帧之间的身份漂移
-    风险由此变为需要人工留意的已知限制，不再有自动化兜底。
-    """
-    del shot, bible, rejection_details, rejected_out, screenplay
-    return selected, set()
-
-
-
 async def _build_library_reference_assets(
     *,
     conn: Any,

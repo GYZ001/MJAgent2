@@ -14,7 +14,6 @@ from .mode_selection import (
     _MAX_TIMELINE_KEYFRAMES,
     _MULTI_KEYFRAME_INVARIANCE_NOTE,
     _SHORT_SHOT_MAX_SECONDS,
-    _dedupe_str,
 )
 
 
@@ -252,73 +251,6 @@ def narrative_keyframe_beats(shot: Shot, count: int) -> list[dict[str, Any]]:
             ),
         })
     return beats
-
-
-def _shot_for_keyframe_beat(shot: Shot, beat: dict[str, Any] | None) -> Shot:
-    if not beat:
-        return shot
-    from app.compiler import explicit_height_difference_evidence, has_contact_action
-
-    target = str(beat.get("target_desc") or shot.action_desc).strip()
-    update: dict[str, Any] = {
-        "action_desc": target,
-        "primary_action": target,
-        "first_frame_desc": target,
-        "last_frame_desc": target,
-        "state_in": target,
-        "state_out": target,
-    }
-    phase = str(beat.get("phase") or "").strip()
-    if phase:
-        inherited_tags = [
-            tag for tag in (shot.risk_tags or [])
-            if not str(tag).startswith("contact_phase:")
-        ]
-        beat_contact_phase = str(beat.get("contact_phase") or "none")
-        update["risk_tags"] = _dedupe_str([
-            *inherited_tags,
-            f"timeline_keyframe_phase:{phase}",
-            *(
-                [f"contact_phase:{beat_contact_phase}"]
-                if beat_contact_phase != "none" else []
-            ),
-        ])
-    height_evidence = explicit_height_difference_evidence(shot)
-    if height_evidence:
-        update["spatial_anchor"] = "；".join(
-            part for part in (
-                (shot.spatial_anchor or "").strip(),
-                "原镜头明示身高差证据：" + "；".join(height_evidence),
-            )
-            if part
-        )
-    required_text = shot.required_text
-    if required_text is not None:
-        try:
-            beat_time = float(beat.get("time_s") or 0.0)
-            appear_at = float(required_text.appear_start_s or 0.0)
-            stable_until = (
-                float(required_text.stable_until_s)
-                if required_text.stable_until_s is not None
-                else None
-            )
-            text_visible = appear_at <= beat_time and (stable_until is None or beat_time <= stable_until)
-        except (TypeError, ValueError):
-            text_visible = False
-        update["required_text"] = (
-            required_text.model_copy(update={"appear_start_s": 0.0, "stable_until_s": None})
-            if text_visible
-            else None
-        )
-    # 与视频提示词合同对齐：原镜头只要属于真实接触互动，所有时序帧都共用
-    # 侧面轴线。不能让起势帧因“尚未接触”又回到正面，否则九图会互相冲突。
-    if has_contact_action(shot):
-        update["camera_angle"] = "侧面视角"
-        update["risk_tags"] = _dedupe_str([
-            *(update.get("risk_tags") or shot.risk_tags or []),
-            "timeline_contact_side_axis",
-        ])
-    return shot.model_copy(deep=True, update=update)
 
 
 def keyframe_contract_fingerprint(
