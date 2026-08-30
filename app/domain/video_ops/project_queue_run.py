@@ -139,7 +139,16 @@ def recover_project_video_completion_queues() -> int:
         """SELECT * FROM workflow_runs
            WHERE workflow_type='project_video_completion_queue'
              AND status='PAUSED_EXTERNAL' AND failure_code='SERVICE_RESTART'
-             AND recovered_by_run_id IS NULL ORDER BY updated_at"""
+             AND recovered_by_run_id IS NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM projects p -- ALL_OWNERS: startup recovery scans
+               -- every owner's paused project-wide video completion queues
+               -- after a process reload/restart; excludes soft-deleted
+               -- (recycle-bin) projects so their residual video generation
+               -- is not re-armed and does not burn quota
+                WHERE p.id=workflow_runs.scope_id AND p.deleted_at IS NOT NULL
+             )
+           ORDER BY updated_at"""
     ).fetchall()
     resumed = 0
     for row in rows:

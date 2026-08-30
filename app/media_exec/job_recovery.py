@@ -1,16 +1,18 @@
 """启动期与周期性的媒体作业恢复/对账（拆分自 ``run_job.py``）。
 
 ``recover_and_start`` 是进程启动时调用一次的入口：清空内存队列、拉起
-worker 池与调度器（``.worker_lifecycle``）。``recover_media_jobs``/
+worker 池与调度器（``.worker_lifecycle``/``.dispatch``，2026-08-30 从前者拆出
+后者承接持久派发部分，见 ``.dispatch`` 模块 docstring）。``recover_media_jobs``/
 ``_recover_one_media_job`` 处理进程重启后遗留的 in-flight job；
 ``reconcile_stalled_video_jobs``/``_block_orphaned_continuity_job`` 是
 ``_stale_lease_sweeper``（``.worker_lifecycle``）周期性调用的对账，找出租约过
 期、连续性锚点缺失或被单镜拖死的 job 并纠正。``recover_and_start`` 需要
-``.worker_lifecycle`` 的四个名字（``_dispatch_due_jobs``/``_drain_memory_queue``/
-``_start_durable_dispatcher``/``ensure_workers``），而 ``.worker_lifecycle`` 自己
-的 ``_stale_lease_sweeper`` 又需要本文件的恢复函数——真正的双向依赖，用惰性
-（函数体内部）导入在本文件这一侧打破，``.worker_lifecycle`` 侧保持顶层导入
-（做法与 ``.enqueue``/``.run_job`` 的既有惰性导入一致）。
+``.worker_lifecycle`` 的两个名字（``_drain_memory_queue``/``ensure_workers``）
+与 ``.dispatch`` 的两个名字（``_dispatch_due_jobs``/``_start_durable_dispatcher``），
+而 ``.worker_lifecycle`` 自己的 ``_stale_lease_sweeper`` 又需要本文件的恢复函
+数——真正的双向依赖，用惰性（函数体内部）导入在本文件这一侧打破，
+``.worker_lifecycle`` 侧保持顶层导入（做法与 ``.enqueue``/``.run_job`` 的既有
+惰性导入一致）；``.dispatch`` 与本文件之间没有反向依赖，不需要同样处理。
 """
 
 from __future__ import annotations
@@ -33,12 +35,8 @@ from .legacy_keyframes import decommission_legacy_keyframe_jobs
 def recover_and_start(loop_concurrency: int | None = None) -> None:
     """启动时恢复队列（PRD §4.5 验收：中途杀进程重启后队列状态可恢复）。"""
     from app.media_pipeline.bootstrap import start_media_pipeline
-    from .worker_lifecycle import (
-        _dispatch_due_jobs,
-        _drain_memory_queue,
-        _start_durable_dispatcher,
-        ensure_workers,
-    )
+    from .worker_lifecycle import _drain_memory_queue, ensure_workers
+    from .dispatch import _dispatch_due_jobs, _start_durable_dispatcher
 
     start_media_pipeline()
     decommission_legacy_keyframe_jobs()
@@ -189,7 +187,15 @@ def recover_media_jobs() -> int:
              AND wr.status='PAUSED_EXTERNAL'
              AND wr.failure_code='SERVICE_RESTART'
              AND j.cancellation_requested=0
-             AND j.abandoned=0""",
+             AND j.abandoned=0
+             AND NOT EXISTS (
+               SELECT 1 FROM projects p -- ALL_OWNERS: startup recovery
+               -- scans every owner's media jobs for orphaned running
+               -- generation tasks after a process reload/restart; excludes
+               -- soft-deleted (recycle-bin) projects so their residual jobs
+               -- are not re-armed and do not burn quota
+                WHERE p.id=j.project_id AND p.deleted_at IS NOT NULL
+             )""",
     ))
     resumed = 0
     for r in rows:
@@ -354,6 +360,14 @@ def reconcile_stalled_video_jobs(limit: int = 50) -> dict[str, int]:
              AND NOT EXISTS (
                SELECT 1 FROM jobs j WHERE j.shot_id=s.id AND j.kind='video'
              )
+             AND NOT EXISTS (
+               SELECT 1 FROM projects p -- ALL_OWNERS: periodic startup
+               -- sweep re-enqueues legacy jobless preflight-blocked shots
+               -- across every owner; excludes soft-deleted (recycle-bin)
+               -- projects so their shots are not re-enqueued and do not
+               -- burn quota
+                WHERE p.id=e.project_id AND p.deleted_at IS NOT NULL
+             )
            ORDER BY a.created_at DESC LIMIT ?""",
         (stamp - 86400.0, max(1, int(limit))),
     ))
@@ -391,6 +405,13 @@ def reconcile_stalled_video_jobs(limit: int = 50) -> dict[str, int]:
              AND status='waiting_retry'
              AND (next_retry_at IS NULL OR next_retry_at<=?)
              AND cancellation_requested=0 AND abandoned=0
+             AND NOT EXISTS (
+               SELECT 1 FROM projects p -- ALL_OWNERS: periodic sweep retries
+               -- stalled video preflight jobs across every owner; excludes
+               -- soft-deleted (recycle-bin) projects so their jobs are not
+               -- retried and do not burn quota
+                WHERE p.id=jobs.project_id AND p.deleted_at IS NOT NULL
+             )
            ORDER BY updated_at LIMIT ?""",
         (stamp, max(1, int(limit))),
     ))

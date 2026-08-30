@@ -426,6 +426,296 @@ def test_running_character_reference_run_keeps_refs_busy_when_project_flag_is_id
     assert progress["missing"] == 1
 
 
+def _mark_soft_deleted(conn, project_id: str, *, stamp: float = 999.0) -> None:
+    conn.execute(
+        "UPDATE projects SET deleted_at=? WHERE id=?", (stamp, project_id)
+    )
+    conn.commit()
+
+
+def test_recover_plan_tasks_skips_soft_deleted_project(tmp_path, monkeypatch) -> None:
+    """回收站项目残留的 plan_status='running' 不应被启动恢复重新拉起，
+    未删除项目的同类残留任务照常恢复。"""
+    conn = _fresh_database(tmp_path, monkeypatch)
+    conn.execute(
+        "INSERT INTO projects(id,name,status,plan_status,created_at) "
+        "VALUES('p-deleted','P2','created','running',2)"
+    )
+    conn.execute("UPDATE projects SET plan_status='running' WHERE id='p1'")
+    _mark_soft_deleted(conn, "p-deleted")
+    spawned = _capture_spawn(monkeypatch)
+
+    resumed = planning.recover_plan_tasks()
+
+    assert resumed == 1
+    assert spawned == [("plan", "p1")], "回收站项目 p-deleted 不应被拉起分集规划任务"
+    assert conn.execute(
+        "SELECT plan_status FROM projects WHERE id='p-deleted'"
+    ).fetchone()["plan_status"] == "running", "回收站项目状态应保持原样，未被启动恢复接管"
+
+
+def test_recover_bible_tasks_skips_soft_deleted_project(tmp_path, monkeypatch) -> None:
+    """回收站项目残留的 bible_status='running' 不应被启动恢复重新拉起人物谱任务，
+    未删除项目的同类残留任务照常恢复（不能把恢复功能整个关掉）。"""
+    conn = _fresh_database(tmp_path, monkeypatch)
+    conn.execute(
+        "INSERT INTO projects(id,name,status,bible_status,created_at) "
+        "VALUES('p-deleted','P2','created','running',2)"
+    )
+    conn.execute("UPDATE projects SET bible_status='running' WHERE id='p1'")
+    _mark_soft_deleted(conn, "p-deleted")
+    spawned = _capture_spawn(monkeypatch)
+
+    resumed = api.recover_bible_tasks()
+
+    assert resumed == 1
+    assert spawned == [("bible", "p1")], "回收站项目 p-deleted 不应被拉起人物谱任务"
+    assert conn.execute(
+        "SELECT bible_status FROM projects WHERE id='p-deleted'"
+    ).fetchone()["bible_status"] == "running", "回收站项目状态应保持原样，未被启动恢复接管"
+
+
+def test_recover_character_ref_tasks_skips_soft_deleted_project(tmp_path, monkeypatch) -> None:
+    """回收站项目残留的 refs_status='running' 不应被启动恢复重新拉起定妆任务，
+    未删除项目的同类残留任务照常恢复。"""
+    conn = _fresh_database(tmp_path, monkeypatch)
+    conn.execute(
+        "INSERT INTO projects(id,name,status,refs_status,created_at) "
+        "VALUES('p-deleted','P2','created','running',2)"
+    )
+    conn.execute("UPDATE projects SET refs_status='running' WHERE id='p1'")
+    _mark_soft_deleted(conn, "p-deleted")
+    patch_api_everywhere(monkeypatch, "_refs_task_active", lambda _pid: False)
+    seen: list[str] = []
+    patch_api_everywhere(
+        monkeypatch, "_start_refs_generation",
+        lambda project_id, target, **kwargs: seen.append(project_id) or True,
+    )
+
+    resumed = api.recover_character_ref_tasks()
+
+    assert resumed == 1
+    assert seen == ["p1"], "回收站项目 p-deleted 不应被拉起定妆生成任务"
+
+
+def test_recover_scene_ref_tasks_skips_soft_deleted_project(tmp_path, monkeypatch) -> None:
+    """回收站项目残留的 scene_refs_status='running' 不应被启动恢复重新拉起场景图任务，
+    未删除项目的同类残留任务照常恢复。"""
+    conn = _fresh_database(tmp_path, monkeypatch)
+    bible_json = json.dumps({"scenes": [{"name": "客厅"}]}, ensure_ascii=False)
+    conn.execute(
+        "INSERT INTO projects(id,name,status,bible_status,scene_refs_status,bible_json,created_at) "
+        "VALUES('p-deleted','P2','created','ready','running',?,2)",
+        (bible_json,),
+    )
+    conn.execute(
+        "UPDATE projects SET bible_status='ready', scene_refs_status='running', bible_json=? "
+        "WHERE id='p1'",
+        (bible_json,),
+    )
+    _mark_soft_deleted(conn, "p-deleted")
+    seen: list[str] = []
+    patch_api_everywhere(
+        monkeypatch, "_start_scene_refs_generation",
+        lambda project_id, target, **kwargs: seen.append(project_id) or True,
+    )
+
+    resumed = api.recover_scene_ref_tasks()
+
+    assert resumed == 1
+    assert seen == ["p1"], "回收站项目 p-deleted 不应被拉起场景图生成任务"
+
+
+def test_recover_portrait_view_redo_tasks_skips_soft_deleted_project(tmp_path, monkeypatch) -> None:
+    """回收站项目残留的定妆单视角重做任务不应被启动恢复重新拉起继续烧图像配额，
+    未删除项目的同类残留任务照常恢复。"""
+    conn = _fresh_database(tmp_path, monkeypatch)
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES('p-deleted','P2','created',2)"
+    )
+    _mark_soft_deleted(conn, "p-deleted")
+    live_run = _paused_run(
+        "portrait_view_redo", "project", "p1",
+        config={
+            "task_key": "portrait_1:profile", "character_name": "甲一",
+            "portrait_id": "portrait_1", "view_role": "profile",
+            "quote_id": "quote_1", "budget_limit_cny": 1.5,
+        },
+    )
+    _paused_run(
+        "portrait_view_redo", "project", "p-deleted",
+        config={
+            "task_key": "portrait_2:profile", "character_name": "乙二",
+            "portrait_id": "portrait_2", "view_role": "profile",
+            "quote_id": "quote_2", "budget_limit_cny": 1.5,
+        },
+    )
+    spawned = _capture_spawn(monkeypatch)
+    monkeypatch.setattr(task_registry, "active", lambda *_args: False)
+
+    resumed = api.recover_portrait_view_redo_tasks()
+
+    assert resumed == 1
+    assert spawned == [("portrait_view_redo", "portrait_1:profile")], (
+        "回收站项目 p-deleted 不应被拉起定妆单视角重做任务"
+    )
+    child = conn.execute(
+        "SELECT id FROM workflow_runs WHERE parent_run_id=?", (live_run,),
+    ).fetchone()
+    assert child is not None
+
+
+def test_recover_scene_view_redo_tasks_skips_soft_deleted_project(tmp_path, monkeypatch) -> None:
+    """回收站项目残留的场景单视角重做任务不应被启动恢复重新拉起继续烧图像配额，
+    未删除项目的同类残留任务照常恢复。"""
+    conn = _fresh_database(tmp_path, monkeypatch)
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES('p-deleted','P2','created',2)"
+    )
+    _mark_soft_deleted(conn, "p-deleted")
+    live_run = _paused_run(
+        "scene_view_redo", "project", "p1",
+        config={
+            "task_key": "scene_1:front", "scene_name": "客厅",
+            "scene_reference_id": "scene_1", "view_role": "front",
+            "quote_id": "quote_1", "budget_limit_cny": 1.5,
+        },
+    )
+    _paused_run(
+        "scene_view_redo", "project", "p-deleted",
+        config={
+            "task_key": "scene_2:front", "scene_name": "厨房",
+            "scene_reference_id": "scene_2", "view_role": "front",
+            "quote_id": "quote_2", "budget_limit_cny": 1.5,
+        },
+    )
+    spawned = _capture_spawn(monkeypatch)
+    monkeypatch.setattr(task_registry, "active", lambda *_args: False)
+
+    resumed = api.recover_scene_view_redo_tasks()
+
+    assert resumed == 1
+    assert spawned == [("scene_view_redo", "scene_1:front")], (
+        "回收站项目 p-deleted 不应被拉起场景单视角重做任务"
+    )
+    child = conn.execute(
+        "SELECT id FROM workflow_runs WHERE parent_run_id=?", (live_run,),
+    ).fetchone()
+    assert child is not None
+
+
+def test_recover_project_video_completion_queues_skips_soft_deleted_project(
+    tmp_path, monkeypatch,
+) -> None:
+    """回收站项目残留的项目级视频补齐队列不应被启动恢复重新拉起继续烧视频配额，
+    未删除项目的同类残留任务照常恢复。"""
+    conn = _fresh_database(tmp_path, monkeypatch)
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES('p-deleted','P2','created',2)"
+    )
+    _mark_soft_deleted(conn, "p-deleted")
+    live_run = _paused_run(
+        "project_video_completion_queue", "project", "p1",
+        config={"queue_state": {"plan": []}},
+    )
+    _paused_run(
+        "project_video_completion_queue", "project", "p-deleted",
+        config={"queue_state": {"plan": []}},
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET failure_code='SERVICE_RESTART' "
+        "WHERE workflow_type='project_video_completion_queue'"
+    )
+    conn.commit()
+    spawned = _capture_spawn(monkeypatch)
+    monkeypatch.setattr(task_registry, "active", lambda *_args: False)
+
+    resumed = api.recover_project_video_completion_queues()
+
+    assert resumed == 1
+    assert spawned == [("video_completion_project", "p1")], (
+        "回收站项目 p-deleted 不应被拉起项目级视频补齐队列"
+    )
+    child = conn.execute(
+        "SELECT id FROM workflow_runs WHERE parent_run_id=?", (live_run,),
+    ).fetchone()
+    assert child is not None
+
+
+def test_recover_delivery_tasks_skips_soft_deleted_project(tmp_path, monkeypatch) -> None:
+    """回收站项目残留的交付包/审批构建任务不应被启动恢复重新拉起继续消耗算力，
+    未删除项目的同类残留任务照常恢复。"""
+    conn = _fresh_database(tmp_path, monkeypatch)
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES('p-deleted','P2','created',2)"
+    )
+    _mark_soft_deleted(conn, "p-deleted")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,title,created_at) "
+        "VALUES('e-live','p1',1,'Episode',1)"
+    )
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,title,created_at) "
+        "VALUES('e-deleted','p-deleted',1,'Episode',1)"
+    )
+    conn.commit()
+    payload = {"package_id": "delivery_stable", "reason": "ship"}
+    live_run = _paused_run(
+        "delivery_package", "episode", "e-live",
+        config={"recovery_payload": payload},
+    )
+    _paused_run(
+        "delivery_package", "episode", "e-deleted",
+        config={"recovery_payload": payload},
+    )
+    spawned = _capture_spawn(monkeypatch)
+
+    resumed = orchestration_api.recover_delivery_tasks()
+
+    assert resumed == 1
+    child = conn.execute(
+        "SELECT id FROM workflow_runs WHERE parent_run_id=?", (live_run,),
+    ).fetchone()
+    assert child is not None
+    assert spawned == [("run", child["id"])], "回收站项目 p-deleted 的交付任务不应被拉起"
+
+
+def test_recover_video_completion_runs_skips_soft_deleted_project(tmp_path, monkeypatch) -> None:
+    """回收站项目残留的全片视频补齐 Supervisor 不应被启动恢复扫描纳入候选继续烧视频
+    配额，未删除项目的同类残留 episode 照常被扫描（不能把恢复功能整个关掉）。"""
+    conn = _fresh_database(tmp_path, monkeypatch)
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES('p-deleted','P2','created',2)"
+    )
+    _mark_soft_deleted(conn, "p-deleted")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,video_completion_mode,"
+        "active_video_run_id,storyboard_artifact_id,created_at) "
+        "VALUES('e-live','p1',1,'generating','complete','run-live','sb-live',1)"
+    )
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,video_completion_mode,"
+        "active_video_run_id,storyboard_artifact_id,created_at) "
+        "VALUES('e-deleted','p-deleted',1,'generating','complete','run-deleted','sb-deleted',1)"
+    )
+    conn.commit()
+    from app.video_supervisor import recover_video_completion_runs
+
+    monkeypatch.setattr(task_registry, "active", lambda *_args: False)
+    checked: list[str] = []
+
+    def fake_load_checkpoint(episode_id):
+        checked.append(episode_id)
+        return None
+
+    patch_video_supervisor_everywhere(monkeypatch, "load_latest_checkpoint", fake_load_checkpoint)
+
+    resumed = recover_video_completion_runs()
+
+    assert resumed == 0
+    assert checked == ["e-live"], "回收站项目 p-deleted 的 episode 不应进入恢复候选扫描"
+
+
 def test_portrait_view_redo_is_recreated_from_paused_run(tmp_path, monkeypatch) -> None:
     conn = _fresh_database(tmp_path, monkeypatch)
     parent = _paused_run(

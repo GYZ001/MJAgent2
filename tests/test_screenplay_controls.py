@@ -3131,6 +3131,82 @@ def test_recovery_resumes_repair_interrupted_by_service_restart(monkeypatch) -> 
     }
 
 
+def test_recovery_skips_screenplay_task_of_soft_deleted_project(monkeypatch) -> None:
+    """启动恢复扫描按 deleted_at 过滤：回收站项目里被中断的剧本任务不会被拉起
+    续跑，而未删除项目的同类残留任务照常恢复（不能把恢复功能整个关掉）。"""
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id, name, status, created_at) VALUES('p-deleted','demo3','created',?)",
+        (db.now(),),
+    )
+    conn.execute(
+        "INSERT INTO episodes(id, project_id, episode_no, title, screenplay_status, status, created_at) "
+        "VALUES('e-deleted','p-deleted',1,'回收站剧集','repairing','planned',?)",
+        (db.now(),),
+    )
+    conn.commit()
+    deleted_parent = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e-deleted",
+        input_fingerprint="repair-deleted",
+    )
+    live_parent = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="repair-live",
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='PAUSED_EXTERNAL', failure_code='SERVICE_RESTART' "
+        "WHERE id IN (?,?)",
+        (deleted_parent, live_parent),
+    )
+    conn.execute(
+        "UPDATE episodes SET active_screenplay_run_id=? WHERE id='e-deleted'",
+        (deleted_parent,),
+    )
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='repairing', screenplay_error='修复到第 2 步', "
+        "active_screenplay_run_id=? WHERE id='e1'",
+        (live_parent,),
+    )
+    # 软删除：deleted_at 非空即回收站，与账号删除共用同一判据
+    conn.execute("UPDATE projects SET deleted_at=? WHERE id='p-deleted'", (db.now(),))
+    conn.commit()
+
+    class Recorder:
+        run_id = "run_recovered_live"
+
+    spawned: list[tuple[str, str, str | None]] = []
+
+    def fake_recorder(*_args, **_kwargs):
+        return Recorder()
+
+    def fake_spawn(kind, key, coro, *, project_id=None):
+        spawned.append((kind, key, project_id))
+        coro.close()
+        return None
+
+    patch_api_everywhere(monkeypatch, "_new_screenplay_recorder", fake_recorder)
+    monkeypatch.setattr(task_registry, "spawn", fake_spawn)
+
+    resumed = api.recover_screenplay_tasks()
+
+    assert resumed == 1
+    assert spawned == [("screenplay", "e1", "p1")], (
+        "回收站项目 p-deleted 的残留剧本任务不应被拉起续跑，"
+        "未删除项目 p1 的残留任务必须照常恢复"
+    )
+    deleted_episode = conn.execute(
+        "SELECT screenplay_status, active_screenplay_run_id FROM episodes WHERE id='e-deleted'"
+    ).fetchone()
+    assert deleted_episode["screenplay_status"] == "repairing"
+    assert deleted_episode["active_screenplay_run_id"] == deleted_parent, (
+        "回收站项目的残留任务应保持原样，未被启动恢复接管或改写"
+    )
+
+
 def test_recovery_rebases_obsolete_contract_revision(monkeypatch) -> None:
     conn = db.get_conn()
     revision = ensure_production_revision(

@@ -419,6 +419,114 @@ def test_blocked_preflight_is_not_reactivated_from_error_prose(
     assert job["pipeline_stage"] == "preflight_blocked"
 
 
+def test_stall_sweeper_skips_preflight_retry_for_soft_deleted_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回收站项目残留的 preflight waiting_retry job 不应被巡检重试重新拉起，
+    未删除项目的同类残留任务照常重试（不能把巡检功能整个关掉）。"""
+    conn = _conn()
+    _seed(conn)
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES('p-deleted','P','created',1)"
+    )
+    conn.execute("UPDATE projects SET deleted_at=999 WHERE id='p-deleted'")
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
+           VALUES('e-deleted','p-deleted',1,'confirmed',1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,episode_id,project_id,status,
+               cancellation_requested,abandoned,created_at,updated_at
+           ) VALUES('j-live','video','s1','e1','p1','waiting_retry',0,0,1,1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,episode_id,project_id,status,
+               cancellation_requested,abandoned,created_at,updated_at
+           ) VALUES('j-deleted','video','s-deleted','e-deleted','p-deleted','waiting_retry',0,0,1,1)"""
+    )
+    conn.commit()
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    calls: list[str] = []
+    patch_worker_everywhere(
+        monkeypatch, "enqueue_shot",
+        lambda shot_id, **_kwargs: calls.append(shot_id) or {"task_accepted": True},
+    )
+
+    report = worker.reconcile_stalled_video_jobs()
+
+    assert calls == ["s1"], "回收站项目 p-deleted 的残留 preflight 任务不应被重试拉起"
+    assert report["preflight_retried"] == 1
+
+
+def test_stall_sweeper_skips_legacy_jobless_recovery_for_soft_deleted_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回收站项目里没有 job 的历史 VIDEO_PREFLIGHT_BLOCKED 镜头不应被巡检重新入队，
+    未删除项目的同类历史遗留镜头照常恢复。"""
+    conn = _conn()
+    _seed(conn)
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES('p-deleted','P','created',1)"
+    )
+    conn.execute("UPDATE projects SET deleted_at=999 WHERE id='p-deleted'")
+    conn.execute("UPDATE episodes SET status='generating' WHERE id='e1'")
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
+           VALUES('e-deleted','p-deleted',1,'generating',1)"""
+    )
+    conn.execute(
+        """INSERT INTO shots(
+               id,episode_id,shot_no,duration_s,shot_size,camera_move,scene_setting,
+               characters,action_desc,first_frame_desc,last_frame_desc,source_excerpt,
+               narration,dialogues,transition,continuity_from_prev
+           ) VALUES('s-deleted','e-deleted',1,10,'中景','固定','宝阁','[]','动作描述',
+                    '首帧','尾帧','原文', '', '[]','硬切',0)"""
+    )
+    for shot_id in ("s1", "s-deleted"):
+        conn.execute(
+            """INSERT INTO artifacts(
+                   id,type,scope_type,scope_id,version,status,trust_level,
+                   content_json,content_hash,created_at
+               ) VALUES(?, 'video_shot_issue','shot',?,1,'validated','T2',?,?,?)""",
+            (
+                f"art_{shot_id}", shot_id,
+                json.dumps({
+                    "episode_id": "e1" if shot_id == "s1" else "e-deleted",
+                    "shot_id": shot_id, "shot_no": 1,
+                    "issues": [{"code": "VIDEO_PREFLIGHT_BLOCKED"}],
+                }),
+                f"hash_{shot_id}", worker.now(),
+            ),
+        )
+    conn.commit()
+    _patch_enqueue_runtime(monkeypatch, conn)
+    calls: list[str] = []
+
+    def fake_enqueue(shot_id, **_kwargs):
+        calls.append(shot_id)
+        conn.execute(
+            """INSERT INTO jobs(id,kind,shot_id,episode_id,project_id,status,created_at,updated_at)
+               VALUES(?, 'video', ?, ?, ?, 'queued', 1, 1)""",
+            (
+                f"job_{shot_id}", shot_id,
+                "e1" if shot_id == "s1" else "e-deleted",
+                "p1" if shot_id == "s1" else "p-deleted",
+            ),
+        )
+        conn.commit()
+        return {"task_accepted": True}
+
+    monkeypatch.setattr(compiler, "compile_prompt", lambda *_a, **_k: "安全的视频提示词")
+    patch_worker_everywhere(monkeypatch, "enqueue_shot", fake_enqueue)
+
+    report = worker.reconcile_stalled_video_jobs()
+
+    assert calls == ["s1"], "回收站项目 p-deleted 的历史遗留镜头不应被重新入队"
+    assert report["legacy_jobless_recovered"] == 1
+
+
 def test_transient_preflight_failure_is_retried_by_sweeper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

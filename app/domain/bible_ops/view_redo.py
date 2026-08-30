@@ -125,9 +125,18 @@ def recover_portrait_view_redo_tasks() -> int:
     """重建进程重启时丢失的单视角异步任务。"""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, scope_id, config_snapshot_json FROM workflow_runs "
-        "WHERE workflow_type='portrait_view_redo' AND status='PAUSED_EXTERNAL' "
-        "AND recovered_by_run_id IS NULL ORDER BY updated_at"
+        """SELECT id, scope_id, config_snapshot_json FROM workflow_runs
+           WHERE workflow_type='portrait_view_redo' AND status='PAUSED_EXTERNAL'
+             AND recovered_by_run_id IS NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM projects p -- ALL_OWNERS: startup recovery scans
+               -- every owner's paused portrait single-view redo runs after a
+               -- process reload/restart; excludes soft-deleted (recycle-bin)
+               -- projects so their residual image regeneration is not
+               -- re-armed and does not burn quota
+                WHERE p.id=workflow_runs.scope_id AND p.deleted_at IS NOT NULL
+             )
+           ORDER BY updated_at"""
     ).fetchall()
     resumed = 0
     for row in rows:
@@ -324,9 +333,18 @@ def recover_scene_view_redo_tasks() -> int:
     """服务重启后从持久运行记录恢复场景单视角重做。"""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id,scope_id,config_snapshot_json FROM workflow_runs "
-        "WHERE workflow_type='scene_view_redo' AND status='PAUSED_EXTERNAL' "
-        "AND recovered_by_run_id IS NULL ORDER BY updated_at"
+        """SELECT id,scope_id,config_snapshot_json FROM workflow_runs
+           WHERE workflow_type='scene_view_redo' AND status='PAUSED_EXTERNAL'
+             AND recovered_by_run_id IS NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM projects p -- ALL_OWNERS: startup recovery scans
+               -- every owner's paused scene single-view redo runs after a
+               -- process reload/restart; excludes soft-deleted (recycle-bin)
+               -- projects so their residual image regeneration is not
+               -- re-armed and does not burn quota
+                WHERE p.id=workflow_runs.scope_id AND p.deleted_at IS NOT NULL
+             )
+           ORDER BY updated_at"""
     ).fetchall()
     resumed = 0
     for row in rows:

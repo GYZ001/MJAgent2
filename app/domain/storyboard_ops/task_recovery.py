@@ -23,7 +23,15 @@ def recover_storyboard_tasks() -> int:
     conn = get_conn()
     rows = conn.execute(
         "SELECT * FROM episodes "
-        "WHERE status='scripting' AND screenplay_status='ready' AND screenplay_json IS NOT NULL"
+        "WHERE status='scripting' AND screenplay_status='ready' "
+        "AND screenplay_json IS NOT NULL "
+        "AND NOT EXISTS ("
+        "SELECT 1 FROM projects p -- ALL_OWNERS: startup recovery scans "
+        "every owner's episodes for orphaned running storyboard tasks "
+        "after a process reload/restart; excludes soft-deleted "
+        "(recycle-bin) projects so their residual tasks are not resumed\n"
+        "WHERE p.id=episodes.project_id AND p.deleted_at IS NOT NULL"
+        ")"
     ).fetchall()
     resumed = 0
     for row in rows:

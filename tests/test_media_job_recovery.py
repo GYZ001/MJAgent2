@@ -221,6 +221,48 @@ def test_paused_budget_jobs_are_not_resumed(monkeypatch) -> None:
     assert job["status"] == "paused_budget"
 
 
+def test_soft_deleted_project_job_is_not_resumed(monkeypatch) -> None:
+    """回收站项目残留的中断媒体任务不应被启动恢复重新拉起继续烧算力，
+    未删除项目的同类残留任务照常恢复（不能把恢复功能整个关掉）。"""
+    conn = _conn()
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('proj-deleted','P',1)")
+    conn.execute("UPDATE projects SET deleted_at=999 WHERE id='proj-deleted'")
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('proj-live','P2',1)")
+    for suffix, project_id in (("deleted", "proj-deleted"), ("live", "proj-live")):
+        run_id, step_id, job_id = f"run_{suffix}", f"step_{suffix}", f"j_{suffix}"
+        conn.execute(
+            "INSERT INTO workflow_runs(id, workflow_type, scope_type, scope_id, status, "
+            "input_fingerprint, failure_code, failure_message, started_at, updated_at) "
+            "VALUES(?, 'video_generation', 'shot', ?, 'PAUSED_EXTERNAL', 'fp', "
+            "'SERVICE_RESTART', '服务重启，可从安全检查点恢复', 1.0, 1.0)",
+            (run_id, f"shot_{suffix}"),
+        )
+        conn.execute(
+            "INSERT INTO step_runs(id, run_id, step_key, status, error_code, error_message, "
+            "started_at) "
+            "VALUES(?, ?, 'video_generation', 'FAILED', 'SERVICE_RESTART', "
+            "'服务重启，步骤已中断', 1.0)",
+            (step_id, run_id),
+        )
+        conn.execute(
+            "INSERT INTO jobs(id, kind, shot_id, version_id, episode_id, project_id, status, "
+            "run_id, step_run_id, lease_owner, lease_expires_at, created_at, updated_at) "
+            "VALUES(?, 'video', ?, ?, ?, ?, 'running', ?, ?, 'w0', 999999999.0, 1.0, 1.0)",
+            (job_id, f"shot_{suffix}", f"ver_{suffix}", f"ep_{suffix}", project_id, run_id, step_id),
+        )
+    conn.commit()
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker._queue, "put_nowait", lambda jid: None)
+
+    resumed = worker.recover_media_jobs()
+
+    assert resumed == 1
+    deleted_job = conn.execute("SELECT status FROM jobs WHERE id='j_deleted'").fetchone()
+    assert deleted_job["status"] == "running", "回收站项目的残留任务不应被复位为可调度状态"
+    live_job = conn.execute("SELECT status FROM jobs WHERE id='j_live'").fetchone()
+    assert live_job["status"] == "queued", "未删除项目的残留任务必须照常恢复"
+
+
 def test_page_approved_budget_overrides_static_safety_default(
     monkeypatch,
 ) -> None:

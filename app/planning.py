@@ -211,7 +211,7 @@ def recover_plan_tasks() -> int:
         "SELECT id FROM projects -- ALL_OWNERS: startup recovery scans every "
         "project for orphaned running episode-planning tasks after a process "
         "reload/restart; runs before traffic is accepted, no request context\n"
-        "WHERE plan_status='running'"
+        "WHERE plan_status='running' AND deleted_at IS NULL"
     ).fetchall():
         project_id = row["id"]
         if task_registry.active("plan", project_id):

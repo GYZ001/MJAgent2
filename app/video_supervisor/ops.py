@@ -124,7 +124,17 @@ def recover_video_completion_runs() -> int:
     rows = conn.execute(
         """SELECT id, project_id, status AS episode_status, active_video_run_id,
                   video_completion_mode, storyboard_artifact_id
-           FROM episodes WHERE video_completion_mode='complete'"""
+           FROM episodes
+           WHERE video_completion_mode='complete'
+             AND NOT EXISTS (
+               SELECT 1 FROM projects p -- ALL_OWNERS: startup recovery scans
+               -- every owner's episodes for an interrupted full-episode video
+               -- completion Supervisor after a process reload/restart;
+               -- excludes soft-deleted (recycle-bin) projects so their
+               -- residual video generation is not re-armed and does not
+               -- burn quota
+                WHERE p.id=episodes.project_id AND p.deleted_at IS NOT NULL
+             )"""
     ).fetchall()
     resumed = 0
 

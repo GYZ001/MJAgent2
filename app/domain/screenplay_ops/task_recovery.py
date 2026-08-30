@@ -147,25 +147,36 @@ def recover_screenplay_tasks() -> int:
     rows = conn.execute(
         """SELECT e.*
              FROM episodes e
-            WHERE (
-                    e.screenplay_status IN ('queued','running')
-                    AND COALESCE(e.screenplay_error, '') NOT LIKE 'CANCELLING:%'
-                    AND NOT EXISTS(
-                        SELECT 1 FROM workflow_runs cancelled
-                         WHERE cancelled.id=e.active_screenplay_run_id
-                           AND cancelled.status IN ('CANCELLED','CANCELLING')
-                    )
+            WHERE NOT EXISTS (
+                    SELECT 1 FROM projects p -- ALL_OWNERS: startup recovery
+                    -- scans every owner's episodes for orphaned running
+                    -- screenplay-generation tasks after a process
+                    -- reload/restart; excludes soft-deleted (recycle-bin)
+                    -- projects so their residual tasks are not resumed and
+                    -- do not burn quota
+                     WHERE p.id=e.project_id AND p.deleted_at IS NOT NULL
                   )
-               OR (
-                    e.screenplay_status='repairing'
-                    AND EXISTS(
-                        SELECT 1 FROM workflow_runs wr
-                         WHERE wr.id=e.active_screenplay_run_id
-                           AND wr.workflow_type='screenplay'
-                           AND wr.status='PAUSED_EXTERNAL'
-                           AND wr.recovered_by_run_id IS NULL
-                    )
-               )"""
+              AND (
+                    (
+                        e.screenplay_status IN ('queued','running')
+                        AND COALESCE(e.screenplay_error, '') NOT LIKE 'CANCELLING:%'
+                        AND NOT EXISTS(
+                            SELECT 1 FROM workflow_runs cancelled
+                             WHERE cancelled.id=e.active_screenplay_run_id
+                               AND cancelled.status IN ('CANCELLED','CANCELLING')
+                        )
+                      )
+                   OR (
+                        e.screenplay_status='repairing'
+                        AND EXISTS(
+                            SELECT 1 FROM workflow_runs wr
+                             WHERE wr.id=e.active_screenplay_run_id
+                               AND wr.workflow_type='screenplay'
+                               AND wr.status='PAUSED_EXTERNAL'
+                               AND wr.recovered_by_run_id IS NULL
+                        )
+                   )
+              )"""
     ).fetchall()
     resumed = 0
     for row in rows:

@@ -44,7 +44,7 @@ def recover_bible_tasks() -> int:
         "FROM projects -- ALL_OWNERS: startup recovery scans every project for "
         "orphaned running bible tasks after a process reload/restart; runs "
         "before traffic is accepted, no request/Principal context\n"
-        "WHERE bible_status='running'"
+        "WHERE bible_status='running' AND deleted_at IS NULL"
     ).fetchall()
     resumed = 0
     for r in rows:
@@ -102,15 +102,18 @@ def recover_character_ref_tasks() -> int:
            -- for orphaned running portrait-batch tasks after a process
            -- reload/restart; runs before traffic is accepted, no request
            -- context
-           WHERE refs_status='running'
-              OR EXISTS (
-                  SELECT 1 FROM workflow_runs wr
-                   WHERE wr.workflow_type='character_references'
-                     AND wr.scope_type='project'
-                     AND wr.scope_id=p.id
-                     AND wr.status='PAUSED_EXTERNAL'
-                     AND wr.recovered_by_run_id IS NULL
-              )"""
+           WHERE p.deleted_at IS NULL
+             AND (
+               refs_status='running'
+                  OR EXISTS (
+                      SELECT 1 FROM workflow_runs wr
+                       WHERE wr.workflow_type='character_references'
+                         AND wr.scope_type='project'
+                         AND wr.scope_id=p.id
+                         AND wr.status='PAUSED_EXTERNAL'
+                         AND wr.recovered_by_run_id IS NULL
+                  )
+             )"""
     ).fetchall()
     resumed = 0
     for row in rows:
@@ -160,8 +163,10 @@ def recover_scene_ref_tasks() -> int:
         "FROM projects -- ALL_OWNERS: startup recovery scans every project for "
         "orphaned scene-asset tasks after a process reload/restart; runs "
         "before traffic is accepted, no request context\n"
-        "WHERE scene_refs_status='running' "
+        "WHERE deleted_at IS NULL AND ("
+        "scene_refs_status='running' "
         "OR (scene_refs_status='idle' AND bible_status='ready')"
+        ")"
     ).fetchall()
     resumed = 0
     for row in rows:

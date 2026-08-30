@@ -1343,6 +1343,74 @@ def test_storyboard_recovery_resumes_service_restart_and_persists_pointer(
     assert spawned == {"kind": "storyboard", "key": "e1", "project_id": "p1"}
 
 
+def test_storyboard_recovery_skips_soft_deleted_project(
+    storyboard_db, monkeypatch,
+):
+    """回收站项目里被服务重启中断的分镜任务不应被启动恢复重新拉起，
+    未删除项目的同类残留任务照常恢复（不能把恢复功能整个关掉）。"""
+    parent = WorkflowRecorder.create(
+        workflow_type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="restart-live",
+    )
+    parent.start()
+    parent.pause_external("服务重启", conn=None)
+    storyboard_db.execute(
+        "UPDATE episodes SET status='scripting',active_storyboard_run_id=? WHERE id='e1'",
+        (parent.run_id,),
+    )
+    screenplay = {"id": "script-2", "episode_no": 1, "title": "回收站测试", "full_script_text": "测试正文2"}
+    storyboard_db.execute(
+        """INSERT INTO projects(id,name,bible_json,bible_status,plan_status,created_at)
+           VALUES('p-deleted','回收站项目','','ready','ready',1)"""
+    )
+    storyboard_db.execute(
+        """INSERT INTO episodes(
+               id,project_id,episode_no,title,source_chapters,target_duration_s,
+               screenplay_json,screenplay_status,screenplay_artifact_id,status,created_at
+           ) VALUES('e-deleted','p-deleted',1,'回收站集','[1]',10,?,'ready','screenplay-v2','scripting',1)""",
+        (json.dumps(screenplay, ensure_ascii=False),),
+    )
+    deleted_parent = WorkflowRecorder.create(
+        workflow_type="storyboard",
+        scope_type="episode",
+        scope_id="e-deleted",
+        input_fingerprint="restart-deleted",
+    )
+    deleted_parent.start()
+    deleted_parent.pause_external("服务重启", conn=None)
+    storyboard_db.execute(
+        "UPDATE episodes SET active_storyboard_run_id=? WHERE id='e-deleted'",
+        (deleted_parent.run_id,),
+    )
+    storyboard_db.execute(
+        "UPDATE projects SET deleted_at=999 WHERE id='p-deleted'"
+    )
+    storyboard_db.commit()
+
+    spawned: list[dict] = []
+
+    def fake_spawn(kind, key, coro, *, project_id=None):
+        spawned.append({"kind": kind, "key": key, "project_id": project_id})
+        coro.close()
+        return None
+
+    monkeypatch.setattr(task_registry, "spawn", fake_spawn)
+
+    assert api.recover_storyboard_tasks() == 1
+    assert spawned == [{"kind": "storyboard", "key": "e1", "project_id": "p1"}], (
+        "回收站项目 p-deleted 的残留分镜任务不应被拉起续跑"
+    )
+    deleted_episode = storyboard_db.execute(
+        "SELECT status,active_storyboard_run_id FROM episodes WHERE id='e-deleted'"
+    ).fetchone()
+    assert deleted_episode["status"] == "scripting"
+    assert deleted_episode["active_storyboard_run_id"] == deleted_parent.run_id, (
+        "回收站项目的残留任务应保持原样，未被启动恢复接管"
+    )
+
+
 def test_storyboard_recovery_does_not_take_over_user_pause(
     storyboard_db, monkeypatch,
 ):
