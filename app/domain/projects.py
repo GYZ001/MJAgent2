@@ -1,14 +1,56 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+import json
 
-try:
-    router
-except NameError:  # pragma: no cover - used when importing this module directly
-    from app.domain.common import *
+from collections.abc import Iterable
+from pathlib import Path
+
+from fastapi import (
+    Body,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+)
+
+from app import (
+    config,
+    task_registry,
+    worker,
+)
+from app.db import (
+    get_conn,
+    new_id,
+    now,
+    rows_to_dicts,
+)
+from app.domain.common import (
+    _as_body_dict,
+    _episode_or_404,
+    _media_url,
+    _project_or_404,
+    _recover_orphan_bible_dicts,
+    router,
+)
+from app.evidence import repository as evidence_repository
+from app.ingest import ingest_novel
+from app.media_urls import build_media_url
+from app.novel_formats import (
+    SUPPORTED_NOVEL_LABEL,
+    novel_file_suffix,
+    prepare_novel_bytes,
+    validate_novel_filename,
+)
+from app.planning import chapter_preview
+from app.schemas import EpisodeScreenplay
 
 
 _SQLITE_IN_CHUNK_SIZE = 400
+
+# 软删除项目在回收站保留的时长；到期由 sweep_expired_deleted_projects 彻底清理。
+# 判据是 deleted_at 时间戳（见 app/db.py MIGRATIONS 的列注释），这个常量只用来
+# 算「到期时间」，不是驱动清理的计时器本身。
+PROJECT_RECYCLE_BIN_RETENTION_S = 24 * 3600
 
 
 def _project_task_timings(conn, project: dict) -> dict[str, dict[str, float | None]]:
@@ -344,6 +386,8 @@ def list_projects():
     principal = get_current_principal()
     # 系统管理员看全部；普通用户只看自己所属工作空间下的项目——RBAC 第四阶段
     # 收紧点之一，此前这里没有任何 WHERE，任何登录用户都能看到全量项目列表。
+    # deleted_at IS NULL：软删除的项目进了回收站，不再出现在正常列表——
+    # 回收站专用列表见 list_deleted_projects()。
     if principal is not None and not principal.is_system_admin:
         workspace_ids = list(principal.workspace_roles.keys())
         if not workspace_ids:
@@ -351,16 +395,53 @@ def list_projects():
         marks = ",".join("?" for _ in workspace_ids)
         rows = rows_to_dicts(conn.execute(
             "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at "
-            f"FROM projects WHERE workspace_id IN ({marks}) ORDER BY created_at DESC",
+            f"FROM projects WHERE deleted_at IS NULL AND workspace_id IN ({marks}) ORDER BY created_at DESC",
             workspace_ids,
         ).fetchall())
     else:
         rows = rows_to_dicts(conn.execute(
-            "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at FROM projects ORDER BY created_at DESC").fetchall())
+            "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at "
+            "FROM projects WHERE deleted_at IS NULL ORDER BY created_at DESC").fetchall())
     _recover_orphan_bible_dicts(conn, rows)
     for p in rows:
         p["chapter_count"] = conn.execute("SELECT COUNT(*) c FROM chapters WHERE project_id=?", (p["id"],)).fetchone()["c"]
         p["episode_count"] = conn.execute("SELECT COUNT(*) c FROM episodes WHERE project_id=?", (p["id"],)).fetchone()["c"]
+    return rows
+
+
+@router.get("/projects/deleted")
+def list_deleted_projects():
+    """回收站：已软删除但还没到 24 小时保留期（或还没被手动彻底清理）的项目。
+
+    必须注册在 ``GET /projects/{project_id}`` 之前（见本文件靠后处该路由的
+    注册位置）——否则 Starlette 会先把 "deleted" 当成 project_id 匹配掉。
+    """
+    from app.auth.principal import get_current_principal
+
+    conn = get_conn()
+    principal = get_current_principal()
+    if principal is not None and not principal.is_system_admin:
+        workspace_ids = list(principal.workspace_roles.keys())
+        if not workspace_ids:
+            return []
+        marks = ",".join("?" for _ in workspace_ids)
+        rows = rows_to_dicts(conn.execute(
+            "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at, deleted_at "
+            f"FROM projects WHERE deleted_at IS NOT NULL AND workspace_id IN ({marks}) "
+            "ORDER BY deleted_at DESC",
+            workspace_ids,
+        ).fetchall())
+    else:
+        rows = rows_to_dicts(conn.execute(
+            "SELECT id, name, status, novel_chars, bible_status, plan_status, created_at, deleted_at "
+            "FROM projects WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC").fetchall())
+    stamp = now()
+    for p in rows:
+        p["chapter_count"] = conn.execute("SELECT COUNT(*) c FROM chapters WHERE project_id=?", (p["id"],)).fetchone()["c"]
+        p["episode_count"] = conn.execute("SELECT COUNT(*) c FROM episodes WHERE project_id=?", (p["id"],)).fetchone()["c"]
+        purge_at = float(p["deleted_at"]) + PROJECT_RECYCLE_BIN_RETENTION_S
+        p["purge_at"] = purge_at
+        p["retention_seconds_remaining"] = max(0.0, purge_at - stamp)
     return rows
 
 def _attach_character_portraits(conn, project_id: str, bible: dict) -> None:
@@ -1615,8 +1696,35 @@ async def delete_episode(episode_id: str):
     return await _delete_episode_core(episode_id)
 
 
+def _deleted_project_or_404(project_id: str) -> dict:
+    """回收站专用存在性校验：只认已软删除（``deleted_at`` 非空）的项目。
+
+    与 ``_project_or_404``（app.domain.common）互补而非重复：那个函数只认
+    "正常"（未删除）项目，这个只认"回收站里"的项目——恢复/彻底清理必须落在
+    这条判据上，否则一个还没删除的项目也能被拿来"彻底清理"。
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM projects WHERE id=? AND deleted_at IS NOT NULL", (project_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, f"回收站中不存在该项目：{project_id}")
+    return dict(row)
+
+
 async def _delete_project_core(project_id: str) -> dict:
-    """删除项目的领域逻辑，供 REST 路由与 ``project.delete`` Command Handler 共用。"""
+    """软删除的领域逻辑，供 REST 路由与 ``project.delete`` Command Handler 共用。
+
+    只把项目标记进回收站（``deleted_at``），不删除任何数据库行、不碰磁盘文件。
+    24 小时后由 ``sweep_expired_deleted_projects`` 自动彻底清理，用户也可以
+    随时在回收站里手动恢复或彻底清理——见 ``_restore_project_core`` /
+    ``_purge_project_core``。
+
+    在途任务的处理：与旧版硬删除一致，先核对供应商付费任务是否已到终态、
+    再取消项目级后台协程——回收站里的项目不应该继续烧算力。这一步失败
+    （``ProviderTasksNotTerminalError``）会整体拒绝这次软删除，用户需要等
+    任务到终态或去控制台核对后重试；不提供强制忽略。
+    """
     from app.completion_grant import (
         assert_provider_tasks_clearable,
         prepare_provider_tasks_for_clear,
@@ -1627,15 +1735,92 @@ async def _delete_project_core(project_id: str) -> dict:
     provider_reconciliation = await reconcile_project_provider_tasks_for_clear(
         project_id,
         conn=get_conn(),
-        evidence_source="project_delete_terminal_reconcile",
+        evidence_source="project_soft_delete_terminal_reconcile",
     )
     # Fast preflight before cancelling any producer. The authoritative check is
-    # repeated inside the deletion transaction after all local writers stop.
+    # repeated inside the update transaction after all local writers stop.
     assert_provider_tasks_clearable(
         project_id=project_id,
         conn=get_conn(),
     )
-    # 先停止并等待所有项目级后台协程退出，防止删库后任务继续回写孤儿版本/参考图。
+    # 先停止并等待所有项目级后台协程退出，防止回收站里的项目继续跑生成/烧算力；
+    # 被取消的任务各自的 CancelledError 处理器会把 bible_status 等字段翻成终态
+    # （见 app/domain/bible_ops/task_run.py），启动恢复扫描因此不会把它当成
+    # "重启丢失的在途任务"再拉起来。
+    cancelled_tasks = await task_registry.cancel_project(project_id)
+    conn = get_conn()
+    stamp = now()
+    try:
+        prepare_provider_tasks_for_clear(
+            project_id=project_id,
+            conn=conn,
+        )
+        cur = conn.execute(
+            "UPDATE projects SET deleted_at=? WHERE id=? AND deleted_at IS NULL",
+            (stamp, project_id),
+        )
+        conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    if cur.rowcount != 1:
+        # 与另一次并发的软删除请求赛跑输了：对方已经先把它标进回收站。
+        raise HTTPException(409, "项目已在回收站中")
+    return {
+        "deleted": project_id,
+        "deleted_at": stamp,
+        "purge_at": stamp + PROJECT_RECYCLE_BIN_RETENTION_S,
+        "cancelled_tasks": cancelled_tasks,
+        "provider_reconciliation": provider_reconciliation,
+    }
+
+
+async def _restore_project_core(project_id: str) -> dict:
+    """把项目从回收站恢复成正常项目：清空 ``deleted_at``，不改动其余任何数据。"""
+    _deleted_project_or_404(project_id)
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE projects SET deleted_at=NULL WHERE id=? AND deleted_at IS NOT NULL",
+            (project_id,),
+        )
+        conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    if cur.rowcount != 1:
+        raise HTTPException(404, f"回收站中不存在该项目：{project_id}")
+    return {"restored": project_id}
+
+
+async def _purge_project_core(project_id: str) -> dict:
+    """彻底清理：只对已在回收站的项目生效，物理删除数据库行与磁盘产物。
+
+    破坏性操作的原子性：数据库删除全部提交成功之后才执行 ``shutil.rmtree``；
+    数据库提交失败（异常/回滚）时磁盘上一个文件都不会被动。反过来的顺序
+    （先删文件）一旦中途失败，会把仍在数据库里的行指向已经消失的文件——
+    比"删除慢了一步但数据完好"更危险。
+    """
+    from app.completion_grant import (
+        assert_provider_tasks_clearable,
+        prepare_provider_tasks_for_clear,
+        reconcile_project_provider_tasks_for_clear,
+    )
+
+    project = _deleted_project_or_404(project_id)
+    provider_reconciliation = await reconcile_project_provider_tasks_for_clear(
+        project_id,
+        conn=get_conn(),
+        evidence_source="project_purge_terminal_reconcile",
+    )
+    assert_provider_tasks_clearable(
+        project_id=project_id,
+        conn=get_conn(),
+    )
+    # 软删除时已经取消过一轮；这里再取消一次是防御性的（例如用户在软删除后
+    # 短暂恢复、又发起新任务、又再次软删除的场景），不是重复劳动的赘余。
     cancelled_tasks = await task_registry.cancel_project(project_id)
     conn = get_conn()
     try:
@@ -1655,7 +1840,14 @@ async def _delete_project_core(project_id: str) -> dict:
         conn.execute("DELETE FROM jobs WHERE project_id=?", (project_id,))
         conn.execute("DELETE FROM character_portraits WHERE project_id=?", (project_id,))
         conn.execute("DELETE FROM scene_references WHERE project_id=?", (project_id,))
-        conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+        # deleted_at IS NOT NULL：只删仍在回收站里的这一行，防止跟一次并发的
+        # 恢复请求赛跑——真撞上了，物理清理就整体失败，磁盘文件原封不动
+        # （下面的 rmtree 不会执行），下一轮清理再来。
+        purge_cur = conn.execute(
+            "DELETE FROM projects WHERE id=? AND deleted_at IS NOT NULL", (project_id,)
+        )
+        if purge_cur.rowcount != 1:
+            raise HTTPException(409, "项目已被恢复，取消本次彻底清理")
         conn.commit()
     except BaseException:
         if conn.in_transaction:
@@ -1665,11 +1857,84 @@ async def _delete_project_core(project_id: str) -> dict:
     from app.config import PROJECTS_DIR
     shutil.rmtree(PROJECTS_DIR / project_id, ignore_errors=True)
     return {
-        "deleted": project_id,
+        "purged": project_id,
+        "name": project["name"],
         "cancelled_tasks": cancelled_tasks,
         "evidence_removed": evidence_removed,
         "provider_reconciliation": provider_reconciliation,
     }
+
+
+async def _purge_all_deleted_projects_core() -> dict:
+    """清空回收站：逐个彻底清理全部已软删除的项目。
+
+    每个项目的清理各自独立提交；一个项目失败（例如供应商任务未到终态）不
+    得阻塞其余项目——收集失败项返回，而不是让调用方一次报错看不到全貌。
+    """
+    conn = get_conn()
+    project_ids = [
+        row["id"] for row in conn.execute(
+            "SELECT id FROM projects WHERE deleted_at IS NOT NULL"
+        ).fetchall()
+    ]
+    purged: list[str] = []
+    failed: list[dict] = []
+    for pid in project_ids:
+        try:
+            await _purge_project_core(pid)
+            purged.append(pid)
+        except Exception as exc:  # noqa: BLE001 — 单个项目失败不得阻塞其余项目清空
+            from app.errors import log_error
+            rec = log_error(
+                exc,
+                action="project_purge_all",
+                context={"project_id": pid},
+                meta={"stage": "recycle_bin_purge_all"},
+            )
+            failed.append({"project_id": pid, "error_id": rec.error_id, "error": str(exc)})
+    return {"purged": purged, "purged_count": len(purged), "failed": failed}
+
+
+async def sweep_expired_deleted_projects() -> dict:
+    """24 小时保留期到期的项目自动彻底清理；由周期性系统任务调用（见
+    ``app.recovery``）。判据是 ``deleted_at`` 时间戳与当前时间的差值，不依赖
+    任何内存计时器——后端不管重启多少次，只要时间戳过期就会在下一轮巡检
+    被清理；供应商任务未到终态的项目会在这一轮失败并保留，下一轮重试。
+    """
+    conn = get_conn()
+    cutoff = now() - PROJECT_RECYCLE_BIN_RETENTION_S
+    project_ids = [
+        row["id"] for row in conn.execute(
+            "SELECT id FROM projects WHERE deleted_at IS NOT NULL AND deleted_at < ?",
+            (cutoff,),
+        ).fetchall()
+    ]
+    purged: list[str] = []
+    failed: list[dict] = []
+    for pid in project_ids:
+        try:
+            await _purge_project_core(pid)
+            purged.append(pid)
+        except Exception as exc:  # noqa: BLE001 — 单个项目失败不得阻塞其余到期项目
+            from app.errors import log_error
+            rec = log_error(
+                exc,
+                action="project_recycle_bin_sweep",
+                context={"project_id": pid},
+                meta={"stage": "recycle_bin_sweep"},
+            )
+            failed.append({"project_id": pid, "error_id": rec.error_id, "error": str(exc)})
+    return {"purged": purged, "purged_count": len(purged), "failed": failed}
+
+
+@router.delete("/projects/deleted")
+async def purge_all_deleted_projects():
+    """一键清空回收站。必须注册在 ``DELETE /projects/{project_id}`` 之前，
+    理由同 ``list_deleted_projects``：都是 "projects" 后接一个静态段。"""
+    from app.capabilities.dispatch import dispatch, respond_ui
+
+    result = await dispatch("project.purge_all", {}, initiator="ui")
+    return respond_ui(result)
 
 
 @router.delete("/projects/{project_id}")
@@ -1677,6 +1942,22 @@ async def delete_project(project_id: str):
     from app.capabilities.dispatch import dispatch, respond_ui
 
     result = await dispatch("project.delete", {"project_id": project_id}, initiator="ui")
+    return respond_ui(result)
+
+
+@router.post("/projects/{project_id}/restore")
+async def restore_project(project_id: str):
+    from app.capabilities.dispatch import dispatch, respond_ui
+
+    result = await dispatch("project.restore", {"project_id": project_id}, initiator="ui")
+    return respond_ui(result)
+
+
+@router.delete("/projects/{project_id}/purge")
+async def purge_project(project_id: str):
+    from app.capabilities.dispatch import dispatch, respond_ui
+
+    result = await dispatch("project.purge", {"project_id": project_id}, initiator="ui")
     return respond_ui(result)
 
 

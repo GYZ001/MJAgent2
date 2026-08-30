@@ -25,17 +25,23 @@ def _fp(parts: dict[str, Any]) -> str:
 def project_delete(args) -> PreflightResult:
     from app.completion_grant import provider_task_clearance_snapshot
 
+    # 软删除（2026-08-30）：project.delete 把项目移入回收站，不再物理删除任何
+    # 东西；deleted_at IS NULL 把已经在回收站里的项目也当"不存在"，同一语义
+    # 见 app.domain.common._project_or_404。真正的物理删除是 project.purge。
     conn = get_conn()
-    row = conn.execute("SELECT id, name, status FROM projects WHERE id=?", (args.project_id,)).fetchone()
+    row = conn.execute(
+        "SELECT id, name, status FROM projects WHERE id=? AND deleted_at IS NULL",
+        (args.project_id,),
+    ).fetchone()
     if not row:
         return PreflightResult(
             command="project.delete",
             allowed=False,
-            risk=RiskLevel.R3_DESTRUCTIVE,
+            risk=RiskLevel.R1_REVERSIBLE,
             summary="项目不存在",
             state_fingerprint=_fp({"project_id": args.project_id, "missing": True}),
             requires_confirmation=False,
-            confirmation_policy=ConfirmationPolicy.ALWAYS,
+            confirmation_policy=ConfirmationPolicy.NEVER,
             denial_code="not_found",
             denial_message="项目不存在",
         )
@@ -55,11 +61,12 @@ def project_delete(args) -> PreflightResult:
     return PreflightResult(
         command="project.delete",
         allowed=True,
-        risk=RiskLevel.R3_DESTRUCTIVE,
+        risk=RiskLevel.R1_REVERSIBLE,
         summary=(
-            f"将永久删除项目「{row['name']}」及其全部剧集/镜头/产物"
+            f"将把项目「{row['name']}」及其全部剧集/镜头/产物移入回收站，"
+            "24 小时内可随时恢复"
             + (
-                f"；删除前将只读核对 {blocker_count} 个供应商任务的终态"
+                f"；移入前将只读核对 {blocker_count} 个供应商任务的终态"
                 if blocker_count
                 else ""
             )
@@ -73,7 +80,7 @@ def project_delete(args) -> PreflightResult:
             },
         ),
         warnings=[
-            "此操作不可恢复",
+            "回收站保留 24 小时后自动彻底清理，届时不可恢复",
             *(
                 ["只会查询已有供应商任务并结算账本，不会创建新任务"]
                 if blocker_count
@@ -87,8 +94,8 @@ def project_delete(args) -> PreflightResult:
             "shots": shot_count,
             "provider_clearance": clearance,
         }),
-        requires_confirmation=True,
-        confirmation_policy=ConfirmationPolicy.ALWAYS,
+        requires_confirmation=False,
+        confirmation_policy=ConfirmationPolicy.NEVER,
     )
 
 

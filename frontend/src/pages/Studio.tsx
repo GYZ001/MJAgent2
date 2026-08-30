@@ -1,8 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { api, Project } from '../api'
+import { api, DeletedProject, Project } from '../api'
 import { useNav, usePoll } from '../App'
 import QueryState from '../components/QueryState'
-import { useFocusTrap } from '../hooks/useFocusTrap'
 import { formatFileSize, novelTitleFromFilename, projectEntry, validateNovelFile } from './studioImport'
 
 const STATUS_LABEL: Record<string, [string, string]> = {
@@ -12,11 +11,25 @@ const STATUS_LABEL: Record<string, [string, string]> = {
 
 type ImportStage = 'idle' | 'selected' | 'uploading' | 'creating' | 'error'
 
+/** 剩余保留时间的展示：不到 1 分钟也如实显示，不假装还有很多时间。 */
+function formatRetention(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  if (hours > 0) return `约 ${hours} 小时 ${minutes} 分钟后彻底清理`
+  if (minutes > 0) return `约 ${minutes} 分钟后彻底清理`
+  return '即将彻底清理'
+}
+
 export default function Studio() {
   const { go, toast } = useNav()
-  const { data: projects, refresh, error, loading } = usePoll<Project[]>(() => api.get('/projects'), 6000)
+  const { data: projects, refresh, error, loading } = usePoll<Project[]>(() => api.listProjects(), 6000)
+  const {
+    data: deletedProjects, refresh: refreshDeleted, error: deletedError, loading: deletedLoading,
+  } = usePoll<DeletedProject[]>(() => api.listDeletedProjects(), 15000)
   const [name, setName] = useState('')
   const [showImport, setShowImport] = useState(window.location.pathname === '/workspaces/new')
+  const [showRecycleBin, setShowRecycleBin] = useState(false)
   const importTriggerRef = useRef<HTMLButtonElement | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const [drag, setDrag] = useState(false)
@@ -24,15 +37,17 @@ export default function Studio() {
   const [pendingAttachment, setPendingAttachment] = useState<{ fileKey: string; token: string } | null>(null)
   const [importStage, setImportStage] = useState<ImportStage>('idle')
   const [importError, setImportError] = useState<string | null>(null)
-  const [deleteTarget, setDeleteTarget] = useState<Project | null>(null)
-  const [deleting, setDeleting] = useState(false)
-  const deleteTriggerRef = useRef<HTMLButtonElement | null>(null)
+  // 单个项目的删除/恢复/彻底删除各自独立跑，用 id 记录"正在处理哪一个"，
+  // 避免同一个按钮被连点两次；清空回收站是另一条独立的忙碌态。
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [purgingAll, setPurgingAll] = useState(false)
   const projectNameId = useId()
   const importPanelId = useId()
   const importHelpId = useId()
   const uploading = importStage === 'uploading' || importStage === 'creating'
   const emptyProjectList = !loading && !error && projects?.length === 0
   const importVisible = showImport || emptyProjectList
+  const deletedCount = deletedProjects?.length ?? 0
   const observabilityIntent = new URLSearchParams(window.location.search).get('intent') === 'observability'
 
   useEffect(() => {
@@ -88,12 +103,12 @@ export default function Studio() {
       if (!attachmentToken) {
         const form = new FormData()
         form.append('file', file)
-        const attachment = await api.upload('/attachments/novel', form) as { attachment_token: string }
+        const attachment = await api.uploadNovelAttachment(form)
         attachmentToken = attachment.attachment_token
         setPendingAttachment({ fileKey, token: attachmentToken })
       }
       setImportStage('creating')
-      const res = await api.post('/projects/import', {
+      const res = await api.importProject({
         attachment_token: attachmentToken,
         name: projectName,
       })
@@ -125,31 +140,67 @@ export default function Studio() {
     }
   }
 
+  // 软删除后项目就移入回收站：点一下直接执行，不再弹确认框（2026-08-30 用户
+  // 拍板）——回收站本身就是保护机制，24 小时内随时能恢复。
   async function remove(p: Project) {
-    setDeleting(true)
+    setBusyId(p.id)
     try {
-      await api.del(`/projects/${p.id}`)
-      toast(`已删除《${p.name}》`)
-      setDeleteTarget(null)
-      window.requestAnimationFrame(() => {
-        importTriggerRef.current?.focus()
-      })
+      await api.deleteProject(p.id)
+      toast(`《${p.name}》已移入回收站，24 小时内可恢复`)
       refresh()
+      refreshDeleted()
       window.dispatchEvent(new Event('manju:projects-changed'))
     } catch (e: unknown) {
       toast((e as Error).message, true)
     } finally {
-      setDeleting(false)
+      setBusyId(null)
     }
   }
 
-  function closeDeleteDialog() {
-    setDeleteTarget(null)
-    window.requestAnimationFrame(() => {
-      const trigger = deleteTriggerRef.current
-      if (trigger?.isConnected) trigger.focus()
-      else importTriggerRef.current?.focus()
-    })
+  async function restore(p: DeletedProject) {
+    setBusyId(p.id)
+    try {
+      await api.restoreProject(p.id)
+      toast(`《${p.name}》已恢复`)
+      refresh()
+      refreshDeleted()
+      window.dispatchEvent(new Event('manju:projects-changed'))
+    } catch (e: unknown) {
+      toast((e as Error).message, true)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function purge(p: DeletedProject) {
+    setBusyId(p.id)
+    try {
+      await api.purgeProject(p.id)
+      toast(`《${p.name}》已彻底删除`)
+      refreshDeleted()
+    } catch (e: unknown) {
+      toast((e as Error).message, true)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function purgeAll() {
+    setPurgingAll(true)
+    try {
+      const result = await api.purgeAllDeletedProjects()
+      toast(
+        result.failed?.length
+          ? `已彻底删除 ${result.purged_count} 个项目，${result.failed.length} 个失败`
+          : `回收站已清空，彻底删除 ${result.purged_count} 个项目`,
+        Boolean(result.failed?.length),
+      )
+      refreshDeleted()
+    } catch (e: unknown) {
+      toast((e as Error).message, true)
+    } finally {
+      setPurgingAll(false)
+    }
   }
 
   return (
@@ -158,6 +209,16 @@ export default function Studio() {
         <div className="crumb">漫剧案头 / 项目空间</div>
         <div className="page-title-row">
           <h1>项目空间 <span className="sub">每本小说都是一个独立的创作工作空间</span></h1>
+          <button
+            className="btn"
+            type="button"
+            aria-expanded={showRecycleBin}
+            aria-controls="recycle-bin-panel"
+            aria-label={showRecycleBin ? '收起回收站' : `展开回收站，当前 ${deletedCount} 个项目`}
+            onClick={() => setShowRecycleBin(v => !v)}
+          >
+            回收站{deletedCount > 0 ? ` · ${deletedCount}` : ''}
+          </button>
           {!emptyProjectList && (
             <button
               ref={importTriggerRef}
@@ -189,6 +250,69 @@ export default function Studio() {
         <div className="monitor-state ready" role="status">
           旧观测链接未携带可验证的项目。请先从左侧项目空间切换器选择小说，系统会继续打开对应观测页。
         </div>
+      )}
+
+      {showRecycleBin && (
+        <section id="recycle-bin-panel" className="card recycle-bin-panel">
+          <div className="section-heading">
+            <div><span className="eyebrow">回收站</span><h3>已删除的项目</h3></div>
+            <span className="hint">24 小时保留期内可随时恢复；到期或手动彻底删除后不可恢复</span>
+          </div>
+          <QueryState
+            loading={deletedLoading}
+            error={deletedError}
+            hasData={deletedCount > 0}
+            objectName="回收站项目"
+            emptyText="回收站是空的。"
+            onRetry={refreshDeleted}
+          >
+            {deletedCount > 0 && (
+              <>
+                <ul className="recycle-bin-list">
+                  {deletedProjects!.map(p => (
+                    <li key={p.id} className="recycle-bin-row">
+                      <div className="recycle-bin-info">
+                        <b>{p.name}</b>
+                        <span>{p.chapter_count} 章 · {p.episode_count} 集 · {formatRetention(p.retention_seconds_remaining)}</span>
+                      </div>
+                      <div className="recycle-bin-actions">
+                        <button
+                          className="btn small"
+                          type="button"
+                          disabled={busyId === p.id}
+                          aria-label={`恢复项目《${p.name}》`}
+                          onClick={() => { void restore(p) }}
+                        >
+                          {busyId === p.id ? '处理中…' : '恢复'}
+                        </button>
+                        <button
+                          className="btn small danger"
+                          type="button"
+                          disabled={busyId === p.id}
+                          aria-label={`彻底删除项目《${p.name}》，不可恢复`}
+                          onClick={() => { void purge(p) }}
+                        >
+                          彻底删除
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                <div className="recycle-bin-footer">
+                  <button
+                    className="btn danger"
+                    type="button"
+                    disabled={purgingAll}
+                    aria-label="清空回收站，彻底删除全部已软删除的项目"
+                    onClick={() => { void purgeAll() }}
+                  >
+                    {purgingAll ? '清空中…' : '清空回收站'}
+                  </button>
+                </div>
+              </>
+            )}
+          </QueryState>
+        </section>
       )}
 
       {importVisible && <section id={importPanelId} className="card import-panel" aria-busy={uploading || undefined}>
@@ -351,10 +475,15 @@ export default function Studio() {
                     </span>
                     {p.bible_status === 'running' && <span className="stamp gold">人物谱生成中</span>}
                     {p.plan_status === 'running' && <span className="stamp gold">分集生成中</span>}
-                    <button className="project-delete" type="button" onClick={event => {
-                      deleteTriggerRef.current = event.currentTarget
-                      setDeleteTarget(p)
-                    }} aria-label={`永久删除项目《${p.name}》`}>删除项目</button>
+                    <button
+                      className="project-delete"
+                      type="button"
+                      disabled={busyId === p.id}
+                      onClick={() => { void remove(p) }}
+                      aria-label={`删除项目《${p.name}》，移入回收站，24 小时内可恢复`}
+                    >
+                      {busyId === p.id ? '处理中…' : '删除项目'}
+                    </button>
                   </div>
                 </article>
               )
@@ -363,54 +492,6 @@ export default function Studio() {
         </section>
         ) : null}
       </QueryState>
-      {deleteTarget && (
-        <ProjectDeleteDialog
-          project={deleteTarget}
-          deleting={deleting}
-          onClose={closeDeleteDialog}
-          onConfirm={() => { void remove(deleteTarget) }}
-        />
-      )}
     </>
-  )
-}
-
-function ProjectDeleteDialog({
-  project,
-  deleting,
-  onClose,
-  onConfirm,
-}: {
-  project: Project
-  deleting: boolean
-  onClose: () => void
-  onConfirm: () => void
-}) {
-  const trapRef = useFocusTrap(true, onClose)
-  return (
-    <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
-      if (event.currentTarget === event.target && !deleting) onClose()
-    }}>
-      <section ref={trapRef} className="impact-dialog project-delete-dialog" role="dialog" aria-modal="true"
-        aria-labelledby="project-delete-title">
-        <h3 id="project-delete-title">删除《{project.name}》？</h3>
-        <p className="error-banner">此操作不可恢复。</p>
-        <dl>
-          <div><dt>原著</dt><dd>{project.chapter_count} 章 · {(project.novel_chars / 10000).toFixed(1)} 万字</dd></div>
-          <div><dt>分集</dt><dd>{project.episode_count} 集</dd></div>
-          <div><dt>同时删除</dt><dd>人物谱、场景、剧本、分镜、参考图、视频与交付记录</dd></div>
-        </dl>
-        <div className="dialog-actions">
-          <button className="btn" type="button" disabled={deleting}
-            aria-label={deleting ? '保留项目，暂不可用：正在删除项目' : '保留项目，不执行删除'}
-            onClick={onClose}>保留项目</button>
-          <button className="btn danger" type="button" disabled={deleting}
-            aria-label={deleting ? '确认永久删除，暂不可用：删除请求正在处理' : `确认永久删除项目《${project.name}》`}
-            onClick={onConfirm}>
-            {deleting ? '删除中…' : '确认永久删除'}
-          </button>
-        </div>
-      </section>
-    </div>
   )
 }
