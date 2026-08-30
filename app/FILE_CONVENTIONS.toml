@@ -76,7 +76,6 @@ max_function_lines_python = 50
 "app/domain/screenplay_ops/activation.py" = 529
 "app/domain/screenplay_ops/edit.py" = 527
 "app/domain/screenplay_ops/status_snapshot.py" = 501
-"app/domain/screenplay_ops/task_body.py" = 562
 "app/domain/storyboard_ops/clear_apply.py" = 507
 "app/domain/storyboard_ops/evidence.py" = 504
 "app/domain/storyboard_ops/task_body.py" = 560
@@ -232,6 +231,8 @@ max_function_lines_python = 50
 "app/domain/review_wall.py" = 208
 "app/domain/screenplay_ops/activation.py" = 324
 "app/domain/screenplay_ops/batch.py" = 121
+"app/domain/screenplay_ops/character_discovery.py" = 82  # _screenplay_character_discovery，
+    # 从 task_body.py 按原样搬移（2026-08-30，层号治理，见 app/LAYERS.toml 组
 "app/domain/screenplay_ops/delete.py" = 120
 "app/domain/screenplay_ops/edit.py" = 334
 "app/domain/screenplay_ops/guarded.py" = 52

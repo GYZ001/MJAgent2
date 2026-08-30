@@ -1,6 +1,13 @@
 """剧本生成任务体：角色发现、任务体本体、录制器、恢复后录制任务、context pack。
 
 从 app/domain/screenplay_ops.py 按原样搬移；依赖 run_control。
+
+2026-08-30：``_screenplay_character_discovery`` 本体搬到同包
+``.character_discovery``（层号治理，见该文件 docstring）——本文件转发保持
+原名可从 ``.task_body``/``app.domain.screenplay_ops``/``app.domain`` 原样
+导入；``StageError`` 只是随之改成显式转发（``as`` 语法，见下方 import），
+本文件自身不再直接使用它，但 ``app.domain.screenplay_ops.__init__`` 仍从
+``.task_body`` 原样重导出这个符号，必须保留这个绑定。
 """
 from __future__ import annotations
 
@@ -17,7 +24,6 @@ from app.db import (
 )
 from app.domain.common import (
     _episode_source_text,
-    _project_bible_or_placeholder,
 )
 from app.evidence import repository as evidence_repository
 from app.harness.context import ContextPack
@@ -29,116 +35,17 @@ from app.orchestration.engine import (
 from app.orchestration.state_machine import StateConflict
 from app.stages import (
     SCREENPLAY_SOURCE_BUDGET_CHARS,
-    StageError,
+    StageError as StageError,
 )
 
+from .character_discovery import (
+    _screenplay_character_discovery as _screenplay_character_discovery,
+)
 from .run_control import (
     _assert_screenplay_run_owner,
     _project_screenplay_runtime_failure,
 )
 
-
-async def _screenplay_character_discovery(
-    episode_id: str,
-    source_text: str,
-    *,
-    draft_text: str = "",
-) -> dict:
-    """Run the required incremental cast pass for one screenplay generation."""
-    conn = get_conn()
-    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
-    if not ep:
-        raise StageError("新人物发现", ["剧集不存在"])
-    project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-    if not project:
-        raise StageError("新人物发现", ["项目不存在"])
-    _assert_screenplay_run_owner(episode_id)
-    if not (project["bible_json"] or "").strip():
-        # 剧本允许先于完整人物谱生产，但人物身份不能因此绕过预检。先原子写入
-        # 最小骨架，后续仍由既有增量流程建文字卡；bible_status 保持原值，
-        # 不把这个骨架伪装成用户已完成的人物谱。
-        placeholder = _project_bible_or_placeholder(project)
-        conn.execute(
-            "UPDATE projects SET bible_json=? "
-            "WHERE id=? AND COALESCE(TRIM(bible_json), '')=''",
-            (placeholder.model_dump_json(), ep["project_id"]),
-        )
-        conn.commit()
-        project = conn.execute(
-            "SELECT * FROM projects WHERE id=?", (ep["project_id"],)
-        ).fetchone()
-    bible = _project_bible_or_placeholder(project)
-    from app.portraits import (
-        ensure_cards_for_text,
-        persist_screenplay_character_resolutions,
-        screenplay_identity_scope_fingerprint,
-    )
-
-    # 人物发现是剧本 stage 0，跑在叙事蓝图**之前**，拿不到蓝图那份 paratext
-    # 判定，于是会把作者的话里的人名（作者笔名本身）当成出场人物立卡。
-    # 这里用同一份判据先净化一次；判不出来就退回原文，绝不挡住人物发现。
-    # 只净化**发现用**的文本，剧本链路的 source_text 一个字都不动——
-    # 那里需要完整原文做 audit_only 来源审计，删字会让 SRC 段编号错位。
-    from app.source_paratext import strip_paratext
-
-    discovery_text = await strip_paratext(
-        source_text, operation_id=f"screenplay.discovery.paratext:{episode_id}"
-    )
-    try:
-        result = await ensure_cards_for_text(
-            ep["project_id"],
-            ep["episode_no"],
-            discovery_text,
-            bible,
-            draft_text=draft_text,
-            generate_portraits=False,
-            write_guard=lambda: _assert_screenplay_run_owner(episode_id),
-        )
-    except (StageError, StateConflict):
-        raise
-    except Exception as exc:  # noqa: BLE001 - 统一转成剧本阶段可恢复诊断
-        from app.errors import code_ref
-
-        public = code_ref(
-            exc,
-            action="screenplay_character_discovery",
-            context={"episode_id": episode_id, "project_id": ep["project_id"]},
-        )
-        raise StageError(
-            "新人物发现",
-            [
-                f"人物身份模型暂未完成本集预检，请在剧本阶段重试（{public}）"
-                "[IDENTITY_DISCOVERY_FIXED_RETRY_BUDGET]"
-            ],
-        ) from exc
-    if result.get("errors"):
-        raise StageError("新人物发现", list(result["errors"]))
-    _assert_screenplay_run_owner(episode_id)
-    from app.observability.tracing import current_trace
-
-    expected_run_id = current_trace().run_id
-    result["resolutions"] = persist_screenplay_character_resolutions(
-        conn,
-        episode_id,
-        result.get("resolutions") or [],
-        retire_legacy_future_identity=True,
-        expected_active_run_id=expected_run_id,
-        replace_identity_scope=screenplay_identity_scope_fingerprint(
-            int(ep["episode_no"]), source_text
-        ),
-    )
-    for warning in result.get("warnings") or []:
-        errors.log_error(
-            None,
-            action="screenplay_character_discovery_warning",
-            context={
-                "project_id": ep["project_id"],
-                "episode_id": episode_id,
-                "episode_no": ep["episode_no"],
-            },
-            message=warning,
-        )
-    return result
 
 async def _screenplay_task(
     episode_id: str,

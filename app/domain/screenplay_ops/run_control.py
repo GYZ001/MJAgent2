@@ -1,6 +1,11 @@
 """剧本生成任务的运行态判定、持久化运行取消、所有者断言、命令总线重试授权与目标时长/运行态失败投影。
 
 从 app/domain/screenplay_ops.py 按原样搬移；依赖 status_snapshot。
+
+2026-08-30：``_assert_screenplay_run_owner`` 本体搬到同包 ``.run_owner``
+（层号治理，见该文件 docstring）——本文件转发保持原名可从 ``.run_control``/
+``app.domain.screenplay_ops``/``app.domain`` 原样导入，不影响既有调用点
+（``guarded.py``/``task_body.py`` 等仍从本文件取这个符号）。
 """
 from __future__ import annotations
 
@@ -27,6 +32,7 @@ from fastapi import (
 )
 from typing import Any
 
+from .run_owner import _assert_screenplay_run_owner as _assert_screenplay_run_owner
 from .status_snapshot import (
     _clear_unpublished_screenplay_ir,
     _screenplay_production_state,
@@ -88,30 +94,6 @@ def _cancel_persisted_screenplay_run(
         }:
             return False
         raise
-
-def _assert_screenplay_run_owner(
-    episode_id: str,
-    *,
-    run_id: str | None = None,
-) -> None:
-    if run_id is None:
-        from app.observability.tracing import current_trace
-
-        run_id = current_trace().run_id
-    if not run_id:
-        return
-    row = get_conn().execute(
-        "SELECT active_screenplay_run_id FROM episodes WHERE id=?",
-        (episode_id,),
-    ).fetchone()
-    actual = str(row["active_screenplay_run_id"] or "") if row else "missing"
-    if not row or actual != run_id:
-        raise StateConflict(
-            "screenplay_owner",
-            episode_id,
-            {run_id},
-            actual,
-        )
 
 @router.put("/episodes/{episode_id}/target-duration")
 def update_episode_target_duration(

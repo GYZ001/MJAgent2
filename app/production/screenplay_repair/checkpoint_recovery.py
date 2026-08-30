@@ -50,18 +50,23 @@ async def ensure_source_characters_incremental(
 ) -> dict[str, Any]:
     """增量追加 source-backed 角色，不触发完整 regenerate。
 
-    未做层号治理（2026-08-30，app/LAYERS.toml 组 12 遗留的最后一条上行边）：
-    ``_screenplay_character_discovery``（domain/screenplay_ops/task_body.py）
-    是剧本生成任务体里一整段业务流程（task_registry/evidence/harness.context/
-    orchestration.engine/state_machine/stages/portraits/source_paratext + 运行
-    所有权断言），不是可以安全抽取的纯函数——它已经深度嵌入 L5 的剧本编排任务
-    生命周期。真正的问题是「剧本修复流程（L4）复用了剧本生成任务体（L5）的一
-    整段逻辑」，机械抽符号会掩盖这个耦合；是否把 checkpoint_recovery 这类
-    「从检查点恢复」的操作本身归类为编排层，还是把「增量角色发现」重构成双方
-    都能调用的独立服务，需要下一轮架构决策，不在本轮范围内。
+    2026-08-30 层号治理（消掉 app/LAYERS.toml 组 12 全仓最后一条上行边）：
+    上一轮判定 ``_screenplay_character_discovery`` 整体不可安全抽取，是把
+    ``task_body.py`` 文件级 import 清单（含 task_registry/orchestration.engine
+    等，供该文件里 ``_screenplay_task``/``_recorded_screenplay_task`` 等其他
+    函数使用）误当成了这一个函数自己的依赖——逐行核对该函数体后发现它实际只
+    碰 app.db/app.errors/app.orchestration.state_machine/app.stages（均 L2-L4）
+    + 延迟 app.portraits/app.source_paratext/app.observability.tracing + 运行
+    所有权断言 ``_assert_screenplay_run_owner``（其自身也只碰 app.db +
+    state_machine，同样被同一个误判连带扣在 L5）。两者都已按「真搬移」（不改
+    签名/不改行为）拆到独立文件：``app.domain.screenplay_ops.run_owner``（L2）
+    与 ``app.domain.screenplay_ops.character_discovery``（L4），直接指向后者，
+    不再经 ``app.domain.screenplay_ops`` 包聚合入口（默认 L5）中转。
     """
-    from app.domain import screenplay_ops
-    return await screenplay_ops._screenplay_character_discovery(
+    from app.domain.screenplay_ops.character_discovery import (
+        _screenplay_character_discovery,
+    )
+    return await _screenplay_character_discovery(
         episode_id, source_text, draft_text=draft_text,
     )
 

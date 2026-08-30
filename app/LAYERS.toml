@@ -62,15 +62,22 @@
 #
 # 2026-08-30 第二轮：消掉 20 条里 19 条（见本文件下方「消剩余上行边」大段注释，
 # 组 5-11 逐条列了手法与依据）。实测 `--check-layers --max-violations 100000`
-# 从 20 降到 1——只剩 checkpoint_recovery -> screenplay_ops.
-# _screenplay_character_discovery 这一条真实设计张力（不是层号定错、不是可机械
-# 抽取的纯函数，见该调用点 app/production/screenplay_repair/
-# checkpoint_recovery.py 的函数级注释），不做机械修复、不加豁免掩盖。阈值不再
+# 从 20 降到 1，当时判定剩下的 checkpoint_recovery ->
+# screenplay_ops._screenplay_character_discovery 是「真实设计张力、不可机械抽取」
+# ——**这个判定后来被证伪**（见本文件下方组 12 注释）：那次判断把 task_body.py
+# 这个**文件的 import 汇总**当成了这个**函数实际用到的依赖**，而该函数体从未
+# 触碰 task_registry / orchestration.engine，那些是同文件兄弟函数用的。第三轮
+# 逐行读函数体后真搬移解掉，违规归 0。阈值不再
 # 加缓冲——1 是本轮改动触及的所有模块的真实实测值，且待修复的那一条本身不会因
 # 为其他 agent 的并行改动而变化（它是本文件之前就存在、与本轮无关的独立业务
 # 耦合，不像上一轮「20→22」时还要预留未声明模块的余量）；如果后续架构决策解决
 # 了它，把这里改成 0。
-max_violations = 1
+#
+# 2026-08-30 第三轮：复核「1」这条并证伪了「不可安全抽取」的结论（逐行核对
+# 该函数实际依赖，不是转述上一轮的文件级 import 清单——见下方「组 12」）。
+# 真搬移两个新文件后实测：--max-violations 100000 从 1 降到 0。全仓上行边清零，
+# 阈值同步收到地板 0；以后任何新增上行边都是真回潮，不再有历史缓冲可用。
+max_violations = 0
 
 # 豁免：每条必须带 reason 与 expires（YYYY-MM-DD），过期的豁免按违规计入总数。
 # 目前没有需要豁免的边——所有现存上行边都走 max_violations 阈值收敛，不在这里
@@ -347,8 +354,8 @@ allowed_exceptions = []
 # 文档建议不同，见下方各自注释）。全部是「新开小模块 / 精确声明子模块层号 +
 # 把消费方的包级 import 改成指向具体子模块」，不挪动任何函数体的业务逻辑本身
 # （group 5/9/11 除外，见下）。实测：--max-violations 100000 从 20 降到 1
-# （只剩 checkpoint_recovery -> screenplay_ops._screenplay_character_discovery
-# 这一条真实设计张力，见该函数调用点的注释，不用机械抽符号掩盖）。
+# （当时只剩 checkpoint_recovery -> screenplay_ops._screenplay_character_discovery
+# 一条；那次判它「不可机械抽取」是错的，第三轮已证伪并真搬移解掉，见组 12）。
 # ============================================================================
 
 # ---- 组 5：artifacts -> completion_grant（真搬移，新文件） ----
@@ -414,7 +421,29 @@ allowed_exceptions = []
     # lightweight_status.py 自身留在默认 L5（它 import app.domain.common.router
     # 真实 FastAPI 路由对象，不能整体降级）
 
-# ---- 组 12：checkpoint_recovery -> screenplay_ops._screenplay_character_
-# discovery（未修，设计张力，不做机械修复——见该调用点注释与
-# docs/layer_violations_plan_2026-08-30.md 组 12） ----
-# 不在此加豁免：CLAUDE.md 禁止黑白名单式豁免，这条边计入 max_violations。
+# ---- 组 12（2026-08-30 复核后解掉）：checkpoint_recovery -> screenplay_ops.
+# _screenplay_character_discovery。上一轮判定「不可安全抽取」，理由是该函数
+# 深度嵌入 task_registry/orchestration.engine 等 L5 编排依赖——独立核对该函数
+# 逐行实际用到的名字（不是它所在文件 task_body.py 的文件级 import 清单）后
+# 证伪：它本体只碰 app.db/app.errors/app.orchestration.state_machine/
+# app.stages（L2-L4）+ 延迟 app.portraits/app.source_paratext/
+# app.observability.tracing + 运行所有权断言 _assert_screenplay_run_owner
+# （run_control.py 里定义，自身也只碰 app.db + state_machine，同样被「文件级
+# 依赖当函数级依赖」的误判连带扣在 L5）。task_body.py 里真正需要 L5 编排依赖
+# 的是 _screenplay_task/_new_screenplay_recorder/
+# _reserve_screenplay_concurrency_slot/_screenplay_context_pack/
+# _recorded_screenplay_task 这几个函数，与本次搬移的函数无关，一行未动。
+# 真搬移两个新文件（与组 7a/7b/8/9/11 同一手法，都不改签名/不改行为）：
+"app.domain.screenplay_ops.run_owner" = 2  # 从 run_control.py 抽出
+    # _assert_screenplay_run_owner，只依赖 app.db + app.orchestration.
+    # state_machine + 延迟 app.observability.tracing；run_control.py 自身留在
+    # 默认 L5（它 import app.domain.common.router 真实 FastAPI 路由对象、
+    # 承载 update_episode_target_duration 路由，不能整体降级），转发保持
+    # 原名可从 .run_control 原样导入
+"app.domain.screenplay_ops.character_discovery" = 4  # 从 task_body.py 抽出
+    # _screenplay_character_discovery，依赖见上，最高层是延迟 app.portraits/
+    # app.source_paratext（均 L4）；_project_bible_or_placeholder 改直接从
+    # app.visual_styles（L1）导入，不再经 app.domain.common（默认 L5）转手
+    # （同一个对象，行为不变，与组 9 同一手法）；checkpoint_recovery.py 直接
+    # import 本模块，不再经 app.domain.screenplay_ops 包聚合入口中转
+# 实测：--max-violations 100000 从 1 降到 0。全仓上行边清零。

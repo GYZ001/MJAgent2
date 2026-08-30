@@ -548,21 +548,54 @@ def test_check_layers_subprocess_passes_with_configured_threshold() -> None:
     assert "OK" in result.stdout
 
 
-def test_check_layers_bare_invocation_is_strict_mode_against_real_repo() -> None:
-    # The repo currently has known upward edges (see
-    # docs/architecture_layering_plan_2026-08-29.md 2.2), so strict mode
-    # (no --max-violations) must be non-zero today. This pins the *mode's*
-    # behavior, not a specific count.
+def test_check_layers_bare_invocation_uses_zero_threshold() -> None:
+    """不带 ``--max-violations`` 就是严格模式：阈值取 0。
+
+    判据挂在**它自己报出来的阈值**上（``run_check_layers`` 里
+    ``threshold = 0 if max_violations is None else max_violations``），
+    与仓库当下有几条违规无关。
+
+    原来的版本断言「真实仓库今天至少有一条上行边，所以必须返回 1」——注释自称
+    「pins the mode's behavior, not a specific count」，实现却恰恰相反：它依赖
+    仓库**有**违规。2026-08-30 上行边清零后它当场变红，**代码变好把测试搞红了**。
+    本仓库这轮已经犯过同一个错两次（``assert config.star_import_exempt`` 在 exec
+    外观全部退场后变红、``assert collapsed["collapsed_packages"]`` 同理），根因
+    都是「断言了会被正常进展改变的瞬时状态」，与 CLAUDE.md「判据必须挂在这件事
+    本身成没成，不得挂在会被正常操作改动的整体状态上」是同一条。
+    """
+    bare = subprocess.run(
+        [sys.executable, "scripts/arch_graph.py", "--check-layers"],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert "阈值 0" in bare.stdout, f"裸调用必须用阈值 0：\n{bare.stdout}"
+
+    explicit = subprocess.run(
+        [sys.executable, "scripts/arch_graph.py", "--check-layers", "--max-violations", "7"],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert "阈值 7" in explicit.stdout, f"显式阈值必须被采用：\n{explicit.stdout}"
+
+
+def test_real_repo_currently_has_zero_upward_edges() -> None:
+    """全仓上行边必须保持 0 条——这是棘轮，不是现状描述。
+
+    2026-08-30 第三轮把最后一条边（``checkpoint_recovery`` ->
+    ``screenplay_ops._screenplay_character_discovery``）真搬移解掉后归零，
+    ``app/LAYERS.toml`` 的 ``max_violations`` 随之降到 0。这条把「零」锁死：
+    以后谁新引入一条上行边，CI 立刻红，而不是等人想起来去翻报告。
+
+    与上面那条的分工：那条验**工具的模式语义**，这条验**本仓库的实际状态**，
+    且方向只能更好——所以它不会因为代码改进而变红。
+    """
     result = subprocess.run(
         [sys.executable, "scripts/arch_graph.py", "--check-layers"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
+        cwd=ROOT, capture_output=True, text=True, check=False,
     )
 
-    assert result.returncode == 1
-    assert "FAIL" in result.stdout
+    assert result.returncode == 0, (
+        "全仓上行边必须保持 0 条。禁止靠 allowed_exceptions 白名单或调大 "
+        f"max_violations 绕过（CLAUDE.md「红线只降不升」）：\n{result.stdout}"
+    )
 
 
 def test_default_summary_output_is_unaffected_by_check_layers_flag() -> None:
