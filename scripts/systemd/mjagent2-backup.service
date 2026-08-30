@@ -1,0 +1,18 @@
+[Unit]
+Description=MJAgent2 SQLite hot backup of data/manju.db
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/MJAgent2
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/bin/python3 /root/MJAgent2/scripts/backup_manju_db.py
+Nice=15
+IOSchedulingClass=idle
+# 实测 743MB 库整备 60s；留 10x 余量，超时即失败可见，不留半截产物
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

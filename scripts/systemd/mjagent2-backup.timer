@@ -1,0 +1,12 @@
+[Unit]
+Description=Run MJAgent2 database backup daily
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+AccuracySec=1min
+# 关机错过的那次开机后补跑——备份漏一天不能靠运气
+Persistent=true
+Unit=mjagent2-backup.service
+
+[Install]
+WantedBy=timers.target
