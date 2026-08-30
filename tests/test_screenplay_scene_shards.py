@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from app import db, errors as app_errors, generation_concurrency
 from app import screenplay_scene_shards as scene_shards_module
+from app.media_pipeline import concurrency as media_concurrency
 from tests.conftest import (
     patch_screenplay_scene_shards_everywhere as _patch_scene_shards,
 )
@@ -4291,6 +4292,31 @@ def _shard(
     )
 
 
+def _pin_provider_channel_limit(monkeypatch, limit: int) -> None:
+    """把全局供应商槽位（"text_provider_calls"）的生效上限钉死为固定值。
+
+    该资源的生效并发自 app.media_pipeline.concurrency 的自适应通道机制接入后
+    （见 app.generation_concurrency._configured_limit）不再直读
+    ``generation_concurrency.get_setting``，只打这一个补丁不再对它有任何效力
+    ——测试会因为拿到真实 DB 配置或跨用例残留的通道缓存值（``channel_limit``
+    结果依赖模块级 ``_channels`` 缓存，不按测试/事件循环隔离）而拿到与预期
+    不符的并发上限，导致「等待方应当排队」或「两个槽位应当同时被占用」这
+    类断言随机 flaky、甚至挂起。直接钉死 ``channel_limit`` 的返回值，同时
+    短路 ``media_pipeline.concurrency`` 自己的 ``get_setting``/
+    ``memory_pressure_reason``，让这个数值不再受 DB、通道缓存、内存压力信
+    号或测试执行顺序影响（做法与 ``tests/test_generation_concurrency.py``
+    的 ``_single_provider_slot`` 一致）。
+    """
+    monkeypatch.setattr(
+        generation_concurrency,
+        "get_setting",
+        lambda key: str(limit) if key == "text_generation_concurrency" else None,
+    )
+    monkeypatch.setattr(media_concurrency, "get_setting", lambda key: None)
+    monkeypatch.setattr(media_concurrency, "channel_limit", lambda resource: limit)
+    monkeypatch.setattr(media_concurrency, "memory_pressure_reason", lambda: None)
+
+
 def _creative_shard(
     plan,
     blueprint: NarrativeBlueprint,
@@ -4624,11 +4650,7 @@ def test_scene_shard_ordinary_failure_lets_queued_real_provider_waiter_proceed(
         return max(minimum, min(maximum, values.get(key, default)))
 
     _patch_scene_shards(monkeypatch, "_setting_int", fixed_settings)
-    monkeypatch.setattr(
-        generation_concurrency,
-        "get_setting",
-        lambda key: "1" if key == "text_generation_concurrency" else None,
-    )
+    _pin_provider_channel_limit(monkeypatch, 1)
 
     async def wait_for_queued_peer() -> None:
         gate = generation_concurrency.gate_for("text_provider_calls")
@@ -4684,13 +4706,7 @@ def test_semantic_repair_gate_fences_queued_next_scene_ledger(
     monkeypatch,
     failure_kind: str,
 ) -> None:
-    monkeypatch.setattr(
-        generation_concurrency,
-        "get_setting",
-        lambda key: (
-            "1" if key == "text_generation_concurrency" else None
-        ),
-    )
+    _pin_provider_channel_limit(monkeypatch, 1)
 
     async def scenario() -> tuple[
         BaseException,
@@ -4966,6 +4982,12 @@ def test_scene_shard_batch_user_cancellation_does_not_mark_failed(
             raise
 
     _patch_scene_shards(monkeypatch, "_setting_int", fixed_settings)
+    # 两枚 shard 必须能同时占住供应商槽位（不排队）才能都跑进
+    # blocking_structured、都设起 started——槽位上限若被跨用例残留的自适应
+    # 通道缓存值压到 1（见 _pin_provider_channel_limit 的说明），第二枚 shard
+    # 会卡在拿槽位这一步，all_started 永远不触发，测试挂死。钉死为与本地
+    # per-episode parallelism 相同的 2，消除这个上限来源的不确定性。
+    _pin_provider_channel_limit(monkeypatch, 2)
     monkeypatch.setattr(
         scene_shards_module.model_gateway,
         "chat_structured",

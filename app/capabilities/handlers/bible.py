@@ -57,6 +57,32 @@ async def update(args: I.BibleUpdateInput) -> CommandResult:
     )
 
 
+async def set_style(args: I.BibleSetStyleInput) -> CommandResult:
+    """人物谱与场景库共用的统一画风入口：不重新生成角色内容，仅换画风并按需
+    重生成定妆照与场景图两条腿；未变化时幂等短路。见
+    ``app.domain.bible_ops.style_and_drafts.set_bible_visual_style`` 的完整语义。
+    """
+    from app import api
+
+    body = {
+        "style_name": args.style_name,
+        "expected_version": args.expected_version,
+        "confirm": bool(args.confirm),
+        "quote_id": args.quote_id,
+    }
+    outcome = await call_guarded(api.set_bible_visual_style, args.project_id, body)
+    if isinstance(outcome, CommandResult):
+        return outcome
+    summary = "画风未变化，未触发任何生成" if not outcome.get("changed") else (
+        "统一画风已更新" + ("；已重放为幂等确认" if outcome.get("idempotent_replay") else "，人物定妆照与场景图已发起重生成")
+    )
+    return succeeded(
+        summary,
+        data=outcome,
+        resource_uris=[f"manju://projects/{args.project_id}/bible"],
+    )
+
+
 async def portrait_update_prompt(args: I.PortraitUpdatePromptInput) -> CommandResult:
     from app import api
 

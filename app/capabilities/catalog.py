@@ -462,6 +462,24 @@ def _register_commands(registry) -> None:
             tags=("bible",),
         ),
         _cmd(
+            "bible.set_style",
+            title="配置统一画风",
+            description=(
+                "人物谱与场景库共用的统一画风配置：不重新生成角色外观/性格/关系，仅切换画风字段；"
+                "画风未变化时幂等短路不产生费用，实际变化时先返回人物+场景合并报价，确认后同一次"
+                "调用内依次发起定妆照与场景图两条全量重生成"
+            ),
+            input_model=I.BibleSetStyleInput,
+            risk=RiskLevel.R2_MATERIAL,
+            confirmation=ConfirmationPolicy.WHEN_IMPACT,
+            idempotency=IdempotencyPolicy.REQUIRED,
+            scopes={"manju:generation-media"},
+            side_effect="creates_paid_image_jobs_and_may_invalidate_downstream",
+            handler=h_bible.set_style,
+            rest_routes=("POST /api/projects/{project_id}/bible/style",),
+            tags=("bible", "portrait", "scene"),
+        ),
+        _cmd(
             "portrait.update_prompt",
             title="修改定妆描述",
             description="更新单角色画像 Prompt（可逆编辑）",

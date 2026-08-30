@@ -50,6 +50,13 @@ class BibleUpdateInput(StandardCommandInput):
     impact_preview_fingerprint: str | None = None
 
 
+class BibleSetStyleInput(StandardCommandInput):
+    project_id: str
+    style_name: str
+    confirm: bool = False
+    quote_id: str | None = None
+
+
 class PortraitUpdatePromptInput(StandardCommandInput):
     project_id: str
     character: str
