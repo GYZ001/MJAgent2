@@ -1,7 +1,7 @@
 """三档会员配额引擎：项目数 / 每模块并发 / 30 天 token 额度 / 30 天视频时长额度
-+ 一次性图像成本上限池。
+/ 30 天定妆照与场景图（图像）额度。
 
-四类配额语义互不混同，各自独立判据（CLAUDE.md「Gates and Criteria」）：
+五类配额语义互不混同，各自独立判据（CLAUDE.md「Gates and Criteria」）：
 - ``projects``：账号名下未软删除项目数上限，判据挂在 ``projects`` 表的实时计数
   （回收站已软删除的不计入）。
 - ``concurrency``：同一账号同一模块同时在跑的任务数上限，判据挂在
@@ -10,11 +10,16 @@
 - ``token``：文本/结构化调用的 ``usage.total_tokens``，按 30 天滚动周期累计。
 - ``video_seconds``：按镜固定 15 秒计（不是实际渲染时长），按 30 天滚动周期
   累计。
+- ``image``：定妆照/场景图生成成本，按各档位独立上限、与 token/video_seconds
+  共用同一个 30 天滚动周期（同一账号同一时刻只有一个周期锚点，随周期重置，
+  不再是终身一次性池）。额度用尽后续图像成本改记到 ``token`` 资源里
+  （``charge_image_cost`` 一次决定两笔分账，同一调用方事务提交或回滚，不会
+  出现"扣了图像额度没扣 token"的半途态）。
 
-一次性图像成本池（``IMAGE_POOL_CAP``）不随 30 天周期滚动——用哨兵
-``IMAGE_POOL_PERIOD_INDEX`` 存进同一张 ledger，代表"终身只有这一份"；用尽后续
-图像成本改记到 ``token`` 资源里（``charge_image_cost`` 一次决定两笔分账，同一
-调用方事务提交或回滚，不会出现"扣了池子没扣 token"的半途态）。
+三档图像额度数值来自实测：建一个项目的定妆照/场景图成本 2.22M–3.97M（三个只
+做筹备的真实项目）。free 300 万约等于每月能建 1 个项目——与 free 的项目数上限
+1 自洽；pro 900 万约 2-3 个（上限 3）；max 3000 万约 8-10 个（上限 10）。三档
+的图像额度与各自被允许持有的项目数是对齐的。
 
 幂等：``quota_ledger`` 对 ``(resource, attempt_key, reason)`` 加 UNIQUE 约束——
 同一次尝试（attempt）的同一个动作（charge/refund）只落一行；重放交给 SQLite
@@ -35,8 +40,6 @@ from app.db import now
 
 PERIOD_SECONDS = 30 * 86400.0
 SECONDS_PER_SHOT = 15.0
-IMAGE_POOL_CAP = 3_000_000.0
-IMAGE_POOL_PERIOD_INDEX = -1  # 终身池的哨兵周期号，永不随 30 天滚动前进
 
 MODULE_SCREENPLAY = "screenplay"
 MODULE_STORYBOARD = "storyboard"
@@ -50,19 +53,26 @@ class TierLimits:
     concurrency: int | None
     token: float | None
     video_seconds: float | None
+    image: float | None        # 定妆照/场景图成本上限，与 token 同周期滚动重置
 
 
 TIER_TABLE: dict[str, TierLimits] = {
-    "free": TierLimits("free", 1, 1, 300_000.0, 5 * 60.0),
-    "pro": TierLimits("pro", 3, 3, 900_000.0, 15 * 60.0),
-    "max": TierLimits("max", 10, 10, 3_000_000.0, 50 * 60.0),
+    "free": TierLimits("free", 1, 1, 300_000.0, 5 * 60.0, 3_000_000.0),
+    "pro": TierLimits("pro", 3, 3, 900_000.0, 15 * 60.0, 9_000_000.0),
+    "max": TierLimits("max", 10, 10, 3_000_000.0, 50 * 60.0, 30_000_000.0),
 }
 VALID_TIERS = frozenset(TIER_TABLE)
-_UNLIMITED = TierLimits("unlimited", None, None, None, None)
+_UNLIMITED = TierLimits("unlimited", None, None, None, None, None)
 
 _UPGRADE_PATH = {
-    "free": "升级到 Pro 档位（3 个项目 / 每模块 3 并发 / 90 万 token / 15 分钟视频）",
-    "pro": "升级到 Max 档位（10 个项目 / 每模块 10 并发 / 300 万 token / 50 分钟视频）",
+    "free": (
+        "升级到 Pro 档位（3 个项目 / 每模块 3 并发 / 90 万 token / 15 分钟视频 "
+        "/ 900 万定妆照与场景图额度）"
+    ),
+    "pro": (
+        "升级到 Max 档位（10 个项目 / 每模块 10 并发 / 300 万 token / 50 分钟视频 "
+        "/ 3000 万定妆照与场景图额度）"
+    ),
     "max": "已是最高付费档位；如需更高配额请联系管理员开通不限量账号",
 }
 
@@ -352,12 +362,14 @@ def charge_tokens(
 def charge_image_cost(
     conn: sqlite3.Connection, user_id: str, cost: float, *, attempt_key: str
 ) -> dict:
-    """图像生成成本：先扣「定妆照/场景图」终身上限池，池子不够再扣 30 天 token
-    额度；两段不足以覆盖时整体拒绝（两条 ledger 写入与调用方其它写入共享同一
-    个未提交事务，拒绝时整体回滚，不留"扣一半"的半途态）。"""
+    """图像生成成本：先扣本账号档位当前 30 天周期的「定妆照/场景图」额度，额
+    度不够再扣同一周期的 token 额度；两段不足以覆盖时整体拒绝（两条 ledger 写
+    入与调用方其它写入共享同一个未提交事务，拒绝时整体回滚，不留"扣一半"的
+    半途态）。image 与 token 用同一个 ``period_index``（同一账号同一周期锚
+    点），随 30 天周期一起重置，不再是终身一次性池。"""
     if cost <= 0:
         return {"pool_charged": 0.0, "token_charged": 0.0, "idempotent_replay": False}
-    pool_existing = _charge_exists(conn, "image_pool", attempt_key)
+    pool_existing = _charge_exists(conn, "image", attempt_key)
     token_existing = _charge_exists(conn, "token", attempt_key)
     if pool_existing is not None or token_existing is not None:
         return {
@@ -366,31 +378,32 @@ def charge_image_cost(
             "idempotent_replay": True,
         }
     limits = effective_limits(conn, user_id)
+    anchor = period_anchor(conn, user_id)
+    pidx = period_index(anchor)
     if limits.token is None:
-        # 无限量账号：全记进池子做审计留痕，不做上限判断。
+        # 无限量账号：全记进图像资源做审计留痕，不做上限判断。
         _record_ledger(
-            conn, user_id=user_id, resource="image_pool", pidx=IMAGE_POOL_PERIOD_INDEX,
+            conn, user_id=user_id, resource="image", pidx=pidx,
             attempt_key=attempt_key, reason="charge", delta=float(cost),
         )
         return {"pool_charged": float(cost), "token_charged": 0.0, "idempotent_replay": False}
-    pool_used = usage_for(conn, user_id, "image_pool", IMAGE_POOL_PERIOD_INDEX)
-    from_pool = min(cost, max(0.0, IMAGE_POOL_CAP - pool_used))
+    image_cap = limits.image if limits.image is not None else 0.0
+    pool_used = usage_for(conn, user_id, "image", pidx)
+    from_pool = min(cost, max(0.0, image_cap - pool_used))
     remainder = cost - from_pool
-    anchor = period_anchor(conn, user_id)
-    pidx = period_index(anchor)
     token_used = usage_for(conn, user_id, "token", pidx)
     if remainder > 0 and token_used + remainder > limits.token:
         raise QuotaExceeded(
             gate="token", tier=limits.tier, limit=limits.token, used=token_used,
             remaining=max(0.0, limits.token - token_used), reset_at=period_reset_at(anchor),
             message=(
-                "图像生成的一次性上限池已耗尽，30 天 token 额度也不足以覆盖"
+                "30 天定妆照/场景图额度已耗尽，30 天 token 额度也不足以覆盖"
                 f"剩余成本（{limits.tier} 档上限 {int(limits.token)}）"
             ),
         )
     if from_pool > 0:
         _record_ledger(
-            conn, user_id=user_id, resource="image_pool", pidx=IMAGE_POOL_PERIOD_INDEX,
+            conn, user_id=user_id, resource="image", pidx=pidx,
             attempt_key=attempt_key, reason="charge", delta=float(from_pool),
         )
     if remainder > 0:

@@ -105,13 +105,16 @@ def test_effective_limits_admin_and_unknown_user_are_unlimited():
 def test_effective_limits_match_tier_table():
     conn = get_conn()
     for tier, expected in (
-        ("free", (1, 1, 300_000.0, 300.0)),
-        ("pro", (3, 3, 900_000.0, 900.0)),
-        ("max", (10, 10, 3_000_000.0, 3000.0)),
+        ("free", (1, 1, 300_000.0, 300.0, 3_000_000.0)),
+        ("pro", (3, 3, 900_000.0, 900.0, 9_000_000.0)),
+        ("max", (10, 10, 3_000_000.0, 3000.0, 30_000_000.0)),
     ):
         uid = _make_user(tier)
         limits = quota.effective_limits(conn, uid)
-        assert (limits.projects, limits.concurrency, limits.token, limits.video_seconds) == expected
+        assert (
+            limits.projects, limits.concurrency, limits.token,
+            limits.video_seconds, limits.image,
+        ) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -157,19 +160,94 @@ def test_refund_without_prior_charge_is_a_safe_noop():
 def test_charge_image_cost_idempotent_across_pool_and_token_split():
     conn = get_conn()
     uid = _make_user("free")
-    # 先把池子打到只剩 100，再花 300：应该 100 走池子、200 走 token。
+    limits = quota.effective_limits(conn, uid)
+    pidx = quota.period_index(quota.period_anchor(conn, uid))
+    # 先把本周期的图像额度打到只剩 100，再花 300：应该 100 走图像额度、200 走 token。
     quota._record_ledger(
-        conn, user_id=uid, resource="image_pool", pidx=quota.IMAGE_POOL_PERIOD_INDEX,
-        attempt_key="prefill", reason="charge", delta=quota.IMAGE_POOL_CAP - 100,
+        conn, user_id=uid, resource="image", pidx=pidx,
+        attempt_key="prefill", reason="charge", delta=limits.image - 100,
     )
     r1 = quota.charge_image_cost(conn, uid, 300.0, attempt_key="img:1")
     r2 = quota.charge_image_cost(conn, uid, 300.0, attempt_key="img:1")
     conn.commit()
     assert r1 == {"pool_charged": 100.0, "token_charged": 200.0, "idempotent_replay": False}
     assert r2 == {"pool_charged": 100.0, "token_charged": 200.0, "idempotent_replay": True}
-    pidx = quota.period_index(quota.period_anchor(conn, uid))
     assert quota.usage_for(conn, uid, "token", pidx) == 200.0
-    assert quota.usage_for(conn, uid, "image_pool", quota.IMAGE_POOL_PERIOD_INDEX) == quota.IMAGE_POOL_CAP
+    assert quota.usage_for(conn, uid, "image", pidx) == limits.image
+
+
+def test_charge_image_cost_boundary_per_tier():
+    """三档图像额度各自独立：满档后立刻溢出到 token，不会互相污染彼此的上限。"""
+    conn = get_conn()
+    for tier, cap in (
+        ("free", 3_000_000.0), ("pro", 9_000_000.0), ("max", 30_000_000.0),
+    ):
+        uid = _make_user(tier)
+        r1 = quota.charge_image_cost(conn, uid, cap, attempt_key=f"img-{tier}-full")
+        conn.commit()
+        assert r1 == {"pool_charged": cap, "token_charged": 0.0, "idempotent_replay": False}
+
+        # 再花 1：图像额度已耗尽，整笔溢出到 token。
+        r2 = quota.charge_image_cost(conn, uid, 1.0, attempt_key=f"img-{tier}-overflow")
+        conn.commit()
+        assert r2 == {"pool_charged": 0.0, "token_charged": 1.0, "idempotent_replay": False}
+
+        pidx = quota.period_index(quota.period_anchor(conn, uid))
+        assert quota.usage_for(conn, uid, "image", pidx) == cap
+        assert quota.usage_for(conn, uid, "token", pidx) == 1.0
+
+
+def test_charge_image_cost_rejected_when_both_image_and_token_exhausted():
+    conn = get_conn()
+    uid = _make_user("free")
+    limits = quota.effective_limits(conn, uid)
+    # 图像额度用满，token 额度也用满：再来一分钱的图像成本都应该被整体拒绝。
+    quota.charge_image_cost(conn, uid, limits.image, attempt_key="img:fill-pool")
+    conn.commit()
+    quota.charge_tokens(conn, uid, limits.token, attempt_key="call:fill-token")
+    conn.commit()
+
+    with pytest.raises(quota.QuotaExceeded) as exc_info:
+        quota.charge_image_cost(conn, uid, 1.0, attempt_key="img:rejected")
+    detail = exc_info.value.detail
+    assert detail["gate"] == "token"
+    assert detail["remaining"] == 0.0
+
+    # 拒绝时整体不落任何一笔账（既不扣图像也不扣 token）。
+    pidx = quota.period_index(quota.period_anchor(conn, uid))
+    assert quota.usage_for(conn, uid, "image", pidx) == limits.image
+    assert quota.usage_for(conn, uid, "token", pidx) == limits.token
+
+
+def test_image_quota_resets_after_30_day_period_rolls_over():
+    """把周期锚点拨到 31 天前，模拟"下一个周期已经开始"，确认图像额度恢复。"""
+    conn = get_conn()
+    uid = _make_user("free")
+    limits = quota.effective_limits(conn, uid)
+
+    r1 = quota.charge_image_cost(conn, uid, limits.image, attempt_key="img:period0")
+    conn.commit()
+    assert r1 == {"pool_charged": limits.image, "token_charged": 0.0, "idempotent_replay": False}
+    old_anchor = quota.period_anchor(conn, uid)
+    old_pidx = quota.period_index(old_anchor)
+    assert quota.usage_for(conn, uid, "image", old_pidx) == limits.image
+
+    # 把锚点向前拨 31 天（等价于"31 天已经过去"）。
+    conn.execute(
+        "UPDATE users SET quota_period_started_at=? WHERE id=?",
+        (old_anchor - 31 * 86400.0, uid),
+    )
+    conn.commit()
+
+    new_anchor = quota.period_anchor(conn, uid)
+    new_pidx = quota.period_index(new_anchor)
+    assert new_pidx != old_pidx, "锚点后移 31 天后应该落进新的 30 天周期"
+    assert quota.usage_for(conn, uid, "image", new_pidx) == 0.0, "新周期的图像用量应该是 0"
+
+    # 新周期里应该能重新从图像额度里整笔扣，不再溢出到 token。
+    r2 = quota.charge_image_cost(conn, uid, 1000.0, attempt_key="img:period1")
+    conn.commit()
+    assert r2 == {"pool_charged": 1000.0, "token_charged": 0.0, "idempotent_replay": False}
 
 
 # ---------------------------------------------------------------------------

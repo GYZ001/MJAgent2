@@ -1704,14 +1704,15 @@ MIGRATIONS = (
     "ALTER TABLE projects ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''",
     "CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_user_id)",
     # 三档会员配额（见 app/quota.py 模块文档）：tier 决定项目数/并发/token/
-    # 视频时长四类上限，quota_period_started_at 是 30 天滚动周期的锚点（从开户
-    # 日起算，不是自然月）。ALTER 加常量 DEFAULT 'free' 会顺带回填所有历史
-    # 账号——现存账号里 is_system_admin=1 的三个（lnuyasha/regression-bot/
-    # cursor-agent）在 app.quota.effective_limits 里直接按管理员放行，tier 列
-    # 的值对它们不生效，无需单独回填成别的值；其余三个普通账号（demo/demo1/
-    # demo2）落在默认 free 档，与用户拍板一致。quota_period_started_at 留空由
-    # _backfill_quota_period_anchor 一次性回填成 created_at（不能用常量
-    # DEFAULT——每行的正确值是该行自己的 created_at，不是一个跨行常量）。
+    # 视频时长/图像（定妆照/场景图）五类上限，quota_period_started_at 是 30 天
+    # 滚动周期的锚点（从开户日起算，不是自然月）。ALTER 加常量 DEFAULT 'free'
+    # 会顺带回填所有历史账号——现存账号里 is_system_admin=1 的三个
+    # （lnuyasha/regression-bot/cursor-agent）在 app.quota.effective_limits 里
+    # 直接按管理员放行，tier 列的值对它们不生效，无需单独回填成别的值；其余三
+    # 个普通账号（demo/demo1/demo2）落在默认 free 档，与用户拍板一致。
+    # quota_period_started_at 留空由 _backfill_quota_period_anchor 一次性回填
+    # 成 created_at（不能用常量 DEFAULT——每行的正确值是该行自己的
+    # created_at，不是一个跨行常量）。
     "ALTER TABLE users ADD COLUMN tier TEXT NOT NULL DEFAULT 'free'",
     "ALTER TABLE users ADD COLUMN quota_period_started_at REAL",
     # 配额用量的唯一事实来源（append-only）：当前用量 = SUM(delta) WHERE
@@ -1719,7 +1720,14 @@ MIGRATIONS = (
     # attempt_key, reason) 是幂等的唯一保证——同一次尝试（attempt_key，如
     # provider_calls.id 或 jobs.id）的同一个动作（charge/refund）只落一行，
     # 重放交给 SQLite 的 UNIQUE 冲突短路，见 app/quota.py::_record_ledger。
-    # image_pool 资源用哨兵 period_index=-1，代表终身池、不随 30 天周期滚动。
+    # image 资源与 token/video_seconds 共用同一个 period_index（同一账号同一
+    # 周期锚点），额度用尽后续图像成本改记到 token 资源里，见
+    # app/quota.py::charge_image_cost。上线初期曾用哨兵 period_index=-1 存过
+    # 一次性池（resource='image_pool'）；2026-08-30 改造前查证生产库
+    # quota_ledger 全表 0 行（配额刚上线、尚未跑过一次真实生成），因此无需迁
+    # 移。即便未来某个环境残留了 -1 哨兵行，也会被永久跳过而不影响正确性——
+    # usage_for() 按 period_index=? 精确匹配求和，真实周期号恒 >=0，-1 永远
+    # 不会被任何新周期的用量查询命中或累加。
     """CREATE TABLE IF NOT EXISTS quota_ledger (
            id INTEGER PRIMARY KEY AUTOINCREMENT,
            user_id TEXT NOT NULL,
