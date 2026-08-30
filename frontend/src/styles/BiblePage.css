@@ -232,65 +232,6 @@
   gap: 8px;
   margin-bottom: 10px;
 }
-.visual-style-list {
-  display: grid;
-  gap: 10px;
-  max-height: min(420px, 48vh);
-  margin-top: 14px;
-  padding-right: 2px;
-  overflow: auto;
-}
-.visual-style-option {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 13px 14px;
-  border: 1px solid rgba(108, 113, 121, 0.18);
-  border-radius: 13px;
-  background: rgba(44, 38, 32, 0.035);
-  color: var(--ink);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
-}
-.visual-style-option:focus-visible {
-  outline: 2px solid rgba(181, 68, 52, 0.38);
-  outline-offset: 2px;
-}
-.visual-style-thumb {
-  flex: 0 0 auto;
-  width: 52px;
-  height: 52px;
-  border-radius: 10px;
-  object-fit: cover;
-  background: rgba(108, 113, 121, 0.12);
-}
-.visual-style-option span {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: grid;
-  gap: 4px;
-}
-.visual-style-option b {
-  font: 700 14px/1.35 var(--serif);
-  letter-spacing: 0.02em;
-}
-.visual-style-option small {
-  color: var(--ink-soft);
-  font: 12.5px/1.55 var(--ui);
-}
-.visual-style-option em {
-  flex: 0 0 auto;
-  padding: 4px 8px;
-  border-radius: 999px;
-  background: rgba(181, 68, 52, 0.12);
-  color: var(--cinnabar);
-  font: 700 11px/1 var(--ui);
-  font-style: normal;
-}
 :where(:root[data-theme="dark"]) .asset-params-action {
   border-top: 1px solid var(--hairline);
 }
@@ -301,8 +242,5 @@
   background: rgba(var(--ink-rgb), 0.08);
 }
 :where(:root[data-theme="dark"]) .refs-stop-checklist > div {
-  background: rgba(var(--ink-rgb), 0.035);
-}
-:where(:root[data-theme="dark"]) .visual-style-option {
   background: rgba(var(--ink-rgb), 0.035);
 }

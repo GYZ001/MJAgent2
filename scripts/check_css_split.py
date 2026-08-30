@@ -18,9 +18,15 @@ SRC = pathlib.Path('/root/MJAgent2/frontend/src')
 PAGES = {
     'BiblePage': ['pages/BiblePage.tsx'], 'BoardPage': ['pages/BoardPage.tsx'],
     'WallPage': ['pages/WallPage.tsx'], 'ScriptPage': ['pages/ScriptPage.tsx'],
-    'ScenesPage': ['pages/ScenesPage.tsx'], 'MonitorPage': ['pages/MonitorPage.tsx'],
+    'ScenesPage': ['pages/ScenesPage.tsx'], 'MonitorPage': ['pages/MonitorPage.tsx', 'pages/monitor/'],
     'CinemaPage': ['pages/CinemaPage.tsx'], 'ReaderPage': ['pages/ReaderPage.tsx'],
-    'AccountAdminPage': ['pages/AccountAdminPage.tsx', 'components/AccountAdminDialogs.tsx'],
+    'AccountAdminPage': [
+        'pages/AccountAdminPage.tsx', 'components/AccountAdminDialogs.tsx',
+        # 2026-08-30 从 AccountAdminPage.tsx 抽出（该页当时 398/400 行，
+        # 贴着前端 400 行上限）。卡片的 .account-card* 选择器随之搬家，
+        # 不登记就会被判成「共享/全局」而要求挪进 index.css。
+        'components/AccountCard.tsx',
+    ],
 }
 CLS_RE = re.compile(r'className=(?:"([^"]*)"|\{`([^`]*)`\}|\{([^}]*)\})', re.S)
 
@@ -35,7 +41,18 @@ def _class_sets(text):
 ALL = {p: p.read_text(encoding='utf-8') for p in SRC.rglob('*')
        if p.suffix in ('.tsx', '.ts') and p.is_file() and '.test.' not in p.name}
 COOCCUR = [s for text in ALL.values() for s in _class_sets(text)]
-PAGE_FILES = {n: {str(SRC / r) for r in f} for n, f in PAGES.items()}
+
+def _expand_entry(entry):
+    """一页可以声明一个目录（以 '/' 结尾）代替逐个列举其下的分拆组件文件——
+    否则新增一个 pages/monitor/Foo.tsx 却忘了在这里登记，它的 className 就会被
+    当成"不属于任何页面"，从而被误判成共享/全局。"""
+    if entry.endswith('/'):
+        base = SRC / entry
+        return {str(f) for f in base.rglob('*')
+                if f.suffix in ('.tsx', '.ts') and f.is_file() and '.test.' not in f.name}
+    return {str(SRC / entry)}
+
+PAGE_FILES = {n: set().union(*(_expand_entry(r) for r in f)) for n, f in PAGES.items()}
 PAGE_CLS = {}
 for name, files in PAGE_FILES.items():
     toks = set()
@@ -46,7 +63,11 @@ for name, files in PAGE_FILES.items():
 SHARED = set()
 for p, text in ALL.items():
     if not any(str(p) in f for f in PAGE_FILES.values()):
-        SHARED |= set(re.findall(r'[a-zA-Z][\w-]*', text))
+        # 只把「真的挂在某个元素的 className 上」的 token 计入共享——整份源码
+        # 里任意位置出现的同名字符串（URL 路径片段、注释、变量名……）不算数。
+        # 例如 api/delivery.ts 里的 `/episodes/${id}/customer-feedback` 会让
+        # 同名 class `.customer-feedback` 被误判成共享，即便它只在一个页面用到。
+        for s in _class_sets(text): SHARED |= s
 
 # 纯状态修饰词：到处都在用，但从不单独承载样式，不该左右归属判定。
 # `.prep-roster-name-btn.selected` 的归属由 .prep-roster-name-btn 决定。
