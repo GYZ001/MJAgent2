@@ -199,57 +199,21 @@ from .reference_generate import (
     write_reference_prompt_batch as write_reference_prompt_batch,
 )
 from .reference_generate_legacy import (
-    Any as Any,
-    Bible as Bible,
-    Callable as Callable,
-    EpisodeScreenplay as EpisodeScreenplay,
-    KEYFRAME_PROMPT_CONTRACT_VERSION as KEYFRAME_PROMPT_CONTRACT_VERSION,
-    KEYFRAME_STRUCTURAL_FALLBACK_MODE as KEYFRAME_STRUCTURAL_FALLBACK_MODE,
-    Path as Path,
-    REFERENCE_IMAGE_MODE as REFERENCE_IMAGE_MODE,
-    REFERENCE_IMAGE_TYPES as REFERENCE_IMAGE_TYPES,
-    ReferenceImageAsset as ReferenceImageAsset,
-    Shot as Shot,
-    ShotVideoModeDecision as ShotVideoModeDecision,
-    _MULTI_KEYFRAME_INVARIANCE_NOTE as _MULTI_KEYFRAME_INVARIANCE_NOTE,
-    _SLOT_ROLE_CYCLE as _SLOT_ROLE_CYCLE,
-    _asset_from_path as _asset_from_path,
     _build_generated_reference_assets_legacy as _build_generated_reference_assets_legacy,
-    _dedupe_assets as _dedupe_assets,
-    _dedupe_str as _dedupe_str,
-    _enforce_reference_consistency as _enforce_reference_consistency,
-    _enforce_timeline_keyframe_invariance as _enforce_timeline_keyframe_invariance,
-    _finalize_reference_selection as _finalize_reference_selection,
-    _generate_reference_keep_best as _generate_reference_keep_best,
-    _portrait_seed_inputs as _portrait_seed_inputs,
-    _reference_runtime_blocking as _reference_runtime_blocking,
-    _screenplay_call_kwargs as _screenplay_call_kwargs,
-    _shot_for_keyframe_beat as _shot_for_keyframe_beat,
-    annotations as annotations,
-    asyncio as asyncio,
-    batch_prompt_enabled as batch_prompt_enabled,
-    character_reference_assets as character_reference_assets,
-    hashlib as hashlib,
-    hiagent as hiagent,
-    is_narrative_keyframe_slot as is_narrative_keyframe_slot,
-    json as json,
-    keyframe_candidate_count as keyframe_candidate_count,
-    keyframe_contract_fingerprint as keyframe_contract_fingerprint,
-    max_character_reference_images as max_character_reference_images,
-    max_reference_images as max_reference_images,
-    min_generated_references as min_generated_references,
-    narrative_keyframe_beats as narrative_keyframe_beats,
-    previous_tail_reference_asset as previous_tail_reference_asset,
-    reference_gen_retries as reference_gen_retries,
-    reference_image_path as reference_image_path,
-    reference_prompt_async as reference_prompt_async,
-    required_visual_anchor_names as required_visual_anchor_names,
-    scene_reference_assets as scene_reference_assets,
-    supporting_keyframe_candidate_count as supporting_keyframe_candidate_count,
-    timeline_keyframe_plan as timeline_keyframe_plan,
-    write_reference_prompt as write_reference_prompt,
-    write_reference_prompt_batch as write_reference_prompt_batch,
 )
+
+# _build_generated_reference_assets_legacy's phases now live in sibling
+# reference_generate_legacy_*.py files (see reference_generate_legacy.py's
+# module docstring for the split map). Every other name that used to be
+# importable as ``app.video_modes.<name>`` because the pre-split single file
+# happened to import it at module level is already re-exported above from
+# whichever other submodule also imports it (asset_lookup/continuity_tail/
+# keyframe_contract/mode_selection/reference_assemble/reference_generate/
+# reference_prompt/seedance_pack) -- verified by diffing the pre-split
+# file's import list against every other block's names. ``asyncio`` is the
+# one exception: no other block imports it, so it is re-sourced here from
+# the sibling that now uses it.
+from .reference_generate_legacy_candidates import asyncio as asyncio
 from .reference_prompt import (
     Any as Any,
     Bible as Bible,

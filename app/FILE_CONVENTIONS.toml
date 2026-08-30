@@ -97,10 +97,9 @@ max_function_lines_python = 50
 "app/media_exec/enqueue.py" = 2255
 "app/media_exec/input_first_frame_last.py" = 565
 "app/media_exec/input_reference.py" = 533
-"app/media_exec/run_job.py" = 1422
+"app/media_exec/run_job.py" = 1060
 "app/minimax_h3.py" = 1581
 "app/multiview.py" = 2262
-"app/narrative/storyboard_validate.py" = 1356
 "app/narrative_blueprint/models_core.py" = 552
 "app/narrative_outline.py" = 792
 "app/narrative_priority.py" = 1078
@@ -155,7 +154,6 @@ max_function_lines_python = 50
 "app/validators/storyboard_core.py" = 676
 "app/validators/storyboard_delivery.py" = 526
 "app/video_modes/keyframe_contract.py" = 509
-"app/video_modes/reference_generate_legacy.py" = 1368
 "app/video_modes/seedance_pack.py" = 523
 "app/video_plan/generate.py" = 689
 "app/video_prompt_ai.py" = 603
@@ -239,6 +237,7 @@ max_function_lines_python = 50
 "app/domain/screenplay_ops/batch.py" = 121
 "app/domain/screenplay_ops/character_discovery.py" = 82  # _screenplay_character_discovery，
     # 从 task_body.py 按原样搬移（2026-08-30，层号治理，见 app/LAYERS.toml 组
+    # 12），基线随函数一起转移，不是新增欠账
 "app/domain/screenplay_ops/delete.py" = 120
 "app/domain/screenplay_ops/edit.py" = 334
 "app/domain/screenplay_ops/guarded.py" = 52
@@ -307,7 +306,7 @@ max_function_lines_python = 50
 "app/media_exec/job_recovery.py" = 147
 "app/media_exec/reference_progress.py" = 56
 "app/media_exec/retry_scheduling.py" = 51
-"app/media_exec/run_job.py" = 1088
+"app/media_exec/run_job.py" = 727
 "app/media_exec/worker_loop.py" = 54
 "app/media_pipeline/reference_store.py" = 169
 "app/media_pipeline/scheduler.py" = 74
@@ -326,7 +325,6 @@ max_function_lines_python = 50
 "app/narrative/screenplay_validate_experience_paths.py" = 236
 "app/narrative/screenplay_validate_identity.py" = 65
 "app/narrative/screenplay_validate_scenes.py" = 77
-"app/narrative/storyboard_validate.py" = 1192
 "app/narrative_blueprint/patch_apply.py" = 240
 "app/narrative_blueprint/prompt_contract.py" = 110
 "app/narrative_blueprint/provider_normalize.py" = 66
@@ -491,6 +489,8 @@ max_function_lines_python = 50
 "app/stages/blueprint_semantic_review_reviewer.py" = 184
 # 基线随函数转移，不是新增欠账：_blueprint_semantic_review_round_inputs 原本
 # 就在 958 行的 blueprint_semantic_review 单体里，拆分只是把它挪到叶子模块，
+# 行数一行没多。（reviewer.py 那条 504 的 line_count 基线已删除——新文件本来
+# 就该达标，所以再拆一刀让它降到 399，而不是给新文件发基线。）
 "app/stages/blueprint_semantic_review_inputs.py" = 76
 "app/stages/blueprint_semantic_review_round.py" = 85
 "app/stages/blueprint_shard_structure.py" = 100
@@ -532,7 +532,6 @@ max_function_lines_python = 50
 "app/video_modes/mode_selection.py" = 65
 "app/video_modes/reference_assemble.py" = 155
 "app/video_modes/reference_generate.py" = 101
-"app/video_modes/reference_generate_legacy.py" = 1188
 "app/video_modes/reference_prompt.py" = 151
 "app/video_modes/seedance_pack.py" = 139
 "app/video_plan/capability_snapshot.py" = 88

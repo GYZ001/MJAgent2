@@ -10,11 +10,26 @@
 对账（``.job_recovery``）、延迟重排与预算恢复（``.retry_scheduling``）、五个
 围栏异常（``.fences``）都移到了各自独立的子模块（移动，未重写）。
 
-``_run_job`` 本身（1,157 行的单一协程，视频作业从领取到终态判决的完整状态机）
-留在本文件——它是全部上述子模块的编排者，逐行搬移到任何一个子模块都会让该
-子模块反过来依赖几乎所有其它子模块，而不是让它继续依赖它们，属于
+``_run_job`` 本身（原 1,157 行的单一协程，视频作业从领取到终态判决的完整状态
+机）：2026-08-30 这一轮拆出了两段结构上真正独立、且不触碰下面这条打桩告警的
+部分——领取/加载（``.run_job_claim``，``_claim_and_load_job``，一个 dataclass
+承载 conn/owner/job/version/shot/ep/meta/... 供调用方原样解包）与全部 8 个
+``except`` 处理器（``.run_job_errors`` / ``.run_job_errors_provider``，最大
+的 ``except (ProviderError, Exception)`` 分支单独占一个文件，见其 module
+docstring）。核心状态机（供应商提交 + 轮询 + 成功后校验/采纳，try 主体约
+735 行）**留在本文件未再拆分**：它对 ``_assert_review_dependency_fence_async``
+的调用散布在几乎每个阶段（worker_start/provider_input_adoption/
+provider_submit/provider_poll/candidate/candidate_evidence 六处），
+``image_inputs``/``video_inputs``/``actual_mode``/``task_id``/``meta``/
+``prompt_text``/``result`` 七个局部变量在一个不可重入的 ``while True`` 状态
+机里被反复读写，且内层是两层嵌套 try/except（供应商 create 失败必须原子释放
+预算槽位与已认领费用）——这条路径的失败模式是真实付费与卡死，不是可维护性
+问题。继续拆分需要为这些名字设计显式的依赖注入或大范围重写控制流，本轮判断
+收益（进一步的行数下降）不足以覆盖对生产计费链路的回归风险，留给下一轮专门
+处理。它仍是全部上述子模块的编排者，逐行搬移到任何一个子模块都会让该子模块
+反过来依赖几乎所有其它子模块，而不是让它继续依赖它们，属于
 ``app/FILE_CONVENTIONS.toml`` 里「移动未重写的既有巨型单函数」豁免类别的同类
-情况（与 ``compile_screenplay_ir``、``validate_screenplay_narrative`` 等同理）。
+情况（与 ``compile_screenplay_ir`` 等同理）。
 
 本文件因此还承担第二个角色：``app/media_exec/__init__.py`` 现有的
 ``from .run_job import (...)`` 一次性导入了 85 个名字（拆分前它们都定义在这
@@ -42,7 +57,7 @@ import asyncio
 import json
 import time
 
-from app import config, errors, hiagent, video_modes
+from app import config, hiagent, video_modes
 from app.artifacts import _invalidate_final_video
 from app.compiler import ensure_source_excerpt_in_prompt, shot_cost_cny
 from app.completion_grant import VideoBudgetAuthorizationError
@@ -51,7 +66,6 @@ from app.hiagent import ProviderError
 from app.evidence import media as media_evidence
 from app.orchestration import media_scheduler
 from app.orchestration.media_runs import mark_media_job_state
-from app.observability.tracing import set_worker_trace
 
 from .common import LeaseLost, _retry_tasks
 from .enqueue import (
@@ -60,7 +74,6 @@ from .enqueue import (
     _video_path,
     enqueue_shot,
     reconcile_episode_generation_status,
-    recover_equivalent_stale_provider_jobs,
 )
 from .fences import (
     ProviderCreateUnresolved,
@@ -172,64 +185,36 @@ from .worker_loop import (
     _wait_for_worker_job,
     _worker_loop,
 )
+from .run_job_claim import _claim_and_load_job
+from .run_job_errors import (
+    _handle_admission_deferred,
+    _handle_budget_authorization_error,
+    _handle_provider_create_unresolved,
+    _handle_review_dependency_fence,
+    _handle_video_input_repair_required,
+    _handle_video_plan_stale,
+)
+from .run_job_errors_provider import _handle_provider_or_generic_error
 
 
 async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
     from app.media_pipeline.stage_state import set_pipeline_stage
 
-    # Workers are spawned during application recovery.  Give the lifespan and
-    # HTTP server a scheduling boundary before any JSON decoding, authority
-    # verification, or reference preparation below; otherwise a recovered
-    # cohort can monopolize the event loop before the socket starts listening.
-    await asyncio.sleep(1.0)
-    conn = get_conn()
-    owner = lease_owner or f"direct-{id(asyncio.current_task())}"
-    if lease_owner is None:
-        if not await _claim_job_without_blocking_loop(
-            job_id,
-            owner,
-            lease_seconds=180.0,
-        ):
-            return
-        run_row = conn.execute(
-            "SELECT run_id, step_run_id FROM jobs WHERE id=?", (job_id,)
-        ).fetchone()
-        if run_row:
-            mark_media_job_state(run_row["run_id"], run_row["step_run_id"], "running")
-    job = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-    if not job or job["status"] != "running" or job["lease_owner"] != owner:
+    claimed = await _claim_and_load_job(job_id, lease_owner)
+    if claimed is None:
         return
-    # 这个 worker task 会在同一个 asyncio Task/Context 里连续 await 很多个 job；
-    # 不重新绑定的话，provider_calls（尤其 video_create/video_poll）会带着上一个
-    # job 的 trace，或者干脆一直是启动时的空 trace，链路树永远关联不到它们。
-    # 详见 set_worker_trace 的说明：这里必须在本 job 的第一次供应商调用之前、
-    # 每个 job 都调用一次，即使 run_id 为空也要显式清空上一个 job 留下的痕迹。
-    set_worker_trace(job["run_id"], job["step_run_id"])
-    if job["kind"] != "video":
-        # 旧版关键帧 job 可能在升级前已持久化。它们不再恢复或执行，避免继续消耗图片额度，
-        # 同时清除造成前端长期显示“生成中”的遗留状态。
-        conn.execute("UPDATE shots SET scene_status='none' WHERE id=?", (job["shot_id"],))
-        conn.commit()
-        if _set_job(
-            job["id"], "cancelled", "关键帧功能已下线；请从参考图视频入口重新生成",
-            lease_owner=owner,
-        ):
-            media_scheduler.settle_budget(job["id"], 0.0, success=False)
-        return
-    version = conn.execute("SELECT * FROM shot_versions WHERE id=?", (job["version_id"],)).fetchone()
-    shot = conn.execute("SELECT * FROM shots WHERE id=?", (job["shot_id"],)).fetchone()
-    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (job["episode_id"],)).fetchone()
+    conn = claimed.conn
+    owner = claimed.owner
+    job = claimed.job
+    version = claimed.version
+    shot = claimed.shot
+    ep = claimed.ep
+    meta = claimed.meta
+    result_adoptable = claimed.result_adoptable
+    provider_recovery_only = claimed.provider_recovery_only
+    task_id = claimed.task_id
+    started = claimed.started
 
-    meta = json.loads(version["image_inputs"] or "{}")
-    result_adoptable = bool(
-        job["video_slot_active"] and job["provider_result_adoptable"]
-    )
-    provider_recovery_only = bool(
-        job["provider_poll_required"] and not result_adoptable
-    )
-    task_id = version["provider_task_id"]
-
-    started = time.time()
     try:
         if not provider_recovery_only:
             await _assert_review_dependency_fence_async(
@@ -969,368 +954,21 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
     except LeaseLost:
         return
     except VideoInflightAdmissionDeferred as exc:
-        message = str(exc)
-        changed = conn.execute(
-            """UPDATE jobs
-                  SET status='queued',error=?,reason_code='EPISODE_VIDEO_INFLIGHT_FULL',
-                      reason_text=?,provider_non_cancellable=0,
-                      provider_create_state='not_started',
-                      lease_owner=NULL,lease_expires_at=NULL,next_retry_at=?,updated_at=?
-                WHERE id=? AND status='running' AND lease_owner=?
-                  AND provider_non_cancellable=0""",
-            (message, message, now() + 20.0, now(), job_id, owner),
-        )
-        if changed.rowcount != 1:
-            conn.rollback()
-            return
-        conn.execute(
-            "UPDATE budget_reservations SET status='reserved' WHERE job_id=? AND status='running'",
-            (job_id,),
-        )
-        conn.commit()
-        task = asyncio.get_running_loop().create_task(_requeue_after(job_id, 20.0))
-        _retry_tasks.add(task)
-        task.add_done_callback(_retry_tasks.discard)
-        return
+        _handle_admission_deferred(conn, job_id, owner, exc)
     except VideoBudgetAuthorizationError as exc:
-        message = str(exc)
-        # 预算认领在"cap 与已认领总额零余量"附近可能被瞬时挤掉（同集其它镜
-        # 头的认领/释放时序），不代表这一集真的超支——claim_video_submit_
-        # slot 用的仍是人已经批准过的同一个 cap，没有申请新额度。像"槽位已
-        # 满"（见上面 VideoInflightAdmissionDeferred 分支）一样先给几次有限
-        # 退避重试的机会，比一次没挤上就直接卡死等人手再点一次 /generate 更
-        # 合理；重试耗尽仍未通过，才落回下面真正需要人工处理的 paused_budget
-        # 终态——预算保护本身没有放宽，只是不再让一次瞬时失败必须靠人手恢复。
-        retry_count = int(meta.get("budget_pause_auto_retry_count") or 0)
-        if retry_count < config.VIDEO_JOB_MAX_RETRIES:
-            retry_count += 1
-            delay = config.VIDEO_JOB_RETRY_BASE_DELAY * (2 ** (retry_count - 1))
-            meta["budget_pause_auto_retry_count"] = retry_count
-            note = (
-                f"本集视频预算认领未通过，已在人工已批准的额度内自动重试第 "
-                f"{retry_count}/{config.VIDEO_JOB_MAX_RETRIES} 次（约 {int(delay)} 秒后），"
-                f"不会申请新的预算；若重试耗尽仍未通过才会暂停等待人工处理。原因：{message}"
-            )
-            retried = conn.execute(
-                """UPDATE jobs
-                      SET status='queued',error=?,reason_code='VIDEO_BUDGET_NOT_AUTHORIZED',
-                          reason_text=?,provider_non_cancellable=0,
-                          provider_create_state='not_started',
-                          lease_owner=NULL,lease_expires_at=NULL,next_retry_at=?,
-                          updated_at=?
-                    WHERE id=? AND status='running' AND lease_owner=?""",
-                (note, note, now() + delay, now(), job_id, owner),
-            )
-            if retried.rowcount == 1:
-                conn.execute(
-                    """UPDATE budget_reservations SET status='reserved'
-                        WHERE job_id=? AND status='running'""",
-                    (job_id,),
-                )
-                conn.commit()
-                _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False))
-                mark_media_job_state(
-                    _row_value(job, "run_id"), _row_value(job, "step_run_id"), "queued", note,
-                )
-                task = asyncio.get_running_loop().create_task(_requeue_after(job_id, delay))
-                _retry_tasks.add(task)
-                task.add_done_callback(_retry_tasks.discard)
-                return
-            conn.rollback()
-            return
-        changed = conn.execute(
-            """UPDATE jobs
-                  SET status='paused_budget',error=?,reason_code='VIDEO_BUDGET_NOT_AUTHORIZED',
-                      reason_text=?,provider_non_cancellable=0,
-                      provider_create_state='not_started',
-                      video_slot_active=0,
-                      lease_owner=NULL,lease_expires_at=NULL,next_retry_at=NULL,
-                      updated_at=?
-                WHERE id=? AND status='running' AND lease_owner=?""",
-            (message, message, now(), job_id, owner),
-        )
-        if changed.rowcount != 1:
-            conn.rollback()
-            return
-        _set_version(version["id"], status="paused_budget", error=message)
-        conn.execute(
-            "UPDATE shot_versions SET video_slot_active=0 WHERE id=?",
-            (version["id"],),
-        )
-        conn.execute(
-            """UPDATE budget_reservations
-                  SET status='released',settled_at=?,actual_cost_cny=0
-                WHERE job_id=? AND status IN ('reserved','running')""",
-            (now(), job_id),
-        )
-        conn.commit()
-        mark_media_job_state(
-            _row_value(job, "run_id"),
-            _row_value(job, "step_run_id"),
-            "paused_budget",
-            message,
-        )
-        reconcile_episode_generation_status(job["episode_id"])
-        return
+        _handle_budget_authorization_error(conn, job, job_id, owner, version, meta, exc)
     except VideoPlanStaleFence as exc:
-        public = str(exc)
-        if _set_job(job_id, "stale", public, lease_owner=owner):
-            _set_version(version["id"], status="stale", error=public)
-            media_scheduler.settle_budget(job_id, 0.0, success=False)
-            reconcile_episode_generation_status(job["episode_id"])
-            # A sibling-only replan may preserve this shot's complete execution
-            # contract. Recover the accepted provider handle in place when that
-            # equivalence can be proven; never issue another create call.
-            recover_equivalent_stale_provider_jobs(job["episode_id"])
-        return
+        _handle_video_plan_stale(job, job_id, owner, version, exc)
     except ReviewDependencyFence as exc:
-        public = str(exc)
-        if _set_job(job_id, "failed", public, lease_owner=owner):
-            _set_version(version["id"], status="failed", error=public)
-            media_scheduler.settle_budget(job_id, 0.0, success=False)
-            reconcile_episode_generation_status(job["episode_id"])
-        return
+        _handle_review_dependency_fence(job, job_id, owner, version, exc)
     except VideoInputRepairRequired as exc:
-        repair_mode = str(
-            meta.get("mode") or meta.get("planned_mode")
-            or video_modes.REFERENCE_IMAGE_MODE
-        )
-        repair_label = {
-            video_modes.FIRST_FRAME_MODE: "上一视频尾帧首帧",
-            video_modes.FIRST_LAST_FRAME_MODE: "首尾帧",
-            video_modes.REFERENCE_IMAGE_MODE: "参考图",
-            video_modes.VIDEO_INPUT_MODE: "参考视频",
-        }.get(repair_mode, "视频输入")
-        repair_code = {
-            video_modes.FIRST_FRAME_MODE: "FIRST_FRAME_REPAIR_REQUIRED",
-            video_modes.FIRST_LAST_FRAME_MODE: "FIRST_LAST_FRAME_REPAIR_REQUIRED",
-            video_modes.REFERENCE_IMAGE_MODE: "REFERENCE_IMAGE_REPAIR_REQUIRED",
-            video_modes.VIDEO_INPUT_MODE: "VIDEO_INPUT_REPAIR_REQUIRED",
-        }.get(repair_mode, "VIDEO_INPUT_REPAIR_REQUIRED")
-        record = errors.log_error(
-            exc,
-            action="video_mode_input_repair",
-            context={
-                "shot_id": job["shot_id"],
-                "version_id": version["id"],
-                "job_id": job_id,
-                "mode": meta.get("mode"),
-            },
-        )
-        message = (
-            f"{repair_label}输入仍需修复：{exc}。本镜保持 "
-            f"{repair_mode}，"
-            "未切换生成方式，也未提交不合格输入。"
-            f"（{repair_code} · {record.error_id}）"
-        )
-        changed = conn.execute(
-            """UPDATE jobs
-                  SET status='waiting_human',error=?,
-                      reason_code=?,
-                      reason_text=?,lease_owner=NULL,lease_expires_at=NULL,
-                      next_retry_at=NULL,video_slot_active=0,updated_at=?
-                WHERE id=? AND status='running' AND lease_owner=?""",
-            (message, repair_code, message, now(), job_id, owner),
-        )
-        if changed.rowcount != 1:
-            conn.rollback()
-            return
-        _set_version(version["id"], status="waiting_human", error=message, video_slot_active=0)
-        conn.execute(
-            """UPDATE shot_video_generation_plans
-                  SET status='waiting_asset',updated_at=?
-                WHERE id=?""",
-            (now(), str(meta.get("shot_plan_id") or "")),
-        )
-        conn.commit()
-        media_scheduler.settle_budget(job_id, 0.0, success=False)
-        mark_media_job_state(
-            _row_value(job, "run_id"),
-            _row_value(job, "step_run_id"),
-            "waiting_human",
-            message,
-        )
-        reconcile_episode_generation_status(job["episode_id"])
-        return
+        _handle_video_input_repair_required(conn, job, job_id, owner, version, meta, exc)
     except ProviderCreateUnresolved as exc:
-        message = str(exc)
-        if not _commit_provider_create_unresolved(
-            conn,
-            job_id=job_id,
-            version_id=version["id"],
-            owner=owner,
-            message=message,
-        ):
-            return
-        mark_media_job_state(
-            _row_value(job, "run_id"),
-            _row_value(job, "step_run_id"),
-            "waiting_human",
-            message,
-        )
-        reconcile_episode_generation_status(job["episode_id"])
-        return
+        _handle_provider_create_unresolved(conn, job, job_id, owner, version, exc)
     except (ProviderError, Exception) as exc:  # noqa: BLE001 失败要响：原文进日志，前端给码+分类
-        from app.harness.model_gateway import StructuredProviderRejection
-
-        if isinstance(exc, StructuredProviderRejection):
-            exc = ProviderError(
-                "AI 视频提示词服务拒绝当前内容",
-                raw=str(exc),
-                failure=hiagent.ProviderFailure.model_rejection(
-                    hiagent.ProviderFailureKind.PROMPT_PROVIDER_REJECTED
-                ),
-                delivery_state="not_sent",
-                replay_safe=True,
-            )
-        if not media_scheduler.renew_lease(job_id, owner, lease_seconds=180.0):
-            return
-        record = errors.log_error(
-            exc, action="shot_video_generate",
-            context={"shot_id": job["shot_id"], "version_id": version["id"], "job_id": job_id})
-        poll_state = conn.execute(
-            "SELECT provider_poll_required FROM jobs WHERE id=?",
-            (job_id,),
-        ).fetchone()
-        guidance = (
-            _video_model_rejection_guidance(meta, exc)
-            if isinstance(exc, ProviderError)
-            else None
+        await _handle_provider_or_generic_error(
+            conn, job, job_id, owner, version, meta, task_id, provider_operation_id, exc,
         )
-        provider_failure = exc.failure if isinstance(exc, ProviderError) else None
-        reason_code = (
-            guidance[0]
-            if guidance
-            else (provider_failure.reason_code if provider_failure else None)
-        )
-        public = (
-            f"{guidance[1]}（{guidance[0]} · {record.error_id}）"
-            if guidance else record.public
-        )
-        provider_poll_pending = bool(
-            task_id
-            and poll_state is not None
-            and poll_state["provider_poll_required"]
-        )
-        if (
-            provider_poll_pending
-            and (
-                not isinstance(exc, ProviderError)
-                or bool(provider_failure and provider_failure.retryable)
-            )
-            and _defer_provider_poll(
-                job_id,
-                task_id,
-                lease_owner=owner,
-            )
-        ):
-            return
-        # 仅结构化 retryable 故障自动重排；重试耗尽后转人工，不改变原始类别。
-        if isinstance(exc, ProviderError) and _schedule_job_retry(
-            job_id, exc, lease_owner=owner
-        ):
-            _set_version(version["id"], status="queued")
-            return
-        external_terminal = bool(
-            provider_failure
-            and provider_failure.disposition
-            is hiagent.ProviderFailureDisposition.EXTERNAL_TERMINAL
-        )
-        if provider_poll_pending and external_terminal:
-            await _commit_provider_terminal_failure(
-                conn,
-                job_id=job_id,
-                version_id=version["id"],
-                owner=owner,
-                operation_id=provider_operation_id,
-                message=public,
-                reason_code=reason_code or provider_failure.reason_code,
-                failure=provider_failure,
-            )
-            if (
-                provider_failure.kind
-                != hiagent.ProviderFailureKind.PROMPT_PROVIDER_REJECTED.value
-            ):
-                conn.execute(
-                    """UPDATE jobs SET provider_create_state='model_rejected'
-                        WHERE id=? AND status='failed'""",
-                    (job_id,),
-                )
-                conn.commit()
-            mark_media_job_state(
-                _row_value(job, "run_id"),
-                _row_value(job, "step_run_id"),
-                "failed",
-                public,
-            )
-            reconcile_episode_generation_status(job["episode_id"])
-            return
-        final_status = (
-            "waiting_human"
-            if provider_failure and not external_terminal
-            else "failed"
-        )
-        if _set_job(job_id, final_status, public, lease_owner=owner):
-            conn.execute(
-                """UPDATE video_generation_attempts
-                      SET status='failed',error=?,updated_at=?
-                    WHERE version_id=? AND status='provider_running'""",
-                (str(exc)[:2000], now(), version["id"]),
-            )
-            if meta.get("shot_plan_id"):
-                conn.execute(
-                    """UPDATE shot_video_generation_plans
-                          SET status='failed',updated_at=? WHERE id=?""",
-                    (now(), str(meta["shot_plan_id"])),
-                )
-            if provider_failure:
-                persisted_disposition = (
-                    hiagent.ProviderFailureDisposition.EXTERNAL_TERMINAL
-                    if external_terminal
-                    else hiagent.ProviderFailureDisposition.MANUAL_REVIEW
-                )
-                conn.execute(
-                    """UPDATE jobs
-                          SET reason_code=?,reason_text=?,
-                              provider_failure_category=?,
-                              provider_failure_kind=?,
-                              provider_failure_disposition=?,
-                              provider_failure_retryable=?
-                        WHERE id=? AND status=?""",
-                    (
-                        reason_code,
-                        public,
-                        provider_failure.category.value,
-                        provider_failure.kind,
-                        persisted_disposition.value,
-                        int(provider_failure.retryable),
-                        job_id,
-                        final_status,
-                    ),
-                )
-                if (
-                    external_terminal
-                    and provider_failure.kind
-                    != hiagent.ProviderFailureKind.PROMPT_PROVIDER_REJECTED.value
-                ):
-                    conn.execute(
-                        """UPDATE jobs SET provider_create_state='model_rejected'
-                            WHERE id=? AND status='failed'""",
-                        (job_id,),
-                    )
-            conn.commit()
-            _set_version(version["id"], status=final_status, error=public)
-            if provider_poll_pending:
-                conn.execute(
-                    """UPDATE budget_reservations
-                          SET status='reserved'
-                        WHERE job_id=? AND status='running'""",
-                    (job_id,),
-                )
-                conn.commit()
-            else:
-                media_scheduler.settle_budget(job_id, 0.0, success=False)
-            reconcile_episode_generation_status(job["episode_id"])
 
 
 __all__ = [

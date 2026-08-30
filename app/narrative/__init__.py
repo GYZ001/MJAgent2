@@ -89,20 +89,24 @@ from .storyboard_validate import (
     NARRATIVE_CONTRACT_VERSION as NARRATIVE_CONTRACT_VERSION,
     Storyboard as Storyboard,
     StoryboardOutline as StoryboardOutline,
-    _contribution_nonempty as _contribution_nonempty,
-    _declared_change_matches as _declared_change_matches,
     _norm as _norm,
     _outline_as_shots as _outline_as_shots,
-    _require_refs as _require_refs,
-    _state_without_identity as _state_without_identity,
-    _target_state_fragment_matches as _target_state_fragment_matches,
     action_participant_delivery_errors as action_participant_delivery_errors,
-    defaultdict as defaultdict,
     index_narrative_plan as index_narrative_plan,
-    onscreen_text_for_capacity as onscreen_text_for_capacity,
     validate_storyboard_narrative as validate_storyboard_narrative,
     validate_storyboard_screenplay_authority as validate_storyboard_screenplay_authority,
 )
+
+# validate_storyboard_narrative's per-shot/post-loop phases now live in
+# sibling storyboard_validate_*.py files (see storyboard_validate.py's module
+# docstring for the split map); two plain stdlib/third-party names that used
+# to be importable as ``app.narrative.<name>`` because the pre-split single
+# file happened to import them at module level moved with their phase.
+# _contribution_nonempty/_declared_change_matches/_require_refs/
+# _state_without_identity/_target_state_fragment_matches also moved, but are
+# already re-exported above from .primitives with the identical object.
+from .storyboard_validate_context import defaultdict as defaultdict
+from .storyboard_validate_shot_capacity import onscreen_text_for_capacity as onscreen_text_for_capacity
 
 from .review import (
     Any as Any,
