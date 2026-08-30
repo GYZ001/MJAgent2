@@ -271,6 +271,46 @@ def test_recovery_keeps_future_retry_and_cancel_marks_provider_work_abandoned(mo
     assert tuple(row) == (1, 1)
 
 
+def test_recoverable_jobs_skips_soft_deleted_project(monkeypatch) -> None:
+    """回收站项目里过期 lease 的 job 既不应被复位为可调度状态，也不应出现在派发
+    资格返回列表里；未删除项目的同类 job 照常处理（不能把恢复功能整个关掉）。"""
+    conn = _conn()
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('p-deleted','P2',0)")
+    conn.execute("UPDATE projects SET deleted_at=999 WHERE id='p-deleted'")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,created_at) VALUES('e-deleted','p-deleted',1,0)"
+    )
+    conn.execute(
+        "INSERT INTO jobs(id,kind,episode_id,project_id,status,lease_expires_at,created_at,updated_at) "
+        "VALUES('j-deleted','video','e-deleted','p-deleted','running',1,0,0)"
+    )
+    # 独立于过期 lease 转换路径之外，再放一个已经是 queued 的回收站项目 job，
+    # 单独覆盖第二条派发资格 SELECT 本身的过滤（不依赖第一条转换是否发生）。
+    conn.execute(
+        "INSERT INTO jobs(id,kind,episode_id,project_id,status,created_at,updated_at) "
+        "VALUES('j-deleted-queued','video','e-deleted','p-deleted','queued',0,0)"
+    )
+    conn.execute("UPDATE jobs SET status='running', lease_expires_at=1 WHERE id='j1'")
+    conn.commit()
+    monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)
+    monkeypatch.setattr(media_scheduler, "now", lambda: 100.0)
+
+    jobs = dict(media_scheduler.recoverable_jobs())
+
+    assert "j1" in jobs, "未删除项目过期 lease 的 job 应恢复为可调度状态"
+    assert "j2" in jobs, "未删除项目本就 queued 的 job 应出现在派发资格列表里"
+    assert "j-deleted" not in jobs, "回收站项目的 job 不应出现在派发资格列表里"
+    assert "j-deleted-queued" not in jobs, (
+        "回收站项目本就 queued 的 job 也不应出现在派发资格列表里"
+    )
+    assert conn.execute(
+        "SELECT status FROM jobs WHERE id='j1'"
+    ).fetchone()["status"] in ("queued", "waiting_provider")
+    assert conn.execute(
+        "SELECT status FROM jobs WHERE id='j-deleted'"
+    ).fetchone()["status"] == "running", "回收站项目的 job 不应被复位为可调度状态"
+
+
 def test_cancel_before_provider_transport_releases_both_budget_claims(monkeypatch) -> None:
     conn = _conn()
     monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)

@@ -5,9 +5,10 @@
 输入模式准备（``.input_boundary``/``.input_reference``/``.input_first_frame_last``/
 ``.input_video_mode``）、job/version 状态与轮询策略（``.job_state``）、参考图
 进度（``.reference_progress``）、调度分派与 worker 生命周期
-（``.worker_lifecycle``）、worker 主循环（``.worker_loop``）、恢复/对账
-（``.job_recovery``）、延迟重排与预算恢复（``.retry_scheduling``）、五个围栏
-异常（``.fences``）都移到了各自独立的子模块（移动，未重写）。
+（``.worker_lifecycle``，2026-08-30 进一步拆出 ``.dispatch`` 承接其中的持久
+派发部分，见该文件模块 docstring）、worker 主循环（``.worker_loop``）、恢复/
+对账（``.job_recovery``）、延迟重排与预算恢复（``.retry_scheduling``）、五个
+围栏异常（``.fences``）都移到了各自独立的子模块（移动，未重写）。
 
 ``_run_job`` 本身（1,157 行的单一协程，视频作业从领取到终态判决的完整状态机）
 留在本文件——它是全部上述子模块的编排者，逐行搬移到任何一个子模块都会让该
@@ -143,24 +144,26 @@ from .retry_scheduling import (
 )
 from .worker_lifecycle import (
     _SWEEPER_INTERVAL_SECONDS,
-    _dispatch_due_jobs,
-    _dispatch_due_jobs_legacy,
-    _dispatch_due_jobs_stage_aware,
     _dispatcher_task,
     _drain_memory_queue,
-    _durable_dispatcher,
-    _enqueue_for_current_status,
     _poll_worker_target,
-    _queue_job,
     _reference_worker_target,
     _stale_lease_sweeper,
-    _start_durable_dispatcher,
     _sweeper_task,
     _video_ready_worker_target,
     _worker_target,
     ensure_workers,
     start_stale_lease_sweeper,
     stop,
+)
+from .dispatch import (
+    _dispatch_due_jobs,
+    _dispatch_due_jobs_legacy,
+    _dispatch_due_jobs_stage_aware,
+    _durable_dispatcher,
+    _enqueue_for_current_status,
+    _queue_job,
+    _start_durable_dispatcher,
 )
 from .worker_loop import (
     _maybe_auto_qa,

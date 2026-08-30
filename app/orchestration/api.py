@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 
-from app import config, task_registry
+from app import config, quota, task_registry
 from app.auth.principal import get_current_principal
 from app.db import get_conn, new_id, now
 from app.evidence import repository
@@ -414,6 +414,11 @@ def _restart_storyboard_run(run_id: str, trigger_type: str):
                 recorder.cancel("恢复任务启动失败，资源状态已回滚", conn=None)
             except Exception:  # noqa: BLE001
                 pass
+        if isinstance(exc, quota.QuotaExceeded):
+            # 状态已按上面回滚，但配额超限的 429（tier/limit/upgrade_path 详情）
+            # 必须原样透传，不能被下面的通用 503 糊掉
+            # （CLAUDE.md「拦住用户时必须给出路」）。
+            raise exc
         raise HTTPException(503, {
             "code": "RUN_RESUME_START_FAILED",
             "message": "分镜恢复任务未能启动，原状态已保留，可稍后重试",
@@ -1577,6 +1582,14 @@ def recover_delivery_tasks() -> int:
              AND wr.status='PAUSED_EXTERNAL'
              AND wr.failure_code='SERVICE_RESTART'
              AND wr.recovered_by_run_id IS NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM projects p -- ALL_OWNERS: startup recovery scans
+               -- every owner's paused delivery-package/approval-build runs
+               -- after a process reload/restart; excludes soft-deleted
+               -- (recycle-bin) projects so their residual packaging/approval
+               -- work is not re-armed and does not burn compute
+                WHERE p.id=e.project_id AND p.deleted_at IS NOT NULL
+             )
            ORDER BY wr.updated_at"""
     ).fetchall()
     resumed = 0

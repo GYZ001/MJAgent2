@@ -4,7 +4,8 @@
 判定一条 job 的 ``image_inputs`` 元数据是否已具备参考图画廊/是否需要自动重
 拍；``_completed_reference_slots``/``_narrative_keyframe_candidate_progress`` 统
 计参考槽位与叙事关键帧候选的完成度，供调度优先级
-（``.worker_lifecycle``）与生成预算展示复用。不接触数据库、不做 I/O。
+（``.dispatch``，2026-08-30 从 ``.worker_lifecycle`` 拆出）与生成预算展示复
+用。不接触数据库、不做 I/O。
 """
 
 from __future__ import annotations

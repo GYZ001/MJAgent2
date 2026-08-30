@@ -20,24 +20,31 @@ import name`` 互相导入（方法与 ``app/portraits`` 拆包一致，见该�
 ``_video_ready_worker_target``/``_poll_worker_target``/``_dispatcher_task``
 不在 ``.common``，而在 ``.run_job.worker_lifecycle``（``run_job.py`` 2026-08-30
 进一步拆成的 14 个子模块之一，见该文件模块 docstring 的完整拆分说明）——它们
-只被 ``worker_lifecycle.py`` 自己的 ``ensure_workers()``/``stop()`` 用
-``global`` 语句重新赋值，Python 的 ``global`` 只能重绑定函数所在模块自己的命
-名空间，放在 common.py 会让这些写入创建出一份 common.py 永远看不到的私有副
-本。``run_job.py`` 顶层 ``from .worker_lifecycle import`` 这五个名字只是转手
-再导出（供本文件 ``from .run_job import _worker_target, ...`` 与
-``app/worker.py`` 继续用同一份 85 名字清单，不用改一行），真正的定义处/写
-者/读者仍然同在 ``worker_lifecycle.py``。``_queue``/``_reference_queue``/
+只被 ``worker_lifecycle.py`` 自己的 ``ensure_workers()``（四个 worker-target 计
+数）/``stop()``（含 ``_dispatcher_task``）用 ``global`` 语句重新赋值，Python 的
+``global`` 只能重绑定函数所在模块自己的命名空间，放在 common.py 会让这些写入
+创建出一份 common.py 永远看不到的私有副本。``run_job.py`` 顶层
+``from .worker_lifecycle import`` 这五个名字只是转手再导出（供本文件
+``from .run_job import _worker_target, ...`` 与 ``app/worker.py`` 继续用同一份
+85 名字清单，不用改一行），真正的定义处/写者/读者仍然同在
+``worker_lifecycle.py``——2026-08-30 从 ``worker_lifecycle.py`` 进一步拆出的
+``.dispatch``（承接 ``_enqueue_for_current_status``/``_queue_job``/两个
+``_dispatch_due_jobs*``/``_durable_dispatcher``/``_start_durable_dispatcher``）
+只读 ``worker_lifecycle._xxx``、只在 ``_start_durable_dispatcher()`` 里写
+``worker_lifecycle._dispatcher_task = ...``，全部走限定属性访问而非
+``global``，物理声明处不受影响，见 ``.dispatch`` 模块 docstring。``_queue``/
+``_reference_queue``/
 ``_video_ready_queue``/``_poll_queue``/``_workers``/``_reference_workers``/
 ``_video_ready_workers``/``_poll_workers``/``_worker_retire_events``/
 ``_retry_tasks`` 没有这个问题——它们全程只被原地修改（``.append``/``.clear``/
 ``.add``/``.put``/``[key]=``），从未被重新赋值，所以哪个模块 ``from .common
 import`` 到的都是同一个可变对象，直接满足「只剩一份」。
 
-``enqueue.py`` 与 ``run_job.py`` 内部的 ``worker_lifecycle.py``（经
-``job_recovery.py`` 转一手：``worker_lifecycle`` 顶层导入 ``job_recovery``，
-``job_recovery`` 顶层导入 ``enqueue`` 的两个名字）互相需要对方的名字
-（``worker_lifecycle`` 定义 ``_enqueue_for_current_status``；``enqueue`` 里 4 处
-调用它）。这是唯一一对真正的双向依赖，用惰性（函数内局部）import 打破：
+``enqueue.py`` 与 ``run_job.py`` 内部的 ``.dispatch``（经两跳转手：
+``.dispatch`` 顶层导入 ``worker_lifecycle``，``worker_lifecycle`` 顶层导入
+``job_recovery``，``job_recovery`` 顶层导入 ``enqueue`` 的两个名字）互相需要
+对方的名字（``.dispatch`` 定义 ``_enqueue_for_current_status``；``enqueue`` 里
+4 处调用它）。这是唯一一对真正的双向依赖，用惰性（函数内局部）import 打破：
 ``enqueue.py`` 把它对 ``_enqueue_for_current_status`` 的引用推迟到调用处，不
 在模块顶层做，避免两个模块互相在对方未加载完时抢一个还不存在的名字
 （``run_job.py`` 自己拆出的 14 个子模块之间还有第二对这样的双向依赖——

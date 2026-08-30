@@ -37,6 +37,8 @@ def _seed_job(
     provider_task_id: str | None = None,
     refs_ready: bool = False,
     retake: bool = False,
+    episode_id: str = "e1",
+    project_id: str = "p1",
 ) -> None:
     meta = {
         "reference_images": ([{"id": f"ref-{version_id}"}] if refs_ready else []),
@@ -51,8 +53,8 @@ def _seed_job(
     )
     conn.execute(
         "INSERT INTO jobs(id,kind,shot_id,version_id,episode_id,project_id,status,created_at,"
-        "updated_at,after_shot_id) VALUES(?,'video',?,?, 'e1','p1',?,1,1,?)",
-        (job_id, shot_id, version_id, status, after_shot_id),
+        "updated_at,after_shot_id) VALUES(?,'video',?,?,?,?,?,1,1,?)",
+        (job_id, shot_id, version_id, episode_id, project_id, status, after_shot_id),
     )
 
 
@@ -262,3 +264,78 @@ def test_video_ready_preempts_reference_when_slot_free(monkeypatch) -> None:
     assert "j-ready" in ready_q
     assert "j-ready" not in ref_q
     assert "j-ref" in ref_q
+
+
+def _seed_two_projects_one_soft_deleted(conn: sqlite3.Connection) -> None:
+    """p1 是正常项目，p2 已软删除（``deleted_at`` 非空）；各挂一条待派发 job。"""
+    conn.execute("INSERT INTO projects(id,name,status,created_at) VALUES('p1','P','created',1)")
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at,deleted_at) "
+        "VALUES('p2','P2','created',1,100)"
+    )
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) "
+        "VALUES('e1','p1',1,'generating',1)"
+    )
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) "
+        "VALUES('e2','p2',1,'generating',1)"
+    )
+    _seed_shot(conn, "s1", 1)
+    _seed_shot(conn, "s2", 2)
+    _seed_job(conn, job_id="j-live", shot_id="s1", version_id="v1",
+              refs_ready=True, episode_id="e1", project_id="p1")
+    _seed_job(conn, job_id="j-deleted", shot_id="s2", version_id="v2",
+              refs_ready=True, episode_id="e2", project_id="p2")
+    conn.commit()
+
+
+def test_dispatch_stage_aware_excludes_soft_deleted_project_jobs(monkeypatch) -> None:
+    """派发器必须排除已软删除项目的排队 job，否则删除后仍会继续派发烧配额。
+
+    ``worker_lifecycle._dispatch_due_jobs_stage_aware``（现拆到
+    ``app.media_exec.dispatch``）是常驻的实时派发器，与「启动恢复扫描」是两
+    条独立的路径——只挡住恢复路径不会挡住这个循环把已删除项目的残留 job
+    继续派下去。
+    """
+    conn = _conn()
+    _seed_two_projects_one_soft_deleted(conn)
+
+    ref_q: list[str] = []
+    ready_q: list[str] = []
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker._queue, "put_nowait", ref_q.append)
+    monkeypatch.setattr(worker._video_ready_queue, "put_nowait", ready_q.append)
+    monkeypatch.setattr(worker._poll_queue, "put_nowait", lambda *_: None)
+    patch_worker_everywhere(monkeypatch, "_worker_target", 2)
+    patch_worker_everywhere(monkeypatch, "_reference_worker_target", 2)
+    patch_worker_everywhere(monkeypatch, "_video_ready_worker_target", 2)
+    patch_worker_everywhere(monkeypatch, "_poll_worker_target", 1)
+    monkeypatch.setattr("app.media_pipeline.retry_policy.scheduler_policy", lambda: "stage_aware")
+
+    result = worker._dispatch_due_jobs_stage_aware()
+
+    dispatched = set(ref_q) | set(ready_q)
+    assert "j-live" in dispatched
+    assert "j-deleted" not in dispatched
+    # 判据落在源头 SQL，不只是排队阶段过滤：due 集合本身也必须已经排除。
+    assert result["due"] == 1
+
+
+def test_dispatch_legacy_excludes_soft_deleted_project_jobs(monkeypatch) -> None:
+    """旧调度器同样必须遵守 ``deleted_at`` 判据（legacy 与 stage_aware 两条路径
+    都要挡，见 ``app.media_exec.dispatch`` 模块 docstring）。"""
+    conn = _conn()
+    _seed_two_projects_one_soft_deleted(conn)
+
+    main: list[str] = []
+    patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker._queue, "put_nowait", main.append)
+    patch_worker_everywhere(monkeypatch, "_worker_target", 2)
+    patch_worker_everywhere(monkeypatch, "_poll_worker_target", 1)
+    monkeypatch.setattr("app.media_pipeline.retry_policy.scheduler_policy", lambda: "legacy")
+
+    result = worker._dispatch_due_jobs_legacy()
+
+    assert main == ["j-live"]
+    assert result["due"] == 1

@@ -4,8 +4,8 @@
 重新入队场景（内存队列延迟、job 失败退避重试、供应商轮询节流），全部经
 ``_retry_tasks``（``.common``）持有强引用防止被 GC 回收。``retry_paused`` 是预
 算暂停任务在用户提升额度后的批量恢复入口，与前三者共用
-``.worker_lifecycle._enqueue_for_current_status`` 把 job 重新路由回正确的调度
-通道。
+``.dispatch._enqueue_for_current_status``（2026-08-30 从 ``.worker_lifecycle``
+拆出）把 job 重新路由回正确的调度通道。
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from app.orchestration import media_scheduler
 from app.orchestration.media_runs import mark_media_job_state
 
 from .common import _retry_tasks, episode_video_budget_limit
-from .worker_lifecycle import _enqueue_for_current_status
+from .dispatch import _enqueue_for_current_status
 
 
 async def _requeue_after(job_id: str, delay: float) -> None:

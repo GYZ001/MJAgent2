@@ -470,11 +470,22 @@ def recoverable_jobs() -> list[tuple[str, float]]:
     """
     db = get_conn()
     stamp = now()
-    # 过期 lease 的 running：若上游已接单，回到 waiting_provider；否则回 queued
+    # 过期 lease 的 running：若上游已接单，回到 waiting_provider；否则回 queued。
+    # 回收站项目的残留 job 保持排除在外：不把它复位成可调度状态，它就永远
+    # 停在 running，不会被下面的派发资格扫描或 worker_lifecycle 的调度器重新
+    # 捞起——24 小时（或账号级联 30 天）后回收站清理会连这一行一并处理掉。
     expired = db.execute(
         """SELECT id, provider_non_cancellable, provider_create_state, version_id FROM jobs
            WHERE status='running' AND (lease_expires_at IS NULL OR lease_expires_at<?)
-             AND cancellation_requested=0 AND abandoned=0""",
+             AND cancellation_requested=0 AND abandoned=0
+             AND NOT EXISTS (
+               SELECT 1 FROM projects p -- ALL_OWNERS: startup recovery scans
+               -- every owner's stale-leased media jobs after a process
+               -- reload/restart; excludes soft-deleted (recycle-bin)
+               -- projects so their residual jobs are not re-armed and do
+               -- not burn quota
+                WHERE p.id=jobs.project_id AND p.deleted_at IS NOT NULL
+             )""",
         (stamp,),
     ).fetchall()
     for row in expired:
@@ -499,6 +510,14 @@ def recoverable_jobs() -> list[tuple[str, float]]:
     rows = db.execute(
         """SELECT id, next_retry_at FROM jobs
            WHERE status IN ('queued','waiting_provider') AND cancellation_requested=0 AND abandoned=0
+             AND NOT EXISTS (
+               SELECT 1 FROM projects p -- ALL_OWNERS: startup recovery's
+               -- actual dispatch-eligibility scan, run for every owner;
+               -- excludes soft-deleted (recycle-bin) projects so their
+               -- residual jobs are not reported as recoverable and do not
+               -- burn quota
+                WHERE p.id=jobs.project_id AND p.deleted_at IS NOT NULL
+             )
            ORDER BY created_at""",
     ).fetchall()
     db.commit()

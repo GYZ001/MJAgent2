@@ -16,15 +16,17 @@ from .common import episode_video_budget_limit
 
 _LOGGER = logging.getLogger(__name__)
 
-# ``_enqueue_for_current_status`` (defined in ``.worker_lifecycle`` since the
-# further ``run_job.py`` split) is intentionally *not* imported here at module
-# level: ``.worker_lifecycle`` imports ``.job_recovery`` at its own top level,
-# and ``.job_recovery`` imports ``reconcile_episode_generation_status``/
-# ``recover_equivalent_stale_provider_jobs`` from *this* file at its own top
-# level -- an eager top-level ``from .worker_lifecycle import
-# _enqueue_for_current_status`` here would close that into a real import
-# cycle. The four call sites below do the import locally instead (resolved at
-# call time, once every module involved has finished loading).
+# ``_enqueue_for_current_status`` (defined in ``.dispatch`` since the 2026-08-30
+# split of ``.worker_lifecycle``; ``.dispatch`` itself imports
+# ``.worker_lifecycle`` at its own top level) is intentionally *not* imported
+# here at module level: ``.worker_lifecycle`` imports ``.job_recovery`` at its
+# own top level, and ``.job_recovery`` imports
+# ``reconcile_episode_generation_status``/``recover_equivalent_stale_provider_jobs``
+# from *this* file at its own top level -- an eager top-level ``from .dispatch
+# import _enqueue_for_current_status`` here would close that into a real
+# import cycle (enqueue -> dispatch -> worker_lifecycle -> job_recovery ->
+# enqueue). The four call sites below do the import locally instead (resolved
+# at call time, once every module involved has finished loading).
 
 
 def _video_path(project_id: str, episode_no: int, shot_no: int, version_no: int) -> Path:
@@ -329,7 +331,7 @@ def resume_episode_video_tasks(episode_id: str) -> dict[str, object]:
     for row in resumed:
         try:
             if row["version_id"]:
-                from .worker_lifecycle import _enqueue_for_current_status
+                from .dispatch import _enqueue_for_current_status
 
                 _enqueue_for_current_status(row["id"])
             else:
@@ -497,7 +499,7 @@ def recover_equivalent_stale_provider_jobs(episode_id: str) -> dict[str, object]
         )
     conn.commit()
     for row in recovered:
-        from .worker_lifecycle import _enqueue_for_current_status
+        from .dispatch import _enqueue_for_current_status
 
         _enqueue_for_current_status(row["job_id"])
         mark_media_job_state(
@@ -1212,7 +1214,7 @@ def _resume_reused_paused_job(
         (row["id"],),
     )
     conn.commit()
-    from .worker_lifecycle import _enqueue_for_current_status
+    from .dispatch import _enqueue_for_current_status
 
     _enqueue_for_current_status(row["id"])
     return {
@@ -2220,7 +2222,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         return result
     dispatch_deferred = False
     try:
-        from .worker_lifecycle import _enqueue_for_current_status
+        from .dispatch import _enqueue_for_current_status
 
         _enqueue_for_current_status(job_id)
     except Exception as exc:  # durable dispatcher continuously rebuilds queues from jobs
