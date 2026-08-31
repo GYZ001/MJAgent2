@@ -470,9 +470,14 @@ def _adopt_shots(name: str, eid: str) -> None:
 
 def stage_concat(name: str, eid: str) -> None:
     mix = mix_status(eid)
-    if mix.get("final_video_url"):
-        log(f"{name} 成片已存在，跳过合成")
+    # 只有"存在且不过期"才算已完成。后端会在分镜重做/素材清空后把成片标成
+    # final_video_stale=true，而 URL 仍然指向上一版文件——只看 URL 存在就跳过
+    # 合成，等于拿旧成片给这一轮的分镜背书，整集报 ✅ 而这一轮根本没合成过。
+    if mix.get("final_video_url") and not mix.get("final_video_stale"):
+        log(f"{name} 成片已存在且不过期，跳过合成")
         return
+    if mix.get("final_video_url"):
+        log(f"{name} 成片已过期（分镜或素材已变），重新合成")
     code, resp = approved(
         "POST", f"/api/episodes/{eid}/concatenate",
         {"idempotency_key": f"first10-concat-{eid}-{ATTEMPT}"}, timeout=600,
@@ -480,8 +485,11 @@ def stage_concat(name: str, eid: str) -> None:
     log(f"{name} 合成 -> HTTP{code} {json.dumps(resp, ensure_ascii=False)[:200]}")
     if code not in (200, 202):
         raise StageFailure(f"成片合成失败：HTTP{code} {json.dumps(resp, ensure_ascii=False)[:200]}")
-    if not mix_status(eid).get("final_video_url"):
+    after = mix_status(eid)
+    if not after.get("final_video_url"):
         raise StageFailure("合成返回成功但未产出 final_video_url")
+    if after.get("final_video_stale"):
+        raise StageFailure("合成返回成功但成片仍被判过期")
 
 
 # ---------------------------------------------------------------------------

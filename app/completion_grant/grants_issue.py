@@ -349,10 +349,10 @@ def issue_video_completion_grant(
         # ep_0a70ec56e8e9：96 元历史 settled 认领 + 本轮批准 96，写进去的上限
         # 仍是 96，八个镜头全部 paused_budget、整集停在 WAITING_AUTHORIZATION。
         # 加上已承诺责任后，可用 = 上限 - 已用 = cap，正好是用户这次批的数。
-        _baseline, committed = _episode_video_budget_floor(episode_id, conn=conn)
+        # _episode_video_budget_floor 的第二个返回值就是已承诺责任。
         authority_cap = authorize_episode_video_budget_absolute(
             episode_id,
-            committed + cap,
+            _episode_video_budget_floor(episode_id, conn=conn)[1] + cap,
             source=f"completion_grant:{grant_id}",
             conn=conn,
         )
