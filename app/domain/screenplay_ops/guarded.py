@@ -74,7 +74,7 @@ async def _screenplay_guarded(
     batch_run_id: str | None = None,
 ):
     from app.generation_concurrency import run_with_generation_slot
-    from app import quota
+    from app import quota, quota_expiry
 
     conn = get_conn()
     owner_user_id = quota.owner_of_episode(conn, episode_id)
@@ -85,8 +85,11 @@ async def _screenplay_guarded(
         # 必然读到自己刚插入、已经通过准入的这一行，是死代码，且两处各自读一
         # 次表还制造了本该已经消灭的 TOCTOU 窗口。这里只剩 token 额度：token
         # 花费只有调用真正结束才知道，没法像并发槽位那样在创建时精确预留，
-        # 所以仍在这里做"账号 30 天 token 额度是否已经见顶"的前置检查。
+        # 所以仍在这里做"账号 30 天 token 额度是否已经见顶"的前置检查。会员
+        # 到期闸门（quota_expiry）同理放在这里而不是并发占位那个事务里——它
+        # 只拦"要不要开启新一轮"，与并发槽位占位无关。
         try:
+            quota_expiry.assert_membership_active(conn, owner_user_id)
             quota.assert_token_capacity(conn, owner_user_id)
         except quota.QuotaExceeded:
             try:
@@ -116,11 +119,7 @@ async def _screenplay_guarded(
         return await _recorded_screenplay_task(episode_id, recorder)
 
     try:
-        await run_with_generation_slot(
-            "screenplay",
-            activate,
-            priority=priority,
-        )
+        await run_with_generation_slot("screenplay", activate, priority=priority)
     except asyncio.CancelledError:
         row = get_conn().execute(
             "SELECT status FROM workflow_runs WHERE id=?",

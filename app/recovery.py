@@ -337,6 +337,37 @@ async def account_recycle_bin_sweep_loop(interval_s: float = 300.0) -> None:
         await asyncio.sleep(max(60.0, min(float(interval_s), 900.0)))
 
 
+async def expired_membership_sweep_loop(interval_s: float = 3600.0) -> None:
+    """周期性把已过期的付费档位账号降级回 free，并裁剪超额项目。
+
+    与 ``project_recycle_bin_sweep_loop``/``account_recycle_bin_sweep_loop``
+    同一种调度形态与同一条判据风格——挂 ``users.tier_expires_at`` 时间戳，不
+    挂内存计时器；见 ``app.domain.projects.sweep_expired_memberships``。单个
+    账号的降级失败（例如级联项目里有供应商任务未到终态）不影响其余到期账
+    号，也不会让循环本身退出。默认间隔 1 小时（会员到期不是抢时间的操作，
+    不需要像回收站清理那样分钟级巡检）；睡眠上限相应放宽到 3600 秒而不是沿
+    用其它两个循环的 900 秒——那个 900 秒上限是为默认 300 秒间隔的循环定的，
+    直接照抄会把这里的调用方传参强行砍成 15 分钟一轮，与"默认按小时巡检"的
+    本意不符；下限仍是 60 秒，理由不变：调用方传一个荒谬小的 interval_s 也
+    不该把这个循环压成忙轮询。
+    """
+    from app.domain.projects import sweep_expired_memberships
+    while True:
+        try:
+            await sweep_expired_memberships()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — 巡检循环自身不得因单个账号坏数据退出
+            from app.errors import log_error
+            log_error(
+                exc,
+                action="expired_membership_sweep_loop",
+                context={"interval_s": interval_s},
+                meta={"stage": "expired_membership_sweep", "isolation": "loop"},
+            )
+        await asyncio.sleep(max(60.0, min(float(interval_s), 3600.0)))
+
+
 async def monitor_audit_flush_loop(interval_s: float = 60.0) -> None:
     """定期把 ``monitor_audit`` 本地缓冲（写锁竞争导致的失败兜底）补写回库。
 

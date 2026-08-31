@@ -10,6 +10,7 @@ import json
 from app import (
     errors,
     quota,
+    quota_expiry,
     task_registry,
     worker,
 )
@@ -92,6 +93,7 @@ def _reserve_refs_recorder(
         if owns_transaction:
             conn.execute("BEGIN IMMEDIATE")
         if owner_user_id is not None:
+            quota_expiry.assert_membership_active(conn, owner_user_id)
             active = count_active_project_scoped_workflow_runs(
                 conn, owner_user_id, "character_references", exclude_run_id=None,
             )

@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from app import config, errors, hiagent, quota, video_modes
+from app import config, errors, hiagent, quota, quota_expiry, video_modes
 from app.compiler import ensure_source_excerpt_in_prompt, idem_key as make_idem_key
 from app.db import get_conn, new_id, now
 from app.orchestration import media_scheduler
@@ -809,10 +809,9 @@ def _begin_video_preflight_job(
             # 事务里）。找不到归属账号（legacy-shared 兼容路径）时不拦截。
             owner_user_id = quota.owner_of_project(conn, shot["project_id"])
             if owner_user_id is not None:
+                quota_expiry.assert_membership_active(conn, owner_user_id)
                 active_jobs = quota.count_active_video_jobs(conn, owner_user_id)
-                quota.check_module_concurrency(
-                    conn, owner_user_id, quota.MODULE_VIDEO, active_count=active_jobs,
-                )
+                quota.check_module_concurrency(conn, owner_user_id, quota.MODULE_VIDEO, active_count=active_jobs)
                 quota.reserve_video_seconds(conn, owner_user_id, attempt_key=job_id)
             conn.execute(
                 """INSERT INTO jobs(

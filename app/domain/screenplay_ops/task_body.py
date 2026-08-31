@@ -237,7 +237,7 @@ def _reserve_screenplay_concurrency_slot(
     这一行，因此准入判定读到的 ``active_count`` 永远不含"正在被别的并发请求
     创建、尚未提交"的幽灵行——同一账号同一模块的两个并发请求不可能都读到
     "还没到上限"再各自建一行，把上限撑破。"""
-    from app import quota
+    from app import quota, quota_expiry
 
     owner_user_id = quota.owner_of_episode(conn, episode_id)
     owns_transaction = not conn.in_transaction
@@ -245,6 +245,7 @@ def _reserve_screenplay_concurrency_slot(
         if owns_transaction:
             conn.execute("BEGIN IMMEDIATE")
         if owner_user_id is not None:
+            quota_expiry.assert_membership_active(conn, owner_user_id)
             active = quota.count_active_workflow_runs(
                 conn, owner_user_id, "screenplay", exclude_run_id=None,
             )

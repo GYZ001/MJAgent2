@@ -89,7 +89,7 @@ def _reserve_storyboard_concurrency_slot(
     同一套惯例（照抄 media_scheduler.reserve_budget 的 owns_transaction 写法，
     不新造第二套事务风格）。通过后才允许 workflow_runs 出现这一行，两个并发
     请求不可能都读到"还没到上限"再各自建一行。"""
-    from app import quota
+    from app import quota, quota_expiry
 
     owner_user_id = quota.owner_of_episode(conn, episode_id)
     owns_transaction = not conn.in_transaction
@@ -97,6 +97,7 @@ def _reserve_storyboard_concurrency_slot(
         if owns_transaction:
             conn.execute("BEGIN IMMEDIATE")
         if owner_user_id is not None:
+            quota_expiry.assert_membership_active(conn, owner_user_id)
             active = quota.count_active_workflow_runs(
                 conn, owner_user_id, "storyboard", exclude_run_id=None,
             )
@@ -364,7 +365,7 @@ async def _storyboard_guarded_recorded(
 ) -> None:
     from app.generation_concurrency import run_with_generation_slot
     from app.orchestration.state_machine import StateConflict
-    from app import quota
+    from app import quota, quota_expiry
 
     conn = get_conn()
     owner_user_id = quota.owner_of_episode(conn, episode_id)
@@ -373,8 +374,10 @@ async def _storyboard_guarded_recorded(
         # _reserve_storyboard_concurrency_slot）与 workflow_runs 那一行的插入
         # 绑在同一个 BEGIN IMMEDIATE 事务里做过，这里不重复判并发（理由同
         # screenplay_ops.guarded._screenplay_guarded 的对应注释）。这里只剩
-        # token 额度检查，理由同上：花费只有调用结束才知道，没法预留。
+        # token 额度检查，理由同上：花费只有调用结束才知道，没法预留。会员
+        # 到期闸门同理放在这里，理由同 guarded._screenplay_guarded。
         try:
+            quota_expiry.assert_membership_active(conn, owner_user_id)
             quota.assert_token_capacity(conn, owner_user_id)
         except quota.QuotaExceeded:
             try:

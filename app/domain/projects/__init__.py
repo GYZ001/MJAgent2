@@ -26,6 +26,10 @@ episode_renumber，含 SQLite 事务 + 磁盘目录搬迁的原子性回滚）�
 ``_purge_all_deleted_projects_core``（均在 ``lifecycle`` 子模块）被
 ``app.domain.account_deletion``（账号级联软删除/恢复）复用，签名与行为不变。
 
+2026-08-30 新增第 11 个子模块 ``downgrade``（会员到期后的降级：裁剪超额项目
+到新档位上限 + 周期性到期扫描），依赖 ``lifecycle``（复用 ``_delete_project_
+core`` 做实际删除，软删除进回收站，不是硬删）——见该子模块文档字符串。
+
 本文件是稳定入口：所有既有 ``from app.domain.projects import X`` /
 ``app.domain.projects.X`` 调用点必须原样可用——每个符号（含每个子模块自己
 ``import`` 进来的名字，不只是它原生定义的）用 ``name as name`` 显式再导出
@@ -166,4 +170,9 @@ from app.domain.projects.lifecycle import (
     purge_project as purge_project,
     restore_project as restore_project,
     sweep_expired_deleted_projects as sweep_expired_deleted_projects,
+)
+
+from app.domain.projects.downgrade import (
+    sweep_expired_memberships as sweep_expired_memberships,
+    trim_projects_to_tier_limit as trim_projects_to_tier_limit,
 )
