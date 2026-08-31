@@ -355,11 +355,14 @@ def main() -> int:
         residue = verify_clean(ro, scope)
     finally:
         ro.close()
+    # 退出码只挂产物信号——逐表验证有没有残留。单步的非 2xx 不参与判定：
+    # 清除是幂等动作，"本集没有可删除的剧本""没有分镜可清"这类响应恰恰说明
+    # 目标已经是干净的，把它们算成失败会让退出码永远为 1、从而失去意义。
+    # 但仍然如实打印出来：某一步真的失败时，它会同时表现为残留。
+    if problems:
+        log("[非 2xx 的清除步骤，仅供排查] " + "；".join(problems))
     if residue:
         log("[未清干净] " + "；".join(residue))
-    if problems:
-        log("[清除步骤报错] " + "；".join(problems))
-    if residue or problems:
         return 1
     log("清除完成，逐表验证无残留。")
     return 0
