@@ -277,6 +277,7 @@ def _quick_commands(paths: list[str]) -> list[tuple[list[str], Path]]:
         commands.append(([sys.executable, "scripts/check_dark_theme.py"], ROOT))
         # 页面样式表只放本页独占的选择器，否则别的页面会掉样式。
         commands.append(([sys.executable, "scripts/check_css_split.py"], ROOT))
+        commands.append(([sys.executable, "scripts/check_css_classes_defined.py"], ROOT))
 
     frontend_changes = [path for path in paths if path.startswith("frontend/")]
     if frontend_changes:
@@ -327,6 +328,7 @@ def _full_commands(*, live_integration: bool = False) -> list[tuple[list[str], P
         ([sys.executable, "scripts/check_capability_coverage.py"], ROOT),
         ([sys.executable, "scripts/check_dark_theme.py"], ROOT),
         ([sys.executable, "scripts/check_css_split.py"], ROOT),
+        ([sys.executable, "scripts/check_css_classes_defined.py"], ROOT),
         (_layers_check_command(), ROOT),
         (_file_conventions_check_command(), ROOT),
         ([sys.executable, "-m", "compileall", "-q", "app"], ROOT),
