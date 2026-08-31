@@ -3,15 +3,16 @@ import { api } from '../api'
 import type { VisualStyleOption } from '../components/VisualStyleDialog'
 
 /**
- * 人物谱与场景库共用的统一画风弹窗状态。两个页面都从同一个后端来源
- * （GET /projects/{id}/bible/visual-styles + 当前项目的 bible_style_name）
- * 读取当前画风，保证无论从哪个页面打开，看到的都是同一份项目级设置，而不是
- * 各自维护的一份本地默认值。
+ * 导入项目页与（历史上）人物谱/场景库共用的统一画风弹窗状态。项目已存在时
+ * 从 GET /projects/{id}/bible/visual-styles 读取，保证看到的是同一份项目级
+ * 设置；`projectId` 为 null 时（导入面板：项目尚未创建，没有 id 可传）改读
+ * 项目无关的 GET /bible/visual-styles——两者返回同一份
+ * VISUAL_STYLE_PRESETS，只是要不要求 project_id 已存在的区别。
  *
- * 下游动作（人物谱页触发定妆照 / 场景库页触发场景图）由调用方在 onConfirm
- * 里各自处理，这个 hook 只负责弹窗本身的状态机。
+ * 下游动作（当前只剩导入面板：选定后随创建请求一起提交）由调用方在
+ * onConfirm 里处理，这个 hook 只负责弹窗本身的状态机。
  */
-export function useVisualStyleDialog(projectId: string) {
+export function useVisualStyleDialog(projectId: string | null) {
   const [styleOpen, setStyleOpen] = useState(false)
   const [styleLoading, setStyleLoading] = useState(false)
   const [styleError, setStyleError] = useState<string | null>(null)
@@ -23,7 +24,9 @@ export function useVisualStyleDialog(projectId: string) {
     setStyleLoading(true)
     setStyleError(null)
     try {
-      const result = await api.bibleVisualStyles(projectId)
+      const result = projectId
+        ? await api.bibleVisualStyles(projectId)
+        : await api.bibleVisualStylesUnscoped()
       const names = result.items.map(item => item.name).filter(Boolean)
       setStyleOptions(result.items)
       setSelectedStyle(

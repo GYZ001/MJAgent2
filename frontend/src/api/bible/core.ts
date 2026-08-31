@@ -106,20 +106,29 @@ export function bibleImpactPreview(
   return request("POST", `/projects/${projectId}/bible/impact-preview`, body);
 }
 
-export function bibleVisualStyles(projectId: string): Promise<{
+export interface VisualStyleCatalog {
   default: string;
   items: Array<{ name: string; description: string; sample_image: string }>;
-}> {
+}
+
+export function bibleVisualStyles(projectId: string): Promise<VisualStyleCatalog> {
   return request("GET", `/projects/${projectId}/bible/visual-styles`);
 }
 
+/** 导入面板选画风用：项目尚未创建，没有 project_id 可传，取值与
+ *  bibleVisualStyles 完全一致（同一份后端 VISUAL_STYLE_PRESETS）。 */
+export function bibleVisualStylesUnscoped(): Promise<VisualStyleCatalog> {
+  return request("GET", "/bible/visual-styles");
+}
+
 /**
- * 人物谱与场景库共用：只切换项目统一画风，不重新生成人物谱角色内容。
- * 两段式：不带 confirm 时，画风未变化直接返回 changed=false；画风有变化则
- * 后端抛 409（ApiError.code === 'PAYMENT_CONFIRM_REQUIRED'），detail.precheck
- * 是人物+场景合并报价。带 confirm+quote_id 确认后，后端在同一次请求内发起
- * 人物定妆照与场景图两条生成线（见 lib/styleRegen.ts::applyStyleRegen，
- * 前端拿到报价后立即用 quote_id 自动确认，不再弹窗等用户手动点确认）。
+ * 只切换项目统一画风，不重新生成人物谱角色内容。两段式：不带 confirm 时，
+ * 画风未变化直接返回 changed=false；画风有变化则后端抛 409
+ * （ApiError.code === 'PAYMENT_CONFIRM_REQUIRED'），detail.precheck 是人物+
+ * 场景合并报价。带 confirm+quote_id 确认后，后端在同一次请求内发起人物定妆
+ * 照与场景图两条生成线。2026-08-31 起画风只在导入项目时选定一次
+ * （见 projects.ts::importProject），人物谱/场景库不再提供前端换风格入口，
+ * 本函数与后端路由继续保留供 Agent/MCP 调用。
  */
 export function setBibleStyle(
   projectId: string,

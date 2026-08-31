@@ -3,7 +3,9 @@ import { api, Project } from '../api'
 import { useNav, usePoll } from '../App'
 import QueryState from '../components/QueryState'
 import { RecycleBinDialog } from '../components/RecycleBinDialog'
+import VisualStyleDialog from '../components/VisualStyleDialog'
 import { useRecycleBin } from '../hooks/useRecycleBin'
+import { useVisualStyleDialog } from '../hooks/useVisualStyleDialog'
 import { formatFileSize, novelTitleFromFilename, projectEntry, validateNovelFile } from './studioImport'
 
 const STATUS_LABEL: Record<string, [string, string]> = {
@@ -22,6 +24,11 @@ export default function Studio() {
   const [name, setName] = useState('')
   const [showImport, setShowImport] = useState(window.location.pathname === '/workspaces/new')
   const [showRecycleBin, setShowRecycleBin] = useState(false)
+  // 画风是项目级设置，2026-08-31 用户拍板挪到导入项目时一次性选定——人物谱/
+  // 场景库降为纯展示，不再提供换风格入口。projectId 传 null：复用与人物谱/
+  // 场景库同一份 VisualStyleDialog/useVisualStyleDialog，这里项目还不存在。
+  const styleDialog = useVisualStyleDialog(null)
+  const [styleName, setStyleName] = useState('')
 
   const importTriggerRef = useRef<HTMLButtonElement | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -102,6 +109,7 @@ export default function Studio() {
       const res = await api.importProject({
         attachment_token: attachmentToken,
         name: projectName,
+        style_name: styleName || undefined,
       })
       const planningRunning = res.episode_planning?.status === 'running'
       const assetStatus = res.asset_generation?.status
@@ -112,6 +120,7 @@ export default function Studio() {
           : '；部分后台准备未能启动，原文和项目已保留，请进入项目重试'
       toast(`《${projectName}》导入完成：${res.ingestion.chapter_count} 章，${res.ingestion.total_chars} 字${res.ingestion.auto_split ? '（未识别到章节标题，已按字数切分）' : ''}${bootstrapMessage}`)
       setName('')
+      setStyleName('')
       setSelectedFile(null)
       setPendingAttachment(null)
       setImportError(null)
@@ -252,6 +261,14 @@ export default function Studio() {
             <span>{uploading ? '请保持页面开启，不要重复提交' : '或将一份文件拖到这里'}</span>
           </button>
         </div>
+        <div>
+          <label className="f">统一画风（决定人物定妆照与场景图风格；创建后不再提供更换入口）</label>
+          <button type="button" className="btn small" disabled={uploading}
+            aria-label={`统一画风：${styleName || '默认（国漫电影风）'}，点击选择`}
+            onClick={() => void styleDialog.openStyleDialog(styleName)}>
+            {styleName || '默认（国漫电影风）'} · 选择画风
+          </button>
+        </div>
         <p id={importHelpId} className="import-guidance">
           选择文件只会在本页预览；确认后才上传并创建项目。现有项目不会被覆盖。
         </p>
@@ -389,6 +406,25 @@ export default function Studio() {
         ) : null}
       </QueryState>
       {recycleBin.dialog}
+      <VisualStyleDialog
+        open={styleDialog.styleOpen}
+        loading={styleDialog.styleLoading}
+        error={styleDialog.styleError}
+        options={styleDialog.styleOptions}
+        selected={styleDialog.selectedStyle}
+        scopeNote="该风格会用于这个项目此后全部人物定妆照与场景图，创建后人物谱/场景库不再提供更换入口。"
+        confirmLabel="确定画风"
+        onSelect={styleDialog.setSelectedStyle}
+        onClose={styleDialog.closeStyleDialog}
+        onConfirm={() => {
+          if (!styleDialog.selectedStyle) {
+            styleDialog.setStyleError('请先选择统一画面风格')
+            return
+          }
+          setStyleName(styleDialog.selectedStyle)
+          styleDialog.closeStyleDialog()
+        }}
+      />
     </>
   )
 }

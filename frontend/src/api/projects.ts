@@ -2,11 +2,7 @@ import { get, mutate, request } from "./client";
 import type { ArtifactEvidence, ShotTiming, TaskTiming, TextModelChoice } from "./common";
 import type { EpisodePrepPack, EpisodeScreenplay, ScreenplayState } from "./screenplay";
 import type { Bible } from "./bible";
-import type {
-  EpisodePipelineSummary,
-  Shot,
-  StoryboardStatus,
-} from "./storyboard";
+import type { EpisodePipelineSummary, Shot, StoryboardStatus } from "./storyboard";
 
 export interface ChapterContent {
   idx: number;
@@ -295,6 +291,7 @@ export function getChapter(projectId: string, idx: number): Promise<ChapterConte
 export function importProject(body: {
   attachment_token: string;
   name: string;
+  style_name?: string; // 统一画风预设名，导入时一次性选定并落进项目 world
 }): Promise<{
   project_id: string;
   ingestion: { chapter_count: number; total_chars: number; auto_split?: boolean };

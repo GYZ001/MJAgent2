@@ -11,6 +11,10 @@ from app.capabilities.schemas import StandardCommandInput
 class ProjectImportNovelInput(StandardCommandInput):
     attachment_token: str
     name: str | None = None
+    #: 统一画风预设名（app.visual_styles.VISUAL_STYLE_PRESETS 之一）；省略时
+    #: 世界观判定按 DEFAULT_VISUAL_STYLE_NAME 兜底。2026-08-31 用户拍板：画风
+    #: 选择挪到导入项目时一次性定下，人物谱/场景库不再提供换风格入口。
+    style_name: str | None = None
 
 
 class ProjectDeleteInput(StandardCommandInput):

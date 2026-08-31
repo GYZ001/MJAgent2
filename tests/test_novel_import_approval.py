@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from io import BytesIO
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
@@ -99,7 +100,7 @@ def test_import_reuses_attachment_token_after_approval(
 ) -> None:
     started: dict[str, str] = {}
 
-    async def fake_start_bible(project_id: str, feedback: str) -> dict:
+    async def fake_start_bible(project_id: str, feedback: str, **_kwargs) -> dict:
         started["project_id"] = project_id
         started["feedback"] = feedback
         return {"status": "running", "run_id": "run_bootstrap"}
@@ -158,7 +159,7 @@ def test_legacy_multipart_import_reuses_upload_across_approval(
     async def fake_start_plan(project_id: str) -> dict:
         return {"status": "running", "task_id": f"plan:{project_id}"}
 
-    async def fake_start_bible(project_id: str, _feedback: str) -> dict:
+    async def fake_start_bible(project_id: str, _feedback: str, **_kwargs) -> dict:
         return {"status": "running", "task_id": f"bible:{project_id}"}
 
     monkeypatch.setattr(planning, "start_plan", fake_start_plan)
@@ -187,7 +188,7 @@ def test_import_keeps_attachment_available_when_project_creation_fails(
     async def fake_start_plan(project_id: str) -> dict:
         return {"status": "running", "task_id": f"plan:{project_id}"}
 
-    async def fake_start_bible(project_id: str, _feedback: str) -> dict:
+    async def fake_start_bible(project_id: str, _feedback: str, **_kwargs) -> dict:
         return {"status": "running", "task_id": f"bible:{project_id}"}
 
     monkeypatch.setattr(planning, "start_plan", fake_start_plan)
@@ -220,7 +221,7 @@ def test_import_reports_paid_asset_bootstrap_as_waiting_confirmation(
     async def fake_start_plan(project_id: str) -> dict:
         return {"status": "running", "task_id": f"plan:{project_id}"}
 
-    async def require_payment(project_id: str, _feedback: str) -> dict:
+    async def require_payment(project_id: str, _feedback: str, **_kwargs) -> dict:
         raise HTTPException(
             409,
             detail={
@@ -269,7 +270,7 @@ async def test_import_receipt_recovers_project_after_attachment_store_is_lost(
     async def fake_start_plan(project_id: str) -> dict:
         return {"status": "running", "task_id": f"plan:{project_id}"}
 
-    async def fake_start_bible(project_id: str, _feedback: str) -> dict:
+    async def fake_start_bible(project_id: str, _feedback: str, **_kwargs) -> dict:
         return {"status": "running", "task_id": f"bible:{project_id}"}
 
     monkeypatch.setattr(planning, "start_plan", fake_start_plan)
@@ -283,6 +284,74 @@ async def test_import_receipt_recovers_project_after_attachment_store_is_lost(
     assert result.data["project_id"] == created["project_id"]
     assert result.data["idempotent_replay"] is True
     assert db.get_conn().execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
+
+
+def test_import_style_name_lands_in_project_world(
+    client: TestClient, monkeypatch,
+) -> None:
+    """2026-08-31 用户拍板：画风改在导入项目时一次性选定。这条用例验证选定的
+    style_name 真的贯穿 project.import_novel -> _confirm_and_start_bible ->
+    _start_bible_core -> _bible_task 这条链路，落进 bible_json.world.
+    visual_style_canonical，不只是被接收后又在某一环被丢弃或忽略。
+
+    world 判定异步跑在 task_registry 的 "bible" 任务里，且这个任务跑在
+    TestClient 内部自己的事件循环上（与本测试函数不是同一个 loop，不能直接
+    await），导入请求本身也只会返回 running；这里用轮询等它跑完再断言落库
+    结果，与 tests/test_agent_api.py::_wait_turn 同一套等待范式。
+    """
+    import time
+
+    from app.visual_styles import visual_style_prompt
+
+    captured: dict[str, str | None] = {}
+
+    async def fake_start_plan(project_id: str) -> dict:
+        return {"status": "running", "task_id": f"plan:{project_id}"}
+
+    async def fake_generate_bible(*_args, **kwargs):
+        from app.schemas import Bible, World
+        prompt = kwargs.get("visual_style_prompt")
+        captured["visual_style_prompt"] = prompt
+        return Bible(world=World(era="古代", genre="仙侠", visual_style_canonical=prompt or ""), characters=[])
+
+    def fake_start_refs(_project_id: str, _only_character: str | None, **_kwargs) -> dict | None:
+        return None
+
+    monkeypatch.setattr(planning, "start_plan", fake_start_plan)
+    patch_api_everywhere(monkeypatch, "generate_bible", fake_generate_bible)
+    patch_api_everywhere(monkeypatch, "_start_refs_generation", fake_start_refs)
+
+    upload = client.post(
+        "/api/attachments/novel",
+        files={"file": ("style.txt", "第一章 开始\n这是正文。".encode("utf-8"), "text/plain")},
+    )
+    args = {
+        "attachment_token": upload.json()["attachment_token"],
+        "name": "画风测试",
+        "style_name": "古典水墨风",
+    }
+    imported = client.post("/api/projects/import", json=args)
+    assert imported.status_code == 200, imported.text
+    project_id = imported.json()["project_id"]
+    assert imported.json()["asset_generation"]["status"] == "running"
+
+    deadline = time.time() + 5.0
+    row = None
+    while time.time() < deadline:
+        row = db.get_conn().execute(
+            "SELECT bible_json, bible_style_name, bible_status FROM projects WHERE id=?",
+            (project_id,),
+        ).fetchone()
+        if row["bible_status"] != "running":
+            break
+        time.sleep(0.05)
+
+    assert row is not None
+    assert row["bible_status"] == "ready"
+    assert row["bible_style_name"] == "古典水墨风"
+    expected_prompt = visual_style_prompt("古典水墨风")
+    assert captured["visual_style_prompt"] == expected_prompt
+    assert json.loads(row["bible_json"])["world"]["visual_style_canonical"] == expected_prompt
 
 
 def test_upload_accepts_epub_and_imports_spine_in_order(client: TestClient) -> None:

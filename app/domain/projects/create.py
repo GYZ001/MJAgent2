@@ -182,7 +182,11 @@ async def upload_novel_attachment(file: UploadFile = File(...)):
 
 
 @router.post("/projects")
-async def create_project(name: str = Form(...), file: UploadFile = File(...)):
+async def create_project(
+    name: str = Form(...),
+    file: UploadFile = File(...),
+    style_name: str | None = Form(default=None),
+):
     """页面上传入口：内部换发 attachment_token 后统一走 Command Bus，与 Agent/MCP 同一实现。"""
     from app.capabilities.attachments import store_upload
     from app.capabilities.dispatch import dispatch, respond_ui
@@ -194,6 +198,7 @@ async def create_project(name: str = Form(...), file: UploadFile = File(...)):
         {
             "attachment_token": token,
             "name": name,
+            "style_name": style_name,
             "idempotency_key": f"novel-import:{token}",
         },
         initiator="ui",
@@ -205,6 +210,7 @@ async def create_project(name: str = Form(...), file: UploadFile = File(...)):
 async def create_project_from_attachment(
     attachment_token: str = Body(...),
     name: str | None = Body(default=None),
+    style_name: str | None = Body(default=None),
 ):
     """用已上传的附件令牌导入小说，确保批准前后的命令参数保持不变。"""
     from app.capabilities.dispatch import dispatch, respond_ui
@@ -214,6 +220,7 @@ async def create_project_from_attachment(
         {
             "attachment_token": attachment_token,
             "name": name,
+            "style_name": style_name,
             # The one-time attachment token is unique for this import. Reusing
             # it as the command key makes response-loss retries replay-safe.
             "idempotency_key": f"novel-import:{attachment_token}",

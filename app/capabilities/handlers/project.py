@@ -6,6 +6,26 @@ from app.capabilities.handlers.common import call_guarded, failed, succeeded
 from app.capabilities.schemas import CommandResult
 
 
+async def _confirm_and_start_bible(project_id: str, style_name: str | None) -> CommandResult:
+    """导入即定风格：世界观判定挪到项目创建时自动发起，不再等用户回到人物谱
+    页手动点「选择画风并确定世界观」（2026-08-31 用户拍板：人物谱/场景库降为
+    纯展示，画风改在导入面板一次性选定）。首次生成只判定 era/genre/画风，不
+    产生图片费用（见 api._compute_bible_generate_precheck 的对应分支），比照
+    app.domain.bible_ops 里其余「预检后立即用 quote_id 自动确认」路径
+    （2026-08-29 用户拍板删除费用确认弹窗），这里同样不停下来等人工点头。
+    """
+    from app import api
+
+    async def _run():
+        precheck = api._compute_bible_generate_precheck(project_id, style_name=style_name)
+        quote = api._issue_payment_quote(precheck)
+        return await api._start_bible_core(
+            project_id, "", confirm=True, quote_id=quote["quote_id"], style_name=style_name,
+        )
+
+    return await call_guarded(_run)
+
+
 async def import_novel(args: I.ProjectImportNovelInput) -> CommandResult:
     from app import api, planning
     from app.capabilities import attachments
@@ -70,7 +90,7 @@ async def import_novel(args: I.ProjectImportNovelInput) -> CommandResult:
             "task_id": f"bible:{project_id}",
         }
     else:
-        generation = await call_guarded(api._start_bible_core, project_id, "")
+        generation = await _confirm_and_start_bible(project_id, args.style_name)
         if isinstance(generation, CommandResult):
             detail = generation.data if isinstance(generation.data, dict) else {}
             if detail.get("code") == "PAYMENT_CONFIRM_REQUIRED":

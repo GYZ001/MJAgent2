@@ -22,6 +22,10 @@ from app.schemas import (
     character_is_portrait_eligible,
     schema_errors,
 )
+from app.visual_styles import (
+    DEFAULT_VISUAL_STYLE_NAME,
+    visual_style_options,
+)
 from fastapi import (
     Body,
     HTTPException,
@@ -100,6 +104,13 @@ def _compute_style_regen_quote(project_id: str) -> dict:
         "idempotency_hint": "同一报价重复确认只受理一次，人物与场景两条线都不会重复启动",
         "stop_policy": "确认后人物与场景两条生成线独立运行，可分别在人物谱/场景库停止；已完成的图片保留",
     }
+
+@router.get("/bible/visual-styles")
+async def bible_visual_styles_unscoped():
+    """导入项目面板选画风用：项目尚未创建，没有 project_id 可传，取值与项目级
+    ``GET /projects/{id}/bible/visual-styles``（precheck.py）完全一致，同一份
+    ``VISUAL_STYLE_PRESETS``。"""
+    return {"default": DEFAULT_VISUAL_STYLE_NAME, "items": visual_style_options()}
 
 @router.post("/projects/{project_id}/bible/style")
 async def set_bible_visual_style(project_id: str, body: dict | None = Body(None)):

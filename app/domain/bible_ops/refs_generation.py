@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 
 from app import (
     errors,
@@ -28,7 +27,6 @@ from app.orchestration.engine import (
     WorkflowRecorder,
     fingerprint,
 )
-from app.schemas import character_is_portrait_eligible
 from fastapi import HTTPException
 
 from .precheck import compute_refs_cost_precheck
@@ -233,6 +231,52 @@ def _start_refs_generation(
         "run_id": recorder.run_id,
     }
 
+def _established_portrait_gap_names(conn, project_id: str) -> list[str]:
+    """已建卡角色里「缺图或出图失败」的名单：POST /projects/{id}/refs 在没有
+    显式指定 character(s) 时的补图范围来源，只补残缺、不重复出图。
+
+    名单来源限定 ``character_portraits`` 里非作废槽位（``ep_start>=0``）——
+    负数 ``ep_start`` 是 ``promote_staged_initial_portrait`` 压入的已作废历史
+    定妆照槽位，纳入会把重做过定妆照的角色错误地算成多张（与
+    app.portraits.card_rebind 模块 docstring 同一条纪律）。2026-08-31 架构
+    转向后角色只随映射台按需建卡，这里直接查已经真正建过定妆记录的角色，
+    不依赖 bible_json 快照。
+
+    「有没有缺口」的判据与 compute_refs_cost_precheck 的 resume 分支同口径
+    （当前采用版本 ``ep_end IS NULL``、pack_status、必需视角是否齐全），不
+    重写第二份相似判据；已有整包且视角齐全的角色不出现在返回值里，调用方
+    据此保证「已有图不重复出图、不重复烧钱」。
+    """
+    from app.multiview import CHARACTER_REQUIRED_VIEWS
+
+    rows = conn.execute(
+        "SELECT DISTINCT character_name FROM character_portraits "
+        "WHERE project_id=? AND ep_start>=0",
+        (project_id,),
+    ).fetchall()
+    established = sorted({row["character_name"] for row in rows if row["character_name"]})
+    gaps: list[str] = []
+    for name in established:
+        current = conn.execute(
+            "SELECT id, pack_status FROM character_portraits "
+            "WHERE project_id=? AND character_name=? AND ep_end IS NULL "
+            "ORDER BY ep_start DESC LIMIT 1",
+            (project_id, name),
+        ).fetchone()
+        if not current or current["pack_status"] not in (None, "ready"):
+            gaps.append(name)
+            continue
+        ready_roles = {
+            row["view_role"] for row in conn.execute(
+                "SELECT view_role, status, image_path FROM character_portrait_views "
+                "WHERE portrait_id=?", (current["id"],),
+            ).fetchall()
+            if row["status"] == "ready" and row["image_path"]
+        }
+        if any(role not in ready_roles for role in CHARACTER_REQUIRED_VIEWS):
+            gaps.append(name)
+    return gaps
+
 async def _refs_task(
     project_id: str,
     only_character: str | None,
@@ -282,10 +326,13 @@ async def _refs_task(
         elif only_character:
             names = [only_character]
         elif p and p["bible_json"]:
-            names = [
-                c["name"] for c in json.loads(p["bible_json"]).get("characters", [])
-                if character_is_portrait_eligible(c)
-            ]
+            # 未显式指定角色范围时，名单来自已建卡角色的既有定妆记录，不是发现
+            # 新角色——这是修补已知残缺（供应商失败/内容审核拦截/并发中断导致
+            # 的缺图），不是产生新发现。名单本身已经只含缺口，「已有图不重复
+            # 出图」由此保证；不额外强改调用方的 resume——它仍只表达调用方
+            # 自己的语义（例如是否顺带作废旧视频等下游产物），不是本次要动的
+            # 范围（2026-08-31 用户拍板）。
+            names = _established_portrait_gap_names(conn, project_id)
             only_characters = names
         else:
             names = []
