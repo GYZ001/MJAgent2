@@ -161,7 +161,10 @@ RESIDUE_PROBES: list[tuple[str, str, str]] = [
     ("artifacts", "id", "artifacts"),
     ("evaluations", "artifact_id", "artifacts"),
     ("episode_video_generation_plans", "episode_id", "episodes"),
-    ("episode_video_budget_authorities", "episode_id", "episodes"),
+    # 刻意不清 episode_video_budget_authorities / provider_video_budget_claims：
+    # 那是已经产生的付款责任，属于账目而不是流水线产出（与 reset_pipeline_data
+    # 把 payment_orders / quota_ledger 归入保留是同一条界线）。认领是 settled 的
+    # 那笔钱真的花掉了，删掉等于篡改账；授权行是它的上限记录，一起留着。
     ("video_budget_authorization_receipts", "episode_id", "episodes"),
     ("delivery_packages", "episode_id", "episodes"),
     ("concat_operation_receipts", "episode_id", "episodes"),

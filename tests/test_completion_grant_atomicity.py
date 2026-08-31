@@ -372,3 +372,78 @@ async def test_project_completion_derives_stable_episode_grant_key(
     assert captured["body"]["idempotency_key"] == (
         "project-request:episode:grant-episode"
     )
+
+
+def _insert_claim(conn, *, operation_id: str, amount: float, status: str) -> None:
+    completion_grant.ensure_video_budget_authority_tables(conn)
+    conn.execute(
+        """INSERT INTO provider_video_budget_claims(
+               operation_id,project_id,episode_id,shot_id,job_id,version_id,
+               origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
+               amount_cny,status,created_at,updated_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            # job_id/version_id 置空，复刻生产形态：这两列的外键是
+            # ON DELETE SET NULL，镜头版本被清掉后认领行留存、只剩 origin_*。
+            operation_id, "grant-project", "grant-episode", "grant-shot-1",
+            None, None, "grant-episode", "grant-shot-1", "job-1", "ver-1",
+            amount, status, 1, 1,
+        ),
+    )
+    conn.commit()
+
+
+def test_budget_floor_counts_claims_when_authority_row_is_missing(grant_db) -> None:
+    """已有认领、却没有 authority 行时，新批的上限不得低于已用额度。
+
+    扣款侧一律按 ``used = baseline + claimed`` 判断，而
+    ``_historical_video_liability`` 按设计只统计**没有 claim 归属**的遗留责任
+    （避免与 claimed 重复计），所以有认领时它正确地返回 0。此前 floor 直接
+    等于 baseline、把 claimed 丢掉，新批的 cap 一诞生就低于已用额度：实测
+    ep_0a70ec56e8e9 已有 96 元 settled 认领，新授权拿到 cap=96 而 used 已是
+    96，之后每次供应商调用都被判超限，8 个镜头全部 paused_budget，整集永久
+    停在 WAITING_AUTHORIZATION。
+    """
+    conn = grant_db
+    _insert_claim(conn, operation_id="op-old", amount=96.0, status="settled")
+    conn.execute("DELETE FROM episode_video_budget_authorities")
+    conn.commit()
+
+    baseline, floor = completion_grant._episode_video_budget_floor(
+        "grant-episode", conn=conn,
+    )
+
+    assert baseline == 0.0
+    assert floor == 96.0
+
+
+def test_released_claims_do_not_raise_the_floor(grant_db) -> None:
+    """released 的认领代表从未真正计费，不构成已承诺责任，不得抬高下限。"""
+    conn = grant_db
+    _insert_claim(conn, operation_id="op-released", amount=96.0, status="released")
+    conn.execute("DELETE FROM episode_video_budget_authorities")
+    conn.commit()
+
+    _baseline, floor = completion_grant._episode_video_budget_floor(
+        "grant-episode", conn=conn,
+    )
+
+    assert floor == 0.0
+
+
+def test_new_grant_after_historical_claims_can_still_reserve(grant_db) -> None:
+    """端到端：有历史认领的分集重新发授权后，下一次供应商扣款必须还能通过。"""
+    conn = grant_db
+    _insert_claim(conn, operation_id="op-old", amount=96.0, status="settled")
+    conn.execute("DELETE FROM episode_video_budget_authorities")
+    conn.commit()
+
+    completion_grant.authorize_episode_video_budget_increment(
+        episode_id="grant-episode", increment_cny=96.0, source="test:regrant", conn=conn,
+    )
+    row = conn.execute(
+        "SELECT baseline_cny,cap_cny FROM episode_video_budget_authorities"
+        " WHERE episode_id='grant-episode'"
+    ).fetchone()
+
+    assert float(row["cap_cny"]) > 96.0

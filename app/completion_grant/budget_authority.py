@@ -20,25 +20,42 @@ from app.completion_grant.models import (
     VIDEO_BUDGET_RETRY_MARGIN_MULTIPLIER,
 )
 
+def _episode_video_claimed(episode_id: str, *, conn) -> float:
+    """扣款侧算作"已用"的那部分认领——与 ``reserve_provider_video_budget``
+    里的 ``claimed`` 必须是同一个查询，两处漂移就会让新批的 cap 一诞生就低于
+    已用额度。"""
+    return float(conn.execute(
+        """SELECT COALESCE(SUM(amount_cny),0) AS amount
+             FROM provider_video_budget_claims
+            WHERE episode_id=? AND status!='released'""",
+        (episode_id,),
+    ).fetchone()["amount"] or 0)
+
+
 def _episode_video_budget_floor(episode_id: str, *, conn) -> tuple[float, float]:
-    """已承诺的下限：返回 (baseline_cny, floor_cny)。floor 是既有 cap 与
-    （baseline+在途认领）取大者；没有 authority 行时回退到历史遗留
-    liability。cap 永远不能低于 floor，否则会撕毁已经产生的付款责任。"""
+    """已承诺的下限：返回 (baseline_cny, floor_cny)。floor 至少是
+    baseline+已认领，有 authority 行时还不低于既有 cap。cap 永远不能低于
+    floor，否则会撕毁已经产生的付款责任。
+
+    两个分支都必须把 ``claimed`` 计进 floor。扣款侧一律按
+    ``used = baseline + claimed`` 判断，而"没有 authority 行"的分支曾只返回
+    ``baseline``——``_historical_video_liability`` 按设计只统计**没有 claim
+    归属**的遗留责任（避免与 claimed 重复计），所以有认领时它正确地返回 0，
+    于是 floor 也成了 0，新批的 cap 一诞生就低于已用额度：实测
+    ``ep_0a70ec56e8e9`` 已有 96 元 settled 认领、authority 行缺失，新授权拿到
+    cap=96 而 used 已是 96，之后每一次供应商调用都被判超限，8 个镜头全部
+    ``paused_budget``，整集永久停在 WAITING_AUTHORIZATION。
+    """
     current = conn.execute(
         "SELECT baseline_cny,cap_cny FROM episode_video_budget_authorities WHERE episode_id=?",
         (episode_id,),
     ).fetchone()
+    claimed = _episode_video_claimed(episode_id, conn=conn)
     if current:
         baseline = float(current["baseline_cny"] or 0)
-        claimed = float(conn.execute(
-            """SELECT COALESCE(SUM(amount_cny),0) AS amount
-                 FROM provider_video_budget_claims
-                WHERE episode_id=? AND status!='released'""",
-            (episode_id,),
-        ).fetchone()["amount"] or 0)
         return baseline, max(float(current["cap_cny"] or 0), baseline + claimed)
     baseline = _historical_video_liability(episode_id, conn=conn)
-    return baseline, baseline
+    return baseline, baseline + claimed
 
 
 def _apply_video_budget_retry_margin(
@@ -169,18 +186,10 @@ def authorize_episode_video_budget_absolute(
     if owns_transaction:
         db.execute("BEGIN IMMEDIATE")
     try:
-        current = db.execute(
-            "SELECT baseline_cny,cap_cny FROM episode_video_budget_authorities WHERE episode_id=?",
-            (episode_id,),
-        ).fetchone()
-        baseline = (
-            float(current["baseline_cny"] or 0)
-            if current else _historical_video_liability(episode_id, conn=db)
-        )
-        cap = max(
-            requested,
-            float(current["cap_cny"] or 0) if current else 0.0,
-        )
+        # 同一条下限口径（见 _episode_video_budget_floor）：显式设定上限也不得
+        # 低于已经承诺出去的责任，否则调用侧立刻判超限。
+        baseline, floor = _episode_video_budget_floor(episode_id, conn=db)
+        cap = max(requested, floor)
         stamp = now()
         db.execute(
             """INSERT INTO episode_video_budget_authorities(
