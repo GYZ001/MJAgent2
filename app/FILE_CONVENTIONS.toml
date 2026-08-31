@@ -77,7 +77,7 @@ max_function_lines_python = 50
 "app/domain/review_wall.py" = 1080
 "app/domain/screenplay_ops/activation.py" = 529
 "app/domain/screenplay_ops/edit.py" = 527
-"app/domain/screenplay_ops/status_snapshot.py" = 501
+"app/domain/screenplay_ops/status_snapshot.py" = 498
 "app/domain/storyboard_ops/clear_apply.py" = 507
 "app/domain/storyboard_ops/evidence.py" = 504
 "app/domain/storyboard_ops/task_body.py" = 560
@@ -168,7 +168,7 @@ max_function_lines_python = 50
 "app/video_prompt_ai.py" = 603
 "app/video_supervisor/run_loop.py" = 606
 "frontend/src/App.tsx" = 1525
-"frontend/src/api/projects.ts" = 410
+"frontend/src/api/projects.ts" = 407
 # 2026-08-30 +10：用户拍板"映射台/分镜台/生成台按身份实时解析当前定妆照"，
 # PrepPackCharacterAsset 新增 current_portrait_id/current_portrait_image_url
 # 两个展示字段（后端 app/domain/storyboard_ops/current_portraits.py 现算，不
@@ -176,7 +176,7 @@ max_function_lines_python = 50
 "frontend/src/api/screenplay.ts" = 340
 "frontend/src/components/EpisodeCrumb.tsx" = 301
 "frontend/src/components/observability/TraceDrawer.tsx" = 834
-"frontend/src/pages/BiblePage.tsx" = 1933
+"frontend/src/pages/BiblePage.tsx" = 1783
 "frontend/src/pages/BoardPage.test.ts" = 360
 # 2026-08-30 +16：素材条/素材详情两处角色缩略图改用当前解析结果，新增"已更新"
 # 轻标记（与 portrait_id 快照不同时）+ 无定妆照的显式空态，见上方 screenplay.ts 注释同一次改动。
@@ -185,13 +185,13 @@ max_function_lines_python = 50
 "frontend/src/pages/EpisodesPage.tsx" = 741
 "frontend/src/pages/MonitorPage.test.ts" = 313
 "frontend/src/pages/MonitorPage.tsx" = 874
-"frontend/src/pages/ScenesPage.tsx" = 1586
+"frontend/src/pages/ScenesPage.tsx" = 1290
 "frontend/src/pages/ScriptPage.render.test.ts" = 523
 "frontend/src/pages/ScriptPage.test.ts" = 1112
 # 2026-08-31：映射台入口审计——预检弹窗拆到 components/script/PrepPackPreviewDialog.tsx，
 # 净减少的行数换来给"发现新资源/索引历史资源"补文案和结果摘要的空间，950→926。
 "frontend/src/pages/ScriptPage.tsx" = 926
-"frontend/src/pages/Studio.tsx" = 439
+"frontend/src/pages/Studio.tsx" = 430
 "frontend/src/pages/WallPage.test.ts" = 343
 # 2026-08-30 +16：生成台素材条/素材详情同上一批改动，见 BoardPage.tsx 注释。
 "frontend/src/pages/WallPage.tsx" = 964
@@ -386,7 +386,7 @@ max_function_lines_python = 50
 "app/orchestration/media_scheduler.py" = 195
 "app/planning.py" = 75
 "app/portraits/cards.py" = 238
-"app/portraits/cards_ensure.py" = 229
+"app/portraits/cards_ensure.py" = 213
 "app/portraits/discovery.py" = 217
 "app/portraits/discovery_fragments.py" = 89
 "app/portraits/discovery_legacy.py" = 696
