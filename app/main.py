@@ -48,6 +48,7 @@ from app.orchestration.api import router as orchestration_router
 from app.observability.api import router as observability_router
 from app.payments.routes import public_router as payments_public_router
 from app.payments.routes import router as payments_router
+from app.provider_task_zero_cost_api import router as provider_task_zero_cost_router
 from app.system_api import public_router as system_public_router
 from app.system_api import router as system_router
 
@@ -281,6 +282,7 @@ app.include_router(planning_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(orchestration_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(observability_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(system_router, dependencies=_PROJECT_OWNER_DEPS)
+app.include_router(provider_task_zero_cost_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(agent_capabilities_router, prefix="/api", dependencies=_PROJECT_OWNER_DEPS)
 # agent_conversation_router 的 require_local_session 由路由自身声明（见
 # app/agent/api.py 的 APIRouter(dependencies=...)），这里只需再叠一层工作空间隔离。

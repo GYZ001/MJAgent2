@@ -3,6 +3,7 @@ import { api, ApiError } from "../../api";
 import type { Job, VideoModeAudit } from "../../api";
 import JsonViewer from "../../components/JsonViewer";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
+import ZeroCostRelease from "./ZeroCostRelease";
 import {
   PROVIDER_RESUBMISSION_WARNING,
   fmtTime,
@@ -112,9 +113,7 @@ export default function JobDrawer({
       ? `/projects/${encodeURIComponent(job.project_id)}/episodes/${encodeURIComponent(job.episode_id)}/${(job.workflow_type || job.kind) === "storyboard" ? "board" : (job.workflow_type || job.kind) === "screenplay" ? "script" : "wall"}`
       : `/projects/${encodeURIComponent(job.project_id)}/bible`
     : "";
-  const canRetry =
-    job.source !== "screenplay" &&
-    ["failed", "partial", "cancelled"].includes(job.status);
+  const canRetry = job.source !== "screenplay" && ["failed", "partial", "cancelled"].includes(job.status);
   const canResume = [
     "paused_external",
     "paused_budget",
@@ -129,9 +128,7 @@ export default function JobDrawer({
   // "cancel" a task and then watch it keep running anyway — confusing even
   // though harmless. The record's real state is already visible via its
   // status/label and error text; only the misleading action is withheld.
-  const canCancel =
-    job.source !== "screenplay" &&
-    ["running", "queued", "recovering"].includes(job.status);
+  const canCancel = job.source !== "screenplay" && ["running", "queued", "recovering"].includes(job.status);
   const modeAudit = (
     detail?.video_mode_audit && typeof detail.video_mode_audit === "object"
       ? detail.video_mode_audit
@@ -230,6 +227,7 @@ export default function JobDrawer({
             <JsonViewer data={detail} collapsed={false} maxHeight="50vh" />
           </details>
         )}
+        <ZeroCostRelease job={job} onReleased={() => { onChanged(); void load(); }} />
         <div className="monitor-drawer-actions">
           <span role="status">{copied}</span>
           {job.reason_code && (

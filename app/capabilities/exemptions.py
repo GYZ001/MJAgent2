@@ -55,6 +55,7 @@ EXEMPT_ROUTE_REASONS: dict[str, str] = {
         "POST /api/shots/{shot_id}/impact-preview": "分镜修订前只读影响预览",
         "POST /api/shots/{shot_id}/spoken-conflict-preview": "分镜口播冲突处理前只读预览",
         "POST /api/system/jobs/{job_id}/retry": "监制房运维重试入口；只限本机管理员",
+        "POST /api/system/provider-tasks/zero-cost-release": "供应商任务已终态拒绝、且本地证据已证明零扣费（或所用视频模型已声明不产生真实账单）的预留释放入口；只做把预留结算为 0 这一件事，不提交新任务、不放宽 PROVIDER_TASKS_NOT_TERMINAL 闸门本身的判据，本地二段式确认（?confirm=true），只限本机系统管理员，不向 Agent/MCP 开放",
         "POST /api/system/monitor/events": "前端监控事件采集入口；只记录遥测，不执行领域动作",
         "POST /api/versions/{version_id}/archive": "生成台人工归档操作；不删除媒体，不向 Agent/MCP 开放",
         "DELETE /api/versions/{version_id}/archive": "生成台人工取消归档操作；不向 Agent/MCP 开放",

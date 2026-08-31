@@ -28,6 +28,8 @@ export const api_system = {
   runRunAction: jobs.runRunAction,
   cancelJob: jobs.cancelJob,
   retrySystemJob: jobs.retrySystemJob,
+  getZeroCostCandidate: jobs.getZeroCostCandidate,
+  releaseZeroCostJobs: jobs.releaseZeroCostJobs,
   // calls
   getCallsPage: calls.getCallsPage,
   getCallDetail: calls.getCallDetail,

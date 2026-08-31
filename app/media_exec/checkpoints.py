@@ -343,23 +343,20 @@ def _commit_provider_terminal_failure_in_transaction(
     ).fetchone()
     if job is None:
         raise LeaseLost(f"provider failure lost lease: {job_id} / {owner}")
+    # 产物信号：该版本累计有没有产出（非"这次尝试"），用权威 version_id 单查。
+    produced = conn.execute("SELECT video_path FROM shot_versions WHERE id=?", (version_id,)).fetchone()
     claim = conn.execute(
-        """SELECT amount_cny FROM provider_video_budget_claims
-            WHERE operation_id=? AND job_id=?""",
+        "SELECT amount_cny FROM provider_video_budget_claims WHERE operation_id=? AND job_id=?",
         (operation_id, job_id),
     ).fetchone()
     reservation = conn.execute(
-        "SELECT amount_cny FROM budget_reservations WHERE job_id=?",
-        (job_id,),
+        "SELECT amount_cny FROM budget_reservations WHERE job_id=?", (job_id,),
     ).fetchone()
-    settled_cost = max(
-        0.0,
-        float(
-            claim["amount_cny"]
-            if claim is not None
-            else (reservation["amount_cny"] if reservation is not None else 0)
-        ),
-    )
+    # 零产出（从未下载）不按预留估算全价结算。
+    settled_cost = max(0.0, float(
+        claim["amount_cny"] if claim is not None
+        else (reservation["amount_cny"] if reservation is not None else 0)
+    )) if produced["video_path"] else 0.0
     changed = conn.execute(
         """UPDATE jobs
               SET status='failed',error=?,reason_code=?,reason_text=?,

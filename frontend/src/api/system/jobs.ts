@@ -128,3 +128,30 @@ export function cancelJob(jobId: string) {
 export function retrySystemJob(jobId: string, body: Record<string, unknown>) {
   return request("POST", `/system/jobs/${encodeURIComponent(jobId)}/retry`, body);
 }
+
+/** 供应商终态拒绝、且实际计费确凿为零——给 JobDrawer 判断要不要展示「释放零
+ *  扣费预留」按钮，以及确认文案里要写的金额与理由。不满足也带结构化 reason，
+ *  不把用户晾在原地。 */
+export interface ZeroCostCandidate {
+  job_id: string;
+  eligible: boolean;
+  reason: string;
+  reserved_amount_cny: number;
+}
+
+export function getZeroCostCandidate(jobId: string): Promise<ZeroCostCandidate> {
+  return get(`/system/provider-tasks/zero-cost-candidates/${encodeURIComponent(jobId)}`);
+}
+
+/** 本地二段式确认：不带 confirm 只预览（服务端会返回将要释放的清单与金额，
+ *  抛 422 供 JobDrawer 展示确认文案），带 confirm=true 才真正结算为 0。 */
+export function releaseZeroCostJobs(
+  jobIds: string[],
+  confirm: boolean,
+): Promise<{ ok: boolean; released: Array<{ job_id: string; amount_cny: number; reason: string }> }> {
+  return request(
+    "POST",
+    `/system/provider-tasks/zero-cost-release${confirm ? "?confirm=true" : ""}`,
+    { job_ids: jobIds },
+  );
+}

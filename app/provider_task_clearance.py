@@ -16,6 +16,13 @@
 ``completion_grant.py`` 从本文件重新导入这五个符号并保持原样对外可见（所有既有
 ``from app.completion_grant import ProviderTasksNotTerminalError`` 等调用点不用
 改），``artifacts.py`` 的两处调用改成直接从本文件导入。
+
+2026-08-30：``provider_task_clearance_snapshot``/``prepare_provider_tasks_for_
+clear`` 各自延迟 import 同层的 ``app.provider_task_zero_cost``（供应商已终态
+拒绝、且确凿零扣费的一类，``provably_unsubmitted_cancelled``/
+``external_terminal`` 都不覆盖），只读重新分类 blocker、必要时结算——延迟导入
+不是为了避环（两个模块互不反向依赖），只是不想改「模块级只依赖 app.db」这句
+话本身。
 """
 from __future__ import annotations
 
@@ -390,13 +397,17 @@ def provider_task_clearance_snapshot(
     from job kind. A provider-backed operation without durable terminal
     evidence blocks cleanup so its task handle and billing authority survive.
     """
-    clearance, _terminal_actions = _provider_task_clearance_evaluation(
+    from app.provider_task_zero_cost import apply_zero_cost_terminal_release
+
+    db = conn or get_conn()
+    clearance, terminal_actions = _provider_task_clearance_evaluation(
         project_id=project_id,
         episode_id=episode_id,
         shot_ids=shot_ids,
         version_ids=version_ids,
-        conn=conn,
+        conn=db,
     )
+    apply_zero_cost_terminal_release(db, clearance, terminal_actions)
     return clearance
 
 
@@ -429,6 +440,11 @@ def prepare_provider_tasks_for_clear(
     conn=None,
 ) -> dict[str, Any]:
     """Fence provider risk and explicitly release unsubmitted reservations."""
+    from app.provider_task_zero_cost import (
+        _release_zero_cost_terminal_jobs_in_transaction,
+        apply_zero_cost_terminal_release,
+    )
+
     db = conn or get_conn()
     clearance, terminal_actions = _provider_task_clearance_evaluation(
         project_id=project_id,
@@ -437,8 +453,12 @@ def prepare_provider_tasks_for_clear(
         version_ids=version_ids,
         conn=db,
     )
+    apply_zero_cost_terminal_release(db, clearance, terminal_actions)
     if not clearance["safe_to_clear"]:
         raise ProviderTasksNotTerminalError(clearance)
+    zero_cost_release = terminal_actions.get("zero_cost_release") or []
+    if zero_cost_release:
+        _release_zero_cost_terminal_jobs_in_transaction(db, zero_cost_release)
     releasable = terminal_actions["release"]
     if releasable:
         marks = ",".join("?" for _ in releasable)

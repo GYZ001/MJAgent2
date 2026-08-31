@@ -555,6 +555,81 @@ def test_episode_scoped_reconcile_settles_remote_terminal_without_download(
     ).fetchone()["status"] == "failed"
 
 
+def test_reconcile_failed_terminal_settles_zero_cost_not_reserved_estimate() -> None:
+    """真实事故复盘（proj_1fce17f77010 镜 5/6）：供应商确认终态失败=零产出，
+    此前这条路径无条件按预留估算（``amount_cny``）结算，把没有任何产出的
+    失败版本记成了全价——``video_path`` 全程为空，``cost_cny`` 却是 12。修复
+    后 failed 分支必须结算为 0，与全仓其余「供应商确认失败 ->
+    settle_budget(0, success=False)」的既有口径一致。"""
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="accepted",
+        claim_status="accepted",
+        provider_task_id="provider-task-1",
+    )
+    conn.execute(
+        """INSERT INTO budget_reservations(
+               id,job_id,scope_type,scope_id,amount_cny,status,created_at
+           ) VALUES('b-provider','j-provider','episode','e',4,'reserved',1)"""
+    )
+    conn.commit()
+
+    result = asyncio.run(
+        completion_grant.reconcile_provider_tasks_for_clear(
+            episode_id="e",
+            conn=conn,
+            terminal_observations={"provider-task-1": {"status": "failed"}},
+            evidence_source="sha256:zero-output-test",
+        )
+    )
+
+    assert result["reconciled_job_ids"] == ["j-provider"]
+    version = conn.execute(
+        "SELECT status,video_path,cost_cny FROM shot_versions WHERE id='v-provider'"
+    ).fetchone()
+    assert dict(version) == {"status": "failed", "video_path": None, "cost_cny": 0.0}
+    reservation = conn.execute(
+        "SELECT status,actual_cost_cny FROM budget_reservations WHERE job_id='j-provider'"
+    ).fetchone()
+    assert dict(reservation) == {"status": "settled", "actual_cost_cny": 0.0}
+
+
+def test_reconcile_succeeded_terminal_still_charges_reserved_estimate() -> None:
+    """回归安全网：succeeded（隔离不采用）分支不受上面那条修复影响，仍按预留
+    估算保守计费——不能因为修了 failed 分支就把这个也一起改没了。"""
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="accepted",
+        claim_status="accepted",
+        provider_task_id="provider-task-1",
+    )
+    conn.execute(
+        """INSERT INTO budget_reservations(
+               id,job_id,scope_type,scope_id,amount_cny,status,created_at
+           ) VALUES('b-provider','j-provider','episode','e',4,'reserved',1)"""
+    )
+    conn.commit()
+
+    result = asyncio.run(
+        completion_grant.reconcile_provider_tasks_for_clear(
+            episode_id="e",
+            conn=conn,
+            terminal_observations={"provider-task-1": {"status": "succeeded"}},
+            evidence_source="sha256:quarantined-test",
+        )
+    )
+
+    assert result["reconciled_job_ids"] == ["j-provider"]
+    assert conn.execute(
+        "SELECT cost_cny FROM shot_versions WHERE id='v-provider'"
+    ).fetchone()["cost_cny"] == 4.0
+    assert conn.execute(
+        "SELECT actual_cost_cny FROM budget_reservations WHERE job_id='j-provider'"
+    ).fetchone()["actual_cost_cny"] == 4.0
+
+
 def test_close_superseded_unclaimed_video_jobs_closes_only_provably_uncharged_orphans() -> None:
     """paused_budget/waiting_human 等孤儿任务只有在本地证据已经证明「不可能
     产生费用」（从未提交给供应商、没有在途 claim）且所属镜头已经换到别的

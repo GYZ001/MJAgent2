@@ -96,7 +96,7 @@ max_function_lines_python = 50
 "app/identity_contracts.py" = 806
 "app/loops/base.py" = 547
 "app/media_exec/__init__.py" = 509
-"app/media_exec/checkpoints.py" = 520
+"app/media_exec/checkpoints.py" = 517
 "app/media_exec/concat.py" = 1416
 "app/media_exec/enqueue.py" = 2255
 "app/media_exec/input_first_frame_last.py" = 565
@@ -194,7 +194,7 @@ max_function_lines_python = 50
 # 2026-08-30 +16：生成台素材条/素材详情同上一批改动，见 BoardPage.tsx 注释。
 "frontend/src/pages/WallPage.tsx" = 964
 "frontend/src/pages/monitor/CallsSection.tsx" = 397
-"frontend/src/pages/monitor/JobDrawer.tsx" = 320
+"frontend/src/pages/monitor/JobDrawer.tsx" = 318
 "frontend/src/pages/monitor/JobsSection.tsx" = 384
 "frontend/src/pages/monitor/SettingsSection.tsx" = 376
 "frontend/src/pages/monitor/models/useModelCenterState.ts" = 333

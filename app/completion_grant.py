@@ -546,7 +546,7 @@ async def reconcile_provider_tasks_for_clear(
                         task_id,
                         "quarantined" if status == "succeeded" else "failed",
                         terminal_message,
-                        amount_cny,
+                        amount_cny if status == "succeeded" else 0.0,  # failed=零产出不计费
                         version_id,
                     ),
                 )
@@ -554,7 +554,7 @@ async def reconcile_provider_tasks_for_clear(
                 """UPDATE budget_reservations
                       SET status='settled',settled_at=?,actual_cost_cny=?
                     WHERE job_id=? AND status IN ('reserved','running')""",
-                (stamp, amount_cny, job_id),
+                (stamp, amount_cny if status == "succeeded" else 0.0, job_id),
             )
             db.commit()
         except BaseException:
