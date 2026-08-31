@@ -235,8 +235,8 @@ def _start_refs_generation(
 def _character_pack_incomplete(conn, project_id: str, name: str) -> bool:
     """单个角色「当前采用包」是否残缺：无当前采用包、pack_status 非 ready，
     或必需视角未齐全。判据与 compute_refs_cost_precheck 的 resume 分支同
-    口径，抽成共享实现供 _established_portrait_gap_names 与
-    _incomplete_portrait_eligible_names 复用，不重写第二份相似判据。"""
+    口径，抽成共享实现供 _incomplete_portrait_eligible_names 复用，不重写
+    第二份相似判据。"""
     from app.multiview import CHARACTER_REQUIRED_VIEWS
 
     current = conn.execute(
@@ -256,26 +256,17 @@ def _character_pack_incomplete(conn, project_id: str, name: str) -> bool:
     }
     return any(role not in ready_roles for role in CHARACTER_REQUIRED_VIEWS)
 
-def _established_portrait_gap_names(conn, project_id: str) -> list[str]:
-    """已建卡角色里「缺图或出图失败」的名单：POST /projects/{id}/refs 在没有
-    显式指定 character(s) 时的补图范围来源，只补残缺、不重复出图。名单来源
-    限定 ``character_portraits`` 里非作废槽位（``ep_start>=0``，负数是
-    promote_staged_initial_portrait 压入的已作废历史槽位）。已有整包且视角
-    齐全的角色不出现在返回值里，调用方据此保证「已有图不重复出图」。"""
-    rows = conn.execute(
-        "SELECT DISTINCT character_name FROM character_portraits "
-        "WHERE project_id=? AND ep_start>=0",
-        (project_id,),
-    ).fetchall()
-    established = sorted({row["character_name"] for row in rows if row["character_name"]})
-    return [name for name in established if _character_pack_incomplete(conn, project_id, name)]
-
 def _incomplete_portrait_eligible_names(conn, project_id: str) -> list[str]:
-    """refs_status='ready' 的产物判据：人物谱里每个具备定妆资格的角色是否都
-    真的有完整定妆包——挂在「角色都有图」这个产物信号上，不挂在「批量任务
-    跑完了」这个过程信号上。名单口径覆盖全部具备定妆资格的角色（不止「已
-    建卡」的），换画风把 character_portraits 整表清空后仍能如实报告「全部
-    缺图」，不因「没有已建卡角色」就误判无需检查。"""
+    """双重身份：既是 refs_status='ready' 的产物判据，也是 POST
+    /projects/{id}/refs 在没有显式指定 character(s) 时的补图范围来源
+    （_refs_task 直接复用本函数，不重复实现）——挂在「角色都有图」这个产物
+    信号上，不挂在「批量任务跑完了」这个过程信号上。名单口径覆盖全部具备
+    定妆资格的角色（不止「已建卡」的），换画风把 character_portraits 整表
+    清空、或角色由映射台按需建卡从未在该表出现过时，仍能如实报告「全部
+    缺图」并把这些角色排进补图范围，不因「没有已建卡角色」就误判无需检查
+    （2026-08-31 修复：POST /refs 曾只用「已建卡角色缺口」扫描，人物谱里
+    「有、但从未建卡」的角色对它结构上不可见，用户点补图后这些角色一个都
+    不会被排进生成）。"""
     import json
 
     from app.schemas import character_is_portrait_eligible
@@ -336,13 +327,19 @@ async def _refs_task(
         elif only_character:
             names = [only_character]
         elif p and p["bible_json"]:
-            # 未显式指定角色范围时，名单来自已建卡角色的既有定妆记录，不是发现
-            # 新角色——这是修补已知残缺（供应商失败/内容审核拦截/并发中断导致
-            # 的缺图），不是产生新发现。名单本身已经只含缺口，「已有图不重复
-            # 出图」由此保证；不额外强改调用方的 resume——它仍只表达调用方
-            # 自己的语义（例如是否顺带作废旧视频等下游产物），不是本次要动的
-            # 范围（2026-08-31 用户拍板）。
-            names = _established_portrait_gap_names(conn, project_id)
+            # 未显式指定角色范围时，名单必须来自人物谱里全部具备定妆资格的角色
+            # 中「尚无完整定妆包」的那些（_incomplete_portrait_eligible_names，
+            # 与 refs_status 的产物判据同一口径）——不能再用「已建卡角色缺口」
+            # 扫描（_established_portrait_gap_names）：那份扫描的名单来源限定
+            # 在 character_portraits 里已经出现过的角色，新架构下角色由映射台
+            # 按需建卡、换画风又会把该表整表清空，导致「人物谱里有、但从未建
+            # 卡」的角色对这条路径结构上不可见——用户点击「补齐缺失定妆照」
+            # 按钮后，这些角色一个都不会被排进生成（实战撞到：5 个角色里 4 个
+            # 从未建卡，POST /refs 补图后仍只有 1/5 有图）。名单本身已经只含
+            # 缺口，「已有图不重复出图」由此保证；不额外强改调用方的 resume——
+            # 它仍只表达调用方自己的语义（例如是否顺带作废旧视频等下游产
+            # 物），不是本次要动的范围（2026-08-31 用户拍板）。
+            names = _incomplete_portrait_eligible_names(conn, project_id)
             only_characters = names
         else:
             names = []
