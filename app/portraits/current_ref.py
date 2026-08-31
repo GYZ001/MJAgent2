@@ -24,18 +24,26 @@ def _current_portrait_row(
     visual_entity_id: str | None = None,
 ):
     """覆盖 ``episode_no`` 的那一段定妆照整行——生成侧唯一的选段判据
-    （``ep_start<=episode_no AND (ep_end IS NULL OR ep_end>=episode_no)``，
-    命中里 ``ep_start`` 最大的那段胜出）。``visual_entity_id`` 非空时优先按
-    视觉实体 ID 查询——同一视觉实体跨集复用同一张脸，不受该集本次称谓/是否
-    已具名影响（设计文档 §4.2）；未命中（含该列尚未迁移落地）时回退到既有
-    的 ``character_name`` 路径。命中行的文件已从磁盘丢失时视为未命中，调用
-    方不得回退到别的判据。
+    （``ep_start>=0 AND ep_start<=episode_no AND (ep_end IS NULL OR
+    ep_end>=episode_no)``，命中里 ``ep_start`` 最大的那段胜出）。
+    ``visual_entity_id`` 非空时优先按视觉实体 ID 查询——同一视觉实体跨集
+    复用同一张脸，不受该集本次称谓/是否已具名影响（设计文档 §4.2）；未
+    命中（含该列尚未迁移落地）时回退到既有的 ``character_name`` 路径。命中
+    行的文件已从磁盘丢失时视为未命中，调用方不得回退到别的判据。
+
+    显式 ``ep_start>=0``：``promote_staged_initial_portrait`` 把手工重新定妆
+    前的旧包压成历史槽位时，从 -1 递减、``ep_end`` 恒置 0——真实数据里存在
+    （``portrait_5889d5f70972``→-1、``portrait_383d7c8520ff``→-2）。这些槽位
+    对 ``episode_no>=1`` 时已经会被 ``ep_end>=episode_no`` 条件排除，但那是
+    ``ep_end=0`` 这个具体取值带来的隐式副作用，不是本查询自己声明的下限——
+    显式加下限，不依赖另一个字段的巧合取值来防止把"其实没有有效图"误判成
+    "有图"。
     """
     if visual_entity_id:
         try:
             row = get_conn().execute(
                 "SELECT * FROM character_portraits "
-                "WHERE project_id=? AND visual_entity_id=? AND ep_start<=? "
+                "WHERE project_id=? AND visual_entity_id=? AND ep_start>=0 AND ep_start<=? "
                 "AND (ep_end IS NULL OR ep_end>=?) "
                 "ORDER BY ep_start DESC LIMIT 1",
                 (project_id, visual_entity_id, episode_no, episode_no),
@@ -47,7 +55,8 @@ def _current_portrait_row(
     try:
         row = get_conn().execute(
             "SELECT * FROM character_portraits "
-            "WHERE project_id=? AND character_name=? AND ep_start<=? AND (ep_end IS NULL OR ep_end>=?) "
+            "WHERE project_id=? AND character_name=? AND ep_start>=0 AND ep_start<=? "
+            "AND (ep_end IS NULL OR ep_end>=?) "
             "ORDER BY ep_start DESC LIMIT 1",
             (project_id, name, episode_no, episode_no)).fetchone()
     except sqlite3.OperationalError:

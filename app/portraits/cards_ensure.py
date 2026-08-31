@@ -7,9 +7,9 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from app.db import get_conn
-from app.errors import ContentGenerationError
+from app.errors import ContentGenerationError, code_ref
 from app.portraits.card_owner import bible_known_labels
-from app.schemas import Bible
+from app.schemas import Bible, character_is_portrait_eligible
 
 from ._db_probe import _has_column
 from ._identity_tokens import _identity_disambiguating_suffix
@@ -21,18 +21,144 @@ from .constants import (
     CURRENT_IDENTITY_LITERAL_PROVENANCE,
     CURRENT_IDENTITY_SYNTHETIC_PROVENANCE,
 )
+from .current_ref import current_portrait_ref
 from .discovery import discover_character_candidates
-from .discovery_fragments import _future_chapter_context
+from .discovery_fragments import _card_lock, _future_chapter_context
 from .discovery_resample import (
     _named_candidate_materialization_compatible,
     screenplay_identity_scope_fingerprint,
 )
 from .evidence_receipt import _validate_current_identity_receipt_bundle
+from .portrait_io import _generate_discovered_character_portrait
 from .resolution_store import load_screenplay_character_resolutions
 from .structural_coverage import (
     _identity_resolution,
     screenplay_identity_resolution_is_current_for_source,
 )
+
+
+async def _ensure_known_character_portrait(
+    conn, project_id: str, name: str, episode_no: int, bible: Bible,
+    *, generate_portraits: bool, write_guard: Callable[[], None] | None,
+) -> dict:
+    """已在人物谱里的角色，映射进本集时是否已有可用定妆照——判据与
+    ``app.portraits.current_ref.current_portrait_ref`` 完全同一张表、同一个
+    查询形状（该模块 docstring 明确禁止另写一条相似查询），额外校验落盘
+    文件是否存在，不会把"卡还在但图已丢"误判成"有图"。
+
+    真实事故链：角色改成映射时逐个建卡，出图可能因供应商错误/内容审核/
+    并发中断失败；旧代码此时只做称谓归一，永远不再检查也不再补图，分镜台
+    永久拿不到这个角色的素材。这里补上"缺就补"，并让补图失败产生可见信号
+    （返回 status="failed"，调用方计入 warnings），不静默跳过。
+
+    ``generate_portraits=False`` 时不发起任何供应商调用（与本函数同级的
+    ``unknown_by_name`` 分支同一约定），只报告"缺图待补"——下一次以
+    ``generate_portraits=True`` 调用本函数的入口（映射台资产解析，
+    ``app.production.prep_pack.discovery._discover_new_characters``）会真正
+    补上。
+    """
+    if current_portrait_ref(project_id, name, episode_no) is not None:
+        return {"status": "has_portrait", "name": name}
+    character = next((c for c in bible.characters if c.name == name), None)
+    if character is None or not character_is_portrait_eligible(character):
+        return {"status": "skipped", "name": name, "reason": "not portrait eligible"}
+    if not generate_portraits:
+        return {"status": "deferred", "name": name}
+    lock = await _card_lock(project_id, name)
+    async with lock:
+        if write_guard:
+            write_guard()
+        if current_portrait_ref(project_id, name, episode_no) is not None:
+            return {"status": "has_portrait", "name": name}  # 并发已补
+        latest = conn.execute(
+            "SELECT bible_version FROM projects WHERE id=?", (project_id,),
+        ).fetchone()
+        try:
+            portrait = await _generate_discovered_character_portrait(
+                project_id,
+                name,
+                bible.world.visual_style_canonical,
+                character.appearance_canonical,
+                ep_start=episode_no,
+                bible_version=int(latest["bible_version"] or 0) if latest else 0,
+            )
+        except Exception as exc:  # noqa: BLE001 -- 补图失败必须可见，不吞
+            public = code_ref(
+                exc,
+                action="backfill_known_character_portrait",
+                context={"project_id": project_id, "name": name, "episode_no": episode_no},
+            )
+            return {"status": "failed", "name": name, "portrait_error": public}
+    return {"status": "backfilled", "name": name, **portrait}
+
+
+async def _backfill_known_character_portraits(
+    conn, project_id: str, episode_no: int, bible: Bible,
+    known_named_candidates: list[dict],
+    *, generate_portraits: bool, write_guard: Callable[[], None] | None,
+) -> tuple[list[dict], list[str]]:
+    """``known_named_candidates`` 去重后逐个补图检查——拆出为独立函数，不塞进
+    ``ensure_cards_for_text`` 自己的函数体（该函数已经在
+    ``app/FILE_CONVENTIONS.toml`` 的 function_lines 棘轮基线上，新增逻辑只能
+    另起函数，不能继续加长它）。返回 ``(portraits_backfilled, warning_lines)``
+    供调用方合并进自己的 ``warnings`` 列表。
+    """
+    known_names_needing_check = dict.fromkeys(
+        str(item.get("name") or "").strip() for item in known_named_candidates
+    )
+    backfilled: list[dict] = []
+    warning_lines: list[str] = []
+    for name in known_names_needing_check:
+        if not name:
+            continue
+        outcome = await _ensure_known_character_portrait(
+            conn, project_id, name, episode_no, bible,
+            generate_portraits=generate_portraits, write_guard=write_guard,
+        )
+        status = outcome["status"]
+        if status == "backfilled":
+            backfilled.append(outcome)
+        elif status == "failed":
+            warning_lines.append(
+                f"{name}：人物卡已存在，但本集定妆照缺失且自动补图失败"
+                f"{outcome.get('portrait_error') or ''}"
+            )
+        elif status == "deferred":
+            warning_lines.append(
+                f"{name}：人物卡已存在但本集缺少可用定妆照，"
+                "将在资产准备阶段自动补齐"
+            )
+    return backfilled, warning_lines
+
+
+def _reference_identity_resolutions(mentioned_only_candidates: list[dict]) -> list[dict]:
+    """A stable referenced identity still needs an authority even when it never
+    appears visually and therefore must not create a character card."""
+    out: list[dict] = []
+    for item in mentioned_only_candidates:
+        source_label = str(item.get("source_label") or item.get("name") or "").strip()
+        canonical_name = str(item.get("name") or source_label).strip()
+        if source_label and canonical_name:
+            out.append(_identity_resolution(
+                item, canonical_name, "reference_identity",
+                reason="来源或蓝图引用该稳定身份，但当前集不需要人物卡或视觉资产",
+            ))
+    return out
+
+
+def _future_identity_resolutions(known_named_candidates: list[dict]) -> list[dict]:
+    """本集用了新称谓，但人物谱已有该角色——记一条决议，供剧本消歧表复用。"""
+    out: list[dict] = []
+    for item in known_named_candidates:
+        source_label = str(item.get("source_label") or "").strip()
+        canonical_name = str(item.get("name") or "").strip()
+        if source_label and canonical_name and source_label != canonical_name:
+            out.append(_identity_resolution(
+                item, canonical_name, "future_identity",
+                reason="后续章节已确认该称谓属于人物谱已有角色",
+            ))
+    return out
+
 
 async def ensure_cards_for_text(
     project_id: str,
@@ -174,33 +300,18 @@ async def ensure_cards_for_text(
     _route_name_first_owner: dict[str, str] = {}
     _route_name_collisions: dict[str, int] = {}
 
-    # A stable referenced identity still needs an authority even when it never
-    # appears visually and therefore must not create a character card.
-    for item in mentioned_only_candidates:
-        source_label = str(
-            item.get("source_label") or item.get("name") or ""
-        ).strip()
-        canonical_name = str(item.get("name") or source_label).strip()
-        if source_label and canonical_name:
-            resolutions.append(_identity_resolution(
-                item,
-                canonical_name,
-                "reference_identity",
-                reason=(
-                    "来源或蓝图引用该稳定身份，但当前集不需要人物卡或视觉资产"
-                ),
-            ))
+    resolutions.extend(_reference_identity_resolutions(mentioned_only_candidates))
+    resolutions.extend(_future_identity_resolutions(known_named_candidates))
 
-    for item in known_named_candidates:
-        source_label = str(item.get("source_label") or "").strip()
-        canonical_name = str(item.get("name") or "").strip()
-        if source_label and canonical_name and source_label != canonical_name:
-            resolutions.append(_identity_resolution(
-                item,
-                canonical_name,
-                "future_identity",
-                reason="后续章节已确认该称谓属于人物谱已有角色",
-            ))
+    # 已在人物谱里的角色映射进本集时不能只做称谓归一：卡可能是之前哪一集
+    # 建成后出图失败留下的（供应商错误/内容审核/并发中断），如果只写决议、
+    # 不检查有没有图，分镜台就永久拿不到这个角色的素材（见
+    # _backfill_known_character_portraits / _ensure_known_character_portrait）。
+    portraits_backfilled, portrait_backfill_warnings = await _backfill_known_character_portraits(
+        conn, project_id, episode_no, bible, known_named_candidates,
+        generate_portraits=generate_portraits, write_guard=write_guard,
+    )
+    warnings.extend(portrait_backfill_warnings)
 
     # 功能身份保留原文稳定称谓。是否需要人物卡与是否具备真名是两件事，
     # 不得通过改成“路人甲/乙/丙”来降低角色重要性或抹掉来源身份。
@@ -309,5 +420,6 @@ async def ensure_cards_for_text(
         "future_context_label": future_label,
         "errors": errors,
         "warnings": warnings,
+        "portraits_backfilled": portraits_backfilled,
     }
 
