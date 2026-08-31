@@ -7,7 +7,7 @@ from app.capabilities.schemas import CommandResult
 
 
 async def generate_episode(args: I.VideoGenerateEpisodeInput) -> CommandResult:
-    from app import api
+    from app import api, db
     from app.capabilities.preflight import video_generate_episode
     from app.completion_grant import authorize_episode_video_budget_increment
 
@@ -50,8 +50,7 @@ async def generate_episode(args: I.VideoGenerateEpisodeInput) -> CommandResult:
                 error_code="idempotency_key_required",
             )
         authorize_episode_video_budget_increment(
-            args.episode_id,
-            approved_cost,
+            args.episode_id, approved_cost, conn=db.get_conn(),
             source="capability:video.generate_episode",
             operation_id=f"{command}:{args.idempotency_key}",
             request_fingerprint=request_fingerprint,
@@ -303,8 +302,7 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
         ).fetchone()
         if shot:
             authorize_episode_video_budget_increment(
-                str(shot["episode_id"]),
-                approved_cost,
+                str(shot["episode_id"]), approved_cost, conn=get_conn(),
                 source="capability:video.generate_shot",
                 operation_id=f"{command}:{args.idempotency_key}",
                 request_fingerprint=request_fingerprint,

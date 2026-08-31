@@ -85,6 +85,7 @@ def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
         "budget-e",
         4.0,
         source="test-approval",
+        conn=conn,
     )
     assert cap == 12.0
     for index in (1, 2, 3):
@@ -94,6 +95,7 @@ def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
             version_id=f"budget-v{index}",
             operation_id=f"video-create-budget-v{index}",
             amount_cny=4.0,
+            conn=conn,
         ) is True
     # 第 4 次尝试超出含余量的 cap（12.0）——余量覆盖真实重投需求，但仍是
     # 有限的，超出仍必须被拦，不能靠它把预算保护整个放宽。
@@ -103,8 +105,9 @@ def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
         version_id="budget-v4",
         operation_id="video-create-budget-v4",
         amount_cny=4.0,
+        conn=conn,
     ) is False
-    assert episode_video_budget_snapshot("budget-e") == {
+    assert episode_video_budget_snapshot("budget-e", conn=conn) == {
         "baseline_cny": 0.0,
         "claimed_cny": 12.0,
         "used_cny": 12.0,
@@ -116,6 +119,7 @@ def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
         "budget-e",
         4.0,
         source="test-topup",
+        conn=conn,
     )
     assert reserve_provider_video_budget(
         episode_id="budget-e",
@@ -123,6 +127,7 @@ def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
         version_id="budget-v4",
         operation_id="video-create-budget-v4",
         amount_cny=4.0,
+        conn=conn,
     ) is True
 
 
@@ -176,6 +181,7 @@ def test_concurrent_provider_video_budget_claims_share_one_atomic_cap() -> None:
         "race-e",
         4.0,
         source="concurrency-test",
+        conn=conn,
     )
     barrier = threading.Barrier(2)
 
@@ -187,13 +193,14 @@ def test_concurrent_provider_video_budget_claims_share_one_atomic_cap() -> None:
             version_id=f"race-v{index}",
             operation_id=f"video-create-race-v{index}",
             amount_cny=7.0,
+            conn=conn,
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(reserve, (1, 2)))
 
     assert sorted(results) == [False, True]
-    assert episode_video_budget_snapshot("race-e") == {
+    assert episode_video_budget_snapshot("race-e", conn=conn) == {
         "baseline_cny": 0.0,
         "claimed_cny": 7.0,
         "used_cny": 7.0,
@@ -250,6 +257,7 @@ def test_completion_budget_requirement_includes_sunk_duplicate_claims() -> None:
         "required-e",
         20,
         source="test-approval",
+        conn=conn,
     )
     for index in (1, 2):
         operation_id = f"video-create-required-v{index}"
@@ -259,9 +267,10 @@ def test_completion_budget_requirement_includes_sunk_duplicate_claims() -> None:
             version_id=f"required-v{index}",
             operation_id=operation_id,
             amount_cny=4,
+            conn=conn,
         ) is True
 
-    assert episode_video_completion_budget_requirement("required-e") == {
+    assert episode_video_completion_budget_requirement("required-e", conn=conn) == {
         "used_cny": 8.0,
         "claimed_current_shots": 1,
         "shots_total": 2,
@@ -667,3 +676,65 @@ async def test_semantic_repair_accepts_unfamiliar_action_without_phrase_rules(
     )
     assert result.proposal_id == "semantic-proposal-unfamiliar"
     assert candidate_board.shots[0].action_desc == candidate.action_desc
+
+
+def test_completion_grant_connection_ownership_is_explicit() -> None:
+    """app/completion_grant.py 的公共入口不得给 conn 留默认值。
+
+    这些函数决定「这一集能花多少钱」「预留算不算数」「grant 还有没有效」，全都在
+    调用方的事务里被读写。conn=None + `db = conn or get_conn()` 让漏传毫无阻力：
+    被调用方回退到自己的连接，读到的是调用方事务里看不见的状态——金额判断与事实
+    不一致，而且不报错。必传之后，漏传在调用那一刻就是 TypeError。
+    （CLAUDE.md「Ownership Must Be Explicit」：可选参数是缺陷的温床。）
+    """
+    import ast
+    import inspect
+    from pathlib import Path
+
+    from app import completion_grant
+
+    source_path = Path(inspect.getfile(completion_grant))
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+
+    offenders: list[str] = []
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        args = node.args
+        defaulted = dict(zip([a.arg for a in args.kwonlyargs], args.kw_defaults))
+        if args.defaults:
+            positional = [a.arg for a in args.args][-len(args.defaults):]
+            defaulted.update(dict(zip(positional, args.defaults)))
+        default = defaulted.get("conn")
+        if isinstance(default, ast.Constant) and default.value is None:
+            offenders.append(f"{node.name}（第 {node.lineno} 行）")
+    assert not offenders, (
+        "以下函数的 conn 又有默认值了：" + "、".join(offenders)
+        + "。漏传会静默读到另一个事务的状态。"
+    )
+
+
+def test_completion_grant_never_falls_back_to_its_own_connection() -> None:
+    """源码级守卫：不得再出现 `conn or get_conn()` 兜底。
+
+    这个写法比 conn=None 本身更隐蔽——签名看起来像是"可选优化"，实际是在调用方
+    的事务之外另开一条连接读写同一批余额。
+    """
+    import ast
+    import inspect
+    from pathlib import Path
+
+    from app import completion_grant
+
+    tree = ast.parse(Path(inspect.getfile(completion_grant)).read_text(encoding="utf-8"))
+    offenders = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.BoolOp)
+        and isinstance(node.op, ast.Or)
+        and any(
+            isinstance(value, ast.Call) and getattr(value.func, "id", None) == "get_conn"
+            for value in node.values
+        )
+    ]
+    assert not offenders, f"第 {offenders} 行出现了 `conn or get_conn()` 兜底"

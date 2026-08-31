@@ -344,8 +344,8 @@ def _migrate_provider_claim_ledger(db) -> None:
         raise RuntimeError("provider claim ledger migration lost rows")
 
 
-def ensure_video_budget_authority_tables(conn=None) -> None:
-    db = conn or get_conn()
+def ensure_video_budget_authority_tables(conn) -> None:
+    db = conn
     owns_transaction = not db.in_transaction
     if owns_transaction:
         db.execute("BEGIN IMMEDIATE")
@@ -423,7 +423,7 @@ async def reconcile_provider_tasks_for_clear(
     episode_id: str | None = None,
     shot_ids: list[str] | tuple[str, ...] = (),
     version_ids: list[str] | tuple[str, ...] = (),
-    conn=None,
+    conn,
     terminal_observations: dict[str, dict[str, Any]] | None = None,
     evidence_source: str | None = None,
 ) -> dict[str, Any]:
@@ -443,7 +443,7 @@ async def reconcile_provider_tasks_for_clear(
     from app import hiagent
     from app.hiagent import ProviderError
 
-    db = conn or get_conn()
+    db = conn
     initial = provider_task_clearance_snapshot(
         project_id=project_id,
         episode_id=episode_id,
@@ -577,7 +577,7 @@ async def reconcile_provider_tasks_for_clear(
 async def reconcile_project_provider_tasks_for_clear(
     project_id: str,
     *,
-    conn=None,
+    conn,
     terminal_observations: dict[str, dict[str, Any]] | None = None,
     evidence_source: str | None = None,
 ) -> dict[str, Any]:
@@ -596,7 +596,7 @@ async def reconcile_project_provider_tasks_for_clear(
 
 
 def close_superseded_unclaimed_video_jobs(
-    episode_id: str, *, conn=None,
+    episode_id: str, *, conn,
 ) -> list[str]:
     """Close video jobs that never reached the provider and are now moot.
 
@@ -620,7 +620,7 @@ def close_superseded_unclaimed_video_jobs(
     its shot has moved on. This never touches a job that still has any
     provider footprint or any non-released claim.
     """
-    db = conn or get_conn()
+    db = conn
     ensure_video_budget_authority_tables(db)
     rows = db.execute(
         """SELECT j.id AS job_id, j.version_id
@@ -730,9 +730,9 @@ def _historical_video_liability(episode_id: str, *, conn) -> float:
     return round(total, 6)
 
 
-def migrate_legacy_video_liabilities(conn=None) -> int:
+def migrate_legacy_video_liabilities(conn) -> int:
     """Move unowned legacy version costs into the project claim ledger once."""
-    db = conn or get_conn()
+    db = conn
     ensure_video_budget_authority_tables(db)
     owns_transaction = not db.in_transaction
     if owns_transaction:
@@ -845,13 +845,13 @@ def _apply_video_budget_retry_margin(
 
 
 def preview_episode_video_budget_authorization_cap(
-    episode_id: str, amount_cny: float, *, conn=None,
+    episode_id: str, amount_cny: float, *, conn,
 ) -> float:
     """只读预览：`authorize_episode_video_budget_increment` 对同样的
     episode_id/amount 会产出的 cap，供审批卡在真正下单前展示「授权上限」。
     必须与真实授权函数用同一套推导逻辑，不能各算各的、界面和执行对不上。
     """
-    db = conn or get_conn()
+    db = conn
     ensure_video_budget_authority_tables(db)
     _, floor = _episode_video_budget_floor(episode_id, conn=db)
     return round(_apply_video_budget_retry_margin(floor, amount_cny), 6)
@@ -864,13 +864,13 @@ def authorize_episode_video_budget_increment(
     source: str,
     operation_id: str | None = None,
     request_fingerprint: str | None = None,
-    conn=None,
+    conn,
 ) -> float:
     """Add one explicitly approved payable-video amount to the episode cap."""
     amount = float(increment_cny)
     if not math.isfinite(amount) or amount < 0:
         raise ValueError("视频授权额度必须是非负有限数")
-    db = conn or get_conn()
+    db = conn
     ensure_video_budget_authority_tables(db)
     db.execute(
         """CREATE TABLE IF NOT EXISTS video_budget_authorization_receipts(
@@ -947,13 +947,13 @@ def authorize_episode_video_budget_absolute(
     cap_cny: float,
     *,
     source: str,
-    conn=None,
+    conn,
 ) -> float:
     """Persist an absolute completion-run cap without forgetting sunk liability."""
     requested = float(cap_cny)
     if not math.isfinite(requested) or requested < 0:
         raise ValueError("视频授权上限必须是非负有限数")
-    db = conn or get_conn()
+    db = conn
     ensure_video_budget_authority_tables(db)
     owns_transaction = not db.in_transaction
     if owns_transaction:
@@ -990,8 +990,8 @@ def authorize_episode_video_budget_absolute(
         raise
 
 
-def episode_video_budget_snapshot(episode_id: str, *, conn=None) -> dict[str, float] | None:
-    db = conn or get_conn()
+def episode_video_budget_snapshot(episode_id: str, *, conn) -> dict[str, float] | None:
+    db = conn
     ensure_video_budget_authority_tables(db)
     row = db.execute(
         "SELECT baseline_cny,cap_cny FROM episode_video_budget_authorities WHERE episode_id=?",
@@ -1016,7 +1016,7 @@ def episode_video_budget_snapshot(episode_id: str, *, conn=None) -> dict[str, fl
     }
 
 
-def project_video_budget_snapshot(project_id: str, *, conn=None) -> dict[str, float]:
+def project_video_budget_snapshot(project_id: str, *, conn) -> dict[str, float]:
     """Aggregate durable provider liability across every episode in a project.
 
     Claim release is the accounting boundary. Job and version outcomes only
@@ -1024,7 +1024,7 @@ def project_video_budget_snapshot(project_id: str, *, conn=None) -> dict[str, fl
     have incurred a charge. Episodes without an authority row use the legacy
     liability estimator until their first grant freezes that amount as baseline.
     """
-    db = conn or get_conn()
+    db = conn
     ensure_video_budget_authority_tables(db)
     episodes = db.execute(
         """SELECT e.id,a.baseline_cny
@@ -1058,12 +1058,12 @@ def project_video_budget_snapshot(project_id: str, *, conn=None) -> dict[str, fl
 def episode_video_completion_budget_requirement(
     episode_id: str,
     *,
-    conn=None,
+    conn,
 ) -> dict[str, float | int]:
     """Return the absolute provider cap needed for one claim per current shot."""
     from app.video_cost_model import initial_shot_generation_cost
 
-    db = conn or get_conn()
+    db = conn
     ensure_video_budget_authority_tables(db)
     release_row = db.execute(
         "SELECT published_storyboard_artifact_id FROM episodes WHERE id=?",
@@ -1132,7 +1132,7 @@ def reserve_provider_video_budget(
     version_id: str,
     operation_id: str,
     amount_cny: float,
-    conn=None,
+    conn,
 ) -> bool:
     """Atomically claim one provider create cost.
 
@@ -1140,7 +1140,7 @@ def reserve_provider_video_budget(
     supplies an active transaction, the claim participates in that transaction.
     """
     amount = max(0.0, float(amount_cny))
-    db = conn or get_conn()
+    db = conn
     if db.in_transaction:
         tables = {
             str(row["name"])
@@ -1287,7 +1287,7 @@ def close_provider_video_budget_claim_liability(
     *,
     job_id: str,
     reason: str,
-    conn=None,
+    conn,
 ) -> bool:
     """Close recovery for an accepted operation without releasing its budget.
 
@@ -1298,7 +1298,7 @@ def close_provider_video_budget_claim_liability(
     closure_reason = str(reason or "").strip()
     if not closure_reason:
         raise ValueError("provider claim liability closure requires a reason")
-    db = conn or get_conn()
+    db = conn
     ensure_video_budget_authority_tables(db)
     existing = db.execute(
         """SELECT status FROM provider_video_budget_claims
@@ -1332,8 +1332,8 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def ensure_completion_grants_table(conn=None) -> None:
-    db = conn or get_conn()
+def ensure_completion_grants_table(conn) -> None:
+    db = conn
     db.execute(
         """CREATE TABLE IF NOT EXISTS completion_grants (
             id TEXT PRIMARY KEY,
@@ -1716,10 +1716,10 @@ def current_video_completion_qualification(
     episode_id: str,
     *,
     generation_plan_applicable: bool | None = None,
-    conn=None,
+    conn,
 ) -> tuple[dict[str, Any], str]:
     """Build the complete release contract rechecked before every paid stage."""
-    db = conn or get_conn()
+    db = conn
     episode = db.execute(
         "SELECT id,project_id FROM episodes WHERE id=?", (episode_id,)
     ).fetchone()
@@ -1862,8 +1862,8 @@ def issue_video_completion_grant(
     idempotency_key: str | None = None,
 ) -> tuple[VideoCompletionGrant, str]:
     """Atomically issue one completion grant and its payable budget authority."""
-    ensure_completion_grants_table()
     conn = get_conn()
+    ensure_completion_grants_table(conn)
     ensure_video_budget_authority_tables(conn)
     requested_budget = (
         float(budget_cap_cny) if budget_cap_cny is not None else None
@@ -2115,7 +2115,7 @@ def _row_to_video_grant(row) -> VideoCompletionGrant:
 
 
 def get_video_grant(grant_id: str) -> VideoCompletionGrant | None:
-    ensure_completion_grants_table()
+    ensure_completion_grants_table(get_conn())
     row = get_conn().execute(
         "SELECT * FROM completion_grants WHERE id=?", (grant_id,)
     ).fetchone()
@@ -2170,7 +2170,7 @@ def validate_video_grant(
     plan_applicable = bool(plan_binding.get("applicable"))
     try:
         current, current_hash = current_video_completion_qualification(
-            episode_id,
+            episode_id, conn=get_conn(),
             generation_plan_applicable=plan_applicable,
         )
     except ValueError as exc:
@@ -2220,7 +2220,7 @@ def bind_video_grant_generation_plan(
         return grant
     try:
         current, current_hash = current_video_completion_qualification(
-            episode_id,
+            episode_id, conn=get_conn(),
             generation_plan_applicable=True,
         )
     except ValueError as exc:
@@ -2275,7 +2275,7 @@ def bump_video_grant_budget(
     idempotency_key: str | None = None,
 ) -> VideoCompletionGrant:
     """Atomically top up a grant, its budget authority and audit ledger."""
-    ensure_completion_grants_table()
+    ensure_completion_grants_table(get_conn())
     add_cny = float(add_cny)
     add_wall_s = float(add_wall_s)
     if not math.isfinite(add_cny) or add_cny < 0 or add_cny > 100000:
@@ -2406,8 +2406,8 @@ def bump_video_grant_budget(
 
 
 def consume_grant(grant_id: str) -> None:
-    ensure_completion_grants_table()
     conn = get_conn()
+    ensure_completion_grants_table(conn)
     conn.execute(
         "UPDATE completion_grants SET consumed_at=? WHERE id=? AND consumed_at IS NULL",
         (now(), grant_id),
@@ -2416,8 +2416,8 @@ def consume_grant(grant_id: str) -> None:
 
 
 def revoke_grant(grant_id: str) -> None:
-    ensure_completion_grants_table()
     conn = get_conn()
+    ensure_completion_grants_table(conn)
     conn.execute(
         "UPDATE completion_grants SET revoked_at=? WHERE id=? AND revoked_at IS NULL",
         (now(), grant_id),
@@ -2426,8 +2426,8 @@ def revoke_grant(grant_id: str) -> None:
 
 
 def revoke_active_video_grants_for_episode(episode_id: str) -> int:
-    ensure_completion_grants_table()
     conn = get_conn()
+    ensure_completion_grants_table(conn)
     cur = conn.execute(
         """UPDATE completion_grants SET revoked_at=?
            WHERE episode_id=? AND kind='video' AND revoked_at IS NULL AND consumed_at IS NULL""",
@@ -2439,7 +2439,7 @@ def revoke_active_video_grants_for_episode(episode_id: str) -> int:
 
 def active_video_grant_budget_cap(episode_id: str) -> float | None:
     """若本集有未撤销的视频 grant，返回其 budget_cap_cny，供 enqueue 优先读取。"""
-    ensure_completion_grants_table()
+    ensure_completion_grants_table(get_conn())
     row = get_conn().execute(
         """SELECT budget_cap_cny FROM completion_grants
            WHERE episode_id=? AND kind='video' AND revoked_at IS NULL

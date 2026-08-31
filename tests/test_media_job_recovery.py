@@ -272,7 +272,8 @@ def test_page_approved_budget_overrides_static_safety_default(
     monkeypatch.setattr(
         completion_grant,
         "episode_video_budget_snapshot",
-        lambda _episode_id: {
+        # conn 已改为必传（app/completion_grant.py，连接所有权显式化），桩要跟着收
+        lambda _episode_id, *, conn: {
             "baseline_cny": 0.0,
             "claimed_cny": 0.0,
             "used_cny": 0.0,
@@ -297,7 +298,8 @@ def test_page_approved_budget_can_be_lower_than_static_default(
     monkeypatch.setattr(
         completion_grant,
         "episode_video_budget_snapshot",
-        lambda _episode_id: {
+        # conn 已改为必传（app/completion_grant.py，连接所有权显式化），桩要跟着收
+        lambda _episode_id, *, conn: {
             "baseline_cny": 0.0,
             "claimed_cny": 0.0,
             "used_cny": 0.0,

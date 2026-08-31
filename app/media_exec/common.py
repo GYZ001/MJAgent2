@@ -87,8 +87,9 @@ def episode_video_budget_limit(episode_id: str) -> float:
     authority_limit: float | None = None
     try:
         from app.completion_grant import episode_video_budget_snapshot
+        from app.db import get_conn
 
-        authority = episode_video_budget_snapshot(episode_id)
+        authority = episode_video_budget_snapshot(episode_id, conn=get_conn())
         if authority is not None:
             authority_limit = float(authority["cap_cny"])
     except Exception:  # noqa: BLE001 - legacy databases retain static cap
