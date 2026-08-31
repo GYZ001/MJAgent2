@@ -1,6 +1,7 @@
 from app.visual_styles import (
     VISUAL_STYLE_PRESETS,
     is_photographic_style_prompt,
+    visual_style_options,
     visual_style_prompt,
 )
 
@@ -36,3 +37,13 @@ def test_is_photographic_style_prompt_matches_by_resolved_prompt_text() -> None:
     assert is_photographic_style_prompt("超写实风") is False
     assert is_photographic_style_prompt("") is False
     assert is_photographic_style_prompt(None) is False
+
+
+def test_visual_style_options_carry_photographic_flag_from_presets() -> None:
+    """前端导入面板用 ``photographic`` 判断要不要提示"视频阶段易被拒收"——
+    这里逐条核对每个选项的 ``photographic`` 与其源预设一致，不是另建一份
+    独立于 ``VISUAL_STYLE_PRESETS`` 的判断。"""
+    options = {item["name"]: item for item in visual_style_options()}
+    assert set(options) == {p.name for p in VISUAL_STYLE_PRESETS}
+    for preset in VISUAL_STYLE_PRESETS:
+        assert options[preset.name]["photographic"] is preset.photographic

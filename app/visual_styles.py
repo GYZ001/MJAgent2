@@ -65,12 +65,18 @@ VISUAL_STYLE_PRESETS: tuple[VisualStylePreset, ...] = (
 DEFAULT_VISUAL_STYLE_NAME = "国漫电影风"
 
 
-def visual_style_options() -> list[dict[str, str]]:
+def visual_style_options() -> list[dict[str, str | bool]]:
+    """前端导入面板选画风用。``photographic`` 随预设透出（而不是让前端另建一份
+    名单）：照片级真人摄影预设在视频供应商侧有较高概率因疑似真人触发隐私政策
+    拒收（``InputImageSensitiveContentDetected.PrivacyInformation``，见
+    ``app.harness.hiagent_input_image_privacy``），前端据此在选择时如实提示，
+    不禁止选择——用户可能确实只要图不要视频。"""
     return [
         {
             "name": preset.name,
             "description": preset.description,
             "sample_image": preset.sample_image,
+            "photographic": preset.photographic,
         }
         for preset in VISUAL_STYLE_PRESETS
     ]

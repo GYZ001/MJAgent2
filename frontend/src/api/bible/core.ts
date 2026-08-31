@@ -108,7 +108,10 @@ export function bibleImpactPreview(
 
 export interface VisualStyleCatalog {
   default: string;
-  items: Array<{ name: string; description: string; sample_image: string }>;
+  /** photographic：照片级真人摄影质感预设，视频阶段有较高概率因供应商隐私
+   *  政策判定疑似真人而被拒收（InputImageSensitiveContentDetected.
+   *  PrivacyInformation）。导入面板据此提示，不禁止选择。 */
+  items: Array<{ name: string; description: string; sample_image: string; photographic: boolean }>;
 }
 
 export function bibleVisualStyles(projectId: string): Promise<VisualStyleCatalog> {

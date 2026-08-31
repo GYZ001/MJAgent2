@@ -19,8 +19,12 @@ from typing import Any
 
 from app import config, hiagent, video_modes
 from app.db import get_conn, now
+from app.harness.hiagent_input_image_privacy import (
+    INPUT_IMAGE_PRIVACY_CODE, INPUT_IMAGE_PRIVACY_REJECTED_KIND,
+)
 from app.hiagent import ProviderError
 from app.orchestration.media_runs import mark_media_job_state
+from app.visual_styles import VISUAL_STYLE_PRESETS
 
 from .common import LeaseLost
 from .enqueue import _row_value
@@ -115,6 +119,17 @@ def _video_model_rejection_guidance(
                 "VIDEO_PROMPT_PROVIDER_REJECTED",
                 "AI 视频提示词服务明确拒绝了当前内容；系统未改写内容、未切换生成方式，"
                 "也未向视频服务提交本镜。请更换获准的提示词模型或人工调整内容后再继续。",
+            )
+        if exc.failure.kind == INPUT_IMAGE_PRIVACY_REJECTED_KIND:
+            return (
+                "VIDEO_INPUT_IMAGE_PRIVACY_REJECTED",
+                "视频供应商判定本镜输入图疑似真人肖像，按隐私政策拒收"
+                f"（供应商错误码 {INPUT_IMAGE_PRIVACY_CODE}）。真人摄影风/精修真人风越接近"
+                "真实人像越容易触发这类判定，同一画风原样重试大概率复现同样的拒绝，"
+                "系统已停止对本镜的自动付费重试。请到项目设置改用非真人画风（"
+                + "、".join(preset.name for preset in VISUAL_STYLE_PRESETS if not preset.photographic)
+                + "）后重新生成定妆照与本镜；若需继续保留当前摄影类画风，"
+                "可仅保留图片产出、不生成视频。",
             )
         mode = str(meta.get("mode") or meta.get("planned_mode") or "")
         quote = f"供应商原文：{provider_text}。" if provider_text else ""

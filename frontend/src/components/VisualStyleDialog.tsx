@@ -1,6 +1,13 @@
 import { useFocusTrap } from '../hooks/useFocusTrap'
 
-export type VisualStyleOption = { name: string; description: string; sample_image: string }
+export type VisualStyleOption = {
+  name: string
+  description: string
+  sample_image: string
+  /** 照片级真人摄影质感：视频阶段有较高概率因供应商隐私政策判定疑似真人而被
+   *  拒收，弹窗据此显示提示，不禁止选择。 */
+  photographic: boolean
+}
 
 /**
  * 人物谱与场景库共用的统一画风选择弹窗。
@@ -72,6 +79,11 @@ export default function VisualStyleDialog({
                 <span>
                   <b>{option.name}</b>
                   <small>{option.description}</small>
+                  {option.photographic && (
+                    <small className="warning-banner">
+                      视频阶段较高概率因疑似真人被供应商隐私政策拒收，仅出图可放心选用；需要出视频建议改选其它画风
+                    </small>
+                  )}
                 </span>
                 {selected === option.name && <em>已选</em>}
               </button>

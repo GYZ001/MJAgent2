@@ -1126,6 +1126,39 @@ def test_http_400_rejection_is_typed_without_parsing_body_words() -> None:
     assert "请求被拒绝" in str(error)
 
 
+def test_input_image_privacy_rejection_is_typed_as_deterministic_model_rejection() -> None:
+    """真实案例（2026-08-31，《我欲封天》EP3-EP10 视频阶段 8/10 集被拒）：
+    Ark/Seedance 原生 400 报文（``error.code`` 直接就是这个字符串，不是
+    HiAgent 网关自己的 ``error.failure`` 包装）必须被归为 model_rejection +
+    external_terminal + 不可重试——同一输入图重试打给同一供应商policy 必然
+    复现同样的拒绝，不是瞬时故障。"""
+    error = hiagent._classify_http_error(
+        400,
+        '{"error":{"code":"InputImageSensitiveContentDetected.PrivacyInformation",'
+        '"message":"The request failed because the input image \'content[2]\' '
+        'may contain real person"}}',
+    )
+
+    assert error.retryable is False
+    assert error.failure_kind == "input_image_privacy_rejected"
+    assert error.failure_category == "model_rejection"
+    assert error.failure_disposition == "external_terminal"
+
+
+def test_input_image_privacy_rejection_ignores_message_text_without_matching_code() -> None:
+    """反例：逐字相同的真实拒绝文案，只要 code 换成别的家族成员，就必须回落
+    到通用 provider_rejected——证明分类看的是 code 字段，不是英文措辞。"""
+    error = hiagent._classify_http_error(
+        400,
+        '{"error":{"code":"InputImageSensitiveContentDetected.Violence",'
+        '"message":"The request failed because the input image \'content[2]\' '
+        'may contain real person"}}',
+    )
+
+    assert error.failure_kind == "provider_rejected"
+    assert error.failure_category == "technical"
+
+
 def test_image_rejection_does_not_rewrite_or_replay_prompt(monkeypatch) -> None:
     calls: list[dict] = []
 

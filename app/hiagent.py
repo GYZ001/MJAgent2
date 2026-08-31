@@ -32,6 +32,9 @@ from app.atomic_io import atomic_write_bytes
 from app.db import (finish_provider_call, get_conn, get_setting, log_provider_call,
                     provider_operation_id, start_provider_call,
                     update_provider_call_progress, update_provider_call_request)
+from app.harness.hiagent_input_image_privacy import (
+    INPUT_IMAGE_PRIVACY_REJECTED_KIND, is_input_image_privacy_rejection,
+)
 from app.harness.hiagent_stream_evidence import (
     INTERRUPTED_STREAM_TEXT_CHARS, classify_interrupted_stream,
     interrupted_stream_evidence, remember_unconsumed_stream_frame,
@@ -712,6 +715,11 @@ def _classify_http_error(status: int, body: str, key_name: str = "HIAGENT_API_KE
             delivery_state="responded",
             create_not_accepted=explicit_not_accepted,
             failure=structured_failure,
+        )
+    if is_input_image_privacy_rejection(body):
+        return ProviderError(
+            f"上游请求失败（HTTP {status}）：{body[:300]}", raw=body, delivery_state="responded",
+            failure=ProviderFailure.model_rejection(INPUT_IMAGE_PRIVACY_REJECTED_KIND),
         )
     if status in (401, 403):
         return ProviderError(

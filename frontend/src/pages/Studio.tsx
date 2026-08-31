@@ -264,10 +264,10 @@ export default function Studio() {
         <div>
           <label className="f">统一画风（决定人物定妆照与场景图风格；创建后不再提供更换入口）</label>
           <button type="button" className="btn small" disabled={uploading}
-            aria-label={`统一画风：${styleName || '默认（国漫电影风）'}，点击选择`}
-            onClick={() => void styleDialog.openStyleDialog(styleName)}>
+            aria-label={`统一画风：${styleName || '默认（国漫电影风）'}，点击选择`} onClick={() => void styleDialog.openStyleDialog(styleName)}>
             {styleName || '默认（国漫电影风）'} · 选择画风
           </button>
+          {styleDialog.styleOptions.find(o => o.name === styleName)?.photographic && <p className="warning-banner" role="status">当前画风为照片级真人摄影质感：视频生成阶段有较高概率被供应商隐私政策判定疑似真人而拒收，建议仅用于不出视频的场景，或改选其它画风。</p>}
         </div>
         <p id={importHelpId} className="import-guidance">
           选择文件只会在本页预览；确认后才上传并创建项目。现有项目不会被覆盖。

@@ -21,3 +21,18 @@ describe('导入面板复用统一画风弹窗，并把选定结果带进创建�
     expect(source).toMatch(/api\.importProject\(\{[\s\S]{0,200}style_name: styleName \|\| undefined/)
   })
 })
+
+// 真实案例（2026-08-31）：同一项目同一摄影类画风下 8/10 集视频阶段被供应商
+// 隐私政策拒收。导入面板必须在选画风时如实提示——不禁止选择，只是不再沉默。
+describe('摄影类画风在导入面板给出可见提示，非摄影类不提示', () => {
+  it('提示按已选画风的 photographic 标记门控，不是无条件展示', () => {
+    expect(source).toMatch(
+      /styleDialog\.styleOptions\.find\(o => o\.name === styleName\)\?\.photographic && <p className="warning-banner"/,
+    )
+  })
+
+  it('提示文案指向真实供应商风险与出路，不是空话', () => {
+    expect(source).toContain('视频生成阶段有较高概率被供应商隐私政策判定疑似真人而拒收')
+    expect(source).toContain('或改选其它画风')
+  })
+})
