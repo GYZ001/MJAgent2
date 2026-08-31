@@ -5244,3 +5244,142 @@ def test_empty_character_mentions_without_known_roster_is_not_flagged(monkeypatc
     ))
 
     assert character_manifest_anomaly is None
+
+
+# ---------------------------------------------------------------------------
+# known_characters 提示词参数改逐字命中过滤（不是 RAG/关键词检索——见
+# chunking.py._prep_pack_character_shortlist 上方大注释）：项目登记的角色
+# 可能有几十个，本集原文通常只出现其中几个，另外那几十个不是中性噪音，是
+# 诱导错误归属的噪音。判据与 true_name.py._prep_pack_true_name_verdict_
+# candidates 同一口径：已登记角色的全部称谓（name/alias）里，任一个逐字出现
+# 在本集原文中，该角色的规范名才入选。
+# ---------------------------------------------------------------------------
+
+def test_character_shortlist_is_literal_hit_not_full_registry() -> None:
+    """三个已登记角色：'灰袍老者' 靠 name 本身在本集原文逐字命中；'许清' 的
+    name 本身没出现，但它的别名'许姑娘'逐字命中——入选名单的必须是规范名
+    '许清'本人，不是命中的那个别名；'王有材' 的 name 与全部别名都没在本集
+    原文出现，必须被排除在 shortlist 之外。known_names（全量注册表）必须
+    原样返回三个名字，不受这道过滤影响——那是喂给 character_manifest_
+    anomaly 的数据，跟 shortlist 是两个不同的问题。"""
+    conn = _make_conn()
+    for row_id, name in (("cp1", "灰袍老者"), ("cp2", "许清"), ("cp3", "王有材")):
+        conn.execute(
+            "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+            "VALUES (?,'p1',?,1,NULL)",
+            (row_id, name),
+        )
+    conn.commit()
+    _seed_bible_characters(conn, "p1", [
+        _bible_character("灰袍老者"),
+        _bible_character("许清", aliases=[_bible_alias("许姑娘")]),
+        _bible_character("王有材", aliases=[_bible_alias("老王")]),
+    ])
+    source_text = "灰袍老者缓步走入大殿，许姑娘紧随其后。"
+
+    known_names, shortlist = prep_pack._prep_pack_character_shortlist(
+        conn, "p1", 2, source_text,
+    )
+
+    assert set(known_names) == {"灰袍老者", "许清", "王有材"}, (
+        "全量注册表必须原样返回，不受逐字命中过滤影响"
+    )
+    assert shortlist == ["灰袍老者", "许清"], (
+        "灰袍老者靠 name 本身命中；许清靠别名'许姑娘'命中，入选的必须是规范名"
+        "'许清'本人，不是命中的那个别名字符串"
+    )
+    assert "王有材" not in shortlist, "王有材的 name 与全部别名都没在本集原文出现，必须被排除"
+
+
+def test_character_shortlist_empty_hit_does_not_fall_back_to_full_registry() -> None:
+    """空集不许退回全量（硬性纪律）：本集原文一个已登记角色都没提到，
+    shortlist 必须是空列表本身，不能因为空而悄悄回退成 known_names。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp1','p1','王有材',1,NULL)"
+    )
+    conn.commit()
+    _seed_bible_characters(conn, "p1", [_bible_character("王有材")])
+    source_text = "一段与已登记角色毫无关系的原文。"
+
+    known_names, shortlist = prep_pack._prep_pack_character_shortlist(
+        conn, "p1", 2, source_text,
+    )
+
+    assert known_names == ["王有材"]
+    assert shortlist == [], "空命中必须是空列表本身，不是回退到 known_names"
+
+
+def test_shortlist_exclusion_does_not_remove_registry_or_true_name_visibility(
+    monkeypatch,
+) -> None:
+    """钉住"四条必须写死"第4条：逐字命中过滤只砍"chunk 抽取时的拼写对齐
+    提示"（喂进 _extract_chunk 的 known_characters 参数），不砍身份体系的
+    可见性。'王有材' 因为本集原文没提到而被排除出提示词名单，仍必须能
+    通过 _resolve_portrait_id（角色卡注册表）与 true_name.py 的全书卷宗
+    真名裁决（_prep_pack_true_name_verdict_candidates）正常查到——没有这个
+    测试，将来很容易被改成真的从身份体系里过滤掉。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp1','p1','灰袍老者',1,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
+        "VALUES ('cp2','p1','王有材',1,NULL)"
+    )
+    conn.commit()
+    _seed_bible_characters(conn, "p1", [
+        _bible_character("灰袍老者"), _bible_character("王有材"),
+    ])
+    patch_prep_pack_everywhere(monkeypatch, "get_conn", lambda: conn)
+
+    source_text = "灰袍老者缓步走入大殿。"
+    captured_known_characters: list[list[str]] = []
+
+    async def fake_extract_chunk(*, known_characters, **_kwargs):
+        captured_known_characters.append(known_characters)
+        return prep_pack._ChunkResponse(
+            characters=[
+                prep_pack._ModelCharacterMention(
+                    display_name="灰袍老者", suspected_true_name=None, segment_indexes=[1],
+                )
+            ],
+            scenes=[], props=[],
+        )
+
+    patch_prep_pack_everywhere(monkeypatch, "_extract_chunk", fake_extract_chunk)
+
+    asyncio.run(prep_pack._generate_prep_pack_once(
+        episode_id="ep-test", episode_no=2, project_id="p1",
+        chapter_indexes=[], source_text=source_text, run_id=None, attempt_hint="",
+    ))
+
+    assert captured_known_characters, "_extract_chunk 必须至少被调用过一次"
+    for shortlist in captured_known_characters:
+        assert shortlist == ["灰袍老者"], (
+            "王有材未在本集原文出现，不该进提示词名单——这是本次改动要收紧的部分"
+        )
+
+    # 身份体系可见性：王有材没进提示词名单，不代表它从注册表/真名裁决里消失。
+    assert prep_pack._resolve_portrait_id(conn, "p1", "王有材", 2) == "cp2", (
+        "角色卡注册表（character_portraits）必须仍能正常解析到王有材——"
+        "shortlist 只是提示词内容，不是身份注册表本身"
+    )
+    known_names, _shortlist = prep_pack._prep_pack_character_shortlist(
+        conn, "p1", 2, source_text,
+    )
+    assert "王有材" in known_names, "全量注册表读侧必须仍然看得见王有材"
+
+    roster = prep_pack._prep_pack_true_name_verdict_roster(
+        prep_pack._load_project_bible(conn, "p1"), "character",
+    )
+    dossier = [
+        {"entry_index": 1, "chapter_idx": 1, "segment_index": 1, "text": "王有材出现在这一章。"},
+    ]
+    candidates = prep_pack._prep_pack_true_name_verdict_candidates(dossier, roster, "王有材")
+    assert "王有材" in candidates, (
+        "全书卷宗真名裁决的候选集完全来自人物谱 + 卷宗文本逐字命中，跟本集 chunk "
+        "提示词的 shortlist 无关——王有材必须仍然是合法候选"
+    )

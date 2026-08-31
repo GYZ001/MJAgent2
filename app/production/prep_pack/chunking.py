@@ -9,6 +9,7 @@ from __future__ import annotations
 from app.source_excerpt import SourceSegment
 
 from .contracts import _CHUNK_MAX_CHARS
+from .discovery import _load_project_bible
 
 
 def _chunk_segments(
@@ -90,6 +91,69 @@ def _known_character_names(conn, project_id: str, episode_no: int) -> list[str]:
         (project_id, episode_no, episode_no),
     ).fetchall()
     return [str(row["character_name"]) for row in rows]
+
+
+# 逐字命中过滤（不是 RAG/关键词检索——见本函数下方"为什么不用 RAG"一节）：
+# chunk_extraction.py._extract_chunk 把 known_characters 拼进每一个 chunk 的
+# 提示词，措辞明确写着"仅供拼写对齐——原文没有这样称呼，就不要往上面靠"，
+# 这是一条禁令，压力随名单长度线性上升。项目登记的角色可能有几十个，本集
+# 原文通常只出现其中几个，另外那几十个不是中性噪音，是诱导错误归属的
+# 噪音——模型会把本集的新角色往它们中某一个"看起来眼熟"的登记名上靠，
+# 走建卡通道时因为"已经对齐"而漏建，制造重复卡（跟 true_name.py._prep_
+# pack_true_name_verdict_candidates 挑中错误候选是同一类误差，只是这里
+# 发生得更早、更隐蔽——连模型自己的"都不是"出口都没有，提示词直接把错误
+# 候选摆在眼前）。
+#
+# 判据与 true_name.py._prep_pack_true_name_verdict_candidates 同一口径
+# （该函数 docstring："人物谱/场景谱里，规范名或已确认别名在卷宗文本里
+# 逐字命中的候选"）：已登记角色的全部称谓（character.name + Bible.
+# characters[].aliases[].text，按名字匹配 Bible 条目）里，任一个在
+# ``source_text``（本集原文）中逐字出现，该角色就入选——入选后放进名单
+# 的是它的规范名，不是命中的那个别名，对齐目标保持唯一。
+#
+# 为什么不用 RAG/关键词检索：两者都有召回损失，而这里"召回失败"直接兑换
+# 成最不想要的结果——一个本该被对齐的已登记角色没进名单，模型会把它当
+# 新角色申报，走建卡通道，产生重复卡。逐字包含判断没有这个误差项：只要
+# 称谓真的逐字出现，判据结构上不可能漏判它。
+#
+# 两条纪律（都不是新发明，是既有反黑白名单/反兜底纪律在这里的应用）：
+# 1) 空集不回退全量——本集一个已登记角色都没命中，返回空列表就是诚实
+#    结果；``if not shortlist: shortlist = known_names`` 这类短路会把
+#    刚刚修掉的准确率问题原样带回来，是明确禁止的写法。
+# 2) 不设数量上限——上限天然来自"本集原文能出现多少个不同称谓"，已经
+#    有界；额外加"最多取前 N 个"是把不该存在的绝对门槛重新引入。
+#
+# 只砍"chunk 抽取时的拼写对齐提示"，不砍身份体系的可见性：返回的第一个
+# 元素 known_names 是未经过滤的全量登记名单，调用方（_generate_prep_pack_
+# once）必须继续把它单独喂给 character_manifest_anomaly 的 len() 判据——
+# 未入选 shortlist 的角色仍然在 _resolve_portrait_id/character_portraits
+# 与全书卷宗真名裁决（true_name.py）里正常可见，两者互不依赖这个 shortlist
+# （见 tests/test_prep_pack_asset_discovery.py 对应的钉住测试）。
+def _prep_pack_character_shortlist(
+    conn, project_id: str, episode_no: int, source_text: str,
+) -> tuple[list[str], list[str]]:
+    """返回 (known_names, shortlist)：known_names 是 _known_character_names
+    的原样全量结果（供调用方喂 anomaly 信号，见上方大注释"只砍…不砍…"一节，
+    两者不得合并成一个变量）；shortlist 是其中全部称谓（name/alias）在
+    ``source_text`` 里逐字命中的子集，元素是命中角色各自的规范名。"""
+    known_names = _known_character_names(conn, project_id, episode_no)
+    if not known_names:
+        return known_names, []
+    bible = _load_project_bible(conn, project_id)
+    aliases_by_name: dict[str, list[str]] = {
+        str(character.name or "").strip(): [
+            str(alias.text or "").strip() for alias in (character.aliases or [])
+        ]
+        for character in bible.characters
+    }
+    shortlist = [
+        name for name in known_names
+        if any(
+            form and form in source_text
+            for form in (name, *aliases_by_name.get(name, []))
+        )
+    ]
+    return known_names, shortlist
 
 
 def _known_scene_names(conn, project_id: str, episode_no: int) -> list[str]:

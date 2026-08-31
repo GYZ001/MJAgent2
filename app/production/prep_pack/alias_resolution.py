@@ -7,6 +7,7 @@ Split out of app/production/prep_pack.py.
 from __future__ import annotations
 
 import json
+from app.portraits.card_owner import _character_claims_label
 from app.schemas import Bible
 
 
@@ -15,11 +16,17 @@ def _prep_pack_bible_alias_owner(bible: Bible | None, alias: str) -> str | None:
     这个别名字符串的角色名；没有任何角色登记则返回 ``None``。只回答"有没有
     人认领"，不判断唯一性——唯一性/冲突判定是
     ``_prep_pack_bible_alias_conflicting_owner`` 的职责，两者分工跟历史的
-    "读侧函数"/"冲突检查函数"两分是同构的，不合并成一个函数。"""
+    "读侧函数"/"冲突检查函数"两分是同构的，不合并成一个函数。匹配判据收敛到
+    ``app.portraits.card_owner._character_claims_label``（``include_name=
+    False``，本函数只认领别名、不认领 name 本身）——全仓库【这个称呼字符串
+    算不算已经属于人物谱里的某个角色】的匹配原语只此一条，见该模块 docstring
+    "将来这两个函数收敛到本模块时…" 一节。"""
     if not alias or bible is None:
         return None
     for character in bible.characters:
-        if any(a.text == alias for a in (character.aliases or [])):
+        if _character_claims_label(
+            character, alias, include_name=False, include_aliases=True,
+        ):
             return character.name
     return None
 
@@ -28,13 +35,16 @@ def _prep_pack_bible_alias_conflicting_owner(
     bible: Bible | None, alias: str, canonical_name: str,
 ) -> str | None:
     """人物谱里除 ``canonical_name`` 本人之外，是否还有别的角色也在
-    ``aliases`` 里登记了同一个别名字符串？命中即返回那个冲突角色名。"""
+    ``aliases`` 里登记了同一个别名字符串？命中即返回那个冲突角色名。匹配
+    判据同上，收敛到 ``_character_claims_label``（``include_name=False``）。"""
     if not alias or bible is None:
         return None
     for character in bible.characters:
         if character.name == canonical_name:
             continue
-        if any(a.text == alias for a in (character.aliases or [])):
+        if _character_claims_label(
+            character, alias, include_name=False, include_aliases=True,
+        ):
             return character.name
     return None
 

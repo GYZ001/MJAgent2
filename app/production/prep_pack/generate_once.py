@@ -20,9 +20,9 @@ from .chunk_extraction import (
 )
 from .chunking import (
     _chunk_segments,
-    _known_character_names,
     _known_scene_names,
     _prep_pack_chapter_titles,
+    _prep_pack_character_shortlist,
     _prep_pack_gate_segment_indexes,
 )
 from .contracts import (
@@ -152,7 +152,13 @@ async def _generate_prep_pack_once(
     conn = get_conn()
     segments = index_source_segments(source_text)
     chunks = _chunk_segments(segments)
-    known_characters = _known_character_names(conn, project_id, episode_no)
+    # known_character_pool（全量登记角色，只喂下面 character_manifest_anomaly
+    # 的 len() 判据）与 known_characters（逐字命中过滤后，只喂 _extract_chunk
+    # 提示词）是两个不同问题，不合并成一个变量——见
+    # _prep_pack_character_shortlist 上方大注释"只砍…不砍…"一节：前者回答
+    # "这个项目本来就该有角色可映射吗"，名单变短不该让这个既有信号跟着哑火；
+    # 后者才是本次改动要收紧的"拼写对齐提示"。
+    known_character_pool, known_characters = _prep_pack_character_shortlist(conn, project_id, episode_no, source_text)
     known_scenes = _known_scene_names(conn, project_id, episode_no)
     # 1.9.0 (kept in 2.0.0, see PREP_PACK_VERSION's 1.9.0 note above):
     # DB-anchored chapter titles for this episode's own chapters -- fed to
@@ -278,20 +284,22 @@ async def _generate_prep_pack_once(
     # ERR-20260824-7ab7cb 的既有说明），格式修复调用据此"忠实"地只交回
     # scenes、把 characters/props 一并修没了——scene_mentions 非空使上面
     # 那道门禁直接放行，角色维度归零这件事从此再没有任何信号能被看见。
-    # 判据纯数据推导，不认名字：known_characters 非空说明本项目已有登记
-    # 角色谱、这一集理应有角色可映射；scene_mentions/prop_mentions 任一
-    # 非空说明这段原文确有实质内容被成功抽取，不是"这段原文本来就没有
-    # 角色出场"（例如纯风景过场）——两个条件同时成立时 character_mentions
-    # 仍整段为空就是可疑信号。只记录进 _publish_prep_pack 的 evaluation.
-    # evidence（同 rejected_paratext_claims 等既有观测字段的路子），不
-    # raise：既定方向是必被看见，不是必被拦住，交付判据仍然是逐条对原文。
+    # 判据纯数据推导，不认名字：known_character_pool（全量登记角色，不是
+    # 逐字命中过滤后的 known_characters——见本函数顶部"两个不同问题"注释）
+    # 非空说明本项目已有登记角色谱、这一集理应有角色可映射；scene_mentions/
+    # prop_mentions 任一非空说明这段原文确有实质内容被成功抽取，不是"这段
+    # 原文本来就没有角色出场"（例如纯风景过场）——两个条件同时成立时
+    # character_mentions 仍整段为空就是可疑信号。只记录进 _publish_prep_
+    # pack 的 evaluation.evidence（同 rejected_paratext_claims 等既有观测
+    # 字段的路子），不 raise：既定方向是必被看见，不是必被拦住，交付判据
+    # 仍然是逐条对原文。
     character_manifest_anomaly = (
         {
-            "known_character_count": len(known_characters),
+            "known_character_count": len(known_character_pool),
             "scene_mention_count": len(scene_mentions),
             "prop_mention_count": len(prop_mentions),
         }
-        if known_characters and not character_mentions and (scene_mentions or prop_mentions)
+        if known_character_pool and not character_mentions and (scene_mentions or prop_mentions)
         else None
     )
 

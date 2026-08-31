@@ -71,6 +71,7 @@ from .chunking import (
     _known_character_names,
     _known_scene_names,
     _prep_pack_chapter_titles,
+    _prep_pack_character_shortlist,
     _prep_pack_gate_segment_indexes,
     _render_chunk,
 )
