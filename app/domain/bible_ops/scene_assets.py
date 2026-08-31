@@ -195,7 +195,8 @@ def compute_scene_cost_precheck(
         "bible_version": p.get("bible_version"),
     })
     return {
-        "quote_id": scope_fp,
+        # 同 precheck.py 的同类注释：未签发前不叫 quote_id，避免调用方拿着
+        # 这个范围指纹去确认时落进 QUOTE_STALE。
         "scope_fingerprint": scope_fp,
         "computed_at": computed,
         "quote_expires_at": computed + 300,

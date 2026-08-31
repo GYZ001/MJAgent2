@@ -89,7 +89,9 @@ def _compute_style_regen_quote(project_id: str) -> dict:
         "bible_version": p.get("bible_version"),
     })
     return {
-        "quote_id": scope_fingerprint,
+        # 同 precheck.py 的同类注释：未签发前不叫 quote_id，调用方必须先经
+        # _issue_payment_quote 落库才能拿到可确认的真值（本函数的两处调用方
+        # 都已经这样做——见下方 set_bible_visual_style）。
         "scope_fingerprint": scope_fingerprint,
         "action": "style_regen_all",
         "project_id": project_id,
