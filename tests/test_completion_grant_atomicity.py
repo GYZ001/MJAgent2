@@ -7,7 +7,7 @@ import threading
 import pytest
 
 from app import api, completion_grant, db
-from tests.conftest import patch_video_supervisor_everywhere, patch_api_everywhere
+from tests.conftest import patch_completion_grant_everywhere, patch_video_supervisor_everywhere, patch_api_everywhere
 
 
 @pytest.fixture
@@ -79,8 +79,8 @@ def test_issue_rolls_back_grant_when_budget_authority_write_fails(
         write_authority(*args, **kwargs)
         raise RuntimeError("injected authority failure")
 
-    monkeypatch.setattr(
-        completion_grant,
+    patch_completion_grant_everywhere(
+        monkeypatch,
         "authorize_episode_video_budget_absolute",
         fail_authority,
     )
@@ -111,8 +111,8 @@ def test_topup_rolls_back_grant_when_budget_authority_write_fails(
         write_authority(*args, **kwargs)
         raise RuntimeError("injected topup authority failure")
 
-    monkeypatch.setattr(
-        completion_grant,
+    patch_completion_grant_everywhere(
+        monkeypatch,
         "authorize_episode_video_budget_absolute",
         fail_authority,
     )
@@ -268,8 +268,8 @@ async def test_completion_core_passes_idempotency_key_to_grant_issue(
         captured.update(kwargs)
         raise RuntimeError("stop after issue capture")
 
-    monkeypatch.setattr(
-        completion_grant,
+    patch_completion_grant_everywhere(
+        monkeypatch,
         "issue_video_completion_grant",
         stop_after_capture,
     )
@@ -294,8 +294,8 @@ async def test_completion_core_passes_idempotency_key_to_grant_topup(
 ) -> None:
     _isolate_completion_core(grant_db, monkeypatch)
     captured = {}
-    monkeypatch.setattr(
-        completion_grant,
+    patch_completion_grant_everywhere(
+        monkeypatch,
         "validate_video_grant",
         lambda *_args, **_kwargs: object(),
     )
@@ -304,8 +304,8 @@ async def test_completion_core_passes_idempotency_key_to_grant_topup(
         captured.update({"grant_id": grant_id, **kwargs})
         raise RuntimeError("stop after topup capture")
 
-    monkeypatch.setattr(
-        completion_grant,
+    patch_completion_grant_everywhere(
+        monkeypatch,
         "bump_video_grant_budget",
         stop_after_capture,
     )

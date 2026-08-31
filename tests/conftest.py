@@ -1076,3 +1076,37 @@ class SessionTestClient:
 
     def __getattr__(self, name: str):
         return getattr(self._client, name)
+
+
+def patch_completion_grant_everywhere(monkeypatch, name, value, **kwargs):
+    """Patch a symbol on ``app.completion_grant`` in every submodule that binds it.
+
+    与 ``patch_portraits_everywhere`` 同因：``app/completion_grant.py`` 原本是单
+    文件（2467 行），2026-08-31 拆成 ``app.completion_grant`` 包，于是
+    ``monkeypatch.setattr(completion_grant, name, value)`` 只改到包自身的再导出
+    属性，够不到每个子模块在 import 时给自己绑的那份副本。
+
+    实测的两种失效形态（拆包当场就被这两条抓出来）：
+      * ``grants_issue.py`` 用 ``from .budget_authority import
+        authorize_episode_video_budget_absolute`` 在模块级绑定，包属性上的桩
+        对它无效——测试断言「注入的异常应当抛出」时表现为 DID NOT RAISE；
+      * ``get_conn`` / ``now`` 这类底层依赖原本是单文件的模块属性，拆包后包
+        命名空间里根本没有，直接 AttributeError。
+
+    这个 helper 走遍所有子模块，凡是绑了 ``name`` 的都打上，重现拆包前的单命名
+    空间打桩语义。
+    """
+    import pkgutil
+    import sys
+
+    import app.completion_grant as completion_grant
+
+    kwargs.setdefault("raising", False)
+    monkeypatch.setattr(completion_grant, name, value, **kwargs)
+    for _, mod_name, _ in pkgutil.iter_modules(completion_grant.__path__):
+        # 用 sys.modules 按全限定名解析，不要用 getattr——理由见
+        # patch_portraits_everywhere 的注释（子模块再导出同名符号会让包属性
+        # 被覆盖，getattr 静默返回错的对象）。
+        submodule = sys.modules.get(f"{completion_grant.__name__}.{mod_name}")
+        if submodule is not None and hasattr(submodule, name):
+            monkeypatch.setattr(submodule, name, value, raising=False)

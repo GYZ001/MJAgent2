@@ -62,7 +62,6 @@ max_function_lines_python = 50
 "app/capabilities/bus.py" = 560
 "app/capabilities/preflight.py" = 1388
 "app/compiler.py" = 1781
-"app/completion_grant.py" = 2467
 "app/config.py" = 613
 "app/continuity.py" = 1795
 # 2026-08-30 +25：新增 payment_orders 迁移（微信/支付宝订单表，见
@@ -226,7 +225,18 @@ max_function_lines_python = 50
 "app/capabilities/idempotency.py" = 65
 "app/capabilities/preflight.py" = 172
 "app/compiler.py" = 461
-"app/completion_grant.py" = 205
+# 2026-08-31（#75）app/completion_grant.py（2467 行 = 500 上限的 5 倍）拆成
+# app.completion_grant 包，原来单条 205 的基线随函数分散到 7 个子模块。
+# line_count 条目已删除：8 个子模块最大 463 行，全部在默认 500 以内。
+# 每条仍是欠账不是许可——grants_issue.py 的 205 就是原来那个最大函数
+# （issue_video_completion_grant），只是不再拖着 2400 行陪葬。
+"app/completion_grant/budget_authority.py" = 73
+"app/completion_grant/budget_claims.py" = 141
+"app/completion_grant/grants_api.py" = 128
+"app/completion_grant/grants_issue.py" = 205
+"app/completion_grant/ledger.py" = 100
+"app/completion_grant/qualification.py" = 103
+"app/completion_grant/reconcile.py" = 128
 "app/continuity.py" = 138
 "app/db.py" = 266
 "app/delivery.py" = 689

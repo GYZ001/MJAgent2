@@ -18,7 +18,7 @@ from app.capabilities.schemas import (
     RiskLevel,
     StandardCommandInput,
 )
-from tests.conftest import patch_api_everywhere
+from tests.conftest import patch_completion_grant_everywhere, patch_api_everywhere
 
 
 def _conn() -> sqlite3.Connection:
@@ -208,7 +208,7 @@ async def test_completion_reuses_exact_run_across_pre_binding_crash(
     installed_before_crash: bool,
 ) -> None:
     """No second workflow may appear around create/install/receipt crash windows."""
-    from app import api, completion_grant
+    from app import api
     from app.orchestration.engine import fingerprint
 
     conn = _full_conn()
@@ -232,8 +232,8 @@ async def test_completion_reuses_exact_run_across_pre_binding_crash(
         wall_clock_cap_s=3600.0,
         max_fallback_shots=0,
     )
-    monkeypatch.setattr(
-        completion_grant,
+    patch_completion_grant_everywhere(
+        monkeypatch,
         "issue_video_completion_grant",
         lambda **_kwargs: (grant, None),
     )
@@ -301,7 +301,7 @@ async def test_completion_reuses_exact_run_across_pre_binding_crash(
 
 @pytest.mark.asyncio
 async def test_caught_spawn_failure_is_exact_terminal_failure(monkeypatch) -> None:
-    from app import api, completion_grant
+    from app import api
     import app.evidence.repository as evidence_repository
     import app.orchestration.engine as orchestration_engine
     import app.orchestration.state_machine as state_machine
@@ -329,8 +329,8 @@ async def test_caught_spawn_failure_is_exact_terminal_failure(monkeypatch) -> No
         wall_clock_cap_s=3600.0,
         max_fallback_shots=0,
     )
-    monkeypatch.setattr(
-        completion_grant,
+    patch_completion_grant_everywhere(
+        monkeypatch,
         "issue_video_completion_grant",
         lambda **_kwargs: (grant, None),
     )
@@ -384,7 +384,7 @@ async def test_hard_crash_reuses_actual_persisted_workflow_without_duplicate(
     monkeypatch,
     crash_point: str,
 ) -> None:
-    from app import api, completion_grant
+    from app import api
     import app.evidence.repository as evidence_repository
     import app.orchestration.engine as orchestration_engine
 
@@ -398,8 +398,8 @@ async def test_hard_crash_reuses_actual_persisted_workflow_without_duplicate(
     patch_api_everywhere(monkeypatch, "_review_assert_positive_action", lambda *_: {})
     patch_api_everywhere(monkeypatch, "_assert_storyboard_generation_gate", lambda *_: None)
     monkeypatch.setattr(api.task_registry, "active", lambda *_: False)
-    monkeypatch.setattr(
-        completion_grant,
+    patch_completion_grant_everywhere(
+        monkeypatch,
         "issue_video_completion_grant",
         lambda **_kwargs: (
             SimpleNamespace(

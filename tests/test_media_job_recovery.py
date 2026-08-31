@@ -15,7 +15,7 @@ import pytest
 from fastapi import HTTPException
 
 from app import db, worker
-from tests.conftest import patch_video_plan_everywhere, patch_worker_everywhere
+from tests.conftest import patch_completion_grant_everywhere, patch_video_plan_everywhere, patch_worker_everywhere
 
 
 def _conn() -> sqlite3.Connection:
@@ -266,11 +266,10 @@ def test_soft_deleted_project_job_is_not_resumed(monkeypatch) -> None:
 def test_page_approved_budget_overrides_static_safety_default(
     monkeypatch,
 ) -> None:
-    import app.completion_grant as completion_grant
 
     patch_worker_everywhere(monkeypatch, "get_setting", lambda *_args: "100")
-    monkeypatch.setattr(
-        completion_grant,
+    patch_completion_grant_everywhere(
+        monkeypatch,
         "episode_video_budget_snapshot",
         # conn 已改为必传（app/completion_grant.py，连接所有权显式化），桩要跟着收
         lambda _episode_id, *, conn: {
@@ -280,8 +279,8 @@ def test_page_approved_budget_overrides_static_safety_default(
             "cap_cny": 440.0,
         },
     )
-    monkeypatch.setattr(
-        completion_grant,
+    patch_completion_grant_everywhere(
+        monkeypatch,
         "active_video_grant_budget_cap",
         lambda _episode_id: None,
     )
@@ -292,11 +291,10 @@ def test_page_approved_budget_overrides_static_safety_default(
 def test_page_approved_budget_can_be_lower_than_static_default(
     monkeypatch,
 ) -> None:
-    import app.completion_grant as completion_grant
 
     patch_worker_everywhere(monkeypatch, "get_setting", lambda *_args: "100")
-    monkeypatch.setattr(
-        completion_grant,
+    patch_completion_grant_everywhere(
+        monkeypatch,
         "episode_video_budget_snapshot",
         # conn 已改为必传（app/completion_grant.py，连接所有权显式化），桩要跟着收
         lambda _episode_id, *, conn: {
@@ -306,8 +304,8 @@ def test_page_approved_budget_can_be_lower_than_static_default(
             "cap_cny": 50.0,
         },
     )
-    monkeypatch.setattr(
-        completion_grant,
+    patch_completion_grant_everywhere(
+        monkeypatch,
         "active_video_grant_budget_cap",
         lambda _episode_id: None,
     )
@@ -709,8 +707,8 @@ def test_create_response_without_task_id_waits_for_human_and_never_replays(
     monkeypatch.setattr(concurrency, "report_congestion", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(concurrency, "report_healthy", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(stage_state, "set_pipeline_stage", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        completion_grant, "reserve_provider_video_budget", lambda **_kwargs: True,
+    patch_completion_grant_everywhere(
+        monkeypatch, "reserve_provider_video_budget", lambda **_kwargs: True,
     )
     patch_worker_everywhere(monkeypatch, "mark_media_job_state", lambda *_args, **_kwargs: None)
     patch_worker_everywhere(monkeypatch, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,

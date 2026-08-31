@@ -45,6 +45,7 @@ from app.video_supervisor import (
     save_checkpoint,
 )
 from tests.conftest import (
+    patch_completion_grant_everywhere,
     patch_video_plan_everywhere,
     patch_video_supervisor_everywhere,
     patch_worker_everywhere,
@@ -76,17 +77,19 @@ def memdb(monkeypatch, tmp_path):
         return conn
 
     # 顶层 from app.db import get_conn 的模块 + db 本身
-    import app.completion_grant as completion_grant
     import app.evidence.media as evidence_media
     import app.orchestration.media_scheduler as media_scheduler
     import app.orchestration.state_machine as state_machine
     import app.video_cost_model as video_cost_model
     import app.video_crop as video_crop
 
+    # completion_grant 已是包（2026-08-31 拆分）：裸的循环 setattr 只到包属性，
+    # 够不到子模块各自绑的 get_conn 副本，必须走 helper（与下方 video_supervisor
+    # 的处理同理）。
+    patch_completion_grant_everywhere(monkeypatch, "get_conn", _get)
     for mod in (
         db_mod,
         evidence_repository,
-        completion_grant,
         evidence_media,
         media_scheduler,
         state_machine,

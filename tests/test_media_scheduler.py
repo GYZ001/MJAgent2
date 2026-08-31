@@ -4,7 +4,7 @@ import sqlite3
 import pytest
 
 from app import completion_grant, db, worker
-from tests.conftest import patch_worker_everywhere
+from tests.conftest import patch_completion_grant_everywhere, patch_worker_everywhere
 from app.orchestration import media_scheduler
 
 
@@ -74,7 +74,7 @@ def test_stale_worker_cannot_accept_provider_budget_after_lease_takeover(
     clock = {"now": 100.0}
     monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)
     monkeypatch.setattr(media_scheduler, "now", lambda: clock["now"])
-    monkeypatch.setattr(completion_grant, "now", lambda: clock["now"])
+    patch_completion_grant_everywhere(monkeypatch, "now", lambda: clock["now"])
     completion_grant.ensure_video_budget_authority_tables(conn)
     conn.execute(
         """INSERT INTO episode_video_budget_authorities(

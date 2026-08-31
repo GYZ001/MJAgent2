@@ -8,6 +8,7 @@ import pytest
 
 from app import db, hiagent
 from app.completion_grant import (
+    ensure_video_budget_authority_tables,
     GrantValidationError,
     authorize_episode_video_budget_increment,
     episode_video_completion_budget_requirement,
@@ -25,7 +26,7 @@ from app.video_supervisor import (
     _semantic_storyboard_repair_proposal,
     _ensure_supervisor_video_plan,
 )
-from tests.conftest import patch_video_plan_everywhere, patch_video_supervisor_everywhere
+from tests.conftest import patch_completion_grant_everywhere, patch_video_plan_everywhere, patch_video_supervisor_everywhere
 
 
 @pytest.fixture(autouse=True)
@@ -183,17 +184,29 @@ def test_concurrent_provider_video_budget_claims_share_one_atomic_cap() -> None:
         source="concurrency-test",
         conn=conn,
     )
+    # 建表在起线程之前做完：DDL 落进竞态窗口会让另一线程已编译的语句抛
+    # sqlite3.OperationalError: database schema has changed，那是 setup 自己
+    # 打架，与本测试要验的「并发认领共享同一个原子 cap」无关。
+    ensure_video_budget_authority_tables(conn)
     barrier = threading.Barrier(2)
 
     def reserve(index: int) -> bool:
         barrier.wait()
+        # 连接必须在线程内部取。app/db.py 的 get_conn() 是线程局部的
+        # （_local = threading.local()），每个线程拿到自己的连接，两笔认领才会
+        # 真的在 SQLite 层面争用同一个 cap——这正是本测试要验的东西。
+        #
+        # 2026-08-31 教训：连接所有权收紧那一轮（aa4d0d9）把主线程的 conn 传进
+        # 了这里，两个线程于是共用一条连接，没有任何真实争用，两笔都能成功。
+        # 症状是间歇性的（有时报 schema has changed，有时断言 [True, True]），
+        # 所以它在几轮全量里都侥幸绿过——被削弱的测试比红的测试危险。
         return reserve_provider_video_budget(
             episode_id="race-e",
             job_id=f"race-j{index}",
             version_id=f"race-v{index}",
             operation_id=f"video-create-race-v{index}",
             amount_cny=7.0,
-            conn=conn,
+            conn=db.get_conn(),
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -484,7 +497,6 @@ async def test_asset_preparation_has_zero_calls_after_release_authority_drift(
 
 def test_grant_recomputes_bound_plan_and_capability_snapshot(monkeypatch) -> None:
     from app.evidence import repository as evidence_repository
-    import app.completion_grant as completion_grant
     import app.video_plan as video_plan
     from tests.test_video_plan_reconcile import _conn
 
@@ -495,8 +507,11 @@ def test_grant_recomputes_bound_plan_and_capability_snapshot(monkeypatch) -> Non
         "active_model",
         lambda _kind, _provider=None: "model",
     )
-    for module in (completion_grant, evidence_repository):
-        monkeypatch.setattr(module, "get_conn", lambda: conn)
+    # completion_grant 是包（2026-08-31 拆分），裸的 setattr 只改到包属性，够不到
+    # 各子模块自己绑的 get_conn 副本——必须走 helper。evidence_repository 是单
+    # 文件模块，循环打桩仍然有效。
+    patch_completion_grant_everywhere(monkeypatch, "get_conn", lambda: conn)
+    monkeypatch.setattr(evidence_repository, "get_conn", lambda: conn)
     patch_video_plan_everywhere(monkeypatch, "get_conn", lambda: conn)
     grant, _token = issue_video_completion_grant(
         episode_id="e",
@@ -535,7 +550,6 @@ def test_grant_leaves_plan_pending_after_provider_selection_changes(
     monkeypatch,
 ) -> None:
     from app.evidence import repository as evidence_repository
-    import app.completion_grant as completion_grant
     from tests.test_video_plan_reconcile import _conn
 
     conn = _conn()
@@ -545,8 +559,11 @@ def test_grant_leaves_plan_pending_after_provider_selection_changes(
         "active_model",
         lambda _kind, _provider=None: "model-2",
     )
-    for module in (completion_grant, evidence_repository):
-        monkeypatch.setattr(module, "get_conn", lambda: conn)
+    # completion_grant 是包（2026-08-31 拆分），裸的 setattr 只改到包属性，够不到
+    # 各子模块自己绑的 get_conn 副本——必须走 helper。evidence_repository 是单
+    # 文件模块，循环打桩仍然有效。
+    patch_completion_grant_everywhere(monkeypatch, "get_conn", lambda: conn)
+    monkeypatch.setattr(evidence_repository, "get_conn", lambda: conn)
     patch_video_plan_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     grant, _token = issue_video_completion_grant(
@@ -568,7 +585,6 @@ def test_grant_leaves_plan_pending_after_provider_selection_changes(
 @pytest.mark.asyncio
 async def test_supervisor_checkpoint_acquires_exact_grant_plan_binding(monkeypatch) -> None:
     from app.evidence import repository as evidence_repository
-    import app.completion_grant as completion_grant
     from tests.test_video_plan_reconcile import _conn
 
     conn = _conn()
@@ -578,11 +594,11 @@ async def test_supervisor_checkpoint_acquires_exact_grant_plan_binding(monkeypat
         "active_model",
         lambda _kind, _provider=None: "model",
     )
-    for module in (
-        completion_grant,
-        evidence_repository,
-    ):
-        monkeypatch.setattr(module, "get_conn", lambda: conn)
+    # completion_grant 是包（2026-08-31 拆分），裸的 setattr 只改到包属性，够不到
+    # 各子模块自己绑的 get_conn 副本——必须走 helper。evidence_repository 是单
+    # 文件模块，循环打桩仍然有效。
+    patch_completion_grant_everywhere(monkeypatch, "get_conn", lambda: conn)
+    monkeypatch.setattr(evidence_repository, "get_conn", lambda: conn)
     # app.video_supervisor and app.video_plan are real packages: a loop-based
     # setattr on the bare package object would silently miss submodules like
     # video_supervisor/authority.py or video_plan/release_manifest.py that

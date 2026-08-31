@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 
 from app import api, db, worker
-from tests.conftest import patch_video_supervisor_everywhere, patch_worker_everywhere, patch_api_everywhere
+from tests.conftest import patch_completion_grant_everywhere, patch_video_supervisor_everywhere, patch_worker_everywhere, patch_api_everywhere
 
 
 def _published_screenplay_json() -> str:
@@ -256,14 +256,15 @@ def test_upstream_snapshot_finds_live_task_without_durable_pointer(monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_video_completion_spawn_failure_is_retryable_and_rolls_back(monkeypatch) -> None:
-    import app.completion_grant as completion_grant
     import app.evidence.repository as evidence_repository
     import app.orchestration.engine as orchestration_engine
     import app.orchestration.state_machine as state_machine
 
     conn = _conn()
+    # completion_grant 已是包（2026-08-31 拆分）：裸的循环 setattr 只改到包属性，
+    # 够不到子模块各自绑的 get_conn 副本，必须走 helper。其余三个仍是单文件模块。
+    patch_completion_grant_everywhere(monkeypatch, "get_conn", lambda: conn)
     for module in (
-        completion_grant,
         evidence_repository,
         orchestration_engine,
         state_machine,
@@ -545,7 +546,6 @@ async def test_project_video_queue_is_persisted_and_recoverable(monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_video_completion_rejects_existing_durable_active_run(monkeypatch) -> None:
-    import app.completion_grant as completion_grant
     import app.evidence.repository as evidence_repository
     import app.orchestration.engine as orchestration_engine
     import app.orchestration.state_machine as state_machine
@@ -564,8 +564,10 @@ async def test_video_completion_rejects_existing_durable_active_run(monkeypatch)
         "UPDATE episodes SET active_video_run_id='run-existing' WHERE id='e'"
     )
     conn.commit()
+    # completion_grant 已是包（2026-08-31 拆分）：裸的循环 setattr 只改到包属性，
+    # 够不到子模块各自绑的 get_conn 副本，必须走 helper。其余三个仍是单文件模块。
+    patch_completion_grant_everywhere(monkeypatch, "get_conn", lambda: conn)
     for module in (
-        completion_grant,
         evidence_repository,
         orchestration_engine,
         state_machine,
@@ -595,7 +597,6 @@ async def test_video_completion_rejects_existing_durable_active_run(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_run_resume_reuses_video_checkpoint_and_records_parent(monkeypatch) -> None:
-    import app.completion_grant as completion_grant
     import app.orchestration.api as orchestration_api
 
     conn = _conn()
@@ -628,8 +629,8 @@ async def test_run_resume_reuses_video_checkpoint_and_records_parent(monkeypatch
         "load_latest_checkpoint",
         lambda _episode_id: SimpleNamespace(grant_id="grant-1"),
     )
-    monkeypatch.setattr(
-        completion_grant,
+    patch_completion_grant_everywhere(
+        monkeypatch,
         "validate_video_grant",
         lambda *_args, **_kwargs: SimpleNamespace(grant_id="grant-1"),
     )
