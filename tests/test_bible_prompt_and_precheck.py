@@ -12,6 +12,7 @@ from app.schemas import Bible, Character, World
 from app.validators import validate_bible
 from tests.conftest import patch_stages_everywhere as _patch_stages
 from tests.conftest import patch_api_everywhere
+from tests.conftest import patch_worker_everywhere
 
 
 def test_normalize_prompt_collapses_duplicate_punctuation() -> None:
@@ -373,8 +374,11 @@ def test_purge_for_style_change_clears_both_character_and_scene_refs(monkeypatch
     char_img.write_bytes(b"x")
     scene_img.write_bytes(b"x")
 
-    from app import worker
-    monkeypatch.setattr(worker, "purge_project_video_artifacts", lambda _pid: {"purged_videos": 0})
+    # 必须走 patch_worker_everywhere：app.media_exec 已经是真包，每个子模块各持
+    # 一份自己的绑定，裸 monkeypatch.setattr(worker, ...) 只改到 app.worker 的
+    # 再导出，真实调用点（app/media_exec/common.py 等）看不见，测试会照常变绿
+    # 而被验证的代码路径从未被替换。tests/test_worker_monkeypatch_guard.py 守着这条。
+    patch_worker_everywhere(monkeypatch, "purge_project_video_artifacts", lambda _pid: {"purged_videos": 0})
     patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
 
     bible = Bible(
