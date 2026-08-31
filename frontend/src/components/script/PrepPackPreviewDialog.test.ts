@@ -31,6 +31,61 @@ describe('PrepPackPreviewDialog', () => {
     expect(html).toContain('启动首版映射包生成')
   })
 
+  it('surfaces the known image cost before the launch button, and never fakes the unknowable part', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackPreviewDialog, {
+      preview: {
+        title: '首次生成映射包预检',
+        data: {
+          input: { source_chars: 500, source_chapters: [3] },
+          cast_impact: {
+            portrait_asset_stage: {
+              known_pending_characters: ['李富贵'],
+              known_pending_scenes: ['宗门广场'],
+              known_image_count: 5,
+              known_cost_cny: 1.0,
+              estimated_images: null,
+              estimated_cost_cny: null,
+              note: '本集若出现尚未登记的新角色/新场景，会自动建卡/登记并生成参考图；具体新增数量在生成前无法确知，完整费用以生成后为准。',
+            },
+          },
+        },
+        idempotencyKey: 'k-cost',
+      },
+      onCancel: () => {}, onConfirm: () => {},
+    }))
+    expect(html).toContain('已知会出图')
+    expect(html).toContain('¥1')
+    // 已知部分必须排在启动按钮之前——用户点下去之前就该看到。
+    expect(html.indexOf('已知会出图')).toBeLessThan(html.indexOf('启动首版映射包生成'))
+    // 新发现部分必须如实标为不可预知，不得杜撰一个精确数字。
+    expect(html).toContain('无法确知')
+  })
+
+  it('renders zero known cost as zero, not a fabricated default, when nothing is pending', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackPreviewDialog, {
+      preview: {
+        title: '首次生成映射包预检',
+        data: {
+          input: { source_chars: 200, source_chapters: [1] },
+          cast_impact: {
+            portrait_asset_stage: {
+              known_pending_characters: [],
+              known_pending_scenes: [],
+              known_image_count: 0,
+              known_cost_cny: 0,
+              estimated_images: null,
+              estimated_cost_cny: null,
+            },
+          },
+        },
+        idempotencyKey: 'k-zero',
+      },
+      onCancel: () => {}, onConfirm: () => {},
+    }))
+    expect(html).toContain('共 0 张')
+    expect(html).toContain('¥0')
+  })
+
   it('still surfaces the fresh-retry-grant warning when the backend flags an unknown prior receipt', () => {
     const html = renderToStaticMarkup(createElement(PrepPackPreviewDialog, {
       preview: {

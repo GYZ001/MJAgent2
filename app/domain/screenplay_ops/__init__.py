@@ -28,6 +28,13 @@ from .status_snapshot import (
     task_registry as task_registry,
 )
 
+from .cast_impact_estimate import (
+    _prep_pack_known_pending_images as _prep_pack_known_pending_images,
+    _prep_pack_literal_matches as _prep_pack_literal_matches,
+    _prep_pack_pending_characters as _prep_pack_pending_characters,
+    _prep_pack_pending_scenes as _prep_pack_pending_scenes,
+)
+
 from .lightweight_status import (
     _episode_or_404 as _episode_or_404,
     router as router,

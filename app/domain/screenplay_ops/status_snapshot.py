@@ -171,7 +171,10 @@ def _screenplay_field_diff(current, proposed) -> list[dict]:
     return changed
 
 def _screenplay_cast_impact(conn, ep: dict, source_text: str) -> dict:
-    """Pure read-only cast impact; semantic identity count remains unknown."""
+    """Pure read-only cast impact；portrait_asset_stage 已知/未知两段口径见
+    cast_impact_estimate 模块 docstring。"""
+    from .cast_impact_estimate import _prep_pack_known_pending_images
+
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     bible = _project_bible_or_placeholder(project)
     known = {character.name for character in bible.characters}
@@ -181,17 +184,11 @@ def _screenplay_cast_impact(conn, ep: dict, source_text: str) -> dict:
         "candidate_count": None,
         "requires_model_resolution": True,
         "note": "新增人物数量需由来源证据模型判断；预检不使用姓名/职业/称谓词表猜测",
-        "screenplay_stage": {
-            "auto_add_text_cards": True,
-            "generate_portraits": False,
-        },
-        "portrait_asset_stage": {
-            "deferred": True,
-            "views_per_character": 3,
-            "estimated_images": None,
-            "estimated_cost_cny": None,
-            "note": "剧本任务不出图；实际新增人物经模型确认后，定妆包在独立资产环节确认费用并补齐",
-        },
+        "screenplay_stage": {"auto_add_text_cards": True, "generate_portraits": False},
+        "portrait_asset_stage": _prep_pack_known_pending_images(
+            conn, project_id=ep["project_id"], episode_no=int(ep["episode_no"]),
+            source_text=source_text, bible=bible,
+        ),
     }
 
 def _screenplay_rebuild_state(snapshot: dict, exc) -> dict:
