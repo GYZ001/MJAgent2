@@ -1017,3 +1017,106 @@ def test_paratext_cleaning_is_capped_and_fails_open(monkeypatch) -> None:
         started.close()
 
     assert cleaned == chapters
+
+
+def test_paratext_budget_is_not_dragged_out_by_slow_cancellation(monkeypatch) -> None:
+    """任务一：15s 预算必须真正封顶净化阶段的墙钟耗时，不能只是"发出取消
+    信号"的时间点。
+
+    `test_paratext_cleaning_is_capped_and_fails_open` 的桩函数不处理
+    `CancelledError`，一被 `cancel()` 就立刻结束——覆盖不到真实事故：供应商
+    侧对取消信号的响应本身很慢（实测最长 ~120s 才收尾）。这里的桩显式吞下
+    `CancelledError` 后再拖一段时间才重新抛出，复现"取消信号已发、但迟迟
+    不落地"的真实形状，断言净化阶段本身不会被这段收尾时间拖累。
+    """
+    import asyncio
+    import time as time_mod
+
+    from app import source_paratext, stages
+    from app.stages import bible_paratext as bible_paratext_mod
+
+    chapters = [
+        {"id": f"ch{i}", "idx": i, "title": f"第{i}章", "content": f"第{i}章开头。" + "文" * 4000}
+        for i in range(1, 10)
+    ]
+
+    async def _slow_to_cancel(conn, chapter_row, *, operation_id: str):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            # 供应商侧收到取消信号后仍不肯立刻收尾（真实事故里最长 ~120s）。
+            await asyncio.sleep(0.6)
+            raise
+        return [], False
+
+    monkeypatch.setattr(source_paratext, "chapter_paratext_offsets", _slow_to_cancel)
+    _patch_stages(monkeypatch, "BIBLE_PARATEXT_BUDGET_S", 0.2)
+    _patch_stages(monkeypatch, "BIBLE_PARATEXT_CHAPTER_TIMEOUT_S", 0.1)
+
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    try:
+        wall_started = time_mod.monotonic()
+        cleaned = loop.run_until_complete(stages._chapters_without_paratext(chapters))
+        elapsed = time_mod.monotonic() - wall_started
+        # 关键断言：净化阶段自身的墙钟耗时必须贴着 0.2s 预算，不能被拖到
+        # 供应商侧 0.6s 才收尾的取消响应——如果又退回"等它落地"，这里会量出
+        # 接近 0.6s+ 的耗时而不是 0.2s 出头。
+        assert elapsed < 0.5
+        assert cleaned == chapters
+    finally:
+        # 测试卫生：净化阶段已经返回，但后台收尾任务还在等桩函数落地——
+        # 在关闭这个临时 event loop 前先让它跑完，避免 "Task was destroyed
+        # but it is pending" 噪音；这段等待不计入上面的耗时断言。
+        stragglers = [t for t in bible_paratext_mod._PARATEXT_STRAGGLER_REAPERS if not t.done()]
+        if stragglers:
+            loop.run_until_complete(asyncio.gather(*stragglers, return_exceptions=True))
+        loop.close()
+
+
+def test_paratext_dispatch_stops_early_instead_of_firing_then_cancelling(monkeypatch) -> None:
+    """任务二：不能"发完再靠预算砍掉大半"——1616 章的真实项目里这样干出过
+    "成功 50、取消 59"，取消比成功还多，白白占用供应商时间。改成按本轮已
+    完成调用的实测耗时动态判断还要不要继续发；章节数远超预算能承载的量时，
+    实际发出的请求数必须显著少于章节总数（不断言具体数字，只断言这个
+    "发出数 < 总数"的关系，判据从运行时实测耗时推导，不是新写死的常量）。
+    """
+    import asyncio
+
+    from app import source_paratext, stages
+    from app.stages import bible_paratext as bible_paratext_mod
+
+    total = 60
+    chapters = [
+        {"id": f"ch{i}", "idx": i, "title": f"第{i}章", "content": f"第{i}章开头。" + "文" * 200}
+        for i in range(1, total + 1)
+    ]
+    dispatched = 0
+
+    async def _steady_call(conn, chapter_row, *, operation_id: str):
+        nonlocal dispatched
+        dispatched += 1
+        await asyncio.sleep(0.2)
+        return [], False
+
+    monkeypatch.setattr(source_paratext, "chapter_paratext_offsets", _steady_call)
+    # 把 scope 强制展开到全部章节：这个测试专门测"发多少"，不掺 scope 本身
+    # 的裁剪（那条已有 test_paratext_scope_does_not_scale_with_book_length 守）。
+    _patch_stages(monkeypatch, "_bible_paratext_scope", lambda valid: list(range(len(valid))))
+    _patch_stages(monkeypatch, "BIBLE_PARATEXT_BUDGET_S", 0.6)
+    _patch_stages(monkeypatch, "BIBLE_PARATEXT_CHAPTER_TIMEOUT_S", 0.3)
+    _patch_stages(monkeypatch, "BIBLE_PARATEXT_CONCURRENCY", 2)
+
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    try:
+        cleaned = loop.run_until_complete(stages._chapters_without_paratext(chapters))
+    finally:
+        stragglers = [t for t in bible_paratext_mod._PARATEXT_STRAGGLER_REAPERS if not t.done()]
+        if stragglers:
+            loop.run_until_complete(asyncio.gather(*stragglers, return_exceptions=True))
+        loop.close()
+
+    assert cleaned == chapters
+    # 60 章、预算 0.6s、并发 2、单条 0.2s：理论上限约 6 条左右能在预算内跑完；
+    # 旧代码会把 60 条全部 create_task 再靠超时砍掉大半，新代码应当让明显
+    # 来不及的调用自己放弃、从不发起请求。
+    assert dispatched < total

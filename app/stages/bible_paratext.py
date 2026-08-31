@@ -7,6 +7,7 @@ import time
 
 from app import config
 from app.db import get_conn, log_provider_call
+from app.source_paratext import chapter_paratext_offsets, remove_offsets
 
 from .bible_shared import (
     BIBLE_PARATEXT_BUDGET_S,
@@ -37,6 +38,72 @@ def _bible_paratext_scope(valid: list[dict]) -> list[int]:
     )
     scope |= set(range(min(window, len(valid))))
     return sorted(index for index in scope if 0 <= index < len(valid))
+
+
+def _paratext_pace_estimate(observed_durations: list[float]) -> float:
+    """预算还够不够再发一条的判据：取本轮已完成调用的实测耗时平均。一条
+    都还没跑完时没有数据可推，退回本文件已冻结的单章超时
+    `BIBLE_PARATEXT_CHAPTER_TIMEOUT_S` 作保守估计——这不是新发明的魔数，
+    是复用既有的单章上限；数据一旦出现就改用真实观测值，不再依赖它。
+    """
+    if not observed_durations:
+        return BIBLE_PARATEXT_CHAPTER_TIMEOUT_S
+    return sum(observed_durations) / len(observed_durations)
+
+
+async def _clean_chapter_paratext(
+    slot: int, *, chapter: dict, position: int, conn, limiter: asyncio.Semaphore,
+    deadline: float, observed_durations: list[float],
+) -> tuple[int, str, bool]:
+    """单章净化：先问"这条发出去还来不来得及"（任务二，见
+    `_chapters_without_paratext` docstring 2026-08-30 条），来不及就直接
+    退回原文，从不占用信号量、也从不发起 HTTP 请求——不是"发完再靠预算
+    砍"，是"按预算决定发多少"。判断分两处：信号量前挡"排到我时明显已经
+    来不及了就不排"，信号量后挡"排队本身也吃掉了剩余预算"，两处漏掉
+    任何一处都会退化回"先占资源再白等"。
+    """
+    content = chapter.get("content") or ""
+    if deadline - time.time() < _paratext_pace_estimate(observed_durations):
+        return slot, content, False
+    async with limiter:
+        if deadline - time.time() < _paratext_pace_estimate(observed_durations):
+            return slot, content, False
+        call_started = time.time()
+        try:
+            regions, cache_hit = await asyncio.wait_for(
+                chapter_paratext_offsets(
+                    conn, chapter,
+                    operation_id=f"bible.paratext:{chapter.get('id') or position}",
+                ),
+                timeout=BIBLE_PARATEXT_CHAPTER_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            return slot, content, False
+        finally:
+            observed_durations.append(time.time() - call_started)
+    return slot, remove_offsets(content, regions), cache_hit
+
+
+# 15s 预算到点后被 cancel() 的任务：cancel() 只是"发出取消信号"，供应商侧
+# 真正响应取消可能要等到它自己的读超时（实测最长 ~120s，见
+# `_chapters_without_paratext` docstring 事故记录）。继续在净化阶段的关键
+# 路径上 `await` 它们落地，会让 15s 预算变成"发出取消信号的时间点"而不是
+# "这一步实际耗时的上限"——两分钟的事故正是这么来的。但完全不管、连
+# cancel() 的结果都不收也不对：那是另一种悬挂——没人 retrieve 它们的异常，
+# 且不能假设供应商侧一定老实响应 cancel()。取舍：cancel() 之后不在净化
+# 阶段的关键路径上等，改用一个独立的收尾任务在后台 `gather` 到底——集合
+# 持有强引用防止任务被当成孤儿提前回收（asyncio 官方推荐的 fire-and-forget
+# 写法），落地后自己从集合摘除；异常统一丢弃（return_exceptions=True，
+# 与净化"判不出就退回原文、不阻断任何人"的既有语义一致）。供应商侧因此
+# 仍会跑到它自己的超时才收尾——这笔浪费不是这个函数能解决的，改由
+# `_clean_chapter_paratext` 的动态节流从源头减少要收尾的条数。
+_PARATEXT_STRAGGLER_REAPERS: set[asyncio.Task] = set()
+
+
+def _reap_paratext_stragglers(pending: list[asyncio.Task]) -> None:
+    reaper = asyncio.create_task(asyncio.gather(*pending, return_exceptions=True))
+    _PARATEXT_STRAGGLER_REAPERS.add(reaper)
+    reaper.add_done_callback(_PARATEXT_STRAGGLER_REAPERS.discard)
 
 
 async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
@@ -71,9 +138,20 @@ async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
     应趋近于零，这一步的墙钟耗时应趋近于"读库"而不是"等模型"。缺
     `id` 的章节（测试用的合成 dict）无法持久化，退化为每次都重算，行为
     与改造前完全一致，不影响正确性。
-    """
-    from app.source_paratext import chapter_paratext_offsets, remove_offsets
 
+    **2026-08-30（预算真正封顶 + 按预算决定发多少）**：15s 预算此前只是
+    "发出取消信号"的时间点——供应商侧真正响应取消要等到它自己的读超时
+    （实测最长 ~120s），而旧代码在这里 `await asyncio.gather(*pending,
+    return_exceptions=True)` 等它们落地，于是净化阶段实际耗时可以拖到
+    两分钟，恰好违反了本函数存在的理由（"绝不能占据人物谱主链路两分钟"）。
+    改法见 `_reap_paratext_stragglers`：cancel() 之后不在关键路径上等，
+    交给后台收尾任务；代价是供应商侧算力仍会跑到它自己的超时，这笔浪费
+    改由 `_clean_chapter_paratext` 的动态节流从源头收窄——scope 里的章节
+    不再一次性全部 `create_task` 再靠预算砍掉大半（1616 章的真实项目里
+    这样干出过"成功 50、取消 59"，取消比成功还多），而是按本轮已完成
+    调用的实测耗时判断"这条发出去还来不来得及"，来不及就直接退回原文，
+    从不占用信号量、也从不发起 HTTP 请求。
+    """
     positions = [i for i, ch in enumerate(chapters) if (ch.get("content") or "").strip()]
     valid = [chapters[i] for i in positions]
     if not valid:
@@ -82,24 +160,16 @@ async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
     conn = get_conn()
     limiter = asyncio.Semaphore(BIBLE_PARATEXT_CONCURRENCY)
     started = time.time()
+    deadline = started + BIBLE_PARATEXT_BUDGET_S
+    observed_durations: list[float] = []
 
-    async def _clean(slot: int) -> tuple[int, str, bool]:
-        chapter = valid[slot]
-        async with limiter:
-            try:
-                regions, cache_hit = await asyncio.wait_for(
-                    chapter_paratext_offsets(
-                        conn, chapter,
-                        operation_id=f"bible.paratext:{chapter.get('id') or positions[slot]}",
-                    ),
-                    timeout=BIBLE_PARATEXT_CHAPTER_TIMEOUT_S,
-                )
-            except asyncio.TimeoutError:
-                return slot, chapter.get("content") or "", False
-        stripped = remove_offsets(chapter.get("content") or "", regions)
-        return slot, stripped, cache_hit
-
-    tasks = [asyncio.create_task(_clean(slot)) for slot in scope]
+    tasks = [
+        asyncio.create_task(_clean_chapter_paratext(
+            slot, chapter=valid[slot], position=positions[slot], conn=conn,
+            limiter=limiter, deadline=deadline, observed_durations=observed_durations,
+        ))
+        for slot in scope
+    ]
     try:
         done, pending = await asyncio.wait(tasks, timeout=BIBLE_PARATEXT_BUDGET_S)
     except BaseException:  # 外层取消/关服：不留悬挂任务
@@ -109,7 +179,7 @@ async def _chapters_without_paratext(chapters: list[dict]) -> list[dict]:
     for task in pending:
         task.cancel()
     if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
+        _reap_paratext_stragglers(pending)
 
     cleaned = list(chapters)
     changed = 0
