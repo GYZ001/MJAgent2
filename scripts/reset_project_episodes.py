@@ -215,18 +215,37 @@ def clear_episode_via_api(eid: str, label: str) -> list[str]:
     problems: list[str] = []
     steps = [
         ("POST", f"/api/episodes/{eid}/clear-artifacts", None, "参考图/视频/分析"),
-        ("POST", f"/api/episodes/{eid}/storyboard/clear", {"reason": "全链路重跑前清空"},
-         "分镜"),
+        ("STORYBOARD", f"/api/episodes/{eid}/storyboard/clear", None, "分镜"),
         ("DELETE", f"/api/episodes/{eid}/screenplay", None, "剧本"),
     ]
     for method, path, body, what in steps:
-        code, resp = approved(method, path, body)
+        if method == "STORYBOARD":
+            code, resp = _clear_storyboard(eid)
+        else:
+            code, resp = approved(method, path, body)
         ok = code in (200, 202, 204, 404)
         log(f"  {label} 清{what} -> HTTP{code}"
             f"{'' if ok else ' ' + json.dumps(resp, ensure_ascii=False)[:200]}")
         if not ok:
             problems.append(f"{label} 清{what} HTTP{code}")
     return problems
+
+
+def _clear_storyboard(eid: str) -> tuple[int, dict]:
+    """分镜清空是两段式：先取影响预览的 preview_token，再带着它执行。
+
+    少了第一段一律 428「请先查看并批准最新影响预览」——这是给人看影响面的
+    设计，不是可以绕开的形式。已经没有分镜可清时预览会拒绝，那种拒绝按"本来
+    就是空的"处理，不算失败。
+    """
+    code, resp = approved("POST", f"/api/episodes/{eid}/storyboard/clear-preview")
+    token = resp.get("preview_token") if isinstance(resp, dict) else None
+    if not token:
+        if code in (409, 422) and "没有" in json.dumps(resp, ensure_ascii=False):
+            return 404, resp
+        return code, resp
+    return approved("POST", f"/api/episodes/{eid}/storyboard/clear",
+                    {"preview_token": token, "reason": "全链路重跑前清空"})
 
 
 PROJECT_ASSET_SWEEPS = [
@@ -249,6 +268,32 @@ PROJECT_STATUS_RESET = {
     "bible_status": "idle", "bible_error": None, "refs_status": "idle",
     "portraits_status": "idle", "scene_refs_status": "idle",
 }
+
+
+def sweep_orchestration_residue(conn: sqlite3.Connection,
+                                scope: dict[str, list[str]]) -> None:
+    """产品的清除端点只管流水线产出，不动编排与产物记录；这里做兜底清扫。
+
+    留着它们"从零重跑"就不成立：``artifacts`` 里装着分镜/剧本产物与视频补齐
+    checkpoint，而过期 checkpoint 正是让整个视频阶段被跳过的那个 bug 的宿主。
+
+    删除顺序直接取 ``RESIDUE_PROBES`` 的逆序——那份表里父表在前、子表在后，
+    倒过来正好是子表先删。不另写一份删除清单：两份清单迟早会分叉，而分叉的
+    那一条就是漏网的残留。
+    """
+    for table, column, key in reversed(RESIDUE_PROBES):
+        ids = scope.get(key) or []
+        if not ids:
+            continue
+        removed = 0
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            ph = ",".join("?" * len(chunk))
+            removed += conn.execute(
+                f"DELETE FROM {table} WHERE {column} IN ({ph})", chunk).rowcount
+        if removed:
+            log(f"  兜底清 {table}.{column}：{removed} 行")
+    conn.commit()
 
 
 def purge_project_assets(conn: sqlite3.Connection, project_id: str) -> None:
@@ -298,6 +343,7 @@ def main() -> int:
     conn.row_factory = sqlite3.Row
     try:
         purge_project_assets(conn, project_id)
+        sweep_orchestration_residue(conn, scope)
     finally:
         conn.close()
 
