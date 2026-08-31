@@ -2617,6 +2617,107 @@ def test_identity_adjudication_creates_source_backed_functional_authority(
     ) == [adjudicated]
 
 
+def test_identity_adjudication_new_named_wires_identity_source_labels_end_to_end(
+    monkeypatch,
+) -> None:
+    """任务一接线验证（identity_adjudication.py 侧）：AI 仲裁判 new_named 时，
+    identity.source_names 里除 canonical_name 外的其它称呼必须真的喂给
+    ensure_character_card 的 identity_source_labels、落卡时登记成别名——否则下次
+    同一个人换个称呼出现，card_owner 的别名匹配仍然查不到，重复建卡的风险原样
+    保留。只 mock 模型调用这一个外部边界，ensure_character_card 本身跑真的，
+    落库到位后用 card_owner 独立核验（不是只断言参数被传了进去）。"""
+    import sqlite3
+
+    from tests.conftest import patch_portraits_everywhere
+
+    payload = _v13_payload()
+    payload["format_version"] = "screenplay-generation-ir.v1.4"
+    payload["identities"][0]["authority_id"] = "bible:谷言"
+    payload["identities"][1].update({
+        "authority_id": "",
+        "source_names": ["旧友", "钥匙人"],
+    })
+    episode = {
+        "id": "ep-ir-new-named-alias",
+        "episode_no": 1,
+        "project_id": "p1",
+        "authorized_source_chapters": {"chapter-1": SOURCE},
+        "character_resolutions": [],
+    }
+    bible = _bible()
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT, bible_version INTEGER DEFAULT 0)"
+    )
+    conn.execute("CREATE TABLE chapters(project_id TEXT, idx INTEGER, content TEXT)")
+    conn.execute("CREATE TABLE episodes(project_id TEXT, episode_no INTEGER, source_chapters TEXT)")
+    conn.execute(
+        "CREATE TABLE character_portraits(id TEXT, project_id TEXT, character_name TEXT, ep_start INTEGER, "
+        "ep_end INTEGER, appearance TEXT, prompt TEXT, image_path TEXT, base_portrait_id TEXT, "
+        "bible_version INTEGER, created_at REAL)"
+    )
+    conn.execute(
+        "INSERT INTO projects(id, bible_json, bible_version) VALUES('p1', ?, 1)",
+        (json.dumps(bible.model_dump(), ensure_ascii=False),),
+    )
+    conn.execute("INSERT INTO episodes(project_id, episode_no, source_chapters) VALUES('p1', 1, '[1]')")
+    conn.execute(
+        "INSERT INTO chapters(project_id, idx, content) VALUES('p1', 1, ?)",
+        ("旧友（人称钥匙人）在门口等待多时。钥匙人递上钥匙后转身离开。" * 3,),
+    )
+    conn.commit()
+
+    settings: dict[str, str] = {}
+    patch_portraits_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_portraits_everywhere(monkeypatch, "get_setting", lambda k: settings.get(k))
+    patch_portraits_everywhere(monkeypatch, "set_setting", lambda k, v: settings.__setitem__(k, v))
+
+    async def fake_assess(name, fragments, *, style, known_names, ep_label, **_kwargs):
+        return {
+            "subject_kind": "person", "important": True, "reason": "反复出场", "role": "重要配角",
+            "appearance_canonical": "神色慌张男子，外套带血迹，步伐匆忙，眼神警惕，气息急促",
+            "personality": "警惕", "speech_style": "急促", "relationships": [],
+        }
+
+    patch_portraits_everywhere(monkeypatch, "assess_new_character", fake_assess)
+
+    async def fake_chat(*_args, **_kwargs):
+        return json.dumps({"decisions": [{
+            "identity_key": "friend",
+            "status": "new_named",
+            "authority_id": "",
+            "canonical_name": "旧友",
+            "evidence_source_ids": ["SRC0002"],
+            "rationale": "SRC0002 明确写出旧友的具名身份并反复出场",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(identity_adjudication.model_gateway, "chat", fake_chat)
+    candidate = ScreenplayGenerationIR.model_validate(payload)
+    resolved = asyncio.run(adjudicate_screenplay_ir_identities(
+        candidate,
+        episode=episode,
+        source_text=SOURCE,
+        bible=bible,
+        persist_new_resolutions=False,
+    ))
+
+    friend = next(item for item in resolved.identities if item.key == "friend")
+    assert friend.authority_id == "bible:旧友"
+
+    stored_bible = Bible.model_validate(json.loads(
+        conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]
+    ))
+    card = next(c for c in stored_bible.characters if c.name == "旧友")
+    # 端到端断言：别名真的落库了（不是只断言参数被传进 ensure_character_card）。
+    alias_texts = {a.text for a in card.aliases}
+    assert "钥匙人" in alias_texts
+
+    from app.portraits.card_owner import resolve_card_owner
+    assert resolve_card_owner(stored_bible, "钥匙人") == ("owner", "旧友")
+
+
 def test_identity_adjudication_normalizes_multi_segment_evidence_to_doc_order(
     monkeypatch,
 ) -> None:

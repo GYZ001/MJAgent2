@@ -16,6 +16,7 @@ from app.identity_authority import (
     normalize_character_resolution,
 )
 from app.portraits.card_owner import bible_known_labels
+from app.portraits.card_rebind import rebind_character_card
 from app.schemas import Bible, EpisodeScreenplay
 from app.screenplay_ir import (
     ScreenplayGenerationIR,
@@ -190,7 +191,7 @@ def _prompt(payload: dict[str, Any]) -> str:
 规则：
 1. 每个 issues 涉及的 identity_key 都必须且只能输出一个 decision。
 2. 若证据确认它属于 authority_registry 中某个实体，status=bind，authority_id 必须逐字引用该项。
-   identities 中留空的 authority_id 表示未决输入，不构成任何既有身份权威。
+   identities 中留空的 authority_id 表示未决输入，不构成任何既有身份权威；若本集原文首次揭晓与已登记 canonical_name 不同的稳定真名，canonical_name 须逐字来自 owned SRC，否则留空、不得猜测。
 3. 若原文唯一明确给出稳定真名且 registry 尚无对应项，status=new_named，canonical_name 必须逐字来自 owned SRC；
    后端先完成最小文字卡，再签发 bible:<name> authority。
 4. 若原文确认它是独立出场/开口实体，但 registry 尚无对应项，status=new_functional，
@@ -206,7 +207,7 @@ def _prompt(payload: dict[str, Any]) -> str:
 {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}
 
 只输出 JSON：
-{{"decisions":[{{"identity_key":"IR identity.key","status":"bind|new_named|new_functional|insufficient_evidence","authority_id":"bind 时填写已有 ID，否则空串","canonical_name":"new_named/new_functional 时填写 owned SRC 逐字称谓，否则可空","evidence_source_ids":["SRC0001"],"rationale":"基于哪些原文动作、对白或同一性证据"}}]}}"""
+{{"decisions":[{{"identity_key":"IR identity.key","status":"bind|new_named|new_functional|insufficient_evidence","authority_id":"bind 时填写已有 ID，否则空串","canonical_name":"new_named/new_functional 时填写 owned SRC 逐字称谓；bind 时若本集首次揭晓与已登记 canonical_name 不同的真名则逐字填写，否则可空","evidence_source_ids":["SRC0001"],"rationale":"基于哪些原文动作、对白或同一性证据"}}]}}"""
 
 
 def _source_segment_document_order(source_text: str) -> dict[str, int]:
@@ -300,9 +301,9 @@ def _validate_decisions(
         )
         if decision.status == "bind":
             if decision.authority_id not in valid_authorities:
-                raise ContentGenerationError(
-                    f"人物身份仲裁 {key} 引用了不存在的 authority_id"
-                )
+                raise ContentGenerationError(f"人物身份仲裁 {key} 引用了不存在的 authority_id")
+            if (revealed_name := decision.canonical_name.strip()) and not any(revealed_name in source_by_id[s] for s in evidence_ids):
+                raise ContentGenerationError(f"人物身份仲裁 {key} 声称揭晓的真名不属于所引原文")
         elif decision.status in {"new_functional", "new_named"}:
             canonical_name = decision.canonical_name.strip()
             identity_display_name = str(
@@ -451,10 +452,13 @@ async def adjudicate_screenplay_ir_identities(
         }
 
     new_resolutions: list[dict[str, Any]] = []
+    source_by_id = {item["source_segment_id"]: item["text"] for item in payload["source_segments"]}
     for key, decision in decisions.items():
         identity = identities_by_key[key]
         if decision.status == "bind":
             identity.authority_id = decision.authority_id
+            if (revealed_name := decision.canonical_name.strip()) and (from_label := decision.authority_id.removeprefix("bible:")) != decision.authority_id and from_label != revealed_name:
+                await rebind_character_card(str(episode.get("project_id") or ""), from_label, revealed_name)
             continue
         if decision.status == "new_named":
             from app.portraits import ensure_character_card
@@ -463,8 +467,8 @@ async def adjudicate_screenplay_ir_identities(
                 str(episode.get("project_id") or ""),
                 decision.canonical_name,
                 int(episode.get("episode_no") or 1),
-                generate_portrait=False,
-                require_identity_card=True,
+                generate_portrait=False, require_identity_card=True,
+                identity_source_labels=identity.source_names,
             )
             if card.get("status") not in {"exists", "added", "ready", "created"}:
                 raise ContentGenerationError(
@@ -521,10 +525,6 @@ async def adjudicate_screenplay_ir_identities(
             ).encode("utf-8")
         ).hexdigest()[:16]
         identity.authority_id = authority_id
-        source_by_id = {
-            item["source_segment_id"]: item["text"]
-            for item in payload["source_segments"]
-        }
         source_label = next((
             token
             for token in [*identity.source_names, identity.display_name]

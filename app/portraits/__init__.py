@@ -81,10 +81,7 @@ from app.source_excerpt import (
     index_source_segments,
 )
 
-from ._db_probe import (
-    _has_column,
-    _has_table,
-)
+from ._db_probe import _has_column, _has_table
 from ._identity_tokens import (
     _IDENTITY_DISAMBIGUATING_ORDINALS,
     _IDENTITY_LIST_SEPARATOR_PATTERN,
@@ -94,6 +91,7 @@ from ._identity_tokens import (
     _project_identity_token,
     _visual_entity_id_for_resolution_safe,
 )
+from .card_owner import bible_known_labels, resolve_card_owner
 from .cards import (
     CHARACTER_CARD_ROLES,
     CHARACTER_SUBJECT_PERSON,
@@ -475,6 +473,7 @@ __all__ = [
     "audit_identity_coverage_from_structural_evidence",
     "base64",
     "bible_for_episode",
+    "bible_known_labels",
     "bible_with_pending_characters_for_text",
     "bible_with_provisional_characters",
     "chapter_is_stub",
@@ -522,6 +521,7 @@ __all__ = [
     "redraw_prompt",
     "register_initial_portrait",
     "resolution_declares_functional_identity",
+    "resolve_card_owner",
     "resolve_future_identity_candidates",
     "screen_appearance_changes",
     "screenplay_character_resolution_errors",

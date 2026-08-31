@@ -17,6 +17,7 @@ from app.db import get_conn, new_id, now
 from app.errors import ContentGenerationError, code_ref
 from app.evidence.media import record_reference_asset
 from app.harness.types import EvidenceArtifact
+from app.portraits.card_owner import resolve_card_owner
 from app.refs import _safe_name, portrait_prompt, production_appearance_anchor
 from app.schemas import Bible
 
@@ -348,7 +349,6 @@ def _update_bible_appearance(conn, project_id: str, name: str, appearance: str, 
     conn.execute("UPDATE projects SET bible_json=? WHERE id=?", (json.dumps(data, ensure_ascii=False), project_id))
 
 
-
 def _append_character_to_bible(conn, project_id: str, char: dict) -> bool:
     """Atomically append a discovered character and advance bible lineage/version."""
     artifact_supported = (
@@ -362,7 +362,7 @@ def _append_character_to_bible(conn, project_id: str, char: dict) -> bool:
     if not row or not row["bible_json"]:
         return False
     data = json.loads(row["bible_json"])
-    if char.get("name") in {c.get("name") for c in data.get("characters", [])}:
+    if resolve_card_owner(Bible.model_validate(data), char.get("name") or "")[0] != "none":
         return False
     data.setdefault("characters", []).append(char)
     payload = json.dumps(data, ensure_ascii=False)

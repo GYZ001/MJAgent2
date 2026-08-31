@@ -2567,6 +2567,14 @@ def test_auto_discovered_character_pack_starts_at_first_appearance(tmp_path, mon
 def test_minor_character_is_skipped_and_negatively_cached(monkeypatch) -> None:
     conn = _make_conn()
     _seed_project(conn, "路人甲走过。" * 6)
+    # EP22 指向与 EP21 完全相同的源章节，保证两次调用检索到的 fragments 逐字一致
+    # ——负缓存现在挂在片段内容哈希上（见 discovery_fragments._fragment_signature），
+    # 不是"过了多少集"，必须真的验证"片段相同 → 命中缓存"，不能靠"这集查不到
+    # 任何片段"这条无关的早退路径蒙混过关。
+    conn.execute(
+        "INSERT INTO episodes(project_id, episode_no, source_chapters) VALUES('p1', 22, '[30]')"
+    )
+    conn.commit()
     _patch_settings(monkeypatch, conn)
 
     calls = {"assess": 0}
@@ -2581,10 +2589,296 @@ def test_minor_character_is_skipped_and_negatively_cached(monkeypatch) -> None:
     res = asyncio.run(portraits.ensure_character_card("p1", "路人甲", 21))
     assert res["status"] == "skipped_minor"
     assert calls["assess"] == 1
-    # 21 集判过不重要 → 22 集在重判窗口内，直接命中负缓存，不再调模型
+    # 21 集判过不重要，22 集检索到的原文片段与 21 集完全相同（同一份源章节）
+    # → 命中负缓存，不再调模型。
     res2 = asyncio.run(portraits.ensure_character_card("p1", "路人甲", 22))
     assert res2["status"] == "skipped_minor"
     assert calls["assess"] == 1
+
+
+def test_minor_character_cache_invalidates_when_fragments_change(monkeypatch) -> None:
+    """负缓存挂产物信号：片段变了必须重判，不是靠集数窗口过期才重判。"""
+    conn = _make_conn()
+    _seed_project(conn, "路人甲走过。" * 6)
+    _patch_settings(monkeypatch, conn)
+
+    calls = {"assess": 0}
+
+    async def fake_assess(*a, **k):
+        calls["assess"] += 1
+        return {"subject_kind": "person", "important": False, "reason": "路人", "role": "重要配角",
+                "appearance_canonical": "", "personality": "", "speech_style": "", "relationships": []}
+
+    patch_portraits_everywhere(monkeypatch, "assess_new_character", fake_assess)
+
+    res = asyncio.run(portraits.ensure_character_card("p1", "路人甲", 21))
+    assert res["status"] == "skipped_minor"
+    assert calls["assess"] == 1
+
+    # 新增一章、且提到"路人甲"，让这次检索到的片段内容真的变了——即使仍是同一
+    # 集号（21），负缓存也必须失效，模型必须被重新调用。
+    conn.execute(
+        "INSERT INTO chapters(project_id, idx, content) VALUES('p1', 31, ?)",
+        ("路人甲竟是绝世高手，一掌震碎山门。" * 4,),
+    )
+    conn.commit()
+
+    res2 = asyncio.run(portraits.ensure_character_card("p1", "路人甲", 21))
+    assert res2["status"] == "skipped_minor"
+    assert calls["assess"] == 2
+
+
+def test_ensure_character_card_registers_identity_source_label_aliases(monkeypatch) -> None:
+    """任务一：建卡即登记别名——本次身份决议里同一 identity_group 的其它
+    source_label 落卡时写进 Character.aliases，card_owner 的别名匹配才有东西可
+    匹配（否则下次同一个人换个称呼出现仍会漏判、建出第二张卡）。"""
+    conn = _make_conn()
+    _seed_project(conn, "李富贵（人称小胖子）走进大厅。小胖子笑呵呵地打招呼。" * 4)
+    _patch_settings(monkeypatch, conn)
+
+    async def fake_assess(name, fragments, *, style, known_names, ep_label, **_kwargs):
+        return {
+            "subject_kind": "person", "important": True, "reason": "反复出场", "role": "重要配角",
+            "appearance_canonical": "圆脸男子，身着青布短打，笑容憨厚，体态微胖，腰系粗布腰带",
+            "personality": "憨厚", "speech_style": "爽朗", "relationships": [],
+        }
+
+    patch_portraits_everywhere(monkeypatch, "assess_new_character", fake_assess)
+
+    res = asyncio.run(portraits.ensure_character_card(
+        "p1", "李富贵", 21, generate_portrait=False,
+        identity_source_labels=["小胖子", "查无此人的称呼", "李富贵"],
+    ))
+    assert res["status"] == "added"
+
+    characters = json.loads(
+        conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]
+    )["characters"]
+    card = next(c for c in characters if c["name"] == "李富贵")
+    alias_texts = {a["text"] for a in card["aliases"]}
+    # 有共现证据的候选登记为别名……
+    assert "小胖子" in alias_texts
+    # ……原文里根本没出现过的候选不会被凭空登记（不确定不登记）。
+    assert "查无此人的称呼" not in alias_texts
+    # 自身规范名不会被登记成自己的别名。
+    assert "李富贵" not in alias_texts
+    alias = next(a for a in card["aliases"] if a["text"] == "小胖子")
+    assert alias["is_exclusive"] is False  # 这条通道没做过排他性核验，不得假装做过
+    assert alias["evidence_chapter_index"] == 30
+    assert "小胖子" in alias["evidence_quote"] and "李富贵" in alias["evidence_quote"]
+
+    # 别名感知的解析器现在查得到了：下次同一个人换个称呼出现，card_owner 命中
+    # 已有归属，而不是建出第二张卡（这条链路本身归 app/portraits/card_owner.py，
+    # 这里只验证接线：新卡的 aliases 确实喂给了它）。
+    res2 = asyncio.run(portraits.ensure_character_card("p1", "小胖子", 22))
+    assert res2 == {"status": "exists", "name": "李富贵"}
+
+
+def test_ensure_character_card_without_identity_source_labels_keeps_empty_aliases(monkeypatch) -> None:
+    """未传 identity_source_labels（当前两个生产调用方都还没接线）时行为不变：
+    aliases 为空列表，不是缺陷。"""
+    conn = _make_conn()
+    _seed_project(conn, "蛇后现身，紫色长发，妖娆冷艳。蛇后再次出手。" * 3)
+    _patch_settings(monkeypatch, conn)
+
+    async def fake_assess(*a, **k):
+        return {"subject_kind": "person", "important": True, "reason": "反复出场", "role": "重要配角",
+                "appearance_canonical": "紫发妖娆女子，紫色长发，金瞳蛇眸，蛇纹长裙，气场冷艳标志性蛇瞳",
+                "personality": "", "speech_style": "", "relationships": []}
+
+    patch_portraits_everywhere(monkeypatch, "assess_new_character", fake_assess)
+
+    res = asyncio.run(portraits.ensure_character_card("p1", "蛇后", 21, generate_portrait=False))
+    assert res["status"] == "added"
+    characters = json.loads(
+        conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]
+    )["characters"]
+    card = next(c for c in characters if c["name"] == "蛇后")
+    assert card["aliases"] == []
+
+
+def test_ensure_cards_for_text_wires_identity_source_labels_end_to_end(monkeypatch) -> None:
+    """任务一接线验证：`identity_source_labels` 参数本身早就存在，但两个生产
+    调用方（cards_ensure.py 的 unknown_by_name 循环、identity_adjudication.py 的
+    new_named 分支）此前都没有传——整条能力通但没接，card_owner 靠别名去重因此
+    长期空转。这里走 `ensure_cards_for_text` 真正的生产入口（不 mock
+    ensure_character_card 本身），验证 unknown_by_name 分组把同一个人的多个
+    source_label 真的喂给了建卡，产出了可核验的别名，且 card_owner 真的能靠它
+    去重——只断言参数被传进去不算数。"""
+    conn = _make_conn()
+    _seed_project(conn, "李富贵（人称小胖子）赶来赴宴。小胖子笑呵呵地打招呼。" * 4)
+    _patch_settings(monkeypatch, conn)
+
+    async def fake_assess(name, fragments, *, style, known_names, ep_label, **_kwargs):
+        return {
+            "subject_kind": "person", "important": True, "reason": "反复出场", "role": "重要配角",
+            "appearance_canonical": "圆脸男子，身着青布短打，笑容憨厚，体态微胖，腰系粗布腰带",
+            "personality": "憨厚", "speech_style": "爽朗", "relationships": [],
+        }
+
+    patch_portraits_everywhere(monkeypatch, "assess_new_character", fake_assess)
+
+    result = asyncio.run(portraits.ensure_cards_for_text(
+        "p1", 21, "李富贵（人称小胖子）赶来赴宴。", Bible.model_validate(json.loads(
+            conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]
+        )),
+        generate_portraits=False,
+        _precomputed_candidates=[
+            {"source_label": "李富贵", "name": "李富贵", "kind": "onscreen"},
+            {"source_label": "小胖子", "name": "李富贵", "kind": "onscreen"},
+        ],
+    ))
+    assert [item["name"] for item in result["added"]] == ["李富贵"]
+
+    bible = Bible.model_validate(json.loads(
+        conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]
+    ))
+    card = next(c for c in bible.characters if c.name == "李富贵")
+    # 端到端断言：别名真的落库了（不是只断言参数被传进 ensure_character_card）。
+    alias_texts = {a.text for a in card.aliases}
+    assert "小胖子" in alias_texts
+
+    # card_owner 真的能靠这条别名去重：resolve_card_owner 对"小胖子"返回 owner。
+    owner = portraits.card_owner.resolve_card_owner(bible, "小胖子")
+    assert owner == ("owner", "李富贵")
+
+    # 复跑一遍生产入口：下次同一个人以别名出现，不会再建出第二张卡。
+    result2 = asyncio.run(portraits.ensure_cards_for_text(
+        "p1", 22, "小胖子又来了。", bible,
+        generate_portraits=False,
+        _precomputed_candidates=[
+            {"source_label": "小胖子", "name": "小胖子", "kind": "onscreen"},
+        ],
+    ))
+    assert result2["added"] == []
+    names_after = [c["name"] for c in json.loads(
+        conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]
+    )["characters"]]
+    assert names_after.count("李富贵") == 1
+    assert "小胖子" not in names_after
+
+
+def test_concurrent_alias_and_true_name_discovery_converge_to_one_card(monkeypatch) -> None:
+    """任务三：两集并发发现同一个人，一集以真名触发（带 identity_source_labels
+    登记别名）、另一集以别名触发，`_card_lock` 按 (project,name) 加锁——两个不同
+    名字字符串走的是两把不同的锁，不互斥，真正防重的是 `_bible_lock` 项目级锁下
+    `_append_character_to_bible` 对 `card_owner.resolve_card_owner` 的复查。用
+    `asyncio.Event` 逼真名那一路先完整落库（含别名），再放行别名那一路继续跑到
+    落库这一步，验证它确实撞上复查、没有建出第二张卡，且两个称呼最终都能解析到
+    同一张卡。"""
+    conn = _make_conn()
+    _seed_project(conn, "李富贵（人称小胖子）在门外等候。小胖子推门而入，笑呵呵地打招呼。" * 4)
+    # 第二集也能在原文里检索到同一个人（两集共用同一批章节是常见情形），
+    # 否则 _forward_fragments 会因为 episode 22 没有登记 source_chapters
+    # 提前判"原文查无此名"、根本走不到下面要验证的落库竞争。
+    conn.execute("INSERT INTO episodes(project_id, episode_no, source_chapters) VALUES('p1', 22, '[30]')")
+    conn.commit()
+    _patch_settings(monkeypatch, conn)
+
+    true_name_committed = asyncio.Event()
+
+    async def fake_assess(name, fragments, *, style, known_names, ep_label, **_kwargs):
+        # 先让出一次控制权：两边都必须先跑到"归属查无此人"的预检（此时谁都还没
+        # 落库），再各自等在这里，交出的这一步顺序才是真的并发竞争，不是
+        # "先跑完一个再跑另一个"的伪并发（伪并发会让第二路的预检直接命中第
+        # 一路已提交的结果，测不到 _bible_lock 下 _append_character_to_bible
+        # 复查这条真正的防线）。
+        await asyncio.sleep(0)
+        if name == "小胖子":
+            await true_name_committed.wait()
+        return {
+            "subject_kind": "person", "important": True, "reason": "反复出场", "role": "重要配角",
+            "appearance_canonical": "圆脸男子，身着青布短打，笑容憨厚，体态微胖，腰系粗布腰带",
+            "personality": "憨厚", "speech_style": "爽朗", "relationships": [],
+        }
+
+    patch_portraits_everywhere(monkeypatch, "assess_new_character", fake_assess)
+
+    async def run_both() -> tuple[dict, dict]:
+        async def build_true_name() -> dict:
+            result = await portraits.ensure_character_card(
+                "p1", "李富贵", 21, generate_portrait=False,
+                identity_source_labels=["小胖子"],
+            )
+            true_name_committed.set()
+            return result
+
+        task_true_name = asyncio.create_task(build_true_name())
+        task_alias = asyncio.create_task(portraits.ensure_character_card(
+            "p1", "小胖子", 22, generate_portrait=False,
+        ))
+        return await asyncio.gather(task_true_name, task_alias)
+
+    result_true_name, result_alias = asyncio.run(run_both())
+
+    assert result_true_name["status"] == "added"
+    # 别名那一路必须识别出真名那一路已经赢得了归属，不能被误报成"added"——
+    # 那会让调用方以为又建出一张新卡（真实归属其实早已确定）。
+    assert result_alias["status"] == "exists"
+    assert result_alias["name"] == "李富贵"
+
+    characters = json.loads(
+        conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]
+    )["characters"]
+    # 种子人物谱本就有"甲一"；这里只断言"李富贵"没有被并发建出第二张卡，
+    # "小胖子"没有作为独立角色出现。
+    names = [c["name"] for c in characters]
+    assert names.count("李富贵") == 1
+    assert "小胖子" not in names
+
+    bible = Bible.model_validate({"world": {"visual_style_canonical": "国风"}, "characters": characters})
+    assert portraits.card_owner.resolve_card_owner(bible, "李富贵") == ("owner", "李富贵")
+    assert portraits.card_owner.resolve_card_owner(bible, "小胖子") == ("owner", "李富贵")
+
+
+def test_ensure_character_card_reports_card_incomplete_not_skipped_minor(monkeypatch) -> None:
+    """任务二 a：appearance_canonical 长度越界导致的降级要独立于"戏份不足"——
+    模型判了 important=true，只是格式不达标，不能把 reason 说成"戏份不足"，也不能
+    混进 skipped_minor 那条正常终态。"""
+    conn = _make_conn()
+    _seed_project(conn, "丁力听令后带人巡查山门。" * 4)
+    settings = _patch_settings(monkeypatch, conn)
+
+    # 打桩到 model_gateway.chat（共享单例模块，不受包拆分影响），让真正的
+    # assess_new_character/_build_verdict 跑一遍——只打桩 assess_new_character
+    # 整个函数会绕过 _build_verdict 的降级逻辑本身，测不到 model_important/
+    # incomplete_reason 这两个新字段是否被正确算出来。
+    async def fake_chat(messages, **_kwargs):
+        return json.dumps({
+            "subject_kind": "person", "important": True, "reason": "反复出场，值得建卡",
+            "role": "重要配角",
+            "appearance_canonical": "一个男子",  # 远短于 APPEARANCE_MIN=20
+            "personality": "", "speech_style": "", "relationships": [],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+
+    res = asyncio.run(portraits.ensure_character_card("p1", "丁力", 21))
+    assert res["status"] == "card_incomplete"
+    assert res["status"] != "skipped_minor"
+    assert "appearance_canonical 长度" in res["reason"]
+    assert "20~80" in res["reason"]
+    assert "反复出场，值得建卡" not in res["reason"]  # 不沿用模型"值得建卡"的旧理由
+    # 不是正常终态，不写负缓存——不能被静默压住，下次必须还有机会重判。
+    assert settings.get(portraits._discovery_skip_key("p1", "丁力")) in (None, "")
+
+
+def test_ensure_character_card_still_skipped_minor_when_model_says_unimportant(monkeypatch) -> None:
+    """对照组：模型自己判 important=false 时仍是 skipped_minor，不会被误判成
+    card_incomplete。"""
+    conn = _make_conn()
+    _seed_project(conn, "路人乙路过。" * 4)
+    _patch_settings(monkeypatch, conn)
+
+    async def fake_assess(*a, **k):
+        return {"subject_kind": "person", "important": False, "reason": "路人",
+                "role": "重要配角", "appearance_canonical": "", "personality": "",
+                "speech_style": "", "relationships": []}
+
+    patch_portraits_everywhere(monkeypatch, "assess_new_character", fake_assess)
+
+    res = asyncio.run(portraits.ensure_character_card("p1", "路人乙", 21))
+    assert res["status"] == "skipped_minor"
 
 
 def test_ensure_cards_for_screenplay_blocks_unknown_names_without_building_cards(monkeypatch) -> None:
@@ -3112,7 +3406,7 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
 
     async def fake_ensure(
         _project_id, name, _episode_no, *,
-        generate_portrait=True, require_identity_card=False,
+        generate_portrait=True, require_identity_card=False, **_kwargs,
     ):
         ensured.append(name)
         assert generate_portrait is False

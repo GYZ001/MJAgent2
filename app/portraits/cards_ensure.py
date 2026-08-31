@@ -239,6 +239,7 @@ async def ensure_cards_for_text(
         ensure_kwargs = {
             "generate_portrait": generate_portraits,
             "require_identity_card": True,
+            "identity_source_labels": [str(item.get("source_label") or "") for item in items],
         }
         if write_guard is not None:
             ensure_kwargs["write_guard"] = write_guard

@@ -18,18 +18,24 @@ from app.refs import production_appearance_anchor
 from app.schemas import Bible, Character, extract_json
 
 from ._db_probe import _has_column
+from .bible_compat import (  # noqa: F401 -- 重新导出，见下方模块末尾的说明注释
+    bible_with_pending_characters_for_text,
+    bible_with_provisional_characters,
+)
+from .card_aliases import new_card_aliases
+from .card_verdict import unimportant_verdict_result
 from .constants import (
     APPEARANCE_MAX,
     APPEARANCE_MIN,
     CHARACTER_CARD_MAX_TOKENS,
 )
 from .discovery_fragments import (
-    DISCOVERY_REJUDGE_WINDOW,
     _bible_lock,
     _card_lock,
     _card_owner_lookup,
     _discovery_skip_key,
     _forward_fragments,
+    _fragment_signature,
     _name_in_bible,
     _non_character_skip_key,
 )
@@ -161,6 +167,22 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
             # role 是闭合枚举，不是自由文本。
             and role in CHARACTER_CARD_ROLES
         )
+        # 模型原始的 important 信号（降级前）：card_complete=False 时，代码把
+        # important 强制降级成 false，但下游不能把这次降级误报成"模型判了戏份
+        # 不足"——那是格式问题，与 model_important 一起交给 ensure_character_card
+        # 的 unimportant_verdict_result 区分 card_incomplete / skipped_minor。
+        model_important = important
+        incomplete_reason = ""
+        if not card_complete:
+            if not (APPEARANCE_MIN <= len(appearance) <= APPEARANCE_MAX):
+                incomplete_reason = (
+                    f"appearance_canonical 长度 {len(appearance)} 字，"
+                    f"要求 {APPEARANCE_MIN}~{APPEARANCE_MAX} 字"
+                )
+            else:
+                incomplete_reason = (
+                    f"role「{role}」不是 {'/'.join(CHARACTER_CARD_ROLES)} 之一"
+                )
         if important and not card_complete:
             important = False  # 外观太稀薄不足以稳定定妆 → 不建卡
         if subject_kind != CHARACTER_SUBJECT_PERSON:
@@ -210,7 +232,9 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
                 })
         return {
             "important": important,
+            "model_important": model_important,
             "card_complete": card_complete,
+            "incomplete_reason": incomplete_reason,
             "subject_kind": subject_kind,
             "is_person": subject_kind == CHARACTER_SUBJECT_PERSON,
             "reason": (obj.get("reason") or "").strip(),
@@ -267,6 +291,7 @@ async def ensure_character_card(
     generate_portrait: bool = True,
     require_identity_card: bool = False,
     write_guard: Callable[[], None] | None = None,
+    identity_source_labels: list[str] | None = None,
 ) -> dict:
     """检查新角色的原文份量，并自动完成建卡与定妆包。
 
@@ -274,6 +299,13 @@ async def ensure_character_card(
     ``require_identity_card`` 会要求模型完成最小人物卡，不能再以戏份少降为路人。
     一次性功能角色仍跳过。建卡先落库，定妆包生成失败时保留卡片并由分镜前
     的自愈步骤重试，不再暴露人工待审队列。带 (project,name) 锁，可幂等并发。
+
+    ``identity_source_labels``：本次身份决议里同一 identity_group 下、除 ``name``
+    本身外的其它 source_label（换称呼但指向同一个人）。新建卡时会尝试把它们登记
+    为 ``Character.aliases``（见 ``.card_aliases.new_card_aliases``），让下次同一个
+    人换个称呼出现时 ``card_owner`` 的别名匹配查得到。``cards_ensure.py`` 的
+    ``unknown_by_name`` 分组、``identity_adjudication.py`` 的 ``identity.source_names``
+    都已接线传入；未传（或传空）时按原样跳过，不写任何 aliases，与历史行为一致。
     """
     name = (name or "").strip()
     if not name:
@@ -304,15 +336,16 @@ async def ensure_character_card(
             and item.get("character") == name
             and item.get("status") in {"pending", "processing", "auto_applied_asset_failed"}
         ), None)
-        # 负缓存：近 DISCOVERY_REJUDGE_WINDOW 集内判过"戏份不足"就先不重判；隔得够远会重新评估
-        # （龙套后期可能转重要）。
+        # 负缓存：判过"戏份不足"的名字先不重判——判据挂在这次检索到的原文片段
+        # 内容上，不是挂在"过了多少集"（片段没变就仍是同一次判断的延续；片段变了
+        # 就必须重判，见 _fragment_signature/discovery_fragments.py）。
+        fragments, ep_label, forward_chapters_by_idx = _forward_fragments(
+            conn, project_id, name, from_episode_no
+        )
+        fragment_signature = _fragment_signature(fragments)
         skip_raw = get_setting(_discovery_skip_key(project_id, name))
         if skip_raw and existing_change is None and not require_identity_card:
-            try:
-                last = int(skip_raw)
-            except (TypeError, ValueError):
-                last = 0
-            if 0 < from_episode_no - last < DISCOVERY_REJUDGE_WINDOW:
+            if skip_raw == fragment_signature:
                 return {"status": "skipped_minor", "name": name, "reason": "recently judged minor"}
         bible_artifact_supported = _has_column(conn, "projects", "bible_artifact_id")
         select_cols = "bible_json, bible_version"
@@ -326,9 +359,6 @@ async def ensure_character_card(
         bible = Bible.model_validate(json.loads(project["bible_json"]))
         style = bible.world.visual_style_canonical
         known = sorted(bible_known_labels(bible))
-        fragments, ep_label, forward_chapters_by_idx = _forward_fragments(
-            conn, project_id, name, from_episode_no
-        )
         if existing_change is not None:
             change_payload = (
                 existing_change.get("payload")
@@ -349,7 +379,7 @@ async def ensure_character_card(
                         "status": "error", "name": name,
                         "reason": "真名已确认，但人物卡缺少可核验的原文片段",
                     }
-                set_setting(_discovery_skip_key(project_id, name), str(from_episode_no))
+                set_setting(_discovery_skip_key(project_id, name), fragment_signature)
                 return {"status": "skipped_minor", "name": name, "reason": "no fragments in novel"}
             try:
                 assessment_options = {
@@ -384,7 +414,7 @@ async def ensure_character_card(
                 # 确认的是"这是一个稳定的专名"，不是"这是一个人"。宗门、器物、
                 # 地点即使专名稳定、戏份很重，也只能留在场景库/reference 身份里。
                 set_setting(
-                    _discovery_skip_key(project_id, name), str(from_episode_no)
+                    _discovery_skip_key(project_id, name), fragment_signature
                 )
                 set_setting(_non_character_skip_key(project_id, name), "1")
                 return {
@@ -393,23 +423,21 @@ async def ensure_character_card(
                     "subject_kind": verdict.get("subject_kind") or "",
                     "reason": verdict["reason"],
                 }
-            if not verdict["important"] and not (
-                require_identity_card and card_complete
-            ):
-                if require_identity_card:
-                    return {
-                        "status": "error", "name": name,
-                        "reason": "身份模型已确认真名，但人物卡模型未返回完整稳定卡片",
-                    }
-                set_setting(_discovery_skip_key(project_id, name), str(from_episode_no))
-                return {"status": "skipped_minor", "name": name, "reason": verdict["reason"]}
+            unimportant_result = unimportant_verdict_result(
+                name, verdict, require_identity_card=require_identity_card,
+                card_complete=card_complete, project_id=project_id,
+                fragment_signature=fragment_signature,
+            )
+            if unimportant_result is not None:
+                return unimportant_result
+            aliases = new_card_aliases(name, identity_source_labels, forward_chapters_by_idx)
             try:
                 char_obj = Character.model_validate({
                     "name": name, "role": verdict["role"],
                     "appearance_canonical": verdict["appearance_canonical"],
                     "personality": verdict["personality"], "speech_style": verdict["speech_style"],
                     "relationships": verdict["relationships"], "portrait_prompt_override": None,
-                    "source_evidence": verdict.get("source_evidence") or []})
+                    "source_evidence": verdict.get("source_evidence") or [], "aliases": aliases})
             except ValidationError as exc:
                 return {"status": "error", "name": name, "reason": f"card invalid {exc}"[:240]}
 
@@ -449,6 +477,14 @@ async def ensure_character_card(
             if write_guard:
                 write_guard()
             appended = _append_character_to_bible(conn, project_id, card)
+        if not appended and (owner_result := _card_owner_lookup(conn, project_id, name)) is not None:
+            # 并发竞态：写锁内复查（_append_character_to_bible 自己也会用
+            # card_owner 复核）发现名字/别名已经被另一路并发调用抢先落库，不是
+            # 真的写入失败。必须原样返回归属者结果（跟函数开头两处早退分支同一个
+            # 出口），不能落进下面"写入失败"的错误分支——那会在归属其实已经
+            # 确定的情况下把返回状态误报成 error，也不能顺势往下走判成"added"，
+            # 那会让调用方以为又建出了一张新卡（真实归属早已属于另一个名字）。
+            return owner_result
         if not appended and not _name_in_bible(conn, project_id, name):
             existing["status"] = "auto_apply_failed"
             existing["decision_reason"] = "人物卡写入失败"
@@ -529,65 +565,8 @@ async def ensure_character_card(
         }
 
 
-def bible_with_provisional_characters(bible: Bible, discovery: dict | None) -> Bible:
-    """兼容旧运行记录：把历史临时人物注入当前剧本生成上下文。
-
-    新流程会在发现阶段直接自动入卡；此函数只用于断点续跑的向后兼容。
-    """
-    cards = (discovery or {}).get("provisional_characters") or []
-    if not cards:
-        return bible
-    characters = list(bible.characters)
-    known = {character.name for character in characters}
-    for card in cards:
-        if not isinstance(card, dict):
-            continue
-        try:
-            character = Character.model_validate(card)
-        except ValidationError:
-            continue
-        if character.name in known:
-            continue
-        characters.append(character)
-        known.add(character.name)
-    return bible.model_copy(update={"characters": characters})
-
-
-def bible_with_pending_characters_for_text(
-    project_id: str,
-    bible: Bible,
-    text: str,
-) -> Bible:
-    """恢复/续跑时从历史队列恢复本章实际出现的临时人物约束。
-
-    这是只读的旧数据兼容路径，不触发出图。
-    """
-    if not (text or "").strip():
-        return bible
-    conn = get_conn()
-    if not _has_column(conn, "projects", "bible_auto_changes_json"):
-        return bible
-    row = conn.execute(
-        "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
-    ).fetchone()
-    try:
-        items = json.loads(row["bible_auto_changes_json"] or "[]") if row else []
-    except (TypeError, ValueError, json.JSONDecodeError):
-        items = []
-    cards: list[dict] = []
-    for item in items:
-        if (
-            not isinstance(item, dict)
-            or item.get("status") != "pending"
-            or item.get("kind") not in {"new_character", "character_discovery", "new_bible_character"}
-        ):
-            continue
-        name = str(item.get("character") or "").strip()
-        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-        card = payload.get("character_card")
-        if name and name in text and isinstance(card, dict):
-            cards.append(card)
-    return bible_with_provisional_characters(
-        bible, {"provisional_characters": cards},
-    )
+# bible_with_provisional_characters / bible_with_pending_characters_for_text 搬到
+# .bible_compat（见该文件模块 docstring：与建卡逻辑正交，是安全的搬迁对象）。
+# 这里重新导入进本模块命名空间，app/portraits/__init__.py 的
+# `from .cards import bible_with_provisional_characters` 等既有导入不受影响。
 

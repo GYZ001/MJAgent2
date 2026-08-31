@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 
@@ -27,7 +28,14 @@ from .discovery_resample import extract_character_fragments
 
 IDENTITY_DISCOVERY_FORWARD_CHAPTERS = 10
 CHARACTER_IMPORTANCE_FORWARD_CHAPTERS = 20
-DISCOVERY_REJUDGE_WINDOW = 20     # 判过"戏份不足"的名字，隔多少集才重新评估一次（避免对龙套反复调模型）
+# 曾经的负缓存过期窗口（隔多少集重新评估一次）：判据挂在"过了多少集"这个会被
+# 正常追更改动的状态字段上，不是挂在"这个角色的戏份是否真的变了"本身
+# （CLAUDE.md「判据必须挂在这件事本身成没成」）。已被 cards.py 里 ensure_
+# character_card 的内容哈希负缓存取代（键值改成 _fragment_signature(fragments)，
+# 片段变了才重判，不再按集数强制过期）。这个常量本身仍保留、不删——
+# app/portraits/__init__.py 仍在重新导出它（那个文件归另一个代理管，本次不碰），
+# 删掉会让它的导入直接 ImportError。
+DISCOVERY_REJUDGE_WINDOW = 20
 
 # 同名角色卡的建卡互斥锁（逐集分镜并行时，两集可能同时发现同一新角色）。
 _card_locks: dict[tuple[str, str], asyncio.Lock] = {}
@@ -68,6 +76,14 @@ def _non_character_skip_key(project_id: str, name: str) -> str:
 
 def _discovery_skip_key(project_id: str, name: str) -> str:
     return f"char_discovery_skip:{project_id}:{name}"
+
+
+def _fragment_signature(fragments: str) -> str:
+    """``_forward_fragments`` 产出内容的哈希指纹，供 ``_discovery_skip_key`` 的
+    负缓存判据使用：片段没变，仍是同一次"戏份不足"判断的延续；片段变了（新章节
+    写到这个人、检索窗口前移）就必须重判。挂产物信号，不挂"过了多少集"。
+    """
+    return hashlib.sha256((fragments or "").encode("utf-8")).hexdigest()
 
 
 def _bible_card_owner(
