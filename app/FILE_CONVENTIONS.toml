@@ -57,7 +57,7 @@ max_function_lines_python = 50
 
 [baseline.line_count]
 "app/agent/orchestrator.py" = 616
-"app/api.py" = 1091
+"app/api.py" = 1089
 "app/artifacts.py" = 1375
 "app/capabilities/bus.py" = 560
 "app/capabilities/preflight.py" = 1388
@@ -70,7 +70,7 @@ max_function_lines_python = 50
 # 解而上调基线的情况不是同一性质，不违反棘轮"只降不升"守的是设计质量维度。
 "app/db.py" = 3535
 "app/delivery.py" = 1954
-"app/domain/__init__.py" = 1096
+"app/domain/__init__.py" = 1094
 "app/domain/bible_ops/precheck.py" = 543
 "app/domain/bible_ops/view_redo.py" = 568
 "app/domain/common.py" = 1023
@@ -176,7 +176,7 @@ max_function_lines_python = 50
 "frontend/src/api/screenplay.ts" = 340
 "frontend/src/components/EpisodeCrumb.tsx" = 301
 "frontend/src/components/observability/TraceDrawer.tsx" = 834
-"frontend/src/pages/BiblePage.tsx" = 1934
+"frontend/src/pages/BiblePage.tsx" = 1933
 "frontend/src/pages/BoardPage.test.ts" = 360
 # 2026-08-30 +16：素材条/素材详情两处角色缩略图改用当前解析结果，新增"已更新"
 # 轻标记（与 portrait_id 快照不同时）+ 无定妆照的显式空态，见上方 screenplay.ts 注释同一次改动。
@@ -188,8 +188,9 @@ max_function_lines_python = 50
 "frontend/src/pages/ScenesPage.tsx" = 1586
 "frontend/src/pages/ScriptPage.render.test.ts" = 523
 "frontend/src/pages/ScriptPage.test.ts" = 1112
-# 2026-08-30 +5：人物谱缩略图同上一批改动，改用当前解析结果 + "已更新"轻标记。
-"frontend/src/pages/ScriptPage.tsx" = 950
+# 2026-08-31：映射台入口审计——预检弹窗拆到 components/script/PrepPackPreviewDialog.tsx，
+# 净减少的行数换来给"发现新资源/索引历史资源"补文案和结果摘要的空间，950→926。
+"frontend/src/pages/ScriptPage.tsx" = 926
 "frontend/src/pages/Studio.tsx" = 439
 "frontend/src/pages/WallPage.test.ts" = 343
 # 2026-08-30 +16：生成台素材条/素材详情同上一批改动，见 BoardPage.tsx 注释。
@@ -250,7 +251,7 @@ max_function_lines_python = 50
 "app/domain/bible_ops/scene_refs.py" = 62
 "app/domain/bible_ops/style_and_drafts.py" = 117
 "app/domain/bible_ops/task_recovery.py" = 73
-"app/domain/bible_ops/task_run.py" = 130
+"app/domain/bible_ops/task_run.py" = 112
 "app/domain/bible_ops/view_redo.py" = 82
 "app/domain/common.py" = 134
 "app/domain/projects/bible_attachments.py" = 126
@@ -499,7 +500,7 @@ max_function_lines_python = 50
 "app/spoken_contract.py" = 71
 "app/stages/alias_backfill.py" = 97
 "app/stages/alias_verdict.py" = 87
-"app/stages/bible_generate.py" = 126
+"app/stages/bible_generate.py" = 91
 "app/stages/bible_paratext.py" = 56
 "app/stages/bible_supplement.py" = 97
 "app/stages/blueprint_budget.py" = 186
