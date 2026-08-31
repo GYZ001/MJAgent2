@@ -115,11 +115,17 @@ def resolve_project_id(selector: str) -> str:
 
     命中 0 个或多个都直接退出：猜一个跑下去，要么跑空、要么把别的项目当成
     目标跑掉几小时，两个方向都比停下来贵。
+
+    回收站里的项目（``deleted_at`` 非空）不参与匹配：重名的软删项目会把按名字
+    的解析变成"命中多个"而整轮跑不起来——实测同一部小说被重复导入后删掉一份，
+    仅剩的那份就再也解析不出来了。显式给 id 时仍然照给的来，那是调用方明确
+    指名，包括指名一个回收站里的项目。
     """
     conn = _readonly_conn()
     try:
         rows = conn.execute(
-            "SELECT id, name FROM projects WHERE id=? OR name=? ORDER BY id",
+            "SELECT id, name FROM projects WHERE id=? OR (name=? AND deleted_at IS NULL)"
+            " ORDER BY id",
             (selector, selector),
         ).fetchall()
     finally:
