@@ -13,60 +13,21 @@ import PrepSubnav from '../components/PrepSubnav'
 import QueryState from '../components/QueryState'
 import DecisionDialog from '../components/DecisionDialog'
 import OperationError from '../components/OperationError'
-import VisualStyleDialog from '../components/VisualStyleDialog'
 import WorldbuildingStatus, { worldbuildingRunning } from '../components/WorldbuildingStatus'
 import { SINGLE_ROW_ASSET_PAGE, useFillPageSize } from '../hooks/useFillPageSize'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { usePrepListState } from '../hooks/usePrepListState'
-import { useVisualStyleDialog } from '../hooks/useVisualStyleDialog'
 import { formatBookTitle } from '../lib/bookTitle'
 import { sceneStepStatus } from '../lib/prepSteps'
 import { sceneUsability } from '../lib/sceneUsability'
-import { applyStyleRegen } from '../lib/styleRegen'
 import { statusLabel, statusTitle } from '../lib/statusLabels'
+import ManualSceneDialog from '../components/bible/ManualSceneDialog'
+import ReplaceSceneImageControl from '../components/bible/ReplaceSceneImageControl'
+import SceneLibraryEmptyState from '../components/bible/SceneLibraryEmptyState'
 import "../styles/ScenesPage.css";
 
-type ScenePreviewDraft = {
-  bibleVersion: number
-  scenes: Scene[]
-}
-
-export function scenePreviewStorageKey(projectId: string): string {
-  return `manju:scene-preview:${projectId}`
-}
-
-export function readScenePreviewDraft(
-  storage: Pick<Storage, 'getItem' | 'removeItem'>,
-  projectId: string,
-  bibleVersion: number,
-): Scene[] | null {
-  const key = scenePreviewStorageKey(projectId)
-  try {
-    const parsed = JSON.parse(storage.getItem(key) || 'null') as ScenePreviewDraft | null
-    const valid = parsed?.bibleVersion === bibleVersion
-      && Array.isArray(parsed.scenes)
-      && parsed.scenes.length > 0
-      && parsed.scenes.every(scene =>
-        typeof scene?.name === 'string' && typeof scene?.scene_canonical === 'string')
-    if (valid) return parsed!.scenes
-  } catch {
-    // Invalid drafts are removed below.
-  }
-  storage.removeItem(key)
-  return null
-}
-
-export function writeScenePreviewDraft(
-  storage: Pick<Storage, 'setItem'>,
-  projectId: string,
-  bibleVersion: number,
-  scenes: Scene[],
-): void {
-  storage.setItem(scenePreviewStorageKey(projectId), JSON.stringify({ bibleVersion, scenes }))
-}
-
 export default function ScenesPage() {
-  const { projectId, toast, registerNavigationGuard } = useNav()
+  const { projectId, toast, go, registerNavigationGuard } = useNav()
   const { data: p, refresh, error, status, loading } = useProject(projectId!, undefined, 'scenes')
   const [busy, setBusy] = useState(false)
   const [pageSize, sceneGridRef] = useFillPageSize(SINGLE_ROW_ASSET_PAGE)
@@ -90,9 +51,7 @@ export default function ScenesPage() {
     adoptedArtifactId?: string | null
   } | null>(null)
   const [gapScan, setGapScan] = useState<SceneGapScan | null>(null)
-  const [scenePreview, setScenePreview] = useState<Scene[] | null>(null)
   const [compareDetail, setCompareDetail] = useState<{ title: string; images: { src: string; label: string }[] } | null>(null)
-  const styleDialog = useVisualStyleDialog(projectId!)
   // 生成前的费用确认弹窗已删除（2026-08-29 用户拍板）。busyRef 是同步锁，
   // 防止连点两次把「预检 -> 立即确认」这条自动化路径跑两遍——参见
   // BiblePage.tsx 同名注释，两页判据一致。
@@ -162,16 +121,6 @@ export default function ScenesPage() {
     if (generating) void refreshProgress()
   }, [generating, refreshProgress])
 
-  useEffect(() => {
-    if (!p || busy || scenePreview || scenes.length > 0) return
-    const restored = readScenePreviewDraft(
-      window.localStorage,
-      p.id,
-      p.bible_version ?? 0,
-    )
-    if (restored) setScenePreview(restored)
-  }, [p, busy, scenePreview, scenes.length])
-
   if (error && !p) return <QueryState loading={false} error={error} status={status} hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
   if (loading && !p) return <QueryState loading hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
   if (!p) return <QueryState loading hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
@@ -196,21 +145,6 @@ export default function ScenesPage() {
     } catch (e: unknown) { toast(e instanceof Error ? e.message : String(e), true) }
   }
 
-  const previewInitialScenes = async () => {
-    setBusy(true)
-    try {
-      const preview = await api.sceneBiblePreview(p.id)
-      writeScenePreviewDraft(
-        window.localStorage,
-        p.id,
-        p.bible_version ?? 0,
-        preview.scenes,
-      )
-      setScenePreview(preview.scenes)
-    } catch (e: unknown) { toast(e instanceof Error ? e.message : String(e), true) }
-    finally { setBusy(false) }
-  }
-
   const scanGaps = async () => {
     setBusy(true)
     try {
@@ -228,60 +162,6 @@ export default function ScenesPage() {
         scenes: selectedScenes, resume, confirm: true, quote_id: quote.quote_id,
       })
       toast(`${title}：已提交 ${quote.image_count} 张场景图生成`)
-    })
-  }
-
-  /**
-   * 场景库页在项目尚无世界观时的风格确认：与人物谱页「选择画风并确定世界观」
-   * 走同一条后端路径（POST /projects/{id}/bible，重路径，含 LLM），不是
-   * POST /bible/style——那条轻路径要求 bible_json 已存在，空项目调用会被
-   * 后端 409 拒绝（见 app/domain/bible_ops.py set_bible_visual_style）。
-   * 判据用产物信号 `hasBible = !!p.bible`，不是某个状态字段：世界观一旦判定
-   * 成功（即使后面失败重试）都会落 bible_json，只有真正从未成功过时才为空。
-   *
-   * 架构转向（2026-08-31）后本端点只判定世界观（era/genre/画风），不再点名
-   * 角色、不批量生成场景清单——确认后场景库仍需要用户在下方手动点「准备
-   * 场景清单」，不会自动接续。
-   */
-  const startBibleAndSceneLibrary = async (styleName: string) => {
-    await act(async () => {
-      const quote = await api.bibleGeneratePrecheck(p.id, { style_name: styleName })
-      await api.generateBible(p.id, {
-        confirm: true,
-        quote_id: quote.quote_id,
-        idempotency_key: quote.quote_id,
-        style_name: styleName,
-      })
-      toast('世界观已确定；请在下方点击「准备场景清单」继续')
-    })
-  }
-
-  /**
-   * 场景库页的风格确认：只切换项目统一画风（不重新生成人物谱角色内容）。
-   * 预检拿到（人物+场景）合并报价后立即用 quote_id 自动确认，不再弹窗等
-   * 用户手动点「确认并开始」——后端在同一次请求里发起人物定妆照与场景图
-   * 两条生成线，不是本页自己排队调用两个端点，那样任一步失败或页面被
-   * 关掉，另一条线就发不出去了。
-   */
-  const submitStyleForScenes = async (styleName: string) => {
-    await act(async () => {
-      const outcome = await applyStyleRegen(p.id, styleName, p.bible_version ?? 0)
-      if (outcome.kind === 'unchanged') {
-        toast(`统一画风仍为「${styleName}」，无需变更`)
-        return
-      }
-      if (outcome.kind === 'idempotent_replay') {
-        toast('该次风格切换已经处理过，未重复触发生成')
-        return
-      }
-      const parts: string[] = []
-      if (outcome.sceneBibleReady) {
-        parts.push(outcome.sceneRefsStarted ? '场景图已开始按新画风重新生成' : `场景图未能启动：${outcome.sceneRefsError || '请重试'}`)
-      } else {
-        parts.push('场景清单尚未生成，请先点击上方“准备场景清单”；完成后可单独按新画风生成场景图')
-      }
-      parts.push(outcome.refsStarted ? '定妆照已开始按新画风重新生成' : `定妆照未能启动：${outcome.refsError || '请到人物谱重试'}`)
-      toast(parts.join('；'), !outcome.sceneRefsStarted && outcome.sceneBibleReady)
     })
   }
 
@@ -319,47 +199,24 @@ export default function ScenesPage() {
 
       <section className="card">
         <h3>场景图素材库
-          <span className="hint">世界观确定后可在本页按需准备场景设定</span>
+          <span className="hint">场景在映射台按需发现，本页负责展示、补图与手动新增/替换</span>
         </h3>
-        {!hasBible && (
+        {!hasBible && !pipelineRunning && p.bible_status !== 'failed' && (
           <div className="library-action-row">
-            {!pipelineRunning && (
-              <button className="btn primary" disabled={busy}
-                title="确认画风后只判定年代/题材/统一画风（世界观）；场景清单仍需要在本页手动准备，不会自动生成。"
-                aria-label={busy
-                  ? '选择画风并确定世界观，暂不可用：正在处理上一项操作'
-                  : p.bible_status === 'failed' ? '重新选择画风并确定世界观' : '选择画风并确定世界观'}
-                onClick={() => void styleDialog.openStyleDialog(p.bible_style_name)}>
-                {p.bible_status === 'failed' ? '重新选择画风并确定世界观' : '选择画风并确定世界观'}
-              </button>
-            )}
+            <span className="hint">世界观（年代/题材/统一画风）已在创建项目时选定，正在确定中。</span>
             <WorldbuildingStatus project={p} running={pipelineRunning}
               busy={busy} setBusy={setBusy} toast={toast} refresh={refresh} />
-          </div>
-        )}
-        {!hasBible && !pipelineRunning && (
-          <div className="hint">
-            选择统一画风后只判定世界观；场景清单需要世界观确定后在本页手动点「准备场景清单」。
           </div>
         )}
         {!hasBible && p.bible_status === 'failed' && (
           <OperationError
             title="世界观判定未完成"
             message={p.bible_error}
-            guidance="失败结果没有发布；原著和已生成资产保持不变。可重新选择画风并生成。"
+            guidance="失败结果没有发布；原著和已生成资产保持不变。场景库页不再提供重新发起入口，请联系管理员或重新导入项目。"
           />
         )}
         {hasBible && (
           <div className="library-action-row">
-            {!scenes.length && !generating && !pipelineRunning && (
-              <button className="btn primary" disabled={busy}
-                aria-label={busy
-                  ? '准备场景清单，暂不可用：正在分析原文'
-                  : '准备场景清单'}
-                onClick={previewInitialScenes}>
-                {busy ? '正在分析原文并准备场景清单…' : '准备场景清单'}
-              </button>
-            )}
             {scenes.length > 0 && !generating && (
               <button className="btn primary" disabled={busy}
                 aria-label={busy ? '扫描场景图缺口，暂不可用：正在处理上一项操作' : '扫描场景图缺口，扫描免费且不会生成图片'}
@@ -376,16 +233,9 @@ export default function ScenesPage() {
             )}
             <WorldbuildingStatus project={p} running={pipelineRunning}
               busy={busy} setBusy={setBusy} toast={toast} refresh={refresh} />
-            <button className="btn ghost" disabled={busy || generating || pipelineRunning}
-              title="风格是项目级设置：确认后将直接依次重新生成场景图与定妆照两部分，已生成的都会按新画风重做"
-              aria-label={busy || generating || pipelineRunning
-                ? '配置统一画风，暂不可用：正在处理上一项操作'
-                : '配置统一画风；确认后依次触发场景图与定妆照重新生成'}
-              onClick={() => void styleDialog.openStyleDialog(p.bible_style_name)}>
-              配置统一画风
-            </button>
             {generating && <span className="stamp gold">生成中</span>}
             {scenes.length > 0 && <span className="stamp green">{scenes.length} 个场景</span>}
+            <ManualSceneDialog projectId={p.id} onAdded={refresh} />
             <ServerTaskTimer
               label="场景图"
               startedAt={p.task_timings?.scene_refs?.started_at}
@@ -394,11 +244,13 @@ export default function ScenesPage() {
             />
           </div>
         )}
+        {hasBible && !scenes.length && !generating && !pipelineRunning
+          && <SceneLibraryEmptyState onGoEpisodes={() => go('episodes', p.id)} />}
         {pipelineRunning && (
           <div className="hint task-progress-copy" role="status">
             {p.bible_status === 'running'
-              ? '世界观正在判定；完成后请回到本页手动准备场景清单。'
-              : '定妆照正在生成；场景清单/场景图不受影响，可在本页按需操作。'}
+              ? '世界观正在判定；完成后场景会随映射台按需积累，无需在本页操作。'
+              : '定妆照正在生成；场景图不受影响，可在本页按需操作。'}
           </div>
         )}
         {generating && !scenes.length && (
@@ -563,6 +415,7 @@ export default function ScenesPage() {
             setParamsSceneName(null); setParamsDirty({ anchor: false, prompt: false })
           }}
         >
+          <ReplaceSceneImageControl projectId={p.id} sceneName={paramsScene.name} onChanged={refresh} />
           <SceneAnchorBlock projectId={p.id} scene={paramsScene} expectedVersion={p.bible_version ?? 0}
             disabled={busy || generating} onChanged={refresh}
             onDirtyChange={dirty => setParamsDirty(value => ({ ...value, anchor: dirty }))} />
@@ -606,31 +459,6 @@ export default function ScenesPage() {
           }}
         />
       )}
-      <VisualStyleDialog
-        open={styleDialog.styleOpen}
-        loading={styleDialog.styleLoading}
-        error={styleDialog.styleError}
-        options={styleDialog.styleOptions}
-        selected={styleDialog.selectedStyle}
-        scopeNote={hasBible
-          ? '确认后将直接重新生成「场景图 + 定妆照」；人物设定本身不会重新生成。'
-          : '确认后只判定世界观（年代/题材/统一画风）；不生成角色，场景清单需要之后在本页手动准备。'}
-        onSelect={styleDialog.setSelectedStyle}
-        onClose={styleDialog.closeStyleDialog}
-        onConfirm={() => {
-          if (!styleDialog.selectedStyle) {
-            styleDialog.setStyleError('请先选择统一画面风格')
-            return
-          }
-          const chosen = styleDialog.selectedStyle
-          styleDialog.closeStyleDialog()
-          if (hasBible) {
-            void submitStyleForScenes(chosen)
-          } else {
-            void startBibleAndSceneLibrary(chosen)
-          }
-        }}
-      />
       {gapScan && (
         <SceneGapDialog scan={gapScan} onClose={() => setGapScan(null)} onGenerate={selected => {
           void handoffGapSelectionToGenerate(
@@ -639,24 +467,6 @@ export default function ScenesPage() {
             scenes => quoteSceneGeneration(scenes, true, '补齐/重试场景图'),
           )
         }} />
-      )}
-      {scenePreview && (
-        <ScenePreviewDialog
-          scenes={scenePreview}
-          onClose={() => {
-            window.localStorage.removeItem(scenePreviewStorageKey(p.id))
-            setScenePreview(null)
-          }}
-          onConfirm={async confirmed => {
-            window.localStorage.removeItem(scenePreviewStorageKey(p.id))
-            setScenePreview(null)
-            await act(async () => {
-              const quote = await api.sceneBiblePrecheck(p.id, confirmed)
-              await api.genSceneBible(p.id, { scenes: confirmed, confirm: true, quote_id: quote.quote_id })
-              toast(`场景清单已确认；已提交 ${quote.actual_view_count} 张场景图生成`)
-            })
-          }}
-        />
       )}
       {compareDetail && <ImageCompareModal {...compareDetail} onClose={() => setCompareDetail(null)} />}
     </>
@@ -1436,112 +1246,6 @@ function SceneGapDialog({ scan, onClose, onGenerate }: {
           <button className="btn primary" type="button" disabled={!selected.length}
             aria-label={!selected.length ? '处理已选缺口，暂不可用：请至少选择一个场景' : '处理已选缺口；点击后立即提交生成'}
             onClick={() => onGenerate(selected)}>处理已选缺口</button>
-        </div>
-      </section>
-    </div>
-  )
-}
-
-function ScenePreviewDialog({ scenes, onClose, onConfirm }: {
-  scenes: Scene[]
-  onClose: () => void
-  onConfirm: (scenes: Scene[]) => Promise<void>
-}) {
-  const trapRef = useFocusTrap(true, onClose)
-  const [items, setItems] = useState(() => scenes.map(scene => ({ ...scene })))
-  const [selected, setSelected] = useState(() => scenes.map(scene => scene.name))
-  const [busy, setBusy] = useState(false)
-  const [mergeOpen, setMergeOpen] = useState(false)
-  const [mergeName, setMergeName] = useState('')
-  const selectedItems = items.filter(item => selected.includes(item.name))
-  const duplicate = new Set(selectedItems.map(item => item.name)).size !== selectedItems.length
-  const invalid = !selectedItems.length || duplicate || selectedItems.some(item =>
-    !item.name.trim() || item.scene_canonical.trim().length < 30 || item.scene_canonical.trim().length > 80)
-
-  const update = (index: number, patch: Partial<Scene>) => setItems(current => current.map((item, i) => {
-    if (i !== index) return item
-    const next = { ...item, ...patch }
-    if (patch.name && selected.includes(item.name)) {
-      setSelected(names => names.map(name => name === item.name ? patch.name! : name))
-    }
-    return next
-  }))
-
-  const mergeSelected = () => {
-    if (selectedItems.length < 2) return
-    const name = mergeName.trim()
-    if (!name) return
-    const merged: Scene = {
-      ...selectedItems[0], name,
-      scene_canonical: [...new Set(selectedItems.map(item => item.scene_canonical))].join('；').slice(0, 80),
-      discovery_sources: [...new Set(selectedItems.flatMap(item => item.discovery_sources?.length ? item.discovery_sources : [item.name]))],
-    }
-    setItems(current => [merged, ...current.filter(item => !selected.includes(item.name))])
-    setSelected([name])
-    setMergeOpen(false)
-    setMergeName('')
-  }
-
-  return (
-    <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
-      if (event.currentTarget === event.target) onClose()
-    }}>
-      <section ref={trapRef} className="impact-dialog scene-preview-dialog" role="dialog" aria-modal="true" aria-label="确认场景提取清单">
-        <h3>确认场景提取清单</h3>
-        <p>先取消不需要项、合并同义场景或修订名称与固定场景描述；确认后将直接开始生成场景清单与首批场景图。</p>
-        <div className="pay-scope-actions">
-          <button className="btn small" type="button" aria-expanded={mergeOpen} disabled={selectedItems.length < 2}
-            aria-label={selectedItems.length < 2 ? '合并勾选项，暂不可用：请至少选择两个场景' : '合并勾选的同义场景'}
-            onClick={() => { setMergeName(selectedItems[0]?.name || ''); setMergeOpen(value => !value) }}>合并勾选项</button>
-          <span role="status">已选 {selectedItems.length}/{items.length}</span>
-        </div>
-        {mergeOpen && (
-          <div className="scene-merge-control">
-            <label>合并后的规范场景名
-              <input value={mergeName} autoFocus onChange={event => setMergeName(event.target.value)} />
-            </label>
-            <span>将合并当前勾选的 {selectedItems.length} 个场景，原始发现依据会保留。</span>
-            <div>
-              <button className="btn small ghost" type="button" onClick={() => setMergeOpen(false)}>取消合并</button>
-              <button className="btn small primary" type="button" disabled={!mergeName.trim()}
-                aria-label={!mergeName.trim() ? '确认合并，暂不可用：请填写合并后的场景名' : '确认合并勾选场景'}
-                onClick={mergeSelected}>确认合并</button>
-            </div>
-          </div>
-        )}
-        <div className="scene-preview-list">
-          {items.map((scene, index) => (
-            <article key={`${index}:${scene.name}`}>
-              <label className="pay-scope-option">
-                <input type="checkbox" checked={selected.includes(scene.name)} onChange={event => setSelected(current =>
-                  event.target.checked ? [...new Set([...current, scene.name])] : current.filter(name => name !== scene.name))} />
-                <b>纳入本次范围</b>
-              </label>
-              <input aria-label="场景名称" value={scene.name} onChange={event => update(index, { name: event.target.value })} />
-              <select aria-label="室内外" value={scene.location_kind || ''} onChange={event => update(index, { location_kind: event.target.value })}>
-                <option value="">待确认</option><option value="室内">室内</option><option value="室外">室外</option><option value="其他">其他</option>
-              </select>
-              <textarea aria-label="场景固定描述" rows={3} value={scene.scene_canonical}
-                onChange={event => update(index, { scene_canonical: event.target.value })} />
-              <small className={scene.scene_canonical.length < 30 || scene.scene_canonical.length > 80 ? 'failed' : ''}>
-                固定描述 {scene.scene_canonical.length}/80 字（要求 30~80）
-              </small>
-              {!!scene.discovery_sources?.length && <small>发现依据：{scene.discovery_sources.join('、')}</small>}
-            </article>
-          ))}
-        </div>
-        {duplicate && <div className="error-banner">场景名称不能重复；同义场景请合并</div>}
-        <div className="dialog-actions">
-          <button className="btn" type="button" disabled={busy}
-            aria-label={busy ? '取消场景清单，暂不可用：正在提交生成请求' : '取消场景清单'}
-            onClick={onClose}>取消</button>
-          <button className="btn primary" type="button" disabled={busy || invalid}
-            aria-label={busy || invalid
-              ? `确认场景清单并开始出图，暂不可用：${busy ? '正在提交生成请求' : !selectedItems.length ? '请至少选择一个场景' : duplicate ? '场景名称不能重复，请先合并' : '场景名称不能为空，且固定描述需为 30 至 80 字'}`
-              : '确认场景清单，点击后立即开始生成场景图'}
-            onClick={async () => {
-            setBusy(true); try { await onConfirm(selectedItems) } finally { setBusy(false) }
-          }}>{busy ? '正在提交…' : '确认场景清单并开始出图'}</button>
         </div>
       </section>
     </div>

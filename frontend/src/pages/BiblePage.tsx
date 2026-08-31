@@ -14,7 +14,6 @@ import { useFocusTrap } from '../hooks/useFocusTrap'
 import { usePrepListState } from '../hooks/usePrepListState'
 import { formatBookTitle } from '../lib/bookTitle'
 import { sceneStepStatus } from '../lib/prepSteps'
-import { applyStyleRegen } from '../lib/styleRegen'
 import type { PrepStepStatus } from '../lib/statusLabels'
 import CharacterFilters, {
   characterFilterActiveCount,
@@ -26,10 +25,10 @@ import CharacterQaPanel from '../components/CharacterQaPanel'
 import ImageCompareModal from '../components/ImageCompareModal'
 import OperationError from '../components/OperationError'
 import StageTextModelPicker from '../components/StageTextModelPicker'
-import VisualStyleDialog from '../components/VisualStyleDialog'
 import WorldbuildingStatus from '../components/WorldbuildingStatus'
-import NominateCharacterEntry from '../components/NominateCharacterDialog'
-import { useVisualStyleDialog } from '../hooks/useVisualStyleDialog'
+import CharacterLibraryEmptyState from '../components/bible/CharacterLibraryEmptyState'
+import ManualCharacterDialog from '../components/bible/ManualCharacterDialog'
+import ReplaceCharacterPortraitControl from '../components/bible/ReplaceCharacterPortraitControl'
 import "../styles/BiblePage.css";
 
 const REQUIRED_CHARACTER_VIEWS = ['front_full', 'three_quarter', 'profile'] as const
@@ -415,8 +414,6 @@ export default function BiblePage() {
     character_names?: string[]
     server_bible?: Bible | null
   } | null>(null)
-  const styleDialog = useVisualStyleDialog(projectId!)
-  const styleActionRef = useRef<'full_regen' | 'style_only'>('full_regen')
   const editingRef = useRef<Bible | null>(null)
   // 生成前的费用确认弹窗已删除（2026-08-29 用户拍板：模型与视频生成走公司自
   // 有服务，不计费，这层确认对他是纯摩擦）。busyRef 是同步锁，防止连点两次
@@ -685,66 +682,6 @@ export default function BiblePage() {
     } catch { /* ignore invalid local backup */ }
   }
 
-  /** 世界观判定路径：POST /projects/{id}/bible（含 LLM）。只判定
-   * era/genre/visual_style_canonical；已有人物谱时原样带出已有角色/场景，
-   * 不清空也不重新生成，只有首次生成时 characters 才是 []。*/
-  const startBibleAfterStyle = async (styleName: string) => {
-    await openPayment(
-      {},
-      async (quote) => {
-        await api.generateBible(p.id, {
-          confirm: true,
-          quote_id: quote.quote_id,
-          idempotency_key: quote.quote_id,
-          style_name: styleName,
-        })
-        toast(p.bible
-          ? '世界观已更新；已有角色与场景保持不变'
-          : '世界观已确定；人物与场景请到映射台/场景库按需生成')
-      },
-      () => api.bibleGeneratePrecheck(p.id, { style_name: styleName }),
-    )
-  }
-
-  const startBible = async () => {
-    styleActionRef.current = 'full_regen'
-    await styleDialog.openStyleDialog(p.bible_style_name)
-  }
-
-  const startStyleOnly = async () => {
-    styleActionRef.current = 'style_only'
-    await styleDialog.openStyleDialog(p.bible_style_name)
-  }
-
-  /**
-   * 「更换统一画风（不改人物设定）」的轻量路径：只切换项目风格字段
-   * （POST /bible/style，不重生成人物谱内容、不调模型）。预检拿到合并报价后
-   * 立即用 quote_id 自动确认，不再弹窗等用户手动点「确认并开始」——后端在
-   * 同一次请求里发起人物定妆照与场景图两条生成线，不是本页自己排队调用两个
-   * 端点，那样任一步失败或页面被关掉，另一条线就发不出去了。
-   */
-  const submitStyleOnly = async (styleName: string) => {
-    await act(async () => {
-      const outcome = await applyStyleRegen(p.id, styleName, p.bible_version ?? 0)
-      if (outcome.kind === 'unchanged') {
-        toast(`统一画风仍为「${styleName}」，无需变更`)
-        return
-      }
-      if (outcome.kind === 'idempotent_replay') {
-        toast('该次风格切换已经处理过，未重复触发生成')
-        return
-      }
-      const parts: string[] = []
-      parts.push(outcome.refsStarted ? '定妆照已开始按新画风重新生成' : `定妆照未能启动：${outcome.refsError || '请重试'}`)
-      if (outcome.sceneBibleReady) {
-        parts.push(outcome.sceneRefsStarted ? '场景图已开始按新画风重新生成' : `场景图未能启动：${outcome.sceneRefsError || '请到场景库重试'}`)
-      } else {
-        parts.push('场景清单尚未生成，请先在「场景库」准备场景清单，完成后可单独按新画风生成场景图')
-      }
-      toast(parts.join('；'), !outcome.refsStarted)
-    })
-  }
-
   const retryRefs = async () => {
     await openPayment(
       { resume: true },
@@ -760,25 +697,6 @@ export default function BiblePage() {
       async () => {
         const gaps = await api.refsGaps(p.id)
         return gaps.precheck
-      },
-    )
-  }
-
-  const restartRefsWithLatestSettings = async () => {
-    if (dirty) {
-      toast('请先定稿当前人物谱修订，再按最新画风批量重新生成', true)
-      return
-    }
-    await openPayment(
-      { resume: false },
-      async (quote) => {
-        await api.generateRefs(p.id, {
-          resume: false,
-          confirm: true,
-          quote_id: quote.quote_id,
-          idempotency_key: quote.quote_id,
-        })
-        toast(`已按最新人物设定与画风开始批量重新生成全部 ${quote.character_count} 个角色的定妆照；新包结构完整前保留旧成品`)
       },
     )
   }
@@ -1025,49 +943,8 @@ export default function BiblePage() {
       <section className="card">
         <h3>原著 <span className="hint">{(p.novel_chars / 10000).toFixed(1)} 万字 · {p.chapter_count ?? p.chapters?.length ?? 0} 章</span></h3>
         <div className="library-action-row">
-          {!p.bible && !generating && (
-            <button className="btn primary" disabled={busy}
-              title="确认画风后只判定年代/题材/统一画风（世界观）；人物与场景改到映射台/场景库按需生成，不会随这一步自动产出。"
-              aria-label={busy
-                ? '选择画风并确定世界观，暂不可用：正在处理上一项操作'
-                : p.bible_status === 'failed' ? '重新选择画风并确定世界观' : '选择画风并确定世界观'}
-              onClick={() => void startBible()}>
-              {p.bible_status === 'failed' ? '重新选择画风并确定世界观' : '选择画风并确定世界观'}
-            </button>
-          )}
-          {p.bible && !generating && (
-            <>
-              <button
-                className="btn primary"
-                disabled={busy || dirty}
-                title={dirty ? '请先定稿当前人物谱修订' : '按当前人物设定与统一画风批量重新生成全部角色定妆照'}
-                aria-label={busy || dirty
-                  ? `按最新设定批量重新生成定妆照，暂不可用：${busy ? '正在处理上一项操作' : '请先定稿当前人物谱修订'}`
-                  : '按最新设定批量重新生成定妆照；点击后立即提交'}
-                onClick={() => void restartRefsWithLatestSettings()}
-              >
-                按最新设定批量重新生成定妆照
-              </button>
-              <button
-                className="btn"
-                disabled={busy || dirty}
-                title={dirty ? '请先定稿当前人物谱修订' : '重新选择统一画风并重新判定世界观（年代/题材/画风）；已有角色与场景保持不变，不会被清空或重新生成'}
-                onClick={() => void startBible()}
-              >
-                重新判定世界观并更换画风
-              </button>
-              <button
-                className="btn ghost"
-                disabled={busy || dirty}
-                title={dirty ? '请先定稿当前人物谱修订' : '项目级设置：只切换统一画风，不改动人物设定；确认后将直接重新生成定妆照与场景图'}
-                aria-label={busy || dirty
-                  ? `更换统一画风，暂不可用：${busy ? '正在处理上一项操作' : '请先定稿当前人物谱修订'}`
-                  : '更换统一画风（保留人物设定，重新生成定妆照与场景图）'}
-                onClick={() => void startStyleOnly()}
-              >
-                更换统一画风（不改人物设定）
-              </button>
-            </>
+          {!p.bible && !generating && p.bible_status !== 'failed' && (
+            <span className="hint">世界观（年代/题材/统一画风）已在创建项目时选定，正在确定中。</span>
           )}
           {p.bible && (p.refs_status === 'failed' || hasRefGaps) && !generating && (
             <>
@@ -1132,14 +1009,14 @@ export default function BiblePage() {
         )}
         {!generating && p.bible && (
           <div className="hint library-note">
-            更新人物谱角色设定并定稿后，可选择角色重新生成定妆照；如需更换统一画风，「更换统一画风」与「重新判定世界观并更换画风」都不会改动已有角色。新图通过质检前不会替换已采用成品。
+            更新人物谱角色设定并定稿后，可选择角色重新生成定妆照。统一画风在创建项目时已选定，本页不再提供更换入口。新图通过质检前不会替换已采用成品。
           </div>
         )}
         {p.bible_status === 'failed' && (
           <OperationError
             title="人物谱生成未完成"
             message={p.bible_error}
-            guidance="失败结果没有发布；原著、旧人物谱和已生成资产保持不变。可重新生成，若持续失败可展开详情排查。"
+            guidance="失败结果没有发布；原著、旧人物谱和已生成资产保持不变。人物谱页不再提供重新发起入口，请联系管理员或重新导入项目。"
           />
         )}
         {p.bible_status === 'warning' && (
@@ -1175,7 +1052,7 @@ export default function BiblePage() {
           <div style={{ fontSize: 14, background: 'rgba(181,68,52,0.05)', borderLeft: '3px solid var(--cinnabar)', padding: '8px 12px', borderRadius: '0 6px 6px 0', lineHeight: 1.9 }}>
             {visualStyleDisplayName}
           </div>
-          {editing && <p className="hint">画风提示词由后端统一管理；如需更换画风，请用「更换统一画风」或「重新判定世界观并更换画风」，二者都不会改动当前角色。</p>}
+          {editing && <p className="hint">画风提示词由后端统一管理，在创建项目时已选定，不随本次修订变化。</p>}
           <div style={{ height: 16 }} />
           <div className="library-note-row">
             {refsRunning && <span className="stamp gold">定妆中</span>}
@@ -1199,7 +1076,7 @@ export default function BiblePage() {
               roles={characterRoles}
             />
             <span className="library-result-count" role="status">共 {bible.characters.length} 个角色{hasCharacterCriteria ? ` · 当前显示 ${filteredChars.length}` : ''}</span>
-            <NominateCharacterEntry projectId={p.id} onFocusCharacter={name => setCharSearch(name)} />
+            <ManualCharacterDialog projectId={p.id} onAdded={refresh} />
           </div>
           <div ref={characterGridRef} className="figure-grid">
             {pagedChars.map(({ c, i }: { c: Character; i: number }) => {
@@ -1267,13 +1144,8 @@ export default function BiblePage() {
             )})}
           </div>
           {pageSize > 0 && !pagedChars.length && (
-            <div className="library-filter-empty" role="status">
-              <b>{hasCharacterCriteria ? '没有符合当前条件的角色' : '人物谱暂无角色'}</b>
-              <p>{hasCharacterCriteria
-                ? `${charQuery ? `搜索“${charQuery}”` : '当前筛选'}未命中；清除条件后可恢复全部 ${bible.characters.length} 个角色。`
-                : '人物按需生成：可点击上方「提名没被选上的角色」按原文称呼登记，或进入修订手动补充。'}</p>
-              {hasCharacterCriteria && <button type="button" className="btn small" onClick={resetCharacterList}>清除搜索与筛选</button>}
-            </div>
+            <CharacterLibraryEmptyState hasCriteria={hasCharacterCriteria} query={charQuery} totalCount={bible.characters.length}
+              onResetFilters={resetCharacterList} onGoEpisodes={() => go('episodes', p.id)} />
           )}
           {charPageCount > 1 && (
             <div className="library-pagination" aria-label="角色分页">
@@ -1362,31 +1234,6 @@ export default function BiblePage() {
           )}
         </section>
       )}
-      <VisualStyleDialog
-        open={styleDialog.styleOpen}
-        loading={styleDialog.styleLoading}
-        error={styleDialog.styleError}
-        options={styleDialog.styleOptions}
-        selected={styleDialog.selectedStyle}
-        scopeNote={styleActionRef.current === 'style_only'
-          ? '确认后将直接重新生成「定妆照 + 场景图」；人物设定本身不会重新生成。'
-          : '确认后将只重新判定世界观（年代/题材/统一画风）；不生成角色或场景，已有角色与场景保持不变。'}
-        onSelect={styleDialog.setSelectedStyle}
-        onClose={styleDialog.closeStyleDialog}
-        onConfirm={() => {
-          if (!styleDialog.selectedStyle) {
-            styleDialog.setStyleError('请先选择统一画面风格')
-            return
-          }
-          const chosen = styleDialog.selectedStyle
-          styleDialog.closeStyleDialog()
-          if (styleActionRef.current === 'style_only') {
-            void submitStyleOnly(chosen)
-          } else {
-            void startBibleAfterStyle(chosen)
-          }
-        }}
-      />
       {skipConfirm && (
         <SkipConfirmDialog
           data={skipConfirm}
@@ -1454,6 +1301,9 @@ export default function BiblePage() {
               ? paramsCharacter.relationships.map(r => `${r.relation}→${r.to}`).join('；')
               : '未设置'}</p></div>
           </div>
+          <ReplaceCharacterPortraitControl
+            projectId={p.id} characterName={paramsCharacter.name} onChanged={refresh}
+          />
           <PortraitBlock projectId={p.id} character={paramsCharacter}
             disabled={busy || refsRunning} onChanged={refresh}
             regenerate={() => openPayment(

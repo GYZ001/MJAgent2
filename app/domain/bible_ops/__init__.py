@@ -1,6 +1,6 @@
 """人物谱（Bible）与角色/场景引用图生成的路由与业务逻辑。
 
-``app/domain/bible_ops.py``（4,386 行 / 123 个顶层定义）拆成本包，按关注点分 15 个子模块：共享原语（primitives）、场景素材缺口判据（scene_assets）、人物谱改动影响预检（precheck）、角色引用图生成任务（refs_generation）与场景引用图/场景圣经准备任务（scene_bible_prep）、人物谱生成任务体（task_run）与开机孤儿任务恢复（task_recovery，依赖 task_run 故排其后）、单场景引用图生命周期（scene_refs）、整体画风切换与草稿存取（style_and_drafts）、人物谱/角色卡编辑（edit）、立绘候选查询与采纳（portrait_candidates）、变更后自动改配裁决（auto_change）、场景提示词/锚点编辑（scene_edit）、角色/场景单视图重绘（view_redo）、用户提名建卡（nominate，2026-08-31 新增：用户看到角色没被自动选上时的手动入口，复用既有建卡判据，不新写一套）。移动未重写，逻辑/签名/格式不变。
+``app/domain/bible_ops.py``（4,386 行 / 123 个顶层定义）拆成本包，按关注点分 15 个子模块：共享原语（primitives）、场景素材缺口判据（scene_assets）、人物谱改动影响预检（precheck）、角色引用图生成任务（refs_generation）与场景引用图/场景圣经准备任务（scene_bible_prep）、人物谱生成任务体（task_run）与开机孤儿任务恢复（task_recovery，依赖 task_run 故排其后）、单场景引用图生命周期（scene_refs）、整体画风切换与草稿存取（style_and_drafts）、人物谱/角色卡编辑（edit）、立绘候选查询与采纳（portrait_candidates）、变更后自动改配裁决（auto_change）、场景提示词/锚点编辑（scene_edit）、角色/场景单视图重绘（view_redo）、用户提名建卡（nominate，2026-08-31 新增：用户看到角色没被自动选上时的手动入口，复用既有建卡判据，不新写一套）、共用上传校验（manual_upload，2026-08-31 新增）、角色手动新增/替换定妆照（manual_character，2026-08-31 新增：图像描述与图片完全由用户提供，不走模型；去重仍过 resolve_card_owner，替换复用 portrait_candidates 的 adopt/rollback 语义）、场景手动新增/替换场景图（manual_scene，2026-08-31 新增：与 manual_character 同一用户拍板的场景侧镜像）。移动未重写，逻辑/签名/格式不变。
 
 本文件是稳定入口：所有既有 ``from app.domain.bible_ops import X`` / ``app.domain.bible_ops.X`` 调用点必须原样可用——每个符号（含每个子模块自己``import`` 进来的名字，不只是它原生定义的）用 ``name as name`` 显式再导出（PEP 484显式重导出写法，与 ``app/validators/__init__.py``、``app/narrative/__init__.py``同一先例），而不是 ``from .x import *``（``app/FILE_CONVENTIONS.toml`` 的``star_import`` 闸门禁止后者）。新增人物谱相关逻辑请加进对应关注点的子模块，不要加回本文件。
 """
@@ -138,12 +138,15 @@ from .scene_refs import (
 )
 
 from .style_and_drafts import (
+    DEFAULT_VISUAL_STYLE_NAME as DEFAULT_VISUAL_STYLE_NAME,
     _compute_style_regen_quote as _compute_style_regen_quote,
+    bible_visual_styles_unscoped as bible_visual_styles_unscoped,
     get_bible_draft as get_bible_draft,
     refs_gaps as refs_gaps,
     refs_progress as refs_progress,
     save_bible_draft as save_bible_draft,
     set_bible_visual_style as set_bible_visual_style,
+    visual_style_options as visual_style_options,
 )
 
 from .edit import (
@@ -198,4 +201,15 @@ from .view_redo import (
     regenerate_character_view_route as regenerate_character_view_route,
     regenerate_scene_view_route as regenerate_scene_view_route,
     rollback_scene_reference as rollback_scene_reference,
+)
+
+from .manual_character import (
+    add_manual_character as add_manual_character,
+    replace_character_portrait_image as replace_character_portrait_image,
+)
+
+from .manual_scene import (
+    add_manual_scene as add_manual_scene,
+    replace_scene_image as replace_scene_image,
+    rollback_manual_scene_image as rollback_manual_scene_image,
 )

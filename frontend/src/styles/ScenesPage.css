@@ -6,18 +6,6 @@
 
    往这里加样式前先想清楚：它只在本页加载。跨页复用的东西属于 index.css。 */
 
-.scene-row {
-  display: flex;
-  gap: 14px;
-  flex-wrap: wrap;
-}
-.scene-thumb img {
-  width: 100%;
-  aspect-ratio: 9/16;
-  object-fit: cover;
-  display: block;
-  background: var(--paper-deep);
-}
 .scene-card-summary {
   display: grid;
   gap: 9px;
@@ -29,29 +17,6 @@
 }
 .scene-detail-trigger:hover span {
   transform: translateX(3px);
-}
-.scene-quality-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 26px;
-  margin: 2px 0 8px;
-}
-.scene-candidates-trigger span {
-  display: grid;
-  min-width: 17px;
-  height: 17px;
-  padding: 0 4px;
-  place-items: center;
-  border-radius: 999px;
-  background: rgba(47, 72, 88, 0.1);
-  color: var(--indigo);
-  font-size: 9.5px;
-}
-.scene-candidates-trigger:hover {
-  border-color: rgba(47, 72, 88, 0.38);
-  color: var(--indigo);
 }
 .scene-detail-backdrop {
   position: fixed;
@@ -233,8 +198,7 @@
   color: var(--ink-soft);
   font-size: 11.5px;
 }
-.scene-gap-list,
-.scene-preview-list {
+.scene-gap-list {
   display: grid;
   gap: 9px;
   max-height: 55vh;
@@ -243,8 +207,7 @@
   overflow: auto;
   list-style: none;
 }
-.scene-gap-list li,
-.scene-preview-list article {
+.scene-gap-list li {
   padding: 11px 12px;
   border: 1px solid var(--hairline);
   border-radius: 9px;
@@ -259,19 +222,6 @@
   margin: 5px 0 0 24px;
   color: var(--ink-faint);
   font-size: 11px;
-}
-.scene-preview-list article {
-  display: grid;
-  grid-template-columns: minmax(150px, 0.7fr) 110px minmax(280px, 1.6fr);
-  gap: 8px;
-  align-items: start;
-}
-.scene-preview-list article > label,
-.scene-preview-list article > small {
-  grid-column: 1 / -1;
-}
-.scene-preview-list textarea {
-  resize: vertical;
 }
 .scene-anchor-editor {
   margin: 0 0 14px;
@@ -296,13 +246,8 @@
   font-size: 11px;
 }
 @media (max-width: 700px) {
-  .scene-preview-list article,
-    .scene-anchor-form {
+  .scene-anchor-form {
       grid-template-columns: 1fr;
-    }
-  .scene-preview-list article > label,
-    .scene-preview-list article > small {
-      grid-column: auto;
     }
 }
 .scene-detail-empty {
@@ -359,19 +304,6 @@
   margin: 0;
   color: var(--ink-faint);
   font-size: 12px;
-}
-.scene-candidate-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 10px 0;
-}
-.scene-candidate-summary span {
-  padding: 4px 8px;
-  border: 1px solid var(--hairline);
-  border-radius: 999px;
-  color: var(--ink-faint);
-  font-size: 10.5px;
 }
 .scene-candidate-modal-head > button {
   width: 44px;
@@ -453,12 +385,6 @@
 .scene-candidate-meta strong {
   font-size: 11.5px;
 }
-.scene-candidate-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
 .scene-manual-review-backdrop {
   position: fixed;
   z-index: 175;
@@ -478,24 +404,6 @@
   color: var(--ink-faint);
   font-size: 12px;
   line-height: 1.6;
-}
-.scene-manual-review-checks {
-  display: grid;
-  gap: 9px;
-}
-.scene-manual-review-checks label {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  padding: 10px;
-  border: 1px solid var(--hairline);
-  border-radius: 9px;
-  background: #fff;
-  font-size: 12px;
-  line-height: 1.45;
-}
-.scene-manual-review-checks input {
-  margin-top: 2px;
 }
 .scene-manual-review-reason {
   display: grid;
@@ -570,47 +478,6 @@
       padding: 12px 18px;
     }
 }
-.scene-outline-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 12px;
-}
-.scene-outline-body {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  padding: 12px;
-}
-@media (max-width: 720px) {
-  .scene-outline-grid {
-      grid-template-columns: 1fr;
-    }
-}
-.scene-merge-control {
-  display: grid;
-  gap: 8px;
-  margin: 10px 0 14px;
-  padding: 12px;
-  border: 1px solid var(--hairline);
-  border-radius: 10px;
-  background: rgba(54, 86, 108, 0.045);
-}
-.scene-merge-control label {
-  display: grid;
-  gap: 5px;
-  color: var(--ink-soft);
-  font-size: 12px;
-  font-weight: 600;
-}
-.scene-merge-control span {
-  color: var(--ink-faint);
-  font-size: 11.5px;
-}
-.scene-merge-control > div {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
 .scene-version-rollback {
   display: grid;
   gap: 7px;
@@ -650,8 +517,5 @@
   background: rgba(var(--ink-rgb), 0.06);
 }
 :where(:root[data-theme="dark"]) .scene-candidate-preview {
-  background: var(--card);
-}
-:where(:root[data-theme="dark"]) .scene-manual-review-checks label {
   background: var(--card);
 }

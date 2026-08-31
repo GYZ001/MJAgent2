@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import type { Bible, Character } from '../api'
 import {
@@ -13,6 +15,32 @@ import {
 } from './BiblePage'
 
 const character = (name: string) => ({ name } as Character)
+
+const source = readFileSync(fileURLToPath(new URL('./BiblePage.tsx', import.meta.url)), 'utf-8')
+// 空态文案 2026-08-31 抽到独立组件文件腾行数空间，断言改读这份源码。
+const emptyStateSource = readFileSync(fileURLToPath(new URL('../components/bible/CharacterLibraryEmptyState.tsx', import.meta.url)), 'utf-8')
+
+// 人物谱不再持有「模型驱动」批量生成入口，但保留「用户自己填写、不走模型」的
+// 手动新增/替换。无组件渲染测试基建，改用源码静态扫描守住入口不回归/不漏挂。
+describe('人物谱页不再持有产生新内容的入口', () => {
+  it('世界观/画风生成按钮与提名新角色入口已移除', () => {
+    expect(source).not.toContain('选择画风并确定世界观')
+    expect(source).not.toContain('重新判定世界观并更换画风')
+    expect(source).not.toContain('更换统一画风')
+    expect(source).not.toContain('按最新设定批量重新生成定妆照')
+    expect(source).not.toMatch(/VisualStyleDialog|useVisualStyleDialog|NominateCharacterEntry/)
+  })
+
+  it('人物空态给出指向映射台（分集页）的可点击入口，且保留既有角色维护操作与手动新增/替换', () => {
+    expect(emptyStateSource).toContain('角色在映射台按需发现')
+    expect(source).toMatch(/onGoEpisodes=\{\(\) => go\('episodes', p\.id\)\}/)
+    expect(source).toContain('补齐缺失的定妆照')
+    expect(source).toContain('修订人物谱')
+    expect(source).toContain('定稿人物谱')
+    expect(source).toContain('<ManualCharacterDialog')
+    expect(source).toContain('<ReplaceCharacterPortraitControl')
+  })
+})
 
 describe('characterIsFitting', () => {
   it('全量批次在 refs_target 为空时标记所有角色', () => {

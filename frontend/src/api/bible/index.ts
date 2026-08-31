@@ -3,15 +3,18 @@
 import * as core from "./core";
 import * as characters from "./characters";
 import * as scenes from "./scenes";
+import * as manual from "./manual";
 
 export * from "./core";
 export * from "./characters";
 export * from "./scenes";
+export * from "./manual";
 
 export const api_bible = {
   // core
   bibleImpactPreview: core.bibleImpactPreview,
   bibleVisualStyles: core.bibleVisualStyles,
+  bibleVisualStylesUnscoped: core.bibleVisualStylesUnscoped,
   setBibleStyle: core.setBibleStyle,
   bibleGeneratePrecheck: core.bibleGeneratePrecheck,
   saveBibleDraft: core.saveBibleDraft,
@@ -39,4 +42,10 @@ export const api_bible = {
   regenerateSceneView: scenes.regenerateSceneView,
   adoptSceneCandidate: scenes.adoptSceneCandidate,
   rollbackSceneReference: scenes.rollbackSceneReference,
+  // manual（完全手动新增/替换，不走模型）
+  addManualCharacter: manual.addManualCharacter,
+  replaceCharacterPortraitImage: manual.replaceCharacterPortraitImage,
+  addManualScene: manual.addManualScene,
+  replaceSceneImage: manual.replaceSceneImage,
+  rollbackManualSceneImage: manual.rollbackManualSceneImage,
 };

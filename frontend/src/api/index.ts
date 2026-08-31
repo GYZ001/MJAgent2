@@ -76,6 +76,7 @@ export const api = {
   rollbackSceneReference: bibleApi.api_bible.rollbackSceneReference,
   bibleImpactPreview: bibleApi.api_bible.bibleImpactPreview,
   bibleVisualStyles: bibleApi.api_bible.bibleVisualStyles,
+  bibleVisualStylesUnscoped: bibleApi.api_bible.bibleVisualStylesUnscoped,
   setBibleStyle: bibleApi.api_bible.setBibleStyle,
   bibleGeneratePrecheck: bibleApi.api_bible.bibleGeneratePrecheck,
   refsPrecheck: bibleApi.api_bible.refsPrecheck,
@@ -94,6 +95,11 @@ export const api = {
   updateBible: bibleApi.updateBible,
   setCharacterPortraitPrompt: bibleApi.setCharacterPortraitPrompt,
   nominateCharacter: bibleApi.nominateCharacter,
+  addManualCharacter: bibleApi.addManualCharacter,
+  replaceCharacterPortraitImage: bibleApi.replaceCharacterPortraitImage,
+  addManualScene: bibleApi.addManualScene,
+  replaceSceneImage: bibleApi.replaceSceneImage,
+  rollbackManualSceneImage: bibleApi.rollbackManualSceneImage,
 
   /* ── 映射台域 ── */
   screenplayPreflight: screenplayApi.screenplayPreflight,
