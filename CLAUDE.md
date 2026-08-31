@@ -98,3 +98,4 @@
 - **破坏性操作要有原子性**：新产出确认成功之后才替换旧的，中途失败旧的必须原封不动。
 - **不得用 `pkill -f "uvicorn app.main"`**——它会匹配到自己的命令行把 shell 一起杀掉。按 PID kill 再 `setsid` 重启。
 - **改完代码必须手工重启后端才生效**（无托管的孤儿进程）；重启前先查在途任务，重启后核对进程启动时间晚于所有改动文件的 mtime。
+- **前端不要跑 `npm run build` 当自检**，要验就 `npx tsc --noEmit` + `npx vitest run`。后端 `SpaStaticFiles` 每次请求都读盘服务 `frontend/dist`，所以写进 dist 的那一刻就是发布到生产——和后端「必须重启才生效」不对称，于是构建这个人人顺手跑的动作带上了发布副作用。2026-08-30 实测：agent 自检构建把前端发到 18:06，后端进程还停在 14:50，用户拿到新前端配旧后端，小说导入预检直接挂掉。vite 的 outDir 现已指向 `frontend/dist-staging`（构建无副作用），发布走 `py scripts/publish_frontend.py`：它校验产物完整性、拦住「后端启动时间早于最新 `app/**/*.py`」的版本偏斜（并给出重启命令），再原子替换。`tests/test_frontend_publish_gate.py` 守着 outDir 不被改回 `dist`。

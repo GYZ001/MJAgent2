@@ -38,6 +38,18 @@ export default defineConfig({
       '/media': backendProxy(),
     },
   },
+  build: {
+    // 构建产物落在 dist-staging，不是 dist——后端 app/main.py 用 StaticFiles 挂载
+    // frontend/dist，而 StaticFiles 每次请求都读盘，所以写 dist 就是「即时发布到
+    // 生产」，没有后端那种「改完必须手工重启才生效」的闸门。
+    //
+    // 2026-08-30 实测事故：并行 agent 把 `npm run build` 当自检手段跑，前端 18:06
+    // 发布、后端进程还停在 14:50，用户拿到的是新前端配旧后端，小说导入预检直接挂掉。
+    // 构建是每个人都会顺手跑的动作，不该带副作用。
+    //
+    // 发布改成显式一步：py scripts/publish_frontend.py（校验 + 原子替换）。
+    outDir: 'dist-staging',
+  },
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts'],
