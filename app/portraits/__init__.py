@@ -132,6 +132,7 @@ from .constants import (
     STAGED_INITIAL_EP_START,
     STRUCTURAL_IDENTITY_COVERAGE_VERSION,
 )
+from .current_ref import current_portrait_ref, portrait_for_episode
 from .discovery import discover_character_candidates
 from .discovery_fragments import (
     CHARACTER_IMPORTANCE_FORWARD_CHAPTERS,
@@ -246,7 +247,6 @@ from .portrait_io import (
     _update_bible_appearance,
     appearance_for_episode,
     bible_for_episode,
-    portrait_for_episode,
     portrait_views_for_episode,
     promote_staged_initial_portrait,
     redraw_prompt,
@@ -481,6 +481,7 @@ __all__ = [
     "chapter_titles_match",
     "code_ref",
     "config",
+    "current_portrait_ref",
     "discover_character_candidates",
     "ensure_cards_for_screenplay",
     "ensure_cards_for_text",

@@ -111,12 +111,17 @@ max_function_lines_python = 50
 "app/observability/api.py" = 2418
 "app/orchestration/api.py" = 1762
 "app/orchestration/media_scheduler.py" = 527
-"app/portraits/__init__.py" = 537
+# 2026-08-30 +1：本文件是全包唯一稳定入口，docstring 自己要求"新增符号必须
+# 显式再导出"——新增 current_portrait_ref（映射台/分镜台/生成台按集解析当前
+# 定妆照，与生成侧 portrait_for_episode 共用同一份判据）必然让这里净增 1 行
+# __all__ 条目；这与本文件顶部 app/db.py 迁移账本那条同一性质（记账文件的
+# 正常形态，不是拒绝拆分的复杂度膨胀）。
+"app/portraits/__init__.py" = 538
 "app/portraits/cards.py" = 595
 "app/portraits/discovery_legacy.py" = 975
 "app/portraits/identity_response_projection.py" = 722
 "app/portraits/portrait_drift.py" = 548
-"app/portraits/portrait_io.py" = 640
+"app/portraits/portrait_io.py" = 600
 "app/portraits/resolution_apply_screenplay.py" = 591
 "app/portraits/structural_coverage.py" = 575
 "app/portraits/structural_coverage_audit.py" = 838
@@ -163,12 +168,18 @@ max_function_lines_python = 50
 "app/video_supervisor/run_loop.py" = 606
 "frontend/src/App.tsx" = 1525
 "frontend/src/api/projects.ts" = 410
-"frontend/src/api/screenplay.ts" = 330
+# 2026-08-30 +10：用户拍板"映射台/分镜台/生成台按身份实时解析当前定妆照"，
+# PrepPackCharacterAsset 新增 current_portrait_id/current_portrait_image_url
+# 两个展示字段（后端 app/domain/storyboard_ops/current_portraits.py 现算，不
+# 进已发布产物），字段注释解释了它们与快照 portrait_id 的关系——不是拒绝拆分。
+"frontend/src/api/screenplay.ts" = 340
 "frontend/src/components/EpisodeCrumb.tsx" = 301
 "frontend/src/components/observability/TraceDrawer.tsx" = 834
 "frontend/src/pages/BiblePage.tsx" = 1934
 "frontend/src/pages/BoardPage.test.ts" = 360
-"frontend/src/pages/BoardPage.tsx" = 1358
+# 2026-08-30 +16：素材条/素材详情两处角色缩略图改用当前解析结果，新增"已更新"
+# 轻标记（与 portrait_id 快照不同时）+ 无定妆照的显式空态，见上方 screenplay.ts 注释同一次改动。
+"frontend/src/pages/BoardPage.tsx" = 1374
 "frontend/src/pages/CinemaPage.tsx" = 931
 "frontend/src/pages/EpisodesPage.tsx" = 741
 "frontend/src/pages/MonitorPage.test.ts" = 313
@@ -176,10 +187,12 @@ max_function_lines_python = 50
 "frontend/src/pages/ScenesPage.tsx" = 1586
 "frontend/src/pages/ScriptPage.render.test.ts" = 523
 "frontend/src/pages/ScriptPage.test.ts" = 1112
-"frontend/src/pages/ScriptPage.tsx" = 945
+# 2026-08-30 +5：人物谱缩略图同上一批改动，改用当前解析结果 + "已更新"轻标记。
+"frontend/src/pages/ScriptPage.tsx" = 950
 "frontend/src/pages/Studio.tsx" = 439
 "frontend/src/pages/WallPage.test.ts" = 343
-"frontend/src/pages/WallPage.tsx" = 948
+# 2026-08-30 +16：生成台素材条/素材详情同上一批改动，见 BoardPage.tsx 注释。
+"frontend/src/pages/WallPage.tsx" = 964
 "frontend/src/pages/monitor/CallsSection.tsx" = 397
 "frontend/src/pages/monitor/JobDrawer.tsx" = 320
 "frontend/src/pages/monitor/JobsSection.tsx" = 384

@@ -28,3 +28,34 @@ export function findSceneReferenceImage(bible: Bible | null | undefined, sceneRe
   }
   return null
 }
+
+/**
+ * 用户拍板（2026-08-30）：映射台/分镜台/生成台展示定妆照时，按身份实时解析出
+ * 「当前实际会用的那张」，不再用 asset_manifest 里固化的 portrait_id 快照当作
+ * 当前状态渲染（那只做溯源）。current_portrait_id / current_portrait_image_url
+ * 由后端 GET /episodes/{id} 投影时按本集集号现算（app/domain/storyboard_ops/
+ * current_portraits.py），与生成时 app.portraits.current_portrait_ref 同一份
+ * 判据——这里只做纯展示派生（取图、比对两个 id 是否一致），不重新判定"当前是
+ * 哪一张"本身，避免长出第二份可能漂移的判据。
+ */
+export interface CharacterPortraitDisplay {
+  /** 当前解析出的定妆照；null 表示这个身份现在没有可用定妆照（如群演），必须
+   *  显示"无定妆照"，不得回退显示 portrait_id 快照对应的旧图。 */
+  imageUrl: string | null
+  /** true 表示当前解析结果与发布时固化的 portrait_id 快照不同——分镜/映射记录
+   *  当时依据的是另一张图，界面需要一个不打断的轻标记，不是弹窗或告警。 */
+  updated: boolean
+}
+
+export function characterPortraitDisplay(character: {
+  portrait_id?: string | null
+  current_portrait_id?: string | null
+  current_portrait_image_url?: string | null
+}): CharacterPortraitDisplay {
+  return {
+    imageUrl: character.current_portrait_image_url ?? null,
+    updated: !!character.portrait_id
+      && !!character.current_portrait_id
+      && character.portrait_id !== character.current_portrait_id,
+  }
+}

@@ -28,6 +28,7 @@ from app.domain.common import (
 from app.evidence import repository as evidence_repository
 from fastapi import HTTPException
 
+from .current_portraits import attach_current_character_portraits
 from .mutation_primitives import _apply_contract_to_public_shot
 from .public_shot_versions import _public_shot_versions
 from .resume_state import (
@@ -57,7 +58,12 @@ def episode_detail(episode_id: str, view: str | None = None):
         from app.storyboard_workspace import reconcile_cancelled_storyboard_run
         reconcile_cancelled_storyboard_run(episode_id)
     with evidence_repository.artifact_read_scope():
-        return _episode_detail_projection(episode_id, view)
+        detail = _episode_detail_projection(episode_id, view)
+    # 不进 _episode_detail_projection 本体（该函数的行数棘轮已按现状封顶，
+    # 见文件顶部 docstring）：这一步只是给已投影出的 prep_pack/shots 角色
+    # 条目就地加两个展示用字段，不改变投影函数自身的字段依赖顺序。
+    attach_current_character_portraits(detail, view)
+    return detail
 
 def _episode_detail_projection(episode_id: str, view: str | None) -> dict:
     """Read-only projection body; the caller owns reconciliation and scoping."""

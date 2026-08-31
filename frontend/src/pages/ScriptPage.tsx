@@ -20,7 +20,7 @@ import { useFocusTrap } from '../hooks/useFocusTrap'
 import { useDeleteConfirm } from '../hooks/useDeleteConfirm'
 import { screenplayTaskNotice } from '../lib/productionNotices'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
-import { findPortraitImage, findSceneReferenceImage } from '../lib/bibleAssets'
+import { characterPortraitDisplay, findPortraitImage, findSceneReferenceImage } from '../lib/bibleAssets'
 import StageTextModelPicker from '../components/StageTextModelPicker'
 import "../styles/ScriptPage.css";
 
@@ -769,7 +769,7 @@ export function PrepPackView({
           <h3 className="prep-section-heading">出场人物 · {characters.length}</h3>
           <div className="prep-roster">
             {characters.map(character => {
-              const imageUrl = findPortraitImage(bible, character.portrait_id)
+              const { imageUrl, updated: portraitUpdated } = characterPortraitDisplay(character)
               const name = character.display_name || character.identity_id || '未命名角色'
               // 本集称谓（display_appellation）单独标出；旧的 aliases 小签保留，但
               // 去掉与本集称谓重复的那一条，避免同一句话在同一行出现两遍。
@@ -787,8 +787,15 @@ export function PrepPackView({
               return (
                 <div className="prep-roster-item" key={character.identity_id || character.display_name}>
                   {imageUrl
-                    ? <img className="prep-roster-thumb" src={imageUrl} alt={name} loading="lazy" decoding="async" />
-                    : <div className="prep-roster-thumb-empty" aria-hidden="true">无图</div>}
+                    ? (
+                      <span className="prep-roster-thumb-wrap">
+                        <img className="prep-roster-thumb" src={imageUrl} alt={name} loading="lazy" decoding="async" />
+                        {portraitUpdated && (
+                          <span className="prep-roster-thumb-updated" title="定妆照已更新，与本集映射记录当时依据的那张不同">已更新</span>
+                        )}
+                      </span>
+                    )
+                    : <div className="prep-roster-thumb-empty" aria-hidden="true">无定妆照</div>}
                   <div className="prep-roster-body">
                     <span className="prep-roster-name">
                       {canLocateAppellation ? (

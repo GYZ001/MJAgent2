@@ -174,6 +174,16 @@ export interface PrepPackCharacterAsset {
   display_appellation?: string;
   /** 1.6.0+ 字段；这条绑定是怎么判出来的，见 PrepPackProvenance。 */
   provenance?: PrepPackProvenance;
+  /**
+   * 非持久化展示字段（GET /episodes/{id} 投影时按当前状态实时算出，不进
+   * 已发布 prep_pack 产物本身）：这个身份按本集集号解析出的「当前实际会用
+   * 的那张」定妆照，与生成时 app.portraits.current_portrait_ref 同一份判据
+   * ——portrait_id 是发布时固化的快照，只做溯源，不代表当前状态。两者不同
+   * 时前端应提示"已更新"；current_portrait_id 为 null 表示当前无可用定妆照
+   * （不得回退显示 portrait_id 对应的旧图）。
+   */
+  current_portrait_id?: string | null;
+  current_portrait_image_url?: string | null;
 }
 
 export interface PrepPackSceneAsset {

@@ -116,6 +116,12 @@
 .wall-resource-chip-scene {
   border-radius: 8px;
 }
+/* 定妆照按身份实时解析（用户拍板，2026-08-30）：紧凑素材条没有余量放文字徽标，
+   用细描边标出"与本段素材记录当时依据的那张不同"，完整说明放 title 悬浮提示里。 */
+.wall-resource-chip-thumb-updated {
+  outline: 2px solid var(--gold);
+  outline-offset: 1px;
+}
 .wall-resource-chip-empty {
   display: flex;
   align-items: center;
@@ -264,6 +270,23 @@ details.wall-meta-details > :not(summary) {
   border-radius: 8px;
   object-fit: cover;
   background: var(--paper-deep);
+}
+.wall-resource-thumb-wrap {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+}
+.wall-resource-thumb-updated {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--ink-soft);
+  font: 600 8.5px/1.4 var(--ui);
+  white-space: nowrap;
 }
 .wall-resource-thumb-empty,
 .wall-resource-icon {

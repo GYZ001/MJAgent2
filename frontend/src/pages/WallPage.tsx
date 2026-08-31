@@ -16,7 +16,7 @@ import {
 import { ItemTaskTimer } from '../components/TaskTimer'
 import QueryState from '../components/QueryState'
 import { compactShotStage } from '../shotStatus'
-import { findPortraitImage, findSceneReferenceImage } from '../lib/bibleAssets'
+import { characterPortraitDisplay, findSceneReferenceImage } from '../lib/bibleAssets'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
 import '../styles/WallPage.css'
 
@@ -684,11 +684,20 @@ function SegmentResourceStrip({ resources, bible }: { resources: StoryboardPackR
   return (
     <div className="wall-resource-strip" aria-label="本段素材">
       {characters.map((character, index) => {
-        const imageUrl = findPortraitImage(bible, character.portrait_id)
+        const { imageUrl, updated } = characterPortraitDisplay(character)
         const label = character.identity_id || '未命名角色'
-        const tip = character.description ? `${label} · ${character.description}` : label
+        const tipBase = character.description ? `${label} · ${character.description}` : label
+        const tip = imageUrl
+          ? (updated ? `${tipBase}（定妆照已更新）` : tipBase)
+          : `${label} · 无定妆照`
         return imageUrl
-          ? <img key={`c-${index}`} className="wall-resource-chip-thumb" src={imageUrl} alt={label} title={tip} loading="lazy" decoding="async" />
+          ? (
+            <img
+              key={`c-${index}`}
+              className={`wall-resource-chip-thumb${updated ? ' wall-resource-chip-thumb-updated' : ''}`}
+              src={imageUrl} alt={label} title={tip} loading="lazy" decoding="async"
+            />
+          )
           : <div key={`c-${index}`} className="wall-resource-chip-empty" title={tip} aria-label={tip}>{label.slice(0, 1) || '无'}</div>
       })}
       {scenes.map((scene, index) => {
@@ -716,12 +725,19 @@ function SegmentResourceRoster({ resources, bible }: { resources: StoryboardPack
         <b>人物 · {characters.length}</b>
         <div className="wall-resource-list">
           {characters.map((character, index) => {
-            const imageUrl = findPortraitImage(bible, character.portrait_id)
+            const { imageUrl, updated } = characterPortraitDisplay(character)
             return (
               <div className="wall-resource-item" key={`${character.identity_id || 'character'}-${index}`}>
                 {imageUrl
-                  ? <img className="wall-resource-thumb" src={imageUrl} alt={character.identity_id} loading="lazy" decoding="async" />
-                  : <div className="wall-resource-thumb-empty" aria-hidden="true">无图</div>}
+                  ? (
+                    <span className="wall-resource-thumb-wrap">
+                      <img className="wall-resource-thumb" src={imageUrl} alt={character.identity_id} loading="lazy" decoding="async" />
+                      {updated && (
+                        <span className="wall-resource-thumb-updated" title="定妆照已更新，与本段素材记录当时依据的那张不同">已更新</span>
+                      )}
+                    </span>
+                  )
+                  : <div className="wall-resource-thumb-empty" aria-hidden="true">无定妆照</div>}
                 <div className="wall-resource-body">
                   <span className="wall-resource-name">{character.identity_id || '未命名角色'}</span>
                   <span className="wall-resource-desc">{character.description || (imageUrl ? '' : '暂无文字描述')}</span>

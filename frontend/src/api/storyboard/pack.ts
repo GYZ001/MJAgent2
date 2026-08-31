@@ -25,6 +25,15 @@ export interface StoryboardPackResourceCharacter {
   identity_id: string;
   portrait_id?: string | null;
   description?: string;
+  /**
+   * 非持久化展示字段，语义同 PrepPackCharacterAsset 的同名字段（见
+   * api/screenplay.ts）：按本集集号实时解析出的「当前实际会用的那张」定妆照，
+   * 与生成侧同一份判据（app.portraits.current_portrait_ref）。portrait_id 是
+   * 段落落库时固化的快照，只做溯源；current_portrait_id 为 null 表示当前无
+   * 可用定妆照，不得回退显示 portrait_id 对应的旧图。
+   */
+  current_portrait_id?: string | null;
+  current_portrait_image_url?: string | null;
 }
 
 export interface StoryboardPackResourceScene {

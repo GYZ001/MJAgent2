@@ -322,6 +322,26 @@
   color: var(--ink-faint);
   font-size: 10.5px;
 }
+/* 定妆照按身份实时解析（用户拍板，2026-08-30）：缩略图外层加一个定位容器，
+   角标"已更新"提示当前解析结果与本集映射记录固化的快照不同——轻标记，
+   不是弹窗或告警，颜色沿用中性 token，不借用错误色。 */
+.prep-roster-thumb-wrap {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+}
+.prep-roster-thumb-updated {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  padding: 1px 5px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--ink-soft);
+  font: 600 8.5px/1.4 var(--ui, sans-serif);
+  white-space: nowrap;
+}
 .prep-roster-icon {
   flex: none;
   width: 56px;

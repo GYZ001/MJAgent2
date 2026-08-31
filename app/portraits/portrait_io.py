@@ -26,6 +26,7 @@ from ._db_probe import (
 )
 from ._identity_tokens import _visual_entity_id_for_resolution_safe
 from .constants import STAGED_INITIAL_EP_START
+from .current_ref import portrait_for_episode
 
 # ---------- 定妆照落盘 / 登记 ----------
 
@@ -192,47 +193,6 @@ def _open_portrait(
         "SELECT * FROM character_portraits WHERE project_id=? AND character_name=? "
         "AND ep_end IS NULL AND ep_start<>? ORDER BY ep_start DESC LIMIT 1",
         (project_id, name, STAGED_INITIAL_EP_START)).fetchone()
-
-
-def portrait_for_episode(
-    project_id: str,
-    name: str,
-    episode_no: int | None,
-    *,
-    visual_entity_id: str | None = None,
-) -> str | None:
-    """返回覆盖该集的定妆照落盘路径；未命中返回 None（调用方回退到 bible.ref_image_path）。
-
-    ``visual_entity_id`` 非空时优先按视觉实体 ID 查询——同一视觉实体跨集
-    复用同一张脸，不受该集本次称谓/是否已具名影响（设计文档 §4.2）；未
-    命中（含该列尚未迁移落地）时回退到既有的 ``character_name`` 路径。
-    """
-    if episode_no is None:
-        return None
-    if visual_entity_id:
-        try:
-            row = get_conn().execute(
-                "SELECT image_path FROM character_portraits "
-                "WHERE project_id=? AND visual_entity_id=? AND ep_start<=? "
-                "AND (ep_end IS NULL OR ep_end>=?) "
-                "ORDER BY ep_start DESC LIMIT 1",
-                (project_id, visual_entity_id, episode_no, episode_no),
-            ).fetchone()
-        except sqlite3.OperationalError:
-            row = None
-        if row and row["image_path"] and Path(row["image_path"]).exists():
-            return row["image_path"]
-    try:
-        row = get_conn().execute(
-            "SELECT image_path FROM character_portraits "
-            "WHERE project_id=? AND character_name=? AND ep_start<=? AND (ep_end IS NULL OR ep_end>=?) "
-            "ORDER BY ep_start DESC LIMIT 1",
-            (project_id, name, episode_no, episode_no)).fetchone()
-    except sqlite3.OperationalError:
-        return None
-    if row and row["image_path"] and Path(row["image_path"]).exists():
-        return row["image_path"]
-    return None
 
 
 def appearance_for_episode(

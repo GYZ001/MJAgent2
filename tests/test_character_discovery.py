@@ -2843,6 +2843,70 @@ def test_portrait_for_episode_visual_entity_id_column_missing_falls_back_to_char
     assert anchor and "黑发少年" in anchor
 
 
+def test_current_portrait_ref_matches_portrait_for_episode_selection(monkeypatch, tmp_path) -> None:
+    """展示侧（映射台/分镜台/生成台）复用的 current_portrait_ref 必须与生成侧
+    portrait_for_episode 选中同一行——同一份判据，不是两份可能漂移的查询。"""
+    conn = _make_conn()
+    _seed_project(conn, "x")
+    _patch_settings(monkeypatch, conn)
+    early = tmp_path / "early.jpg"
+    early.write_bytes(b"fake")
+    later = tmp_path / "later.jpg"
+    later.write_bytes(b"fake")
+    _insert_portrait(conn, "p1", "甲一", 1, 4, "黑发少年", str(early))
+    _insert_portrait(conn, "p1", "甲一", 5, None, "白发青年", str(later))
+
+    for episode_no, expected, expected_ep_start in ((1, early, 1), (4, early, 1), (5, later, 5), (30, later, 5)):
+        path = portraits.portrait_for_episode("p1", "甲一", episode_no)
+        ref = portraits.current_portrait_ref("p1", "甲一", episode_no)
+        assert path == str(expected)
+        assert ref is not None
+        assert ref["image_path"] == path
+        assert ref["portrait_id"] == f"po_甲一_{expected_ep_start}"
+
+
+def test_current_portrait_ref_ignores_superseded_negative_ep_start_history_slots(monkeypatch, tmp_path) -> None:
+    """真实事故复现（proj_1fce17f77010「景田」）：手工重做定妆照两次后，旧包
+    被 promote_staged_initial_portrait 压进负数历史槽（ep_start<0, ep_end=0），
+    只做溯源，不能再被任何真实集号命中。current_portrait_ref 必须和生成侧
+    portrait_for_episode 一样，只看到 ep_start=1 那张最新的，不能读到旧图。"""
+    conn = _make_conn()
+    _seed_project(conn, "x")
+    _patch_settings(monkeypatch, conn)
+    oldest = tmp_path / "oldest.jpg"
+    oldest.write_bytes(b"fake")
+    middle = tmp_path / "middle.jpg"
+    middle.write_bytes(b"fake")
+    newest = tmp_path / "newest.jpg"
+    newest.write_bytes(b"fake")
+    _insert_portrait(conn, "p1", "甲一", -1, 0, "第一版（已作废）", str(oldest))
+    _insert_portrait(conn, "p1", "甲一", -2, 0, "第二版（已作废）", str(middle))
+    _insert_portrait(conn, "p1", "甲一", 1, None, "第三版（当前）", str(newest))
+
+    for episode_no in (1, 2, 99):
+        ref = portraits.current_portrait_ref("p1", "甲一", episode_no)
+        assert ref is not None
+        assert ref["image_path"] == str(newest)
+        assert ref["image_path"] == portraits.portrait_for_episode("p1", "甲一", episode_no)
+
+
+def test_current_portrait_ref_none_when_no_portrait_registered(monkeypatch) -> None:
+    conn = _make_conn()
+    _seed_project(conn, "x")
+    _patch_settings(monkeypatch, conn)
+    assert portraits.current_portrait_ref("p1", "从未登记的角色", 1) is None
+
+
+def test_current_portrait_ref_none_when_file_missing_on_disk(monkeypatch) -> None:
+    """磁盘上的文件已经丢失时视为未命中——不得让调用方拿着一个死链接展示，
+    也不得回退到别的判据（如快照 id）。"""
+    conn = _make_conn()
+    _seed_project(conn, "x")
+    _patch_settings(monkeypatch, conn)
+    _insert_portrait(conn, "p1", "甲一", 1, None, "黑发少年", "/tmp/definitely-not-there.jpg")
+    assert portraits.current_portrait_ref("p1", "甲一", 1) is None
+
+
 def test_open_portrait_visual_entity_id_prefers_entity_match_over_name_mismatch(
     monkeypatch,
 ) -> None:
