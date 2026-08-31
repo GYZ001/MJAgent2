@@ -33,6 +33,7 @@ from .precheck import compute_refs_cost_precheck
 from .primitives import (
     QUOTA_MODULE_PORTRAIT,
     _consume_payment_quote,
+    _issue_payment_quote,
     _normalize_character_selection,
     _payment_confirm_required,
     _refs_target_payload,
@@ -414,7 +415,9 @@ async def start_refs(project_id: str, body: dict | None = None):
         project_id, character=quote_character, characters=selected_names, resume=resume
     )
     if payload.get("confirm") is not True:
-        raise _payment_confirm_required(quote)
+        # 见 task_run.py 同类注释：未签发的报价不能作为 409 里的 quote_id 递
+        # 出去，否则调用方按响应指引确认必然 QUOTE_STALE。
+        raise _payment_confirm_required(_issue_payment_quote(quote))
     quote_id = payload.get("quote_id")
     quote_row = _validate_payment_quote(project_id, quote_id, quote)
     if quote_row["consumed_at"] is not None:

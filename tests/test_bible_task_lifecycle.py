@@ -479,3 +479,57 @@ async def test_start_bible_core_recovers_stale_failed_project_without_model_call
     saved = json.loads(row["bible_json"])
     assert saved["world"]["visual_style_canonical"] == visual_style_prompt("真人摄影风")
     assert saved["characters"] == []
+
+
+@pytest.mark.asyncio
+async def test_start_bible_core_confirm_flow_from_409_precheck_succeeds(
+    tmp_path, monkeypatch,
+) -> None:
+    """回归锁：真实故障复现路径。POST /projects/{id}/bible 不带 confirm 时，
+    _start_bible_core 走 ``if not confirm: raise _payment_confirm_required(precheck)``
+    这条分支——之前 precheck 是 _compute_bible_generate_precheck 的原始返回值，
+    其中占位的 ``quote_id`` 字段实际装的是 scope_fingerprint，从未写进
+    character_payment_quotes。任何按 409 响应指引（带 confirm=true + 该
+    quote_id）再来一次的调用方都会在 _validate_payment_quote 里查不到这一行，
+    命中 QUOTE_STALE——而"请重新确认"没有出路，因为重新预检拿到的还是同一个
+    假值，是死循环（实测复现：尝试恢复 proj_f8cf2eeb2e66 时撞上）。
+
+    这条用例钉住修复：未确认调用必须先 _issue_payment_quote() 把报价落库，
+    409 响应里的 quote_id 才是一个真正能拿去确认的凭证。"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "bible-409-confirm.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,status,bible_status,bible_error,created_at) "
+        "VALUES('p1','P','ingested','idle',NULL,1)"
+    )
+    conn.commit()
+    patch_api_everywhere(monkeypatch, "_require_harness_engine", lambda _project_id: None)
+    patch_api_everywhere(monkeypatch, "_start_refs_generation", lambda *_args, **_kwargs: None)
+
+    # 第一步：不带 confirm 调用，复刻真实的 POST /projects/{id}/bible {} 请求。
+    with pytest.raises(HTTPException) as first_call:
+        await api._start_bible_core("p1", "", confirm=False)
+    assert first_call.value.status_code == 409
+    assert first_call.value.detail["code"] == "PAYMENT_CONFIRM_REQUIRED"
+    precheck = first_call.value.detail["precheck"]
+    quote_id_from_409 = precheck["quote_id"]
+    assert quote_id_from_409, "409 响应必须带一个 quote_id"
+    assert quote_id_from_409 != precheck["scope_fingerprint"], (
+        "quote_id 不能等于 scope_fingerprint——那是未签发的占位值，"
+        "从未写进 character_payment_quotes，必然导致 QUOTE_STALE"
+    )
+    issued_row = conn.execute(
+        "SELECT * FROM character_payment_quotes WHERE quote_id=?", (quote_id_from_409,),
+    ).fetchone()
+    assert issued_row is not None, "409 里的 quote_id 必须已经落库，否则调用方无路可走"
+
+    # 第二步：完全按 409 响应指引——带 confirm=true 与它给的 quote_id 再调一次。
+    result = await api._start_bible_core(
+        "p1", "", confirm=True, quote_id=quote_id_from_409,
+    )
+
+    assert result["status"] == "ready"
+    row = conn.execute("SELECT bible_status FROM projects WHERE id='p1'").fetchone()
+    assert row["bible_status"] == "ready"

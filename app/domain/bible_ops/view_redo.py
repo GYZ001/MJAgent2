@@ -31,6 +31,7 @@ from fastapi import HTTPException
 from .precheck import compute_refs_cost_precheck
 from .primitives import (
     _consume_payment_quote,
+    _issue_payment_quote,
     _parse_json_value,
     _payment_confirm_required,
     _validate_payment_quote,
@@ -183,17 +184,12 @@ async def regenerate_character_view_route(
     if routed is not None:
         return routed
     _project_or_404(project_id)
-    if payload.get("confirm") is not True:
-        raise HTTPException(
-            409,
-            detail={
-                "code": "PAYMENT_CONFIRM_REQUIRED",
-                "message": "必须先完成费用预检并显式确认（confirm=true）",
-            },
-        )
     quote = compute_refs_cost_precheck(
         project_id, character=character_name, view_role=view_role,
     )
+    if payload.get("confirm") is not True:
+        # 曾经这里的 409 完全不带 precheck；现在签发并落库一份可直接拿去确认的真实报价。
+        raise _payment_confirm_required(_issue_payment_quote(quote))
     quote_id = payload.get("quote_id")
     quote_row = _validate_payment_quote(project_id, quote_id, quote)
     if quote_row["consumed_at"] is not None:
@@ -201,7 +197,7 @@ async def regenerate_character_view_route(
             "status": "accepted", "idempotent_replay": True,
             "task_id": quote_row["consumed_task_id"], "run_id": quote_row["consumed_run_id"],
             "portrait_id": portrait_id, "view_role": view_role,
-            "character_name": character_name, "precheck": quote,
+            "character_name": character_name, "quote_id": quote_id, "precheck": quote,
         }
     conn = get_conn()
     row = conn.execute(
@@ -245,7 +241,7 @@ async def regenerate_character_view_route(
         str(quote_id), task_id=started["task_id"], run_id=started["run_id"],
     )
     return {
-        **started, "precheck": quote,
+        **started, "quote_id": quote_id, "precheck": quote,
         "message": "单视角重做任务已受理，可刷新查看进度",
     }
 
@@ -404,13 +400,15 @@ async def regenerate_scene_view_route(
         scene_reference_id=scene_reference_id, action="regenerate_view",
     )
     if payload.get("confirm") is not True:
-        raise _payment_confirm_required(quote)
-    quote_row = _validate_payment_quote(project_id, payload.get("quote_id"), quote)
+        # 见 task_run.py 同类注释：未签发的报价不能作为 409 的 quote_id 递出去。
+        raise _payment_confirm_required(_issue_payment_quote(quote))
+    confirmed_quote_id = payload.get("quote_id")
+    quote_row = _validate_payment_quote(project_id, confirmed_quote_id, quote)
     if quote_row["consumed_at"] is not None:
         return {
             "status": "accepted", "idempotent_replay": True,
             "task_id": quote_row["consumed_task_id"], "run_id": quote_row["consumed_run_id"],
-            "precheck": quote,
+            "quote_id": confirmed_quote_id, "precheck": quote,
         }
     task_key = f"{scene_reference_id}:{view_role}"
     if task_registry.active("scene_view_redo", task_key):
@@ -419,21 +417,22 @@ async def regenerate_scene_view_route(
                          and (run.get("config_snapshot") or {}).get("task_key") == task_key), None)
         return {
             "status": "accepted", "task_id": f"scene_view_redo:{task_key}",
-            "run_id": (existing or {}).get("id"), "precheck": quote,
+            "run_id": (existing or {}).get("id"), "quote_id": confirmed_quote_id, "precheck": quote,
         }
     started = _start_scene_view_redo(
         project_id, scene_name, scene_reference_id, view_role,
-        quote_id=str(payload.get("quote_id")),
+        quote_id=str(confirmed_quote_id),
         budget_limit_cny=float(quote.get("max_retry_budget_cny") or 1),
     )
     if not started:
         raise HTTPException(409, "该场景视角重做任务已在运行")
     _consume_payment_quote(
-        str(payload.get("quote_id")), task_id=started["task_id"], run_id=started["run_id"],
+        str(confirmed_quote_id), task_id=started["task_id"], run_id=started["run_id"],
     )
     return {
         **started,
-        "precheck": quote, "message": "单视角重做任务已受理，可刷新恢复进度",
+        "quote_id": confirmed_quote_id, "precheck": quote,
+        "message": "单视角重做任务已受理，可刷新恢复进度",
     }
 
 @router.post("/projects/{project_id}/scenes/{scene_name}/refs/{scene_reference_id}/views/{view_role}/regenerate/cancel")

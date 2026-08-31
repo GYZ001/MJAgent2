@@ -207,7 +207,10 @@ def test_bible_generate_precheck_binds_style_name(monkeypatch) -> None:
     quote = bible_ops._compute_bible_generate_precheck("p1", style_name="真人摄影风")
 
     assert quote["style_name"] == "真人摄影风"
-    assert quote["quote_id"] == fingerprint({
+    # 未签发的原始范围指纹不叫 quote_id（那要经 _issue_payment_quote 落库
+    # 才产生，否则调用方拿它去确认会落进 QUOTE_STALE）。
+    assert "quote_id" not in quote
+    assert quote["scope_fingerprint"] == fingerprint({
         "project_id": "p1",
         "action": "generate_bible_and_refs",
         "character_count": 0,

@@ -45,6 +45,7 @@ from .precheck import (
 )
 from .primitives import (
     _consume_payment_quote,
+    _issue_payment_quote,
     _normalize_visual_style_name,
     _payment_confirm_required,
     _supports_bible_style_name,
@@ -302,7 +303,12 @@ async def _start_bible_core(
     style_name = _normalize_visual_style_name(style_name)
     precheck = _compute_bible_generate_precheck(project_id, style_name=style_name)
     if not confirm:
-        raise _payment_confirm_required(precheck)
+        # 未确认调用必须签发并落库一份真实报价，而不是把 precheck 内部占位的
+        # quote_id（其实是 scope_fingerprint）原样递给调用方——那个值从未写进
+        # character_payment_quotes，调用方按响应指引带它来确认必然 QUOTE_STALE
+        # 死循环（实测 ERR：POST /bible 不带 confirm → 409 里的 quote_id 是
+        # scope_fingerprint 的 64 位 hash，无法通过 _validate_payment_quote）。
+        raise _payment_confirm_required(_issue_payment_quote(precheck))
     quote_row = _validate_payment_quote(project_id, quote_id, precheck)
     if quote_row["consumed_at"] is not None:
         return {

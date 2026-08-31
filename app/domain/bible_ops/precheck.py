@@ -415,7 +415,7 @@ def compute_refs_cost_precheck(
         "bible_version": p.get("bible_version"),
     })
     return {
-        "quote_id": scope_fingerprint,
+        # 不设 quote_id：未签发的范围指纹按它确认会 QUOTE_STALE，真值由 _issue_payment_quote() 落库后签发。
         "scope_fingerprint": scope_fingerprint,
         "computed_at": computed_at,
         "quote_expires_at": computed_at + 300,
@@ -501,7 +501,7 @@ def _compute_bible_generate_precheck(project_id: str, *, style_name: str | None 
         "style_name": style_name,
     })
     return {
-        "quote_id": scope_fingerprint,
+        # 同上：未签发前不叫 quote_id，避免调用方按此范围指纹确认落进 QUOTE_STALE。
         "scope_fingerprint": scope_fingerprint,
         "computed_at": computed_at,
         "quote_expires_at": computed_at + 300,

@@ -261,7 +261,11 @@ def test_refs_precheck_counts_images(monkeypatch) -> None:
     assert quote["character_count"] == 1
     assert quote["image_count"] == 3
     assert quote["estimated_cost_cny"] == pytest.approx(0.6)
-    assert quote["quote_id"] == fingerprint({
+    # compute_refs_cost_precheck 是未签发的原始范围指纹，quote_id 只有经
+    # _issue_payment_quote 落库才产生（见 test_bible_generate_requires_confirm
+    # 与 test_payment_quote_expires_and_consumed_quote_replays）。
+    assert "quote_id" not in quote
+    assert quote["scope_fingerprint"] == fingerprint({
         "project_id": "proj_test",
         "character": None,
         "characters": None,

@@ -237,7 +237,9 @@ async def start_scene_bible(project_id: str, body: dict | None = None):
         project_id, scenes=names, action="generate_bible_and_refs", scene_payloads=confirmed_scenes,
     )
     if payload.get("confirm") is not True:
-        raise _payment_confirm_required(quote)
+        # 见 task_run.py 同类注释：未签发的报价不能作为 409 里的 quote_id 递
+        # 出去，否则调用方按响应指引确认必然 QUOTE_STALE。
+        raise _payment_confirm_required(_issue_payment_quote(quote))
     quote_row = _validate_payment_quote(project_id, payload.get("quote_id"), quote)
     if quote_row["consumed_at"] is not None:
         return {
@@ -289,7 +291,9 @@ async def start_scene_refs(project_id: str, body: dict | None = None):
     resume = bool(payload.get("resume", not bool(only)))
     quote = compute_scene_cost_precheck(project_id, scenes=selected, resume=resume)
     if payload.get("confirm") is not True:
-        raise _payment_confirm_required(quote)
+        # 见 task_run.py 同类注释：未签发的报价不能作为 409 里的 quote_id 递
+        # 出去，否则调用方按响应指引确认必然 QUOTE_STALE。
+        raise _payment_confirm_required(_issue_payment_quote(quote))
     quote_row = _validate_payment_quote(project_id, payload.get("quote_id"), quote)
     if quote_row["consumed_at"] is not None:
         return {
