@@ -112,10 +112,14 @@ export function RecycleBinDialog(props: RecycleBinDialogProps) {
                 className="btn danger"
                 type="button"
                 disabled={purgingAll}
-                aria-label="清空回收站，彻底删除全部已软删除的项目"
+                aria-label={purgingAll
+                  ? '清空回收站正在后台执行，可关闭本窗口，完成后会有提示'
+                  : '清空回收站，彻底删除全部已软删除的项目'}
                 onClick={() => { void onPurgeAll() }}
               >
-                {purgingAll ? '清空中…' : '清空回收站'}
+                {/* 后台执行中：不装一个笼统的"清空中…"，用列表本身当前还剩几个
+                    项目做进度指示——deletedCount 随轮询更新，见 useRecycleBin。 */}
+                {purgingAll ? `清空中…（剩 ${deletedCount} 个，可关闭本窗口）` : '清空回收站'}
               </button>
             </div>
           </>

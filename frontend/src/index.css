@@ -8484,8 +8484,17 @@ summary:focus-visible,
   font: 600 11.5px var(--ui);
 }
 
-/* 通用确认弹窗由抽屉式证据层承载，单独恢复为居中的模态布局。 */
+/* 通用确认弹窗由抽屉式证据层承载，单独恢复为居中的模态布局。
+   2026-08-31：这个变体就是全站的「确认/决策弹窗」角色（DeleteConfirmDialog /
+   DecisionDialog / ImpactDialog 等都靠 .impact-dialog 子元素落进这条规则），
+   语义上它永远是"对刚发生的动作的二次确认"，必须盖住发起它的任何东西。
+   base .evidence-backdrop 的 180 是给纯抽屉角色（EvidenceDrawer）用的，不能
+   覆盖到这里——回收站模态 .dialog-backdrop 是 200，从它里面弹出的确认弹窗
+   如果还留在 180 就会被回收站本身压住（用户实测：清空回收站的确认弹窗点不
+   到）。抬到 210，压过 .dialog-backdrop / .monitor-drawer-backdrop，但仍让
+   在 .capability-approval-backdrop（1200，终审闸）之下。 */
 .evidence-backdrop:has(> .impact-dialog) {
+  z-index: 210;
   align-items: center;
   justify-content: center;
   padding: clamp(12px, 3vw, 28px);

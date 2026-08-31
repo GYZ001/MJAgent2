@@ -1,9 +1,9 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { api, DeletedProject, Project } from '../api'
+import { api, Project } from '../api'
 import { useNav, usePoll } from '../App'
 import QueryState from '../components/QueryState'
 import { RecycleBinDialog } from '../components/RecycleBinDialog'
-import { useDeleteConfirm } from '../hooks/useDeleteConfirm'
+import { useRecycleBin } from '../hooks/useRecycleBin'
 import { formatFileSize, novelTitleFromFilename, projectEntry, validateNovelFile } from './studioImport'
 
 const STATUS_LABEL: Record<string, [string, string]> = {
@@ -18,10 +18,7 @@ type ImportStage = 'idle' | 'selected' | 'uploading' | 'creating' | 'error'
 export default function Studio() {
   const { go, toast } = useNav()
   const { data: projects, refresh, error, loading } = usePoll<Project[]>(() => api.listProjects(), 6000)
-  const {
-    data: deletedProjects, refresh: refreshDeleted, error: deletedError, loading: deletedLoading,
-  } = usePoll<DeletedProject[]>(() => api.listDeletedProjects(), 15000)
-  const deleteConfirm = useDeleteConfirm()
+  const recycleBin = useRecycleBin(toast, refresh)
   const [name, setName] = useState('')
   const [showImport, setShowImport] = useState(window.location.pathname === '/workspaces/new')
   const [showRecycleBin, setShowRecycleBin] = useState(false)
@@ -33,17 +30,15 @@ export default function Studio() {
   const [pendingAttachment, setPendingAttachment] = useState<{ fileKey: string; token: string } | null>(null)
   const [importStage, setImportStage] = useState<ImportStage>('idle')
   const [importError, setImportError] = useState<string | null>(null)
-  // 单个项目的删除/恢复/彻底删除各自独立跑，用 id 记录"正在处理哪一个"，
-  // 避免同一个按钮被连点两次；清空回收站是另一条独立的忙碌态。
+  // 单个项目软删除各自独立跑，用 id 记录"正在处理哪一个"，避免同一个按钮被
+  // 连点两次；回收站内的恢复/彻底删除/清空的忙碌态在 useRecycleBin 里。
   const [busyId, setBusyId] = useState<string | null>(null)
-  const [purgingAll, setPurgingAll] = useState(false)
   const projectNameId = useId()
   const importPanelId = useId()
   const importHelpId = useId()
   const uploading = importStage === 'uploading' || importStage === 'creating'
   const emptyProjectList = !loading && !error && projects?.length === 0
   const importVisible = showImport || emptyProjectList
-  const deletedCount = deletedProjects?.length ?? 0
   const observabilityIntent = new URLSearchParams(window.location.search).get('intent') === 'observability'
 
   useEffect(() => {
@@ -144,50 +139,10 @@ export default function Studio() {
       await api.deleteProject(p.id)
       toast(`《${p.name}》已移入回收站，24 小时内可恢复`)
       refresh()
-      refreshDeleted()
+      recycleBin.refreshDeleted()
       window.dispatchEvent(new Event('manju:projects-changed'))
     } catch (e: unknown) { toast((e as Error).message, true) } finally {
       setBusyId(null)
-    }
-  }
-
-  async function restore(p: DeletedProject) {
-    setBusyId(p.id)
-    try {
-      await api.restoreProject(p.id)
-      toast(`《${p.name}》已恢复`)
-      refresh()
-      refreshDeleted()
-      window.dispatchEvent(new Event('manju:projects-changed'))
-    } catch (e: unknown) { toast((e as Error).message, true) } finally {
-      setBusyId(null)
-    }
-  }
-
-  async function purge(p: DeletedProject) {
-    setBusyId(p.id)
-    try {
-      const done = await deleteConfirm.run(() => api.purgeProject(p.id))
-      if (done) { toast(`《${p.name}》已彻底删除`); refreshDeleted() }
-    } catch (e: unknown) { toast((e as Error).message, true) } finally {
-      setBusyId(null)
-    }
-  }
-
-  async function purgeAll() {
-    setPurgingAll(true)
-    try {
-      const result = await deleteConfirm.run(() => api.purgeAllDeletedProjects())
-      if (!result) return
-      const msg = result.failed?.length
-        ? `已彻底删除 ${result.purged_count} 个项目，${result.failed.length} 个失败`
-        : `回收站已清空，彻底删除 ${result.purged_count} 个项目`
-      toast(msg, Boolean(result.failed?.length))
-      refreshDeleted()
-    } catch (e: unknown) {
-      toast((e as Error).message, true)
-    } finally {
-      setPurgingAll(false)
     }
   }
 
@@ -202,10 +157,10 @@ export default function Studio() {
             type="button"
             aria-expanded={showRecycleBin}
             aria-controls="recycle-bin-panel"
-            aria-label={showRecycleBin ? '收起回收站' : `展开回收站，当前 ${deletedCount} 个项目`}
+            aria-label={showRecycleBin ? '收起回收站' : `展开回收站，当前 ${recycleBin.deletedCount} 个项目`}
             onClick={() => setShowRecycleBin(v => !v)}
           >
-            回收站{deletedCount > 0 ? ` · ${deletedCount}` : ''}
+            回收站{recycleBin.deletedCount > 0 ? ` · ${recycleBin.deletedCount}` : ''}
           </button>
           {!emptyProjectList && (
             <button
@@ -242,17 +197,17 @@ export default function Studio() {
 
       {showRecycleBin && (
         <RecycleBinDialog
-          deletedProjects={deletedProjects}
-          deletedCount={deletedCount}
-          deletedLoading={deletedLoading}
-          deletedError={deletedError}
-          busyId={busyId}
-          purgingAll={purgingAll}
-          onRestore={(p: DeletedProject) => { void restore(p) }}
-          onPurge={(p: DeletedProject) => { void purge(p) }}
-          onPurgeAll={() => { void purgeAll() }}
+          deletedProjects={recycleBin.deletedProjects}
+          deletedCount={recycleBin.deletedCount}
+          deletedLoading={recycleBin.deletedLoading}
+          deletedError={recycleBin.deletedError}
+          busyId={recycleBin.busyId}
+          purgingAll={recycleBin.purgingAll}
+          onRestore={recycleBin.restore}
+          onPurge={recycleBin.purge}
+          onPurgeAll={recycleBin.purgeAll}
           onClose={() => setShowRecycleBin(false)}
-          onRefresh={() => refreshDeleted()}
+          onRefresh={recycleBin.refreshDeleted}
         />
       )}
 
@@ -433,7 +388,7 @@ export default function Studio() {
         </section>
         ) : null}
       </QueryState>
-      {deleteConfirm.dialog}
+      {recycleBin.dialog}
     </>
   )
 }
