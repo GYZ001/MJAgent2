@@ -2548,10 +2548,21 @@ def test_auto_discovered_character_pack_starts_at_first_appearance(tmp_path, mon
         pack_calls.append(kwargs)
         return {"status": "ready", "portrait_id": kwargs["portrait_id"]}
 
+    # 素材原文"葛叶陪同角色丁现身，并与甲一正面交锋"把新称谓"葛叶"和既有角色
+    # "甲一"放进了同一段——两人正在正面交锋，明显是两个人，但字面共现会让
+    # app.portraits.card_merge 的归并判断把"甲一"算作候选、发起一次裁决模型
+    # 调用（见该模块 docstring）。这里如实模拟模型的正确判断："都不是/无法
+    # 确定"，验证归并判断不会把对手误判成同一个人、仍然正常建新卡。
+    async def fake_card_merge_verdict(messages, *, model_type, **kwargs):
+        return model_type(
+            selected_candidate="都不是/无法确定", supporting_entry_index=1, supporting_quote="",
+        )
+
     patch_portraits_everywhere(monkeypatch, "assess_new_character", fake_assess)
     patch_portraits_everywhere(monkeypatch, "_generate_fresh_portrait", fake_portrait)
     patch_portraits_everywhere(monkeypatch, "_review_portrait_asset", fake_review)
     monkeypatch.setattr("app.multiview.ensure_character_multiview_pack", fake_pack)
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_card_merge_verdict)
 
     result = asyncio.run(portraits.ensure_character_card("p1", "葛叶", 5))
 

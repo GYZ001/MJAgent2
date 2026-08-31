@@ -22,7 +22,7 @@ from .bible_compat import (  # noqa: F401 -- 重新导出，见下方模块末�
     bible_with_pending_characters_for_text,
     bible_with_provisional_characters,
 )
-from .card_aliases import new_card_aliases
+from .card_merge import resolve_card_build_or_merge
 from .card_verdict import unimportant_verdict_result
 from .constants import (
     APPEARANCE_MAX,
@@ -302,10 +302,13 @@ async def ensure_character_card(
 
     ``identity_source_labels``：本次身份决议里同一 identity_group 下、除 ``name``
     本身外的其它 source_label（换称呼但指向同一个人）。新建卡时会尝试把它们登记
-    为 ``Character.aliases``（见 ``.card_aliases.new_card_aliases``），让下次同一个
-    人换个称呼出现时 ``card_owner`` 的别名匹配查得到。``cards_ensure.py`` 的
-    ``unknown_by_name`` 分组、``identity_adjudication.py`` 的 ``identity.source_names``
-    都已接线传入；未传（或传空）时按原样跳过，不写任何 aliases，与历史行为一致。
+    为 ``Character.aliases``（见 ``.card_merge.resolve_card_build_or_merge`` 内部
+    调用的 ``.card_aliases.new_card_aliases``），让下次同一个人换个称呼出现时
+    ``card_owner`` 的别名匹配查得到。``cards_ensure.py`` 的 ``unknown_by_name``
+    分组、``identity_adjudication.py`` 的 ``identity.source_names`` 都已接线传入；
+    未传（或传空）时按原样跳过，不写任何 aliases，与历史行为一致。真正建卡之前，
+    ``resolve_card_build_or_merge`` 还会先问一遍 ``name`` 是不是人物谱里已有某个
+    角色的另一种叫法，是则登记别名、复用既有卡，不建新卡（见该函数 docstring）。
     """
     name = (name or "").strip()
     if not name:
@@ -430,16 +433,13 @@ async def ensure_character_card(
             )
             if unimportant_result is not None:
                 return unimportant_result
-            aliases = new_card_aliases(name, identity_source_labels, forward_chapters_by_idx)
-            try:
-                char_obj = Character.model_validate({
-                    "name": name, "role": verdict["role"],
-                    "appearance_canonical": verdict["appearance_canonical"],
-                    "personality": verdict["personality"], "speech_style": verdict["speech_style"],
-                    "relationships": verdict["relationships"], "portrait_prompt_override": None,
-                    "source_evidence": verdict.get("source_evidence") or [], "aliases": aliases})
-            except ValidationError as exc:
-                return {"status": "error", "name": name, "reason": f"card invalid {exc}"[:240]}
+            build_result = await resolve_card_build_or_merge(
+                conn, project_id, name, bible, verdict,
+                identity_source_labels, forward_chapters_by_idx, write_guard,
+            )
+            if isinstance(build_result, dict):
+                return build_result
+            char_obj = build_result
 
         # 保留内部追溯记录，但不再把它当成用户待审任务。
         existing = existing_change
