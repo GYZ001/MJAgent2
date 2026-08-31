@@ -1441,3 +1441,33 @@ def test_terminal_success_with_zero_shots_is_not_completed() -> None:
     assert result["user_state"] == "not_started"
     assert result["next_actions"][0]["id"] == "open_storyboard"
     assert result["next_actions"][0]["endpoint"] == "/api/episodes/e/storyboard/status"
+
+
+def test_planned_episode_is_not_reported_as_active_upstream(monkeypatch) -> None:
+    """刚清空（或从未动过）的分集不得被判成"上游任务仍在写入"。
+
+    app/artifacts.py 清空分镜后把 status 写回 'planned'，而 'planned' 曾被算进
+    上游活跃兜底集合——清完分镜的下一次清空于是被自己刚造出的状态挡住，报
+    「编剧或分镜任务仍在写入，请先停止上游任务」，而根本没有这样的任务可停。
+    """
+    conn = _conn()
+    conn.execute("UPDATE episodes SET status='planned' WHERE id='e'")
+    conn.commit()
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+
+    snapshot = api._review_upstream_snapshot("e")
+
+    assert snapshot["active_upstream_runs"] == []
+
+
+def test_scripting_episode_without_run_record_still_fails_closed(monkeypatch) -> None:
+    """真正进行中的状态继续兜底：旧式任务没有 workflow_run 时只剩状态可依。"""
+    conn = _conn()
+    conn.execute("UPDATE episodes SET status='scripting' WHERE id='e'")
+    conn.commit()
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+
+    snapshot = api._review_upstream_snapshot("e")
+
+    assert [item["status"] for item in snapshot["active_upstream_runs"]] == ["scripting"]
+    assert snapshot["active_upstream_runs"][0]["source"] == "episode_status"

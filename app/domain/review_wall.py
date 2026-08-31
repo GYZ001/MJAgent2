@@ -721,8 +721,16 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
                 "updated_at": None,
                 "source": "task_registry",
             })
-    # 旧任务没有 workflow_run 时，剧集状态仍要 fail-closed。
-    if ep.get("status") in {"scripting", "storyboarding", "planned"} and not active:
+    # 旧任务没有 workflow_run 时，剧集状态仍要 fail-closed。只认真正"进行中"
+    # 的两个状态：'planned' 曾经也在这个集合里，但它恰恰是**什么都还没开始**
+    # 的初始态，而且 app/artifacts.py 清空分镜后正是把 status 写回 'planned'——
+    # 于是清完分镜的下一次清空被自己刚造出的状态挡住，报「编剧或分镜任务仍在
+    # 写入，请先停止上游任务」，而根本没有这样的任务可停（CLAUDE.md「拦住用户
+    # 时必须给出路」）。这条兜底只在既没有 durable run、也没有 task_registry
+    # 注册任务时才轮得到（上面两个循环已各自扫过），所以此处的 'planned' 只可
+    # 能是真的空闲。旧式任务真的在跑时会把状态推到 scripting/storyboarding，
+    # 那两个继续 fail-closed。
+    if ep.get("status") in {"scripting", "storyboarding"} and not active:
         active.append({
             "kind": "upstream", "run_id": None, "status": ep.get("status"),
             "stage": None, "updated_at": None, "source": "episode_status",
