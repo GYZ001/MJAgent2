@@ -226,7 +226,14 @@ async def set_bible_visual_style(project_id: str, body: dict | None = Body(None)
     refs_started = False
     refs_error: str | None = None
     try:
-        refs_started = bool(_start_refs_generation(project_id, None, resume=False))
+        # 必须显式传全部具备定妆资格的角色名单：不传时 _start_refs_generation
+        # 会用「已建卡角色缺口」扫描（_established_portrait_gap_names）当默认
+        # 范围，那份扫描只看已经在 character_portraits 里出现过的角色——新
+        # 架构下角色只随映射台按需建卡，凡是还没被任何一集映射过的角色永远
+        # 不会出现在扫描结果里，画风切换对它们就成了悄悄的无害空转，本应
+        # 与 _compute_style_regen_quote 的整包报价同口径的这条腿名不副实
+        # （实战撞到：换画风后 5 个角色只有已建卡的 1 个重新出图）。
+        refs_started = bool(_start_refs_generation(project_id, None, resume=False, only_characters=[c.name for c in instance.characters if character_is_portrait_eligible(c)]))
     except Exception as exc:  # noqa: BLE001 风格切换已落库；这条腿独立失败，不回滚风格
         refs_error = errors.record_and_format(
             exc, action="refs_spawn_after_style_change", context={"project_id": project_id},

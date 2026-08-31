@@ -232,51 +232,60 @@ def _start_refs_generation(
         "run_id": recorder.run_id,
     }
 
-def _established_portrait_gap_names(conn, project_id: str) -> list[str]:
-    """已建卡角色里「缺图或出图失败」的名单：POST /projects/{id}/refs 在没有
-    显式指定 character(s) 时的补图范围来源，只补残缺、不重复出图。
-
-    名单来源限定 ``character_portraits`` 里非作废槽位（``ep_start>=0``）——
-    负数 ``ep_start`` 是 ``promote_staged_initial_portrait`` 压入的已作废历史
-    定妆照槽位，纳入会把重做过定妆照的角色错误地算成多张（与
-    app.portraits.card_rebind 模块 docstring 同一条纪律）。2026-08-31 架构
-    转向后角色只随映射台按需建卡，这里直接查已经真正建过定妆记录的角色，
-    不依赖 bible_json 快照。
-
-    「有没有缺口」的判据与 compute_refs_cost_precheck 的 resume 分支同口径
-    （当前采用版本 ``ep_end IS NULL``、pack_status、必需视角是否齐全），不
-    重写第二份相似判据；已有整包且视角齐全的角色不出现在返回值里，调用方
-    据此保证「已有图不重复出图、不重复烧钱」。
-    """
+def _character_pack_incomplete(conn, project_id: str, name: str) -> bool:
+    """单个角色「当前采用包」是否残缺：无当前采用包、pack_status 非 ready，
+    或必需视角未齐全。判据与 compute_refs_cost_precheck 的 resume 分支同
+    口径，抽成共享实现供 _established_portrait_gap_names 与
+    _incomplete_portrait_eligible_names 复用，不重写第二份相似判据。"""
     from app.multiview import CHARACTER_REQUIRED_VIEWS
 
+    current = conn.execute(
+        "SELECT id, pack_status FROM character_portraits "
+        "WHERE project_id=? AND character_name=? AND ep_end IS NULL "
+        "ORDER BY ep_start DESC LIMIT 1",
+        (project_id, name),
+    ).fetchone()
+    if not current or current["pack_status"] not in (None, "ready"):
+        return True
+    ready_roles = {
+        row["view_role"] for row in conn.execute(
+            "SELECT view_role, status, image_path FROM character_portrait_views "
+            "WHERE portrait_id=?", (current["id"],),
+        ).fetchall()
+        if row["status"] == "ready" and row["image_path"]
+    }
+    return any(role not in ready_roles for role in CHARACTER_REQUIRED_VIEWS)
+
+def _established_portrait_gap_names(conn, project_id: str) -> list[str]:
+    """已建卡角色里「缺图或出图失败」的名单：POST /projects/{id}/refs 在没有
+    显式指定 character(s) 时的补图范围来源，只补残缺、不重复出图。名单来源
+    限定 ``character_portraits`` 里非作废槽位（``ep_start>=0``，负数是
+    promote_staged_initial_portrait 压入的已作废历史槽位）。已有整包且视角
+    齐全的角色不出现在返回值里，调用方据此保证「已有图不重复出图」。"""
     rows = conn.execute(
         "SELECT DISTINCT character_name FROM character_portraits "
         "WHERE project_id=? AND ep_start>=0",
         (project_id,),
     ).fetchall()
     established = sorted({row["character_name"] for row in rows if row["character_name"]})
-    gaps: list[str] = []
-    for name in established:
-        current = conn.execute(
-            "SELECT id, pack_status FROM character_portraits "
-            "WHERE project_id=? AND character_name=? AND ep_end IS NULL "
-            "ORDER BY ep_start DESC LIMIT 1",
-            (project_id, name),
-        ).fetchone()
-        if not current or current["pack_status"] not in (None, "ready"):
-            gaps.append(name)
-            continue
-        ready_roles = {
-            row["view_role"] for row in conn.execute(
-                "SELECT view_role, status, image_path FROM character_portrait_views "
-                "WHERE portrait_id=?", (current["id"],),
-            ).fetchall()
-            if row["status"] == "ready" and row["image_path"]
-        }
-        if any(role not in ready_roles for role in CHARACTER_REQUIRED_VIEWS):
-            gaps.append(name)
-    return gaps
+    return [name for name in established if _character_pack_incomplete(conn, project_id, name)]
+
+def _incomplete_portrait_eligible_names(conn, project_id: str) -> list[str]:
+    """refs_status='ready' 的产物判据：人物谱里每个具备定妆资格的角色是否都
+    真的有完整定妆包——挂在「角色都有图」这个产物信号上，不挂在「批量任务
+    跑完了」这个过程信号上。名单口径覆盖全部具备定妆资格的角色（不止「已
+    建卡」的），换画风把 character_portraits 整表清空后仍能如实报告「全部
+    缺图」，不因「没有已建卡角色」就误判无需检查。"""
+    import json
+
+    from app.schemas import character_is_portrait_eligible
+
+    row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+    if not row or not row["bible_json"]:
+        return []
+    bible = json.loads(row["bible_json"])
+    names = [c.get("name") for c in bible.get("characters", []) if character_is_portrait_eligible(c)]
+    return [name for name in names if _character_pack_incomplete(conn, project_id, name)]
 
 async def _refs_task(
     project_id: str,
@@ -348,13 +357,30 @@ async def _refs_task(
         )
         if not resume:
             worker.purge_character_video_artifacts(project_id, names)
+        # refs_status='ready' 必须挂在「人物谱里每个具备定妆资格的角色都真的
+        # 有完整定妆包」这个产物信号上，不能挂在「本次生成步骤没抛异常」这个
+        # 过程信号上——否则名单口径错配（例如换画风把 character_portraits
+        # 整表清空后本批次名单意外算成空）会让 refs_status 报 ready 但实际
+        # 大批角色仍缺图，下游映射台/分镜台会误以为素材已齐（CLAUDE.md
+        # 「Gates and Criteria」）。
+        incomplete = _incomplete_portrait_eligible_names(conn, project_id)
+        if incomplete:
+            final_status, final_error, final_message = (
+                "warning",
+                f"定妆任务已结束，但仍有角色缺少完整定妆包：{'、'.join(incomplete[:8])}",
+                f"人物参考资产已生成，但仍有缺口：{'、'.join(incomplete[:8])}",
+            )
+        else:
+            final_status, final_error, final_message = (
+                "ready", None, "人物参考资产已生成且结构完整",
+            )
         conn.execute(
-            "UPDATE projects SET refs_status='ready', refs_error=NULL, refs_target=NULL, "
+            "UPDATE projects SET refs_status=?, refs_error=?, refs_target=NULL, "
             "refs_batch_started_at=NULL WHERE id=?",
-            (project_id,),
+            (final_status, final_error, project_id),
         )
         conn.commit()
-        recorder.succeed("人物参考资产已生成且结构完整", conn=None)
+        recorder.succeed(final_message, conn=None)
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
             recorder.pause_external("服务重启，定妆任务等待自动恢复", conn=None)

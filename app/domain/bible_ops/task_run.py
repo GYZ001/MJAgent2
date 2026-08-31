@@ -30,6 +30,7 @@ from app.orchestration.engine import (
     WorkflowRecorder,
     fingerprint,
 )
+from app.schemas import character_is_portrait_eligible
 from app.stages import (
     StageError,
     generate_bible,
@@ -149,7 +150,15 @@ async def _bible_task(
         # 恒为空，旧的「无条件触发」假设不再成立）。
         if trigger_full_refs and not residual and (not old_bible or (old_style and bible.world.visual_style_canonical != old_style)):
             try:
-                _start_refs_generation(project_id, None)
+                # 显式传全部具备定妆资格的角色名单，不能让 _start_refs_generation
+                # 靠「没传 only_characters」自己去猜范围：上面 _purge_for_style_change
+                # 已经把 character_portraits 整表清空，此时若不传范围，它内部的
+                # 「已建卡角色缺口」扫描（_established_portrait_gap_names）会因为
+                # 表刚被清空而查到零个已建卡角色，把整批当空选中悄悄早退——一个
+                # 角色都不会重新出图，refs_status 却仍会走向 ready（实战撞到：
+                # 我欲封天换画风后 5 个角色只剩 1 个有图）。名单口径与
+                # compute_refs_cost_precheck 的整包生成分支同源，不重写第二份。
+                _start_refs_generation(project_id, None, only_characters=[c.name for c in bible.characters if character_is_portrait_eligible(c)])
             except Exception as exc:  # noqa: BLE001 bible remains deliverable
                 public = errors.record_and_format(
                     exc, action="refs_spawn_after_bible", context={"project_id": project_id},

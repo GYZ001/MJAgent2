@@ -7,9 +7,13 @@
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
-from app.domain.bible_ops.refs_generation import _established_portrait_gap_names
+from app.domain.bible_ops.refs_generation import (
+    _established_portrait_gap_names,
+    _incomplete_portrait_eligible_names,
+)
 
 
 def _conn() -> sqlite3.Connection:
@@ -124,3 +128,68 @@ def test_mixed_established_characters_only_gaps_returned() -> None:
     conn.commit()
 
     assert _established_portrait_gap_names(conn, "proj_test") == ["待补图"]
+
+
+# ---------------------------------------------------------------------------
+# refs_status='ready' 的产物判据：_incomplete_portrait_eligible_names。
+#
+# 与上面的 _established_portrait_gap_names（只看「已建卡」角色）不同，这份
+# 判据覆盖人物谱里**全部**具备定妆资格的角色——包括从未在 character_portraits
+# 出现过的角色。实战撞到的故障：换画风把 character_portraits 整表清空后，
+# 「已建卡角色」扫描查到零个角色、误判成「无需检查」，refs_status 报 ready
+# 但实际 4/5 角色缺图（CLAUDE.md「空集合不等于无需检查」）。
+# ---------------------------------------------------------------------------
+
+def _conn_with_bible(names: list[str]) -> sqlite3.Connection:
+    conn = _conn()
+    conn.execute("CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT)")
+    bible_json = json.dumps({
+        "characters": [
+            {"name": n, "role": "配角", "appearance_canonical": f"{n}占位外观"}
+            for n in names
+        ],
+    }, ensure_ascii=False)
+    conn.execute("INSERT INTO projects(id, bible_json) VALUES('proj_test', ?)", (bible_json,))
+    return conn
+
+
+def test_all_characters_ready_means_no_incomplete_names() -> None:
+    conn = _conn_with_bible(["甲一", "乙二"])
+    for pid, name in (("p1", "甲一"), ("p2", "乙二")):
+        _insert_portrait(conn, pid, name, ep_start=1, ep_end=None, pack_status="ready")
+        _insert_views(conn, pid, ["front_full", "three_quarter", "profile"])
+    conn.commit()
+
+    assert _incomplete_portrait_eligible_names(conn, "proj_test") == []
+
+
+def test_never_established_character_counts_as_incomplete() -> None:
+    """核心回归锁：换画风把 character_portraits 整表清空后，5 个角色里只有 1
+    个（甲一）被重新出图——其余 4 个从未出现在 character_portraits 里，
+    「已建卡角色」口径看不见它们，但产物判据必须能看见。"""
+    conn = _conn_with_bible(["甲一", "乙二", "丙三", "丁四", "戊五"])
+    _insert_portrait(conn, "p1", "甲一", ep_start=1, ep_end=None, pack_status="ready")
+    _insert_views(conn, "p1", ["front_full", "three_quarter", "profile"])
+    conn.commit()
+
+    assert _incomplete_portrait_eligible_names(conn, "proj_test") == [
+        "乙二", "丙三", "丁四", "戊五",
+    ]
+
+
+def test_established_but_incomplete_pack_counts_as_incomplete() -> None:
+    conn = _conn_with_bible(["甲一"])
+    _insert_portrait(conn, "p1", "甲一", ep_start=1, ep_end=None, pack_status="ready")
+    _insert_views(conn, "p1", ["front_full", "three_quarter"])  # profile 缺失
+    conn.commit()
+
+    assert _incomplete_portrait_eligible_names(conn, "proj_test") == ["甲一"]
+
+
+def test_no_bible_json_returns_empty_not_error() -> None:
+    conn = _conn()
+    conn.execute("CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT)")
+    conn.execute("INSERT INTO projects(id, bible_json) VALUES('proj_test', NULL)")
+    conn.commit()
+
+    assert _incomplete_portrait_eligible_names(conn, "proj_test") == []

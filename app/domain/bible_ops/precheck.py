@@ -40,8 +40,8 @@ from .primitives import (
 
 
 def _purge_for_style_change(project_id: str, instance: "Bible") -> dict:
-    """画风变更的连锁失效：清理全项目旧画风视频产物，并作废旧画风定妆照
-    （旧定妆照/旧尾帧是比文字 prompt 更强的画风信号，残留会把新画风拉回旧画风）。"""
+    """画风变更的连锁失效：清理全项目旧画风视频产物，并作废旧画风定妆照（旧定妆照/旧尾帧是比文字 prompt 更强的画风信号，残留会把新画风拉回旧画风）。
+    硬删除而非 promote_staged_initial_portrait 式负数归档：与 purge_character_portrait 同属彻底退场惯例，详见改动报告。"""
     purged = worker.purge_project_video_artifacts(project_id)
     refs_cleared = 0
     for c in instance.characters:

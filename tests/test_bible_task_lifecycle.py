@@ -50,8 +50,8 @@ def test_bible_task_starts_full_refs_after_success(monkeypatch) -> None:
 
     started: dict[str, object] = {}
 
-    def fake_start_refs(project_id: str, only_character: str | None) -> bool:
-        started["args"] = (project_id, only_character)
+    def fake_start_refs(project_id: str, only_character: str | None, *, only_characters=None, **_kwargs) -> bool:
+        started["args"] = (project_id, only_character, tuple(only_characters or []))
         return True
 
     patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
@@ -64,7 +64,11 @@ def test_bible_task_starts_full_refs_after_success(monkeypatch) -> None:
     assert row["bible_status"] == "ready"
     assert row["status"] == "bible_ready"
     assert row["bible_version"] == 1
-    assert started["args"] == ("proj_test", None)
+    # only_characters 必须显式带出全部具备定妆资格的角色名单——不能让
+    # _start_refs_generation 靠「没传」自己去猜范围（见 precheck.py
+    # _purge_for_style_change 与本文件顶部改动说明：established-gap 扫描在
+    # 表刚被清空时会把整批错判成空，一个角色都不出图却仍报 refs_status=ready）。
+    assert started["args"] == ("proj_test", None, ("甲一",))
 
 
 def test_bible_task_skips_refs_regen_when_style_unchanged_with_existing_characters(monkeypatch) -> None:
@@ -172,6 +176,61 @@ def test_bible_task_still_regens_refs_when_style_actually_changes(monkeypatch) -
     assert refs_started == ["proj_test"], "画风确实变化时必须触发定妆照重新生成"
 
 
+def test_bible_task_style_change_regenerates_every_character_not_just_first(monkeypatch) -> None:
+    """回归锁（实战撞到：《我欲封天》换画风后 5 个角色只有 1 个重新出图）。
+
+    _purge_for_style_change 会先把 character_portraits 整表清空；如果这里
+    仍像旧代码一样只传 _start_refs_generation(project_id, None)（不显式给
+    only_characters），它内部退化成的「已建卡角色缺口」扫描
+    （_established_portrait_gap_names）会因为表刚被清空查到零个已建卡角色，
+    把整批角色当空选中悄悄早退——一个都不会重新出图。这里用 5 个角色钉住：
+    必须把全部具备定妆资格的角色名单传下去，不能只传第一个或漏传。
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE chapters(project_id TEXT, idx INTEGER)")
+    conn.execute(
+        "CREATE TABLE projects("
+        "id TEXT PRIMARY KEY, bible_json TEXT, bible_version INTEGER DEFAULT 0, "
+        "bible_status TEXT, bible_error TEXT, status TEXT)"
+    )
+    names = ["孟浩", "王有材", "上官修", "赵武刚", "王腾飞"]
+    old_bible = Bible(
+        world=World(visual_style_canonical="真人摄影风，实拍质感，自然光影"),
+        characters=[
+            Character(name=n, role="配角", appearance_canonical=f"{n}的外观描述占位")
+            for n in names
+        ],
+    )
+    conn.execute(
+        "INSERT INTO projects(id, bible_json, bible_version, bible_status, bible_error, status) "
+        "VALUES('proj_test', ?, 1, 'running', NULL, 'bible_ready')",
+        (old_bible.model_dump_json(),),
+    )
+    conn.commit()
+
+    async def fake_generate_bible(*_args, previous_bible=None, **_kwargs):
+        return Bible(
+            world=World(visual_style_canonical="国漫3D动画电影质感，虚构数字角色，精致光影"),
+            characters=[Character(**c) for c in previous_bible["characters"]],
+        )
+
+    calls: list[tuple] = []
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "generate_bible", fake_generate_bible)
+    patch_api_everywhere(monkeypatch, "_purge_for_style_change", lambda *_a, **_k: {})
+    patch_api_everywhere(monkeypatch, "_start_refs_generation",
+        lambda project_id, only_character, *, only_characters=None, **_k:
+            calls.append((project_id, only_character, tuple(only_characters or []))) or True,
+    )
+
+    asyncio.run(api._bible_task("proj_test", trigger_full_refs=True))
+
+    assert len(calls) == 1
+    assert calls[0][0] == "proj_test"
+    assert set(calls[0][2]) == set(names), "换画风必须重新生成人物谱里的每一个角色，不能只出第一个"
+
+
 def test_bible_task_no_longer_auto_starts_scene_preparation(monkeypatch) -> None:
     """架构转向（2026-08-31）：generate_scene_bible 批量场景清单生成退出首版
     流程，_bible_task 成功后不再自动触发 _start_scene_bible_preparation——
@@ -199,7 +258,7 @@ def test_bible_task_no_longer_auto_starts_scene_preparation(monkeypatch) -> None
 
     patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     patch_api_everywhere(monkeypatch, "generate_bible", fake_generate_bible)
-    patch_api_everywhere(monkeypatch, "_start_refs_generation", lambda *_args: True)
+    patch_api_everywhere(monkeypatch, "_start_refs_generation", lambda *_args, **_kwargs: True)
     prepared: list[str] = []
     patch_api_everywhere(monkeypatch,
         "_start_scene_bible_preparation",
@@ -254,7 +313,7 @@ def test_bible_completion_preserves_planned_project_status(monkeypatch) -> None:
 
     patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     patch_api_everywhere(monkeypatch, "generate_bible", fake_generate_bible)
-    patch_api_everywhere(monkeypatch, "_start_refs_generation", lambda *_args: True)
+    patch_api_everywhere(monkeypatch, "_start_refs_generation", lambda *_args, **_kwargs: True)
 
     asyncio.run(api._bible_task("proj_planned", trigger_full_refs=True))
 

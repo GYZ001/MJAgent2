@@ -171,6 +171,48 @@ def test_set_bible_style_confirm_spawns_both_legs_in_one_request(monkeypatch) ->
     assert row["bible_style_name"] == "真人摄影风"
 
 
+def test_set_bible_style_confirm_regenerates_every_eligible_character(monkeypatch) -> None:
+    """回归锁（实战撞到：《我欲封天》换画风后 5 个角色只有 1 个重新出图）。
+
+    _start_refs_generation 不传 only_characters 时会退化成「已建卡角色缺口」
+    扫描（_established_portrait_gap_names），那份扫描只认 character_portraits
+    里已经出现过的角色——新架构下角色只随映射台按需建卡，凡是还没被任何一
+    集映射过的角色永远不在扫描结果里，画风切换对它们就是无害空转的假象。
+    set_bible_visual_style 必须显式把全部具备定妆资格的角色传下去，覆盖范围
+    要和 _compute_style_regen_quote 报价时的整包口径一致，不能少算。
+    """
+    old_prompt = "国漫3D动画电影质感，明确虚构数字角色、非真人照片，精致光影，统一电影画面。"
+    names = ["孟浩", "王有材", "上官修", "赵武刚", "王腾飞"]
+    bible_json = json.dumps({
+        "characters": [
+            {"name": n, "role": "配角", "appearance_canonical": f"{n}的外观描述占位"}
+            for n in names
+        ],
+        "world": {"era": "", "genre": "仙侠", "visual_style_canonical": old_prompt},
+        "scenes": [],
+    }, ensure_ascii=False)
+    conn = _make_conn(bible_json, bible_version=0)
+    _patch_project(monkeypatch, conn)
+    calls = _patch_spawns(monkeypatch)
+
+    precheck = _confirm_required_quote(monkeypatch, conn, {
+        "style_name": "真人摄影风", "expected_version": 0,
+    })
+    assert precheck["characters"]["character_count"] == 5
+
+    result = asyncio.run(bible_ops.set_bible_visual_style("p1", {
+        "style_name": "真人摄影风", "expected_version": 0,
+        "confirm": True, "quote_id": precheck["quote_id"],
+    }))
+
+    assert result["refs_started"] is True
+    assert len(calls["refs"]) == 1
+    assert set(calls["refs"][0][2]["only_characters"]) == set(names), (
+        "换画风必须把全部具备定妆资格的角色传给 _start_refs_generation，"
+        "不能只靠已建卡角色缺口扫描（会漏掉从未建卡的角色）"
+    )
+
+
 def test_set_bible_style_confirm_idempotent_replay_does_not_respawn(monkeypatch) -> None:
     """反复确认同一报价：第二次是幂等重放，不重复触发生成、不重复扣费。"""
     old_prompt = "国漫3D动画电影质感，明确虚构数字角色、非真人照片，精致光影，统一电影画面。"
