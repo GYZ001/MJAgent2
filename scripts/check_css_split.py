@@ -17,7 +17,14 @@ import check_dark_theme as C
 SRC = pathlib.Path('/root/MJAgent2/frontend/src')
 PAGES = {
     'BiblePage': ['pages/BiblePage.tsx'], 'BoardPage': ['pages/BoardPage.tsx'],
-    'WallPage': ['pages/WallPage.tsx'], 'ScriptPage': ['pages/ScriptPage.tsx'],
+    'WallPage': ['pages/WallPage.tsx'],
+    'ScriptPage': [
+        'pages/ScriptPage.tsx',
+        # 2026-08-31 映射台入口审计：预检弹窗与"新发现/索引历史资源"摘要拆到
+        # components/script/ 下的独立文件，不登记就会被判成"不属于任何页面"，
+        # 从而被要求挪进 index.css（同 AccountAdminPage 的先例）。
+        'components/script/',
+    ],
     'ScenesPage': ['pages/ScenesPage.tsx'], 'MonitorPage': ['pages/MonitorPage.tsx', 'pages/monitor/'],
     'CinemaPage': ['pages/CinemaPage.tsx'], 'ReaderPage': ['pages/ReaderPage.tsx'],
     'AccountAdminPage': [

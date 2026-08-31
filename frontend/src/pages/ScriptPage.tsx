@@ -16,7 +16,8 @@ import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import { ScreenplayStatusStamp } from '../components/ProductionStatusStamp'
 import QueryState from '../components/QueryState'
 import OperationError from '../components/OperationError'
-import { useFocusTrap } from '../hooks/useFocusTrap'
+import PrepPackPreviewDialog from '../components/script/PrepPackPreviewDialog'
+import PrepPackDiscoverySummary from '../components/script/PrepPackDiscoverySummary'
 import { useDeleteConfirm } from '../hooks/useDeleteConfirm'
 import { screenplayTaskNotice } from '../lib/productionNotices'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
@@ -28,7 +29,7 @@ type ScreenplayProduction = NonNullable<
   NonNullable<ReturnType<typeof useScriptEpisode>['data']>['screenplay_production']
 >
 
-type ActionPreview = {
+export type ActionPreview = {
   title: string
   data: Record<string, any>
   idempotencyKey: string
@@ -324,7 +325,6 @@ export default function ScriptPage() {
   const [detailsExpanded, setDetailsExpanded] = useState(false)
   const [preview, setPreview] = useState<ActionPreview | null>(null)
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false)
-  const previewTrapRef = useFocusTrap(Boolean(preview), () => setPreview(null))
   const deleteConfirm = useDeleteConfirm()
 
   const screenplayTaskActive = ep?.screenplay_production?.task_active
@@ -346,7 +346,8 @@ export default function ScriptPage() {
   const stages = resolveStages(ep?.screenplay_production)
   const normalizedStages = useMemo(() => stages.map(normalizeStage), [stages])
   const activeStage = normalizedStages.find(item => item.tone === 'active')
-  const generatingHint = activeStage ? `正在${activeStage.text}…` : '正在生成映射包…'
+  const generatingHint = (activeStage ? `正在${activeStage.text}…` : '正在生成映射包…')
+    + '完成后将展示本集新建的角色卡/定妆照与已匹配的历史素材。'
 
   const run = async (fn: () => Promise<any>, done?: string) => {
     setBusy(true)
@@ -445,7 +446,7 @@ export default function ScriptPage() {
       case 'generate_screenplay':
         return <button className="btn primary" disabled={Boolean(screenplayGenerateDisabledReason)}
           aria-label={screenplayGenerateDisabledReason ? `首次生成映射包，暂不可用：${screenplayGenerateDisabledReason}` : '首次生成映射包'}
-          title={screenplayGenerateDisabledReason || '生成前将展示输入范围'} onClick={openScreenplayPreview}>首次生成映射包</button>
+          title={screenplayGenerateDisabledReason || '生成前会展示输入范围；本集新角色/新场景将自动建卡并生成定妆照，已有的自动匹配复用'} onClick={openScreenplayPreview}>首次生成映射包</button>
       case 'stop_screenplay':
         return <button className="btn ghost danger" disabled={busy}
           aria-label={busy ? '停止映射包任务，暂不可用：正在处理上一项操作' : '停止映射包任务'}
@@ -479,7 +480,7 @@ export default function ScriptPage() {
     <>
       <header className="desk-head">
         <EpisodeCrumb label="映射台" view="script" episodeNo={ep.episode_no} />
-        <h1>映射台 <span className="sub">《{ep.title}》 · 先发现本集人物/场景并映射到世界书素材，再交给分镜台生成视频提示词</span></h1>
+        <h1>映射台 <span className="sub">《{ep.title}》 · 发现本集人物/场景：新角色/新场景自动建卡并生成定妆照，已有的自动匹配世界书素材，再交给分镜台生成视频提示词</span></h1>
         <div className="stage-model-picker-row">
           <StageTextModelPicker
             projectId={projectId!}
@@ -619,36 +620,7 @@ export default function ScriptPage() {
         />
       )}
 
-      {preview && (
-        <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
-          if (event.currentTarget === event.target) setPreview(null)
-        }}>
-          <section ref={previewTrapRef} className="impact-dialog" role="dialog" aria-modal="true" aria-label={preview.title}>
-            <h3>{preview.title}</h3>
-            <p>预检不会创建任务；只有点击下方执行按钮才会发起。</p>
-            <ul>
-              <li>
-                原文 {preview.data.input?.source_chars ?? '—'} 字，
-                覆盖 {preview.data.input?.source_chapters?.length ?? '—'} 个源章节
-              </li>
-              {preview.data.blueprint_budget?.requires_fresh_retry_grant && (
-                <li className="danger">
-                  上次生成的模型调用被中断、结果未知（常见于服务重启或网络波动）。
-                  为避免重复扣费，系统已暂停自动重试；确认继续将授权对同一环节重新发起一次付费调用。
-                </li>
-              )}
-            </ul>
-            <div className="dialog-actions">
-              <button className="btn" onClick={() => setPreview(null)}>取消（不执行）</button>
-              <button className="btn primary" onClick={executePreview}>
-                {preview.data.blueprint_budget?.requires_fresh_retry_grant
-                  ? '授权并重试（可能重新计费）'
-                  : '启动首版映射包生成'}
-              </button>
-            </div>
-          </section>
-        </div>
-      )}
+      <PrepPackPreviewDialog preview={preview} onCancel={() => setPreview(null)} onConfirm={executePreview} />
       {deleteConfirm.dialog}
     </>
   )
@@ -745,6 +717,10 @@ export function PrepPackView({
       {!gate.ok && (
         <p className="prep-gate-missing">缺失原文段索引：{gate.uncoveredLabels.join('、') || '未知'}</p>
       )}
+
+      {/* 本集"发现了什么/复用了什么"一目了然摘要，不必逐条悬停 provenance 才知道
+          结果——见 PrepPackDiscoverySummary 的判据说明。 */}
+      <PrepPackDiscoverySummary characters={characters} scenes={scenes} />
 
       {/* 真 bug 修复：旧版（转型前）映射包没有 segment_indexes/appellation_map/props
           字段，字段缺失绝不能渲染成"测量后是 0"或"核对后未发现"——这里换成显式

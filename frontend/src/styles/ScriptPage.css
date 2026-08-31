@@ -220,6 +220,20 @@
   font: 12.5px/1.7 var(--ui, sans-serif);
   word-break: break-word;
 }
+/* 本集"新发现 vs 索引历史"一目了然摘要（PrepPackDiscoverySummary）：紧跟门禁
+   条带，人物/场景两个分句之间留出可换行的间距，不做成卡片——它是结果的补充
+   说明，不是独立的交付物区块。 */
+.prep-discovery-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin: 8px 2px 0;
+  color: var(--ink-soft);
+  font: 12.5px/1.7 var(--ui, sans-serif);
+}
+.prep-discovery-summary-item {
+  white-space: nowrap;
+}
 /* 资源清单是这一页的交付物主体：人物/场景/道具各自成节，纵向堆叠、每节
    独占整页宽度（沿用 index.css 的 .card + .card 卡间距），取代旧的"称谓表在左、
    资源挤进窄侧栏"两栏骨架。 */

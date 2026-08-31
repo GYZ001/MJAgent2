@@ -1,0 +1,49 @@
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { describe, expect, it } from 'vitest'
+import PrepPackPreviewDialog from './PrepPackPreviewDialog'
+
+// 这是映射台唯一一处"点下去会真正开始生成、会花钱"之前的确认点——新架构下
+// 映射台是用户拿到角色卡的唯一入口，弹窗必须在这里说清楚点击后会发生什么
+// （新角色/新场景自动建卡+生成定妆照，已有的自动匹配复用），不能只说
+// "将展示输入范围"这种不涉及产出的技术性描述。
+
+describe('PrepPackPreviewDialog', () => {
+  it('renders nothing when there is no pending preview', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackPreviewDialog, {
+      preview: null, onCancel: () => {}, onConfirm: () => {},
+    }))
+    expect(html).toBe('')
+  })
+
+  it('states the real outcome (auto card + portrait creation, auto reuse of existing ones) before the user commits', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackPreviewDialog, {
+      preview: {
+        title: '首次生成映射包预检',
+        data: { input: { source_chars: 3200, source_chapters: [1, 2] } },
+        idempotencyKey: 'k1',
+      },
+      onCancel: () => {}, onConfirm: () => {},
+    }))
+    expect(html).toContain('自动建卡并生成定妆照')
+    expect(html).toContain('自动匹配复用')
+    expect(html).toContain('3200')
+    expect(html).toContain('启动首版映射包生成')
+  })
+
+  it('still surfaces the fresh-retry-grant warning when the backend flags an unknown prior receipt', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackPreviewDialog, {
+      preview: {
+        title: '首次生成映射包预检',
+        data: {
+          input: { source_chars: 100, source_chapters: [1] },
+          blueprint_budget: { requires_fresh_retry_grant: true },
+        },
+        idempotencyKey: 'k2',
+      },
+      onCancel: () => {}, onConfirm: () => {},
+    }))
+    expect(html).toContain('结果未知')
+    expect(html).toContain('授权并重试（可能重新计费）')
+  })
+})
