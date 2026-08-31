@@ -195,3 +195,81 @@ describe("api session recovery", () => {
     expect(unauthenticatedCalls).toBe(1);
   });
 });
+
+describe("waiting_approval 的自动消费边界（2026-08-30：除了删除资源，否则不需要弹窗）", () => {
+  it("confirmation_policy=always（删除资源）不自动消费，抛出 ApprovalRequiredError 供调用方展示确认弹窗", async () => {
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/auth/login") return loginResponse("login-token");
+        if (url === "/api/projects/p1/purge") {
+          calls += 1;
+          const token = new Headers(init?.headers).get("X-Manju-Approval-Token");
+          if (!token) {
+            return Response.json(
+              {
+                status: "waiting_approval",
+                approval_token: "tok-1",
+                preflight: { summary: "彻底删除项目", confirmation_policy: "always" },
+              },
+              { status: 202 },
+            );
+          }
+          return Response.json({ ok: true, purged: true });
+        }
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+
+    const { api, login, ApprovalRequiredError } = await import("./api");
+    await login("alice", "secret12");
+
+    let caught: InstanceType<typeof ApprovalRequiredError> | undefined;
+    try {
+      await api.del("/projects/p1/purge");
+    } catch (e) {
+      caught = e as InstanceType<typeof ApprovalRequiredError>;
+    }
+    expect(caught).toBeInstanceOf(ApprovalRequiredError);
+    expect(caught?.preflight.summary).toBe("彻底删除项目");
+    expect(calls).toBe(1); // 没有自动带 approval_token 重放
+
+    await expect(caught!.retry()).resolves.toEqual({ ok: true, purged: true });
+    expect(calls).toBe(2);
+  });
+
+  it("confirmation_policy 不是 always（非删除资源）时仍照旧自动带 approval_token 重放，不弹窗", async () => {
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/auth/login") return loginResponse("login-token");
+        if (url === "/api/system/settings") {
+          calls += 1;
+          const token = new Headers(init?.headers).get("X-Manju-Approval-Token");
+          if (!token) {
+            return Response.json(
+              {
+                status: "waiting_approval",
+                approval_token: "tok-2",
+                preflight: { summary: "更新设置", confirmation_policy: "when_impact" },
+              },
+              { status: 202 },
+            );
+          }
+          return Response.json({ ok: true, updated: true });
+        }
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+
+    const { api, login } = await import("./api");
+    await login("alice", "secret12");
+
+    await expect(api.put("/system/settings", {})).resolves.toEqual({ ok: true, updated: true });
+    expect(calls).toBe(2); // 首次拿到 202，第二次自动带 token 重放——调用方全程无感
+  });
+});

@@ -23,7 +23,7 @@ def commands() -> list[CommandSpec]:
             description="消费 attachment_token 创建项目并导入 TXT 或 EPUB，随后自动分集并生成人物谱与多视角素材库",
             input_model=I.ProjectImportNovelInput,
             risk=RiskLevel.R2_MATERIAL,
-            confirmation=ConfirmationPolicy.ALWAYS,
+            confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.REQUIRED,
             scopes={"manju:project-write"},
             side_effect="creates_project",

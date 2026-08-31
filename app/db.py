@@ -1413,7 +1413,6 @@ def _repair_dangling_video_adoption(conn: sqlite3.Connection) -> int:
         invalidate_episode_delivery_authority(conn, episode_id)
     return len(bad_shot_ids)
 
-
 # 增量迁移：已有库上加列（首次建表时 SCHEMA 已含则忽略报错）
 MIGRATIONS = (
     """CREATE TABLE IF NOT EXISTS media_cleanup_outbox (
@@ -1715,6 +1714,7 @@ MIGRATIONS = (
     # created_at，不是一个跨行常量）。
     "ALTER TABLE users ADD COLUMN tier TEXT NOT NULL DEFAULT 'free'",
     "ALTER TABLE users ADD COLUMN quota_period_started_at REAL",
+    "ALTER TABLE users ADD COLUMN tier_expires_at REAL",  # 会员到期：NULL=不过期，见 app/quota_expiry.py
     # 配额用量的唯一事实来源（append-only）：当前用量 = SUM(delta) WHERE
     # user_id=? AND resource=? AND period_index=?。UNIQUE(resource,
     # attempt_key, reason) 是幂等的唯一保证——同一次尝试（attempt_key，如
@@ -1752,6 +1752,31 @@ MIGRATIONS = (
     # 30 天（app.domain.projects.ACCOUNT_DELETE_RETENTION_S），与账号自身的
     # 保留期绑定一致，见 sweep_expired_deleted_projects()。
     "ALTER TABLE projects ADD COLUMN recycle_bin_retention_s INTEGER",
+    # 支付订单（见 app/payments/ 模块文档）：微信/支付宝下单+回调+对账的唯一
+    # 事实来源。amount_fen 用整数分，不用浮点存钱；status 状态机只能前进
+    # （pending -> paid -> fulfilled，或 pending -> closed），见
+    # app.payments.models.ALLOWED_TRANSITIONS；product_detail_json 存商品参数
+    # （加量包的 packages 数 / 档位升级的 target_tier），发货时读出来调用既有
+    # 的 app.quota_addon.grant_video_addon_seconds 或直接写 users.tier，不在
+    # 这张表里另建一套记账——quota_ledger 的 attempt_key 直接用这张表的 id
+    # （订单号），见 app.payments.fulfillment。
+    """CREATE TABLE IF NOT EXISTS payment_orders (
+           id TEXT PRIMARY KEY,
+           user_id TEXT NOT NULL,
+           channel TEXT NOT NULL,
+           product TEXT NOT NULL,
+           product_detail_json TEXT NOT NULL,
+           amount_fen INTEGER NOT NULL,
+           status TEXT NOT NULL,
+           channel_txn_id TEXT,
+           close_reason TEXT,
+           created_at REAL NOT NULL,
+           paid_at REAL,
+           fulfilled_at REAL,
+           closed_at REAL
+       )""",
+    "CREATE INDEX IF NOT EXISTS idx_payment_orders_user ON payment_orders(user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_payment_orders_status ON payment_orders(status, created_at)",
 )
 
 

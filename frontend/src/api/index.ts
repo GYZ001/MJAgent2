@@ -1,8 +1,9 @@
 // 前端 API 层入口。拆分后的目录结构：
-//   client.ts    — 传输层：ApiError、会话管理、request/get/mutate/download（内部
-//                  可见，不在这里对外导出；只有 get/post/put/del/upload 这几个
-//                  逃生口作为 `api` 对象的方法保留，供确实无法收敛成具名方法的
-//                  调用点使用）。
+//   client.ts    — 传输层：ApiError、ApprovalRequiredError（删除资源类命令
+//                  等待批准，见 hooks/useDeleteConfirm）、会话管理、
+//                  request/get/mutate/download（内部可见，不在这里对外导出；
+//                  只有 get/post/put/del/upload 这几个逃生口作为 `api` 对象
+//                  的方法保留，供确实无法收敛成具名方法的调用点使用）。
 //   auth.ts      — 登录态：login/logout/me/changePassword，onUnauthenticated 信号。
 //   common.ts    — 跨域共享的叶子类型（ArtifactEvidence/TaskTiming/...）与
 //                  numToCn 工具。
@@ -18,7 +19,7 @@
 // 硬约束：`api` 对象的方法名与对外形状不得因为这次重组而改变——全前端大量
 // `import { api } from '../api'`，这里只是换文件组织，不是换 API。
 
-import { download, get, mutate, request, ApiError, onUnauthenticated } from "./client";
+import { download, get, mutate, request, ApiError, ApprovalRequiredError, onUnauthenticated } from "./client";
 import * as bibleApi from "./bible";
 import * as screenplayApi from "./screenplay";
 import * as storyboardApi from "./storyboard";
@@ -30,7 +31,8 @@ import { getArtifactLineage, numToCn } from "./common";
 
 export type { AuthMeResponse, AuthLoginResponse } from "./auth";
 export { login, logout, me, changePassword, deleteMyAccount } from "./auth";
-export { onUnauthenticated, ApiError };
+export { onUnauthenticated, ApiError, ApprovalRequiredError };
+export type { ApprovalPreflight } from "./client";
 export { numToCn };
 export * from "./common";
 export * from "./bible";

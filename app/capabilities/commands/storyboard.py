@@ -38,7 +38,7 @@ def commands() -> list[CommandSpec]:
             description="批量启动待办分镜",
             input_model=I.SelectorInput,
             risk=RiskLevel.R2_MATERIAL,
-            confirmation=ConfirmationPolicy.ALWAYS,
+            confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.REQUIRED,
             scopes={"manju:generation-text"},
             side_effect="creates_batch_runs",

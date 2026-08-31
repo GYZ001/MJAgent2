@@ -126,6 +126,9 @@ allowed_exceptions = []
                        # _UPGRADE_PATH），只 import app.quota_addon（同层，取
                        # 加量包定价文案）；不 import app.quota，避免环——
                        # app.quota 反过来 import 本模块做 re-export
+"app.quota_expiry" = 2  # 2026-08-30 新增：会员到期闸门，只 import app.db、
+                        # app.quota（取 QuotaExceeded，同层单向——app.quota
+                        # 反过来不 import 本模块，不构成环）
 "app.artifacts" = 2
 "app.evidence" = 2
 "app.errors" = 2  # 2026-08-30：原 L0，只 import app.db，见文件末尾变更说明
@@ -335,6 +338,15 @@ allowed_exceptions = []
 "app.monitoring" = 5
 "app.observability" = 5  # 前缀：覆盖裸模块与 .api；.tracing/.metrics 已用更
                           # 具体的 key 覆盖，最长前缀匹配优先于这条
+"app.payments" = 5  # 2026-08-30 新增：微信/支付宝下单+回调+对账+发货，前缀覆盖
+                     # 全部子模块（含零依赖的 crypto_asn1/crypto_rsa/crypto_aesgcm——
+                     # 它们本身是纯 stdlib、真实层号该是 L1，但零消费方在
+                     # app.payments 外，与 app.domain/app.capabilities 同一种
+                     # "只声明包前缀就够"的处理，不为包内单文件加更具体 key）。
+                     # 挂 APIRouter 只被 app.main 引用，与 app.auth.admin_api
+                     # 同一种"路由→域"入口角色；import app.db(L2)/
+                     # app.quota_addon(L2)，零反向依赖——本包外没有任何模块
+                     # import app.payments。
 "app.planning" = 5
 "app.recovery" = 5
 "app.system_api" = 5

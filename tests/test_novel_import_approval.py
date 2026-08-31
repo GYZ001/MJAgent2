@@ -120,15 +120,12 @@ def test_import_reuses_attachment_token_after_approval(
         "name": "回归测试小说",
     }
 
-    waiting = client.post("/api/projects/import", json=command_args)
-    assert waiting.status_code == 202
-    approval_token = waiting.json()["approval_token"]
-
-    imported = client.post(
-        "/api/projects/import",
-        json=command_args,
-        headers={"X-Manju-Approval-Token": approval_token},
-    )
+    # project.import_novel 不是删除资源，2026-08-30 产品追加拍板「除了删除
+    # 资源，否则不需要弹窗」后已从 confirmation=ALWAYS 降回 NEVER，所以第一次
+    # 调用就直接执行到域层，不会先拿到一次 202 + approval_token。这条用例现在
+    # 要验的是"同一个 attachment_token 重放不会建出第二个项目"这条幂等语义
+    # （见下面的 replayed 断言），不再是审批链路本身。
+    imported = client.post("/api/projects/import", json=command_args)
     assert imported.status_code == 200, imported.text
     payload = imported.json()
     assert payload["project_id"].startswith("proj_")
@@ -169,18 +166,12 @@ def test_legacy_multipart_import_reuses_upload_across_approval(
     file_payload = {
         "file": ("legacy.txt", "第一章 兼容入口\n正文内容。".encode(), "text/plain")
     }
-    waiting = client.post(
-        "/api/projects",
-        data={"name": "兼容入口"},
-        files=file_payload,
-    )
-    assert waiting.status_code == 202
-
+    # project.import_novel 现在是 confirmation=NEVER（见上一条用例同样的说明），
+    # 第一次调用直接执行。
     imported = client.post(
         "/api/projects",
         data={"name": "兼容入口"},
         files=file_payload,
-        headers={"X-Manju-Approval-Token": waiting.json()["approval_token"]},
     )
 
     assert imported.status_code == 200, imported.text
@@ -206,27 +197,19 @@ def test_import_keeps_attachment_available_when_project_creation_fails(
         files={"file": ("retry.txt", "第一章 重试\n正文仍在。".encode(), "text/plain")},
     )
     args = {"attachment_token": upload.json()["attachment_token"], "name": "可重试导入"}
-    waiting = client.post("/api/projects/import", json=args)
 
     def fail_create(*_args, **_kwargs):
         raise HTTPException(503, "数据库暂时不可用")
 
+    # project.import_novel 是 confirmation=NEVER，每次调用都直接执行到域层
+    # （不再有 202 + approval_token 这一步）。
     patch_api_everywhere(monkeypatch, "_create_project_core", fail_create)
-    failed = client.post(
-        "/api/projects/import",
-        json=args,
-        headers={"X-Manju-Approval-Token": waiting.json()["approval_token"]},
-    )
+    failed = client.post("/api/projects/import", json=args)
     assert failed.status_code == 503
     assert db.get_conn().execute("SELECT COUNT(*) AS c FROM projects").fetchone()["c"] == 0
 
     patch_api_everywhere(monkeypatch, "_create_project_core", original_create)
-    retry_waiting = client.post("/api/projects/import", json=args)
-    retried = client.post(
-        "/api/projects/import",
-        json=args,
-        headers={"X-Manju-Approval-Token": retry_waiting.json()["approval_token"]},
-    )
+    retried = client.post("/api/projects/import", json=args)
     assert retried.status_code == 200
     assert retried.json()["project_id"].startswith("proj_")
 
@@ -254,12 +237,10 @@ def test_import_reports_paid_asset_bootstrap_as_waiting_confirmation(
         files={"file": ("paid.txt", "第一章 开始\n这是正文。".encode(), "text/plain")},
     )
     args = {"attachment_token": upload.json()["attachment_token"], "name": "费用确认"}
-    waiting = client.post("/api/projects/import", json=args)
-    imported = client.post(
-        "/api/projects/import",
-        json=args,
-        headers={"X-Manju-Approval-Token": waiting.json()["approval_token"]},
-    )
+    # project.import_novel 是 confirmation=NEVER：直接调用即执行到域层，命中
+    # 的这个 409 PAYMENT_CONFIRM_REQUIRED 是域层自己的付费报价流（与 Command
+    # Bus 的 waiting_approval 是两套不同机制），本来就不受本次改动影响。
+    imported = client.post("/api/projects/import", json=args)
 
     assert imported.status_code == 200
     asset = imported.json()["asset_generation"]

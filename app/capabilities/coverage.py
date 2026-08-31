@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from app.capabilities.loader import ensure_catalog_loaded
-from app.capabilities.registry import get_registry
+from app.capabilities.registry import CommandSpec, get_registry
 from app.capabilities.schemas import ConfirmationPolicy
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -70,19 +70,30 @@ def _normalize_route_path(prefix: str, route_path: str) -> str:
     return full_path
 
 
+#: 会改变数据的 HTTP 方法。GET 不在内——它不需要能力分类。
+_MUTATING_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
+
+
 def discover_mutating_routes(app_dir: Path = APP_DIR) -> list[str]:
-    """从源码装饰器静态发现 mutating 路由（不启动 FastAPI / DB）。"""
-    found: set[str] = set()
-    for path in sorted(app_dir.rglob("*.py")):
-        if path.name.startswith("test_"):
-            continue
-        text = path.read_text(encoding="utf-8")
-        prefix = _router_prefix_for_file(path, text)
-        for match in _DECORATOR_RE.finditer(text):
-            method = match.group(1).upper()
-            full_path = _normalize_route_path(prefix, match.group(2))
-            found.add(f"{method} {full_path}")
-    return sorted(found)
+    """从源码装饰器静态发现 mutating 路由（不启动 FastAPI / DB）。
+
+    走 ``_iter_route_endpoints`` 的 AST 遍历，不再自己用正则扫一遍。原先这里
+    用的 ``_DECORATOR_RE`` 只认 ``@router.`` 与 ``@app.``，**认不出
+    ``@public_router.``**——于是 ``app/payments/routes.py`` 的两个渠道回调
+    （``/api/payments/notify/wechat`` 与 ``/notify/alipay``）压根没被扫到，
+    能力覆盖闸门对它们完全沉默。而公开路由恰恰是最该被分类的一类：它们不挂
+    会话鉴权，验签是唯一防线。``app/system_api.py`` 的 ``public_router`` 同样
+    受影响。
+
+    同一份判据不该有两套实现：AST 那条路径的 ``_ROUTER_NAMES`` 早就包含
+    ``public_router``，也不受多行装饰器影响，而这里的正则要求方法名与路径同行。
+    两套并存必然漂移，本次就是已经漂了——统一到 AST 一份。
+    """
+    return sorted(
+        f"{method} {full_path}"
+        for method, full_path, _src in _iter_route_endpoints(app_dir)
+        if method in _MUTATING_METHODS
+    )
 
 
 def _route_decorator_path(dec: ast.expr) -> tuple[str, str] | None:
@@ -234,6 +245,56 @@ def find_always_confirm_routes_without_gate() -> list[str]:
                     f"{name}: 路由 {rr} 声明 confirmation=ALWAYS，"
                     "但源码既不经 Command Bus 也没有本地确认闸门"
                 )
+    return problems
+
+
+def _is_resource_deletion(spec: CommandSpec) -> bool:
+    """「删除资源」判据：``side_effect`` 前缀 ``deletes_``/``purges_`` 表示不可逆
+    销毁资源本身。``soft_deletes_``（如 ``project.delete`` 移入回收站、
+    ``account.admin_soft_delete`` 移入 30 天保留期）刻意不算——两者都各自配一个
+    ``restore`` 命令，是可撤销的，本来就不该弹「不可撤销」的确认框。
+
+    没有用 HTTP 方法（DELETE）单独判：本仓库同时有 (a) DELETE 方法但可撤销
+    的路由（``account.admin_soft_delete``、``project.delete``，各自都配
+    restore）、也有 (b) POST 方法但确实销毁数据的路由（``video.clear_shot``
+    等走 ``POST .../clear-artifacts``，是这套 REST 命名的既有写法）——method
+    在这两个方向上都会误判，``side_effect`` 才是这里唯一自解释、和业务语义
+    直接绑定的字段。也没有用 ``risk == R3_DESTRUCTIVE``：``delivery.review``、
+    ``system.update_settings``、``video.adopt_version`` 都是 R3 但都不是删除
+    资源，用 risk 会把「破坏性」和「删除」两个不同的轴混成一个，反而把非删除
+    操作也判进「必须弹窗」。
+    """
+    return spec.side_effect.startswith(("deletes_", "purges_"))
+
+
+def find_confirmation_policy_mismatches() -> list[str]:
+    """产品规则闸门（2026-08-30 拍板）：除了删除资源，否则不需要弹窗。
+
+    catalog 的 ``confirmation`` 必须与这条规则双向一致，否则要么是「删资源却
+    不拦」，要么是「登记了 ALWAYS 但对浏览器用户从不生效」的又一个空头承诺——
+    Command Bus 的 ``WAITING_APPROVAL`` 对浏览器调用方会被
+    ``frontend/src/api/client.ts`` 自动用 ``approval_token`` 消费掉、不弹任何
+    确认界面，ALWAYS 对浏览器调用方唯一还生效的场景就是真正的资源删除（client.ts
+    专门对这一档改成不自动消费，改由页面弹出确认框，见该文件与
+    ``find_always_confirm_routes_without_gate`` 的判据说明）。
+    """
+    ensure_catalog_loaded()
+    registry = get_registry()
+    problems: list[str] = []
+    for name, spec in sorted(registry.commands.items()):
+        deletion = _is_resource_deletion(spec)
+        always = spec.confirmation == ConfirmationPolicy.ALWAYS
+        if deletion and not always:
+            problems.append(
+                f"{name}: side_effect={spec.side_effect!r} 是删除资源，"
+                "但 confirmation != ALWAYS——用户删除前不会被拦"
+            )
+        if always and not deletion:
+            problems.append(
+                f"{name}: confirmation=ALWAYS 但 side_effect={spec.side_effect!r} "
+                "不是删除资源——ALWAYS 对浏览器调用方无效（client.ts 自动消费 "
+                "approval_token），这是又一个空头承诺"
+            )
     return problems
 
 

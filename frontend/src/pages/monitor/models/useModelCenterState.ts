@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { api } from "../../../api";
+import { api, ApprovalRequiredError } from "../../../api";
 import type { CatalogModel, Health, ModelCatalog, ModelKind, SettingsView } from "../../../api";
 import { useFocusTrap } from "../../../hooks/useFocusTrap";
 import type { ModelTestState } from "./LibraryModal";
@@ -204,7 +204,7 @@ export function useModelCenterState({
   const removeModel = async (item: CatalogModel) => {
     setDeletingModel(true);
     try {
-      await api.deleteModel(item.id);
+      await api.deleteModel(item.id).catch(e => (e instanceof ApprovalRequiredError ? e.retry() : Promise.reject(e))); // DeleteModal 已问过一次，直接重放
       await refreshCatalog();
       setDeleteModel(null);
       toast(`${modelBusinessLabel(item.label)} 已删除`);

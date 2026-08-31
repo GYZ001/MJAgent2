@@ -29,14 +29,12 @@ def commands() -> list[CommandSpec]:
         # 同层，跨层顾虑已不成立），是因为总线的 WAITING_APPROVAL 对 UI 调用方会被
         # frontend/src/api/client.ts 自动用 approval_token 重放消费掉、不弹出任何
         # 确认 UI（2026-08-29 产品拍板下线生成前确认弹窗），经总线反而会掩盖这里
-        # 需要的真实人工确认。quota.grant_video_addon 不在此列——它是 R2 但没有
-        # 这种"自己有等价确认"的情况，2026-08-30 查明是 catalog 唯一一个声明
-        # confirm=always 却在真实 REST 路径上零确认/零幂等/零审计的命令，已改接
-        # app.auth.admin_api::grant_video_addon_route 经 ui_route()/dispatch()——
-        # 对这条命令而言，调用方带 idempotency_key 时总线幂等缓存就会生效（不带
-        # 时和此前一样按一次性 key 处理，是 app.auth.admin_api::grant_video_addon
-        # 文档过的既有取舍，未改变）；"确认"这一环对 UI 调用方同样是自动消费，
-        # 真正的人工闸口仍旧是 admin_only 鉴权本身。
+        # 需要的真实人工确认。quota.grant_video_addon 不在此列——它不是删除资源
+        # （2026-08-30 产品追加拍板：除了删除资源，否则不需要弹窗），已从
+        # confirm=always 降回 NEVER：ALWAYS 对浏览器调用方从来就只是空头承诺
+        # （同样会被 client.ts 自动消费掉），登记成 ALWAYS 只会让人误以为它有效。
+        # 幂等仍然生效（调用方带 idempotency_key 时总线幂等缓存生效，不带时按
+        # 一次性 key 处理，是既有取舍，未改变）；真正的人工闸口是 admin_only 鉴权。
         _cmd(
             "account.self_delete",
             title="删除本账号（不可撤销）",
@@ -91,7 +89,7 @@ def commands() -> list[CommandSpec]:
             description="管理员手工为账号发放视频加量包（每包 10 分钟，¥199）；加量包不随 30 天配额周期重置，发出即计费",
             input_model=I.QuotaGrantVideoAddonInput,
             risk=RiskLevel.R2_MATERIAL,
-            confirmation=ConfirmationPolicy.ALWAYS,
+            confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.REQUIRED,
             scopes={"manju:admin"},
             side_effect="grants_paid_quota",

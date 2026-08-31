@@ -19,6 +19,37 @@ export class ApiError extends Error {
   }
 }
 
+/** waiting_approval 载荷里的 preflight 字段（后端 PreflightResult 的 JSON 形状，
+ *  这里只声明前端实际会读的几个字段）。 */
+export interface ApprovalPreflight {
+  summary: string;
+  risk?: string;
+  confirmation_policy?: string;
+  affected?: {
+    projects?: string[];
+    episodes?: string[];
+    shots?: string[];
+    shot_count?: number;
+    versions?: string[];
+    packages?: string[];
+  };
+}
+
+/**
+ * 「删除资源」类命令在等待批准：与其余命令不同，这一档不会被 request() 自动
+ * 用 approval_token 重放掉（2026-08-30 产品拍板：除了删除资源，否则不需要
+ * 弹窗）。调用方（通常经 hooks/useDeleteConfirm）捕获后向用户展示
+ * `preflight.summary`，用户确认时调用 `retry()` 重放同一次请求。
+ */
+export class ApprovalRequiredError extends Error {
+  constructor(
+    public preflight: ApprovalPreflight,
+    public retry: () => Promise<any>,
+  ) {
+    super(preflight?.summary || "需要确认后才能继续，该操作不可撤销");
+  }
+}
+
 function normalizeNetworkError(error: unknown): Error {
   if (error instanceof ApiError) return error;
   const message = error instanceof Error ? error.message : String(error);
@@ -200,17 +231,28 @@ export async function request(
       if (!payload.approval_token) {
         throw new ApiError(403, "需要批准但未返回令牌，请在控制台确认后重试");
       }
-      // 浏览器端不再就用户自己刚点下的动作二次追问（2026-08-29 用户拍板：
-      // 生成前的批准/确认弹窗一律下线）。直接拿服务端下发的 approval_token
-      // 重放。注意这里删掉的只是「问用户」这一步——agent/MCP 那条人在环路
-      // 的闸门走 app/agent/approvals.py 与 app/mcp/server.py，自成一套
-      // approval_id，不经过本文件，保持原样。
-      return request(method, path, body, {
+      const resubmit = () => request(method, path, body, {
         ...options,
         approvalToken: String(payload.approval_token),
         _retried: true,
         _sessionRefreshed: true,
       });
+      // 浏览器端不再就用户自己刚点下的动作二次追问（2026-08-29 用户拍板：
+      // 生成前的批准/确认弹窗一律下线）——但「删除资源」除外（2026-08-30
+      // 产品追加拍板：除了删除资源，否则不需要弹窗）。这一档必须让用户真的
+      // 看到确认界面，不能像其余命令一样在这里被自动重放掉——那正是本次要
+      // 修的问题：catalog 登记了 confirmation=ALWAYS，但对浏览器调用方从来
+      // 就是空头承诺。判据挂在服务端返回的 preflight.confirmation_policy 上
+      // （源自 CommandSpec.confirmation；后端闸门
+      // app.capabilities.coverage.find_confirmation_policy_mismatches 保证
+      // 这个值只在真删除资源时才是 "always"），不挂前端硬编码的路径名单——
+      // 新登记的删除类能力自动落进这一档，不需要改这个文件。
+      // agent/MCP 那条人在环路的闸门走 app/agent/approvals.py 与
+      // app/mcp/server.py，自成一套 approval_id，不经过本文件，不受影响。
+      if (payload.preflight?.confirmation_policy === "always") {
+        throw new ApprovalRequiredError(payload.preflight, resubmit);
+      }
+      return resubmit();
     }
     // 异步受理（如单视角重做）：直接返回 payload，不再走 handle
     return payload;

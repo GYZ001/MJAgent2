@@ -46,6 +46,8 @@ from app.recovery import (
 )
 from app.orchestration.api import router as orchestration_router
 from app.observability.api import router as observability_router
+from app.payments.routes import public_router as payments_public_router
+from app.payments.routes import router as payments_router
 from app.system_api import public_router as system_public_router
 from app.system_api import router as system_router
 
@@ -101,6 +103,12 @@ async def lifespan(_: FastAPI):
         from app.recovery import account_recycle_bin_sweep_loop
         task_registry.spawn(
             "system", "account_recycle_bin_sweep", account_recycle_bin_sweep_loop(),
+        )
+        # 已过期付费档位账号自动降级回 free + 裁剪超额项目；同一份恢复协调者
+        # 独占逻辑，理由与上面两个回收站巡检一致。
+        from app.recovery import expired_membership_sweep_loop
+        task_registry.spawn(
+            "system", "expired_membership_sweep", expired_membership_sweep_loop(),
         )
         # monitor_audit 独立连接抢不到写锁时的本地缓冲补写；同一份恢复协调者
         # 独占逻辑，避免两个实例同时截断同一份缓冲文件。
@@ -266,6 +274,8 @@ async def _on_unhandled(request: Request, exc: Exception):
 app.include_router(system_public_router)  # health 等公开探活，不要求会话
 app.include_router(auth_router)  # /api/auth/*：login 本身必须公开，路由自身按需挂 session deps
 app.include_router(auth_admin_router)  # /api/system/users：路由自身逐条挂 require_system_admin
+app.include_router(payments_router)  # /api/payments/orders*：账号级自助购买，路由自身挂 require_local_session
+app.include_router(payments_public_router)  # /api/payments/notify/*：渠道回调，公开端点，验签是唯一防线
 app.include_router(router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(planning_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(orchestration_router, dependencies=_PROJECT_OWNER_DEPS)

@@ -17,6 +17,7 @@ import { ScreenplayStatusStamp } from '../components/ProductionStatusStamp'
 import QueryState from '../components/QueryState'
 import OperationError from '../components/OperationError'
 import { useFocusTrap } from '../hooks/useFocusTrap'
+import { useDeleteConfirm } from '../hooks/useDeleteConfirm'
 import { screenplayTaskNotice } from '../lib/productionNotices'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
 import { findPortraitImage, findSceneReferenceImage } from '../lib/bibleAssets'
@@ -324,6 +325,7 @@ export default function ScriptPage() {
   const [preview, setPreview] = useState<ActionPreview | null>(null)
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false)
   const previewTrapRef = useFocusTrap(Boolean(preview), () => setPreview(null))
+  const deleteConfirm = useDeleteConfirm()
 
   const screenplayTaskActive = ep?.screenplay_production?.task_active
     ?? ['queued', 'running'].includes(ep?.screenplay_status ?? '')
@@ -355,11 +357,8 @@ export default function ScriptPage() {
       return result
     } catch (unknownError: unknown) {
       const apiError = unknownError as Error & { status?: number; detail?: any }
-      if (apiError.status === 403 && apiError.message.includes('已取消操作')) {
-        toast('未执行，数据保持不变')
-      } else {
-        toast(apiError.message, true)
-      }
+      const cancelled = apiError.status === 403 && apiError.message.includes('已取消操作')
+      toast(cancelled ? '未执行，数据保持不变' : apiError.message, !cancelled)
       throw unknownError
     } finally {
       setBusy(false)
@@ -376,9 +375,7 @@ export default function ScriptPage() {
         data,
         idempotencyKey: stableKey(`screenplay:${ep.id}`),
       })
-    } catch (previewError) {
-      toast((previewError as Error).message, true)
-    } finally { setBusy(false) }
+    } catch (previewError) { toast((previewError as Error).message, true) } finally { setBusy(false) }
   }
 
   const executePreview = async () => {
@@ -411,7 +408,7 @@ export default function ScriptPage() {
   const deleteCurrentScreenplay = async () => {
     if (!ep) return
     try {
-      const result = await run(() => api.deleteScreenplay(ep.id))
+      const result = await run(() => deleteConfirm.run(() => api.deleteScreenplay(ep.id)))
       if (result) toast('当前映射包及下游已删除')
     } catch { /* run 已呈现结果 */ }
   }
@@ -652,6 +649,7 @@ export default function ScriptPage() {
           </section>
         </div>
       )}
+      {deleteConfirm.dialog}
     </>
   )
 }

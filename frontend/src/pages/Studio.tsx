@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { api, DeletedProject, Project } from '../api'
 import { useNav, usePoll } from '../App'
 import QueryState from '../components/QueryState'
+import { useDeleteConfirm } from '../hooks/useDeleteConfirm'
 import { formatFileSize, novelTitleFromFilename, projectEntry, validateNovelFile } from './studioImport'
 
 const STATUS_LABEL: Record<string, [string, string]> = {
@@ -27,6 +28,7 @@ export default function Studio() {
   const {
     data: deletedProjects, refresh: refreshDeleted, error: deletedError, loading: deletedLoading,
   } = usePoll<DeletedProject[]>(() => api.listDeletedProjects(), 15000)
+  const deleteConfirm = useDeleteConfirm()
   const [name, setName] = useState('')
   const [showImport, setShowImport] = useState(window.location.pathname === '/workspaces/new')
   const [showRecycleBin, setShowRecycleBin] = useState(false)
@@ -150,9 +152,7 @@ export default function Studio() {
       refresh()
       refreshDeleted()
       window.dispatchEvent(new Event('manju:projects-changed'))
-    } catch (e: unknown) {
-      toast((e as Error).message, true)
-    } finally {
+    } catch (e: unknown) { toast((e as Error).message, true) } finally {
       setBusyId(null)
     }
   }
@@ -165,9 +165,7 @@ export default function Studio() {
       refresh()
       refreshDeleted()
       window.dispatchEvent(new Event('manju:projects-changed'))
-    } catch (e: unknown) {
-      toast((e as Error).message, true)
-    } finally {
+    } catch (e: unknown) { toast((e as Error).message, true) } finally {
       setBusyId(null)
     }
   }
@@ -175,12 +173,9 @@ export default function Studio() {
   async function purge(p: DeletedProject) {
     setBusyId(p.id)
     try {
-      await api.purgeProject(p.id)
-      toast(`《${p.name}》已彻底删除`)
-      refreshDeleted()
-    } catch (e: unknown) {
-      toast((e as Error).message, true)
-    } finally {
+      const done = await deleteConfirm.run(() => api.purgeProject(p.id))
+      if (done) { toast(`《${p.name}》已彻底删除`); refreshDeleted() }
+    } catch (e: unknown) { toast((e as Error).message, true) } finally {
       setBusyId(null)
     }
   }
@@ -188,13 +183,12 @@ export default function Studio() {
   async function purgeAll() {
     setPurgingAll(true)
     try {
-      const result = await api.purgeAllDeletedProjects()
-      toast(
-        result.failed?.length
-          ? `已彻底删除 ${result.purged_count} 个项目，${result.failed.length} 个失败`
-          : `回收站已清空，彻底删除 ${result.purged_count} 个项目`,
-        Boolean(result.failed?.length),
-      )
+      const result = await deleteConfirm.run(() => api.purgeAllDeletedProjects())
+      if (!result) return
+      const msg = result.failed?.length
+        ? `已彻底删除 ${result.purged_count} 个项目，${result.failed.length} 个失败`
+        : `回收站已清空，彻底删除 ${result.purged_count} 个项目`
+      toast(msg, Boolean(result.failed?.length))
       refreshDeleted()
     } catch (e: unknown) {
       toast((e as Error).message, true)
@@ -492,6 +486,7 @@ export default function Studio() {
         </section>
         ) : null}
       </QueryState>
+      {deleteConfirm.dialog}
     </>
   )
 }

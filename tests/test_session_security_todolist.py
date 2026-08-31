@@ -223,29 +223,20 @@ def test_browse_defaults_to_grant_roots_not_home(authed: SessionTestClient, tmp_
 
 
 def test_mkdir_requires_directory_grant(authed: SessionTestClient, tmp_path: Path) -> None:
+    """system.mkdir 不再走"未批准先 202、批准后才真正执行"（2026-08-30 产品拍板：
+    除了删除资源，否则不需要弹窗；system.mkdir 不是删除资源，已从
+    confirmation=ALWAYS 降到 NEVER），第一次调用就直接执行到域层——这条用例
+    真正要守住的"路径必须在 directory_grant 白名单内"不变，只是现在这个拒绝
+    在第一次调用就直接发生，不需要先换一个 approval_token 再被拒绝。"""
     outside = tmp_path / "outside"
     outside.mkdir()
-    waiting = authed.post("/api/system/mkdir", json={"path": str(outside), "name": "child"})
-    assert waiting.status_code == 202, waiting.text
-    token = waiting.json()["approval_token"]
-    denied = authed.post(
-        "/api/system/mkdir",
-        json={"path": str(outside), "name": "child"},
-        headers={"X-Manju-Approval-Token": token},
-    )
+    denied = authed.post("/api/system/mkdir", json={"path": str(outside), "name": "child"})
     assert denied.status_code == 403, denied.text
 
     from app.config import PROJECTS_DIR
 
     granted_parent = PROJECTS_DIR
-    waiting_ok = authed.post("/api/system/mkdir", json={"path": str(granted_parent), "name": "child_ok"})
-    assert waiting_ok.status_code == 202, waiting_ok.text
-    token_ok = waiting_ok.json()["approval_token"]
-    done = authed.post(
-        "/api/system/mkdir",
-        json={"path": str(granted_parent), "name": "child_ok"},
-        headers={"X-Manju-Approval-Token": token_ok},
-    )
+    done = authed.post("/api/system/mkdir", json={"path": str(granted_parent), "name": "child_ok"})
     assert done.status_code == 200, done.text
     assert (granted_parent / "child_ok").is_dir()
 

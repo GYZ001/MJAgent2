@@ -586,6 +586,10 @@ def test_admin_user_is_never_blocked_by_any_gate():
 def test_http_project_creation_blocked_once_free_tier_quota_is_used(monkeypatch):
     """走真实 HTTP 入口：free 档账号已有 1 个项目时，第二次导入被 429 拦下，
     响应带齐 gate/remaining/reset_at/tier/upgrade_path；且没有新项目行落库。
+
+    project.import_novel 不是删除资源，2026-08-30 产品追加拍板「除了删除资源，
+    否则不需要弹窗」后已从 confirmation=ALWAYS 降回 NEVER，所以现在第一次调用
+    就直接执行到域层的配额检查，不会先拿到一次 202 + approval_token。
     """
     client = TestClient(app)
     uid = _make_user("free")
@@ -594,21 +598,9 @@ def test_http_project_creation_blocked_once_free_tier_quota_is_used(monkeypatch)
 
     _make_project(uid)  # 已经用满 free 档的 1 个项目名额
 
-    def _post():
-        return client.post(
-            "/api/projects",
-            headers=headers,
-            data={"name": "第二个项目"},
-            files={"file": ("novel.txt", "第一章\n正文正文正文。\n".encode("utf-8"), "text/plain")},
-        )
-
-    waiting = _post()
-    assert waiting.status_code == 202, waiting.text
-    approval_token = waiting.json()["approval_token"]
-
     resp = client.post(
         "/api/projects",
-        headers={**headers, "X-Manju-Approval-Token": approval_token},
+        headers=headers,
         data={"name": "第二个项目"},
         files={"file": ("novel.txt", "第一章\n正文正文正文。\n".encode("utf-8"), "text/plain")},
     )
@@ -823,11 +815,15 @@ def test_http_admin_grant_video_addon_lets_a_previously_blocked_shot_through():
     ``quota_addon.grant_video_addon_seconds``，而不是只有单元函数本身正确。
     额外验证同一个 idempotency_key 重复调用只生效一次。
 
-    2026-08-30 起该端点经 Command Bus（``quota.grant_video_addon`` 在 catalog
-    里声明 ``confirmation=ALWAYS``）：首次调用不带 ``X-Manju-Approval-Token``
-    只会拿到 202 + approval_token，真正执行要带着这个 token 重放——与
+    该端点经 Command Bus（``quota.grant_video_addon``），但 2026-08-30 产品
+    追加拍板「除了删除资源，否则不需要弹窗」后，它已从 ``confirmation=ALWAYS``
+    降回 ``NEVER``——发放加量包不是删除资源，ALWAYS 对浏览器调用方本来就只是
+    空头承诺（``frontend/src/api/client.ts`` 会自动用 approval_token 消费掉，
+    不弹任何确认界面）。所以现在首次调用直接执行，不会先拿到
+    202 + approval_token；真正需要人工在场点头的是删除类命令，见
     ``tests/test_session_security_todolist.py::test_mkdir_requires_directory_grant``
-    同一套协议，不是本端点特有。"""
+    （system.mkdir 同样已降级）与 ``tests/test_capability_registry.py`` 里仍然
+    ALWAYS 的 project.purge 用例。"""
     client = TestClient(app)
     admin_id = _make_user("free", is_admin=True)
     admin_headers = {**_HEADERS, "X-Manju-Session": create_session(admin_id)}
@@ -841,18 +837,9 @@ def test_http_admin_grant_video_addon_lets_a_previously_blocked_shot_through():
         quota.reserve_video_seconds(conn, uid, attempt_key="job:http:probe")
 
     grant_body = {"packages": 1, "idempotency_key": "order:http-1"}
-    waiting = client.post(
-        f"/api/system/users/{uid}/video-addons",
-        headers=admin_headers,
-        json=grant_body,
-    )
-    assert waiting.status_code == 202, waiting.text
-    assert waiting.json()["status"] == "waiting_approval"
-    approval_token = waiting.json()["approval_token"]
-
     resp = client.post(
         f"/api/system/users/{uid}/video-addons",
-        headers={**admin_headers, "X-Manju-Approval-Token": approval_token},
+        headers=admin_headers,
         json=grant_body,
     )
     assert resp.status_code == 200, resp.text

@@ -9,6 +9,7 @@ from app.capabilities.coverage import (
     assert_full_coverage,
     discover_mutating_routes,
     find_always_confirm_routes_without_gate,
+    find_confirmation_policy_mismatches,
     validate_catalog_integrity,
 )
 from app.capabilities.policy import consume_approval, issue_approval, reset_approvals_for_tests
@@ -108,12 +109,74 @@ def test_command_input_models_extend_standard_fields() -> None:
 def test_high_risk_commands_require_confirmation_metadata() -> None:
     # project.delete 现在是软删除（移入回收站，24 小时内可恢复），不再是
     # R3_DESTRUCTIVE——真正不可逆的彻底清理是 project.purge / project.purge_all。
+    # delivery.review 不在这份名单里了：它风险仍是 R3（见下一个测试），但它不是
+    # 删除资源（side_effect="human_delivery_gate"），2026-08-30 产品拍板「除了
+    # 删除资源，否则不需要弹窗」后已从 ALWAYS 降到 NEVER——ALWAYS 对浏览器调用方
+    # 本来就只是空头承诺（client.ts 自动消费 approval_token），登记成 ALWAYS
+    # 反而会让人误以为它真的会弹窗拦人。
     registry = get_registry()
-    for name in ("project.purge", "project.purge_all", "video.clear_episode", "delivery.review"):
+    for name in ("project.purge", "project.purge_all", "video.clear_episode"):
         spec = registry.get_command(name)
         assert spec.risk == RiskLevel.R3_DESTRUCTIVE
         assert spec.confirmation == ConfirmationPolicy.ALWAYS
         assert spec.idempotency == IdempotencyPolicy.REQUIRED
+
+
+def test_delivery_review_is_high_risk_but_not_a_deletion_so_never_confirms() -> None:
+    """delivery.review 是「人工签核」而不是「删除资源」：点击审批本身就是慎重
+    动作，不需要在它之上再叠一层确认弹窗（那层弹窗对浏览器用户从来就不会真的
+    弹出来，见 test_always_confirm_capabilities_have_a_rest_confirmation_gate
+    的说明）。风险登记仍是 R3，只是不再用 confirmation=ALWAYS 这种对浏览器
+    用户无效的方式表达。"""
+    spec = get_registry().get_command("delivery.review")
+    assert spec.risk == RiskLevel.R3_DESTRUCTIVE
+    assert spec.confirmation == ConfirmationPolicy.NEVER
+
+
+def test_confirmation_policy_matches_resource_deletion_rule() -> None:
+    """产品规则闸门（2026-08-30 拍板）：除了删除资源，否则不需要弹窗。
+    见 app/capabilities/coverage.py::find_confirmation_policy_mismatches 的
+    判据说明——判据挂在 side_effect 的 deletes_/purges_ 前缀上，不是硬编码的
+    命令名单，新登记的能力自动被这条规则覆盖。"""
+    assert find_confirmation_policy_mismatches() == []
+
+
+def test_confirmation_policy_mismatch_gate_catches_both_directions() -> None:
+    """红绿验证 find_confirmation_policy_mismatches：分别构造「删资源却不是
+    ALWAYS」与「非删除却是 ALWAYS」两种违规，闸门必须都能报红；改回真实值后
+    必须恢复绿。不用真的改全局注册表状态泄漏到其他测试——改完立刻在同一个
+    测试内还原。"""
+    from dataclasses import replace
+
+    registry = get_registry()
+
+    original_purge = registry.get_command("project.purge")
+    registry.commands["project.purge"] = replace(
+        original_purge, confirmation=ConfirmationPolicy.NEVER,
+    )
+    try:
+        problems = find_confirmation_policy_mismatches()
+        assert any(
+            p.startswith("project.purge:") and "是删除资源，但 confirmation != ALWAYS" in p
+            for p in problems
+        )
+    finally:
+        registry.commands["project.purge"] = original_purge
+    assert find_confirmation_policy_mismatches() == []
+
+    original_quota = registry.get_command("quota.grant_video_addon")
+    registry.commands["quota.grant_video_addon"] = replace(
+        original_quota, confirmation=ConfirmationPolicy.ALWAYS,
+    )
+    try:
+        problems = find_confirmation_policy_mismatches()
+        assert any(
+            p.startswith("quota.grant_video_addon:") and "不是删除资源" in p
+            for p in problems
+        )
+    finally:
+        registry.commands["quota.grant_video_addon"] = original_quota
+    assert find_confirmation_policy_mismatches() == []
 
 
 def test_soft_deleted_project_lifecycle_commands_are_reversible() -> None:

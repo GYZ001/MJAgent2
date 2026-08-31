@@ -418,7 +418,7 @@ def video_generate_shot(args) -> PreflightResult:
             summary="镜头不存在",
             state_fingerprint=_fp({"shot_id": args.shot_id, "missing": True}),
             requires_confirmation=False,
-            confirmation_policy=ConfirmationPolicy.ALWAYS,
+            confirmation_policy=ConfirmationPolicy.NEVER,
             denial_code="not_found",
             denial_message="镜头不存在",
         )
@@ -466,7 +466,7 @@ def video_generate_shot(args) -> PreflightResult:
             "reroll": bool(getattr(args, "reroll", False)),
         }),
         requires_confirmation=True,
-        confirmation_policy=ConfirmationPolicy.ALWAYS,
+        confirmation_policy=ConfirmationPolicy.NEVER,
     )
 
 
@@ -483,7 +483,7 @@ def video_generate_episode(args) -> PreflightResult:
             summary="剧集不存在",
             state_fingerprint=_fp({"episode_id": args.episode_id, "missing": True}),
             requires_confirmation=False,
-            confirmation_policy=ConfirmationPolicy.ALWAYS,
+            confirmation_policy=ConfirmationPolicy.NEVER,
             denial_code="not_found",
             denial_message="剧集不存在",
         )
@@ -497,7 +497,7 @@ def video_generate_episode(args) -> PreflightResult:
                 summary="全片补齐 Supervisor 运行中",
                 state_fingerprint=_fp({"episode_id": args.episode_id, "supervisor": True}),
                 requires_confirmation=False,
-                confirmation_policy=ConfirmationPolicy.ALWAYS,
+                confirmation_policy=ConfirmationPolicy.NEVER,
                 denial_code="conflict",
                 denial_message="全片补齐 Supervisor 运行中，请等待完成或取消后再用快速生成",
             )
@@ -561,7 +561,7 @@ def video_generate_episode(args) -> PreflightResult:
             "total": total,
         }),
         requires_confirmation=True,
-        confirmation_policy=ConfirmationPolicy.ALWAYS,
+        confirmation_policy=ConfirmationPolicy.NEVER,
     )
 
 
@@ -678,7 +678,7 @@ def video_complete_project(args) -> PreflightResult:
             summary="项目不存在",
             state_fingerprint=_fp({"project_id": args.project_id, "missing": True}),
             requires_confirmation=False,
-            confirmation_policy=ConfirmationPolicy.ALWAYS,
+            confirmation_policy=ConfirmationPolicy.NEVER,
             denial_code="not_found",
             denial_message="项目不存在",
         )
@@ -757,7 +757,7 @@ def video_complete_project(args) -> PreflightResult:
             "allow_storyboard_edit": allow_edit,
         }),
         requires_confirmation=True,
-        confirmation_policy=ConfirmationPolicy.ALWAYS,
+        confirmation_policy=ConfirmationPolicy.NEVER,
         denial_code=None if eligible else "no_eligible_episodes",
         denial_message=None if eligible else "没有可补齐的已确认剧集",
     )
@@ -1183,7 +1183,7 @@ def screenplay_resume(args) -> PreflightResult:
         ),
         state_fingerprint=_fp({"episode": dict(ep), "production": state}),
         requires_confirmation=allowed,
-        confirmation_policy=ConfirmationPolicy.ALWAYS,
+        confirmation_policy=ConfirmationPolicy.NEVER,
         denial_code=None if allowed else "SCREENPLAY_NOT_RESUMABLE",
         denial_message=None if allowed else "当前没有可继续的剧本流程，或任务仍在运行",
     )
@@ -1338,7 +1338,7 @@ def delivery_review(args) -> PreflightResult:
             summary="剧集不存在",
             state_fingerprint=_fp({"episode_id": args.episode_id, "missing": True}),
             requires_confirmation=False,
-            confirmation_policy=ConfirmationPolicy.ALWAYS,
+            confirmation_policy=ConfirmationPolicy.NEVER,
             denial_code="not_found",
             denial_message="剧集不存在",
         )
@@ -1362,7 +1362,7 @@ def delivery_review(args) -> PreflightResult:
             "packages": package_ids,
         }),
         requires_confirmation=True,
-        confirmation_policy=ConfirmationPolicy.ALWAYS,
+        confirmation_policy=ConfirmationPolicy.NEVER,
     )
 
 

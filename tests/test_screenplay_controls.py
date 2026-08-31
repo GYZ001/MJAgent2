@@ -1132,16 +1132,31 @@ def test_resume_route_has_a_distinct_capability() -> None:
     ] == "screenplay.resume"
     assert registry.commands["screenplay.resume"].title == "继续剧本流程"
     assert registry.commands["screenplay.resume"].risk == RiskLevel.R2_MATERIAL
+    # 不是删除资源（side_effect="resumes_working_revision_finalization"），
+    # 2026-08-30 产品拍板「除了删除资源，否则不需要弹窗」后已从 ALWAYS 降到
+    # NEVER——ALWAYS 对浏览器调用方本来就只是空头承诺（client.ts 自动消费
+    # approval_token）。
     assert (
         registry.commands["screenplay.resume"].confirmation
-        == ConfirmationPolicy.ALWAYS
+        == ConfirmationPolicy.NEVER
     )
 
 
 @pytest.mark.asyncio
-async def test_baseline_rebuild_resume_requires_same_session_single_use_approval(
+async def test_baseline_rebuild_resume_executes_immediately_without_approval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """screenplay.resume 不再需要审批（2026-08-30 产品拍板：除了删除资源，否则
+    不需要弹窗；它不是删除资源，已从 confirmation=ALWAYS 降到 NEVER）。
+
+    这条用例原来验证的是"未批准就等待、批准后才真正调用 resume_screenplay、
+    批准令牌只能用一次、跨会话不可用"——批准链路整套已经不适用于这个命令了
+    （session 绑定 / 单次使用 / 重放拒绝仍是 Command Bus 的通用机制，继续由
+    test_capability_registry.py 用 project.purge——现在唯一还需要真批准的
+    R3_DESTRUCTIVE 命令之一——覆盖）。这里只保留还有意义的部分：单次调用直接
+    成功执行，且确实把正确的 episode_id 和当前合同（baseline_rebuild）传到了
+    resume_screenplay。
+    """
     from app.capabilities.bus import get_command_bus
     from app.capabilities.dispatch import result_http_payload
     from app.capabilities.schemas import CommandStatus
@@ -1166,35 +1181,16 @@ async def test_baseline_rebuild_resume_requires_same_session_single_use_approval
         "idempotency_key": "resume-approved-rebuild",
     }
 
-    waiting = await bus.execute_async(
+    approved = await bus.execute_async(
         "screenplay.resume",
         args,
         session_id="session-a",
     )
 
-    assert waiting.status == CommandStatus.WAITING_APPROVAL
-    assert waiting.preflight is not None
-    assert waiting.preflight.summary == "按当前合同重建剧本基线"
-    assert waiting.preflight.affected.extra["resume_mode"] == "baseline_rebuild"
-    assert launches == []
-
-    token = waiting.data["approval_token"]
-    wrong_session = await bus.execute_async(
-        "screenplay.resume",
-        {**args, "approval_token": token},
-        session_id="session-b",
-    )
-    assert wrong_session.status == CommandStatus.REJECTED
-    assert wrong_session.error_code == "approval_invalid"
-    assert "session mismatch" in wrong_session.summary
-    assert launches == []
-
-    approved = await bus.execute_async(
-        "screenplay.resume",
-        {**args, "approval_token": token},
-        session_id="session-a",
-    )
     assert approved.status == CommandStatus.SUCCEEDED
+    assert approved.preflight is not None
+    assert approved.preflight.summary == "按当前合同重建剧本基线"
+    assert approved.preflight.affected.extra["resume_mode"] == "baseline_rebuild"
     assert approved.data["mode"] == "baseline_rebuild"
     assert approved.summary == (
         "已按当前合同启动剧本基线重建；"
@@ -1203,16 +1199,6 @@ async def test_baseline_rebuild_resume_requires_same_session_single_use_approval
     receipt = result_http_payload(approved)
     assert receipt["mode"] == "baseline_rebuild"
     assert receipt["summary"] == approved.summary
-    assert launches == ["e1"]
-
-    replay = await bus.execute_async(
-        "screenplay.resume",
-        {**args, "approval_token": token},
-        session_id="session-a",
-    )
-    assert replay.status == CommandStatus.REJECTED
-    assert replay.error_code == "approval_invalid"
-    assert replay.summary == "approval_token already used"
     assert launches == ["e1"]
 
 
