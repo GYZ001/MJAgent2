@@ -186,8 +186,9 @@ def authorize_episode_video_budget_absolute(
     if owns_transaction:
         db.execute("BEGIN IMMEDIATE")
     try:
-        # 同一条下限口径（见 _episode_video_budget_floor）：显式设定上限也不得
-        # 低于已经承诺出去的责任，否则调用侧立刻判超限。
+        # 这里的 requested 是调用方给出的**绝对总额**（补款路径传的就是新的总
+        # 上限），所以不加不减；只保证不低于已承诺责任 floor，否则扣款侧立刻
+        # 判超限。"本轮批准额度"要变成总额是调用方的事，见 grants_issue。
         baseline, floor = _episode_video_budget_floor(episode_id, conn=db)
         cap = max(requested, floor)
         stamp = now()

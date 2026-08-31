@@ -447,3 +447,39 @@ def test_new_grant_after_historical_claims_can_still_reserve(grant_db) -> None:
     ).fetchone()
 
     assert float(row["cap_cny"]) > 96.0
+
+
+def test_regrant_leaves_room_for_the_newly_approved_amount(grant_db) -> None:
+    """重跑时新批的额度必须真的可用：可用 = 上限 - 已用 应等于本轮批准数。
+
+    分集授权存的是累计上限，而 grant 的 cap 是本轮批准额度，两者不是同一个
+    量。首轮已承诺为 0 时恰好相等，掩盖了这个区别；重跑时旧责任已经占满上限，
+    直接把本轮额度当绝对总额写入就等于零余量，扣款侧第一次调用就超限——实测
+    八个镜头全部 paused_budget、整集停在 WAITING_AUTHORIZATION。
+    """
+    conn = grant_db
+    _insert_claim(conn, operation_id="op-old", amount=96.0, status="settled")
+    conn.execute("DELETE FROM episode_video_budget_authorities")
+    conn.commit()
+
+    _issue(idempotency_key="regrant-after-history")
+    row = conn.execute(
+        "SELECT cap_cny FROM episode_video_budget_authorities"
+        " WHERE episode_id='grant-episode'"
+    ).fetchone()
+    used = 96.0
+
+    assert float(row["cap_cny"]) - used == 50.0
+
+
+def test_first_grant_cap_is_unchanged_without_history(grant_db) -> None:
+    """没有历史责任时上限与从前完全一致，不会多批。"""
+    conn = grant_db
+
+    _issue(idempotency_key="first-grant-no-history")
+    row = conn.execute(
+        "SELECT cap_cny FROM episode_video_budget_authorities"
+        " WHERE episode_id='grant-episode'"
+    ).fetchone()
+
+    assert float(row["cap_cny"]) == 50.0

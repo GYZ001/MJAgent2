@@ -16,6 +16,7 @@ from app.provider_task_clearance import (
     prepare_provider_tasks_for_clear as prepare_provider_tasks_for_clear,
 )
 from app.completion_grant.budget_authority import (
+    _episode_video_budget_floor,
     authorize_episode_video_budget_absolute,
     episode_video_completion_budget_requirement,
 )
@@ -341,9 +342,17 @@ def issue_video_completion_grant(
                 generation_plan.get("capability_snapshot_id"),
             ),
         )
+        # cap 是**本轮**批准的额度，而分集授权存的是累计上限，两者不是同一个量。
+        # 首轮已承诺责任为 0 时恰好相等，长期掩盖了这个区别；重跑时旧责任已经
+        # 占满上限，直接把 cap 当绝对总额写进去就等于零余量——扣款侧按
+        # used = baseline + claimed 判断，第一次供应商调用就超限。实测
+        # ep_0a70ec56e8e9：96 元历史 settled 认领 + 本轮批准 96，写进去的上限
+        # 仍是 96，八个镜头全部 paused_budget、整集停在 WAITING_AUTHORIZATION。
+        # 加上已承诺责任后，可用 = 上限 - 已用 = cap，正好是用户这次批的数。
+        _baseline, committed = _episode_video_budget_floor(episode_id, conn=conn)
         authority_cap = authorize_episode_video_budget_absolute(
             episode_id,
-            cap,
+            committed + cap,
             source=f"completion_grant:{grant_id}",
             conn=conn,
         )
