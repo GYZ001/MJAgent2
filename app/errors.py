@@ -26,6 +26,7 @@ CATEGORIES: dict[str, dict[str, Any]] = {
     "quality_gate": {"label": "质量校验", "technical": False, "hint": ""},
     "provider":   {"label": "大模型/外部服务", "technical": True,
                    "hint": "大模型/外部服务调用失败，可稍后重试；若持续失败请把错误码反馈给技术人员。"},
+    "provider_rejected": {"label": "供应商内容审核", "technical": False, "hint": ""},
     "generation": {"label": "内容生成", "technical": True,
                    "hint": "内容生成未通过格式或业务校验，可点击重试；若持续失败，请先按错误码检查具体原因，再决定是否调整「修复重试上限」。"},
     "generation_retry_grant": {
@@ -131,6 +132,25 @@ def _extract_message(exc: BaseException | None) -> str:
     return str(exc)
 
 
+def _provider_error_category(exc: BaseException) -> tuple[str, str]:
+    """``ProviderError`` splits by ``failure_category``, not by message text.
+
+    A supplier's own content-review rejection (``failure_category ==
+    "model_rejection"``, see ``app.hiagent.ProviderFailure.model_rejection``)
+    is a definitive, non-retryable outcome. It must not share the generic
+    "provider"/"LLM" category's technical hint ("可稍后重试") -- that hint is
+    a lie for this outcome (CLAUDE.md「界面承诺必须与实际行为一致」) and, being
+    a sanitized technical category, would also swallow the exception's own
+    message, which is where the caller quoted the provider's original text
+    (ERR-20260831-4c9132: retrying a content-filter refusal cannot change
+    the result). ``provider_rejected`` is deliberately non-technical so
+    ``_public_text`` shows that message verbatim instead of a canned hint.
+    """
+    if getattr(exc, "failure_category", "") == "model_rejection":
+        return "provider_rejected", "LLM-REJECTED"
+    return "provider", "LLM"
+
+
 def classify(exc: BaseException | None, http_status: int | None = None) -> tuple[str, str]:
     """归类并产出报错码。返回 (category_key, code)。
 
@@ -178,7 +198,7 @@ def classify(exc: BaseException | None, http_status: int | None = None) -> tuple
         # "供应商调用成功、我方业务一致性校验没通过"，理应同一类。
         return "quality_gate", "QA"
     if "ProviderError" in exc_names:
-        return "provider", "LLM"
+        return _provider_error_category(exc)
     if "StructuredProviderRejection" in exc_names:
         # app.harness.model_gateway.chat_structured 在供应商返回显式
         # {"error": ...} 拒答信封时抛出——不是格式/语义失败，是供应商层面的

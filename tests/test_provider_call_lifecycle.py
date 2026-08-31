@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from app import config, db, hiagent, system_api, video_modes, worker
+from app.harness import hiagent_stream_evidence
 
 
 def test_provider_cache_request_identity_ignores_only_stream_transport_fields() -> None:
@@ -2918,33 +2919,50 @@ def test_identity_discovery_read_timeout_is_stage_specific(monkeypatch) -> None:
 def test_interrupted_stream_keeps_bounded_evidence() -> None:
     """The discarded reconstruction must not take the diagnosis with it."""
     frames: list[str] = []
-    hiagent._remember_unconsumed_stream_frame(frames, 'event: error')
-    hiagent._remember_unconsumed_stream_frame(frames, '{"code":400,"msg":"x"}')
-    hiagent._remember_unconsumed_stream_frame(frames, '   ')
+    hiagent_stream_evidence.remember_unconsumed_stream_frame(frames, 'event: error')
+    hiagent_stream_evidence.remember_unconsumed_stream_frame(frames, '{"code":400,"msg":"x"}')
+    hiagent_stream_evidence.remember_unconsumed_stream_frame(frames, '   ')
     assert frames == ['event: error', '{"code":400,"msg":"x"}']
 
     for _ in range(10):
-        hiagent._remember_unconsumed_stream_frame(frames, "extra")
-    assert len(frames) == hiagent._INTERRUPTED_STREAM_MAX_FRAMES
+        hiagent_stream_evidence.remember_unconsumed_stream_frame(frames, "extra")
+    assert len(frames) == hiagent_stream_evidence.INTERRUPTED_STREAM_MAX_FRAMES
 
-    evidence = hiagent._interrupted_stream_evidence(
+    evidence = hiagent_stream_evidence.interrupted_stream_evidence(
         content_parts=["抱歉，我无法"],
         reasoning_parts=[],
         unconsumed_frames=frames,
+        state={},
     )
     assert evidence["content_prefix"] == "抱歉，我无法"
     assert evidence["summary"] == "抱歉，我无法"
     assert evidence["unconsumed_frames"] == frames
+    assert evidence["finish_reason"] is None
 
 
 def test_interrupted_stream_evidence_falls_back_to_dropped_frame() -> None:
     """With no content at all, the dropped SSE frame is the only evidence."""
-    evidence = hiagent._interrupted_stream_evidence(
+    evidence = hiagent_stream_evidence.interrupted_stream_evidence(
         content_parts=[],
         reasoning_parts=[],
         unconsumed_frames=['{"code":400,"message":"too long"}'],
+        state={},
     )
     assert evidence["summary"] == '{"code":400,"message":"too long"}'
+
+
+def test_interrupted_stream_evidence_carries_finish_reason() -> None:
+    """A terminal ``finish_reason`` the provider did send must survive into
+    evidence even though the stream still ended without ``[DONE]`` --
+    ERR-20260831-4c9132's root cause was this signal being discarded before
+    the interrupted-stream branch ever saw it."""
+    evidence = hiagent_stream_evidence.interrupted_stream_evidence(
+        content_parts=["抱歉，该问题不符合安全合规要求，暂时无法回答"],
+        reasoning_parts=[],
+        unconsumed_frames=[],
+        state={"finish_reason": "content_filter"},
+    )
+    assert evidence["finish_reason"] == "content_filter"
 
 
 def test_reproduced_interruption_is_relabelled_as_deterministic() -> None:
