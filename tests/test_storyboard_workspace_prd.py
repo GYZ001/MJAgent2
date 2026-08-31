@@ -2297,6 +2297,75 @@ def test_storyboard_source_binding_integrity_rejects_tampering(
         workspace.assert_storyboard_source_bindings_complete("e1")
 
 
+def test_storyboard_source_binding_tolerates_whitespace_at_span_boundaries(
+    storyboard_db,
+) -> None:
+    """EP1 real-world regression (ERR-20260831-e5f50c).
+
+    app/production/storyboard_pack.py's ``_resolve_segment_source_binding``
+    slices ``full_source_text[start:end]`` verbatim (no stripping) because
+    segment boundaries land on the chapter's own paragraph newlines, so a
+    fully byte-exact binding can legitimately start or end with whitespace
+    (confirmed against the live incident data: ``content[start:end] ==
+    shots.source_excerpt`` byte-for-byte, trailing ``"\\n"`` included). The
+    gate must compare both sides exactly as stored, not strip only
+    ``source_excerpt`` and manufacture a false "drift".
+    """
+    padded_source = "少年推开房门，看见桌上的信，神色骤然一沉。\n"
+    storyboard_db.execute(
+        "UPDATE chapters SET content=? WHERE project_id='p1' AND idx=1",
+        (padded_source,),
+    )
+    new_hash = hashlib.sha256(padded_source.encode("utf-8")).hexdigest()
+    storyboard_db.execute(
+        "UPDATE shots SET source_excerpt=? WHERE id='s1'",
+        (padded_source,),
+    )
+    storyboard_db.execute(
+        "UPDATE storyboard_source_bindings SET end_offset=?, source_version_hash=?, "
+        "excerpt_hash=? WHERE shot_id='s1'",
+        (len(padded_source), new_hash, new_hash),
+    )
+    storyboard_db.commit()
+
+    workspace.assert_storyboard_source_bindings_complete("e1")  # must not raise
+
+
+def test_storyboard_source_binding_still_rejects_real_drift_with_whitespace_boundary(
+    storyboard_db,
+) -> None:
+    """The whitespace tolerance above must not turn into a rubber stamp.
+
+    Once ``shots.source_excerpt`` genuinely diverges byte-for-byte from what
+    the stored offsets point at in current chapter content -- here the
+    boundary "\\n" that the offsets and content agree on is simply missing
+    from the stored excerpt, a real edit rather than incidental padding --
+    the gate must still fail closed exactly as before.
+    """
+    padded_source = "少年推开房门，看见桌上的信，神色骤然一沉。\n"
+    storyboard_db.execute(
+        "UPDATE chapters SET content=? WHERE project_id='p1' AND idx=1",
+        (padded_source,),
+    )
+    new_hash = hashlib.sha256(padded_source.encode("utf-8")).hexdigest()
+    storyboard_db.execute(
+        "UPDATE storyboard_source_bindings SET end_offset=?, source_version_hash=?, "
+        "excerpt_hash=? WHERE shot_id='s1'",
+        (len(padded_source), new_hash, new_hash),
+    )
+    # shots.source_excerpt intentionally left without the trailing "\n" that
+    # content[start:end] now includes -- a genuine byte-level divergence,
+    # the exact class of drift this gate exists to catch.
+    storyboard_db.execute(
+        "UPDATE shots SET source_excerpt='少年推开房门，看见桌上的信，神色骤然一沉。' "
+        "WHERE id='s1'",
+    )
+    storyboard_db.commit()
+
+    with pytest.raises(ValueError, match="绑定切片与 source_excerpt 不一致"):
+        workspace.assert_storyboard_source_bindings_complete("e1")
+
+
 def test_idempotent_confirmation_converges_terminal_runtime_state(storyboard_db):
     recorder = _cancel_test_run(storyboard_db)
     orphan = WorkflowRecorder.create(

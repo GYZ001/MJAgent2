@@ -761,7 +761,7 @@ def assert_storyboard_source_bindings_complete(
             issues.append(f"第 {shot_no} 镜原文偏移越界")
             continue
         actual = content[start:end]
-        excerpt = str(row["source_excerpt"] or "").strip()
+        excerpt = str(row["source_excerpt"] or "")  # 不变量是字节级相等含首尾空白，只 strip 一边会把一致的绑定误判成漂移
         if actual != excerpt:
             issues.append(f"第 {shot_no} 镜绑定切片与 source_excerpt 不一致")
             continue
@@ -833,7 +833,7 @@ def repair_generated_source_bindings(episode_id: str) -> dict[str, Any]:
     realigned = 0
     unresolved: list[int] = []
     for row in shots:
-        candidate = (row["source_excerpt"] or "").strip()
+        candidate = (raw_excerpt := row["source_excerpt"] or "").strip()  # 改写要比 raw_excerpt，比 candidate 会漏改纯空白差异
         matches = []
         try:
             canonical, normalized = align_generated_source_evidence(
@@ -841,15 +841,13 @@ def repair_generated_source_bindings(episode_id: str) -> dict[str, Any]:
                 candidate,
                 conn=conn,
             )
-            if canonical != candidate:
+            if canonical != raw_excerpt:
                 conn.execute(
                     "UPDATE shots SET source_excerpt=? WHERE id=?",
                     (canonical, row["id"]),
                 )
                 realigned += 1
-            persist_source_binding(
-                str(row["id"]), normalized, conn=conn, commit=False,
-            )
+            persist_source_binding(str(row["id"]), normalized, conn=conn, commit=False)
             bound += 1
             continue
         except (HTTPException, StopIteration):
@@ -889,7 +887,7 @@ def repair_generated_source_bindings(episode_id: str) -> dict[str, Any]:
             unresolved.append(int(row["shot_no"]))
             continue
         _score, _exact, source, aligned = max(matches, key=lambda item: (item[0], item[1]))
-        if aligned.excerpt != candidate:
+        if aligned.excerpt != raw_excerpt:
             conn.execute(
                 "UPDATE shots SET source_excerpt=? WHERE id=?",
                 (aligned.excerpt, row["id"]),
@@ -935,7 +933,7 @@ def verify_or_bind_existing_excerpt(
     状态快照使用 ``persist_legacy=False`` 保持只读；真正的确认预览才提交可证明的
     历史绑定，避免普通轮询产生审计写入。
     """
-    excerpt = (excerpt or "").strip()
+    excerpt = (raw_excerpt := excerpt or "").strip()  # raw_excerpt 未 strip，核验已有绑定要用它做字节级比对
     if not excerpt:
         raise HTTPException(422, "原文证据为空，请从本集原文重新框选")
     existing = source_binding_for_shot(shot_id)
@@ -947,7 +945,7 @@ def verify_or_bind_existing_excerpt(
         if not source or source["source_version_hash"] != existing["source_version_hash"]:
             raise HTTPException(409, "原文版本已变化，已有证据需要重新绑定")
         actual = (source["content"] or "")[int(existing["start_offset"]):int(existing["end_offset"])]
-        if actual != excerpt or hashlib.sha256(actual.encode("utf-8")).hexdigest() != existing["excerpt_hash"]:
+        if actual != raw_excerpt or hashlib.sha256(actual.encode("utf-8")).hexdigest() != existing["excerpt_hash"]:
             raise HTTPException(422, "原文证据与已绑定章节位置不一致")
         return existing
     matches: list[tuple[dict[str, Any], int]] = []
@@ -969,5 +967,6 @@ def verify_or_bind_existing_excerpt(
         "excerpt_hash": hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
     }
     if persist_legacy:
+        get_conn().execute("UPDATE shots SET source_excerpt=? WHERE id=?", (excerpt, shot_id))  # 同步，否则字节级核验判成漂移
         persist_source_binding(shot_id, normalized)
     return normalized
