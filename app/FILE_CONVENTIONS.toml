@@ -117,7 +117,8 @@ max_function_lines_python = 50
 # __all__ 条目；这与本文件顶部 app/db.py 迁移账本那条同一性质（记账文件的
 # 正常形态，不是拒绝拆分的复杂度膨胀）。
 "app/portraits/__init__.py" = 538
-"app/portraits/cards.py" = 595
+"app/portraits/cards.py" = 572  # 2026-08-31 棘轮收紧（595→572）：一人一卡批次把
+# 建卡判定与别名登记拆到 card_verdict.py / card_aliases.py / bible_compat.py
 "app/portraits/discovery_legacy.py" = 975
 "app/portraits/identity_response_projection.py" = 722
 "app/portraits/portrait_drift.py" = 548
@@ -150,7 +151,8 @@ max_function_lines_python = 50
 "app/stages/blueprint_budget.py" = 545
 "app/stages/blueprint_generate_sharded.py" = 652
 "app/stages/blueprint_repair.py" = 545
-"app/stages/roster_recurring.py" = 650
+"app/stages/roster_recurring.py" = 627  # 2026-08-31 棘轮收紧（650→627）：准入门槛与
+# 分块规划拆到 roster_admission.py / roster_chunk_plan.py
 "app/stages/screenplay_generate.py" = 612
 "app/storyboard_authority.py" = 583
 "app/storyboard_supervisor.py" = 1622
