@@ -8,6 +8,7 @@ from collections.abc import Callable
 
 from app.db import get_conn
 from app.errors import ContentGenerationError
+from app.portraits.card_owner import bible_known_labels
 from app.schemas import Bible
 
 from ._db_probe import _has_column
@@ -74,9 +75,7 @@ async def ensure_cards_for_text(
             source_text=source_text,
         )
     ]
-    future_text, future_label = _future_chapter_context(
-        conn, project_id, episode_no,
-    )
+    future_text, future_label = _future_chapter_context(conn, project_id, episode_no)
     candidates = (
         [dict(item) for item in _precomputed_candidates]
         if _precomputed_candidates is not None
@@ -122,7 +121,7 @@ async def ensure_cards_for_text(
                 )
     if write_guard:
         write_guard()
-    known = {c.name for c in bible.characters}
+    known = bible_known_labels(bible)
     unknown_by_name: dict[str, list[dict]] = {}
     functional_candidates: list[dict] = []
     known_named_candidates: list[dict] = []
@@ -286,12 +285,16 @@ async def ensure_cards_for_text(
             errors.append(f"{name}：{result.get('reason') or result.get('status') or '补卡失败'}")
 
         if result.get("status") in {"added", "exists"}:
+            # "exists" 现在带回的是归属者的规范名（app.portraits.card_owner），
+            # 不是被查询的标签：以别名"小胖子"命中的归属者是"李富贵"，决议必须
+            # 指向人物谱里真实存在的角色，不能沿用查询标签本身。
+            canonical_name = str(result.get("name") or name).strip()
             for item in items:
                 source_label = str(item.get("source_label") or name).strip()
-                if source_label != name:
+                if source_label != canonical_name:
                     resolutions.append(_identity_resolution(
                         item,
-                        name,
+                        canonical_name,
                         "future_identity",
                         reason="后续章节已确认该称谓的稳定真名",
                     ))

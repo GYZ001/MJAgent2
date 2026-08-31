@@ -9,7 +9,8 @@ import json
 import re
 
 from app import textmatch
-from app.schemas import EpisodeScreenplay
+from app.portraits.card_owner import resolve_card_owner
+from app.schemas import Bible, EpisodeScreenplay
 from app.source_excerpt import align_source_excerpt
 
 from .constants import (
@@ -69,11 +70,56 @@ def _discovery_skip_key(project_id: str, name: str) -> str:
     return f"char_discovery_skip:{project_id}:{name}"
 
 
-def _name_in_bible(conn, project_id: str, name: str) -> bool:
+def _bible_card_owner(
+    conn, project_id: str, name: str,
+) -> tuple[str, str] | tuple[str, list[str]]:
+    """``name`` 在人物谱里的归属判定，委托给唯一的身份归属解析器（见
+    ``app.portraits.card_owner`` 模块 docstring）。返回 ``resolve_card_owner``
+    的三态：owner/none/conflict——不折叠成布尔值，调用方需要区分"精确命中一个
+    角色"与"命中多个角色的真实歧义"。
+    """
     row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
     if not row or not row["bible_json"]:
-        return False
-    return any((c.get("name") or "") == name for c in json.loads(row["bible_json"]).get("characters", []))
+        return ("none", "")
+    bible = Bible.model_validate(json.loads(row["bible_json"]))
+    return resolve_card_owner(bible, name)
+
+
+def _name_in_bible(conn, project_id: str, name: str) -> bool:
+    """`name` 是否已经属于人物谱里的某个角色——精确比对 name 与全部 alias.text，
+    委托给唯一的身份归属解析器（见 app.portraits.card_owner 模块 docstring）。
+    conflict（同一称呼命中 ≥2 个角色）按"已有归属"处理，fail closed：不再新建卡。
+    """
+    return _bible_card_owner(conn, project_id, name)[0] != "none"
+
+
+def _card_owner_lookup(conn, project_id: str, name: str) -> dict | None:
+    """``ensure_character_card`` 两处"人物谱里已有归属就不新建卡"早退判断的
+    共同实现，返回可以直接作为函数结果的 payload；``None`` 表示两种既有情况
+    都不成立，调用方按原计划继续走建卡流程。
+
+    - owner：返回归属者的规范名（人物谱里真实存在的 ``Character.name``），
+      不是被查询的标签——下游（``cards_ensure.py``）拿这个 name 生成身份决议，
+      决议必须指向人物谱里真实存在的角色，不能是"李富贵"的别名"小胖子"本身。
+    - conflict：同一称呼精确命中 ≥2 个不同角色，真实存在的合法数据（例如
+      "大汉"同时是"曹阳"和"虎爷"的别名，见 card_owner 模块 docstring），必须
+      fail closed——不得替调用方猜一个归属，status 与 "exists" 分开，好让
+      调用方能识别并拒绝据此生成任何决议。
+    """
+    status, value = _bible_card_owner(conn, project_id, name)
+    if status == "owner":
+        return {"status": "exists", "name": value}
+    if status == "conflict":
+        return {
+            "status": "conflict",
+            "name": name,
+            "owners": value,
+            "reason": (
+                f"「{name}」在人物谱中同时命中 {'、'.join(value)}，"
+                "无法安全判定唯一归属，未新建卡也未复用任一方"
+            ),
+        }
+    return None
 
 
 def _forward_fragments(

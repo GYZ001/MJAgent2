@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from app.db import get_conn, get_setting, new_id, now, set_setting
 from app.errors import ContentGenerationError, code_ref
 from app.harness import model_gateway
+from app.portraits.card_owner import bible_known_labels
 from app.refs import production_appearance_anchor
 from app.schemas import Bible, Character, extract_json
 
@@ -26,15 +27,13 @@ from .discovery_fragments import (
     DISCOVERY_REJUDGE_WINDOW,
     _bible_lock,
     _card_lock,
+    _card_owner_lookup,
     _discovery_skip_key,
     _forward_fragments,
     _name_in_bible,
     _non_character_skip_key,
 )
-from .portrait_io import (
-    _append_character_to_bible,
-    _generate_discovered_character_portrait,
-)
+from .portrait_io import _append_character_to_bible, _generate_discovered_character_portrait
 
 # 人物谱是"可以被选角、被定妆、能出镜表演的人"的登记表。宗门、地点、器物、
 # 功法都不是人，它们属于场景库或 reference 身份，绝不能占据人物卡。
@@ -54,8 +53,7 @@ def _candidate_requires_identity_card(item: dict, known_names: set[str]) -> bool
     """Only a new named identity that appears or speaks needs a visual card."""
     name = str(item.get("name") or "").strip()
     return bool(
-        name
-        and name not in known_names
+        name and name not in known_names
         and str(item.get("identity_kind") or "named") == "named"
         and item.get("kind") != "mentioned"
     )
@@ -283,14 +281,14 @@ async def ensure_character_card(
     if write_guard:
         write_guard()
     conn = get_conn()
-    if _name_in_bible(conn, project_id, name):
-        return {"status": "exists", "name": name}
+    if (owner_result := _card_owner_lookup(conn, project_id, name)) is not None:
+        return owner_result
     lock = await _card_lock(project_id, name)
     async with lock:
         if write_guard:
             write_guard()
-        if _name_in_bible(conn, project_id, name):  # 拿到锁后复查（并发兜底）
-            return {"status": "exists", "name": name}
+        if (owner_result := _card_owner_lookup(conn, project_id, name)) is not None:  # 拿到锁后复查（并发兜底）
+            return owner_result
         if not _has_column(conn, "projects", "bible_auto_changes_json"):
             conn.execute("ALTER TABLE projects ADD COLUMN bible_auto_changes_json TEXT")
         pending_row = conn.execute(
@@ -327,7 +325,7 @@ async def ensure_character_card(
             return {"status": "skipped", "name": name, "reason": "no bible"}
         bible = Bible.model_validate(json.loads(project["bible_json"]))
         style = bible.world.visual_style_canonical
-        known = [c.name for c in bible.characters]
+        known = sorted(bible_known_labels(bible))
         fragments, ep_label, forward_chapters_by_idx = _forward_fragments(
             conn, project_id, name, from_episode_no
         )

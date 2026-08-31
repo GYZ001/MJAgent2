@@ -10929,3 +10929,124 @@ def test_current_identity_alias_only_binds_true_owner_not_namesake() -> None:
     ]
     assert shishi_decisions
     assert {item["authority_id"] for item in shishi_decisions} == {"bible:许清"}
+
+
+def _seed_bible_project(conn: sqlite3.Connection, bible: Bible) -> None:
+    conn.execute(
+        "INSERT INTO projects(id, bible_json, bible_version) VALUES('p1', ?, 1)",
+        (json.dumps(bible.model_dump(), ensure_ascii=False),),
+    )
+    conn.commit()
+
+
+def test_ensure_character_card_alias_label_returns_canonical_owner_name(
+    monkeypatch,
+) -> None:
+    """人物谱登记「李富贵（别名：小胖子）」时，用别名"小胖子"去建卡应识别出
+    已有归属，并把归属者的规范名"李富贵"带回给调用方——不是被查询的标签本身。
+    ``app.portraits.cards_ensure`` 拿这个 name 去生成身份决议，决议必须指向
+    人物谱里真实存在的角色，否则身份层与人物谱就此不一致（见
+    app/portraits/card_owner.py 模块 docstring）。"""
+    conn = _make_conn()
+    _seed_bible_project(conn, Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="李富贵", role="重要配角", appearance_canonical="圆脸胖身，锦袍加身",
+            aliases=[CharacterAlias(
+                text="小胖子", name_kind="honorific",
+                evidence_chapter_index=1, evidence_quote="众人都唤他小胖子",
+            )],
+        )],
+    ))
+    _patch_settings(monkeypatch, conn)
+
+    result = asyncio.run(portraits.ensure_character_card("p1", "小胖子", 21))
+
+    assert result == {"status": "exists", "name": "李富贵"}
+    characters = json.loads(
+        conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]
+    )["characters"]
+    assert len(characters) == 1  # 没有建出第二张卡
+
+
+def test_ensure_character_card_conflicting_alias_fails_closed_without_new_card(
+    monkeypatch,
+) -> None:
+    """真实存在的歧义必须 fail closed：实测 proj_195be7df1fd6 里"大汉"同时是
+    "曹阳"和"虎爷"的别名，两人确实是不同的人。既不能替调用方猜一个归属当
+    "exists"放行（那会把决议错误地钉死在其中一人身上），也不能因为查无精确
+    单一归属而建出第三张卡。"""
+    conn = _make_conn()
+    _seed_bible_project(conn, Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[
+            Character(
+                name="曹阳", role="重要配角", appearance_canonical="虬髯壮汉，皮甲",
+                aliases=[CharacterAlias(
+                    text="大汉", name_kind="referential", is_exclusive=False,
+                    evidence_chapter_index=1, evidence_quote="那大汉正是曹阳",
+                )],
+            ),
+            Character(
+                name="虎爷", role="重要配角", appearance_canonical="络腮胡壮汉，皮甲",
+                aliases=[CharacterAlias(
+                    text="大汉", name_kind="referential", is_exclusive=False,
+                    evidence_chapter_index=2, evidence_quote="虎爷这大汉一声怒吼",
+                )],
+            ),
+        ],
+    ))
+    _patch_settings(monkeypatch, conn)
+
+    result = asyncio.run(portraits.ensure_character_card("p1", "大汉", 21))
+
+    assert result["status"] == "conflict"
+    assert sorted(result["owners"]) == ["曹阳", "虎爷"]
+    assert result["reason"]  # 可见信号是硬要求：宁可报出来让人看见，也不要静默挑一个
+    characters = json.loads(
+        conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]
+    )["characters"]
+    assert len(characters) == 2  # 没有猜歧义、也没有建第三张卡
+
+
+def test_ensure_cards_for_text_conflict_label_errors_without_resolution(
+    monkeypatch,
+) -> None:
+    """``ensure_cards_for_text`` 收到 conflict 状态时：不得据此生成任何身份
+    决议（那会把决议钉死在被猜测的归属上），必须落进 errors（可见信号），且
+    不得混进 skipped——skipped 语义是"正常终态"，conflict 是需要人工确认的
+    歧义，两者不能共用同一条通路。"""
+    conn = _make_conn()
+    _seed_project(conn, "大汉守在门前，怒目而视。" * 3)
+    _patch_settings(monkeypatch, conn)
+
+    async def fake_ensure(*_args, **_kwargs):
+        return {
+            "status": "conflict",
+            "name": "大汉",
+            "owners": ["曹阳", "虎爷"],
+            "reason": "「大汉」在人物谱中同时命中 曹阳、虎爷，无法安全判定唯一归属，未新建卡也未复用任一方",
+        }
+
+    patch_portraits_everywhere(monkeypatch, "ensure_character_card", fake_ensure)
+    bible = Bible.model_validate(json.loads(
+        conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]
+    ))
+
+    result = asyncio.run(portraits.ensure_cards_for_text(
+        "p1", 21, "大汉守在门前，怒目而视。", bible,
+        generate_portraits=False,
+        _precomputed_candidates=[{
+            "name": "大汉",
+            "source_label": "大汉",
+            "identity_kind": "named",
+            "kind": "onscreen",
+            "evidence": "大汉守门",
+        }],
+    ))
+
+    assert result["added"] == []
+    assert result["resolutions"] == []
+    assert result["skipped"] == []
+    assert any("大汉" in message for message in result["errors"])
+    assert any("无法安全判定" in message for message in result["errors"])

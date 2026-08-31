@@ -15,6 +15,7 @@ from app.identity_authority import (
     identity_resolution_is_authoritative,
     normalize_character_resolution,
 )
+from app.portraits.card_owner import bible_known_labels
 from app.schemas import Bible, EpisodeScreenplay
 from app.screenplay_ir import (
     ScreenplayGenerationIR,
@@ -685,11 +686,10 @@ async def adjudicate_screenplay_document_identities(
             for voice_id in contract.voice_ids:
                 add(voice_id)
 
-    known = {
-        str(character.name or "").strip()
-        for character in bible.characters
-        if str(character.name or "").strip()
-    }
+    # 收敛到唯一的身份归属解析器（app.portraits.card_owner）：name + 全部 alias，
+    # 不再只比对 name——只看 name 会把"人物谱里已有别名的角色"误判成"查无此人"，
+    # 从而对已有角色再次触发身份仲裁 + ensure_character_card，制造第二张卡。
+    known = bible_known_labels(bible)
     if screenplay.narrative_plan is not None:
         known.update(
             token
