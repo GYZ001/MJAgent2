@@ -93,6 +93,7 @@ export const api = {
   cancelRefsGeneration: bibleApi.cancelRefsGeneration,
   updateBible: bibleApi.updateBible,
   setCharacterPortraitPrompt: bibleApi.setCharacterPortraitPrompt,
+  nominateCharacter: bibleApi.nominateCharacter,
 
   /* ── 映射台域 ── */
   screenplayPreflight: screenplayApi.screenplayPreflight,

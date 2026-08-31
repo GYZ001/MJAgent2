@@ -16,6 +16,11 @@ from app.capabilities.schemas import ConfirmationPolicy, IdempotencyPolicy, Risk
 
 
 def commands() -> list[CommandSpec]:
+    return [*_bible_card_commands(), *_portrait_commands()]
+
+
+def _bible_card_commands() -> list[CommandSpec]:
+    """人物谱整体生成/修订 + 单角色提名建卡（不含定妆照，见 ``_portrait_commands``）。"""
     return [
         _cmd(
             "bible.generate",
@@ -78,6 +83,30 @@ def commands() -> list[CommandSpec]:
             rest_routes=("POST /api/projects/{project_id}/bible/style",),
             tags=("bible", "portrait", "scene"),
         ),
+        _cmd(
+            "bible.nominate_character",
+            title="提名角色",
+            description=(
+                "用户提名一个原文称呼：命中人物谱已有角色则登记别名，都没命中则按既有建卡判据"
+                "（原文证据检索/subject_kind=person 硬闸/外观生成）尝试新建人物卡；命中多个角色"
+                "时 fail closed，不猜测归属"
+            ),
+            input_model=I.CharacterNominateInput,
+            risk=RiskLevel.R2_MATERIAL,
+            confirmation=ConfirmationPolicy.NEVER,
+            idempotency=IdempotencyPolicy.RECOMMENDED,
+            scopes={"manju:generation-media"},
+            side_effect="may_create_character_card_or_register_alias",
+            handler=h_bible.nominate_character,
+            rest_routes=("POST /api/projects/{project_id}/characters/nominate",),
+            tags=("bible", "portrait"),
+        ),
+    ]
+
+
+def _portrait_commands() -> list[CommandSpec]:
+    """定妆照生命周期：改描述、生成/取消整批、单视角重做。"""
+    return [
         _cmd(
             "portrait.update_prompt",
             title="修改定妆描述",

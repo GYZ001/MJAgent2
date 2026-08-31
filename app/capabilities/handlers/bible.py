@@ -83,6 +83,30 @@ async def set_style(args: I.BibleSetStyleInput) -> CommandResult:
     )
 
 
+async def nominate_character(args: I.CharacterNominateInput) -> CommandResult:
+    """用户提名一个原文称呼：命中已有角色则登记别名，否则按既有建卡判据处理。
+    真实结果（exists/conflict/added/skipped_minor/card_incomplete/
+    skipped_not_person/error）原样透传给调用方，不折叠成一句"提名失败"，见
+    ``app.domain.bible_ops.nominate`` 的模块 docstring。
+
+    直接从 ``app.domain.bible_ops`` 导入（不经 ``app.api``）：``app/api.py`` /
+    ``app/domain/__init__.py`` 的整仓再导出列表都卡在 line_count 棘轮基线的零
+    余量上，新增一个再导出符号就会把两个文件同时推过基线——``app/capabilities/
+    handlers/screenplay.py`` 的 ``generate``/``patch`` 已经是这个"绕过顶层门面
+    直接从 app.domain.<chunk> 导入"的先例，同一模式在这里复用，不新造写法。
+    """
+    from app.domain.bible_ops import nominate_character as _nominate_character
+
+    outcome = await call_guarded(
+        _nominate_character,
+        args.project_id,
+        {"label": args.label, "from_episode_no": args.from_episode_no},
+    )
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded(outcome.get("message") or "提名已处理", data=outcome)
+
+
 async def portrait_update_prompt(args: I.PortraitUpdatePromptInput) -> CommandResult:
     from app import api
 

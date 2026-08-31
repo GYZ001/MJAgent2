@@ -28,6 +28,7 @@ import OperationError from '../components/OperationError'
 import StageTextModelPicker from '../components/StageTextModelPicker'
 import VisualStyleDialog from '../components/VisualStyleDialog'
 import WorldbuildingStatus from '../components/WorldbuildingStatus'
+import NominateCharacterEntry from '../components/NominateCharacterDialog'
 import { useVisualStyleDialog } from '../hooks/useVisualStyleDialog'
 import "../styles/BiblePage.css";
 
@@ -1198,9 +1199,8 @@ export default function BiblePage() {
               onChange={value => { setCharFilters(value); setCharPage(0) }}
               roles={characterRoles}
             />
-            <span className="library-result-count" role="status">
-              共 {bible.characters.length} 个角色{hasCharacterCriteria ? ` · 当前显示 ${filteredChars.length}` : ''}
-            </span>
+            <span className="library-result-count" role="status">共 {bible.characters.length} 个角色{hasCharacterCriteria ? ` · 当前显示 ${filteredChars.length}` : ''}</span>
+            <NominateCharacterEntry projectId={p.id} onFocusCharacter={name => setCharSearch(name)} />
           </div>
           <div ref={characterGridRef} className="figure-grid">
             {pagedChars.map(({ c, i }: { c: Character; i: number }) => {

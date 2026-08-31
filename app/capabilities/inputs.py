@@ -82,6 +82,20 @@ class BibleSetStyleInput(StandardCommandInput):
     quote_id: str | None = None
 
 
+class CharacterNominateInput(StandardCommandInput):
+    """用户提名一个原文称呼（人物谱页"没被选上的角色"手动入口）。
+
+    ``from_episode_no`` 是原文证据检索的起点集数，省略时端点按 1 处理——见
+    ``app.domain.bible_ops.nominate`` 模块 docstring；本模型里保持 ``int | None``
+    是为了让调用方可以显式省略，实际归一化发生在领域函数里，不在这里塞默认值
+    逻辑（配套参数/归一化只应有一处权威实现）。
+    """
+
+    project_id: str
+    label: str
+    from_episode_no: int | None = None
+
+
 class PortraitUpdatePromptInput(StandardCommandInput):
     project_id: str
     character: str

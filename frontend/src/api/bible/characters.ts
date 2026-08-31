@@ -292,3 +292,8 @@ export function regenerateCharacterView(
     body || {},
   );
 }
+
+/** 提名一个原文称呼：命中已有角色就登记别名，否则按建卡判据尝试新建（见后端 nominate.py）。*/
+export function nominateCharacter(projectId: string, label: string, fromEpisodeNo?: number) {
+  return mutate("POST", `/projects/${projectId}/characters/nominate`, { label, from_episode_no: fromEpisodeNo });
+}
