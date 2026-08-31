@@ -176,7 +176,7 @@ max_function_lines_python = 50
 "frontend/src/api/screenplay.ts" = 340
 "frontend/src/components/EpisodeCrumb.tsx" = 301
 "frontend/src/components/observability/TraceDrawer.tsx" = 834
-"frontend/src/pages/BiblePage.tsx" = 1783
+"frontend/src/pages/BiblePage.tsx" = 1772
 "frontend/src/pages/BoardPage.test.ts" = 360
 # 2026-08-30 +16：素材条/素材详情两处角色缩略图改用当前解析结果，新增"已更新"
 # 轻标记（与 portrait_id 快照不同时）+ 无定妆照的显式空态，见上方 screenplay.ts 注释同一次改动。
@@ -251,7 +251,7 @@ max_function_lines_python = 50
 "app/domain/bible_ops/scene_refs.py" = 62
 "app/domain/bible_ops/style_and_drafts.py" = 117
 "app/domain/bible_ops/task_recovery.py" = 73
-"app/domain/bible_ops/task_run.py" = 112
+"app/domain/bible_ops/task_run.py" = 99
 "app/domain/bible_ops/view_redo.py" = 82
 "app/domain/common.py" = 134
 "app/domain/projects/bible_attachments.py" = 126

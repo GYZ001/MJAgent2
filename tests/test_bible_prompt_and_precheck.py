@@ -224,7 +224,6 @@ def test_bible_generate_precheck_prices_existing_characters_only_when_style_chan
     重生成），画风真的不同才按现有角色数计价（那才会真的触发定妆重生成）。"""
     from app.domain import bible_ops
     from app.schemas import Bible, Character, World
-    import json as json_mod
 
     from app.domain.bible_ops.primitives import _visual_style_prompt_or_default as _style_prompt
     bible = Bible(
@@ -263,19 +262,21 @@ def test_bible_generate_precheck_prices_existing_characters_only_when_style_chan
 
 
 def test_generate_bible_forces_backend_visual_style_prompt(monkeypatch) -> None:
-    """架构转向（2026-08-31）后 generate_bible 只判定世界观：visual_style_prompt
-    传入时必须原样覆盖模型自己写的画风（画风由后端统一管理，不接受模型自由
-    发挥），era/genre 仍取模型判断结果；没有 previous_bible（首次生成）时
-    characters 恒为空。替换同名旧用例（旧用例走整套点名+角色详情 AgentLoop，
-    那条路径已经退场）。"""
+    """架构转向（2026-08-31 二次拍板）：generate_bible 不再发起任何模型调用——
+    画风已经由用户在导入面板选定，visual_style_prompt 就是选定结果本身，
+    原样写进 world，不问模型。没有 previous_bible（首次生成）时 era/genre
+    留空、characters 恒为空。替换同名旧用例（旧用例走一次「轻量模型调用判定
+    era/genre」的中间方案，那条方案本身已被推翻——它在真实项目上把用户拦在
+    HiAgent 内容审核后面）。"""
     from app import stages
     from app.harness import model_gateway
     import asyncio
 
-    async def fake_chat_structured(_messages, *, model_type, **_kwargs):
-        return model_type(
-            era="架空古代", genre="东方仙侠", visual_style_canonical="模型自行写的画风字数也凑够十五字以上",
-        )
+    calls = {"count": 0}
+
+    async def fake_chat_structured(*_args, **_kwargs):  # pragma: no cover - 不该被调用
+        calls["count"] += 1
+        raise AssertionError("generate_bible 不应再发起任何模型调用")
 
     monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
 
@@ -284,21 +285,24 @@ def test_generate_bible_forces_backend_visual_style_prompt(monkeypatch) -> None:
         visual_style_prompt="电影级真实质感，现实人物建模，自然光影，细节丰富，东方仙侠风。",
     ))
 
+    assert calls["count"] == 0, "画风已由用户选定，不该再问模型"
     assert result.world.visual_style_canonical == "电影级真实质感，现实人物建模，自然光影，细节丰富，东方仙侠风。"
-    assert result.world.era == "架空古代"
-    assert result.world.genre == "东方仙侠"
+    assert result.world.era == ""
+    assert result.world.genre == ""
     assert result.characters == []
 
 
 def test_generate_bible_carries_forward_existing_characters_and_scenes_unchanged(monkeypatch) -> None:
-    """回归锁（协调方 2026-08-31 打回）：重新判定世界观绝不能清空已积累的角色/
-    场景卡。新架构下角色卡/场景卡是随分集由映射台提名或分镜展开前反应式建卡
+    """回归锁（协调方 2026-08-31 打回，二次拍板后依然成立）：换画风绝不能清空
+    已积累的角色/场景卡，也不该动 era/genre——这次调用压根没有重新判断过它们。
+    新架构下角色卡/场景卡是随分集由映射台提名或分镜展开前反应式建卡
     （ensure_character_card / assess_new_scene）陆续积累出来的，不是靠这个
     「重新生成人物谱」按钮点名出来的——早期实现 `characters=[]` 是把"首次生成
     没有候选可点名"和"重新判定世界观"两种情况错误合并成同一种「清空」处理，
     会把用户攒了几十集的角色卡和场景卡随手一个按钮清零。这里钉住：传入
     previous_bible 时，返回的 Bible.characters/scenes 与旧数据逐字段一致，
-    只有 world 换成了新判定结果——防止将来又被改回覆盖。"""
+    world.era/genre 原样带出，只有 visual_style_canonical 换成新选定的画风——
+    防止将来又被改回覆盖，也防止「不问模型」被悄悄改回「问模型」。"""
     from app import stages
     from app.harness import model_gateway
     import asyncio
@@ -322,18 +326,19 @@ def test_generate_bible_carries_forward_existing_characters_and_scenes_unchanged
         ],
     }
 
-    async def fake_chat_structured(_messages, *, model_type, **_kwargs):
-        return model_type(era="架空古代", genre="东方仙侠", visual_style_canonical="全新画风描述也凑够十五个字以上")
+    async def fake_chat_structured(*_args, **_kwargs):  # pragma: no cover - 不该被调用
+        raise AssertionError("换画风不该再发起任何模型调用")
 
     monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
 
     result = asyncio.run(stages.generate_bible(
         [{"idx": 1, "title": "第一章", "content": "甲一走入山中。"}],
         previous_bible=previous_bible,
+        visual_style_prompt="全新画风描述也凑够十五个字以上",
     ))
 
-    assert result.world.era == "架空古代"
-    assert result.world.genre == "东方仙侠"
+    assert result.world.era == "现代都市"
+    assert result.world.genre == "都市异能"
     assert result.world.visual_style_canonical == "全新画风描述也凑够十五个字以上"
     assert [c.name for c in result.characters] == ["甲一", "乙二"]
     assert result.characters[0].appearance_canonical == "十五岁少年，黑发束起，黑色劲装，眉眼倔强坚毅"
@@ -1071,44 +1076,44 @@ def test_roster_presence_dossier_empty_when_quote_not_locatable() -> None:
     assert stages._roster_presence_dossier(1, "毫不相关的原文。", "根本没有的引句") == []
 
 
-def test_generate_bible_produces_world_only_and_never_calls_roster_pipeline(monkeypatch) -> None:
-    """架构转向（2026-08-31）：首版人物谱只从原文判定世界观，不再点名角色、
-    不复用整套 roster 流水线。即使章节原文里出现了具名角色（"小胖子"），
-    generate_bible 也绝不能把它写进产出——这条测试同时钉住「characters 恒为
-    []」与「不再调用 _recurring_character_names/roster AgentLoop」两件事，
-    替换同名旧用例（旧用例断言 bible.characters 非空，验的是已经退场的整套
-    点名-归并-详情生成行为）。"""
+def test_generate_bible_never_calls_any_model_or_roster_pipeline(monkeypatch) -> None:
+    """架构转向（2026-08-31 二次拍板）：generate_bible 不再判定世界观、不再点名
+    角色、不复用整套 roster 流水线——不发起任何模型调用。上一版方案是「发一次
+    轻量模型调用判定 era/genre/画风」，这个方案本身被推翻：画风已经由用户在
+    导入面板选定，问模型是多余的，而这次多余调用在真实项目（《我欲封天》）
+    上直接触发 HiAgent 内容审核（``finish_reason=content_filter``），把用户
+    拦在 ``bible_status=failed`` 且没有出路。这条测试用打桩计数钉住「调用次数
+    恒为 0」，同时保留旧用例「不再调用点名流水线」与「characters 恒为 []」的
+    回归锁（旧用例断言 bible.characters 非空，验的是已经退场的整套点名-归并-
+    详情生成行为；再之前一版断言「发一个只判定世界观的模型调用」，那个中间
+    方案本身也已经退场）。"""
     import asyncio
     from app import stages
     from app.harness import model_gateway
 
-    seen: dict[str, object] = {}
+    model_calls = {"count": 0}
     roster_called = {"value": False}
 
     async def fake_recurring_character_names(*_args, **_kwargs):  # pragma: no cover - 不该被调用
         roster_called["value"] = True
         return [("小胖子", "李富贵", 2, 16, 6, [])]
 
-    async def fake_chat_structured(messages, *, model_type, **kwargs):
-        seen["prompt"] = messages[-1]["content"]
-        seen["call_meta"] = kwargs.get("call_meta")
-        return model_type(
-            era="架空古代", genre="东方玄幻", visual_style_canonical="国漫3D动画电影质感，精致光影，统一电影画面",
-        )
+    async def fake_chat_structured(*_args, **_kwargs):  # pragma: no cover - 不该被调用
+        model_calls["count"] += 1
+        raise AssertionError("generate_bible 不应再发起任何模型调用")
 
     _patch_stages(monkeypatch, "_recurring_character_names", fake_recurring_character_names)
     monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
 
-    bible = asyncio.run(stages.generate_bible([
-        {"idx": 1, "title": "第一章", "content": "小胖子与孟浩同行。"}
-    ]))
+    bible = asyncio.run(stages.generate_bible(
+        [{"idx": 1, "title": "第一章", "content": "小胖子与孟浩同行。"}],
+        visual_style_prompt="国漫3D动画电影质感，精致光影，统一电影画面",
+    ))
 
     assert bible.characters == []
-    assert roster_called["value"] is False, "首版人物谱不得再调用点名流水线"
-    prompt = str(seen["prompt"])
-    assert "不涉及任何具体角色" in prompt
-    assert '"characters"' not in prompt, "世界观判定的输出 JSON Schema 不应再包含角色字段"
-    assert seen["call_meta"]["stage_key"] == "character_bible_world"
+    assert bible.world.visual_style_canonical == "国漫3D动画电影质感，精致光影，统一电影画面"
+    assert roster_called["value"] is False, "不得再调用点名流水线"
+    assert model_calls["count"] == 0, "generate_bible 不该再发起任何模型调用"
 
 
 def test_paratext_scope_does_not_scale_with_book_length() -> None:

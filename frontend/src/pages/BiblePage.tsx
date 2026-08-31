@@ -14,6 +14,7 @@ import { useFocusTrap } from '../hooks/useFocusTrap'
 import { usePrepListState } from '../hooks/usePrepListState'
 import { formatBookTitle } from '../lib/bookTitle'
 import { sceneStepStatus } from '../lib/prepSteps'
+import { retryBibleGenerationAction } from '../lib/retryBibleGeneration'
 import type { PrepStepStatus } from '../lib/statusLabels'
 import CharacterFilters, {
   characterFilterActiveCount,
@@ -24,7 +25,6 @@ import CharacterFilters, {
 import CharacterQaPanel from '../components/CharacterQaPanel'
 import ImageCompareModal from '../components/ImageCompareModal'
 import OperationError from '../components/OperationError'
-import StageTextModelPicker from '../components/StageTextModelPicker'
 import WorldbuildingStatus from '../components/WorldbuildingStatus'
 import CharacterLibraryEmptyState from '../components/bible/CharacterLibraryEmptyState'
 import ManualCharacterDialog from '../components/bible/ManualCharacterDialog'
@@ -701,6 +701,8 @@ export default function BiblePage() {
     )
   }
 
+  const retryBibleGeneration = retryBibleGenerationAction(p, act)
+
   const skipToEpisodes = async () => {
     try {
       let names: string[] = []
@@ -924,19 +926,6 @@ export default function BiblePage() {
           }}
         />
         <h1>人物谱 <span className="sub">角色资产与定妆版本中心 · 保持跨镜头、跨分集一致</span></h1>
-        <div className="stage-model-picker-row">
-          <StageTextModelPicker
-            projectId={projectId!}
-            field="bible_text_provider"
-            label="文本模型（项目）"
-            title="世界书生成使用的文本模型。作用域：整个项目；不选则使用系统默认文本模型，只影响之后新发起的谱写，不影响已生成内容"
-            value={p.bible_text_provider}
-            choices={p.text_model_choices ?? []}
-            disabled={busy}
-            toast={toast}
-            onSaved={() => void refresh({ force: true })}
-          />
-        </div>
         <hr className="rule" />
       </header>
 
@@ -1013,11 +1002,11 @@ export default function BiblePage() {
           </div>
         )}
         {p.bible_status === 'failed' && (
-          <OperationError
-            title="人物谱生成未完成"
-            message={p.bible_error}
-            guidance="失败结果没有发布；原著、旧人物谱和已生成资产保持不变。人物谱页不再提供重新发起入口，请联系管理员或重新导入项目。"
-          />
+          <OperationError title="人物谱世界观未写入" message={p.bible_error}
+            guidance="原著和已生成资产保持不变。这一步现在只是把已选定的画风写入项目，不再调用外部模型判断年代或题材，点击重试基本不会再失败；重试成功后即可在映射台或本页手动添加角色。">
+            <button className="btn small" disabled={busy} onClick={() => void retryBibleGeneration()}
+              aria-label={busy ? '重新生成人物谱，暂不可用：正在处理上一项操作' : '重新生成人物谱'}>重新生成人物谱</button>
+          </OperationError>
         )}
         {p.bible_status === 'warning' && (
           <OperationError

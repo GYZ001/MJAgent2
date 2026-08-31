@@ -426,3 +426,56 @@ async def test_bible_shutdown_keeps_running_projection_for_recovery(
         "SELECT bible_status,bible_error FROM projects WHERE id='p1'"
     ).fetchone()
     assert dict(project) == {"bible_status": "running", "bible_error": None}
+
+
+@pytest.mark.asyncio
+async def test_start_bible_core_recovers_stale_failed_project_without_model_call(
+    tmp_path, monkeypatch,
+) -> None:
+    """存量修复回归锁：真实卡住的《我欲封天》项目停在 bible_status='failed'、
+    bible_json 为空（HiAgent content_filter 拦下了旧版「轻量模型调用判定
+    era/genre/画风」），但 bible_style_name 在导入时已经落库。二次拍板后
+    generate_bible 不再发起任何模型调用，既有「重新生成人物谱」按钮天然就是
+    自愈路径——这条用例复刻那批项目的真实落库状态，钉住重试能让它们恢复
+    可用，且过程中不发起任何模型调用（model_gateway.chat_structured 一被
+    调用就报错，不是靠打桩绕过它）。"""
+    import json
+
+    from app.harness import model_gateway
+    from app.visual_styles import visual_style_prompt
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "bible-recover.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects("
+        "id,name,status,bible_status,bible_error,bible_json,bible_style_name,plan_status,created_at"
+        ") VALUES('p1','我欲封天','planned','failed',?,NULL,'真人摄影风','ready',1)",
+        ("「内容生成」内容生成未通过格式或业务校验，可点击重试（错误码 GEN · ERR-20260831-577587）",),
+    )
+    conn.commit()
+    patch_api_everywhere(monkeypatch, "_require_harness_engine", lambda _project_id: None)
+    patch_api_everywhere(monkeypatch, "_start_refs_generation", lambda *_args, **_kwargs: None)
+
+    async def fail_if_called(*_args, **_kwargs):  # pragma: no cover - 不该被调用
+        raise AssertionError("重新生成人物谱不该再发起任何模型调用")
+
+    monkeypatch.setattr(model_gateway, "chat_structured", fail_if_called)
+
+    precheck = api._compute_bible_generate_precheck("p1", style_name="真人摄影风")
+    quote = api._issue_payment_quote(precheck)
+
+    result = await api._start_bible_core(
+        "p1", "", confirm=True, quote_id=quote["quote_id"], style_name="真人摄影风",
+    )
+
+    assert result["status"] == "ready"
+    row = conn.execute(
+        "SELECT bible_status, bible_error, bible_json FROM projects WHERE id='p1'"
+    ).fetchone()
+    assert row["bible_status"] == "ready"
+    assert row["bible_error"] is None
+    saved = json.loads(row["bible_json"])
+    assert saved["world"]["visual_style_canonical"] == visual_style_prompt("真人摄影风")
+    assert saved["characters"] == []

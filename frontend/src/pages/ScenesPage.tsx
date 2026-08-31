@@ -19,6 +19,7 @@ import { useFocusTrap } from '../hooks/useFocusTrap'
 import { usePrepListState } from '../hooks/usePrepListState'
 import { formatBookTitle } from '../lib/bookTitle'
 import { sceneStepStatus } from '../lib/prepSteps'
+import { retryBibleGenerationAction } from '../lib/retryBibleGeneration'
 import { sceneUsability } from '../lib/sceneUsability'
 import { statusLabel, statusTitle } from '../lib/statusLabels'
 import ManualSceneDialog from '../components/bible/ManualSceneDialog'
@@ -155,6 +156,7 @@ export default function ScenesPage() {
     finally { setBusy(false) }
   }
 
+  const retryBibleGeneration = retryBibleGenerationAction(p, act)
   const quoteSceneGeneration = async (selectedScenes: string[], resume: boolean, title: string) => {
     await act(async () => {
       const quote = await api.sceneRefsPrecheck(p.id, { scenes: selectedScenes, resume })
@@ -209,11 +211,9 @@ export default function ScenesPage() {
           </div>
         )}
         {!hasBible && p.bible_status === 'failed' && (
-          <OperationError
-            title="世界观判定未完成"
-            message={p.bible_error}
-            guidance="失败结果没有发布；原著和已生成资产保持不变。场景库页不再提供重新发起入口，请联系管理员或重新导入项目。"
-          />
+          <OperationError title="人物谱世界观未写入" message={p.bible_error} guidance="原著和已生成资产保持不变。这一步现在只是把已选定的画风写入项目，不再调用外部模型判断年代或题材，点击重试基本不会再失败；重试成功后即可在映射台或人物谱页手动添加角色，场景也随之可用。">
+            <button type="button" className="btn small" disabled={busy} onClick={() => void retryBibleGeneration()} aria-label={busy ? '重新生成人物谱，暂不可用：正在处理上一项操作' : '重新生成人物谱'}>重新生成人物谱</button>
+          </OperationError>
         )}
         {hasBible && (
           <div className="library-action-row">

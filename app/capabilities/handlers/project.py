@@ -7,12 +7,15 @@ from app.capabilities.schemas import CommandResult
 
 
 async def _confirm_and_start_bible(project_id: str, style_name: str | None) -> CommandResult:
-    """导入即定风格：世界观判定挪到项目创建时自动发起，不再等用户回到人物谱
+    """导入即定风格：世界观写入挪到项目创建时自动发起，不再等用户回到人物谱
     页手动点「选择画风并确定世界观」（2026-08-31 用户拍板：人物谱/场景库降为
-    纯展示，画风改在导入面板一次性选定）。首次生成只判定 era/genre/画风，不
-    产生图片费用（见 api._compute_bible_generate_precheck 的对应分支），比照
-    app.domain.bible_ops 里其余「预检后立即用 quote_id 自动确认」路径
-    （2026-08-29 用户拍板删除费用确认弹窗），这里同样不停下来等人工点头。
+    纯展示，画风改在导入面板一次性选定）。首次生成只是把选定的画风写进
+    world.visual_style_canonical，不再发起任何模型调用（同日二次拍板：画风
+    已由用户选定，问模型判定 era/genre 是多余的，且曾在真实项目上触发内容
+    审核把用户拦住），也不产生图片费用（见 api._compute_bible_generate_precheck
+    的对应分支），比照 app.domain.bible_ops 里其余「预检后立即用 quote_id 自动
+    确认」路径（2026-08-29 用户拍板删除费用确认弹窗），这里同样不停下来等人工
+    点头。
     """
     from app import api
 

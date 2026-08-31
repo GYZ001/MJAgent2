@@ -47,7 +47,6 @@ from .primitives import (
     _consume_payment_quote,
     _normalize_visual_style_name,
     _payment_confirm_required,
-    _project_columns,
     _supports_bible_style_name,
     _validate_payment_quote,
     _visual_style_prompt_or_default,
@@ -71,8 +70,6 @@ async def _bible_task(
             style_name = style_row["bible_style_name"] if style_row else None
         style_name = _normalize_visual_style_name(style_name)
         style_prompt = _visual_style_prompt_or_default(style_name)
-        chapters = rows_to_dicts(conn.execute(
-            "SELECT * FROM chapters WHERE project_id=? ORDER BY idx", (project_id,)).fetchall())
         timeout_s = max(int(get_setting("bible_task_timeout_s") or BIBLE_TASK_TIMEOUT_S), 60)
         # 重新谱写时按角色名保留已有定妆照（重生圣经不应丢失一致性锚点）
         old_row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
@@ -80,25 +77,17 @@ async def _bible_task(
         old_bible = None
         if old_row and old_row["bible_json"]:
             old_bible = json.loads(old_row["bible_json"])
-        from app import model_registry
-        from app.harness.text_provider_scope import stage_text_provider
-
-        resolved_text_provider = None
-        if "bible_text_provider" in _project_columns(conn):
-            provider_row = conn.execute(
-                "SELECT bible_text_provider FROM projects WHERE id=?", (project_id,),
-            ).fetchone()
-            resolved_text_provider = model_registry.resolve_stage_text_provider(
-                provider_row["bible_text_provider"] if provider_row else None
-            )
-        with stage_text_provider(resolved_text_provider):
-            bible = await asyncio.wait_for(
-                generate_bible(
-                    chapters, feedback=feedback, previous_bible=old_bible,
-                    project_id=project_id, visual_style_prompt=style_prompt,
-                ),
-                timeout=timeout_s,
-            )
+        # generate_bible 不再读原文、不再发起任何模型调用（2026-08-31 二次
+        # 拍板，见该函数 docstring）：不再查 chapters（大长篇整本查出来只为
+        # 传参又原样丢弃，纯浪费）、也不再按 bible_text_provider 路由文本
+        # 模型 provider——这一环节已经没有模型调用可路由。
+        bible = await asyncio.wait_for(
+            generate_bible(
+                [], feedback=feedback, previous_bible=old_bible,
+                project_id=project_id, visual_style_prompt=style_prompt,
+            ),
+            timeout=timeout_s,
+        )
         if old_bible:
             old_style = (old_bible.get("world") or {}).get("visual_style_canonical")
             old_refs = {c.get("name"): c.get("ref_image_path")
@@ -337,7 +326,7 @@ async def _start_bible_core(
     recorder = None
     try:
         recorder = _new_bible_recorder(project_id, style_name=style_name)
-        task_registry.spawn(
+        task = task_registry.spawn(
             "bible",
             project_id,
             _recorded_bible_task(
@@ -346,6 +335,14 @@ async def _start_bible_core(
             ),
             project_id=project_id,
         )
+        # generate_bible 不再发起任何模型调用（2026-08-31 二次拍板），这一段
+        # 现在总是秒级完成：不再返回一个「running」占位就撒手让调用方（导入
+        # 面板/REST 端点/Agent-MCP）自己轮询，而是等这个任务真正跑完，返回值
+        # 直接反映它的终态（ready/warning/failed）——用户不会再看到与实际情况
+        # 脱节的「谱写中」。仍然经 task_registry.spawn 而不是直接 await 协程
+        # 本身：继续复用同一把双提交互斥锁（active()/register() 撞车即
+        # RuntimeError）与取消/关机语义，只是紧接着在这里等它跑完。
+        await task
     except Exception as exc:
         if _supports_bible_style_name(conn):
             conn.execute(
@@ -383,7 +380,16 @@ async def _start_bible_core(
     _consume_payment_quote(
         str(quote_id), task_id=f"bible:{project_id}", run_id=recorder.run_id,
     )
-    return {"status": "running", "task_id": f"bible:{project_id}", "run_id": recorder.run_id}
+    # 任务已经跑完（见上面的 await task），这里重新查一次而不是继续沿用
+    # 调用前的占位值：_bible_task 在另一个 asyncio Task 上用它自己的连接
+    # 提交（app.db.get_conn 按 asyncio Task 分连接），只有重新 SELECT 才能
+    # 看到它刚提交的终态。
+    final_row = conn.execute("SELECT bible_status FROM projects WHERE id=?", (project_id,)).fetchone()
+    return {
+        "status": final_row["bible_status"] if final_row else "unknown",
+        "task_id": f"bible:{project_id}",
+        "run_id": recorder.run_id,
+    }
 
 @router.post("/projects/{project_id}/bible")
 async def start_bible(project_id: str, body: dict | None = Body(None)):

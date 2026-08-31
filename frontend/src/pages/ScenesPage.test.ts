@@ -54,6 +54,16 @@ describe('场景库页保留手动新增/替换（用户自己填写，不走模
   })
 })
 
+describe('人物谱世界观写入失败时的场景库出路', () => {
+  it('不再让用户去联系管理员或重新导入，改成可点的重试', () => {
+    expect(source).not.toContain('联系管理员')
+    expect(source).not.toContain('不再提供重新发起入口')
+    expect(source).toContain('重新生成人物谱')
+    expect(source).toContain('retryBibleGenerationAction')
+    expect(source).toMatch(/guidance="[^"]*映射台[^"]*(手动添加|手动新增)/)
+  })
+})
+
 describe('场景库步骤状态', () => {
   it('生成期间优先显示进行中，不把待生成缺口误报为有问题', () => {
     expect(sceneStepStatus({ scene_refs_status: 'running', bible: bibleWithScenes([]) })).toBe('running')

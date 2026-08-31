@@ -28,17 +28,17 @@ describe('人物谱页不再持有产生新内容的入口', () => {
     expect(source).not.toContain('重新判定世界观并更换画风')
     expect(source).not.toContain('更换统一画风')
     expect(source).not.toContain('按最新设定批量重新生成定妆照')
-    expect(source).not.toMatch(/VisualStyleDialog|useVisualStyleDialog|NominateCharacterEntry/)
+    expect(source).not.toContain('联系管理员'); expect(source).not.toMatch(/VisualStyleDialog|useVisualStyleDialog|NominateCharacterEntry/)
   })
 
-  it('人物空态给出指向映射台（分集页）的可点击入口，且保留既有角色维护操作与手动新增/替换', () => {
+  it('人物空态给出指向映射台（分集页）的可点击入口，且保留既有角色维护操作与手动新增/替换；世界观写入失败也能自助重试', () => {
     expect(emptyStateSource).toContain('角色在映射台按需发现')
     expect(source).toMatch(/onGoEpisodes=\{\(\) => go\('episodes', p\.id\)\}/)
     expect(source).toContain('补齐缺失的定妆照')
-    expect(source).toContain('修订人物谱')
-    expect(source).toContain('定稿人物谱')
+    expect(source).toContain('修订人物谱'); expect(source).toContain('定稿人物谱')
     expect(source).toContain('<ManualCharacterDialog')
     expect(source).toContain('<ReplaceCharacterPortraitControl')
+    expect(source).toContain('重新生成人物谱'); expect(source).toContain('retryBibleGenerationAction')
   })
 })
 

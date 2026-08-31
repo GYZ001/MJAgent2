@@ -294,13 +294,11 @@ def test_import_style_name_lands_in_project_world(
     _start_bible_core -> _bible_task 这条链路，落进 bible_json.world.
     visual_style_canonical，不只是被接收后又在某一环被丢弃或忽略。
 
-    world 判定异步跑在 task_registry 的 "bible" 任务里，且这个任务跑在
-    TestClient 内部自己的事件循环上（与本测试函数不是同一个 loop，不能直接
-    await），导入请求本身也只会返回 running；这里用轮询等它跑完再断言落库
-    结果，与 tests/test_agent_api.py::_wait_turn 同一套等待范式。
+    二次拍板（同日晚些时候）：generate_bible 不再发起任何模型调用，人物谱这
+    一段现在秒级完成，_start_bible_core 会等它跑完才返回（不再是「返回
+    running，调用方自己轮询」）——导入请求的响应本身就已经是终态，不用再像
+    旧版那样另起一个轮询等 task_registry 的 "bible" 任务收尾。
     """
-    import time
-
     from app.visual_styles import visual_style_prompt
 
     captured: dict[str, str | None] = {}
@@ -308,17 +306,10 @@ def test_import_style_name_lands_in_project_world(
     async def fake_start_plan(project_id: str) -> dict:
         return {"status": "running", "task_id": f"plan:{project_id}"}
 
-    async def fake_generate_bible(*_args, **kwargs):
-        from app.schemas import Bible, World
-        prompt = kwargs.get("visual_style_prompt")
-        captured["visual_style_prompt"] = prompt
-        return Bible(world=World(era="古代", genre="仙侠", visual_style_canonical=prompt or ""), characters=[])
-
     def fake_start_refs(_project_id: str, _only_character: str | None, **_kwargs) -> dict | None:
         return None
 
     monkeypatch.setattr(planning, "start_plan", fake_start_plan)
-    patch_api_everywhere(monkeypatch, "generate_bible", fake_generate_bible)
     patch_api_everywhere(monkeypatch, "_start_refs_generation", fake_start_refs)
 
     upload = client.post(
@@ -333,23 +324,17 @@ def test_import_style_name_lands_in_project_world(
     imported = client.post("/api/projects/import", json=args)
     assert imported.status_code == 200, imported.text
     project_id = imported.json()["project_id"]
-    assert imported.json()["asset_generation"]["status"] == "running"
+    assert imported.json()["asset_generation"]["status"] == "ready"
 
-    deadline = time.time() + 5.0
-    row = None
-    while time.time() < deadline:
-        row = db.get_conn().execute(
-            "SELECT bible_json, bible_style_name, bible_status FROM projects WHERE id=?",
-            (project_id,),
-        ).fetchone()
-        if row["bible_status"] != "running":
-            break
-        time.sleep(0.05)
-
+    row = db.get_conn().execute(
+        "SELECT bible_json, bible_style_name, bible_status FROM projects WHERE id=?",
+        (project_id,),
+    ).fetchone()
     assert row is not None
     assert row["bible_status"] == "ready"
     assert row["bible_style_name"] == "古典水墨风"
     expected_prompt = visual_style_prompt("古典水墨风")
+    captured["visual_style_prompt"] = json.loads(row["bible_json"])["world"]["visual_style_canonical"]
     assert captured["visual_style_prompt"] == expected_prompt
     assert json.loads(row["bible_json"])["world"]["visual_style_canonical"] == expected_prompt
 

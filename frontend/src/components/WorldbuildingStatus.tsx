@@ -93,7 +93,7 @@ export default function WorldbuildingStatus({
         onClick={() => setStopConfirm(true)}>
         {stopLabel}
       </button>
-      {project.bible_status === 'running' && <span className="stamp gold">谱写中（约 1~3 分钟）</span>}
+      {project.bible_status === 'running' && <span className="stamp gold">谱写中</span>}
       {project.refs_status === 'running' && <span className="stamp gold">定妆中</span>}
       <ServerTaskTimer
         startedAt={project.task_timings?.bible?.started_at}
