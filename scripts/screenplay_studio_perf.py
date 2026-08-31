@@ -24,14 +24,18 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# 直接 `python scripts/x.py` 运行时 sys.path[0] 是 scripts/，不是仓库根。
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts.session_token import session_token  # noqa: E402
 sys.path.insert(0, str(ROOT))
 BASE = "http://127.0.0.1:8230"
-SESSION = (ROOT / "data" / "regression_session_token.txt").read_text(encoding="utf-8").strip()  # 2026-08-24 legacy 通道关闭后迁移
 
 
 def timed_get(path: str, timeout: int = 120) -> dict:
     request = urllib.request.Request(BASE + path, method="GET")
-    request.add_header("X-Manju-Session", SESSION)
+    request.add_header("X-Manju-Session", session_token())
     request.add_header("Accept-Encoding", "gzip")
     start = time.perf_counter()
     try:

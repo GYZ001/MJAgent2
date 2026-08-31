@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import json
 import sqlite3
 import time
@@ -28,6 +29,11 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# 直接 `python scripts/x.py` 运行时 sys.path[0] 是 scripts/，不是仓库根。
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts.session_token import WITH_LOCAL_SECRET, session_token  # noqa: E402
 BASE = "http://127.0.0.1:8230"
 DB_PATH = ROOT / "data" / "manju.db"
 # 项目按**名字**解析，不写死 id。历史上写死的 proj_3ac0b627fa46、proj_4c21fc3ce76a
@@ -37,25 +43,7 @@ LOG = ROOT / "logs" / "first10_videos.log"
 
 # 认证：优先回归专用凭证，缺失时回退本机进程级共享秘密（后端 MJ_LEGACY_SHARED_SESSION
 # 默认开启，接受该秘密为系统管理员身份）。不新增任何白名单逻辑，仅是读取现有凭证。
-_TOKEN_CANDIDATES = (
-    ROOT / "data" / "regression_session_token.txt",
-    ROOT / "data" / "local_session_secret.txt",
-)
 
-
-def _load_session() -> str:
-    for path in _TOKEN_CANDIDATES:
-        if path.exists():
-            value = path.read_text(encoding="utf-8").strip()
-            if value:
-                return value
-    raise SystemExit(
-        "找不到会话凭证：data/regression_session_token.txt 与 "
-        "data/local_session_secret.txt 均不存在或为空。"
-    )
-
-
-SESSION = _load_session()
 
 # 每次启动一个新的尝试标识。幂等键的用途是「同一个请求重发不要重复扣费」，
 # 不是「这一集永远只许尝试一次」——固定成 first10-video-{eid} 之后，重跑
@@ -81,7 +69,7 @@ def call(method: str, path: str, body: dict | None = None,
          headers: dict | None = None, timeout: int = 120) -> tuple[int, dict]:
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request(BASE + path, data=data, method=method)
-    request.add_header("X-Manju-Session", SESSION)
+    request.add_header("X-Manju-Session", session_token(WITH_LOCAL_SECRET))
     request.add_header("Content-Type", "application/json")
     for key, value in (headers or {}).items():
         request.add_header(key, value)

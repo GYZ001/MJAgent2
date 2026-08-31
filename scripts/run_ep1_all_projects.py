@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import json
 import os
 import sqlite3
@@ -34,8 +35,12 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# 直接 `python scripts/x.py` 运行时 sys.path[0] 是 scripts/，不是仓库根。
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts.session_token import session_token  # noqa: E402
 BASE = "http://127.0.0.1:8230"
-SESSION = (ROOT / "data" / "regression_session_token.txt").read_text(encoding="utf-8").strip()
 DB_PATH = ROOT / "data" / "manju.db"
 LOG = ROOT / "logs" / os.environ.get("EP1_LOG_NAME", "ep1_all.log")
 # 补跑某个项目时要开第二个进程，与主进程并存。状态文件是读-改-写，两个进程共用
@@ -86,7 +91,7 @@ def call(method: str, path: str, body: dict | None = None,
          headers: dict | None = None, timeout: int = 90) -> tuple[int, dict]:
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request(BASE + path, data=data, method=method)
-    request.add_header("X-Manju-Session", SESSION)
+    request.add_header("X-Manju-Session", session_token())
     request.add_header("Content-Type", "application/json")
     for key, value in (headers or {}).items():
         request.add_header(key, value)

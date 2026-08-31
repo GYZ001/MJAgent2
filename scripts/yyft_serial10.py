@@ -66,13 +66,17 @@ from pathlib import Path
 from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# 直接 `python scripts/x.py` 运行时 sys.path[0] 是 scripts/，不是仓库根。
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts.session_token import session_token  # noqa: E402
 BASE = "http://127.0.0.1:8230"
 # 2026-08-24 起改用回归专用会话凭证（data/regression_session_token.txt），不再
 # 复用开发者本机的 local_session_secret.txt；读取方式不变：整行 .strip() 后原样
 # 当 X-Manju-Session 头发出。已用新旧两个 token 分别对只读端点
 # （GET /api/system/jobs、/screenplay/status）验证过 200，写操作（含审批）的
 # 验证按约定留给正式回归的 clear 步骤。
-SESSION = (ROOT / "data" / "regression_session_token.txt").read_text(encoding="utf-8").strip()
 PROJECT_ID = "proj_3ac0b627fa46"
 EPISODES = [
     ("EP1", "ep_3d523ff4d0a4"),
@@ -145,7 +149,7 @@ def call(method: str, path: str, body: dict | None = None,
          headers: dict | None = None, timeout: int = 90) -> tuple[int, dict]:
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request(BASE + path, data=data, method=method)
-    request.add_header("X-Manju-Session", SESSION)
+    request.add_header("X-Manju-Session", session_token())
     request.add_header("Content-Type", "application/json")
     for key, value in (headers or {}).items():
         request.add_header(key, value)
