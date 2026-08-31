@@ -673,6 +673,113 @@ def test_runtime_requires_repair_when_library_has_no_usable_images(monkeypatch) 
     assert "reference_fallback_mode" not in meta
 
 
+def test_runtime_falls_back_to_text_only_when_candidate_pool_is_genuinely_empty(monkeypatch) -> None:
+    """群演/一次性人物没有定妆照、镜头没有场景名——候选池本来就是空的，是
+    设计使然，不是漏抽：不得卡人工，应退化为纯文本继续出片，metadata 如实
+    标注未使用参考图（PRD：REFERENCE_IMAGE_REPAIR_REQUIRED 误伤空池场景）。
+    """
+    import app.multiview as mv
+
+    monkeypatch.setattr(mv, "character_multiview_enabled", lambda: True)
+    monkeypatch.setattr(mv, "scene_multiview_enabled", lambda: True)
+
+    async def fake_build_reference_assets(**kwargs):
+        meta = kwargs["existing_meta"]
+        _mark_runtime_library_policy(meta)
+        meta["reference_manifest"] = {
+            "characters": [{
+                "name": "entity:extra1", "asset_required": False,
+                "look_revision_id": None, "pack_status": None,
+                "selected_view_ids": [], "missing_required": [],
+            }],
+            "scene": None,
+        }
+        return []
+
+    stage_calls: list[tuple] = []
+    writes: list[dict] = []
+    patch_worker_everywhere(monkeypatch, "_set_version", lambda *a, **k: writes.append(k))
+    patch_video_modes_everywhere(monkeypatch, "build_reference_assets", fake_build_reference_assets)
+    monkeypatch.setattr(
+        "app.media_pipeline.stage_state.set_pipeline_stage",
+        lambda *a, **k: stage_calls.append((a, k)),
+    )
+
+    conn = _FakeConn({"bible_json": _bible().model_dump_json()})
+    meta = {
+        "mode": REFERENCE_IMAGE_MODE,
+        "mode_decision": decision_to_dict(video_modes.default_reference_decision()),
+        "after_shot_id": None,
+    }
+
+    out_meta, out_prompt = asyncio.run(worker._prepare_reference_mode_inputs(
+        conn,
+        {"id": "j1", "project_id": "p1", "episode_id": "e1", "shot_id": "s1"},
+        {"id": "v1"},
+        _shot_row(),
+        {"episode_no": 1},
+        meta,
+        "PROMPT --dur 5",
+    ))
+
+    assert out_meta["reference_images"] == []
+    assert out_meta["reference_generation_complete"] is True
+    assert out_meta["reference_mode_text_only_fallback"] is True
+    assert out_meta["reference_mode_text_only_reason"] == "empty_candidate_pool"
+    # 关键防回归：这个字段若被误置 True，会被 dispatch.py 的 static_waiting
+    # 判据误读成「静态图已备、只等尾帧」，把刚设好的 STAGE_VIDEO_READY 打回等待态。
+    assert out_meta["reference_static_ready"] is False
+    assert out_prompt.startswith("PROMPT")
+    from app.media_pipeline import stages as media_stages
+
+    assert any(call_args[1] == media_stages.STAGE_VIDEO_READY for call_args, _kw in stage_calls)
+    assert writes
+
+
+def test_runtime_still_requires_repair_when_generated_images_were_all_rejected(monkeypatch) -> None:
+    """空池放行只认「从未要求过资产」；一旦真的生成过候选、又被判不合格
+    （rejection_details 非空），必须维持原有的人工修复拦截，不能被空池
+    放行顺带一起放走。"""
+    import app.multiview as mv
+
+    monkeypatch.setattr(mv, "character_multiview_enabled", lambda: True)
+    monkeypatch.setattr(mv, "scene_multiview_enabled", lambda: True)
+
+    async def fake_build_reference_assets(**kwargs):
+        meta = kwargs["existing_meta"]
+        _mark_runtime_library_policy(meta)
+        meta["reference_manifest"] = {"characters": [], "scene": None}
+        kwargs["rejection_details"].append({
+            "reason": "quality_reject", "asset": "candidate-1",
+        })
+        return []
+
+    patch_worker_everywhere(monkeypatch, "_set_version", lambda *a, **k: None)
+    patch_video_modes_everywhere(monkeypatch, "build_reference_assets", fake_build_reference_assets)
+    monkeypatch.setattr("app.media_pipeline.stage_state.set_pipeline_stage", lambda *a, **k: None)
+
+    conn = _FakeConn({"bible_json": _bible().model_dump_json()})
+    meta = {
+        "mode": REFERENCE_IMAGE_MODE,
+        "mode_decision": decision_to_dict(video_modes.default_reference_decision()),
+        "after_shot_id": None,
+    }
+
+    with pytest.raises(worker.VideoInputRepairRequired, match="参考图模式 2 次"):
+        asyncio.run(worker._prepare_reference_mode_inputs(
+            conn,
+            {"id": "j1", "project_id": "p1", "episode_id": "e1", "shot_id": "s1"},
+            {"id": "v1"},
+            _shot_row(),
+            {"episode_no": 1},
+            meta,
+            "PROMPT",
+        ))
+
+    assert meta.get("reference_mode_text_only_fallback") is None
+    assert meta["reference_group_gate_passed"] is False
+
+
 def test_runtime_submits_existing_character_and_scene_library_assets(monkeypatch) -> None:
     """图库资产齐全时直接进入视频就绪，不再生成剧情关键帧。"""
 

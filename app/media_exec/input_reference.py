@@ -22,6 +22,7 @@ from .fences import VideoInputRepairRequired
 from .input_boundary import _ContinuityWait
 from .job_state import _set_version
 from .reference_progress import _narrative_keyframe_candidate_progress
+from .reference_pool_gate import finish_reference_mode_without_assets
 
 
 async def _prepare_reference_mode_inputs(
@@ -493,41 +494,14 @@ async def _prepare_reference_mode_inputs(
         conn.commit()
         return meta, prompt_text
 
-    # ── 参考图模式两次均未得到文件：保留原模式并进入修复 ──
-    _delete_rejected_assets(rejected_assets)
-    ref_failure_reason = (
-        f"参考图模式 2 次尝试均未产出可用资产 "
-        f"（共 {len(rejection_details)} 张被拒绝）"
+    # ── 参考图模式两次均未得到文件：区分「候选池本来就是空的」与「真实故障」──
+    # （群演/一次性人物没有定妆照、镜头没有 scene_name 是设计使然，不应卡人工；
+    # 判据与纯文本落点见 .reference_pool_gate，理由见该模块 docstring）
+    return await finish_reference_mode_without_assets(
+        conn=conn, job=job, meta=meta, prompt_text=prompt_text, version=version,
+        shot_model=shot_model, bible=bible, screenplay=screenplay, decision=decision,
+        rejection_details=rejection_details, rejected_assets=rejected_assets,
+        lease_owner=lease_owner,
     )
-    log_provider_call(
-        "reference_image_mode_original_failure", config.MODEL_TEXT, "REFERENCE_MODE_ORIGINAL_FAILURE",
-        None, 0, meta={
-            "shot_id": shot_id,
-            "original_failure_reason": ref_failure_reason,
-            "rejection_count": len(rejection_details),
-            "rejection_details": rejection_details[:10],
-        })
-
-    meta["reference_failure_logs"] = (meta.get("reference_failure_logs") or []) + [{
-        "mode": video_modes.REFERENCE_IMAGE_MODE,
-        "original_failure_reason": ref_failure_reason,
-        "rejection_count": len(rejection_details),
-        "rejection_details": rejection_details[:10],
-        "prompt": prompt_text[:500],
-    }]
-    meta["reference_generation_complete"] = False
-    meta["reference_static_ready"] = False
-    meta["continuity_anchor_ready"] = False
-    meta["reference_group_gate_passed"] = False
-    meta["video_input_manifest_frozen"] = False
-    meta["narrative_keyframe_missing"] = False
-    meta["reference_gate_retry_exhausted"] = True
-    meta["reference_images"] = []
-    _set_version(
-        version["id"],
-        image_inputs=json.dumps(meta, ensure_ascii=False),
-        prompt_text=prompt_text,
-    )
-    raise VideoInputRepairRequired(ref_failure_reason)
 
 __all__ = [name for name in globals() if not name.startswith("__")]
