@@ -95,6 +95,7 @@ EXEMPT_ROUTE_REASONS: dict[str, str] = {
     "GET /api/projects/{project_id}/characters/{character_name}/portrait-candidates": "角色定妆候选只读列表",
     "POST /api/projects/{project_id}/characters/{character_name}/portraits/{portrait_id}/adopt": "人物定妆候选人工采纳；页面评审入口，写入 gate/change 决策",
     "POST /api/projects/{project_id}/characters/{character_name}/portraits/{portrait_id}/rollback": "人物定妆候选人工回滚；页面评审入口，复用采纳切换逻辑",
+    "POST /api/projects/{project_id}/scenes/{scene_name}/refs/{scene_reference_id}/manual-rollback": "场景库手动新增/替换场景图的人工回滚；页面评审入口，与既有 POST .../scenes/{scene_name}/refs/{scene_reference_id}/rollback、POST .../characters/{character_name}/portraits/{portrait_id}/rollback 同一分类口径——回滚本身不是独立领域命令",
     "POST /api/payments/notify/wechat": "微信支付渠道异步回调：不是领域命令，调用方是微信服务器而非本产品用户，"
         "挂在 public_router 上无会话鉴权——**验签是唯一防线**"
         "（app.payments.wechat.verify_and_decrypt_notify，任何一步失败整体拒绝）。"

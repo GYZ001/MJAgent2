@@ -308,6 +308,32 @@ def _register_human_only(registry) -> None:
             rest_routes=("DELETE /api/episodes/{episode_id}",),
             tags=("human", "episode", "destructive"),
         ),
+        HumanOnlySpec(
+            "human.manual_character_asset",
+            "手动新增/替换角色定妆照",
+            "用户手写角色名称、外观锚点、年代服饰并上传一张定妆照作为定妆照；不走模型评估或生成",
+            reason=(
+                "图像描述与定妆照文件必须由用户亲自撰写和上传，Agent 无法代填外观描述、"
+                "更不能代传图片——这正是人物谱「完全手动新增」能力存在的意义（同 "
+                "human.choose_episode_target_duration 把创作/素材取舍权留给用户的政策口径）"
+            ),
+            rest_routes=(
+                "POST /api/projects/{project_id}/characters/manual",
+                "POST /api/projects/{project_id}/characters/{character_name}/portrait-image",
+            ),
+            tags=("human", "bible", "character", "upload"),
+        ),
+        HumanOnlySpec(
+            "human.manual_scene_asset",
+            "手动新增/替换场景图",
+            "用户手写场景名称、场景锚点并上传一张场景图；不走模型评估或生成",
+            reason="场景锚点描述与场景图文件必须由用户亲自撰写和上传，政策口径同 human.manual_character_asset",
+            rest_routes=(
+                "POST /api/projects/{project_id}/scenes/manual",
+                "POST /api/projects/{project_id}/scenes/{scene_name}/image",
+            ),
+            tags=("human", "bible", "scene", "upload"),
+        ),
     ]:
         registry.register_human_only(spec)
 
