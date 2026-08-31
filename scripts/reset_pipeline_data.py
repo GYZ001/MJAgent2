@@ -102,6 +102,12 @@ KEEP_TABLES = {
     "mcp_tokens",
     "monitor_audit",
     "novel_import_receipts",
+    # 账号域，不是流水线产出：payment_orders 是真金白银的支付订单，quota_ledger
+    # 是按 user_id 记账的会员配额（两张表都不含 project_id，清不出项目粒度）。
+    # 清掉前者等于毁支付记录，清掉后者等于凭空发配额——重跑时配额真的不够，
+    # 那是要报出来的产品信号，不是靠清账本绕过去的。
+    "payment_orders",
+    "quota_ledger",
     "provider_calls",
     "provider_video_capability_snapshots",
     "settings",
