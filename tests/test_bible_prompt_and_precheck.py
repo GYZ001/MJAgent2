@@ -172,7 +172,10 @@ def test_generate_precheck_estimates_without_bible(monkeypatch) -> None:
     assert "无费用" in result["estimate_note"]
 
 
-def test_visual_style_options_expose_names_and_descriptions_only(monkeypatch) -> None:
+def test_visual_style_options_expose_photographic_flag(monkeypatch) -> None:
+    """``photographic`` 加入响应体（2026-08-31）：导入面板据此对摄影类画风给出
+    "视频阶段易被隐私政策拒收"的提示——判据是既有的
+    ``VisualStylePreset.photographic``字段，不是前端另建一份画风名单。"""
     from app.domain import bible_ops
     import asyncio
 
@@ -185,8 +188,15 @@ def test_visual_style_options_expose_names_and_descriptions_only(monkeypatch) ->
         item["name"] == "真人摄影风" and "真人" in item["description"]
         for item in result["items"]
     )
-    assert all(set(item) == {"name", "description", "sample_image"} for item in result["items"])
+    assert all(
+        set(item) == {"name", "description", "sample_image", "photographic"}
+        for item in result["items"]
+    )
     assert all(item["sample_image"] for item in result["items"])
+    photographic_names = {item["name"] for item in result["items"] if item["photographic"]}
+    non_photographic_names = {item["name"] for item in result["items"] if not item["photographic"]}
+    assert photographic_names == {"真人摄影风", "精修真人风"}
+    assert non_photographic_names == {"国漫电影风", "古典水墨风"}
 
 
 def test_bible_generate_precheck_binds_style_name(monkeypatch) -> None:
