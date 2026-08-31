@@ -11,13 +11,14 @@ export interface SceneStepProject {
 
 /**
  * 场景库这一步的状态：人物谱页与场景库页的顶部步骤卡共用同一份判据，不允许
- * 两页各自维护一份互相漂移——人物谱/定妆照仍在跑时，场景库这一步已经在管线
- * 里被安排执行（后端人物谱生成成功后无条件依次触发定妆照、场景清单、
- * 场景图，参见 ScenesPage `startBibleAndSceneLibrary` 的注释），不能显示
- * 「未开始」，那是在说谎（CLAUDE.md：界面承诺必须与实际行为一致）。
+ * 两页各自维护一份互相漂移。架构转向（2026-08-31）后场景清单/场景图不再随
+ * 人物谱谱写自动级联（generate_scene_bible 退出首版流程，场景改为
+ * app.scenes.assess_new_scene 反应式发现/场景库页手动准备），因此这一步的
+ * 状态只看它自己的产物信号（scene_refs_status/scenes），不再把
+ * bible_status/refs_status 的「运行中」借用成本步骤的「运行中」——那样会在
+ * 场景库实际什么都没开始时显示「进行中」，同样是在说谎。
  */
 export function sceneStepStatus(project: SceneStepProject): PrepStepStatus {
-  if (project.bible_status === 'running' || project.refs_status === 'running') return 'running'
   const status = project.scene_refs_status
   const scenes = project.bible?.scenes ?? []
   if (status === 'running') return 'running'

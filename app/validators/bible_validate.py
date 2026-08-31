@@ -13,13 +13,16 @@ def validate_bible(bible: Bible) -> list[str]:
     )
 
     errors = []
-    # 角色数量不再设上限：旧注释「初始人物谱由 prompt 约束为 ≤8 个，上限放宽到 60」
-    # 的前提早已失效——首版本身产出的就不是 8 个而是 20 个，60=20+40 只是从失效
-    # 前提算出的余数。失控防线已移到点名阶段单独兜底（见
-    # app/stages/common.py 的 BIBLE_ROSTER_RUNAWAY_MAX，候选超过 200 时直接
-    # 报错），这里只保留「至少 1 个」这条真实失败信号。
-    if not bible.characters:
-        errors.append(f"characters 数量 {len(bible.characters)}，要求至少 1 个")
+    # 空角色列表合法（2026-08-31 架构转向）：首版人物谱只判定世界观
+    # （app.stages.bible_generate.generate_bible），characters=[] 是这条主路径
+    # 的正常产出，不是失败信号——角色改为映射台按需提名
+    # （POST /projects/{id}/characters/nominate）或分集反应式建卡产出，不再
+    # 在这里强制「至少 1 个」。角色数量本身也不再设上限：旧注释「初始人物谱由
+    # prompt 约束为 ≤8 个，上限放宽到 60」的前提早已失效——首版本身产出的
+    # 就不是 8 个而是 20 个，60=20+40 只是从失效前提算出的余数。失控防线曾
+    # 在点名阶段单独兜底（app/stages/common.py 的 BIBLE_ROSTER_RUNAWAY_MAX，
+    # 候选超过 200 时直接报错），点名退出主路径后这条防线随之停用，同一批
+    # 退场，不在这里补一条新上限。
     names = [c.name for c in bible.characters]
     if len(names) != len(set(names)):
         errors.append("characters.name 存在重复")

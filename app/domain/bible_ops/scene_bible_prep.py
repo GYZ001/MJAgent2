@@ -166,41 +166,16 @@ def _decode_scene_target(value: str | list[str] | None) -> str | list[str] | Non
         return list(dict.fromkeys(names)) or None
     return value.strip() or None
 
-def _consume_pending_scene_regen_if_ready(project_id: str, scenes_ready: bool) -> None:
-    """消费「风格确认后场景图自动续跑」这张票据（见 db.py 里 pending_scene_regen
-    列的注释）：人物谱谱写/重谱成功时 _bible_task 写下这张票据，场景清单一旦真的
-    就绪（这里，_scene_bible_task 成功落盘之后）就自动继续生成场景图——不必等
-    用户之后碰巧访问场景库页面。
-
-    用一次原子 UPDATE ... WHERE pending_scene_regen=1 消费：rowcount=0 说明没有
-    待消费的票据（普通场景清单刷新、或已被消费过），直接跳过，不会重复触发。
-    """
-    conn = get_conn()
-    project_columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
-    if "pending_scene_regen" not in project_columns or not scenes_ready:
-        return
-    cursor = conn.execute(
-        "UPDATE projects SET pending_scene_regen=0 WHERE id=? AND pending_scene_regen=1",
-        (project_id,),
-    )
-    conn.commit()
-    if cursor.rowcount < 1:
-        return
-    try:
-        started = _start_scene_refs_generation(project_id, None, resume=False)
-    except Exception as exc:  # noqa: BLE001 场景清单仍然算成功，只是场景图续跑失败
-        public = errors.record_and_format(
-            exc, action="scene_refs_spawn_after_style_regen", context={"project_id": project_id},
-        )
-        conn.execute(
-            "UPDATE projects SET scene_refs_status='failed',scene_refs_error=? WHERE id=?",
-            (f"场景清单已就绪，但按新画风继续生成场景图未能启动，可在场景库重试。{public}", project_id),
-        )
-        conn.commit()
-        return
-    if not started:
-        # 场景图任务已在跑（比如用户自己手动触发过）：票据的目的已经达成，不是失败。
-        return
+# `_consume_pending_scene_regen_if_ready`（消费 db.py 里 pending_scene_regen
+# 列的票据、场景清单落盘后自动续跑场景图）随 2026-08-31 架构转向一并退场：
+# 唯一的票据写入方是 app/domain/bible_ops/task_run.py 的 _bible_task 场景清单
+# 自动级联，那段已经删除（generate_scene_bible 退出首版流程，场景改为
+# app.scenes.assess_new_scene 反应式发现），这个函数因此永远读不到 flag=1、
+# 变成恒定空转的死代码——按「退场必须同时带走为它服务的机器」一并删除，不
+# 留一个看起来在守护、实际再也不会触发的消费者。场景图生成现在只有两个入口：
+# 用户在场景库页手动确认（start_scene_bible 里直接调用
+# _start_scene_refs_generation，不经过票据）与画风切换（set_bible_visual_style
+# 同理直接调用），都不依赖这张票据。
 
 async def _scene_bible_task(
     project_id: str,
@@ -250,7 +225,6 @@ async def _scene_bible_task(
         )
         conn.commit()
         recorder.succeed("场景设定已准备，场景图等待费用确认", conn=None)
-        _consume_pending_scene_regen_if_ready(project_id, bool(scenes))
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
             recorder.pause_external("服务重启，场景设定任务等待自动恢复", conn=None)

@@ -35,6 +35,7 @@ from .primitives import (
     _issue_payment_quote,
     _normalize_character_selection,
     _normalize_visual_style_name,
+    _visual_style_prompt_or_default,
 )
 
 
@@ -464,29 +465,28 @@ async def refs_cost_precheck(project_id: str, body: dict | None = None):
     ))
 
 def _compute_bible_generate_precheck(project_id: str, *, style_name: str | None = None) -> dict:
-    """计算首次人物谱+定妆范围；不签发可执行凭证。"""
+    """POST /bible 只判定世界观（不点名角色）的真实成本预检：只有请求画风与
+    当前画风不同才触发角色批量重出定妆照（判据须与 _bible_task 的
+    style_changed 同口径），首次生成或画风未变时无图片费用，不报假价。"""
     from app.config import IMAGE_PRICE_PER_UNIT
     from app.multiview import CHARACTER_REQUIRED_VIEWS
-    from app.stages import BIBLE_MUST_COVER_MAX
 
     style_name = _normalize_visual_style_name(style_name)
     p = _project_or_404(project_id)
     unit = float(IMAGE_PRICE_PER_UNIT)
     views_per = len(CHARACTER_REQUIRED_VIEWS)
-    # 首版谱写按粗估规模估算（人物点名不设人数上限，真实角色数可能更多）；若已有 bible 则用真实角色数
-    if p.get("bible_json"):
-        bible = json.loads(p["bible_json"])
-        chars = bible.get("characters") or []
-        char_count = len(chars)
-        names = [c.get("name") for c in chars if c.get("name")]
-        estimate_note = "基于当前人物谱角色数"
+    bible = json.loads(p["bible_json"]) if p.get("bible_json") else None
+    current_style = ((bible or {}).get("world") or {}).get("visual_style_canonical")
+    style_changing = bool(current_style) and _visual_style_prompt_or_default(style_name) != current_style
+    chars = (bible or {}).get("characters") or [] if style_changing else []
+    char_count = len(chars)
+    names = [c.get("name") for c in chars if c.get("name")]
+    if style_changing:
+        estimate_note = "画风将发生变化，按当前人物谱角色数重新生成全部角色定妆照"
+    elif bible:
+        estimate_note = "本次只判定世界观，画风未变化，不会重新生成角色定妆照，无图片费用"
     else:
-        char_count = BIBLE_MUST_COVER_MAX
-        names = []
-        estimate_note = (
-            f"尚无人物谱，按 {BIBLE_MUST_COVER_MAX} 角色规模粗估（人物点名不设人数"
-            "上限，实际角色数可能更多）；谱写完成后按真实角色数出图并重新结算"
-        )
+        estimate_note = "首次生成只判定年代/题材/画风（世界观），本身不产生角色或图片，无费用；角色改在映射台按需生成"
     image_count = char_count * views_per
     estimated = round(image_count * unit, 2)
     max_retry = round(estimated * 1.5, 2)

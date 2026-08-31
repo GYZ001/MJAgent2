@@ -53,7 +53,6 @@ from .primitives import (
     _visual_style_prompt_or_default,
 )
 from .refs_generation import _start_refs_generation
-from .scene_bible_prep import _start_scene_bible_preparation
 
 
 async def _bible_task(
@@ -106,7 +105,11 @@ async def _bible_task(
                         for c in old_bible.get("characters", [])}
             for c in bible.characters:
                 c.ref_image_path = old_refs.get(c.name) or None
-        # 重谱后画风变化 → 旧画风定妆照与旧视频全部作废（否则图像信号会把新画风拉回旧画风）
+        # 世界观判定不再改动角色内容（generate_bible 原样带出 previous_bible 的
+        # characters/scenes），只有画风真的变化才需要作废旧画风定妆照/视频——
+        # 否则图像信号会把新画风拉回旧画风；画风未变时旧定妆照依旧成立，不能
+        # 无差别打回重做（下面的定妆触发条件复用同一个判据，不引入新变量以
+        # 免把本函数推过单函数行数基线）。
         if old_style and bible.world.visual_style_canonical != old_style:
             _purge_for_style_change(project_id, bible)
         residual = list(getattr(bible, "residual_errors", []) or [])
@@ -146,7 +149,15 @@ async def _bible_task(
                     final_project_status if not residual else "created", project_id,
                 ))
         conn.commit()
-        if trigger_full_refs and not residual:
+        # 只在「首次生成」（characters 恒为空，_start_refs_generation 本来就是
+        # 无害空转，见 app.refs.generate_refs 对空选中集的早退）或「画风确实
+        # 变化」（旧定妆照已被上面的 _purge_for_style_change 判定失效，需要
+        # 按新画风重出）时才触发定妆任务。画风未变时，世界观判定不产生任何
+        # 角色内容变化，已有定妆照依旧成立——不该被这次调用无差别打回重做，
+        # 那会把「只是重新判定了一次年代/题材」变成一次隐藏的、真实产生图片
+        # 费用的批量重出图（回归：previous_bible 带出角色后，characters 不再
+        # 恒为空，旧的「无条件触发」假设不再成立）。
+        if trigger_full_refs and not residual and (not old_bible or (old_style and bible.world.visual_style_canonical != old_style)):
             try:
                 _start_refs_generation(project_id, None)
             except Exception as exc:  # noqa: BLE001 bible remains deliverable
@@ -158,27 +169,14 @@ async def _bible_task(
                     (f"人物谱已完成，但定妆任务未能启动，可直接重试定妆。{public}", project_id),
                 )
                 conn.commit()
-            if "scene_refs_status" in project_columns:
-                # 场景清单还不存在（首次谱写）或即将被这次 free 重生成覆盖（重谱换
-                # 风格）：两种情况场景图都要在清单就绪后自动继续，不能停下来等用户
-                # 之后碰巧访问场景库页。票据写在这里、由 _scene_bible_task 消费。
-                if "pending_scene_regen" in project_columns:
-                    conn.execute(
-                        "UPDATE projects SET pending_scene_regen=1 WHERE id=?", (project_id,),
-                    )
-                    conn.commit()
-                try:
-                    _start_scene_bible_preparation(project_id)
-                except Exception as exc:  # noqa: BLE001 bible remains deliverable
-                    public = errors.record_and_format(
-                        exc, action="scene_bible_spawn_after_bible",
-                        context={"project_id": project_id},
-                    )
-                    conn.execute(
-                        "UPDATE projects SET scene_refs_status='failed',scene_refs_error=? WHERE id=?",
-                        (f"人物谱已完成，但场景设定未能启动，可在场景库重试。{public}", project_id),
-                    )
-                    conn.commit()
+            # 场景清单批量生成（generate_scene_bible）同一批退场（2026-08-31）：
+            # 不再在人物谱谱写成功后自动触发 _start_scene_bible_preparation。
+            # 场景改为按需反应式发现——分镜阶段遇到未匹配的 label 时逐个跑
+            # app.scenes.assess_new_scene（该路径已存在，对照
+            # portraits.ensure_character_card 的新角色路径）。场景库页仍保留
+            # 手动「预览并生成场景圣经」的批量入口（app/domain/bible_ops/
+            # scene_refs.py 的 /scene-bible/preview 与 /scene-bible），那是用户
+            # 显式触发的独立操作，不属于本次退场范围。
     except asyncio.TimeoutError:
         conn.execute(
             "UPDATE projects SET bible_status='failed', bible_error=? WHERE id=?",

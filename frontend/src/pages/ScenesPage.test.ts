@@ -24,9 +24,11 @@ describe('场景库步骤状态', () => {
     })).toBe('problem')
   })
 
-  it('人物谱或定妆照仍在跑时，场景库这一步不能显示未开始——管线已经在为它排队', () => {
-    expect(sceneStepStatus({ bible_status: 'running', scene_refs_status: undefined })).toBe('running')
-    expect(sceneStepStatus({ bible_status: 'ready', refs_status: 'running' })).toBe('running')
+  it('架构转向后场景步骤独立于人物谱/定妆照：二者运行中不再借用成场景库的进行中', () => {
+    // generate_scene_bible 退出首版流程后，场景清单/场景图不再随人物谱谱写
+    // 自动级联；场景库自己没有信号时就是未开始，不能借用人物谱的运行状态。
+    expect(sceneStepStatus({ bible_status: 'running', scene_refs_status: undefined })).toBe('idle')
+    expect(sceneStepStatus({ bible_status: 'ready', refs_status: 'running' })).toBe('idle')
   })
 })
 

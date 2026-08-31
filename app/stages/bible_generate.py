@@ -1,8 +1,20 @@
-"""人物谱生成——角色详情生成与 generate_bible/generate_scene_bible 主入口。"""
+"""人物谱生成——角色详情生成与 generate_bible/generate_scene_bible 主入口。
+
+架构转向（2026-08-31 用户拍板）：`generate_bible` 首版不再点名角色，只判定
+世界观，见该函数 docstring 的完整理由。下方 `_BibleRosterDraft` /
+`_normalize_must_cover_rows` / `_normalize_roster_against_candidates` /
+`_validate_bible_roster` 与 `.alias_backfill` / `.roster_recurring` 的导入，
+连同 `_generate_character_detail` / `_generate_character_detail_batch`
+两个单角色详情生成原语，现在只服务于已退场的旧点名主链路——不再被
+`generate_bible` 调用，保留只是因为：①它们仍被 `app/stages/__init__.py`
+按原样重新导出、供 `tests/test_bible_parallelism.py` 等直接单元测试；
+②与 roster_*.py 七个模块同批退场，删除是单独一轮任务（不在本次改动范围）。
+"""
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import time
 
 from pydantic import BaseModel
@@ -11,7 +23,7 @@ from app import config
 from app.db import get_setting, log_provider_call
 from app.harness import model_gateway
 from app.loops import AgentLoop, AgentLoopPolicy
-from app.schemas import (Bible, Character, Scene)
+from app.schemas import (Bible, Character, Scene, World)
 from app.validators import (validate_bible,
                             validate_scene_bible)
 
@@ -39,7 +51,7 @@ from .bible_paratext import (
     BIBLE_DETAIL_TIMEOUT_S,
     _chapters_without_paratext,
 )
-from .bible_shared import _bible_short_json_call_meta, _chapters_by_idx, _render_bible_source
+from .bible_shared import _bible_short_json_call_meta, _render_bible_source
 from .common import StageError, _run_with_agent_loop
 from .constants import SYSTEM_PREFIX
 from .identity_evidence import _appearance_evidence_verified, _validate_appearance_evidence
@@ -190,147 +202,171 @@ async def _generate_character_detail_batch(
     return characters
 
 
+# ---------- A0. 世界观判定（首版人物谱唯一产出；不点名、不生成角色） ----------
+
+BIBLE_WORLD_MAX_ATTEMPTS = 3
+BIBLE_WORLD_TIMEOUT_S = 60.0
+BIBLE_WORLD_MAX_TOKENS = 512
+
+# 与 validate_bible 对 world 字段的判据同一份正则/同一条长度区间——世界观
+# 判定单独成一次轻量调用后，仍不能比原来的整份人物谱校验更松。
+_WORLD_PLACEHOLDER_PATTERN = re.compile(r"(待定|待补|未知|未命名|占位|暂定|TBD|unknown|placeholder)", re.I)
+
+
+class _WorldOnlyDraft(BaseModel):
+    """首版人物谱的唯一模型产出：只有世界观三要素，不含任何角色字段。"""
+
+    era: str = ""
+    genre: str = ""
+    visual_style_canonical: str = ""
+
+
+def _carry_forward_existing_bible_assets(
+    previous_bible: dict | None,
+) -> tuple[list[Character], list[Scene]]:
+    """重新判定世界观时原样带出已有角色/场景，不重新生成也不清空。
+
+    早期实现在没有 ``previous_bible`` 与"重新判定世界观"两种情况下都直接
+    ``characters=[]``，把"首次生成、没有候选可点名"和"重新判定世界观、
+    角色早已由映射台/分集反应式建卡积累出来"错误地合并成同一种「清空」——
+    人工核验点出这会把用户攒了几十集的角色卡（连同人物谱里登记的场景卡）
+    随手一个「重新判定世界观」按钮清零，已改正。
+
+    ``previous_bible`` 是 ``json.loads(projects.bible_json)`` 的原始 dict（见
+    app/domain/bible_ops/task_run.py 的 ``_bible_task``），没有旧 bible（真正
+    首次生成）时两个列表都为空——这才是"没有候选可点名"的正确空态，不是
+    「重新判定世界观也清空」。"""
+    if not previous_bible:
+        return [], []
+    characters = [
+        Character.model_validate(item) for item in previous_bible.get("characters", []) or []
+    ]
+    scenes = [
+        Scene.model_validate(item) for item in previous_bible.get("scenes", []) or []
+    ]
+    return characters, scenes
+
+
+def _validate_world_only(world: _WorldOnlyDraft) -> list[str]:
+    errors: list[str] = []
+    if _WORLD_PLACEHOLDER_PATTERN.search(world.era or ""):
+        errors.append(f"world.era「{world.era}」是占位值，必须依据原文判定年代")
+    if _WORLD_PLACEHOLDER_PATTERN.search(world.genre or ""):
+        errors.append(f"world.genre「{world.genre}」是占位值，必须依据原文判定题材")
+    if not 15 <= len(world.visual_style_canonical or "") <= 60:
+        errors.append(
+            f"world.visual_style_canonical 长度 {len(world.visual_style_canonical or '')} 字，"
+            "要求 15~60 字"
+        )
+    return errors
+
+
 async def generate_bible(chapters: list[dict], feedback: str = "", previous_bible: dict | None = None,
                          project_id: str | None = None,
                          visual_style_prompt: str | None = None) -> Bible:
-    """Generate a small roster first, then fan out bounded per-character requests."""
+    """首版人物谱只从原文判定世界观（era/genre/visual_style_canonical）；不再
+    点名角色、不生成角色详情。首次生成时产出 ``characters=[]``；重新判定
+    世界观时原样带出 ``previous_bible`` 已有的 characters/scenes（见下）。
+
+    架构转向（2026-08-31 用户拍板，实测依据）：《我欲封天》1616 章只读前 20
+    章点名，剩下 1596 章的人天然不在候选里——漏斗是候选 25 → 判为人 18 →
+    最终 7，放宽出口变不出第 26 个候选，也没有任何窗口大小能解决（读 60 章
+    仍漏 1556 章）。"这一集原文里出现了谁"是逐字可判的局部问题，"谁是全书
+    重要角色"是模型也答不准的全局判断题，因此人物/场景改为按需增长：
+      - 用户在映射台主动提名（``POST /projects/{project_id}/characters/nominate``，
+        见 app/domain/bible_ops/nominate.py：命中已有角色登记别名，未命中的
+        走 ``app.portraits.cards.ensure_character_card`` 建卡）；
+      - 分集反应式发现在分镜展开前建卡（``ensure_character_card`` 的其它
+        调用方，如 app/identity_adjudication.py，卡在展开前已建好）。
+
+    本函数因此不再复用 roster_recurring/admission/chunk_plan/candidates/
+    merge/personhood/truename 那整套点名-归并-核验流水线，也不再调用本文件
+    自己的 `_generate_character_detail_batch`（单角色详情生成原语）——理由
+    与保留方式见本文件顶部模块级注释。
+
+    ``previous_bible``（重新判定世界观时的旧 bible_json）用于**原样带出**已有
+    ``characters``/``scenes``，不重新生成也不清空：新架构下角色卡/场景卡是
+    随分集陆续积累出来的（映射台提名或分镜展开前反应式建卡/assess_new_scene），
+    「重新判定世界观并更换画风」这个动作的新语义只是替换 world 三要素，绝不
+    能把用户攒了几十集的角色卡和场景卡清零——早期版本直接 `characters=[]`
+    是把"首次生成没有候选可点名"和"重新判定世界观"两种情况错误地合并成了
+    同一种「清空」处理，被人工核验点出后改正。没有 ``previous_bible``（真正
+    首次生成）时才是空列表，这才是"没有候选可点名"的正确空态。
+    """
     chapters = await _chapters_without_paratext(chapters)
-    chapters_by_idx = _chapters_by_idx(chapters)
-    must_cover = _normalize_must_cover_rows(
-        await _recurring_character_names(chapters, project_id=project_id)
+    source_text = _render_bible_source(chapters)
+    carried_characters, carried_scenes = _carry_forward_existing_bible_assets(previous_bible)
+    forced_style = (visual_style_prompt or "").strip()
+    feedback_part = (
+        f"\n人工打回重生要求（最高优先级）：{feedback.strip()}\n" if feedback.strip() else ""
     )
-    if not must_cover:
-        raise StageError(
-            "角色圣经",
-            ["人物点名未产出任何经原文核验的角色候选，拒绝在无证据情况下编造人物谱"],
-            exit_reason="empty_verified_roster",
-        )
+    style_rule = (
+        f"visual_style_canonical 必须逐字写成：{forced_style}" if forced_style else
+        "visual_style_canonical：按题材生成 15~60 字的统一 CG/动画/漫画/插画画风描述"
+    )
+    prompt = f"""任务：只从原文判定这部作品的世界观三要素，不涉及任何具体角色、不输出角色名单。
 
-    must_cover_lines = [
-        (
-            f"{formal or appellation}（原文称呼：{'、'.join(dict.fromkeys([appellation, *aliases]))}；"
-            f"核验在场 {onstage_count} 次；全文命中 {mention_count} 次；覆盖 {chapter_count} 章）"
-        )
-        for appellation, formal, onstage_count, mention_count, chapter_count, aliases in must_cover
-    ]
-    previous_names = [
-        item.get("name", "") for item in (previous_bible or {}).get("characters", [])
-        if item.get("name")
-    ]
-    forced_style = visual_style_prompt or ""
-    roster_context = "\n".join(f"- {line}" for line in must_cover_lines) or "- 暂无已核验候选"
-    roster_prompt = f"""任务：根据已经完成代码归并和在场核验的候选摘要，只确定人物谱最终角色名单、角色类型和世界观；不要生成外观、性格、台词风格、关系或证据。
-
-已核验候选摘要：
-{roster_context}
-
-规则：
-1. 候选摘要来自前 20 章单章点名、身份归一、在场核验与全文检索；不得新增摘要中没有的人物，候选摘要里的人必须全收。
-2. 所有候选都必须收录；role 只负责区分主次，不得删除低频但已核验在场的候选。全文命中/覆盖章节用于判断重要程度，在场证据用于判断是否真实出场，二者不能互相替代。
-3. name 必须使用括号外的正式姓名；若括号外仍是描述性称呼，说明全文尚未揭示真名，才可暂用该称呼。source_appellations 必须完整收录括号内原文称呼。
-4. 同一候选行内的正式姓名、绰号、描述性称呼属于同一人物，严禁拆成多个角色。
-5. 用户反馈：{feedback.strip() or '无'}。
-6. 历史人物谱角色仅供返工对照，不得绕过候选摘要新增人物：{'、'.join(previous_names) or '无'}。
-7. visual_style_canonical：{forced_style or '按古典修仙题材生成 25~40 字的统一 CG/动画/漫画/插画画风'}。
-8. era 与 genre 只写简短题材标签；不得复述小说内容。
+要求：
+1. era：简短年代/社会形态标签（如"上古洪荒""现代都市""架空古代修真"），依据原文的社会制度、称谓与器物判断，不得复述小说内容，不得留占位符。
+2. genre：简短题材标签（如"东方玄幻""都市异能""历史架空"）。
+3. {style_rule}
+{feedback_part}
+小说文本（节选，供年代/题材/画风判断）：
+{source_text}
 
 输出 JSON Schema：
-{{"characters": [{{"name": str, "role": "主角|重要配角|反派", "source_appellations": [str]}}], "world": {{"era": str, "genre": str, "visual_style_canonical": str}}}}"""
-    roster_loop = AgentLoop(
-        stage_key="character_bible_roster",
-        contract_key="character_bible_roster",
-        goal="确定人物谱角色名单与统一世界观",
-        scope_type="project",
-        scope_id=project_id or hashlib.sha256(roster_context.encode("utf-8")).hexdigest()[:16],
-        artifact_type="character_bible_roster",
-        policy=AgentLoopPolicy(
-            max_iterations=2,
-            stall_rounds=2,
-            min_quality_gain=0.03,
-            no_gain_rounds=1,
-            allow_warning_candidate=False,
-            repair_all_blockers=True,
-        ),
-    )
-
-    def validate_roster(candidate: _BibleRosterDraft) -> list[str]:
-        _normalize_roster_against_candidates(candidate, must_cover, chapters)
-        if visual_style_prompt:
-            candidate.world.visual_style_canonical = visual_style_prompt
-        return _validate_bible_roster(candidate)
-
-    roster = await _run_with_agent_loop(
-        "人物名单", "character_bible_roster", roster_prompt, _BibleRosterDraft,
-        validate_roster, loop=roster_loop, temperature=0.3, max_tokens=4096,
-        repair_user_prompt_limit=16000, repair_candidate_limit=5000,
-    )
-    _normalize_roster_against_candidates(roster, must_cover, chapters)
-    if visual_style_prompt:
-        roster.world.visual_style_canonical = visual_style_prompt
-    style = roster.world.visual_style_canonical
-    characters = await _generate_character_detail_batch(
-        roster.characters,
-        chapters,
-        style=style,
-        era=roster.world.era,
-        chapters_by_idx=chapters_by_idx,
-        project_id=project_id,
-    )
-    bible = Bible(world=roster.world, characters=characters)
-    await _verify_character_aliases_in_place(bible, chapters, project_id=project_id)
-    for character in bible.characters:
-        entry = next((item for item in roster.characters if item.name == character.name), None)
-        if entry is not None:
-            _attach_roster_source_appellations(character, entry, chapters)
-
-    missing = [
-        item for item in must_cover
-        if not _bible_covers_name(
-            bible, {value for value in (item[0], item[1], *item[5]) if value}
-        )
-    ]
-    if missing:
-        # Reuse the same single-character primitive; no batch/full-source supplement request.
-        existing_names = {character.name for character in bible.characters}
-        entries = [
-            _BibleRosterEntry(
-                name=formal or appellation,
-                role="重要配角",
-                source_appellations=list(dict.fromkeys([appellation, *aliases])),
-                # 跟主路径同一条线：appellation 是这个候选进名单的身份标识，
-                # 点名申报的 aliases 没核验过，不能走免检通道入谱。
-                unverified_appellations=[
-                    name for name in dict.fromkeys(aliases) if name != appellation
-                ],
+{{"era": str, "genre": str, "visual_style_canonical": str}}"""
+    last_error = "未知错误"
+    for attempt in range(1, BIBLE_WORLD_MAX_ATTEMPTS + 1):
+        started = time.time()
+        try:
+            draft = await asyncio.wait_for(
+                model_gateway.chat_structured(
+                    [{"role": "system", "content": SYSTEM_PREFIX}, {"role": "user", "content": prompt}],
+                    model_type=_WorldOnlyDraft,
+                    validate=None,
+                    operation_id=f"bible_world_only:{project_id or ''}:{attempt}",
+                    temperature=0.3 if attempt == 1 else 0.1,
+                    max_tokens=BIBLE_WORLD_MAX_TOKENS,
+                    format_retry_limit=1,
+                    semantic_retry_limit=0,
+                    call_meta=_bible_short_json_call_meta({
+                        "stage": "世界观判定",
+                        "stage_key": "character_bible_world",
+                        "call_role": "stage_generate" if attempt == 1 else "stage_repair",
+                        "call_role_label": "世界观判定",
+                        "attempt": attempt,
+                        "project_id": project_id,
+                    }),
+                ),
+                timeout=BIBLE_WORLD_TIMEOUT_S,
             )
-            for appellation, formal, _onstage, _mentions, _chapters, aliases in missing
-            if (formal or appellation) not in existing_names
-        ]
-        supplemented = await _generate_character_detail_batch(
-            entries,
-            chapters,
-            style=style,
-            era=roster.world.era,
-            chapters_by_idx=chapters_by_idx,
-            project_id=project_id,
-        )
-        bible.characters.extend(supplemented)
-        if supplemented:
-            await _verify_character_aliases_for_subset(
-                bible, supplemented, chapters_by_idx, project_id=project_id,
+            if forced_style:
+                draft.visual_style_canonical = forced_style
+            errors_found = _validate_world_only(draft)
+            if errors_found:
+                raise ValueError("；".join(errors_found))
+            log_provider_call(
+                "character_bible_world", config.MODEL_TEXT, "OK", None,
+                int((time.time() - started) * 1000),
+                meta={"attempt": attempt, "project_id": project_id},
             )
-            for character, entry in zip(supplemented, entries, strict=False):
-                _attach_roster_source_appellations(character, entry, chapters)
-
-    valid_names = {character.name for character in bible.characters}
-    for character in bible.characters:
-        character.relationships = [
-            relation for relation in character.relationships if relation.to in valid_names
-        ]
-    errors = validate_bible(bible) + _validate_appearance_evidence(bible, chapters_by_idx)
-    if errors:
-        raise StageError("角色圣经", errors, exit_reason="local_detail_blockers")
-    return bible
+            world = World(
+                era=draft.era, genre=draft.genre,
+                visual_style_canonical=draft.visual_style_canonical,
+            )
+            return Bible(world=world, characters=carried_characters, scenes=carried_scenes)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 换温度重试，用尽后转 StageError
+            last_error = str(exc)
+            log_provider_call(
+                "character_bible_world", config.MODEL_TEXT,
+                "TIMEOUT" if isinstance(exc, TimeoutError) else "FAILED", None,
+                int((time.time() - started) * 1000),
+                meta={"attempt": attempt, "project_id": project_id, "error": last_error[:300]},
+            )
+    raise StageError("角色圣经", [f"世界观判定失败：{last_error}"], exit_reason="world_only_failed")
 
 
 # ---------- A2. 场景圣经（场景图素材库的规范场景，跨集场景一致性核心） ----------

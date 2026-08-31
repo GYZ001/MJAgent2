@@ -106,6 +106,16 @@ def test_bible_accepts_compact_complete_production_identity() -> None:
     assert validate_bible(bible) == []
 
 
+def test_bible_allows_empty_character_roster() -> None:
+    """架构转向（2026-08-31）回归锁：首版人物谱只判定世界观，characters=[]
+    是新主路径（app.stages.generate_bible）的正常产出，不再是「characters
+    数量 0，要求至少 1 个」的失败信号。人物改为映射台按需提名/分集反应式
+    建卡，不在这里强制要求非空。"""
+    bible = Bible(characters=[], world=World(visual_style_canonical="3D动漫CG渲染，虚构数字角色，电影光影"))
+
+    assert validate_bible(bible) == []
+
+
 def test_project_or_404_normalizes_sqlite_row_to_dict(monkeypatch) -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -134,6 +144,10 @@ def test_project_or_404_normalizes_sqlite_row_to_dict(monkeypatch) -> None:
 
 
 def test_generate_precheck_estimates_without_bible(monkeypatch) -> None:
+    """架构转向（2026-08-31）回归锁：首次生成只判定世界观（不点名角色），
+    真实成本是 0——不能再按「粗估 20 角色」报一个 12 元的假价格（协调方
+    2026-08-31 打回：就钱的事情给用户假数字，比文案不准严重）。替换同名旧
+    用例（旧用例断言 20 角色/12 元，验的是已退场的点名规模粗估）。"""
     from app.domain import bible_ops
     import asyncio
 
@@ -150,10 +164,11 @@ def test_generate_precheck_estimates_without_bible(monkeypatch) -> None:
     ).fetchone()))
 
     result = asyncio.run(bible_ops.bible_generate_precheck("p1"))
-    assert result["character_count"] == 20
-    assert result["image_count"] == 60
-    assert result["estimated_cost_cny"] == 12.0
+    assert result["character_count"] == 0
+    assert result["image_count"] == 0
+    assert result["estimated_cost_cny"] == 0.0
     assert result["style_name"] == "国漫电影风"
+    assert "无费用" in result["estimate_note"]
 
 
 def test_visual_style_options_expose_names_and_descriptions_only(monkeypatch) -> None:
@@ -194,44 +209,74 @@ def test_bible_generate_precheck_binds_style_name(monkeypatch) -> None:
     assert quote["quote_id"] == fingerprint({
         "project_id": "p1",
         "action": "generate_bible_and_refs",
-        "character_count": 20,
-        "image_count": 60,
+        "character_count": 0,
+        "image_count": 0,
         "unit": 0.2,
         "bible_version": 0,
         "style_name": "真人摄影风",
     })
 
 
+def test_bible_generate_precheck_prices_existing_characters_only_when_style_changes(monkeypatch) -> None:
+    """回归锁：已有人物谱时，报价必须与 _bible_task 的真实触发条件同一份口径——
+    请求的画风与当前画风相同就是 0 费用（世界观判定不改动角色，不触发定妆
+    重生成），画风真的不同才按现有角色数计价（那才会真的触发定妆重生成）。"""
+    from app.domain import bible_ops
+    from app.schemas import Bible, Character, World
+    import json as json_mod
+
+    from app.domain.bible_ops.primitives import _visual_style_prompt_or_default as _style_prompt
+    bible = Bible(
+        # 用真实的「国漫电影风」prompt 文本（不是随手写的自定义字符串），才能
+        # 让下面「请求同一个 style_name」真正命中"未变化"分支——这条测试要验
+        # 的正是这次判据与文本比较，不是随便什么字符串都相等。
+        world=World(visual_style_canonical=_style_prompt("国漫电影风")),
+        characters=[
+            Character(name="甲一", role="主角", appearance_canonical="十五岁少年，黑发束起，黑色劲装，眉眼倔强坚毅"),
+            Character(name="乙二", role="重要配角", appearance_canonical="四十岁男性，短发，深色正装配白衬衫，身材微胖"),
+        ],
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT, bible_version INTEGER DEFAULT 0)"
+    )
+    conn.execute(
+        "INSERT INTO projects(id, bible_json, bible_version) VALUES('p1', ?, 3)",
+        (bible.model_dump_json(),),
+    )
+    conn.commit()
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "_project_or_404", lambda _pid: dict(conn.execute(
+        "SELECT * FROM projects WHERE id='p1'"
+    ).fetchone()))
+
+    unchanged = bible_ops._compute_bible_generate_precheck("p1", style_name="国漫电影风")
+    assert unchanged["character_count"] == 0
+    assert unchanged["estimated_cost_cny"] == 0.0
+
+    changed = bible_ops._compute_bible_generate_precheck("p1", style_name="真人摄影风")
+    assert changed["character_count"] == 2
+    assert changed["character_names"] == ["甲一", "乙二"]
+    assert changed["estimated_cost_cny"] > 0
+
+
 def test_generate_bible_forces_backend_visual_style_prompt(monkeypatch) -> None:
+    """架构转向（2026-08-31）后 generate_bible 只判定世界观：visual_style_prompt
+    传入时必须原样覆盖模型自己写的画风（画风由后端统一管理，不接受模型自由
+    发挥），era/genre 仍取模型判断结果；没有 previous_bible（首次生成）时
+    characters 恒为空。替换同名旧用例（旧用例走整套点名+角色详情 AgentLoop，
+    那条路径已经退场）。"""
     from app import stages
+    from app.harness import model_gateway
     import asyncio
 
-    seen = {}
-
-    async def fake_roll_call(*_args, **_kwargs):
-        return [("孟浩", "", 2, 10, 1, [])]
-
-    async def fake_loop(*_args, **_kwargs):
-        seen["allow_warning_candidate"] = _kwargs["loop"].policy.allow_warning_candidate
-        seen["repair_all_blockers"] = _kwargs["loop"].policy.repair_all_blockers
-        candidate = stages._BibleRosterDraft(
-            world=World(visual_style_canonical="模型自行写的画风"),
-            characters=[stages._BibleRosterEntry(name="孟浩", role="主角")],
+    async def fake_chat_structured(_messages, *, model_type, **_kwargs):
+        return model_type(
+            era="架空古代", genre="东方仙侠", visual_style_canonical="模型自行写的画风字数也凑够十五字以上",
         )
-        assert _args[4](candidate) == []
-        seen["style_during_validation"] = candidate.world.visual_style_canonical
-        return candidate
 
-    async def fake_details(entries, *_args, **_kwargs):
-        return [Character(
-            name=entries[0].name, role=entries[0].role,
-            appearance_canonical="黑发少年，青色长衫，目光沉稳，身形清瘦，腰间系旧布袋",
-        )]
-
-    _patch_stages(monkeypatch, "_recurring_character_names", fake_roll_call)
-    _patch_stages(monkeypatch, "_run_with_agent_loop", fake_loop)
-    _patch_stages(monkeypatch, "_generate_character_detail_batch", fake_details)
-    _patch_stages(monkeypatch, "_verify_character_aliases_in_place", lambda *_args, **_kwargs: asyncio.sleep(0))
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
 
     result = asyncio.run(stages.generate_bible(
         [{"idx": 1, "title": "第一章", "content": "孟浩走入山中。"}],
@@ -239,9 +284,124 @@ def test_generate_bible_forces_backend_visual_style_prompt(monkeypatch) -> None:
     ))
 
     assert result.world.visual_style_canonical == "电影级真实质感，现实人物建模，自然光影，细节丰富，东方仙侠风。"
-    assert seen["style_during_validation"] == result.world.visual_style_canonical
-    assert seen["allow_warning_candidate"] is False
-    assert seen["repair_all_blockers"] is True
+    assert result.world.era == "架空古代"
+    assert result.world.genre == "东方仙侠"
+    assert result.characters == []
+
+
+def test_generate_bible_carries_forward_existing_characters_and_scenes_unchanged(monkeypatch) -> None:
+    """回归锁（协调方 2026-08-31 打回）：重新判定世界观绝不能清空已积累的角色/
+    场景卡。新架构下角色卡/场景卡是随分集由映射台提名或分镜展开前反应式建卡
+    （ensure_character_card / assess_new_scene）陆续积累出来的，不是靠这个
+    「重新生成人物谱」按钮点名出来的——早期实现 `characters=[]` 是把"首次生成
+    没有候选可点名"和"重新判定世界观"两种情况错误合并成同一种「清空」处理，
+    会把用户攒了几十集的角色卡和场景卡随手一个按钮清零。这里钉住：传入
+    previous_bible 时，返回的 Bible.characters/scenes 与旧数据逐字段一致，
+    只有 world 换成了新判定结果——防止将来又被改回覆盖。"""
+    from app import stages
+    from app.harness import model_gateway
+    import asyncio
+
+    previous_bible = {
+        "world": {"era": "现代都市", "genre": "都市异能", "visual_style_canonical": "旧画风描述占位十五字以上凑数"},
+        "characters": [
+            {
+                "name": "甲一", "role": "主角",
+                "appearance_canonical": "十五岁少年，黑发束起，黑色劲装，眉眼倔强坚毅",
+                "ref_image_path": "/media/refs/jia_yi.png",
+            },
+            {
+                "name": "乙二", "role": "重要配角",
+                "appearance_canonical": "四十岁男性，短发，深色正装配白衬衫，身材微胖",
+            },
+        ],
+        "scenes": [
+            {"name": "甲家测验广场", "scene_canonical": "青石广场，日光正盛，围观人群环绕，测验碑立于中央",
+             "ref_image_path": "/media/refs/scene_plaza.png"},
+        ],
+    }
+
+    async def fake_chat_structured(_messages, *, model_type, **_kwargs):
+        return model_type(era="架空古代", genre="东方仙侠", visual_style_canonical="全新画风描述也凑够十五个字以上")
+
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+
+    result = asyncio.run(stages.generate_bible(
+        [{"idx": 1, "title": "第一章", "content": "甲一走入山中。"}],
+        previous_bible=previous_bible,
+    ))
+
+    assert result.world.era == "架空古代"
+    assert result.world.genre == "东方仙侠"
+    assert result.world.visual_style_canonical == "全新画风描述也凑够十五个字以上"
+    assert [c.name for c in result.characters] == ["甲一", "乙二"]
+    assert result.characters[0].appearance_canonical == "十五岁少年，黑发束起，黑色劲装，眉眼倔强坚毅"
+    assert result.characters[0].ref_image_path == "/media/refs/jia_yi.png"
+    assert [s.name for s in result.scenes] == ["甲家测验广场"]
+    assert result.scenes[0].ref_image_path == "/media/refs/scene_plaza.png"
+
+
+def test_purge_for_style_change_clears_both_character_and_scene_refs(monkeypatch) -> None:
+    """协调方 2026-08-31 要求复核：generate_bible 现在原样带出 previous_bible
+    的 characters/scenes（不再恒为空），_purge_for_style_change 的场景清理分支
+    （for sc in instance.scenes: ...）之前因为 instance.scenes 恒为 [] 一直是
+    死代码，从未真正清理过场景定妆图；这里钉住它现在确实按角色与场景两条腿
+    都清理：ref_image_path 清空、character_portraits/scene_references 落库
+    行删除、refs_status/scene_refs_status 回到 idle。"""
+    from app.domain import bible_ops
+    from app.schemas import Bible, Character, Scene, World
+    import tempfile
+    from pathlib import Path
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE projects(id TEXT PRIMARY KEY, refs_status TEXT, scene_refs_status TEXT)"
+    )
+    conn.execute("CREATE TABLE character_portraits(project_id TEXT, character_name TEXT)")
+    conn.execute("CREATE TABLE scene_references(project_id TEXT, scene_name TEXT)")
+    conn.execute(
+        "INSERT INTO projects(id, refs_status, scene_refs_status) VALUES('p1', 'ready', 'ready')"
+    )
+    conn.execute("INSERT INTO character_portraits VALUES('p1', '甲一')")
+    conn.execute("INSERT INTO scene_references VALUES('p1', '甲家广场')")
+    conn.commit()
+
+    tmp_dir = tempfile.mkdtemp()
+    char_img = Path(tmp_dir) / "char.png"
+    scene_img = Path(tmp_dir) / "scene.png"
+    char_img.write_bytes(b"x")
+    scene_img.write_bytes(b"x")
+
+    from app import worker
+    monkeypatch.setattr(worker, "purge_project_video_artifacts", lambda _pid: {"purged_videos": 0})
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+
+    bible = Bible(
+        world=World(visual_style_canonical="赛博朋克霓虹质感，虚构数字角色，高对比光影"),
+        characters=[Character(
+            name="甲一", role="主角", appearance_canonical="十五岁少年，黑发束起，黑色劲装，眉眼倔强坚毅",
+            ref_image_path=str(char_img),
+        )],
+        scenes=[Scene(
+            name="甲家广场", scene_canonical="青石广场，日光正盛，围观人群环绕，测验碑立于中央",
+            ref_image_path=str(scene_img),
+        )],
+    )
+
+    result = bible_ops._purge_for_style_change("p1", bible)
+
+    assert result["refs_cleared"] == 1
+    assert result["scene_refs_cleared"] == 1
+    assert bible.characters[0].ref_image_path is None
+    assert bible.scenes[0].ref_image_path is None
+    assert not char_img.exists()
+    assert not scene_img.exists()
+    assert conn.execute("SELECT COUNT(*) c FROM character_portraits").fetchone()["c"] == 0
+    assert conn.execute("SELECT COUNT(*) c FROM scene_references").fetchone()["c"] == 0
+    row = conn.execute("SELECT refs_status, scene_refs_status FROM projects WHERE id='p1'").fetchone()
+    assert row["refs_status"] == "idle"
+    assert row["scene_refs_status"] == "idle"
 
 
 def test_bible_source_keeps_first_ten_chapters_complete() -> None:
@@ -907,49 +1067,44 @@ def test_roster_presence_dossier_empty_when_quote_not_locatable() -> None:
     assert stages._roster_presence_dossier(1, "毫不相关的原文。", "根本没有的引句") == []
 
 
-def test_generate_bible_uses_small_roster_contract_and_single_character_details(monkeypatch) -> None:
+def test_generate_bible_produces_world_only_and_never_calls_roster_pipeline(monkeypatch) -> None:
+    """架构转向（2026-08-31）：首版人物谱只从原文判定世界观，不再点名角色、
+    不复用整套 roster 流水线。即使章节原文里出现了具名角色（"小胖子"），
+    generate_bible 也绝不能把它写进产出——这条测试同时钉住「characters 恒为
+    []」与「不再调用 _recurring_character_names/roster AgentLoop」两件事，
+    替换同名旧用例（旧用例断言 bible.characters 非空，验的是已经退场的整套
+    点名-归并-详情生成行为）。"""
     import asyncio
     from app import stages
+    from app.harness import model_gateway
 
     seen: dict[str, object] = {}
+    roster_called = {"value": False}
 
-    async def fake_roll_call(*_args, **_kwargs):
+    async def fake_recurring_character_names(*_args, **_kwargs):  # pragma: no cover - 不该被调用
+        roster_called["value"] = True
         return [("小胖子", "李富贵", 2, 16, 6, [])]
 
-    async def fake_loop(*args, **kwargs):
-        seen["prompt"] = args[2]
-        seen["repair_user_prompt_limit"] = kwargs["repair_user_prompt_limit"]
-        return stages._BibleRosterDraft(
-            world=World(visual_style_canonical="国漫3D动画电影质感，精致光影，统一电影画面"),
-            characters=[stages._BibleRosterEntry(
-                name="李富贵", role="重要配角", source_appellations=["小胖子"],
-            )],
+    async def fake_chat_structured(messages, *, model_type, **kwargs):
+        seen["prompt"] = messages[-1]["content"]
+        seen["call_meta"] = kwargs.get("call_meta")
+        return model_type(
+            era="架空古代", genre="东方玄幻", visual_style_canonical="国漫3D动画电影质感，精致光影，统一电影画面",
         )
 
-    async def fake_details(entries, *_args, **_kwargs):
-        seen["entries"] = entries
-        return [Character(
-            name=entries[0].name, role=entries[0].role,
-            appearance_canonical="十六七岁少年，黑色短发，深棕短打，身形敦实，腰间挂木尺",
-        )]
-
-    _patch_stages(monkeypatch, "_recurring_character_names", fake_roll_call)
-    _patch_stages(monkeypatch, "_run_with_agent_loop", fake_loop)
-    _patch_stages(monkeypatch, "_generate_character_detail_batch", fake_details)
-    _patch_stages(monkeypatch, "_verify_character_aliases_in_place", lambda *_args, **_kwargs: asyncio.sleep(0))
+    _patch_stages(monkeypatch, "_recurring_character_names", fake_recurring_character_names)
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
 
     bible = asyncio.run(stages.generate_bible([
         {"idx": 1, "title": "第一章", "content": "小胖子与孟浩同行。"}
     ]))
 
-    # 本章「小胖子」出现、真名「李富贵」未出现，主名按原文频次保留绰号。
-    assert [item.name for item in bible.characters] == ["小胖子"]
-    assert "不要生成外观" in str(seen["prompt"])
-    assert "已核验候选摘要" in str(seen["prompt"])
-    assert "小胖子与孟浩同行" not in str(seen["prompt"])
-    assert seen["repair_user_prompt_limit"] == 16000
-    assert seen["entries"][0].name == "小胖子"
-    assert seen["entries"][0].source_appellations == ["李富贵"]
+    assert bible.characters == []
+    assert roster_called["value"] is False, "首版人物谱不得再调用点名流水线"
+    prompt = str(seen["prompt"])
+    assert "不涉及任何具体角色" in prompt
+    assert '"characters"' not in prompt, "世界观判定的输出 JSON Schema 不应再包含角色字段"
+    assert seen["call_meta"]["stage_key"] == "character_bible_world"
 
 
 def test_paratext_scope_does_not_scale_with_book_length() -> None:

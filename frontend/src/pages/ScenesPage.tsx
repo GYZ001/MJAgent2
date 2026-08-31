@@ -232,16 +232,16 @@ export default function ScenesPage() {
   }
 
   /**
-   * 场景库页在项目尚无人物谱时的风格确认：与人物谱页「开始生成人物谱与场景库」
+   * 场景库页在项目尚无世界观时的风格确认：与人物谱页「选择画风并确定世界观」
    * 走同一条后端路径（POST /projects/{id}/bible，重路径，含 LLM），不是
    * POST /bible/style——那条轻路径要求 bible_json 已存在，空项目调用会被
    * 后端 409 拒绝（见 app/domain/bible_ops.py set_bible_visual_style）。
-   * 判据用产物信号 `hasBible = !!p.bible`，不是某个状态字段：人物谱一旦生成成
-   * 功（即使后面失败重试）都会落 bible_json，只有真正从未成功过时才为空。
+   * 判据用产物信号 `hasBible = !!p.bible`，不是某个状态字段：世界观一旦判定
+   * 成功（即使后面失败重试）都会落 bible_json，只有真正从未成功过时才为空。
    *
-   * 后端 _bible_task 在人物谱生成成功后会无条件依次触发定妆照、场景清单
-   * （pending_scene_regen 票据）、场景图——本页确认一次即可拿到全部四类产物，
-   * 不需要用户之后再去人物谱页点第二次。
+   * 架构转向（2026-08-31）后本端点只判定世界观（era/genre/画风），不再点名
+   * 角色、不批量生成场景清单——确认后场景库仍需要用户在下方手动点「准备
+   * 场景清单」，不会自动接续。
    */
   const startBibleAndSceneLibrary = async (styleName: string) => {
     await act(async () => {
@@ -252,7 +252,7 @@ export default function ScenesPage() {
         idempotency_key: quote.quote_id,
         style_name: styleName,
       })
-      toast('人物谱生成已开始；完成后会自动接续生成定妆照、场景清单与场景图')
+      toast('世界观已确定；请在下方点击「准备场景清单」继续')
     })
   }
 
@@ -319,18 +319,18 @@ export default function ScenesPage() {
 
       <section className="card">
         <h3>场景图素材库
-          <span className="hint">人物谱完成后自动准备场景设定</span>
+          <span className="hint">世界观确定后可在本页按需准备场景设定</span>
         </h3>
         {!hasBible && (
           <div className="library-action-row">
             {!pipelineRunning && (
               <button className="btn primary" disabled={busy}
-                title="确认画风后会依次自动生成人物谱、角色定妆照、场景清单与场景图；无需再到人物谱页操作。"
+                title="确认画风后只判定年代/题材/统一画风（世界观）；场景清单仍需要在本页手动准备，不会自动生成。"
                 aria-label={busy
-                  ? '选择画风并生成人物谱与场景库，暂不可用：正在处理上一项操作'
-                  : p.bible_status === 'failed' ? '重新选择画风并生成人物谱与场景库' : '选择画风并生成人物谱与场景库'}
+                  ? '选择画风并确定世界观，暂不可用：正在处理上一项操作'
+                  : p.bible_status === 'failed' ? '重新选择画风并确定世界观' : '选择画风并确定世界观'}
                 onClick={() => void styleDialog.openStyleDialog(p.bible_style_name)}>
-                {p.bible_status === 'failed' ? '重新选择画风并生成人物谱与场景库' : '选择画风并生成人物谱与场景库'}
+                {p.bible_status === 'failed' ? '重新选择画风并确定世界观' : '选择画风并确定世界观'}
               </button>
             )}
             <WorldbuildingStatus project={p} running={pipelineRunning}
@@ -339,12 +339,12 @@ export default function ScenesPage() {
         )}
         {!hasBible && !pipelineRunning && (
           <div className="hint">
-            选择统一画风后将依次自动生成人物谱、角色定妆照、场景清单与场景图。
+            选择统一画风后只判定世界观；场景清单需要世界观确定后在本页手动点「准备场景清单」。
           </div>
         )}
         {!hasBible && p.bible_status === 'failed' && (
           <OperationError
-            title="人物谱生成未完成"
+            title="世界观判定未完成"
             message={p.bible_error}
             guidance="失败结果没有发布；原著和已生成资产保持不变。可重新选择画风并生成。"
           />
@@ -397,13 +397,13 @@ export default function ScenesPage() {
         {pipelineRunning && (
           <div className="hint task-progress-copy" role="status">
             {p.bible_status === 'running'
-              ? '人物谱正在生成；完成后会自动接续生成定妆照、场景清单与场景图，无需在本页手动触发。'
-              : '定妆照正在生成；完成后会自动接续准备场景设定并生成场景图，无需在本页手动触发。'}
+              ? '世界观正在判定；完成后请回到本页手动准备场景清单。'
+              : '定妆照正在生成；场景清单/场景图不受影响，可在本页按需操作。'}
           </div>
         )}
         {generating && !scenes.length && (
           <div className="hint task-progress-copy" role="status">
-            正在根据人物谱画风和原文准备场景设定；完成后会展示场景清单并自动开始生成场景图。
+            场景图正在生成。
           </div>
         )}
         {generating && progress && (
@@ -614,7 +614,7 @@ export default function ScenesPage() {
         selected={styleDialog.selectedStyle}
         scopeNote={hasBible
           ? '确认后将直接重新生成「场景图 + 定妆照」；人物设定本身不会重新生成。'
-          : '确认后将生成人物谱与角色定妆照；完成后场景清单与场景图会自动接续生成，无需再到人物谱页操作。'}
+          : '确认后只判定世界观（年代/题材/统一画风）；不生成角色，场景清单需要之后在本页手动准备。'}
         onSelect={styleDialog.setSelectedStyle}
         onClose={styleDialog.closeStyleDialog}
         onConfirm={() => {

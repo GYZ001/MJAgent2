@@ -89,7 +89,6 @@ from .refs_generation import (
 )
 
 from .scene_bible_prep import (
-    _consume_pending_scene_regen_if_ready as _consume_pending_scene_regen_if_ready,
     _decode_scene_target as _decode_scene_target,
     _scene_assets_task_active as _scene_assets_task_active,
     _scene_bible_task as _scene_bible_task,

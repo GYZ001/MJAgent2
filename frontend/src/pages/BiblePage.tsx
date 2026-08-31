@@ -685,12 +685,9 @@ export default function BiblePage() {
     } catch { /* ignore invalid local backup */ }
   }
 
-  /**
-   * 人物谱页与场景库页共用的「首次/全量重生成」路径：POST /projects/{id}/bible
-   * （重路径，含 LLM）。人物谱生成成功后，后端 _bible_task 会无条件依次触发
-   * 定妆照、场景清单（pending_scene_regen 票据）、场景图——本页确认一次即
-   * 拿到全部四类产物，不需要用户再去场景库页点第二次。
-   */
+  /** 世界观判定路径：POST /projects/{id}/bible（含 LLM）。只判定
+   * era/genre/visual_style_canonical；已有人物谱时原样带出已有角色/场景，
+   * 不清空也不重新生成，只有首次生成时 characters 才是 []。*/
   const startBibleAfterStyle = async (styleName: string) => {
     await openPayment(
       {},
@@ -701,7 +698,9 @@ export default function BiblePage() {
           idempotency_key: quote.quote_id,
           style_name: styleName,
         })
-        toast('人物谱生成已开始；完成后会自动接续生成定妆照、场景清单与场景图')
+        toast(p.bible
+          ? '世界观已更新；已有角色与场景保持不变'
+          : '世界观已确定；人物与场景请到映射台/场景库按需生成')
       },
       () => api.bibleGeneratePrecheck(p.id, { style_name: styleName }),
     )
@@ -1028,12 +1027,12 @@ export default function BiblePage() {
         <div className="library-action-row">
           {!p.bible && !generating && (
             <button className="btn primary" disabled={busy}
-              title="确认画风后会依次自动生成人物谱、角色定妆照、场景清单与场景图；无需再到场景库页操作。"
+              title="确认画风后只判定年代/题材/统一画风（世界观）；人物与场景改到映射台/场景库按需生成，不会随这一步自动产出。"
               aria-label={busy
-                ? '选择画风并生成人物谱与场景库，暂不可用：正在处理上一项操作'
-                : p.bible_status === 'failed' ? '重新选择画风并生成人物谱与场景库' : '选择画风并生成人物谱与场景库'}
+                ? '选择画风并确定世界观，暂不可用：正在处理上一项操作'
+                : p.bible_status === 'failed' ? '重新选择画风并确定世界观' : '选择画风并确定世界观'}
               onClick={() => void startBible()}>
-              {p.bible_status === 'failed' ? '重新选择画风并生成人物谱与场景库' : '选择画风并生成人物谱与场景库'}
+              {p.bible_status === 'failed' ? '重新选择画风并确定世界观' : '选择画风并确定世界观'}
             </button>
           )}
           {p.bible && !generating && (
@@ -1052,10 +1051,10 @@ export default function BiblePage() {
               <button
                 className="btn"
                 disabled={busy || dirty}
-                title={dirty ? '请先定稿当前人物谱修订' : '重新选择统一画风，将重新生成人物谱与定妆照（会重新生成人物设定本身）'}
+                title={dirty ? '请先定稿当前人物谱修订' : '重新选择统一画风并重新判定世界观（年代/题材/画风）；已有角色与场景保持不变，不会被清空或重新生成'}
                 onClick={() => void startBible()}
               >
-                重新生成人物谱并更换画风
+                重新判定世界观并更换画风
               </button>
               <button
                 className="btn ghost"
@@ -1133,7 +1132,7 @@ export default function BiblePage() {
         )}
         {!generating && p.bible && (
           <div className="hint library-note">
-            更新人物谱角色设定并定稿后，可选择角色重新生成定妆照；如需更换统一画风，请重新生成人物谱并选择风格。新图通过质检前不会替换已采用成品。
+            更新人物谱角色设定并定稿后，可选择角色重新生成定妆照；如需更换统一画风，「更换统一画风」与「重新判定世界观并更换画风」都不会改动已有角色。新图通过质检前不会替换已采用成品。
           </div>
         )}
         {p.bible_status === 'failed' && (
@@ -1176,7 +1175,7 @@ export default function BiblePage() {
           <div style={{ fontSize: 14, background: 'rgba(181,68,52,0.05)', borderLeft: '3px solid var(--cinnabar)', padding: '8px 12px', borderRadius: '0 6px 6px 0', lineHeight: 1.9 }}>
             {visualStyleDisplayName}
           </div>
-          {editing && <p className="hint">画风提示词由后端统一管理；如需更换画风，请重新生成人物谱并选择新的风格。</p>}
+          {editing && <p className="hint">画风提示词由后端统一管理；如需更换画风，请用「更换统一画风」或「重新判定世界观并更换画风」，二者都不会改动当前角色。</p>}
           <div style={{ height: 16 }} />
           <div className="library-note-row">
             {refsRunning && <span className="stamp gold">定妆中</span>}
@@ -1272,7 +1271,7 @@ export default function BiblePage() {
               <b>{hasCharacterCriteria ? '没有符合当前条件的角色' : '人物谱暂无角色'}</b>
               <p>{hasCharacterCriteria
                 ? `${charQuery ? `搜索“${charQuery}”` : '当前筛选'}未命中；清除条件后可恢复全部 ${bible.characters.length} 个角色。`
-                : '可重新生成人物谱，或进入修订补充角色。'}</p>
+                : '人物按需生成：可点击上方「提名没被选上的角色」按原文称呼登记，或进入修订手动补充。'}</p>
               {hasCharacterCriteria && <button type="button" className="btn small" onClick={resetCharacterList}>清除搜索与筛选</button>}
             </div>
           )}
@@ -1371,7 +1370,7 @@ export default function BiblePage() {
         selected={styleDialog.selectedStyle}
         scopeNote={styleActionRef.current === 'style_only'
           ? '确认后将直接重新生成「定妆照 + 场景图」；人物设定本身不会重新生成。'
-          : '确认后将在本页重新生成人物谱与定妆照；风格确定后场景库的场景图也会一并重新生成。'}
+          : '确认后将只重新判定世界观（年代/题材/统一画风）；不生成角色或场景，已有角色与场景保持不变。'}
         onSelect={styleDialog.setSelectedStyle}
         onClose={styleDialog.closeStyleDialog}
         onConfirm={() => {

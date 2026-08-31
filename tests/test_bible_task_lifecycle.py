@@ -67,7 +67,117 @@ def test_bible_task_starts_full_refs_after_success(monkeypatch) -> None:
     assert started["args"] == ("proj_test", None)
 
 
-def test_bible_task_starts_scene_preparation_without_unquoted_images(monkeypatch) -> None:
+def test_bible_task_skips_refs_regen_when_style_unchanged_with_existing_characters(monkeypatch) -> None:
+    """回归锁（协调方 2026-08-31 打回）：重新判定世界观现在会原样带出已有角色
+    （见 app.stages.generate_bible 的 previous_bible 处理），characters 不再
+    恒为空——如果 _start_refs_generation 还像以前那样无条件触发，「重新判定
+    世界观并更换画风」在画风没变时也会把已有角色的定妆照全部打回重做，产生
+    真实的图片费用。画风未变时世界观判定不改动任何角色内容，不该触发定妆。
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE chapters(project_id TEXT, idx INTEGER)")
+    conn.execute(
+        "CREATE TABLE projects("
+        "id TEXT PRIMARY KEY, bible_json TEXT, bible_version INTEGER DEFAULT 0, "
+        "bible_status TEXT, bible_error TEXT, status TEXT)"
+    )
+    old_bible = Bible(
+        world=World(visual_style_canonical="国风水墨，虚构数字角色，电影光影，古典留白"),
+        characters=[Character(
+            name="甲一", role="主角",
+            appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩",
+            ref_image_path="/media/refs/jia_yi.png",
+        )],
+    )
+    conn.execute(
+        "INSERT INTO projects(id, bible_json, bible_version, bible_status, bible_error, status) "
+        "VALUES('proj_test', ?, 1, 'running', NULL, 'bible_ready')",
+        (old_bible.model_dump_json(),),
+    )
+    conn.commit()
+
+    async def fake_generate_bible(*_args, previous_bible=None, **_kwargs):
+        # 复刻真实 generate_bible：画风不变、角色原样带出。
+        assert previous_bible is not None
+        return Bible(
+            world=World(
+                era="架空古代", genre="东方仙侠",
+                visual_style_canonical="国风水墨，虚构数字角色，电影光影，古典留白",
+            ),
+            characters=[Character(**c) for c in previous_bible["characters"]],
+        )
+
+    refs_started: list[str] = []
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "generate_bible", fake_generate_bible)
+    patch_api_everywhere(monkeypatch, "_start_refs_generation",
+        lambda project_id, *_a, **_k: refs_started.append(project_id) or True,
+    )
+
+    asyncio.run(api._bible_task("proj_test", trigger_full_refs=True))
+
+    row = conn.execute("SELECT bible_status, bible_json FROM projects WHERE id='proj_test'").fetchone()
+    assert row["bible_status"] == "ready"
+    assert refs_started == [], "画风未变时不该触发定妆照重新生成"
+    import json
+    saved = json.loads(row["bible_json"])
+    assert [c["name"] for c in saved["characters"]] == ["甲一"]
+    assert saved["characters"][0]["ref_image_path"] == "/media/refs/jia_yi.png"
+
+
+def test_bible_task_still_regens_refs_when_style_actually_changes(monkeypatch) -> None:
+    """与上一条对照：画风确实变化时，旧定妆照被 _purge_for_style_change 判定
+    失效，仍要触发定妆照重新生成——这条不能被上面那条「画风未变不触发」的
+    修复连带误伤。"""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE chapters(project_id TEXT, idx INTEGER)")
+    conn.execute(
+        "CREATE TABLE projects("
+        "id TEXT PRIMARY KEY, bible_json TEXT, bible_version INTEGER DEFAULT 0, "
+        "bible_status TEXT, bible_error TEXT, status TEXT)"
+    )
+    old_bible = Bible(
+        world=World(visual_style_canonical="国风水墨，虚构数字角色，电影光影，古典留白"),
+        characters=[Character(
+            name="甲一", role="主角",
+            appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩",
+            ref_image_path="/media/refs/jia_yi.png",
+        )],
+    )
+    conn.execute(
+        "INSERT INTO projects(id, bible_json, bible_version, bible_status, bible_error, status) "
+        "VALUES('proj_test', ?, 1, 'running', NULL, 'bible_ready')",
+        (old_bible.model_dump_json(),),
+    )
+    conn.commit()
+
+    async def fake_generate_bible(*_args, previous_bible=None, **_kwargs):
+        return Bible(
+            world=World(visual_style_canonical="赛博朋克霓虹质感，虚构数字角色，高对比光影"),
+            characters=[Character(**c) for c in previous_bible["characters"]],
+        )
+
+    refs_started: list[str] = []
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    patch_api_everywhere(monkeypatch, "generate_bible", fake_generate_bible)
+    patch_api_everywhere(monkeypatch, "_purge_for_style_change", lambda *_a, **_k: {})
+    patch_api_everywhere(monkeypatch, "_start_refs_generation",
+        lambda project_id, *_a, **_k: refs_started.append(project_id) or True,
+    )
+
+    asyncio.run(api._bible_task("proj_test", trigger_full_refs=True))
+
+    assert refs_started == ["proj_test"], "画风确实变化时必须触发定妆照重新生成"
+
+
+def test_bible_task_no_longer_auto_starts_scene_preparation(monkeypatch) -> None:
+    """架构转向（2026-08-31）：generate_scene_bible 批量场景清单生成退出首版
+    流程，_bible_task 成功后不再自动触发 _start_scene_bible_preparation——
+    场景改为分镜阶段按需反应式发现（app.scenes.assess_new_scene）。这条用例
+    钉住「不再自动触发」这一新契约，替换同名旧用例（旧用例断言
+    prepared == ["proj_test"]，验的是已经退场的行为）。"""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE chapters(project_id TEXT, idx INTEGER)")
@@ -84,16 +194,8 @@ def test_bible_task_starts_scene_preparation_without_unquoted_images(monkeypatch
     conn.commit()
 
     async def fake_generate_bible(*_args, **_kwargs):
-        return Bible(
-            world=World(visual_style_canonical="国风水墨"),
-            characters=[
-                Character(
-                    name="甲一",
-                    role="主角",
-                    appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩",
-                )
-            ],
-        )
+        # 首版人物谱只产出 world，characters 恒为 []（见 app.stages.generate_bible）。
+        return Bible(world=World(visual_style_canonical="国风水墨"), characters=[])
 
     patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
     patch_api_everywhere(monkeypatch, "generate_bible", fake_generate_bible)
@@ -106,7 +208,7 @@ def test_bible_task_starts_scene_preparation_without_unquoted_images(monkeypatch
     monkeypatch.setattr(
         task_registry,
         "spawn",
-        lambda *_args, **_kwargs: pytest.fail("免费场景清单准备不应直接启动付费图片任务"),
+        lambda *_args, **_kwargs: pytest.fail("场景清单准备不应再被 _bible_task 自动启动"),
     )
 
     asyncio.run(api._bible_task("proj_test", trigger_full_refs=True))
@@ -120,7 +222,7 @@ def test_bible_task_starts_scene_preparation_without_unquoted_images(monkeypatch
         "scene_refs_status": "idle",
         "scene_refs_error": None,
     }
-    assert prepared == ["proj_test"]
+    assert prepared == [], "场景清单生成必须只能由映射台/场景库手动触发，不再随人物谱谱写自动启动"
 
 
 def test_bible_completion_preserves_planned_project_status(monkeypatch) -> None:

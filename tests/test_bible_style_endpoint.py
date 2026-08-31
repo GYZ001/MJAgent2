@@ -300,3 +300,42 @@ def test_set_bible_style_rejects_unknown_style_name(monkeypatch) -> None:
             "p1", {"style_name": "赛博朋克风（不存在的预设）", "expected_version": 0},
         ))
     assert exc_info.value.status_code == 422
+
+
+def test_set_bible_style_works_with_empty_character_roster(monkeypatch) -> None:
+    """架构转向（2026-08-31）回归锁：首版人物谱只产出 world，characters 恒为
+    []（app.stages.generate_bible）。这里的 409「请先...生成人物谱」检查只看
+    bible_json 是否存在，不看 characters 是否非空——世界观判定完成后
+    bible_json 已经落库（哪怕 characters=[]），配画风必须能正常走通，否则新
+    流程的第一步就会被自己挡住。人物这条腿在 0 个角色下发起也不应报错（见
+    app.refs.generate_refs 对空选中集的早退），场景腿因为没有场景清单本来就
+    发起不了。"""
+    old_prompt = "国漫3D动画电影质感，明确虚构数字角色、非真人照片，精致光影，统一电影画面。"
+    bible_json = json.dumps({
+        "characters": [],
+        "world": {"era": "", "genre": "仙侠", "visual_style_canonical": old_prompt},
+        "scenes": [],
+    }, ensure_ascii=False)
+    conn = _make_conn(bible_json, bible_version=0)
+    _patch_project(monkeypatch, conn)
+    calls = _patch_spawns(monkeypatch)
+
+    precheck = _confirm_required_quote(monkeypatch, conn, {
+        "style_name": "真人摄影风", "expected_version": 0,
+    })
+    assert precheck["characters"]["image_count"] == 0
+    assert precheck["scene_bible_ready"] is False
+
+    result = asyncio.run(bible_ops.set_bible_visual_style("p1", {
+        "style_name": "真人摄影风", "expected_version": 0,
+        "confirm": True, "quote_id": precheck["quote_id"],
+    }))
+
+    assert result["changed"] is True
+    assert result["refs_started"] is True
+    assert result["scene_refs_started"] is False
+    assert len(calls["refs"]) == 1
+    assert calls["scene_refs"] == []
+
+    row = conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()
+    assert json.loads(row["bible_json"])["characters"] == []

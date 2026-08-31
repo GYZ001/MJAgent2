@@ -266,6 +266,26 @@ def test_prompt_compiler_never_leaks_raw_functional_extra_error_without_bible() 
         compile_prompt(shot, empty_bible)
 
 
+def test_validate_storyboard_does_not_strip_characters_when_bible_is_empty() -> None:
+    """架构转向（2026-08-31）回归锁：首版人物谱不再点名角色，
+    ``Bible(characters=[])`` 是新主路径的正常产物，不是异常态。
+    ``is_allowed_storyboard_character`` 早有 ``allow_without_bible=True`` 分支
+    （没有真实角色圣经时不做强制删除，保持占位圣经的历史兼容行为）——这条
+    用例把它钉在 ``validate_storyboard`` 这个真实调用点上：空人物谱下，镜头
+    引用一个尚未在圣经里登记的角色名（甲一，等待映射台/分集反应式建卡）不
+    应该被判定为「既不在角色圣经中，也不是允许的功能性路人标签」而报错，
+    分镜展开前的反应式发现才是真正把关的地方，不是这条校验。"""
+    shot = _real_shot_2()
+    empty_bible = Bible(characters=[], world=_bible().world)
+
+    errors = validate_storyboard(
+        Storyboard(episode_no=1, shots=[shot]), empty_bible, target_duration_s=50,
+    )
+
+    assert not any("既不在角色圣经中" in error for error in errors)
+    assert not any("甲一" in error and "characters" in error for error in errors)
+
+
 def test_historical_shot_repair_creates_lineaged_t1_candidate(
     tmp_path, monkeypatch
 ) -> None:
