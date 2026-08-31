@@ -1192,3 +1192,57 @@ def test_episode_clear_rejects_provider_risk_before_reset_or_pause(
     assert conn.execute(
         "SELECT status FROM provider_video_budget_claims WHERE operation_id='op-provider'"
     ).fetchone()[0] == "accepted"
+
+
+def test_clearance_chain_requires_an_explicit_connection() -> None:
+    """清空判据链不得给 conn 留默认值。
+
+    这条链是「删项目 / 清空整集 / 清空单镜」的准入闸门。调用方漏传时若回退到
+    自己开的连接，读到的是另一个事务里看不见的状态——safe_to_clear 与事务内的
+    事实不一致，而且不报错。必传之后漏传在调用那一刻就是 TypeError。
+    （CLAUDE.md「Ownership Must Be Explicit」：可选参数是缺陷的温床。）
+    """
+    import inspect
+
+    from app import provider_task_clearance as pc
+
+    chain = (
+        pc._provider_task_clearance_evaluation,
+        pc.provider_task_clearance_snapshot,
+        pc.assert_provider_tasks_clearable,
+        pc.prepare_provider_tasks_for_clear,
+    )
+    for fn in chain:
+        param = inspect.signature(fn).parameters["conn"]
+        assert param.default is inspect.Parameter.empty, (
+            f"{fn.__name__} 的 conn 又有默认值了；漏传会静默读到另一个事务的状态"
+        )
+
+    # 行为红绿：漏传立刻炸，而不是等到线上读到错状态。
+    with pytest.raises(TypeError):
+        pc.provider_task_clearance_snapshot(project_id="proj_x")
+    with pytest.raises(TypeError):
+        pc.assert_provider_tasks_clearable(project_id="proj_x")
+    with pytest.raises(TypeError):
+        pc.prepare_provider_tasks_for_clear(project_id="proj_x")
+
+
+def test_clearance_chain_does_not_fall_back_to_its_own_connection() -> None:
+    """源码级守卫：链上函数体里不得再出现 `conn or get_conn()` 兜底。"""
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parent.parent / "app" / "provider_task_clearance.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    offenders = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.BoolOp)
+        and isinstance(node.op, ast.Or)
+        and any(
+            isinstance(v, ast.Call)
+            and getattr(v.func, "id", None) == "get_conn"
+            for v in node.values
+        )
+    ]
+    assert not offenders, f"第 {offenders} 行出现了 `conn or get_conn()` 兜底"

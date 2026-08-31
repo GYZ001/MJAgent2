@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.db import get_conn, now
+from app.db import now
 
 
 class ProviderTasksNotTerminalError(ValueError):
@@ -46,15 +46,20 @@ class ProviderTasksNotTerminalError(ValueError):
         super().__init__(self.detail["message"])
 
 
+# 清空判据链上的 conn 一律必传，不给默认值。这条链是「删项目 / 清空整集 /
+# 清空单镜」的准入闸门：调用方漏传时若回退到自己开的连接，读到的是另一个
+# 事务里看不见的状态，safe_to_clear 会与事务内的事实不一致，而且不报错。
+# 必传之后，漏传在调用那一刻就是 TypeError。（CLAUDE.md「Ownership Must Be
+# Explicit」：可选参数是缺陷的温床。）
 def _provider_task_clearance_evaluation(
     *,
     project_id: str | None = None,
     episode_id: str | None = None,
     shot_ids: list[str] | tuple[str, ...] = (),
     version_ids: list[str] | tuple[str, ...] = (),
-    conn=None,
+    conn,
 ) -> tuple[dict[str, Any], dict[str, list[str]]]:
-    db = conn or get_conn()
+    db = conn
     job_columns = {
         str(row["name"] if hasattr(row, "keys") else row[1])
         for row in db.execute("PRAGMA table_info(jobs)").fetchall()
@@ -389,7 +394,7 @@ def provider_task_clearance_snapshot(
     episode_id: str | None = None,
     shot_ids: list[str] | tuple[str, ...] = (),
     version_ids: list[str] | tuple[str, ...] = (),
-    conn=None,
+    conn,
 ) -> dict[str, Any]:
     """Return whether destructive cleanup can preserve provider authority.
 
@@ -399,7 +404,7 @@ def provider_task_clearance_snapshot(
     """
     from app.provider_task_zero_cost import apply_zero_cost_terminal_release
 
-    db = conn or get_conn()
+    db = conn
     clearance, terminal_actions = _provider_task_clearance_evaluation(
         project_id=project_id,
         episode_id=episode_id,
@@ -417,7 +422,7 @@ def assert_provider_tasks_clearable(
     episode_id: str | None = None,
     shot_ids: list[str] | tuple[str, ...] = (),
     version_ids: list[str] | tuple[str, ...] = (),
-    conn=None,
+    conn,
 ) -> dict[str, Any]:
     clearance = provider_task_clearance_snapshot(
         project_id=project_id,
@@ -437,7 +442,7 @@ def prepare_provider_tasks_for_clear(
     episode_id: str | None = None,
     shot_ids: list[str] | tuple[str, ...] = (),
     version_ids: list[str] | tuple[str, ...] = (),
-    conn=None,
+    conn,
 ) -> dict[str, Any]:
     """Fence provider risk and explicitly release unsubmitted reservations."""
     from app.provider_task_zero_cost import (
@@ -445,7 +450,7 @@ def prepare_provider_tasks_for_clear(
         apply_zero_cost_terminal_release,
     )
 
-    db = conn or get_conn()
+    db = conn
     clearance, terminal_actions = _provider_task_clearance_evaluation(
         project_id=project_id,
         episode_id=episode_id,
