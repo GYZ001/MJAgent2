@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from app.domain import common
 from app.refs import normalize_prompt_text, portrait_prompt
 from app.orchestration.engine import fingerprint
@@ -386,6 +388,146 @@ def test_onstage_evidence_stuck_in_one_chapter_is_not_a_recurring_character(monk
     admitted = [item[0] for item in ranked]
     assert "绿袍男子" not in admitted, "在场证据不跨章的候选不该建卡"
     assert "孟浩" in admitted, "跨章复现的角色必须留下"
+
+
+def test_admission_relaxes_chapter_floor_for_personal_name_not_referential(monkeypatch) -> None:
+    """4a：跨章要求按 name_form 分档。真实故障挡的是「绿袍男子」这类靠衣着指人
+    的类别称谓，不是「只出现一章」本身——这个区分已经由资格裁决模型判进
+    name_form。姓名形态的候选，证据全挤在同一章也该入选；代称形态仍要求跨 2
+    章，用同一份数据（两个称呼提及次数接近）显式验证是 name_form 在把关，不是
+    机缘巧合。
+    """
+    import asyncio
+    import json
+
+    from app import stages
+    from app.harness import model_gateway
+
+    chapter_one = (
+        "陈默大步走出，陈默转身冷笑。"
+        "青衣客一言不发，青衣客缓缓后退，青衣客又转身望天。"
+    )
+    chapters = [{"idx": 1, "title": "第一章", "content": chapter_one}] + [
+        {"idx": i, "title": f"第{i}章", "content": f"第{i}章：正文占位。"}
+        for i in range(2, 21)
+    ]
+
+    async def fake_chat(_messages, **_kwargs):
+        return json.dumps({
+            "candidates": [
+                {
+                    "primary_appellation": "陈默", "formal_name": "",
+                    "onstage_evidence": [
+                        {"chapter_index": 1, "quote": "陈默大步走出，陈默转身冷笑。"},
+                        {"chapter_index": 1, "quote": "陈默转身冷笑。"},
+                    ],
+                },
+                {
+                    "primary_appellation": "青衣客", "formal_name": "",
+                    "onstage_evidence": [
+                        {"chapter_index": 1, "quote": "青衣客一言不发，青衣客缓缓后退，青衣客又转身望天。"},
+                        {"chapter_index": 1, "quote": "青衣客缓缓后退，青衣客又转身望天。"},
+                    ],
+                },
+            ],
+        }, ensure_ascii=False)
+
+    async def fake_chat_structured(_messages, **kwargs):
+        model_type = kwargs["model_type"]
+        meta = kwargs.get("call_meta") or {}
+        if model_type is stages._RosterPersonhoodResolution:
+            name_form = "personal_name" if meta.get("character_name") == "陈默" else "referential"
+            return model_type(verdict="person", supporting_chapter_index=1, name_form=name_form)
+        if model_type is stages._RosterTrueNameResolution:
+            return model_type(verdict="unrevealed")
+        return model_type(verdict="onstage", supporting_segment_index=1)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+    ranked = asyncio.run(stages._recurring_character_names(chapters))
+
+    admitted = [item[0] for item in ranked]
+    assert "陈默" in admitted, "姓名形态的候选跨章门槛降到 1 章后应当入选"
+    assert "青衣客" not in admitted, "代称形态仍要求跨 2 章，门槛放松不能一起放行"
+
+
+def test_roll_call_coverage_log_reports_absolute_failed_chunks(monkeypatch) -> None:
+    """点名分块失败必须以绝对数 + 失败章号入账，不能只留比例：「20/60」和
+    「6/20」比例接近，绝对损失差三倍多，只记比例看不出这个差异。"""
+    import asyncio
+    import json
+
+    from app import stages
+    from app.harness import model_gateway
+    from tests.conftest import patch_stages_everywhere as patch_stages
+
+    async def fake_chat(_messages, **kwargs):
+        meta = kwargs.get("call_meta") or {}
+        if meta.get("chunk_index") == 2:
+            raise RuntimeError("provider unavailable")
+        return json.dumps({"candidates": []})
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    calls: list[tuple] = []
+
+    def fake_log(kind, *args, **kwargs):
+        calls.append((kind, kwargs.get("meta") or {}))
+
+    patch_stages(monkeypatch, "log_provider_call", fake_log)
+    patch_stages(monkeypatch, "BIBLE_ROLL_CALL_MAX_ATTEMPTS", 1)
+
+    chapters = [{"idx": i, "title": f"第{i}章", "content": "正文" * 50} for i in range(1, 6)]
+    result = asyncio.run(stages._recurring_character_names(chapters))
+
+    assert result == []
+    coverage = next(meta for kind, meta in calls if kind == "character_roll_call_coverage")
+    assert coverage["failed_chunk_count"] == 1
+    assert coverage["total_chunk_count"] == 5
+    assert coverage["failed_chapters"] == [3]
+
+
+def test_roster_runaway_guard_rejects_absurd_candidate_counts(monkeypatch) -> None:
+    """失控护栏：候选数超过上限时响亮报错，不是静默截断——区别于被拆掉的
+    ranked[:20]（静默吃人），这个是停下来报警。"""
+    import asyncio
+    import json
+
+    from app import stages
+    from app.harness import model_gateway
+    from tests.conftest import patch_stages_everywhere as patch_stages
+
+    chapters = [
+        {"idx": i, "title": f"第{i}章", "content": f"第{i}章：甲现身，乙现身，丙现身。"}
+        for i in range(1, 21)
+    ]
+
+    def _evidence() -> list[dict]:
+        return [
+            {"chapter_index": 1, "quote": "第1章：甲现身，乙现身，丙现身。"},
+            {"chapter_index": 2, "quote": "第2章：甲现身，乙现身，丙现身。"},
+        ]
+
+    async def fake_chat(_messages, **_kwargs):
+        return json.dumps({
+            "candidates": [
+                {"primary_appellation": "甲", "formal_name": "", "onstage_evidence": _evidence()},
+                {"primary_appellation": "乙", "formal_name": "", "onstage_evidence": _evidence()},
+                {"primary_appellation": "丙", "formal_name": "", "onstage_evidence": _evidence()},
+            ],
+        }, ensure_ascii=False)
+
+    async def fake_chat_structured(_messages, **kwargs):
+        model_type = kwargs["model_type"]
+        return model_type(verdict="onstage", supporting_segment_index=1)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(model_gateway, "chat_structured", fake_chat_structured)
+    patch_stages(monkeypatch, "BIBLE_ROSTER_RUNAWAY_MAX", 2)
+
+    with pytest.raises(stages.StageError) as exc_info:
+        asyncio.run(stages._recurring_character_names(chapters))
+    assert "候选" in str(exc_info.value)
+    assert "200" not in str(exc_info.value)  # 断言用的是被打过补丁的上限，不是硬编码 200
 
 
 def test_single_chapter_corpus_still_produces_a_verified_roster(monkeypatch) -> None:

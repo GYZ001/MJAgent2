@@ -473,7 +473,7 @@ def _compute_bible_generate_precheck(project_id: str, *, style_name: str | None 
     p = _project_or_404(project_id)
     unit = float(IMAGE_PRICE_PER_UNIT)
     views_per = len(CHARACTER_REQUIRED_VIEWS)
-    # 首版谱写按必收名单上限估算；若已有 bible 则用真实角色数
+    # 首版谱写按粗估规模估算（人物点名不设人数上限，真实角色数可能更多）；若已有 bible 则用真实角色数
     if p.get("bible_json"):
         bible = json.loads(p["bible_json"])
         chars = bible.get("characters") or []
@@ -484,8 +484,8 @@ def _compute_bible_generate_precheck(project_id: str, *, style_name: str | None 
         char_count = BIBLE_MUST_COVER_MAX
         names = []
         estimate_note = (
-            f"尚无人物谱，按首版必收名单上限 {BIBLE_MUST_COVER_MAX} 角色估算；"
-            "谱写完成后按真实角色数出图"
+            f"尚无人物谱，按 {BIBLE_MUST_COVER_MAX} 角色规模粗估（人物点名不设人数"
+            "上限，实际角色数可能更多）；谱写完成后按真实角色数出图并重新结算"
         )
     image_count = char_count * views_per
     estimated = round(image_count * unit, 2)

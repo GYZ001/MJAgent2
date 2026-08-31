@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-import hashlib
 import re
 from typing import Any
 
@@ -24,8 +23,6 @@ from .common import (
     BIBLE_FORMAL_NAME_MIN_RATIO,
     BIBLE_HEAD_CHAPTERS,
     BIBLE_LOOKAHEAD_CHAPTERS,
-    BIBLE_MUST_COVER_MAX,
-    BIBLE_RECURRING_MIN_ONSTAGE_CHAPTERS,
     BIBLE_RECURRING_MIN_ONSTAGE_QUOTES,
     BIBLE_ROLL_CALL_CHUNK_CHAPTERS,
     BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS,
@@ -34,21 +31,25 @@ from .common import (
     BIBLE_ROLL_CALL_MAX_ATTEMPTS,
     BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE,
     BIBLE_ROLL_CALL_TIMEOUT_S,
-    BIBLE_SMALL_VERDICT_TIMEOUT_S,
+    BIBLE_ROSTER_RUNAWAY_MAX,
     BIBLE_STATISTICAL_MIN_CHAPTER_RATIO,
-    BIBLE_STATISTICAL_MIN_MENTIONS,
     StageError,
 )
 from .constants import SYSTEM_PREFIX
 from .identity_evidence import _alias_text_is_independent_appellation, _quote_comparison_variants
+from .roster_admission import (
+    _roster_mentioned_importance_verdict,
+    _roster_onstage_chapter_floor,
+    _roster_statistical_mention_floor,
+)
 from .roster_candidates import (
     _CharacterRollCall,
-    _MentionedCharacterImportanceResolution,
     _RosterCandidate,
     _coerce_roster_chapter_index,
     _pin_roster_candidates_to_source,
     _shared_appellations,
 )
+from .roster_chunk_plan import _expand_chunk_plan, _failed_chunk_meta
 from .roster_merge import _merge_roll_call_candidates, _resolve_generic_character_candidates
 from .roster_personhood import _filter_non_person_roster_candidates
 from .roster_truename import _discover_roster_true_names, _resolve_conflicting_formal_names
@@ -221,8 +222,8 @@ async def _recurring_character_names(
        而不是被谈论、被指涉、被交代来历的对象）；裁决通过（verdict=="onstage" 且
        段号钉证通过）才计入该候选的 `verified_onstage_count`。
     4. 按 `verified_onstage_count` 降序（同分按 primary_appellation 字典序打破
-       平局）排序，取 >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES 的候选，最多保留
-       BIBLE_MUST_COVER_MAX 个。
+       平局）排序，取 >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES 的候选，不设人数
+       上限（超过 BIBLE_ROSTER_RUNAWAY_MAX 时判失控直接报错，见下方）。
 
     点名调用失败时返回空名单，绝不阻断人物谱本身；结构闸/裁决闸任一步不通过，
     该条证据直接丢弃，不确定不登记（不会因为某一条证据没通过就拒绝整个候选，
@@ -232,10 +233,10 @@ async def _recurring_character_names(
     if not valid:
         return []
     head = valid[:BIBLE_HEAD_CHAPTERS]
-    chunks = [
+    chunks = _expand_chunk_plan([
         head[index:index + BIBLE_ROLL_CALL_CHUNK_CHAPTERS]
         for index in range(0, len(head), BIBLE_ROLL_CALL_CHUNK_CHAPTERS)
-    ]
+    ], BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS)
     chapters_by_idx = _chapters_by_idx(valid)
     roll_call_sem = asyncio.Semaphore(BIBLE_ROLL_CALL_CONCURRENCY)
 
@@ -257,7 +258,7 @@ async def _recurring_character_names(
 6. 只有本人说话、行动或被直接叙述为在场才算 onstage_evidence；被谈论、回忆或背景介绍不算。
 7. 但具名人物即使当前仅被提及，只要原文明示其建立宗门/制度、造成持续冲突、留下关键规则或后续行动目标，也可输出候选；onstage_evidence 填包含该剧情作用的逐字引句，后续程序会把它判为 mentioned_only，不得伪装成已出场。
 8. 只申报可单独指认、能作为定妆对象的人物；同一个人在本块只输出一次。器物与法宝、没有自己姓名的野兽、用「某人的客人」这类描述指代且无法对应到具体人名的路人，都不是人物候选。
-9. 本块最多输出 12 个候选，优先输出戏份最重的人物；引句只保留能证明在场的最小片段，不要复述剧情。
+9. 本块最多输出 20 个候选，优先输出戏份最重的人物；引句只保留能证明在场的最小片段，不要复述剧情。
 
 小说正文：
 {chunk_text}
@@ -359,6 +360,7 @@ async def _recurring_character_names(
     mention_counts: dict[str, int] = {}
     chapter_counts: dict[str, int] = {}
     personhood_by_appellation: dict[str, str] = {}
+    name_form_by_appellation: dict[str, str] = {}
     evidence_total = 0
     structural_pass = 0
     # 结构闸（G1-G3）零模型调用、纯同步核对，先把候选证据筛成「值得送裁决闸」的
@@ -379,6 +381,7 @@ async def _recurring_character_names(
             aliases.insert(0, appellation)
         aliases_by_appellation[appellation] = aliases
         personhood_by_appellation[appellation] = candidate.personhood
+        name_form_by_appellation[appellation] = candidate.name_form
         search_terms = {value for value in [appellation, formal, *aliases] if value}
         mention_counts[appellation] = sum(
             (chapter.get("content") or "").count(term)
@@ -468,55 +471,15 @@ async def _recurring_character_names(
 
     mentioned_retain: set[str] = set()
 
-    async def _judge_mentioned_importance(appellation: str) -> tuple[str, bool]:
-        dossier = mentioned_dossiers.get(appellation, [])[:6]
-        if not dossier or appellation in ambiguous_appellations:
-            return appellation, False
-        catalog = "\n\n".join(
-            f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
-            for item in dossier
-        )
-        prompt = f"""任务：判断仅被提及、尚未真实出场的具名人物「{appellation}」是否应作为未来重要角色保留在人物谱。
-
-原文卷宗：
-{catalog}
-
-全文机械信号：称呼/别名命中 {mention_counts.get(appellation, 0)} 次，覆盖 {chapter_counts.get(appellation, 0)} 章。
-
-只有原文明确显示其具备持续剧情作用时才 retain，例如：创建宗门或制度、造成当前核心冲突、留下仍在生效的规则/遗产、被明确设为后续行动目标。仅有家世介绍、欠债对象、路人背景、一次性比较或传闻，一律 drop；证据不足选 uncertain。不得根据常识或作品知识补充。
-"""
-        try:
-            resolution = await asyncio.wait_for(
-                model_gateway.chat_structured(
-                    [{"role": "system", "content": SYSTEM_PREFIX},
-                     {"role": "user", "content": prompt}],
-                    model_type=_MentionedCharacterImportanceResolution,
-                    validate=None,
-                    operation_id="mentioned_character_importance:" + hashlib.sha256(
-                        f"{appellation}:{catalog}".encode("utf-8")
-                    ).hexdigest(),
-                    temperature=0.0,
-                    max_tokens=384,
-                    call_meta=_bible_short_json_call_meta({
-                        "stage": "未出场角色重要性裁决",
-                        "stage_key": "mentioned_character_importance",
-                        "call_role": "stage_validate",
-                        "character_name": appellation,
-                        "project_id": project_id,
-                    }),
-                ),
-                timeout=BIBLE_SMALL_VERDICT_TIMEOUT_S,
-            )
-        except Exception:  # noqa: BLE001 - 不确定不登记
-            return appellation, False
-        valid_chapters = {int(item["chapter_idx"]) for item in dossier}
-        return appellation, (
-            resolution.verdict == "retain"
-            and resolution.supporting_chapter_index in valid_chapters
-        )
-
     mentioned_jobs = [
-        _judge_mentioned_importance(appellation)
+        _roster_mentioned_importance_verdict(
+            appellation,
+            mentioned_dossiers=mentioned_dossiers,
+            mention_counts=mention_counts,
+            chapter_counts=chapter_counts,
+            ambiguous_appellations=ambiguous_appellations,
+            project_id=project_id,
+        )
         for appellation, count in mentioned_counts.items()
         if count >= 1 and mention_counts.get(appellation, 0) >= 2
     ]
@@ -527,19 +490,42 @@ async def _recurring_character_names(
 
     # 准入分三条独立通道，任一命中即可进入名单：
     # A. 在场证据通道：裁决闸核验通过 >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES 条，
-    #    且这些证据跨到 >= BIBLE_RECURRING_MIN_ONSTAGE_CHAPTERS 个章节
-    #    （章数不足的短篇按语料实际章数封顶，见 `_corpus_scoped_chapter_threshold`）；
+    #    且这些证据跨到达标章节数（按 name_form 分档，见
+    #    `_roster_onstage_chapter_floor`；章数不足的短篇再按语料实际章数封顶，
+    #    见 `_corpus_scoped_chapter_threshold`）；
     # B. 剧情权威通道：仅被提及，但原文赋予其持续剧情作用（mentioned_retain）；
     # C. 全文统计通道：全文命中与章节覆盖同时达标——主角/核心配角在原文里持续出现，
     #    这本身就是比"某一条引句能否通过单次模型裁决"更稳的重要性证据。
     #    真实故障：孟浩前 20 章提及 991 次、覆盖 20/20 章，却因 3 条引句裁决全判
     #    other 被整个淘汰，而只出现 1 次的「李富贵」反被当成主角，人物谱不可用。
     window_size = max(1, len(head))
-    # 两条通道的章节门槛都按语料实际章数封顶（见 `_corpus_scoped_chapter_threshold`）：
-    # 统计通道数的是全书命中章，用全书章数封顶；在场通道数的是窗口内被钉证的章，
-    # 用窗口章数封顶。
+    # 通道 A 要的是「复现人物」（本函数名即 recurring），所以在场证据必须跨章：
+    # 全部挤在同一章说明这个人在那一章之外没有存在感，而人物谱的作用域是全书。
+    # 真实故障：「绿袍男子」——靠山宗那批绿袍修士的类别称谓，不是谁的专名——三条
+    # 在场证据全在第 2 章，靠通道 A 建了正式角色卡；它随后被映射器裸命中，把整集
+    # 映射卡死在「称谓未逐字出现在本集原文」的反幻觉闸上，且重试必然复现。挡它的
+    # 是「靠衣着指人」这个性质（name_form=referential），不是「只出现一章」本身：
+    # 姓名/尊称形态跨章门槛降到 1 章（`_roster_onstage_chapter_floor`），只有
+    # 代称/未判定形态仍要求跨 2 章。漏判不是永久损失：真在某一章挑大梁的角色由
+    # 分镜阶段的按集新角色发现补建卡。语料本身只有一章时门槛再按实际章数封顶
+    # （见 `_corpus_scoped_chapter_threshold`），钉不住章号的证据照旧不计。
+    onstage_recurring = {
+        appellation
+        for appellation, count in verified_counts.items()
+        if count >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
+        and len(verified_chapters.get(appellation, ())) >= _corpus_scoped_chapter_threshold(
+            _roster_onstage_chapter_floor(name_form_by_appellation.get(appellation, "uncertain")),
+            len(window_chapters_by_idx),
+        )
+    }
+    # 统计通道章节门槛按语料实际章数封顶（数的是全书命中章，用全书章数封顶，见
+    # `_corpus_scoped_chapter_threshold`）；提及量门槛改成本次通道 A 候选的相对
+    # 分布（`_roster_statistical_mention_floor`），不再是跨作品固定值。
     min_statistical_chapters = _corpus_scoped_chapter_threshold(
         max(2, round(window_size * BIBLE_STATISTICAL_MIN_CHAPTER_RATIO)), len(valid),
+    )
+    statistical_min_mentions = _roster_statistical_mention_floor(
+        [mention_counts.get(appellation, 0) for appellation in onstage_recurring]
     )
     statistical_retain = {
         appellation
@@ -548,26 +534,8 @@ async def _recurring_character_names(
         # 走不了统计通道，正确做法是把卷宗做厚让模型判得出，不是绕过它。
         if personhood_by_appellation.get(appellation) == "person"
         and appellation not in ambiguous_appellations
-        and mention_counts.get(appellation, 0) >= BIBLE_STATISTICAL_MIN_MENTIONS
+        and mention_counts.get(appellation, 0) >= statistical_min_mentions
         and chapter_counts.get(appellation, 0) >= min_statistical_chapters
-    }
-    # 通道 A 要的是「复现人物」（本函数名即 recurring），所以在场证据必须跨章：
-    # 全部挤在同一章说明这个人在那一章之外没有存在感，而人物谱的作用域是全书。
-    # 真实故障：「绿袍男子」——靠山宗那批绿袍修士的类别称谓，不是谁的专名——三条
-    # 在场证据全在第 2 章，靠通道 A 建了正式角色卡；它随后被映射器裸命中，把整集
-    # 映射卡死在「称谓未逐字出现在本集原文」的反幻觉闸上，且重试必然复现。
-    # 漏判不是永久损失：真在某一章挑大梁的角色由分镜阶段的按集新角色发现补建卡。
-    # 语料本身只有一章时「跨章」这个维度不存在，门槛退到 1 章，把关交给条数门槛
-    # （BIBLE_RECURRING_MIN_ONSTAGE_QUOTES）和资格裁决；此时仍要求至少有一章被
-    # 钉证，钉不住章号的证据照旧不计。
-    min_onstage_chapters = _corpus_scoped_chapter_threshold(
-        BIBLE_RECURRING_MIN_ONSTAGE_CHAPTERS, len(window_chapters_by_idx),
-    )
-    onstage_recurring = {
-        appellation
-        for appellation, count in verified_counts.items()
-        if count >= BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
-        and len(verified_chapters.get(appellation, ())) >= min_onstage_chapters
     }
     ranked = [
         (
@@ -590,12 +558,21 @@ async def _recurring_character_names(
         0 if item[0] in mentioned_retain and item[2] == 0 else -1,
         -item[4], -item[3], -item[2], item[1] or item[0],
     ))
-    result = ranked[:BIBLE_MUST_COVER_MAX]
+    # 不再截断人数：旧的 20 上限来自过期前提（首版曾约束 ≤8 个）。这里只留一道
+    # 失控护栏（不是质量门槛）——真实作品不会触及，触发多半是资格裁决整体失效，
+    # 会让下游详情生成扇出成几百次调用。
+    if len(ranked) > BIBLE_ROSTER_RUNAWAY_MAX:
+        raise StageError(
+            "人物点名",
+            [f"候选 {len(ranked)} 个超过 {BIBLE_ROSTER_RUNAWAY_MAX} 人失控上限，疑似资格裁决整体失效"],
+        )
+    result = ranked
     # 记账：供人工从数字上判断「这次点名是不是明显偏少/裁决通过率是不是异常低」，
     # 不是核验闸门本身。
     log_provider_call(
         "character_roll_call_coverage", config.MODEL_TEXT, "OK", None, 0,
         meta={
+            **_failed_chunk_meta(chunks, chunk_results),
             "candidates": len(candidates),
             "evidence_total": evidence_total,
             "structural_gate_passed": structural_pass,

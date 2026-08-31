@@ -475,6 +475,10 @@ BIBLE_STATISTICAL_MIN_CHAPTER_RATIO = 0.15
 # 更常用的原文称呼连 aliases 都进不去，检索直接落空。
 BIBLE_FORMAL_NAME_MIN_RATIO = 1.0
 BIBLE_MUST_COVER_MAX = 20        # 前 60 章重要角色容量；详情仍逐角色小请求生成
+# 人数不设上限（见 roster_recurring._recurring_character_names）；这是失控护栏
+# 不是质量门槛——真实作品不会触及，触发多半是资格裁决整体失效，会让下游详情
+# 生成扇出成几百次调用。
+BIBLE_ROSTER_RUNAWAY_MAX = 200
 # 点名调用每个候选最多申报几条在场证据。判据只需要 BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
 # （=2）条核验通过的证据；这里留 1 条余量应付结构闸/裁决闸刷掉个别证据，不留更多——
 # 多留的每一条对戏份多的主角都是纯浪费：一个出场上千次的主角，旧提示词「尽量都列出来」

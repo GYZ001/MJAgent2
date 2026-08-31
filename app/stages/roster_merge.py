@@ -93,6 +93,10 @@ def _merge_roll_call_candidates(
             personhood = "non_person"
         else:
             personhood = "uncertain"
+        # name_form 同一口径：多个成员一致才敢用，只要出现分歧就说明形态本身
+        # 不确定，保守回落 uncertain（不能猜一个可能错的形态出来）。
+        name_forms = {item.name_form for item in group if item.name_form != "uncertain"}
+        name_form = next(iter(name_forms)) if len(name_forms) == 1 else "uncertain"
         merged.append(_RosterCandidate(
             primary_appellation=primary,
             formal_name=formal,
@@ -100,6 +104,7 @@ def _merge_roll_call_candidates(
             identity_evidence=deduped_identity[:BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE],
             onstage_evidence=deduped[:BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE],
             personhood=personhood,
+            name_form=name_form,
         ))
     return merged
 

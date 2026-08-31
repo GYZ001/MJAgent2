@@ -30,6 +30,28 @@ def test_merge_roll_call_candidates_merges_formal_name_and_caps_evidence() -> No
         [candidate(primary_appellation="许师姐", personhood="uncertain")],
     ])
     assert person_kept[0].personhood == "person"
+
+
+def test_merge_roll_call_candidates_preserves_name_form() -> None:
+    """归并重建 _RosterCandidate 时曾经漏传 name_form，导致合并后全部候选静默
+    回落 uncertain——4a 按 name_form 分档的跨章门槛因此结构上永远读不到真实
+    形态。一致时沿用该形态；单个候选（无同组成员）原样透传；互相冲突时保守
+    退回 uncertain，不擅自替模型选一个可能错的形态。"""
+    candidate = stages._RosterCandidate
+    single = stages._merge_roll_call_candidates([
+        [candidate(primary_appellation="陈默", name_form="personal_name")],
+    ])
+    assert single[0].name_form == "personal_name"
+    agree = stages._merge_roll_call_candidates([
+        [candidate(primary_appellation="小胖子", name_form="personal_name")],
+        [candidate(primary_appellation="小胖子", name_form="uncertain")],
+    ])
+    assert agree[0].name_form == "personal_name"
+    conflict = stages._merge_roll_call_candidates([
+        [candidate(primary_appellation="青衣客", name_form="personal_name")],
+        [candidate(primary_appellation="青衣客", name_form="referential")],
+    ])
+    assert conflict[0].name_form == "uncertain"
     split = stages._merge_roll_call_candidates([
         [candidate(primary_appellation="小胖子", aliases=["胖子", "李富贵"])],
         [candidate(primary_appellation="王有材", aliases=["胖子", "有材大哥"])],
@@ -409,6 +431,53 @@ def test_protagonist_is_assigned_by_fulltext_signals_not_model() -> None:
     assert protagonist.presence_status == "onstage"
     assert protagonist.portrait_eligible is True
     assert "presence_by_fulltext_coverage" in protagonist.importance_signals
+
+
+def test_roster_onstage_chapter_floor_by_name_form() -> None:
+    """4a：跨章门槛按称呼形态分档，姓名/尊称降到 1 章，代称/未判定仍是 2 章。"""
+    from app.stages.roster_admission import _roster_onstage_chapter_floor
+
+    assert _roster_onstage_chapter_floor("personal_name") == 1
+    assert _roster_onstage_chapter_floor("honorific") == 1
+    assert _roster_onstage_chapter_floor("referential") == 2
+    assert _roster_onstage_chapter_floor("uncertain") == 2
+
+
+def test_roster_statistical_mention_floor_relative_to_channel_a() -> None:
+    """4b：统计通道门槛改成通道 A 候选提及数中位数的 20%，地板 5；通道 A 空时
+    退回跨作品常数 BIBLE_STATISTICAL_MIN_MENTIONS，fail-safe 方向不变松。"""
+    from app.stages import BIBLE_STATISTICAL_MIN_MENTIONS
+    from app.stages.roster_admission import _roster_statistical_mention_floor
+
+    assert _roster_statistical_mention_floor([]) == BIBLE_STATISTICAL_MIN_MENTIONS
+    assert _roster_statistical_mention_floor([100]) == 20
+    assert _roster_statistical_mention_floor([10, 20, 30]) == 5
+
+
+@pytest.mark.asyncio
+async def test_oversized_chapter_is_split_into_multiple_chunks_not_truncated(monkeypatch) -> None:
+    """超过 BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS 的单章不再截断丢正文，而是切
+    成多块各发一次点名请求，尾部内容必须完整送达某一块（不是被截断丢弃）。"""
+    inputs: list[str] = []
+
+    async def fake_chat(messages, **kwargs):
+        if (kwargs.get("call_meta") or {}).get("stage_key") != "character_roll_call":
+            model_type = kwargs["model_type"]
+            return model_type(verdict="onstage", supporting_segment_index=1)
+        inputs.append(messages[-1]["content"])
+        return json.dumps({"candidates": []})
+
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    long_body = "正文片段。" * 2000 + "END_MARKER_TAIL"
+    chapters = [{"idx": 1, "title": "第一章", "content": long_body}]
+
+    result = await stages._recurring_character_names(chapters)
+
+    assert result == []
+    assert len(inputs) > 1, "超预算章节必须拆成多块分别请求，不是一块截断"
+    assert not any("已截断" in item for item in inputs)
+    assert any("END_MARKER_TAIL" in item for item in inputs), "尾部内容不能被截断丢弃"
+    assert all(len(item) < stages.BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS + 2000 for item in inputs)
 
 
 @pytest.mark.asyncio

@@ -243,8 +243,8 @@ def _assign_protagonist_by_signals(draft: _BibleRosterDraft) -> None:
 def _validate_bible_roster(draft: _BibleRosterDraft) -> list[str]:
     names = [(item.name or "").strip() for item in draft.characters]
     errors: list[str] = []
-    if not 1 <= len(names) <= 20:
-        errors.append(f"characters 数量 {len(names)}，要求 1~20 个")
+    if not names:
+        errors.append("characters 数量 0，要求至少 1 个")
     if any(not name for name in names):
         errors.append("characters.name 不能为空")
     if len(names) != len(set(names)):
