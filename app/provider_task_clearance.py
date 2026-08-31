@@ -29,6 +29,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.db import now
+from app.provider_task_scope import build_clearance_scope
 
 
 class ProviderTasksNotTerminalError(ValueError):
@@ -60,84 +61,18 @@ def _provider_task_clearance_evaluation(
     conn,
 ) -> tuple[dict[str, Any], dict[str, list[str]]]:
     db = conn
-    job_columns = {
-        str(row["name"] if hasattr(row, "keys") else row[1])
-        for row in db.execute("PRAGMA table_info(jobs)").fetchall()
-    }
-    normalized_shots = list(dict.fromkeys(str(value) for value in shot_ids if value))
-    normalized_versions = list(
-        dict.fromkeys(str(value) for value in version_ids if value)
+    scope = build_clearance_scope(
+        db,
+        project_id=project_id,
+        episode_id=episode_id,
+        shot_ids=shot_ids,
+        version_ids=version_ids,
     )
-    job_scope_clauses: list[str] = []
-    job_scope_params: list[str] = []
-    claim_scope_clauses: list[str] = []
-    claim_scope_params: list[str] = []
-    if project_id:
-        if "project_id" in job_columns:
-            job_scope_clauses.append("j.project_id=?")
-            job_scope_params.append(project_id)
-        if "episode_id" in job_columns:
-            job_scope_clauses.append(
-                "j.episode_id IN (SELECT id FROM episodes WHERE project_id=?)"
-            )
-            job_scope_params.append(project_id)
-        job_scope_clauses.extend([
-            """j.shot_id IN (
-                   SELECT s.id FROM shots s
-                   JOIN episodes e ON e.id=s.episode_id
-                  WHERE e.project_id=?
-               )""",
-            """j.version_id IN (
-                   SELECT v.id FROM shot_versions v
-                   JOIN shots s ON s.id=v.shot_id
-                   JOIN episodes e ON e.id=s.episode_id
-                  WHERE e.project_id=?
-               )""",
-        ])
-        job_scope_params.extend([project_id, project_id])
-        claim_scope_clauses.append("c.project_id=?")
-        claim_scope_params.append(project_id)
-    if episode_id:
-        if "episode_id" in job_columns:
-            job_scope_clauses.append("j.episode_id=?")
-            job_scope_params.append(episode_id)
-        job_scope_clauses.extend([
-            "j.shot_id IN (SELECT id FROM shots WHERE episode_id=?)",
-            """j.version_id IN (
-                   SELECT v.id FROM shot_versions v
-                   JOIN shots s ON s.id=v.shot_id
-                  WHERE s.episode_id=?
-               )""",
-        ])
-        job_scope_params.extend([episode_id, episode_id])
-        claim_scope_clauses.append(
-            "(c.episode_id=? OR c.origin_episode_id=?)"
-        )
-        claim_scope_params.extend([episode_id, episode_id])
-    if normalized_shots:
-        marks = ",".join("?" for _ in normalized_shots)
-        job_scope_clauses.extend([
-            f"j.shot_id IN ({marks})",
-            f"j.version_id IN (SELECT id FROM shot_versions WHERE shot_id IN ({marks}))",
-        ])
-        job_scope_params.extend(normalized_shots)
-        job_scope_params.extend(normalized_shots)
-        claim_scope_clauses.append(
-            f"(c.shot_id IN ({marks}) OR c.origin_shot_id IN ({marks}))"
-        )
-        claim_scope_params.extend(normalized_shots)
-        claim_scope_params.extend(normalized_shots)
-    if normalized_versions:
-        marks = ",".join("?" for _ in normalized_versions)
-        job_scope_clauses.append(f"j.version_id IN ({marks})")
-        job_scope_params.extend(normalized_versions)
-        claim_scope_clauses.append(
-            f"(c.version_id IN ({marks}) OR c.origin_version_id IN ({marks}))"
-        )
-        claim_scope_params.extend(normalized_versions)
-        claim_scope_params.extend(normalized_versions)
-    if not job_scope_clauses:
-        raise ValueError("provider task clearance requires a resource scope")
+    job_columns = scope.job_columns
+    job_scope_clauses = scope.job_scope_clauses
+    job_scope_params = scope.job_scope_params
+    claim_scope_clauses = scope.claim_scope_clauses
+    claim_scope_params = scope.claim_scope_params
 
     claims_available = bool(db.execute(
         """SELECT 1 FROM sqlite_master

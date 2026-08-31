@@ -375,6 +375,10 @@ allowed_exceptions = []
                                     # prepare_provider_tasks_for_clear 及其
                                     # 调用链（只用 app.db），completion_grant.py
                                     # 转发保持原名可用，artifacts.py 改直接导入
+"app.provider_task_scope" = 2  # 新文件（2026-08-30，清空判据的作用域构建，从
+                               # provider_task_clearance.py 抽出——那个文件顶到了
+                               # 500 行上限，拆分而不是加基线）；只用 sqlite 连接，
+                               # 与 app.provider_task_clearance 同层
 "app.provider_task_zero_cost" = 2  # 新文件（2026-08-30，零扣费终态拒绝放行 +
                                     # 释放动作），只用 app.db，与
                                     # app.provider_task_clearance 同层、互相调用

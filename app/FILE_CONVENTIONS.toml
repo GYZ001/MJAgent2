@@ -432,9 +432,12 @@ max_function_lines_python = 50
 "app/production/screenplay_repair/qa.py" = 217
 "app/production/screenplay_repair/revalidate_resume.py" = 328
 "app/production/storyboard_pack.py" = 182
-"app/provider_task_clearance.py" = 324  # _provider_task_clearance_evaluation，
+"app/provider_task_clearance.py" = 258  # _provider_task_clearance_evaluation，
     # 从 app/completion_grant.py 按原样搬移（2026-08-30，层号治理，见
-    # app/LAYERS.toml 组 5），基线随函数一起转移，不是新增欠账
+    # app/LAYERS.toml 组 5），基线随函数一起转移，不是新增欠账。
+    # 2026-08-30 由 324 降到 258：作用域构建（四种范围翻译成 SQL 子句）抽到了
+    # app/provider_task_scope.py。棘轮只降不升——拆小了就把数字调小。剩下的 258
+    # 是那个 151 行的逐行判定循环，仍是欠账，不是许可。
 "app/recovery.py" = 85
 "app/refs.py" = 120
 "app/rejected_media.py" = 73
