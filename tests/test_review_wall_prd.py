@@ -1355,3 +1355,89 @@ def test_worker_ignores_sibling_gallery_growth_on_another_shot(monkeypatch) -> N
     worker._assert_review_dependency_fence(
         {"episode_id": "e", "shot_id": "s1"}, "v-current", "candidate",
     )
+
+
+def _terminal_projection(coverage: dict | None, **extra) -> dict:
+    proj = {"phase": "SUCCEEDED_COVERED", "run_id": "run-old", "grant_id": "grant-old"}
+    if coverage is not None:
+        proj["coverage"] = coverage
+    proj.update(extra)
+    return proj
+
+
+def test_terminal_success_expires_when_storyboard_no_longer_covered() -> None:
+    """分镜重做后旧终态不得继续宣布"已补齐"，且必须给回重跑入口。
+
+    实测 ``ep_0a70ec56e8e9``：分镜重做换掉整张镜头表后，同一条响应里 coverage
+    是 adopted 0 / total 4，user_state 却仍是 completed、next_actions 只剩
+    「查看成片」——界面宣布已补齐却没有任何入口能重新补齐，脚本化调用也因此
+    整段跳过视频阶段，零条供应商调用就报「没有候选版本可采纳」。
+    """
+    checkpoint = SimpleNamespace(
+        phase="SUCCEEDED_COVERED", run_id="run-old", grant_id="grant-old",
+    )
+
+    result = api._video_completion_user_contract(
+        "e",
+        checkpoint,
+        _terminal_projection({"total": 4, "adopted": 0, "unadopted": 4}),
+        running=False,
+    )
+
+    assert result["user_state"] == "not_started"
+    assert "4" in result["message"]
+    assert [a["id"] for a in result["next_actions"]] == ["start_completion"]
+    assert result["next_actions"][0]["endpoint"] == "/api/episodes/e/video-completion"
+
+
+def test_terminal_success_still_completed_when_every_shot_adopted() -> None:
+    checkpoint = SimpleNamespace(
+        phase="SUCCEEDED_COVERED", run_id="run-old", grant_id="grant-old",
+    )
+
+    result = api._video_completion_user_contract(
+        "e", checkpoint,
+        _terminal_projection({"total": 3, "adopted": 3, "unadopted": 0}),
+        running=False,
+    )
+
+    assert result["user_state"] == "completed"
+    assert result["next_actions"][0]["id"] == "view_results"
+
+
+def test_terminal_success_keeps_checkpoint_verdict_without_live_signal() -> None:
+    """台账没建起来时没有产物信号可依，维持 checkpoint 结论，不拿缺失当证据。"""
+    checkpoint = SimpleNamespace(
+        phase="SUCCEEDED_COVERED", run_id="run-old", grant_id="grant-old",
+    )
+
+    no_ledger = api._video_completion_user_contract(
+        "e", checkpoint, _terminal_projection(None), running=False,
+    )
+    errored = api._video_completion_user_contract(
+        "e", checkpoint,
+        _terminal_projection({"total": 4, "adopted": 0, "unadopted": 4},
+                             ledger_error="boom"),
+        running=False,
+    )
+
+    assert no_ledger["user_state"] == "completed"
+    assert errored["user_state"] == "completed"
+
+
+def test_terminal_success_with_zero_shots_is_not_completed() -> None:
+    """空集合不等于"无需检查"：一个镜头都没有的分集谈不上"全片已补齐"。"""
+    checkpoint = SimpleNamespace(
+        phase="COMPLETED_DEADLINE_FALLBACK", run_id="run-old", grant_id="grant-old",
+    )
+
+    result = api._video_completion_user_contract(
+        "e", checkpoint,
+        {"phase": "COMPLETED_DEADLINE_FALLBACK", "run_id": "run-old",
+         "coverage": {"total": 0, "adopted": 0, "unadopted": 0}},
+        running=False,
+    )
+
+    assert result["user_state"] == "not_started"
+    assert result["next_actions"][0]["id"] == "open_storyboard"
+    assert result["next_actions"][0]["endpoint"] == "/api/episodes/e/storyboard/status"

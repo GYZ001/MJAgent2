@@ -20,6 +20,10 @@ from .completion_core import (
     _ensure_video_episode_columns,
     _recorded_video_completion_task,
 )
+from .completion_freshness import (
+    TERMINAL_SUCCESS_PHASES,
+    terminal_success_contract,
+)
 from .generate import _shot_by_no
 
 
@@ -185,22 +189,11 @@ def _video_completion_user_contract(
                 action("start_completion", "开始全片补齐", "POST", base, True),
             ],
         }
-    if phase == "SUCCEEDED_COVERED":
-        return {
-            "user_state": "completed",
-            "message": "全片视频已补齐",
-            "next_actions": [
-                action("view_results", "查看成片", "GET", f"/api/episodes/{episode_id}"),
-            ],
-        }
-    if phase == "COMPLETED_DEADLINE_FALLBACK":
-        return {
-            "user_state": "completed",
-            "message": "已按截止时间完成交差，部分镜头可能使用保底版本",
-            "next_actions": [
-                action("view_results", "查看结果", "GET", f"/api/episodes/{episode_id}"),
-            ],
-        }
+    if phase in TERMINAL_SUCCESS_PHASES:
+        # 终态只在它仍描述当前这版分镜时才算数，判据见 completion_freshness。
+        return terminal_success_contract(
+            episode_id, phase, projection, base=base, action=action,
+        )
     if phase == "PARTIAL_NO_USABLE_CANDIDATE":
         missing = len(projection.get("missing_shots") or [])
         suffix = f"，仍有 {missing} 个镜头未能生成技术可播版" if missing else ""
