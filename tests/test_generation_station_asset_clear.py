@@ -1246,3 +1246,32 @@ def test_clearance_chain_does_not_fall_back_to_its_own_connection() -> None:
         )
     ]
     assert not offenders, f"第 {offenders} 行出现了 `conn or get_conn()` 兜底"
+
+
+def test_planned_episode_can_be_cleared_without_active_runs(monkeypatch) -> None:
+    """'planned' 的分集没有任何在途运行时必须可清。
+
+    'planned' 是**还没开始**的初始态，而 _clear_episode_artifacts 自己收尾时
+    正是把 status 写回 'planned'——把它算进"在写"会让清完之后的下一次清空被
+    自己刚造出的状态挡住，报「编剧或分镜任务仍在写入，清空已原子拒绝」，而
+    根本没有这样的任务可停。
+    """
+    conn = _database()
+    conn.execute("UPDATE episodes SET status='planned' WHERE id='e'")
+    conn.commit()
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+
+    artifacts._begin_clear_transaction(conn, "e")
+
+
+def test_scripting_episode_clear_still_fails_closed(monkeypatch) -> None:
+    """真正在写的状态继续原子拒绝。"""
+    conn = _database()
+    conn.execute("UPDATE episodes SET status='scripting' WHERE id='e'")
+    conn.commit()
+    patch_api_everywhere(monkeypatch, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+
+    with pytest.raises(ValueError, match="仍在写入"):
+        artifacts._begin_clear_transaction(conn, "e")

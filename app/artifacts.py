@@ -90,7 +90,7 @@ def _begin_clear_transaction(
         run = conn.execute("SELECT status FROM workflow_runs WHERE id=?", (run_id,)).fetchone()
         if not run or run["status"] not in _CLEAR_TERMINAL_RUN_STATES:
             active.append(str(run_id))
-    writing_status = ep["status"] in {"planned", "scripting", "storyboarding", "generating"}
+    writing_status = ep["status"] in {"scripting", "storyboarding", "generating"}  # 'planned' 是未开始态
     if (
         writing_status
         and not authorized_storyboard_run
