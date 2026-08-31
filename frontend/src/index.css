@@ -9982,3 +9982,84 @@ summary:focus-visible,
 :where(:root[data-theme="dark"]) .visual-style-option {
   background: rgba(var(--ink-rgb), 0.035);
 }
+
+/* ---------------------------------------------------------------------------
+   通用确认弹窗（.dialog-backdrop / .dialog）
+   2026-08-30：AccountAdminDialogs.tsx 里的四个弹窗（创建账号 / 重置密码 /
+   自删账号 / 管理员删账号）一直在用这两个类名，但**它们从未被定义过**——
+   没有样式就退化成文档流里的普通 div，整个"弹窗"排在页面最底部。用户报
+   「删除用户时没有弹窗，是在页面下方让我选择」，就是这个。
+   四道前端闸门都没抓到：check_dark_theme 查暗色覆盖、check_css_split 查跨页
+   选择器、tsc 查类型、vitest 查渲染结果——**没有一道查「className 引用的样式
+   是否存在」**。这类"引用了不存在的样式"在 CSS 里天然静默。
+   放 index.css 而不是某个页面样式表：它被多个页面的弹窗共用，放进页面表会被
+   check_css_split 判成跨页选择器。几何与层级抄 .evidence-backdrop 那套既有
+   写法，不自创第二套模态体系。
+   --------------------------------------------------------------------------- */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(12px, 3vw, 28px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: rgba(26, 27, 29, 0.54);
+  backdrop-filter: blur(6px);
+}
+.dialog {
+  width: min(520px, 100%);
+  max-height: min(760px, calc(100dvh - 32px));
+  margin: auto;
+  overflow-y: auto;
+  padding: 22px 24px;
+  border-radius: 14px;
+  border: 1px solid var(--hairline);
+  background: var(--card);
+  box-shadow: 0 24px 60px rgba(30, 27, 20, 0.28);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.dialog > h3 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--ink);
+}
+.dialog-hint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+@media (max-width: 620px) {
+  .dialog-backdrop {
+    align-items: flex-end;
+    padding: 8px;
+  }
+  .dialog {
+    width: 100%;
+    max-height: calc(100dvh - 16px);
+  }
+  .dialog-actions button {
+    flex: 1 1 auto;
+  }
+}
+:where(:root[data-theme="dark"]) .dialog-backdrop {
+  background: rgba(0, 0, 0, 0.62);
+}
+
+/* 回收站是列表不是确认框，比默认确认弹窗宽一些；仍受 .dialog 的最大高度约束。 */
+.dialog.recycle-bin-panel {
+  width: min(720px, 100%);
+  margin-top: 0;
+}

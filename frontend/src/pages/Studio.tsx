@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { api, DeletedProject, Project } from '../api'
 import { useNav, usePoll } from '../App'
 import QueryState from '../components/QueryState'
+import { RecycleBinDialog } from '../components/RecycleBinDialog'
 import { useDeleteConfirm } from '../hooks/useDeleteConfirm'
 import { formatFileSize, novelTitleFromFilename, projectEntry, validateNovelFile } from './studioImport'
 
@@ -13,14 +14,6 @@ const STATUS_LABEL: Record<string, [string, string]> = {
 type ImportStage = 'idle' | 'selected' | 'uploading' | 'creating' | 'error'
 
 /** 剩余保留时间的展示：不到 1 分钟也如实显示，不假装还有很多时间。 */
-function formatRetention(seconds: number): string {
-  const total = Math.max(0, Math.floor(seconds))
-  const hours = Math.floor(total / 3600)
-  const minutes = Math.floor((total % 3600) / 60)
-  if (hours > 0) return `约 ${hours} 小时 ${minutes} 分钟后彻底清理`
-  if (minutes > 0) return `约 ${minutes} 分钟后彻底清理`
-  return '即将彻底清理'
-}
 
 export default function Studio() {
   const { go, toast } = useNav()
@@ -32,6 +25,7 @@ export default function Studio() {
   const [name, setName] = useState('')
   const [showImport, setShowImport] = useState(window.location.pathname === '/workspaces/new')
   const [showRecycleBin, setShowRecycleBin] = useState(false)
+
   const importTriggerRef = useRef<HTMLButtonElement | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const [drag, setDrag] = useState(false)
@@ -247,66 +241,19 @@ export default function Studio() {
       )}
 
       {showRecycleBin && (
-        <section id="recycle-bin-panel" className="card recycle-bin-panel">
-          <div className="section-heading">
-            <div><span className="eyebrow">回收站</span><h3>已删除的项目</h3></div>
-            <span className="hint">24 小时保留期内可随时恢复；到期或手动彻底删除后不可恢复</span>
-          </div>
-          <QueryState
-            loading={deletedLoading}
-            error={deletedError}
-            hasData={deletedCount > 0}
-            objectName="回收站项目"
-            emptyText="回收站是空的。"
-            onRetry={refreshDeleted}
-          >
-            {deletedCount > 0 && (
-              <>
-                <ul className="recycle-bin-list">
-                  {deletedProjects!.map(p => (
-                    <li key={p.id} className="recycle-bin-row">
-                      <div className="recycle-bin-info">
-                        <b>{p.name}</b>
-                        <span>{p.chapter_count} 章 · {p.episode_count} 集 · {formatRetention(p.retention_seconds_remaining)}</span>
-                      </div>
-                      <div className="recycle-bin-actions">
-                        <button
-                          className="btn small"
-                          type="button"
-                          disabled={busyId === p.id}
-                          aria-label={`恢复项目《${p.name}》`}
-                          onClick={() => { void restore(p) }}
-                        >
-                          {busyId === p.id ? '处理中…' : '恢复'}
-                        </button>
-                        <button
-                          className="btn small danger"
-                          type="button"
-                          disabled={busyId === p.id}
-                          aria-label={`彻底删除项目《${p.name}》，不可恢复`}
-                          onClick={() => { void purge(p) }}
-                        >
-                          彻底删除
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-                <div className="recycle-bin-footer">
-                  <button
-                    className="btn danger"
-                    type="button"
-                    disabled={purgingAll}
-                    aria-label="清空回收站，彻底删除全部已软删除的项目"
-                    onClick={() => { void purgeAll() }}
-                  >
-                    {purgingAll ? '清空中…' : '清空回收站'}
-                  </button>
-                </div>
-              </>
-            )}
-          </QueryState>
-        </section>
+        <RecycleBinDialog
+          deletedProjects={deletedProjects}
+          deletedCount={deletedCount}
+          deletedLoading={deletedLoading}
+          deletedError={deletedError}
+          busyId={busyId}
+          purgingAll={purgingAll}
+          onRestore={(p: DeletedProject) => { void restore(p) }}
+          onPurge={(p: DeletedProject) => { void purge(p) }}
+          onPurgeAll={() => { void purgeAll() }}
+          onClose={() => setShowRecycleBin(false)}
+          onRefresh={() => refreshDeleted()}
+        />
       )}
 
       {importVisible && <section id={importPanelId} className="card import-panel" aria-busy={uploading || undefined}>
