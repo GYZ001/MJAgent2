@@ -24,14 +24,19 @@ from app.db import get_setting, log_provider_call
 from app.harness import model_gateway
 from app.loops import AgentLoop, AgentLoopPolicy
 from app.schemas import (Bible, Character, Scene, World)
-from app.validators import (validate_bible,
+# 下面几个 import 块里有一批本模块自己已经不再调用的名字：点名与角色详情退出
+# 首版主路径之后（见 generate_bible 的 docstring），它们的调用点没了，但
+# app/stages/__init__.py 仍从本模块透传导出它们，是包级对外 API 的一部分。
+# 删掉会静默打断 app.stages.validate_bible 这类既有引用，因此标 noqa 保留，
+# 与 roster_* 一起在专门那一轮里连同再导出一并退场。
+from app.validators import (validate_bible,  # noqa: F401 -- re-exported by app/stages/__init__.py
                             validate_scene_bible)
 
-from .alias_backfill import (
+from .alias_backfill import (  # noqa: F401 -- re-exported, see note above
     _verify_character_aliases_for_subset,
     _verify_character_aliases_in_place,
 )
-from .bible_models import (
+from .bible_models import (  # noqa: F401 -- re-exported, see note above
     _BibleRosterDraft,
     _BibleRosterEntry,
     _CharacterDetail,
@@ -54,8 +59,11 @@ from .bible_paratext import (
 from .bible_shared import _bible_short_json_call_meta, _render_bible_source
 from .common import StageError, _run_with_agent_loop
 from .constants import SYSTEM_PREFIX
-from .identity_evidence import _appearance_evidence_verified, _validate_appearance_evidence
-from .roster_recurring import (
+from .identity_evidence import (  # noqa: F401 -- _validate_appearance_evidence 经 __init__ 再导出
+    _appearance_evidence_verified,
+    _validate_appearance_evidence,
+)
+from .roster_recurring import (  # noqa: F401 -- 点名已退出主路径，仅保留包级再导出
     _attach_roster_source_appellations,
     _bible_covers_name,
     _recurring_character_names,
