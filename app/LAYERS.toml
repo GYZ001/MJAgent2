@@ -332,6 +332,13 @@ allowed_exceptions = []
 "app.agent_api" = 5  # 与 app.agent 包同名但不是它的子模块（dot-boundary 不会
                       # 误吃），独立顶层文件，单独声明
 "app.delivery" = 5
+"app.delivery_package_build" = 5  # build_delivery_package 拆出的 helper：工作目录/
+                                   # 快照/媒体拷贝/manifest 组装，仅 app.delivery 消费，
+                                   # 依赖面与 app.delivery 本身一致，同层。
+"app.delivery_package_publish" = 5  # build_delivery_package 拆出的 helper：门禁/
+                                     # lease 一致性/权威漂移检查/最终发布事务。
+"app.delivery_package_replay" = 5  # build_delivery_package 拆出的 helper：既有包
+                                    # 重放 + 崩溃恢复孤儿产物两条分支。
 "app.downstream_authority" = 5
 "app.mcp" = 5  # 前缀：覆盖 .auth/.errors/.prompts/.rate_limit/.resources/
                # .server/.tools

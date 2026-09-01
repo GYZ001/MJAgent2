@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import html
 import hashlib
 import json
 import re
-import shutil
 import time
 import uuid
 import zipfile
@@ -18,6 +16,33 @@ from app.evidence import repository
 from app.evidence.media import grade_shot_video, validate_video_file
 from app.harness.types import Evaluation, Issue, IssueSeverity
 from app.orchestration.engine import fingerprint
+
+from app.delivery_package_build import (
+    _append_delivery_report_files,
+    _build_delivery_known_issues_lines,
+    _build_delivery_manifest,
+    _build_delivery_quality_report,
+    _collect_delivery_media_files,
+    _create_delivery_workspace_dir,
+    _purge_startup_fenced_delivery_remnants,
+    _render_delivery_quality_report_html,
+    _resolve_delivery_final_package_dir,
+    _resolve_delivery_workspace_dir,
+    _write_delivery_snapshots,
+)
+from app.delivery_package_publish import (
+    _advance_delivery_operation_phase,
+    _assert_delivery_operation_lease_consistent,
+    _commit_delivery_package_publication,
+    _prepare_delivery_artifact_content,
+    _raise_if_delivery_authority_drifted,
+    _raise_if_delivery_gate_blocked,
+    _resolve_delivery_package_id,
+)
+from app.delivery_package_replay import (
+    _recover_orphan_delivery_package,
+    _replay_existing_delivery_package,
+)
 
 # 仅允许 new_id("delivery") / 测试稳定 id 形态，禁止路径分隔与穿越。
 _PACKAGE_ID_RE = re.compile(r"^delivery_[A-Za-z0-9_-]+$")
@@ -836,13 +861,7 @@ def build_delivery_package(
     operation_lease_owner: str | None = None,
 ) -> dict[str, Any]:
     readiness = delivery_readiness(episode_id)
-    gate_findings = list(readiness["blockers"])
-    if gate_findings:
-        summary = "；".join(
-            str(item.get("message") or item.get("key") or "未知阻塞")
-            for item in gate_findings[:5]
-        )
-        raise ValueError(f"交付硬门禁未通过：{summary}")
+    gate_findings = _raise_if_delivery_gate_blocked(readiness)
     release_authority = dict(readiness["storyboard_release_authority"] or {})
     video_delivery_manifest = dict(readiness["video_delivery_manifest"] or {})
     if decision is not None:
@@ -850,275 +869,43 @@ def build_delivery_package(
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-    if package_id is not None:
-        package_id = validate_package_id(package_id)
-    else:
-        package_id = validate_package_id(new_id("delivery"))
-    if bool(operation_request_fingerprint) != bool(operation_lease_owner):
-        raise ValueError("交付构建 operation lease 参数不完整")
-    if operation_lease_owner:
-        _assert_delivery_operation_owner(
-            conn,
-            package_id=package_id,
-            request_fingerprint=str(operation_request_fingerprint),
-            lease_owner=operation_lease_owner,
-        )
+    package_id = _resolve_delivery_package_id(package_id)
+    _assert_delivery_operation_lease_consistent(
+        conn,
+        package_id=package_id,
+        operation_request_fingerprint=operation_request_fingerprint,
+        operation_lease_owner=operation_lease_owner,
+    )
     operation_started_at = operation_started_at or now()
     delivery_root = (
         config.PROJECTS_DIR / ep["project_id"] / "episodes" / str(ep["episode_no"]) / "delivery"
     ).resolve()
+
     existing = conn.execute(
         "SELECT * FROM delivery_packages WHERE id=?", (package_id,)
     ).fetchone()
     if existing:
-        package_path = Path(existing["package_path"]).resolve()
-        if not package_path.is_relative_to(delivery_root):
-            raise ValueError("交付包路径超出当前剧集目录，已拒绝读取")
-        manifest = json.loads(existing["manifest_json"])
-        if manifest.get("storyboard_release_authority") != release_authority:
-            raise ValueError("交付包绑定的分镜发布权威已漂移，禁止重放旧包")
-        quality_report = json.loads(existing["quality_report_json"])
-        missing_files = []
-        damaged_files = []
-        for item in manifest.get("files") or []:
-            relative = str(item.get("path") or "").strip()
-            if not relative:
-                continue
-            candidate = (package_path / relative).resolve()
-            if not candidate.is_relative_to(package_path):
-                damaged_files.append(relative)
-                continue
-            if not candidate.is_file():
-                missing_files.append(relative)
-                continue
-            expected_size = item.get("size_bytes")
-            expected_hash = str(item.get("sha256") or "")
-            if (
-                expected_size is not None and candidate.stat().st_size != int(expected_size)
-            ) or (
-                expected_hash and _sha256(candidate) != expected_hash
-            ):
-                damaged_files.append(relative)
-        for filename, expected_payload in (
-            ("manifest.json", manifest),
-            ("quality-report.json", quality_report),
-        ):
-            path = package_path / filename
-            try:
-                actual_payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, TypeError, ValueError, json.JSONDecodeError):
-                damaged_files.append(filename)
-                continue
-            if actual_payload != expected_payload:
-                damaged_files.append(filename)
-        if not package_path.is_dir() or missing_files or damaged_files:
-            details = [
-                *(f"缺少 {path}" for path in missing_files[:3]),
-                *(f"损坏 {path}" for path in damaged_files[:3]),
-            ]
-            raise ValueError(
-                "交付包文件不完整，数据库记录已保留供审计；请重新创建一份交付包"
-                + (f"（{'；'.join(details)}）" if details else "")
-            )
-        archive_path = Path(str(package_path) + ".zip")
-        archive_recovered = False
-        if not _archive_matches_directory(archive_path, package_path):
-            if existing["status"] != "waiting_human":
-                raise ValueError("已审核或历史交付包字节不可变，压缩包损坏后禁止自动重写")
-            if not operation_lease_owner:
-                raise ValueError("等待审核交付包缺少原 operation owner，禁止自动重写压缩包")
-            _assert_delivery_operation_owner(
-                conn,
-                package_id=package_id,
-                request_fingerprint=str(operation_request_fingerprint),
-                lease_owner=operation_lease_owner,
-            )
-            archive_path = atomic_zip_directory(package_path, archive_path)
-            archive_recovered = True
-        return {
-            "package_id": existing["id"],
-            "artifact_id": existing["artifact_id"],
-            "trust_level": (repository.get_artifact(existing["artifact_id"]) or {}).get("trust_level", "T3"),
-            "status": existing["status"],
-            "package_path": str(package_path),
-            "archive_path": str(archive_path),
-            "manifest": manifest,
-            "quality_report": quality_report,
-            "archive_recovered": archive_recovered,
-        }
-    orphan_package_dir = (delivery_root / package_id).resolve()
-    orphan_archive = Path(str(orphan_package_dir) + ".zip")
-    orphan_artifact_id = f"art_delivery_{package_id.removeprefix('delivery_')}"
-    orphan_artifact = repository.get_artifact(orphan_artifact_id)
-    if orphan_package_dir.is_dir() and orphan_artifact is not None:
-        try:
-            orphan_manifest = json.loads(
-                (orphan_package_dir / "manifest.json").read_text(encoding="utf-8")
-            )
-            orphan_quality = json.loads(
-                (orphan_package_dir / "quality-report.json").read_text(encoding="utf-8")
-            )
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError("交付崩溃恢复目录已损坏") from exc
-        orphan_files_valid = True
-        for item in orphan_manifest.get("files") or []:
-            candidate = (
-                orphan_package_dir / str(item.get("path") or "")
-            ).resolve()
-            if (
-                orphan_package_dir not in candidate.parents
-                or not candidate.is_file()
-                or candidate.stat().st_size != int(item.get("size_bytes") or -1)
-                or _sha256(candidate) != str(item.get("sha256") or "")
-            ):
-                orphan_files_valid = False
-                break
-        if (
-            orphan_manifest.get("storyboard_release_authority") != release_authority
-            or orphan_manifest.get("video_delivery_manifest") != video_delivery_manifest
-            or not orphan_files_valid
-            or not _archive_matches_directory(orphan_archive, orphan_package_dir)
-            or repository.content_hash(
-                orphan_artifact.get("content"), orphan_artifact.get("file_path"),
-            ) != orphan_artifact.get("content_hash")
-        ):
-            raise ValueError("交付崩溃恢复证据与当前权威不一致")
-        # This branch recovers production artifacts left by an older process
-        # that committed the immutable files/artifact before the package row.
-        # Serialize the final authority checks with adoption and operation
-        # takeover.  Otherwise a new adopted video could commit after the
-        # checks above and the orphan would be resurrected as current.
-        if conn.in_transaction:
-            conn.commit()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            from app import downstream_authority
+        return _replay_existing_delivery_package(
+            conn, package_id, existing, delivery_root, release_authority,
+            operation_lease_owner=operation_lease_owner,
+            operation_request_fingerprint=operation_request_fingerprint,
+        )
 
-            if downstream_authority.verify_current_storyboard_release_authority(
-                episode_id, conn=conn,
-            ) != release_authority:
-                raise ValueError("交付崩溃恢复时分镜发布权威发生漂移")
-            if downstream_authority.current_adopted_video_delivery_manifest(
-                episode_id, conn=conn,
-            ) != video_delivery_manifest:
-                raise ValueError("交付崩溃恢复时已采纳视频发生漂移")
-            if operation_lease_owner:
-                _assert_delivery_operation_owner(
-                    conn,
-                    package_id=package_id,
-                    request_fingerprint=str(operation_request_fingerprint),
-                    lease_owner=operation_lease_owner,
-                )
-            current_orphan_artifact = conn.execute(
-                """SELECT type,scope_type,scope_id,status,contract_version,
-                          content_json,file_path,content_hash,parent_artifact_ids_json
-                     FROM artifacts WHERE id=?""",
-                (orphan_artifact_id,),
-            ).fetchone()
-            if current_orphan_artifact is None:
-                raise ValueError("交付崩溃恢复 Artifact 已被撤销")
-            try:
-                current_orphan_content = json.loads(
-                    current_orphan_artifact["content_json"] or "null"
-                )
-            except (TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise ValueError("交付崩溃恢复 Artifact 内容损坏") from exc
-            expected_orphan_content = {
-                "package_id": package_id,
-                "manifest": orphan_manifest,
-                "quality_report": orphan_quality,
-            }
-            expected_parents = {
-                str(item["id"])
-                for item in readiness["source_artifacts"]
-            }
-            expected_parents.update(
-                str(item["artifact_id"])
-                for item in readiness["videos"]
-                if item.get("artifact_id")
-            )
-            try:
-                actual_parents = {
-                    str(item) for item in json.loads(
-                        current_orphan_artifact["parent_artifact_ids_json"] or "[]"
-                    )
-                }
-            except (TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise ValueError("交付崩溃恢复 Artifact 父血缘损坏") from exc
-            expected_manifest_path = (orphan_package_dir / "manifest.json").resolve()
-            actual_manifest_path = Path(
-                str(current_orphan_artifact["file_path"] or "")
-            ).resolve()
-            if (
-                current_orphan_artifact["type"] != "delivery_package"
-                or current_orphan_artifact["scope_type"] != "episode"
-                or current_orphan_artifact["scope_id"] != episode_id
-                or current_orphan_artifact["status"] != "validated"
-                or current_orphan_artifact["contract_version"] != "delivery-1.0.0"
-                or current_orphan_content != expected_orphan_content
-                or actual_manifest_path != expected_manifest_path
-                or actual_parents != expected_parents
-            ):
-                raise ValueError("交付崩溃恢复 Artifact 合同、范围或血缘不兼容")
-            if repository.content_hash(
-                current_orphan_content, current_orphan_artifact["file_path"],
-            ) != current_orphan_artifact["content_hash"]:
-                raise ValueError("交付崩溃恢复 Artifact 实际内容已漂移")
-            conn.execute(
-                """INSERT INTO delivery_packages(
-                       id,episode_id,artifact_id,status,package_path,manifest_json,
-                       quality_report_json,known_issues,created_at
-                   ) VALUES(?,?,?,'waiting_human',?,?,?,'',?)""",
-                (
-                    package_id,
-                    episode_id,
-                    orphan_artifact_id,
-                    str(orphan_package_dir),
-                    json.dumps(orphan_manifest, ensure_ascii=False),
-                    json.dumps(orphan_quality, ensure_ascii=False),
-                    operation_started_at,
-                ),
-            )
-            status_clause, status_params = _episode_release_status_cas_clause(
-                conn, episode_id,
-            )
-            cursor = conn.execute(
-                f"""UPDATE episodes
-                      SET delivery_artifact_id=?,delivery_status='waiting_human'
-                    WHERE id=?
-                      AND storyboard_artifact_id=?
-                      AND published_storyboard_artifact_id=?
-                      AND storyboard_production_revision_id=?
-                      AND storyboard_completion_certificate_id=?
-                      AND {status_clause}""",
-                (
-                    orphan_artifact_id,
-                    episode_id,
-                    release_authority["published_storyboard_artifact_id"],
-                    release_authority["published_storyboard_artifact_id"],
-                    release_authority["storyboard_production_revision_id"],
-                    release_authority["storyboard_completion_certificate_id"],
-                    *status_params,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise ValueError("交付崩溃恢复发生分镜权威 CAS 冲突")
-            conn.commit()
-        except Exception:
-            if conn.in_transaction:
-                conn.rollback()
-            raise
-        return {
-            "package_id": package_id,
-            "artifact_id": orphan_artifact_id,
-            "trust_level": orphan_artifact.get("trust_level", "T3"),
-            "status": "waiting_human",
-            "package_path": str(orphan_package_dir),
-            "archive_path": str(orphan_archive),
-            "manifest": orphan_manifest,
-            "quality_report": orphan_quality,
-            "archive_recovered": True,
-        }
+    recovered = _recover_orphan_delivery_package(
+        conn,
+        episode_id=episode_id,
+        package_id=package_id,
+        delivery_root=delivery_root,
+        release_authority=release_authority,
+        video_delivery_manifest=video_delivery_manifest,
+        readiness=readiness,
+        operation_started_at=operation_started_at,
+        operation_lease_owner=operation_lease_owner,
+        operation_request_fingerprint=operation_request_fingerprint,
+    )
+    if recovered is not None:
+        return recovered
+
     # A delivery snapshot is a production output, not an editor preview.  The
     # mutable episode projection is only accepted for genuinely legacy,
     # plan-null episodes; modern episodes must be re-resolved through their
@@ -1126,208 +913,51 @@ def build_delivery_package(
     from app.production.screenplay_authority import resolve_downstream_screenplay
 
     screenplay_context = resolve_downstream_screenplay(episode_id, conn=conn)
-    final_package_dir = (delivery_root / package_id).resolve()
-    if not final_package_dir.is_relative_to(delivery_root):
-        raise ValueError("非法的 package_id")
-    owner_suffix = operation_lease_owner or uuid.uuid4().hex
-    package_dir = (delivery_root / f".{package_id}.{owner_suffix}.tmp").resolve()
-    receipt_row = None
-    if operation_lease_owner:
-        receipt_row = conn.execute(
-            """SELECT workspace_path,promotion_phase,abandoned_workspace_path,
-                      abandoned_promotion_phase,recovery_fenced_owner
-                 FROM delivery_operation_receipts
-               WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
-                 AND status='running'""",
-            (package_id, operation_request_fingerprint, operation_lease_owner),
-        ).fetchone()
-        if receipt_row is None:
-            raise ValueError("交付 operation workspace owner 已失效")
-        bound_workspace = str(receipt_row["workspace_path"] or "")
-        if bound_workspace:
-            package_dir = Path(bound_workspace).resolve()
-        else:
-            updated = conn.execute(
-                """UPDATE delivery_operation_receipts
-                      SET workspace_path=?,promotion_phase='building',updated_at=?
-                    WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
-                      AND status='running'""",
-                (
-                    str(package_dir), time.time(), package_id,
-                    operation_request_fingerprint, operation_lease_owner,
-                ),
-            )
-            if updated.rowcount != 1:
-                raise ValueError("交付 operation workspace owner 已被接管")
-            conn.commit()
+    final_package_dir = _resolve_delivery_final_package_dir(package_id, delivery_root)
+    package_dir, receipt_row = _resolve_delivery_workspace_dir(
+        conn,
+        package_id=package_id,
+        delivery_root=delivery_root,
+        operation_lease_owner=operation_lease_owner,
+        operation_request_fingerprint=operation_request_fingerprint,
+    )
     if not package_dir.is_relative_to(delivery_root):
         raise ValueError("非法的交付操作目录")
     # A startup-fenced takeover retains the previous owner's workspace/phase
     # as evidence.  Only that proof permits removal of exact crash remnants;
     # natural lease expiry alone is insufficient because the old thread may
     # still be alive.  The new owner always builds in its own directory.
-    abandoned_workspace = ""
-    abandoned_phase = ""
-    startup_fenced = False
-    if operation_lease_owner and receipt_row is not None:
-        abandoned_workspace = str(receipt_row["abandoned_workspace_path"] or "")
-        abandoned_phase = str(receipt_row["abandoned_promotion_phase"] or "")
-        startup_fenced = (
-            str(receipt_row["recovery_fenced_owner"] or "")
-            == str(operation_lease_owner or "")
-        )
-    if startup_fenced and abandoned_phase in {
-        "ready", "directory_promoted", "promoted",
-    }:
-        abandoned_path = Path(abandoned_workspace).resolve() if abandoned_workspace else None
-        if abandoned_path is not None and not abandoned_path.is_relative_to(delivery_root):
-            raise ValueError("交付恢复遗留目录超出当前剧集目录")
-        if final_package_dir.exists():
-            shutil.rmtree(final_package_dir)
-        Path(str(final_package_dir) + ".zip").unlink(missing_ok=True)
-        if abandoned_path is not None and abandoned_path.exists():
-            shutil.rmtree(abandoned_path)
-        if abandoned_path is not None:
-            Path(str(abandoned_path) + ".zip").unlink(missing_ok=True)
-    if package_dir.exists():
-        shutil.rmtree(package_dir)
-    archive_candidate = Path(str(package_dir) + ".zip")
-    if archive_candidate.exists():
-        archive_candidate.unlink()
-    package_dir.mkdir(parents=True, exist_ok=False)
-    snapshots = package_dir / "snapshots"
-    snapshots.mkdir()
-    _write_json(
-        snapshots / "character-bible.json",
-        _sanitize_delivery_value(json.loads(project["bible_json"] or "{}")),
+    _purge_startup_fenced_delivery_remnants(
+        receipt_row, final_package_dir,
+        delivery_root=delivery_root, operation_lease_owner=operation_lease_owner,
     )
-    _write_json(
-        snapshots / "screenplay.json",
-        _sanitize_delivery_value(
-            screenplay_context.screenplay.model_dump(mode="json")
-        ),
-    )
-    _write_json(
-        snapshots / "source-chapters.json",
-        {
-            "schema_version": "1.0.0",
-            "episode_id": episode_id,
-            "project_id": ep["project_id"],
-            "chapters": readiness["source_chapters"],
-        },
-    )
-    shot_rows = rows_to_dicts(conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
-    ).fetchall())
-    for shot in shot_rows:
-        for field in ("characters", "dialogues"):
-            shot[field] = json.loads(shot[field] or "[]")
-    _write_json(
-        snapshots / "storyboard.json",
-        _sanitize_delivery_value({"episode_no": ep["episode_no"], "shots": shot_rows}),
+    archive_candidate, snapshots = _create_delivery_workspace_dir(package_dir)
+    _write_delivery_snapshots(
+        conn, snapshots,
+        project=project, screenplay_context=screenplay_context,
+        episode_id=episode_id, ep=ep, readiness=readiness,
     )
 
-    files: list[dict[str, Any]] = []
-    final_source = config.PROJECTS_DIR / ep["project_id"] / "episodes" / str(ep["episode_no"]) / "final" / "episode.mp4"
-    final_copy = _copy_if_present(str(final_source), package_dir / "media" / "episode.mp4")
-    if final_copy:
-        files.append({"role": "final_video", "path": final_copy.relative_to(package_dir).as_posix()})
-    final_edit_source = final_source.with_name("episode.edit-report.json")
-    final_edit_copy = _copy_if_present(
-        str(final_edit_source), package_dir / "reports" / "final-edit.json",
-    )
-    if final_edit_copy:
-        files.append({
-            "role": "final_edit_report",
-            "path": final_edit_copy.relative_to(package_dir).as_posix(),
-        })
-    for item in readiness["videos"]:
-        dest = package_dir / "media" / "shots" / f"shot-{item['shot_no']:03d}.mp4"
-        copied = _copy_if_present(item.get("path"), dest)
-        if copied:
-            files.append({
-                "role": "shot_video", "shot_no": item["shot_no"],
-                "artifact_id": item.get("artifact_id"),
-                "path": copied.relative_to(package_dir).as_posix(),
-            })
-    for snapshot in sorted(snapshots.iterdir()):
-        files.append({"role": "snapshot", "path": snapshot.relative_to(package_dir).as_posix()})
-    for item in files:
-        path = package_dir / item["path"]
-        item.update({"sha256": _sha256(path), "size_bytes": path.stat().st_size})
+    files = _collect_delivery_media_files(package_dir, snapshots, ep, readiness)
 
-    manifest = {
-        "schema_version": "1.0.0",
-        "package_id": package_id,
-        "episode": {"id": episode_id, "number": ep["episode_no"], "title": ep["title"]},
-        "created_at": operation_started_at,
-        "source_artifacts": readiness["source_artifacts"],
-        "storyboard_release_authority": release_authority,
-        "video_delivery_manifest": video_delivery_manifest,
-        "source_chapters": readiness["source_chapters"],
-        "files": files,
-        "reproducibility": {
-            "input_fingerprint": fingerprint(
-                readiness["source_artifacts"], readiness["source_chapters"], files
-            ),
-            "shot_duration_range_s": [config.VIDEO_DURATION_MIN_S, config.VIDEO_DURATION_MAX_S],
-            "shot_duration_decided_by": "model",
-        },
-    }
-    quality_report = {
-        "schema_version": "1.0.0",
-        "hard_gate_passed": True,
-        "runtime_blocking": False,
-        "gate_retry_exhausted": bool(gate_findings),
-        "gate_findings": _sanitize_delivery_value(gate_findings),
-        "checks": _sanitize_delivery_value(readiness["checks"]),
-        "evidence_coverage": readiness["evidence_coverage"],
-        "warnings": _sanitize_delivery_value(readiness["warnings"]),
-        "final_edit": _sanitize_delivery_value(readiness.get("final_edit_report")),
-        "human_decision": {
-            "decision": decision,
-            "decided_by": decided_by,
-            "reason": reason,
-            "accepted_risk": accepted_risk,
-        },
-    }
+    manifest = _build_delivery_manifest(
+        package_id, episode_id, ep, operation_started_at,
+        release_authority, video_delivery_manifest, readiness, files,
+    )
+    quality_report = _build_delivery_quality_report(
+        gate_findings, readiness,
+        decision=decision, decided_by=decided_by, reason=reason, accepted_risk=accepted_risk,
+    )
     _write_json(package_dir / "manifest.json", manifest)
     _write_json(package_dir / "quality-report.json", quality_report)
-    report_html = (
-        "<!doctype html><meta charset='utf-8'><title>Delivery Quality Report</title>"
-        f"<h1>第 {ep['episode_no']} 集交付质量报告</h1>"
-        f"<p>质量检查：仅评分、不阻断；证据覆盖率：{readiness['evidence_coverage']:.1%}</p>"
-        f"<p>终剪状态：{'已执行确定性终剪' if (readiness.get('final_edit_report') or {}).get('ok') else '基础合成降级或无终剪报告'}</p>"
-        "<h2>检查项</h2><ul>"
-        + "".join(
-            f"<li>{'通过' if item['passed'] else '失败'} · {html.escape(item['message'])}</li>"
-            for item in readiness["checks"]
-        )
-        + "</ul><h2>人工决定</h2>"
-        + f"<p>{html.escape(decision or '等待人工门禁')} · {html.escape(reason or '')}</p>"
+    report_html = _render_delivery_quality_report_html(
+        ep, readiness, decision=decision, reason=reason,
     )
     atomic_write_text(package_dir / "quality-report.html", report_html)
-    known_lines = ["# Known Issues", ""]
-    if readiness["warnings"]:
-        known_lines.extend(f"- {item.get('message', item.get('code', '未知风险'))}" for item in readiness["warnings"])
-    else:
-        known_lines.append("- 无已知残余问题。")
-    if accepted_risk:
-        known_lines.extend(["", "## Accepted Risk", "", f"- {accepted_risk}"])
+    known_lines = _build_delivery_known_issues_lines(readiness, accepted_risk)
     atomic_write_text(package_dir / "known-issues.md", "\n".join(known_lines))
     _assert_no_delivery_secrets(package_dir)
-    for role, filename in (
-        ("quality_report_json", "quality-report.json"),
-        ("quality_report_html", "quality-report.html"),
-        ("known_issues", "known-issues.md"),
-    ):
-        report_path = package_dir / filename
-        files.append({
-            "role": role,
-            "path": filename,
-            "sha256": _sha256(report_path),
-            "size_bytes": report_path.stat().st_size,
-        })
+    _append_delivery_report_files(files, package_dir)
     manifest["files"] = files
     manifest["reproducibility"]["input_fingerprint"] = fingerprint(
         readiness["source_artifacts"], readiness["source_chapters"], files
@@ -1341,82 +971,49 @@ def build_delivery_package(
             request_fingerprint=str(operation_request_fingerprint),
             lease_owner=operation_lease_owner,
         )
-    from app.downstream_authority import verify_current_storyboard_release_authority
-
-    if verify_current_storyboard_release_authority(
-        episode_id,
-        conn=conn,
-    ) != release_authority:
-        raise ValueError("交付构建期间分镜发布权威发生漂移，已拒绝发布交付包")
-    from app.downstream_authority import current_adopted_video_delivery_manifest
-
-    if current_adopted_video_delivery_manifest(
-        episode_id,
-        conn=conn,
-    ) != video_delivery_manifest:
-        raise ValueError("交付构建期间已采纳视频发生漂移，已拒绝发布交付包")
+    _raise_if_delivery_authority_drifted(
+        conn, episode_id, release_authority, video_delivery_manifest,
+        storyboard_drift_message="交付构建期间分镜发布权威发生漂移，已拒绝发布交付包",
+        video_drift_message="交付构建期间已采纳视频发生漂移，已拒绝发布交付包",
+    )
     # 先完成客户可下载的文件，再提交数据库指针；ZIP 失败不能留下“已批准但不可下载”的记录。
     archive_path = Path(atomic_zip_directory(package_dir, archive_candidate))
 
     if operation_lease_owner:
-        _renew_delivery_operation_owner(
-            conn,
-            package_id=package_id,
-            request_fingerprint=str(operation_request_fingerprint),
-            lease_owner=operation_lease_owner,
+        _advance_delivery_operation_phase(
+            conn, package_id=package_id,
+            operation_request_fingerprint=operation_request_fingerprint,
+            operation_lease_owner=operation_lease_owner,
+            phase="ready", conflict_message="交付 operation owner 在 ready 前已被接管",
         )
-        updated = conn.execute(
-            """UPDATE delivery_operation_receipts
-                  SET promotion_phase='ready',updated_at=?
-                WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
-                  AND status='running'""",
-            (time.time(), package_id, operation_request_fingerprint, operation_lease_owner),
-        )
-        if updated.rowcount != 1:
-            raise ValueError("交付 operation owner 在 ready 前已被接管")
-        conn.commit()
     if final_package_dir.exists() or Path(str(final_package_dir) + ".zip").exists():
         raise ValueError("交付最终目录已存在，拒绝删除或覆盖另一 owner 产物")
     package_dir.rename(final_package_dir)
     if operation_lease_owner:
-        updated = conn.execute(
-            """UPDATE delivery_operation_receipts
-                  SET promotion_phase='directory_promoted',updated_at=?
-                WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
-                  AND status='running'""",
-            (time.time(), package_id, operation_request_fingerprint, operation_lease_owner),
+        _advance_delivery_operation_phase(
+            conn, package_id=package_id,
+            operation_request_fingerprint=operation_request_fingerprint,
+            operation_lease_owner=operation_lease_owner,
+            phase="directory_promoted",
+            conflict_message="交付 operation owner 在目录发布后已被接管",
         )
-        if updated.rowcount != 1:
-            raise ValueError("交付 operation owner 在目录发布后已被接管")
-        conn.commit()
     final_archive_path = Path(str(final_package_dir) + ".zip")
     archive_path.rename(final_archive_path)
     if operation_lease_owner:
-        updated = conn.execute(
-            """UPDATE delivery_operation_receipts
-                  SET promotion_phase='promoted',updated_at=?
-                WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
-                  AND status='running'""",
-            (time.time(), package_id, operation_request_fingerprint, operation_lease_owner),
+        _advance_delivery_operation_phase(
+            conn, package_id=package_id,
+            operation_request_fingerprint=operation_request_fingerprint,
+            operation_lease_owner=operation_lease_owner,
+            phase="promoted", conflict_message="交付 operation owner 在压缩包发布后已被接管",
         )
-        if updated.rowcount != 1:
-            raise ValueError("交付 operation owner 在压缩包发布后已被接管")
-        conn.commit()
     package_dir = final_package_dir
     archive_path = final_archive_path
 
-    parent_ids = [artifact["id"] for artifact in readiness["source_artifacts"]]
-    parent_ids.extend(item["artifact_id"] for item in readiness["videos"] if item.get("artifact_id"))
-    artifact_id = f"art_delivery_{package_id.removeprefix('delivery_')}"
-    artifact_content = {
-        "package_id": package_id, "manifest": manifest, "quality_report": quality_report,
-    }
-    artifact = repository.get_artifact(artifact_id)
-    expected_artifact_hash = repository.content_hash(
-        artifact_content, str(package_dir / "manifest.json")
+    artifact_id, parent_ids, artifact_content, expected_artifact_hash = (
+        _prepare_delivery_artifact_content(
+            package_id, package_dir, manifest, quality_report, readiness,
+        )
     )
-    if artifact and artifact["content_hash"] != expected_artifact_hash:
-        raise ValueError("同一交付操作的恢复输入已变化，已停止覆盖原证据")
     file_eval = Evaluation(
         evaluator_type="file",
         evaluator_name="delivery_manifest_validator",
@@ -1426,116 +1023,25 @@ def build_delivery_package(
         score=100,
         evidence={"file_count": len(files), "checks": readiness["checks"]},
     )
-    if conn.in_transaction:
-        conn.commit()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        if verify_current_storyboard_release_authority(
-            episode_id, conn=conn,
-        ) != release_authority:
-            raise ValueError("交付发布前分镜发布权威发生漂移")
-        if current_adopted_video_delivery_manifest(
-            episode_id, conn=conn,
-        ) != video_delivery_manifest:
-            raise ValueError("交付发布前已采纳视频发生漂移")
-        if operation_lease_owner:
-            _assert_delivery_operation_owner(
-                conn,
-                package_id=package_id,
-                request_fingerprint=str(operation_request_fingerprint),
-                lease_owner=operation_lease_owner,
-            )
-        artifact_row = conn.execute(
-            "SELECT * FROM artifacts WHERE id=?", (artifact_id,),
-        ).fetchone()
-        if artifact_row is None:
-            version = conn.execute(
-                """SELECT COALESCE(MAX(version),0)+1 AS n FROM artifacts
-                   WHERE type='delivery_package' AND scope_type='episode' AND scope_id=?""",
-                (episode_id,),
-            ).fetchone()["n"]
-            conn.execute(
-                """INSERT INTO artifacts(
-                       id,type,scope_type,scope_id,version,status,trust_level,
-                       content_json,file_path,content_hash,parent_artifact_ids_json,
-                       contract_version,created_at
-                   ) VALUES(?,'delivery_package','episode',?,?,'validated','T3',?,?,?,?,?,?)""",
-                (
-                    artifact_id,
-                    episode_id,
-                    version,
-                    json.dumps(artifact_content, ensure_ascii=False),
-                    str(package_dir / "manifest.json"),
-                    expected_artifact_hash,
-                    json.dumps(parent_ids, ensure_ascii=False),
-                    "delivery-1.0.0",
-                    now(),
-                ),
-            )
-        elif str(artifact_row["content_hash"] or "") != expected_artifact_hash:
-            raise ValueError("交付 Artifact CAS 内容冲突")
-        existing_file_eval = conn.execute(
-            """SELECT 1 FROM evaluations
-               WHERE artifact_id=? AND evaluator_name='delivery_manifest_validator'""",
-            (artifact_id,),
-        ).fetchone()
-        if not existing_file_eval:
-            conn.execute(
-                """INSERT INTO evaluations(
-                       id,artifact_id,evaluator_type,evaluator_name,evaluator_version,
-                       status,hard_gate_passed,evaluation_role,score_status,runtime_blocking,
-                       retry_eligible,score,dimension_scores_json,issues_json,evidence_json,
-                       confidence,recovered,created_at
-                   ) VALUES(?,?, 'file',?,?,'passed',1,'runtime_gate','scored',1,0,100,
-                            '{}','[]',?,1,0,?)""",
-                (
-                    new_id("eval"), artifact_id, file_eval.evaluator_name,
-                    file_eval.evaluator_version,
-                    json.dumps(file_eval.evidence, ensure_ascii=False, sort_keys=True),
-                    now(),
-                ),
-            )
-        conn.execute(
-            """INSERT INTO delivery_packages(
-                   id,episode_id,artifact_id,status,package_path,manifest_json,
-                   quality_report_json,known_issues,created_at,approved_at
-               ) VALUES(?,?,?,'waiting_human',?,?,?, ?,?,NULL)""",
-            (
-                package_id, episode_id, artifact_id, str(package_dir),
-                json.dumps(manifest, ensure_ascii=False),
-                json.dumps(quality_report, ensure_ascii=False),
-                "\n".join(known_lines), operation_started_at,
-            ),
-        )
-        status_clause, status_params = _episode_release_status_cas_clause(
-            conn, episode_id,
-        )
-        cursor = conn.execute(
-            f"""UPDATE episodes
-                  SET delivery_artifact_id=?,delivery_status='waiting_human'
-                WHERE id=?
-                  AND storyboard_artifact_id=?
-                  AND published_storyboard_artifact_id=?
-                  AND storyboard_production_revision_id=?
-                  AND storyboard_completion_certificate_id=?
-                  AND {status_clause}""",
-            (
-                artifact_id,
-                episode_id,
-                release_authority["published_storyboard_artifact_id"],
-                release_authority["published_storyboard_artifact_id"],
-                release_authority["storyboard_production_revision_id"],
-                release_authority["storyboard_completion_certificate_id"],
-                *status_params,
-            ),
-        )
-        if cursor.rowcount != 1:
-            raise ValueError("交付发布发生分镜权威 CAS 冲突")
-        conn.commit()
-    except Exception:
-        if conn.in_transaction:
-            conn.rollback()
-        raise
+    _commit_delivery_package_publication(
+        conn,
+        episode_id=episode_id,
+        package_id=package_id,
+        artifact_id=artifact_id,
+        package_dir=package_dir,
+        release_authority=release_authority,
+        video_delivery_manifest=video_delivery_manifest,
+        artifact_content=artifact_content,
+        expected_artifact_hash=expected_artifact_hash,
+        parent_ids=parent_ids,
+        file_eval=file_eval,
+        manifest=manifest,
+        quality_report=quality_report,
+        known_lines=known_lines,
+        operation_started_at=operation_started_at,
+        operation_lease_owner=operation_lease_owner,
+        operation_request_fingerprint=operation_request_fingerprint,
+    )
     return {
         "package_id": package_id,
         "artifact_id": artifact_id,
