@@ -15,12 +15,15 @@ for an outcome that was actually already final.
 classification with two structural signals (CLAUDE.md「禁止黑白名单与枚举
 穷举」-- neither looks at what the refusal text says):
 
-1. ``finish_reason == "content_filter"``, the provider's own terminal signal.
-2. Failing that, >=2 attempts of the same business operation each ending
-   INTERRUPTED with byte-identical, non-empty evidence -- verified against
-   170 real production rows sharing this exact incident's shape (same
-   operation_id, escalating attempt_no, identical 22-character content, up
-   to 6 attempts; a random transport cut does not reproduce like that).
+>=2 attempts of the same business operation each ending INTERRUPTED with
+byte-identical, non-empty evidence -- verified against 170 real production
+rows sharing this exact incident's shape (same operation_id, escalating
+attempt_no, identical 22-character content, up to 6 attempts; a random
+transport cut does not reproduce like that)。
+
+供应商自己的 ``finish_reason == "content_filter"`` 曾是单独成立的第二条判据，
+2026-09-01 被实测证伪后删除（见 app/harness/hiagent_stream_evidence.py 模块
+docstring 的重放记录）：突发负载下同样会发这个信号，单次不足以定性。
 
 This file covers the pure judgment function, its DB-query glue, the
 end-to-end ``_stream_chat_completion`` behavior for both outcomes, and that
@@ -77,13 +80,18 @@ def _insert_interrupted_call(conn, *, operation_id: str, received_chars: int, su
 # ---------------------------------------------------------------------------
 
 
-def test_content_filter_finish_reason_is_immediately_deterministic():
-    """Signal 1 needs no history at all -- it fires on a call_id that has no
-    matching provider_calls row, proving the DB is never even queried."""
+def test_content_filter_finish_reason_alone_is_not_deterministic():
+    """2026-09-01（ERR-20260901-6d6a87）：供应商自己的 content_filter 单次信号
+    不再足以定性。实测同一份请求（同 operation_id）三次 OK、第四次被 content_filter
+    拒、原样重放又三次全部成功——突发负载下 HiAgent 同样发这套话术。判错的代价是
+    告诉用户"重试不会改变结果，请改内容或换模型"，把人推去改小说原文。"""
     conn = _conn()
+    call_id = _insert_interrupted_call(
+        conn, operation_id="op-cf-once", received_chars=22, summary=REFUSAL_TEXT,
+    )
     assert hiagent_stream_evidence.classify_interrupted_stream(
-        conn, 999999, "content_filter", 300,
-    ) is True
+        conn, call_id, "content_filter", 300,
+    ) is False
 
 
 def test_single_attempt_without_finish_reason_stays_uncertain():
@@ -225,19 +233,20 @@ def _run_stream(monkeypatch, tmp_path, db_name: str, body: str, *, payload=None)
     return asyncio.run(run())
 
 
-def test_content_filter_finish_reason_becomes_terminal_rejection(tmp_path, monkeypatch):
-    """Requirement #1: finish_reason=="content_filter" must be treated as a
-    determined terminal outcome -- no retry offered, provider text quoted."""
+def test_first_content_filter_refusal_stays_retryable(tmp_path, monkeypatch):
+    """第一次拒绝（哪怕带 content_filter）只算"结果不确定"，保留重试出路。
+
+    2026-09-01 实测：用户并行跑 7 集时 HiAgent 批量回这套"安全合规"话术，而同一
+    份请求前后都能正常出结果；判成终局会让整批集数停在一个假结论上。真拒绝会在
+    第二次尝试复现，由 signal 2 收口（见下一条用例）。"""
     exc = _run_stream(
         monkeypatch, tmp_path, "cf.db",
         _sse_body(content=REFUSAL_TEXT, finish_reason="content_filter"),
     )
-    assert exc.failure_category == "model_rejection"
-    assert exc.retryable is False
-    assert exc.delivery_state == "responded"
-    assert REFUSAL_TEXT in str(exc)
-    assert "请在页面确认后重试" not in str(exc)
-    assert "结果不确定" not in str(exc)
+    assert exc.failure_kind == "stream_interrupted"
+    assert exc.retryable is True
+    assert exc.delivery_state == "unknown"
+    assert exc.requires_explicit_retry is True
 
 
 def test_genuine_long_interruption_without_finish_reason_stays_retryable(tmp_path, monkeypatch):
