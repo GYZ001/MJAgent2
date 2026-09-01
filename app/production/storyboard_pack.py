@@ -751,13 +751,9 @@ def _strip_paratext_from_beat_draft(
 
 
 # ---------------------------------------------------------------------------
-# 世界书标准外观/场景锚点接入（问题一修复，2026-08-26 真实 EP1 回归：孟浩在
-# 10 段里换了三套衣服）。根因不是模型能力，是管道没接上——prep_pack 装配
-# asset_manifest.characters[]/scenes[] 时只写 identity_id/display_name/
-# portrait_id/scene_reference_id 等身份字段，从不带外观/场景描述本身；模型
-# 只能从自己这一段的原文现推，原文没写衣着的段落只能各段各编。世界书里的
-# 标准外观/场景锚点（character_portraits.appearance / scene_references.
-# scene_canonical）一直都在，只是没被送给模型。
+# 世界书标准外观/场景锚点接入（问题一修复，真实 EP1 回归：孟浩换了三套
+# 衣服——asset_manifest 只写身份字段，模型只能现推外观；世界书的标准外观/
+# 场景锚点一直都在，只是没被送给模型）。
 # ---------------------------------------------------------------------------
 
 _NO_CANONICAL_APPEARANCE_NOTE = (
@@ -774,64 +770,68 @@ _NO_CANONICAL_SCENE_NOTE = (
 )
 
 
-def _character_canonical_appearance(conn, portrait_id: str | None) -> str | None:
-    """这个已解析 portrait_id 对应的世界书标准外观锚点串。
-
-    ``portrait_id`` 在传入这里之前，已经由映射台
-    ``app.production.prep_pack._resolve_portrait_id`` 按本集集号在
-    ``character_portraits.ep_start``/``ep_end`` 区间里选定过一次（见该函数
-    与 asset_manifest.characters[] 的装配处）——本函数只按这个已选定的 id
-    取值，不重新做一遍区间选择，选取逻辑只有一套。
+def _character_canonical_appearance(
+    conn, portrait_id: str | None, *, bible_appearance: str | None = None,
+) -> str | None:
+    """这个已解析 portrait_id 对应的世界书标准外观锚点串；查不到（含出图已
+    解耦到后台、portrait_id 本就为空）时回退 ``bible_appearance``——世界书
+    ``Character.appearance_canonical`` 本来就是外观权威，不是 character_
+    portraits 行的附属产物。
     """
-    if not portrait_id:
-        return None
-    row = conn.execute(
-        "SELECT appearance FROM character_portraits WHERE id=?", (portrait_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    appearance = str(row["appearance"] or "").strip()
-    return appearance or None
+    if portrait_id:
+        row = conn.execute(
+            "SELECT appearance FROM character_portraits WHERE id=?", (portrait_id,),
+        ).fetchone()
+        if row is not None:
+            appearance = str(row["appearance"] or "").strip()
+            if appearance:
+                return appearance
+    return bible_appearance
 
 
-def _scene_canonical_description(conn, scene_reference_id: str | None) -> str | None:
-    """场景侧同构：``scene_reference_id`` 同样已由
-    ``app.production.prep_pack._resolve_scene_reference_id`` 按本集集号选定
-    过一次，这里只按这个已选定的 id 取 ``scene_references.scene_canonical``。
+def _scene_canonical_description(
+    conn, scene_reference_id: str | None, *, bible_scene_canonical: str | None = None,
+) -> str | None:
+    """场景侧同构（见 ``_character_canonical_appearance``）：查不到时回退
+    ``bible_scene_canonical``（世界书 ``Scene.scene_canonical``）。
     """
-    if not scene_reference_id:
-        return None
-    row = conn.execute(
-        "SELECT scene_canonical FROM scene_references WHERE id=?", (scene_reference_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    canonical = str(row["scene_canonical"] or "").strip()
-    return canonical or None
+    if scene_reference_id:
+        row = conn.execute(
+            "SELECT scene_canonical FROM scene_references WHERE id=?", (scene_reference_id,),
+        ).fetchone()
+        if row is not None:
+            canonical = str(row["scene_canonical"] or "").strip()
+            if canonical:
+                return canonical
+    return bible_scene_canonical
 
 
-def _enrich_asset_manifest_canonical_visuals(conn, payload: dict[str, Any]) -> None:
+def _enrich_asset_manifest_canonical_visuals(
+    conn, payload: dict[str, Any], *, bible: Bible | None = None,
+) -> None:
     """原地把世界书标准外观/场景锚点补进 ``payload["asset_manifest"]``。
 
-    在 ``_generate_beat_sheet``/``_generate_all_segment_prompts`` 之前调用一次
-    （逐 identity 只查一次，不在逐段循环里重复查询）；``_segment_relevant_
-    assets`` 之后按段筛选时拿到的就是同一批已带 appearance/scene_canonical
-    的条目对象，不需要再改那个函数。只多一次查询，不建新表也不建新缓存。
-
-    ``functional_extras``（群演/一次性人物）没有 portrait_id、天生没有标准
-    外观：这里显式写一条说明而不是留空——留空会被模型读成"没有任何关于外观
-    的信息"，导致同一群演在不同段落里各编一套，是问题一的同一种漂移换了个
-    没有 portrait_id 的马甲，不是不同的问题。
+    在 ``_generate_beat_sheet``/``_generate_all_segment_prompts`` 之前调用一次。
+    ``bible`` 非空时兜底取世界书原始锚点——出图已解耦到后台，卡在人物谱/场景库
+    但还没出图的资产查不到 character_portraits/scene_references 行，不该被读成
+    "没有任何外观信息"。``functional_extras``（群演）没有 portrait_id，天生没有
+    标准外观，这里显式写一条说明而不是留空，避免被模型读成"无信息"而各段各编。
     """
+    bible_appearance = {c.name: c.appearance_canonical for c in (bible.characters if bible else [])}
+    bible_scenes = {s.name: s.scene_canonical for s in (bible.scenes if bible else [])}
     manifest = payload.get("asset_manifest") or {}
     for character in manifest.get("characters") or []:
-        appearance = _character_canonical_appearance(conn, character.get("portrait_id"))
-        character["appearance"] = appearance or _NO_CANONICAL_APPEARANCE_NOTE
+        character["appearance"] = _character_canonical_appearance(
+            conn, character.get("portrait_id"),
+            bible_appearance=bible_appearance.get(str(character.get("display_name") or "")),
+        ) or _NO_CANONICAL_APPEARANCE_NOTE
     for extra in manifest.get("functional_extras") or []:
         extra["appearance"] = _NO_CANONICAL_APPEARANCE_NOTE
     for scene in manifest.get("scenes") or []:
-        canonical = _scene_canonical_description(conn, scene.get("scene_reference_id"))
-        scene["scene_canonical"] = canonical or _NO_CANONICAL_SCENE_NOTE
+        scene["scene_canonical"] = _scene_canonical_description(
+            conn, scene.get("scene_reference_id"),
+            bible_scene_canonical=bible_scenes.get(str(scene.get("display_name") or "")),
+        ) or _NO_CANONICAL_SCENE_NOTE
 
 
 async def _generate_beat_sheet(
@@ -1535,7 +1535,6 @@ async def generate_storyboard_pack(
     if not segments:
         raise ValueError(f"episode {episode_id} 没有可用原文，无法生成分镜")
     target_video_model = str(ep["target_video_model"] or "hiagent").strip() or "hiagent"
-    _enrich_asset_manifest_canonical_visuals(conn, payload)
 
     bible: Bible | None = None
     project = conn.execute(
@@ -1547,6 +1546,7 @@ async def generate_storyboard_pack(
         bible = bible_for_episode(
             ep["project_id"], Bible.model_validate(json.loads(project["bible_json"])), episode_no,
         )
+    _enrich_asset_manifest_canonical_visuals(conn, payload, bible=bible)
 
     beat_draft = await _generate_beat_sheet(
         episode_id=episode_id, episode_no=episode_no, segments=segments, payload=payload,

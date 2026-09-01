@@ -9,6 +9,7 @@ package's split report for why further splitting was out of scope here.
 from __future__ import annotations
 
 from app.identity_authority import visual_entity_id_for_resolution
+from app.portraits.card_owner import resolve_card_owner
 from app.source_excerpt import (
     SourceSegment,
     index_source_segments,
@@ -94,38 +95,29 @@ async def _resolve_assets(
     is direct-match only; pass 2 re-resolves after discovery using whatever it
     newly registered (new cards+portraits, a known-alias -> canonical-name
     rename e.g. "小胖子" -> "李富贵", or a functional/no-asset disposition).
-
     A resolved character's manifest entry carries an ``aliases`` list: the
     distinct raw mention strings (e.g. ["小胖子"]) that resolved to it via a
     rename, for P1 storyboard prompts to use.
 
-    Second real-run finding (EP13, coordinator-reviewed): app.portraits'
-    identity discovery does its own independent read of the source text and
-    phrases/scopes its own candidates differently from prep_pack's chunk
-    extraction -- discovery resolved "外宗弟子" as functional_identity while
-    the published chunk extraction said "一名外宗弟子" for what is plainly the
-    same one-off crowd concept; several other occupation-title mentions
-    ("养丹坊掌柜", "宝阁执事", "围观弟子") got no matching disposition at all
-    by exact string, even though discovery ran cleanly (its own ``errors``
-    was empty) and *did* resolve the real new character "曹阳" (a portrait was
-    generated) in the very same call. Per app.portraits' own long-standing
-    rule (portraits.py:1727,7340 -- an unconfirmed-real-name one-off keeps its
-    own source label and gets a typed functional identity, never silently
-    dropped nor renamed to something generic), a mention that discovery
-    neither resolved nor explicitly failed on defaults to a functional extra
-    under its own raw text -- not a card, not a portrait, not a gate error.
-    The only thing that still hard-blocks after discovery runs is
-    _discovery_errored_names: discovery said something concrete about that
-    *specific* name (a confirmed real identity whose card generation itself
-    failed, or an exception) -- "消歧和发现都没能给出任何归类结论" is the one
-    state this function will not paper over.
+    Second real-run finding (EP13, coordinator-reviewed): discovery phrases/
+    scopes candidates differently from prep_pack's chunk extraction (e.g.
+    "外宗弟子" vs the chunk extraction's "一名外宗弟子" for the same one-off
+    crowd concept; several occupation-title mentions got no matching
+    disposition at all by exact string even though discovery ran cleanly and
+    did resolve a real new character in the same call). Per app.portraits'
+    rule (portraits.py:1727,7340: an unconfirmed-real-name one-off keeps its
+    own source label as a typed functional identity, never silently dropped
+    nor renamed), a mention discovery neither resolved nor explicitly failed
+    on defaults to a functional extra under its own raw text. Only
+    _discovery_errored_names (discovery said something concrete about that
+    specific name) still hard-blocks -- "消歧和发现都没能给出任何归类结论"
+    is the one state this function will not paper over.
 
     Episodes where pass 1 already resolves every mention by exact name never
-    call discovery at all (``stats``' counters stay at 0) -- but note this is
-    now a narrower case than "no new characters": any mention that is not an
-    exact known name (a genuine one-off extra with no real name, not just a
-    new named character) also routes through discovery so it can receive a
-    real disposition instead of being assumed one way or the other.
+    call discovery at all (``stats``' counters stay at 0) -- narrower than
+    "no new characters": any mention that isn't an exact known name (a
+    one-off extra with no real name, not just a new named character) also
+    routes through discovery to receive a real disposition, not an assumption.
 
     ``appellation_resolutions`` (2.0.1 bug fix, see the note above
     ``_prep_pack_build_appellation_map``): an optional out-parameter -- when
@@ -419,7 +411,10 @@ async def _resolve_assets(
                         portrait_id = _resolve_portrait_id(
                             conn, project_id, resolved_name, episode_no,
                         )
-            if not portrait_id:
+            # 出图已解耦到后台：没行只说明没出图，不说明人物谱没卡。
+            # resolve_card_owner（建卡去重判据唯一落地点）核验命中即按已解析
+            # 处理，出图闸门是生成台 confirmation_gate 的事，这里不重复把关。
+            if not portrait_id and resolve_card_owner(bible, resolved_name) != ("owner", resolved_name):
                 errors.append(
                     f"角色「{name}」（段 {mention_segment_indexes}）未解析到已有 "
                     "portrait_id，身份消歧也未能将其归类为已有角色或确定性群演"
@@ -545,7 +540,7 @@ async def _resolve_assets(
             # 确定性替换来源是 anchor_phrase，但 anchor_phrase 是"钉证命中
             # 的证据段落"，不是"称谓"，真实 EP1 数据坐实二者不可互换。
             display_appellation = name
-            entry = characters.setdefault(portrait_id, {
+            entry = characters.setdefault(portrait_id or f"bible:{resolved_name}", {
                 "identity_id": f"bible:{resolved_name}",
                 "display_name": resolved_name,
                 "portrait_id": portrait_id,
@@ -660,7 +655,12 @@ async def _resolve_assets(
                 and not _prep_pack_mention_has_text_evidence(name, source_text)
             ):
                 scene_reference_id = None
-            if not scene_reference_id:
+            # 场景库真有这张卡（match_scene_name 精确匹配），没行只是没出图。
+            scene_card_matched = canonical_scene_name in {s.name for s in bible.scenes}
+            if not scene_reference_id and not (
+                scene_card_matched
+                and (resolved_via_discovery or _prep_pack_mention_has_text_evidence(name, source_text))
+            ):
                 errors.append(
                     f"场景「{name}」（段 {mention_segment_indexes}）未解析到已有 "
                     "scene_reference_id"
@@ -768,7 +768,7 @@ async def _resolve_assets(
                 scene_anchor_segments, scene_anchor_phrase = (
                     _prep_pack_local_text_anchor(segments, [name])
                 )
-            entry = scenes.setdefault(scene_reference_id, {
+            entry = scenes.setdefault(scene_reference_id or f"scene:{resolved_name}", {
                 "scene_id": f"scene:{resolved_name}",
                 "display_name": resolved_name,
                 "scene_reference_id": scene_reference_id,

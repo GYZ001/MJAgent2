@@ -828,6 +828,31 @@ def test_enrich_asset_manifest_canonical_visuals_notes_missing_portrait_row_inst
     assert "没有为这个角色建立标准外观" in character["appearance"]
 
 
+def test_enrich_asset_manifest_canonical_visuals_falls_back_to_bible_appearance_without_portrait_row():
+    """任务V收尾（真实 EP1 回归 ERR-20260831-63a9d2）：出图解耦到后台后，
+    映射台可能已经把角色/场景解析到人物谱/场景库的卡，但 character_portraits/
+    scene_references 还没有对应行（图还没出）。外观/场景锚点必须回退世界书
+    原始 appearance_canonical/scene_canonical，不是 _NO_CANONICAL_APPEARANCE_
+    NOTE 兜底——那句兜底只该留给素材库压根没有这张卡的群演/一次性人物。"""
+    conn = db.get_conn()
+    _seed_episode(conn, episode_id="ep-visuals-5")
+    conn.commit()
+    payload = _prep_pack_2_0_0_payload()  # portrait_id/scene_reference_id 均无对应行
+    bible = Bible.model_validate({
+        "characters": [{
+            "name": "少年", "role": "主角",
+            "appearance_canonical": "十六七岁少年，黑发碎短，蓝色文士长衫。",
+        }],
+        "scenes": [{"name": "山顶", "scene_canonical": "云雾缭绕的山顶。"}],
+        "world": {"era": "", "genre": "", "visual_style_canonical": "测试画风"},
+    })
+    _enrich_asset_manifest_canonical_visuals(conn, payload, bible=bible)
+    character = payload["asset_manifest"]["characters"][0]
+    scene = payload["asset_manifest"]["scenes"][0]
+    assert character["appearance"] == "十六七岁少年，黑发碎短，蓝色文士长衫。"
+    assert scene["scene_canonical"] == "云雾缭绕的山顶。"
+
+
 # ---------------------------------------------------------------------------
 # persist_storyboard_pack：DB 落库形状
 # ---------------------------------------------------------------------------

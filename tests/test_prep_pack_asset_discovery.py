@@ -266,6 +266,86 @@ def test_fully_known_cast_triggers_zero_discovery_calls(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 任务V收尾（2026-08-31 真实 EP1 回归 ERR-20260831-63a9d2）：出图已解耦到
+# 后台，建映射清单这一刻 character_portraits/scene_references 往往一行都
+# 没有（图/定场图还没生成完）。判据必须挂人物谱/场景库里有没有这张卡，不挂
+# 那两张表有没有行——男主角孟浩人物谱在册，仅仅因为图还没出就被判"未解析到
+# 已有 portrait_id"，连同王有材、许师姐一起把整集剧本阶段判 failed。
+# ---------------------------------------------------------------------------
+
+def test_character_resolves_from_bible_card_without_any_portrait_row(monkeypatch):
+    """孟浩人物谱在册，但 character_portraits 一行都没有（出图还没跑完）。
+    裸命中必须在 pass 1 直接解析成功（zero discovery calls），portrait_id
+    留空而不是报错落 functional_extras——出图闸门是生成台的事，不是这里。"""
+    conn = _make_conn()
+    _seed_bible_characters(conn, "p1", [
+        _bible_character("孟浩", appearance_canonical="十七岁少年，黑发短打"),
+    ])
+
+    def boom_character(*_a, **_k):
+        raise AssertionError("人物谱已有卡的裸命中不应调用角色发现")
+
+    patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", boom_character)
+
+    events = [_event("ev_001", characters=[
+        {"display_name": "孟浩", "is_background_extra": False},
+    ])]
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
+        conn, episode_no=1, events=events,
+        source_text="孟浩站在山门前，神情凝重。",
+    )
+
+    assert errors == []
+    assert stats["character_discovery_calls"] == 0
+    assert functional_extras == []
+    assert characters == [{
+        "identity_id": "bible:孟浩", "display_name": "孟浩",
+        "portrait_id": None, "segment_indexes": [1], "aliases": [],
+        "visual_entity_id": "bible:孟浩", "display_appellation": "孟浩",
+        "provenance": {
+            "method": "direct", "anchor_segments": [1], "anchor_phrase": "孟浩",
+        },
+    }]
+
+
+def test_scene_resolves_from_bible_card_without_any_reference_row(monkeypatch):
+    """场景侧同构：场景库有「宗门广场」这张卡，但 scene_references 一行都
+    没有（定场图还没生成）。裸命中必须直接解析成功，不落"未解析到已有
+    scene_reference_id"。"""
+    conn = _make_conn()
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id='p1'",
+        (json.dumps({
+            "characters": [],
+            "scenes": [{"name": "宗门广场", "scene_canonical": "青石铺地的宽阔广场"}],
+            "world": {"era": "", "genre": "", "visual_style_canonical": "测试画风"},
+        }, ensure_ascii=False),),
+    )
+    conn.commit()
+
+    def boom_scene(*_a, **_k):
+        raise AssertionError("场景库已有卡的裸命中不应调用场景发现")
+
+    monkeypatch.setattr(scenes, "ensure_scenes_for_labels", boom_scene)
+
+    events = [_event("ev_001", scenes_=[{"display_name": "宗门广场"}])]
+    characters, scene_list, props, functional_extras, errors, stats, true_name_hints, scene_alias_anchors, rejected_alias_conflicts = _resolve(
+        conn, episode_no=1, events=events,
+        source_text="众人聚在宗门广场，等候号令。",
+    )
+
+    assert errors == []
+    assert stats["scene_discovery_calls"] == 0
+    assert scene_list == [{
+        "scene_id": "scene:宗门广场", "display_name": "宗门广场",
+        "scene_reference_id": None, "segment_indexes": [1],
+        "provenance": {
+            "method": "direct", "anchor_segments": [1], "anchor_phrase": "宗门广场",
+        },
+    }]
+
+
+# ---------------------------------------------------------------------------
 # Real bug #1 (EP2): a mention the chunk-extraction model itself guessed was
 # a background extra must NOT be exempted from resolution -- if it is
 # actually a known bible character under a nickname, it must still bind to
