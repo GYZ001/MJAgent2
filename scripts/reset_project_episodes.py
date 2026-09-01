@@ -319,11 +319,38 @@ def _range_covers_all_produced_episodes(
     return not (produced - set(scope["episodes"]))
 
 
+def _reset_bible_keeping_style(conn: sqlite3.Connection, project_id: str) -> None:
+    """人物谱只保留 ``world``（里面装着用户选的画风），清掉角色与场景。
+
+    新架构下角色/场景都由映射台按需发现，它们是流水线产物；只重置状态字段而
+    留着 bible_json 会造出"谱里有角色、定妆照表里没有"的错位（那正是手动补图
+    路径看不见任何角色的那个缺陷的形态），而且下一轮映射会把它们当成已有候选，
+    "从零重跑"就不成立。
+    """
+    row = conn.execute(
+        "SELECT bible_json FROM projects WHERE id=?", (project_id,),
+    ).fetchone()
+    try:
+        bible = json.loads((row["bible_json"] if row else "") or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        bible = {}
+    kept = {"characters": [], "scenes": []}
+    if isinstance(bible.get("world"), dict):
+        kept["world"] = bible["world"]
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id=?",
+        (json.dumps(kept, ensure_ascii=False), project_id),
+    )
+    log(f"  人物谱重置：角色 {len(bible.get('characters') or [])} → 0，"
+        f"场景 {len(bible.get('scenes') or [])} → 0（画风保留）")
+
+
 def purge_project_assets(conn: sqlite3.Connection, project_id: str) -> None:
     """项目级视觉资产没有对应的清除端点，只能走 SQL；一律按 project_id 收敛。"""
     for table, sql in PROJECT_ASSET_SWEEPS:
         cur = conn.execute(sql, (project_id,))
         log(f"  SQL 清 {table}：{cur.rowcount} 行")
+    _reset_bible_keeping_style(conn, project_id)
     sets = ", ".join(f"{k}=?" for k in PROJECT_STATUS_RESET)
     conn.execute(f"UPDATE projects SET {sets} WHERE id=?",
                  (*PROJECT_STATUS_RESET.values(), project_id))
