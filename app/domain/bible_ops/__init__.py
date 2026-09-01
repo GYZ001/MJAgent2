@@ -83,7 +83,6 @@ from .refs_generation import (
     asyncio as asyncio,
     cancel_refs as cancel_refs,
     errors as errors,
-    get_setting as get_setting,
     start_refs as start_refs,
     task_registry as task_registry,
 )
@@ -187,6 +186,11 @@ from .scene_edit import (
     edit_scene_anchor as edit_scene_anchor,
     edit_scene_prompt as edit_scene_prompt,
 )
+
+# get_setting 同理从真源（app.db）导出：2026-09-01 成本预算体系退役时，
+# refs_generation.py 里那行 get_setting 导入变成未使用被删掉，直接打断了这条
+# 再导出链，整个工作区 import app.main 失败——与下面 current_actor_name 是同一个坑。
+from app.db import get_setting as get_setting
 
 # current_actor_name 从真源导出，不再借道 view_redo 转手：候选采纳路由退场后
 # view_redo 自己不再用它，靠"子模块碰巧还 import 着"来支撑包属性，下一个人删掉
