@@ -26,6 +26,7 @@ from app.completion_grant.models import (
     VIDEO_PERMISSION,
     GrantValidationError,
     VideoCompletionGrant,
+    VideoPlanGenerationError,
     _row_to_video_grant,
 )
 from app.completion_grant.qualification import (
@@ -136,7 +137,9 @@ def bind_video_grant_generation_plan(
             generation_plan_applicable=True,
         )
     except ValueError as exc:
-        raise GrantValidationError("VIDEO_PLAN_INVALID", str(exc)) from exc
+        # 计划生成/校验失败，不是授权失败——用独立的异常类型，见
+        # VideoPlanGenerationError 的 docstring（ERR-20260831-dd05c7）。
+        raise VideoPlanGenerationError(str(exc)) from exc
     old_release = {key: value for key, value in old.items() if key != "generation_plan"}
     current_release = {
         key: value for key, value in current.items() if key != "generation_plan"

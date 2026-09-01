@@ -166,7 +166,7 @@ max_function_lines_python = 50
 "app/video_modes/seedance_pack.py" = 523
 "app/video_plan/generate.py" = 689
 "app/video_prompt_ai.py" = 603
-"app/video_supervisor/run_loop.py" = 606
+"app/video_supervisor/run_loop.py" = 604
 "frontend/src/App.tsx" = 1525
 "frontend/src/api/projects.ts" = 407
 # 2026-08-30 +10：用户拍板"映射台/分镜台/生成台按身份实时解析当前定妆照"，
@@ -579,7 +579,7 @@ max_function_lines_python = 50
 "app/video_repair_router.py" = 135
 "app/video_supervisor/adoption.py" = 73
 "app/video_supervisor/assets.py" = 108
-"app/video_supervisor/authority.py" = 102
+"app/video_supervisor/authority.py" = 101
 "app/video_supervisor/checkpoint.py" = 131
 "app/video_supervisor/closeout.py" = 132
 "app/video_supervisor/coverage.py" = 259
@@ -588,7 +588,7 @@ max_function_lines_python = 50
 "app/video_supervisor/job_control.py" = 81
 "app/video_supervisor/ops.py" = 168
 "app/video_supervisor/resilience.py" = 58
-"app/video_supervisor/run_loop.py" = 499
+"app/video_supervisor/run_loop.py" = 468
 "app/video_supervisor/storyboard_repair.py" = 123
 "app/video_supervisor/watchdog.py" = 134
 

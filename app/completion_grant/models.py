@@ -96,6 +96,19 @@ class GrantValidationError(ValueError):
     def __init__(self, code: str, message: str):
         self.code = code
         super().__init__(message)
+class VideoPlanGenerationError(RuntimeError):
+    """整集视频计划 JSON 编译/校验失败——不是授权问题。
+
+    无论用户追加多少预算或时长都解决不了模型输出畸形。刻意不继承
+    ``GrantValidationError``：那样会被 video_supervisor 里每一处
+    ``except GrantValidationError`` 一并吞掉，翻译成 WAITING_AUTHORIZATION，
+    把用户导向一个死循环的 ``authorize_continue`` 入口（ERR-20260831-dd05c7，
+    run_45be44ddd467）。保留 ``.code`` 字段只是为了复用既有的
+    ``_record_grant_validation_failure`` 明细落库逻辑，不代表它是同一类错误。
+    """
+    def __init__(self, message: str, *, code: str = "VIDEO_PLAN_INVALID"):
+        self.code = code
+        super().__init__(message)
 def _row_to_video_grant(row) -> VideoCompletionGrant:
     def _col(name, default=None):
         try:

@@ -8,6 +8,7 @@ from typing import Any
 from app.completion_grant import (
     GrantValidationError,
     VideoCompletionGrant,
+    VideoPlanGenerationError,
     bind_video_grant_generation_plan,
     validate_video_grant,
 )
@@ -194,14 +195,16 @@ async def _ensure_supervisor_video_plan(
                 conn=conn,
             )
         except (ValueError, VideoPlanValidationError) as exc:
-            raise GrantValidationError("VIDEO_PLAN_INVALID", str(exc)) from exc
+            # 计划生成/校验失败，不是授权失败——用独立的异常类型，不复用
+            # GrantValidationError（见 VideoPlanGenerationError docstring，
+            # ERR-20260831-dd05c7）。
+            raise VideoPlanGenerationError(str(exc)) from exc
     if (
         plan.status != "valid"
         or not await _verify_episode_plan_current_async(plan)
         or not video_plan_provider_selection_is_current(plan, conn=conn)
     ):
-        raise GrantValidationError(
-            "VIDEO_PLAN_INVALID",
+        raise VideoPlanGenerationError(
             "Supervisor 启动前未取得当前有效的整集视频计划",
         )
     if not grant.episode_video_plan_id:
@@ -248,13 +251,15 @@ async def _ensure_supervisor_video_plan(
 
 def _record_grant_validation_failure(
     cp: VideoSupervisorCheckpoint,
-    exc: GrantValidationError,
+    exc: GrantValidationError | VideoPlanGenerationError,
     *,
     run_id: str | None,
     stage: str,
 ) -> None:
-    """Persist the full detail behind a ``GrantValidationError`` before it is
-    reduced to a bare ``cp.outcome = exc.code``.
+    """Persist the full detail behind a ``GrantValidationError`` (or the
+    sibling ``VideoPlanGenerationError``) before it is reduced to a bare
+    ``cp.outcome = exc.code``. Both share the same ``.code``/``__cause__``
+    shape, which is all this function reads.
 
     Every Supervisor boundary that catches ``GrantValidationError`` used to
     throw away ``str(exc)`` entirely -- for ``VIDEO_PLAN_INVALID`` that string

@@ -924,6 +924,81 @@ async def test_fresh_completion_with_all_adopted_finishes_without_enqueue(memdb,
     ).fetchone()["c"] == 0
 
 
+@pytest.mark.asyncio
+async def test_video_plan_generation_failure_does_not_wait_for_authorization(
+    memdb, monkeypatch,
+):
+    """Bug W 回归锁：模型返回的整集视频计划 JSON 编译/校验失败必须落
+    FAILED_CLOSED，不能被伪装成 WAITING_AUTHORIZATION——那会把用户导向一个无论
+    追加多少预算都解决不了问题的 authorize_continue 死循环入口
+    （ERR-20260831-dd05c7，run_45be44ddd467）。"""
+    from app.completion_grant import VideoPlanGenerationError
+    from app.video_supervisor import TERMINAL_SUPERVISOR_PHASES, run_video_completion_supervisor
+
+    eid, _ = _seed_episode(memdb, 2)
+
+    async def fake_ensure_plan(cp):
+        raise VideoPlanGenerationError("模型返回的视频计划 JSON 无法解析")
+
+    patch_video_supervisor_everywhere(monkeypatch, "_ensure_supervisor_video_plan", fake_ensure_plan)
+
+    result = await run_video_completion_supervisor(eid, resume=False, wall_clock_cap_s=60)
+
+    assert result.phase == "FAILED_CLOSED"
+    assert result.phase != "WAITING_AUTHORIZATION"
+    assert result.phase in TERMINAL_SUPERVISOR_PHASES
+    assert result.outcome == "VIDEO_PLAN_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_ordinary_grant_validation_failure_still_waits_for_authorization(
+    memdb, monkeypatch,
+):
+    """负控：真正的授权缺口（预算/时长/撤销之外的 GrantValidationError）必须
+    继续落 WAITING_AUTHORIZATION——证明上一测试的修复只挑出了
+    VideoPlanGenerationError，没有连带把合法的授权拦截也改没了。"""
+    from app.completion_grant import GrantValidationError
+    from app.video_supervisor import run_video_completion_supervisor
+
+    eid, _ = _seed_episode(memdb, 2)
+
+    async def fake_ensure_plan(cp):
+        raise GrantValidationError("GRANT_NOT_FOUND", "视频补齐授权不存在")
+
+    patch_video_supervisor_everywhere(monkeypatch, "_ensure_supervisor_video_plan", fake_ensure_plan)
+
+    result = await run_video_completion_supervisor(eid, resume=False, wall_clock_cap_s=60)
+
+    assert result.phase == "WAITING_AUTHORIZATION"
+    assert result.outcome == "GRANT_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_grant_revoked_failure_still_resolves_to_cancelled(memdb, monkeypatch):
+    """GRANT_REVOKED 是唯一"用户已经自己取消"的 GrantValidationError code；
+    把 8 处重复 handler 收拢成共用判据函数后必须保住这个既有分支。"""
+    from app.completion_grant import GrantValidationError
+    from app.video_supervisor import run_video_completion_supervisor
+
+    eid, _ = _seed_episode(memdb, 1)
+
+    async def fake_ensure_plan(cp):
+        return None
+
+    async def fake_verify_authority(cp, *, stage):
+        raise GrantValidationError("GRANT_REVOKED", "视频补齐授权已撤销")
+
+    patch_video_supervisor_everywhere(monkeypatch, "_ensure_supervisor_video_plan", fake_ensure_plan)
+    patch_video_supervisor_everywhere(
+        monkeypatch, "_verify_supervisor_paid_authority_async", fake_verify_authority,
+    )
+
+    result = await run_video_completion_supervisor(eid, resume=False, wall_clock_cap_s=60)
+
+    assert result.phase == "CANCELLED"
+    assert result.outcome == "GRANT_REVOKED"
+
+
 def test_integration_preflight_issue_in_ledger(memdb):
     eid, _ = _seed_episode(memdb, 3)
     shot_id = f"{eid}_shot_2"

@@ -7,6 +7,7 @@ from app.completion_grant import (
     DEFAULT_VIDEO_BUDGET_CAP_CNY,
     GrantValidationError,
     VideoCompletionGrant,
+    VideoPlanGenerationError,
     validate_video_grant,
 )
 from app.db import get_conn, now
@@ -46,6 +47,34 @@ from .job_control import _reconcile_terminal_continuity_blocks
 from .models import VideoSupervisorCheckpoint
 from .storyboard_repair import _amend_storyboard, _try_auto_crop
 
+
+async def _resolve_grant_failure(
+    cp: VideoSupervisorCheckpoint,
+    exc: GrantValidationError | VideoPlanGenerationError,
+    *,
+    run_id: str | None,
+    stage: str,
+) -> VideoSupervisorCheckpoint:
+    """一个判据，供每一处付费边界的 except 共用：这次失败该不该让用户去追加
+    授权？
+
+    ``VideoPlanGenerationError`` 是独立的异常类型，天生不会被任何裸
+    ``except GrantValidationError`` 接住——调用方必须显式把它加进 except 元组
+    才能碰到这里；一旦碰到，一律落 FAILED_CLOSED：模型计划 JSON 畸形，追加多
+    少预算或时长都解决不了（ERR-20260831-dd05c7）。``GRANT_REVOKED`` 是唯一
+    「用户已经自己取消」的 GrantValidationError code，落 CANCELLED；其余才是
+    真正的授权缺口，落 WAITING_AUTHORIZATION。
+    """
+    if isinstance(exc, VideoPlanGenerationError):
+        cp.phase = "FAILED_CLOSED"
+    elif exc.code == "GRANT_REVOKED":
+        cp.phase = "CANCELLED"
+    else:
+        cp.phase = "WAITING_AUTHORIZATION"
+    cp.outcome = exc.code
+    await _save_checkpoint_async(cp, run_id=run_id)
+    _record_grant_validation_failure(cp, exc, run_id=run_id, stage=stage)
+    return cp
 
 
 async def run_video_completion_supervisor(
@@ -133,25 +162,17 @@ async def run_video_completion_supervisor(
                 return await _deadline_closeout_async(
                     cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED",
                 )
-            cp.phase = "WAITING_AUTHORIZATION"
-            cp.outcome = exc.code
-            await _save_checkpoint_async(cp, run_id=run_id)
-            _record_grant_validation_failure(
+            return await _resolve_grant_failure(
                 cp, exc, run_id=run_id, stage="grant_validate_preflight",
             )
-            return cp
 
     try:
         grant = await _ensure_supervisor_video_plan(cp)
         await _save_checkpoint_async(cp, run_id=run_id)
-    except GrantValidationError as exc:
-        cp.phase = "WAITING_AUTHORIZATION"
-        cp.outcome = exc.code
-        await _save_checkpoint_async(cp, run_id=run_id)
-        _record_grant_validation_failure(
+    except (VideoPlanGenerationError, GrantValidationError) as exc:
+        return await _resolve_grant_failure(
             cp, exc, run_id=run_id, stage="ensure_video_plan",
         )
-        return cp
 
     if run_id:
         evidence_repository.append_event(
@@ -167,13 +188,9 @@ async def run_video_completion_supervisor(
             run_id=run_id,
         )
     except GrantValidationError as exc:
-        cp.phase = "WAITING_AUTHORIZATION"
-        cp.outcome = exc.code
-        await _save_checkpoint_async(cp, run_id=run_id)
-        _record_grant_validation_failure(
+        return await _resolve_grant_failure(
             cp, exc, run_id=run_id, stage="reference_asset_prep",
         )
-        return cp
     except Exception as exc:  # noqa: BLE001 - 资产失败降级，不得中断整集覆盖
         cp.quality_target_missed = True
         await _save_checkpoint_async(cp, run_id=run_id)
@@ -226,16 +243,9 @@ async def run_video_completion_supervisor(
                 stage="supervisor_tick",
             )
         except GrantValidationError as exc:
-            cp.phase = (
-                "CANCELLED" if exc.code == "GRANT_REVOKED"
-                else "WAITING_AUTHORIZATION"
-            )
-            cp.outcome = exc.code
-            await _save_checkpoint_async(cp, run_id=run_id)
-            _record_grant_validation_failure(
+            return await _resolve_grant_failure(
                 cp, exc, run_id=run_id, stage="supervisor_tick",
             )
-            return cp
         if g:
             cp.budget["cap_cny"] = float(g.budget_cap_cny)
             wall_cap = float(g.wall_clock_cap_s)
@@ -352,13 +362,9 @@ async def run_video_completion_supervisor(
                         first=True,
                     )
                 except GrantValidationError as exc:
-                    cp.phase = "WAITING_AUTHORIZATION"
-                    cp.outcome = exc.code
-                    await _save_checkpoint_async(cp, run_id=run_id)
-                    _record_grant_validation_failure(
+                    return await _resolve_grant_failure(
                         cp, exc, run_id=run_id, stage="dispatch_first_pass",
                     )
-                    return cp
                 if dispatched:
                     progressed = True
                 # Narrative-authority request compilation is intentionally
@@ -441,14 +447,10 @@ async def run_video_completion_supervisor(
                         )
                     )
                 except GrantValidationError as exc:
-                    cp.phase = "WAITING_AUTHORIZATION"
-                    cp.outcome = exc.code
                     _merge_shot_state(cp, ledger)
-                    await _save_checkpoint_async(cp, run_id=run_id)
-                    _record_grant_validation_failure(
+                    return await _resolve_grant_failure(
                         cp, exc, run_id=run_id, stage="amend_storyboard",
                     )
-                    return cp
                 if amended:
                     cp.phase = "WAITING_HUMAN"
                     cp.outcome = "已创建分镜修改草稿；视频流水线已暂停，等待分镜台完整终态与人工重新确认"
@@ -525,13 +527,9 @@ async def run_video_completion_supervisor(
                     plan=plan,
                 )
             except GrantValidationError as exc:
-                cp.phase = "WAITING_AUTHORIZATION"
-                cp.outcome = exc.code
-                await _save_checkpoint_async(cp, run_id=run_id)
-                _record_grant_validation_failure(
+                return await _resolve_grant_failure(
                     cp, exc, run_id=run_id, stage="dispatch_repair",
                 )
-                return cp
             if dispatched:
                 progressed = True
                 cascaded = _apply_cascade(entry, ledger, cp)

@@ -45,6 +45,7 @@ from app.completion_grant.models import (
     VIDEO_PERMISSION as VIDEO_PERMISSION,
     VideoBudgetAuthorizationError as VideoBudgetAuthorizationError,
     VideoCompletionGrant as VideoCompletionGrant,
+    VideoPlanGenerationError as VideoPlanGenerationError,
     _PROVIDER_CLAIM_LEDGER_COLUMNS as _PROVIDER_CLAIM_LEDGER_COLUMNS,
     _row_to_video_grant as _row_to_video_grant,
 )
@@ -139,6 +140,7 @@ __all__ = [
     "VIDEO_PERMISSION",
     "VideoBudgetAuthorizationError",
     "VideoCompletionGrant",
+    "VideoPlanGenerationError",
     "_PROVIDER_CLAIM_LEDGER_COLUMNS",
     "_apply_video_budget_retry_margin",
     "_canonical_json",
