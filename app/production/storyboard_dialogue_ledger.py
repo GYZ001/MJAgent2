@@ -13,6 +13,22 @@ dropped_lines）并说明弃置理由，阶段二据此拿到「这段必须说�
 类型），均为同层或更低层（见 app/LAYERS.toml "app.production" = 4、
 "app.spoken_contract" = 4、"app.source_excerpt" = 1），不依赖
 app.production.storyboard_pack 本身，避免循环导入。
+
+2.1.1（真实 EP1 回归，ERR-20260901-bcfa58/run_4e66c18f6713）：容量闸门本身
+判得对（Q09(12)+Q10(3)+Q11(9)+Q12(31)=55 字全归第 5 段，超 54 字上限），但
+三次语义重试全部没修出、耗尽预算致整集失败——三次响应长度几乎不变
+（4840/4863/4861），说明模型没找到可执行的修法。根因三处，全在报错/提示词
+的可操作性，不在闸门阈值（54 不动）：① 报错只给合计数，模型自己数台词字数
+必然不准，尤其是要在"挪去别的段"和"拆成两段"之间选一个可行方案时；② 规则
+从未正面说过"多个段可以共享同一原文段号"，模型不敢往这个方向想；③
+model_gateway 的通用修复包装写死"保持其余已验证字段不变"，把这次真正需要
+的结构性修复（挪行、加段、重排 segment_no）一并劝退了（第 4 段同样覆盖
+Q09-12 的原文段号且只用了 18 字，挪一条过去两边都合规，模型三次都没想到）。
+修复：`_segment_capacity_errors` 补齐逐条字数明细、反查可挪去的其它
+segment_no、显式声明这类修复不受"保持其余字段不变"限制；`extract_
+dialogue_targets` 在抽取期预拆单条超容量的引句（结构性无解地雷，EP1 最长
+39 字未触发但必须堵上）；`beat_sheet_dialogue_ledger_rules` 补两条正面陈述。
+只改生成路径的报错文案与抽取逻辑，落库形状不变。
 """
 from __future__ import annotations
 
@@ -57,6 +73,42 @@ class _AiDroppedLine(BaseModel):
     reason: str = Field(min_length=1)
 
 
+_CLAUSE_RE = re.compile(r".*?[，。！？；,.!?;]|.+$")
+
+
+def _split_overlong_quote(text: str, *, max_chars: int) -> list[str]:
+    """按句读确定性拆成多条、每条 ≤max_chars，不改写用词（ERR-20260901-bcfa58
+    预防：单条引句超过单段容量是结构性无解地雷——不能跨段、装不下、又不许
+    弃置）。口径参照老管线 app.screenplay_ir.prompt_context._split_spoken_line：
+    先按标点切分句读、攒到装不下另起一条；单个句读本身仍超限才逐字符切。
+    """
+    clauses = [c for c in _CLAUSE_RE.findall(text) if c.strip()]
+    chunks: list[str] = []
+    current = ""
+    for clause in clauses:
+        if current and spoken_contract.content_char_count(current + clause) > max_chars:
+            chunks.append(current)
+            current = ""
+        if spoken_contract.content_char_count(clause) <= max_chars:
+            current += clause
+            continue
+        for character in clause:
+            if current and spoken_contract.content_char_count(current + character) > max_chars:
+                chunks.append(current)
+                current = ""
+            current += character
+    if current:
+        chunks.append(current)
+    return [c.strip() for c in chunks if c.strip()]
+
+
+def _quote_parts(line: str, *, max_chars: int) -> list[str]:
+    """单条引句是否需要预拆；恰好等于 max_chars 不拆。"""
+    if spoken_contract.content_char_count(line) <= max_chars:
+        return [line]
+    return _split_overlong_quote(line, max_chars=max_chars)
+
+
 def extract_dialogue_targets(
     segments: list[SourceSegment], paratext_indexes: set[int],
 ) -> list[DialogueQuote]:
@@ -65,7 +117,11 @@ def extract_dialogue_targets(
     全部收录、不设长度黑名单——语气词、屏上文字这类要不要保留是模型在台账
     里显式弃置的判断（dropped_lines.reason），代码不预判、不过滤，否则「代码
     先过滤掉一批」和「模型再丢一批」会重犯同一个问题：谁都不为总丢失量负责。
+    单条超过 config.MAX_SPOKEN_CHARS_PER_SHOT 的引句在这里预拆成多条（见
+    _split_overlong_quote），quote_id 仍按出现顺序连续编号，拆出的各部分只是
+    编号相邻，不再是同一条。
     """
+    max_chars = config.MAX_SPOKEN_CHARS_PER_SHOT
     quotes: list[DialogueQuote] = []
     counter = 0
     for index, segment in enumerate(segments, start=1):
@@ -79,13 +135,14 @@ def extract_dialogue_targets(
                     matches.append((match.start(), line))
         matches.sort(key=lambda item: item[0])
         for _offset, line in matches:
-            counter += 1
-            quotes.append(DialogueQuote(
-                quote_id=f"Q{counter:02d}",
-                source_segment_index=index,
-                text=line,
-                content_chars=spoken_contract.content_char_count(line),
-            ))
+            for part in _quote_parts(line, max_chars=max_chars):
+                counter += 1
+                quotes.append(DialogueQuote(
+                    quote_id=f"Q{counter:02d}",
+                    source_segment_index=index,
+                    text=part,
+                    content_chars=spoken_contract.content_char_count(part),
+                ))
     return quotes
 
 
@@ -149,30 +206,63 @@ def _kept_segment_binding_errors(
     return errors
 
 
+def _segment_overflow_breakdown(quotes: list[DialogueQuote]) -> str:
+    """`Q09(12字)+Q10(3字)+Q11(9字)+Q12(31字)=55字` 逐条明细，供模型直接读数，
+    不用自己数字数（ERR-20260901-bcfa58：三次响应长度几乎不变，根因之一是
+    报错只给合计数，模型自己数字数必然不准）。"""
+    ordered = sorted(quotes, key=lambda q: q.quote_id)
+    parts = "+".join(f"{q.quote_id}({q.content_chars}字)" for q in ordered)
+    return f"{parts}={sum(q.content_chars for q in ordered)}字"
+
+
+def _segment_move_targets(
+    quotes: list[DialogueQuote], segment_no: int, segment_source_indexes: dict[int, list[int]],
+) -> list[int]:
+    """同样覆盖这些台词原文段号、且不是本段自己的其它 segment_no（反查用）。"""
+    source_indexes = {q.source_segment_index for q in quotes}
+    return sorted(
+        other_no for other_no, allowed in segment_source_indexes.items()
+        if other_no != segment_no and source_indexes & set(allowed)
+    )
+
+
 def _segment_capacity_errors(
     kept: list[_AiKeptLine],
     quotes_by_id: dict[str, DialogueQuote],
+    segment_source_indexes: dict[int, list[int]],
     *,
     max_chars_per_segment: int,
 ) -> list[str]:
     """同一段分到的必保台词合计字数不能超过 15 秒口播容量。
 
-    错误文案必须给出合法出路——「拆成更多段」，不是「删台词」：段数是自由
-    变量，用户已拍板连贯性优先于时长紧凑，不设段数上限。
+    ERR-20260901-bcfa58 真实回归：闸门判得对，但报错不可操作，三次语义重试
+    耗尽仍未修出。文案必须给足三样东西：逐条字数明细（不用模型自己数）、
+    反查可挪去的其它 segment_no、明确声明拆段/重排/改 kept_lines 不受
+    chat_structured 通用修复包装"保持其余已验证字段不变"那句话的限制——
+    那句话原本劝的是别的字段，却把真正需要的结构性修复一并劝退了。
     """
-    totals: dict[int, int] = {}
+    by_segment: dict[int, list[DialogueQuote]] = {}
     for item in kept:
         quote = quotes_by_id.get(item.quote_id)
         if quote is not None:
-            totals[item.segment_no] = totals.get(item.segment_no, 0) + quote.content_chars
+            by_segment.setdefault(item.segment_no, []).append(quote)
     errors = []
-    for segment_no, total in sorted(totals.items()):
-        if total > max_chars_per_segment:
-            errors.append(
-                f"第 {segment_no} 段分到的必保台词合计 {total} 字，超过 15 秒口播容量 "
-                f"{max_chars_per_segment} 字；把这一段台词密集处拆成更多 15 秒段——"
-                "段数由剧情密度决定、没有上限，不要为了少分段而丢弃或压缩台词"
-            )
+    for segment_no, quotes in sorted(by_segment.items()):
+        total = sum(q.content_chars for q in quotes)
+        if total <= max_chars_per_segment:
+            continue
+        targets = _segment_move_targets(quotes, segment_no, segment_source_indexes)
+        move_hint = (
+            f"可将其中若干条挪到第 {targets} 段——这些段的 source_segment_indexes 同样覆盖"
+            "这些台词的原文段号；" if targets else ""
+        )
+        errors.append(
+            f"第 {segment_no} 段分到的必保台词 {_segment_overflow_breakdown(quotes)}，超过 15 秒"
+            f"口播容量 {max_chars_per_segment} 字。{move_hint}也可以把本段拆成两段，两段引用"
+            "同一原文段号本就合法（多个段共享一个原文段号是允许的）。此类修复允许并通常需要"
+            "新增段落、重排全部 segments[].segment_no，并同步更新 kept_lines 里对应的 segment_no"
+            "引用——这些改动属于修复本身，不受「保持其余已验证字段不变」的限制"
+        )
     return errors
 
 
@@ -188,7 +278,9 @@ def dialogue_ledger_errors(
     quotes_by_id = {q.quote_id: q for q in quotes}
     errors = _quote_id_partition_errors(quotes, kept_lines, dropped_lines)
     errors.extend(_kept_segment_binding_errors(kept_lines, quotes_by_id, segment_source_indexes))
-    errors.extend(_segment_capacity_errors(kept_lines, quotes_by_id, max_chars_per_segment=max_chars_per_segment))
+    errors.extend(_segment_capacity_errors(
+        kept_lines, quotes_by_id, segment_source_indexes, max_chars_per_segment=max_chars_per_segment,
+    ))
     return errors
 
 
@@ -249,7 +341,11 @@ def dialogue_ledger_summary(
 
 
 def beat_sheet_dialogue_ledger_rules() -> list[str]:
-    """阶段一 rules[] 里对白台账的两条正面陈述，供 storyboard_pack._beat_sheet_rules 拼接。"""
+    """阶段一 rules[] 里对白台账的正面陈述，供 storyboard_pack._beat_sheet_rules 拼接。
+
+    后两条是 ERR-20260901-bcfa58 真实回归补的：模型三次重试都没想到"同一原文
+    段号可以给多个段引用"和"拆段重排是预期动作"，因为规则从没正面说过。
+    """
     return [
         "dialogue_targets 列出了本章全部原文引号台词：每一条 quote_id 都必须在"
         "kept_lines 或 dropped_lines 里逐字复制、出现且只出现一次，不得虚构、遗漏"
@@ -260,6 +356,15 @@ def beat_sheet_dialogue_ledger_rules() -> list[str]:
         "分到同一段的 kept_lines 台词，合计纯文字字数不能超过这段 15 秒的口播容量"
         f"（{config.MAX_SPOKEN_CHARS_PER_SHOT} 字）；装不下就把这一段拆成更多段落，"
         "段数不设上限，不要为了凑少数段而丢弃或压缩台词",
+        "多个段可以引用同一原文段号：对白密集的原文段落经常需要拆成多个 15 秒段，"
+        "这些段的 source_segment_indexes 出现重叠、都指向同一个原文段号是完全合法"
+        "的写法，不是错误。修复台词超容量报错时，新增段落并重排全部 "
+        "segments[].segment_no 是预期动作，不是意外，也不受其它字段"
+        "「已验证不用改」的惯例限制",
+        "dialogue_targets 里少数 quote_id 是原文一句台词过长（超过单段 15 秒容量）"
+        "被预先按标点拆成的多条，quote_id 连续编号、内容是同一句话的不同部分；"
+        "这些条目如果保留，应尽量分到相邻或同一段落，保持原有先后顺序，不要打乱"
+        "语序或分散安排到不相关的段落",
     ]
 
 

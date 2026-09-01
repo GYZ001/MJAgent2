@@ -13,9 +13,8 @@
       与映射台使用的是同一套分段函数，segment_index 对齐）交给模型，
       产出节拍表（beat_sheet）与节拍到段的归组（一段 = 一个叙事单元，
       固定 15 秒 / 2-4 镜）——这一步决定「这一集有几段」，是整个改造的
-      支点：取消事件链之后，段数不再由上游给，必须由本阶段从原文推导。
-      2.1.0 起还决定「这一段有哪些必须说出口的原文台词」（见
-      app.production.storyboard_dialogue_ledger）。
+      支点：取消事件链之后，段数不再由上游给，必须由本阶段从原文推导——
+      2.1.0 起还决定「这一段有哪些必须说出口的原文台词」（见 storyboard_dialogue_ledger）。
     阶段二：为每一段各发一次独立调用（``_generate_all_segment_prompts``
       内部按 segment_no 顺序串行推进，不是 asyncio.gather 并行），每次
       调用只带这一段自己的原文切片 + 节拍 + 相关人物/场景/道具资源 +
@@ -330,7 +329,13 @@ from app.source_excerpt import SourceSegment, index_source_segments
 #: 台词大量丢失"的旧分集 resume 时判定为不算数、用新契约重新生成。方言约束
 #: 两段指令文本同期拆到新模块 app.production.storyboard_dialects（纯搬移 +
 #: 内容更新），为新增逻辑腾行数，不让本文件超过 2087 行 line_count 棘轮。
-STORYBOARD_PACK_VERSION = "2.1.0"
+#:
+#: 2.1.1（真实 EP1 回归 ERR-20260901-bcfa58/run_4e66c18f6713：容量闸门判得对，
+#: 报错不可操作，三次语义重试耗尽仍未修出——完整归因与三处修复见
+#: app.production.storyboard_dialogue_ledger 模块 docstring）。只改生成路径的
+#: 报错文案与抽取期预拆逻辑，落库形状不变；marker 按 2.0.6 先例仍钉在
+#: storyboard_pack/2.1.0，不随这次修复移动。
+STORYBOARD_PACK_VERSION = "2.1.1"
 
 #: Written to Shot.prompt_contract_version for every row this module writes;
 #: downstream consumers key off it to know this row's legacy per-shot fields
@@ -751,9 +756,7 @@ def _enrich_asset_manifest_canonical_visuals(
 
 
 def _beat_sheet_rules(paratext_indexes: set[int]) -> list[str]:
-    """阶段一 rules[]：段落归组的形状要求 + 2.1.0 对白台账正面陈述（后者见
-    beat_sheet_dialogue_ledger_rules：合法值从哪来、默认怎么做、弃置时怎么写）。
-    """
+    """阶段一 rules[]：段落归组形状要求 + 2.1.0 对白台账正面陈述（见 beat_sheet_dialogue_ledger_rules）。"""
     rules = [
         "beat_sheet[].segment_indexes 与 segments[].source_segment_indexes 必须引用"
         "下方原文自带的 [段N] 编号，不得虚构或越界",
@@ -1187,9 +1190,7 @@ def _segment_continuity_rules(
 
 
 def _segment_shared_rules() -> list[str]:
-    """每段调用都相同的资源引用规则（角色/场景外观锚点、台词互覆盖）。内容与
-    之前完全一致，从 _generate_all_segment_prompts 抽出腾行数，不让那个已在
-    function_lines baseline 里的函数继续变长。"""
+    """每段调用都相同的资源引用规则（角色/场景外观锚点、台词互覆盖）；从 _generate_all_segment_prompts 抽出腾行数。"""
     return [
         "relevant_assets 里每个角色/场景都带一个外观/场景字段（角色和"
         "群演统一叫 appearance；场景叫 scene_canonical）：内容是一段"
@@ -1455,8 +1456,7 @@ class StoryboardPackSegment(BaseModel):
     dialogue: list[dict[str, Any]]
     resources: dict[str, Any]
     degraded_capabilities: list[str]
-    #: 2.1.0 对白台账：本段 kept 的原文台词，供事后核对丢没丢。默认空列表
-    #: 兼容旧数据行。
+    #: 2.1.0 对白台账：本段 kept 的原文台词，供事后核对丢没丢；默认空列表兼容旧行。
     required_dialogue: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -1466,8 +1466,7 @@ class StoryboardPack(BaseModel):
     target_model: str
     beat_sheet: list[StoryboardPackBeat]
     segments: list[StoryboardPackSegment]
-    #: 2.1.0 对白台账统计，只是 generate->persist 间的传递载体，落库形态是
-    #: persist_storyboard_pack 另开的 EvidenceArtifact，不写进 shots 行。
+    #: 2.1.0 对白台账统计，只是 generate->persist 传递载体，落库形态是另开的 EvidenceArtifact。
     dialogue_ledger: dict[str, Any] = Field(default_factory=dict)
 
 

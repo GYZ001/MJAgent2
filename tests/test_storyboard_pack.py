@@ -23,6 +23,7 @@ from app.production.storyboard_dialogue_ledger import (
     DialogueQuote,
     _AiDroppedLine,
     _AiKeptLine,
+    beat_sheet_dialogue_ledger_rules,
     dialogue_ledger_errors,
     dialogue_ledger_summary,
     extract_dialogue_targets,
@@ -428,7 +429,7 @@ def test_dialogue_ledger_errors_rejects_kept_line_referencing_unknown_segment_no
     assert any("不存在的 segment_no=99" in e for e in errors)
 
 
-def test_dialogue_ledger_errors_rejects_segment_over_capacity_and_suggests_more_segments():
+def test_dialogue_ledger_errors_rejects_segment_over_capacity_and_offers_a_split_path():
     quotes = [_quote("Q01", text="这句台词很长" * 10, chars=60)]
     errors = dialogue_ledger_errors(
         quotes=quotes,
@@ -437,7 +438,134 @@ def test_dialogue_ledger_errors_rejects_segment_over_capacity_and_suggests_more_
         segment_source_indexes={1: [1]},
         max_chars_per_segment=54,
     )
-    assert any("超过 15 秒口播容量" in e and "拆成更多" in e for e in errors)
+    assert any("超过 15 秒口播容量" in e and "拆成两段" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# ERR-20260901-bcfa58 真实 EP1 回归：容量闸门判得对，报错不可操作，三次语义
+# 重试耗尽仍未修出。三处修复：逐条字数明细 + 反查可挪去的段号 + 显式声明
+# 拆段/重排不受"保持其余字段不变"限制；抽取期预拆超长引句；两条正面陈述。
+# ---------------------------------------------------------------------------
+
+def test_dialogue_ledger_errors_capacity_message_gives_itemized_char_breakdown():
+    """报错必须给逐条字数明细，不能只给合计数——模型自己数字数必然不准。"""
+    quotes = [
+        _quote("Q09", segment_index=2, text="x" * 12, chars=12),
+        _quote("Q10", segment_index=2, text="x" * 3, chars=3),
+        _quote("Q11", segment_index=2, text="x" * 9, chars=9),
+        _quote("Q12", segment_index=2, text="x" * 31, chars=31),
+    ]
+    errors = dialogue_ledger_errors(
+        quotes=quotes,
+        kept_lines=[
+            _AiKeptLine(quote_id="Q09", segment_no=5), _AiKeptLine(quote_id="Q10", segment_no=5),
+            _AiKeptLine(quote_id="Q11", segment_no=5), _AiKeptLine(quote_id="Q12", segment_no=5),
+        ],
+        dropped_lines=[],
+        segment_source_indexes={4: [2], 5: [2]},
+        max_chars_per_segment=54,
+    )
+    flagged = [e for e in errors if "第 5 段" in e]
+    assert flagged
+    assert "Q09(12字)+Q10(3字)+Q11(9字)+Q12(31字)=55字" in flagged[0]
+
+
+def test_dialogue_ledger_errors_capacity_message_names_a_valid_move_target():
+    """反查同样覆盖这些台词原文段号的其它段，点名可以挪过去——EP1 真实
+    归因：第 4 段同样覆盖原文段 2 且只用了 18 字，模型三次都没发现。"""
+    quotes = [_quote("Q09", segment_index=2, text="x" * 55, chars=55)]
+    errors = dialogue_ledger_errors(
+        quotes=quotes,
+        kept_lines=[_AiKeptLine(quote_id="Q09", segment_no=5)],
+        dropped_lines=[],
+        segment_source_indexes={4: [2], 5: [2]},
+        max_chars_per_segment=54,
+    )
+    flagged = [e for e in errors if "第 5 段" in e]
+    assert flagged
+    assert "挪到第 [4] 段" in flagged[0]
+    assert "source_segment_indexes 同样覆盖" in flagged[0]
+
+
+def test_dialogue_ledger_errors_capacity_message_silent_on_move_target_when_none_exists():
+    quotes = [_quote("Q01", segment_index=1, text="x" * 55, chars=55)]
+    errors = dialogue_ledger_errors(
+        quotes=quotes,
+        kept_lines=[_AiKeptLine(quote_id="Q01", segment_no=1)],
+        dropped_lines=[],
+        segment_source_indexes={1: [1]},
+        max_chars_per_segment=54,
+    )
+    flagged = [e for e in errors if "第 1 段" in e]
+    assert flagged
+    assert "挪到第" not in flagged[0]
+
+
+def test_dialogue_ledger_errors_capacity_message_overrides_keep_other_fields_unchanged():
+    """显式声明拆段/重排/改 kept_lines 不受 chat_structured 通用修复包装
+    「保持其余已验证字段不变」的限制——这句话原本劝退了真正需要的修复。"""
+    quotes = [_quote("Q01", text="x" * 55, chars=55)]
+    errors = dialogue_ledger_errors(
+        quotes=quotes,
+        kept_lines=[_AiKeptLine(quote_id="Q01", segment_no=1)],
+        dropped_lines=[],
+        segment_source_indexes={1: [1]},
+        max_chars_per_segment=54,
+    )
+    flagged = [e for e in errors if "第 1 段" in e]
+    assert flagged
+    assert "重排全部 segments[].segment_no" in flagged[0]
+    assert "同步更新 kept_lines" in flagged[0]
+    assert "保持其余已验证字段不变" in flagged[0]
+    assert "两段引用同一原文段号本就合法" in flagged[0]
+
+
+def test_extract_dialogue_targets_pre_splits_a_single_overlong_quote():
+    """单条引句超过 54 字容量是结构性无解地雷：抽取期就按句读确定性预拆。
+
+    四个「20 字 + 逗号」句读拼成 80 字内容，按句读切分应产出 2 条（各 40 字），
+    验证既不整条硬切（不含逗号）也不逐字拆散（能按标点找到断点）。
+    """
+    clause = "甲" * 20 + "，"
+    quotes = extract_dialogue_targets([_seg(f"他说：“{clause * 4}”。")], set())
+    assert len(quotes) == 2
+    for quote in quotes:
+        assert quote.content_chars <= config.MAX_SPOKEN_CHARS_PER_SHOT
+        assert quote.content_chars == 40
+    ids = [int(q.quote_id[1:]) for q in quotes]
+    assert ids == list(range(ids[0], ids[0] + len(ids))), "拆出的多条编号必须连续"
+    assert all(q.source_segment_index == 1 for q in quotes)
+
+
+def test_extract_dialogue_targets_does_not_split_a_quote_at_exactly_the_capacity_limit():
+    """恰好等于容量上限的引句不拆——只有严格超出才需要预拆。"""
+    exact_line = "甲" * config.MAX_SPOKEN_CHARS_PER_SHOT
+    quotes = extract_dialogue_targets([_seg(f"他说：“{exact_line}”。")], set())
+    assert len(quotes) == 1
+    assert quotes[0].content_chars == config.MAX_SPOKEN_CHARS_PER_SHOT
+
+
+def test_extract_dialogue_targets_splits_continue_numbering_with_surrounding_quotes():
+    """预拆不打乱全局编号连续性：拆出的多条与前后其它引句共用同一个计数器。"""
+    over = "甲" * (config.MAX_SPOKEN_CHARS_PER_SHOT + 10)
+    quotes = extract_dialogue_targets(
+        [_seg("甲说：“先走”。"), _seg(f"乙说：“{over}”。丙说：“再见”。")], set(),
+    )
+    assert quotes[0].quote_id == "Q01"
+    assert quotes[-1].text == "再见"
+    ids = [int(q.quote_id[1:]) for q in quotes]
+    assert ids == list(range(1, len(ids) + 1))
+
+
+def test_beat_sheet_dialogue_ledger_rules_states_shared_segment_source_index_is_legal():
+    rules = beat_sheet_dialogue_ledger_rules()
+    assert any("多个段可以引用同一原文段号" in r for r in rules)
+    assert any("新增段落并重排全部" in r for r in rules)
+
+
+def test_beat_sheet_dialogue_ledger_rules_explains_pre_split_fragments():
+    rules = beat_sheet_dialogue_ledger_rules()
+    assert any("同一句话的不同部分" in r and "相邻或同一段落" in r for r in rules)
 
 
 def test_dialogue_ledger_errors_empty_ledger_passes_with_no_quotes():
@@ -2128,7 +2256,14 @@ def test_contract_marker_bumps_to_2_1_0_so_stale_low_fidelity_packs_regenerate()
     继续复用那些低保真产物，新校验、新提示词永远碰不到它们。
     """
     assert STORYBOARD_PACK_CONTRACT_MARKER == "storyboard_pack/2.1.0"
-    assert STORYBOARD_PACK_VERSION == "2.1.0"
+    assert STORYBOARD_PACK_VERSION > "2.1.0"
+
+
+def test_contract_marker_stays_pinned_at_2_1_0_for_the_2_1_1_generation_path_fix():
+    """2.1.1（ERR-20260901-bcfa58）只改生成路径的报错文案与抽取期预拆逻辑，
+    落库形状不变——同 2.0.6 先例，marker 不随这次修复移动。"""
+    assert STORYBOARD_PACK_VERSION == "2.1.1"
+    assert STORYBOARD_PACK_CONTRACT_MARKER == "storyboard_pack/2.1.0"
 
 
 def test_ensure_segment_prompt_budget_passes_when_room_is_ample(monkeypatch):
