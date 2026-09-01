@@ -382,17 +382,14 @@ def pack_is_ready(pack_status: str | None, views: list[dict[str, Any]], required
     return not missing_required_views(views, required)
 
 
-def scene_pack_is_usable(row, views: list[dict[str, Any]]) -> bool:
-    """下游消费资格只看必需视角文件齐全（PRD QA-SO）。"""
-    if not row:
-        return False
-    return not missing_required_views(views, SCENE_REQUIRED_VIEWS)
-
-
 def scene_primary_is_usable(row, views: list[dict[str, Any]]) -> bool:
-    """主场景图可用资格只看文件是否存在（PRD QA-SO #21）。
+    """场景可用资格只看主图文件是否存在（用户拍板 2026-09-01：有图就是可用）。
 
-    额外视角缺失或 QA 低分不得使已有 establishing 图失效。
+    额外视角缺失或 QA 低分不得使已有 establishing 图失效。曾经并列存在的
+    ``scene_pack_is_usable``（要求 establishing+reverse_angle 齐全才算可用）已随
+    同一次拍板退场：它把"只出了主图"的场景判成不可用，既让场景库显示"不可用"，
+    又让出图流程把整张主图作废重来（真实事故 2026-09-01「赵国大青山山顶」堆了 8
+    张候选）。判据只剩这一条，不留第二套。
     """
     del views
     if not row:
@@ -717,9 +714,7 @@ def resolve_shot_asset_dependencies(
             project_id, sname, episode_no, ready_only=False, conn=conn,
         )
         row = scene_row_for_episode(project_id, sname, episode_no, conn=conn)
-        pack_usable = scene_pack_is_usable(row, all_views)
-        primary_usable = scene_primary_is_usable(row, all_views)
-        usable = pack_usable or primary_usable
+        usable = scene_primary_is_usable(row, all_views)
         views = (
             [v for v in all_views if v.get("status") == "ready" and v.get("image_path")]
             if ready_only and usable else ([] if ready_only else all_views)
@@ -732,8 +727,7 @@ def resolve_shot_asset_dependencies(
             "scene_revision_id": row["id"] if row else None,
             "pack_status": (row["pack_status"] if row and "pack_status" in row.keys() else None),
             "asset_usable": usable,
-            "pack_usable": pack_usable,
-            "primary_usable": primary_usable,
+            "primary_usable": usable,
             "selected_view_ids": [v["id"] for v in selected],
             "selected_views": [
                 {
@@ -746,7 +740,8 @@ def resolve_shot_asset_dependencies(
                 for v in selected
             ],
             "available_view_roles": [v.get("view_role") for v in views if v.get("view_role")],
-            "missing_required": missing_required_views(all_views, SCENE_REQUIRED_VIEWS),
+            # 缺口只报"有没有主图"，不报缺侧视角——口径与分镜包分支一致。
+            "missing_required": [] if usable else ["establishing"],
         }
 
     return build_reference_manifest(
@@ -861,15 +856,11 @@ def manifest_production_blockers(manifest: dict[str, Any] | None) -> list[str]:
         if not scene.get("scene_revision_id"):
             if scene.get("asset_required", True):
                 blockers.append(f"场景「{name}」缺少本集场景版本")
-        else:
-            pack = scene.get("pack_status")
-            missing = [str(x) for x in (scene.get("missing_required") or []) if x]
-            if pack and pack != PACK_STATUS_READY:
-                blockers.append(f"场景「{name}」多视角包状态为 {pack}")
-            elif missing:
-                blockers.append(f"场景「{name}」缺少必需视角：{','.join(missing)}")
-            elif not (scene.get("selected_view_ids") or scene.get("selected_views")):
-                blockers.append(f"场景「{name}」无可用 ready 视角")
+        elif not (scene.get("selected_view_ids") or scene.get("selected_views")):
+            # 有图就是可用（用户拍板 2026-09-01）：场景不再因 pack_status 未 ready
+            # 或缺侧视角而被判成拦路项——那会让"主图明明在、生成也拿得到"的场景
+            # 挡住整集付费生成。
+            blockers.append(f"场景「{name}」没有可用的场景图")
     return blockers
 
 
@@ -925,8 +916,6 @@ def scan_episode_reference_asset_gaps(
                 continue
             if (
                 not scene.get("scene_revision_id")
-                or scene.get("pack_status") not in {None, PACK_STATUS_READY}
-                or bool(scene.get("missing_required"))
                 or not (scene.get("selected_view_ids") or scene.get("selected_views"))
             ):
                 name = str(scene.get("name") or "").strip()

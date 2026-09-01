@@ -21,9 +21,10 @@ def test_scene_library_routes_accept_post() -> None:
     assert "POST" in methods_by_path["/api/projects/{project_id}/scene-bible"]
     assert "POST" in methods_by_path["/api/projects/{project_id}/scene-refs"]
     assert "POST" in methods_by_path["/api/projects/{project_id}/scene-refs/cancel"]
-    assert "POST" in methods_by_path[
-        "/api/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/adopt"
-    ]
+    # 候选采纳路由已随候选图能力退场（用户拍板 2026-09-01）：路由表里不该再有它，
+    # 否则就是"能力说撤了、入口还在"的半退场。
+    assert "/api/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/adopt" \
+        not in methods_by_path
 
 
 def test_scene_bible_parent_does_not_block_scene_reference_handoff(monkeypatch) -> None:

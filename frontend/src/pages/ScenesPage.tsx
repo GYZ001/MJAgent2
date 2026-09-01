@@ -1,12 +1,10 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import {
-  api, Scene, SceneGapScan, SceneRefSegment,
-  SceneReferenceCandidate, SceneRefsProgress,
+  api, Scene, SceneGapScan, SceneRefSegment, SceneRefsProgress,
 } from '../api'
 import { useNav, usePoll, useProject } from '../App'
 import { ServerTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
-import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import GenerationParamsDialog from '../components/GenerationParamsDialog'
 import ImageCompareModal from '../components/ImageCompareModal'
 import PrepSubnav from '../components/PrepSubnav'
@@ -21,7 +19,7 @@ import { formatBookTitle } from '../lib/bookTitle'
 import { sceneStepStatus } from '../lib/prepSteps'
 import { retryBibleGenerationAction } from '../lib/retryBibleGeneration'
 import { sceneUsability } from '../lib/sceneUsability'
-import { statusLabel, statusTitle } from '../lib/statusLabels'
+import { statusLabel } from '../lib/statusLabels'
 import ManualSceneDialog from '../components/bible/ManualSceneDialog'
 import ReplaceSceneImageControl from '../components/bible/ReplaceSceneImageControl'
 import SceneLibraryEmptyState from '../components/bible/SceneLibraryEmptyState'
@@ -46,11 +44,6 @@ export default function ScenesPage() {
   const [paramsDirty, setParamsDirty] = useState({ anchor: false, prompt: false })
   const [paramsCloseConfirm, setParamsCloseConfirm] = useState(false)
   const [stopConfirm, setStopConfirm] = useState(false)
-  const [candidatePreview, setCandidatePreview] = useState<{
-    sceneName: string
-    candidates: SceneReferenceCandidate[]
-    adoptedArtifactId?: string | null
-  } | null>(null)
   const [gapScan, setGapScan] = useState<SceneGapScan | null>(null)
   const [compareDetail, setCompareDetail] = useState<{ title: string; images: { src: string; label: string }[] } | null>(null)
   // 生成前的费用确认弹窗已删除（2026-08-29 用户拍板）。busyRef 是同步锁，
@@ -366,35 +359,14 @@ export default function ScenesPage() {
           )}
         </section>
       )}
-      {candidatePreview && (
-        <SceneCandidateModal
-          projectId={p.id}
-          {...candidatePreview}
-          focusActive={!compareDetail}
-          disabled={busy || generating}
-          onCompare={images => setCompareDetail({ title: `${candidatePreview.sceneName} · 候选比较`, images })}
-          onClose={() => setCandidatePreview(null)}
-          onAdopted={(sceneName, candidates, adoptedArtifactId) => {
-            setCandidatePreview({ sceneName, candidates, adoptedArtifactId })
-            refresh()
-          }}
-          onCandidatesChanged={(sceneName, candidates) => {
-            setCandidatePreview(current => current ? { ...current, sceneName, candidates } : current)
-            refresh()
-          }}
-        />
-      )}
       {detailScene && (
         <SceneDetailModal
           projectId={p.id}
           scene={detailScene}
-          focusActive={!candidatePreview && !paramsScene && !compareDetail}
+          focusActive={!paramsScene && !compareDetail}
           disabled={busy || generating}
           onClose={() => setDetailSceneName(null)}
           onChanged={refresh}
-          onShowCandidates={(sceneName, candidates, adoptedArtifactId) => {
-            setCandidatePreview({ sceneName, candidates, adoptedArtifactId })
-          }}
           onShowParams={sceneName => {
             setParamsDirty({ anchor: false, prompt: false }); setParamsSceneName(sceneName)
           }}
@@ -548,7 +520,7 @@ function sceneViewPresentation(viewRole?: string | null) {
 }
 
 function SceneDetailModal({
-  projectId, scene, focusActive, disabled, onClose, onChanged, onShowCandidates, onShowParams, onCompare, onRequestRedo,
+  projectId, scene, focusActive, disabled, onClose, onChanged, onShowParams, onCompare, onRequestRedo,
 }: {
   projectId: string
   scene: Scene
@@ -556,11 +528,6 @@ function SceneDetailModal({
   disabled?: boolean
   onClose: () => void
   onChanged: () => void
-  onShowCandidates: (
-    sceneName: string,
-    candidates: SceneReferenceCandidate[],
-    adoptedArtifactId?: string | null,
-  ) => void
   onShowParams: (sceneName: string) => void
   onCompare: (images: { src: string; label: string }[]) => void
   onRequestRedo: (sceneName: string, sceneRefId: string, viewRole: string) => Promise<void>
@@ -571,7 +538,6 @@ function SceneDetailModal({
   const activeRef = refs.find(ref => ref.ep_end == null)
     ?? refs.find(ref => ref.image_url === scene.ref_image_url)
     ?? [...refs].sort((a, b) => b.ep_start - a.ep_start)[0]
-  const candidates = scene.scene_candidates ?? []
   const actualRoles = Array.from(new Set(refs.flatMap(ref => (ref.views ?? []).map(view => view.view_role || '')))).filter(Boolean)
   const guides = actualRoles.length ? actualRoles : ['establishing', 'reverse_angle']
 
@@ -624,15 +590,6 @@ function SceneDetailModal({
         </div>
         <footer>
           <div>
-            {candidates.length > 0 && (
-              <button className="btn" type="button" onClick={() => onShowCandidates(
-                scene.name,
-                candidates,
-                activeRef?.artifact_id,
-              )}>
-                查看候选图（{candidates.length}）
-              </button>
-            )}
             <button className="btn" type="button" onClick={() => onShowParams(scene.name)}>
               场景设定与重绘
             </button>
@@ -644,171 +601,6 @@ function SceneDetailModal({
             )}
           </div>
           <button className="btn primary" type="button" onClick={onClose}>完成</button>
-        </footer>
-      </section>
-    </div>
-  )
-}
-
-function SceneCandidateModal({
-  projectId, sceneName, candidates, adoptedArtifactId, focusActive, disabled, onClose, onAdopted,
-  onCandidatesChanged, onCompare,
-}: {
-  projectId: string
-  sceneName: string
-  candidates: SceneReferenceCandidate[]
-  adoptedArtifactId?: string | null
-  focusActive: boolean
-  disabled?: boolean
-  onClose: () => void
-  onAdopted: (sceneName: string, candidates: SceneReferenceCandidate[], adoptedArtifactId: string) => void
-  onCandidatesChanged: (sceneName: string, candidates: SceneReferenceCandidate[]) => void
-  onCompare: (images: { src: string; label: string }[]) => void
-}) {
-  const { toast } = useNav()
-  const [evidenceOpen, setEvidenceOpen] = useState(false)
-  const [adoptingId, setAdoptingId] = useState<string | null>(null)
-  const [adoptRequest, setAdoptRequest] = useState<{ artifactId: string; warnings: string[] } | null>(null)
-  const trapRef = useFocusTrap(focusActive && !evidenceOpen && !adoptRequest, onClose)
-  const availableCount = candidates.filter(item => !!item.image_url).length
-
-  const applyAdoptedState = (artifactId: string) => candidates.map(item =>
-    item.artifact_id === artifactId
-      ? { ...item, status: 'approved' }
-      : item.status === 'approved' ? { ...item, status: 'superseded' } : item)
-
-  const adopt = async (artifactId: string, reason: string) => {
-    setAdoptingId(artifactId)
-    try {
-      await api.adoptSceneCandidate(projectId, sceneName, artifactId, reason)
-      setAdoptRequest(null)
-      toast(`已采纳「${sceneName}」的候选图`)
-      onAdopted(sceneName, applyAdoptedState(artifactId), artifactId)
-    } catch (e: unknown) {
-      toast(e instanceof Error ? e.message : String(e), true)
-    } finally {
-      setAdoptingId(null)
-    }
-  }
-
-  return (
-    <div className="scene-candidate-backdrop" role="presentation" onMouseDown={event => {
-      if (event.currentTarget === event.target) onClose()
-    }}>
-      <section ref={trapRef} className={`scene-candidate-modal${candidates.length === 1 ? ' single' : candidates.length === 2 ? ' double' : ''}`}
-        role="dialog" aria-modal="true" aria-labelledby="scene-candidate-title">
-        <header className="scene-candidate-modal-head">
-          <div>
-            <span className="eyebrow">场景候选</span>
-            <h2 id="scene-candidate-title">{sceneName}</h2>
-            <p>候选图是否可人工采纳只看图片文件是否存在，由人工挑选决定。</p>
-            {availableCount > 1 && (
-              <button className="btn small" type="button" onClick={() => onCompare(
-                candidates.filter(item => !!item.image_url).map(item => ({
-                  src: item.image_url!, label: `尝试 ${item.attempt ?? '—'} · ${statusLabel(item.status)}`,
-                })),
-              )}>1:1 并排比较候选</button>
-            )}
-          </div>
-          <button type="button" aria-label="关闭候选预览" onClick={onClose}>×</button>
-        </header>
-        <div className="scene-candidate-modal-body">
-          {candidates.map(candidate => {
-            const isCurrent = candidate.artifact_id === adoptedArtifactId
-            const canOfferAdopt = !isCurrent && !!candidate.image_url
-            return (
-              <article className={`scene-candidate-preview${isCurrent ? ' current' : candidate.image_url ? ' passed' : ' rejected'}`}
-                key={candidate.artifact_id}>
-                <div className="scene-candidate-image">
-                  {candidate.image_url
-                    ? <CandidateImage src={candidate.image_url} alt={`${sceneName}候选 ${candidate.attempt ?? ''}`}
-                        onOpen={() => onCompare([{
-                          src: candidate.image_url!, label: `${sceneName} · 尝试 ${candidate.attempt ?? '—'}`,
-                        }])} />
-                    : <div className="scene-candidate-empty">图片不可用</div>}
-                  <span>{isCurrent ? '当前采用' : candidate.image_url ? '可采纳' : '不可用'}</span>
-                </div>
-                <div className="scene-candidate-meta">
-                  <div>
-                    <b>尝试 {candidate.attempt ?? '—'}</b>
-                    <small title={`${statusTitle(candidate.trust_level)} · ${statusTitle(candidate.status)}`}>
-                      {statusLabel(candidate.trust_level)} · {statusLabel(candidate.status)}
-                    </small>
-                  </div>
-                </div>
-                {candidate.evidence && <EvidenceDrawer evidence={candidate.evidence} label="查看技术证据"
-                  onOpenChange={setEvidenceOpen} />}
-                {canOfferAdopt && <button className="btn small primary" type="button" disabled={!!adoptingId || disabled}
-                  aria-label={adoptingId || disabled
-                    ? `采纳此图，暂不可用：${adoptingId ? '正在处理上一项采纳操作' : '当前有其他场景任务运行'}`
-                    : '采纳此图；下一步填写采纳理由并确认影响'}
-                  onClick={() => setAdoptRequest({ artifactId: candidate.artifact_id, warnings: [] })}>
-                  {adoptingId === candidate.artifact_id ? '采纳中…' : '采纳此图'}
-                </button>}
-              </article>
-            )
-          })}
-        </div>
-        <footer>
-          <span>共 {candidates.length} 个候选</span>
-          <button className="btn" type="button" onClick={onClose}>完成</button>
-        </footer>
-        {adoptRequest && <SceneCandidateAdoptDialog
-          sceneName={sceneName}
-          warnings={adoptRequest.warnings}
-          busy={adoptingId === adoptRequest.artifactId}
-          onClose={() => setAdoptRequest(null)}
-          onConfirm={reason => void adopt(adoptRequest.artifactId, reason)}
-        />}
-      </section>
-    </div>
-  )
-}
-
-function SceneCandidateAdoptDialog({
-  sceneName,
-  warnings,
-  busy,
-  onClose,
-  onConfirm,
-}: {
-  sceneName: string
-  warnings: string[]
-  busy: boolean
-  onClose: () => void
-  onConfirm: (reason: string) => void
-}) {
-  const [reason, setReason] = useState('')
-  const trapRef = useFocusTrap(true, onClose)
-  return (
-    <div className="scene-manual-review-backdrop" role="presentation" onMouseDown={event => {
-      if (event.currentTarget === event.target && !busy) onClose()
-    }}>
-      <section ref={trapRef} className="scene-manual-review-dialog" role="dialog" aria-modal="true"
-        aria-labelledby="scene-adopt-title">
-        <h3 id="scene-adopt-title">采纳「{sceneName}」候选图</h3>
-        <p>采纳后将作为场景库当前主图；历史版本会保留，可在场景版本中回滚。</p>
-        {!!warnings.length && (
-          <div className="warning-banner" role="status">
-            <b>采纳前请确认以下质检提示</b>
-            <ul>{warnings.map((warning, index) => <li key={`${index}:${warning}`}>{warning}</li>)}</ul>
-          </div>
-        )}
-        <label className="scene-manual-review-reason">
-          <span>采纳理由（必填）</span>
-          <textarea value={reason} disabled={busy} rows={3} maxLength={300}
-            placeholder="说明画面质量、场景一致性和风险判断"
-            onChange={event => setReason(event.target.value)} />
-        </label>
-        <footer>
-          <button className="btn" type="button" disabled={busy} onClick={onClose}>取消</button>
-          <button className="btn primary" type="button" disabled={busy || reason.trim().length < 4}
-            aria-label={busy || reason.trim().length < 4
-              ? `确认采纳此图，暂不可用：${busy ? '正在处理采纳操作' : '请填写至少 4 个字的采纳理由'}`
-              : '确认采纳此图'}
-            onClick={() => onConfirm(reason.trim())}>
-            {busy ? '采纳中…' : '确认采纳此图'}
-          </button>
         </footer>
       </section>
     </div>
@@ -1269,22 +1061,6 @@ function SceneCardImage({ src, name, dimmed, onOpen }: {
     <button type="button" className="scene-visual scene-image-button" onClick={onOpen} aria-label={`放大查看${name}`}>
       <img key={retry} src={src} alt={name} onError={() => setFailed(true)} loading="lazy" decoding="async"
         style={{ opacity: dimmed ? 0.45 : 1, transition: 'opacity 0.3s' }} />
-    </button>
-  )
-}
-
-function CandidateImage({ src, alt, onOpen }: { src: string; alt: string; onOpen: () => void }) {
-  const [failed, setFailed] = useState(false)
-  const [retry, setRetry] = useState(0)
-  if (failed) return (
-    <div className="scene-candidate-empty">
-      图片加载失败
-      <button type="button" className="btn small" onClick={() => { setFailed(false); setRetry(value => value + 1) }}>重试</button>
-    </div>
-  )
-  return (
-    <button type="button" className="scene-image-button" onClick={onOpen} aria-label={`放大查看${alt}`}>
-      <img key={retry} src={src} alt={alt} onError={() => setFailed(true)} loading="lazy" decoding="async" />
     </button>
   )
 }

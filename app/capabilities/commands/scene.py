@@ -90,20 +90,4 @@ def commands() -> list[CommandSpec]:
             ),
             tags=("scene", "multiview"),
         ),
-        _cmd(
-            "scene.adopt_candidate",
-            title="采纳场景候选图",
-            description="将已通过新版硬门禁的场景候选图采纳为主图；明确硬失败不可绕过",
-            input_model=I.SceneAdoptCandidateInput,
-            risk=RiskLevel.R2_MATERIAL,
-            confirmation=ConfirmationPolicy.NEVER,
-            idempotency=IdempotencyPolicy.REQUIRED,
-            scopes={"manju:project-write"},
-            side_effect="adopts_scene_reference_candidate",
-            handler=h_scene.adopt_candidate,
-            rest_routes=(
-                "POST /api/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/adopt",
-            ),
-            tags=("scene",),
-        ),
     ]

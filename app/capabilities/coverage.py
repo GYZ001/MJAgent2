@@ -386,7 +386,7 @@ def validate_catalog_integrity() -> list[str]:
         "project.import_novel", "project.delete",
         "bible.generate", "bible.update", "bible.cancel",
         "portrait.update_prompt", "portrait.generate", "portrait.cancel", "portrait.regenerate_view",
-        "scene.generate_bible", "scene.generate_refs", "scene.update_prompt", "scene.cancel_refs", "scene.regenerate_view", "scene.adopt_candidate",
+        "scene.generate_bible", "scene.generate_refs", "scene.update_prompt", "scene.cancel_refs", "scene.regenerate_view",
         "episode.plan",
         "screenplay.generate", "screenplay.resume", "screenplay.repair_draft", "screenplay.generate_batch", "screenplay.update", "screenplay.delete", "screenplay.cancel",
         "storyboard.generate", "storyboard.generate_batch", "shot.update", "storyboard.confirm", "storyboard.cancel",

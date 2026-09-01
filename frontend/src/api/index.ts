@@ -74,7 +74,6 @@ export const api = {
   editSceneAnchor: bibleApi.api_bible.editSceneAnchor,
   regenerateCharacterView: bibleApi.api_bible.regenerateCharacterView,
   regenerateSceneView: bibleApi.api_bible.regenerateSceneView,
-  adoptSceneCandidate: bibleApi.api_bible.adoptSceneCandidate,
   rollbackSceneReference: bibleApi.api_bible.rollbackSceneReference,
   bibleImpactPreview: bibleApi.api_bible.bibleImpactPreview,
   bibleVisualStyles: bibleApi.api_bible.bibleVisualStyles,

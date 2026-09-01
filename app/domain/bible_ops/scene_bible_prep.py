@@ -289,7 +289,7 @@ async def _scene_refs_task(
     requested_by: str = "user",
     trigger_type: str = "manual",
 ):
-    from app.scenes import SceneCandidateReviewRequired, generate_scene_refs
+    from app.scenes import generate_scene_refs
     conn = get_conn()
     try:
         recorder = _reserve_scene_refs_recorder(
@@ -334,14 +334,6 @@ async def _scene_refs_task(
         else:
             recorder.cancel(conn=None)
         raise
-    except SceneCandidateReviewRequired as exc:
-        message = str(exc)[:1200]
-        recorder.partial(message, conn=None)
-        conn.execute(
-            "UPDATE projects SET scene_refs_status='warning', scene_refs_error=? WHERE id=?",
-            (message, project_id),
-        )
-        conn.commit()
     except Exception as exc:  # noqa: BLE001
         recorder.fail(exc, conn=None)
         public = errors.record_and_format(exc, action="scene_refs_generate", context={"project_id": project_id})

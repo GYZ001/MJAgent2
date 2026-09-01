@@ -57,7 +57,7 @@ max_function_lines_python = 50
 
 [baseline.line_count]
 "app/agent/orchestrator.py" = 616
-"app/api.py" = 1089
+"app/api.py" = 1087
 "app/artifacts.py" = 1375
 "app/capabilities/bus.py" = 560
 "app/capabilities/preflight.py" = 1388
@@ -70,9 +70,9 @@ max_function_lines_python = 50
 # 解而上调基线的情况不是同一性质，不违反棘轮"只降不升"守的是设计质量维度。
 "app/db.py" = 3535
 "app/delivery.py" = 1954
-"app/domain/__init__.py" = 1094
+"app/domain/__init__.py" = 1092
 "app/domain/bible_ops/precheck.py" = 543
-"app/domain/bible_ops/view_redo.py" = 568
+"app/domain/bible_ops/view_redo.py" = 534
 "app/domain/common.py" = 1023
 "app/domain/review_wall.py" = 1080
 "app/domain/screenplay_ops/activation.py" = 529
@@ -102,7 +102,7 @@ max_function_lines_python = 50
 "app/media_exec/input_reference.py" = 507
 "app/media_exec/run_job.py" = 1060
 "app/minimax_h3.py" = 1581
-"app/multiview.py" = 2262
+"app/multiview.py" = 2251
 "app/narrative_blueprint/models_core.py" = 552
 "app/narrative_outline.py" = 792
 "app/narrative_priority.py" = 1078
@@ -148,7 +148,7 @@ max_function_lines_python = 50
 # 腾行数，净变化后实测再降 1 行（2086→2085）。
 "app/quota.py" = 559
 "app/refs.py" = 548
-"app/scenes.py" = 2328
+"app/scenes.py" = 1791
 "app/schemas.py" = 2571
 "app/screenplay_ir/prompt_context.py" = 517
 "app/screenplay_scene_shards/generate_shards.py" = 603
@@ -185,7 +185,15 @@ max_function_lines_python = 50
 # PrepPackCharacterAsset 新增 current_portrait_id/current_portrait_image_url
 # 两个展示字段（后端 app/domain/storyboard_ops/current_portraits.py 现算，不
 # 进已发布产物），字段注释解释了它们与快照 portrait_id 的关系——不是拒绝拆分。
-"frontend/src/api/screenplay.ts" = 340
+# 2026-09-01 候选图能力整体退场（用户拍板："只要有图就是可用，取消候选图的能力"）：
+# app/scenes.py 2328 -> 1791（9 个候选/QA 证据函数与自动采纳分支删除）、
+# ScenesPage.tsx 1290 -> 1066（候选弹窗与采纳对话框删除）、view_redo.py 568 -> 534
+# （采纳路由删除）、multiview.py 2262 -> 2251（scene_pack_is_usable 判据退场）。
+# 全部是删代码带来的收紧，按棘轮规则同步调低基线。
+
+# 2026-09-01 340 -> 166：映射包（EpisodePrepPack / PrepPack*）契约类型整体拆到
+# 同目录 prepPack.ts（195 行，默认阈值内，不进基线），棘轮随拆分收紧。
+"frontend/src/api/screenplay.ts" = 166
 "frontend/src/components/EpisodeCrumb.tsx" = 301
 "frontend/src/components/observability/TraceDrawer.tsx" = 834
 # 2026-08-31 棘轮收紧（1772→1766）：占位四态改造把 characterIsFitting 从本文件
@@ -204,7 +212,7 @@ max_function_lines_python = 50
 "frontend/src/pages/EpisodesPage.tsx" = 741
 "frontend/src/pages/MonitorPage.test.ts" = 313
 "frontend/src/pages/MonitorPage.tsx" = 874
-"frontend/src/pages/ScenesPage.tsx" = 1290
+"frontend/src/pages/ScenesPage.tsx" = 1066
 "frontend/src/pages/ScriptPage.render.test.ts" = 523
 # 2026-08-31 +50：PrepPackView 定妆照占位四态新增测试覆盖，同 BoardPage.test.ts 注释。
 "frontend/src/pages/ScriptPage.test.ts" = 1162
@@ -239,7 +247,7 @@ max_function_lines_python = 50
 "app/capabilities/commands/bible.py" = 122
 "app/capabilities/commands/delivery.py" = 73
 "app/capabilities/commands/project.py" = 72
-"app/capabilities/commands/scene.py" = 91
+"app/capabilities/commands/scene.py" = 75
 "app/capabilities/commands/screenplay.py" = 121
 "app/capabilities/commands/storyboard.py" = 73
 "app/capabilities/commands/system.py" = 130
@@ -279,7 +287,7 @@ max_function_lines_python = 50
 "app/domain/bible_ops/task_run.py" = 99
 "app/domain/bible_ops/view_redo.py" = 82
 "app/domain/common.py" = 134
-"app/domain/projects/bible_attachments.py" = 126
+"app/domain/projects/bible_attachments.py" = 100
 "app/domain/projects/create.py" = 69
 "app/domain/projects/detail.py" = 201
 "app/domain/projects/episode_delete.py" = 56
@@ -487,7 +495,7 @@ max_function_lines_python = 50
 "app/rejected_media.py" = 73
 "app/renderability_score.py" = 69
 "app/repair_router.py" = 219
-"app/scenes.py" = 295
+"app/scenes.py" = 228
 "app/schemas.py" = 251
 "app/screenplay_ir/assemble.py" = 79
 "app/screenplay_ir/compile_setup.py" = 120

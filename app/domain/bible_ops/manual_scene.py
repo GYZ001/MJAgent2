@@ -11,7 +11,7 @@
 路径同一张表）。
 
 替换走独立的归档-新建：没有复用 view_redo.py 的 ``rollback_scene_reference``/
-``adopt_scene_candidate``——那一对服务的是 AI 多视角候选采纳流水线，强制要求
+已退场的候选采纳流水线——那一对服务的是 AI 多视角候选采纳流水线，强制要求
 ``establishing``+``reverse_angle`` 视角齐全（``app.multiview.SCENE_REQUIRED_
 VIEWS``）；手动上传天然只有一张主图、从不进入该流水线，套用那道视角门禁会让
 "可回滚"的承诺落空（实测：回滚会因视角不全被拒，参见本文件下方 manual-rollback

@@ -40,7 +40,6 @@ export const api_bible = {
   editScenePrompt: scenes.editScenePrompt,
   editSceneAnchor: scenes.editSceneAnchor,
   regenerateSceneView: scenes.regenerateSceneView,
-  adoptSceneCandidate: scenes.adoptSceneCandidate,
   rollbackSceneReference: scenes.rollbackSceneReference,
   // manual（完全手动新增/替换，不走模型）
   addManualCharacter: manual.addManualCharacter,

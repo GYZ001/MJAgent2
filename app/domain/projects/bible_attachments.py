@@ -195,35 +195,12 @@ def _attach_scene_refs(conn, project_id: str, bible: dict) -> None:
             },
             "views": views_by_scene.get(r.get("id") or "", []),
         })
-    candidate_by_name: dict[str, list[dict]] = {}
-    artifact_rows = rows_to_dicts(conn.execute(
-        """SELECT * FROM artifacts
-           WHERE type='scene_reference' AND scope_type='reference_asset' AND scope_id LIKE ?
-           ORDER BY created_at, version""",
-        (f"{project_id}:%",),
-    ).fetchall())
-    for artifact in artifact_rows:
-        try:
-            content = json.loads(artifact.get("content_json") or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            content = {}
-        scene_name = str(content.get("scene_name") or "").strip()
-        if not scene_name:
-            continue
-        artifact["evaluations"] = evidence_repository.get_evaluations(artifact["id"])
-        artifact.pop("content_json", None)
-        candidate_by_name.setdefault(scene_name, []).append({
-            "artifact_id": artifact["id"],
-            "status": artifact["status"],
-            "trust_level": artifact["trust_level"],
-            "attempt": content.get("attempt"),
-            "image_url": _media_url(artifact.get("file_path")),
-            "evidence": artifact,
-        })
+    # 候选图能力已退场（用户拍板 2026-09-01，见 app/scenes.py 的墓碑注释）：这里
+    # 曾把该项目全部 scene_reference 产物连同它们的评估记录一并下发给场景库供人工
+    # 挑选采纳。现在场景卡只需要"当前这一版"，历史版本仍可在场景版本里回滚。
     for s in bible.get("scenes", []):
         segs = by_name.get(s.get("name"), [])
         s["scene_refs"] = segs
-        s["scene_candidates"] = candidate_by_name.get(s.get("name"), [])
         if not s.get("ref_image_url"):
             latest = next((seg for seg in reversed(segs) if seg.get("image_url")), None)
             if latest:

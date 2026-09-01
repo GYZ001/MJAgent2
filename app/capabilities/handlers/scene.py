@@ -57,16 +57,4 @@ async def regenerate_view(args: I.SceneViewRegenerateInput) -> CommandResult:
     return succeeded(f"场景视角 {args.view_role} 已重做并通过整包 QA", data=outcome)
 
 
-async def adopt_candidate(args: I.SceneAdoptCandidateInput) -> CommandResult:
-    from app import api
-
-    outcome = await call_guarded(
-        api.adopt_scene_candidate_route,
-        args.project_id, args.scene_name, args.artifact_id,
-        body={"reason": args.reason},
-    )
-    if isinstance(outcome, CommandResult):
-        return outcome
-    return succeeded(f"已采纳场景「{args.scene_name}」的候选图", data=outcome)
-
 

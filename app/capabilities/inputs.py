@@ -142,13 +142,6 @@ class SceneViewRegenerateInput(StandardCommandInput):
     view_role: str
 
 
-class SceneAdoptCandidateInput(StandardCommandInput):
-    project_id: str
-    scene_name: str
-    artifact_id: str
-    reason: str = "人工采纳候选"
-
-
 class EpisodePlanInput(StandardCommandInput):
     project_id: str
     replace_existing: bool = False

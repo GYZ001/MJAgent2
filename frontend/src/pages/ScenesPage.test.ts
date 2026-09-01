@@ -115,7 +115,10 @@ describe('场景主图与附加视角状态', () => {
     expect(sceneUsability(scene, false)).toBe('available')
   })
 
-  it('整包模式缺少必需视角文件时不可用', () => {
+  it('只出了主图、侧视角还没补上，照样是可用', () => {
+    // 用户拍板 2026-09-01：有图就是可用。旧判据要求 required_views 齐全，实测把
+    // 「赵国大青山山顶」（主图在、reverse_angle 没成）判成不可用，还连带让出图流程
+    // 反复重烧主图堆到 8 张候选。
     const scene = {
       name: '半包场景',
       scene_canonical: '室内',
@@ -131,6 +134,11 @@ describe('场景主图与附加视角状态', () => {
       }],
     }
 
+    expect(sceneUsability(scene, false)).toBe('available')
+  })
+
+  it('一张图都没有才是不可用', () => {
+    const scene = { name: '空场景', scene_canonical: '室内', scene_refs: [] }
     expect(sceneUsability(scene, false)).toBe('unavailable')
   })
 })

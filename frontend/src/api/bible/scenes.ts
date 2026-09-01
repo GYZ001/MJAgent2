@@ -102,15 +102,6 @@ export interface SceneRefSegment {
   }[];
 }
 
-export interface SceneReferenceCandidate {
-  artifact_id: string;
-  status: string;
-  trust_level: string;
-  attempt?: number | null;
-  image_url?: string | null;
-  evidence?: ArtifactEvidence | null;
-}
-
 export interface Scene {
   name: string;
   scene_canonical: string;
@@ -120,7 +111,6 @@ export interface Scene {
   scene_prompt_override?: string | null;
   scene_prompt_effective?: string;
   scene_refs?: SceneRefSegment[];
-  scene_candidates?: SceneReferenceCandidate[];
   space?: string;
   time_of_day?: string;
   lighting?: string;
@@ -228,19 +218,6 @@ export function regenerateSceneView(
     "POST",
     `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/refs/${sceneRefId}/views/${encodeURIComponent(viewRole)}/regenerate`,
     body,
-  );
-}
-
-export function adoptSceneCandidate(
-  projectId: string,
-  sceneName: string,
-  artifactId: string,
-  reason?: string,
-) {
-  return request(
-    "POST",
-    `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/candidates/${encodeURIComponent(artifactId)}/adopt`,
-    { reason: reason || "人工采纳候选" },
   );
 }
 

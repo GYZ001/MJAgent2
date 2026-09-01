@@ -10,7 +10,6 @@ import json
 from app import (
     task_registry,
 )
-from app.auth.principal import current_actor_name
 from app.db import (
     get_conn,
     new_id,
@@ -443,38 +442,6 @@ async def cancel_scene_view_regeneration(
     task_key = f"{scene_reference_id}:{view_role}"
     stopped = await task_registry.cancel_and_wait("scene_view_redo", task_key)
     return {"stopped": stopped, "task_id": f"scene_view_redo:{task_key}", "old_asset_preserved": True}
-
-@router.post("/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/adopt")
-async def adopt_scene_candidate_route(
-    project_id: str, scene_name: str, artifact_id: str, body: dict | None = None,
-):
-    """手动采纳场景候选图为主图。"""
-    from app.capabilities.dispatch import ui_route
-    routed = await ui_route(
-        "scene.adopt_candidate",
-        {
-            "project_id": project_id,
-            "scene_name": scene_name,
-            "artifact_id": artifact_id,
-            "reason": (body or {}).get("reason") or "",
-        },
-    )
-    if routed is not None:
-        return routed
-    _project_or_404(project_id)
-    from app.scenes import adopt_scene_candidate
-    try:
-        return await adopt_scene_candidate(
-            project_id,
-            scene_name,
-            artifact_id,
-            reason=str((body or {}).get("reason") or ""),
-            decided_by=current_actor_name(),
-        )
-    except KeyError as exc:
-        raise HTTPException(404, str(exc) or "候选不存在") from exc
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
 
 @router.post("/projects/{project_id}/scenes/{scene_name}/refs/{scene_reference_id}/rollback")
 async def rollback_scene_reference(

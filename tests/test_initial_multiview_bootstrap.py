@@ -591,9 +591,14 @@ def test_resume_completes_partial_character_pack_instead_of_skipping_it(
     assert persisted["characters"][0]["ref_image_path"] == str(front)
 
 
-def test_scene_exists_requires_complete_multiview_pack(
+def test_scene_exists_only_requires_the_primary_image(
     asset_db, monkeypatch,
 ) -> None:
+    """有图就是可用（用户拍板 2026-09-01）：主图落盘即算"这个场景已经有图"。
+
+    旧判据要求整包必需视角齐全，等价于把"侧视角没补上"翻译成"还没有图"，于是
+    每一轮补图都重出一张全新主图——候选堆积的直接来源。
+    """
     conn, tmp_path = asset_db
     _seed_bible_project(conn, with_scene=True)
     image = tmp_path / "scene.jpg"
@@ -609,7 +614,8 @@ def test_scene_exists_requires_complete_multiview_pack(
         1,
     )
     monkeypatch.setattr(multiview, "scene_multiview_enabled", lambda: True)
-    assert scenes.scene_ref_exists(conn, "proj_bootstrap", "Courtyard") is False
+    # 只有主图、一个视角行都没有：照样算"已经有图"。
+    assert scenes.scene_ref_exists(conn, "proj_bootstrap", "Courtyard") is True
 
     conn.execute("UPDATE scene_references SET pack_status='ready' WHERE id=?", (scene_id,))
     for role in ("establishing", "reverse_angle"):
@@ -662,9 +668,15 @@ def test_scene_multiview_generation_uses_candidate_scoped_recovery_operations(
     assert all(item["operation_id"].startswith("op_scene_view_") for item in captured)
 
 
-def test_failed_extra_view_pack_does_not_expose_primary_to_video(
+def test_failed_extra_view_pack_still_exposes_primary_to_video(
     asset_db, monkeypatch,
 ) -> None:
+    """有图就是可用（用户拍板 2026-09-01，取代旧的"侧视角没齐就不给下游用"）。
+
+    旧策略的代价是实测出来的：主图已落盘、只差 reverse_angle 时 scene_ref_exists
+    判"还没有图"，于是每一轮补图都重烧一张全新主图，「赵国大青山山顶」堆到 8 张
+    候选，场景库还一直显示"不可用"。现在侧视角缺失只影响侧视角自己。
+    """
     conn, tmp_path = asset_db
     _seed_bible_project(conn, with_scene=True)
     image = tmp_path / "usable-primary.jpg"
@@ -697,10 +709,9 @@ def test_failed_extra_view_pack_does_not_expose_primary_to_video(
 
     row = conn.execute("SELECT * FROM scene_references WHERE id=?", (scene_id,)).fetchone()
     views = multiview.list_scene_views(scene_id, conn=conn)
-    assert multiview.scene_pack_is_usable(row, views) is False
     assert multiview.scene_primary_is_usable(row, views) is True
-    assert scenes.scene_ref_exists(conn, "proj_bootstrap", "Courtyard") is False
-    assert scenes.scene_ref_for_episode("proj_bootstrap", "Courtyard", 1) is None
+    assert scenes.scene_ref_exists(conn, "proj_bootstrap", "Courtyard") is True
+    assert scenes.scene_ref_for_episode("proj_bootstrap", "Courtyard", 1) == str(image)
 
 
 def test_scene_pack_resume_reuses_existing_main_image_without_regenerating(

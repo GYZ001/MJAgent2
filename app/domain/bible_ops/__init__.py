@@ -188,14 +188,17 @@ from .scene_edit import (
     edit_scene_prompt as edit_scene_prompt,
 )
 
+# current_actor_name 从真源导出，不再借道 view_redo 转手：候选采纳路由退场后
+# view_redo 自己不再用它，靠"子模块碰巧还 import 着"来支撑包属性，下一个人删掉
+# 那行未使用的 import 就会连带打断这条再导出链（本次已实测踩中）。
+from app.auth.principal import current_actor_name as current_actor_name
+
 from .view_redo import (
     _run_portrait_view_redo as _run_portrait_view_redo,
     _run_scene_view_redo as _run_scene_view_redo,
     _start_portrait_view_redo as _start_portrait_view_redo,
     _start_scene_view_redo as _start_scene_view_redo,
-    adopt_scene_candidate_route as adopt_scene_candidate_route,
     cancel_scene_view_regeneration as cancel_scene_view_regeneration,
-    current_actor_name as current_actor_name,
     recover_portrait_view_redo_tasks as recover_portrait_view_redo_tasks,
     recover_scene_view_redo_tasks as recover_scene_view_redo_tasks,
     regenerate_character_view_route as regenerate_character_view_route,
