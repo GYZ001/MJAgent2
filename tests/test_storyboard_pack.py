@@ -13,16 +13,30 @@ import asyncio
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from app import config, db
 from app.continuity import dialogue_framing_errors
 from app.domain.video_ops import _storyboard_structural_errors
 from app.production.screenplay_authority import project_prep_pack_to_screenplay
+from app.production.storyboard_dialogue_ledger import (
+    DialogueQuote,
+    _AiDroppedLine,
+    _AiKeptLine,
+    dialogue_ledger_errors,
+    dialogue_ledger_summary,
+    extract_dialogue_targets,
+    required_dialogue_for_segments,
+    required_dialogue_missing_errors,
+)
 from app.production.storyboard_pack import (
     CAMERA_DIGEST_WINDOW,
+    MAX_SHOTS_PER_SEGMENT,
+    MIN_SHOTS_PER_SEGMENT,
     STORYBOARD_PACK_CONTRACT_MARKER,
     STORYBOARD_PACK_VERSION,
     MINIMAX_H3_DIALECT_INSTRUCTIONS,
+    SEEDANCE_DIALECT_INSTRUCTIONS,
     SEGMENT_PROMPT_ANSWER_TOKENS,
     StoryboardPack,
     StoryboardPackBeat,
@@ -256,7 +270,7 @@ def test_validate_beat_sheet_draft_accepts_well_formed_draft():
             )
         ],
     )
-    assert _validate_beat_sheet_draft(draft, total_segments=3) == []
+    assert _validate_beat_sheet_draft(draft, total_segments=3, dialogue_quotes=[]) == []
 
 
 def test_validate_beat_sheet_draft_rejects_out_of_range_segment_index():
@@ -264,7 +278,7 @@ def test_validate_beat_sheet_draft_rejects_out_of_range_segment_index():
         beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[99])],
         segments=[_AiSegmentPlan(segment_no=1, synopsis="x", source_segment_indexes=[1])],
     )
-    errors = _validate_beat_sheet_draft(draft, total_segments=3)
+    errors = _validate_beat_sheet_draft(draft, total_segments=3, dialogue_quotes=[])
     assert any("不存在的原文段号" in e for e in errors)
 
 
@@ -273,7 +287,7 @@ def test_validate_beat_sheet_draft_rejects_non_contiguous_segment_no():
         beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1])],
         segments=[_AiSegmentPlan(segment_no=2, synopsis="x", source_segment_indexes=[1])],
     )
-    errors = _validate_beat_sheet_draft(draft, total_segments=3)
+    errors = _validate_beat_sheet_draft(draft, total_segments=3, dialogue_quotes=[])
     assert any("连续递增" in e for e in errors)
 
 
@@ -286,8 +300,234 @@ def test_validate_beat_sheet_draft_rejects_unknown_beat_id_reference():
             )
         ],
     )
-    errors = _validate_beat_sheet_draft(draft, total_segments=3)
+    errors = _validate_beat_sheet_draft(draft, total_segments=3, dialogue_quotes=[])
     assert any("不存在的 beat_id" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# 2.1.0 对白台账：确定性抽取（四种引号 + paratext 排除）
+# ---------------------------------------------------------------------------
+
+def _seg(text: str) -> SourceSegment:
+    return SourceSegment(segment_id="s", text=text, start_offset=0, end_offset=len(text))
+
+
+def test_extract_dialogue_targets_covers_all_four_quote_styles():
+    segments = [
+        _seg("张三说：“你好啊”。"),
+        _seg("李四说：「我们走吧」。"),
+        _seg("他喊：『小心！』"),
+        _seg('她答："好的。"'),
+    ]
+    quotes = extract_dialogue_targets(segments, set())
+    texts = [q.text for q in quotes]
+    assert texts == ["你好啊", "我们走吧", "小心！", "好的。"]
+    assert [q.quote_id for q in quotes] == ["Q01", "Q02", "Q03", "Q04"]
+    assert [q.source_segment_index for q in quotes] == [1, 2, 3, 4]
+
+
+def test_extract_dialogue_targets_numbers_by_appearance_order_within_a_segment():
+    segments = [_seg("甲说：“先走”，乙答：“再等等”。")]
+    quotes = extract_dialogue_targets(segments, set())
+    assert [(q.quote_id, q.text) for q in quotes] == [("Q01", "先走"), ("Q02", "再等等")]
+
+
+def test_extract_dialogue_targets_excludes_paratext_segments():
+    segments = [_seg("正文说：“留下”。"), _seg("作者的话：“求票”。")]
+    quotes = extract_dialogue_targets(segments, {2})
+    assert [q.text for q in quotes] == ["留下"]
+
+
+def test_extract_dialogue_targets_computes_content_chars_without_punctuation():
+    quotes = extract_dialogue_targets([_seg("甲说：“你好，世界！”")], set())
+    assert quotes[0].content_chars == 4  # 你好世界，标点与说话人前缀不计入
+
+
+def test_extract_dialogue_targets_empty_when_no_quotes():
+    assert extract_dialogue_targets([_seg("这一段没有任何引号台词。")], set()) == []
+
+
+# ---------------------------------------------------------------------------
+# 2.1.0 对白台账：阶段一 blocking 校验（dialogue_ledger_errors）
+# ---------------------------------------------------------------------------
+
+def _quote(quote_id="Q01", segment_index=1, text="走吧", chars=None) -> DialogueQuote:
+    from app import spoken_contract
+
+    return DialogueQuote(
+        quote_id=quote_id, source_segment_index=segment_index, text=text,
+        content_chars=chars if chars is not None else spoken_contract.content_char_count(text),
+    )
+
+
+def test_dialogue_ledger_errors_accepts_fully_partitioned_kept_and_dropped():
+    quotes = [_quote("Q01"), _quote("Q02", text="啊")]
+    errors = dialogue_ledger_errors(
+        quotes=quotes,
+        kept_lines=[_AiKeptLine(quote_id="Q01", segment_no=1)],
+        dropped_lines=[_AiDroppedLine(quote_id="Q02", reason="纯语气词")],
+        segment_source_indexes={1: [1]},
+        max_chars_per_segment=54,
+    )
+    assert errors == []
+
+
+def test_dialogue_ledger_errors_rejects_unknown_quote_id_reference():
+    errors = dialogue_ledger_errors(
+        quotes=[_quote("Q01")],
+        kept_lines=[_AiKeptLine(quote_id="Q99", segment_no=1)],
+        dropped_lines=[],
+        segment_source_indexes={1: [1]},
+        max_chars_per_segment=54,
+    )
+    assert any("不存在的 quote_id" in e for e in errors)
+
+
+def test_dialogue_ledger_errors_rejects_quote_missing_from_both_lists():
+    errors = dialogue_ledger_errors(
+        quotes=[_quote("Q01"), _quote("Q02")],
+        kept_lines=[_AiKeptLine(quote_id="Q01", segment_no=1)],
+        dropped_lines=[],
+        segment_source_indexes={1: [1]},
+        max_chars_per_segment=54,
+    )
+    assert any("Q02" in e and "既不在" in e for e in errors)
+
+
+def test_dialogue_ledger_errors_rejects_quote_listed_in_both_kept_and_dropped():
+    errors = dialogue_ledger_errors(
+        quotes=[_quote("Q01")],
+        kept_lines=[_AiKeptLine(quote_id="Q01", segment_no=1)],
+        dropped_lines=[_AiDroppedLine(quote_id="Q01", reason="重复")],
+        segment_source_indexes={1: [1]},
+        max_chars_per_segment=54,
+    )
+    assert any("重复出现" in e for e in errors)
+
+
+def test_dialogue_ledger_errors_rejects_cross_segment_drift():
+    """台词不得分到一个没有引用它原文段号的新段（跨段漂移）。"""
+    errors = dialogue_ledger_errors(
+        quotes=[_quote("Q01", segment_index=1)],
+        kept_lines=[_AiKeptLine(quote_id="Q01", segment_no=2)],
+        dropped_lines=[],
+        segment_source_indexes={1: [1], 2: [2, 3]},
+        max_chars_per_segment=54,
+    )
+    assert any("跨段漂移" in e for e in errors)
+
+
+def test_dialogue_ledger_errors_rejects_kept_line_referencing_unknown_segment_no():
+    errors = dialogue_ledger_errors(
+        quotes=[_quote("Q01", segment_index=1)],
+        kept_lines=[_AiKeptLine(quote_id="Q01", segment_no=99)],
+        dropped_lines=[],
+        segment_source_indexes={1: [1]},
+        max_chars_per_segment=54,
+    )
+    assert any("不存在的 segment_no=99" in e for e in errors)
+
+
+def test_dialogue_ledger_errors_rejects_segment_over_capacity_and_suggests_more_segments():
+    quotes = [_quote("Q01", text="这句台词很长" * 10, chars=60)]
+    errors = dialogue_ledger_errors(
+        quotes=quotes,
+        kept_lines=[_AiKeptLine(quote_id="Q01", segment_no=1)],
+        dropped_lines=[],
+        segment_source_indexes={1: [1]},
+        max_chars_per_segment=54,
+    )
+    assert any("超过 15 秒口播容量" in e and "拆成更多" in e for e in errors)
+
+
+def test_dialogue_ledger_errors_empty_ledger_passes_with_no_quotes():
+    """空取值域：本章没有引号台词时，kept/dropped 也为空——自然通过。"""
+    errors = dialogue_ledger_errors(
+        quotes=[], kept_lines=[], dropped_lines=[],
+        segment_source_indexes={1: [1]}, max_chars_per_segment=54,
+    )
+    assert errors == []
+
+
+def test_dialogue_ledger_errors_empty_ledger_rejects_any_referenced_id():
+    """空取值域=什么都不合法，不是"不用查"（2.0.2 changelog 同类教训）。"""
+    errors = dialogue_ledger_errors(
+        quotes=[],
+        kept_lines=[_AiKeptLine(quote_id="Q01", segment_no=1)],
+        dropped_lines=[],
+        segment_source_indexes={1: [1]}, max_chars_per_segment=54,
+    )
+    assert any("不存在的 quote_id" in e for e in errors)
+
+
+def test_validate_beat_sheet_draft_surfaces_dialogue_ledger_errors():
+    """_validate_beat_sheet_draft 把 dialogue_ledger_errors 接进自己的 blocking 校验。"""
+    draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1])],
+        segments=[_AiSegmentPlan(segment_no=1, synopsis="x", source_segment_indexes=[1], beat_ids=["B1"])],
+        kept_lines=[_AiKeptLine(quote_id="Q-GHOST", segment_no=1)],
+    )
+    errors = _validate_beat_sheet_draft(draft, total_segments=3, dialogue_quotes=[])
+    assert any("不存在的 quote_id" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# 2.1.0 必保台词：required_dialogue_for_segments / dialogue_ledger_summary
+# ---------------------------------------------------------------------------
+
+def test_required_dialogue_for_segments_groups_kept_lines_by_segment_no():
+    quotes = [_quote("Q01", segment_index=1, text="走吧"), _quote("Q02", segment_index=2, text="等等")]
+    kept = [_AiKeptLine(quote_id="Q01", segment_no=1), _AiKeptLine(quote_id="Q02", segment_no=1)]
+    grouped = required_dialogue_for_segments(kept, quotes)
+    assert grouped == {
+        1: [
+            {"quote_id": "Q01", "text": "走吧", "source_segment_index": 1},
+            {"quote_id": "Q02", "text": "等等", "source_segment_index": 2},
+        ]
+    }
+
+
+def test_required_dialogue_for_segments_empty_when_no_kept_lines():
+    assert required_dialogue_for_segments([], [_quote("Q01")]) == {}
+
+
+def test_dialogue_ledger_summary_reports_drop_rate_and_dropped_text():
+    quotes = [_quote("Q01", text="走吧", chars=2), _quote("Q02", text="啊", chars=1)]
+    summary = dialogue_ledger_summary(
+        quotes,
+        kept_lines=[_AiKeptLine(quote_id="Q01", segment_no=1)],
+        dropped_lines=[_AiDroppedLine(quote_id="Q02", reason="纯语气词")],
+    )
+    assert summary["total_quotes"] == 2
+    assert summary["dropped_count"] == 1
+    assert summary["dropped_lines"][0]["text"] == "啊"
+    assert summary["dropped_char_ratio"] == round(1 / 3, 4)
+
+
+def test_dialogue_ledger_summary_zero_ratio_when_no_quotes():
+    assert dialogue_ledger_summary([], [], [])["dropped_char_ratio"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# 2.1.0 必保台词：required_dialogue_missing_errors（阶段二 blocking 检查）
+# ---------------------------------------------------------------------------
+
+def test_required_dialogue_missing_errors_empty_when_no_requirement():
+    assert required_dialogue_missing_errors([], []) == []
+
+
+def test_required_dialogue_missing_errors_flags_absent_line():
+    errors = required_dialogue_missing_errors(
+        [{"quote_id": "Q01", "text": "我们走吧", "source_segment_index": 1}], ["完全不相关的台词"],
+    )
+    assert any("Q01" in e for e in errors)
+
+
+def test_required_dialogue_missing_errors_accepts_verbatim_presence():
+    errors = required_dialogue_missing_errors(
+        [{"quote_id": "Q01", "text": "我们走吧", "source_segment_index": 1}], ["我们走吧"],
+    )
+    assert errors == []
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +545,25 @@ def _draft(**overrides) -> _AiStoryboardSegmentDraft:
     return _AiStoryboardSegmentDraft(**base)
 
 
+# ---------------------------------------------------------------------------
+# 2.1.0 镜头数放宽：MIN_SHOTS_PER_SEGMENT 3→2（对话交锋段 2 镜正反打即可）
+# ---------------------------------------------------------------------------
+
+def test_min_shots_per_segment_is_two():
+    assert MIN_SHOTS_PER_SEGMENT == 2
+    assert MAX_SHOTS_PER_SEGMENT == 4
+
+
+def test_segment_draft_accepts_two_shots_at_the_new_floor():
+    draft = _draft(shot_count=MIN_SHOTS_PER_SEGMENT)
+    assert draft.shot_count == 2
+
+
+def test_segment_draft_rejects_shot_count_below_the_new_floor():
+    with pytest.raises(ValidationError):
+        _draft(shot_count=MIN_SHOTS_PER_SEGMENT - 1)
+
+
 # 2026-08-26（用户拍板，第一版分镜提示词不设任何内容门禁）：
 # _validate_segment_draft 现在只剩「下一环节会真的用不了」的形状检查
 # （prompt_text 空/超限、H3 固定字段名）；内容判断（说话人在场、资源身份是否
@@ -312,13 +571,16 @@ def _draft(**overrides) -> _AiStoryboardSegmentDraft:
 # model_gateway.chat_structured 的语义重试/失败判定。
 
 def test_validate_segment_draft_accepts_well_formed_draft():
-    errors = _validate_segment_draft(_draft(), dialect_render_format="seedance_compact_director_brief")
+    errors = _validate_segment_draft(
+        _draft(), dialect_render_format="seedance_compact_director_brief", required_dialogue=[],
+    )
     assert errors == []
 
 
 def test_validate_segment_draft_rejects_empty_prompt_text():
     errors = _validate_segment_draft(
         _draft(prompt_text=" "), dialect_render_format="seedance_compact_director_brief",
+        required_dialogue=[],
     )
     assert any("为空" in e for e in errors)
 
@@ -327,13 +589,16 @@ def test_validate_segment_draft_requires_h3_literal_fields():
     errors = _validate_segment_draft(
         _draft(prompt_text="没有按 H3 格式写的自由散文"),
         dialect_render_format="minimax_h3_native_fields",
+        required_dialogue=[],
     )
     assert any("integrated_multimodal_description:" in e for e in errors)
 
 
 def test_validate_segment_draft_rejects_over_char_limit(monkeypatch):
     monkeypatch.setattr(config, "PROMPT_CHAR_LIMIT", 10)
-    errors = _validate_segment_draft(_draft(), dialect_render_format="seedance_compact_director_brief")
+    errors = _validate_segment_draft(
+        _draft(), dialect_render_format="seedance_compact_director_brief", required_dialogue=[],
+    )
     assert any("超过上限" in e for e in errors)
 
 
@@ -343,6 +608,7 @@ def test_validate_segment_draft_does_not_block_on_dialogue_source_outside_segmen
     errors = _validate_segment_draft(
         _draft(dialogue=[_AiDialogueLine(speaker_identity_id="id_a", line="走吧", source_segment_index=9)]),
         dialect_render_format="seedance_compact_director_brief",
+        required_dialogue=[],
     )
     assert errors == []
 
@@ -351,6 +617,50 @@ def test_validate_segment_draft_does_not_block_on_unknown_character_resource():
     errors = _validate_segment_draft(
         _draft(resources=_AiSegmentResources(characters=[{"identity_id": "id_ghost", "description": "x"}])),
         dialect_render_format="seedance_compact_director_brief",
+        required_dialogue=[],
+    )
+    assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# 2.1.0 必保台词：required_dialogue 是 _validate_segment_draft 唯一新增的
+# blocking 内容检查。
+# ---------------------------------------------------------------------------
+
+def test_validate_segment_draft_rejects_missing_required_dialogue():
+    errors = _validate_segment_draft(
+        _draft(dialogue=[]),
+        dialect_render_format="seedance_compact_director_brief",
+        required_dialogue=[{"quote_id": "Q01", "text": "我们走吧", "source_segment_index": 1}],
+    )
+    assert any("必保台词" in e and "Q01" in e for e in errors)
+
+
+def test_validate_segment_draft_accepts_required_dialogue_present_verbatim():
+    errors = _validate_segment_draft(
+        _draft(dialogue=[_AiDialogueLine(speaker_identity_id="id_a", line="我们走吧", source_segment_index=1)]),
+        dialect_render_format="seedance_compact_director_brief",
+        required_dialogue=[{"quote_id": "Q01", "text": "我们走吧", "source_segment_index": 1}],
+    )
+    assert errors == []
+
+
+def test_validate_segment_draft_accepts_required_dialogue_with_minor_connective_edit():
+    """允许衔接性微调（不要求逐字），核对主干即可。"""
+    errors = _validate_segment_draft(
+        _draft(dialogue=[_AiDialogueLine(
+            speaker_identity_id="id_a", line="他说：我们走吧。", source_segment_index=1,
+        )]),
+        dialect_render_format="seedance_compact_director_brief",
+        required_dialogue=[{"quote_id": "Q01", "text": "我们走吧", "source_segment_index": 1}],
+    )
+    assert errors == []
+
+
+def test_validate_segment_draft_empty_required_dialogue_is_noop():
+    errors = _validate_segment_draft(
+        _draft(dialogue=[]), dialect_render_format="seedance_compact_director_brief",
+        required_dialogue=[],
     )
     assert errors == []
 
@@ -463,6 +773,69 @@ def test_dialect_tells_the_model_what_to_do_with_a_character_that_has_no_referen
     assert "每一个出现他的镜头" in rule, "没有要求未收录角色每镜自带外观特征"
 
 
+# ---------------------------------------------------------------------------
+# 2.1.0 方言文案：镜头数放宽（2-4）、必保台词、受控画外音
+# ---------------------------------------------------------------------------
+
+def test_dialect_instructions_mention_two_to_four_shots_not_the_old_fixed_range():
+    """旧措辞是「本段固定 3-4 镜」；新措辞放宽下限到 2，且不再是「固定」。
+    "3-4" 本身仍会出现（叙事推进段用 3-4 镜），只是不再是唯一/固定选项。"""
+    for name, text in (
+        ("seedance", SEEDANCE_DIALECT_INSTRUCTIONS),
+        ("minimax_h3", MINIMAX_H3_DIALECT_INSTRUCTIONS),
+    ):
+        assert "2-4" in text, f"{name} 没有把镜头数下限放宽到 2-4"
+    assert "本段固定 3-4 镜" not in SEEDANCE_DIALECT_INSTRUCTIONS
+    assert "write 3-4 Shots total." not in MINIMAX_H3_DIALECT_INSTRUCTIONS
+
+
+def test_seedance_dialect_explains_dialogue_exchange_can_use_two_shots():
+    assert "正反打" in SEEDANCE_DIALECT_INSTRUCTIONS
+    assert "交锋段" in SEEDANCE_DIALECT_INSTRUCTIONS
+
+
+def test_dialect_instructions_reference_required_dialogue_capacity_contract():
+    """必保台词清单由上游给定，方言指令必须要求「全部说出」而不是自行取舍。"""
+    for name, text in (
+        ("seedance", SEEDANCE_DIALECT_INSTRUCTIONS),
+        ("minimax_h3", MINIMAX_H3_DIALECT_INSTRUCTIONS),
+    ):
+        assert "required_dialogue" in text, f"{name} 没有提到 required_dialogue 必保台词清单"
+
+
+def test_seedance_dialect_explains_offscreen_voice_writing_convention():
+    text = SEEDANCE_DIALECT_INSTRUCTIONS
+    assert "offscreen_voice" in text
+    assert "画外音" in text
+    assert "口型" in text or "嘴唇" in text, "没有要求声明画面里角色的口型/嘴唇状态"
+
+
+def test_h3_dialect_connects_offscreen_voiceover_to_the_delivery_field():
+    text = MINIMAX_H3_DIALECT_INSTRUCTIONS
+    assert "off-screen voiceover" in text
+    assert "offscreen_voice" in text
+    assert "delivery" in text
+
+
+def test_ai_dialogue_line_defaults_delivery_to_spoken_dialogue():
+    line = _AiDialogueLine(speaker_identity_id="id_a", line="走吧", source_segment_index=1)
+    assert line.delivery == "spoken_dialogue"
+
+
+def test_ai_dialogue_line_accepts_offscreen_voice():
+    line = _AiDialogueLine(
+        speaker_identity_id="id_a", line="走吧", source_segment_index=1, delivery="offscreen_voice",
+    )
+    assert line.delivery == "offscreen_voice"
+
+
+def test_ai_dialogue_line_rejects_unknown_delivery_value():
+    with pytest.raises(ValidationError):
+        _AiDialogueLine(
+            speaker_identity_id="id_a", line="走吧", source_segment_index=1, delivery="narration",
+        )
+
+
 def test_unknown_character_advisory_says_what_actually_happened() -> None:
     """降级信号不能声称做了它没做的事。
 
@@ -495,6 +868,27 @@ def test_segment_content_advisories_flags_misattributed_speaker_but_does_not_rai
         source_segment_indexes=[1, 2],
     )
     assert any("不在本段 resources.characters 内" in a for a in advisories)
+
+
+def test_segment_content_advisories_offscreen_voice_uses_different_wording():
+    """画外音不要求在场，advisory 措辞不能说「没有在场证据」——声音仍需归属
+    到一个角色，改说「未列入」。"""
+    draft = _draft(
+        dialogue=[_AiDialogueLine(
+            speaker_identity_id="id_absent", line="走吧", source_segment_index=1,
+            delivery="offscreen_voice",
+        )],
+        resources=_AiSegmentResources(characters=[{"identity_id": "id_a", "description": "x"}]),
+    )
+    advisories = _segment_content_advisories(
+        draft, known_character_ids={"id_a", "id_absent"}, known_scene_ids=set(),
+        source_segment_indexes=[1, 2],
+    )
+    flagged = [a for a in advisories if "SPEAKER_ABSENT" in a]
+    assert flagged
+    assert "画外音" in flagged[0]
+    assert "未列入" in flagged[0]
+    assert "没有在场证据" not in flagged[0]
 
 
 def test_segment_content_advisories_flags_untraceable_dialogue_source():
@@ -628,6 +1022,31 @@ def test_storyboard_pack_dialogue_errors_flags_absent_speaker():
     )
     errors = storyboard_pack_dialogue_errors(shot)
     assert any("SPEAKER_ABSENT" in e for e in errors)
+
+
+def test_storyboard_pack_dialogue_errors_legacy_row_without_delivery_key_treated_as_spoken():
+    """旧数据行（2.1.0 之前生成）没有 delivery 键——按 spoken_dialogue 处理，
+    行为与 2.1.0 之前完全一致：报「没有在场证据」，不是「未列入」。"""
+    shot = _shot_with_segment(
+        dialogue=[{"speaker_identity_id": "id_ghost", "line": "走吧", "source_segment_index": 1}],
+    )
+    assert "delivery" not in shot.storyboard_pack_segment["dialogue"][0]
+    errors = storyboard_pack_dialogue_errors(shot)
+    assert any("没有在场证据" in e for e in errors)
+
+
+def test_storyboard_pack_dialogue_errors_offscreen_voice_uses_different_wording():
+    shot = _shot_with_segment(
+        dialogue=[{
+            "speaker_identity_id": "id_ghost", "line": "走吧", "source_segment_index": 1,
+            "delivery": "offscreen_voice",
+        }],
+    )
+    errors = storyboard_pack_dialogue_errors(shot)
+    flagged = [e for e in errors if "SPEAKER_ABSENT" in e]
+    assert flagged
+    assert "画外音" in flagged[0] and "未列入" in flagged[0]
+    assert "没有在场证据" not in flagged[0]
 
 
 def test_storyboard_pack_dialogue_errors_flags_untraceable_source():
@@ -922,6 +1341,82 @@ def test_persist_storyboard_pack_writes_one_shots_row_per_segment():
     # （app.media_exec.enqueue 第一次生成时也是从这个字段读，不再经过
     # adopted_version_id 转一手）。
     assert contract["storyboard_pack_segment"]["prompt_text"] == _pack().segments[0].prompt_text
+
+
+def test_persist_storyboard_pack_defaults_missing_delivery_key_to_spoken_dialogue():
+    """_pack() 的 dialogue 字典没有 delivery 键（模拟旧数据/未声明字段的模型
+    产出）：persist 必须把它落成 spoken_dialogue，不得留空或报错。"""
+    conn = db.get_conn()
+    episode_id = "ep-pack-delivery-default"
+    _seed_episode(conn, episode_id=episode_id)
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    payload = _prep_pack_2_0_0_payload()
+    segments = _real_segments(conn, ep)
+    assert "delivery" not in _pack().segments[0].dialogue[0]
+    persist_storyboard_pack(conn, episode_id, ep, payload, _pack(), segments=segments)
+
+    row = conn.execute("SELECT * FROM shots WHERE episode_id=?", (episode_id,)).fetchone()
+    dialogues = json.loads(row["dialogues"])
+    assert dialogues[0]["delivery"] == "spoken_dialogue"
+
+
+def test_persist_storyboard_pack_preserves_explicit_offscreen_voice_delivery():
+    conn = db.get_conn()
+    episode_id = "ep-pack-delivery-offscreen"
+    _seed_episode(conn, episode_id=episode_id)
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    payload = _prep_pack_2_0_0_payload()
+    segments = _real_segments(conn, ep)
+    pack = _pack()
+    pack.segments[0].dialogue = [{
+        "speaker_identity_id": "id_a", "line": "他早就想离开这里了",
+        "source_segment_index": 1, "delivery": "offscreen_voice",
+    }]
+    persist_storyboard_pack(conn, episode_id, ep, payload, pack, segments=segments)
+
+    row = conn.execute("SELECT * FROM shots WHERE episode_id=?", (episode_id,)).fetchone()
+    dialogues = json.loads(row["dialogues"])
+    assert dialogues[0]["delivery"] == "offscreen_voice"
+
+
+def test_persist_storyboard_pack_carries_required_dialogue_into_shot_contract():
+    conn = db.get_conn()
+    episode_id = "ep-pack-required-dialogue"
+    _seed_episode(conn, episode_id=episode_id)
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    payload = _prep_pack_2_0_0_payload()
+    segments = _real_segments(conn, ep)
+    pack = _pack()
+    pack.segments[0].required_dialogue = [
+        {"quote_id": "Q01", "text": "走了", "source_segment_index": 1},
+    ]
+    persist_storyboard_pack(conn, episode_id, ep, payload, pack, segments=segments)
+
+    row = conn.execute("SELECT * FROM shots WHERE episode_id=?", (episode_id,)).fetchone()
+    contract = json.loads(row["shot_contract_json"])
+    assert contract["storyboard_pack_segment"]["required_dialogue"] == [
+        {"quote_id": "Q01", "text": "走了", "source_segment_index": 1},
+    ]
+
+
+def test_persist_storyboard_pack_writes_dialogue_ledger_artifact():
+    """episode 级对白台账落成独立 EvidenceArtifact，与 beat_sheet 产物同一模式。"""
+    conn = db.get_conn()
+    episode_id = "ep-pack-dialogue-ledger-artifact"
+    _seed_episode(conn, episode_id=episode_id)
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    payload = _prep_pack_2_0_0_payload()
+    segments = _real_segments(conn, ep)
+    pack = _pack()
+    pack.dialogue_ledger = {"total_quotes": 1, "dropped_count": 0}
+    persist_storyboard_pack(conn, episode_id, ep, payload, pack, segments=segments)
+
+    row = conn.execute(
+        "SELECT content_json FROM artifacts WHERE type='storyboard_pack_dialogue_ledger' "
+        "AND scope_id=?", (episode_id,),
+    ).fetchone()
+    assert row is not None
+    assert json.loads(row["content_json"]) == {"total_quotes": 1, "dropped_count": 0}
 
 
 def test_enqueue_reads_prompt_text_from_contract_not_adopted_version():
@@ -1621,16 +2116,19 @@ def _patch_thinking_model(
     )
 
 
-def test_contract_marker_stays_on_2_0_5_so_existing_packs_resume():
-    """marker 跟落库形状走，不跟提示词措辞走。
+def test_contract_marker_bumps_to_2_1_0_so_stale_low_fidelity_packs_regenerate():
+    """marker 跟落库形状走，不跟提示词措辞走——但 2.1.0 落库形状确实变了。
 
-    2.0.6 起的约定：只改生成切分或提示词措辞时不动 marker，已成功的集不该被
-    强迫重跑一次付费生成；需要用上新提示词的集走「删除 + 重新生成」。所以
-    STORYBOARD_PACK_VERSION 会随每次修订往前走，marker 只在落库形状真变了
-    的那次才动——断言版本号具体等于几，守的是前者而不是这条规则本身。
+    2.0.6～2.0.8 期间 marker 一直钉在 storyboard_pack/2.0.5：那几次只改生成
+    切分或提示词措辞，落库形状不变，已成功的集不该被强迫重跑一次付费生成。
+    2.1.0 不是同一种情况：新增 StoryboardPackSegment.required_dialogue 字段、
+    dialogue[] 新增 delivery 键，是真正的落库形状变化；更重要的是，这次改造
+    的全部意义在于让"已生成但台词大量丢失"的旧分集在 resume 时被判定为不算
+    数、用新的对白台账 + 必保台词校验重新生成——marker 不动会让 resume 短路
+    继续复用那些低保真产物，新校验、新提示词永远碰不到它们。
     """
-    assert STORYBOARD_PACK_CONTRACT_MARKER == "storyboard_pack/2.0.5"
-    assert STORYBOARD_PACK_VERSION > "2.0.6"
+    assert STORYBOARD_PACK_CONTRACT_MARKER == "storyboard_pack/2.1.0"
+    assert STORYBOARD_PACK_VERSION == "2.1.0"
 
 
 def test_ensure_segment_prompt_budget_passes_when_room_is_ample(monkeypatch):
@@ -1858,6 +2356,7 @@ async def test_generate_calls_model_once_per_segment_strictly_sequential(monkeyp
         payload={},
         target_video_model="hiagent",
         bible=None,
+        required_dialogue_by_segment_no={},
     )
 
     assert list(result) == [1, 2, 3, 4, 5]
@@ -1908,6 +2407,7 @@ async def test_generate_camera_digest_window_excludes_segments_outside_window(mo
         payload={},
         target_video_model="hiagent",
         bible=None,
+        required_dialogue_by_segment_no={},
     )
 
     assert calls[0]["recent_camera_language"] == []
@@ -1950,6 +2450,7 @@ async def test_generate_appearance_rule_tells_model_to_copy_fresh_not_from_memor
         payload={},
         target_video_model="hiagent",
         bible=None,
+        required_dialogue_by_segment_no={},
     )
 
     assert len(calls) == 2
@@ -1959,6 +2460,55 @@ async def test_generate_appearance_rule_tells_model_to_copy_fresh_not_from_memor
         )
         assert "不要凭记忆复述" in appearance_rule
         assert "每次都" in appearance_rule and "重新逐字抄一遍" in appearance_rule
+
+
+@pytest.mark.asyncio
+async def test_generate_passes_required_dialogue_into_payload_and_rules(monkeypatch):
+    """2.1.0：上游按段分配好的 required_dialogue 必须原样进这一段的
+    task_payload，并生成对应的正面陈述规则（要求全部说出，不得再挑拣）。"""
+    import app.production.storyboard_pack as storyboard_pack_module
+
+    calls: list[dict] = []
+
+    async def fake_chat_structured(messages, **kwargs):
+        payload = json.loads(messages[1]["content"])
+        calls.append(payload)
+        return _segment_draft(f"提示词-段{payload['segment_no']}")
+
+    monkeypatch.setattr(storyboard_pack_module.model_gateway, "chat_structured", fake_chat_structured)
+    monkeypatch.setattr(storyboard_pack_module, "_ensure_segment_prompt_budget", lambda: None)
+
+    beat_draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1])],
+        segments=[
+            _AiSegmentPlan(segment_no=1, synopsis="a", source_segment_indexes=[1], beat_ids=["B1"]),
+            _AiSegmentPlan(segment_no=2, synopsis="b", source_segment_indexes=[2], beat_ids=["B1"]),
+        ],
+    )
+    source = [
+        SourceSegment(segment_id="s1", text="少年站在山顶。", start_offset=0, end_offset=7),
+        SourceSegment(segment_id="s2", text="他扔掉了葫芦。", start_offset=7, end_offset=14),
+    ]
+    required = {1: [{"quote_id": "Q01", "text": "我们走吧", "source_segment_index": 1}]}
+
+    await _generate_all_segment_prompts(
+        episode_id="ep-required-dialogue",
+        episode_no=1,
+        beat_draft=beat_draft,
+        segments=source,
+        payload={},
+        target_video_model="hiagent",
+        bible=None,
+        required_dialogue_by_segment_no=required,
+    )
+
+    assert calls[0]["required_dialogue"] == required[1]
+    rule = next(r for r in calls[0]["rules"] if "required_dialogue" in r)
+    assert "必须原样体现" in rule or "必须逐字保留" in rule
+
+    assert calls[1]["required_dialogue"] == []
+    empty_rule = next(r for r in calls[1]["rules"] if "required_dialogue" in r)
+    assert "为空" in empty_rule
 
 
 @pytest.mark.asyncio
@@ -1997,6 +2547,7 @@ async def test_generate_raises_before_any_call_when_budget_cannot_fit_first_segm
             payload={},
             target_video_model="hiagent",
             bible=None,
+            required_dialogue_by_segment_no={},
         )
 
     assert called is False, "预算不够就不该真的发出请求"

@@ -633,11 +633,8 @@ def validate_storyboard(
 # 从原文做字符串匹配——避免和映射台的在场判据产生第二套、可能漂移的实现。
 
 def storyboard_pack_dialogue_errors(shot: Shot) -> list[str]:
-    """分镜台 2.0.0 段行的台词闸门：说话人在场 + 台词有可溯源原文段落。
-
-    只对 ``shot.storyboard_pack_segment is not None`` 的行生效（分镜台 2.0.0
-    产出）；旧架构的行没有这个字段，返回空列表，不受影响。
-    """
+    """分镜台段行的台词闸门：说话人在场 + 台词可溯源；delivery 感知（2.1.0
+    受控画外音，旧行无此键按 spoken_dialogue 处理）；旧架构行返回空列表。"""
     segment = shot.storyboard_pack_segment
     if segment is None:
         return []
@@ -650,12 +647,14 @@ def storyboard_pack_dialogue_errors(shot: Shot) -> list[str]:
     for index, line in enumerate(segment.get("dialogue") or []):
         speaker_id = str(line.get("speaker_identity_id") or "")
         source_index = line.get("source_segment_index")
+        delivery = str(line.get("delivery") or "spoken_dialogue")
         if not speaker_id or speaker_id not in known_character_ids:
-            errors.append(
-                f"[STORYBOARD_PACK_DIALOGUE_SPEAKER_ABSENT] shot_no={shot.shot_no} "
-                f"dialogue[{index}] 的说话人「{speaker_id}」在本段原文中没有在场证据"
-                "（不在本段 resources.characters 内）"
+            tail = (
+                f"是画外音，说话人「{speaker_id}」未列入本段 resources.characters（画外发声也需要注明归属角色）"
+                if delivery == "offscreen_voice" else
+                f"的说话人「{speaker_id}」在本段原文中没有在场证据（不在本段 resources.characters 内）"
             )
+            errors.append(f"[STORYBOARD_PACK_DIALOGUE_SPEAKER_ABSENT] shot_no={shot.shot_no} dialogue[{index}] {tail}")
         try:
             source_index_int = int(source_index)
         except (TypeError, ValueError):

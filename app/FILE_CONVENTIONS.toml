@@ -135,7 +135,10 @@ max_function_lines_python = 50
 "app/production/screenplay_authority.py" = 2529
 "app/production/screenplay_document.py" = 1704
 "app/production/screenplay_repair/llm_field_patch.py" = 593
-"app/production/storyboard_pack.py" = 2087
+"app/production/storyboard_pack.py" = 2086
+# 2.1.0（对白台账/必保台词/受控画外音/镜头数放宽）：方言约束两段指令文本 +
+# _dialect_for_target_video_model 拆到新模块 app.production.storyboard_dialects，
+# 腾出的行数让本文件净减 1 行（2087→2086）——棘轮只降不升，收紧后如实记账。
 "app/quota.py" = 559
 "app/refs.py" = 548
 "app/scenes.py" = 2328
@@ -161,7 +164,9 @@ max_function_lines_python = 50
 "app/validators/outline_dialogue.py" = 566
 "app/validators/prep_pack_ledger.py" = 647
 "app/validators/screenplay_validate.py" = 746
-"app/validators/storyboard_core.py" = 676
+"app/validators/storyboard_core.py" = 675
+# 2026-09-01 分镜台 2.1.0：storyboard_pack_dialogue_errors 补 delivery 感知
+# 措辞（受控画外音），净变化后实测降到 675（676→675）——棘轮只降不升。
 "app/validators/storyboard_delivery.py" = 526
 "app/video_modes/seedance_pack.py" = 523
 "app/video_plan/generate.py" = 689
