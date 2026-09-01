@@ -338,41 +338,84 @@ def _validate_future_identity_response(
                         f"{group_key}"
                     )
             continue
-        if canonical_name != canonical_name.strip() or not canonical_name:
-            errors.append(
-                f"future identity NEW 真名无效：{group_key}"
-            )
-        if len(canonical_name) > IDENTITY_SOURCE_LABEL_DEFENSIVE_MAX_LENGTH:
-            errors.append(
-                f"future identity NEW 真名过长：{group_key}"
-            )
-        if _identity_source_label_has_list_separator(canonical_name):
-            errors.append(
-                f"future identity NEW 真名不得包含身份列表分隔符：{group_key}"
-            )
-        if declared_form != IDENTITY_NAME_FORM_PERSONAL:
-            errors.append(
-                "future identity NEW 只能签发真名（真名 > 尊称 > 代称）："
-                f"{group_key}"
-            )
-        if canonical_name in existing_identity_names:
-            errors.append(
-                "future identity NEW 不得重新签发已有 authority："
-                f"{group_key}"
-            )
-        if evidence_id not in evidence_ids_by_group.get(group_key, []):
-            errors.append(
-                f"future identity NEW evidence_id 越界：{group_key}"
-            )
-            continue
-        evidence = evidence_by_id.get(evidence_id, {})
-        evidence_text = str(evidence.get("text") or "")
-        if (
-            evidence.get("origin") != "future"
-            or evidence_text not in future_text
-            or canonical_name not in evidence_text
-        ):
-            errors.append(
-                f"future identity NEW 缺少逐字真名锚点：{group_key}"
-            )
+        errors.extend(_future_identity_new_named_errors(
+            group_key,
+            canonical_name=canonical_name,
+            evidence_id=evidence_id,
+            declared_form=declared_form,
+            existing_identity_names=existing_identity_names,
+            evidence_ids_by_group=evidence_ids_by_group,
+            evidence_by_id=evidence_by_id,
+            future_text=future_text,
+        ))
+    return errors
+
+
+def _future_identity_new_named_errors(
+    group_key: str,
+    *,
+    canonical_name: str,
+    evidence_id: str,
+    declared_form: str,
+    existing_identity_names: set[str],
+    evidence_ids_by_group: dict[str, list[str]],
+    evidence_by_id: dict[str, dict],
+    future_text: str,
+) -> list[str]:
+    """校验一个被选中 N: 决议的 group：真名形态与逐字锚点的全部判据。
+
+    从 ``_validate_future_identity_response`` 拆出（棘轮基线只降不升，见
+    ``FILE_CONVENTIONS.toml``），本身不含新判据，只是把原来内联在主循环
+    尾部、只在 ``resolution_kind == "new_named"`` 时才执行的一段独立校验
+    提升为具名函数。
+    """
+    errors: list[str] = []
+    if canonical_name != canonical_name.strip() or not canonical_name:
+        errors.append(f"future identity NEW 真名无效：{group_key}")
+    if len(canonical_name) > IDENTITY_SOURCE_LABEL_DEFENSIVE_MAX_LENGTH:
+        errors.append(f"future identity NEW 真名过长：{group_key}")
+    if _identity_source_label_has_list_separator(canonical_name):
+        errors.append(
+            f"future identity NEW 真名不得包含身份列表分隔符：{group_key}"
+        )
+    if declared_form != IDENTITY_NAME_FORM_PERSONAL:
+        errors.append(
+            "future identity NEW 只能签发真名（真名 > 尊称 > 代称）："
+            f"{group_key}"
+        )
+    if canonical_name in existing_identity_names:
+        # 真实事故 ERR-20260831-45404d（EP1 run_c14d8e02d220）：这条本身是
+        # 正确的 fail-closed（同一个真名不得被两次签发新 authority），但
+        # 原始报错没说清楚正确的修复入口在哪——真正该做的合并动作属于
+        # CURRENT 身份识别阶段的 K 决议 absorbed_functional_keys（见
+        # identity_schemas.CurrentKnownIdentityDecision），不是这里能做
+        # 的事，FUTURE 阶段对这个 group 只能改选 F: 决议占位。
+        errors.append(
+            "future identity NEW 不得重新签发已有 authority："
+            f"{group_key} 真名={canonical_name!r} 已在本集权威目录中登记；"
+            "同一个人的其它称谓要在 CURRENT 身份识别阶段用 K 决议的 "
+            "absorbed_functional_keys 吸收，这里只能改选 F: 决议"
+        )
+    if evidence_id not in evidence_ids_by_group.get(group_key, []):
+        # 真实事故 ERR-20260831-45404d：provider 严格模式下 "" 对
+        # reveal_evidence_ids 始终是 schema 合法值（见
+        # identity_schemas._future_identity_schema 里 reveal_evidence_ids
+        # 的注释），选 N: 却把它留空正是那次事故的直接触发点——分清"为空"
+        # 与"填了但不在本组证据目录里"，帮下一个读到这条报错的人一眼看出
+        # 是哪一种。
+        reason = "为空" if not evidence_id else "越界"
+        errors.append(
+            f"future identity NEW evidence_id {reason}：{group_key}"
+            "（选 N: 必须填一个该组证据目录里真实存在的 evidence_id，"
+            "空字符串只在选 F: 时合法）"
+        )
+        return errors
+    evidence = evidence_by_id.get(evidence_id, {})
+    evidence_text = str(evidence.get("text") or "")
+    if (
+        evidence.get("origin") != "future"
+        or evidence_text not in future_text
+        or canonical_name not in evidence_text
+    ):
+        errors.append(f"future identity NEW 缺少逐字真名锚点：{group_key}")
     return errors

@@ -284,6 +284,25 @@ def _future_identity_schema(
                 for key in keys
             }),
             "reveal_evidence_ids": exact_map({
+                # "" 对每个 key 都无条件合法：真正的业务约束是"只有该组
+                # decisions 选 F: 时才允许 ''，选 N: 时必须是本组证据目录
+                # 里的一个真实 evidence_id"，但这是一条跨 decisions/
+                # reveal_evidence_ids 两个字段的条件约束，strict provider
+                # schema 只保留 $defs/$ref/additionalProperties/enum/items/
+                # properties/required/type 这几个关键字（见
+                # _IDENTITY_COVERAGE_STRICT_PROVIDER_SCHEMA_KEYWORDS），
+                # oneOf/if-then-else 会被 _identity_strict_provider_schema
+                # 的白名单静默剥离（实测验证，见
+                # test_future_identity_reveal_evidence_id_conditional_
+                # constraint_is_not_representable_in_strict_schema）——不是
+                # 忘了写，是这层扁平 schema 结构性表达不了。真实事故
+                # ERR-20260831-45404d（EP1 run_c14d8e02d220）：模型选了
+                # N:G002 却把 reveal_evidence_ids 留空，schema 认为合法，
+                # 业务校验才拒绝，两头各占一半理。这里不放宽业务校验（那会
+                # 允许模型用空 evidence_id 伪造"揭示"），改在
+                # _future_identity_prompt 的规则 4 里正面写清"选 N 必须给
+                # 真实 evidence_id，空串只在选 F 时合法"，把模型能看到的
+                # 提示词与它能看到的这份 schema 对齐，不再自相矛盾。
                 key: {
                     "type": "string",
                     "enum": ["", *evidence_ids_by_group.get(key, [])],

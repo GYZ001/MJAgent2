@@ -10122,6 +10122,222 @@ def test_future_identity_new_reissue_stays_fatal_on_ambiguous_authority_conflict
         ))
 
 
+# ---------------------------------------------------------------------------
+# 真实事故 ERR-20260831-45404d（EP1 run_c14d8e02d220，provider_calls.id=26617）
+# 复现：G002（source_labels=["孟才子","孟兄"]）待消歧，"孟浩" 已经是本集独立
+# 具名在场的 authority（episode_named_authorities 成员，唯一 alias 就是自己
+# 的 canonical_name），所以决议目录里不会为 G002 铸出任何 K:bible:孟浩 选项
+# （见 future_identity_decisions.py 的 canonical_anchor 排除逻辑）。真实响应
+# 选了 N:G002 揭示"孟浩"，但 reveal_evidence_ids 留空——schema 对每个 group
+# 都无条件把 "" 收进 reveal_evidence_ids 的 enum（见 identity_schemas.
+# _future_identity_schema 的相关注释），业务判据必须拒绝，于是拒绝理由里同时
+# 出现"不得重新签发已有 authority"与"evidence_id 越界"两条，字面上像是两个
+# 独立缺陷，实测证明只有一个根因：模型看到的 schema 允许空 evidence_id，一旦
+# 它真的留空，连带把本该救场的归一改写（_normalize_future_identity_payload
+# 的 reissue 分支）也一起挡住了——归一改写要求 evidence_id 非空才会尝试匹配。
+# ---------------------------------------------------------------------------
+
+def _mengfu_ep1_candidates() -> list[dict]:
+    return [
+        {
+            "name": "孟浩",
+            "source_label": "孟浩",
+            "identity_kind": "named",
+            "identity_group": "current-1:named:mf",
+            "authority_id": "bible:孟浩",
+            "decision_provenance": (
+                portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
+            ),
+            "kind": "onscreen",
+        },
+        {
+            "name": "孟才子",
+            "source_label": "孟才子",
+            "identity_kind": "functional",
+            "identity_group": "current-1:F1",
+            "kind": "onscreen",
+        },
+    ]
+
+
+_MENGFU_EP1_FUTURE_TEXT = (
+    "孟才子这个称呼渐渐没人再提，众人都改口叫孟浩，孟浩也应答自如。"
+)
+
+
+def test_future_identity_new_empty_evidence_id_is_clearly_rejected_ep1_regression(
+    monkeypatch,
+) -> None:
+    """复现 ERR-20260831-45404d：N: 决议 + 空 reveal_evidence_ids 必须继续
+    fail-closed（不放松判据），但报错要能一眼看出真正原因：evidence_id 是
+    "为空"不是笼统的"越界"，且"不得重新签发已有 authority"要点出正确的
+    修复入口在 CURRENT 阶段的 absorbed_functional_keys，而不是把人晾在原地。
+    """
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        prompt = str(messages[0]["content"])
+        # defect 1 的提示词修复：正面陈述空字符串只在选 F: 时合法。
+        assert "空字符串只在该组选 F: 时合法" in prompt
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        group_key = next(iter(
+            schema["properties"]["decisions"]["properties"]
+        ))
+        enum = schema["properties"]["decisions"]["properties"][
+            group_key
+        ]["enum"]
+        # 决议目录里不该出现指向 bible:孟浩 的 K: 选项——孟浩已经在本集
+        # 独立具名在场，见本段落顶部的事故说明。
+        assert not any(":bible:孟浩:" in value for value in enum)
+        return json.dumps({
+            "decisions": {
+                group_key: next(v for v in enum if v.startswith("N:")),
+            },
+            "revealed_names": {group_key: "孟浩"},
+            "revealed_name_kinds": {group_key: "personal_name"},
+            "reveal_evidence_ids": {group_key: ""},
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    with pytest.raises(model_gateway.StructuredSemanticError) as excinfo:
+        asyncio.run(portraits.resolve_future_identity_candidates(
+            _mengfu_ep1_candidates(),
+            source_text="孟才子在人群中不太起眼。",
+            future_text=_MENGFU_EP1_FUTURE_TEXT,
+            bible=Bible(world=World(visual_style_canonical="国风"), characters=[]),
+            episode_no=1,
+            future_label="后续章节",
+        ))
+
+    message = str(excinfo.value)
+    assert "evidence_id 为空" in message
+    assert "空字符串只在选 F: 时合法" in message
+    assert "不得重新签发已有 authority" in message
+    assert "absorbed_functional_keys" in message
+    assert calls == 1
+
+
+def test_future_identity_new_real_evidence_id_reissues_onstage_authority(
+    monkeypatch,
+) -> None:
+    """同一个事故场景，唯一变量是 reveal_evidence_ids 不再留空：模型改选
+    该组证据目录里一个真实存在的 evidence_id 之后，已有的归一改写
+    （REISSUE_KNOWN_RESOLUTION_KIND，"孟浩"整体逐字出现在 future_text 里
+    且唯一命中一个 authority）照常生效，不需要放宽任何业务判据就能成功。
+    这证明 ERR-20260831-45404d 里报出的两条错误共享同一个根因：defect 1
+    修好后，defect 2 描述的失败在这个真实场景里不会再复现。
+    """
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        group_key = next(iter(
+            schema["properties"]["decisions"]["properties"]
+        ))
+        decision_enum = schema["properties"]["decisions"]["properties"][
+            group_key
+        ]["enum"]
+        evidence_enum = schema["properties"]["reveal_evidence_ids"][
+            "properties"
+        ][group_key]["enum"]
+        real_evidence_id = next(value for value in evidence_enum if value)
+        return json.dumps({
+            "decisions": {
+                group_key: next(
+                    v for v in decision_enum if v.startswith("N:")
+                ),
+            },
+            "revealed_names": {group_key: "孟浩"},
+            "revealed_name_kinds": {group_key: "personal_name"},
+            "reveal_evidence_ids": {group_key: real_evidence_id},
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    resolved = asyncio.run(portraits.resolve_future_identity_candidates(
+        _mengfu_ep1_candidates(),
+        source_text="孟才子在人群中不太起眼。",
+        future_text=_MENGFU_EP1_FUTURE_TEXT,
+        bible=Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        episode_no=1,
+        future_label="后续章节",
+    ))
+
+    assert calls == 1
+    mengcaizi = next(
+        item for item in resolved if item["source_label"] == "孟才子"
+    )
+    assert mengcaizi["name"] == "孟浩"
+    assert mengcaizi["identity_kind"] == "named"
+    assert mengcaizi["authority_id"] == "bible:孟浩"
+    assert mengcaizi["resolution_kind"] == (
+        portraits.REISSUE_KNOWN_RESOLUTION_KIND
+    )
+
+
+def test_future_identity_prompt_states_reveal_evidence_id_cannot_be_empty_for_new() -> None:
+    """defect 1 的提示词修复本身要有独立断言，不依赖任何一次具体调用的
+    副作用——防止这句正面陈述被以后的改动悄悄改回去或删掉。
+
+    ``_future_identity_prompt`` 不在 ``app.portraits`` 包顶层重新导出，直接从
+    定义它的子模块按全限定名导入（不用 ``getattr`` 遍历包属性，见
+    CLAUDE.md 关于拆包解析的约束）。
+    """
+    from app.portraits.future_identity_prompt import _future_identity_prompt
+
+    schema = portraits._future_identity_schema(
+        ["G001"],
+        decision_ids_by_group={"G001": ["F:G001", "N:G001"]},
+        evidence_ids_by_group={"G001": ["E:aaaaaaaaaaaaaaaaaaaa"]},
+    )
+    (
+        _identity_schema,
+        _identity_response_format,
+        _group_projection,
+        _decision_projection,
+        _evidence_projection,
+        prompt,
+    ) = _future_identity_prompt(
+        [{
+            "group_key": "G001",
+            "identity_group": "current-1:F1",
+            "labels": ["孟才子"],
+        }],
+        group_keys=["G001"],
+        authority_projection=[],
+        decision_by_id={
+            "F:G001": {
+                "decision_id": "F:G001",
+                "group_key": "G001",
+                "resolution_kind": "functional",
+            },
+            "N:G001": {
+                "decision_id": "N:G001",
+                "group_key": "G001",
+                "resolution_kind": "new_named",
+            },
+        },
+        decision_ids_by_group={"G001": ["F:G001", "N:G001"]},
+        evidence_by_id={
+            "E:aaaaaaaaaaaaaaaaaaaa": {
+                "evidence_id": "E:aaaaaaaaaaaaaaaaaaaa",
+                "origin": "future",
+                "text": "孟浩",
+            },
+        },
+        evidence_ids_by_group={"G001": ["E:aaaaaaaaaaaaaaaaaaaa"]},
+        source_text="孟才子。",
+        future_label="后续章节",
+    )
+    assert schema["properties"]["reveal_evidence_ids"]["properties"][
+        "G001"
+    ]["enum"][0] == ""
+    assert "空字符串只在该组选 F: 时合法" in prompt
+
+
 def test_registered_authority_without_literal_anchor_routes_to_functional(
     monkeypatch,
 ) -> None:

@@ -73,7 +73,7 @@ def _future_identity_prompt(
    人的名字同时出现在一段话里不算数——两人对答、一方提起另一方、并列出场、
    一方是另一方的亲属或下属，都是两个人同时在场，这种情况选 F: 决议。
 4. 只有证据目录首次逐字揭示了不在已有权威目录中的稳定真名，才能选 N: 决议；
-   revealed_names 写真名，reveal_evidence_ids 选包含该真名的 evidence_id，
+   revealed_names 写真名，reveal_evidence_ids 必须选一个该组证据目录里真实存在、且包含该真名的 evidence_id（不得为空字符串——空字符串只在该组选 F: 时合法），
    revealed_name_kinds 写 personal_name。
    {IDENTITY_NAME_FORM_RULE}
    「某师姐」「某爷」「某掌柜」这类姓氏或关系加称呼是 honorific，不是真名：
