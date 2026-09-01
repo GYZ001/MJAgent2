@@ -1,5 +1,4 @@
 import asyncio
-import inspect
 import json
 import sqlite3
 from types import SimpleNamespace
@@ -51,9 +50,12 @@ def _current_identity_wire(
         )
         end_marker = "\n\n本批已登记身份 K 决议目录"
         if marker in prompt and end_marker in prompt:
+            # 证据目录恒是紧跟标题的那一行（json.dumps 无缩进、文本里的换行已转义），
+            # 只取那一行；不要再"切到下一个小节标题为止"——目录后面还跟着别的正面
+            # 陈述（IDENTITY_EVIDENCE_ONLY_NAME_SOURCE），那种切法会把说明文字一起
+            # 喂给 json.loads。
             raw_catalog = prompt.split(marker, 1)[1]
-            raw_catalog = raw_catalog.split("\n", 1)[1]
-            raw_catalog = raw_catalog.split(end_marker, 1)[0]
+            raw_catalog = raw_catalog.split("\n", 1)[1].split("\n", 1)[0]
             evidence_by_ref = {
                 str(item["evidence_ref"]): dict(item)
                 for item in json.loads(raw_catalog)
@@ -4637,6 +4639,34 @@ def test_current_identity_prompt_states_root_is_flat_kn_f() -> None:
     assert "root 只输出一次 k/n/f" in prompt
 
 
+def test_current_identity_prompt_forbids_filling_names_from_world_knowledge() -> None:
+    """真实回归 ERR-20260901-0fbce1 / ERR-20260901-ca388b（《金瓶梅词话》第一回）：
+    本批证据里「武大」出现 52 次、「武植」0 次，模型仍按民间说法把这个人写成本名
+    「武植」，还绑到一条讲汉高祖四皓的证据上，整集预检硬失败；同一提示词下重试一次
+    照样复现，说明不是采样抖动，是提示词没覆盖「我认得这部作品」这一越界形态。
+
+    这条断言守着那段正面陈述本身（判据是字符串包含、认不认得这部作品与写什么名字
+    无关、读到的称谓形态不合适时该往哪写），不依赖任何一次具体模型调用。
+    """
+    from app.portraits.current_identity_prompt import _current_identity_prompt
+
+    _schema, _response_format, prompt = _current_identity_prompt(
+        episode_no=1,
+        known="武松",
+        prior_functional_projection=[],
+        evidence_catalog=[{"evidence_ref": "E001", "text": "武大買了些肉菜歸來。"}],
+        known_decision_projection=[],
+        existing_resolution_projection=[],
+        evidence_refs=["E001"],
+        known_decision_ids=[],
+    )
+    assert "判据是字符串包含" in prompt
+    assert "你是否认得这部作品、这个人物，与该写什么名字无关" in prompt
+    assert "只要证据文本里没有逐字出现，就不得写出来" in prompt
+    # 只堵一种写法挡不住模型换个变体，正面陈述必须同时说清"那该写什么"。
+    assert "只写你在这批证据里实际读到的那个称谓" in prompt
+
+
 def test_current_identity_rf11_manual_alias_k_is_backend_projected() -> None:
     records = portraits._current_identity_evidence_records(
         "师尊走入殿中。陌生门卫守在门外。"
@@ -5629,8 +5659,20 @@ def test_current_identity_prompt_forbids_absorbing_own_source_label() -> None:
     """
     from app.portraits.current_identity_prompt import _current_identity_prompt
 
-    prompt_source = inspect.getsource(_current_identity_prompt)
-    assert "absorbed_functional_keys 里禁止填入这条 k 决议自己的" in prompt_source
+    # 2026-09-01：规则 9 整块搬到 constants.IDENTITY_ABSORBED_KEYS_RULE（为在证据目录
+    # 后面和末尾各插一行正面陈述腾出 function_lines 余量）。断言改看渲染结果——模型收到
+    # 的是渲染后的提示词，读函数源码会在下一次同类搬移时再次误报。
+    _schema, _response_format, prompt = _current_identity_prompt(
+        episode_no=1,
+        known="孟浩",
+        prior_functional_projection=[],
+        evidence_catalog=[{"evidence_ref": "E001", "text": "孟浩说道。"}],
+        known_decision_projection=[],
+        existing_resolution_projection=[],
+        evidence_refs=["E001"],
+        known_decision_ids=[],
+    )
+    assert "absorbed_functional_keys 里禁止填入这条 k 决议自己的" in prompt
 
 
 def test_current_identity_absorbed_functional_keys_accepts_prior_batch_p_token() -> None:
@@ -5944,16 +5986,16 @@ def test_current_identity_named_requires_literal_selected_evidence(
         ), ensure_ascii=False)
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    with pytest.raises(
-        model_gateway.StructuredSemanticError,
-        match="缺少逐字 owned evidence",
-    ):
-        asyncio.run(portraits.discover_character_candidates(
-            "一个面色苍白，看不出年纪的女子走来。",
-            Bible(world=World(visual_style_canonical="国风"), characters=[]),
-            1,
-        ))
+    result = asyncio.run(portraits.discover_character_candidates(
+        "一个面色苍白，看不出年纪的女子走来。",
+        Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        1,
+    ))
     assert calls == 1
+    # 「面色苍白的女子」在整批证据里一次都没有逐字出现（原文是"一个面色苍白，看不出
+    # 年纪的女子"），属于可被证据证伪的编造：就地丢弃，不再把整集拖下水。
+    # 见 identity_literal_evidence 模块 docstring 的实测记录。
+    assert [item["source_label"] for item in result] == []
 
 
 def test_current_identity_literal_label_isolated_as_synthetic_once(
@@ -5969,10 +6011,8 @@ def test_current_identity_literal_label_isolated_as_synthetic_once(
             "backend-owned 当前身份证据目录。E ref 已绑定完整证据 receipt，"
             "禁止跨 E 搬运人物："
         )
-        raw_catalog = prompt.split(marker, 1)[1].split("\n", 1)[1]
-        raw_catalog = raw_catalog.split(
-            "\n\n本批已登记身份 K 决议目录", 1
-        )[0]
+        # 同上：目录恒为紧跟标题的那一行。
+        raw_catalog = prompt.split(marker, 1)[1].split("\n", 1)[1].split("\n", 1)[0]
         catalog = json.loads(raw_catalog)
         unrelated_ref = next(
             str(item["evidence_ref"])
@@ -8543,10 +8583,17 @@ def test_current_identity_named_rebinds_wrong_evidence_ref(monkeypatch) -> None:
     assert named[0]["source_segment_id"] == "SRC0002"
 
 
-def test_current_identity_named_without_any_owned_evidence_still_fails(
+def test_current_identity_named_without_any_owned_evidence_is_dropped(
     monkeypatch,
 ) -> None:
-    """改绑只认原文逐字存在的称谓；正文里根本没有的名字仍必须硬失败。"""
+    """改绑只认原文逐字存在的称谓；正文里根本没有的名字整条丢弃。
+
+    2026-09-01 策略变更（ERR-20260901-0fbce1，《金瓶梅词话》第一回）：这一类
+    以前整集硬失败，实测线上两次、本地三次连撞——模型每次换一个从原著常识里
+    补来的名字（武植 / 武大郎 / 項羽），提示词三轮加强压不掉。名字在唯一允许的
+    来源里 0 次出现，是能被证据证伪的编造，丢弃是确定性判断；保留它才会把一个
+    原文不存在的人写进人物体系。丢弃走 WARNING，不静默。
+    """
     calls = 0
 
     async def fake_chat(messages, **kwargs):
@@ -8565,16 +8612,13 @@ def test_current_identity_named_without_any_owned_evidence_still_fails(
         ), ensure_ascii=False)
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    with pytest.raises(
-        model_gateway.StructuredSemanticError,
-        match="缺少逐字 owned evidence",
-    ):
-        asyncio.run(portraits.extract_current_identity_candidates(
-            "孟浩抬头望向山巅，久久没有说话。\n\n绿袍男子带着恭维说道。",
-            Bible(world=World(visual_style_canonical="国风"), characters=[]),
-            1,
-        ))
+    result = asyncio.run(portraits.extract_current_identity_candidates(
+        "孟浩抬头望向山巅，久久没有说话。\n\n绿袍男子带着恭维说道。",
+        Bible(world=World(visual_style_canonical="国风"), characters=[]),
+        1,
+    ))
     assert calls == 1
+    assert "许师姐" not in [item["source_label"] for item in result]
 
 
 # --- ERR-20260823-66c63c / ERR-20260823-71551e --------------------------------

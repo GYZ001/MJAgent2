@@ -26,7 +26,13 @@ from __future__ import annotations
 
 import json
 
-from .constants import IDENTITY_NAME_FORM_RULE
+from .constants import (
+    IDENTITY_ABSORBED_KEYS_RULE,
+    IDENTITY_EVIDENCE_ONLY_NAME_SOURCE,
+    IDENTITY_LITERAL_LABEL_RULE,
+    IDENTITY_LITERAL_SELF_CHECK,
+    IDENTITY_NAME_FORM_RULE,
+)
 from .identity_schemas import (
     _current_identity_schema,
     _identity_strict_response_format,
@@ -63,6 +69,7 @@ def _current_identity_prompt(
 
 本批 backend-owned 当前身份证据目录。E ref 已绑定完整证据 receipt，禁止跨 E 搬运人物：
 {json.dumps(evidence_catalog, ensure_ascii=False, separators=(',', ':'))}
+{IDENTITY_EVIDENCE_ONLY_NAME_SOURCE}
 
 本批已登记身份 K 决议目录（只有这些 decision_id 可进入 k；目录为空则所有 k=[]）：
 {json.dumps(known_decision_projection, ensure_ascii=False, separators=(',', ':'))}
@@ -89,7 +96,7 @@ def _current_identity_prompt(
    逐字称谓按第 4 条放入 f，交给后续带 authority_id 的权威绑定去认领。人物谱名单只用于
    识别，不是可以直接书写的名字。
 3. 当前阶段的新 named 只用于逐字自称谓：n 每项写 evidence_ref、identity_label、name_kind 与 kind，
-   identity_label 必须是所选 E text 的连续逐字子串；后端会令 canonical_name=source_label。
+   identity_label 必须是所选 E text 的连续逐字子串；后端会令 canonical_name=source_label。{IDENTITY_LITERAL_LABEL_RULE}
    {IDENTITY_NAME_FORM_RULE}
    name_kind 只描述 identity_label 这个字符串本身的形态，与你是否认得这个人无关；
    尊称或代称请照实写 honorific/referential，后端会自动把它落为功能身份。
@@ -131,48 +138,7 @@ def _current_identity_prompt(
    scope_qualifier——不要依赖后端的确定性降级补足（后端会用甲/乙/丙...
    兜底填一个可用但没有语义信息量的限定语，只是防止拒绝重来，不是让你
    可以不填）。
-9. absorbed_functional_keys 的合法取值域只有三类，逐项必须精确复制其中
-   之一——本批 f 项自己声明过的 functional_identity_key、前批 P token
-   （prior functional 分组的 decision_id）、或本集已有功能身份决议的
-   canonical_name；不是任意你认为"指代同一人"的称谓原文。后端只核验每个
-   token 是否确实来自这三类来源，不做文本语义判断，越界或臆造的 token
-   （包括任何未按上述三类之一先行声明过的称谓原文）都会导致本次响应被
-   拒绝重试。
-
-   这三类来源有一个共同前提：token 背后的实体在被吸收前必须处于"稳定真名
-   尚未确认"的功能性占位状态——这正是规则4"若…无法确认稳定真名，放入 f"
-   的适用范围。一个人只要已经有确定真名（不论是这条 k 决议刚揭晓的，还是
-   人物谱/更早证据里早已确认的），TA 的其它称谓从一开始就不满足"功能性
-   占位"这个前提，永远不构成合法的 f 项，也就永远不会出现在上述三类合法
-   来源里——不得为了让某个称谓能被吸收，倒着现造一条 f 项把它包装成功能性
-   占位；f 项存在的理由是"真名未定"，不是"我想吸收它"。这类已有确定真名
-   之人的其它称谓，走称谓解析的正常渠道（n 的逐字自称谓声明、或人物谱别名
-   登记），不进 absorbed_functional_keys。（真实事故：「孟才子」「孟兄」是
-   孟浩的称谓、「王伯的儿子」是王有材的称谓、「许师姐」是许清的称谓——这
-   四人都已有确定真名，从一开始就不是合法的 f 项，任何 k 决议都不得把这类
-   称谓原文填入 absorbed_functional_keys。）
-
-   合法用例：如果某个 k 决议揭晓的真名，其实就是一个仍处于 functional 状态
-   的称谓组一路指代的同一个人——例如某绰号从更早的证据起就被追踪为
-   functional，直到这条 k 决议对应的证据才第一次读到该人物的真名——不要
-   把真名重复写进 n（那是这条 k 决议已经覆盖的重复声明，会被拒绝）：改为
-   在这条 k 决议里填写 absorbed_functional_keys，逐项精确复制被吸收的
-   functional_identity_key/P token/canonical_name。只有在你确实判断这些
-   token 指代的是同一个人时才填写；拿不准是否为同一人时留空，不要吸收。
-
-   absorbed_functional_keys 里禁止填入这条 k 决议自己的 source_label（即
-   本批 K 决议目录里这个 decision_id 条目自带的 source_label 原文）：选中
-   decision_id 本身已经表达了这个称谓属于该决议，重复列出会被判定为越界
-   token 而拒绝，不是多填了一道保险。absorbed_functional_keys 只能用来
-   吸收这个自身称谓之外的、真正处于功能性占位状态的其它称谓组（不是任何
-   已有确定真名之人的称谓，见本条前半段）——如果某个这样的称谓只是你在
-   证据里零散认出、还没有单独作为一条 f 项列出（source_label 与 functional_
-   identity_key 均已确定），它就还不是合法的可吸收 token：必须先在本响应
-   的 f 数组里为它单独声明一条 f 项（source_label 填该称谓本身，
-   functional_identity_key 可以直接使用你打算吸收的同一个 key），再在
-   absorbed_functional_keys 里精确复制那个 key。第7条"每个人只输出一次"
-   约束的是同一个人不得被同时判给两个互相冲突的最终身份归属，不禁止你为
-   将被吸收的称谓单独声明它自己的 f 项——被吸收的 f 项与吸收它的 k 决议
-   共存，就是这条通道设计的正常形态。
-只输出 response_format 约束的 JSON，不要复述证据、Schema 或规则。"""
+{IDENTITY_ABSORBED_KEYS_RULE}
+只输出 response_format 约束的 JSON，不要复述证据、Schema 或规则。
+{IDENTITY_LITERAL_SELF_CHECK}"""
     return current_schema, current_response_format, prompt

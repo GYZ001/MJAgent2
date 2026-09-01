@@ -29,6 +29,7 @@ from .evidence_merge import (
     _identity_form_functional_key,
     _resolved_evidence_ref,
 )
+from .identity_literal_evidence import literal_owned_matches, named_literal_miss_verdict
 from .identity_schemas import CurrentIdentityCandidateResponse
 
 def _project_current_identity_response(
@@ -178,11 +179,7 @@ def _project_current_identity_response(
             # 只在全批唯一匹配时才自动改绑；命中多条视为歧义，不得静默挑一个可能
             # 错的目标——这种情况维持原判（named 硬失败，functional 隔离为
             # synthetic）。
-            literal_matches = [
-                owned
-                for owned in evidence_by_ref.values()
-                if source_label in str(owned.get("text") or "")
-            ]
+            literal_matches = literal_owned_matches(source_label, evidence_by_ref)
             if len(literal_matches) == 1:
                 record = literal_matches[0]
                 evidence_text = str(record.get("text") or "")
@@ -204,9 +201,10 @@ def _project_current_identity_response(
                     f"{source_label}"
                 )
             if not literal:
-                errors.append(
-                    f"current named 缺少逐字 owned evidence：{source_label}"
-                )
+                verdict = named_literal_miss_verdict(source_label, evidence_by_ref)
+                if verdict is None:
+                    return
+                errors.append(verdict)
             if (
                 known_authority
                 and kind == "onscreen"
