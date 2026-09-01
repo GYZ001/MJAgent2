@@ -60,9 +60,10 @@ def start_background_portraits(project_id: str) -> None:
     二是避免在明知没有角色时还去起一个必然空转的后台任务。
 
     两条后台任务各自独立 try/except：一个起不来不该拖累另一个，也不该
-    拖累映射本身——映射的产物是卡片/场景条目，已经落库了。缺图会在发起
-    付费视频时被参考图就绪校验拦住（单镜走 _assert_shot_generation_gate，
-    整集走 asset_gaps；场景走分镜台的场景主图校验），不会静默流到生成台。
+    拖累映射本身——映射的产物是卡片/场景条目，已经落库了。缺图只在发起
+    付费视频时被拦（单镜走 _assert_shot_generation_gate，整集走 asset_gaps），
+    分镜台不再因缺图报错（de12095 已拆掉那道场景主图校验：分镜产出的是文本，
+    图只在往供应商发的时候才真的需要）。
 
     触发点放在 domain 层而不是 app.production.prep_pack 里：后者是 L4，引
     app.domain 是上行边（分层闸门实测拦下过）。编排本来就该由上层做。
