@@ -2935,9 +2935,9 @@ async def test_semantic_patch_budget_preserves_local_prompt_and_truncation_error
 
 @pytest.mark.asyncio
 async def test_semantic_patch_repairs_unescaped_inner_quotes(monkeypatch):
-    from app import schemas
     from app.harness import model_gateway
     from app.production import screenplay_repair
+    from tests.conftest import patch_schemas_everywhere
 
     issue = structured_issue(
         code="MUST_KEEP_SPINE_BEAT_NOT_PERFORMED",
@@ -2959,7 +2959,7 @@ async def test_semantic_patch_repairs_unescaped_inner_quotes(monkeypatch):
         return {"candidate_plans": []}
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(schemas, "extract_json", fake_extract)
+    patch_schemas_everywhere(monkeypatch, "extract_json", fake_extract)
 
     result = await screenplay_repair._llm_field_patch_once(
         issue,

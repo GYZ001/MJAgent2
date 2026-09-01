@@ -153,7 +153,6 @@ max_lines_tests = 500
 "app/quota.py" = 559
 "app/refs.py" = 548
 "app/scenes.py" = 1791
-"app/schemas.py" = 2571
 "app/screenplay_ir/prompt_context.py" = 517
 "app/screenplay_scene_shards/generate_shards.py" = 603
 "app/screenplay_scene_shards/input_contracts.py" = 599
@@ -500,7 +499,14 @@ max_lines_tests = 500
 "app/renderability_score.py" = 69
 "app/repair_router.py" = 219
 "app/scenes.py" = 228
-"app/schemas.py" = 251
+# 2026-09-01 app/schemas.py 拆成 app/schemas/ 包后，这一条 251 换成下面 5 条。
+# 数字没有变差：per-file 基线只记「该文件最长的那个函数」，2571 行里另外 4 个超标函数
+# 一直被这条掩盖着；拆开后各自现形，同一批函数、同一份实现，一行代码没改。
+"app/schemas/screenplay.py" = 251
+"app/schemas/json_extract.py" = 128
+"app/schemas/json_repair_structure.py" = 80
+"app/schemas/json_repair_strings.py" = 55
+"app/schemas/narrative_action.py" = 52
 "app/screenplay_ir/assemble.py" = 79
 "app/screenplay_ir/compile_setup.py" = 120
 "app/screenplay_ir/compiler.py" = 195
@@ -677,7 +683,10 @@ max_lines_tests = 500
 "tests/test_character_alias.py" = 1170
 "tests/test_video_modes.py" = 1147
 "tests/test_character_status_facts.py" = 1135
-"tests/conftest.py" = 1112
+# 2026-09-01 1112 -> 1144：app/schemas.py 拆包按 CLAUDE.md 要求补 patch_schemas_everywhere
+# （不补的话 8 处 monkeypatch.setattr(schemas, ...) 会静默失效、测试照绿而桩没生效）。
+# tests/ 的基线本就是当天纳入闸门时的快照，这里一并按同一次改动的最终状态重取。
+"tests/conftest.py" = 1144
 "tests/test_screenplay_scene_repair.py" = 1066
 "tests/test_core_regressions.py" = 1057
 "tests/test_minimax_h3.py" = 1037

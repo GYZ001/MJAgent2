@@ -5,9 +5,9 @@ import asyncio
 import pytest
 from pydantic import BaseModel, Field
 
-from app import schemas
 from app.harness import model_gateway
 from app.narrative_blueprint import BlueprintSemanticReview
+from tests.conftest import patch_schemas_everywhere
 
 
 class _Payload(BaseModel):
@@ -181,7 +181,7 @@ def test_structured_runner_recovers_complete_trailing_json(
         raise AssertionError("valid trailing object must win before root repair")
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(schemas, "extract_json", unexpected_root_repair)
+    patch_schemas_everywhere(monkeypatch, "extract_json", unexpected_root_repair)
     result = asyncio.run(model_gateway.chat_structured(
         [{"role": "user", "content": "return json"}],
         model_type=_Payload,
@@ -213,7 +213,7 @@ def test_structured_runner_only_validates_latest_complete_root(
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
     monkeypatch.setattr(model_gateway, "_json_candidates", unexpected_candidate_scan)
-    monkeypatch.setattr(schemas, "extract_json", unexpected_root_repair)
+    patch_schemas_everywhere(monkeypatch, "extract_json", unexpected_root_repair)
 
     result = asyncio.run(model_gateway.chat_structured(
         [{"role": "user", "content": "return json"}],
@@ -244,7 +244,7 @@ def test_latest_array_with_extra_closer_blocks_old_root_without_retry(
         raise AssertionError("array authority must not scan its child object")
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(schemas, "extract_json", unexpected_object_scan)
+    patch_schemas_everywhere(monkeypatch, "extract_json", unexpected_object_scan)
 
     with pytest.raises(
         model_gateway.StructuredFormatError,
@@ -280,7 +280,7 @@ def test_latest_array_with_extra_closer_retries_only_array_substring(
         raise AssertionError("array authority must not scan its child object")
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(schemas, "extract_json", unexpected_object_scan)
+    patch_schemas_everywhere(monkeypatch, "extract_json", unexpected_object_scan)
 
     result = asyncio.run(model_gateway.chat_structured(
         [{"role": "user", "content": "original"}],
@@ -309,7 +309,7 @@ def test_standalone_array_is_root_type_format_error(
         raise AssertionError("array authority must not scan its child object")
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(schemas, "extract_json", unexpected_object_scan)
+    patch_schemas_everywhere(monkeypatch, "extract_json", unexpected_object_scan)
 
     with pytest.raises(
         model_gateway.StructuredFormatError,
@@ -336,7 +336,7 @@ def test_nested_array_does_not_override_outer_object_authority(
         raise AssertionError("complete outer object must use direct decoding")
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(schemas, "extract_json", unexpected_root_repair)
+    patch_schemas_everywhere(monkeypatch, "extract_json", unexpected_root_repair)
 
     result = asyncio.run(model_gateway.chat_structured(
         [{"role": "user", "content": "return json"}],
@@ -671,7 +671,7 @@ def test_format_repair_does_not_fall_back_past_latest_complete_root(
         raise AssertionError("a complete latest root must not use extract_json")
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(schemas, "extract_json", unexpected_root_repair)
+    patch_schemas_everywhere(monkeypatch, "extract_json", unexpected_root_repair)
 
     result = asyncio.run(model_gateway.chat_structured(
         [{"role": "user", "content": "original"}],

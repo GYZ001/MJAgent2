@@ -113,6 +113,38 @@ def patch_stages_everywhere(monkeypatch, name, value, **kwargs):
             monkeypatch.setattr(submodule, name, value, raising=False)
 
 
+def patch_schemas_everywhere(monkeypatch, name, value, **kwargs):
+    """Patch a symbol on ``app.schemas`` in every submodule that actually binds it.
+
+    ``app/schemas.py`` was one file until it was split into the ``app.schemas``
+    package (see ``app/schemas/__init__.py``); every call site shared a single
+    module namespace, so ``monkeypatch.setattr(schemas, name, value)`` reached
+    all of them. After the split each submodule holds its own copy of any
+    name it imported (from ``app.schemas`` re-exports or from elsewhere), so
+    patching only the package-level re-export silently misses whichever
+    submodule the real call happens to live in -- the patch appears to apply
+    (no error) but the mocked code path is never exercised. This walks every
+    submodule of ``app.schemas`` and patches ``name`` wherever it is bound,
+    which reproduces the pre-split single-namespace patch semantics.
+    """
+    import pkgutil
+    import sys
+
+    import app.schemas as schemas
+
+    kwargs.setdefault("raising", False)
+    monkeypatch.setattr(schemas, name, value, **kwargs)
+    for _, mod_name, _ in pkgutil.iter_modules(schemas.__path__):
+        # 用 sys.modules 按全限定名解析叶子模块，不要用 getattr：子模块若
+        # 再导出一个与自身文件同名的符号（`from .x import x as x`），包属性
+        # 会被那个符号覆盖掉子模块引用，getattr 于是静默返回错的对象，
+        # hasattr 判 False、打桩打空且不报错（2026-08-30 实测：曾让
+        # get_conn 静默连到生产库，造成 7 个测试假绿/假红）。
+        submodule = sys.modules.get(f"{schemas.__name__}.{mod_name}")
+        if submodule is not None and hasattr(submodule, name):
+            monkeypatch.setattr(submodule, name, value, raising=False)
+
+
 def patch_screenplay_scene_shards_everywhere(monkeypatch, name, value, **kwargs):
     """Patch a symbol on ``app.screenplay_scene_shards`` in every submodule that
     actually binds it.
