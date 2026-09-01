@@ -18,6 +18,7 @@ from typing import Any
 
 from .alias_resolution import _prep_pack_cross_episode_alias_conflict
 from .asset_lookup import _resolve_portrait_id
+from .persistent_appellation import resolve_persistent_appellation
 from .functional_candidates import (
     _PREP_PACK_FUNCTIONAL_CANDIDATE_NO_MATCH_LABEL,
     _prep_pack_functional_candidate_dossier,
@@ -144,7 +145,7 @@ def _prep_pack_functional_candidate_pin_segment(
     return None
 
 
-async def _prep_pack_resolve_functional_extra_candidate(
+async def _prep_pack_functional_candidate_verdict_only(
     conn, *, project_id: str, episode_id: str, episode_no: int,
     label: str, source_text: str, segments: list[SourceSegment], bible: Bible,
     character_mentions: list[dict[str, Any]],
@@ -232,3 +233,34 @@ async def _prep_pack_resolve_functional_extra_candidate(
     }
 
 
+
+
+async def _prep_pack_resolve_functional_extra_candidate(
+    conn, *, project_id: str | None, episode_id: str, episode_no: int,
+    label: str, source_text: str, segments: list[SourceSegment], bible: Bible,
+    character_mentions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """未解析标签的两级归属：先问"是不是人物谱里已有的某个人"，再问"它自己
+    是不是一个该建卡的稳定身份"。
+
+    第一级是 1.8.0 的候选判别（``_prep_pack_functional_candidate_verdict_only``），
+    但它只能绑到**已经存在**的角色卡上；第一集人物谱是空的，真名要到后文才
+    揭晓的角色因此永远没有可绑候选，必然落 functional_extras 当无图群演，
+    分镜台每个镜头各自想象她长什么样。第二级补上这块缺口：跨章反复出现的
+    称谓直接按这个称谓建卡出图，不等真名（判据与后续一致性接力见
+    ``persistent_appellation`` 模块 docstring）。
+
+    两级都不成立就原样返回第一级的结论，标签照旧落 functional_extras。
+    """
+    verdict = await _prep_pack_functional_candidate_verdict_only(
+        conn, project_id=project_id, episode_id=episode_id,
+        episode_no=episode_no, label=label, source_text=source_text,
+        segments=segments, bible=bible, character_mentions=character_mentions,
+    )
+    if verdict["resolved"] or not project_id:
+        return verdict
+    carded = await resolve_persistent_appellation(
+        conn, project_id=project_id, episode_no=episode_no,
+        label=label, segments=segments,
+    )
+    return {**verdict, **carded} if carded else verdict
