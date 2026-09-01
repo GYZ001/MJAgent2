@@ -4561,6 +4561,82 @@ def test_current_identity_rf11_schema_stays_under_strict_property_limit() -> Non
     ]["decision_id"]["enum"] == ["K:NONE"]
 
 
+def test_current_identity_rejects_kn_nested_inside_f_element() -> None:
+    """真实 EP1 回归 ERR-20260901-dded96：模型把 k/n 错误嵌进了 f 数组元素
+    内部（``{"f": [{"k": [], "n": [...]}]}``），而不是三个同级根数组——8 条
+    pydantic 校验错误（k/n 缺失、f.0 缺整套必填字段、f.0.k 与 f.0.n 越界）。
+
+    根 schema 必须继续 fail closed：不许放松校验去迁就这种嵌套错位，也不许
+    在代码里猜着把它“修复”成合法结构——那会编造出假的身份归属，比直接失败
+    更危险（CLAUDE.md「不得兜底填充」）。这条测试锁住真实生产响应的原始
+    形状，不是构造的极端用例。
+    """
+    payload = {
+        "f": [{
+            "k": [],
+            "n": [
+                {
+                    "evidence_ref": "E001",
+                    "identity_label": "孟浩",
+                    "kind": "onscreen",
+                    "name_kind": "personal_name",
+                },
+                {
+                    "evidence_ref": "E002",
+                    "identity_label": "王有材",
+                    "kind": "onscreen",
+                    "name_kind": "personal_name",
+                },
+            ],
+        }],
+    }
+    with pytest.raises(ValidationError) as excinfo:
+        portraits.CurrentIdentityCandidateResponse.model_validate(payload)
+    errors = {
+        (error["loc"], error["type"])
+        for error in excinfo.value.errors()
+    }
+    assert (("k",), "missing") in errors
+    assert (("n",), "missing") in errors
+    assert (("f", 0, "evidence_ref"), "missing") in errors
+    assert (("f", 0, "source_label"), "missing") in errors
+    assert (("f", 0, "functional_identity_key"), "missing") in errors
+    assert (("f", 0, "kind"), "missing") in errors
+    assert (("f", 0, "k"), "extra_forbidden") in errors
+    assert (("f", 0, "n"), "extra_forbidden") in errors
+
+
+def test_current_identity_prompt_states_root_is_flat_kn_f() -> None:
+    """真实 EP1 回归 ERR-20260901-cfff07 / ERR-20260901-dded96 的提示词修复
+    本身要有独立断言，不依赖任何一次具体调用的副作用——防止这段正面陈述
+    （根对象是三个同级数组、元素内部不得再出现 k/n/f、外加一个最小合法
+    形状示例）被以后的改动悄悄改回去或删掉。
+
+    ``_current_identity_prompt`` 不在 ``app.portraits`` 包顶层重新导出，
+    直接从定义它的子模块按全限定名导入（不用 ``getattr`` 遍历包属性，见
+    CLAUDE.md 关于拆包解析的约束）。
+    """
+    from app.portraits.current_identity_prompt import _current_identity_prompt
+
+    _schema, _response_format, prompt = _current_identity_prompt(
+        episode_no=1,
+        known="孟浩",
+        prior_functional_projection=[],
+        evidence_catalog=[{"evidence_ref": "E001", "text": "孟浩说道。"}],
+        known_decision_projection=[],
+        existing_resolution_projection=[],
+        evidence_refs=["E001"],
+        known_decision_ids=[],
+    )
+    assert (
+        '{"k": [], "n": [{"evidence_ref": "E001", "identity_label": "孟浩"'
+        in prompt
+    )
+    assert "n、f 数组里的每一个" in prompt
+    assert "不得再出现" in prompt
+    assert "root 只输出一次 k/n/f" in prompt
+
+
 def test_current_identity_rf11_manual_alias_k_is_backend_projected() -> None:
     records = portraits._current_identity_evidence_records(
         "师尊走入殿中。陌生门卫守在门外。"
@@ -5543,10 +5619,17 @@ def test_current_identity_prompt_forbids_absorbing_own_source_label() -> None:
     """锁定本次修复实际落地的 prompt 措辞：规则 9 必须明确告诉模型，
     K 决议自己的锚定 source_label 不得再出现在自己的 absorbed_functional_
     keys 里，否则这条真实回归（ERR-20260825-0d8a29）会在下一次改动 prompt
-    时被悄悄改回去而没有测试察觉。"""
-    prompt_source = inspect.getsource(
-        portraits._discover_character_candidates_legacy
-    )
+    时被悄悄改回去而没有测试察觉。
+
+    2026-09-01：prompt 构造从 ``_discover_character_candidates_legacy`` 尾部
+    拆到了 ``current_identity_prompt._current_identity_prompt``（见该模块
+    docstring，理由与 ``_future_identity_prompt`` 的拆分一致），按全限定名
+    直接导入子模块（不用 ``getattr`` 遍历包属性，见 CLAUDE.md 关于拆包解析
+    的约束）。
+    """
+    from app.portraits.current_identity_prompt import _current_identity_prompt
+
+    prompt_source = inspect.getsource(_current_identity_prompt)
     assert "absorbed_functional_keys 里禁止填入这条 k 决议自己的" in prompt_source
 
 

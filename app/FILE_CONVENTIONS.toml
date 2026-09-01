@@ -118,7 +118,11 @@ max_function_lines_python = 50
 "app/portraits/__init__.py" = 538
 "app/portraits/cards.py" = 572  # 2026-08-31 棘轮收紧（595→572）：一人一卡批次把
 # 建卡判定与别名登记拆到 card_verdict.py / card_aliases.py / bible_compat.py
-"app/portraits/discovery_legacy.py" = 975
+# 2026-09-01 棘轮收紧（975→857）：current-identity 的 schema+prompt 组装段
+# 拆到 current_identity_prompt.py（同 future_identity_prompt.py 拆分理由，
+# 见该文件 docstring），腾出空间给 K/N/F 显式形状示例，修复 ERR-20260901-
+# cfff07 / ERR-20260901-dded96。
+"app/portraits/discovery_legacy.py" = 857
 "app/portraits/identity_response_projection.py" = 722
 "app/portraits/portrait_drift.py" = 548
 "app/portraits/portrait_io.py" = 600
@@ -135,10 +139,13 @@ max_function_lines_python = 50
 "app/production/screenplay_authority.py" = 2529
 "app/production/screenplay_document.py" = 1704
 "app/production/screenplay_repair/llm_field_patch.py" = 593
-"app/production/storyboard_pack.py" = 2086
+"app/production/storyboard_pack.py" = 2085
 # 2.1.0（对白台账/必保台词/受控画外音/镜头数放宽）：方言约束两段指令文本 +
 # _dialect_for_target_video_model 拆到新模块 app.production.storyboard_dialects，
 # 腾出的行数让本文件净减 1 行（2087→2086）——棘轮只降不升，收紧后如实记账。
+# 2.1.1（ERR-20260901-bcfa58 容量闸门报错可操作性修复）：改动全在新模块
+# storyboard_dialogue_ledger.py，本文件只加一条 changelog、压缩几处旧注释
+# 腾行数，净变化后实测再降 1 行（2086→2085）。
 "app/quota.py" = 559
 "app/refs.py" = 548
 "app/scenes.py" = 2328
@@ -405,9 +412,15 @@ max_function_lines_python = 50
 "app/planning.py" = 75
 "app/portraits/cards.py" = 238
 "app/portraits/cards_ensure.py" = 213
+# 2026-09-01 新增：从 discovery_legacy.py 拆出的 current-identity schema+
+# prompt 组装函数，同 future_identity_prompt.py 一样是「一个大 prompt 模板
+# 字符串」，超默认单函数 50 行是这类纯组装函数的固有形态，不是逻辑复杂度。
+"app/portraits/current_identity_prompt.py" = 122
 "app/portraits/discovery.py" = 217
 "app/portraits/discovery_fragments.py" = 89
-"app/portraits/discovery_legacy.py" = 696
+# 2026-09-01 棘轮收紧（696→591）：prompt 组装段拆出后，本文件最长函数
+# _discover_character_candidates_legacy 变短，同步收紧。
+"app/portraits/discovery_legacy.py" = 591
 "app/portraits/evidence_catalog.py" = 90
 "app/portraits/evidence_merge.py" = 70
 "app/portraits/evidence_receipt.py" = 96
