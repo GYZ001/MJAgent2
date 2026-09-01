@@ -86,3 +86,42 @@ def _prep_pack_register_scene_alias_if_new(
     return _append_scene_alias(conn, project_id, canonical_name, wording)
 
 
+# 场景侧多提及引文聚合（真实故障 ERR-20260901-2e124f 排查结论）：
+# _prep_pack_scene_alias_provenance 的 scene_event_evidence_quotes 形参
+# 本是复数（isomorphic 于旧 event_chain[].source_evidence[].quote——一个
+# 场景可能对应多个事件，各自一条独立引文），resolve_assets.py 2.0.2 砍
+# event_chain 后调用方退化成只传"这一条提及自己的 quote"，丢了"同一
+# 地点在本集被提到不止一次、只有其中一条真的带上逐字引文"这种聚合信息。
+# 真实现场：同一次运行里 chunk 抽取重跑一遍，前一遍某场景的 quote 完整
+# 逐字命中原文，后一遍同一场景因为流式响应中途截断、JSON 格式修复调用
+# 诚实地把这个必填字段留空——最终被采纳的只有后一遍那条空引文的提及，
+# 三路锚点候选全灭，拦停整集，即便"这地方在原文里确有依据"这件事本身
+# 从未被推翻。这个函数把本集全部 scene_mentions 按"最终解析到哪个规范
+# 场景"分组，收集每个规范场景名下全部非空引文——不重复解析合法性判断
+# （不合法/未解析的提及在这里被安静跳过，主循环 _pass() 自己会正确
+# 拦截它们，这里只负责聚合"已经合法解析成功"的提及各自申报的引文，不
+# 越权判定某条提及是否成立），供调用方把同一场景的姐妹提及的引文一并
+# 纳入锚点候选——不是编造，每一条都仍要经 _prep_pack_local_text_anchor
+# 逐字核验，找不到照样判定没有本集依据。
+def _prep_pack_group_scene_quotes_by_canonical(
+    conn, project_id: str, episode_no: int, bible: Bible,
+    scene_mentions: list[dict], scene_rename: dict[str, str],
+) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for mention in scene_mentions:
+        name = str(mention.get("display_name") or "").strip()
+        quote = str(mention.get("quote") or "").strip()
+        if not name or not quote:
+            continue
+        resolved_name = scene_rename.get(name, name)
+        _scene_reference_id, canonical_name = (
+            _prep_pack_resolve_scene_reference_with_alias(
+                conn, project_id, episode_no, resolved_name, bible,
+            )
+        )
+        quotes = grouped.setdefault(canonical_name, [])
+        if quote not in quotes:
+            quotes.append(quote)
+    return grouped
+
+

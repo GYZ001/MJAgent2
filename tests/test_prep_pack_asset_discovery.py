@@ -1352,6 +1352,123 @@ def test_synthetic_scene_label_without_any_independent_evidence_still_blocked(mo
 
 
 # ---------------------------------------------------------------------------
+# 2.0.5 -- 真实事故回归（ERR-20260901-2e124f，run_44dab0986f49，EP1「大青山
+# 半山裂缝」）：同一个地点本集被提到两次，模型各自铸出了不同标签（跟真实
+# 现场"大青山半山裂缝"/"大青山半山腰裂缝"一个降为别名同一个形状），经场景
+# 发现统一判给了同一个规范场景——真实现场里其中一条提及自己的 quote 是
+# 空字符串（provider_calls 逐字取证：那一遍 chunk 抽取的原始流式响应恰好
+# 在这个场景的 quote 字段值之前被截断，触发的"只修 JSON 格式不改语义"
+# 修复调用因为压根没见过这段内容，只能诚实地留空，不是模型拒绝引用），
+# 而另一条姐妹提及确实申报了逐字命中原文的 quote——canonical_scene_name/
+# name 两路合成标签结构上必然不逐字出现，旧实现只看"这一条提及自己的
+# scene_quote"，三路全灭，has_scene_anchor 门禁具名拦截整集。
+# ---------------------------------------------------------------------------
+
+def test_scene_sibling_mention_quote_rescues_empty_quote_anchor(monkeypatch):
+    """红灯（真实故障 ERR-20260901-2e124f 复现 + 修复验证）：把没带 quote
+    的那条提及排在前面（_pass 内 scenes.setdefault 只认第一条写入的
+    provenance），验证它自己的锚点计算真的用上了姐妹提及的引文，不是
+    靠处理顺序侥幸绕过。"""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end) "
+        "VALUES ('sr-dqsbc','p1','大青山半山裂缝',1,NULL)"
+    )
+    conn.commit()
+
+    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels):
+        assert set(labels) == {"大青山半山腰裂缝", "半山裂缝处"}
+        return {
+            "added": [], "errors": [], "ready_scenes": list(labels),
+            "resolved_names": {label: "大青山半山裂缝" for label in labels},
+        }
+
+    monkeypatch.setattr(scenes, "ensure_scenes_for_labels", fake_ensure_scenes_for_labels)
+
+    scene_mentions = [
+        {
+            # 真实事故里被采纳、决定 provenance 的那条：quote 被传输/格式
+            # 修复层丢空，不是模型没申报（模型确实被要求逐字引用）。
+            "display_name": "半山裂缝处", "segment_indexes": [2], "quote": "",
+        },
+        {
+            # 姐妹提及：同一处地点，真的逐字申报了原文引文。
+            "display_name": "大青山半山腰裂缝", "segment_indexes": [2],
+            "quote": "在这峭壁的半山腰上，似乎存在了一处裂缝",
+        },
+    ]
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
+        conn, source_text=_EP1_REAL_SOURCE_TEXT,
+        character_mentions=[], scene_mentions=scene_mentions, prop_mentions=[],
+    )
+    assert errors == []
+    assert len(scene_list) == 1, "两条提及必须归并成同一个规范场景条目"
+    entry = scene_list[0]
+    assert entry["display_name"] == "大青山半山裂缝"
+    assert entry["provenance"]["method"] == "resolution"
+    assert entry["provenance"]["anchor_phrase"] == "在这峭壁的半山腰上，似乎存在了一处裂缝", (
+        "锚点必须来自姐妹提及真实申报的引文，不能是编造或空字符串"
+    )
+    assert entry["provenance"]["anchor_segments"] == [2]
+    verify_errors = _provenance_self_verify(
+        _EP1_REAL_SOURCE_TEXT, characters, scene_list, functional_extras,
+    )
+    assert verify_errors == [], (
+        "带 quote 的姐妹提及必须能让没带 quote 的那条一并通过来源证明自校验"
+    )
+
+
+def test_scene_sibling_quote_does_not_leak_across_unrelated_scenes(monkeypatch):
+    """红灯（红线反向验证：姐妹引文聚合必须按规范场景分组，不能全局共用）：
+    两个互不相关的场景各出现一条提及，一条有 quote、一条没有——没 quote
+    的那条绝不能借用另一个不相关场景的引文蒙混过关，必须仍然 fail closed。
+    """
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end) "
+        "VALUES ('sr-a','p1','大青山半山裂缝',1,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end) "
+        "VALUES ('sr-b','p1','青山下大河',1,NULL)"
+    )
+    conn.commit()
+
+    async def fake_ensure_scenes_for_labels(project_id, episode_no, labels):
+        mapping = {"大青山半山腰裂缝": "大青山半山裂缝", "河边渡口": "青山下大河"}
+        assert set(labels) == set(mapping)
+        return {
+            "added": [], "errors": [], "ready_scenes": list(labels),
+            "resolved_names": {label: mapping[label] for label in labels},
+        }
+
+    monkeypatch.setattr(scenes, "ensure_scenes_for_labels", fake_ensure_scenes_for_labels)
+
+    scene_mentions = [
+        {"display_name": "河边渡口", "segment_indexes": [3], "quote": ""},
+        {
+            "display_name": "大青山半山腰裂缝", "segment_indexes": [2],
+            "quote": "在这峭壁的半山腰上，似乎存在了一处裂缝",
+        },
+    ]
+    characters, scene_list, props, functional_extras, errors, stats, *_ = _resolve(
+        conn, source_text=_EP1_REAL_SOURCE_TEXT,
+        character_mentions=[], scene_mentions=scene_mentions, prop_mentions=[],
+    )
+    assert errors == []
+    river_entry = next(s for s in scene_list if s["display_name"] == "青山下大河")
+    assert river_entry["provenance"]["anchor_phrase"] == "", (
+        "「河边渡口」没有自己的独立证据，不能借用「大青山半山裂缝」的引文"
+    )
+    verify_errors = _provenance_self_verify(
+        _EP1_REAL_SOURCE_TEXT, characters, scene_list, functional_extras,
+    )
+    assert len(verify_errors) == 1
+    assert "缺少 anchor_phrase" in verify_errors[0]
+    assert "青山下大河" in verify_errors[0]
+
+
+# ---------------------------------------------------------------------------
 # 1.5.0 -- speaker 名册引用化（真实 EP2 回归：关键台词"割舌头"的 speaker 被
 # 写成"韩宗"，实际说话人是"绿袍男子"，韩宗第 5 章才出场，speaker 字段从未
 # 进任何校验管线）。这两个函数是纯确定性查表，不需要 DB/异步，直接单测。

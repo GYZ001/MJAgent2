@@ -21,6 +21,7 @@ from .alias_resolution import (
     _prep_pack_lookup_character_alias_canonical_name,
 )
 from .asset_lookup import (
+    _prep_pack_group_scene_quotes_by_canonical,
     _prep_pack_register_scene_alias_if_new,
     _prep_pack_resolve_scene_reference_with_alias,
     _resolve_portrait_id,
@@ -583,6 +584,11 @@ async def _resolve_assets(
             # 原文真实用过的称呼"重新播种给别的分集。
             if came_via_resolution and literal_evidence and name not in entry["aliases"]:
                 entry["aliases"].append(name)
+        # 姐妹提及引文聚合（ERR-20260901-2e124f，见
+        # _prep_pack_group_scene_quotes_by_canonical 完整案情）：预先按最终
+        # 解析结果分组好全部非空引文，供下面每条提及的锚点候选借用。
+        scene_sibling_quotes = _prep_pack_group_scene_quotes_by_canonical(
+            conn, project_id, episode_no, bible, scene_mentions, scene_rename)
         for mention in scene_mentions:
             name = str(mention["display_name"] or "").strip()
             if not name:
@@ -691,39 +697,28 @@ async def _resolve_assets(
             # 的 match_scene_name 回退分支）；最后是裸直接命中（direct）。
             scene_forward_chapter_label = ""
             scene_source_episode_no: int | None = None
-            # 场景绑定的锚点候选（第28轮 ERR-20260824，v3 审计
-            # A2_scene_no_text_evidence 25 条；2.0.2 恢复第三路候选，见
-            # PREP_PACK_VERSION 上方 2.0.2 大注释——48e01ff 砍 event_chain
-            # 时曾把这里收窄成只剩 [canonical_scene_name, name]，两路都是
-            # 模型综合出的合成标签时结构上必然两路皆空，是当晚引入的真实
-            # 回归，不是本条注释历史上就接受的设计）：resolution/discovery
-            # 两支试 [canonical_scene_name, name, scene_quote]——发现新建
-            # 场景、或消歧把一个提及判给已有场景时，模型申报的规范名
-            # （canonical_scene_name）本身可能才是原文里真正出现的措辞
-            # （label 是提及方式，canonical 是模型综合出的标签，反之亦然，
-            # 取决于具体场景），scene_quote 是这条提及自己申报、经
-            # _prep_pack_local_text_anchor 逐字核验的独立证据（isomorphic
-            # 于旧 event_chain[].source_evidence[].quote，见 _ModelSceneMention.
-            # quote 上方注释）——不是同义反复：它不是 name/canonical_scene_
-            # name 的重复或变体，是模型对"这段原文写的是不是这个地点"这个
-            # 独立问题的另一次单独申报，真假不由申报本身决定，由它是否
-            # 逐字命中原文决定。三路候选都试过仍找不到，才是真的没有本集
-            # 依据（下面 has_scene_anchor 会拦截，不再像 1.6.0 最初实现
-            # 那样静默放行空锚）。
+            # 场景绑定的锚点候选（第28轮 ERR-20260824；2.0.2 恢复第三路
+            # scene_quote，见 PREP_PACK_VERSION 2.0.2 大注释）：resolution/
+            # discovery 两支试 [canonical_scene_name, name, scene_quote,
+            # *姐妹提及引文]——canonical/name 都可能是模型综合出的合成标签
+            # （反之亦然，取决于场景），scene_quote 是这条提及自己申报、经
+            # _prep_pack_local_text_anchor 逐字核验的独立证据。末尾姐妹提及
+            # 引文（ERR-20260901-2e124f，见 _prep_pack_group_scene_quotes_
+            # by_canonical 完整案情）：同一地点本集被提到不止一次时，任何
+            # 一条姐妹提及申报的引文都是同等有效的本集依据，不该只认触发
+            # 这次 method 判定的那一条。全部候选都试过仍找不到，才是真的
+            # 没有本集依据（下面 has_scene_anchor 会拦截，不静默放行空锚）。
+            scene_quote_cands = [
+                canonical_scene_name, name, scene_quote,
+                *scene_sibling_quotes.get(canonical_scene_name, [])]
             if canonical_scene_name in newly_added_scene_names:
                 scene_method = "discovery"
-                scene_anchor_segments, scene_anchor_phrase = (
-                    _prep_pack_local_text_anchor(
-                        segments, [canonical_scene_name, name, scene_quote],
-                    )
-                )
+                scene_anchor_segments, scene_anchor_phrase = _prep_pack_local_text_anchor(
+                    segments, scene_quote_cands)
             elif resolved_via_discovery:
                 scene_method = "resolution"
-                scene_anchor_segments, scene_anchor_phrase = (
-                    _prep_pack_local_text_anchor(
-                        segments, [canonical_scene_name, name, scene_quote],
-                    )
-                )
+                scene_anchor_segments, scene_anchor_phrase = _prep_pack_local_text_anchor(
+                    segments, scene_quote_cands)
             elif via_suspected_true_name:
                 # 跟角色侧同一套判定（第29轮，见
                 # _prep_pack_verify_true_name_hypothesis 上方完整
@@ -751,17 +746,16 @@ async def _resolve_assets(
                         )
             elif canonical_scene_name != name:
                 # 2.0.2：恢复传入这条提及自己的 quote 作为第三方参数
-                # scene_event_evidence_quotes（该形参名未改——语义仍是
-                # "候选独立证据引文列表"，只是来源粒度从"事件"下沉到
-                # "提及"，见该函数 docstring 与 PREP_PACK_VERSION 上方
-                # 2.0.2 大注释）；找不到独立证据时函数自身仍会诚实降级为
-                # alias_inherited，不在这里改判据。
+                # scene_event_evidence_quotes（语义是"候选独立证据引文
+                # 列表"，见该函数 docstring）；这里连同姐妹提及的引文一并
+                # 传入（见 _prep_pack_group_scene_quotes_by_canonical），
+                # 找不到任何一条独立证据时仍诚实降级为 alias_inherited。
                 (
                     scene_method, scene_anchor_segments, scene_anchor_phrase,
                     scene_source_episode_no,
                 ) = _prep_pack_scene_alias_provenance(
-                    conn, segments, scene_reference_id,
-                    canonical_scene_name, [scene_quote],
+                    conn, segments, scene_reference_id, canonical_scene_name,
+                    [scene_quote, *scene_sibling_quotes.get(canonical_scene_name, [])],
                 )
             else:
                 scene_method = "direct"
