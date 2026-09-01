@@ -299,6 +299,26 @@ def sweep_orchestration_residue(conn: sqlite3.Connection,
     conn.commit()
 
 
+
+def _range_covers_all_produced_episodes(
+    conn: sqlite3.Connection, project_id: str, scope: dict[str, list[str]],
+) -> bool:
+    """本次集号范围是否覆盖了项目里全部"还有产出"的分集。
+
+    判据挂产物信号而不是集号区间：有 shots 的分集才算有产出，范围外还有这样
+    的分集就说明清项目级资产会越界。
+    """
+    produced = {
+        str(row["episode_id"]) for row in conn.execute(
+            """SELECT DISTINCT e.id AS episode_id
+                 FROM episodes e JOIN shots s ON s.episode_id=e.id
+                WHERE e.project_id=?""",
+            (project_id,),
+        )
+    }
+    return not (produced - set(scope["episodes"]))
+
+
 def purge_project_assets(conn: sqlite3.Connection, project_id: str) -> None:
     """项目级视觉资产没有对应的清除端点，只能走 SQL；一律按 project_id 收敛。"""
     for table, sql in PROJECT_ASSET_SWEEPS:
@@ -345,7 +365,16 @@ def main() -> int:
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     try:
-        purge_project_assets(conn, project_id)
+        # 项目级视觉资产（定妆照/场景图）按 project_id 收敛，没有集号维度：
+        # 只清一部分集号时清掉它们会越界毁掉范围外分集的资产绑定——实测
+        # 只清 EP1 却把 EP2-EP10 的定妆照一起清了。因此只有当本次范围覆盖
+        # 了项目里全部有产出的分集时才清；否则跳过并说明，由调用方决定是不是
+        # 要扩大范围。
+        if _range_covers_all_produced_episodes(conn, project_id, scope):
+            purge_project_assets(conn, project_id)
+        else:
+            log("  跳过项目级视觉资产：本次范围之外还有已产出的分集，"
+                "清掉定妆照/场景图会越界（要清就把范围扩到全部分集）")
         sweep_orchestration_residue(conn, scope)
     finally:
         conn.close()
