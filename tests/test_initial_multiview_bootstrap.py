@@ -703,6 +703,101 @@ def test_failed_extra_view_pack_does_not_expose_primary_to_video(
     assert scenes.scene_ref_for_episode("proj_bootstrap", "Courtyard", 1) is None
 
 
+def test_scene_pack_resume_reuses_existing_main_image_without_regenerating(
+    asset_db, monkeypatch,
+) -> None:
+    """场景包续跑（主图已落盘、pack 未 ready）复用已有主图，不重新付费出图。
+
+    这条保护原属 app.scenes._ensure_reactive_scene_image（出图解耦到后台任务后
+    生产侧已无调用方，2026-08-31 退场），等价语义现在完整落在
+    multiview.complete_legacy_scene_pack——app.video_supervisor.assets 唯一在跑
+    的生产入口——里：establishing 视角发现父图 image_path 已落盘时直接复用，不再
+    调用 _generate_image。跟着这个真正承担保护的函数一起测，而不是继续锁一个已
+    经没有生产调用方的孤儿函数。"""
+    conn, tmp_path = asset_db
+    _seed_bible_project(conn, with_scene=True)
+    image = tmp_path / "existing-main.jpg"
+    image.write_bytes(b"existing-scene")
+    scene_id = scenes.register_initial_scene_ref(
+        conn, "proj_bootstrap", "Courtyard", str(image),
+        "stone courtyard at dawn with a red gate", "prompt", {"overall": 0.95}, 1,
+    )
+    conn.execute(
+        "UPDATE scene_references SET pack_status='generating' WHERE id=?", (scene_id,),
+    )
+    conn.commit()
+
+    async def reuse_main_reject_regenerate(*_args, **kwargs):
+        if kwargs.get("call_meta", {}).get("view_role") == "establishing":
+            raise AssertionError("父图已落盘，不得为 establishing 视角重新付费生成")
+        return {"b64_json": base64.b64encode(b"reverse").decode("ascii")}
+
+    monkeypatch.setattr(multiview, "_generate_image", reuse_main_reject_regenerate)
+    monkeypatch.setattr(multiview, "scene_multiview_enabled", lambda: True)
+
+    result = asyncio.run(multiview.complete_legacy_scene_pack(
+        "proj_bootstrap", "Courtyard", 1, "cinematic animation",
+    ))
+
+    assert result["status"] == "ready"
+    row = conn.execute(
+        "SELECT image_path, pack_status FROM scene_references WHERE id=?", (scene_id,),
+    ).fetchone()
+    assert row["image_path"] == str(image)
+    assert row["pack_status"] == "ready"
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM scene_references "
+        "WHERE project_id='proj_bootstrap' AND scene_name='Courtyard'"
+    ).fetchone()["n"] == 1
+
+
+def test_scene_pack_failure_preserves_paid_main_image(asset_db, monkeypatch) -> None:
+    """场景包续跑中途失败（反打图供应商异常）不得连累已付费落盘的主图。
+
+    同上，这条保护原属 app.scenes._ensure_reactive_scene_image，现在跟着真正在
+    生产路径上跑的 multiview.complete_legacy_scene_pack 一起测。已知边界差异：
+    旧函数会在异常处理里显式把 pack_status 写回 'failed' 并把错误原因记进
+    group_qa_json；新调用方 app.video_supervisor.assets._prepare_episode_
+    reference_assets 没有复刻这段诊断写入，异常改为在 run_loop 外层被捕获、记成
+    VIDEO_REFERENCE_ASSET_PREP_FAILED 证据事件（app/video_supervisor/run_loop.py）
+    ——诊断信息仍然可见，只是搬去了证据时间线而不是这一行的 group_qa_json，且这段
+    行为在 _ensure_reactive_scene_image 已无生产调用方之后本来就是死代码，不是本
+    次退场引入的回归。这里只锁真正还在起作用的保护：已付费主图文件与
+    image_path 不会被失败的续跑冲掉。"""
+    conn, tmp_path = asset_db
+    _seed_bible_project(conn, with_scene=True)
+    image = tmp_path / "existing-main.jpg"
+    image.write_bytes(b"existing-scene")
+    scene_id = scenes.register_initial_scene_ref(
+        conn, "proj_bootstrap", "Courtyard", str(image),
+        "stone courtyard at dawn with a red gate", "prompt", {"overall": 0.95}, 1,
+    )
+    conn.execute(
+        "UPDATE scene_references SET pack_status='failed' WHERE id=?", (scene_id,),
+    )
+    conn.commit()
+
+    async def fail_reverse_angle(*_args, **kwargs):
+        if kwargs.get("call_meta", {}).get("view_role") == "reverse_angle":
+            raise RuntimeError("side view provider unavailable")
+        return {"b64_json": base64.b64encode(b"main").decode("ascii")}
+
+    monkeypatch.setattr(multiview, "_generate_image", fail_reverse_angle)
+    monkeypatch.setattr(multiview, "scene_multiview_enabled", lambda: True)
+
+    with pytest.raises(RuntimeError, match="side view provider unavailable"):
+        asyncio.run(multiview.complete_legacy_scene_pack(
+            "proj_bootstrap", "Courtyard", 1, "cinematic animation",
+        ))
+
+    row = conn.execute(
+        "SELECT image_path, pack_status FROM scene_references WHERE id=?", (scene_id,),
+    ).fetchone()
+    assert row["image_path"] == str(image)
+    assert row["pack_status"] != "ready"
+    assert image.is_file()
+
+
 def test_pending_reverse_view_is_promoted_without_regeneration(asset_db, monkeypatch) -> None:
     conn, tmp_path = asset_db
     _seed_bible_project(conn, with_scene=True)
