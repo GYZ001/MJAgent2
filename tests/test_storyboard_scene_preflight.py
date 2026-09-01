@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from pathlib import Path
 
 import pytest
 
@@ -267,7 +266,15 @@ def test_scene_projection_reconciliation_does_not_wait_for_full_episode_success(
     assert saved_outline.shots[0].scene_name == "大青山顶山崖"
 
 
-def test_scene_preflight_waits_for_each_relevant_scene_image(tmp_path, monkeypatch) -> None:
+def test_scene_preflight_does_not_wait_for_scene_image_before_releasing_storyboard(
+    tmp_path, monkeypatch,
+) -> None:
+    """出图从分镜台解耦到后台（用户口径：分镜不像视频生成那样往外发，不能因为
+    图片没生成就报错）。旧版本这里锁的是「逐个等图」——ensure_scenes_for_storyboard
+    内联调用 _generate_and_register_scene、等 scene_references 落盘才放行；那条
+    判据已经不成立：分镜台压根不再触发图片生成，等图这件事完全交给映射台发布后
+    统一触发的后台任务（app/domain/screenplay_ops/background_portraits.py）。
+    本用例改锁新行为：场景已在库里解析到就直接放行，不内联生成、不落盘。"""
     bible = _bible("甲家迎客大厅", "蛇人族大殿", "蛇人族城墙上空")
     _fresh_project(tmp_path, monkeypatch, bible)
     generated: list[str] = []
@@ -277,14 +284,13 @@ def test_scene_preflight_waits_for_each_relevant_scene_image(tmp_path, monkeypat
     result = asyncio.run(scenes.ensure_scenes_for_storyboard("p1", 209, _screenplay(), bible))
 
     assert result["blocking_errors"] == []
-    assert generated == ["蛇人族大殿", "蛇人族城墙上空"]
-    assert "甲家迎客大厅" not in generated
-    for name in generated:
+    assert generated == [], "分镜台不得再内联触发场景出图，出图只归后台任务"
+    for name in ("蛇人族大殿", "蛇人族城墙上空"):
         row = db.get_conn().execute(
-            "SELECT image_path FROM scene_references WHERE project_id='p1' AND scene_name=?",
+            "SELECT id FROM scene_references WHERE project_id='p1' AND scene_name=?",
             (name,),
         ).fetchone()
-        assert row and Path(row["image_path"]).is_file()
+        assert row is None, f"{name}：分镜台不应该落盘任何 scene_references 行"
 
 
 def test_reactive_scene_recovery_resumes_missing_views_without_regenerating_main(
@@ -430,10 +436,12 @@ def test_reactive_scene_pack_failure_preserves_paid_main_image(
 
 
 def test_new_screenplay_scene_is_ai_adopted_and_hidden_from_human_queue(tmp_path, monkeypatch) -> None:
+    """`generated`/`_install_fake_scene_generator` 曾用来顺带断言场景图被内联
+    生成——出图解耦到后台后这条判据不再成立（分镜台压根不再触发生成），删掉即
+    可，不影响本用例真正要锁的行为：新场景被 AI 自动采纳、写入 bible 别名、且
+    在 bible_auto_changes 里标成 auto_applied。"""
     bible = _bible("甲家迎客大厅")
     _fresh_project(tmp_path, monkeypatch, bible)
-    generated: list[str] = []
-    _install_fake_scene_generator(tmp_path, monkeypatch, generated)
 
     async def fake_assess(*_args, **_kwargs):
         return {
@@ -453,7 +461,6 @@ def test_new_screenplay_scene_is_ai_adopted_and_hidden_from_human_queue(tmp_path
     result = asyncio.run(scenes.ensure_scenes_for_storyboard("p1", 209, one_scene, bible))
 
     assert result["blocking_errors"] == []
-    assert generated == ["蛇人族大殿"]
     project = db.get_conn().execute(
         "SELECT bible_json,bible_auto_changes_json FROM projects WHERE id='p1'",
     ).fetchone()
@@ -514,11 +521,12 @@ def test_new_interior_scene_is_not_collapsed_to_generic_exterior_alias(
     tmp_path,
     monkeypatch,
 ) -> None:
+    """`generated`/`_install_fake_scene_generator` 曾用来顺带断言场景图被内联
+    生成——出图解耦到后台后这条判据不再成立，删掉即可，不影响本用例真正要锁的
+    行为：新的室内场景不会被错误合并进已有的室外别名。"""
     bible = _bible("外宗宝阁前")
     bible.scenes[0].aliases = ["日 / 外宗宝阁"]
     _fresh_project(tmp_path, monkeypatch, bible)
-    generated: list[str] = []
-    _install_fake_scene_generator(tmp_path, monkeypatch, generated)
 
     async def fake_assess(*_args, **_kwargs):
         return {
@@ -560,7 +568,6 @@ def test_new_interior_scene_is_not_collapsed_to_generic_exterior_alias(
     )
 
     assert result["blocking_errors"] == []
-    assert generated == ["外宗宝阁内"]
     current = Bible.model_validate_json(
         db.get_conn().execute(
             "SELECT bible_json FROM projects WHERE id='p1'"
@@ -569,18 +576,25 @@ def test_new_interior_scene_is_not_collapsed_to_generic_exterior_alias(
     assert {scene.name for scene in current.scenes} == {"外宗宝阁前", "外宗宝阁内"}
 
 
-def test_scene_preflight_does_not_continue_when_own_image_is_unavailable(tmp_path, monkeypatch) -> None:
+def test_scene_preflight_does_not_block_storyboard_when_scene_image_is_missing(
+    tmp_path, monkeypatch,
+) -> None:
+    """旧版本这里锁的是「图拿不到就必须 blocking_errors」——那是给分镜台加的一道
+    等图闸门，随本轮场景出图解耦一并撤销。用户口径：分镜不像视频生成那样往外发，
+    不能因为图片没生成就报错；分镜产出的是文本（场景锚点 + 镜头描述），图只在
+    发起付费视频时才真的需要，那道闸已经独立落地（单镜
+    _assert_shot_generation_gate，整集 scan_episode_reference_asset_gaps，均见
+    commit 2441f6f）。本用例改锁新行为：即使这两个场景一张图都没有、也不会被
+    内联生成，分镜台照样正常放行、不产出 blocking_errors。"""
     bible = _bible("蛇人族大殿", "蛇人族城墙上空")
     _fresh_project(tmp_path, monkeypatch, bible)
 
-    async def unavailable(*_args, **_kwargs):
-        return None
+    async def must_not_be_called(*_args, **_kwargs):
+        raise AssertionError("分镜台不得再内联调用场景出图")
 
-    monkeypatch.setattr(scenes, "_generate_and_register_scene", unavailable)
-    monkeypatch.setattr("app.multiview.scene_multiview_enabled", lambda: False)
+    monkeypatch.setattr(scenes, "_generate_and_register_scene", must_not_be_called)
     monkeypatch.setattr(scenes, "screen_scene_state_changes", lambda *_args, **_kwargs: {})
 
     result = asyncio.run(scenes.ensure_scenes_for_storyboard("p1", 209, _screenplay(), bible))
 
-    assert len(result["blocking_errors"]) == 2
-    assert all("自动场景图生成尚未就绪" in error for error in result["blocking_errors"])
+    assert result["blocking_errors"] == []

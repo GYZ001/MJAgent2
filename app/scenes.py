@@ -8,7 +8,9 @@ scene_references（按"适用集区间"分段，ep_end=NULL 表示开区间=当�
 两条产生路径（完全复刻 app.portraits 的角色定妆照机制）：
   ① 初始批量：generate_scene_refs（场景圣经定稿后，适用集 1~ 至今）。
   ② 分镜阶段反应式发现：ensure_scenes_for_storyboard——剧本里出现、场景库里没有、够戏份的
-     新场景 → 评估后补进 bible.scenes + 出图，适用集从首次出场那集起开放。
+     新场景 → 评估后补进 bible.scenes，适用集从首次出场那集起开放。出图不在这里
+     内联完成，挪到映射台发布后统一触发的后台任务（见
+     app/domain/screenplay_ops/background_portraits.py）。
 """
 from __future__ import annotations
 
@@ -1851,7 +1853,11 @@ async def _ensure_reactive_scene_image(
 
 
 async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenplay, bible) -> dict:
-    """分镜前反应式维护本集场景：AI 自动建库、等待场景图就绪，再交给分镜。"""
+    """分镜前反应式维护本集场景：AI 自动建库，再交给分镜。不内联等图落盘——分镜
+    产出的是文本（场景锚点 + 镜头描述），图只在发起付费视频时才真的需要，那道闸
+    已经独立落地（单镜 _assert_shot_generation_gate，整集
+    scan_episode_reference_asset_gaps）。出图统一由映射台发布后触发的后台任务
+    补齐，见 app/domain/screenplay_ops/background_portraits.py。"""
     scenes = list(getattr(bible, "scenes", None) or [])
     style = bible.world.visual_style_canonical
     conn = get_conn()
@@ -1948,7 +1954,13 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
             errors.append(message)
             blocking_errors.append(message)
 
-    # 所有本集剧本场景都必须等到自己的主图落盘；不存在“借最接近旧场景继续分镜”。
+    # 场景卡片只需入库映射；分镜不再内联等图（用户明确口径：分镜不像视频
+    # 生成那样往外发，不能因为图片没生成就报错）。出图交给后台补图任务
+    # （见 app/domain/screenplay_ops/background_portraits.py），缺图的安全网
+    # 挪到真正需要图的地方——发起付费视频时：整集走
+    # scan_episode_reference_asset_gaps，单镜走 _assert_shot_generation_gate
+    # （commit 2441f6f，先于本次解耦落地）。这里仍然拦"场景压根没建库成功"
+    # ——那不是缺图，是这个场景本身还不存在，分镜没有可用的锚点。
     project_row = conn.execute(
         "SELECT bible_json,bible_version FROM projects WHERE id=?", (project_id,),
     ).fetchone()
@@ -1964,36 +1976,14 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
             continue
         if matched not in relevant_names:
             relevant_names.append(matched)
-    by_name = {scene.name: scene for scene in scenes}
+    change_rows = conn.execute(
+        "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
+    ).fetchone()
+    try:
+        all_changes = json.loads(change_rows["bible_auto_changes_json"] or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        all_changes = []
     for name in relevant_names:
-        scene = by_name[name]
-        try:
-            ready = await _ensure_reactive_scene_image(
-                project_id,
-                scene,
-                episode_no=episode_no,
-                style=current_bible.world.visual_style_canonical,
-                bible_version=int(project_row["bible_version"] or 0),
-            )
-        except Exception as exc:  # noqa: BLE001
-            message = f"{name}：自动场景图生成尚未就绪" + code_ref(
-                exc, action="auto_generate_storyboard_scene",
-                context={"project_id": project_id, "scene": name, "episode_no": episode_no},
-            )
-            errors.append(message)
-            blocking_errors.append(message)
-            continue
-        for item in added:
-            if item.get("name") == name:
-                item["has_image"] = True
-                item.update(ready)
-        change_rows = conn.execute(
-            "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
-        ).fetchone()
-        try:
-            all_changes = json.loads(change_rows["bible_auto_changes_json"] or "[]")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            all_changes = []
         for change in all_changes:
             if change.get("kind") == "scene_discovery" and change.get("scene") == name:
                 _mark_scene_auto_change(
@@ -2001,8 +1991,7 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
                     project_id,
                     str(change.get("id") or ""),
                     status="auto_applied",
-                    reason="AI 已自动采纳场景并等待场景图落盘后放行分镜",
-                    image_path=ready["image_path"],
+                    reason="AI 已自动采纳场景，场景图交由后台生成",
                 )
 
     # ② 已入库场景的永久状态演进（损毁/重建等）
