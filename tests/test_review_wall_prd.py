@@ -828,6 +828,61 @@ def test_persisted_new_run_overrides_old_terminal_checkpoint_after_restart() -> 
 
 
 # ---------------------------------------------------------------------------
+# FAILED_CLOSED 文案必须如实反映本次为什么停下来，而不是对所有原因都吐出同一
+# 句通用话——ERR-20260831-dd05c7 之后 VideoPlanGenerationError 落 FAILED_CLOSED
+# 时 checkpoint.outcome 会带上 VIDEO_PLAN_INVALID，用户消息要能看出「是计划生
+# 成失败」；命中不到已知 code 时必须诚实退回通用说法，不得编造原因。两种情况
+# 下 next_actions 都必须保留 repair_preview 与 start_completion 这两条真出路。
+# ---------------------------------------------------------------------------
+
+
+def test_failed_closed_video_plan_invalid_names_the_real_reason() -> None:
+    checkpoint = SimpleNamespace(
+        phase="FAILED_CLOSED",
+        run_id="run-1",
+        grant_id="grant-1",
+        outcome="VIDEO_PLAN_INVALID",
+    )
+    result = api._video_completion_user_contract(
+        "e",
+        checkpoint,
+        {"phase": "FAILED_CLOSED", "run_id": "run-1", "outcome": "VIDEO_PLAN_INVALID"},
+        running=False,
+    )
+
+    assert result["user_state"] == "failed"
+    assert "视频计划" in result["message"]
+    assert "校验" in result["message"]
+    action_ids = [a["id"] for a in result["next_actions"]]
+    assert action_ids == ["repair_preview", "start_completion"]
+    start = next(a for a in result["next_actions"] if a["id"] == "start_completion")
+    assert start["endpoint"] == "/api/episodes/e/video-completion"
+    assert start["method"] == "POST"
+
+
+def test_failed_closed_unknown_outcome_falls_back_to_honest_generic_message() -> None:
+    """负控：命中不到 code 的 FAILED_CLOSED（例如韧性外壳自身也失败时的兜底
+    outcome="FAILED_CLOSED"，或未来新增但还没补映射条目的 code）必须继续用
+    原来的通用说法，不能因为查不到映射就编造一个具体原因。"""
+    checkpoint = SimpleNamespace(
+        phase="FAILED_CLOSED",
+        run_id="run-1",
+        grant_id="grant-1",
+        outcome="FAILED_CLOSED",
+    )
+    result = api._video_completion_user_contract(
+        "e",
+        checkpoint,
+        {"phase": "FAILED_CLOSED", "run_id": "run-1", "outcome": "FAILED_CLOSED"},
+        running=False,
+    )
+
+    assert result["message"] == "全片补齐已安全停止，现有采用版不会丢失"
+    action_ids = [a["id"] for a in result["next_actions"]]
+    assert action_ids == ["repair_preview", "start_completion"]
+
+
+# ---------------------------------------------------------------------------
 # P0 fix #4：WAITING_HUMAN / PAUSED_EXTERNAL 不得对已被供应商明确拒绝的镜头
 # 展示"继续补齐"这个假出路——resume 对这类镜头不会重试它。同一 phase 也
 # 用于用户手动暂停/资产待补齐等真正可以 resume 的场景，必须只在

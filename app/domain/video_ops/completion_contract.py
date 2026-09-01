@@ -122,6 +122,30 @@ def _resume_prepared_complete_episode_operation(
     conn.commit()
     return dict(result)
 
+# FAILED_CLOSED 的 checkpoint.outcome -> 用户可读细节。只收录目前已知会走到
+# FAILED_CLOSED 的 code：来源见 app/video_supervisor/run_loop.py
+# ``_resolve_grant_failure``（VideoPlanGenerationError，默认 code
+# VIDEO_PLAN_INVALID，ERR-20260831-dd05c7）。resilience.py 的
+# ``_mark_failed_closed``（韧性外壳自身也失败时的最后防线）把 outcome 设成字
+# 面量 "FAILED_CLOSED"，本身不携带比 phase 更多的信息，故不收录——命中不到
+# 表里的 code 一律走下面的通用说法，不得编造更具体的原因。
+_FAILED_CLOSED_OUTCOME_DETAIL = {
+    "VIDEO_PLAN_INVALID": "模型生成的整集视频计划未通过校验",
+}
+
+def _failed_closed_contract(cp: Any, projection: dict[str, Any], *, base: str, action) -> dict[str, Any]:
+    outcome = getattr(cp, "outcome", None) or projection.get("outcome")
+    detail = _FAILED_CLOSED_OUTCOME_DETAIL.get(outcome)
+    suffix = f"（{detail}）" if detail else ""
+    return {
+        "user_state": "failed",
+        "message": f"全片补齐已安全停止{suffix}，现有采用版不会丢失",
+        "next_actions": [
+            action("repair_preview", "查看修复预演", "GET", f"{base}/repair-preview"),
+            action("start_completion", "重新授权并补齐", "POST", base, True),
+        ],
+    }
+
 def _video_completion_user_contract(
     episode_id: str,
     cp: Any,
@@ -206,14 +230,7 @@ def _video_completion_user_contract(
             ],
         }
     if phase == "FAILED_CLOSED":
-        return {
-            "user_state": "failed",
-            "message": "全片补齐已安全停止，现有采用版不会丢失",
-            "next_actions": [
-                action("repair_preview", "查看修复预演", "GET", f"{base}/repair-preview"),
-                action("start_completion", "重新授权并补齐", "POST", base, True),
-            ],
-        }
+        return _failed_closed_contract(cp, projection, base=base, action=action)
     if phase == "CANCELLED":
         return {
             "user_state": "cancelled",
