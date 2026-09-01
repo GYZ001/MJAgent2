@@ -10080,6 +10080,13 @@ summary:focus-visible,
    列表，文字用 nowrap 截断」两处展示同一份数据，用户反馈太小看不清人脸、也分
    不出两处展示的区别。合并成 components/SegmentResourcePanel.tsx 一处、常驻
    展示（不用再点开折叠）、缩略图放大到 88px，描述文字改成可换行不截断。
+   2026-09-01 布局重做（用户反馈"很难看、文字紧贴边缘"）：三类素材从"三个等宽列"
+   改成"纵向分节 + 组内自适应网格"（一段 6 个人物会排成一行 4~6 张卡片，而不是把
+   左列拉成 6 行高、右两列空着）；缩略图 88px -> 64px、卡片改成垂直居中的紧凑行，
+   名字单行省略（完整值挂 title）。描述文字仍然不截断——那是 2026-08-31 的用户
+   拍板，这次只收小字号，不把它改回去。文字紧贴卡片边缘是分镜台侧的问题：
+   .storyboard-pack-segment 用的 .shot-strip 没有内边距（.card 有 20px/22px），
+   已在 styles/BoardPage.css 补上，不在本组件里加 padding 打补丁。
    放 index.css 而不是某页的 styles/*.css：这个组件被 BoardPage 和 WallPage 两
    页共用，放进任一页的样式表都会被 scripts/check_css_split.py 判成跨页选择器
    （见该脚本文档开头的说明——"跨页复用的留在 index.css"）。
@@ -10090,8 +10097,9 @@ summary:focus-visible,
    --------------------------------------------------------------------------- */
 .segres-panel {
   display: grid;
-  gap: 10px;
-  margin: 4px 0 2px;
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--hairline);
 }
 .segres-head {
   display: flex;
@@ -10112,29 +10120,38 @@ summary:focus-visible,
   color: var(--ink-faint);
   font: 400 11.5px/1.6 var(--ui);
 }
+/* 三类素材纵向分节、各自占满整宽；组内条目才是横向流动的网格。上一版把三类做成
+   三个等宽列（auto-fit minmax(240px)），一段有 6 个人物 1 个场景时左列拉成 6 行
+   高、右两列几乎全空，越宽的屏越难看。 */
 .segres-groups {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 14px;
 }
+.segres-group {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
 .segres-group > b {
-  display: block;
-  margin-bottom: 8px;
-  font: 650 12px var(--ui);
-  color: var(--ink);
+  margin: 0;
+  color: var(--ink-soft);
+  font: 650 11.5px var(--ui);
+  letter-spacing: 0.04em;
 }
 .segres-list {
   display: grid;
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+  gap: 8px;
 }
 .segres-item {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 8px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 10px;
   border: 1px solid var(--hairline);
   border-radius: 10px;
-  background: var(--surface-muted);
+  background: var(--card);
 }
 .segres-thumb-btn {
   position: relative;
@@ -10146,9 +10163,9 @@ summary:focus-visible,
   cursor: zoom-in;
 }
 .segres-thumb {
-  width: 88px;
-  height: 88px;
-  border-radius: 10px;
+  width: 72px;
+  height: 72px;
+  border-radius: 8px;
   object-fit: cover;
   background: var(--paper-deep);
 }
@@ -10169,15 +10186,15 @@ summary:focus-visible,
   flex: none;
   align-items: center;
   justify-content: center;
-  width: 88px;
-  height: 88px;
-  padding: 6px;
+  width: 72px;
+  height: 72px;
+  padding: 4px;
   border: 1px dashed var(--line);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--paper-deep);
   color: var(--ink-faint);
   text-align: center;
-  font: 600 11px/1.35 var(--ui);
+  font: 600 10px/1.3 var(--ui);
 }
 /* 定妆照/场景图生成失败态渲染成 <a>（可点击补图入口，见
    components/PortraitPlaceholder.tsx 文档字符串），用醒目的朱色描边与其余三态
@@ -10196,33 +10213,37 @@ a.segres-thumb-empty {
   flex: none;
   align-items: center;
   justify-content: center;
-  width: 88px;
-  height: 88px;
-  border-radius: 10px;
+  width: 72px;
+  height: 72px;
+  border-radius: 8px;
   background: var(--paper-deep);
   color: var(--ink-faint);
-  font-size: 22px;
+  font-size: 20px;
 }
 .segres-body {
   display: flex;
   min-width: 0;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 3px;
-  padding-top: 2px;
+  gap: 2px;
 }
+/* 名字单行省略：它是标签不是正文，长称谓（"白白净净身子较胖的少年"）撑开卡片会
+   让同一行的卡片一起变高。完整名字挂在 title 上，鼠标悬停可读。描述仍然不截断
+   （2026-08-31 用户拍板，旧版 nowrap 截断读不出内容），只是字号收小。 */
 .segres-name {
   color: var(--ink);
-  font: 650 13px var(--ui);
-  overflow-wrap: break-word;
+  font: 650 12.5px var(--ui);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .segres-desc {
   color: var(--ink-soft);
-  font: 400 12px/1.5 var(--ui);
+  font: 400 11.5px/1.5 var(--ui);
   overflow-wrap: break-word;
 }
 @media (max-width: 640px) {
-  .segres-groups {
+  .segres-list {
     grid-template-columns: 1fr;
   }
 }

@@ -593,6 +593,13 @@
   color: var(--ink-faint);
   font: 400 11.5px/1.6 var(--ui);
 }
+/* 分镜台段落卡用的是 .shot-strip（无内边距，为了让镜头图能出血到卡边），而这一屏
+   全是文字：段头、素材清单、提示词都直接贴着卡片边缘（用户反馈 2026-09-01）。这里
+   补上与 .card 相同的 20px/22px 内边距，只作用于分镜包段落卡，不动 .shot-strip 本身
+   ——它还服务着别的出血布局。 */
+.storyboard-pack-segment {
+  padding: 20px 22px;
+}
 .storyboard-pack-segment-head {
   display: flex;
   align-items: flex-start;
