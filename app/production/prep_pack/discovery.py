@@ -136,8 +136,13 @@ async def _discover_new_characters(
     )
 
     bible = _load_project_bible(conn, project_id)
+    # generate_portraits=False：出图从映射台解耦到后台（实测出图占映射台约
+    # 三分之二的供应商时间，EP1 image 469.6s / 全部 725.9s，映射墙钟 611s，
+    # 用户按下"映射"要干等十分钟）。映射台只负责发现→建卡→绑别名这些纯文本
+    # 工作；定妆照交给下面的后台任务，发起付费视频前由生成台的参考图就绪校验
+    # 兜底（_assert_shot_generation_gate / 整集入口的 asset_gaps）。
     result = await ensure_cards_for_text(
-        project_id, episode_no, discovery_text, bible, generate_portraits=True,
+        project_id, episode_no, discovery_text, bible, generate_portraits=False,
     )
     persist_screenplay_character_resolutions(
         conn, episode_id, result.get("resolutions") or [],
@@ -246,4 +251,5 @@ async def _discover_new_scenes(
 # 候选"、字数预算也按同样粒度兜底（保底段一律收录，超限做确定性截断而非
 # 整段丢弃），并把候选集从"只看本集原文逐字命中"扩展为"逐字命中 ∪ 人物谱
 # 注册区间覆盖本集"两类并集。
+
 

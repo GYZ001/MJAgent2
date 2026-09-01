@@ -72,7 +72,8 @@ def test_recurring_appellation_gets_its_own_card(monkeypatch) -> None:
     assert result["text"] == "许师姐走了进来"
     # 跨章复现已是"稳定身份"的结构证据，不得再被判成戏份少的路人。
     assert calls[0]["kwargs"]["require_identity_card"] is True
-    assert calls[0]["kwargs"]["generate_portrait"] is True
+    # 出图已解耦到后台：映射阶段只建卡，不在这里等图。
+    assert calls[0]["kwargs"]["generate_portrait"] is False
 
 
 def test_two_chapter_label_stays_a_functional_extra(monkeypatch) -> None:

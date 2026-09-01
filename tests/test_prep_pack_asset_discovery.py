@@ -458,7 +458,9 @@ def test_unresolved_new_character_routes_through_discovery_and_resolves(monkeypa
     async def fake_ensure_cards_for_text(project_id, episode_no, source_text, bible, *, generate_portraits=True):
         calls["n"] += 1
         assert project_id == "p1" and episode_no == 2
-        assert generate_portraits is True
+        # 出图已从映射台解耦到后台（见 screenplay_ops.background_portraits）：
+        # 映射只建卡，定妆照由后台任务补，付费视频前由参考图就绪校验兜底。
+        assert generate_portraits is False
         conn.execute(
             "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end) "
             "VALUES ('cp-new','p1','沈青梧',2,NULL)"

@@ -26,6 +26,7 @@ from app.domain.common import (
     _episode_source_text,
 )
 from app.evidence import repository as evidence_repository
+from .background_portraits import start_background_portraits
 from app.harness.context import ContextPack
 from app.harness.contracts import get_contract
 from app.orchestration.engine import (
@@ -100,6 +101,7 @@ async def _screenplay_task(
                 source_text=source_text,
                 run_id=run_id,
             )
+        start_background_portraits(str(ep_data.get("project_id") or ""))
         return payload
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
@@ -468,3 +470,4 @@ async def _recorded_screenplay_task(
         except StateConflict:
             return None
         return None
+

@@ -83,7 +83,8 @@ async def resolve_persistent_appellation(
     # 再让模型以"本集戏份少"把它降回路人——那正是漂移的来源。
     result = await ensure_character_card(
         project_id, label, episode_no,
-        generate_portrait=True, require_identity_card=True,
+        # 与 discovery 同一条：出图解耦到后台，这里只建卡。
+        generate_portrait=False, require_identity_card=True,
     )
     status = str((result or {}).get("status") or "")
     # "exists" 是这个称谓命中了人物谱里已有角色的别名，返回的 name 是归属者的
