@@ -1377,18 +1377,17 @@ def test_scene_label_aliased_to_two_scenes_still_resolves_via_this_calls_own_ver
             "location_kind": "",
         }
 
-    async def fake_ensure_reactive_scene_image(project_id, scene, *, episode_no, style, bible_version):
-        return {"image_path": "/fake/南峰山脚洞府.jpg", "reused": True}
-
     monkeypatch.setattr(scenes, "get_conn", lambda: conn)
     monkeypatch.setattr(scenes, "assess_new_scene", fake_assess_new_scene)
-    monkeypatch.setattr(scenes, "_ensure_reactive_scene_image", fake_ensure_reactive_scene_image)
 
     result = asyncio.run(scenes.ensure_scenes_for_labels("p1", 7, ["洞府"]))
 
     assert result["errors"] == [], result["errors"]
     assert result["resolved_names"] == {"洞府": "南峰山脚洞府"}, result["resolved_names"]
-    assert result["ready_scenes"] == ["南峰山脚洞府"]
+    # 出图已解耦到后台（见 app/scenes.py::ensure_scenes_for_labels 尾段
+    # 说明），本函数不再内联等图落盘，返回值里也不再有 ready_scenes——本测试
+    # 只验证历史别名平局下 resolved_names 仍能正确落到 direct_resolutions
+    # 的裁决结果，不是这里的断言重点。
 
 
 def test_scene_alias_registration_persists_new_wording_and_is_idempotent(monkeypatch):

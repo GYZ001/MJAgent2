@@ -2073,14 +2073,14 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
 async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: list[str]) -> dict:
     """反应式场景发现，供没有编译剧本对象的调用方使用（如 episode_prep_pack 的资产
     映射，app/production/prep_pack.py）：对给定的原始场景提及标签逐个做 新场景/
-    已有场景别名 判定，新场景则建库并出场景参考图。
+    已有场景别名 判定，新场景则建库。出场景参考图不在本函数内联完成，见下方
+    尾段说明。
 
-    是 ``ensure_scenes_for_storyboard`` 的①部分（发现→建库→出图）在“只有一串标签、
+    是 ``ensure_scenes_for_storyboard`` 的①部分（发现→建库）在“只有一串标签、
     没有 screenplay 场景结构”时的等价复用：调用同一批 assess_new_scene /
-    _append_scene_to_bible / _append_scene_alias / _ensure_reactive_scene_image，
-    不重复其判定逻辑。不含该函数的②已入库场景状态演进探测（损毁/重建等）——那仍是
-    分镜前维护职责，本函数的调用方（映射台）不需要，也拿不到②所需的 screenplay/
-    summary_by_heading 输入。
+    _append_scene_to_bible / _append_scene_alias，不重复其判定逻辑。不含该函数的
+    ②已入库场景状态演进探测（损毁/重建等）——那仍是分镜前维护职责，本函数的调用方
+    （映射台）不需要，也拿不到②所需的 screenplay/summary_by_heading 输入。
     """
     conn = get_conn()
     project = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
@@ -2088,7 +2088,6 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
         return {
             "added": [],
             "errors": [f"{label}：人物谱尚未初始化，无法建场景库" for label in labels],
-            "ready_scenes": [],
             "resolved_names": {},
         }
     bible = Bible.model_validate(json.loads(project["bible_json"]))
@@ -2188,7 +2187,12 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
             )
             errors.append(message)
 
-    # 所有传入标签都必须等到自己的主图落盘；不存在“借最接近旧场景继续用”。
+    # 场景卡片只需入库映射；出图从映射台解耦到后台，不在这里内联等图落盘
+    # （定妆照同一轮已落地，见 app/domain/screenplay_ops/background_portraits.py
+    # ::start_background_portraits 与其调用方 task_body.py::_screenplay_task
+    # 的 finally——prep_pack 成功/失败/用户取消都会触发后台补图，只排除进程
+    # 热更/停机）。缺场景图会在分镜/发起付费视频时被参考图就绪校验拦住，不会
+    # 静默流到生成台。
     project_row = conn.execute(
         "SELECT bible_json,bible_version FROM projects WHERE id=?", (project_id,),
     ).fetchone()
@@ -2208,36 +2212,14 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
         resolved_names[label] = matched
         if matched not in relevant_names:
             relevant_names.append(matched)
-    by_name = {scene.name: scene for scene in scenes}
-    ready_scenes: list[str] = []
+    change_rows = conn.execute(
+        "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
+    ).fetchone()
+    try:
+        all_changes = json.loads(change_rows["bible_auto_changes_json"] or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        all_changes = []
     for name in relevant_names:
-        scene = by_name[name]
-        try:
-            ready = await _ensure_reactive_scene_image(
-                project_id,
-                scene,
-                episode_no=episode_no,
-                style=current_bible.world.visual_style_canonical,
-                bible_version=int(project_row["bible_version"] or 0),
-            )
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"{name}：自动场景图生成尚未就绪" + code_ref(
-                exc, action="auto_generate_prep_pack_scene",
-                context={"project_id": project_id, "scene": name, "episode_no": episode_no},
-            ))
-            continue
-        ready_scenes.append(name)
-        for item in added:
-            if item.get("name") == name:
-                item["has_image"] = True
-                item.update(ready)
-        change_rows = conn.execute(
-            "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
-        ).fetchone()
-        try:
-            all_changes = json.loads(change_rows["bible_auto_changes_json"] or "[]")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            all_changes = []
         for change in all_changes:
             if change.get("kind") == "scene_discovery" and change.get("scene") == name:
                 _mark_scene_auto_change(
@@ -2245,14 +2227,12 @@ async def ensure_scenes_for_labels(project_id: str, episode_no: int, labels: lis
                     project_id,
                     str(change.get("id") or ""),
                     status="auto_applied",
-                    reason="AI 已自动采纳场景并等待场景图落盘后放行",
-                    image_path=ready["image_path"],
+                    reason="AI 已自动采纳场景，场景图交由后台生成",
                 )
 
     return {
         "added": added,
         "errors": errors,
-        "ready_scenes": ready_scenes,
         "resolved_names": resolved_names,
     }
 

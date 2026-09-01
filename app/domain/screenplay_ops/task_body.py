@@ -66,6 +66,8 @@ async def _screenplay_task(
     """
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    project_id = str(ep["project_id"]) if ep else ""
+    trigger_background_refs = True
     try:
         _assert_screenplay_run_owner(episode_id)
         ep_data = dict(ep)
@@ -101,11 +103,13 @@ async def _screenplay_task(
                 source_text=source_text,
                 run_id=run_id,
             )
-        start_background_portraits(str(ep_data.get("project_id") or ""))
         return payload
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
-            # 进程热更/停机不是用户取消；保留 running 让新 worker 续跑。
+            # 进程热更/停机不是用户取消；保留 running 让新 worker 续跑，也不
+            # 该在这个形状下抢跑后台补图——新 worker 续跑时会有自己的成功/
+            # 失败路径去触发，这里触发只会重复。
+            trigger_background_refs = False
             raise
         from app.observability.tracing import current_trace
         try:
@@ -157,6 +161,17 @@ async def _screenplay_task(
             public_error=public,
         )
         return None
+    finally:
+        # 无条件触发（成功/失败/用户取消都算，只排除上面进程热更/停机那一支）
+        # ——卡片是 prep_pack 内部 discovery 阶段就建好的，闸门缺图报错、并发
+        # 围栏冲突等任何后续失败都不改变卡片已经落库这一事实。触发器若只挂在
+        # 成功路径上，一旦 prep_pack 因为"闸门要图但图还没生成"这类原因抛异常，
+        # 触发器永远不会跑，图也永远补不上（ERR-20260831-63a9d2：EP1 建出 3
+        # 张角色卡，character_portraits 却是 0 行，portraits_status 停在
+        # idle）。_start_refs_generation/_start_scene_refs_generation 本身
+        # 已经是幂等的"已有同项目任务在跑则不重复起"，重复触发无害。
+        if trigger_background_refs:
+            start_background_portraits(project_id)
 
 def _new_screenplay_recorder(
     episode_id: str,
