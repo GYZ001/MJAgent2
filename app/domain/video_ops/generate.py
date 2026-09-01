@@ -25,7 +25,7 @@ from app.domain.storyboard_ops import _board_from_shot_rows
 from fastapi import HTTPException
 from pathlib import Path
 
-from .confirmation_gate import _assert_storyboard_generation_gate
+from .confirmation_gate import _assert_shot_generation_gate, _assert_storyboard_generation_gate
 
 
 def _shot_by_no(episode_id: str, shot_no: int):
@@ -456,7 +456,7 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
     shot_row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
     if not shot_row:
         raise HTTPException(404, "镜头不存在")
-    _assert_storyboard_generation_gate(shot_row["episode_id"])
+    _assert_shot_generation_gate(shot_row["episode_id"])
     qualification = _review_assert_shot_positive(
         shot_id, body.get("qualification_version"),
     )

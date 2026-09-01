@@ -139,6 +139,39 @@ def _restore_unconfirmed_storyboard_projection(
         raise
     return board
 
+
+def _assert_episode_reference_assets_ready(conn, episode, rows) -> None:
+    """本集用到的定妆照/场景图必须都已就绪，否则不得发起付费视频。
+
+    判据复用 ``scan_episode_reference_asset_gaps``——整集入口用的就是它，不另写
+    第二套"有没有图"的判断（本仓库已因两套判据分叉吃过亏）。
+    """
+    from app.multiview import scan_episode_reference_asset_gaps
+
+    from app.domain.storyboard_ops import _board_from_shot_rows
+
+    board = _board_from_shot_rows(rows, episode["episode_no"])
+    gaps = scan_episode_reference_asset_gaps(
+        project_id=episode["project_id"],
+        episode_no=int(episode["episode_no"]),
+        shots=list(zip([row["id"] for row in rows], board.shots, strict=False)),
+        conn=conn,
+    )
+    if not gaps["blockers"]:
+        return
+    names = "、".join([
+        *(f"人物「{name}」" for name in gaps["characters"]),
+        *(f"场景「{name}」" for name in gaps["scenes"]),
+    ]) or "本集生产资产"
+    raise HTTPException(409, {
+        "code": "REFERENCE_ASSETS_NOT_READY",
+        "message": f"{names}的参考图还没生成好，现在发起视频会拿不到素材。"
+                   "图片正在后台生成，稍等片刻再试；也可以在人物谱/场景库手动上传。",
+        "recovery_action": "等待后台出图完成，或在人物谱/场景库手动补图",
+        "episode_id": episode["id"],
+    })
+
+
 def _assert_storyboard_generation_gate(episode_id: str) -> None:
     """Authorize paid work from a current certificate, never a live score.
 
@@ -329,3 +362,22 @@ def create_storyboard_confirmation_preview(episode_id: str) -> dict:
 @router.post("/episodes/{episode_id}/confirm-preview")
 def confirm_episode_preview(episode_id: str):
     return create_storyboard_confirmation_preview(episode_id)
+
+
+def _assert_shot_generation_gate(episode_id: str) -> None:
+    """单镜生成专用闸门：公共闸门 + 本集参考图必须已就绪。
+
+    出图从映射台解耦到后台之后，发起付费视频时定妆照/场景图可能还没跑完，而
+    单镜入口此前只查镜头存在、分镜确认与预算，缺图照样能发出付费调用。
+
+    为什么不把这条加进公共的 _assert_storyboard_generation_gate：它被四个付费
+    入口共用，其中"补齐到全片可用"本身就会先补素材再生成——那正是整集入口
+    缺图时 409 消息里指的出路，把校验加进公共部分会把出路一起堵死。
+    """
+    _assert_storyboard_generation_gate(episode_id)
+    conn = get_conn()
+    episode = _episode_or_404(episode_id)
+    rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
+    ).fetchall()
+    _assert_episode_reference_assets_ready(conn, episode, rows)
