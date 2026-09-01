@@ -23,6 +23,13 @@ export interface StoryboardPackSegmentBeat {
 
 export interface StoryboardPackResourceCharacter {
   identity_id: string;
+  /**
+   * 非持久化展示字段（GET /episodes/{id} 投影时按本集映射包现算）：这个条目的
+   * 人类可读名字。段落清单里只有内部键——群演是 entity:<sha256 前16位>，界面直接
+   * 渲染就是一串哈希（用户实测 2026-09-01）。查不到时后端不挂这个字段，也不编
+   * 名字，调用方显示中性占位并把原始 id 放进 title。
+   */
+  display_name?: string;
   portrait_id?: string | null;
   description?: string;
   /**
@@ -38,7 +45,19 @@ export interface StoryboardPackResourceCharacter {
 
 export interface StoryboardPackResourceScene {
   scene_id: string;
+  /** 语义同 StoryboardPackResourceCharacter.display_name。 */
+  display_name?: string;
   scene_reference_id?: string | null;
+  /**
+   * 非持久化展示字段（GET /episodes/{id} 投影时按当前状态实时算出，不进已发布
+   * 产物本身），语义与 current_portrait_* 对称：这个场景按本集集号解析出的
+   * 「当前实际会用的那张」场景图，与生成侧同一份判据（后端
+   * app.multiview.scene_row_for_episode）。scene_reference_id 是固化快照，只做
+   * 溯源——出图解耦到后台后，映射那一刻它恒为 null，拿它查图必然查不到。两个
+   * 字段为 null 表示当前没有可用场景图，不得回退显示快照对应的旧图。
+   */
+  current_scene_reference_id?: string | null;
+  current_scene_image_url?: string | null;
   description?: string;
 }
 

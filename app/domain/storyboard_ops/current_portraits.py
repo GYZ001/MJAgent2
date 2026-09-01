@@ -1,5 +1,13 @@
-"""映射台/分镜台/生成台展示用：给每个已绑定 portrait_id 的角色资产条目挂上
-「当前实际会用的那张」定妆照，供前端在快照与当前不同时提示"已更新"。
+"""映射台/分镜台/生成台展示用：给每个人物谱身份的角色资产条目挂上「当前实际
+会用的那张」定妆照，供前端渲染缩略图、并在快照与当前不同时提示"已更新"。
+
+挂不挂这两个字段只看 identity_id 是不是人物谱身份（``bible:`` 前缀），**不看
+产物里固化的 portrait_id 快照**。旧版以 ``if character.get("portrait_id")`` 为
+门槛，在出图解耦到后台之后必然失效：映射跑完那一刻角色卡刚建、图还没出，
+快照恒为 null，于是这三个角色的缩略图永远停在"定妆照待生成"——连硬刷新都救
+不回来，因为门槛卡在展示层而不是数据本身。生成侧同一处病灶已由
+app.multiview._storyboard_pack_asset_dependencies 修掉（asset_required 改挂
+人物谱的卡、不挂快照），展示侧这里是同一个修法。
 
 不改写已发布产物：episode_prep_pack_payload() 每次调用都从 screenplay_json
 反序列化出一份新 dict，shots 同理来自 SELECT * 的行拷贝——本模块只往这些
@@ -32,11 +40,19 @@ def _character_name_from_identity(identity_id: str) -> str | None:
     return name or None
 
 
+def _is_bible_character(entry: Any) -> bool:
+    """这个资产条目要不要挂当前定妆照：只看 identity_id 是不是人物谱身份。"""
+    return isinstance(entry, dict) and bool(
+        _character_name_from_identity(str(entry.get("identity_id") or "")),
+    )
+
+
 def attach_current_character_portraits(detail: dict[str, Any], view: str | None) -> None:
     """就地给 detail["prep_pack"] 与 detail["shots"] 里的角色资产条目加
     current_portrait_id / current_portrait_image_url。未命中时两个字段都是
     None——调用方（前端）必须原样显示"无定妆照"，不得回退到 portrait_id
-    快照对应的图。
+    快照对应的图。群演/未收录称谓（identity_id 不带 bible: 前缀）连查都不查，
+    两个字段一个都不加：它们没有定妆照是设计使然，不是"当前解析不到"。
     """
     del view  # 两个来源字段是否存在已经由 _episode_detail_projection 按 view 决定
     project_id = detail.get("project_id")
@@ -69,12 +85,12 @@ def attach_current_character_portraits(detail: dict[str, Any], view: str | None)
     if isinstance(prep_pack, dict):
         characters = ((prep_pack.get("asset_manifest") or {}).get("characters")) or []
         for character in characters:
-            if isinstance(character, dict) and character.get("portrait_id"):
+            if _is_bible_character(character):
                 character.update(resolved(character.get("identity_id")))
 
     for shot in detail.get("shots") or []:
         segment = (shot or {}).get("storyboard_pack_segment") or {}
         resources = segment.get("resources") or {}
         for character in resources.get("characters") or []:
-            if isinstance(character, dict) and character.get("portrait_id"):
+            if _is_bible_character(character):
                 character.update(resolved(character.get("identity_id")))

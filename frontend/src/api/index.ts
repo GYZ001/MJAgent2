@@ -8,7 +8,8 @@
 //   common.ts    — 跨域共享的叶子类型（ArtifactEvidence/TaskTiming/...）与
 //                  numToCn 工具。
 //   bible/       — 人物谱域（世界书 / 人物与定妆照 / 场景与场景图）。
-//   screenplay.ts— 映射台域（EpisodeScreenplay / EpisodePrepPack / ScreenplayState）。
+//   screenplay.ts— 映射台域（EpisodeScreenplay / ScreenplayState）。
+//   prepPack.ts  — 映射台域的分集映射包契约（EpisodePrepPack / PrepPack*）。
 //   storyboard/  — 分镜台域（Shot / ShotVersion / StoryboardPack / 分镜台任务状态）。
 //   video.ts     — 视频生成域（ShotVideoGenerationPlan / ReviewWallContext）。
 //   delivery.ts  — 成片与交付域（MixStatus / DeliveryReadiness / DeliveryPackageRecord）。
@@ -37,6 +38,7 @@ export { numToCn };
 export * from "./common";
 export * from "./bible";
 export * from "./screenplay";
+export * from "./prepPack";
 export * from "./storyboard";
 export * from "./video";
 export * from "./delivery";

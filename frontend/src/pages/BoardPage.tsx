@@ -1,6 +1,6 @@
 import { ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
-  api, ApiError, Bible, Episode, Shot, StoryboardStatus,
+  api, ApiError, Episode, Shot, StoryboardStatus,
   type ConfirmPreview, type ProviderTaskBlocker, type ProviderTaskClearance,
   type ProviderTaskReconcileResult, type StartPreview, type StoryboardClearPreview,
   type VideoModelSwitchConfirm,
@@ -10,7 +10,7 @@ import EpisodeCrumb from '../components/EpisodeCrumb'
 import { ItemTaskTimer, ServerTaskTimer } from '../components/TaskTimer'
 import DecisionDialog from '../components/DecisionDialog'
 import QueryState from '../components/QueryState'
-import SegmentResourcePanel from '../components/SegmentResourcePanel'
+import SegmentResourcePanel from '../components/SegmentResourcePanel'; import { useRefsSettledRefresh } from '../hooks/useRefsSettledRefresh'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { storyboardTaskNotice } from '../lib/productionNotices'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
@@ -95,10 +95,10 @@ export type StoryboardPackResourceGapSummary = {
 }
 
 /**
- * 要求 2：一眼看出这一集有多少素材没映射上。linked = portrait_id/scene_reference_id
- * 非空；未 link 的与全部 props 都只有文字描述（世界书没有道具素材库）。按段落
- * 出现次数计数，不去重——同一角色在不同段落可能一段有素材、另一段没有，逐段计数
- * 才能反映"这一集"整体的映射缺口，而不是掩盖某几段的缺失。
+ * 要求 2：一眼看出这一集有多少素材没映射上。linked 挂后端现算的 current_portrait_id/
+ * current_scene_reference_id，不挂段落固化的快照——出图解耦后快照恒为 null，挂它会让
+ * 这一行永远显示"命中 0/N"，而生成时每段都拿得到图（真实事故 2026-09-01 EP1）。未
+ * link 的与全部 props 只有文字描述；按段落出现次数计数，不去重，才不会掩盖某几段的缺失。
  */
 export function storyboardPackResourceGapSummary(shots: Shot[]): StoryboardPackResourceGapSummary {
   let charactersLinked = 0
@@ -111,11 +111,11 @@ export function storyboardPackResourceGapSummary(shots: Shot[]): StoryboardPackR
     if (!resources) continue
     for (const character of resources.characters ?? []) {
       charactersTotal += 1
-      if (character.portrait_id) charactersLinked += 1
+      if (character.current_portrait_id) charactersLinked += 1
     }
     for (const scene of resources.scenes ?? []) {
       scenesTotal += 1
-      if (scene.scene_reference_id) scenesLinked += 1
+      if (scene.current_scene_reference_id) scenesLinked += 1
     }
     propsTotal += resources.props?.length ?? 0
   }
@@ -428,10 +428,10 @@ function statusFallback(ep: Episode): StoryboardStatus {
 export default function BoardPage() {
   const { episodeId, go, projectId, toast } = useNav()
   const { data: ep, refresh, error, status: queryErrorStatus, loading } = useEpisode(episodeId!, 'board')
-  // 分镜台 2.0.0 段落资源清单里的 portrait_id/scene_reference_id 指向项目人物谱/
-  // 场景库，需要同一份 bible 才能查缩略图；口径与用法都照抄 ScriptPage.tsx（refs/
-  // scene_refs 生成中轮询，2026-08-31 接上自动刷新，其余时候一次性拉取）。
+  // 项目 payload 只供占位四态判断"这一轮出图管没管到它"；缩略图取分集 payload 上
+  // 后端现算的 current_* 字段。口径照抄 ScriptPage.tsx（出图中轮询项目、跑完补刷分集）。
   const { data: project, refresh: refreshProject } = useProject(projectId!, refsBusyPollInterval, 'bible')
+  useRefsSettledRefresh(project, refresh)
   const [busy, setBusy] = useState(false)
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null)
   const [onlyProblems, setOnlyProblems] = useState(false)
@@ -1008,7 +1008,7 @@ export default function BoardPage() {
             )}
             {selectedShot && (
               <StoryboardPackSegmentView key={selectedShot.id}
-                shot={selectedShot} bible={project?.bible} notify={toast} project={project} />
+                shot={selectedShot} notify={toast} project={project} />
             )}
           </section>
         </div>
@@ -1152,9 +1152,9 @@ export default function BoardPage() {
  * 3. 次要——shot_count/目标模型/原文段号回指/台词条数/节拍/降级角标，小字与角标，
  *    不占正文层级，用 <details> 收起可展开的长内容（台词全文、节拍摘要、素材详情）。
  */
-function StoryboardPackSegmentView({ shot, bible, notify, project }: {
+function StoryboardPackSegmentView({ shot, notify, project }: {
   shot: Shot
-  bible: Bible | null | undefined; project: ImageGenTaskLike | null | undefined
+  project: ImageGenTaskLike | null | undefined
   notify: (message: string, error?: boolean) => void
 }) {
   const segment = shot.storyboard_pack_segment
@@ -1193,7 +1193,7 @@ function StoryboardPackSegmentView({ shot, bible, notify, project }: {
         </div>
       </header>
 
-      <SegmentResourcePanel resources={segment.resources} bible={bible} project={project} />
+      <SegmentResourcePanel resources={segment.resources} project={project} />
 
       <section className="storyboard-pack-prompt-block">
         <div className="storyboard-pack-prompt-head">

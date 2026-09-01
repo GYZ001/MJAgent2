@@ -319,24 +319,24 @@ describe('分镜台段落展示（docs/STORYBOARD_PROMPT_IR_DESIGN.md 冻结契�
     expect(storyboardPackBeatOverview([shot(), shot({ id: 's2' })])).toEqual([])
   })
 
-  it('资源缺口统计按段落引用计数，区分有素材与只有文字描述两种状态', () => {
+  it('资源缺口统计按段落引用计数，只认后端现算的 current_*——段落固化的快照 id 不算命中', () => {
     const shots = [
       packShot({ id: 's1' }, {
         resources: {
           characters: [
-            { identity_id: 'char-1', portrait_id: 'portrait-1', description: '' },
-            { identity_id: 'char-2', portrait_id: null, description: '一名少年' },
+            { identity_id: 'char-1', current_portrait_id: 'portrait-1', description: '' },
+            { identity_id: 'char-2', portrait_id: 'snapshot-1', current_portrait_id: null, description: '一名少年' },
           ],
           scenes: [
-            { scene_id: 'scene-1', scene_reference_id: null, description: '破旧的柴房' },
+            { scene_id: 'scene-1', scene_reference_id: 'snapshot-2', current_scene_reference_id: null, description: '破旧的柴房' },
           ],
           props: [{ label: '密信', description: '一封火漆密封的信' }],
         },
       }),
       packShot({ id: 's2' }, {
         resources: {
-          characters: [{ identity_id: 'char-1', portrait_id: 'portrait-1', description: '' }],
-          scenes: [{ scene_id: 'scene-2', scene_reference_id: 'ref-2', description: '' }],
+          characters: [{ identity_id: 'char-1', current_portrait_id: 'portrait-1', description: '' }],
+          scenes: [{ scene_id: 'scene-2', current_scene_reference_id: 'ref-2', description: '' }],
           props: [],
         },
       }),

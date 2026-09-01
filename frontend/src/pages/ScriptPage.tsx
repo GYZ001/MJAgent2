@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   api,
-  Bible,
   EpisodePrepPack,
   PrepPackAppellationMapEntry,
   PrepPackCoverageEntry,
@@ -19,10 +18,10 @@ import OperationError from '../components/OperationError'
 import PrepPackPreviewDialog from '../components/script/PrepPackPreviewDialog'
 import PrepPackDiscoverySummary from '../components/script/PrepPackDiscoverySummary'
 import PortraitPlaceholder from '../components/PortraitPlaceholder'; import SceneReferencePlaceholder from '../components/SceneReferencePlaceholder'
-import { useDeleteConfirm } from '../hooks/useDeleteConfirm'
+import { useDeleteConfirm } from '../hooks/useDeleteConfirm'; import { useRefsSettledRefresh } from '../hooks/useRefsSettledRefresh'
 import { screenplayTaskNotice } from '../lib/productionNotices'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
-import { characterPortraitDisplay, findPortraitImage, findSceneReferenceImage, refsBusyPollInterval, type RefsTaskLike } from '../lib/bibleAssets'
+import { characterPortraitDisplay, refsBusyPollInterval, type RefsTaskLike } from '../lib/bibleAssets'
 import StageTextModelPicker from '../components/StageTextModelPicker'
 import "../styles/ScriptPage.css";
 
@@ -163,11 +162,6 @@ export function coverageGateSummary(ledger: PrepPackCoverageLedger | null | unde
     totalSegments: ledger?.total_segments ?? 0,
   }
 }
-
-// findPortraitImage / findSceneReferenceImage 已提取到 lib/bibleAssets.ts
-// （BoardPage.tsx 分镜台 2.0.0 段落资源清单需要同一份素材查找逻辑，不得复制第二份
-// 实现）；这里重新导出保持既有对外接口与测试导入路径不变，函数体没有改动。
-export { findPortraitImage, findSceneReferenceImage }
 
 /**
  * 画面与字幕分离（1.7.0+，见 docs/CHARACTER_IDENTITY_ENTITY_DESIGN.md §4.3）：
@@ -322,6 +316,7 @@ export default function ScriptPage() {
   const { episodeId, projectId, go, toast } = useNav()
   const { data: ep, refresh, error, status, loading } = useScriptEpisode(episodeId!)
   const { data: project, refresh: refreshProject } = useProject(projectId!, refsBusyPollInterval, 'bible')
+  useRefsSettledRefresh(project, refresh)
   const [busy, setBusy] = useState(false)
   const [detailsExpanded, setDetailsExpanded] = useState(false)
   const [preview, setPreview] = useState<ActionPreview | null>(null)
@@ -581,7 +576,7 @@ export default function ScriptPage() {
       <div className="workspace-gap" />
 
       {isPrepPack(packRaw) ? (
-        <PrepPackView pack={packRaw} bible={project?.bible} project={project} sourceFallback={sourceRangeText(ep.source_chapters)} />
+        <PrepPackView pack={packRaw} project={project} sourceFallback={sourceRangeText(ep.source_chapters)} />
       ) : ep.screenplay ? (
         <section className="card">
           <div className="empty">
@@ -633,10 +628,9 @@ function appellationRowKey(entry: PrepPackAppellationMapEntry, index: number): s
 }
 
 export function PrepPackView({
-  pack, bible, sourceFallback, project,
+  pack, sourceFallback, project,
 }: {
   pack: EpisodePrepPack
-  bible: Bible | null | undefined
   sourceFallback: string
   /** 测试大量直接构造本组件不关心 refs 任务态，未传时占位落到 pending，不是静默错误。 */
   project?: { refs_status?: string; refs_target?: string | null; scene_refs_status?: string; scene_refs_target?: string | null } | null
@@ -832,7 +826,7 @@ export function PrepPackView({
           <h3 className="prep-section-heading">出场场景 · {scenes.length}</h3>
           <div className="prep-roster">
             {scenes.map(scene => {
-              const imageUrl = findSceneReferenceImage(bible, scene.scene_reference_id)
+              const imageUrl = scene.current_scene_image_url ?? null
               const name = scene.display_name || scene.scene_id || '未命名场景'
               const coverageText = assetCoverageText(scene.segment_indexes)
               return (

@@ -1,6 +1,6 @@
 import { get, mutate, request } from "./client";
 import type { ArtifactEvidence, ShotTiming, TaskTiming, TextModelChoice } from "./common";
-import type { EpisodePrepPack, EpisodeScreenplay, ScreenplayState } from "./screenplay";
+import type { EpisodeScreenplay, ScreenplayState } from "./screenplay"; import type { EpisodePrepPack } from "./prepPack";
 import type { Bible } from "./bible";
 import type { EpisodePipelineSummary, Shot, StoryboardStatus } from "./storyboard";
 

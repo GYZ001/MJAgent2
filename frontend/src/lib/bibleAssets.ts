@@ -1,33 +1,17 @@
-import { Bible, ReferenceImage } from '../api'
+import { ReferenceImage } from '../api'
 
-/**
- * 提取到 lib/（原在 pages/ScriptPage.tsx）：分镜台 2.0.0 展示改造需要在
- * BoardPage.tsx 里按 portrait_id / scene_reference_id 查同一份人物谱/场景库
- * 素材缩略图，跨页复用必须共享同一个真源，不得复制第二份实现——见
- * docs/STORYBOARD_PROMPT_IR_DESIGN.md。ScriptPage.tsx 通过
- * `export { findPortraitImage, findSceneReferenceImage } from '../lib/bibleAssets'`
- * 保持对外接口不变，函数体没有改动。
+/*
+ * 曾经这里有 findPortraitImage / findSceneReferenceImage：拿产物里固化的
+ * portrait_id / scene_reference_id 快照，去项目人物谱/场景库的 portraits[] /
+ * scene_refs[] 里查缩略图。2026-09-01 随同一天的展示修复一起退场——出图解耦到
+ * 后台之后，映射/分镜落库那一刻两个快照恒为 null，这条查图路径必然落空，图后来
+ * 出好了界面也永远停在"待生成"（真实事故：proj_f8cf2eeb2e66 EP1，人物谱与场景库
+ * 六张图全在，映射台/分镜台/生成台一张不显示）。取代它的是后端在
+ * GET /episodes/{id} 现算的 current_portrait_image_url /
+ * current_scene_image_url（app/domain/storyboard_ops/current_portraits.py、
+ * current_scene_refs.py），与生成侧挑参考图同一份判据。快照字段本身保留，只做
+ * 溯源，不再参与"现在该显示哪张图"。
  */
-
-/** 复用 BiblePage 展示 character_portraits 的口径：在项目人物谱的 portraits[] 里按 id 查图。 */
-export function findPortraitImage(bible: Bible | null | undefined, portraitId: string | null | undefined): string | null {
-  if (!portraitId) return null
-  for (const character of bible?.characters ?? []) {
-    const match = (character.portraits ?? []).find(portrait => portrait.id === portraitId)
-    if (match?.image_url) return match.image_url
-  }
-  return null
-}
-
-/** 复用 ScenesPage 展示 scene_references 的口径：在项目场景库的 scene_refs[] 里按 id 查图。 */
-export function findSceneReferenceImage(bible: Bible | null | undefined, sceneReferenceId: string | null | undefined): string | null {
-  if (!sceneReferenceId) return null
-  for (const scene of bible?.scenes ?? []) {
-    const match = (scene.scene_refs ?? []).find(ref => ref.id === sceneReferenceId)
-    if (match?.image_url) return match.image_url
-  }
-  return null
-}
 
 /**
  * 用户拍板（2026-08-30）：映射台/分镜台/生成台展示定妆照时，按身份实时解析出
@@ -104,7 +88,7 @@ export function refsPhaseForName(project: RefsTaskLike, name: string): RefsTaskP
 /**
  * 从 BiblePage.tsx 挪来（2026-08-31，定妆照占位四态改造）：ScriptPage/BoardPage/
  * WallPage 判断"这个角色是否被本轮 refs 生成任务覆盖"要用同一份判据，不得复制
- * 第二份实现——同 findPortraitImage 当年从 ScriptPage 挪出来的先例。只在
+ * 第二份实现——同 characterPortraitDisplay 当年从 ScriptPage 挪出来的先例。只在
  * running 时为真，BiblePage.tsx 改为重新导出，对外接口与测试导入路径不变。
  */
 export function characterIsFitting(project: RefsTaskLike, character: { name: string }): boolean {
@@ -218,8 +202,8 @@ export type ImageGenTaskLike = RefsTaskLike & SceneRefsTaskLike
 /**
  * 从 pages/WallPage.tsx 挪来（2026-08-31，「传入素材」展示重做）：给一张
  * GET /shots/{id}/review 返回的 image_inputs.reference_images 元素生成展示标签。
- * 这是「这一次生成实际发给供应商的参考图」的标签，与 characterPortraitDisplay/
- * findSceneReferenceImage 展示的「本段脚本声明涉及哪个实体」是两件不同的事——
+ * 这是「这一次生成实际发给供应商的参考图」的标签，与 characterPortraitDisplay
+ * 展示的「本段脚本声明涉及哪个实体、当前解析到哪张图」是两件不同的事——
  * 前者只在生成台按具体一次生成尝试展示，后者跨分镜台/生成台展示当前解析结果。
  * components/GenerationReferenceGallery.tsx 与 WallPage.tsx 共用同一份实现，
  * WallPage.tsx 通过 `export { referenceImageLabel } from '../lib/bibleAssets'`

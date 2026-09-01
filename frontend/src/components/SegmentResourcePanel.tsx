@@ -1,15 +1,29 @@
 import { useState } from 'react'
 import type {
-  Bible,
   StoryboardPackResourceCharacter,
   StoryboardPackResourceProp,
   StoryboardPackResourceScene,
   StoryboardPackResources,
 } from '../api'
-import { characterPortraitDisplay, findSceneReferenceImage, type ImageGenTaskLike } from '../lib/bibleAssets'
+import { characterPortraitDisplay, type ImageGenTaskLike } from '../lib/bibleAssets'
 import ImageCompareModal from './ImageCompareModal'
 import PortraitPlaceholder from './PortraitPlaceholder'
 import SceneReferencePlaceholder from './SceneReferencePlaceholder'
+
+/**
+ * 段落资源清单的展示名：优先用后端按本集映射包现算的 display_name；没有就从内部
+ * 键里取人能读的部分——``bible:孟浩`` 的冒号后半段本来就是名字，而 ``entity:``
+ * 后面是 sha256 前 16 位（app.identity_authority），对人零信息，只能显示中性占位，
+ * 不许把哈希当名字摆出来（用户实测 2026-09-01：生成台整排群演都是一串 id）。
+ * 原始 id 不丢，调用方挂在 title 上供溯源。
+ */
+function resourceLabel(displayName: string | undefined, id: string | undefined, fallback: string): string {
+  if (displayName) return displayName
+  if (!id) return fallback
+  if (id.startsWith('entity:')) return fallback
+  const readable = id.includes(':') ? id.slice(id.indexOf(':') + 1) : id
+  return readable || fallback
+}
 
 type Preview = { title: string; images: { src: string; label: string }[] }
 type OnPreview = (label: string, src: string) => void
@@ -26,6 +40,12 @@ type OnPreview = (label: string, src: string) => void
  * 参考图」——那件事只在生成台由 components/GenerationReferenceGallery.tsx 按具体
  * 一次生成尝试的 image_inputs 展示，两者语义不同，不在本组件里重复。
  *
+ * 人物/场景两类缩略图都直接取后端现算的 current_portrait_image_url /
+ * current_scene_image_url，不再拿段落里固化的 portrait_id / scene_reference_id
+ * 快照去人物谱/场景库查图：出图解耦到后台后，分镜落库那一刻两个快照恒为 null，
+ * 查图必然落空，图后来出好了也永远显示"待生成"（真实事故 2026-09-01 EP1）。
+ * 因此本组件不再需要 bible。
+ *
  * 缺图四态（生成中/失败/待生成/群演无定妆照）不重新判定，直接复用
  * components/PortraitPlaceholder.tsx、SceneReferencePlaceholder.tsx——同一份判据
  * 见 lib/bibleAssets.ts::resolvePortraitPlaceholderKind 的文档字符串。
@@ -33,9 +53,8 @@ type OnPreview = (label: string, src: string) => void
  * CSS 放 index.css 而不是某页的 styles/*.css：本组件被两个页面共用，放进页面样式
  * 表会被 scripts/check_css_split.py 判成跨页选择器（见该脚本文档）。
  */
-export default function SegmentResourcePanel({ resources, bible, project }: {
+export default function SegmentResourcePanel({ resources, project }: {
   resources: StoryboardPackResources
-  bible: Bible | null | undefined
   project: ImageGenTaskLike | null | undefined
 }) {
   const [preview, setPreview] = useState<Preview | null>(null)
@@ -56,7 +75,7 @@ export default function SegmentResourcePanel({ resources, bible, project }: {
         : (
           <div className="segres-groups">
             <CharacterGroup characters={characters} project={project} onPreview={onPreview} />
-            <SceneGroup scenes={scenes} bible={bible} project={project} onPreview={onPreview} />
+            <SceneGroup scenes={scenes} project={project} onPreview={onPreview} />
             <PropGroup props={props} />
           </div>
         )}
@@ -76,7 +95,7 @@ function CharacterGroup({ characters, project, onPreview }: {
       <div className="segres-list">
         {characters.map((character, index) => {
           const { imageUrl, updated } = characterPortraitDisplay(character)
-          const label = character.identity_id || '未命名角色'
+          const label = resourceLabel(character.display_name, character.identity_id, '未具名群演')
           return (
             <div className="segres-item" key={`c-${index}`}>
               {imageUrl
@@ -88,7 +107,7 @@ function CharacterGroup({ characters, project, onPreview }: {
                 )
                 : <PortraitPlaceholder identityId={character.identity_id} project={project} className="segres-thumb-empty" />}
               <div className="segres-body">
-                <span className="segres-name">{label}</span>
+                <span className="segres-name" title={character.identity_id}>{label}</span>
                 <span className="segres-desc">{character.description || (imageUrl ? '' : '暂无文字描述')}</span>
               </div>
             </div>
@@ -100,9 +119,8 @@ function CharacterGroup({ characters, project, onPreview }: {
   )
 }
 
-function SceneGroup({ scenes, bible, project, onPreview }: {
+function SceneGroup({ scenes, project, onPreview }: {
   scenes: StoryboardPackResourceScene[]
-  bible: Bible | null | undefined
   project: ImageGenTaskLike | null | undefined
   onPreview: OnPreview
 }) {
@@ -111,8 +129,8 @@ function SceneGroup({ scenes, bible, project, onPreview }: {
       <b>场景 · {scenes.length}</b>
       <div className="segres-list">
         {scenes.map((scene, index) => {
-          const imageUrl = findSceneReferenceImage(bible, scene.scene_reference_id)
-          const label = scene.scene_id || '未命名场景'
+          const imageUrl = scene.current_scene_image_url ?? null
+          const label = resourceLabel(scene.display_name, scene.scene_id, '未命名场景')
           return (
             <div className="segres-item" key={`s-${index}`}>
               {imageUrl
@@ -123,7 +141,7 @@ function SceneGroup({ scenes, bible, project, onPreview }: {
                 )
                 : <SceneReferencePlaceholder sceneId={scene.scene_id} label={label} project={project} className="segres-thumb-empty" />}
               <div className="segres-body">
-                <span className="segres-name">{label}</span>
+                <span className="segres-name" title={scene.scene_id}>{label}</span>
                 <span className="segres-desc">{scene.description || (imageUrl ? '' : '暂无文字描述')}</span>
               </div>
             </div>

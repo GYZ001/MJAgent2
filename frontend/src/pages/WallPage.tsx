@@ -4,7 +4,6 @@ import { episodeBusy, useEpisode, useNav, useProject } from '../App'
 import {
   api,
   ApiError,
-  type Bible,
   type EpisodeGenerateResult,
   type ReferenceImage,
   type ReusedReason,
@@ -299,7 +298,6 @@ export default function WallPage() {
     episodeId || '', 'wall', current => episodeBusy(current) ? 4000 : 0,
   )
   const { data: project } = useProject(projectId!, refsBusyPollInterval, 'bible')
-  const bible = project?.bible ?? null
 
   const shots = useMemo(() => (ep?.shots ?? []).filter(isSegmentShot), [ep?.shots])
 
@@ -539,7 +537,7 @@ export default function WallPage() {
               <SegmentWorkbench
                 key={selectedSummary.id}
                 shot={selectedSummary}
-                bible={bible} project={project}
+                project={project}
                 context={context}
                 detail={detail}
                 onRefresh={refreshAll}
@@ -578,9 +576,9 @@ function SegmentNavItem({ shot, selected, onSelect }: { shot: Shot; selected: bo
   )
 }
 
-function SegmentWorkbench({ shot, bible, context, detail, onRefresh, onToast, project }: {
+function SegmentWorkbench({ shot, context, detail, onRefresh, onToast, project }: {
   shot: Shot
-  bible: Bible | null; project: ImageGenTaskLike | null
+  project: ImageGenTaskLike | null
   context: ReviewWallContext | null
   detail: DetailState
   onRefresh: () => Promise<void>
@@ -617,7 +615,7 @@ function SegmentWorkbench({ shot, bible, context, detail, onRefresh, onToast, pr
         </div>
       </header>
 
-      <SegmentResourcePanel resources={segment.resources} bible={bible} project={project} />
+      <SegmentResourcePanel resources={segment.resources} project={project} />
 
       <section className="wall-prompt-block">
         <div className="wall-prompt-head">

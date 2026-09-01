@@ -10,8 +10,6 @@ import {
   characterAppellationTag,
   compressSegmentIndexes,
   coverageGateSummary,
-  findPortraitImage,
-  findSceneReferenceImage,
   isLegacyPrepPackFormat,
   isPrepPack,
   normalizeStage,
@@ -315,63 +313,6 @@ describe('coverageGateSummary', () => {
   })
 })
 
-describe('findPortraitImage', () => {
-  const bible = {
-    characters: [
-      {
-        name: '甲',
-        role: '',
-        appearance_canonical: '',
-        personality: '',
-        speech_style: '',
-        relationships: [],
-        portraits: [
-          { id: 'portrait-1', ep_start: 1, ep_end: null, image_url: 'https://example.test/a.png' },
-        ],
-      },
-    ],
-    world: { era: '', genre: '', visual_style_canonical: '' },
-  } as any
-
-  it('finds the image url for a matching portrait id across all characters', () => {
-    expect(findPortraitImage(bible, 'portrait-1')).toBe('https://example.test/a.png')
-  })
-
-  it('returns null when the portrait id is empty, missing, or unmatched', () => {
-    expect(findPortraitImage(bible, '')).toBeNull()
-    expect(findPortraitImage(bible, null)).toBeNull()
-    expect(findPortraitImage(bible, 'portrait-unknown')).toBeNull()
-    expect(findPortraitImage(null, 'portrait-1')).toBeNull()
-  })
-})
-
-describe('findSceneReferenceImage', () => {
-  const bible = {
-    characters: [],
-    world: { era: '', genre: '', visual_style_canonical: '' },
-    scenes: [
-      {
-        name: '客栈',
-        scene_canonical: '',
-        scene_refs: [
-          { id: 'scene-ref-1', ep_start: 1, ep_end: null, image_url: 'https://example.test/s.png' },
-        ],
-      },
-    ],
-  } as any
-
-  it('finds the image url for a matching scene reference id across all scenes', () => {
-    expect(findSceneReferenceImage(bible, 'scene-ref-1')).toBe('https://example.test/s.png')
-  })
-
-  it('returns null when the scene reference id is empty, missing, or unmatched', () => {
-    expect(findSceneReferenceImage(bible, '')).toBeNull()
-    expect(findSceneReferenceImage(bible, undefined)).toBeNull()
-    expect(findSceneReferenceImage(bible, 'scene-ref-unknown')).toBeNull()
-    expect(findSceneReferenceImage(null, 'scene-ref-1')).toBeNull()
-  })
-})
-
 describe('stageStateTone / stageStateLabel', () => {
   it('normalizes the confirmed new-shape state values (pending/active/done/blocked)', () => {
     expect(stageStateTone('pending')).toBe('pending')
@@ -564,29 +505,16 @@ describe('real EP1 payload walkthrough (no live auth session available; verified
     expect(gate.retainedCount).toBe(33)
   })
 
-  it('resolves every real character portrait_id and scene_reference_id to a non-empty roster name', () => {
-    // 用真实 portrait_id/scene_reference_id 命中一个人造 Bible（真实 image_url 由后端
-    // build_media_url 生成，这里只验证 id 匹配机制本身，已在 findPortraitImage 单测中
-    // 单独覆盖 URL 取值路径）。
-    const bible = {
-      characters: [
-        { name: '孟浩', portraits: [{ id: 'portrait_ecc9491a63f4', image_url: '/media/a.jpg' }] },
-        { name: '王有材', portraits: [{ id: 'portrait_bb6813d0733d', image_url: '/media/b.jpg' }] },
-        { name: '许清', portraits: [{ id: 'portrait_e01eec6ef5ef', image_url: '/media/c.jpg' }] },
-      ],
-      world: { era: '', genre: '', visual_style_canonical: '' },
-      scenes: [
-        { name: '大青山山顶', scene_refs: [{ id: 'scene_e6dab3555673', image_url: '/media/d.jpg' }] },
-        { name: '半山青石空地', scene_refs: [{ id: 'scene_a9c9f33fad29', image_url: '/media/e.jpg' }] },
-      ],
-    } as any
+  it('每条真实素材条目都有可展示的正名（缩略图另由后端现算字段决定）', () => {
+    // 这里只验"正名不空"。缩略图取哪张图已经不再由产物里的 portrait_id/
+    // scene_reference_id 快照决定——后端在 GET /episodes/{id} 现算 current_*
+    // 字段（见 app/domain/storyboard_ops/current_portraits.py、current_scene_refs.py），
+    // 快照只做溯源，出图解耦到后台后它在新产物里恒为 null。
     for (const character of ep1Pack.asset_manifest.characters) {
       expect(character.display_name.trim().length).toBeGreaterThan(0)
-      expect(findPortraitImage(bible, character.portrait_id)).toMatch(/^\/media\//)
     }
     for (const scene of ep1Pack.asset_manifest.scenes) {
       expect(scene.display_name.trim().length).toBeGreaterThan(0)
-      expect(findSceneReferenceImage(bible, scene.scene_reference_id)).toMatch(/^\/media\//)
     }
   })
 
