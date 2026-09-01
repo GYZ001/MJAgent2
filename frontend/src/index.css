@@ -10072,3 +10072,157 @@ summary:focus-visible,
   width: min(720px, 100%);
   margin-top: 0;
 }
+
+/* ---------------------------------------------------------------------------
+   分镜台（BoardPage）/ 生成台（WallPage）共用素材展示（.segres-*）
+   2026-08-31「传入素材」展示重做，用户拍板：原来两页各自把 storyboard_pack
+   segment.resources 拆成「头部一排 30px 小圆缩略图」+「折叠详情里的 40px 缩略图
+   列表，文字用 nowrap 截断」两处展示同一份数据，用户反馈太小看不清人脸、也分
+   不出两处展示的区别。合并成 components/SegmentResourcePanel.tsx 一处、常驻
+   展示（不用再点开折叠）、缩略图放大到 88px，描述文字改成可换行不截断。
+   放 index.css 而不是某页的 styles/*.css：这个组件被 BoardPage 和 WallPage 两
+   页共用，放进任一页的样式表都会被 scripts/check_css_split.py 判成跨页选择器
+   （见该脚本文档开头的说明——"跨页复用的留在 index.css"）。
+   与生成台专属的 .genref-*（styles/WallPage.css，展示"这一次生成实际发给供应商
+   的参考图"）刻意用不同的类名前缀、不同的标题文案："本段涉及素材"是按当前
+   人物谱/场景库解析出的声明式清单，"本次生成实际参考图"是某一次生成尝试真正
+   用了什么，两者是不同的事实，不能互相替代。
+   --------------------------------------------------------------------------- */
+.segres-panel {
+  display: grid;
+  gap: 10px;
+  margin: 4px 0 2px;
+}
+.segres-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+.segres-head b {
+  font: 650 12.5px var(--ui);
+  color: var(--ink);
+}
+.segres-head span {
+  color: var(--ink-faint);
+  font: 400 11px var(--ui);
+}
+.segres-empty-hint {
+  margin: 0;
+  color: var(--ink-faint);
+  font: 400 11.5px/1.6 var(--ui);
+}
+.segres-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+}
+.segres-group > b {
+  display: block;
+  margin-bottom: 8px;
+  font: 650 12px var(--ui);
+  color: var(--ink);
+}
+.segres-list {
+  display: grid;
+  gap: 10px;
+}
+.segres-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--surface-muted);
+}
+.segres-thumb-btn {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: zoom-in;
+}
+.segres-thumb {
+  width: 88px;
+  height: 88px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: var(--paper-deep);
+}
+.segres-thumb-updated {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--ink-soft);
+  font: 600 9.5px/1.4 var(--ui);
+  white-space: nowrap;
+}
+.segres-thumb-empty {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 88px;
+  height: 88px;
+  padding: 6px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: var(--paper-deep);
+  color: var(--ink-faint);
+  text-align: center;
+  font: 600 11px/1.35 var(--ui);
+}
+/* 定妆照/场景图生成失败态渲染成 <a>（可点击补图入口，见
+   components/PortraitPlaceholder.tsx 文档字符串），用醒目的朱色描边与其余三态
+   （生成中/待生成/群演无定妆照，都是纯展示 <div>）区分——CLAUDE.md「拦住用户时
+   必须给出路」，失败态本身就该看起来"可以点"。 */
+a.segres-thumb-empty {
+  border-style: solid;
+  border-color: rgba(181, 68, 52, 0.5);
+  background: rgba(181, 68, 52, 0.06);
+  color: var(--cinnabar-deep);
+  cursor: pointer;
+  text-decoration: none;
+}
+.segres-thumb-icon {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 88px;
+  height: 88px;
+  border-radius: 10px;
+  background: var(--paper-deep);
+  color: var(--ink-faint);
+  font-size: 22px;
+}
+.segres-body {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 2px;
+}
+.segres-name {
+  color: var(--ink);
+  font: 650 13px var(--ui);
+  overflow-wrap: break-word;
+}
+.segres-desc {
+  color: var(--ink-soft);
+  font: 400 12px/1.5 var(--ui);
+  overflow-wrap: break-word;
+}
+@media (max-width: 640px) {
+  .segres-groups {
+    grid-template-columns: 1fr;
+  }
+}

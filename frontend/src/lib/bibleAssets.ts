@@ -1,4 +1,4 @@
-import { Bible } from '../api'
+import { Bible, ReferenceImage } from '../api'
 
 /**
  * 提取到 lib/（原在 pages/ScriptPage.tsx）：分镜台 2.0.0 展示改造需要在
@@ -214,3 +214,19 @@ export function sceneRefPlaceholderText(kind: SceneRefPlaceholderKind): string {
  *  组件，中间每一跳的 prop 类型都得同时满足 RefsTaskLike 与 SceneRefsTaskLike，
  *  否则窄类型会在半路把 scene_refs_status/scene_refs_target 截断掉。 */
 export type ImageGenTaskLike = RefsTaskLike & SceneRefsTaskLike
+
+/**
+ * 从 pages/WallPage.tsx 挪来（2026-08-31，「传入素材」展示重做）：给一张
+ * GET /shots/{id}/review 返回的 image_inputs.reference_images 元素生成展示标签。
+ * 这是「这一次生成实际发给供应商的参考图」的标签，与 characterPortraitDisplay/
+ * findSceneReferenceImage 展示的「本段脚本声明涉及哪个实体」是两件不同的事——
+ * 前者只在生成台按具体一次生成尝试展示，后者跨分镜台/生成台展示当前解析结果。
+ * components/GenerationReferenceGallery.tsx 与 WallPage.tsx 共用同一份实现，
+ * WallPage.tsx 通过 `export { referenceImageLabel } from '../lib/bibleAssets'`
+ * 保持对外接口（含既有测试的导入路径）不变。
+ */
+export function referenceImageLabel(ref: ReferenceImage): string {
+  if (ref.type === 'character' || ref.entity_type === 'character') return `人物 · ${ref.entity_name || '未命名'}`
+  if (ref.type === 'scene' || ref.entity_type === 'scene') return `场景 · ${ref.entity_name || '未命名'}`
+  return ref.entity_name || ref.source || '参考图'
+}

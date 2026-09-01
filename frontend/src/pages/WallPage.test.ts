@@ -18,7 +18,6 @@ import {
   segmentGenerateDisabledReason,
   segmentPhase,
   segmentPhaseCounts,
-  SegmentResourceRoster,
   stampClassForStatus,
   versionStatusLabel,
   versionStatusTone,
@@ -342,49 +341,5 @@ describe('CON-409（REVIEW_QUALIFICATION_CHANGED）自动重试：只认这一�
   it('非 409 或非 ApiError 都不触发重试', () => {
     expect(qualificationChangedRetryVersion(new Error('network down'))).toBeNull()
     expect(qualificationChangedRetryVersion(new ApiError(500, 'boom'))).toBeNull()
-  })
-})
-
-describe('SegmentResourceRoster 定妆照占位四态（用户拍板 2026-08-31）', () => {
-  const noImageCharacter = { identity_id: 'bible:张三', portrait_id: 'portrait_x', description: '' }
-  const extraCharacter = { identity_id: 'entity:abcdef', portrait_id: null, description: '' }
-
-  const resources = (character: Record<string, unknown>) => ({
-    characters: [character], scenes: [], props: [],
-  }) as any
-
-  it('本轮 refs 任务正在为具名角色出图 -> "定妆照生成中"，不是"无定妆照"', () => {
-    const html = renderToStaticMarkup(createElement(SegmentResourceRoster, {
-      resources: resources(noImageCharacter), bible: null,
-      project: { refs_status: 'running', refs_target: null },
-    }))
-    expect(html).toContain('定妆照生成中')
-    expect(html).not.toContain('无定妆照')
-  })
-
-  it('出图任务失败且命中这个角色 -> "定妆照生成失败" + 可点击补图入口', () => {
-    const html = renderToStaticMarkup(createElement(SegmentResourceRoster, {
-      resources: resources(noImageCharacter), bible: null,
-      project: { id: 'proj_7', refs_status: 'failed', refs_target: '张三' } as any,
-    }))
-    expect(html).toContain('定妆照生成失败')
-    expect(html).toMatch(/<a[^>]+href="\/projects\/proj_7\/bible"[^>]*>定妆照生成失败<\/a>/)
-  })
-
-  it('既没在跑也没失败 -> "定妆照待生成"', () => {
-    const html = renderToStaticMarkup(createElement(SegmentResourceRoster, {
-      resources: resources(noImageCharacter), bible: null,
-      project: { refs_status: 'ready', refs_target: null },
-    }))
-    expect(html).toContain('定妆照待生成')
-  })
-
-  it('群演/未收录称谓（identity_id 无 bible: 前缀）恒显示"无定妆照"', () => {
-    const html = renderToStaticMarkup(createElement(SegmentResourceRoster, {
-      resources: resources(extraCharacter), bible: null,
-      project: { refs_status: 'running', refs_target: null },
-    }))
-    expect(html).toContain('无定妆照')
-    expect(html).not.toContain('定妆照生成中')
   })
 })

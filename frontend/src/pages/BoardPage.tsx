@@ -1,6 +1,6 @@
 import { ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
-  api, ApiError, Bible, Episode, Shot, StoryboardPackResources, StoryboardStatus,
+  api, ApiError, Bible, Episode, Shot, StoryboardStatus,
   type ConfirmPreview, type ProviderTaskBlocker, type ProviderTaskClearance,
   type ProviderTaskReconcileResult, type StartPreview, type StoryboardClearPreview,
   type VideoModelSwitchConfirm,
@@ -10,11 +10,11 @@ import EpisodeCrumb from '../components/EpisodeCrumb'
 import { ItemTaskTimer, ServerTaskTimer } from '../components/TaskTimer'
 import DecisionDialog from '../components/DecisionDialog'
 import QueryState from '../components/QueryState'
+import SegmentResourcePanel from '../components/SegmentResourcePanel'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { storyboardTaskNotice } from '../lib/productionNotices'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
-import { characterPortraitDisplay, findSceneReferenceImage, portraitPlaceholderText, refsBusyPollInterval, resolvePortraitPlaceholderKind, type ImageGenTaskLike } from '../lib/bibleAssets'
-import PortraitPlaceholder from '../components/PortraitPlaceholder'; import SceneReferencePlaceholder from '../components/SceneReferencePlaceholder'
+import { refsBusyPollInterval, type ImageGenTaskLike } from '../lib/bibleAssets'
 import StageTextModelPicker from '../components/StageTextModelPicker'
 import "../styles/BoardPage.css";
 
@@ -1191,8 +1191,9 @@ function StoryboardPackSegmentView({ shot, bible, notify, project }: {
           </div>
           <p className="storyboard-pack-synopsis">{segment.synopsis || '（本段无梗概）'}</p>
         </div>
-        <StoryboardPackResourceStrip resources={segment.resources} bible={bible} project={project} />
       </header>
+
+      <SegmentResourcePanel resources={segment.resources} bible={bible} project={project} />
 
       <section className="storyboard-pack-prompt-block">
         <div className="storyboard-pack-prompt-head">
@@ -1232,10 +1233,6 @@ function StoryboardPackSegmentView({ shot, bible, notify, project }: {
             </ul>
           </details>
         )}
-        <details className="pack-meta-details">
-          <summary className="pack-meta-chip">素材详情</summary>
-          <StoryboardPackResourceRoster resources={segment.resources} bible={bible} project={project} />
-        </details>
         {segment.degraded_capabilities.map((item, index) => (
           <span key={index} className="pack-meta-chip degraded">{item}</span>
         ))}
@@ -1244,131 +1241,3 @@ function StoryboardPackSegmentView({ shot, bible, notify, project }: {
   )
 }
 
-/** 永远可见层的素材缩略图行：能用视觉表达的不用文字——人物/场景绑了素材显示缩略图，
- *  没绑上显示灰位占位（用户一眼数得出有多少没映射上）；道具没有世界书图像素材库，
- *  设计使然地走文字。名称与描述收进 title 悬浮提示，不占正文层级。 */
-function StoryboardPackResourceStrip({ resources, bible, project }: {
-  resources: StoryboardPackResources
-  bible: Bible | null | undefined; project: ImageGenTaskLike | null | undefined
-}) {
-  const characters = resources.characters ?? []
-  const scenes = resources.scenes ?? []
-  const props = resources.props ?? []
-  if (!characters.length && !scenes.length && !props.length) {
-    return <div className="storyboard-pack-resource-strip-empty">暂无数据</div>
-  }
-  return (
-    <div className="storyboard-pack-resource-strip" aria-label="本段素材">
-      {characters.map((character, index) => {
-        const { imageUrl, updated } = characterPortraitDisplay(character)
-        const label = character.identity_id || '未命名角色'
-        const tipBase = character.description ? `${label} · ${character.description}` : label
-        const placeholderText = portraitPlaceholderText(resolvePortraitPlaceholderKind(character.identity_id, project))
-        const tip = imageUrl
-          ? (updated ? `${tipBase}（定妆照已更新）` : tipBase)
-          : `${label} · ${placeholderText}`
-        return imageUrl
-          ? (
-            <img
-              key={`c-${index}`}
-              className={`pack-resource-chip-thumb${updated ? ' pack-resource-chip-thumb-updated' : ''}`}
-              src={imageUrl} alt={label} title={tip} loading="lazy" decoding="async"
-            />
-          )
-          : <div key={`c-${index}`} className="pack-resource-chip-empty" title={tip} aria-label={tip}>{label.slice(0, 1) || '无'}</div>
-      })}
-      {scenes.map((scene, index) => {
-        const imageUrl = findSceneReferenceImage(bible, scene.scene_reference_id)
-        const label = scene.scene_id || '未命名场景'
-        const tip = scene.description ? `${label} · ${scene.description}` : label
-        return imageUrl
-          ? <img key={`s-${index}`} className="pack-resource-chip-thumb pack-resource-chip-scene" src={imageUrl} alt={label} title={tip} loading="lazy" decoding="async" />
-          : <div key={`s-${index}`} className="pack-resource-chip-empty pack-resource-chip-scene" title={tip} aria-label={tip}>{label.slice(0, 1) || '无'}</div>
-      })}
-      {props.map((prop, index) => (
-        <span key={`p-${index}`} className="pack-resource-chip-text" title={prop.description || prop.label}>{prop.label || '未命名道具'}</span>
-      ))}
-    </div>
-  )
-}
-
-/** 要求 2：区分"有素材"（人物 portrait_id / 场景 scene_reference_id 非空，显示缩略图）
- *  与"只有文字描述"（为 null，以及全部 props——世界书没有道具素材库）两种状态，
- *  视觉上一眼能分：有图用缩略图，无图用占位块 + 文字描述。 */
-export function StoryboardPackResourceRoster({ resources, bible, project }: {
-  resources: StoryboardPackResources
-  bible: Bible | null | undefined; project: ImageGenTaskLike | null | undefined
-}) {
-  const characters = resources.characters ?? []
-  const scenes = resources.scenes ?? []
-  const props = resources.props ?? []
-  return (
-    <section className="storyboard-pack-resources">
-      <div className="storyboard-pack-resource-group">
-        <b>人物 · {characters.length}</b>
-        <div className="pack-resource-list">
-          {characters.map((character, index) => {
-            const { imageUrl, updated } = characterPortraitDisplay(character)
-            return (
-              <div className="pack-resource-item" key={`${character.identity_id || 'character'}-${index}`}>
-                {imageUrl
-                  ? (
-                    <span className="pack-resource-thumb-wrap">
-                      <img className="pack-resource-thumb" src={imageUrl} alt={character.identity_id} loading="lazy" decoding="async" />
-                      {updated && (
-                        <span className="pack-resource-thumb-updated" title="定妆照已更新，与本段素材记录当时依据的那张不同">已更新</span>
-                      )}
-                    </span>
-                  )
-                  : <PortraitPlaceholder identityId={character.identity_id} project={project} className="pack-resource-thumb-empty" />}
-                <div className="pack-resource-body">
-                  <span className="pack-resource-name">{character.identity_id || '未命名角色'}</span>
-                  <span className="pack-resource-desc">{character.description || (imageUrl ? '' : '暂无文字描述')}</span>
-                </div>
-              </div>
-            )
-          })}
-          {!characters.length && <p className="storyboard-pack-empty-hint">本段无人物资源</p>}
-        </div>
-      </div>
-
-      <div className="storyboard-pack-resource-group">
-        <b>场景 · {scenes.length}</b>
-        <div className="pack-resource-list">
-          {scenes.map((scene, index) => {
-            const imageUrl = findSceneReferenceImage(bible, scene.scene_reference_id)
-            return (
-              <div className="pack-resource-item" key={`${scene.scene_id || 'scene'}-${index}`}>
-                {imageUrl
-                  ? <img className="pack-resource-thumb" src={imageUrl} alt={scene.scene_id} loading="lazy" decoding="async" />
-                  : <SceneReferencePlaceholder sceneId={scene.scene_id} label={scene.scene_id || '未命名场景'} project={project} className="pack-resource-thumb-empty" />}
-                <div className="pack-resource-body">
-                  <span className="pack-resource-name">{scene.scene_id || '未命名场景'}</span>
-                  <span className="pack-resource-desc">{scene.description || (imageUrl ? '' : '暂无文字描述')}</span>
-                </div>
-              </div>
-            )
-          })}
-          {!scenes.length && <p className="storyboard-pack-empty-hint">本段无场景资源</p>}
-        </div>
-      </div>
-
-      <div className="storyboard-pack-resource-group">
-        <b>道具 · {props.length}</b>
-        <div className="pack-resource-list">
-          {/* 道具没有世界书图像素材库（设计使然），一律只有文字描述，用统一占位图标。 */}
-          {props.map((prop, index) => (
-            <div className="pack-resource-item" key={`${prop.label || 'prop'}-${index}`}>
-              <div className="pack-resource-icon" aria-hidden="true">物</div>
-              <div className="pack-resource-body">
-                <span className="pack-resource-name">{prop.label || '未命名道具'}</span>
-                <span className="pack-resource-desc">{prop.description || '暂无文字描述'}</span>
-              </div>
-            </div>
-          ))}
-          {!props.length && <p className="storyboard-pack-empty-hint">本段无道具</p>}
-        </div>
-      </div>
-    </section>
-  )
-}

@@ -180,12 +180,14 @@ max_function_lines_python = 50
 # 挪到 lib/bibleAssets.ts（跨页复用改成共享同一份判据，不留第二份实现），本文件
 # 改重新导出，净减少 6 行——拆小了就把数字调小。
 "frontend/src/pages/BiblePage.tsx" = 1766
-# 2026-08-31 +47：StoryboardPackResourceRoster 定妆照占位四态新增测试覆盖（生成中/
-# 生成失败给出可点击补图入口/待生成/群演恒无定妆照），见 lib/bibleAssets.ts 同一次改造。
-"frontend/src/pages/BoardPage.test.ts" = 407
-# 2026-08-30 +16：素材条/素材详情两处角色缩略图改用当前解析结果，新增"已更新"
-# 轻标记（与 portrait_id 快照不同时）+ 无定妆照的显式空态，见上方 screenplay.ts 注释同一次改动。
-"frontend/src/pages/BoardPage.tsx" = 1374
+# 2026-08-31「传入素材」展示重做：StoryboardPackResourceRoster 的四态测试搬到
+# components/SegmentResourcePanel.test.ts（两页共用一份组件，不再各测一遍），
+# 407 -> 363，棘轮收紧。
+"frontend/src/pages/BoardPage.test.ts" = 363
+# 2026-08-31「传入素材」展示重做（用户拍板）：头部小圆缩略图行 + 折叠详情里的
+# 缩略图列表两处拆到 components/SegmentResourcePanel.tsx 合并成一处，页面只剩
+# 调用点，1374 -> 1243，棘轮收紧。
+"frontend/src/pages/BoardPage.tsx" = 1243
 "frontend/src/pages/CinemaPage.tsx" = 931
 "frontend/src/pages/EpisodesPage.tsx" = 741
 "frontend/src/pages/MonitorPage.test.ts" = 313
@@ -198,10 +200,14 @@ max_function_lines_python = 50
 # 净减少的行数换来给"发现新资源/索引历史资源"补文案和结果摘要的空间，950→926。
 "frontend/src/pages/ScriptPage.tsx" = 926
 "frontend/src/pages/Studio.tsx" = 430
-# 2026-08-31 +47：SegmentResourceRoster 定妆照占位四态新增测试覆盖，同 BoardPage.test.ts 注释。
-"frontend/src/pages/WallPage.test.ts" = 390
-# 2026-08-30 +16：生成台素材条/素材详情同上一批改动，见 BoardPage.tsx 注释。
-"frontend/src/pages/WallPage.tsx" = 964
+# 2026-08-31「传入素材」展示重做：SegmentResourceRoster 的四态测试搬到
+# components/SegmentResourcePanel.test.ts，同 BoardPage.test.ts 注释，390 -> 345。
+"frontend/src/pages/WallPage.test.ts" = 345
+# 2026-08-31「传入素材」展示重做（用户拍板）：素材条/素材详情合并进
+# components/SegmentResourcePanel.tsx，「视频下方参考图带标签」拆到
+# components/GenerationReferenceGallery.tsx，referenceImageLabel 挪到
+# lib/bibleAssets.ts，964 -> 837，棘轮收紧。
+"frontend/src/pages/WallPage.tsx" = 837
 "frontend/src/pages/monitor/CallsSection.tsx" = 397
 "frontend/src/pages/monitor/JobDrawer.tsx" = 318
 "frontend/src/pages/monitor/JobsSection.tsx" = 384

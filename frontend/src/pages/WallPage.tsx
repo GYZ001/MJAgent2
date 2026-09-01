@@ -11,15 +11,17 @@ import {
   type ReviewWallContext,
   type Shot,
   type ShotVersion,
-  type StoryboardPackResources,
 } from '../api'
 import { ItemTaskTimer } from '../components/TaskTimer'
 import QueryState from '../components/QueryState'
 import { compactShotStage } from '../shotStatus'
-import { characterPortraitDisplay, findSceneReferenceImage, portraitPlaceholderText, refsBusyPollInterval, resolvePortraitPlaceholderKind, type ImageGenTaskLike } from '../lib/bibleAssets'
+import { refsBusyPollInterval, type ImageGenTaskLike } from '../lib/bibleAssets'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
-import PortraitPlaceholder from '../components/PortraitPlaceholder'; import SceneReferencePlaceholder from '../components/SceneReferencePlaceholder'
+import GenerationReferenceGallery from '../components/GenerationReferenceGallery'
+import SegmentResourcePanel from '../components/SegmentResourcePanel'
 import '../styles/WallPage.css'
+
+export { referenceImageLabel } from '../lib/bibleAssets'
 
 // 生成台 2.0（storyboard_pack/2.0.1，见 app/production/storyboard_pack.py）：一个
 // 15 秒段 = shots 表一行，storyboard_pack_segment 非 null 是这一行有内容可展示的
@@ -145,12 +147,6 @@ export function extractReferenceImagesByVersion(shot: Shot): Record<string, Refe
     if (refs?.length) map[version.id] = refs
   }
   return map
-}
-
-export function referenceImageLabel(ref: ReferenceImage): string {
-  if (ref.type === 'character' || ref.entity_type === 'character') return `人物 · ${ref.entity_name || '未命名'}`
-  if (ref.type === 'scene' || ref.entity_type === 'scene') return `场景 · ${ref.entity_name || '未命名'}`
-  return ref.entity_name || ref.source || '参考图'
 }
 
 /** 触发生成按钮的可用性判据；eligible=null 表示生成资格尚未加载完成。 */
@@ -619,8 +615,9 @@ function SegmentWorkbench({ shot, bible, context, detail, onRefresh, onToast, pr
           </div>
           <p className="wall-segment-synopsis">{segment.synopsis || '（本段无梗概）'}</p>
         </div>
-        <SegmentResourceStrip resources={segment.resources} bible={bible} project={project} />
       </header>
+
+      <SegmentResourcePanel resources={segment.resources} bible={bible} project={project} />
 
       <section className="wall-prompt-block">
         <div className="wall-prompt-head">
@@ -650,10 +647,6 @@ function SegmentWorkbench({ shot, bible, context, detail, onRefresh, onToast, pr
             </ul>
           </details>
         ) : <span className="wall-meta-chip wall-chip-muted">无台词</span>}
-        <details className="wall-meta-details">
-          <summary className="wall-meta-chip">素材详情</summary>
-          <SegmentResourceRoster resources={segment.resources} bible={bible} project={project} />
-        </details>
         {segment.degraded_capabilities.map((item, index) => (
           <span key={index} className="wall-meta-chip wall-chip-degraded">{item}</span>
         ))}
@@ -669,120 +662,6 @@ function SegmentWorkbench({ shot, bible, context, detail, onRefresh, onToast, pr
         onToast={onToast}
       />
     </article>
-  )
-}
-
-function SegmentResourceStrip({ resources, bible, project }: { resources: StoryboardPackResources; bible: Bible | null; project: ImageGenTaskLike | null }) {
-  const characters = resources.characters ?? []
-  const scenes = resources.scenes ?? []
-  const props = resources.props ?? []
-  if (!characters.length && !scenes.length && !props.length) {
-    return <div className="wall-empty-hint">暂无数据</div>
-  }
-  return (
-    <div className="wall-resource-strip" aria-label="本段素材">
-      {characters.map((character, index) => {
-        const { imageUrl, updated } = characterPortraitDisplay(character)
-        const label = character.identity_id || '未命名角色'
-        const tipBase = character.description ? `${label} · ${character.description}` : label
-        const placeholderText = portraitPlaceholderText(resolvePortraitPlaceholderKind(character.identity_id, project))
-        const tip = imageUrl
-          ? (updated ? `${tipBase}（定妆照已更新）` : tipBase)
-          : `${label} · ${placeholderText}`
-        return imageUrl
-          ? (
-            <img
-              key={`c-${index}`}
-              className={`wall-resource-chip-thumb${updated ? ' wall-resource-chip-thumb-updated' : ''}`}
-              src={imageUrl} alt={label} title={tip} loading="lazy" decoding="async"
-            />
-          )
-          : <div key={`c-${index}`} className="wall-resource-chip-empty" title={tip} aria-label={tip}>{label.slice(0, 1) || '无'}</div>
-      })}
-      {scenes.map((scene, index) => {
-        const imageUrl = findSceneReferenceImage(bible, scene.scene_reference_id)
-        const label = scene.scene_id || '未命名场景'
-        const tip = scene.description ? `${label} · ${scene.description}` : label
-        return imageUrl
-          ? <img key={`s-${index}`} className="wall-resource-chip-thumb wall-resource-chip-scene" src={imageUrl} alt={label} title={tip} loading="lazy" decoding="async" />
-          : <div key={`s-${index}`} className="wall-resource-chip-empty wall-resource-chip-scene" title={tip} aria-label={tip}>{label.slice(0, 1) || '无'}</div>
-      })}
-      {props.map((prop, index) => (
-        <span key={`p-${index}`} className="wall-resource-chip-text" title={prop.description || prop.label}>{prop.label || '未命名道具'}</span>
-      ))}
-    </div>
-  )
-}
-
-export function SegmentResourceRoster({ resources, bible, project }: { resources: StoryboardPackResources; bible: Bible | null; project: ImageGenTaskLike | null }) {
-  const characters = resources.characters ?? []
-  const scenes = resources.scenes ?? []
-  const props = resources.props ?? []
-  return (
-    <section className="wall-resource-roster">
-      <div className="wall-resource-group">
-        <b>人物 · {characters.length}</b>
-        <div className="wall-resource-list">
-          {characters.map((character, index) => {
-            const { imageUrl, updated } = characterPortraitDisplay(character)
-            return (
-              <div className="wall-resource-item" key={`${character.identity_id || 'character'}-${index}`}>
-                {imageUrl
-                  ? (
-                    <span className="wall-resource-thumb-wrap">
-                      <img className="wall-resource-thumb" src={imageUrl} alt={character.identity_id} loading="lazy" decoding="async" />
-                      {updated && (
-                        <span className="wall-resource-thumb-updated" title="定妆照已更新，与本段素材记录当时依据的那张不同">已更新</span>
-                      )}
-                    </span>
-                  )
-                  : <PortraitPlaceholder identityId={character.identity_id} project={project} className="wall-resource-thumb-empty" />}
-                <div className="wall-resource-body">
-                  <span className="wall-resource-name">{character.identity_id || '未命名角色'}</span>
-                  <span className="wall-resource-desc">{character.description || (imageUrl ? '' : '暂无文字描述')}</span>
-                </div>
-              </div>
-            )
-          })}
-          {!characters.length && <p className="wall-empty-hint">本段无人物资源</p>}
-        </div>
-      </div>
-      <div className="wall-resource-group">
-        <b>场景 · {scenes.length}</b>
-        <div className="wall-resource-list">
-          {scenes.map((scene, index) => {
-            const imageUrl = findSceneReferenceImage(bible, scene.scene_reference_id)
-            return (
-              <div className="wall-resource-item" key={`${scene.scene_id || 'scene'}-${index}`}>
-                {imageUrl
-                  ? <img className="wall-resource-thumb" src={imageUrl} alt={scene.scene_id} loading="lazy" decoding="async" />
-                  : <SceneReferencePlaceholder sceneId={scene.scene_id} label={scene.scene_id || '未命名场景'} project={project} className="wall-resource-thumb-empty" />}
-                <div className="wall-resource-body">
-                  <span className="wall-resource-name">{scene.scene_id || '未命名场景'}</span>
-                  <span className="wall-resource-desc">{scene.description || (imageUrl ? '' : '暂无文字描述')}</span>
-                </div>
-              </div>
-            )
-          })}
-          {!scenes.length && <p className="wall-empty-hint">本段无场景资源</p>}
-        </div>
-      </div>
-      <div className="wall-resource-group">
-        <b>道具 · {props.length}</b>
-        <div className="wall-resource-list">
-          {props.map((prop, index) => (
-            <div className="wall-resource-item" key={`${prop.label || 'prop'}-${index}`}>
-              <div className="wall-resource-icon" aria-hidden="true">物</div>
-              <div className="wall-resource-body">
-                <span className="wall-resource-name">{prop.label || '未命名道具'}</span>
-                <span className="wall-resource-desc">{prop.description || '暂无文字描述'}</span>
-              </div>
-            </div>
-          ))}
-          {!props.length && <p className="wall-empty-hint">本段无道具</p>}
-        </div>
-      </div>
-    </section>
   )
 }
 
@@ -926,18 +805,13 @@ function GenerationPanel({ shot, context, referenceImages, detailLoading, detail
               <div><dt>成本</dt><dd>￥{selected.cost_cny.toFixed(2)}</dd></div>
             </dl>
           )}
-          {detailLoading && <p className="wall-empty-hint">正在加载参考图…</p>}
-          {!!refs.length && (
-            <div className="wall-refs" aria-label="参考图">
-              {refs.map(ref => (
-                <figure className="wall-ref-card" key={ref.id}>
-                  {ref.image_url
-                    ? <img src={ref.image_url} alt={referenceImageLabel(ref)} loading="lazy" />
-                    : <div className="wall-resource-thumb-empty">无图</div>}
-                  <span title={referenceImageLabel(ref)}>{referenceImageLabel(ref)}</span>
-                </figure>
-              ))}
-            </div>
+          {!detailError && (
+            <GenerationReferenceGallery
+              refs={refs}
+              loading={detailLoading}
+              hasAttempt={hasAttempt}
+              hasDeclaredResources={Boolean(segment?.resources.characters?.length || segment?.resources.scenes?.length)}
+            />
           )}
           {selected?.provider_task_id && <p className="wall-empty-hint">供应商任务：{selected.provider_task_id}</p>}
         </div>

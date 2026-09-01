@@ -17,7 +17,14 @@ import check_dark_theme as C
 SRC = pathlib.Path('/root/MJAgent2/frontend/src')
 PAGES = {
     'BiblePage': ['pages/BiblePage.tsx'], 'BoardPage': ['pages/BoardPage.tsx'],
-    'WallPage': ['pages/WallPage.tsx'],
+    'WallPage': [
+        'pages/WallPage.tsx',
+        # 2026-08-31「传入素材」展示重做：生成台实际参考图画廊拆到
+        # components/GenerationReferenceGallery.tsx（只有生成台一个消费方，复用
+        # WallPage 既有的 .wall-attempt-issue/.wall-empty-hint 告警样式）。不登记
+        # 就会被判成"不属于任何页面"，同 ScriptPage/AccountAdminPage 的先例。
+        'components/GenerationReferenceGallery.tsx',
+    ],
     'ScriptPage': [
         'pages/ScriptPage.tsx',
         # 2026-08-31 映射台入口审计：预检弹窗与"新发现/索引历史资源"摘要拆到

@@ -98,51 +98,6 @@
   color: var(--ink);
   font: 500 13px/1.65 var(--ui);
 }
-.wall-resource-strip {
-  display: flex;
-  flex: 0 0 auto;
-  flex-wrap: wrap;
-  gap: 6px;
-  max-width: 100%;
-}
-.wall-resource-chip-thumb,
-.wall-resource-chip-empty {
-  flex: none;
-  width: 30px;
-  height: 30px;
-  border-radius: 999px;
-  object-fit: cover;
-}
-.wall-resource-chip-scene {
-  border-radius: 8px;
-}
-/* 定妆照按身份实时解析（用户拍板，2026-08-30）：紧凑素材条没有余量放文字徽标，
-   用细描边标出"与本段素材记录当时依据的那张不同"，完整说明放 title 悬浮提示里。 */
-.wall-resource-chip-thumb-updated {
-  outline: 2px solid var(--gold);
-  outline-offset: 1px;
-}
-.wall-resource-chip-empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--paper-deep);
-  color: var(--ink-faint);
-  font: 600 11px var(--ui);
-}
-.wall-resource-chip-text {
-  display: inline-flex;
-  align-items: center;
-  padding: 0 8px;
-  height: 30px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-muted);
-  color: var(--ink-soft);
-  font: 500 10.5px var(--ui);
-  white-space: nowrap;
-}
-
 .wall-prompt-block {
   margin: 0;
 }
@@ -241,87 +196,6 @@ details.wall-meta-details > :not(summary) {
 .wall-dialogue-source {
   color: var(--ink-faint);
   font: 400 10px var(--ui);
-  white-space: nowrap;
-}
-.wall-resource-roster {
-  display: grid;
-  gap: 14px;
-  padding: 8px 10px 2px;
-}
-.wall-resource-group > b {
-  display: block;
-  margin-bottom: 6px;
-  font: 650 12px var(--ui);
-}
-.wall-resource-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.wall-resource-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.wall-resource-thumb {
-  flex: none;
-  width: 40px;
-  height: 40px;
-  border-radius: 8px;
-  object-fit: cover;
-  background: var(--paper-deep);
-}
-.wall-resource-thumb-wrap {
-  position: relative;
-  flex: none;
-  display: inline-flex;
-}
-.wall-resource-thumb-updated {
-  position: absolute;
-  right: -4px;
-  bottom: -4px;
-  padding: 1px 5px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-muted);
-  color: var(--ink-soft);
-  font: 600 8.5px/1.4 var(--ui);
-  white-space: nowrap;
-}
-.wall-resource-thumb-empty,
-.wall-resource-icon {
-  display: flex;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  border-radius: 8px;
-  background: var(--paper-deep);
-  color: var(--ink-faint);
-  font-size: 9.5px;
-}
-.wall-resource-icon {
-  font-size: 16px;
-}
-.wall-resource-body {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 1px;
-}
-.wall-resource-name {
-  overflow: hidden;
-  color: var(--ink);
-  font: 600 12px var(--ui);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.wall-resource-desc {
-  overflow: hidden;
-  color: var(--ink-faint);
-  font: 400 11px/1.4 var(--ui);
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .wall-empty-hint {
@@ -466,30 +340,71 @@ details.wall-meta-details > :not(summary) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.wall-refs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+/* components/GenerationReferenceGallery.tsx（2026-08-31「传入素材」展示重做）：
+   这次生成实际发给供应商的参考图，缩略图放大到 120px（原 84px 且标签 9.5px 被
+   截断到看不清），与 index.css 的 .segres-* （本段应涉及的完整素材清单）视觉上
+   刻意不同，避免用户把两处误认成同一件事。只此一个消费方，随 WallPage 的
+   懒加载分包一起下载，已登记进 scripts/check_css_split.py 的
+   PAGES['WallPage']。 */
+.genref-gallery {
   margin-top: 8px;
 }
-.wall-ref-card {
-  display: grid;
-  gap: 3px;
-  width: 84px;
+.genref-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
 }
-.wall-ref-card img {
-  width: 84px;
-  height: 84px;
-  border-radius: 8px;
+.genref-head b {
+  font: 650 12.5px var(--ui);
+}
+.genref-head span {
+  color: var(--ink-faint);
+  font: 400 11px var(--ui);
+}
+.genref-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+}
+.genref-card {
+  display: grid;
+  gap: 5px;
+  width: 120px;
+  margin: 0;
+}
+.genref-thumb-btn {
+  display: block;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: zoom-in;
+}
+.genref-thumb-btn img {
+  display: block;
+  width: 120px;
+  height: 120px;
+  border-radius: 10px;
   object-fit: cover;
   background: var(--paper-deep);
 }
-.wall-ref-card span {
-  overflow: hidden;
+.genref-thumb-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 120px;
+  height: 120px;
+  border-radius: 10px;
+  background: var(--paper-deep);
   color: var(--ink-faint);
-  font: 400 9.5px/1.3 var(--ui);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font: 600 11px var(--ui);
+}
+.genref-card figcaption {
+  overflow-wrap: break-word;
+  color: var(--ink-soft);
+  font: 500 11px/1.4 var(--ui);
 }
 
 @media (max-width: 900px) {
