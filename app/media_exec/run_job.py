@@ -53,7 +53,6 @@ name`` / ``app.media_exec.run_job.name`` 的既有调用点（含
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 
@@ -61,18 +60,16 @@ from app import config, hiagent, video_modes
 from app.artifacts import _invalidate_final_video
 from app.compiler import ensure_source_excerpt_in_prompt, shot_cost_cny
 from app.completion_grant import VideoBudgetAuthorizationError
-from app.db import get_conn, now
+from app.db import now
 from app.hiagent import ProviderError
 from app.evidence import media as media_evidence
 from app.orchestration import media_scheduler
 from app.orchestration.media_runs import mark_media_job_state
 
-from .common import LeaseLost, _retry_tasks
+from .common import LeaseLost
 from .enqueue import (
     _load_shot_model,
     _row_value,
-    _video_path,
-    enqueue_shot,
     reconcile_episode_generation_status,
 )
 from .fences import (
@@ -185,6 +182,7 @@ from .worker_loop import (
     _wait_for_worker_job,
     _worker_loop,
 )
+from . import run_job_steps
 from .run_job_claim import _claim_and_load_job
 from .run_job_errors import (
     _handle_admission_deferred,
@@ -313,9 +311,9 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             wait = 15.0
             note = wait_exc.reason
             from app.media_pipeline import stages as media_stages
-            set_pipeline_stage(
-                job_id,
-                (
+            await run_job_steps.defer_job_with_wait(
+                conn, job_id, owner, status="queued", note=note, wait=wait,
+                stage=(
                     media_stages.STAGE_WAITING_DEPENDENCY
                     if meta.get("shot_plan_id")
                     else media_stages.STAGE_WAITING_CONTINUITY
@@ -325,23 +323,8 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     if meta.get("shot_plan_id")
                     else "WAITING_CONTINUITY_ANCHOR"
                 ),
-                reason_text=note,
-                conn=conn,
+                schedule_retry=True,
             )
-            conn.execute(
-                """UPDATE jobs SET status='queued', error=?, next_retry_at=?,
-                          lease_owner=NULL, lease_expires_at=NULL, updated_at=?
-                   WHERE id=? AND lease_owner=?""",
-                (note, now() + wait, now(), job_id, owner),
-            )
-            conn.execute(
-                "UPDATE budget_reservations SET status='reserved' WHERE job_id=? AND status='running'",
-                (job_id,),
-            )
-            conn.commit()
-            task = asyncio.get_running_loop().create_task(_requeue_after(job_id, wait))
-            _retry_tasks.add(task)
-            task.add_done_callback(_retry_tasks.discard)
             return
         _assert_job_lease(job_id, owner)
         if not provider_recovery_only:
@@ -362,9 +345,9 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 wait = 15.0
                 note = reason or "等待上一镜连续锚点"
                 status = "waiting_human" if "人工" in note else "queued"
-                set_pipeline_stage(
-                    job_id,
-                    (
+                await run_job_steps.defer_job_with_wait(
+                    conn, job_id, owner, status=status, note=note, wait=wait,
+                    stage=(
                         media_stages.STAGE_WAITING_HUMAN
                         if status == "waiting_human"
                         else (
@@ -378,24 +361,8 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                         if meta.get("shot_plan_id")
                         else "WAITING_CONTINUITY_ANCHOR"
                     ),
-                    reason_text=note,
-                    conn=conn,
+                    schedule_retry=(status == "queued"),
                 )
-                conn.execute(
-                    """UPDATE jobs SET status=?, error=?, next_retry_at=?,
-                              lease_owner=NULL, lease_expires_at=NULL, updated_at=?
-                       WHERE id=? AND lease_owner=?""",
-                    (status, note, now() + wait, now(), job_id, owner),
-                )
-                conn.execute(
-                    "UPDATE budget_reservations SET status='reserved' WHERE job_id=? AND status='running'",
-                    (job_id,),
-                )
-                conn.commit()
-                if status == "queued":
-                    task = asyncio.get_running_loop().create_task(_requeue_after(job_id, wait))
-                    _retry_tasks.add(task)
-                    task.add_done_callback(_retry_tasks.discard)
                 return
 
         # 视频提交配额：首轮优先，重抽限额
@@ -408,26 +375,12 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             )
             if not ok:
                 wait = 20.0
-                set_pipeline_stage(
-                    job_id, media_stages.STAGE_WAITING_VIDEO_SLOT,
+                await run_job_steps.defer_job_with_wait(
+                    conn, job_id, owner, status="queued", note=reason or "等待视频槽位", wait=wait,
+                    stage=media_stages.STAGE_WAITING_VIDEO_SLOT,
                     reason_code="EPISODE_VIDEO_INFLIGHT_FULL",
-                    reason_text=reason or "等待视频槽位",
-                    conn=conn,
+                    schedule_retry=True,
                 )
-                conn.execute(
-                    """UPDATE jobs SET status='queued', error=?, next_retry_at=?,
-                              lease_owner=NULL, lease_expires_at=NULL, updated_at=?
-                       WHERE id=? AND lease_owner=?""",
-                    (reason or "等待视频槽位", now() + wait, now(), job_id, owner),
-                )
-                conn.execute(
-                    "UPDATE budget_reservations SET status='reserved' WHERE job_id=? AND status='running'",
-                    (job_id,),
-                )
-                conn.commit()
-                task = asyncio.get_running_loop().create_task(_requeue_after(job_id, wait))
-                _retry_tasks.add(task)
-                task.add_done_callback(_retry_tasks.discard)
                 return
 
         image_inputs: list[tuple[str, str]] | None = None
@@ -755,76 +708,18 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             break
 
         _assert_job_lease(job_id, owner)
-        meta["provider_video_source_url"] = result["video_url"]
-        # Current provider contract advertises a seven-day URL. Keep a
-        # conservative six-day reuse window so downstream jobs never race expiry.
-        meta["provider_video_source_url_expires_at"] = now() + 6 * 24 * 3600
-        dest = _video_path(job["project_id"], ep["episode_no"], shot["shot_no"], version["version_no"])
-        await hiagent.download(result["video_url"], str(dest))
+        dest = await run_job_steps.download_provider_result(
+            conn, meta, job, ep, shot, version, result, provider_recovery_only,
+        )
         _assert_job_lease(job_id, owner)
-        if not provider_recovery_only and meta.get("shot_plan_id"):
-            from app.video_plan import active_plan_is_current
-            if not active_plan_is_current(str(meta["shot_plan_id"]), conn=conn):
-                raise VideoPlanStaleFence("视频生成完成时计划已失效，候选已隔离")
-        supervisor_owner = _row_value(job, "owner_run_id")
-        if supervisor_owner and not provider_recovery_only:
-            current_owner = get_conn().execute(
-                "SELECT active_video_run_id, video_completion_mode FROM episodes WHERE id=?",
-                (job["episode_id"],),
-            ).fetchone()
-            fenced = (
-                not current_owner
-                or current_owner["video_completion_mode"] != "complete"
-                or current_owner["active_video_run_id"] != supervisor_owner
-            )
-            if not fenced:
-                try:
-                    from app.video_supervisor import TERMINAL_SUPERVISOR_PHASES, load_latest_checkpoint
-                    owner_cp = load_latest_checkpoint(job["episode_id"])
-                    fenced = bool(
-                        owner_cp
-                        and (
-                            owner_cp.dispatch_fenced_at is not None
-                            or owner_cp.phase in TERMINAL_SUPERVISOR_PHASES
-                        )
-                    )
-                except Exception:  # noqa: BLE001 — active run ownership remains the fallback fence
-                    pass
-            if fenced:
-                from app.observability.metrics import inc
-                inc(
-                    "video_supervisor_orphan_provider_result_total",
-                    episode_id=job["episode_id"],
-                    owner_run_id=supervisor_owner,
-                )
-                media_scheduler.request_cancel(
-                    job_id,
-                    reason="结果到达时所属 Supervisor 已收口；候选已隔离，不参与自动采用",
-                )
-                return
+        if run_job_steps.check_supervisor_ownership_fence(job, job_id, provider_recovery_only):
+            return
         if not provider_recovery_only:
             await _assert_review_dependency_fence_async(
                 job, version["id"], "candidate",
             )
-        latency = round(time.time() - started, 1)
-        paid_attempts = max(
-            1,
-            int(meta.get("provider_paid_attempts") or 0),
-            _paid_video_attempt_count(conn, version["id"]),
-        )
-        meta["provider_paid_attempts"] = paid_attempts
-        cost = shot_cost_cny(shot["duration_s"]) * paid_attempts
-        result_adoptable = await _commit_video_result_checkpoint(
-            conn,
-            job_id=job_id,
-            version_id=version["id"],
-            owner=owner,
-            operation_id=provider_operation_id,
-            video_path=str(dest),
-            last_frame_url=result["last_frame_url"],
-            cost_cny=cost,
-            latency_s=latency,
-            image_inputs=json.dumps(meta, ensure_ascii=False),
+        result_adoptable, cost = await run_job_steps.commit_result_checkpoint(
+            conn, job_id, version, owner, provider_operation_id, meta, dest, result, shot, started,
         )
         if not result_adoptable:
             mark_media_job_state(
@@ -835,18 +730,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             )
             reconcile_episode_generation_status(job["episode_id"])
             return
-        if meta.get("shot_plan_id"):
-            from app.video_plan import VideoGenerationMode, get_shot_plan, record_mode_attempt
-            active_shot_plan = get_shot_plan(job["shot_id"], conn=conn)
-            if active_shot_plan and active_shot_plan.shot_plan_id == meta.get("shot_plan_id"):
-                record_mode_attempt(
-                    version_id=version["id"],
-                    shot_plan=active_shot_plan,
-                    actual_mode=VideoGenerationMode(meta["actual_mode"]),
-                    status="succeeded",
-                    provider_task_id=task_id,
-                    conn=conn,
-                )
+        run_job_steps.record_success_mode_attempt(conn, job, version, meta, task_id)
         # 生成台产生了新片段，旧的整集合成视频即过期 → 删除，避免成片台展示陈旧成品
         _invalidate_final_video(job["project_id"], ep["episode_no"])
         # 自动 QA 可能跑满 VLM 读超时（默认 300s），超过默认 180s lease 会被 sweeper
@@ -857,25 +741,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             lease_seconds=max(180.0, float(config.TIMEOUT_VLM_READ) + 60.0),
         )
         # 完整补齐模式只有 Supervisor 有权重抽和采用；Worker 只执行、校验并产出候选。
-        supervisor_controlled = False
-        try:
-            ep_mode = get_conn().execute(
-                "SELECT video_completion_mode FROM episodes WHERE id=?",
-                (job["episode_id"],),
-            ).fetchone()
-            supervisor_controlled = bool(
-                ep_mode and ep_mode["video_completion_mode"] == "complete"
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        force_best = await _maybe_auto_qa(
-            job,
-            version["id"],
-            str(dest),
-            allow_autonomous_retake=not supervisor_controlled,
-        )
-        if supervisor_controlled:
-            force_best = False
+        supervisor_controlled, force_best = await run_job_steps.run_auto_qa(job, version, dest)
         _assert_job_lease(job_id, owner)
         await _assert_review_dependency_fence_async(
             job, version["id"], "candidate_evidence",
@@ -883,74 +749,20 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         media_evidence.record_video_candidate(
             version["id"], step_run_id=_row_value(job, "step_run_id")
         )
-        technical = json.loads(conn.execute(
-            "SELECT technical_validation_json FROM shot_versions WHERE id=?", (version["id"],)
-        ).fetchone()["technical_validation_json"] or "{}")
-        if meta.get("shot_plan_id") and not _video_mode_input_roles_valid(meta):
-            raise ProviderError("视频供应商输入角色与已发布模式计划不一致")
-        if not technical.get("passed"):
+        passed, meta, resubmits = run_job_steps.evaluate_technical_validation(conn, version, meta)
+        if not passed:
             # 技术校验失败：在 technical_resubmit_limit 内自动新建版本重提
             from app.media_pipeline.retry_policy import technical_resubmit_limit
-            resubmits = 0
-            try:
-                meta = json.loads(version["image_inputs"] or "{}")
-                resubmits = int(meta.get("technical_resubmit_count") or 0)
-            except Exception:  # noqa: BLE001
-                resubmits = 0
             if not supervisor_controlled and resubmits < technical_resubmit_limit():
                 if _set_job(job_id, "succeeded", lease_owner=owner):
                     media_scheduler.settle_budget(job_id, cost, success=True)
                     reconcile_episode_generation_status(job["episode_id"])
-                    replacement = enqueue_shot(
-                        job["shot_id"],
-                        reroll=True,
-                        after_shot_id=job["after_shot_id"],
-                        auto_retake_count=resubmits + 1,
-                        dependency_snapshot=meta.get("review_dependency_snapshot"),
-                    )
-                    # 标记新版本的 technical_resubmit_count（尽力而为）
-                    try:
-                        new_version_id = replacement.get("version_id")
-                        new_ver = (
-                            get_conn().execute(
-                                "SELECT id,image_inputs FROM shot_versions WHERE id=?",
-                                (new_version_id,),
-                            ).fetchone()
-                            if new_version_id else None
-                        )
-                        if new_ver:
-                            import json as _json
-                            m = _json.loads(new_ver["image_inputs"] or "{}")
-                            if isinstance(m, dict):
-                                m["technical_resubmit_count"] = resubmits + 1
-                                get_conn().execute(
-                                    "UPDATE shot_versions SET image_inputs=? WHERE id=?",
-                                    (_json.dumps(m, ensure_ascii=False), new_ver["id"]),
-                                )
-                                get_conn().commit()
-                    except Exception:  # noqa: BLE001
-                        pass
+                    run_job_steps.resubmit_after_technical_failure(job, resubmits, meta)
                 return
             raise ProviderError("视频文件技术校验失败，候选不可采用")
-        if not supervisor_controlled:
-            await _assert_review_dependency_fence_async(
-                job, version["id"], "adoption_relation",
-            )
-            media_evidence.select_best_video_candidate(
-                job["shot_id"], force_best=force_best
-            )
-            adopted = conn.execute(
-                "SELECT adopted_version_id FROM shots WHERE id=?",
-                (job["shot_id"],),
-            ).fetchone()
-            if adopted and adopted["adopted_version_id"]:
-                from app.video_plan import reconcile_adopted_revision
-                reconcile_adopted_revision(
-                    job["shot_id"], adopted["adopted_version_id"], conn=conn,
-                )
-        if _set_job(job_id, "succeeded", lease_owner=owner):
-            media_scheduler.settle_budget(job_id, cost, success=True)
-            reconcile_episode_generation_status(job["episode_id"])
+        await run_job_steps.adopt_and_settle_candidate(
+            conn, job, job_id, owner, version, cost, supervisor_controlled, force_best,
+        )
     except LeaseLost:
         return
     except VideoInflightAdmissionDeferred as exc:

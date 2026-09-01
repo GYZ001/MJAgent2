@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from pathlib import Path
 from typing import Any
 
-from app import config, errors, hiagent, quota, quota_expiry, video_modes
-from app.compiler import ensure_source_excerpt_in_prompt, idem_key as make_idem_key
+from app import config, errors, quota, quota_expiry, video_modes
 from app.db import get_conn, new_id, now
 from app.orchestration import media_scheduler
-from app.orchestration.media_runs import ensure_media_trace, mark_media_job_state
+from app.orchestration.media_runs import mark_media_job_state
 
+from . import enqueue_context, enqueue_persist, enqueue_prompt
 from .common import episode_video_budget_limit
 
 _LOGGER = logging.getLogger(__name__)
@@ -1428,40 +1427,15 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                        preflight_repair: dict[str, Any] | None = None) -> dict:
     """为镜头创建参考图模式视频版本并入队。
     critique：上一版 AI 评语问题，作为本次必须改正项写入 prompt。
-    幂等：相同 idem_key 的成功版本直接复用（reroll 时跳过复用）。"""
-    from app.compiler import (
-        CompileError,
-        VIDEO_PROMPT_CONTRACT_VERSION,
-        compile_prompt,
-    )
-    from app.video_prompt_ai import AI_VIDEO_PROMPT_CONTRACT_VERSION
-    from app.video_prompt_profiles import (
-        resolve_video_prompt_profile,
-        video_prompt_target_fingerprint,
-    )
-    from app.continuity import (
-        derive_continuity_mode,
-        effective_state_out,
-        prompt_source_provenance_errors,
-        preflight_seedance_gates,
-        resolve_first_last_boundary_relation,
-        resolve_do_not_repeat_texts,
-        shot_contract_dict,
-        uses_previous_tail_frame,
-    )
-    target_video_provider = hiagent.active_provider("video")
-    target_video_model = hiagent.active_model(
-        "video",
-        target_video_provider,
-    )
-    target_prompt_profile = resolve_video_prompt_profile(
-        provider=target_video_provider,
-        model=target_video_model,
-    )
-    target_prompt_fingerprint = video_prompt_target_fingerprint(
-        provider=target_video_provider,
-        model=target_video_model,
-    )
+    幂等：相同 idem_key 的成功版本直接复用（reroll 时跳过复用）。
+
+    薄编排器：具体解析/编译/落库步骤见 ``.enqueue_context``/``.enqueue_prompt``/
+    ``.enqueue_persist``（2026-09-01 从本函数原 743 行拆出，移动未重写）。
+    """
+    (
+        target_video_provider, target_video_model,
+        target_prompt_profile, target_prompt_fingerprint,
+    ) = enqueue_context.resolve_target_video_profile()
     authority_context = _assert_enqueue_storyboard_authority(shot_id)
     if (
         authority_context.narrative_authority_required
@@ -1472,745 +1446,120 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
             "自由文本覆盖已审读的分镜语义；请通过受控分镜候选修订后重新发布"
         )
     conn = get_conn()
-    shot_row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
-    if not shot_row:
-        raise ValueError(f"镜头不存在：{shot_id}")
-    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (shot_row["episode_id"],)).fetchone()
-    project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-    if not bool(_row_value(project, "harness_engine_enabled", 1)):
-        raise ValueError("该项目的 Harness Engine 已由灰度开关隔离")
-    # 分镜是否已具备生产权威（含 status 白名单 / 分镜台 2.0.0 产物完整性）
-    # 在函数开头 _assert_enqueue_storyboard_authority(shot_id) 已经判过一次；
-    # 这里原来还有一份独立的 `ep["status"] not in (...)` 复查，是同一件事的
-    # 第二份拷贝，且只认 status 白名单、不认产物信号，会把上面已经放行的
-    # 分镜台 2.0.0 分集重新拦一次。
-    episode_bound_provider = str(_row_value(ep, "target_video_model") or "").strip() or "hiagent"
-    # 按适配器族比较，不按 provider key 原始字符串比：自建实例（custom:xxx）
-    # 复用内置协议实现，字符串比较会把"同协议、不同连接"误判成绑定不一致
-    # （本机部署的历史模型迁移已经把内嵌 Seedance/MiniMax H3 包装成了
-    # custom:<id>，字符串比较在这台机器上会 100% 误判，见 video_providers.same_family）。
-    from app import video_providers
-
-    if not video_providers.same_family(episode_bound_provider, target_video_provider):
-        raise ValueError(
-            f"[VIDEO_MODEL_BINDING_MISMATCH] 本集绑定的视频模型是 {episode_bound_provider}，"
-            f"当前生效模型是 {target_video_provider or '(未配置)'}"
-            "（两者提示词方言不兼容，不能混投）；"
-            "请在分镜台切换回本集绑定的模型，或先在模型中心把生效模型切到该值再重试"
-        )
-
-    from app.domain.common import _project_bible_or_placeholder
-
-    bible = _project_bible_or_placeholder(project)
-    # Compile the paid video request from the accepted per-episode portrait
-    # revision, not from a possibly older project-Bible appearance string.
-    # The worker already resolves this view for keyframes; enqueue must use the
-    # same source or the frozen video prompt can disagree with its reference pack.
-    from app.portraits import bible_for_episode
-    bible = bible_for_episode(ep["project_id"], bible, ep["episode_no"])
-    shot = _load_shot_model(shot_row)
-    # 分镜台 2.0.0（app.production.storyboard_pack）行：prompt_text 已在分镜台
-    # 阶段由模型直接产出并原样持久化到 shot_versions.prompt_text（见该模块
-    # persist_storyboard_pack 的文档）。这里必须原样复用，不能再走
-    # compile_prompt 重新拼装——那会用代码把模型产出的整块提示词打散成结构化
-    # 字段再拼回去，正是分镜台 2.0.0 要去掉的行为。设计决策「只用参考图模式，
-    # 首尾帧链不做」（docs/STORYBOARD_PROMPT_IR_DESIGN.md）在这类行上同样要
-    # 显式落地，不依赖 derive_continuity_mode 从空字段间接猜出同一结论。
-    is_storyboard_pack_shot = shot.storyboard_pack_segment is not None
-    screenplay = authority_context.screenplay
-    prior_rows = conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? AND shot_no<? ORDER BY shot_no",
-        (shot_row["episode_id"], int(shot_row["shot_no"])),
-    ).fetchall()
-    prior_shots = [_load_shot_model(row) for row in prior_rows]
-    # Persisted legacy boards may contain snake_case ledger IDs. Resolve them
-    # to Chinese semantics at the final model boundary; unresolved IDs vanish.
-    shot.do_not_repeat = resolve_do_not_repeat_texts(shot, screenplay, prior_shots)
-    shot_plan = None
-    if authority_context.narrative_authority_required:
-        from app.video_plan import get_shot_plan
-
-        shot_plan = get_shot_plan(shot_id, conn=conn)
-        if shot_plan is None:
-            raise ValueError(
-                "[VIDEO_PLAN_REQUIRED] 叙事镜头必须绑定当前已验证的 "
-                "EpisodeVideoGenerationPlan，禁止默认回退参考图模式"
-            )
-        decision = video_modes.dict_to_decision(
-            shot_plan.model_dump(mode="json")
-        )
-    else:
-        decision = (
-            _decision_from_mode_plan(shot_row)
-            or video_modes.default_reference_decision()
-        )
-        if decision.mode != video_modes.REFERENCE_IMAGE_MODE:
-            decision = video_modes.default_reference_decision()
-
-    first_frame_requirement = None
-    first_frame_source = None
-    boundary_source_shot_id = None
-    if shot_plan is not None and shot_plan.mode.value in {
-        video_modes.FIRST_FRAME_MODE,
-        video_modes.FIRST_LAST_FRAME_MODE,
-    }:
-        first_frame_requirement = next(
-            (
-                item
-                for item in shot_plan.required_assets
-                if item.role == "first_frame"
-            ),
-            None,
-        )
-        if first_frame_requirement is not None:
-            first_frame_source = first_frame_requirement.source.value
-            boundary_source_shot_id = first_frame_requirement.source_shot_id
-
-    # 跨镜连贯只继承上一镜的实际/计划尾状态；不得把上一镜完整动作描述塞进 prompt。
-    # after_shot_id 无效时回退到 shot_no-1，避免 action_continuation 在缺 prev 时被当成链首误杀。
-    prev_row = None
-    planned_dependency_id = (
-        str(shot_plan.depends_on_shot_id)
-        if shot_plan is not None and shot_plan.depends_on_shot_id
-        else None
+    shot_row, ep, project = enqueue_context.load_video_binding_context(
+        conn, shot_id, target_video_provider,
     )
-    if (
-        shot_plan is not None
-        and after_shot_id is not None
-        and after_shot_id != planned_dependency_id
-    ):
-        raise ValueError("请求的前序镜头与已发布视频计划不一致")
-    dependency_id = planned_dependency_id if shot_plan is not None else after_shot_id
-    if dependency_id:
-        prev_row = conn.execute(
-            "SELECT * FROM shots WHERE id=? AND episode_id=?",
-            (dependency_id, shot_row["episode_id"]),
-        ).fetchone()
-        if prev_row is None and shot_plan is not None:
-            raise ValueError("视频计划引用的前序镜头不存在或不属于本集")
-    if prev_row is None and shot_plan is None and int(shot_row["shot_no"]) > 1:
-        prev_row = conn.execute(
-            "SELECT * FROM shots WHERE episode_id=? AND shot_no<? ORDER BY shot_no DESC LIMIT 1",
-            (shot_row["episode_id"], int(shot_row["shot_no"])),
-        ).fetchone()
-    boundary_prev_row = None
-    if boundary_source_shot_id:
-        boundary_prev_row = conn.execute(
-            "SELECT * FROM shots WHERE id=? AND episode_id=?",
-            (boundary_source_shot_id, shot_row["episode_id"]),
-        ).fetchone()
-        if boundary_prev_row is None:
-            raise ValueError("视频计划的首帧来源镜头不存在或不属于本集")
-    continuity_prev_row = boundary_prev_row or prev_row
-    prev_shot = (
-        _load_shot_model(continuity_prev_row)
-        if continuity_prev_row is not None
-        else None
+    bible, shot, is_storyboard_pack_shot, screenplay, prior_shots = (
+        enqueue_context.resolve_shot_context(conn, shot_row, ep, project, authority_context)
     )
-    sequence_prev_row = None
-    if int(shot_row["shot_no"]) > 1:
-        sequence_prev_row = conn.execute(
-            """SELECT * FROM shots
-               WHERE episode_id=? AND shot_no<?
-               ORDER BY shot_no DESC LIMIT 1""",
-            (shot_row["episode_id"], int(shot_row["shot_no"])),
-        ).fetchone()
-    prompt_context_row = continuity_prev_row or sequence_prev_row
-    previous_prompt_version = None
-    if prompt_context_row is not None:
-        adopted_version_id = _row_value(
-            prompt_context_row,
-            "adopted_version_id",
-        )
-        if adopted_version_id:
-            previous_prompt_version = conn.execute(
-                """SELECT id,prompt_text FROM shot_versions
-                   WHERE id=? AND shot_id=?""",
-                (adopted_version_id, prompt_context_row["id"]),
-            ).fetchone()
-        if previous_prompt_version is None:
-            previous_prompt_version = conn.execute(
-                """SELECT id,prompt_text FROM shot_versions
-                   WHERE shot_id=? AND prompt_text IS NOT NULL
-                   ORDER BY version_no DESC LIMIT 1""",
-                (prompt_context_row["id"],),
-            ).fetchone()
-    previous_prompt_text = (
-        str(previous_prompt_version["prompt_text"] or "")
-        if previous_prompt_version is not None
-        else ""
+    shot_plan, decision = enqueue_context.resolve_mode_decision(
+        conn, shot_id, shot_row, authority_context,
     )
-    previous_prompt_fingerprint = (
-        hashlib.sha256(previous_prompt_text.encode("utf-8")).hexdigest()
-        if previous_prompt_text
-        else ""
+    first_frame_requirement, first_frame_source, boundary_source_shot_id = (
+        enqueue_context.resolve_first_frame_requirement(shot_plan)
     )
-    if is_storyboard_pack_shot:
-        # 冻结的设计决策：分镜台 2.0.0 只用参考图模式，跨段不做首尾帧链
-        # （docs/STORYBOARD_PROMPT_IR_DESIGN.md「跨段一致性」）。强制这两个
-        # 字段，不让 derive_continuity_mode 从空的 state_in/state_out 间接
-        # 猜出 action_continuation 之类需要真实上一镜尾帧的结论。
-        continuity_mode = "scene_change"
-        shot.continuity_mode = continuity_mode
-        shot.continuity_from_prev = False
-        shot.transition = "硬切"
-    else:
-        continuity_mode = derive_continuity_mode(shot, prev_shot)
-        shot.continuity_mode = continuity_mode
-        shot.continuity_from_prev = uses_previous_tail_frame(continuity_mode)
-        if continuity_mode != "scene_change":
-            shot.transition = "硬切"
-    boundary_relation_edit = (
-        shot_plan.relations.edit if shot_plan is not None else None
-    )
-    boundary_relation_action = (
-        shot_plan.relations.action if shot_plan is not None else None
-    )
-    boundary_relation_reason = "planned_relation"
-    if first_frame_requirement is not None:
-        (
-            boundary_relation_edit,
-            boundary_relation_action,
-            boundary_relation_reason,
-        ) = resolve_first_last_boundary_relation(
-            shot,
-            prev_shot,
-            planned_edit=boundary_relation_edit,
-            planned_action=boundary_relation_action,
-        )
-    prev_state_out = effective_state_out(prev_shot) if prev_shot else None
-    boundary_start_state = None
-    if boundary_prev_row is not None and prev_shot is not None:
-        if first_frame_source == "PREVIOUS_STATIC_TAIL":
-            boundary_start_state = (
-                (prev_shot.last_frame_desc or "").strip()
-                or prev_state_out
-            )
-        else:
-            boundary_start_state = prev_state_out
-    planned_state_dependency = (
-        shot_plan is not None and shot_plan.state_dependency != "none"
-    )
-    prompt_prev_state_out = (
-        prev_state_out
-        if planned_state_dependency or uses_previous_tail_frame(continuity_mode)
-        else None
-    )
-    if prompt_prev_state_out:
-        shot.state_in = prompt_prev_state_out
-    chain_after_shot_id = (
-        planned_dependency_id
-        if shot_plan is not None
-        else (
-            (prev_row["id"] if prev_row else None)
-            if uses_previous_tail_frame(continuity_mode) else None
+    prev_row, boundary_prev_row, prev_shot, prompt_context_row, planned_dependency_id = (
+        enqueue_context.resolve_dependency_rows(
+            conn, shot_row, shot_plan, after_shot_id, boundary_source_shot_id,
         )
     )
-    chain_after_version_id = (
-        _row_value(prev_row, "adopted_version_id")
-        if chain_after_shot_id else None
+    previous_prompt_version, previous_prompt_text, previous_prompt_fingerprint = (
+        enqueue_context.resolve_previous_prompt(conn, prompt_context_row)
     )
-
-    outgoing_transition = _outgoing_transition_context(conn, shot_row)
-    incoming_transition = None
-    if int(shot_row["shot_no"]) > 1 and not uses_previous_tail_frame(continuity_mode):
-        incoming_transition = _transition_value(shot_row)
-        if incoming_transition == "硬切":
-            incoming_transition = None
+    continuity_mode = enqueue_context.apply_continuity_mode(shot, prev_shot, is_storyboard_pack_shot)
+    (
+        boundary_relation_edit, boundary_relation_action, boundary_relation_reason,
+        boundary_start_state, prev_state_out,
+    ) = enqueue_context.resolve_boundary_relation(
+        shot, prev_shot, shot_plan, first_frame_requirement, first_frame_source, boundary_prev_row,
+    )
+    prompt_prev_state_out, chain_after_shot_id, chain_after_version_id = (
+        enqueue_context.resolve_chain_dependency(
+            shot, shot_plan, continuity_mode, prev_row, prev_state_out, planned_dependency_id,
+        )
+    )
+    outgoing_transition, incoming_transition = enqueue_context.resolve_transitions(
+        conn, shot_row, continuity_mode,
+    )
 
     if is_storyboard_pack_shot:
-        # prompt_text 已在分镜台阶段由模型直接产出，原样存在这一行的
-        # shots.shot_contract_json.storyboard_pack_segment.prompt_text
-        # （app.production.storyboard_pack.persist_storyboard_pack 把
-        # segment.model_dump(mode="json") 整段存进 shot_contract_json，
-        # prompt_text 是其中一个字段）；原样复用，不跑 compile_prompt/
-        # preflight_seedance_gates——那一整套面向单镜叙事契约字段
-        # （first_frame_desc/state_in/primary_action/...）的检查在这类行上
-        # 全部是空字段，不是"通过"也不是"该拦"，是这条检查本身不适用。
-        # 分镜台落库不再插入一条"占位已采纳"的 shot_versions 行去当
-        # prompt_text 的载体（那条占位行会让每个镜头一落库就显示"已采纳"，
-        # 却没有真实视频；也会占掉 version_no=1，让第一次真生成变成 v2）——
-        # shot_contract_json 才是权威来源，这里直接读 shot 模型上已解析好的
-        # storyboard_pack_segment（_load_shot_model 在上面已经把
-        # shot_contract_json 解析进 shot.storyboard_pack_segment），不必再查
-        # 一次 shot_versions，也不再依赖 adopted_version_id。
-        prompt_text = str((shot.storyboard_pack_segment or {}).get("prompt_text") or "")
-        if not prompt_text.strip():
-            raise ValueError(
-                "[STORYBOARD_PACK_PROMPT_MISSING] 该分镜台 2.0.0 段没有已产出的 "
-                "prompt_text，请先在分镜台重新生成本段"
-            )
+        prompt_text = enqueue_prompt.storyboard_pack_prompt_text(shot)
     else:
-        preflight_errors = preflight_seedance_gates(
-            shot,
-            prev=prev_shot,
-            prompt_text=None,
-            screenplay=screenplay,
-        )
-        if preflight_errors:
-            raise CompileError("；".join(preflight_errors))
-
-        raw_prompt_text = compile_prompt(
-            shot,
-            bible,
-            extra_negative,
-            with_refs=True,
-            from_scene=False,
-            chained=bool(chain_after_shot_id),
-            critique=critique,
-            prev_tail_action=None,
-            with_last_frame=False,
-            incoming_transition=incoming_transition,
-            outgoing_transition=(
-                outgoing_transition["transition"]
-                if outgoing_transition else None
-            ),
-            next_scene=(
-                outgoing_transition["next_scene"]
-                if outgoing_transition else None
-            ),
-            next_first_frame_desc=(
-                outgoing_transition["next_first_frame_desc"]
-                if outgoing_transition else None
-            ),
-            continuity_mode=continuity_mode,
-            prev_state_out=prompt_prev_state_out,
-            voice_bible=screenplay.voice_bible,
-            screenplay=screenplay,
-            video_generation_mode=(
-                shot_plan.mode.value if shot_plan is not None else decision.mode
-            ),
-            first_frame_source=first_frame_source,
-            boundary_relation_edit=boundary_relation_edit,
-            boundary_relation_action=boundary_relation_action,
-            boundary_start_state=boundary_start_state,
+        prompt_text, preflight_repair = enqueue_prompt.compile_legacy_prompt(
+            shot, prev_shot, screenplay, bible, extra_negative, critique, preflight_repair,
+            chain_after_shot_id=chain_after_shot_id, continuity_mode=continuity_mode,
+            incoming_transition=incoming_transition, outgoing_transition=outgoing_transition,
+            prompt_prev_state_out=prompt_prev_state_out, shot_plan=shot_plan, decision=decision,
+            first_frame_source=first_frame_source, boundary_relation_edit=boundary_relation_edit,
+            boundary_relation_action=boundary_relation_action, boundary_start_state=boundary_start_state,
             previous_prompt_text=previous_prompt_text,
         )
-        raw_source_errors = prompt_source_provenance_errors(raw_prompt_text, shot)
-        prompt_text = ensure_source_excerpt_in_prompt(raw_prompt_text, shot)
-        if raw_source_errors:
-            prompt_scrub = {
-                "repair": "source_excerpt_prompt_scrub",
-                "matched_rules": raw_source_errors,
-            }
-            if preflight_repair:
-                preflight_repair = {
-                    **preflight_repair,
-                    "prompt_scrubbed": True,
-                    "prompt_scrub_rules": raw_source_errors,
-                }
-            else:
-                preflight_repair = prompt_scrub
-        preflight_errors = preflight_seedance_gates(
-            shot,
-            prev=prev_shot,
-            prompt_text=prompt_text,
-            screenplay=screenplay,
-        )
-        if preflight_errors:
-            source_errors = prompt_source_provenance_errors(prompt_text, shot)
-            raise CompileError(
-                "；".join(preflight_errors),
-                retryable=bool(source_errors),
-                failure_kind="prompt_source_provenance" if source_errors else None,
-            )
 
     # 参考图是分镜级素材。重抽、改词或带评语只创建新视频版本，不能重新跑参考图生成。
-    reference_gallery = _load_reference_gallery(conn, shot_row)
-    from app.multiview import manifest_revisions_match, resolve_shot_asset_dependencies
-
-    current_reference_manifest = resolve_shot_asset_dependencies(
-        project_id=ep["project_id"],
-        episode_no=ep["episode_no"],
-        shot_id=shot_id,
-        shot=shot,
-        scene_name=getattr(shot, "scene_name", "") or None,
-        conn=conn,
-        bible=bible,
-        screenplay=screenplay,
+    reference_gallery, current_reference_manifest = enqueue_prompt.resolve_reference_gallery(
+        conn, shot_id, shot_row, ep, shot, screenplay, bible,
     )
-    if (
-        reference_gallery
-        and isinstance(reference_gallery.get("reference_manifest"), dict)
-        and not manifest_revisions_match(
-            reference_gallery["reference_manifest"], current_reference_manifest,
-        )
-    ):
-        # A new portrait/scene revision invalidates the copied shot gallery even
-        # when a user previously edited that gallery. The worker rechecks this
-        # before provider submission; doing it here also prevents idempotency
-        # from returning an old succeeded video before a new job is created.
-        reference_gallery = None
 
-    key_material = (
-        prompt_text
-        + f"|mode:{decision.mode}|plan:{video_modes.decision_to_dict(decision)}"
-        + f"|after:{chain_after_shot_id or ''}"
-        + f"|after_version:{chain_after_version_id or ''}"
-        + f"|keyframe_prompt_contract:{video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION}"
-        + f"|video_prompt_contract:{VIDEO_PROMPT_CONTRACT_VERSION}"
-        + f"|ai_video_prompt_contract:{AI_VIDEO_PROMPT_CONTRACT_VERSION}"
-        + f"|ai_video_prompt_target:{target_prompt_fingerprint}"
-        + f"|prompt_user_instruction:{(prompt_override or '').strip()}"
-        + f"|previous_prompt:{previous_prompt_fingerprint}"
-        + f"|reference_input_policy:{video_modes.REFERENCE_INPUT_POLICY_VERSION}"
-        + f"|reference_dependencies:{current_reference_manifest.get('input_fingerprint') or ''}"
+    key = enqueue_prompt.build_idem_key(
+        prompt_text, decision, chain_after_shot_id, chain_after_version_id,
+        target_prompt_fingerprint=target_prompt_fingerprint, prompt_override=prompt_override,
+        previous_prompt_fingerprint=previous_prompt_fingerprint,
+        current_reference_manifest=current_reference_manifest, reference_gallery=reference_gallery,
+        reroll=reroll, operation_idempotency_key=operation_idempotency_key,
+        supervisor_run_id=supervisor_run_id, auto_retake_count=auto_retake_count,
+        critique=critique, critique_sources=critique_sources,
     )
-    # 只有人工编辑会改变视频输入并打破原幂等键；未编辑画廊沿用历史幂等行为，
-    # 普通重复点击仍直接复用已有成功视频。
-    if reference_gallery and reference_gallery["revision"] is not None:
-        key_material += (
-            f"|reference_gallery:{reference_gallery['source_version_id']}"
-            f"@{reference_gallery['revision']}:{reference_gallery['fingerprint']}"
-        )
-    if reroll:
-        reroll_scope = str(operation_idempotency_key or "").strip()
-        if not reroll_scope:
-            reroll_scope = make_idem_key(
-                json.dumps(
-                    {
-                        "supervisor_run_id": supervisor_run_id or "",
-                        "auto_retake_count": max(0, int(auto_retake_count)),
-                        "critique": critique or [],
-                        "critique_sources": critique_sources or [],
-                        "previous_prompt_fingerprint": previous_prompt_fingerprint or "",
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
-            )
-        key = make_idem_key(key_material + f"|reroll_operation:{reroll_scope}")
-    else:
-        key = make_idem_key(key_material)
 
-    # A paid command receipt can be lost after the durable enqueue commits.  The
-    # domain key therefore owns replay safety too: the same logical operation
-    # must recover the exact version/job instead of relying on the outer bus.
-    if not reroll or operation_idempotency_key:
-        # 复用成功版；同时挡住仍在排队/运行中的同键任务，避免双击重复付费。
-        # waiting_human 不在这里：它是死路（既不是"进行中"也不是"已交付"），
-        # 把它当可复用会让同指纹的重新生成永远指回同一个卡死版本（见
-        # CLAUDE.md「Gates and Criteria」）。
-        reusable_statuses = [
-            "succeeded", "queued", "running", "waiting_provider",
-            "waiting_retry", "paused_budget", "paused",
-        ]
-        if supervisor_run_id:
-            reusable_statuses.append("abandoned")
-        status_marks = ",".join("?" for _ in reusable_statuses)
-        existing = conn.execute(
-            "SELECT * FROM shot_versions WHERE shot_id=? AND idem_key=? "
-            f"AND status IN ({status_marks}) "
-            "ORDER BY CASE status WHEN 'succeeded' THEN 0 ELSE 1 END, version_no DESC "
-            "LIMIT 1",
-            (shot_id, key, *reusable_statuses)).fetchone()
-        if existing:
-            result = {
-                "reused": True,
-                "version_id": existing["id"],
-                "reused_reason": _reused_reason_for_status(existing["status"]),
-            }
-            if existing["status"] in {"paused", "abandoned"}:
-                resumed = _resume_reused_paused_job(
-                    existing["id"],
-                    supervisor_run_id=supervisor_run_id,
-                    dependency_snapshot=dependency_snapshot,
-                    preflight_job_id=preflight_job_id,
-                    preflight_owner=preflight_owner,
-                )
-                if resumed:
-                    result.update(resumed)
-            if preflight_repair:
-                result["preflight_repair"] = preflight_repair
-            if (
-                operation_idempotency_key
-                and operation_request_fingerprint
-                and operation_claim_token
-            ):
-                job = conn.execute(
-                    "SELECT id,provider_operation_id,status FROM jobs WHERE version_id=? ORDER BY created_at DESC LIMIT 1",
-                    (existing["id"],),
-                ).fetchone()
-                from app.video_command_operations import bind_video_command_operation
+    reused = enqueue_prompt.find_reusable_version(
+        conn, shot_id, key, reroll=reroll, operation_idempotency_key=operation_idempotency_key,
+        supervisor_run_id=supervisor_run_id, dependency_snapshot=dependency_snapshot,
+        preflight_job_id=preflight_job_id, preflight_owner=preflight_owner,
+        preflight_repair=preflight_repair, operation_request_fingerprint=operation_request_fingerprint,
+        operation_claim_token=operation_claim_token, operation_command=operation_command,
+        shot_plan=shot_plan,
+    )
+    if reused is not None:
+        return reused
 
-                bind_video_command_operation(
-                    command=operation_command,
-                    idempotency_key=operation_idempotency_key,
-                    request_fingerprint=operation_request_fingerprint,
-                    claim_token=operation_claim_token,
-                    binding={
-                        "plan_id": (shot_plan.episode_video_plan_id if shot_plan else None),
-                        "version_id": existing["id"],
-                        "job_id": job["id"] if job else None,
-                        "provider_operation_id": job["provider_operation_id"] if job else None,
-                        "result": result,
-                        **({"append_enqueued": {"shot_id": shot_id, **result}}
-                           if operation_command == "video.generate_episode" else {}),
-                    },
-                    conn=conn,
-                    merge=operation_command == "video.generate_episode",
-                )
-                conn.commit()
-            return result
-
-    version_no = (conn.execute(
-        "SELECT COALESCE(MAX(version_no), 0) AS m FROM shot_versions WHERE shot_id=?",
-        (shot_id,)).fetchone()["m"]) + 1
     version_id = new_id("ver")
-    image_meta = {
-        "mode": decision.mode,
-        "mode_decision": video_modes.decision_to_dict(decision),
-        "after_shot_id": chain_after_shot_id,
-        "after_version_id": chain_after_version_id,
-        "after_shot_no": None,
-        "continuity_mode": continuity_mode,
-        "prev_state_out": prompt_prev_state_out,
-        "incoming_transition": incoming_transition,
-        "outgoing_transition": outgoing_transition,
-        "auto_retake_count": max(0, int(auto_retake_count)),
-        "supervisor_run_id": supervisor_run_id,
-        "shot_contract_json": json.dumps(shot_contract_dict(shot), ensure_ascii=False),
-        "video_prompt_contract_version": VIDEO_PROMPT_CONTRACT_VERSION,
-        "ai_video_prompt_required": not is_storyboard_pack_shot,
-        "ai_video_prompt_contract_target": AI_VIDEO_PROMPT_CONTRACT_VERSION,
-        "ai_video_prompt_profile_target": target_prompt_profile.profile_id,
-        "ai_video_prompt_profile_version_target": target_prompt_profile.version,
-        "ai_video_prompt_target_provider": target_video_provider,
-        "ai_video_prompt_target_model": target_video_model,
-        "continuity_contract_prompt": prompt_text,
-        "prompt_user_instruction": (prompt_override or "").strip(),
-        "prompt_critique": [
-            str(item).strip()
-            for item in (critique or [])
-            if str(item).strip()
-        ],
-        "previous_prompt_version_id": (
-            previous_prompt_version["id"]
-            if previous_prompt_version is not None
-            else None
-        ),
-        "previous_prompt_fingerprint": previous_prompt_fingerprint or None,
-        "previous_prompt_inherited": bool(
-            previous_prompt_text and not prompt_override
-        ),
-        "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
-        "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
-        "boundary_prompt_contract": {
-            "video_generation_mode": (
-                shot_plan.mode.value if shot_plan is not None else decision.mode
-            ),
-            "first_frame_source": first_frame_source,
-            "source_shot_id": boundary_source_shot_id,
-            "relation_edit": boundary_relation_edit,
-            "relation_action": boundary_relation_action,
-            "relation_normalization_reason": boundary_relation_reason,
-            "start_state": boundary_start_state,
-        },
-    }
-    if shot_plan is not None:
-        image_meta.update({
-            "episode_video_plan_id": shot_plan.episode_video_plan_id,
-            "shot_plan_id": shot_plan.shot_plan_id,
-            "plan_revision": shot_plan.plan_revision,
-            "source_storyboard_revision_id": shot_plan.source_storyboard_revision_id,
-            "capability_snapshot_id": shot_plan.capability_snapshot_id,
-            "input_revision_fingerprints": dict(
-                shot_plan.input_revision_fingerprints
-            ),
-            "planned_mode": shot_plan.mode.value,
-            "actual_mode": shot_plan.mode.value,
-            "video_input_intent": (
-                shot_plan.video_input_intent.value
-                if shot_plan.video_input_intent is not None else None
-            ),
-            "depends_on_shot_id": shot_plan.depends_on_shot_id,
-        })
-    if preflight_repair:
-        image_meta["preflight_auto_repair"] = preflight_repair
-    if dependency_snapshot:
-        # This immutable token is checked again by the worker before every
-        # candidate/QA/adoption write.  Keeping it on the version also makes a
-        # stale provider result explainable after process restarts.
-        image_meta["review_dependency_snapshot"] = {
-            "qualification_version": dependency_snapshot.get("qualification_version"),
-            "published_screenplay_artifact_id": dependency_snapshot.get("published_screenplay_artifact_id"),
-            "confirmed_storyboard_artifact_id": dependency_snapshot.get("confirmed_storyboard_artifact_id"),
-            "screenplay_revision": dependency_snapshot.get("screenplay_revision"),
-            "storyboard_revision": dependency_snapshot.get("storyboard_revision"),
-            "asset_status": dependency_snapshot.get("asset_status"),
-            "asset_inputs": dependency_snapshot.get("asset_inputs") or [],
-            "asset_soft_warnings": dependency_snapshot.get("asset_soft_warnings") or [],
-            "captured_at": dependency_snapshot.get("server_time"),
-        }
-    if critique_sources:
-        image_meta["critique_sources"] = critique_sources
-    if reference_gallery:
-        image_meta["reference_images"] = reference_gallery["reference_images"]
-        image_meta["reference_gallery_source_version_id"] = reference_gallery["source_version_id"]
-        image_meta["reference_gallery_fingerprint"] = reference_gallery["fingerprint"]
-        if reference_gallery.get("keyframe_contract_fingerprint"):
-            image_meta["keyframe_contract_fingerprint"] = reference_gallery["keyframe_contract_fingerprint"]
-        if isinstance(reference_gallery.get("keyframe_sequence"), dict):
-            image_meta["keyframe_sequence"] = reference_gallery["keyframe_sequence"]
-        if isinstance(reference_gallery.get("reference_manifest"), dict):
-            image_meta["reference_manifest"] = reference_gallery["reference_manifest"]
-            image_meta["reference_manifest_frozen"] = True
-        if reference_gallery["revision"] is not None:
-            image_meta["reference_gallery_revision"] = reference_gallery["revision"]
-        if reference_gallery["edited"]:
-            image_meta["reference_gallery_edited"] = True
-        if reference_gallery.get("contract_override"):
-            image_meta["reference_gallery_contract_override"] = True
-    job_id = preflight_job_id or new_id("job")
-    budget_limit = episode_video_budget_limit(str(ep["id"]))
-    run_id, step_run_id = ensure_media_trace(
-        workflow_type="video_generation", scope_id=shot_id,
-        input_value={"prompt": prompt_text, "version": version_no}, budget_limit_cny=budget_limit,
+    image_meta = enqueue_persist.build_base_image_meta(
+        decision, shot, prompt_text, is_storyboard_pack_shot,
+        chain_after_shot_id=chain_after_shot_id, chain_after_version_id=chain_after_version_id,
+        continuity_mode=continuity_mode, prompt_prev_state_out=prompt_prev_state_out,
+        incoming_transition=incoming_transition, outgoing_transition=outgoing_transition,
+        auto_retake_count=auto_retake_count, supervisor_run_id=supervisor_run_id,
+        target_prompt_profile=target_prompt_profile, target_video_provider=target_video_provider,
+        target_video_model=target_video_model, prompt_override=prompt_override, critique=critique,
+        previous_prompt_version=previous_prompt_version,
+        previous_prompt_fingerprint=previous_prompt_fingerprint,
+        previous_prompt_text=previous_prompt_text, first_frame_source=first_frame_source,
+        boundary_source_shot_id=boundary_source_shot_id, boundary_relation_edit=boundary_relation_edit,
+        boundary_relation_action=boundary_relation_action, boundary_relation_reason=boundary_relation_reason,
+        boundary_start_state=boundary_start_state,
     )
+    enqueue_persist.apply_shot_plan_meta(image_meta, shot_plan)
+    enqueue_persist.apply_optional_meta(
+        image_meta, preflight_repair=preflight_repair, dependency_snapshot=dependency_snapshot,
+        critique_sources=critique_sources, reference_gallery=reference_gallery,
+    )
+
+    budget_limit = episode_video_budget_limit(str(ep["id"]))
     from app.video_cost_model import initial_shot_generation_cost
 
     estimate = initial_shot_generation_cost(float(shot.duration_s))
-    try:
-        if conn.in_transaction:
-            conn.commit()
-        conn.execute("BEGIN IMMEDIATE")
-        version_no = (conn.execute(
-            "SELECT COALESCE(MAX(version_no),0)+1 AS n FROM shot_versions WHERE shot_id=?",
-            (shot_id,),
-        ).fetchone()["n"])
-        conn.execute(
-            """INSERT INTO shot_versions(
-                   id,shot_id,version_no,prompt_text,idem_key,status,
-                   video_slot_active,created_at,image_inputs
-               ) VALUES(?,?,?,?,?,'queued',1,?,?)""",
-            (
-                version_id,
-                shot_id,
-                version_no,
-                prompt_text,
-                key,
-                now(),
-                json.dumps(image_meta, ensure_ascii=False),
-            ),
-        )
-        if preflight_job_id:
-            updated = conn.execute(
-                """UPDATE jobs
-                      SET version_id=?,episode_id=?,project_id=?,status='queued',
-                          video_slot_active=1,error=NULL,next_retry_at=NULL,retry_count=0,
-                          reason_code=NULL,reason_text=NULL,stage_progress_json=NULL,
-                          after_shot_id=?,after_version_id=?,run_id=?,
-                          owner_run_id=?,step_run_id=?,
-                          lease_owner=NULL,lease_expires_at=NULL,updated_at=?
-                    WHERE id=? AND shot_id=? AND kind='video' AND version_id IS NULL
-                      AND video_slot_active=1 AND lease_owner=?""",
-                (
-                    version_id,
-                    ep["id"],
-                    project["id"],
-                    chain_after_shot_id,
-                    chain_after_version_id,
-                    run_id,
-                    supervisor_run_id,
-                    step_run_id,
-                    now(),
-                    job_id,
-                    shot_id,
-                    preflight_owner,
-                ),
-            )
-            if updated.rowcount != 1:
-                raise ValueError("视频输入校验任务状态已变化，请刷新后重试")
-        else:
-            conn.execute(
-                """INSERT INTO jobs(
-                       id,kind,shot_id,version_id,episode_id,project_id,status,
-                       video_slot_active,created_at,updated_at,after_shot_id,
-                       after_version_id,run_id,owner_run_id,step_run_id
-                   ) VALUES(
-                       ?,'video',?,?,?,?,'queued',1,?,?,?,?,?,?,?
-                   )""",
-                (
-                    job_id,
-                    shot_id,
-                    version_id,
-                    ep["id"],
-                    project["id"],
-                    now(),
-                    now(),
-                    chain_after_shot_id,
-                    chain_after_version_id,
-                    run_id,
-                    supervisor_run_id,
-                    step_run_id,
-                ),
-            )
-        try:
-            from app.media_pipeline import stages as media_stages
-            from app.media_pipeline.stage_state import set_pipeline_stage
-            set_pipeline_stage(job_id, media_stages.STAGE_JOB_QUEUED, conn=conn)
-        except Exception:  # noqa: BLE001
-            pass
-        reserved = media_scheduler.reserve_budget(
-            job_id, ep["id"], estimate, budget_limit, conn=conn
-        )
-        if not reserved:
-            conn.execute(
-                """UPDATE jobs
-                      SET video_slot_active=0,lease_owner=NULL,lease_expires_at=NULL,
-                          updated_at=?
-                    WHERE id=?""",
-                (now(), job_id),
-            )
-            conn.execute(
-                """UPDATE shot_versions
-                      SET status='paused_budget',video_slot_active=0,
-                          error='集预算不足，任务已暂停'
-                    WHERE id=?""",
-                (version_id,),
-            )
-        if (
-            operation_idempotency_key
-            and operation_request_fingerprint
-            and operation_claim_token
-        ):
-            from app.video_command_operations import bind_video_command_operation
-
-            domain_result = {
-                "reused": False,
-                "version_id": version_id,
-                "job_id": job_id,
-                "task_accepted": True,
-            }
-            if not reserved:
-                domain_result["paused_budget"] = True
-            bind_video_command_operation(
-                command=operation_command,
-                idempotency_key=operation_idempotency_key,
-                request_fingerprint=operation_request_fingerprint,
-                claim_token=operation_claim_token,
-                binding={
-                    "plan_id": (shot_plan.episode_video_plan_id if shot_plan else None),
-                    "version_id": version_id,
-                    "job_id": job_id,
-                    "provider_operation_id": None,
-                    "result": domain_result,
-                    **({"append_enqueued": {"shot_id": shot_id, **domain_result}}
-                       if operation_command == "video.generate_episode" else {}),
-                },
-                conn=conn,
-                merge=operation_command == "video.generate_episode",
-            )
-        conn.execute(
-            "UPDATE episodes SET status='generating' WHERE id=? AND status='confirmed'",
-            (ep["id"],),
-        )
-        conn.commit()
-    except Exception:
-        if conn.in_transaction:
-            conn.rollback()
-        raise
-    if not reserved:
+    persisted = enqueue_persist.persist_new_video_version(
+        conn, shot_id=shot_id, version_id=version_id, prompt_text=prompt_text, key=key,
+        image_meta=image_meta, preflight_job_id=preflight_job_id, preflight_owner=preflight_owner,
+        ep=ep, project=project, chain_after_shot_id=chain_after_shot_id,
+        chain_after_version_id=chain_after_version_id, supervisor_run_id=supervisor_run_id,
+        estimate=estimate, budget_limit=budget_limit,
+        operation_idempotency_key=operation_idempotency_key,
+        operation_request_fingerprint=operation_request_fingerprint,
+        operation_claim_token=operation_claim_token, operation_command=operation_command,
+        shot_plan=shot_plan,
+    )
+    job_id = persisted["job_id"]
+    if not persisted["reserved"]:
         reconcile_episode_generation_status(ep["id"])
         result = {
             "reused": False, "version_id": version_id, "job_id": job_id,
@@ -2219,27 +1568,10 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         if preflight_repair:
             result["preflight_repair"] = preflight_repair
         return result
-    dispatch_deferred = False
-    try:
-        from .dispatch import _enqueue_for_current_status
 
-        _enqueue_for_current_status(job_id)
-    except Exception as exc:  # durable dispatcher continuously rebuilds queues from jobs
-        errors.record_and_format(
-            exc,
-            action="video_initial_dispatch",
-            context={"job_id": job_id, "shot_id": shot_id, "episode_id": ep["id"]},
-        )
-        dispatch_deferred = True
-        conn.execute(
-            "UPDATE jobs SET error=?, updated_at=? WHERE id=? AND status='queued'",
-            (
-                "任务已写入持久队列；实时调度通知暂未送达，系统将自动重新发现，无需重复点击",
-                now(),
-                job_id,
-            ),
-        )
-        conn.commit()
+    dispatch_deferred = enqueue_persist.dispatch_new_video_job(
+        conn, job_id=job_id, shot_id=shot_id, episode_id=ep["id"],
+    )
     result = {
         "reused": False,
         "version_id": version_id,
