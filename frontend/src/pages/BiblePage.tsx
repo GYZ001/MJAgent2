@@ -12,6 +12,7 @@ import PrepSubnav from '../components/PrepSubnav'
 import { SINGLE_ROW_ASSET_PAGE, useFillPageSize } from '../hooks/useFillPageSize'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { usePrepListState } from '../hooks/usePrepListState'
+import { characterIsFitting } from '../lib/bibleAssets'
 import { formatBookTitle } from '../lib/bookTitle'
 import { sceneStepStatus } from '../lib/prepSteps'
 import { retryBibleGenerationAction } from '../lib/retryBibleGeneration'
@@ -191,17 +192,10 @@ function compareCharacters(left: Character, right: Character, sort: string, proj
   return left.name.localeCompare(right.name, 'zh-CN')
 }
 
-export function characterIsFitting(project: { refs_status?: string; refs_target?: string | null }, character: Character): boolean {
-  if (project.refs_status !== 'running') return false
-  if (!project.refs_target) return true
-  if (project.refs_target === character.name) return true
-  try {
-    const targets = JSON.parse(project.refs_target)
-    return Array.isArray(targets) && targets.includes(character.name)
-  } catch {
-    return false
-  }
-}
+// characterIsFitting 已提取到 lib/bibleAssets.ts（2026-08-31，定妆照占位四态
+// 改造）：ScriptPage/BoardPage/WallPage 判断角色是否命中本轮 refs 任务要用同一
+// 份判据，不得复制第二份实现；这里重新导出保持既有对外接口/测试导入路径不变。
+export { characterIsFitting }
 
 function characterAvailabilityForFilter(
   project: { refs_status?: string; refs_target?: string | null } | null | undefined,

@@ -16,8 +16,9 @@ import {
 import { ItemTaskTimer } from '../components/TaskTimer'
 import QueryState from '../components/QueryState'
 import { compactShotStage } from '../shotStatus'
-import { characterPortraitDisplay, findSceneReferenceImage } from '../lib/bibleAssets'
+import { characterPortraitDisplay, findSceneReferenceImage, portraitPlaceholderText, refsBusyPollInterval, resolvePortraitPlaceholderKind, type ImageGenTaskLike } from '../lib/bibleAssets'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
+import PortraitPlaceholder from '../components/PortraitPlaceholder'; import SceneReferencePlaceholder from '../components/SceneReferencePlaceholder'
 import '../styles/WallPage.css'
 
 // 生成台 2.0（storyboard_pack/2.0.1，见 app/production/storyboard_pack.py）：一个
@@ -301,7 +302,7 @@ export default function WallPage() {
   const { data: ep, refresh, error, status, loading } = useEpisode(
     episodeId || '', 'wall', current => episodeBusy(current) ? 4000 : 0,
   )
-  const { data: project } = useProject(projectId!, 0, 'bible')
+  const { data: project } = useProject(projectId!, refsBusyPollInterval, 'bible')
   const bible = project?.bible ?? null
 
   const shots = useMemo(() => (ep?.shots ?? []).filter(isSegmentShot), [ep?.shots])
@@ -486,11 +487,8 @@ export default function WallPage() {
           <span>已产生费用 <b>￥{spent.toFixed(2)}</b></span>
         </div>
         <div className="wall-summary-actions">
-          <button
-            type="button"
-            className="btn primary small wall-summary-generate-all"
-            disabled={Boolean(bulkDisabledReason) || bulkPreparing}
-            title={bulkDisabledReason || undefined}
+          <button type="button" className="btn primary small wall-summary-generate-all"
+            disabled={Boolean(bulkDisabledReason) || bulkPreparing} title={bulkDisabledReason || undefined}
             aria-label={bulkDisabledReason ? `生成所有视频，暂不可用：${bulkDisabledReason}` : '生成所有视频；点击后立即提交'}
             onClick={() => { void generateAll() }}
           >
@@ -545,7 +543,7 @@ export default function WallPage() {
               <SegmentWorkbench
                 key={selectedSummary.id}
                 shot={selectedSummary}
-                bible={bible}
+                bible={bible} project={project}
                 context={context}
                 detail={detail}
                 onRefresh={refreshAll}
@@ -584,9 +582,9 @@ function SegmentNavItem({ shot, selected, onSelect }: { shot: Shot; selected: bo
   )
 }
 
-function SegmentWorkbench({ shot, bible, context, detail, onRefresh, onToast }: {
+function SegmentWorkbench({ shot, bible, context, detail, onRefresh, onToast, project }: {
   shot: Shot
-  bible: Bible | null
+  bible: Bible | null; project: ImageGenTaskLike | null
   context: ReviewWallContext | null
   detail: DetailState
   onRefresh: () => Promise<void>
@@ -621,7 +619,7 @@ function SegmentWorkbench({ shot, bible, context, detail, onRefresh, onToast }: 
           </div>
           <p className="wall-segment-synopsis">{segment.synopsis || '（本段无梗概）'}</p>
         </div>
-        <SegmentResourceStrip resources={segment.resources} bible={bible} />
+        <SegmentResourceStrip resources={segment.resources} bible={bible} project={project} />
       </header>
 
       <section className="wall-prompt-block">
@@ -654,7 +652,7 @@ function SegmentWorkbench({ shot, bible, context, detail, onRefresh, onToast }: 
         ) : <span className="wall-meta-chip wall-chip-muted">无台词</span>}
         <details className="wall-meta-details">
           <summary className="wall-meta-chip">素材详情</summary>
-          <SegmentResourceRoster resources={segment.resources} bible={bible} />
+          <SegmentResourceRoster resources={segment.resources} bible={bible} project={project} />
         </details>
         {segment.degraded_capabilities.map((item, index) => (
           <span key={index} className="wall-meta-chip wall-chip-degraded">{item}</span>
@@ -674,7 +672,7 @@ function SegmentWorkbench({ shot, bible, context, detail, onRefresh, onToast }: 
   )
 }
 
-function SegmentResourceStrip({ resources, bible }: { resources: StoryboardPackResources; bible: Bible | null }) {
+function SegmentResourceStrip({ resources, bible, project }: { resources: StoryboardPackResources; bible: Bible | null; project: ImageGenTaskLike | null }) {
   const characters = resources.characters ?? []
   const scenes = resources.scenes ?? []
   const props = resources.props ?? []
@@ -687,9 +685,10 @@ function SegmentResourceStrip({ resources, bible }: { resources: StoryboardPackR
         const { imageUrl, updated } = characterPortraitDisplay(character)
         const label = character.identity_id || '未命名角色'
         const tipBase = character.description ? `${label} · ${character.description}` : label
+        const placeholderText = portraitPlaceholderText(resolvePortraitPlaceholderKind(character.identity_id, project))
         const tip = imageUrl
           ? (updated ? `${tipBase}（定妆照已更新）` : tipBase)
-          : `${label} · 无定妆照`
+          : `${label} · ${placeholderText}`
         return imageUrl
           ? (
             <img
@@ -715,7 +714,7 @@ function SegmentResourceStrip({ resources, bible }: { resources: StoryboardPackR
   )
 }
 
-function SegmentResourceRoster({ resources, bible }: { resources: StoryboardPackResources; bible: Bible | null }) {
+export function SegmentResourceRoster({ resources, bible, project }: { resources: StoryboardPackResources; bible: Bible | null; project: ImageGenTaskLike | null }) {
   const characters = resources.characters ?? []
   const scenes = resources.scenes ?? []
   const props = resources.props ?? []
@@ -737,7 +736,7 @@ function SegmentResourceRoster({ resources, bible }: { resources: StoryboardPack
                       )}
                     </span>
                   )
-                  : <div className="wall-resource-thumb-empty" aria-hidden="true">无定妆照</div>}
+                  : <PortraitPlaceholder identityId={character.identity_id} project={project} className="wall-resource-thumb-empty" />}
                 <div className="wall-resource-body">
                   <span className="wall-resource-name">{character.identity_id || '未命名角色'}</span>
                   <span className="wall-resource-desc">{character.description || (imageUrl ? '' : '暂无文字描述')}</span>
@@ -757,7 +756,7 @@ function SegmentResourceRoster({ resources, bible }: { resources: StoryboardPack
               <div className="wall-resource-item" key={`${scene.scene_id || 'scene'}-${index}`}>
                 {imageUrl
                   ? <img className="wall-resource-thumb" src={imageUrl} alt={scene.scene_id} loading="lazy" decoding="async" />
-                  : <div className="wall-resource-thumb-empty" aria-hidden="true">无图</div>}
+                  : <SceneReferencePlaceholder sceneId={scene.scene_id} label={scene.scene_id || '未命名场景'} project={project} className="wall-resource-thumb-empty" />}
                 <div className="wall-resource-body">
                   <span className="wall-resource-name">{scene.scene_id || '未命名场景'}</span>
                   <span className="wall-resource-desc">{scene.description || (imageUrl ? '' : '暂无文字描述')}</span>

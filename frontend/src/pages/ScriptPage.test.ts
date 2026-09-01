@@ -1110,3 +1110,53 @@ describe('PrepPackView appellation/alias badge title carries the real content, n
     expect(html).toContain('title="本集称谓：乙名、丙名"')
   })
 })
+
+describe('PrepPackView 定妆照占位四态（用户拍板 2026-08-31：不许一律显示"无定妆照"）', () => {
+  const buildPackWithCharacter = (character: Record<string, unknown>) => ({
+    prep_pack_version: '2.0.0',
+    episode_no: 1,
+    episode_scope: { chapter_indexes: [1], source_segment_count: 5 },
+    asset_manifest: { characters: [character], scenes: [] },
+    coverage_ledger: {
+      total_segments: 5, delivered: [1, 2, 3, 4, 5],
+      merged: [], retained_as_context: [], proven_duplicates: [], uncovered: [],
+    },
+  }) as any
+
+  const noImageCharacter = {
+    identity_id: 'bible:张三', display_name: '张三', portrait_id: 'portrait_x', segment_indexes: [1],
+  }
+
+  it('本轮 refs 任务正在为这个角色出图 -> 显示"定妆照生成中"，不是"无定妆照"', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, {
+      pack: buildPackWithCharacter(noImageCharacter), bible: null, sourceFallback: '第 1 章',
+      project: { refs_status: 'running', refs_target: null },
+    }))
+    expect(html).toContain('定妆照生成中')
+    expect(html).not.toContain('无定妆照')
+  })
+
+  it('出图任务失败且命中这个角色 -> 显示"定妆照生成失败"，且给出可点击的补图入口', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, {
+      pack: buildPackWithCharacter(noImageCharacter), bible: null, sourceFallback: '第 1 章',
+      project: { id: 'proj_1', refs_status: 'failed', refs_target: '张三' } as any,
+    }))
+    expect(html).toContain('定妆照生成失败')
+    expect(html).toMatch(/<a[^>]+href="\/projects\/proj_1\/bible"[^>]*>定妆照生成失败<\/a>/)
+  })
+
+  it('既没在跑也没失败 -> 显示"定妆照待生成"', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, {
+      pack: buildPackWithCharacter(noImageCharacter), bible: null, sourceFallback: '第 1 章',
+      project: { refs_status: 'ready', refs_target: null },
+    }))
+    expect(html).toContain('定妆照待生成')
+  })
+
+  it('project 未传（旧调用点/测试常见形态）时不崩溃，落到"定妆照待生成"', () => {
+    const html = renderToStaticMarkup(createElement(PrepPackView, {
+      pack: buildPackWithCharacter(noImageCharacter), bible: null, sourceFallback: '第 1 章',
+    }))
+    expect(html).toContain('定妆照待生成')
+  })
+})

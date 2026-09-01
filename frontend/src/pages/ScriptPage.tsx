@@ -18,10 +18,11 @@ import QueryState from '../components/QueryState'
 import OperationError from '../components/OperationError'
 import PrepPackPreviewDialog from '../components/script/PrepPackPreviewDialog'
 import PrepPackDiscoverySummary from '../components/script/PrepPackDiscoverySummary'
+import PortraitPlaceholder from '../components/PortraitPlaceholder'; import SceneReferencePlaceholder from '../components/SceneReferencePlaceholder'
 import { useDeleteConfirm } from '../hooks/useDeleteConfirm'
 import { screenplayTaskNotice } from '../lib/productionNotices'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
-import { characterPortraitDisplay, findPortraitImage, findSceneReferenceImage } from '../lib/bibleAssets'
+import { characterPortraitDisplay, findPortraitImage, findSceneReferenceImage, refsBusyPollInterval, type RefsTaskLike } from '../lib/bibleAssets'
 import StageTextModelPicker from '../components/StageTextModelPicker'
 import "../styles/ScriptPage.css";
 
@@ -320,7 +321,7 @@ export function ScreenplayResumeButton({
 export default function ScriptPage() {
   const { episodeId, projectId, go, toast } = useNav()
   const { data: ep, refresh, error, status, loading } = useScriptEpisode(episodeId!)
-  const { data: project, refresh: refreshProject } = useProject(projectId!, 0, 'bible')
+  const { data: project, refresh: refreshProject } = useProject(projectId!, refsBusyPollInterval, 'bible')
   const [busy, setBusy] = useState(false)
   const [detailsExpanded, setDetailsExpanded] = useState(false)
   const [preview, setPreview] = useState<ActionPreview | null>(null)
@@ -417,8 +418,7 @@ export default function ScriptPage() {
   if (!ep) {
     return (
       <QueryState
-        loading={loading}
-        error={error}
+        loading={loading} error={error}
         status={status}
         hasData={false}
         objectName="映射台"
@@ -581,7 +581,7 @@ export default function ScriptPage() {
       <div className="workspace-gap" />
 
       {isPrepPack(packRaw) ? (
-        <PrepPackView pack={packRaw} bible={project?.bible} sourceFallback={sourceRangeText(ep.source_chapters)} />
+        <PrepPackView pack={packRaw} bible={project?.bible} project={project} sourceFallback={sourceRangeText(ep.source_chapters)} />
       ) : ep.screenplay ? (
         <section className="card">
           <div className="empty">
@@ -633,13 +633,13 @@ function appellationRowKey(entry: PrepPackAppellationMapEntry, index: number): s
 }
 
 export function PrepPackView({
-  pack,
-  bible,
-  sourceFallback,
+  pack, bible, sourceFallback, project,
 }: {
   pack: EpisodePrepPack
   bible: Bible | null | undefined
   sourceFallback: string
+  /** 测试大量直接构造本组件不关心 refs 任务态，未传时占位落到 pending，不是静默错误。 */
+  project?: { refs_status?: string; refs_target?: string | null; scene_refs_status?: string; scene_refs_target?: string | null } | null
 }) {
   const gate = useMemo(() => coverageGateSummary(pack.coverage_ledger), [pack.coverage_ledger])
   const legacy = isLegacyPrepPackFormat(pack)
@@ -771,7 +771,7 @@ export function PrepPackView({
                         )}
                       </span>
                     )
-                    : <div className="prep-roster-thumb-empty" aria-hidden="true">无定妆照</div>}
+                    : <PortraitPlaceholder identityId={character.identity_id} project={project} className="prep-roster-thumb-empty" />}
                   <div className="prep-roster-body">
                     <span className="prep-roster-name">
                       {canLocateAppellation ? (
@@ -839,7 +839,7 @@ export function PrepPackView({
                 <div className="prep-roster-item" key={scene.scene_id || scene.display_name}>
                   {imageUrl
                     ? <img className="prep-roster-thumb" src={imageUrl} alt={name} loading="lazy" decoding="async" />
-                    : <div className="prep-roster-thumb-empty" aria-hidden="true">无图</div>}
+                    : <SceneReferencePlaceholder sceneId={scene.scene_id} label={name} project={project} className="prep-roster-thumb-empty" />}
                   <div className="prep-roster-body">
                     <span className="prep-roster-name">
                       {/* 长场景名同样会被 .prep-roster-name-text 的单行省略号截断

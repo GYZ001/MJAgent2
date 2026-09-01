@@ -176,8 +176,13 @@ max_function_lines_python = 50
 "frontend/src/api/screenplay.ts" = 340
 "frontend/src/components/EpisodeCrumb.tsx" = 301
 "frontend/src/components/observability/TraceDrawer.tsx" = 834
-"frontend/src/pages/BiblePage.tsx" = 1772
-"frontend/src/pages/BoardPage.test.ts" = 360
+# 2026-08-31 棘轮收紧（1772→1766）：占位四态改造把 characterIsFitting 从本文件
+# 挪到 lib/bibleAssets.ts（跨页复用改成共享同一份判据，不留第二份实现），本文件
+# 改重新导出，净减少 6 行——拆小了就把数字调小。
+"frontend/src/pages/BiblePage.tsx" = 1766
+# 2026-08-31 +47：StoryboardPackResourceRoster 定妆照占位四态新增测试覆盖（生成中/
+# 生成失败给出可点击补图入口/待生成/群演恒无定妆照），见 lib/bibleAssets.ts 同一次改造。
+"frontend/src/pages/BoardPage.test.ts" = 407
 # 2026-08-30 +16：素材条/素材详情两处角色缩略图改用当前解析结果，新增"已更新"
 # 轻标记（与 portrait_id 快照不同时）+ 无定妆照的显式空态，见上方 screenplay.ts 注释同一次改动。
 "frontend/src/pages/BoardPage.tsx" = 1374
@@ -187,12 +192,14 @@ max_function_lines_python = 50
 "frontend/src/pages/MonitorPage.tsx" = 874
 "frontend/src/pages/ScenesPage.tsx" = 1290
 "frontend/src/pages/ScriptPage.render.test.ts" = 523
-"frontend/src/pages/ScriptPage.test.ts" = 1112
+# 2026-08-31 +50：PrepPackView 定妆照占位四态新增测试覆盖，同 BoardPage.test.ts 注释。
+"frontend/src/pages/ScriptPage.test.ts" = 1162
 # 2026-08-31：映射台入口审计——预检弹窗拆到 components/script/PrepPackPreviewDialog.tsx，
 # 净减少的行数换来给"发现新资源/索引历史资源"补文案和结果摘要的空间，950→926。
 "frontend/src/pages/ScriptPage.tsx" = 926
 "frontend/src/pages/Studio.tsx" = 430
-"frontend/src/pages/WallPage.test.ts" = 343
+# 2026-08-31 +47：SegmentResourceRoster 定妆照占位四态新增测试覆盖，同 BoardPage.test.ts 注释。
+"frontend/src/pages/WallPage.test.ts" = 390
 # 2026-08-30 +16：生成台素材条/素材详情同上一批改动，见 BoardPage.tsx 注释。
 "frontend/src/pages/WallPage.tsx" = 964
 "frontend/src/pages/monitor/CallsSection.tsx" = 397

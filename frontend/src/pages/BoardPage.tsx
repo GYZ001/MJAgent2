@@ -13,7 +13,8 @@ import QueryState from '../components/QueryState'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { storyboardTaskNotice } from '../lib/productionNotices'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
-import { characterPortraitDisplay, findSceneReferenceImage } from '../lib/bibleAssets'
+import { characterPortraitDisplay, findSceneReferenceImage, portraitPlaceholderText, refsBusyPollInterval, resolvePortraitPlaceholderKind, type ImageGenTaskLike } from '../lib/bibleAssets'
+import PortraitPlaceholder from '../components/PortraitPlaceholder'; import SceneReferencePlaceholder from '../components/SceneReferencePlaceholder'
 import StageTextModelPicker from '../components/StageTextModelPicker'
 import "../styles/BoardPage.css";
 
@@ -428,9 +429,9 @@ export default function BoardPage() {
   const { episodeId, go, projectId, toast } = useNav()
   const { data: ep, refresh, error, status: queryErrorStatus, loading } = useEpisode(episodeId!, 'board')
   // 分镜台 2.0.0 段落资源清单里的 portrait_id/scene_reference_id 指向项目人物谱/
-  // 场景库，需要同一份 bible 才能查缩略图；口径与用法都照抄 ScriptPage.tsx（同一个
-  // 项目、一次性拉取、不轮询）。
-  const { data: project, refresh: refreshProject } = useProject(projectId!, 0, 'bible')
+  // 场景库，需要同一份 bible 才能查缩略图；口径与用法都照抄 ScriptPage.tsx（refs/
+  // scene_refs 生成中轮询，2026-08-31 接上自动刷新，其余时候一次性拉取）。
+  const { data: project, refresh: refreshProject } = useProject(projectId!, refsBusyPollInterval, 'bible')
   const [busy, setBusy] = useState(false)
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null)
   const [onlyProblems, setOnlyProblems] = useState(false)
@@ -543,9 +544,7 @@ export default function BoardPage() {
   if (!ep || !status) {
     return (
       <QueryState
-        loading={loading}
-        error={error}
-        status={queryErrorStatus}
+        loading={loading} error={error} status={queryErrorStatus}
         hasData={false}
         objectName="分镜台"
         loadingText="正在加载分镜、段落列表与确认状态…"
@@ -1009,7 +1008,7 @@ export default function BoardPage() {
             )}
             {selectedShot && (
               <StoryboardPackSegmentView key={selectedShot.id}
-                shot={selectedShot} bible={project?.bible} notify={toast} />
+                shot={selectedShot} bible={project?.bible} notify={toast} project={project} />
             )}
           </section>
         </div>
@@ -1153,9 +1152,9 @@ export default function BoardPage() {
  * 3. 次要——shot_count/目标模型/原文段号回指/台词条数/节拍/降级角标，小字与角标，
  *    不占正文层级，用 <details> 收起可展开的长内容（台词全文、节拍摘要、素材详情）。
  */
-function StoryboardPackSegmentView({ shot, bible, notify }: {
+function StoryboardPackSegmentView({ shot, bible, notify, project }: {
   shot: Shot
-  bible: Bible | null | undefined
+  bible: Bible | null | undefined; project: ImageGenTaskLike | null | undefined
   notify: (message: string, error?: boolean) => void
 }) {
   const segment = shot.storyboard_pack_segment
@@ -1192,7 +1191,7 @@ function StoryboardPackSegmentView({ shot, bible, notify }: {
           </div>
           <p className="storyboard-pack-synopsis">{segment.synopsis || '（本段无梗概）'}</p>
         </div>
-        <StoryboardPackResourceStrip resources={segment.resources} bible={bible} />
+        <StoryboardPackResourceStrip resources={segment.resources} bible={bible} project={project} />
       </header>
 
       <section className="storyboard-pack-prompt-block">
@@ -1235,7 +1234,7 @@ function StoryboardPackSegmentView({ shot, bible, notify }: {
         )}
         <details className="pack-meta-details">
           <summary className="pack-meta-chip">素材详情</summary>
-          <StoryboardPackResourceRoster resources={segment.resources} bible={bible} />
+          <StoryboardPackResourceRoster resources={segment.resources} bible={bible} project={project} />
         </details>
         {segment.degraded_capabilities.map((item, index) => (
           <span key={index} className="pack-meta-chip degraded">{item}</span>
@@ -1248,9 +1247,9 @@ function StoryboardPackSegmentView({ shot, bible, notify }: {
 /** 永远可见层的素材缩略图行：能用视觉表达的不用文字——人物/场景绑了素材显示缩略图，
  *  没绑上显示灰位占位（用户一眼数得出有多少没映射上）；道具没有世界书图像素材库，
  *  设计使然地走文字。名称与描述收进 title 悬浮提示，不占正文层级。 */
-function StoryboardPackResourceStrip({ resources, bible }: {
+function StoryboardPackResourceStrip({ resources, bible, project }: {
   resources: StoryboardPackResources
-  bible: Bible | null | undefined
+  bible: Bible | null | undefined; project: ImageGenTaskLike | null | undefined
 }) {
   const characters = resources.characters ?? []
   const scenes = resources.scenes ?? []
@@ -1264,9 +1263,10 @@ function StoryboardPackResourceStrip({ resources, bible }: {
         const { imageUrl, updated } = characterPortraitDisplay(character)
         const label = character.identity_id || '未命名角色'
         const tipBase = character.description ? `${label} · ${character.description}` : label
+        const placeholderText = portraitPlaceholderText(resolvePortraitPlaceholderKind(character.identity_id, project))
         const tip = imageUrl
           ? (updated ? `${tipBase}（定妆照已更新）` : tipBase)
-          : `${label} · 无定妆照`
+          : `${label} · ${placeholderText}`
         return imageUrl
           ? (
             <img
@@ -1295,9 +1295,9 @@ function StoryboardPackResourceStrip({ resources, bible }: {
 /** 要求 2：区分"有素材"（人物 portrait_id / 场景 scene_reference_id 非空，显示缩略图）
  *  与"只有文字描述"（为 null，以及全部 props——世界书没有道具素材库）两种状态，
  *  视觉上一眼能分：有图用缩略图，无图用占位块 + 文字描述。 */
-function StoryboardPackResourceRoster({ resources, bible }: {
+export function StoryboardPackResourceRoster({ resources, bible, project }: {
   resources: StoryboardPackResources
-  bible: Bible | null | undefined
+  bible: Bible | null | undefined; project: ImageGenTaskLike | null | undefined
 }) {
   const characters = resources.characters ?? []
   const scenes = resources.scenes ?? []
@@ -1320,7 +1320,7 @@ function StoryboardPackResourceRoster({ resources, bible }: {
                       )}
                     </span>
                   )
-                  : <div className="pack-resource-thumb-empty" aria-hidden="true">无定妆照</div>}
+                  : <PortraitPlaceholder identityId={character.identity_id} project={project} className="pack-resource-thumb-empty" />}
                 <div className="pack-resource-body">
                   <span className="pack-resource-name">{character.identity_id || '未命名角色'}</span>
                   <span className="pack-resource-desc">{character.description || (imageUrl ? '' : '暂无文字描述')}</span>
@@ -1341,7 +1341,7 @@ function StoryboardPackResourceRoster({ resources, bible }: {
               <div className="pack-resource-item" key={`${scene.scene_id || 'scene'}-${index}`}>
                 {imageUrl
                   ? <img className="pack-resource-thumb" src={imageUrl} alt={scene.scene_id} loading="lazy" decoding="async" />
-                  : <div className="pack-resource-thumb-empty" aria-hidden="true">无图</div>}
+                  : <SceneReferencePlaceholder sceneId={scene.scene_id} label={scene.scene_id || '未命名场景'} project={project} className="pack-resource-thumb-empty" />}
                 <div className="pack-resource-body">
                   <span className="pack-resource-name">{scene.scene_id || '未命名场景'}</span>
                   <span className="pack-resource-desc">{scene.description || (imageUrl ? '' : '暂无文字描述')}</span>
