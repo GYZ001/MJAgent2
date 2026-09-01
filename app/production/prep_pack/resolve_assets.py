@@ -879,14 +879,14 @@ async def _resolve_assets(
                     # 王有材人物谱在册、定妆照已生成，仍被判 functional_identity
                     # 扫进 functional_extras。discovery 明确判定的非人物
                     # （宗门/法器/笔名）不在此列，它们本就不该绑定到任何真人。
-                    if (
-                        name not in non_person_names
-                        and name in bible_character_names
-                        and _resolve_portrait_id(conn, project_id, name, episode_no)
-                    ):
+                    if name not in non_person_names and name in bible_character_names:
                         skip_character_names.discard(name)
                     continue
-                if _resolve_portrait_id(conn, project_id, name, episode_no):
+                # 判据挂"人物谱里有没有这张卡"，不挂"现在有没有图"：出图已解耦
+                # 到后台，建清单这一刻图往往还没出来，用有没有图判会把连主角在内
+                # 的全部具名角色打成群演（实测 characters 空、6 个全落
+                # functional_extras）。有没有图是发起付费视频前那道闸门的事。
+                if name in bible_character_names:
                     continue
                 skip_character_names.add(name)
             discovery_diagnostics.extend(str(e) for e in discovery_result.get("errors") or [])

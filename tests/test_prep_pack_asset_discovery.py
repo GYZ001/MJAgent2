@@ -341,6 +341,42 @@ def test_known_alias_flagged_as_background_extra_still_binds_to_its_portrait(mon
 # blocked, not silently dropped, not renamed to something generic.
 # ---------------------------------------------------------------------------
 
+
+def _card_in_bible(conn, project_id: str, name: str) -> None:
+    """把角色写进人物谱——真实 ``ensure_cards_for_text`` 建卡就是写这里。
+
+    出图解耦到后台之后，"是具名角色还是群演"的判据挂在人物谱有没有这张卡，不再
+    挂"现在有没有定妆照图"（建清单那一刻图往往还没出来）。桩必须跟着真实行为走，
+    只插 character_portraits 行不写人物谱就不是忠实替身了。
+    """
+    import json as _json
+
+    row = conn.execute(
+        "SELECT bible_json FROM projects WHERE id=?", (project_id,),
+    ).fetchone()
+    try:
+        bible = _json.loads((row[0] if row else "") or "{}")
+    except (TypeError, ValueError):
+        bible = {}
+    characters = list(bible.get("characters") or [])
+    if not any(str(c.get("name") or "") == name for c in characters):
+        characters.append({
+            "name": name, "aliases": [],
+            # role / appearance_canonical 是 Character 的必填字段，缺了
+            # Bible.model_validate 会抛，桩就不再是忠实替身。
+            "role": "配角", "appearance_canonical": f"{name}的外貌",
+        })
+    bible["characters"] = characters
+    # upsert 而不是 UPDATE：夹具只建表，projects 行由各测试自己插，行不在时
+    # UPDATE 会静默不生效，桩看起来建了卡其实没建。
+    conn.execute(
+        "INSERT INTO projects(id, bible_json) VALUES(?,?)"
+        " ON CONFLICT(id) DO UPDATE SET bible_json=excluded.bible_json",
+        (project_id, _json.dumps(bible, ensure_ascii=False)),
+    )
+    conn.commit()
+
+
 def test_occupation_title_extras_absorbed_into_functional_extras(monkeypatch):
     """真实 EP13 案例：'养丹坊掌柜'/'宝阁执事'/'围观弟子'/'一名外宗弟子' 这类
     职业称谓一次性人物，discovery 干净运行（无 errors）却没有对这些具体字符串
@@ -360,6 +396,7 @@ def test_occupation_title_extras_absorbed_into_functional_extras(monkeypatch):
             "VALUES ('cp-cy','p1','曹阳',2,NULL)"
         )
         conn.commit()
+        _card_in_bible(conn, "p1", "曹阳")
         return {
             "added": [{"name": "曹阳"}], "skipped": [],
             # Discovery's own phrasing differs from the chunk extractor's
@@ -372,6 +409,14 @@ def test_occupation_title_extras_absorbed_into_functional_extras(monkeypatch):
         }
 
     patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_discovery)
+    # 曹阳建卡之后候选集不再为空，未解析标签会走候选判别（一次模型调用）。
+    # 本用例只关心"职业称谓收编成群演、曹阳进 characters"，判别一律回未绑定。
+    async def no_candidate(*_a, **_k):
+        return {"resolved": False, "attempted": False}
+
+    patch_prep_pack_everywhere(
+        monkeypatch, "_prep_pack_resolve_functional_extra_candidate", no_candidate,
+    )
     patch_portraits_everywhere(monkeypatch, "persist_screenplay_character_resolutions", lambda *a, **k: [])
 
     events = [
@@ -466,6 +511,8 @@ def test_unresolved_new_character_routes_through_discovery_and_resolves(monkeypa
             "VALUES ('cp-new','p1','沈青梧',2,NULL)"
         )
         conn.commit()
+        _card_in_bible(conn, "p1", "沈青梧")
+        _card_in_bible(conn, "p1", "沈青梧")
         return {"added": [{"name": "沈青梧"}], "resolutions": [], "errors": [], "skipped": [], "warnings": []}
 
     conn = _make_conn()
@@ -2071,6 +2118,7 @@ def test_provenance_discovery_method_self_verifies(monkeypatch):
             "VALUES ('cp-new','p1','沈青梧',2,NULL)"
         )
         conn.commit()
+        _card_in_bible(conn, "p1", "沈青梧")
         return {"added": [{"name": "沈青梧"}], "resolutions": [], "errors": [], "skipped": [], "warnings": []}
 
     patch_portraits_everywhere(monkeypatch, "ensure_cards_for_text", fake_ensure_cards_for_text)
