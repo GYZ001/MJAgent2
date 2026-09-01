@@ -14,6 +14,8 @@ from typing import Any
 from app import config, hiagent
 from app.atomic_io import atomic_write_bytes
 from app.db import get_conn, get_setting, new_id, now
+from app.portraits.card_owner import resolve_card_owner
+from app.portraits.current_ref import current_portrait_ref
 from app.refs import (
     _safe_name,
     character_visual_style_lock,
@@ -23,6 +25,7 @@ from app.refs import (
     production_appearance_anchor,
     scene_visual_style_lock,
 )
+from app.validators import match_scene_name
 
 # ---------- 视角角色常量 ----------
 
@@ -468,24 +471,25 @@ def build_reference_manifest(
 
 
 def _storyboard_pack_asset_dependencies(
-    *, episode_no: int, shot_id: str, segment: dict[str, Any], conn: Any,
+    *, project_id: str, episode_no: int, shot_id: str, segment: dict[str, Any],
+    conn: Any, bible: Any,
 ) -> dict[str, Any]:
-    """分镜台 2.0.0 段的资源依赖：直接按 ID 查库，不按名字选视角。
-
-    这一段自己的 ``resources.characters[].portrait_id`` /
-    ``resources.scenes[].scene_reference_id`` 已经由分镜台在生成时按本集
-    集号解析过一次（app.production.prep_pack._resolve_portrait_id /
-    _resolve_scene_reference_id），指向 character_portraits / scene_references
-    里唯一确定的一行。下面 name-based 分支（``select_character_view_roles`` /
-    ``select_scene_view_roles`` 之类）是给"一行 = 一个连续镜头、有
-    shot_size/camera_move/scene_time 等契约字段"的旧架构按名字重新挑视角用
-    的——这类行结构性没有那些字段（persist_storyboard_pack 留空），套用旧
-    分支只会读到错的/空的视角选择，实测复现：场景参考图因此从未被附加过
-    （只有角色定妆照命中，纯属它的默认视角选择在空字段下恰好兜底成
-    front_full）。这里改成不经过视角选择，直接信任分镜台自己已经做过的
-    资源解析——冻结设计决策"只用参考图模式"的字面意思就是每个角色/场景
-    一张确定的图，不是从多视角包里再挑一张。
+    """分镜台 2.0.0 段的资源依赖：要不要参考图挂人物谱/场景库的卡（现查
+    ``resolve_card_owner`` / ``match_scene_name``，不认前缀字符串），图本身
+    按集号现查（``current_portrait_ref`` / 本文件 ``scene_row_for_episode``，
+    与展示侧同源）——都不读段落自己固化的 ``portrait_id`` /
+    ``scene_reference_id`` 快照。旧版 ``asset_required=bool(portrait_id)``：
+    出图解耦到后台后映射那一刻新角色/场景多半还没出图，快照恒 null，于是被
+    判"不需要参考图"，视频生成拿不到脸、人物每镜漂移（EP2 实证：小胖子定妆
+    照生成前 1 分钟就已落库，只因快照是 null 被判不需要）。``entity:`` 前缀
+    的群演查无此人，天然 ``asset_required=False``；已建卡但图还没出来时
+    ``missing_required`` 现在会真正非空，``manifest_production_blockers``
+    拦得住。下面 name-based 分支给旧架构按名字重挑视角，这类行没有那些
+    契约字段不适用，这里仍不经过视角选择，直接信任分镜台已做的资源归属。
+    ``bible`` 必填：判断"有没有卡"是所有权问题，猜不得。
     """
+    if bible is None:
+        raise ValueError("分镜包资产依赖解析缺少 Bible")
     resources = segment.get("resources") or {}
 
     def _display_name(identity_or_scene_id: str) -> str:
@@ -495,15 +499,13 @@ def _storyboard_pack_asset_dependencies(
     for entry in resources.get("characters") or []:
         identity_id = str(entry.get("identity_id") or "")
         name = _display_name(identity_id) or identity_id
-        portrait_id = entry.get("portrait_id")
-        row = (
-            conn.execute(
-                "SELECT id, image_path FROM character_portraits WHERE id=?", (portrait_id,),
-            ).fetchone()
-            if portrait_id else None
-        )
-        image_path = str(row["image_path"] or "") if row else ""
-        usable = bool(image_path) and Path(image_path).is_file()
+        has_card = resolve_card_owner(bible, name)[0] != "none"
+        current = current_portrait_ref(
+            project_id, name, episode_no, visual_entity_id=identity_id, conn=conn,
+        ) if has_card else None
+        portrait_id = current["portrait_id"] if current else None
+        image_path = current["image_path"] if current else ""
+        usable = current is not None
         selected_view = {
             "id": portrait_id,
             "view_role": "front_full",
@@ -516,24 +518,21 @@ def _storyboard_pack_asset_dependencies(
             "identity_id": identity_id,
             "asset_name": name,
             "role_kind": "storyboard_pack",
-            "asset_required": bool(portrait_id),
-            "look_revision_id": portrait_id if row else None,
+            "asset_required": has_card,
+            "look_revision_id": portrait_id,
             "pack_status": PACK_STATUS_READY if usable else None,
             "selected_view_ids": [portrait_id] if selected_view else [],
             "selected_views": [selected_view] if selected_view else [],
             "available_view_roles": ["front_full"] if selected_view else [],
-            "missing_required": [] if (selected_view or not portrait_id) else ["front_full"],
+            "missing_required": [] if (selected_view or not has_card) else ["front_full"],
         })
 
     def _resolve_scene_entry(scene_entry: dict[str, Any]) -> dict[str, Any]:
-        scene_reference_id = scene_entry.get("scene_reference_id")
         sname = _display_name(str(scene_entry.get("scene_id") or ""))
-        row = (
-            conn.execute(
-                "SELECT id, image_path FROM scene_references WHERE id=?", (scene_reference_id,),
-            ).fetchone()
-            if scene_reference_id else None
-        )
+        scenes = getattr(bible, "scenes", None) or []
+        has_card = bool(sname and match_scene_name(sname, scenes, allow_fuzzy=False))
+        row = scene_row_for_episode(project_id, sname, episode_no, conn=conn) if has_card else None
+        scene_reference_id = row["id"] if row else None
         image_path = str(row["image_path"] or "") if row else ""
         usable = bool(image_path) and Path(image_path).is_file()
         selected_view = {
@@ -545,8 +544,8 @@ def _storyboard_pack_asset_dependencies(
         } if usable else None
         return {
             "name": sname,
-            "asset_required": bool(scene_reference_id),
-            "scene_revision_id": scene_reference_id if row else None,
+            "asset_required": has_card,
+            "scene_revision_id": scene_reference_id,
             "pack_status": PACK_STATUS_READY if usable else None,
             "asset_usable": usable,
             "pack_usable": usable,
@@ -554,7 +553,7 @@ def _storyboard_pack_asset_dependencies(
             "selected_view_ids": [scene_reference_id] if selected_view else [],
             "selected_views": [selected_view] if selected_view else [],
             "available_view_roles": ["establishing"] if selected_view else [],
-            "missing_required": [] if (selected_view or not scene_reference_id) else ["establishing"],
+            "missing_required": [] if (selected_view or not has_card) else ["establishing"],
         }
 
     # 一段可以在中途转场到第二个（甚至更多）场景——之前这里写死只取
@@ -612,7 +611,8 @@ def resolve_shot_asset_dependencies(
     segment = getattr(shot, "storyboard_pack_segment", None)
     if segment is not None:
         return _storyboard_pack_asset_dependencies(
-            episode_no=episode_no, shot_id=shot_id, segment=segment, conn=conn,
+            project_id=project_id, episode_no=episode_no, shot_id=shot_id,
+            segment=segment, conn=conn, bible=bible,
         )
     from app.continuity import effective_characters_visible
 

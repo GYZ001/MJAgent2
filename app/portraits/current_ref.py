@@ -7,6 +7,13 @@
 app.domain.storyboard_ops.current_portraits 使用）都只调用它，不允许再有
 第二份相似查询——两份判据必然漂移，真实事故正是界面读了已发布产物里固化
 的 portrait_id 快照、与生成时实际选中的那张不同。
+
+``conn`` 形参（可选，默认 None→回退 ``get_conn()``）：展示侧调用方（映射台/
+分镜台渲染）没有现成事务，留默认值安全；但 app.multiview._storyboard_pack_
+asset_dependencies 这类生成侧调用方自己身处调用方传入的事务连接里，
+``get_conn()`` 按 asyncio task 缓存连接，可能不是那个事务连接——回退会读到
+不一致状态（同一类事故的教训见 app.multiview.resolve_shot_asset_dependencies
+的 conn 形参说明）。生成侧必须显式传入自己的 conn，不能依赖这里的默认值。
 """
 from __future__ import annotations
 
@@ -22,6 +29,7 @@ def _current_portrait_row(
     episode_no: int,
     *,
     visual_entity_id: str | None = None,
+    conn=None,
 ):
     """覆盖 ``episode_no`` 的那一段定妆照整行——生成侧唯一的选段判据
     （``ep_start>=0 AND ep_start<=episode_no AND (ep_end IS NULL OR
@@ -38,10 +46,13 @@ def _current_portrait_row(
     ``ep_end=0`` 这个具体取值带来的隐式副作用，不是本查询自己声明的下限——
     显式加下限，不依赖另一个字段的巧合取值来防止把"其实没有有效图"误判成
     "有图"。
+
+    ``conn`` 未传时回退 ``get_conn()``（展示侧既有行为不变）。
     """
+    db = conn if conn is not None else get_conn()
     if visual_entity_id:
         try:
-            row = get_conn().execute(
+            row = db.execute(
                 "SELECT * FROM character_portraits "
                 "WHERE project_id=? AND visual_entity_id=? AND ep_start>=0 AND ep_start<=? "
                 "AND (ep_end IS NULL OR ep_end>=?) "
@@ -53,7 +64,7 @@ def _current_portrait_row(
         if row and row["image_path"] and Path(row["image_path"]).exists():
             return row
     try:
-        row = get_conn().execute(
+        row = db.execute(
             "SELECT * FROM character_portraits "
             "WHERE project_id=? AND character_name=? AND ep_start>=0 AND ep_start<=? "
             "AND (ep_end IS NULL OR ep_end>=?) "
@@ -91,16 +102,22 @@ def current_portrait_ref(
     episode_no: int | None,
     *,
     visual_entity_id: str | None = None,
+    conn=None,
 ) -> dict | None:
     """映射台/分镜台/生成台展示用：覆盖该集「当前实际会用的那张」定妆照的
     id + 落盘路径。与 ``portrait_for_episode`` 共用同一份选段判据
     （``_current_portrait_row``），保证展示侧与生成侧永远读同一个答案。
     未命中（角色没有定妆照，或文件已从磁盘丢失）返回 None；调用方必须原样
     显示"无定妆照"，不得回退到快照 id 对应的那张图。
+
+    ``conn`` 可选：生成侧（身处调用方自己的事务连接里）必须显式传入，见模块
+    docstring；展示侧留默认值走既有的 ``get_conn()`` 回退。
     """
     if episode_no is None:
         return None
-    row = _current_portrait_row(project_id, name, episode_no, visual_entity_id=visual_entity_id)
+    row = _current_portrait_row(
+        project_id, name, episode_no, visual_entity_id=visual_entity_id, conn=conn,
+    )
     if not row:
         return None
     return {"portrait_id": str(row["id"]), "image_path": row["image_path"]}

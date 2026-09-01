@@ -1244,6 +1244,7 @@ def test_resolve_shot_asset_dependencies_storyboard_pack_branch_resolves_real_as
     """
     from app.media_exec.enqueue import _load_shot_model
     from app.multiview import resolve_shot_asset_dependencies
+    from app.schemas import Bible, Character, Scene, World
 
     conn = db.get_conn()
     episode_id = "ep-pack-conn-regress"
@@ -1252,15 +1253,19 @@ def test_resolve_shot_asset_dependencies_storyboard_pack_branch_resolves_real_as
     portrait_image.write_bytes(b"fake-png")
     scene_image = tmp_path / "scene.png"
     scene_image.write_bytes(b"fake-png")
+    # character_name/scene_name 对齐 _pack() 段落资源里实际的 identity_id/
+    # scene_id（"id_a"/"scene_1"，见 _pack() fixture）——现在按名字实时查
+    # library，不再按段落固化的 portrait_id/scene_reference_id 直接 SELECT
+    # id=? 拿行，两边名字必须对得上。
     conn.execute(
         "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, "
         "image_path, created_at) VALUES(?,?,?,?,?,?,?)",
-        ("portrait_1", "proj-1", "少年", 1, None, str(portrait_image), db.now()),
+        ("portrait_1", "proj-1", "id_a", 1, None, str(portrait_image), db.now()),
     )
     conn.execute(
         "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end, "
         "image_path, created_at) VALUES(?,?,?,?,?,?,?)",
-        ("scene_ref_1", "proj-1", "山顶", 1, None, str(scene_image), db.now()),
+        ("scene_ref_1", "proj-1", "scene_1", 1, None, str(scene_image), db.now()),
     )
     conn.commit()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
@@ -1270,9 +1275,14 @@ def test_resolve_shot_asset_dependencies_storyboard_pack_branch_resolves_real_as
     row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_ids[0],)).fetchone()
     shot = _load_shot_model(row)
     assert shot.storyboard_pack_segment is not None
+    bible = Bible(
+        characters=[Character(name="id_a", role="配角", appearance_canonical="少年，青衫")],
+        world=World(visual_style_canonical="写实"),
+        scenes=[Scene(name="scene_1", scene_canonical="山顶，日，云雾")],
+    )
 
     manifest = resolve_shot_asset_dependencies(
-        project_id="proj-1", episode_no=1, shot_id=row["id"], shot=shot, conn=conn,
+        project_id="proj-1", episode_no=1, shot_id=row["id"], shot=shot, conn=conn, bible=bible,
     )
     character = manifest["characters"][0]
     assert character["look_revision_id"] == "portrait_1"
@@ -1293,6 +1303,7 @@ def test_storyboard_pack_asset_dependencies_resolves_every_declared_scene_not_ju
     验证修复后两个场景都进了 manifest，且都能展开成可提交的参考图锚点。
     """
     from app.multiview import _storyboard_pack_asset_dependencies, library_anchor_assets_from_manifest
+    from app.schemas import Bible, Scene, World
 
     conn = db.get_conn()
     episode_id = "ep-pack-multiscene"
@@ -1323,8 +1334,15 @@ def test_storyboard_pack_asset_dependencies_resolves_every_declared_scene_not_ju
             ],
         },
     }
+    bible = Bible(
+        characters=[], world=World(visual_style_canonical="写实"),
+        scenes=[
+            Scene(name="山顶", scene_canonical="山顶，日"),
+            Scene(name="山脚", scene_canonical="山脚，日"),
+        ],
+    )
     manifest = _storyboard_pack_asset_dependencies(
-        episode_no=1, shot_id="shot-x", segment=segment, conn=conn,
+        project_id="proj-1", episode_no=1, shot_id="shot-x", segment=segment, conn=conn, bible=bible,
     )
     assert manifest["scene"]["name"] == "山顶"
     assert manifest["scene"]["scene_revision_id"] == "scene_ref_a"
@@ -1346,6 +1364,7 @@ def test_storyboard_pack_asset_dependencies_second_scene_unresolvable_is_visible
     主场景一直就有这条检查）时，manifest_production_blockers 必须报出来——
     可见不拦截，不能像旧代码那样连声明都消失，事后无法核对。"""
     from app.multiview import _storyboard_pack_asset_dependencies, manifest_production_blockers
+    from app.schemas import Bible, Scene, World
 
     conn = db.get_conn()
     episode_id = "ep-pack-multiscene-gap"
@@ -1369,12 +1388,182 @@ def test_storyboard_pack_asset_dependencies_second_scene_unresolvable_is_visible
             ],
         },
     }
+    # 「失踪场景」已经在场景库建卡（bible.scenes 里有），只是 scene_references
+    # 没有它的可用行——这是 has_card=True 但当前查不到图的真实缺口场景，跟
+    # 「查无此卡」不是一回事，必须走同一个「已建卡但没图」的拦截分支。
+    bible = Bible(
+        characters=[], world=World(visual_style_canonical="写实"),
+        scenes=[
+            Scene(name="山顶", scene_canonical="山顶，日"),
+            Scene(name="失踪场景", scene_canonical="失踪场景，日"),
+        ],
+    )
     manifest = _storyboard_pack_asset_dependencies(
-        episode_no=1, shot_id="shot-x", segment=segment, conn=conn,
+        project_id="proj-1", episode_no=1, shot_id="shot-x", segment=segment, conn=conn, bible=bible,
     )
     blockers = manifest_production_blockers(manifest)
     assert any("失踪场景" in b for b in blockers)
 
+
+# ---------------------------------------------------------------------------
+# asset_required 判据挂人物谱/场景库的卡、不挂段落固化快照（出图解耦漏掉的
+# 最后一环）：映射那一刻本集新发现的角色/场景还没出图，段落自己的
+# portrait_id/scene_reference_id 快照恒为 null；旧判据 asset_required=
+# bool(snapshot_id) 因此把它们判成"不需要参考图"，视频生成拿不到脸。
+# EP2 实证：小胖子已建卡且定妆照在生成开始前已经落库，只因映射时快照是
+# null 被判不需要。
+# ---------------------------------------------------------------------------
+
+def test_storyboard_pack_asset_required_carded_character_resolves_live_portrait_despite_null_snapshot(
+    tmp_path,
+):
+    """已建卡角色：段落快照 portrait_id 为空（本集新发现、映射时还没出图），
+    但按集号现查能找到真实定妆照——asset_required 必须为真，且必须真的把
+    这张图选出来，不能因为快照是空就判成不需要。"""
+    from app.multiview import _storyboard_pack_asset_dependencies
+    from app.schemas import Bible, Character, World
+
+    conn = db.get_conn()
+    episode_id = "ep-pack-live-portrait"
+    _seed_episode(conn, episode_id=episode_id)
+    portrait_image = tmp_path / "portrait.png"
+    portrait_image.write_bytes(b"fake-png")
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, "
+        "image_path, created_at) VALUES(?,?,?,?,?,?,?)",
+        ("portrait_live", "proj-1", "孟浩", 1, None, str(portrait_image), db.now()),
+    )
+    conn.commit()
+
+    segment = {
+        "segment_no": 1,
+        "resources": {
+            "characters": [{"identity_id": "bible:孟浩", "portrait_id": None}],
+            "scenes": [],
+        },
+    }
+    bible = Bible(
+        characters=[Character(name="孟浩", role="主角", appearance_canonical="孟浩，青年")],
+        world=World(visual_style_canonical="写实"),
+    )
+    manifest = _storyboard_pack_asset_dependencies(
+        project_id="proj-1", episode_no=1, shot_id="shot-x", segment=segment, conn=conn, bible=bible,
+    )
+    character = manifest["characters"][0]
+    assert character["asset_required"] is True
+    assert character["look_revision_id"] == "portrait_live"
+    assert character["selected_views"][0]["image_path"] == str(portrait_image)
+    assert character["missing_required"] == []
+
+
+def test_storyboard_pack_asset_required_carded_character_without_any_portrait_blocks_gate(
+    tmp_path,
+):
+    """已建卡角色，但当前真的没有任何可用视角（没有 character_portraits 行）——
+    asset_required 仍是真，missing_required 必须非空，manifest_production_
+    blockers 必须真的拦下来，不能形同虚设。"""
+    from app.multiview import _storyboard_pack_asset_dependencies, manifest_production_blockers
+    from app.schemas import Bible, Character, World
+
+    conn = db.get_conn()
+    episode_id = "ep-pack-no-portrait-yet"
+    _seed_episode(conn, episode_id=episode_id)
+
+    segment = {
+        "segment_no": 1,
+        "resources": {
+            "characters": [{"identity_id": "bible:小胖子", "portrait_id": None}],
+            "scenes": [],
+        },
+    }
+    bible = Bible(
+        characters=[Character(name="小胖子", role="配角", appearance_canonical="小胖子，圆脸")],
+        world=World(visual_style_canonical="写实"),
+    )
+    manifest = _storyboard_pack_asset_dependencies(
+        project_id="proj-1", episode_no=1, shot_id="shot-x", segment=segment, conn=conn, bible=bible,
+    )
+    character = manifest["characters"][0]
+    assert character["asset_required"] is True
+    assert character["look_revision_id"] is None
+    assert character["missing_required"] == ["front_full"]
+    blockers = manifest_production_blockers(manifest)
+    assert any("小胖子" in b for b in blockers)
+
+
+def test_storyboard_pack_asset_required_false_for_entity_prefixed_extra():
+    """负控：群演/一次性人物（identity_id 是 entity: 前缀的视觉实体哈希，人物谱
+    里查无此人）必须继续 asset_required=False、missing_required 为空——这条
+    修复只该让"已建卡但快照为空"的角色变真，不能反过来把本来就没有卡的群演
+    也误判成需要参考图。"""
+    from app.multiview import _storyboard_pack_asset_dependencies, manifest_production_blockers
+    from app.schemas import Bible, Character, World
+
+    conn = db.get_conn()
+    episode_id = "ep-pack-extra-stays-optional"
+    _seed_episode(conn, episode_id=episode_id)
+
+    segment = {
+        "segment_no": 1,
+        "resources": {
+            "characters": [{"identity_id": "entity:fdd28fea634a6cdc", "portrait_id": None}],
+            "scenes": [],
+        },
+    }
+    bible = Bible(
+        characters=[Character(name="孟浩", role="主角", appearance_canonical="孟浩，青年")],
+        world=World(visual_style_canonical="写实"),
+    )
+    manifest = _storyboard_pack_asset_dependencies(
+        project_id="proj-1", episode_no=1, shot_id="shot-x", segment=segment, conn=conn, bible=bible,
+    )
+    character = manifest["characters"][0]
+    assert character["asset_required"] is False
+    assert character["missing_required"] == []
+    blockers = manifest_production_blockers(manifest)
+    assert blockers == []
+
+
+def test_storyboard_pack_asset_required_scene_resolves_live_reference_despite_null_snapshot(
+    tmp_path,
+):
+    """场景侧同构：已建卡场景（bible.scenes 里有），段落快照 scene_reference_id
+    为空，但按集号现查能找到真实场景图——asset_required 为真且必须选出这张图，
+    跟角色侧同一个判据来源，不是另写一套。"""
+    from app.multiview import _storyboard_pack_asset_dependencies
+    from app.schemas import Bible, Scene, World
+
+    conn = db.get_conn()
+    episode_id = "ep-pack-live-scene"
+    _seed_episode(conn, episode_id=episode_id)
+    scene_image = tmp_path / "scene.png"
+    scene_image.write_bytes(b"fake-png")
+    conn.execute(
+        "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end, "
+        "image_path, created_at) VALUES(?,?,?,?,?,?,?)",
+        ("scene_ref_live", "proj-1", "靠山宗山峦小路", 1, None, str(scene_image), db.now()),
+    )
+    conn.commit()
+
+    segment = {
+        "segment_no": 1,
+        "resources": {
+            "characters": [],
+            "scenes": [{"scene_id": "scene:靠山宗山峦小路", "scene_reference_id": None}],
+        },
+    }
+    bible = Bible(
+        characters=[], world=World(visual_style_canonical="写实"),
+        scenes=[Scene(name="靠山宗山峦小路", scene_canonical="靠山宗外围，山路，日")],
+    )
+    manifest = _storyboard_pack_asset_dependencies(
+        project_id="proj-1", episode_no=1, shot_id="shot-x", segment=segment, conn=conn, bible=bible,
+    )
+    scene = manifest["scene"]
+    assert scene["asset_required"] is True
+    assert scene["scene_revision_id"] == "scene_ref_live"
+    assert scene["selected_views"][0]["image_path"] == str(scene_image)
+    assert scene["missing_required"] == []
 
 
 

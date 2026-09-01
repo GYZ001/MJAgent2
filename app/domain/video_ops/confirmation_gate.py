@@ -145,17 +145,27 @@ def _assert_episode_reference_assets_ready(conn, episode, rows) -> None:
 
     判据复用 ``scan_episode_reference_asset_gaps``——整集入口用的就是它，不另写
     第二套"有没有图"的判断（本仓库已因两套判据分叉吃过亏）。
+
+    ``bible`` 必须真的传：分镜包分支判断"要不要参考图"现在挂人物谱/场景库
+    有没有这张卡（见 app.multiview._storyboard_pack_asset_dependencies），
+    漏传会在调用那一刻就地报 ValueError，不会静默放行。
     """
     from app.multiview import scan_episode_reference_asset_gaps
 
+    from app.domain.common import _project_bible_or_placeholder
     from app.domain.storyboard_ops import _board_from_shot_rows
 
+    project = conn.execute(
+        "SELECT * FROM projects WHERE id=?", (episode["project_id"],),
+    ).fetchone()
+    bible = _project_bible_or_placeholder(project)
     board = _board_from_shot_rows(rows, episode["episode_no"])
     gaps = scan_episode_reference_asset_gaps(
         project_id=episode["project_id"],
         episode_no=int(episode["episode_no"]),
         shots=list(zip([row["id"] for row in rows], board.shots, strict=False)),
         conn=conn,
+        bible=bible,
     )
     if not gaps["blockers"]:
         return
