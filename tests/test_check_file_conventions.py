@@ -489,6 +489,9 @@ def _minimal_defaults() -> str:
         "max_lines_python = 600\n"
         "max_lines_frontend = 400\n"
         "max_function_lines_python = 200\n"
+        # 2026-09-01 tests/ 纳入闸门后 defaults 的必填项，缺了 load_config 就报错
+        # ——配置本身错了要响，不静默用默认值兜。
+        "max_lines_tests = 600\n"
     )
 
 
@@ -637,6 +640,7 @@ def test_load_config_rejects_docstring_exempt_non_string_entries(tmp_path: Path)
 def test_run_check_returns_2_on_missing_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("scripts.check_file_conventions.collect_python_files", lambda: [])
     monkeypatch.setattr("scripts.check_file_conventions.collect_frontend_files", lambda: [])
+    monkeypatch.setattr("scripts.check_file_conventions.collect_test_files", lambda: [])
 
     exit_code = run_check(tmp_path / "missing.toml", 10, as_json=False)
 
@@ -652,6 +656,7 @@ def test_run_check_returns_2_when_scan_scope_is_empty(
     toml_path.write_text(_minimal_defaults(), encoding="utf-8")
     monkeypatch.setattr("scripts.check_file_conventions.collect_python_files", lambda: [])
     monkeypatch.setattr("scripts.check_file_conventions.collect_frontend_files", lambda: [])
+    monkeypatch.setattr("scripts.check_file_conventions.collect_test_files", lambda: [])
 
     exit_code = run_check(toml_path, 10, as_json=False)
 
@@ -668,6 +673,7 @@ def test_run_check_returns_0_when_clean(
     good = _write(tmp_path, "clean.py", '"""doc"""\nVALUE = 1\n')
     monkeypatch.setattr("scripts.check_file_conventions.collect_python_files", lambda: [good])
     monkeypatch.setattr("scripts.check_file_conventions.collect_frontend_files", lambda: [])
+    monkeypatch.setattr("scripts.check_file_conventions.collect_test_files", lambda: [])
 
     exit_code = run_check(toml_path, 10, as_json=False)
 
@@ -685,6 +691,7 @@ def test_run_check_returns_1_when_a_file_violates(
     bad = _write(tmp_path, "no_doc.py", "VALUE = 1\n")
     monkeypatch.setattr("scripts.check_file_conventions.collect_python_files", lambda: [bad])
     monkeypatch.setattr("scripts.check_file_conventions.collect_frontend_files", lambda: [])
+    monkeypatch.setattr("scripts.check_file_conventions.collect_test_files", lambda: [])
 
     exit_code = run_check(toml_path, 10, as_json=False)
 
@@ -704,6 +711,7 @@ def test_run_check_json_output_matches_report_to_dict(
     good = _write(tmp_path, "clean.py", '"""doc"""\nVALUE = 1\n')
     monkeypatch.setattr("scripts.check_file_conventions.collect_python_files", lambda: [good])
     monkeypatch.setattr("scripts.check_file_conventions.collect_frontend_files", lambda: [])
+    monkeypatch.setattr("scripts.check_file_conventions.collect_test_files", lambda: [])
 
     exit_code = run_check(toml_path, 10, as_json=True)
 
@@ -798,3 +806,55 @@ def test_real_repo_report_actuals_runs_and_emits_json() -> None:
     assert rows, "--report-actuals 应当至少报出一个文件"
     assert all({"path", "lines"} <= set(r) for r in rows)
     assert any((_repo_root() / r["path"]).exists() for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# tests/ 纳入闸门（2026-09-01）
+# ---------------------------------------------------------------------------
+
+
+def test_test_files_are_scanned_for_line_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """tests/ 此前不在任何闸门覆盖内，长出了 11,700 行的测试文件。纳入后：
+    超过 max_lines_tests 的测试文件必须报违规。"""
+    monkeypatch.setattr("scripts.check_file_conventions.ROOT", tmp_path)
+    path = _write(tmp_path, "tests/test_huge.py", '"""doc."""\n' + "x = 1\n" * 40)
+    config = _base_config(max_lines_tests=20)
+
+    report = evaluate([], [], config, test_files=[path])
+
+    assert [(v.dimension, v.actual, v.threshold) for v in report.violations] == [
+        ("line_count", 41, 20),
+    ]
+
+
+def test_test_files_are_not_judged_on_function_length_or_docstring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """只查行数：参数化用例天然长，模块 docstring 是「模块即契约」才有的要求，
+    测试文件两条都不适用——多查一个维度就是在惩罚写表驱动测试。"""
+    monkeypatch.setattr("scripts.check_file_conventions.ROOT", tmp_path)
+    body = "def test_long():\n" + "    assert True\n" * 30
+    path = _write(tmp_path, "tests/test_no_docstring.py", body)
+    config = _base_config(max_lines_tests=500, max_function_lines_python=5)
+
+    report = evaluate([], [], config, test_files=[path])
+
+    assert report.violations == []
+    assert report.docstring_violations == []
+
+
+def test_test_file_baseline_is_a_ratchet_like_the_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """基线内不报，超基线就报——与 app/ 的 line_count 同一性质。"""
+    monkeypatch.setattr("scripts.check_file_conventions.ROOT", tmp_path)
+    path = _write(tmp_path, "tests/test_legacy.py", '"""doc."""\n' + "x = 1\n" * 40)
+    rel = path.relative_to(tmp_path).as_posix()
+    config = _base_config(max_lines_tests=20, test_line_baseline={rel: 41})
+
+    assert evaluate([], [], config, test_files=[path]).violations == []
+
+    tighter = _base_config(max_lines_tests=20, test_line_baseline={rel: 40})
+    assert len(evaluate([], [], tighter, test_files=[path]).violations) == 1

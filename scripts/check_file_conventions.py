@@ -63,6 +63,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 APP = ROOT / "app"
 FRONTEND_SRC = ROOT / "frontend" / "src"
+TESTS = ROOT / "tests"
 DEFAULT_CONFIG_FILE = APP / "FILE_CONVENTIONS.toml"
 
 # 维度名——闭集，由本工具自身定义（不是从外部数据枚举业务值，类比 LAYERS.toml
@@ -101,6 +102,20 @@ def collect_frontend_files() -> list[Path]:
     return sorted(FRONTEND_SRC.rglob("*.ts")) + sorted(FRONTEND_SRC.rglob("*.tsx"))
 
 
+def collect_test_files() -> list[Path]:
+    """`tests/**/*.py`。
+
+    2026-09-01 纳入扫描：此前 `tests/` 不在任何闸门覆盖内，长出了 11,700 行和
+    11,017 行的测试文件（73/271 超 500 行，p90 = 1,147）。测试是全仓改动最频繁的
+    部分——一次策略变更就牵动几十个用例——不设约束等于把最常改的代码放进无人区。
+
+    只查 `line_count` 一个维度。函数行数不查：表驱动的参数化用例天然长，用产品
+    代码的 50 行阈值卡它会逼人把用例拆碎、反而更难读。模块 docstring 与星号导入
+    也不查：那两条是为「模块作为对外契约」立的，测试文件不是契约。
+    """
+    return sorted(TESTS.rglob("*.py"))
+
+
 # ---------------------------------------------------------------------------
 # 配置加载与校验
 # ---------------------------------------------------------------------------
@@ -119,7 +134,9 @@ class ConventionsConfig:
     max_lines_python: int
     max_lines_frontend: int
     max_function_lines_python: int
+    max_lines_tests: int = 500
     line_baseline: dict[str, int] = field(default_factory=dict)
+    test_line_baseline: dict[str, int] = field(default_factory=dict)
     function_lines_baseline: dict[str, int] = field(default_factory=dict)
     docstring_exempt: frozenset[str] = field(default_factory=frozenset)
     star_import_exempt: frozenset[str] = field(default_factory=frozenset)
@@ -179,8 +196,10 @@ def load_config(path: Path) -> ConventionsConfig:
     max_lines_python = _require_positive_int(defaults, "max_lines_python", path)
     max_lines_frontend = _require_positive_int(defaults, "max_lines_frontend", path)
     max_function_lines_python = _require_positive_int(defaults, "max_function_lines_python", path)
+    max_lines_tests = _require_positive_int(defaults, "max_lines_tests", path)
 
     line_baseline = _load_int_baseline_table(data, "line_count", path)
+    test_line_baseline = _load_int_baseline_table(data, "test_line_count", path)
     function_lines_baseline = _load_int_baseline_table(data, "function_lines", path)
 
     docstring_exempt = _load_file_list_table(data, "docstring_exempt", path)
@@ -222,7 +241,9 @@ def load_config(path: Path) -> ConventionsConfig:
         max_lines_python=max_lines_python,
         max_lines_frontend=max_lines_frontend,
         max_function_lines_python=max_function_lines_python,
+        max_lines_tests=max_lines_tests,
         line_baseline=line_baseline,
+        test_line_baseline=test_line_baseline,
         function_lines_baseline=function_lines_baseline,
         docstring_exempt=docstring_exempt,
         star_import_exempt=star_import_exempt,
@@ -381,6 +402,7 @@ def evaluate(
     frontend_files: list[Path],
     config: ConventionsConfig,
     *,
+    test_files: list[Path] | None = None,
     today: dt.date | None = None,
 ) -> Report:
     """核心判定：给一份显式文件清单（不是「全仓库」），逐个量、逐个判。
@@ -435,6 +457,19 @@ def evaluate(
             threshold = config.line_baseline.get(rel, config.max_lines_frontend)
             if lines > threshold:
                 report.violations.append(Violation(DIM_LINE_COUNT, rel, lines, threshold))
+
+    # tests/ 只查行数一个维度，理由见 collect_test_files 的 docstring。
+    for path in test_files or []:
+        rel = relpath(path)
+        if exempted(rel, DIM_LINE_COUNT):
+            continue
+        metrics = measure_python_file(path)
+        if metrics is None:
+            report.unparseable.append(rel)
+            continue
+        threshold = config.test_line_baseline.get(rel, config.max_lines_tests)
+        if metrics.lines > threshold:
+            report.violations.append(Violation(DIM_LINE_COUNT, rel, metrics.lines, threshold))
 
     return report
 
@@ -534,17 +569,18 @@ def run_check(config_path: Path, top: int, *, as_json: bool) -> int:
 
     python_files = collect_python_files()
     frontend_files = collect_frontend_files()
+    test_files = collect_test_files()
     # 空集合不等于「无需检查」：扫描范围本身配错了（比如路径改名）必须报错，
     # 不能因为「一个文件都没找到」就悄悄放行。
-    if not python_files and not frontend_files:
+    if not python_files and not frontend_files and not test_files:
         print(
-            f"FAIL: 扫描范围为空（{APP} 与 {FRONTEND_SRC} 均无匹配文件），"
+            f"FAIL: 扫描范围为空（{APP}、{FRONTEND_SRC} 与 {TESTS} 均无匹配文件），"
             "这通常意味着扫描路径配置错误，不是「全部合格」",
             file=sys.stderr,
         )
         return 2
 
-    report = evaluate(python_files, frontend_files, config)
+    report = evaluate(python_files, frontend_files, config, test_files=test_files)
 
     if as_json:
         print(json.dumps(report_to_dict(report), ensure_ascii=False, indent=2))
@@ -556,7 +592,7 @@ def run_check(config_path: Path, top: int, *, as_json: bool) -> int:
 
 def run_report_actuals(top: int) -> int:
     """只打印实测指标，不判定通过/失败。用于人工核对该不该调紧某个文件的基线。"""
-    python_files = collect_python_files()
+    python_files = collect_python_files() + collect_test_files()
     frontend_files = collect_frontend_files()
     rows = []
     for path in python_files:

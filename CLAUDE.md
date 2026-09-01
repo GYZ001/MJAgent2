@@ -33,6 +33,50 @@
 - **`global` 重绑定的名字必须与它的写入者同模块。** Python 的 `global` 只重绑定**定义它的那个模块**的命名空间；分开会让写入落进私有副本、读取方永远看不到，**且不报错**。
 - **拆文件后全仓 grep 硬编码路径。** `scripts/check_contract_surface.py` 的 `REQUIRED` 字典硬编码路径会让任何人跑它都 `SystemExit`；同文件 `FORBIDDEN` 字典对已删路径是 `if not path.exists(): continue`——**静默跳过，检查悄悄失效而所有人以为它在保护自己**。`tests/test_scripts_hardcoded_paths_exist.py` 现在守着这一类。
 
+## Code Architecture Norms（2026-09-01 全仓实测）
+
+这一节的数字来自对全仓的实测（`scripts/arch_graph.py`、`scripts/check_file_conventions.py`
+与一次性 AST 统计），不是拍脑袋定的目标。当时规模：后端 628 模块 / 214,765 行，测试
+271 文件 / 161,549 行（测试:代码 = 0.75:1），前端 172 文件 / 32,609 行。
+
+**已经达标、不许回退的四条**：分层上行边 0 条（阈值锁死 0）；返回类型注解 91%
+（3958/4341）；全仓 TODO 1 个、FIXME/HACK/XXX 各 0——不要用 TODO 记账，问题要么修、
+要么在 docstring 里写清为什么不修；无 `exec()` 聚合外观。
+
+**欠账分两档处理，不要混用。** 新增文件与新增函数**严格达标**（Python ≤500 行、
+前端 ≤300 行、测试 ≤500 行、单函数 ≤50 代码行），一条都不许进 `[baseline.*]`；存量超标
+文件走**季度净减**，不做「每次改动即时抵扣」。理由是实测的：2026-09-01 一天之内，
+「想加一个字段先得还一笔债」触发了 3 次（加两个契约字段先拆 `api/prepPack.ts`、加两行
+提示词先把规则 9 外移、加一行 hook 调用先压掉三行注释）。拆分本身都是对的，但这个摩擦
+会把人推向「把新代码塞进还有基线余量的大文件」，与机制初衷相反。当时的欠账总量：
+99 个 py 超 500 行、775 个函数超 50 代码行，累计 56,357 文件行 + 43,294 函数行。
+
+**结构红线（新增即拒）**
+
+- **`app/` 根目录不再新增散文件。** 现状 93 个文件 50,889 行 = 全后端 23.7%，最大的几个
+  （db.py 3535、hiagent.py 3150、schemas.py 2571）全在这里。新模块进包，包名说明领域。
+- **再导出门面不得再长，且必须从真源导出。** `app/api.py` 1,087 行里 96% 是 import +
+  `__all__`、自有定义 0 个，`app/domain/__init__.py` 95%。这类门面把「删一行未使用的
+  import」变成跨包破坏性操作——实测踩中：删掉 `view_redo.py` 一行没人用的 import，
+  直接打断 `app.domain.bible_ops` 的再导出链，`app.api` 整个 import 失败。再导出写
+  `from app.auth.principal import current_actor_name as current_actor_name`，不要借道某个
+  碰巧 import 了它的子模块转手。
+- **扇入 >100 的模块不得再加职责。** 现状 `app.db` 254、`app.schemas` 186、
+  `app.evidence` 103。这类模块每一行改动都是全仓风险面。
+- **基础设施模块不得参与循环。** 现状 8 个循环团、39 个模块（6.2%），其中
+  `db ↔ quota ↔ quota_addon ↔ quota_tiers` 是基础设施反向依赖业务，优先拆。
+- **函数内 `import app.*` 不是解耦手段。** 现状 1,405 处（占内部导入 31%），集中在
+  `orchestration.api` 51 / `system_api` 40 / `media_exec.enqueue` 30。它把循环依赖藏进
+  运行时、让静态分析看不见。新增延迟导入必须就地写一行注释说明「为什么这里不能模块级导入」。
+- **测试代码同样受约束。** `tests/` 2026-09-01 起纳入 `check_file_conventions.py`（只查
+  行数，不查函数长度/docstring/星号导入——那几条是为「模块即对外契约」立的，测试文件不是
+  契约；表驱动用例天然长，用 50 行卡它是在惩罚写参数化测试）。纳入时 73/271 个文件超
+  500 行（最大 11,700 与 11,017），已按实测值播种基线。新增测试文件按 500 严格执行。
+
+**拆分时的既有约束照旧生效**：拆包用真包（禁 `exec()` 外观、禁 `from .x import *`）；
+拆包必然让 `monkeypatch.setattr(pkg, name, stub)` 静默失效，必须同步补 `tests/conftest.py`
+的 `patch_<pkg>_everywhere()` 与 AST 守卫测试；拆完全仓 grep 硬编码路径。详见上一节。
+
 ## Verification
 完成后必须：
 - 日常改动优先运行 `py scripts/verify.py`，只验证 Git 改动直接影响的范围；提交或发布前才运行 `py scripts/verify.py --full`；

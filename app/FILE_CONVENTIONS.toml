@@ -54,6 +54,10 @@ exemptions = []
 max_lines_python = 500
 max_lines_frontend = 300
 max_function_lines_python = 50
+# tests/ 2026-09-01 纳入闸门，沿用与 app/ 相同的 500：测试代码没有理由比产品代码
+# 更容易长胖，何况它是全仓改动最频繁的部分。只查行数一个维度，见
+# scripts/check_file_conventions.py::collect_test_files 的 docstring。
+max_lines_tests = 500
 
 [baseline.line_count]
 "app/agent/orchestrator.py" = 616
@@ -637,3 +641,83 @@ max_function_lines_python = 50
 [baseline.star_import_exempt]
 "files" = []
 
+# ---------------------------------------------------------------------------
+# tests/ 的行数棘轮（2026-09-01 纳入闸门）。此前 tests/ 不在任何闸门覆盖内，长出了
+# 11,700 行与 11,017 行的测试文件；测试是全仓改动最频繁的部分，最常改的代码却没有
+# 任何形状约束。下面每条都是纳入那一刻的**实测值**，与 app/ 的基线同一性质：欠账，
+# 不是许可。新增测试文件按 defaults.max_lines_tests（500）严格执行，不许进这张表。
+# ---------------------------------------------------------------------------
+[baseline.test_line_count]
+"tests/test_character_discovery.py" = 11700
+"tests/test_screenplay_scene_shards.py" = 11017
+"tests/test_prep_pack_asset_discovery.py" = 5631
+"tests/test_narrative_blueprint.py" = 4925
+"tests/test_blueprint_shard_budget.py" = 4125
+"tests/test_screenplay_ir.py" = 3834
+"tests/test_screenplay_controls.py" = 3563
+"tests/test_production_repair.py" = 3253
+"tests/test_storyboard_workspace_prd.py" = 3241
+"tests/test_storyboard_pack.py" = 3160
+"tests/test_provider_call_lifecycle.py" = 3141
+"tests/test_screenplay_authority.py" = 2827
+"tests/test_video_supervisor_integration.py" = 2158
+"tests/test_media_job_recovery.py" = 1998
+"tests/test_narrative_continuity.py" = 1796
+"tests/test_narrative_outline_projection.py" = 1605
+"tests/test_review_wall_prd.py" = 1528
+"tests/test_run_2470cc8c594e_identity_group_fix.py" = 1439
+"tests/test_bible_parallelism.py" = 1389
+"tests/test_episode_source_audit.py" = 1323
+"tests/test_startup_recovery.py" = 1311
+"tests/test_bible_prompt_and_precheck.py" = 1299
+"tests/test_screenplay_stage.py" = 1295
+"tests/test_generation_station_asset_clear.py" = 1277
+"tests/test_screenplay_workspace_prd.py" = 1213
+"tests/test_episode_partial_concat.py" = 1201
+"tests/test_character_alias.py" = 1170
+"tests/test_video_modes.py" = 1147
+"tests/test_character_status_facts.py" = 1135
+"tests/conftest.py" = 1112
+"tests/test_screenplay_scene_repair.py" = 1066
+"tests/test_core_regressions.py" = 1057
+"tests/test_minimax_h3.py" = 1037
+"tests/test_video_plan_reconcile.py" = 983
+"tests/test_initial_multiview_bootstrap.py" = 955
+"tests/test_run_2eb70bae74e4_recovery.py" = 947
+"tests/test_screenplay_structured_runner.py" = 875
+"tests/test_seedance_continuity_prd.py" = 873
+"tests/test_quota.py" = 870
+"tests/test_check_file_conventions.py" = 860
+"tests/test_storyboard_repair_v2.py" = 859
+"tests/test_narrative_identity_contracts.py" = 826
+"tests/test_video_stall_recovery.py" = 823
+"tests/test_prep_pack_coverage.py" = 766
+"tests/test_delivery.py" = 765
+"tests/test_rbac_project_isolation.py" = 761
+"tests/test_narrative_hard_gates.py" = 759
+"tests/test_video_completion_authority.py" = 756
+"tests/test_workspace_payload_views.py" = 749
+"tests/test_bible_impact_and_concurrency.py" = 670
+"tests/test_worker_reference_gallery.py" = 632
+"tests/test_hiagent_response_format.py" = 631
+"tests/test_agent_loop.py" = 623
+"tests/test_arch_graph_layers.py" = 612
+"tests/test_narrative_repair.py" = 607
+"tests/test_bible_task_lifecycle.py" = 594
+"tests/test_prep_pack_storyboard_projection.py" = 586
+"tests/test_generation_concurrency.py" = 586
+"tests/test_dialogue_framing.py" = 585
+"tests/test_video_shot_mutex.py" = 570
+"tests/test_model_gateway_contracts.py" = 566
+"tests/test_yyft_serial10_auto_cycle.py" = 563
+"tests/test_capability_registry.py" = 563
+"tests/test_video_completion_command_receipts.py" = 555
+"tests/test_harness_orchestration.py" = 551
+"tests/test_project_observability.py" = 543
+"tests/test_chapter_cognition_card.py" = 543
+"tests/test_video_supervisor_unit.py" = 542
+"tests/test_validators.py" = 527
+"tests/test_test_isolation.py" = 526
+"tests/test_narrative_contract_roundtrip.py" = 519
+"tests/test_video_provider_recovery_slots.py" = 509
+"tests/test_screenplay_delete.py" = 501
