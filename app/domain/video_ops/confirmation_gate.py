@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from app.db import get_conn
+from .source_coverage import storyboard_source_coverage_gap
 from app.domain.common import (
     _episode_or_404,
     _project_bible_or_placeholder,
@@ -273,6 +274,10 @@ def create_storyboard_confirmation_preview(episode_id: str) -> dict:
             0,
             f"分镜尚未达到完整终态：已完成 {len(rows)}/{planned} 镜，最终镜{'有效' if final_valid else '缺失'}",
         )
+    # 原文覆盖是独立于"这批镜头自身完不完整"的另一个问题，判据见 source_coverage：
+    # 计划镜数本身就是 1 时 1/1 也判终态通过，而那一镜可能只绑了开头几百字。
+    if (coverage_gap := storyboard_source_coverage_gap(conn, episode_id)) is not None:
+        hard_errors.insert(0, coverage_gap)
     hard_errors = list(dict.fromkeys(hard_errors))
     warnings = list(dict.fromkeys(evaluation.warnings))
     payload = {
