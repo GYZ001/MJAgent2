@@ -123,6 +123,22 @@ def _prep_pack_citation_forms(phrase: str) -> list[str]:
     return forms
 
 
+def _prep_pack_locate_stitched_quote(segments: list[SourceSegment], phrase: str) -> tuple[list[int], str]:
+    """整条不命中时的最后一步：拆句后每句都逐字命中且与原文同序，才以最长句（≥6 字）为锚点；任一句定位不到或次序颠倒即整条拒绝。ERR-20260902-507cb0《三国演义》第一回：原文相隔数十字的两句被接成一条 quote，两轮重试一字不差——拼接是引用格式不是改写；反例见 test_prep_pack_asset_discovery 的 invented_quotes。"""
+    parts = [part.strip() for part in re.split(r"(?<=[。！？…．.!?])", phrase) if part.strip()]
+    located: list[tuple[list[int], str]] = []
+    for sentence in parts if len(parts) >= 2 else []:
+        hit = next(((s, f) for f in _prep_pack_citation_forms(sentence) if (s := _prep_pack_locate_verbatim(segments, f))), None)
+        if hit is None:
+            return [], ""
+        located.append(hit)
+    order = [(segs[0], segments[segs[0] - 1].text.find(form)) for segs, form in located]
+    if not located or order != sorted(order):
+        return [], ""
+    best = max(located, key=lambda item: len(item[1]))
+    return best if len(best[1].rstrip(_PREP_PACK_TERMINAL_MARKS)) >= 6 else ([], "")
+
+
 def _prep_pack_locate_phrase(
     segments: list[SourceSegment], phrase: str,
 ) -> tuple[list[int], str]:
@@ -155,7 +171,7 @@ def _prep_pack_locate_phrase(
         located = _prep_pack_locate_verbatim(segments, candidate)
         if located:
             return located, candidate
-    return [], ""
+    return _prep_pack_locate_stitched_quote(segments, phrase)
 
 
 def _prep_pack_local_text_anchor(
@@ -201,14 +217,12 @@ def _prep_pack_local_text_anchor(
 # _PREP_PACK_SCENE_METHODS_REQUIRING_ANCHOR 里，空锚合法豁免，跟
 # resolution_forward 同待遇）。
 #
-# 2.0.2 更新（见 PREP_PACK_VERSION 上方 2.0.2 大注释）：2.0.0 砍
-# event_chain 后，调用方一度把 scene_event_evidence_quotes 传空列表
-# （event_chain 没了，暂时没有替代来源）——这不是这份函数签名/判据本身
-# 的改动，函数体一行未动，仍然是"给一份候选引文列表，命中就升级
-# resolution，不命中就诚实降级 alias_inherited"这同一套判据；变化只在
-# 调用方现在恢复传入这条场景提及自己申报的 quote（_ModelSceneMention.
-# quote，isomorphic 于旧 event_chain[].source_evidence[].quote，只是
-# 粒度从"事件"下沉到"提及"，见调用点上方注释）。
+# 2.0.2 更新（见 PREP_PACK_VERSION 上方 2.0.2 大注释）：2.0.0 砍 event_chain 后，调用方
+# 一度把 scene_event_evidence_quotes 传空列表（event_chain 没了，暂时没有替代来源）——这不是
+# 这份函数签名/判据本身的改动，函数体一行未动，仍然是"给一份候选引文列表，命中就升级
+# resolution，不命中就诚实降级 alias_inherited"这同一套判据；变化只在调用方现在恢复传入这条
+# 场景提及自己申报的 quote（_ModelSceneMention.quote，isomorphic 于旧
+# event_chain[].source_evidence[].quote，只是粒度从"事件"下沉到"提及"，见调用点上方注释）。
 def _prep_pack_scene_alias_provenance(
     conn, segments: list[SourceSegment], scene_reference_id: str,
     canonical_scene_name: str, scene_event_evidence_quotes: list[str],
