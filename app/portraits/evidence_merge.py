@@ -358,7 +358,11 @@ def _current_identity_decision_cap(evidence_ref_count: int) -> int:
     失控，只是这一集对话轮次天然多。旧的固定 64 硬把这批合法输出当成失控拒绝。
 
     公式：max(_CURRENT_IDENTITY_DECISION_CAP_FLOOR, 批次 evidence ref 数量 *
-    _CURRENT_IDENTITY_DECISION_CAP_PER_REF)。
+    _CURRENT_IDENTITY_DECISION_CAP_PER_REF)。k 分支另有下界：不得低于本批目录里
+    实际提供的 K 决议数（调用方 _project_current_identity_response 取
+    max(本函数, len(known_decisions))）——每个已登记称谓在每条证据里都必须选 K，
+    选满目录是契约要求的结果。ERR-20260902-b227f9（《三国演义》第一回第二轮）：
+    人物谱 15 人 × 7 条证据提供了 87 条 K，模型如实选了 87 条，被 64 拒绝。
     - 下限 64：保留历史基线，≤21 个 evidence ref 的批次（绝大多数集数）行为
       与改动前完全一致，不放宽任何既有防护。
     - 倍数 3：以 ERR-20260824-aeee2d 的真实密度（≈1 条/ref）为校准点，

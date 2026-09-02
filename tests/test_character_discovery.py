@@ -824,7 +824,7 @@ def test_current_identity_decision_cap_still_rejects_genuine_overflow_in_small_b
         existing_functional_routes=set(),
     )
     assert any(
-        message == "current identity f decisions 过多" for message in errors
+        message.startswith("current identity f decisions 过多") for message in errors
     )
 
 

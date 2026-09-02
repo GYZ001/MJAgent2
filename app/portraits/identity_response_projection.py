@@ -60,9 +60,12 @@ def _project_current_identity_response(
     # 第22轮总审计 ERR-20260824-aeee2d：帽子随本批 evidence ref 数量缩放，
     # 见 _current_identity_decision_cap 的完整推导。
     decision_cap = _current_identity_decision_cap(len(expected_refs))
+    # k 的帽子不得低于本批目录里实际提供的 K 决议数：每个已登记称谓在每条证据里都
+    # 必须选 K，模型选满目录是契约要求的结果，不是失控（ERR-20260902-b227f9：87 选 87 被 64 拒）。
+    branch_caps = {"k": max(decision_cap, len(known_decisions or {})), "n": decision_cap, "f": decision_cap}
     for branch, items in (("k", value.k), ("n", value.n), ("f", value.f)):
-        if len(items) > decision_cap:
-            errors.append(f"current identity {branch} decisions 过多")
+        if len(items) > branch_caps[branch]:
+            errors.append(f"current identity {branch} decisions 过多（{len(items)} 条，上限 {branch_caps[branch]}）")
 
     # rule 6 makes functional_identity_key the model's own explicit "this is
     # the same person" signal: two F entries that repeat both the identical
@@ -74,10 +77,7 @@ def _project_current_identity_response(
     # auto-rebound; see test_current_identity_literal_label_isolated_as_synthetic_once).
     functional_repeat_pairs: dict[tuple[str, str], int] = {}
     for item in value.f:
-        pair = (
-            str(item.source_label or "").strip(),
-            str(item.functional_identity_key or "").strip(),
-        )
+        pair = (str(item.source_label or "").strip(), str(item.functional_identity_key or "").strip())
         functional_repeat_pairs[pair] = functional_repeat_pairs.get(pair, 0) + 1
     declared_repeat_labels = {
         label for (label, key), count in functional_repeat_pairs.items()
