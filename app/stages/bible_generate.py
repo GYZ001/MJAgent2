@@ -29,6 +29,7 @@ from app.schemas import (Bible, Character, Scene, World)
 # 调用（外观证据核验随详情生成一起归了映射台），但 app/stages/__init__.py 仍从
 # 本模块透传导出它们，且被 app/portraits/cards.py（生产代码）与多个测试文件
 # 直接消费，删掉会静默打断这些既有引用，因此标 noqa 保留。
+from app.scene_contract import SCENE_ONE_LOCATION_RULE
 from app.validators import (validate_bible,  # noqa: F401 -- re-exported by app/stages/__init__.py
                             validate_scene_bible)
 
@@ -163,7 +164,7 @@ async def generate_scene_bible(chapters: list[dict], bible: Bible,
 题材：{genre or '（未标注）'}
 
 要求：
-1. 只收录【反复出现 / 有戏份 / 画面感强】的关键场景（如主角居所、宗门广场、夜晚密林、朝堂等），最多 12 个；一次性出现的过场地点不要收录。
+1. 只收录【反复出现 / 有戏份 / 画面感强】的关键场景（如主角居所、宗门广场、山中密林、朝堂等），最多 12 个；一次性出现的过场地点不要收录。{SCENE_ONE_LOCATION_RULE}
 2. name：稳定的场景短标签（4~10 字，如"宗门广场""破败客栈内"），后续所有分镜的场景都收敛到这些名字，便于跨集复用同一张场景图。name 之间不要语义重复。
 3. scene_canonical 是该场景的"固定场景锚点串"：{SCENE_CANONICAL_MIN_CHARS}~{SCENE_CANONICAL_MAX_CHARS} 字（这是硬门禁，多一个字整份清单都会被拒收，写完请数一遍），必须包含 地点/室内外/典型光线时段/标志性陈设或建筑/整体氛围色调。只写视觉可见的环境信息，不写人物、不写剧情动作。原著未描写处按题材与画风合理补全并保持内部一致。
 {scene_style_rule}

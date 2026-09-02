@@ -33,7 +33,7 @@ from app.evidence.media import record_reference_asset
 from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
 from app.refs import _safe_name, scene_visual_style_lock
-from app.scene_contract import split_legacy_scene_setting
+from app.scene_contract import SCENE_SAME_LOCATION_MATCH_RULE, split_legacy_scene_setting
 from app.schemas import Bible, Scene, extract_json
 from app.validators import match_scene_name
 
@@ -826,8 +826,7 @@ async def assess_new_scene(label: str, spatial_context: str, *, style: str,
     from app.visual_styles import is_photographic_style_prompt
     known = "、".join(known_names) or "（无）"
     scene_canonical_style_rule = (
-        f"必须贴合画风「{style}」，是照片级摄影质感的实景环境描述，允许并鼓励真实材质、"
-        "自然光影与摄影级细节。"
+        f"必须贴合画风「{style}」，是照片级摄影质感的实景环境描述，允许并鼓励真实材质、自然光影与摄影级细节。"
         if is_photographic_style_prompt(style)
         else f"必须贴合画风「{style}」，是 CG/动画/漫画类非真人渲染场景，严禁真人实拍/实景照片描述。"
     )
@@ -844,6 +843,7 @@ async def assess_new_scene(label: str, spatial_context: str, *, style: str,
 - 这是已确认剧本中真实开拍的场次，不得因一次性过场而省略场景。
 - important=true：它是已有列表之外的真正新地点，必须自动加入场景库并生成场景图。
 - important=false：仅当它确实是已有场景的别名/简称；existing_scene_name 必须返回已有列表中的完整名称。
+- {SCENE_SAME_LOCATION_MATCH_RULE}
 - name：稳定的场景短标签（4~10 字），不要与已有场景重名。
 - scene_canonical 是"固定场景锚点串"：30~60 字，须含 地点/室内外/光线时段/标志陈设/氛围色调；只写视觉可见的环境信息，不写人物、不写剧情动作。{scene_canonical_style_rule}
 
