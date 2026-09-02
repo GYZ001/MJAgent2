@@ -1898,7 +1898,8 @@ def test_ensure_character_card_auto_adds_prominent_character_and_portrait(monkey
     names = [c["name"] for c in json.loads(
         conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"])["characters"]]
     assert "蛇后" in names
-    assert conn.execute("SELECT bible_version FROM projects WHERE id='p1'").fetchone()["bible_version"] == 2
+    # 建卡 CAS +1，定妆后外观/参考图回写（mutate_bible_json）再 +1——每次人物谱写入都推进版本。
+    assert conn.execute("SELECT bible_version FROM projects WHERE id='p1'").fetchone()["bible_version"] == 3
     assert conn.execute("SELECT COUNT(*) c FROM character_portraits WHERE character_name='蛇后'").fetchone()["c"] == 1
     queue = json.loads(conn.execute(
         "SELECT bible_auto_changes_json FROM projects WHERE id='p1'"

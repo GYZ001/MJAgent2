@@ -48,7 +48,8 @@ from .card_aliases import _cooccurrence_evidence
 from .card_aliases import new_card_aliases
 from .card_rebind import _cas_write_bible
 from .constants import CAST_DISCOVERY_SOURCE_BUDGET, IDENTITY_NAME_FORM_REFERENTIAL
-from .discovery_fragments import _bible_lock
+from .discovery_fragments import _bible_lock, _card_owner_lookup
+from .name_intro import find_name_introductions, intro_owner_of
 
 _CARD_MERGE_NO_MATCH_LABEL = "都不是/无法确定"
 
@@ -236,8 +237,11 @@ async def resolve_card_merge_target(
         return None
     roster = {c.name: [c.name, *(a.text for a in c.aliases)] for c in bible.characters}
     dossier_text = "".join(item["text"] for item in dossier)
+    # 「姓关，名羽，字长生」里「关羽」两字不相连：显式介绍句把 label 链接到的全名也是合法候选。
+    intro_linked_names = {intro.full_name for intro in find_name_introductions(dossier_text) if label in intro.alt_names}
     candidates = [
-        name for name, forms in roster.items() if any(f and f in dossier_text for f in forms)
+        name for name, forms in roster.items()
+        if name in intro_linked_names or any(f and f in dossier_text for f in forms)
     ]
     if not candidates:
         return None
@@ -248,15 +252,21 @@ async def resolve_card_merge_target(
     if pinned is None or label not in pinned["text"]:
         return None
     forms = roster[response.selected_candidate]
-    if not any(form and form in pinned["text"] for form in forms):
+    intro = intro_owner_of(label, find_name_introductions(pinned["text"]))
+    # 「姓关，名羽，字长生」：全名两字不相连，逐字包含查不到；显式介绍句本身就是最强的身份链接证据。
+    intro_linked = intro is not None and intro.full_name == response.selected_candidate
+    if not intro_linked and not any(form and form in pinned["text"] for form in forms):
         return None
-    evidence = _card_merge_alias_evidence(chapters_by_idx, forms, label)
+    evidence = (
+        (int(pinned["chapter_idx"]), intro.quote) if intro_linked
+        else _card_merge_alias_evidence(chapters_by_idx, forms, label)
+    )
     if evidence is None:
         return None
     chapter_idx, quote = evidence
     alias = CharacterAlias(
-        text=label, name_kind=IDENTITY_NAME_FORM_REFERENTIAL,
-        evidence_chapter_index=chapter_idx, evidence_quote=quote, is_exclusive=False,
+        text=label, name_kind=intro.aliases_kind if intro_linked else IDENTITY_NAME_FORM_REFERENTIAL,
+        evidence_chapter_index=chapter_idx, evidence_quote=quote, is_exclusive=intro_linked,
     ).model_dump(mode="json")
     return response.selected_candidate, alias
 
@@ -325,6 +335,39 @@ def apply_card_merge_alias(
         return False
     conn.commit()
     return True
+
+
+async def courtesy_name_redirect(
+    conn, project_id: str, name: str, chapters_by_idx: dict[int, str], write_guard,
+) -> dict | str | None:
+    """``name`` 若在原文显式介绍句里是某人的字/改名（「姓关，名羽，字长生」），返回归属结论：
+
+    - 归属者已有人物卡 → 登记 ``name`` 为其别名并返回 ``{"status": "exists", "name": 全名}``；
+    - 归属者还没有卡 → 返回全名字符串，调用方改为在全名下建卡（``name`` 随之登记为别名）；
+    - 不是任何介绍句里的字/改名 → None，走原有流程。
+    这是文本里作者写下的身份声明，不是按先验猜测（真实事故：「长生」「关羽」各建一卡，见 name_intro 模块）。
+    """
+    intros = [
+        (chapter_idx, intro)
+        for chapter_idx, content in sorted(chapters_by_idx.items())
+        for intro in find_name_introductions(str(content or ""))
+    ]
+    owner = intro_owner_of(name, [intro for _idx, intro in intros])
+    if owner is None or owner.full_name == name:
+        return None
+    if _card_owner_lookup(conn, project_id, owner.full_name) is None:
+        return owner.full_name
+    chapter_idx = next(idx for idx, intro in intros if intro == owner)
+    alias = CharacterAlias(
+        text=name, name_kind=owner.aliases_kind, evidence_chapter_index=chapter_idx,
+        evidence_quote=owner.quote[:240], is_exclusive=True,
+    ).model_dump(mode="json")
+    lock = await _bible_lock(project_id)
+    async with lock:
+        if write_guard:
+            write_guard()
+        apply_card_merge_alias(conn, project_id, owner.full_name, alias)
+    return {"status": "exists", "name": owner.full_name}
 
 
 async def resolve_card_build_or_merge(

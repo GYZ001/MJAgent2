@@ -22,7 +22,7 @@ from .bible_compat import (  # noqa: F401 -- 重新导出，见下方模块末�
     bible_with_pending_characters_for_text,
     bible_with_provisional_characters,
 )
-from .card_merge import resolve_card_build_or_merge
+from .card_merge import courtesy_name_redirect, resolve_card_build_or_merge
 from .card_verdict import unimportant_verdict_result
 from .constants import (
     APPEARANCE_MAX,
@@ -318,17 +318,14 @@ async def ensure_character_card(
     conn = get_conn()
     if (owner_result := _card_owner_lookup(conn, project_id, name)) is not None:
         return owner_result
-    lock = await _card_lock(project_id, name)
-    async with lock:
+    async with await _card_lock(project_id, name):
         if write_guard:
             write_guard()
         if (owner_result := _card_owner_lookup(conn, project_id, name)) is not None:  # 拿到锁后复查（并发兜底）
             return owner_result
         if not _has_column(conn, "projects", "bible_auto_changes_json"):
             conn.execute("ALTER TABLE projects ADD COLUMN bible_auto_changes_json TEXT")
-        pending_row = conn.execute(
-            "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
-        ).fetchone()
+        pending_row = conn.execute("SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,)).fetchone()
         try:
             change_items = json.loads(pending_row["bible_auto_changes_json"] or "[]") if pending_row else []
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -336,15 +333,20 @@ async def ensure_character_card(
         existing_change = next((
             item for item in change_items
             if item.get("kind") in {"new_character", "character_discovery", "new_bible_character"}
-            and item.get("character") == name
-            and item.get("status") in {"pending", "processing", "auto_applied_asset_failed"}
+            and item.get("character") == name and item.get("status") in {"pending", "processing", "auto_applied_asset_failed"}
         ), None)
         # 负缓存：判过"戏份不足"的名字先不重判——判据挂在这次检索到的原文片段
         # 内容上，不是挂在"过了多少集"（片段没变就仍是同一次判断的延续；片段变了
         # 就必须重判，见 _fragment_signature/discovery_fragments.py）。
-        fragments, ep_label, forward_chapters_by_idx = _forward_fragments(
-            conn, project_id, name, from_episode_no
-        )
+        fragments, ep_label, forward_chapters_by_idx = _forward_fragments(conn, project_id, name, from_episode_no)
+        # 字/改名先归位（「长生」→「关羽」，见 courtesy_name_redirect）：有卡则登记别名复用，无卡则改在全名下建卡。
+        redirect = await courtesy_name_redirect(conn, project_id, name, forward_chapters_by_idx, write_guard)
+        if isinstance(redirect, dict):
+            return redirect
+        if redirect:
+            labels = [*(identity_source_labels or []), name]
+            return await ensure_character_card(project_id, redirect, from_episode_no, generate_portrait=generate_portrait,
+                                               require_identity_card=require_identity_card, identity_source_labels=labels, write_guard=write_guard)
         fragment_signature = _fragment_signature(fragments)
         skip_raw = get_setting(_discovery_skip_key(project_id, name))
         if skip_raw and existing_change is None and not require_identity_card:
@@ -444,22 +446,13 @@ async def ensure_character_card(
         # 保留内部追溯记录，但不再把它当成用户待审任务。
         existing = existing_change
         if existing is None:
-            evidence_fragments = [
-                part.strip() for part in fragments.split("\n……\n") if part.strip()
-            ][:6]
+            evidence_fragments = [part.strip() for part in fragments.split("\n……\n") if part.strip()][:6]
             existing = {
-                "id": new_id("change"),
-                "kind": "new_character",
-                "status": "processing",
-                "character": name,
-                "ep_start": from_episode_no,
-                "reason": verdict["reason"],
-                "created_at": now(),
+                "id": new_id("change"), "kind": "new_character", "status": "processing", "character": name,
+                "ep_start": from_episode_no, "reason": verdict["reason"], "created_at": now(),
                 "payload": {
-                    "character_card": char_obj.model_dump(mode="json"),
-                    "source_episode": from_episode_no,
-                    "source_episode_label": ep_label,
-                    "evidence_fragments": evidence_fragments,
+                    "character_card": char_obj.model_dump(mode="json"), "source_episode": from_episode_no,
+                    "source_episode_label": ep_label, "evidence_fragments": evidence_fragments,
                 },
             }
             change_items.append(existing)
