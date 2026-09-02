@@ -99,7 +99,7 @@ def test_scene_bible_task_no_longer_auto_starts_scene_refs(monkeypatch) -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
-        "CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT, "
+        "CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT, bible_version INTEGER DEFAULT 0, "
         "scene_refs_status TEXT, scene_refs_error TEXT, pending_scene_regen INTEGER NOT NULL DEFAULT 0)"
     )
     conn.execute("CREATE TABLE chapters(project_id TEXT, idx INTEGER, content TEXT)")

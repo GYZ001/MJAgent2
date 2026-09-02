@@ -112,14 +112,15 @@ def test_scene_bible_preparation_persists_list_without_starting_images(monkeypat
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
-        "CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT, scene_refs_status TEXT, scene_refs_error TEXT)"
+        "CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT, bible_version INTEGER DEFAULT 0, "
+        "scene_refs_status TEXT, scene_refs_error TEXT)"
     )
     conn.execute("CREATE TABLE chapters(project_id TEXT, idx INTEGER, content TEXT)")
     bible_json = json.dumps({
         "characters": [],
         "world": {"visual_style_canonical": "国漫风格", "era": "", "genre": "仙侠"},
     }, ensure_ascii=False)
-    conn.execute("INSERT INTO projects VALUES('p', ?, 'running', NULL)", (bible_json,))
+    conn.execute("INSERT INTO projects VALUES('p', ?, 0, 'running', NULL)", (bible_json,))
     conn.execute("INSERT INTO chapters VALUES('p', 1, '青山脚下')")
     conn.commit()
     class Recorder:

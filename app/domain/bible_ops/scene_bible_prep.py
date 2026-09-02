@@ -176,6 +176,64 @@ def _decode_scene_target(value: str | list[str] | None) -> str | list[str] | Non
 # _start_scene_refs_generation，不经过票据）与画风切换（set_bible_visual_style
 # 同理直接调用），都不依赖这张票据。
 
+def _merge_planned_scenes(planned: list[dict], existing: list[dict]) -> list[dict]:
+    """规划清单优先；已在库里、但不在清单里的场景原样保留；同名场景合并别名。
+
+    场景圣经任务曾对 ``scenes`` 字段整体替换（"重读 bible 只覆盖 scenes 字段"）——
+    它防住了并发的人物谱更新，却没防住并发的**场景**追加：映射台的反应式场景发现
+    （app.scenes.ensure_scenes_for_labels → _append_scene_to_bible）在同一份 bible_json
+    上追加场景。真实事故（2026-09-02《神墓》proj_facfc3964f69，人物谱版本流水 v4→v5）：
+    01:07:13/01:07:20 发现刚追加「上古神魔陵园」「冬日积雪雪枫林」，01:07:21 这里
+    整体回写把两条覆盖掉，本集映射随即两轮都因「未解析到 scene_reference_id」失败。
+    库里已有而清单里没有的场景是别的流程核验后写进去的事实，这里没有资格丢弃它。
+    """
+    remaining = {
+        str(scene.get("name") or "").strip(): scene
+        for scene in existing
+        if isinstance(scene, dict) and str(scene.get("name") or "").strip()
+    }
+    merged: list[dict] = []
+    for scene in planned:
+        prior = remaining.pop(str(scene.get("name") or "").strip(), None)
+        if prior is not None:
+            aliases = [*(scene.get("aliases") or []), *(prior.get("aliases") or [])]
+            scene = {**scene, "aliases": list(dict.fromkeys(a for a in aliases if a))}
+        merged.append(scene)
+    merged.extend(remaining.values())
+    return merged
+
+
+_PLANNED_SCENES_CAS_ATTEMPTS = 5
+
+
+def _persist_planned_scenes(conn, project_id: str, planned: list[dict], *, fallback: Bible) -> None:
+    """把规划好的场景清单合并进 bible_json 回写；CAS 钉在 bible_version 上。
+
+    与 app.scenes._commit_scene_bible_mutation 用同一把「版本号」乐观锁：读到的
+    版本与写入时不一致就重读、重合并、重写，重试耗尽则失败关闭，绝不盲写。
+    ``fallback`` 只在 projects 行还没有 bible_json 时兜底成形状，不改变任何决策。
+    """
+    for _attempt in range(_PLANNED_SCENES_CAS_ATTEMPTS):
+        row = conn.execute(
+            "SELECT bible_json,bible_version FROM projects WHERE id=?", (project_id,),
+        ).fetchone()
+        data = json.loads(row["bible_json"]) if row and row["bible_json"] else fallback.model_dump()
+        data["scenes"] = _merge_planned_scenes(planned, data.get("scenes") or [])
+        Bible.model_validate(data)
+        expected = int((row["bible_version"] if row else 0) or 0)
+        cursor = conn.execute(
+            "UPDATE projects SET bible_json=?,bible_version=?,scene_refs_status='idle',"
+            "scene_refs_error=NULL WHERE id=? AND COALESCE(bible_version,0)=?",
+            (json.dumps(data, ensure_ascii=False), expected + 1, project_id, expected),
+        )
+        conn.commit()
+        if cursor.rowcount == 1:
+            return
+    raise ValueError(
+        f"场景清单落库时人物谱被并发修改，重试 {_PLANNED_SCENES_CAS_ATTEMPTS} 次仍未成功"
+    )
+
+
 async def _scene_bible_task(
     project_id: str,
     *,
@@ -213,16 +271,9 @@ async def _scene_bible_task(
             contract_key="scene_bible",
             agent_name="scene_bible",
         )
-        # 重读 bible（人物谱可能已被并发流程更新），只覆盖 scenes 字段后回写。
-        p2 = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
-        data = json.loads(p2["bible_json"]) if p2 and p2["bible_json"] else bible.model_dump()
-        data["scenes"] = [s.model_dump() for s in scenes]
-        conn.execute(
-            "UPDATE projects SET bible_json=?,scene_refs_status='idle',scene_refs_error=NULL "
-            "WHERE id=?",
-            (json.dumps(data, ensure_ascii=False), project_id),
+        _persist_planned_scenes(
+            conn, project_id, [s.model_dump() for s in scenes], fallback=bible,
         )
-        conn.commit()
         recorder.succeed("场景设定已准备，场景图等待范围确认", conn=None)
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
