@@ -1,11 +1,10 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { ApiError, type ReferenceImage, type Shot, type ShotVersion, type StoryboardPackSegment } from '../api'
+import { ApiError, type Shot, type ShotVersion, type StoryboardPackSegment } from '../api'
 import {
   bulkGenerateDisabledReason,
   bulkGenerateEstimate,
-  extractReferenceImagesByVersion,
   formatResolution,
   isSegmentShot,
   parseTechnicalValidation,
@@ -148,19 +147,7 @@ describe('分辨率展示', () => {
   })
 })
 
-describe('参考图按版本摊平', () => {
-  it('只摊平真正带参考图的版本', () => {
-    const refs: ReferenceImage[] = [{ id: 'r1', type: 'character', source: 'asset_library' }]
-    const s = packShot({
-      versions: [
-        version({ id: 'v1', image_inputs: { reference_images: refs } }),
-        version({ id: 'v2', image_inputs: { reference_images: [] } }),
-        version({ id: 'v3' }),
-      ],
-    })
-    expect(extractReferenceImagesByVersion(s)).toEqual({ v1: refs })
-  })
-
+describe('参考图展示标签', () => {
   it('人物/场景参考图带身份标签，其余退回来源', () => {
     expect(referenceImageLabel({ id: 'r1', type: 'character', source: 'asset_library', entity_name: '孟浩' }))
       .toBe('人物 · 孟浩')

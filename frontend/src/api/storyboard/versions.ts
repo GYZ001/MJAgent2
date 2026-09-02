@@ -68,6 +68,10 @@ export interface ShotVersion {
     }[];
     fallback_reason?: string | null;
     retry_reason?: string | null;
+    /** image_inputs 体积超上限被后端整块裁掉（_public_shot_versions 的
+     *  _MAX_PUBLIC_IMAGE_INPUT_CHARS）；此时上面各字段是缺省值而非事实，
+     *  尤其 reference_images 空数组只代表「没下发」，不代表「没参考图」。 */
+    omitted_for_size?: boolean;
   };
 }
 

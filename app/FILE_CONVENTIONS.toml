@@ -216,12 +216,15 @@ max_lines_tests = 500
 "frontend/src/pages/Studio.tsx" = 430
 # 2026-08-31「传入素材」展示重做：SegmentResourceRoster 的四态测试搬到
 # components/SegmentResourcePanel.test.ts，同 BoardPage.test.ts 注释，390 -> 345。
-"frontend/src/pages/WallPage.test.ts" = 304
+# 2026-09-01 参考图快照判据修正：摊平用例搬到 lib/wallReferences.test.ts，304 -> 291。
+"frontend/src/pages/WallPage.test.ts" = 291
 # 2026-08-31「传入素材」展示重做（用户拍板）：素材条/素材详情合并进
 # components/SegmentResourcePanel.tsx，「视频下方参考图带标签」拆到
 # components/GenerationReferenceGallery.tsx，referenceImageLabel 挪到
 # lib/bibleAssets.ts，964 -> 837，棘轮收紧。
-"frontend/src/pages/WallPage.tsx" = 788
+# 2026-09-01 参考图快照判据修正：摊平/指纹两个纯判据外移到 lib/wallReferences.ts，
+# 788 -> 786。
+"frontend/src/pages/WallPage.tsx" = 786
 "frontend/src/pages/monitor/CallsSection.tsx" = 397
 "frontend/src/pages/monitor/JobDrawer.tsx" = 317
 "frontend/src/pages/monitor/JobsSection.tsx" = 384

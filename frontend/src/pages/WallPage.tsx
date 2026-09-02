@@ -16,6 +16,7 @@ import QueryState from '../components/QueryState'
 import { compactShotStage } from '../shotStatus'
 import { refsBusyPollInterval, type ImageGenTaskLike } from '../lib/bibleAssets'
 import { compressSegmentIndexes } from '../lib/segmentIndexes'
+import { extractReferenceImagesByVersion, shotVersionSignature } from '../lib/wallReferences'
 import GenerationReferenceGallery from '../components/GenerationReferenceGallery'
 import SegmentResourcePanel from '../components/SegmentResourcePanel'
 import '../styles/WallPage.css'
@@ -125,17 +126,6 @@ export function parseTechnicalValidation(raw?: string | null): ParsedTechnicalVa
 
 export function formatResolution(width: number, height: number): string {
   return width > 0 && height > 0 ? `${width}×${height}` : '解析中…'
-}
-
-/** GET /shots/{id}/review 才带 image_inputs.reference_images（列表接口为控制体积不带）；
- *  按版本 id 摊平成 map，供生成面板只读展示"挂的是哪张参考图"。 */
-export function extractReferenceImagesByVersion(shot: Shot): Record<string, ReferenceImage[]> {
-  const map: Record<string, ReferenceImage[]> = {}
-  for (const version of shot.versions ?? []) {
-    const refs = version.image_inputs?.reference_images
-    if (refs?.length) map[version.id] = refs
-  }
-  return map
 }
 
 /** 触发生成按钮的可用性判据；eligible=null 表示生成资格尚未加载完成。 */
@@ -308,10 +298,15 @@ export default function WallPage() {
     }
   }, [])
 
+  // 轮询带出新的版本事实（新尝试、状态推进、供应商任务号落定）时必须重取详情：
+  // 参考图只在详情接口里，不跟着重取就会一直显示「点生成之前」的那份空快照。
+  const selectedVersionSignature = shotVersionSignature(
+    shots.find(item => item.id === selectedShotId),
+  )
   useEffect(() => {
     if (!selectedShotId) { setDetail({ status: 'idle' }); return }
     void loadDetail(selectedShotId)
-  }, [selectedShotId, loadDetail])
+  }, [selectedShotId, selectedVersionSignature, loadDetail])
 
   const refreshAll = useCallback(async () => {
     await refresh({ force: true })
@@ -690,6 +685,9 @@ function GenerationPanel({ shot, context, referenceImages, detailLoading, detail
   }
 
   const technical = parseTechnicalValidation(selected?.technical_validation_json)
+  // 快照里没有这条版本 = 参考图「还不知道」（轮询先于详情看到新尝试），不是
+  // 「一张都没带」；按加载中处理，等详情到位再判，绝不据此报「参考图缺失」。
+  const refsKnown = !selected || selected.id in referenceImages
   const refs = selected ? referenceImages[selected.id] ?? [] : []
   const resolution = selected ? resolutions[selected.id] : undefined
   const targetDurationS = segment?.duration_s ?? shot.duration_s
@@ -760,7 +758,7 @@ function GenerationPanel({ shot, context, referenceImages, detailLoading, detail
           {!detailError && (
             <GenerationReferenceGallery
               refs={refs}
-              loading={detailLoading}
+              loading={detailLoading || !refsKnown}
               hasAttempt={hasAttempt}
               hasDeclaredResources={Boolean(segment?.resources.characters?.length || segment?.resources.scenes?.length)}
             />
