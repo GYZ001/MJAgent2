@@ -39,6 +39,25 @@ def _buffer_path() -> Path:
     return DATA_DIR / "monitor_audit_pending.jsonl"
 
 
+def _error_log_buffer_path() -> Path:
+    from app.config import DATA_DIR
+
+    return DATA_DIR / "error_log_pending.jsonl"
+
+
+# error_logs 走同一套缓冲（2026-09-02 ERR-20260902-30223f：刘备定妆包重试的真实异常因
+# database is locked 没写进 error_logs，排障时只剩一行进程日志）。列顺序与 error_logs 表一致。
+_ERROR_LOG_INSERT = (
+    "INSERT OR IGNORE INTO error_logs(id, ts, category, category_label, code, is_technical, http_status,"
+    " action, context_json, message, traceback, exc_type, meta_json) VALUES(:id,:ts,:category,:category_label,"
+    ":code,:is_technical,:http_status,:action,:context_json,:message,:traceback,:exc_type,:meta_json)"
+)
+_MONITOR_AUDIT_INSERT = (
+    "INSERT OR IGNORE INTO monitor_audit(id,ts,action,object_type,object_id,outcome,detail_json)"
+    " VALUES(:id,:ts,:action,:object_type,:object_id,:outcome,:detail_json)"
+)
+
+
 def _lock(handle: Any) -> None:
     if fcntl is not None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -65,8 +84,17 @@ def append(
         "id": id, "ts": ts, "action": action, "object_type": object_type,
         "object_id": object_id, "outcome": outcome, "detail_json": detail_json,
     }
+    _append_row(_buffer_path, row)
+
+
+def append_error_log(row: dict[str, Any]) -> None:
+    """把一条写失败的 error_logs 行落进本地缓冲；键与 error_logs 表列名一致。不抛出。"""
+    _append_row(_error_log_buffer_path, row)
+
+
+def _append_row(path_factory: Any, row: dict[str, Any]) -> None:
     try:
-        path = _buffer_path()
+        path = path_factory()
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             _lock(handle)
@@ -80,18 +108,13 @@ def append(
         pass  # 连本地磁盘都写不进去：没有更兜底的地方了，吞掉。
 
 
-def _insert_rows(rows: list[dict[str, Any]]) -> None:
+def _insert_rows(rows: list[dict[str, Any]], insert_sql: str = _MONITOR_AUDIT_INSERT) -> None:
     from app.config import DB_PATH
 
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
     try:
         conn.execute("BEGIN IMMEDIATE")
-        conn.executemany(
-            "INSERT OR IGNORE INTO monitor_audit"
-            "(id,ts,action,object_type,object_id,outcome,detail_json)"
-            " VALUES(:id,:ts,:action,:object_type,:object_id,:outcome,:detail_json)",
-            rows,
-        )
+        conn.executemany(insert_sql, rows)
         conn.commit()
     except BaseException:
         if conn.in_transaction:
@@ -102,13 +125,16 @@ def _insert_rows(rows: list[dict[str, Any]]) -> None:
 
 
 def flush() -> int:
-    """把缓冲文件里攒下的行一次性补写进 ``monitor_audit``；返回补写行数。
+    """把两个缓冲文件里攒下的行一次性补写回库（monitor_audit 与 error_logs）；返回补写行数。
 
     只在 DB 事务确认提交后才截断文件——中途失败（例如这一刻写锁仍被别的事务
     占着）原样保留，下一轮循环重试；不丢也不重复（重放靠 id 主键
     ``INSERT OR IGNORE`` 天然幂等，见模块 docstring）。
     """
-    path = _buffer_path()
+    return _flush_file(_buffer_path(), _MONITOR_AUDIT_INSERT) + _flush_file(_error_log_buffer_path(), _ERROR_LOG_INSERT)
+
+
+def _flush_file(path: Path, insert_sql: str) -> int:
     if not path.exists():
         return 0
     try:
@@ -118,7 +144,7 @@ def flush() -> int:
                 rows = _parse_rows(handle.read())
                 if not rows:
                     return 0
-                _insert_rows(rows)
+                _insert_rows(rows, insert_sql)
                 handle.seek(0)
                 handle.truncate()
                 return len(rows)

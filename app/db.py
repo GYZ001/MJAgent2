@@ -3467,34 +3467,34 @@ def insert_error_log(error_id: str, *, category: str, category_label: str, code:
     就会把未提交的中间态一起提交进库——已经用这个模式毁过真实业务数据
     （详见 app/domain/storyboard_ops.py、bible_ops.py 的相关修复提交）。
 
-    取舍（SQLite 单写者语义）：如果调用方此刻仍持有未提交的写事务，这个独立
-    连接抢不到写锁，``BEGIN IMMEDIATE`` 会立刻失败（``timeout=0``，不阻塞调用
-    方等锁）——这种情况下这条错误日志会丢失。这是可接受的代价：错误日志丢失
-    远好于把半途的业务写入静默提交进库。「先回滚再记日志」仍然值得坚持（能
-    提高日志落库成功率），但改造后它不再是数据安全的承重墙。
-
-    写失败一律吞掉（调用方 errors.log_error 同样外层吞异常，记日志绝不能
-    掩盖/中断原始业务错误），但不能完全无痕，所以在进程日志留一行 WARNING。
+    取舍（SQLite 单写者语义）：如果调用方此刻仍持有未提交的写事务，这个独立连接抢不到
+    写锁，``BEGIN IMMEDIATE`` 会立刻失败（``timeout=0``，不阻塞调用方等锁）——远好于把
+    半途的业务写入静默提交进库。写失败一律吞掉（记日志绝不能掩盖/中断原始业务错误），
+    留一行 WARNING，并把这一行落进本地缓冲（``app.monitor_audit_buffer.append_error_log``）
+    由 ``app.recovery.monitor_audit_flush_loop`` 定期补写——写锁繁忙时不再丢记录。
     """
+    row = {
+        "id": error_id, "ts": now(), "category": category, "category_label": category_label, "code": code,
+        "is_technical": 1 if is_technical else 0, "http_status": http_status, "action": action,
+        "context_json": _dump_call_json(context), "message": (message or "")[:20_000] or None,
+        "traceback": (traceback_text or "")[:40_000] or None, "exc_type": exc_type,
+        "meta_json": json.dumps(meta or {}, ensure_ascii=False)[:1000],
+    }
+
     def operation(conn: sqlite3.Connection) -> None:
         conn.execute(
-            """INSERT OR REPLACE INTO error_logs(
-                id, ts, category, category_label, code, is_technical, http_status,
-                action, context_json, message, traceback, exc_type, meta_json
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (error_id, now(), category, category_label, code, 1 if is_technical else 0, http_status,
-             action, _dump_call_json(context), (message or "")[:20_000] or None,
-             (traceback_text or "")[:40_000] or None, exc_type,
-             json.dumps(meta or {}, ensure_ascii=False)[:1000]),
+            "INSERT OR REPLACE INTO error_logs(id, ts, category, category_label, code, is_technical, http_status,"
+            " action, context_json, message, traceback, exc_type, meta_json) VALUES(:id,:ts,:category,:category_label,"
+            ":code,:is_technical,:http_status,:action,:context_json,:message,:traceback,:exc_type,:meta_json)",
+            row,
         )
 
     try:
         _run_write_transaction_once(operation)
-    except BaseException as exc:  # noqa: BLE001 日志落库失败绝不能上抛/掩盖调用方的原始错误
-        _LOGGER.warning(
-            "insert_error_log failed for %s (code=%s action=%s): %r",
-            error_id, code, action, exc,
-        )
+    except BaseException as exc:  # noqa: BLE001 日志落库失败绝不能上抛/掩盖调用方的原始错误；落本地缓冲待补写
+        _LOGGER.warning("insert_error_log failed for %s (code=%s action=%s): %r", error_id, code, action, exc)
+        from app.monitor_audit_buffer import append_error_log as buffer_append_error_log
+        buffer_append_error_log(row)
 
 
 def insert_monitor_audit(
