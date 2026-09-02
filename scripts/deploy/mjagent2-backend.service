@@ -1,0 +1,29 @@
+# 计算服务器 B 上的后端：uvicorn 只绑回环，经反向 SSH 隧道被入口机 A 的 nginx 访问。
+# 安装：cp scripts/deploy/mjagent2-backend.service /etc/systemd/system/ && systemctl daemon-reload
+#       && systemctl enable --now mjagent2-backend
+[Unit]
+Description=MJAgent2 backend (uvicorn: API + frontend/dist + /media)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/MJAgent2
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=MJ_BACKEND_HOST=127.0.0.1
+# 不继承任何代理变量（与 scripts/dev.sh 一致）：后台服务默认直连 provider。
+ExecStartPre=/bin/mkdir -p /root/MJAgent2/logs
+ExecStart=/root/MJAgent2/.venv/bin/python /root/MJAgent2/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8230 --timeout-graceful-shutdown 30
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=45
+LimitNOFILE=65536
+StandardOutput=append:/root/MJAgent2/logs/backend.log
+StandardError=append:/root/MJAgent2/logs/backend.log
+
+[Install]
+WantedBy=multi-user.target

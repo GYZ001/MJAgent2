@@ -1,0 +1,14 @@
+# 入口机 A 上：每天凌晨拉 origin/main，有变更就构建并推到计算服务器 B 重启后端。
+[Unit]
+Description=MJAgent2 nightly deploy: pull origin/main on A, push to compute server B if changed
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/MJAgent2
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/root/MJAgent2/scripts/deploy/nightly_deploy_to_b.sh
+TimeoutStartSec=1800

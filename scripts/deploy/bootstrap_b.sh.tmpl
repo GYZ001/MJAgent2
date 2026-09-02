@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# MJAgent2 计算服务器（B）一次性引导——模板。真正下发的副本由入口机 A 上的
+# scripts/deploy/render_bootstrap.sh 渲染（填入隧道私钥、A 的 root 公钥、A 的主机指纹），
+# 私钥绝不入库。
+#
+# 只做三件事：装隧道私钥、授权入口机 A 的 root 经隧道运维本机、拉起反向隧道的 systemd 单元。
+# 其余（装依赖、同步代码与数据、后端服务）由 A 经运维隧道 `ssh mjb`（127.0.0.1:2222）完成。
+#
+# 拓扑：用户 → 域名 → A nginx → 127.0.0.1:18230 → (B 主动打到 A 的 SSH 反向隧道) → B 127.0.0.1:8230
+# B 不新增任何公网入站端口；只要求 B 能出站到 A:22。
+set -euo pipefail
+A_HOST="${A_HOST:-43.153.78.247}"
+KEY=/root/.ssh/mjagent2_tunnel_ed25519
+UNIT=/etc/systemd/system/mjagent2-tunnel.service
+[ "$(id -u)" = 0 ] || { echo "请用 root 运行" >&2; exit 1; }
+
+echo "== [1/4] 隧道私钥 =="
+install -d -m 700 /root/.ssh
+umask 077
+cat > "$KEY" <<'KEY_EOF'
+__TUNNEL_PRIVATE_KEY__
+KEY_EOF
+chmod 600 "$KEY"
+umask 022
+
+echo "== [2/4] 钉死 A 的主机指纹 + 授权 A 的 root 经隧道登录本机 =="
+touch /root/.ssh/known_hosts /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+grep -qF "__A_HOST_KEY_PUB__" /root/.ssh/known_hosts || echo "${A_HOST} __A_HOST_KEY_PUB__" >> /root/.ssh/known_hosts
+grep -qF "__A_ROOT_PUBKEY__" /root/.ssh/authorized_keys || echo "__A_ROOT_PUBKEY__" >> /root/.ssh/authorized_keys
+
+echo "== [3/4] autossh（尽力安装；装不上就用 ssh + systemd Restart=always，功能等价）=="
+if ! command -v autossh >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq autossh >/dev/null 2>&1 || \
+      { apt-get update -qq >/dev/null 2>&1 || true; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq autossh >/dev/null 2>&1 || true; }
+  elif command -v dnf >/dev/null 2>&1; then dnf install -y -q autossh >/dev/null 2>&1 || true
+  elif command -v yum >/dev/null 2>&1; then yum install -y -q autossh >/dev/null 2>&1 || true
+  fi
+fi
+if command -v autossh >/dev/null 2>&1; then BIN="$(command -v autossh) -M 0"; else BIN="$(command -v ssh)"; fi
+echo "隧道进程：$BIN"
+
+echo "== [4/4] systemd 单元 mjagent2-tunnel.service =="
+cat > "$UNIT" <<EOF_UNIT
+[Unit]
+Description=MJAgent2 reverse SSH tunnel to entry server A (app 18230, mgmt 2222)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# autossh 默认要求首连存活 30s 才算成功，否则直接退出；置 0 让它无条件重试。
+Environment=AUTOSSH_GATETIME=0
+ExecStart=${BIN} -N -T \\
+  -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \\
+  -o ExitOnForwardFailure=yes -o ConnectTimeout=20 \\
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/.ssh/known_hosts \\
+  -o IdentitiesOnly=yes -i ${KEY} \\
+  -R 127.0.0.1:18230:127.0.0.1:8230 \\
+  -R 127.0.0.1:2222:127.0.0.1:22 \\
+  mjtunnel@${A_HOST}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF_UNIT
+systemctl daemon-reload
+systemctl enable --now mjagent2-tunnel.service
+sleep 5
+systemctl --no-pager --lines=8 status mjagent2-tunnel.service || true
+
+echo
+echo "== 本机盘点（供 A 侧后续部署参考）=="
+( . /etc/os-release 2>/dev/null; echo "OS: ${PRETTY_NAME:-unknown}" )
+echo "CPU: $(nproc)  MEM: $(free -h | awk '/Mem/{print $2}')  DISK(/): $(df -h / | awk 'NR==2{print $4" free of "$2}')"
+echo "python3: $(python3 --version 2>&1)  docker: $(command -v docker || echo none)  nginx: $(command -v nginx || echo none)  ffmpeg: $(command -v ffmpeg || echo none)"
+echo "sshd: $(sshd -T 2>/dev/null | grep -E '^(permitrootlogin|pubkeyauthentication) ' | tr '\n' ' ')"
+echo "LISTEN:"; ss -tlnp 2>/dev/null | awk 'NR>1{print "  "$4}' | sort -u
+echo "outbound: A:22=$(timeout 5 bash -c "</dev/tcp/${A_HOST}/22" 2>/dev/null && echo ok || echo FAIL)  hiagent=$(curl -s -o /dev/null -m 8 -w '%{http_code}' https://hia.volcenginepaas.com/ || echo FAIL)"
+echo "完成。若上面 status 显示 active (running)，A 侧即可 ssh mjb 继续部署。"

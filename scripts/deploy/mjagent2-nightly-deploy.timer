@@ -1,0 +1,11 @@
+[Unit]
+Description=Run MJAgent2 nightly deploy to B at 03:30 Asia/Shanghai
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 Asia/Shanghai
+AccuracySec=1min
+Persistent=true
+Unit=mjagent2-nightly-deploy.service
+
+[Install]
+WantedBy=timers.target
