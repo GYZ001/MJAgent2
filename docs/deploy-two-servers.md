@@ -161,3 +161,27 @@ nginx `mjagent2.diag.log` 的 `up_resp`（后端耗时，含隧道）切换前�
 起 B → nginx 上游切回 18230 → 域名验证全绿 → A 以 127.0.0.1 重启。
 这次经历也说明：**任何一次在 B 上的重启都是对启动恢复逻辑的真实测试**，凌晨流水线的
 40s 健康检查 + 回滚是必要的。
+
+## 备份：B 本地热备 + A 异地副本
+
+- B：`mjagent2-backup.timer` 每天 03:17（B 本地时间）用 SQLite 在线备份 API 热备到
+  `/var/backups/mjagent2/db/manju-<ts>.db.gz`（`scripts/backup_manju_db.py`：备份→
+  integrity_check→gzip→原子换 `manju-latest.db.gz` 软链→按保留策略清理），日志
+  `logs/backup_manju_db.log`。首次 2026-09-03 03:17 成功（928MB → 540MB，41s）。
+- A：`mjagent2-backup-pull.timer` 每天 04:00 Asia/Shanghai 经隧道把 B 的备份镜像到
+  `/var/backups/mjagent2/db-from-b/`（`scripts/deploy/pull_b_backups.sh`），只拉真实文件，
+  最新一份 `gzip -t` 校验，本机保留最近 7 天 + 最新一份；日志 `logs/backup-pull.log`。
+  B 整机丢失时从 A 这份恢复：`gunzip -c manju-<ts>.db.gz > data/manju.db`（已实测解压后
+  `integrity_check ok`）。
+- 恢复到 B 的顺序：停 `mjagent2-backend` → 删 `data/manju.db-wal/-shm` → 放入解压后的
+  `manju.db` → 起服务（应用启动时自动切回 WAL）。
+
+## 开发流程约定（迁移后）
+
+- 改代码在 A：测试、ruff、`verify.py`、前端构建（node）都只在 A 上有；B 没有 node≥18。
+- 让用户看到：`scripts/deploy_to_b.sh`；不动手也会在 03:30 由流水线按 origin/main 发布。
+- **直接在 B 上热修必须当天在 A 提交推远端**，否则 03:30 的 `git reset --hard` 会抹掉。
+- **回归/驱动脚本（`scripts/yyft_serial10.py` 等）只在 A 上跑**：它们硬编码
+  `127.0.0.1:8230`，在 A 是调试实例，在 B 就是生产库。
+- 排查线上问题到 B：`ssh mjb`，`logs/backend.log`、`journalctl -u mjagent2-backend`、
+  `error_logs` 表（只读打开：`file:...?mode=ro`）。

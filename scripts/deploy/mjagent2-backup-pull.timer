@@ -1,0 +1,11 @@
+[Unit]
+Description=Pull B's DB backup to A daily at 04:00 Asia/Shanghai (B backs up at 03:17)
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 Asia/Shanghai
+AccuracySec=5min
+Persistent=true
+Unit=mjagent2-backup-pull.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,15 @@
+# 入口机 A 上：每天从计算服务器 B 拉一份数据库热备到本机（异地副本）。
+[Unit]
+Description=MJAgent2 pull daily DB backup from compute server B to A
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/root/MJAgent2/scripts/deploy/pull_b_backups.sh
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=1800
