@@ -216,13 +216,26 @@ def _segment_overflow_breakdown(quotes: list[DialogueQuote]) -> str:
 
 
 def _segment_move_targets(
-    quotes: list[DialogueQuote], segment_no: int, segment_source_indexes: dict[int, list[int]],
+    quotes: list[DialogueQuote],
+    segment_no: int,
+    segment_source_indexes: dict[int, list[int]],
+    segment_totals: dict[int, int],
+    *,
+    max_chars_per_segment: int,
 ) -> list[int]:
-    """同样覆盖这些台词原文段号、且不是本段自己的其它 segment_no（反查用）。"""
+    """同样覆盖这些台词原文段号、且**确有剩余容量**的其它 segment_no。
+
+    ERR-20260901-b1c349（真实 EP1 二次回归，2.1.2）：上一版只反查"覆盖同一
+    原文段号"，不核对目标段自己是否也满/超，制造了"循环指路"——两个相邻段
+    互相点名对方当挪动目标，而对方同样超容，模型三次重试都在两个死路之间
+    打转。这里额外要求 segment_totals[other_no] < max_chars_per_segment。
+    """
     source_indexes = {q.source_segment_index for q in quotes}
     return sorted(
         other_no for other_no, allowed in segment_source_indexes.items()
-        if other_no != segment_no and source_indexes & set(allowed)
+        if other_no != segment_no
+        and source_indexes & set(allowed)
+        and segment_totals.get(other_no, 0) < max_chars_per_segment
     )
 
 
@@ -235,33 +248,38 @@ def _segment_capacity_errors(
 ) -> list[str]:
     """同一段分到的必保台词合计字数不能超过 15 秒口播容量。
 
-    ERR-20260901-bcfa58 真实回归：闸门判得对，但报错不可操作，三次语义重试
-    耗尽仍未修出。文案必须给足三样东西：逐条字数明细（不用模型自己数）、
-    反查可挪去的其它 segment_no、明确声明拆段/重排/改 kept_lines 不受
-    chat_structured 通用修复包装"保持其余已验证字段不变"那句话的限制——
-    那句话原本劝的是别的字段，却把真正需要的结构性修复一并劝退了。
+    2.1.2 起只在归一化后的断言路径使用（见 storyboard_capacity_normalize.
+    normalize_and_assert_capacity）——容量维度不再打回模型语义重试，但文案
+    仍必须正确：断言真的触发时说明归一化算法本身有 bug，需要给排查线索。
+    逐条字数明细（不用人自己数）、只点名确有剩余容量的目标段、给出按
+    ceil(total/54) 算出的确切拆分段数、明确声明这类结构性修复不受
+    chat_structured 通用修复包装"保持其余已验证字段不变"的限制。
     """
     by_segment: dict[int, list[DialogueQuote]] = {}
     for item in kept:
         quote = quotes_by_id.get(item.quote_id)
         if quote is not None:
             by_segment.setdefault(item.segment_no, []).append(quote)
+    segment_totals = {no: sum(q.content_chars for q in qs) for no, qs in by_segment.items()}
     errors = []
     for segment_no, quotes in sorted(by_segment.items()):
-        total = sum(q.content_chars for q in quotes)
+        total = segment_totals[segment_no]
         if total <= max_chars_per_segment:
             continue
-        targets = _segment_move_targets(quotes, segment_no, segment_source_indexes)
+        targets = _segment_move_targets(
+            quotes, segment_no, segment_source_indexes, segment_totals,
+            max_chars_per_segment=max_chars_per_segment,
+        )
+        needed = -(-total // max_chars_per_segment)  # ceil(total / max_chars_per_segment)
         move_hint = (
-            f"可将其中若干条挪到第 {targets} 段——这些段的 source_segment_indexes 同样覆盖"
-            "这些台词的原文段号；" if targets else ""
+            f"可将其中若干条挪到第 {targets} 段——这些段目前还有剩余容量；" if targets else ""
         )
         errors.append(
             f"第 {segment_no} 段分到的必保台词 {_segment_overflow_breakdown(quotes)}，超过 15 秒"
-            f"口播容量 {max_chars_per_segment} 字。{move_hint}也可以把本段拆成两段，两段引用"
-            "同一原文段号本就合法（多个段共享一个原文段号是允许的）。此类修复允许并通常需要"
-            "新增段落、重排全部 segments[].segment_no，并同步更新 kept_lines 里对应的 segment_no"
-            "引用——这些改动属于修复本身，不受「保持其余已验证字段不变」的限制"
+            f"口播容量 {max_chars_per_segment} 字。{move_hint}也可以把本段拆成 {needed} 段，多段"
+            "引用同一原文段号本就合法（多个段共享一个原文段号是允许的）。此类修复允许并通常需要"
+            "新增段落、重排全部 segments[].segment_no，并同步更新 kept_lines 里对应的 "
+            "segment_no 引用——这些改动属于修复本身，不受「保持其余已验证字段不变」的限制"
         )
     return errors
 
@@ -273,14 +291,25 @@ def dialogue_ledger_errors(
     dropped_lines: list[_AiDroppedLine],
     segment_source_indexes: dict[int, list[int]],
     max_chars_per_segment: int,
+    include_capacity: bool = True,
 ) -> list[str]:
-    """阶段一对白台账的全部 blocking 校验，供 semantic retry 使用。"""
+    """阶段一对白台账的 blocking 校验。
+
+    2.1.2（ERR-20260901-bcfa58/b1c349 两轮真实回归）：容量检查（一段 kept
+    台词合计是否超容）不再是模型职责——"怎么重新分配/拆段"是算术+结构重排，
+    模型两轮实测都做不好（上一版连 55 对 54 差 1 字都没修出，这一版三次重试
+    全部撞在"循环指路"里），改由 normalize_beat_sheet_capacity 确定性归一化
+    兜底。include_capacity=False（阶段一 in-loop 用）只跑 partition/binding
+    ——这两条仍是语义判断，理应由模型在 semantic retry 里修；归一化后的
+    fail-closed 断言用默认 True 复核归一化本身有没有 bug。
+    """
     quotes_by_id = {q.quote_id: q for q in quotes}
     errors = _quote_id_partition_errors(quotes, kept_lines, dropped_lines)
     errors.extend(_kept_segment_binding_errors(kept_lines, quotes_by_id, segment_source_indexes))
-    errors.extend(_segment_capacity_errors(
-        kept_lines, quotes_by_id, segment_source_indexes, max_chars_per_segment=max_chars_per_segment,
-    ))
+    if include_capacity:
+        errors.extend(_segment_capacity_errors(
+            kept_lines, quotes_by_id, segment_source_indexes, max_chars_per_segment=max_chars_per_segment,
+        ))
     return errors
 
 
@@ -311,12 +340,15 @@ def dialogue_ledger_summary(
     quotes: list[DialogueQuote],
     kept_lines: list[_AiKeptLine],
     dropped_lines: list[_AiDroppedLine],
+    capacity_normalization: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """episode 级完整台账：kept + dropped + 弃置率统计。
+    """episode 级完整台账：kept + dropped + 弃置率统计 + 容量归一化遥测。
 
     落成 ``storyboard_pack_dialogue_ledger`` 类型的 EvidenceArtifact（见
     ``persist_storyboard_pack``），保证「原文有多少台词、丢了哪句、丢了多少
-    字」事后可查——本次改造要解决的正是这一类此前完全没有留痕的静默丢失。
+    字、哪段因为容量被机械拆过」事后可查——2.1.2 起 capacity_normalization
+    是 ``storyboard_capacity_normalize.normalize_beat_sheet_capacity`` 的
+    返回值直接落盘，不另起一套统计。
     """
     quotes_by_id = {q.quote_id: q for q in quotes}
     total_chars = sum(q.content_chars for q in quotes)
@@ -337,14 +369,36 @@ def dialogue_ledger_summary(
         ],
         "dropped_count": len(dropped_lines),
         "dropped_char_ratio": round(dropped_chars / total_chars, 4) if total_chars else 0.0,
+        "capacity_normalization": capacity_normalization or [],
+    }
+
+
+def dialogue_density_by_source_segment(
+    quotes: list[DialogueQuote], *, max_chars_per_segment: int,
+) -> dict[int, dict[str, int]]:
+    """按原文段号统计台词总字数与至少需要的段数（ceil(chars/54)）。
+
+    2.1.2（ERR-20260901-b1c349）：给模型一份数据化的分段依据，让它第一次
+    分段就切够，而不是全靠事后的容量归一化兜底——归一化管"切错了怎么机械
+    修正"，这个函数管"一开始怎么少犯错"。只从 dialogue_targets 确定性推导，
+    没有台词的原文段号不出现在返回值里。
+    """
+    totals: dict[int, int] = {}
+    for quote in quotes:
+        totals[quote.source_segment_index] = totals.get(quote.source_segment_index, 0) + quote.content_chars
+    return {
+        index: {"quote_chars": chars, "min_segments": -(-chars // max_chars_per_segment)}
+        for index, chars in totals.items()
     }
 
 
 def beat_sheet_dialogue_ledger_rules() -> list[str]:
     """阶段一 rules[] 里对白台账的正面陈述，供 storyboard_pack._beat_sheet_rules 拼接。
 
-    后两条是 ERR-20260901-bcfa58 真实回归补的：模型三次重试都没想到"同一原文
-    段号可以给多个段引用"和"拆段重排是预期动作"，因为规则从没正面说过。
+    第 3、4 条是 ERR-20260901-bcfa58 真实回归补的：模型三次重试都没想到
+    "同一原文段号可以给多个段引用"和"拆段重排是预期动作"，因为规则从没正面
+    说过。第 5 条是 ERR-20260901-b1c349 二次回归补的：给模型数据化的分段
+    依据，第一次就切够，减少事后再靠归一化机械修正的次数。
     """
     return [
         "dialogue_targets 列出了本章全部原文引号台词：每一条 quote_id 都必须在"
@@ -365,6 +419,10 @@ def beat_sheet_dialogue_ledger_rules() -> list[str]:
         "被预先按标点拆成的多条，quote_id 连续编号、内容是同一句话的不同部分；"
         "这些条目如果保留，应尽量分到相邻或同一段落，保持原有先后顺序，不要打乱"
         "语序或分散安排到不相关的段落",
+        "dialogue_density_by_source_segment 给出了每个原文段号至少需要的段数"
+        "（min_segments=该段号台词总字数 ÷ 15 秒容量、向上取整）：全集分段数不得"
+        "低于这些 min_segments 的量级；对白密集的原文段号，直接按它的 "
+        "min_segments 切成对应数量的段，不要先按叙事单元切一遍再发现装不下",
     ]
 
 

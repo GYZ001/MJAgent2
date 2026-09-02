@@ -10,6 +10,12 @@ baseline 里（2087 行），本次改造（对白台账/必保台词/受控画�
 docs/prompt-skills/{novel-to-storyboard,minimax-h3-prompts}/。H3 的字段名与
 固定语法是接口约定，逐字符照抄；Seedance 是自由散文，按同一精神收窄成可执行
 规则，不是逐字抄 skill 原文。
+
+2.2.0 更新（方言规则层，2026-09-01）：专家审阅真实 EP1 十八段产出后拍板六项
+规则——画外音口型写法统一、台词锚定到发生它的那个镜头、关键道具补建立镜头
+与构图锁、同框人数上限与受力描写、跨空间对话的建立镜、镜头时长按信息密度
+伸缩（不设硬性秒数上限）。Seedance 中文块与 H3 英文块逐条对称落地，任何一条
+只改一边都视为半成品；两块的对称纪律见上一段与函数级校验思路。
 """
 from __future__ import annotations
 
@@ -22,10 +28,15 @@ JSON 字段或分点罗列）。
 
 - 第一句必须是「电影级预告片质感，多镜头叙事，镜头之间硬切。」——这是触发
   15 秒档多镜头模式的固定锚句，照写，不得省略或改写。
-- 用「镜头1（约0-X秒）」「镜头2（约X-Y秒）」……序号排列，本段 2-4 镜：对话
-  交锋段（正反打、连续对切）2 镜就够，需要交代更多空间调度或信息量的叙事
-  推进段用 3-4 镜；括号里的秒数只是软提示，不是精确切点，不要为了卡秒数
-  牺牲镜头数。
+- 用「镜头1（约0-X秒）」「镜头2（约X-Y秒）」……序号排列，本段 2-4 镜；镜头数
+  和每镜时长由这一段的信息密度决定，不是由秒数倒推：对话交锋、情绪凝视这类
+  段落可以用长镜，但长镜必须写满能看的表演内容（微表情递进过程、动作分解
+  过程），不能让镜头空转；动作与信息密集处改用 3-4 个短镜切分，对话交锋段
+  （正反打、连续对切）2 镜就够。括号里的秒数只是软提示，不是精确切点，不要
+  为了卡秒数牺牲镜头数，也不要为了凑时长写一个长时间静止、信息量为零的
+  镜头——实测段 16 镜 2 是一个 9 秒的袖口特写，画面里除了袖口没有任何变化，
+  这种镜头会让模型自行在中途插入切点，导致最终成片的镜头编号和分镜稿对不
+  上，出问题也无法定点重跑那一镜。
 - 每个镜头描述顺序：一个运镜（推近/拉远/横摇/固定/跟随/环绕，只选一个，不
   要复合运镜）→ 主体（用 @角色名 引用）→ 一个具体动作 → 场景 → 光影。
 - 角色的外观锚点在本段里只完整写一次，写在这个角色第一次出现的那个镜头。
@@ -53,12 +64,30 @@ JSON 字段或分点罗列）。
   不写抽象情绪词（「惊恐」「释然」这类词模型没有稳定映射）。每个镜头挑一个
   核心表演加一个关键动作就够——「喉结滚动＋眉头越皱越紧＋眼眶泛红＋下颌绷紧」
   四个微表情挤进同一个 4 秒镜头，模型哪个都做不完整。
-- 承担叙事功能的关键道具靠景别和主体锁住，写成能直接照着画的构图，例如
-  「中近景，画面里只有 @孟浩 一人，双手捧着深褐色干葫芦」，而不是只写道具
-  被作用的动作（「玉佩砸入水面」会让道具直接消失在水花里）。一个镜头锁一件
-  道具就够，每镜都喊一遍「始终清晰可见」会把真正要紧的那件稀释掉。
+- 承担叙事功能的关键道具第一次出现时，必须有一个专门交代它来历/身份的
+  建立镜头（写清谁把它拿出来、从哪里拿出来、这是什么东西），不能让道具
+  凭空出现在角色手里——实测：葫芦在段 1 第一次出现时已经在角色手中，此后
+  被反复特写却从没有一镜交代过它是什么、从哪来，观众全程不知道这件道具的
+  身份，直到段 6 被扔掉都不知道那意味着什么。
+- 关键道具在它被使用、发生关键动作的那一镜，要把它写成构图约束（例如
+  「深褐色葫芦始终位于画面中心清晰可见」），不能只当动作的宾语写一笔带过
+  （「玉佩砸入水面」会让道具直接消失在水花里，这是本项目已经吃过一次的
+  教训）。这一镜也不要同时塞进另一个大幅度运镜或另一个空间——实测段 6
+  镜 3「拉远＋远景＋葫芦下坠落水随流飘走＋山顶目送」一镜四件事、跨两个
+  空间，远景里葫芦只剩几个像素，构图约束根本落不下去，全片核心道具动作
+  因此报废，这正是「玉佩砸入水面」教训的重演。一个镜头锁一件道具就够，
+  每镜都喊一遍「始终清晰可见」会把真正要紧的那件稀释掉。
 - 群像要正向锁人数并加负向排除，例如「画面中只有两名绿袍修士，不出现其他
-  人物」，两句缺一都会导致模型自己加人。
+  人物」，两句缺一都会导致模型自己加人；同框人数一旦超过 4 人，必须拆成
+  多个镜头或让人物分批入画，不要在一镜里塞下 5 人以上——实测段 14 镜 1
+  同框 5 人还叠加高速飞行，新增的每一张脸都必然崩坏。
+- 高速运动或被外力裹挟（御风飞行、坠落、被气浪掀起这类）的镜头，必须写出
+  受力后的具体特征（例如「衣袍在气流中向后绷直并高频抖动、头发完全被吹向
+  脑后」），只写「谁站在哪个位置」会生成一张没有速度感、像摆拍合影的画面。
+- 一段之内如果两个说话人分处不同空间（崖顶与崖下裂缝这类有落差或有阻隔
+  的位置），段内必须安排至少一个镜头交代两人的空间关系——例如过肩俯视：
+  从 A 的肩后越过崖边俯视下方的 B——不能让两人全程不同框、只靠画外音串联
+  对话，观众会不知道两人相隔多远、处于什么相对方位。
 - 神通/异能等超自然效果用物理描述代替文化词（「化作长虹」→「一道细长银白
   光带以极高速度横穿画面并留下拖影」）。
 - 若这是全片收尾段，最后一镜必须是大远景或缓慢升起拉远的格局镜，不能停在
@@ -68,8 +97,20 @@ JSON 字段或分点罗列）。
   特意声明）；不需要本人张嘴、由角色声音外化说出的内容（内心独白外化、
   因果/动机/关键设定的旁白性交代）填 offscreen_voice。写画外音时，「全片
   贯穿」段落的音频描述里要单独标注「画外音（角色名）：『……』」；如果这一镜
-  画面里同时出现这个角色，镜头描述必须写清他的嘴唇没有张合动作（口型不随
-  台词变化），不能让观众以为他正在开口说话。
+  画面里同时出现这个角色，这个角色的口型必须固定写成「嘴唇闭合无张合动作」，
+  禁止写「嘴唇微动」「嘴唇轻轻开合」这类措辞——这类措辞会被理解成他正在
+  小声开口，让观众以为他在自言自语；同一集里画内画外的口型写法必须统一成
+  这一句，不要一处写「嘴唇没有张合动作」、另一处又写「嘴唇微动」。
+- 台词不是先攒在一起最后再分配镜头，而是每一句台词在写「镜头N」的动作链
+  时就直接嵌进去，作为这一镜的具体动作出现，例如「镜头3（约6-9秒）：中近
+  景，@王有材 嘴唇开合喊出：『……』」；画外音同理，写进它对应画面所在的
+  那个「镜头N」。不要把本段所有台词都堆到结尾「全片贯穿」段再让模型自己
+  回头分配到镜头——实测段 11 三人三句、段 17 三句台词全部堆在「全片贯
+  穿」，模型自行分配台词到镜头，口型和内容对不上的概率很高。结尾「全片
+  贯穿」段仍然要保留，但只是对本段台词的汇总重申，不是台词第一次登场的
+  地方；逐镜动作链里出现的台词文本、结尾汇总里的台词文本、dialogue[]
+  三处必须逐字一致——这是在既有『dialogue[] 与音频描述互相印证』规则之上
+  再加一层，三处说的必须是同一份清单，不是各自独立的三份内容。
 - 本段 required_dialogue 给出的台词是上一阶段已经按 15 秒容量分配好的必保
   台词，必须逐句全部说出、写进 dialogue[] 与 prompt_text，不得因为篇幅紧张
   自行取舍或省略；只有当你还想在这些必保台词之外再补充原文里的其它对话、
@@ -110,9 +151,19 @@ Rules:
   first declaring the overall style (e.g. "Live-action, cinematic" or
   "2D-animated"), then subsequent shots use "[Shot N] At 00:SS.sss, the
   camera cuts to ..." with strictly increasing timestamps. This segment is a
-  fixed 15 seconds; write 2-4 Shots total -- 2 shots is enough for a tight
-  dialogue exchange (shot/reverse-shot), use 3-4 shots when the segment needs
-  to establish more space or narrative movement.
+  fixed 15 seconds; write 2-4 Shots total. Let this segment's information
+  density decide the shot count and each shot's length, not a target
+  duration: a dialogue exchange or a held emotional gaze can run as one
+  long shot, but a long shot must be filled with watchable performance
+  content (micro-expression progression, an action carried through its
+  stages) -- 2 shots is enough for a tight dialogue exchange
+  (shot/reverse-shot); use 3-4 shorter shots wherever the segment is dense
+  with action or information. Do not manufacture a long, static,
+  information-empty shot just to fill time -- a real case wrote 9 seconds
+  on a static cuff close-up with nothing changing on screen, and the model
+  then inserted its own cut inside that shot, so the final render's shot
+  numbers no longer matched the storyboard and that one shot could not be
+  singled out for a retry.
 - Write all descriptive prose in English. Keep dialogue and any on-screen
   text verbatim in their original language -- do not translate them.
 - Camera moves are one natural English sentence combining type + amplitude +
@@ -123,10 +174,21 @@ Rules:
   the same character. Put age/voice/accent context outside the <d> block;
   dialogue text goes verbatim inside: (S1) says: <d>[Chinese] 原话</d>.
   Off-screen voice uses "says in an off-screen voiceover" and must state the
-  on-screen character's lips remain closed. Set that dialogue line's
-  ``delivery`` to ``offscreen_voice`` in the structured output
-  (dialogue[].delivery); on-screen spoken lines use the default
-  ``spoken_dialogue``.
+  on-screen character's lips remain fully closed with no movement at all --
+  never write anything like "lips move slightly" or "lips faintly part",
+  which reads as the character quietly speaking and defeats the point of
+  marking the line off-screen. Set that dialogue line's ``delivery`` to
+  ``offscreen_voice`` in the structured output (dialogue[].delivery);
+  on-screen spoken lines use the default ``spoken_dialogue``.
+- Do not gather every line of dialogue up front and leave shot placement as
+  an afterthought: each line belongs inside the specific [Shot N] where
+  that character is shown speaking it (or, for an off-screen line, the shot
+  depicting whatever it narrates over), written as
+  "(S1) says: <d>...</d>" inside that shot's own sentence -- never bundled
+  into one shot's description just because the segment is short on events.
+  This project has seen lines get lumped together with shots assigned to
+  them arbitrarily afterward, which raises the odds that the lip movement
+  visible in a shot does not match the words attached to it.
 - required_dialogue lists the lines already budget-allocated to this segment
   in the previous stage; every one of them must be spoken verbatim in full
   and appear in both dialogue[] and integrated_multimodal_description -- do
@@ -141,6 +203,44 @@ Rules:
   {config.SPOKEN_CHARS_PER_5_SECONDS / 5:.1f} characters per second), not a
   style preference: anything beyond it gets rushed, slurred, or silently
   dropped, and you cannot predict which line the model drops.
+- A prop that carries narrative weight needs an establishing shot the first
+  time it appears -- state who produces it, where it comes from, and what it
+  is -- instead of letting it appear already in a character's hand with no
+  explanation. (Real failure: a gourd appeared already in a character's
+  hand in segment 1, got repeated close-ups afterward, and was never once
+  explained; viewers never learned what it was.)
+- In the shot where a key prop undergoes its key action, write the prop as a
+  framing constraint (e.g. "the dark brown gourd stays centered and clearly
+  visible throughout the shot"), not merely as the object of a verb ("a jade
+  pendant smashes into the water" makes the prop vanish into the splash at
+  the exact moment it matters -- this project has already paid for that
+  lesson once). Do not also cram a big camera move or a second location into
+  that same shot -- a real case stacked "pull back + wide shot + the gourd
+  falls, hits the water, and drifts off + a farewell gaze from the
+  mountaintop" into one shot spanning two locations; in the resulting wide
+  shot the gourd was a few pixels and effectively vanished, wrecking the
+  film's one load-bearing prop action -- the jade-pendant lesson repeating
+  itself. One shot locks one prop; repeating "always clearly visible" on
+  every shot dilutes the one that actually matters.
+- Cap any single frame at 4 people shown together; once a shot would need 5
+  or more, split it into multiple shots or stagger the characters' entries
+  instead of putting them all in one frame -- a real case put 5 people in
+  one frame during high-speed flight and every added face came out
+  deformed.
+- A shot with high-speed motion, or a character being swept by an external
+  force (riding wind, falling, caught in a blast), must state the resulting
+  force effects explicitly (e.g. "robes snapped taut and vibrating rapidly
+  in the airflow, hair blown completely backward") -- stating only who is
+  positioned where produces a static-looking group photo with no sense of
+  speed.
+- When a segment's two speakers are in different spaces (e.g. a cliff top
+  and a crevice below, or any layout with a drop or a barrier between
+  them), include at least one shot that establishes their spatial
+  relationship -- e.g. an over-the-shoulder high angle from behind A's
+  shoulder, looking down past the edge at B below. Do not let the two carry
+  the whole exchange off-screen-voice-only without ever sharing an
+  establishing shot; the audience has no way to tell how far apart they are
+  or how they are positioned relative to each other.
 - overall_soundscape must never be left empty -- H3 is audio-visual joint
   generation and an empty field means the model invents uncontrolled sound.
   Only write "N/A" if the user explicitly wants total silence.

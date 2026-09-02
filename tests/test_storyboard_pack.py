@@ -19,16 +19,27 @@ from app import config, db
 from app.continuity import dialogue_framing_errors
 from app.domain.video_ops import _storyboard_structural_errors
 from app.production.screenplay_authority import project_prep_pack_to_screenplay
+from app.production.storyboard_capacity_normalize import (
+    StoryboardCapacityNormalizationError,
+    normalize_and_assert_capacity,
+    normalize_beat_sheet_capacity,
+)
 from app.production.storyboard_dialogue_ledger import (
     DialogueQuote,
     _AiDroppedLine,
     _AiKeptLine,
     beat_sheet_dialogue_ledger_rules,
+    dialogue_density_by_source_segment,
     dialogue_ledger_errors,
     dialogue_ledger_summary,
     extract_dialogue_targets,
     required_dialogue_for_segments,
     required_dialogue_missing_errors,
+)
+from app.production.storyboard_narrative_arc import (
+    beat_sheet_narrative_arc_rules,
+    segment_narrative_arc_payload_fields,
+    segment_narrative_arc_rules,
 )
 from app.production.storyboard_pack import (
     CAMERA_DIGEST_WINDOW,
@@ -49,6 +60,7 @@ from app.production.storyboard_pack import (
     _AiSegmentPlan,
     _AiSegmentResources,
     _AiStoryboardSegmentDraft,
+    _beat_sheet_rules,
     _camera_digest_window_payload,
     _dialect_for_target_video_model,
     _enrich_asset_manifest_canonical_visuals,
@@ -306,6 +318,33 @@ def test_validate_beat_sheet_draft_rejects_unknown_beat_id_reference():
 
 
 # ---------------------------------------------------------------------------
+# 2.2.0 色温弧线：palette 是开放词汇字段，不设枚举（CLAUDE.md 禁止黑白名单）
+# ---------------------------------------------------------------------------
+
+def test_ai_segment_plan_defaults_palette_to_empty_string():
+    """默认空串兼容模型截断导致的漏填，不强行兜底一个假色温。"""
+    plan = _AiSegmentPlan(segment_no=1, synopsis="x", source_segment_indexes=[1])
+    assert plan.palette == ""
+
+
+def test_ai_segment_plan_accepts_any_palette_string_no_enum():
+    """开放词汇：随便一句色温描述都必须被接受，不做枚举校验。"""
+    plan = _AiSegmentPlan(
+        segment_no=1, synopsis="x", source_segment_indexes=[1], palette="冷调青灰转夕阳暖金",
+    )
+    assert plan.palette == "冷调青灰转夕阳暖金"
+
+
+def test_storyboard_pack_segment_defaults_palette_to_empty_string():
+    """落库字段同样默认空串，兼容 2.2.0 之前生成、没有这个字段的旧行。"""
+    segment = StoryboardPackSegment(
+        segment_no=1, synopsis="x", source_segment_indexes=[1],
+        prompt_text="p", shot_count=3, dialogue=[], resources={}, degraded_capabilities=[],
+    )
+    assert segment.palette == ""
+
+
+# ---------------------------------------------------------------------------
 # 2.1.0 对白台账：确定性抽取（四种引号 + paratext 排除）
 # ---------------------------------------------------------------------------
 
@@ -430,6 +469,7 @@ def test_dialogue_ledger_errors_rejects_kept_line_referencing_unknown_segment_no
 
 
 def test_dialogue_ledger_errors_rejects_segment_over_capacity_and_offers_a_split_path():
+    """2.1.2：拆分段数是按 ceil(total/54) 算出来的确切数字，不是笼统的"两段"。"""
     quotes = [_quote("Q01", text="这句台词很长" * 10, chars=60)]
     errors = dialogue_ledger_errors(
         quotes=quotes,
@@ -438,7 +478,7 @@ def test_dialogue_ledger_errors_rejects_segment_over_capacity_and_offers_a_split
         segment_source_indexes={1: [1]},
         max_chars_per_segment=54,
     )
-    assert any("超过 15 秒口播容量" in e and "拆成两段" in e for e in errors)
+    assert any("超过 15 秒口播容量" in e and "拆成 2 段" in e for e in errors)
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +524,7 @@ def test_dialogue_ledger_errors_capacity_message_names_a_valid_move_target():
     flagged = [e for e in errors if "第 5 段" in e]
     assert flagged
     assert "挪到第 [4] 段" in flagged[0]
-    assert "source_segment_indexes 同样覆盖" in flagged[0]
+    assert "还有剩余容量" in flagged[0]
 
 
 def test_dialogue_ledger_errors_capacity_message_silent_on_move_target_when_none_exists():
@@ -517,7 +557,7 @@ def test_dialogue_ledger_errors_capacity_message_overrides_keep_other_fields_unc
     assert "重排全部 segments[].segment_no" in flagged[0]
     assert "同步更新 kept_lines" in flagged[0]
     assert "保持其余已验证字段不变" in flagged[0]
-    assert "两段引用同一原文段号本就合法" in flagged[0]
+    assert "多段引用同一原文段号本就合法" in flagged[0]
 
 
 def test_extract_dialogue_targets_pre_splits_a_single_overlong_quote():
@@ -566,6 +606,337 @@ def test_beat_sheet_dialogue_ledger_rules_states_shared_segment_source_index_is_
 def test_beat_sheet_dialogue_ledger_rules_explains_pre_split_fragments():
     rules = beat_sheet_dialogue_ledger_rules()
     assert any("同一句话的不同部分" in r and "相邻或同一段落" in r for r in rules)
+
+
+def test_beat_sheet_dialogue_ledger_rules_states_density_table_basis():
+    rules = beat_sheet_dialogue_ledger_rules()
+    assert any("dialogue_density_by_source_segment" in r and "min_segments" in r for r in rules)
+
+
+# ---------------------------------------------------------------------------
+# 2.2.0 节拍表提示词层：色温弧线起点 + 独白合并授权 + 高潮展开授权
+# （专家审阅真实 EP1 十八段产出、用户拍板）
+# ---------------------------------------------------------------------------
+
+def test_beat_sheet_narrative_arc_rules_asks_for_a_palette_direction_per_segment():
+    rules = beat_sheet_narrative_arc_rules()
+    assert any("色温" in r and "segments[].palette" in r for r in rules)
+    assert any("色温方向明显拉开差异" in r for r in rules)
+
+
+def test_beat_sheet_narrative_arc_rules_authorizes_merging_static_monologue_segments():
+    """独白合并授权：合并上限约 2 个段，判据是"不可视觉化"与"不承载因果/
+    动机/关键设定"两个条件同时成立——真实案例是 EP1 前 5 段（占全片 28%）
+    全是"孟浩坐山顶皱眉攥葫芦"同一情绪的静态独白。"""
+    rules = beat_sheet_narrative_arc_rules()
+    merge_rule = next(r for r in rules if "连续静态独白" in r)
+    assert "2 个节拍" in merge_rule
+    assert "两个条件同时成立" in merge_rule
+    # 必须显式衔接既有的"保留进节拍、改写成画外音"规则，不是推翻它。
+    assert "不推翻" in merge_rule
+
+
+def test_beat_sheet_narrative_arc_rules_authorizes_expanding_climax_beats():
+    """高潮/转折节拍展开授权：真实案例是 EP1 掳人+飞行只分到约 30 秒。"""
+    rules = beat_sheet_narrative_arc_rules()
+    assert any("2-3 个段展开" in r and "冲突密集" in r for r in rules)
+
+
+def test_beat_sheet_rules_includes_narrative_arc_rules():
+    """确认 _beat_sheet_rules() 真的把三条叙事弧线规则接进了阶段一 rules[]，
+    不是新函数写好了但没接线。"""
+    rules = _beat_sheet_rules(set())
+    assert any("segments[].palette" in r for r in rules)
+    assert any("连续静态独白" in r for r in rules)
+    assert any("2-3 个段展开" in r for r in rules)
+
+
+# ---------------------------------------------------------------------------
+# 2.2.0 阶段二：首尾段标记（修 bug）+ 色温渐变 + 闪回边界
+# ---------------------------------------------------------------------------
+
+def test_segment_narrative_arc_payload_fields_flags_first_segment():
+    fields = segment_narrative_arc_payload_fields(
+        segment_no=1, total_segments=5, palette_current="冷调青灰", palette_previous="",
+    )
+    assert fields["is_first_segment"] is True
+    assert fields["is_final_segment"] is False
+    assert fields["palette_current"] == "冷调青灰"
+    assert fields["palette_previous"] == ""
+
+
+def test_segment_narrative_arc_payload_fields_flags_final_segment():
+    """这是本次改造要修的 bug 本身：EP1 段18（全片收尾）此前拿不到任何
+    "这是最后一段"的信号，方言约束里的收尾大远景规则因此从未触发。"""
+    fields = segment_narrative_arc_payload_fields(
+        segment_no=18, total_segments=18, palette_current="", palette_previous="高对比青绿银白",
+    )
+    assert fields["is_first_segment"] is False
+    assert fields["is_final_segment"] is True
+
+
+def test_segment_narrative_arc_payload_fields_single_segment_episode_is_both():
+    """只有一段的极端情形：first 和 final 同时成立，不是互斥的。"""
+    fields = segment_narrative_arc_payload_fields(
+        segment_no=1, total_segments=1, palette_current="", palette_previous="",
+    )
+    assert fields["is_first_segment"] is True
+    assert fields["is_final_segment"] is True
+
+
+def test_segment_narrative_arc_rules_always_explains_first_final_segment_meaning():
+    rules = segment_narrative_arc_rules(palette_current="", palette_previous="")
+    assert any("is_first_segment" in r and "is_final_segment" in r and "全片收尾段" in r for r in rules)
+
+
+def test_segment_narrative_arc_rules_adds_transition_rule_only_when_palette_changes():
+    """色温相同（或本段没写 palette）时不应该出现渐变要求——没有转折就不该
+    有转折指令，避免模型无中生有地加一段渐变。"""
+    unchanged = segment_narrative_arc_rules(palette_current="冷调青灰", palette_previous="冷调青灰")
+    assert not any("渐变" in r for r in unchanged)
+
+    changed = segment_narrative_arc_rules(palette_current="夕阳暖金", palette_previous="冷调青灰")
+    transition_rule = next(r for r in changed if "渐变" in r)
+    assert "夕阳暖金" in transition_rule and "冷调青灰" in transition_rule
+    assert "两秒" in transition_rule
+    assert "本段画面里" in transition_rule
+
+
+def test_segment_narrative_arc_rules_transition_rule_silent_when_current_palette_empty():
+    """本段自己没写 palette（模型漏填）时不该假装有转折可言。"""
+    rules = segment_narrative_arc_rules(palette_current="", palette_previous="冷调青灰")
+    assert not any("渐变" in r for r in rules)
+
+
+def test_segment_narrative_arc_rules_always_includes_flashback_boundary():
+    """闪回硬边界：只能取材本段或前文原文里实际出现过的意象，防兜底编造；
+    闪回画面同样受本段色温约束。"""
+    rules = segment_narrative_arc_rules(palette_current="", palette_previous="")
+    flashback_rule = next(r for r in rules if "闪回" in r)
+    assert "offscreen_voice" in flashback_rule
+    assert "不得编造" in flashback_rule
+    assert "色温" in flashback_rule
+
+
+# ---------------------------------------------------------------------------
+# ERR-20260901-b1c349 真实 EP1 二次回归：2.1.1 的报错仍未让模型修对，甚至
+# 出现"循环指路"（两个相邻段互相指对方当挪动目标，而对方同样超容）。2.1.2
+# 结论：容量维度不再打回模型语义重试，改成确定性归一化；报错文案（仅归一化
+# 后断言路径使用）只点名确有剩余容量的目标，没有就不给挪动建议。
+# ---------------------------------------------------------------------------
+
+def test_dialogue_ledger_errors_does_not_recommend_moving_into_an_equally_overflowing_segment():
+    """循环指路回归：两个相邻段都超容时，谁都不该被点名当对方的挪动目标。"""
+    quotes = [
+        _quote("Q09", segment_index=2, text="x" * 12, chars=12),
+        _quote("Q10", segment_index=2, text="x" * 3, chars=3),
+        _quote("Q11", segment_index=2, text="x" * 9, chars=9),
+        _quote("Q12", segment_index=2, text="x" * 31, chars=31),
+        _quote("Q05", segment_index=2, text="x" * 19, chars=19),
+        _quote("Q06", segment_index=2, text="x" * 36, chars=36),
+    ]
+    kept = [
+        _AiKeptLine(quote_id="Q09", segment_no=5), _AiKeptLine(quote_id="Q10", segment_no=5),
+        _AiKeptLine(quote_id="Q11", segment_no=5), _AiKeptLine(quote_id="Q12", segment_no=5),
+        _AiKeptLine(quote_id="Q05", segment_no=4), _AiKeptLine(quote_id="Q06", segment_no=4),
+    ]
+    errors = dialogue_ledger_errors(
+        quotes=quotes, kept_lines=kept, dropped_lines=[],
+        segment_source_indexes={4: [2], 5: [2]}, max_chars_per_segment=54,
+    )
+    seg4 = next(e for e in errors if "第 4 段" in e)
+    seg5 = next(e for e in errors if "第 5 段" in e)
+    assert "挪到第" not in seg4, "第 4 段自己也超容（55 字），不该被第 5 段点名当目标"
+    assert "挪到第" not in seg5, "第 5 段自己也超容（55 字），不该被第 4 段点名当目标"
+    assert "拆成 2 段" in seg4 and "拆成 2 段" in seg5
+
+
+def test_dialogue_ledger_errors_capacity_split_count_scales_with_total():
+    """135 字（真实 EP1 归因数字）需要拆 3 段，不是固定的"两段"。"""
+    quotes = [
+        _quote("Q01", text="x" * 4, chars=4), _quote("Q02", text="x" * 39, chars=39),
+        _quote("Q03", text="x" * 38, chars=38), _quote("Q04", text="x" * 54, chars=54),
+    ]
+    kept = [_AiKeptLine(quote_id=q.quote_id, segment_no=1) for q in quotes]
+    errors = dialogue_ledger_errors(
+        quotes=quotes, kept_lines=kept, dropped_lines=[],
+        segment_source_indexes={1: [1]}, max_chars_per_segment=54,
+    )
+    flagged = [e for e in errors if "第 1 段" in e]
+    assert flagged
+    assert "135字" in flagged[0]
+    assert "拆成 3 段" in flagged[0]
+
+
+# ---------------------------------------------------------------------------
+# 2.1.2 密度表：dialogue_density_by_source_segment，给模型数据化的分段依据。
+# ---------------------------------------------------------------------------
+
+def test_dialogue_density_by_source_segment_computes_totals_and_min_segments():
+    quotes = [
+        _quote("Q01", segment_index=2, text="x" * 30, chars=30),
+        _quote("Q02", segment_index=2, text="x" * 30, chars=30),
+        _quote("Q03", segment_index=5, text="x" * 10, chars=10),
+    ]
+    density = dialogue_density_by_source_segment(quotes, max_chars_per_segment=54)
+    assert density == {
+        2: {"quote_chars": 60, "min_segments": 2},
+        5: {"quote_chars": 10, "min_segments": 1},
+    }
+
+
+def test_dialogue_density_by_source_segment_omits_source_segments_without_dialogue():
+    density = dialogue_density_by_source_segment([], max_chars_per_segment=54)
+    assert density == {}
+
+
+def test_dialogue_density_by_source_segment_exact_multiple_does_not_round_up_extra():
+    quotes = [_quote("Q01", segment_index=1, text="x" * 54, chars=54)]
+    density = dialogue_density_by_source_segment(quotes, max_chars_per_segment=54)
+    assert density[1]["min_segments"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 2.1.2 容量归一化：normalize_beat_sheet_capacity / normalize_and_assert_capacity
+# ---------------------------------------------------------------------------
+
+def _plan(segment_no: int, synopsis: str = "x", source=(1,), beat_ids=("B1",)) -> _AiSegmentPlan:
+    return _AiSegmentPlan(
+        segment_no=segment_no, synopsis=synopsis,
+        source_segment_indexes=list(source), beat_ids=list(beat_ids),
+    )
+
+
+def test_normalize_beat_sheet_capacity_bins_135_chars_into_three_segments():
+    """真实 EP1 归因数字：Q01(4)+Q02(39)+Q03(38)+Q04(54)=135 字应拆成 3 箱。"""
+    quotes = [
+        DialogueQuote(quote_id="Q01", source_segment_index=2, text="a", content_chars=4),
+        DialogueQuote(quote_id="Q02", source_segment_index=2, text="b", content_chars=39),
+        DialogueQuote(quote_id="Q03", source_segment_index=2, text="c", content_chars=38),
+        DialogueQuote(quote_id="Q04", source_segment_index=2, text="d", content_chars=54),
+    ]
+    draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[2])],
+        segments=[_plan(1, synopsis="原段", source=(2,))],
+        kept_lines=[_AiKeptLine(quote_id=q.quote_id, segment_no=1) for q in quotes],
+    )
+    telemetry = normalize_beat_sheet_capacity(draft, quotes)
+
+    assert len(draft.segments) == 3
+    assert [s.segment_no for s in draft.segments] == [1, 2, 3]
+    assert telemetry == [{"original_segment_no": 1, "bin_count": 3, "new_segment_nos": [1, 2, 3]}]
+    for segment_no, quote_ids in [(1, {"Q01", "Q02"}), (2, {"Q03"}), (3, {"Q04"})]:
+        kept_here = {k.quote_id for k in draft.kept_lines if k.segment_no == segment_no}
+        assert kept_here == quote_ids
+
+
+def test_normalize_beat_sheet_capacity_first_bin_keeps_original_synopsis_others_get_marker():
+    quotes = [
+        DialogueQuote(quote_id="Q01", source_segment_index=1, text="a", content_chars=54),
+        DialogueQuote(quote_id="Q02", source_segment_index=1, text="b", content_chars=54),
+    ]
+    draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1])],
+        segments=[_plan(1, synopsis="他扔掉了理想", source=(1,))],
+        kept_lines=[_AiKeptLine(quote_id="Q01", segment_no=1), _AiKeptLine(quote_id="Q02", segment_no=1)],
+    )
+    normalize_beat_sheet_capacity(draft, quotes)
+    assert draft.segments[0].synopsis == "他扔掉了理想"
+    assert draft.segments[1].synopsis == "他扔掉了理想（容量拆分·承接前段台词）"
+
+
+def test_normalize_beat_sheet_capacity_new_segments_inherit_source_indexes_and_beat_ids():
+    quotes = [
+        DialogueQuote(quote_id="Q01", source_segment_index=3, text="a", content_chars=54),
+        DialogueQuote(quote_id="Q02", source_segment_index=3, text="b", content_chars=54),
+    ]
+    draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B7", summary="x", segment_indexes=[3])],
+        segments=[_plan(1, source=(3, 4), beat_ids=("B7",))],
+        kept_lines=[_AiKeptLine(quote_id="Q01", segment_no=1), _AiKeptLine(quote_id="Q02", segment_no=1)],
+    )
+    normalize_beat_sheet_capacity(draft, quotes)
+    spawned = draft.segments[1]
+    assert spawned.source_segment_indexes == [3, 4]
+    assert spawned.beat_ids == ["B7"]
+    # 继承的列表必须是独立拷贝，不与原段共享同一个对象。
+    assert spawned.source_segment_indexes is not draft.segments[0].source_segment_indexes
+
+
+def test_normalize_beat_sheet_capacity_noop_when_no_segment_overflows():
+    quotes = [DialogueQuote(quote_id="Q01", source_segment_index=1, text="a", content_chars=10)]
+    draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1])],
+        segments=[_plan(1)],
+        kept_lines=[_AiKeptLine(quote_id="Q01", segment_no=1)],
+    )
+    telemetry = normalize_beat_sheet_capacity(draft, quotes)
+    assert telemetry == []
+    assert len(draft.segments) == 1
+    assert draft.segments[0].segment_no == 1
+
+
+def test_normalize_beat_sheet_capacity_renumbers_untouched_segments_after_an_earlier_split():
+    """拆分发生在前面的段时，后面完全没超容的段也要跟着重排 segment_no。"""
+    quotes = [
+        DialogueQuote(quote_id="Q01", source_segment_index=1, text="a", content_chars=54),
+        DialogueQuote(quote_id="Q02", source_segment_index=1, text="b", content_chars=54),
+        DialogueQuote(quote_id="Q03", source_segment_index=2, text="c", content_chars=10),
+    ]
+    draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1, 2])],
+        segments=[_plan(1, source=(1,)), _plan(2, source=(2,))],
+        kept_lines=[
+            _AiKeptLine(quote_id="Q01", segment_no=1), _AiKeptLine(quote_id="Q02", segment_no=1),
+            _AiKeptLine(quote_id="Q03", segment_no=2),
+        ],
+    )
+    normalize_beat_sheet_capacity(draft, quotes)
+    assert [s.segment_no for s in draft.segments] == [1, 2, 3]
+    q03 = next(k for k in draft.kept_lines if k.quote_id == "Q03")
+    assert q03.segment_no == 3, "原第 2 段被挤到第 3 段，kept_lines 必须跟着更新"
+
+
+def test_normalize_and_assert_capacity_returns_telemetry_when_normalization_succeeds():
+    quotes = [
+        DialogueQuote(quote_id="Q01", source_segment_index=1, text="a", content_chars=54),
+        DialogueQuote(quote_id="Q02", source_segment_index=1, text="b", content_chars=54),
+    ]
+    draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1])],
+        segments=[_plan(1)],
+        kept_lines=[_AiKeptLine(quote_id="Q01", segment_no=1), _AiKeptLine(quote_id="Q02", segment_no=1)],
+    )
+    telemetry = normalize_and_assert_capacity(draft, quotes)
+    assert telemetry[0]["bin_count"] == 2
+    # 复核断言本身必须真的通过：归一化后每段合计不超容。
+    assert all(
+        sum(q.content_chars for q in quotes if any(
+            k.quote_id == q.quote_id and k.segment_no == s.segment_no for k in draft.kept_lines
+        )) <= 54
+        for s in draft.segments
+    )
+
+
+def test_normalize_and_assert_capacity_fail_closed_when_normalization_itself_is_buggy(monkeypatch):
+    """fail-closed 路径：归一化后复核仍超容，说明归一化算法自己有 bug，必须
+    抛出而不是静默放行——这是唯一允许把容量错误亮给人看的场景。
+
+    用一个"什么都不做"的假归一化模拟 bug；再把容量上限收到 10，让原本
+    54 字的合法 kept 台词在这个假实现下必然显得超容，触发断言。
+    """
+    import app.production.storyboard_capacity_normalize as capacity_normalize_module
+
+    quotes = [DialogueQuote(quote_id="Q01", source_segment_index=1, text="a", content_chars=54)]
+    draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1])],
+        segments=[_plan(1)],
+        kept_lines=[_AiKeptLine(quote_id="Q01", segment_no=1)],
+    )
+    monkeypatch.setattr(capacity_normalize_module, "normalize_beat_sheet_capacity", lambda d, q: [])
+    monkeypatch.setattr(config, "MAX_SPOKEN_CHARS_PER_SHOT", 10)
+    with pytest.raises(StoryboardCapacityNormalizationError):
+        capacity_normalize_module.normalize_and_assert_capacity(draft, quotes)
 
 
 def test_dialogue_ledger_errors_empty_ledger_passes_with_no_quotes():
@@ -1527,6 +1898,39 @@ def test_persist_storyboard_pack_carries_required_dialogue_into_shot_contract():
     ]
 
 
+def test_persist_storyboard_pack_carries_palette_into_shot_contract():
+    """色温弧线落库供审计核对——不是只在生成期用完即弃的临时载荷。"""
+    conn = db.get_conn()
+    episode_id = "ep-pack-palette"
+    _seed_episode(conn, episode_id=episode_id)
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    payload = _prep_pack_2_0_0_payload()
+    segments = _real_segments(conn, ep)
+    pack = _pack()
+    pack.segments[0].palette = "冷调青灰转夕阳暖金"
+    persist_storyboard_pack(conn, episode_id, ep, payload, pack, segments=segments)
+
+    row = conn.execute("SELECT * FROM shots WHERE episode_id=?", (episode_id,)).fetchone()
+    contract = json.loads(row["shot_contract_json"])
+    assert contract["storyboard_pack_segment"]["palette"] == "冷调青灰转夕阳暖金"
+
+
+def test_persist_storyboard_pack_defaults_palette_to_empty_string_for_legacy_pack():
+    """_pack() 不显式设置 palette 时（模拟旧数据/未声明字段的模型产出），
+    落库必须是空串，不得留空 key 或报错。"""
+    conn = db.get_conn()
+    episode_id = "ep-pack-palette-default"
+    _seed_episode(conn, episode_id=episode_id)
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    payload = _prep_pack_2_0_0_payload()
+    segments = _real_segments(conn, ep)
+    persist_storyboard_pack(conn, episode_id, ep, payload, _pack(), segments=segments)
+
+    row = conn.execute("SELECT * FROM shots WHERE episode_id=?", (episode_id,)).fetchone()
+    contract = json.loads(row["shot_contract_json"])
+    assert contract["storyboard_pack_segment"]["palette"] == ""
+
+
 def test_persist_storyboard_pack_writes_dialogue_ledger_artifact():
     """episode 级对白台账落成独立 EvidenceArtifact，与 beat_sheet 产物同一模式。"""
     conn = db.get_conn()
@@ -2244,26 +2648,20 @@ def _patch_thinking_model(
     )
 
 
-def test_contract_marker_bumps_to_2_1_0_so_stale_low_fidelity_packs_regenerate():
-    """marker 跟落库形状走，不跟提示词措辞走——但 2.1.0 落库形状确实变了。
+def test_contract_marker_bumps_to_2_2_0_so_stale_packs_without_palette_regenerate():
+    """marker 跟落库形状走，不跟提示词措辞走。
 
-    2.0.6～2.0.8 期间 marker 一直钉在 storyboard_pack/2.0.5：那几次只改生成
-    切分或提示词措辞，落库形状不变，已成功的集不该被强迫重跑一次付费生成。
-    2.1.0 不是同一种情况：新增 StoryboardPackSegment.required_dialogue 字段、
-    dialogue[] 新增 delivery 键，是真正的落库形状变化；更重要的是，这次改造
-    的全部意义在于让"已生成但台词大量丢失"的旧分集在 resume 时被判定为不算
-    数、用新的对白台账 + 必保台词校验重新生成——marker 不动会让 resume 短路
-    继续复用那些低保真产物，新校验、新提示词永远碰不到它们。
+    2.1.1（ERR-20260901-bcfa58）/2.1.2（ERR-20260901-b1c349）期间 marker 一直
+    钉在 storyboard_pack/2.1.0：那两次只改生成路径的报错文案/抽取期预拆/容量
+    归一化，不改落库形状，已成功的集不该被强迫重跑一次付费生成。2.2.0 不是
+    同一种情况：新增 StoryboardPackSegment.palette 字段（专家审阅真实 EP1
+    十八段产出、用户拍板的色温弧线改造，见 app.production.storyboard_pack 的
+    STORYBOARD_PACK_VERSION changelog 与 app.production.storyboard_narrative_arc
+    模块 docstring），是真正的落库形状变化——旧行没有这个字段，marker 不动会
+    让 resume 短路把它们误判为"已经用新契约生成过"而不重新生成。
     """
-    assert STORYBOARD_PACK_CONTRACT_MARKER == "storyboard_pack/2.1.0"
-    assert STORYBOARD_PACK_VERSION > "2.1.0"
-
-
-def test_contract_marker_stays_pinned_at_2_1_0_for_the_2_1_1_generation_path_fix():
-    """2.1.1（ERR-20260901-bcfa58）只改生成路径的报错文案与抽取期预拆逻辑，
-    落库形状不变——同 2.0.6 先例，marker 不随这次修复移动。"""
-    assert STORYBOARD_PACK_VERSION == "2.1.1"
-    assert STORYBOARD_PACK_CONTRACT_MARKER == "storyboard_pack/2.1.0"
+    assert STORYBOARD_PACK_CONTRACT_MARKER == "storyboard_pack/2.2.0"
+    assert STORYBOARD_PACK_VERSION == "2.2.0"
 
 
 def test_ensure_segment_prompt_budget_passes_when_room_is_ample(monkeypatch):
@@ -2644,6 +3042,80 @@ async def test_generate_passes_required_dialogue_into_payload_and_rules(monkeypa
     assert calls[1]["required_dialogue"] == []
     empty_rule = next(r for r in calls[1]["rules"] if "required_dialogue" in r)
     assert "为空" in empty_rule
+
+
+@pytest.mark.asyncio
+async def test_generate_marks_first_and_final_segment_and_carries_palette_arc(monkeypatch):
+    """2.2.0 端到端：is_first_segment/is_final_segment 必须按真实位置计算
+    （不是恒定 False——那正是本次要修的 bug），palette_current/palette_previous
+    必须逐段正确传递，且只在色温真的变化时才出现渐变规则。"""
+    import app.production.storyboard_pack as storyboard_pack_module
+
+    calls: list[dict] = []
+
+    async def fake_chat_structured(messages, **kwargs):
+        payload = json.loads(messages[1]["content"])
+        calls.append(payload)
+        return _segment_draft(f"提示词-段{payload['segment_no']}")
+
+    monkeypatch.setattr(storyboard_pack_module.model_gateway, "chat_structured", fake_chat_structured)
+    monkeypatch.setattr(storyboard_pack_module, "_ensure_segment_prompt_budget", lambda: None)
+
+    beat_draft = _AiBeatSheetDraft(
+        beat_sheet=[_AiBeat(beat_id="B1", summary="x", segment_indexes=[1, 2, 3])],
+        segments=[
+            _AiSegmentPlan(
+                segment_no=1, synopsis="a", source_segment_indexes=[1],
+                beat_ids=["B1"], palette="冷调青灰",
+            ),
+            _AiSegmentPlan(
+                segment_no=2, synopsis="b", source_segment_indexes=[2],
+                beat_ids=["B1"], palette="夕阳暖金",
+            ),
+            _AiSegmentPlan(
+                segment_no=3, synopsis="c", source_segment_indexes=[3],
+                beat_ids=["B1"], palette="夕阳暖金",
+            ),
+        ],
+    )
+    source = [
+        SourceSegment(segment_id="s1", text="少年站在山顶。", start_offset=0, end_offset=7),
+        SourceSegment(segment_id="s2", text="他扔掉了葫芦。", start_offset=7, end_offset=14),
+        SourceSegment(segment_id="s3", text="葫芦落入河中。", start_offset=14, end_offset=21),
+    ]
+
+    await _generate_all_segment_prompts(
+        episode_id="ep-narrative-arc",
+        episode_no=1,
+        beat_draft=beat_draft,
+        segments=source,
+        payload={},
+        target_video_model="hiagent",
+        bible=None,
+        required_dialogue_by_segment_no={},
+    )
+
+    assert len(calls) == 3
+    # 位置标记必须按真实段号/总段数计算，不是恒定值。
+    assert (calls[0]["is_first_segment"], calls[0]["is_final_segment"]) == (True, False)
+    assert (calls[1]["is_first_segment"], calls[1]["is_final_segment"]) == (False, False)
+    assert (calls[2]["is_first_segment"], calls[2]["is_final_segment"]) == (False, True)
+
+    # 色温弧线逐段传递：本段自己的 palette，以及上一段的 palette。
+    assert calls[0]["palette_current"] == "冷调青灰"
+    assert calls[0]["palette_previous"] == ""
+    assert calls[1]["palette_current"] == "夕阳暖金"
+    assert calls[1]["palette_previous"] == "冷调青灰"
+    assert calls[2]["palette_current"] == "夕阳暖金"
+    assert calls[2]["palette_previous"] == "夕阳暖金"
+
+    # 段1->2 色温变化，必须出现渐变规则；段2->3 色温不变，不应该出现。
+    assert any("渐变" in r for r in calls[1]["rules"])
+    assert not any("渐变" in r for r in calls[2]["rules"])
+    # 首尾段含义规则与闪回边界规则每一段都要出现。
+    for call in calls:
+        assert any("is_final_segment" in r for r in call["rules"])
+        assert any("闪回" in r for r in call["rules"])
 
 
 @pytest.mark.asyncio

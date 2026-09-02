@@ -52,6 +52,7 @@ from app.db import new_id
 from app.evidence import repository as evidence_repository
 from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
+from app.production.storyboard_capacity_normalize import normalize_and_assert_capacity
 from app.production.storyboard_dialects import (
     MINIMAX_H3_DIALECT_INSTRUCTIONS,  # noqa: F401 -- 重新导出，测试按旧路径 import
     SEEDANCE_DIALECT_INSTRUCTIONS,  # noqa: F401 -- 重新导出，测试按旧路径 import
@@ -62,12 +63,19 @@ from app.production.storyboard_dialogue_ledger import (
     _AiDroppedLine,
     _AiKeptLine,
     beat_sheet_dialogue_ledger_rules,
+    dialogue_density_by_source_segment,
     dialogue_ledger_errors,
     dialogue_ledger_summary,
     extract_dialogue_targets,
     required_dialogue_for_segments,
     required_dialogue_missing_errors,
     required_dialogue_rule,
+)
+from app.production.storyboard_narrative_arc import (
+    _segment_continuity_rules,
+    beat_sheet_narrative_arc_rules,
+    segment_narrative_arc_payload_fields,
+    segment_narrative_arc_rules,
 )
 from app.schemas import Bible, Dialogue
 from app.source_chapters import _episode_source_text
@@ -259,52 +267,29 @@ from app.source_excerpt import SourceSegment, index_source_segments
 #:
 #: 2.0.8（用户拍板，2026-08-29：阶段二从「整集一次批量调用」改回「逐段独立
 #: 调用」，但带一镜参考）：2.0.3 把逐段独立调用改成整集打包，理由是逐段调用
-#: 跨段视野为零，是角色换装、转场生硬、镜头语言重复三个真实缺陷的结构性
-#: 根因（见 2.0.3 changelog）。本次改回逐段调用不是简单回滚——三个缺陷必须
-#: 逐条有新的应对，否则就是把已经修好的东西带回来：
-#: ① 角色换装：不再依赖模型在一次大调用里"记住"自己前面写过什么（那正是
-#: 2.0.3 想解决、也确实解决过的问题）。新机制更强：relevant_assets 里每个
-#: 角色/场景的 appearance/scene_canonical 锚点在**每一次**独立调用里都逐字
-#: 给一遍，模型每次都从同一份世界书原文抄，不允许凭记忆复述——这是对同一份
-#: 固定真值的确定性复制，不是对自己早前发挥的模糊回忆，理论上比"整集一次看
-#: 见全部段落、指望模型自己保持一致"更不容易漂移。唯一的残余风险在
-#: functional_extras（没有世界书标准外观的群演）：这类角色的自定特征目前
-#: 只能靠"上一段"这一层（见②）部分兜底，非相邻段之间可能仍会漂移，是本次
-#: 有意接受、写在这里而不是事后才发现的已知限制。
-#: ② 转场生硬：每次调用把上一段（segment_no - 1，若存在）已经生成、定稿的
-#: prompt_text 原文整段给模型，要求它自己判断"接不接得上空间/时间"，用能
-#: 承接上一段末尾的起幅、或一个让观众能感知到切换的起幅——用户方案明确要求
-#: 的那一层。第一段没有上一段，提示词里如实说清楚，不假装存在一个不存在的
-#: 参照。
-#: ③ 镜头语言重复：只给上一段这一条线索窗口太窄（第 1、3、5 段用同一机位，
-#: 隔着第 2、4 段各自独立生成的调用发现不了）。模型每次调用在结构化产出里
-#: 自报本段的 camera_digest（开场景别 / 开场运镜 / 与上一段的转场类型）——
-#: 这个字段只用于拼给"接下来几段"的最近镜头语言清单，不落进
-#: StoryboardPackSegment/shots 表（分镜产出的持久化形状不变，"不要改形状，
-#: 只改怎么生成"的边界线画在这里）。窗口大小取 4 段：任务给的范围是 3~5，
-#: 本仓库没有一份可以直接回答"隔几段观众才会感知到镜头语言重复"的历史观测，
-#: 4 取的是范围中点、且与本模块自己的 MAX_SHOTS_PER_SEGMENT=4 同一量级，
-#: 是一个有理由但未经真实回归验证的判断，不是拍脑袋瞎猜也不是精确推导——
-#: 后续如果真实回归证明窗口太窽或太宽，需要重新标定，不能想当然当结论。
-#: 有重复需要的场景（同一场戏的正反打/连续对切）给了合法出路：
-#: camera_repetition_rationale 字段说明为什么这次重复是必要的；没有重复
-#: 需要就留空，不强行找理由。
+#: 跨段视野为零，是角色换装/转场生硬/镜头语言重复三个真实缺陷的结构性根因
+#: （见 2.0.3 changelog）。本次改回逐段调用不是简单回滚，三个缺陷各有新应对：
+#: ① 角色换装——不再依赖模型在一次大调用里"记住"前面写过什么，relevant_
+#: assets 的 appearance/scene_canonical 锚点每次独立调用都逐字重给，模型
+#: 每次从同一份世界书原文抄、不凭记忆复述，比"整集一次看见全部段落"更不
+#: 容易漂移。残余风险：functional_extras（无标准外观的群演）只能靠②的
+#: "上一段"部分兜底，非相邻段仍可能漂移，是已知限制。
+#: ② 转场生硬——每次调用把上一段（若存在）定稿的 prompt_text 全文给模型，
+#: 由它判断承接空间/时间还是需要转场；第一段如实说明没有上一段可参考。
+#: ③ 镜头语言重复——只给上一段发现不了"第 1、3、5 段用同一机位"这种隔段
+#: 重复，模型每次自报 camera_digest（开场景别/运镜/转场类型）拼成"最近几段"
+#: 清单，只服务于生成期参考，不落进 StoryboardPackSegment/shots 表。窗口取
+#: 4 段：任务范围 3~5，本仓无历史观测能精确回答，4 是范围中点且与
+#: MAX_SHOTS_PER_SEGMENT=4 同量级，是有理由但未经验证的判断。真需要重复
+#: 机位（正反打/连续对切）时 camera_repetition_rationale 给合法出路。
 #:
-#: 代价与新判据：一集内的调用变回严格串行（第 N 段必须等第 N-1 段完成才能
-#: 发出），15 段就是 15 次顺序调用，长尾命中机会从"一次整批 1~2 次"变成
-#: "每段各一次、共 N 次"。作为交换，单次调用的输入/输出体量大幅缩小（不再
-#: 携带全集源文本、全量 beat_sheet、全量素材清单），读超时因此从 960s 收紧到
-#: 独立的 TIMEOUT_CHAT_STORYBOARD_PACK_SEGMENT_READ（见 app/config.py 的推导
-#: 注释与 app/hiagent.py::_chat_read_timeout_s），卡住能更快暴露、更快重试，
-#: 不必再空等接近 16 分钟。批量场景下"一次调用装几段"的 token 算术
-#: （_segment_prompt_batch_capacity/_split_segment_prompt_batches）随批量
-#: 一并退场——固定一次只写一段，不再需要这套算术；SEGMENT_BATCH_TOKENS_FLOOR
-#: 这个只为"批量太小也要留余量"服务的下限常量同样退场。答案预算的安全网本身
-#: 不退场（2.0.6 的教训——答案预算装不下会撞 finish_reason=length、整段
-#: 失败且照常计费——与批不批无关），改成 _ensure_segment_prompt_budget 在
-#: 发每一次单段请求前仍然核验一遍。持久化契约字段名/形状不变，
-#: STORYBOARD_PACK_CONTRACT_MARKER 仍钉在 2.0.5（同 2.0.6 先例：只改生成
-#: 路径的调用切分，不改落库形状）。
+#: 代价：一集内调用变回严格串行，长尾命中机会从"一次整批 1~2 次"变成"每段
+#: 各一次、共 N 次"；换来单次调用输入/输出体量大幅缩小，读超时从 960s 收紧
+#: 到独立的 TIMEOUT_CHAT_STORYBOARD_PACK_SEGMENT_READ，卡住更快暴露/重试，
+#: 不必再空等 16 分钟。批量算术（_segment_prompt_batch_capacity 等）随批量
+#: 一并退场；答案预算安全网不退场（2.0.6 教训：装不下会撞 finish_reason=
+#: length、整段失败且照常计费），改成 _ensure_segment_prompt_budget 每次
+#: 单段请求前核验。持久化契约不变，MARKER 仍钉 2.0.5（同 2.0.6 先例）。
 #:
 #: 2.1.0（用户拍板，成片剧情跳跃/台词大量省略，实测 EP1 原文 488 字引号对白
 #: 只存活 68 字）：根因是"模型看着办、丢了什么无人知道"——阶段一曾写"删掉
@@ -335,14 +320,31 @@ from app.source_excerpt import SourceSegment, index_source_segments
 #: app.production.storyboard_dialogue_ledger 模块 docstring）。只改生成路径的
 #: 报错文案与抽取期预拆逻辑，落库形状不变；marker 按 2.0.6 先例仍钉在
 #: storyboard_pack/2.1.0，不随这次修复移动。
-STORYBOARD_PACK_VERSION = "2.1.1"
+#:
+#: 2.1.2（真实 EP1 二次回归 ERR-20260901-b1c349：2.1.1 报错仍未让模型修对，
+#: 甚至出现两段互相指对方当挪动目标的"循环指路"——完整归因与实现见
+#: app.production.storyboard_capacity_normalize 模块 docstring）。结论是容量
+#: 维度（怎么重新分配/拆段）不该再打回模型语义重试，改成生成期确定性归一化；
+#: 归一化只重排模型已确认保留的台词、不发明内容，synopsis 追加的可见标记是
+#: 既有字段的内容变化（不是新字段/新类型），不构成落库形状变化，marker 仍钉
+#: storyboard_pack/2.1.0。
+#:
+#: 2.2.0（专家审阅真实 EP1 十八段产出、用户拍板 2026-09-01：首尾段标记补丁 +
+#: 色温弧线 + 独白压缩与闪回三项结构层改造，完整决策链与真实案例见
+#: app.production.storyboard_narrative_arc 模块 docstring，不在这里重复）。
+#: 落库新增 StoryboardPackSegment.palette 字段（阶段一模型自报的色温/色调
+#: 方向），MARKER 必须跟着换版本号——旧行没有这个字段，resume 短路如果继续
+#: 认旧 marker，会把这些缺字段的旧行误判为"已经用新契约生成过"而不重新生成。
+STORYBOARD_PACK_VERSION = "2.2.0"
 
 #: Written to Shot.prompt_contract_version for every row this module writes;
 #: downstream consumers key off it to know this row's legacy per-shot fields
 #: are not authoritative. 2.1.0 起改到 storyboard_pack/2.1.0（见上方
 #: changelog）：目的是让台词大量丢失的旧分集 resume 时判定为不算数、重新
-#: 生成，marker 不动会让 resume 短路继续复用那些低保真产物。
-STORYBOARD_PACK_CONTRACT_MARKER = "storyboard_pack/2.1.0"
+#: 生成，marker 不动会让 resume 短路继续复用那些低保真产物。2.2.0 起改到
+#: storyboard_pack/2.2.0（同上方 changelog）：新增 palette 落库字段，旧行
+#: 没有这个字段，resume 短路必须判过期重生成。
+STORYBOARD_PACK_CONTRACT_MARKER = "storyboard_pack/2.2.0"
 
 SEGMENT_DURATION_S = 15
 MIN_SHOTS_PER_SEGMENT = 2
@@ -481,6 +483,8 @@ class _AiSegmentPlan(BaseModel):
     synopsis: str
     source_segment_indexes: list[int] = Field(min_length=1)
     beat_ids: list[str] = Field(default_factory=list)
+    #: 2.2.0 色温弧线：开放词汇，不设枚举；默认空串兼容模型截断导致的漏填。
+    palette: str = ""
 
 
 class _AiBeatSheetDraft(BaseModel):
@@ -515,12 +519,14 @@ def _validate_beat_sheet_draft(
         if unknown_beats:
             errors.append(f"段 {seg.segment_no} 引用了不存在的 beat_id {unknown_beats}")
     segment_source_indexes = {s.segment_no: s.source_segment_indexes for s in draft.segments}
+    # 2.1.2：容量检查不在这里跑，改由 storyboard_capacity_normalize 兜底。
     errors.extend(dialogue_ledger_errors(
         quotes=dialogue_quotes,
         kept_lines=draft.kept_lines,
         dropped_lines=draft.dropped_lines,
         segment_source_indexes=segment_source_indexes,
         max_chars_per_segment=config.MAX_SPOKEN_CHARS_PER_SHOT,
+        include_capacity=False,
     ))
     return errors
 
@@ -755,6 +761,16 @@ def _enrich_asset_manifest_canonical_visuals(
         ) or _NO_CANONICAL_SCENE_NOTE
 
 
+def _dialogue_targets_payload(dialogue_quotes: list[DialogueQuote]) -> dict[str, Any]:
+    """阶段一 payload 里对白台账相关的两个字段：台账本身 + 2.1.2 新增的密度表。"""
+    return {
+        "dialogue_targets": [q.model_dump(mode="json") for q in dialogue_quotes],
+        "dialogue_density_by_source_segment": dialogue_density_by_source_segment(
+            dialogue_quotes, max_chars_per_segment=config.MAX_SPOKEN_CHARS_PER_SHOT,
+        ),
+    }
+
+
 def _beat_sheet_rules(paratext_indexes: set[int]) -> list[str]:
     """阶段一 rules[]：段落归组形状要求 + 2.1.0 对白台账正面陈述（见 beat_sheet_dialogue_ledger_rules）。"""
     rules = [
@@ -769,6 +785,7 @@ def _beat_sheet_rules(paratext_indexes: set[int]) -> list[str]:
         "不能因为「无法视觉化」直接丢弃——保留进节拍，下一步会把它改写成一句简短的"
         "角色画外音说出来（这属于内容改编，不算 dialogue_targets 里的引号台词）",
         *beat_sheet_dialogue_ledger_rules(),
+        *beat_sheet_narrative_arc_rules(),
     ]
     paratext_rule = _paratext_exclusion_rule(paratext_indexes)
     if paratext_rule is not None:
@@ -799,7 +816,7 @@ async def _generate_beat_sheet(
         "episode_no": episode_no,
         "known_assets": _manifest_brief_for_prompt(payload),
         "source_text_by_segment": source_block,
-        "dialogue_targets": [q.model_dump(mode="json") for q in dialogue_quotes],
+        **_dialogue_targets_payload(dialogue_quotes),
         "output_schema": _AiBeatSheetDraft.model_json_schema(),
     }
     fingerprint = hashlib.sha256(
@@ -1143,50 +1160,9 @@ def _camera_digest_window_payload(
     ]
 
 
-def _segment_continuity_rules(
-    *,
-    previous_segment_no: int | None,
-    camera_history: list[dict[str, Any]],
-) -> list[str]:
-    """一镜参考的第一、二层文案（第三层——世界书外观锚点——在
-    ``_generate_all_segment_prompts`` 的 shared_rules 里，逐段调用同样适用）。
-
-    按 CLAUDE.md「Prompts」一节的要求写：正面陈述而非禁令，说清参考素材从
-    哪来，以及确实没有时该怎么写——本集第一段没有上一段、没有镜头语言历史，
-    两种情况都直接说清楚，不假装存在一个不存在的参照。
-    """
-    if previous_segment_no is not None:
-        rule_1 = (
-            f"previous_segment_prompt 是上一段（第 {previous_segment_no} 段）"
-            "已经生成、定稿的提示词全文，不会再被改写。本段与它的关系由你自己"
-            "判断：如果本段发生在与上一段相同的空间、紧接着的时间点，本段的"
-            "起幅要能承接上一段结尾的画面（同一场景、同一光影，人物姿态自然"
-            "接续，不要凭空跳到一个新姿势或新机位）；如果本段换了空间或跳过"
-            "了一段时间，本段的起幅要让观众能明确感知到这次切换（用新的场景"
-            "描述、光影变化，或者一个专门的转场镜头交代），不能让两段读起来"
-            "像是从互不相干的素材里各剪一段拼起来的。"
-        )
-    else:
-        rule_1 = "本段是本集第一段，没有上一段可参考，起幅由你自行判断，不必与任何前情衔接。"
-    if camera_history:
-        history_nos = [item["segment_no"] for item in camera_history]
-        rule_2 = (
-            f"recent_camera_language 列出了最近 {len(camera_history)} 段"
-            f"（第 {history_nos} 段）各自的开场景别与运镜。本段的开场景别、"
-            "运镜请从这份清单以外挑一个组合，让画面持续推进；如果这一段的"
-            "剧情确实需要沿用清单里出现过的某个机位（例如同一场戏的正反打、"
-            "同一场追逐的连续对切），把理由写进 camera_repetition_rationale"
-            "（例如「与第 X 段是同一场对话的正反打，沿用同一组机位是刻意"
-            "的」）；如果这一段没有这种必要，camera_repetition_rationale "
-            "留空即可，不必强行解释。"
-        )
-    else:
-        rule_2 = (
-            "本集到本段为止还没有可参考的镜头语言历史，camera_digest 与 "
-            "camera_repetition_rationale 按本段实际情况据实填写、留空即可，"
-            "不必刻意呼应任何东西。"
-        )
-    return [rule_1, rule_2]
+# ``_segment_continuity_rules`` 2.2.0 起搬到 app.production.storyboard_narrative_arc
+# （纯函数、不依赖本文件任何私有对象，为新增的三项结构层改造腾行数——见该模块
+# docstring）；本文件通过上方 import 继续用同一个名字调用它，行为不变。
 
 
 def _segment_shared_rules() -> list[str]:
@@ -1309,6 +1285,7 @@ async def _generate_all_segment_prompts(
         source_text = _segment_source_block(segments, plan.source_segment_indexes, paratext_indexes)
         segment_paratext_hit = set(plan.source_segment_indexes) & paratext_indexes
         required_dialogue = required_dialogue_by_segment_no.get(plan.segment_no, [])
+        palette_previous = beat_draft.segments[plan.segment_no - 2].palette if plan.segment_no > 1 else ""
         task_payload: dict[str, Any] = {
             "task": (
                 "为下面这一段原文和节拍写一整段可直接投喂视频生成模型的提示词"
@@ -1322,7 +1299,14 @@ async def _generate_all_segment_prompts(
                 *shared_rules,
                 required_dialogue_rule(required_dialogue),
                 *([_paratext_exclusion_rule(segment_paratext_hit)] if segment_paratext_hit else []),
+                *segment_narrative_arc_rules(palette_current=plan.palette, palette_previous=palette_previous),
             ],
+            **segment_narrative_arc_payload_fields(
+                segment_no=plan.segment_no,
+                total_segments=len(beat_draft.segments),
+                palette_current=plan.palette,
+                palette_previous=palette_previous,
+            ),
             "segment_no": plan.segment_no,
             "synopsis": plan.synopsis,
             "beats": [
@@ -1458,6 +1442,8 @@ class StoryboardPackSegment(BaseModel):
     degraded_capabilities: list[str]
     #: 2.1.0 对白台账：本段 kept 的原文台词，供事后核对丢没丢；默认空列表兼容旧行。
     required_dialogue: list[dict[str, Any]] = Field(default_factory=list)
+    #: 2.2.0 色温弧线，落库供审计核对；默认空串兼容旧行（旧行没有这个字段）。
+    palette: str = ""
 
 
 class StoryboardPack(BaseModel):
@@ -1516,8 +1502,7 @@ async def generate_storyboard_pack(
         )
     _enrich_asset_manifest_canonical_visuals(conn, payload, bible=bible)
 
-    # 2.1.0：paratext 账提前算一次，确定性抽取全部原文引号台词，同时喂给
-    # 阶段一（取值域）与阶段二（分配结果）。
+    # 2.1.0：paratext 账提前算一次，抽取台词同时喂给阶段一（取值域）与阶段二（分配结果）。
     paratext_indexes = _paratext_segment_indexes(payload)
     dialogue_quotes = extract_dialogue_targets(segments, paratext_indexes)
 
@@ -1529,6 +1514,8 @@ async def generate_storyboard_pack(
     # rules[] 只是提示词层面的禁令，不是校验闸门，这里在通过格式校验之后、
     # 进入 phase 2 之前用同一份 paratext 账把漏网的引用滤掉。
     paratext_strip_notes = _strip_paratext_from_beat_draft(beat_draft, paratext_indexes)
+    # 2.1.2：容量维度改成确定性归一化，不再打回模型重试（见 storyboard_capacity_normalize）。
+    capacity_normalization = normalize_and_assert_capacity(beat_draft, dialogue_quotes)
     required_dialogue_by_segment_no = required_dialogue_for_segments(
         beat_draft.kept_lines, dialogue_quotes,
     )
@@ -1571,6 +1558,7 @@ async def generate_storyboard_pack(
                 *paratext_strip_notes,
             ],
             required_dialogue=required_dialogue_by_segment_no.get(plan.segment_no, []),
+            palette=plan.palette,
         )
         for plan in beat_draft.segments
     ]
@@ -1586,7 +1574,7 @@ async def generate_storyboard_pack(
         ],
         segments=list(pack_segments),
         dialogue_ledger=dialogue_ledger_summary(
-            dialogue_quotes, beat_draft.kept_lines, beat_draft.dropped_lines,
+            dialogue_quotes, beat_draft.kept_lines, beat_draft.dropped_lines, capacity_normalization,
         ),
     )
 
