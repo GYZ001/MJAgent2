@@ -1,11 +1,13 @@
 """LLM 流水线阶段包：摘要 / 角色圣经 / 剧集规划 / 可拍剧本 / 分镜脚本。
 
 原 app/stages.py（12,142 行 / 174 个顶层定义）按关注点拆分为本包下的多个模块：
-剧本 IR 保真（ir_*）、叙事蓝图分片与重试预算（blueprint_*）、角色点名与身份归并
-（roster_*）、人物谱生成与补充（bible_*）、别名取证（identity_evidence.py /
-alias_*.py）、状态事实回填（status_facts_*.py）、章节认知卡（cognition.py），
-外加两个跨关注点共用的基础设施模块（common.py / constants.py / bible_shared.py /
-screenplay_source.py）。
+剧本 IR 保真（ir_*）、叙事蓝图分片与重试预算（blueprint_*）、人物谱生成与补充
+（bible_*）、别名取证（identity_evidence.py / alias_*.py）、状态事实回填
+（status_facts_*.py）、章节认知卡（cognition.py），外加两个跨关注点共用的
+基础设施模块（common.py / constants.py / bible_shared.py / screenplay_source.py）。
+旧点名与身份归并管线（roster_*.py 共 7 个模块）与旁文本净化（bible_paratext.py）
+已于 2026-09-01 整体退场：generate_bible 不再点名角色，这条管线除测试外零生产
+调用方，7+1 个模块彼此连通、构成一条完整链路，随本轮一并删除。
 
 本文件是唯一的稳定入口：全仓所有 `from app.stages import X` / `import app.stages` /
 `stages.X` 使用方式必须不经改动继续可用——下面按来源模块显式再导出每一个符号
@@ -14,17 +16,16 @@ screenplay_source.py）。
 """
 from __future__ import annotations
 
+from app.source_excerpt import index_source_segments
+
 from .alias_backfill import (
     ALIAS_BACKFILL_SOURCE_BUDGET_CHARS,
     Character,
     CharacterAlias,
-    ConfigDict,
     Field,
     _ALIAS_VERDICT_NO_MATCH_LABEL,
     _AliasBackfillDeclaration,
     _AliasBackfillDraft,
-    _ROSTER_PRESENCE_VERDICT_LABELS,
-    _RosterPresenceVerdictResponse,
     _alias_declaration_verified,
     _alias_evidence_resolution,
     _alias_verdict_call,
@@ -34,18 +35,13 @@ from .alias_backfill import (
     _alias_verdict_roster,
     _chapters_by_idx,
     _find_alias_bridge_chapter,
-    _quote_comparison_variants,
     _render_alias_backfill_source,
-    _roster_presence_dossier,
-    _roster_presence_verdict_call,
     _verify_character_aliases_for_subset,
     _verify_character_aliases_in_place,
     asyncio,
     backfill_character_aliases,
     build_chapter_cognition_card,
     defaultdict,
-    index_source_segments,
-    json,
     reverify_character_aliases,
 )
 from .alias_verdict import (
@@ -63,32 +59,14 @@ from .alias_verdict import (
 )
 from .bible_generate import (
     AgentLoopPolicy,
-    BIBLE_APPEARANCE_FIELD_RULE,
-    BIBLE_DETAIL_EVIDENCE_MAX_CHARS,
-    BIBLE_DETAIL_FIRST_TOKEN_TIMEOUT_S,
-    BIBLE_DETAIL_MAX_ATTEMPTS,
-    BIBLE_DETAIL_MAX_TOKENS,
-    BIBLE_DETAIL_TIMEOUT_S,
     Scene,
-    _BibleRosterDraft,
     _BibleRosterEntry,
     _CharacterDetail,
     _SceneBibleDraft,
     _appearance_evidence_verified,
-    _attach_roster_source_appellations,
-    _bible_covers_name,
-    _chapters_without_paratext,
-    _character_detail_evidence_pack,
-    _character_stub_from_roster,
-    _generate_character_detail,
-    _generate_character_detail_batch,
-    _normalize_must_cover_rows,
-    _normalize_roster_against_candidates,
-    _recurring_character_names,
     _render_bible_source,
     _sanitize_character_detail_payload,
     _validate_appearance_evidence,
-    _validate_bible_roster,
     generate_bible,
     generate_scene_bible,
     get_setting,
@@ -98,32 +76,15 @@ from .bible_generate import (
 )
 from .bible_models import (
     AppearanceEvidence,
-    BIBLE_DETAIL_EVIDENCE_MAX_SEGMENTS,
     Literal,
     Relationship,
     World,
-    _assign_protagonist_by_signals,
-    _character_importance_metadata,
-    _pick_canonical_display_name,
-    _spread_named_segments,
-)
-from .bible_paratext import (
-    BIBLE_PARATEXT_BUDGET_S,
-    BIBLE_PARATEXT_CHAPTER_TIMEOUT_S,
-    BIBLE_PARATEXT_CONCURRENCY,
-    BIBLE_PARATEXT_MARGIN_CHAPTERS,
-    BIBLE_ROSTER_INPUT_MAX_CHARS,
-    BIBLE_SOURCE_BUDGET_CHARS,
-    _bible_paratext_scope,
-    _bible_source_plan,
-    get_conn,
 )
 from .bible_shared import (
     BIBLE_FIRST_TOKEN_TIMEOUT_S,
     _BIBLE_TAIL_SAMPLE_MAX,
     _BIBLE_TAIL_SLICE_CHARS,
 )
-from .bible_supplement import _BibleSupplement, _supplement_bible_characters
 from .blueprint_budget import BLUEPRINT_CALL_ABANDONED_BY_DELETE, _BlueprintGenerationBudget
 from .blueprint_budget_trace import (
     _blueprint_generation_budget_for_trace,
@@ -335,98 +296,11 @@ from .identity_evidence import (
     _alias_bridge_dual_anchor_quote,
     _alias_bridge_quote,
     _alias_text_is_independent_appellation,
-)
-from .ir_complete import (
-    IR_MIN_ADAPTED_SOURCE_RATIO,
-    ScreenplayIRFidelityError,
-    _IRFidelityPatch,
-    _complete_screenplay_ir_fidelity,
-    _ir_fidelity_patch_context,
-    _merge_ir_fidelity_patch,
-    _select_fidelity_blueprint_plans,
-    compile_screenplay_ir,
-    math,
-    textmatch,
-)
-from .ir_patch import (
-    IRScene,
-    IRSceneUnit,
-    IR_LOCAL_SOURCE_WINDOW,
-    _IRFidelityInsertion,
-    _IRScenePartition,
-    _IRScenePartitionPlan,
-    _IRSceneReplacement,
+    _quote_comparison_variants,
 )
 from .ir_snapshot import (
-    ArtifactNeedsRebuildError,
-    IR_MIN_LOCAL_ADAPTED_SOURCE_RATIO,
-    _recover_screenplay_ir_candidate,
-    _screenplay_ir_blueprint_snapshot_matches,
     _select_current_blueprint_artifact,
-    screenplay_ir_fidelity_budget,
-    screenplay_ir_missing_event_semantic_paths,
-    screenplay_ir_missing_participant_delivery_paths,
-    screenplay_ir_source_audit_contract_errors,
     screenplay_ir_token_budget,
-)
-from .roster_candidates import (
-    _CharacterRollCall,
-    _MentionedCharacterImportanceResolution,
-    _RosterAppellationScope,
-    _RosterCandidate,
-    _RosterIdentityResolution,
-    _RosterOnstageEvidence,
-    _candidate_appellations,
-    _candidate_source_texts,
-    _coerce_roster_chapter_index,
-    _identity_merge_keys,
-    _is_composite_appellation,
-    _normalize_roster_verdict_payload,
-    _pin_roster_candidates_to_source,
-    _pin_roster_name_to_source,
-    _require_explicit_verdict,
-    _roster_appellation_mentions,
-    _roster_candidate_stands_alone,
-    _roster_label_needs_identity_resolution,
-    _shared_appellations,
-    model_validator,
-)
-from .roster_merge import (
-    BIBLE_APPELLATION_SCOPE_SEGMENTS,
-    _merge_roll_call_candidates,
-    _resolve_generic_character_candidates,
-    _roster_appellation_scope,
-)
-from .roster_personhood import (
-    BIBLE_PERSONHOOD_DOSSIER_SEGMENTS,
-    _RosterPersonhoodResolution,
-    _RosterTrueNameResolution,
-    _filter_non_person_roster_candidates,
-    _named_hit_chapters,
-    _roster_personhood_dossier,
-)
-from .roster_recurring import (
-    _BibleRollCallChunkFailed,
-    _cooccurrence_quote,
-    _corpus_scoped_chapter_threshold,
-    _discover_roster_true_names,
-    _resolve_conflicting_formal_names,
-)
-from .roster_truename import (
-    BIBLE_TRUE_NAME_DOSSIER_BATCHES,
-    BIBLE_TRUE_NAME_DOSSIER_SEGMENTS,
-    _roster_true_name_dossier_batches,
-)
-from .screenplay_generate import (
-    Dialogue,
-    EMOTIONS,
-    _canonical_scene_pack_names,
-    _generate_screenplay_scene_sharded_baseline,
-    _parse_key_line,
-    _scene_pack_dialogues,
-    _speech_budget_table_text,
-    key_line_catalog,
-    validate_and_apply_blueprint_scene_contract,
 )
 from .screenplay_source import (
     SCREENPLAY_SOURCE_BUDGET_CHARS,

@@ -48,15 +48,6 @@ CHARACTER_VIEW_FRAMING: dict[str, tuple[bool, str]] = {
 }
 _DEFAULT_VIEW_FRAMING = (True, "全身立绘")
 
-
-def character_view_requires_full_body(view_role: str | None) -> bool:
-    """这条视角的生成合同要不要求全身入画。
-
-    未知视角按「要求全身」处理：新视角没登记时宁可误报一次，也好过悄悄放行一张
-    真的被腰斩的图。
-    """
-    return CHARACTER_VIEW_FRAMING.get(str(view_role or ""), _DEFAULT_VIEW_FRAMING)[0]
-
 VIEW_ROLE_LABELS = {
     "front_full": "正面全身",
     "three_quarter": "3/4 面",
@@ -79,7 +70,6 @@ PACK_STATUS_GENERATING = "generating"
 PACK_STATUS_QA_PENDING = "qa_pending"
 PACK_STATUS_READY = "ready"
 PACK_STATUS_FAILED = "failed"
-PACK_STATUS_LEGACY = "legacy_partial"
 
 def bool_setting(key: str, default: bool = True) -> bool:
     raw = (get_setting(key) or str(default)).strip().lower()
@@ -374,12 +364,6 @@ def scene_views_for_episode(
 def missing_required_views(views: list[dict[str, Any]], required: tuple[str, ...]) -> list[str]:
     present = {v.get("view_role") for v in views if v.get("status") == "ready" and v.get("image_path")}
     return [role for role in required if role not in present]
-
-
-def pack_is_ready(pack_status: str | None, views: list[dict[str, Any]], required: tuple[str, ...]) -> bool:
-    """结构就绪：必需视角文件齐全即可（QA 分数不参与，PRD QA-SO #16/#20）。"""
-    del pack_status
-    return not missing_required_views(views, required)
 
 
 def scene_primary_is_usable(row, views: list[dict[str, Any]]) -> bool:
@@ -2209,43 +2193,3 @@ async def regenerate_scene_view(
     _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_READY)
     conn.commit()
     return {"status": "ready", "view_role": view_role, "view_id": view_id}
-
-
-# ---------- 高风险视频抽帧 ----------
-
-HIGH_RISK_QA_TAGS = frozenset({
-    "duration_gt5_needs_review",
-    "identity_risk",
-    "occlusion_risk",
-    "crowd_risk",
-    "action_complex",
-    "multi_character",
-    "high_risk_qa",
-    "complex_action",
-    "occlusion",
-})
-
-
-def shot_needs_high_risk_frame_sample(shot: Any) -> bool:
-    """高风险镜头：duration>5 或 risk_tags 命中时，视频 QA 抽五帧。"""
-    tags = {str(t).strip() for t in (getattr(shot, "risk_tags", None) or []) if str(t).strip()}
-    if tags & HIGH_RISK_QA_TAGS:
-        return True
-    try:
-        if int(getattr(shot, "duration_s", 0) or 0) > 5:
-            return True
-    except (TypeError, ValueError):
-        pass
-    if isinstance(shot, dict):
-        try:
-            raw = shot.get("risk_tags")
-            if isinstance(raw, str):
-                raw = json.loads(raw)
-            tags = {str(t).strip() for t in (raw or []) if str(t).strip()}
-            if tags & HIGH_RISK_QA_TAGS:
-                return True
-            if int(shot.get("duration_s") or 0) > 5:
-                return True
-        except (TypeError, ValueError, json.JSONDecodeError):
-            pass
-    return False

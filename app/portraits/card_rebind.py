@@ -47,8 +47,8 @@ from .constants import IDENTITY_NAME_FORM_REFERENTIAL
 from .discovery_fragments import _bible_lock
 
 # 改绑生成的别名没有原文引句可核验（本原语不接收章节/原文输入），如实标注
-# 为「未核验」，不假装有证据锚点——is_exclusive=False 与 app.stages.roster_
-# recurring._attach_roster_source_appellations 的免检通道同一纪律。
+# 为「未核验」，不假装有证据锚点——is_exclusive=False 是免检通道显式登记的
+# 同一业务纪律（见 ERR-20260828-9fcabe 事故复盘）。
 _REBIND_ALIAS_EVIDENCE_CHAPTER_INDEX = -1
 _REBIND_ALIAS_EVIDENCE_QUOTE = "身份仲裁改绑：无原文引句锚点，未核验"
 

@@ -150,7 +150,6 @@ from .retry_scheduling import (
     _defer_provider_poll,
     _requeue_after,
     _schedule_job_retry,
-    retry_paused,
 )
 from .worker_lifecycle import (
     _SWEEPER_INTERVAL_SECONDS,
@@ -176,7 +175,6 @@ from .dispatch import (
     _start_durable_dispatcher,
 )
 from .worker_loop import (
-    _maybe_auto_qa,
     _release_interrupted_worker_job,
     _video_mode_input_roles_valid,
     _wait_for_worker_job,
@@ -462,8 +460,8 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                         )
                         if not slot_claimed and slot_reason == "VIDEO_BUDGET_NOT_AUTHORIZED":
                             raise VideoBudgetAuthorizationError(
-                                "本集缺少有效的视频费用授权，或本次供应商视频调用将超过"
-                                "用户已批准的费用上限；任务已在付费调用前暂停"
+                                "预算台账表缺失（部署/迁移异常），无法记录本次供应商调用，"
+                                "任务已暂停，需人工介入排查"
                             )
                         if not slot_claimed:
                             raise VideoInflightAdmissionDeferred(
@@ -733,15 +731,18 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         run_job_steps.record_success_mode_attempt(conn, job, version, meta, task_id)
         # 生成台产生了新片段，旧的整集合成视频即过期 → 删除，避免成片台展示陈旧成品
         _invalidate_final_video(job["project_id"], ep["episode_no"])
-        # 自动 QA 可能跑满 VLM 读超时（默认 300s），超过默认 180s lease 会被 sweeper
-        # 抢占：原协程仍会跑完但无法 settle，新 worker 则对已成功版本重跑付费链路。
+        # VLM 视觉质检已整体下线，run_auto_qa 不再跑独立的自动 QA 步骤，不再有
+        # 跑满读超时的风险；这里仍按 TIMEOUT_VLM_READ 留出余量，只是防御性冗余
+        # （历史事故：lease 到期后 sweeper 抢占，原协程跑完却无法 settle，新
+        # worker 对已成功版本重跑付费链路），未删除是为了 VLM 未来复活时不用
+        # 重新调参，不代表当前真的会跑到这个时长。
         _assert_job_lease(
             job_id,
             owner,
             lease_seconds=max(180.0, float(config.TIMEOUT_VLM_READ) + 60.0),
         )
         # 完整补齐模式只有 Supervisor 有权重抽和采用；Worker 只执行、校验并产出候选。
-        supervisor_controlled, force_best = await run_job_steps.run_auto_qa(job, version, dest)
+        supervisor_controlled = await run_job_steps.run_auto_qa(job, version, dest)
         _assert_job_lease(job_id, owner)
         await _assert_review_dependency_fence_async(
             job, version["id"], "candidate_evidence",
@@ -761,7 +762,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 return
             raise ProviderError("视频文件技术校验失败，候选不可采用")
         await run_job_steps.adopt_and_settle_candidate(
-            conn, job, job_id, owner, version, cost, supervisor_controlled, force_best,
+            conn, job, job_id, owner, version, cost, supervisor_controlled,
         )
     except LeaseLost:
         return
@@ -823,7 +824,6 @@ __all__ = [
     "_ensure_ai_video_prompt",
     "_image_dimensions",
     "_load_boundary_asset",
-    "_maybe_auto_qa",
     "_narrative_keyframe_candidate_progress",
     "_normalize_boundary_pair",
     "_paid_video_attempt_count",
@@ -866,7 +866,6 @@ __all__ = [
     "reconcile_stalled_video_jobs",
     "recover_and_start",
     "recover_media_jobs",
-    "retry_paused",
     "start_stale_lease_sweeper",
     "stop",
 ]

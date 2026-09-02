@@ -13,8 +13,6 @@ EP1-10 并发回归里 3 集失败；跨项目复现见 ERR-20260828-9fcabe（�
    两边都不进 source_labels（不猜赢家）。
 3. 非回归：带限定语的真实别名（许师姐/陈师兄/赵武刚师兄/金袍老者/上官老者/李富贵/
    虎爷爷）必须全部保留且仍进 source_labels。
-4. `_attach_roster_source_appellations`（免检通道，ERR-20260828-9fcabe 的登记入口）
-   登记的别名 is_exclusive 必须为 False。
 """
 from __future__ import annotations
 
@@ -232,30 +230,3 @@ def test_qualified_aliases_are_not_regressed_by_exclusivity_filtering() -> None:
             assert alias_text in entry["source_labels"], (
                 f"{name} 的别名 {alias_text} 应当保留在 source_labels 里"
             )
-
-
-# ---------- 4. _attach_roster_source_appellations：免检通道显式登记 is_exclusive=False ----------
-
-def test_roster_source_appellation_backfill_marks_alias_non_exclusive() -> None:
-    """免检通道（ERR-20260828-9fcabe 事故登记入口）只做共现检查，从未为排他性做过
-    任何核验——必须显式写 is_exclusive=False，不依赖 schema 默认值。别名仍然登记
-    （解析能力不丢），只是不参与身份决议。"""
-    from app import stages
-
-    character = Character(name="马骥", role="主角", appearance_canonical="书生模样")
-    entry = stages._BibleRosterEntry(
-        name="马骥", role="主角", source_appellations=["大夫"],
-    )
-    chapters = [{"idx": 1, "title": "第一章", "content": (
-        "那些士绅大夫争着想开开眼界，便叫村民邀请马骥前去。"
-    )}]
-
-    stages._attach_roster_source_appellations(character, entry, chapters)
-
-    assert [a.text for a in character.aliases] == ["大夫"]
-    assert character.aliases[0].is_exclusive is False
-
-    bible = _bible(character)
-    registry = identity_authority_registry(bible, [])
-    entry_registry = _entry(registry, "bible:马骥")
-    assert entry_registry["source_labels"] == ["马骥"]  # 「大夫」不折进身份凭证

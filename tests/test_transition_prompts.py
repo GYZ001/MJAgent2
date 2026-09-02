@@ -1,4 +1,4 @@
-from app.compiler import compile_prompt, compile_scene_prompt
+from app.compiler import compile_prompt
 from app.schemas import Bible, Character, Shot, Storyboard, TRANSITIONS, World
 from app.validators import normalize_continuity
 
@@ -83,25 +83,3 @@ def test_video_prompt_contains_incoming_and_outgoing_transition() -> None:
     assert "首日傍晚，藏书阁" in prompt
     # 禁止把下一镜详细首帧剧情注入当前提示词
     assert "甲二儿独坐书案前" not in prompt
-
-def test_tail_keyframe_prompt_contains_transition_tail_requirement() -> None:
-    bible = _bible()
-    shot = _shot(
-        4,
-        "首日上午，广场",
-        ["甲一", "甲二儿"],
-        "甲一背对石碑停住脚步，甲二儿怔在原地。",
-        last_frame_desc="甲二儿眼眶发红，广场人声渐弱。",
-    )
-
-    prompt = compile_scene_prompt(
-        shot,
-        bible,
-        kind="tail",
-        outgoing_transition="闪白",
-        next_scene="首日傍晚，藏书阁",
-    )
-
-    assert "编辑衔接尾帧" in prompt
-    assert "闪白" in prompt
-    assert "不预烧渐暗、闪白、叠化" in prompt

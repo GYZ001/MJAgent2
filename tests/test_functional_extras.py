@@ -4,7 +4,7 @@ import pytest
 
 from app import api, db
 from app.character_policy import is_functional_extra
-from app.compiler import CompileError, compile_prompt, compile_scene_prompt
+from app.compiler import CompileError, compile_prompt
 from app.continuity import shot_contract_dict
 from app.evidence import repository
 from app.harness.contracts import get_contract
@@ -140,10 +140,8 @@ def test_functional_extra_compiles_without_persistent_bible_asset() -> None:
     normalize_offbible_characters(Storyboard(episode_no=1, shots=[shot]), _bible())
 
     video_prompt = compile_prompt(shot, _bible())
-    frame_prompt = compile_scene_prompt(shot, _bible(), kind="tail")
 
     assert "功能性路人「functional:examiner」" in video_prompt
-    assert "功能性路人「functional:examiner」" in frame_prompt
     assert "functional:examiner" in video_prompt and "甲一，测验力，三段" in video_prompt
     assert "[AUDIO TIMELINE]" in video_prompt
 
@@ -171,15 +169,8 @@ def test_legacy_functional_name_requires_persisted_typed_voice_contract() -> Non
         _bible(),
         screenplay=screenplay,
     )
-    frame_prompt = compile_scene_prompt(
-        shot,
-        _bible(),
-        kind="tail",
-        screenplay=screenplay,
-    )
 
     assert "功能性路人「测验员」" in video_prompt
-    assert "功能性路人「测验员」" in frame_prompt
 
 
 def test_functional_extra_must_be_visibly_staged() -> None:

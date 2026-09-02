@@ -103,7 +103,6 @@ def _shot(
         reason_codes=["RELATION_DRIVEN"],
         confidence=0.9,
         estimated_latency_ms=100,
-        estimated_cost=1,
         capability_snapshot_id="cap-1",
     )
 
@@ -281,7 +280,6 @@ async def test_ai_episode_plan_is_single_call_versioned_and_first_shot_is_fixed(
                     "reason_codes": ["MODEL_PROPOSED_INVALID_FIRST_MODE"],
                     "confidence": 0.9,
                     "estimated_latency_ms": 100,
-                    "estimated_cost": 1,
                 },
                 {
                     "shot_id": "SH-2",
@@ -301,7 +299,6 @@ async def test_ai_episode_plan_is_single_call_versioned_and_first_shot_is_fixed(
                     "reason_codes": ["MODEL_RETURNED_EXECUTION_FIELDS"],
                     "confidence": 0.9,
                     "estimated_latency_ms": 100,
-                    "estimated_cost": 1,
                 },
                 {
                     "shot_id": "SH-3",
@@ -310,7 +307,6 @@ async def test_ai_episode_plan_is_single_call_versioned_and_first_shot_is_fixed(
                     "reason_codes": ["INTENTIONAL_RECOMPOSITION"],
                     "confidence": 0.9,
                     "estimated_latency_ms": 100,
-                    "estimated_cost": 1,
                 },
             ],
         })
@@ -452,7 +448,6 @@ async def test_large_episode_plan_is_size_windowed_then_validated_as_one_plan(
                     "reason_codes": ["RELATION_DRIVEN"],
                     "confidence": 0.9,
                     "estimated_latency_ms": 100,
-                    "estimated_cost": 1,
                 }
                 for shot in payload["shots"]
             ],

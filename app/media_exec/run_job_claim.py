@@ -46,8 +46,8 @@ async def _claim_and_load_job(job_id: str, lease_owner: str | None) -> _ClaimedJ
     """Claim the job (if not already leased) and load its version/shot/episode rows.
 
     Returns ``None`` when ``_run_job`` must return immediately (lease not
-    claimed, row vanished/reassigned, or a non-video legacy job was
-    cancelled in place).
+    claimed, row vanished/reassigned, or the job's ``kind`` isn't
+    ``"video"`` and was failed closed in place).
     """
     # Workers are spawned during application recovery.  Give the lifespan and
     # HTTP server a scheduling boundary before any JSON decoding, authority
@@ -60,7 +60,7 @@ async def _claim_and_load_job(job_id: str, lease_owner: str | None) -> _ClaimedJ
     if job is None:
         return None
     if job["kind"] != "video":
-        _cancel_legacy_keyframe_job(conn, job, owner)
+        _fail_unknown_job_kind(job, owner)
         return None
     return _load_claimed_job_rows(conn, owner, job)
 
@@ -94,14 +94,10 @@ async def _claim_job_row(conn: Any, job_id: str, owner: str, lease_owner: str | 
     return job
 
 
-def _cancel_legacy_keyframe_job(conn: Any, job: Any, owner: str) -> None:
-    """Cancel a pre-upgrade legacy keyframe job in place; these no longer run."""
-    # 旧版关键帧 job 可能在升级前已持久化。它们不再恢复或执行，避免继续消耗图片额度，
-    # 同时清除造成前端长期显示"生成中"的遗留状态。
-    conn.execute("UPDATE shots SET scene_status='none' WHERE id=?", (job["shot_id"],))
-    conn.commit()
+def _fail_unknown_job_kind(job: Any, owner: str) -> None:
+    """Fail closed on any job kind other than 'video'; the worker only knows how to run video jobs."""
     if _set_job(
-        job["id"], "cancelled", "关键帧功能已下线；请从参考图视频入口重新生成",
+        job["id"], "failed", f"未知任务类型「{job['kind']}」，worker 不支持执行此类任务",
         lease_owner=owner,
     ):
         media_scheduler.settle_budget(job["id"], 0.0, success=False)

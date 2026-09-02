@@ -457,7 +457,7 @@ def test_legacy_image_fallback_cannot_outrank_or_grade_over_real_video(
     assert before["shots"][0]["has_model_candidate"] is True
     assert media_evidence.grade_shot_video("s1")["version_id"] == "v1"
 
-    selected = media_evidence.select_best_video_candidate("s1", force_best=True)
+    selected = media_evidence.select_best_video_candidate("s1")
 
     assert selected is not None
     assert selected["version_id"] == "v1"

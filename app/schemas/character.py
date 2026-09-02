@@ -35,9 +35,9 @@ class CharacterAlias(BaseModel):
     # 不看 is_exclusive）是两件不同的事——别名本身永不因排他性判定失败被删除。
     # 默认 True 是刻意的：存量数据在迁移前行为与今天完全一致，不产生安全倒退，
     # 也不破坏现有直接构造 CharacterAlias(...) 的测试。真正决定这个值的是
-    # app.stages._alias_verdict_call 新增的排他性裁决（见该函数），或
-    # app.stages._attach_roster_source_appellations 这条免检通道（显式写 False，
-    # 见该函数——它从未为排他性做过任何核验，不该假装做过）。
+    # app.stages._alias_verdict_call 新增的排他性裁决（见该函数），或若干
+    # 共现免检通道（app/portraits/card_aliases.py、card_rebind.py 等，均显式
+    # 写 False——它们从未为排他性做过任何核验，不该假装做过）。
     is_exclusive: bool = True
 
 

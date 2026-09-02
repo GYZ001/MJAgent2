@@ -640,7 +640,7 @@ def test_select_best_video_candidate_adopts_first_technical_version(monkeypatch)
 
     assert selected and selected["version_id"] == "low"
     assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "low"
-    forced = media.select_best_video_candidate("s", force_best=True)
+    forced = media.select_best_video_candidate("s")
     assert forced and forced["version_id"] == "low"
     assert forced["fallback"] is True
     assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "low"
@@ -678,7 +678,7 @@ def test_select_best_video_candidate_does_not_replace_existing_adoption(monkeypa
     import app.artifacts
     monkeypatch.setattr(app.artifacts, "invalidate_episode_final", lambda _: False)
 
-    selected = media.select_best_video_candidate("s", force_best=True)
+    selected = media.select_best_video_candidate("s")
 
     assert selected and selected["version_id"] == "low"
     assert selected["fallback"] is False
@@ -709,7 +709,7 @@ def test_select_best_video_candidate_adopts_single_low_score_candidate(monkeypat
     selected = media.select_best_video_candidate("s")
     assert selected and selected["version_id"] == "only"
     assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "only"
-    forced = media.select_best_video_candidate("s", force_best=True)
+    forced = media.select_best_video_candidate("s")
     assert forced and forced["version_id"] == "only"
 
 

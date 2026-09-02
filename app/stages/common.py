@@ -475,15 +475,17 @@ BIBLE_STATISTICAL_MIN_CHAPTER_RATIO = 0.15
 # 更常用的原文称呼连 aliases 都进不去，检索直接落空。
 BIBLE_FORMAL_NAME_MIN_RATIO = 1.0
 BIBLE_MUST_COVER_MAX = 20        # 前 60 章重要角色容量；详情仍逐角色小请求生成
-# 人数不设上限（见 roster_recurring._recurring_character_names）；这是失控护栏
-# 不是质量门槛——真实作品不会触及，触发多半是资格裁决整体失效，会让下游详情
-# 生成扇出成几百次调用。
+# 人数不设上限（旧点名管线的失控护栏，不是质量门槛）——真实作品不会触及，触发
+# 多半是资格裁决整体失效，会让下游详情生成扇出成几百次调用。旧点名管线
+# （roster_*.py）已于 2026-09-01 整体退场，此常量随该批常量原样保留，未随之
+# 删除（common.py 本轮只改注释，不改符号集）。
 BIBLE_ROSTER_RUNAWAY_MAX = 200
 # 点名调用每个候选最多申报几条在场证据。判据只需要 BIBLE_RECURRING_MIN_ONSTAGE_QUOTES
 # （=2）条核验通过的证据；这里留 1 条余量应付结构闸/裁决闸刷掉个别证据，不留更多——
 # 多留的每一条对戏份多的主角都是纯浪费：一个出场上千次的主角，旧提示词「尽量都列出来」
 # 会让模型老实列出十几条，既拉长点名调用本身的输出（更容易撞 max_tokens 截断，撞了就要
-# 整次重试），又线性拉长下游裁决闸的调用条数。见 `_recurring_character_names` docstring。
+# 整次重试），又线性拉长下游裁决闸的调用条数（旧点名管线已于 2026-09-01 整体退场，
+# 本常量原样保留）。
 BIBLE_ROLL_CALL_MAX_EVIDENCE_PER_CANDIDATE = 3
 BIBLE_ROLL_CALL_CHUNK_CHAPTERS = 1
 BIBLE_ROLL_CALL_CHUNK_INPUT_MAX_CHARS = 8000

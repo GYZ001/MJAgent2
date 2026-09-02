@@ -7,13 +7,11 @@
 "李富贵"，剧本这次写"小胖子"），``card_owner`` 的别名匹配没有东西可匹配，仍会
 漏判、建出第二张卡。``card_owner.py`` 修的是"查得准"，这个模块修的是"查得到"。
 
-证据口径与 ``app.stages.roster_recurring._attach_roster_source_appellations`` 的
-"共现闸"同构（该函数已明确"这条免检通道只做共现检查，没有为排他性做过任何核
-验"）：候选别名文本必须与角色规范名在同一章节原文里、彼此相距不超过一个短窗口
-内共现，才登记；找不到共现证据的候选一律丢弃——不确定不登记，是 CharacterAlias
-的既有合同（见 app/schemas.py:113 docstring），不是本模块新定的规则。``is_exclusive``
-显式写 False：这里同样没有做过任何排他性核验，不该假装做过（同一口径见
-app/stages/roster_recurring.py:196 附近注释）。
+证据口径是"共现闸"：候选别名文本必须与角色规范名在同一章节原文里、彼此相距
+不超过一个短窗口内共现，才登记；找不到共现证据的候选一律丢弃——不确定不
+登记，是 CharacterAlias 的既有合同（见 app/schemas.py:113 docstring），不是
+本模块新定的规则。``is_exclusive`` 显式写 False：这里同样没有做过任何排他性
+核验，不该假装做过（同一业务纪律见 ERR-20260828-9fcabe 事故复盘）。
 
 ``app/portraits/cards_ensure.py`` 的 ``unknown_by_name`` 分组、
 ``app/identity_adjudication.py`` 的 ``identity.source_names`` 持有这份"同一
@@ -29,7 +27,7 @@ import re
 from app.portraits.constants import IDENTITY_NAME_FORM_REFERENTIAL
 from app.schemas import CharacterAlias
 
-# 与 roster_recurring._cooccurrence_quote 同一量级：短窗口，逐字命中，不做模糊匹配。
+# 短窗口，逐字命中，不做模糊匹配。
 _COOCCURRENCE_WINDOW = 80
 
 
@@ -79,7 +77,8 @@ def new_card_aliases(
         aliases.append(CharacterAlias(
             text=label,
             # 这条别名是代码按共现补回来的，没有模型标注过形态，就不替它下结论
-            # （与 roster_recurring._attach_roster_source_appellations 同一口径）。
+            # （免检通道显式登记 is_exclusive=False 的同一业务纪律，见
+            # ERR-20260828-9fcabe 事故复盘）。
             name_kind=IDENTITY_NAME_FORM_REFERENTIAL,
             evidence_chapter_index=chapter_idx,
             evidence_quote=quote,

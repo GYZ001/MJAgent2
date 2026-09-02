@@ -23,8 +23,6 @@ QUALITY_SUFFIX = (
     "人物五官清晰稳定、表情自然，手部与所持道具关系正常稳定；材质稳定、边缘清晰、空间纵深明确，"
     "自然光影与合理景深，运动模糊符合真实摄影规律；动作符合人体结构、重心和惯性并自然连贯，"
     "镜头运动平滑稳定，光线方向、色调和整体美术风格统一，保持竖屏电影质感")
-# 成片不要任何配乐：只保留人物台词/旁白人声与必要环境音
-NO_BGM_SUFFIX = "全程不要任何背景音乐、不要配乐、不要 BGM；声音只保留人物台词、旁白人声与必要的环境音"
 SOURCE_EXCERPT_MARKER = "小说原文兜底参考："
 VIDEO_PROMPT_CONTRACT_VERSION = "cinematic_continuity_v1"
 
@@ -33,21 +31,6 @@ def _clean_transition(transition: str | None) -> str:
     if not transition or transition == "硬切":
         return ""
     return transition
-
-def _scene_tail_transition_line(transition: str | None, next_scene: str | None = None,
-                                next_first_frame_desc: str | None = None) -> str:
-    transition = _clean_transition(transition)
-    if not transition:
-        return ""
-    target = f"下一镜场景是「{next_scene.strip()}」" if next_scene and next_scene.strip() else "下一镜是新场景"
-    first_frame = (
-        f"，首帧意向是「{next_first_frame_desc.strip()[:70]}」"
-        if next_first_frame_desc and next_first_frame_desc.strip() else ""
-    )
-    return (
-        f"编辑衔接尾帧：最终编辑将用「{transition}」进入下一镜，{target}{first_frame}；"
-        "本尾图只保留稳定、干净、可重叠的动作结果，不预烧渐暗、闪白、叠化或字幕。"
-    )
 
 
 class CompileError(ValueError):
@@ -295,12 +278,6 @@ def shot_contact_phase(shot: Shot) -> str:
             "approach", "established", "separated",
         }:
             return value
-    return "none"
-
-
-def contact_action_phase(text: str | None) -> str:
-    """Legacy text cannot authoritatively declare an interaction phase."""
-    _ = text
     return "none"
 
 
@@ -1676,100 +1653,6 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
 
     return sanitize_seedance_prompt(text)
 
-
-
-SCENE_RUNTIME_CONTRACT = (
-    "严格满足上方结构化身份、场景、动作、构图、文字和技术合同；"
-    "不添加合同外主体、状态、标记或媒介变化"
-)
-SCENE_QUALITY = (
-    "竖屏 9:16 单帧定格画面，构图完整，人物五官清晰稳定、表情自然，手部与所持道具关系正常稳定，"
-    "光影与色调统一，电影质感，高清")
-# 角色不漂移 + 同镜两帧同机位 + 特效克制（与视频侧一致，三者是全时长区间成片稳定的关键）
-SCENE_CONSISTENCY = (
-    "人物形象严格遵循上方角色锚点串与参考图：同一张脸、同一发型、同一服装、同一年龄与体型，跨镜不漂移；"
-    "同框多人物默认站立身高与眼线齐平、体型尺度协调，除非画面描述已写明身高差，禁止随意一高一低"
-)
-SCENE_SAME_FRAMING = "本帧与本镜另一张关键帧（首图/尾图）保持同一机位、同一构图、同一场景布置与光线方向，只有人物动作所处的瞬间不同，不要换机位或重新构图"
-# 动作/互动保真：把"摸石碑"画成"正面端站、手悬空、与石碑互不相干"是当前关键帧最常见的失真。
-SCENE_ACTION_FIDELITY = (
-    "严格按上方画面描述还原人物的动作与朝向：若描述中人物在触碰/按压/拿取/递出/挥击/指向/注视/搀扶某个对象或另一个人，"
-    "必须画出明确的接触或明确朝向该对象——人物的身体、肩线、面部与视线随动作转向目标，手部真实搭在/握住/伸向目标，"
-    "人物与对象形成清晰可读的互动关系；切勿把有互动的动作画成正面端站、双手垂放、目视镜头、与对象彼此无关的摆拍站姿；"
-    "接触类动作优先侧面构图，清楚展现接触点与双方相对方位"
-)
-SCENE_CONTACT_SIDE_VIEW = (
-    "本帧含接触类动作：采用侧面视角构图，清楚展现肢体接触点与人物/对象的空间关系，禁止正面摆拍"
-)
-SCENE_EFFECT_RESTRAINT = "光效/特效服从剧情：日常场景克制写实、不要满屏光效或能量粒子，仅在情绪高潮或力量爆发瞬间才用强特效且不遮挡面部表情"
-
-
-def compile_scene_prompt(shot: Shot, bible: Bible, *, kind: str = "tail",
-                         outgoing_transition: str | None = None,
-                         next_scene: str | None = None,
-                         next_first_frame_desc: str | None = None,
-                         screenplay: EpisodeScreenplay | None = None) -> str:
-    """编译“场景关键帧”图像生成 prompt（Seedream 用）：画风 + 场景 + 在场人物锚点 +
-    本镜动作的【首图/尾图定格】。生成的图随后作为 Seedance 视频首尾帧。"""
-    if kind not in ("head", "tail"):
-        raise CompileError(f"未知关键帧类型：{kind}")
-    bible_map = {c.name: c for c in bible.characters}
-    identity_resolver = _assert_shot_character_contract(
-        shot, bible, context="关键帧", screenplay=screenplay,
-    )
-    declared_functional_names = typed_functional_identity_names(screenplay)
-    anchors = "；".join(
-        identity_resolver.visual_anchor(name)
-        if identity_resolver is not None
-        else (
-            bible_map[name].appearance_canonical
-            if name in bible_map else (
-                collective_role_anchor(name)
-                if is_collective_role(name)
-                else functional_extra_anchor(
-                    name,
-                    declared_functional_names=declared_functional_names,
-                )
-            )
-        )
-        for name in shot.characters
-    )
-    visible_names = "、".join(shot.characters)
-    visible_roster = (
-        f"本帧只允许出现这些画面人物：{visible_names}；不得添加名单外人物、无关路人或多余人影，"
-        "人物位置必须符合本镜首尾帧描述和动作调度"
-        if visible_names else "")
-    scene_hint = shot.scene_setting.strip()
-    # 优先用分镜给出的“首帧/尾帧画面描述”（两者明显不同）；缺失时退回 action_desc + 起势/收势框定
-    ff = (shot.first_frame_desc or "").strip()
-    lf = (shot.last_frame_desc or "").strip()
-    if kind == "head":
-        frame_desc = (f"画面定格在本镜【开始】的静止瞬间（动作尚未发生）：{ff}" if ff
-                      else f"画面定格在本镜开始的瞬间（动作起势，尚未展开）：{shot.action_desc}")
-    else:
-        frame_desc = (f"画面定格在本镜【结束】的静止瞬间（动作已完成、结果清晰可见，与开始画面明显不同）：{lf}" if lf
-                      else f"画面定格在本镜结束的瞬间（动作收势，动作结果清晰可见）：{shot.action_desc}")
-    transition_frame_hint = (
-        _scene_tail_transition_line(outgoing_transition, next_scene, next_first_frame_desc)
-        if kind == "tail" else ""
-    )
-    parts = [
-        f"统一画风：{bible.world.visual_style_canonical}",
-        f"画面人物：{anchors}" if anchors else "",
-        visible_roster,
-        SCENE_CONSISTENCY if anchors else "",
-        f"场景：{scene_hint}" if scene_hint else "",
-        frame_desc,
-        SCENE_ACTION_FIDELITY if anchors else "",
-        SCENE_CONTACT_SIDE_VIEW if has_contact_action(shot) else "",
-        SCENE_SAME_FRAMING,
-        SCENE_EFFECT_RESTRAINT,
-        transition_frame_hint,
-        f"景别：{shot.shot_size}" + ("；机位：侧面" if has_contact_action(shot) else ""),
-        SCENE_QUALITY,
-        SCENE_RUNTIME_CONTRACT,
-    ]
-    return "。".join(p.strip().rstrip("。") for p in parts if p.strip())
 
 
 def idem_key(prompt_text: str, image_urls: list[tuple[str, str]] | None = None) -> str:

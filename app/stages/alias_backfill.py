@@ -1,22 +1,22 @@
-"""别名取证——在场裁决、候选判别证据解析与别名回填/复核主入口。"""
+"""别名取证——候选判别证据解析与别名回填/复核主入口。
+
+本文件原有的人物点名在场裁决闸（卷宗检索 + 独立模型裁决）已随「人物谱旧点名
+管线整体退场」（2026-09-01）删除：唯一调用方是同批删除的点名管线协作模块，
+除测试外零生产调用方。
+"""
 from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-import hashlib
-import json
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 from app import config
 from app.db import log_provider_call
 from app.harness import model_gateway
 from app.schemas import (Bible, Character, CharacterAlias,
                          extract_json)
-from app.source_excerpt import (
-    index_source_segments,
-)
 
 from .alias_verdict import (
     _ALIAS_VERDICT_NO_MATCH_LABEL,
@@ -35,127 +35,7 @@ from .constants import SYSTEM_PREFIX
 from .identity_evidence import (
     _alias_declaration_verified,
     _find_alias_bridge_chapter,
-    _quote_comparison_variants,
 )
-
-
-# ---------- A0a. 人物点名在场裁决闸（见 §3 步骤 3，与别名裁决闸同一分工范式：
-# 代码检索卷宗 → 低温模型独立裁决 → 代码结构性钉证）----------
-#
-# 根因回顾（见 `_recurring_character_names` docstring）：旧判据把"名字在原文窗口里
-# 出现的次数"当成"这个人是不是重要角色"的代理信号，王伯/周员外/靠山老祖三个反例
-# 证明这个信号会整体失效——命中全部来自旁白交代身份或他人台词提及，本人从未
-# 真正出现在画面里。结构闸（G1-G3，见 `_recurring_character_names`）只能核验
-# "引句确实是原文逐字内容、称呼确实在引句里出现"，核验不了"这句话描述的是不是
-# 这个人本人在场"——这是一道开放语义判断，必须像别名裁决闸一样交给独立的低温
-# 模型调用，代码只做结构性钉证。
-
-
-def _roster_presence_dossier(
-    chapter_idx: int, chapter_text: str, quote: str,
-) -> list[dict[str, Any]]:
-    """在场裁决卷宗检索：quote 已经过结构闸核验为该章原文的逐字子串（含
-    `_quote_comparison_variants` 允许的脱引号变体），这里用 `index_source_segments`
-    定位 quote 落在哪个自然段，连同前后各 1 段一并收录，供裁决闸判断"在场 vs 仅被
-    提及"时看到足够上下文——不像别名裁决闸那样需要覆盖全部候选人的按层保底配额
-    （这里没有候选竞争，只有一条证据本身要不要被采信），一段 + 前后各 1 段的小卷宗
-    足够。quote 跨越自然段边界、或分段规则下找不到任何包含 quote 的自然段（极端
-    情况）时返回空列表，交由调用方按 `reason="no_presence_dossier"` 拒绝——不确定
-    不登记的安全默认在这里同样成立，不是跳过检查。"""
-    segments = index_source_segments(chapter_text)
-    variants = _quote_comparison_variants(quote)
-    hit_index = next(
-        (i for i, seg in enumerate(segments) if any(v in seg.text for v in variants)),
-        None,
-    )
-    if hit_index is None:
-        return []
-    lo = max(0, hit_index - 1)
-    hi = min(len(segments) - 1, hit_index + 1)
-    return [
-        {"chapter_idx": chapter_idx, "segment_index": i + 1, "text": segments[i].text}
-        for i in range(lo, hi + 1)
-    ]
-
-
-_ROSTER_PRESENCE_VERDICT_LABELS = ("onstage", "mentioned_only", "uncertain")
-
-
-class _RosterPresenceVerdictResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    # 三态是非题结构本身决定的封闭集合（在场/仅被提及/无法确定），不是从业务数据里
-    # 枚举出的名单，schema 层面同样用 enum 收紧（见 `_roster_presence_verdict_call`）。
-    verdict: str
-    # 钉证判据与别名裁决闸同一范式：模型只需引用卷宗目录里某一条的段号，不要求逐字
-    # 复述原文；schema 层面用 enum 收紧到本次卷宗实际收录的段号集合，代码层面复用
-    # `_alias_verdict_pin_segment` 再做一次结构性核验。
-    supporting_segment_index: int
-
-
-async def _roster_presence_verdict_call(
-    *, appellation: str, dossier: list[dict[str, Any]], project_id: str | None,
-) -> _RosterPresenceVerdictResponse:
-    """在场裁决：唯一一次独立模型调用，只给卷宗原文，问一道结构相同、措辞不同的
-    是非题——不是"称谓 X 指代候选中的谁"（别名裁决闸的候选判别），而是"这段文字里，
-    这个称呼指代的人物本人是不是真的置身其中"。这段"在场"语义（本人说话/动作/被
-    叙述在场 vs 被提及/回忆/转述/背景交代）与 `app/production/prep_pack.py`
-    `_extract_chunk` 的 `segment_indexes` 判据是同一条语义边界，此处只是移植到
-    一个新的调用点。"""
-    catalog = "\n\n".join(
-        f"[第{item['chapter_idx']}章·段{item['segment_index']}] {item['text']}"
-        for item in dossier
-    )
-    segment_indexes = [item["segment_index"] for item in dossier]
-    prompt = f"""下面是原著第 {dossier[0]['chapter_idx']} 章中包含称呼"{appellation}"的原文段落
-（含前后语境，出现顺序不代表任何推断结论），每段前面标了段号：
-{catalog}
-
-任务：仅依据以上原文段落本身，判断称呼"{appellation}"所指代的人物本人，是不是真的出现
-在画面中——本人在说话、在行动，或被旁白直接叙述为置身其中，才算在场；如果这段文字里
-正在说话、正在行动、被叙述置身其中的是别人，"{appellation}"只是作为被谈论、被指涉、被
-交代来历或状态的对象出现在别人的叙述或话语里，即使字面提到了这个称呼，也不算在场。
-- verdict 三选一："onstage"（本人确实在场）/ "mentioned_only"（只是被提及、回忆、转述
-  或背景交代，本人未真正置身其中）/ "uncertain"（原文本身不足以判断）；证据不够就选
-  uncertain，不要为了给出结论而猜测。
-- supporting_segment_index 必须填上面某一段落标注的段号（取值只能是 {segment_indexes}
-  之一），选你得出这个结论最主要依据的那一段，不要凭空填一个没在目录里出现的段号。
-只输出符合 Schema 的 JSON。"""
-    operation_id = "character_roster_presence_verdict:" + hashlib.sha256(
-        json.dumps(
-            {
-                "appellation": appellation,
-                "dossier": [
-                    (item["chapter_idx"], item["segment_index"]) for item in dossier
-                ],
-            },
-            ensure_ascii=False, sort_keys=True,
-        ).encode("utf-8")
-    ).hexdigest()
-    schema = _RosterPresenceVerdictResponse.model_json_schema()
-    schema["properties"]["supporting_segment_index"]["enum"] = segment_indexes
-    schema["properties"]["verdict"]["enum"] = list(_ROSTER_PRESENCE_VERDICT_LABELS)
-    return await model_gateway.chat_structured(
-        [{"role": "user", "content": prompt}],
-        model_type=_RosterPresenceVerdictResponse,
-        validate=None,
-        operation_id=operation_id,
-        max_tokens=300,
-        # 低温：与 `_alias_verdict_call` 同一理由——这道闸的语义判断要稳定复现，
-        # 同一份卷宗重跑不该一次判在场一次判不确定。
-        temperature=0.0,
-        format_retry_limit=1,
-        semantic_retry_limit=1,
-        output_schema=schema,
-        call_meta=_bible_short_json_call_meta({
-            "stage": "人物在场裁决",
-            "stage_key": "character_roster_presence_verdict",
-            "call_role": "stage_generate",
-            "call_role_label": "人物在场裁决",
-            "expected_json": True,
-            "project_id": project_id,
-            "appellation": appellation,
-        }),
-    )
 
 
 def _alias_verdict_roster(bible: Bible) -> dict[str, list[str]]:

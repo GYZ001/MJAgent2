@@ -4,23 +4,18 @@ import asyncio
 from copy import deepcopy
 import hashlib
 import json
-import pathlib
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
-from app import config, db, portraits, stages
+from app import config, portraits, stages
 from app import errors as app_errors
 from app import identity_adjudication
-from app.evidence import repository as evidence_repository
-from app.harness.types import EvidenceArtifact
 from app.identity_adjudication import adjudicate_screenplay_ir_identities
 from app.identity_authority import normalize_character_resolution
 from app.identity_contracts import narrative_identity_resolver
 from app.narrative import validate_screenplay_narrative
-from app.observability.tracing import bind_trace
 from app.production.screenplay_document import (
     document_to_screenplay,
     screenplay_to_document,
@@ -1865,99 +1860,6 @@ def test_v13_rejects_globally_overcompressed_units() -> None:
         )
 
 
-def test_fidelity_plan_selection_keeps_low_density_internal_windows() -> None:
-    context = {
-        "missing_source_ids": [],
-        "windows_requiring_expansion": [{
-            "source_segments": [
-                {"source_segment_id": "SRC0002", "text": "第二段"},
-                {"source_segment_id": "SRC0003", "text": "第三段"},
-                {"source_segment_id": "SRC0004", "text": "第四段"},
-                {"source_segment_id": "SRC0005", "text": "第五段"},
-            ],
-        }],
-    }
-    plans = [
-        SimpleNamespace(key="bp-sc001", source_segment_ids=["SRC0001", "SRC0002"]),
-        SimpleNamespace(key="bp-sc002", source_segment_ids=["SRC0003"]),
-        SimpleNamespace(key="bp-sc003", source_segment_ids=["SRC0004", "SRC0005"]),
-    ]
-
-    remaining, internal, selected, repair_source_ids = (
-        stages._select_fidelity_blueprint_plans(
-            context,
-            plans,
-            candidate_scene_count=3,
-        )
-    )
-
-    assert remaining == []
-    assert [plan.key for plan in internal] == [
-        "bp-sc001", "bp-sc002", "bp-sc003",
-    ]
-    assert selected == []
-    assert repair_source_ids == {
-        "SRC0002", "SRC0003", "SRC0004", "SRC0005",
-    }
-
-
-def test_fidelity_patch_routes_unit_to_its_source_owner_scene() -> None:
-    candidate = ScreenplayGenerationIR.model_validate(_v13_payload())
-    candidate.source_scene_owners = {
-        "SRC0001": "sc1",
-        "SRC0002": "sc2",
-        "SRC0003": "sc3",
-    }
-    unit = candidate.scenes[1].units[0].model_copy(deep=True)
-    original_counts = {
-        scene.key: len(scene.units) for scene in candidate.scenes
-    }
-    patch = stages._IRFidelityPatch.model_validate({
-        "insertions": [{
-            "scene_key": "sc1",
-            "units": [unit.model_dump(mode="json")],
-        }],
-    })
-
-    inserted = stages._merge_ir_fidelity_patch(
-        candidate,
-        patch,
-        SOURCE,
-        round_no=1,
-    )
-
-    assert inserted == 1
-    assert len(candidate.scenes[0].units) == original_counts["sc1"]
-    assert len(candidate.scenes[1].units) == original_counts["sc2"] + 1
-
-
-def test_fidelity_patch_rejects_unit_with_multiple_source_owners() -> None:
-    candidate = ScreenplayGenerationIR.model_validate(_v13_payload())
-    candidate.source_scene_owners = {
-        "SRC0001": "sc1",
-        "SRC0002": "sc2",
-        "SRC0003": "sc3",
-    }
-    unit = candidate.scenes[0].units[0].model_copy(deep=True)
-    unit.source_segment_ids = ["SRC0001", "SRC0002"]
-    unit.action_agency.source_segment_ids = ["SRC0001", "SRC0002"]
-    unit.text_provenance.source_segment_ids = ["SRC0001", "SRC0002"]
-    patch = stages._IRFidelityPatch.model_validate({
-        "insertions": [{
-            "scene_key": "sc1",
-            "units": [unit.model_dump(mode="json")],
-        }],
-    })
-
-    with pytest.raises(ValueError, match="跨越多个 source owner"):
-        stages._merge_ir_fidelity_patch(
-            candidate,
-            patch,
-            SOURCE,
-            round_no=1,
-        )
-
-
 def test_truncated_ir_recovers_only_complete_top_level_members() -> None:
     payload = _ir_payload()
     payload["format_version"] = "screenplay-generation-ir.v1.2"
@@ -3225,38 +3127,6 @@ def _audit_only_ir_payload(*source_ids: str) -> dict:
     return payload
 
 
-def _persist_recoverable_ir(
-    *,
-    episode_id: str,
-    input_fingerprint: str,
-    contract_version: str,
-    payload: dict,
-) -> tuple[str, str, dict]:
-    run_id = evidence_repository.create_run(
-        workflow_type="screenplay",
-        scope_type="episode",
-        scope_id=episode_id,
-        input_fingerprint=input_fingerprint,
-    )
-    step_id = evidence_repository.create_step(run_id, "screenplay.iteration")
-    artifact = evidence_repository.create_artifact(
-        EvidenceArtifact(
-            type="screenplay_generation_ir",
-            scope_type="episode",
-            scope_id=episode_id,
-            status="candidate",
-            trust_level="T1",
-            content=payload,
-            contract_version=contract_version,
-            prompt_version=stages.SCREENPLAY_BASELINE_PROMPT_VERSION,
-        ),
-        step_run_id=step_id,
-    )
-    return run_id, step_id, artifact
-
-
-
-
 def test_current_ir_serialization_declares_participant_delivery_contract() -> None:
     payload = _participant_delivery_complete_ir_payload(
         stages.IR_VERSION
@@ -3459,184 +3329,6 @@ def test_source_audit_contract_rejects_invalid_canonical_identity(
         ScreenplayGenerationIR.model_validate(payload)
 
 
-def test_recovery_accepts_legal_current_ir_artifact() -> None:
-    episode_id = "ep-ir-contract-v4"
-    run_id, step_id, artifact = _persist_recoverable_ir(
-        episode_id=episode_id,
-        input_fingerprint="ir-contract-v4",
-        contract_version=stages.IR_VERSION,
-        payload=_participant_delivery_complete_ir_payload(
-            stages.IR_VERSION
-        ),
-    )
-
-    with bind_trace(run_id, step_id):
-        recovered = stages._recover_screenplay_ir_candidate(episode_id)
-
-    assert recovered is not None
-    candidate, artifact_id = recovered
-    assert artifact_id == artifact["id"]
-    assert candidate.format_version == "screenplay-generation-ir.v4"
-    row = db.get_conn().execute(
-        "SELECT status,stale_reason FROM artifacts WHERE id=?",
-        (artifact["id"],),
-    ).fetchone()
-    assert tuple(row) == ("candidate", None)
-
-
-def test_recovery_rejects_legal_ir_payload_with_drifted_outer_hash() -> None:
-    episode_id = "ep-ir-contract-v4-tampered"
-    payload = _participant_delivery_complete_ir_payload(stages.IR_VERSION)
-    run_id, step_id, artifact = _persist_recoverable_ir(
-        episode_id=episode_id,
-        input_fingerprint="ir-contract-v4-tampered",
-        contract_version=stages.IR_VERSION,
-        payload=payload,
-    )
-    tampered = deepcopy(payload)
-    tampered["metadata"]["title"] = "另一份仍合法的 IR"
-    conn = db.get_conn()
-    conn.execute(
-        "UPDATE artifacts SET content_json=? WHERE id=?",
-        (json.dumps(tampered, ensure_ascii=False), artifact["id"]),
-    )
-    conn.commit()
-
-    with bind_trace(run_id, step_id):
-        recovered = stages._recover_screenplay_ir_candidate(episode_id)
-
-    assert recovered is None
-    row = conn.execute(
-        "SELECT status,stale_reason FROM artifacts WHERE id=?",
-        (artifact["id"],),
-    ).fetchone()
-    assert row["status"] == "stale"
-    assert "存储指纹漂移" in row["stale_reason"]
-
-
-def test_recovery_rebuilds_ir_with_swapped_audit_node_source_groups() -> None:
-    episode_id = "ep-ir-contract-v3-audit-authority"
-    payload = _audit_only_ir_payload("SRC0002", "SRC0003")
-    expected = deepcopy(payload["source_audit_annotations"])
-    payload["source_audit_annotations"][0]["source_segment_ids"], payload[
-        "source_audit_annotations"
-    ][1]["source_segment_ids"] = (
-        payload["source_audit_annotations"][1]["source_segment_ids"],
-        payload["source_audit_annotations"][0]["source_segment_ids"],
-    )
-    run_id, step_id, artifact = _persist_recoverable_ir(
-        episode_id=episode_id,
-        input_fingerprint="ir-contract-v3-audit-authority",
-        contract_version=stages.IR_VERSION,
-        payload=payload,
-    )
-
-    with bind_trace(run_id, step_id):
-        recovered = stages._recover_screenplay_ir_candidate(
-            episode_id,
-            expected_source_audit_annotations=expected,
-        )
-
-    assert recovered is None
-    row = db.get_conn().execute(
-        "SELECT status,stale_reason FROM artifacts WHERE id=?",
-        (artifact["id"],),
-    ).fetchone()
-    assert row["status"] == "stale"
-    assert "IR_SOURCE_AUDIT_AUTHORITY_MISMATCH" in row["stale_reason"]
-
-
-def test_recovery_marks_current_ir_without_source_audit_contract_stale() -> None:
-    episode_id = "ep-ir-contract-v3-audit-missing"
-    payload = _participant_delivery_complete_ir_payload(stages.IR_VERSION)
-    payload.pop("source_audit_annotations")
-    run_id, step_id, artifact = _persist_recoverable_ir(
-        episode_id=episode_id,
-        input_fingerprint="ir-contract-v3-audit-missing",
-        contract_version=stages.IR_VERSION,
-        payload=payload,
-    )
-
-    with bind_trace(run_id, step_id):
-        recovered = stages._recover_screenplay_ir_candidate(episode_id)
-
-    assert recovered is None
-    row = db.get_conn().execute(
-        "SELECT status,stale_reason FROM artifacts WHERE id=?",
-        (artifact["id"],),
-    ).fetchone()
-    assert row["status"] == "stale"
-    assert "ARTIFACT_NEEDS_REBUILD" in row["stale_reason"]
-    assert "source_audit_annotations" in row["stale_reason"]
-
-
-def test_recovery_marks_structurally_complete_legacy_ir_for_rebuild() -> None:
-    episode_id = "ep-ir-contract-v1-complete"
-    run_id, step_id, artifact = _persist_recoverable_ir(
-        episode_id=episode_id,
-        input_fingerprint="ir-contract-v1-complete",
-        contract_version="screenplay-generation-ir.v1.5",
-        payload=_participant_delivery_complete_ir_payload(
-            "screenplay-generation-ir.v1.5"
-        ),
-    )
-
-    with bind_trace(run_id, step_id):
-        recovered = stages._recover_screenplay_ir_candidate(episode_id)
-
-    assert recovered is None
-    row = db.get_conn().execute(
-        "SELECT status,stale_reason FROM artifacts WHERE id=?",
-        (artifact["id"],),
-    ).fetchone()
-    assert row["status"] == "stale"
-    assert "需要重建" in row["stale_reason"]
-
-
-def test_recovery_marks_legacy_ir_without_participant_deliveries_stale() -> None:
-    episode_id = "ep-ir-contract-v1-incomplete"
-    payload = _ir_payload()
-    payload["format_version"] = "screenplay-generation-ir.v1.5"
-    for scene in payload["scenes"]:
-        for unit in scene["units"]:
-            unit.pop("participant_deliveries", None)
-    for event in payload["events"]:
-        event.pop("participant_deliveries", None)
-    run_id, step_id, artifact = _persist_recoverable_ir(
-        episode_id=episode_id,
-        input_fingerprint="ir-contract-v1-incomplete",
-        contract_version="screenplay-generation-ir.v1.5",
-        payload=payload,
-    )
-
-    with bind_trace(run_id, step_id):
-        recovered = stages._recover_screenplay_ir_candidate(episode_id)
-
-    assert recovered is None
-    row = db.get_conn().execute(
-        "SELECT status,stale_reason FROM artifacts WHERE id=?",
-        (artifact["id"],),
-    ).fetchone()
-    assert row["status"] == "stale"
-    assert "ARTIFACT_NEEDS_REBUILD" in row["stale_reason"]
-    assert "participant_deliveries" in row["stale_reason"]
-
-
-def test_durable_ir_without_blueprint_hash_uses_strict_runtime_validation() -> None:
-    assert stages._screenplay_ir_blueprint_snapshot_matches(
-        {},
-        "current-blueprint-hash",
-    )
-    assert stages._screenplay_ir_blueprint_snapshot_matches(
-        {"blueprint_hash": "current-blueprint-hash"},
-        "current-blueprint-hash",
-    )
-    assert not stages._screenplay_ir_blueprint_snapshot_matches(
-        {"blueprint_hash": "different-blueprint-hash"},
-        "current-blueprint-hash",
-    )
-
-
 def test_ir_token_budget_scales_with_source_segments() -> None:
     medium_source = "\n\n".join(
         f"第{index}段。" + "剧情动作" * 20
@@ -3772,25 +3464,6 @@ def test_screenplay_document_roundtrip_preserves_body_interleave() -> None:
         "actor_id": "谷言",
         "agency_mode": "voluntary",
     }]
-
-
-def test_gap_search_walks_every_remaining_batch(monkeypatch) -> None:
-    """A batch without a gap is not a failure; the gap is in a later batch.
-
-    Production EP2 died at IR_MERGE with 「IR 保真补写没有可处理的缺口窗口」
-    because only the first six remaining plans were inspected, and its missing
-    source sat further along the plan list.
-    """
-    from app.stages import ir_complete as stages_module
-
-    source = pathlib.Path(stages_module.__file__).read_text(encoding="utf-8")
-    body = source[source.index("selected_windows = project_windows("):]
-    body = body[: body.index("context[\"required_remaining_scene_plans\"]")]
-
-    # The search must iterate the remaining plans, not slice a fixed prefix.
-    assert "for start in range(0, len(_remaining_plans), 6):" in body
-    assert "_remaining_plans[start:start + 6]" in body
-    assert "_remaining_plans[:6]" not in body
 
 
 def test_attributed_text_unit_needs_no_person_state_subject_in_ir() -> None:

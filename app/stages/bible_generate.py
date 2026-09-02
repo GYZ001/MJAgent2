@@ -5,33 +5,30 @@
 判定」调用——那个中间方案本身就是错的，见该函数 docstring 的完整理由（简言
 之：画风由用户在导入面板选定，问模型是多余的；这次多余调用在真实项目上直接
 触发 HiAgent 内容审核 content_filter，把用户卡死在 bible_status=failed 且没有
-出路）。下方 `_BibleRosterDraft` / `_normalize_must_cover_rows` /
-`_normalize_roster_against_candidates` / `_validate_bible_roster` 与
-`.alias_backfill` / `.roster_recurring` 的导入，连同 `_generate_character_detail`
-/ `_generate_character_detail_batch` 两个单角色详情生成原语，现在只服务于已退场
-的旧点名主链路——不再被 `generate_bible` 调用，保留只是因为：①它们仍被
-`app/stages/__init__.py` 按原样重新导出、供 `tests/test_bible_parallelism.py`
-等直接单元测试；②与 roster_*.py 七个模块同批退场，删除是单独一轮任务（不在
-本次改动范围）。
+出路）。
+
+`_generate_character_detail` / `_generate_character_detail_batch` 两个单角色
+详情生成原语已随点名/详情生成退场删除（生产零调用，`generate_bible` 从不
+调用它们）。旧点名链已于 2026-09-01 整体退场：8 个协作模块（点名 → 结构闸 →
+独立裁决闸 → 归并 → 排序 → 旁文本净化）逐个 grep 复核确认彼此连通、除测试外
+零生产调用方，本轮随测试一并删除。
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
-import time
+import time  # noqa: F401 -- 本模块自身不再用，经 __init__ 再导出；tests/test_blueprint_shard_budget.py
+# 仍会 monkeypatch.setattr(stages.time, ...)（time 是共享单例模块对象，见
+# tests/test_stages_monkeypatch_guard.py 模块 docstring 的说明），必须保留可解析入口
 
 from pydantic import BaseModel
 
-from app import config
-from app.db import get_setting, log_provider_call
-from app.harness import model_gateway
+from app.db import get_setting
 from app.loops import AgentLoop, AgentLoopPolicy
 from app.schemas import (Bible, Character, Scene, World)
-# 下面几个 import 块里有一批本模块自己已经不再调用的名字：点名与角色详情退出
-# 首版主路径之后（见 generate_bible 的 docstring），它们的调用点没了，但
-# app/stages/__init__.py 仍从本模块透传导出它们，是包级对外 API 的一部分。
-# 删掉会静默打断 app.stages.validate_bible 这类既有引用，因此标 noqa 保留，
-# 与 roster_* 一起在专门那一轮里连同再导出一并退场。
+# _appearance_evidence_verified/_validate_appearance_evidence 本模块自身已不再
+# 调用（外观证据核验随详情生成一起归了映射台），但 app/stages/__init__.py 仍从
+# 本模块透传导出它们，且被 app/portraits/cards.py（生产代码）与多个测试文件
+# 直接消费，删掉会静默打断这些既有引用，因此标 noqa 保留。
 from app.validators import (validate_bible,  # noqa: F401 -- re-exported by app/stages/__init__.py
                             validate_scene_bible)
 
@@ -40,177 +37,16 @@ from .alias_backfill import (  # noqa: F401 -- re-exported, see note above
     _verify_character_aliases_in_place,
 )
 from .bible_models import (  # noqa: F401 -- re-exported, see note above
-    _BibleRosterDraft,
     _BibleRosterEntry,
     _CharacterDetail,
-    _character_detail_evidence_pack,
-    _character_stub_from_roster,
-    _normalize_must_cover_rows,
-    _normalize_roster_against_candidates,
     _sanitize_character_detail_payload,
-    _validate_bible_roster,
 )
-from .bible_paratext import (
-    BIBLE_APPEARANCE_FIELD_RULE,
-    BIBLE_DETAIL_EVIDENCE_MAX_CHARS,
-    BIBLE_DETAIL_FIRST_TOKEN_TIMEOUT_S,
-    BIBLE_DETAIL_MAX_ATTEMPTS,
-    BIBLE_DETAIL_MAX_TOKENS,
-    BIBLE_DETAIL_TIMEOUT_S,
-    _chapters_without_paratext,  # noqa: F401 -- generate_bible 不再净化旁文本，但符号仍经 __init__ 再导出
-)
-from .bible_shared import _bible_short_json_call_meta, _render_bible_source
+from .bible_shared import _render_bible_source
 from .common import _run_with_agent_loop
-from .constants import SYSTEM_PREFIX
 from .identity_evidence import (  # noqa: F401 -- _validate_appearance_evidence 经 __init__ 再导出
     _appearance_evidence_verified,
     _validate_appearance_evidence,
 )
-from .roster_recurring import (  # noqa: F401 -- 点名已退出主路径，仅保留包级再导出
-    _attach_roster_source_appellations,
-    _bible_covers_name,
-    _recurring_character_names,
-)
-
-
-async def _generate_character_detail(
-    entry: _BibleRosterEntry,
-    *,
-    roster_names: list[str],
-    evidence_pack: str,
-    style: str,
-    era: str = "",
-    chapters_by_idx: dict[int, str],
-    project_id: str | None,
-) -> Character | None:
-    from app.refs import PRODUCTION_APPEARANCE_MAX_CHARS, PRODUCTION_APPEARANCE_MIN_CHARS
-
-    base_pack = evidence_pack[:BIBLE_DETAIL_EVIDENCE_MAX_CHARS]
-    last_error = ""
-    for attempt in range(1, BIBLE_DETAIL_MAX_ATTEMPTS + 1):
-        pack = base_pack if attempt == 1 else base_pack[: max(2000, len(base_pack) // 2)]
-        prompt = f"""任务：只为一个已确认角色生成角色详情。角色名字与角色类型已经由上游锁定，不得更改。
-目标角色：{entry.name}
-角色类型：{entry.role}
-原文称呼：{'、'.join(entry.source_appellations) or entry.name}
-完整角色名单（relationships.to 只能从这里选择）：{'、'.join(roster_names)}
-统一画风：{style}
-世界年代/社会形态：{era or '原文未明确，必须从证据包的社会制度、材质和服装称谓保守判断'}
-
-{BIBLE_APPEARANCE_FIELD_RULE}
-
-要求：appearance_canonical {PRODUCTION_APPEARANCE_MIN_CHARS}~{PRODUCTION_APPEARANCE_MAX_CHARS} 字；period_costume_canonical 20~60 字，明确该年代、地域/宗门、身份层级下可用的服装形制、面料、鞋履、束发与禁用的现代/错代元素，并与原文直接服装描写一致；speech_style 15~30 字；只写该角色；不确定的关系、别名、标志性特征证据留空。source_evidence 引句必须不超过 40 字且逐字来自证据包。
-
-该角色的小证据包（不是全书）：
-{pack}
-
-输出 JSON Schema：
-{{"appearance_canonical": str, "period_costume_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "aliases": [{{"text": str, "name_kind": str, "evidence_chapter_index": int, "evidence_quote": str}}], "source_evidence": [{{"evidence_chapter_index": int, "evidence_quote": str}}]}}"""
-        started = time.time()
-        try:
-            detail = await asyncio.wait_for(
-                model_gateway.chat_structured(
-                    [{"role": "system", "content": SYSTEM_PREFIX}, {"role": "user", "content": prompt}],
-                    model_type=_CharacterDetail,
-                    validate=None,
-                    normalize_payload=_sanitize_character_detail_payload,
-                    operation_id=(
-                        f"character_bible_detail:{project_id or ''}:{entry.name}:{attempt}"
-                    ),
-                    temperature=0.35 if attempt == 1 else 0.15,
-                    max_tokens=BIBLE_DETAIL_MAX_TOKENS,
-                    # 外层 attempt 循环是本函数唯一的重试预算：内层结构化重试关掉，
-                    # 让格式/语义失败原样抛出，由外层换温度重跑（保持"每个角色各自
-                    # 重试、互不影响"的语义），不再让网关吞掉一轮。
-                    format_retry_limit=0,
-                    semantic_retry_limit=0,
-                    call_meta=_bible_short_json_call_meta({
-                        "stage": "角色详情生成",
-                        "stage_key": "character_bible_detail",
-                        "call_role": "stage_generate" if attempt == 1 else "stage_repair",
-                        "call_role_label": "单角色详情",
-                        "character_name": entry.name,
-                        "attempt": attempt,
-                        "input_chars": len(pack),
-                        "project_id": project_id,
-                        "first_token_timeout_s": BIBLE_DETAIL_FIRST_TOKEN_TIMEOUT_S,
-                    }),
-                ),
-                timeout=BIBLE_DETAIL_TIMEOUT_S,
-            )
-            character = Character(
-                name=entry.name,
-                role=entry.role,
-                appearance_canonical=detail.appearance_canonical,
-                personality=detail.personality,
-                speech_style=detail.speech_style,
-                relationships=detail.relationships,
-                aliases=detail.aliases,
-                source_evidence=detail.source_evidence,
-                presence_status=entry.presence_status,
-                importance_score=entry.importance_score,
-                importance_signals=entry.importance_signals,
-                portrait_eligible=True,
-                appearance_status="grounded",
-                period_costume_canonical=detail.period_costume_canonical,
-            )
-            if not PRODUCTION_APPEARANCE_MIN_CHARS <= len(character.appearance_canonical) <= PRODUCTION_APPEARANCE_MAX_CHARS:
-                raise ValueError("appearance_canonical 长度越界")
-            if not 20 <= len(character.period_costume_canonical) <= 60:
-                raise ValueError("period_costume_canonical 长度越界")
-            character.relationships = [item for item in character.relationships if item.to in roster_names]
-            character.source_evidence = [
-                item for item in character.source_evidence
-                if _appearance_evidence_verified(
-                    chapters_by_idx, {entry.name}, item.evidence_chapter_index, item.evidence_quote,
-                )
-            ]
-            log_provider_call(
-                "character_bible_detail", config.MODEL_TEXT, "OK", None,
-                int((time.time() - started) * 1000),
-                meta={"character_name": entry.name, "attempt": attempt, "input_chars": len(pack)},
-            )
-            return character
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - only this character retries
-            last_error = str(exc)
-            log_provider_call(
-                "character_bible_detail", config.MODEL_TEXT,
-                "TIMEOUT" if isinstance(exc, TimeoutError) else "FAILED", None,
-                int((time.time() - started) * 1000),
-                meta={"character_name": entry.name, "attempt": attempt, "input_chars": len(pack), "error": last_error[:300]},
-            )
-    return None
-
-
-async def _generate_character_detail_batch(
-    entries: list[_BibleRosterEntry], chapters: list[dict], *, style: str, era: str = "",
-    chapters_by_idx: dict[int, str], project_id: str | None,
-) -> list[Character]:
-    roster_names = [entry.name for entry in entries]
-    tasks = [asyncio.create_task(_generate_character_detail(
-        entry,
-        roster_names=roster_names,
-        evidence_pack=_character_detail_evidence_pack(
-            chapters, [entry.name, *entry.source_appellations]
-        ),
-        style=style,
-        era=era,
-        chapters_by_idx=chapters_by_idx,
-        project_id=project_id,
-    )) for entry in entries]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    characters: list[Character] = []
-    for entry, result in zip(entries, results, strict=True):
-        if isinstance(result, asyncio.CancelledError):
-            raise result
-        if isinstance(result, BaseException) or result is None:
-            # 名单已锁定。详情失败留下占位，禁止把主角/配角从人物谱抹掉。
-            characters.append(_character_stub_from_roster(entry))
-            continue
-        characters.append(result)
-    return characters
 
 
 # ---------- A0. 世界观（首版人物谱唯一产出；不点名、不生成角色） ----------

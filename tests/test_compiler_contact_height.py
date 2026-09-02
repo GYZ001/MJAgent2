@@ -1,7 +1,6 @@
 """接触动作侧面机位 + 同框同身高：编译期确定性规则。"""
 from app.compiler import (
     compile_prompt,
-    compile_scene_prompt,
     has_contact_action,
     has_explicit_height_difference,
 )
@@ -113,10 +112,3 @@ def test_compile_prompt_skips_equal_height_for_single_character() -> None:
     shot = _contact_shot(characters=["甲一"])
     prompt = compile_prompt(shot, _bible())
     assert "站立身高与眼线尽量齐平" not in prompt
-
-
-def test_compile_scene_prompt_contact_side_and_height() -> None:
-    prompt = compile_scene_prompt(_contact_shot(), _bible(), kind="head")
-    assert "侧面视角构图" in prompt or "机位：侧面" in prompt
-    assert "站立身高与眼线齐平" in prompt
-    assert "接触类动作优先侧面构图" in prompt

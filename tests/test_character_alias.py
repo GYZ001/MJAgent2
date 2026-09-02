@@ -248,28 +248,6 @@ def test_alias_independence_gate_keeps_legitimate_particle_initial_names() -> No
     assert stages._alias_text_is_independent_appellation("") is False
 
 
-def test_roster_appellation_backfill_skips_phrase_fragment() -> None:
-    """名单补录这条路径绕开了证据闸，词形闸必须在这里也拦住残片。
-
-    真实事故里「的师兄」正是从这条路进的库：它只要求 80 字窗口内与角色名共现，
-    拿 _alias_declaration_verified 回测该条目会得到 False，证明它从未过闸。
-    """
-    from app import stages
-    from app.schemas import Character
-
-    character = Character(name="孟浩", role="主角", appearance_canonical="书生模样")
-    entry = stages._BibleRosterEntry(
-        name="孟浩", role="主角", source_appellations=["的师兄", "孟才子"],
-    )
-    chapters = [{"idx": 3, "title": "第三章", "content": (
-        "孟浩迟疑开口：可杂役处的师兄只让我们每天每人十木。孟才子救我，那少年喊道。"
-    )}]
-
-    stages._attach_roster_source_appellations(character, entry, chapters)
-
-    assert [alias.text for alias in character.aliases] == ["孟才子"]
-
-
 # ---------- 2b. 引号规范化：修复 A（回填 dry-run 12 条只过 0 条的真因） ----------
 #
 # 真实 dry-run 复现的 bug：模型申报 evidence_quote 时自己套了一层 ASCII 直引号
