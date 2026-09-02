@@ -41,6 +41,13 @@ def _http_error_code(exc: HTTPException) -> str | None:
     return detail.get("code") if isinstance(detail, dict) else None
 
 
+def _http_error_message(exc: HTTPException) -> str:
+    detail = exc.detail
+    if isinstance(detail, dict):
+        return str(detail.get("message") or detail.get("code") or detail)
+    return str(detail)
+
+
 # ---------------------------------------------------------------- screenplay
 
 def screenplay_complete(conn, episode_id: str) -> bool:
@@ -117,36 +124,121 @@ def video_complete(conn, episode_id: str) -> bool:
     return rebuild_coverage_ledger(episode_id).covered_within_quota()
 
 
-def _stalled_video_reason(episode_id: str) -> str:
-    conn = get_conn()
+def _active_video_run(conn, episode_id: str) -> dict | None:
     ep = conn.execute(
         "SELECT active_video_run_id FROM episodes WHERE id=?", (episode_id,)
     ).fetchone()
     run_id = ep["active_video_run_id"] if ep else None
     if not run_id or str(run_id).startswith("starting:"):
-        return ""
+        return None
     run = conn.execute(
-        "SELECT status, failure_message FROM workflow_runs WHERE id=?", (run_id,)
+        "SELECT id, status, failure_message FROM workflow_runs WHERE id=?", (run_id,)
     ).fetchone()
+    return dict(run) if run else None
+
+
+def _stalled_video_reason(episode_id: str) -> str:
+    run = _active_video_run(get_conn(), episode_id)
     if not run:
         return ""
     return f"：{run['failure_message'] or run['status']}"
 
 
-async def _run_video(episode_id: str, run_id: str) -> None:
+# 补齐 Supervisor 停在这些 checkpoint 阶段时都不能静默发起新的 fresh 尝试：
+# WAITING_AUTHORIZATION/WAITING_HUMAN/WAITING_RETRY 需要人工在生成台处理，
+# PAUSED_EXTERNAL 这里特指「不是服务重启」的暂停（用户手动点了暂停，见
+# app/video_supervisor/run_loop.py 的 action=="pause" 分支）——它和 workflow_runs
+# 记录的字面 status='PAUSED_EXTERNAL'（唯一来源是 recorder.pause_external()，只在
+# task_registry.shutdown_in_progress() 时触发）是两回事，见下面 _kick_video_completion
+# 的分支顺序：先判 workflow_runs.status，命中才自动唤醒；命中不了才落到这里按
+# checkpoint phase 停下来讲人话。
+_VIDEO_WAIT_PHASES = {
+    "WAITING_AUTHORIZATION", "WAITING_HUMAN", "WAITING_RETRY", "PAUSED_EXTERNAL",
+}
+
+# outcome 大多是 app.completion_grant.GrantValidationError.code（如
+# GRANT_EXPIRED/GRANT_REVOKED），本身已是可读的英文短语，直接透出即可；只有
+# STORYBOARD_REPAIR_PROPOSAL_NOT_AUTHORIZED（见 run_loop.py 第 404 行）没有配套
+# 人话，专门补这一条。不新造一整套阶段文案——阶段名复用
+# app.video_supervisor.constants.phase_label，不重复 _PHASE_LABELS。
+_VIDEO_WAIT_OUTCOME_DETAILS: dict[str, str] = {
+    "STORYBOARD_REPAIR_PROPOSAL_NOT_AUTHORIZED": (
+        "AI 提议修改分镜以补齐镜头，需要你在生成台批准或自行修分镜"
+    ),
+}
+
+
+def _video_wait_message(detail: str, phase: str | None) -> str:
+    from app.video_supervisor import phase_label
+
+    label = phase_label(phase) if phase else "等待处理"
+    return (
+        f"生成台正在等待处理（{label}）：{detail}。"
+        "请到生成台处理后，再回连播台点「继续」"
+    )
+
+
+def _checkpoint_wait_message(cp) -> str:
+    outcome = cp.outcome or ""
+    detail = _VIDEO_WAIT_OUTCOME_DETAILS.get(outcome) or outcome or "需要人工处理"
+    return _video_wait_message(detail, cp.phase)
+
+
+async def _resume_paused_video(episode_id: str, run_id: str, cp) -> str | None:
+    """PAUSED_EXTERNAL 且是服务重启导致时尝试唤醒原运行；返回 None 表示已唤醒，
+    返回值非 None 时是给用户看的等待文案（唤醒失败或缺少可续跑的授权）。"""
     from app.domain.video_ops import _complete_episode_core
 
+    if not cp.grant_id:
+        return _video_wait_message(
+            "生成台因服务重启暂停，但缺少可续跑的补齐授权，需要人工在生成台重新发起",
+            cp.phase,
+        )
+    try:
+        await _complete_episode_core(episode_id, {
+            "mode": "resume",
+            "completion_grant_id": cp.grant_id,
+            "idempotency_key": f"{run_id}:video-resume:{episode_id}",
+        })
+        return None
+    except HTTPException as exc:
+        return _video_wait_message(
+            f"服务重启后自动恢复未成功：{_http_error_message(exc)}", cp.phase,
+        )
+
+
+async def _kick_video_completion(episode_id: str, run_id: str) -> None:
+    from app.domain.video_ops import _complete_episode_core
+    from app.video_supervisor import load_latest_checkpoint
+
+    run = _active_video_run(get_conn(), episode_id)
+    cp = load_latest_checkpoint(episode_id) if run else None
+    matched_cp = cp if (cp and run and cp.run_id == run["id"]) else None
+
+    if matched_cp and run["status"] == "PAUSED_EXTERNAL":
+        wait_message = await _resume_paused_video(episode_id, run_id, matched_cp)
+        if wait_message is None:
+            return
+        raise RuntimeError(wait_message)
+
+    if matched_cp and matched_cp.phase in _VIDEO_WAIT_PHASES:
+        raise RuntimeError(_checkpoint_wait_message(matched_cp))
+
+    try:
+        await _complete_episode_core(episode_id, {
+            "mode": "fresh",
+            "allow_fallback_adopt": True,
+            "allow_storyboard_edit": False,
+            "idempotency_key": f"{run_id}:video:{episode_id}",
+        })
+    except HTTPException as exc:
+        if _http_error_code(exc) != "VIDEO_COMPLETION_ALREADY_ACTIVE":
+            raise
+
+
+async def _run_video(episode_id: str, run_id: str) -> None:
     if not task_registry.active("video_completion", episode_id):
-        try:
-            await _complete_episode_core(episode_id, {
-                "mode": "fresh",
-                "allow_fallback_adopt": True,
-                "allow_storyboard_edit": False,
-                "idempotency_key": f"{run_id}:video:{episode_id}",
-            })
-        except HTTPException as exc:
-            if _http_error_code(exc) != "VIDEO_COMPLETION_ALREADY_ACTIVE":
-                raise
+        await _kick_video_completion(episode_id, run_id)
     while task_registry.active("video_completion", episode_id):
         await asyncio.sleep(8)
     if not video_complete(get_conn(), episode_id):
