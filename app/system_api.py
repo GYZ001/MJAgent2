@@ -1302,10 +1302,9 @@ def jobs_overview(include_all: bool = False):
         for row in run_recent
     }
     for row in run_recent:
-        row["source"] = "run"
-        row["run_id"] = row["id"]
-        row["kind"] = row["workflow_type"]
-        row["raw_status"] = row["status"]
+        row["source"], row["run_id"] = "run", row["id"]
+        row["kind"], row["raw_status"] = row["workflow_type"], row["status"]
+        row.pop("budget_limit_cny", None)  # 预算已退场恒为 inf（20b6252），摘掉避免 json.dumps 500
         tail = (
             _resolve_recovery_tail(row["id"], chain_lookup)
             if row.get("recovered_by_run_id") else None
@@ -1825,11 +1824,7 @@ def retry_job(job_id: str, body: dict | None = None, _admin: None = Depends(requ
                 # 恒定返回 True，仍调用只为保留审计台账记账；「失败→paused_budget
                 # 并抛 409」分支已删除。
                 worker.media_scheduler.reserve_budget(
-                    job_id,
-                    item["episode_id"],
-                    estimate,
-                    worker.episode_video_budget_limit(item["episode_id"]),
-                    conn=conn,
+                    job_id, item["episode_id"], estimate, conn=conn,
                 )
                 reserve_provider_video_budget(
                     episode_id=str(item["episode_id"]),

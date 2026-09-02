@@ -18,15 +18,20 @@ def reserve_budget(
     job_id: str,
     episode_id: str,
     amount_cny: float,
-    limit_cny: float,
     *,
     conn: sqlite3.Connection | None = None,
 ) -> bool:
     """Record one payable job's reservation against the episode ledger.
 
-    金额已不构成生成拦截（会员分档时长制），``limit_cny`` 不再用于比较，
-    保留形参只是为了不必改动全部调用点签名；超限即拦截并把 job 打成
-    ``paused_budget`` 的那条分支已删除（见 CLAUDE.md「Retiring Features」）。"""
+    金额已不构成生成拦截（会员分档时长制）。此前保留过一个从不比较的
+    ``limit_cny`` 形参只是为了不必改动全部调用点签名；超限即拦截并把 job
+    打成 ``paused_budget`` 的那条分支已删除（见 CLAUDE.md「Retiring
+    Features」）。``limit_cny`` 本身已随「往上游收一步」的第二轮退场
+    (2026-09-02) 一并删除——它是本函数体内唯一从不被读取的形参，删掉的同时
+    连带删了它唯一的上游来源 ``episode_video_budget_limit()``（曾恒返回
+    ``math.inf``，经 ``ensure_media_trace()`` 写进
+    ``workflow_runs.budget_limit_cny`` 后把 ``GET /api/system/jobs`` 的
+    ``json.dumps`` 炸成 500）。"""
     db = conn or get_conn()
     owns_transaction = not db.in_transaction
     amount = max(0.0, float(amount_cny))

@@ -9,7 +9,6 @@ queued，随后由数据库驱动的持久调度器在下一轮重新发现并�
 """
 import asyncio
 import json
-import math
 import sqlite3
 
 import pytest
@@ -240,20 +239,21 @@ def test_soft_deleted_project_job_is_not_resumed(monkeypatch) -> None:
     assert live_job["status"] == "queued", "未删除项目的残留任务必须照常恢复"
 
 
-def test_episode_video_budget_limit_is_retired_and_never_gates(
-    monkeypatch,
-) -> None:
-    """成本预算拦截体系退场（2026-09-01）：``episode_video_budget_limit`` 不再
-    按 grant 固化 cap > 权威快照 cap > 设置旋钮的优先级解析一个"预算上限"——
-    那条优先级正是 EP2 事故的根因（旋钮调到 1000 仍被更早固化的 grant cap
-    拦下）。为它服务的 ``episode_video_budget_snapshot``/
-    ``active_video_grant_budget_cap`` 两个函数已随退场一并删除；本函数现在
-    是一个不再读取任何金额来源的哨兵值，无论设置旋钮如何取值都必须恒为
-    ``math.inf``，证明调用点即便仍然传入这个返回值也不可能再据此拦截生成。"""
-
-    patch_worker_everywhere(monkeypatch, "get_setting", lambda *_args: "100")
-
-    assert worker.episode_video_budget_limit("episode") == math.inf
+def test_episode_video_budget_limit_fully_retired(monkeypatch) -> None:
+    """真实故障复现：旧哨兵 math.inf 经 ensure_media_trace() 写进新建 run 的
+    budget_limit_cny，炸了 /api/system/jobs 的 json.dumps；新建运行须落 NULL。"""
+    assert not hasattr(worker, "episode_video_budget_limit")
+    import app.evidence.repository as evidence_repository
+    import app.orchestration.engine as orchestration_engine, app.orchestration.state_machine as state_machine
+    from app.orchestration.media_runs import ensure_media_trace
+    conn = _conn()
+    for module in (evidence_repository, orchestration_engine, state_machine):
+        monkeypatch.setattr(module, "get_conn", lambda: conn)
+    run_id, _step_id = ensure_media_trace(workflow_type="video_generation", scope_id="shot-x", input_value={"v": 1})
+    assert run_id is not None
+    row = conn.execute(
+        "SELECT budget_limit_cny FROM workflow_runs WHERE id=?", (run_id,)).fetchone()
+    assert row["budget_limit_cny"] is None
 
 
 def test_cancelled_jobs_are_not_resumed(monkeypatch) -> None:
@@ -1537,7 +1537,6 @@ def test_manual_retry_resumes_video_input_repair_waiting_human(
         monkeypatch.setattr(module, "get_conn", lambda: conn)
     patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.media_scheduler, "get_conn", lambda: conn)
-    patch_worker_everywhere(monkeypatch, "episode_video_budget_limit", lambda _episode_id: 100)
     patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
     result = system_api.retry_job("j1")

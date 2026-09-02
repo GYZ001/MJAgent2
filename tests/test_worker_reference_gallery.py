@@ -99,7 +99,7 @@ def test_enqueue_budget_reserves_full_timeline_keyframe_estimate(monkeypatch) ->
     patch_video_modes_everywhere(monkeypatch, "estimated_keyframe_generation_count", lambda: 9)
     captured: dict[str, float] = {}
 
-    def reserve(_job_id, _episode_id, estimate, _limit, *, conn=None):
+    def reserve(_job_id, _episode_id, estimate, *, conn=None):
         captured["estimate"] = float(estimate)
         return True
 

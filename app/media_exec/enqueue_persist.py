@@ -207,12 +207,12 @@ def _mark_job_stage_queued(conn, job_id: str) -> None:
         pass
 
 
-def _reserve_or_pause_budget(conn, *, job_id, version_id, episode_id, estimate, budget_limit) -> bool:
+def _reserve_or_pause_budget(conn, *, job_id, version_id, episode_id, estimate) -> bool:
     """记账预扣：金额不再构成生成拦截，``reserve_budget`` 恒返回 True，保留
     调用只为维持 ``budget_reservations`` 审计台账写入；「失败→paused_budget」
     分支已删除。``version_id`` 形参不再被本函数使用，保留只为了不改动调用点签名。
     """
-    return media_scheduler.reserve_budget(job_id, episode_id, estimate, budget_limit, conn=conn)
+    return media_scheduler.reserve_budget(job_id, episode_id, estimate, conn=conn)
 
 
 def _bind_new_operation_if_requested(
@@ -248,7 +248,7 @@ def _bind_new_operation_if_requested(
 def persist_new_video_version(
     conn, *, shot_id, version_id, prompt_text, key, image_meta, preflight_job_id,
     preflight_owner, ep, project, chain_after_shot_id, chain_after_version_id,
-    supervisor_run_id, estimate, budget_limit, operation_idempotency_key,
+    supervisor_run_id, estimate, operation_idempotency_key,
     operation_request_fingerprint, operation_claim_token, operation_command, shot_plan,
 ) -> dict[str, Any]:
     """在单个 BEGIN IMMEDIATE 事务里写入新版本/job、预扣预算、绑定操作、推进分集状态。
@@ -263,10 +263,13 @@ def persist_new_video_version(
     pretrace_version_no = (conn.execute(
         "SELECT COALESCE(MAX(version_no), 0) AS m FROM shot_versions WHERE shot_id=?",
         (shot_id,)).fetchone()["m"]) + 1
+    # 不再传 budget_limit_cny：ensure_media_trace() 已停止接受这个形参
+    # （2026-09-02，见其 docstring），新建 video_generation 运行的
+    # workflow_runs.budget_limit_cny 落到 WorkflowRecorder.create() 自身默认
+    # 值 None，不再是 episode_video_budget_limit() 的哨兵 math.inf。
     run_id, step_run_id = ensure_media_trace(
         workflow_type="video_generation", scope_id=shot_id,
         input_value={"prompt": prompt_text, "version": pretrace_version_no},
-        budget_limit_cny=budget_limit,
     )
     try:
         if conn.in_transaction:
@@ -289,7 +292,7 @@ def persist_new_video_version(
         _mark_job_stage_queued(conn, job_id)
         reserved = _reserve_or_pause_budget(
             conn, job_id=job_id, version_id=version_id, episode_id=ep["id"],
-            estimate=estimate, budget_limit=budget_limit,
+            estimate=estimate,
         )
         _bind_new_operation_if_requested(
             conn, operation_idempotency_key=operation_idempotency_key,

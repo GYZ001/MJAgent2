@@ -26,14 +26,16 @@ def _conn() -> sqlite3.Connection:
 
 
 def test_budget_reservation_no_longer_overruns_into_pause(monkeypatch) -> None:
-    """成本预算拦截体系退场（2026-09-01）：``reserve_budget`` 不再比较
-    spent+reserved+amount 与 limit_cny 把超额的 job 打成 paused_budget——
-    ``limit_cny`` 形参原样保留只是兼容旧调用签名。6+5=11 早已超过旧测试
-    传入的 limit_cny=10，新行为下两笔都必须成功入账、job 都保持 queued。"""
+    """成本预算拦截体系退场（2026-09-01，形参本身于 2026-09-02 收口删除）：
+    ``reserve_budget`` 不再比较 spent+reserved+amount 与一个上限把超额的
+    job 打成 paused_budget——那个 ``limit_cny`` 形参在函数体内从不被读取，
+    随「往上游收一步」与它唯一的上游 ``episode_video_budget_limit()`` 一并
+    删除。6+5=11 早已超过旧测试传入的 limit_cny=10，新行为下两笔都必须
+    成功入账、job 都保持 queued。"""
     conn = _conn()
     monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)
-    assert media_scheduler.reserve_budget("j1", "e", 6, 10, conn=conn)
-    assert media_scheduler.reserve_budget("j2", "e", 5, 10, conn=conn)
+    assert media_scheduler.reserve_budget("j1", "e", 6, conn=conn)
+    assert media_scheduler.reserve_budget("j2", "e", 5, conn=conn)
     assert conn.execute("SELECT status FROM jobs WHERE id='j2'").fetchone()["status"] == "queued"
     assert conn.execute("SELECT SUM(amount_cny) FROM budget_reservations WHERE status='reserved'").fetchone()[0] == 11
 
@@ -42,7 +44,7 @@ def test_budget_reservation_joins_callers_transaction() -> None:
     conn = _conn()
 
     conn.execute("BEGIN IMMEDIATE")
-    assert media_scheduler.reserve_budget("j1", "e", 6, 10, conn=conn)
+    assert media_scheduler.reserve_budget("j1", "e", 6, conn=conn)
     assert conn.in_transaction is True
     assert conn.execute(
         "SELECT amount_cny FROM budget_reservations WHERE job_id='j1'"

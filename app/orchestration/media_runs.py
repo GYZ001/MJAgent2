@@ -14,12 +14,26 @@ MEDIA_WORKFLOWS = {"video_generation", "scene_generation"}
 
 
 def ensure_media_trace(
-    *, workflow_type: str, scope_id: str, input_value: object, budget_limit_cny: float | None
+    *, workflow_type: str, scope_id: str, input_value: object
 ) -> tuple[str | None, str | None]:
     """Create a durable Run/Step for a directly queued media task.
 
     When called inside another workflow step, the existing trace is preserved so
     the job remains attributable to its parent operation.
+
+    历史列，退场后无写入者：这里曾接一个 ``budget_limit_cny`` 形参转手给
+    ``WorkflowRecorder.create()``。视频生成路径的唯一上游
+    ``episode_video_budget_limit()`` 恒返回 ``math.inf`` 哨兵（成本预算体系
+    退场后的遗留兼容签名），写进 ``workflow_runs.budget_limit_cny`` 这个
+    REAL 列后，任何原样吐出该行的接口 ``json.dumps`` 都会因不接受 ``inf``
+    而 500（含 ``GET /api/system/jobs``）。2026-09-02 把
+    ``episode_video_budget_limit()`` 与这里的形参一并删除：本函数不再传这
+    个值，新建的 video_generation/scene_generation 运行落到
+    ``WorkflowRecorder.create()`` 自身默认值 None，列值恒为 NULL。这个列和
+    ``WorkflowRecorder.create()``/``evidence.repository.create_run()`` 的
+    同名形参本身**没有**退场——``app.domain.bible_ops.view_redo``
+    （人物/场景改版的支付额度校验，另一套业务）仍在给别的 workflow_type
+    传有限值，本函数只是不再是它众多写入者之一。
     """
     trace = current_trace()
     if trace.run_id:
@@ -30,7 +44,6 @@ def ensure_media_trace(
             scope_type="shot",
             scope_id=scope_id,
             input_fingerprint=fingerprint(input_value),
-            budget_limit_cny=budget_limit_cny,
         )
         recorder.start()
         step_id = repository.create_step(

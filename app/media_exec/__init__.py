@@ -128,7 +128,6 @@ from .common import (
     _video_ready_workers,
     _worker_retire_events,
     _workers,
-    episode_video_budget_limit,
 )
 
 from .enqueue import (
@@ -455,7 +454,6 @@ __all__ = [
     "ensure_source_excerpt_in_prompt",
     "ensure_workers",
     "episode_mix_status",
-    "episode_video_budget_limit",
     "errors",
     "get_conn",
     "get_setting",

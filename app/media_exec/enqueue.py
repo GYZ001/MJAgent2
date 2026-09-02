@@ -11,7 +11,6 @@ from app.orchestration import media_scheduler
 from app.orchestration.media_runs import mark_media_job_state
 
 from . import enqueue_context, enqueue_persist, enqueue_prompt
-from .common import episode_video_budget_limit
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -411,11 +410,7 @@ def recover_equivalent_stale_provider_jobs(episode_id: str) -> dict[str, object]
             reservation["amount_cny"] if reservation else 0
         )
         if not media_scheduler.reserve_budget(
-            row["job_id"],
-            episode_id,
-            reservation_amount,
-            episode_video_budget_limit(episode_id),
-            conn=conn,
+            row["job_id"], episode_id, reservation_amount, conn=conn,
         ):
             budget_blocked.append(dict(row))
             continue
@@ -1142,10 +1137,8 @@ def _resume_reused_paused_job(
         from app.video_cost_model import initial_shot_generation_cost
 
         media_scheduler.reserve_budget(
-            row["id"],
-            row["episode_id"],
+            row["id"], row["episode_id"],
             initial_shot_generation_cost(float(row["duration_s"] or 0)),
-            episode_video_budget_limit(str(row["episode_id"])),
             conn=conn,
         )
 
@@ -1532,7 +1525,6 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         critique_sources=critique_sources, reference_gallery=reference_gallery,
     )
 
-    budget_limit = episode_video_budget_limit(str(ep["id"]))
     from app.video_cost_model import initial_shot_generation_cost
 
     estimate = initial_shot_generation_cost(float(shot.duration_s))
@@ -1541,7 +1533,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         image_meta=image_meta, preflight_job_id=preflight_job_id, preflight_owner=preflight_owner,
         ep=ep, project=project, chain_after_shot_id=chain_after_shot_id,
         chain_after_version_id=chain_after_version_id, supervisor_run_id=supervisor_run_id,
-        estimate=estimate, budget_limit=budget_limit,
+        estimate=estimate,
         operation_idempotency_key=operation_idempotency_key,
         operation_request_fingerprint=operation_request_fingerprint,
         operation_claim_token=operation_claim_token, operation_command=operation_command,
