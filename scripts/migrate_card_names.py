@@ -99,3 +99,104 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# ---------------------------------------------------------------------------
+# apply（2026-09-02，用户拍板「按经验做，测试数据随时可删」）
+# ---------------------------------------------------------------------------
+import asyncio  # noqa: E402
+
+from app.bible_store import mutate_bible_json  # noqa: E402
+from app.schemas import Bible, CharacterAlias  # noqa: E402
+
+
+def merge_card(conn: sqlite3.Connection, project_id: str, source: str, target: str) -> str:
+    """把 ``source`` 卡并入 ``target``：source 登记为 target 的别名（非独占），删 source 卡及其定妆照记录。"""
+    def mutate(data: dict) -> bool:
+        chars = data.get("characters", [])
+        src = next((c for c in chars if c.get("name") == source), None)
+        tgt = next((c for c in chars if c.get("name") == target), None)
+        if src is None or tgt is None:
+            return False
+        texts = {a.get("text") for a in tgt.get("aliases", [])}
+        if source not in texts:
+            tgt.setdefault("aliases", []).append(CharacterAlias(
+                text=source, name_kind="referential", evidence_chapter_index=1,
+                evidence_quote=f"人物卡迁移：「{source}」与「{target}」为同一人", is_exclusive=False,
+            ).model_dump(mode="json"))
+        for alias in src.get("aliases", []):
+            if alias.get("text") not in texts and alias.get("text") != target:
+                tgt["aliases"].append(alias)
+        chars.remove(src)
+        Bible.model_validate(data)
+        return True
+
+    if not mutate_bible_json(conn, project_id, mutate):
+        return f"skip merge {source}->{target}（卡不存在）"
+    ids = [r[0] for r in conn.execute("SELECT id FROM character_portraits WHERE project_id=? AND character_name=?", (project_id, source))]
+    for pid in ids:
+        conn.execute("DELETE FROM character_portrait_views WHERE portrait_id=?", (pid,))
+    conn.execute("DELETE FROM character_portraits WHERE project_id=? AND character_name=?", (project_id, source))
+    conn.commit()
+    return f"merged {source} -> {target}（删除定妆照记录 {len(ids)} 条）"
+
+
+def rename_card(conn: sqlite3.Connection, project_id: str, old: str, new: str) -> str:
+    """把卡 ``old`` 改名为 ``new``，``old`` 登记为非独占别名；定妆照记录同步改名。"""
+    def mutate(data: dict) -> bool:
+        chars = data.get("characters", [])
+        if any(c.get("name") == new for c in chars):
+            raise ValueError(f"目标名「{new}」已存在，请改用 merge")
+        card = next((c for c in chars if c.get("name") == old), None)
+        if card is None:
+            return False
+        card["name"] = new
+        if old not in {a.get("text") for a in card.get("aliases", [])}:
+            card.setdefault("aliases", []).append(CharacterAlias(
+                text=old, name_kind="referential", evidence_chapter_index=1,
+                evidence_quote=f"人物卡迁移：原卡名「{old}」为通称，改为「{new}」", is_exclusive=False,
+            ).model_dump(mode="json"))
+        Bible.model_validate(data)
+        return True
+
+    if not mutate_bible_json(conn, project_id, mutate):
+        return f"skip rename {old}（卡不存在）"
+    conn.execute(
+        "UPDATE character_portraits SET character_name=?, visual_entity_id=CASE WHEN visual_entity_id=? THEN ? ELSE visual_entity_id END "
+        "WHERE project_id=? AND character_name=?",
+        (new, f"bible:{old}", f"bible:{new}", project_id, old),
+    )
+    conn.commit()
+    return f"renamed {old} -> {new}"
+
+
+async def suggest_name(conn: sqlite3.Connection, project_id: str, label: str) -> str:
+    """用新上线的建卡命名契约让模型给出有区分度的名字；只采信 accepted_card_name 认可的形态。"""
+    from app.portraits.card_merge import accepted_card_name
+    from app.portraits.cards import assess_new_character
+    from app.portraits.discovery_fragments import _forward_fragments
+
+    row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+    bible = Bible.model_validate(json.loads(row["bible_json"]))
+    fragments, ep_label, chapters_by_idx = _forward_fragments(conn, project_id, label, 1)
+    if not fragments:
+        return label
+    verdict = await assess_new_character(
+        label, fragments, style=bible.world.visual_style_canonical,
+        known_names=[c.name for c in bible.characters if c.name != label], ep_label=ep_label,
+        require_identity_card=True, chapters_by_idx=chapters_by_idx,
+    )
+    return accepted_card_name(label, verdict.get("canonical_name"), fragments)
+
+
+def apply_plan(conn: sqlite3.Connection, plan: list[tuple[str, str, str, str]]) -> None:
+    """plan 条目：(project_id, action, source/old, target/new)；target 为空的 rename 先向模型要名字。"""
+    for project_id, action, source, target in plan:
+        if action == "merge":
+            print(merge_card(conn, project_id, source, target))
+        elif action == "rename":
+            new = target or asyncio.run(suggest_name(conn, project_id, source))
+            if new == source:
+                print(f"keep {source}（模型未给出可核验的新名，保留）")
+            else:
+                print(rename_card(conn, project_id, source, new))
