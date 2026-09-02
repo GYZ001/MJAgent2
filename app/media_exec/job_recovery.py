@@ -174,8 +174,11 @@ def recover_media_jobs() -> int:
     发现它们。run 从 PAUSED_EXTERNAL 转回 WAITING_RETRY，旧 FAILED step 保留为
     审计历史，并创建 iteration+1 的 READY step 供 worker 接管。
 
-    边界：不恢复 PAUSED_BUDGET（预算不足，需显式 retry_paused 释放预算后重试）；
-         不恢复 FAILED/CANCELLED（真正报错或人工取消）。"""
+    边界：不恢复 FAILED/CANCELLED（真正报错或人工取消）。历史上这里还排除
+    PAUSED_BUDGET（预算不足，需显式 retry_paused 释放预算后重试）——成本预算
+    拦截体系退场（2026-09-01）后，``reconcile_stalled_video_jobs`` 的周期扫描
+    已经把 paused_budget 当可继续状态自动恢复，不再要求用户显式操作，本函数
+    这里不需要重复处理。"""
     media_scheduler.reconcile_cancelled_version_states()
     decommission_legacy_keyframe_jobs()
     conn = get_conn()
@@ -296,26 +299,54 @@ def _block_orphaned_continuity_job(conn, row) -> bool:
     return True
 
 
+def _resume_budget_paused_episodes(conn, limit: int) -> int:
+    """Auto-resume every ``paused_budget`` job (退场后不再是人工闸门，见调用方)。"""
+    episode_ids = [
+        str(row["id"])
+        for row in conn.execute(
+            """SELECT DISTINCT j.episode_id AS id FROM jobs j
+                WHERE j.kind='video' AND j.status='paused_budget'
+                  AND j.episode_id IS NOT NULL
+                  AND NOT EXISTS ( -- ALL_OWNERS, excludes recycle-bin projects
+                    SELECT 1 FROM projects p WHERE p.id=j.project_id AND p.deleted_at IS NOT NULL
+                  )
+                ORDER BY j.episode_id LIMIT ?""",
+            (max(1, int(limit)),),
+        ).fetchall()
+    ]
+    if not episode_ids:
+        return 0
+    from .retry_scheduling import retry_paused
+    resumed = 0
+    for episode_id in episode_ids:
+        try:
+            resumed += retry_paused(episode_id)
+        except Exception:
+            continue
+    return resumed
+
+
 def reconcile_stalled_video_jobs(limit: int = 50) -> dict[str, int]:
     """周期修复没有 worker 能消费的业务级卡死状态。
 
-    ``paused_budget`` is an intentional user gate, not a stalled state. Only
-    an explicit page action may call ``retry_paused`` and move it to queued.
+    ``paused_budget`` 历史上是"预算不足，需要用户在页面上显式提额"的意图性
+    人工闸门，不当成卡死状态自动恢复。成本预算拦截体系退场（2026-09-01）
+    后，那个"用户必须显式提额"的前提本身已经不成立——``reserve_budget``/
+    ``reserve_provider_video_budget`` 都不再据金额拒绝，旧状态行不会再有
+    "预算不足"这个真实原因，继续要求人工点一下"恢复"才能重新排队，纯粹是
+    为已废止概念服务的拦路石（见 CLAUDE.md「Retiring Features」）。这里改为
+    与其它卡死状态一样，周期扫描自动把它们判定为可继续。
     """
     from app.observability.metrics import inc
 
     conn = get_conn()
     stamp = now()
-    report = {
-        "redundant_preflight_closed": 0,
-        "legacy_jobless_recovered": 0,
-        "legacy_preflight_reactivated": 0,
-        "preflight_retried": 0,
-        "continuity_degraded": 0,
-        "dependency_repair_required": 0,
-        "budget_resumed": 0,
-        "episodes_reconciled": 0,
-    }
+    report = dict.fromkeys((
+        "redundant_preflight_closed", "legacy_jobless_recovered",
+        "legacy_preflight_reactivated", "preflight_retried",
+        "continuity_degraded", "dependency_repair_required",
+        "budget_resumed", "quarantine_released", "episodes_reconciled",
+    ), 0)
 
     redundant = conn.execute(
         """UPDATE jobs
@@ -449,6 +480,9 @@ def reconcile_stalled_video_jobs(limit: int = 50) -> dict[str, int]:
             except Exception:  # noqa: BLE001
                 pass
 
+    report["budget_resumed"] = _resume_budget_paused_episodes(conn, limit)
+    from .quarantine_release import release_orphan_quarantined_versions
+    report["quarantine_released"] = release_orphan_quarantined_versions(conn, limit)
     episode_rows = conn.execute(
         "SELECT id FROM episodes WHERE status='generating'"
     ).fetchall()

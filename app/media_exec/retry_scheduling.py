@@ -139,6 +139,20 @@ def _defer_provider_poll(
     return True
 
 
+def _resume_estimate(row) -> float:
+    """恢复时写进台账的估算额（纯审计口径，不再参与任何拦截判定）。"""
+    estimate = float(row["reserved_cost_cny"] or 0)
+    if estimate > 0:
+        return estimate
+    if row["kind"] == "scene":
+        return float(config.IMAGE_PRICE_PER_UNIT)
+    return float(
+        shot_cost_cny(int(row["duration_s"] or 5))
+        + config.IMAGE_PRICE_PER_UNIT
+        * video_modes.estimated_keyframe_generation_count()
+    )
+
+
 def retry_paused(episode_id: str, *, job_id: str | None = None) -> int:
     """Resume budget-paused work against the current user-approved cap."""
     conn = get_conn()
@@ -159,26 +173,30 @@ def retry_paused(episode_id: str, *, job_id: str | None = None) -> int:
         ).fetchall()
     resumed = 0
     for r in rows:
-        estimate = float(r["reserved_cost_cny"] or 0)
-        if estimate <= 0:
-            estimate = (
-                config.IMAGE_PRICE_PER_UNIT
-                if r["kind"] == "scene"
-                else (
-                    shot_cost_cny(int(r["duration_s"] or 5))
-                    + config.IMAGE_PRICE_PER_UNIT
-                    * video_modes.estimated_keyframe_generation_count()
-                )
-            )
+        estimate = _resume_estimate(r)
         if media_scheduler.reserve_budget(
             r["id"], episode_id, estimate,
             budget_limit, conn=conn,
         ):
+            # 恢复必须连 video_slot_active/provider_result_adoptable 一起放回：
+            # 预算暂停当初把它们清零（见 enqueue_persist._reserve_or_pause_budget
+            # 与 run_job_errors._pause_for_budget_authorization），只改 status 会
+            # 让任务重新跑完、拿到好视频，却在
+            # checkpoints._commit_video_result_checkpoint_in_transaction 里因
+            # adoptable=False 被判 quarantined——放行了任务却扔掉它的产出。
             changed = conn.execute(
-                """UPDATE jobs SET status='queued', error=NULL, next_retry_at=NULL, updated_at=?
+                """UPDATE jobs SET status='queued', error=NULL, next_retry_at=NULL,
+                          video_slot_active=1, provider_result_adoptable=1, updated_at=?
                    WHERE id=? AND status='paused_budget'""",
                 (now(), r["id"]),
             )
+            if changed.rowcount == 1:
+                conn.execute(
+                    """UPDATE shot_versions SET video_slot_active=1
+                        WHERE id=(SELECT version_id FROM jobs WHERE id=?)
+                          AND video_slot_active=0""",
+                    (r["id"],),
+                )
             conn.commit()
             if changed.rowcount != 1:
                 continue

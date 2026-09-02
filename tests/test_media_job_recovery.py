@@ -9,6 +9,7 @@ queued，随后由数据库驱动的持久调度器在下一轮重新发现并�
 """
 import asyncio
 import json
+import math
 import sqlite3
 
 import pytest
@@ -263,54 +264,34 @@ def test_soft_deleted_project_job_is_not_resumed(monkeypatch) -> None:
     assert live_job["status"] == "queued", "未删除项目的残留任务必须照常恢复"
 
 
-def test_page_approved_budget_overrides_static_safety_default(
+def test_episode_video_budget_limit_is_retired_and_never_gates(
     monkeypatch,
 ) -> None:
+    """成本预算拦截体系退场（2026-09-01）：``episode_video_budget_limit`` 不再
+    按 grant 固化 cap > 权威快照 cap > 设置旋钮的优先级解析一个"预算上限"——
+    那条优先级正是 EP2 事故的根因（旋钮调到 1000 仍被更早固化的 grant cap
+    拦下）。本函数现在是一个不再读取任何这些来源的哨兵值，无论设置、快照、
+    grant 如何取值都必须恒为 ``math.inf``，证明调用点即便仍然传入这个返回值
+    也不可能再据此拦截生成。"""
 
     patch_worker_everywhere(monkeypatch, "get_setting", lambda *_args: "100")
     patch_completion_grant_everywhere(
         monkeypatch,
         "episode_video_budget_snapshot",
-        # conn 已改为必传（app/completion_grant.py，连接所有权显式化），桩要跟着收
         lambda _episode_id, *, conn: {
             "baseline_cny": 0.0,
             "claimed_cny": 0.0,
             "used_cny": 0.0,
-            "cap_cny": 440.0,
+            "cap_cny": 3.0,
         },
     )
     patch_completion_grant_everywhere(
         monkeypatch,
         "active_video_grant_budget_cap",
-        lambda _episode_id: None,
+        lambda _episode_id: 7.0,
     )
 
-    assert worker.episode_video_budget_limit("episode") == 440.0
-
-
-def test_page_approved_budget_can_be_lower_than_static_default(
-    monkeypatch,
-) -> None:
-
-    patch_worker_everywhere(monkeypatch, "get_setting", lambda *_args: "100")
-    patch_completion_grant_everywhere(
-        monkeypatch,
-        "episode_video_budget_snapshot",
-        # conn 已改为必传（app/completion_grant.py，连接所有权显式化），桩要跟着收
-        lambda _episode_id, *, conn: {
-            "baseline_cny": 0.0,
-            "claimed_cny": 0.0,
-            "used_cny": 0.0,
-            "cap_cny": 50.0,
-        },
-    )
-    patch_completion_grant_everywhere(
-        monkeypatch,
-        "active_video_grant_budget_cap",
-        lambda _episode_id: None,
-    )
-
-    assert worker.episode_video_budget_limit("episode") == 50.0
+    assert worker.episode_video_budget_limit("episode") == math.inf
 
 
 def test_cancelled_jobs_are_not_resumed(monkeypatch) -> None:
@@ -928,7 +909,12 @@ def test_paid_provider_attempts_count_distinct_operations() -> None:
     assert worker._paid_video_attempt_count(conn, "v1") == 3
 
 
-def test_resubmit_budget_extension_is_atomic_and_capped() -> None:
+def test_resubmit_budget_extension_no_longer_caps() -> None:
+    """成本预算拦截体系退场（2026-09-01）：``extend_budget_reservation`` 不再
+    比较 spent+reserved+additional 与 ``limit_cny`` 拒绝续期——那条比较正是
+    旧版"预算暂停"的来源之一。``limit_cny`` 形参原样保留只是为了不必改动
+    调用点签名，函数本身必须无条件记账成功，即便请求金额远超传入的
+    limit_cny。"""
     conn = _conn()
     conn.execute(
         """INSERT INTO jobs(
@@ -942,19 +928,20 @@ def test_resubmit_budget_extension_is_atomic_and_capped() -> None:
     )
     conn.commit()
 
+    # limit_cny=9 本应在旧逻辑下拒绝 5+5=10；新行为下无条件成功。
     assert worker.media_scheduler.extend_budget_reservation(
         "j1", "e1", 5, 9, conn=conn,
-    ) is False
-    assert conn.execute(
-        "SELECT amount_cny FROM budget_reservations WHERE job_id='j1'",
-    ).fetchone()["amount_cny"] == 5
-
-    assert worker.media_scheduler.extend_budget_reservation(
-        "j1", "e1", 5, 10, conn=conn,
     ) is True
     assert conn.execute(
         "SELECT amount_cny FROM budget_reservations WHERE job_id='j1'",
     ).fetchone()["amount_cny"] == 10
+
+    assert worker.media_scheduler.extend_budget_reservation(
+        "j1", "e1", 5, 1, conn=conn,
+    ) is True
+    assert conn.execute(
+        "SELECT amount_cny FROM budget_reservations WHERE job_id='j1'",
+    ).fetchone()["amount_cny"] == 15
 
 
 def test_reference_mode_submission_authority_failure_precedes_paid_marker(
@@ -1120,9 +1107,14 @@ def test_new_submission_retry_recalculates_budget_and_double_click_is_idempotent
     ).fetchone()[0] == 2
 
 
-def test_new_submission_retry_fails_closed_without_episode_authority(
+def test_new_submission_retry_no_longer_fails_closed_without_episode_authority(
     monkeypatch,
 ) -> None:
+    """成本预算拦截体系退场（2026-09-01）：新提交重试不再要求本集存在
+    ``episode_video_budget_authorities`` 行——那正是 EP2 事故的机制之一
+    （旋钮/授权缺失时把 job 打成 paused_budget 并抛 409
+    JOB_RETRY_AUTHORITY_MISSING）。缺少授权行不再拦截重试，任务必须正常
+    进入 queued 并生成新的供应商 operation_id。"""
     import app.monitoring as monitoring
     import app.system_api as system_api
 
@@ -1132,26 +1124,23 @@ def test_new_submission_retry_fails_closed_without_episode_authority(
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
     patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
-    with pytest.raises(HTTPException) as blocked:
-        system_api.retry_job("j-retry")
+    result = system_api.retry_job("j-retry")
 
-    assert blocked.value.detail["code"] == "JOB_RETRY_AUTHORITY_MISSING"
-    job = conn.execute(
-        "SELECT status,reserved_cost_cny,reason_code FROM jobs WHERE id='j-retry'"
-    ).fetchone()
-    assert dict(job) == {
-        "status": "paused_budget",
-        "reserved_cost_cny": 0.0,
-        "reason_code": "VIDEO_BUDGET_NOT_AUTHORIZED",
-    }
+    assert result["job"]["status"] == "queued"
+    new_operation_id = result["job"]["provider_operation_id"]
+    assert new_operation_id != "video-create-v-retry-old"
     assert conn.execute(
-        "SELECT COUNT(*) FROM provider_video_budget_claims"
-    ).fetchone()[0] == 0
+        "SELECT status,reason_code FROM jobs WHERE id='j-retry'"
+    ).fetchone()["status"] == "queued"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM provider_video_budget_claims WHERE status='reserved'"
+    ).fetchone()[0] == 1
 
 
-def test_new_submission_retry_blocks_when_authority_budget_is_insufficient(
+def test_new_submission_retry_no_longer_blocks_on_insufficient_authority_budget(
     monkeypatch,
 ) -> None:
+    """同上：本集已有授权但 cap 远低于本次预估成本时，同样不再拦截。"""
     import app.monitoring as monitoring
     import app.system_api as system_api
 
@@ -1162,16 +1151,15 @@ def test_new_submission_retry_blocks_when_authority_budget_is_insufficient(
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
     patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
-    with pytest.raises(HTTPException) as blocked:
-        system_api.retry_job("j-retry")
+    result = system_api.retry_job("j-retry")
 
-    assert blocked.value.detail["code"] == "JOB_RETRY_BUDGET_BLOCKED"
+    assert result["job"]["status"] == "queued"
     assert conn.execute(
         "SELECT status FROM jobs WHERE id='j-retry'"
-    ).fetchone()["status"] == "paused_budget"
+    ).fetchone()["status"] == "queued"
     assert conn.execute(
-        "SELECT COUNT(*) FROM provider_video_budget_claims"
-    ).fetchone()[0] == 0
+        "SELECT COUNT(*) FROM provider_video_budget_claims WHERE status='reserved'"
+    ).fetchone()[0] == 1
 
 
 def test_manual_budget_retry_only_resumes_requested_job(monkeypatch) -> None:
