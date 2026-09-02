@@ -2026,15 +2026,15 @@ def _message_content_mentions_json(value: Any) -> bool:
 def _messages_for_response_format(
     messages: list[dict], response_format: dict[str, Any] | None,
 ) -> list[dict]:
-    """Make ``json_object`` requests valid for strict OpenAI-compatible gateways.
+    """Make ``json_object``/``json_schema`` requests valid for strict OpenAI-compatible gateways.
 
-    Some gateways reject ``response_format={"type": "json_object"}`` unless a
-    message explicitly contains the word ``JSON``.  Add that protocol hint at
-    the provider boundary, without mutating caller-owned messages.  Other
-    response formats and ordinary text calls retain their byte-for-byte message
-    payload semantics.
+    Some gateways reject any JSON ``response_format`` unless a message explicitly
+    contains the word ``JSON`` (DeepSeek V4 Pro via HiAgent enforces it for
+    ``json_schema`` too: ERR-20260902-3d19ef, 2026-09-02).  Add that protocol hint
+    at the provider boundary, without mutating caller-owned messages.  Other
+    response formats and ordinary text calls keep their byte-for-byte payload.
     """
-    if not response_format or response_format.get("type") != "json_object":
+    if not response_format or response_format.get("type") not in {"json_object", "json_schema"}:
         return messages
     copied = [dict(message) for message in messages]
     if any(
