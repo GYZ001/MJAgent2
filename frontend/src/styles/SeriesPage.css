@@ -1,6 +1,8 @@
 /* 连播台（SeriesPage）独占样式——只服务这一页，随该页懒加载分包一起下载。
  * 复用 index.css 的 .desk-head/.card/.rule/.stamp/.btn/.f，这里只放本页独有的
- * 版式：说明文案、状态条、区间选择器、进度板表格、播放器。 */
+ * 版式：说明文案、切分表单、队列/批量条、任务表格、进度板表格、播放器、导出面板。
+ * 移动端：表格用横向滚动容器兜住窄屏（用户主要在手机上看这个页面），按钮组
+ * 用 flex-wrap 避免挤成一坨。 */
 
 .series-intro {
   margin: 0 0 16px;
@@ -8,43 +10,152 @@
   line-height: 1.7;
 }
 
-.series-status-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-
-.series-range-fields {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-}
-
-.series-range-field {
-  min-width: 200px;
-}
-
-.series-range-field select {
-  width: 100%;
-}
-
-.series-range-summary {
-  margin: 12px 0 0;
-  font-size: 13px;
+.series-empty {
+  margin: 12px 0;
+  color: var(--ink-soft);
 }
 
 .series-range-invalid {
   color: var(--cinnabar);
 }
 
+/* ————— 切分表单 ————— */
+.series-planner-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.series-planner-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.series-planner-form input[type="number"] {
+  width: 100px;
+}
+
+.series-plan-summary,
+.series-plan-result {
+  margin: 10px 0 0;
+  font-size: 13px;
+}
+
+/* ————— 队列状态条 + 批量操作条 ————— */
+.series-task-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.series-queue-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.series-batch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.series-batch-count {
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.series-batch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.series-batch-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+/* ————— 任务表格 ————— */
+.series-table-scroll {
+  overflow-x: auto;
+  margin-top: 12px;
+}
+
+.series-task-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+}
+
+.series-task-table th,
+.series-task-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--hairline);
+  vertical-align: top;
+}
+
+.series-task-missing {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--cinnabar);
+}
+
+.series-task-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.series-task-progress-steps {
+  color: var(--ink-soft);
+}
+
+.series-task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.series-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  font-size: 13px;
+}
+
+/* ————— 任务详情 ————— */
+.series-task-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+
 .series-board {
   margin-top: 16px;
+}
+
+.series-board-scroll {
   overflow-x: auto;
 }
 
 .series-board-table {
   width: 100%;
+  min-width: 640px;
   border-collapse: collapse;
 }
 
@@ -65,6 +176,7 @@
   outline-offset: -2px;
 }
 
+/* ————— 播放器 ————— */
 .series-film-player {
   margin-top: 16px;
 }
@@ -78,6 +190,7 @@
 
 .series-film-meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 16px;
   margin: 10px 0;
@@ -105,4 +218,66 @@
 
 .series-film-chapter-btn:hover {
   background: var(--control-surface-hover, var(--surface-muted));
+}
+
+/* ————— 导出面板 ————— */
+.series-export-hint {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.series-export-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.series-export-item {
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.series-export-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.series-export-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.series-export-skipped {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+@media (max-width: 720px) {
+  .series-planner-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .series-batch-actions {
+    width: 100%;
+  }
+  .series-batch-actions > button {
+    flex: 1 1 auto;
+  }
+  .series-task-actions {
+    flex-direction: column;
+  }
+  .series-task-actions > button {
+    width: 100%;
+  }
 }

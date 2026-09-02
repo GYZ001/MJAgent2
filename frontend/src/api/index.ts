@@ -154,10 +154,17 @@ export const api = {
   listEpisodesPage: projectsApi.listEpisodesPage,
 
   /* ── 连播台域 ── */
-  getSeriesFilm: seriesApi.getSeriesFilm,
-  startSeriesFilm: seriesApi.startSeriesFilm,
-  pauseSeriesFilm: seriesApi.pauseSeriesFilm,
-  resumeSeriesFilm: seriesApi.resumeSeriesFilm,
+  getSeriesTasks: seriesApi.getSeriesTasks,
+  getSeriesTaskPlan: seriesApi.getSeriesTaskPlan,
+  createSeriesTasks: seriesApi.createSeriesTasks,
+  deleteSeriesTask: seriesApi.deleteSeriesTask,
+  getSeriesTaskDetail: seriesApi.getSeriesTaskDetail,
+  enqueueSeriesTasks: seriesApi.enqueueSeriesTasks,
+  cancelSeriesTasks: seriesApi.cancelSeriesTasks,
+  pauseSeriesQueue: seriesApi.pauseSeriesQueue,
+  resumeSeriesQueue: seriesApi.resumeSeriesQueue,
+  createSeriesExport: seriesApi.createSeriesExport,
+  getSeriesExports: seriesApi.getSeriesExports,
 
   /* ── 观测台与系统管理域 ── */
   ...systemApi.api_system,

@@ -1,6 +1,6 @@
 import { useRef } from 'react'
-import type { Film } from '../../api'
-import { formatFileSize } from '../studioImport'
+import type { SeriesTaskFilmDetail } from '../../api'
+import { formatFilmSize } from './seriesTaskText'
 
 export function formatFilmDuration(seconds: number): string {
   const total = Math.max(0, Math.round(seconds))
@@ -15,12 +15,15 @@ export function formatFilmDuration(seconds: number): string {
 /** 点击章节应该把播放头跳到哪——按 episode_no 匹配对应章节的 start_s；
  *  找不到（数据缺失）返回 null，调用方据此忽略这次点击，不强行跳到 0 秒
  *  制造"点了没反应但其实跳错地方"的假象。 */
-export function seriesChapterSeekTime(chapters: Film['chapters'], episodeNo: number): number | null {
+export function seriesChapterSeekTime(
+  chapters: SeriesTaskFilmDetail['chapters'],
+  episodeNo: number,
+): number | null {
   const found = chapters.find(chapter => chapter.episode_no === episodeNo)
   return found ? found.start_s : null
 }
 
-export default function SeriesFilmPlayer({ film }: { film: Film }) {
+export default function SeriesFilmPlayer({ film }: { film: SeriesTaskFilmDetail }) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
 
   const seekToEpisode = (episodeNo: number) => {
@@ -35,7 +38,7 @@ export default function SeriesFilmPlayer({ film }: { film: Film }) {
       <video ref={videoRef} controls src={film.url} className="series-film-video" />
       <div className="series-film-meta">
         <span>时长 {formatFilmDuration(film.duration_s)}</span>
-        <span>大小 {formatFileSize(film.size_bytes)}</span>
+        <span>大小 {formatFilmSize(film.size_bytes)}</span>
         <a className="btn" href={film.url} download>下载连播成片</a>
       </div>
       <ol className="series-film-chapters">

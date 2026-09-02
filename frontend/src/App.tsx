@@ -168,7 +168,8 @@ export function routeFromPath(pathname: string): Pick<
   const projectId = decodePart(parts[1]);
   if (parts[2] === "observability")
     return { view: "observability", projectId, episodeId: null, chapterIdx: null };
-  if (parts[2] === "series") return { view: "series", projectId, episodeId: null, chapterIdx: null };
+  if (parts[2] === "series")
+    return { view: "series", projectId, episodeId: decodePart(parts[3]), chapterIdx: null };
   if (parts[2] === "reader") {
     const idx = Number(parts[3]);
     return {
@@ -222,7 +223,8 @@ export function locationFor(
   if (!projectId) return "/workspaces";
   const project = `/projects/${encodeURIComponent(projectId)}`;
   if (view === "observability") return `${project}/observability/jobs`;
-  if (view === "series") return `${project}/series`;
+  if (view === "series")
+    return episodeId ? `${project}/series/${encodeURIComponent(episodeId)}` : `${project}/series`;
   if (view === "reader") return `${project}/reader/${chapterIdx ?? 1}`;
   if (
     view === "script" ||
