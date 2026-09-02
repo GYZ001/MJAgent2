@@ -370,10 +370,51 @@ async def courtesy_name_redirect(
     return {"status": "exists", "name": owner.full_name}
 
 
+def accepted_card_name(label: str, proposed: str | None, fragments: str) -> str:
+    """人物卡名：模型提出的 canonical_name 只在两种可核验形态下采用，否则沿用称谓本身。
+
+    - 描述性称谓加限定（「老人」→「守墓老人」）：必须包含原称谓且更长——通称加限定后才有区分度；
+    - 原文里真的出现的名字（「小公主」→「雨馨」）：必须逐字出现在检索到的原文片段里。
+    其它（凭空起名、缩短、换词）一律不采信。判据来自称谓与原文，不含任何词表
+    （真实事故：神墓「老人」「孩子」「神秘人」各成一卡，后续每集的同称谓都与之冲突）。
+    """
+    label = str(label or "").strip()
+    proposed = str(proposed or "").strip()
+    if not proposed or proposed == label or proposed in label:  # 空、相同、或只是把称谓截短：都不采信
+        return label
+    if label in proposed:
+        return proposed
+    return proposed if proposed in (fragments or "") else label
+
+
+async def resolve_card_name(
+    conn, project_id: str, label: str, verdict: dict, fragments: str,
+    chapters_by_idx: dict[int, str], write_guard,
+) -> dict | str:
+    """建卡用哪个名字：``accepted_card_name`` 定名；若该名字已有卡，则把称谓登记为其别名并复用。"""
+    card_name = accepted_card_name(label, verdict.get("canonical_name"), fragments)
+    if card_name == label or _card_owner_lookup(conn, project_id, card_name) is None:
+        return card_name
+    found = _cooccurrence_evidence(chapters_by_idx, label, label)
+    if found is None:
+        return card_name
+    chapter_idx, quote = found
+    alias = CharacterAlias(
+        text=label, name_kind=IDENTITY_NAME_FORM_REFERENTIAL, evidence_chapter_index=chapter_idx,
+        evidence_quote=quote, is_exclusive=False,
+    ).model_dump(mode="json")
+    lock = await _bible_lock(project_id)
+    async with lock:
+        if write_guard:
+            write_guard()
+        apply_card_merge_alias(conn, project_id, card_name, alias)
+    return {"status": "exists", "name": card_name}
+
+
 async def resolve_card_build_or_merge(
     conn, project_id: str, name: str, bible: Bible, verdict: dict,
     identity_source_labels: list[str] | None, forward_chapters_by_idx: dict[int, str],
-    write_guard,
+    write_guard, descriptive_label: str | None = None,
 ) -> dict | Character:
     """``ensure_character_card`` "none 之后、建卡之前"唯一的分岔口：先问一遍
     这个称呼是不是人物谱里已有某个角色的另一种叫法（``resolve_card_merge_
@@ -395,6 +436,12 @@ async def resolve_card_build_or_merge(
             apply_card_merge_alias(conn, project_id, merge_target, alias)
         return {"status": "exists", "name": merge_target}
     aliases = new_card_aliases(name, identity_source_labels, forward_chapters_by_idx)
+    if descriptive_label and descriptive_label != name and (found := _cooccurrence_evidence(forward_chapters_by_idx, descriptive_label, descriptive_label)):
+        # 卡名是称谓加限定合成的（「守墓老人」），原文里逐字出现的是称谓本身：把称谓登记为非独占别名。
+        aliases.append(CharacterAlias(
+            text=descriptive_label, name_kind=IDENTITY_NAME_FORM_REFERENTIAL,
+            evidence_chapter_index=found[0], evidence_quote=found[1], is_exclusive=False,
+        ).model_dump(mode="json"))
     try:
         return Character.model_validate({
             "name": name, "role": verdict["role"],

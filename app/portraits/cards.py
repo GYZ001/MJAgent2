@@ -22,7 +22,7 @@ from .bible_compat import (  # noqa: F401 -- 重新导出，见下方模块末�
     bible_with_pending_characters_for_text,
     bible_with_provisional_characters,
 )
-from .card_merge import courtesy_name_redirect, resolve_card_build_or_merge
+from .card_merge import courtesy_name_redirect, resolve_card_build_or_merge, resolve_card_name
 from .card_verdict import unimportant_verdict_result
 from .constants import (
     APPEARANCE_MAX,
@@ -129,8 +129,10 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
 人物谱只登记 person。组织、地点、器物即使在剧情里极其重要、也确实需要视觉一致性，
 也一律 important=false——它们属于场景库，不属于人物谱。
 
+- canonical_name 是这张卡的固定名字：「{name}」是人名就原样填；原文明确给出此人真名就填真名（须逐字出现在上面片段里）；
+  「{name}」只是称呼/身份/外貌描述（老人、女孩、黑衣人）时，在它基础上加限定写成有区分度的固定称谓（如「守墓老人」），不得只填通称或凭空起名。
 只输出一个 JSON 对象：
-{{"subject_kind": "person|organization|place|object|other", "important": true/false, "reason": "一句话依据", "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "source_evidence": [{{"evidence_chapter_index": int, "evidence_quote": str}}]}}"""
+{{"subject_kind": "person|organization|place|object|other", "important": true/false, "canonical_name": str, "reason": "一句话依据", "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}], "source_evidence": [{{"evidence_chapter_index": int, "evidence_quote": str}}]}}"""
 
     async def _assess_once(extra_instruction: str) -> dict:
         messages = [{"role": "user", "content": prompt + extra_instruction}]
@@ -236,6 +238,7 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
             "card_complete": card_complete,
             "incomplete_reason": incomplete_reason,
             "subject_kind": subject_kind,
+            "canonical_name": str(obj.get("canonical_name") or "").strip(),
             "is_person": subject_kind == CHARACTER_SUBJECT_PERSON,
             "reason": (obj.get("reason") or "").strip(),
             "role": role,
@@ -331,8 +334,7 @@ async def ensure_character_card(
         except (TypeError, ValueError, json.JSONDecodeError):
             change_items = []
         existing_change = next((
-            item for item in change_items
-            if item.get("kind") in {"new_character", "character_discovery", "new_bible_character"}
+            item for item in change_items if item.get("kind") in {"new_character", "character_discovery", "new_bible_character"}
             and item.get("character") == name and item.get("status") in {"pending", "processing", "auto_applied_asset_failed"}
         ), None)
         # 负缓存：判过"戏份不足"的名字先不重判——判据挂在这次检索到的原文片段
@@ -387,12 +389,7 @@ async def ensure_character_card(
                 set_setting(_discovery_skip_key(project_id, name), fragment_signature)
                 return {"status": "skipped_minor", "name": name, "reason": "no fragments in novel"}
             try:
-                assessment_options = {
-                    "style": style,
-                    "known_names": known,
-                    "ep_label": ep_label,
-                    "chapters_by_idx": forward_chapters_by_idx,
-                }
+                assessment_options = {"style": style, "known_names": known, "ep_label": ep_label, "chapters_by_idx": forward_chapters_by_idx}
                 if require_identity_card:
                     assessment_options["require_identity_card"] = True
                 verdict = await assess_new_character(
@@ -435,9 +432,13 @@ async def ensure_character_card(
             )
             if unimportant_result is not None:
                 return unimportant_result
+            named = await resolve_card_name(conn, project_id, name, verdict, fragments, forward_chapters_by_idx, write_guard)
+            if isinstance(named, dict):
+                return named
+            label, name = name, named  # 此后 name 是卡名（可能是「守墓老人」），label 是触发建卡的称谓
             build_result = await resolve_card_build_or_merge(
-                conn, project_id, name, bible, verdict,
-                identity_source_labels, forward_chapters_by_idx, write_guard,
+                conn, project_id, name, bible, verdict, identity_source_labels, forward_chapters_by_idx,
+                write_guard, descriptive_label=label if label != name else None,
             )
             if isinstance(build_result, dict):
                 return build_result
@@ -450,10 +451,8 @@ async def ensure_character_card(
             existing = {
                 "id": new_id("change"), "kind": "new_character", "status": "processing", "character": name,
                 "ep_start": from_episode_no, "reason": verdict["reason"], "created_at": now(),
-                "payload": {
-                    "character_card": char_obj.model_dump(mode="json"), "source_episode": from_episode_no,
-                    "source_episode_label": ep_label, "evidence_fragments": evidence_fragments,
-                },
+                "payload": {"character_card": char_obj.model_dump(mode="json"), "source_episode": from_episode_no,
+                            "source_episode_label": ep_label, "evidence_fragments": evidence_fragments},
             }
             change_items.append(existing)
         else:
