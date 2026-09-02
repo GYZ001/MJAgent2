@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from app.payments.models import STATUS_CLOSED, STATUS_FULFILLED, STATUS_PAID, STATUS_PENDING
+from app.payments.models import STATUS_FULFILLED, STATUS_PAID, STATUS_PENDING
 
 
 def create_order(
@@ -73,18 +73,6 @@ def mark_fulfilled(conn: sqlite3.Connection, order_id: str, *, fulfilled_at: flo
     cur = conn.execute(
         "UPDATE payment_orders SET status=?, fulfilled_at=? WHERE id=? AND status=?",
         (STATUS_FULFILLED, fulfilled_at, order_id, STATUS_PAID),
-    )
-    return cur.rowcount == 1
-
-
-def close_order(conn: sqlite3.Connection, order_id: str, *, reason: str, closed_at: float) -> bool:
-    """``pending -> closed``：用户取消，或对账发现渠道侧已明确失败/超时未支付。
-    已经 ``paid``/``fulfilled`` 的订单不会被这条语句影响（WHERE 卡住），
-    "先关闭已支付订单" 不是这个函数的职责——本单不做退款，见模块文档。
-    """
-    cur = conn.execute(
-        "UPDATE payment_orders SET status=?, close_reason=?, closed_at=? WHERE id=? AND status=?",
-        (STATUS_CLOSED, reason, closed_at, order_id, STATUS_PENDING),
     )
     return cur.rowcount == 1
 

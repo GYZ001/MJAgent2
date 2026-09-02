@@ -316,33 +316,6 @@ def _source_records(conn: Any, episode: Any) -> tuple[list[dict[str, Any]], str]
     return records, source_text
 
 
-def screenplay_authorized_source_chapter_ids(
-    episode_id: str,
-    *,
-    conn: Any | None = None,
-) -> set[str]:
-    """Return every stable chapter handle accepted by the narrative contract.
-
-    Historical prompts used chapter indices while current source records also
-    expose database IDs.  Both resolve to the same episode-scoped chapter rows;
-    arbitrary IDs from another project or episode remain invalid.
-    """
-    db = conn or get_conn()
-    episode = db.execute(
-        "SELECT * FROM episodes WHERE id=?",
-        (episode_id,),
-    ).fetchone()
-    if episode is None:
-        raise ValueError(f"episode not found: {episode_id}")
-    records, _source_text = _source_records(db, episode)
-    return {
-        str(value)
-        for record in records
-        for value in (record.get("chapter_id"), record.get("chapter_idx"))
-        if value not in (None, "")
-    }
-
-
 def screenplay_authorized_source_chapters(
     episode_id: str,
     *,

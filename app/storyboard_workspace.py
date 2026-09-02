@@ -574,31 +574,6 @@ def persist_source_binding(
         db_conn.commit()
 
 
-def realign_generated_source_binding(
-    episode_id: str,
-    shot_id: str,
-    excerpt: str,
-    *,
-    conn=None,
-    commit: bool = True,
-) -> dict[str, Any]:
-    """Atomically align and bind an automated repair's authorized source excerpt."""
-    db_conn = conn or get_conn()
-    candidate, normalized = align_generated_source_evidence(
-        episode_id,
-        excerpt,
-        conn=db_conn,
-    )
-    db_conn.execute(
-        "UPDATE shots SET source_excerpt=? WHERE id=?",
-        (candidate, shot_id),
-    )
-    persist_source_binding(
-        shot_id, normalized, conn=db_conn, commit=commit,
-    )
-    return {**normalized, "source_excerpt": candidate}
-
-
 def align_generated_source_evidence(
     episode_id: str,
     excerpt: str,

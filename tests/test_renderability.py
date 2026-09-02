@@ -3,8 +3,7 @@ from app.renderability import (
     shot_count_budget_errors,
 )
 from app.schemas import (
-    AtomicAction, Bible, Character, EpisodeScreenplay, KeyDialogueChain,
-    KeyDialogueTurn, NarrativeAnchor, NarrativeContinuityPlan,
+    AtomicAction, Bible, Character, EpisodeScreenplay, NarrativeAnchor, NarrativeContinuityPlan,
     NarrativeEvent, NarrativeEvidence, PlotSpine, PlotSpineBeat,
     StoryEvent, World,
 )
@@ -166,25 +165,6 @@ def test_episode_target_from_spine_has_no_product_maximum() -> None:
     assert episode_target_from_spine(8) == 80
     assert episode_target_from_spine(12) == 120
     assert episode_target_from_spine(100) == 1000
-
-
-def test_screenplay_duration_expands_for_spoken_capacity() -> None:
-    from app.renderability import screenplay_required_duration_s
-
-    script = EpisodeScreenplay(
-        episode_no=1,
-        dialogue_chains=[KeyDialogueChain(
-            chain_id="DC1",
-            topic="完整交付",
-            turns=[KeyDialogueTurn(
-                speaker="甲",
-                line="剧情" * 200,
-                source_text="剧情" * 200,
-            )],
-        )],
-    )
-
-    assert screenplay_required_duration_s(script, minimum_s=50) >= 120
 
 
 def test_duration_gt5_blocked_when_fits_five() -> None:

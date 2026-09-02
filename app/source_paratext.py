@@ -334,7 +334,3 @@ def paratext_segment_indexes(
 def paratext_cache_clear() -> None:
     with _CACHE_LOCK:
         _CACHE.clear()
-
-
-def _spans_debug(text: str) -> dict[str, Any]:  # pragma: no cover - 诊断用
-    return {"cached": _cached(text), "key": _cache_key(text)}

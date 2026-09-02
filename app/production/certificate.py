@@ -128,29 +128,6 @@ def _is_passing_runtime_gate(row: Any) -> bool:
     )
 
 
-def _required_exact_runtime_gate(
-    rows: list[Any],
-    *,
-    evaluator_name: str,
-    evaluator_version: str,
-) -> Any:
-    named = [row for row in rows if row["evaluator_name"] == evaluator_name]
-    if len(named) != 1:
-        raise ValueError(
-            f"完成凭证必须精确引用一个 {evaluator_name} runtime gate"
-        )
-    row = named[0]
-    if not evaluator_version or row["evaluator_version"] != evaluator_version:
-        raise ValueError(
-            f"完成凭证的 {evaluator_name} evaluator_version 与当前契约不匹配"
-        )
-    if not _is_passing_runtime_gate(row):
-        raise ValueError(
-            f"完成凭证的 {evaluator_name} 必须是已通过且 runtime_blocking 的 runtime_gate"
-        )
-    return row
-
-
 def _required_exact_score_only(
     rows: list[Any],
     *,

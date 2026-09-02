@@ -159,7 +159,7 @@ def test_high_risk_tool_call_waits_for_approval(client, monkeypatch) -> None:
     approval = store.get_approval_by_tool_call(tc["id"])
     assert approval is not None
     assert approval["token_hash"]
-    assert approvals.peek_pending_token(tc["id"])
+    assert tc["id"] in approvals._PENDING_TOKENS
 
 
 # ---------- 3. 批准后执行 ----------
@@ -186,7 +186,7 @@ def test_approve_resumes_turn_and_reports_real_result(client, monkeypatch) -> No
     assert tc["status"] in {"failed", "succeeded", "accepted_async"}
     if tc["status"] == "failed":
         assert tc.get("result_summary")
-    assert approvals.peek_pending_token(tool_call_id) is None
+    assert tool_call_id not in approvals._PENDING_TOKENS
 
     turn = body["turn"]
     assert turn["status"] == "completed"

@@ -14,27 +14,48 @@ and narrative-review-report pass/fail + audience payload hashing.
 
 This file is the sole stable entry point: every existing
 ``from app.narrative import X`` / ``import app.narrative`` / ``narrative.X``
-call site across the repo must keep working unmodified -- every symbol
-(including every plain stdlib/third-party name the original file imported at
-module level, since those were reachable as ``narrative.<name>`` too) is
-explicitly re-exported below using the ``name as name`` PEP 484 explicit-
-re-export form, matching the precedent set by ``app/validators/__init__.py``
-and ``app/screenplay_ir/__init__.py`` (``from .x import *`` is forbidden by
-the ``star_import`` gate in ``app/FILE_CONVENTIONS.toml``). Add new narrative
-validation logic to the concern-matching submodule, not back into this file.
+call site across the repo must keep working unmodified. Every symbol is
+re-exported from its **true source** exactly once: symbols defined inside
+this package are exported from the submodule that actually defines them;
+symbols from other modules (``app.schemas``, ``app.spoken_contract``) are
+imported directly from there, not borrowed via a submodule that happened to
+import them too (``name as name`` PEP 484 explicit-re-export form, no
+``from .x import *`` -- see the ``star_import`` gate in
+``app/FILE_CONVENTIONS.toml``). ``config`` is ``app.config``, the real
+shared module singleton (not a per-submodule copy of a value);
+``tests/test_narrative_monkeypatch_guard.py`` names ``narrative.config`` as
+the one exempted "attribute on a shared singleton" pattern, so it stays
+re-exported from its true source ``app``. Plain stdlib/typing names (``Any``,
+``Iterable``, ``dataclass``, ``defaultdict``, ``hashlib``, ``json``) are no
+longer re-exported as package attributes -- submodule implementation
+details, not this package's public API; a repo-wide grep found no
+``narrative.<name>`` reads or monkeypatch targets depending on them.
+Add new narrative validation logic to the concern-matching submodule, not
+back into this file.
 """
 from __future__ import annotations
 
-from .authority import (
-    Any as Any,
-    Storyboard as Storyboard,
-    storyboard_authority_projection as storyboard_authority_projection,
-)
-
-from .primitives import (
-    Any as Any,
-    Iterable as Iterable,
+from app import config as config
+from app.schemas import (
+    EpisodeScreenplay as EpisodeScreenplay,
+    NARRATIVE_CONTRACT_VERSION as NARRATIVE_CONTRACT_VERSION,
+    NarrativeContinuityPlan as NarrativeContinuityPlan,
+    NarrativeReviewReport as NarrativeReviewReport,
     ShotContribution as ShotContribution,
+    Storyboard as Storyboard,
+    StoryboardOutline as StoryboardOutline,
+    is_system_environment_entity_id as is_system_environment_entity_id,
+    system_environment_entity_id as system_environment_entity_id,
+)
+from app.spoken_contract import onscreen_text_for_capacity as onscreen_text_for_capacity
+
+from .authority import storyboard_authority_projection as storyboard_authority_projection
+from .plan_index import (
+    NarrativeIndex as NarrativeIndex,
+    action_participant_delivery_errors as action_participant_delivery_errors,
+    index_narrative_plan as index_narrative_plan,
+)
+from .primitives import (
     _anchor_ref_errors as _anchor_ref_errors,
     _belief_fragment_matches as _belief_fragment_matches,
     _changed_audience_state_fields as _changed_audience_state_fields,
@@ -50,69 +71,13 @@ from .primitives import (
     _target_state_fragment_matches as _target_state_fragment_matches,
     normalize_source_evidence_text as normalize_source_evidence_text,
 )
-
-from .plan_index import (
-    Any as Any,
-    EpisodeScreenplay as EpisodeScreenplay,
-    NarrativeContinuityPlan as NarrativeContinuityPlan,
-    NarrativeIndex as NarrativeIndex,
-    _ids as _ids,
-    _norm as _norm,
-    action_participant_delivery_errors as action_participant_delivery_errors,
-    dataclass as dataclass,
-    index_narrative_plan as index_narrative_plan,
+from .review import (
+    audience_perceptual_surface_hash as audience_perceptual_surface_hash,
+    narrative_review_passes as narrative_review_passes,
 )
-
-from .screenplay_validate import (
-    EpisodeScreenplay as EpisodeScreenplay,
-    Iterable as Iterable,
-    index_narrative_plan as index_narrative_plan,
-    system_environment_entity_id as system_environment_entity_id,
-    validate_screenplay_narrative as validate_screenplay_narrative,
-)
-
-# validate_screenplay_narrative's helper phases now live in sibling
-# screenplay_validate_*.py files (see screenplay_validate.py's module
-# docstring for the split map); a handful of plain stdlib/third-party names
-# that used to be importable as ``app.narrative.<name>`` because the
-# pre-split single file happened to import them at module level moved with
-# their phase. Most (Any/_anchor_ref_errors/_norm/_require_refs/etc.) are
-# already re-exported above from .primitives/.plan_index/.storyboard_validate
-# with the identical object, so only the two not covered anywhere else are
-# re-sourced here.
-from .screenplay_validate_core import is_system_environment_entity_id as is_system_environment_entity_id
-from .screenplay_validate_experience_paths import config as config
-
+from .screenplay_validate import validate_screenplay_narrative as validate_screenplay_narrative
 from .storyboard_validate import (
-    Any as Any,
-    EpisodeScreenplay as EpisodeScreenplay,
-    NARRATIVE_CONTRACT_VERSION as NARRATIVE_CONTRACT_VERSION,
-    Storyboard as Storyboard,
-    StoryboardOutline as StoryboardOutline,
-    _norm as _norm,
     _outline_as_shots as _outline_as_shots,
-    action_participant_delivery_errors as action_participant_delivery_errors,
-    index_narrative_plan as index_narrative_plan,
     validate_storyboard_narrative as validate_storyboard_narrative,
     validate_storyboard_screenplay_authority as validate_storyboard_screenplay_authority,
-)
-
-# validate_storyboard_narrative's per-shot/post-loop phases now live in
-# sibling storyboard_validate_*.py files (see storyboard_validate.py's module
-# docstring for the split map); two plain stdlib/third-party names that used
-# to be importable as ``app.narrative.<name>`` because the pre-split single
-# file happened to import them at module level moved with their phase.
-# _contribution_nonempty/_declared_change_matches/_require_refs/
-# _state_without_identity/_target_state_fragment_matches also moved, but are
-# already re-exported above from .primitives with the identical object.
-from .storyboard_validate_context import defaultdict as defaultdict
-from .storyboard_validate_shot_capacity import onscreen_text_for_capacity as onscreen_text_for_capacity
-
-from .review import (
-    Any as Any,
-    NarrativeReviewReport as NarrativeReviewReport,
-    audience_perceptual_surface_hash as audience_perceptual_surface_hash,
-    hashlib as hashlib,
-    json as json,
-    narrative_review_passes as narrative_review_passes,
 )

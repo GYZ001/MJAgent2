@@ -17,7 +17,6 @@ VALID_CHANNELS = frozenset({CHANNEL_WECHAT, CHANNEL_ALIPAY})
 
 PRODUCT_VIDEO_ADDON = "video_addon"
 PRODUCT_TIER_UPGRADE = "tier_upgrade"
-VALID_PRODUCTS = frozenset({PRODUCT_VIDEO_ADDON, PRODUCT_TIER_UPGRADE})
 
 #: free 档不是可购买的升级目标（升级只能往上走，降级不通过支付发生）。
 PURCHASABLE_TIERS = frozenset(VALID_TIERS - {"free"})
@@ -26,7 +25,6 @@ STATUS_PENDING = "pending"
 STATUS_PAID = "paid"
 STATUS_FULFILLED = "fulfilled"
 STATUS_CLOSED = "closed"
-VALID_STATUSES = frozenset({STATUS_PENDING, STATUS_PAID, STATUS_FULFILLED, STATUS_CLOSED})
 
 #: 状态机只能向前走，不可逆向跳转；pending 可以走向 paid 或 closed（用户取消/
 #: 超时未支付），paid 只能走向 fulfilled（发货），fulfilled/closed 是终态。

@@ -15,7 +15,6 @@ from app.production.certificate import (
 from app.production.metrics import record_certificate_issued
 from app.production.patch import load_screenplay_from_artifact
 from app.production.revision import get_production_revision, set_published_artifact
-from app.production.structured_issues import blocker_count, must_fix_count
 from app.validators import ending_hook_grounding_report
 
 
@@ -813,8 +812,3 @@ def publish_storyboard(
         "shot_count": len(shots_payload),
         "status": "scripted",
     }
-
-
-def can_issue_certificate(issues: list) -> bool:
-    """QA 是只读门禁：任何 blocker / must-fix 都必须先由 Repair 生成新候选。"""
-    return blocker_count(issues) == 0 and must_fix_count(issues) == 0

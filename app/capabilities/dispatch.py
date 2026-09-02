@@ -162,9 +162,6 @@ def raise_if_failed(result: CommandResult) -> None:
         raise HTTPException(status_code, detail)
 
 
-raise_for_command_result = raise_if_failed
-
-
 def respond_ui(result: CommandResult, *, session_id: str | None = None) -> dict[str, Any] | JSONResponse:
     """dispatch 之后的统一 REST 收尾：待批准 → 202；失败 → HTTPException；成功 → payload。"""
     if session_id is None:

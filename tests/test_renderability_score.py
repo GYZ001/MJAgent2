@@ -1,5 +1,5 @@
 """Renderability 金样打分单测。"""
-from app.renderability_score import compare_with_baseline, score_renderability_sample
+from app.renderability_score import score_renderability_sample
 
 
 def test_score_against_legacy_24_shot_baseline() -> None:
@@ -36,9 +36,3 @@ def test_score_against_legacy_24_shot_baseline() -> None:
     assert "shot_count_in_soft_budget" not in result["gates"]
     assert result["vs_baseline"]["shot_count_le_70pct_baseline"] is True
     assert result["metrics"]["contract_version"] == "renderability_v1"
-
-
-def test_compare_with_baseline_ratio() -> None:
-    cmp = compare_with_baseline({"shot_count": 12}, {"shot_count": 24})
-    assert cmp["shot_count_ratio"] == 0.5
-    assert cmp["meets_70pct_goal"] is True

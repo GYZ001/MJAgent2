@@ -165,13 +165,13 @@ def record_success_mode_attempt(conn, job, version, meta: dict, task_id) -> None
         )
 
 
-async def run_auto_qa(job, version, dest) -> tuple[bool, bool]:
-    """判定完整补齐模式是否由 Supervisor 掌控自动重抽/采用；跑自动 QA。
+async def run_auto_qa(job, version, dest) -> bool:
+    """判定完整补齐模式是否由 Supervisor 掌控自动重抽/采用。
 
-    返回 ``(supervisor_controlled, force_best)``。
+    VLM 视觉质检已整体下线，不再有独立的"自动 QA"步骤要跑；``version``/
+    ``dest`` 参数保留仅为调用方兼容。返回 ``supervisor_controlled``。
     """
-    from .worker_loop import _maybe_auto_qa
-
+    del version, dest
     supervisor_controlled = False
     try:
         ep_mode = get_conn().execute(
@@ -182,12 +182,7 @@ async def run_auto_qa(job, version, dest) -> tuple[bool, bool]:
         )
     except Exception:  # noqa: BLE001
         pass
-    force_best = await _maybe_auto_qa(
-        job, version["id"], str(dest), allow_autonomous_retake=not supervisor_controlled,
-    )
-    if supervisor_controlled:
-        force_best = False
-    return supervisor_controlled, force_best
+    return supervisor_controlled
 
 
 def evaluate_technical_validation(conn, version, meta: dict) -> tuple[bool, dict, int]:
@@ -249,7 +244,7 @@ def resubmit_after_technical_failure(job, resubmits: int, meta: dict) -> None:
         pass
 
 
-async def adopt_and_settle_candidate(conn, job, job_id, owner, version, cost, supervisor_controlled, force_best) -> None:
+async def adopt_and_settle_candidate(conn, job, job_id, owner, version, cost, supervisor_controlled) -> None:
     """非 Supervisor 掌控时采用最佳候选；随后统一结算预算并推进分集状态。"""
     from .authority import _assert_review_dependency_fence_async
     from .enqueue import reconcile_episode_generation_status
@@ -258,9 +253,7 @@ async def adopt_and_settle_candidate(conn, job, job_id, owner, version, cost, su
         await _assert_review_dependency_fence_async(
             job, version["id"], "adoption_relation",
         )
-        media_evidence.select_best_video_candidate(
-            job["shot_id"], force_best=force_best
-        )
+        media_evidence.select_best_video_candidate(job["shot_id"])
         adopted = conn.execute(
             "SELECT adopted_version_id FROM shots WHERE id=?",
             (job["shot_id"],),

@@ -54,7 +54,6 @@ BAILIAN_TEXT_BASE_MODELS = ("qwen3.7-max", "qwen3.7-plus")
 BAILIAN_VLM_FREE_MODELS = ("qwen3.7-plus-2026-05-26",)
 BAILIAN_VLM_BASE_MODELS = ("qwen3.7-plus",)
 _BAILIAN_FAILED_MODELS: dict[str, set[str]] = {"text": set(), "vlm": set()}
-_MEDIA_SEMAPHORES: weakref.WeakKeyDictionary[Any, asyncio.Semaphore] = weakref.WeakKeyDictionary()
 _IMAGE_SEMAPHORES: weakref.WeakKeyDictionary[Any, asyncio.Semaphore] = weakref.WeakKeyDictionary()
 
 

@@ -14,7 +14,6 @@ from starlette.middleware.gzip import GZipMiddleware
 
 from app import errors, task_registry, worker
 from app.agent.api import router as agent_conversation_router
-from app.agent_api import router as agent_capabilities_router
 from app.api import purge_legacy_screenplays, router
 from app.auth.admin_api import router as auth_admin_router
 from app.auth.api import router as auth_router
@@ -283,7 +282,6 @@ app.include_router(orchestration_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(observability_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(system_router, dependencies=_PROJECT_OWNER_DEPS)
 app.include_router(provider_task_zero_cost_router, dependencies=_PROJECT_OWNER_DEPS)
-app.include_router(agent_capabilities_router, prefix="/api", dependencies=_PROJECT_OWNER_DEPS)
 # agent_conversation_router 的 require_local_session 由路由自身声明（见
 # app/agent/api.py 的 APIRouter(dependencies=...)），这里只需再叠一层工作空间隔离。
 app.include_router(agent_conversation_router, prefix="/api", dependencies=[Depends(require_project_owner_access)])

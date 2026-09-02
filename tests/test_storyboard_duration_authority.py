@@ -10,8 +10,6 @@ from app.storyboard_authority import (
     OUTLINE_AUTHORITY_VERSION,
     StoryboardOutlineAuthorityError,
     StoryboardOutlineMigrationRequired,
-    migrate_storyboard_outline_authority,
-    outline_fingerprint,
     persist_storyboard_outline_authority,
     resolve_storyboard_outline_authority,
 )
@@ -101,11 +99,3 @@ def test_unversioned_outline_requires_explicit_cas_migration(authority_db) -> No
 
     with pytest.raises(StoryboardOutlineMigrationRequired):
         persist_storyboard_outline_authority("e", outline)
-
-    migrated = migrate_storyboard_outline_authority(
-        "e",
-        expected_stored_target_duration_s=710,
-        expected_outline_fingerprint=outline_fingerprint(raw),
-    )
-    assert migrated.authoritative_duration_s == 15
-    assert migrated.planning_duration_s == 710

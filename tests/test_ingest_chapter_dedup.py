@@ -1,6 +1,6 @@
 import pytest
 
-from app.ingest import clean_text, ingest_novel, split_chapters
+from app.ingest import _split_chapters_with_removed, clean_text, ingest_novel
 
 
 def test_ingest_drops_adjacent_title_only_duplicate() -> None:
@@ -36,7 +36,7 @@ def test_split_does_not_merge_different_titles_with_reused_ordinal() -> None:
 大战落幕，中域开始重建，幸存者们重新踏上各自的道路。
 """
 
-    chapters = split_chapters(text)
+    chapters, _removed = _split_chapters_with_removed(text)
 
     assert len(chapters) == 2
     assert chapters[0]["title"] != chapters[1]["title"]

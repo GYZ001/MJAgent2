@@ -34,11 +34,6 @@ def register_pending(
     )
 
 
-def peek_pending_token(tool_call_id: str) -> str | None:
-    with _lock:
-        return _PENDING_TOKENS.get(tool_call_id)
-
-
 def consume_pending_token(tool_call_id: str) -> str | None:
     with _lock:
         return _PENDING_TOKENS.pop(tool_call_id, None)

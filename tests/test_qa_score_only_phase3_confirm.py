@@ -10,9 +10,8 @@ from app import db
 from app.domain import video_ops
 from app.domain.video_ops import ConfirmationEvaluation
 from app.evidence import repository
-from app.harness.types import EvidenceArtifact, Issue, IssueSeverity
-from app.production.publish import can_issue_certificate
-from app.storyboard_workspace import realign_generated_source_binding
+from app.harness.types import EvidenceArtifact
+from app.storyboard_workspace import align_generated_source_evidence, persist_source_binding
 from tests.conftest import patch_api_everywhere
 
 
@@ -71,13 +70,9 @@ def confirm_db(tmp_path, monkeypatch):
         ),
     )
     conn.execute("UPDATE episodes SET storyboard_artifact_id=? WHERE id='e1'", (artifact["id"],))
-    realign_generated_source_binding(
-        "e1",
-        "s1",
-        source,
-        conn=conn,
-        commit=False,
-    )
+    _candidate, _normalized = align_generated_source_evidence("e1", source, conn=conn)
+    conn.execute("UPDATE shots SET source_excerpt=? WHERE id='s1'", (_candidate,))
+    persist_source_binding("s1", _normalized, conn=conn, commit=False)
     conn.commit()
     yield conn
     conn.close()
@@ -283,25 +278,3 @@ def test_current_storyboard_certificate_survives_downstream_observation(
     )
 
     video_ops._assert_storyboard_generation_gate("e1")
-
-
-def test_screenplay_certificate_requires_all_runtime_gate_issues_to_be_fixed():
-    qa_issue = Issue(
-        code="BUSINESS_RULE_FAILED",
-        severity=IssueSeverity.BLOCKER,
-        subject="screenplay",
-        message="剧情节奏评分低，需要优化但不影响结构交付",
-        evidence={"must_fix": True},
-        repairable=True,
-    )
-    structural_issue = Issue(
-        code="SCHEMA_INVALID",
-        severity=IssueSeverity.BLOCKER,
-        subject="screenplay",
-        message="schema 缺少必填字段",
-        evidence={"must_fix": True},
-        repairable=True,
-    )
-
-    assert can_issue_certificate([qa_issue]) is False
-    assert can_issue_certificate([structural_issue]) is False

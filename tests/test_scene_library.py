@@ -3,7 +3,6 @@ from app.schemas import Bible, Character, Scene, Shot, Storyboard, World
 from app.scene_contract import split_legacy_scene_setting
 from app.validators import (canonicalize_storyboard_scene, match_scene_name, validate_scene_bible,
                             validate_storyboard_scenes)
-from app.scenes import scene_refs_as_image_inputs
 
 
 def _scenes() -> list[Scene]:
@@ -243,23 +242,3 @@ def test_validate_storyboard_scenes_flags_out_of_library_scene() -> None:
     assert len(errors) == 1
     assert "不在场景图素材库内" in errors[0]
     assert board.shots[0].scene_name == ""
-
-
-# ---------- scene_refs_as_image_inputs ----------
-
-def test_scene_refs_as_image_inputs_fallback_to_bible_path(tmp_path) -> None:
-    img = tmp_path / "scene.jpg"
-    img.write_bytes(b"\xff\xd8\xff\xe0fake-jpeg-bytes")
-    bible = _bible_with_scenes()
-    bible.scenes[0].ref_image_path = str(img)
-    inputs = scene_refs_as_image_inputs(bible, ["宗门广场"], 1)
-    assert len(inputs) == 1
-    url, role = inputs[0]
-    assert role == "reference_image"
-    assert url.startswith("data:")
-
-
-def test_scene_refs_as_image_inputs_skips_missing_file() -> None:
-    bible = _bible_with_scenes()
-    bible.scenes[0].ref_image_path = "/nonexistent/scene.jpg"
-    assert scene_refs_as_image_inputs(bible, ["宗门广场"], 1) == []

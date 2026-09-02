@@ -78,13 +78,6 @@ def test_prompt_profile_follows_the_registry() -> None:
     ).render_format == "seedance_compact_director_brief"
 
 
-def test_wait_meta_keys_are_declared_by_adapters() -> None:
-    keys = video_providers.all_wait_meta_keys()
-    assert "minimax_h3_generation_started_at" in keys
-    # 清单必须来自适配器自身，重新提交时才不会漏清某一家的键。
-    assert set(minimax_h3.MiniMaxH3Adapter().wait_meta_keys) <= set(keys)
-
-
 def test_custom_h3_instance_binds_its_own_connection(monkeypatch) -> None:
     _register_custom(monkeypatch, {
         "id": "model_x", "provider": "custom:model_x", "model": "minimax-h3",

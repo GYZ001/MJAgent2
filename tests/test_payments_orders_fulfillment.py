@@ -83,18 +83,6 @@ def test_order_starts_pending_and_mark_paid_transitions_once():
     assert orders.get_order(conn, order_id)["channel_txn_id"] == "wx-txn-1"
 
 
-def test_close_order_only_affects_pending():
-    conn = get_conn()
-    uid = _make_user()
-    order_id = _make_addon_order(conn, uid)
-    orders.mark_paid(conn, order_id, channel_txn_id="wx-txn-2", paid_at=now())
-    conn.commit()
-
-    # 已经 paid 的订单不能被 close_order 影响——不是"退款"的替代品。
-    assert orders.close_order(conn, order_id, reason="用户取消", closed_at=now()) is False
-    assert orders.get_order(conn, order_id)["status"] == STATUS_PAID
-
-
 def test_fulfill_order_rejects_pending_order():
     conn = get_conn()
     uid = _make_user()

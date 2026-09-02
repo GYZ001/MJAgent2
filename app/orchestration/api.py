@@ -53,7 +53,7 @@ def list_runs(
 
 RUN_ACTIONABLE_STATUSES = {
     "CREATED", "RUNNING", "WAITING_RETRY", "WAITING_HUMAN", "WAITING_AUTHORIZATION",
-    "PAUSED_BUDGET", "PAUSED_EXTERNAL", "FAILED", "PARTIAL",
+    "PAUSED_EXTERNAL", "FAILED", "PARTIAL",
 }
 
 
@@ -712,7 +712,7 @@ async def resume_run(run_id: str, *, allow_new_submission: bool = False):
     if not run:
         raise HTTPException(404, "运行不存在")
     if run["status"] not in {
-        "PAUSED_EXTERNAL", "PAUSED_BUDGET", "WAITING_RETRY",
+        "PAUSED_EXTERNAL", "WAITING_RETRY",
         "WAITING_HUMAN", "WAITING_AUTHORIZATION",
     }:
         raise HTTPException(409, "当前状态不能恢复")
@@ -776,14 +776,6 @@ async def pause_run(run_id: str):
             "run": repository.get_run(run_id),
         }
     raise HTTPException(400, "当前工作流不支持暂停")
-
-
-@router.post("/runs/{run_id}/handoff")
-async def handoff_run_route(run_id: str):
-    from app.capabilities.dispatch import dispatch, respond_ui
-
-    result = await dispatch("run.control", {"run_id": run_id, "action": "handoff"}, initiator="ui")
-    return respond_ui(result)
 
 
 async def handoff_run(run_id: str):
@@ -931,10 +923,7 @@ def project_storyboard_metrics(project_id: str):
         "scripting_episodes": sum(1 for e in episodes if e["status"] == "scripting"),
         "phase_counts": phase_counts,
         "waiting_human": phase_counts.get("WAITING_HUMAN", 0),
-        "paused": (
-            phase_counts.get("PAUSED_EXTERNAL", 0)
-            + phase_counts.get("PAUSED_BUDGET", 0)
-        ),
+        "paused": phase_counts.get("PAUSED_EXTERNAL", 0),
         "waiting_authorization": phase_counts.get("WAITING_AUTHORIZATION", 0),
         "repairing": phase_counts.get("REPAIRING", 0),
         "episodes": rows,
@@ -1715,13 +1704,6 @@ async def run_benchmark(body: dict = Body(...)):
         attested_by=attested_by,
         attestation_note=str(body.get("attestation_note") or "").strip() or None,
     )
-
-
-@router.get("/benchmarks/release-gate")
-def get_release_gate():
-    from app.benchmarks import release_gate_status
-
-    return release_gate_status()
 
 
 @router.put("/projects/{project_id}/engine")

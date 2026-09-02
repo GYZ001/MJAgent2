@@ -1783,14 +1783,13 @@ def _persist_review_projection(screenplay, board, screenplay_artifact=None):
                 artifact["id"],
             ),
         )
-        from app.storyboard_workspace import realign_generated_source_binding
+        from app.storyboard_workspace import align_generated_source_evidence, persist_source_binding
 
-        realign_generated_source_binding(
-            "episode-generic",
-            f"shot-row-{shot.shot_no}",
-            shot.source_excerpt,
-            conn=conn,
-            commit=False,
+        _shot_row_id = f"shot-row-{shot.shot_no}"
+        _candidate, _normalized = align_generated_source_evidence(
+            "episode-generic", shot.source_excerpt, conn=conn,
         )
+        conn.execute("UPDATE shots SET source_excerpt=? WHERE id=?", (_candidate, _shot_row_id))
+        persist_source_binding(_shot_row_id, _normalized, conn=conn, commit=False)
     conn.commit()
     return screenplay_artifact, shot_artifact_ids

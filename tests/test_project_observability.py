@@ -356,11 +356,11 @@ def test_trace_labels_hide_technical_keys_but_keep_them_in_metadata() -> None:
 
     name, role, method = observability_api._trace_call_semantics(
         "val422_metric",
-        {"metric": "repair_activation_total"},
+        {"metric": "baseline_generation_calls_total"},
         "生成剧本",
     )
     assert (name, role, method) == (
-        "记录剧本修复启动次数",
+        "记录剧本初稿生成次数",
         "program_processing",
         "通过本地结构校验",
     )

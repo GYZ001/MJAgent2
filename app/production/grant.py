@@ -29,17 +29,6 @@ ALLOWED_COMMANDS = frozenset({
     "run.control",
 })
 
-DENIED_COMMANDS = frozenset({
-    "project.delete",
-    "source.update",
-    "settings.update",
-    "screenplay.generate",  # 首轮完成后由 policy 再拦一层
-    "storyboard.generate",
-    "video.generate",
-    "video.complete_episode",
-})
-
-
 class ProductionGrant(BaseModel):
     grant_id: str
     episode_id: str
@@ -97,6 +86,15 @@ def issue_production_grant(
     conn=None,
     commit: bool = True,
 ) -> tuple[ProductionGrant, str]:
+    """签发一次性剧集范围授权。
+
+    ``allowed_commands``/``max_touched_nodes`` 目前只做审计记录——唯一的校验
+    消费方 ``assert_grant_allows`` 已随死代码清理一并删除（全仓零引用，实际
+    校验在 ``app/domain/screenplay_ops/activation.py`` 用内联 SQL 只查
+    ``issued_by``/``input_artifact_hash``/``revoked_at``/``expires_at``/
+    ``consumed_at``，从不读这两个字段）。这里不新增校验逻辑去补上这个缺口——
+    是否需要补，是产品/安全侧的决策，不在本轮死代码清理范围内。
+    """
     db = conn or get_conn()
     if conn is None:
         ensure_production_grants_table()
@@ -185,33 +183,6 @@ def get_production_grant(grant_id: str) -> ProductionGrant | None:
         revoked_at=row["revoked_at"],
         consumed_at=row["consumed_at"],
     )
-
-
-def assert_grant_allows(
-    grant: ProductionGrant | str,
-    *,
-    command: str,
-    episode_id: str | None = None,
-    touched_nodes: int = 0,
-) -> ProductionGrant:
-    g = get_production_grant(grant) if isinstance(grant, str) else grant
-    if g is None:
-        raise PermissionError("Production Grant 不存在")
-    if g.revoked_at is not None:
-        raise PermissionError("Production Grant 已撤销")
-    if now() > g.expires_at:
-        raise PermissionError("Production Grant 已过期")
-    if episode_id and g.episode_id != episode_id:
-        raise PermissionError("Production Grant 剧集范围不匹配")
-    if command in DENIED_COMMANDS:
-        raise PermissionError(f"Production Grant 禁止命令 {command}")
-    if command not in set(g.allowed_commands) and command not in ALLOWED_COMMANDS:
-        raise PermissionError(f"Production Grant 未授权命令 {command}")
-    if touched_nodes > g.max_touched_nodes:
-        raise PermissionError(
-            f"Patch 触及节点数 {touched_nodes} 超过授权上限 {g.max_touched_nodes}"
-        )
-    return g
 
 
 # app.db.init_db() no longer imports this module directly (P0-3 dependency

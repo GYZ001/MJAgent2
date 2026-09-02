@@ -200,16 +200,6 @@ def get_active_production_revision(episode_id: str, kind: Kind) -> ProductionRev
     return _row_to_revision(row)
 
 
-def screenplay_scene_shard_expected_hashes(
-    revision: ProductionRevision | None,
-) -> tuple[str, str]:
-    checkpoint = dict(revision.checkpoint_json or {}) if revision else {}
-    return (
-        str(checkpoint.get("blueprint_hash") or ""),
-        str(checkpoint.get("identity_registry_hash") or ""),
-    )
-
-
 def _artifact_json(row: dict[str, Any]) -> dict[str, Any] | None:
     content = row.get("content")
     if isinstance(content, dict):

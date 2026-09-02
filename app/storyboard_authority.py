@@ -512,34 +512,6 @@ def persist_storyboard_outline_projection(
     return None
 
 
-def migrate_storyboard_outline_authority(
-    episode_id: str,
-    *,
-    expected_stored_target_duration_s: int,
-    expected_outline_fingerprint: str,
-    conn=None,
-) -> StoryboardOutlineAuthority:
-    """Explicitly adopt a legacy outline after operator-supplied CAS checks."""
-    db = conn or get_conn()
-    row = db.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
-    if row is None:
-        raise StoryboardOutlineAuthorityError(f"剧集不存在：{episode_id}")
-    if _metadata_complete(row):
-        raise StoryboardOutlineAuthorityError("当前 outline 已有完整权威版本，无需迁移")
-    if int(row["target_duration_s"] or 0) != int(expected_stored_target_duration_s):
-        raise StoryboardOutlineAuthorityError("迁移前 stored target_duration_s 已变化")
-    raw_outline = str(row["storyboard_outline_json"] or "")
-    if not raw_outline or outline_fingerprint(raw_outline) != expected_outline_fingerprint:
-        raise StoryboardOutlineAuthorityError("迁移前 storyboard outline fingerprint 已变化")
-    return persist_storyboard_outline_authority(
-        episode_id,
-        raw_outline,
-        conn=db,
-        allow_unversioned_migration=True,
-        migration_reason="explicit_legacy_outline_authority_migration",
-    )
-
-
 def assert_storyboard_matches_outline_authority(
     authority: StoryboardOutlineAuthority,
     board: Storyboard,

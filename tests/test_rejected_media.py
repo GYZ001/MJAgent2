@@ -6,7 +6,7 @@ import threading
 import pytest
 
 from app import db
-from app.rejected_media import purge_reference_artifact, purge_rejected_media
+from app.rejected_media import _purge_artifact, purge_rejected_media
 
 
 def test_purge_rejected_media_removes_files_records_and_gallery_refs(
@@ -168,8 +168,11 @@ def test_reference_purge_refuses_artifact_in_published_lineage(
     )
     conn.commit()
 
+    artifact = conn.execute(
+        "SELECT * FROM artifacts WHERE id='reference-parent'",
+    ).fetchone()
     with pytest.raises(ValueError, match="禁止物理清理"):
-        purge_reference_artifact(conn, "reference-parent")
+        _purge_artifact(conn, artifact)
 
     assert conn.execute(
         "SELECT 1 FROM artifacts WHERE id='reference-parent'",

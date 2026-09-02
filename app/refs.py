@@ -226,12 +226,6 @@ def _merge_generated_portraits(conn, project_id: str, characters) -> None:
     )
 
 
-def portrait_appearance_anchor(prompt: str | None, fallback: str = "") -> str:
-    """Return the separately persisted appearance authority when available."""
-    fallback_text = production_appearance_anchor(fallback)
-    return fallback_text or production_appearance_anchor(prompt or "")
-
-
 async def generate_refs(
     project_id: str,
     only_character: str | None = None,

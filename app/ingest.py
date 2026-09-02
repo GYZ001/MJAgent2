@@ -277,12 +277,6 @@ def _split_chapters_with_removed(text: str) -> tuple[list[dict], list[dict]]:
     return chapters, removed
 
 
-def split_chapters(text: str) -> list[dict]:
-    """按章节标题切分；识别不到 2 个标题时按字数等分并提示性命名。"""
-    chapters, _ = _split_chapters_with_removed(text)
-    return chapters
-
-
 def ingest_novel(raw: bytes) -> dict:
     if not raw:
         raise ValueError("文件为空，请选择包含正文的 TXT 小说")

@@ -370,16 +370,12 @@ def video_candidate_selection_score(
     return round(base - penalty, 4)
 
 
-def select_best_video_candidate(
-    shot_id: str, *, force_best: bool = False
-) -> dict[str, Any] | None:
+def select_best_video_candidate(shot_id: str) -> dict[str, Any] | None:
     """Adopt the first technically valid video that passes the clip contract.
 
     技术校验（文件存在、容器格式、时长）是唯一客观判据。VLM 视觉质检已下线，
-    不再参与候选筛选或排序；``force_best`` 参数保留仅为调用方兼容。
+    不再参与候选筛选或排序。
     """
-    del force_best
-
     conn = get_conn()
     rows = conn.execute(
         "SELECT * FROM shot_versions WHERE shot_id=? AND status='succeeded' ORDER BY version_no",

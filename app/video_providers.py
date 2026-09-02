@@ -258,13 +258,3 @@ def adapter_for_output_url(url: str) -> VideoProviderAdapter | None:
     return None
 
 
-def all_wait_meta_keys() -> tuple[str, ...]:
-    """所有适配器写进 job meta 的键的并集。"""
-    keys: list[str] = []
-    for adapter in all_adapters():
-        for key in adapter.wait_meta_keys:
-            if key not in keys:
-                keys.append(key)
-    return tuple(keys)
-
-

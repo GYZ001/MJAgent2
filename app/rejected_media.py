@@ -216,19 +216,6 @@ def _purge_artifact(conn, artifact: Any) -> tuple[int, int]:
     return records + 1, sum(discard_file(path) for path in paths)
 
 
-def purge_reference_artifact(conn, artifact_id: str, *, commit: bool = True) -> dict[str, int]:
-    artifact = conn.execute(
-        "SELECT * FROM artifacts WHERE id=? AND scope_type='reference_asset'",
-        (artifact_id,),
-    ).fetchone()
-    if not artifact:
-        return {"records": 0, "files": 0}
-    records, files = _purge_artifact(conn, artifact)
-    if commit:
-        conn.commit()
-    return {"records": records, "files": files}
-
-
 def _scrub_shot_galleries(conn) -> tuple[int, int, set[str]]:
     removed = 0
     files = 0

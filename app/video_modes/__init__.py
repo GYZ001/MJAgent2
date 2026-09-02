@@ -14,88 +14,83 @@ reference_generate_legacy*.py 共 9 个文件）已于 2026-08-30 整体删除�
 它自那之后零测试覆盖、零生产调用方，是纯粹的死代码。
 
 本文件是唯一的稳定入口：全仓所有 `from app.video_modes import X` /
-`import app.video_modes` / `video_modes.X` 使用方式必须不经改动继续可用——下面按来源
-模块显式再导出每一个符号（用 `name as name` 的 PEP 484 显式重导出写法，不使用
-`from .x import *`，见 app/FILE_CONVENTIONS.toml 的 star_import 闸门）。新增视频模式
-逻辑请加进对应关注点的子模块，不要加回本文件。
+`import app.video_modes` / `video_modes.X` 使用方式必须不经改动继续可用——下面按**真源**
+显式再导出每一个符号：包内定义的符号从定义它的子模块导出一次；来自其它模块的符号
+（`app.schemas`、`app.db`、`app.hiagent`、`app.video_plan` 等）从其真正的定义模块直接
+导出，不借道某个碰巧 import 了它的子模块转手（用 `name as name` 的 PEP 484 显式重导出
+写法，不使用 `from .x import *`，见 app/FILE_CONVENTIONS.toml 的 star_import 闸门）。
+`config`/`hiagent` 是 `app.config`/`app.hiagent` 两个共享单例模块对象本身，
+`tests/test_video_modes_monkeypatch_guard.py` 显式把 `video_modes.config.X` /
+`video_modes.hiagent.X` 排除在“包拆分打桩陷阱”之外，因此仍从真源 `app` 导出。
+stdlib/typing（`Any`、`Callable`、`Path`、`annotations`、`asdict`、`base64`、
+`dataclass`、`field`、`hashlib`、`json`、`re`、`shutil`、`subprocess`）不再作为包属性
+导出——纯子模块实现细节导入，全仓 grep 确认没有 `video_modes.<名字>` 读取或打桩依赖。
+新增视频模式逻辑请加进对应关注点的子模块，不要加回本文件。
 """
 from __future__ import annotations
 
-from .asset_lookup import (
-    Any as Any,
-    Bible as Bible,
-    Path as Path,
-    ReferenceImageAsset as ReferenceImageAsset,
-    _asset_from_path as _asset_from_path,
-    _safe_ref_name as _safe_ref_name,
-    annotations as annotations,
-    character_reference_assets as character_reference_assets,
+from app import (
     config as config,
     hiagent as hiagent,
-    json as json,
+)
+
+from app.atomic_io import (
+    atomic_write_bytes as atomic_write_bytes,
+)
+from app.db import (
+    get_setting as get_setting,
     new_id as new_id,
-    re as re,
+)
+from app.hiagent import (
+    ProviderError as ProviderError,
+)
+from app.refs import (
+    visual_style_lock as visual_style_lock,
+)
+from app.schemas import (
+    Bible as Bible,
+    EpisodeScreenplay as EpisodeScreenplay,
+    Shot as Shot,
+)
+from app.video_plan import (
+    VideoGenerationMode as VideoGenerationModeEnum,  # noqa: F401 -- renamed re-export
+    VideoInputIntent as VideoInputIntent,
+)
+
+from .asset_lookup import (
+    _asset_from_path as _asset_from_path,
+    _safe_ref_name as _safe_ref_name,
+    character_reference_assets as character_reference_assets,
     reference_image_path as reference_image_path,
     scene_reference_assets as scene_reference_assets,
 )
 from .continuity_tail import (
-    Any as Any,
-    Bible as Bible,
-    EpisodeScreenplay as EpisodeScreenplay,
-    Path as Path,
-    ReferenceImageAsset as ReferenceImageAsset,
-    Shot as Shot,
-    _MAX_REDUNDANCY_PENALTY as _MAX_REDUNDANCY_PENALTY,
     _apply_redundancy_penalties as _apply_redundancy_penalties,
-    _asset_from_path as _asset_from_path,
-    _dedupe_assets as _dedupe_assets,
-    _enforce_reference_consistency as _enforce_reference_consistency,
     _finalize_reference_selection as _finalize_reference_selection,
-    _reference_runtime_blocking as _reference_runtime_blocking,
-    annotations as annotations,
     assemble_continuity_tail as assemble_continuity_tail,
-    max_character_reference_images as max_character_reference_images,
-    new_id as new_id,
-    previous_tail_reference_asset as previous_tail_reference_asset,
-    reference_image_path as reference_image_path,
 )
 from .keyframe_contract import (
-    Any as Any,
-    Bible as Bible,
-    EpisodeScreenplay as EpisodeScreenplay,
-    KEYFRAME_PROMPT_CONTRACT_VERSION as KEYFRAME_PROMPT_CONTRACT_VERSION,
-    Shot as Shot,
-    _MULTI_KEYFRAME_INVARIANCE_NOTE as _MULTI_KEYFRAME_INVARIANCE_NOTE,
     _keyframe_character_anchors as _keyframe_character_anchors,
     _keyframe_contract as _keyframe_contract,
     _keyframe_contract_instructions as _keyframe_contract_instructions,
     _keyframe_text_instruction as _keyframe_text_instruction,
-    annotations as annotations,
-    hashlib as hashlib,
     is_narrative_keyframe_slot as is_narrative_keyframe_slot,
-    json as json,
     keyframe_contract_fingerprint as keyframe_contract_fingerprint,
 )
 from .mode_selection import (
-    Any as Any,
-    Bible as Bible,
-    EpisodeScreenplay as EpisodeScreenplay,
     FIRST_FRAME_MODE as FIRST_FRAME_MODE,
     FIRST_LAST_FRAME_MODE as FIRST_LAST_FRAME_MODE,
     KEYFRAME_PROMPT_CONTRACT_VERSION as KEYFRAME_PROMPT_CONTRACT_VERSION,
     KEYFRAME_STRUCTURAL_FALLBACK_MODE as KEYFRAME_STRUCTURAL_FALLBACK_MODE,
-    ProviderError as ProviderError,
     REFERENCE_IMAGE_MODE as REFERENCE_IMAGE_MODE,
     REFERENCE_IMAGE_TYPES as REFERENCE_IMAGE_TYPES,
     REFERENCE_INPUT_POLICY_VERSION as REFERENCE_INPUT_POLICY_VERSION,
     ReferenceImageAsset as ReferenceImageAsset,
     ReferenceImagePlan as ReferenceImagePlan,
-    Shot as Shot,
     ShotVideoModeDecision as ShotVideoModeDecision,
     ShotVideoModeSelector as ShotVideoModeSelector,
     VIDEO_INPUT_MODE as VIDEO_INPUT_MODE,
     VideoGenerationMode as VideoGenerationMode,
-    VideoGenerationModeEnum as VideoGenerationModeEnum,
     _DEFAULT_KEYFRAME_CANDIDATE_COUNT as _DEFAULT_KEYFRAME_CANDIDATE_COUNT,
     _KEYFRAME_LLM_PROMPT_MAX_CHARS as _KEYFRAME_LLM_PROMPT_MAX_CHARS,
     _MAX_REDUNDANCY_PENALTY as _MAX_REDUNDANCY_PENALTY,
@@ -106,18 +101,13 @@ from .mode_selection import (
     _parse_ref_prompts as _parse_ref_prompts,
     _reference_runtime_blocking as _reference_runtime_blocking,
     _screenplay_call_kwargs as _screenplay_call_kwargs,
-    annotations as annotations,
-    asdict as asdict,
     batch_prompt_enabled as batch_prompt_enabled,
     bool_setting as bool_setting,
-    dataclass as dataclass,
     decision_to_dict as decision_to_dict,
     default_reference_decision as default_reference_decision,
     dict_to_decision as dict_to_decision,
     estimated_keyframe_generation_count as estimated_keyframe_generation_count,
-    field as field,
     float_setting as float_setting,
-    get_setting as get_setting,
     int_setting as int_setting,
     keyframe_candidate_count as keyframe_candidate_count,
     max_character_reference_images as max_character_reference_images,
@@ -128,108 +118,38 @@ from .mode_selection import (
     supporting_keyframe_candidate_count as supporting_keyframe_candidate_count,
 )
 from .reference_assemble import (
-    Any as Any,
-    Bible as Bible,
-    Callable as Callable,
-    EpisodeScreenplay as EpisodeScreenplay,
-    Path as Path,
-    REFERENCE_INPUT_POLICY_VERSION as REFERENCE_INPUT_POLICY_VERSION,
-    ReferenceImageAsset as ReferenceImageAsset,
-    Shot as Shot,
-    ShotVideoModeDecision as ShotVideoModeDecision,
-    _asset_from_path as _asset_from_path,
     _build_library_reference_assets as _build_library_reference_assets,
-    _dedupe_assets as _dedupe_assets,
-    _dedupe_str as _dedupe_str,
     _enforce_reference_consistency as _enforce_reference_consistency,
-    annotations as annotations,
     build_reference_assets as build_reference_assets,
-    character_reference_assets as character_reference_assets,
-    max_reference_images as max_reference_images,
-    scene_reference_assets as scene_reference_assets,
 )
 from .reference_generate import (
-    Any as Any,
-    Bible as Bible,
-    EpisodeScreenplay as EpisodeScreenplay,
-    Path as Path,
-    ProviderError as ProviderError,
-    ReferenceImageAsset as ReferenceImageAsset,
-    Shot as Shot,
     _SEED_USAGE_NOTE as _SEED_USAGE_NOTE,
-    _asset_from_path as _asset_from_path,
     _extract_last_frame as _extract_last_frame,
     _generate_image_with_seed_fallback as _generate_image_with_seed_fallback,
     _generate_one_reference as _generate_one_reference,
-    _keyframe_character_anchors as _keyframe_character_anchors,
     _portrait_seed_inputs as _portrait_seed_inputs,
-    _safe_ref_name as _safe_ref_name,
-    annotations as annotations,
-    atomic_write_bytes as atomic_write_bytes,
-    base64 as base64,
-    config as config,
-    hashlib as hashlib,
-    hiagent as hiagent,
-    json as json,
-    new_id as new_id,
     previous_tail_reference_asset as previous_tail_reference_asset,
     previous_tail_source_contract as previous_tail_source_contract,
-    reference_generation_prompt as reference_generation_prompt,
-    reference_image_path as reference_image_path,
-    shutil as shutil,
-    subprocess as subprocess,
 )
 from .reference_prompt import (
-    Any as Any,
-    Bible as Bible,
-    EpisodeScreenplay as EpisodeScreenplay,
-    KEYFRAME_PROMPT_CONTRACT_VERSION as KEYFRAME_PROMPT_CONTRACT_VERSION,
-    KEYFRAME_STRUCTURAL_FALLBACK_MODE as KEYFRAME_STRUCTURAL_FALLBACK_MODE,
-    Path as Path,
-    REFERENCE_INPUT_POLICY_VERSION as REFERENCE_INPUT_POLICY_VERSION,
-    Shot as Shot,
-    _KEYFRAME_LLM_PROMPT_MAX_CHARS as _KEYFRAME_LLM_PROMPT_MAX_CHARS,
-    _MAX_TIMELINE_KEYFRAMES as _MAX_TIMELINE_KEYFRAMES,
-    _SHORT_SHOT_MAX_SECONDS as _SHORT_SHOT_MAX_SECONDS,
-    _keyframe_character_anchors as _keyframe_character_anchors,
-    _keyframe_contract as _keyframe_contract,
-    _keyframe_contract_instructions as _keyframe_contract_instructions,
-    _keyframe_text_instruction as _keyframe_text_instruction,
     _photographic_medium_instruction as _photographic_medium_instruction,
     _seeded_structured_endpoint as _seeded_structured_endpoint,
-    annotations as annotations,
     reference_gallery_matches_keyframe_contract as reference_gallery_matches_keyframe_contract,
     reference_gallery_matches_library_policy as reference_gallery_matches_library_policy,
     reference_generation_prompt as reference_generation_prompt,
-    visual_style_lock as visual_style_lock,
 )
 from .seedance_pack import (
-    Any as Any,
-    FIRST_FRAME_MODE as FIRST_FRAME_MODE,
-    FIRST_LAST_FRAME_MODE as FIRST_LAST_FRAME_MODE,
-    Path as Path,
-    ProviderError as ProviderError,
-    REFERENCE_IMAGE_MODE as REFERENCE_IMAGE_MODE,
     REFERENCE_PROMPT_NOTE_MARKER as REFERENCE_PROMPT_NOTE_MARKER,
     REFERENCE_SINGLE_INSTANCE_NOTE as REFERENCE_SINGLE_INSTANCE_NOTE,
-    ReferenceImageAsset as ReferenceImageAsset,
-    VIDEO_INPUT_MODE as VIDEO_INPUT_MODE,
-    VideoInputIntent as VideoInputIntent,
     _CONTINUITY_FRAME_LABELS as _CONTINUITY_FRAME_LABELS,
-    _MAX_TIMELINE_KEYFRAMES as _MAX_TIMELINE_KEYFRAMES,
     _dedupe_assets as _dedupe_assets,
     _reference_identity_names as _reference_identity_names,
     _reference_input_label as _reference_input_label,
-    annotations as annotations,
     append_reference_prompt_notes as append_reference_prompt_notes,
     append_reference_prompt_notes_from_dicts as append_reference_prompt_notes_from_dicts,
     build_seedance_image_inputs as build_seedance_image_inputs,
     build_seedance_video_inputs as build_seedance_video_inputs,
     dedupe_reference_dicts as dedupe_reference_dicts,
-    hiagent as hiagent,
-    is_narrative_keyframe_slot as is_narrative_keyframe_slot,
-    max_character_reference_images as max_character_reference_images,
-    max_reference_images as max_reference_images,
     pack_reference_images_for_seedance as pack_reference_images_for_seedance,
-    reference_gallery_matches_library_policy as reference_gallery_matches_library_policy,
 )
+

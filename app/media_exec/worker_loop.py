@@ -4,7 +4,7 @@
 期 asyncio 任务本体：不断领取一个 job（``_claim_job_without_blocking_loop``，
 ``.authority``）、跑 ``_run_job``、处理中断（``_release_interrupted_worker_job``）。
 ``_run_job`` 定义在 ``.run_job``（该模块名字本身就是这个函数），但
-``.run_job`` 顶层需要 ``_maybe_auto_qa``/``_video_mode_input_roles_valid``（本文
+``.run_job_steps`` 需要 ``_video_mode_input_roles_valid``（本文
 件）供自己内部调用——若本文件在顶层 ``from .run_job import _run_job`` 会与
 ``.run_job`` 反向成环，因此对 ``_run_job`` 的引用推迟到 ``_worker_loop`` 函数体
 内部按需导入（做法与 ``.enqueue`` 需要 ``.run_job._enqueue_for_current_status``
@@ -66,21 +66,6 @@ def _video_mode_input_roles_valid(meta: dict[str, Any]) -> bool:
             and not meta.get("last_frame_used")
         )
     return False
-
-
-async def _maybe_auto_qa(
-    job,
-    version_id: str,
-    video_path: str,
-    *,
-    allow_autonomous_retake: bool = True,
-) -> bool:
-    """VLM 视觉质检已整体下线：候选是否可采用只看技术校验
-    （app.evidence.media.validate_video_file：文件是否存在、容器格式、时长），
-    不再调用模型评分/评语，不再产生模型调用延迟与费用。保留函数签名与调用点，
-    避免调用方大改；不再读取 auto_qa 设置。"""
-    del job, version_id, video_path, allow_autonomous_retake
-    return True
 
 
 async def _wait_for_worker_job(

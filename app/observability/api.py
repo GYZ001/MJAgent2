@@ -6,17 +6,14 @@ object back to one project before returning data or dispatching an action.
 """
 from __future__ import annotations
 
-import base64
-import binascii
 import json
 import re
 import time
 from collections import Counter
 from typing import Any
-from urllib.parse import unquote_to_bytes
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import PlainTextResponse
 
 from app.auth.deps import require_system_admin
 from app.db import get_conn
@@ -298,7 +295,6 @@ _TRACE_STAGE_PURPOSE_LABELS = {
     "角色圣经": "生成人物设定",
 }
 _TRACE_METRIC_PURPOSE_LABELS = {
-    "repair_activation_total": "记录剧本修复启动次数",
     "baseline_generation_calls_total": "记录剧本初稿生成次数",
     "production_repair_patch_total": "记录剧本局部修复次数",
     "time_to_completion_certificate_seconds": "记录剧本验收耗时",
@@ -633,7 +629,7 @@ def _video_stage_statuses(context: dict[str, Any]) -> dict[str, str]:
     run_status = str(run.get("status") or "PENDING")
     active_job_statuses = {
         "queued", "running", "waiting_provider", "waiting_retry",
-        "waiting_budget", "waiting",
+        "waiting",
     }
     terminal_success = phase in {
         "SUCCEEDED_COVERED", "COMPLETED_DEADLINE_FALLBACK",
@@ -729,7 +725,7 @@ def _video_stage_subtitles(context: dict[str, Any]) -> dict[str, str]:
         status_counts.get(value, 0)
         for value in (
             "queued", "running", "waiting_provider", "waiting_retry",
-            "waiting_budget", "waiting",
+            "waiting",
         )
     )
     succeeded_attempts = sum(
@@ -1470,9 +1466,6 @@ def _video_completion_stage_detail(
                 "status": plan.get("status") if plan else "pending",
                 "shot_count": len(shot_plans),
                 "mode_distribution": mode_distribution,
-                "estimated_cost_cny": (
-                    plan.get("estimated_cost") if plan else None
-                ),
                 "estimated_latency_ms": (
                     plan.get("estimated_latency_ms") if plan else None
                 ),
@@ -1768,26 +1761,6 @@ def _video_create_degraded_scenes(item: dict[str, Any]) -> list[str]:
         else None
     )
     return [str(name) for name in degraded if str(name).strip()] if isinstance(degraded, list) else []
-
-
-def _data_uri_bytes(value: str) -> tuple[bytes, str] | None:
-    if not value.startswith("data:"):
-        return None
-    header, _, payload = value.partition(",")
-    if not payload:
-        return None
-    mime = "application/octet-stream"
-    is_base64 = False
-    for segment in header[len("data:"):].split(";"):
-        if segment == "base64":
-            is_base64 = True
-        elif segment:
-            mime = segment
-    try:
-        raw = base64.b64decode(payload) if is_base64 else unquote_to_bytes(payload)
-    except (binascii.Error, ValueError):
-        return None
-    return raw, mime
 
 
 def _compact_media_call_input(item: dict[str, Any], project_id: str) -> Any:
@@ -2161,18 +2134,6 @@ def scoped_run(project_id: str, run_id: str):
     return {**run, **_run_context(run)}
 
 
-@router.get("/projects/{project_id}/observability/runs/{run_id}/steps")
-def scoped_run_steps(project_id: str, run_id: str):
-    _assert_scope(project_id, _run_project(run_id), "运行")
-    return orchestration_api.get_steps(run_id)
-
-
-@router.get("/projects/{project_id}/observability/runs/{run_id}/events")
-def scoped_run_events(project_id: str, run_id: str, after: float | None = None, limit: int = Query(500, ge=1, le=1000)):
-    _assert_scope(project_id, _run_project(run_id), "运行")
-    return orchestration_api.get_events(run_id, after=after, limit=limit)
-
-
 @router.post("/projects/{project_id}/observability/runs/{run_id}/{action}")
 async def scoped_run_action(project_id: str, run_id: str, action: str, body: dict | None = Body(None)):
     _assert_scope(project_id, _run_project(run_id), "运行")
@@ -2262,35 +2223,6 @@ def scoped_call_download(project_id: str, call_id: int):
     )
 
 
-@router.get("/projects/{project_id}/observability/calls/{call_id}/content/{index}")
-def scoped_call_content_asset(project_id: str, call_id: int, index: int):
-    """按需解码并回传 request_json.content[index] 里内嵌的一张原图/视频帧。
-
-    链路详情不会把 base64 塞进节点 JSON（见 _compact_media_call_input），点开
-    某张参考图时才走这个接口现场解码，返回真实字节而不是文本。
-    """
-    _assert_scope(project_id, _call_project(call_id), "调用记录")
-    row = _call_row(call_id)
-    if not row:
-        raise HTTPException(404, "调用记录不存在")
-    try:
-        request_obj = json.loads(row.get("request_json") or "null")
-    except (TypeError, json.JSONDecodeError):
-        request_obj = None
-    content = request_obj.get("content") if isinstance(request_obj, dict) else None
-    if not isinstance(content, list) or not (0 <= index < len(content)):
-        raise HTTPException(404, "该调用记录没有这一项内容")
-    part = content[index]
-    part_type = part.get("type") if isinstance(part, dict) else None
-    url_field = {"image_url": "image_url", "video_url": "video_url"}.get(str(part_type))
-    url = str(((part or {}).get(url_field) or {}).get("url") or "") if url_field else ""
-    parsed = _data_uri_bytes(url)
-    if parsed is None:
-        raise HTTPException(404, "这一项内容不是内嵌的媒体数据，或已不是 data: 格式")
-    raw_bytes, mime = parsed
-    return Response(content=raw_bytes, media_type=mime)
-
-
 @router.get("/projects/{project_id}/observability/traces/{object_type}/{object_id}")
 def scoped_trace(
     project_id: str,
@@ -2314,12 +2246,6 @@ def scoped_trace_node(
     )
 
 
-@router.get("/projects/{project_id}/observability/gates")
-def scoped_gates(project_id: str, limit: int = Query(100, ge=1, le=500)):
-    _project(project_id)
-    return orchestration_api.list_pending_gates(project_id=project_id, limit=limit)
-
-
 @router.post("/projects/{project_id}/observability/gates/{artifact_id}/decision")
 def scoped_gate_decision(project_id: str, artifact_id: str, body: dict = Body(...)):
     _assert_scope(project_id, _artifact_project(artifact_id), "门禁产物")
@@ -2330,16 +2256,6 @@ def scoped_gate_decision(project_id: str, artifact_id: str, body: dict = Body(..
 def scoped_artifact(project_id: str, artifact_id: str):
     _assert_scope(project_id, _artifact_project(artifact_id), "证据产物")
     return orchestration_api.get_artifact(artifact_id)
-
-
-@router.get("/projects/{project_id}/observability/artifacts/{artifact_id}/{part}")
-def scoped_artifact_part(project_id: str, artifact_id: str, part: str):
-    _assert_scope(project_id, _artifact_project(artifact_id), "证据产物")
-    if part == "evals":
-        return orchestration_api.get_artifact_evaluations(artifact_id)
-    if part == "lineage":
-        return orchestration_api.get_artifact_lineage(artifact_id)
-    raise HTTPException(404, "证据视图不存在")
 
 
 @router.get("/observability/resolve")

@@ -83,17 +83,6 @@ ACTION_DESC_TARGET_MAX = 55
 SCENE_OUTLINE_MIN = 1
 SCENE_STORY_FUNCTION_MIN_CHARS = 6
 
-_RENDERABILITY_PROMPT_BLOCK = """【Renderability First·视频模型能力边界】
-逐镜可拍性由 ShotTask 的动作阶段、capacity_budget、可见身份、连续性状态差与
-required_text 合同决定。自然语言中的物件、动作、情绪或题材词不参与通过判定。
-若任务超出时长或可读窗口，应在 AtomicAction.splittable_boundaries 上重分配阶段，
-不得扫描文案词汇后删除内容。"""
-
-
-def renderability_prompt_block() -> str:
-    return _RENDERABILITY_PROMPT_BLOCK
-
-
 def shot_count_budget_errors(n_shots: int, *, context: str = "分镜") -> list[str]:
     """Shot count is never a content gate; duplicate/function gates stop runaway work."""
     _ = (n_shots, context)
@@ -117,56 +106,6 @@ def episode_target_from_spine(spine_beat_count: int) -> int:
     raw = max(config.EPISODE_TARGET_MIN_S, raw)
     step = config.EPISODE_TARGET_STEP_S
     return max(config.EPISODE_TARGET_MIN_S, math.ceil(raw / step) * step)
-
-
-def screenplay_required_duration_s(screenplay, *, minimum_s: int = 0) -> int:
-    """Use the executable outline as duration authority when one can be compiled."""
-    from app import config
-    from app.spoken_contract import content_char_count
-
-    if getattr(screenplay, "narrative_plan", None) is not None:
-        from app.narrative_priority import (
-            authoritative_outline_duration_s,
-            compile_authoritative_delivery_outline,
-        )
-
-        _projected, outline, _audit = (
-            compile_authoritative_delivery_outline(screenplay)
-        )
-        return max(
-            int(minimum_s or 0),
-            authoritative_outline_duration_s(outline),
-        )
-
-    # Legacy scripts without a narrative graph retain the old conservative
-    # floor until they can be migrated to structured ShotTasks.
-    spoken_chars = sum(
-        content_char_count(turn.line)
-        for chain in (getattr(screenplay, "dialogue_chains", None) or [])
-        for turn in (chain.turns or [])
-    )
-    spoken_rate = (
-        config.SPOKEN_CHARS_PER_5_SECONDS
-        / config.VIDEO_DURATION_MIN_S
-    )
-    spoken_seconds = math.ceil(spoken_chars / spoken_rate) if spoken_chars else 0
-    spine = getattr(screenplay, "plot_spine", None)
-    beats = list(getattr(spine, "spine_beats", None) or [])
-    must_keep = [beat for beat in beats if beat.must_keep] or beats
-    beat_seconds = len(must_keep) * 2 * PREFERRED_SHOT_DURATION_S
-    scene_seconds = (
-        len(getattr(screenplay, "scene_outline", None) or [])
-        * PREFERRED_SHOT_DURATION_S
-    )
-    raw = max(
-        int(minimum_s or 0),
-        config.EPISODE_TARGET_MIN_S,
-        spoken_seconds,
-        beat_seconds,
-        scene_seconds,
-    )
-    step = config.EPISODE_TARGET_STEP_S
-    return math.ceil(raw / step) * step
 
 
 def shot_duration_should_prefer_five(*, spoken_chars: int, action_beats: int) -> bool:

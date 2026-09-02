@@ -79,13 +79,6 @@ class SceneAssetQualityError(ContentGenerationError):
     """A scene asset exists or was evaluated, but its typed QA contract failed."""
 
 
-def _scene_failures_are_quality_only(failures: list[Exception]) -> bool:
-    """Classify by exception type; error prose never participates in routing."""
-    return bool(failures) and all(
-        isinstance(exc, SceneAssetQualityError) for exc in failures
-    )
-
-
 # ---------- 落盘 / 提示词 ----------
 
 def normalize_scene_prompt(*segments: str) -> str:
@@ -445,32 +438,6 @@ def scene_ref_qa_for_episode(project_id: str, name: str, episode_no: int | None)
         except (TypeError, ValueError):
             return None
     return None
-
-
-def scene_refs_as_image_inputs(bible: Bible, scene_names: list[str], limit: int,
-                               *, project_id: str | None = None,
-                               episode_no: int | None = None) -> list[tuple[str, str]]:
-    """规范场景名 →(data_url, "reference_image") 列表，最多 limit 张。
-    有项目上下文时只接受通过新版门禁的分段包；无项目上下文的旧调用才回退 Bible 缓存。"""
-    out: list[tuple[str, str]] = []
-    by_name = {s.name: s for s in (getattr(bible, "scenes", None) or [])}
-    seen: set[str] = set()
-    for name in scene_names:
-        if len(out) >= max(limit, 0):
-            break
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        path = scene_ref_for_episode(project_id, name, episode_no) if project_id else None
-        if not path and not project_id:
-            sc = by_name.get(name)
-            path = getattr(sc, "ref_image_path", None) if sc else None
-        if path and Path(path).exists():
-            try:
-                out.append((hiagent.data_url_from_file(path), "reference_image"))
-            except OSError:
-                continue
-    return out
 
 
 # ---------- 初始批量出图 ----------
@@ -1666,23 +1633,6 @@ shot_only / 未永久变化请 changed=false。new_scene_canonical 须 30~80 字
             "evidence_excerpt": item.evidence_excerpt.strip(),
         }
     return out
-
-
-def _update_bible_scene_canonical(conn, project_id: str, name: str, canonical: str,
-                                  ref_image_path: str | None = None) -> None:
-    row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
-    if not row or not row["bible_json"]:
-        return
-    data = json.loads(row["bible_json"])
-    for sc in data.get("scenes", []):
-        if sc.get("name") == name:
-            sc["scene_canonical"] = canonical
-            if ref_image_path:
-                sc["ref_image_path"] = ref_image_path
-            break
-    conn.execute("UPDATE projects SET bible_json=? WHERE id=?",
-                 (json.dumps(data, ensure_ascii=False), project_id))
-    conn.commit()
 
 
 async def _refresh_scene_on_state_change(

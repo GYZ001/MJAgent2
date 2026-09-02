@@ -42,26 +42,6 @@ def record_noop_rejected(*, kind: str, episode_id: str, **extra: Any) -> None:
     inc("repair_noop_rejected_total", kind=kind, episode_id=episode_id, **extra)
 
 
-def record_issue_reopened(*, kind: str, episode_id: str, fingerprint: str = "", **extra: Any) -> None:
-    inc(
-        "repair_issue_reopened_total",
-        kind=kind,
-        episode_id=episode_id,
-        fingerprint=fingerprint,
-        **extra,
-    )
-
-
-def record_activation(*, kind: str, episode_id: str, activation_no: int = 0, **extra: Any) -> None:
-    inc(
-        "repair_activation_total",
-        kind=kind,
-        episode_id=episode_id,
-        activation_no=activation_no,
-        **extra,
-    )
-
-
 def record_certificate_issued(*, kind: str, episode_id: str, **extra: Any) -> None:
     inc("time_to_completion_certificate_seconds", kind=kind, episode_id=episode_id, **extra)
     inc(f"certified_{kind}_delivery_rate", kind=kind, episode_id=episode_id, value=1, **extra)

@@ -108,25 +108,3 @@ def score_renderability_sample(
     }
 
 
-def compare_with_baseline(
-    candidate: dict[str, Any],
-    baseline: dict[str, Any],
-) -> dict[str, Any]:
-    """candidate / baseline 均为 score_renderability_sample 的输出，或含 shot_count 的简表。"""
-    c_shots = int(
-        (candidate.get("metrics") or candidate).get("shot_count")
-        or candidate.get("shot_count")
-        or 0
-    )
-    b_shots = int(
-        (baseline.get("metrics") or baseline).get("shot_count")
-        or baseline.get("shot_count")
-        or 0
-    )
-    return {
-        "candidate_shot_count": c_shots,
-        "baseline_shot_count": b_shots,
-        "shot_count_ratio": round(c_shots / b_shots, 3) if b_shots else None,
-        "meets_70pct_goal": (c_shots <= int(b_shots * 0.7)) if b_shots else None,
-        "contract_version": "renderability_v1",
-    }

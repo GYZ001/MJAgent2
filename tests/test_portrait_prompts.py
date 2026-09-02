@@ -5,7 +5,6 @@ from app.refs import (
     _merge_generated_portraits,
     character_visual_style_lock,
     effective_portrait_prompt,
-    portrait_appearance_anchor,
     portrait_prompt,
     production_appearance_anchor,
     scene_visual_style_lock,
@@ -133,27 +132,6 @@ def test_multiview_prompt_keeps_latest_edit_without_keyword_filtering() -> None:
     assert "3/4" in prompt
     assert "画风最高优先级" in prompt
     assert "视角与构图要求覆盖源提示词" in prompt
-
-
-def test_persisted_appearance_is_authority_instead_of_prompt_parsing() -> None:
-    latest = (
-        "3D国漫写实风。全身角色立绘定妆照：少女，黑色及腰长发，"
-        "淡紫色古风长裙，金色刺绣纹饰，广袖流仙裙。正面站立，中性表情，"
-        "纯浅米色背景，全身完整可见。"
-    )
-
-    anchor = portrait_appearance_anchor(latest, "淡绿色上衣搭配紧腿长裤")
-
-    assert anchor == "淡绿色上衣搭配紧腿长裤"
-
-
-def test_placeholder_portrait_prompt_falls_back_to_segment_appearance() -> None:
-    anchor = portrait_appearance_anchor(
-        "p",
-        "早期：黑发少年，玄色劲装，目光坚定",
-    )
-
-    assert anchor == "早期：黑发少年，玄色劲装，目光坚定"
 
 
 def test_episode_bible_uses_persisted_appearance_not_prompt_word_extraction(monkeypatch) -> None:
