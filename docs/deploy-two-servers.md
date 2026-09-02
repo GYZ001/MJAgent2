@@ -138,3 +138,26 @@ nginx `mjagent2.diag.log` 的 `up_resp`（后端耗时，含隧道）切换前�
 剩下的 ~160ms 是新加坡↔北京的物理往返，改不掉：用户在国内 → 新加坡 → 北京 → 新加坡 → 国内，
 比原来多跨一次国际链路。要再降只能把入口挪到国内（B 开 443 或国内另起入口机，涉及备案），
 这是用户拍板的事，不在本次范围。
+
+## 2026-09-02 切换后事故：B 启动即整进程锁死（已修）
+
+**现象**：用 `FORCE=1` 跑凌晨流水线重启 B（23:31 北京时间）后，B 一启动就打
+`insert_error_log failed ... database is locked`，随后 worker 循环、watchdog、HTTP 全部卡死，
+域名 502。域名临时切回 A 本机实例（23:35），B 停机排查。
+
+**根因**（沙箱里用 B 的库复现，0.00s 必现）：`reconcile_stalled_video_jobs` →
+`release_orphan_quarantined_versions` 只看「本镜没有 succeeded 版本」，漏了本镜已有
+版本占着 `video_slot_active=1`（B 在线那 10 分钟里 worker 恢复了暂停的视频任务，为
+`shot_1d91980603b8` 排了 v2）；放行 v1 的 UPDATE 撞 `uq_versions_active_video_shot`
+抛 IntegrityError。真正致命的是第二层：抛错时任务局部的常驻连接上还开着写事务，调用方
+记错误走独立连接（`timeout=0`）抢不到锁，事务永不回滚，整个进程所有写入者跟着死锁。
+
+**修复**（commit `bea6e93`，A 主动重启 B 用它原来的冲突数据验证过，启动干净）：
+放行判据改为与唯一索引同一谓词（有 succeeded 或占槽版本的镜不放行）；
+`reconcile_stalled_video_jobs` 异常时 `conn.rollback()` 先于一切再抛。回归测试
+`tests/test_quarantine_release_slot_guard.py` 修复前红（IntegrityError + 事务泄漏）、修复后绿。
+
+**切回**：23:50 停 A → 以 A 的库为准再做一次 delta 同步（B 那 10 分钟的自动恢复产物作废）→
+起 B → nginx 上游切回 18230 → 域名验证全绿 → A 以 127.0.0.1 重启。
+这次经历也说明：**任何一次在 B 上的重启都是对启动恢复逻辑的真实测试**，凌晨流水线的
+40s 健康检查 + 回滚是必要的。
