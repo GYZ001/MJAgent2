@@ -27,18 +27,24 @@ import { pickerWindowParams, resolveWindowedEpisodeId } from "./episodePicker";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
 import { canSeeSystemSettings } from "./auth/session";
 import ThemeSwitch from "./theme/ThemeSwitch";
-
-// 加载器单独具名：lazy() 与 hover 预取共用同一个引用，import() 天然去重。
-const loadBiblePage = () => import("./pages/BiblePage");
-const loadScenesPage = () => import("./pages/ScenesPage");
-const loadEpisodesPage = () => import("./pages/EpisodesPage");
-const loadScriptPage = () => import("./pages/ScriptPage");
-const loadBoardPage = () => import("./pages/BoardPage");
-const loadWallPage = () => import("./pages/WallPage");
-const loadCinemaPage = () => import("./pages/CinemaPage");
-const loadMonitorPage = () => import("./pages/MonitorPage");
-const loadReaderPage = () => import("./pages/ReaderPage");
-const loadAccountAdminPage = () => import("./pages/AccountAdminPage");
+import {
+  loadAccountAdminPage,
+  loadBiblePage,
+  loadBoardPage,
+  loadCinemaPage,
+  loadEpisodesPage,
+  loadMonitorPage,
+  loadReaderPage,
+  loadScenesPage,
+  loadScriptPage,
+  loadSeriesPage,
+  loadWallPage,
+  PAGE_LOADERS,
+  SECTIONS,
+  SYSTEM_SECTIONS,
+  type View,
+} from "./appSections";
+export type { View } from "./appSections";
 
 const BiblePage = lazy(loadBiblePage);
 const ScenesPage = lazy(loadScenesPage);
@@ -47,35 +53,10 @@ const ScriptPage = lazy(loadScriptPage);
 const BoardPage = lazy(loadBoardPage);
 const WallPage = lazy(loadWallPage);
 const CinemaPage = lazy(loadCinemaPage);
+const SeriesPage = lazy(loadSeriesPage);
 const MonitorPage = lazy(loadMonitorPage);
 const ReaderPage = lazy(loadReaderPage);
 const AccountAdminPage = lazy(loadAccountAdminPage);
-
-export type View =
-  | "studio"
-  | "bible"
-  | "scenes"
-  | "episodes"
-  | "script"
-  | "board"
-  | "wall"
-  | "cinema"
-  | "observability"
-  | "system"
-  | "reader";
-
-const PAGE_LOADERS: Partial<Record<View, () => Promise<unknown>>> = {
-  bible: loadBiblePage,
-  scenes: loadScenesPage,
-  episodes: loadEpisodesPage,
-  script: loadScriptPage,
-  board: loadBoardPage,
-  wall: loadWallPage,
-  cinema: loadCinemaPage,
-  observability: loadMonitorPage,
-  system: loadMonitorPage,
-  reader: loadReaderPage,
-};
 
 /** 项目清单拉取失败后的重试退避区间。 */
 const PROJECTS_RETRY_MIN_MS = 2000;
@@ -164,61 +145,6 @@ export function useNav(): Nav {
   return context ?? fallback;
 }
 
-const SECTIONS: {
-  key: View;
-  label: string;
-  icon: string;
-  group: string;
-  needProject?: boolean;
-  needEpisode?: boolean;
-  matchViews?: View[];
-}[] = [
-  {
-    key: "bible",
-    label: "世界书",
-    icon: "书",
-    group: "世界书",
-    needProject: true,
-    matchViews: ["bible", "scenes", "episodes"],
-  },
-  {
-    key: "script",
-    label: "映射台",
-    icon: "映",
-    group: "内容制作",
-    needEpisode: true,
-  },
-  {
-    key: "board",
-    label: "分镜台",
-    icon: "镜",
-    group: "内容制作",
-    needEpisode: true,
-  },
-  {
-    key: "wall",
-    label: "生成台",
-    icon: "生",
-    group: "质量交付",
-    needEpisode: true,
-  },
-  {
-    key: "cinema",
-    label: "成片台",
-    icon: "片",
-    group: "质量交付",
-    needEpisode: true,
-  },
-  { key: "observability", label: "观测台", icon: "观", group: "项目观测", needProject: true },
-];
-
-const SYSTEM_SECTIONS: Array<{ key: "overview" | "models" | "accounts" | "settings"; label: string; icon: string }> = [
-  { key: "overview", label: "总览", icon: "总" },
-  { key: "models", label: "模型中心", icon: "模" },
-  { key: "accounts", label: "账号管理", icon: "户" },
-  { key: "settings", label: "系统设置", icon: "设" },
-];
-
 const decodePart = (value?: string) =>
   value ? decodeURIComponent(value) : null;
 
@@ -242,6 +168,7 @@ export function routeFromPath(pathname: string): Pick<
   const projectId = decodePart(parts[1]);
   if (parts[2] === "observability")
     return { view: "observability", projectId, episodeId: null, chapterIdx: null };
+  if (parts[2] === "series") return { view: "series", projectId, episodeId: null, chapterIdx: null };
   if (parts[2] === "reader") {
     const idx = Number(parts[3]);
     return {
@@ -295,6 +222,7 @@ export function locationFor(
   if (!projectId) return "/workspaces";
   const project = `/projects/${encodeURIComponent(projectId)}`;
   if (view === "observability") return `${project}/observability/jobs`;
+  if (view === "series") return `${project}/series`;
   if (view === "reader") return `${project}/reader/${chapterIdx ?? 1}`;
   if (
     view === "script" ||
@@ -1057,6 +985,7 @@ function AppShell() {
           ) : (
             <WorkspaceEmpty label="成片台" view="cinema" />
           ))}
+        {view === "series" && projectId && <SeriesPage key={projectId} />}
         {view === "observability" && projectId && (
           <MonitorPage mode="project" projectId={projectId} projectName={currentProject?.name} />
         )}
