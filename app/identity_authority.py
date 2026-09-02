@@ -20,6 +20,8 @@ BACKEND_OWNED_IDENTITY_AUTHORITY_VERSION = (
 NON_AUTHORITATIVE_SOURCE_LABEL_PROVENANCES = frozenset({
     "provider_synthetic_functional.v1",
 })
+# Named-family decisions: both mint ``bible:<name>`` and fold into that group.
+NAMED_FAMILY_RESOLUTIONS = frozenset({"future_identity", "reference_identity"})
 
 
 class IdentityAuthorityConflictError(ValueError):
@@ -94,7 +96,7 @@ def authority_id_for_resolution(value: dict[str, Any]) -> str:
     # that makes the structural-coverage gate see two authority classes in one
     # group.  Only functional extras (no stable canonical name) fall through to
     # the synthetic functional namespace below.
-    if canonical_name and resolution in {"future_identity", "reference_identity"}:
+    if canonical_name and resolution in NAMED_FAMILY_RESOLUTIONS:
         return f"bible:{canonical_name}"
 
     source_label = str(value.get("source_label") or "").strip()
@@ -191,7 +193,7 @@ def visual_entity_id_for_resolution(value: dict[str, Any]) -> str:
     """
     canonical_name = str(value.get("canonical_name") or "").strip()
     resolution = str(value.get("resolution") or "").strip()
-    if canonical_name and resolution in {"future_identity", "reference_identity"}:
+    if canonical_name and resolution in NAMED_FAMILY_RESOLUTIONS:
         return f"bible:{canonical_name}"
 
     seed = {
@@ -388,18 +390,21 @@ def identity_authority_registry(
         ).strip()
         raw_identity_group = identity_group
         semantic_group = None
-        if (
-            str(item.get("resolution") or "") == "future_identity"
-        ):
+        resolution = str(item.get("resolution") or "")
+        if resolution in NAMED_FAMILY_RESOLUTIONS:
             # A confirmed name is no longer an episode-local functional group.
             # This applies equally to Bible and backend-signed future-name /
             # candidate authorities: multiple former F1 tokens may be verified
             # aliases of one authority, while the forward raw-group check below
             # still forbids one F1 from resolving to two authorities.
+            # ``reference_identity`` folds the same way: its authority is already
+            # ``bible:<name>``, so keeping the raw model group (current-1:F18)
+            # made one authority span two groups once the same name entered the
+            # Bible mid-run (ERR-20260902-2aabcc: 雨馨 remembered, never on screen).
             semantic_group = authority_id
-            authorities_by_named_canonical.setdefault(
-                item["canonical_name"], set()
-            ).add(authority_id)
+        if resolution == "future_identity":
+            # Only future claims compete for one name; reference rows may coexist with a manual authority.
+            authorities_by_named_canonical.setdefault(item["canonical_name"], set()).add(authority_id)
         register_group(
             authority_id,
             raw_identity_group,
