@@ -5,6 +5,14 @@
 ``projects/{pid}/series/exports/{export_id}/`` 下是硬链接（同一文件系统零拷贝）+
 ``manifest.json``（Export 对象持久化形态）+ ``下载清单.txt``（每行一个可下载
 URL，能直接喂给 aria2/wget -i）。
+
+已知限制：``下载清单.txt`` 是**生成那一刻**写死的静态文件，里面的 ``mt=`` 票据
+按天分桶（``app.media_urls``，只认今天与昨天两桶）。接口返回的 ``items[].url``
+每次读取都重签（见 ``_resign_urls``），这个 txt 里的不会——它的用法是「导出后
+立刻下载、马上喂给下载工具」，隔天再用需要重新点一次导出。之所以不改成动态
+生成的接口：``<a href>`` 下载不会带 ``X-Manju-Session`` 头，`/api` 路由服务不了
+这个场景，URL 里带票据的 `/media` 静态文件才行。等 ``MJ_MEDIA_REQUIRE_TICKET``
+真正打开时，这一条是要一起处理的。
 """
 from __future__ import annotations
 
@@ -116,6 +124,28 @@ def create_export(project_id: str, task_ids: list[str]) -> dict:
     return export
 
 
+def _resign_urls(export_dir: Path, export: dict) -> dict:
+    """按盘上现状重签这个导出包里的全部 ``/media`` URL。
+
+    ``manifest.json`` 里持久化的 URL 带的是**生成那天**的 ``mt=`` 票据，而
+    ``app.media_urls`` 的票据按天分桶、只认今天与昨天两桶——直接把持久化的那份
+    返给前端，导出包放过一天就是一串过期票据，等 ``MJ_MEDIA_REQUIRE_TICKET``
+    打开就整包 403。URL 必须在**读取时**按路径重新签发，不能当成静态数据存。
+    """
+    items = []
+    for item in export.get("items") or []:
+        path = export_dir / str(item.get("file_name") or "")
+        version = None
+        if path.is_file():
+            stat = path.stat()
+            version = f"{stat.st_mtime_ns}-{stat.st_size}"
+        items.append({**item, "url": build_media_url(str(path), version=version)})
+    export["items"] = items
+    export["manifest_url"] = build_media_url(str(export_dir / "manifest.json"))
+    export["list_url"] = build_media_url(str(export_dir / "下载清单.txt"))
+    return export
+
+
 def list_exports(project_id: str) -> list[dict]:
     root = _exports_root(project_id)
     if not root.is_dir():
@@ -126,7 +156,7 @@ def list_exports(project_id: str) -> list[dict]:
         if not manifest_path.is_file():
             continue
         try:
-            entries.append(json.loads(manifest_path.read_text(encoding="utf-8")))
+            entries.append(_resign_urls(child, json.loads(manifest_path.read_text(encoding="utf-8"))))
         except (OSError, ValueError):
             continue
     entries.sort(key=lambda e: e.get("created_at") or 0, reverse=True)
