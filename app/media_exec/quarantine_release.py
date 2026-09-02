@@ -14,6 +14,11 @@ def release_orphan_quarantined_versions(conn, limit: int) -> int:
     ``video_slot_active=0 → adoptable=False`` 机器扔掉的好素材——用户已经等了
     6 次生成却拿不到任何能用的东西，继续隔离纯粹是为已废止概念服务的拦路石。
     每镜只放行最新的一版，避免一次冒出多个候选。
+
+    「一个可用版本都没有」必须与 ``uq_versions_active_video_shot``（每镜至多一行
+    ``video_slot_active=1``）同一判据：本镜若有别的版本正占着槽位（新一轮生成已在
+    排队/运行），这镜就不是孤儿，放行会在 UPDATE 上撞唯一索引。2026-09-02 计算服务器
+    上就是这样：v1 隔离、v2 queued 占槽，放行 v1 抛 IntegrityError，把启动恢复整个打死。
     """
     rows = conn.execute(
         """SELECT v.id, v.shot_id, v.video_path
@@ -22,7 +27,8 @@ def release_orphan_quarantined_versions(conn, limit: int) -> int:
               AND COALESCE(v.video_path,'') <> ''
               AND NOT EXISTS (
                 SELECT 1 FROM shot_versions ok
-                 WHERE ok.shot_id=v.shot_id AND ok.status='succeeded'
+                 WHERE ok.shot_id=v.shot_id
+                   AND (ok.status='succeeded' OR ok.video_slot_active=1)
               )
               AND v.created_at=(
                 SELECT MAX(x.created_at) FROM shot_versions x

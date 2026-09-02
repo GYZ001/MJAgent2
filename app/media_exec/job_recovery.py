@@ -302,10 +302,23 @@ def reconcile_stalled_video_jobs(limit: int = 50) -> dict[str, int]:
     人工闸门；成本预算拦截体系连同它的读侧恢复机制已于 2026-09-01 整体退场
     （既无生产者又无存量行，见 CLAUDE.md「Retiring Features」），该状态不再
     存在，本函数不再扫描它。
+
+    异常时**回滚必须是第一件事**：各修复段在任务/线程局部的常驻连接上开着写事务，
+    不回滚就把写锁留在这条连接上——错误记录走独立连接且 ``timeout=0``，先抢不到锁；
+    随后进程里所有写入者（worker 循环、watchdog、HTTP）跟着卡死。2026-09-02 计算服务器
+    启动即锁死（``startup_recovery.media_stalls`` → 全进程 database is locked）就是这条路。
     """
+    conn = get_conn()
+    try:
+        return _reconcile_stalled_video_jobs(conn, limit)
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _reconcile_stalled_video_jobs(conn, limit: int) -> dict[str, int]:
     from app.observability.metrics import inc
 
-    conn = get_conn()
     stamp = now()
     report = dict.fromkeys((
         "redundant_preflight_closed", "legacy_jobless_recovered",
