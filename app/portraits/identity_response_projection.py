@@ -94,17 +94,17 @@ def _project_current_identity_response(
     # 得完全正确——两条 functional，F4/F5，scope_qualifier 分别是「两个绿袍男子
     # 之一/之二」——却被按「冒用」硬失败，整集映射包卡死且重试必然再失败。
     #
-    # 判据取自本次输入里模型自己的产出，不含任何词表：一个称谓是不是通称，由
-    # 它在这批证据里指向几个个体决定。王有材那类真正的降级误判仍然被拦：那种
-    # 情形下模型只会报一条，label 不会跨 key 复用。
+    # 判据取自本批模型自己的产出，不含词表：称谓是不是通称，由它在这批指向几个个体决定。第二种形态
+    # （ERR-20260902-ba850c《神墓》二章）：已登记称谓「老人」嵌在本批别的 functional 称谓里（「镇上一位老人」
+    # 「守墓老人」），它在这批就是通称头名词，同样不指向唯一身份；真名不会被嵌进别的称谓。王有材那类降级误判仍被拦。
     functional_keys_by_label: dict[str, set[str]] = {}
     for item in value.f:
-        label = str(item.source_label or "").strip()
-        key = str(item.functional_identity_key or "").strip()
+        label, key = str(item.source_label or "").strip(), str(item.functional_identity_key or "").strip()
         if label and key:
             functional_keys_by_label.setdefault(label, set()).add(key)
     labels_shared_across_individuals = {
-        label for label, keys in functional_keys_by_label.items() if len(keys) > 1
+        label for label, keys in functional_keys_by_label.items()
+        if len(keys) > 1 or any(label in other and other != label for other in functional_keys_by_label)
     }
 
     # 同批折叠通道（absorbed_functional_keys，见设计文档 §4.2 "同批折叠
