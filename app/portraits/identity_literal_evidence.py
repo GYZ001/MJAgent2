@@ -9,16 +9,18 @@
   第一回，同一提示词连撞两次）：本批 16 条证据里「武大」出现 52 次、「武植」0 次，
   模型仍按民间说法写了本名「武植」，还绑到一条讲汉高祖四皓的证据上。治因在提示词
   （见 constants.IDENTITY_LITERAL_LABEL_RULE），这里只负责把现象说清楚。
-- **命中多条**：名字确实在原文里，只是模型选错了 ``evidence_ref``，而逐字命中不止
-  一条、无法确定改绑到哪一条（唯一命中时调用方已自动改绑，根本走不到报错）。
+- **命中多条**：名字确实在原文里，只是模型选错了 ``evidence_ref``。named 称谓由
+  ``literal_rebind_target`` 改绑到首条逐字出处（理由见该函数 docstring），所以
+  ``named_literal_miss_verdict`` 的多条命中分支只剩防御意义；functional 称谓多条命中
+  仍是真正的身份歧义，调用方维持原判。
 
 两种形态的处置不同，理由是"证据能不能证伪它"：
 
 - **整批 0 命中**：这条记录可以被证据直接证伪——本次唯一允许的名字来源里，这个字符串
   一次都没有出现过。丢弃它是确定性的判断，不是猜测，也不是兜底填充（不补任何值）；
   留着它才是把一个原文不存在的人写进人物体系。丢弃走 WARNING 日志，不静默。
-- **命中多条**：证据证明这个名字真的在原文里，只是不知道该绑哪一条——这是真正的
-  "不确定"，维持 fail-closed 硬失败。
+- **命中多条**：证据证明这个名字真的在原文里。对 named 而言"绑哪一条"只是出处收据
+  的选择、不是身份判断，取首条是确定性规则；对 functional 才是真正的"不确定"。
 
 为什么 0 命中不再整集硬失败：实测（2026-09-01，《金瓶梅词话》第一回）线上两次、
 本地三次连撞同一形态，模型每次都换一个名字（武植 / 武大郎 / 項羽——原文分别写
@@ -47,13 +49,43 @@ def literal_owned_matches(
     ]
 
 
+def literal_rebind_target(
+    source_label: str, evidence_by_ref: dict[str, Any] | None, identity_kind: str,
+) -> Any | None:
+    """模型把称谓绑错了 E 时该改绑到哪条 owned 证据；``None`` 表示不改绑、维持原判。
+
+    - named：改绑到**首条**逐字含它的证据（按证据目录顺序），多条命中同样改绑。改绑的
+      对象只是"这个名字逐字出现在哪一段"的出处收据，不是身份判断——名字本身就是
+      identity_label，任何一条逐字含它的证据都同样证明它在本集原文里。真实事故
+      ERR-20260902-c587ac（《三国演义》第一回，00:57 与 01:06 两次一样）：模型把「张飞」
+      钉在 E003——那段写的是「姓张，名飞，字翼德」，逐字串「张飞」不在其中，而 E004–E007
+      四段逐字含它。旧规则多条命中即整集硬失败，且重试必然复现（模型总在人物出场处
+      申报，古典小说的出场句正是「姓 X 名 Y」形态），一集永远过不去。取首条是确定性规则，
+      与模型自己"在首次出现处申报"的惯例一致，不引入任何猜测。
+    - functional：只在全批唯一命中时改绑。描述性称谓（「大汉」「少年」）在多段里可能各指
+      不同的人，多条命中是真正的身份歧义，维持原判（调用方隔离为 synthetic）。
+    """
+    matches = literal_owned_matches(source_label, evidence_by_ref)
+    if not matches:
+        return None
+    if identity_kind != "named":
+        return matches[0] if len(matches) == 1 else None
+    if len(matches) > 1:
+        log.warning(
+            "current named 改绑到首条逐字出处：%s（模型所选证据不含它，本批 %d 条证据逐字含它）",
+            source_label, len(matches),
+        )
+    return matches[0]
+
+
 def named_literal_miss_verdict(
     source_label: str, evidence_by_ref: dict[str, Any] | None,
 ) -> str | None:
     """named 记录找不到逐字出处时怎么处置（形态与理由见模块 docstring）。
 
     返回 ``None`` 表示这条记录已被判定为凭空编造、就地丢弃（本函数已记 WARNING）；
-    返回字符串表示歧义，调用方按业务校验错误硬失败。
+    返回字符串表示歧义，调用方按业务校验错误硬失败——调用方先走
+    ``literal_rebind_target`` 的话，named 只会以 0 命中形态到这里，多条命中分支是防御。
     """
     matches = literal_owned_matches(source_label, evidence_by_ref)
     if matches:

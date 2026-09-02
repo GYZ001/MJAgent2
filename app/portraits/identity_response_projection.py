@@ -29,7 +29,7 @@ from .evidence_merge import (
     _identity_form_functional_key,
     _resolved_evidence_ref,
 )
-from .identity_literal_evidence import literal_owned_matches, named_literal_miss_verdict
+from .identity_literal_evidence import literal_rebind_target, named_literal_miss_verdict
 from .identity_schemas import CurrentIdentityCandidateResponse
 
 def _project_current_identity_response(
@@ -176,12 +176,12 @@ def _project_current_identity_response(
             # 生产 EP5：两条同 key「男子」都被错误绑到了不含该词的段落，唯一真正
             # 逐字出现「男子」的段落反而没有被引用，导致本应合并的一个人被按证据
             # 分别隔离出不同 identity_group，触发 source_label 重复硬失败。
-            # 只在全批唯一匹配时才自动改绑；命中多条视为歧义，不得静默挑一个可能
-            # 错的目标——这种情况维持原判（named 硬失败，functional 隔离为
-            # synthetic）。
-            literal_matches = literal_owned_matches(source_label, evidence_by_ref)
-            if len(literal_matches) == 1:
-                record = literal_matches[0]
+            # named 改绑到首条逐字出处（多条命中也改绑，理由见 identity_literal_evidence
+            # .literal_rebind_target）；functional 只在全批唯一匹配时改绑，多条命中维持
+            # 原判、隔离为 synthetic。
+            rebound = literal_rebind_target(source_label, evidence_by_ref, identity_kind)
+            if rebound is not None:
+                record = rebound
                 evidence_text = str(record.get("text") or "")
                 literal = True
         if canonical_name != canonical_name.strip():
