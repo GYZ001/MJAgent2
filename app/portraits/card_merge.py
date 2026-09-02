@@ -56,7 +56,9 @@ _CARD_MERGE_NO_MATCH_LABEL = "都不是/无法确定"
 class _CardMergeVerdictResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     selected_candidate: str
-    supporting_entry_index: int
+    # 选了具体候选时必填卷宗编号；选「都不是/无法确定」时没有可引的支撑段，填 null
+    #（ERR-20260902-205c51：模型如实填 null 被 int 契约拒绝，两轮格式修复都拒改语义）。
+    supporting_entry_index: int | None = None
     supporting_quote: str = ""
 
 
@@ -176,10 +178,10 @@ def _card_merge_prompt(
   "{label}"具体对应候选中的哪一个时，选"{_CARD_MERGE_NO_MATCH_LABEL}"，不要
   勉强给出确定结论；不要因为某个候选在段落里出现次数多就倾向选它，只依据
   原文是否真的能确定"{label}"就是在称呼这个人；
-- supporting_entry_index 必须填上面某个候选编号（取值只能是 {entry_indexes}
-  之一），选你得出这个结论最主要依据的那一段——理想情况下这段原文应同时
-  出现"{label}"与该候选的人物谱称谓（例如"以后别叫我 X 了，叫我 {label} 吧"
-  这类身份链接句）；
+- supporting_entry_index：选了具体候选时必须填上面某个候选编号（取值只能是
+  {entry_indexes} 之一），选你得出这个结论最主要依据的那一段——理想情况下这段原文
+  应同时出现"{label}"与该候选的人物谱称谓（例如"以后别叫我 X 了，叫我 {label} 吧"
+  这类身份链接句）；选"{_CARD_MERGE_NO_MATCH_LABEL}"时填 null；
 - supporting_quote 可选，若填写请给该段里的一句原文摘录供人工复核参考，
   不要求逐字精确，留空也可以。
 只输出符合 Schema 的 JSON。"""
@@ -194,7 +196,9 @@ async def _card_merge_verdict(
     重跑不该一次选中一次不确定）。"""
     prompt, entry_indexes, candidate_options = _card_merge_prompt(label, dossier, candidates)
     schema = _CardMergeVerdictResponse.model_json_schema()
-    schema["properties"]["supporting_entry_index"]["enum"] = entry_indexes
+    schema["properties"]["supporting_entry_index"] = {
+        "title": "Supporting Entry Index", "type": ["integer", "null"], "enum": [*entry_indexes, None],
+    }
     schema["properties"]["selected_candidate"]["enum"] = candidate_options
     operation_id = "portraits_card_merge:" + evidence_repository.content_hash({
         "label": label, "candidates": candidates, "dossier": entry_indexes,

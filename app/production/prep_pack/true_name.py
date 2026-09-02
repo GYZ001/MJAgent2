@@ -123,7 +123,7 @@ def _prep_pack_sample_dossier_entries_within_budget(
 class _PrepPackTrueNameVerdictResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     selected_candidate: str
-    supporting_entry_index: int
+    supporting_entry_index: int | None = None  # 选「都不是/无法确定」时填 null（ERR-20260902-205c51 同族）
     supporting_quote: str = ""
 
 
@@ -215,8 +215,8 @@ async def _prep_pack_true_name_verdict(
   "{alias}"具体对应候选中的哪一个时，选"{_PREP_PACK_TRUE_NAME_VERDICT_NO_MATCH_LABEL}"，
   不要勉强给出确定结论；不要因为某个候选在段落里出现次数多、看起来眼熟就倾向选它，
   只依据原文是否真的能确定二者是{same_subject}；
-- supporting_entry_index 必须填上面某个候选编号（取值只能是 {entry_indexes} 之一），
-  选你得出这个结论最主要依据的那一段；
+- supporting_entry_index：选了具体候选时必须填上面某个候选编号（取值只能是 {entry_indexes} 之一），
+  选你得出这个结论最主要依据的那一段；选"{_PREP_PACK_TRUE_NAME_VERDICT_NO_MATCH_LABEL}"时填 null；
 - supporting_quote 可选，若填写请给该段里的一句原文摘录供人工复核参考，不要求逐字
   精确，留空也可以。
 只输出符合 Schema 的 JSON。"""
@@ -226,7 +226,7 @@ async def _prep_pack_true_name_verdict(
     # 就选不出卷宗外的编号或候选集之外的人/地；真正生效的核验仍在
     # _prep_pack_true_name_pin_dossier_entry 与
     # _prep_pack_verify_true_name_hypothesis 里做代码侧结构校验。
-    schema["properties"]["supporting_entry_index"]["enum"] = entry_indexes
+    schema["properties"]["supporting_entry_index"] = {"type": ["integer", "null"], "enum": [*entry_indexes, None]}
     schema["properties"]["selected_candidate"]["enum"] = candidate_options
     return await _call_structured(
         run_id=run_id,
