@@ -436,6 +436,9 @@ allowed_exceptions = []
 "app.domain.video_ops.confirmation_eval" = 4  # 改完 _compact_episode_target
     # （app.episode_target）与 _board_from_shot_rows（mutation_primitives）的
     # import 路径后，自身只剩 app.compiler/app.schemas/app.validators，均 <=4
+"app.domain.video_ops.completion_resume" = 5  # 从 completion_core.py 拆出的
+    # resume owner-pointer 接管判据，只依赖 app.task_registry/app.video_supervisor
+    # 的 checkpoint 读取（均 <=5），与 app.domain 前缀同层，显式声明避免噪音
 
 # ---- 组 11：screenplay_ops.prep_pack_stage_snapshot（真搬移，新文件，未采用
 # 该文档建议的「塞进 app.production.revision」——revision.py 已在 1987 行的

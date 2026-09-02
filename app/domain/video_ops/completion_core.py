@@ -26,6 +26,7 @@ from app.domain.review_wall import (
 )
 from fastapi import HTTPException
 
+from .completion_resume import _assert_resume_may_take_over, resolve_resume_parent_run_id
 from .confirmation_gate import _assert_storyboard_generation_gate
 
 
@@ -333,16 +334,13 @@ async def _complete_episode_core(
                     == operation_fingerprint
                 ):
                     reusable_run_id = str(previous_active_run_id)
-        if (
-            previous_claim_live
-            or (active_status in active_run_states and not reusable_run_id)
-        ):
-            raise HTTPException(409, {
-                "code": "VIDEO_COMPLETION_ALREADY_ACTIVE",
-                "message": "全片补齐任务已在启动或运行，请勿重复提交",
-                "active_run_id": previous_active_run_id,
-                "action": "view_progress",
-            })
+        resume_takeover = False
+        if previous_claim_live or (active_status in active_run_states and not reusable_run_id):
+            _assert_resume_may_take_over(
+                mode=mode, grant_id=grant_id, existing=existing, episode_id=episode_id,
+                previous_run_id=previous_active_run_id, active_status=active_status,
+            )
+            resume_takeover = True
         if reusable_run_id is None:
             claimed = conn.execute(
                 """UPDATE episodes SET active_video_run_id=?
@@ -401,7 +399,7 @@ async def _complete_episode_core(
                     trigger_type=trigger_type,
                     deadline_at=now() + resolved_wall_cap,
                     policy_snapshot=workflow_policy_snapshot,
-                    parent_run_id=parent_run_id,
+                    parent_run_id=resolve_resume_parent_run_id(resume_takeover, previous_active_run_id, parent_run_id),
                 )
             )
     except Exception:
