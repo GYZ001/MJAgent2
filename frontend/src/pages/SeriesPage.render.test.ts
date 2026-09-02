@@ -14,13 +14,13 @@ import type {
 // react-test-renderer 真的挂载 SeriesPage，覆盖列表页与详情页的关键渲染态。
 //
 // usePoll 按 deps 数组长度区分资源：连播任务列表/详情都传 [projectId, x]（长度 2，
-// 用 mockNav.episodeId 是否有值再细分是列表还是详情），导出包轮询固定传
+// 用 mockNav.taskId 是否有值再细分是列表还是详情），导出包轮询固定传
 // [projectId]（长度 1）——与 useSeriesTaskListState.ts / SeriesTaskDetail.tsx 里
 // 实际调用 usePoll 时传的 deps 一一对应，改了那边的 deps 形状这里也要跟着改。
 
 // vi.mock 会被提升到文件顶部；工厂里只能引用以 `mock` 开头（经 vi.hoisted 声明）的变量。
 const { mockNav, mockData } = vi.hoisted(() => ({
-  mockNav: { projectId: 'proj1' as string | null, episodeId: null as string | null },
+  mockNav: { projectId: 'proj1' as string | null, episodeId: null as string | null, taskId: null as string | null },
   mockData: {
     list: null as SeriesTaskListResponse | null,
     exports: { exports: [] as SeriesExport[] },
@@ -32,10 +32,11 @@ vi.mock('../App', () => ({
   useNav: () => ({
     projectId: mockNav.projectId,
     episodeId: mockNav.episodeId,
+    taskId: mockNav.taskId,
     chapterIdx: null,
     view: 'series',
-    go: (_v: unknown, _pid: unknown, episodeId?: string | null) => {
-      mockNav.episodeId = episodeId ?? null
+    go: (_v: unknown, _pid: unknown, _eid?: unknown, _cidx?: unknown, _h?: unknown, taskId?: string | null) => {
+      mockNav.taskId = taskId ?? null
     },
     requestNavigation: () => {},
     toast: () => {},
@@ -43,7 +44,7 @@ vi.mock('../App', () => ({
   }),
   usePoll: (_fetcher: unknown, _interval: unknown, deps: unknown[]) => {
     const isExports = deps.length === 1
-    const data = isExports ? mockData.exports : (mockNav.episodeId ? mockData.detail : mockData.list)
+    const data = isExports ? mockData.exports : (mockNav.taskId ? mockData.detail : mockData.list)
     return { data, error: null, status: null, loading: false, refresh: async () => data }
   },
 }))
@@ -104,7 +105,7 @@ const listResponse = (overrides: Partial<SeriesTaskListResponse> = {}): SeriesTa
 describe('连播任务列表页渲染', () => {
   beforeEach(() => {
     mockNav.projectId = 'proj1'
-    mockNav.episodeId = null
+    mockNav.taskId = null
     mockData.list = listResponse()
     mockData.exports = { exports: [] }
     mockData.detail = null
@@ -179,7 +180,7 @@ describe('连播任务列表页渲染', () => {
 describe('连播任务详情页渲染', () => {
   beforeEach(() => {
     mockNav.projectId = 'proj1'
-    mockNav.episodeId = 'st_1'
+    mockNav.taskId = 'st_1'
     mockData.detail = {
       task_id: 'st_1',
       index: 1,

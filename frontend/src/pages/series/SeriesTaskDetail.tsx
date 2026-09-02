@@ -10,8 +10,8 @@ import { seriesTaskProgressLabel, seriesTaskStatusLabel, seriesTaskStatusTone, s
 const detailPollInterval = (detail: SeriesTaskDetailType | null) =>
   detail && (detail.status === 'running' || detail.status === 'queued') ? 4000 : 0
 
-/** 任务详情页：路由 /projects/{pid}/series/{taskId}，taskId 借 useNav().episodeId
- *  槽位承载（见 App.tsx routeFromPath/locationFor）。刷新页面要停在详情页，所以
+/** 任务详情页：路由 /projects/{pid}/series/{taskId}，taskId 是 Nav 自己的字段
+ *  （见 App.tsx 的 Nav.taskId，不借用 episodeId）。刷新页面要停在详情页，所以
  *  这里必须真的走 URL 路由，不能只靠父组件内部 state 记住"当前在看哪个任务"。 */
 export default function SeriesTaskDetail({ projectId, taskId }: { projectId: string; taskId: string }) {
   const { go } = useNav()
@@ -48,7 +48,7 @@ export default function SeriesTaskDetail({ projectId, taskId }: { projectId: str
         </h1>
         <hr className="rule" />
       </header>
-      <button type="button" className="btn" onClick={() => go('series', projectId, null)}>← 返回任务列表</button>
+      <button type="button" className="btn" onClick={() => go('series', projectId)}>← 返回任务列表</button>
       <section className="series-task-detail-meta card">
         <span className={`stamp ${seriesTaskStatusTone(data.status)}`}>{seriesTaskStatusLabel(data.status)}</span>
         <span>{seriesTaskProgressLabel(data)}</span>

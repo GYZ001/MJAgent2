@@ -95,12 +95,18 @@ interface Nav {
   projectId: string | null;
   episodeId: string | null;
   chapterIdx: number | null;
+  /** 连播台任务详情（/projects/{pid}/series/{taskId}）。有自己的字段而不借用
+   *  episodeId：那个槽位按设计永远装着「当前项目选中的集」——进项目时 App 会自动
+   *  解析第一集直接 setEpisodeId（不经 go()、不改 URL），借用它承载任务 id 会让每个
+   *  有分集的项目一进连播台就去查 /series-tasks/ep_xxx 而 404（2026-09-02 实测）。 */
+  taskId: string | null;
   go: (
     v: View,
     projectId?: string | null,
     episodeId?: string | null,
     chapterIdx?: number | null,
     historyAction?: "push" | "replace",
+    taskId?: string | null,
   ) => void;
   requestNavigation: (target: string, commit: () => void) => void;
   toast: (msg: string, isErr?: boolean) => void;
@@ -115,6 +121,7 @@ interface PendingNavigation {
   projectId: string | null;
   episodeId: string | null;
   chapterIdx: number | null;
+  taskId: string | null;
   target: string;
   historyAction: "push" | "replace";
   prompt: NavigationGuardPrompt;
@@ -129,12 +136,13 @@ export function useNav(): Nav {
     const route = readLocation();
     return {
       ...route,
-      go: (view, projectId, episodeId, chapterIdx) => {
+      go: (view, projectId, episodeId, chapterIdx, _historyAction, taskId) => {
         window.location.assign(locationFor(
           view,
           projectId === undefined ? route.projectId : projectId,
           episodeId === undefined ? route.episodeId : episodeId,
           chapterIdx === undefined ? route.chapterIdx : chapterIdx,
+          view === "series" ? (taskId ?? null) : null,
         ));
       },
       requestNavigation: (_target, commit) => commit(),
@@ -150,26 +158,34 @@ const decodePart = (value?: string) =>
 
 export function routeFromPath(pathname: string): Pick<
   Nav,
-  "view" | "projectId" | "episodeId" | "chapterIdx"
+  "view" | "projectId" | "episodeId" | "chapterIdx" | "taskId"
 > {
   const parts = pathname.split("/").filter(Boolean);
   if (parts[0] === "system")
-    return { view: "system", projectId: null, episodeId: null, chapterIdx: null };
+    return { view: "system", projectId: null, episodeId: null, chapterIdx: null, taskId: null };
   if (parts[0] === "workspaces")
-    return { view: "studio", projectId: null, episodeId: null, chapterIdx: null };
+    return { view: "studio", projectId: null, episodeId: null, chapterIdx: null, taskId: null };
   if (parts[0] !== "projects" || !parts[1]) {
     return {
       view: "studio",
       projectId: null,
       episodeId: null,
       chapterIdx: null,
+      taskId: null,
     };
   }
   const projectId = decodePart(parts[1]);
   if (parts[2] === "observability")
-    return { view: "observability", projectId, episodeId: null, chapterIdx: null };
-  if (parts[2] === "series")
-    return { view: "series", projectId, episodeId: decodePart(parts[3]), chapterIdx: null };
+    return { view: "observability", projectId, episodeId: null, chapterIdx: null, taskId: null };
+  if (parts[2] === "series") {
+    return {
+      view: "series",
+      projectId,
+      episodeId: null,
+      chapterIdx: null,
+      taskId: decodePart(parts[3]),
+    };
+  }
   if (parts[2] === "reader") {
     const idx = Number(parts[3]);
     return {
@@ -177,6 +193,7 @@ export function routeFromPath(pathname: string): Pick<
       projectId,
       episodeId: null,
       chapterIdx: Number.isFinite(idx) ? idx : 1,
+      taskId: null,
     };
   }
   if (parts[2] === "episodes" && parts[3]) {
@@ -186,7 +203,7 @@ export function routeFromPath(pathname: string): Pick<
       page === "board" || page === "wall" || page === "cinema"
         ? page
         : "script";
-    return { view, projectId, episodeId, chapterIdx: null };
+    return { view, projectId, episodeId, chapterIdx: null, taskId: null };
   }
   if (
     parts[2] === "script" ||
@@ -199,33 +216,18 @@ export function routeFromPath(pathname: string): Pick<
       projectId,
       episodeId: null,
       chapterIdx: null,
+      taskId: null,
     };
   }
   const view: View =
     parts[2] === "scenes" || parts[2] === "episodes" || parts[2] === "bible"
       ? parts[2]
       : "bible";
-  return { view, projectId, episodeId: null, chapterIdx: null };
+  return { view, projectId, episodeId: null, chapterIdx: null, taskId: null };
 }
 
 function readLocation() {
   return routeFromPath(window.location.pathname);
-}
-
-/** go() 的分集槽位解析：``undefined`` = 沿用当前选中的集（映射台/分镜台之间来回
- *  切换要记住分集），``null``/字符串 = 显式指定。连播台是唯一的例外：它的这个槽位
- *  承载的是**任务 id**（/projects/{pid}/series/{taskId}），只能来自列表→详情的显式
- *  导航；从别的工作台带过来的粘性分集 id 对它没有意义——2026-09-02 实测，从选中了
- *  某一集的分镜台点侧栏进连播台，那个集 id 被编进 URL、当成任务 id 去查详情，
- *  用户看到的是「资源不存在或不属于当前账号」。 */
-export function resolveNavEpisodeId(
-  view: View,
-  requested: string | null | undefined,
-  current: string | null,
-): string | null {
-  if (view === "studio" || view === "system") return null;
-  if (requested === undefined) return view === "series" ? null : current;
-  return requested;
 }
 
 export function locationFor(
@@ -233,6 +235,7 @@ export function locationFor(
   projectId: string | null,
   episodeId: string | null,
   chapterIdx: number | null,
+  taskId: string | null = null,
 ) {
   if (view === "studio") return "/workspaces";
   if (view === "system") return "/system/overview";
@@ -240,7 +243,7 @@ export function locationFor(
   const project = `/projects/${encodeURIComponent(projectId)}`;
   if (view === "observability") return `${project}/observability/jobs`;
   if (view === "series")
-    return episodeId ? `${project}/series/${encodeURIComponent(episodeId)}` : `${project}/series`;
+    return taskId ? `${project}/series/${encodeURIComponent(taskId)}` : `${project}/series`;
   if (view === "reader") return `${project}/reader/${chapterIdx ?? 1}`;
   if (
     view === "script" ||
@@ -288,6 +291,7 @@ function AppShell() {
   const [view, setView] = useState<View>(initial.view);
   const [projectId, setProjectId] = useState<string | null>(initial.projectId);
   const [episodeId, setEpisodeId] = useState<string | null>(initial.episodeId);
+  const [taskId, setTaskId] = useState<string | null>(initial.taskId);
   const [chapterIdx, setChapterIdx] = useState<number | null>(
     initial.chapterIdx,
   );
@@ -466,6 +470,7 @@ function AppShell() {
       eid?: string | null,
       cidx?: number | null,
       historyAction: "push" | "replace" = "push",
+      tid?: string | null,
     ) => {
       const globalView = v === "studio" || v === "system";
       const nextProjectId = globalView
@@ -473,17 +478,24 @@ function AppShell() {
         : pid === undefined
           ? projectId
           : pid;
-      const nextEpisodeId = resolveNavEpisodeId(v, eid, episodeId);
+      const nextEpisodeId = globalView
+        ? null
+        : eid === undefined
+          ? episodeId
+          : eid;
       const nextChapterIdx = globalView
         ? null
         : cidx === undefined
           ? chapterIdx
           : cidx;
+      // 任务 id 从不「沿用当前」：只有连播台用它，且只能来自列表→详情的显式点击。
+      const nextTaskId = v === "series" ? (tid ?? null) : null;
       const target = locationFor(
         v,
         nextProjectId,
         nextEpisodeId,
         nextChapterIdx,
+        nextTaskId,
       );
       const currentLocation = `${window.location.pathname}${window.location.search}`;
       if (currentLocation !== target && navigationGuardRef.current) {
@@ -492,6 +504,7 @@ function AppShell() {
           projectId: nextProjectId,
           episodeId: nextEpisodeId,
           chapterIdx: nextChapterIdx,
+          taskId: nextTaskId,
           target,
           historyAction,
           prompt: navigationGuardRef.current,
@@ -511,6 +524,7 @@ function AppShell() {
       setProjectId(nextProjectId);
       setEpisodeId(nextEpisodeId);
       setChapterIdx(nextChapterIdx);
+      setTaskId(nextTaskId);
       setView(v);
       setMobileNavOpen(false);
       window.scrollTo({ top: 0, behavior: "auto" });
@@ -535,6 +549,7 @@ function AppShell() {
           projectId,
           episodeId,
           chapterIdx,
+          taskId,
           target,
           historyAction: "push",
           prompt: navigationGuardRef.current,
@@ -579,6 +594,7 @@ function AppShell() {
     setProjectId(next.projectId);
     setEpisodeId(next.episodeId);
     setChapterIdx(next.chapterIdx);
+    setTaskId(next.taskId);
     setPendingNavigation(null);
     setMobileNavOpen(false);
     window.scrollTo({ top: 0, behavior: "auto" });
@@ -608,6 +624,7 @@ function AppShell() {
       setProjectId(next.projectId);
       setEpisodeId(next.episodeId);
       setChapterIdx(next.chapterIdx);
+      setTaskId(next.taskId);
       setMobileNavOpen(false);
       window.scrollTo({ top: 0, behavior: "auto" });
     };
@@ -654,6 +671,7 @@ function AppShell() {
     projectId,
     episodeId,
     chapterIdx,
+    taskId,
     go,
     requestNavigation,
     toast,

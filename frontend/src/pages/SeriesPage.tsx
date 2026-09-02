@@ -9,11 +9,11 @@ import SeriesTaskDetail from './series/SeriesTaskDetail'
 import { SERIES_PAGE_SIZE, useSeriesTaskListState } from './series/useSeriesTaskListState'
 import '../styles/SeriesPage.css'
 
-/** 连播台入口：按 useNav().episodeId 分流——该槽位在连播台语境下承载 taskId
- *  （见 App.tsx routeFromPath/locationFor）。空 = 任务列表页，有值 = 任务详情页。
- *  刷新页面要停在原地，所以分流必须挂在路由上，不能只靠组件内部 state。 */
+/** 连播台入口：按 useNav().taskId 分流（路由 /projects/{pid}/series/{taskId}，见
+ *  App.tsx 的 Nav.taskId）。空 = 任务列表页，有值 = 任务详情页。刷新页面要停在
+ *  原地，所以分流必须挂在路由上，不能只靠组件内部 state。 */
 export default function SeriesPage() {
-  const { projectId, episodeId: taskId } = useNav()
+  const { projectId, taskId } = useNav()
   if (!projectId) return null
   return taskId
     ? <SeriesTaskDetail projectId={projectId} taskId={taskId} />
@@ -81,7 +81,7 @@ function SeriesTaskListView({ projectId }: { projectId: string }) {
         allOnPageSelected={state.allOnPageSelected}
         onStart={state.onStart}
         startBusyTaskId={state.startBusyTaskId}
-        onView={taskId => go('series', projectId, taskId)}
+        onView={taskId => go('series', projectId, undefined, undefined, 'push', taskId)}
         onDelete={state.onDelete}
       />
       {pageCount > 1 && (
