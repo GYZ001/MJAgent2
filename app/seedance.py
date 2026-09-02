@@ -17,6 +17,14 @@ import httpx
 
 from app import config
 
+# Doubao Seedance（火山方舟）支持 resolution 顶层字段，取值 480p/720p/1080p；
+# 不传时网关按自身默认档位出片——实测（docs/PROVIDER_CAPABILITY_NOTES.md）15s
+# 竖屏任务在未传 resolution 时落到 720×1280，而不是产品要求的 1080×1920。
+# 分辨率是生成时唯一「省了、后期完全救不回」的参数，必须显式钉死，不依赖供应商
+# 默认值随时间/型号漂移。产品当前固定竖屏 9:16，1080p 档位与既有 --ratio 9:16
+# 组合即得到 1080×1920。
+SEEDANCE_VIDEO_RESOLUTION = "1080p"
+
 
 class SeedanceAdapter:
     """Seedance 2.0（火山 HiAgent 网关）。"""
@@ -61,6 +69,7 @@ class SeedanceAdapter:
         # 服务端默认值本来就是 False（视频无水印），这里仍显式传递：不依赖供应商
         # 默认值——供应商改了默认值我们不会知道，显式传参把这件事钉死在我们自己手里。
         payload["watermark"] = False
+        payload["resolution"] = SEEDANCE_VIDEO_RESOLUTION
         if return_last_frame:
             payload["return_last_frame"] = True
         if call_meta and call_meta.get("operation_id"):

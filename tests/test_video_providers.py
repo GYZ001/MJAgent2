@@ -219,6 +219,39 @@ def test_seedance_wait_policy_leaves_the_generic_budget_untouched() -> None:
     assert meta == {}
 
 
+def test_seedance_create_video_task_pins_explicit_1080p_resolution(monkeypatch) -> None:
+    """真实链路审阅发现提交报文尾部只有 --ratio 9:16 --dur 15，没有 resolution；
+
+    实测（docs/PROVIDER_CAPABILITY_NOTES.md）不传该字段时网关落到 720×1280，
+    竖屏分辨率是生成时唯一后期救不回的参数，必须显式钉在提交报文里。
+    """
+    captured: dict = {}
+
+    async def fake_post_json(_client, _url, payload, **_kwargs):
+        captured["payload"] = payload
+        return {"id": "task-1080p"}
+
+    monkeypatch.setattr(hiagent, "active_model", lambda *_a, **_k: "test-video-model")
+    monkeypatch.setattr(
+        hiagent, "_model_connection", lambda *_a, **_k: ("https://example.test", {})
+    )
+    monkeypatch.setattr(
+        hiagent, "_latest_provider_operation_request", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
+
+    task_id = asyncio.run(
+        seedance.SeedanceAdapter().create_video_task(
+            "身体力学：向前一步 --ratio 9:16 --dur 15",
+            image_urls=[("https://img.example.test/a.jpg", "first_frame")],
+        )
+    )
+
+    assert task_id == "task-1080p"
+    assert captured["payload"]["resolution"] == seedance.SEEDANCE_VIDEO_RESOLUTION
+    assert seedance.SEEDANCE_VIDEO_RESOLUTION == "1080p"
+
+
 def test_h3_wait_policy_separates_queueing_from_generation() -> None:
     adapter = minimax_h3.MiniMaxH3Adapter()
     policy = {"elapsed_s": 500.0, "timeout_s": 9000.0, "poll_delay_s": None,
