@@ -27,7 +27,6 @@ from app.domain.bible_ops.refs_generation import (
     _incomplete_portrait_eligible_names,
     _refs_task,
 )
-from app.multiview import CHARACTER_REQUIRED_VIEWS
 
 
 def _conn() -> sqlite3.Connection:
