@@ -373,3 +373,33 @@ def test_list_series_exports_wraps_in_object(client) -> None:
     resp = client.get("/api/projects/p1/series-exports")
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"exports": []}
+
+
+# ------------------------------------------------- 完成判据挂产物而不是状态字段
+
+def test_idle_task_with_current_film_is_reported_succeeded(client, monkeypatch) -> None:
+    """从没跑过、但成片已在盘上且未过期的任务，列表里必须显示「已完成」。
+
+    这种任务真实存在（旧单例连播台留下的成片、重新切分后与旧区间重合的任务）。
+    照 series_tasks.status 字段显示会让列表说「未开始」，而点开始时入队又判
+    「已完成，成片未过期」把它跳过——界面与实际行为对不上。
+    """
+    _seed_episodes("p1", [1, 2])
+    client.post("/api/projects/p1/series-tasks", json={"group_size": 2})
+    listed = client.get("/api/projects/p1/series-tasks").json()
+    task = listed["tasks"][0]
+    assert task["status"] == "idle" and task["film"] is None  # 前提：此刻确实没产物
+
+    monkeypatch.setattr(
+        merge, "film_for_range",
+        lambda *_a: {"url": "/media/x.mp4", "duration_s": 1.0, "size_bytes": 1, "created_at": 0.0,
+                     "path": "x.mp4", "episode_from": 1, "episode_to": 2, "chapters": []},
+    )
+    monkeypatch.setattr(merge, "merge_is_current", lambda *_a: True)
+
+    refreshed = client.get("/api/projects/p1/series-tasks").json()["tasks"][0]
+    assert refreshed["status"] == "succeeded"
+
+    # 成片过期（输入指纹对不上）时不许冒充完成——退回真实字段值。
+    monkeypatch.setattr(merge, "merge_is_current", lambda *_a: False)
+    assert client.get("/api/projects/p1/series-tasks").json()["tasks"][0]["status"] == "idle"

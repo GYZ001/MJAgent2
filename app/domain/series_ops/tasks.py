@@ -186,6 +186,25 @@ def _queue_positions(conn, project_id: str) -> dict[str, int]:
     return {row["id"]: i + 1 for i, row in enumerate(rows)}
 
 
+def display_status(row: dict, film: dict | None) -> str:
+    """对外展示的状态——完成与否挂产物，不挂 ``series_tasks.status`` 这个字段。
+
+    从没跑过（``idle``）但成片已经在盘上且未过期的任务必须显示「已完成」：这种
+    任务真实存在——旧单例连播台留下的成片、以及重新切分后与旧区间重合的任务。
+    照字段显示会让列表说「未开始」而入队时被判「已完成，成片未过期」跳过，
+    界面与实际行为对不上（CLAUDE.md「界面承诺必须与实际行为一致」）。
+
+    只提升 ``idle`` 一档：``running``/``queued`` 是此刻的事实，``failed``/
+    ``cancelled`` 带着用户需要看到的原因，都不该被一个恰好存在的产物盖掉。
+    """
+    if row["status"] != "idle" or film is None:
+        return row["status"]
+    episode_nos = list(range(row["episode_from"], row["episode_to"] + 1))
+    if merge.merge_is_current(row["project_id"], row["episode_from"], row["episode_to"], episode_nos):
+        return "succeeded"
+    return row["status"]
+
+
 def task_summary(
     row: dict, index: int, queue_positions: dict[str, int], missing_episode_nos: list[int],
 ) -> dict:
@@ -198,7 +217,7 @@ def task_summary(
         "episode_from": row["episode_from"], "episode_to": row["episode_to"],
         "episode_count": episode_count,
         "missing_episode_nos": missing_episode_nos,
-        "status": row["status"], "queue_position": queue_positions.get(row["id"]),
+        "status": display_status(row, film), "queue_position": queue_positions.get(row["id"]),
         "current_episode_no": progress.get("current_episode_no"),
         "current_stage": progress.get("current_stage"),
         "steps_done": state.steps_done(progress), "steps_total": episode_count * 5,
