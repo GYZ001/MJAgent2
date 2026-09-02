@@ -1,9 +1,6 @@
-"""``scripts/smoke_live_routes*.py`` 的纯函数测试：路径/query 参数解析
-（``path_param_names``/``resolve_route_params``/``build_url``/
-``resolve_query_params``/``append_query``）、判据分类（``classify_result``）、
-index.html 资产抽取（``extract_asset_refs``）。不连接真实后端、不在模块级读
-凭证文件；数据库相关测试都用本文件自建的内存 sqlite3 连接，不触碰
-``data/manju.db``。
+"""``scripts/smoke_live_routes*.py`` 的纯函数测试：路径/query 参数解析、
+判据分类、index.html 资产抽取、``/media`` URL 百分号编码。不连接真实后端、
+不在模块级读凭证文件；数据库相关测试都用本文件自建的内存 sqlite3 连接。
 """
 from __future__ import annotations
 
@@ -14,7 +11,8 @@ import pytest
 
 from scripts.smoke_live_routes import classify_result, extract_asset_refs
 from scripts.smoke_live_routes_params import (
-    append_query, build_url, path_param_names, resolve_query_params, resolve_route_params,
+    append_query, build_url, path_param_names, quote_media_url_path, resolve_query_params,
+    resolve_route_params,
 )
 
 # path_param_names / build_url
@@ -34,13 +32,11 @@ def test_build_url_substitutes_by_name_not_position() -> None:
     assert url == "/api/projects/proj_abc/chapters/3"
 
 def test_build_url_quotes_special_characters_in_normal_params() -> None:
-    # provider 值可能带冒号（如 "custom:model_xxx"），普通参数必须整体转义；
-    # /media/{path} 例外——多段 :path 转换器，斜杠须原样保留，不能转义成 %2F。
     url = build_url("/api/video-capabilities/{provider}/{model}", {"provider": "a:b", "model": "m"})
-    assert url == "/api/video-capabilities/a%3Ab/m"
-    assert build_url("/media/{path}", {"path": "proj_x/refs/a.jpg"}) == "/media/proj_x/refs/a.jpg"
+    assert url == "/api/video-capabilities/a%3Ab/m"  # 冒号须整体转义
+    assert build_url("/media/{path}", {"path": "proj_x/refs/a.jpg"}) == "/media/proj_x/refs/a.jpg"  # 斜杠保留
 
-# resolve_route_params：用内存 sqlite3 连接模拟真实表结构，不碰真实数据库。
+# resolve_route_params：内存 sqlite3 模拟真实表结构，不碰真实数据库
 
 @pytest.fixture
 def conn() -> sqlite3.Connection:  # 供 resolve_route_params 与 resolve_query_params 共用
@@ -52,17 +48,13 @@ def conn() -> sqlite3.Connection:  # 供 resolve_route_params 与 resolve_query_
         CREATE TABLE chapters(project_id TEXT, idx INTEGER);
         CREATE TABLE provider_calls(id INTEGER, project_id TEXT);
         CREATE TABLE artifacts(id TEXT, scope_type TEXT, scope_id TEXT, file_path TEXT);
-        CREATE TABLE workflow_runs(id TEXT);
-        CREATE TABLE jobs(id TEXT);
-        CREATE TABLE episodes(id TEXT);
+        CREATE TABLE workflow_runs(id TEXT); CREATE TABLE jobs(id TEXT); CREATE TABLE episodes(id TEXT);
         """
     )
     return connection
 
 def test_resolve_route_params_no_params_returns_single_empty_row(conn: sqlite3.Connection) -> None:
-    rows, reason = resolve_route_params(conn, [], 1, Path("/tmp"))
-    assert rows == [{}]
-    assert reason is None
+    assert resolve_route_params(conn, [], 1, Path("/tmp")) == ([{}], None)
 
 def test_resolve_route_params_joint_project_id_excludes_soft_deleted(conn: sqlite3.Connection) -> None:
     conn.execute("INSERT INTO projects(id, deleted_at) VALUES ('proj_live', NULL)")
@@ -92,9 +84,7 @@ def test_resolve_route_params_simple_lookup_for_single_param(conn: sqlite3.Conne
         (["project_id", "object_type", "object_id"], "超出通用表/列映射范围"),
     ],
 )
-def test_resolve_route_params_skip_reasons(
-    conn: sqlite3.Connection, names, expected_reason_fragment,
-) -> None:
+def test_resolve_route_params_skip_reasons(conn: sqlite3.Connection, names, expected_reason_fragment) -> None:
     rows, reason = resolve_route_params(conn, names, 1, Path("/tmp"))
     assert rows is None
     assert expected_reason_fragment in reason
@@ -115,16 +105,8 @@ def test_resolve_route_params_media_path_relative_to_projects_dir(conn: sqlite3.
 @pytest.mark.parametrize(
     "status,expected_outcome",
     [
-        (200, "PASS"),
-        (201, "PASS"),
-        (299, "PASS"),
-        (404, "OPTIONAL_404"),
-        (401, "FAIL"),
-        (403, "FAIL"),
-        (422, "FAIL"),
-        (500, "FAIL"),
-        (503, "FAIL"),
-        (0, "FAIL"),
+        (200, "PASS"), (201, "PASS"), (299, "PASS"), (404, "OPTIONAL_404"),
+        (401, "FAIL"), (403, "FAIL"), (422, "FAIL"), (500, "FAIL"), (503, "FAIL"), (0, "FAIL"),
     ],
 )
 def test_classify_result_outcome(status: int, expected_outcome: str) -> None:
@@ -198,3 +180,16 @@ def test_append_query_encodes_params_and_noops_when_empty() -> None:
         "/api/observability/resolve?run_id=run_a+b"
     )
     assert append_query("/api/settings", {}) == "/api/settings"
+
+# quote_media_url_path：build_media_url 返回值不做百分号编码，中文路径段必须补编码
+
+def test_quote_media_url_path_encodes_non_ascii_and_leaves_query_alone() -> None:
+    raw = "/media/proj_facfc3964f69/scene_refs/皇家古籍藏书室__candidate_e1bf55db5a3e.jpg?mt=517a8a2d647b"
+    quoted = quote_media_url_path(raw)
+    quoted.encode("ascii")  # urllib 要能编码成 ASCII，否则连接层直接抛异常
+    assert quoted == (
+        "/media/proj_facfc3964f69/scene_refs/%E7%9A%87%E5%AE%B6%E5%8F%A4%E7%B1%8D"
+        "%E8%97%8F%E4%B9%A6%E5%AE%A4__candidate_e1bf55db5a3e.jpg?mt=517a8a2d647b"
+    )
+    assert quote_media_url_path("/api/settings") == "/api/settings"  # 非 /media 原样返回
+    assert quote_media_url_path("/media/plain/ok.jpg?mt=abc") == "/media/plain/ok.jpg?mt=abc"

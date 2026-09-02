@@ -35,8 +35,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from scripts.session_token import WITH_LOCAL_SECRET, session_token  # noqa: E402
 from scripts.smoke_live_routes_params import (  # noqa: E402
-    append_query, build_url, format_args, path_param_names, resolve_query_params,
-    resolve_route_params,
+    append_query, build_url, format_args, path_param_names, quote_media_url_path,
+    resolve_query_params, resolve_route_params,
 )
 
 BASE = "http://127.0.0.1:8230"
@@ -169,6 +169,9 @@ def check_media_ticket(base: str, rel_path: str, timeout: float) -> list[dict]:
     ticketed = build_media_url(rel_path)
     if not ticketed:
         return [row(f"{_MEDIA_TEMPLATE}（带票据）", rel_path, 0, 0.0, b"", "FAIL", "build_media_url 未能签发票据")]
+    # build_media_url 不做百分号编码，中文/空格等非 ASCII 路径段直接拼进 URL
+    # 会让 urllib 在连接层抛异常（status=0）；发请求前补一道编码。
+    ticketed = quote_media_url_path(ticketed)
     s1, b1, e1 = http_call(base, "GET", ticketed, timeout=timeout)
     o1, d1 = classify_result(s1)
     bare = f"/media/{quote(rel_path, safe='/')}"

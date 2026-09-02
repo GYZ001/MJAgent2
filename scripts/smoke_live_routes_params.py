@@ -163,3 +163,28 @@ def append_query(url: str, query: dict) -> str:
     if not query:
         return url
     return f"{url}?{urlencode(query)}"
+
+
+def quote_media_url_path(url: str) -> str:
+    """给 ``app.media_urls.build_media_url()`` 的返回值补百分号编码。
+
+    实测核实过它的形态：``build_media_url("proj_x/scene_refs/皇家....jpg")``
+    直接返回 ``/media/proj_x/scene_refs/皇家....jpg?mt=<票据>``——路径段是
+    原始 UTF-8，未做任何百分号编码（它是给浏览器 ``<img>``/``<video>`` 的
+    ``src`` 用的，浏览器自己会编码）。``urllib`` 发请求前必须自己编码，否则
+    含中文/空格等非 ASCII 字符的路径段会在连接层直接抛异常（表现为
+    ``status=0``，不是后端拒绝——实测命中过一次）。
+
+    只编码 ``/media/`` 之后、``?`` 之前的路径段，query string（``mt=`` 票据）
+    原样保留、不经过 quote——它是对**未编码**路径签的名，编码路径不影响签名
+    输入（``verify_media_ticket`` 拿到的是 FastAPI ``:path`` 转换器解码回原文
+    后的字符串），但重新 quote 那段纯 ASCII 的 ``mt=<hex>`` 没有意义还徒增
+    出错面。不是 ``/media/`` 开头的输入原样返回，不强行摆弄。
+    """
+    prefix = "/media/"
+    if not url.startswith(prefix):
+        return url
+    rest = url[len(prefix):]
+    path_part, sep, query_part = rest.partition("?")
+    quoted_path = "/".join(quote(segment, safe="") for segment in path_part.split("/"))
+    return prefix + quoted_path + (sep + query_part if sep else "")
