@@ -16,6 +16,7 @@ from app.capabilities.commands import project as cd_project
 from app.capabilities.commands import run as cd_run
 from app.capabilities.commands import scene as cd_scene
 from app.capabilities.commands import screenplay as cd_screenplay
+from app.capabilities.commands import series as cd_series
 from app.capabilities.commands import storyboard as cd_storyboard
 from app.capabilities.commands import system as cd_system
 from app.capabilities.commands import video as cd_video
@@ -34,6 +35,7 @@ _COMMAND_DOMAINS = (
     cd_screenplay,
     cd_storyboard,
     cd_video,
+    cd_series,
     cd_delivery,
     cd_run,
     cd_system,

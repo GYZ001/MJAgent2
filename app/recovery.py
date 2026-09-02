@@ -111,6 +111,7 @@ async def recover_all() -> dict[str, Any]:
     )
     from app.planning import recover_plan_tasks
     from app.orchestration.api import recover_delivery_tasks
+    from app.domain.series_ops import recover_series_film_runs
 
     started_at = time.time()
     started_clock = time.monotonic()
@@ -145,10 +146,7 @@ async def recover_all() -> dict[str, Any]:
     run_step("media", worker.recover_media_jobs)
     from app.artifacts import flush_pending_media_cleanup
     run_step("media_cleanup_outbox", flush_pending_media_cleanup)
-    run_step(
-        "abandoned_partial_files_removed",
-        lambda: cleanup_abandoned_parts(PROJECTS_DIR),
-    )
+    run_step("abandoned_partial_files_removed", lambda: cleanup_abandoned_parts(PROJECTS_DIR))
     from app.rejected_media import purge_rejected_media
     run_step("rejected_media_purged", purge_rejected_media)
     run_step("media_dispatcher", worker.recover_and_start, record_empty=False)
@@ -173,6 +171,7 @@ async def recover_all() -> dict[str, Any]:
 
     run_step("video_completion", recover_video_completion)
     run_step("project_video_completion", recover_project_video_completion_queues)
+    run_step("series_film", recover_series_film_runs)
     run_step("delivery", recover_delivery_tasks)
     finished_at = time.time()
     report["recovery_meta"] = {

@@ -1,0 +1,108 @@
+/* 连播台（SeriesPage）独占样式——只服务这一页，随该页懒加载分包一起下载。
+ * 复用 index.css 的 .desk-head/.card/.rule/.stamp/.btn/.f，这里只放本页独有的
+ * 版式：说明文案、状态条、区间选择器、进度板表格、播放器。 */
+
+.series-intro {
+  margin: 0 0 16px;
+  color: var(--ink-soft);
+  line-height: 1.7;
+}
+
+.series-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.series-range-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.series-range-field {
+  min-width: 200px;
+}
+
+.series-range-field select {
+  width: 100%;
+}
+
+.series-range-summary {
+  margin: 12px 0 0;
+  font-size: 13px;
+}
+
+.series-range-invalid {
+  color: var(--cinnabar);
+}
+
+.series-board {
+  margin-top: 16px;
+  overflow-x: auto;
+}
+
+.series-board-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.series-board-table th,
+.series-board-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--hairline);
+  white-space: nowrap;
+}
+
+.series-board-row-current td {
+  background: var(--surface-muted, rgba(168, 132, 44, 0.08));
+}
+
+.series-board-cell-current {
+  outline: 2px solid var(--gold);
+  outline-offset: -2px;
+}
+
+.series-film-player {
+  margin-top: 16px;
+}
+
+.series-film-video {
+  width: 100%;
+  max-height: 480px;
+  background: #000;
+  border-radius: 8px;
+}
+
+.series-film-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 10px 0;
+  font-size: 13px;
+}
+
+.series-film-chapters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.series-film-chapter-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--control-border);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.series-film-chapter-btn:hover {
+  background: var(--control-surface-hover, var(--surface-muted));
+}

@@ -34,6 +34,12 @@ PAGES = {
     ],
     'ScenesPage': ['pages/ScenesPage.tsx'], 'MonitorPage': ['pages/MonitorPage.tsx', 'pages/monitor/'],
     'CinemaPage': ['pages/CinemaPage.tsx'], 'ReaderPage': ['pages/ReaderPage.tsx'],
+    'SeriesPage': [
+        'pages/SeriesPage.tsx',
+        # 2026-09-01 新增连播台：区间选择/进度板/播放器拆到 pages/series/ 下的
+        # 独立文件，不登记就会被判成"不属于任何页面"（同 ScriptPage 的先例）。
+        'pages/series/',
+    ],
     'AccountAdminPage': [
         'pages/AccountAdminPage.tsx', 'components/AccountAdminDialogs.tsx',
         # 2026-08-30 从 AccountAdminPage.tsx 抽出（该页当时 398/400 行，

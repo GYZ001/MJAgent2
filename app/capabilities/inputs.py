@@ -389,3 +389,17 @@ class BenchmarkRunInput(StandardCommandInput):
 class SystemMkdirInput(StandardCommandInput):
     parent_grant: str
     name: str
+
+
+class SeriesFilmStartInput(StandardCommandInput):
+    """连播台启动（``series.film_start``）：闭区间 [episode_from, episode_to]，跨度 ≤10。"""
+
+    project_id: str
+    episode_from: int
+    episode_to: int
+
+
+class SeriesFilmControlInput(StandardCommandInput):
+    """连播台暂停/继续（``series.film_pause``/``series.film_resume``）共用输入。"""
+
+    project_id: str

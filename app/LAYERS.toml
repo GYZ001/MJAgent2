@@ -170,6 +170,7 @@ allowed_exceptions = []
 
 # ---- L5 编排与入口：可依赖 L0-L4 ----
 "app.domain" = 5
+"app.domain.series_ops" = 5  # 与 app.domain 前缀同层，显式声明避免未声明模块的 fail-safe 噪音
 "app.media_exec" = 5
 "app.capabilities" = 5
 "app.orchestration" = 5

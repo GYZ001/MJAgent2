@@ -563,7 +563,7 @@ from app.domain import (
     visual_style_prompt,
     worker,
 )
-
+from app.domain import series_ops as series_ops  # noqa: F401 -- 触发连播台路由注册；新切片，不进下方历史 __all__ 快照
 __all__ = [
     "APIRouter",
     "Any",

@@ -27,6 +27,7 @@ import * as storyboardApi from "./storyboard";
 import * as videoApi from "./video";
 import * as deliveryApi from "./delivery";
 import * as projectsApi from "./projects";
+import * as seriesApi from "./series";
 import * as systemApi from "./system";
 import { getArtifactLineage, numToCn } from "./common";
 
@@ -43,6 +44,7 @@ export * from "./storyboard";
 export * from "./video";
 export * from "./delivery";
 export * from "./projects";
+export * from "./series";
 export * from "./system";
 
 export const api = {
@@ -150,6 +152,12 @@ export const api = {
   setEpisodeTargetDuration: projectsApi.setEpisodeTargetDuration,
   getStoryboardMetrics: projectsApi.getStoryboardMetrics,
   listEpisodesPage: projectsApi.listEpisodesPage,
+
+  /* ── 连播台域 ── */
+  getSeriesFilm: seriesApi.getSeriesFilm,
+  startSeriesFilm: seriesApi.startSeriesFilm,
+  pauseSeriesFilm: seriesApi.pauseSeriesFilm,
+  resumeSeriesFilm: seriesApi.resumeSeriesFilm,
 
   /* ── 观测台与系统管理域 ── */
   ...systemApi.api_system,

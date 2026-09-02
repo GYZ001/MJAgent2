@@ -1104,10 +1104,8 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
         "recover_video_completion_runs",
         recover("video_completion"),
     )
-    patch_api_everywhere(monkeypatch,
-        "recover_project_video_completion_queues",
-        recover("project_video_completion"),
-    )
+    patch_api_everywhere(monkeypatch, "recover_project_video_completion_queues", recover("project_video_completion"))
+    monkeypatch.setattr(api.series_ops, "recover_series_film_runs", recover("series_film"))
     monkeypatch.setattr(orchestration_api, "recover_delivery_tasks", recover("delivery"))
 
     report = asyncio.run(recovery.recover_all())
@@ -1117,7 +1115,7 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
         "partial_cleanup", "rejected_media", "worker_start", "lease_sweeper",
         "character_bible", "character_references", "portrait_view_redo",
         "scene_references", "episode_mapping",
-        "screenplay", "storyboard", "video_completion", "project_video_completion", "delivery",
+        "screenplay", "storyboard", "video_completion", "project_video_completion", "series_film", "delivery",
     ]
     assert {
         key: value for key, value in report.items()
@@ -1132,7 +1130,7 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
         "rejected_media_purged": {"artifacts": 2, "records": 3, "files": 2},
         "character_references": 1, "portrait_view_redo": 1, "scene_references": 1,
         "episode_mapping": 1, "screenplay": 1, "storyboard": 1,
-        "video_completion": 1, "project_video_completion": 1, "delivery": 1,
+        "video_completion": 1, "project_video_completion": 1, "series_film": 1, "delivery": 1,
     }
     assert report["recovery_meta"]["failed_steps"] == []
     assert report["recovery_meta"]["duration_ms"] >= 0
