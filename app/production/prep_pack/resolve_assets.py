@@ -938,15 +938,14 @@ async def _resolve_assets(
             stats["scene_discovery_calls"] += 1
             scene_discovery_result = await _run_async_step(
                 run_id, "episode_prep_pack_scene_discovery",
-                lambda: _discover_new_scenes(
-                    conn, project_id=project_id, episode_no=episode_no,
-                    labels=unresolved_scenes,
-                ),
+                lambda: _discover_new_scenes(conn, project_id=project_id, episode_no=episode_no, labels=unresolved_scenes),
             )
+            # 同人物发现后那次重读：新场景已追加进人物谱，旧快照下 pass2 的 scene_card_matched 永远看不见它，
+            # 本轮必失败、只能指望下一轮时后台已出图（ERR-20260902-982a95：曲阳 02:45:41 建库，02:45:50 判未解析）。
+            bible = _load_project_bible(conn, project_id)
             scene_rename = dict(scene_discovery_result.get("resolved_names") or {})
             newly_added_scene_names = frozenset(
-                str(item.get("name") or "").strip()
-                for item in (scene_discovery_result.get("added") or [])
+                str(item.get("name") or "").strip() for item in (scene_discovery_result.get("added") or [])
                 if isinstance(item, dict) and str(item.get("name") or "").strip()
             )
             discovery_diagnostics.extend(str(e) for e in scene_discovery_result.get("errors") or [])
