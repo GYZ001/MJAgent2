@@ -202,7 +202,6 @@ export interface Shot {
   preflight_errors?: string[];
   qa_warnings?: string[];
   prompt_preview?: string;
-  est_cost_cny: number;
   versions: ShotVersion[];
   version_count?: number;
   video_stale: boolean;

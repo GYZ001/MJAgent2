@@ -624,7 +624,7 @@ export default function EpisodesPage() {
           message="系统会逐集取消仍在运行的任务，并把每集恢复到可重新生成或继续修复的状态；已完成映射包不会删除。"
           details={[
             '已写入的工作副本和已发布映射包会保留',
-            '正在执行的模型请求可能已产生费用，停止不会退回已发生费用',
+            '正在执行的模型请求会跑完当前这一步，停止只影响尚未开始的部分',
           ]}
           confirmLabel="确认停止这些映射包任务"
           cancelLabel="继续批量生成"
@@ -649,7 +649,7 @@ export default function EpisodesPage() {
             deleteTarget.shot_count
               ? `将同时删除 ${deleteTarget.shot_count} 个分镜及其视频、图片和成片文件`
               : '当前没有分镜，但已有映射包或制作记录也会一并删除',
-            `已发生费用 ¥${deleteTarget.cost_cny.toFixed(1)} 不会退回；以后重新规划全部分集时，本章可能被重新建立`,
+            '以后重新规划全部分集时，本章可能被重新建立',
           ]}
           confirmLabel="确认永久删除本集"
           cancelLabel="保留本集"
@@ -690,8 +690,8 @@ function EpisodeBatchConfirmDialog({
         ? '将清空当前全部分集及其映射包、分镜、视频和交付记录，再按原著重新建立分集。'
         : '将依据原著章节创建分集，不会启动映射包、分镜或视频生成。',
       cost: totalEpisodes
-        ? '重新规划可能调用文本模型并产生费用；已发生的旧任务费用不会退回。'
-        : '分集规划可能调用文本模型并产生费用，实际金额以调用日志为准。',
+        ? '重新规划会调用文本模型，占用会员时长；旧任务已消耗的时长不会退回。'
+        : '分集规划会调用文本模型，占用会员时长。',
       confirm: totalEpisodes ? '确认清空并重新分集' : '确认开始分集',
       danger: totalEpisodes > 0,
     }
@@ -700,7 +700,7 @@ function EpisodeBatchConfirmDialog({
         title: '批量生成待办映射包？',
         count: `${screenplayTodoCount} 集`,
         impact: '只处理待生成、失败或需要修订的映射包；已完成且无需重建的映射包不会重复生成。',
-        cost: '每集会调用文本模型，可能产生模型费用；实际金额以调用日志为准，失败不会覆盖已完成映射包。',
+        cost: '每集会调用文本模型，占用会员时长；失败不会覆盖已完成映射包。',
         confirm: '确认生成待办映射包',
         danger: false,
       }
@@ -708,7 +708,7 @@ function EpisodeBatchConfirmDialog({
         title: '批量生成待办分镜？',
         count: `${storyboardTodoCount} 集`,
         impact: '只处理映射包已就绪或可从恢复点继续的分集；不会自动确认分镜，也不会启动付费视频。',
-        cost: '逐集调用文本模型，可能产生模型费用；实际金额以调用日志为准。',
+        cost: '逐集调用文本模型，占用会员时长。',
         confirm: '确认生成待办分镜',
         danger: false,
       }
@@ -723,7 +723,7 @@ function EpisodeBatchConfirmDialog({
           <div><dt>项目</dt><dd>{projectName}</dd></div>
           <div><dt>本次范围</dt><dd>{content.count}</dd></div>
           <div><dt>执行影响</dt><dd>{content.impact}</dd></div>
-          <div><dt>费用说明</dt><dd>{content.cost}</dd></div>
+          <div><dt>时长占用</dt><dd>{content.cost}</dd></div>
         </dl>
         <div className="dialog-actions">
           <button className="btn" type="button" disabled={busy}

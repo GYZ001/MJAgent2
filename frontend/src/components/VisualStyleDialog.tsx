@@ -27,7 +27,7 @@ export default function VisualStyleDialog({
   options,
   selected,
   scopeNote,
-  confirmLabel = '确认风格并预览费用',
+  confirmLabel = '确认风格并预览影响',
   onSelect,
   onClose,
   onConfirm,

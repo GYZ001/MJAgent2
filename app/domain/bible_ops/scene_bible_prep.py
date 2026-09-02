@@ -15,7 +15,6 @@ from app import (
 )
 from app.db import (
     get_conn,
-    get_setting,
     now,
     rows_to_dicts,
 )
@@ -268,7 +267,6 @@ def _reserve_scene_refs_recorder(
             input_fingerprint=fingerprint(project_id, only_scene, "scene_references"),
             requested_by=requested_by,
             trigger_type=trigger_type,
-            budget_limit_cny=float(get_setting("episode_cost_limit_cny") or 100),
             parent_run_id=parent_run_id,
         )
         if owns_transaction and conn.in_transaction:

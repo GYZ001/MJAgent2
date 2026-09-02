@@ -397,7 +397,8 @@ def test_project_delete_preflight_returns_project_scoped_provider_blocker() -> N
     assert "不会创建新任务" in result.warnings[-1]
 
 
-def test_video_batch_preflight_quotes_exact_pending_shot_cost() -> None:
+def test_video_batch_preflight_no_longer_quotes_cost() -> None:
+    """成本预算拦截体系退场（2026-09-01）：批准卡不再报「预计 ¥X」。"""
     from app import db
 
     conn = db.get_conn()
@@ -419,12 +420,13 @@ def test_video_batch_preflight_quotes_exact_pending_shot_cost() -> None:
         {"episode_id": "video-quote-ep"},
     )
 
-    # 参考图只复用人物谱/场景库，预检不再预留额外关键帧生成费用。
-    assert result.estimated_cost_cny == pytest.approx(16.8)
-    assert "¥16.8" in result.summary
+    assert not hasattr(result, "estimated_cost_cny")
+    assert not hasattr(result, "authorized_cap_cny")
+    assert "¥" not in result.summary
 
 
-def test_video_completion_preflight_does_not_hide_cost_above_requested_cap() -> None:
+def test_video_completion_preflight_no_longer_quotes_cost() -> None:
+    """同上：全片补齐批准卡也不再报预计费用/授权预算。"""
     from app import db
 
     conn = db.get_conn()
@@ -434,9 +436,7 @@ def test_video_completion_preflight_does_not_hide_cost_above_requested_cap() -> 
     )
     for shot_no in (1, 2):
         conn.execute(
-            """INSERT INTO shots(
-                   id,episode_id,shot_no,duration_s,characters,dialogues
-               ) VALUES(?,?,?,?, '[]','[]')""",
+            "INSERT INTO shots(id,episode_id,shot_no,duration_s,characters,dialogues) VALUES(?,?,?,?,'[]','[]')",
             (f"video-complete-quote-s{shot_no}", "video-complete-quote-ep", shot_no, 5),
         )
     conn.commit()
@@ -449,8 +449,8 @@ def test_video_completion_preflight_does_not_hide_cost_above_requested_cap() -> 
         },
     )
 
-    assert result.estimated_cost_cny is not None
-    assert result.estimated_cost_cny > 1
+    assert not hasattr(result, "estimated_cost_cny")
+    assert "¥" not in result.summary
 
 
 def test_approval_token_single_use() -> None:

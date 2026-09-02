@@ -31,7 +31,7 @@ function shot(overrides: Partial<Shot> = {}): Shot {
     characters: [], action_desc: '',
     first_frame_desc: '', last_frame_desc: '', source_excerpt: '',
     narration: '', dialogues: [], transition: '',
-    continuity_from_prev: 0, adopted_version_id: null, est_cost_cny: 0, versions: [], video_stale: false,
+    continuity_from_prev: 0, adopted_version_id: null, versions: [], video_stale: false,
     ...overrides,
   }
 }

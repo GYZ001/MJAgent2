@@ -281,13 +281,15 @@ def test_tools_call_unknown_tool_returns_jsonrpc_error(client: TestClient) -> No
 def test_prompts_list_contains_core_prompts(client: TestClient) -> None:
     resp = _rpc(client, "prompts/list", token=_token())
     names = {p["name"] for p in resp.json()["result"]["prompts"]}
+    # cost_preview 随成本预算拦截体系一起退场（2026-09-01）：会员分档时长制
+    # 下模型/视频调用不按金额计费，"预估生成成本" prompt 已无意义。
     assert {
         "continue_project",
         "diagnose_run",
         "revise_shot",
         "prepare_episode_delivery",
-        "cost_preview",
     } <= names
+    assert "cost_preview" not in names
 
 
 def test_prompts_get_renders_arguments(client: TestClient) -> None:

@@ -73,7 +73,6 @@ def requires_confirmation(spec: CommandSpec, preflight: PreflightResult) -> bool
             or affected.shot_count > 1
             or affected.versions
             or affected.packages
-            or preflight.estimated_cost_cny
             or preflight.warnings
         )
     # OPTIONAL：调用方可选择自动，但服务端仍可在高风险时升级

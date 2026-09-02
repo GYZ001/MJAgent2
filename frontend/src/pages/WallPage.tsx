@@ -92,14 +92,6 @@ export function segmentPhaseCounts(shots: Shot[]): Record<SegmentPhase, number> 
   return counts
 }
 
-/** 实际已发生费用：累加全部尝试（含失败/隔离候选），不是只算已采纳版本。 */
-export function episodeSpentCny(shots: Shot[]): number {
-  return shots.reduce(
-    (sum, shot) => sum + (shot.versions ?? []).reduce((inner, version) => inner + (version.cost_cny || 0), 0),
-    0,
-  )
-}
-
 export function resolveSelectedShotId(shots: Array<Pick<Shot, 'id'>>, currentId: string | null): string | null {
   if (currentId && shots.some(shot => shot.id === currentId)) return currentId
   return shots[0]?.id ?? null
@@ -167,8 +159,8 @@ export function segmentGenerateDisabledReason(params: {
 /** 「生成所有视频」一次提交前的口径预估。与后端 `only_incomplete` 同一套判据：
  *  只有已采纳或已有成功候选的段才算「已完成」而被跳过（app/domain/video_ops.py
  *  `_generate_episode_core` 里 `completed_ids` 的查询条件），生成中/需处理的段仍会
- *  被送进这次请求——生成中的段会在 enqueue_shot 里被判定为「已有活动任务」而复用、
- *  不产生新费用，需处理（失败/隔离）的段会被真正重新尝试、产生新费用。 */
+ *  被送进这次请求——生成中的段会在 enqueue_shot 里被判定为「已有活动任务」而复用，
+ *  需处理（失败/隔离）的段会被真正重新尝试。 */
 export interface BulkGenerateEstimate {
   totalCount: number
   succeededCount: number
@@ -177,9 +169,6 @@ export interface BulkGenerateEstimate {
   pendingCount: number
   /** 会被送进这次 /generate 请求的段数：total - succeeded。 */
   submitCount: number
-  /** 会实际产生新费用的段（待生成 + 需处理；生成中的段走幂等复用，不重复计费）。 */
-  newCostShotIds: string[]
-  estimatedNewCostCny: number
 }
 
 export function bulkGenerateEstimate(shots: Shot[]): BulkGenerateEstimate {
@@ -187,16 +176,12 @@ export function bulkGenerateEstimate(shots: Shot[]): BulkGenerateEstimate {
   let generatingCount = 0
   let attentionCount = 0
   let pendingCount = 0
-  let estimatedNewCostCny = 0
-  const newCostShotIds: string[] = []
   for (const shot of shots) {
     const phase = segmentPhase(shot)
     if (phase === 'succeeded') { succeededCount += 1; continue }
     if (phase === 'generating') { generatingCount += 1; continue }
     if (phase === 'attention') attentionCount += 1
     else pendingCount += 1
-    estimatedNewCostCny += shot.est_cost_cny ?? 0
-    newCostShotIds.push(shot.id)
   }
   return {
     totalCount: shots.length,
@@ -205,8 +190,6 @@ export function bulkGenerateEstimate(shots: Shot[]): BulkGenerateEstimate {
     attentionCount,
     pendingCount,
     submitCount: shots.length - succeededCount,
-    newCostShotIds,
-    estimatedNewCostCny: Math.round(estimatedNewCostCny * 100) / 100,
   }
 }
 
@@ -224,29 +207,6 @@ export function bulkGenerateDisabledReason(params: {
   if (!params.eligible) return params.blockers.join('；') || '当前生成资格未通过'
   if (params.submitCount === 0) return '全部片段已完成，无需再次生成'
   return ''
-}
-
-/** 确认弹窗文案——集中在一处生成，避免「弹窗上写一套、点击后端实际做另一套」：
- *  summary 是这次会花的钱，details 逐条交代已完成/生成中/需处理三种段各自的命运。 */
-export function bulkGenerateDialogCopy(estimate: BulkGenerateEstimate): { summary: string; details: string[] } {
-  const summary = estimate.submitCount === 0
-    ? '本次没有可提交的片段'
-    : `本次将提交 ${estimate.submitCount} 段，预计新增费用 ￥${estimate.estimatedNewCostCny.toFixed(2)}`
-  const details: string[] = []
-  if (estimate.pendingCount || estimate.attentionCount) {
-    details.push(
-      `待生成 ${estimate.pendingCount} 段` +
-      (estimate.attentionCount ? ` + 需处理 ${estimate.attentionCount} 段将重新尝试生成` : '会提交生成') +
-      '，实际费用以供应商返回为准',
-    )
-  }
-  if (estimate.generatingCount) {
-    details.push(`生成中的 ${estimate.generatingCount} 段已有任务在处理，会被去重复用，不会重复扣费`)
-  }
-  if (estimate.succeededCount) {
-    details.push(`已完成的 ${estimate.succeededCount} 段不会重新生成`)
-  }
-  return { summary, details }
 }
 
 /** 409 · REVIEW_QUALIFICATION_CHANGED（CON-409）：整集范围的 qualification_version
@@ -450,7 +410,6 @@ export default function WallPage() {
 
   const selectedSummary = shots.find(shot => shot.id === selectedShotId) ?? null
   const counts = segmentPhaseCounts(shots)
-  const spent = episodeSpentCny(shots)
   const goProcess = () => go(
     ep.status === 'scripting' || ep.status === 'planned' ? 'script' : 'board', projectId, ep.id,
   )
@@ -478,7 +437,6 @@ export default function WallPage() {
           <span>生成中 <b>{counts.generating}</b></span>
           <span>已完成 <b>{counts.succeeded}</b></span>
           <span className={counts.attention ? 'wall-summary-count attention' : 'wall-summary-count'}>需处理 <b>{counts.attention}</b></span>
-          <span>已产生费用 <b>￥{spent.toFixed(2)}</b></span>
         </div>
         <div className="wall-summary-actions">
           <button type="button" className="btn primary small wall-summary-generate-all"
@@ -743,7 +701,6 @@ function GenerationPanel({ shot, context, referenceImages, detailLoading, detail
       <div className="wall-generation-toolbar">
         <div>
           <b>{hasAttempt ? `已尝试 ${versions.length} 次` : '尚未生成'}</b>
-          <span>预计单次 ￥{(shot.est_cost_cny ?? 0).toFixed(2)}</span>
         </div>
         <button type="button" className="btn primary small"
           disabled={Boolean(disabledReason)}
@@ -800,7 +757,6 @@ function GenerationPanel({ shot, context, referenceImages, detailLoading, detail
             <dl className="wall-player-facts">
               <div><dt>时长</dt><dd>{technical?.durationS != null ? `${technical.durationS.toFixed(1)}s` : `${targetDurationS}s（目标）`}</dd></div>
               <div><dt>分辨率</dt><dd>{resolution ? formatResolution(resolution.width, resolution.height) : '未播放'}</dd></div>
-              <div><dt>成本</dt><dd>￥{selected.cost_cny.toFixed(2)}</dd></div>
             </dl>
           )}
           {!detailError && (
@@ -824,7 +780,6 @@ function GenerationPanel({ shot, context, referenceImages, detailLoading, detail
                   <b>v{version.version_no}</b>
                   <span className={stampClassForStatus(version.status)}>{versionStatusLabel(version.status)}</span>
                 </span>
-                <small>￥{version.cost_cny.toFixed(2)}</small>
               </button>
             ))}
           </div>

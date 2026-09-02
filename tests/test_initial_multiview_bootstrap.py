@@ -948,8 +948,6 @@ def test_stale_assets_preview_accepts_sqlite_episode_rows(asset_db, monkeypatch)
     result = api.stale_assets_preview("ep_wall")
     assert result["stale_count"] == 1
     assert result["shots"][0]["reasons"] == ["storyboard_artifact"]
-    from app.video_cost_model import initial_shot_generation_cost
-
-    assert result["shots"][0]["estimated_cost_cny"] == (
-        initial_shot_generation_cost(5)
-    )
+    # 成本预算拦截体系退场（2026-09-01）：stale 预览不再报"预计费用"字段。
+    assert "estimated_cost_cny" not in result
+    assert "estimated_cost_cny" not in result["shots"][0]

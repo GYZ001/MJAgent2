@@ -211,7 +211,7 @@ describe("系统设置功能分类", () => {
       "text_generation_concurrency",
       "video_submit_concurrency",
       "image_request_concurrency",
-      "episode_cost_limit_cny",
+      "provider_call_retention_days",
       "storyboard_workspace_safe_readonly",
       "future_setting",
     ];

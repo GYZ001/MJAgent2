@@ -111,10 +111,10 @@ export default function WorldbuildingStatus({
           summary={project.bible_status === 'running' ? '人物谱尚未完成' : '定妆照仍在生成'}
           message={project.bible_status === 'running'
             ? '系统会停止当前谱写任务；尚未完成的人物谱不会发布，已有原著和旧版本保持不变。'
-            : '系统会停止后续定妆队列并保留已落盘素材；已提交给图片服务的当前请求可能仍会完成并产生费用。'}
+            : '系统会停止后续定妆队列并保留已落盘素材；已提交给图片服务的当前请求可能仍会跑完。'}
           details={[
             project.bible_status === 'running' ? '稍后可重新发起人物谱生成' : '已完成定妆照不会删除，可稍后补齐缺失项',
-            '停止请求不代表供应商会退回已经发生的费用',
+            '停止请求不会撤回已经提交给供应商的那一次调用',
           ]}
           confirmLabel={`确认${stopLabel}`}
           cancelLabel="继续生成"

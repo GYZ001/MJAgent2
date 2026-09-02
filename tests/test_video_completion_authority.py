@@ -36,7 +36,7 @@ def _isolated_db(tmp_path, monkeypatch):
     db.init_db()
 
 
-def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
+def test_provider_video_budget_claims_no_longer_capped() -> None:
     conn = db.get_conn()
     conn.execute(
         "INSERT INTO projects(id,name,status,created_at) VALUES('budget-p','P','created',1)"
@@ -79,9 +79,10 @@ def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
         )
     conn.commit()
 
-    # 授权口径见 completion_grant.VIDEO_BUDGET_RETRY_MARGIN_MULTIPLIER：cap
-    # 不再等于首轮预估的 4.0，而是含重试余量的 4.0*3=12.0——覆盖同一镜头
-    # 最多 2 次自动重投（合计 3 次付费尝试），但余量不是无限的。
+    # 成本预算拦截体系退场（2026-09-01）：cap 仍然计算并写入审计台账
+    # （completion_grant.VIDEO_BUDGET_RETRY_MARGIN_MULTIPLIER 口径不变，
+    # 4.0*3=12.0），但 reserve_provider_video_budget 不再据此拒绝认领——
+    # 那条「used+amount>cap 拒绝」分支正是 EP2 事故的机制之一。
     cap = authorize_episode_video_budget_increment(
         "budget-e",
         4.0,
@@ -89,7 +90,7 @@ def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
         conn=conn,
     )
     assert cap == 12.0
-    for index in (1, 2, 3):
+    for index in (1, 2, 3, 4):
         assert reserve_provider_video_budget(
             episode_id="budget-e",
             job_id=f"budget-j{index}",
@@ -98,41 +99,19 @@ def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
             amount_cny=4.0,
             conn=conn,
         ) is True
-    # 第 4 次尝试超出含余量的 cap（12.0）——余量覆盖真实重投需求，但仍是
-    # 有限的，超出仍必须被拦，不能靠它把预算保护整个放宽。
-    assert reserve_provider_video_budget(
-        episode_id="budget-e",
-        job_id="budget-j4",
-        version_id="budget-v4",
-        operation_id="video-create-budget-v4",
-        amount_cny=4.0,
-        conn=conn,
-    ) is False
+    # 第 4 笔（累计 16.0）早已超过审计 cap（12.0）——snapshot 如实反映这个
+    # 超额（cap_cny 不变、claimed_cny 已超过、remaining_cny 夹到 0），但这只是
+    # 报表数字，不再是任何人的拦截依据。
     assert episode_video_budget_snapshot("budget-e", conn=conn) == {
         "baseline_cny": 0.0,
-        "claimed_cny": 12.0,
-        "used_cny": 12.0,
+        "claimed_cny": 16.0,
+        "used_cny": 16.0,
         "cap_cny": 12.0,
         "remaining_cny": 0.0,
     }
 
-    authorize_episode_video_budget_increment(
-        "budget-e",
-        4.0,
-        source="test-topup",
-        conn=conn,
-    )
-    assert reserve_provider_video_budget(
-        episode_id="budget-e",
-        job_id="budget-j4",
-        version_id="budget-v4",
-        operation_id="video-create-budget-v4",
-        amount_cny=4.0,
-        conn=conn,
-    ) is True
 
-
-def test_concurrent_provider_video_budget_claims_share_one_atomic_cap() -> None:
+def test_concurrent_provider_video_budget_claims_no_longer_contend_on_cap() -> None:
     conn = db.get_conn()
     conn.execute(
         "INSERT INTO projects(id,name,status,created_at) VALUES('race-p','P','created',1)"
@@ -174,10 +153,11 @@ def test_concurrent_provider_video_budget_claims_share_one_atomic_cap() -> None:
             ),
         )
     conn.commit()
-    # 授权 4.0 首轮预估，含重试余量后 cap=12.0（见
-    # completion_grant.VIDEO_BUDGET_RETRY_MARGIN_MULTIPLIER）。两笔并发认领
-    # 各 7.0：合计 14.0 超过 12.0，只有一笔能挤进去——用来测原子互斥，claim
-    # 金额必须仍大到能撞上含余量后的新 cap，不能沿用旧的零余量数字。
+    # 成本预算拦截体系退场（2026-09-01）：授权 4.0 首轮预估，含重试余量后
+    # cap=12.0（见 completion_grant.VIDEO_BUDGET_RETRY_MARGIN_MULTIPLIER，
+    # 这个口径本身不变）。两笔并发认领各 7.0，合计 14.0 早已超过 12.0——旧版
+    # 这里测的是「谁能原子地挤进 cap」，新版 cap 不再拦人，两笔都必须成功，
+    # 用来证明退场后的并发路径里也没有任何隐藏的金额互斥残留。
     authorize_episode_video_budget_increment(
         "race-e",
         4.0,
@@ -212,13 +192,13 @@ def test_concurrent_provider_video_budget_claims_share_one_atomic_cap() -> None:
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(reserve, (1, 2)))
 
-    assert sorted(results) == [False, True]
+    assert sorted(results) == [True, True]
     assert episode_video_budget_snapshot("race-e", conn=conn) == {
         "baseline_cny": 0.0,
-        "claimed_cny": 7.0,
-        "used_cny": 7.0,
+        "claimed_cny": 14.0,
+        "used_cny": 14.0,
         "cap_cny": 12.0,
-        "remaining_cny": 5.0,
+        "remaining_cny": 0.0,
     }
 
 

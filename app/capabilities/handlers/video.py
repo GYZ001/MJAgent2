@@ -7,9 +7,7 @@ from app.capabilities.schemas import CommandResult
 
 
 async def generate_episode(args: I.VideoGenerateEpisodeInput) -> CommandResult:
-    from app import api, db
-    from app.capabilities.preflight import video_generate_episode
-    from app.completion_grant import authorize_episode_video_budget_increment
+    from app import api
 
     from app.capabilities.bus import canonical_command_request_fingerprint
     from app.video_command_operations import (
@@ -42,24 +40,10 @@ async def generate_episode(args: I.VideoGenerateEpisodeInput) -> CommandResult:
             resource_uris=[f"manju://episodes/{args.episode_id}/storyboard"],
         )
 
-    approved_cost = float(video_generate_episode(args).estimated_cost_cny or 0)
-    if approved_cost > 0:
-        if not args.idempotency_key:
-            return failed(
-                "付费视频命令必须提供稳定的 idempotency_key",
-                error_code="idempotency_key_required",
-            )
-        authorize_episode_video_budget_increment(
-            args.episode_id, approved_cost, conn=db.get_conn(),
-            source="capability:video.generate_episode",
-            operation_id=f"{command}:{args.idempotency_key}",
-            request_fingerprint=request_fingerprint,
-        )
     outcome = await call_guarded(
         api._generate_episode_core,
         args.episode_id,
         {
-            "authorized_video_cost_cny": approved_cost,
             "idempotency_key": args.idempotency_key,
             "request_id": args.request_id,
             "operation_request_fingerprint": request_fingerprint,
@@ -254,8 +238,6 @@ async def complete_project(args: I.VideoCompleteProjectInput) -> CommandResult:
 
 async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
     from app import api
-    from app.capabilities.preflight import video_generate_shot
-    from app.completion_grant import authorize_episode_video_budget_increment
 
     from app.capabilities.bus import canonical_command_request_fingerprint
     from app.video_command_operations import (
@@ -288,33 +270,12 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
             resource_uris=[f"manju://shots/{args.shot_id}"],
         )
 
-    approved_cost = float(video_generate_shot(args).estimated_cost_cny or 0)
-    if approved_cost > 0:
-        if not args.idempotency_key:
-            return failed(
-                "付费视频命令必须提供稳定的 idempotency_key",
-                error_code="idempotency_key_required",
-            )
-        from app.db import get_conn
-
-        shot = get_conn().execute(
-            "SELECT episode_id FROM shots WHERE id=?", (args.shot_id,),
-        ).fetchone()
-        if shot:
-            authorize_episode_video_budget_increment(
-                str(shot["episode_id"]), approved_cost, conn=get_conn(),
-                source="capability:video.generate_shot",
-                operation_id=f"{command}:{args.idempotency_key}",
-                request_fingerprint=request_fingerprint,
-            )
-
     body = {
         "prompt_override": args.prompt_override,
         "reroll": args.reroll,
         "qualification_version": args.qualification_version,
         "idempotency_key": args.idempotency_key,
         "request_id": args.request_id,
-        "authorized_video_cost_cny": approved_cost,
         "operation_request_fingerprint": request_fingerprint,
         "operation_claim_token": operation_owner,
     }

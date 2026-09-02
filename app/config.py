@@ -463,7 +463,6 @@ DEFAULT_SETTINGS = {
     # 本地项目媒体映射到自有对象存储/CDN 的公开基址；为空时视频输入明确阻断。
     "provider_media_public_base_url": "",
     "provider_media_max_download_bytes": str(512 * 1024 * 1024),
-    "episode_cost_limit_cny": "100",
     "use_character_refs": "true",     # 出场角色定妆照随镜头注入 reference_image（跨集一致性核心）
     "max_ref_images": "2",            # 单镜头最多附几张定妆照
     # VAL-422：口播一致性 / 结构化主线门禁分阶段开关

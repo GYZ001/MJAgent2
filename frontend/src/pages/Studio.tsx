@@ -116,7 +116,7 @@ export default function Studio() {
       const bootstrapMessage = planningRunning && assetStatus === 'running'
         ? '；自动分集、人物谱和素材准备已启动'
         : planningRunning && assetStatus === 'awaiting_confirmation'
-          ? '；自动分集已启动，人物谱与定妆将在确认费用后继续'
+          ? '；自动分集已启动，人物谱与定妆将在确认后继续'
           : '；部分后台准备未能启动，原文和项目已保留，请进入项目重试'
       toast(`《${projectName}》导入完成：${res.ingestion.chapter_count} 章，${res.ingestion.total_chars} 字${res.ingestion.auto_split ? '（未识别到章节标题，已按字数切分）' : ''}${bootstrapMessage}`)
       setName('')
@@ -292,7 +292,7 @@ export default function Studio() {
               {importStage === 'selected' && selectedFile && (
                 <p className="import-impact">
                   将创建《{name.trim() || novelTitleFromFilename(selectedFile.name)}》；导入后自动启动分集规划、
-                  人物谱和素材准备，可能产生模型费用。
+                  人物谱和素材准备，会占用会员时长。
                 </p>
               )}
               {importError && (

@@ -253,12 +253,6 @@ export default function ProjectOverviewSection({
                   {settingsPoll.data?.effective.video_submit_concurrency}
                 </dd>
               </div>
-              <div>
-                <dt>单集预算</dt>
-                <dd>
-                  ¥ {settingsPoll.data?.effective.episode_cost_limit_cny}
-                </dd>
-              </div>
             </dl>
           </DataBoundary>
         </section>

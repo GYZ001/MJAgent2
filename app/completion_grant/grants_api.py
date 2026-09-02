@@ -193,8 +193,11 @@ def bump_video_grant_budget(
     ensure_completion_grants_table(get_conn())
     add_cny = float(add_cny)
     add_wall_s = float(add_wall_s)
-    if not math.isfinite(add_cny) or add_cny < 0 or add_cny > 100000:
-        raise GrantValidationError("INVALID_BUDGET", "追加预算必须是 0–100000 的有限数")
+    # 金额不再构成生成拦截（会员分档时长制，非按金额计费）：add_cny 只做非负
+    # 有限数的基本输入校验，不再设 100000 上限——那是历史"预算"概念的残留。
+    # add_wall_s 是单次生成运行的时长墙，不是会员分档时长配额，其上限原样保留。
+    if not math.isfinite(add_cny) or add_cny < 0:
+        raise GrantValidationError("INVALID_BUDGET", "追加预算必须是非负有限数")
     if not math.isfinite(add_wall_s) or add_wall_s < 0 or add_wall_s > 604800:
         raise GrantValidationError("INVALID_WALL_CLOCK", "追加时长必须是 0–604800 秒的有限数")
     if add_cny == 0 and add_wall_s == 0:
@@ -241,10 +244,10 @@ def bump_video_grant_budget(
             )
         new_cap = float(grant.budget_cap_cny) + add_cny
         new_wall = float(grant.wall_clock_cap_s) + add_wall_s
-        if new_cap > 100000 or new_wall > 604800:
+        if new_wall > 604800:
             raise GrantValidationError(
                 "GRANT_LIMIT_EXCEEDED",
-                "追加后授权超过最大上限",
+                "追加后时长墙超过最大上限",
             )
         stamp = now()
         new_deadline = float(grant.issued_at) + new_wall

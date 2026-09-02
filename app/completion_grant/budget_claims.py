@@ -21,10 +21,15 @@ def reserve_provider_video_budget(
     amount_cny: float,
     conn,
 ) -> bool:
-    """Atomically claim one provider create cost.
+    """Atomically record one provider create cost against the audit ledger.
 
-    A payable create without episode authority is rejected. When a caller
-    supplies an active transaction, the claim participates in that transaction.
+    金额不再构成生成拦截（会员分档时长制，非按金额计费）：历史上这里会在
+    ``episode_video_budget_authorities`` 缺失或 ``used+amount>cap`` 时拒绝
+    claim，那两条拦截分支已删除——见 CLAUDE.md「Retiring Features」与本次
+    「成本预算拦截体系退场」。ownership 校验（job/version/shot/episode 对齐）
+    与 operation_id 幂等去重是生成授权/幂等机制，不属于金额职能，原样保留。
+    When a caller supplies an active transaction, the claim participates in
+    that transaction.
     """
     amount = max(0.0, float(amount_cny))
     db = conn
@@ -50,14 +55,6 @@ def reserve_provider_video_budget(
     try:
         if owns_transaction:
             db.execute("BEGIN IMMEDIATE")
-        authority = db.execute(
-            "SELECT baseline_cny,cap_cny FROM episode_video_budget_authorities WHERE episode_id=?",
-            (episode_id,),
-        ).fetchone()
-        if authority is None:
-            if owns_transaction:
-                db.rollback()
-            return False
         scope = db.execute(
             """SELECT e.project_id,s.episode_id,s.id AS shot_id
                  FROM jobs j
@@ -107,18 +104,6 @@ def reserve_provider_video_budget(
                 if owns_transaction:
                     db.commit()
                 return True
-        claimed = float(db.execute(
-            """SELECT COALESCE(SUM(amount_cny),0) AS amount
-                 FROM provider_video_budget_claims
-                WHERE episode_id=? AND status!='released'""",
-            (episode_id,),
-        ).fetchone()["amount"] or 0)
-        used = float(authority["baseline_cny"] or 0) + claimed
-        cap = float(authority["cap_cny"] or 0)
-        if used + amount > cap + 1e-9:
-            if owns_transaction:
-                db.rollback()
-            return False
         stamp = now()
         db.execute(
             """INSERT INTO provider_video_budget_claims(

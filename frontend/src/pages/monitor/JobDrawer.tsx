@@ -283,8 +283,8 @@ export default function JobDrawer({
               : confirmAction === "resume"
                 ? providerCreateUnresolved
                   ? "系统会先查找原供应商任务并继续查询，不会在此步骤重新提交 create。"
-                  : "恢复会从安全检查点继续，并可能产生新的模型费用。"
-                : "重试会创建新的执行轮次，并可能产生新的模型费用。"}
+                  : "恢复会从安全检查点继续，并占用新的模型生成时长。"
+                : "重试会创建新的执行轮次，并占用新的模型生成时长。"}
             <button
               disabled={!!busy}
               onClick={() => void runAction(confirmAction)}

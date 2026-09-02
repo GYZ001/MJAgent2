@@ -93,9 +93,15 @@ def test_noop_stall_reconciliation_releases_write_transaction(
     assert conn.in_transaction is False
 
 
-def test_stall_reconciliation_never_resumes_budget_pause(
+def test_stall_reconciliation_auto_resumes_budget_pause(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """成本预算拦截体系退场（2026-09-01）：``paused_budget`` 不再是"预算不足，
+    需要用户显式提额"的意图性人工闸门——那个前提本身已经不成立
+    （``reserve_budget``/``reserve_provider_video_budget`` 都不再据金额拒绝）。
+    继续要求人工点一下"恢复"才能重新排队，会让旧状态行（本仓库生产库实测
+    存在 10 条）永久卡死，变成已废止概念的拦路石。巡检现在必须像对待其它
+    卡死状态一样，自动把它们判定为可继续。"""
     conn = _conn()
     _seed(conn)
     conn.execute(
@@ -109,26 +115,15 @@ def test_stall_reconciliation_never_resumes_budget_pause(
     )
     conn.commit()
     patch_worker_everywhere(monkeypatch, "get_conn", lambda: conn)
-    patch_worker_everywhere(monkeypatch,
-        "retry_paused",
-        lambda *_args, **_kwargs: pytest.fail(
-            "巡检不得调用显式预算恢复入口"
-        ),
-    )
-    patch_worker_everywhere(monkeypatch,
-        "_enqueue_for_current_status",
-        lambda *_args, **_kwargs: pytest.fail(
-            "预算暂停任务不得由巡检重新入队"
-        ),
-    )
+    patch_worker_everywhere(monkeypatch, "_enqueue_for_current_status", lambda _job_id: None)
 
     report = worker.reconcile_stalled_video_jobs()
 
     job = conn.execute(
         "SELECT status FROM jobs WHERE id='budget-paused'"
     ).fetchone()
-    assert job["status"] == "paused_budget"
-    assert report["budget_resumed"] == 0
+    assert job["status"] == "queued"
+    assert report["budget_resumed"] == 1
 
 
 def test_embedded_source_dialogue_is_not_inferred_or_mutated_during_enqueue(

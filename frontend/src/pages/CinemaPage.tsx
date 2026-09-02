@@ -823,7 +823,7 @@ export default function CinemaPage() {
                 `复验人：${reviewer.trim()}`,
                 `审核意见：${reason.trim()}`,
                 ...(reviewDecision === 'approve_with_risk' ? [`接受风险：${acceptedRisk.trim()}`] : []),
-                '本次审核不会生成新媒体或产生模型费用；既有成片和其他候选保留',
+                '本次审核不会生成新媒体或占用生成时长；既有成片和其他候选保留',
               ]}
               confirmLabel={reviewDecision === 'approve'
                 ? '确认批准交付'
@@ -849,7 +849,7 @@ export default function CinemaPage() {
               message="系统会把当前成片、交付检查和质量依据固化为一个新的待人工复验候选。"
               details={[
                 '不会自动批准或对外交付，生成后仍需填写复验人和审核意见',
-                '不会重新生成图片或视频，也不产生模型生成费用',
+                '不会重新生成图片或视频，也不占用生成时长',
                 '现有成片、既有交付候选和审核记录都会保留',
               ]}
               confirmLabel="确认生成交付候选"
@@ -869,7 +869,7 @@ export default function CinemaPage() {
               summary={`第 ${ep.episode_no} 集 · ${feedback.trim()}`}
               message="确认后会保存这条反馈并创建新的修订任务，供制作人员后续处理。"
               details={[
-                '不会立即重新生成图片、视频或产生模型费用',
+                '不会立即重新生成图片、视频，也不占用生成时长',
                 '当前成片、已交付快照和既有审核记录不会被覆盖',
                 '反馈提交成功后会清空本次输入',
               ]}
@@ -892,7 +892,7 @@ export default function CinemaPage() {
                 ? '现有最新成片入口会更新为本次结果；镜头候选、采用关系和既有交付记录不会随之删除。'
                 : '将使用当前已有的真实采用版；未采纳但已有可播放模型候选的分镜会先自动择优，其余镜头跳过。'}
               details={[
-                '合成过程不产生模型生成费用',
+                '合成过程不占用模型生成时长',
                 spedShots.length
                   ? `倍速定稿：${spedShots.map(shot => `镜 ${shot.shot_no} ${shot.playback_rate}×`).join('、')}`
                   : '所有采纳片段均按 1× 合成',

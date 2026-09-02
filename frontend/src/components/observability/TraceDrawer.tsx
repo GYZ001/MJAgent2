@@ -699,10 +699,6 @@ export default function TraceDrawer({
                 链路节点
               </span>
               <span>
-                <b>¥ {Number(trace.cost_cny || 0).toFixed(2)}</b>
-                已记录费用
-              </span>
-              <span>
                 <b>{formatTime(trace.started_at)}</b>
                 开始时间
               </span>

@@ -22,7 +22,13 @@ def reserve_budget(
     *,
     conn: sqlite3.Connection | None = None,
 ) -> bool:
-    """Atomically reserve episode budget before a payable job can run."""
+    """Record one payable job's reservation against the episode ledger.
+
+    金额已不构成生成拦截：本产品现行计费是会员分档时长制（HiAgent 自有服务，
+    模型/视频调用不按金额计费），``limit_cny`` 不再用于比较——保留形参只是
+    为了不必改动全部调用点签名。历史上这里会在 spent+reserved+amount 超过
+    limit_cny 时把 job 打成 ``paused_budget`` 并回滚，那条拦截分支已删除；
+    见 CLAUDE.md「Retiring Features」与本次「成本预算拦截体系退场」。"""
     db = conn or get_conn()
     owns_transaction = not db.in_transaction
     amount = max(0.0, float(amount_cny))
@@ -36,36 +42,6 @@ def reserve_budget(
             if owns_transaction:
                 db.commit()
             return True
-        spent = db.execute(
-            """SELECT COALESCE(SUM(v.cost_cny), 0) AS amount
-               FROM shot_versions v JOIN shots s ON s.id=v.shot_id
-               WHERE s.episode_id=? AND v.status='succeeded'""",
-            (episode_id,),
-        ).fetchone()["amount"]
-        reserved = db.execute(
-            """SELECT COALESCE(SUM(amount_cny), 0) AS amount
-               FROM budget_reservations
-               WHERE scope_type='episode' AND scope_id=? AND status IN ('reserved','running')
-                 AND job_id!=?""",
-            (episode_id, job_id),
-        ).fetchone()["amount"]
-        if float(spent) + float(reserved) + amount > float(limit_cny) + 1e-9:
-            db.execute(
-                """UPDATE jobs
-                      SET status='paused_budget',reserved_cost_cny=0,
-                          video_slot_active=0,updated_at=?
-                    WHERE id=?""",
-                (now(), job_id),
-            )
-            db.execute(
-                """UPDATE shot_versions
-                      SET video_slot_active=0
-                    WHERE id=(SELECT version_id FROM jobs WHERE id=?)""",
-                (job_id,),
-            )
-            if owns_transaction:
-                db.commit()
-            return False
         db.execute(
             """INSERT INTO budget_reservations(
                    id, job_id, scope_type, scope_id, amount_cny, status, created_at
@@ -96,7 +72,10 @@ def extend_budget_reservation(
     *,
     conn: sqlite3.Connection | None = None,
 ) -> bool:
-    """Atomically enlarge one active reservation before an intentional paid resubmit."""
+    """Atomically enlarge one active reservation before an intentional paid resubmit.
+
+    金额不再构成拦截，见 ``reserve_budget`` 同一处说明；``limit_cny`` 保留仅为
+    兼容既有调用签名，本函数只做幂等的余额记账，不再据此回滚/拒绝。"""
     db = conn or get_conn()
     additional = max(0.0, float(additional_cny))
     try:
@@ -111,23 +90,7 @@ def extend_budget_reservation(
             if existing and existing["status"] in ACTIVE_RESERVATIONS
             else 0.0
         )
-        spent = db.execute(
-            """SELECT COALESCE(SUM(v.cost_cny), 0) AS amount
-               FROM shot_versions v JOIN shots s ON s.id=v.shot_id
-               WHERE s.episode_id=? AND v.status='succeeded'""",
-            (episode_id,),
-        ).fetchone()["amount"]
-        reserved = db.execute(
-            """SELECT COALESCE(SUM(amount_cny), 0) AS amount
-               FROM budget_reservations
-               WHERE scope_type='episode' AND scope_id=?
-                 AND status IN ('reserved','running') AND job_id!=?""",
-            (episode_id, job_id),
-        ).fetchone()["amount"]
         target = current + additional
-        if float(spent) + float(reserved) + target > float(limit_cny) + 1e-9:
-            db.rollback()
-            return False
         if existing:
             db.execute(
                 """UPDATE budget_reservations

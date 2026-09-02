@@ -21,7 +21,6 @@ function shot(partial: Partial<Shot> & { versions?: ShotVersion[] }): Shot {
     transition: '硬切',
     continuity_from_prev: 0,
     adopted_version_id: null,
-    est_cost_cny: 0,
     versions: [],
     scene_status: 'idle',
     approved_scene_id: null,

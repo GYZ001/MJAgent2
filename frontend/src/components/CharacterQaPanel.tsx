@@ -186,7 +186,7 @@ export default function CharacterQaPanel({
               ? '确认后，后续新生成内容会使用该候选；当前采用版本会保留为历史记录。'
               : '确认后，后续新生成内容会改用上一可用版本；当前版本和历史记录不会删除。'}
             details={[
-              '不会重新生成图片，也不会产生生成费用',
+              '不会重新生成图片，也不会占用生成时长',
               '已完成的历史视频不会被自动删除',
             ]}
             confirmLabel={pendingDecision.action === 'adopt' ? '确认采纳候选' : '确认回滚版本'}

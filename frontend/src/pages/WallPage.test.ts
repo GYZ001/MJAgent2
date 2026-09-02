@@ -3,10 +3,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { ApiError, type ReferenceImage, type Shot, type ShotVersion, type StoryboardPackSegment } from '../api'
 import {
-  bulkGenerateDialogCopy,
   bulkGenerateDisabledReason,
   bulkGenerateEstimate,
-  episodeSpentCny,
   extractReferenceImagesByVersion,
   formatResolution,
   isSegmentShot,
@@ -33,7 +31,7 @@ function shot(overrides: Partial<Shot> = {}): Shot {
     characters: [], action_desc: '',
     first_frame_desc: '', last_frame_desc: '', source_excerpt: '',
     narration: '', dialogues: [], transition: '',
-    continuity_from_prev: 0, adopted_version_id: null, est_cost_cny: 4.5, versions: [], video_stale: false,
+    continuity_from_prev: 0, adopted_version_id: null, versions: [], video_stale: false,
     ...overrides,
   }
 }
@@ -110,14 +108,6 @@ describe('段落生成阶段与统计', () => {
       packShot({ id: 's4', versions: [version({ status: 'failed' })] }),
     ]
     expect(segmentPhaseCounts(shots)).toEqual({ pending: 1, generating: 1, succeeded: 1, attention: 1 })
-  })
-
-  it('已产生费用按全部尝试累加，不是只算已采纳版本', () => {
-    const shots = [
-      packShot({ id: 's1', versions: [version({ id: 'v1', cost_cny: 12, status: 'failed' }), version({ id: 'v2', cost_cny: 8, status: 'succeeded' })] }),
-      packShot({ id: 's2', versions: [version({ id: 'v3', cost_cny: 5 })] }),
-    ]
-    expect(episodeSpentCny(shots)).toBe(25)
   })
 })
 
@@ -239,18 +229,18 @@ describe('八态状态文案与色调', () => {
 // _generate_episode_core 的 completed_ids 查询同一口径：只有已采纳或已有成功候选
 // 的段才算「已完成」被跳过，生成中/需处理的段仍会被送进这次请求。
 describe('批量生成预估：口径对齐后端 only_incomplete（只有已完成的段被跳过）', () => {
-  const pending = shot({ id: 's-pending', est_cost_cny: 12 })
+  const pending = shot({ id: 's-pending' })
   const generating = shot({
-    id: 's-generating', est_cost_cny: 12, versions: [version({ id: 'v-g', status: 'running' })],
+    id: 's-generating', versions: [version({ id: 'v-g', status: 'running' })],
   })
   const succeeded = shot({
-    id: 's-done', est_cost_cny: 12, versions: [version({ id: 'v-s', status: 'succeeded' })],
+    id: 's-done', versions: [version({ id: 'v-s', status: 'succeeded' })],
   })
   const attention = shot({
-    id: 's-attn', est_cost_cny: 12, versions: [version({ id: 'v-a', status: 'failed' })],
+    id: 's-attn', versions: [version({ id: 'v-a', status: 'failed' })],
   })
 
-  it('已完成的段不计入提交数，也不计入新增费用', () => {
+  it('已完成的段不计入提交数', () => {
     const estimate = bulkGenerateEstimate([pending, generating, succeeded, attention])
     expect(estimate.totalCount).toBe(4)
     expect(estimate.succeededCount).toBe(1)
@@ -260,17 +250,9 @@ describe('批量生成预估：口径对齐后端 only_incomplete（只有已完
     expect(estimate.submitCount).toBe(3)
   })
 
-  it('新增费用只算待生成 + 需处理，生成中的段走去重复用不计费', () => {
-    const estimate = bulkGenerateEstimate([pending, generating, succeeded, attention])
-    expect(estimate.newCostShotIds.slice().sort()).toEqual(['s-attn', 's-pending'])
-    expect(estimate.estimatedNewCostCny).toBeCloseTo(24)
-  })
-
-  it('全部已完成时提交数与新增费用都是 0，不虚报', () => {
+  it('全部已完成时提交数是 0，不虚报', () => {
     const estimate = bulkGenerateEstimate([succeeded])
     expect(estimate.submitCount).toBe(0)
-    expect(estimate.estimatedNewCostCny).toBe(0)
-    expect(estimate.newCostShotIds).toEqual([])
   })
 })
 
@@ -297,29 +279,6 @@ describe('批量生成按钮可用性判据', () => {
   it('满足全部条件时可用', () => {
     expect(bulkGenerateDisabledReason({ submitting: false, eligible: true, blockers: [], submitCount: 3 }))
       .toBe('')
-  })
-})
-
-describe('批量生成确认弹窗文案：写什么就必须做什么，不许弹窗一套、实际另一套', () => {
-  it('三种命运在 details 里逐条交代：待生成/需处理会花钱，生成中去重不花钱，已完成不会重来', () => {
-    const estimate = bulkGenerateEstimate([
-      shot({ id: 'p1', est_cost_cny: 12 }),
-      shot({ id: 'g1', est_cost_cny: 12, versions: [version({ id: 'vg', status: 'running' })] }),
-      shot({ id: 'd1', est_cost_cny: 12, versions: [version({ id: 'vd', status: 'succeeded' })] }),
-      shot({ id: 'a1', est_cost_cny: 12, versions: [version({ id: 'va', status: 'failed' })] }),
-    ])
-    const copy = bulkGenerateDialogCopy(estimate)
-    expect(copy.summary).toBe('本次将提交 3 段，预计新增费用 ￥24.00')
-    expect(copy.details.some(line => line.includes('待生成 1 段'))).toBe(true)
-    expect(copy.details.some(line => line.includes('需处理 1 段将重新尝试生成'))).toBe(true)
-    expect(copy.details.some(line => line.includes('生成中的 1 段') && line.includes('不会重复扣费'))).toBe(true)
-    expect(copy.details.some(line => line.includes('已完成的 1 段不会重新生成'))).toBe(true)
-  })
-  it('没有可提交片段时如实说明，不留一句诱导确认的旧文案', () => {
-    const estimate = bulkGenerateEstimate([
-      shot({ id: 'd1', est_cost_cny: 12, versions: [version({ id: 'vd', status: 'succeeded' })] }),
-    ])
-    expect(bulkGenerateDialogCopy(estimate).summary).toBe('本次没有可提交的片段')
   })
 })
 

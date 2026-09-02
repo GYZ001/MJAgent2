@@ -43,7 +43,7 @@ export default function ZeroCostRelease({
   if (done) {
     return (
       <div className="monitor-state ready" role="status">
-        预留已结算为 0 元，清空/重做阻塞已解除，可刷新后重试原操作。
+        该任务占用已释放，清空/重做阻塞已解除，可刷新后重试原操作。
       </div>
     );
   }
@@ -51,16 +51,16 @@ export default function ZeroCostRelease({
 
   return (
     <div className="monitor-impact">
-      <b>供应商已终态拒绝，且未产生任何费用：</b>
-      <span>{eligible.reason}（预留 ¥{eligible.amount.toFixed(2)}）</span>
+      <b>供应商已终态拒绝，未实际产出任何内容：</b>
+      <span>{eligible.reason}</span>
       {error && <span role="alert">{error}</span>}
       {!confirming ? (
         <button type="button" onClick={() => setConfirming(true)}>
-          释放此任务的预留预算
+          释放此任务的占用
         </button>
       ) : (
         <div className="monitor-inline-confirm">
-          确认后会把这笔预留结算为 0 元，并解除对该镜头清空/重做操作的阻塞，不可撤销。
+          确认后会释放这笔占用，并解除对该镜头清空/重做操作的阻塞，不可撤销。
           <button
             disabled={busy}
             onClick={async () => {

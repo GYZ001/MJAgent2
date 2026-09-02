@@ -13,7 +13,6 @@ from app import (
 )
 from app.db import (
     get_conn,
-    get_setting,
     rows_to_dicts,
 )
 from app.domain.common import (
@@ -242,7 +241,6 @@ def _episode_detail_projection(episode_id: str, view: str | None) -> dict:
     ep["narrative_metrics"] = None
     # 预估只按模型选择的实际分镜时长累计；单集不设总时长产品上限。
     ep["cost_cny"] = worker.episode_cost(episode_id)
-    ep["cost_limit_cny"] = float(get_setting("episode_cost_limit_cny") or 100)
     shots = rows_to_dicts(shot_rows)
     version_counts = {}
     if view == "board" and shots:
@@ -268,9 +266,6 @@ def _episode_detail_projection(episode_id: str, view: str | None) -> dict:
         _apply_contract_to_public_shot(s)
         from app.continuity import information_items_for_shot
         s["new_information_items"] = information_items_for_shot(s, script)
-        from app.video_cost_model import initial_shot_generation_cost
-
-        s["est_cost_cny"] = initial_shot_generation_cost(s["duration_s"])
         if s.get("storyboard_artifact_id") and (full or view == "board"):
             shot_artifact = evidence_repository.get_artifact(s["storyboard_artifact_id"])
             if shot_artifact:
@@ -371,16 +366,6 @@ def _episode_detail_projection(episode_id: str, view: str | None) -> dict:
             conn=conn,
         )
         try:
-            from app.completion_grant import (
-                episode_video_completion_budget_requirement,
-            )
-            ep["video_budget"] = episode_video_completion_budget_requirement(
-                episode_id,
-                conn=conn,
-            )
-        except Exception:  # noqa: BLE001
-            ep["video_budget"] = None
-        try:
             from app.video_supervisor import load_latest_checkpoint, public_checkpoint_projection
             vcp = load_latest_checkpoint(episode_id)
             ep["video_supervisor"] = public_checkpoint_projection(vcp)
@@ -446,9 +431,6 @@ def shot_review_detail(shot_id: str):
             else:
                 screenplay = _load_screenplay(dict(episode_row))
     shot["new_information_items"] = information_items_for_shot(shot, screenplay)
-    from app.video_cost_model import initial_shot_generation_cost
-
-    shot["est_cost_cny"] = initial_shot_generation_cost(shot["duration_s"])
     shot["video_stale"] = _shot_video_is_stale(
         conn, shot, episode_row["storyboard_artifact_id"] if episode_row else None
     )

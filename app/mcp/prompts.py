@@ -40,14 +40,6 @@ _PROMPTS: dict[str, dict[str, Any]] = {
         "description": "检查镜头采用、拼接、readiness 与交付缺口，列出仍需处理的事项",
         "arguments": [_arg("episode_id", "剧集 ID")],
     },
-    "cost_preview": {
-        "title": "预估生成成本",
-        "description": "在不执行任何生成的情况下，估算指定范围的预计花费",
-        "arguments": [
-            _arg("project_id", "项目 ID", required=False),
-            _arg("episode_id", "剧集 ID", required=False),
-        ],
-    },
 }
 
 
@@ -106,12 +98,5 @@ def _render(name: str, arguments: dict[str, Any]) -> str:
         return (
             f"请检查剧集 {episode_id} 的交付准备情况：读取 manju://episodes/{episode_id}/delivery，"
             "列出未采用镜头、未拼接内容和 readiness 阻塞项，并给出处理顺序建议。"
-        )
-    if name == "cost_preview":
-        scope = arguments.get("episode_id") or arguments.get("project_id") or "未指定范围"
-        return (
-            f"请在不执行任何生成任务的前提下，估算 {scope} 的预计生成花费："
-            "读取相关资源了解待办镜头/待办剧本数量，并对相应 Tool 使用 dry_run 预检获取 "
-            "estimated_cost_cny，不要实际创建任何付费任务。"
         )
     return ""

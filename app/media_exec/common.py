@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import shutil
 import subprocess
 import tempfile
@@ -82,24 +83,18 @@ class LeaseLost(RuntimeError):
 
 
 def episode_video_budget_limit(episode_id: str) -> float:
-    """Resolve the user-approved episode cap before the static safety default."""
-    static_limit = float(get_setting("episode_cost_limit_cny") or 100)
-    authority_limit: float | None = None
-    try:
-        from app.completion_grant import episode_video_budget_snapshot
-        from app.db import get_conn
+    """兼容旧调用签名的哨兵值——金额不再构成生成拦截。
 
-        authority = episode_video_budget_snapshot(episode_id, conn=get_conn())
-        if authority is not None:
-            authority_limit = float(authority["cap_cny"])
-    except Exception:  # noqa: BLE001 - legacy databases retain static cap
-        pass
-    try:
-        from app.completion_grant import active_video_grant_budget_cap
-
-        grant_cap = active_video_grant_budget_cap(episode_id)
-        if grant_cap is not None:
-            return float(grant_cap)
-    except Exception:  # noqa: BLE001
-        pass
-    return authority_limit if authority_limit is not None else static_limit
+    本产品现行计费是会员分档时长制（HiAgent 自有服务，模型/视频调用不按金额
+    计费）。历史实现会依次尝试 grant 固化 cap／权威快照 cap／
+    ``episode_cost_limit_cny`` 设置旋钮取一个"预算上限"，喂给
+    ``app.orchestration.media_scheduler.reserve_budget`` 去比较拦截——那次
+    拦截曾在旋钮已调到 1000 的情况下仍因 grant 固化 cap 更早生效而拦住用户
+    的整集生成（EP2 事故）。``reserve_budget``／
+    ``completion_grant.reserve_provider_video_budget`` 均已删除金额比较分支，
+    不再读取这个返回值做拦截判断；本函数仅为了不必改动全部调用点签名而保留，
+    返回值不再具备任何业务含义。见 CLAUDE.md「Retiring Features」与本次
+    「成本预算拦截体系退场」。
+    """
+    del episode_id
+    return math.inf

@@ -18,7 +18,6 @@ from app.provider_task_clearance import (
 from app.completion_grant.budget_authority import (
     _episode_video_budget_floor,
     authorize_episode_video_budget_absolute,
-    episode_video_completion_budget_requirement,
 )
 from app.completion_grant.ledger import ensure_video_budget_authority_tables
 from app.completion_grant.models import (
@@ -277,30 +276,20 @@ def issue_video_completion_grant(
             )
         generation_plan = qualification["generation_plan"]
         issued_at = now()
-        budget_requirement = episode_video_completion_budget_requirement(
-            episode_id,
-            conn=conn,
-        )
-        required_cap = float(
-            budget_requirement["required_completion_cap_cny"] or 0
-        )
-        cap = float(
-            requested_budget
-            if requested_budget is not None
-            else max(1.0, required_cap)
-        )
-        if cap + 1e-9 < required_cap:
-            raise GrantValidationError(
-                "VIDEO_BUDGET_BELOW_AUTHORITY_PLAN",
-                "视频授权低于当前权威镜头计划的一次完整生成成本："
-                f"requested={cap:g}, required={required_cap:g}",
-            )
-        wall = requested_wall
-        if not math.isfinite(cap) or not 1 <= cap <= 100000:
+        # 金额不再构成生成拦截（会员分档时长制，非按金额计费）：历史上这里会在
+        # cap 低于 episode_video_completion_budget_requirement 算出的
+        # required_cap、或 cap 不在 1–100000 区间时拒发 grant
+        # （VIDEO_BUDGET_BELOW_AUTHORITY_PLAN / INVALID_BUDGET）。两条拦截分支
+        # 已删除——见 CLAUDE.md「Retiring Features」与本次「成本预算拦截体系
+        # 退场」。cap 仍然计算并写入审计台账（completion_grants.budget_cap_cny /
+        # video_budget_authority_ledger），只是不再据此阻止授权签发。
+        cap = float(requested_budget) if requested_budget is not None else 1.0
+        if not math.isfinite(cap) or cap < 0:
             raise GrantValidationError(
                 "INVALID_BUDGET",
-                "视频补齐预算必须是 1–100000 的有限数",
+                "视频补齐预算必须是非负有限数",
             )
+        wall = requested_wall
         if not math.isfinite(wall) or not 60 <= wall <= 604800:
             raise GrantValidationError(
                 "INVALID_WALL_CLOCK",

@@ -92,12 +92,6 @@ class PreflightResult(BaseModel):
     allowed: bool
     risk: RiskLevel
     summary: str
-    estimated_cost_cny: float | None = None
-    # 含重试余量的授权上限（见 app.completion_grant.
-    # preview_episode_video_budget_authorization_cap）。只在会触发真实预算
-    # 授权的付费视频命令上填充；跟 estimated_cost_cny（首轮预估）是两个不同
-    # 的数，审批卡必须把两者都亮出来，不能只显示预估让人误以为那就是上限。
-    authorized_cap_cny: float | None = None
     affected: AffectedScope = Field(default_factory=AffectedScope)
     preconditions: list[PreconditionCheck] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

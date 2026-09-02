@@ -406,8 +406,6 @@ def video_clear_shot(args) -> PreflightResult:
 
 
 def video_generate_shot(args) -> PreflightResult:
-    from app.video_cost_model import initial_shot_generation_cost
-
     conn = get_conn()
     shot = owned_shot_row(args.shot_id)
     if not shot:
@@ -435,22 +433,13 @@ def video_generate_shot(args) -> PreflightResult:
         ep["status"] in {"confirmed", "generating", "done", "mixed"}
         or storyboard_pack_prompts_complete(conn, str(shot["episode_id"]))
     )
-    estimated = initial_shot_generation_cost(float(shot["duration_s"] or 0))
-    from app.completion_grant import preview_episode_video_budget_authorization_cap
-
-    authorized_cap = preview_episode_video_budget_authorization_cap(
-        str(shot["episode_id"]), estimated, conn=conn,
-    )
     return PreflightResult(
         command="video.generate_shot",
         allowed=True,
         risk=RiskLevel.R2_MATERIAL,
         summary=(
             f"将为第 {ep['episode_no'] if ep else '?'} 集第 {shot['shot_no']} 镜生成视频"
-            f"（首轮预估约 ¥{estimated:.1f}；含重试余量的授权上限 ¥{authorized_cap:.0f}）"
         ),
-        estimated_cost_cny=estimated,
-        authorized_cap_cny=authorized_cap,
         affected=AffectedScope(episodes=[shot["episode_id"]], shots=[args.shot_id], shot_count=1),
         preconditions=[
             PreconditionCheck(
@@ -471,8 +460,6 @@ def video_generate_shot(args) -> PreflightResult:
 
 
 def video_generate_episode(args) -> PreflightResult:
-    from app.video_cost_model import initial_shot_generation_cost
-
     conn = get_conn()
     ep = owned_episode_row(args.episode_id)
     if not ep:
@@ -512,21 +499,6 @@ def video_generate_episode(args) -> PreflightResult:
     total = conn.execute(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (args.episode_id,)
     ).fetchone()["c"]
-    payable_rows = conn.execute(
-        """SELECT s.duration_s FROM shots s
-            WHERE s.episode_id=?
-              AND (s.adopted_version_id IS NULL OR s.adopted_version_id='')
-              AND NOT EXISTS (
-                  SELECT 1 FROM shot_versions v
-                   WHERE v.shot_id=s.id AND v.status='succeeded'
-                     AND v.video_path IS NOT NULL AND v.video_path!=''
-              )""",
-        (args.episode_id,),
-    ).fetchall()
-    estimated = round(sum(
-        initial_shot_generation_cost(float(row["duration_s"] or 0))
-        for row in payable_rows
-    ), 2)
     # 见 video_generate_shot 同一处注释：加上分镜台 2.0.0 的产物信号，避免
     # 批准卡对已经产物齐全的分集显示"分镜未确认"。
     from app.domain.common import storyboard_pack_prompts_complete
@@ -534,21 +506,11 @@ def video_generate_episode(args) -> PreflightResult:
     confirmed = ep["status"] in {"confirmed", "generating", "done", "mixed"} or (
         storyboard_pack_prompts_complete(conn, args.episode_id)
     )
-    from app.completion_grant import preview_episode_video_budget_authorization_cap
-
-    authorized_cap = preview_episode_video_budget_authorization_cap(
-        args.episode_id, estimated, conn=conn,
-    )
     return PreflightResult(
         command="video.generate_episode",
         allowed=True,
         risk=RiskLevel.R2_MATERIAL,
-        summary=(
-            f"将生成第 {ep['episode_no']} 集约 {pending} 个待办镜头"
-            f"（首轮预估约 ¥{estimated:.1f}；含重试余量的授权上限 ¥{authorized_cap:.0f}）"
-        ),
-        estimated_cost_cny=estimated,
-        authorized_cap_cny=authorized_cap,
+        summary=f"将生成第 {ep['episode_no']} 集约 {pending} 个待办镜头",
         affected=AffectedScope(episodes=[args.episode_id], shot_count=int(pending or 0)),
         preconditions=[
             PreconditionCheck(key="storyboard_confirmed", passed=confirmed, message="分镜已确认" if confirmed else "分镜未确认"),
@@ -599,17 +561,6 @@ def video_complete_episode(args) -> PreflightResult:
         grades = ledger.grades
     except Exception:  # noqa: BLE001
         pass
-    estimated = round(max(int(uncovered or 0), 1) * 3.6 * 1.6, 2)
-    try:
-        from app.video_cost_model import predict_episode_completion_cost
-        from app.video_supervisor import rebuild_coverage_ledger
-        ledger = rebuild_coverage_ledger(args.episode_id)
-        uncovered_ids = [e.shot_id for e in ledger.entries if e.grade == "C" or e.video_stale or e.chain_stale]
-        pred = predict_episode_completion_cost(args.episode_id, uncovered_shot_ids=uncovered_ids)
-        if pred.get("expected_cny"):
-            estimated = float(pred["expected_cny"])
-    except Exception:  # noqa: BLE001
-        pass
     # 见 video_generate_shot 同一处注释：加上分镜台 2.0.0 的产物信号。
     from app.domain.common import storyboard_pack_prompts_complete
 
@@ -628,7 +579,7 @@ def video_complete_episode(args) -> PreflightResult:
     summary = (
         f"补齐第 {ep['episode_no']} 集到全片可用："
         f"当前 A={grades.get('A', 0)} B={grades.get('B', 0)} 未覆盖={grades.get('C', uncovered)}；"
-        f"授权预算 ¥{float(cap):.0f}，时长墙 {float(wall)/3600:.0f}h，B 级配额 {fallback}"
+        f"时长墙 {float(wall)/3600:.0f}h，B 级配额 {fallback}"
     )
     if allow_edit:
         summary += "；已授权微调分镜"
@@ -638,7 +589,6 @@ def video_complete_episode(args) -> PreflightResult:
         allowed=True,
         risk=risk,
         summary=summary,
-        estimated_cost_cny=estimated,
         affected=AffectedScope(episodes=[args.episode_id], shot_count=int(uncovered or 0)),
         preconditions=[
             PreconditionCheck(
@@ -706,37 +656,16 @@ def video_complete_project(args) -> PreflightResult:
     global_cap = float(500 if global_arg is None else global_arg)
     per_cap = float(150 if per_arg is None else per_arg)
     allow_edit = bool(getattr(args, "allow_storyboard_edit", False))
-    estimated = round(min(global_cap, max(1, len(eligible)) * per_cap * 0.65), 2)
-    try:
-        from app.video_cost_model import predict_episode_completion_cost
-        from app.video_supervisor import rebuild_coverage_ledger
-        total_est = 0.0
-        for r in eligible:
-            ledger = rebuild_coverage_ledger(r["id"])
-            if ledger.covered_within_quota():
-                continue
-            uncovered_ids = [
-                e.shot_id for e in ledger.entries
-                if e.grade == "C" or e.video_stale or e.chain_stale
-            ]
-            pred = predict_episode_completion_cost(r["id"], uncovered_shot_ids=uncovered_ids)
-            total_est += float(pred.get("expected_cny") or 0)
-        if total_est > 0:
-            estimated = min(global_cap, total_est)
-    except Exception:  # noqa: BLE001
-        pass
     risk = RiskLevel.R3_DESTRUCTIVE if allow_edit else RiskLevel.R2_MATERIAL
     summary = (
         f"跨集补齐「{project['name']}」："
-        f"{len(eligible)}/{len(rows)} 集可补齐，全局预算 ¥{global_cap:.0f}，"
-        f"单集上限 ¥{per_cap:.0f}。串行启动，不自动成片/交付。"
+        f"{len(eligible)}/{len(rows)} 集可补齐。串行启动，不自动成片/交付。"
     )
     return PreflightResult(
         command="video.complete_project",
         allowed=bool(eligible),
         risk=risk,
         summary=summary if eligible else "没有可补齐的已确认剧集",
-        estimated_cost_cny=estimated if eligible else 0,
         affected=AffectedScope(
             projects=[args.project_id],
             episodes=[r["id"] for r in eligible],

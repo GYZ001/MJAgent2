@@ -126,7 +126,6 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "reference_shot_cohort_limit": _number("参考图镜头批次上限", "15", 1, 32, unit="镜"),
     "video_concurrency": _number("兼容视频并发数", "15", 1, 64, unit="任务"),
     "auto_concurrency": _number("兼容旧版视频并发", "15", 1, 128, unit="任务"),
-    "episode_cost_limit_cny": _number("单集成本上限", "100", 0, 1_000_000, step=.01, unit="元", integer=False),
     "max_ref_images": _number("单镜头最多参考图数", "2", 0, 16, unit="张"),
     "max_repair_attempts": _number("修复重试上限", "8", 0, 30, unit="次"),
     "provider_call_retention_days": _number("模型调用日志保留天数", "30", 1, 365, unit="天", immediate=False),

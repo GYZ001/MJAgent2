@@ -15,7 +15,6 @@ from app import (
 )
 from app.db import (
     get_conn,
-    get_setting,
     now,
 )
 from app.domain.common import (
@@ -69,7 +68,6 @@ def _new_refs_recorder(
             "resume": resume,
             "fresh_after": fresh_after,
         },
-        budget_limit_cny=float(get_setting("episode_cost_limit_cny") or 100),
         parent_run_id=parent_run_id,
     )
 

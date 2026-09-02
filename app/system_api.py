@@ -1897,79 +1897,33 @@ def retry_job(job_id: str, body: dict | None = None, _admin: None = Depends(requ
                             job_id,
                         ),
                     )
-                budget_reserved = worker.media_scheduler.reserve_budget(
+                # 金额不再构成生成拦截（会员分档时长制，非按金额计费）：
+                # reserve_budget/reserve_provider_video_budget 均已删除
+                # cap 比较分支，恒定返回 True——仍然调用它们只是为了保留
+                # budget_reservations/provider_video_budget_claims 审计台账
+                # 的记账副作用。历史上这里会在任一者返回 False 时把 job 打成
+                # paused_budget 并抛 409（JOB_RETRY_AUTHORITY_MISSING /
+                # JOB_RETRY_BUDGET_BLOCKED），那条拦截分支已删除——见
+                # CLAUDE.md「Retiring Features」与本次「成本预算拦截体系
+                # 退场」。
+                worker.media_scheduler.reserve_budget(
                     job_id,
                     item["episode_id"],
                     estimate,
                     worker.episode_video_budget_limit(item["episode_id"]),
                     conn=conn,
                 )
-                provider_budget_claimed = (
-                    budget_reserved
-                    and reserve_provider_video_budget(
-                        episode_id=str(item["episode_id"]),
-                        job_id=job_id,
-                        version_id=str(item["version_id"]),
-                        operation_id=provider_operation_id,
-                        amount_cny=estimate,
-                        conn=conn,
-                    )
+                reserve_provider_video_budget(
+                    episode_id=str(item["episode_id"]),
+                    job_id=job_id,
+                    version_id=str(item["version_id"]),
+                    operation_id=provider_operation_id,
+                    amount_cny=estimate,
+                    conn=conn,
                 )
             except Exception:
                 conn.rollback()
                 raise
-            if not budget_reserved or not provider_budget_claimed:
-                authority = conn.execute(
-                    """SELECT 1 FROM episode_video_budget_authorities
-                        WHERE episode_id=?""",
-                    (item["episode_id"],),
-                ).fetchone()
-                message = (
-                    "本集缺少有效的视频费用授权，任务已在供应商调用前暂停"
-                    if authority is None
-                    else "本集剩余授权额度不足，任务已在供应商调用前暂停"
-                )
-                code = (
-                    "JOB_RETRY_AUTHORITY_MISSING"
-                    if authority is None
-                    else "JOB_RETRY_BUDGET_BLOCKED"
-                )
-                conn.execute(
-                    """UPDATE budget_reservations
-                          SET status='released',settled_at=?,actual_cost_cny=0
-                        WHERE job_id=? AND status IN ('reserved','running')""",
-                    (time.time(), job_id),
-                )
-                conn.execute(
-                    """UPDATE jobs
-                          SET status='paused_budget',reserved_cost_cny=0,error=?,
-                              video_slot_active=0,
-                              reason_code='VIDEO_BUDGET_NOT_AUTHORIZED',
-                              reason_text=?,updated_at=?
-                        WHERE id=? AND status=? AND COALESCE(state_revision,0)=?""",
-                    (
-                        message,
-                        message,
-                        time.time(),
-                        job_id,
-                        item["status"],
-                        int(item.get("state_revision") or 0),
-                    ),
-                )
-                conn.execute(
-                    "UPDATE shot_versions SET video_slot_active=0 WHERE id=?",
-                    (item["version_id"],),
-                )
-                conn.commit()
-                raise HTTPException(409, detail={
-                    "code": code,
-                    "message": message,
-                    "retryability": {
-                        "retryable": True,
-                        "action": "increase_budget",
-                        "paid_risk": "blocked_before_charge",
-                    },
-                })
             cursor = conn.execute(
                 """UPDATE jobs
                       SET status=?,error=NULL,next_retry_at=NULL,
