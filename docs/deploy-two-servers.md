@@ -91,3 +91,50 @@ A 侧 sshd 对 `mjtunnel` 的限制（`/etc/ssh/sshd_config` 末尾 `Match User 
 6. 重新引导 B（例如换机器）：A 上 `scripts/deploy/render_bootstrap.sh` 会生成带私钥的一次性
    脚本并打印 curl 命令；它需要 nginx 临时片段 `mjagent2-deploy-bootstrap.conf`
    （已删除，照 render 脚本注释临时加回，用完再删）。
+
+## 2026-09-02 切换记录与验证结果
+
+切换 08:20:55–08:22:47 PDT（23:20–23:22 北京时间）：停 A 后端 → 停 B 后端并清 WAL →
+A 上 `sqlite3.backup` 一致快照 → 以 B 上旧副本为基准 delta 传输（97 万 KB 只发了 468KB）→
+data/、projects/ 增量（0 文件差异）→ 代码再同步 → B 上 `integrity_check ok` → 起 B →
+nginx 上游切到 18230 → A 后端以 `127.0.0.1` 重启。域名不可用窗口约 2 分钟。
+
+走域名 `https://automanju.com` 的验证（`/root/mjagent2-deploy/verify_domain.sh`）：
+
+| 项 | 结果 |
+|---|---|
+| 首页 + 主 bundle `index-CY2SzUdZ.js` | 200 / 200（与 A 上已发布产物一致） |
+| 登录接口（错误密码） | 401 + 结构化错误体（不是 500） |
+| 未登录 `/api/auth/me` | 401 |
+| 带会话 `/api/system/jobs`、`/api/projects` | 200 |
+| 媒体下载 `/media/...?mt=` | 200，`Cache-Control: private, max-age=31536000, immutable`；`Range: bytes=0-99` → 206 |
+| 上传 multipart `/api/attachments/novel` | 200，返回 attachment_token |
+| Agent 真实模型调用（B → HiAgent）+ SSE `/api/agent/turns/{id}/events` | 200 `text/event-stream`，ttfb 0.21s，23 个事件（thinking.delta×17、assistant.delta×3、turn.started/completed…）逐条到达 |
+| WebSocket 握手透传（HTTP/1.1，Upgrade 头） | 直连 B 与走域名响应一致（uvicorn 对不存在的 WS 路由回 500），证明 nginx→隧道→B 原样透传；项目今天没有 WS 端点 |
+| IP 入口 `https://43.153.78.247/` | 200 |
+| B 侧确认 | `logs/backend.log` 记到这些请求；`mjagent2-backend`/`mjagent2-tunnel` 均 active |
+| 编码/字体 | `ffmpeg -encoders` 有 libx264（实测编码成功）；`final_edit._font_path()` → wqy-zenhei |
+
+**没做的**：真实登录（没有用户密码，只验了接口行为）；整集成片编码这类长任务没有跑，
+只验证了 ffmpeg/字体前置条件与一次真实模型调用。
+
+## 延迟：这套拓扑的固有代价
+
+nginx `mjagent2.diag.log` 的 `up_resp`（后端耗时，含隧道）切换前后对比（同一批端点，200 响应）：
+
+| 端点 | 切换前（A 本机） | 切换后（经隧道到 B，修 keep-alive 前） |
+|---|---|---|
+| `/api/projects/proj_*` | 38ms | 554ms |
+| `/api/episodes/ep_*` | 69ms | 358ms |
+| `/api/episodes/ep_*/screenplay/status` | 13ms | 684ms |
+| API 总体中位 / p90 | 18 / 160ms | 498 / 979ms |
+
+拆解：B↔A 裸 RTT 160ms（0 丢包）；B 本机处理 3–30ms；**经隧道复用连接每请求 172ms，
+新建连接 700–1100ms**（开 SSH 通道 + B 侧 TCP 建连要多付 2–3 个跨境 RTT）。uvicorn 默认
+5s 关空闲连接，页面轮询间隔一超过 5s，nginx 缓存的上游连接就全死了，每个请求都在付
+新建连接的价。已改：B 上 `--timeout-keep-alive 330`，A 上上游 `keepalive_timeout 300s`
+（nginx 先关，缓存里不会有已死连接）。改后走域名稳态 **~205ms/请求**（≈1 个 RTT + 处理）。
+
+剩下的 ~160ms 是新加坡↔北京的物理往返，改不掉：用户在国内 → 新加坡 → 北京 → 新加坡 → 国内，
+比原来多跨一次国际链路。要再降只能把入口挪到国内（B 开 443 或国内另起入口机，涉及备案），
+这是用户拍板的事，不在本次范围。

@@ -47,7 +47,7 @@ build_dist() {
 push_rev() {
   local rev="$1"
   git -C "$ROOT" push -q "$B:/root/MJAgent2" "$rev:refs/remotes/a/main"
-  ssh "$B" "git reset -q --hard $rev && git clean -qfd && echo $rev > DEPLOYED_REV"
+  ssh "$B" "cd /root/MJAgent2 && git reset -q --hard $rev && git clean -qfd && echo $rev > DEPLOYED_REV"
   rsync -az --delete "$REL/$rev/dist/" "$B:/root/MJAgent2/frontend/dist/"
   ssh "$B" 'cd /root/MJAgent2 && .venv/bin/pip install -q -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt && systemctl restart mjagent2-backend'
 }

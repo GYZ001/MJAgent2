@@ -28,7 +28,7 @@ rsync -az --delete $DRY \
 [ -n "$DRY" ] && { echo "dry-run 结束"; exit 0; }
 
 echo "== 依赖对齐（requirements.txt）=="
-ssh "$B" '.venv/bin/pip install -q -r requirements.txt'
+ssh "$B" 'cd /root/MJAgent2 && .venv/bin/pip install -q -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt'
 
 if [ "$RESTART" = 1 ]; then
   echo "== 重启 B 后端 =="
