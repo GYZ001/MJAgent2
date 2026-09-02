@@ -6,6 +6,7 @@ Split out of app/production/prep_pack.py.
 """
 from __future__ import annotations
 
+from app.db import get_setting
 from app.evidence import repository as evidence_repository
 from app.harness import model_gateway
 from app.harness.contracts import get_contract
@@ -107,6 +108,9 @@ async def _call_structured(
     step_id = _begin_step(run_id, step_key, iteration_no=iteration_no)
     trace = current_trace()
     ctx = bind_trace(run_id, step_id, trace.trace_id) if run_id else nullcontext()
+    # 与 blueprint_repair 同源的旋钮（ERR-20260901-037d7b：早停截断与口吃 JSON
+    # 都是随机采样失败，写死 1 次修复机会抽到坏样本即整步失败）。
+    format_retry_limit = int(get_setting("screenplay_format_retry_limit") or 1)
     try:
         with ctx:
             if output_schema is not None:
@@ -117,7 +121,7 @@ async def _call_structured(
                     operation_id=operation_id,
                     max_tokens=max_tokens,
                     temperature=temperature,
-                    format_retry_limit=1,
+                    format_retry_limit=format_retry_limit,
                     semantic_retry_limit=1,
                     call_meta=call_meta,
                     output_schema=output_schema,
@@ -130,7 +134,7 @@ async def _call_structured(
                     operation_id=operation_id,
                     max_tokens=max_tokens,
                     temperature=temperature,
-                    format_retry_limit=1,
+                    format_retry_limit=format_retry_limit,
                     semantic_retry_limit=1,
                     call_meta=call_meta,
                     response_format=_response_format(model_type, schema_name),

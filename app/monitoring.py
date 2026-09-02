@@ -104,7 +104,11 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "最终上限仍受模型与上下文能力约束。"
         ),
     ),
-    "screenplay_format_retry_limit": _number("剧本格式修复上限", "1", 0, 3, unit="次"),
+    # 默认 1→3（2026-09-01 ERR-20260901-037d7b）：映射台 chunk 调用实测两类
+    # 随机失败——供应商 finish_reason=stop 早停截断（258/8000 token 就停笔）与
+    # 修复调用口吃 JSON（"k": "k": "v"）——单次修复机会抽到坏样本即整步失败。
+    # 失败是随机采样问题，模型调用免费（HiAgent 自有服务），多抽即过。
+    "screenplay_format_retry_limit": _number("剧本格式修复上限", "3", 0, 3, unit="次"),
     "screenplay_semantic_retry_limit": _number("剧本语义修复上限", "1", 0, 3, unit="次"),
     "screenplay_fidelity_max_rounds": _number("剧本保真补写上限", "8", 1, 8, unit="轮"),
     "video_submit_concurrency": _number("视频提交并发", "15", 1, 64, unit="任务"),
