@@ -27,6 +27,7 @@ from pathlib import Path
 from fastapi import File, Form, HTTPException, UploadFile
 
 from app.atomic_io import atomic_write_bytes
+from app.bible_store import mutate_bible_json
 from app.db import get_conn, new_id, now
 from app.domain.common import _media_url, _project_or_404, router
 from app.refs import SCENE_CANONICAL_MAX_CHARS, SCENE_CANONICAL_MIN_CHARS, _safe_name
@@ -77,18 +78,14 @@ def _archive_current_scene_ref(conn, project_id: str, name: str, current_id: str
 
 
 def _sync_bible_scene_ref_image(conn, project_id: str, name: str, image_path: str) -> None:
-    prow = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
-    if not prow or not prow["bible_json"]:
-        return
-    bible_data = json.loads(prow["bible_json"])
-    for scene_entry in bible_data.get("scenes", []):
-        if scene_entry.get("name") == name:
-            scene_entry["ref_image_path"] = image_path
-            break
-    conn.execute(
-        "UPDATE projects SET bible_json=? WHERE id=?",
-        (json.dumps(bible_data, ensure_ascii=False), project_id),
-    )
+    def sync(data: dict) -> bool:
+        for scene_entry in data.get("scenes", []):
+            if scene_entry.get("name") == name:
+                scene_entry["ref_image_path"] = image_path
+                return True
+        return False
+
+    mutate_bible_json(conn, project_id, sync)
 
 
 def _replace_current_scene_ref(

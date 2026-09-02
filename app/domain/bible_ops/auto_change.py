@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 
+from app.bible_store import BibleJsonConflict, mutate_bible_json
 from app.db import (
     get_conn,
     now,
@@ -24,6 +25,14 @@ from .edit import _commit_bible_revision
 from .portrait_candidates import _set_current_portrait
 from .primitives import _parse_json_value
 from .scene_assets import _scene_current_row
+
+def _mutate_or_409(conn, project_id: str, mutate) -> bool:
+    """人物谱写入统一走版本乐观锁；重试耗尽转 409（路由不走命令总线时 ValueError 会裸奔成 500）。"""
+    try:
+        return mutate_bible_json(conn, project_id, mutate)
+    except BibleJsonConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+
 
 
 def _auto_change_payload(item: dict) -> dict:
@@ -224,16 +233,16 @@ async def decide_auto_change(project_id: str, change_id: str, body: dict | None 
         elif kind == "scene_discovery":
             scene = _auto_change_payload(matched_item).get("scene")
             if isinstance(scene, dict) and scene.get("name"):
-                bible = json.loads(project["bible_json"] or '{}')
-                if not any(item.get("name") == scene["name"] for item in bible.get("scenes", [])):
+                def append_scene(bible: dict) -> bool:
+                    if any(item.get("name") == scene["name"] for item in bible.get("scenes", [])):
+                        return False
                     bible.setdefault("scenes", []).append(scene)
-                    instance, validation_errors = schema_errors(Bible, bible)
+                    _instance, validation_errors = schema_errors(Bible, bible)
                     if validation_errors:
                         raise HTTPException(422, "；".join(validation_errors))
-                    conn.execute(
-                        "UPDATE projects SET bible_json=?,bible_version=bible_version+1 WHERE id=?",
-                        (instance.model_dump_json(), project_id),
-                    )
+                    return True
+
+                if _mutate_or_409(conn, project_id, append_scene):
                     action_result.update({
                         "added_scene": scene["name"], "requires_payment_confirmation": True,
                         "message": "场景锚点已批准入库；出图仍需在场景库完成生成范围确认",
@@ -243,21 +252,20 @@ async def decide_auto_change(project_id: str, change_id: str, body: dict | None 
             change_payload = _auto_change_payload(matched_item)
             new_canonical = str(change_payload.get("new_scene_canonical") or "").strip()
             ep_start = max(1, int(matched_item.get("ep_start") or 1))
-            bible = json.loads(project["bible_json"] or '{}')
-            target_scene = next(
-                (item for item in bible.get("scenes", []) if item.get("name") == scene_name), None,
-            )
-            if not target_scene or not new_canonical:
-                raise HTTPException(422, "场景状态变化缺少目标场景或新锚点")
-            target_scene["pending_state_canonical"] = new_canonical
-            target_scene["pending_state_ep_start"] = ep_start
-            instance, validation_errors = schema_errors(Bible, bible)
-            if validation_errors:
-                raise HTTPException(422, "；".join(validation_errors))
-            conn.execute(
-                "UPDATE projects SET bible_json=?,bible_version=bible_version+1 WHERE id=?",
-                (instance.model_dump_json(), project_id),
-            )
+            def mark_pending_state(bible: dict) -> bool:
+                target_scene = next(
+                    (item for item in bible.get("scenes", []) if item.get("name") == scene_name), None,
+                )
+                if not target_scene or not new_canonical:
+                    raise HTTPException(422, "场景状态变化缺少目标场景或新锚点")
+                target_scene["pending_state_canonical"] = new_canonical
+                target_scene["pending_state_ep_start"] = ep_start
+                _instance, validation_errors = schema_errors(Bible, bible)
+                if validation_errors:
+                    raise HTTPException(422, "；".join(validation_errors))
+                return True
+
+            _mutate_or_409(conn, project_id, mark_pending_state)
             current_ref = _scene_current_row(conn, project_id, scene_name)
             if current_ref and "change_json" in current_ref.keys():
                 ref_change = _parse_json_value(current_ref["change_json"], {}) or {}

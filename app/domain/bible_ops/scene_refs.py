@@ -9,6 +9,7 @@ import json
 from app import (
     task_registry,
 )
+from app.bible_store import BibleJsonConflict, mutate_bible_json
 from app.db import (
     get_conn,
     now,
@@ -237,12 +238,10 @@ async def start_scene_bible(project_id: str, body: dict | None = None):
             "run_id": quote_row["consumed_run_id"],
         }
     conn = get_conn()
-    current = json.loads(p["bible_json"])
-    current["scenes"] = confirmed_scenes
-    conn.execute(
-        "UPDATE projects SET bible_json=? WHERE id=?",
-        (json.dumps(current, ensure_ascii=False), project_id),
-    )
+    try:
+        mutate_bible_json(conn, project_id, lambda data: data.update(scenes=confirmed_scenes) or True)
+    except BibleJsonConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     conn.commit()
     if not _start_scene_refs_generation(project_id, names):
         raise HTTPException(409, "场景图正在生成中")

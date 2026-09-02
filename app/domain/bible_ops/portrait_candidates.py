@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 
+from app.bible_store import mutate_bible_json
 from app.db import (
     get_conn,
     new_id,
@@ -239,17 +240,14 @@ def _set_current_portrait(
         "UPDATE character_portraits SET ep_start=?, ep_end=NULL, change_json=? WHERE id=?",
         (adopted_start, json.dumps(change, ensure_ascii=False), row["id"]),
     )
-    prow = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
-    if prow and prow["bible_json"]:
-        bible = json.loads(prow["bible_json"])
+    def adopt_ref(bible: dict) -> bool:
         for character in bible.get("characters", []):
             if character.get("name") == character_name:
                 character["ref_image_path"] = row["image_path"]
-                break
-        conn.execute(
-            "UPDATE projects SET bible_json=? WHERE id=?",
-            (json.dumps(bible, ensure_ascii=False), project_id),
-        )
+                return True
+        return False
+
+    mutate_bible_json(conn, project_id, adopt_ref)
     artifact_id = row["artifact_id"] if "artifact_id" in row.keys() else None
     if artifact_id:
         conn.execute(

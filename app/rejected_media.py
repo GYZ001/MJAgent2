@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from app.bible_store import mutate_bible_json
 from app.db import get_conn
 
 
@@ -146,12 +147,6 @@ def purge_scene_reference(conn, scene_reference_id: str, *, commit: bool = True)
 def _refresh_bible_reference(
     conn, project_id: str, collection: str, name: str,
 ) -> None:
-    project = conn.execute(
-        "SELECT bible_json FROM projects WHERE id=?", (project_id,),
-    ).fetchone()
-    if not project or not project["bible_json"]:
-        return
-    bible = _json(project["bible_json"], {})
     if collection == "characters":
         replacement = conn.execute(
             "SELECT image_path FROM character_portraits "
@@ -166,14 +161,15 @@ def _refresh_bible_reference(
             "ORDER BY ep_start DESC,created_at DESC LIMIT 1",
             (project_id, name),
         ).fetchone()
-    for item in bible.get(collection, []):
-        if item.get("name") == name:
-            item["ref_image_path"] = replacement["image_path"] if replacement else None
-            break
-    conn.execute(
-        "UPDATE projects SET bible_json=? WHERE id=?",
-        (json.dumps(bible, ensure_ascii=False), project_id),
-    )
+
+    def refresh(bible: dict) -> bool:
+        for item in bible.get(collection, []):
+            if item.get("name") == name:
+                item["ref_image_path"] = replacement["image_path"] if replacement else None
+                return True
+        return False
+
+    mutate_bible_json(conn, project_id, refresh)
 
 
 def _purge_artifact(conn, artifact: Any) -> tuple[int, int]:

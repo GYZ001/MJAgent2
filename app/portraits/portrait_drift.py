@@ -8,6 +8,7 @@ import json
 
 from pathlib import Path
 
+from app.bible_store import mutate_bible_json
 from app.db import get_conn, new_id, now
 from app.errors import ContentGenerationError, code_ref
 from app.evidence.media import record_reference_asset
@@ -54,35 +55,27 @@ def _episode_source_text(conn, project_id: str, episode_no: int) -> str:
 
 def reconcile_bible_display_appearances(conn, project_id: str) -> list[str]:
     """Keep the project card on each character's current persistent portrait segment."""
-    row = conn.execute(
-        "SELECT bible_json FROM projects WHERE id=?",
-        (project_id,),
-    ).fetchone()
-    if not row or not row["bible_json"]:
-        return []
-    data = json.loads(row["bible_json"])
     changed: list[str] = []
-    for character in data.get("characters", []):
-        name = str(character.get("name") or "").strip()
-        if not name:
-            continue
-        portrait = _open_portrait(conn, project_id, name)
-        if portrait is None:
-            continue
-        appearance = str(portrait["appearance"] or "").strip()
-        image_path = str(portrait["image_path"] or "").strip()
-        if appearance and character.get("appearance_canonical") != appearance:
-            character["appearance_canonical"] = appearance
-            changed.append(name)
-        if image_path and character.get("ref_image_path") != image_path:
-            character["ref_image_path"] = image_path
-            if name not in changed:
+
+    def reconcile(data: dict) -> bool:
+        changed.clear()
+        for character in data.get("characters", []):
+            name = str(character.get("name") or "").strip()
+            portrait = _open_portrait(conn, project_id, name) if name else None
+            if portrait is None:
+                continue
+            appearance = str(portrait["appearance"] or "").strip()
+            image_path = str(portrait["image_path"] or "").strip()
+            if appearance and character.get("appearance_canonical") != appearance:
+                character["appearance_canonical"] = appearance
                 changed.append(name)
-    if changed:
-        conn.execute(
-            "UPDATE projects SET bible_json=? WHERE id=?",
-            (json.dumps(data, ensure_ascii=False), project_id),
-        )
+            if image_path and character.get("ref_image_path") != image_path:
+                character["ref_image_path"] = image_path
+                if name not in changed:
+                    changed.append(name)
+        return bool(changed)
+
+    if mutate_bible_json(conn, project_id, reconcile):
         conn.commit()
     return changed
 

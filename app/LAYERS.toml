@@ -110,6 +110,7 @@ allowed_exceptions = []
 
 # ---- L2 持久化：可依赖 L0-L1 ----
 "app.db" = 2
+"app.bible_store" = 2  # 2026-09-02 新增：projects.bible_json 读-改-写的唯一入口（bible_version 乐观锁），只 import 标准库
 "app.quota" = 2  # 2026-08-30 新增：五档会员配额引擎，只 import app.db、
                  # app.quota_addon、app.quota_scope、app.quota_tiers（均同层）；
                  # app.db (finish_provider_call) 反过来按需记账用延迟 import

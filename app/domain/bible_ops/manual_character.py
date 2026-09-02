@@ -32,6 +32,7 @@ from pathlib import Path
 from fastapi import File, Form, HTTPException, UploadFile
 
 from app.atomic_io import atomic_write_bytes
+from app.bible_store import mutate_bible_json
 from app.db import get_conn
 from app.domain.common import _media_url, _project_or_404, router
 from app.portraits import (
@@ -216,18 +217,16 @@ def _promote_manual_portrait(conn, project_id: str, name: str, portrait_id: str,
         "UPDATE character_portraits SET pack_status=? WHERE id=?",
         (_MANUAL_PORTRAIT_PACK_STATUS, portrait_id),
     )
-    prow = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
-    if prow and prow["bible_json"]:
-        bible_data = json.loads(prow["bible_json"])
-        for character in bible_data.get("characters", []):
-            if character.get("name") == name:
-                character["ref_image_path"] = image_path
-                break
-        conn.execute(
-            "UPDATE projects SET bible_json=? WHERE id=?",
-            (json.dumps(bible_data, ensure_ascii=False), project_id),
-        )
+    mutate_bible_json(conn, project_id, lambda data: _set_ref_image(data.get("characters", []), name, image_path))
     conn.commit()
+
+
+def _set_ref_image(entries: list, name: str, image_path: str) -> bool:
+    for entry in entries:
+        if entry.get("name") == name:
+            entry["ref_image_path"] = image_path
+            return True
+    return False
 
 
 @router.post("/projects/{project_id}/characters/{character_name}/portrait-image")

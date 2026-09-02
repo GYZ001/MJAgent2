@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 
+from app.bible_store import BibleJsonConflict, mutate_bible_json
 from app.db import (
     get_conn,
     now,
@@ -30,6 +31,14 @@ from .primitives import (
 )
 from .scene_assets import _scene_current_row
 
+def _mutate_or_409(conn, project_id: str, mutate) -> bool:
+    """人物谱写入统一走版本乐观锁；重试耗尽转 409。"""
+    try:
+        return mutate_bible_json(conn, project_id, mutate)
+    except BibleJsonConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 
 @router.put("/projects/{project_id}/scenes/{scene_name}/prompt")
 async def edit_scene_prompt(project_id: str, scene_name: str, body: dict):
@@ -47,14 +56,15 @@ async def edit_scene_prompt(project_id: str, scene_name: str, body: dict):
     prompt_text = (body.get("scene_prompt") or "").strip()
     if prompt_text and not 10 <= len(prompt_text) <= 400:
         raise HTTPException(422, f"场景图描述长度 {len(prompt_text)} 字，要求 10~400 字（留空则恢复默认）")
-    bible = json.loads(p["bible_json"])
-    target = next((s for s in bible.get("scenes", []) if s.get("name") == scene_name), None)
-    if target is None:
-        raise HTTPException(404, f"场景不存在：{scene_name}")
-    target["scene_prompt_override"] = prompt_text or None
+    def set_override(bible: dict) -> bool:
+        target = next((s for s in bible.get("scenes", []) if s.get("name") == scene_name), None)
+        if target is None:
+            raise HTTPException(404, f"场景不存在：{scene_name}")
+        target["scene_prompt_override"] = prompt_text or None
+        return True
+
     conn = get_conn()
-    conn.execute("UPDATE projects SET bible_json=? WHERE id=?",
-                 (json.dumps(bible, ensure_ascii=False), project_id))
+    _mutate_or_409(conn, project_id, set_override)
     conn.commit()
     return {"saved": True, "reset_to_default": not prompt_text}
 
@@ -83,21 +93,24 @@ async def edit_scene_anchor(project_id: str, scene_name: str, body: dict):
     location = str(body.get("location_kind") or target.get("location_kind") or "").strip()
     if location and location not in {"室内", "室外", "其他"}:
         raise HTTPException(422, "location_kind 须为室内/室外/其他")
-    target.update({
-        "scene_canonical": canonical, "location_kind": location,
-        "space": str(body.get("space") or "").strip(),
-        "time_of_day": str(body.get("time_of_day") or "").strip(),
-        "lighting": str(body.get("lighting") or "").strip(),
+    fields = {
+        "scene_canonical": canonical, "location_kind": location, "space": str(body.get("space") or "").strip(),
+        "time_of_day": str(body.get("time_of_day") or "").strip(), "lighting": str(body.get("lighting") or "").strip(),
         "landmarks": [str(item).strip() for item in (body.get("landmarks") or []) if str(item).strip()],
-    })
-    instance, validation_errors = schema_errors(Bible, bible)
-    if validation_errors:
-        raise HTTPException(422, "；".join(validation_errors))
+    }
+
+    def apply(data: dict) -> bool:
+        scene = next((s for s in data.get("scenes", []) if s.get("name") == scene_name), None)
+        if scene is None:
+            raise HTTPException(404, f"场景不存在：{scene_name}")
+        scene.update(fields)
+        _instance, validation_errors = schema_errors(Bible, data)
+        if validation_errors:
+            raise HTTPException(422, "；".join(validation_errors))
+        return True
+
     conn = get_conn()
-    conn.execute(
-        "UPDATE projects SET bible_json=?,bible_version=bible_version+1 WHERE id=?",
-        (instance.model_dump_json(), project_id),
-    )
+    _mutate_or_409(conn, project_id, apply)
     current = _scene_current_row(conn, project_id, scene_name)
     if current:
         change = _parse_json_value(current["change_json"] if "change_json" in current.keys() else None, {}) or {}

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from app import config, generation_concurrency, hiagent, quota
 from app.atomic_io import atomic_write_bytes
+from app.bible_store import mutate_bible_json
 from app.db import get_conn, new_id
 from app.evidence.media import record_reference_asset
 from app.errors import ContentGenerationError
@@ -202,28 +203,23 @@ def _merge_generated_portraits(conn, project_id: str, characters) -> None:
     and keyframe compilation on the previous outfit.
     """
     accepted = {
-        item.name: {
-            "ref_image_path": item.ref_image_path,
-            "appearance_canonical": item.appearance_canonical,
-        }
-        for item in characters
-        if item.ref_image_path
+        item.name: {"ref_image_path": item.ref_image_path, "appearance_canonical": item.appearance_canonical}
+        for item in characters if item.ref_image_path
     }
     if not accepted:
         return
-    row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
-    if not row or not row["bible_json"]:
-        return
-    latest = json.loads(row["bible_json"])
-    for item in latest.get("characters", []):
-        if item.get("name") in accepted:
-            published = accepted[item["name"]]
-            item["ref_image_path"] = published["ref_image_path"]
-            item["appearance_canonical"] = published["appearance_canonical"]
-    conn.execute(
-        "UPDATE projects SET bible_json=? WHERE id=?",
-        (json.dumps(latest, ensure_ascii=False), project_id),
-    )
+
+    def publish(latest: dict) -> bool:
+        changed = False
+        for item in latest.get("characters", []):
+            if item.get("name") in accepted:
+                published = accepted[item["name"]]
+                item["ref_image_path"] = published["ref_image_path"]
+                item["appearance_canonical"] = published["appearance_canonical"]
+                changed = True
+        return changed
+
+    mutate_bible_json(conn, project_id, publish)
 
 
 async def generate_refs(

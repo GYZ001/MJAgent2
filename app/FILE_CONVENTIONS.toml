@@ -124,7 +124,7 @@ max_lines_tests = 500
 # cfff07 / ERR-20260901-dded96。
 "app/portraits/discovery_legacy.py" = 857
 "app/portraits/identity_response_projection.py" = 720
-"app/portraits/portrait_drift.py" = 548
+"app/portraits/portrait_drift.py" = 541
 "app/portraits/portrait_io.py" = 599
 "app/portraits/resolution_apply_screenplay.py" = 591
 "app/portraits/structural_coverage.py" = 575
@@ -138,7 +138,7 @@ max_lines_tests = 500
 "app/production/screenplay_authority.py" = 2502
 "app/production/screenplay_document.py" = 1704
 "app/production/screenplay_repair/llm_field_patch.py" = 593
-"app/production/storyboard_pack.py" = 2073
+"app/production/storyboard_pack.py" = 2072
 # 2.1.0（对白台账/必保台词/受控画外音/镜头数放宽）：方言约束两段指令文本 +
 # _dialect_for_target_video_model 拆到新模块 app.production.storyboard_dialects，
 # 腾出的行数让本文件净减 1 行（2087→2086）——棘轮只降不升，收紧后如实记账。
@@ -146,8 +146,8 @@ max_lines_tests = 500
 # storyboard_dialogue_ledger.py，本文件只加一条 changelog、压缩几处旧注释
 # 腾行数，净变化后实测再降 1 行（2086→2085）。
 "app/quota.py" = 559
-"app/refs.py" = 542
-"app/scenes.py" = 1741
+"app/refs.py" = 538
+"app/scenes.py" = 1738
 "app/screenplay_ir/prompt_context.py" = 517
 "app/screenplay_scene_shards/generate_shards.py" = 603
 "app/screenplay_scene_shards/input_contracts.py" = 599
@@ -269,14 +269,14 @@ max_lines_tests = 500
 "app/continuity.py" = 138
 "app/db.py" = 266
 "app/delivery.py" = 317
-"app/domain/bible_ops/auto_change.py" = 213
+"app/domain/bible_ops/auto_change.py" = 210
 "app/domain/bible_ops/edit.py" = 125
 "app/domain/bible_ops/portrait_candidates.py" = 68
 "app/domain/bible_ops/precheck.py" = 110
 "app/domain/bible_ops/refs_generation.py" = 85
 "app/domain/bible_ops/scene_assets.py" = 69
 "app/domain/bible_ops/scene_bible_prep.py" = 70
-"app/domain/bible_ops/scene_refs.py" = 60
+"app/domain/bible_ops/scene_refs.py" = 58
 "app/domain/bible_ops/style_and_drafts.py" = 117
 "app/domain/bible_ops/task_recovery.py" = 73
 "app/domain/bible_ops/task_run.py" = 99
@@ -488,7 +488,7 @@ max_lines_tests = 500
 "app/rejected_media.py" = 73
 "app/renderability_score.py" = 69
 "app/repair_router.py" = 219
-"app/scenes.py" = 228
+"app/scenes.py" = 223
 # 2026-09-01 app/schemas.py 拆成 app/schemas/ 包后，这一条 251 换成下面 5 条。
 # 数字没有变差：per-file 基线只记「该文件最长的那个函数」，2571 行里另外 4 个超标函数
 # 一直被这条掩盖着；拆开后各自现形，同一批函数、同一份实现，一行代码没改。

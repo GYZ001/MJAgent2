@@ -168,12 +168,12 @@ def test_episode_bible_uses_persisted_appearance_not_prompt_word_extraction(monk
 def test_portrait_completion_merges_without_erasing_concurrent_scenes() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.execute("CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT)")
+    conn.execute("CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT, bible_version INTEGER DEFAULT 0)")
     bible = {
         "characters": [{"name": "丙老", "ref_image_path": None}],
         "scenes": [{"name": "后山山崖", "scene_canonical": "并发场景任务已写入"}],
     }
-    conn.execute("INSERT INTO projects VALUES('p', ?)", (json.dumps(bible, ensure_ascii=False),))
+    conn.execute("INSERT INTO projects(id, bible_json) VALUES('p', ?)", (json.dumps(bible, ensure_ascii=False),))
     character = Character(
         name="丙老", role="配角", appearance_canonical="透明苍老人影",
         ref_image_path="accepted.jpg",

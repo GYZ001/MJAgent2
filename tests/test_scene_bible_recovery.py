@@ -8,7 +8,7 @@ from app.schemas import Scene
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.execute("CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT)")
+    conn.execute("CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT, bible_version INTEGER DEFAULT 0)")
     conn.execute(
         "CREATE TABLE artifacts(type TEXT, scope_type TEXT, scope_id TEXT, "
         "status TEXT, version INTEGER, content_json TEXT)"
@@ -29,7 +29,7 @@ def test_approved_scene_bible_restores_only_missing_scenes() -> None:
             {"name": "后山", "scene_canonical": "批准的后山"},
         ]
     }
-    conn.execute("INSERT INTO projects VALUES('p', ?)", (json.dumps(current, ensure_ascii=False),))
+    conn.execute("INSERT INTO projects(id, bible_json) VALUES('p', ?)", (json.dumps(current, ensure_ascii=False),))
     conn.execute(
         "INSERT INTO artifacts VALUES('scene_bible', 'project', 'p', 'approved', 1, ?)",
         (json.dumps(approved, ensure_ascii=False),),
@@ -48,7 +48,7 @@ def test_scene_path_merge_preserves_concurrent_character_update() -> None:
         "characters": [{"name": "丙老", "ref_image_path": "portrait.jpg"}],
         "scenes": [{"name": "后山", "scene_canonical": "后山", "ref_image_path": None}],
     }
-    conn.execute("INSERT INTO projects VALUES('p', ?)", (json.dumps(latest, ensure_ascii=False),))
+    conn.execute("INSERT INTO projects(id, bible_json) VALUES('p', ?)", (json.dumps(latest, ensure_ascii=False),))
     generated = Scene(name="后山", scene_canonical="后山", ref_image_path="scene.jpg")
 
     _merge_generated_scene_refs(conn, "p", [generated])

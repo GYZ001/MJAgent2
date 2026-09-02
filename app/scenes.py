@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app import config, generation_concurrency, hiagent, quota
 from app.atomic_io import atomic_write_bytes
+from app.bible_store import mutate_bible_json
 from app.errors import ContentGenerationError, code_ref
 from app.db import get_conn, new_id, now
 from app.evidence import repository as evidence_repository
@@ -266,18 +267,18 @@ def _restore_approved_scene_bible(conn, project_id: str, bible_data: dict) -> bo
         approved = json.loads(row["content_json"])
     except (TypeError, ValueError, json.JSONDecodeError):
         return False
-    current = bible_data.setdefault("scenes", [])
-    known = {item.get("name") for item in current}
-    missing = [item for item in approved.get("scenes", []) if item.get("name") not in known]
-    if not missing:
-        return False
-    current.extend(missing)
-    conn.execute(
-        "UPDATE projects SET bible_json=? WHERE id=?",
-        (json.dumps(bible_data, ensure_ascii=False), project_id),
-    )
-    conn.commit()
-    return True
+    def restore(data: dict) -> bool:
+        current = data.setdefault("scenes", [])
+        known = {item.get("name") for item in current}
+        missing = [item for item in approved.get("scenes", []) if item.get("name") not in known]
+        current.extend(missing)
+        return bool(missing)
+
+    # 调用方手里的快照与库里各自补齐：库走版本乐观锁，快照就地扩展供本次运行使用。
+    changed = restore(bible_data)
+    if mutate_bible_json(conn, project_id, restore):
+        conn.commit()
+    return changed
 
 
 def _merge_generated_scene_refs(conn, project_id: str, generated_scenes) -> None:
@@ -287,17 +288,16 @@ def _merge_generated_scene_refs(conn, project_id: str, generated_scenes) -> None
     }
     if not accepted:
         return
-    row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
-    if not row or not row["bible_json"]:
-        return
-    latest = json.loads(row["bible_json"])
-    for item in latest.get("scenes", []):
-        if item.get("name") in accepted:
-            item["ref_image_path"] = accepted[item["name"]]
-    conn.execute(
-        "UPDATE projects SET bible_json=? WHERE id=?",
-        (json.dumps(latest, ensure_ascii=False), project_id),
-    )
+
+    def publish(latest: dict) -> bool:
+        changed = False
+        for item in latest.get("scenes", []):
+            if item.get("name") in accepted:
+                item["ref_image_path"] = accepted[item["name"]]
+                changed = True
+        return changed
+
+    mutate_bible_json(conn, project_id, publish)
 
 
 async def _save_image_item(item: dict, dest: str) -> None:
@@ -602,20 +602,17 @@ async def _generate_one_scene_reference(
             # another's merge (last write wins on the whole blob).
             async with bible_merge_lock:
                 _merge_generated_scene_refs(conn, project_id, [sc])
-                latest_project = conn.execute(
-                    "SELECT bible_json FROM projects WHERE id=?", (project_id,),
-                ).fetchone()
-                latest_bible = json.loads(latest_project["bible_json"] or "{}")
-                for item in latest_bible.get("scenes", []):
-                    if item.get("name") == sc.name:
-                        item["scene_canonical"] = pending_state
-                        item["pending_state_canonical"] = None
-                        item["pending_state_ep_start"] = None
-                        break
-                conn.execute(
-                    "UPDATE projects SET bible_json=? WHERE id=?",
-                    (json.dumps(latest_bible, ensure_ascii=False), project_id),
-                )
+
+                def apply_pending_state(latest_bible: dict) -> bool:
+                    for item in latest_bible.get("scenes", []):
+                        if item.get("name") == sc.name:
+                            item["scene_canonical"] = pending_state
+                            item["pending_state_canonical"] = None
+                            item["pending_state_ep_start"] = None
+                            return True
+                    return False
+
+                mutate_bible_json(conn, project_id, apply_pending_state)
                 conn.commit()
             return
     sc.ref_image_path = None

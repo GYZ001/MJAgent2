@@ -13,6 +13,7 @@ from pathlib import Path
 from app.evidence import repository as evidence_repository
 from app import config, hiagent
 from app.atomic_io import atomic_write_bytes
+from app.bible_store import mutate_bible_json
 from app.db import get_conn, new_id, now
 from app.errors import ContentGenerationError, code_ref
 from app.evidence.media import record_reference_asset
@@ -337,16 +338,15 @@ async def _generate_fresh_portrait(project_id: str, name: str, style: str, appea
 def _update_bible_appearance(conn, project_id: str, name: str, appearance: str, ref_image_path: str) -> None:
     """漂移重绘后把 bible 里该角色的外观锚点/参考图同步成最新版（供人物谱 UI 展示）。
     真正驱动按集渲染的是 character_portraits 分段表 + bible_for_episode 的本集视图，所以这里只是展示用。"""
-    row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
-    if not row or not row["bible_json"]:
-        return
-    data = json.loads(row["bible_json"])
-    for c in data.get("characters", []):
-        if c.get("name") == name:
-            c["appearance_canonical"] = appearance
-            c["ref_image_path"] = ref_image_path
-            break
-    conn.execute("UPDATE projects SET bible_json=? WHERE id=?", (json.dumps(data, ensure_ascii=False), project_id))
+    def sync(data: dict) -> bool:
+        for c in data.get("characters", []):
+            if c.get("name") == name:
+                c["appearance_canonical"] = appearance
+                c["ref_image_path"] = ref_image_path
+                return True
+        return False
+
+    mutate_bible_json(conn, project_id, sync)
 
 
 def _append_character_to_bible(conn, project_id: str, char: dict) -> bool:

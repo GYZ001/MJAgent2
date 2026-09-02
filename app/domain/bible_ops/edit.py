@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 
+from app.bible_store import BibleJsonConflict, mutate_bible_json
 from app.db import (
     get_conn,
     new_id,
@@ -324,13 +325,17 @@ async def edit_portrait_prompt(project_id: str, character_name: str, body: dict)
     prompt_text = (body.get("portrait_prompt") or "").strip()
     if prompt_text and not 10 <= len(prompt_text) <= 400:
         raise HTTPException(422, f"画像描述长度 {len(prompt_text)} 字，要求 10~400 字（留空则恢复默认）")
-    bible = json.loads(p["bible_json"])
-    target = next((c for c in bible.get("characters", []) if c.get("name") == character_name), None)
-    if target is None:
-        raise HTTPException(404, f"角色不存在：{character_name}")
-    target["portrait_prompt_override"] = prompt_text or None
+    def set_override(bible: dict) -> bool:
+        target = next((c for c in bible.get("characters", []) if c.get("name") == character_name), None)
+        if target is None:
+            raise HTTPException(404, f"角色不存在：{character_name}")
+        target["portrait_prompt_override"] = prompt_text or None
+        return True
+
     conn = get_conn()
-    conn.execute("UPDATE projects SET bible_json=? WHERE id=?",
-                 (json.dumps(bible, ensure_ascii=False), project_id))
+    try:
+        mutate_bible_json(conn, project_id, set_override)
+    except BibleJsonConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     conn.commit()
     return {"saved": True, "reset_to_default": not prompt_text}
