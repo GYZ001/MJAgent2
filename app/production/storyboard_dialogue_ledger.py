@@ -190,19 +190,40 @@ def _kept_segment_binding_errors(
     原文段号的新段，会让下游台词与画面来源对不上。
     """
     errors: list[str] = []
+    uncovered: dict[int, list[str]] = {}
     for item in kept:
         quote = quotes_by_id.get(item.quote_id)
         if quote is None:
             continue  # 已在 partition 检查里报过，这里不重复报同一个问题
         allowed = segment_source_indexes.get(item.segment_no)
+        if allowed is not None and quote.source_segment_index in allowed:
+            continue
+        covering = sorted(
+            no for no, indexes in segment_source_indexes.items() if quote.source_segment_index in indexes
+        )
+        if not covering:
+            # 没有任何段覆盖这句台词的原文段：单说「分到覆盖它的那个段」是让模型
+            # 去找一个不存在的目标（ERR-20260902-b2db9f：模型只切了 1 段却要安置
+            # 7 个原文段的 46 句台词，三轮修复都在虚构 segment_no）。按原文段聚合，
+            # 下面统一给出「新增段落」这条唯一可行的修法。
+            uncovered.setdefault(quote.source_segment_index, []).append(item.quote_id)
+            continue
+        where = f"覆盖它原文段号的是第 {covering} 段，必须分到其中一段"
         if allowed is None:
-            errors.append(f"kept_lines 的 {item.quote_id} 引用了不存在的 segment_no={item.segment_no}")
-        elif quote.source_segment_index not in allowed:
+            errors.append(f"kept_lines 的 {item.quote_id} 引用了不存在的 segment_no={item.segment_no}；{where}")
+        else:
             errors.append(
                 f"kept_lines 的 {item.quote_id}（原文段号 {quote.source_segment_index}）"
                 f"被分到第 {item.segment_no} 段，但该段 source_segment_indexes 只覆盖 "
-                f"{sorted(allowed)}；台词不得跨段漂移，必须分到覆盖它原文段号的那个段"
+                f"{sorted(allowed)}；台词不得跨段漂移，{where}"
             )
+    for source_index, quote_ids in sorted(uncovered.items()):
+        errors.append(
+            f"原文段 {source_index} 的必保台词 {quote_ids} 没有任何段覆盖它（当前 segments 的 "
+            f"source_segment_indexes 只覆盖 {sorted({i for v in segment_source_indexes.values() for i in v})}）："
+            f"请在 segments 里新增一段、source_segment_indexes 含 {source_index}，重排全部 segment_no，"
+            "并把这些台词分到新段；新增段落属于修复本身，不受「保持其余已验证字段不变」的限制"
+        )
     return errors
 
 
