@@ -56,6 +56,7 @@ from app.production.storyboard_pack import (
     _AiBeat,
     _AiBeatSheetDraft,
     _AiCameraDigest,
+    _AiContinuityMemo,
     _AiDialogueLine,
     _AiSegmentPlan,
     _AiSegmentResources,
@@ -1034,11 +1035,15 @@ def test_required_dialogue_missing_errors_accepts_verbatim_presence():
 # ---------------------------------------------------------------------------
 
 def _draft(**overrides) -> _AiStoryboardSegmentDraft:
+    # continuity_memo 默认给一份合法的第一段备忘（inferred，非空 time_of_day）：
+    # 这些用例测的是 prompt_text/H3 字段/required_dialogue，不是连贯性备忘本身，
+    # 默认值必须能通过 continuity_memo_errors，否则会被无关的「time_of_day
+    # 不能为空」挡住——见 tests/test_storyboard_continuity_memo.py 专测该闸门。
     base = dict(
         prompt_text="电影级预告片质感，多镜头叙事，镜头之间硬切。……",
         shot_count=3,
         dialogue=[_AiDialogueLine(speaker_identity_id="id_a", line="走吧", source_segment_index=1)],
-        resources=_AiSegmentResources(),
+        resources=_AiSegmentResources(), continuity_memo=_AiContinuityMemo(time_of_day="白天"),
     )
     base.update(overrides)
     return _AiStoryboardSegmentDraft(**base)
@@ -2648,20 +2653,14 @@ def _patch_thinking_model(
     )
 
 
-def test_contract_marker_bumps_to_2_2_0_so_stale_packs_without_palette_regenerate():
-    """marker 跟落库形状走，不跟提示词措辞走。
-
-    2.1.1（ERR-20260901-bcfa58）/2.1.2（ERR-20260901-b1c349）期间 marker 一直
-    钉在 storyboard_pack/2.1.0：那两次只改生成路径的报错文案/抽取期预拆/容量
-    归一化，不改落库形状，已成功的集不该被强迫重跑一次付费生成。2.2.0 不是
-    同一种情况：新增 StoryboardPackSegment.palette 字段（专家审阅真实 EP1
-    十八段产出、用户拍板的色温弧线改造，见 app.production.storyboard_pack 的
-    STORYBOARD_PACK_VERSION changelog 与 app.production.storyboard_narrative_arc
-    模块 docstring），是真正的落库形状变化——旧行没有这个字段，marker 不动会
-    让 resume 短路把它们误判为"已经用新契约生成过"而不重新生成。
+def test_contract_marker_bumps_to_2_3_0_so_stale_packs_without_continuity_memo_regenerate():
+    """marker 跟落库形状走：2.3.0 新增 StoryboardPackSegment.continuity_memo
+    字段（跨段连贯性备忘，真实回归「白天说着说着变成黑夜了」驱动的改造，见
+    app.production.storyboard_continuity_memo 模块 docstring），旧行没有这个
+    字段，marker 不动会让 resume 短路把它们误判为"已经用新契约生成过"。
     """
-    assert STORYBOARD_PACK_CONTRACT_MARKER == "storyboard_pack/2.2.0"
-    assert STORYBOARD_PACK_VERSION == "2.2.0"
+    assert STORYBOARD_PACK_CONTRACT_MARKER == "storyboard_pack/2.3.0"
+    assert STORYBOARD_PACK_VERSION == "2.3.0"
 
 
 def test_ensure_segment_prompt_budget_passes_when_room_is_ample(monkeypatch):

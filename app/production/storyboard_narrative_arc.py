@@ -54,6 +54,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.production.storyboard_continuity_memo import _AiContinuityMemo, continuity_memo_rules
+
 
 def beat_sheet_narrative_arc_rules() -> list[str]:
     """阶段一（节拍表）rules[] 新增的三类正面陈述：色温弧线的起点、独白/
@@ -188,3 +190,78 @@ def _segment_continuity_rules(
             "不必刻意呼应任何东西。"
         )
     return [rule_1, rule_2]
+
+
+def _segment_shared_rules() -> list[str]:
+    """每段调用都相同的资源引用规则（角色/场景外观锚点、台词互覆盖）。
+
+    2.3.0：从 ``storyboard_pack.py`` 搬移到本模块（纯搬移，行为不变），
+    为该文件新增的跨段连贯性备忘改造腾行数——``storyboard_pack.py`` 通过
+    ``from app.production.storyboard_narrative_arc import _segment_shared_rules``
+    继续用同一个名字调用它，测试的既有导入路径不受影响。
+    """
+    return [
+        "relevant_assets 里每个角色/场景都带一个外观/场景字段（角色和"
+        "群演统一叫 appearance；场景叫 scene_canonical）：内容是一段"
+        "具体描述时，那就是这个角色/场景在本集的标准锚点，本段写它时必须"
+        "逐字沿用这段描述本身，不得改写、精简、替换或按本段情境调整——"
+        "哪怕你在更早的段落里已经写过这个角色，也不要凭记忆复述，每次都"
+        "从下面这段 relevant_assets 原文重新逐字抄一遍，这样才能保证跨段"
+        "完全一致；relevant_assets 里没有写到的部位，本段也不要新增描述。"
+        "内容是「没有标准外观/场景……」这类说明文字时，才由你自行确定"
+        "特征——这种情况下你看不到本集其它段落写了什么，无法强制跨段"
+        "一致，只需按本段的画面据实描述。",
+        "dialogue[] 与 prompt_text 两处的台词必须互相覆盖、逐句一致："
+        "dialogue[] 列出的每一句台词都必须能在本段 prompt_text 里找到"
+        "对应原话，prompt_text 里写出的台词原话也必须同时登记进本段的 "
+        "dialogue[]，不得只在一处出现。",
+        "本段 prompt_text 里出场或说话的角色都必须同时列进 "
+        "resources.characters。resources.characters[].identity_id 的合法取值"
+        "只有两处、必须逐字整串复制（含冒号与前缀，一个字符都不能改写、"
+        "简化或模仿）：relevant_assets.characters[] 每一项自带的 "
+        "identity_id 字段本身，或者 relevant_assets.functional_extras[] "
+        "每一项自带的 visual_entity_id 字段本身——这两个列表里已经出现的"
+        "字符串，就是本段能够使用的全部合法值，不存在第三种取值来源，也"
+        "不允许你按看到的格式风格自己拼一个新字符串（哪怕格式看起来和已有"
+        "的很像）。如果本段确实出场或说话的某个角色，在 "
+        "relevant_assets.characters 和 relevant_assets.functional_extras 两处"
+        "都找不到对应条目——本集素材库还没有收录这个角色——identity_id 就"
+        "直接写这个角色在原文里的称谓原文本身，不加冒号、不加任何前缀，"
+        "尤其不要模仿已收录角色的 id 写法（那种带前缀的写法是「素材库已"
+        "收录」这个事实本身的标记，没有收录记录时自己套用等于冒充一个不"
+        "存在的收录状态）。",
+        "本段 prompt_text 里画面实际发生的场景都必须同时列进 "
+        "resources.scenes。resources.scenes[].scene_id 的合法取值只有一处、"
+        "必须逐字整串复制：relevant_assets.scenes[] 每一项自带的 scene_id "
+        "字段本身，不允许自己新造、简化或从其他场景挪用。如果 "
+        "relevant_assets.scenes 本身是空列表——映射台没有为本段原文范围"
+        "登记任何场景——resources.scenes 留空是唯一诚实的选择，不必也不"
+        "应该勉强套用一个不属于本段的场景 id；但只要 relevant_assets.scenes "
+        "非空且本段画面确实发生在其中某个场景，就必须把对应 scene_id 列进 "
+        "resources.scenes，不得因为篇幅或注意力被其他字段占用而省略。",
+    ]
+
+
+def phase2_segment_rules(
+    *,
+    continuity_rules: list[str],
+    shared_rules: list[str],
+    required_dialogue_rule_text: str,
+    paratext_exclusion_rule: str | None,
+    palette_current: str,
+    palette_previous: str,
+    previous_memo: _AiContinuityMemo | None,
+) -> list[str]:
+    """汇总阶段二 task_payload["rules"] 的全部来源，从
+    ``_generate_all_segment_prompts``（已在 155 行 function_lines 棘轮基线上，
+    零余量）抽出腾行数，为新增的 continuity_memo_rules 腾出空间。各参数在
+    调用处已经算好，本函数只负责拼装顺序，不重新计算任何一项。
+    """
+    return [
+        *continuity_rules,
+        *shared_rules,
+        required_dialogue_rule_text,
+        *([paratext_exclusion_rule] if paratext_exclusion_rule else []),
+        *segment_narrative_arc_rules(palette_current=palette_current, palette_previous=palette_previous),
+        *continuity_memo_rules(previous_memo),
+    ]

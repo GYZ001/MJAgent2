@@ -61,6 +61,13 @@ from app.production.storyboard_dialects import (
 from app.production.storyboard_context_segments import (
     context_only_segment_errors, context_segment_indexes, context_segment_rule,
 )
+from app.production.storyboard_continuity_memo import (
+    _AiContinuityMemo,
+    continuity_memo_character_advisories,
+    continuity_memo_errors,
+    continuity_memo_output_contract_text,
+    continuity_memo_payload,
+)
 from app.production.storyboard_dialogue_ledger import (
     DialogueQuote,
     _AiDroppedLine,
@@ -76,9 +83,10 @@ from app.production.storyboard_dialogue_ledger import (
 )
 from app.production.storyboard_narrative_arc import (
     _segment_continuity_rules,
+    _segment_shared_rules,
     beat_sheet_narrative_arc_rules,
+    phase2_segment_rules,
     segment_narrative_arc_payload_fields,
-    segment_narrative_arc_rules,
 )
 from app.schemas import Bible, Dialogue
 from app.source_chapters import _episode_source_text
@@ -338,7 +346,16 @@ from app.source_excerpt import SourceSegment, index_source_segments
 #: 落库新增 StoryboardPackSegment.palette 字段（阶段一模型自报的色温/色调
 #: 方向），MARKER 必须跟着换版本号——旧行没有这个字段，resume 短路如果继续
 #: 认旧 marker，会把这些缺字段的旧行误判为"已经用新契约生成过"而不重新生成。
-STORYBOARD_PACK_VERSION = "2.2.0"
+#:
+#: 2.3.0（用户拍板 2026-09-02，真实回归「人物白天说着说着就变成黑夜了」驱动）：
+#: 新增跨段连贯性备忘 continuity_memo（本段结束时的时段与人物状态，下一段
+#: 续接时默认逐字沿用，只有本段原文明确写出时间推移才允许改变并要求引用原文
+#: 原话）——完整判据、正面提示词文案、阻断式校验见新模块
+#: app.production.storyboard_continuity_memo 的 docstring，不在这里重复。
+#: 落库新增 StoryboardPackSegment.continuity_memo 字段，MARKER 必须跟着换
+#: 版本号：旧行没有这个字段，resume 短路如果继续认旧 marker，会把这些缺字段
+#: 的旧行误判为"已经用新契约生成过"而不重新生成，跳过本次真正要修的时段漂移。
+STORYBOARD_PACK_VERSION = "2.3.0"
 
 #: Written to Shot.prompt_contract_version for every row this module writes;
 #: downstream consumers key off it to know this row's legacy per-shot fields
@@ -346,8 +363,9 @@ STORYBOARD_PACK_VERSION = "2.2.0"
 #: changelog）：目的是让台词大量丢失的旧分集 resume 时判定为不算数、重新
 #: 生成，marker 不动会让 resume 短路继续复用那些低保真产物。2.2.0 起改到
 #: storyboard_pack/2.2.0（同上方 changelog）：新增 palette 落库字段，旧行
-#: 没有这个字段，resume 短路必须判过期重生成。
-STORYBOARD_PACK_CONTRACT_MARKER = "storyboard_pack/2.2.0"
+#: 没有这个字段，resume 短路必须判过期重生成。2.3.0 起改到
+#: storyboard_pack/2.3.0：新增 continuity_memo 落库字段，同一理由。
+STORYBOARD_PACK_CONTRACT_MARKER = "storyboard_pack/2.3.0"
 
 SEGMENT_DURATION_S = 15
 MIN_SHOTS_PER_SEGMENT = 2
@@ -915,6 +933,10 @@ class _AiStoryboardSegmentDraft(BaseModel):
     #: 留空，不强行找理由（对应「不得兜底填充」）。
     camera_repetition_rationale: str = ""
     camera_digest: _AiCameraDigest = Field(default_factory=_AiCameraDigest)
+    #: 2.3.0 跨段连贯性备忘（真实回归「白天说着说着变成黑夜」驱动），只在生成期
+    #: 跨调用传递 + 落库审计，与 camera_digest 同一先例——见
+    #: app.production.storyboard_continuity_memo 模块 docstring。
+    continuity_memo: _AiContinuityMemo = Field(default_factory=_AiContinuityMemo)
 
 
 def _segment_relevant_assets(
@@ -948,6 +970,8 @@ def _validate_segment_draft(
     *,
     dialect_render_format: str,
     required_dialogue: list[dict[str, Any]],
+    previous_memo: _AiContinuityMemo | None = None,
+    segment_source_text: str = "",
 ) -> list[str]:
     """Blocking checks -- the only things that can make
     ``model_gateway.chat_structured`` retry or fail this segment.
@@ -958,6 +982,15 @@ def _validate_segment_draft(
     required_dialogue 是否真的被说出口（容量已在上一阶段分配好，没有"装不下"
     的借口），不是恢复旧 F1-F6 全套内容闸门。其余仍是"下一环节用不了"的形状
     问题：prompt_text 空/超限、H3 固定字段名是否存在。
+
+    2.3.0：新增 ``continuity_memo_errors`` 阻断检查（真实回归「白天说着说着
+    变成黑夜」驱动，完整判据见 app.production.storyboard_continuity_memo 模块
+    docstring）。``previous_memo``/``segment_source_text`` 两个新参数带默认值
+    只是为了不必逐一改写本文件里既有的、与连贯性备忘无关的直接调用点
+    （它们测的是 prompt_text/H3 字段/required_dialogue 这几件事，默认值下等
+    价于「本集第一段、原文为空」，_draft() 测试 fixture 已配一份合法备忘让
+    这些用例继续通过）；``_generate_all_segment_prompts`` 唯一的生产调用点
+    两个参数都显式传递，不依赖默认值。
     """
     errors: list[str] = []
     if not draft.prompt_text.strip():
@@ -973,6 +1006,7 @@ def _validate_segment_draft(
     errors.extend(required_dialogue_missing_errors(
         required_dialogue, [line.line for line in draft.dialogue],
     ))
+    errors.extend(continuity_memo_errors(draft.continuity_memo, previous_memo, segment_source_text))
     return errors
 
 
@@ -1105,6 +1139,11 @@ def _segment_content_advisories(
                 "留空是诚实的选择，不是这次分镜生成的遗漏；如需为本段挂场景参考图，"
                 "需要先补齐映射台对这段原文范围的场景发现"
             )
+    # 2.3.0：continuity_memo.characters 只做 advisory，不阻断——见
+    # app.production.storyboard_continuity_memo.continuity_memo_character_advisories。
+    advisories.extend(
+        continuity_memo_character_advisories(draft.continuity_memo, segment_character_ids)
+    )
     return advisories
 
 
@@ -1159,53 +1198,10 @@ def _camera_digest_window_payload(
     ]
 
 
-# ``_segment_continuity_rules`` 2.2.0 起搬到 app.production.storyboard_narrative_arc
-# （纯函数、不依赖本文件任何私有对象，为新增的三项结构层改造腾行数——见该模块
-# docstring）；本文件通过上方 import 继续用同一个名字调用它，行为不变。
-
-
-def _segment_shared_rules() -> list[str]:
-    """每段调用都相同的资源引用规则（角色/场景外观锚点、台词互覆盖）；从 _generate_all_segment_prompts 抽出腾行数。"""
-    return [
-        "relevant_assets 里每个角色/场景都带一个外观/场景字段（角色和"
-        "群演统一叫 appearance；场景叫 scene_canonical）：内容是一段"
-        "具体描述时，那就是这个角色/场景在本集的标准锚点，本段写它时必须"
-        "逐字沿用这段描述本身，不得改写、精简、替换或按本段情境调整——"
-        "哪怕你在更早的段落里已经写过这个角色，也不要凭记忆复述，每次都"
-        "从下面这段 relevant_assets 原文重新逐字抄一遍，这样才能保证跨段"
-        "完全一致；relevant_assets 里没有写到的部位，本段也不要新增描述。"
-        "内容是「没有标准外观/场景……」这类说明文字时，才由你自行确定"
-        "特征——这种情况下你看不到本集其它段落写了什么，无法强制跨段"
-        "一致，只需按本段的画面据实描述。",
-        "dialogue[] 与 prompt_text 两处的台词必须互相覆盖、逐句一致："
-        "dialogue[] 列出的每一句台词都必须能在本段 prompt_text 里找到"
-        "对应原话，prompt_text 里写出的台词原话也必须同时登记进本段的 "
-        "dialogue[]，不得只在一处出现。",
-        "本段 prompt_text 里出场或说话的角色都必须同时列进 "
-        "resources.characters。resources.characters[].identity_id 的合法取值"
-        "只有两处、必须逐字整串复制（含冒号与前缀，一个字符都不能改写、"
-        "简化或模仿）：relevant_assets.characters[] 每一项自带的 "
-        "identity_id 字段本身，或者 relevant_assets.functional_extras[] "
-        "每一项自带的 visual_entity_id 字段本身——这两个列表里已经出现的"
-        "字符串，就是本段能够使用的全部合法值，不存在第三种取值来源，也"
-        "不允许你按看到的格式风格自己拼一个新字符串（哪怕格式看起来和已有"
-        "的很像）。如果本段确实出场或说话的某个角色，在 "
-        "relevant_assets.characters 和 relevant_assets.functional_extras 两处"
-        "都找不到对应条目——本集素材库还没有收录这个角色——identity_id 就"
-        "直接写这个角色在原文里的称谓原文本身，不加冒号、不加任何前缀，"
-        "尤其不要模仿已收录角色的 id 写法（那种带前缀的写法是「素材库已"
-        "收录」这个事实本身的标记，没有收录记录时自己套用等于冒充一个不"
-        "存在的收录状态）。",
-        "本段 prompt_text 里画面实际发生的场景都必须同时列进 "
-        "resources.scenes。resources.scenes[].scene_id 的合法取值只有一处、"
-        "必须逐字整串复制：relevant_assets.scenes[] 每一项自带的 scene_id "
-        "字段本身，不允许自己新造、简化或从其他场景挪用。如果 "
-        "relevant_assets.scenes 本身是空列表——映射台没有为本段原文范围"
-        "登记任何场景——resources.scenes 留空是唯一诚实的选择，不必也不"
-        "应该勉强套用一个不属于本段的场景 id；但只要 relevant_assets.scenes "
-        "非空且本段画面确实发生在其中某个场景，就必须把对应 scene_id 列进 "
-        "resources.scenes，不得因为篇幅或注意力被其他字段占用而省略。",
-    ]
+# ``_segment_continuity_rules``/``_segment_shared_rules``/``phase2_segment_rules``
+# 2.2.0/2.3.0 起搬到 app.production.storyboard_narrative_arc（纯函数、不依赖
+# 本文件任何私有对象，为新增的结构层改造腾行数——见该模块 docstring）；本文件
+# 通过上方 import 继续用同一个名字调用它们，行为不变。
 
 
 
@@ -1254,13 +1250,8 @@ async def _generate_all_segment_prompts(
         str(e.get("visual_entity_id") or "")
         for e in (payload.get("asset_manifest") or {}).get("functional_extras") or []
     }
-    known_scene_ids = {
-        str(s.get("scene_id") or "") for s in (payload.get("asset_manifest") or {}).get("scenes") or []
-    }
-    visual_style = (
-        bible.world.visual_style_canonical
-        if bible is not None and bible.world is not None else ""
-    )
+    known_scene_ids = {str(s.get("scene_id") or "") for s in (payload.get("asset_manifest") or {}).get("scenes") or []}
+    visual_style = bible.world.visual_style_canonical if bible is not None and bible.world is not None else ""
     shared_rules = _segment_shared_rules()
 
     by_segment_no: dict[int, _AiStoryboardSegmentDraft] = {}
@@ -1272,6 +1263,7 @@ async def _generate_all_segment_prompts(
         relevant_assets_by_segment_no[plan.segment_no] = relevant_assets
         previous_draft = by_segment_no.get(plan.segment_no - 1)
         previous_segment_no = plan.segment_no - 1 if previous_draft is not None else None
+        previous_memo = previous_draft.continuity_memo if previous_draft is not None else None
         camera_history = _camera_digest_window_payload(
             camera_digest_by_segment_no,
             segment_no=plan.segment_no,
@@ -1287,19 +1279,19 @@ async def _generate_all_segment_prompts(
         palette_previous = beat_draft.segments[plan.segment_no - 2].palette if plan.segment_no > 1 else ""
         task_payload: dict[str, Any] = {
             "task": (
-                "为下面这一段原文和节拍写一整段可直接投喂视频生成模型的提示词"
-                "（prompt_text）。prompt_text 必须是完整、可直接复制使用的一整块"
-                "文本，不要拆成多个片段或只写关键词——你产出的字符串会被原样"
-                "保存并原样提交给视频生成接口，不会再被代码拼接、改写或补充"
-                "任何后缀。"
+                "为下面这一段原文和节拍写一整段可直接投喂视频生成模型的提示词（prompt_text）。"
+                "prompt_text 必须是完整、可直接复制使用的一整块文本，不要拆成多个片段或只写关键词"
+                "——你产出的字符串会被原样保存并原样提交给视频生成接口，不会再被代码拼接、改写或补充任何后缀。"
             ),
-            "rules": [
-                *continuity_rules,
-                *shared_rules,
-                required_dialogue_rule(required_dialogue),
-                *([_paratext_exclusion_rule(segment_paratext_hit)] if segment_paratext_hit else []),
-                *segment_narrative_arc_rules(palette_current=plan.palette, palette_previous=palette_previous),
-            ],
+            "rules": phase2_segment_rules(
+                continuity_rules=continuity_rules, shared_rules=shared_rules,
+                required_dialogue_rule_text=required_dialogue_rule(required_dialogue),
+                paratext_exclusion_rule=(
+                    _paratext_exclusion_rule(segment_paratext_hit) if segment_paratext_hit else None
+                ),
+                palette_current=plan.palette, palette_previous=palette_previous,
+                previous_memo=previous_memo,
+            ),
             **segment_narrative_arc_payload_fields(
                 segment_no=plan.segment_no,
                 total_segments=len(beat_draft.segments),
@@ -1320,6 +1312,7 @@ async def _generate_all_segment_prompts(
             "relevant_assets": relevant_assets,
             "required_dialogue": required_dialogue,
             "previous_segment_prompt": previous_draft.prompt_text if previous_draft is not None else None,
+            "previous_continuity_memo": continuity_memo_payload(previous_memo),
             "recent_camera_language": camera_history,
             "visual_style": visual_style,
             "target_video_model": target_model_literal,
@@ -1345,6 +1338,7 @@ async def _generate_all_segment_prompts(
                 "degraded_capabilities": "本段因模型能力缺失而做的降级处理清单（例如 Seedance 侧的屏上文字改「无字」+ 后期合成说明）；没有降级则留空数组，不得留空字符串占位",
                 "camera_digest": "本段实际选用的开场景别（opening_shot_size）、开场运镜（opening_camera_move），以及本段与上一段之间的转场类型（transition_from_previous，本集第一段留空）；只用于给接下来几段做参考，不进入分镜产出契约",
                 "camera_repetition_rationale": "只在本段开场确实沿用了 recent_camera_language 里出现过的机位时才写理由；没有重复就留空，不得编造理由",
+                "continuity_memo": continuity_memo_output_contract_text(),
             },
             "output_schema": _AiStoryboardSegmentDraft.model_json_schema(),
         }
@@ -1365,8 +1359,9 @@ async def _generate_all_segment_prompts(
                 {"role": "user", "content": json.dumps(task_payload, ensure_ascii=False)},
             ],
             model_type=_AiStoryboardSegmentDraft,
-            validate=lambda value, _required=required_dialogue: _validate_segment_draft(
-                value, dialect_render_format=profile.render_format, required_dialogue=_required,
+            validate=lambda value, _req=required_dialogue, _pm=previous_memo, _st=source_text: _validate_segment_draft(
+                value, dialect_render_format=profile.render_format, required_dialogue=_req,
+                previous_memo=_pm, segment_source_text=_st,
             ),
             operation_id=f"storyboard_pack_segment_{episode_id}_{plan.segment_no}_{fingerprint}",
             max_tokens=SEGMENT_PROMPT_ANSWER_TOKENS,
@@ -1443,6 +1438,9 @@ class StoryboardPackSegment(BaseModel):
     required_dialogue: list[dict[str, Any]] = Field(default_factory=list)
     #: 2.2.0 色温弧线，落库供审计核对；默认空串兼容旧行（旧行没有这个字段）。
     palette: str = ""
+    #: 2.3.0 跨段连贯性备忘（_AiContinuityMemo.model_dump），落库供审计核对；
+    #: 默认空 dict 兼容旧行（旧行没有这个字段）。
+    continuity_memo: dict[str, Any] = Field(default_factory=dict)
 
 
 class StoryboardPack(BaseModel):
@@ -1558,6 +1556,7 @@ async def generate_storyboard_pack(
             ],
             required_dialogue=required_dialogue_by_segment_no.get(plan.segment_no, []),
             palette=plan.palette,
+            continuity_memo=segment_drafts[plan.segment_no].continuity_memo.model_dump(mode="json"),
         )
         for plan in beat_draft.segments
     ]
