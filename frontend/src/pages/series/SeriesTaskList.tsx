@@ -61,6 +61,7 @@ function SeriesTaskRow({
       <td>
         {task.film
           ? `${formatFilmDuration(task.film.duration_s)} · ${formatFilmSize(task.film.size_bytes)}`
+            + (task.film_stale ? ' · 成片已过期，可重新执行' : '')
           : '尚无成片'}
       </td>
       <td className="series-task-actions">

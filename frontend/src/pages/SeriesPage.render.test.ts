@@ -79,6 +79,7 @@ const task = (overrides: Partial<SeriesTaskSummary> = {}): SeriesTaskSummary => 
   steps_total: 50,
   error: null,
   film: null,
+  film_stale: false,
   updated_at: 0,
   finished_at: null,
   ...overrides,
@@ -118,6 +119,22 @@ describe('连播任务列表页渲染', () => {
     const serialized = JSON.stringify(renderer.toJSON())
     expect(serialized).toContain('第 1-10 集')
     expect(serialized).toContain('第 11-20 集')
+    await act(async () => { renderer.unmount() })
+  })
+
+  it('成片已过期的任务在成片列标出「可重新执行」，不被「已完成」盖住', async () => {
+    // 跑成功过、但区间里某一集的成片后来重做了 → 后端 status 仍是 succeeded、
+    // film_stale 为真。界面必须把这件事说出来，否则用户看到「已完成」就不会再点。
+    const base = listResponse()
+    base.tasks[0] = {
+      ...base.tasks[0], status: 'succeeded', film_stale: true,
+      film: { url: '/media/x.mp4', duration_s: 61, size_bytes: 1024, created_at: 0 },
+    }
+    mockData.list = base
+    const renderer = await renderPage()
+    const serialized = JSON.stringify(renderer.toJSON())
+    expect(serialized).toContain('已完成')
+    expect(serialized).toContain('成片已过期，可重新执行')
     await act(async () => { renderer.unmount() })
   })
 

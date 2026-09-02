@@ -101,6 +101,9 @@ export interface SeriesTaskSummary {
   steps_total: number;
   error: string | null;
   film: SeriesTaskFilm | null;
+  /** 成片存在但输入指纹已变（区间里某一集的成片后来重做过）——此时任务可以重新
+   *  入队重合一次，列表/详情都必须标出来，不能被「已完成」三个字盖住。 */
+  film_stale: boolean;
   updated_at: number;
   finished_at: number | null;
 }
@@ -108,8 +111,6 @@ export interface SeriesTaskSummary {
 export interface SeriesTaskDetail extends Omit<SeriesTaskSummary, "film"> {
   episodes: EpisodeEntry[];
   film: SeriesTaskFilmDetail | null;
-  /** film 存在但输入指纹已变（该集重新生成过），需要用户重新执行任务。 */
-  film_stale: boolean;
 }
 
 export interface SeriesTaskListResponse {

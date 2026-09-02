@@ -186,23 +186,31 @@ def _queue_positions(conn, project_id: str) -> dict[str, int]:
     return {row["id"]: i + 1 for i, row in enumerate(rows)}
 
 
-def display_status(row: dict, film: dict | None) -> str:
-    """对外展示的状态——完成与否挂产物，不挂 ``series_tasks.status`` 这个字段。
+def film_state(row: dict, film: dict | None) -> tuple[str, bool]:
+    """返回 ``(对外展示的状态, 成片是否已过期)``——完成与否挂产物，不挂状态字段。
 
-    从没跑过（``idle``）但成片已经在盘上且未过期的任务必须显示「已完成」：这种
-    任务真实存在——旧单例连播台留下的成片、以及重新切分后与旧区间重合的任务。
-    照字段显示会让列表说「未开始」而入队时被判「已完成，成片未过期」跳过，
-    界面与实际行为对不上（CLAUDE.md「界面承诺必须与实际行为一致」）。
+    两个方向都要掰正，否则界面会在两头各撒一次谎：
+
+    - 从没跑过（``idle``）但成片已在盘上且未过期 → 显示「已完成」。这种任务真实
+      存在：旧单例连播台留下的成片、重新切分后与旧区间重合的任务。照字段显示会让
+      列表说「未开始」，而点开始时入队判据又判「已完成，成片未过期」把它跳过。
+    - 跑成功过（``succeeded``）但某一集的成片后来重做了（``film.report.json`` 记的
+      输入指纹对不上）→ ``film_stale`` 为真。此时它确实可以重新入队（入队判据用的
+      是同一个 ``merge_is_current``），列表必须让用户看见这件事，否则「已完成」三个
+      字会盖住「其实要重合一次」。
 
     只提升 ``idle`` 一档：``running``/``queued`` 是此刻的事实，``failed``/
     ``cancelled`` 带着用户需要看到的原因，都不该被一个恰好存在的产物盖掉。
     """
-    if row["status"] != "idle" or film is None:
-        return row["status"]
+    if film is None:
+        return row["status"], False
     episode_nos = list(range(row["episode_from"], row["episode_to"] + 1))
-    if merge.merge_is_current(row["project_id"], row["episode_from"], row["episode_to"], episode_nos):
-        return "succeeded"
-    return row["status"]
+    current = merge.merge_is_current(
+        row["project_id"], row["episode_from"], row["episode_to"], episode_nos,
+    )
+    if not current:
+        return row["status"], True
+    return ("succeeded" if row["status"] == "idle" else row["status"]), False
 
 
 def task_summary(
@@ -211,13 +219,15 @@ def task_summary(
     progress = state.load_progress(row)
     episode_count = row["episode_to"] - row["episode_from"] + 1
     film = merge.film_for_range(row["project_id"], row["episode_from"], row["episode_to"])
+    status, film_stale = film_state(row, film)
     return {
         "task_id": row["id"], "index": index,
         "title": row["title"] or _default_title(row["episode_from"], row["episode_to"]),
         "episode_from": row["episode_from"], "episode_to": row["episode_to"],
         "episode_count": episode_count,
         "missing_episode_nos": missing_episode_nos,
-        "status": display_status(row, film), "queue_position": queue_positions.get(row["id"]),
+        "status": status, "film_stale": film_stale,
+        "queue_position": queue_positions.get(row["id"]),
         "current_episode_no": progress.get("current_episode_no"),
         "current_stage": progress.get("current_stage"),
         "steps_done": state.steps_done(progress), "steps_total": episode_count * 5,
@@ -297,12 +307,7 @@ def task_detail(conn, project_id: str, task_id: str) -> dict:
             "title": episode_row.get("title"), "stages": entry["stages"], "error": entry.get("error"),
         })
     summary["episodes"] = episodes_out
-    episode_nos = [r["episode_no"] for r in ordered]
-    film = merge.film_for_range(project_id, row["episode_from"], row["episode_to"])
-    summary["film"] = film
-    summary["film_stale"] = bool(film) and not merge.merge_is_current(
-        project_id, row["episode_from"], row["episode_to"], episode_nos,
-    )
+    # film / film_stale 由 task_summary 一处算出（同一判据不留第二份实现）。
     return summary
 
 

@@ -400,6 +400,32 @@ def test_idle_task_with_current_film_is_reported_succeeded(client, monkeypatch) 
     refreshed = client.get("/api/projects/p1/series-tasks").json()["tasks"][0]
     assert refreshed["status"] == "succeeded"
 
-    # 成片过期（输入指纹对不上）时不许冒充完成——退回真实字段值。
+    # 成片过期（输入指纹对不上）时不许冒充完成——退回真实字段值并标记 film_stale。
     monkeypatch.setattr(merge, "merge_is_current", lambda *_a: False)
-    assert client.get("/api/projects/p1/series-tasks").json()["tasks"][0]["status"] == "idle"
+    stale = client.get("/api/projects/p1/series-tasks").json()["tasks"][0]
+    assert stale["status"] == "idle" and stale["film_stale"] is True
+
+
+def test_succeeded_task_with_stale_film_is_flagged_not_hidden(client, monkeypatch) -> None:
+    """跑成功过、但某一集成片后来重做了 → 状态仍是已完成，但必须标出成片已过期。
+
+    这一档不能沉默：入队判据用的就是同一个 merge_is_current，此刻它确实可以重新
+    入队重合一次，「已完成」三个字不该把这件事盖住。
+    """
+    _seed_episodes("p1", [1, 2])
+    client.post("/api/projects/p1/series-tasks", json={"group_size": 2})
+    task_id = client.get("/api/projects/p1/series-tasks").json()["tasks"][0]["task_id"]
+    db.get_conn().execute("UPDATE series_tasks SET status='succeeded' WHERE id=?", (task_id,))
+    db.get_conn().commit()
+
+    monkeypatch.setattr(
+        merge, "film_for_range",
+        lambda *_a: {"url": "/media/x.mp4", "duration_s": 1.0, "size_bytes": 1, "created_at": 0.0,
+                     "path": "x.mp4", "episode_from": 1, "episode_to": 2, "chapters": []},
+    )
+    monkeypatch.setattr(merge, "merge_is_current", lambda *_a: False)
+
+    listed = client.get("/api/projects/p1/series-tasks").json()["tasks"][0]
+    assert listed["status"] == "succeeded" and listed["film_stale"] is True
+    detail = client.get(f"/api/projects/p1/series-tasks/{task_id}").json()
+    assert detail["film_stale"] is True  # 详情与列表用同一份判据，不各算各的

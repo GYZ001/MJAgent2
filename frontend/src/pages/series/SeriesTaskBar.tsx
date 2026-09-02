@@ -62,7 +62,8 @@ export default function SeriesTaskBar({
             </button>
           </div>
           <p className="series-batch-hint">
-            按勾选顺序串行执行，一次只跑一个任务；已完成的任务会被跳过，需要重跑请先删除或勾选重跑。
+            按勾选顺序串行执行，一次只跑一个任务。已完成的任务会被跳过——它们的成片已经在盘上；
+            要重做请先去成片台/生成台重跑对应的集，成片一变这里就会重新判为可执行。
           </p>
         </div>
       )}
