@@ -445,6 +445,10 @@ async def _generate_discovered_character_portrait(
         portrait_id = str(row["id"])
         image_path = str(row["image_path"] or "")
         candidate_appearance = str(row["appearance"] or appearance)
+        if pack_supported and str(row["pack_status"] or "") == "ready" and row["ep_end"] is None:
+            # 包已就绪且已是开区间：纯复用、不写库。分镜前的补齐重试走到这里时若再写库，撞上写锁
+            # 就会被外层当成「定妆包生成失败」（ERR-20260902-30223f 刘备：三视角齐全却报失败）。
+            return {"portrait_id": portrait_id, "image_path": image_path, "pack_status": "ready", "reused": True, "gate_retry_exhausted": False}
         try:
             if pack_supported:
                 from app.multiview import ensure_character_multiview_pack, pack_result_ok
@@ -454,14 +458,9 @@ async def _generate_discovered_character_portrait(
                     pack = {"status": "ready", "portrait_id": portrait_id, "reused": True}
                 else:
                     pack = await ensure_character_multiview_pack(
-                        project_id=project_id,
-                        portrait_id=portrait_id,
-                        character_name=name,
-                        appearance=candidate_appearance,
-                        visual_style=style,
-                        ep_start=ep_start,
-                        base_portrait_id=row["base_portrait_id"],
-                        primary_qa=primary_qa,
+                        project_id=project_id, portrait_id=portrait_id, character_name=name,
+                        appearance=candidate_appearance, visual_style=style, ep_start=ep_start,
+                        base_portrait_id=row["base_portrait_id"], primary_qa=primary_qa,
                     )
                 if not pack_result_ok(pack):
                     conn.execute(
